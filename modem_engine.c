@@ -2483,7 +2483,9 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
             rate = max_rate;
         /* trellis code 0 = V34_TRELLIS_16 (v34_tables.h, not exported); the
          * peer's own decode of our Type-0 MP confirms 16-state upstream. */
-        if (v34_v90_prepare_upstream_data(g_v34, baud, rate, 0) == 0) {
+        if (v34_v90_prepare_upstream_data(g_v34, baud,
+                                           v34_get_rx_high_carrier(g_v34),
+                                           rate, 0) == 0) {
             g_v34_upstream_data_armed = true;
             g_v90_upstream_e_run = 0;
             ME_LOG("[ME] V.90 upstream RX data prepared (%d baud, %d bps, trellis 16); watching for E\n",
@@ -3889,7 +3891,8 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
                    "(U_INFO=%d)\n", g_v90a_u_info);
             trace_phase("V8 selected V90 analogue role");
 
-            /* §6.2: the analogue modem's upstream is 3200 baud. */
+            /* §6.2: the analogue modem must support 3200; it may select 3000
+             * after INFO1d.  Start with the mandatory capability ceiling. */
             g_v34_start_baud = 3200;
             start_v34_training();
             g_v34_start_baud = saved_baud;
@@ -3954,7 +3957,8 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
                g_v92_v8_offered ? "; V.92 pending INFO0 confirmation" : "");
         trace_phase("V8 selected V90%s", g_v92_v8_offered ? "; V92 INFO0 pending" : "");
         g_mod = ME_MOD_V90;
-        /* V.90 §6.2: analog modem only supports 3200 baud (mandatory) */
+        /* V.90 §6.2: the digital modem must receive both 3000 and 3200;
+         * initialize at 3200 so INFO1d can enable both rows. */
         int saved_baud = g_v34_start_baud;
         g_v34_start_baud = 3200;
         start_v34_training();

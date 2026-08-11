@@ -283,19 +283,19 @@ Phase 4 is not "CP/CP' in disguise".
   the analogue V.34 transmitter emits B1 as §10.1.3.1's complete P-mapping-
   frame data frame rather than a single mapping frame.  The upstream receiver no longer carries the 8 kHz/T/2 geometry into DATA.
   At the E→B1 seam, and only in the V.90 upstream receive branch, it now
-  resamples the 8 kHz line stream to 9.6 kHz, applies the 3200-baud 12%-rolloff
-  RRC at exactly T/3, searches the complete reset-state B1 frame for timing,
-  and solves a supervised T/3 equalizer.  That resampler, RRC history, timing
-  phase and equalizer continue unchanged through B1 into DATA; ordinary V.34
-  retains its existing T/2 receiver.  The external G.711 accounting and the
-  downstream byte-exact PCM path are untouched.  A PCMU-quantized native V.34
-  transmitter→receiver regression now acquires B1 and carries **16,000
-  pseudorandom payload bits at 21,600 bit/s with zero errors**, while verifying
-  the independent 8 kHz/9.6 kHz counts (16,000 external samples, 19,180
-  internal samples after causal-filter delay).  Clean synthetic sweeps pass
-  through 26,400 bit/s; 28,800 and 31,200 bit/s are rejected by the complete-
-  B1 fit gate rather than entering DATA with random output.  Hardware payload
-  interoperability remains to be measured.
+  resamples the 8 kHz line stream to exactly T/3: 9 kHz at 3000 baud or
+  9.6 kHz at 3200 baud.  It applies the selected rate's 12%-rolloff RRC,
+  searches the complete reset-state B1 frame for timing, and solves a
+  supervised T/3 equalizer.  That resampler, RRC history, timing phase and
+  equalizer continue unchanged through B1 into DATA; ordinary V.34 retains
+  its existing T/2 receiver.  The external G.711 accounting and downstream
+  byte-exact PCM path are untouched.  Native regressions now cover 3000-low,
+  3000-high, 3200-low and 3200-high through both PCMU and PCMA quantization.
+  Every case acquires B1 and carries **16,000 pseudorandom payload bits at
+  21,600 bit/s with zero errors**, while verifying the independent clocks
+  (16,000 external samples become 17,981 at 9 kHz or 19,180 at 9.6 kHz after
+  causal-filter delay).  The seam rejects 3000/31,200 as an illegal rate
+  combination.  Hardware payload interoperability remains to be measured.
 
   A live d-modem attempt on 2026-08-11 did not reach that acceptance point.
   Two correctly configured calls (including one after a full container restart)

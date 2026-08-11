@@ -9392,8 +9392,11 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->data_symbol_conjugate = false;
     s->phase4_da_derot = 0;
     span_log(s->logging, SPAN_LOG_FLOW,
-             "Rx - V.90 upstream B1 acquired at 9.6 kHz T/3 "
-             "(sample=%lld, symbols=%d, fit=%.1f%%)\n",
+             "Rx - V.90 upstream B1 acquired at %d Hz T/3 "
+             "(baud=%d carrier=%s sample=%lld, symbols=%d, fit=%.1f%%)\n",
+             s->v90_t3_internal_rate,
+             baud_rate_parameters[s->baud_rate].baud_rate,
+             s->high_carrier ? "high" : "low",
              (long long)best_first, s->v90_t3_b1_symbols,
              100.0f*best_match);
     v90_t3_emit_ready(s);
@@ -9402,8 +9405,8 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
 static void v90_t3_put_sample(v34_rx_state_t *s, complexf_t value)
 {
     double angle = -2.0*M_PI
-                 * carrier_frequency(V34_BAUD_RATE_3200, s->high_carrier)
-                 * (double)s->v90_t3_output_count/9600.0;
+                 * carrier_frequency(s->baud_rate, s->high_carrier)
+                 * (double)s->v90_t3_output_count/s->v90_t3_internal_rate;
     complexf_t mixed;
     complexf_t filtered = {0.0f, 0.0f};
 
@@ -9480,12 +9483,15 @@ static int v90_t3_primary_rx(v34_rx_state_t *s, const int16_t amp[], int len)
             int ring = (int)(n % (V34_V90_T3_RESAMPLE_TAPS + 8));
             s->v90_t3_input[ring] = analytic;
         }
-        /* Rational 6/5 interpolation.  Publication is delayed by half the
-           window, but input consumption remains exactly the caller's 8 kHz
-           length and the output count tends exactly to 6/5 of it. */
-        while (5*s->v90_t3_next_output <= 6*(n - half))
+        /* Exact rational interpolation from the 8 kHz bearer to three
+           samples/symbol: 9 kHz (9/8) at 3000 baud and 9.6 kHz (6/5) at
+           3200.  Publication is delayed by half the window; external input
+           accounting remains exactly the caller's 8 kHz sample count. */
+        while (8000*s->v90_t3_next_output
+               <= (int64_t)s->v90_t3_internal_rate*(n - half))
         {
-            double t = 5.0*s->v90_t3_next_output/6.0;
+            double t = 8000.0*s->v90_t3_next_output
+                     / s->v90_t3_internal_rate;
             int centre = (int)floor(t);
             complexf_t y = {0.0f, 0.0f};
             double norm = 0.0;
@@ -10477,6 +10483,7 @@ SPAN_DECLARE(int) v34_set_rx_data_transform(v34_state_t *s,
 
 SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
                                                 int baud_rate,
+                                                int high_carrier,
                                                 int bit_rate,
                                                 int trellis_size)
 {
@@ -10486,6 +10493,7 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
 
     if (!s || (baud_rate != V34_BAUD_RATE_3000
                && baud_rate != V34_BAUD_RATE_3200)
+        || (high_carrier != 0 && high_carrier != 1)
         || bit_rate < 2400 || bit_rate > 33600 || (bit_rate % 2400) != 0)
         return -1;
     bit_rate_n = bit_rate/2400;
@@ -10498,6 +10506,7 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
        Recompute carrier/shaper/mapper state without moving the CP stage;
        v34_begin_rx_data() performs the later E-to-B1 handoff. */
     s->rx.baud_rate = baud_rate;
+    s->rx.high_carrier = high_carrier != 0;
     s->rx.v34_carrier_phase_rate =
         dds_phase_ratef(carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
     s->rx.shaper_re = v34_rx_shapers_re[s->rx.baud_rate][s->rx.high_carrier];
@@ -10517,7 +10526,7 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
        timing/history at the E→B1 sample boundary. */
     cvec_copyf(s->rx.eq_coeff, s->rx.eq_coeff_save,
                V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN);
-    s->rx.v90_t3_prepared = (baud_rate == V34_BAUD_RATE_3200);
+    s->rx.v90_t3_prepared = true;
     s->rx.v90_t3_trellis_size = trellis_size;
     /* This context's externally visible current rate is the selected V.90
        upstream, not the initial 3200-baud capability ceiling. */
@@ -10543,12 +10552,12 @@ SPAN_DECLARE(int) v34_v90_upstream_rx_acquired(v34_state_t *s)
 
 SPAN_DECLARE(void) v34_v90_upstream_sample_counts(v34_state_t *s,
                                                   int64_t *input_8k,
-                                                  int64_t *output_96k)
+                                                  int64_t *output_t3)
 {
     if (input_8k)
         *input_8k = s ? s->rx.v90_t3_input_count : 0;
-    if (output_96k)
-        *output_96k = s ? s->rx.v90_t3_output_count : 0;
+    if (output_t3)
+        *output_t3 = s ? s->rx.v90_t3_output_count : 0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -10570,13 +10579,15 @@ static bool v90_t3_build_b1(v34_rx_state_t *rx)
     int16_t frame[16];
     int rate = (rx->bit_rate/2 + 1)*2400;
 
-    tx = v34_init(NULL, 3200, rate, true, true,
+    tx = v34_init(NULL,
+                  baud_rate_parameters[rx->baud_rate].baud_rate,
+                  rate, true, true,
                   v90_t3_b1_get_bit, NULL,
                   v90_t3_b1_put_bit, NULL);
     if (!tx)
         return false;
     tx->tx.scrambler_tap = 4;       /* V.90 analogue-modem GPA, §8.5.1. */
-    tx->tx.baud_rate = V34_BAUD_RATE_3200;
+    tx->tx.baud_rate = rx->baud_rate;
     if (v34_seed_tx_data(tx, rate/2400, rx->v90_t3_trellis_size,
                          0, 0, NULL) != 0)
     {
@@ -10612,6 +10623,11 @@ static bool v90_t3_build_b1(v34_rx_state_t *rx)
 static bool v90_t3_start(v34_rx_state_t *rx)
 {
     rx->v90_t3_active = false;
+    rx->v90_t3_internal_rate =
+        3*baud_rate_parameters[rx->baud_rate].baud_rate;
+    if (rx->v90_t3_internal_rate != 9000
+        && rx->v90_t3_internal_rate != 9600)
+        return false;
     rx->v90_t3_acquisition_attempted = false;
     rx->v90_t3_acquired = false;
     rx->v90_t3_input_count = 0;

@@ -100,3 +100,17 @@ record:
 Synthetic success is not hardware interoperability.  Completion requires an
 FCS-valid upstream LAPM exchange against a foreign modem at each claimed
 symbol rate.
+
+## Implementation status
+
+Steps 1–3 are implemented offline:
+
+- the digital RX retains and applies its transmitted INFO1d carrier row;
+- INFO1a's selected 3000/3200 rate and carrier cross the CP-to-DATA seam
+  explicitly;
+- 3000 is capped at 28800 and 3200 at 31200;
+- the T/3 receiver runs at 9000 or 9600 Hz from the negotiated symbol rate;
+- all eight rate/carrier/law combinations recover 16000 deterministic payload
+  bits without error through G.711 quantization.
+
+Step 4, foreign-modem hardware qualification and LAPM evidence, remains open.

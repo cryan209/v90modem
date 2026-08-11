@@ -5486,11 +5486,11 @@ static bool test_v90_v34_rx_stage_isolation(void)
 /* The dedicated V90_CP stage acquires CPt/CP at the 2400-baud control-channel
    rate, then hands to DATA.  V.90 skips the ordinary V.34 MP exchange that
    would reconfigure the receiver for the upstream data baud, so
-   v34_v90_prepare_upstream_data() must do it at the V90_CP seam: restore the
-   V.90-mandated 3200-baud data rate (V.90 §6.2) and recompute carrier/shaper/
-   parm state, without resetting the trained equalizer.  Regression for the
-   dead-upstream-RX bug (live 2026-07-26: DATA entered at baud_rate=0/1800 Hz,
-   zero mapping frames, while downstream TX was healthy). */
+   v34_v90_prepare_upstream_data() must restore INFO1a's selected 3000/3200
+   rate and INFO1d carrier at the seam (V.90 §6.2, §8.2.3.2), without resetting
+   the trained equalizer.  Regression for the dead-upstream-RX bug (live
+   2026-07-26: DATA entered at baud_rate=0/1800 Hz, zero mapping frames, while
+   downstream TX was healthy). */
 static bool test_v90_v90cp_upstream_data_reconfiguration(void)
 {
     static const struct {
@@ -5520,12 +5520,12 @@ static bool test_v90_v90cp_upstream_data_reconfiguration(void)
         cp_baud = v34_get_rx_baud_rate(answerer);
         /* §6.2: 3000 tops out at 28800 while 3200 permits 31200. */
         if (cases[c].code == 3
-            && v34_v90_prepare_upstream_data(answerer, 3, 31200, 0) == 0) {
+            && v34_v90_prepare_upstream_data(answerer, 3, 1, 31200, 0) == 0) {
             fprintf(stderr, "V.90 accepted illegal 3000/31200 upstream\n");
             v34_free(answerer);
             return false;
         }
-        if (v34_v90_prepare_upstream_data(answerer, cases[c].code,
+        if (v34_v90_prepare_upstream_data(answerer, cases[c].code, 1,
                                            cases[c].max_bps, 0) != 0
             || v34_get_rx_baud_rate(answerer) != cases[c].code
             || v34_get_current_bit_rate(answerer) != cases[c].max_bps
@@ -5587,7 +5587,8 @@ static void v90_t3_test_put_bit(void *user_data, int bit)
     s->bit_pos++;
 }
 
-static bool test_v90_upstream_t3_b1_acquisition(void)
+static bool test_v90_upstream_t3_case(int baud_code, bool high_carrier,
+                                      v91_law_t law)
 {
     v90_t3_test_bits_t sent = {.state = 0x90B1D47AU};
     v90_t3_test_bits_t received = {0};
@@ -5596,28 +5597,45 @@ static bool test_v90_upstream_t3_b1_acquisition(void)
     int16_t linear[160];
     int16_t wire[160];
     int64_t input_8k = 0;
-    int64_t output_96k = 0;
+    int64_t output_t3 = 0;
     int alignment = -1;
     int checked_bits;
+    int baud = baud_code == 3 ? 3000 : 3200;
+    int internal_rate = 3*baud;
+    bool tx_calling = high_carrier;
     bool ok = false;
 
-    vpcm_log("Test: V.90 upstream T/3 B1 acquisition and DATA payload");
-    tx = v34_init(NULL, 3200, 21600, true, true,
+    vpcm_log("Test: V.90 upstream T/3 %d-%s DATA over %s",
+             baud, high_carrier ? "high" : "low", vpcm_law_to_str(law));
+    /* Ordinary V.34 assigns caller TX/answerer RX to high and answerer TX/
+       caller RX to low.  Choose roles solely to exercise the requested
+       carrier; the forced V.90 DATA seam does not depend on call direction. */
+    tx = v34_init(NULL, baud, 21600, tx_calling, true,
                   v90_t3_test_get_bit, &sent,
                   vpcm_v34_dummy_put_bit, NULL);
-    rx = v34_init(NULL, 3200, 21600, false, true,
+    rx = v34_init(NULL, baud, 21600, false, true,
                   vpcm_v34_dummy_get_bit, NULL,
                   v90_t3_test_put_bit, &received);
     if (!tx || !rx)
         goto done;
-    v34_set_v90_mode(tx, V91_LAW_ULAW);
-    v34_set_v90_mode(rx, V91_LAW_ULAW);
+    v34_set_v90_mode(tx, law == V91_LAW_ALAW ? 1 : 0);
+    v34_set_v90_mode(rx, law == V91_LAW_ALAW ? 1 : 0);
     v34_set_put_phase4_bit(rx, vpcm_v34_dummy_put_bit, NULL);
     v34_force_v90_phase4_cp_rx(rx);
-    if (v34_v90_prepare_upstream_data(rx, 4, 21600, 0) != 0
-        || v34_begin_rx_data(rx) != 0
-        || v34_v90_begin_tx_data(tx, 9, 0, 0, 0, NULL) != 0) {
-        goto done;
+    {
+        int prepare_rc = v34_v90_prepare_upstream_data(rx, baud_code,
+                                                           high_carrier ? 1 : 0,
+                                                           21600, 0);
+        int rx_rc = prepare_rc == 0 ? v34_begin_rx_data(rx) : -2;
+        int tx_rc = v34_v90_begin_tx_data(tx, 9, 0, 0, 0, NULL);
+
+        if (prepare_rc != 0 || rx_rc != 0 || tx_rc != 0) {
+            fprintf(stderr,
+                    "V.90 T/3 setup failed (%d-%s %s prepare=%d rx=%d tx=%d)\n",
+                    baud, high_carrier ? "high" : "low", vpcm_law_to_str(law),
+                    prepare_rc, rx_rc, tx_rc);
+            goto done;
+        }
     }
     for (int block = 0; block < 100; block++) {
         int produced = v34_tx(tx, linear, 160);
@@ -5626,19 +5644,24 @@ static bool test_v90_upstream_t3_b1_acquisition(void)
             goto done;
         for (int i = produced; i < 160; i++)
             linear[i] = 0;
-        for (int i = 0; i < 160; i++)
-            wire[i] = ulaw_to_linear(linear_to_ulaw(linear[i]));
+        for (int i = 0; i < 160; i++) {
+            wire[i] = law == V91_LAW_ALAW
+                    ? alaw_to_linear(linear_to_alaw(linear[i]))
+                    : ulaw_to_linear(linear_to_ulaw(linear[i]));
+        }
         if (v34_rx(rx, wire, 160) != 0)
             goto done;
     }
-    v34_v90_upstream_sample_counts(rx, &input_8k, &output_96k);
+    v34_v90_upstream_sample_counts(rx, &input_8k, &output_t3);
     if (!v34_v90_upstream_rx_acquired(rx)
-        || input_8k != 16000 || output_96k <= input_8k
-        || output_96k > (6*input_8k)/5) {
+        || input_8k != 16000 || output_t3 <= input_8k
+        || output_t3 > (input_8k*internal_rate)/8000
+        || output_t3 < (input_8k*internal_rate)/8000 - 100) {
         fprintf(stderr,
-                "V.90 T/3 B1 acquisition failed (acquired=%d, 8k=%lld, 9.6k=%lld)\n",
+                "V.90 T/3 B1 acquisition failed (%d-%s %s acquired=%d, 8k=%lld, T/3=%lld)\n",
+                baud, high_carrier ? "high" : "low", vpcm_law_to_str(law),
                 v34_v90_upstream_rx_acquired(rx),
-                (long long)input_8k, (long long)output_96k);
+                (long long)input_8k, (long long)output_t3);
         goto done;
     }
     for (int shift = 0; shift + 128 <= received.bit_pos && shift < 4096;
@@ -5671,9 +5694,10 @@ static bool test_v90_upstream_t3_b1_acquisition(void)
             goto payload_fail;
     }
     ok = true;
-    vpcm_log("PASS: V.90 native upstream DATA, %d bits zero-error "
-             "(%lld 8k -> %lld 9.6k samples)",
-             checked_bits, (long long)input_8k, (long long)output_96k);
+    vpcm_log("PASS: V.90 native upstream %d-%s %s DATA, %d bits zero-error "
+             "(%lld 8k -> %lld T/3 samples)",
+             baud, high_carrier ? "high" : "low", vpcm_law_to_str(law),
+             checked_bits, (long long)input_8k, (long long)output_t3);
     goto done;
 payload_fail:
     fprintf(stderr,
@@ -5685,6 +5709,23 @@ done:
     if (rx)
         v34_free(rx);
     return ok;
+}
+
+static bool test_v90_upstream_t3_b1_acquisition(void)
+{
+    static const int bauds[] = {3, 4};
+    static const v91_law_t laws[] = {V91_LAW_ULAW, V91_LAW_ALAW};
+
+    for (unsigned b = 0; b < sizeof(bauds)/sizeof(bauds[0]); b++) {
+        for (int carrier = 0; carrier < 2; carrier++) {
+            for (unsigned l = 0; l < sizeof(laws)/sizeof(laws[0]); l++) {
+                if (!test_v90_upstream_t3_case(bauds[b], carrier != 0,
+                                               laws[l]))
+                    return false;
+            }
+        }
+    }
+    return true;
 }
 
 static void vpcm_packed_bits_to_str(const uint8_t *buf, int bit_count, char *out, size_t out_size)

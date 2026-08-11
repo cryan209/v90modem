@@ -886,6 +886,7 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
             if (n > 0
                 && v34_v90_prepare_upstream_data(answerer,
                                                  analogue_cfg.baud_rate_code,
+                                                 analogue_cfg.high_carrier,
                                                  n*2400, mp->trellis) == 0) {
                 native_cp.upstream_prepared = true;
                 /* E may have completed in the receive chunk immediately

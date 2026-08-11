@@ -801,6 +801,8 @@ typedef struct
         solution; raw/FIR/FSE state then continues unchanged into DATA. */
     bool v90_t3_prepared;
     int v90_t3_trellis_size;
+    /*! \brief Three-times-symbol-rate clock: 9000 for 3000 baud, 9600 for 3200. */
+    int v90_t3_internal_rate;
     bool v90_t3_active;
     bool v90_t3_acquisition_attempted;
     bool v90_t3_acquired;
