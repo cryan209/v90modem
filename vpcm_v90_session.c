@@ -1,6 +1,7 @@
 #include "vpcm_v90_session.h"
 #include "v90.h"
 #include "v90_analogue_phase3.h"
+#include "v90_cp_rx.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -209,6 +210,36 @@ static void vpcm_v90_bit_feeder_init(vpcm_v90_bit_feeder_t *f,
     f->data      = data;
     f->len_bytes = len_bytes;
     f->bit_pos   = 0;
+}
+
+typedef struct {
+    uint8_t *data;
+    int capacity_bytes;
+    int bit_pos;
+} vpcm_v90_bit_sink_t;
+
+static void vpcm_v90_bit_sink_put_bit(void *user_data, int bit)
+{
+    vpcm_v90_bit_sink_t *s = (vpcm_v90_bit_sink_t *)user_data;
+
+    if (!s || !s->data || (bit != 0 && bit != 1)
+        || s->bit_pos >= s->capacity_bytes*8)
+        return;
+    if (bit)
+        s->data[s->bit_pos >> 3] |= (uint8_t)(1U << (s->bit_pos & 7));
+    s->bit_pos++;
+}
+
+static void vpcm_v90_bit_sink_init(vpcm_v90_bit_sink_t *s,
+                                   uint8_t *data, int capacity_bytes)
+{
+    if (!s)
+        return;
+    s->data = data;
+    s->capacity_bytes = capacity_bytes;
+    s->bit_pos = 0;
+    if (data && capacity_bytes > 0)
+        memset(data, 0, (size_t)capacity_bytes);
 }
 
 static int vpcm_v90_dummy_get_bit(void *user_data)
@@ -575,6 +606,65 @@ static void vpcm_v90_transport_linear(v91_law_t law,
     }
 }
 
+static int vpcm_v90_select_upstream_n(const vpcm_cp_frame_t *cp,
+                                      const v90_analogue_mp_t *mp)
+{
+    if (!cp || !mp)
+        return 0;
+    for (int n = mp->max_drn; n >= 2; n--) {
+        unsigned bit = 1U << (n - 2);
+
+        if ((mp->rate_mask & bit) && (cp->upstream_rate_mask & bit))
+            return n;
+    }
+    return 0;
+}
+
+typedef struct {
+    v90_cp_rx_t rx;
+    v34_state_t *v34;
+    v90_state_t *digital;
+    bool cpt_accepted;
+    bool cp_accepted;
+    bool cp_prime_accepted;
+} vpcm_v90_native_cp_rx_t;
+
+static void vpcm_v90_native_cp_frame(void *user_data,
+                                     const vpcm_cp_diag_t *diag)
+{
+    vpcm_v90_native_cp_rx_t *s = (vpcm_v90_native_cp_rx_t *)user_data;
+
+    if (!s || !s->digital || !diag || !diag->valid)
+        return;
+    if (!v90_set_phase4_cp(s->digital, &diag->frame))
+        return;
+    if (!diag->frame.v90_compatibility) {
+        if (v90_handle_rx_event(s->digital, V90_RX_EVENT_CP_VALID))
+            s->cpt_accepted = true;
+    } else {
+        /* v90_set_phase4_cp() itself latches data CP/CP' and may advance the
+         * transmitter before the advisory CP_VALID event is delivered. */
+        (void)v90_handle_rx_event(s->digital, V90_RX_EVENT_CP_VALID);
+        if (diag->frame.acknowledge)
+            s->cp_prime_accepted = true;
+        else
+            s->cp_accepted = true;
+    }
+}
+
+static void vpcm_v90_native_cp_bit(void *user_data, int bit)
+{
+    vpcm_v90_native_cp_rx_t *s = (vpcm_v90_native_cp_rx_t *)user_data;
+    uint32_t rejected_before;
+
+    if (!s || (bit != 0 && bit != 1))
+        return;
+    rejected_before = s->rx.rejected_frames;
+    (void)v90_cp_rx_put_bit(&s->rx, bit);
+    if (s->v34 && s->rx.rejected_frames != rejected_before)
+        v34_reject_v90_phase4_hypothesis(s->v34);
+}
+
 /*
  * Run the actual analogue and digital Phase 3/4 engines against each other.
  * The downstream is exchanged as authoritative G.711 octets; the upstream is
@@ -595,12 +685,14 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
                                           const v90_dil_analysis_t *dil_analysis,
                                           bool v92_mode,
                                           const vpcm_v90_startup_contract_io_t *io,
-                                          vpcm_v90_startup_contract_report_t *report)
+                                          vpcm_v90_startup_contract_report_t *report,
+                                          bool *native_upstream_ready_out)
 {
     v90_analogue_phase3_config_t analogue_cfg;
     v90_analogue_phase3_t *analogue = NULL;
     v90_state_t *digital = NULL;
     vpcm_cp_frame_t cp_prime;
+    vpcm_v90_native_cp_rx_t native_cp;
     int16_t analogue_tx[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
     int16_t digital_rx[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
     uint8_t digital_tx[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
@@ -614,8 +706,12 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
     bool cp_notified = false;
     bool cp_prime_notified = false;
     bool e_notified = false;
+    bool native_cp_started = false;
+    bool upstream_rx_armed = false;
     bool ok = false;
 
+    if (native_upstream_ready_out)
+        *native_upstream_ready_out = false;
     (void)dil_analysis;
     (void)v92_mode; /* This path is deliberately native V.90, not V.92 proxying. */
     if (!caller || !answerer || !digital_dil)
@@ -633,6 +729,12 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
     analogue_cfg.v34 = caller;
     analogue = v90_analogue_phase3_init(&analogue_cfg);
     digital = v90_init_data_pump(vpcm_v90_data_law(law));
+    memset(&native_cp, 0, sizeof(native_cp));
+    native_cp.v34 = answerer;
+    native_cp.digital = digital;
+    v90_cp_rx_init(&native_cp.rx, 4, law == V91_LAW_ALAW,
+                   vpcm_v90_native_cp_frame, &native_cp);
+    v34_set_put_phase4_bit(answerer, vpcm_v90_native_cp_bit, &native_cp);
     if (!analogue || !digital) {
         fprintf(stderr, "V.90 native coupled training: initialization failed\n");
         goto done;
@@ -692,24 +794,39 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
 
         cpt = v90_analogue_phase3_cpt(analogue);
         cp = v90_analogue_phase3_cp(analogue);
-        /* CP is sent at two bits per V.34 symbol.  Waiting 512 symbols gives
-         * the receiver several complete Table-14 repetitions and also lets Ri
-         * exceed §9.4.1.1's 192T minimum before acknowledging CPt. */
-        if (!cpt_notified && cpt && analogue_stage == V90A_TX_CPT
+        cpt_notified |= native_cp.cpt_accepted;
+        cp_notified |= native_cp.cp_accepted;
+        cp_prime_notified |= native_cp.cp_prime_accepted;
+        if (!native_cp_started && cpt) {
+            v34_force_v90_phase4_cp_rx(answerer);
+            native_cp_started = true;
+        }
+        /* CP is sent at two bits per V.34 symbol.  Keep CPt/CP up for ten
+         * complete Table-14 repetitions so the V.34 hypothesis retries and
+         * strict receiver's eight-frame soft vote have enough observations.
+         * A fixed 512-symbol wait truncated the large clean-line CPt before
+         * even one repetition had completed. */
+        if (law == V91_LAW_ALAW
+            && !cpt_notified && cpt && analogue_stage == V90A_TX_CPT
             && v90_analogue_tx_stage_symbols(
-                   v90_analogue_phase3_tx_state(analogue)) >= 512
+                   v90_analogue_phase3_tx_state(analogue))
+                   >= 10*vpcm_cp_bit_length(cpt)
             && v90_set_phase4_cp(digital, cpt)) {
             cpt_notified = v90_handle_rx_event(digital, V90_RX_EVENT_CP_VALID);
         }
-        if (!cp_notified && cp && analogue_stage == V90A_TX_CP
+        if (law == V91_LAW_ALAW
+            && !cp_notified && cp && analogue_stage == V90A_TX_CP
             && v90_analogue_tx_stage_symbols(
-                   v90_analogue_phase3_tx_state(analogue)) >= 512
+                   v90_analogue_phase3_tx_state(analogue))
+                   >= 10*vpcm_cp_bit_length(cp)
             && v90_set_phase4_cp(digital, cp)) {
             cp_notified = v90_handle_rx_event(digital, V90_RX_EVENT_CP_VALID);
         }
-        if (!cp_prime_notified && cp && analogue_stage == V90A_TX_CP_PRIME
+        if (law == V91_LAW_ALAW
+            && !cp_prime_notified && cp && analogue_stage == V90A_TX_CP_PRIME
             && v90_analogue_tx_stage_symbols(
-                   v90_analogue_phase3_tx_state(analogue)) >= 512) {
+                   v90_analogue_phase3_tx_state(analogue))
+                   >= vpcm_cp_bit_length(cp)) {
             cp_prime = *cp;
             cp_prime.acknowledge = true;
             if (v90_set_phase4_cp(digital, &cp_prime)) {
@@ -718,12 +835,28 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
             }
         }
         if (!e_notified && analogue_stage == V90A_TX_B1_PENDING) {
-            e_notified = v90_handle_rx_event(digital, V90_RX_EVENT_E);
+            const v90_analogue_phase4_t *p4 =
+                v90_analogue_phase3_phase4_state(analogue);
+            const v90_analogue_mp_t *mp = p4 ? v90_analogue_phase4_mp(p4) : NULL;
+            int n = vpcm_v90_select_upstream_n(cp, mp);
+
+            /* V.90 §9.4.2.4-.5: E ends on this block and the analogue side
+             * starts reset-state B1 on its next v34_tx().  Arm the digital
+             * receiver now so both V.34 mapper/scrambler states share that
+             * exact boundary. */
+            if (n > 0
+                && v34_v90_prepare_upstream_data(answerer, n*2400,
+                                                 mp->trellis) == 0
+                && v34_begin_rx_data(answerer) == 0) {
+                upstream_rx_armed = true;
+                e_notified = v90_handle_rx_event(digital, V90_RX_EVENT_E);
+            }
         }
 
         if (v90_training_complete(digital)
             && v90_analogue_phase3_data_ready(analogue)
-            && v90_analogue_phase3_upstream_rate(analogue) > 0) {
+            && v90_analogue_phase3_upstream_rate(analogue) > 0
+            && upstream_rx_armed) {
             ok = true;
             break;
         }
@@ -733,6 +866,14 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
             break;
         }
     }
+
+    fprintf(stderr,
+            "[VPCM] Native V.34 CP receive: bits=%llu valid=%u rejected=%u "
+            "accepted=%d/%d/%d rx_data=%d\n",
+            (unsigned long long)native_cp.rx.input_bits,
+            native_cp.rx.valid_frames, native_cp.rx.rejected_frames,
+            native_cp.cpt_accepted, native_cp.cp_accepted,
+            native_cp.cp_prime_accepted, upstream_rx_armed);
 
     if (!ok) {
         fprintf(stderr,
@@ -746,6 +887,14 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
                                v90_analogue_phase3_tx_stage(analogue)) : "none",
                 analogue ? v90_analogue_rx_stage_name(
                                v90_analogue_phase3_rx_stage(analogue)) : "none");
+    }
+
+    if (native_upstream_ready_out) {
+        *native_upstream_ready_out = getenv("VPCM_V90_NATIVE_UPSTREAM") != NULL
+            && ok
+            && native_cp.cpt_accepted
+            && native_cp.cp_accepted
+            && upstream_rx_armed;
     }
 
     if (report && analogue && digital) {
@@ -796,7 +945,9 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
                                          bool v92_mode,
                                          vpcm_v90_startup_contract_report_t *report,
                                          vpcm_v90_bit_feeder_t *caller_feeder,
-                                         v34_state_t **caller_out)
+                                         vpcm_v90_bit_sink_t *answerer_sink,
+                                         v34_state_t **caller_out,
+                                         v34_state_t **answerer_out)
 {
     v34_state_t *caller;
     v34_state_t *answerer;
@@ -819,10 +970,13 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
     bool phase2_ok;
     bool received_info0a_valid;
     bool received_info1a_valid;
+    bool native_upstream_ready = false;
     bool ok;
 
     if (caller_out)
         *caller_out = NULL;
+    if (answerer_out)
+        *answerer_out = NULL;
 
     /* Use the bit feeder for the caller so data-mode TX carries real payload.
      * The feeder data pointer is populated before vpcm_v90_run_data_mode is called;
@@ -834,7 +988,9 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
                       vpcm_v90_dummy_put_bit, NULL);
     answerer = v34_init(NULL, 3200, 21600, false, true,
                         vpcm_v90_dummy_get_bit, NULL,
-                        vpcm_v90_dummy_put_bit, NULL);
+                        answerer_sink ? vpcm_v90_bit_sink_put_bit
+                                      : vpcm_v90_dummy_put_bit,
+                        answerer_sink);
     if (!caller || !answerer) {
         if (caller)
             v34_free(caller);
@@ -1079,23 +1235,19 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
         if (caller_phase3_tx_ready)
             vpcm_v90_run_coupled_training(law, caller, answerer,
                                           report ? report->phase2_u_info : 0,
-                                          digital_dil, dil_analysis, v92_mode, io, report);
+                                          digital_dil, dil_analysis, v92_mode, io, report,
+                                          &native_upstream_ready);
     }
 
-    /* answerer is always an internal training proxy; free it now. */
-    v34_free(answerer);
-
-    /* Transfer caller ownership to the data-mode loop when native training
-     * completed — the caller V.34 state is in data mode and its v34_tx()
-     * output is the correct V.92 upstream waveform.  In all other cases
-     * (phase 2 failed, training did not complete, or no output pointer
-     * provided) the caller is freed here. */
-    if (phase2_ok
-        && report && report->phase3_native_analogue_completed
-        && caller_out) {
+    /* Keep both ends only when strict wire-decoded CPt/CP/CP' armed the
+     * digital V.34 receiver at the same E/B1 seam as the analogue transmitter.
+     * Otherwise the compatibility payload runner owns neither context. */
+    if (phase2_ok && native_upstream_ready && caller_out && answerer_out) {
         *caller_out = caller;
+        *answerer_out = answerer;
     } else {
         v34_free(caller);
+        v34_free(answerer);
     }
     return ok;
 }
@@ -1174,6 +1326,7 @@ void vpcm_v92_select_profile_from_dil(const v90_dil_analysis_t *analysis,
 static bool vpcm_v90_run_data_mode(v91_law_t law,
                                    const vpcm_v90_startup_contract_io_t *io,
                                    v34_state_t *native_caller,
+                                   v34_state_t *native_answerer,
                                    v90_state_t *downstream_tx,
                                    v90_state_t *downstream_rx,
                                    v91_state_t *upstream_rx,
@@ -1206,6 +1359,7 @@ static bool vpcm_v90_run_data_mode(v91_law_t law,
         int down_consumed;
         int up_consumed;
         int16_t up_linear[VPCM_V90_DATA_CHUNK_CODEWORDS];
+        int16_t up_rx_linear[VPCM_V90_DATA_CHUNK_CODEWORDS];
 
         chunk_codewords  = total_codewords - offset;
         if (chunk_codewords > VPCM_V90_DATA_CHUNK_CODEWORDS)
@@ -1262,21 +1416,93 @@ static bool vpcm_v90_run_data_mode(v91_law_t law,
             return false;
         }
 
-        /* Upstream decode — V.91 transparent RX.
-         * When native_caller is set the upstream signal is real V.34 modulation;
-         * the V.91 transparent decoder will produce garbage bytes (expected),
-         * so we skip the consume-count check in that case. */
-        up_consumed = v91_rx_codewords(upstream_rx,
-                                       up_data_out + up_byte_offset, chunk_up_bytes,
-                                       up_pcm_rx + offset, chunk_codewords);
-        if (!native_caller && up_consumed != chunk_up_bytes) {
-            fprintf(stderr, "V.90 data mode: upstream RX short at offset %d\n", offset);
-            return false;
+        if (native_caller && native_answerer) {
+            for (int i = 0; i < chunk_codewords; i++) {
+                up_rx_linear[i] = (law == V91_LAW_ALAW)
+                                ? alaw_to_linear(up_pcm_rx[offset + i])
+                                : ulaw_to_linear(up_pcm_rx[offset + i]);
+            }
+            if (v34_rx(native_answerer, up_rx_linear, chunk_codewords) != 0) {
+                fprintf(stderr, "V.90 data mode: native V.34 RX failed at offset %d\n",
+                        offset);
+                return false;
+            }
+            up_consumed = 0;
+        } else {
+            up_consumed = v91_rx_codewords(upstream_rx,
+                                           up_data_out + up_byte_offset,
+                                           chunk_up_bytes,
+                                           up_pcm_rx + offset, chunk_codewords);
+            if (up_consumed != chunk_up_bytes) {
+                fprintf(stderr, "V.90 data mode: upstream RX short at offset %d\n",
+                        offset);
+                return false;
+            }
         }
         (void) up_consumed;
         (void) up_total_bytes;
         (void) down_total_bytes;
     }
+    return true;
+}
+
+static bool vpcm_v90_verify_native_upstream(const uint8_t *expected,
+                                            int expected_bytes,
+                                            const vpcm_v90_bit_sink_t *sink,
+                                            uint8_t *aligned_out)
+{
+    const int sync_bits = 128;
+    int alignment = -1;
+    int search_limit;
+    int checked_bits;
+
+    if (!expected || !sink || !sink->data || sink->bit_pos < sync_bits)
+        return false;
+    search_limit = sink->bit_pos - sync_bits;
+    if (search_limit > 4096)
+        search_limit = 4096;
+    for (int shift = 0; shift <= search_limit; shift++) {
+        int bit;
+
+        for (bit = 0; bit < sync_bits; bit++) {
+            int got = (sink->data[(shift + bit) >> 3]
+                       >> ((shift + bit) & 7)) & 1;
+            int want = (expected[bit >> 3] >> (bit & 7)) & 1;
+
+            if (got != want)
+                break;
+        }
+        if (bit == sync_bits) {
+            alignment = shift;
+            break;
+        }
+    }
+    if (alignment < 0) {
+        fprintf(stderr, "V.90 native V.34 upstream payload sync not found (%d bits)\n",
+                sink->bit_pos);
+        return false;
+    }
+    checked_bits = sink->bit_pos - alignment;
+    if (checked_bits > expected_bytes*8)
+        checked_bits = expected_bytes*8;
+    if (checked_bits < 8000)
+        return false;
+    memset(aligned_out, 0, (size_t)expected_bytes);
+    for (int bit = 0; bit < checked_bits; bit++) {
+        int got = (sink->data[(alignment + bit) >> 3]
+                   >> ((alignment + bit) & 7)) & 1;
+        int want = (expected[bit >> 3] >> (bit & 7)) & 1;
+
+        if (got != want) {
+            fprintf(stderr, "V.90 native V.34 upstream mismatch at bit %d\n", bit);
+            return false;
+        }
+        if (got)
+            aligned_out[bit >> 3] |= (uint8_t)(1U << (bit & 7));
+    }
+    fprintf(stderr,
+            "[VPCM] PASS: native analogue->digital V.34 payload, %d bits, zero errors\n",
+            checked_bits);
     return true;
 }
 
@@ -1312,7 +1538,9 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     v90_state_t *downstream_tx;
     v90_state_t *downstream_rx;
     v34_state_t *native_caller;
+    v34_state_t *native_answerer;
     vpcm_v90_bit_feeder_t caller_bit_feeder;
+    vpcm_v90_bit_sink_t answerer_bit_sink;
     int data_frames;
     int total_codewords;
     int up_total_bits;
@@ -1330,9 +1558,11 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     memset(&local_report, 0, sizeof(local_report));
     memset(&digital_dil_analysis, 0, sizeof(digital_dil_analysis));
     memset(&caller_bit_feeder, 0, sizeof(caller_bit_feeder));
+    memset(&answerer_bit_sink, 0, sizeof(answerer_bit_sink));
     downstream_tx = NULL;
     downstream_rx = NULL;
     native_caller = NULL;
+    native_answerer = NULL;
     data_seconds = params->data_seconds;
     if (data_seconds <= 0)
         data_seconds = 10;
@@ -1386,7 +1616,9 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
                                        params->v92_mode,
                                        &local_report,
                                        &caller_bit_feeder,
-                                       &native_caller)) {
+                                       &answerer_bit_sink,
+                                       &native_caller,
+                                       &native_answerer)) {
         return false;
     }
     if (local_report.phase2_received_info1a_valid) {
@@ -1606,11 +1838,13 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     memset(down_data_out, 0, (size_t) down_total_bytes);
     memset(up_data_out, 0, (size_t) up_total_bytes);
 
-    /* Arm the bit feeder with the real upstream data now that up_data_in is filled. */
+    /* These callback objects were installed before Phase 2; attach their
+     * payload buffers only after native E/B1 has completed. */
     vpcm_v90_bit_feeder_init(&caller_bit_feeder, up_data_in, up_total_bytes);
+    vpcm_v90_bit_sink_init(&answerer_bit_sink, up_data_out, up_total_bytes);
 
     if (!vpcm_v90_run_data_mode(params->law, io,
-                                 native_caller,
+                                 native_caller, native_answerer,
                                  downstream_tx, downstream_rx,
                                  &caller_rx, &answerer_tx,
                                  down_data_in, down_data_out,
@@ -1635,6 +1869,9 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     }
 
     if (!vpcm_v90_expect_equal("V.90 downstream payload", down_data_in, down_data_out, down_total_bytes)
+        || (native_caller && native_answerer
+            && !vpcm_v90_verify_native_upstream(up_data_in, up_total_bytes,
+                                                &answerer_bit_sink, up_data_out))
         || (!native_caller
             && !vpcm_v90_expect_equal("V.92 upstream payload", up_data_in, up_data_out, up_total_bytes))) {
         free(down_data_in);
@@ -1714,6 +1951,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     v90_free(downstream_tx);
     v90_free(downstream_rx);
     v34_free(native_caller);
+    v34_free(native_answerer);
 
     if (report)
         *report = local_report;

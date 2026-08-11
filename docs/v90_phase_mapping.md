@@ -270,8 +270,14 @@ Phase 4 is not "CP/CP' in disguise".
   `v90_analogue_phase3.c`: authoritative G.711 downstream drives the analogue
   PCM receiver and its V.34 upstream drives the digital V.34 receiver.  Both
   roles must complete Phase 3, Phase 4 and enter data mode for that case to
-  pass.  The later payload runner and impairment scenarios still retain
-  V.91-derived compatibility objects and are not yet native proof
+  pass.  The clean PCMU path now also drives Phase 4 from CPt and CP frames
+  recovered by the digital V.34 receiver rather than the old fixed 512-symbol
+  bridge (which truncated a large CPt before one repetition completed).
+  `VPCM_V90_NATIVE_UPSTREAM=1` carries the two live V.34 contexts into the
+  payload runner; that strict diagnostic currently reaches DATA and produces
+  the negotiated number of bits, but fails payload sync.  PCMA CP acquisition
+  also remains open.  Compatibility remains the default payload truth until
+  those two failures are fixed
 - peer-initiated retrains are answered per §9.3.1/§9.4.1/§9.5.1.2: a 2400 Hz
   Tone A detector (Goertzel, 80 ms confirmation) runs during the Phase 3/4 RX
   stages in `v34rx.c` and reports `PEER_RETRAIN`; the engine responds by
