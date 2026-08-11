@@ -283,7 +283,14 @@ Phase 4 is not "CP/CP' in disguise".
   the analogue V.34 transmitter emits B1 as §10.1.3.1's complete P-mapping-
   frame data frame rather than a single mapping frame.  Payload still does
   not synchronize: with frame timing corrected, the remaining blocker is
-  receive-constellation geometry/equalization, not bit count or B1 duration
+  receive-constellation geometry/equalization, not bit count or B1 duration.
+  A direct reset-state mapper→demapper check at N=13/16-state trellis carries
+  77,688 decoded bits with zero errors, ruling out the Viterbi, shell demapper
+  and descrambler when fed exact Q9.7 points.  The waveform path's first 1024
+  decoded bits contain only 411 ones even though its leading decoded interval
+  is B1's scrambled-all-ones data frame; its best 128-bit payload candidate is
+  still 45 errors.  The corruption therefore exists before the mapping-frame
+  decoder, in the post-CP equalizer/constellation slicer
 - peer-initiated retrains are answered per §9.3.1/§9.4.1/§9.5.1.2: a 2400 Hz
   Tone A detector (Goertzel, 80 ms confirmation) runs during the Phase 3/4 RX
   stages in `v34rx.c` and reports `PEER_RETRAIN`; the engine responds by

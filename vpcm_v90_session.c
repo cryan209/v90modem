@@ -1494,6 +1494,8 @@ static bool vpcm_v90_verify_native_upstream(const uint8_t *expected,
 {
     const int sync_bits = 128;
     int alignment = -1;
+    int best_errors = sync_bits + 1;
+    int best_shift = -1;
     int search_limit;
     int checked_bits;
 
@@ -1505,22 +1507,36 @@ static bool vpcm_v90_verify_native_upstream(const uint8_t *expected,
     for (int shift = 0; shift <= search_limit; shift++) {
         int bit;
 
+        int errors = 0;
+
         for (bit = 0; bit < sync_bits; bit++) {
             int got = (sink->data[(shift + bit) >> 3]
                        >> ((shift + bit) & 7)) & 1;
             int want = (expected[bit >> 3] >> (bit & 7)) & 1;
 
-            if (got != want)
-                break;
+            errors += got != want;
         }
-        if (bit == sync_bits) {
+        if (errors < best_errors) {
+            best_errors = errors;
+            best_shift = shift;
+        }
+        if (errors == 0) {
             alignment = shift;
             break;
         }
     }
     if (alignment < 0) {
-        fprintf(stderr, "V.90 native V.34 upstream payload sync not found (%d bits)\n",
-                sink->bit_pos);
+        int prefix_bits = sink->bit_pos < 1024 ? sink->bit_pos : 1024;
+        int prefix_ones = 0;
+
+        for (int bit = 0; bit < prefix_bits; bit++)
+            prefix_ones += (sink->data[bit >> 3] >> (bit & 7)) & 1;
+        fprintf(stderr,
+                "V.90 native V.34 upstream payload sync not found (%d bits; "
+                "best 128-bit candidate shift=%d errors=%d; "
+                "B1-prefix ones=%d/%d)\n",
+                sink->bit_pos, best_shift, best_errors,
+                prefix_ones, prefix_bits);
         return false;
     }
     checked_bits = sink->bit_pos - alignment;
