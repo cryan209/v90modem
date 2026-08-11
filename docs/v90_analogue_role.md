@@ -39,7 +39,8 @@ Then `ATD<the digital modem's extension>` on the PTY. `ME_V90_ANALOGUE_HOLD=1`
 keeps the call up after Phase 3 for capture; `ME_V90_ANALOGUE_DIL` picks the
 descriptor to request (`measurement` by default, or `none`, `default-ja`,
 `courier-style`, `smartlink-adi`, `smartlink-adi-qc`);
-`ME_V90_ANALOGUE_UINFO` sets U_INFO (78 by default);
+`ME_V90_ANALOGUE_UINFO` sets the preferred U_INFO (78 by default; values below
+67 are rejected and INFO0d's power limit may clamp it further);
 `ME_V90_ANALOGUE_SCR=1` transmits SCR rather than silence during DIL
 (§9.3.2.9 permits either).  For a controlled §9.6 interoperability run,
 `ME_V90_ANALOGUE_RATE_RENEGOTIATE_MS=<ms>` initiates renegotiation that long
@@ -51,6 +52,24 @@ expiry initiate 70 ± 5 ms silence followed by Tone A; a byte-exact downstream
 1200 Hz detector responds after more than 50 ms of Tone B.  Both paths restart
 the borrowed SpanDSP context directly at §9.2.2.1.3 (the INFO0 exchange is not
 repeated), then re-enter the normal L1/L2, INFO1d/INFO1a and Phase 3 handoff.
+
+### Analogue-side clause audit closure
+
+The remaining clause-level omissions identified after the data path came live
+are now closed:
+
+- Table 10 bits 40:49 carry the measured 1050 Hz offset, or -512 when the
+  required accuracy is unavailable.
+- U_INFO is constrained to 67..127 and clamped against INFO0d's maximum digital
+  transmit power; the receiver uses the effective value actually transmitted.
+- Table 10 bits 34:36 select 3200, 3000 or 3429 only when INFO1d enables it.
+- §9.3.2.8's zero-length DIL proceeds with a conservative eight-level,
+  28-kbit/s CP and a Table-17-valid CPt instead of waiting for a measurement
+  that cannot exist.
+- §9.7 cleardown is recognized from MP drn=0, and local hangup runs §9.6 long
+  enough to send a complete CP with drn=0 before releasing SIP.
+- §9.4.2 and §9.6.2 deadlines use Phase 2's measured RTDEa rather than fixed
+  SIP allowances.
 
 ### The four modules
 
@@ -694,7 +713,7 @@ for Phase 3: there is no foreign Phase 4 downstream in this tree, so §8.6.4's
 level and §8.6.5's frame alignment are still agreed between two halves of one
 codebase.
 
-## What is left
+## Historical Phase-4 snapshot (superseded by the status above)
 
 1. **Decode the card's TRN2d.** R̄i now follows, so the constellation the CPt
    named is the next thing to settle: 13% of the symbols after the seam are

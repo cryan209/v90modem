@@ -9043,6 +9043,8 @@ static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law)
     v90_info1a_t analog_info1a;
     v90_info0a_diag_t info0a_diag;
     v90_info1a_diag_t info1a_diag;
+    v34_v90_info1a_t received_info1a;
+    v34_v90_info1d_t received_info1d;
     uint8_t info0a_bits[(V90_INFO0A_BITS + 7) / 8];
     uint8_t info1a_bits[(V90_INFO1A_BITS + 7) / 8];
     char info0a_str[V90_INFO0A_BITS + 1];
@@ -9145,12 +9147,16 @@ static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law)
 
     v34_set_v90_mode(caller, law == V91_LAW_ALAW ? 1 : 0);
     v34_set_v90_mode(answerer, law == V91_LAW_ALAW ? 1 : 0);
+    /* A configured interop/debug value may never make Table 10 non-conformant. */
+    v34_set_v90_u_info(caller, 1);
     if (g_vpcm_session_diag)
     {
         span_log_set_level(v34_get_logging_state(caller), SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL | SPAN_LOG_FLOW);
         span_log_set_level(v34_get_logging_state(answerer), SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL | SPAN_LOG_FLOW);
     }
 
+    memset(&received_info1a, 0, sizeof(received_info1a));
+    memset(&received_info1d, 0, sizeof(received_info1d));
     caller_saw_info0 = false;
     answerer_saw_info0 = false;
     caller_saw_info1 = false;
@@ -9266,6 +9272,24 @@ static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law)
                 vpcm_v34_rx_stage_to_str(v34_get_rx_stage(caller)),
                 vpcm_v34_tx_stage_to_str(v34_get_tx_stage(answerer)),
                 vpcm_v34_rx_stage_to_str(v34_get_rx_stage(answerer)));
+    }
+
+    if (ok) {
+        if (!v34_get_v90_received_info1a(answerer, &received_info1a)
+            || received_info1a.u_info < 67
+            || received_info1a.freq_offset < -512
+            || received_info1a.freq_offset > 511
+            || received_info1a.upstream_symbol_rate_code < 3
+            || received_info1a.upstream_symbol_rate_code > 5
+            || !v34_get_v90_received_info1d(caller, &received_info1d)
+            || received_info1d.rate_data[
+                   received_info1a.upstream_symbol_rate_code].max_bit_rate == 0) {
+            fprintf(stderr,
+                    "V.90 analogue INFO1a constraints failed: u_info=%d offset=%d baud=%d\n",
+                    received_info1a.u_info, received_info1a.freq_offset,
+                    received_info1a.upstream_symbol_rate_code);
+            ok = false;
+        }
     }
 
     v34_free(caller);

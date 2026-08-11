@@ -14,12 +14,8 @@
 #include "v90_analogue_phase3.h"
 
 static const int baud_rates[6] = {2400, 2743, 2800, 3000, 3200, 3429};
-/* No round-trip estimator is exposed at this layer.  Reserve 500 ms each way
- * beyond §9.6.2's 5000 ms floor; this is conservative on a G.711 SIP path. */
-#define RR_ED_DEADLINE_SAMPLES  (6000*8)
-/* §9.4.2's 15 s + five RTDs.  No RTD API reaches this layer yet; reserve
- * 500 ms per trip on the SIP path, measured from the INFO1a/Phase-3 seam. */
-#define PHASE4_B1D_DEADLINE_SAMPLES  (17500*8)
+#define RR_ED_DEADLINE_BASE_SAMPLES     (5000*8)
+#define PHASE4_B1D_DEADLINE_BASE_SAMPLES (15000*8)
 
 struct v90_analogue_phase3_s {
     v90_analogue_tx_t *tx;
@@ -43,10 +39,14 @@ struct v90_analogue_phase3_s {
     vpcm_cp_frame_t        cp;
     bool                   phase4_started;
     bool                   phase4_failed;
+    bool                   startup_data_reached;
     bool                   upstream_data_started;
     int                    upstream_rate_n;
     int                    upstream_max_n;
+    int                    round_trip_delay_samples;
+    bool                   zero_length_dil;
     uint64_t               rx_samples;
+    uint64_t               phase4_deadline;
     uint64_t               rr_deadline;
     bool                   rr_active;
 
@@ -98,6 +98,13 @@ v90_analogue_phase3_t *v90_analogue_phase3_init(const v90_analogue_phase3_config
     s->shaping_lookahead = cfg->shaping_lookahead;
     s->digital_max_tx_dbm0 = cfg->digital_max_tx_dbm0;
     s->upstream_max_n = cfg->upstream_max_n;
+    s->round_trip_delay_samples = cfg->round_trip_delay_samples > 0
+                                ? cfg->round_trip_delay_samples : 0;
+    s->zero_length_dil = (cfg->dil.n == 0);
+    /* §9.4.2 measures 15 s + five RTDs from INFO1a.  This object is created
+     * at the immediately following Phase-3 seam. */
+    s->phase4_deadline = PHASE4_B1D_DEADLINE_BASE_SAMPLES
+                       + 5U*(uint64_t)s->round_trip_delay_samples;
 
     s->tx = v90_analogue_tx_init(&txc);
     s->rx = v90_analogue_rx_init(&rxc);
@@ -181,7 +188,7 @@ static void apply_phase4_events(v90_analogue_phase3_t *s, unsigned events)
             s->upstream_data_started = false;
             s->upstream_rate_n = 0;
             s->rr_active = true;
-            s->rr_deadline = s->rx_samples + RR_ED_DEADLINE_SAMPLES;
+            s->rr_deadline = 0; /* armed at the S-to-S-bar transition */
         } else {
             s->phase4_failed = true;
         }
@@ -214,7 +221,8 @@ static void start_phase4(v90_analogue_phase3_t *s)
         return;
     if (v90_analogue_tx_stage(s->tx) != V90A_TX_PHASE4)
         return;
-    if ((m = v90_analogue_rx_measurement(s->rx)) == NULL)
+    m = v90_analogue_rx_measurement(s->rx);
+    if (m == NULL && !s->zero_length_dil)
         return;
     /*
      * §8.5.2: ld "shall be consistent with the capabilities of the digital
@@ -236,9 +244,15 @@ static void start_phase4(v90_analogue_phase3_t *s)
         /*endif*/
     }
     /*endif*/
-    if (!v90_analogue_phase4_build_cp(m, s->law, s->digital_max_tx_dbm0,
-                                      s->shaping_redundancy, ld,
-                                      &s->cpt, &s->cp)) {
+    if (m != NULL) {
+        if (!v90_analogue_phase4_build_cp(m, s->law, s->digital_max_tx_dbm0,
+                                          s->shaping_redundancy, ld,
+                                          &s->cpt, &s->cp)) {
+            s->phase4_failed = true;
+            return;
+        }
+    } else if (!v90_analogue_phase4_build_zero_dil_cp(
+                   s->law, s->shaping_redundancy, ld, &s->cpt, &s->cp)) {
         s->phase4_failed = true;
         return;
     }
@@ -314,8 +328,10 @@ unsigned v90_analogue_phase3_rx(v90_analogue_phase3_t *s,
          * not §8.4's and feeding both would only produce noise in one. */
         events = v90_analogue_phase4_put(s->p4, codewords, count);
         apply_phase4_events(s, events);
-        if ((events & V90A4_RX_EVENT_DATA) != 0)
+        if ((events & V90A4_RX_EVENT_DATA) != 0) {
+            s->startup_data_reached = true;
             s->rr_active = false;
+        }
         if (tone_b)
             events |= V90A_EVENT_TONE_B_RETRAIN;
         return events;
@@ -331,8 +347,12 @@ unsigned v90_analogue_phase3_rx(v90_analogue_phase3_t *s,
 
 int v90_analogue_phase3_tx(v90_analogue_phase3_t *s, int16_t *amp, int max_len)
 {
+    v90_analogue_tx_stage_t before;
+    int len;
+
     if (s == NULL  ||  amp == NULL  ||  max_len <= 0)
         return 0;
+    before = v90_analogue_tx_stage(s->tx);
     /* V.90 §9.4.2.4-.5: after E, select the highest upstream rate enabled by
      * both CP and the digital modem's MP, then hand the existing modulator to
      * V.34's reset-state B1/data mapper.  Keeping this at the next v34_tx()
@@ -368,7 +388,15 @@ int v90_analogue_phase3_tx(v90_analogue_phase3_t *s, int16_t *amp, int max_len)
             }
         }
     }
-    return v34_tx(s->v34, amp, max_len);
+    len = v34_tx(s->v34, amp, max_len);
+    if (s->rr_active && s->rr_deadline == 0
+        && before == V90A_TX_RR_S
+        && v90_analogue_tx_stage(s->tx) != V90A_TX_RR_S) {
+        /* §9.6.2: Ed is due within 5000 ms plus two RTDs after S-to-S-bar. */
+        s->rr_deadline = s->rx_samples + RR_ED_DEADLINE_BASE_SAMPLES
+                       + 2U*(uint64_t)s->round_trip_delay_samples;
+    }
+    return len;
 }
 
 v90_analogue_tx_stage_t v90_analogue_phase3_tx_stage(const v90_analogue_phase3_t *s)
@@ -393,7 +421,10 @@ const v90_analogue_rx_t *v90_analogue_phase3_rx_state(const v90_analogue_phase3_
 
 bool v90_analogue_phase3_complete(const v90_analogue_phase3_t *s)
 {
-    return s  &&  v90_analogue_tx_stage(s->tx) == V90A_TX_PHASE4;
+    /* Once CPt is armed the transmitter immediately leaves the boundary
+     * stage; Phase 3 remains complete throughout Phase 4. */
+    return s && (s->phase4_started
+                 || v90_analogue_tx_stage(s->tx) == V90A_TX_PHASE4);
 }
 
 bool v90_analogue_phase3_retrain_due(const v90_analogue_phase3_t *s)
@@ -423,8 +454,9 @@ bool v90_analogue_phase3_phase4_retrain_due(const v90_analogue_phase3_t *s)
     if (s->phase4_failed)
         return true;
     return s->phase4_started
+        && !s->startup_data_reached
         && !v90_analogue_phase3_data_ready(s)
-        && s->rx_samples >= PHASE4_B1D_DEADLINE_SAMPLES;
+        && s->rx_samples >= s->phase4_deadline;
 }
 
 const vpcm_cp_frame_t *v90_analogue_phase3_cpt(const v90_analogue_phase3_t *s)
@@ -471,7 +503,7 @@ bool v90_analogue_phase3_start_rate_renegotiation(v90_analogue_phase3_t *s,
     s->upstream_data_started = false;
     s->upstream_rate_n = 0;
     s->rr_active = true;
-    s->rr_deadline = s->rx_samples + RR_ED_DEADLINE_SAMPLES;
+    s->rr_deadline = 0; /* §9.6.2 starts the timer at S-to-S-bar. */
     return true;
 }
 
@@ -480,7 +512,30 @@ bool v90_analogue_phase3_rate_renegotiating(const v90_analogue_phase3_t *s)
     return s && s->rr_active;
 }
 
+bool v90_analogue_phase3_start_cleardown(v90_analogue_phase3_t *s)
+{
+    if (s == NULL || s->p4 == NULL || !s->upstream_data_started || s->rr_active
+        || !v90_analogue_phase4_start_rate_renegotiation(s->p4, false)
+        || !v90_analogue_tx_start_cleardown(s->tx)
+        || v34_v90_resume_external_symbols(s->v34,
+                                            v90_analogue_tx_get_symbol,
+                                            s->tx) != 0) {
+        return false;
+    }
+    s->upstream_data_started = false;
+    s->upstream_rate_n = 0;
+    s->rr_active = true;
+    s->rr_deadline = 0;
+    return true;
+}
+
+bool v90_analogue_phase3_cleardown_complete(const v90_analogue_phase3_t *s)
+{
+    return s && v90_analogue_tx_stage(s->tx) == V90A_TX_CLEARDOWN_DONE;
+}
+
 bool v90_analogue_phase3_rate_retrain_due(const v90_analogue_phase3_t *s)
 {
-    return s && s->rr_active && s->rx_samples >= s->rr_deadline;
+    return s && s->rr_active && s->rr_deadline != 0
+        && s->rx_samples >= s->rr_deadline;
 }

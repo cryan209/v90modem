@@ -1587,12 +1587,9 @@ static const bool g_advertise_v90 = true; /* Advertise V.90 — PCM downstream a
  * to use (§5.4.3).  This software has always been the digital side, and V.8
  * has always said so.
  *
- * The analogue role is opt-in and incomplete: V.8 negotiates it correctly, but
- * Phase 3 has no analogue transmitter (no Sr/TRN1r/Jr, no Ja carrying a DIL
- * descriptor), so a call that negotiated it could not proceed.  Rather than
- * advertise something we cannot honour to a real peer, selecting it requires
- * ME_V90_ROLE=analogue and the V.8 result handler says plainly what is
- * missing.  See docs/v90_analogue_role.md.
+ * The analogue role is opt-in.  It runs the analogue branches of V.8 and
+ * Phases 2-4, then V.34 upstream and PCM downstream data, retrain, rate
+ * renegotiation and §9.7 cleardown.  See docs/v90_analogue_role.md.
  */
 static bool g_v90_analogue_role = false;
 
@@ -1619,6 +1616,7 @@ static bool     g_v90a_retrain_logged = false;
 static uint64_t g_v90a_data_start_samples = 0;
 static bool     g_v90a_rr_triggered = false;
 static bool     g_v90a_rr_deadline_logged = false;
+static bool     g_v90a_cleardown = false;
 static uint64_t g_v90a_rx_codewords = 0;
 static int      g_v90a_data_diag_bits = 0;
 static int      g_v90a_data_diag_zeros = 0;
@@ -1631,16 +1629,15 @@ static v90_dil_desc_t g_v90a_dil;
 static bool     g_v90a_dil_valid = false;
 
 /*
- * U_INFO for our INFO1a (Table 11 bits 25:31): the Ucode the digital modem
- * will train on.  Table 12's note says it "shall be greater than 66", and 78
- * sits mid-scale above that.  The Eicon card honours whatever is asked for --
- * the Courier asked it for 48 -- so this is tunable for interop work.
+ * U_INFO for our INFO1a (Table 10 bits 25:31): the Ucode the digital modem
+ * will train on.  §8.2.3.2 requires it to be greater than 66; Phase 2 clamps
+ * it further when INFO0d's maximum transmit power cannot carry the point.
  */
 static int me_v90a_u_info(void)
 {
     int v = parse_env_int("ME_V90_ANALOGUE_UINFO", 78);
 
-    return (v > 0  &&  v < 128) ? v : 78;
+    return (v >= 67  &&  v < 128) ? v : 78;
 }
 
 /* The DIL descriptor to request in Ja.  §9.3.2.9 will measure what comes back
@@ -2881,6 +2878,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90a_data_start_samples = 0;
     g_v90a_rr_triggered = false;
     g_v90a_rr_deadline_logged = false;
+    g_v90a_cleardown = false;
     g_v90a_rx_codewords = 0;
     g_v90a_data_diag_bits = 0;
     g_v90a_data_diag_zeros = 0;
@@ -3049,6 +3047,7 @@ static bool restart_v90_analogue_phase2_locked(const char *reason)
     g_v90a_data_start_samples = 0;
     g_v90a_rr_triggered = false;
     g_v90a_rr_deadline_logged = false;
+    g_v90a_cleardown = false;
     g_v90a_rx_codewords = 0;
     g_v90a_data_bits_seen = 0;
     g_v90a_data_adp_count = 0;
@@ -4108,6 +4107,18 @@ void me_answer(void)
 void me_hangup(void)
 {
     pthread_mutex_lock(&g_state_mtx);
+    /* V.90 §9.7 requires a data-mode disconnect to send drn=0 in a rate
+     * sequence.  Keep SIP up until one complete CP has gone on the wire; a
+     * second request, or a call outside stable analogue V.90 data, is hard. */
+    if (!g_v90a_cleardown && g_v90a && g_state == ME_DATA
+        && v90_analogue_phase3_data_ready(g_v90a)
+        && v90_analogue_phase3_start_cleardown(g_v90a)) {
+        g_v90a_cleardown = true;
+        ME_LOG("[ME] V.90 analogue: initiating §9.7 cleardown (CP drn=0)\n");
+        trace_phase("V90a cleardown initiated");
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
     g_state = ME_HANGUP;
     pthread_mutex_unlock(&g_state_mtx);
     /* sip_modem.c will detect ME_HANGUP and hang up the SIP call */
@@ -5706,7 +5717,12 @@ static void prepare_v90_analogue_phase3_locked(void)
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.law = (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
-    cfg.baud_rate_code = 4;             /* §6.2: 3200 baud upstream */
+    /* Table 10 bits 34:36 were selected from INFO1d when INFO1a was built.
+     * 3200 is mandatory; 3000/3429 are used only when the peer enabled them. */
+    cfg.baud_rate_code = v34_get_tx_baud_rate(g_v34);
+    if (cfg.baud_rate_code < 3 || cfg.baud_rate_code > 5)
+        cfg.baud_rate_code = 4;
+    cfg.round_trip_delay_samples = v34_get_round_trip_delay_samples(g_v34);
     /*
      * The upstream carrier is the digital modem's choice, not ours.  §8.2.3.2
      * Table 9 makes INFO1d identical to V.34's INFO1c, and V.34 §10.1.2.3.4
@@ -5729,15 +5745,22 @@ static void prepare_v90_analogue_phase3_locked(void)
         if (v34_get_v90_received_info1d(g_v34, &info1d)) {
             cfg.high_carrier = info1d.rate_data[cfg.baud_rate_code].use_high_carrier;
             ME_LOG("[ME] V.90 analogue upstream: INFO1d selects the %s carrier "
-                   "at 3200 baud (max bit rate code %d)\n",
-                   cfg.high_carrier ? "high" : "low",
+                   "at symbol-rate code %d (max bit rate code %d)\n",
+                   cfg.high_carrier ? "high" : "low", cfg.baud_rate_code,
                    info1d.rate_data[cfg.baud_rate_code].max_bit_rate);
         } else {
             ME_LOG("[ME] V.90 analogue upstream: no INFO1d decoded; defaulting "
-                   "to the high carrier at 3200 baud\n");
+                   "to the high carrier at symbol-rate code %d\n",
+                   cfg.baud_rate_code);
         }
     }
-    cfg.u_info = g_v90a_u_info;
+    /* prepare_v90_info1a() clamps the configured preference to Table 10's
+     * U_INFO > 66 and INFO0d power requirements.  The PCM receiver must use
+     * the effective value that actually went on the wire. */
+    cfg.u_info = v34_get_v90_tx_u_info(g_v34);
+    if (cfg.u_info < 67 || cfg.u_info > 127)
+        cfg.u_info = 78;
+    g_v90a_u_info = cfg.u_info;
     cfg.md_units = 0;                   /* INFO1a announces no MD */
     cfg.digital_max_tx_dbm0 = 0.0;
     {
@@ -5761,7 +5784,6 @@ static void prepare_v90_analogue_phase3_locked(void)
                    "unavailable; CP power cap disabled\n");
         }
     }
-    cfg.scr_during_dil = parse_env_int("ME_V90_ANALOGUE_SCR", 0) != 0;
     cfg.scr_during_dil = parse_env_int("ME_V90_ANALOGUE_SCR", 0) != 0;
     /*
      * §5.4.5's Sr, which this side chooses and Phase 4's CPt/CP carry.  The
@@ -5790,11 +5812,12 @@ static void prepare_v90_analogue_phase3_locked(void)
         return;
     }
     g_v90a_started = true;
-    ME_LOG("[ME] V.90 analogue Phase 3 started: 3200 baud %s carrier, U_INFO=%d, "
-           "Ja descriptor N=%u (%d bits)\n",
-           cfg.high_carrier ? "high" : "low",
+    ME_LOG("[ME] V.90 analogue Phase 3 started: symbol-rate code %d, %s carrier, U_INFO=%d, "
+           "Ja descriptor N=%u (%d bits), RTD=%d samples\n",
+           cfg.baud_rate_code, cfg.high_carrier ? "high" : "low",
            g_v90a_u_info, (unsigned) cfg.dil.n,
-           v90_analogue_tx_ja_bits(v90_analogue_phase3_tx_state(g_v90a)));
+           v90_analogue_tx_ja_bits(v90_analogue_phase3_tx_state(g_v90a)),
+           cfg.round_trip_delay_samples);
     trace_phase("V90 analogue Phase3 start: U_INFO=%d N=%u",
                 g_v90a_u_info, (unsigned) cfg.dil.n);
 }
@@ -5899,7 +5922,19 @@ static void me_v90_analogue_progress_locked(void)
             }
         }
     }
+    if (g_v90a_cleardown
+        && v90_analogue_phase3_cleardown_complete(g_v90a)) {
+        ME_LOG("[ME] V.90 analogue: §9.7 cleardown sequence sent; releasing SIP bearer\n");
+        trace_phase("V90a cleardown CP complete");
+        g_state = ME_HANGUP;
+        return;
+    }
     if (v90_analogue_phase3_rate_retrain_due(g_v90a)) {
+        if (g_v90a_cleardown) {
+            ME_LOG("[ME] V.90 analogue: §9.7 cleardown peer did not answer Rd; releasing bearer\n");
+            g_state = ME_HANGUP;
+            return;
+        }
         if (!g_v90a_rr_deadline_logged) {
             g_v90a_rr_deadline_logged = true;
             ME_LOG("[ME] V.90 analogue: §9.6.2 Ed deadline expired; retrain required\n");
@@ -6671,8 +6706,10 @@ void me_tx_audio(int16_t *amp, int len)
                 /* The analogue role's data direction remains V.34 upstream;
                  * keep using the modulator whose mapper was seeded from MP. */
                 pthread_mutex_lock(&g_state_mtx);
-                if (g_v90a)
+                if (g_v90a) {
                     v90_analogue_phase3_tx(g_v90a, amp, len);
+                    me_v90_analogue_progress_locked();
+                }
                 pthread_mutex_unlock(&g_state_mtx);
             } else {
                 uint8_t pcm_out[len];
@@ -6766,6 +6803,13 @@ void me_rx_g711(const uint8_t *codewords, int count)
          * data, so it must continue to receive after ME_DATA is entered. */
         events = v90_analogue_phase3_rx(g_v90a, codewords, count);
         g_v90a_rx_codewords += (uint64_t) count;
+        if (events & V90A4_RX_EVENT_CLEARDOWN) {
+            /* §9.7: MP drn=0 is a completed cleardown indication, not a
+             * malformed MP and not a retrain request. */
+            ME_LOG("[ME] V.90 analogue: peer requested §9.7 cleardown (MP drn=0)\n");
+            trace_phase("V90a peer cleardown");
+            g_state = ME_HANGUP;
+        }
         if (events & V90A_EVENT_TONE_B_RETRAIN) {
             /* §9.3.2/§9.4.2/§9.6.2: sustained Tone B is the digital modem's
              * retrain request; answer with §9.5.2.2, not a fresh V.8 call. */

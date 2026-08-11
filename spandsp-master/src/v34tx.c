@@ -1152,28 +1152,101 @@ static void prepare_info1a(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.90 Table 15's maximum single-point magnitudes for INFO0d's maximum
+   digital-modem transmit-power codes, from -0.5 through -16 dBm0.  Table 10
+   requires U_INFO's training point not to exceed that announced maximum. */
+static const int v90_max_point_level[32] =
+{
+    15124, 14276, 13480, 12724, 12012, 11340, 10708, 10108,
+     9544,  9008,  8504,  8028,  7580,  7156,  6756,  6380,
+     6020,  5684,  5368,  5068,  4784,  4516,  4264,  4024,
+     3800,  3588,  3388,  3196,  3020,  2852,  2692,  2540
+};
+
+/* Positive G.711 reconstruction level for a universal code. */
+static int v90_u_info_level(int pcm_law, int ucode)
+{
+    int mantissa;
+    int segment;
+
+    mantissa = ucode & 15;
+    segment = (ucode >> 4) & 7;
+    if (pcm_law) {
+        if (segment == 0)
+            return 8 + 16*mantissa;
+        return (264 + 16*mantissa) << (segment - 1);
+    }
+    return (((mantissa << 3) + 132) << segment) - 132;
+}
+
+static int v90_select_info1a_baud(const v34_state_t *s)
+{
+    /* §6.2 makes 3200 mandatory.  SpanDSP also implements the optional 3000
+       and 3429 rates; use one only when INFO1d says its receiver supports it. */
+    static const int preference[] = {
+        V34_BAUD_RATE_3200, V34_BAUD_RATE_3000, V34_BAUD_RATE_3429
+    };
+
+    if (s->rx.info1c_received) {
+        for (unsigned i = 0; i < sizeof(preference)/sizeof(preference[0]); i++) {
+            int baud = preference[i];
+
+            if (s->rx.info1c.rate_data[baud].max_bit_rate > 0)
+                return baud;
+        }
+    }
+    /* No valid INFO1d should reach §9.2.2.1.9.  Retain the mandatory rate as
+       a defensive fallback rather than put a reserved value in Table 10. */
+    return V34_BAUD_RATE_3200;
+}
+
 static void prepare_v90_info1a(v34_state_t *s)
 {
+    int requested_u_info;
+
     /* V.90 §8.2.3.2 Table 10: INFO1a from the analog (calling) modem.
        Different field layout from standard V.34 INFO1a — carries U_INFO
        (Ucode for 2-point train) and upstream/downstream rate codes. */
     s->tx.info1a.power_reduction = 0;
     s->tx.info1a.additional_power_reduction = 0;
     s->tx.info1a.md = 0;
-    s->tx.info1a.freq_offset = 0;
+    if (s->rx.l1_l2_1050_phase_step_count > 0) {
+        float offset_hz;
+        int offset_code;
 
-    /* In V.90 INFO1a, max_data_rate carries the 7-bit U_INFO Ucode.  The
-       analogue modem chooses it; v34_set_v90_u_info() is how, and its
-       receiver has to be told the same value.  Default: midpoint Ucode 78. */
-    s->tx.info1a.max_data_rate = (s->tx.v90_u_info > 0  &&  s->tx.v90_u_info < 128)
-                               ? s->tx.v90_u_info
-                               : 78;
+        offset_hz = (s->rx.l1_l2_1050_phase_step_sum
+                   / s->rx.l1_l2_1050_phase_step_count)
+                  / (2.0f*3.14159265f*0.020f);
+        offset_code = (int) lroundf(offset_hz/0.02f);
+        s->tx.info1a.freq_offset = (offset_code >= -511 && offset_code <= 511)
+                                ? offset_code : -512;
+    } else {
+        /* Table 10: -512 says the required 0.25 Hz accuracy was unavailable. */
+        s->tx.info1a.freq_offset = -512;
+    }
+
+    /* U_INFO is strictly greater than 66 and its point power may not exceed
+       INFO0d's maximum.  Clamp a diagnostic preference rather than emit a
+       non-conformant INFO1a; the effective value is exposed to the PCM RX. */
+    requested_u_info = (s->tx.v90_u_info >= 67 && s->tx.v90_u_info < 128)
+                     ? s->tx.v90_u_info : 78;
+    if (s->rx.info0d_extensions_valid) {
+        int limit = v90_max_point_level[s->rx.info0d_max_power_code & 31];
+
+        while (requested_u_info > 67
+               && v90_u_info_level(s->tx.v90_pcm_law, requested_u_info) > limit) {
+            requested_u_info--;
+        }
+    }
+    s->tx.v90_u_info = requested_u_info;
+    s->tx.info1a.max_data_rate = requested_u_info;
     s->tx.info1a.use_high_carrier = false;
     s->tx.info1a.preemphasis_filter = 0;
 
-    /* Upstream baud rate: use configured baud rate (default 3200 = code 4) */
+    /* Table 10 bits 34:36 must select a rate INFO1d enabled. */
+    s->tx.baud_rate = v90_select_info1a_baud(s);
     s->tx.info1a.baud_rate_a_to_c = s->tx.baud_rate;
-    /* Downstream: 8000 PCM sampling = code 6 */
+    /* Downstream: 8000 PCM sampling = code 6. */
     s->tx.info1a.baud_rate_c_to_a = 6;
 }
 /*- End of function --------------------------------------------------------*/
@@ -7261,6 +7334,25 @@ SPAN_DECLARE(int) v34_get_rx_baud_rate(v34_state_t *s)
     if (!s)
         return -1;
     return s->rx.baud_rate;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_get_tx_baud_rate(v34_state_t *s)
+{
+    return s ? s->tx.baud_rate : -1;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_get_round_trip_delay_samples(v34_state_t *s)
+{
+    return (s && s->rx.round_trip_delay_estimate > 0)
+         ? s->rx.round_trip_delay_estimate : 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_get_v90_tx_u_info(v34_state_t *s)
+{
+    return (s && s->tx.v90_mode && s->calling_party) ? s->tx.v90_u_info : 0;
 }
 /*- End of function --------------------------------------------------------*/
 

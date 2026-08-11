@@ -322,9 +322,15 @@ static unsigned push_bit(v90_analogue_phase4_t *s, int bit)
                 if (s->stage == V90A4_RX_TRN2D)
                     s->stage = V90A4_RX_MP;
                 /*endif*/
-                events |= V90A4_RX_EVENT_MP;
-                if (s->mp.acknowledge)
-                    events |= V90A4_RX_EVENT_MP_PRIME;
+                if (s->mp.max_drn == 0) {
+                    /* §9.7: drn=0 in either rate sequence is cleardown, not
+                     * a failed rate negotiation or a reason to retrain. */
+                    events |= V90A4_RX_EVENT_CLEARDOWN;
+                } else {
+                    events |= V90A4_RX_EVENT_MP;
+                    if (s->mp.acknowledge)
+                        events |= V90A4_RX_EVENT_MP_PRIME;
+                }
                 /*endif*/
             }
             /*endif*/
@@ -1047,6 +1053,57 @@ bool v90_analogue_phase4_build_cp(const v90_dil_measurement_t *m,
      */
     if (v90_analogue_phase4_cp_k(&cpt) < 0  ||  v90_analogue_phase4_cp_k(&cp) < 0)
         return false;
+    *cp_out = cp;
+    *cpt_out = cpt;
+    return true;
+}
+
+bool v90_analogue_phase4_build_zero_dil_cp(v90_law_t law,
+                                           int shaping_redundancy,
+                                           int shaping_lookahead,
+                                           vpcm_cp_frame_t *cpt_out,
+                                           vpcm_cp_frame_t *cp_out)
+{
+    vpcm_cp_frame_t cp;
+    vpcm_cp_frame_t cpt;
+
+    if (cpt_out == NULL || cp_out == NULL
+        || shaping_redundancy < 0 || shaping_redundancy > 3
+        || shaping_lookahead < 0 || shaping_lookahead > 3
+        || (shaping_redundancy == 0 && shaping_lookahead != 0)) {
+        return false;
+    }
+
+    /* V.90 §9.3.2.8 explicitly permits N=0.  No line measurement then exists,
+     * so use eight lowest positive levels in every interval.  Their product
+     * is 8^6 = 2^18: enough for CP drn=1 (K=15+Sr) at every Sr, while their
+     * power is below even Table 15's -16 dBm0 limit in both G.711 laws. */
+    vpcm_cp_init(&cp);
+    cp.v90_compatibility = true;
+    cp.drn = 1;                       /* Table 14: 28 kbit/s, minimum V.90 rate */
+    cp.codec_alaw = (law == V90_LAW_ALAW);
+    cp.shaping_redundancy = (uint8_t) shaping_redundancy;
+    cp.shaping_lookahead = (uint8_t) shaping_lookahead;
+    cp.trn1d_gain_q3_13 = 8192;       /* unity, Q3.13 */
+    cp.upstream_rate_mask = 0x0FFF;   /* mandatory 4800..28800 plus 31200 */
+    cp.constellation_count = 1;
+    cp.dfi[0] = cp.dfi[1] = cp.dfi[2] = 0;
+    cp.dfi[3] = cp.dfi[4] = cp.dfi[5] = 0;
+    for (int ucode = 0; ucode < 8; ucode++)
+        vpcm_cp_mask_set(cp.masks[0], ucode, true);
+
+    /* Keeping drn=4 makes D=12 and K=6+Sr, inside Table 17 for every Sr and
+     * comfortably inside the same 2^18 constellation product. */
+    cpt = cp;
+    cpt.v90_compatibility = false;
+    cpt.drn = 4;
+
+    if (!vpcm_cp_validate(&cp, NULL, 0)
+        || !vpcm_cp_validate(&cpt, NULL, 0)
+        || v90_analogue_phase4_cp_k(&cp) < 0
+        || v90_analogue_phase4_cp_k(&cpt) < 0) {
+        return false;
+    }
     *cp_out = cp;
     *cpt_out = cpt;
     return true;

@@ -29,6 +29,8 @@ typedef struct {
     int       baud_rate_code;   /* INFO1a bits 34:36 — upstream symbol rate */
     bool      high_carrier;     /* as INFO1d directed (§8.2.3.2, Table 9) */
     int       u_info;           /* INFO1a bits 25:31 — this side chose it */
+    /* Phase 2 RTDEa in 8000 Hz samples, used by §9.4.2 and §9.6.2 deadlines. */
+    int       round_trip_delay_samples;
     int       md_units;         /* INFO1a bits 18:24, 35 ms units; 0 skips MD */
     v90_dil_desc_t dil;         /* the descriptor to carry in Ja; n == 0 = none */
     bool      scr_during_dil;   /* §9.3.2.9: SCR rather than silence */
@@ -123,6 +125,9 @@ int v90_analogue_phase3_upstream_rate(const v90_analogue_phase3_t *s);
 bool v90_analogue_phase3_start_rate_renegotiation(v90_analogue_phase3_t *s,
                                                    bool silence_request);
 bool v90_analogue_phase3_rate_renegotiating(const v90_analogue_phase3_t *s);
+/* §9.7: initiate CP drn=0 through the §9.6 transaction. */
+bool v90_analogue_phase3_start_cleardown(v90_analogue_phase3_t *s);
+bool v90_analogue_phase3_cleardown_complete(const v90_analogue_phase3_t *s);
 /* §9.6.2: Ed must arrive within 5000 ms plus two round trips. */
 bool v90_analogue_phase3_rate_retrain_due(const v90_analogue_phase3_t *s);
 

@@ -137,6 +137,7 @@ struct v90_analogue_tx_s {
      */
     uint8_t  cpt_bits[VPCM_CP_MAX_BITS];
     int      cpt_len;
+    vpcm_cp_frame_t cp_frame;          /* retained for §9.7's drn=0 CP */
     uint8_t  cp_bits[VPCM_CP_MAX_BITS];
     int      cp_len;
     uint8_t  cp_prime_bits[VPCM_CP_MAX_BITS];
@@ -149,6 +150,7 @@ struct v90_analogue_tx_s {
     bool     scr_after_r;
     bool     phase4_armed;
     bool     rr_silence_request;
+    bool     cleardown;
     /* §9.4.2.2/.3/.4 all say "complete the current sequence" before changing
      * signal, so an event latches here and is acted on at the next wrap. */
     bool     pending_r_transition;
@@ -259,6 +261,10 @@ static v90_analogue_tx_stage_t cp_symbol(v90_analogue_tx_t *s,
         break;
     case V90A_TX_CP:
     case V90A_TX_RR_CP:
+        /* §9.7 needs only a rate sequence carrying drn=0.  Once a complete CP
+         * has gone on the wire the bearer may be released. */
+        if (s->cleardown)
+            return V90A_TX_CLEARDOWN_DONE;
         /* §9.4.2.3 / §9.6.2.1.8: MP received, so acknowledge from the next
          * sequence on. */
         if (s->pending_mp) {
@@ -572,6 +578,9 @@ void v90_analogue_tx_get_symbol(void *user_data, float *re, float *im)
         }
         return;
 
+    case V90A_TX_CLEARDOWN_DONE:
+        return;
+
     case V90A_TX_RR_EC_SCR:
         /* §9.6.2.1.6: recondition for no more than 1000 ms after Ed. */
         diff_encoded_symbol(s, 1, 1, re, im);
@@ -624,6 +633,7 @@ bool v90_analogue_tx_start_phase4(v90_analogue_tx_t *s,
         return false;
     if (!vpcm_cp_encode_bits(cp, s->cp_bits, &s->cp_len))
         return false;
+    s->cp_frame = *cp;
     /* §8.5.2: CP' is CP with the acknowledge bit set, and every CP in a group
      * carries identical parameters -- so derive it rather than accept one. */
     prime = *cp;
@@ -686,6 +696,7 @@ bool v90_analogue_tx_start_rate_renegotiation(v90_analogue_tx_t *s,
      * only before the first startup CPt, not on rate renegotiation. */
     s->s_index = 0;
     s->rr_silence_request = silence_request;
+    s->cleardown = false;
     s->pending_mp = false;
     s->pending_mp_prime = false;
     enter_stage(s, V90A_TX_RR_S);
@@ -695,6 +706,29 @@ bool v90_analogue_tx_start_rate_renegotiation(v90_analogue_tx_t *s,
 bool v90_analogue_tx_rate_renegotiate(v90_analogue_tx_t *s)
 {
     return v90_analogue_tx_start_rate_renegotiation(s, false);
+}
+
+bool v90_analogue_tx_start_cleardown(v90_analogue_tx_t *s)
+{
+    vpcm_cp_frame_t clear;
+
+    if (s == NULL || s->stage != V90A_TX_B1_PENDING || !s->phase4_armed)
+        return false;
+    clear = s->cp_frame;
+    clear.drn = 0;
+    clear.acknowledge = false;
+    clear.silence_request = false;
+    if (!vpcm_cp_encode_bits(&clear, s->cp_bits, &s->cp_len)
+        || (s->cp_len & 1)) {
+        return false;
+    }
+    s->s_index = 0;
+    s->rr_silence_request = false;
+    s->cleardown = true;
+    s->pending_mp = false;
+    s->pending_mp_prime = false;
+    enter_stage(s, V90A_TX_RR_S);
+    return true;
 }
 
 void v90_analogue_tx_rt_transition_seen(v90_analogue_tx_t *s)
@@ -740,6 +774,7 @@ const char *v90_analogue_tx_stage_name(v90_analogue_tx_stage_t stage)
     case V90A_TX_RR_CPS_PRIME:      return "rate renegotiation CPs-prime";
     case V90A_TX_RR_EC_SCR:         return "rate renegotiation echo SCR";
     case V90A_TX_RR_CP:             return "rate renegotiation CP";
+    case V90A_TX_CLEARDOWN_DONE:    return "cleardown complete";
     }
     return "?";
 }

@@ -325,6 +325,23 @@ SPAN_DECLARE(int) v34_get_rx_stage(v34_state_t *s);
     \return The RX baud-rate code, or -1 on error. */
 SPAN_DECLARE(int) v34_get_rx_baud_rate(v34_state_t *s);
 
+/*! Get the current TX symbol-rate code (v34_baud_rate_e, 0=2400..5=3429).
+    \param s The modem context.
+    \return The TX baud-rate code, or -1 on error. */
+SPAN_DECLARE(int) v34_get_tx_baud_rate(v34_state_t *s);
+
+/*! Get the Phase 2 round-trip delay estimate.
+    \param s The modem context.
+    \return The estimate in 8000 Hz sample times, or 0 if unavailable. */
+SPAN_DECLARE(int) v34_get_round_trip_delay_samples(v34_state_t *s);
+
+/*! Get the effective U_INFO selected for a locally transmitted V.90 INFO1a.
+    This can be lower than the configured preference when INFO0d's maximum
+    digital transmit power requires it.
+    \param s The modem context.
+    \return U_INFO (67..127), or 0 when not in the analogue V.90 role. */
+SPAN_DECLARE(int) v34_get_v90_tx_u_info(v34_state_t *s);
+
 /*! Get the current TX stage of the V.34 state machine.
     \param s The modem context.
     \return The current TX stage (v34_tx_stages_e value). */

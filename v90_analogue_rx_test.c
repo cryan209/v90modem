@@ -772,6 +772,20 @@ static void test_phase4_cp_from_measurement(void)
                "CP drn=%u (%d bits/frame, K=%d, %.0f bps)\n",
                sr, cpt.drn, cpt.drn + 8, cpt_k,
                cp.drn, cp.drn + 20, cp_k, vpcm_cp_drn_to_bps(cp.drn));
+
+        /* §9.3.2.8's N=0 path has no measurement but must still reach Phase 4. */
+        CHECK(v90_analogue_phase4_build_zero_dil_cp(
+                  V90_LAW_ULAW, sr, ld, &cpt, &cp),
+              "Sr=%d: zero-length DIL produced no conservative CP", sr);
+        CHECK(cp.drn == 1 && cpt.drn == 4,
+              "Sr=%d: zero-DIL rates were CP=%u CPt=%u", sr, cp.drn, cpt.drn);
+        if ((digital = v90_init_data_pump(V90_LAW_ULAW)) != NULL) {
+            CHECK(v90_set_phase4_cp(digital, &cpt),
+                  "Sr=%d: digital modem rejects zero-DIL CPt", sr);
+            CHECK(v90_set_phase4_cp(digital, &cp),
+                  "Sr=%d: digital modem rejects zero-DIL CP", sr);
+            v90_free(digital);
+        }
     }
 }
 

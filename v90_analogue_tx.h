@@ -65,6 +65,7 @@ typedef enum {
     V90A_TX_RR_CPS_PRIME,       /* §9.6.2.1.5 — acknowledged CPs */
     V90A_TX_RR_EC_SCR,          /* §9.6.2.1.6 — echo-canceller SCR */
     V90A_TX_RR_CP,              /* §9.6.2.1.7 — CP with bit 30 clear */
+    V90A_TX_CLEARDOWN_DONE,     /* §9.7 — one CP with drn=0 completed */
 } v90_analogue_tx_stage_t;
 
 typedef struct v90_analogue_tx_s v90_analogue_tx_t;
@@ -137,6 +138,8 @@ void v90_analogue_tx_mp_prime_seen(v90_analogue_tx_t *s);     /* §9.4.2.4 */
 bool v90_analogue_tx_start_rate_renegotiation(v90_analogue_tx_t *s,
                                                bool silence_request);
 bool v90_analogue_tx_rate_renegotiate(v90_analogue_tx_t *s);
+/* §9.7: enter §9.6 with a CP rate sequence whose drn is zero. */
+bool v90_analogue_tx_start_cleardown(v90_analogue_tx_t *s);
 void v90_analogue_tx_rt_transition_seen(v90_analogue_tx_t *s);
 
 v90_analogue_tx_stage_t v90_analogue_tx_stage(const v90_analogue_tx_t *s);

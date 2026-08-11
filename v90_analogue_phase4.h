@@ -67,6 +67,7 @@ typedef enum {
 #define V90A4_RX_EVENT_RD_BAR     (1u << 9)  /* §9.6.2.2.2 Rd→R̄d */
 #define V90A4_RX_EVENT_RT         (1u << 10) /* §9.6.2.1.7 Rt acquired */
 #define V90A4_RX_EVENT_RT_BAR     (1u << 11) /* §9.6.2.1.8 Rt→R̄t */
+#define V90A4_RX_EVENT_CLEARDOWN  (1u << 12) /* §9.7 MP drn=0 */
 
 /* Table 16, the fields §9.4.2.4 acts on. */
 typedef struct {
@@ -171,5 +172,14 @@ bool v90_analogue_phase4_build_cp(const v90_dil_measurement_t *m,
                                   int shaping_lookahead,
                                   vpcm_cp_frame_t *cpt_out,
                                   vpcm_cp_frame_t *cp_out);
+
+/* §9.3.2.8 permits a zero-length DIL.  With no measurement to derive a
+ * constellation from, offer a deliberately conservative low-level set that
+ * supports the minimum downstream rate and obeys every Table-14 constraint. */
+bool v90_analogue_phase4_build_zero_dil_cp(v90_law_t law,
+                                           int shaping_redundancy,
+                                           int shaping_lookahead,
+                                           vpcm_cp_frame_t *cpt_out,
+                                           vpcm_cp_frame_t *cp_out);
 
 #endif

@@ -461,6 +461,17 @@ static void test_rate_renegotiation_silence_cycle(void)
     CHECK(v90_analogue_tx_stage(tx) == V90A_TX_B1_PENDING,
           "second CP/MP exchange did not return to B1");
 
+    /* §9.7 uses the same §9.6 opening but changes only CP's drn to zero. */
+    CHECK(v90_analogue_tx_start_cleardown(tx),
+          "could not initiate §9.7 cleardown");
+    n = run_stage(tx, V90A_TX_RR_S, 4000);
+    CHECK(n == 128, "cleardown S was %dT, expected 128T", n);
+    n = run_stage(tx, V90A_TX_RR_S_BAR, 4000);
+    CHECK(n == 16, "cleardown S-bar was %dT, expected 16T", n);
+    run_stage(tx, V90A_TX_CP, 4000);
+    CHECK(v90_analogue_tx_stage(tx) == V90A_TX_CLEARDOWN_DONE,
+          "drn=0 CP did not complete cleardown");
+
     v90_analogue_tx_free(tx);
 }
 
