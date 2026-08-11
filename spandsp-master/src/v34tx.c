@@ -1098,6 +1098,11 @@ static void prepare_info1c(v34_state_t *s)
             s->tx.info1c.rate_data[i].pre_emphasis = 6;
             s->tx.info1c.rate_data[i].max_bit_rate = (s->tx.baud_rate >= i)  ?  max_n  :  0;
         }
+        /* V.90 §8.2.3.2 Tables 9/10: INFO1a selects a row but does not
+           repeat that row's carrier bit.  Retain exactly what this digital
+           modem is about to transmit so its upstream RX can apply it. */
+        s->rx.v90_info1d_high_carrier[i] =
+            s->tx.info1c.rate_data[i].use_high_carrier;
     }
     if (s->tx.v90_mode)
     {
@@ -7334,6 +7339,12 @@ SPAN_DECLARE(int) v34_get_rx_baud_rate(v34_state_t *s)
     if (!s)
         return -1;
     return s->rx.baud_rate;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_get_rx_high_carrier(v34_state_t *s)
+{
+    return s ? (s->rx.high_carrier ? 1 : 0) : -1;
 }
 /*- End of function --------------------------------------------------------*/
 

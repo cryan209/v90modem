@@ -2412,6 +2412,25 @@ static void v90_reset_upstream_data_arming(void)
     g_v90_upstream_e_run = 0;
 }
 
+/* V.90 §6.2 requires the digital modem to support both 3000 and 3200 baud;
+ * Table 10 carries the analogue modem's selection.  Keep that protocol value
+ * authoritative after the CP receiver temporarily switches to 2400 baud. */
+static int v90_selected_upstream_baud_locked(void)
+{
+    v34_v90_info1a_t info1a;
+
+    if (g_v34 && v34_get_v90_received_info1a(g_v34, &info1a)
+        && (info1a.upstream_symbol_rate_code == 3
+            || info1a.upstream_symbol_rate_code == 4))
+        return info1a.upstream_symbol_rate_code;
+    return 4;  /* Defensive fallback to mandatory analogue-modem support. */
+}
+
+static int v90_upstream_baud_max_bps(int baud_code)
+{
+    return baud_code == 3 ? 28800 : 31200;
+}
+
 /* Runs with g_state_mtx held, either synchronously inside v34_rx() or from
  * the independent strict batch receiver after its worker reacquires state. */
 static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
@@ -2456,15 +2475,19 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
     if (accepted)
         v90_cp_live_mark_accepted_locked(diag);
     if (accepted && frame->acknowledge && !g_v34_upstream_data_armed && g_v34) {
+        int baud = v90_selected_upstream_baud_locked();
         int rate = v34_get_current_bit_rate(g_v34);
+        int max_rate = v90_upstream_baud_max_bps(baud);
 
+        if (rate > max_rate)
+            rate = max_rate;
         /* trellis code 0 = V34_TRELLIS_16 (v34_tables.h, not exported); the
          * peer's own decode of our Type-0 MP confirms 16-state upstream. */
-        if (v34_v90_prepare_upstream_data(g_v34, rate, 0) == 0) {
+        if (v34_v90_prepare_upstream_data(g_v34, baud, rate, 0) == 0) {
             g_v34_upstream_data_armed = true;
             g_v90_upstream_e_run = 0;
-            ME_LOG("[ME] V.90 upstream RX data prepared (%d bps, trellis 16); watching for E\n",
-                   rate);
+            ME_LOG("[ME] V.90 upstream RX data prepared (%d baud, %d bps, trellis 16); watching for E\n",
+                   baud == 3 ? 3000 : 3200, rate);
         } else {
             ME_LOG("[ME] V.90 upstream RX data prepare FAILED (rate %d)\n", rate);
         }
@@ -4535,8 +4558,8 @@ static bool v90_p3_confirm_signal_locked(p3_signal_type_t want)
     int16_t window[P3_CONFIRM_SAMPLES];
     int baud_code;
     int n;
-    p3_result_t *result;
     bool found = false;
+    bool ran = false;
 
     if (disabled < 0)
         disabled = getenv("ME_V90_P3_CONFIRM") &&
@@ -4567,30 +4590,38 @@ static bool v90_p3_confirm_signal_locked(p3_signal_type_t want)
     for (int i = 0; i < n; i++)
         window[i] = g_rx_ref_buf[(g_rx_ref_wr - n + i) & TX_BUF_MASK];
 
-    /* The analogue caller transmits at the high carrier (1800 Hz at 2400
-     * baud).  p3_demod's PLL corrects residual carrier offset.
-     * Use PP-trained variant for the J confirmation: the fast equalizer
-     * (SPRA159 §3.2.3) converges on noisy signals where blind CMA fails. */
-    result = p3_demod_run_pp_trained(window, n, 0, baud_code, P3_CARRIER_HIGH, 8000);
-    if (!result)
-        return true;   /* p3_demod defect: don't block a real event */
+    /* V.90 §8.2.3.2 Tables 9/10 make the carrier an INFO1d per-rate choice;
+     * it is not necessarily the ordinary V.34 caller/high default.  Try the
+     * negotiated carrier first and the alternate as a robustness fallback,
+     * matching the primary Ja scanner.  Use the PP-trained variant: the fast
+     * equalizer (SPRA159 §3.2.3) converges where blind CMA fails. */
+    for (int attempt = 0; attempt < 2 && !found; attempt++) {
+        int preferred = v34_get_rx_high_carrier(g_v34)
+                      ? P3_CARRIER_HIGH : P3_CARRIER_LOW;
+        int carrier = attempt == 0 ? preferred : !preferred;
+        p3_result_t *result = p3_demod_run_pp_trained(
+            window, n, 0, baud_code, carrier, 8000);
 
-    for (int i = 0; i < result->segment_count; i++) {
-        p3_signal_type_t type = result->segments[i].type;
-        if (want == P3_SIGNAL_S) {
-            /* Accept either polarity: the v34rx detector reports both S and
-             * S-bar through the same event. */
-            if (type == P3_SIGNAL_S || type == P3_SIGNAL_S_BAR) {
+        if (!result)
+            continue;
+        ran = true;
+        for (int i = 0; i < result->segment_count; i++) {
+            p3_signal_type_t type = result->segments[i].type;
+            if (want == P3_SIGNAL_S) {
+                /* Accept either polarity: v34rx reports S and S-bar through
+                 * the same event. */
+                if (type == P3_SIGNAL_S || type == P3_SIGNAL_S_BAR) {
+                    found = true;
+                    break;
+                }
+            } else if (type == want) {
                 found = true;
                 break;
             }
-        } else if (type == want) {
-            found = true;
-            break;
         }
+        p3_result_free(result);
     }
-    p3_result_free(result);
-    return found;
+    return ran ? found : true;  /* A p3_demod defect must not block a real event. */
 }
 
 /* Primary Ja detector: structurally identifies the 16-bit repeating J
@@ -6425,7 +6456,18 @@ static void enter_v90_phase4_rx_locked(void)
 
     ME_LOG("[ME] %s Phase 3 complete; enabling native upstream Phase 4 receiver\n",
            g_v92_active ? "V.92" : "V.90");
-    v90_set_upstream_rate_limit(g_v90, v34_get_current_bit_rate(g_v34));
+    {
+        int baud = v90_selected_upstream_baud_locked();
+        int limit = v34_get_current_bit_rate(g_v34);
+        int baud_limit = v90_upstream_baud_max_bps(baud);
+
+        if (limit > baud_limit)
+            limit = baud_limit;
+        v90_set_upstream_rate_limit(g_v90, limit);
+        ME_LOG("[ME] V.90 upstream selection: %d baud, rate cap %d bps, %s carrier\n",
+               baud == 3 ? 3000 : 3200, limit,
+               v34_get_rx_high_carrier(g_v34) ? "high" : "low");
+    }
     if (!g_v92_active) {
         v90_cp_live_note_phase4_hint_locked();
         v34_force_v90_phase4_cp_rx(g_v34);

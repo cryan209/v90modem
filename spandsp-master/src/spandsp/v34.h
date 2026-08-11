@@ -319,11 +319,16 @@ SPAN_DECLARE(int) v34_get_rx_stage(v34_state_t *s);
 
 /*! Get the current RX symbol-rate code (v34_baud_rate_e, 0=2400..5=3429).
     After v34_v90_prepare_upstream_data() this is the negotiated V.90
-    upstream data baud (3200 for V.90 per V.90 §6.2), not the CP
+    upstream data baud (3000 or 3200 per V.90 §6.2), not the CP
     control-channel rate.  Primarily a regression-test hook.
     \param s The modem context.
     \return The RX baud-rate code, or -1 on error. */
 SPAN_DECLARE(int) v34_get_rx_baud_rate(v34_state_t *s);
+
+/*! Get the current RX carrier selection.
+    \param s The modem context.
+    \return Non-zero for the high carrier, zero for low, or -1 on error. */
+SPAN_DECLARE(int) v34_get_rx_high_carrier(v34_state_t *s);
 
 /*! Get the current TX symbol-rate code (v34_baud_rate_e, 0=2400..5=3429).
     \param s The modem context.
@@ -534,8 +539,11 @@ SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s);
     stage, hypothesis lock or scrambler state.  Unlike v34_seed_rx_mp(),
     this is safe to call while the live CP bit tap is still running: the
     engine detects the analogue modem's E itself and then calls
-    v34_begin_rx_data().  bit_rate is in bps (2400..33600). */
+    v34_begin_rx_data().  baud_rate is the negotiated V.34 symbol-rate code;
+    V.90 §6.2 requires digital-modem support for codes 3 (3000) and 4 (3200).
+    bit_rate is in bps and must be legal for that symbol rate. */
 SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
+                                                int baud_rate,
                                                 int bit_rate,
                                                 int trellis_size);
 

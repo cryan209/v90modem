@@ -5493,79 +5493,63 @@ static bool test_v90_v34_rx_stage_isolation(void)
    zero mapping frames, while downstream TX was healthy). */
 static bool test_v90_v90cp_upstream_data_reconfiguration(void)
 {
-    v34_state_t *answerer;
-    int cp_baud;
-    int data_baud;
+    static const struct {
+        int code;
+        int baud;
+        int max_bps;
+    } cases[] = {
+        {3, 3000, 28800},
+        {4, 3200, 31200}
+    };
 
     vpcm_log("Test: V.90 V90_CP -> DATA upstream reconfiguration");
-    answerer = v34_init(NULL, 3200, 21600, false, true,
-                        vpcm_v34_dummy_get_bit, NULL,
-                        vpcm_v34_dummy_put_bit, NULL);
-    if (answerer == NULL)
-    {
-        fprintf(stderr,
-                "V.90 upstream reconfiguration test could not initialize answerer\n");
-        return false;
-    }
-    v34_set_put_phase4_bit(answerer, vpcm_v34_dummy_put_bit, NULL);
-    v34_set_v90_mode(answerer, V91_LAW_ULAW);
-    v34_force_v90_phase4_cp_rx(answerer);
-    if (v34_get_rx_stage(answerer) != V34_RX_STAGE_V90_CP)
-    {
-        fprintf(stderr,
-                "V.90 upstream reconfiguration test did not enter V90_CP\n");
+    for (unsigned c = 0; c < sizeof(cases)/sizeof(cases[0]); c++) {
+        v34_state_t *answerer = v34_init(
+            NULL, 3200, 21600, false, true,
+            vpcm_v34_dummy_get_bit, NULL,
+            vpcm_v34_dummy_put_bit, NULL);
+        int cp_baud;
+
+        if (!answerer) {
+            fprintf(stderr, "V.90 upstream reconfiguration init failed\n");
+            return false;
+        }
+        v34_set_put_phase4_bit(answerer, vpcm_v34_dummy_put_bit, NULL);
+        v34_set_v90_mode(answerer, V91_LAW_ULAW);
+        v34_force_v90_phase4_cp_rx(answerer);
+        cp_baud = v34_get_rx_baud_rate(answerer);
+        /* §6.2: 3000 tops out at 28800 while 3200 permits 31200. */
+        if (cases[c].code == 3
+            && v34_v90_prepare_upstream_data(answerer, 3, 31200, 0) == 0) {
+            fprintf(stderr, "V.90 accepted illegal 3000/31200 upstream\n");
+            v34_free(answerer);
+            return false;
+        }
+        if (v34_v90_prepare_upstream_data(answerer, cases[c].code,
+                                           cases[c].max_bps, 0) != 0
+            || v34_get_rx_baud_rate(answerer) != cases[c].code
+            || v34_get_current_bit_rate(answerer) != cases[c].max_bps
+            || v34_get_rx_stage(answerer) != V34_RX_STAGE_V90_CP) {
+            fprintf(stderr,
+                    "V.90 upstream prepare failed: CP=%d wanted=%d/%d got=%d/%d stage=%s\n",
+                    cp_baud, cases[c].baud, cases[c].max_bps,
+                    v34_get_rx_baud_rate(answerer),
+                    v34_get_current_bit_rate(answerer),
+                    vpcm_v34_rx_stage_to_str(v34_get_rx_stage(answerer)));
+            v34_free(answerer);
+            return false;
+        }
+        if (v34_begin_rx_data(answerer) != 0
+            || v34_get_rx_stage(answerer) != V34_RX_STAGE_DATA
+            || v34_get_rx_baud_rate(answerer) != cases[c].code) {
+            fprintf(stderr, "V.90 E/DATA handoff lost %d-baud selection\n",
+                    cases[c].baud);
+            v34_free(answerer);
+            return false;
+        }
         v34_free(answerer);
-        return false;
     }
-    /* CP acquisition runs at the 2400-baud control-channel rate.  Whatever
-       baud_rate the CP stage holds, the data prepare must move it to 3200. */
-    cp_baud = v34_get_rx_baud_rate(answerer);
-    if (v34_v90_prepare_upstream_data(answerer, 31200, 0) != 0)
-    {
-        fprintf(stderr,
-                "V.90 upstream reconfiguration test: v34_v90_prepare_upstream_data failed\n");
-        v34_free(answerer);
-        return false;
-    }
-    data_baud = v34_get_rx_baud_rate(answerer);
-    if (data_baud != 4 /* V34_BAUD_RATE_3200, v34_tables.h */)
-    {
-        fprintf(stderr,
-                "V.90 upstream reconfiguration test: data baud stayed at %d (CP=%d), expected %d (3200)\n",
-                data_baud, cp_baud, 4 /* V34_BAUD_RATE_3200 */);
-        v34_free(answerer);
-        return false;
-    }
-    /* The seam must not promote the stage out of V90_CP; only the E handoff
-       (v34_begin_rx_data) does that. */
-    if (v34_get_rx_stage(answerer) != V34_RX_STAGE_V90_CP)
-    {
-        fprintf(stderr,
-                "V.90 upstream reconfiguration test: prepare moved stage to %s\n",
-                vpcm_v34_rx_stage_to_str(v34_get_rx_stage(answerer)));
-        v34_free(answerer);
-        return false;
-    }
-    if (v34_begin_rx_data(answerer) != 0
-        || v34_get_rx_stage(answerer) != V34_RX_STAGE_DATA)
-    {
-        fprintf(stderr,
-                "V.90 upstream reconfiguration test: E handoff to DATA failed\n");
-        v34_free(answerer);
-        return false;
-    }
-    /* The reconfigured baud must survive into DATA (the dead-RX bug left it
-       at the CP value through DATA entry). */
-    if (v34_get_rx_baud_rate(answerer) != 4 /* V34_BAUD_RATE_3200 */)
-    {
-        fprintf(stderr,
-                "V.90 upstream reconfiguration test: DATA baud %d != 3200\n",
-                v34_get_rx_baud_rate(answerer));
-        v34_free(answerer);
-        return false;
-    }
-    v34_free(answerer);
-    vpcm_log("PASS: V.90 V90_CP -> DATA reconfigures RX to 3200 baud");
+    vpcm_log("PASS: V.90 V90_CP -> DATA preserves 3000/3200 and rate ceilings");
     return true;
 }
 
@@ -5630,7 +5614,7 @@ static bool test_v90_upstream_t3_b1_acquisition(void)
     v34_set_v90_mode(rx, V91_LAW_ULAW);
     v34_set_put_phase4_bit(rx, vpcm_v34_dummy_put_bit, NULL);
     v34_force_v90_phase4_cp_rx(rx);
-    if (v34_v90_prepare_upstream_data(rx, 21600, 0) != 0
+    if (v34_v90_prepare_upstream_data(rx, 4, 21600, 0) != 0
         || v34_begin_rx_data(rx) != 0
         || v34_v90_begin_tx_data(tx, 9, 0, 0, 0, NULL) != 0) {
         goto done;
@@ -9283,7 +9267,10 @@ static bool test_spandsp_v90_info_startup_over_analog_g711(v91_law_t law)
             || received_info1a.upstream_symbol_rate_code > 5
             || !v34_get_v90_received_info1d(caller, &received_info1d)
             || received_info1d.rate_data[
-                   received_info1a.upstream_symbol_rate_code].max_bit_rate == 0) {
+                   received_info1a.upstream_symbol_rate_code].max_bit_rate == 0
+            || v34_get_rx_high_carrier(answerer) !=
+               (received_info1d.rate_data[
+                    received_info1a.upstream_symbol_rate_code].use_high_carrier ? 1 : 0)) {
             fprintf(stderr,
                     "V.90 analogue INFO1a constraints failed: u_info=%d offset=%d baud=%d\n",
                     received_info1a.u_info, received_info1a.freq_offset,

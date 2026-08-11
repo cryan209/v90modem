@@ -996,6 +996,10 @@ typedef struct
     uint8_t info1a_raw_12_17;
     uint8_t info1a_raw_32_33;
     uint16_t info1a_raw_40_49;
+    /*! \brief Per-rate carrier choices transmitted by this digital modem in
+        INFO1d.  Table 10 reserves bits 32:33, so the later INFO1a cannot carry
+        this choice back; the receiver must retain its own Table 9 rows. */
+    bool v90_info1d_high_carrier[6];
     /*! \brief Sticky flag for V.90 answerer recovery when stale INFO0a is seen
                during the INFO1a wait window. */
     bool v90_repeated_info0a_pending;

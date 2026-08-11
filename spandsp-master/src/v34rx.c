@@ -2876,14 +2876,12 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
                 span_log(s->logging, SPAN_LOG_FLOW, "  Frequency offset = %fHz\n", info1a->freq_offset*0.02f);
 
             /* The analogue modem transmits Phase 3 at the a->c symbol rate.
-               Table 11: "The carrier frequency ... to be used are those
-               already indicated for this symbol rate in INFO1d" -- our
-               INFO1d advertises the high carrier for every upstream rate
-               (see prepare_info1c()). */
+               V.34 §10.1.2.3.4/Table 12: carrier and pre-emphasis are those
+               this digital modem already indicated for that row in INFO1d. */
             if (info1a->baud_rate_a_to_c >= 0  &&  info1a->baud_rate_a_to_c <= 5)
             {
                 s->baud_rate = info1a->baud_rate_a_to_c;
-                s->high_carrier = true;
+                s->high_carrier = s->v90_info1d_high_carrier[s->baud_rate];
                 s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, s->high_carrier));
                 create_godard_coeffs(&s->pri_ted,
                                      carrier_frequency(s->baud_rate, s->high_carrier),
@@ -2904,13 +2902,13 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
             else
                 span_log(s->logging, SPAN_LOG_FLOW, "  Frequency offset = %fHz\n", info1a->freq_offset*0.02f);
 
-            /* In V.90, the upstream (analog→digital) uses V.34 modulation at the selected baud rate.
-               Use the upstream baud rate for the primary channel RX configuration. */
+            /* V.90 §8.2.3.2 Tables 9/10: INFO1a selects the upstream row;
+               bits 32:33 are reserved and do not repeat its carrier choice.
+               Apply the row this digital modem retained when sending INFO1d. */
             if (info1a->baud_rate_a_to_c >= 0  &&  info1a->baud_rate_a_to_c <= 5)
             {
                 s->baud_rate = info1a->baud_rate_a_to_c;
-                if (s->info1a_raw_32_33 & 0x2)
-                    s->high_carrier = true;
+                s->high_carrier = s->v90_info1d_high_carrier[s->baud_rate];
                 s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, s->high_carrier));
                 create_godard_coeffs(&s->pri_ted,
                                      carrier_frequency(s->baud_rate, s->high_carrier),
@@ -10478,44 +10476,28 @@ SPAN_DECLARE(int) v34_set_rx_data_transform(v34_state_t *s,
 /*- End of function --------------------------------------------------------*/
 
 SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
+                                                int baud_rate,
                                                 int bit_rate,
                                                 int trellis_size)
 {
     int i;
     int bit_rate_n;
-    int data_baud;
-    const char *baud_env;
+    int max_bit_rate_n;
 
-    if (!s || bit_rate < 2400 || bit_rate > 33600 || (bit_rate % 2400) != 0)
+    if (!s || (baud_rate != V34_BAUD_RATE_3000
+               && baud_rate != V34_BAUD_RATE_3200)
+        || bit_rate < 2400 || bit_rate > 33600 || (bit_rate % 2400) != 0)
         return -1;
     bit_rate_n = bit_rate/2400;
-    if (set_trellis_mode(s, trellis_size))
+    max_bit_rate_n = (baud_rate_parameters[baud_rate].max_bit_rate_code >> 1) + 1;
+    if (bit_rate_n > max_bit_rate_n || set_trellis_mode(s, trellis_size))
         return -1;
-    /* V.90 §6.2 mandates the V.34 analogue modem support the 3200-baud
-       symbol rate; the upstream V.34 data direction uses it.  The dedicated
-       V90_CP stage acquires CPt/CP at the 2400-baud control-channel rate
-       (see v90_cp_live.c V90_CP_LIVE_BAUD_CODE), so by the time CP' is
-       accepted s->rx.baud_rate is still the CP value and v34_set_working_
-       parameters() below would size the data mapping frame / viterbi /
-       superframe for the wrong baud -- which is exactly the dead-upstream-
-       RX signature (live 2026-07-26: DATA entered at baud_rate=0/1800 Hz,
-       zero mapping frames, while the downstream TX was healthy).  V.90
-       skips the ordinary V.34 MP exchange that would otherwise reconfigure
-       the receiver for data, so do it here, at the V90_CP seam: restore the
-       negotiated data baud and recompute the carrier/shaper/parm state
-       while leaving the CP receiver intact through the remainder of E.
-       At the following B1 boundary the dedicated 9.6 kHz/T/3 branch acquires
-       its own timing/equalizer from known B1.  high_carrier is preserved from
-       the Phase-3/INFO1a assignment. */
-    data_baud = V34_BAUD_RATE_3200;
-    baud_env = getenv("ME_V90_UPSTREAM_BAUD");
-    if (baud_env && *baud_env)
-    {
-        int b = atoi(baud_env);
-        if (b >= V34_BAUD_RATE_2400 && b <= V34_BAUD_RATE_3429)
-            data_baud = b;
-    }
-    s->rx.baud_rate = data_baud;
+    /* V.90 §6.2 requires the digital modem to receive both 3000 and 3200
+       symbols/s.  The dedicated V90_CP stage acquires CPt/CP at 2400 baud,
+       so INFO1a's selected rate must be supplied explicitly at the CP' seam.
+       Recompute carrier/shaper/mapper state without moving the CP stage;
+       v34_begin_rx_data() performs the later E-to-B1 handoff. */
+    s->rx.baud_rate = baud_rate;
     s->rx.v34_carrier_phase_rate =
         dds_phase_ratef(carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
     s->rx.shaper_re = v34_rx_shapers_re[s->rx.baud_rate][s->rx.high_carrier];
@@ -10535,8 +10517,11 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
        timing/history at the E→B1 sample boundary. */
     cvec_copyf(s->rx.eq_coeff, s->rx.eq_coeff_save,
                V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN);
-    s->rx.v90_t3_prepared = (data_baud == V34_BAUD_RATE_3200);
+    s->rx.v90_t3_prepared = (baud_rate == V34_BAUD_RATE_3200);
     s->rx.v90_t3_trellis_size = trellis_size;
+    /* This context's externally visible current rate is the selected V.90
+       upstream, not the initial 3200-baud capability ceiling. */
+    s->bit_rate = bit_rate;
     /* V.90 §8.5.1 upstream B1/data uses the analogue-modem GPA tap. */
     s->rx.scrambler_tap = 4;
     s->rx.use_non_linear_encoder = false;

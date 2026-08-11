@@ -884,8 +884,9 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
              * receiver now so both V.34 mapper/scrambler states share that
              * exact boundary. */
             if (n > 0
-                && v34_v90_prepare_upstream_data(answerer, n*2400,
-                                                 mp->trellis) == 0) {
+                && v34_v90_prepare_upstream_data(answerer,
+                                                 analogue_cfg.baud_rate_code,
+                                                 n*2400, mp->trellis) == 0) {
                 native_cp.upstream_prepared = true;
                 /* E may have completed in the receive chunk immediately
                  * before the analogue stage became B1_PENDING. */
