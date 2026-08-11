@@ -85,6 +85,7 @@ bool vpcm_cp_frames_equal(const vpcm_cp_frame_t *a, const vpcm_cp_frame_t *b)
     return a->transparent_mode_granted == b->transparent_mode_granted
         && a->v90_compatibility == b->v90_compatibility
         && a->drn == b->drn
+        && a->silence_request == b->silence_request
         && a->acknowledge == b->acknowledge
         && a->codec_alaw == b->codec_alaw
         && a->shaping_redundancy == b->shaping_redundancy
@@ -206,7 +207,7 @@ static bool vpcm_cp_encode_bits_fixed_fill(const vpcm_cp_frame_t *cp,
     vpcm_cp_set_bit(bits_out, 18, cp->transparent_mode_granted ? 1 : 0);
     vpcm_cp_set_bit(bits_out, 19, cp->v90_compatibility ? 1 : 0);
     vpcm_cp_set_bits(bits_out, 20, 5, cp->drn);
-    vpcm_cp_set_bit(bits_out, 30, 0);
+    vpcm_cp_set_bit(bits_out, 30, cp->silence_request ? 1 : 0);
     vpcm_cp_set_bits(bits_out, 31, 2, cp->shaping_redundancy);
     vpcm_cp_set_bit(bits_out, 33, cp->acknowledge ? 1 : 0);
     vpcm_cp_set_bit(bits_out, 34, 0);
@@ -335,8 +336,9 @@ bool vpcm_cp_build_diag(const vpcm_cp_frame_t *cp, vpcm_cp_diag_t *diag)
         diag->reserved_bits_ok = diag->reserved_bits_ok && (diag->bits[i] == 0);
     for (int i = 129; i <= 135; i++)
         diag->reserved_bits_ok = diag->reserved_bits_ok && (diag->bits[i] == 0);
-    diag->v90_compat_ok = (diag->bits[19] == 1
-                           && diag->bits[30] == 0);
+    /* Table 14 bit 19 distinguishes CPt from CP; bit 30 distinguishes CPs.
+     * All combinations used by §9.4/§9.6 are syntactically valid here. */
+    diag->v90_compat_ok = true;
     diag->fill_ok = true;
     for (int i = diag->nbits - 3; i < diag->nbits; i++) {
         if (diag->bits[i] != 0) {
@@ -387,11 +389,12 @@ bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag)
         diag->reserved_bits_ok = diag->reserved_bits_ok && (bits[i] == 0);
     for (i = 129; i <= 135; i++)
         diag->reserved_bits_ok = diag->reserved_bits_ok && (bits[i] == 0);
-    diag->v90_compat_ok = (bits[30] == 0);
+    diag->v90_compat_ok = true;
 
     diag->frame.transparent_mode_granted = (bits[18] != 0);
     diag->frame.v90_compatibility = (bits[19] != 0);
     diag->frame.drn = (uint8_t) vpcm_cp_get_bits(bits, 20, 5);
+    diag->frame.silence_request = (bits[30] != 0);
     diag->frame.acknowledge = (bits[33] != 0);
     diag->frame.codec_alaw = (bits[35] != 0);
     diag->frame.shaping_redundancy = (uint8_t)vpcm_cp_get_bits(bits, 31, 2);

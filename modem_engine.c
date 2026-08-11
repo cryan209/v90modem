@@ -1614,6 +1614,9 @@ static bool     g_v90a_started = false;
 static bool     g_v90a_complete_logged = false;
 static bool     g_v90a_failed_logged = false;
 static bool     g_v90a_retrain_logged = false;
+static uint64_t g_v90a_data_start_samples = 0;
+static bool     g_v90a_rr_triggered = false;
+static bool     g_v90a_rr_deadline_logged = false;
 static uint64_t g_v90a_rx_codewords = 0;
 static int      g_v90a_data_diag_bits = 0;
 static int      g_v90a_data_diag_zeros = 0;
@@ -2845,6 +2848,9 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90a_complete_logged = false;
     g_v90a_failed_logged = false;
     g_v90a_retrain_logged = false;
+    g_v90a_data_start_samples = 0;
+    g_v90a_rr_triggered = false;
+    g_v90a_rr_deadline_logged = false;
     g_v90a_rx_codewords = 0;
     g_v90a_data_diag_bits = 0;
     g_v90a_data_diag_zeros = 0;
@@ -3801,6 +3807,9 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
             g_v90a_complete_logged = false;
             g_v90a_failed_logged = false;
             g_v90a_retrain_logged = false;
+            g_v90a_data_start_samples = 0;
+            g_v90a_rr_triggered = false;
+            g_v90a_rr_deadline_logged = false;
             g_v90a_rx_codewords = 0;
 
             /* Phase 2 CC carriers are the mirror of the digital role's: §8.2.3.1
@@ -5755,6 +5764,41 @@ static void me_v90_analogue_progress_locked(void)
      * worth reporting.  Follow it from here instead, unconditionally.
      */
     me_v90_analogue_phase4_progress_locked();
+
+    /* Opt-in trigger for exercising the analogue-initiated half of §9.6.
+     * Zero (the default) never initiates autonomously. */
+    if (v90_analogue_phase3_data_ready(g_v90a)) {
+        int delay_ms = parse_env_int("ME_V90_ANALOGUE_RATE_RENEGOTIATE_MS", 0);
+
+        if (g_v90a_data_start_samples == 0)
+            g_v90a_data_start_samples = g_rx_ref_samples;
+        if (!g_v90a_rr_triggered && delay_ms > 0
+            && g_rx_ref_samples - g_v90a_data_start_samples
+               >= (uint64_t) delay_ms*8U) {
+            bool silence = parse_env_int(
+                "ME_V90_ANALOGUE_RATE_RENEGOTIATE_SILENCE", 0) != 0;
+
+            g_v90a_rr_triggered = true;
+            if (v90_analogue_phase3_start_rate_renegotiation(g_v90a, silence)) {
+                ME_LOG("[ME] V.90 analogue: initiating §9.6 rate renegotiation%s\n",
+                       silence ? " with CPs echo reconditioning" : "");
+                trace_phase("V90a initiate rate renegotiation%s",
+                            silence ? " CPs" : "");
+            } else {
+                ME_LOG("[ME] V.90 analogue: could not initiate §9.6 rate renegotiation\n");
+            }
+        }
+    }
+    if (v90_analogue_phase3_rate_retrain_due(g_v90a)) {
+        if (!g_v90a_rr_deadline_logged) {
+            g_v90a_rr_deadline_logged = true;
+            ME_LOG("[ME] V.90 analogue: §9.6.2 Ed deadline expired; retrain required\n");
+            trace_phase("V90a rate renegotiation deadline expired");
+        }
+        if (parse_env_int("ME_V90_ANALOGUE_HOLD", 0) == 0)
+            g_state = ME_HANGUP;
+        return;
+    }
 
     /*
      * Say why Phase 4 did not arm, and say it from here.

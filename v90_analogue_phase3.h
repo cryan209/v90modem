@@ -112,4 +112,12 @@ int v90_analogue_phase3_get_data_bits(v90_analogue_phase3_t *s,
                                       uint8_t *bits, int max_bits);
 int v90_analogue_phase3_upstream_rate(const v90_analogue_phase3_t *s);
 
+/* V.90 §9.6.2.1: begin an analogue-modem-initiated transaction.  With
+ * silence_request, perform the CPs/Ed/SCR/CP and Rt/R̄t second pass. */
+bool v90_analogue_phase3_start_rate_renegotiation(v90_analogue_phase3_t *s,
+                                                   bool silence_request);
+bool v90_analogue_phase3_rate_renegotiating(const v90_analogue_phase3_t *s);
+/* §9.6.2: Ed must arrive within 5000 ms plus two round trips. */
+bool v90_analogue_phase3_rate_retrain_due(const v90_analogue_phase3_t *s);
+
 #endif

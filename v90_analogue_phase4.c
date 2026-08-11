@@ -110,6 +110,7 @@ struct v90_analogue_phase4_s {
     int      rd_bar_symbols;
     int      rate_renegotiations;
     bool     renegotiation_training;
+    bool     silence_cycle;
 
     int      mp_frames;
     v90_analogue_mp_t mp;
@@ -390,22 +391,24 @@ static void queue_data_bit(v90_analogue_phase4_t *s, uint8_t bit)
     s->data_count++;
 }
 
-/* §8.6.4 Rd is R at the highest-power point of each CP data-frame interval.
- * Return slot-0's polarity for a complete +++---/---+++ frame, or -1. */
-static int rd_frame_polarity(const v90_analogue_phase4_t *s)
+/* §8.6.4 Rd/Rt are R at the highest-power point of each data/training
+ * constellation interval. Return slot-0 polarity for +++---/---+++, or -1. */
+static int r_frame_polarity(const v90_analogue_phase4_t *s,
+                            const vpcm_cp_frame_t *constellations)
 {
     int first_sign = -1;
 
     for (int i = 0; i < 6; i++) {
-        int constellation = s->cfg.cp.dfi[i];
+        int constellation = constellations->dfi[i];
         int highest = -1;
         int ucode;
         int sign;
 
-        if (constellation < 0 || constellation >= s->cfg.cp.constellation_count)
+        if (constellation < 0
+            || constellation >= constellations->constellation_count)
             return -1;
         for (int u = VPCM_CP_MASK_BITS - 1; u >= 0; u--) {
-            if (vpcm_cp_mask_get(s->cfg.cp.masks[constellation], u)) {
+            if (vpcm_cp_mask_get(constellations->masks[constellation], u)) {
                 highest = u;
                 break;
             }
@@ -430,10 +433,9 @@ static unsigned demap_frame(v90_analogue_phase4_t *s)
     bool data_mode;
     int n;
 
-    /* §9.6.2.2.1-.2: Rd begins on a data-frame boundary and R̄d lasts 24T.
-     * Inspect the raw six codewords before trying the modulus demapper. */
+    /* §9.6: Rd/Rt begin on a data-frame boundary and barred R lasts 24T. */
     if (s->stage == V90A4_RX_DATA) {
-        int polarity = rd_frame_polarity(s);
+        int polarity = r_frame_polarity(s, &s->cfg.cp);
 
         if (polarity >= 0) {
             if (s->rd_candidate_frames == 0 || polarity == s->rd_polarity) {
@@ -443,8 +445,6 @@ static unsigned demap_frame(v90_analogue_phase4_t *s)
                 s->rd_polarity = polarity;
                 s->rd_candidate_frames = 1;
             }
-            /* Two exact frames are already a vanishingly unlikely data
-             * coincidence; Rd supplies 64.  Hold the first out of LAPM too. */
             if (s->rd_candidate_frames >= 2) {
                 s->rd_symbols = 12;
                 s->rd_bar_symbols = 0;
@@ -454,27 +454,60 @@ static unsigned demap_frame(v90_analogue_phase4_t *s)
             return events;
         }
         s->rd_candidate_frames = 0;
-    } else if (s->stage == V90A4_RX_RR_RD) {
-        int polarity = rd_frame_polarity(s);
+    } else if (s->stage == V90A4_RX_RR_RD
+               || s->stage == V90A4_RX_RR_RT) {
+        bool rt = (s->stage == V90A4_RX_RR_RT);
+        const vpcm_cp_frame_t *set = rt ? &s->cfg.cpt : &s->cfg.cp;
+        int polarity = r_frame_polarity(s, set);
 
+        if (rt && s->rd_symbols == 0) {
+            if (polarity < 0) {
+                s->rd_candidate_frames = 0;
+                return events;
+            }
+            if (s->rd_candidate_frames == 0 || polarity == s->rd_polarity) {
+                s->rd_polarity = polarity;
+                s->rd_candidate_frames++;
+            } else {
+                s->rd_polarity = polarity;
+                s->rd_candidate_frames = 1;
+            }
+            if (s->rd_candidate_frames >= 2) {
+                s->rd_symbols = 12;
+                s->rd_bar_symbols = 0;
+                events |= V90A4_RX_EVENT_RT;
+            }
+            return events;
+        }
         if (polarity == s->rd_polarity) {
             s->rd_symbols += 6;
         } else if (polarity >= 0) {
             s->rd_bar_symbols += 6;
             if (s->rd_bar_symbols >= 12) {
-                s->stage = V90A4_RX_RR_R_BAR;
-                events |= V90A4_RX_EVENT_RD_BAR;
+                if (s->stage == V90A4_RX_RR_RT) {
+                    s->stage = V90A4_RX_RR_RT_BAR;
+                    events |= V90A4_RX_EVENT_RT_BAR;
+                } else {
+                    s->stage = V90A4_RX_RR_R_BAR;
+                    events |= V90A4_RX_EVENT_RD_BAR;
+                }
             }
         }
         return events;
-    } else if (s->stage == V90A4_RX_RR_R_BAR) {
-        int polarity = rd_frame_polarity(s);
+    } else if (s->stage == V90A4_RX_RR_R_BAR
+               || s->stage == V90A4_RX_RR_RT_BAR) {
+        bool rt = (s->stage == V90A4_RX_RR_RT_BAR);
+        const vpcm_cp_frame_t *set = rt ? &s->cfg.cpt : &s->cfg.cp;
+        int polarity = r_frame_polarity(s, set);
 
         if (polarity >= 0 && polarity != s->rd_polarity)
             s->rd_bar_symbols += 6;
         if (s->rd_bar_symbols >= R_BAR_SYMBOLS) {
-            s->rate_renegotiations++;
             s->rd_candidate_frames = 0;
+            if (rt)
+                s->silence_cycle = false;
+            else
+                s->rate_renegotiations++;
             start_training_mapper(s, true);
             events |= V90A4_RX_EVENT_TRN2D;
         }
@@ -554,7 +587,17 @@ static unsigned demap_frame(v90_analogue_phase4_t *s)
         s->ed_zero_frames = all_zero ? s->ed_zero_frames + 1 : 0;
         if (s->ed_zero_frames >= ED_FRAMES) {
             events |= V90A4_RX_EVENT_ED;
-            start_data_mapper(s);
+            if (s->silence_cycle) {
+                /* §9.6.2.1.6-.8: digital silence while we recondition, then
+                 * Rt/R̄t under the retained training constellations. */
+                s->frame_fill = 0;
+                s->rd_candidate_frames = 0;
+                s->rd_symbols = 0;
+                s->rd_bar_symbols = 0;
+                s->stage = V90A4_RX_RR_RT;
+            } else {
+                start_data_mapper(s);
+            }
         }
     }
     return events;
@@ -718,6 +761,8 @@ static unsigned put_one(v90_analogue_phase4_t *s, uint8_t c)
 
     case V90A4_RX_RR_RD:
     case V90A4_RX_RR_R_BAR:
+    case V90A4_RX_RR_RT:
+    case V90A4_RX_RR_RT_BAR:
         s->frame[s->frame_fill++] = c;
         if (s->frame_fill == 6) {
             s->frame_fill = 0;
@@ -762,6 +807,8 @@ const char *v90_analogue_phase4_stage_name(v90_analogue_phase4_rx_stage_t stage)
     case V90A4_RX_DATA:   return "data";
     case V90A4_RX_RR_RD:  return "rate renegotiation Rd";
     case V90A4_RX_RR_R_BAR: return "rate renegotiation R-bar-d";
+    case V90A4_RX_RR_RT:  return "rate renegotiation Rt";
+    case V90A4_RX_RR_RT_BAR: return "rate renegotiation R-bar-t";
     }
     return "?";
 }
@@ -809,6 +856,16 @@ int v90_analogue_phase4_b1d_bit_errors(const v90_analogue_phase4_t *s)
 int v90_analogue_phase4_rate_renegotiations(const v90_analogue_phase4_t *s)
 {
     return s ? s->rate_renegotiations : 0;
+}
+
+bool v90_analogue_phase4_start_rate_renegotiation(v90_analogue_phase4_t *s,
+                                                   bool silence_request)
+{
+    if (s == NULL || s->stage != V90A4_RX_DATA)
+        return false;
+    s->silence_cycle = silence_request;
+    s->rd_candidate_frames = 0;
+    return true;
 }
 
 int v90_analogue_phase4_get_data_bits(v90_analogue_phase4_t *s,

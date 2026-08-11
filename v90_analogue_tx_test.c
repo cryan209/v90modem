@@ -376,6 +376,94 @@ static void test_ja_carries_the_descriptor(void)
  * The events are delivered on a timer here rather than from a real digital
  * peer: this produces a plausible waveform to decode, not a real call.
  */
+static void test_rate_renegotiation_silence_cycle(void)
+{
+    v90_analogue_tx_config_t cfg;
+    v90_analogue_tx_t *tx;
+    vpcm_cp_frame_t cpt;
+    vpcm_cp_frame_t cp;
+    vpcm_cp_frame_t cps;
+    vpcm_cp_frame_t decoded;
+    uint8_t cp_bits[VPCM_CP_MAX_BITS];
+    int cp_nbits;
+    float re;
+    float im;
+    int n;
+
+    printf("§9.6.2.1 analogue-initiated CPs/echo-reconditioning cycle\n");
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.baud_rate_code = 4;
+    tx = v90_analogue_tx_init(&cfg);
+    CHECK(tx != NULL, "rate-renegotiation transmitter did not initialise");
+    if (tx == NULL)
+        return;
+
+    /* Reach Phase 4 through the zero-length-DIL startup path. */
+    run_stage(tx, V90A_TX_INITIAL_SILENCE, 4000);
+    run_stage(tx, V90A_TX_S, 4000);
+    run_stage(tx, V90A_TX_S_BAR, 4000);
+    run_stage(tx, V90A_TX_PP, 4000);
+    run_stage(tx, V90A_TX_TRN, 8000);
+    v90_analogue_tx_sd_bar_seen(tx);
+    v90_analogue_tx_jd_seen(tx);
+    v90_analogue_tx_jd_prime_seen(tx);
+    run_stage(tx, V90A_TX_S_BAR_AFTER_JD, 4000);
+
+    vpcm_cp_init(&cpt);
+    cpt.v90_compatibility = false;
+    cpt.drn = 12;
+    vpcm_cp_enable_all_ucodes(cpt.masks[0]);
+    cp = cpt;
+    cp.v90_compatibility = true;
+    cp.drn = 1;
+    cp.upstream_rate_mask = 1;
+    cps = cp;
+    cps.silence_request = true;
+    CHECK(vpcm_cp_encode_bits(&cps, cp_bits, &cp_nbits)
+          && vpcm_cp_decode_bits(cp_bits, cp_nbits, &decoded)
+          && decoded.silence_request,
+          "Table 14 bit 30 did not survive CPs encode/decode");
+    CHECK(v90_analogue_tx_start_phase4(tx, &cpt, &cp, false),
+          "could not arm Phase 4 for rate-renegotiation test");
+    pull(tx, &re, &im);                 /* PHASE4 -> CPt */
+    v90_analogue_tx_r_transition_seen(tx);
+    run_stage(tx, V90A_TX_CPT, 4000);
+    v90_analogue_tx_mp_seen(tx);
+    run_stage(tx, V90A_TX_CP, 4000);
+    v90_analogue_tx_mp_prime_seen(tx);
+    run_stage(tx, V90A_TX_CP_PRIME, 4000);
+    run_stage(tx, V90A_TX_E, 100);
+    CHECK(v90_analogue_tx_stage(tx) == V90A_TX_B1_PENDING,
+          "startup did not reach B1 before rate renegotiation");
+
+    CHECK(v90_analogue_tx_start_rate_renegotiation(tx, true),
+          "could not initiate CPs rate renegotiation");
+    n = run_stage(tx, V90A_TX_RR_S, 4000);
+    CHECK(n == 128, "rate-renegotiation S was %dT, expected 128T", n);
+    n = run_stage(tx, V90A_TX_RR_S_BAR, 4000);
+    CHECK(n == 16, "rate-renegotiation S-bar was %dT, expected 16T", n);
+    CHECK(v90_analogue_tx_stage(tx) == V90A_TX_RR_CPS,
+          "silence request did not select CPs");
+    v90_analogue_tx_mp_seen(tx);
+    run_stage(tx, V90A_TX_RR_CPS, 4000);
+    v90_analogue_tx_mp_prime_seen(tx);  /* Ed after MP' */
+    run_stage(tx, V90A_TX_RR_CPS_PRIME, 4000);
+    n = run_stage(tx, V90A_TX_RR_EC_SCR, 4000);
+    CHECK(n == 320, "echo-reconditioning SCR was %dT, expected 100 ms", n);
+    CHECK(v90_analogue_tx_stage(tx) == V90A_TX_RR_CP,
+          "echo SCR did not return to clear-bit-30 CP");
+    v90_analogue_tx_rt_transition_seen(tx);
+    v90_analogue_tx_mp_seen(tx);
+    run_stage(tx, V90A_TX_RR_CP, 4000);
+    v90_analogue_tx_mp_prime_seen(tx);
+    run_stage(tx, V90A_TX_CP_PRIME, 4000);
+    run_stage(tx, V90A_TX_E, 100);
+    CHECK(v90_analogue_tx_stage(tx) == V90A_TX_B1_PENDING,
+          "second CP/MP exchange did not return to B1");
+
+    v90_analogue_tx_free(tx);
+}
+
 static int write_ulaw(const char *path, const v90_analogue_tx_config_t *cfg)
 {
     static const int baud_rates[6] = {2400, 2743, 2800, 3000, 3200, 3429};
@@ -486,6 +574,7 @@ int main(int argc, char *argv[])
     test_sequence();
     test_zero_length_dil();
     test_ja_carries_the_descriptor();
+    test_rate_renegotiation_silence_cycle();
 
     if (ulaw_path) {
         v90_analogue_tx_config_t cfg;

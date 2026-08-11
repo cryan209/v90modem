@@ -51,6 +51,8 @@ typedef enum {
     V90A4_RX_DATA,          /* §9.4.1.5: negotiated downstream data */
     V90A4_RX_RR_RD,         /* §9.6.2.2.1: tracking Rd */
     V90A4_RX_RR_R_BAR,      /* §9.6.2.2.2: 24T R̄d */
+    V90A4_RX_RR_RT,         /* §9.6.2.1.7: tracking Rt after CPs */
+    V90A4_RX_RR_RT_BAR,     /* §9.6.2.1.8: 24T R̄t */
 } v90_analogue_phase4_rx_stage_t;
 
 #define V90A4_RX_EVENT_R          (1u << 0)  /* Ri acquired */
@@ -63,6 +65,8 @@ typedef enum {
 #define V90A4_RX_EVENT_DATA       (1u << 7)  /* all 48 B1d frames received */
 #define V90A4_RX_EVENT_RD         (1u << 8)  /* §9.6.2.2.1 Rd acquired */
 #define V90A4_RX_EVENT_RD_BAR     (1u << 9)  /* §9.6.2.2.2 Rd→R̄d */
+#define V90A4_RX_EVENT_RT         (1u << 10) /* §9.6.2.1.7 Rt acquired */
+#define V90A4_RX_EVENT_RT_BAR     (1u << 11) /* §9.6.2.1.8 Rt→R̄t */
 
 /* Table 16, the fields §9.4.2.4 acts on. */
 typedef struct {
@@ -120,6 +124,9 @@ int v90_analogue_phase4_trn2d_ones(const v90_analogue_phase4_t *s);
 int v90_analogue_phase4_b1d_frames(const v90_analogue_phase4_t *s);
 int v90_analogue_phase4_b1d_bit_errors(const v90_analogue_phase4_t *s);
 int v90_analogue_phase4_rate_renegotiations(const v90_analogue_phase4_t *s);
+/* Arm §9.6.2.1's optional CPs/echo-reconditioning cycle before local S. */
+bool v90_analogue_phase4_start_rate_renegotiation(v90_analogue_phase4_t *s,
+                                                   bool silence_request);
 int v90_analogue_phase4_get_data_bits(v90_analogue_phase4_t *s,
                                       uint8_t *bits, int max_bits);
 

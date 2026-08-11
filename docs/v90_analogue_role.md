@@ -12,11 +12,22 @@ suite, so if a convention is wrong in shared `vpcm_*` code, both ends agree and
 the peer still fails. Running our analogue side against a real digital modem
 breaks that circularity.
 
-## Status: V.8, Phase 2 and Phase 3 run in a live call
+## Status: live through Phase 4, B1/B1d and V.42 detection
 
-`ME_V90_ROLE=analogue` now takes a call as far as the end of Phase 3. Phase 4
-(§9.4) does not exist, so the engine says so and hangs up rather than running
-out the training timeout.
+`ME_V90_ROLE=analogue` completes Phases 2–4 against the Eicon DSP emulator,
+starts genuine V.34 B1/data upstream, decodes PCM B1d/data downstream and has
+reached V.42 detection.  The remaining live blocker is upstream quality: the
+Eicon asserts a rate-change condition and currently falls back to full retrain
+before LAPM establishment.
+
+V.90 §9.6 is implemented in both analogue-role directions.  A digital-initiated
+Rd/R̄d transaction is answered with S/S̄, CP/CP′, E/B1 while receiving optional
+TRN2d, MP/MP′, Ed/B1d.  The analogue side can initiate the same transaction;
+setting Table 14 bit 30 also runs the CPs/CPs′, Ed/silence, conditioning SCR,
+clear CP and Rt/R̄t second pass required by §9.6.2.1.  Mapper, carrier and RRC
+state are preserved at the data-to-S seam, while B1/B1d state is reset at the
+specified boundary.  The 5000 ms plus round-trip Ed deadline is enforced with
+a conservative SIP-path allowance.
 
 ```bash
 ME_V90_ROLE=analogue VPCM_ME_VERBOSE=1 ./sip_v90_modem \
@@ -30,7 +41,10 @@ descriptor to request (`measurement` by default, or `none`, `default-ja`,
 `courier-style`, `smartlink-adi`, `smartlink-adi-qc`);
 `ME_V90_ANALOGUE_UINFO` sets U_INFO (78 by default);
 `ME_V90_ANALOGUE_SCR=1` transmits SCR rather than silence during DIL
-(§9.3.2.9 permits either).
+(§9.3.2.9 permits either).  For a controlled §9.6 interoperability run,
+`ME_V90_ANALOGUE_RATE_RENEGOTIATE_MS=<ms>` initiates renegotiation that long
+after B1d; `ME_V90_ANALOGUE_RATE_RENEGOTIATE_SILENCE=1` selects the CPs echo-
+reconditioning path.  Both are off by default.
 
 ### The four modules
 

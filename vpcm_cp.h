@@ -23,6 +23,9 @@ typedef struct {
     bool transparent_mode_granted;
     bool v90_compatibility;
     uint8_t drn;
+    /* V.90 Table 14 bit 30: CPs requests echo-canceller reconditioning during
+     * §9.6 rate renegotiation.  It is zero during startup CPt/CP. */
+    bool silence_request;
     bool acknowledge;
     bool codec_alaw;
     uint8_t shaping_redundancy;

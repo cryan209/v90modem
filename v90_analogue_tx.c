@@ -99,6 +99,10 @@ static const int baud_rates[6] = {2400, 2743, 2800, 3000, 3200, 3429};
 
 /* §9.4.2.2: SCR after the R̄i transition, for no more than 4000 ms. */
 #define SCR_PHASE4_MAX_MS       4000
+/* §9.6.2.1.6 permits at most 1000 ms.  This implementation has no separate
+ * echo canceller to converge, but emits a short conditioning interval so the
+ * requested silence transaction remains observable and interoperable. */
+#define RR_EC_SCR_MS            100
 /* §8.5.3 -> §10.1.3.2/V.34: E is 20 bits, and this mapping is 2 bits/symbol. */
 #define E_SYMBOLS               10
 
@@ -137,9 +141,14 @@ struct v90_analogue_tx_s {
     int      cp_len;
     uint8_t  cp_prime_bits[VPCM_CP_MAX_BITS];
     int      cp_prime_len;
+    uint8_t  cps_bits[VPCM_CP_MAX_BITS];
+    int      cps_len;
+    uint8_t  cps_prime_bits[VPCM_CP_MAX_BITS];
+    int      cps_prime_len;
     int      cp_bit_pos;            /* cursor into whichever is being sent */
     bool     scr_after_r;
     bool     phase4_armed;
+    bool     rr_silence_request;
     /* §9.4.2.2/.3/.4 all say "complete the current sequence" before changing
      * signal, so an event latches here and is acted on at the next wrap. */
     bool     pending_r_transition;
@@ -202,7 +211,12 @@ static const uint8_t *cp_stream(const v90_analogue_tx_t *s, int *len)
     switch (s->stage) {
     case V90A_TX_CPT:       *len = s->cpt_len;      return s->cpt_bits;
     case V90A_TX_CP:        *len = s->cp_len;       return s->cp_bits;
+    case V90A_TX_RR_CP:     *len = s->cp_len;       return s->cp_bits;
     case V90A_TX_CP_PRIME:  *len = s->cp_prime_len; return s->cp_prime_bits;
+    case V90A_TX_RR_CPS:    *len = s->cps_len;      return s->cps_bits;
+    case V90A_TX_RR_CPS_PRIME:
+        *len = s->cps_prime_len;
+        return s->cps_prime_bits;
     default:                *len = 0;               return NULL;
     }
 }
@@ -244,10 +258,24 @@ static v90_analogue_tx_stage_t cp_symbol(v90_analogue_tx_t *s,
         }
         break;
     case V90A_TX_CP:
-        /* §9.4.2.3: MP received, so acknowledge from the next sequence on. */
+    case V90A_TX_RR_CP:
+        /* §9.4.2.3 / §9.6.2.1.8: MP received, so acknowledge from the next
+         * sequence on. */
         if (s->pending_mp) {
             s->pending_mp = false;
             return V90A_TX_CP_PRIME;
+        }
+        break;
+    case V90A_TX_RR_CPS:
+        if (s->pending_mp) {
+            s->pending_mp = false;
+            return V90A_TX_RR_CPS_PRIME;
+        }
+        break;
+    case V90A_TX_RR_CPS_PRIME:
+        if (s->pending_mp_prime) {
+            s->pending_mp_prime = false;
+            return V90A_TX_RR_EC_SCR;
         }
         break;
     case V90A_TX_CP_PRIME:
@@ -485,7 +513,10 @@ void v90_analogue_tx_get_symbol(void *user_data, float *re, float *im)
 
     case V90A_TX_CPT:
     case V90A_TX_CP:
-    case V90A_TX_CP_PRIME: {
+    case V90A_TX_CP_PRIME:
+    case V90A_TX_RR_CPS:
+    case V90A_TX_RR_CPS_PRIME:
+    case V90A_TX_RR_CP: {
         v90_analogue_tx_stage_t next = cp_symbol(s, re, im);
 
         if (next != s->stage)
@@ -529,14 +560,24 @@ void v90_analogue_tx_get_symbol(void *user_data, float *re, float *im)
         return;
 
     case V90A_TX_RR_S_BAR:
-        /* §9.6.2.2.3-.4: S̄ for 16T, omit optional SCR, then CP. */
+        /* §9.6.2.1.2/.2.3: S̄ for 16T; optional pre-CP SCR is omitted. */
         s_symbol(s, re, im);
         if (s->stage_symbols >= S_BAR_SYMBOLS) {
             s_reverse(s);
             s->cp_bit_pos = 0;
             s->pending_mp = false;
             s->pending_mp_prime = false;
-            enter_stage(s, V90A_TX_CP);
+            enter_stage(s, s->rr_silence_request ? V90A_TX_RR_CPS
+                                                  : V90A_TX_CP);
+        }
+        return;
+
+    case V90A_TX_RR_EC_SCR:
+        /* §9.6.2.1.6: recondition for no more than 1000 ms after Ed. */
+        diff_encoded_symbol(s, 1, 1, re, im);
+        if (s->stage_symbols >= ms_to_symbols(s, RR_EC_SCR_MS)) {
+            s->cp_bit_pos = 0;
+            enter_stage(s, V90A_TX_RR_CP);
         }
         return;
     }
@@ -574,6 +615,8 @@ bool v90_analogue_tx_start_phase4(v90_analogue_tx_t *s,
                                   bool scr_after_r)
 {
     vpcm_cp_frame_t prime;
+    vpcm_cp_frame_t silence;
+    vpcm_cp_frame_t silence_prime;
 
     if (s == NULL  ||  cpt == NULL  ||  cp == NULL)
         return false;
@@ -587,10 +630,20 @@ bool v90_analogue_tx_start_phase4(v90_analogue_tx_t *s,
     prime.acknowledge = true;
     if (!vpcm_cp_encode_bits(&prime, s->cp_prime_bits, &s->cp_prime_len))
         return false;
+    silence = *cp;
+    silence.silence_request = true;
+    silence.acknowledge = false;
+    silence_prime = silence;
+    silence_prime.acknowledge = true;
+    if (!vpcm_cp_encode_bits(&silence, s->cps_bits, &s->cps_len)
+        || !vpcm_cp_encode_bits(&silence_prime, s->cps_prime_bits,
+                                &s->cps_prime_len))
+        return false;
     /* Two bits go out per symbol, so an odd length would put the sequence
      * boundary mid-symbol and "complete the current sequence" would have no
      * meaning.  Table 14's fill bits make it even; check rather than assume. */
-    if ((s->cpt_len & 1)  ||  (s->cp_len & 1)  ||  (s->cp_prime_len & 1))
+    if ((s->cpt_len & 1)  ||  (s->cp_len & 1)  ||  (s->cp_prime_len & 1)
+        || (s->cps_len & 1) || (s->cps_prime_len & 1))
         return false;
     s->scr_after_r = scr_after_r;
     s->phase4_armed = true;
@@ -611,28 +664,44 @@ void v90_analogue_tx_mp_seen(v90_analogue_tx_t *s)
      * digital modem is ahead of us, so cut SCR short rather than lose it. */
     if (s->stage == V90A_TX_SCR4)
         enter_stage(s, V90A_TX_CP);
-    if (s->stage == V90A_TX_CP)
+    if (s->stage == V90A_TX_CP || s->stage == V90A_TX_RR_CP
+        || s->stage == V90A_TX_RR_CPS)
         s->pending_mp = true;
 }
 
 void v90_analogue_tx_mp_prime_seen(v90_analogue_tx_t *s)
 {
-    if (s  &&  s->stage == V90A_TX_CP_PRIME)
+    if (s  &&  (s->stage == V90A_TX_CP_PRIME
+                || s->stage == V90A_TX_RR_CPS_PRIME))
         s->pending_mp_prime = true;
 }
 
-bool v90_analogue_tx_rate_renegotiate(v90_analogue_tx_t *s)
+bool v90_analogue_tx_start_rate_renegotiation(v90_analogue_tx_t *s,
+                                               bool silence_request)
 {
-    if (s == NULL  ||  s->stage != V90A_TX_B1_PENDING  ||  !s->phase4_armed)
+    if (s == NULL || s->stage != V90A_TX_B1_PENDING || !s->phase4_armed)
         return false;
-    /* §9.6.2.2.2 starts a fresh S/S̄ response, but CP's GPA scrambler and
-     * differential state are deliberately retained: §8.5.2 initializes them
+    /* §9.6.2.1.1/.2.2 starts a fresh S/S̄ transaction, but CP's GPA
+     * scrambler and differential state are retained: §8.5.2 initializes them
      * only before the first startup CPt, not on rate renegotiation. */
     s->s_index = 0;
+    s->rr_silence_request = silence_request;
     s->pending_mp = false;
     s->pending_mp_prime = false;
     enter_stage(s, V90A_TX_RR_S);
     return true;
+}
+
+bool v90_analogue_tx_rate_renegotiate(v90_analogue_tx_t *s)
+{
+    return v90_analogue_tx_start_rate_renegotiation(s, false);
+}
+
+void v90_analogue_tx_rt_transition_seen(v90_analogue_tx_t *s)
+{
+    /* §9.6.2.1.8: CP is already being repeated; R̄t only changes what the
+     * receive side hunts next, so this event exists to document/order it. */
+    (void) s;
 }
 
 v90_analogue_tx_stage_t v90_analogue_tx_stage(const v90_analogue_tx_t *s)
@@ -667,6 +736,10 @@ const char *v90_analogue_tx_stage_name(v90_analogue_tx_stage_t stage)
     case V90A_TX_B1_PENDING:        return "B1/data handover";
     case V90A_TX_RR_S:              return "rate renegotiation S";
     case V90A_TX_RR_S_BAR:          return "rate renegotiation S-bar";
+    case V90A_TX_RR_CPS:            return "rate renegotiation CPs";
+    case V90A_TX_RR_CPS_PRIME:      return "rate renegotiation CPs-prime";
+    case V90A_TX_RR_EC_SCR:         return "rate renegotiation echo SCR";
+    case V90A_TX_RR_CP:             return "rate renegotiation CP";
     }
     return "?";
 }

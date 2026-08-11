@@ -419,6 +419,7 @@ static void test_phase4_receive(int sr)
     int mp_nbits;
     int n;
     int b1_n;
+    int startup_n;
     int len;
     const int r_reps = 32;               /* §9.4.1.1: at least 192T */
     const int r_bar_reps = 4;            /* §8.6.4: exactly four */
@@ -458,7 +459,7 @@ static void test_phase4_receive(int sr)
     /* Startup plus one complete §9.6.2.2 response cycle: 384T Rd, 24T R̄d,
      * TRN2d/MP/Ed under CP with CPt's K, then another B1d/data pair. */
     len = (r_reps + r_bar_reps)*6
-        + (frames + 49 + 64 + 4 + frames + 49)*6;
+        + (frames + 49 + 64 + 4 + frames + 64 + 4 + frames + 49)*6;
     stream = calloc((size_t) len, 1);
     if (plain == NULL  ||  stream == NULL) {
         printf("  FAIL: out of memory\n");
@@ -509,6 +510,7 @@ static void test_phase4_receive(int sr)
         return;
     }
     n += b1_n;
+    startup_n = n;
 
     /* Digital-modem-initiated rate renegotiation (§9.6.1.1/§9.6.2.2). */
     put_r_pattern(stream + (r_reps + r_bar_reps)*6 + n,
@@ -528,6 +530,24 @@ static void test_phase4_receive(int sr)
     CHECK(b1_n == frames*6,
           "could not generate rate-renegotiation TRN2d/MP/Ed");
     n += b1_n;
+    if (sr == 0) {
+        /* §9.6.2.1.6-.8 CPs path: after first Ed/silence, Rt/R̄t starts a
+         * second clear-bit-30 CP/MP transaction. */
+        put_r_pattern(stream + (r_reps + r_bar_reps)*6 + n,
+                      64, V90_LAW_ULAW, 127, false);
+        n += 64*6;
+        put_r_pattern(stream + (r_reps + r_bar_reps)*6 + n,
+                      4, V90_LAW_ULAW, 127, true);
+        n += 4*6;
+        memset(&zero, 0, sizeof(zero));
+        b1_n = v90_generate_phase4_codewords(
+            V90_LAW_ULAW, &rr_mapping, &zero, plain, frames,
+            stream + (r_reps + r_bar_reps)*6 + n,
+            len - (r_reps + r_bar_reps)*6 - n);
+        CHECK(b1_n == frames*6,
+              "could not generate post-Rt TRN2d/MP/Ed");
+        n += b1_n;
+    }
     memset(&zero, 0, sizeof(zero));
     b1_n = v90_generate_phase4_codewords(
         V90_LAW_ULAW, &cp, &zero, data_plain, 49,
@@ -550,12 +570,24 @@ static void test_phase4_receive(int sr)
     }
 
     events = 0;
-    for (int off = 0; off < (r_reps + r_bar_reps)*6 + n; off += 160) {
-        int take = (r_reps + r_bar_reps)*6 + n - off;
+    {
+        int startup_end = (r_reps + r_bar_reps)*6 + startup_n;
+        int total = (r_reps + r_bar_reps)*6 + n;
 
-        if (take > 160)
-            take = 160;
-        events |= v90_analogue_phase4_put(rx, stream + off, take);
+        for (int off = 0; off < startup_end; off += 160) {
+            int take = startup_end - off;
+            if (take > 160)
+                take = 160;
+            events |= v90_analogue_phase4_put(rx, stream + off, take);
+        }
+        CHECK(v90_analogue_phase4_start_rate_renegotiation(rx, sr == 0),
+              "could not arm local rate renegotiation");
+        for (int off = startup_end; off < total; off += 160) {
+            int take = total - off;
+            if (take > 160)
+                take = 160;
+            events |= v90_analogue_phase4_put(rx, stream + off, take);
+        }
     }
 
     CHECK((events & V90A4_RX_EVENT_R) != 0, "Ri never acquired");
@@ -576,6 +608,12 @@ static void test_phase4_receive(int sr)
           "§9.6.2.2.1 Rd was not acquired on the data-frame grid");
     CHECK((events & V90A4_RX_EVENT_RD_BAR) != 0,
           "§9.6.2.2.2 Rd-to-R̄d transition was not detected");
+    if (sr == 0) {
+        CHECK((events & V90A4_RX_EVENT_RT) != 0,
+              "§9.6.2.1.7 Rt was not acquired after CPs silence");
+        CHECK((events & V90A4_RX_EVENT_RT_BAR) != 0,
+              "§9.6.2.1.8 Rt-to-R̄t transition was not detected");
+    }
     CHECK(v90_analogue_phase4_rate_renegotiations(rx) == 1,
           "completed %d rate renegotiations, expected one",
           v90_analogue_phase4_rate_renegotiations(rx));

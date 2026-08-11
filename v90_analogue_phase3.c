@@ -13,6 +13,9 @@
 #include "v90_analogue_phase3.h"
 
 static const int baud_rates[6] = {2400, 2743, 2800, 3000, 3200, 3429};
+/* No round-trip estimator is exposed at this layer.  Reserve 500 ms each way
+ * beyond §9.6.2's 5000 ms floor; this is conservative on a G.711 SIP path. */
+#define RR_ED_DEADLINE_SAMPLES  (6000*8)
 
 struct v90_analogue_phase3_s {
     v90_analogue_tx_t *tx;
@@ -39,6 +42,9 @@ struct v90_analogue_phase3_s {
     bool                   upstream_data_started;
     int                    upstream_rate_n;
     int                    upstream_max_n;
+    uint64_t               rx_samples;
+    uint64_t               rr_deadline;
+    bool                   rr_active;
 };
 
 v90_analogue_phase3_t *v90_analogue_phase3_init(const v90_analogue_phase3_config_t *cfg)
@@ -161,10 +167,14 @@ static void apply_phase4_events(v90_analogue_phase3_t *s, unsigned events)
                                                 s->tx) == 0) {
             s->upstream_data_started = false;
             s->upstream_rate_n = 0;
+            s->rr_active = true;
+            s->rr_deadline = s->rx_samples + RR_ED_DEADLINE_SAMPLES;
         } else {
             s->phase4_failed = true;
         }
     }
+    if (events & V90A4_RX_EVENT_RT_BAR)
+        v90_analogue_tx_rt_transition_seen(s->tx); /* §9.6.2.1.8 */
     if (events & V90A4_RX_EVENT_R_BAR)
         v90_analogue_tx_r_transition_seen(s->tx);  /* §9.4.2.2: end CPt */
     if (events & V90A4_RX_EVENT_MP)
@@ -243,11 +253,14 @@ unsigned v90_analogue_phase3_rx(v90_analogue_phase3_t *s,
 
     if (s == NULL)
         return 0;
+    s->rx_samples += (uint64_t) count;
     if (s->p4 != NULL) {
         /* Phase 3's receiver is finished with this stream; §8.6's signals are
          * not §8.4's and feeding both would only produce noise in one. */
         events = v90_analogue_phase4_put(s->p4, codewords, count);
         apply_phase4_events(s, events);
+        if ((events & V90A4_RX_EVENT_DATA) != 0)
+            s->rr_active = false;
         return events;
     }
     /*endif*/
@@ -370,4 +383,34 @@ int v90_analogue_phase3_get_data_bits(v90_analogue_phase3_t *s,
 int v90_analogue_phase3_upstream_rate(const v90_analogue_phase3_t *s)
 {
     return s ? s->upstream_rate_n*2400 : 0;
+}
+
+bool v90_analogue_phase3_start_rate_renegotiation(v90_analogue_phase3_t *s,
+                                                   bool silence_request)
+{
+    if (s == NULL || s->p4 == NULL || !s->upstream_data_started
+        || s->rr_active
+        || !v90_analogue_phase4_start_rate_renegotiation(s->p4,
+                                                          silence_request)
+        || !v90_analogue_tx_start_rate_renegotiation(s->tx, silence_request)
+        || v34_v90_resume_external_symbols(s->v34,
+                                            v90_analogue_tx_get_symbol,
+                                            s->tx) != 0) {
+        return false;
+    }
+    s->upstream_data_started = false;
+    s->upstream_rate_n = 0;
+    s->rr_active = true;
+    s->rr_deadline = s->rx_samples + RR_ED_DEADLINE_SAMPLES;
+    return true;
+}
+
+bool v90_analogue_phase3_rate_renegotiating(const v90_analogue_phase3_t *s)
+{
+    return s && s->rr_active;
+}
+
+bool v90_analogue_phase3_rate_retrain_due(const v90_analogue_phase3_t *s)
+{
+    return s && s->rr_active && s->rx_samples >= s->rr_deadline;
 }
