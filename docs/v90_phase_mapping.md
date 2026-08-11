@@ -266,8 +266,12 @@ Phase 4 is not "CP/CP' in disguise".
   shaped vectors for each supported Sr/lookahead combination
 - repeatable real-modem evidence collection is documented in
   `docs/v90_hardware_interop.md`; no hardware result is implied by that tooling
-- the synthetic V.90/V.92 session contract still uses V.91-derived helper
-  objects and must not be treated as native V.90 interoperability proof
+- the clean-line session contract now couples `v90.c` directly to
+  `v90_analogue_phase3.c`: authoritative G.711 downstream drives the analogue
+  PCM receiver and its V.34 upstream drives the digital V.34 receiver.  Both
+  roles must complete Phase 3, Phase 4 and enter data mode for that case to
+  pass.  The later payload runner and impairment scenarios still retain
+  V.91-derived compatibility objects and are not yet native proof
 - peer-initiated retrains are answered per §9.3.1/§9.4.1/§9.5.1.2: a 2400 Hz
   Tone A detector (Goertzel, 80 ms confirmation) runs during the Phase 3/4 RX
   stages in `v34rx.c` and reports `PEER_RETRAIN`; the engine responds by
@@ -309,8 +313,12 @@ Compatibility layers that should disappear over time:
 1. Keep Phase 2 consumption in `vpcm_v90_session`.
 2. Make post-Phase-2 policy decisions from consumed `INFO0a/INFO1a`.
 3. Replace seeded V.91 DIL alignment with a native V.90 Phase 3 branch.
+   Completed for the clean-line coupled session; impairment scenarios still
+   use the compatibility branch when their deliberately sparse DIL yields no
+   offerable native constellation.
 4. Implement answerer-side Phase 3 control flow as:
    `Sd -> S̄d -> TRN1d -> Jd until S -> Jd'`.
+   Completed in the clean-line coupled session.
 5. Carry the negotiated Phase 4 mapper through B1d into connected data.
    Completed for `Sr=0/1/2/3` CPt training and data mode with mandatory
    `ld=0/1`.

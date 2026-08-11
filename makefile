@@ -141,7 +141,7 @@ SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c data_stack
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
 TEST_TARGETS = vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v34_phase2_decode_test v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test
-TEST_OBJS = vpcm_loopback_test.o v90.o v90_cp_rx.o v90_dil_rx.o v90_dil_measure.o v90_dil_presets.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_cp_rx.o v92_trn2u.o p3_demod.o
+TEST_OBJS = vpcm_loopback_test.o v90.o v90_cp_rx.o v90_dil_rx.o v90_dil_measure.o v90_dil_presets.o v90_analogue_tx.o v90_analogue_rx.o v90_analogue_phase3.o v90_analogue_phase4.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_cp_rx.o v92_trn2u.o p3_demod.o
 DECODE_OBJS = vpcm_decode.o v90_dil_measure.o v90_dil_presets.o v34_phase2_decode.o v34_info_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_anspcm_decode.o p3_demod.o v90.o v90_cp_rx.o v91.o vpcm_cp.o v21_fsk_demod.o phase12_decode.o call_init_tone_probe.o v90_dil_rx.o
 ENCODE_OBJS = vpcm_encode.o v90.o v91.o vpcm_cp.o v92_phase4_decode.o
 V92_REPLAY_OBJS = tools/v92_trn2u_replay.o v92_trn2u.o v92_cp_rx.o vpcm_cp.o

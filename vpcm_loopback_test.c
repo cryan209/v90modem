@@ -7333,8 +7333,8 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
     if (g_vpcm_session_diag) {
         vpcm_log("Phase model: Phase 1 = V.8/V.8bis (real SpanDSP path)");
         vpcm_log("Phase model: Phase 2 = real SpanDSP V.90 INFO transport plus shared INFO0a/INFO1a validation");
-        vpcm_log("Phase model: Phase 3 = caller/answerer V.90 training; downstream digital->analogue uses native V.90 Sd/TRN1d/Jd/Jd'/DIL, while analogue->digital currently probes native SpanDSP caller S/MD/TRN/J and falls back to the shared compatibility path when that continuation does not carry through this G.711 loopback yet.");
-        vpcm_log("Phase model: Phase 4 = caller/answerer V.90 MP/data-mode handoff; the session now probes the live native analogue Phase 4 path and only falls back to shared CP/B1 recording when that continuation does not reach data mode.");
+        vpcm_log("Phase model: Phase 3 = native digital PCM TX/RX coupled directly to the analogue Phase 3 engine over byte-exact G.711 downstream and quantised V.34 upstream.");
+        vpcm_log("Phase model: Phase 4 = native analogue CPt/CP and digital Ri/TRN2d/MP/Ed/B1d; clean-line sessions require both roles to reach data mode.");
         vpcm_log("Harness note: startup/data contract now runs through vpcm_v90_session rather than inline harness logic.");
     }
 
@@ -7353,6 +7353,22 @@ static bool run_v90_v92_startup_contract_session(v91_law_t law,
     memset(&report, 0, sizeof(report));
     if (!vpcm_v90_session_run_startup_contract(&session, &params, &io, &report)) {
         fprintf(stderr, "V.90/V.92 startup contract session failed in vpcm_v90_session\n");
+        return false;
+    }
+    /* A clean bearer is the interoperability truth test: compatibility
+     * payload coverage must never turn a failed native Phase 3/4 into PASS. */
+    if (!echo_limited
+        && (!report.phase3_native_analogue_completed
+            || !report.phase4_native_analogue_completed
+            || !report.phase4_native_caller_tx_data_mode
+            || !report.phase4_native_answerer_tx_data_mode)) {
+        fprintf(stderr,
+                "V.90 clean-line session did not complete native Phase 3/4 "
+                "(phase3=%d phase4=%d analogue_data=%d digital_data=%d)\n",
+                report.phase3_native_analogue_completed ? 1 : 0,
+                report.phase4_native_analogue_completed ? 1 : 0,
+                report.phase4_native_caller_tx_data_mode ? 1 : 0,
+                report.phase4_native_answerer_tx_data_mode ? 1 : 0);
         return false;
     }
 

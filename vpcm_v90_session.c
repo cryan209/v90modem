@@ -1,5 +1,6 @@
 #include "vpcm_v90_session.h"
 #include "v90.h"
+#include "v90_analogue_phase3.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -575,23 +576,16 @@ static void vpcm_v90_transport_linear(v91_law_t law,
 }
 
 /*
- * vpcm_v90_run_coupled_training — V.90 Phase 3+4 synchronized loop.
+ * Run the actual analogue and digital Phase 3/4 engines against each other.
+ * The downstream is exchanged as authoritative G.711 octets; the upstream is
+ * the analogue engine's V.34 waveform passed through one G.711 quantisation
+ * step into the digital modem's V.34 receiver.  This replaces the old second
+ * V.34 transmitter which acted as a downstream training proxy.
  *
- * Runs three things in lockstep:
- *   A. The V.34 answerer↔caller pair — provides proper V.34 training signals
- *      so the caller can complete Phase 3/4 (SpanDSP V.34 cannot decode V.90
- *      PCM training waveforms, so the answerer acts as a V.34 training proxy).
- *   B. The V.90 PCM state machine — generates the correct downstream G.711
- *      codewords (Sd/TRN1d/Jd/DIL/Ri/TRN2d/CP/B1d) for recording.
- *   C. Event bridging — real V.34 milestones from the caller's TX drive the
- *      V.90 PCM state machine, replacing the old fixed-duration timers:
- *        caller TX >= FIRST_S  + digital in Jd  → v90_notify_s_detected (Jd)
- *        caller TX >= PHASE4_WAIT + digital in DIL → v90_notify_s_detected (DIL)
- *        caller TX >= MP        + digital in TRN2d → v90_notify_cp_ready
- *
- * Downstream recording comes from the V.90 PCM machine (correct waveform).
- * Upstream recording comes from the caller's V.34 TX (correct waveform).
- * The answerer's V.34 TX is used only for training and is not recorded.
+ * The few event bridges below model the live engine's receiver callbacks.  In
+ * every case the event is sourced from a state transition made by the native
+ * opposite-side engine after consuming the wire waveform; no fixed training
+ * timer or V.91 startup object advances either modem.
  */
 static bool vpcm_v90_run_coupled_training(v91_law_t law,
                                           v34_state_t *caller,
@@ -603,174 +597,194 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
                                           const vpcm_v90_startup_contract_io_t *io,
                                           vpcm_v90_startup_contract_report_t *report)
 {
-    v90_state_t *digital;
-    vpcm_cp_frame_t cp_frame;
-    uint8_t downstream_drn;
-    uint8_t upstream_drn;
-    int16_t answerer_tx[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
-    int16_t caller_tx[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
-    int16_t answerer_rx[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
-    int16_t caller_rx[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
-    int16_t downstream_linear[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
-    uint8_t downstream_g711[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
-    uint8_t upstream_g711[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
-    int total_samples;
+    v90_analogue_phase3_config_t analogue_cfg;
+    v90_analogue_phase3_t *analogue = NULL;
+    v90_state_t *digital = NULL;
+    vpcm_cp_frame_t cp_prime;
+    int16_t analogue_tx[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
+    int16_t digital_rx[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
+    uint8_t digital_tx[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
+    uint8_t analogue_g711[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
+    int total_samples = 0;
     int caller_tx_stage;
-    int caller_event = VPCM_V90_V34_EVENT_NONE;
-    int answerer_event = VPCM_V90_V34_EVENT_NONE;
-    v90_tx_phase_t tx_phase;
-    bool jd_notified;
-    bool dil_notified;
-    bool cp_notified;
-    bool ok;
+    bool ja_notified = false;
+    bool jd_s_notified = false;
+    bool dil_s_notified = false;
+    bool cpt_notified = false;
+    bool cp_notified = false;
+    bool cp_prime_notified = false;
+    bool e_notified = false;
+    bool ok = false;
 
-    if (!caller || !answerer || !digital_dil || !dil_analysis)
+    (void)dil_analysis;
+    (void)v92_mode; /* This path is deliberately native V.90, not V.92 proxying. */
+    if (!caller || !answerer || !digital_dil)
         return false;
 
+    memset(&analogue_cfg, 0, sizeof(analogue_cfg));
+    analogue_cfg.law = vpcm_v90_data_law(law);
+    analogue_cfg.baud_rate_code = 4; /* INFO1a selected 3200 baud in this harness. */
+    analogue_cfg.high_carrier = true; /* INFO1d's 3200-baud selection. */
+    analogue_cfg.u_info = u_info;
+    analogue_cfg.dil = *digital_dil;
+    /* The digital receiver conservatively accepts the closing S only after a
+     * complete DIL cycle, so measure that full cycle in this strict pairing. */
+    analogue_cfg.dil_coverage = 1.0;
+    analogue_cfg.v34 = caller;
+    analogue = v90_analogue_phase3_init(&analogue_cfg);
     digital = v90_init_data_pump(vpcm_v90_data_law(law));
-    if (!digital) {
-        fprintf(stderr, "V.90 coupled training: failed to initialize digital state\n");
-        return false;
-    }
-    if (v92_mode)
-        v90_enable_v92_mode(digital);
-
-    /* Pre-build CP frame from DIL analysis. */
-    vpcm_v92_select_profile_from_dil(dil_analysis, &downstream_drn, &upstream_drn);
-    vpcm_cp_init(&cp_frame);
-    cp_frame.transparent_mode_granted = false;
-    cp_frame.v90_compatibility = true;
-    cp_frame.drn = downstream_drn;
-    cp_frame.constellation_count = 1;
-    memset(cp_frame.dfi, 0, sizeof(cp_frame.dfi));
-    vpcm_cp_enable_all_ucodes(cp_frame.masks[0]);
-    if (!v90_set_phase4_cp(digital, &cp_frame)) {
-        fprintf(stderr, "V.90 coupled training: failed to encode CP frame (drn=%u)\n",
-                (unsigned) downstream_drn);
-        v90_free(digital);
-        return false;
+    if (!analogue || !digital) {
+        fprintf(stderr, "V.90 native coupled training: initialization failed\n");
+        goto done;
     }
 
     v90_set_dil_descriptor(digital, digital_dil);
     v90_start_phase3(digital, u_info);
 
-    total_samples = 0;
-    jd_notified = false;
-    dil_notified = false;
-    cp_notified = false;
-    ok = false;
     while (total_samples < VPCM_V90_PHASE3_NATIVE_MAX_SAMPLES) {
+        v90_analogue_tx_stage_t analogue_stage;
+        v90_tx_phase_t digital_phase;
+        const vpcm_cp_frame_t *cpt;
+        const vpcm_cp_frame_t *cp;
 
-        /* A. V.34 training pair: answerer provides downstream V.34 signals
-         *    to the caller so Phase 3/4 training completes normally. */
-        if (v34_tx(answerer, answerer_tx, VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES)
+        if (v90_analogue_phase3_tx(analogue, analogue_tx,
+                                   VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES)
                 != VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES
-            || v34_tx(caller, caller_tx, VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES)
-                != VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES)
+            || v90_phase3_tx_codewords(digital, digital_tx,
+                                       VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES)
+                != VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES) {
             break;
-
-        vpcm_v90_transport_linear(law, caller_rx, answerer_tx,
-                                  VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES);
-        vpcm_v90_transport_linear(law, answerer_rx, caller_tx,
-                                  VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES);
-        if (v34_rx(caller, caller_rx, VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES) != 0
-            || v34_rx(answerer, answerer_rx, VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES) != 0)
-            break;
-
-        /* B. V.90 PCM machine: generate downstream recording (correct waveform). */
-        v90_phase3_tx(digital, downstream_linear, VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES);
-        vpcm_v90_encode_linear_chunk_to_g711(law, downstream_linear, downstream_g711,
+        }
+        vpcm_v90_encode_linear_chunk_to_g711(law, analogue_tx, analogue_g711,
                                              VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES);
-        if (!vpcm_v90_record_simplex(io, law, true, downstream_g711,
-                                     VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES)) {
-            fprintf(stderr, "V.90 coupled training: downstream record failed\n");
+        if (!vpcm_v90_record_duplex(io, digital_tx, analogue_g711,
+                                    VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES)) {
+            fprintf(stderr, "V.90 native coupled training: recording failed\n");
             break;
         }
 
-        /* C. Record caller's V.34 TX as the upstream waveform. */
-        vpcm_v90_encode_linear_chunk_to_g711(law, caller_tx, upstream_g711,
-                                             VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES);
-        if (!vpcm_v90_record_simplex(io, law, false, upstream_g711,
-                                     VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES)) {
-            fprintf(stderr, "V.90 coupled training: upstream record failed\n");
+        /* Byte-exact PCM downstream into the analogue modem. */
+        (void)v90_analogue_phase3_rx(analogue, digital_tx,
+                                     VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES);
+        /* Analogue V.34 upstream through the same G.711 quantisation used by
+         * the live bearer, into the digital modem's upstream receiver. */
+        vpcm_v90_transport_linear(law, digital_rx, analogue_tx,
+                                  VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES);
+        if (v34_rx(answerer, digital_rx,
+                   VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES) != 0) {
             break;
         }
 
         total_samples += VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES;
-        tx_phase = v90_get_tx_phase(digital);
-        caller_tx_stage = v34_get_tx_stage(caller);
-        caller_event = v34_get_rx_event(caller);
-        answerer_event = v34_get_rx_event(answerer);
+        analogue_stage = v90_analogue_phase3_tx_stage(analogue);
+        digital_phase = v90_get_tx_phase(digital);
 
-        /* D. Bridge V.34 caller milestones → V.90 PCM state machine. */
-        if (!jd_notified && tx_phase == V90_TX_JD
-                && caller_tx_stage >= VPCM_V90_V34_TX_STAGE_FIRST_S) {
-            v90_notify_s_detected(digital);
-            jd_notified = true;
+        if (!ja_notified && analogue_stage >= V90A_TX_JA) {
+            ja_notified = v90_handle_rx_event(digital, V90_RX_EVENT_J);
         }
-        if (!dil_notified && tx_phase == V90_TX_DIL
-                && caller_tx_stage >= VPCM_V90_V34_TX_STAGE_PHASE4_WAIT) {
-            v90_notify_s_detected(digital);
-            dil_notified = true;
+        if (!jd_s_notified && analogue_stage >= V90A_TX_S_AFTER_JD) {
+            jd_s_notified = v90_handle_rx_event(digital, V90_RX_EVENT_S);
         }
-        if (!cp_notified && tx_phase == V90_TX_TRN2D
-                && caller_tx_stage >= VPCM_V90_V34_TX_STAGE_MP) {
-            v90_notify_cp_ready(digital);
-            cp_notified = true;
+        if (!dil_s_notified && analogue_stage >= V90A_TX_S_DIL_ENOUGH
+            && digital_phase == V90_TX_DIL) {
+            dil_s_notified = v90_handle_rx_event(digital, V90_RX_EVENT_S);
         }
 
-        /* E. Exit conditions. */
-        if (v90_training_complete(digital)) {
+        cpt = v90_analogue_phase3_cpt(analogue);
+        cp = v90_analogue_phase3_cp(analogue);
+        /* CP is sent at two bits per V.34 symbol.  Waiting 512 symbols gives
+         * the receiver several complete Table-14 repetitions and also lets Ri
+         * exceed §9.4.1.1's 192T minimum before acknowledging CPt. */
+        if (!cpt_notified && cpt && analogue_stage == V90A_TX_CPT
+            && v90_analogue_tx_stage_symbols(
+                   v90_analogue_phase3_tx_state(analogue)) >= 512
+            && v90_set_phase4_cp(digital, cpt)) {
+            cpt_notified = v90_handle_rx_event(digital, V90_RX_EVENT_CP_VALID);
+        }
+        if (!cp_notified && cp && analogue_stage == V90A_TX_CP
+            && v90_analogue_tx_stage_symbols(
+                   v90_analogue_phase3_tx_state(analogue)) >= 512
+            && v90_set_phase4_cp(digital, cp)) {
+            cp_notified = v90_handle_rx_event(digital, V90_RX_EVENT_CP_VALID);
+        }
+        if (!cp_prime_notified && cp && analogue_stage == V90A_TX_CP_PRIME
+            && v90_analogue_tx_stage_symbols(
+                   v90_analogue_phase3_tx_state(analogue)) >= 512) {
+            cp_prime = *cp;
+            cp_prime.acknowledge = true;
+            if (v90_set_phase4_cp(digital, &cp_prime)) {
+                cp_prime_notified =
+                    v90_handle_rx_event(digital, V90_RX_EVENT_CP_VALID);
+            }
+        }
+        if (!e_notified && analogue_stage == V90A_TX_B1_PENDING) {
+            e_notified = v90_handle_rx_event(digital, V90_RX_EVENT_E);
+        }
+
+        if (v90_training_complete(digital)
+            && v90_analogue_phase3_data_ready(analogue)
+            && v90_analogue_phase3_upstream_rate(analogue) > 0) {
             ok = true;
             break;
         }
-        if (caller_event == VPCM_V90_V34_EVENT_TRAINING_FAILED
-            || answerer_event == VPCM_V90_V34_EVENT_TRAINING_FAILED)
+        if (v90_analogue_phase3_retrain_due(analogue)
+            || v90_analogue_phase3_phase4_retrain_due(analogue)
+            || v34_get_rx_event(answerer) == VPCM_V90_V34_EVENT_TRAINING_FAILED) {
             break;
+        }
     }
 
     if (!ok) {
         fprintf(stderr,
-                "V.90 coupled training: did not complete "
-                "(samples=%d jd=%d dil=%d cp=%d tx_phase=%d caller_tx=%d)\n",
-                total_samples, jd_notified ? 1 : 0, dil_notified ? 1 : 0,
-                cp_notified ? 1 : 0, (int) v90_get_tx_phase(digital),
-                v34_get_tx_stage(caller));
+                "V.90 native coupled training: did not complete "
+                "(samples=%d ja=%d jd_s=%d dil_s=%d cpt=%d cp=%d cp'=%d E=%d "
+                "digital=%d analogue=%s/%s)\n",
+                total_samples, ja_notified, jd_s_notified, dil_s_notified,
+                cpt_notified, cp_notified, cp_prime_notified, e_notified,
+                digital ? (int)v90_get_tx_phase(digital) : -1,
+                analogue ? v90_analogue_tx_stage_name(
+                               v90_analogue_phase3_tx_stage(analogue)) : "none",
+                analogue ? v90_analogue_rx_stage_name(
+                               v90_analogue_phase3_rx_stage(analogue)) : "none");
     }
 
-    if (report) {
+    if (report && analogue && digital) {
         caller_tx_stage = v34_get_tx_stage(caller);
-        report->phase3_native_analogue_started   = jd_notified || dil_notified;
-        report->phase3_native_analogue_completed = ok;
-        report->phase3_native_caller_tx_stage    = caller_tx_stage;
-        report->phase3_native_caller_rx_stage    = v34_get_rx_stage(caller);
-        report->phase3_native_caller_rx_event    = v34_get_rx_event(caller);
-        report->phase3_native_caller_j_bits      = v34_get_phase3_j_bits(caller);
-        report->phase3_native_caller_j_trn16     = v34_get_phase3_j_trn16(caller);
-        report->phase3_native_caller_trn_lock_score = v34_get_phase3_trn_lock_score(caller);
-        report->phase3_native_answerer_tx_stage  = v34_get_tx_stage(answerer);
-        report->phase3_native_answerer_rx_stage  = v34_get_rx_stage(answerer);
-        report->phase3_native_answerer_rx_event  = v34_get_rx_event(answerer);
-        report->phase3_native_answerer_j_bits    = v34_get_phase3_j_bits(answerer);
-        report->phase3_native_answerer_j_trn16   = v34_get_phase3_j_trn16(answerer);
-        report->phase3_native_answerer_trn_lock_score = v34_get_phase3_trn_lock_score(answerer);
-        report->phase4_native_analogue_started   = (caller_tx_stage >= VPCM_V90_V34_TX_STAGE_PHASE4_WAIT);
-        report->phase4_native_analogue_completed = ok && cp_notified;
-        report->phase4_native_caller_tx_data_mode = (v34_get_tx_data_mode(caller) != 0);
-        report->phase4_native_caller_tx_stage    = caller_tx_stage;
-        report->phase4_native_caller_rx_stage    = v34_get_rx_stage(caller);
-        report->phase4_native_caller_rx_event    = v34_get_rx_event(caller);
-        report->phase4_native_answerer_tx_data_mode = (v34_get_tx_data_mode(answerer) != 0);
-        report->phase4_native_answerer_tx_stage  = v34_get_tx_stage(answerer);
-        report->phase4_native_answerer_rx_stage  = v34_get_rx_stage(answerer);
-        report->phase4_native_answerer_rx_event  = v34_get_rx_event(answerer);
-        vpcm_v90_update_v92_focus_report(report,
-                                         caller_tx_stage,
-                                         !ok || caller_event == VPCM_V90_V34_EVENT_TRAINING_FAILED
-                                             || answerer_event == VPCM_V90_V34_EVENT_TRAINING_FAILED);
+        report->phase3_native_analogue_started = ja_notified;
+        report->phase3_native_analogue_completed =
+            v90_analogue_phase3_phase4_state(analogue) != NULL;
+        report->phase3_native_caller_tx_stage = caller_tx_stage;
+        report->phase3_native_caller_rx_stage = v34_get_rx_stage(caller);
+        report->phase3_native_caller_rx_event = v34_get_rx_event(caller);
+        report->phase3_native_caller_j_bits =
+            v90_analogue_tx_ja_bits(v90_analogue_phase3_tx_state(analogue));
+        report->phase3_native_caller_j_trn16 = -1;
+        report->phase3_native_caller_trn_lock_score = -1;
+        report->phase3_native_answerer_tx_stage = v34_get_tx_stage(answerer);
+        report->phase3_native_answerer_rx_stage = v34_get_rx_stage(answerer);
+        report->phase3_native_answerer_rx_event = v34_get_rx_event(answerer);
+        report->phase3_native_answerer_j_bits = v34_get_phase3_j_bits(answerer);
+        report->phase3_native_answerer_j_trn16 = v34_get_phase3_j_trn16(answerer);
+        report->phase3_native_answerer_trn_lock_score =
+            v34_get_phase3_trn_lock_score(answerer);
+        report->phase4_native_analogue_started =
+            v90_analogue_phase3_phase4_state(analogue) != NULL;
+        report->phase4_native_analogue_completed = ok;
+        report->phase4_native_caller_tx_data_mode =
+            v90_analogue_phase3_upstream_rate(analogue) > 0;
+        report->phase4_native_caller_tx_stage = caller_tx_stage;
+        report->phase4_native_caller_rx_stage = v34_get_rx_stage(caller);
+        report->phase4_native_caller_rx_event = v34_get_rx_event(caller);
+        report->phase4_native_answerer_tx_data_mode = v90_training_complete(digital);
+        report->phase4_native_answerer_tx_stage = v34_get_tx_stage(answerer);
+        report->phase4_native_answerer_rx_stage = v34_get_rx_stage(answerer);
+        report->phase4_native_answerer_rx_event = v34_get_rx_event(answerer);
+        vpcm_v90_update_v92_focus_report(report, caller_tx_stage, !ok);
     }
 
+done:
     v90_free(digital);
+    v90_analogue_phase3_free(analogue);
     return ok;
 }
 
