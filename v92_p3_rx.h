@@ -19,7 +19,8 @@
  *   PCM MSB = 1 (positive, +L_U) → decoded bit 0
  *   PCM MSB = 0 (negative, −L_U) → decoded bit 1
  *
- * GPA polynomial: x^23 + x^18 + 1  (V.92 §6.3, V.34 eq. 7-2, tap = 17)
+ * GPA polynomial: 1 + x^-5 + x^-23 (x^23 + x^18 + 1 in positive-power
+ * form), using delay taps 5/23 (register bits 4/22; V.92 §6.3).
  */
 
 #ifndef V92_P3_RX_H

@@ -127,8 +127,59 @@ the strict CRC.  This narrows the remaining offline problem to adaptive timing
 tracking/equalizer training or a TRN2u wire-format assumption; amplitude alone
 is not the cause.
 
+## PCM-upstream data-pump foundation
+
+`v92_upstream_data.c` starts the post-B1u receive path with the two reversible
+bit-domain stages from the analogue-modem transmitter.  It implements the
+GPA scrambler in 6.3/V.92 and the exact twelve-interval mixed-radix modulus
+encoder in 6.4.1/V.92, including the frame-sign differential state and the
+Table 30 rate relation `K = 2 * (drn + 17)`.  The inverse recovers and
+descrambles a data frame from K0 through K11 and rejects values outside the
+K-bit source alphabet when the modulus product is larger than `2^K`.
+
+The module now continues through 6.4.2-6.4.4 for the initial 16-state profile:
+it selects the minimum-power member of each modulus equivalence class, applies
+the CPd precoder and prefilter, uses V.34 Table 13/Figure 10 with V.92's 4T
+delays, and emits linear samples after gain G.  The deterministic inverse
+undoes the filters and recovers Ki.  An unfiltered two-candidate, 16-state
+Viterbi path retains the Figure-10 survivors over the three trellis frames in
+each data frame and can correct a deliberately wrong hard decision through
+the k=3/Y0 parity constraint.
+
+The loopback suite runs stateful waveform frames at every upstream rate code
+1 through 19 (24 000 through 48 000 bit/s), exercises non-zero recursive
+precoder/prefilter coefficients, and injects one wrong hard decision into each
+of 64 consecutive Viterbi-decoded frames.
+
+`v92_upstream_rx.c` is the live-facing §8.7.1/§9.6.1.1.6 wrapper.  It generates
+the exact 48-frame B1u reference from the CPd we send, searches the incoming
+linear G.711 stream for that complete sequence, fits gain and DC offset, and
+commits framing only after all 48 frames decode to source ones.  Subsequent
+frames are decoded and packed into bytes for the data stack.  The modem engine
+arms it when a valid CPu fixes CPd, withholds DATA after B1d until B1u locks,
+and then reports the negotiated PCM upstream rate.  The synthetic live-wrapper
+test acquires B1u after an unaligned prefix at a different gain/offset and
+delivers 520 payload bytes exactly.
+
+The B1u wrapper now trains a seven-tap supervised linear equalizer when a
+scalar gain/offset fit is insufficient.  A centred three-symbol decision delay
+turns fixed fractional sampling phase and symbol-spaced channel ISI into a
+causal live filter; after B1u, re-encoding each accepted source frame supplies
+the target for decision-directed normalized-LMS updates.  The regression uses
+a 0.2-symbol two-tap channel, reaches 0.99999 post-equalizer correlation, runs
+960 decision-directed symbol updates, and still delivers all 520 bytes.
+
+This remains experimental on a foreign bearer: the equalizer handles fixed
+fractional phase and slowly varying symbol-spaced ISI, but not sample-clock
+slips or a fractionally-spaced timing loop.  Longer Viterbi traceback and the
+32/64-state trellises also remain.
+
 ## Remaining native runtime work
 
+- add sample-clock-slip detection/fractionally-spaced timing recovery ahead
+  of B1u, then validate adaptive-equalizer/PTY delivery against a foreign peer;
+- extend the initial frame-local 16-state Viterbi path to continuous traceback
+  and the Table 30 32/64-state selections;
 - derive TRN2u `L_U` from Phase 3/receiver measurements instead of the
   calibration default;
 - apply CPus to a complete rate-renegotiation state machine (it is currently

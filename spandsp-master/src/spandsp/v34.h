@@ -522,6 +522,16 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
                                                 int bit_rate,
                                                 int trellis_size);
 
+/*! Report whether the V.90 upstream receiver has acquired its 9.6 kHz T/3
+    timing/equalizer solution from the known B1 frame. */
+SPAN_DECLARE(int) v34_v90_upstream_rx_acquired(v34_state_t *s);
+
+/*! Read internal V.90 upstream resampler accounting.  Both counts are DSP-side
+    diagnostics; the external bearer remains an 8 kHz stream. */
+SPAN_DECLARE(void) v34_v90_upstream_sample_counts(v34_state_t *s,
+                                                  int64_t *input_8k,
+                                                  int64_t *output_96k);
+
 /*! Set U_INFO for a V.90 analogue-role INFO1a — Table 11 bits 25:31, the Ucode
     the digital modem uses for Sd and TRN1d (§8.4.4, §8.4.5).  The analogue
     modem chooses it, so its receiver must be told the same value.  Call before

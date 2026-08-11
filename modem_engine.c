@@ -33,6 +33,7 @@
 #include "v92_cp_rx.h"
 #include "v92_p3_rx.h"
 #include "v92_trn2u.h"
+#include "v92_upstream_rx.h"
 
 #include <spandsp.h>
 
@@ -726,6 +727,9 @@ static int            g_v92_trn2u_points = 4;
 static double         g_v92_trn2u_lu = 8000.0;
 static v92_cp_rx_t    g_v92_cp_rx;
 static v92_trn2u_demod_t g_v92_trn2u_demod;
+static v92_upstream_rx_t g_v92_upstream_rx;
+static bool           g_v92_upstream_rx_active = false;
+static bool           g_v92_upstream_lock_logged = false;
 static uint8_t        g_v90_data_frame[V90_DATA_FRAME_LEN];
 static int            g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
 static bool           g_v34_fallback_to_v22bis_pending = false;
@@ -734,11 +738,9 @@ static bool           g_v34_fallback_to_v22bis_pending = false;
  * V.90, so a zero here makes an analogue peer select V.90 even with both
  * INFO0 capability bits set -- slmodemd reports "V92 capabilities: local=1 ,
  * remote=1 , selected=90" the instant it consumes our INFO1d.  Off by default
- * because the upstream data path is still V.34/V.22bis: advertising this
- * commits to a data-mode PCM upstream receiver that does not exist.  Set
- * ME_V92_PCM_UPSTREAM=1 to drive a peer into V.92 and exercise the Phase 3/4
- * upstream receivers (v92_p3_rx.c, v92_trn2u.c, v92_cp_rx.c), which have no
- * live coverage otherwise. */
+ * because the PCM-upstream receiver is still experimental: its B1u and
+ * 16-state data path now exist, but foreign-bearer timing/equalizer coverage
+ * does not.  Set ME_V92_PCM_UPSTREAM=1 to exercise it explicitly. */
 static bool v92_pcm_upstream_advertised(void)
 {
     static int cached = -1;
@@ -2058,12 +2060,13 @@ static int me_start_or_restart_v8_locked(int answer_tone)
     v8_parms.modem_connect_tone = g_calling_party ? MODEM_CONNECT_TONES_NONE
                                                   : answer_tone;
     v8_parms.send_ci            = g_calling_party;
-    /* V.92 Table 5 QC/QCA: this endpoint is always the digital modem.
+    /* V.92 Tables 5/14 QC/QCA: this endpoint is always the digital modem.
        The current Jp profile selects the mandatory 4-point TRN2u channel.
-       When ME_V92_ENABLE=0, omit the V.92 octet entirely: peers such as the
-       Conexant CX93001 commit to V.92 start-up procedures on seeing it in JM
-       and then wait silently for V.92 short-phase signals instead of sending
-       V.90 INFO0a (observed live 2026-07-19). */
+       v8.c gates the QCA response on a received QC per V.92 9.2.4.1/.2;
+       sending this configured QCA after ordinary CM made the Conexant
+       CX93001 wait for QTS/ANSpcm instead of entering full Phase 2.  Even
+       when QCA is suppressed, the CM/JM PCM-availability field below still
+       lets the full-startup path advertise V.92 in INFO0. */
     /* Keep V.92 opt-in until its start-up path is interoperable end to end.
        Advertising it and later demoting to V.90 leaves some analogue modems
        waiting for QTs in their V.92 Phase 3 state machine. */
@@ -2787,6 +2790,12 @@ static void v90_cp_live_worker_stop(void)
     pthread_mutex_destroy(&g_v90_cp_live_mtx);
 }
 
+static void v92_upstream_live_byte(void *user_data, uint8_t byte)
+{
+    (void)user_data;
+    ds_rx_push_bytes(&g_data_stack, &byte, 1);
+}
+
 /* Runs synchronously inside me_rx_g711() while g_state_mtx is held. */
 static void v92_live_p4u_frame(void *user_data,
                                v92_p4u_kind_t kind,
@@ -2817,6 +2826,27 @@ static void v92_live_p4u_frame(void *user_data,
                 && v90_handle_rx_event(g_v90, V90_RX_EVENT_CP_VALID);
         } else if (accepted) {
             accepted = v90_set_v92_cpu(g_v90, &vp);
+            if (accepted) {
+                v92_cpd_frame_t cpd;
+
+                /* §9.6.1.1.6: our CPd defines the waveform that follows
+                 * E2u.  Arm the B1u correlator as soon as that profile is
+                 * fixed; its 48-frame validation supplies the E2u-to-B1u
+                 * boundary without treating a random zero run as E2u. */
+                if (v90_build_v92_cpd_frame(g_v90, &cpd)
+                    && v92_upstream_b1_rx_init(
+                        &g_v92_upstream_rx, &cpd,
+                        v92_upstream_live_byte, NULL)) {
+                    g_v92_upstream_rx_active = true;
+                    g_v92_upstream_lock_logged = false;
+                    ME_LOG("[ME] V.92 PCM-upstream B1u receiver armed: drn=%u rate=%d bps\n",
+                           (unsigned)cpd.selected_upstream_drn,
+                           ((int)cpd.selected_upstream_drn + 17)*8000/6);
+                } else {
+                    g_v92_upstream_rx_active = false;
+                    ME_LOG("[ME] V.92 PCM-upstream CPd profile cannot arm B1u receiver\n");
+                }
+            }
         }
     } else if (kind == V92_P4U_KIND_SUVU && suvu) {
         name = "SUVu";
@@ -2887,6 +2917,8 @@ static void cleanup_v34_v90_training_locked(void)
     g_v92_p3_cpt_active = false;
     v92_su_rx_reset_locked();
     g_v92_trn2u_active = false;
+    g_v92_upstream_rx_active = false;
+    g_v92_upstream_lock_logged = false;
     g_v92_active = false;
     g_v92_v8_offered = false;
     g_v92_info0_local_advertised = false;
@@ -2952,6 +2984,8 @@ static bool restart_v90_phase2_locked(const char *reason)
     g_v92_info0_mutual = false;
     g_v92_info0_peer_logged = false;
     g_v92_trn2u_active = false;
+    g_v92_upstream_rx_active = false;
+    g_v92_upstream_lock_logged = false;
     memset(&g_v92_trn2u_demod, 0, sizeof(g_v92_trn2u_demod));
     v92_p3_rx_init(&g_v92_p3_rx);
     v92_cp_rx_reset(&g_v92_p3_cpt_rx);
@@ -4107,6 +4141,8 @@ void me_on_sip_connected(void)
     g_v92_p3_cpt_active = false;
     v92_su_rx_reset_locked();
     g_v92_trn2u_active = false;
+    g_v92_upstream_rx_active = false;
+    g_v92_upstream_lock_logged = false;
     g_data_link_failed = false;
     g_data_connect_reported = false;
 
@@ -4664,9 +4700,28 @@ static void v90_p3_scan_ja_locked(int len)
                     continue;
 
                 for (int i = 0; i < result->segment_count; i++) {
-                    if (result->segments[i].type == P3_SIGNAL_J) {
-                        bool accepted;
+                    const p3_segment_t *seg = &result->segments[i];
 
+                    if (seg->type == P3_SIGNAL_J
+                        && seg->end_sample >= n - P3_JA_SCAN_THROTTLE
+                        && seg->j_table_match_pct >= 85) {
+                        bool accepted;
+                        int start_sample = seg->start_sample;
+                        int end_sample = seg->end_sample;
+                        int length = seg->length;
+                        int match_pct = seg->j_table_match_pct;
+
+                        /* The 400 ms analysis window overlaps PP/TRN and old
+                         * Ja on every invocation.  Accepting a J segment
+                         * anywhere in it can fire on stale training hundreds
+                         * of milliseconds before the peer enters WaitForSd;
+                         * SmartLink then reports zero Sd energy and retrains.
+                         * Require J evidence in the newest 80 ms, matching the
+                         * scan cadence, and a strong Table 18 match, so
+                         * §9.3.1.3's delay is measured from the current Ja
+                         * rather than an old segment.  Live false triggers in
+                         * scrambled TRN scored only 69-71% and preceded the
+                         * canonical Ja event by 409-477 ms (2026-08-11). */
                         p3_result_free(result);
                         /* Fire J event directly.  The post-processing (DIL
                          * capture, S-detector arming) mirrors the v34rx J
@@ -4679,9 +4734,10 @@ static void v90_p3_scan_ja_locked(int len)
                             v34_v90_arm_phase3_s_detector(g_v34);
                         }
                         fprintf(stderr,
-                                "[ME] V.90 p3_demod: J detected (structural, %d ms window, "
-                                "baud=%d carrier=%s); accepted=%d\n",
-                                n * 1000 / 8000, b,
+                                "[ME] V.90 p3_demod: current J detected (structural, %d ms window, "
+                                "segment=%d..%d samples/%d symbols match=%d%%, baud=%d carrier=%s); "
+                                "accepted=%d\n",
+                                n * 1000 / 8000, start_sample, end_sample, length, match_pct, b,
                                 carrier == P3_CARRIER_HIGH ? "high" : "low",
                                 accepted ? 1 : 0);
                         trace_phase("V90 p3_demod J detected accepted=%d", accepted ? 1 : 0);
@@ -6096,25 +6152,42 @@ static void prepare_v90_phase3_locked(void)
             if (g_v90 && g_v90_pending_dil_valid)
                 v90_set_dil_descriptor(g_v90, &g_v90_pending_dil);
             if (g_v90 && g_v90_phase2_restarts > 0) {
-                /* With p3_demod as the primary Ja detector (~80-100 ms
-                 * detection), Sd starts immediately after J confirmation.
-                 * §9.3.1.3 allows 0 ms delay ("may wait for up to 500 ms").
-                 * The retrain override is kept as an env escape hatch for
-                 * peers whose WaitForSd arms late, but defaults to 0 (no
-                 * override) since structural J detection fires within the
-                 * peer's arming window on both initial and retrained
-                 * attempts.  The old 1550 ms default compensated for the
-                 * 625 ms ME_V90_J_LOOKAHEAD_BITS detection delay; with
-                 * p3_demod that delay is gone. */
-                int retrain_delay =
-                    parse_env_int("ME_V90_SD_DELAY_RETRAIN_MS", 0);
+                const char *configured = getenv("ME_V90_SD_DELAY_RETRAIN_MS");
+                int retrain_delay;
 
-                if (retrain_delay > 0) {
-                    v90_set_sd_delay_ms(g_v90, retrain_delay);
-                    ME_LOG("[ME] V.90: retrained attempt %u; Sd delay override %d ms "
+                /* §9.3.1.3 permits the digital modem to wait 0..500 ms after
+                 * detecting Ja before Sd.  SmartLink's WaitForSd acquisition
+                 * has a narrow, attempt-dependent window: repeating the
+                 * initial ME_V90_SD_DELAY_MS on every retrain produced three
+                 * identical misses live (2026-08-11).  Probe the legal window
+                 * deterministically on successive retrains unless an explicit
+                 * fixed interoperability value was requested. */
+                if (configured && *configured) {
+                    retrain_delay = parse_env_int("ME_V90_SD_DELAY_RETRAIN_MS", 0);
+                    if (retrain_delay < 0)
+                        retrain_delay = 0;
+                    if (retrain_delay > 5000)
+                        retrain_delay = 5000;
+                    ME_LOG("[ME] V.90: retrained attempt %u; fixed Sd delay %d ms "
                            "(ME_V90_SD_DELAY_RETRAIN_MS)\n",
                            g_v90_phase2_restarts, retrain_delay);
+                } else {
+                    /* The peer normally permits two V.90 retries before its
+                     * third failure drops to V.34.  With Ja now gated to the
+                     * current strong Table 18 match, try the immediate legal
+                     * transition first, then the middle and late windows. */
+                    static const int legal_delays_ms[] = {0, 250, 500};
+                    unsigned int index = (g_v90_phase2_restarts - 1U)
+                                         % (sizeof(legal_delays_ms)/sizeof(legal_delays_ms[0]));
+
+                    retrain_delay = legal_delays_ms[index];
+                    ME_LOG("[ME] V.90: retrained attempt %u; adaptive §9.3.1.3 Sd delay %d ms\n",
+                           g_v90_phase2_restarts, retrain_delay);
                 }
+                /* Set zero explicitly.  Leaving the override unset here used
+                 * to inherit ME_V90_SD_DELAY_MS, despite the old log/comment
+                 * claiming that the retrained-attempt default was zero. */
+                v90_set_sd_delay_ms(g_v90, retrain_delay);
             }
         }
         if (g_v90) {
@@ -6276,7 +6349,14 @@ static void enter_v90_data_locked(void)
 
     if (g_state != ME_TRAINING || !g_v90 || !g_v34)
         return;
-    upstream_rate = v34_get_current_bit_rate(g_v34);
+    /* V.92 §9.6.1.1.6 does not expose carrier/data until B1u has conditioned
+     * the PCM-upstream receiver.  Downstream B1d can finish first. */
+    if (g_v92_active
+        && (!g_v92_upstream_rx_active || !g_v92_upstream_rx.locked))
+        return;
+    upstream_rate = g_v92_active
+        ? ((int)g_v92_upstream_rx.cpd.selected_upstream_drn + 17)*8000/6
+        : v34_get_current_bit_rate(g_v34);
     downstream_rate = (v90_data_bits_per_frame(g_v90) * 8000) / 6;
     if (downstream_rate <= 0)
         downstream_rate = V90_RATE_BPS;
@@ -6284,9 +6364,12 @@ static void enter_v90_data_locked(void)
     g_state = ME_DATA;
     g_phase_start_ms = 0;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
-    ME_LOG("[ME] V.90 startup complete (upstream V.34 %d bps, downstream PCM %d bps)\n",
+    ME_LOG("[ME] %s startup complete (upstream %s %d bps, downstream PCM %d bps)\n",
+           g_v92_active ? "V.92" : "V.90",
+           g_v92_active ? "PCM" : "V.34",
            upstream_rate, downstream_rate);
-    trace_phase("V90 enter DATA after B1d: upstream=%d downstream=%d",
+    trace_phase("%s enter DATA after B1: upstream=%d downstream=%d",
+                g_v92_active ? "V92" : "V90",
                 upstream_rate, downstream_rate);
     if (g_data_framing != DS_FRAMING_V42) {
         g_data_connect_reported = true;
@@ -6782,6 +6865,29 @@ void me_rx_g711(const uint8_t *codewords, int count)
         && v90_get_tx_phase(g_v90) >= V90_TX_TRN2D
         && v90_get_tx_phase(g_v90) < V90_TX_DATA) {
         (void)v92_trn2u_demod_feed(&g_v92_trn2u_demod, codewords, count);
+    }
+    if (g_v92_upstream_rx_active && g_v92_active
+        && (g_state == ME_TRAINING || g_state == ME_DATA)) {
+        for (int i = 0; i < count; i++) {
+            int16_t linear = pcm_to_linear(codewords[i]);
+            bool was_locked = g_v92_upstream_rx.locked;
+
+            (void)v92_upstream_b1_rx_feed(&g_v92_upstream_rx, &linear, 1);
+            if (!was_locked && g_v92_upstream_rx.locked) {
+                if (!g_v92_upstream_lock_logged) {
+                    g_v92_upstream_lock_logged = true;
+                    ME_LOG("[ME] V.92 PCM upstream: B1u locked corr=%.6f gain=%.6f offset=%.2f eq_delay=%d\n",
+                           g_v92_upstream_rx.correlation,
+                           g_v92_upstream_rx.gain,
+                           g_v92_upstream_rx.offset,
+                           g_v92_upstream_rx.equalizer_delay);
+                    trace_phase("V92 B1u locked corr=%.6f",
+                                g_v92_upstream_rx.correlation);
+                }
+                if (g_v90 && v90_get_tx_phase(g_v90) == V90_TX_DATA)
+                    enter_v90_data_locked();
+            }
+        }
     }
     pthread_mutex_unlock(&g_state_mtx);
     if (g_g711_rx_tap)
