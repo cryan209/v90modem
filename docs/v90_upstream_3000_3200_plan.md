@@ -146,6 +146,13 @@ and its carrier-rise optimization no longer truncates the search eight seconds
 after an earlier Phase-3 rise.  Replaying the exact live RX above now recovers
 a CRC-clean 428-bit CPt at 3200 baud (`drn=15`, `Sr=1`, `ld=1`, PCMU, one
 transmitter constellation with a separate codec mask).  The prior code reports
-`no strict frame` on the same waveform.  Subsequent live retries did not make
-it through the still-variable Ja/Sd seam to exercise CPt again, so advancement
-past `V90_CP` remains to be confirmed on a fresh foreign call.
+`no strict frame` on the same waveform.
+
+A fresh post-restart run then validated the same path live.  The batch receiver
+armed at upstream sample 128073, recovered the peer's CRC-clean 428-bit CPt at
+sample 134211, and `v90.c` accepted it and began barred Ri followed by 2040
+mapped TRN2d symbols (`D=23`, `K=18`).  SmartLink nevertheless continued
+repeating CPt and retrained, so CPt acquisition itself is complete; the next
+blocker is why the peer does not recognize the barred-Ri/TRN2d acknowledgement.
+Evidence is in
+`artifacts/dmodem-3000-3200-live/v90-dmodem-cpt2-20260811T220326Z/`.
