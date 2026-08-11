@@ -1609,6 +1609,7 @@ static bool me_v90_analogue_role(void)
 static v90_analogue_phase3_t *g_v90a = NULL;
 static bool     g_v90a_started = false;
 static bool     g_v90a_complete_logged = false;
+static bool     g_v90a_failed_logged = false;
 static bool     g_v90a_retrain_logged = false;
 static uint64_t g_v90a_rx_codewords = 0;
 static int      g_v90a_u_info = 78;
@@ -2833,6 +2834,7 @@ static void cleanup_v34_v90_training_locked(void)
     }
     g_v90a_started = false;
     g_v90a_complete_logged = false;
+    g_v90a_failed_logged = false;
     g_v90a_retrain_logged = false;
     g_v90a_rx_codewords = 0;
     if (g_v90) {
@@ -3782,6 +3784,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
             }
             g_v90a_started = false;
             g_v90a_complete_logged = false;
+            g_v90a_failed_logged = false;
             g_v90a_retrain_logged = false;
             g_v90a_rx_codewords = 0;
 
@@ -3898,8 +3901,9 @@ void me_init(void)
 
         g_v90_analogue_role = (role && strcmp(role, "analogue") == 0);
         if (g_v90_analogue_role)
-            ME_LOG("[ME] V.90 role: ANALOGUE (opt-in; V.8, Phase 2 and Phase 3 "
-                   "only — §9.4 Phase 4 is not implemented)\n");
+            ME_LOG("[ME] V.90 role: ANALOGUE (opt-in; V.8 through §9.4.2.4 — "
+                   "§9.4.2.5's B1 is not implemented, so the call stops "
+                   "short of data mode)\n");
     }
     dring_init(&downstream_ring);
     dring_init(&upstream_ring);
@@ -5709,6 +5713,26 @@ static void me_v90_analogue_progress_locked(void)
      */
     me_v90_analogue_phase4_progress_locked();
 
+    /*
+     * Say why Phase 4 did not arm, and say it from here.
+     *
+     * This used to sit at the end of the block below, which is one-shot on
+     * "Phase 3 complete" -- and the handover happens on a *later* receive
+     * batch than the one that completes Phase 3, so the flag was always still
+     * false when it was read and the message could never print.  Measured
+     * live (run 77): a call whose measurement yielded no constellation logged
+     * nothing at all between "DIL measured" and the hold, which is the one
+     * case where the engine most needs to speak.
+     */
+    if (v90_analogue_phase3_phase4_failed(g_v90a)  &&  !g_v90a_failed_logged) {
+        g_v90a_failed_logged = true;
+        ME_LOG("[ME] V.90 analogue: the measurement yielded no constellation "
+               "§8.5.2 would let us offer; Phase 4 cannot start (§9.4.2.1 has "
+               "nothing to put in a CPt)\n");
+        trace_phase("V90a Phase4 build failed");
+    }
+    /*endif*/
+
     if (!v90_analogue_phase3_complete(g_v90a)  ||  g_v90a_complete_logged)
         return;
     g_v90a_complete_logged = true;
@@ -5741,6 +5765,34 @@ static void me_v90_analogue_progress_locked(void)
                        (unsigned) plan.drn, plan.bps,
                        plan.robbed_bit_limited ? " (robbed-bit limited)" : "",
                        plan.noise_limited ? " (noise limited)" : "");
+            } else {
+                v90_dil_rate_plan_t raw;
+                bool any;
+
+                /*
+                 * No constellation at the 3-sigma margin.  Say what the line
+                 * would carry without it, because the two answers point at
+                 * different problems: a measurement that yields nothing either
+                 * way is a bad DIL or a bad receiver, while one that yields a
+                 * rate at 0 sigma and nothing at 3 is a noisy line meeting a
+                 * margin policy with no floor.  Run 77 was the second, and
+                 * logged neither.
+                 */
+                any = v90_dil_measure_plan_rate(m, 0, 0.0, 0.0,
+                                                (g_law == ME_LAW_ALAW)
+                                                    ? V90_LAW_ALAW
+                                                    : V90_LAW_ULAW,
+                                                &raw);
+                ME_LOG("[ME] V.90 analogue constellation: none at a 3-sigma "
+                       "noise margin; ignoring noise it would be %s\n",
+                       any ? "offerable" : "still empty");
+                if (any) {
+                    ME_LOG("[ME] V.90 analogue constellation (0 sigma): "
+                           "Mi = %d %d %d %d %d %d, drn=%u, %.0f bps\n",
+                           raw.mi[0], raw.mi[1], raw.mi[2], raw.mi[3],
+                           raw.mi[4], raw.mi[5], (unsigned) raw.drn, raw.bps);
+                }
+                /*endif*/
             }
         } else {
             ME_LOG("[ME] V.90 analogue: Phase 3 ended with no DIL measurement\n");
@@ -5748,11 +5800,6 @@ static void me_v90_analogue_progress_locked(void)
         trace_phase("V90a Phase3 complete");
     }
 
-    if (v90_analogue_phase3_phase4_failed(g_v90a)) {
-        ME_LOG("[ME] V.90 analogue: the measurement yielded no constellation "
-               "§8.5.2 would let us offer; Phase 4 cannot start\n");
-    }
-    /*endif*/
 }
 
 /*

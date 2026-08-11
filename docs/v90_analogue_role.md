@@ -600,8 +600,55 @@ values are legal and the rate arithmetic differs in each:
 **The default is Sr = 0** (`ME_V90_ANALOGUE_SR`, with `ME_V90_ANALOGUE_LD` for
 ld). It is the only value that needs nothing agreed with the far end: no filter
 parameters in Table 14 bits 69:101, no ld to keep consistent with Jd, and all
-six sign bits carrying data. Untested against the card — the run that would say
-whether R̄i follows has not been taken.
+six sign bits carrying data.
+
+### R̄i follows (live, run 79, 2026-08-11)
+
+```text
+[ME] V.90 analogue Phase 4 started (§9.4.2.1): CPt drn=22 (30 bits/frame, K=24),
+     CP drn=17 (37 bits/frame, K=31, 49333 bps), Sr=0, ld=0, u-law
+[ME] V.90 analogue Phase 4 RX: Ri
+[ME] V.90 analogue Phase 4 RX: TRN2d (Ri 2556T, …)
+[ME] V.90 analogue TX: CP
+```
+
+and on the wire, which is where it should be read rather than from the detector
+under test — 30 s of the card's downstream is kept as
+[`../artifacts/eicon-phase4-downstream/`](../artifacts/eicon-phase4-downstream/):
+
+```text
+  15.446 s .. 15.767 s   2568 symbols, Ucode 22, + + + − − −      Ri
+  15.767 s               − − − + + +  ×4  (24T exactly)           R̄i, §9.4.1.2
+  15.770 s ..            mapped symbols, magnitudes 88…127        TRN2d
+```
+
+Four repetitions of the reversed pattern and not one more, which is §8.6.4's R̄
+and §9.4.1.2's "Ri for 24T", followed immediately by a stream that is no longer
+two codewords. Before the Sr fix the same card held Ri for thirty seconds —
+79 979 runs of exactly three signs, never reversing. **So the card was refusing
+the CPt, and it was the K, exactly as the offline check said.**
+
+Ri is Ucode 22, though this call announced U<sub>INFO</sub> = 48. §8.6.4 says Ri
+uses the codeword whose Ucode is U<sub>INFO</sub>, so the card ignores that field
+here too — the same disregard it shows when picking Sd's W. The Ri hunt learns
+the level from the wire, so it acquired regardless.
+
+**Where it stops now: TRN2d does not demap.** Every six-symbol frame is
+rejected and none of §8.6.5's scrambled ones come back, because 13% of the
+symbols are outside every constellation the CPt named. Two candidates, and the
+fixture is there to separate them: the card is not using the constellation we
+asked for (it has form — U<sub>INFO</sub>, W, and now Ri), or our six-symbol
+frame grid is off at the R̄i seam, where it is set by counting 24T rather than by
+searching. The card sits at TrnProgress `0x00c4` throughout.
+
+One further defect this run pair found, in reporting rather than protocol: run
+77's measurement yielded no constellation at the 3σ noise margin, and the engine
+logged *nothing* between "DIL measured" and the hold — the "Phase 4 cannot
+start" message was one-shot on Phase 3 completion, which happens a receive batch
+*before* the handover, so it could never fire. It now has its own latch, and the
+no-constellation branch reports what the line would carry at 0σ (there: Mi = 12
+12 18 12 12 12, drn = 8) so a margin problem is distinguishable from a
+measurement problem.
 
 That capture also cost a receiver fix worth recording. The stream carries 24
 anomalies in those thirty seconds — runs of one and five signs where every
@@ -629,9 +676,14 @@ codebase.
 
 ## What is left
 
-1. **A live call at Sr = 0**, to see whether R̄i follows. The CPt is valid now by
-   the check the digital modem makes; whether this card wants anything else is
-   unmeasured.
+1. **Decode the card's TRN2d.** R̄i now follows, so the constellation the CPt
+   named is the next thing to settle: 13% of the symbols after the seam are
+   outside it. Offline, against
+   [`../artifacts/eicon-phase4-downstream/`](../artifacts/eicon-phase4-downstream/).
+2. **A noise-margin floor.** `v90_dil_measure_plan_rate()` returns false rather
+   than backing off when 3σ leaves nothing, and run 77 lost a call to it with a
+   line that carried drn = 8 at 0σ. A modem should offer the lowest rate it can
+   or retrain, not fall silent.
 2. **B1 (§9.4.2.5)** — E is transmitted; B1 is one data frame of scrambled ones
    through the *data mode* mapper, which the analogue role does not have (the
    upstream data path is still SpanDSP's V.22bis placeholder). The transmitter
