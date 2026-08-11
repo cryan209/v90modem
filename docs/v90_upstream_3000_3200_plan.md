@@ -1,0 +1,102 @@
+# V.90 upstream 3000/3200 symbol-rate plan
+
+## Scope and requirements
+
+This plan covers the V.34 analogue-to-digital channel used as the V.90
+upstream.  “Carrier support” means both required symbol rates and both V.34
+carrier choices:
+
+| Symbol rate | low carrier | high carrier |
+|---|---:|---:|
+| 3000 | 1800 Hz | 2000 Hz |
+| 3200 | 12800/7 Hz (about 1829 Hz) | 1920 Hz |
+
+V.90 §6.2 requires the digital modem to support **both 3000 and 3200
+symbols/s**.  The analogue modem must support 3200 and may support 3000.
+The analogue modem selects the upstream symbol rate during Phase 2.  Per
+§8.2.3.2 Tables 9 and 10, that selection must be one of the rates enabled by
+the digital modem's INFO1d, and the carrier and pre-emphasis are the values
+INFO1d gave for that rate.
+
+The bearer remains exactly 8000 G.711 codewords/s.  Internal resampling must
+not alter external sample accounting.
+
+## Current baseline
+
+- V.34 TX/RX RRC tables exist for 3000-low/high and 3200-low/high.
+- INFO0 and INFO1 encode/decode all four combinations.
+- The analogue-role Phase 3 transmitter follows received INFO1d and has been
+  observed live at 3200-low.
+- The digital-role DATA receiver has a supervised B1/T/3 path, but it is
+  hard-coded to 3200, 9.6 kHz and the 3200 carrier table.
+- The clean PCMU 3200/21600 regression recovers at least 16000 payload bits
+  without error.  Hardware payload interoperability is not yet established.
+
+## Implementation steps
+
+### 1. Make Phase-2 negotiation authoritative
+
+1. Preserve, in the digital receiver, the per-rate carrier choices actually
+   transmitted in INFO1d.
+2. When INFO1a selects 3000 or 3200, configure the receiver from that stored
+   INFO1d row rather than from Table 10 reserved bits or the initial V.34
+   caller/answerer default.
+3. Make the live Phase-3 confirmation path try the negotiated carrier and the
+   alternate carrier, matching the Ja scanner's acquisition policy.
+4. Pass the selected symbol-rate code explicitly through the CP-to-E/DATA
+   handoff.  Remove the hidden 3200 default and diagnostic environment
+   override from that protocol decision.
+5. Cap the MP offer and selected upstream bit rate to a combination legal for
+   the selected symbol rate (28800 at 3000; 31200 at 3200).
+
+Acceptance:
+
+- Unit tests preserve 3000 and 3200 across `V90_CP -> E -> DATA`.
+- Invalid 3000/31200 preparation is rejected.
+- Low and high carrier selections survive INFO1d/INFO1a processing.
+
+### 2. Generalize the supervised B1/DATA receiver
+
+1. Keep three internal samples per symbol, but derive the internal rate from
+   the negotiated baud: 9000 Hz for 3000 and 9600 Hz for 3200.
+2. Generalize the rational 8 kHz resampler using the exact internal rate.
+3. Mix with the selected baud/carrier pair rather than the 3200 table row.
+4. Build the reset-state B1 reference with the negotiated baud and mapper
+   parameters.
+5. Preserve one continuous resampler, carrier, timing and equalizer state from
+   B1 into DATA.
+
+Acceptance:
+
+- External input count remains exactly the supplied 8 kHz sample count.
+- Internal count approaches 9/8 of input at 3000 and 6/5 at 3200.
+- Both rates acquire complete B1 and recover a deterministic payload without
+  bit errors over a G.711 round trip.
+
+### 3. Add the rate/carrier/law regression matrix
+
+Run the native waveform test for:
+
+- 3000-low and 3000-high at a legal data rate;
+- 3200-low and 3200-high at the same data rate;
+- PCMU and PCMA quantization.
+
+Also assert the legal maximum-rate boundary separately for 3000 and 3200.
+Tests must report symbol rate, carrier, law, external/internal sample counts,
+alignment and compared payload bits.
+
+### 4. Hardware qualification
+
+Test 3200 first, then force or negotiate 3000 as the fallback.  For each call
+record:
+
+- INFO1d rows and selected INFO1a rate;
+- selected low/high carrier and measured carrier offset;
+- CP/CP-prime, E and complete-B1 acquisition;
+- upstream/downstream negotiated bit rates;
+- first LAPM frame and sustained upstream BER;
+- any rate-change or retrain reason.
+
+Synthetic success is not hardware interoperability.  Completion requires an
+FCS-valid upstream LAPM exchange against a foreign modem at each claimed
+symbol rate.
