@@ -34,6 +34,7 @@
  * the §9.3.2.10 stopping rule and claims nothing more.
  */
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -856,6 +857,35 @@ static int trace_stream(const char *path, int u_info)
     return 0;
 }
 
+static void test_tone_b_retrain_detector(void)
+{
+    v90_analogue_phase3_config_t cfg;
+    v90_analogue_phase3_t *p3;
+    uint8_t pcm[480];
+    unsigned events;
+
+    printf("§9.5.2.2 Tone B retrain detection (>50 ms)\n");
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.law = V90_LAW_ULAW;
+    cfg.baud_rate_code = 4;
+    cfg.u_info = 48;
+    p3 = v90_analogue_phase3_init(&cfg);
+    CHECK(p3 != NULL, "could not initialise Tone B detector fixture");
+    if (p3 == NULL)
+        return;
+    for (int i = 0; i < (int)sizeof(pcm); i++) {
+        double x = 5000.0*sin(2.0*3.14159265358979323846*1200.0*i/8000.0);
+        pcm[i] = linear_to_ulaw((int16_t)x);
+    }
+    events = v90_analogue_phase3_rx(p3, pcm, 400); /* exactly 50 ms */
+    CHECK((events & V90A_EVENT_TONE_B_RETRAIN) == 0,
+          "Tone B fired at 50 ms instead of more than 50 ms");
+    events = v90_analogue_phase3_rx(p3, pcm + 400, 80);
+    CHECK((events & V90A_EVENT_TONE_B_RETRAIN) != 0,
+          "Tone B did not fire after 60 ms");
+    v90_analogue_phase3_free(p3);
+}
+
 int main(int argc, char *argv[])
 {
     size_t i;
@@ -871,6 +901,7 @@ int main(int argc, char *argv[])
     for (int sr = 0; sr <= 3; sr++)
         test_phase4_receive(sr);
     test_phase4_cp_from_measurement();
+    test_tone_b_retrain_detector();
 
     if (failures) {
         printf("%d failure%s\n", failures, failures == 1 ? "" : "s");

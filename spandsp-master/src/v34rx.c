@@ -3736,7 +3736,12 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
         {
             if (++s->persistence2 == 20)
             {
-                //s->received_event = V34_EVENT_TONE_SEEN;
+                /* V.90 §9.5.2 resumes after INFO0, so the analogue modem must
+                   publish sustained Tone B to FIRST_A.  Plain V.34 retains
+                   its historical INFO0-driven shortcut. */
+                if (s->v90_mode && s->calling_party && s->info0_received)
+                    s->received_event = V34_EVENT_TONE_SEEN;
+                /*endif*/
             }
             /*endif*/
             break;

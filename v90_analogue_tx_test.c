@@ -464,6 +464,42 @@ static void test_rate_renegotiation_silence_cycle(void)
     v90_analogue_tx_free(tx);
 }
 
+static void test_v34_analogue_retrain_entry(void)
+{
+    v34_state_t *v34;
+    int16_t amp[160];
+    int nonzero;
+
+    printf("§9.5.2 analogue retrain entry: 70 ms silence then Tone A\n");
+    v34 = v34_init(NULL, 3200, 21600, true, true,
+                   NULL, NULL, NULL, NULL);
+    CHECK(v34 != NULL, "could not initialise V.34 retrain fixture");
+    if (v34 == NULL)
+        return;
+    v34_set_v90_mode(v34, 0);
+    CHECK(v34_restart(v34, 3200, 21600, true) == 0,
+          "could not restart V.34 retrain fixture");
+    v34_v90_start_analogue_retrain(v34);
+    for (int left = 560; left > 0; ) {
+        int take = left > (int)(sizeof(amp)/sizeof(amp[0]))
+                 ? (int)(sizeof(amp)/sizeof(amp[0])) : left;
+        int got = v34_tx(v34, amp, take);
+
+        CHECK(got == take, "retrain silence produced %d/%d samples", got, take);
+        for (int i = 0; i < got; i++)
+            CHECK(amp[i] == 0, "§9.5.2 silence became non-zero at %d ms",
+                  (560 - left + i)/8);
+        left -= got;
+    }
+    CHECK(v34_tx(v34, amp, 160) == 160,
+          "Tone A block did not produce 160 samples");
+    nonzero = 0;
+    for (int i = 0; i < 160; i++)
+        nonzero += (amp[i] != 0);
+    CHECK(nonzero > 100, "Tone A block had only %d non-zero samples", nonzero);
+    v34_free(v34);
+}
+
 static int write_ulaw(const char *path, const v90_analogue_tx_config_t *cfg)
 {
     static const int baud_rates[6] = {2400, 2743, 2800, 3000, 3200, 3429};
@@ -575,6 +611,7 @@ int main(int argc, char *argv[])
     test_zero_length_dil();
     test_ja_carries_the_descriptor();
     test_rate_renegotiation_silence_cycle();
+    test_v34_analogue_retrain_entry();
 
     if (ulaw_path) {
         v90_analogue_tx_config_t cfg;

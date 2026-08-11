@@ -372,6 +372,13 @@ SPAN_DECLARE(void) v34_v90_clear_peer_retrain_event(v34_state_t *s);
     \param s The modem context. */
 SPAN_DECLARE(void) v34_v90_start_retrain_response(v34_state_t *s);
 
+/*! Start the analogue-modem side of V.90 §9.5.2 after v34_restart(): 70 ± 5 ms
+    silence, Tone A, Tone B detection/reversals, then §9.2.2.1.4.  This is used
+    for both initiating (§9.5.2.1) and responding (§9.5.2.2), since the latter
+    has already observed the required 50 ms of Tone B.
+    \param s The V.90 analogue/calling modem context. */
+SPAN_DECLARE(void) v34_v90_start_analogue_retrain(v34_state_t *s);
+
 /*! Get the number of distinct, strictly detected Phase 3 S transitions.
     \param s The modem context.
     \return A monotonically increasing count for the current training attempt. */

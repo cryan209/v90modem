@@ -46,6 +46,12 @@ descriptor to request (`measurement` by default, or `none`, `default-ja`,
 after B1d; `ME_V90_ANALOGUE_RATE_RENEGOTIATE_SILENCE=1` selects the CPs echo-
 reconditioning path.  Both are off by default.
 
+V.90 §9.5.2 retrain is also live for the analogue role.  Phase 3 and §9.6 Ed
+expiry initiate 70 ± 5 ms silence followed by Tone A; a byte-exact downstream
+1200 Hz detector responds after more than 50 ms of Tone B.  Both paths restart
+the borrowed SpanDSP context directly at §9.2.2.1.3 (the INFO0 exchange is not
+repeated), then re-enter the normal L1/L2, INFO1d/INFO1a and Phase 3 handoff.
+
 ### The four modules
 
 - [`v90_analogue_tx.c`](../v90_analogue_tx.c) — the §9.3.2 signals: S, S̄, PP,

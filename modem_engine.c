@@ -2994,6 +2994,52 @@ static bool restart_v90_phase2_locked(const char *reason)
     return true;
 }
 
+/* V.90 §9.5.2, analogue role.  Unlike a fresh call, retrain skips INFO0 and
+ * resumes at the Tone A/Tone B ranging exchange (§9.2.2.1.3-.4). */
+static bool restart_v90_analogue_phase2_locked(const char *reason)
+{
+    int bps;
+
+    if (g_mod != ME_MOD_V90 || !me_v90_analogue_role() || !g_v34)
+        return false;
+    bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(3200);
+
+    if (g_v90a) {
+        v90_analogue_phase3_free(g_v90a);
+        g_v90a = NULL;
+    }
+    g_v90a_started = false;
+    g_v90a_complete_logged = false;
+    g_v90a_failed_logged = false;
+    g_v90a_retrain_logged = false;
+    g_v90a_data_start_samples = 0;
+    g_v90a_rr_triggered = false;
+    g_v90a_rr_deadline_logged = false;
+    g_v90a_rx_codewords = 0;
+    g_v90a_data_bits_seen = 0;
+    g_v90a_data_adp_count = 0;
+
+    if (v34_restart(g_v34, 3200, bps, true) != 0) {
+        ME_LOG("[ME] V.90 analogue retrain restart failed (3200/%d)\n", bps);
+        return false;
+    }
+    v34_set_v90_mode(g_v34, (g_law == ME_LAW_ALAW) ? 1 : 0);
+    v34_set_v90_u_info(g_v34, g_v90a_u_info);
+    v34_tx_power(g_v34, -10.0f);
+    v34_v90_start_analogue_retrain(g_v34);
+
+    data_stack_prepare(bps);
+    g_state = ME_TRAINING;
+    g_notch.active = false;
+    notch_filter_init(&g_notch, 2400.0f, 30.0f, 8000.0f);
+    g_v90_phase2_restarts++;
+    ME_LOG("[ME] V.90 analogue: %s; §9.5.2 retrain %u (3200/%d)\n",
+           reason ? reason : "retrain requested", g_v90_phase2_restarts, bps);
+    trace_phase("V90a 9.5.2 retrain attempt=%u profile=3200/%d",
+                g_v90_phase2_restarts, bps);
+    return true;
+}
+
 static int v90_dil_capture_get_bit(int pos)
 {
     return (g_v90_dil_capture[pos / 8] >> (pos % 8)) & 1;
@@ -5741,19 +5787,15 @@ static void me_v90_analogue_progress_locked(void)
         if (!g_v90a_retrain_logged) {
             g_v90a_retrain_logged = true;
             ME_LOG("[ME] V.90 analogue: §9.3.2 deadline passed in %s with no answer "
-                   "from the digital modem; §9.5.2.1 retrain is not implemented\n",
+                   "from the digital modem; initiating §9.5.2.1 retrain\n",
                    v90_analogue_tx_stage_name(tx_stage));
             trace_phase("V90a deadline expired in %s",
                         v90_analogue_tx_stage_name(tx_stage));
         }
-        /* ME_V90_ANALOGUE_HOLD is a capture aid, and this is the path a lab
-         * run most needs it on: the question it answers is what the digital
-         * modem does *after* our deadline, which hanging up here destroys.
-         * An Eicon Diva Server under emulation was still advancing its Phase 3
-         * states when this fired. */
         if (parse_env_int("ME_V90_ANALOGUE_HOLD", 0) != 0)
             return;
-        g_state = ME_HANGUP;
+        if (!restart_v90_analogue_phase2_locked("Phase 3 deadline"))
+            g_state = ME_HANGUP;
         return;
     }
 
@@ -5764,6 +5806,18 @@ static void me_v90_analogue_progress_locked(void)
      * worth reporting.  Follow it from here instead, unconditionally.
      */
     me_v90_analogue_phase4_progress_locked();
+
+    if (v90_analogue_phase3_phase4_retrain_due(g_v90a)) {
+        if (!g_v90a_retrain_logged) {
+            g_v90a_retrain_logged = true;
+            ME_LOG("[ME] V.90 analogue: §9.4.2 B1d/constellation deadline; initiating §9.5.2.1 retrain\n");
+            trace_phase("V90a Phase4 retrain required");
+        }
+        if (parse_env_int("ME_V90_ANALOGUE_HOLD", 0) == 0
+            && !restart_v90_analogue_phase2_locked("Phase 4 failure/deadline"))
+            g_state = ME_HANGUP;
+        return;
+    }
 
     /* Opt-in trigger for exercising the analogue-initiated half of §9.6.
      * Zero (the default) never initiates autonomously. */
@@ -5795,7 +5849,9 @@ static void me_v90_analogue_progress_locked(void)
             ME_LOG("[ME] V.90 analogue: §9.6.2 Ed deadline expired; retrain required\n");
             trace_phase("V90a rate renegotiation deadline expired");
         }
-        if (parse_env_int("ME_V90_ANALOGUE_HOLD", 0) == 0)
+        if (parse_env_int("ME_V90_ANALOGUE_HOLD", 0) == 0
+            && !restart_v90_analogue_phase2_locked(
+                    "rate-renegotiation Ed deadline"))
             g_state = ME_HANGUP;
         return;
     }
@@ -6627,6 +6683,12 @@ void me_rx_g711(const uint8_t *codewords, int count)
          * data, so it must continue to receive after ME_DATA is entered. */
         events = v90_analogue_phase3_rx(g_v90a, codewords, count);
         g_v90a_rx_codewords += (uint64_t) count;
+        if (events & V90A_EVENT_TONE_B_RETRAIN) {
+            /* §9.3.2/§9.4.2/§9.6.2: sustained Tone B is the digital modem's
+             * retrain request; answer with §9.5.2.2, not a fresh V.8 call. */
+            ME_LOG("[ME] V.90 analogue: Tone B >50 ms; responding with §9.5.2.2 retrain\n");
+            (void) restart_v90_analogue_phase2_locked("peer Tone B");
+        }
         me_v90_analogue_progress_locked();
         if ((events & V90A4_RX_EVENT_DATA)
             && g_state == ME_TRAINING

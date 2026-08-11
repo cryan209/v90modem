@@ -5,6 +5,7 @@
  * is the whole of §9.3.2's dependency on the far end.
  */
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -16,6 +17,9 @@ static const int baud_rates[6] = {2400, 2743, 2800, 3000, 3200, 3429};
 /* No round-trip estimator is exposed at this layer.  Reserve 500 ms each way
  * beyond §9.6.2's 5000 ms floor; this is conservative on a G.711 SIP path. */
 #define RR_ED_DEADLINE_SAMPLES  (6000*8)
+/* §9.4.2's 15 s + five RTDs.  No RTD API reaches this layer yet; reserve
+ * 500 ms per trip on the SIP path, measured from the INFO1a/Phase-3 seam. */
+#define PHASE4_B1D_DEADLINE_SAMPLES  (17500*8)
 
 struct v90_analogue_phase3_s {
     v90_analogue_tx_t *tx;
@@ -45,6 +49,15 @@ struct v90_analogue_phase3_s {
     uint64_t               rx_samples;
     uint64_t               rr_deadline;
     bool                   rr_active;
+
+    /* §9.5.2.2 Tone B (1200 Hz) detector on the byte-exact downstream. */
+    double                 tone_b_re;
+    double                 tone_b_im;
+    double                 tone_b_energy;
+    uint64_t               tone_b_sample;
+    int                    tone_b_block_samples;
+    int                    tone_b_good_blocks;
+    bool                   tone_b_reported;
 };
 
 v90_analogue_phase3_t *v90_analogue_phase3_init(const v90_analogue_phase3_config_t *cfg)
@@ -245,15 +258,57 @@ static void start_phase4(v90_analogue_phase3_t *s)
     s->phase4_started = true;
 }
 
+static bool detect_tone_b(v90_analogue_phase3_t *s,
+                          const uint8_t *codewords, int count)
+{
+    const double omega = 2.0*3.14159265358979323846*1200.0/8000.0;
+
+    for (int i = 0; i < count; i++) {
+        double sample = (s->law == V90_LAW_ALAW)
+                      ? alaw_to_linear(codewords[i])
+                      : ulaw_to_linear(codewords[i]);
+        double phase = omega*(double)(s->tone_b_sample++ % 20U);
+
+        s->tone_b_re += sample*cos(phase);
+        s->tone_b_im -= sample*sin(phase);
+        s->tone_b_energy += sample*sample;
+        if (++s->tone_b_block_samples == 80) {
+            double ratio = s->tone_b_energy > 0.0
+                         ? 2.0*(s->tone_b_re*s->tone_b_re
+                               + s->tone_b_im*s->tone_b_im)
+                           /(80.0*s->tone_b_energy)
+                         : 0.0;
+
+            if (s->tone_b_energy/80.0 > 10000.0 && ratio > 0.65)
+                s->tone_b_good_blocks++;
+            else
+                s->tone_b_good_blocks = 0;
+            s->tone_b_re = 0.0;
+            s->tone_b_im = 0.0;
+            s->tone_b_energy = 0.0;
+            s->tone_b_block_samples = 0;
+            /* §9.5.2.2 says more than 50 ms. Six 10 ms blocks is strictly
+             * greater, and phase reversals do not disturb this energy test. */
+            if (s->tone_b_good_blocks >= 6 && !s->tone_b_reported) {
+                s->tone_b_reported = true;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 unsigned v90_analogue_phase3_rx(v90_analogue_phase3_t *s,
                                 const uint8_t *codewords,
                                 int count)
 {
     unsigned events;
+    bool tone_b;
 
     if (s == NULL)
         return 0;
     s->rx_samples += (uint64_t) count;
+    tone_b = detect_tone_b(s, codewords, count);
     if (s->p4 != NULL) {
         /* Phase 3's receiver is finished with this stream; §8.6's signals are
          * not §8.4's and feeding both would only produce noise in one. */
@@ -261,12 +316,16 @@ unsigned v90_analogue_phase3_rx(v90_analogue_phase3_t *s,
         apply_phase4_events(s, events);
         if ((events & V90A4_RX_EVENT_DATA) != 0)
             s->rr_active = false;
+        if (tone_b)
+            events |= V90A_EVENT_TONE_B_RETRAIN;
         return events;
     }
     /*endif*/
     events = v90_analogue_rx_put(s->rx, codewords, count);
     apply_events(s, events);
     start_phase4(s);
+    if (tone_b)
+        events |= V90A_EVENT_TONE_B_RETRAIN;
     return events;
 }
 
@@ -355,6 +414,17 @@ const v90_analogue_phase4_t *v90_analogue_phase3_phase4_state(const v90_analogue
 bool v90_analogue_phase3_phase4_failed(const v90_analogue_phase3_t *s)
 {
     return s  &&  s->phase4_failed;
+}
+
+bool v90_analogue_phase3_phase4_retrain_due(const v90_analogue_phase3_t *s)
+{
+    if (s == NULL)
+        return false;
+    if (s->phase4_failed)
+        return true;
+    return s->phase4_started
+        && !v90_analogue_phase3_data_ready(s)
+        && s->rx_samples >= PHASE4_B1D_DEADLINE_SAMPLES;
 }
 
 const vpcm_cp_frame_t *v90_analogue_phase3_cpt(const v90_analogue_phase3_t *s)

@@ -3948,11 +3948,25 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
 
     if (s->tx.stage == V34_TX_STAGE_V90_RETRAIN_SILENCE)
     {
-        /* V.90 §9.5.1.2: after 70 ± 5 ms of silence, transmit Tone B,
-           condition the receiver to detect a Tone A phase reversal, and
-           proceed per §9.2.1.1.3 (the PHASE2_B_INFO0_SEEN handler). */
+        /* V.90 §9.5.1.2/§9.5.2: after 70 ± 5 ms of silence, transmit the
+           role's tone and resume Phase 2 after the omitted INFO0 exchange. */
         if (++s->tx.tone_duration >= 42)
         {
+            if (s->calling_party)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.90 analogue: retrain silence complete; transmitting Tone A and awaiting Tone B\n");
+                s->tx.tone_duration = 0;
+                s->rx.received_event = V34_EVENT_NONE;
+                s->rx.persistence1 = 0;
+                s->rx.persistence2 = 0;
+                s->rx.info0_received = true; /* §9.5 omits INFO0. */
+                s->rx.current_demodulator = V34_MODULATION_TONES;
+                s->rx.stage = V34_RX_STAGE_TONE_B;
+                initial_ab_not_ab_baud_init(s);
+                return zero;
+            }
+            /*endif*/
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: retrain-response silence complete; transmitting Tone B and awaiting Tone A reversal\n");
             /* V.90 §9.2.1.1.8: "Any subsequent retrains shall use Phase 2 of
@@ -7170,6 +7184,26 @@ SPAN_DECLARE(void) v34_force_phase4(v34_state_t *s)
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Tx - v34_force_phase4(): external V.90 Phase 3 complete, handing TX/RX to native Phase 4\n");
     phase4_wait_init(s);
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_v90_start_analogue_retrain(v34_state_t *s)
+{
+    if (!s || !s->tx.v90_mode || !s->calling_party)
+        return;
+    /* V.90 §9.5.2.1/.2: both analogue procedures start with 70 ms silence
+       followed by Tone A.  The ordinary initial preamble is deliberately
+       skipped because §9.5 resumes at §9.2.2.1.3, after INFO0. */
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - V.90 analogue retrain armed; 70 ms silence then Tone A (9.5.2)\n");
+    v90_phase2_reset_transactions(s);
+    s->tx.current_modulator = V34_MODULATION_CC;
+    s->tx.current_getbaud = get_v90_wait_info1a_baud;
+    s->tx.tone_duration = 0;
+    s->tx.stage = V34_TX_STAGE_V90_RETRAIN_SILENCE;
+    s->rx.received_event = V34_EVENT_NONE;
+    s->rx.persistence1 = 0;
+    s->rx.persistence2 = 0;
 }
 /*- End of function --------------------------------------------------------*/
 

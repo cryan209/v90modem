@@ -68,6 +68,10 @@ void v90_analogue_phase3_free(v90_analogue_phase3_t *s);
  * receive events raised (V90A_RX_EVENT_*), after they have been applied to the
  * transmitter.
  */
+/* Event outside the Phase 3/4 receiver bit range: §9.3.2/§9.4.2/§9.6.2 all
+ * require the analogue modem to answer a sustained digital-modem Tone B. */
+#define V90A_EVENT_TONE_B_RETRAIN  (1u << 16)
+
 unsigned v90_analogue_phase3_rx(v90_analogue_phase3_t *s,
                                 const uint8_t *codewords,
                                 int count);
@@ -103,6 +107,8 @@ const v90_dil_measurement_t *v90_analogue_phase3_measurement(const v90_analogue_
 const v90_analogue_phase4_t *v90_analogue_phase3_phase4_state(const v90_analogue_phase3_t *s);
 /* The measurement produced no constellation §8.5.2 would let us offer. */
 bool v90_analogue_phase3_phase4_failed(const v90_analogue_phase3_t *s);
+/* §9.4.2: no B1d within 15 s plus five round trips, or no usable CP. */
+bool v90_analogue_phase3_phase4_retrain_due(const v90_analogue_phase3_t *s);
 /* What is being transmitted, once Phase 4 has started.  NULL before that. */
 const vpcm_cp_frame_t *v90_analogue_phase3_cpt(const v90_analogue_phase3_t *s);
 const vpcm_cp_frame_t *v90_analogue_phase3_cp(const v90_analogue_phase3_t *s);
