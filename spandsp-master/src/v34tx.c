@@ -6728,6 +6728,26 @@ SPAN_DECLARE(int) v34_tx_start_external_symbols(v34_state_t *s,
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v34_v90_resume_external_symbols(v34_state_t *s,
+                                                  v34_tx_external_symbol_func_t fn,
+                                                  void *user_data)
+{
+    if (s == NULL  ||  fn == NULL)
+        return -1;
+    /* V.90 §9.6 requires downstream data-frame alignment to survive rate
+       renegotiation.  Unlike v34_tx_start_external_symbols(), this seam must
+       not zero carrier phase, baud phase, or the RRC history. */
+    s->tx.external_symbol_func = fn;
+    s->tx.external_symbol_user_data = user_data;
+    s->tx.current_getbaud = get_external_baud;
+    s->tx.current_modulator = V34_MODULATION_V34;
+    s->tx.tx_data_mode = false;
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - V.90 rate renegotiation: preserving modulator phase for S/S-bar/CP\n");
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v34_tx_stop_external_symbols(v34_state_t *s)
 {
     s->tx.external_symbol_func = NULL;
@@ -6943,6 +6963,39 @@ SPAN_DECLARE(int) v34_seed_tx_data(v34_state_t *s,
     s->tx.aux_bit_cnt = 0;
     s->tx.v0_pattern = 0;
     s->tx.current_get_bit = s->tx.get_bit;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_v90_begin_tx_data(v34_state_t *s,
+                                        int bit_rate_n,
+                                        int trellis_size,
+                                        int use_non_linear_encoder,
+                                        int expanded_shaping,
+                                        const int16_t precoder_coeffs[6])
+{
+    if (v34_seed_tx_data(s, bit_rate_n, trellis_size,
+                         use_non_linear_encoder, expanded_shaping,
+                         precoder_coeffs) != 0)
+        return -1;
+    /* V.90 §8.5.1/§9.4.2.5 uses V.34's B1: the first data frame is scrambled
+       ones with every data-mode state reset.  get_data_baud() already does
+       exactly that before returning to the normal get-bit callback.  Preserve
+       carrier phase and pulse-shaper history from E; only replace the external
+       symbol source and mapper. */
+    s->tx.external_symbol_func = NULL;
+    s->tx.external_symbol_user_data = NULL;
+    s->tx.tx_mapping_frame_step = 0;
+    s->tx.b1_sent = false;
+    s->tx.current_modulator = V34_MODULATION_V34;
+    s->tx.current_getbaud = get_data_baud;
+    s->tx.tx_data_mode = true;
+    s->primary_channel_active = true;
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - V.90 analogue handover to B1/data: N=%d (%d bps), "
+             "trellis=%d nonlinear=%d expanded=%d\n",
+             bit_rate_n, bit_rate_n*2400, trellis_size,
+             use_non_linear_encoder != 0, expanded_shaping != 0);
     return 0;
 }
 /*- End of function --------------------------------------------------------*/

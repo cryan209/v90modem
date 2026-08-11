@@ -58,7 +58,9 @@ typedef enum {
     V90A_TX_CP,                 /* §9.4.2.3 — CP, until MP arrives */
     V90A_TX_CP_PRIME,           /* §9.4.2.3 — CP with the acknowledge bit set */
     V90A_TX_E,                  /* §9.4.2.4 — §8.5.3's 20 ones */
-    V90A_TX_B1_PENDING,         /* §9.4.2.5 — E sent; B1 is not implemented */
+    V90A_TX_B1_PENDING,         /* §9.4.2.5 — hand over to V.34 B1/data mapper */
+    V90A_TX_RR_S,               /* §9.6.2.2.2 — response S for 128T */
+    V90A_TX_RR_S_BAR,           /* §9.6.2.2.3 — response S̄ for 16T */
 } v90_analogue_tx_stage_t;
 
 typedef struct v90_analogue_tx_s v90_analogue_tx_t;
@@ -127,6 +129,8 @@ bool v90_analogue_tx_start_phase4(v90_analogue_tx_t *s,
 void v90_analogue_tx_r_transition_seen(v90_analogue_tx_t *s); /* §9.4.2.2 */
 void v90_analogue_tx_mp_seen(v90_analogue_tx_t *s);           /* §9.4.2.3 */
 void v90_analogue_tx_mp_prime_seen(v90_analogue_tx_t *s);     /* §9.4.2.4 */
+/* §9.6.2.2: the digital modem's Rd→R̄d transition requests a response. */
+bool v90_analogue_tx_rate_renegotiate(v90_analogue_tx_t *s);
 
 v90_analogue_tx_stage_t v90_analogue_tx_stage(const v90_analogue_tx_t *s);
 const char *v90_analogue_tx_stage_name(v90_analogue_tx_stage_t stage);

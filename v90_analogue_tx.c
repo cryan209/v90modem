@@ -513,13 +513,31 @@ void v90_analogue_tx_get_symbol(void *user_data, float *re, float *im)
         return;
 
     case V90A_TX_B1_PENDING:
-        /*
-         * §9.4.2.5 wants B1 here — one data frame of scrambled ones through
-         * the *data mode* mapper, which the analogue role does not have: the
-         * upstream data path is still SpanDSP's V.22bis placeholder.  Sending
-         * something that is not B1 would be worse than sending nothing, so
-         * hold silence and let the engine report where this stopped.
-         */
+        /* §9.4.2.5: v90_analogue_phase3_tx() sees this boundary on the next
+         * output call and hands the modulator to SpanDSP's reset-state V.34
+         * B1/data mapper.  Return silence only for the remainder of the block
+         * in which E completed; starting B1 mid-block would lose its boundary. */
+        return;
+
+    case V90A_TX_RR_S:
+        /* V.90 §9.6.2.2.2: response to the digital modem's Rd→R̄d. */
+        s_symbol(s, re, im);
+        if (s->stage_symbols >= S_SYMBOLS) {
+            s_reverse(s);
+            enter_stage(s, V90A_TX_RR_S_BAR);
+        }
+        return;
+
+    case V90A_TX_RR_S_BAR:
+        /* §9.6.2.2.3-.4: S̄ for 16T, omit optional SCR, then CP. */
+        s_symbol(s, re, im);
+        if (s->stage_symbols >= S_BAR_SYMBOLS) {
+            s_reverse(s);
+            s->cp_bit_pos = 0;
+            s->pending_mp = false;
+            s->pending_mp_prime = false;
+            enter_stage(s, V90A_TX_CP);
+        }
         return;
     }
 }
@@ -603,6 +621,20 @@ void v90_analogue_tx_mp_prime_seen(v90_analogue_tx_t *s)
         s->pending_mp_prime = true;
 }
 
+bool v90_analogue_tx_rate_renegotiate(v90_analogue_tx_t *s)
+{
+    if (s == NULL  ||  s->stage != V90A_TX_B1_PENDING  ||  !s->phase4_armed)
+        return false;
+    /* §9.6.2.2.2 starts a fresh S/S̄ response, but CP's GPA scrambler and
+     * differential state are deliberately retained: §8.5.2 initializes them
+     * only before the first startup CPt, not on rate renegotiation. */
+    s->s_index = 0;
+    s->pending_mp = false;
+    s->pending_mp_prime = false;
+    enter_stage(s, V90A_TX_RR_S);
+    return true;
+}
+
 v90_analogue_tx_stage_t v90_analogue_tx_stage(const v90_analogue_tx_t *s)
 {
     return s ? s->stage : V90A_TX_PHASE4;
@@ -632,7 +664,9 @@ const char *v90_analogue_tx_stage_name(v90_analogue_tx_stage_t stage)
     case V90A_TX_CP:                return "CP";
     case V90A_TX_CP_PRIME:          return "CP'";
     case V90A_TX_E:                 return "E";
-    case V90A_TX_B1_PENDING:        return "B1 (not implemented)";
+    case V90A_TX_B1_PENDING:        return "B1/data handover";
+    case V90A_TX_RR_S:              return "rate renegotiation S";
+    case V90A_TX_RR_S_BAR:          return "rate renegotiation S-bar";
     }
     return "?";
 }

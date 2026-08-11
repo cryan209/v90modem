@@ -30,11 +30,15 @@ struct v90_analogue_phase3_s {
     int                    u_info;
     int                    shaping_redundancy;
     int                    shaping_lookahead;
+    double                 digital_max_tx_dbm0;
     v90_analogue_phase4_t *p4;
     vpcm_cp_frame_t        cpt;
     vpcm_cp_frame_t        cp;
     bool                   phase4_started;
     bool                   phase4_failed;
+    bool                   upstream_data_started;
+    int                    upstream_rate_n;
+    int                    upstream_max_n;
 };
 
 v90_analogue_phase3_t *v90_analogue_phase3_init(const v90_analogue_phase3_config_t *cfg)
@@ -73,6 +77,8 @@ v90_analogue_phase3_t *v90_analogue_phase3_init(const v90_analogue_phase3_config
     s->u_info = cfg->u_info;
     s->shaping_redundancy = cfg->shaping_redundancy;
     s->shaping_lookahead = cfg->shaping_lookahead;
+    s->digital_max_tx_dbm0 = cfg->digital_max_tx_dbm0;
+    s->upstream_max_n = cfg->upstream_max_n;
 
     s->tx = v90_analogue_tx_init(&txc);
     s->rx = v90_analogue_rx_init(&rxc);
@@ -146,6 +152,19 @@ static void apply_events(v90_analogue_phase3_t *s, unsigned events)
  */
 static void apply_phase4_events(v90_analogue_phase3_t *s, unsigned events)
 {
+    if (events & V90A4_RX_EVENT_RD_BAR) {
+        /* V.90 §9.6.2.2.2: replace V.34 data at the preserved symbol seam
+         * with S/S̄/CP.  The next B1 handoff will seed the newly received MP. */
+        if (v90_analogue_tx_rate_renegotiate(s->tx)
+            && v34_v90_resume_external_symbols(s->v34,
+                                                v90_analogue_tx_get_symbol,
+                                                s->tx) == 0) {
+            s->upstream_data_started = false;
+            s->upstream_rate_n = 0;
+        } else {
+            s->phase4_failed = true;
+        }
+    }
     if (events & V90A4_RX_EVENT_R_BAR)
         v90_analogue_tx_r_transition_seen(s->tx);  /* §9.4.2.2: end CPt */
     if (events & V90A4_RX_EVENT_MP)
@@ -194,7 +213,8 @@ static void start_phase4(v90_analogue_phase3_t *s)
         /*endif*/
     }
     /*endif*/
-    if (!v90_analogue_phase4_build_cp(m, s->law, s->shaping_redundancy, ld,
+    if (!v90_analogue_phase4_build_cp(m, s->law, s->digital_max_tx_dbm0,
+                                      s->shaping_redundancy, ld,
                                       &s->cpt, &s->cp)) {
         s->phase4_failed = true;
         return;
@@ -203,6 +223,7 @@ static void start_phase4(v90_analogue_phase3_t *s)
     p4c.law = s->law;
     p4c.u_info = s->u_info;
     p4c.cpt = s->cpt;
+    p4c.cp = s->cp;
     if ((s->p4 = v90_analogue_phase4_init(&p4c)) == NULL
         ||
         !v90_analogue_tx_start_phase4(s->tx, &s->cpt, &s->cp, false)) {
@@ -227,7 +248,7 @@ unsigned v90_analogue_phase3_rx(v90_analogue_phase3_t *s,
          * not §8.4's and feeding both would only produce noise in one. */
         events = v90_analogue_phase4_put(s->p4, codewords, count);
         apply_phase4_events(s, events);
-        return 0;
+        return events;
     }
     /*endif*/
     events = v90_analogue_rx_put(s->rx, codewords, count);
@@ -240,6 +261,41 @@ int v90_analogue_phase3_tx(v90_analogue_phase3_t *s, int16_t *amp, int max_len)
 {
     if (s == NULL  ||  amp == NULL  ||  max_len <= 0)
         return 0;
+    /* V.90 §9.4.2.4-.5: after E, select the highest upstream rate enabled by
+     * both CP and the digital modem's MP, then hand the existing modulator to
+     * V.34's reset-state B1/data mapper.  Keeping this at the next v34_tx()
+     * boundary lets the final E symbol finish in the external source first. */
+    if (!s->upstream_data_started
+        && v90_analogue_tx_stage(s->tx) == V90A_TX_B1_PENDING
+        && s->p4 != NULL) {
+        const v90_analogue_mp_t *mp = v90_analogue_phase4_mp(s->p4);
+        int n = 0;
+
+        if (mp != NULL) {
+            int highest = mp->max_drn;
+
+            if (s->upstream_max_n >= 2 && highest > s->upstream_max_n)
+                highest = s->upstream_max_n;
+            for (int candidate = highest; candidate >= 2; candidate--) {
+                unsigned bit = 1U << (candidate - 2);
+
+                if ((mp->rate_mask & bit)  &&  (s->cp.upstream_rate_mask & bit)) {
+                    n = candidate;
+                    break;
+                }
+            }
+            if (n > 0
+                && v34_v90_begin_tx_data(s->v34, n, mp->trellis,
+                                         mp->nonlinear,
+                                         mp->expanded_shaping,
+                                         &mp->precoder[0][0]) == 0) {
+                s->upstream_rate_n = n;
+                s->upstream_data_started = true;
+            } else {
+                s->phase4_failed = true;
+            }
+        }
+    }
     return v34_tx(s->v34, amp, max_len);
 }
 
@@ -296,4 +352,22 @@ const vpcm_cp_frame_t *v90_analogue_phase3_cpt(const v90_analogue_phase3_t *s)
 const vpcm_cp_frame_t *v90_analogue_phase3_cp(const v90_analogue_phase3_t *s)
 {
     return (s  &&  s->phase4_started) ? &s->cp : NULL;
+}
+
+bool v90_analogue_phase3_data_ready(const v90_analogue_phase3_t *s)
+{
+    return s && s->p4
+        && v90_analogue_phase4_stage(s->p4) == V90A4_RX_DATA;
+}
+
+int v90_analogue_phase3_get_data_bits(v90_analogue_phase3_t *s,
+                                      uint8_t *bits, int max_bits)
+{
+    return (s && s->p4)
+        ? v90_analogue_phase4_get_data_bits(s->p4, bits, max_bits) : 0;
+}
+
+int v90_analogue_phase3_upstream_rate(const v90_analogue_phase3_t *s)
+{
+    return s ? s->upstream_rate_n*2400 : 0;
 }

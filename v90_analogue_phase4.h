@@ -47,7 +47,10 @@ typedef enum {
     V90A4_RX_R_BAR,         /* §9.4.2.2 transition seen; R̄i running */
     V90A4_RX_TRN2D,         /* §8.6.5, demapping to ones */
     V90A4_RX_MP,            /* §8.6.3 Table 16 frames */
-    V90A4_RX_DONE,          /* §8.6.2 Ed: MP is over */
+    V90A4_RX_B1D,           /* §8.6.1: 48 CP-mapped all-ones frames */
+    V90A4_RX_DATA,          /* §9.4.1.5: negotiated downstream data */
+    V90A4_RX_RR_RD,         /* §9.6.2.2.1: tracking Rd */
+    V90A4_RX_RR_R_BAR,      /* §9.6.2.2.2: 24T R̄d */
 } v90_analogue_phase4_rx_stage_t;
 
 #define V90A4_RX_EVENT_R          (1u << 0)  /* Ri acquired */
@@ -56,6 +59,10 @@ typedef enum {
 #define V90A4_RX_EVENT_MP         (1u << 3)  /* §9.4.2.3 a valid MP frame */
 #define V90A4_RX_EVENT_MP_PRIME   (1u << 4)  /* §9.4.2.4 MP with bit 33 set */
 #define V90A4_RX_EVENT_ED         (1u << 5)  /* §8.6.2 Ed */
+#define V90A4_RX_EVENT_B1D        (1u << 6)  /* first valid §8.6.1 B1d frame */
+#define V90A4_RX_EVENT_DATA       (1u << 7)  /* all 48 B1d frames received */
+#define V90A4_RX_EVENT_RD         (1u << 8)  /* §9.6.2.2.1 Rd acquired */
+#define V90A4_RX_EVENT_RD_BAR     (1u << 9)  /* §9.6.2.2.2 Rd→R̄d */
 
 /* Table 16, the fields §9.4.2.4 acts on. */
 typedef struct {
@@ -66,6 +73,9 @@ typedef struct {
     bool     expanded_shaping;  /* bit 32 */
     bool     acknowledge;       /* bit 33 — this is an MP′ */
     uint16_t rate_mask;         /* bits 36:48 — 4800 … 33600 */
+    /* Table 16 Type 1, signed two's-complement precoder coefficients.  These
+     * seed the analogue modem's V.34 upstream transmitter before B1. */
+    int16_t  precoder[3][2];    /* [h(1)..h(3)][real, imaginary] */
 } v90_analogue_mp_t;
 
 typedef struct v90_analogue_phase4_s v90_analogue_phase4_t;
@@ -79,6 +89,8 @@ typedef struct {
      * why Phase 4 cannot start until the measurement has produced one.
      */
     vpcm_cp_frame_t cpt;
+    /* §8.6.1 and data mode switch to CP and reset all mapper state after Ed. */
+    vpcm_cp_frame_t cp;
 } v90_analogue_phase4_config_t;
 
 v90_analogue_phase4_t *v90_analogue_phase4_init(const v90_analogue_phase4_config_t *cfg);
@@ -103,6 +115,13 @@ const v90_analogue_mp_t *v90_analogue_phase4_mp(const v90_analogue_phase4_t *s);
 int v90_analogue_phase4_demap_failures(const v90_analogue_phase4_t *s);
 /* How much of TRN2d demapped to §8.6.5's ones. */
 int v90_analogue_phase4_trn2d_ones(const v90_analogue_phase4_t *s);
+/* §8.6.1 progress and decoded data bits.  Bits are returned unpacked, oldest
+ * first; B1d's known ones are validated but are never delivered as data. */
+int v90_analogue_phase4_b1d_frames(const v90_analogue_phase4_t *s);
+int v90_analogue_phase4_b1d_bit_errors(const v90_analogue_phase4_t *s);
+int v90_analogue_phase4_rate_renegotiations(const v90_analogue_phase4_t *s);
+int v90_analogue_phase4_get_data_bits(v90_analogue_phase4_t *s,
+                                      uint8_t *bits, int max_bits);
 
 /*
  * §5.4.1's K for a CP frame — the bits that enter the modulus encoder, which
@@ -126,6 +145,10 @@ int v90_analogue_phase4_cp_k(const vpcm_cp_frame_t *cp);
  * them puts the digital modem's mapper on a different number of bits per frame
  * than its receiver is decoding.
  *
+ * `max_tx_dbm0` is INFO0d bits 33:37 in dBm0 and applies §8.5.2/Table 15
+ * to CP's data-mode constellation.  Pass 0 only when that capability was not
+ * received (the offline-test/unbounded case).
+ *
  * `shaping_redundancy` is §5.4.5's Sr, which this side chooses: 0 disables
  * spectral shaping, 1 to 3 enable it and spend that many sign bits on it.  It
  * has to be decided here rather than stamped on afterwards, because it moves
@@ -136,6 +159,7 @@ int v90_analogue_phase4_cp_k(const vpcm_cp_frame_t *cp);
  */
 bool v90_analogue_phase4_build_cp(const v90_dil_measurement_t *m,
                                   v90_law_t law,
+                                  double max_tx_dbm0,
                                   int shaping_redundancy,
                                   int shaping_lookahead,
                                   vpcm_cp_frame_t *cpt_out,

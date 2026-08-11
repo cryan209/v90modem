@@ -4701,7 +4701,10 @@ int v90_generate_phase4_codewords(v90_law_t law,
         || cp->shaping_redundancy > 3
         || cp->shaping_lookahead > 3)
         return 0;
-    bits_per_frame = cp->drn + 8;
+    /* Table 14: CPt carries drn+8 bits while data-mode CP carries drn+20.
+     * The public generator is used for both; treating CP as CPt made offline
+     * B1d vectors exercise the wrong mapper rate. */
+    bits_per_frame = cp->drn + (cp->v90_compatibility ? 20 : 8);
     sign_bits = V90_FRAME_LEN - cp->shaping_redundancy;
     modulus_bits = bits_per_frame - sign_bits;
     if (modulus_bits < 0 || modulus_bits > 56)

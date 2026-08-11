@@ -364,7 +364,39 @@ static int build_mp_type0(uint8_t *bits, uint8_t max_drn, bool acknowledge)
     }
     for (i = 0; i < 16; i++)
         bits[69 + i] = (uint8_t) ((crc >> i) & 1);
-    return 102;
+    return 86;
+}
+
+static int build_mp_type1(uint8_t *bits, uint8_t max_drn, bool acknowledge)
+{
+    uint16_t crc;
+    int i;
+
+    memset(bits, 0, 204);
+    for (i = 0; i < 17; i++)
+        bits[i] = 1;
+    bits[18] = 1;
+    for (i = 0; i < 4; i++)
+        bits[24 + i] = (uint8_t) ((max_drn >> i) & 1);
+    bits[33] = acknowledge ? 1 : 0;
+    for (i = 0; i < 13; i++)
+        bits[36 + i] = 1;
+    for (i = 0; i < 16; i++) {
+        bits[52 + i] = (uint8_t) ((0x1234U >> i) & 1U);
+        bits[69 + i] = (uint8_t) ((0xFEDCU >> i) & 1U);
+        bits[86 + i] = (uint8_t) ((0x2345U >> i) & 1U);
+        bits[103 + i] = (uint8_t) ((0xDCBAU >> i) & 1U);
+        bits[120 + i] = (uint8_t) ((0x3456U >> i) & 1U);
+        bits[137 + i] = (uint8_t) ((0xCBA9U >> i) & 1U);
+    }
+    crc = 0xFFFF;
+    for (int start = 17; start <= 153; start += 17) {
+        for (int bit = start + 1; bit <= start + 16; bit++)
+            crc = crc_itu16_bits(bits[bit] & 1U, 1, crc);
+    }
+    for (i = 0; i < 16; i++)
+        bits[171 + i] = (uint8_t) ((crc >> i) & 1);
+    return 188;
 }
 
 static void test_phase4_receive(int sr)
@@ -373,9 +405,12 @@ static void test_phase4_receive(int sr)
     v90_analogue_phase4_t *rx;
     v90_shaped_rx_state_t zero;
     vpcm_cp_frame_t cpt;
+    vpcm_cp_frame_t cp;
+    vpcm_cp_frame_t rr_mapping;
     const v90_analogue_mp_t *mp;
-    uint8_t mp_bits[102];
+    uint8_t mp_bits[204];
     uint8_t *plain;
+    uint8_t data_plain[49*64];
     uint8_t *stream;
     unsigned events;
     int bits_per_frame;
@@ -383,6 +418,7 @@ static void test_phase4_receive(int sr)
     int frames;
     int mp_nbits;
     int n;
+    int b1_n;
     int len;
     const int r_reps = 32;               /* §9.4.1.1: at least 192T */
     const int r_bar_reps = 4;            /* §8.6.4: exactly four */
@@ -407,14 +443,22 @@ static void test_phase4_receive(int sr)
     for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++)
         cpt.dfi[i] = 0;
 
+    cp = cpt;
+    cp.v90_compatibility = true;
+    cp.drn = 1;                         /* D=21, valid data-mode CP for init */
+
     bits_per_frame = cpt.drn + 8;
     /* §9.4.1.2 sends at least 2040T of TRN2d; 400 frames is 2400T. */
     trn2d_frames = 400;
-    mp_nbits = build_mp_type0(mp_bits, 14, true);
+    mp_nbits = (sr == 0) ? build_mp_type1(mp_bits, 14, true)
+                         : build_mp_type0(mp_bits, 14, true);
     frames = trn2d_frames + (mp_nbits + bits_per_frame - 1)/bits_per_frame + 2;
 
     plain = calloc((size_t) frames*bits_per_frame, 1);
-    len = (r_reps + r_bar_reps)*6 + frames*6;
+    /* Startup plus one complete §9.6.2.2 response cycle: 384T Rd, 24T R̄d,
+     * TRN2d/MP/Ed under CP with CPt's K, then another B1d/data pair. */
+    len = (r_reps + r_bar_reps)*6
+        + (frames + 49 + 64 + 4 + frames + 49)*6;
     stream = calloc((size_t) len, 1);
     if (plain == NULL  ||  stream == NULL) {
         printf("  FAIL: out of memory\n");
@@ -426,10 +470,12 @@ static void test_phase4_receive(int sr)
     /* §8.6.5: TRN2d is scrambled ones.  MP follows in the same bit stream. */
     memset(plain, 1, (size_t) trn2d_frames*bits_per_frame);
     memcpy(plain + trn2d_frames*bits_per_frame, mp_bits, (size_t) mp_nbits);
+    /* Fill to the MP mapping boundary and §8.6.2's following two complete Ed
+     * frames are zero.  B1d below starts a separately reset CP mapper. */
     for (int i = trn2d_frames*bits_per_frame + mp_nbits;
          i < frames*bits_per_frame;
          i++) {
-        plain[i] = 1;
+        plain[i] = 0;
     }
 
     put_r_pattern(stream, r_reps, V90_LAW_ULAW, ucode, false);
@@ -445,11 +491,56 @@ static void test_phase4_receive(int sr)
         free(stream);
         return;
     }
+    /* §8.6.1: reset mapper, 48 CP-mapped frames of ones, then one data frame
+     * whose alternating payload verifies that state remains continuous. */
+    memset(data_plain, 1, 48*(cp.drn + 20));
+    for (int i = 0; i < cp.drn + 20; i++)
+        data_plain[48*(cp.drn + 20) + i] = (uint8_t)(i & 1);
+    memset(&zero, 0, sizeof(zero));
+    b1_n = v90_generate_phase4_codewords(
+        V90_LAW_ULAW, &cp, &zero, data_plain, 49,
+        stream + (r_reps + r_bar_reps)*6 + n,
+        len - (r_reps + r_bar_reps)*6 - n);
+    if (b1_n != 49*6) {
+        printf("  FAIL: could not generate B1d/data downstream\n");
+        failures++;
+        free(plain);
+        free(stream);
+        return;
+    }
+    n += b1_n;
+
+    /* Digital-modem-initiated rate renegotiation (§9.6.1.1/§9.6.2.2). */
+    put_r_pattern(stream + (r_reps + r_bar_reps)*6 + n,
+                  64, V90_LAW_ULAW, 127, false);       /* Rd: 384T */
+    n += 64*6;
+    put_r_pattern(stream + (r_reps + r_bar_reps)*6 + n,
+                  4, V90_LAW_ULAW, 127, true);         /* R̄d: 24T */
+    n += 4*6;
+    rr_mapping = cp;
+    rr_mapping.v90_compatibility = false;
+    rr_mapping.drn = cpt.drn;  /* §8.6: CP constellation/shaping, CPt K */
+    memset(&zero, 0, sizeof(zero));
+    b1_n = v90_generate_phase4_codewords(
+        V90_LAW_ULAW, &rr_mapping, &zero, plain, frames,
+        stream + (r_reps + r_bar_reps)*6 + n,
+        len - (r_reps + r_bar_reps)*6 - n);
+    CHECK(b1_n == frames*6,
+          "could not generate rate-renegotiation TRN2d/MP/Ed");
+    n += b1_n;
+    memset(&zero, 0, sizeof(zero));
+    b1_n = v90_generate_phase4_codewords(
+        V90_LAW_ULAW, &cp, &zero, data_plain, 49,
+        stream + (r_reps + r_bar_reps)*6 + n,
+        len - (r_reps + r_bar_reps)*6 - n);
+    CHECK(b1_n == 49*6, "could not generate post-renegotiation B1d/data");
+    n += b1_n;
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.law = V90_LAW_ULAW;
     cfg.u_info = 48;
     cfg.cpt = cpt;
+    cfg.cp = cp;
     if ((rx = v90_analogue_phase4_init(&cfg)) == NULL) {
         printf("  FAIL: Phase 4 receiver did not initialise\n");
         failures++;
@@ -475,6 +566,35 @@ static void test_phase4_receive(int sr)
           "no MP frame passed Table 16's structure and CRC");
     CHECK((events & V90A4_RX_EVENT_MP_PRIME) != 0,
           "MP' not recognised — §9.4.2.4's E would never be sent");
+    CHECK((events & V90A4_RX_EVENT_ED) != 0,
+          "two complete Ed frames were not recognised");
+    CHECK((events & V90A4_RX_EVENT_B1D) != 0,
+          "B1d did not start on the reset CP mapper");
+    CHECK((events & V90A4_RX_EVENT_DATA) != 0,
+          "48 B1d frames did not release downstream data");
+    CHECK((events & V90A4_RX_EVENT_RD) != 0,
+          "§9.6.2.2.1 Rd was not acquired on the data-frame grid");
+    CHECK((events & V90A4_RX_EVENT_RD_BAR) != 0,
+          "§9.6.2.2.2 Rd-to-R̄d transition was not detected");
+    CHECK(v90_analogue_phase4_rate_renegotiations(rx) == 1,
+          "completed %d rate renegotiations, expected one",
+          v90_analogue_phase4_rate_renegotiations(rx));
+    CHECK(v90_analogue_phase4_b1d_frames(rx) == 48,
+          "B1d had %d frames, expected 48",
+          v90_analogue_phase4_b1d_frames(rx));
+    CHECK(v90_analogue_phase4_b1d_bit_errors(rx) == 0,
+          "B1d known plaintext had %d bit errors",
+          v90_analogue_phase4_b1d_bit_errors(rx));
+    {
+        uint8_t got[64];
+        int got_n = v90_analogue_phase4_get_data_bits(rx, got, sizeof(got));
+
+        CHECK(got_n == 2*(cp.drn + 20), "decoded %d data bits, expected %d",
+              got_n, 2*(cp.drn + 20));
+        for (int i = 0; i < got_n; i++)
+            CHECK(got[i] == (uint8_t)((i % (cp.drn + 20)) & 1),
+                  "data bit %d broke B1d mapper continuity", i);
+    }
     CHECK(v90_analogue_phase4_demap_failures(rx) == 0,
           "%d frames would not demap against the CPt they were mapped with",
           v90_analogue_phase4_demap_failures(rx));
@@ -494,6 +614,13 @@ static void test_phase4_receive(int sr)
     if ((mp = v90_analogue_phase4_mp(rx)) != NULL) {
         CHECK(mp->max_drn == 14, "MP max drn %u, expected 14", mp->max_drn);
         CHECK(mp->acknowledge, "MP acknowledge bit not read back");
+        CHECK(mp->type1 == (sr == 0), "MP type was not decoded correctly");
+        if (sr == 0) {
+            CHECK(mp->precoder[0][0] == 0x1234
+                  &&  (uint16_t) mp->precoder[0][1] == 0xFEDC
+                  &&  mp->precoder[2][0] == 0x3456,
+                  "Type-1 precoder coefficients were not decoded correctly");
+        }
         printf("  Ri %dT, TRN2d %dT, %d MP frame(s): max drn=%u (%d bps), "
                "rate mask 0x%04X, %s\n",
                v90_analogue_phase4_r_symbols(rx),
@@ -555,7 +682,8 @@ static void test_phase4_cp_from_measurement(void)
         int cpt_k;
         int cp_k;
 
-        if (!v90_analogue_phase4_build_cp(&m, V90_LAW_ULAW, sr, ld, &cpt, &cp)) {
+        if (!v90_analogue_phase4_build_cp(&m, V90_LAW_ULAW, 0.0,
+                                           sr, ld, &cpt, &cp)) {
             printf("  FAIL: Sr=%d yielded no offerable constellation\n", sr);
             failures++;
             continue;

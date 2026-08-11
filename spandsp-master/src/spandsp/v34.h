@@ -477,6 +477,19 @@ SPAN_DECLARE(int) v34_seed_tx_data(v34_state_t *s,
                                    int expanded_shaping,
                                    const int16_t precoder_coeffs[6]);
 
+/*! Hand an externally sequenced V.90 analogue transmitter from E to B1/data.
+    Seeds the V.34 data mapper from the validated V.90 MP, emits B1 as the
+    first all-ones data frame (V.90 §8.5.1/§9.4.2.5), then takes bits from the
+    modem's normal get-bit callback.  The existing carrier/modulator phase is
+    preserved across the handover.
+    \return 0 on success, or -1 for invalid modulation parameters. */
+SPAN_DECLARE(int) v34_v90_begin_tx_data(v34_state_t *s,
+                                        int bit_rate_n,
+                                        int trellis_size,
+                                        int use_non_linear_encoder,
+                                        int expanded_shaping,
+                                        const int16_t precoder_coeffs[6]);
+
 /*! Produce one complete V.34 mapping frame (eight Q9.7 complex symbols). */
 SPAN_DECLARE(int) v34_get_mapping_frame_state(v34_state_t *s,
                                               int16_t bits[16]);
@@ -537,6 +550,13 @@ SPAN_DECLARE(int) v34_tx_start_external_symbols(v34_state_t *s,
                                                 int high_carrier,
                                                 v34_tx_external_symbol_func_t fn,
                                                 void *user_data);
+
+/*! Replace the active data mapper with an external symbol source without
+    resetting carrier phase, baud timing, or pulse-shaper history.  Used at
+    V.90 §9.6's data-frame-aligned rate-renegotiation seam. */
+SPAN_DECLARE(int) v34_v90_resume_external_symbols(v34_state_t *s,
+                                                  v34_tx_external_symbol_func_t fn,
+                                                  void *user_data);
 
 /*! Stop an external symbol source and leave the transmitter silent.
     \param s The modem context. */

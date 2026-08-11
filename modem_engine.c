@@ -565,6 +565,9 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
     case DS_LINK_DETECTING:
         ME_LOG("[ME] V.42 detection started\n");
         break;
+    case DS_LINK_DETECTED:
+        ME_LOG("[ME] V.42 detection succeeded; entering LAPM establishment\n");
+        break;
     case DS_LINK_XID_NEGOTIATED:
         ME_LOG("[ME] V.42 XID negotiated\n");
         break;
@@ -1612,6 +1615,12 @@ static bool     g_v90a_complete_logged = false;
 static bool     g_v90a_failed_logged = false;
 static bool     g_v90a_retrain_logged = false;
 static uint64_t g_v90a_rx_codewords = 0;
+static int      g_v90a_data_diag_bits = 0;
+static int      g_v90a_data_diag_zeros = 0;
+static uint64_t g_v90a_data_bits_seen = 0;
+static uint64_t g_v90a_data_adp_window = 0;
+static int      g_v90a_data_adp_window_bits = 0;
+static int      g_v90a_data_adp_count = 0;
 static int      g_v90a_u_info = 78;
 static v90_dil_desc_t g_v90a_dil;
 static bool     g_v90a_dil_valid = false;
@@ -2837,6 +2846,12 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90a_failed_logged = false;
     g_v90a_retrain_logged = false;
     g_v90a_rx_codewords = 0;
+    g_v90a_data_diag_bits = 0;
+    g_v90a_data_diag_zeros = 0;
+    g_v90a_data_bits_seen = 0;
+    g_v90a_data_adp_window = 0;
+    g_v90a_data_adp_window_bits = 0;
+    g_v90a_data_adp_count = 0;
     if (g_v90) {
         v90_free(g_v90);
         g_v90 = NULL;
@@ -3901,9 +3916,8 @@ void me_init(void)
 
         g_v90_analogue_role = (role && strcmp(role, "analogue") == 0);
         if (g_v90_analogue_role)
-            ME_LOG("[ME] V.90 role: ANALOGUE (opt-in; V.8 through §9.4.2.4 — "
-                   "§9.4.2.5's B1 is not implemented, so the call stops "
-                   "short of data mode)\n");
+            ME_LOG("[ME] V.90 role: ANALOGUE (opt-in; Phase 4 B1/B1d and "
+                   "bidirectional data mappers enabled)\n");
     }
     dring_init(&downstream_ring);
     dring_init(&upstream_ring);
@@ -5614,6 +5628,29 @@ static void prepare_v90_analogue_phase3_locked(void)
     }
     cfg.u_info = g_v90a_u_info;
     cfg.md_units = 0;                   /* INFO1a announces no MD */
+    cfg.digital_max_tx_dbm0 = 0.0;
+    {
+        v34_v90_info0a_t info0d;
+
+        /* V.90 §8.2.1/Table 7 bits 33:37: code 0 is -0.5 dBm0 and code
+         * 31 is -16 dBm0.  §8.5.2/Table 15 requires CP's average power to
+         * obey this value; omitting it made clean digital calls offer every
+         * measured Ucode at 56 kbit/s regardless of the peer's limit. */
+        if (v34_get_v90_received_info0a(g_v34, &info0d)
+            && info0d.info0d_extensions_valid) {
+            cfg.digital_max_tx_dbm0 = -0.5*(info0d.info0d_max_power_code + 1);
+            ME_LOG("[ME] V.90 analogue downstream: INFO0d maximum transmit "
+                   "power %.1f dBm0 (code %u, measured at %s)\n",
+                   cfg.digital_max_tx_dbm0,
+                   (unsigned) info0d.info0d_max_power_code,
+                   info0d.info0d_power_measured_at_codec_output
+                       ? "codec output" : "digital-modem terminals");
+        } else {
+            ME_LOG("[ME] V.90 analogue downstream: INFO0d power extension "
+                   "unavailable; CP power cap disabled\n");
+        }
+    }
+    cfg.scr_during_dil = parse_env_int("ME_V90_ANALOGUE_SCR", 0) != 0;
     cfg.scr_during_dil = parse_env_int("ME_V90_ANALOGUE_SCR", 0) != 0;
     /*
      * §5.4.5's Sr, which this side chooses and Phase 4's CPt/CP carry.  The
@@ -5625,6 +5662,12 @@ static void prepare_v90_analogue_phase3_locked(void)
      */
     cfg.shaping_redundancy = parse_env_int("ME_V90_ANALOGUE_SR", 0);
     cfg.shaping_lookahead = parse_env_int("ME_V90_ANALOGUE_LD", 0);
+    cfg.upstream_max_n = parse_env_int("ME_V90_ANALOGUE_UPSTREAM_MAX_N", 0);
+    if (cfg.upstream_max_n >= 2 && cfg.upstream_max_n <= 14)
+        ME_LOG("[ME] V.90 analogue diagnostic upstream ceiling: N=%d (%d bps)\n",
+               cfg.upstream_max_n, cfg.upstream_max_n*2400);
+    else
+        cfg.upstream_max_n = 0;
     cfg.v34 = g_v34;                    /* borrow the modulator Phase 2 configured */
     if (g_v90a_dil_valid)
         cfg.dil = g_v90a_dil;
@@ -5836,6 +5879,20 @@ static void me_v90_analogue_phase4_progress_locked(void)
                    vpcm_cp_drn_to_bps(cp->drn),
                    cp->shaping_redundancy, cp->shaping_lookahead,
                    cp->codec_alaw ? "A-law" : "u-law");
+            ME_LOG("[ME] V.90 analogue Phase 4 constellations: "
+                   "CPt Mi=%d/%d/%d/%d/%d/%d; CP Mi=%d/%d/%d/%d/%d/%d\n",
+                   vpcm_cp_mask_population(cpt->masks[cpt->dfi[0]]),
+                   vpcm_cp_mask_population(cpt->masks[cpt->dfi[1]]),
+                   vpcm_cp_mask_population(cpt->masks[cpt->dfi[2]]),
+                   vpcm_cp_mask_population(cpt->masks[cpt->dfi[3]]),
+                   vpcm_cp_mask_population(cpt->masks[cpt->dfi[4]]),
+                   vpcm_cp_mask_population(cpt->masks[cpt->dfi[5]]),
+                   vpcm_cp_mask_population(cp->masks[cp->dfi[0]]),
+                   vpcm_cp_mask_population(cp->masks[cp->dfi[1]]),
+                   vpcm_cp_mask_population(cp->masks[cp->dfi[2]]),
+                   vpcm_cp_mask_population(cp->masks[cp->dfi[3]]),
+                   vpcm_cp_mask_population(cp->masks[cp->dfi[4]]),
+                   vpcm_cp_mask_population(cp->masks[cp->dfi[5]]));
             trace_phase("V90a Phase4 start: CPt drn=%u CP drn=%u",
                         cpt->drn, cp->drn);
         }
@@ -5847,12 +5904,15 @@ static void me_v90_analogue_phase4_progress_locked(void)
     if (stage != last) {
         last = stage;
         ME_LOG("[ME] V.90 analogue Phase 4 RX: %s (Ri %dT, TRN2d %dT/%d ones, "
-               "MP %d frames, %d frames off the CPt constellation)\n",
+               "MP %d frames, B1d %d/48 frames with %d bit errors, "
+               "%d demap failures)\n",
                v90_analogue_phase4_stage_name(stage),
                v90_analogue_phase4_r_symbols(p4),
                v90_analogue_phase4_trn2d_symbols(p4),
                v90_analogue_phase4_trn2d_ones(p4),
                v90_analogue_phase4_mp_frames(p4),
+               v90_analogue_phase4_b1d_frames(p4),
+               v90_analogue_phase4_b1d_bit_errors(p4),
                v90_analogue_phase4_demap_failures(p4));
         trace_phase("V90a P4 RX %s", v90_analogue_phase4_stage_name(stage));
     }
@@ -6424,15 +6484,24 @@ void me_tx_audio(int16_t *amp, int len)
                 v34_tx(g_v34, amp, len);
             pthread_mutex_unlock(&g_state_mtx);
         } else if (g_mod == ME_MOD_V90) {
-            uint8_t pcm_out[len];
-            bool generated;
+            if (me_v90_analogue_role()) {
+                /* The analogue role's data direction remains V.34 upstream;
+                 * keep using the modulator whose mapper was seeded from MP. */
+                pthread_mutex_lock(&g_state_mtx);
+                if (g_v90a)
+                    v90_analogue_phase3_tx(g_v90a, amp, len);
+                pthread_mutex_unlock(&g_state_mtx);
+            } else {
+                uint8_t pcm_out[len];
+                bool generated;
 
-            pthread_mutex_lock(&g_state_mtx);
-            generated = generate_v90_raw_codewords_locked(pcm_out, len);
-            pthread_mutex_unlock(&g_state_mtx);
-            if (generated) {
-                for (int i = 0; i < len; i++)
-                    amp[i] = pcm_to_linear(pcm_out[i]);
+                pthread_mutex_lock(&g_state_mtx);
+                generated = generate_v90_raw_codewords_locked(pcm_out, len);
+                pthread_mutex_unlock(&g_state_mtx);
+                if (generated) {
+                    for (int i = 0; i < len; i++)
+                        amp[i] = pcm_to_linear(pcm_out[i]);
+                }
             }
         } else {
             /* V.22bis duplex downstream TX */
@@ -6503,16 +6572,87 @@ void me_rx_g711(const uint8_t *codewords, int count)
                && (g_state == ME_TRAINING || g_state == ME_DATA));
     if (raw_v91)
         v91_live_receive_codewords_locked(codewords, count);
-    if (g_v90a_started && g_v90a && g_state == ME_TRAINING) {
-        /*
-         * §9.3.2's whole conditional structure comes off this stream: the
-         * Sd-to-S̄d transition ends Ja, Jd starts S, J'd starts S̄, and enough
-         * DIL ends Phase 3.  v90_analogue_phase3_rx() applies each to the
-         * transmitter as it is found.
-         */
-        (void) v90_analogue_phase3_rx(g_v90a, codewords, count);
+    if (g_v90a_started && g_v90a
+        && (g_state == ME_TRAINING || g_state == ME_DATA)) {
+        unsigned events;
+        uint8_t data_bits[2048];
+        int nbits;
+
+        /* Phase 3 and Phase 4/data are one byte-exact DS0 stream.  The Phase 4
+         * receiver changes from CPt to CP at Ed and retains that mapper into
+         * data, so it must continue to receive after ME_DATA is entered. */
+        events = v90_analogue_phase3_rx(g_v90a, codewords, count);
         g_v90a_rx_codewords += (uint64_t) count;
         me_v90_analogue_progress_locked();
+        if ((events & V90A4_RX_EVENT_DATA)
+            && g_state == ME_TRAINING
+            && v90_analogue_phase3_data_ready(g_v90a)) {
+            const vpcm_cp_frame_t *cp = v90_analogue_phase3_cp(g_v90a);
+            int downstream_rate = cp ? (int)vpcm_cp_drn_to_bps(cp->drn) : 0;
+            int upstream_rate = v90_analogue_phase3_upstream_rate(g_v90a);
+
+            if (downstream_rate <= 0)
+                downstream_rate = V90_RATE_BPS;
+            /* The stack's line bit rate clocks its transmitted V.42/V.14
+             * stream.  In the analogue role that stream is the V.34 upstream,
+             * not the faster PCM downstream; using 56 kbit/s here made V.42's
+             * detection timers expire while bits left at 12–26.4 kbit/s. */
+            data_stack_start_online(upstream_rate > 0 ? upstream_rate
+                                                      : downstream_rate,
+                                    g_calling_party);
+            g_state = ME_DATA;
+            g_phase_start_ms = 0;
+            ME_LOG("[ME] V.90 analogue startup complete after B1d "
+                   "(upstream V.34 %d bps, downstream PCM %d bps)\n",
+                   upstream_rate, downstream_rate);
+            trace_phase("V90a enter DATA after B1d: upstream=%d downstream=%d",
+                        upstream_rate, downstream_rate);
+            if (g_data_framing != DS_FRAMING_V42) {
+                g_data_connect_reported = true;
+                di_on_connected(downstream_rate);
+            } else {
+                ME_LOG("[ME] V.90 analogue carrier ready; waiting for V.42 LAPM\n");
+            }
+        }
+        while ((nbits = v90_analogue_phase3_get_data_bits(
+                    g_v90a, data_bits, (int)sizeof(data_bits))) > 0) {
+            for (int i = 0; i < nbits; i++) {
+                int data_bit = data_bits[i] & 1U;
+
+                if (g_v90a_data_diag_bits < 4096) {
+                    g_v90a_data_diag_bits++;
+                    if (!data_bit)
+                        g_v90a_data_diag_zeros++;
+                    if (g_v90a_data_diag_bits == 4096) {
+                        ME_LOG("[ME] V.90 analogue first 4096 downstream data "
+                               "bits: %d zeroes, %d marks\n",
+                               g_v90a_data_diag_zeros,
+                               4096 - g_v90a_data_diag_zeros);
+                    }
+                }
+                if (data_bit == 0 && g_v90a_data_bits_seen > 0
+                    && g_v90a_data_adp_window_bits == 44
+                    && g_v90a_data_adp_window == ((1ULL << 44) - 1ULL)) {
+                    ME_LOG("[ME] V.90 analogue first downstream zero at bit %llu\n",
+                           (unsigned long long)g_v90a_data_bits_seen);
+                }
+                /* V.42 §7.2.1 Table 3: (E), 12 marks, (C), 12 marks. */
+                g_v90a_data_adp_window =
+                    (g_v90a_data_adp_window >> 1) | ((uint64_t)data_bit << 43);
+                if (g_v90a_data_adp_window_bits < 44)
+                    g_v90a_data_adp_window_bits++;
+                if (g_v90a_data_adp_window_bits == 44
+                    && g_v90a_data_adp_window == 0xFFFA1BFFE8AULL) {
+                    g_v90a_data_adp_count++;
+                    ME_LOG("[ME] V.90 analogue decoded V.42 ADP #%d at "
+                           "downstream bit %llu\n",
+                           g_v90a_data_adp_count,
+                           (unsigned long long)(g_v90a_data_bits_seen - 43));
+                }
+                g_v90a_data_bits_seen++;
+                ds_rx_put_bit(&g_data_stack, data_bit);
+            }
+        }
     }
     if (g_v92_p3_rx_active && g_v92_active && g_state == ME_TRAINING) {
         for (int i = 0; i < count; i++) {

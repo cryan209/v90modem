@@ -33,6 +33,9 @@ typedef struct {
     v90_dil_desc_t dil;         /* the descriptor to carry in Ja; n == 0 = none */
     bool      scr_during_dil;   /* §9.3.2.9: SCR rather than silence */
     double    dil_coverage;     /* §9.3.2.10 stopping rule; 0 = default */
+    /* INFO0d bits 33:37, in dBm0, for §8.5.2/Table 15.  Zero means the
+     * capability was unavailable (the offline-test/unbounded case). */
+    double    digital_max_tx_dbm0;
     /*
      * §5.4.5's Sr, carried into Phase 4's CPt and CP: 0 disables spectral
      * shaping, 1 to 3 spend that many of the six sign bits on it.  This side
@@ -43,6 +46,9 @@ typedef struct {
      */
     int       shaping_redundancy;
     int       shaping_lookahead;
+    /* Diagnostic ceiling for the V.34 upstream N (N*2400 bit/s).  Zero trusts
+     * MP; 2..14 permits probing peers which immediately request §9.6. */
+    int       upstream_max_n;
     /*
      * A V.34 context to borrow as the modulator.  Phase 2 has already
      * configured one — power, symbol rate, carrier — and its receiver is what
@@ -100,5 +106,10 @@ bool v90_analogue_phase3_phase4_failed(const v90_analogue_phase3_t *s);
 /* What is being transmitted, once Phase 4 has started.  NULL before that. */
 const vpcm_cp_frame_t *v90_analogue_phase3_cpt(const v90_analogue_phase3_t *s);
 const vpcm_cp_frame_t *v90_analogue_phase3_cp(const v90_analogue_phase3_t *s);
+/* §8.6.1 has completed and downstream CP data is being decoded. */
+bool v90_analogue_phase3_data_ready(const v90_analogue_phase3_t *s);
+int v90_analogue_phase3_get_data_bits(v90_analogue_phase3_t *s,
+                                      uint8_t *bits, int max_bits);
+int v90_analogue_phase3_upstream_rate(const v90_analogue_phase3_t *s);
 
 #endif

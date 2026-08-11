@@ -44,6 +44,9 @@ static void ds_v42_status(void *user_data, int status)
     case V42_STATUS_DETECTING:
         event = DS_LINK_DETECTING;
         break;
+    case V42_STATUS_DETECTION_SUCCEEDED:
+        event = DS_LINK_DETECTED;
+        break;
     case V42_STATUS_XID_NEGOTIATED:
         event = DS_LINK_XID_NEGOTIATED;
         break;

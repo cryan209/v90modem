@@ -36,6 +36,7 @@ typedef enum {
 
 typedef enum {
     DS_LINK_DETECTING,
+    DS_LINK_DETECTED,
     DS_LINK_XID_NEGOTIATED,
     DS_LINK_CONNECTED,
     DS_LINK_UNSUPPORTED,
