@@ -321,6 +321,20 @@ Phase 4 is not "CP/CP' in disguise".
   complete call.  Artifacts are under
   `artifacts/dmodem-t3-live/20260811T072246Z-adaptive-sd/`.
 
+  A later live run showed that a fixed 85% threshold was the opposite failure
+  on the negotiated 3200-low path: SmartLink's real Ja is only 63% against our
+  absolute Table-18 convention, but repeats one learned 16-bit word at 85-94%
+  for more than 600 ms.  Acquisition now accepts either strong immediate Table
+  evidence or weaker evidence backed independently by duration and periodicity;
+  the latter cannot accept the old 48-symbol TRN coincidence.  Its rolling raw
+  grader retains 800 ms and checks 3000/3200 low/high, and the signal/gap/Ja
+  edge runs before echo cancellation because the V.34 front end erased the
+  legal 1829 Hz low-carrier signal.  A CRC-valid Ja descriptor still wins when
+  available.  Live, SmartLink moved from zero error energy to about 9, built a
+  428-bit CPt, and this receiver entered `V90_CP`; it retrained before CP
+  validation.  Evidence:
+  `artifacts/dmodem-3000-3200-live/v90-dmodem-adaptive5-20260811T214619Z/`.
+
   The reason for this branch was isolated before implementation.  A direct
   reset-state mapper→demapper check at N=13/16-state trellis carried 77,688
   decoded bits with zero errors, while the old waveform path returned random

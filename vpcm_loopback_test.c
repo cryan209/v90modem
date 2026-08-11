@@ -14,6 +14,7 @@
  */
 
 #include "v91.h"
+#include "p3_demod.h"
 #include "vpcm_call.h"
 #include "vpcm_call_pair.h"
 #include "vpcm_link.h"
@@ -393,6 +394,7 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law);
 static bool test_v90_v34_rx_stage_isolation(void);
 static bool test_v90_v90cp_upstream_data_reconfiguration(void);
 static bool test_v90_upstream_t3_b1_acquisition(void);
+static bool test_v90_adaptive_ja_acceptance(void);
 static bool test_v90_negotiated_data_rates(v91_law_t law);
 static bool test_v90_spectral_shaping(v91_law_t law);
 static bool test_v92_suvd_codec_and_phase4(void);
@@ -5711,6 +5713,58 @@ done:
     return ok;
 }
 
+static bool test_v90_adaptive_ja_acceptance(void)
+{
+    p3_segment_t segment;
+
+    vpcm_log("Test: adaptive V.90 Ja acquisition policy");
+    memset(&segment, 0, sizeof(segment));
+    segment.type = P3_SIGNAL_J;
+
+    /* Clean Table 18 evidence remains the low-latency path. */
+    segment.length = 48;
+    segment.j_table_match_pct = 85;
+    segment.j_periodic_match_pct = 70;
+    if (!p3_is_adaptive_ja_candidate(&segment, 3200))
+        return false;
+
+    /* Captured false TRN candidates: plausible Table score, only 15 ms. */
+    segment.j_table_match_pct = 71;
+    segment.j_periodic_match_pct = 95;
+    if (p3_is_adaptive_ja_candidate(&segment, 3200)) {
+        fprintf(stderr, "adaptive Ja policy accepted short TRN coincidence\n");
+        return false;
+    }
+
+    /* Captured d-modem 3200-low Ja: weak absolute convention, long periodic run. */
+    segment.length = 512;  /* 160 ms at 3200; live runs exceed 600 ms. */
+    segment.j_table_match_pct = 63;
+    segment.j_periodic_match_pct = 85;
+    if (!p3_is_adaptive_ja_candidate(&segment, 3200)) {
+        fprintf(stderr, "adaptive Ja policy rejected sustained foreign Ja\n");
+        return false;
+    }
+
+    /* Duration is measured in time, so 3000 receives the same policy. */
+    segment.length = 480;
+    if (!p3_is_adaptive_ja_candidate(&segment, 3000))
+        return false;
+
+    /* Some foreign conventions have no usable absolute Table label at all;
+       a 300 ms, highly periodic J run remains structurally unambiguous. */
+    segment.length = 960;
+    segment.j_table_match_pct = 0;
+    segment.j_periodic_match_pct = 95;
+    if (!p3_is_adaptive_ja_candidate(&segment, 3200))
+        return false;
+
+    segment.type = P3_SIGNAL_TRN;
+    if (p3_is_adaptive_ja_candidate(&segment, 3000))
+        return false;
+    vpcm_log("PASS: adaptive Ja separates short TRN from sustained periodic J");
+    return true;
+}
+
 static bool test_v90_upstream_t3_b1_acquisition(void)
 {
     static const int bauds[] = {3, 4};
@@ -10470,6 +10524,7 @@ static bool run_vpcm_primitive_suite(void)
     return test_vpcm_cp_robbed_bit_safe_profile()
         && test_v90_v34_rx_stage_isolation()
         && test_v90_v90cp_upstream_data_reconfiguration()
+        && test_v90_adaptive_ja_acceptance()
         && test_v90_upstream_t3_b1_acquisition()
         && test_v92_ja_strict_descriptor_parsing()
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ULAW)

@@ -1737,6 +1737,8 @@ static int     g_tx_buf_rd = 0;  /* read position (updated by me_rx_audio) */
    post EC), so the echo gate correlates exactly the signal the S detector
    decided on. */
 static int16_t  g_rx_ref_buf[TX_BUF_SIZE];
+/* Pre-echo-canceller samples for adaptive Phase-3 acquisition. */
+static int16_t  g_rx_raw_buf[TX_BUF_SIZE];
 static int      g_rx_ref_wr = 0;
 static uint64_t g_rx_ref_samples = 0;   /* monotonic; aligns gate logs to the tap */
 
@@ -3701,6 +3703,7 @@ static void start_v34_training(void)
        nonsense. */
     memset(g_tx_buf, 0, sizeof(g_tx_buf));
     memset(g_rx_ref_buf, 0, sizeof(g_rx_ref_buf));
+    memset(g_rx_raw_buf, 0, sizeof(g_rx_raw_buf));
     g_tx_buf_wr = 0;
     g_tx_buf_rd = 0;
     g_rx_ref_wr = 0;
@@ -4516,12 +4519,15 @@ static double v90_s_echo_correlation_locked(void)
     return best;
 }
 
-static void v90_s_echo_record_rx_locked(const int16_t *amp, int len)
+static void v90_s_echo_record_rx_locked(const int16_t *filtered,
+                                         const int16_t *raw,
+                                         int len)
 {
-    if (!amp || len <= 0)
+    if (!filtered || !raw || len <= 0)
         return;
     for (int i = 0; i < len; i++) {
-        g_rx_ref_buf[g_rx_ref_wr] = amp[i];
+        g_rx_ref_buf[g_rx_ref_wr] = filtered[i];
+        g_rx_raw_buf[g_rx_ref_wr] = raw[i];
         g_rx_ref_wr = (g_rx_ref_wr + 1) & TX_BUF_MASK;
     }
     /* Monotonic count of RX samples that reached the V.34/V.90 receiver.  Logged
@@ -4640,10 +4646,10 @@ static bool v90_p3_confirm_signal_locked(p3_signal_type_t want)
  * At 2400 baud the J period is 8 symbols (3.3 ms); two periods fit in
  * ~7 ms, so a 100 ms scan window has ample data.
  *
- * Throttled to every 80 ms to keep CPU usage reasonable (~9 ms per scan).
- * Total J detection latency is ~80 ms (throttle) + ~7 ms (pattern) =
- * ~87 ms, well within the peer's ~1.1 s WaitForSd timeout.  With this
- * as the primary detector, ME_V90_SD_DELAY_MS and
+ * Throttled to every 80 ms.  The 800 ms history lets a weak foreign
+ * convention trade Table-18 score for sustained periodicity; a clean J still
+ * takes the immediate short-evidence path.  Both remain within WaitForSd.
+ * With this as the primary detector, ME_V90_SD_DELAY_MS and
  * ME_V90_SD_DELAY_RETRAIN_MS can both default to 0 (§9.3.1.3 allows
  * 0–500 ms; 0 is valid when Ja is detected structurally rather than
  * by bit count).
@@ -4655,7 +4661,7 @@ static bool v90_p3_confirm_signal_locked(p3_signal_type_t want)
  * Disabled by ME_V90_P3_CONFIRM=0 (same kill switch as the S/J
  * confirmation gates). */
 enum { P3_JA_SCAN_THROTTLE = 640 };  /* 80 ms at 8 kHz */
-enum { P3_JA_SCAN_WINDOW  = 3200 };  /* 400 ms at 8 kHz — longer for noisy HW */
+enum { P3_JA_SCAN_WINDOW  = 6400 };  /* 800 ms: retain a full weak foreign-J run */
 enum { P3_JA_SCAN_LOG_INTERVAL = 2400 };  /* log every 300 ms */
 
 static int g_v90_p3_ja_scan_samples = 0;
@@ -4698,42 +4704,31 @@ static void v90_p3_scan_ja_locked(int len)
             return;
     }
 
-    baud_code = v34_get_rx_baud_rate(g_v34);
-    if (baud_code < P3_BAUD_2400 || baud_code >= P3_BAUD_COUNT)
-        baud_code = P3_BAUD_2400;
+    baud_code = v90_selected_upstream_baud_locked();
+    if (baud_code != P3_BAUD_3000 && baud_code != P3_BAUD_3200)
+        baud_code = P3_BAUD_3200;
 
     n = P3_JA_SCAN_WINDOW;
     if (n > TX_BUF_SIZE)
         n = TX_BUF_SIZE;
+    /* Grade Ja on the pre-echo-canceller observation.  With INFO1d selecting
+     * 3200-low, SmartLink's raw 1829 Hz Ja remains 94% periodic while the
+     * ordinary V.34 echo front end erases it.  Payload RX remains filtered;
+     * only this bounded acquisition decision uses the raw companion ring. */
     for (int i = 0; i < n; i++)
-        window[i] = g_rx_ref_buf[(g_rx_ref_wr - n + i) & TX_BUF_MASK];
+        window[i] = g_rx_raw_buf[(g_rx_ref_wr - n + i) & TX_BUF_MASK];
 
-    /* Try the negotiated baud first, then fall back to other common rates.
-     * V.34 Phase 3 training (S/S̄/PP/TRN/Ja) runs at the negotiated symbol
-     * rate, but v34_get_rx_baud_rate() can return the wrong value on some
-     * peers (observed: returns 3200 when the analogue modem trains at
-     * 2400).  Trying all rates costs ~4×18 ms = 72 ms every 80 ms throttle —
-     * acceptable since this only runs while waiting for Ja.
-     *
-     * Try both carriers at each baud: the caller uses the high carrier, but
-     * which frequency is “high” depends on the baud (1800 Hz @ 2400, 1920 Hz
-     * @ 3200, etc.).  p3_demod’s PLL corrects residual offset but needs the
-     * starting carrier to be close. */
+    /* V.90 §6.2 limits this upstream to 3000/3200 (3429 is optional and is
+     * not offered by the current profile).  Try INFO1a's selected rate first
+     * and the other required digital-modem rate as fallback.  This bounds the
+     * 800 ms grader to four rate/carrier passes per 80 ms tick. */
     {
-        /* Priority order: negotiated baud first, then 2400 (most common for
-         * V.90 Phase 3), then 3200, then the rest. */
-        int try_bauds[P3_BAUD_COUNT];
+        int try_bauds[2];
         int n_try = 0;
 
         try_bauds[n_try++] = baud_code;
-        if (baud_code != P3_BAUD_2400)
-            try_bauds[n_try++] = P3_BAUD_2400;
-        if (baud_code != P3_BAUD_3200)
-            try_bauds[n_try++] = P3_BAUD_3200;
-        for (int b = 0; b < P3_BAUD_COUNT; b++) {
-            if (b != baud_code && b != P3_BAUD_2400 && b != P3_BAUD_3200)
-                try_bauds[n_try++] = b;
-        }
+        try_bauds[n_try++] = baud_code == P3_BAUD_3000
+                           ? P3_BAUD_3200 : P3_BAUD_3000;
 
         for (int bi = 0; bi < n_try; bi++) {
             int b = try_bauds[bi];
@@ -4750,24 +4745,27 @@ static void v90_p3_scan_ja_locked(int len)
 
                     if (seg->type == P3_SIGNAL_J
                         && seg->end_sample >= n - P3_JA_SCAN_THROTTLE
-                        && seg->j_table_match_pct >= 85) {
+                        && p3_is_adaptive_ja_candidate(
+                               seg, (int)(result->baud_rate_estimate + 0.5f))) {
                         bool accepted;
                         int start_sample = seg->start_sample;
                         int end_sample = seg->end_sample;
                         int length = seg->length;
                         int match_pct = seg->j_table_match_pct;
+                        int periodic_pct = seg->j_periodic_match_pct;
 
-                        /* The 400 ms analysis window overlaps PP/TRN and old
+                        /* The rolling analysis window overlaps PP/TRN and old
                          * Ja on every invocation.  Accepting a J segment
                          * anywhere in it can fire on stale training hundreds
                          * of milliseconds before the peer enters WaitForSd;
                          * SmartLink then reports zero Sd energy and retrains.
                          * Require J evidence in the newest 80 ms, matching the
-                         * scan cadence, and a strong Table 18 match, so
-                         * §9.3.1.3's delay is measured from the current Ja
-                         * rather than an old segment.  Live false triggers in
-                         * scrambled TRN scored only 69-71% and preceded the
-                         * canonical Ja event by 409-477 ms (2026-08-11). */
+                         * scan cadence.  p3_is_adaptive_ja_candidate() accepts
+                         * either a strong short Table 18 match or a weaker run
+                         * only after duration and periodicity independently
+                         * prove sustained J.  Live false TRN matches scored
+                         * 69-71% but lasted only 48 symbols; the foreign
+                         * 3200-low Ja scores 63% yet persists for 600+ ms. */
                         p3_result_free(result);
                         /* Fire J event directly.  The post-processing (DIL
                          * capture, S-detector arming) mirrors the v34rx J
@@ -4780,10 +4778,11 @@ static void v90_p3_scan_ja_locked(int len)
                             v34_v90_arm_phase3_s_detector(g_v34);
                         }
                         fprintf(stderr,
-                                "[ME] V.90 p3_demod: current J detected (structural, %d ms window, "
-                                "segment=%d..%d samples/%d symbols match=%d%%, baud=%d carrier=%s); "
-                                "accepted=%d\n",
-                                n * 1000 / 8000, start_sample, end_sample, length, match_pct, b,
+                                "[ME] V.90 p3_demod: current J detected (adaptive structural, %d ms window, "
+                                "segment=%d..%d samples/%d symbols table=%d%% periodic=%d%%, "
+                                "baud=%d carrier=%s); accepted=%d\n",
+                                n * 1000 / 8000, start_sample, end_sample, length,
+                                match_pct, periodic_pct, b,
                                 carrier == P3_CARRIER_HIGH ? "high" : "low",
                                 accepted ? 1 : 0);
                         trace_phase("V90 p3_demod J detected accepted=%d", accepted ? 1 : 0);
@@ -5193,8 +5192,11 @@ void me_rx_audio(const int16_t *amp, int len)
                 } else if (notch_active) {
                     notch_filter_apply(&g_notch, filtered, len);
                 }
-                v90_wait_ja_energy_gate_locked(filtered, len);
-                v90_s_echo_record_rx_locked(filtered, len);
+                /* Acquisition markers must survive a legal INFO1d carrier
+                 * choice that confuses the ordinary V.34 echo front end.
+                 * Grade the physical signal/gap/Ja edge on unmodified RX. */
+                v90_wait_ja_energy_gate_locked(amp, len);
+                v90_s_echo_record_rx_locked(filtered, amp, len);
                 /*
                  * Once the analogue role's Phase 3 is running, what arrives is
                  * the digital modem's PCM downstream — Sd, TRN1d, Jd, DIL —
@@ -5206,9 +5208,9 @@ void me_rx_audio(const int16_t *amp, int len)
                 if (!g_v90a_started)
                     v34_rx(g_v34, filtered, len);
                 /* p3_demod J scanner runs AFTER v34_rx so the real-time V.34
-                   receiver processes samples first.  The scanner reads from
-                   the g_rx_ref_buf ring (filled by v90_s_echo_record above),
-                   not from v34_rx's internal state, so ordering is safe. */
+                   receiver processes samples first.  The scanner reads the
+                   raw companion ring filled beside g_rx_ref_buf, not from
+                   v34_rx's internal state, so ordering is safe. */
                 v90_p3_scan_ja_locked(len);
                 if (g_v34_fallback_to_v22bis_pending) {
                     int status = g_v34_fallback_status;

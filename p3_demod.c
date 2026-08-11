@@ -2353,6 +2353,36 @@ bool p3_find_answer_phase4_timing(const p3_result_t *result,
     return true;
 }
 
+bool p3_is_adaptive_ja_candidate(const p3_segment_t *segment, int baud_rate)
+{
+    int duration_ms;
+
+    if (!segment || segment->type != P3_SIGNAL_J || baud_rate <= 0
+        || segment->length <= 0)
+        return false;
+    duration_ms = (segment->length*1000 + baud_rate/2)/baud_rate;
+
+    /* A clean Table 18 match is safe with only a few periods. */
+    if (segment->j_table_match_pct >= 85 && duration_ms >= 10)
+        return true;
+
+    /* Live SmartLink Ja at 3200-low is badly transformed by its analogue
+       bridge: Table 18 reaches only 63%, while the repeated 16-bit sequence
+       remains 85-90% periodic for 610-750 ms.  The old false positives in
+       scrambled TRN also reached 69-71% Table 18, but lasted only 48 symbols
+       (15 ms).  Trade instantaneous Table confidence for independent duration
+       and periodicity evidence rather than lowering one global threshold. */
+    if (segment->j_table_match_pct >= 60
+        && segment->j_periodic_match_pct >= 82
+        && duration_ms >= 160)
+        return true;
+
+    /* A longer, exceptionally periodic run is self-authenticating even when
+       the foreign modem's bit convention prevents any Table 18 labelling.
+       A scrambled TRN cannot sustain one learned 16-bit word for 300 ms. */
+    return segment->j_periodic_match_pct >= 92 && duration_ms >= 300;
+}
+
 typedef struct {
     p3_phase4_timing_quality_t timing;
     int j_table_match_pct;

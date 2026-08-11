@@ -233,6 +233,11 @@ typedef struct {
 /* Spec-timed Phase 4 transition quality. The transmitting call modem sends
  * J -> one J' block -> TRN; the transmitting answer modem sends
  * S(128T) -> S-bar(16T) -> TRN. */
+/* Live Ja acquisition policy.  A clean short Table-18 match is accepted
+ * immediately; a distorted candidate must instead prove that it is a
+ * sustained periodic J sequence rather than a chance TRN match. */
+bool p3_is_adaptive_ja_candidate(const p3_segment_t *segment, int baud_rate);
+
 typedef struct {
     bool  found;
     bool  source_calling_party;

@@ -114,3 +114,25 @@ Steps 1–3 are implemented offline:
   bits without error through G.711 quantization.
 
 Step 4, foreign-modem hardware qualification and LAPM evidence, remains open.
+
+### 2026-08-11 d-modem acquisition result
+
+A 3200-low call against the SmartLink `d-modem` rig exposed a prerequisite
+before DATA: INFO1d correctly selected 1829 Hz, but the ordinary V.34 echo
+front end erased Ja and left the peer in `WaitForSd` with zero error energy.
+Acquisition is now multi-evidence rather than one fixed Table-18 threshold:
+
+- a clean short Table-18 match is accepted immediately;
+- a weaker candidate must persist as a periodic J run, preventing the old
+  48-symbol TRN false positive;
+- the rolling grader retains 800 ms and tests 3000/3200 low/high only;
+- the physical signal/gap/Ja edge is graded before echo cancellation, while
+  payload reception remains on the filtered path;
+- a CRC-valid Ja descriptor remains authoritative whenever it arrives first.
+
+Live evidence in
+`artifacts/dmodem-3000-3200-live/v90-dmodem-adaptive5-20260811T214619Z/`
+selected 3200-low, drove SmartLink's error energy from zero to about 9, caused
+it to build its 428-bit CPt, and moved this receiver into `V90_CP`.  It then
+retrained before CP validation, so the next foreign-modem blocker is CPt
+acquisition rather than Ja/Sd acquisition.
