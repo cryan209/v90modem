@@ -281,26 +281,54 @@ Phase 4 is not "CP/CP' in disguise".
   digital receiver's recovered bit clock (rather than at the analogue TX
   timestamp), which removes a measured one-2D-symbol mapping-grid error, and
   the analogue V.34 transmitter emits B1 as §10.1.3.1's complete P-mapping-
-  frame data frame rather than a single mapping frame.  Payload still does
-  not synchronize: with frame timing corrected, the remaining blocker is
-  receive-constellation geometry/equalization, not bit count or B1 duration.
-  A direct reset-state mapper→demapper check at N=13/16-state trellis carries
-  77,688 decoded bits with zero errors, ruling out the Viterbi, shell demapper
-  and descrambler when fed exact Q9.7 points.  The waveform path's first 1024
-  decoded bits contain only 411 ones even though its leading decoded interval
-  is B1's scrambled-all-ones data frame; its best 128-bit payload candidate is
-  still 45 errors.  The corruption therefore exists before the mapping-frame
-  decoder, in the post-CP equalizer/constellation slicer.  Cross-checking the
-  exact coupled upstream capture with `modem-dsp-emu/tools/v90_rx_reference_demod.py`
-  gives **31.4 dB SNR / 2.7% EVM** over its clean four-point stretches (mu-law
-  ceiling 37.0 dB), while this receiver still returns effectively random B1.
-  The transmitted waveform and G.711 quantisation are therefore good; the
-  failure is specifically SpanDSP's online acquisition.  This agrees with the
-  emulator investigation's control: its independent online blind loop could
-  not demodulate even its own clean signal, while deterministic matched-filter
-  sampling plus least-squares equalization reached 36.3 dB.  Set
-  `VPCM_V90_NATIVE_UPSTREAM_DUMP=/tmp/native-up.ulaw` on the strict diagnostic
-  to reproduce the same cross-check
+  frame data frame rather than a single mapping frame.  The upstream receiver no longer carries the 8 kHz/T/2 geometry into DATA.
+  At the E→B1 seam, and only in the V.90 upstream receive branch, it now
+  resamples the 8 kHz line stream to 9.6 kHz, applies the 3200-baud 12%-rolloff
+  RRC at exactly T/3, searches the complete reset-state B1 frame for timing,
+  and solves a supervised T/3 equalizer.  That resampler, RRC history, timing
+  phase and equalizer continue unchanged through B1 into DATA; ordinary V.34
+  retains its existing T/2 receiver.  The external G.711 accounting and the
+  downstream byte-exact PCM path are untouched.  A PCMU-quantized native V.34
+  transmitter→receiver regression now acquires B1 and carries **16,000
+  pseudorandom payload bits at 21,600 bit/s with zero errors**, while verifying
+  the independent 8 kHz/9.6 kHz counts (16,000 external samples, 19,180
+  internal samples after causal-filter delay).  Clean synthetic sweeps pass
+  through 26,400 bit/s; 28,800 and 31,200 bit/s are rejected by the complete-
+  B1 fit gate rather than entering DATA with random output.  Hardware payload
+  interoperability remains to be measured.
+
+  A live d-modem attempt on 2026-08-11 did not reach that acceptance point.
+  Two correctly configured calls (including one after a full container restart)
+  retrained in Phase 3 before CPt/CP/E/B1: SmartLink reported repeated
+  `WaitForSd`, either `Error Energy = -0.000` or an unconverged 1800-3600
+  plateau, then `retrain requested`/`drop to V34`.  The new T/3 branch therefore
+  never armed and the calls neither validate nor invalidate its hardware data
+  decode.  Logs are under
+  `artifacts/dmodem-t3-live/20260811T070448Z-correct-env/`.
+
+  Follow-up A/B work found one concrete cause of the Phase 3 lottery.  The
+  400 ms `p3_demod` Ja scanner accepted a J-labelled segment anywhere near the
+  tail of its window even when its Table 18 match was only 69-71%; on two live
+  retries those events preceded the canonical Ja event by 409-477 ms.  Sd was
+  therefore transmitted while SmartLink was not yet ready and its error energy
+  remained exactly zero.  Ja fast-path acceptance now requires both current
+  (newest 80 ms) evidence and at least an 85% Table 18 match; weaker live
+  signals fall through to the canonical detector.  Retrained attempts also no
+  longer accidentally inherit the initial `ME_V90_SD_DELAY_MS`: absent an
+  explicit `ME_V90_SD_DELAY_RETRAIN_MS`, they probe the §9.3.1.3 legal window
+  at 0, 250 and 500 ms.  A delay-only A/B moved one attempt from zero energy to
+  79.7, but not to CPt; the corrected Ja gate likewise has not yet produced a
+  complete call.  Artifacts are under
+  `artifacts/dmodem-t3-live/20260811T072246Z-adaptive-sd/`.
+
+  The reason for this branch was isolated before implementation.  A direct
+  reset-state mapper→demapper check at N=13/16-state trellis carried 77,688
+  decoded bits with zero errors, while the old waveform path returned random
+  B1.  Cross-checking that same waveform with
+  `modem-dsp-emu/tools/v90_rx_reference_demod.py` gave **31.4 dB SNR / 2.7%
+  EVM** (mu-law ceiling 37.0 dB) using the same 9.6 kHz/T/3 architecture.
+  Set `VPCM_V90_NATIVE_UPSTREAM_DUMP=/tmp/native-up.ulaw` on the strict
+  diagnostic to reproduce the captured input.
 - peer-initiated retrains are answered per §9.3.1/§9.4.1/§9.5.1.2: a 2400 Hz
   Tone A detector (Goertzel, 80 ms confirmation) runs during the Phase 3/4 RX
   stages in `v34rx.c` and reports `PEER_RETRAIN`; the engine responds by

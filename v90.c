@@ -874,8 +874,29 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
         out->points[0][points++] = (uint16_t)linear;
     }
     out->set_sizes[0] = (uint8_t)points;
+    /* V.92 §6.4.2: k=3 uses equivalence classes modulo 2*Mi across a
+     * constellation of N=2*LC signed points.  Therefore Mi must not exceed
+     * LC.  The old 2*points value made Mi=N: half of the k=3 residues had no
+     * representative in the constellation, so no analogue transmitter could
+     * honour the CPd. */
     for (int i = 0; i < 12; i++)
-        out->moduli[i] = (uint8_t)(2 * points > 255 ? 255 : 2 * points);
+        out->moduli[i] = (uint8_t)points;
+    if (points > 0) {
+        __uint128_t product = 1;
+        int drn = out->selected_upstream_drn;
+
+        for (int i = 0; i < 12; i++)
+            product *= (unsigned)points;
+        /* §6.4.1 requires product(Mi) >= 2^K, with Table 30/§6.1 giving
+         * K=2*(drn+17).  Back off the offer rather than emitting a CPd whose
+         * modulus alphabet cannot carry its selected rate. */
+        while (drn > 0
+               && product < ((__uint128_t)1 << (2*(drn + 17))))
+            drn--;
+        if (drn < 1)
+            return false;
+        out->selected_upstream_drn = (uint8_t)drn;
+    }
     return points > 0;
 }
 
