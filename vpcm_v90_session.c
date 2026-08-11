@@ -627,6 +627,12 @@ typedef struct {
     bool cpt_accepted;
     bool cp_accepted;
     bool cp_prime_accepted;
+    bool look_for_e;
+    bool upstream_prepared;
+    bool upstream_data_started;
+    bool e_complete;
+    int e_ones;
+    int e_post_bits;
 } vpcm_v90_native_cp_rx_t;
 
 static void vpcm_v90_native_cp_frame(void *user_data,
@@ -659,6 +665,31 @@ static void vpcm_v90_native_cp_bit(void *user_data, int bit)
 
     if (!s || (bit != 0 && bit != 1))
         return;
+    /* §8.5.3/V.90: E is twenty ones after CP.  Detect it in the digital
+       receiver's recovered bit clock, not when the analogue transmitter
+       changes stage: the modulator, G.711 path and receive RRC have group
+       delay, and entering DATA at the TX timestamp put our mapping-frame grid
+       one 2D symbol early. */
+    if (s->look_for_e) {
+        if (s->e_complete) {
+            s->e_post_bits++;
+        } else {
+            if (bit)
+                s->e_ones++;
+            else
+                s->e_ones = 0;
+            if (s->e_ones >= 20)
+                s->e_complete = true;
+        }
+        /* The receive RRC makes the first post-E symbol still belong to its
+           preceding-symbol history.  Enter DATA after one complete additional
+           recovered dibit so mapping-frame slot zero lands on B1 slot zero. */
+        if (s->e_complete && s->e_post_bits >= 2 && s->upstream_prepared
+            && !s->upstream_data_started
+            && v34_begin_rx_data(s->v34) == 0) {
+            s->upstream_data_started = true;
+        }
+    }
     rejected_before = s->rx.rejected_frames;
     (void)v90_cp_rx_put_bit(&s->rx, bit);
     if (s->v34 && s->rx.rejected_frames != rejected_before)
@@ -794,6 +825,8 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
 
         cpt = v90_analogue_phase3_cpt(analogue);
         cp = v90_analogue_phase3_cp(analogue);
+        if (analogue_stage == V90A_TX_CP_PRIME)
+            native_cp.look_for_e = true;
         cpt_notified |= native_cp.cpt_accepted;
         cp_notified |= native_cp.cp_accepted;
         cp_prime_notified |= native_cp.cp_prime_accepted;
@@ -846,10 +879,18 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
              * exact boundary. */
             if (n > 0
                 && v34_v90_prepare_upstream_data(answerer, n*2400,
-                                                 mp->trellis) == 0
-                && v34_begin_rx_data(answerer) == 0) {
-                upstream_rx_armed = true;
-                e_notified = v90_handle_rx_event(digital, V90_RX_EVENT_E);
+                                                 mp->trellis) == 0) {
+                native_cp.upstream_prepared = true;
+                /* E may have completed in the receive chunk immediately
+                 * before the analogue stage became B1_PENDING. */
+                if (native_cp.e_complete && native_cp.e_post_bits >= 2
+                    && !native_cp.upstream_data_started
+                    && v34_begin_rx_data(answerer) == 0) {
+                    native_cp.upstream_data_started = true;
+                }
+                upstream_rx_armed = native_cp.upstream_data_started;
+                if (upstream_rx_armed)
+                    e_notified = v90_handle_rx_event(digital, V90_RX_EVENT_E);
             }
         }
 

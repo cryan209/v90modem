@@ -505,8 +505,9 @@ typedef struct
     int16_t tx_mapping_frame_buf[16];
     /*! \brief Data mode: which 2D symbol (0-7) we're on within the current mapping frame */
     int tx_mapping_frame_step;
-    /*! \brief Data mode: true after B1 frame has been sent */
-    bool b1_sent;
+    /*! \brief Number of all-ones B1 mapping frames emitted.  Per
+        §10.1.3.1/V.34, B1 is one complete data frame (P mapping frames). */
+    int b1_frames_sent;
     /*! \brief True once TX has entered data mode (used by RX to freeze equalizer) */
     bool tx_data_mode;
 

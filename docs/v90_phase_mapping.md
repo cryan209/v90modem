@@ -277,7 +277,13 @@ Phase 4 is not "CP/CP' in disguise".
   payload runner; that strict diagnostic currently reaches DATA and produces
   the negotiated number of bits, but fails payload sync.  PCMA CP acquisition
   also remains open.  Compatibility remains the default payload truth until
-  those two failures are fixed
+  those two failures are fixed.  The strict path now detects E in the
+  digital receiver's recovered bit clock (rather than at the analogue TX
+  timestamp), which removes a measured one-2D-symbol mapping-grid error, and
+  the analogue V.34 transmitter emits B1 as §10.1.3.1's complete P-mapping-
+  frame data frame rather than a single mapping frame.  Payload still does
+  not synchronize: with frame timing corrected, the remaining blocker is
+  receive-constellation geometry/equalization, not bit count or B1 duration
 - peer-initiated retrains are answered per §9.3.1/§9.4.1/§9.5.1.2: a 2400 Hz
   Tone A detector (Goertzel, 80 ms confirmation) runs during the Phase 3/4 RX
   stages in `v34rx.c` and reports `PEER_RETRAIN`; the engine responds by

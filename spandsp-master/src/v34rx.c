@@ -9717,6 +9717,13 @@ SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
     s->rx.mp_phase4_force_abs_active = 0;
     s->rx.mp_phase4_diff_collapse_streak = 0;
     s->rx.mp_phase4_diff_recover_streak = 0;
+    /* Preserve the Phase-3 channel solution before CP's decision-aided
+       acquisition starts.  CP is differentially decodable and may need the
+       DA loop to establish absolute phase, but §9.4.2.2/V.90 assumes the
+       channel is static through this seam: adapting the CMA equalizer to a
+       hypothesis that has not yet passed CP CRC can destroy the multi-level
+       data slicer's only valid equalizer. */
+    equalizer_save(&s->rx);
     s->rx.phase4_da_active = 0;
     s->rx.phase4_da_seeded = 0;
     s->rx.phase4_da_derot = 0;
@@ -10024,6 +10031,12 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
                                s->rx.baud_rate,
                                s->rx.bit_rate,
                                false);
+    /* CP hypothesis acquisition may move the decision-aided phase tracker,
+       but not the Phase-3 equalizer describing the unchanged analogue
+       channel.  Restore only coefficients: clearing eq_buf here would lose
+       timing/history at the E→B1 sample boundary. */
+    cvec_copyf(s->rx.eq_coeff, s->rx.eq_coeff_save,
+               V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN);
     s->rx.use_non_linear_encoder = false;
     for (i = 0;  i < 3;  i++)
     {

@@ -6192,16 +6192,20 @@ static complex_sig_t get_data_baud(v34_state_t *s)
     if (s->tx.tx_mapping_frame_step == 0)
     {
         /* Need a new mapping frame */
-        if (!s->tx.b1_sent)
+        if (s->tx.b1_frames_sent < s->tx.parms.p)
         {
-            /* B1: first data frame is all-ones (V.34 §9.2).
-               fake_get_bit returns 1, which parse_primary_channel_bitstream will use. */
+            /* §10.1.3.1/V.34: B1 is a complete data frame of P mapping
+               frames, all ones.  One mapping frame is only 2.5 ms at 3200
+               baud; treating that as B1 starts payload inside the receiver's
+               remaining B1 interval and permanently displaces framing. */
             span_get_bit_func_t saved_get_bit = s->tx.current_get_bit;
             s->tx.current_get_bit = fake_get_bit;
             v34_get_mapping_frame(&s->tx, s->tx.tx_mapping_frame_buf);
             s->tx.current_get_bit = saved_get_bit;
-            s->tx.b1_sent = true;
-            span_log(&s->logging, SPAN_LOG_FLOW, "Tx - B1 frame sent (all-ones data frame)\n");
+            if (++s->tx.b1_frames_sent == s->tx.parms.p)
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - B1 complete (%d all-ones mapping frames)\n",
+                         s->tx.parms.p);
         }
         else
         {
@@ -6246,7 +6250,7 @@ static void data_baud_init(v34_state_t *s)
                  s->tx.parms.p, s->tx.parms.j, s->tx.parms.l);
     }
     s->tx.tx_mapping_frame_step = 0;
-    s->tx.b1_sent = false;
+    s->tx.b1_frames_sent = 0;
     s->tx.data_frame = 0;
     s->tx.super_frame = 0;
     s->tx.s_bit_cnt = 0;
@@ -7000,7 +7004,14 @@ SPAN_DECLARE(int) v34_v90_begin_tx_data(v34_state_t *s,
     s->tx.external_symbol_func = NULL;
     s->tx.external_symbol_user_data = NULL;
     s->tx.tx_mapping_frame_step = 0;
-    s->tx.b1_sent = false;
+    s->tx.b1_frames_sent = 0;
+    /* §10.1.3.1/V.34: B1 carries the superframe inversion state of the
+       final data frame.  v34_begin_rx_data() enters with this same state. */
+    if (s->tx.parms.j > 0)
+    {
+        s->tx.super_frame = s->tx.parms.j - 1;
+        s->tx.v0_pattern = (uint16_t)(2*(s->tx.parms.j - 1));
+    }
     s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.current_getbaud = get_data_baud;
     s->tx.tx_data_mode = true;
