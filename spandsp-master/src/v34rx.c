@@ -4814,7 +4814,13 @@ static __inline__ void put_bit(v34_rx_state_t *s, int bit)
     if (s->training_stage == TRAINING_TX_STAGE_NORMAL_OPERATION_V34)
     {
         out_bit = descramble(s, bit);
-        s->put_bit(s->put_bit_user_data, out_bit);
+        /* V.90 §8.5.1 defines B1 as V.34's final all-ones training frame.
+           The T/3 receiver must consume it to advance the trellis, mapper and
+           descrambler, but it is not user data and must never reach V.42's
+           ODP detector.  The ordinary V.34 path uses training_stage for this
+           gate; the independently acquired V.90 path needs its own boundary. */
+        if (!s->v90_t3_suppress_output)
+            s->put_bit(s->put_bit_user_data, out_bit);
     }
     else if (s->training_stage == TRAINING_STAGE_TEST_ONES)
     {
@@ -9306,6 +9312,8 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             z = complex_mulf(&s->v90_t3_fse[tap], &x);
             y = complex_addf(&y, &z);
         }
+        s->v90_t3_suppress_output =
+            s->v90_t3_next_symbol < s->v90_t3_publish_symbol;
         process_primary_symbol(s, &y);
         s->v90_t3_next_symbol += 3;
     }
@@ -9385,6 +9393,13 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_training_match = best_match;
     s->v90_t3_fse_conjugate = best_conjugate;
     s->v90_t3_next_symbol = best_first;
+    /* process_primary_symbol() has a 15-step Viterbi wind-up.  Consume B1
+       plus 32 flush symbols before publishing decoded bits; ODP is repeated,
+       so this bounded post-B1 guard loses no V.42 information while ensuring
+       delayed B1 ones cannot be mistaken for a non-ODP peer. */
+    s->v90_t3_publish_symbol =
+        best_first + 3*(s->v90_t3_b1_symbols + 32);
+    s->v90_t3_suppress_output = true;
     s->v90_t3_acquired = true;
     /* The supervised filter already maps onto the exact Q9.7 template grid. */
     s->data_symbol_scale = 1.0f;
@@ -10637,6 +10652,8 @@ static bool v90_t3_start(v34_rx_state_t *rx)
     rx->v90_t3_rrc_pos = 0;
     rx->v90_t3_raw_count = 0;
     rx->v90_t3_next_symbol = 0;
+    rx->v90_t3_publish_symbol = 0;
+    rx->v90_t3_suppress_output = true;
     rx->v90_t3_training_match = 0.0f;
     rx->v90_t3_fse_conjugate = false;
     memset(rx->v90_t3_hilbert, 0, sizeof(rx->v90_t3_hilbert));

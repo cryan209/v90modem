@@ -821,6 +821,8 @@ typedef struct
     complexf_t v90_t3_fse[V34_V90_T3_FSE_TAPS];
     bool v90_t3_fse_conjugate;
     int64_t v90_t3_next_symbol;
+    int64_t v90_t3_publish_symbol;
+    bool v90_t3_suppress_output;
     int v90_t3_b1_symbols;
     complexf_t v90_t3_b1[V34_V90_T3_B1_MAX_SYMBOLS];
     float v90_t3_training_match;
