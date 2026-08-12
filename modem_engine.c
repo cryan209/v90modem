@@ -1562,6 +1562,7 @@ static int            g_v90_dil_capture_bits = 0;
 static int            g_v90_dil_capture_search = 0;
 static int            g_v90_dil_hyp_last_bits = 0;
 static bool           g_v90_dil_hyp_dumped = false;
+static bool           g_v90_wait_ja_tone_a_logged = false;
 
 /* Echo canceller for full-duplex V.34.
    The FXS hybrid in the AudioCodes gateway leaks our TX signal back into
@@ -2396,6 +2397,7 @@ static void v90_dil_capture_reset(void)
     g_v90_dil_hyp_dumped = false;
     g_v90_pending_dil_valid = false;
     g_v90_dil_parse_logged = false;
+    g_v90_wait_ja_tone_a_logged = false;
     g_v90_phase3_s_events = 0;
     g_last_v90_bridge_rx_stage = -1;
     g_last_v90_bridge_tx_stage = -1;
@@ -3175,6 +3177,73 @@ static bool v90_dil_capture_try_parse_at(int start)
     return true;
 }
 
+/* Should a heuristic Ja detector be allowed to start Sd?
+ *
+ * §9.3.1.3 has the digital modem transmit Sd once it detects Ja, and V.92
+ * §9.5.1.1.3 says what "detects" has to mean: "after receiving a DIL descriptor
+ * of Ja" -- a CRC-valid descriptor, not an energy edge.  The V.92 path already
+ * enforces exactly that (v92_apply_p3_ja_locked refuses a non-strict Ja).
+ *
+ * It matters because starting Sd is destructive to the thing we still need.
+ * §9.3.2.4 has the analogue modem stop Ja as soon as it sees our Sd→S̄d, and
+ * measured against the Courier (2026-08-12, both captures, bit-identical
+ * descriptors) the DIL descriptor sits in the *last 20%* of Ja: the peer trains
+ * for ~2.2 s and the only CRC-valid copy starts at bit ~14290 of ~17000, with
+ * one frame (2060 bits) of margin.  So any detector that fires before the
+ * descriptor parses truncates the one frame that carries DIL -- one live run
+ * missed it by 152 bits.  July's runs decoded it only because the heuristics
+ * happened to fire late.
+ *
+ * The heuristics stay available for the case where no descriptor can ever
+ * arrive: a peer that declined V.90 (Table 10 downstream code 0-5) is doing
+ * plain V.34, whose J carries no DIL descriptor at all.
+ *
+ * ME_V90_JA_HEURISTICS=1 restores the old always-on behaviour.
+ * ME_V90_JA_HEURISTIC_FALLBACK_MS>0 re-enables them that many ms after the
+ * first suppressed attempt, as a bounded escape hatch.  Default 0: never. */
+static bool v90_ja_heuristic_allowed(const char *source)
+{
+    static uint64_t first_suppressed_ms = 0;
+    static bool     logged[4];
+    v34_v90_info1a_t received;
+    int  idx;
+    long fallback_ms;
+
+    /* Descriptor already in hand -- J has fired, nothing left to protect. */
+    if (g_v90_dil_parse_logged)
+        return true;
+    if (parse_env_int("ME_V90_JA_HEURISTICS", 0) != 0)
+        return true;
+    /* Peer declined V.90: plain V.34 J, no descriptor will ever parse. */
+    if (g_v34
+        && v34_get_v90_received_info1a(g_v34, &received)
+        && received.u_info > 0
+        && received.downstream_rate_code >= 0
+        && received.downstream_rate_code <= 5)
+        return true;
+
+    fallback_ms = parse_env_int("ME_V90_JA_HEURISTIC_FALLBACK_MS", 0);
+    if (first_suppressed_ms == 0)
+        first_suppressed_ms = trace_now_ms();
+    else if (fallback_ms > 0
+             && trace_now_ms() - first_suppressed_ms >= (uint64_t) fallback_ms) {
+        ME_LOG("[ME] V.90 Ja: no descriptor after %ld ms; allowing %s heuristic "
+               "(ME_V90_JA_HEURISTIC_FALLBACK_MS)\n", fallback_ms, source);
+        return true;
+    }
+
+    idx = (source[0] == 'p') ? 0 : (source[0] == 'e') ? 1 : 2;
+    if (!logged[idx]) {
+        logged[idx] = true;
+        ME_LOG("[ME] V.90 Ja: suppressing %s heuristic; §9.3.1.3/V.92 §9.5.1.1.3 "
+               "start Sd only on a CRC-valid DIL descriptor, and starting early "
+               "makes the peer stop Ja (§9.3.2.4) before the descriptor arrives\n",
+               source);
+        trace_phase("V90 Ja heuristic suppressed (%s), awaiting descriptor", source);
+    }
+    return false;
+}
+
 /* A CRC-valid DIL descriptor is proof the peer is transmitting Ja right now --
  * strictly better evidence than the energy-gap heuristic or the J look-ahead
  * timer that currently drive the Ja event. Use it as soon as we have it.
@@ -3395,6 +3464,31 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
      * decode unnecessary.  Treating a fallback as live receive evidence
      * disabled this entire path and left SmartLink waiting for Sd until the
      * unrelated J-lookahead timer expired. */
+    /* What the descriptor parser is actually being handed.  v34rx has three
+     * Ja sinks and only phase3_ja_capture_hyp[] (filled in PHASE3_WAIT_S)
+     * reaches this search; the "Ja capture: emitted N bits" span_log comes
+     * from a different buffer, so it can report tens of thousands of bits that
+     * this function never sees.  Chasing that discrepancy cost a whole session
+     * -- log the parser's own input, and log the RX stage with it, because the
+     * arrays are legitimately empty in PHASE3_TRAINING (stage 11) and only
+     * fill in PHASE3_WAIT_S (stage 10). */
+    {
+        static int calls = 0;
+
+        if ((calls++ % 200) == 0 && me_verbose_enabled()) {
+            int longest = 0, longest_h = -1;
+
+            for (int h = 0; g_v34 && h < 24; h++) {
+                int n = v34_v90_copy_phase3_ja_bits(g_v34, h, unpacked,
+                                                    V90_DIL_CAPTURE_MAX_BITS);
+                if (n > longest) { longest = n; longest_h = h; }
+            }
+            ME_LOG("[ME] V.90 Ja search input: v34=%d parsed=%d rx_stage=%d "
+                   "longest_hyp_len=%d (hyp %d)\n",
+                   g_v34 ? 1 : 0, g_v90_dil_parse_logged ? 1 : 0,
+                   g_v34 ? v34_get_rx_stage(g_v34) : -1, longest, longest_h);
+        }
+    }
     if (!g_v34 || g_v90_dil_parse_logged)
         return g_v90_dil_parse_logged;
 
@@ -4418,6 +4512,90 @@ static double v90_s_rx_active_fraction_locked(double floor_rms)
     return (double)active / (double)subs;
 }
 
+/* Fraction of the S window's energy that sits in the V.34 Tone A band.
+ *
+ * The third false-S source, and the only one the other three gates cannot
+ * reach.  Tone A (§11.2.1.2 / §9.5.2.1, 2400 Hz) is a real, loud, far-end
+ * signal, so the silence floor, the RX/TX ratio test and the echo correlator
+ * all correctly pass it: it is genuinely not our echo and genuinely not a dead
+ * line.  A pure tone differentially demodulates to a constant dibit, which the
+ * rotation detector reads as a sustained S -- and p3_demod's structural check
+ * lets it through too, because a constant dibit stream *is* 6-symbol periodic.
+ *
+ * Measured on the Courier capture 20260812T073702Z (µ-law, 100 ms windows,
+ * Hann): the retrain tone holds 0.79-0.80 of its energy in 2300-2500 Hz for
+ * 32 s, while every window in which the Courier was really transmitting
+ * (Ja, PP/TRN) scores 0.03-0.09.  The separation is an order of magnitude, and
+ * it is structural rather than calibrated: the real far-end S is V.34-modulated
+ * around the 1829/1920 Hz carriers and cannot concentrate its energy in a
+ * 200 Hz band at the top of the passband.
+ *
+ * Bins are evaluated at exact DFT frequencies k*fs/N so Parseval applies and
+ * the ratio is comparable against the window's total energy.  Costs 21
+ * Goertzel passes over 800 samples, only on an S event that has already
+ * cleared every other gate. */
+enum { TONE_A_LO_HZ = 2300, TONE_A_HI_HZ = 2500, TONE_A_FS = 8000 };
+
+static double v90_s_tone_a_fraction_locked(void)
+{
+    double total = 0.0;
+    double band = 0.0;
+    int klo = (TONE_A_LO_HZ * S_ECHO_WIN) / TONE_A_FS;
+    int khi = (TONE_A_HI_HZ * S_ECHO_WIN) / TONE_A_FS;
+
+    /* Hann-window the same 100 ms the other gates score, so leakage from the
+     * strong out-of-band content of a real S does not inflate the ratio. */
+    for (int n = 0; n < S_ECHO_WIN; n++) {
+        int idx = (g_rx_ref_wr - S_ECHO_WIN + n) & TX_BUF_MASK;
+        double w = 0.5 - 0.5 * cos(2.0 * M_PI * (double)n / (double)(S_ECHO_WIN - 1));
+        double x = (double)g_rx_ref_buf[idx] * w;
+
+        total += x * x;
+    }
+    if (total <= 0.0)
+        return 0.0;
+
+    for (int k = klo; k <= khi; k++) {
+        double omega = 2.0 * M_PI * (double)k / (double)S_ECHO_WIN;
+        double coeff = 2.0 * cos(omega);
+        double s0 = 0.0, s1 = 0.0, s2 = 0.0;
+
+        for (int n = 0; n < S_ECHO_WIN; n++) {
+            int idx = (g_rx_ref_wr - S_ECHO_WIN + n) & TX_BUF_MASK;
+            double w = 0.5 - 0.5 * cos(2.0 * M_PI * (double)n / (double)(S_ECHO_WIN - 1));
+
+            s0 = (double)g_rx_ref_buf[idx] * w + coeff * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        /* |X_k|^2 from the Goertzel recurrence, doubled for the mirrored
+         * negative-frequency bin so the sum is comparable with total energy. */
+        band += 2.0 * (s1 * s1 + s2 * s2 - coeff * s1 * s2);
+    }
+    return band / (total * (double)S_ECHO_WIN);
+}
+
+static double me_v90_s_tone_a_max_fraction(void)
+{
+    static double cached = -1.0;
+
+    if (cached < 0.0) {
+        const char *v = getenv("ME_V90_S_TONE_A_MAX_FRACTION");
+
+        /* Midway (in log terms) between the measured 0.09 real-signal ceiling
+         * and the 0.79 Tone A floor.  0 disables the gate. */
+        cached = 0.35;
+        if (v && *v) {
+            char *end;
+            double parsed = strtod(v, &end);
+
+            if (end != v && *end == '\0' && parsed >= 0.0 && parsed <= 1.0)
+                cached = parsed;
+        }
+    }
+    return cached;
+}
+
 /* RMS of our OWN transmit over the same window, for the RX/TX ratio test. */
 static double v90_s_tx_rms_locked(void)
 {
@@ -4821,7 +4999,12 @@ static void v90_p3_scan_ja_locked(int len)
                          * event handler so the downstream state is identical
                          * regardless of which detector fired first. */
                         g_v90_p3_ja_fired = true;
-                        accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
+                        /* Keep decoding Ja either way -- it is the descriptor
+                           parse that is now allowed to fire J. */
+                        (void)v90_dil_capture_try_v34_hypotheses();
+                        accepted = v90_ja_heuristic_allowed("p3_demod")
+                                 ? v90_handle_rx_event(g_v90, V90_RX_EVENT_J)
+                                 : false;
                         if (accepted) {
                             (void)v90_dil_capture_try_v34_hypotheses();
                             v34_v90_arm_phase3_s_detector(g_v34);
@@ -4936,7 +5119,43 @@ static void v90_wait_ja_energy_gate_locked(const int16_t *amp, int len)
             case 2:                     /* in gap — energy return means Ja */
                 if (signal_now) {
                     if (ms_in_state >= 30) {
-                        bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
+                        bool accepted;
+                        double tone_a_max = me_v90_s_tone_a_max_fraction();
+                        double tone_a = (tone_a_max > 0.0)
+                                      ? v90_s_tone_a_fraction_locked() : 0.0;
+
+                        /* "Energy came back" is also true when the peer gives
+                           up and starts its §9.5.2.1 Tone A retrain, and that
+                           is exactly the shape this heuristic sees: the peer
+                           stops Ja, there is a gap, then a loud steady tone.
+                           Live (20260812T073702Z) the Courier's real Ja ran
+                           9.0-12.1 s and this gate fired at 12.20 s on the
+                           retrain tone instead -- so Sd started against a
+                           modem that had already left Phase 3, and the Ja that
+                           carried the DIL descriptor was never decoded.
+                           Treating a retrain as Ja is strictly worse than not
+                           firing: WAIT_JA still has its own timeout. */
+                        if (tone_a_max > 0.0 && tone_a >= tone_a_max) {
+                            /* Tone A persists, so this retests every 30 ms for
+                               the rest of the call -- say it once. */
+                            if (!g_v90_wait_ja_tone_a_logged) {
+                                g_v90_wait_ja_tone_a_logged = true;
+                                ME_LOG("[ME] V.90 WAIT_JA: energy returned after gap but it is the "
+                                       "far-end Tone A retrain (band2400=%.3f >= %.3f); not Ja\n",
+                                       tone_a, tone_a_max);
+                                trace_phase("V90 WAIT_JA energy return rejected as Tone A band=%.3f",
+                                            tone_a);
+                            }
+                            ms_in_state = 0;
+                            break;
+                        }
+                        if (!v90_ja_heuristic_allowed("energy-gap")) {
+                            /* Not a state change: leave the gate armed so a
+                               later, descriptor-backed Ja is still seen. */
+                            ms_in_state = 0;
+                            break;
+                        }
+                        accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
 
                         ME_LOG("[ME] V.90 WAIT_JA: energy returned after gap; treating as Ja start (accepted=%d)\n",
                                accepted ? 1 : 0);
@@ -5360,8 +5579,18 @@ void me_rx_audio(const int16_t *amp, int len)
                            structural classifier may not find a clean J
                            segment.  Neither path should block the other.
                            The p3_demod S gate (below) is the one that
-                           matters — it prevents false-S DIL cutoff. */
-                        bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
+                           matters — it prevents false-S DIL cutoff.
+
+                           All three are now subordinate to the descriptor:
+                           they detect that Ja is present, which is true and
+                           useful, but presence is not what §9.3.1.3 needs
+                           before Sd may start.  Decode first, then fire. */
+                        bool accepted;
+
+                        (void)v90_dil_capture_try_v34_hypotheses();
+                        accepted = v90_ja_heuristic_allowed("v34rx")
+                                 ? v90_handle_rx_event(g_v90, V90_RX_EVENT_J)
+                                 : false;
 
                         if (accepted) {
                             (void)v90_dil_capture_try_v34_hypotheses();
@@ -5491,13 +5720,38 @@ void me_rx_audio(const int16_t *amp, int len)
                                         g_v90_phase3_s_events);
                             continue;
                         }
-                        accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_S);
-                        fprintf(stderr,
-                                "[ME] V.90 strict RX event: index=%d event=S tx_phase=%d accepted=%d "
-                                "echo_corr=%.3f rx_rms=%.1f rx_sample=%llu\n",
-                                g_v90_phase3_s_events,
-                                (int)v90_get_tx_phase(g_v90),
-                                accepted ? 1 : 0, echo, rx_rms, (unsigned long long)g_rx_ref_samples);
+                        /* Last gate: a far-end retrain tone.  Runs after the
+                           structural check because a constant dibit stream
+                           satisfies that check -- 6-symbol periodicity is
+                           exactly what a pure tone produces -- so this is the
+                           only test that separates Tone A from a real S. */
+                        {
+                            double tone_a_max = me_v90_s_tone_a_max_fraction();
+                            double tone_a = (tone_a_max > 0.0)
+                                          ? v90_s_tone_a_fraction_locked() : 0.0;
+
+                            if (tone_a_max > 0.0 && tone_a >= tone_a_max) {
+                                fprintf(stderr,
+                                        "[ME] V.90 strict RX event: index=%d event=S tx_phase=%d "
+                                        "REJECTED as far-end Tone A retrain (band2400=%.3f >= %.3f, "
+                                        "echo_corr=%.3f rx_rms=%.1f rx_sample=%llu)\n",
+                                        g_v90_phase3_s_events,
+                                        (int)v90_get_tx_phase(g_v90),
+                                        tone_a, tone_a_max, echo, rx_rms,
+                                        (unsigned long long)g_rx_ref_samples);
+                                trace_phase("V90 strict RX event=S count=%d rejected_tone_a band=%.3f",
+                                            g_v90_phase3_s_events, tone_a);
+                                continue;
+                            }
+                            accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_S);
+                            fprintf(stderr,
+                                    "[ME] V.90 strict RX event: index=%d event=S tx_phase=%d accepted=%d "
+                                    "echo_corr=%.3f rx_rms=%.1f band2400=%.3f rx_sample=%llu\n",
+                                    g_v90_phase3_s_events,
+                                    (int)v90_get_tx_phase(g_v90),
+                                    accepted ? 1 : 0, echo, rx_rms, tone_a,
+                                    (unsigned long long)g_rx_ref_samples);
+                        }
                         trace_phase("V90 strict RX event=S count=%d accepted=%d echo_corr=%.3f rms=%.1f",
                                     g_v90_phase3_s_events, accepted ? 1 : 0, echo, rx_rms, (unsigned long long)g_rx_ref_samples);
                     }

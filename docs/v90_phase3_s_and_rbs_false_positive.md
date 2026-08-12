@@ -674,3 +674,492 @@ analogue modem must send CP, then the exchange proceeds through CP-prime, MP-pri
 E, B1d and DATA. We are now at that CP boundary. V.92 is therefore opt-in
 (`ME_V92_ENABLE=1`) until its QTs/ANSpcm startup path is interoperable end to end;
 plain V.90 is the default.
+
+## 17. Tone A gated (2026-08-12), and the DIL blocker is not the S detector
+
+Two live Courier calls this session against the Cisco VG224 path (ext 8405,
+`artifacts/v90-hardware/20260812T073702Z-*` and `20260812T075230Z-*`).
+
+**The third false-S source named earlier is now gated.** §9.5.2.1 Tone A is a
+real, loud, non-echo far-end signal, so the silence floor, the RX/TX ratio test
+and the echo correlator all correctly pass it, and p3_demod's structural check
+passes it too — a pure tone differentially demodulates to a constant dibit, and
+a constant dibit stream *is* 6-symbol periodic. Only a narrowband test
+separates it. `v90_s_tone_a_fraction_locked()` in modem_engine.c scores the
+fraction of the same 100 ms window's energy in 2300–2500 Hz (Hann-windowed
+Goertzel at exact DFT bins, so Parseval makes the ratio comparable to total
+energy), and rejects an S at or above `ME_V90_S_TONE_A_MAX_FRACTION`
+(default 0.35).
+
+Measured on the 073702Z capture, µ-law, 100 ms windows:
+
+| window | band 2300–2500 Hz |
+|---|---|
+| Courier Ja (9.5 / 10.5 / 11.5 s) | 0.100 / 0.036 / 0.103 |
+| Tone A retrain (12.4 / 15.0 / 30.0 s) | 0.794 / 0.794 / 0.796 |
+
+An order of magnitude, and the separation is structural rather than calibrated:
+the real far-end S is V.34-modulated around the 1829/1920 Hz carriers and cannot
+concentrate its energy in a 200 Hz band at the top of the passband. The same
+test now also gates the WAIT_JA energy-return heuristic, which fires on exactly
+the shape a retrain presents (peer stops, gap, loud steady tone).
+
+**Both gates are offline-validated and live-unexercised.** In the 075230Z call
+they logged nothing, because a pre-existing detector — "Tone A detected in stage
+PHASE3_WAIT_S (80 ms)" — caught the retrain first and reported it per §9.5.1.2.
+That call was much cleaner than 073702Z (`s_events=0 cp_bits=0 cp_rejected=0`
+against `10 / 389 / 3`, and it followed the retrain into a legitimate second
+Phase 2 instead of spending 32 s decoding a tone) but with the new gates silent
+that difference is not attributable to them. Judge over several calls.
+
+**The DIL blocker is upstream of all of this, and it is not a detector problem.**
+DIL is skipped at `v90.c:3248` whenever `dil_requested` is false, and that flag
+is set only by a CRC-valid Ja descriptor. Neither call parsed one — zero
+"parsed Ja DIL descriptor" lines — so `dil=0` in both. In 073702Z the Courier's
+real Ja ran 9.0–12.1 s while our TX sat at 0; p3_demod's J scan covered exactly
+that window (scan t=0 is tap 8.84 s) and reported "no J found" eleven times,
+after which the energy heuristic fired on the retrain tone at 12.20 s. So Sd
+started against a modem that had already left Phase 3, and the Ja carrying the
+descriptor was never decoded.
+
+Offline, `./vpcm_decode --g711 --law ulaw --p3` on that 3.1 s Ja window picks
+the right configuration on its own — 3200 baud low (1829 Hz), matching the
+INFO1a we decoded live (U_INFO=74, upstream symbol rate code 4, downstream rate
+code 6) — and still fails the same way: it classifies the whole window as TRN,
+reports **dber 3684/19704 (19%)** and "Ja DIL search: no J segment". A 19%
+differential bit-error rate on a transport with zero packet loss means the
+demodulator is not locked, not that the descriptor is absent; the wide-transform
+search does find 17-ones syncs at bits 48/4341/5040 and every parse off them is
+garbage.
+
+Next: fix Ja demodulation at 3200/1829 against this capture (it is a fixture now
+— 3.1 s of foreign Ja, and the offline path reproduces the live failure exactly),
+not the S detector. Until a descriptor parses, DIL cannot be transmitted at all.
+
+## 18. Ja decode (2026-08-12): four hypotheses tested and killed
+
+Six live Courier calls chasing "the descriptor does not decode". Nothing here
+fixed it; all four candidate causes are now excluded, and two diagnostic traps
+cost most of the session. Recorded so the next pass does not repeat them.
+
+**Killed: "the demodulator is not locking (dber 19%)".** `vpcm_decode --p3` on
+the July capture that *did* decode the descriptor twice reports **dber 21-44%**
+and "Ja DIL search: no J segment" — worse than the 19% of the failing August
+capture, which p3 renders as one clean 9852-symbol TRN segment. `--p3` is not
+the live Ja path and its dber says nothing about whether the descriptor decodes.
+Do not use it as the metric.
+
+**Killed: carrier mismatch.** The RX carrier is `s->v90_info1d_high_carrier[]`,
+i.e. whatever *we* announced in INFO1d (v34rx.c `process_rx_info1a()`), chosen
+per call by the L2 line probe (v34tx.c `v34_l2_probe_result()`). It correlated
+perfectly across four calls — both July calls probed high (1920 Hz) and parsed
+the descriptor, both August calls probed low (1829 Hz) and did not — and a
+forced-high live call (`20260812T080908Z-*carrier-high`) **still did not
+parse**. The correlation was spurious. A head-to-head p3 scan (all 12
+hypotheses, which needs a window under 12000 samples or the ranking silently
+drops four candidates) also confirms each call's upstream really is at the
+carrier we announced: July 1920 Hz wins 633 to 151, August 1829 Hz wins 2744 to
+667. The Courier honours INFO1d's carrier bit.
+
+**Killed: signal quality.** Measured on the August fixture: carrier offset
+**-0.48 Hz**, symbol rate exactly **3200**, RTP 0 loss / 0 discard / 0 reorder.
+
+**Killed: "the parser is fed nothing".** It looked conclusive — the parser's
+only input is `v34_v90_copy_phase3_ja_bits()`, which reads
+`phase3_ja_capture_hyp[]`, while the "Ja capture: emitted 17664 bits" span_log
+comes from `phase3_ja_capture[]`, a different buffer filled from a different
+stage. Instrumenting it showed `longest_hyp_len=0`. That was a sampling
+artifact: the arrays are legitimately empty in PHASE3_TRAINING (stage 11) and
+fill normally once the receiver reaches PHASE3_WAIT_S (stage 10), reaching
+**15832 bits** by the end of a call. The parser gets its bits and still finds no
+CRC-valid descriptor. A v34rx.c change to mirror the TRAINING-stage capture into
+the hypothesis arrays was written, tested live (no effect — that stage's
+contribution is wiped by the one-shot reset at the TRAINING→WAIT_S transition)
+and reverted.
+
+**Trap worth knowing: `ME_LOG` is gated on `me_verbose_enabled()`
+(`VPCM_ME_VERBOSE`), and most visible `[ME]` lines are raw `fprintf`.** Adding
+an ME_LOG diagnostic and seeing no output means nothing. Run hardware captures
+with `VPCM_ME_VERBOSE=1` — the July runs had it on, which is also why their logs
+carry `parsed Ja DIL descriptor` lines and August's do not. (The descriptor
+genuinely did not parse in August: `v90_dil_capture_try_parse_at()` sets
+`dil_requested` before it logs, and `dil=0` with no DIL on the wire is
+independent of logging.)
+
+The permanent diagnostic left behind is `[ME] V.90 Ja search input:` — the
+parser's own input length, hypothesis and RX stage, verbose-gated.
+
+**Where it actually stands.** The parser receives ~16k Ja-stage bits per call
+and no window of them passes the 17-ones preamble plus descriptor CRC. The open
+question is no longer "why is the demodulator broken" but **whether those bits
+are Ja at all**: p3 classifies the whole 3.1 s as TRN on both the working and
+failing captures, and the Courier retrains ~3.3 s into its Phase 3, at the point
+where it expects Sd. Next pass should compare the July (parsed) and August (not
+parsed) *hypothesis-array bit streams* directly — dump both with
+`ME_V90_JA_DUMP_PREFIX` (note it triggers off hypothesis 0's length against
+`ME_V90_JA_DUMP_MIN_BITS`, default 32000, which no August call reached) — rather
+than re-deriving the modulation offline.
+
+## 19. The Ja bit-stream diff (2026-08-12): the demod is fine, the margin is not
+
+Replayed both captures through the *same* receiver offline, using a
+parametrised copy of `tmp/v34_phase3_replay.c` (kept as
+`artifacts/courier-ja-3200low/streams/ja_replay.c`): it forces Phase 3 RX, feeds
+linear PCM, then dumps all 24 hypothesis streams and tries the descriptor parse
+at every 17-ones+0 preamble. **Note the two captures use different RTP codecs —
+July negotiated PCMA, August PCMU — while both log `law=ULAW`, which is the
+V.90 PCM law, a different field. Decode each tap with its own law.**
+
+The replay is faithful: July reproduces its live result exactly
+(`DESCRIPTOR hyp=8 start=14312 N=197 LSP=66 LTP=66`, matching the live
+`parsed Ja DIL descriptor` line).
+
+| | July (dilgate-3) | August (jastage) |
+|---|---|---|
+| hyp 8 stream length | 16922 bits | 17198 bits |
+| 17-ones+0 preambles | 2, at 14312 / 16372 | 2, at 14282 / 16342 |
+| CRC-valid descriptors | 1, at 14312 | 1, at 14282 |
+| descriptor | N=197 LSP=66 LTP=66 | N=197 LSP=66 LTP=66 |
+
+**The two 1702-bit descriptor payloads are bit-for-bit identical — 0 differing
+bits.** The Ja frame period is 2060 bits; the second preamble in each capture is
+truncated by the end of the peer's transmission, so there is exactly **one**
+complete decodable copy per call.
+
+**The first preamble lands 14282 bits ≈ 2.23 s into the peer's ~2.9 s Phase 3**,
+i.e. the descriptor occupies only the last ~0.6 s: the Courier sends ~2.2 s of
+training first, which is why p3 classifies the whole window as TRN and finds
+"no J segment" on *both* captures. Nothing before bit 14282 is decodable.
+
+**So the demodulator is not broken, and section 18's framing was wrong.** The
+descriptor decodes whenever the capture runs long enough, and the margin is one
+frame:
+
+- July captured 16922 bits — 908 past the 15984 the descriptor needs. Parsed.
+- August `jastage` reached 15832 bits live... and **also parsed**
+  (`parsed Ja DIL descriptor (N=197 LSP=66 LTP=66)`, hypothesis 8, +11688 ms),
+  then ran Sd → S̄d → TRN1d (2496 symbols) → Jd, where **the Courier retrained
+  during Jd** (`Peer retrained during tx_phase=6`) — i.e. that run reached the
+  original §9.3.2.7 Jd blocker, not a Ja one.
+- The earlier August runs fell short: 073702 never acquired PP at all
+  (`PP start detected` = 0, and the replay reproduces that at every start offset
+  and both carriers), and others cut the peer's Ja off early.
+
+**Why a run fails is therefore a race, not a decode defect: the peer stops Ja as
+soon as it sees our Sd (§9.3.2.4), and the descriptor is in the last 20% of Ja.**
+Any Ja detection that fires before the descriptor parses truncates the very
+frame we need. `v90_note_ja_confirmed_by_descriptor()` already encodes the right
+rule ("a CRC-valid DIL descriptor is proof the peer is transmitting Ja right
+now -- strictly better evidence than the energy-gap heuristic"), but the three
+heuristic paths — p3_demod's J scan, the WAIT_JA energy-return gate, and
+v34rx's J event — can each fire first and start Sd early.
+
+Next change to try: gate Sd on the parsed descriptor, letting the heuristics only
+arm a bounded fallback, so we never cut off the frame that carries DIL. Fixtures:
+`artifacts/courier-ja-3200low/streams/{july-dilgate3,aug-jastage}-hyp8.bits`.
+
+## 20. Sd is now gated on the descriptor (2026-08-12)
+
+Section 19 left the mechanism as a hypothesis. It is now measured. Counting runs
+of consecutive ones in the August hyp-8 stream, the whole 17198-bit capture
+contains **exactly two** runs of >=10 ones — both exactly 17 long, at 14282 and
+16342. If the Courier were transmitting the descriptor throughout Ja and our
+receiver were merely converging, degraded repeats would still show 10-16 length
+near-preambles at 2060-bit spacing; there are none. **The Courier transmits
+~2.2 s of training and only then starts Ja frames** — which is also why p3
+classifies the whole window as TRN on the working capture. The descriptor
+arrives late because it *is* late, not because we decode it late.
+
+That makes an early Sd actively harmful: §9.3.2.4 has the analogue modem stop on
+Sd→S̄d, so a detector that fires during the peer's training can stop it before it
+ever transmits a descriptor frame.
+
+`v90_ja_heuristic_allowed()` in modem_engine.c now gates all three heuristic Ja
+detectors — p3_demod's J scan, the WAIT_JA energy-return gate, and v34rx's J
+event. They still run, and Ja decoding still runs on every one of them; what
+they no longer do is fire `V90_RX_EVENT_J` and start Sd. Only a CRC-valid
+descriptor does that, via the `v90_note_ja_confirmed_by_descriptor()` path that
+already existed. Exceptions: a peer that declined V.90 (Table 10 downstream code
+0-5) is doing plain V.34, whose J carries no descriptor, so the heuristics stay
+live there. `ME_V90_JA_HEURISTICS=1` restores the old behaviour;
+`ME_V90_JA_HEURISTIC_FALLBACK_MS>0` re-enables them that long after the first
+suppressed attempt. Default 0 — never.
+
+Measured over three live calls (`*desconly-1..3`), against four earlier ones:
+
+| | heuristics on | descriptor-gated |
+|---|---|---|
+| descriptor parsed | 1 of 4 | 1 of 3 |
+| reached Jd | 1 of 4 | 1 of 3 |
+| phantom Phase 3/4 decoded from Tone A | 1 of 4 (32 s, cp_rejected=3) | 0 of 3 |
+
+The hit rate is unchanged on this sample — too small to claim an improvement —
+but the failure mode is cleaner: no run starts Sd during the peer's training,
+and no run spends the call decoding a retrain tone. Runs that fail now simply
+never transmit, and the peer's retrain gives another attempt inside the same
+call.
+
+**The blocker after this is the original one, unchanged:** `desconly-3` parsed
+the descriptor at +12030 ms, ran Sd (64 reps) → S̄d → TRN1d (2496 symbols) → Jd,
+and the Courier retrained during Jd (`Peer retrained during tx_phase=6`), same as
+`jastage`. We now reach that point deliberately rather than by luck, which makes
+it testable: TRN1d is still 2496 symbols / 312 ms here, against the 30000T /
+3750 ms a working digital modem sends (`docs/eicon_downstream_comparison.md`),
+and that remains the leading candidate for why the Courier never decodes our Jd.
+Testing it needs the `ME_V90_TRN1D_SYMBOLS` clamp at `v90.c:121` raised past
+16000.
+
+## 21. TRN1d = 30000T tested live (2026-08-12): disproven, and harmful
+
+The `ME_V90_TRN1D_SYMBOLS` ceiling was already 32000 (a previous session raised
+it from 16000; CLAUDE.md's "clamp <=16000 blocks testing" line was stale). So
+this was purely a live test: three descriptor-gated calls at
+`ME_V90_TRN1D_SYMBOLS=30000`, one of which parsed the descriptor and reached
+`TRN1d complete (30000 symbols)`.
+
+**It does not fix the Courier's Jd, and it makes the window worse.** Both a
+2496T and a 30000T run were measured from the same reference — Sd start, and the
+peer's Tone A onset minus our detector's 80 ms:
+
+| | TRN1d 2496T | TRN1d 30000T |
+|---|---|---|
+| Sd starts | 12030 ms | 11927 ms |
+| Jd starts | 12396 ms | 15731 ms |
+| peer Tone A, after end of Ja | 5076 ms | 4241 ms |
+| **Jd airtime before it gave up** | **4764 ms** | **491 ms** |
+
+The peer's retrain is anchored to §9.3.2.7's "within 4500 ms from the end of Ja",
+not to anything about Jd: it fires at essentially the same point relative to end
+of Ja in both runs. TRN1d length only decides how much of that fixed window is
+left for Jd — 30000T spends 3750 ms of the 4500 ms budget and leaves Jd 491 ms.
+
+So the hypothesis in `docs/eicon_downstream_comparison.md` — that our 312 ms
+TRN1d is why the Courier never decodes our Jd — is **disproven for this peer**.
+At the default length the Courier receives **4.7 seconds** of Jd and retrains
+anyway. Whatever it objects to is in the Jd content or its framing, not in how
+long it was trained beforehand. Do not adopt 30000T; the Eicon card's use of it
+says something about the Eicon's peer, not about ours.
+
+Next candidates, in order: Jd frame content and CRC against Table 13 (the
+`goal11-jdp84` / `jd26k` / `jd22680` / `jdfix` runs churned here before without
+resolving it), and §8.4.2's requirement that Jd's differential encoder be
+initialised with the final symbol of the transmitted TRN1d — which is exactly
+the kind of seam a TRN1d length change would have perturbed and did not.
+
+## 22. §8.4.2 Jd seeding verified correct (2026-08-12)
+
+Spec text, from `T-REC-V.90-199809`:
+
+> §8.4.2: "The bits are scrambled and differentially encoded and then
+> transmitted as the sign of the PCM codeword whose Ucode is UINFO... **The
+> differential encoder shall be initialized with the final symbol of the
+> transmitted TRN1d.**"
+> §8.4.5: "Signal TRN1d is a sequence of the PCM codeword whose Ucode is UINFO
+> with signs generated by applying binary ones to the input of the scrambler
+> described in 5.3... **The scrambler is initialized to zero prior to the
+> transmission of TRN1d.** TRN1d shall be an integer multiple of 6 symbols long."
+> §8.4: "The digital modem shall use the polynomial, GPC... when generating
+> signals Jd, Jd′ and TRN1d."
+
+All four hold in `v90.c`: the scrambler is zeroed at the S̄d→TRN1d transition
+(`v90_scrambler_init`, v90.c:3114); TRN1d puts the scrambler output straight on
+the sign with no differential encoding; `s->diff_enc = sign` on the symbol where
+`sample_count` reaches `v90_trn1d_len()`, i.e. the final TRN1d symbol
+(v90.c:3151); and the length is forced to a multiple of 6. The scrambler
+deliberately continues into Jd, which matches §8.4 naming one polynomial for all
+three signals and §8.4.5 stating the only initialisation point.
+
+**Verified empirically, not just by reading.** `tools/v90_jd_decode.py` is an
+independent implementation of the same rule (`prev = s[jd - 1]` as the §8.4.2
+seed, GPC descramble). Run against our own transmitted downstream, cut from
+`*desconly-3/live-tx.g711`:
+
+```
+TRN1d: 2496T (312.0 ms), U_INFO=74      <- descrambles to all ones
+Jd:    39152T (4894.0 ms), 543.8 frames
+72-bit periodicity: 100.0%
+CRC 0x76ee VALID    sync OK   start bits OK   fill 0000 OK
+```
+
+`vpcm_decode --v90` agrees independently: `Sd W_UCODE=90 (U_INFO=74) 64 reps`,
+`S̄d 8 reps`, `TRN1d 2496 symbols descrambled to ones`, `Jd+J'd ~543 frames`.
+
+Every Table 13 field checks out: sync 17 ones, start bits at 17/34/51 all 0,
+reserved 41:46 all 0, shaping lookahead 49:50 = 1 (legal range 1–3), fill 0000,
+CRC valid. The only field worth a second look is the rate mask, which advertises
+**every** rate from 28000 to 56000 — a capability claim we may not be able to
+honour, though the peer selects via CP regardless, so this is a weak lead.
+
+**So the second and third candidates from §21 are both closed**: the Jd
+differential seeding is right, and the Jd framing and CRC are right. The Courier
+is being sent a spec-conformant, CRC-valid Jd for 4.7 seconds and retrains at
+§9.3.2.7's deadline anyway. Nothing left in Jd's *content* explains it; the next
+places to look are physical or alignment-level — downstream power (§8.4 says
+Phase 3 digital-modem signals are not spectrally shaped, and Table 15's cap
+applies in Phase 4, not here), and §8.4.4's "The first symbol of Sd is defined to
+be transmitted in data frame interval 0. The digital modem shall keep data frame
+alignment from this point on."
+
+## 23. §8.4.4 Sd data frame alignment verified correct (2026-08-12)
+
+> §8.4.4: "Sd consists of 64 repetitions of the sequence {+W, +0, +W, –W, –0, –W}
+> where W is defined to be the PCM codeword whose Ucode is 16 + UINFO and 0 is
+> the PCM codeword with Ucode 0... **The first symbol of Sd is defined to be
+> transmitted in data frame interval 0. The digital modem shall keep data frame
+> alignment from this point on.**"
+
+Both halves check out on our own transmitted downstream
+(`*desconly-3/live-tx.g711`, U_INFO = 74, so W = 90).
+
+**The pattern that defines interval 0** — first four repetitions, decoded to
+(sign, Ucode):
+
+```
++90 +0 +90 -90 -0 -90
++90 +0 +90 -90 -0 -90
++90 +0 +90 -90 -0 -90
++90 +0 +90 -90 -0 -90
+```
+
+**Alignment kept from that point on** — every phase boundary is an exact
+multiple of 6 symbols from Sd's first symbol:
+
+| boundary | symbol | offset from Sd | data frames |
+|---|---:|---:|---:|
+| Sd | 480 | 0 | 0 |
+| S̄d | 864 | 384 | 64 |
+| TRN1d | 912 | 432 | 72 |
+| Jd | 3408 | 2928 | 488 |
+
+Segment lengths are exactly the spec's: Sd 384 (64×6), S̄d 48 (8×6), TRN1d 2496
+(416×6). The Jd frame is 72 bits = 72 symbols = 12 data frames, so the framing
+divides the alignment evenly.
+
+The runtime hazard here is `me_cr_get_adjustment()` inserting or dropping a
+single G.711 codeword to correct clock drift, which would shift the data frame
+phase by ±1 and silently violate "shall keep data frame alignment from this
+point on". It did not fire: zero slip events logged in either run, and
+`v90_jd_decode.py` measures **72-bit periodicity of 100.0% across 543 Jd frames**,
+which no inserted or deleted sample could survive.
+
+Note in passing: we transmit −0 (µ-law 0x7F) in the negative zero slots where the
+Eicon card transmits +0 (0xFF) in every zero slot (see CLAUDE.md). In µ-law both
+decode to linear 0, so the analogue modem — which sees only the D/A voltage —
+cannot distinguish them, and this is not a candidate here. **In A-law it would
+be**: Ucode 0 decodes to ±8 there, a real 16-LSB difference, and the July runs
+were PCMA.
+
+**With §§8.4.2, 8.4.4, 8.4.5 and Table 13 all verified, nothing in the Phase 3
+downstream we generate explains the Courier's behaviour.** The next place to look
+is the transport, not the modem: this Courier is on a **Cisco VG224 port 2/5
+(ext 8405)**, a different gateway from the 2911 FXS that the July `no vad` /
+`no echo-cancel` / `fax protocol none` work was applied to
+([[cisco-fxs-path-broken]]). CLAUDE.md's first constraint is that the RTP payload
+*is* the DS0 stream the far end's D/A sees; any gain, echo cancellation or codec
+hop in the VG224 makes a byte-exact downstream impossible and would present
+exactly as "spec-perfect Jd, ignored". Verify the VG224's port configuration
+before writing any more modem code.
+
+## 24. VG224 gateway was not modem-safe; fixed (2026-08-12)
+
+**The gateway changed between the July and August captures, which invalidates
+every July-vs-August comparison above as a code comparison.** Confirmed from the
+SIP To: headers: July's working runs (dilgate-2/-3, Ja decoded, DIL ran 2 full
+cycles) were `To: "7802"` = **Cisco 2911 FXS 0/3/2**, the port configured in July
+with `no vad` / `no echo-cancel` / `fax protocol none`. Every August run is
+`To: "VG224 Port 2/5" <8405>` — a different box. Current wiring, probed by
+dialling from each modem and reading the CDR caller ID: Courier #1
+(`/dev/cu.usbserial-21210`) → VG224 2/5 (8405); Courier #2 (`FT4TQOFT`) → VG224
+2/13 (8413); USR 56K (`21240`) → AudioCodes (6311). Nothing is on the 2911 FXS
+any more.
+
+**VG224 console is `/dev/cu.usbserial-630` @ 9600 8N1, already in enable mode.**
+It needs several `\r` and a patient read — a short probe looks completely silent.
+Telnet is open but refuses ("Password required, but none set").
+
+Config as found. The VoIP side was fine — `modem passthrough nse codec g711ulaw`,
+`no vad`, `codec g711ulaw`, `fax protocol pass-through g711ulaw` on
+`dial-peer voice 8999 voip`. The per-port side was not:
+
+| port | as found |
+|---|---|
+| 2/3 | `no echo-cancel enable`, `no non-linear` — deliberately modem-safe |
+| **2/5** (Courier #1) | **EC enabled, non-linear enabled** (defaults, so absent from running-config; `show voice port summary` showed `EC y`) |
+| **2/13** (Courier #2) | same |
+
+plus `playout-delay minimum low` — an **adaptive** jitter buffer — on the VoIP
+dial-peer. `modem passthrough nse` only engages when the far end signals NSE,
+which we never do, so EC, NLP and adaptive playout were all live for the whole
+call. NLP substitutes or mutes audio it judges to be echo, and adaptive playout
+inserts and deletes samples to track drift; either destroys the sample continuity
+a sign-only signal like Jd depends on (one substituted sample desynchronises the
+§5.3 GPC descrambler for 23 symbols).
+
+Applied with the user's approval, verified, **not written to startup-config** (a
+VG224 reload reverts it):
+
+```
+voice-port 2/5     ! and 2/13
+ no echo-cancel enable
+ no non-linear
+dial-peer voice 8999 voip
+ playout-delay mode fixed
+```
+
+**Measured effect — the peer's behaviour changed substantially.** Its Phase 3
+now runs **6.0 s** instead of ~2.9 s, i.e. it stays in Phase 3 more than twice as
+long before giving up, and the offline replay of `noec-1` captures **26736 Ja
+bits** (against the ~16000 the descriptor needs) with the descriptor present and
+decodable: `DESCRIPTOR hyp=8 start=14420 N=197 LSP=66 LTP=66`.
+
+**But the live path parsed 0 of 3**, against 1 of 3 before — a sample far too
+small to call a regression, and the offline result says the signal got *better*,
+not worse. So the failure has moved: we are now being handed 26k bits of Ja
+containing a demonstrably decodable descriptor and are not extracting it. That is
+a defect on our side, not the peer's or the line's, and it is the next thing to
+chase. Note `PP start detected` fires twice in both a parsing and a non-parsing
+run, so the one-shot reset of `phase3_ja_capture_hyp[]` at each
+TRAINING→WAIT_S transition is a suspect but not established.
+
+## 25. After the gateway fix: Ja is reliable, the blocker is unchanged
+
+VG224 config saved to startup-config (`write memory`) so it survives a reload.
+
+**`output attenuation -6` explained, partly.** The device reports the range as
+`<-6 - 14>` dB of *attenuation*, so -6 is the least-attenuation (hottest) end,
+not a neutral setting — neutral would be `output attenuation 0`. It is set on
+every port. `show voice port 2/5` reports two different fields that do not agree
+on their face — `Out Attenuation is Set to -6 dB` alongside `Analog interface
+D-A gain offset = -3.0 dB` and `Output attenuation is set to 14 dB` — so the
+configured value maps onto an internal scale rather than being a direct pad.
+Left alone; worth an A/B against `output attenuation 0` if downstream level ever
+becomes a suspect, since -6 is the hottest setting and clipping W = Ucode 90
+would be nonlinear rather than a uniform gain.
+
+**The "live miss" did not reproduce.** Two further runs after the gateway change
+both parsed the descriptor (2/2, `N=197 LSP=66 LTP=66`), against 0/3 in the
+batch taken immediately after the change. The `DISCARDING ... Ja bits on
+re-entry to WAIT_S` diagnostic added to v34rx.c never fired — the second
+`PP start detected` lands before any Ja is captured — so **the hypothesis that
+the TRAINING→WAIT_S reset wipes the descriptor is disproven**, and the earlier
+0/3 is best read as run-to-run variance.
+
+**The blocker is exactly where it was, now with a clean transport and reliable
+Ja.** Both runs: Ja parsed → Sd (64 reps) → S̄d → TRN1d (2496T) → Jd → the
+Courier retrains. Measured from the tap during our Jd (11.6–16.4 s):
+
+| window | far-end RMS | spectral flatness |
+|---|---:|---:|
+| peer transmitting Ja (9.0–11.4 s) | ~1530 | 0.19 |
+| **during our Jd (11.6–16.4 s)** | **~54** | **0.26 (broadband noise)** |
+| peer Tone A retrain (16.6 s+) | ~2920 | 0.000 (pure tone) |
+
+So the Courier is genuinely silent — 29 dB below its own transmit level, with a
+noise-shaped spectrum — for the whole of our Jd, then retrains at its §9.3.2.7
+deadline. The S-event gates are behaving correctly here: every S in these runs
+was rejected on the RX/TX ratio test at 0.03–0.10 against a 0.15 threshold, and
+the tap confirms there was nothing to detect.
+
+Everything we send is now verified conformant (§§8.4.2, 8.4.4, 8.4.5, Table 13,
+§9.3.1.4), the transport is modem-safe, and Ja decodes. The Courier receives a
+CRC-valid Jd for 4.7 s and does not answer it.

@@ -6466,6 +6466,21 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 span_log(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 3: first %dT of TRN processed; equalizer frozen, waiting for J-handling stage\n",
                          PHASE3_TRN_REFINE_BAUDS);
+                /* This transition wipes phase3_ja_capture_hyp[] below, which is
+                   the ONLY input to the V.90 DIL descriptor parser.  If the
+                   receiver re-enters PHASE3_TRAINING mid-Ja and comes back, the
+                   descriptor bits captured so far are discarded and the parser
+                   restarts from nothing -- so say how much is being thrown
+                   away.  Live 2026-08-12: the peer's Ja carries exactly one
+                   CRC-valid descriptor copy, so losing the capture across it
+                   loses the whole call's DIL. */
+                if (s->phase3_ja_capture_hyp_len[0] > 0)
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 3: DISCARDING %d captured Ja bits on re-entry to WAIT_S\n",
+                             s->phase3_ja_capture_hyp_len[0]);
+                }
+                /*endif*/
                 s->stage = V34_RX_STAGE_PHASE3_WAIT_S;
                 s->duration = 0;
                 s->s_detect_count = 0;
