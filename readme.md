@@ -92,6 +92,19 @@ make
                 --pty-link /tmp/v90modem
 ```
 
+Select the highest modem family offered in V.8 with `--mode v34|v90|v92`.
+The default is `v90`; lower fallback modes remain advertised. For a plain V.34
+interoperability run, configure the peer for V.34 and start this endpoint with:
+
+```bash
+./sip_v90_modem --mode v34 --sip-server your-provider.com \
+                --username modem --password yourpassword \
+                --pty-link /tmp/v90modem
+```
+
+`ME_MODE=v34|v90|v92` is the equivalent environment setting. The older
+`ME_V92_ENABLE=1` remains supported when `ME_MODE` is unset.
+
 ### macOS notes
 
 - Install dependencies (Homebrew), then build with `make`.

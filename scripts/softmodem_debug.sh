@@ -9,6 +9,7 @@ USERNAME=""
 PASSWORD=""
 PTY_LINK="/tmp/v90modem"
 LOCAL_PORT="5060"
+MODE="v90"
 VERBOSE=1
 BUILD_FIRST=1
 LOG_FILE=""
@@ -26,6 +27,7 @@ Options:
   --password <pass>       SIP password
   --pty-link <path>       PTY symlink path (default: ${PTY_LINK})
   --local-port <port>     Local SIP UDP port (default: ${LOCAL_PORT})
+  --mode <v34|v90|v92>    Highest modem family to offer (default: ${MODE})
   --log-file <path>       Optional log output file
   --no-build              Skip 'make sip_v90_modem'
   --skip-preflight        Skip local UDP bind preflight check
@@ -50,6 +52,8 @@ while [[ $# -gt 0 ]]; do
       PTY_LINK="${2:-}"; shift 2 ;;
     --local-port)
       LOCAL_PORT="${2:-}"; shift 2 ;;
+    --mode)
+      MODE="${2:-}"; shift 2 ;;
     --log-file)
       LOG_FILE="${2:-}"; shift 2 ;;
     --no-build)
@@ -66,6 +70,11 @@ while [[ $# -gt 0 ]]; do
       exit 2 ;;
   esac
 done
+
+case "${MODE}" in
+  v34|v90|v92) ;;
+  *) echo "Invalid --mode: ${MODE} (expected v34, v90, or v92)" >&2; exit 2 ;;
+esac
 
 check_udp_bindability() {
   local port="$1"
@@ -119,7 +128,7 @@ if [[ "${RUN_PREFLIGHT}" -eq 1 ]]; then
   fi
 fi
 
-CMD=("${BIN}" "--pty-link" "${PTY_LINK}" "--local-port" "${LOCAL_PORT}")
+CMD=("${BIN}" "--pty-link" "${PTY_LINK}" "--local-port" "${LOCAL_PORT}" "--mode" "${MODE}")
 
 if [[ -n "${SIP_SERVER}" ]]; then
   CMD+=("--sip-server" "${SIP_SERVER}")
@@ -136,6 +145,7 @@ fi
 
 echo "Starting softmodem debug runtime..."
 echo "  PTY link:    ${PTY_LINK}"
+echo "  Modem mode:  ${MODE}"
 echo "  Local SIP:   UDP ${LOCAL_PORT}"
 if [[ -n "${SIP_SERVER}" ]]; then
   echo "  SIP server:  ${SIP_SERVER}"

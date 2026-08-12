@@ -1577,7 +1577,12 @@ static modem_echo_can_segment_state_t *g_echo_can = NULL;
    well-separated, and the LMS diverges if active.  We track RX frame count since
    ME_TRAINING started and only activate after a delay (Phase 2 takes 2-5s). */
 /* EC disabled — notch filter used instead (see g_notch) */
-static const bool g_advertise_v90 = true; /* Advertise V.90 — PCM downstream active */
+/* Selected once in me_init() from ME_MODE.  Keeping this at the V.8 offer
+ * boundary lets plain V.34 exercise SpanDSP without entering any V.90/V.92
+ * branches.  Values: v34, v90 (default), v92. */
+static bool g_advertise_v90 = true;
+static bool g_enable_v92 = false;
+static const char *g_mode_name = "v90";
 
 /*
  * Which side of a V.90 call this endpoint offers to be.
@@ -2070,7 +2075,7 @@ static int me_start_or_restart_v8_locked(int answer_tone)
     /* Keep V.92 opt-in until its start-up path is interoperable end to end.
        Advertising it and later demoting to V.90 leaves some analogue modems
        waiting for QTs in their V.92 Phase 3 state machine. */
-    if (parse_env_int("ME_V92_ENABLE", 0) != 0)
+    if (g_enable_v92)
         v8_parms.v92            = g_calling_party ? 0x45 : 0x47;
     else
         v8_parms.v92            = -1;
@@ -3956,7 +3961,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
         g_v92_v8_offered = (result->v92 >= 0
                           || (result->jm_cm.pcm_modem_availability
                               & V8_PSTN_PCM_MODEM_V90_V92_ANALOGUE) != 0)
-                        && parse_env_int("ME_V92_ENABLE", 0) != 0;
+                        && g_enable_v92;
         g_v92_info0_local_advertised = g_v92_v8_offered;
         g_v92_info0_peer_capable = false;
         g_v92_info0_peer_short_phase2 = false;
@@ -3967,7 +3972,8 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
              || (result->jm_cm.pcm_modem_availability
                  & V8_PSTN_PCM_MODEM_V90_V92_ANALOGUE) != 0)
             && !g_v92_v8_offered)
-            ME_LOG("[ME] V.92 capability present, but ME_V92_ENABLE=0; using V.90 Phase 4\n");
+            ME_LOG("[ME] V.92 capability present, but modem mode is %s; using V.90 Phase 4\n",
+                   g_mode_name);
         ME_LOG("[ME] V.8 negotiated V.90 PCM downstream + V.34 upstream%s\n",
                g_v92_v8_offered ? "; V.92 pending INFO0 confirmation" : "");
         trace_phase("V8 selected V90%s", g_v92_v8_offered ? "; V92 INFO0 pending" : "");
@@ -4042,9 +4048,39 @@ void me_init(void)
     pthread_mutex_init(&g_state_mtx, NULL);
     v90_cp_live_worker_start();
     {
+        const char *mode = getenv("ME_MODE");
         const char *role = getenv("ME_V90_ROLE");
 
-        g_v90_analogue_role = (role && strcmp(role, "analogue") == 0);
+        /* ME_V92_ENABLE remains a compatibility alias when ME_MODE is absent. */
+        if (!mode || !*mode || strcmp(mode, "auto") == 0) {
+            g_advertise_v90 = true;
+            g_enable_v92 = parse_env_int("ME_V92_ENABLE", 0) != 0;
+            g_mode_name = g_enable_v92 ? "v92" : "v90";
+        } else if (strcmp(mode, "v34") == 0) {
+            g_advertise_v90 = false;
+            g_enable_v92 = false;
+            g_mode_name = "v34";
+        } else if (strcmp(mode, "v90") == 0) {
+            g_advertise_v90 = true;
+            g_enable_v92 = false;
+            g_mode_name = "v90";
+        } else if (strcmp(mode, "v92") == 0) {
+            g_advertise_v90 = true;
+            g_enable_v92 = true;
+            g_mode_name = "v92";
+        } else {
+            ME_LOG("[ME] Unknown ME_MODE '%s'; using v90\n", mode);
+            g_advertise_v90 = true;
+            g_enable_v92 = false;
+            g_mode_name = "v90";
+        }
+
+        g_v90_analogue_role = g_advertise_v90
+                           && role && strcmp(role, "analogue") == 0;
+        ME_LOG("[ME] Modem mode: %s (V.8 offer %s)\n", g_mode_name,
+               g_advertise_v90 ? "V90|V34|V22" : "V34|V22");
+        if (!g_advertise_v90 && role && strcmp(role, "analogue") == 0)
+            ME_LOG("[ME] ME_V90_ROLE=analogue ignored in v34 mode\n");
         if (g_v90_analogue_role)
             ME_LOG("[ME] V.90 role: ANALOGUE (opt-in; Phase 4 B1/B1d and "
                    "bidirectional data mappers enabled)\n");
@@ -4215,7 +4251,8 @@ void me_on_sip_connected(void)
         return;
     }
     pthread_mutex_unlock(&g_state_mtx);
-    trace_phase("enter V8: advertised mods=%s", g_advertise_v90 ? "V90|V34|V22" : "V34|V22");
+    trace_phase("enter V8: mode=%s advertised mods=%s", g_mode_name,
+                g_advertise_v90 ? "V90|V34|V22" : "V34|V22");
 
     ME_LOG("[ME] SIP connected as %s, starting V.8 handshake\n",
             g_calling_party ? "caller" : "answerer");

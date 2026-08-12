@@ -958,6 +958,7 @@ int main(int argc, char *argv[])
     const char *password    = NULL;
     const char *pty_link    = "/tmp/modem0";
     const char *bind_addr   = NULL;
+    const char *modem_mode  = NULL;
     char        bind_addr_buf[64];
     int         local_port  = 5060;
     int         rtp_port    = 0;
@@ -979,16 +980,29 @@ int main(int argc, char *argv[])
             rtp_port = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bind-addr") && i+1 < argc)
             bind_addr = argv[++i];
+        else if (!strcmp(argv[i], "--mode") && i+1 < argc)
+            modem_mode = argv[++i];
         else if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "-v"))
             me_set_verbose(1);
         else if (!strcmp(argv[i], "--help")) {
             fprintf(stderr,
                 "Usage: %s [--sip-server host] [--username u] [--password p]\n"
                 "          [--pty-link path] [--local-port port] [--rtp-port port]\n"
-                "          [--bind-addr ip] [--verbose]\n", argv[0]);
+                "          [--bind-addr ip] [--mode v34|v90|v92] [--verbose]\n", argv[0]);
             return 0;
         }
     }
+
+    if (modem_mode
+        && strcmp(modem_mode, "v34") != 0
+        && strcmp(modem_mode, "v90") != 0
+        && strcmp(modem_mode, "v92") != 0) {
+        fprintf(stderr, "Invalid --mode '%s' (expected v34, v90, or v92)\n",
+                modem_mode);
+        return 2;
+    }
+    if (modem_mode)
+        setenv("ME_MODE", modem_mode, 1);
 
     if (!bind_addr && sip_server &&
         detect_local_ip_for_host(sip_server, bind_addr_buf,

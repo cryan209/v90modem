@@ -116,3 +116,10 @@ tools/__pycache__/
 # Regenerable extracted Eicon DSP firmware images
 # (run tools/eicon_dsp_extract.py docs/firmware/dspdload.bin to recreate)
 /artifacts/eicon-dsp/
+
+# Local hardware interoperability captures
+/artifacts/dmodem-3000-3200-live/
+/artifacts/dmodem-t3-live/
+/artifacts/eicon-native-tower/
+/artifacts/v92-slmodem-tower/
+/artifacts/v92-usb-cx93001/
