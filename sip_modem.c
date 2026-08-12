@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <signal.h>
 #include <unistd.h>
 #include <sys/socket.h>
@@ -291,6 +292,17 @@ static pj_status_t modem_passthrough_port_create(const pjmedia_port *source_port
 /* (me_cr_update). It never modifies the packet stream.                */
 /* ------------------------------------------------------------------ */
 
+typedef struct rtp_trace_state_s {
+    FILE *file;
+    pj_bool_t initialized;
+    uint16_t last_seq;
+    uint32_t last_ts;
+    int64_t last_ns;
+    uint64_t packets;
+    uint64_t sequence_gaps;
+    uint64_t timestamp_discontinuities;
+} rtp_trace_state_t;
+
 typedef struct rtp_tap_transport_s {
     pjmedia_transport base;
     pj_pool_t *pool;
@@ -300,6 +312,8 @@ typedef struct rtp_tap_transport_s {
     void (*stream_rtp_cb)(void *user_data, void *pkt, pj_ssize_t size);
     void (*stream_rtp_cb2)(pjmedia_tp_cb_param *param);
     void (*stream_rtcp_cb)(void *user_data, void *pkt, pj_ssize_t size);
+    rtp_trace_state_t rx_trace;
+    rtp_trace_state_t tx_trace;
 } rtp_tap_transport_t;
 
 static int64_t rtp_tap_now_ns(void)
@@ -309,21 +323,87 @@ static int64_t rtp_tap_now_ns(void)
     return (int64_t) ts.tv_sec * 1000000000LL + (int64_t) ts.tv_nsec;
 }
 
-static void rtp_tap_observe(const void *pkt, pj_ssize_t size)
+static void rtp_trace_open(rtp_trace_state_t *trace, const char *name)
+{
+    const char *dir = getenv("VPCM_G711_TAP_DIR");
+    char path[1024];
+
+    if (!trace || !dir || !*dir)
+        return;
+    if (snprintf(path, sizeof(path), "%s/%s", dir, name) >= (int)sizeof(path)) {
+        PJ_LOG(2, ("sip_modem", "RTP trace path is too long; %s disabled", name));
+        return;
+    }
+    trace->file = fopen(path, "w");
+    if (!trace->file) {
+        PJ_LOG(2, ("sip_modem", "Cannot open RTP trace %s: %s", path, strerror(errno)));
+        return;
+    }
+    setvbuf(trace->file, NULL, _IOFBF, 64 * 1024);
+    fprintf(trace->file,
+            "monotonic_ns,seq,timestamp,marker,payload_type,packet_bytes,ssrc,seq_delta,ts_delta,wall_delta_ns\n");
+}
+
+static void rtp_trace_packet(rtp_trace_state_t *trace, const void *pkt,
+                             pj_size_t size, int64_t now_ns)
 {
     const pjmedia_rtp_hdr *hdr;
+    uint16_t seq;
+    uint32_t ts;
+    int seq_delta = 0;
+    int32_t ts_delta = 0;
+    int64_t wall_delta = 0;
 
-    if (size < (pj_ssize_t) sizeof(pjmedia_rtp_hdr))
+    if (!trace || size < sizeof(pjmedia_rtp_hdr))
         return;
     hdr = (const pjmedia_rtp_hdr *) pkt;
-    me_cr_update(pj_ntohl(hdr->ts), rtp_tap_now_ns());
+    seq = pj_ntohs(hdr->seq);
+    ts = pj_ntohl(hdr->ts);
+    if (trace->initialized) {
+        seq_delta = (int)(uint16_t)(seq - trace->last_seq);
+        ts_delta = (int32_t)(ts - trace->last_ts);
+        wall_delta = now_ns - trace->last_ns;
+        if (seq_delta != 1)
+            trace->sequence_gaps++;
+        /* G.711 is normally one 160-sample packet. A marker may legitimately
+           restart a talkspurt/timestamp run, so only count an unexpected RTP
+           timestamp step when sequence continuity says this is the next packet. */
+        if (seq_delta == 1 && !hdr->m && ts_delta != 160)
+            trace->timestamp_discontinuities++;
+    }
+    if (trace->file) {
+        fprintf(trace->file, "%lld,%u,%u,%u,%u,%lu,%u,%d,%d,%lld\n",
+                (long long)now_ns, (unsigned)seq, (unsigned)ts,
+                (unsigned)hdr->m, (unsigned)hdr->pt, (unsigned long)size,
+                (unsigned)pj_ntohl(hdr->ssrc), seq_delta, (int)ts_delta,
+                (long long)wall_delta);
+    }
+    trace->initialized = PJ_TRUE;
+    trace->last_seq = seq;
+    trace->last_ts = ts;
+    trace->last_ns = now_ns;
+    trace->packets++;
+}
+
+static void rtp_tap_observe(rtp_tap_transport_t *tap, const void *pkt,
+                            pj_ssize_t size)
+{
+    const pjmedia_rtp_hdr *hdr;
+    int64_t now_ns;
+
+    if (!tap || size < (pj_ssize_t) sizeof(pjmedia_rtp_hdr))
+        return;
+    hdr = (const pjmedia_rtp_hdr *) pkt;
+    now_ns = rtp_tap_now_ns();
+    rtp_trace_packet(&tap->rx_trace, pkt, (pj_size_t)size, now_ns);
+    me_cr_update(pj_ntohl(hdr->ts), now_ns);
 }
 
 static void rtp_tap_rtp_cb2(pjmedia_tp_cb_param *param)
 {
     rtp_tap_transport_t *tap = (rtp_tap_transport_t *) param->user_data;
 
-    rtp_tap_observe(param->pkt, param->size);
+    rtp_tap_observe(tap, param->pkt, param->size);
 
     if (tap->stream_rtp_cb2) {
         pjmedia_tp_cb_param cbparam;
@@ -392,6 +472,7 @@ static pj_status_t rtp_tap_send_rtp(pjmedia_transport *tp, const void *pkt,
                                     pj_size_t size)
 {
     rtp_tap_transport_t *tap = (rtp_tap_transport_t *) tp;
+    rtp_trace_packet(&tap->tx_trace, pkt, size, rtp_tap_now_ns());
     return pjmedia_transport_send_rtp(tap->slave_tp, pkt, size);
 }
 
@@ -455,9 +536,26 @@ static pj_status_t rtp_tap_simulate_lost(pjmedia_transport *tp,
     return pjmedia_transport_simulate_lost(tap->slave_tp, dir, pct_lost);
 }
 
+static void rtp_trace_close(const char *direction, rtp_trace_state_t *trace)
+{
+    if (!trace)
+        return;
+    if (trace->file) {
+        fclose(trace->file);
+        trace->file = NULL;
+    }
+    PJ_LOG(3, ("sip_modem",
+               "RTP %s trace: packets=%llu sequence_gaps=%llu timestamp_discontinuities=%llu",
+               direction, (unsigned long long)trace->packets,
+               (unsigned long long)trace->sequence_gaps,
+               (unsigned long long)trace->timestamp_discontinuities));
+}
+
 static void rtp_tap_on_destroy(void *arg)
 {
     rtp_tap_transport_t *tap = (rtp_tap_transport_t *) arg;
+    rtp_trace_close("RX", &tap->rx_trace);
+    rtp_trace_close("TX", &tap->tx_trace);
     if (tap->pool)
         pj_pool_release(tap->pool);
 }
@@ -516,6 +614,8 @@ static pjmedia_transport *on_create_media_transport(pjsua_call_id call_id,
     tap->base.type = base_tp->type;
     tap->base.op = &rtp_tap_op;
     tap->slave_tp = base_tp;
+    rtp_trace_open(&tap->rx_trace, "rtp-rx.csv");
+    rtp_trace_open(&tap->tx_trace, "rtp-tx.csv");
 
     if (base_tp->grp_lock) {
         tap->base.grp_lock = base_tp->grp_lock;
