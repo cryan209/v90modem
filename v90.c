@@ -2167,6 +2167,27 @@ static bool v90_jd_rate_bit_enabled(int k, int cap_bps)
     return v90_jd_rate_bit_bps(k) <= cap_bps;
 }
 
+/* Jd bits 49:50, Table 13: 1..3.  Default unchanged at 1 pending a live result;
+ * ME_V90_JD_SHAPING_LOOKAHEAD=3 matches the Eicon card's working downstream. */
+static int v90_jd_shaping_lookahead(void)
+{
+    static int cached;
+
+    if (cached == 0) {
+        const char *value = getenv("ME_V90_JD_SHAPING_LOOKAHEAD");
+
+        cached = 1;
+        if (value && *value) {
+            char *end;
+            long parsed = strtol(value, &end, 10);
+
+            if (end != value && *end == '\0' && parsed >= 1 && parsed <= 3)
+                cached = (int) parsed;
+        }
+    }
+    return cached;
+}
+
 static void v90_build_jd(v90_state_t *s)
 {
     /* Build the 72-bit Jd frame per V.90 Table 13.
@@ -2239,9 +2260,32 @@ static void v90_build_jd(v90_state_t *s)
     /* Bit 48 — constellation size for renegotiation: 0=4-point */
     pos++;
 
-    /* Bits 49:50 — spectral shaping lookahead: 1 (minimum mandatory) */
-    s->jd_bits[pos/8] |= (1 << (pos%8)), pos++;
-    pos++; /* bit 50 = 0 → value is 1 */
+    /* Bits 49:50 — Table 13: "A number between 1 and 3 indicating the digital
+     * modem's maximum lookahead for spectral shaping", LSB first.
+     *
+     * This was hardcoded to 1 as "the minimum mandatory" value.  1 is legal,
+     * but the only foreign V.90 digital modem we have -- the Eicon Diva Server,
+     * captured in artifacts/eicon-digital-downstream/, whose downstream a USR
+     * Courier V.Everything answered with CONNECT -- sends **3**, and that is the
+     * *only* field in which its Jd frame differs from ours.  Both frames are
+     * otherwise bit-identical: same 17-ones sync, same rate masks, same 4-point
+     * constellation bits, same fill, valid CRC.  Against the same modem model
+     * ours is received for 4.7 s and never answered (docs section 25).
+     *
+     * The parallel worth noting is §5.4.5's Sr on this project's own analogue
+     * side: a legal-looking shaping parameter (Sr = 1) made every Phase 4
+     * constellation unbuildable and the peer simply never advanced.  A
+     * lookahead the peer cannot plan around would fail the same silent way. */
+    {
+        int ld = v90_jd_shaping_lookahead();
+
+        if (ld & 1)
+            s->jd_bits[pos/8] |= (1 << (pos%8));
+        pos++;
+        if (ld & 2)
+            s->jd_bits[pos/8] |= (1 << (pos%8));
+        pos++;
+    }
 
     /* Bit 51 — start bit (0) */
     pos++;

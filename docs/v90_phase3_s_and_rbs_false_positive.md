@@ -1163,3 +1163,199 @@ the tap confirms there was nothing to detect.
 Everything we send is now verified conformant (§§8.4.2, 8.4.4, 8.4.5, Table 13,
 §9.3.1.4), the transport is modem-safe, and Ja decodes. The Courier receives a
 CRC-valid Jd for 4.7 s and does not answer it.
+
+## 26. Why does the Courier ignore a valid Jd? Not the frame — proven
+
+Compared our Jd frame against the only foreign V.90 digital modem we have: the
+Eicon Diva Server downstream in `artifacts/eicon-digital-downstream/`, which a
+USR Courier V.Everything answered with `CONNECT 32000/ARQ/V90/LAPM`. Same modem
+model as the one refusing us.
+
+Decoding both with `tools/v90_jd_decode.py`, the two Jd frames differed in
+**exactly one field**:
+
+| bits 49:50 (Table 13 shaping lookahead, 1–3) | |
+|---|---|
+| Eicon `11` → **3** | Courier answered CONNECT |
+| ours `10` → **1** | Courier retrains |
+
+Everything else was already bit-identical: 17-ones sync, both start bits, rate
+masks `1111111111111111` / `111111000000`, both constellation bits 0 (4-point),
+fill 0000, valid CRC. Ours was hardcoded at v90.c as "1 (minimum mandatory)".
+There was a good reason to suspect it: §5.4.5's Sr on this project's own
+analogue side is a precedent where a legal-looking shaping parameter (Sr = 1)
+made every Phase 4 constellation unbuildable and the peer silently never
+advanced.
+
+Made it settable (`ME_V90_JD_SHAPING_LOOKAHEAD`, 1–3) and tested live at 3. The
+transmitted frame is now
+
+```
+111111111111111110111111111111111101111110000000011001100110110011110000
+CRC 0x66cf VALID
+```
+
+**byte-for-byte identical to the Eicon's frame, same CRC** — and the Courier
+still ignores it and retrains (`ld3-3`: Ja parsed, Sd → S̄d → TRN1d → Jd, peer
+retrain, no S accepted, DIL never sent).
+
+**So the Jd frame content is definitively not the cause.** We now transmit the
+exact 72 bits that this modem model accepted from a different digital modem, and
+it is still refused. Combined with §§8.4.2/8.4.4/8.4.5 and §9.3.1.4 already
+verified, and TRN1d length tested at both 2496T and 30000T, nothing about *what*
+we send explains it.
+
+What still differs from the Eicon's successful call, in order of interest:
+
+1. **Level.** The Courier asked the Eicon for `U_INFO = 48` (W = Ucode 64,
+   linear 1980) and asks us for `U_INFO = 74` (W = Ucode 90, linear 6652) —
+   our downstream is ~10.5 dB hotter in linear terms. The VG224 also runs
+   `output attenuation -6`, the *hottest* end of its −6..14 dB range. If W is
+   clipping in the gateway D/A or the modem front end, that is nonlinear: it
+   would corrupt TRN1d equaliser conditioning and Jd slicing while leaving the
+   coarse Sd pattern detectable — which is exactly the observed split. Against
+   this: the peer chose 74 itself, and a peer measuring a hot line should ask
+   for less, not more. Testable directly by setting `output attenuation 0` on
+   voice-port 2/5 and repeating.
+2. **TRN1d duration**, 2496T vs the Eicon's 30005T. Tested at 30000T with
+   lookahead 1 and it did not help (section 21); not yet retested with the two
+   changes combined, and note the Eicon's peer answered after only 943T / 118 ms
+   of Jd, so Jd airtime was never the constraint that section implied.
+3. The transport itself — the Eicon capture did not traverse this VG224.
+
+Default left at 1 pending evidence, but 3 is arguably the better default purely
+because it makes our frame identical to the one known to interoperate with this
+hardware.
+
+## 27. Downstream level is not the cause either (2026-08-12)
+
+Set `output attenuation 0` on VG224 voice-port 2/5 — note 0 is the IOS default,
+so the setting disappears from running-config; the lab had explicitly configured
+every port to `-6`, the hottest end of the −6..14 dB range. Left at 0 in the
+running config; **startup-config still has −6** (it was written before this
+test), so a VG224 reload restores the old value.
+
+The change did reach the line. Measured from our own echo during Phase 3
+transmission (EC is off, so our downstream leaks back through the hybrid), taken
+over windows where we transmit and the peer is silent:
+
+| run | echo RMS | our TX RMS | echo/TX |
+|---|---:|---:|---:|
+| `discard-2` (attenuation −6) | 69.7 | 3603 | −34.3 dB |
+| `att0-2` (attenuation 0) | 43.7 | 3552 | −38.2 dB |
+| `att0-4` (attenuation 0) | 44.2 | 3552 | −38.1 dB |
+
+3.9 dB quieter, short of the full 6 dB because part of that residual is line
+noise that does not scale with our output.
+
+**Result: no change in behaviour.** Four calls, two of which reached Jd (Ja parse
+is roughly one call in two): both ran Ja → Sd → S̄d → TRN1d → Jd → peer retrain,
+no S accepted, DIL never sent — with shaping lookahead 3, i.e. a Jd frame
+byte-identical to the Eicon's.
+
+One further data point against the level theory: **the Courier still asks for
+`U_INFO = 74`** after the 4 dB drop, the same value it asked for at −6. If its
+choice of U_INFO were driven by the received level in the way the clipping
+hypothesis assumed, it should have moved.
+
+So downstream level joins the list of eliminated causes. As of now, against this
+Courier: Ja decodes, Phase 3 is verified conformant in content
+(§§8.4.2/8.4.4/8.4.5, Table 13), timing (§9.3.1.4, both 2496T and 30000T),
+alignment and now level, the transport is modem-safe (EC/NLP off, fixed playout),
+and the Jd frame is bit-identical to one this modem model answered with CONNECT.
+It still receives 4.7 s of that Jd and does not answer.
+
+**Proposed decisive next test: replay the Eicon downstream at the peer.** We hold
+27 s of a downstream that a Courier V.Everything answered with
+`CONNECT 32000/ARQ/V90/LAPM` (`artifacts/eicon-digital-downstream/`). Feeding it
+to *this* Courier in place of our own Phase 3 splits the remaining space in one
+call: if it answers the recording, the difference is still something in our
+signal that all the above checks have missed; if it ignores the recording too,
+the difference is this line, this gateway or this modem, and no amount of
+transmitter work will fix it. It needs the engine to hand the transmitter over
+to file playback at the Phase 2→3 seam, with the recording's own Sd as the
+alignment reference.
+
+## 28. The VG224 never enters modem passthrough (2026-08-12)
+
+Queried the gateway *during* Phase 3 (VG224 console, `/dev/cu.usbserial-630`;
+note the enable session times out, so a helper must re-`enable` each time).
+Our call leg:
+
+```
+Tele 2/5 (301822) [2/5] tx:4550/4550/0ms g711ulaw noise:-32 acom:6 i/0:-13/-13 dBm
+```
+
+`tx:<tot>/<v>/<fax>ms` — **4550 ms total, 4550 ms voice, 0 ms fax/modem** — and
+no `MODEMPASS` block on the leg. `modem passthrough nse codec g711ulaw` is
+configured on `dial-peer voice 8999 voip`, but NSE has to be negotiated with the
+far end and neither Asterisk nor this project signals it, so **the DSP stays in
+voice mode for the entire call**.
+
+That is the difference in kind we had not accounted for. Everything fixed so far
+— EC off, NLP off, fixed playout, no VAD — removes individual voice features,
+but the path is still the voice pipeline rather than a clear channel. CLAUDE.md's
+first constraint is that the RTP payload *is* the DS0 stream the far end's D/A
+sees; a voice-mode DSP does not promise that, whatever features are disabled.
+
+Against this: the same voice path carries the Courier's upstream V.34 Ja well
+enough to yield CRC-valid DIL descriptors, and carries our Sd/S̄d well enough
+that the peer acts on the §9.3.2.4 transition. So it is not grossly destructive
+in either direction — which is why this is a candidate, not a conclusion.
+
+Two ways to settle it, in increasing order of effort:
+
+1. **Force the DSP out of voice mode.** Either make our side answer the NSE, or
+   find a VG224 configuration that engages passthrough on local tone detection
+   without peer negotiation.
+2. **Replay the Eicon downstream at this Courier** (section 27). Still the
+   single most decisive call available: it removes our transmitter from the
+   experiment entirely.
+
+Also found: a **stuck call on port 2/21**, 57 minutes and counting, to a bogus
+number, with an off-hook FXS and 171763 packets sent. It is not one of the three
+modems under test (2/5, 2/13, AudioCodes) and sits on a different channel of the
+same DSP (0/1:3 vs our 0/1:1). Two active calls is trivial load for that DSP so
+it is unlikely to be causal, but it is real and should be cleared.
+
+## 29. Modem passthrough cannot be engaged from the gateway alone
+
+Tried both methods the VG224 offers on `dial-peer voice 8999 voip`
+(`modem passthrough ?` → `nse | protocol | system`):
+
+- `modem passthrough nse codec g711ulaw` (as found): mid-call
+  `Tele 2/5 tx:4550/4550/0ms` — **0 ms modem**.
+- `modem passthrough protocol codec g711ulaw` (SDP renegotiation, the SIP
+  method): mid-call `Tele 2/5 tx:12500/12500/0ms` — **0 ms modem**.
+
+Setting `protocol` needs the fax protocol removed first (`no fax protocol`;
+`fax protocol none` is not enough — IOS still reports "need to unconfigure fax
+protocol first"), and warns "modem passthru protocol supported only on sip
+signaling", which is satisfied here.
+
+**Neither engages.** Both methods trigger on detecting a modem answer tone and
+then require the *far end* to complete the switch — NSE needs the peer to honour
+Cisco's named signalling events, `protocol` needs the peer to accept a SIP
+re-INVITE. Our ANSam originates on the IP side (V.90 puts the analogue modem on
+the calling side, so the digital modem answers), and neither Asterisk nor this
+project participates in either mechanism. Nothing configurable on the gateway
+alone will switch that DSP out of voice mode.
+
+Call outcome was unchanged in protocol mode: Ja parsed, Sd → S̄d → TRN1d → Jd,
+peer retrained, no S, no DIL.
+
+**So the voice-mode theory from section 28 is untested, not disproven.** Testing
+it properly needs our side to participate in passthrough negotiation, which is a
+real piece of work (recognising and answering NSE, or handling the gateway's
+re-INVITE) and is only worth doing if there is other evidence the voice path is
+lossy — the evidence so far says it is not grossly so, since it carries CRC-valid
+Ja upstream and an Sd the peer acts on.
+
+Gateway restored to `modem passthrough nse codec g711ulaw` +
+`fax protocol pass-through g711ulaw` afterwards, so other users of this VG224 are
+unaffected. Retained from earlier sections: per-port `no echo-cancel enable` /
+`no non-linear` on 2/5 and 2/13, `playout-delay mode fixed`, and
+`output attenuation 0` on 2/5 (startup-config still holds the old −6).
+
+Note also: port 2/21's long-running call is a **live call to an Asterisk
+extension**, not the stuck call section 28 assumed. Do not clear it.
