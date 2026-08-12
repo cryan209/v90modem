@@ -157,7 +157,13 @@ Its internal known-TRN2 oracle produces the same signed 16-level sequence as
 our transmitted stream, codeword for codeword.  The remaining failure is MP:
 the peer enabled TRN2d about 240 ms after barred Ri, so the old 2040T minimum
 left only about 120 observed conditioning symbols before MP and no MP decoded.
-The default is now 8000T (1 s), within §9.4.1.3's 2000 ms limit; live
-qualification remains pending because subsequent calls did not pass the
-variable Ja/Sd seam.  Evidence is in
-`artifacts/dmodem-3000-3200-live/v90-dmodem-cpt2-20260811T220326Z/`.
+A controlled live A/B then bounded the usable interval.  At 8000T (1 s), MP
+began at SmartLink's short Phase-4 timeout and it retrained.  At 4000T (500 ms),
+SmartLink decoded MP and MP′, sent a CRC-clean 700-bit CP′, detected Ed, sent E
+and B1, and both ends entered DATA at 31200 bit/s upstream and 52000 bit/s
+downstream.  The default is therefore 4000T.  This proves the complete physical
+startup through B1; FCS-valid LAPM traffic remains the hardware qualification
+criterion.  Evidence:
+
+- CPt/TRN2 oracle: `artifacts/dmodem-3000-3200-live/v90-dmodem-cpt2-20260811T220326Z/`
+- successful 4000T DATA entry: `artifacts/dmodem-3000-3200-live/v90-dmodem-trn2-4000b-20260812T002922Z/`

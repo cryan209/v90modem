@@ -33,11 +33,11 @@
 #define V90_RI_POST_CP_SYMBOLS 24
 /* V.90 requires at least 2040T and MP within 2000 ms (§9.4.1.2/.3).
  * SmartLink recognizes barred Ri but enables its TRN2d study about 240 ms
- * later; the 2040T minimum then leaves it only ~120 useful symbols before MP.
- * Send 8000T (1 s), still comfortably inside §9.4.1.3, so a conforming but
- * slow receiver gets a substantial known-ones conditioning interval.
- * ME_V90_TRN2D_SYMBOLS remains available for controlled A/B work. */
-#define V90_TRN2D_DEFAULT_SYMBOLS 8000
+ * later; 2040T leaves only ~120 useful symbols before MP.  Conversely, 8000T
+ * reaches MP at the peer's short Phase-4 timeout.  The measured interop point
+ * is 4000T (500 ms): SmartLink decoded MP/MP'/Ed and entered DATA.  Keep the
+ * environment override for controlled receiver-conditioning A/B work. */
+#define V90_TRN2D_DEFAULT_SYMBOLS 4000
 
 static int v90_trn2d_symbols(void)
 {
