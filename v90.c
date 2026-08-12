@@ -31,11 +31,13 @@
 /* Phase 4 timing constants (ITU-T V.90 §9.4.1) */
 #define V90_RI_SYMBOLS   192  /* Ri duration: at least 192T (§9.4.1.1) */
 #define V90_RI_POST_CP_SYMBOLS 24
-/* V.90 requires a minimum of 2040T and MP within 2000 ms (§9.4.1.2/.3).
- * Use the minimum by default so a late CPt leaves the analogue modem the
- * largest possible Phase-4 acquisition window.  Longer TRN2d study windows
- * remain available through ME_V90_TRN2D_SYMBOLS for peers such as SmartLink. */
-#define V90_TRN2D_DEFAULT_SYMBOLS 2040
+/* V.90 requires at least 2040T and MP within 2000 ms (§9.4.1.2/.3).
+ * SmartLink recognizes barred Ri but enables its TRN2d study about 240 ms
+ * later; the 2040T minimum then leaves it only ~120 useful symbols before MP.
+ * Send 8000T (1 s), still comfortably inside §9.4.1.3, so a conforming but
+ * slow receiver gets a substantial known-ones conditioning interval.
+ * ME_V90_TRN2D_SYMBOLS remains available for controlled A/B work. */
+#define V90_TRN2D_DEFAULT_SYMBOLS 8000
 
 static int v90_trn2d_symbols(void)
 {

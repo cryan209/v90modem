@@ -2733,7 +2733,10 @@ static void *v90_cp_live_worker(void *user_data)
                 rx_baseline.semantic_rejected_frames);
 
             if (repeated_cpt
-                && repeated_cpt_sample >= cpt_accept_sample) {
+                && repeated_cpt_sample >= recent_start) {
+                /* The batch search deliberately retains pre-transition CPt.
+                 * Do not call that historical frame "repeating" after the
+                 * newest 500 ms has moved into optional §9.4.2.2 SCR. */
                 classification = "repeating-CPt";
             } else if (recent_rms < 64.0) {
                 classification = "silence";

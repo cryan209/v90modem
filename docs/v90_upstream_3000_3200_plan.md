@@ -151,8 +151,13 @@ transmitter constellation with a separate codec mask).  The prior code reports
 A fresh post-restart run then validated the same path live.  The batch receiver
 armed at upstream sample 128073, recovered the peer's CRC-clean 428-bit CPt at
 sample 134211, and `v90.c` accepted it and began barred Ri followed by 2040
-mapped TRN2d symbols (`D=23`, `K=18`).  SmartLink nevertheless continued
-repeating CPt and retrained, so CPt acquisition itself is complete; the next
-blocker is why the peer does not recognize the barred-Ri/TRN2d acknowledgement.
-Evidence is in
+mapped TRN2d symbols (`D=23`, `K=18`).  SmartLink set `CPnot`, completed its
+current CPt, and enabled its TRN2d study, proving that it recognized barred Ri.
+Its internal known-TRN2 oracle produces the same signed 16-level sequence as
+our transmitted stream, codeword for codeword.  The remaining failure is MP:
+the peer enabled TRN2d about 240 ms after barred Ri, so the old 2040T minimum
+left only about 120 observed conditioning symbols before MP and no MP decoded.
+The default is now 8000T (1 s), within §9.4.1.3's 2000 ms limit; live
+qualification remains pending because subsequent calls did not pass the
+variable Ja/Sd seam.  Evidence is in
 `artifacts/dmodem-3000-3200-live/v90-dmodem-cpt2-20260811T220326Z/`.
