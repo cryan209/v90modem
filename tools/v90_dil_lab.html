@@ -1,0 +1,2311 @@
+<title>V.90 DIL Lab — Ja descriptor in, downstream rate out</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root {
+  color-scheme: light;
+  --bg:        #eef1f2;
+  --surface:   #ffffff;
+  --surface-2: #f6f8f8;
+  --ink:       #101a1e;
+  --muted:     #5b6d75;
+  --faint:     #8b9ba2;
+  --rule:      #cfd9dc;
+  --rule-soft: #e2e9eb;
+  --accent:    #0a6a78;
+  --accent-ink:#ffffff;
+  --signal:    #a8630c;
+  --good:      #2c6b4f;
+  --bad:       #9d2f24;
+  --cell-off:  #e6ebec;
+  --shadow:    0 1px 2px rgba(16,26,30,.06), 0 8px 24px rgba(16,26,30,.05);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg:        #0d1417;
+    --surface:   #141d21;
+    --surface-2: #18242a;
+    --ink:       #e2ebee;
+    --muted:     #93a6ad;
+    --faint:     #6c7f87;
+    --rule:      #27353b;
+    --rule-soft: #1e2b30;
+    --accent:    #4ec5d2;
+    --accent-ink:#06232a;
+    --signal:    #dda246;
+    --good:      #62c096;
+    --bad:       #e0705f;
+    --cell-off:  #1b262b;
+    --shadow:    0 1px 2px rgba(0,0,0,.4), 0 10px 28px rgba(0,0,0,.28);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg:        #0d1417;
+  --surface:   #141d21;
+  --surface-2: #18242a;
+  --ink:       #e2ebee;
+  --muted:     #93a6ad;
+  --faint:     #6c7f87;
+  --rule:      #27353b;
+  --rule-soft: #1e2b30;
+  --accent:    #4ec5d2;
+  --accent-ink:#06232a;
+  --signal:    #dda246;
+  --good:      #62c096;
+  --bad:       #e0705f;
+  --cell-off:  #1b262b;
+  --shadow:    0 1px 2px rgba(0,0,0,.4), 0 10px 28px rgba(0,0,0,.28);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.mono, code, input, select, textarea, .num {
+  font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- page frame ---- */
+
+.wrap { max-width: 1400px; margin: 0 auto; padding: 28px 20px 72px; }
+
+header.page {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 18px;
+  padding-bottom: 16px; margin-bottom: 22px;
+  border-bottom: 2px solid var(--ink);
+}
+header.page h1 {
+  margin: 0;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 20px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+}
+header.page .tag {
+  color: var(--muted); font-size: 13px; max-width: 62ch;
+}
+header.page .spec {
+  margin-left: auto; color: var(--faint); font-size: 12px; letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+.cols { display: grid; grid-template-columns: minmax(340px, 400px) 1fr; gap: 22px; align-items: start; }
+@media (max-width: 980px) { .cols { grid-template-columns: 1fr; } }
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  box-shadow: var(--shadow);
+  margin-bottom: 18px;
+}
+.panel > h2 {
+  margin: 0;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--rule);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 11px; font-weight: 700; letter-spacing: .11em; text-transform: uppercase;
+  color: var(--muted);
+  display: flex; align-items: baseline; gap: 10px;
+}
+.panel > h2 .cite { margin-left: auto; color: var(--faint); font-weight: 400; letter-spacing: .04em; }
+.panel .body { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+
+/* ---- form controls ---- */
+
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field > label, .grouplab {
+  font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+.field .hint { font-size: 12px; color: var(--faint); line-height: 1.4; }
+
+input[type="text"], input[type="number"], select, textarea {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--surface-2);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+}
+textarea { resize: vertical; line-height: 1.45; word-break: break-all; }
+input:focus-visible, select:focus-visible, textarea:focus-visible, button:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+input[type="range"] { width: 100%; accent-color: var(--accent); }
+
+.row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.row.two { grid-template-columns: repeat(2, 1fr); }
+
+.slider-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.slider-head .val { font-size: 13px; font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
+
+button {
+  font: inherit; font-size: 13px;
+  padding: 6px 11px;
+  color: var(--ink); background: var(--surface-2);
+  border: 1px solid var(--rule); border-radius: 3px;
+  cursor: pointer;
+}
+button:hover { border-color: var(--accent); color: var(--accent); }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.primary:hover { filter: brightness(1.08); color: var(--accent-ink); }
+.btnrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.inline-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.inline-check input { accent-color: var(--accent); }
+
+.slots { display: flex; gap: 6px; }
+.slots label {
+  flex: 1; text-align: center; padding: 5px 0; cursor: pointer;
+  border: 1px solid var(--rule); border-radius: 3px;
+  background: var(--surface-2);
+  font-family: ui-monospace, Menlo, monospace; font-size: 12px;
+}
+.slots input { position: absolute; opacity: 0; pointer-events: none; }
+.slots label.on { background: var(--signal); border-color: var(--signal); color: #fff; }
+
+/* ---- readout ---- */
+
+.headline {
+  display: grid; grid-template-columns: auto 1fr; gap: 4px 26px; align-items: end;
+  padding: 16px 18px;
+}
+.rate {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: clamp(38px, 6vw, 58px); font-weight: 700; line-height: .95;
+  letter-spacing: -.02em;
+  font-variant-numeric: tabular-nums;
+}
+.rate small { font-size: .32em; font-weight: 400; letter-spacing: .1em; color: var(--muted); margin-left: .5em; }
+.rate.dead { color: var(--bad); font-size: clamp(20px, 3vw, 28px); }
+.headline .sub { color: var(--muted); font-size: 13px; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 18px 16px; }
+.chip {
+  font-family: ui-monospace, Menlo, monospace; font-size: 11px; letter-spacing: .04em;
+  padding: 3px 8px; border-radius: 999px;
+  border: 1px solid var(--rule); color: var(--muted); background: var(--surface-2);
+}
+.chip.warn { color: var(--signal); border-color: var(--signal); }
+.chip.bad  { color: var(--bad);    border-color: var(--bad); }
+.chip.ok   { color: var(--good);   border-color: var(--good); }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(128px, 1fr)); gap: 1px; background: var(--rule-soft); }
+.stat { background: var(--surface); padding: 10px 14px; }
+.stat .k { font-size: 10.5px; letter-spacing: .09em; text-transform: uppercase; color: var(--faint);
+           font-family: ui-monospace, Menlo, monospace; }
+.stat .v { font-family: ui-monospace, Menlo, monospace; font-size: 17px; font-variant-numeric: tabular-nums; }
+.stat .v.sm { font-size: 13px; }
+
+.mi-strip { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; padding: 14px; }
+.mi {
+  border: 1px solid var(--rule); border-top: 3px solid var(--accent); border-radius: 3px;
+  padding: 8px 10px; background: var(--surface-2);
+}
+.mi.thin { border-top-color: var(--signal); }
+.mi.dead { border-top-color: var(--bad); }
+.mi .i { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint);
+         font-family: ui-monospace, Menlo, monospace; }
+.mi .m { font-family: ui-monospace, Menlo, monospace; font-size: 20px; font-variant-numeric: tabular-nums; }
+.mi .b { font-size: 11px; color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
+
+table.grid { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.grid th, table.grid td { padding: 4px 8px; text-align: right; border-bottom: 1px solid var(--rule-soft); }
+table.grid th {
+  position: sticky; top: 0; background: var(--surface); z-index: 1;
+  font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--faint); font-weight: 600;
+}
+table.grid td { font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
+table.grid td.l, table.grid th.l { text-align: left; }
+.scroll { max-height: 460px; overflow: auto; }
+.scroll-x { overflow-x: auto; }
+
+.cellrow td.c { width: 34px; padding: 3px 4px; }
+.dot { display: block; height: 14px; border-radius: 2px; background: var(--cell-off); }
+.dot.keep  { background: var(--accent); }
+.dot.power { background: var(--signal); }
+.dot.merge { background: var(--bad); opacity: .55; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 14px; padding: 10px 14px; border-top: 1px solid var(--rule-soft);
+          font-size: 12px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 14px; height: 10px; border-radius: 2px; display: inline-block; }
+
+.stream { display: flex; flex-wrap: wrap; gap: 2px; padding: 12px 14px; }
+.sym {
+  font-family: ui-monospace, Menlo, monospace; font-size: 11px;
+  padding: 2px 4px; border-radius: 2px; background: var(--surface-2); border: 1px solid var(--rule-soft);
+  min-width: 30px; text-align: center;
+}
+.sym.hit { border-color: var(--bad); color: var(--bad); }
+.sym.ref { color: var(--faint); }
+
+p.note { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+p.note code { font-size: 12px; background: var(--surface-2); padding: 0 3px; border-radius: 2px; }
+.err { color: var(--bad); font-size: 12.5px; font-family: ui-monospace, Menlo, monospace; }
+.ok  { color: var(--good); }
+
+.footer { margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--rule);
+          color: var(--faint); font-size: 12px; }
+</style>
+
+<script id="v90-dil-core">
+/*
+ * Core: a direct port of the in-tree C.  Nothing here touches the DOM, so it
+ * can be run head-less and diffed against the C it came from.
+ *
+ *   Table 12 pack/parse ....... v90.c  v90_build_dil_descriptor_bits(),
+ *                                      v90_parse_dil_descriptor()
+ *   DIL symbol generation ..... v90.c  v90_dil_generate_codewords()  (§8.4.1)
+ *   descriptor validation ..... v90_dil_presets.c v90_dil_desc_validate()
+ *   measurement ............... v90_dil_measure.c v90_dil_measure()  (§9.3.2.9)
+ *   constellation and rate .... v90_dil_measure.c v90_dil_measure_plan_rate_sr()
+ *                                      (§5.4.1, §5.4.3, §8.5.2/Table 15)
+ */
+(function (global) {
+'use strict';
+
+var ULAW = 0, ALAW = 1;
+
+/* ---- G.711, from spandsp's g711.h ---- */
+
+function ulawToLinear(b) {
+  b = (~b) & 0xFF;
+  var t = ((((b & 0x0F) << 3) + 0x84) << ((b & 0x70) >> 4));
+  return (b & 0x80) ? (0x84 - t) : (t - 0x84);
+}
+
+function alawToLinear(b) {
+  b ^= 0x55;
+  var i = (b & 0x0F) << 4;
+  var seg = (b & 0x70) >> 4;
+  if (seg) i = (i + 0x108) << (seg - 1);
+  else i += 8;
+  return (b & 0x80) ? i : -i;
+}
+
+function codewordToLinear(law, cw) {
+  return law === ALAW ? alawToLinear(cw & 0xFF) : ulawToLinear(cw & 0xFF);
+}
+
+/* V.90 Table 1: Ucode to signed G.711 codeword.  sign 1 = positive. */
+function composeCodeword(law, ucode, sign) {
+  ucode &= 0x7F;
+  var pcm = law === ALAW ? ((ucode ^ 0x55) | 0x80) : (0xFF - ucode);
+  return ((pcm & 0x7F) | (sign ? 0x80 : 0)) & 0xFF;
+}
+
+function decomposeCodeword(law, cw) {
+  return {
+    sign: (cw & 0x80) ? 1 : 0,
+    ucode: law === ALAW ? ((cw ^ 0x55) & 0x7F) : (0x7F - (cw & 0x7F))
+  };
+}
+
+var LEVEL = [new Int32Array(128), new Int32Array(128)];
+(function () {
+  for (var law = 0; law < 2; law++) {
+    for (var u = 0; u < 128; u++) {
+      var v = codewordToLinear(law, composeCodeword(law, u, 1));
+      LEVEL[law][u] = v < 0 ? -v : v;
+    }
+  }
+})();
+
+function ucodeLevel(law, u) { return LEVEL[law][u & 0x7F]; }
+
+/* Nearest Ucode by level, ties to the lower Ucode (dil_abs_level ordering). */
+function quantise(law, level) {
+  var best = 0, bestD = 1e30, tbl = LEVEL[law];
+  for (var u = 0; u < 128; u++) {
+    var d = Math.abs(tbl[u] - level);
+    if (d < bestD - 1e-9) { bestD = d; best = u; }
+  }
+  return best;
+}
+
+/* ---- descriptor ---- */
+
+function newDescriptor() {
+  return {
+    n: 0, lsp: 1, ltp: 1,
+    sp: new Uint8Array(128), tp: new Uint8Array(128),
+    h: new Uint8Array(8), ref: new Uint8Array(8),
+    train: new Uint8Array(255)
+  };
+}
+
+function cloneDescriptor(d) {
+  return {
+    n: d.n, lsp: d.lsp, ltp: d.ltp,
+    sp: new Uint8Array(d.sp), tp: new Uint8Array(d.tp),
+    h: new Uint8Array(d.h), ref: new Uint8Array(d.ref),
+    train: new Uint8Array(d.train)
+  };
+}
+
+function clampPositive(v, maxV) { return v < 1 ? 1 : (v > maxV ? maxV : v); }
+
+/* §8.4.1: Lc = (Hc + 1) * 6 for the Uchord of the segment's training Ucode. */
+function segmentLen(d, seg) {
+  var chord = (d.train[seg] & 0x7F) >> 4;
+  if (chord > 7) chord = 7;
+  return (d.h[chord] + 1) * 6;
+}
+
+function cycleLen(d) {
+  if (!d || d.n <= 0) return 0;
+  var total = 0;
+  for (var i = 0; i < d.n; i++) total += segmentLen(d, i);
+  return total;
+}
+
+function symbolCodeword(law, d, seg, pos) {
+  var train = d.train[seg] & 0x7F;
+  var chord = train >> 4; if (chord > 7) chord = 7;
+  var lsp = clampPositive(d.lsp, 128);
+  var ltp = clampPositive(d.ltp, 128);
+  var spBit = d.sp[pos % lsp] ? 1 : 0;
+  var tpBit = d.tp[pos % ltp] ? 1 : 0;
+  return composeCodeword(law, tpBit ? train : (d.ref[chord] & 0x7F), spBit);
+}
+
+function generate(law, d, len) {
+  var out = new Uint8Array(len);
+  if (!d || d.n <= 0 || len <= 0) return out;
+  var seg = 0, pos = 0, segLen = segmentLen(d, 0);
+  for (var i = 0; i < len; i++) {
+    out[i] = symbolCodeword(law, d, seg, pos);
+    if (++pos >= segLen) { pos = 0; seg = (seg + 1) % d.n; segLen = segmentLen(d, seg); }
+  }
+  return out;
+}
+
+/* ---- Table 12 bit packing ---- */
+
+function getBit(buf, pos) { return (buf[pos >> 3] >> (pos & 7)) & 1; }
+
+function getBits(buf, pos, count) {
+  var v = 0;
+  for (var i = 0; i < count; i++) v |= getBit(buf, pos + i) << i;
+  return v >>> 0;
+}
+
+function putBits(st, value, bits) {
+  for (var i = 0; i < bits; i++) {
+    if (value & (1 << i)) st.buf[(st.pos + i) >> 3] |= 1 << ((st.pos + i) & 7);
+  }
+  st.pos += bits;
+}
+
+function crcBit(bit, crc) {
+  return ((bit ^ crc) & 1) ? (((crc >>> 1) ^ 0x8408) & 0xFFFF) : (crc >>> 1);
+}
+
+/*
+ * V.34 §10.1.2.3.2's CRC over the descriptor.  Frame-sync, start and fill bits
+ * do not enter the generator: from Table 12 every seventeenth bit from bit 51
+ * is a start bit.
+ */
+function descriptorCrc(buf, crcStart) {
+  var crc = 0xFFFF;
+  for (var i = 0; i < crcStart; i++) {
+    if (i < 18 || i === 34 || (i >= 51 && ((i - 51) % 17) === 0)) continue;
+    crc = crcBit(getBit(buf, i), crc);
+  }
+  return crc;
+}
+
+function descriptorBitLen(d) {
+  if (!d) return 0;
+  if (d.n === 0 && (d.lsp !== 1 || d.ltp !== 1)) return 0;
+  if (d.lsp > 128 || d.ltp > 128 || d.lsp < 1 || d.ltp < 1) return 0;
+  var alpha = Math.floor((d.lsp + 15) / 16) * 17;
+  var beta = Math.floor((d.ltp + 15) / 16) * 17;
+  var training = Math.floor((d.n + 1) / 2) * 17;
+  var bitLen = 187 + alpha + beta + training + 18;
+  if (bitLen & 1) bitLen++;
+  return bitLen;
+}
+
+function putFramedPattern(st, pattern, len) {
+  var copied = 0;
+  while (copied < len) {
+    var chunk = Math.min(16, len - copied);
+    putBits(st, 0, 1);
+    for (var i = 0; i < chunk; i++) putBits(st, pattern[copied + i] ? 1 : 0, 1);
+    st.pos += 16 - chunk;
+    copied += chunk;
+  }
+}
+
+function putFramedBytePairs(st, values, count) {
+  var index = 0;
+  while (index < count) {
+    putBits(st, 0, 1);
+    putBits(st, values[index++] & 0x7F, 7);
+    if (index < count) {
+      putBits(st, 0, 1);
+      putBits(st, values[index++] & 0x7F, 7);
+      putBits(st, 0, 1);
+    } else {
+      st.pos += 9;
+    }
+  }
+}
+
+function packDescriptor(d) {
+  var bitLen = descriptorBitLen(d);
+  if (bitLen <= 0) return null;
+  var st = { buf: new Uint8Array((bitLen + 7) >> 3), pos: 0 };
+  putBits(st, 0x1FFFF, 17);
+  putBits(st, 0, 1);
+  putBits(st, d.n, 8);
+  st.pos += 8;
+  putBits(st, 0, 1);
+  putBits(st, (d.lsp - 1) & 0x7F, 7);
+  putBits(st, 0, 1);
+  putBits(st, (d.ltp - 1) & 0x7F, 7);
+  putBits(st, 0, 1);
+  putFramedPattern(st, d.sp, d.lsp);
+  putFramedPattern(st, d.tp, d.ltp);
+  putFramedBytePairs(st, d.h, 8);
+  putFramedBytePairs(st, d.ref, 8);
+  putFramedBytePairs(st, d.train, d.n);
+  var crcStart = st.pos;
+  putBits(st, 0, 1);
+  putBits(st, descriptorCrc(st.buf, crcStart), 16);
+  putBits(st, 0, 1);
+  if (st.pos < bitLen) st.pos = bitLen;
+  if (st.pos !== bitLen) return null;
+  return { bytes: st.buf, bitLen: bitLen };
+}
+
+function expectZero(buf, bitLen, pos) { return pos < bitLen && getBit(buf, pos) === 0; }
+
+function expectZeroRange(buf, bitLen, pos, count) {
+  if (pos + count > bitLen) return false;
+  for (var i = 0; i < count; i++) if (getBit(buf, pos + i) !== 0) return false;
+  return true;
+}
+
+function copyFramedPattern(out, outLen, buf, bitLen, start) {
+  var pos = start, copied = 0;
+  while (copied < outLen) {
+    var chunk = Math.min(16, outLen - copied);
+    if (!expectZero(buf, bitLen, pos)) return false;
+    pos++;
+    if (pos + chunk > bitLen) return false;
+    for (var i = 0; i < chunk; i++) out[copied + i] = getBit(buf, pos + i);
+    pos += chunk;
+    var pad = 16 - chunk;
+    if (pad > 0) {
+      if (!expectZeroRange(buf, bitLen, pos, pad)) return false;
+      pos += pad;
+    }
+    copied += chunk;
+  }
+  return true;
+}
+
+function parseBytePairs(out, count, buf, bitLen, start) {
+  var pos = start, index = 0;
+  while (index < count) {
+    if (!expectZero(buf, bitLen, pos)) return false;
+    pos++;
+    if (pos + 8 > bitLen) return false;
+    out[index++] = getBits(buf, pos, 7);
+    pos += 7;
+    if (index < count) {
+      if (!expectZero(buf, bitLen, pos)) return false;
+      pos++;
+      if (pos + 8 > bitLen) return false;
+      out[index++] = getBits(buf, pos, 7);
+      pos += 7;
+      if (!expectZero(buf, bitLen, pos)) return false;
+      pos++;
+    } else {
+      if (!expectZeroRange(buf, bitLen, pos, 9)) return false;
+      pos += 9;
+    }
+  }
+  return true;
+}
+
+function parseTrainingUcodes(d, buf, bitLen, start) {
+  if (!parseBytePairs(d.train, d.n, buf, bitLen, start)) return false;
+  var pos = start;
+  /* walk to the end of the pairs to check the trailing start bit */
+  var index = 0;
+  while (index < d.n) {
+    pos += 8;
+    index++;
+    if (index < d.n) { pos += 9; index++; }
+    else pos += 9;
+  }
+  if (!expectZero(buf, bitLen, pos)) return false;
+  pos++;
+  return pos + 16 <= bitLen;
+}
+
+function parseDescriptor(buf, bitLen) {
+  var fail = function (why) { return { ok: false, error: why }; };
+  if (!buf || bitLen < 206) return fail('shorter than the 206-bit minimum');
+
+  var d = newDescriptor();
+  for (var i = 0; i < 17; i++) {
+    if (getBit(buf, i) === 0) return fail('bits 0:16 are not the all-ones frame sync');
+  }
+  if (!expectZero(buf, bitLen, 17)) return fail('bit 17 (start bit) is not zero');
+
+  d.n = getBits(buf, 18, 8);
+  if (!expectZeroRange(buf, bitLen, 26, 8)) return fail('bits 26:33 are not zero');
+  if (!expectZero(buf, bitLen, 34)) return fail('bit 34 (start bit) is not zero');
+
+  d.lsp = getBits(buf, 35, 7) + 1;
+  if (!expectZero(buf, bitLen, 42)) return fail('bit 42 is not zero');
+  d.ltp = getBits(buf, 43, 7) + 1;
+  if (!expectZero(buf, bitLen, 50)) return fail('bit 50 is not zero');
+  if (d.n === 0 && (d.lsp !== 1 || d.ltp !== 1))
+    return fail('N = 0 requires LSP = LTP = 1');
+
+  var alpha = Math.floor((d.lsp + 15) / 16) * 17;
+  var beta = alpha + Math.floor((d.ltp + 15) / 16) * 17;
+  var trainingStart = 187 + beta;
+  var trainingBits = Math.floor((d.n + 1) / 2) * 17;
+  var crcStart = trainingStart + trainingBits;
+  if (bitLen < crcStart + 18) return fail('truncated: needs ' + (crcStart + 18) + ' bits for N=' + d.n);
+
+  if (!copyFramedPattern(d.sp, d.lsp, buf, bitLen, 51)) return fail('SP field framing');
+  if (!copyFramedPattern(d.tp, d.ltp, buf, bitLen, 51 + alpha)) return fail('TP field framing');
+  if (!parseBytePairs(d.h, 8, buf, bitLen, 51 + beta)) return fail('H1..H8 framing');
+  if (!parseBytePairs(d.ref, 8, buf, bitLen, 119 + beta)) return fail('REF1..REF8 framing');
+  if (!parseTrainingUcodes(d, buf, bitLen, trainingStart)) return fail('training Ucode framing');
+
+  var want = getBits(buf, crcStart + 1, 16);
+  var got = descriptorCrc(buf, crcStart);
+  if (want !== got) {
+    return fail('CRC mismatch: frame carries 0x' + want.toString(16).toUpperCase() +
+                ', computed 0x' + got.toString(16).toUpperCase());
+  }
+  if (!expectZero(buf, bitLen, crcStart + 17)) return fail('bit after the CRC is not zero');
+  return { ok: true, desc: d, bitLen: crcStart + 18 };
+}
+
+/*
+ * What a descriptor can teach us, before it is ever transmitted.
+ * An interval counts as probed when at least two distinct levels reach it;
+ * REFc counts, since a per-chord REFc spreads levels through TP = 0 alone.
+ */
+function validate(d) {
+  var out = {
+    cycleSymbols: 0, cycleMs: 0, segments: d.n, distinctUcodes: 0,
+    lowestUcode: 127, highestUcode: 0, intervalsProbed: 0,
+    intervalDistinct: [0, 0, 0, 0, 0, 0], minIntervalLevels: 128,
+    chordsCovered: 0, ok: false
+  };
+  if (!d || d.n < 1) return out;
+  var seenU = new Uint8Array(128), seenC = new Uint8Array(8);
+  var iu = [], id = [0, 0, 0, 0, 0, 0];
+  for (var q = 0; q < 6; q++) iu.push(new Uint8Array(128));
+  var pos = 0;
+  for (var k = 0; k < d.n; k++) {
+    var train = d.train[k] & 0x7F;
+    var chord = (train >> 4) & 7;
+    var ref = d.ref[chord] & 0x7F;
+    var segLen = (d.h[chord] + 1) * 6;
+    var ltp = d.ltp ? d.ltp : 1;
+    if (!seenU[train]) { seenU[train] = 1; out.distinctUcodes++; }
+    if (!seenC[chord]) { seenC[chord] = 1; out.chordsCovered++; }
+    if (train < out.lowestUcode) out.lowestUcode = train;
+    if (train > out.highestUcode) out.highestUcode = train;
+    for (var i = 0; i < segLen; i++) {
+      var u = d.tp[i % ltp] ? train : ref;
+      var interval = (pos + i) % 6;
+      if (!iu[interval][u & 0x7F]) { iu[interval][u & 0x7F] = 1; id[interval]++; }
+    }
+    pos += segLen;
+  }
+  for (var j = 0; j < 6; j++) {
+    if (id[j] >= 2) out.intervalsProbed |= 1 << j;
+    if (id[j] < out.minIntervalLevels) out.minIntervalLevels = id[j];
+  }
+  out.intervalDistinct = id;
+  out.cycleSymbols = pos;
+  out.cycleMs = pos / 8;
+  out.ok = out.intervalsProbed === 0x3F && out.distinctUcodes >= 2;
+  return out;
+}
+
+/* ---- the channel ---- */
+
+function Rng(seed) { this.s = (seed >>> 0) || 1; }
+Rng.prototype.uniform = function () {
+  var x = this.s;
+  x ^= (x << 13); x >>>= 0;
+  x ^= (x >>> 17);
+  x ^= (x << 5); x >>>= 0;
+  this.s = x;
+  return x / 4294967296;
+};
+Rng.prototype.gauss = function () {
+  var acc = 0;
+  for (var i = 0; i < 12; i++) acc += this.uniform();
+  return acc - 6;
+};
+
+/*
+ * The impairments a DS0 actually meets, in the order it meets them:
+ *   1. a digital pad, whose output is still a codeword;
+ *   2. robbed-bit signalling, which takes the LSB of the octet in fixed
+ *      phases of the six-symbol frame;
+ *   3. line noise, then the analogue modem's own A/D decision.
+ */
+function impair(stream, law, opt) {
+  var gain = Math.pow(10, -(opt.padDb || 0) / 20);
+  var rbs = opt.rbsMask || 0;
+  var sigma = opt.sigma || 0;
+  var rng = new Rng(opt.seed === undefined ? 1 : opt.seed);
+  var out = new Uint8Array(stream);
+  for (var i = 0; i < out.length; i++) {
+    var p = decomposeCodeword(law, out[i]);
+    var lvl = LEVEL[law][p.ucode] * gain;
+    out[i] = composeCodeword(law, quantise(law, lvl), p.sign);
+    if (rbs & (1 << (i % 6))) out[i] &= 0xFE;
+    if (sigma > 0) {
+      p = decomposeCodeword(law, out[i]);
+      lvl = LEVEL[law][p.ucode] + sigma * rng.gauss();
+      if (lvl < 0) lvl = 0;
+      if (lvl > 32767) lvl = 32767;
+      out[i] = composeCodeword(law, quantise(law, lvl), p.sign);
+    }
+  }
+  return out;
+}
+
+/* ---- §9.3.2.9 measurement ---- */
+
+function measure(rx, law, d, offset) {
+  var cycle = cycleLen(d);
+  if (!rx || !d || rx.length <= 0 || offset < 0 || offset >= rx.length || cycle <= 0) return null;
+  var avail = Math.min(rx.length - offset, cycle);
+  if (avail < 12) return null;
+
+  var gen = generate(law, d, avail);
+  var out = {
+    u: [], alignOffset: offset, symbolsUsed: avail, cycleLen: cycle,
+    coverage: avail / cycle, ucodesMeasured: 0, gainDb: 0, rbsSlotMask: 0,
+    usable: new Uint8Array(128), usableCount: 0
+  };
+  var tally = [], slotTally = [], slotSum = [], slotSq = [], slotCnt = [];
+  var rxSum = new Float64Array(128), rxN = new Int32Array(128);
+  for (var u = 0; u < 128; u++) {
+    out.u.push({
+      txCount: 0, rxUcode: 0, rxAgree: 0, rxDistinct: 0, txLevel: 0, rxLevel: 0,
+      slotDisagree: 0, rxUcodeSlot: [-1, -1, -1, -1, -1, -1],
+      rxLevelSlot: [0, 0, 0, 0, 0, 0], rxSigma: 0,
+      rxSigmaSlot: [0, 0, 0, 0, 0, 0]
+    });
+    tally.push(null); slotTally.push(null);
+    slotSum.push(new Float64Array(6)); slotSq.push(new Float64Array(6));
+    slotCnt.push(new Int32Array(6));
+  }
+  var lazy = function (arr, i, make) { if (!arr[i]) arr[i] = make(); return arr[i]; };
+
+  for (var i = 0; i < avail; i++) {
+    var tx = decomposeCodeword(law, gen[i]);
+    var rxc = decomposeCodeword(law, rx[offset + i]);
+    var lvl = LEVEL[law][rxc.ucode];
+    var slot = (i + offset) % 6;
+    lazy(tally, tx.ucode, function () { return new Int32Array(128); })[rxc.ucode]++;
+    lazy(slotTally, tx.ucode, function () { return new Int32Array(6 * 128); })[slot * 128 + rxc.ucode]++;
+    rxSum[tx.ucode] += lvl;
+    rxN[tx.ucode]++;
+    out.u[tx.ucode].txCount++;
+    out.u[tx.ucode].txLevel = LEVEL[law][tx.ucode];
+    slotSum[tx.ucode][slot] += lvl;
+    slotSq[tx.ucode][slot] += lvl * lvl;
+    slotCnt[tx.ucode][slot]++;
+  }
+
+  for (u = 0; u < 128; u++) {
+    var o = out.u[u];
+    if (o.txCount === 0) continue;
+    var t = tally[u], bestU = -1, bestN = 0, distinct = 0;
+    for (var r = 0; r < 128; r++) {
+      if (!t[r]) continue;
+      distinct++;
+      if (t[r] > bestN) { bestN = t[r]; bestU = r; }
+    }
+    o.rxUcode = bestU; o.rxAgree = bestN; o.rxDistinct = distinct;
+    o.rxLevel = rxN[u] ? Math.trunc(rxSum[u] / rxN[u]) : 0;
+    out.ucodesMeasured++;
+
+    var st = slotTally[u];
+    for (var s = 0; s < 6; s++) {
+      var sBestU = -1, sBestN = 0;
+      for (var q = 0; q < 128; q++) {
+        if (st[s * 128 + q] > sBestN) { sBestN = st[s * 128 + q]; sBestU = q; }
+      }
+      o.rxUcodeSlot[s] = sBestU;
+      o.rxLevelSlot[s] = slotCnt[u][s] ? Math.trunc(slotSum[u][s] / slotCnt[u][s]) : 0;
+      if (slotCnt[u][s] > 1) {
+        var n2 = slotCnt[u][s];
+        var mean = slotSum[u][s] / n2;
+        var varr = slotSq[u][s] / n2 - mean * mean;
+        o.rxSigmaSlot[s] = varr > 0 ? Math.sqrt(varr) : 0;
+      }
+    }
+    var acc = 0, seen = 0;
+    for (s = 0; s < 6; s++) if (slotCnt[u][s] > 1) { acc += o.rxSigmaSlot[s]; seen++; }
+    o.rxSigma = seen ? acc / seen : 0;
+  }
+
+  var gainAcc = 0, gainN = 0;
+  for (u = 0; u < 128; u++) {
+    if (out.u[u].txCount === 0) continue;
+    if (out.u[u].txLevel > 0 && out.u[u].rxLevel > 0) {
+      gainAcc += out.u[u].rxLevel / out.u[u].txLevel;
+      gainN++;
+    }
+  }
+
+  /* Robbed-bit signalling lands in a fixed phase of the frame, so attributing
+   * each disagreement to its phase separates it from a uniform impairment. */
+  var slotBad = [0, 0, 0, 0, 0, 0], slotN = [0, 0, 0, 0, 0, 0];
+  for (i = 0; i < avail; i++) {
+    var txp = decomposeCodeword(law, gen[i]);
+    var rxp = decomposeCodeword(law, rx[offset + i]);
+    var sl = (i + offset) % 6;
+    slotN[sl]++;
+    if (out.u[txp.ucode].rxUcode >= 0 && rxp.ucode !== out.u[txp.ucode].rxUcode) {
+      slotBad[sl]++;
+      out.u[txp.ucode].slotDisagree |= 1 << sl;
+    }
+  }
+  for (i = 0; i < 6; i++) if (slotN[i] > 0 && slotBad[i] * 4 > slotN[i]) out.rbsSlotMask |= 1 << i;
+
+  var prev = -1;
+  for (u = 0; u < 128; u++) {
+    if (out.u[u].txCount === 0) continue;
+    if (prev < 0 || out.u[u].rxUcode !== out.u[prev].rxUcode) {
+      out.usable[u] = 1; out.usableCount++; prev = u;
+    }
+  }
+
+  out.gainDb = gainN ? 20 * Math.log10(gainAcc / gainN) : 0;
+  return out;
+}
+
+/* ---- §5.4.1 / §5.4.3 / §8.5.2 ---- */
+
+function drnToK(drn, sr) {
+  if (drn === 0 || drn > 28 || sr < 0 || sr > 3) return 0;
+  return drn + 14 + sr;
+}
+
+function drnToBps(drn) { return drn === 0 ? 0 : ((drn + 20) * 8000) / 6; }
+
+function drnForBits(bits, sr) {
+  for (var d = 22; d >= 0; d--) {
+    var k = drnToK(d, sr);
+    if (k > 0 && k <= bits) return d;
+  }
+  return -1;
+}
+
+/* Table 15, in 0.5 dBm0 steps from -0.5 to -16.  The limit is the square. */
+var POWER_LIMIT_AMPLITUDE = [
+  15124, 14276, 13480, 12724, 12012, 11340, 10708, 10108,
+  9544, 9008, 8504, 8028, 7580, 7156, 6756, 6380,
+  6020, 5684, 5368, 5068, 4784, 4516, 4264, 4024,
+  3800, 3588, 3388, 3196, 3020, 2852, 2692, 2540
+];
+
+function powerLimit(maxTxDbm0) {
+  if (maxTxDbm0 > -0.5 || maxTxDbm0 < -16) return 0;
+  var idx = Math.trunc((-maxTxDbm0) / 0.5 + 0.5) - 1;
+  if (idx < 0 || idx >= 32) return 0;
+  var amp = POWER_LIMIT_AMPLITUDE[idx];
+  return amp * amp;
+}
+
+function maskGet(mask, u) { return (mask[u >> 3] >> (u & 7)) & 1; }
+function maskSet(mask, u, on) {
+  if (on) mask[u >> 3] |= 1 << (u & 7);
+  else mask[u >> 3] &= ~(1 << (u & 7));
+}
+
+/*
+ * §8.5.2 average power, weighted by how often §5.4.3's modulus encoder uses
+ * each level over all 2^K input words — the levels are not equiprobable.
+ */
+function constellationPower(mask, mi, k, law) {
+  if (!mask || !mi || k <= 0 || k > 60) return 0;
+  var total = 0;
+  var twoK = Math.pow(2, k);
+  var aI = 1;
+  var rI = twoK - 1;
+  for (var i = 0; i < 6; i++) {
+    if (mi[i] < 1) return 0;
+    var levels = [];
+    for (var u = 0; u < 128 && levels.length < mi[i]; u++) {
+      if (maskGet(mask[i], u)) levels.push(LEVEL[law][u]);
+    }
+    if (levels.length !== mi[i]) return 0;
+    var kI = rI % mi[i];
+    var rNext = Math.floor(rI / mi[i]);
+    for (var j = 0; j < mi[i]; j++) {
+      var p = levels[j] * levels[j];
+      var nIj;
+      if (j < Math.trunc(kI)) nIj = aI * (rNext + 1);
+      else if (j === Math.trunc(kI)) nIj = twoK - aI * (rI - rNext);
+      else nIj = aI * rNext;
+      total += p * nIj;
+    }
+    aI *= mi[i];
+    rI = rNext;
+  }
+  return total / (6 * twoK);
+}
+
+function planRate(m, levelMargin, noiseSigmas, maxTxDbm0, law, sr) {
+  if (!m || levelMargin < 0 || sr < 0 || sr > 3) return null;
+  var out = {
+    mask: [], mi: [0, 0, 0, 0, 0, 0], bitsAvailable: 0, drn: 0, sr: sr, k: 0,
+    bps: 0, robbedBitLimited: false, intervalsUnprobed: 0, avgPower: 0,
+    powerLimit: 0, powerLimited: false, pointsDropped: 0, noiseLimited: false,
+    pointsBelowMargin: 0, noiseFloor: 0, fail: null
+  };
+  for (var q = 0; q < 6; q++) out.mask.push(new Uint8Array(16));
+
+  var bits = 0;
+  for (var i = 0; i < 6; i++) {
+    var prevLevel = -1, prevSigma = 0, probed = 0;
+    for (var u = 0; u < 128; u++) {
+      var o = m.u[u];
+      if (o.txCount === 0) continue;
+      if (o.rxUcodeSlot[i] < 0) continue;
+      var level = o.rxLevelSlot[i];
+      var sigma = o.rxSigmaSlot[i];
+      var need = levelMargin > 1 ? levelMargin : 1;
+      if (noiseSigmas > 0) {
+        var want = noiseSigmas * Math.sqrt(prevSigma * prevSigma + sigma * sigma);
+        if (want > need) need = want;
+      }
+      if (prevLevel >= 0 && (level - prevLevel) < need) { out.pointsBelowMargin++; continue; }
+      probed++;
+      maskSet(out.mask[i], u, true);
+      out.mi[i]++;
+      prevLevel = level;
+      prevSigma = sigma;
+    }
+    if (probed < 2) out.intervalsUnprobed |= 1 << i;
+    if (out.mi[i] < 1) { out.fail = 'interval ' + i + ' has no measured level at all'; return out; }
+    bits += Math.log2(out.mi[i]);
+  }
+
+  out.bitsAvailable = bits;
+  out.noiseLimited = noiseSigmas > 0 && out.pointsBelowMargin > 0;
+  var sigmaAcc = 0, sigmaN = 0;
+  for (i = 0; i < 128; i++) {
+    if (m.u[i].txCount > 0 && m.u[i].rxSigma > 0) { sigmaAcc += m.u[i].rxSigma; sigmaN++; }
+  }
+  out.noiseFloor = sigmaN ? sigmaAcc / sigmaN : 0;
+
+  var d = drnForBits(bits, sr);
+  if (d < 0) {
+    out.fail = 'the measured constellation carries ' + bits.toFixed(2) +
+               ' bits/frame, below the ' + drnToK(1, sr) + ' bits V.90’s slowest rate needs';
+    return out;
+  }
+  out.drn = d;
+
+  out.powerLimit = powerLimit(maxTxDbm0);
+  if (out.powerLimit > 0) {
+    for (;;) {
+      var k = drnToK(out.drn, sr);
+      out.avgPower = constellationPower(out.mask, out.mi, k, law);
+      if (out.avgPower <= out.powerLimit) break;
+      var fattest = 0;
+      for (i = 1; i < 6; i++) if (out.mi[i] > out.mi[fattest]) fattest = i;
+      if (out.mi[fattest] <= 2) {
+        out.fail = 'Table 15 cannot be met at any rate with this constellation';
+        return out;
+      }
+      var highest = -1;
+      for (u = 127; u >= 0; u--) if (maskGet(out.mask[fattest], u)) { highest = u; break; }
+      if (highest < 0) { out.fail = 'no point left to drop'; return out; }
+      maskSet(out.mask[fattest], highest, false);
+      out.mi[fattest]--;
+      out.pointsDropped++;
+      out.powerLimited = true;
+      bits = 0;
+      for (i = 0; i < 6; i++) bits += Math.log2(out.mi[i]);
+      out.bitsAvailable = bits;
+      d = drnForBits(bits, sr);
+      if (d < 0) { out.fail = 'Table 15 leaves less than V.90’s slowest rate'; return out; }
+      out.drn = d;
+    }
+  }
+
+  var widest = 0;
+  for (i = 0; i < 6; i++) if (out.mi[i] > widest) widest = out.mi[i];
+  for (i = 0; i < 6; i++) if (out.mi[i] < widest) out.robbedBitLimited = true;
+
+  out.k = drnToK(out.drn, sr);
+  out.bps = drnToBps(out.drn);
+  return out;
+}
+
+/* ---- shuffling ----
+ *
+ * Segment lengths are multiples of 6 (§8.4.1: Lc = (Hc+1)*6), so every segment
+ * starts in data-frame interval 0 and the *order* of the training Ucodes
+ * cannot change which interval anything lands in.  Over a whole cycle, against
+ * the deterministic impairments — a pad, robbed bits — a reordering therefore
+ * measures exactly the same thing, and it is worth knowing that before
+ * attributing a difference to the shuffle.  (Verified: full-cycle scores are
+ * bit-identical under permutation at sigma = 0, and differ under noise only
+ * because each symbol meets the noise at its own position.)
+ *
+ * Order stops being a no-op the moment the DIL is cut short, which §9.3.2.10
+ * says is the normal case: the analogue modem stops "when it has received
+ * enough".  What a half pass has learned is then entirely a question of which
+ * segments came first, and that is what these reorderings move.
+ */
+
+function shuffleTraining(d, rng) {
+  var out = cloneDescriptor(d);
+  for (var i = d.n - 1; i > 0; i--) {
+    var j = Math.floor(rng.uniform() * (i + 1));
+    var t = out.train[i]; out.train[i] = out.train[j]; out.train[j] = t;
+  }
+  return out;
+}
+
+/*
+ * Deterministic spread: order the segments by the fractional parts of i*phi,
+ * so that *every* prefix is spread evenly over the original ladder rather than
+ * evenly on average.  A half pass of this covers the whole Ucode range.
+ */
+function spreadTraining(d) {
+  var out = cloneDescriptor(d);
+  var phi = 0.6180339887498949;
+  var idx = [];
+  for (var i = 0; i < d.n; i++) idx.push(i);
+  idx.sort(function (a, b) {
+    var fa = (a * phi) % 1, fb = (b * phi) % 1;
+    return fa - fb || a - b;
+  });
+  for (i = 0; i < d.n; i++) out.train[i] = d.train[idx[i]];
+  return out;
+}
+
+/* A new ladder of the same length, drawn without replacement from 1..127. */
+function resampleLadder(d, rng) {
+  var out = cloneDescriptor(d);
+  var pool = [];
+  for (var u = 1; u < 128; u++) pool.push(u);
+  for (var i = pool.length - 1; i > 0; i--) {
+    var j = Math.floor(rng.uniform() * (i + 1));
+    var t = pool[i]; pool[i] = pool[j]; pool[j] = t;
+  }
+  var pick = pool.slice(0, Math.min(d.n, pool.length));
+  pick.sort(function (a, b) { return a - b; });
+  for (i = 0; i < d.n; i++) out.train[i] = pick[i % pick.length];
+  return spreadTraining(out);
+}
+
+/*
+ * A descriptor drawn from scratch, inside Table 12's field ranges and inside
+ * §9.3.2.7's airtime.  LTP is drawn coprime with 6 by preference, because a
+ * TP whose period shares a factor with 6 cannot walk every phase of the frame
+ * — the trap documented in docs/v90_constellation_selection.md.
+ */
+var COPRIME_LTP = [5, 7, 11, 13, 17, 19, 23, 25, 29, 31, 35, 37, 41, 43, 47, 49, 53, 55];
+
+function randomDescriptor(rng, opt) {
+  opt = opt || {};
+  var d = newDescriptor();
+  var hc = 1 + Math.floor(rng.uniform() * 20);          /* 12T .. 126T */
+  var maxN = Math.floor(24000 / ((hc + 1) * 6));        /* keep the cycle sane */
+  var n = 8 + Math.floor(rng.uniform() * Math.max(1, Math.min(200, maxN) - 8));
+  var i;
+
+  d.n = Math.max(2, Math.min(255, n));
+  d.lsp = 6 + Math.floor(rng.uniform() * 26);
+  d.ltp = opt.anyLtp
+    ? 1 + Math.floor(rng.uniform() * 60)
+    : COPRIME_LTP[Math.floor(rng.uniform() * COPRIME_LTP.length)];
+  for (i = 0; i < d.lsp; i++) d.sp[i] = rng.uniform() < 0.5 ? 1 : 0;
+  var ones = 0;
+  for (i = 0; i < d.ltp; i++) { d.tp[i] = rng.uniform() < 0.45 ? 1 : 0; ones += d.tp[i]; }
+  if (!ones) d.tp[0] = 1;
+  var perChordRef = rng.uniform() < 0.4;
+  for (i = 0; i < 8; i++) {
+    d.h[i] = hc;
+    d.ref[i] = perChordRef ? ((i << 4) | 1) : 0;
+  }
+  var pool = [];
+  for (var u = 1; u < 128; u++) pool.push(u);
+  for (i = pool.length - 1; i > 0; i--) {
+    var j = Math.floor(rng.uniform() * (i + 1));
+    var t = pool[i]; pool[i] = pool[j]; pool[j] = t;
+  }
+  var span = Math.min(d.n, pool.length);
+  var pick = pool.slice(0, span).sort(function (a, b) { return a - b; });
+  for (i = 0; i < d.n; i++) d.train[i] = pick[i % span];
+  return spreadTraining(d);
+}
+
+/* A small nudge to the current descriptor: a few Ucodes, a TP bit, Hc. */
+function mutateDescriptor(d, rng) {
+  var out = cloneDescriptor(d);
+  var moves = 1 + Math.floor(rng.uniform() * 3);
+  for (var k = 0; k < moves; k++) {
+    var pick = rng.uniform();
+    if (pick < 0.5 && out.n > 0) {
+      var i = Math.floor(rng.uniform() * out.n);
+      var delta = 1 + Math.floor(rng.uniform() * 8);
+      var v = out.train[i] + (rng.uniform() < 0.5 ? -delta : delta);
+      out.train[i] = Math.max(0, Math.min(127, v));
+    } else if (pick < 0.8) {
+      var b = Math.floor(rng.uniform() * out.ltp);
+      out.tp[b] ^= 1;
+    } else {
+      var hc = Math.max(1, Math.min(21, out.h[0] + (rng.uniform() < 0.5 ? -1 : 1)));
+      for (var c = 0; c < 8; c++) out.h[c] = hc;
+    }
+  }
+  var ones = 0;
+  for (var q = 0; q < out.ltp; q++) ones += out.tp[q];
+  if (!ones) out.tp[0] = 1;
+  return out;
+}
+
+function makeRng(seed) { return new Rng(seed); }
+
+/*
+ * Score a descriptor on one channel: the rate it can actually offer.
+ * Every trial sees the same noise realisation, so the comparison is between
+ * descriptors rather than between lucky draws.
+ */
+function scoreDescriptor(d, law, channel, policy) {
+  var cycle = cycleLen(d);
+  if (cycle < 12) return null;
+  if (!packDescriptor(d)) return null;
+  var len = Math.max(12, Math.round(cycle * channel.coverage));
+  var tx = generate(law, d, len);
+  var rx = impair(tx, law, channel);
+  var m = measure(rx, law, d, 0);
+  if (!m) return null;
+  var plan = planRate(m, policy.margin, policy.sigmas, policy.dbm0, law, policy.sr);
+  var ok = plan && !plan.fail && !plan.intervalsUnprobed;
+  return {
+    bps: ok ? plan.bps : 0,
+    drn: ok ? plan.drn : 0,
+    usable: m.usableCount,
+    cycle: cycle,
+    symbols: len,
+    unprobed: plan ? plan.intervalsUnprobed : 0x3F,
+    fail: plan ? plan.fail : 'measurement failed'
+  };
+}
+
+/* ---- presets (v90_dil_presets.c) ---- */
+
+function setDefaultPatterns(d) {
+  d.lsp = 12; d.ltp = 11;
+  for (var i = 0; i < 12; i++) d.sp[i] = (0x0A6D >> i) & 1;
+  for (i = 0; i < 11; i++) d.tp[i] = (0x6B7 >> i) & 1;
+}
+
+function presetDefaultJa() {
+  var d = newDescriptor();
+  var offsets = [2, 4, 6, 8, 10, 12, 14, 15];
+  d.n = 125; d.lsp = 12; d.ltp = 12;
+  for (var i = 0; i < 12; i++) {
+    d.sp[i] = (0x0A6D >> i) & 1;
+    d.tp[i] = (0x0DB7 >> i) & 1;
+  }
+  for (i = 0; i < 8; i++) { d.h[i] = 1; d.ref[i] = (i << 4) | 1; }
+  for (i = 0; i < d.n; i++) d.train[i] = ((i % 8) << 4) | offsets[Math.floor(i / 8) % 8];
+  return d;
+}
+
+function presetMeasurement() {
+  var d = newDescriptor();
+  d.n = 120;
+  setDefaultPatterns(d);
+  for (var i = 0; i < 8; i++) { d.h[i] = 10; d.ref[i] = 0; }
+  for (i = 0; i < d.n; i++) d.train[i] = 2 + Math.floor((i * 125) / (d.n - 1));
+  return d;
+}
+
+function presetCourierStyle() {
+  var d = newDescriptor();
+  d.n = 60;
+  setDefaultPatterns(d);
+  for (var i = 0; i < 8; i++) { d.h[i] = 10; d.ref[i] = 0; }
+  for (i = 0; i < d.n; i++) {
+    d.train[i] = (i & 1) === 0 ? (84 - (i >> 1)) : (1 + ((i >> 1) & 1));
+  }
+  return d;
+}
+
+/* SLModem 2.9.11 setDilDescriptor profiles, as packed Table 12 frames — the
+ * parser validates them exactly as it validates a descriptor off the wire. */
+var SMARTLINK_ADI_HEX =
+  'ffff4102d8d9b113e87253e4969500d68af8032915f06b90306162c2c48489044e4e9c9c383971ca' +
+  'f0e4a489c99292242447468a880c090902f2d36327c74d8d99182f2d56529c941809f1d16123c345' +
+  '8589080f0d16121c141810406000410183030809141630347078001141620245058b0b1819343670' +
+  '74f0f8000a223484a888d111a4244a4b989a383d818a223585aa8ad515ac2c5a5bb8ba787d010b23' +
+  '3686ac8cd919b4346a6bd8dab8bd818b2337878e8c169427274d4c969424213932c21403';
+var SMARTLINK_ADI_QC_HEX =
+  'ffff410 2b8bb135f80c69766 14b33b8a097877d40aea0460ad803f9052 01df1ed44a8c3565b5a2' +
+  '073071e2e4c4c98993094e4e9c9c383971caf0e4a489c99292242447468a880c090902f2d36327c7' +
+  '4d8d99182f2d56529c941809f1d16123c3458589080f0d16121c1418104060004101830308091416' +
+  '3034707800114162024505 8b0b18193436707 4f0f8000a223484a888d111a4244a4b989a383d818a' +
+  '223585aa8ad515ac2c5a5bb8ba787d010b233686ac8cd919b4346a6bd8dab8bd818b2337878e8c16' +
+  '9427274d4c96942421393242 2a0c';
+
+/*
+ * The USR Courier V.Everything's own descriptor, recovered from the Ja it
+ * transmitted in artifacts/courier-ja-3200low/ (both the July and August
+ * demodulation hypotheses yield this frame, byte-identical, CRC valid).
+ *
+ * Cross-checked the hard way: the DIL these 197 segments describe correlates
+ * at 0.9999 against what the Eicon card actually transmitted downstream in
+ * artifacts/eicon-digital-downstream/call1-connect-32000.ulaw, starting at
+ * sample 98315 — the 12289.4 ms DIL that docs/eicon_downstream_comparison.md
+ * had already located by segmentation alone.
+ */
+var COURIER_JA_HEX =
+  'ffff1503080a52b5a4a516ad34a51501000042104210210421040080820205050a0a1414000000000000000000dd1cb93870' +
+  '6f00dc04b4116033b086404d411a0334076710cc24945120b33086414c431807300f5f00bc047411e032b085404b4116032c' +
+  '075710ac245451a0b23085414a431407280f4f009c0434116032b0844049411203240747108c24145120b230844148431007' +
+  '200f3f007c04f410e031b0834047410e031c0737106c24d450a0b130834146430c07180f2f205c44b4906031b1824245450a' +
+  '0b141727304c6494d020b13182434447080f101f2f205c44b4906031b1824245450a0b141727304c6494d020b13182434447' +
+  '080f101f00fa1101';
+
+function hexToBits(hex) {
+  var clean = String(hex).replace(/[^0-9a-fA-F]/g, '');
+  if (clean.length & 1) clean = clean.slice(0, -1);
+  var bytes = new Uint8Array(clean.length / 2);
+  for (var i = 0; i < bytes.length; i++) bytes[i] = parseInt(clean.substr(i * 2, 2), 16);
+  return bytes;
+}
+
+function bitsToHex(bytes, bitLen) {
+  var n = (bitLen + 7) >> 3, s = '';
+  for (var i = 0; i < n; i++) s += ('0' + bytes[i].toString(16)).slice(-2);
+  return s;
+}
+
+function presetFromHex(hex, bitLen) {
+  var r = parseDescriptor(hexToBits(hex), bitLen);
+  return r.ok ? r.desc : null;
+}
+
+var PRESETS = [
+  { id: 'default-ja', name: 'Default Ja — 125 segments × 12T', build: presetDefaultJa,
+    note: 'The clean-line profile this tree has always sent. REFc = (chord<<4)|1, 8 offsets across all 8 chords.' },
+  { id: 'measurement', name: 'Measurement — 120 × 66T', build: presetMeasurement,
+    note: 'Built for measuring: the whole ladder, REFc = 0, LTP 11 so training reaches every interval.' },
+  { id: 'courier-real', name: 'Courier V.Everything — recovered from its Ja', build: function () { return presetFromHex(COURIER_JA_HEX, 2058); },
+    note: 'The real thing: 197 segments of 66T recovered from the Courier’s own Ja, CRC valid. Generates the DIL the Eicon card sent downstream at 12289.4 ms to 0.9999 correlation.' },
+  { id: 'courier', name: 'Courier-style — 60 × 66T (reconstruction)', build: presetCourierStyle,
+    note: 'The earlier reconstruction, kept for comparison: shape observed from the downstream, values guessed. Compare its ladder with the recovered descriptor above.' },
+  { id: 'adi', name: 'SmartLink ADI — 144 × 60/120T', build: function () { return presetFromHex(SMARTLINK_ADI_HEX, 1566); },
+    note: 'SLModem 2.9.11 setDilDescriptor(ADI), parsed from the captured Table 12 frame.' },
+  { id: 'adi-qc', name: 'SmartLink ADI_QC — 144 segments', build: function () { return presetFromHex(SMARTLINK_ADI_QC_HEX, 1702); },
+    note: 'SLModem 2.9.11 setDilDescriptor(ADI_QC), parsed from the captured Table 12 frame.' }
+];
+
+global.V90DIL = {
+  ULAW: ULAW, ALAW: ALAW,
+  ucodeLevel: ucodeLevel, composeCodeword: composeCodeword,
+  codewordToLinear: codewordToLinear,
+  decomposeCodeword: decomposeCodeword, quantise: quantise,
+  newDescriptor: newDescriptor, cloneDescriptor: cloneDescriptor,
+  segmentLen: segmentLen, cycleLen: cycleLen, generate: generate,
+  descriptorBitLen: descriptorBitLen, packDescriptor: packDescriptor,
+  parseDescriptor: parseDescriptor, validate: validate,
+  hexToBits: hexToBits, bitsToHex: bitsToHex,
+  impair: impair, measure: measure, planRate: planRate,
+  makeRng: makeRng, shuffleTraining: shuffleTraining, spreadTraining: spreadTraining,
+  resampleLadder: resampleLadder, randomDescriptor: randomDescriptor,
+  mutateDescriptor: mutateDescriptor, scoreDescriptor: scoreDescriptor,
+  powerLimit: powerLimit, constellationPower: constellationPower,
+  drnToK: drnToK, drnToBps: drnToBps, PRESETS: PRESETS
+};
+})(typeof window !== 'undefined' ? window : globalThis);
+</script>
+
+<div class="wrap">
+<header class="page">
+  <h1>V.90 DIL Lab</h1>
+  <div class="tag">Author a Ja descriptor, impair the DS0 it asks for, and watch the downstream rate fall out of what arrives.</div>
+  <div class="spec">ITU-T V.90 §8.4.1 · §9.3.2.9 · §5.4.3 · §8.5.2</div>
+</header>
+
+<div class="cols">
+  <div class="left">
+
+    <section class="panel">
+      <h2>Ja descriptor <span class="cite">Table 12</span></h2>
+      <div class="body">
+        <div class="field">
+          <label for="preset">Start from</label>
+          <select id="preset"></select>
+          <div class="hint" id="presetNote"></div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="fn">N segments</label>
+            <input type="number" id="fn" min="0" max="255" step="1">
+          </div>
+          <div class="field">
+            <label for="flsp">LSP</label>
+            <input type="number" id="flsp" min="1" max="128" step="1">
+          </div>
+          <div class="field">
+            <label for="fltp">LTP</label>
+            <input type="number" id="fltp" min="1" max="128" step="1">
+          </div>
+        </div>
+        <div class="field">
+          <label for="fsp">SP — sign per symbol, 1 = positive</label>
+          <input type="text" id="fsp" class="mono" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="ftp">TP — 1 = training Ucode, 0 = REFc</label>
+          <input type="text" id="ftp" class="mono" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="fh">H1..H8 — segment length Lc = (Hc+1)&times;6</label>
+          <input type="text" id="fh" class="mono" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="fref">REF1..REF8 — the level sent when TP = 0</label>
+          <input type="text" id="fref" class="mono" spellcheck="false">
+        </div>
+        <div class="field">
+          <label for="ftrain">Training Ucodes &times; N</label>
+          <textarea id="ftrain" rows="4" spellcheck="false"></textarea>
+          <div class="hint">Comma or space separated, 0–127. Ranges work: <code>2-40</code>, <code>84-60/2</code> steps by 2.</div>
+        </div>
+        <div id="descIssues"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Shuffle <span class="cite">§9.3.2.10 — a partial DIL is the normal case</span></h2>
+      <div class="body">
+        <div class="field">
+          <label for="shufMode">Draw</label>
+          <select id="shufMode">
+            <option value="reorder">Reorder — same Ucodes, new segment order</option>
+            <option value="spread">Spread — every prefix covers the ladder</option>
+            <option value="resample">Resample — a new ladder, same length</option>
+            <option value="mutate">Mutate — nudge this descriptor</option>
+            <option value="random">Random — a whole new descriptor</option>
+          </select>
+        </div>
+        <div class="row two">
+          <div class="field">
+            <label for="shufSeed">Draw seed</label>
+            <input type="number" id="shufSeed" min="1" max="999999" step="1">
+          </div>
+          <div class="field">
+            <label for="shufTrials">Search trials</label>
+            <select id="shufTrials">
+              <option value="50">50</option>
+              <option value="200" selected>200</option>
+              <option value="500">500</option>
+              <option value="1000">1000</option>
+            </select>
+          </div>
+        </div>
+        <div class="btnrow">
+          <button type="button" id="shufOnce">Shuffle once</button>
+          <button type="button" id="shufSearch" class="primary">Search for the best</button>
+          <button type="button" id="shufKeep" disabled>Keep the winner</button>
+          <button type="button" id="shufCancel" hidden>Stop</button>
+        </div>
+        <div id="shufOut"></div>
+        <p class="note">Over a full cycle, order changes nothing a pad or a robbed bit does to you —
+          segment lengths are multiples of 6, so the same Ucodes reach the same intervals in any
+          sequence. It still moves the result under noise, because each symbol meets the noise at
+          its own position. Drop <em>DIL received</em> below 100%, which §9.3.2.10 expressly allows,
+          and order decides what has been learned at all.</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Packed frame <span class="cite">the bits Ja carries</span></h2>
+      <div class="body">
+        <div class="field">
+          <label for="bits">Descriptor bits, LSB-first hex</label>
+          <textarea id="bits" rows="5" spellcheck="false"></textarea>
+          <div class="hint" id="bitsInfo"></div>
+        </div>
+        <div class="btnrow">
+          <button type="button" id="parseBits" class="primary">Parse these bits</button>
+          <button type="button" id="repack">Repack from fields</button>
+          <button type="button" id="copyBits">Copy</button>
+        </div>
+        <div id="bitsMsg"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Channel <span class="cite">what the DS0 meets</span></h2>
+      <div class="body">
+        <div class="field">
+          <label for="law">G.711 law</label>
+          <select id="law">
+            <option value="0">&micro;-law</option>
+            <option value="1">A-law</option>
+          </select>
+        </div>
+        <div class="field">
+          <div class="slider-head"><label for="pad">Digital pad</label><span class="val" id="padVal"></span></div>
+          <input type="range" id="pad" min="0" max="12" step="0.5">
+        </div>
+        <div class="field">
+          <span class="grouplab">Robbed-bit signalling — DS0 phase</span>
+          <div class="slots" id="rbs"></div>
+          <div class="hint">The LSB of the octet is taken in the ticked phases of the six-symbol frame.</div>
+        </div>
+        <div class="field">
+          <div class="slider-head"><label for="noise">Line noise &sigma;</label><span class="val" id="noiseVal"></span></div>
+          <input type="range" id="noise" min="0" max="200" step="1">
+        </div>
+        <div class="row two">
+          <div class="field">
+            <div class="slider-head"><label for="cov">DIL received</label><span class="val" id="covVal"></span></div>
+            <input type="range" id="cov" min="10" max="100" step="5">
+          </div>
+          <div class="field">
+            <label for="seed">Noise seed</label>
+            <input type="number" id="seed" min="1" max="99999" step="1">
+          </div>
+        </div>
+        <p class="note">§9.3.2.10 lets the analogue modem stop as soon as it has received enough, so a partial pass is the normal case.</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Receiver policy <span class="cite">§5.4.5 · Table 15</span></h2>
+      <div class="body">
+        <div class="row two">
+          <div class="field">
+            <label for="sigmas">Noise margin (&sigma;)</label>
+            <input type="number" id="sigmas" min="0" max="8" step="0.5">
+          </div>
+          <div class="field">
+            <label for="margin">Level margin</label>
+            <input type="number" id="margin" min="0" max="512" step="1">
+          </div>
+        </div>
+        <div class="row two">
+          <div class="field">
+            <label for="dbm0">Max TX power</label>
+            <select id="dbm0"></select>
+          </div>
+          <div class="field">
+            <label for="sr">Shaping S<sub>r</sub></label>
+            <select id="sr">
+              <option value="0">0 — shaping off</option>
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+            </select>
+          </div>
+        </div>
+        <p class="note">Two points count as different only when their received levels differ by that many standard deviations. Table 15 then caps the average power, dropping points from the top.</p>
+      </div>
+    </section>
+
+  </div>
+
+  <div class="right">
+
+    <section class="panel">
+      <h2>Downstream <span class="cite">§5.4.1 D = drn + 20 bits per 6-symbol frame</span></h2>
+      <div class="headline">
+        <div class="rate" id="rate">&mdash;</div>
+        <div class="sub" id="rateSub"></div>
+      </div>
+      <div class="chips" id="chips"></div>
+      <div class="stats" id="stats"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Constellation per data-frame interval <span class="cite">§5.4.3 &prod;M<sub>i</sub> &ge; 2<sup>K</sup></span></h2>
+      <div class="mi-strip" id="miStrip"></div>
+      <div class="legend">
+        <span><i style="background:var(--accent)"></i> in C<sub>i</sub></span>
+        <span><i style="background:var(--signal)"></i> dropped for Table 15</span>
+        <span><i style="background:var(--bad);opacity:.55"></i> merged into its neighbour</span>
+        <span><i style="background:var(--cell-off)"></i> not probed here</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>CP offer built from this measurement <span class="cite">Table 14 · Table 17</span></h2>
+      <div class="body" id="cpBox"></div>
+    </section>
+
+    <section class="panel">
+      <h2>The ladder, Ucode by Ucode <span class="cite">§9.3.2.9</span></h2>
+      <div class="scroll">
+        <table class="grid" id="ladder"></table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>First symbols on the wire <span class="cite">§8.4.1</span></h2>
+      <div class="body" style="gap:6px">
+        <span class="grouplab">Requested</span>
+        <div class="stream scroll-x" id="txStream" style="padding:0"></div>
+        <span class="grouplab">Received</span>
+        <div class="stream scroll-x" id="rxStream" style="padding:0"></div>
+        <p class="note">Codewords in hex; the Ucode and sign follow Table 1. Red marks a symbol the channel changed.</p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Listen <span class="cite">the DS0 the far D/A converts</span></h2>
+      <div class="body">
+        <div class="btnrow">
+          <button type="button" id="playRx" class="primary">&#9654; Received</button>
+          <button type="button" id="playTx">&#9654; Requested</button>
+          <button type="button" id="stopAudio">Stop</button>
+          <label class="inline-check"><input type="checkbox" id="loopAudio" checked> loop, and follow the channel</label>
+        </div>
+        <div class="field">
+          <div class="slider-head"><label for="vol">Output level</label><span class="val" id="volVal"></span></div>
+          <input type="range" id="vol" min="0" max="100" step="1">
+        </div>
+        <p class="note" id="audioNote"></p>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Take it away <span class="cite">raw G.711, 8 kHz, no header</span></h2>
+      <div class="body">
+        <div class="btnrow">
+          <button type="button" id="dlRx">Download received</button>
+          <button type="button" id="dlTx">Download requested</button>
+          <button type="button" id="dlBits">Download descriptor bits</button>
+        </div>
+        <p class="note">The stream files are what <code>vpcm_decode --g711</code> and the replay tools in
+          <code>tools/</code> read. One codeword per DS0 sample, exactly as the RTP payload carries them.</p>
+      </div>
+    </section>
+
+  </div>
+</div>
+
+<div class="footer">
+  Ports <code>v90.c</code>, <code>v90_dil_presets.c</code> and <code>v90_dil_measure.c</code> from this repository.
+  The impairment chain is a model — pad, then robbed bits, then noise and the far A/D — not a capture.
+</div>
+</div>
+
+<script>
+(function () {
+'use strict';
+var V = window.V90DIL;
+var $ = function (id) { return document.getElementById(id); };
+
+var state = {
+  desc: V.PRESETS[1].build(),
+  law: 0, pad: 0, rbs: 0, noise: 0, cov: 100, seed: 1,
+  sigmas: 3, margin: 0, dbm0: 0, sr: 0
+};
+
+/* ---- field <-> descriptor ---- */
+
+function bitsStr(arr, len) {
+  var s = '';
+  for (var i = 0; i < len; i++) s += arr[i] ? '1' : '0';
+  return s;
+}
+
+function parseBitString(s, max) {
+  var out = [];
+  for (var i = 0; i < s.length && out.length < max; i++) {
+    if (s[i] === '0' || s[i] === '1') out.push(s[i] === '1' ? 1 : 0);
+  }
+  return out;
+}
+
+/* "2-40", "84-60/2" and plain lists all mean a ladder of training Ucodes. */
+function parseUcodeList(s) {
+  var out = [];
+  var parts = String(s).split(/[\s,]+/);
+  for (var i = 0; i < parts.length; i++) {
+    var p = parts[i].trim();
+    if (!p) continue;
+    var m = /^(\d+)-(\d+)(?:\/(\d+))?$/.exec(p);
+    if (m) {
+      var a = +m[1], b = +m[2], step = m[3] ? Math.max(1, +m[3]) : 1;
+      if (a <= b) { for (var v = a; v <= b; v += step) out.push(v & 0x7F); }
+      else { for (v = a; v >= b; v -= step) out.push(v & 0x7F); }
+    } else if (/^\d+$/.test(p)) {
+      out.push(+p & 0x7F);
+    }
+    if (out.length >= 255) break;
+  }
+  return out.slice(0, 255);
+}
+
+function parseByteList(s, count, max) {
+  var out = new Uint8Array(count);
+  var parts = String(s).split(/[\s,]+/).filter(function (x) { return x !== ''; });
+  for (var i = 0; i < count; i++) {
+    var v = i < parts.length ? parseInt(parts[i], 10) : (parts.length ? parseInt(parts[parts.length - 1], 10) : 0);
+    if (!isFinite(v) || v < 0) v = 0;
+    if (v > max) v = max;
+    out[i] = v;
+  }
+  return out;
+}
+
+function descToFields() {
+  var d = state.desc;
+  $('fn').value = d.n;
+  $('flsp').value = d.lsp;
+  $('fltp').value = d.ltp;
+  $('fsp').value = bitsStr(d.sp, d.lsp);
+  $('ftp').value = bitsStr(d.tp, d.ltp);
+  $('fh').value = Array.prototype.join.call(d.h, ',');
+  $('fref').value = Array.prototype.join.call(d.ref, ',');
+  $('ftrain').value = Array.prototype.slice.call(d.train, 0, d.n).join(',');
+}
+
+function fieldsToDesc() {
+  var d = V.newDescriptor();
+  var train = parseUcodeList($('ftrain').value);
+  var n = Math.max(0, Math.min(255, parseInt($('fn').value, 10) || 0));
+  /* N and the list disagree whenever one is edited; the list is the richer
+   * statement, so N follows it unless the user shortened N deliberately. */
+  if (n > train.length) n = train.length;
+  d.n = n;
+  d.lsp = Math.max(1, Math.min(128, parseInt($('flsp').value, 10) || 1));
+  d.ltp = Math.max(1, Math.min(128, parseInt($('fltp').value, 10) || 1));
+  var sp = parseBitString($('fsp').value, d.lsp);
+  var tp = parseBitString($('ftp').value, d.ltp);
+  for (var i = 0; i < d.lsp; i++) d.sp[i] = sp.length ? sp[i % sp.length] : 1;
+  for (i = 0; i < d.ltp; i++) d.tp[i] = tp.length ? tp[i % tp.length] : 1;
+  d.h = parseByteList($('fh').value, 8, 127);
+  d.ref = parseByteList($('fref').value, 8, 127);
+  for (i = 0; i < d.n; i++) d.train[i] = train[i];
+  if (d.n === 0) { d.lsp = 1; d.ltp = 1; }
+  state.desc = d;
+}
+
+/* ---- rendering ---- */
+
+var LAW_NAME = ['µ-law', 'A-law'];
+
+function el(tag, cls, text) {
+  var e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function fmtBps(bps) {
+  return Math.round(bps).toLocaleString('en-US');
+}
+
+function renderDescIssues(chk, packed) {
+  var box = $('descIssues');
+  box.innerHTML = '';
+  var d = state.desc;
+  var msgs = [];
+  if (d.n === 0) {
+    msgs.push(['warn', 'N = 0: §9.3.2.8 permits it, and no line measurement exists. Phase 4 has to fall back to a conservative CP.']);
+  } else {
+    if (!chk.ok) {
+      var blind = [];
+      for (var i = 0; i < 6; i++) if (!(chk.intervalsProbed & (1 << i))) blind.push(i);
+      if (blind.length) {
+        msgs.push(['bad', 'Intervals ' + blind.join(', ') + ' never see two distinct levels. ' +
+          'Nothing is learned about them, and §5.4.3 still needs an Mᵢ for all six.']);
+      }
+      if (chk.distinctUcodes < 2) msgs.push(['bad', 'Fewer than two distinct training Ucodes.']);
+    }
+    if (gcd(d.ltp, 6) !== 1 && d.ltp % 6 !== 0) {
+      msgs.push(['warn', 'LTP ' + d.ltp + ' shares a factor with 6, so TP does not walk every phase of the frame.']);
+    }
+    if (chk.cycleSymbols > 32000) {
+      msgs.push(['warn', 'One cycle is ' + chk.cycleSymbols + 'T (' + chk.cycleMs.toFixed(0) +
+        ' ms). §9.3.2.7 gives Phase 3 a 4500 ms budget from the end of Ja.']);
+    }
+  }
+  if (!packed) msgs.push(['bad', 'These fields do not pack into a legal Table 12 frame.']);
+  for (var m = 0; m < msgs.length; m++) {
+    var p = el('p', msgs[m][0] === 'bad' ? 'err' : 'note', msgs[m][1]);
+    if (msgs[m][0] === 'warn') p.style.color = 'var(--signal)';
+    box.appendChild(p);
+  }
+  if (!msgs.length && d.n > 0) {
+    box.appendChild(el('p', 'note ok', 'All six intervals probed, ' + chk.distinctUcodes +
+      ' distinct Ucodes across ' + chk.chordsCovered + ' chords, cycle ' +
+      chk.cycleSymbols + 'T (' + chk.cycleMs.toFixed(1) + ' ms).'));
+  }
+}
+
+function gcd(a, b) { while (b) { var t = a % b; a = b; b = t; } return a; }
+
+function renderStats(m, plan, chk) {
+  var box = $('stats');
+  box.innerHTML = '';
+  var add = function (k, v, sm) {
+    var s = el('div', 'stat');
+    s.appendChild(el('div', 'k', k));
+    s.appendChild(el('div', 'v' + (sm ? ' sm' : ''), v));
+    box.appendChild(s);
+  };
+  if (!m) { add('measurement', 'none'); return; }
+  add('symbols used', m.symbolsUsed + 'T', true);
+  add('DIL covered', (m.coverage * 100).toFixed(0) + '%');
+  add('ucodes probed', String(m.ucodesMeasured));
+  add('distinguishable', String(m.usableCount));
+  add('measured pad', (-m.gainDb).toFixed(2) + ' dB', true);
+  add('noise floor', plan ? plan.noiseFloor.toFixed(1) : '—', true);
+  var rbs = [];
+  for (var i = 0; i < 6; i++) if (m.rbsSlotMask & (1 << i)) rbs.push(i);
+  add('RBS phases seen', rbs.length ? rbs.join(', ') : 'none', true);
+  add('cycle', chk.cycleSymbols + 'T', true);
+}
+
+function renderChips(m, plan, chk) {
+  var box = $('chips');
+  box.innerHTML = '';
+  var add = function (cls, txt) { box.appendChild(el('span', 'chip ' + cls, txt)); };
+  if (!plan) return;
+  if (plan.fail) { add('bad', plan.fail); return; }
+  if (plan.intervalsUnprobed) {
+    var blind = [];
+    for (var i = 0; i < 6; i++) if (plan.intervalsUnprobed & (1 << i)) blind.push(i);
+    add('bad', 'interval ' + blind.join('/') + ' unprobed — this CP cannot be offered');
+  }
+  if (plan.noiseLimited) add('warn', 'noise merged ' + plan.pointsBelowMargin + ' points from the bottom');
+  if (plan.powerLimited) add('warn', 'Table 15 dropped ' + plan.pointsDropped + ' points from the top');
+  if (plan.robbedBitLimited) add('warn', 'intervals carry different Mᵢ — robbed-bit shaped');
+  if (!plan.noiseLimited && !plan.powerLimited && !plan.robbedBitLimited && !plan.intervalsUnprobed) {
+    add('ok', 'nothing thinned the constellation');
+  }
+  add('', LAW_NAME[state.law]);
+  add('', 'Sᵣ = ' + plan.sr + ', S = ' + (6 - plan.sr));
+}
+
+function renderMi(plan, noPower) {
+  var box = $('miStrip');
+  box.innerHTML = '';
+  for (var i = 0; i < 6; i++) {
+    var mi = plan ? plan.mi[i] : 0;
+    var cls = 'mi';
+    if (plan && (plan.intervalsUnprobed & (1 << i))) cls += ' dead';
+    else if (plan && noPower && mi < noPower.mi[i]) cls += ' thin';
+    var c = el('div', cls);
+    c.appendChild(el('div', 'i', 'interval ' + i));
+    c.appendChild(el('div', 'm', String(mi)));
+    c.appendChild(el('div', 'b', mi > 0 ? Math.log2(mi).toFixed(2) + ' bits' : '—'));
+    box.appendChild(c);
+  }
+}
+
+function renderLadder(m, plan, noPower) {
+  var t = $('ladder');
+  t.innerHTML = '';
+  if (!m) return;
+  var head = t.insertRow();
+  ['Ucode', 'TX lvl', 'RX lvl', 'σ', 'sent'].forEach(function (h) {
+    var th = document.createElement('th');
+    th.textContent = h;
+    if (h === 'Ucode') th.className = 'l';
+    head.appendChild(th);
+  });
+  for (var i = 0; i < 6; i++) {
+    var th = document.createElement('th');
+    th.textContent = 'i' + i;
+    head.appendChild(th);
+  }
+  for (var u = 0; u < 128; u++) {
+    var o = m.u[u];
+    if (o.txCount === 0) continue;
+    var tr = t.insertRow();
+    tr.className = 'cellrow';
+    var cell = function (txt, cls) {
+      var td = tr.insertCell();
+      td.textContent = txt;
+      if (cls) td.className = cls;
+      return td;
+    };
+    cell(String(u), 'l');
+    cell(String(o.txLevel));
+    cell(String(o.rxLevel));
+    cell(o.rxSigma.toFixed(1));
+    cell(String(o.txCount));
+    for (i = 0; i < 6; i++) {
+      var td = tr.insertCell();
+      td.className = 'c';
+      var dot = el('span', 'dot');
+      var seen = o.rxUcodeSlot[i] >= 0;
+      var inFinal = plan && !plan.fail ? maskGet(plan.mask[i], u) : 0;
+      var inNoPower = noPower && !noPower.fail ? maskGet(noPower.mask[i], u) : 0;
+      if (inFinal) { dot.className = 'dot keep'; dot.title = 'Ucode ' + u + ' in C' + i; }
+      else if (inNoPower) { dot.className = 'dot power'; dot.title = 'dropped to meet Table 15'; }
+      else if (seen) { dot.className = 'dot merge'; dot.title = 'arrived too close to the point below it'; }
+      else { dot.title = 'no training symbol reached interval ' + i; }
+      td.appendChild(dot);
+    }
+  }
+}
+
+function maskGet(mask, u) { return (mask[u >> 3] >> (u & 7)) & 1; }
+
+function renderStreams(tx, rx) {
+  var a = $('txStream'), b = $('rxStream');
+  a.innerHTML = ''; b.innerHTML = '';
+  var n = Math.min(60, tx.length);
+  for (var i = 0; i < n; i++) {
+    var p = V.decomposeCodeword(state.law, tx[i]);
+    var q = V.decomposeCodeword(state.law, rx[i]);
+    var sa = el('span', 'sym', (p.sign ? '+' : '-') + p.ucode);
+    sa.title = 'codeword 0x' + tx[i].toString(16) + ', level ' + V.ucodeLevel(state.law, p.ucode);
+    a.appendChild(sa);
+    var sb = el('span', 'sym' + (rx[i] !== tx[i] ? ' hit' : ''), (q.sign ? '+' : '-') + q.ucode);
+    sb.title = 'codeword 0x' + rx[i].toString(16) + ', level ' + V.ucodeLevel(state.law, q.ucode);
+    b.appendChild(sb);
+  }
+}
+
+/*
+ * v90_analogue_phase4_build_cp(): CP carries the Table-15-limited plan, CPt
+ * keeps the impairment-only one, and CPt's rate comes from K rather than the
+ * rate field — Table 14 encodes D as (drn + 20) in CP and (drn + 8) in CPt.
+ */
+function renderCp(plan, noPower) {
+  var box = $('cpBox');
+  box.innerHTML = '';
+  if (!plan || plan.fail || !noPower || noPower.fail) {
+    box.appendChild(el('p', 'err', 'No offerable constellation: ' +
+      ((plan && plan.fail) || (noPower && noPower.fail) || 'measurement failed') + '.'));
+    return;
+  }
+  if (plan.intervalsUnprobed || noPower.intervalsUnprobed) {
+    box.appendChild(el('p', 'err',
+      'build_cp() refuses this: an unprobed interval means the CP names a constellation the DIL never measured.'));
+    return;
+  }
+  var s = 6 - plan.sr;
+  var k = Math.min(24, noPower.k);
+  var cptDrn = k + s - 8;
+  var rows = [];
+  rows.push(['CP', 'drn ' + plan.drn, 'D = ' + (plan.drn + 20), 'K = ' + plan.k,
+             fmtBps(plan.bps) + ' bit/s']);
+  if (cptDrn >= 1 && cptDrn <= 22) {
+    rows.push(['CPt', 'drn ' + cptDrn, 'D = ' + (cptDrn + 8), 'K = ' + k,
+               'Phase 4 training']);
+  } else {
+    rows.push(['CPt', 'out of range', 'K + S - 8 = ' + cptDrn, '', 'build_cp() fails']);
+  }
+  var table = el('table', 'grid');
+  rows.forEach(function (r) {
+    var tr = table.insertRow();
+    r.forEach(function (c, idx) {
+      var td = tr.insertCell();
+      td.textContent = c;
+      if (idx === 0) td.className = 'l';
+    });
+  });
+  box.appendChild(table);
+
+  var pw = plan.powerLimit > 0
+    ? 'Average power ' + plan.avgPower.toFixed(0) + ' against Table 15’s ' +
+      plan.powerLimit.toFixed(0) + ' at ' + state.dbm0.toFixed(1) + ' dBm0.'
+    : 'No power cap applied — the plan is the impairment-only bound.';
+  box.appendChild(el('p', 'note', pw));
+  box.appendChild(el('p', 'note',
+    'Table 17 caps Phase 4’s K at 24 where data mode runs to 39, so a fast line trains slower than it carries. ' +
+    'CPt keeps the un-capped constellation so CP stays a low-level subset of it, satisfying §8.5.2’s 3 dB relation.'));
+}
+
+/* ---- audio ----
+ *
+ * The RTP payload is the DS0 stream, so playing it back is just G.711 decode
+ * at 8 kHz.  The browser resamples to the output device; nothing else is done
+ * to the samples, because anything else would be exactly the transcoding this
+ * whole path forbids.
+ */
+
+var audio = { ctx: null, src: null, gain: null, playing: null, vol: 0.5 };
+
+function stopAudio(keepPlaying) {
+  if (audio.src) {
+    audio.src.onended = null;
+    try { audio.src.stop(); } catch (e) { /* already stopped */ }
+    try { audio.src.disconnect(); } catch (e) { /* already gone */ }
+    audio.src = null;
+  }
+  if (!keepPlaying) audio.playing = null;
+}
+
+function playStream(which) {
+  var bytes = which === 'tx' ? state.tx : state.rx;
+  if (!bytes || bytes.length < 1) return;
+  if (!audio.ctx) {
+    var Ctor = window.AudioContext || window.webkitAudioContext;
+    if (!Ctor) { $('audioNote').textContent = 'This browser has no Web Audio support.'; return; }
+    audio.ctx = new Ctor();
+    audio.gain = audio.ctx.createGain();
+    audio.gain.connect(audio.ctx.destination);
+  }
+  if (audio.ctx.state === 'suspended') audio.ctx.resume();
+  audio.gain.gain.value = audio.vol;
+
+  var n = Math.min(bytes.length, 8000 * 30);
+  var buf = audio.ctx.createBuffer(1, n, 8000);
+  var ch = buf.getChannelData(0);
+  for (var i = 0; i < n; i++) ch[i] = V.codewordToLinear(state.law, bytes[i]) / 32768;
+
+  stopAudio(true);
+  var src = audio.ctx.createBufferSource();
+  src.buffer = buf;
+  src.loop = $('loopAudio').checked;
+  src.connect(audio.gain);
+  src.onended = function () { if (audio.src === src) { audio.src = null; audio.playing = null; describeAudio(); } };
+  src.start();
+  audio.src = src;
+  audio.playing = which;
+  describeAudio();
+}
+
+function describeAudio() {
+  var n = state.rx ? state.rx.length : 0;
+  var what = audio.playing === 'rx' ? 'Playing the received stream.'
+    : audio.playing === 'tx' ? 'Playing the requested stream.' : '';
+  $('audioNote').textContent = (what ? what + ' ' : '') +
+    (n ? n + ' symbols, ' + (n / 8000).toFixed(2) + ' s of ' + LAW_NAME[state.law] +
+         ' at 8 kHz.' : 'Nothing to play.') +
+    (n ? ' A pad lowers it, robbed bits rasp on one phase in six, noise sits under the ladder.' : '');
+}
+
+function download(bytes, name, type) {
+  var blob = new Blob([bytes], { type: type || 'application/octet-stream' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+}
+
+/* ---- the run ---- */
+
+function run() {
+  var d = state.desc;
+  var chk = V.validate(d);
+  var packed = V.packDescriptor(d);
+  $('bits').value = packed ? V.bitsToHex(packed.bytes, packed.bitLen) : '';
+  $('bitsInfo').textContent = packed
+    ? packed.bitLen + ' bits (' + ((packed.bitLen + 7) >> 3) + ' bytes), CRC valid by construction'
+    : 'these fields do not form a legal frame';
+  renderDescIssues(chk, packed);
+
+  var cycle = V.cycleLen(d);
+  if (cycle < 12) {
+    $('rate').textContent = '—';
+    $('rate').className = 'rate dead';
+    $('rateSub').textContent = 'No DIL to send: §9.3.2.8’s N = 0 path leaves the analogue modem with no measurement, and Phase 4 falls back to CP drn 1 (28,000 bit/s) over the eight lowest levels.';
+    renderStats(null, null, chk);
+    renderChips(null, null, chk);
+    renderMi(null, null);
+    renderLadder(null, null, null);
+    renderStreams(new Uint8Array(0), new Uint8Array(0));
+    $('cpBox').innerHTML = '';
+    state.tx = null;
+    state.rx = null;
+    stopAudio();
+    describeAudio();
+    return;
+  }
+
+  var len = Math.max(12, Math.round(cycle * state.cov / 100));
+  var tx = V.generate(state.law, d, len);
+  var rx = V.impair(tx, state.law, {
+    padDb: state.pad, rbsMask: state.rbs, sigma: state.noise, seed: state.seed
+  });
+  state.tx = tx;
+  state.rx = rx;
+  var m = V.measure(rx, state.law, d, 0);
+  var plan = m ? V.planRate(m, state.margin, state.sigmas, state.dbm0, state.law, state.sr) : null;
+  var noPower = m ? V.planRate(m, state.margin, state.sigmas, 0, state.law, state.sr) : null;
+
+  var rateEl = $('rate');
+  if (plan && !plan.fail) {
+    rateEl.className = 'rate';
+    rateEl.innerHTML = fmtBps(plan.bps) + '<small>BIT/S</small>';
+    $('rateSub').textContent = 'drn ' + plan.drn + ' · D = ' + (plan.drn + 20) +
+      ' bits per frame · K = ' + plan.k + ' into the modulus encoder · ' +
+      plan.bitsAvailable.toFixed(2) + ' bits available from ∏Mᵢ';
+  } else {
+    rateEl.className = 'rate dead';
+    rateEl.textContent = 'no rate';
+    $('rateSub').textContent = plan && plan.fail ? plan.fail : 'measurement failed';
+  }
+
+  renderStats(m, plan, chk);
+  renderChips(m, plan, chk);
+  renderMi(plan, noPower);
+  renderCp(plan, noPower);
+  renderLadder(m, plan, noPower);
+  renderStreams(tx, rx);
+
+  /* A looping player follows the channel, so a pad or a robbed bit is heard
+   * as it is dialled in rather than after another click. */
+  if (audio.playing && $('loopAudio').checked) playStream(audio.playing);
+  else describeAudio();
+}
+
+/* ---- shuffle and search ---- */
+
+var search = { running: false, cancel: false, best: null };
+
+function channelOpts() {
+  return {
+    padDb: state.pad, rbsMask: state.rbs, sigma: state.noise,
+    seed: state.seed, coverage: state.cov / 100
+  };
+}
+
+function policyOpts() {
+  return { margin: state.margin, sigmas: state.sigmas, dbm0: state.dbm0, sr: state.sr };
+}
+
+function drawCandidate(mode, rng) {
+  switch (mode) {
+    case 'reorder': return V.shuffleTraining(state.desc, rng);
+    case 'spread': return V.spreadTraining(state.desc);
+    case 'resample': return V.resampleLadder(state.desc, rng);
+    case 'mutate': return V.mutateDescriptor(state.desc, rng);
+    default: return V.randomDescriptor(rng);
+  }
+}
+
+function shuffleOnce() {
+  var mode = $('shufMode').value;
+  var seed = Math.max(1, parseInt($('shufSeed').value, 10) || 1);
+  var rng = V.makeRng(seed);
+  var d = null;
+  /* A draw that packs and probes all six intervals, or the last one tried
+   * with its problems shown rather than hidden. */
+  for (var attempt = 0; attempt < 24; attempt++) {
+    d = drawCandidate(mode, rng);
+    if (V.packDescriptor(d) && V.validate(d).ok) break;
+  }
+  $('shufSeed').value = String((seed % 999999) + 1);
+  if (!d) return;
+  state.desc = d;
+  descToFields();
+  $('bitsMsg').innerHTML = '';
+  var out = $('shufOut');
+  out.innerHTML = '';
+  run();
+  var s = V.scoreDescriptor(d, state.law, channelOpts(), policyOpts());
+  out.appendChild(el('p', 'note', 'Drew ' + mode + ' from seed ' + seed + ': ' +
+    (s && s.bps ? fmtBps(s.bps) + ' bit/s' : 'no offerable rate') +
+    ' at ' + state.cov + '% coverage.'));
+}
+
+function scoreLine(label, s) {
+  if (!s) return label + ': no measurement';
+  if (!s.bps) return label + ': no offerable rate (' + (s.unprobed ? 'unprobed interval' : s.fail) + ')';
+  return label + ': ' + fmtBps(s.bps) + ' bit/s, drn ' + s.drn + ', ' + s.usable +
+    ' Ucodes distinguishable from ' + s.symbols + 'T';
+}
+
+/*
+ * The winner is picked on one noise realisation, which is exactly how you
+ * overfit to a seed.  Re-scoring it on other seeds is the cheapest honest
+ * check available, so it is not optional here.
+ */
+function verifyAcrossSeeds(d, seeds) {
+  var rates = [];
+  for (var i = 0; i < seeds.length; i++) {
+    var ch = channelOpts();
+    ch.seed = seeds[i];
+    var s = V.scoreDescriptor(d, state.law, ch, policyOpts());
+    rates.push(s ? s.bps : 0);
+  }
+  return rates;
+}
+
+function runSearch() {
+  if (search.running) return;
+  var mode = $('shufMode').value;
+  if (mode === 'spread') {
+    $('shufOut').innerHTML = '';
+    $('shufOut').appendChild(el('p', 'note',
+      'Spread is deterministic — there is only one draw to make. Use reorder, resample, mutate or random to search.'));
+    return;
+  }
+  var trials = parseInt($('shufTrials').value, 10) || 200;
+  var seed = Math.max(1, parseInt($('shufSeed').value, 10) || 1);
+  var rng = V.makeRng(seed);
+  var incumbent = V.scoreDescriptor(state.desc, state.law, channelOpts(), policyOpts());
+  var best = null, bestDesc = null, done = 0, rejected = 0;
+  var startedAt = Date.now();
+
+  search.running = true;
+  search.cancel = false;
+  search.best = null;
+  $('shufSearch').disabled = true;
+  $('shufOnce').disabled = true;
+  $('shufKeep').disabled = true;
+  $('shufCancel').hidden = false;
+
+  var out = $('shufOut');
+  var progress = el('p', 'note', 'Searching…');
+  out.innerHTML = '';
+  out.appendChild(progress);
+
+  var finish = function () {
+    search.running = false;
+    $('shufSearch').disabled = false;
+    $('shufOnce').disabled = false;
+    $('shufCancel').hidden = true;
+    out.innerHTML = '';
+    var ms = Date.now() - startedAt;
+    out.appendChild(el('p', 'note', done + ' trials in ' + (ms / 1000).toFixed(1) + ' s' +
+      (rejected ? ', ' + rejected + ' unofferable' : '') +
+      (search.cancel ? ' (stopped)' : '') + '.'));
+    out.appendChild(el('p', 'note', scoreLine('This descriptor', incumbent)));
+    if (best && bestDesc) {
+      var better = !incumbent || !incumbent.bps || best.bps > incumbent.bps ||
+        (best.bps === incumbent.bps && best.usable > incumbent.usable);
+      var p = el('p', better ? 'note ok' : 'note', scoreLine('Best draw', best));
+      out.appendChild(p);
+      var rates = verifyAcrossSeeds(bestDesc, [101, 202, 303, 404, 505]);
+      var lo = Math.min.apply(null, rates), hi = Math.max.apply(null, rates);
+      out.appendChild(el('p', 'note', 'On five other noise seeds it holds ' +
+        fmtBps(lo) + '–' + fmtBps(hi) + ' bit/s.'));
+      search.best = bestDesc;
+      $('shufKeep').disabled = false;
+    } else {
+      out.appendChild(el('p', 'err', 'No draw produced an offerable constellation.'));
+    }
+  };
+
+  var step = function () {
+    if (search.cancel) { finish(); return; }
+    var budget = Date.now() + 40;      /* keep the frame responsive */
+    while (done < trials && Date.now() < budget) {
+      var d = drawCandidate(mode, rng);
+      done++;
+      var s = V.scoreDescriptor(d, state.law, channelOpts(), policyOpts());
+      if (!s || !s.bps) { rejected++; continue; }
+      if (!best || s.bps > best.bps ||
+          (s.bps === best.bps && s.usable > best.usable) ||
+          (s.bps === best.bps && s.usable === best.usable && s.cycle < best.cycle)) {
+        best = s;
+        bestDesc = d;
+      }
+    }
+    progress.textContent = 'Searching… ' + done + ' / ' + trials +
+      (best ? ', best ' + fmtBps(best.bps) + ' bit/s' : '');
+    if (done < trials) setTimeout(step, 0);
+    else finish();
+  };
+  setTimeout(step, 0);
+}
+
+/* ---- wiring ---- */
+
+function syncLabels() {
+  $('padVal').textContent = state.pad.toFixed(1) + ' dB';
+  $('noiseVal').textContent = state.noise === 0 ? 'none' : '±' + state.noise;
+  $('covVal').textContent = state.cov + '%';
+}
+
+function readControls() {
+  state.law = +$('law').value;
+  state.pad = +$('pad').value;
+  state.noise = +$('noise').value;
+  state.cov = +$('cov').value;
+  state.seed = Math.max(1, parseInt($('seed').value, 10) || 1);
+  state.sigmas = +$('sigmas').value;
+  state.margin = Math.max(0, parseInt($('margin').value, 10) || 0);
+  state.dbm0 = +$('dbm0').value;
+  state.sr = +$('sr').value;
+  state.rbs = 0;
+  for (var i = 0; i < 6; i++) {
+    var cb = $('rbs' + i);
+    if (cb.checked) state.rbs |= 1 << i;
+    cb.parentNode.classList.toggle('on', cb.checked);
+  }
+  syncLabels();
+}
+
+function init() {
+  var sel = $('preset');
+  V.PRESETS.forEach(function (p, i) {
+    var o = document.createElement('option');
+    o.value = String(i);
+    o.textContent = p.name;
+    sel.appendChild(o);
+  });
+  sel.value = '1';
+  $('presetNote').textContent = V.PRESETS[1].note;
+
+  var slots = $('rbs');
+  for (var i = 0; i < 6; i++) {
+    var lab = el('label', '', '');
+    var cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.id = 'rbs' + i;
+    lab.appendChild(cb);
+    lab.appendChild(document.createTextNode(String(i)));
+    slots.appendChild(lab);
+  }
+
+  var dbm = $('dbm0');
+  var o = document.createElement('option');
+  o.value = '0';
+  o.textContent = 'no cap';
+  dbm.appendChild(o);
+  for (var p = 0.5; p <= 16.0001; p += 0.5) {
+    o = document.createElement('option');
+    o.value = String(-p);
+    o.textContent = '-' + p.toFixed(1) + ' dBm0';
+    dbm.appendChild(o);
+  }
+
+  $('pad').value = '0';
+  $('noise').value = '0';
+  $('cov').value = '100';
+  $('seed').value = '1';
+  $('sigmas').value = '3';
+  $('margin').value = '0';
+  $('sr').value = '0';
+  dbm.value = '0';
+  $('shufSeed').value = '1';
+  $('vol').value = '50';
+  $('volVal').textContent = '50%';
+  audio.vol = 0.5;
+
+  descToFields();
+  readControls();
+  run();
+
+  sel.addEventListener('change', function () {
+    var p = V.PRESETS[+sel.value];
+    var d = p.build();
+    if (d) { state.desc = d; descToFields(); }
+    $('presetNote').textContent = p.note;
+    $('bitsMsg').innerHTML = '';
+    run();
+  });
+
+  ['fn', 'flsp', 'fltp', 'fsp', 'ftp', 'fh', 'fref', 'ftrain'].forEach(function (id) {
+    $(id).addEventListener('change', function () {
+      $('bitsMsg').innerHTML = '';
+      fieldsToDesc();
+      descToFields();
+      run();
+    });
+  });
+
+  ['law', 'pad', 'noise', 'cov', 'seed', 'sigmas', 'margin', 'dbm0', 'sr'].forEach(function (id) {
+    $(id).addEventListener('input', function () { readControls(); run(); });
+  });
+  for (i = 0; i < 6; i++) {
+    $('rbs' + i).addEventListener('change', function () { readControls(); run(); });
+  }
+
+  $('parseBits').addEventListener('click', function () {
+    var bytes = V.hexToBits($('bits').value);
+    var msg = $('bitsMsg');
+    msg.innerHTML = '';
+    if (!bytes.length) { msg.appendChild(el('p', 'err', 'Nothing to parse.')); return; }
+    var r = V.parseDescriptor(bytes, bytes.length * 8);
+    if (!r.ok) { msg.appendChild(el('p', 'err', 'Rejected: ' + r.error + '.')); return; }
+    state.desc = r.desc;
+    descToFields();
+    msg.appendChild(el('p', 'note ok', 'Parsed ' + r.bitLen + ' bits: N = ' + r.desc.n +
+      ', LSP = ' + r.desc.lsp + ', LTP = ' + r.desc.ltp + ', CRC valid.'));
+    run();
+  });
+
+  $('repack').addEventListener('click', function () {
+    $('bitsMsg').innerHTML = '';
+    fieldsToDesc();
+    descToFields();
+    run();
+  });
+
+  $('shufOnce').addEventListener('click', shuffleOnce);
+  $('shufSearch').addEventListener('click', runSearch);
+  $('shufCancel').addEventListener('click', function () { search.cancel = true; });
+  $('shufKeep').addEventListener('click', function () {
+    if (!search.best) return;
+    state.desc = search.best;
+    descToFields();
+    $('bitsMsg').innerHTML = '';
+    $('shufKeep').disabled = true;
+    run();
+  });
+
+  $('playRx').addEventListener('click', function () { playStream('rx'); });
+  $('playTx').addEventListener('click', function () { playStream('tx'); });
+  $('stopAudio').addEventListener('click', function () { stopAudio(); describeAudio(); });
+  $('loopAudio').addEventListener('change', function () {
+    if (audio.src) audio.src.loop = $('loopAudio').checked;
+  });
+  $('vol').addEventListener('input', function () {
+    audio.vol = +$('vol').value / 100;
+    $('volVal').textContent = $('vol').value + '%';
+    if (audio.gain) audio.gain.gain.value = audio.vol;
+  });
+
+  var lawExt = function () { return state.law === 1 ? 'alaw' : 'ulaw'; };
+  $('dlRx').addEventListener('click', function () {
+    if (state.rx) download(state.rx, 'dil-received-' + lawExt() + '.g711');
+  });
+  $('dlTx').addEventListener('click', function () {
+    if (state.tx) download(state.tx, 'dil-requested-' + lawExt() + '.g711');
+  });
+  $('dlBits').addEventListener('click', function () {
+    var packed = V.packDescriptor(state.desc);
+    if (packed) download(packed.bytes.slice(0, (packed.bitLen + 7) >> 3), 'ja-descriptor.bin');
+  });
+
+  $('copyBits').addEventListener('click', function () {
+    var ta = $('bits');
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) { /* selection is enough */ }
+  });
+}
+
+init();
+})();
+</script>
