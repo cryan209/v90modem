@@ -161,6 +161,7 @@ enum v34_events_e {
     V34_EVENT_TRAINING_FAILED,
     V34_EVENT_E,
     V34_EVENT_PEER_RETRAIN,
+    V34_EVENT_INFOMARKSA_SEEN,
 };
 
 /* Current G.711 law (set by sip_modem.c after codec negotiation). */

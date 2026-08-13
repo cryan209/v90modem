@@ -3646,6 +3646,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
         /*endif*/
         if (bit == 0)
         {
+            s->v90_infomarksa_run = 0;
             if (++s->persistence2 == 20)
             {
                 span_log(s->logging, SPAN_LOG_FLOW, "Rx - Tone A detected\n");
@@ -3665,6 +3666,30 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
         /*endif*/
         if (!s->signal_present)
             s->persistence2 = 0;
+        /*endif*/
+        /* A *sustained* run of ones is INFOMARKSa (V.34 10.1.2.3.6: binary
+           ones on the DPSK modulator, so a phase reversal every baud), as
+           opposed to the isolated reversal handled below.  V.90 9.2.1.2.6
+           needs the two told apart: after the INFO1a deadline, INFOMARKSa
+           means re-send INFO1d and continue per 9.2.1.1.8, while Tone A means
+           the peer is retraining and we answer per 9.5.1.2.
+           The threshold matches the 20 bauds the Tone A detector above uses,
+           and is well past the 1-2 ones an isolated reversal produces. */
+        if (s->v90_infomarksa_run < 1000000)
+            s->v90_infomarksa_run++;
+        /*endif*/
+        if (s->v90_infomarksa_run == 20)
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - INFOMARKSa detected (%d consecutive ones)\n",
+                     s->v90_infomarksa_run);
+            if (s->received_event == V34_EVENT_NONE
+                ||  s->received_event == V34_EVENT_TONE_SEEN)
+            {
+                s->received_event = V34_EVENT_INFOMARKSA_SEEN;
+            }
+            /*endif*/
+        }
         /*endif*/
         /* We have a reversal, but we should only recognise it if it has been
            a little while since the last one.

@@ -258,7 +258,15 @@ enum v34_events_e
         SILENCERETRAIN -> TONE_AB -> Phase 1).  Reported so the application can
         follow it back to Phase 2 instead of continuing to transmit Phase 3/4
         signals over a peer that is no longer listening for them. */
-    V34_EVENT_PEER_RETRAIN
+    V34_EVENT_PEER_RETRAIN,
+    /*! A sustained run of binary ones on the DPSK stream, i.e. INFOMARKSa
+        (V.34 10.1.2.3.6).  V.90 9.2.1.2.6 has the digital modem condition its
+        receiver for "either Tone A or INFOMARKSa" once the INFO1a deadline
+        passes, and gives each a different response: re-send INFO1d for
+        INFOMARKSa, respond to a retrain for Tone A.  Without this event only
+        Tone A could be detected, so the INFO1d re-send was being driven by the
+        Tone A trigger -- the wrong branch of that clause. */
+    V34_EVENT_INFOMARKSA_SEEN
 };
 
 typedef struct
@@ -1021,6 +1029,11 @@ typedef struct
     int step;
     int persistence1;
     int persistence2;
+    /*! Run length of consecutive binary ones on the DPSK info stream, used to
+        tell INFOMARKSa (ones, a phase reversal every baud) from Tone A
+        (unmodulated, so zeros) while waiting for INFO1a.  See
+        V34_EVENT_INFOMARKSA_SEEN. */
+    int v90_infomarksa_run;
     int phase3_s_guard_samples;
     int phase3_s_hits;
     int phase3_s_event_count;

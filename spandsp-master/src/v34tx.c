@@ -4397,16 +4397,58 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     }
     /*endif*/
 
+    /* §9.2.1.2.6, the INFOMARKSa half: "Upon detection of INFOMARKSa, the
+       digital modem shall either initiate a retrain according to 9.5.1.1 or
+       send INFO1d and proceed in accordance with 9.2.1.1.8."  We take the
+       send-INFO1d option, which is what the peer is asking for by marking.
+       This is the trigger the re-send belongs to; before the INFOMARKSa
+       detector existed the timeout below drove it off nothing in particular,
+       and the Tone A branch -- whose spec response is a retrain, not a
+       re-send -- was unreachable. */
+    if (s->rx.received_event == V34_EVENT_INFOMARKSA_SEEN)
+    {
+        s->rx.received_event = V34_EVENT_NONE;
+        if (s->tx.v90_info1a_total_retries < max_total_retries)
+        {
+            s->tx.v90_info1a_total_retries++;
+            s->tx.v90_info1a_fast_retries = 0;
+            s->tx.tone_duration = 0;
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: INFOMARKSa while waiting for INFO1a; re-sending INFO1d per 9.2.1.2.6 (total=%d)\n",
+                     s->tx.v90_info1a_total_retries);
+            info1_baud_init(s);
+            return zero;
+        }
+        /*endif*/
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90: INFOMARKSa after %d INFO1d re-sends; leaving it to the 9.2.1.2.6 deadline\n",
+                 s->tx.v90_info1a_total_retries);
+    }
+    /*endif*/
+
     if (s->rx.received_event == V34_EVENT_TONE_SEEN
         ||  s->rx.received_event == V34_EVENT_REVERSAL_1)
     {
-        if (s->tx.tone_duration >= timeout_bauds
+        /* +1 because wait_timeout_check below pre-increments tone_duration
+           before comparing it against the same deadline.  Testing the
+           un-incremented value here made this branch unreachable: on the baud
+           where the counter would have reached timeout_bauds, this test saw
+           timeout_bauds-1 and fell through, and the timeout then fired,
+           re-sent INFO1d and reset the counter to 0.  Measured live against
+           the Courier (2026-08-13): tone_duration topped out at 414 against a
+           420-baud deadline in every failing call, v90_info1a_retrain_responses
+           was never once incremented, and Phase 2 failed ~40% of the time by
+           exhausting six INFO1d re-sends and falling back to V.22bis while the
+           peer sat there transmitting Tone A. */
+        if (s->tx.tone_duration + 1 >= timeout_bauds
             &&  s->tx.v90_info1a_retrain_responses < V90_INFO1A_MAX_RETRAIN_RESPONSES)
         {
             /* §9.2.1.2.6: Tone A after the INFO1a deadline is the analog
                modem initiating a retrain; respond per §9.5.1.2 (70 ms
                silence, then Tone B and the §9.2.1.1.3 ranging exchange)
-               instead of ignoring it until the peer gives up. */
+               instead of ignoring it until the peer gives up.  Note the spec
+               assigns the *other* action -- re-sending INFO1d -- to
+               INFOMARKSa, not to Tone A. */
             s->tx.v90_info1a_retrain_responses++;
             v90_phase2_reset_transactions(s);
             span_log(&s->logging, SPAN_LOG_FLOW,
@@ -4504,6 +4546,34 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
 wait_timeout_check:
     if (++s->tx.tone_duration >= timeout_bauds)
     {
+        /* §9.2.1.2.6 branches on what the receiver detects at the deadline,
+           so decide from what is *present* rather than from received_event.
+           The event is published once, at the baud persistence2 reaches 20,
+           and v34tx.c clears it in dozens of places, so at the deadline it is
+           almost always NONE -- which is why the Tone A branch above never
+           fired even once it was made reachable, and every failing call took
+           the re-send path regardless of what the peer was doing.
+           persistence2 >= 20 is the same "sustained zeros on the DPSK stream"
+           condition the Tone A detector itself uses. */
+        if (s->rx.signal_present
+            &&  s->rx.persistence2 >= 20
+            &&  s->tx.v90_info1a_retrain_responses < V90_INFO1A_MAX_RETRAIN_RESPONSES)
+        {
+            s->tx.v90_info1a_retrain_responses++;
+            v90_phase2_reset_transactions(s);
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: INFO1a deadline with Tone A present; responding to retrain per 9.5.1.2 (response %d)\n",
+                     s->tx.v90_info1a_retrain_responses);
+            s->tx.tone_duration = 0;
+            s->tx.v90_info1a_fast_retries = 0;
+            s->tx.stage = V34_TX_STAGE_V90_RETRAIN_SILENCE;
+            s->rx.v90_info1d_sent = false;
+            s->rx.received_event = V34_EVENT_NONE;
+            s->rx.persistence1 = 0;
+            s->rx.persistence2 = 0;
+            return zero;
+        }
+        /*endif*/
         s->tx.v90_info1a_total_retries++;
         s->tx.v90_info1a_fast_retries = 0;
         if (s->tx.v90_info1a_total_retries >= max_total_retries)
