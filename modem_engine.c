@@ -5798,7 +5798,27 @@ void me_rx_audio(const int16_t *amp, int len)
                             ME_LOG("[ME] RX PCM dump: /tmp/v34_rx.raw (s16le 8000Hz mono)\n");
                     }
                     if (rx_dump) {
+                        /* Mark the dump against engine state every 100 ms.
+                         * The file is opened once per process and appended
+                         * across every call, with no timestamps of its own, so
+                         * without these a capture cannot be tied to a phase --
+                         * spectral analysis of it can say what tones are on the
+                         * line but not which handshake stage was running, which
+                         * is the only question worth asking of it. Carrying the
+                         * stages here makes each mark self-contained. */
+                        static long rx_dump_total = 0;
+                        static long rx_dump_marked = 0;
+
                         fwrite(filtered, sizeof(int16_t), len, rx_dump);
+                        rx_dump_total += len;
+                        if (rx_dump_total - rx_dump_marked >= 800) {
+                            rx_dump_marked = rx_dump_total;
+                            ME_LOG("[ME] RX dump mark: sample=%ld rx_stage=%d tx_stage=%d mod=%d\n",
+                                   rx_dump_total,
+                                   g_v34 ? v34_get_rx_stage(g_v34) : -1,
+                                   g_v34 ? v34_get_tx_stage(g_v34) : -1,
+                                   (int)g_mod);
+                        }
                         static int rx_dump_count = 0;
                         rx_dump_count += len;
                         if (rx_dump_count >= 8000) {
