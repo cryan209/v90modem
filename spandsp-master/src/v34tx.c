@@ -656,6 +656,8 @@ static void s_not_s_baud_init(v34_state_t *s);
 static void pp_baud_init(v34_state_t *s);
 static void trn_baud_init(v34_state_t *s);
 static void phase4_wait_init(v34_state_t *s);
+static complex_sig_t get_v34_answer_phase3_wait_j_baud(v34_state_t *s);
+static void v34_answer_phase3_wait_j_init(v34_state_t *s);
 static void phase4_rx_conditioning_init(v34_state_t *s, int initial_stage, const char *reason);
 static int mp_rate_n_is_valid(int rate_n);
 static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_rate_c_to_a);
@@ -5055,15 +5057,31 @@ static complex_sig_t get_v34_call_phase3_wait_baud(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static complex_sig_t get_v34_call_info1a_wait_baud(v34_state_t *s)
+{
+    /* V.34 11.2.1.1.9 and 11.3.1.1.1: INFO1a still arrives on the answer
+       modem's control channel after INFO1c transmission completes.  Do not
+       switch this receiver to the primary channel until INFO1a has selected
+       its answer-to-call baud/carrier parameters. */
+    if (s->rx.received_event == V34_EVENT_INFO1_OK)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.34 caller: INFO1a received; conditioning for answerer Phase 3\n");
+        s->rx.received_event = V34_EVENT_NONE;
+        s_not_s_baud_init(s);
+        s->tx.phase3_call_wait_j = true;
+        s->tx.current_getbaud = get_v34_call_phase3_wait_baud;
+    }
+    return zero;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v34_call_phase3_wait_init(v34_state_t *s)
 {
-    /* Reuse the negotiated carrier/pre-emphasis setup and primary-channel
-       RX reset, but suppress the S source until 11.3.1.1.3's J event. */
-    s_not_s_baud_init(s);
-    s->tx.phase3_call_wait_j = true;
-    s->tx.current_getbaud = get_v34_call_phase3_wait_baud;
+    s->tx.phase3_call_wait_j = false;
+    s->tx.current_getbaud = get_v34_call_info1a_wait_baud;
     span_log(&s->logging, SPAN_LOG_FLOW,
-             "Tx - V.34 caller: INFO1c complete; silent while receiving answerer Phase 3\n");
+             "Tx - V.34 caller: INFO1c complete; silent while receiving INFO1a\n");
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -5927,6 +5945,11 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                 s->rx.phase3_s_alt_window = 0;
                 s->rx.phase3_s_alt_count = 0;
                 s->rx.phase3_s_stable_windows = 0;
+                s->rx.phase3_s_present = false;
+                s->rx.phase3_s_detect_armed = true;
+                s->rx.phase3_s_dom_windows = 0;
+                s->rx.phase3_s_dom_symbol = -1;
+                s->rx.phase3_s_fired_symbol = -1;
                 s->rx.phase3_s_guard_samples = 4000;
                 s->rx.phase3_s_hits = 0;
                 memset(s->rx.phase3_s_ring, 0, sizeof(s->rx.phase3_s_ring));
@@ -5951,8 +5974,14 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                 memset(s->rx.phase3_j_prev_valid, 0, sizeof(s->rx.phase3_j_prev_valid));
                 memset(s->rx.phase3_j_win, 0, sizeof(s->rx.phase3_j_win));
                 s->rx.phase3_j_bits = 0;
-                s->rx.phase3_j_lock_hyp = -1;
-                s->rx.phase3_j_trn16 = -1;
+                if (!s->tx.calling_party)
+                {
+                    s->rx.phase3_j_lock_hyp = -1;
+                    s->rx.phase3_j_trn16 = -1;
+                }
+                /* The call modem already decoded the answerer's J in
+                   11.3.1.1.3.  Preserve that TRN mode across its own
+                   PP/TRN/J transmission so 11.3.1.1.7 can send J'. */
                 s->rx.phase3_j_candidate_hyp = -1;
                 s->rx.phase3_j_candidate_phase = -1;
                 s->rx.phase3_j_candidate_pat = -1;
@@ -6050,7 +6079,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                          &&
                          (s->rx.received_event == V34_EVENT_J
                           ||  s->rx.received_event == V34_EVENT_J_DASHED
-                          ||  (s->rx.received_event == V34_EVENT_S && s->rx.info1c.md > 0)))
+                          ||  s->rx.received_event == V34_EVENT_S))
                 {
                     int md_units;
                     int md_wait_samples;
@@ -6063,6 +6092,16 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                        wait MD duration while conditioning for the next
                        S-transition. */
                     if (!s->tx.v90_mode
+                        && s->rx.received_event == V34_EVENT_S
+                        && md_units == 0)
+                    {
+                        /* V.34 11.3.1.2.4-.6: after the caller's S/S-bar,
+                           stop J, train the receive equalizer on PP/TRN and
+                           remain silent until the caller's J is received. */
+                        v34_answer_phase3_wait_j_init(s);
+                        break;
+                    }
+                    else if (!s->tx.v90_mode
                         &&
                         s->rx.received_event == V34_EVENT_S
                         &&
@@ -6192,20 +6231,21 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                 phase4_rx_conditioning_init(s, V34_RX_STAGE_PHASE4_S, "S/S-bar/TRN then MP");
             }
             /*endif*/
-            if (s->tx.v90_v34_fallback)
+            if (s->tx.calling_party || s->tx.v90_v34_fallback)
             {
-                /* V.34 §11.4.1.1.1: the call modem transmits one J' sequence
-                   "and then transmit signal TRN" before MP.  Keep the running
-                   modulator state; just move to the Phase 4 TRN stage. */
+                /* V.34 11.4.1.1.1: every call modem transmits one J' and
+                   then TRN before MP.  This was accidentally restricted to
+                   the V.90 fallback path, so plain V.34 put MP where the
+                   answer modem was still conditioning on TRN. */
                 span_log(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - V.34 fallback: J' complete, transmitting Phase 4 TRN before MP\n");
+                         "Tx - V.34 caller: J' complete, transmitting Phase 4 TRN before MP\n");
+                s->tx.scramble_reg = 0;
                 s->tx.stage = V34_TX_STAGE_PHASE4_TRN;
                 s->tx.tone_duration = 0;
                 s->tx.current_getbaud = get_phase4_baud;
             }
             else
             {
-                /* After J', begin MP exchange (V.34/10.1.3.10) */
                 mp_or_mph_baud_init(s);
             }
             /*endif*/
@@ -6270,10 +6310,12 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
         {
             span_log(&s->logging, SPAN_LOG_FLOW,
                      "Tx - Phase 4: wait complete, starting S signal\n");
-            /* Initialize diff encoder for S signal.
-               S = 180° phase reversal per baud (data_bits=2 = diff += 2).
-               This produces alternating constellation points at 45° and 225°. */
-            s->tx.diff = 0;
+            /* V.34 10.1.3.7: S alternates two points separated by 90°.
+               Use the same absolute-point generator as Phase 3 S rather than
+               the old 180° differential sequence, which the caller cannot
+               identify as S. */
+            s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP),
+                                             TRAINING_SCALE(0.0f));
             s->tx.stage = V34_TX_STAGE_PHASE4_S;
             s->tx.tone_duration = 0;
         }
@@ -6281,11 +6323,11 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
         return zero;
 
     case V34_TX_STAGE_PHASE4_S:
-        /* Phase 4 S signal: 180° phase reversal per baud using 4-point DQPSK.
-           V.34 §11.4.1.2.1: answer modem sends S for 128T. */
-        s->tx.diff = (s->tx.diff + 2) & 3;
+        /* V.34 10.1.3.7 and 11.4.1.2.1: alternate points separated by 90°
+           for 128T, exactly as the Phase 3 S generator does. */
         if (++s->tx.tone_duration == PHASE4_S_BAUDS)
         {
+            s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.stage = V34_TX_STAGE_PHASE4_NOT_S;
             s->tx.tone_duration = 0;
             span_log(&s->logging, SPAN_LOG_FLOW,
@@ -6293,26 +6335,20 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
                      PHASE4_S_BAUDS);
         }
         /*endif*/
-        return training_constellation_4[s->tx.diff];
+        {
+            complex_sig_t z = s->tx.lastbit;
+            s->tx.lastbit.re = z.im;
+            s->tx.lastbit.im = z.re;
+        }
+        return s->tx.lastbit;
 
     case V34_TX_STAGE_PHASE4_NOT_S:
-        /* Phase 4 S-bar signal: 16T.
-           V.34 §10.1.3.3: "S-bar is defined such that the data component of
-           the transition from S to S-bar represents the value 01 (corresponding
-           to a 90° phase offset)."
-
-           First baud of S-bar: diff += 1 (90° transition, detectable by caller)
-           Remaining bauds: diff += 2 (same 180° reversals as S, from new phase) */
-        if (s->tx.tone_duration == 0)
-            s->tx.diff = (s->tx.diff + 1) & 3;  /* 90° S→S-bar transition */
-        else
-            s->tx.diff = (s->tx.diff + 2) & 3;  /* 180° reversal continues */
-        /*endif*/
+        /* The sign change above gives the normative S-to-S-bar data
+           transition; continue the 90°-separated alternation for 16T. */
         if (++s->tx.tone_duration == 16)
         {
-            /* Initialize scrambler to zero for TRN (V.34 §10.1.3.8:
-               "The scrambler is initialized to zero prior to transmission
-               of the TRN signal.") */
+            s->tx.lastbit.re = -s->tx.lastbit.re;
+            /* V.34 10.1.3.8 initializes the TRN scrambler to zero. */
             s->tx.scramble_reg = 0;
             s->tx.stage = V34_TX_STAGE_PHASE4_TRN;
             s->tx.tone_duration = 0;
@@ -6321,7 +6357,12 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
                      s->tx.infoh.trn16 ? "16" : "4");
         }
         /*endif*/
-        return training_constellation_4[s->tx.diff];
+        {
+            complex_sig_t z = s->tx.lastbit;
+            s->tx.lastbit.re = z.im;
+            s->tx.lastbit.im = z.re;
+        }
+        return s->tx.lastbit;
 
     case V34_TX_STAGE_PHASE4_TRN:
         /* Phase 4 TRN: scrambled training before MP.
@@ -6600,6 +6641,46 @@ static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_r
         c_to_a = 1;
     *bit_rate_a_to_c = a_to_c;
     *bit_rate_c_to_a = c_to_a;
+}
+/*- End of function --------------------------------------------------------*/
+
+static complex_sig_t get_v34_answer_phase3_wait_j_baud(v34_state_t *s)
+{
+    /* V.34 11.3.1.2.6 permits up to 500 ms after J; start immediately once
+       the waveform receiver has made J authoritative. */
+    if (s->rx.received_event == V34_EVENT_J
+        || s->rx.received_event == V34_EVENT_J_DASHED)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.34 answerer: caller J received, starting Phase 4 S\n");
+        s->rx.received_event = V34_EVENT_NONE;
+        phase4_wait_init(s);
+    }
+    return zero;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v34_answer_phase3_wait_j_init(v34_state_t *s)
+{
+    /* V.34 11.3.1.2.4-.6: silence follows the caller's S/S-bar while PP and
+       TRN condition the primary receiver.  PHASE3_TRAINING promotes itself to
+       the J scanner after PP acquisition and the initial TRN interval. */
+    s->rx.received_event = V34_EVENT_NONE;
+    s->rx.current_demodulator = V34_MODULATION_V34;
+    s->rx.stage = V34_RX_STAGE_PHASE3_TRAINING;
+    s->rx.duration = 0;
+    s->rx.phase3_pp_started = 0;
+    s->rx.phase3_pp_acquire_hits = 0;
+    s->rx.phase3_pp_phase = -1;
+    s->rx.phase3_pp_phase_score = -1;
+    memset(s->rx.phase3_pp_error, 0, sizeof(s->rx.phase3_pp_error));
+    memset(s->rx.phase3_pp_corr, 0, sizeof(s->rx.phase3_pp_corr));
+    s->rx.phase3_pp_corr_energy = 0.0f;
+    s->rx.phase3_pp_corr_weight = 0.0f;
+    s->tx.tone_duration = 0;
+    s->tx.current_getbaud = get_v34_answer_phase3_wait_j_baud;
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - V.34 answerer: caller S received; silent while acquiring PP/TRN/J\n");
 }
 /*- End of function --------------------------------------------------------*/
 

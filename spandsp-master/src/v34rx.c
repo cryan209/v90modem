@@ -204,7 +204,7 @@ static int phase3_rx_dump_count = 0;
 #define PHASE4_MP_REJECT_DETAIL_LOG_INTERVAL 3200
 #define PHASE3_S_BAUD_LOG_INTERVAL      1000
 #define PHASE3_S_ALTERNATING_MIN        24
-#define PHASE3_S_STABLE_WINDOWS         64
+#define PHASE3_S_STABLE_WINDOWS         32
 /* Sustained-rotation S detection (see private/v34.h): a +/-90 degrees/symbol
    rotation shows as one dominant differential dibit filling the 32-baud window.
    DOMINANT_MIN sits well above scrambled Ja (~11/32) and below a real S
@@ -6034,6 +6034,12 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                 }
                                 else if (s->calling_party)
                                 {
+                                    /* V.34 11.3.1.1.3: receipt of the answer
+                                       modem's J is what permits the call modem
+                                       to start S.  The detector used to log
+                                       this transition without publishing it,
+                                       leaving the transmitter silent forever. */
+                                    s->received_event = V34_EVENT_J;
                                     span_log(s->logging, SPAN_LOG_FLOW,
                                              "Rx - Phase 3: confirmed far-end J for caller (hyp=%d phase=%d hits=%d bits=%d, trn=%s)\n",
                                              best_h, best_p, s->phase3_j_candidate_count,
@@ -6297,8 +6303,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                      s->phase3_s_counts[2], s->phase3_s_counts[3]);
         }
 
-        if ((s->calling_party || (s->v90_mode && !s->calling_party))
-            && s->phase3_s_detect_armed
+        if (s->phase3_s_detect_armed
             && !s->phase3_s_present
             && s->duration >= 64
             && ((s->phase3_s_alt_count >= PHASE3_S_ALTERNATING_MIN
@@ -6315,7 +6320,8 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                      "Rx - Phase 3: far-end S detected after J decode (count=%d via=%s role=%s alt=%d/32 stable=%d dom=%d:%d/32 domwin=%d rev=%d/32 bits=%d trn=%s power=%ld carrier_ref=%ld)\n",
                      s->phase3_s_event_count,
                      by_rotation ? "rotation" : "alternation",
-                     s->calling_party ? "caller" : "V.90 digital answerer",
+                     s->calling_party ? "caller"
+                                      : (s->v90_mode ? "V.90 digital answerer" : "answerer"),
                      s->phase3_s_alt_count, s->phase3_s_stable_windows,
                      dominant_symbol, dominant_count, s->phase3_s_dom_windows,
                      s->bit_count, s->phase3_j_bits,
