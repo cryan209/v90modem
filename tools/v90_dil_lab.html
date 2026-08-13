@@ -1309,6 +1309,66 @@ global.V90DIL = {
     </section>
 
     <section class="panel">
+      <h2>Ladder from audio <span class="cite">§8.4.1 — the training Ucodes are just a list of levels</span></h2>
+      <div class="body">
+        <div class="field">
+          <label for="wavFile">Audio clip</label>
+          <input type="file" id="wavFile" accept="audio/*,.wav,.raw">
+          <div class="hint" id="wavFileNote">WAV is read directly (8/16/24/32-bit PCM or float, any rate, any channel count); anything else goes through the browser’s decoder.</div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="wavSegs">Segments</label>
+            <input type="number" id="wavSegs" min="1" max="255" step="1" value="60">
+          </div>
+          <div class="field">
+            <label for="wavHc">Hc — every chord</label>
+            <input type="number" id="wavHc" min="0" max="127" step="1" value="10">
+          </div>
+          <div class="field">
+            <label for="wavStat">Per segment</label>
+            <select id="wavStat">
+              <option value="peak" selected>Peak</option>
+              <option value="rms">RMS</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label class="inline-check"><input type="checkbox" id="wavNorm" checked> Normalise the clip to full scale first</label>
+          <div class="hint">Off, a quiet clip lands entirely in the bottom chords and probes almost nothing — which is itself worth seeing.</div>
+        </div>
+        <div class="row two">
+          <div class="field">
+            <label for="wavPitch">Carrier — SP</label>
+            <select id="wavPitch"></select>
+            <div class="hint" id="wavPitchNote">Only periods that divide the segment length are offered: SP restarts at every segment boundary, so any other period clicks once per segment.</div>
+          </div>
+          <div class="field">
+            <label class="inline-check"><input type="checkbox" id="wavAutoHc" checked> Fit Hc to the clip’s length</label>
+            <label class="inline-check"><input type="checkbox" id="wavClearTp"> Clear the REF slots — TP all 1</label>
+            <div class="hint">TP zeros drop the level to REF, chopping the carrier at 8000/LTP Hz. Clearing them costs the DIL its REF probes.</div>
+          </div>
+        </div>
+        <div class="btnrow">
+          <button type="button" id="wavApply" class="primary" disabled>Build the ladder</button>
+        </div>
+        <div id="wavOut"></div>
+        <p class="note">Nothing in §8.4.1 asks the ladder to be a tidy ramp, so any sequence of levels is a
+          legal DIL — including one traced from the envelope of a sound clip. This is the browser copy of
+          <code>tools/v90_dil_from_audio.py</code>, and it is useful for the same reason: a clip with a narrow
+          dynamic range is an awkward input the validator and the measurement below should say so about,
+          rather than quietly reporting a small constellation. Levels are quantised under the law selected
+          in <em>Channel</em>; REF is left alone, and SP and TP move only when the carrier controls above
+          say so.</p>
+        <p class="note">On listening: the level is constant across a segment and only the sign varies, so
+          the stream is a fixed-timbre pulse wave with one amplitude step per segment — a single-band
+          vocoder. The clip’s rhythm and dynamics survive that; its timbre cannot. One SP serves the whole
+          descriptor, the carrier period cannot exceed LSP’s 128 symbols (62.5 Hz), and N caps the cycle at
+          255 amplitude steps before it repeats.</p>
+      </div>
+    </section>
+
+    <section class="panel">
       <h2>Shuffle <span class="cite">§9.3.2.10 — a partial DIL is the normal case</span></h2>
       <div class="body">
         <div class="field">
@@ -1908,6 +1968,327 @@ function describeAudio() {
     (n ? ' A pad lowers it, robbed bits rasp on one phase in six, noise sits under the ladder.' : '');
 }
 
+/* ---- a ladder from a sound clip (tools/v90_dil_from_audio.py in the page) ---- */
+
+var clip = { name: '', mono: null, rate: 0, chans: 0, how: '', pitch: null };
+
+/* RIFF/WAVE, mixed to mono at the G.711 linear scale (±32768).  Read here
+ * rather than through the browser's decoder so that the common case -- a
+ * plain PCM WAV -- needs no AudioContext and no user gesture. */
+function decodeWavRiff(ab) {
+  var dv = new DataView(ab);
+  if (ab.byteLength < 44) return null;
+  var tag = function (o) {
+    return String.fromCharCode(dv.getUint8(o), dv.getUint8(o + 1), dv.getUint8(o + 2), dv.getUint8(o + 3));
+  };
+  if (tag(0) !== 'RIFF' || tag(8) !== 'WAVE') return null;
+
+  var fmt = 0, chans = 0, rate = 0, bits = 0, dataOff = 0, dataLen = 0;
+  var p = 12;
+  while (p + 8 <= ab.byteLength) {
+    var id = tag(p), len = dv.getUint32(p + 4, true), body = p + 8;
+    if (id === 'fmt ' && len >= 16) {
+      fmt = dv.getUint16(body, true);
+      chans = dv.getUint16(body + 2, true);
+      rate = dv.getUint32(body + 4, true);
+      bits = dv.getUint16(body + 14, true);
+      /* WAVE_FORMAT_EXTENSIBLE carries the real format in its GUID's first word. */
+      if (fmt === 0xFFFE && len >= 40) fmt = dv.getUint16(body + 24, true);
+    } else if (id === 'data') {
+      dataOff = body;
+      dataLen = Math.min(len, ab.byteLength - body);
+      break;
+    }
+    p = body + len + (len & 1);
+  }
+  if (!chans || !dataOff || !dataLen) return null;
+  if (fmt !== 1 && fmt !== 3) return { error: 'WAV format ' + fmt + ' is compressed; only PCM and float are read here' };
+  if (fmt === 3 && bits !== 32) return { error: bits + '-bit float WAV is not supported' };
+  if (fmt === 1 && bits !== 8 && bits !== 16 && bits !== 24 && bits !== 32) {
+    return { error: bits + '-bit PCM WAV is not supported (8, 16, 24 or 32)' };
+  }
+
+  var stride = (bits >> 3) * chans;
+  var frames = Math.floor(dataLen / stride);
+  if (frames < 1) return { error: 'no audio in the data chunk' };
+  var out = new Float32Array(frames);
+  for (var i = 0; i < frames; i++) {
+    var base = dataOff + i * stride, sum = 0;
+    for (var c = 0; c < chans; c++) {
+      var o = base + c * (bits >> 3), v;
+      if (fmt === 3) v = dv.getFloat32(o, true) * 32768;
+      else if (bits === 8) v = (dv.getUint8(o) - 128) * 256;          /* 8-bit WAV is unsigned */
+      else if (bits === 16) v = dv.getInt16(o, true);
+      else if (bits === 24) v = ((dv.getUint8(o) | (dv.getUint8(o + 1) << 8) | (dv.getInt8(o + 2) << 16))) / 256;
+      else v = dv.getInt32(o, true) / 65536;
+      sum += v;
+    }
+    out[i] = sum / chans;
+  }
+  return { mono: out, rate: rate, chans: chans, how: bits + '-bit ' + (fmt === 3 ? 'float' : 'PCM') + ' WAV' };
+}
+
+/* Anything the RIFF reader will not take goes through Web Audio, which
+ * handles the compressed formats and resamples to the context's rate. */
+function decodeViaBrowser(ab, done, fail) {
+  var Ctor = window.AudioContext || window.webkitAudioContext;
+  if (!Ctor) { fail('this browser has no Web Audio decoder'); return; }
+  if (!audio.ctx) {
+    audio.ctx = new Ctor();
+    audio.gain = audio.ctx.createGain();
+    audio.gain.connect(audio.ctx.destination);
+  }
+  var ok = function (buf) {
+    var n = buf.length, mono = new Float32Array(n);
+    for (var c = 0; c < buf.numberOfChannels; c++) {
+      var ch = buf.getChannelData(c);
+      for (var i = 0; i < n; i++) mono[i] += ch[i] * 32768;
+    }
+    for (i = 0; i < n; i++) mono[i] /= buf.numberOfChannels;
+    done({ mono: mono, rate: buf.sampleRate, chans: buf.numberOfChannels, how: 'decoded by the browser' });
+  };
+  var no = function () { fail('the browser could not decode this file'); };
+  var r = audio.ctx.decodeAudioData(ab, ok, no);
+  if (r && r.then) r.then(ok, no);
+}
+
+function wavMsg(cls, text) {
+  var box = $('wavOut');
+  box.innerHTML = '';
+  box.appendChild(el('p', cls, text));
+}
+
+function loadClip(file) {
+  $('wavApply').disabled = true;
+  clip.mono = null;
+  wavMsg('note', 'Reading ' + file.name + '…');
+  var fr = new FileReader();
+  fr.onerror = function () { wavMsg('err', 'Could not read ' + file.name + '.'); };
+  fr.onload = function () {
+    var ab = fr.result;
+    var accept = function (r) {
+      clip.name = file.name; clip.mono = r.mono; clip.rate = r.rate;
+      clip.chans = r.chans; clip.how = r.how;
+      clip.pitch = estimateClipPeriod();
+      $('wavApply').disabled = false;
+      wavMsg('note ok', file.name + ': ' + r.how + ', ' + r.chans + ' channel' +
+        (r.chans === 1 ? '' : 's') + ', ' + r.rate + ' Hz, ' +
+        (r.mono.length / r.rate).toFixed(2) + ' s.');
+      buildLadderFromClip();
+    };
+    var riff = decodeWavRiff(ab);
+    if (riff && riff.mono) { accept(riff); return; }
+    decodeViaBrowser(ab, accept, function (why) {
+      wavMsg('err', file.name + ': ' + (riff && riff.error ? riff.error : why) + '.');
+    });
+  };
+  fr.readAsArrayBuffer(file);
+}
+
+/* SP restarts at every segment boundary (see generate()), so a carrier whose
+ * period does not divide the segment length is re-phased once per segment --
+ * an audible click at the segment rate.  Offer only the periods that divide. */
+/* Smallest segment length a period of p symbols divides: segments are always
+ * a multiple of six symbols (§8.4.1's Lc = (Hc+1)×6). */
+function lcm6(p) {
+  var a = p, b = 6;
+  while (b) { var t = a % b; a = b; b = t; }
+  return p * 6 / a;
+}
+
+function carrierPeriods(segLen) {
+  var out = [];
+  for (var p = 2; p <= 128 && p <= segLen; p++) if (segLen % p === 0) out.push(p);
+  return out;
+}
+
+/* The clip at 8 kHz, which is the only rate the DS0 has. */
+function clipAt8k(limitSec) {
+  var s = clip.mono, rate = clip.rate || 8000;
+  var want = Math.min(Math.floor(s.length * 8000 / rate), Math.floor((limitSec || 4) * 8000));
+  if (want < 64) return null;
+  var out = new Float32Array(want), step = rate / 8000, mean = 0;
+  for (var i = 0; i < want; i++) {
+    var x = i * step, k = Math.floor(x), f = x - k;
+    var a = s[k], b = k + 1 < s.length ? s[k + 1] : a;
+    out[i] = a + (b - a) * f;
+    mean += out[i];
+  }
+  mean /= want;
+  for (i = 0; i < want; i++) out[i] -= mean;      /* DC would swamp the ACF */
+  return out;
+}
+
+/* Normalised autocorrelation over the periods a carrier could take. */
+function estimateClipPeriod() {
+  var s = clipAt8k(4);
+  if (!s) return null;
+  var n = s.length, e0 = 0;
+  for (var i = 0; i < n; i++) e0 += s[i] * s[i];
+  if (e0 < 1e-6) return null;
+  var bestP = 0, bestR = -2;
+  for (var p = 2; p <= 128; p++) {
+    var num = 0, eL = 0;
+    for (i = 0; i + p < n; i++) { num += s[i] * s[i + p]; eL += s[i + p] * s[i + p]; }
+    if (eL < 1e-9) continue;
+    var r = num / Math.sqrt(e0 * eL);
+    if (r > bestR) { bestR = r; bestP = p; }
+  }
+  if (!bestP || bestR < 0.2) return null;         /* noise has no period worth naming */
+  return { p: bestP, hz: 8000 / bestP, conf: bestR };
+}
+
+/* Rebuild the carrier menu for this segment length, keeping the user's choice
+ * when its period is still legal. */
+function refreshCarrierMenu(segLen, est) {
+  var sel = $('wavPitch'), prev = sel.value;
+  var periods = carrierPeriods(segLen);
+  sel.innerHTML = '';
+  var add = function (value, text) {
+    var o = document.createElement('option');
+    o.value = value; o.textContent = text;
+    sel.appendChild(o);
+  };
+  add('auto', est ? 'Match the clip — ' + est.hz.toFixed(0) + ' Hz measured'
+                  : 'Match the clip — no pitch found');
+  add('keep', 'Leave SP as it is');
+  for (var i = 0; i < periods.length; i++) {
+    add(String(periods[i]), (8000 / periods[i]).toFixed(0) + ' Hz — ' + periods[i] + 'T');
+  }
+  sel.value = prev;
+  if (!sel.value) sel.value = 'auto';
+  return periods;
+}
+
+/* Nearest legal period in log space: an octave out is the usual failure of a
+ * bare ACF peak, so distance is judged by ratio rather than difference. */
+function snapPeriod(periods, target) {
+  var best = 0, bestD = 1e30;
+  for (var i = 0; i < periods.length; i++) {
+    var d = Math.abs(Math.log(periods[i] / target));
+    if (d < bestD) { bestD = d; best = periods[i]; }
+  }
+  return best;
+}
+
+function buildLadderFromClip() {
+  if (!clip.mono || clip.mono.length < 1) { wavMsg('err', 'Load a clip first.'); return; }
+  var segs = Math.max(1, Math.min(255, parseInt($('wavSegs').value, 10) || 60));
+  var rms = $('wavStat').value === 'rms';
+  var s = clip.mono, n = s.length;
+  /* The menu is rebuilt below, so on the first clip it is still empty. */
+  var choice = $('wavPitch').value || 'auto';
+
+  /* Fit the cycle to the clip: N segments of (Hc+1)*6 symbols at 8 kHz should
+   * span it, so the ladder covers the whole clip and the loop matches it. */
+  var hc;
+  if ($('wavAutoHc').checked) {
+    var symbols = n * 8000 / (clip.rate || 8000);
+    var want = symbols / segs;
+    /* When the carrier is also following the clip, prefer a segment the
+     * measured period divides exactly: a carrier a few Hz off its source is
+     * worth more here than a cycle length matched to the last millisecond. */
+    if (choice === 'auto' && clip.pitch) {
+      var L = lcm6(clip.pitch.p);
+      if (L <= 768) {
+        var m = Math.max(1, Math.round(want / L));
+        while (m * L > 768) m--;
+        want = m * L;
+      }
+    }
+    hc = Math.max(0, Math.min(127, Math.round(want / 6) - 1));
+    $('wavHc').value = String(hc);
+  } else {
+    hc = Math.max(0, Math.min(127, parseInt($('wavHc').value, 10) || 0));
+  }
+  var segLen = (hc + 1) * 6;
+  var periods = refreshCarrierMenu(segLen, clip.pitch);
+  choice = $('wavPitch').value || 'auto';   /* a period this Hc lost falls back to auto */
+
+  var scale = 1;
+  if ($('wavNorm').checked) {
+    var peak = 0;
+    for (var i = 0; i < n; i++) { var a = s[i] < 0 ? -s[i] : s[i]; if (a > peak) peak = a; }
+    if (peak > 0) scale = 32635 / peak;                 /* µ-law's largest level */
+  }
+
+  /* One Ucode per segment, from the peak (or RMS) of that slice: peaks track
+   * the envelope and keep the ladder spread out, where a mean collapses it
+   * toward the middle of the range. */
+  var step = n / segs, train = [], d = V.cloneDescriptor(state.desc);
+  for (i = 0; i < segs; i++) {
+    var lo = Math.floor(i * step), hi = Math.max(lo + 1, Math.floor((i + 1) * step));
+    if (hi > n) hi = n;
+    var acc = 0;
+    for (var j = lo; j < hi; j++) {
+      var v = s[j] * scale, m = v < 0 ? -v : v;
+      if (rms) acc += m * m; else if (m > acc) acc = m;
+    }
+    if (rms) acc = Math.sqrt(acc / (hi - lo));
+    var u = V.quantise(state.law, Math.min(acc, 32635));
+    train.push(Math.max(1, u));                          /* Ucode 0 is REFc; it probes nothing */
+  }
+
+  d.n = segs;
+  for (i = 0; i < segs; i++) d.train[i] = train[i];
+  for (i = 0; i < 8; i++) d.h[i] = hc;
+
+  /* SP is free as far as §8.4.1 is concerned -- the measurement reads levels,
+   * not signs -- so it can carry a pitch instead of a rasp. */
+  var period = 0;
+  if (choice === 'auto') period = clip.pitch ? snapPeriod(periods, clip.pitch.p) : 0;
+  else if (choice !== 'keep') period = parseInt(choice, 10) || 0;
+  if (period >= 2) {
+    d.lsp = period;
+    for (i = 0; i < period; i++) d.sp[i] = (i % period) < period / 2 ? 1 : 0;
+  }
+  if ($('wavClearTp').checked) { d.ltp = 1; d.tp[0] = 1; }
+
+  state.desc = d;
+  descToFields();
+  $('bitsMsg').innerHTML = '';
+  run();
+
+  var lo2 = 127, hi2 = 0, distinct = {}, chords = {};
+  for (i = 0; i < segs; i++) {
+    u = train[i];
+    if (u < lo2) lo2 = u;
+    if (u > hi2) hi2 = u;
+    distinct[u] = 1;
+    chords[u >> 4] = 1;
+  }
+  var nch = Object.keys(chords).length;
+  var cycle = segs * segLen;
+  var box = $('wavOut');
+  box.innerHTML = '';
+  box.appendChild(el('p', 'note ok', clip.name + ' → ' + segs + ' segments of ' + segLen +
+    'T, Ucodes ' + lo2 + '–' + hi2 + ', ' + Object.keys(distinct).length + ' distinct, ' +
+    nch + ' of 8 chords, ' + cycle + 'T (' + (cycle / 8).toFixed(0) + ' ms) per cycle, ' +
+    'against ' + (n / (clip.rate || 8000) * 1000).toFixed(0) + ' ms of clip.'));
+
+  var carrier = period >= 2
+    ? 'Carrier ' + (8000 / period).toFixed(0) + ' Hz (' + period + 'T, ' + (segLen / period) +
+      ' periods per segment)' + (clip.pitch
+        ? ', against the clip’s own ' + clip.pitch.hz.toFixed(0) + ' Hz at ' +
+          clip.pitch.conf.toFixed(2) + ' confidence'
+        : '') + '.'
+    : 'SP left as it was — ' + (choice === 'keep' ? 'by choice' :
+        'no pitch found in the clip') + ', so the carrier is whatever the descriptor already said.';
+  box.appendChild(el('p', 'note', carrier));
+
+  var ltpNow = state.desc.ltp, tpZeros = 0;
+  for (i = 0; i < ltpNow; i++) if (!state.desc.tp[i]) tpZeros++;
+  if (tpZeros) {
+    box.appendChild(el('p', 'note', 'TP has ' + tpZeros + ' zero' + (tpZeros === 1 ? '' : 's') +
+      ' in ' + ltpNow + ', so the level drops to REF at ' + (8000 / ltpNow).toFixed(0) +
+      ' Hz and chops the carrier. Clear the REF slots above to hear the tone alone.'));
+  }
+  if (nch < 3) {
+    box.appendChild(el('p', 'err', 'Narrow: this clip’s dynamic range leaves most of the ladder ' +
+      'unprobed, so the measurement only ever sees part of the range.'));
+  }
+}
+
 function download(bytes, name, type) {
   var blob = new Blob([bytes], { type: type || 'application/octet-stream' });
   var url = URL.createObjectURL(blob);
@@ -2262,6 +2643,16 @@ function init() {
     descToFields();
     run();
   });
+
+  $('wavFile').addEventListener('change', function () {
+    if (this.files && this.files[0]) loadClip(this.files[0]);
+  });
+  $('wavApply').addEventListener('click', buildLadderFromClip);
+  ['wavSegs', 'wavHc', 'wavStat', 'wavNorm', 'wavPitch', 'wavAutoHc', 'wavClearTp'].forEach(function (id) {
+    $(id).addEventListener('change', function () { if (clip.mono) buildLadderFromClip(); });
+  });
+  /* Touching Hc by hand is a statement that the fit is not wanted. */
+  $('wavHc').addEventListener('input', function () { $('wavAutoHc').checked = false; });
 
   $('shufOnce').addEventListener('click', shuffleOnce);
   $('shufSearch').addEventListener('click', runSearch);
