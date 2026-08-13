@@ -40,7 +40,7 @@ encoding and precoder coefficients are session state.
 | 10.1.2.1-10.1.2.3 | Tone A/B and INFO0/INFO1 framing | Live V.90 work substantially hardened the shared Phase-2 state machine | Run plain-V.34 caller and answerer recovery cases, not only V.90 role inversions. |
 | 10.1.2.3.4 | INFO1c reports measured per-rate carrier, pre-emphasis and projected rate | L1/L2 measurements and a per-rate evaluator exist | Plain V.34 previously emitted configured rates with pre-emphasis 6.  INFO1c must be built from the measurement for every enabled row and report -512 when frequency offset is unavailable. |
 | 10.1.2.3.5 | INFO1a selects both directional rates and the call-to-answer carrier/pre-emphasis/rate | Parser and serializer exist | Selection must combine INFO1c, local L1/L2 results and both INFO0 asymmetry limits.  Configure TX and RX independently from the result. |
-| 10.1.3.1-10.1.3.9 | B1, E, J/J-prime, optional MD, PP, S, TRN and MP | Shared generators and receivers exist; `v34_duplex_test` provides a waveform-only two-instance bearer. E is the normative single 20-bit sequence, E detection is gated by a complete MP-prime, Phase-4 CMA is limited to the first 512T of TRN and frozen for MP, and B1 is received as the complete known data frame before payload is unclamped. | At 2400/9600 PCMU both directions complete startup, synchronize payload and recover over 16,000 bits without error. PCMA still stalls in Phase 3 and follows before this target enters the default suite. |
+| 10.1.3.1-10.1.3.9 | B1, E, J/J-prime, optional MD, PP, S, TRN and MP | Shared generators and receivers exist; `v34_duplex_test` provides a waveform-only two-instance bearer. E is the normative single 20-bit sequence, E detection is gated by a complete MP-prime, Phase-4 CMA is limited to the first 512T of TRN and frozen for MP, and B1 is received as the complete known data frame before payload is unclamped. | At 2400/9600, PCMU and PCMA both complete startup, synchronize payload and recover over 16,000 bits per direction without error. The former PCMA stall was a false §10.1.3.7 S event on A-law digital silence; S publication now requires non-trivial equalized-symbol energy. Both laws run in `make test`. |
 | 11.2 | Probing/ranging and recovery | Main flow exists, with stage/event tracing | Test both roles, INFO retries, reversal deadlines and measured RTD. |
 | 11.3 | Equalizer and echo-canceller training | Phase-3 TX/RX exists | Replace the narrowband-notch policy with negotiated-carrier retuning and an echo-canceller path where carriers cannot be separated. |
 | 11.4 | Final training and mutually valid MP selection | MP/MP-prime handshake and heuristic receiver exist. Directional maxima now come from INFO1, the local mask intersects both selected baud mappings, final rates intersect both MP masks/maxima, and bit 50 forces the lower symmetric rate unless enabled bilaterally. MP-prime changes only the acknowledge bit rather than rewriting the offer. | `v34_mp_test` covers asymmetric/symmetric maxima, sparse/disjoint masks and all 1..14 maxima. Matrix-test waveform transport for 4/16-point TRN/MP, MP Type 0/1, E and complete B1. |
@@ -60,17 +60,19 @@ encoding and precoder coefficients are session state.
    options remains part of the harness matrix below.
 4. **In progress:** `v34_duplex_test` connects independent caller/answerer
    instances through only a selectable PCMU/PCMA round trip and verifies PRBS
-   payload in both directions after training.  `make v34-duplex-test` is kept
-   outside the green default suite because PCMA still stalls in Phase 3.
-   At 2400/9600 PCMU both directions complete INFO1, S/S-bar, PP, TRN, J,
-   MP/MP-prime, E and B1 from waveform evidence. The known B1 frame now
+   payload in both directions after training and now runs in the green default
+   suite for both laws. At 2400/9600 PCMU and PCMA both complete INFO1,
+   S/S-bar, PP, TRN, J, MP/MP-prime, E and B1 from waveform evidence. The known B1 frame now
    calibrates arbitrary phase, gain and conjugation before reset-state replay;
    both receivers then synchronize and recover over 16,000 payload bits with
    zero errors. Enforcing the configured 9600-bit/s INFO1/MP ceiling removed
    accidental 21600-bit/s negotiation, while §10.1.3 modulation-factor
    compensation removed high-rate clipping. Phase-4 CMA is bounded to the
    first 512T and frozen during framed signalling as required by §11.4. The
-   harness previously exposed and fixed four
+   PCMA blocker was a false S event: A-law silence decodes to ±8, and the
+   near-zero equalizer output looked like sustained rotation. Requiring real
+   symbol energy before the §10.1.3.7 event makes both laws follow the same
+   path. The harness previously exposed and fixed four
    sequencing defects: the caller no longer abandons the control channel
    before INFO1a; J detection is published to the caller transmitter; the
    answerer becomes silent and conditions on caller PP/TRN/J after S/S-bar;

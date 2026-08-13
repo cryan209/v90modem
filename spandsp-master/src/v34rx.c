@@ -6298,6 +6298,13 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
         if (s->phase3_s_detect_armed
             && !s->phase3_s_present
             && s->duration >= 64
+            /* A-law digital silence decodes to +/-8 rather than exact zero.
+               Its near-zero equalizer output has a constant differential
+               dibit and otherwise satisfies the sustained-rotation test.
+               V.34 10.1.3.7 S is a real primary-channel signal, so require
+               non-trivial symbol energy before publishing S. */
+            && mag_now > 0.2f
+            && mag_prev > 0.2f
             && ((s->phase3_s_alt_count >= PHASE3_S_ALTERNATING_MIN
                  && s->phase3_s_stable_windows >= PHASE3_S_STABLE_WINDOWS)
                 || s->phase3_s_dom_windows >= PHASE3_S_DOMINANT_STABLE))
