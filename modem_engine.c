@@ -478,6 +478,33 @@ static bool valid_v34_baud(int baud)
            baud == 3000 || baud == 3200 || baud == 3429;
 }
 
+static float v34_primary_carrier_hz(int baud, bool high)
+{
+    float exact_baud;
+    float ratio;
+
+    /* V.34 §5.2-5.3/Table 2.  Keep the rational symbol rates: the labels
+       2743 and 3429 are rounded names, not the DSP clock values. */
+    switch (baud) {
+    case 2400: exact_baud = 2400.0f; break;
+    case 2743: exact_baud = 2400.0f*8.0f/7.0f; break;
+    case 2800: exact_baud = 2400.0f*7.0f/6.0f; break;
+    case 3000: exact_baud = 2400.0f*5.0f/4.0f; break;
+    case 3200: exact_baud = 2400.0f*4.0f/3.0f; break;
+    case 3429: exact_baud = 2400.0f*10.0f/7.0f; break;
+    default: return 0.0f;
+    }
+    if (baud == 2400)
+        ratio = high ? 3.0f/4.0f : 2.0f/3.0f;
+    else if (baud == 2743 || baud == 2800 || baud == 3000)
+        ratio = high ? 2.0f/3.0f : 3.0f/5.0f;
+    else if (baud == 3200)
+        ratio = high ? 3.0f/5.0f : 4.0f/7.0f;
+    else
+        ratio = 4.0f/7.0f;
+    return exact_baud*ratio;
+}
+
 static int max_v34_bps_for_baud(int baud)
 {
     /* V.34 Table 2: max bit rate per symbol rate */
@@ -1768,6 +1795,11 @@ typedef struct {
 } notch_filter_t;
 
 static notch_filter_t g_notch = {0};
+static int  g_notch_tx_baud = -1;
+static int  g_notch_tx_high = -1;
+static int  g_notch_rx_baud = -1;
+static int  g_notch_rx_high = -1;
+static bool g_v34_use_echo_can = false;
 /* V.22bis guard tone (ITU-T V.22bis §2.1/2.2): an 1800 Hz (or, as a national
    option, 550 Hz) tone transmitted continuously alongside the "high
    channel" carrier, 6 dB (1800 Hz) or 3 dB (550 Hz) below the data signal
@@ -2206,6 +2238,63 @@ static void notch_filter_apply(notch_filter_t *nf, int16_t *samples, int len)
         if (y0 > 32767.0f) y0 = 32767.0f;
         if (y0 < -32768.0f) y0 = -32768.0f;
         samples[i] = (int16_t)y0;
+    }
+}
+
+static void v34_update_echo_policy(void)
+{
+    static const int baud_by_code[6] = {2400, 2743, 2800, 3000, 3200, 3429};
+    int tx_code;
+    int rx_code;
+    int tx_high;
+    int rx_high;
+    int tx_baud;
+    int rx_baud;
+    float tx_carrier;
+    float rx_carrier;
+    float separation;
+
+    if (!g_v34 || g_mod != ME_MOD_V34)
+        return;
+    tx_code = v34_get_tx_baud_rate(g_v34);
+    rx_code = v34_get_rx_baud_rate(g_v34);
+    tx_high = v34_get_tx_high_carrier(g_v34);
+    rx_high = v34_get_rx_high_carrier(g_v34);
+    if (tx_code < 0 || tx_code >= 6 || rx_code < 0 || rx_code >= 6)
+        return;
+    if (tx_code == g_notch_tx_baud && tx_high == g_notch_tx_high
+        && rx_code == g_notch_rx_baud && rx_high == g_notch_rx_high)
+        return;
+
+    tx_baud = baud_by_code[tx_code];
+    rx_baud = baud_by_code[rx_code];
+    tx_carrier = v34_primary_carrier_hz(tx_baud, tx_high != 0);
+    rx_carrier = v34_primary_carrier_hz(rx_baud, rx_high != 0);
+    separation = fabsf(tx_carrier - rx_carrier);
+    g_notch_tx_baud = tx_code;
+    g_notch_tx_high = tx_high;
+    g_notch_rx_baud = rx_code;
+    g_notch_rx_high = rx_high;
+
+    /* V.34 §10.1.2.3.5 selects each direction in INFO1a.  A startup
+       profile is therefore not authoritative here.  A notch is safe only
+       when the selected carriers are separated; 3429 has coincident
+       carriers and 3200 is normally too close, so use the adaptive echo
+       canceller instead of declaring either negotiated profile unusable. */
+    if (separation < 150.0f) {
+        g_notch.active = false;
+        g_v34_use_echo_can = true;
+        ME_LOG("[ME] V.34 negotiated echo policy: TX=%d/%s %.1f Hz, "
+               "RX=%d/%s %.1f Hz, separation %.1f Hz -> adaptive canceller\n",
+               tx_baud, tx_high ? "high" : "low", tx_carrier,
+               rx_baud, rx_high ? "high" : "low", rx_carrier, separation);
+    } else {
+        g_v34_use_echo_can = false;
+        notch_filter_init(&g_notch, tx_carrier, 30.0f, 8000.0f);
+        ME_LOG("[ME] V.34 negotiated echo policy: TX=%d/%s %.1f Hz, "
+               "RX=%d/%s %.1f Hz, separation %.1f Hz -> notch\n",
+               tx_baud, tx_high ? "high" : "low", tx_carrier,
+               rx_baud, rx_high ? "high" : "low", rx_carrier, separation);
     }
 }
 
@@ -3800,16 +3889,23 @@ static void start_v34_training(void)
         modem_echo_can_segment_free(g_echo_can);
         g_echo_can = NULL;
     }
-    if (g_advertise_v90) {
-        g_echo_can = modem_echo_can_segment_init(ECHO_CAN_TAPS);
-        if (g_echo_can) {
-            modem_echo_can_adaption_mode(g_echo_can, 1);
-            ME_LOG("[ME] Echo canceller enabled for V.90 (%d taps = %dms)\n",
-                    ECHO_CAN_TAPS, ECHO_CAN_TAPS * 1000 / 8000);
-        }
-        g_tx_buf_wr = 0;
-        g_tx_buf_rd = 0;
+    /* Keep the canceller available for every duplex V.34-family call.  The
+       negotiated INFO1 rates may leave too little carrier separation for a
+       notch (V.34 §5.3/Table 2); v34_update_echo_policy() chooses it only
+       when the final TX/RX parameters require it. */
+    g_echo_can = modem_echo_can_segment_init(ECHO_CAN_TAPS);
+    if (g_echo_can) {
+        modem_echo_can_adaption_mode(g_echo_can, 1);
+        ME_LOG("[ME] Echo canceller available for V.34-family training (%d taps = %dms)\n",
+                ECHO_CAN_TAPS, ECHO_CAN_TAPS * 1000 / 8000);
     }
+    g_tx_buf_wr = 0;
+    g_tx_buf_rd = 0;
+    g_notch_tx_baud = -1;
+    g_notch_tx_high = -1;
+    g_notch_rx_baud = -1;
+    g_notch_rx_high = -1;
+    g_v34_use_echo_can = false;
     /* Unconditional: the echo gate correlates these rings on every V.90 call,
        and stale audio from a previous training attempt would correlate as
        nonsense. */
@@ -5357,15 +5453,13 @@ void me_rx_audio(const int16_t *amp, int len)
                     g_last_tx_stage = tx_stage;
                 }
 
-                /* Apply notch filter once Phase 3 begins (TX/RX use separated
-                   carriers).  During Phase 2, both sides share 1200 Hz DPSK —
-                   the notch at 1600+ Hz could affect Phase 2 through its skirts,
-                   and there's no echo to cancel since TX/RX overlap.
-                   Previously this used v34_get_primary_channel_active() which
-                   only returns true after Phase 4 completes — far too late.
-                   The equalizer needs clean RX from Phase 3 onset. */
+                /* Begin echo control at Phase 3.  Plain V.34 retunes this from
+                   INFO1a's negotiated per-direction parameters, not the
+                   startup profile (V.34 10.1.2.3.5/Table 16). */
                 bool notch_active = (rx_stage >= V34_RX_STAGE_PHASE3_WAIT_S) ||
                                     (tx_stage >= V34_TX_STAGE_FIRST_S);
+                if (notch_active)
+                    v34_update_echo_policy();
                 int16_t filtered[len];
                 memcpy(filtered, amp, len * sizeof(int16_t));
                 /* NLMS echo canceller: subtract our TX echo from the RX signal.
@@ -5379,7 +5473,8 @@ void me_rx_audio(const int16_t *amp, int len)
                    TX reference comes from the ring buffer with a fixed lookback
                    so that tap[0] corresponds to the most recent TX sample and
                    tap[N] corresponds to N samples ago. */
-                if (g_echo_can && notch_active) {
+                if (g_echo_can && notch_active
+                    && (g_mod == ME_MOD_V90 || g_v34_use_echo_can)) {
                     #define EC_TAPS     1024    /* 128ms — covers delay + full tail */
                     static float ec_h[EC_TAPS];   /* adaptive FIR coefficients */
                     static int ec_init_done = 0;

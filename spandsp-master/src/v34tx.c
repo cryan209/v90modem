@@ -1040,17 +1040,62 @@ static int v34_l2_probe_result(v34_state_t *s,
 }
 /*- End of function --------------------------------------------------------*/
 
+static __inline__ float carrier_frequency(int symbol_rate_code, int low_high);
+
+static int v34_probe_frequency_offset(const v34_state_t *s)
+{
+    float offset_hz;
+    int offset_code;
+
+    if (s->rx.l1_l2_1050_phase_step_count <= 0)
+        return -512;
+    /* V.34 10.1.2.3.4/.5: units are 0.02 Hz and -512 means that the
+       required 0.25 Hz measurement accuracy was unavailable. */
+    offset_hz = (s->rx.l1_l2_1050_phase_step_sum
+               / s->rx.l1_l2_1050_phase_step_count)
+              / (2.0f*3.14159265f*0.020f);
+    offset_code = (int) lroundf(offset_hz/0.02f);
+    return (offset_code >= -511 && offset_code <= 511) ? offset_code : -512;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int v34_configured_rate_n(const v34_state_t *s, int baud_idx)
+{
+    int configured_max;
+    int rate_cap;
+
+    configured_max = (s->tx.parms.max_bit_rate_code >> 1) + 1;
+    rate_cap = (baud_rate_parameters[baud_idx].max_bit_rate_code >> 1) + 1;
+    if (configured_max > rate_cap)
+        configured_max = rate_cap;
+    /* Tables 15 and 16 forbid projected rates above 28800 unless the
+       remote INFO0 advertises the 1664-point constellation. */
+    if (!s->rx.far_capabilities.support_1664_point_constellation
+        && configured_max > 12)
+        configured_max = 12;
+    return configured_max;
+}
+/*- End of function --------------------------------------------------------*/
+
+static bool v34_local_tx_carrier_supported(int baud_idx, int high_carrier)
+{
+    if (baud_idx == V34_BAUD_RATE_3429 && !v34_capabilities.rate_3429_allowed)
+        return false;
+    return high_carrier
+         ? v34_capabilities.support_baud_rate_high_carrier[baud_idx]
+         : v34_capabilities.support_baud_rate_low_carrier[baud_idx];
+}
+/*- End of function --------------------------------------------------------*/
+
 static void prepare_info1c(v34_state_t *s)
 {
     int i;
-    int max_n;
     bool v92_info1d;
 
     s->tx.info1c.power_reduction = 0;
     s->tx.info1c.additional_power_reduction = 0;
     s->tx.info1c.md = 0;
     s->tx.info1c.freq_offset = 0;
-    max_n = (s->tx.parms.max_bit_rate_code >> 1) + 1;
     /* V.92 §9.3 switches INFO1d to Table 17 only after the two INFO0
        capability bits agree.  Table 17 keeps the V.34 probing fields, but
        repurposes bit 70 as PCM-upstream support.  That bit is what actually
@@ -1066,68 +1111,36 @@ static void prepare_info1c(v34_state_t *s)
 
     for (i = 0;  i <= V34_BAUD_RATE_3429;  i++)
     {
-        /* In V.90, INFO1d tells the analogue modem which carrier to use for
-           its upstream transmitter. The digital modem receives that signal
-           on the high carrier. */
-        s->tx.info1c.rate_data[i].use_high_carrier = s->tx.v90_mode ? true : false;
-        if (s->tx.v90_mode)
-        {
-            int rate_cap;
-            int configured_max;
-            int measured_carrier;
-            int measured_pre_emphasis;
+        int configured_max;
+        int measured_carrier;
+        int measured_pre_emphasis;
 
-            rate_cap = (baud_rate_parameters[i].max_bit_rate_code >> 1) + 1;
-            configured_max = (s->tx.baud_rate >= i)
-                           ? ((max_n < rate_cap) ? max_n : rate_cap)
-                           : 0;
-            measured_carrier = 1;
-            measured_pre_emphasis = 0;
-            s->tx.info1c.rate_data[i].max_bit_rate =
-                configured_max > 0
-                ? v34_l2_probe_result(s, i,
-                                      &measured_carrier,
-                                      &measured_pre_emphasis,
-                                      configured_max)
-                : 0;
-            s->tx.info1c.rate_data[i].use_high_carrier = measured_carrier != 0;
-            s->tx.info1c.rate_data[i].pre_emphasis = measured_pre_emphasis;
-        }
-        else
-        {
-            s->tx.info1c.rate_data[i].pre_emphasis = 6;
-            s->tx.info1c.rate_data[i].max_bit_rate = (s->tx.baud_rate >= i)  ?  max_n  :  0;
-        }
+        /* V.34 10.1.2.3.4/Table 15: every enabled INFO1c row is the
+           receiver's L1/L2 result, not a restatement of the startup profile.
+           The same Table-15 fields are reused by V.90 INFO1d. */
+        configured_max = (s->tx.baud_rate >= i) ? v34_configured_rate_n(s, i) : 0;
+        measured_carrier = 0;
+        measured_pre_emphasis = 0;
+        if (i == V34_BAUD_RATE_3429
+            && (!s->rx.far_capabilities.rate_3429_allowed
+                || !v34_capabilities.rate_3429_allowed))
+            configured_max = 0;
+        s->tx.info1c.rate_data[i].max_bit_rate =
+            configured_max > 0
+            ? v34_l2_probe_result(s, i,
+                                  &measured_carrier,
+                                  &measured_pre_emphasis,
+                                  configured_max)
+            : 0;
+        s->tx.info1c.rate_data[i].use_high_carrier = measured_carrier != 0;
+        s->tx.info1c.rate_data[i].pre_emphasis = measured_pre_emphasis;
         /* V.90 §8.2.3.2 Tables 9/10: INFO1a selects a row but does not
            repeat that row's carrier bit.  Retain exactly what this digital
            modem is about to transmit so its upstream RX can apply it. */
-        s->rx.v90_info1d_high_carrier[i] =
+        s->rx.local_info1c_high_carrier[i] =
             s->tx.info1c.rate_data[i].use_high_carrier;
     }
-    if (s->tx.v90_mode)
-    {
-        if (s->rx.l1_l2_1050_phase_step_count > 0)
-        {
-            float offset_hz;
-            int offset_code;
-
-            offset_hz = (s->rx.l1_l2_1050_phase_step_sum
-                       / s->rx.l1_l2_1050_phase_step_count)
-                      / (2.0f*3.14159265f*0.020f);
-            offset_code = (int) lroundf(offset_hz/0.02f);
-            s->tx.info1c.freq_offset = (offset_code >= -511  &&  offset_code <= 511)
-                                    ? offset_code : -512;
-            span_log(tx_log_state(&s->tx), SPAN_LOG_FLOW,
-                     "Tx INFO1d measured probe frequency offset: %.3f Hz (code %d)\n",
-                     offset_hz, s->tx.info1c.freq_offset);
-        }
-        else
-        {
-            /* V.34 10.1.2.3.4: -512 explicitly says the measurement could
-               not be made accurately; zero falsely claims a perfect clock. */
-            s->tx.info1c.freq_offset = -512;
-        }
-    }
+    s->tx.info1c.freq_offset = v34_probe_frequency_offset(s);
     if (v92_info1d)
     {
         /* The 3429-HI carrier selector that occupied bit 70 in V.34/V.90
@@ -1143,17 +1156,131 @@ static void prepare_info1c(v34_state_t *s)
 
 static void prepare_info1a(v34_state_t *s)
 {
+    int rx_carrier[6];
+    int rx_pre_emphasis[6];
+    int rx_max_rate[6];
+    int allowed_difference;
+    int answer_to_call;
+    int call_to_answer;
+    int best_score;
+    int a;
+    int c;
+
     s->tx.info1a.power_reduction = 0;
     s->tx.info1a.additional_power_reduction = 0;
     s->tx.info1a.md = 0;
-    s->tx.info1a.freq_offset = 0;
+    s->tx.info1a.freq_offset = v34_probe_frequency_offset(s);
 
-    s->tx.info1a.use_high_carrier = false;
-    s->tx.info1a.preemphasis_filter = 6;
-    s->tx.info1a.max_data_rate = (s->tx.parms.max_bit_rate_code >> 1) + 1;
+    memset(rx_carrier, 0, sizeof(rx_carrier));
+    memset(rx_pre_emphasis, 0, sizeof(rx_pre_emphasis));
+    memset(rx_max_rate, 0, sizeof(rx_max_rate));
+    for (c = V34_BAUD_RATE_2400; c <= V34_BAUD_RATE_3429; c++)
+    {
+        int configured_max;
 
-    s->tx.info1a.baud_rate_a_to_c = s->tx.baud_rate;
-    s->tx.info1a.baud_rate_c_to_a = s->tx.baud_rate;
+        configured_max = (s->tx.baud_rate >= c) ? v34_configured_rate_n(s, c) : 0;
+        if (c == V34_BAUD_RATE_3429
+            && (!s->rx.far_capabilities.rate_3429_allowed
+                || !v34_capabilities.rate_3429_allowed))
+            configured_max = 0;
+        if (configured_max > 0)
+            rx_max_rate[c] = v34_l2_probe_result(s, c,
+                                                 &rx_carrier[c],
+                                                 &rx_pre_emphasis[c],
+                                                 configured_max);
+    }
+
+    /* V.34 10.1.2.3.5/Table 16: INFO1a jointly selects answer->call from
+       the caller's INFO1c rows and call->answer from this receiver's L1/L2
+       result.  The two INFO0 values bound their symbol-rate difference. */
+    allowed_difference = v34_capabilities.max_baud_rate_difference;
+    if (allowed_difference > s->rx.far_capabilities.max_baud_rate_difference)
+        allowed_difference = s->rx.far_capabilities.max_baud_rate_difference;
+    answer_to_call = -1;
+    call_to_answer = -1;
+    best_score = -1;
+    if (s->rx.info1c_received)
+    {
+        for (a = V34_BAUD_RATE_2400; a <= V34_BAUD_RATE_3429; a++)
+        {
+            int answer_rate;
+            int answer_carrier;
+
+            answer_rate = s->rx.info1c.rate_data[a].max_bit_rate;
+            answer_carrier = s->rx.info1c.rate_data[a].use_high_carrier;
+            if (answer_rate <= 0
+                || !v34_local_tx_carrier_supported(a, answer_carrier))
+                continue;
+            if (answer_rate > v34_configured_rate_n(s, a))
+                answer_rate = v34_configured_rate_n(s, a);
+            for (c = V34_BAUD_RATE_2400; c <= V34_BAUD_RATE_3429; c++)
+            {
+                int score;
+                int lower_rate;
+
+                if (rx_max_rate[c] <= 0 || abs(a - c) > allowed_difference)
+                    continue;
+                lower_rate = (answer_rate < rx_max_rate[c])
+                           ? answer_rate : rx_max_rate[c];
+                /* Prefer the strongest duplex floor, then aggregate rate,
+                   then the higher symbol rates.  Selection policy is local;
+                   legality comes from INFO0/INFO1 and is enforced above. */
+                score = lower_rate*10000 + (answer_rate + rx_max_rate[c])*100
+                      + a*10 + c;
+                if (score > best_score)
+                {
+                    best_score = score;
+                    answer_to_call = a;
+                    call_to_answer = c;
+                }
+            }
+        }
+    }
+
+    if (best_score < 0)
+    {
+        /* §11.2.1.2.9 reaches INFO1a only after a valid INFO1c and probe.
+           Do not manufacture a usable static profile if those prerequisites
+           are absent; the Phase-2 recovery/retrain path must handle it. */
+        answer_to_call = s->tx.baud_rate;
+        call_to_answer = s->rx.baud_rate;
+        s->tx.info1a.use_high_carrier = false;
+        s->tx.info1a.preemphasis_filter = 0;
+        s->tx.info1a.max_data_rate = 0;
+        span_log(&s->logging, SPAN_LOG_WARNING,
+                 "Tx INFO1a: no legal measured duplex symbol-rate pair\n");
+    }
+    else
+    {
+        s->tx.info1a.use_high_carrier = rx_carrier[call_to_answer] != 0;
+        s->tx.info1a.preemphasis_filter = rx_pre_emphasis[call_to_answer];
+        s->tx.info1a.max_data_rate = rx_max_rate[call_to_answer];
+
+        /* This endpoint is the answer modem.  Configure its two primary
+           channels from the independently selected Table-16 directions. */
+        s->tx.baud_rate = answer_to_call;
+        s->tx.high_carrier =
+            s->rx.info1c.rate_data[answer_to_call].use_high_carrier;
+        s->tx.parms.samples_per_symbol_numerator =
+            baud_rate_parameters[answer_to_call].samples_per_symbol_numerator;
+        s->tx.parms.samples_per_symbol_denominator =
+            baud_rate_parameters[answer_to_call].samples_per_symbol_denominator;
+        s->tx.v34_carrier_phase_rate =
+            dds_phase_ratef(carrier_frequency(answer_to_call, s->tx.high_carrier));
+        v34_rx_set_primary_channel(s, call_to_answer,
+                                   s->tx.info1a.use_high_carrier);
+    }
+
+    s->tx.info1a.baud_rate_a_to_c = answer_to_call;
+    s->tx.info1a.baud_rate_c_to_a = call_to_answer;
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx INFO1a measured selection: answer->call=%d baud/%s, "
+             "call->answer=%d baud/%s, projected=%d bps\n",
+             baud_rate_parameters[answer_to_call].baud_rate,
+             s->tx.high_carrier ? "high" : "low",
+             baud_rate_parameters[call_to_answer].baud_rate,
+             s->tx.info1a.use_high_carrier ? "high" : "low",
+             s->tx.info1a.max_data_rate*2400);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -5303,6 +5430,23 @@ static void s_not_s_baud_init(v34_state_t *s)
                  baud_rate_parameters[s->tx.baud_rate].baud_rate,
                  s->tx.high_carrier ? "high" : "low");
     }
+    else if (s->tx.calling_party && !s->tx.v90_mode && s->rx.info1a_received)
+    {
+        /* V.34 10.1.2.3.5/Table 16 bits 37:39 select call->answer,
+           this call modem's transmit direction. */
+        if (s->rx.info1a.baud_rate_c_to_a >= V34_BAUD_RATE_2400
+            && s->rx.info1a.baud_rate_c_to_a <= V34_BAUD_RATE_3429)
+        {
+            s->tx.baud_rate = s->rx.info1a.baud_rate_c_to_a;
+            s->tx.high_carrier = s->rx.info1a.use_high_carrier;
+            s->tx.parms.samples_per_symbol_numerator =
+                baud_rate_parameters[s->tx.baud_rate].samples_per_symbol_numerator;
+            s->tx.parms.samples_per_symbol_denominator =
+                baud_rate_parameters[s->tx.baud_rate].samples_per_symbol_denominator;
+            s->tx.v34_carrier_phase_rate =
+                dds_phase_ratef(carrier_frequency(s->tx.baud_rate, s->tx.high_carrier));
+        }
+    }
     else if (!s->tx.calling_party)
     {
         int silence_bauds = (baud_rate_parameters[s->tx.baud_rate].baud_rate*70 + 500)/1000;
@@ -7525,6 +7669,12 @@ SPAN_DECLARE(int) v34_get_rx_high_carrier(v34_state_t *s)
 SPAN_DECLARE(int) v34_get_tx_baud_rate(v34_state_t *s)
 {
     return s ? s->tx.baud_rate : -1;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_get_tx_high_carrier(v34_state_t *s)
+{
+    return s ? s->tx.high_carrier : -1;
 }
 /*- End of function --------------------------------------------------------*/
 

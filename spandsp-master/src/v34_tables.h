@@ -364,7 +364,7 @@ static const v34_capabilities_t v34_capabilities =
     {true, true, true, true, true, true},
     {true, true, true, true, true, true},
     true,
-    0,
+    5,      /* V.34 10.1.2.3.3 bits 21:23: independent TX/RX symbol rates */
     true,
     TX_CLOCK_SOURCE_INTERNAL,
     false,

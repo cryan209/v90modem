@@ -1011,7 +1011,9 @@ typedef struct
     /*! \brief Per-rate carrier choices transmitted by this digital modem in
         INFO1d.  Table 10 reserves bits 32:33, so the later INFO1a cannot carry
         this choice back; the receiver must retain its own Table 9 rows. */
-    bool v90_info1d_high_carrier[6];
+    /*! Carrier choices sent in local INFO1c/INFO1d, retained because the
+        peer's INFO1a selects a row without repeating its carrier bit. */
+    bool local_info1c_high_carrier[6];
     /*! \brief Sticky flag for V.90 answerer recovery when stale INFO0a is seen
                during the INFO1a wait window. */
     bool v90_repeated_info0a_pending;

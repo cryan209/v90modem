@@ -2881,7 +2881,7 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
             if (info1a->baud_rate_a_to_c >= 0  &&  info1a->baud_rate_a_to_c <= 5)
             {
                 s->baud_rate = info1a->baud_rate_a_to_c;
-                s->high_carrier = s->v90_info1d_high_carrier[s->baud_rate];
+                s->high_carrier = s->local_info1c_high_carrier[s->baud_rate];
                 s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, s->high_carrier));
                 create_godard_coeffs(&s->pri_ted,
                                      carrier_frequency(s->baud_rate, s->high_carrier),
@@ -2908,7 +2908,7 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
             if (info1a->baud_rate_a_to_c >= 0  &&  info1a->baud_rate_a_to_c <= 5)
             {
                 s->baud_rate = info1a->baud_rate_a_to_c;
-                s->high_carrier = s->v90_info1d_high_carrier[s->baud_rate];
+                s->high_carrier = s->local_info1c_high_carrier[s->baud_rate];
                 s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, s->high_carrier));
                 create_godard_coeffs(&s->pri_ted,
                                      carrier_frequency(s->baud_rate, s->high_carrier),
@@ -2946,12 +2946,22 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
         if ((info1a->freq_offset & 0x200))
             info1a->freq_offset = -(info1a->freq_offset ^ 0x3FF) - 1;
         /*endif*/
-        s->baud_rate = info1a->baud_rate_c_to_a;
-        s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, s->high_carrier));
-        create_godard_coeffs(&s->pri_ted,
-                             carrier_frequency(s->baud_rate, s->high_carrier),
-                             baud_rate_parameters[s->baud_rate].baud_rate,
-                             0.99f);
+        /* V.34 10.1.2.3.5/Table 16 bits 34:36 select answer->call,
+           which is this call modem receiver's direction.  Carrier and
+           pre-emphasis came from the INFO1c row we transmitted earlier.
+           Bits 37:39 select our transmitter and are applied by v34tx.c. */
+        if (info1a->baud_rate_a_to_c >= V34_BAUD_RATE_2400
+            && info1a->baud_rate_a_to_c <= V34_BAUD_RATE_3429)
+        {
+            s->baud_rate = info1a->baud_rate_a_to_c;
+            s->high_carrier = s->local_info1c_high_carrier[s->baud_rate];
+            s->v34_carrier_phase_rate =
+                dds_phase_ratef(carrier_frequency(s->baud_rate, s->high_carrier));
+            create_godard_coeffs(&s->pri_ted,
+                                 carrier_frequency(s->baud_rate, s->high_carrier),
+                                 baud_rate_parameters[s->baud_rate].baud_rate,
+                                 0.99f);
+        }
 
         log_info1a(s->logging, false, info1a);
     }
@@ -10842,6 +10852,25 @@ SPAN_DECLARE(void) v34_put_mapping_frame_state(v34_state_t *s,
     if (s && bits)
         v34_put_mapping_frame(&s->rx, bits);
     /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
+void v34_rx_set_primary_channel(v34_state_t *s, int baud_rate, int high_carrier)
+{
+    if (!s || baud_rate < V34_BAUD_RATE_2400 || baud_rate > V34_BAUD_RATE_3429)
+        return;
+    /* V.34 10.1.2.3.5 and Table 16 select the two directions
+       independently.  Apply the direction this receiver will demodulate;
+       the configured startup profile is only a capability ceiling. */
+    s->rx.baud_rate = baud_rate;
+    s->rx.high_carrier = high_carrier != 0;
+    s->rx.v34_carrier_phase_rate =
+        dds_phase_ratef(carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
+    v34_set_working_parameters(&s->rx.parms, s->rx.baud_rate, s->rx.bit_rate, true);
+    create_godard_coeffs(&s->rx.pri_ted,
+                         carrier_frequency(s->rx.baud_rate, s->rx.high_carrier),
+                         baud_rate_parameters[s->rx.baud_rate].baud_rate,
+                         0.99f);
 }
 /*- End of function --------------------------------------------------------*/
 

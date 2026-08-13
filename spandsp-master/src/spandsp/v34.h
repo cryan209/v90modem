@@ -342,6 +342,11 @@ SPAN_DECLARE(int) v34_get_rx_high_carrier(v34_state_t *s);
     \return The TX baud-rate code, or -1 on error. */
 SPAN_DECLARE(int) v34_get_tx_baud_rate(v34_state_t *s);
 
+/*! Get the current TX carrier selection.
+    \param s The modem context.
+    \return Non-zero for the high carrier, zero for low, or -1 on error. */
+SPAN_DECLARE(int) v34_get_tx_high_carrier(v34_state_t *s);
+
 /*! Get the Phase 2 round-trip delay estimate.
     \param s The modem context.
     \return The estimate in 8000 Hz sample times, or 0 if unavailable. */
