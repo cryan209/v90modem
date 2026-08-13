@@ -160,7 +160,7 @@ SRCS += v34_stubs.c
 TEST_OBJS += v34_stubs.o
 endif
 
-.PHONY: all test clean distclean spandsp pjproject v34-tone-matrix v32bis-ref-test v32bis-datapump-test v91-serial-pair-test eicon-rx-test FORCE
+.PHONY: all test clean distclean spandsp pjproject v34-tone-matrix v32bis-ref-test v32bis-datapump-test v91-serial-pair-test eicon-rx-test g711-path-test FORCE
 
 all: $(TARGET) $(TEST_TARGETS)
 
@@ -190,6 +190,19 @@ v91-serial-pair-test: $(TARGET)
 # chain regresses or the defect is fixed.
 eicon-rx-test: vpcm_decode
 	python3 tools/eicon_rx_conformance.py --binary ./vpcm_decode --expect-failure
+
+# Measures whether the SIP path delivers G.711 byte-exactly, which CLAUDE.md's
+# first constraint requires and which no offline test can check: the RTP payload
+# *is* the DS0 stream, so a transcode, an audiohook, or an adaptive jitter
+# buffer anywhere between here and the far end silently breaks Phase 3.  Needs a
+# live PBX and an Answer()+Echo() extension (see the module docstring), so it is
+# deliberately NOT part of `test`.  Second invocation is the counterfactual: a
+# law-pinned endpoint must *refuse* the other law rather than transcode it.
+# Override G711_TEST_ARGS for a different registrar, extension or account.
+G711_TEST_ARGS ?=
+g711-path-test:
+	python3 tools/g711_path_exactness.py $(G711_TEST_ARGS)
+	python3 tools/g711_path_exactness.py --law alaw --expect-488 $(G711_TEST_ARGS)
 
 v32bis-ref-test:
 	python3 -m unittest discover -s tools/v32bis_ref -t .
