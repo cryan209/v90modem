@@ -38,15 +38,25 @@ RX_STAGES = {
     6: "TONE_B", 7: "L1_L2", 10: "PHASE3_WAIT_S", 11: "PHASE3_TRAINING",
 }
 
-MARK_RE = re.compile(
-    r"RX dump mark: sample=(\d+) rx_stage=(-?\d+) tx_stage=(-?\d+) mod=(-?\d+)")
+def mark_re(which):
+    return re.compile(
+        r"%s dump mark: sample=(\d+) rx_stage=(-?\d+) tx_stage=(-?\d+) mod=(-?\d+)"
+        % which)
 
 
-def load_marks(log_path):
+def load_marks(log_path, which):
+    """Marks for one dump.
+
+    RX and TX are written from different callbacks at different rates and the
+    files end up different lengths for the same call, so each has its own
+    counter and they are NOT interchangeable.  Indexing the TX audio with RX
+    marks reads the wrong instant entirely.
+    """
+    rx = mark_re(which)
     marks = []
     with open(log_path, errors="replace") as fp:
         for line in fp:
-            m = MARK_RE.search(line)
+            m = rx.search(line)
             if m:
                 marks.append(tuple(int(g) for g in m.groups()))
     return marks
@@ -118,11 +128,13 @@ def main():
                     help="list windows spent waiting for INFO1a and stop")
     args = ap.parse_args()
 
-    marks = load_marks(args.log)
+    which = "TX" if "tx" in args.audio.rsplit("/", 1)[-1] else "RX"
+    marks = load_marks(args.log, which)
     if not marks:
-        print("No 'RX dump mark' lines in %s -- the build predates them, or "
-              "VPCM_ME_VERBOSE was not set." % args.log, file=sys.stderr)
+        print("No '%s dump mark' lines in %s -- the build predates them, or "
+              "VPCM_ME_VERBOSE was not set." % (which, args.log), file=sys.stderr)
         return 2
+    print("using %s marks for %s" % (which, args.audio))
     d = np.fromfile(args.audio, dtype=np.int16).astype(np.float64)
     print("audio: %d samples (%.1f s), %d marks, last mark at sample %d"
           % (d.size, d.size / FS, len(marks), marks[-1][0]))

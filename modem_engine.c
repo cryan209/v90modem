@@ -7064,8 +7064,29 @@ void me_tx_audio(int16_t *amp, int len)
                     if (tx_dump)
                         ME_LOG("[ME] TX PCM dump: /tmp/v34_tx.raw (s16le 8000Hz mono)\n");
                 }
-                if (tx_dump)
+                if (tx_dump) {
+                    /* The TX dump is written from the transmit callback and
+                     * the RX dump from the receive callback: different call
+                     * sites, different rates, and the two files end up
+                     * different lengths for the same call.  So TX needs its
+                     * own marks -- indexing this file with the RX marks silently
+                     * reads the wrong instant, which is exactly the error that
+                     * produced a confident "our transmitter is silent during
+                     * the stall" from an 8 s misalignment. */
+                    static long tx_dump_total = 0;
+                    static long tx_dump_marked = 0;
+
                     fwrite(amp, sizeof(int16_t), len, tx_dump);
+                    tx_dump_total += len;
+                    if (tx_dump_total - tx_dump_marked >= 800) {
+                        tx_dump_marked = tx_dump_total;
+                        ME_LOG("[ME] TX dump mark: sample=%ld rx_stage=%d tx_stage=%d mod=%d\n",
+                               tx_dump_total,
+                               g_v34 ? v34_get_rx_stage(g_v34) : -1,
+                               g_v34 ? v34_get_tx_stage(g_v34) : -1,
+                               (int)g_mod);
+                    }
+                }
                 for (int i = 0; i < len; i++)
                     tx_energy += (int64_t)amp[i] * amp[i];
                 tx_count += len;
