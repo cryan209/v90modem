@@ -6998,15 +6998,25 @@ static void data_baud_init(v34_state_t *s)
     s->tx.tx_mapping_frame_step = 0;
     s->tx.b1_frames_sent = 0;
     s->tx.data_frame = 0;
-    s->tx.super_frame = 0;
+    /* V.34 10.1.3.1 inserts B1's V0 inversions as though B1 were the
+       final data frame of a superframe.  Start there; after P mapping frames
+       the normal frame advance wraps to superframe zero for payload. */
+    if (s->tx.parms.j > 0)
+    {
+        s->tx.super_frame = s->tx.parms.j - 1;
+        s->tx.v0_pattern = (uint16_t)(2*(s->tx.parms.j - 1));
+    }
+    else
+    {
+        s->tx.super_frame = 0;
+        s->tx.v0_pattern = 0;
+    }
     s->tx.s_bit_cnt = 0;
     s->tx.aux_bit_cnt = 0;
-    s->tx.v0_pattern = 0;
-    /* Initialize precoder and trellis state for data mode. V.34/9.6 starts the
-       convolutional encoder from the all-zero state, so reset state/y0 here
-       rather than relying on nothing having disturbed them since v34_init() --
-       the Phase 2 line probe used to do exactly that. v34_seed_tx_data() zeroes
-       the same set for the offline harness. */
+    /* Initialize scrambler, precoder and trellis state for B1.  V.34
+       10.1.3.1 resets all of them; MP/E use the same scrambler register but
+       are a separate sequence and must not leak state into B1. */
+    s->tx.scramble_reg = 0;
     s->tx.c.re = 0;
     s->tx.c.im = 0;
     s->tx.p.re = 0;

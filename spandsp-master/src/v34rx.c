@@ -2579,20 +2579,12 @@ static void viterbi_update_path_metrics(viterbi_t *s,
                 int next_state = s->encode_table[state][input];
                 int branch = 4*k0 + k1;
 
-                /* For the 16-state rate-2/3 encoder, Y1/Y2 and the old
-                   state's Y0 select one of the eight 4D branches.  The
-                   previous full-candidate update used Y1/Y2 only for the
-                   state transition and allowed geometrically impossible Y0
-                   branches, making the decoder collapse under tiny noise.
-                   V0 flips the Y0 branch bit at the two half-frame
-                   boundaries. */
-                if (s->state_count == 16
-                    && geometric_branch[k0][k1]
-                       != ((((input & 3) << 1) | (state & 1))
-                           ^ (invert ? 1 : 0))) {
-                    continue;
-                }
-
+                /* Table 13 maps each candidate subset pair to the complete
+                   Y4321 convolutional input.  Do not add a Y0 constraint
+                   derived from state&1: U0 also contains C0 (9.6.3.3), so
+                   that shortcut rejects valid zero-error branches even with
+                   no channel.  The authoritative encoder transition below
+                   supplies the trellis constraint for all negotiated sizes. */
                 metric = s->vit[prev_ptr].cumulative_path_metric[state]
                        + s->vit[s->ptr].branch_error_x[branch];
                 if (metric < s->vit[s->ptr].cumulative_path_metric[next_state])
@@ -8369,26 +8361,22 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_COMPLETE, "E detected");
                     span_log(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 4: E signal detected, MP exchange complete — transitioning to DATA mode\n");
-                    s->mp_seen = 2;
-                    s->received_event = V34_EVENT_E;
-                    /* Initialize data mode state */
-                    s->step_2d = 0;
-                    s->data_frame = 0;
-                    s->super_frame = 0;
-                    s->v0_pattern = 0;
-                    s->mapping_frame_count = 0;
-                    s->s_bit_cnt = 0;
-                    s->aux_bit_cnt = 0;
-                    memset(s->xt, 0, sizeof(s->xt));
-                    memset(s->x, 0, sizeof(s->x));
-                    memset(s->ww, 0, sizeof(s->ww));
-                    s->viterbi.ptr = 0;
-                    s->viterbi.windup = 15;
+                    /* Use the same reset-state B1 entry as the offline and
+                       V.90 paths.  The old inline subset left every Viterbi
+                       state at metric zero and started V0 at ordinary frame
+                       zero, although 10.1.3.1 defines B1 as the final data
+                       frame of a superframe with all encoder state reset. */
+                    t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
+                    if (v34_begin_rx_data(t) != 0)
+                    {
+                        s->received_event = V34_EVENT_TRAINING_FAILED;
+                        report_status_change(s, SIG_STATUS_TRAINING_FAILED);
+                        break;
+                    }
                     span_log(s->logging, SPAN_LOG_FLOW,
                              "Rx - DATA mode: parms b=%d k=%d q=%d m=%d p=%d j=%d l=%d r=%d w=%d\n",
                              s->parms.b, s->parms.k, s->parms.q, s->parms.m,
                              s->parms.p, s->parms.j, s->parms.l, s->parms.r, s->parms.w);
-                    s->stage = V34_RX_STAGE_DATA;
                     if (s->duplex)
                         report_status_change(s, SIG_STATUS_TRAINING_SUCCEEDED);
                     /*endif*/
@@ -10917,6 +10905,9 @@ SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
     memset(s->rx.xt, 0, sizeof(s->rx.xt));
     memset(s->rx.x, 0, sizeof(s->rx.x));
     memset(s->rx.ww, 0, sizeof(s->rx.ww));
+    /* V.34 10.1.3.1 initializes the B1 data scrambler independently of
+       the preceding MP/E descrambler stream. */
+    s->rx.scramble_reg = 0;
     s->rx.viterbi.ptr = 0;
     s->rx.viterbi.windup = 15;
     /* 10.1.3.1/V.34: B1 is a reset-state data frame that carries the
@@ -11209,7 +11200,12 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.s_bit_cnt = 0;
     s->rx.aux_bit_cnt = 0;
     s->rx.mapping_frame_count = 0;
-    s->rx.data_symbol_scale = 70.0f;
+    /* The primary equalizer is normalized to unit training radius and the
+       data mapper's Q9.7 contract is applied explicitly in DATA.  A legacy
+       capture-specific factor of 70 drove ordinary V.34 symbols to roughly
+       +/-150 constellation units (and int16 clipping) instead of the Table
+       10/11 odd-integer grid.  Start at unity; B1 calibration can refine it. */
+    s->rx.data_symbol_scale = 1.0f;
     s->rx.data_symbol_rotation = 0;
     s->rx.data_symbol_conjugate = false;
 

@@ -30,6 +30,8 @@ typedef struct endpoint_s {
     int sync_bits;
     int skipped_bits;
     bool payload_synced;
+    int clipped_samples;
+    int16_t peak_sample;
     bool trained;
     bool failed;
 } endpoint_t;
@@ -99,6 +101,8 @@ static int run_case(int baud, int bps, bool alaw)
     int16_t call_rx[BLOCK_SAMPLES];
     int16_t answer_rx[BLOCK_SAMPLES];
     int completed_block = -1;
+    int max_blocks = getenv("V34_DUPLEX_BLOCKS")
+                   ? atoi(getenv("V34_DUPLEX_BLOCKS")) : MAX_BLOCKS;
 
     {
         uint32_t caller_sync_state = caller.expected_lfsr;
@@ -123,6 +127,14 @@ static int run_case(int baud, int bps, bool alaw)
     }
     v34_tx_power(call_modem, -12.0f);
     v34_tx_power(answer_modem, -12.0f);
+    if (getenv("V34_DUPLEX_ROT") || getenv("V34_DUPLEX_CONJ")
+        || getenv("V34_DUPLEX_SCALE")) {
+        int rotation = getenv("V34_DUPLEX_ROT") ? atoi(getenv("V34_DUPLEX_ROT")) : 0;
+        int conjugate = getenv("V34_DUPLEX_CONJ") ? atoi(getenv("V34_DUPLEX_CONJ")) : 0;
+        float scale = getenv("V34_DUPLEX_SCALE") ? strtof(getenv("V34_DUPLEX_SCALE"), NULL) : 1.0f;
+        v34_set_rx_data_transform(call_modem, scale, rotation, conjugate);
+        v34_set_rx_data_transform(answer_modem, scale, rotation, conjugate);
+    }
     if (getenv("V34_DUPLEX_LOG")) {
         span_log_set_level(v34_get_logging_state(call_modem),
                            SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL
@@ -134,7 +146,7 @@ static int run_case(int baud, int bps, bool alaw)
         span_log_set_tag(v34_get_logging_state(answer_modem), "answer");
     }
 
-    for (int block = 0; block < MAX_BLOCKS; block++) {
+    for (int block = 0; block < max_blocks; block++) {
         int call_n = v34_tx(call_modem, call_tx, BLOCK_SAMPLES);
         int answer_n = v34_tx(answer_modem, answer_tx, BLOCK_SAMPLES);
 
@@ -145,6 +157,12 @@ static int run_case(int baud, int bps, bool alaw)
             memset(answer_tx + answer_n, 0,
                    (size_t)(BLOCK_SAMPLES - answer_n)*sizeof(answer_tx[0]));
         for (int i = 0; i < BLOCK_SAMPLES; i++) {
+            int call_abs = abs(call_tx[i]);
+            int answer_abs = abs(answer_tx[i]);
+            if (call_abs > caller.peak_sample) caller.peak_sample = (int16_t)call_abs;
+            if (answer_abs > answer.peak_sample) answer.peak_sample = (int16_t)answer_abs;
+            if (call_abs >= 32760) caller.clipped_samples++;
+            if (answer_abs >= 32760) answer.clipped_samples++;
             answer_rx[i] = g711_roundtrip(call_tx[i], alaw);
             call_rx[i] = g711_roundtrip(answer_tx[i], alaw);
         }
@@ -169,9 +187,12 @@ static int run_case(int baud, int bps, bool alaw)
            caller.trained, answer.trained,
            caller.rx_bits, answer.rx_bits,
            caller.bit_errors, answer.bit_errors,
-           completed_block >= 0 ? (completed_block + 1)*0.020 : MAX_BLOCKS*0.020);
-    printf("  source bits: caller=%d answer=%d; sync skipped=%d/%d\n",
-           caller.tx_bits, answer.tx_bits, caller.skipped_bits, answer.skipped_bits);
+           completed_block >= 0 ? (completed_block + 1)*0.020 : max_blocks*0.020);
+    printf("  source bits: caller=%d answer=%d; sync skipped=%d/%d; "
+           "peaks=%d/%d clipped=%d/%d\n",
+           caller.tx_bits, answer.tx_bits, caller.skipped_bits, answer.skipped_bits,
+           caller.peak_sample, answer.peak_sample,
+           caller.clipped_samples, answer.clipped_samples);
     printf("  stages: caller rx=%d tx=%d event=%d; answer rx=%d tx=%d event=%d\n",
            v34_get_rx_stage(call_modem), v34_get_tx_stage(call_modem),
            v34_get_rx_event(call_modem),
