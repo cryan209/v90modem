@@ -1034,6 +1034,21 @@ typedef struct
         (unmodulated, so zeros) while waiting for INFO1a.  See
         V34_EVENT_INFOMARKSA_SEEN. */
     int v90_infomarksa_run;
+    /*! Goertzel state for the 1800 Hz guard tone and the 2400 Hz carrier, and
+        the ratio between them in dB.  V.34 10.1.2.1 and 10.1.2.3 fix both
+        levels, so the ratio says which state the peer is in:
+          Tone A / A-bar   Tone A -1 dB, guard 0 dB  ->  about +1 dB
+          INFO sequences   carrier -1 dB, guard -7 dB -> about -6 dB
+        Measured live at -5.8 dB when INFO1a decoded and +2.9 dB when it did
+        not, i.e. the peer was still in Tone A and had not sent INFO1a at all.
+        That is the detection 9.2.1.2.6 needs and persistence2 never gave. */
+    float guard_g1;
+    float guard_g2;
+    float carrier_g1;
+    float carrier_g2;
+    int guard_block_len;
+    float guard_carrier_db;
+    int guard_carrier_valid;
     int phase3_s_guard_samples;
     int phase3_s_hits;
     int phase3_s_event_count;

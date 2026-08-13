@@ -4202,6 +4202,50 @@ static int info_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     step = 6;
     for (i = 0;  i < len;  i++)
     {
+        /* Guard-tone / carrier ratio (V.34 10.1.2.1, 10.1.2.3).  Two Goertzel
+           bins over 320 samples (40 ms, 25 Hz resolution -- the tones are
+           600 Hz apart, so this is ample).  The ratio is the only reliable
+           statement this receiver can make about whether the peer is holding
+           Tone A or transmitting an INFO sequence: the spec fixes both levels,
+           and the two states differ by ~7 dB. */
+        {
+            /* Goertzel coefficient is 2cos(2*pi*f/8000):
+                 f=1800 -> 2cos(0.45*pi) =  0.31286893
+                 f=2400 -> 2cos(0.60*pi) = -0.61803399
+               and the sign is folded into the recurrences below. */
+            float x = (float) amp[i];
+            float g0;
+            float c0;
+
+            g0 = x + 0.31286893f*s->guard_g1 - s->guard_g2;
+            s->guard_g2 = s->guard_g1;
+            s->guard_g1 = g0;
+            c0 = x - 0.61803399f*s->carrier_g1 - s->carrier_g2;
+            s->carrier_g2 = s->carrier_g1;
+            s->carrier_g1 = c0;
+            if (++s->guard_block_len >= 320)
+            {
+                float gp = s->guard_g1*s->guard_g1 + s->guard_g2*s->guard_g2
+                         - 0.31286893f*s->guard_g1*s->guard_g2;
+                float cp = s->carrier_g1*s->carrier_g1 + s->carrier_g2*s->carrier_g2
+                         + 0.61803399f*s->carrier_g1*s->carrier_g2;
+
+                if (cp > 1.0f  &&  gp > 1.0f)
+                {
+                    s->guard_carrier_db = 10.0f*log10f(gp/cp);
+                    s->guard_carrier_valid = 1;
+                }
+                else
+                {
+                    s->guard_carrier_valid = 0;
+                }
+                /*endif*/
+                s->guard_g1 = s->guard_g2 = 0.0f;
+                s->carrier_g1 = s->carrier_g2 = 0.0f;
+                s->guard_block_len = 0;
+            }
+            /*endif*/
+        }
         power = power_meter_update(&s->power, amp[i]);
         s->last_info_rx_power = power;
         if (s->sample_time - s->last_info_rx_power_peak_reset >= 800)

@@ -4555,14 +4555,31 @@ wait_timeout_check:
            the re-send path regardless of what the peer was doing.
            persistence2 >= 20 is the same "sustained zeros on the DPSK stream"
            condition the Tone A detector itself uses. */
-        if (s->rx.signal_present
-            &&  s->rx.persistence2 >= 20
-            &&  s->tx.v90_info1a_retrain_responses < V90_INFO1A_MAX_RETRAIN_RESPONSES)
+        /* Is the peer holding Tone A, or transmitting an INFO sequence?
+           V.34 10.1.2.1/10.1.2.3 fix the 1800 Hz guard tone's level in each
+           state, so the guard/carrier ratio answers it directly: about +1 dB
+           under Tone A, about -6 dB under INFO.  -2.5 dB is the midpoint.
+           persistence2 >= 20 was the previous test and never once fired --
+           measured live, the deadline is reached with persistence2 below it
+           even while the peer sits in Tone A. */
+        {
+            bool tone_a_present;
+
+            if (s->rx.guard_carrier_valid)
+                tone_a_present = (s->rx.guard_carrier_db > -2.5f);
+            else
+                tone_a_present = (s->rx.persistence2 >= 20);
+            /*endif*/
+            if (s->rx.signal_present
+                &&  tone_a_present
+                &&  s->tx.v90_info1a_retrain_responses < V90_INFO1A_MAX_RETRAIN_RESPONSES)
         {
             s->tx.v90_info1a_retrain_responses++;
             v90_phase2_reset_transactions(s);
             span_log(&s->logging, SPAN_LOG_FLOW,
-                     "Tx - V.90: INFO1a deadline with Tone A present; responding to retrain per 9.5.1.2 (response %d)\n",
+                     "Tx - V.90: INFO1a deadline, guard/carrier %+.1f dB (valid=%d) => Tone A; responding to retrain per 9.5.1.2 (response %d)\n",
+                     s->rx.guard_carrier_db,
+                     s->rx.guard_carrier_valid,
                      s->tx.v90_info1a_retrain_responses);
             s->tx.tone_duration = 0;
             s->tx.v90_info1a_fast_retries = 0;
@@ -4572,6 +4589,8 @@ wait_timeout_check:
             s->rx.persistence1 = 0;
             s->rx.persistence2 = 0;
             return zero;
+        }
+            /*endif*/
         }
         /*endif*/
         s->tx.v90_info1a_total_retries++;
