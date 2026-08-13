@@ -5494,6 +5494,31 @@ void me_rx_audio(const int16_t *amp, int len)
                 tx_stage = v34_get_tx_stage(g_v34);
                 rx_event = v34_get_rx_event(g_v34);
 
+                /* Drive the Ja descriptor search off the capture, not off J.
+                 *
+                 * Every other call site for this is a J/Ja event handler, so
+                 * once those stop firing the capture keeps growing with nothing
+                 * parsing it.  Measured live against the Courier (2026-08-13,
+                 * commit 1d31353): the capture reached 49152 bits while the
+                 * search never saw past 15850, and this peer's descriptor needs
+                 * ~16340 -- so the frame was in the buffer, ~500 bits beyond
+                 * where anyone looked, and Phase 3 then moved on without DIL.
+                 *
+                 * §9.3.2.9 has the analogue modem send the descriptor inside
+                 * Ja, so the right trigger is "Ja is still arriving", which is
+                 * exactly these two stages.  The function's own
+                 * ME_V90_DIL_HYP_RETRY_BITS throttle (512) already paces the
+                 * 24-hypothesis sliding search, and it early-returns once a
+                 * descriptor is logged, so calling it per RX frame here costs a
+                 * bit-count comparison in the common case. */
+                if (g_mod == ME_MOD_V90
+                    && g_v90
+                    && (rx_stage == V34_RX_STAGE_PHASE3_WAIT_S
+                        || rx_stage == V34_RX_STAGE_PHASE3_TRAINING))
+                {
+                    (void)v90_dil_capture_try_v34_hypotheses();
+                }
+
                 if (g_mod == ME_MOD_V90
                     && (rx_stage != g_last_v90_bridge_rx_stage
                         || tx_stage != g_last_v90_bridge_tx_stage
