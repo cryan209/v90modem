@@ -7423,6 +7423,22 @@ SPAN_DECLARE(int) v34_get_rx_stage(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(float) v34_get_guard_carrier_db(v34_state_t *s, int *valid)
+{
+    /* Level of the peer's 1800 Hz guard tone relative to its 2400 Hz carrier.
+       V.34 10.1.2.1/10.1.2.3 fix both, so this says which state the peer is in:
+       about +1 dB while it holds Tone A, about -6 dB while it transmits an INFO
+       sequence.  Exposed so the engine can log it continuously -- it was
+       previously only reported when the 9.2.1.2.6 deadline branch fired, and a
+       whole 16-call series passed without any call reaching that deadline, so
+       the measurement went unvalidated. */
+    if (valid)
+        *valid = s ? s->rx.guard_carrier_valid : 0;
+    /*endif*/
+    return s ? s->rx.guard_carrier_db : 0.0f;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v34_get_rx_baud_rate(v34_state_t *s)
 {
     if (!s)

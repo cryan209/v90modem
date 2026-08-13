@@ -5812,12 +5812,25 @@ void me_rx_audio(const int16_t *amp, int len)
                         fwrite(filtered, sizeof(int16_t), len, rx_dump);
                         rx_dump_total += len;
                         if (rx_dump_total - rx_dump_marked >= 800) {
+                            int gc_valid = 0;
+                            float gc_db = g_v34
+                                        ? v34_get_guard_carrier_db(g_v34, &gc_valid)
+                                        : 0.0f;
+
                             rx_dump_marked = rx_dump_total;
-                            ME_LOG("[ME] RX dump mark: sample=%ld rx_stage=%d tx_stage=%d mod=%d\n",
+                            /* guard_db is the peer's 1800 Hz guard tone
+                             * relative to its 2400 Hz carrier: about +1 dB
+                             * under Tone A, about -6 dB under an INFO
+                             * sequence (V.34 10.1.2.1/10.1.2.3). Logged on
+                             * every mark so the prediction can be checked on
+                             * ordinary calls, not just the rare ones that
+                             * stall at the 9.2.1.2.6 deadline. */
+                            ME_LOG("[ME] RX dump mark: sample=%ld rx_stage=%d tx_stage=%d mod=%d guard_db=%.1f guard_valid=%d\n",
                                    rx_dump_total,
                                    g_v34 ? v34_get_rx_stage(g_v34) : -1,
                                    g_v34 ? v34_get_tx_stage(g_v34) : -1,
-                                   (int)g_mod);
+                                   (int)g_mod,
+                                   gc_db, gc_valid);
                         }
                         static int rx_dump_count = 0;
                         rx_dump_count += len;

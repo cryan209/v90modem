@@ -317,6 +317,13 @@ SPAN_DECLARE(bool) v34_get_primary_channel_active(v34_state_t *s);
     \return The current RX stage (v34_rx_stages_e value). */
 SPAN_DECLARE(int) v34_get_rx_stage(v34_state_t *s);
 
+/*! Level of the far end's 1800 Hz guard tone relative to its 2400 Hz carrier,
+    in dB (V.34 10.1.2.1, 10.1.2.3).  About +1 dB while the peer holds Tone A,
+    about -6 dB while it transmits an INFO sequence, so the ratio distinguishes
+    the two states.  \param valid set to 0 when neither bin has usable signal.
+*/
+SPAN_DECLARE(float) v34_get_guard_carrier_db(v34_state_t *s, int *valid);
+
 /*! Get the current RX symbol-rate code (v34_baud_rate_e, 0=2400..5=3429).
     After v34_v90_prepare_upstream_data() this is the negotiated V.90
     upstream data baud (3000 or 3200 per V.90 §6.2), not the CP
