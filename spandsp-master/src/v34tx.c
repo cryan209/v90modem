@@ -3816,10 +3816,56 @@ static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                         info1_baud_init(s);
                     else if (s->tx.v90_mode)
                     {
-                        if (s->rx.received_event == V34_EVENT_TONE_SEEN
-                            || s->rx.received_event == V34_EVENT_REVERSAL_1
-                            || s->rx.received_event == V34_EVENT_REVERSAL_3
-                            || s->rx.signal_present)
+                        /* §9.2.1.1.7 sends INFO1d only "after the digital modem
+                           detects Tone A and has received the local echo of L2".
+                           s->rx.signal_present is not that test -- it is true for
+                           any energy at all, including the peer's own L1/L2 probe
+                           still running, so it fired while the far end was still
+                           working through the §9.2.1.1.5/§9.2.1.1.6 exchange and
+                           sent INFO1d into the middle of it.  Measured over 16
+                           calls: every call that reached INFO1a saw 4 L1/L2
+                           events and sent 2 INFO1d frames carrying an identical
+                           probe field; every call that failed saw 2 events, one
+                           probe set, and a payload that varied call to call.  In
+                           two of those the peer was still transmitting 11.4 s
+                           later, i.e. it had not gone quiet -- we had jumped
+                           ahead.
+                           Require real Tone A evidence.  The guard-tone ratio is
+                           the strongest such evidence available (V.34 10.1.2.1:
+                           about +1 dB under Tone A against about -6 dB under an
+                           INFO sequence) and does not depend on an event flag
+                           that v34tx.c clears in dozens of places. */
+                        bool tone_a_evidence;
+
+                        tone_a_evidence = (s->rx.received_event == V34_EVENT_TONE_SEEN
+                                        || s->rx.received_event == V34_EVENT_REVERSAL_1
+                                        || s->rx.received_event == V34_EVENT_REVERSAL_3);
+                        /* ...but not while the peer is still *holding* Tone A.
+                           Measured over 8 calls, the guard/carrier ratio at this
+                           decision separates the outcomes completely:
+
+                             INFO1a received   -5.9 -5.0 -4.2 -5.9 -4.6 -5.9
+                                               -6.0 -4.0 -5.1   (all negative)
+                             INFO1a never came +0.2 +7.0 +4.4   (all positive)
+
+                           Negative is the INFO configuration (10.1.2.3), i.e.
+                           the peer has finished with Tone A and is ready to
+                           exchange INFO; positive is Tone A itself (10.1.2.1),
+                           i.e. it is still mid-§9.2.1.1.6 and INFO1d sent now
+                           lands too early and is ignored.  Every reading here
+                           carried event=REVERSAL_3, so the event flags cannot
+                           tell these two apart -- only the ratio can. */
+                        if (tone_a_evidence
+                            &&  s->rx.guard_carrier_valid
+                            &&  s->rx.guard_carrier_db > -2.5f)
+                        {
+                            span_log(&s->logging, SPAN_LOG_FLOW,
+                                     "Tx - V.90: end of PCM L2 but peer still holds Tone A (guard %+.1f dB); waiting rather than sending INFO1d early\n",
+                                     s->rx.guard_carrier_db);
+                            tone_a_evidence = false;
+                        }
+                        /*endif*/
+                        if (tone_a_evidence)
                         {
                             /* The expected third Tone A reversal can complete
                                during our PCM L2 and switches the RX directly to
@@ -3827,7 +3873,10 @@ static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                                evidence, not a stale event; dropping it here
                                created a 650 ms silence before INFO1d on V.92. */
                             span_log(&s->logging, SPAN_LOG_FLOW,
-                                     "Tx - V.90: Tone A already present at end of PCM L2; sending INFO1d without a carrier gap\n");
+                                     "Tx - V.90: Tone A at end of PCM L2 (event=%d guard=%+.1f dB valid=%d); sending INFO1d without a carrier gap\n",
+                                     s->rx.received_event,
+                                     s->rx.guard_carrier_db,
+                                     s->rx.guard_carrier_valid);
                             info1_baud_init(s);
                         }
                         else
@@ -4171,6 +4220,26 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
     /*endif*/
 
     ++s->tx.tone_duration;
+    /* Same rule as the end-of-L2 gate above: while the peer is still holding
+       Tone A (guard/carrier positive) it is not ready for INFO1d, so keep
+       waiting.  The timeout below is the backstop, so a peer that never moves
+       to the INFO configuration behaves exactly as before this check. */
+    if (s->rx.guard_carrier_valid
+        &&  s->rx.guard_carrier_db > -2.5f
+        &&  s->tx.tone_duration < timeout_bauds)
+    {
+        if ((s->tx.tone_duration % 120) == 0)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: holding INFO1d, peer still in Tone A (guard %+.1f dB) at %d bauds\n",
+                     s->rx.guard_carrier_db,
+                     s->tx.tone_duration);
+        }
+        /*endif*/
+        s->rx.received_event = V34_EVENT_NONE;
+        return zero;
+    }
+    /*endif*/
     if (s->rx.received_event == V34_EVENT_TONE_SEEN
         || s->rx.received_event == V34_EVENT_REVERSAL_1
         || (s->rx.signal_present && s->tx.tone_duration >= 30)
