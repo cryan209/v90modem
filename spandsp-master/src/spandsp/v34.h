@@ -132,6 +132,16 @@ typedef struct
     v34_v90_info1d_baud_rate_parms_t rate_data[6];
 } v34_v90_info1d_t;
 
+/*! V.34 Table 20 directional rate offer.  Rates are N*2400 bit/s with
+    N in 1..14; mask bit N-1 enables that rate. */
+typedef struct
+{
+    int max_rate_a_to_c;
+    int max_rate_c_to_a;
+    uint16_t signalling_rate_mask;
+    bool asymmetric_rates_allowed;
+} v34_mp_rate_offer_t;
+
 #if defined(__cplusplus)
 extern "C"
 {
@@ -476,6 +486,14 @@ SPAN_DECLARE(void) v34_set_mp_rate_policy(v34_state_t *s, int bit_rate_a_to_c, i
     modem's locally-derived defaults.
     \param s The modem context. */
 SPAN_DECLARE(void) v34_clear_mp_rate_policy(v34_state_t *s);
+
+/*! Resolve two V.34 MP rate offers according to 11.4.1.1.4/.2.4 and
+    Table 20 bit 50.
+    \return 0 on success, or -1 when no mutually enabled rate exists. */
+SPAN_DECLARE(int) v34_negotiate_mp_rates(const v34_mp_rate_offer_t *local,
+                                         const v34_mp_rate_offer_t *remote,
+                                         int *rate_a_to_c,
+                                         int *rate_c_to_a);
 
 /*! Force the transmitter/receiver pair into Phase 4 startup. Intended for
     external V.90 downstream implementations which handle Phase 3 themselves

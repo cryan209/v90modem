@@ -433,6 +433,8 @@ static void equalizer_reset(v34_rx_state_t *s);
 static complexf_t equalizer_get(v34_rx_state_t *s);
 static void tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complexf_t *target);
 static void create_godard_coeffs(ted_t *coeffs, float carrier, float baud_rate, float alpha);
+static int set_tx_trellis_mode(v34_state_t *s, int trellis_size);
+static int set_rx_trellis_mode(v34_state_t *s, int trellis_size);
 SPAN_DECLARE(void) v34_put_mapping_frame(v34_rx_state_t *s, int16_t bits[16]);
 
 static int descramble(v34_rx_state_t *s, int in_bit)
@@ -1801,6 +1803,121 @@ static void log_mp_lock_seed(v34_rx_state_t *s,
 }
 /*- End of function --------------------------------------------------------*/
 
+static int mp_highest_enabled_rate(int maximum, int mask)
+{
+    int rate;
+
+    if (maximum > 14)
+        maximum = 14;
+    for (rate = maximum; rate >= 1; rate--)
+    {
+        if (mask & (1 << (rate - 1)))
+            return rate;
+    }
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_negotiate_mp_rates(const v34_mp_rate_offer_t *local,
+                                         const v34_mp_rate_offer_t *remote,
+                                         int *rate_a_to_c,
+                                         int *rate_c_to_a)
+{
+    int common_mask;
+    int a_to_c;
+    int c_to_a;
+
+    if (!local || !remote || !rate_a_to_c || !rate_c_to_a)
+        return -1;
+    /* V.34 11.4.1.1.4/.2.4: each direction is the highest rate enabled
+       in both masks and no greater than either MP maximum. */
+    common_mask = (local->signalling_rate_mask
+                 & remote->signalling_rate_mask) & 0x3FFF;
+    a_to_c = local->max_rate_a_to_c;
+    if (a_to_c > remote->max_rate_a_to_c)
+        a_to_c = remote->max_rate_a_to_c;
+    c_to_a = local->max_rate_c_to_a;
+    if (c_to_a > remote->max_rate_c_to_a)
+        c_to_a = remote->max_rate_c_to_a;
+    a_to_c = mp_highest_enabled_rate(a_to_c, common_mask);
+    c_to_a = mp_highest_enabled_rate(c_to_a, common_mask);
+    if (a_to_c <= 0 || c_to_a <= 0)
+        return -1;
+
+    /* Table 20 bit 50 permits asymmetric data rates only when both modems
+       set it.  Otherwise both channels use the lower selected rate. */
+    if (!(local->asymmetric_rates_allowed
+          && remote->asymmetric_rates_allowed))
+    {
+        int symmetric = (a_to_c < c_to_a) ? a_to_c : c_to_a;
+        a_to_c = symmetric;
+        c_to_a = symmetric;
+    }
+    *rate_a_to_c = a_to_c;
+    *rate_c_to_a = c_to_a;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static bool mp_negotiate_rates(v34_state_t *s, const mp_t *remote)
+{
+    v34_mp_rate_offer_t local_offer;
+    v34_mp_rate_offer_t remote_offer;
+
+    local_offer.max_rate_a_to_c = s->tx.mp.bit_rate_a_to_c;
+    local_offer.max_rate_c_to_a = s->tx.mp.bit_rate_c_to_a;
+    local_offer.signalling_rate_mask = s->tx.mp.signalling_rate_mask;
+    local_offer.asymmetric_rates_allowed = s->tx.mp.asymmetric_rates_allowed;
+    remote_offer.max_rate_a_to_c = remote->bit_rate_a_to_c;
+    remote_offer.max_rate_c_to_a = remote->bit_rate_c_to_a;
+    remote_offer.signalling_rate_mask = remote->signalling_rate_mask;
+    remote_offer.asymmetric_rates_allowed = remote->asymmetric_rates_allowed;
+    if (v34_negotiate_mp_rates(&local_offer, &remote_offer,
+                               &s->tx.negotiated_rate_a_to_c,
+                               &s->tx.negotiated_rate_c_to_a))
+        return false;
+    s->tx.negotiated_rates_valid = true;
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
+static bool mp_apply_parameters(v34_state_t *s, const mp_t *remote)
+{
+    int rx_rate_n;
+
+    /* V.34 10.1.3.9/Table 20: a modem's MP encoder fields select the
+       remote-end transmitter.  Keep TX and RX choices directional. */
+    if (remote->type == 1)
+        memcpy(s->tx.precoder_coeffs, remote->precoder_coeffs,
+               sizeof(s->tx.precoder_coeffs));
+    /* MP0 leaves existing coefficients unaffected. */
+    if (set_tx_trellis_mode(s, remote->trellis_size)
+        || set_rx_trellis_mode(s, s->tx.mp.trellis_size))
+        return false;
+    s->tx.use_non_linear_encoder = remote->use_non_linear_encoder;
+    s->rx.use_non_linear_encoder = s->tx.mp.use_non_linear_encoder;
+    if (!mp_negotiate_rates(s, remote))
+        return false;
+
+    rx_rate_n = s->rx.calling_party
+              ? s->tx.negotiated_rate_a_to_c
+              : s->tx.negotiated_rate_c_to_a;
+    s->rx.bit_rate = (rx_rate_n - 1)*2;
+    s->bit_rate = rx_rate_n*2400;
+    v34_set_working_parameters(&s->rx.parms, s->rx.baud_rate, s->rx.bit_rate,
+                               s->tx.mp.expanded_shaping);
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Rx - Phase 4 negotiated: a2c=%d bps c2a=%d bps; "
+             "RX rate=%d bps trellis=%d nonlinear=%d expanded=%d\n",
+             s->tx.negotiated_rate_a_to_c*2400,
+             s->tx.negotiated_rate_c_to_a*2400,
+             rx_rate_n*2400, s->tx.mp.trellis_size,
+             s->tx.mp.use_non_linear_encoder,
+             s->tx.mp.expanded_shaping);
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
 static bool mp_semantic_ok_phase4(v34_rx_state_t *s, const mp_t *mp, int type, const uint8_t bits[])
 {
     int bit_idx;
@@ -2593,31 +2710,62 @@ static int viterbi_set_trellis(viterbi_t *s,
 }
 /*- End of function --------------------------------------------------------*/
 
-static int set_trellis_mode(v34_state_t *s, int trellis_size)
+static int trellis_parameters(int trellis_size,
+                              const uint8_t (**table)[16],
+                              int *states)
 {
-    const uint8_t (*table)[16];
-    int states;
-
     switch (trellis_size)
     {
     case V34_TRELLIS_16:
-        table = v34_conv16_encode_table;
-        states = 16;
-        break;
+        *table = v34_conv16_encode_table;
+        *states = 16;
+        return 0;
     case V34_TRELLIS_32:
-        table = v34_conv32_encode_table;
-        states = 32;
-        break;
+        *table = v34_conv32_encode_table;
+        *states = 32;
+        return 0;
     case V34_TRELLIS_64:
-        table = v34_conv64_encode_table;
-        states = 64;
-        break;
+        *table = v34_conv64_encode_table;
+        *states = 64;
+        return 0;
     default:
         return -1;
     }
     /*endswitch*/
+}
+/*- End of function --------------------------------------------------------*/
+
+static int set_tx_trellis_mode(v34_state_t *s, int trellis_size)
+{
+    const uint8_t (*table)[16];
+    int states;
+
+    if (trellis_parameters(trellis_size, &table, &states))
+        return -1;
+    (void) states;
     s->tx.conv_encode_table = table;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int set_rx_trellis_mode(v34_state_t *s, int trellis_size)
+{
+    const uint8_t (*table)[16];
+    int states;
+
+    if (trellis_parameters(trellis_size, &table, &states))
+        return -1;
     return viterbi_set_trellis(&s->rx.viterbi, table, states);
+}
+/*- End of function --------------------------------------------------------*/
+
+static int set_trellis_mode(v34_state_t *s, int trellis_size)
+{
+    /* Offline seed/restart callers configure a matched local pair.  Live MP
+       processing uses the directional helpers: V.34 10.1.3.9 says the
+       trellis field selects the remote-end transmitter, not both channels. */
+    return set_tx_trellis_mode(s, trellis_size)
+        || set_rx_trellis_mode(s, trellis_size);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -5303,14 +5451,9 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
                                 s->mp_remote_ack_seen = 1;
                             /*endif*/
                             t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
-                            if (mp.type == 1)
-                            {
-                                /* Set the precoder coefficients we are to use */
-                                memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
-                            }
-                            /*endif*/
-                            if (set_trellis_mode(t, mp.trellis_size))
-                                span_log(&t->logging, SPAN_LOG_FLOW, "Rx - Unexpected trellis size code %d\n", mp.trellis_size);
+                            if (!mp_apply_parameters(t, &mp))
+                                span_log(&t->logging, SPAN_LOG_FLOW,
+                                         "Rx - CC MP directional encoder/rate negotiation failed\n");
                         }
                         else
                         {
@@ -8568,53 +8711,14 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                             s->mp_remote_ack_seen = 1;
                                         /*endif*/
                                         t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
-                                        if (mp.type == 1)
-                                            memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
-                                        /*endif*/
-                                        if (set_trellis_mode(t, mp.trellis_size))
+                                        if (!mp_apply_parameters(t, &mp))
                                         {
                                             span_log(&t->logging, SPAN_LOG_FLOW,
-                                                     "Rx - Unexpected trellis size code %d\n", mp.trellis_size);
+                                                     "Rx - MP directional encoder/rate negotiation failed "
+                                                     "(local mask=0x%04X remote=0x%04X)\n",
+                                                     t->tx.mp.signalling_rate_mask & 0x3FFF,
+                                                     mp.signalling_rate_mask & 0x3FFF);
                                             semantic_good = false;
-                                        }
-                                        /* Update RX data mode parameters from MP-negotiated bit rate.
-                                           We receive from the far end:
-                                           - If we are answerer: receive at bit_rate_c_to_a
-                                           - If we are caller: receive at bit_rate_a_to_c
-                                           MP bit_rate field N means N*2400 bps; convert to
-                                           internal bit_rate_code = (N-1)*2 */
-                                        {
-                                            int rx_rate_n;
-
-                                            rx_rate_n = s->calling_party
-                                                      ? mp.bit_rate_a_to_c
-                                                      : mp.bit_rate_c_to_a;
-                                            s->bit_rate = (rx_rate_n - 1) * 2;
-                                            v34_set_working_parameters(&s->parms, s->baud_rate, s->bit_rate,
-                                                                       mp.expanded_shaping);
-                                            span_log(s->logging, SPAN_LOG_FLOW,
-                                                     "Rx - Phase 4: updated parms from MP: rate=%d bps (N=%d code=%d) "
-                                                     "b=%d k=%d q=%d m=%d p=%d j=%d l=%d\n",
-                                                     rx_rate_n * 2400, rx_rate_n, s->bit_rate,
-                                                     s->parms.b, s->parms.k, s->parms.q, s->parms.m,
-                                                     s->parms.p, s->parms.j, s->parms.l);
-                                        }
-                                        /* Rate negotiation: adopt far-end's proposed rates
-                                           (take min of our rate and their rate for each direction) */
-                                        {
-                                            int neg_a2c;
-                                            int neg_c2a;
-
-                                            neg_a2c = mp.bit_rate_a_to_c;
-                                            neg_c2a = mp.bit_rate_c_to_a;
-                                            if (t->tx.mp.bit_rate_a_to_c > neg_a2c)
-                                                t->tx.mp.bit_rate_a_to_c = neg_a2c;
-                                            if (t->tx.mp.bit_rate_c_to_a > neg_c2a)
-                                                t->tx.mp.bit_rate_c_to_a = neg_c2a;
-                                            span_log(s->logging, SPAN_LOG_FLOW,
-                                                     "Rx - Phase 4: rate negotiation: a2c=%d bps c2a=%d bps\n",
-                                                     t->tx.mp.bit_rate_a_to_c * 2400,
-                                                     t->tx.mp.bit_rate_c_to_a * 2400);
                                         }
                                     }
                                     /*endif*/
@@ -8762,16 +8866,18 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                                 if (mp.mp_acknowledged)
                                                     s->mp_remote_ack_seen = 1;
                                                 t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
-                                                (void) set_trellis_mode(t, mp.trellis_size);
-                                                span_log(s->logging, SPAN_LOG_FLOW,
-                                                         "Rx - Phase 4: MP0 ACCEPTED via majority vote (%d frames)\n",
-                                                         accepted_vote_frames);
-                                                s->mp_seen = 1;
-                                                if (s->mp_accepted_baud == 0)
-                                                    s->mp_accepted_baud = s->duration;
-                                                s->mp_early_rejects = 0;
-                                                v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_INFO, "MP frame accepted via vote; awaiting E");
-                                                frame_accepted = true;
+                                                if (mp_apply_parameters(t, &mp))
+                                                {
+                                                    span_log(s->logging, SPAN_LOG_FLOW,
+                                                             "Rx - Phase 4: MP0 ACCEPTED via majority vote (%d frames)\n",
+                                                             accepted_vote_frames);
+                                                    s->mp_seen = 1;
+                                                    if (s->mp_accepted_baud == 0)
+                                                        s->mp_accepted_baud = s->duration;
+                                                    s->mp_early_rejects = 0;
+                                                    v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_INFO, "MP frame accepted via vote; awaiting E");
+                                                    frame_accepted = true;
+                                                }
                                             }
                                         }
                                     }
@@ -8847,16 +8953,17 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                                 if (mp.mp_acknowledged)
                                                     s->mp_remote_ack_seen = 1;
                                                 t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
-                                                memcpy(&t->tx.precoder_coeffs, mp.precoder_coeffs, sizeof(t->tx.precoder_coeffs));
-                                                (void) set_trellis_mode(t, mp.trellis_size);
-                                                span_log(s->logging, SPAN_LOG_FLOW,
-                                                         "Rx - Phase 4: MP1 ACCEPTED via majority vote\n");
-                                                s->mp_seen = 1;
-                                                if (s->mp_accepted_baud == 0)
-                                                    s->mp_accepted_baud = s->duration;
-                                                s->mp_early_rejects = 0;
-                                                v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_INFO, "MP1 accepted via vote; awaiting E");
-                                                frame_accepted = true;
+                                                if (mp_apply_parameters(t, &mp))
+                                                {
+                                                    span_log(s->logging, SPAN_LOG_FLOW,
+                                                             "Rx - Phase 4: MP1 ACCEPTED via majority vote\n");
+                                                    s->mp_seen = 1;
+                                                    if (s->mp_accepted_baud == 0)
+                                                        s->mp_accepted_baud = s->duration;
+                                                    s->mp_early_rejects = 0;
+                                                    v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_INFO, "MP1 accepted via vote; awaiting E");
+                                                    frame_accepted = true;
+                                                }
                                             }
                                         }
                                     }

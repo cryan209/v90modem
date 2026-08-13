@@ -657,7 +657,6 @@ static void trn_baud_init(v34_state_t *s);
 static void phase4_wait_init(v34_state_t *s);
 static void phase4_rx_conditioning_init(v34_state_t *s, int initial_stage, const char *reason);
 static int mp_rate_n_is_valid(int rate_n);
-static int v34_tx_current_trellis_code(const v34_tx_state_t *s);
 static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_rate_c_to_a);
 static void mp_or_mph_baud_init(v34_state_t *s);
 static void e_baud_init(v34_state_t *s);
@@ -6497,11 +6496,26 @@ static int mp_rate_n_is_valid(int rate_n)
 }
 /*- End of function --------------------------------------------------------*/
 
-static int v34_tx_current_trellis_code(const v34_tx_state_t *s)
+static int mp_highest_masked_rate(int maximum, int mask)
 {
-    if (s->conv_encode_table == v34_conv64_encode_table)
+    int rate;
+
+    if (maximum > 14)
+        maximum = 14;
+    for (rate = maximum; rate >= 1; rate--)
+    {
+        if (mask & (1 << (rate - 1)))
+            return rate;
+    }
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int v34_rx_current_trellis_code(const v34_rx_state_t *s)
+{
+    if (s->viterbi.encode_table == v34_conv64_encode_table)
         return V34_TRELLIS_64;
-    if (s->conv_encode_table == v34_conv32_encode_table)
+    if (s->viterbi.encode_table == v34_conv32_encode_table)
         return V34_TRELLIS_32;
     return V34_TRELLIS_16;
 }
@@ -6509,19 +6523,11 @@ static int v34_tx_current_trellis_code(const v34_tx_state_t *s)
 
 static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_rate_c_to_a)
 {
-    int local_max_n;
-    int remote_max_n;
+    int a_to_c;
+    int c_to_a;
 
-    local_max_n = (s->tx.parms.max_bit_rate_code >> 1) + 1;
-    if (bit_rate_a_to_c)
-        *bit_rate_a_to_c = local_max_n;
-    /*endif*/
-    if (bit_rate_c_to_a)
-        *bit_rate_c_to_a = local_max_n;
-    /*endif*/
     if (!bit_rate_a_to_c || !bit_rate_c_to_a)
         return;
-    /*endif*/
     if (s->tx.mp_rate_policy_valid
         && mp_rate_n_is_valid(s->tx.mp_rate_a_to_c)
         && mp_rate_n_is_valid(s->tx.mp_rate_c_to_a))
@@ -6530,35 +6536,41 @@ static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_r
         *bit_rate_c_to_a = s->tx.mp_rate_c_to_a;
         return;
     }
-    /*endif*/
 
-    /* When the peer's Phase 2 rate advertisement carries a real V.34 max-data
-       field, use it to advertise the opposite direction. In V.90 caller INFO1a,
-       that field is repurposed as U_INFO, so only use remote maxima when the
-       Phase 2 format makes them trustworthy. */
+    if (s->tx.v90_mode && !s->tx.v90_v34_fallback)
+    {
+        /* V.90 repurposes INFO1a's max-rate field as U_INFO and its PCM
+           direction is negotiated by CP, not Table 16/V.34.  Preserve the
+           existing V.90 ceiling until that path supplies an explicit policy. */
+        a_to_c = (s->tx.parms.max_bit_rate_code >> 1) + 1;
+        c_to_a = a_to_c;
+        if (s->calling_party
+            && mp_rate_n_is_valid(s->rx.info1c.rate_data[s->tx.baud_rate].max_bit_rate))
+            a_to_c = s->rx.info1c.rate_data[s->tx.baud_rate].max_bit_rate;
+        *bit_rate_a_to_c = a_to_c;
+        *bit_rate_c_to_a = c_to_a;
+        return;
+    }
+
+    /* V.34 10.1.2.3.4/.5 and 10.1.3.9: carry the directional Phase-2
+       projections into MP.  Do not recreate them from the selected baud's
+       theoretical maximum; the line probe may have selected a lower rate. */
     if (s->calling_party)
     {
-        remote_max_n = s->rx.info1c.rate_data[s->tx.baud_rate].max_bit_rate;
-        if (mp_rate_n_is_valid(remote_max_n))
-            *bit_rate_a_to_c = remote_max_n;
-        /*endif*/
-        *bit_rate_c_to_a = local_max_n;
+        a_to_c = s->tx.info1c.rate_data[s->rx.baud_rate].max_bit_rate;
+        c_to_a = s->rx.info1a.max_data_rate;
     }
     else
     {
-        /* In V.90 the caller INFO1a repurposes this field as U_INFO, but on
-           the Table 11 (V.34-selected) fallback it is a genuine projected
-           max data rate again. */
-        if (!s->tx.v90_mode  ||  s->tx.v90_v34_fallback)
-        {
-            remote_max_n = s->rx.info1a.max_data_rate;
-            if (mp_rate_n_is_valid(remote_max_n))
-                *bit_rate_c_to_a = remote_max_n;
-            /*endif*/
-        }
-        /*endif*/
-        *bit_rate_a_to_c = local_max_n;
+        a_to_c = s->rx.info1c.rate_data[s->tx.baud_rate].max_bit_rate;
+        c_to_a = s->tx.info1a.max_data_rate;
     }
+    if (!mp_rate_n_is_valid(a_to_c))
+        a_to_c = 1;
+    if (!mp_rate_n_is_valid(c_to_a))
+        c_to_a = 1;
+    *bit_rate_a_to_c = a_to_c;
+    *bit_rate_c_to_a = c_to_a;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -6696,23 +6708,45 @@ static void mp_or_mph_baud_init(v34_state_t *s)
         s->tx.mp.bit_rate_a_to_c = bit_rate_a_to_c;
         s->tx.mp.bit_rate_c_to_a = bit_rate_c_to_a;
 
-        /* Build signalling rate capability mask from valid mappings
-           at the selected baud rate.  Bit i = rate (i+1)*2400 bps. */
+        /* Table 20 bit 35:49 is capability in both the transmitter and
+           receiver of this modem.  With asymmetric INFO1 symbol rates it is
+           the intersection of both mapping tables, not the TX table alone. */
         mask = 0;
         for (i = 0;  i < 14;  i++)
         {
-            if (baud_rate_parameters[s->tx.baud_rate].mappings[i * 2].b > 0)
+            if (baud_rate_parameters[s->tx.baud_rate].mappings[i * 2].b > 0
+                && baud_rate_parameters[s->rx.baud_rate].mappings[i * 2].b > 0)
                 mask |= (1 << i);
         }
         /*endfor*/
         s->tx.mp.signalling_rate_mask = mask;
+        s->tx.mp.bit_rate_a_to_c =
+            mp_highest_masked_rate(s->tx.mp.bit_rate_a_to_c, mask);
+        s->tx.mp.bit_rate_c_to_a =
+            mp_highest_masked_rate(s->tx.mp.bit_rate_c_to_a, mask);
 
-        s->tx.mp.trellis_size = v34_tx_current_trellis_code(&s->tx);
-        s->tx.mp.use_non_linear_encoder = s->tx.use_non_linear_encoder;
-        s->tx.mp.expanded_shaping = s->tx.parms.expanded_shaping;
+        /* V.34 10.1.3.9/Table 20: these encoder fields select the
+           remote-end transmitter, so advertise this receiver's requested
+           modes.  The peer's MP configures our transmitter on receipt. */
+        s->tx.mp.trellis_size = v34_rx_current_trellis_code(&s->rx);
+        s->tx.mp.use_non_linear_encoder = s->rx.use_non_linear_encoder;
+        s->tx.mp.expanded_shaping = s->rx.parms.expanded_shaping;
         s->tx.mp.aux_channel_supported = false;
-        s->tx.mp.asymmetric_rates_allowed = (bit_rate_a_to_c != bit_rate_c_to_a);
+        s->tx.mp.asymmetric_rates_allowed = s->tx.v90_mode
+                                          ? (bit_rate_a_to_c != bit_rate_c_to_a)
+                                          : true;
         s->tx.mp.mp_acknowledged = false;
+        s->tx.negotiated_rates_valid = false;
+        s->tx.negotiated_rate_a_to_c = 0;
+        s->tx.negotiated_rate_c_to_a = 0;
+        /* Before the first MP, 10.1.3.9 initializes precoding coefficients
+           to zero.  A later MP0 leaves them unaffected; process_rx_mp only
+           replaces them when a valid MP1 arrives. */
+        if (!s->rx.last_rx_mp_valid)
+        {
+            memset(s->tx.precoder_coeffs, 0, sizeof(s->tx.precoder_coeffs));
+            memset(s->rx.h, 0, sizeof(s->rx.h));
+        }
 
         log_mp(s->tx.logging, true, &s->tx.mp);
         s->tx.txbits = mp_sequence_tx(&s->tx, &s->tx.mp);
@@ -6825,12 +6859,24 @@ static void data_baud_init(v34_state_t *s)
     /* Update TX parms from the MP-negotiated rate for our transmit direction */
     {
         int tx_rate_n;
+        const mp_t *remote_mp;
+
         tx_rate_n = s->calling_party
-                  ? s->tx.mp.bit_rate_c_to_a
-                  : s->tx.mp.bit_rate_a_to_c;
+                  ? s->tx.negotiated_rate_c_to_a
+                  : s->tx.negotiated_rate_a_to_c;
+        if (!s->tx.negotiated_rates_valid || !mp_rate_n_is_valid(tx_rate_n))
+        {
+            /* Defensive only: §11.4 does not permit E until a mutually valid
+               MP/MP-prime exchange has selected both rates. */
+            tx_rate_n = s->calling_party
+                      ? s->tx.mp.bit_rate_c_to_a
+                      : s->tx.mp.bit_rate_a_to_c;
+        }
+        remote_mp = s->rx.last_rx_mp_valid ? &s->rx.last_rx_mp : &s->tx.mp;
         s->tx.bit_rate = (tx_rate_n - 1) * 2;
         v34_set_working_parameters(&s->tx.parms, s->tx.baud_rate, s->tx.bit_rate,
-                                   s->tx.mp.expanded_shaping);
+                                   remote_mp->expanded_shaping);
+        s->tx.use_non_linear_encoder = remote_mp->use_non_linear_encoder;
         span_log(&s->logging, SPAN_LOG_FLOW,
                  "Tx - data_baud_init(): rate=%d bps (N=%d code=%d) "
                  "b=%d k=%d q=%d m=%d p=%d j=%d l=%d\n",

@@ -607,6 +607,13 @@ typedef struct
     int mp_rate_a_to_c;
     /*! \brief Explicit MP maximum caller-to-answerer signalling rate (N*2400). */
     int mp_rate_c_to_a;
+    /*! \brief Final rates after intersecting both MP rate fields and masks.
+        These are separate from mp: MP-prime differs from MP only in its
+        acknowledge bit (V.34 10.1.3.9), so negotiation must not rewrite the
+        locally transmitted MP body. */
+    bool negotiated_rates_valid;
+    int negotiated_rate_a_to_c;
+    int negotiated_rate_c_to_a;
 
     int persistence2;
 

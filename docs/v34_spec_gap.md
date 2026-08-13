@@ -36,14 +36,14 @@ encoding and precoder coefficients are session state.
 |---|---|---|---|
 | 5.1-5.4 | Six symbol rates, legal carriers and selected pre-emphasis | TX/RX tables exist for 2400, 2743, 2800, 3000, 3200 and 3429 | Exercise every rate and carrier selected through INFO1.  At 3429 both carriers are 1959 Hz; this requires echo cancellation and is not an unsupported rate. |
 | 6.1-6.2 | Synchronous datapump plus asynchronous V.14 adaptation | Common data stack is connected | Require byte-exact duplex V.14 at multiple line/DTE ratios. |
-| 7-9 | Directional scrambler, framing, shell mapping, differential/nonlinear/trellis encoding and precoding | Mapper/demapper and data mode exist; reset-state mapper/demapper tests are clean | Test every advertised trellis/shaping combination.  Resolve the RX quantizer TODO for 32/64-state trellis.  Verify Type-1 MP coefficients reach the precoder. |
+| 7-9 | Directional scrambler, framing, shell mapping, differential/nonlinear/trellis encoding and precoding | Mapper/demapper and data mode exist; reset-state mapper/demapper tests are clean. Received MP encoder fields now configure TX while the locally sent MP configures RX; MP1 coefficients reach the TX precoder and MP0 preserves them as required by 10.1.3.9. | Test every advertised trellis/shaping combination.  The live modem currently requests 16-state trellis; resolve and test the RX quantizer TODO before requesting 32/64-state trellis from a peer. |
 | 10.1.2.1-10.1.2.3 | Tone A/B and INFO0/INFO1 framing | Live V.90 work substantially hardened the shared Phase-2 state machine | Run plain-V.34 caller and answerer recovery cases, not only V.90 role inversions. |
 | 10.1.2.3.4 | INFO1c reports measured per-rate carrier, pre-emphasis and projected rate | L1/L2 measurements and a per-rate evaluator exist | Plain V.34 previously emitted configured rates with pre-emphasis 6.  INFO1c must be built from the measurement for every enabled row and report -512 when frequency offset is unavailable. |
 | 10.1.2.3.5 | INFO1a selects both directional rates and the call-to-answer carrier/pre-emphasis/rate | Parser and serializer exist | Selection must combine INFO1c, local L1/L2 results and both INFO0 asymmetry limits.  Configure TX and RX independently from the result. |
 | 10.1.3.1-10.1.3.9 | B1, E, J/J-prime, optional MD, PP, S, TRN and MP | Shared generators and receivers exist; B1 duration/alignment has been corrected during V.90 work | Add a plain-V.34 waveform test through MP/E/B1.  Keep TRN within the clause 11 bounds and make transition decisions event-driven. |
 | 11.2 | Probing/ranging and recovery | Main flow exists, with stage/event tracing | Test both roles, INFO retries, reversal deadlines and measured RTD. |
 | 11.3 | Equalizer and echo-canceller training | Phase-3 TX/RX exists | Replace the narrowband-notch policy with negotiated-carrier retuning and an echo-canceller path where carriers cannot be separated. |
-| 11.4 | Final training and mutually valid MP selection | MP/MP-prime handshake and heuristic receiver exist | Matrix-test 4/16-point TRN/MP, MP Type 0/1, legal rate masks, E and complete B1. |
+| 11.4 | Final training and mutually valid MP selection | MP/MP-prime handshake and heuristic receiver exist. Directional maxima now come from INFO1, the local mask intersects both selected baud mappings, final rates intersect both MP masks/maxima, and bit 50 forces the lower symmetric rate unless enabled bilaterally. MP-prime changes only the acknowledge bit rather than rewriting the offer. | `v34_mp_test` covers asymmetric/symmetric maxima, sparse/disjoint masks and all 1..14 maxima. Matrix-test waveform transport for 4/16-point TRN/MP, MP Type 0/1, E and complete B1. |
 | 11.5 | Local and peer-initiated retrain | V.90-specific retrain handling exists | Implement and test the plain-V.34 Tone A/B procedures in both roles. |
 | 11.6 | Rate renegotiation | V.90-specific external-symbol seam exists | Implement plain-V.34 S/S-bar/TRN/MP/E renegotiation while preserving carrier/timing state. |
 | 11.7 | Cleardown | No qualified duplex procedure | Implement zero-rate MP exchange and deterministic DTE carrier loss. |
@@ -54,7 +54,10 @@ encoding and precoder coefficients are session state.
    parameters independently for TX and RX.
 2. Make Phase 3/4 and the media echo-control policy consume that negotiated
    state rather than the startup profile.
-3. Audit MP through B1/data mode for every advertised encoder option.
+3. ~~Audit MP parameter authority and rate selection through B1/data mode.~~
+   Directional encoder settings and bilateral rate/mask negotiation are now
+   explicit and unit-tested.  Waveform qualification of the advertised
+   options remains part of the harness matrix below.
 4. Add an in-process two-instance V.34 harness over byte-exact PCMU and PCMA.
 5. Run `{2400,2743,2800,3000,3200,3429}` with legal carrier, rate and
    asymmetric-rate combinations; assert external sample accounting.
