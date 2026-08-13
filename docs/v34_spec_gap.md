@@ -40,7 +40,7 @@ encoding and precoder coefficients are session state.
 | 10.1.2.1-10.1.2.3 | Tone A/B and INFO0/INFO1 framing | Live V.90 work substantially hardened the shared Phase-2 state machine | Run plain-V.34 caller and answerer recovery cases, not only V.90 role inversions. |
 | 10.1.2.3.4 | INFO1c reports measured per-rate carrier, pre-emphasis and projected rate | L1/L2 measurements and a per-rate evaluator exist | Plain V.34 previously emitted configured rates with pre-emphasis 6.  INFO1c must be built from the measurement for every enabled row and report -512 when frequency offset is unavailable. |
 | 10.1.2.3.5 | INFO1a selects both directional rates and the call-to-answer carrier/pre-emphasis/rate | Parser and serializer exist | Selection must combine INFO1c, local L1/L2 results and both INFO0 asymmetry limits.  Configure TX and RX independently from the result. |
-| 10.1.3.1-10.1.3.9 | B1, E, J/J-prime, optional MD, PP, S, TRN and MP | Shared generators and receivers exist; B1 duration/alignment has been corrected during V.90 work. `v34_duplex_test` now provides a waveform-only two-instance bearer. The plain caller now receives INFO1a before changing demodulators, both Phase-3 directions complete PP/TRN/J, and the answerer waits silently for the caller's J before Phase 4. | The 2400/9600 PCMU baseline now reaches bilateral Phase-4 TRN and MP transmission. One receiver accepts MP while the opposite directional MP slicer exhausts its hypotheses/CRC retries; fix that waveform decode before promoting the harness into `make test`, then qualify E/B1. |
+| 10.1.3.1-10.1.3.9 | B1, E, J/J-prime, optional MD, PP, S, TRN and MP | Shared generators and receivers exist; B1 duration/alignment has been corrected during V.90 work. `v34_duplex_test` now provides a waveform-only two-instance bearer. The plain caller now receives INFO1a before changing demodulators, both Phase-3 directions complete PP/TRN/J, and the answerer waits silently for the caller's J before Phase 4. | At 2400/9600 PCMU both receivers now accept CRC-valid MP and MP-prime, both detect E, both transmit B1 and both enter DATA without an E-timeout fallback. The post-B1 demapper does not recover even a 32-bit payload sync word, so data-mode slicing/trellis decoding is the next blocker. PCMA still stalls in Phase 3 and follows after the PCMU baseline. |
 | 11.2 | Probing/ranging and recovery | Main flow exists, with stage/event tracing | Test both roles, INFO retries, reversal deadlines and measured RTD. |
 | 11.3 | Equalizer and echo-canceller training | Phase-3 TX/RX exists | Replace the narrowband-notch policy with negotiated-carrier retuning and an echo-canceller path where carriers cannot be separated. |
 | 11.4 | Final training and mutually valid MP selection | MP/MP-prime handshake and heuristic receiver exist. Directional maxima now come from INFO1, the local mask intersects both selected baud mappings, final rates intersect both MP masks/maxima, and bit 50 forces the lower symmetric rate unless enabled bilaterally. MP-prime changes only the acknowledge bit rather than rewriting the offer. | `v34_mp_test` covers asymmetric/symmetric maxima, sparse/disjoint masks and all 1..14 maxima. Matrix-test waveform transport for 4/16-point TRN/MP, MP Type 0/1, E and complete B1. |
@@ -64,9 +64,16 @@ encoding and precoder coefficients are session state.
    outside the green default suite while it encodes the current open defect:
    at 2400/9600 PCMU, both Phase-3 directions now complete INFO1, S/S-bar,
    PP, TRN and J from waveform evidence and both sides reach Phase-4 TRN/MP.
-   The remaining blocker is directional MP waveform recovery: one receiver
-   accepts MP and enters the MP-prime exchange while the other exhausts its
-   slicer hypotheses with CRC failures.  The harness exposed and fixed four
+   Phase 4 now completes bilaterally at 2400/9600 PCMU: both receivers accept
+   CRC-valid MP and MP-prime, both detect E, transmit B1 and enter DATA without
+   the former 500-baud forced transition.  The MP fix separates direct-mapped
+   TRN's absolute-phase lock from MP's differential domain, and a stable
+   three-frame CRC failure now rotates the slicer mode rather than pinning a
+   wrong hypothesis forever.  MP-prime is transmitted in full before E as
+   required by 11.4.1.1.3/11.4.1.2.4.  The remaining PCMU blocker is now the
+   post-B1 datapump: neither direction finds the first 32 payload bits in over
+   one million decoded bits.  PCMA still stalls in Phase 3.  The harness
+   previously exposed and fixed four
    sequencing defects: the caller no longer abandons the control channel
    before INFO1a; J detection is published to the caller transmitter; the
    answerer becomes silent and conditions on caller PP/TRN/J after S/S-bar;

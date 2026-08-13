@@ -7555,7 +7555,13 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             s->mp_early_rejects = 0;
             s->mp_phase4_default_scrambler_tap = s->scrambler_tap;
             s->mp_phase4_default_bit_order = s->mp_phase4_bit_order;
-            s->mp_phase4_default_domain = (s->phase4_trn_lock_domain == 1) ? 1 : 0;
+            /* V.34 10.1.3.8 maps TRN directly, so its winning slicer
+               domain is normally absolute phase.  MP is generated as in
+               10.1.3.3 and is differentially encoded; inheriting TRN's
+               absolute domain turns a perfect 100% TRN lock into random MP
+               bits.  Preserve the mapping/tap/order evidence, but always
+               enter MP in the differential domain. */
+            s->mp_phase4_default_domain = 0;
             s->mp_phase4_reject_streak = 0;
             s->mp_phase4_nolock_count = 0;
             s->mp_phase4_alt_tap_active = 0;
@@ -8389,41 +8395,6 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     break;  /* Exit the bit loop; next baud will enter DATA stage */
                 }
                 /*endif*/
-                if (s->mp_seen == 1  &&  s->mp_accepted_baud > 0
-                    &&  (s->duration - s->mp_accepted_baud) > 500)
-                {
-                    /* Timeout: E not detected within 500 bauds of MP acceptance.
-                       The far end likely already sent E and moved to data mode
-                       while we were still majority-voting MP frames.  Force
-                       transition to DATA mode. */
-                    v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_COMPLETE, "E timeout — forcing DATA transition");
-                    span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 4: E detection timeout (%d bauds since MP accept) — forcing DATA mode\n",
-                             s->duration - s->mp_accepted_baud);
-                    s->mp_seen = 2;
-                    s->step_2d = 0;
-                    s->data_frame = 0;
-                    s->super_frame = 0;
-                    s->v0_pattern = 0;
-                    s->mapping_frame_count = 0;
-                    s->s_bit_cnt = 0;
-                    s->aux_bit_cnt = 0;
-                    memset(s->xt, 0, sizeof(s->xt));
-                    memset(s->x, 0, sizeof(s->x));
-                    memset(s->ww, 0, sizeof(s->ww));
-                    s->viterbi.ptr = 0;
-                    s->viterbi.windup = 15;
-                    span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - DATA mode: parms b=%d k=%d q=%d m=%d p=%d j=%d l=%d r=%d w=%d\n",
-                             s->parms.b, s->parms.k, s->parms.q, s->parms.m,
-                             s->parms.p, s->parms.j, s->parms.l, s->parms.r, s->parms.w);
-                    s->stage = V34_RX_STAGE_DATA;
-                    if (s->duplex)
-                        report_status_change(s, SIG_STATUS_TRAINING_SUCCEEDED);
-                    /*endif*/
-                    break;
-                }
-                /*endif*/
                 if (s->mp_seen == 1  &&  s->mp_remote_ack_seen)
                 {
                     /* We've received MP' (with ack bit); now just wait for E.
@@ -8851,7 +8822,21 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                              "Rx - Phase 4: MP0 majority-vote result: crc_ok=%d fill_ok=%d crc=0x%04X res=0x%04X (%d frames)\n",
                                              vote_crc_ok, vote_fill_ok, vote_rx_crc, vote_res_crc, s->mp0_vote_frames);
 
-                                    if (vote_crc_ok  &&  vote_fill_ok)
+                                    if (!vote_crc_ok || !vote_fill_ok)
+                                    {
+                                        /* Three identical, perfectly framed
+                                           but CRC-invalid MP repetitions are
+                                           not timing wobble.  They identify a
+                                           stable wrong dibit order/domain.
+                                           Drop this lock and advance the retry
+                                           mode instead of re-locking it for
+                                           the rest of the Phase-4 deadline. */
+                                        keep_hypothesis = false;
+                                        s->mp_phase4_reject_streak = 2;
+                                        s->mp0_vote_frames = 0;
+                                        memset(s->mp0_vote_counts, 0, sizeof(s->mp0_vote_counts));
+                                    }
+                                    else
                                     {
                                         int accepted_vote_frames;
 
@@ -8943,7 +8928,14 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                              "Rx - Phase 4: MP1 majority-vote result: crc_ok=%d fill_ok=%d crc=0x%04X res=0x%04X (%d frames)\n",
                                              vote_crc_ok, vote_fill_ok, vote_rx_crc, vote_res_crc, s->mp1_vote_frames);
 
-                                    if (vote_crc_ok  &&  vote_fill_ok)
+                                    if (!vote_crc_ok || !vote_fill_ok)
+                                    {
+                                        keep_hypothesis = false;
+                                        s->mp_phase4_reject_streak = 2;
+                                        s->mp1_vote_frames = 0;
+                                        memset(s->mp1_vote_counts, 0, sizeof(s->mp1_vote_counts));
+                                    }
+                                    else
                                     {
                                         memcpy(s->mp_frame_bits, voted_bits, 188);
                                         crc_good = true;

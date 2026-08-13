@@ -25,6 +25,11 @@ typedef struct endpoint_s {
     int tx_bits;
     int rx_bits;
     int bit_errors;
+    uint32_t sync_window;
+    uint32_t sync_target;
+    int sync_bits;
+    int skipped_bits;
+    bool payload_synced;
     bool trained;
     bool failed;
 } endpoint_t;
@@ -57,6 +62,19 @@ static void put_bit(void *user_data, int bit)
             ep->failed = true;
         return;
     }
+    if (!ep->payload_synced) {
+        ep->sync_window = (ep->sync_window << 1) | (uint32_t)(bit & 1);
+        ep->sync_bits++;
+        if (ep->sync_bits >= 32 && ep->sync_window == ep->sync_target) {
+            for (int i = 0; i < 32; i++)
+                (void)pattern_bit(&ep->expected_lfsr);
+            ep->payload_synced = true;
+            ep->rx_bits = 32;
+        } else {
+            ep->skipped_bits++;
+        }
+        return;
+    }
     if (bit != pattern_bit(&ep->expected_lfsr))
         ep->bit_errors++;
     ep->rx_bits++;
@@ -70,8 +88,10 @@ static int16_t g711_roundtrip(int16_t sample, bool alaw)
 
 static int run_case(int baud, int bps, bool alaw)
 {
-    endpoint_t caller = {"caller", 0xACE1U, 0x1D0FU, 0, 0, 0, false, false};
-    endpoint_t answer = {"answer", 0x1D0FU, 0xACE1U, 0, 0, 0, false, false};
+    endpoint_t caller = {.name = "caller", .tx_lfsr = 0xACE1U,
+                         .expected_lfsr = 0x1D0FU};
+    endpoint_t answer = {.name = "answer", .tx_lfsr = 0x1D0FU,
+                         .expected_lfsr = 0xACE1U};
     v34_state_t *call_modem;
     v34_state_t *answer_modem;
     int16_t call_tx[BLOCK_SAMPLES];
@@ -79,6 +99,17 @@ static int run_case(int baud, int bps, bool alaw)
     int16_t call_rx[BLOCK_SAMPLES];
     int16_t answer_rx[BLOCK_SAMPLES];
     int completed_block = -1;
+
+    {
+        uint32_t caller_sync_state = caller.expected_lfsr;
+        uint32_t answer_sync_state = answer.expected_lfsr;
+        for (int i = 0; i < 32; i++) {
+            caller.sync_target = (caller.sync_target << 1)
+                               | (uint32_t)pattern_bit(&caller_sync_state);
+            answer.sync_target = (answer.sync_target << 1)
+                               | (uint32_t)pattern_bit(&answer_sync_state);
+        }
+    }
 
     call_modem = v34_init(NULL, baud, bps, true, true,
                           get_bit, &caller, put_bit, &caller);
@@ -139,6 +170,8 @@ static int run_case(int baud, int bps, bool alaw)
            caller.rx_bits, answer.rx_bits,
            caller.bit_errors, answer.bit_errors,
            completed_block >= 0 ? (completed_block + 1)*0.020 : MAX_BLOCKS*0.020);
+    printf("  source bits: caller=%d answer=%d; sync skipped=%d/%d\n",
+           caller.tx_bits, answer.tx_bits, caller.skipped_bits, answer.skipped_bits);
     printf("  stages: caller rx=%d tx=%d event=%d; answer rx=%d tx=%d event=%d\n",
            v34_get_rx_stage(call_modem), v34_get_tx_stage(call_modem),
            v34_get_rx_event(call_modem),

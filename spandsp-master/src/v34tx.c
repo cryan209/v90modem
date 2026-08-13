@@ -6753,21 +6753,22 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
             {
                 s->tx.mp.mp_acknowledged = 1;
                 s->tx.txbits = mp_sequence_tx(&s->tx, &s->tx.mp);
+                s->tx.txptr = 0;
                 span_log(&s->logging, SPAN_LOG_FLOW,
                          "Tx - far-end MP received, switching to MP'\n");
+                /* V.34 11.4.1.1.3/11.4.1.2.4 requires a complete MP'
+                   sequence before E.  Do not observe the already-received
+                   remote acknowledgement in this same end-of-MP iteration
+                   and skip transmission of our newly built MP' entirely. */
             }
-            /*endif*/
-            /* Transition to E only after:
-               - we've switched to MP' locally, and
-               - we've received a valid far-end MP' (ack bit seen in a valid MP frame). */
-            if (s->tx.mp.mp_acknowledged  &&  s->rx.mp_remote_ack_seen)
+            else if (s->tx.mp.mp_acknowledged  &&  s->rx.mp_remote_ack_seen)
             {
-                /* We've exchanged acknowledged MP. After completing this MP' frame, send E. */
+                /* A complete local MP' has now been sent and remote MP' was
+                   received, so the next sequence is E. */
                 e_baud_init(s);
             }
             else
             {
-                /* Restart the MP/MP' message */
                 s->tx.txptr = 0;
             }
             /*endif*/
