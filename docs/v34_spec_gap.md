@@ -40,7 +40,7 @@ encoding and precoder coefficients are session state.
 | 10.1.2.1-10.1.2.3 | Tone A/B and INFO0/INFO1 framing | Live V.90 work substantially hardened the shared Phase-2 state machine | Run plain-V.34 caller and answerer recovery cases, not only V.90 role inversions. |
 | 10.1.2.3.4 | INFO1c reports measured per-rate carrier, pre-emphasis and projected rate | L1/L2 measurements and a per-rate evaluator exist | Plain V.34 previously emitted configured rates with pre-emphasis 6.  INFO1c must be built from the measurement for every enabled row and report -512 when frequency offset is unavailable. |
 | 10.1.2.3.5 | INFO1a selects both directional rates and the call-to-answer carrier/pre-emphasis/rate | Parser and serializer exist | Selection must combine INFO1c, local L1/L2 results and both INFO0 asymmetry limits.  Configure TX and RX independently from the result. |
-| 10.1.3.1-10.1.3.9 | B1, E, J/J-prime, optional MD, PP, S, TRN and MP | Shared generators and receivers exist; B1 duration/alignment has been corrected during V.90 work | Add a plain-V.34 waveform test through MP/E/B1.  Keep TRN within the clause 11 bounds and make transition decisions event-driven. |
+| 10.1.3.1-10.1.3.9 | B1, E, J/J-prime, optional MD, PP, S, TRN and MP | Shared generators and receivers exist; B1 duration/alignment has been corrected during V.90 work. `v34_duplex_test` now provides a waveform-only two-instance bearer. | The 2400/9600 PCMU baseline completes INFO1 and the caller acquires PP, then reaches the J scanner, but J does not become authoritative; the answerer consequently waits in Phase-4 TRN. Fix that seam before promoting the harness into `make test`, then extend it through MP/E/B1. |
 | 11.2 | Probing/ranging and recovery | Main flow exists, with stage/event tracing | Test both roles, INFO retries, reversal deadlines and measured RTD. |
 | 11.3 | Equalizer and echo-canceller training | Phase-3 TX/RX exists | Replace the narrowband-notch policy with negotiated-carrier retuning and an echo-canceller path where carriers cannot be separated. |
 | 11.4 | Final training and mutually valid MP selection | MP/MP-prime handshake and heuristic receiver exist. Directional maxima now come from INFO1, the local mask intersects both selected baud mappings, final rates intersect both MP masks/maxima, and bit 50 forces the lower symmetric rate unless enabled bilaterally. MP-prime changes only the acknowledge bit rather than rewriting the offer. | `v34_mp_test` covers asymmetric/symmetric maxima, sparse/disjoint masks and all 1..14 maxima. Matrix-test waveform transport for 4/16-point TRN/MP, MP Type 0/1, E and complete B1. |
@@ -58,7 +58,15 @@ encoding and precoder coefficients are session state.
    Directional encoder settings and bilateral rate/mask negotiation are now
    explicit and unit-tested.  Waveform qualification of the advertised
    options remains part of the harness matrix below.
-4. Add an in-process two-instance V.34 harness over byte-exact PCMU and PCMA.
+4. **In progress:** `v34_duplex_test` connects independent caller/answerer
+   instances through only a selectable PCMU/PCMA round trip and verifies PRBS
+   payload in both directions after training.  `make v34-duplex-test` is kept
+   outside the green default suite while it encodes the current open defect:
+   at 2400/9600 PCMU, INFO1 and PP complete but the call modem's Phase-3 J
+   scanner never promotes J, leaving the answer modem in Phase-4 TRN.  The
+   harness also exposed and fixed the old 30-second static caller silence:
+   11.3.1.1 now keeps the caller silent while its primary receiver acquires
+   PP/TRN/J, then starts local S only from the J event.
 5. Run `{2400,2743,2800,3000,3200,3429}` with legal carrier, rate and
    asymmetric-rate combinations; assert external sample accounting.
 6. Add retrain, rate renegotiation and cleardown tests.

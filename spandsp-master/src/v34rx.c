@@ -6477,7 +6477,9 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    so this internal TX-stage guard can deadlock RX in
                    PHASE3_TRAINING forever. In V.90 mode, trust the Phase 3 RX
                    evidence and allow PP acquisition to proceed. */
-                if (!s->v90_mode && t->tx.stage < V34_TX_STAGE_FIRST_NOT_S)
+                if (!s->v90_mode
+                    && !t->tx.phase3_call_wait_j
+                    && t->tx.stage < V34_TX_STAGE_FIRST_NOT_S)
                 {
                     goto phase3_training_done;
                 }

@@ -631,6 +631,10 @@ typedef struct
     /*! \brief The selected pre-emphasis set, scaled to unity band power gain. */
     float pre_emphasis_norm_coeffs[16];
 
+    /*! \brief Plain V.34 call modem is silent per 11.3.1.1.1-.3 while its
+        primary receiver acquires the answerer's PP/TRN/J. */
+    bool phase3_call_wait_j;
+
     /*! \brief Last values emitted by debug stage-change logging. */
     int last_logged_stage;
     int last_logged_modulator;

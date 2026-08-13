@@ -651,6 +651,7 @@ static int info1a_repeats(v34_state_t *s);
 static void infomarksa_baud_init(v34_state_t *s);
 static int info1c_wait_bauds(v34_state_t *s);
 static void infoh_baud_init(v34_state_t *s);
+static complex_sig_t get_s_not_s_baud(v34_state_t *s);
 static void s_not_s_baud_init(v34_state_t *s);
 static void pp_baud_init(v34_state_t *s);
 static void trn_baud_init(v34_state_t *s);
@@ -5038,6 +5039,34 @@ static void infoh_baud_init(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static complex_sig_t get_v34_call_phase3_wait_baud(v34_state_t *s)
+{
+    /* V.34 11.3.1.1.1-.3: after INFO1c the call modem is silent while
+       receiving the answerer's S/S-bar, PP, first 512T of TRN and J. */
+    if (s->rx.received_event == V34_EVENT_J)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.34 caller: far-end J received, starting local Phase 3 S/S-bar\n");
+        s->rx.received_event = V34_EVENT_NONE;
+        s->tx.phase3_call_wait_j = false;
+        s->tx.current_getbaud = get_s_not_s_baud;
+    }
+    return zero;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v34_call_phase3_wait_init(v34_state_t *s)
+{
+    /* Reuse the negotiated carrier/pre-emphasis setup and primary-channel
+       RX reset, but suppress the S source until 11.3.1.1.3's J event. */
+    s_not_s_baud_init(s);
+    s->tx.phase3_call_wait_j = true;
+    s->tx.current_getbaud = get_v34_call_phase3_wait_baud;
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - V.34 caller: INFO1c complete; silent while receiving answerer Phase 3\n");
+}
+/*- End of function --------------------------------------------------------*/
+
 static complex_sig_t get_info1_baud(v34_state_t *s)
 {
     int bit;
@@ -5083,7 +5112,7 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
         }
         else if (s->tx.calling_party)
         {
-            tx_silence_init(s, 30000);
+            v34_call_phase3_wait_init(s);
         }
         else if (s->tx.v90_mode)
         {
@@ -8130,6 +8159,7 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     s->tx.v90_info1a_fast_retries = 0;
     s->tx.v90_info1a_total_retries = 0;
     s->tx.v90_phase2_info0_recovery_loops = 0;
+    s->tx.phase3_call_wait_j = false;
     /* -1, not 0, so stage-change logging can tell "not started yet" from
        "started at sample 0" and does not report a Phase 2 elapsed time before
        Phase 2 has actually begun. */

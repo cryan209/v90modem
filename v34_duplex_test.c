@@ -1,0 +1,165 @@
+/*
+ * In-process full-duplex V.34 waveform harness over a G.711 round trip.
+ *
+ * This deliberately connects two independent modem instances through only
+ * the bearer transformation.  No internal symbols or INFO/MP state cross the
+ * seam.  ITU-T V.34 (10/96) clauses 10.1 and 11 must therefore complete from
+ * the waveform in both directions before payload bits can pass.
+ */
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <spandsp.h>
+
+#define BLOCK_SAMPLES 160
+#define MAX_BLOCKS 3000       /* 60 seconds at 8 kHz */
+#define PAYLOAD_BITS 16000
+
+typedef struct endpoint_s {
+    const char *name;
+    uint32_t tx_lfsr;
+    uint32_t expected_lfsr;
+    int tx_bits;
+    int rx_bits;
+    int bit_errors;
+    bool trained;
+    bool failed;
+} endpoint_t;
+
+static int pattern_bit(uint32_t *state)
+{
+    int bit = (int)(*state & 1U);
+    uint32_t feedback = ((*state >> 0) ^ (*state >> 2)
+                       ^ (*state >> 3) ^ (*state >> 5)) & 1U;
+    *state = (*state >> 1) | (feedback << 15);
+    return bit;
+}
+
+static int get_bit(void *user_data)
+{
+    endpoint_t *ep = (endpoint_t *)user_data;
+    ep->tx_bits++;
+    return pattern_bit(&ep->tx_lfsr);
+}
+
+static void put_bit(void *user_data, int bit)
+{
+    endpoint_t *ep = (endpoint_t *)user_data;
+
+    if (bit < 0) {
+        if (bit == SIG_STATUS_TRAINING_SUCCEEDED)
+            ep->trained = true;
+        else if (bit == SIG_STATUS_TRAINING_FAILED
+                 || bit == SIG_STATUS_CARRIER_DOWN)
+            ep->failed = true;
+        return;
+    }
+    if (bit != pattern_bit(&ep->expected_lfsr))
+        ep->bit_errors++;
+    ep->rx_bits++;
+}
+
+static int16_t g711_roundtrip(int16_t sample, bool alaw)
+{
+    return alaw ? alaw_to_linear(linear_to_alaw(sample))
+                : ulaw_to_linear(linear_to_ulaw(sample));
+}
+
+static int run_case(int baud, int bps, bool alaw)
+{
+    endpoint_t caller = {"caller", 0xACE1U, 0x1D0FU, 0, 0, 0, false, false};
+    endpoint_t answer = {"answer", 0x1D0FU, 0xACE1U, 0, 0, 0, false, false};
+    v34_state_t *call_modem;
+    v34_state_t *answer_modem;
+    int16_t call_tx[BLOCK_SAMPLES];
+    int16_t answer_tx[BLOCK_SAMPLES];
+    int16_t call_rx[BLOCK_SAMPLES];
+    int16_t answer_rx[BLOCK_SAMPLES];
+    int completed_block = -1;
+
+    call_modem = v34_init(NULL, baud, bps, true, true,
+                          get_bit, &caller, put_bit, &caller);
+    answer_modem = v34_init(NULL, baud, bps, false, true,
+                            get_bit, &answer, put_bit, &answer);
+    if (!call_modem || !answer_modem) {
+        fprintf(stderr, "v34_duplex_test: v34_init failed\n");
+        if (call_modem) v34_free(call_modem);
+        if (answer_modem) v34_free(answer_modem);
+        return 1;
+    }
+    v34_tx_power(call_modem, -12.0f);
+    v34_tx_power(answer_modem, -12.0f);
+    if (getenv("V34_DUPLEX_LOG")) {
+        span_log_set_level(v34_get_logging_state(call_modem),
+                           SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL
+                         | SPAN_LOG_SHOW_TAG | SPAN_LOG_FLOW);
+        span_log_set_tag(v34_get_logging_state(call_modem), "caller");
+        span_log_set_level(v34_get_logging_state(answer_modem),
+                           SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL
+                         | SPAN_LOG_SHOW_TAG | SPAN_LOG_FLOW);
+        span_log_set_tag(v34_get_logging_state(answer_modem), "answer");
+    }
+
+    for (int block = 0; block < MAX_BLOCKS; block++) {
+        int call_n = v34_tx(call_modem, call_tx, BLOCK_SAMPLES);
+        int answer_n = v34_tx(answer_modem, answer_tx, BLOCK_SAMPLES);
+
+        if (call_n < BLOCK_SAMPLES)
+            memset(call_tx + call_n, 0,
+                   (size_t)(BLOCK_SAMPLES - call_n)*sizeof(call_tx[0]));
+        if (answer_n < BLOCK_SAMPLES)
+            memset(answer_tx + answer_n, 0,
+                   (size_t)(BLOCK_SAMPLES - answer_n)*sizeof(answer_tx[0]));
+        for (int i = 0; i < BLOCK_SAMPLES; i++) {
+            answer_rx[i] = g711_roundtrip(call_tx[i], alaw);
+            call_rx[i] = g711_roundtrip(answer_tx[i], alaw);
+        }
+        (void)v34_rx(answer_modem, answer_rx, BLOCK_SAMPLES);
+        (void)v34_rx(call_modem, call_rx, BLOCK_SAMPLES);
+        span_log_bump_samples(v34_get_logging_state(call_modem), BLOCK_SAMPLES);
+        span_log_bump_samples(v34_get_logging_state(answer_modem), BLOCK_SAMPLES);
+
+        if (caller.failed || answer.failed)
+            break;
+        if (caller.trained && answer.trained
+            && caller.rx_bits >= PAYLOAD_BITS
+            && answer.rx_bits >= PAYLOAD_BITS) {
+            completed_block = block;
+            break;
+        }
+    }
+
+    printf("V.34 duplex %d baud/%d bps/%s: trained=%d/%d "
+           "rx_bits=%d/%d errors=%d/%d time=%.2fs\n",
+           baud, bps, alaw ? "alaw" : "ulaw",
+           caller.trained, answer.trained,
+           caller.rx_bits, answer.rx_bits,
+           caller.bit_errors, answer.bit_errors,
+           completed_block >= 0 ? (completed_block + 1)*0.020 : MAX_BLOCKS*0.020);
+    printf("  stages: caller rx=%d tx=%d event=%d; answer rx=%d tx=%d event=%d\n",
+           v34_get_rx_stage(call_modem), v34_get_tx_stage(call_modem),
+           v34_get_rx_event(call_modem),
+           v34_get_rx_stage(answer_modem), v34_get_tx_stage(answer_modem),
+           v34_get_rx_event(answer_modem));
+
+    v34_free(call_modem);
+    v34_free(answer_modem);
+    return (completed_block >= 0
+            && caller.bit_errors == 0
+            && answer.bit_errors == 0) ? 0 : 1;
+}
+
+int main(int argc, char *argv[])
+{
+    int baud = 2400;
+    int bps = 9600;
+    bool alaw = false;
+
+    if (argc > 1) baud = atoi(argv[1]);
+    if (argc > 2) bps = atoi(argv[2]);
+    if (argc > 3) alaw = strcmp(argv[3], "alaw") == 0;
+    return run_case(baud, bps, alaw);
+}

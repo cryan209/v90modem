@@ -149,6 +149,7 @@ DATA_STACK_TEST_OBJS = data_stack_test.o data_stack.o
 V42_LINK_TEST_OBJS = v42_link_test.o
 V34_PHASE2_DECODE_TEST_OBJS = v34_phase2_decode_test.o v34_phase2_decode.o
 V34_MP_TEST_OBJS = v34_mp_test.o
+V34_DUPLEX_TEST_OBJS = v34_duplex_test.o
 V90_ANALOGUE_TX_TEST_OBJS = v90_analogue_tx_test.o v90_analogue_tx.o v90_analogue_phase4.o v90_dil_measure.o v90.o v90_cp_rx.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o
 V90_ANALOGUE_RX_TEST_OBJS = v90_analogue_rx_test.o v90_analogue_rx.o v90_analogue_phase3.o v90_analogue_phase4.o v90_analogue_tx.o v90_dil_measure.o v90.o v90_cp_rx.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o
 # v92_proc_eval_test.c includes phase12_decode.c directly (its evaluator is
@@ -161,7 +162,7 @@ SRCS += v34_stubs.c
 TEST_OBJS += v34_stubs.o
 endif
 
-.PHONY: all test clean distclean spandsp pjproject v34-tone-matrix v32bis-ref-test v32bis-datapump-test v91-serial-pair-test eicon-rx-test g711-path-test FORCE
+.PHONY: all test clean distclean spandsp pjproject v34-tone-matrix v34-duplex-test v32bis-ref-test v32bis-datapump-test v91-serial-pair-test eicon-rx-test g711-path-test FORCE
 
 all: $(TARGET) $(TEST_TARGETS)
 
@@ -235,6 +236,13 @@ v42_link_test: $(V42_LINK_TEST_OBJS) spandsp
 
 v34_phase2_decode_test: $(V34_PHASE2_DECODE_TEST_OBJS)
 	$(CC) $(V34_PHASE2_DECODE_TEST_OBJS) -o $@ -lm
+
+v34-duplex-test: v34_duplex_test
+	./v34_duplex_test 2400 9600 ulaw
+	./v34_duplex_test 2400 9600 alaw
+
+v34_duplex_test: $(V34_DUPLEX_TEST_OBJS) spandsp
+	$(CC) $(V34_DUPLEX_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
 v34_mp_test: $(V34_MP_TEST_OBJS) spandsp
 	$(CC) $(V34_MP_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
@@ -314,6 +322,7 @@ p3_demod.o:       p3_demod.c       p3_demod.h
 v34_phase2_decode.o: v34_phase2_decode.c v34_phase2_decode.h v90.h v91.h
 v34_phase2_decode_test.o: v34_phase2_decode_test.c v34_phase2_decode.h
 v34_mp_test.o: v34_mp_test.c $(SPANDSP_DIR)/spandsp/v34.h
+v34_duplex_test.o: v34_duplex_test.c $(SPANDSP_DIR)/spandsp/v34.h
 v34_info_decode.o: v34_info_decode.c v34_info_decode.h v90.h
 v21_fsk_demod.o:  v21_fsk_demod.c  v21_fsk_demod.h
 phase12_decode.o: phase12_decode.c phase12_decode.h v21_fsk_demod.h v34_info_decode.h v90.h v8bis_decode.h
@@ -351,7 +360,7 @@ pjproject:
 	printf '%s\n' "$$current_host" > "$(PJ_HOST_STAMP)"
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(V92_REPLAY_OBJS) $(DATA_STACK_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(TEST_TARGETS)
+	rm -f $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(V92_REPLAY_OBJS) $(DATA_STACK_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test
 
 distclean: clean
 	rm -f "$(SPANDSP_HOST_STAMP)" "$(PJ_HOST_STAMP)"
