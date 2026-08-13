@@ -6899,9 +6899,11 @@ static complex_sig_t get_e_baud(v34_state_t *s)
                  "Tx - E minimum reached (>=20 bits)\n");
     }
     /*endif*/
-    /* After minimum E duration (10 bauds = 20 bits), transition to B1+data.
-       Use 20 bauds (40 bits) to give the far end time to detect E. */
-    if (s->tx.tone_duration >= 20)
+    /* V.34 10.1.3.2 and 11.4.1 require a single 20-bit E sequence.
+       Extending it to 40 bits leaves ten QPSK symbols after a conforming
+       receiver has entered B1 and destroys the eight-symbol mapping-frame
+       boundary. */
+    if (s->tx.tone_duration >= 10)
     {
         data_baud_init(s);
     }
@@ -6956,8 +6958,10 @@ static complex_sig_t get_data_baud(v34_state_t *s)
        handed the modulator symbols 128x too large. v34_get_mapping_frame() keeps
        its Q9.7 output contract, since v34_get_mapping_frame_state() callers and
        the spandsp v34 tests read those raw values. */
-    v.re = FP_Q9_7_TO_F(s->tx.tx_mapping_frame_buf[2*s->tx.tx_mapping_frame_step]);
-    v.im = FP_Q9_7_TO_F(s->tx.tx_mapping_frame_buf[2*s->tx.tx_mapping_frame_step + 1]);
+    v.re = FP_Q9_7_TO_F(s->tx.tx_mapping_frame_buf[2*s->tx.tx_mapping_frame_step])
+         * s->tx.data_symbol_scale;
+    v.im = FP_Q9_7_TO_F(s->tx.tx_mapping_frame_buf[2*s->tx.tx_mapping_frame_step + 1])
+         * s->tx.data_symbol_scale;
     if (++s->tx.tx_mapping_frame_step >= 8)
         s->tx.tx_mapping_frame_step = 0;
     /*endif*/
@@ -7028,6 +7032,66 @@ static void data_baud_init(v34_state_t *s)
              s->tx.state, s->tx.y0);
     s->tx.y0 = 0;
     s->tx.state = 0;
+    s->tx.data_symbol_scale = 1.0f;
+    {
+        int trellis = (s->tx.conv_encode_table == v34_conv64_encode_table)
+                    ? V34_TRELLIS_64
+                    : ((s->tx.conv_encode_table == v34_conv32_encode_table)
+                       ? V34_TRELLIS_32 : V34_TRELLIS_16);
+        int16_t precoder[6];
+        v34_state_t *probe;
+
+        for (int i = 0; i < 3; i++)
+        {
+            precoder[2*i] = s->tx.precoder_coeffs[i].re;
+            precoder[2*i + 1] = s->tx.precoder_coeffs[i].im;
+        }
+        probe = v34_init(NULL,
+                         baud_rate_parameters[s->tx.baud_rate].baud_rate,
+                         (s->tx.bit_rate/2 + 1)*2400,
+                         s->tx.calling_party, true,
+                         fake_get_bit, NULL, NULL, NULL);
+        if (probe
+            && v34_seed_tx_data(probe, s->tx.bit_rate/2 + 1, trellis,
+                                s->tx.use_non_linear_encoder,
+                                s->tx.parms.expanded_shaping, precoder) == 0)
+        {
+            double energy = 0.0;
+            int symbols = 0;
+            int16_t frame[16];
+            int frames = probe->tx.parms.p*probe->tx.parms.j;
+
+            probe->tx.scrambler_tap = s->tx.scrambler_tap;
+            probe->tx.super_frame = probe->tx.parms.j - 1;
+            probe->tx.v0_pattern = (uint16_t)(2*(probe->tx.parms.j - 1));
+            /* The note in 10.1.3 requires compensation for modulation
+               factors so PP/TRN power is maintained in B1 and DATA.  Measure
+               a reset-state superframe through the negotiated mapper. */
+            for (int m = 0; m < frames; m++)
+            {
+                if (v34_get_mapping_frame(&probe->tx, frame) != 16)
+                    break;
+                for (int i = 0; i < 16; i++)
+                {
+                    double x = frame[i]/128.0;
+                    energy += x*x;
+                }
+                symbols += 8;
+            }
+            if (symbols > 0 && energy > 0.0)
+            {
+                float rms = (float) sqrt(energy/symbols);
+                s->tx.data_symbol_scale = V34_NOMINAL_SYMBOL_RMS/rms;
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - data modulation normalization: mapper_rms=%.4f "
+                         "target=%.4f scale=%.5f (V.34 10.1.3)\n",
+                         rms, V34_NOMINAL_SYMBOL_RMS,
+                         s->tx.data_symbol_scale);
+            }
+        }
+        if (probe)
+            v34_free(probe);
+    }
     s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.tx_data_mode = true;
     s->tx.current_getbaud = get_data_baud;
@@ -7736,6 +7800,7 @@ SPAN_DECLARE(int) v34_seed_tx_data(v34_state_t *s,
     s->tx.s_bit_cnt = 0;
     s->tx.aux_bit_cnt = 0;
     s->tx.v0_pattern = 0;
+    s->tx.data_symbol_scale = 1.0f;
     s->tx.current_get_bit = s->tx.get_bit;
     return 0;
 }
@@ -8287,6 +8352,10 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
     }
     /*endif*/
     v34_set_working_parameters(&s->tx.parms, s->tx.baud_rate, s->tx.bit_rate, true);
+    /* The constructor/restart rate is the local capability ceiling, not just
+       an initial mapper choice.  10.1.2.3.4 may project lower rates from L2,
+       but must not advertise above the configured ceiling. */
+    s->tx.parms.max_bit_rate_code = bit_rate;
 
 #if defined(SPANDSP_USE_FIXED_POINT)
     vec_zeroi16(s->tx.rrc_filter_re, sizeof(s->tx.rrc_filter_re)/sizeof(s->tx.rrc_filter_re[0]));

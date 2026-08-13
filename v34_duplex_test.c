@@ -138,11 +138,13 @@ static int run_case(int baud, int bps, bool alaw)
     if (getenv("V34_DUPLEX_LOG")) {
         span_log_set_level(v34_get_logging_state(call_modem),
                            SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL
-                         | SPAN_LOG_SHOW_TAG | SPAN_LOG_FLOW);
+                         | SPAN_LOG_SHOW_TAG | SPAN_LOG_SHOW_SAMPLE_TIME
+                         | SPAN_LOG_FLOW);
         span_log_set_tag(v34_get_logging_state(call_modem), "caller");
         span_log_set_level(v34_get_logging_state(answer_modem),
                            SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL
-                         | SPAN_LOG_SHOW_TAG | SPAN_LOG_FLOW);
+                         | SPAN_LOG_SHOW_TAG | SPAN_LOG_SHOW_SAMPLE_TIME
+                         | SPAN_LOG_FLOW);
         span_log_set_tag(v34_get_logging_state(answer_modem), "answer");
     }
 

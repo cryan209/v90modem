@@ -526,6 +526,8 @@ typedef struct
     /*! \brief Number of all-ones B1 mapping frames emitted.  Per
         §10.1.3.1/V.34, B1 is one complete data frame (P mapping frames). */
     int b1_frames_sent;
+    /*! \brief Clause 10.1.3 modulation-factor power normalization. */
+    float data_symbol_scale;
     /*! \brief True once TX has entered data mode (used by RX to freeze equalizer) */
     bool tx_data_mode;
 
@@ -845,6 +847,11 @@ typedef struct
     int v90_t3_b1_symbols;
     complexf_t v90_t3_b1[V34_V90_T3_B1_MAX_SYMBOLS];
     float v90_t3_training_match;
+
+    /*! Known-sequence B1 acquisition for ordinary V.34 (10.1.3.1). */
+    bool b1_acquisition_active;
+    int b1_observed_symbols;
+    complexf_t b1_observed[V34_V90_T3_B1_MAX_SYMBOLS];
 
     /*! \brief Parameters for the current bit rate and baud rate */
     v34_parameters_t parms;

@@ -8353,11 +8353,15 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     continue;
                 }
                 /*endif*/
-                if (s->mp_seen == 1  &&  (s->bitstream & 0xFFFFF) == 0xFFFFF)
+                if (s->mp_seen == 1
+                    && s->mp_remote_ack_seen
+                    && (s->bitstream & 0xFFFFF) == 0xFFFFF)
                 {
-                    /* E is 20 consecutive ones — end of MP exchange.
-                       Transition to data mode: the far end will send B1 (one mapping
-                       frame of ones) then switch to the negotiated data constellation. */
+                    /* V.34 11.4.1.1.3/11.4.1.2.3 permits E only after MP' has
+                       been received.  Requiring the acknowledged frame is also
+                       essential for alignment: the tail of an ordinary MP can
+                       contain enough ones that combining it with the first few
+                       E bits falsely detects E up to 18 symbols early. */
                     v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_COMPLETE, "E detected");
                     span_log(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 4: E signal detected, MP exchange complete — transitioning to DATA mode\n");
@@ -8383,13 +8387,10 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     break;  /* Exit the bit loop; next baud will enter DATA stage */
                 }
                 /*endif*/
-                if (s->mp_seen == 1  &&  s->mp_remote_ack_seen)
-                {
-                    /* We've received MP' (with ack bit); now just wait for E.
-                       Avoid relocking churn that can mask E. */
-                    continue;
-                }
-                /*endif*/
+                /* Continue parsing repeated MP' frames while waiting for E.
+                   Each CRC-valid MP' resets bitstream at its exact end, so its
+                   17-one synchronization prefix cannot combine with preceding
+                   fill bits and masquerade as the 20-one E sequence. */
 
                 /* Detect 17x'1' + start '0' + type bit only when not already
                    collecting an MP frame. Otherwise we can retrigger on long runs
@@ -8675,7 +8676,14 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                     if (semantic_good)
                                     {
                                         if (mp.mp_acknowledged)
+                                        {
                                             s->mp_remote_ack_seen = 1;
+                                            /* Start the 20-one E detector after
+                                               the complete MP' boundary; no MP'
+                                               payload bits may count toward E
+                                               (10.1.3.2, 11.4.1.1.3). */
+                                            s->bitstream = 0;
+                                        }
                                         /*endif*/
                                         t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
                                         if (!mp_apply_parameters(t, &mp))
@@ -8996,16 +9004,91 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
         break;
 
     case V34_RX_STAGE_DATA:
+        if (s->b1_acquisition_active)
+        {
+            int n = s->b1_observed_symbols++;
+
+            if (n < s->v90_t3_b1_symbols)
+                s->b1_observed[n] = *sym;
+            if (s->b1_observed_symbols >= s->v90_t3_b1_symbols)
+            {
+                complexf_t corr = complex_setf(0.0f, 0.0f);
+                complexf_t corr_conj = complex_setf(0.0f, 0.0f);
+                float expected_power = 0.0f;
+                float observed_power = 0.0f;
+                float corr_mag2;
+                float corr_conj_mag2;
+                bool conjugate;
+                float phase;
+                float gain;
+
+                for (int i = 0; i < s->v90_t3_b1_symbols; i++)
+                {
+                    complexf_t o = s->b1_observed[i];
+                    complexf_t e = s->v90_t3_b1[i];
+
+                    corr.re += o.re*e.re + o.im*e.im;
+                    corr.im += o.im*e.re - o.re*e.im;
+                    corr_conj.re += o.re*e.re - o.im*e.im;
+                    corr_conj.im += o.im*e.re + o.re*e.im;
+                    expected_power += e.re*e.re + e.im*e.im;
+                    observed_power += o.re*o.re + o.im*o.im;
+                }
+                corr_mag2 = corr.re*corr.re + corr.im*corr.im;
+                corr_conj_mag2 = corr_conj.re*corr_conj.re
+                               + corr_conj.im*corr_conj.im;
+                conjugate = corr_conj_mag2 > corr_mag2;
+                if (conjugate)
+                    corr = corr_conj;
+                gain = sqrtf(corr.re*corr.re + corr.im*corr.im)
+                     / expected_power;
+                phase = atan2f(corr.im, corr.re);
+                s->phase4_da_derot = (int32_t)
+                    (phase*2147483648.0f/3.14159265358979f);
+                s->data_symbol_conjugate = conjugate;
+                s->data_symbol_rotation = 0;
+                s->data_symbol_scale = (gain > 0.0001f) ? 1.0f/gain : 1.0f;
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - B1 acquired: symbols=%d phase=%.2f deg gain=%.4f "
+                         "conjugate=%d normalized-correlation=%.3f\n",
+                         s->v90_t3_b1_symbols, phase*180.0f/3.14159265f,
+                         gain, conjugate,
+                         sqrtf((conjugate ? corr_conj_mag2 : corr_mag2)
+                               /(expected_power*observed_power)));
+                s->mapping_frame_count = 0;
+                for (int i = 0; i < s->v90_t3_b1_symbols; i++)
+                {
+                    complexf_t o = s->b1_observed[i];
+                    float c = cosf(phase);
+                    float sn = sinf(phase);
+                    float re = (o.re*c + o.im*sn)*s->data_symbol_scale;
+                    float im = (o.im*c - o.re*sn)*s->data_symbol_scale;
+
+                    if (conjugate)
+                        im = -im;
+                    s->mapping_frame_buf[s->mapping_frame_count++] =
+                        (int16_t)(re*128.0f);
+                    s->mapping_frame_buf[s->mapping_frame_count++] =
+                        (int16_t)(im*128.0f);
+                    if (s->mapping_frame_count >= 16)
+                    {
+                        v34_put_mapping_frame(s, s->mapping_frame_buf);
+                        s->mapping_frame_count = 0;
+                    }
+                }
+                s->b1_acquisition_active = false;
+            }
+            s->duration++;
+            s->last_sample = *sym;
+            break;
+        }
         /* V.34 data mode: collect equalized symbols into mapping frames (8 x 2D symbols)
            and run the full decode pipeline.
            The CMA equalizer (frozen from training) normalizes to unit magnitude.
-           Training DQPSK is constant modulus, so the frozen equalizer divides by
-           whatever the training amplitude was - the AGC below has already taken
-           the absolute level out, so no TX-side amplitude constant applies here.  The live equalizer output requires
-           a data-mode gain calibration before slicing; 70 is the measured bridge
-           from its unit-radius training normalization to the Q9.7 constellation
-           used by the mapper on the reference 31.2 kbit/s calls.
-           (odd integers 1..43) expected by quantize_n_ways() in Q9.7 format. */
+           Training DQPSK is constant modulus, so its frozen equalizer does not
+           establish the scale or arbitrary phase of the negotiated DATA grid.
+           The complete known B1 frame above supplies that calibration from this
+           call's waveform before payload reaches quantize_n_ways(). */
         {
             float re;
             float im;
@@ -9139,21 +9222,28 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             /* Dump the EXACT Q9.7 values entering the mapping-frame decoder.
                Offline diagnosis only (raw int16 LE pairs, 16 per frame). */
             {
-                static int dump_initialized = 0;
-                static FILE *dump_fp = NULL;
+                static int dump_initialized[2] = {0, 0};
+                static FILE *dump_fp[2] = {NULL, NULL};
+                int dump_index = s->calling_party ? 1 : 0;
 
-                if (!dump_initialized)
+                if (!dump_initialized[dump_index])
                 {
                     const char *path = getenv("V34_DATA_FRAME_DUMP");
 
-                    dump_initialized = 1;
+                    dump_initialized[dump_index] = 1;
                     if (path && *path)
-                        dump_fp = fopen(path, "wb");
+                    {
+                        char endpoint_path[1024];
+                        snprintf(endpoint_path, sizeof(endpoint_path), "%s.%s",
+                                 path, dump_index ? "caller" : "answer");
+                        dump_fp[dump_index] = fopen(endpoint_path, "wb");
+                    }
                 }
-                if (dump_fp)
+                if (dump_fp[dump_index])
                 {
-                    fwrite(s->mapping_frame_buf, sizeof(int16_t), 16, dump_fp);
-                    fflush(dump_fp);
+                    fwrite(s->mapping_frame_buf, sizeof(int16_t), 16,
+                           dump_fp[dump_index]);
+                    fflush(dump_fp[dump_index]);
                 }
             }
             v34_put_mapping_frame(s, s->mapping_frame_buf);
@@ -9220,41 +9310,18 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     && s->phase3_tracking_armed
                     && phase3_tracking_enabled()))
             {
-                /* CMA (blind) equalizer — during Phase 3 TRN refinement and
-                   Phase 4.  Phase 4 needs CMA to adapt equalizer gain for
-                   variable signal levels on analog/SIP channels.
-                   Stop CMA once TX enters data mode — echo from the high-power
-                   data constellation would cause CMA to diverge.
-
-                   ME_V34_FREEZE_CMA_DURING_MP (experimental, 2026-07-19): live
-                   interop showed MP0 frames consistently correct for their
-                   first ~35-50 bits, then close to 50% wrong on every
-                   should-be-0 structural bit afterward -- the signature of a
-                   clean signal whose equalizer has drifted away from its
-                   TRN-converged state, not of noise or a framing bug (carrier
-                   tracking is already frozen during MP for the same class of
-                   risk; CMA is not). Gated behind an env var rather than
-                   flipped outright since the existing comment states MP-time
-                   CMA adaptation was a deliberate, tested choice for gain
-                   variability -- freezing it needs live A/B verification
-                   before it can safely become the default. */
                 v34_state_t *t_cma = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
-                /* V34_RX_STAGE_V90_CP must behave like the stateless
-                   matched-filter fallback (v90_cp_live_direct_recover):
-                   the CPt/CP payload is up to 428 bits / 214 symbols, and
-                   CMA is phase-blind on the QPSK-only CP signal.  Letting it
-                   re-adapt through the frame rotates the constellation
-                   away from its TRN-converged state -- the synchronous path
-                   repeatedly achieves a perfect 18/18 preamble lock then
-                   fails every payload structural bit (live 2026-07-26:
-                   crc=0 structure=N, source=spandsp accepted 0 frames).
-                   Freeze CMA unconditionally for the dedicated V.90 CP
-                   stage; ordinary V.34 MP keeps its env-gated behaviour so
-                   this cannot contaminate normal MP acquisition (verified
-                   by test_v90_v34_rx_stage_isolation). */
+                /* V.34 11.4.1.1.2/11.4.1.2.2 conditions the receiver on
+                   at least 512T of TRN and then receives MP.  MP is signalling,
+                   not an equalizer-training sequence.  Continuing blind CMA
+                   while searching for MP (or indefinitely through a delayed
+                   TRN lock) can drive converged taps to infinity.  Bound Phase
+                   4 refinement to its first 512T and freeze it for all framed
+                   Phase-4 signalling. */
                 bool freeze_mp_cma = (s->stage == V34_RX_STAGE_V90_CP)
-                                  || (v34_rx_stage_is_phase4_frame(s->stage)
-                                      && getenv("ME_V34_FREEZE_CMA_DURING_MP"));
+                                  || v34_rx_stage_is_phase4_frame(s->stage)
+                                  || (s->stage == V34_RX_STAGE_PHASE4_TRN
+                                      && s->phase4_trn_after_j >= 512);
                 /* Once the decision-aided Phase 4 tracker owns the taps
                    (data-aided LMS above), CMA must stand down or the two
                    fight: CMA's phase-blind gradient re-randomizes the phase
@@ -10810,23 +10877,39 @@ static void v90_t3_b1_put_bit(void *user_data, int bit)
     (void) bit;
 }
 
-static bool v90_t3_build_b1(v34_rx_state_t *rx)
+static bool v34_build_expected_b1(v34_rx_state_t *rx)
 {
     v34_state_t *tx;
     int16_t frame[16];
+    int16_t precoder[6];
     int rate = (rx->bit_rate/2 + 1)*2400;
+    int trellis = rx->v90_mode ? rx->v90_t3_trellis_size
+                               : (rx->viterbi.state_count == 64
+                                  ? V34_TRELLIS_64
+                                  : (rx->viterbi.state_count == 32
+                                     ? V34_TRELLIS_32 : V34_TRELLIS_16));
 
+    for (int i = 0; i < 3; i++)
+    {
+        precoder[2*i] = rx->h[i].re;
+        precoder[2*i + 1] = rx->h[i].im;
+    }
     tx = v34_init(NULL,
                   baud_rate_parameters[rx->baud_rate].baud_rate,
-                  rate, true, true,
+                  rate, !rx->calling_party, true,
                   v90_t3_b1_get_bit, NULL,
                   v90_t3_b1_put_bit, NULL);
     if (!tx)
         return false;
-    tx->tx.scrambler_tap = 4;       /* V.90 analogue-modem GPA, §8.5.1. */
+    /* The received B1 uses the far-end role's clause-7 scrambler. */
+    tx->tx.scrambler_tap = rx->v90_mode
+                         ? 4       /* V.90 analogue-modem GPA, §8.5.1. */
+                         : (rx->calling_party ? 4 : 17);
     tx->tx.baud_rate = rx->baud_rate;
-    if (v34_seed_tx_data(tx, rate/2400, rx->v90_t3_trellis_size,
-                         0, 0, NULL) != 0)
+    if (v34_seed_tx_data(tx, rate/2400, trellis,
+                         rx->v90_mode ? 0 : rx->use_non_linear_encoder,
+                         rx->v90_mode ? 0 : rx->parms.expanded_shaping,
+                         rx->v90_mode ? NULL : precoder) != 0)
     {
         v34_free(tx);
         return false;
@@ -10885,7 +10968,7 @@ static bool v90_t3_start(v34_rx_state_t *rx)
     memset(rx->v90_t3_matched, 0, sizeof(rx->v90_t3_matched));
     memset(rx->v90_t3_fse, 0, sizeof(rx->v90_t3_fse));
     v90_t3_make_rrc(rx);
-    if (!v90_t3_build_b1(rx))
+    if (!v34_build_expected_b1(rx))
         return false;
     rx->v90_t3_active = true;
     return true;
@@ -10937,8 +11020,16 @@ SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
     /*endfor*/
     s->rx.received_event = V34_EVENT_E;
     s->rx.mp_seen = 2;
+    s->rx.b1_acquisition_active = false;
+    s->rx.b1_observed_symbols = 0;
     if (s->rx.v90_t3_prepared && !v90_t3_start(&s->rx))
         return -1;
+    if (!s->rx.v90_mode && v34_build_expected_b1(&s->rx))
+        s->rx.b1_acquisition_active = true;
+    /* 11.4.1.1.5/11.4.1.2.5 conditions on the complete known B1 before
+       unclamping user data.  Buffer B1 to measure gain, phase and conjugation
+       from waveform evidence, then replay it through this reset-state decoder. */
+    s->rx.duration = 0;
     s->rx.stage = V34_RX_STAGE_DATA;
     return 0;
 }
@@ -11015,6 +11106,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     else
         s->rx.cc_carrier_phase_rate = dds_phase_ratef((s->calling_party)  ?  2400.0f  :  1200.0f);
     v34_set_working_parameters(&s->rx.parms, s->rx.baud_rate, s->rx.bit_rate, true);
+    s->rx.parms.max_bit_rate_code = bit_rate;
 
     s->rx.high_sample = 0;
     s->rx.low_samples = 0;

@@ -36,11 +36,11 @@ encoding and precoder coefficients are session state.
 |---|---|---|---|
 | 5.1-5.4 | Six symbol rates, legal carriers and selected pre-emphasis | TX/RX tables exist for 2400, 2743, 2800, 3000, 3200 and 3429 | Exercise every rate and carrier selected through INFO1.  At 3429 both carriers are 1959 Hz; this requires echo cancellation and is not an unsupported rate. |
 | 6.1-6.2 | Synchronous datapump plus asynchronous V.14 adaptation | Common data stack is connected | Require byte-exact duplex V.14 at multiple line/DTE ratios. |
-| 7-9 | Directional scrambler, framing, shell mapping, differential/nonlinear/trellis encoding and precoding | Received MP encoder fields configure TX while the locally sent MP configures RX; MP1 coefficients reach the TX precoder and MP0 preserves them. `v34_data_test` now passes exact Q9.7 mapper-to-demapper payload at every legal 2400-baud rate for 16/32/64-state trellis. The Viterbi no longer rejects valid branches using the invalid `state&1` Y0 shortcut (U0 also contains C0, §9.6.3), and B1 resets scrambler/trellis/V0 state per §10.1.3.1. | Extend the exact matrix to every baud and shaping/nonlinear/precoder combination. The full waveform harness still does not recover payload after B1, which now isolates the remaining defect to B1 acquisition/equalizer/constellation transform rather than shell mapping or trellis logic. |
+| 7-9 | Directional scrambler, framing, shell mapping, differential/nonlinear/trellis encoding and precoding | Received MP encoder fields configure TX while the locally sent MP configures RX; MP1 coefficients reach the TX precoder and MP0 preserves them. `v34_data_test` passes exact Q9.7 payload at every legal 2400-baud rate for 16/32/64-state trellis. B1 resets scrambler/trellis/V0 state per §10.1.3.1 and now calibrates phase, gain and conjugation from its known waveform before reset-state replay. §10.1.3 modulation-factor compensation measures a reset-state superframe and keeps DATA at PP/TRN power instead of clipping higher-rate constellations. | Extend the exact and waveform matrices to every baud and shaping/nonlinear/precoder combination. |
 | 10.1.2.1-10.1.2.3 | Tone A/B and INFO0/INFO1 framing | Live V.90 work substantially hardened the shared Phase-2 state machine | Run plain-V.34 caller and answerer recovery cases, not only V.90 role inversions. |
 | 10.1.2.3.4 | INFO1c reports measured per-rate carrier, pre-emphasis and projected rate | L1/L2 measurements and a per-rate evaluator exist | Plain V.34 previously emitted configured rates with pre-emphasis 6.  INFO1c must be built from the measurement for every enabled row and report -512 when frequency offset is unavailable. |
 | 10.1.2.3.5 | INFO1a selects both directional rates and the call-to-answer carrier/pre-emphasis/rate | Parser and serializer exist | Selection must combine INFO1c, local L1/L2 results and both INFO0 asymmetry limits.  Configure TX and RX independently from the result. |
-| 10.1.3.1-10.1.3.9 | B1, E, J/J-prime, optional MD, PP, S, TRN and MP | Shared generators and receivers exist; B1 duration/alignment has been corrected during V.90 work. `v34_duplex_test` now provides a waveform-only two-instance bearer. The plain caller now receives INFO1a before changing demodulators, both Phase-3 directions complete PP/TRN/J, and the answerer waits silently for the caller's J before Phase 4. | At 2400/9600 PCMU both receivers now accept CRC-valid MP and MP-prime, both detect E, both transmit B1 and both enter DATA without an E-timeout fallback. The post-B1 demapper does not recover even a 32-bit payload sync word, so data-mode slicing/trellis decoding is the next blocker. PCMA still stalls in Phase 3 and follows after the PCMU baseline. |
+| 10.1.3.1-10.1.3.9 | B1, E, J/J-prime, optional MD, PP, S, TRN and MP | Shared generators and receivers exist; `v34_duplex_test` provides a waveform-only two-instance bearer. E is the normative single 20-bit sequence, E detection is gated by a complete MP-prime, Phase-4 CMA is limited to the first 512T of TRN and frozen for MP, and B1 is received as the complete known data frame before payload is unclamped. | At 2400/9600 PCMU both directions complete startup, synchronize payload and recover over 16,000 bits without error. PCMA still stalls in Phase 3 and follows before this target enters the default suite. |
 | 11.2 | Probing/ranging and recovery | Main flow exists, with stage/event tracing | Test both roles, INFO retries, reversal deadlines and measured RTD. |
 | 11.3 | Equalizer and echo-canceller training | Phase-3 TX/RX exists | Replace the narrowband-notch policy with negotiated-carrier retuning and an echo-canceller path where carriers cannot be separated. |
 | 11.4 | Final training and mutually valid MP selection | MP/MP-prime handshake and heuristic receiver exist. Directional maxima now come from INFO1, the local mask intersects both selected baud mappings, final rates intersect both MP masks/maxima, and bit 50 forces the lower symmetric rate unless enabled bilaterally. MP-prime changes only the acknowledge bit rather than rewriting the offer. | `v34_mp_test` covers asymmetric/symmetric maxima, sparse/disjoint masks and all 1..14 maxima. Matrix-test waveform transport for 4/16-point TRN/MP, MP Type 0/1, E and complete B1. |
@@ -61,24 +61,16 @@ encoding and precoder coefficients are session state.
 4. **In progress:** `v34_duplex_test` connects independent caller/answerer
    instances through only a selectable PCMU/PCMA round trip and verifies PRBS
    payload in both directions after training.  `make v34-duplex-test` is kept
-   outside the green default suite while it encodes the current open defect:
-   at 2400/9600 PCMU, both Phase-3 directions now complete INFO1, S/S-bar,
-   PP, TRN and J from waveform evidence and both sides reach Phase-4 TRN/MP.
-   Phase 4 now completes bilaterally at 2400/9600 PCMU: both receivers accept
-   CRC-valid MP and MP-prime, both detect E, transmit B1 and enter DATA without
-   the former 500-baud forced transition.  The MP fix separates direct-mapped
-   TRN's absolute-phase lock from MP's differential domain, and a stable
-   three-frame CRC failure now rotates the slicer mode rather than pinning a
-   wrong hypothesis forever.  MP-prime is transmitted in full before E as
-   required by 11.4.1.1.3/11.4.1.2.4.  The remaining PCMU blocker is now the
-   post-B1 waveform front end: neither direction finds the first 32 payload
-   bits.  The exact-symbol `v34_data_test` now proves zero-error shell/trellis
-   decode for all three trellises and every legal 2400-baud rate; it exposed
-   an invalid Viterbi Y0 shortcut and missing §10.1.3.1 scrambler/V0 resets.
-   With those fixed, the waveform failure is specifically B1 equalizer/gain/
-   transform acquisition rather than the mapper or trellis.  PCMA still stalls
-   in Phase 3.  The harness
-   previously exposed and fixed four
+   outside the green default suite because PCMA still stalls in Phase 3.
+   At 2400/9600 PCMU both directions complete INFO1, S/S-bar, PP, TRN, J,
+   MP/MP-prime, E and B1 from waveform evidence. The known B1 frame now
+   calibrates arbitrary phase, gain and conjugation before reset-state replay;
+   both receivers then synchronize and recover over 16,000 payload bits with
+   zero errors. Enforcing the configured 9600-bit/s INFO1/MP ceiling removed
+   accidental 21600-bit/s negotiation, while §10.1.3 modulation-factor
+   compensation removed high-rate clipping. Phase-4 CMA is bounded to the
+   first 512T and frozen during framed signalling as required by §11.4. The
+   harness previously exposed and fixed four
    sequencing defects: the caller no longer abandons the control channel
    before INFO1a; J detection is published to the caller transmitter; the
    answerer becomes silent and conditions on caller PP/TRN/J after S/S-bar;
