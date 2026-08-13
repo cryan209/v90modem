@@ -130,3 +130,4 @@ tools/__pycache__/
 # cannot be regenerated.  These two are per-run dumps nothing reads.
 artifacts/eicon-live/
 artifacts/pdf_text/
+artifacts/courier-ja-3200low/README.md
