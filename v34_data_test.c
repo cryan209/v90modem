@@ -53,7 +53,7 @@ static void put_bit(void *user_data, int bit)
     state->output++;
 }
 
-static int run_case(int rate_n, int trellis)
+static int run_case(int rate_n, int trellis, int shaping)
 {
     bit_state_t source = {.lfsr = 0xACE1U};
     bit_state_t sink = {.expected = 0xACE1U};
@@ -68,11 +68,11 @@ static int run_case(int rate_n, int trellis)
     rx = v34_init(NULL, 2400, rate_n*2400, false, true,
                   get_bit, &sink, put_bit, &sink);
     if (!tx || !rx
-        || v34_seed_tx_data(tx, rate_n, trellis, 0, 0, NULL) != 0
-        || v34_seed_rx_mp(rx, rate_n, trellis, 0, 0, NULL) != 0
+        || v34_seed_tx_data(tx, rate_n, trellis, 0, shaping, NULL) != 0
+        || v34_seed_rx_mp(rx, rate_n, trellis, 0, shaping, NULL) != 0
         || v34_begin_rx_data(rx) != 0) {
-        fprintf(stderr, "v34_data_test: setup failed N=%d trellis=%d\n",
-                rate_n, trellis);
+        fprintf(stderr, "v34_data_test: setup failed N=%d trellis=%d shaping=%d\n",
+                rate_n, trellis, shaping);
         if (tx) v34_free(tx);
         if (rx) v34_free(rx);
         return 1;
@@ -89,8 +89,8 @@ static int run_case(int rate_n, int trellis)
     v34_free(rx);
     if (!sink.synced || sink.output < 1000 || sink.errors != 0) {
         fprintf(stderr,
-                "v34_data_test: FAIL N=%d trellis=%d sync=%d bits=%d errors=%d\n",
-                rate_n, trellis, sink.synced, sink.output, sink.errors);
+                "v34_data_test: FAIL N=%d trellis=%d shaping=%d sync=%d bits=%d errors=%d\n",
+                rate_n, trellis, shaping, sink.synced, sink.output, sink.errors);
         return 1;
     }
     return 0;
@@ -101,8 +101,10 @@ int main(void)
     for (int trellis = 0; trellis < 3; trellis++) {
         /* 2400 baud supports MP rate N=1..9 (V.34 Tables 8/20). */
         for (int rate_n = 1; rate_n <= 9; rate_n++) {
-            if (run_case(rate_n, trellis) != 0)
-                return 1;
+            for (int shaping = 0; shaping <= 1; shaping++) {
+                if (run_case(rate_n, trellis, shaping) != 0)
+                    return 1;
+            }
         }
     }
     puts("v34_data_test: OK");
