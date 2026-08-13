@@ -7795,11 +7795,14 @@ SPAN_DECLARE(int) v34_seed_tx_data(v34_state_t *s,
     s->tx.y0 = 0;
     s->tx.state = 0;
     s->tx.step_2d = 0;
-    s->tx.super_frame = 0;
+    /* The first seeded frame is B1. V.34 10.1.3.1 assigns B1 the inversion
+       state of the final data frame of a superframe. */
+    s->tx.super_frame = s->tx.parms.j > 0 ? s->tx.parms.j - 1 : 0;
     s->tx.data_frame = 0;
     s->tx.s_bit_cnt = 0;
     s->tx.aux_bit_cnt = 0;
-    s->tx.v0_pattern = 0;
+    s->tx.v0_pattern = s->tx.parms.j > 0
+                     ? (uint16_t)(2*(s->tx.parms.j - 1)) : 0;
     s->tx.data_symbol_scale = 1.0f;
     s->tx.current_get_bit = s->tx.get_bit;
     return 0;

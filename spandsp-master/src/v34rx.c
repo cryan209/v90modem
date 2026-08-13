@@ -2497,7 +2497,6 @@ static void viterbi_update_path_metrics(viterbi_t *s,
     int16_t k0;
     int16_t k1;
     uint32_t curr_min_metric;
-    uint32_t min_metric;
     uint32_t metric;
     int prev_ptr;
 
@@ -2579,12 +2578,12 @@ static void viterbi_update_path_metrics(viterbi_t *s,
                 int next_state = s->encode_table[state][input];
                 int branch = 4*k0 + k1;
 
-                /* Table 13 maps each candidate subset pair to the complete
-                   Y4321 convolutional input.  Do not add a Y0 constraint
-                   derived from state&1: U0 also contains C0 (9.6.3.3), so
-                   that shortcut rejects valid zero-error branches even with
-                   no channel.  The authoritative encoder transition below
-                   supplies the trellis constraint for all negotiated sizes. */
+                /* V.34 9.6.3: Table 13 supplies Y4321 and the authoritative
+                   encoder table constrains its state transition. U0 cannot be
+                   inferred from state&1 alone: 9.6.3.3 adds C0 and Table 12
+                   adds V0. A constrained decoder must carry the precoder and
+                   modulo history per survivor; rejecting candidates here
+                   without that state corrupts even exact symbols. */
                 metric = s->vit[prev_ptr].cumulative_path_metric[state]
                        + s->vit[s->ptr].branch_error_x[branch];
                 if (metric < s->vit[s->ptr].cumulative_path_metric[next_state])
