@@ -123,3 +123,10 @@ tools/__pycache__/
 /artifacts/eicon-native-tower/
 /artifacts/v92-slmodem-tower/
 /artifacts/v92-usb-cx93001/
+
+# Hardware-run bulk output.  artifacts/ is otherwise tracked on purpose:
+# artifacts/eicon-digital-downstream/ is the foreign downstream fixture
+# v90_analogue_rx_test runs in `make test`, and it is a hardware capture that
+# cannot be regenerated.  These two are per-run dumps nothing reads.
+artifacts/eicon-live/
+artifacts/pdf_text/
