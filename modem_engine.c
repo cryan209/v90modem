@@ -3475,7 +3475,7 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
     {
         static int calls = 0;
 
-        if ((calls++ % 200) == 0 && me_verbose_enabled()) {
+        if ((calls++ % 25) == 0 && me_verbose_enabled()) {
             int longest = 0, longest_h = -1;
 
             for (int h = 0; g_v34 && h < 24; h++) {

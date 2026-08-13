@@ -5517,6 +5517,19 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         {
                             s->phase3_ja_capture_hyp[h][s->phase3_ja_capture_hyp_len[h]++] = (uint8_t) (dbit[0] & 1);
                             s->phase3_ja_capture_hyp[h][s->phase3_ja_capture_hyp_len[h]++] = (uint8_t) (dbit[1] & 1);
+                            /* Trajectory of the parser's actual input.  The ME
+                               side samples this every 200 calls, which is too
+                               coarse to tell "grew to 11k and was wiped" from
+                               "never exceeded 11k" -- and those imply opposite
+                               fixes.  ~14.3k is where this peer's descriptor
+                               starts, so log either side of it. */
+                            if (h == 0  &&  (s->phase3_ja_capture_hyp_len[h] % 2048) == 0)
+                            {
+                                span_log(s->logging, SPAN_LOG_FLOW,
+                                         "Rx - Phase 3 Ja parser input: hyp0 len=%d bits (stage=%d, need ~16340 to parse)\n",
+                                         s->phase3_ja_capture_hyp_len[h], s->stage);
+                            }
+                            /*endif*/
                         }
                         /*endif*/
                         if (s->phase3_ja_capture_hyp_raw_len[h] + 2 <= (int) sizeof(s->phase3_ja_capture_hyp_raw[h]))
@@ -6474,13 +6487,33 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    away.  Live 2026-08-12: the peer's Ja carries exactly one
                    CRC-valid descriptor copy, so losing the capture across it
                    loses the whole call's DIL. */
-                if (s->phase3_ja_capture_hyp_len[0] > 0)
+                /* Report the longest hypothesis, not hyp 0.  All 24 fill
+                   together today, but keying the report on one of them means a
+                   fill path that ever skips hyp 0 reports "nothing discarded"
+                   while discarding everything -- which is indistinguishable
+                   from the capture never having started, and cost a session
+                   telling those two apart.  The DIL descriptor sits ~14.3k bits
+                   into this peer's Ja and needs ~16.3k to parse, so print the
+                   count unconditionally: "0" here is itself the finding. */
                 {
+                    int cap_h;
+                    int cap_max = 0;
+                    int cap_max_h = -1;
+
+                    for (cap_h = 0;  cap_h < MP_HYPOTHESIS_COUNT;  cap_h++)
+                    {
+                        if (s->phase3_ja_capture_hyp_len[cap_h] > cap_max)
+                        {
+                            cap_max = s->phase3_ja_capture_hyp_len[cap_h];
+                            cap_max_h = cap_h;
+                        }
+                        /*endif*/
+                    }
+                    /*endfor*/
                     span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 3: DISCARDING %d captured Ja bits on re-entry to WAIT_S\n",
-                             s->phase3_ja_capture_hyp_len[0]);
+                             "Rx - Phase 3: DISCARDING %d captured Ja bits (longest hyp=%d) on re-entry to WAIT_S\n",
+                             cap_max, cap_max_h);
                 }
-                /*endif*/
                 s->stage = V34_RX_STAGE_PHASE3_WAIT_S;
                 s->duration = 0;
                 s->s_detect_count = 0;
