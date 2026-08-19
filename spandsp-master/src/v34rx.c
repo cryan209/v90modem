@@ -479,6 +479,56 @@ static int descramble_reg(uint32_t *reg, int scrambler_tap, int in_bit)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Descramble one data bit, and on the V.90 upstream also run the other
+   clause-7 polynomial in parallel.  An idle DTE sends marks, so the correct
+   descrambler yields ones and the wrong one yields a white stream -- which
+   is the difference between upstream payload and upstream noise, and is not
+   otherwise visible from outside. */
+static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
+{
+    int out_bit = descramble(s, in_bit);
+
+    if (s->v90_t3_acquired  &&  !s->v90_t3_suppress_output)
+    {
+        int alt_tap = (s->scrambler_tap == 4) ? 17 : 4;
+        int alt_bit = descramble_reg(&s->v90_t3_alt_scramble, alt_tap, in_bit);
+
+        if (s->v90_t3_first_bits < 96)
+        {
+            s->v90_t3_first_word = (s->v90_t3_first_word << 1) | out_bit;
+            if ((++s->v90_t3_first_bits % 32) == 0)
+            {
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - V.90 upstream first data bits %d-%d: %08X\n",
+                         s->v90_t3_first_bits - 32, s->v90_t3_first_bits - 1,
+                         (unsigned) s->v90_t3_first_word);
+            }
+            /*endif*/
+        }
+        /*endif*/
+        s->v90_t3_ones += out_bit;
+        s->v90_t3_alt_ones += alt_bit;
+        if (++s->v90_t3_bit_count >= 20000)
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - V.90 upstream DATA bits: tap=%d ones=%d%%, "
+                     "tap=%d ones=%d%% (over %d bits)\n",
+                     s->scrambler_tap,
+                     100*s->v90_t3_ones/s->v90_t3_bit_count,
+                     alt_tap,
+                     100*s->v90_t3_alt_ones/s->v90_t3_bit_count,
+                     s->v90_t3_bit_count);
+            s->v90_t3_ones = 0;
+            s->v90_t3_alt_ones = 0;
+            s->v90_t3_bit_count = 0;
+        }
+        /*endif*/
+    }
+    /*endif*/
+    return out_bit;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* Hypothesis index whose map_table row is dibit -> (-dibit) & 3, i.e.
    {0, 3, 2, 1}.  V.34 10.1.3.3 advances the transmitted point index by the
    dibit, and training_constellation_4 is ordered so that an increasing index
@@ -2125,7 +2175,7 @@ static void pack_output_bitstream(v34_rx_state_t *s)
         for (  ;  i < kk;  i++)
         {
             bit = bitstream_get(&s->bs, &u, 1);
-            s->put_bit(s->put_bit_user_data, descramble(s, bit));
+            s->put_bit(s->put_bit_user_data, v90_t3_probe_descramble(s, bit));
         }
         /*endfor*/
         /* Auxiliary data bits are not scrambled (V.34/7) */
@@ -2138,7 +2188,7 @@ static void pack_output_bitstream(v34_rx_state_t *s)
     for (  ;  i < bb;  i++)
     {
         bit = bitstream_get(&s->bs, &u, 1);
-        s->put_bit(s->put_bit_user_data, descramble(s, bit));
+        s->put_bit(s->put_bit_user_data, v90_t3_probe_descramble(s, bit));
     }
     /*endfor*/
 }
@@ -9269,6 +9319,39 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             s->mapping_frame_buf[s->mapping_frame_count++] =
                 (int16_t)(transformed_im * 128.0f * s->data_symbol_scale);
 
+            /* How far the data-mode symbols actually land from the grid.
+               V.34 9.x places every constellation point on odd integers, so
+               a receiver that is decoding has a small residual here and one
+               that is producing white output has a large one.  This is the
+               only direct read on whether an upstream failure is in the
+               waveform or after it. */
+            if (s->v90_t3_acquired  &&  !s->v90_t3_suppress_output)
+            {
+                float g_re = transformed_re*s->data_symbol_scale;
+                float g_im = transformed_im*s->data_symbol_scale;
+                float t_re = 2.0f*floorf(g_re/2.0f) + 1.0f;
+                float t_im = 2.0f*floorf(g_im/2.0f) + 1.0f;
+                float d_re = g_re - t_re;
+                float d_im = g_im - t_im;
+
+                s->v90_t3_decision_err += d_re*d_re + d_im*d_im;
+                s->v90_t3_decision_pow += g_re*g_re + g_im*g_im;
+                if (++s->v90_t3_decision_count >= 3200)
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - V.90 upstream DATA: decision error %.4f "
+                             "per symbol (mean symbol power %.2f) over %d symbols\n",
+                             s->v90_t3_decision_err/s->v90_t3_decision_count,
+                             s->v90_t3_decision_pow/s->v90_t3_decision_count,
+                             s->v90_t3_decision_count);
+                    s->v90_t3_decision_err = 0.0f;
+                    s->v90_t3_decision_pow = 0.0f;
+                    s->v90_t3_decision_count = 0;
+                }
+                /*endif*/
+            }
+            /*endif*/
+
             /* Decision-directed carrier tracking against the DATA
                constellation.  Root cause (2026-07-23, offline 4th-power
                analysis of the winner capture): the V.90 answerer's Phase 3/4
@@ -9935,12 +10018,23 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_training_match = best_match;
     s->v90_t3_fse_conjugate = best_conjugate;
     s->v90_t3_next_symbol = best_first;
-    /* process_primary_symbol() has a 15-step Viterbi wind-up.  Consume B1
-       plus 32 flush symbols before publishing decoded bits; ODP is repeated,
-       so this bounded post-B1 guard loses no V.42 information while ensuring
-       delayed B1 ones cannot be mistaken for a non-ODP peer. */
-    s->v90_t3_publish_symbol =
-        best_first + 3*(s->v90_t3_b1_symbols + 32);
+    /* process_primary_symbol() has a 15-step Viterbi wind-up, so publishing
+       is held off past the end of B1; ODP is repeated, so a bounded post-B1
+       guard loses no V.42 information.
+       The guard must be a whole number of DATA FRAMES, not just of mapping
+       frames.  A data frame is 8*p symbols -- 128 at 3200 baud -- and the
+       shell decoder's position within it is part of its state, so the old
+       flat 32-symbol flush left the decoder a quarter of a data frame out of
+       phase with the transmitter.  Measured live: symbols landing on the grid
+       at ~30 dB, an exact-symbol decode that is bit-perfect offline, and a
+       published bit stream that was nevertheless pure white. */
+    {
+        int frame_symbols = 8*s->parms.p;
+        int flush = (frame_symbols > 0) ? frame_symbols : 32;
+
+        s->v90_t3_publish_symbol =
+            best_first + 3*(s->v90_t3_b1_symbols + flush);
+    }
     s->v90_t3_suppress_output = true;
     s->v90_t3_acquired = true;
     /* The supervised filter already maps onto the exact Q9.7 template grid. */
@@ -9948,6 +10042,11 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->data_symbol_rotation = 0;
     s->data_symbol_conjugate = false;
     s->phase4_da_derot = 0;
+    span_log(s->logging, SPAN_LOG_FLOW,
+             "Rx - V.90 upstream frame parms: b=%d p=%d w=%d j=%d k=%d "
+             "bit_rate=%d b1_symbols=%d publish=+%d symbols\n",
+             s->parms.b, s->parms.p, s->parms.w, s->parms.j, s->parms.k,
+             s->bit_rate, s->v90_t3_b1_symbols, s->v90_t3_b1_symbols + 32);
     span_log(s->logging, SPAN_LOG_FLOW,
              "Rx - V.90 upstream B1 acquired at %d Hz T/3 "
              "(baud=%d carrier=%s sample=%lld, symbols=%d, fit=%.1f%%)\n",

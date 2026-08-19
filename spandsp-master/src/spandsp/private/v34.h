@@ -780,6 +780,18 @@ typedef struct
     uint32_t scramble_reg;
     /*! \brief The scrambler tap which selects between the caller and answerer scramblers */
     int scrambler_tap;
+    /*! \brief First published upstream data bits, for structure checks. */
+    uint32_t v90_t3_first_word;
+    int v90_t3_first_bits;
+    /*! \brief Shadow descrambler for the upstream polynomial check. */
+    uint32_t v90_t3_alt_scramble;
+    int v90_t3_ones;
+    int v90_t3_alt_ones;
+    int v90_t3_bit_count;
+    /*! \brief Running decision-error statistics for the V.90 upstream. */
+    float v90_t3_decision_err;
+    float v90_t3_decision_pow;
+    int v90_t3_decision_count;
     /*! \brief Capturing into the T/3 ring alongside the normal receiver,
         before the DATA handover. */
     bool v90_t3_capture_only;

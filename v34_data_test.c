@@ -53,7 +53,7 @@ static void put_bit(void *user_data, int bit)
     state->output++;
 }
 
-static int run_case(int rate_n, int trellis, int shaping)
+static int run_case_baud(int baud, int rate_n, int trellis, int shaping)
 {
     bit_state_t source = {.lfsr = 0xACE1U};
     bit_state_t sink = {.expected = 0xACE1U};
@@ -63,19 +63,19 @@ static int run_case(int rate_n, int trellis, int shaping)
 
     for (int i = 0; i < 32; i++)
         sink.target = (sink.target << 1) | (uint32_t)pattern_bit(&sync_state);
-    tx = v34_init(NULL, 2400, rate_n*2400, true, true,
+    tx = v34_init(NULL, baud, rate_n*2400, true, true,
                   get_bit, &source, put_bit, &source);
-    rx = v34_init(NULL, 2400, rate_n*2400, false, true,
+    rx = v34_init(NULL, baud, rate_n*2400, false, true,
                   get_bit, &sink, put_bit, &sink);
     if (!tx || !rx
         || v34_seed_tx_data(tx, rate_n, trellis, 0, shaping, NULL) != 0
         || v34_seed_rx_mp(rx, rate_n, trellis, 0, shaping, NULL) != 0
         || v34_begin_rx_data(rx) != 0) {
-        fprintf(stderr, "v34_data_test: setup failed N=%d trellis=%d shaping=%d\n",
-                rate_n, trellis, shaping);
+        /* Not every N is legal at every symbol rate (V.34 Tables 8/20);
+           an unsupported combination is a skip, not a failure. */
         if (tx) v34_free(tx);
         if (rx) v34_free(rx);
-        return 1;
+        return -1;
     }
     for (int frame_no = 0; frame_no < 256; frame_no++) {
         int16_t frame[16];
@@ -89,8 +89,10 @@ static int run_case(int rate_n, int trellis, int shaping)
     v34_free(rx);
     if (!sink.synced || sink.output < 1000 || sink.errors != 0) {
         fprintf(stderr,
-                "v34_data_test: FAIL N=%d trellis=%d shaping=%d sync=%d bits=%d errors=%d\n",
-                rate_n, trellis, shaping, sink.synced, sink.output, sink.errors);
+                "v34_data_test: FAIL baud=%d N=%d trellis=%d shaping=%d "
+                "sync=%d bits=%d errors=%d\n",
+                baud, rate_n, trellis, shaping, sink.synced, sink.output,
+                sink.errors);
         return 1;
     }
     return 0;
@@ -98,15 +100,36 @@ static int run_case(int rate_n, int trellis, int shaping)
 
 int main(void)
 {
+    /* V.34 Tables 8/20: the maximum N rises with the symbol rate.  The V.90
+       upstream this proves out runs at 3200 baud (31200 = N 13), which no
+       case here used to cover -- the live upstream decoded to white while
+       every 2400-baud case passed. */
+    static const struct
+    {
+        int baud;
+        int max_n;
+    } rates[] = {{2400, 9}, {2743, 11}, {2800, 11}, {3000, 12}, {3200, 13},
+                 {3429, 14}};
+
+    int cases = 0;
+
     for (int trellis = 0; trellis < 3; trellis++) {
-        /* 2400 baud supports MP rate N=1..9 (V.34 Tables 8/20). */
-        for (int rate_n = 1; rate_n <= 9; rate_n++) {
-            for (int shaping = 0; shaping <= 1; shaping++) {
-                if (run_case(rate_n, trellis, shaping) != 0)
-                    return 1;
+        for (size_t r = 0; r < sizeof(rates)/sizeof(rates[0]); r++) {
+            for (int rate_n = 1; rate_n <= rates[r].max_n; rate_n++) {
+                for (int shaping = 0; shaping <= 1; shaping++) {
+                    int rc = run_case_baud(rates[r].baud, rate_n, trellis,
+                                           shaping);
+
+                    if (rc > 0)
+                        return 1;
+                    /*endif*/
+                    if (rc == 0)
+                        cases++;
+                    /*endif*/
+                }
             }
         }
     }
-    puts("v34_data_test: OK");
+    printf("v34_data_test: OK (%d cases)\n", cases);
     return 0;
 }
