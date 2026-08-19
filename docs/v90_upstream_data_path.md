@@ -111,24 +111,45 @@ points on it.  Two follow-ups, both run live:
   to data but not to the B1 fit that set our scale, and was the obvious
   suspect -- is ruled out.
 
-So B1 matches its template at 98.6%, and a few hundred symbols later the
-signal is off-lattice under every gain.  Whatever changes, changes at
-that boundary, and it is a property of the signal rather than of our
-filter.  The leading candidate is now **V.34 non-linear precoding**: a
-precoder's output does not sit on the lattice, which is exactly this
-measurement, and seeding `rx.h[]` from the selected MP is already a known
-gap (the digital path emits Type 0 / zero coefficients).  The MP we lock
-reports `type=0`, so either the peer is precoding when our MP did not ask
-it to, or the transform is something else applied only after B1.  The
-B1-era distance-to-grid probe -- the same measure over the suppressed B1
-symbols -- is in the tree to pin the boundary down; it has not yet caught
-a live call, because reaching data mode has been taking 5 to 24 attempts.
+**The B1-era probe then landed, and it moved the fault.**  The same
+distance-to-grid measure over the suppressed B1 symbols reads **0.641**
+-- indistinguishable from the data era's 0.66.  But those very symbols
+are the ones acquisition fits to the B1 template at 98.6%, and the
+template is verifiably on the lattice (dump a mapping frame at
+3200/31200: `23, 21, 3, -13, ...`, odd integers in the /128 domain).
+
+So the symbols are on the lattice where acquisition measures them and
+off it where `process_primary_symbol()` measures them, in *both* eras.
+Nothing changes at the B1->data boundary at all.  **That rules out
+precoding**, which an earlier revision of this note proposed on the
+strength of the data-era number alone: a per-era transform cannot
+explain a corruption that is already present during B1.
+
+What sits between those two measurement points is the DATA symbol path:
+`phase4_da_derot` and the decision-directed carrier tracker that drives
+it, then the conjugate/rotation/scale transform.  Acquisition explicitly
+zeroes all of them, so any of them moving is the corruption.  The DD
+tracker is the only one that moves on its own, and it slices against the
+same lattice, so if it mis-locks it will rotate the constellation off
+the grid and hold it there.  It has a kill switch:
+`ME_V34_DATA_CARRIER_TRACK=0`.  A run with it off is the next
+measurement -- 24 attempts on the rig have not reached data mode since,
+so it is queued rather than answered.
 
 Ruled out along the way, all measured rather than argued: the scrambler
 polynomial (both give 50%), the trellis size (all three swept at
 acquisition), the data-frame phase (fixed, retested, still white), the
-carrier (low, matching INFO1d), and the decoder itself (390 exact-symbol
-cases, every symbol rate, bit-perfect).
+carrier (low, matching INFO1d), the decoder itself (390 exact-symbol
+cases, every symbol rate, bit-perfect), a gain error (33-point sweep
+flat), the equalizer taps (DD-NLMS moved nothing), and now precoding.
+
+A note on the probes themselves: each of the three readings above was
+first read wrongly, and each wrong reading cost a round of work.  0.67
+against the mean power looked like 30 dB; against the lattice spacing it
+is "no relation to the constellation".  And the data-era number alone
+looked like a statement about the B1->data boundary; beside the B1-era
+number it is a statement about our own symbol path.  Take a new probe's
+first reading as a hypothesis, not a result.
 
 ## Status
 
