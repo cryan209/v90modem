@@ -22,8 +22,38 @@ does not honour that field either, the same way it ignores it when choosing Sd's
 W (`docs/v90_analogue_role.md`). The Ri hunt in `v90_analogue_phase4.c` learns
 the level from the wire and does not care, which is why it acquired anyway.
 
-**The TRN2d does not decode yet.** 13% of its symbols are outside every
-constellation the CPt named, so every six-symbol frame is rejected and none of
-§8.6.5's scrambled ones come back. Whether that is the card declining to use
-the constellation we asked for, or our six-symbol frame grid being off by a
-symbol at the R̄i seam, is the open question this fixture exists to answer.
+**The TRN2d does not decode, and the reason is now measured.** The question this
+fixture was kept to answer — whether the card declines the constellation our CPt
+named, or our six-symbol frame grid is off at the R̄i seam — resolves to neither
+of the phrasings it was posed in. `v90_analogue_rx_test` now runs against this
+file and pins all of it:
+
+* **The grid is right.** Our receiver puts TRN2d's first symbol at sample 6135.
+  An independent scan of the Ri sign pattern agrees: the `+ + + − − −` grid
+  reverses to `− − − + + +` after 2544 symbols and runs 24 more, ending at 6135.
+  (Our `r_symbols` counter reports Ri as 2556T, because the reversal detector
+  needs two of R̄i's four repetitions before it fires and charges those 12
+  symbols to Ri. The TRN2d start is unaffected.)
+* **Nothing is outside the constellation.** Splitting the demap failure by cause
+  — the receiver now counts "codeword not in the constellation" separately from
+  "§5.4.3 modulus value needs more than K bits" — gives **out-of-constellation 0**
+  and modulus overflow on **every** frame. The earlier "13% of its symbols are
+  outside every constellation the CPt named" was measuring the wrong thing: a
+  frame that will not demap is not evidence that any symbol was rejected.
+* **The card addresses more modulus space than a CPt can carry.** Its TRN2d uses
+  39 magnitudes — Ucodes 0–39 with 35 absent — with the same support in all six
+  intervals, white (autocorrelation < 0.012 at every lag 1–8) and stationary
+  across the whole 30 s. That is 39^6 = 2^31.7 per six-symbol frame, so it needs
+  K = 32. §8.5.2 / Table 17 cap CPt's K at 24, and the data CP's K is 36.
+* **It is not §8.6.5 scrambled ones under that constellation either.** Sweeping
+  the frame phase (6), the label order (ascending and descending), K (24, 32, 36)
+  and the sign convention (differential and absolute) never moves the descrambled
+  ones rate off 50% — the best of 36 combinations is 50.3%. The per-slot magnitude
+  distributions are also strongly non-uniform and differ between slots, which a
+  §5.4.3 modulus mapper over a fixed constellation cannot produce.
+
+So the card is not generating this TRN2d from the constellation we asked for, and
+a different constellation alone would not explain the last point. What remains
+open is whether it is running some mapper of its own or never entered the CPt
+mapper at all — and that is a question about the card's firmware, which
+`../modem-dsp-emu` runs, rather than about this decoder.

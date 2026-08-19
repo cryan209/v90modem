@@ -85,6 +85,11 @@ struct v90_analogue_phase4_s {
     int      trn2d_ones;
     bool     trn2d_broke;
     int      demap_failures;
+    /* Why a frame failed.  "Not in the constellation" and "the modulus value
+     * needs more than K bits" are different findings about the far end and
+     * were previously indistinguishable -- see the note at the failure site. */
+    int      demap_out_of_constellation;
+    int      demap_modulus_overflow;
 
     /* Plain bits, as a sliding window for the MP hunt. */
     uint8_t  bits[MP_BIT_WINDOW];
@@ -123,6 +128,31 @@ static int codeword_sign(const v90_analogue_phase4_t *s, uint8_t c, int *ucode)
 
     v90_codeword_decompose(s->cfg.law, c, ucode, &sign);
     return sign;
+}
+
+/*
+ * Is every codeword of the buffered six-symbol frame a member of the
+ * constellation this mapping names?  §5.4.3's modulus decode rejects a frame
+ * for either this or an over-large modulus value, and only this one says
+ * anything about the far end's choice of points.
+ */
+static bool frame_ucodes_in_constellation(const v90_analogue_phase4_t *s,
+                                          const vpcm_cp_frame_t *mapping)
+{
+    for (int i = 0; i < (int)(sizeof(s->frame)/sizeof(s->frame[0])); i++) {
+        int constellation = mapping->dfi[i];
+        int ucode = -1;
+
+        (void)codeword_sign(s, s->frame[i], &ucode);
+        if (ucode < 0
+            || constellation >= mapping->constellation_count
+            || !vpcm_cp_mask_get(mapping->masks[constellation], ucode)) {
+            return false;
+        }
+        /*endif*/
+    }
+    /*endfor*/
+    return true;
 }
 
 v90_analogue_phase4_t *v90_analogue_phase4_init(const v90_analogue_phase4_config_t *cfg)
@@ -537,12 +567,27 @@ static unsigned demap_frame(v90_analogue_phase4_t *s)
     /*endif*/
     if (n <= 0) {
         /*
-         * A frame that will not demap is a frame whose codewords are not in
-         * the constellation this side asked for.  Count it: a digital modem
-         * that ignored CPt produces nothing but these, and that is a different
-         * problem from one that is simply not transmitting yet.
+         * Two very different things end up here, and conflating them sends an
+         * investigation the wrong way.
+         *
+         * Either a codeword is not in the constellation this side asked for --
+         * a digital modem that ignored CPt produces nothing but these -- or
+         * every codeword *is* in the constellation but the §5.4.3 modulus
+         * value needs more than K bits, which means the far end is addressing
+         * more points than the K we announced can carry.  The second is not a
+         * statement about any individual symbol, and it also fires for a
+         * locally malformed CP: enable every Ucode and prod(Mi) is 128^6,
+         * hugely over any legal K, so nearly every frame is rejected no matter
+         * what arrives.  Separate them.
          */
         s->demap_failures++;
+        if (mapping->shaping_redundancy == 0
+            && !frame_ucodes_in_constellation(s, mapping)) {
+            s->demap_out_of_constellation++;
+        } else {
+            s->demap_modulus_overflow++;
+        }
+        /*endif*/
         return 0;
     }
     /*endif*/
@@ -842,6 +887,17 @@ const v90_analogue_mp_t *v90_analogue_phase4_mp(const v90_analogue_phase4_t *s)
 int v90_analogue_phase4_demap_failures(const v90_analogue_phase4_t *s)
 {
     return s ? s->demap_failures : 0;
+}
+
+int v90_analogue_phase4_demap_out_of_constellation(
+        const v90_analogue_phase4_t *s)
+{
+    return s ? s->demap_out_of_constellation : 0;
+}
+
+int v90_analogue_phase4_demap_modulus_overflow(const v90_analogue_phase4_t *s)
+{
+    return s ? s->demap_modulus_overflow : 0;
 }
 
 int v90_analogue_phase4_trn2d_ones(const v90_analogue_phase4_t *s)

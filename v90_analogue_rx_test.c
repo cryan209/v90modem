@@ -900,6 +900,170 @@ static void test_tone_b_retrain_detector(void)
     v90_analogue_phase3_free(p3);
 }
 
+
+/*
+ * §9.4.2 against the one foreign Phase 4 downstream we have.
+ *
+ * artifacts/eicon-phase4-downstream/run79-ri-rbar-trn2d.ulaw is 30 s of an
+ * Eicon Diva Server's own §9.4 downstream, captured on the analogue side of a
+ * live call.  Every other Phase 4 test in this file is fed by v90.c, so both
+ * halves share any wrong assumption and agree anyway; this one cannot.
+ *
+ * What it pins is the acquisition, which is what run 79 actually proved: Ri is
+ * found without being told its Ucode, §9.4.1.2's R̄i transition is detected,
+ * and TRN2d starts on the right symbol.  The card ignores U_INFO and sends Ri
+ * at Ucode 22 where this call announced 48, so a receiver that trusts the
+ * announced value finds nothing.  None of this had automated coverage.
+ *
+ * It also pins the answer to the question the fixture was kept to settle.  The
+ * README asked whether the card's TRN2d fails because it declines the
+ * constellation our CPt named, or because our six-symbol frame grid is off at
+ * the R̄i seam.  Measured here, neither is quite it:
+ *
+ *   - The grid is right.  This receiver puts TRN2d's first symbol at sample
+ *     6135, and an independent scan agrees: Ri's +++--- reverses to ---+++
+ *     after 2544 symbols and runs 24 more, ending at 6135.
+ *   - Nothing is outside the constellation.  Splitting the demap failure by
+ *     cause gives out-of-constellation 0 and modulus overflow on every frame.
+ *   - The card addresses more modulus space than a CPt can carry.  Its TRN2d
+ *     uses 39 magnitudes (Ucodes 0-39, 35 absent), the same support in all six
+ *     intervals, white and stationary across the whole 30 s.  That is 39^6 =
+ *     2^31.7 per six-symbol frame, needing K = 32; Table 17 caps CPt's K at 24.
+ *   - And it is not §8.6.5 scrambled ones under that constellation anyway.
+ *     Sweeping frame phase, label order, K and the sign convention never moves
+ *     the descrambled ones rate off 50%.
+ *
+ * So the card is not generating this TRN2d from the constellation we asked
+ * for.  MP is therefore asserted NOT to decode: if it ever does, this test
+ * fires and the fixture README needs rewriting.
+ */
+static void test_phase4_foreign_downstream(void)
+{
+    static const char path[] =
+        "artifacts/eicon-phase4-downstream/run79-ri-rbar-trn2d.ulaw";
+    /* Independently derived from the capture, not from this decoder: the
+     * Ucode-22 run starts at sample 3567 and its +++--- grid reverses to
+     * ---+++ after 2544 symbols, running 24 more.  See the fixture README. */
+    const int expect_ri_start = 3567;
+    const int expect_ri_symbols = 2544;
+    const int expect_trn2d_start = 6135;   /* 3567 + 2544 + 24 */
+    const int r_rep_len = 6;               /* §8.6.4: +++--- is six symbols */
+    v90_analogue_phase4_config_t cfg;
+    v90_analogue_phase4_t *rx;
+    vpcm_cp_frame_t cpt;
+    vpcm_cp_frame_t cp;
+    unsigned events = 0;
+    uint8_t *stream;
+    long len;
+
+    printf("§9.4.2 receive against the Eicon card's own Phase 4 downstream\n");
+    (void)expect_ri_start;
+
+    if ((stream = read_file(path, &len)) == NULL) {
+        printf("  FAIL: could not read %s\n", path);
+        failures++;
+        return;
+    }
+
+    /* The widest legal CPt: the point is to let acquisition run, not to
+     * reproduce run 79's negotiated constellation. */
+    vpcm_cp_init(&cpt);
+    cpt.v90_compatibility = false;
+    cpt.drn = 12;
+    cpt.shaping_redundancy = 0;
+    cpt.shaping_lookahead = 0;
+    cpt.constellation_count = 1;
+    vpcm_cp_enable_all_ucodes(cpt.masks[0]);
+    for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++)
+        cpt.dfi[i] = 0;
+    cp = cpt;
+    cp.v90_compatibility = true;
+    cp.drn = 1;
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.law = V90_LAW_ULAW;
+    cfg.u_info = 48;                 /* what the call announced */
+    cfg.cpt = cpt;
+    cfg.cp = cp;
+    if ((rx = v90_analogue_phase4_init(&cfg)) == NULL) {
+        printf("  FAIL: Phase 4 receiver did not initialise\n");
+        failures++;
+        free(stream);
+        return;
+    }
+
+    for (long off = 0; off < len; off += 160) {
+        int take = (int) ((len - off > 160) ? 160 : (len - off));
+        events |= v90_analogue_phase4_put(rx, stream + off, take);
+    }
+
+    printf("  Ri %dT, TRN2d %dT, MP frames %d\n",
+           v90_analogue_phase4_r_symbols(rx),
+           v90_analogue_phase4_trn2d_symbols(rx),
+           v90_analogue_phase4_mp_frames(rx));
+    printf("  demap failures %d (out-of-constellation %d, modulus overflow %d)\n",
+           v90_analogue_phase4_demap_failures(rx),
+           v90_analogue_phase4_demap_out_of_constellation(rx),
+           v90_analogue_phase4_demap_modulus_overflow(rx));
+
+    CHECK((events & V90A4_RX_EVENT_R) != 0,
+          "Ri never acquired in the card's downstream -- §8.6.4's Ucode is "
+          "learned from the wire because this card does not honour U_INFO "
+          "(it sent Ucode 22 against the announced %d)", cfg.u_info);
+    CHECK((events & V90A4_RX_EVENT_R_BAR) != 0,
+          "§9.4.1.2's Ri-to-R̄i transition never seen -- CPt would never end");
+    CHECK((events & V90A4_RX_EVENT_TRN2D) != 0,
+          "TRN2d never started after the R̄i transition");
+    /*
+     * The load-bearing quantity is where TRN2d begins, not how the preceding
+     * symbols are labelled: it sets the six-symbol mapping grid for everything
+     * after it.  Check it directly against the offset an independent scan of
+     * the Ri sign pattern gives.
+     */
+    CHECK((int)len - v90_analogue_phase4_trn2d_symbols(rx) == expect_trn2d_start,
+          "TRN2d starts at sample %d, expected %d -- the mapping grid for the "
+          "whole of §9.4 hangs off this",
+          (int) len - v90_analogue_phase4_trn2d_symbols(rx), expect_trn2d_start);
+    /*
+     * Ri is reported as 2556T, not the 2544T it actually runs: the reversal
+     * detector needs two of R̄i's four repetitions before it fires, and those
+     * 12 symbols are counted against Ri.  That costs nothing -- TRN2d still
+     * starts in the right place, as checked above -- but the number is not the
+     * length of Ri, and pinning it here stops it being read as one.
+     */
+    CHECK(v90_analogue_phase4_r_symbols(rx)
+              == expect_ri_symbols + 2*r_rep_len,
+          "Ri reported %dT, expected %dT (%dT of Ri plus the %dT of R̄i the "
+          "reversal detector consumes before firing)",
+          v90_analogue_phase4_r_symbols(rx),
+          expect_ri_symbols + 2*r_rep_len, expect_ri_symbols,
+          2*r_rep_len);
+    /*
+     * The finding, not a tolerance.  Every frame is rejected by §5.4.3's
+     * modulus check and not one codeword is outside the constellation, so the
+     * card is addressing more points than the K a CPt can announce -- it is
+     * not using the constellation we named.
+     */
+    CHECK(v90_analogue_phase4_demap_out_of_constellation(rx) == 0,
+          "%d frames carried a codeword outside the constellation; the "
+          "measured failure is modulus overflow, not membership",
+          v90_analogue_phase4_demap_out_of_constellation(rx));
+    CHECK(v90_analogue_phase4_demap_modulus_overflow(rx)
+              == v90_analogue_phase4_trn2d_symbols(rx)/6,
+          "modulus overflow on %d of %d frames; it was every frame when this "
+          "was measured",
+          v90_analogue_phase4_demap_modulus_overflow(rx),
+          v90_analogue_phase4_trn2d_symbols(rx)/6);
+    CHECK(v90_analogue_phase4_mp_frames(rx) == 0,
+          "the card's TRN2d/MP now decodes (%d MP frames) -- that is the "
+          "question the fixture README was kept open for; update it and "
+          "tighten this test",
+          v90_analogue_phase4_mp_frames(rx));
+
+    v90_analogue_phase4_free(rx);
+    free(stream);
+}
+
 int main(int argc, char *argv[])
 {
     size_t i;
@@ -914,6 +1078,7 @@ int main(int argc, char *argv[])
     test_dil_stage();
     for (int sr = 0; sr <= 3; sr++)
         test_phase4_receive(sr);
+    test_phase4_foreign_downstream();
     test_phase4_cp_from_measurement();
     test_tone_b_retrain_detector();
 
