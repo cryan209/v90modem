@@ -95,20 +95,40 @@ past B1, and the first published bits are still white (`1FC01B46
 EAB7C72D 56B1F004`), with both polynomials at 50%.  So data-frame phase
 was a real defect but not the one that whitens the output.
 
-What that leaves, in order of suspicion:
+**And the decision error is not a noise figure at all.**  0.67 across two
+dimensions is exactly 2 x 1/3, which is what symbols distributed
+uniformly over a lattice cell of spacing 2 give.  The data-era symbols
+therefore bear *no relation to the constellation* -- they are not noisy
+points on it.  Two follow-ups, both run live:
 
-1. **The equalizer is never adapted.**  Seven taps, least-squares fitted
-   once over the 128 symbols of B1, then frozen for the rest of the call
-   -- and the residual it leaves is only ~1.7 sigma of the decision
-   half-distance (above).  A few percent of raw symbol errors is enough
-   to make shell-decoded output look white.  Decision-directed LMS on
-   those taps through DATA is the obvious next move, and the metric to
-   judge it by is already in place.
-2. **B1 may be longer than the one data frame we model**, in which case
-   publishing begins inside B1 -- but that would show as ones, not white,
-   so this only matters once the error rate is down.
-3. Superframe/V0 phase, if anything in the shell path depends on it
-   beyond the data-frame position already handled.
+- **Decision-directed NLMS on the seven equalizer taps** moved the
+  decision error not at all.  If the residual were linear distortion
+  those taps could invert, it would have.  (Left off by default:
+  adapting towards meaningless decisions cannot help.)
+- **A 33-point gain sweep**, distance-to-grid at scales from 0.40 to
+  2.00, is flat at 0.65-0.68 everywhere.  No scaling puts these symbols
+  on the lattice, so V.34's per-rate modulation factor -- which applies
+  to data but not to the B1 fit that set our scale, and was the obvious
+  suspect -- is ruled out.
+
+So B1 matches its template at 98.6%, and a few hundred symbols later the
+signal is off-lattice under every gain.  Whatever changes, changes at
+that boundary, and it is a property of the signal rather than of our
+filter.  The leading candidate is now **V.34 non-linear precoding**: a
+precoder's output does not sit on the lattice, which is exactly this
+measurement, and seeding `rx.h[]` from the selected MP is already a known
+gap (the digital path emits Type 0 / zero coefficients).  The MP we lock
+reports `type=0`, so either the peer is precoding when our MP did not ask
+it to, or the transform is something else applied only after B1.  The
+B1-era distance-to-grid probe -- the same measure over the suppressed B1
+symbols -- is in the tree to pin the boundary down; it has not yet caught
+a live call, because reaching data mode has been taking 5 to 24 attempts.
+
+Ruled out along the way, all measured rather than argued: the scrambler
+polynomial (both give 50%), the trellis size (all three swept at
+acquisition), the data-frame phase (fixed, retested, still white), the
+carrier (low, matching INFO1d), and the decoder itself (390 exact-symbol
+cases, every symbol rate, bit-perfect).
 
 ## Status
 

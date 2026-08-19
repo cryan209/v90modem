@@ -9325,6 +9325,31 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                that is producing white output has a large one.  This is the
                only direct read on whether an upstream failure is in the
                waveform or after it. */
+            if (s->v90_t3_acquired  &&  s->v90_t3_suppress_output)
+            {
+                /* Same measure over the B1 era, where the symbols are known
+                   to match their template.  If B1 is on the lattice and the
+                   data that follows is not, whatever changes does so exactly
+                   at that boundary -- which is a statement about the signal,
+                   not about our filter. */
+                float g_re = transformed_re*s->data_symbol_scale;
+                float g_im = transformed_im*s->data_symbol_scale;
+                float t_re = 2.0f*floorf(g_re/2.0f) + 1.0f;
+                float t_im = 2.0f*floorf(g_im/2.0f) + 1.0f;
+
+                s->v90_t3_b1_err += (g_re - t_re)*(g_re - t_re)
+                                  + (g_im - t_im)*(g_im - t_im);
+                if (++s->v90_t3_b1_err_count == 128)
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - V.90 upstream B1-era distance to grid: "
+                             "%.4f per symbol over %d symbols\n",
+                             s->v90_t3_b1_err/s->v90_t3_b1_err_count,
+                             s->v90_t3_b1_err_count);
+                }
+                /*endif*/
+            }
+            /*endif*/
             if (s->v90_t3_acquired  &&  !s->v90_t3_suppress_output)
             {
                 float g_re = transformed_re*s->data_symbol_scale;

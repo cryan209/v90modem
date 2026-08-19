@@ -781,6 +781,9 @@ typedef struct
     uint32_t scramble_reg;
     /*! \brief The scrambler tap which selects between the caller and answerer scramblers */
     int scrambler_tap;
+    /*! \brief Distance-to-grid over the B1 era, for comparison with data. */
+    float v90_t3_b1_err;
+    int v90_t3_b1_err_count;
     /*! \brief Distance-to-grid under a swept gain, to tell a scaling fault
         from symbols that are simply not on the constellation. */
     float v90_t3_gain_err[V34_V90_T3_GAIN_TRIALS];
