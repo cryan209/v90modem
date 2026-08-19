@@ -1204,6 +1204,25 @@ static void mp_unlock_after_reject(v34_rx_state_t *s, bool count_tap_reject)
              s->mp_hypothesis);
     s->mp_early_rejects = 0;
     mp_reset_hypothesis_search(s);
+    if (s->stage == V34_RX_STAGE_V90_CP && s->v90_cp_diff_hypothesis >= 0)
+    {
+        /* Every axis the retry mode rotates is already fixed for a V.90
+           Phase 4 CP: the domain is differential (8.5.2 sends CP through J's
+           modulation, which 10.1.3.3 differentially encodes), the scrambler
+           is the analogue modem's GPA (tap 4, V.90 9), and the bit order is
+           b0,b1.  Rotating off that configuration cannot find a better one --
+           it can only spend the CP window decoding with settings known to be
+           wrong.  Measured: after three rejects the rotation moved to
+           ord=b1,b0 and then tap=17, and no further frame validated.
+           A rejected frame here means line errors in the body, and the answer
+           to that is to re-acquire the next repetition, not to change how it
+           is decoded. */
+        s->mp_frame_pos = 0;
+        s->mp_frame_target = 0;
+        s->mp_phase4_reject_streak = 0;
+        return;
+    }
+    /*endif*/
     if (mp_phase4_has_pinned_trn_lock(s))
     {
         if (count_tap_reject)

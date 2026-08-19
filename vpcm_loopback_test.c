@@ -10089,24 +10089,24 @@ static bool test_v90_v92_startup_contract_path(v91_law_t law)
 /*
  * The V.90/V.92 startup contract path drives two real SpanDSP V.34 modems
  * through a bare, full-duplex G.711 sample-swap loopback (vpcm_v90_transport_
- * linear) that models no half-duplex turn-taking, delay, or tone timing.  The
- * answering modem therefore never completes the Phase-2 INFO0->A/B->L1/L2->INFO1
- * handshake, so the probe exhausts its chunk budget and reports "incomplete".
- * This is a known-incomplete, self-labelled "temporary" harness path (see
- * run_v90_v92_startup_contract_session), not a regression, so it is skipped by
- * default to keep `make test` green.  Enable it — to work on completing the
- * native V.34 loopback handshake — with --contract-path or VPCM_CONTRACT_PATH=1.
+ * linear), coupling our analogue Phase 3/4 engine to our digital one.
+ *
+ * This was skipped by default because the answering modem never completed the
+ * Phase-2 INFO0->A/B->L1/L2->INFO1 handshake and the probe exhausted its chunk
+ * budget.  It now runs end to end in both laws: Phase 2 completes, Phase 3
+ * locks, and the digital side accepts CPt/CP demodulated off the wire.  It is
+ * the only coverage that points our two roles at each other, and it is
+ * deterministic and takes about half a second, so it runs by default.
+ * VPCM_CONTRACT_PATH=0 skips it; --contract-path remains as an explicit enable.
  */
 static bool run_v90_v92_startup_contract_path_or_skip(v91_law_t law)
 {
     const char *env = getenv("VPCM_CONTRACT_PATH");
-    bool enabled = g_vpcm_contract_path
-                || (env != NULL && env[0] != '\0' && strcmp(env, "0") != 0);
 
-    if (!enabled) {
-        vpcm_log("SKIP: V.90/V.92 startup contract path (%s) — native V.34 "
-                 "half-duplex startup does not complete over the bare G.711 "
-                 "loopback; enable with --contract-path or VPCM_CONTRACT_PATH=1",
+    (void)g_vpcm_contract_path;
+    if (env != NULL && strcmp(env, "0") == 0) {
+        vpcm_log("SKIP: V.90/V.92 startup contract path (%s) — disabled by "
+                 "VPCM_CONTRACT_PATH=0",
                  vpcm_law_to_str(law));
         return true;
     }
@@ -12210,9 +12210,9 @@ int main(int argc, char **argv)
             printf("  --all-tests       Run both session and primitive suites.\n");
             printf("  --session-diag    Emit INFO/CP diagnostic tables during session tests.\n");
             printf("  --experimental-v90-info  Run the real SpanDSP V.90 INFO startup harness.\n");
-            printf("  --contract-path   Run the V.90/V.92 startup contract path (skipped by default;\n");
-            printf("                   native V.34 half-duplex startup does not complete over the\n");
-            printf("                   bare G.711 loopback). Also enabled via VPCM_CONTRACT_PATH=1.\n");
+            printf("  --contract-path   Run the V.90/V.92 startup contract path (on by default;\n");
+            printf("                   couples our analogue Phase 3/4 engine to our digital one).\n");
+            printf("                   Set VPCM_CONTRACT_PATH=0 to skip it.\n");
             printf("  --realtime        Pace G.711 transport at 8kHz wall clock instead of CPU speed.\n");
             printf("  --transport <loopback|pj-sip> Select test transport backend (default: loopback).\n");
             printf("                   pj-sip mode requires PJMEDIA passthrough and G.711 only.\n");

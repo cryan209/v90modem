@@ -7559,6 +7559,9 @@ SPAN_DECLARE(int) v34_tx_start_external_symbols(v34_state_t *s,
     s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.getbaud_null_logged = false;
     span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - external symbols: inherited gain %.4f (pre-emphasis idx %d)\n",
+             (double)s->tx.gain, s->tx.pre_emphasis_idx);
+    span_log(&s->logging, SPAN_LOG_FLOW,
              "Tx - external symbol source started (%d baud, %s carrier)\n",
              baud_rate_parameters[s->tx.baud_rate].baud_rate,
              high_carrier  ?  "high"  :  "low");

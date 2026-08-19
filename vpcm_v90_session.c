@@ -722,7 +722,6 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
     v90_analogue_phase3_config_t analogue_cfg;
     v90_analogue_phase3_t *analogue = NULL;
     v90_state_t *digital = NULL;
-    vpcm_cp_frame_t cp_prime;
     vpcm_v90_native_cp_rx_t native_cp;
     int16_t analogue_tx[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
     int16_t digital_rx[VPCM_V90_PHASE3_NATIVE_CHUNK_SAMPLES];
@@ -872,39 +871,14 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
             v34_force_v90_phase4_cp_rx(answerer);
             native_cp_started = true;
         }
-        /* CP is sent at two bits per V.34 symbol.  Keep CPt/CP up for ten
-         * complete Table-14 repetitions so the V.34 hypothesis retries and
-         * strict receiver's eight-frame soft vote have enough observations.
-         * A fixed 512-symbol wait truncated the large clean-line CPt before
-         * even one repetition had completed. */
-        if (law == V91_LAW_ALAW
-            && !cpt_notified && cpt && analogue_stage == V90A_TX_CPT
-            && v90_analogue_tx_stage_symbols(
-                   v90_analogue_phase3_tx_state(analogue))
-                   >= 10*vpcm_cp_bit_length(cpt)
-            && v90_set_phase4_cp(digital, cpt)) {
-            cpt_notified = v90_handle_rx_event(digital, V90_RX_EVENT_CP_VALID);
-        }
-        if (law == V91_LAW_ALAW
-            && !cp_notified && cp && analogue_stage == V90A_TX_CP
-            && v90_analogue_tx_stage_symbols(
-                   v90_analogue_phase3_tx_state(analogue))
-                   >= 10*vpcm_cp_bit_length(cp)
-            && v90_set_phase4_cp(digital, cp)) {
-            cp_notified = v90_handle_rx_event(digital, V90_RX_EVENT_CP_VALID);
-        }
-        if (law == V91_LAW_ALAW
-            && !cp_prime_notified && cp && analogue_stage == V90A_TX_CP_PRIME
-            && v90_analogue_tx_stage_symbols(
-                   v90_analogue_phase3_tx_state(analogue))
-                   >= vpcm_cp_bit_length(cp)) {
-            cp_prime = *cp;
-            cp_prime.acknowledge = true;
-            if (v90_set_phase4_cp(digital, &cp_prime)) {
-                cp_prime_notified =
-                    v90_handle_rx_event(digital, V90_RX_EVENT_CP_VALID);
-            }
-        }
+        /* CPt and CP reach the digital modem only by being demodulated from
+         * the analogue engine's own upstream waveform (vpcm_v90_native_cp_bit
+         * -> v90_cp_rx -> vpcm_v90_native_cp_frame).  There used to be an
+         * A-law-only bypass here that handed the digital side the frame
+         * structure directly, which meant that law never exercised the
+         * receiver at all; both laws now recover CPt/CP off the wire, so the
+         * bypass is gone and this path is honest for both.
+         */
         if (!e_notified && analogue_stage == V90A_TX_B1_PENDING) {
             const v90_analogue_phase4_t *p4 =
                 v90_analogue_phase3_phase4_state(analogue);
