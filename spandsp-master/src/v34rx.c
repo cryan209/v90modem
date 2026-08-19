@@ -7616,6 +7616,27 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 correct_tap = s->v90_mode
                             ? (s->calling_party ? 17 : 4)
                             : (s->calling_party ? 4 : 17);
+                /* The premise above -- that TRN cannot tell GPA from GPC -- is
+                   wrong.  TRN is scrambled ones, so descrambling it with the
+                   wrong polynomial yields a pseudo-random stream (~50% ones),
+                   not ones; only the transmitter's own polynomial converges to
+                   100%.  Measured against slmodemd's upstream, tap=17 scores
+                   99% and tap=4 scores ~54%, i.e. that peer transmits its
+                   upstream with GPC where 6.5/V.90 asks for GPA.  When the
+                   measurement is that decisive, the wire wins over the role
+                   rule -- forcing tap=4 there turned a 100% TRN lock into an
+                   MP search that never locked. */
+                if (s->scrambler_tap != correct_tap
+                    &&
+                    s->phase4_trn_lock_score >= 90)
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 4: role rule wants tap=%d but TRN measured tap=%d at %d%% ones; keeping the measured tap\n",
+                             correct_tap, s->scrambler_tap, s->phase4_trn_lock_score);
+                    correct_tap = s->scrambler_tap;
+                    s->v90_far_tap_measured = s->scrambler_tap;
+                }
+                /*endif*/
                 if (s->scrambler_tap != correct_tap)
                 {
                     span_log(s->logging, SPAN_LOG_FLOW,
@@ -9721,28 +9742,28 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
     }
 }
 
-static void v90_t3_try_acquire(v34_rx_state_t *s)
+static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
+                                              int scrambler_tap,
+                                              int trellis_override);
+static int v34_expected_b1_default_tap(v34_rx_state_t *rx);
+
+/* One acquisition pass over the currently loaded B1 template. */
+static float v90_t3_acquire_pass(v34_rx_state_t *s,
+                                 int64_t search_start,
+                                 int64_t search_end,
+                                 complexf_t best_coeff[V34_V90_T3_FSE_TAPS],
+                                 int64_t *best_first_out,
+                                 bool *best_conjugate_out,
+                                 float *coarse_out)
 {
-    enum { KEEP = 8, SEARCH_END = 240 };
+    enum { KEEP = 8 };
     float score[KEEP] = {0};
     int64_t first[KEEP] = {0};
     bool conjugate[KEEP] = {0};
-    complexf_t best_coeff[V34_V90_T3_FSE_TAPS];
     float best_match = 0.0f;
-    int64_t best_first = 0;
-    bool best_conjugate = false;
     int pre = V34_V90_T3_FSE_TAPS/2;
 
-    if (s->v90_t3_acquired || s->v90_t3_acquisition_attempted
-        || s->v90_t3_b1_symbols <= 0
-        || s->v90_t3_raw_count < SEARCH_END
-             + 3*s->v90_t3_b1_symbols + V34_V90_T3_FSE_TAPS)
-        return;
-    s->v90_t3_acquisition_attempted = true;
-    /* B1 begins at the E handover.  The range accounts for the causal
-       resampler/RRC group delay and media-block boundary uncertainty. */
-    for (int64_t f = pre + V34_V90_T3_RRC_TAPS/2;
-         f <= SEARCH_END;  f++)
+    for (int64_t f = search_start;  f <= search_end;  f++)
     {
         for (int c = 0;  c < 2;  c++)
         {
@@ -9772,11 +9793,130 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
         if (match > best_match)
         {
             best_match = match;
-            best_first = first[k];
-            best_conjugate = conjugate[k];
-            memcpy(best_coeff, candidate, sizeof(best_coeff));
+            *best_first_out = first[k];
+            *best_conjugate_out = conjugate[k];
+            memcpy(best_coeff, candidate,
+                   V34_V90_T3_FSE_TAPS*sizeof(complexf_t));
         }
     }
+    *coarse_out = score[0];
+    return best_match;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v90_t3_try_acquire(v34_rx_state_t *s)
+{
+    /* The E handover is only a coarse anchor: it is detected on the CP bit
+       stream, whose alignment to this 9.6 kHz branch is worth far more than
+       the 25 ms the old fixed 240-sample window allowed.  Measured against
+       slmodemd every template scored ~5%, i.e. B1 was simply not inside the
+       window.  Search as much history as the raw ring holds instead. */
+    enum { SEARCH_BACK = 24000, SEARCH_FORWARD = 4800 };
+    int64_t search_start;
+    int64_t search_end;
+    complexf_t best_coeff[V34_V90_T3_FSE_TAPS];
+    float best_match = 0.0f;
+    float best_coarse = 0.0f;
+    int64_t best_first = 0;
+    bool best_conjugate = false;
+    int best_tap = 0;
+    int best_trellis = -1;
+    /* 6.5/V.90 puts GPA on the analogue modem's upstream, but slmodemd
+       measurably uses GPC, and a template built with the wrong polynomial
+       does not correlate at all (about 5%, versus the 95% this needs).  The
+       two are cheap to tell apart here -- build both and keep whichever
+       actually fits the wire, rather than betting the whole upstream on a
+       role assumption. */
+    int candidate_tap[2];
+    int candidate_count = 0;
+
+    /* Search a span that straddles the anchor.  The E detector runs on the
+       CP bit stream and lags the wire by a variable amount, so B1 can lie
+       either side of it; only a window that reaches back before E can see
+       the common case. */
+    search_start = s->v90_t3_e_anchor - SEARCH_BACK;
+    if (search_start < V34_V90_T3_FSE_TAPS/2 + V34_V90_T3_RRC_TAPS/2)
+        search_start = V34_V90_T3_FSE_TAPS/2 + V34_V90_T3_RRC_TAPS/2;
+    /*endif*/
+    search_end = s->v90_t3_e_anchor + SEARCH_FORWARD;
+    if (s->v90_t3_acquired || s->v90_t3_acquisition_attempted
+        || s->v90_t3_b1_symbols <= 0
+        || s->v90_t3_e_anchor < 0
+        || search_end <= search_start
+        || s->v90_t3_raw_count < search_end
+             + 3*s->v90_t3_b1_symbols + V34_V90_T3_FSE_TAPS)
+        return;
+    /* Never search past what the ring still holds. */
+    if (search_start
+          < s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE
+              + 3*s->v90_t3_b1_symbols + V34_V90_T3_FSE_TAPS + 8)
+    {
+        search_start = s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE
+                     + 3*s->v90_t3_b1_symbols + V34_V90_T3_FSE_TAPS + 8;
+    }
+    /*endif*/
+    s->v90_t3_acquisition_attempted = true;
+
+    candidate_tap[candidate_count++] = v34_expected_b1_default_tap(s);
+    if (s->v90_mode)
+    {
+        candidate_tap[candidate_count] =
+            (candidate_tap[0] == 4) ? 17 : 4;
+        candidate_count++;
+    }
+    /*endif*/
+
+    /* The upstream trellis is the other thing this template has to guess:
+       nothing the peer sends states it, and a wrong convolutional code makes
+       B1 as uncorrelated as a wrong scrambler does. */
+    for (int t = 0;  t < candidate_count  &&  best_match < 0.95f;  t++)
+    {
+        int trellis_count = s->v90_mode ? 3 : 1;
+
+        for (int tr = 0;  tr < trellis_count  &&  best_match < 0.95f;  tr++)
+        {
+            complexf_t coeff[V34_V90_T3_FSE_TAPS];
+            int64_t first = 0;
+            bool conjugate = false;
+            float coarse = 0.0f;
+            float match;
+            int trellis = s->v90_mode ? tr : -1;
+
+            if (!v34_build_expected_b1_tap_trellis(s, candidate_tap[t],
+                                                   trellis))
+                continue;
+            /*endif*/
+            match = v90_t3_acquire_pass(s, search_start, search_end, coeff,
+                                        &first, &conjugate, &coarse);
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - V.90 T/3 B1 template tap=%d trellis=%d: "
+                     "coarse=%.1f%% fit=%.1f%%\n",
+                     candidate_tap[t], trellis,
+                     100.0f*coarse, 100.0f*match);
+            if (match > best_match)
+            {
+                best_match = match;
+                best_coarse = coarse;
+                best_first = first;
+                best_conjugate = conjugate;
+                best_tap = candidate_tap[t];
+                best_trellis = trellis;
+                memcpy(best_coeff, coeff, sizeof(best_coeff));
+            }
+            /*endif*/
+        }
+    }
+    /* Leave the winning template loaded; the data decoder reuses its state. */
+    if (best_tap)
+    {
+        (void)v34_build_expected_b1_tap_trellis(s, best_tap, best_trellis);
+        s->v90_far_tap_measured = best_tap;
+        if (best_trellis >= 0)
+            s->v90_t3_trellis_size = best_trellis;
+        /*endif*/
+    }
+    /*endif*/
+
     /* Dense high-rate B1 can produce a superficially plausible least-squares
        solution which does not generalise into DATA.  Require a near-exact
        complete-frame fit; the clean 21.6 kbit/s regression is 99.9%, while
@@ -9785,9 +9925,9 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     {
         span_log(s->logging, SPAN_LOG_FLOW,
                  "Rx - V.90 T/3 B1 acquisition failed "
-                 "(first=%lld coarse=%.1f%% fit=%.1f%%)\n",
-                 (long long)best_first, 100.0f*score[0],
-                 100.0f*best_match);
+                 "(first=%lld coarse=%.1f%% fit=%.1f%% tap=%d trellis=%d)\n",
+                 (long long)best_first, 100.0f*best_coarse,
+                 100.0f*best_match, best_tap, best_trellis);
         s->received_event = V34_EVENT_TRAINING_FAILED;
         return;
     }
@@ -9849,9 +9989,16 @@ static void v90_t3_put_sample(v34_rx_state_t *s, complexf_t value)
     s->v90_t3_raw_count++;
     s->v90_t3_output_count++;
     if (!s->v90_t3_acquired)
-        v90_t3_try_acquire(s);
+    {
+        if (s->v90_t3_e_anchor >= 0)
+            v90_t3_try_acquire(s);
+        /*endif*/
+    }
     else
+    {
         v90_t3_emit_ready(s);
+    }
+    /*endif*/
 }
 
 static int v90_t3_primary_rx(v34_rx_state_t *s, const int16_t amp[], int len)
@@ -9863,8 +10010,14 @@ static int v90_t3_primary_rx(v34_rx_state_t *s, const int16_t amp[], int len)
         complexf_t analytic = {0.0f, 0.0f};
         int64_t n;
 
-        s->qam_sample_time++;
-        (void) power_meter_update(&s->power, amp[i]);
+        if (!s->v90_t3_capture_only)
+        {
+            /* In capture-only mode the ordinary receiver is still running on
+               these same samples and owns this accounting. */
+            s->qam_sample_time++;
+            (void) power_meter_update(&s->power, amp[i]);
+        }
+        /*endif*/
         s->v90_t3_hilbert[s->v90_t3_hilbert_pos] = amp[i];
         if (++s->v90_t3_hilbert_pos >= V34_V90_T3_HILBERT_TAPS)
             s->v90_t3_hilbert_pos = 0;
@@ -9973,8 +10126,22 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
 
     /* This branch is internal DSP only. v34_rx() still consumes exactly len
        8 kHz line samples; no sample is inserted into or removed from RTP. */
-    if (s->v90_t3_active && s->stage == V34_RX_STAGE_DATA)
-        return v90_t3_primary_rx(s, amp, len);
+    if (s->v90_t3_active)
+    {
+        if (s->stage == V34_RX_STAGE_DATA)
+        {
+            s->v90_t3_capture_only = false;
+            return v90_t3_primary_rx(s, amp, len);
+        }
+        /*endif*/
+        /* Armed but not yet handed over: keep filling the ring so the B1
+           search can reach back across the E boundary, and let the ordinary
+           receiver carry on demodulating CP from the same samples. */
+        s->v90_t3_capture_only = true;
+        (void) v90_t3_primary_rx(s, amp, len);
+        s->v90_t3_capture_only = false;
+    }
+    /*endif*/
 
     /* Use the negotiated baud rate and carrier assignment.
        baud_rate is set from INFO1a (process_rx_info1a) or v34_rx_restart.
@@ -10905,6 +11072,8 @@ SPAN_DECLARE(int) v34_set_rx_data_transform(v34_state_t *s,
 }
 /*- End of function --------------------------------------------------------*/
 
+static bool v90_t3_start(v34_rx_state_t *rx);
+
 SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
                                                 int baud_rate,
                                                 int high_carrier,
@@ -10955,8 +11124,9 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
     /* This context's externally visible current rate is the selected V.90
        upstream, not the initial 3200-baud capability ceiling. */
     s->bit_rate = bit_rate;
-    /* V.90 §8.5.1 upstream B1/data uses the analogue-modem GPA tap. */
-    s->rx.scrambler_tap = 4;
+    /* V.90 §8.5.1 upstream B1/data uses the analogue-modem GPA tap -- unless
+       Phase 4 measured the far end using the other one, which slmodemd does. */
+    s->rx.scrambler_tap = s->rx.v90_far_tap_measured ? s->rx.v90_far_tap_measured : 4;
     s->rx.use_non_linear_encoder = false;
     for (i = 0;  i < 3;  i++)
     {
@@ -10964,6 +11134,16 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
         s->rx.h[i].im = 0;
     }
     /*endfor*/
+    /* Begin filling the T/3 ring now, while the peer is still sending CP.
+       B1 is only 90 ms long and follows E immediately on the wire, whereas
+       the E we anchor on is detected off the CP bit stream and arrives late;
+       starting the capture at the handover meant B1 had already gone by. */
+    if (!s->rx.v90_t3_active  &&  !v90_t3_start(&s->rx))
+    {
+        s->rx.v90_t3_prepared = false;
+        return -1;
+    }
+    /*endif*/
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
@@ -10997,13 +11177,16 @@ static void v90_t3_b1_put_bit(void *user_data, int bit)
     (void) bit;
 }
 
-static bool v34_build_expected_b1(v34_rx_state_t *rx)
+static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
+                                              int scrambler_tap,
+                                              int trellis_override)
 {
     v34_state_t *tx;
     int16_t frame[16];
     int16_t precoder[6];
     int rate = (rx->bit_rate/2 + 1)*2400;
-    int trellis = rx->v90_mode ? rx->v90_t3_trellis_size
+    int trellis = (trellis_override >= 0) ? trellis_override
+                : rx->v90_mode ? rx->v90_t3_trellis_size
                                : (rx->viterbi.state_count == 64
                                   ? V34_TRELLIS_64
                                   : (rx->viterbi.state_count == 32
@@ -11021,10 +11204,14 @@ static bool v34_build_expected_b1(v34_rx_state_t *rx)
                   v90_t3_b1_put_bit, NULL);
     if (!tx)
         return false;
-    /* The received B1 uses the far-end role's clause-7 scrambler. */
-    tx->tx.scrambler_tap = rx->v90_mode
-                         ? 4       /* V.90 analogue-modem GPA, §8.5.1. */
-                         : (rx->calling_party ? 4 : 17);
+    /* The received B1 uses the far-end role's clause-7 scrambler.  6.5/V.90
+       says the analogue modem uses GPA, but slmodemd measurably scrambles its
+       upstream with GPC (Phase-4 TRN descrambles to 100% ones at tap 17 and
+       ~54% at tap 4), and a B1 template built with the wrong polynomial does
+       not correlate with the wire at all -- coarse score 5%, so acquisition
+       failed and no upstream data ever reached the DTE.  Phase 4 has already
+       established which tap the far end really uses; reuse it. */
+    tx->tx.scrambler_tap = scrambler_tap;
     tx->tx.baud_rate = rx->baud_rate;
     if (v34_seed_tx_data(tx, rate/2400, trellis,
                          rx->v90_mode ? 0 : rx->use_non_linear_encoder,
@@ -11059,6 +11246,29 @@ static bool v34_build_expected_b1(v34_rx_state_t *rx)
     v34_free(tx);
     return rx->v90_t3_b1_symbols > 0;
 }
+/*- End of function --------------------------------------------------------*/
+
+static bool v34_build_expected_b1_tap(v34_rx_state_t *rx, int scrambler_tap)
+{
+    return v34_build_expected_b1_tap_trellis(rx, scrambler_tap, -1);
+}
+/*- End of function --------------------------------------------------------*/
+
+static int v34_expected_b1_default_tap(v34_rx_state_t *rx)
+{
+    if (!rx->v90_mode)
+        return rx->calling_party ? 4 : 17;
+    /*endif*/
+    /* 6.5/V.90 says the analogue modem scrambles with GPA (tap 4).  Phase 4
+       overrides that when it measured the far end using GPC. */
+    return rx->v90_far_tap_measured ? rx->v90_far_tap_measured : 4;
+}
+/*- End of function --------------------------------------------------------*/
+
+static bool v34_build_expected_b1(v34_rx_state_t *rx)
+{
+    return v34_build_expected_b1_tap(rx, v34_expected_b1_default_tap(rx));
+}
 
 static bool v90_t3_start(v34_rx_state_t *rx)
 {
@@ -11069,6 +11279,8 @@ static bool v90_t3_start(v34_rx_state_t *rx)
         && rx->v90_t3_internal_rate != 9600)
         return false;
     rx->v90_t3_acquisition_attempted = false;
+    rx->v90_t3_e_anchor = -1;
+    rx->v90_t3_capture_only = false;
     rx->v90_t3_acquired = false;
     rx->v90_t3_input_count = 0;
     rx->v90_t3_next_output = 0;
@@ -11142,8 +11354,24 @@ SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
     s->rx.mp_seen = 2;
     s->rx.b1_acquisition_active = false;
     s->rx.b1_observed_symbols = 0;
-    if (s->rx.v90_t3_prepared && !v90_t3_start(&s->rx))
-        return -1;
+    if (s->rx.v90_t3_prepared)
+    {
+        if (s->rx.v90_t3_active)
+        {
+            /* Already capturing since the upstream was armed -- keep the
+               history and just mark where E landed. */
+            s->rx.v90_t3_e_anchor = s->rx.v90_t3_raw_count;
+        }
+        else
+        {
+            if (!v90_t3_start(&s->rx))
+                return -1;
+            /*endif*/
+            s->rx.v90_t3_e_anchor = s->rx.v90_t3_raw_count;
+        }
+        /*endif*/
+    }
+    /*endif*/
     if (!s->rx.v90_mode && v34_build_expected_b1(&s->rx))
         s->rx.b1_acquisition_active = true;
     /* 11.4.1.1.5/11.4.1.2.5 conditions on the complete known B1 before

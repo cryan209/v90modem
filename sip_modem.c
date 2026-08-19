@@ -686,6 +686,11 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e)
     }
 }
 
+/* Seconds of RTP silence on a connected call before we hang it up. */
+#define RTP_IDLE_HANGUP_SEC 20
+static uint64_t     g_last_rtp_rx_octets = 0;
+static pj_time_val  g_last_rtp_rx_time = {0, 0};
+
 static void on_call_media_state(pjsua_call_id call_id)
 {
     pjsua_call_info ci;
@@ -1277,6 +1282,33 @@ int main(int argc, char *argv[])
                     PJ_LOG(3, ("sip_modem", "Outgoing call to %s", resolved_uri));
                 }
             }
+        }
+
+        /* Drop a call whose RTP has stopped.  Without this, a peer that
+         * disappears without a BYE (the soak rig kills slmodemd outright)
+         * leaves the single call slot occupied for the life of the process
+         * and every later INVITE is refused with "too many calls". */
+        if (g_call_id != PJSUA_INVALID_ID && g_media_connected) {
+            me_diag_snapshot_t rtp_snap;
+            pj_time_val rtp_now;
+
+            me_get_diag_snapshot(&rtp_snap);
+            pj_gettimeofday(&rtp_now);
+            if (rtp_snap.g711_rx_octets != g_last_rtp_rx_octets) {
+                g_last_rtp_rx_octets = rtp_snap.g711_rx_octets;
+                g_last_rtp_rx_time = rtp_now;
+            } else if (g_last_rtp_rx_time.sec != 0
+                       && rtp_now.sec - g_last_rtp_rx_time.sec
+                            >= RTP_IDLE_HANGUP_SEC) {
+                PJ_LOG(2, ("sip_modem",
+                           "No RTP for %d s; hanging up the stalled call",
+                           RTP_IDLE_HANGUP_SEC));
+                pjsua_call_hangup(g_call_id, 0, NULL, NULL);
+                g_last_rtp_rx_time.sec = 0;
+            }
+        } else {
+            g_last_rtp_rx_time.sec = 0;
+            g_last_rtp_rx_octets = 0;
         }
 
         /* Check if the modem engine requested a hang-up */

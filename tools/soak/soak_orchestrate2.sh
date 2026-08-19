@@ -10,7 +10,25 @@ TOWER=root@tower.net.cryan.nz
 MAXATTEMPTS="${3:-8}"
 
 bounce_rig() {
-  ssh -o BatchMode=yes $TOWER "docker exec d-modem sh -c 'for d in /proc/[0-9]*; do cmd=\$(tr \"\\0\" \" \" < \$d/cmdline 2>/dev/null); case \"\$cmd\" in *slmodemd*|*socat*) kill \${d#/proc/} 2>/dev/null;; esac; done; sleep 1; rm -f /tmp/slm.log; true'; docker exec -d -e SIP_LOGIN=6000:6000@asterisk.net.cryan.nz -e DM_RESAMPLER=sinc -e DM_RS_HEADROOM=0.25 d-modem sh -c '/src/slmodemd/slmodemd_trnref -d9 -e /src/d-modem > /tmp/slm.log 2>&1'; sleep 3; docker exec -d d-modem sh -c 'socat TCP-LISTEN:5556,reuseaddr,fork FILE:/dev/ttySL0,raw,echo=0'" 2>/dev/null
+  # Kill hard and *verify*: a surviving slmodemd from the previous attempt
+  # re-creates /dev/ttySL0, and the two instances then fight over the dial
+  # ("Dialer was aborted" -> instant NO CARRIER on every redial).
+  ssh -o BatchMode=yes $TOWER "docker exec d-modem sh -c '
+      for pass in 1 2 3; do
+        for d in /proc/[0-9]*; do
+          cmd=\$(tr \"\\0\" \" \" < \$d/cmdline 2>/dev/null)
+          case \"\$cmd\" in *slmodemd*|*socat*|*d-modem*) kill -9 \${d#/proc/} 2>/dev/null;; esac
+        done
+        sleep 1
+      done
+      rm -f /tmp/slm.log; true'" 2>/dev/null
+  left=$(ssh -o BatchMode=yes $TOWER "docker exec d-modem sh -c 'ps ax -o comm 2>/dev/null | grep -c \"slmodemd_trnref\"'" 2>/dev/null)
+  if [ "${left:-0}" -gt 0 ] 2>/dev/null; then
+    echo "  bounce: $left slmodemd still alive after kill; restarting container"
+    ssh -o BatchMode=yes $TOWER "docker restart d-modem" >/dev/null 2>&1
+    sleep 8
+  fi
+  ssh -o BatchMode=yes $TOWER "docker exec -d -e SIP_LOGIN=6000:6000@asterisk.net.cryan.nz -e DM_RESAMPLER=sinc -e DM_RS_HEADROOM=0.25 d-modem sh -c '/src/slmodemd/slmodemd_trnref -d9 -e /src/d-modem > /tmp/slm.log 2>&1'; sleep 12; docker exec -d d-modem sh -c 'socat TCP-LISTEN:5556,reuseaddr,fork FILE:/dev/ttySL0,raw,echo=0'" 2>/dev/null
   sleep 2
   at=$( (printf 'AT\r'; sleep 2) | nc -4 -w 5 tower.net.cryan.nz 5556 2>/dev/null )
   case "$at" in *OK*) return 0;; *) return 1;; esac

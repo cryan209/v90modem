@@ -2578,7 +2578,14 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
                 diag->nbits, (unsigned)diag->frame.drn, accepted ? 1 : 0);
     if (accepted)
         v90_cp_live_mark_accepted_locked(diag);
-    if (accepted && frame->acknowledge && !g_v34_upstream_data_armed && g_v34) {
+    /* The peer's data-mode CP carries everything the upstream receiver needs
+     * (baud, rate, constellation); its acknowledge bit is about the handshake,
+     * not about the parameters.  Waiting for an acknowledged CP' meant that
+     * against slmodemd -- whose CP' we do not always decode -- the upstream
+     * receiver was never prepared, so B1 was hunted with default parameters,
+     * correlated at 5%, and no upstream byte ever reached the DTE. */
+    if (accepted && (frame->acknowledge || frame->v90_compatibility)
+        && !g_v34_upstream_data_armed && g_v34) {
         int baud = v90_selected_upstream_baud_locked();
         int rate = v34_get_current_bit_rate(g_v34);
         int max_rate = v90_upstream_baud_max_bps(baud);

@@ -35,13 +35,38 @@ def send_at(cmd, wait=2.0):
     return got
 
 send_at("ATZ"); send_at("ATX3"); send_at("AT\\N0"); send_at("AT+MS=90,1,300,56000")
-s.sendall(b"ATD6001\r")
-print("SOCK: dialing", flush=True)
+
+# Drain anything still queued on the pty (socat fork children can deliver a
+# previous call's trailing NO CARRIER here, which used to abort the soak
+# before the dial had even been placed).
+drain_end = time.time() + 1.0
+while time.time() < drain_end:
+    r, _, _ = select.select([s], [], [], 0.2)
+    if r:
+        try:
+            s.recv(4096)
+        except BlockingIOError:
+            pass
 
 rxf = open(os.path.join(OUTDIR, "rx_sock.bin"), "wb")
 idxf = open(os.path.join(OUTDIR, "rx_sock.idx"), "w")
 
+# A dial placed within a few seconds of a rig bounce comes straight back as
+# NO CARRIER (the d-modem child has not finished registering with the SIP
+# server yet).  A redial a few seconds later goes through, so treat an
+# immediate NO CARRIER as "not ready" rather than as a failed soak.
+MAX_DIALS = 12
+dials = 0
+
+def place_dial():
+    global dials, buf
+    dials += 1
+    buf = b""
+    s.sendall(b"ATD6001\r")
+    print(f"SOCK: dialing (attempt {dials})", flush=True)
+
 buf = b""
+place_dial()
 t_wait = time.time()
 while True:
     r, _, _ = select.select([s], [], [], 1.0)
@@ -54,12 +79,29 @@ while True:
             print("SOCK: socket closed while waiting for CONNECT", flush=True)
             sys.exit(1)
         buf += d
+        # Only judge what follows the dial's own echo.
+        if b"ATD6001" in buf:
+            buf = buf.split(b"ATD6001", 1)[1]
         if b"CONNECT" in buf:
             print(f"SOCK: CONNECT seen: {buf[-120:]!r}", flush=True)
             break
         if b"NO CARRIER" in buf or b"BUSY" in buf or b"ERROR" in buf:
+            # A genuine dial cannot fail this fast: the SIP call takes about
+            # six seconds just to reach CONNECTING.  Anything arriving sooner
+            # is a previous call's queued result overtaking our dial echo on
+            # the shared pty -- swallow it and keep waiting.
+            if time.time() - t_wait < 5.0:
+                print(f"SOCK: ignoring stale {buf[-40:]!r} "
+                      f"{time.time() - t_wait:.1f}s after dialing", flush=True)
+                buf = b""
+                continue
             print(f"SOCK: dial failed: {buf[-120:]!r}", flush=True)
-            sys.exit(1)
+            if dials >= MAX_DIALS:
+                sys.exit(1)
+            time.sleep(8)
+            place_dial()
+            t_wait = time.time()
+            continue
     if time.time() - t_wait > 240:
         print("SOCK: no CONNECT within 240s; giving up", flush=True)
         sys.exit(1)

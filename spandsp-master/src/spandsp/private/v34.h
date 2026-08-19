@@ -44,7 +44,10 @@
 #define V34_V90_T3_RESAMPLE_TAPS            33
 #define V34_V90_T3_RRC_TAPS                 97
 #define V34_V90_T3_FSE_TAPS                 7
-#define V34_V90_T3_RAW_SIZE                 4096
+/* Big enough to hold the whole E->B1 era plus the lag of the CP-bitstream E
+   detector that anchors the search (about 3.4 s at 9.6 kHz).  B1 is only
+   90 ms long and had been passing before the capture even started. */
+#define V34_V90_T3_RAW_SIZE                 32768
 #define V34_V90_T3_RAW_MASK                 (V34_V90_T3_RAW_SIZE - 1)
 #define V34_V90_T3_B1_MAX_SYMBOLS           256
 
@@ -777,6 +780,16 @@ typedef struct
     uint32_t scramble_reg;
     /*! \brief The scrambler tap which selects between the caller and answerer scramblers */
     int scrambler_tap;
+    /*! \brief Capturing into the T/3 ring alongside the normal receiver,
+        before the DATA handover. */
+    bool v90_t3_capture_only;
+    /*! \brief Raw-sample index of the E handover, the anchor the B1 search
+        works outwards from.  Negative until E is seen. */
+    int64_t v90_t3_e_anchor;
+    /*! \brief The far-end scrambler tap as measured on Phase 4 TRN (0 if not
+        measured decisively).  Survives the upstream-data handover, which
+        otherwise re-imposes the spec's role default. */
+    int v90_far_tap_measured;
 
     /*! \brief Whether the far-end transmitter uses V.34 nonlinear precoding. */
     bool use_non_linear_encoder;
