@@ -1118,6 +1118,20 @@ typedef struct
     complexf_t phase3_pp_rotation;
     int phase3_pp_phase;
     int phase3_pp_phase_score;
+    /* Mean |equalized symbol - known PP reference| / |reference| over the PP
+       conditioning window: a descrambler-independent front-end health check. */
+    float phase3_pp_resid_sum;
+    int phase3_pp_resid_count;
+    /* Mean distance from the nearest 4-point constellation point over the TRN
+       refine window, normalised by the point radius.  Small means the symbols
+       are clean and any TRN failure is a mapping/descrambler choice; large
+       means the equalizer is not holding once PP stops driving it. */
+    float phase3_trn_resid_sum;
+    int phase3_trn_resid_count;
+    /* V.90 9.4 CP is differentially encoded (10.1.3.3).  A differential
+       decode has no carrier-phase ambiguity, so the dibit transform is fixed
+       by the encoder convention rather than searched.  -1 = not pinned. */
+    int v90_cp_diff_hypothesis;
     int phase3_pp_acquire_hits;
     int phase3_pp_started;
     uint32_t phase3_j_scramble[24];

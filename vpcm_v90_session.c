@@ -754,7 +754,39 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
     memset(&analogue_cfg, 0, sizeof(analogue_cfg));
     analogue_cfg.law = vpcm_v90_data_law(law);
     analogue_cfg.baud_rate_code = 4; /* INFO1a selected 3200 baud in this harness. */
-    analogue_cfg.high_carrier = true; /* INFO1d's 3200-baud selection. */
+    /*
+     * V.90 §9.2.2.1.9 puts the analogue modem in the V.34 answer-modem role,
+     * so INFO1d -- V.34's INFO1c, Table 9 -- describes *this* transmitter.
+     * The carrier must therefore be read out of the INFO1d the digital modem
+     * actually sent, never assumed.
+     *
+     * This was hardcoded true, with a comment claiming INFO1d selects the
+     * high carrier at 3200 baud.  It does not: the digital receiver here
+     * negotiates the low carrier, so the hardcoded value put the whole
+     * upstream 91 Hz off what the far receiver was tuned to (1920 against
+     * 1829 Hz) -- the same defect already fixed on the live path in
+     * prepare_v90_analogue_phase3_locked().  Every Phase 4 CP frame was
+     * rejected because nothing demodulated, not because CP was malformed.
+     */
+    {
+        v34_v90_info1d_t info1d;
+
+        analogue_cfg.high_carrier = true;
+        if (v34_get_v90_received_info1d(caller, &info1d)) {
+            analogue_cfg.high_carrier =
+                info1d.rate_data[analogue_cfg.baud_rate_code].use_high_carrier;
+        } else {
+            /* No INFO1d decoded: fall back to whatever the digital receiver
+             * is actually tuned to rather than a fixed guess. */
+            analogue_cfg.high_carrier = v34_get_rx_high_carrier(answerer) != 0;
+        }
+        fprintf(stderr,
+                "[VPCM] V.90 analogue upstream: %s carrier at symbol-rate "
+                "code %d (digital rx tuned %s)\n",
+                analogue_cfg.high_carrier ? "high" : "low",
+                analogue_cfg.baud_rate_code,
+                v34_get_rx_high_carrier(answerer) ? "high" : "low");
+    }
     analogue_cfg.u_info = u_info;
     analogue_cfg.dil = *digital_dil;
     /* The digital receiver conservatively accepts the closing S only after a
@@ -917,10 +949,16 @@ static bool vpcm_v90_run_coupled_training(v91_law_t law,
     }
 
     fprintf(stderr,
-            "[VPCM] Native V.34 CP receive: bits=%llu valid=%u rejected=%u "
+            "[VPCM] Native V.34 CP receive: bits=%llu sync=%u valid=%u "
+            "rejected=%u (crc=%u structure=%u semantic=%u voted=%u) "
             "accepted=%d/%d/%d rx_data=%d\n",
             (unsigned long long)native_cp.rx.input_bits,
+            native_cp.rx.sync_candidates,
             native_cp.rx.valid_frames, native_cp.rx.rejected_frames,
+            native_cp.rx.crc_rejected_frames,
+            native_cp.rx.structure_rejected_frames,
+            native_cp.rx.semantic_rejected_frames,
+            native_cp.rx.voted_frames_accepted,
             native_cp.cpt_accepted, native_cp.cp_accepted,
             native_cp.cp_prime_accepted, upstream_rx_armed);
 
@@ -1089,6 +1127,14 @@ static bool vpcm_v90_run_phase2_exchange(v91_law_t law,
 
     v34_set_v90_mode(caller, law == V91_LAW_ALAW ? 1 : 0);
     v34_set_v90_mode(answerer, law == V91_LAW_ALAW ? 1 : 0);
+    if (getenv("VPCM_V90_V34_LOG")) {
+        span_log_set_level(v34_get_logging_state(caller),
+                           SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL
+                           | SPAN_LOG_FLOW);
+        span_log_set_level(v34_get_logging_state(answerer),
+                           SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL
+                           | SPAN_LOG_FLOW);
+    }
 
     answerer_saw_info0 = false;
     answerer_saw_info1 = false;

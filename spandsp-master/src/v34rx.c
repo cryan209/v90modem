@@ -479,6 +479,16 @@ static int descramble_reg(uint32_t *reg, int scrambler_tap, int in_bit)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Hypothesis index whose map_table row is dibit -> (-dibit) & 3, i.e.
+   {0, 3, 2, 1}.  V.34 10.1.3.3 advances the transmitted point index by the
+   dibit, and training_constellation_4 is ordered so that an increasing index
+   rotates CLOCKWISE (225, 135, 45, 315 degrees).  The receiver measures the
+   phase increment counter-clockwise, so the recovered differential dibit is
+   always the negation of the transmitted one.  This is a property of the
+   encoder and the table, not of the channel, so for a differential decode it
+   is fixed rather than searched. */
+#define MP_HYPOTHESIS_DIFF_INVERSE 8
+
 static int map_phase4_raw_bits(int dibit, int hypothesis)
 {
     static const uint8_t map_table[MP_HYPOTHESIS_COUNT][4] =
@@ -5657,7 +5667,21 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
         ang2 = arctan2(s->last_sample.im, s->last_sample.re);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = (ang3 >> 30) & 0x3;
-        phase3_abs_bits = (int) ((ang1 + DDS_PHASE(45.0f)) >> 30) & 0x3;
+        /* Absolute (direct-mapped) dibit, for V.34 10.1.3.8 TRN and the V.90
+           9.4 CP hypotheses.  The +45 degree bias above belongs to the
+           DIFFERENTIAL decode only: ang3 is a phase *difference*, which for
+           4-point DPSK clusters on 0/90/180/270, so the bias moves the >>30
+           boundaries off those cluster centres and onto the midpoints.
+           ang1 is an ABSOLUTE angle, and the 4-point training constellation
+           sits at 45/135/225/315 (training_constellation_4).  Applying the
+           same bias here moved the boundaries ONTO the constellation points,
+           so every training symbol landed on a decision boundary and sliced
+           to a coin flip: measured against a known transmitter, TRN scored
+           117/200 with the bias and 200/200 without it.  That kept TRN
+           descrambling at ~54% ones, below the 70% lock gate, so Phase 3
+           never locked and no V.90 Phase 4 CP frame ever demodulated.
+           The absolute slicer's boundaries are the quadrant edges. */
+        phase3_abs_bits = (int) (ang1 >> 30) & 0x3;
         s->duration++;
 
             if (V34_TRACE_DIAGNOSTICS
@@ -6397,7 +6421,21 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
         ang2 = arctan2(s->last_sample.im, s->last_sample.re);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
         data_bits = (ang3 >> 30) & 0x3;
-        phase3_abs_bits = (int) ((ang1 + DDS_PHASE(45.0f)) >> 30) & 0x3;
+        /* Absolute (direct-mapped) dibit, for V.34 10.1.3.8 TRN and the V.90
+           9.4 CP hypotheses.  The +45 degree bias above belongs to the
+           DIFFERENTIAL decode only: ang3 is a phase *difference*, which for
+           4-point DPSK clusters on 0/90/180/270, so the bias moves the >>30
+           boundaries off those cluster centres and onto the midpoints.
+           ang1 is an ABSOLUTE angle, and the 4-point training constellation
+           sits at 45/135/225/315 (training_constellation_4).  Applying the
+           same bias here moved the boundaries ONTO the constellation points,
+           so every training symbol landed on a decision boundary and sliced
+           to a coin flip: measured against a known transmitter, TRN scored
+           117/200 with the bias and 200/200 without it.  That kept TRN
+           descrambling at ~54% ones, below the 70% lock gate, so Phase 3
+           never locked and no V.90 Phase 4 CP frame ever demodulated.
+           The absolute slicer's boundaries are the quadrant edges. */
+        phase3_abs_bits = (int) (ang1 >> 30) & 0x3;
         s->duration++;
         if (!s->phase3_pp_started)
         {
@@ -6595,6 +6633,21 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 }
                 pp_target.re *= scale;
                 pp_target.im *= scale;
+                {
+                    /* Residual between the equalized symbol and the known PP
+                       reference.  PP is a fixed sequence, so this is a direct
+                       measure of front-end health that does not depend on any
+                       descrambler or hypothesis choice. */
+                    float dre = sym->re - pp_target.re;
+                    float dim = sym->im - pp_target.im;
+                    float den = sqrtf(pp_target.re*pp_target.re
+                                      + pp_target.im*pp_target.im);
+                    if (den > 0.01f)
+                    {
+                        s->phase3_pp_resid_sum += sqrtf(dre*dre + dim*dim)/den;
+                        s->phase3_pp_resid_count++;
+                    }
+                }
                 tune_equalizer(s, sym, &pp_target);
             }
 
@@ -6623,6 +6676,12 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 float pct = (s->phase3_pp_obs > 0)
                             ? (100.0f*s->phase3_pp_match/(float) s->phase3_pp_obs)
                             : 0.0f;
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 3: PP mean residual %.3f over %d bauds\n",
+                         (s->phase3_pp_resid_count > 0)
+                             ? s->phase3_pp_resid_sum/s->phase3_pp_resid_count
+                             : -1.0f,
+                         s->phase3_pp_resid_count);
                 span_log(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 3: PP conditioning complete (lag8=%d/%d, %.1f%%, phase=%d, score=%d), refining with first %dT of TRN\n",
                          s->phase3_pp_match, s->phase3_pp_obs, pct,
@@ -6668,6 +6727,15 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 if (isfinite(trn_mag) && trn_mag > 0.0f) {
                     s->phase3_trn_mag_sum += trn_mag;
                     s->phase3_trn_mag_count++;
+                    /* Distance to the nearest QPSK point, normalised. */
+                    {
+                        float a = fabsf(sym->re);
+                        float b = fabsf(sym->im);
+                        float r = trn_mag*0.7071068f;
+                        float d = sqrtf((a - r)*(a - r) + (b - r)*(b - r));
+                        s->phase3_trn_resid_sum += d/trn_mag;
+                        s->phase3_trn_resid_count++;
+                    }
                 }
             }
             if (trn_refine_baud == 1)
@@ -6696,14 +6764,21 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 else if ((s->phase3_trn_bits % 512) == 0)
                 {
                     span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 3 TRN refine: best hyp=%d ones=%d/%d (%d%%)\n",
-                             best_trn_h, best_trn_score, s->phase3_trn_bits, score_pct);
+                             "Rx - Phase 3 TRN refine: best hyp=%d ones=%d/%d (%d%%) tap=%d\n",
+                             best_trn_h, best_trn_score, s->phase3_trn_bits, score_pct,
+                             s->scrambler_tap);
                 }
                 /*endif*/
             }
             /*endif*/
             if (trn_refine_baud == PHASE3_TRN_REFINE_BAUDS)
             {
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 3: TRN mean distance to nearest 4-point %.3f over %d symbols\n",
+                         (s->phase3_trn_resid_count > 0)
+                             ? s->phase3_trn_resid_sum/s->phase3_trn_resid_count
+                             : -1.0f,
+                         s->phase3_trn_resid_count);
                 span_log(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 3: first %dT of TRN processed; equalizer frozen, waiting for J-handling stage\n",
                          PHASE3_TRN_REFINE_BAUDS);
@@ -7933,6 +8008,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 uint32_t chosen_preamble_stream;
                 int hint_h;
                 int hint_only;
+                int pin_diff_hyp;
                 int strict_mp0_lock;
                 int hint_found;
                 int hint_score;
@@ -7957,11 +8033,23 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 chosen_pending_bit = 0;
                 chosen_preamble_stream = 0;
                 hint_h = mp_phase4_has_pinned_trn_lock(s) ? s->phase4_trn_lock_hyp : s->phase3_j_lock_hyp;
+                /* A differentially decoded V.90 CP has an exactly known dibit
+                   transform (see MP_HYPOTHESIS_DIFF_INVERSE).  Pin it, and do
+                   not let the reject/no-lock escapes wander off it: there is
+                   nothing to search for, and wandering only trades the one
+                   correct transform for false preamble hits. */
+                pin_diff_hyp = (v90_cp_rx
+                                && mp_decode_domain == 0
+                                && s->v90_cp_diff_hypothesis >= 0);
+                if (pin_diff_hyp)
+                    hint_h = s->v90_cp_diff_hypothesis;
+                /*endif*/
                 strict_mp0_lock = (s->mp_seen == 0 && expected_mp_type == 0);
                 /* Constrain early MP lock to the TRN/J hint until we have
                    accumulated a couple of failed frame attempts. Using absolute
                    phase4 duration is ineffective because MP starts late in phase4. */
-                hint_only = (hint_h >= 0
+                hint_only = pin_diff_hyp
+                            || (hint_h >= 0
                              && s->mp_phase4_reject_streak < MP_HINT_STRICT_REJECTS
                              && s->mp_phase4_nolock_count < MP_HINT_MAX_NOLOCKS
                              && hint_h < MP_HYPOTHESIS_COUNT
@@ -10517,6 +10605,13 @@ SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
     s->rx.scrambler_tap = 4;
     s->rx.mp_phase4_default_scrambler_tap = 4;
     s->rx.mp_phase4_default_bit_order = 0;
+    /* CP arrives differentially encoded, so pin the fixed differential
+       inverse instead of inheriting the Phase 3 TRN/J hint: that hint was
+       measured on TRN, which V.34 10.1.3.8 maps DIRECTLY, so it describes the
+       absolute-domain rotation and is meaningless for a differential decode.
+       Feeding it here confined the search to the wrong transform while the
+       2-error preamble gate produced false locks faster than the true one. */
+    s->rx.v90_cp_diff_hypothesis = MP_HYPOTHESIS_DIFF_INVERSE;
     s->rx.mp_phase4_default_domain = 0;
     s->rx.mp_phase4_reject_streak = 0;
     s->rx.mp_phase4_nolock_count = 0;
@@ -11245,6 +11340,9 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.info0d_extensions_valid = false;
     s->rx.v90_repeated_info0a_pending = false;
     s->rx.v90_info1d_sent = false;
+    /* Not pinned until the V.90 Phase 4 CP receiver arms it.  Hypothesis 0 is
+       a legal index, so this must not be left at the zero-initialised value. */
+    s->rx.v90_cp_diff_hypothesis = -1;
     s->rx.stage = V34_RX_STAGE_INFO0;
     /* The next info message will be INFO0 or INFOH, depending whether we are in half or full duplex mode. */
     s->rx.target_bits = (s->rx.duplex)  ?  (49 - (4 + 8 + 4))  :  (51 - (4 + 8 + 4));
