@@ -43,7 +43,14 @@
 #define V34_V90_T3_HILBERT_TAPS             63
 #define V34_V90_T3_RESAMPLE_TAPS            33
 #define V34_V90_T3_RRC_TAPS                 97
-#define V34_V90_T3_FSE_TAPS                 7
+/* T/3-spaced fractionally spaced equalizer.  Seven taps (a bit over two
+   symbols) left the B1 template's (39,5) arriving as (33.9,4.3) -- errors of
+   four to five units against a constellation spacing of two, which is
+   hopeless for 31200 and is why the upstream decoded to white.  A 98.6%
+   *energy* fit sounds close and is not: 1.4% of a symbol power of 700 is
+   about 3.2 rms.  21 taps spans seven symbols and is still well determined
+   by B1's 128 symbols (42 unknowns, 256 equations). */
+#define V34_V90_T3_FSE_TAPS                 21
 /* Big enough to hold the whole E->B1 era plus the lag of the CP-bitstream E
    detector that anchors the search (about 3.4 s at 9.6 kHz).  B1 is only
    90 ms long and had been passing before the capture even started. */

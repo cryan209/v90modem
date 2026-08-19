@@ -274,6 +274,8 @@ void me_set_verbose(int v) { g_me_verbose = v ? 1 : 0; }
 #define ME_LOG(fmt, ...) \
     do { if (me_verbose_enabled()) fprintf(stderr, fmt, ##__VA_ARGS__); } while (0)
 
+static int me_span_flow_level(void);
+
 static uint64_t trace_now_ms(void)
 {
     struct timeval tv;
@@ -2167,8 +2169,7 @@ static int me_start_or_restart_v8_locked(int answer_tone)
         {
             logging_state_t *log = v8_get_logging_state(g_v8);
             if (log)
-                span_log_set_level(log, SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL |
-                                        SPAN_LOG_FLOW);
+                span_log_set_level(log, me_span_flow_level());
         }
     }
 
@@ -3748,6 +3749,23 @@ static void v34_put_aux_bit_cb(void *user_data, int bit)
     }
 }
 
+/* SpanDSP FLOW logging is written synchronously from the media thread, and
+ * during a Phase-3 retrain carousel the J detector alone emits hundreds of
+ * lines a second -- measured at 126 MB in 40 minutes, about 50 KB/s.  That is
+ * enough to stall the real-time path, and a stall shows up at the far end as
+ * a discontinuity: the peer's Error Energy jumping from ~24 to +1600 and a
+ * retrain request.  Default to the quiet level and let ME_V34_SPAN_FLOW_LOG=1
+ * turn the diagnostics back on when a capture needs them. */
+static int me_span_flow_level(void)
+{
+    const char *value = getenv("ME_V34_SPAN_FLOW_LOG");
+    int level = SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL;
+
+    if (value && atoi(value) != 0)
+        level |= SPAN_LOG_FLOW;
+    return level;
+}
+
 static void v34_put_bit_cb(void *user_data, int bit)
 {
     (void)user_data;
@@ -3883,8 +3901,7 @@ static void start_v34_training(void)
     /* Enable SpanDSP logging for V.34 training diagnostics */
     logging_state_t *log = v34_get_logging_state(g_v34);
     if (log) {
-        span_log_set_level(log, SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL |
-                                SPAN_LOG_FLOW);
+        span_log_set_level(log, me_span_flow_level());
     }
     v34_tx_power(g_v34, -10.0f);  /* Boosted from -14; caller modem not detecting our Phase 2 */
 
@@ -6933,6 +6950,17 @@ static void enter_v90_phase4_rx_locked(void)
 
         if (limit > baud_limit)
             limit = baud_limit;
+        /* The peer picks its upstream rate from the mask our MP offers, and
+         * at 31200 the symbols arrive with 3-4 units of error against a
+         * constellation spacing of 2 -- too dense for this path to decode.
+         * ME_V90_UPSTREAM_MAX_BPS caps what we offer, so the rate this path
+         * can actually receive becomes a measurement rather than a guess. */
+        {
+            const char *cap = getenv("ME_V90_UPSTREAM_MAX_BPS");
+
+            if (cap && atoi(cap) > 0 && atoi(cap) < limit)
+                limit = atoi(cap);
+        }
         v90_set_upstream_rate_limit(g_v90, limit);
         ME_LOG("[ME] V.90 upstream selection: %d baud, rate cap %d bps, %s carrier\n",
                baud == 3 ? 3000 : 3200, limit,

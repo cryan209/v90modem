@@ -10,24 +10,13 @@ TOWER=root@tower.net.cryan.nz
 MAXATTEMPTS="${3:-8}"
 
 bounce_rig() {
-  # Kill hard and *verify*: a surviving slmodemd from the previous attempt
-  # re-creates /dev/ttySL0, and the two instances then fight over the dial
-  # ("Dialer was aborted" -> instant NO CARRIER on every redial).
-  ssh -o BatchMode=yes $TOWER "docker exec d-modem sh -c '
-      for pass in 1 2 3; do
-        for d in /proc/[0-9]*; do
-          cmd=\$(tr \"\\0\" \" \" < \$d/cmdline 2>/dev/null)
-          case \"\$cmd\" in *slmodemd*|*socat*|*d-modem*) kill -9 \${d#/proc/} 2>/dev/null;; esac
-        done
-        sleep 1
-      done
-      rm -f /tmp/slm.log; true'" 2>/dev/null
-  left=$(ssh -o BatchMode=yes $TOWER "docker exec d-modem sh -c 'ps ax -o comm 2>/dev/null | grep -c \"slmodemd_trnref\"'" 2>/dev/null)
-  if [ "${left:-0}" -gt 0 ] 2>/dev/null; then
-    echo "  bounce: $left slmodemd still alive after kill; restarting container"
-    ssh -o BatchMode=yes $TOWER "docker restart d-modem" >/dev/null 2>&1
-    sleep 8
-  fi
+  # Restart the container outright between attempts.  Killing slmodemd alone
+  # left per-call state behind (and a survivor would re-create /dev/ttySL0,
+  # after which two instances fight over the dial: "Dialer was aborted" ->
+  # instant NO CARRIER on every redial).  A restart is a few seconds and
+  # removes the whole class.
+  ssh -o BatchMode=yes $TOWER "docker restart d-modem" >/dev/null 2>&1
+  sleep 8
   ssh -o BatchMode=yes $TOWER "docker exec -d -e SIP_LOGIN=6000:6000@asterisk.net.cryan.nz -e DM_RESAMPLER=sinc -e DM_RS_HEADROOM=0.25 d-modem sh -c '/src/slmodemd/slmodemd_trnref -d9 -e /src/d-modem > /tmp/slm.log 2>&1'; sleep 12; docker exec -d d-modem sh -c 'socat TCP-LISTEN:5556,reuseaddr,fork FILE:/dev/ttySL0,raw,echo=0'" 2>/dev/null
   sleep 2
   at=$( (printf 'AT\r'; sleep 2) | nc -4 -w 5 tower.net.cryan.nz 5556 2>/dev/null )
@@ -54,7 +43,11 @@ for attempt in $(seq 1 "$MAXATTEMPTS"); do
     sleep 5
     slice=$(tail -c "+$((off+1))" "$SERVERLOG" 2>/dev/null)
     if echo "$slice" | grep -aq "V.90 startup complete"; then verdict=DATA; break; fi
-    if echo "$slice" | grep -aq "restarting Phase 2 (2,"; then verdict=FLIP_LOST; break; fi
+    # Give a call several retrains before abandoning it.  Aborting at the
+    # first one dates from July, when a retrained attempt never reached data
+    # mode; that is worth re-testing rather than assuming, and the peer's own
+    # retrain counter reaches at least 4 on this rig.
+    if echo "$slice" | grep -aq "restarting Phase 2 (${MAXRETRAIN:-5},"; then verdict=FLIP_LOST; break; fi
     kill -0 $sockpid 2>/dev/null || { verdict=SOCK_EXIT; break; }
   done
   if [ "$verdict" = DATA ]; then

@@ -498,7 +498,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
             s->v90_t3_first_word = (s->v90_t3_first_word << 1) | out_bit;
             if ((++s->v90_t3_first_bits % 32) == 0)
             {
-                span_log(s->logging, SPAN_LOG_FLOW,
+                span_log(s->logging, SPAN_LOG_WARNING,
                          "Rx - V.90 upstream first data bits %d-%d: %08X\n",
                          s->v90_t3_first_bits - 32, s->v90_t3_first_bits - 1,
                          (unsigned) s->v90_t3_first_word);
@@ -510,7 +510,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
         s->v90_t3_alt_ones += alt_bit;
         if (++s->v90_t3_bit_count >= 20000)
         {
-            span_log(s->logging, SPAN_LOG_FLOW,
+            span_log(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 upstream DATA bits: tap=%d ones=%d%%, "
                      "tap=%d ones=%d%% (over %d bits)\n",
                      s->scrambler_tap,
@@ -9341,7 +9341,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                   + (g_im - t_im)*(g_im - t_im);
                 if (++s->v90_t3_b1_err_count == 128)
                 {
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    span_log(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream B1-era distance to grid: "
                              "%.4f per symbol over %d symbols\n",
                              s->v90_t3_b1_err/s->v90_t3_b1_err_count,
@@ -9400,7 +9400,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         }
                         /*endif*/
                     }
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    span_log(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream gain sweep: best=%.2f at %.3f "
                              "[%s]\n",
                              0.40f + 0.05f*best_g,
@@ -9410,7 +9410,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     for (int g = 0;  g < V34_V90_T3_GAIN_TRIALS;  g++)
                         s->v90_t3_gain_err[g] = 0.0f;
                     /*endfor*/
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    span_log(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream DATA: decision error %.4f "
                              "per symbol (mean symbol power %.2f) over %d symbols\n",
                              s->v90_t3_decision_err/s->v90_t3_decision_count,
@@ -9913,10 +9913,11 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                     s, s->v90_t3_next_symbol - pre + tap);
                 energy += x.re*x.re + x.im*x.im;
             }
-            /* Only correct small errors: a symbol that landed nearer some
-               other point carries no usable gradient, and following it is
-               how a DD loop runs away. */
-            if (e_re*e_re + e_im*e_im < 0.5f)
+            /* Reject gross outliers only.  The old 0.5 gate was tighter
+               than the error the equalizer actually leaves, so it never
+               fired once -- which is why an earlier "DD-LMS changes
+               nothing" result meant nothing at all. */
+            if (e_re*e_re + e_im*e_im < 8.0f)
             {
                 float mu = s->v90_t3_dd_mu/energy;
 
@@ -10087,7 +10088,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
             /*endif*/
             match = v90_t3_acquire_pass(s, search_start, search_end, coeff,
                                         &first, &conjugate, &coarse);
-            span_log(s->logging, SPAN_LOG_FLOW,
+            span_log(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 T/3 B1 template tap=%d trellis=%d: "
                      "coarse=%.1f%% fit=%.1f%%\n",
                      candidate_tap[t], trellis,
@@ -10122,7 +10123,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
        the known-bad 28.8 kbit/s solution is only about 93%. */
     if (best_match < 0.95f)
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        span_log(s->logging, SPAN_LOG_WARNING,
                  "Rx - V.90 T/3 B1 acquisition failed "
                  "(first=%lld coarse=%.1f%% fit=%.1f%% tap=%d trellis=%d)\n",
                  (long long)best_first, 100.0f*best_coarse,
@@ -10162,19 +10163,19 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
            symbols bearing no relation to the lattice.  Adapting towards
            meaningless decisions cannot help and might hurt.  Enable with
            ME_V90_UPSTREAM_DD_MU=0.05 once that is fixed. */
-        s->v90_t3_dd_mu = value ? (float) atof(value) : 0.0f;
+        s->v90_t3_dd_mu = value ? (float) atof(value) : 0.02f;
     }
     /* The supervised filter already maps onto the exact Q9.7 template grid. */
     s->data_symbol_scale = 1.0f;
     s->data_symbol_rotation = 0;
     s->data_symbol_conjugate = false;
     s->phase4_da_derot = 0;
-    span_log(s->logging, SPAN_LOG_FLOW,
+    span_log(s->logging, SPAN_LOG_WARNING,
              "Rx - V.90 upstream frame parms: b=%d p=%d w=%d j=%d k=%d "
              "bit_rate=%d b1_symbols=%d publish=+%d symbols\n",
              s->parms.b, s->parms.p, s->parms.w, s->parms.j, s->parms.k,
              s->bit_rate, s->v90_t3_b1_symbols, s->v90_t3_b1_symbols + 32);
-    span_log(s->logging, SPAN_LOG_FLOW,
+    span_log(s->logging, SPAN_LOG_WARNING,
              "Rx - V.90 upstream B1 acquired at %d Hz T/3 "
              "(baud=%d carrier=%s sample=%lld, symbols=%d, fit=%.1f%%)\n",
              s->v90_t3_internal_rate,
@@ -10182,6 +10183,38 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
              s->high_carrier ? "high" : "low",
              (long long)best_first, s->v90_t3_b1_symbols,
              100.0f*best_match);
+    /* Print the template and the symbols the emitter actually produces from
+       the same samples.  Acquisition says these agree to 98.6% of energy;
+       the DATA-path probe says the emitted ones are off the lattice.  Both
+       cannot be true, and this is where the two measurements meet. */
+    {
+        char line[512];
+        int len = 0;
+        int pre = V34_V90_T3_FSE_TAPS/2;
+
+        for (int n = 0;  n < 6  &&  len < (int) sizeof(line) - 32;  n++)
+        {
+            complexf_t y = {0.0f, 0.0f};
+
+            for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+            {
+                complexf_t x = v90_t3_raw_get(s, best_first + 3*n - pre + tap);
+                complexf_t z;
+
+                if (s->v90_t3_fse_conjugate)
+                    x.im = -x.im;
+                /*endif*/
+                z = complex_mulf(&s->v90_t3_fse[tap], &x);
+                y = complex_addf(&y, &z);
+            }
+            len += snprintf(line + len, sizeof(line) - len,
+                            "%s(%.1f,%.1f)->(%.1f,%.1f)", n ? " " : "",
+                            s->v90_t3_b1[n].re, s->v90_t3_b1[n].im,
+                            y.re, y.im);
+        }
+        span_log(s->logging, SPAN_LOG_WARNING,
+                 "Rx - V.90 upstream B1 template->emitted: %s\n", line);
+    }
     v90_t3_emit_ready(s);
 }
 
