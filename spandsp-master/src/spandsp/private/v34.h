@@ -50,6 +50,7 @@
 #define V34_V90_T3_RAW_SIZE                 32768
 #define V34_V90_T3_RAW_MASK                 (V34_V90_T3_RAW_SIZE - 1)
 #define V34_V90_T3_B1_MAX_SYMBOLS           256
+#define V34_V90_T3_GAIN_TRIALS              33
 
 /*! The offset between x index values, and what they mean in terms of the V.34
     spec numbering */
@@ -780,6 +781,11 @@ typedef struct
     uint32_t scramble_reg;
     /*! \brief The scrambler tap which selects between the caller and answerer scramblers */
     int scrambler_tap;
+    /*! \brief Distance-to-grid under a swept gain, to tell a scaling fault
+        from symbols that are simply not on the constellation. */
+    float v90_t3_gain_err[V34_V90_T3_GAIN_TRIALS];
+    /*! \brief Decision-directed NLMS step for the upstream equalizer. */
+    float v90_t3_dd_mu;
     /*! \brief First published upstream data bits, for structure checks. */
     uint32_t v90_t3_first_word;
     int v90_t3_first_bits;

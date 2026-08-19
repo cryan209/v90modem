@@ -9336,8 +9336,55 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
 
                 s->v90_t3_decision_err += d_re*d_re + d_im*d_im;
                 s->v90_t3_decision_pow += g_re*g_re + g_im*g_im;
+                /* A mean-square distance-to-grid of 2/3 is exactly what
+                   symbols bearing no relation to the lattice give (uniform
+                   over a cell of spacing 2).  Sweep a scale factor: if some
+                   other gain puts the symbols on the grid, the fault is a
+                   scaling one -- V.34's per-rate modulation factor being the
+                   obvious candidate -- and if none does, the symbols are not
+                   a scaled version of the constellation at all. */
+                for (int g = 0;  g < V34_V90_T3_GAIN_TRIALS;  g++)
+                {
+                    float scale = 0.40f + 0.05f*g;
+                    float sr = g_re*scale;
+                    float si = g_im*scale;
+                    float tr = 2.0f*floorf(sr/2.0f) + 1.0f;
+                    float ti = 2.0f*floorf(si/2.0f) + 1.0f;
+
+                    s->v90_t3_gain_err[g] += (sr - tr)*(sr - tr)
+                                           + (si - ti)*(si - ti);
+                }
                 if (++s->v90_t3_decision_count >= 3200)
                 {
+                    int best_g = 0;
+                    char gains[256];
+                    int len = 0;
+
+                    for (int g = 0;  g < V34_V90_T3_GAIN_TRIALS;  g++)
+                    {
+                        if (s->v90_t3_gain_err[g] < s->v90_t3_gain_err[best_g])
+                            best_g = g;
+                        /*endif*/
+                        if (len < (int) sizeof(gains) - 16)
+                        {
+                            len += snprintf(gains + len, sizeof(gains) - len,
+                                            "%s%.2f:%.3f",
+                                            len ? " " : "", 0.40f + 0.05f*g,
+                                            s->v90_t3_gain_err[g]
+                                              /s->v90_t3_decision_count);
+                        }
+                        /*endif*/
+                    }
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - V.90 upstream gain sweep: best=%.2f at %.3f "
+                             "[%s]\n",
+                             0.40f + 0.05f*best_g,
+                             s->v90_t3_gain_err[best_g]
+                               /s->v90_t3_decision_count,
+                             gains);
+                    for (int g = 0;  g < V34_V90_T3_GAIN_TRIALS;  g++)
+                        s->v90_t3_gain_err[g] = 0.0f;
+                    /*endfor*/
                     span_log(s->logging, SPAN_LOG_FLOW,
                              "Rx - V.90 upstream DATA: decision error %.4f "
                              "per symbol (mean symbol power %.2f) over %d symbols\n",
@@ -9821,6 +9868,47 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
         s->v90_t3_suppress_output =
             s->v90_t3_next_symbol < s->v90_t3_publish_symbol;
         process_primary_symbol(s, &y);
+        /* Decision-directed NLMS on the same taps.  The least-squares fit
+           over B1's 128 symbols leaves about 1.4% residual energy -- roughly
+           1.7 sigma of the decision half-distance -- which is several percent
+           of raw symbol errors, and frozen taps only get worse as the channel
+           and timing drift over a call lasting minutes.  V.34 puts every
+           constellation point on odd integers, so the decision is available
+           here without waiting for the shell decoder. */
+        {
+            float t_re = 2.0f*floorf(y.re/2.0f) + 1.0f;
+            float t_im = 2.0f*floorf(y.im/2.0f) + 1.0f;
+            float e_re = t_re - y.re;
+            float e_im = t_im - y.im;
+            float energy = 1e-6f;
+
+            for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+            {
+                complexf_t x = v90_t3_raw_get(
+                    s, s->v90_t3_next_symbol - pre + tap);
+                energy += x.re*x.re + x.im*x.im;
+            }
+            /* Only correct small errors: a symbol that landed nearer some
+               other point carries no usable gradient, and following it is
+               how a DD loop runs away. */
+            if (e_re*e_re + e_im*e_im < 0.5f)
+            {
+                float mu = s->v90_t3_dd_mu/energy;
+
+                for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+                {
+                    complexf_t x = v90_t3_raw_get(
+                        s, s->v90_t3_next_symbol - pre + tap);
+
+                    if (s->v90_t3_fse_conjugate)
+                        x.im = -x.im;
+                    /* e * conj(x) */
+                    s->v90_t3_fse[tap].re += mu*(e_re*x.re + e_im*x.im);
+                    s->v90_t3_fse[tap].im += mu*(e_im*x.re - e_re*x.im);
+                }
+            }
+            /*endif*/
+        }
         s->v90_t3_next_symbol += 3;
     }
 }
@@ -9894,7 +9982,10 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
        the 25 ms the old fixed 240-sample window allowed.  Measured against
        slmodemd every template scored ~5%, i.e. B1 was simply not inside the
        window.  Search as much history as the raw ring holds instead. */
-    enum { SEARCH_BACK = 24000, SEARCH_FORWARD = 4800 };
+    /* Reach back as far as the ring holds: the E detector's lag varies a
+       lot between calls (measured from 0.3 s to well over 2.5 s), and a
+       search that stops short of it simply never contains B1. */
+    enum { SEARCH_BACK = 30000, SEARCH_FORWARD = 4800 };
     int64_t search_start;
     int64_t search_end;
     complexf_t best_coeff[V34_V90_T3_FSE_TAPS];
@@ -10037,6 +10128,17 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     }
     s->v90_t3_suppress_output = true;
     s->v90_t3_acquired = true;
+    {
+        const char *value = getenv("ME_V90_UPSTREAM_DD_MU");
+
+        /* Off by default.  Decision-directed adaptation is only meaningful
+           once the data-era symbols are on the constellation, and right now
+           their mean-square distance to it is 2/3 -- exactly the figure for
+           symbols bearing no relation to the lattice.  Adapting towards
+           meaningless decisions cannot help and might hurt.  Enable with
+           ME_V90_UPSTREAM_DD_MU=0.05 once that is fixed. */
+        s->v90_t3_dd_mu = value ? (float) atof(value) : 0.0f;
+    }
     /* The supervised filter already maps onto the exact Q9.7 template grid. */
     s->data_symbol_scale = 1.0f;
     s->data_symbol_rotation = 0;
