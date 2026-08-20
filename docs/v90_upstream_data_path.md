@@ -879,8 +879,24 @@ correctly decoded pattern therefore reads 30-40% ones and is indistinguishable
 from noise by that measure, so the receiver throws away good locks as soon as
 the peer says anything.  The V.14 start/stop ratio is there for exactly this
 and reads about 2x on those windows against a 3x lock gate -- close, and worth
-measuring properly rather than tuning blind.  **And the sweep is slower than
-it looks**: a step is applied at a superframe boundary, which is p = 16 data
-frames, so 640 ms, not the 125 ms the short window suggests.  112 candidates
-is over a minute whatever the window is.  Applying a shift at the data-frame
-boundary instead would cut that by sixteen.
+measuring properly rather than tuning blind.
+
+**But do not read too much into a window that reads well.**  Measured on the
+one stretch of this recording that provably carries payload -- bits 2549148
+to 2557684 of the dump, where five of the gaps between `U0` hits are exact
+multiples of the 90-bit line -- the V.14 metric reads 32% at its best phase,
+a ratio of 1.4x, and 51.9% ones.  That is about fourteen correct lines in the
+ninety-five the window could hold.  So even the best region of the call is
+only a sixth right, and the metric is reporting that honestly rather than
+failing to see a good decode.  The fault is still in holding the alignment,
+not in judging it.
+
+A note on the arithmetic, since it is easy to get wrong and it decides
+whether the sweep is fast enough.  `data_frame` counts MAPPING frames within
+a data frame (p = 16) and `super_frame` counts data frames within the
+superframe (j = 7), so the 112-candidate space is one superframe of 112
+mapping frames -- 896 symbols, 280 ms at 3200 baud, which is V.34's superframe
+to the millisecond.  A phase shift lands when `++data_frame >= p`, every 16
+mapping frames, so every 40 ms.  The sweep step rate is therefore set by the
+measurement window and not by the boundary, and moving the application to the
+mapping-frame boundary would buy nothing.
