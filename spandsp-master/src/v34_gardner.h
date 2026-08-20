@@ -140,10 +140,14 @@ static __inline__ float v34_gardner_error(float now_re, float now_im,
     6000 symbols and wound its integrator up until it thrashed.  A fractional
     actuator has no such floor.
 
+    \param track Zero to hold the loop still because the decisions feeding
+           it cannot be trusted; the detector's history is still kept so it
+           can resume without a transient.
     \return -1, 0 or +1 whole samples to move the next symbol instant. */
 static __inline__ int v34_gardner_update(v34_gardner_state_t *g,
                                          float now_re, float now_im,
-                                         float mid_re, float mid_im)
+                                         float mid_re, float mid_im,
+                                         int track)
 {
     /* A real clock offset is a few hundred ppm at worst; at three samples
        per symbol that is well under a thousandth of a sample per symbol.
@@ -160,6 +164,21 @@ static __inline__ int v34_gardner_update(v34_gardner_state_t *g,
         g->prev_re = now_re;
         g->prev_im = now_im;
         g->prev_valid = 1;
+        return 0;
+    }
+    /*endif*/
+    if (!track)
+    {
+        /* The caller says the decisions behind the error are not to be
+           trusted -- typically the frame phase is lost and the decoder is
+           emitting garbage.  Gardner then reports bias, not noise, and an
+           integrator fed on it winds straight to its clamp: measured live,
+           freq pinned at -0.002 and 225 corrections requested in forty
+           seconds on a call whose symbols were never on the lattice.  Hold
+           everything, including the position, and keep only the history the
+           detector needs to resume. */
+        g->prev_re = now_re;
+        g->prev_im = now_im;
         return 0;
     }
     /*endif*/

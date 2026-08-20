@@ -227,7 +227,7 @@ static double run_loop(double ppm, double initial_offset, int nsym,
         /* How far this instant sits from the nearest symbol centre.  Taken
            before the update, so it measures where we actually sampled. */
         ideal = t_now - floor(t_now + 0.5);
-        correction = v34_gardner_update(&g, now_re, now_im, mid_re, mid_im);
+        correction = v34_gardner_update(&g, now_re, now_im, mid_re, mid_im, 1);
         if (correction)
             total++;
         /*endif*/

@@ -10242,24 +10242,23 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                entirely: the loop then never sees its own effect and winds the
                integrator to the clamp.  Measured at 20 ppm, freq ran from
                -2e-5 straight past the -6e-5 it needed to -2e-3.) */
-            {
-                int correction = v34_gardner_update(&s->v90_t3_gardner,
-                                                    y.re, y.im,
-                                                    mid.re, mid.im);
-
-                /* Do not move the symbol clock while the frame phase is
-                   lost.  Gardner's error is only meaningful when the
-                   decisions behind it are; once a decode goes wrong the
-                   detector reports whatever the garbage looks like, and a
-                   few slips in one direction shift the symbol clock a whole
-                   symbol against the transmitter -- which the frame-phase
-                   sweep cannot undo, because it searches mapping frames, not
-                   single symbols.  The fractional part still tracks, so
-                   nothing that could help is frozen. */
-                if (s->v90_t3_sf_locked)
-                    s->v90_t3_next_symbol += correction;
-                /*endif*/
-            }
+            /* Track only while the frame phase is locked.  Gardner's error
+               is only meaningful when the decisions behind it are: once a
+               decode goes wrong the detector reports whatever the garbage
+               looks like, the integrator winds to its clamp (measured: freq
+               pinned at -0.002 with 225 corrections requested in forty
+               seconds), and a few slips in one direction shift the symbol
+               clock a whole symbol against the transmitter -- which the
+               frame-phase sweep cannot undo, because it searches mapping
+               frames, not single symbols.  Holding the loop is also the only
+               correct way to ignore it: dropping the returned correction
+               while the loop had already wrapped its own accumulator moved
+               the sampling position by a whole sample instead of leaving it
+               where it was. */
+            s->v90_t3_next_symbol +=
+                v34_gardner_update(&s->v90_t3_gardner, y.re, y.im,
+                                   mid.re, mid.im,
+                                   s->v90_t3_sf_locked ? 1 : 0);
             if (getenv("ME_V90_UPSTREAM_TIMING_DEBUG"))
             {
                 static int dbg;
