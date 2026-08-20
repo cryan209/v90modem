@@ -13,7 +13,10 @@ import os, sys, time, termios, select
 
 PTY = "/tmp/modem0"
 OUTDIR = sys.argv[1]
-SEND_RATE = 5000          # B/s, under the 5200 B/s V.14 payload capacity of 52000 bps
+SEND_RATE = int(os.environ.get("SOAK_PTY_RATE", "5000"))  # B/s
+# Under the 5200 B/s V.14 payload capacity of 52000 bps.  SOAK_PTY_RATE=0
+# leaves our own transmitter idle, which is how to ask whether the upstream
+# is being disturbed by the downstream we are sending.
 CHUNK = 512
 PHASES = [(0, 35, True), (35, 70, False), (70, 105, True)]
 # SOAK_SECONDS stretches the three-phase schedule for a long correctness run
