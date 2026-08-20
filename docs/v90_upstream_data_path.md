@@ -610,3 +610,101 @@ tried in seconds, and a fix validated before it ever sees the rig.
 
 That is the enabling piece of work, and it is worth more than another
 night of dialling.
+
+## The forty-second collapse, off the wire (2026-08-21)
+
+The previous section ended by saying the enabling piece of work was an
+offline replay: a harness feeding a recorded `live-rx.g711` into the T/3
+receiver from the E handover onwards, so the fault could be bisected on the
+desk instead of over five-minute calls on a rig whose Phase 3 succeeds
+sporadically.  That harness is `v90_upstream_replay.c`.  It replays a
+500-second call in 108 seconds and is deterministic, which is what made
+everything below measurable.
+
+    ./v90_upstream_replay artifacts/dmodem-soak-0821-goalproper/tap/live-rx.g711 ulaw 3200 9600
+
+The E handover is not recorded in the tap, so the harness searches for it:
+it prepares a receiver at candidate instants half a second apart, feeds the
+14 s of history that the receiver's own B1 search reaches back over, calls
+`v34_begin_rx_data()` at the candidate, and asks whether it acquired.  On
+this tap it finds the handover at 88.0 s with a **100.0% B1 fit** — nothing
+but B1 correlates, so the first candidate that acquires is the real one.
+Two things had to be right for that to work, and both are worth knowing
+before writing another harness against this receiver: the history has to be
+fed *between* `v34_v90_prepare_upstream_data()` and `v34_begin_rx_data()`,
+because the first starts the T/3 capture and the second marks the E anchor;
+and the context needs a Phase 4 bit handler, because without one
+`v34_force_v90_phase4_cp_rx()` silently declines, leaving `v34_rx()`
+dispatching into the INFO demodulator where the ring is never filled.
+
+### What the collapse is
+
+The receiver decodes the peer at a mean square distance to the lattice of
+**0.002** for 42.1 s and then loses it **inside three symbols**, and the
+old receiver never got it back.
+
+It is not the wire.  Across that instant the tap is unchanged: level flat at
+~1240 RMS, band 201–3439 Hz before and 205–3449 Hz after, centre 1820 vs
+1827 Hz, no duplicated or all-same RTP payload, and no coherent fourth-power
+line afterwards (peak/median 4, i.e. noise), so not a rotating constellation
+either.
+
+It is not the adaptive loops.  `ME_V90_UPSTREAM_DD_MU=0`,
+`ME_V90_UPSTREAM_CARRIER=0`, `ME_V90_UPSTREAM_TIMING=0` and
+`ME_V34_DATA_CARRIER_TRACK=0`, in every combination, end their first clean
+run at **exactly 42.1 s**.  With all three off the receiver is a fixed FIR
+at a fixed sampling step over a free-running mixer — a deterministic
+function of the samples — so the trigger is in the samples.
+
+It is a **whole-sample slip**.  Deleting one 8 kHz sample at the collapse
+instant doubles the clean stretch, 42.1 s to 81.7 s.  The slips recur every
+33–40 s, which is a clock offset of about three parts per million between
+the peer and the RTP bearer, absorbed as a whole-sample insertion — the
+tower d-modem's resampler is the obvious suspect (it defaults to ZOH; see
+the rig notes).
+
+Gardner cannot help, and this is the design defect the slip exposed: **every
+adaptive element in this receiver is gated on the symbols already being
+good** — the timing loop, the DD-LMS and the carrier loop all on
+`sym_err_ema < 0.35`.  A slip closes the eye in one symbol, so at the exact
+moment correction is needed they all freeze.  That is why the collapse was
+permanent, and why restoring a known-good equalizer hundreds of times
+recovered nothing: a good filter at a sampling instant a whole sample out is
+not a state this receiver can decode in.
+
+### The fix, and what it is worth
+
+`v90_t3_slip_resync()` searches when the eye closes: it re-runs the current
+taps over the recent past at each candidate offset, in thirds of a sample
+out to ±3 samples, and adopts the position that puts the symbols back on the
+lattice.  A slip is a step, so the recent past is already on the far side of
+it and scores it correctly.  Two details matter.  The scorer must read the
+ring through the timing loop's fractional accumulator, because that is where
+the slicer actually looks — scoring whole samples measures a position the
+receiver never uses, and the true offset then scores no better than its
+neighbours.  And the acceptance has to take a clear win rather than a
+perfect one: the equalizer spends the symbols before the trigger adapting to
+nothing, so the best reachable position after a slip scores around 0.42, and
+a 0.25 absolute gate rejected exactly those.  Adoption opens a bounded
+window (`V34_V90_T3_SLIP_RECOVER`) in which the DD-LMS may adapt at an error
+that would otherwise gate it off, so the filter can pull back in.
+
+Measured on the same recorded call: clean time **6.9% → 32.8%**, and the
+first three slips now recover in **under a second** each (44.2–46.2 s,
+82.5–83.3 s, and clean through to 115.0 s) where the first one used to end
+the call's usefulness.
+
+### What is still open
+
+From about 115 s the outages get longer and the search stops helping, and
+the reason is visible in its own log: the score profile goes **flat at ~0.65
+across all nineteen offsets**.  No sampling phase reopens the eye, and
+restoring the last-good equalizer first (which the restore path now does,
+before searching) does not change it either — 293 restores, no improvement.
+So the later outages are not slips, or not only slips, and the next question
+is what the received signal is doing then.  The harness answers questions
+like that in under two minutes each, which is the point of it.
+
+Note the score profile is periodic in three samples, as it must be: three
+samples is one symbol at 3200 baud, and a whole-symbol shift still lands on
+the lattice.  A minimum at −1.67 and at +1.33 is one position, not two.

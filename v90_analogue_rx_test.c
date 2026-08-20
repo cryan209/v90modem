@@ -734,10 +734,36 @@ static void test_phase4_cp_from_measurement(void)
         CHECK(cpt.shaping_redundancy == sr  &&  cp.shaping_redundancy == sr,
               "Sr=%d asked for, Sr=%u/%u built", sr,
               cpt.shaping_redundancy, cp.shaping_redundancy);
-        /* §8.5.2 caps CP's average power 3 dB above CPt's; naming the same
-         * constellations in both makes the difference zero by construction. */
-        CHECK(memcmp(cpt.masks, cp.masks, sizeof(cpt.masks)) == 0,
-              "CPt and CP name different constellations, so §8.5.2 needs checking");
+        /*
+         * §8.6.5: TRN2d/MP/Ed are mapped with the CPt set, and a digital modem
+         * takes K from the constellation it is handed -- so CPt's mask capacity
+         * must itself fit Table 17's K <= 24, not merely its drn field.  A CPt
+         * that keeps CP's full masks (prod(Mi) ~ 2^31) while declaring K=24 is
+         * what let the Eicon card build a K=31 TRN2d that no K=24 receiver can
+         * demap (artifacts/eicon-phase4-downstream/run79).  CPt must therefore
+         * be a *reduced subset* of CP: every CPt point is in CP (so §8.5.2's
+         * "CP no more than 3 dB above CPt" holds in the safe direction, CPt
+         * keeping the higher-amplitude points), and prod(Mi) is commensurate
+         * with K rather than with the data rate. */
+        {
+            uint64_t cpt_prod = 1;
+
+            for (int i = 0; i < 6; i++) {
+                for (int u = 0; u < VPCM_CP_MASK_BITS; u++) {
+                    if (vpcm_cp_mask_get(cpt.masks[i], u)) {
+                        CHECK(vpcm_cp_mask_get(cp.masks[i], u),
+                              "Sr=%d: CPt point Ucode %d in interval %d is not "
+                              "in CP -- CPt is not a subset of the data set",
+                              sr, u, i);
+                    }
+                }
+                cpt_prod *= (uint64_t) vpcm_cp_mask_population(cpt.masks[i]);
+            }
+            CHECK(cpt_prod < (1ULL << 25),
+                  "Sr=%d: CPt mask capacity prod(Mi)=%llu implies K>24, so a "
+                  "digital modem can build TRN2d above Table 17's cap",
+                  sr, (unsigned long long) cpt_prod);
+        }
 
         /* Table 17 and §5.4.3, which is where a wrong Sr shows up. */
         cpt_k = v90_analogue_phase4_cp_k(&cpt);
@@ -925,17 +951,20 @@ static void test_tone_b_retrain_detector(void)
  *     after 2544 symbols and runs 24 more, ending at 6135.
  *   - Nothing is outside the constellation.  Splitting the demap failure by
  *     cause gives out-of-constellation 0 and modulus overflow on every frame.
- *   - The card addresses more modulus space than a CPt can carry.  Its TRN2d
- *     uses 39 magnitudes (Ucodes 0-39, 35 absent), the same support in all six
- *     intervals, white and stationary across the whole 30 s.  That is 39^6 =
- *     2^31.7 per six-symbol frame, needing K = 32; Table 17 caps CPt's K at 24.
- *   - And it is not §8.6.5 scrambled ones under that constellation anyway.
- *     Sweeping frame phase, label order, K and the sign convention never moves
- *     the descrambled ones rate off 50%.
+ *   - The card maps TRN2d at K ~= 31, the data K, not CPt's K = 24.  Reading
+ *     each frame back through the §5.4.3 modulus decoder over run 79's data
+ *     constellation Mi = 39 39 37 39 39 39 gives modulus values reaching
+ *     2^31.6 (median 2^31.3); 99.6% exceed 2^24.  A receiver holding TRN2d to
+ *     CPt's K = 24 overflows on every frame.
  *
- * So the card is not generating this TRN2d from the constellation we asked
- * for.  MP is therefore asserted NOT to decode: if it ever does, this test
- * fires and the fixture README needs rewriting.
+ * That was ours: run 79 built CPt from the *full* data masks (prod(Mi) ~ 2^31)
+ * and only relabelled drn to K = 24, and §8.6.5 has the digital modem take K
+ * from the constellation it is handed, so the card faithfully mapped TRN2d at
+ * K = 31.  v90_analogue_phase4_build_cp now reduces CPt to a genuine subset
+ * with prod(Mi) commensurate with K <= 24 (see the test at the top of this
+ * file).  This capture predates the fix; against it, demapping at CPt's K = 24
+ * still overflows, so MP is asserted NOT to decode.  Live re-verification is
+ * the open item.
  */
 static void test_phase4_foreign_downstream(void)
 {

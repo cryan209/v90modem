@@ -40,20 +40,28 @@ file and pins all of it:
   and modulus overflow on **every** frame. The earlier "13% of its symbols are
   outside every constellation the CPt named" was measuring the wrong thing: a
   frame that will not demap is not evidence that any symbol was rejected.
-* **The card addresses more modulus space than a CPt can carry.** Its TRN2d uses
-  39 magnitudes — Ucodes 0–39 with 35 absent — with the same support in all six
-  intervals, white (autocorrelation < 0.012 at every lag 1–8) and stationary
-  across the whole 30 s. That is 39^6 = 2^31.7 per six-symbol frame, so it needs
-  K = 32. §8.5.2 / Table 17 cap CPt's K at 24, and the data CP's K is 36.
-* **It is not §8.6.5 scrambled ones under that constellation either.** Sweeping
-  the frame phase (6), the label order (ascending and descending), K (24, 32, 36)
-  and the sign convention (differential and absolute) never moves the descrambled
-  ones rate off 50% — the best of 36 combinations is 50.3%. The per-slot magnitude
-  distributions are also strongly non-uniform and differ between slots, which a
-  §5.4.3 modulus mapper over a fixed constellation cannot produce.
+* **The card maps TRN2d at K ≈ 31 — the data K, not CPt's K = 24.** Its TRN2d
+  uses ~40 magnitudes (Ucodes 0–39) with the same support in all six intervals,
+  white (autocorrelation < 0.012 at every lag 1–8) and stationary across the
+  whole 30 s. Reading each six-symbol frame back through the §5.4.3 modulus
+  decoder over `Mi = 39 39 37 39 39 39` (run 79's data constellation) gives
+  modulus values that reach **2^31.6**, median **2^31.3** — 99.6 % of frames
+  exceed 2^24. So the card encoded TRN2d with K ≈ 31, and a receiver holding it
+  to CPt's declared K = 24 overflows on every frame, which is exactly what the
+  test measures.
 
-So the card is not generating this TRN2d from the constellation we asked for, and
-a different constellation alone would not explain the last point. What remains
-open is whether it is running some mapper of its own or never entered the CPt
-mapper at all — and that is a question about the card's firmware, which
-`../modem-dsp-emu` runs, rather than about this decoder.
+**This was ours, and it is now fixed.** Run 79's `docs/v90_analogue_role.md`
+shows the analogue side chose a data constellation `Mi = 39 39 37 39 39 39`
+(K = 31, 49333 bps) and built **CPt from those same full masks**, only relabelling
+`drn` to declare K = 24 (`v90_analogue_phase4_build_cp`). §8.6.5 says TRN2d is
+mapped with the CPt set, and a digital modem takes K from the constellation it is
+handed — so a CPt whose masks still hold 2^31 points *is* a K = 31 offer no matter
+what `drn` says. The card faithfully mapped TRN2d at that capacity; our own K = 24
+receiver then could not demap it. The fix reduces CPt to a genuine subset whose
+`prod(Mi)` is commensurate with K ≤ 24 (dropping the lowest-amplitude points, which
+keeps §8.5.2's power relation on the safe side), so the offer is self-consistent.
+
+This capture predates that fix and is kept as the record of the K = 31 TRN2d the
+old inconsistent CPt provoked. Live re-verification against the card (which should
+now map TRN2d at K = 24 and let MP through) is the open confirmation — it needs the
+`../modem-dsp-emu` rig, not this decoder.

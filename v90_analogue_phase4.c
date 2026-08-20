@@ -1095,6 +1095,54 @@ bool v90_analogue_phase4_build_cp(const v90_dil_measurement_t *m,
         cpt.dfi[i] = (uint8_t) i;
         memcpy(cpt.masks[i], training_plan.mask[i], VPCM_CP_MASK_BYTES);
     }
+    /*
+     * §8.6.5/Table 17: TRN2d, MP and Ed are mapped with *this* CPt set, and a
+     * conformant digital modem takes K from the constellation it is handed.
+     * The training plan carries the full data constellation (prod(Mi) up to
+     * 2^39), so a CPt that only relabels drn to K <= 24 while keeping those
+     * masks is self-inconsistent: the mask capacity still says K = 31.  The
+     * Eicon card builds TRN2d at the masks' capacity, not at drn -- measured
+     * on artifacts/eicon-phase4-downstream/run79: its TRN2d modulus values
+     * reach 2^31.6 (K = 31) against the drn=22/K=24 we declared, so no K=24
+     * receiver can demap it, and the whole call stalls in TRN2d.  Reduce the
+     * set to prod(Mi) ~= 2^K by dropping the lowest-amplitude points first --
+     * the noisiest, closest-spaced levels -- which also keeps CPt's average
+     * power up, so §8.5.2's "CP no more than 3 dB above CPt" stays satisfied in
+     * the safe direction.  (Dropping the *high* points instead -- the Table-15
+     * power thinning -- is what fell the card back to Phase 3 in run 86.)
+     */
+    {
+        int mi[VPCM_CP_FRAME_INTERVALS];
+        uint64_t product = 1;
+
+        for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+            mi[i] = vpcm_cp_mask_population(cpt.masks[i]);
+            if (mi[i] <= 0)
+                return false;
+            product *= (uint64_t) mi[i];
+        }
+        for (;;) {
+            int big = -1;
+            uint64_t reduced;
+
+            for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++)
+                if (mi[i] > 2  &&  (big < 0  ||  mi[i] > mi[big]))
+                    big = i;
+            if (big < 0)
+                break;
+            reduced = product / (uint64_t) mi[big] * (uint64_t) (mi[big] - 1);
+            if (k < 64  &&  reduced < (1ULL << k))
+                break;                 /* removing more breaks 2^K <= prod(Mi) */
+            for (int u = 0; u < VPCM_CP_MASK_BITS; u++) {
+                if (vpcm_cp_mask_get(cpt.masks[big], u)) {
+                    vpcm_cp_mask_set(cpt.masks[big], u, false);
+                    break;
+                }
+            }
+            mi[big]--;
+            product = reduced;
+        }
+    }
     if (k + s - 8 < 1  ||  k + s - 8 > 22)
         return false;
     cpt.drn = (uint8_t) (k + s - 8);

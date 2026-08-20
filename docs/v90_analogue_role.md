@@ -672,13 +672,22 @@ uses the codeword whose Ucode is U<sub>INFO</sub>, so the card ignores that fiel
 here too — the same disregard it shows when picking Sd's W. The Ri hunt learns
 the level from the wire, so it acquired regardless.
 
-**Where it stops now: TRN2d does not demap.** Every six-symbol frame is
-rejected and none of §8.6.5's scrambled ones come back, because 13% of the
-symbols are outside every constellation the CPt named. Two candidates, and the
-fixture is there to separate them: the card is not using the constellation we
-asked for (it has form — U<sub>INFO</sub>, W, and now Ri), or our six-symbol
-frame grid is off at the R̄i seam, where it is set by counting 24T rather than by
-searching. The card sits at TrnProgress `0x00c4` throughout.
+**Where it stopped: TRN2d did not demap — and the cause was our CPt (fixed
+2026-08-19).** Every six-symbol frame overflowed §5.4.3, and reading the capture
+back through the modulus decoder over the data constellation this call chose
+(`Mi = 39 39 37 39 39 39`, the log line above) gives modulus values reaching
+**2^31.6**, median **2^31.3**: the card mapped TRN2d at **K ≈ 31, the data K,
+not CPt's declared K = 24**. §8.6.5 has the digital modem take K from the
+constellation CPt hands it, and `v90_analogue_phase4_build_cp()` was handing it
+the *full* data masks (prod(Mi) ≈ 2^31) while only relabelling `drn` to say
+K = 24 — an offer that reads as K = 31 no matter what the field claims. The card
+mapped it faithfully; our K = 24 receiver could not follow. The builder now
+reduces CPt to a genuine subset with `prod(Mi)` commensurate with K ≤ 24,
+dropping the lowest-amplitude points first so §8.5.2's 3 dB relation stays on
+the safe side (run 86 fell the card back to Phase 3 by dropping *high* points,
+the opposite move). The card sat at TrnProgress `0x00c4` throughout this capture,
+which predates the fix; live re-verification — the card should now map TRN2d at
+K = 24 and let MP through — is the open item.
 
 One further defect this run pair found, in reporting rather than protocol: run
 77's measurement yielded no constellation at the 3σ noise margin, and the engine

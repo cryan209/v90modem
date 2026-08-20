@@ -75,7 +75,25 @@
    symbols above the tracking threshold before the snapshot is restored --
    about a second at 3200 baud, long enough not to fire on a burst. */
 #define V34_V90_T3_FSE_KEEP_ERR             0.20f
-#define V34_V90_T3_FSE_BAD_RUN              3200
+/*! Symbols off the constellation before a slip search runs.  A slip is a
+    step, not a drift, so this only has to be long enough not to fire on a
+    noise burst. */
+#define V34_V90_T3_SLIP_RUN                 240
+
+/*! Symbols of recent history each candidate offset is scored over. */
+#define V34_V90_T3_SLIP_WINDOW              192
+
+/*! Whole samples either side of the current position to search. */
+#define V34_V90_T3_SLIP_SPAN                3
+
+/*! A candidate has to put the symbols this close to the lattice to be
+    adopted; anything worse is not a recovered slip. */
+#define V34_V90_T3_SLIP_ACCEPT_ERR          0.45f
+
+/*! Symbols of relaxed adaptation after a corrected slip. */
+#define V34_V90_T3_SLIP_RECOVER             8000
+
+#define V34_V90_T3_FSE_BAD_RUN              1200
 
 /*! The offset between x index values, and what they mean in terms of the V.34
     spec numbering */
@@ -874,6 +892,16 @@ typedef struct
     int v90_t3_sf_force;
     int v90_t3_df_force;
     int v90_t3_relocks;
+    /*! Consecutive symbols spent off the constellation, and how many
+        whole-sample slips have been corrected. */
+    int v90_t3_slip_run;
+    int v90_t3_slips_recovered;
+    /*! Symbols left in the post-slip window during which the equalizer is
+        allowed to adapt at an error that would otherwise gate it off. */
+    int v90_t3_recover;
+    /*! ME_V90_UPSTREAM_SYM_DUMP: the equalized data-era symbols, as text. */
+    FILE *v90_t3_sym_dump;
+    bool v90_t3_sym_dump_tried;
     /*! \brief Whether this call has shown idle, so the ones metric means
         something and the frame-phase sweep is safe to run. */
     bool v90_t3_idle_seen;

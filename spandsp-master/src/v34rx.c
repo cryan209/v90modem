@@ -10163,6 +10163,175 @@ static float v90_t3_fit(v34_rx_state_t *s, int64_t first, bool conjugate,
     return (float)(1.0 - error/power);
 }
 
+/*! Score a candidate symbol-timing position: the mean square distance from
+    the recent equalized symbols to the V.34 odd-integer lattice, recomputed
+    with the current taps at an offset of `offset` whole samples. */
+static float v90_t3_score_offset(v34_rx_state_t *s, float offset)
+{
+    int pre = V34_V90_T3_FSE_TAPS/2;
+    /* Score where the slicer would actually be looking: the emit path reads
+       the ring through the timing loop's leftover fraction, so a scorer that
+       reads whole samples is measuring a position the receiver never uses,
+       and the true offset scores no better than its neighbours. */
+    float frac = s->v90_t3_timing_enabled ? s->v90_t3_gardner.acc : 0.0f;
+    float total = 0.0f;
+    int counted = 0;
+
+    for (int k = 1;  k <= V34_V90_T3_SLIP_WINDOW;  k++)
+    {
+        int64_t at = s->v90_t3_next_symbol - 3*k + (int) floorf(offset);
+        float sub = frac + (offset - floorf(offset));
+        complexf_t y = {0.0f, 0.0f};
+        float t_re;
+        float t_im;
+
+        if (at - pre < 0
+            ||
+            at - pre < s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE + 8)
+        {
+            break;
+        }
+        /*endif*/
+        for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+        {
+            complexf_t x = v90_t3_raw_get_frac(s, at - pre + tap, sub);
+            complexf_t z;
+
+            if (s->v90_t3_fse_conjugate)
+                x.im = -x.im;
+            /*endif*/
+            z = complex_mulf(&s->v90_t3_fse[tap], &x);
+            y = complex_addf(&y, &z);
+        }
+        /*endfor*/
+        t_re = 2.0f*floorf(y.re/2.0f) + 1.0f;
+        t_im = 2.0f*floorf(y.im/2.0f) + 1.0f;
+        total += (t_re - y.re)*(t_re - y.re) + (t_im - y.im)*(t_im - y.im);
+        counted++;
+    }
+    /*endfor*/
+    if (counted < V34_V90_T3_SLIP_WINDOW/2)
+        return 1e9f;
+    /*endif*/
+    return total/counted;
+}
+/*- End of function --------------------------------------------------------*/
+
+/*! Recover from a whole-sample slip in the received stream.
+
+    Measured offline against a recorded five-minute call (v90_upstream_replay
+    on artifacts/dmodem-soak-0821-goalproper): the upstream decodes the peer
+    perfectly -- distance to the lattice 0.002 -- for 42.1 s, and then loses
+    it inside three symbols and never gets it back.  The wire is unchanged
+    across that instant: same level, same 201-3439 Hz band, same carrier, no
+    duplicated or missing RTP packet, and no coherent rotation afterwards.
+    Deleting ONE 8 kHz sample at that instant doubles the clean stretch to
+    81.7 s, which is what identifies it: the peer's stream gains a sample
+    about every forty seconds, a clock offset of some three parts per
+    million, absorbed as a whole-sample insertion.
+
+    Gardner tracks fractional drift but cannot help here, because every
+    adaptive element in this receiver -- the timing loop, the DD-LMS, the
+    carrier loop -- is gated on the symbols already being good, and a slip
+    closes the eye in one symbol.  The moment correction is needed, all of
+    them freeze, which is exactly why the collapse was permanent and why
+    restoring a known-good equalizer 337 times recovered nothing.
+
+    So when the eye closes, search for it: re-run the existing taps over the
+    recent past at each whole-sample offset and take the one that puts the
+    symbols back on the lattice.  A slip is a step, so the recent past is
+    already on the far side of it and scores it correctly. */
+static void v90_t3_slip_resync(v34_rx_state_t *s)
+{
+    float base;
+    float best;
+    float best_offset = 0.0f;
+    char detail[256];
+    int len = 0;
+
+    base = v90_t3_score_offset(s, 0.0f);
+    best = base;
+    /* Thirds of a sample: at three samples per symbol a slip lands the
+       sampling instant a whole sample out, but the fraction the timing loop
+       was carrying when the eye closed is not necessarily the right one on
+       the far side of the step. */
+    for (int step = -3*V34_V90_T3_SLIP_SPAN;
+         step <= 3*V34_V90_T3_SLIP_SPAN;
+         step++)
+    {
+        float offset = step/3.0f;
+        float q;
+
+        if (step == 0)
+            continue;
+        /*endif*/
+        q = v90_t3_score_offset(s, offset);
+        if (len < (int) sizeof(detail) - 16)
+        {
+            len += snprintf(detail + len, sizeof(detail) - len,
+                            "%s%+.2f:%.2f", len ? " " : "", offset, q);
+        }
+        /*endif*/
+        if (q < best)
+        {
+            best = q;
+            best_offset = offset;
+        }
+        /*endif*/
+    }
+    /*endfor*/
+    span_log(s->logging, SPAN_LOG_FLOW,
+             "Rx - V.90 upstream slip search: base %.3f [%s]\n", base, detail);
+    /* Only move for an unambiguous win.  Adopting a marginally better
+       position on noise would walk the receiver off a symbol at a time. */
+    /* Adopt a clear win rather than only a perfect one.  A slip does not
+       only move the sampling instant: the equalizer spends the symbols
+       before the search is triggered adapting to nothing, so the best
+       reachable position after a late slip scores around 0.42 -- better
+       than the 0.65 of a closed eye by a wide margin, but nowhere near the
+       0.002 of a good one.  Requiring 0.25 absolute rejected exactly those,
+       and the receiver sat at 0.65 for the remaining five minutes. */
+    if (best_offset == 0.0f
+        ||
+        best > V34_V90_T3_SLIP_ACCEPT_ERR
+        ||
+        best > 0.6f*base)
+    {
+        return;
+    }
+    /*endif*/
+    s->v90_t3_next_symbol += (int) floorf(best_offset);
+    if (s->v90_t3_timing_enabled)
+    {
+        s->v90_t3_gardner.acc += best_offset - floorf(best_offset);
+        while (s->v90_t3_gardner.acc >= 1.0f)
+        {
+            s->v90_t3_gardner.acc -= 1.0f;
+            s->v90_t3_next_symbol++;
+        }
+        /*endwhile*/
+    }
+    /*endif*/
+    s->v90_t3_sym_err_ema = best;
+    s->v90_t3_slips_recovered++;
+    /* Let the equalizer back in.  Every adaptive element here is gated on the
+       symbols already being good, which is right in steady state and wrong
+       immediately after a slip: the timing is correct again but the filter
+       still carries whatever the closed eye taught it, and at an error just
+       above the DD-LMS gate it can never pull itself back. */
+    s->v90_t3_recover = V34_V90_T3_SLIP_RECOVER;
+    /* The frame phase survives a whole-sample move -- the symbol stream is
+       the same, sampled correctly again -- but the loops that froze on the
+       way down have to be let go of. */
+    s->v90_t3_gardner.freq = 0.0f;
+    s->v90_t3_gardner.hold = 0;
+    span_log(s->logging, SPAN_LOG_WARNING,
+             "Rx - V.90 upstream slip of %+.2f sample(s) corrected "
+             "(lattice distance %.3f -> %.3f, %d so far)\n",
+             best_offset, base, best, s->v90_t3_slips_recovered);
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v90_t3_emit_ready(v34_rx_state_t *s)
 {
     int pre = V34_V90_T3_FSE_TAPS/2;
@@ -10255,6 +10424,31 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
         if (!s->v90_t3_in_b1)
             s->v90_t3_data_symbols++;
         /*endif*/
+        /* ME_V90_UPSTREAM_SYM_DUMP writes the equalized symbols this slicer
+           actually sees, as text.  The distance-to-lattice figure in the
+           logs says the symbols left the constellation but not what they
+           left it FOR, and that difference -- a rotation, a scale, a
+           different lattice -- is what names the cause. */
+        if (!s->v90_t3_in_b1)
+        {
+            if (!s->v90_t3_sym_dump_tried)
+            {
+                const char *path = getenv("ME_V90_UPSTREAM_SYM_DUMP");
+
+                s->v90_t3_sym_dump_tried = true;
+                if (path)
+                    s->v90_t3_sym_dump = fopen(path, "w");
+                /*endif*/
+            }
+            /*endif*/
+            if (s->v90_t3_sym_dump)
+            {
+                fprintf(s->v90_t3_sym_dump, "%d %.4f %.4f\n",
+                        s->v90_t3_data_symbols, y.re, y.im);
+            }
+            /*endif*/
+        }
+        /*endif*/
         process_primary_symbol(s, &y);
         /* Decision-directed NLMS on the same taps.  The least-squares fit
            over B1's 128 symbols leaves about 1.4% residual energy -- roughly
@@ -10289,7 +10483,11 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                gets walked off, and nothing then re-acquires it. */
             if (e_re*e_re + e_im*e_im < 8.0f
                 &&
-                s->v90_t3_sym_err_ema < V34_V90_T3_TIMING_TRACK_ERR)
+                (s->v90_t3_sym_err_ema < V34_V90_T3_TIMING_TRACK_ERR
+                 ||
+                 (s->v90_t3_recover > 0
+                  &&
+                  s->v90_t3_sym_err_ema < V34_V90_T3_SLIP_ACCEPT_ERR)))
             {
                 float mu = s->v90_t3_dd_mu/energy;
 
@@ -10314,6 +10512,27 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
            wrong, so without a snapshot there is nothing to return to -- a
            call that loses the constellation stays lost for its whole
            remaining length (measured: four minutes of it). */
+        /* A slip closes the eye in a single symbol, so look for one as soon
+           as the error says the constellation is gone -- long before the
+           equalizer-restore path below, which is for a filter that has been
+           walked off gradually and cannot fix a timing step at all. */
+        if (s->v90_t3_sym_err_ema >= V34_V90_T3_TIMING_TRACK_ERR)
+        {
+            if (++s->v90_t3_slip_run >= V34_V90_T3_SLIP_RUN)
+            {
+                s->v90_t3_slip_run = 0;
+                v90_t3_slip_resync(s);
+            }
+            /*endif*/
+        }
+        else
+        {
+            s->v90_t3_slip_run = 0;
+        }
+        /*endif*/
+        if (s->v90_t3_recover > 0)
+            s->v90_t3_recover--;
+        /*endif*/
         if (s->v90_t3_sym_err_ema < V34_V90_T3_FSE_KEEP_ERR)
         {
             if (++s->v90_t3_fse_good_age >= 3200)
@@ -10332,7 +10551,6 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             {
                 memcpy(s->v90_t3_fse, s->v90_t3_fse_good,
                        sizeof(s->v90_t3_fse));
-                s->v90_t3_sym_err_ema = 0.0f;
                 s->v90_t3_fse_bad_run = 0;
                 s->v90_t3_fse_good_age = 0;
                 /* The frame phase almost certainly went with it. */
@@ -10346,6 +10564,17 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                          "Rx - V.90 upstream symbols lost; restoring the "
                          "last good equalizer (restore %d)\n",
                          s->v90_t3_fse_restores);
+                /* Search from the restored filter rather than declaring the
+                   receiver well.  A restore on its own put a known-good
+                   filter back at a sampling instant that is a whole sample
+                   out, which is neither of the two states this receiver can
+                   decode in; zeroing the error estimate then hid that for
+                   the next few hundred symbols.  Together the two halves --
+                   the filter from when it worked, the phase the wire is
+                   actually on now -- are the state the call started in. */
+                s->v90_t3_sym_err_ema = v90_t3_score_offset(s, 0.0f);
+                v90_t3_slip_resync(s);
+                s->v90_t3_recover = V34_V90_T3_SLIP_RECOVER;
             }
             /*endif*/
         }
@@ -10628,7 +10857,18 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
         || search_end <= search_start
         || s->v90_t3_raw_count < search_end
              + 3*s->v90_t3_b1_symbols + V34_V90_T3_FSE_TAPS)
+    {
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - V.90 T/3 B1 search held: acquired=%d attempted=%d "
+                 "b1=%d anchor=%" PRId64 " start=%" PRId64 " end=%" PRId64
+                 " raw=%" PRId64 "\n",
+                 s->v90_t3_acquired ? 1 : 0,
+                 s->v90_t3_acquisition_attempted ? 1 : 0,
+                 s->v90_t3_b1_symbols, s->v90_t3_e_anchor,
+                 search_start, search_end, s->v90_t3_raw_count);
         return;
+    }
+    /*endif*/
     /* Never search past what the ring still holds. */
     if (search_start
           < s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE

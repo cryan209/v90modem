@@ -8576,6 +8576,13 @@ SPAN_DECLARE(int) v34_release(v34_state_t *s)
 
 SPAN_DECLARE(int) v34_free(v34_state_t *s)
 {
+    /* The upstream symbol dump, if ME_V90_UPSTREAM_SYM_DUMP opened one. */
+    if (s->rx.v90_t3_sym_dump)
+    {
+        fclose(s->rx.v90_t3_sym_dump);
+        s->rx.v90_t3_sym_dump = NULL;
+    }
+    /*endif*/
     span_free(s);
     return 0;
 }
