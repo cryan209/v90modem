@@ -240,3 +240,48 @@ coding, shaping, trellis and rate (the peer names every one in its own
 log and they match what we prepare); and a payload bit permutation (no
 periodicity at any frame lag, where a permutation of a 90-bit-periodic
 pattern would keep some).
+
+## Timing recovery (2026-08-20)
+
+`v34_gardner.h` is the loop; `v34_gardner_test` is what it is held to.
+Three things about fitting Gardner to this receiver were not obvious, and
+each cost a wrong version first:
+
+- **The signal is the equalizer output, not the fixed RRC.**  The
+  supervised filter is fitted by least squares onto B1, so it *is* the
+  matched filter here, and its delay sits wherever the fit left it inside
+  21 taps.  A detector reading the RRC stream reported -0.40 on the clean
+  loopback with the true error at zero, and inserted symbols on a channel
+  with no drift.
+- **The actuator has to be continuous.**  Whole samples move the instant;
+  the leftover fraction is an interpolation weight.  Without the fraction
+  the quantum is a third of a symbol, the steady-state error is up to a
+  sixth of one, and the integrator never stops seeing it -- 984
+  corrections over 6000 symbols of a perfectly timed signal.
+- **Do not shift the taps when the instant slips.**  It looks like the
+  right compensation and it cancels the correction: the loop stops seeing
+  its own effect and winds the integrator to its clamp.  The position is
+  `next_symbol + acc` and `acc` gives up a whole sample exactly when one
+  is handed back, so a slip is already continuous.
+
+The gains are slow on purpose (mu 0.005, beta 5e-6).  Gardner carries
+data self-noise on a dense QAM -- about +/-0.2 symbol to symbol with the
+true error at zero -- and the loop is not asked to acquire phase.  The
+equalizer owns phase; the loop only has to catch a clock offset before it
+becomes a symbol.
+
+### A drift regression that is not in the suite yet
+
+The obvious test -- resample the loopback wire by a few ppm and require
+the payload to survive -- was written and then withdrawn, because at the
+lengths where drift matters it measures the harness rather than the
+receiver.  Two things get in the way: `test_v90_upstream_t3_case` zero-fills
+whenever `v34_tx` produces less than a block, so a six-second run decodes
+silence near the end (errors began at bit 118306 of 128304 with the loop
+both enabled and disabled, i.e. identically), and at two seconds a
+realistic offset is a fraction of a sample, which the equalizer absorbs
+whether or not anything is tracking it -- 20 ppm passed with the loop
+disabled.  A useful version needs a transmitter that sustains a long run,
+and then the window has to be taken at the *end* of the capture: drift is
+cumulative, so checking the first second is exactly the blind spot that
+let a receiver with no timing recovery at all look healthy for years.
