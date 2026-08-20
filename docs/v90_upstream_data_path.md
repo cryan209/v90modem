@@ -285,3 +285,53 @@ disabled.  A useful version needs a transmitter that sustains a long run,
 and then the window has to be taken at the *end* of the capture: drift is
 cumulative, so checking the first second is exactly the blind spot that
 let a receiver with no timing recovery at all look healthy for years.
+
+## The upstream carries payload (2026-08-20)
+
+The frame phase is ambiguous in **two** dimensions and only one of them
+was being searched.  B1 does not tell us the peer's superframe counter,
+and its end pins the position *within* the data frame only if B1 ends
+exactly where we think it does.  Sweeping the seven superframe phases
+alone enumerated cleanly on a live call -- 0 through 6, one window each
+-- and none of them decoded, with the symbols clean and B1 matched at
+98.6%.  Sweeping the (superframe, data-frame) pair locks: p*j = 112
+candidates at a 0.4 s window, under a minute, which fits while the peer's
+DTE is idle or trickling.
+
+Two details make the search safe.  The candidate is handed to the decoder
+and applied at *its* data-frame boundary, where the phase is the only
+thing that changes -- an earlier version reset the frame state from the
+emitter, which also zeroed the mapping-frame position mid-frame, so each
+step shifted alignment by part of a frame and the walk wandered (5, 2, 5,
+2, 6) instead of enumerating.  And the candidate comes from a counter,
+not from "current + 1": the decoder advances between the window that
+measures and the boundary that applies, so stepping from the current
+phase is a walk, not a sweep.
+
+Live, 9600 upstream, peer trickling 200 B/s:
+
+- downstream 38830 of 39025 pattern lines, 99.5% clean
+- **upstream 1329 pattern lines in sequence, one missing** -- the peer's
+  own data on our PTY
+
+Across five consecutive calls the sweep locked six times (0, 1, 2, 35,
+102 and 128 steps in, at 78% to 100% ones) and three of the five
+delivered payload.  Finding a lock is no longer the hard part.
+
+**Read the line counts, not the byte percentages.**  The "% clean" figure
+counts every byte on the PTY including the garbage the receiver emits
+while it is unlocked and sweeping, so a call that delivered 1329 of 1330
+lines can read 35% clean.
+
+### Open: holding a lock
+
+A lock holds about twenty-seven seconds -- thirteen consecutive windows
+at 100% ones -- and then decays, with the Gardner slip count going from 7
+to 12 in a few seconds.  A lock is now released and re-swept when the
+ones-fraction falls back, which stops one bad patch ending the call, but
+the underlying question is why a settled receiver starts slipping several
+times a second.  The ones-fraction is also only a valid lock metric while
+the peer's line is mostly idle; at a full send rate it would need
+replacing with something content-independent, and the V.14 framing score
+that `tools/soak/upbits_align.py` computes offline is the obvious
+candidate.
