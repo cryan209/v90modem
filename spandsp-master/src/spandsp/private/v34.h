@@ -70,6 +70,18 @@
    loop holds still: its detector needs symbols that mean something, and 2/3
    is what symbols unrelated to the lattice give. */
 #define V34_V90_T3_TIMING_TRACK_ERR         0.35f
+
+/*! Two estimates of that distance are kept.  The slow one (1/256 per symbol,
+    80 ms at 3200 baud) is what the frame-phase logic and the logs read: it
+    describes how the call is going.  The fast one is what the adaptive
+    elements gate on, and the difference matters more than it sounds.  A slip
+    shuts the eye in a single symbol; with only the slow estimate, the
+    decision-directed LMS goes on adapting HARD onto wrong decisions for the
+    hundred symbols the average takes to notice, and by the time the slip
+    search runs, the filter it would search with has already been walked off
+    -- which is why the search used to come back with every candidate offset
+    scoring the same 0.65 and nothing to choose between them. */
+#define V34_V90_T3_ERR_FAST_SHIFT           16.0f
 /* Distance from the constellation below which the equalizer is considered
    demonstrably good and worth snapshotting, and the number of consecutive
    symbols above the tracking threshold before the snapshot is restored --
@@ -105,14 +117,51 @@
 
 /*! Symbols off the constellation before a slip search runs.  A slip is a
     step, not a drift, so this only has to be long enough not to fire on a
-    noise burst. */
-#define V34_V90_T3_SLIP_RUN                 240
+    noise burst -- and it must be SHORT, because everything that goes wrong
+    after a slip goes wrong while this is counting.
+
+    The peer really does slip whole samples: tools/measure_timing_slips.py
+    reads the transmitter's symbol epoch straight off the wire, out of the
+    phase of the symbol-rate line in the squared analytic envelope, and on
+    artifacts/dmodem-soak-0821-rounds/round1 it steps by exactly one sample
+    28 times in 290 s -- a net 7.2 ppm, and in bursts of three a second
+    apart.  A receiver that takes a second to answer one of those has two
+    more on top of it before it has finished, and two slips corrected as one
+    is a whole-symbol move: the lattice cannot tell +2 samples from -1, so
+    the correction lands a symbol out and the frame phase goes with it.
+    Measured before this was shortened: the call decoded perfectly for 68 s,
+    hit a burst of three, and was still white 145 s later with the wire
+    provably quiet in between. */
+#define V34_V90_T3_SLIP_RUN                 48
 
 /*! Symbols of recent history each candidate offset is scored over. */
 #define V34_V90_T3_SLIP_WINDOW              192
 
-/*! Whole samples either side of the current position to search. */
-#define V34_V90_T3_SLIP_SPAN                3
+/*! How far either side of the current position a slip search may look, in
+    THIRDS of a sample.  The score a candidate is judged on is the distance
+    from the equalized symbols to the lattice, and that measure is periodic
+    in one symbol -- three samples at T/3 -- because a whole-symbol shift
+    still lands every symbol on the constellation.  So the distinct sampling
+    positions all lie within one symbol of the current one, and searching
+    wider does not find anything new: it only offers the same minimum again
+    under a label three samples away, and adopting THAT inserts or drops a
+    whole symbol.
+
+    The unit here is a SIXTH of a T/3 sample, and +/-9 of them is exactly the
+    half symbol either side that covers every distinct position once.  The
+    step has to be finer than a third, because the quantum the peer slips by
+    is one 8 kHz sample, and at 3200 baud that is 1.2 of these T/3 samples --
+    a third-of-a-sample grid has no point within 0.13 of it.
+
+    Measured on artifacts/dmodem-soak-0821-rounds/round1: with the search
+    running to +/-3 samples, 46 of 81 corrections on one call were an
+    equivalent offset a whole symbol out -- 36 of them "+2.67", which is
+    -0.33 plus one symbol.  Each moved the shell decoder's position within
+    the data frame, and the frame-phase sweep cannot undo that because it
+    searches frame LABELS, not single symbols.  The call decoded at 100%
+    ones for 69 s and then never read above 59% again, with the symbols
+    themselves clean for 237 of the remaining windows. */
+#define V34_V90_T3_SLIP_SPAN                9
 
 /*! A candidate has to put the symbols this close to the lattice to be
     adopted; anything worse is not a recovered slip. */
@@ -899,6 +948,9 @@ typedef struct
     int v90_t3_alt_ones;
     int v90_t3_bit_count;
     /*! \brief Running decision-error statistics for the V.90 upstream. */
+    /*! \brief Fast distance-to-lattice estimate, gating the adaptive
+        elements; v90_t3_sym_err_ema is the slow one the rest reads. */
+    float v90_t3_sym_err_fast;
     float v90_t3_decision_err;
     float v90_t3_decision_pow;
     int v90_t3_decision_count;
@@ -913,12 +965,24 @@ typedef struct
     /*! \brief Superframe-phase search over the post-B1 data stream.  The
         peer's superframe counter at B1 is not something B1 tells us, so
         without this the phase is right about one call in j -- measured, one
-        in six across fourteen calls.  v90_t3_sf_force is the next phase to
-        try, applied by the decoder at its own data-frame boundary so the
-        search never disturbs alignment; -1 means nothing pending. */
+        in six across fourteen calls.
+
+        The phase is carried as a RELATIVE offset, not as a pair of absolute
+        frame labels.  super_frame and data_frame are free-running counters:
+        writing the pair (X, Y) into them at a frame boundary shifts the
+        labelling by X, Y minus whatever the counters would naturally have
+        held at THAT boundary, and that natural value moves on between one
+        measurement window and the next.  So an absolute pair does not name a
+        candidate -- recording the best one and writing it back later lands on
+        a different alignment altogether, which is why a sweep that visited
+        the right phase could never return to it.  v90_t3_phase_delta is a
+        shift in data frames, applied by the decoder at its own boundary so
+        the search never disturbs alignment, and v90_t3_phase_pos accumulates
+        the shifts so far, modulo j*p: that IS the candidate's name. */
     int64_t v90_t3_data_symbols;
-    int v90_t3_sf_force;
-    int v90_t3_df_force;
+    int v90_t3_phase_delta;
+    bool v90_t3_phase_pending;
+    int v90_t3_phase_pos;
     int v90_t3_relocks;
     /*! Consecutive symbols spent off the constellation, and how many
         whole-sample slips have been corrected. */
@@ -934,10 +998,7 @@ typedef struct
         many sweeps have run. */
     int v90_t3_sweep_base;
     int v90_t3_sweep_best;
-    int v90_t3_sweep_best_sf;
-    int v90_t3_sweep_best_df;
-    int v90_t3_sweep_last_sf;
-    int v90_t3_sweep_last_df;
+    int v90_t3_sweep_best_pos;
     int v90_t3_sweep_episodes;
     int v90_t3_acq_retries;
     int64_t v90_t3_acq_retry_at;

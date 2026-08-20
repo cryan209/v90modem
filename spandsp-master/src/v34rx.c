@@ -557,8 +557,16 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
         }
         /* While searching, judge on a short window so the whole phase space
            fits inside the peer's idle period; once locked, report on a long
-           one. */
-        if (++s->v90_t3_bit_count >= (s->v90_t3_sf_locked ? 20000 : 4000))
+           one.
+
+           Short means SHORT.  The discrimination on an idle line is 100% ones
+           against 50%, so 800 bits separates the two by twenty standard
+           deviations -- and 800 bits is what makes the search affordable:
+           112 candidates in nine seconds rather than forty-five.  Forty-five
+           was longer than the intervals this peer leaves between the slips
+           that disturb the phase in the first place, so the sweep was losing
+           a race it did not have to be in. */
+        if (++s->v90_t3_bit_count >= (s->v90_t3_sf_locked ? 4800 : 1200))
         {
             int ones_pct = 100*s->v90_t3_ones/s->v90_t3_bit_count;
             int v14_pct = 0;
@@ -643,9 +651,14 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                and with the lock held, nothing looked for the phase again and
                the rest of the call was lost.  Release it and let the sweep
                run once more. */
+            /* A lock is cheap to give up now that a sweep costs ten seconds
+               rather than forty-five, and staying wrong is not cheap at all.
+               The old cap of eight relocks meant a call that had used them up
+               sat on a phase it had already measured as bad for the rest of
+               its length. */
             if (s->v90_t3_sf_locked  &&  ones_pct < 70  &&  v14_ratio < 25
                 &&
-                s->v90_t3_relocks < 8)
+                s->v90_t3_relocks < 200)
             {
                 s->v90_t3_sf_locked = false;
                 s->v90_t3_sf_tries = 0;
@@ -677,7 +690,14 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                         + ((v14_pct >= 5) ? v14_ratio/10 : 0);
             if (!s->v90_t3_sf_locked)
             {
-                if (ones_pct >= 75
+                /* Lock on marks only when they are really marks.  A correct
+                   phase on an idle line reads 99-100%; 75-87% is a phase that
+                   is partly right, and accepting one stopped the sweep and
+                   then spent a 20000-bit window -- two seconds -- proving it
+                   wrong before releasing.  Measured on round1: 35 locks, most
+                   of them in the 75-87% band, and the sweep restarting after
+                   each. */
+                if (ones_pct >= 90
                     ||
                     (v14_pct >= 5  &&  v14_ratio >= 30))
                 {
@@ -696,12 +716,13 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                            s->v90_t3_sweep_episodes
                                < V34_V90_T3_SWEEP_EPISODES))
                          &&
-                         s->v90_t3_sf_tries
-                             < V34_MAX_SUPER_FRAME_PHASES*s->parms.p
+                         s->parms.j > 0
                          &&
-                         s->v90_t3_sf_force < 0
+                         s->parms.p > 0
                          &&
-                         s->parms.j > 0)
+                         s->v90_t3_sf_tries < s->parms.j*s->parms.p
+                         &&
+                         !s->v90_t3_phase_pending)
                 {
                     /* Try the next phase.  The decoder applies it at its own
                        frame boundary, so this costs nothing but the window
@@ -732,36 +753,38 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                     {
                         s->v90_t3_sweep_base = sweep_score;
                         s->v90_t3_sweep_best = sweep_score;
-                        s->v90_t3_sweep_best_sf = s->super_frame;
-                        s->v90_t3_sweep_best_df = s->data_frame;
+                        s->v90_t3_sweep_best_pos = s->v90_t3_phase_pos;
                     }
                     else if (sweep_score > s->v90_t3_sweep_best)
                     {
                         s->v90_t3_sweep_best = sweep_score;
-                        s->v90_t3_sweep_best_sf = s->v90_t3_sweep_last_sf;
-                        s->v90_t3_sweep_best_df = s->v90_t3_sweep_last_df;
+                        s->v90_t3_sweep_best_pos = s->v90_t3_phase_pos;
                     }
                     /*endif*/
-                    s->v90_t3_sf_force = (s->v90_t3_sf_tries/s->parms.p)
-                                       % s->parms.j;
-                    s->v90_t3_df_force = s->v90_t3_sf_tries % s->parms.p;
-                    s->v90_t3_sweep_last_sf = s->v90_t3_sf_force;
-                    s->v90_t3_sweep_last_df = s->v90_t3_df_force;
+                    /* One data frame further on.  The shift is relative, so
+                       the position it reaches is known -- v90_t3_phase_pos --
+                       and can be returned to, which an absolute pair of frame
+                       labels cannot. */
+                    s->v90_t3_phase_delta = 1;
+                    s->v90_t3_phase_pending = true;
                     s->v90_t3_sf_tries++;
                     span_log(s->logging, SPAN_LOG_WARNING,
-                             "Rx - V.90 upstream frame phase -> super %d "
-                             "data %d (step %d, %d%% ones, V.14 %d%% at "
-                             "%dx)\n",
-                             s->v90_t3_sf_force, s->v90_t3_df_force,
-                             s->v90_t3_sf_tries, ones_pct, v14_pct,
+                             "Rx - V.90 upstream frame phase +1 frame "
+                             "(step %d of %d, from offset %d, %d%% ones, "
+                             "V.14 %d%% at %dx)\n",
+                             s->v90_t3_sf_tries, s->parms.j*s->parms.p,
+                             s->v90_t3_phase_pos, ones_pct, v14_pct,
                              v14_ratio/10);
                 }
                 else if (s->v90_t3_sf_tries > 0
                          &&
-                         s->v90_t3_sf_tries
-                             >= V34_MAX_SUPER_FRAME_PHASES*s->parms.p
+                         s->parms.j > 0
                          &&
-                         s->v90_t3_sf_force < 0)
+                         s->parms.p > 0
+                         &&
+                         s->v90_t3_sf_tries >= s->parms.j*s->parms.p
+                         &&
+                         !s->v90_t3_phase_pending)
                 {
                     /* Every candidate has been measured.  Go to the best one
                        -- which is the phase the sweep started from unless
@@ -779,8 +802,16 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                        ones throughout, and not one byte of payload.  With the
                        best candidate restored, a receiver that is already
                        right wins its own sweep and nothing moves. */
-                    s->v90_t3_sf_force = s->v90_t3_sweep_best_sf;
-                    s->v90_t3_df_force = s->v90_t3_sweep_best_df;
+                    int span = s->parms.j*s->parms.p;
+                    int delta = ((s->v90_t3_sweep_best_pos
+                                  - s->v90_t3_phase_pos) % span + span) % span;
+
+                    if (delta != 0)
+                    {
+                        s->v90_t3_phase_delta = delta;
+                        s->v90_t3_phase_pending = true;
+                    }
+                    /*endif*/
                     s->v90_t3_sweep_episodes++;
                     /* Leave the counter at its limit unless another sweep is
                        still allowed.  The walk this replaces stopped for good
@@ -797,11 +828,11 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                     /*endif*/
                     span_log(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream phase sweep done: best "
-                             "super %d data %d scored %d against %d where it "
-                             "started (episode %d)\n",
-                             s->v90_t3_sweep_best_sf, s->v90_t3_sweep_best_df,
+                             "offset %d scored %d against %d where it "
+                             "started; going back %d frames (episode %d)\n",
+                             s->v90_t3_sweep_best_pos,
                              s->v90_t3_sweep_best, s->v90_t3_sweep_base,
-                             s->v90_t3_sweep_episodes);
+                             delta, s->v90_t3_sweep_episodes);
                 }
                 /*endif*/
             }
@@ -9674,6 +9705,12 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    all; a receiver that is decoding reads about 0.10. */
                 s->v90_t3_sym_err_ema += ((d_re*d_re + d_im*d_im)
                                           - s->v90_t3_sym_err_ema)/256.0f;
+                /* The same distance over a much shorter memory, for the
+                   adaptive elements to gate on -- see
+                   V34_V90_T3_ERR_FAST_SHIFT. */
+                s->v90_t3_sym_err_fast += ((d_re*d_re + d_im*d_im)
+                                           - s->v90_t3_sym_err_fast)
+                                          /V34_V90_T3_ERR_FAST_SHIFT;
                 /* A mean-square distance-to-grid of 2/3 is exactly what
                    symbols bearing no relation to the lattice give (uniform
                    over a cell of spacing 2).  Sweep a scale factor: if some
@@ -10243,12 +10280,43 @@ static float v90_t3_fit(v34_rx_state_t *s, int64_t first, bool conjugate,
     return (float)(1.0 - error/power);
 }
 
+/*! The carrier rotation that comes with reading the T/3 ring `offset`
+    samples further on, in radians.
+
+    The ring holds complex baseband, mixed down by an angle indexed on the
+    ABSOLUTE sample count -- see v90_t3_put_sample().  A slip in the peer's
+    stream is a delay of the passband signal, and a passband delay is a
+    baseband delay TIMES a phase: with the received analytic signal
+    a(n) = b(n)e^(jwn), a delay of D gives ring'(n) = b(n-D)e^(-jwD), so
+    reading D samples further on recovers the right baseband sample rotated
+    by -wD.  Correcting the timing without the phase leaves the constellation
+    turned by 82 degrees at 3200 baud low carrier, which is why the slip
+    search used to come back with every offset scoring the same 0.65: the
+    right sampling instant was in the list and still did not fit the lattice.
+
+    Only the residual matters, since V.34's differential mapping makes a
+    90 degree rotation harmless -- and 82 is close enough to 90 that the
+    fourth-power carrier estimator sometimes pulled a call back on its own,
+    which is exactly why recovery looked like a lottery. */
+static float v90_t3_offset_rotation(const v34_rx_state_t *s, float offset)
+{
+    return 2.0f*3.14159265f
+         * carrier_frequency(s->baud_rate, s->high_carrier)
+         * offset/s->v90_t3_internal_rate;
+}
+/*- End of function --------------------------------------------------------*/
+
 /*! Score a candidate symbol-timing position: the mean square distance from
     the recent equalized symbols to the V.34 odd-integer lattice, recomputed
-    with the current taps at an offset of `offset` whole samples. */
+    with the current taps at an offset of `offset` samples, and derotated
+    both by the carrier loop's standing phase -- which is what the slicer
+    sees -- and by the phase the offset itself implies. */
 static float v90_t3_score_offset(v34_rx_state_t *s, float offset)
 {
     int pre = V34_V90_T3_FSE_TAPS/2;
+    float rot = v90_t3_offset_rotation(s, offset);
+    float rot_cs = cosf(rot);
+    float rot_sn = sinf(rot);
     /* Score where the slicer would actually be looking: the emit path reads
        the ring through the timing loop's leftover fraction, so a scorer that
        reads whole samples is measuring a position the receiver never uses,
@@ -10284,6 +10352,24 @@ static float v90_t3_score_offset(v34_rx_state_t *s, float offset)
             y = complex_addf(&y, &z);
         }
         /*endfor*/
+        if (s->v90_t3_carrier_enabled)
+        {
+            float dr;
+            float di;
+
+            v34_carrier_derotate(&s->v90_t3_carrier, y.re, y.im, &dr, &di);
+            y.re = dr;
+            y.im = di;
+        }
+        /*endif*/
+        {
+            /* Undo the phase the offset itself brings with it. */
+            float rr = y.re*rot_cs - y.im*rot_sn;
+            float ri = y.re*rot_sn + y.im*rot_cs;
+
+            y.re = rr;
+            y.im = ri;
+        }
         t_re = 2.0f*floorf(y.re/2.0f) + 1.0f;
         t_im = 2.0f*floorf(y.im/2.0f) + 1.0f;
         total += (t_re - y.re)*(t_re - y.re) + (t_im - y.im)*(t_im - y.im);
@@ -10334,12 +10420,17 @@ static void v90_t3_slip_resync(v34_rx_state_t *s)
     /* Thirds of a sample: at three samples per symbol a slip lands the
        sampling instant a whole sample out, but the fraction the timing loop
        was carrying when the eye closed is not necessarily the right one on
-       the far side of the step. */
-    for (int step = -3*V34_V90_T3_SLIP_SPAN;
-         step <= 3*V34_V90_T3_SLIP_SPAN;
+       the far side of the step.
+
+       One symbol either side and no further -- see V34_V90_T3_SLIP_SPAN.
+       The lattice score is periodic in three samples, so a wider search
+       returns the same minimum again three samples away, and taking that
+       copy shifts the whole symbol stream by one against the transmitter. */
+    for (int step = -V34_V90_T3_SLIP_SPAN;
+         step <= V34_V90_T3_SLIP_SPAN;
          step++)
     {
-        float offset = step/3.0f;
+        float offset = step/6.0f;
         float q;
 
         if (step == 0)
@@ -10380,6 +10471,10 @@ static void v90_t3_slip_resync(v34_rx_state_t *s)
         return;
     }
     /*endif*/
+    /* Take the phase with the timing.  Derotation is by exp(-j*phase), and
+       the correction wanted is a multiply by exp(+j*rot). */
+    s->v90_t3_carrier.phase = v34_carrier_wrap(
+        s->v90_t3_carrier.phase - v90_t3_offset_rotation(s, best_offset));
     s->v90_t3_next_symbol += (int) floorf(best_offset);
     if (s->v90_t3_timing_enabled)
     {
@@ -10393,6 +10488,7 @@ static void v90_t3_slip_resync(v34_rx_state_t *s)
     }
     /*endif*/
     s->v90_t3_sym_err_ema = best;
+    s->v90_t3_sym_err_fast = best;
     s->v90_t3_slips_recovered++;
     /* Let the equalizer back in.  Every adaptive element here is gated on the
        symbols already being good, which is right in steady state and wrong
@@ -10446,7 +10542,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
 
             v34_carrier_derotate(&s->v90_t3_carrier, y.re, y.im, &dr, &di);
             v34_carrier_update(&s->v90_t3_carrier, dr, di,
-                               (s->v90_t3_sym_err_ema
+                               (s->v90_t3_sym_err_fast
                                     < V34_V90_T3_TIMING_TRACK_ERR) ? 1 : 0);
             y.re = dr;
             y.im = di;
@@ -10561,13 +10657,17 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                and stayed there for the remaining four minutes of the call.
                Adapting a filter towards decisions that are noise is how it
                gets walked off, and nothing then re-acquires it. */
+            /* Gate on the FAST estimate.  This filter is the one thing the
+               slip search needs intact to find the new sampling instant, and
+               the slow average leaves it adapting onto garbage for the
+               hundred symbols it takes to turn round. */
             if (e_re*e_re + e_im*e_im < 8.0f
                 &&
-                (s->v90_t3_sym_err_ema < V34_V90_T3_TIMING_TRACK_ERR
+                (s->v90_t3_sym_err_fast < V34_V90_T3_TIMING_TRACK_ERR
                  ||
                  (s->v90_t3_recover > 0
                   &&
-                  s->v90_t3_sym_err_ema < V34_V90_T3_SLIP_ACCEPT_ERR)))
+                  s->v90_t3_sym_err_fast < V34_V90_T3_SLIP_ACCEPT_ERR)))
             {
                 float mu = s->v90_t3_dd_mu/energy;
 
@@ -10596,7 +10696,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
            as the error says the constellation is gone -- long before the
            equalizer-restore path below, which is for a filter that has been
            walked off gradually and cannot fix a timing step at all. */
-        if (s->v90_t3_sym_err_ema >= V34_V90_T3_TIMING_TRACK_ERR)
+        if (s->v90_t3_sym_err_fast >= V34_V90_T3_TIMING_TRACK_ERR)
         {
             if (++s->v90_t3_slip_run >= V34_V90_T3_SLIP_RUN)
             {
@@ -10633,11 +10733,24 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                        sizeof(s->v90_t3_fse));
                 s->v90_t3_fse_bad_run = 0;
                 s->v90_t3_fse_good_age = 0;
-                /* The frame phase almost certainly went with it. */
+                /* The lock goes with it -- the bits cannot be trusted
+                   while the eye is shut -- but NOT the sweep's progress.
+                   Restoring the equalizer does not move the symbol stream,
+                   so a candidate measured before the restore is still the
+                   same candidate afterwards; and a restore fires as often as
+                   every V34_V90_T3_FSE_BAD_RUN symbols, so resetting the
+                   counter here starved the sweep completely.  Measured on
+                   artifacts/dmodem-soak-0821-rounds/round1: 300-odd restores
+                   in one call and the sweep never once passed step 1 of 112,
+                   sitting on the same phase for five minutes. */
                 s->v90_t3_sf_locked = false;
-                s->v90_t3_sf_tries = 0;
+                /* Drop the frequency estimate the closed eye taught the
+                   loop, but NOT its accumulator: acc is the fractional part
+                   of the sampling position, and zeroing it moves that
+                   position by up to a whole sample with nothing to
+                   compensate -- manufacturing, on the recovery path, exactly
+                   the fault the search below is there to undo. */
                 s->v90_t3_gardner.freq = 0.0f;
-                s->v90_t3_gardner.acc = 0.0f;
                 s->v90_t3_gardner.hold = 0;
                 s->v90_t3_fse_restores++;
                 span_log(s->logging, SPAN_LOG_WARNING,
@@ -10653,6 +10766,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                    the filter from when it worked, the phase the wire is
                    actually on now -- are the state the call started in. */
                 s->v90_t3_sym_err_ema = v90_t3_score_offset(s, 0.0f);
+                s->v90_t3_sym_err_fast = s->v90_t3_sym_err_ema;
                 v90_t3_slip_resync(s);
                 s->v90_t3_recover = V34_V90_T3_SLIP_RECOVER;
             }
@@ -10740,7 +10854,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             s->v90_t3_next_symbol +=
                 v34_gardner_update(&s->v90_t3_gardner, y.re, y.im,
                                    mid.re, mid.im,
-                                   (s->v90_t3_sym_err_ema
+                                   (s->v90_t3_sym_err_fast
                                         < V34_V90_T3_TIMING_TRACK_ERR)
                                        ? 1 : 0);
             if (getenv("ME_V90_UPSTREAM_TIMING_DEBUG"))
@@ -11178,12 +11292,14 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_b1_frame_err = 0.0f;
     s->v90_t3_in_b1 = true;
     s->v90_t3_data_symbols = 0;
-    s->v90_t3_sf_force = -1;
-    s->v90_t3_df_force = 0;
+    s->v90_t3_phase_delta = 0;
+    s->v90_t3_phase_pending = false;
+    s->v90_t3_phase_pos = 0;
     s->v90_t3_sf_locked = false;
     s->v90_t3_idle_seen = false;
     s->v90_t3_relocks = 0;
     s->v90_t3_sym_err_ema = 0.0f;
+    s->v90_t3_sym_err_fast = 0.0f;
     s->v90_t3_v14_hist = 0;
     s->v90_t3_v14_bits = 0;
     memset(s->v90_t3_v14_ok, 0, sizeof(s->v90_t3_v14_ok));
@@ -11978,30 +12094,55 @@ SPAN_DECLARE(void) v34_put_mapping_frame(v34_rx_state_t *s, int16_t bits[16])
                            step shifted alignment by part of a frame and the
                            search wandered (5, 2, 5, 2, 6) instead of
                            enumerating the seven phases. */
-                        if (s->v90_t3_sf_force >= 0)
+                        if (s->v90_t3_phase_pending)
                         {
-                            /* Clamp at the point of use.  Everything the
-                               decoder derives from these -- the V0 inversion
-                               pattern and the 4D symbol counter -- indexes
-                               state sized for one superframe of p data
-                               frames, so an out-of-range pair is not a wrong
-                               answer but a wild pointer. */
-                            if (s->parms.j > 0)
-                                s->v90_t3_sf_force %= s->parms.j;
-                            else
-                                s->v90_t3_sf_force = 0;
+                            /* Shift the labelling by a whole number of data
+                               frames, relative to whatever the counters hold
+                               right now.  Reduce modulo j*p at the point of
+                               use: everything the decoder derives from the
+                               pair -- the V0 inversion pattern and the 4D
+                               symbol counter -- indexes state sized for one
+                               superframe of p data frames, so an
+                               out-of-range pair is not a wrong answer but a
+                               wild pointer. */
+                            int span = s->parms.j*s->parms.p;
+
+                            if (span > 0)
+                            {
+                                int total = s->super_frame*s->parms.p
+                                          + s->data_frame
+                                          + s->v90_t3_phase_delta;
+
+                                total = ((total % span) + span) % span;
+                                s->super_frame = total/s->parms.p;
+                                s->data_frame = total % s->parms.p;
+                                s->v0_pattern = (uint16_t) (2*s->super_frame);
+                                s->input_4d = s->super_frame*4*s->parms.p
+                                            + s->data_frame*4;
+                                s->v90_t3_phase_pos =
+                                    (((s->v90_t3_phase_pos
+                                       + s->v90_t3_phase_delta) % span)
+                                     + span) % span;
+                            }
                             /*endif*/
-                            if (s->parms.p > 0)
-                                s->v90_t3_df_force %= s->parms.p;
-                            else
-                                s->v90_t3_df_force = 0;
-                            /*endif*/
-                            s->super_frame = s->v90_t3_sf_force;
-                            s->v0_pattern = (uint16_t) (2*s->super_frame);
-                            s->input_4d = s->super_frame*4*s->parms.p
-                                        + s->v90_t3_df_force*4;
-                            s->data_frame = s->v90_t3_df_force;
-                            s->v90_t3_sf_force = -1;
+                            s->v90_t3_phase_delta = 0;
+                            s->v90_t3_phase_pending = false;
+                            /* Start the measurement where the candidate
+                               starts.  The change is scheduled at the end of
+                               a window and lands here, up to a superframe
+                               later -- 40 ms at 3200 baud, half a search
+                               window -- so without this every candidate is
+                               scored partly on its predecessor, and on a
+                               short window that is most of the evidence. */
+                            s->v90_t3_ones = 0;
+                            s->v90_t3_alt_ones = 0;
+                            s->v90_t3_bit_count = 0;
+                            for (int ph = 0;  ph < 10;  ph++)
+                            {
+                                s->v90_t3_v14_ok[ph] = 0;
+                                s->v90_t3_v14_count[ph] = 0;
+                            }
+                            /*endfor*/
                         }
                         /*endif*/
                     }
@@ -12642,11 +12783,11 @@ static bool v90_t3_start(v34_rx_state_t *rx)
     rx->v90_t3_acquisition_attempted = false;
     rx->v90_t3_sweep_base = 0;
     rx->v90_t3_sweep_best = 0;
-    rx->v90_t3_sweep_best_sf = 0;
-    rx->v90_t3_sweep_best_df = 0;
-    rx->v90_t3_sweep_last_sf = 0;
-    rx->v90_t3_sweep_last_df = 0;
+    rx->v90_t3_sweep_best_pos = 0;
     rx->v90_t3_sweep_episodes = 0;
+    rx->v90_t3_phase_delta = 0;
+    rx->v90_t3_phase_pending = false;
+    rx->v90_t3_phase_pos = 0;
     rx->v90_t3_acq_retries = 0;
     rx->v90_t3_acq_retry_at = 0;
     rx->v90_t3_e_anchor = -1;
