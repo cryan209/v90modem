@@ -560,6 +560,25 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                -- 55-56% held steady for a whole call while the symbols
                themselves were clean at 0.098.  j is only 7 wide, so search
                it against the marks rather than deriving it. */
+            /* Locks are not forever.  Measured live, the upstream held 100%
+               ones for about twenty-seven seconds and then fell back to 50%
+               as the timing loop started slipping several times a second --
+               and with the lock held, nothing looked for the phase again and
+               the rest of the call was lost.  Release it and let the sweep
+               run once more. */
+            if (s->v90_t3_sf_locked  &&  ones_pct < 70
+                &&
+                s->v90_t3_relocks < 8)
+            {
+                s->v90_t3_sf_locked = false;
+                s->v90_t3_sf_tries = 0;
+                s->v90_t3_relocks++;
+                span_log(s->logging, SPAN_LOG_WARNING,
+                         "Rx - V.90 upstream lost frame phase (%d%% ones); "
+                         "sweeping again (release %d)\n",
+                         ones_pct, s->v90_t3_relocks);
+            }
+            /*endif*/
             if (!s->v90_t3_sf_locked)
             {
                 if (ones_pct >= 75)
@@ -10526,6 +10545,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_sf_force = -1;
     s->v90_t3_df_force = 0;
     s->v90_t3_sf_locked = false;
+    s->v90_t3_relocks = 0;
     s->v90_t3_sf_tries = 0;
     {
         const char *value = getenv("ME_V90_UPSTREAM_DD_MU");
