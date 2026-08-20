@@ -508,3 +508,35 @@ stretch (`ME_V90_UPSTREAM_BIT_DUMP`, now that carrier recovery gives
 thirty seconds of clean symbols to dump) and an offline scan for HDLC
 flags and for the pattern under sync framing, which
 `tools/soak/upbits_align.py` already does.
+
+
+## Payload bits are noise, not misaligned bits (measured)
+
+A bit dump taken with the peer's DTE sending, analysed in 20000-bit
+windows for the ones fraction and for autocorrelation at 90, 80 and 10
+bits:
+
+- the idle stretches read ones 0.90-1.00 with autocorrelation ~0.99 at
+  *every* lag -- a nearly constant stream, which is what marks are
+- every other window reads ones 0.50 and autocorrelation 0.50 at every
+  lag -- noise, with no structure at any lag
+
+The peer sends a nine-byte repeating pattern, so a correct-but-misframed
+payload stream would stand out: ones near 0.45 and autocorrelation raised
+at 90 bits while staying flat at 10.  **No window looks like that.**  Put
+with the 777 frame-phase candidates all scoring at chance, alignment is
+eliminated: the bits are not shifted, they are wrong.
+
+So the fork closes on the second branch.  The decode is correct for the
+all-ones idle pattern and produces noise for anything else, which is a
+statement about the shell/trellis path rather than about framing, timing
+or carrier.  It also explains why `v34_data_test` passes 390 cases and
+sees nothing: our encoder and decoder share whatever convention this is,
+so a loopback cancels it, and all-ones is a degenerate input that cannot
+distinguish conventions either.
+
+What that needs is validation against something external to this tree --
+one mapping frame worked through 9.4/9.5's shell mapping and 9.6's
+trellis by hand against the spec tables, or a known-good V.34 capture
+decoded end to end.  Not another live call: the rig has already said
+everything it can about this one.
