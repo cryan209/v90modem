@@ -579,3 +579,34 @@ lethal on the wire, and it was found by looking at RTP jitter rather than
 at DSP.  Worth checking whether anything periodic happens on this call at
 that scale -- jitter-buffer adaptation, RTCP, a tap flush -- before
 reaching for another DSP hypothesis.
+
+
+## Not a media discontinuity either
+
+The received-audio tap from the five-minute call was measured in 200 ms
+blocks across its whole length.  Through the entire data-mode stretch --
+t=80 s to t=416 s, spanning the collapse -- the received level sits at
+305 to 315 RMS with no step, no dropout and no change of any kind.  The
+peer's signal keeps arriving exactly as before; our receiver simply stops
+decoding it.
+
+So the collapse is not a level change, not a dropout, and not a gross
+media event.  Together with everything else ruled out -- timing, gain,
+equalizer taps, carrier (which extends it but does not prevent it),
+payload, framing and alignment -- there is no hypothesis left that can be
+tested from a live call, because a live call has already answered every
+question that can be put to it from the outside.
+
+### What is actually missing: an offline replay
+
+Every remaining question is of the form "what does the receiver do with
+these samples, and what happens if I change X" -- and each one currently
+costs a call that may or may not come, on a rig whose Phase 3 succeeds
+sporadically.  The tap files already hold the exact audio of calls that
+collapsed.  A harness that feeds a recorded live-rx.g711 into the T/3
+upstream receiver, from the E handover onwards, would make this
+reproducible on the desk: the collapse could be bisected, hypotheses
+tried in seconds, and a fix validated before it ever sees the rig.
+
+That is the enabling piece of work, and it is worth more than another
+night of dialling.
