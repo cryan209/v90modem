@@ -476,3 +476,35 @@ was set during an earlier investigation to rule the tracker out as a
 suspect, and it does rule it out -- but it also removes the only thing
 that ever recovers the constellation.  The two calls that delivered real
 payload (1698 lines, and 1329 of 1330 in sequence) both ran with it on.
+
+
+## The frame-phase sweep cannot rescue a busy line (measured)
+
+With the peer's DTE sending continuously and the symbols clean at
+0.09-0.10, the sweep was allowed to run and every candidate was scored on
+V.14 framing.  **777 candidates across a call, all reading 24-29%** --
+chance is 25%.  Not one of the 112 (superframe, data-frame) combinations
+shows async structure.
+
+Put beside the other measurements, that is a sharp fork:
+
+    peer idle      the decode is perfect -- 100% ones, sustained 95 s
+    peer sending   the symbols stay clean, and the bits show no async
+                   framing at any frame phase
+
+So on a busy line the bits are wrong for a reason the frame phase does
+not reach.  Two candidates remain, and they are distinguishable:
+
+- The peer is not sending V.14 async on those calls, and our data stack
+  is framing a synchronous stream.  Against this: calls have delivered
+  1329 of 1330 pattern lines in sequence, so it does send V.14 at least
+  sometimes.
+- The decode is simply wrong for non-trivial data -- correct for the
+  all-ones idle pattern, wrong otherwise -- which would point back at the
+  shell/trellis path rather than at framing.
+
+The way to tell them apart is a bit dump taken during a *good busy*
+stretch (`ME_V90_UPSTREAM_BIT_DUMP`, now that carrier recovery gives
+thirty seconds of clean symbols to dump) and an offline scan for HDLC
+flags and for the pattern under sync framing, which
+`tools/soak/upbits_align.py` already does.
