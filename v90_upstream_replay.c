@@ -203,11 +203,22 @@ int main(int argc, char *argv[])
     if (argc > 5)
     {
         /* A forced handover instant, with the receiver's own logs turned all
-           the way up -- for asking why a candidate did not acquire. */
+           the way up -- for asking why a candidate did not acquire.
+
+           An optional sixth argument gives the seconds of history to feed
+           before the handover, which is the one thing a replay does not get
+           right by default: live, capture starts when the upstream is armed,
+           so by the time E fires the T/3 ring may hold only a few tenths of a
+           second, where this harness hands the receiver fourteen seconds.
+           Live and offline fit the SAME B1 to 98.8% and 100.0% respectively,
+           and the length of the ring behind it is the obvious suspect. */
         int t = (int) (atof(argv[5])*8000.0);
+        double history = (argc > 6) ? atof(argv[6]) : (double) HISTORY_SEC;
 
         rx = make_rx(alaw, baud_code, 0, bps, 1);
-        feed(rx, t - HISTORY_SEC*8000, t);
+        printf("replay: feeding %.2f s of history before the handover\n",
+               history);
+        feed(rx, t - (int) (history*8000.0), t);
         printf("replay: handover forced at %.1f s\n", t/8000.0);
         (void) v34_begin_rx_data(rx);
         feed(rx, t, sample_count);
