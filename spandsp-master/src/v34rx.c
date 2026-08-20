@@ -569,6 +569,9 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
         if (++s->v90_t3_bit_count >= (s->v90_t3_sf_locked ? 4800 : 1200))
         {
             int ones_pct = 100*s->v90_t3_ones/s->v90_t3_bit_count;
+            int shell_pct = s->v90_t3_shell_frames
+                          ? 100*s->v90_t3_shell_bad/s->v90_t3_shell_frames
+                          : -1;
             int v14_pct = 0;
             int v14_ratio = 0;
             int sweep_score = 0;
@@ -620,7 +623,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
             span_log(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 upstream DATA bits: t=%.1fs tap=%d ones=%d%%, "
                      "tap=%d ones=%d%% (over %d bits, slips %d, freq %+.6f, "
-                     "sym err %.3f, V.14 %d%% at %dx)\n",
+                     "sym err %.3f, V.14 %d%% at %dx, shell bad %d%%)\n",
                      (double) s->v90_t3_data_symbols
                          /baud_rate_parameters[s->baud_rate].baud_rate,
                      s->scrambler_tap, ones_pct,
@@ -631,7 +634,8 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                      s->v90_t3_decision_count
                          ? s->v90_t3_decision_err/s->v90_t3_decision_count
                          : 0.0f,
-                     v14_pct, v14_ratio/10);
+                     v14_pct, v14_ratio/10,
+                     (shell_pct >= 0) ? shell_pct : 0);
             span_log(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 upstream carrier: freq %+.5f rad/sym "
                      "(%d decision-directed, %d fourth-power updates)\n",
@@ -656,7 +660,17 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                The old cap of eight relocks meant a call that had used them up
                sat on a phase it had already measured as bad for the rest of
                its length. */
-            if (s->v90_t3_sf_locked  &&  ones_pct < 70  &&  v14_ratio < 25
+            /* Judge a standing lock on the shell indices where they are
+               available, and only fall back on the marks where they are not.
+               The marks cannot tell a correct decode of real traffic from
+               noise -- see V34_V90_T3_SHELL_BAD_PCT -- and releasing on them
+               was throwing away working locks the moment the peer's DTE said
+               anything. */
+            if (s->v90_t3_sf_locked
+                &&
+                ((shell_pct >= 0)
+                     ? (shell_pct >= V34_V90_T3_SHELL_BAD_PCT)
+                     : (ones_pct < 70  &&  v14_ratio < 25))
                 &&
                 s->v90_t3_relocks < 200)
             {
@@ -686,8 +700,14 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                idle line, and V.14 start/stop framing on a busy one.  They are
                measured on the same traffic for every candidate, so they are
                comparable across candidates even where neither is large. */
+            /* Rank candidates by shell consistency first: it separates the
+               right grouping from the wrong one whatever the peer is sending,
+               where both the other terms need the traffic to cooperate.  The
+               weight makes one percent of bad frames outweigh any difference
+               the marks can show. */
             sweep_score = ones_pct
-                        + ((v14_pct >= 5) ? v14_ratio/10 : 0);
+                        + ((v14_pct >= 5) ? v14_ratio/10 : 0)
+                        - ((shell_pct > 0) ? 4*shell_pct : 0);
             if (!s->v90_t3_sf_locked)
             {
                 /* Lock on marks only when they are really marks.  A correct
@@ -840,6 +860,8 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
             s->v90_t3_ones = 0;
             s->v90_t3_alt_ones = 0;
             s->v90_t3_bit_count = 0;
+            s->v90_t3_shell_frames = 0;
+            s->v90_t3_shell_bad = 0;
         }
         /*endif*/
     }
@@ -2442,6 +2464,15 @@ static void pack_output_bitstream(v34_rx_state_t *s)
     /*endif*/
     if (s->parms.k)
     {
+        /* A shell index that does not fit in kk bits cannot have come from a
+           correctly grouped frame: 9.6.3.3 builds r0 from the ring indices of
+           eight 2D symbols that belong together, and the transmitter's own
+           construction bounds it.  bitstream_put() truncates silently, so
+           without this the evidence is thrown away. */
+        s->v90_t3_shell_frames++;
+        if (kk < 32  &&  s->r0 >= (int32_t) (1u << kk))
+            s->v90_t3_shell_bad++;
+        /*endif*/
         /* k is always < 32, so we always put the entire k bits into a single word */
         bitstream_put(&s->bs, &t, s->r0, kk);
         /* We can rely on this calculation always producing a value for chunk with no
@@ -11300,6 +11331,8 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_relocks = 0;
     s->v90_t3_sym_err_ema = 0.0f;
     s->v90_t3_sym_err_fast = 0.0f;
+    s->v90_t3_shell_frames = 0;
+    s->v90_t3_shell_bad = 0;
     s->v90_t3_v14_hist = 0;
     s->v90_t3_v14_bits = 0;
     memset(s->v90_t3_v14_ok, 0, sizeof(s->v90_t3_v14_ok));

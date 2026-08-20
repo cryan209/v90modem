@@ -82,6 +82,22 @@
     -- which is why the search used to come back with every candidate offset
     scoring the same 0.65 and nothing to choose between them. */
 #define V34_V90_T3_ERR_FAST_SHIFT           16.0f
+
+/*! Percentage of shell-mapping frames whose index r0 did not fit in k bits,
+    above which the frame phase is wrong.  9.6.3.3 builds r0 from the ring
+    indices of eight 2D symbols that belong together and the transmitter's own
+    construction bounds it, so an index that does not fit cannot have come
+    from a correctly grouped frame.
+
+    This is the only frame-phase evidence that owes nothing to what the peer
+    is sending, and that matters because the obvious metric lies: the soak
+    pattern is mostly digits, and '0' is 0x30, which LSB-first between a zero
+    start bit and a one stop bit is three ones in ten -- so a PERFECT decode
+    of it reads 30-40% ones and a rule that releases a lock below 70% throws
+    away exactly the decodes it is there to keep.  Measured over round1:
+    correct-phase windows read 0% in 194 of 202 and never above 3%, while
+    wrong-phase windows read 3% or more in 92 of every 100. */
+#define V34_V90_T3_SHELL_BAD_PCT            3
 /* Distance from the constellation below which the equalizer is considered
    demonstrably good and worth snapshotting, and the number of consecutive
    symbols above the tracking threshold before the snapshot is restored --
@@ -951,6 +967,12 @@ typedef struct
     /*! \brief Fast distance-to-lattice estimate, gating the adaptive
         elements; v90_t3_sym_err_ema is the slow one the rest reads. */
     float v90_t3_sym_err_fast;
+    /*! \brief Shell-mapping frames whose index r0 did not fit in k bits.
+        The transmitter builds r0 to fit by construction, so one that does not
+        says the frame grouping is wrong -- a frame-phase check that owes
+        nothing to what the peer is sending, unlike the ones fraction. */
+    int v90_t3_shell_frames;
+    int v90_t3_shell_bad;
     float v90_t3_decision_err;
     float v90_t3_decision_pow;
     int v90_t3_decision_count;
