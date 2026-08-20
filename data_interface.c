@@ -281,6 +281,16 @@ static void *pty_reader_thread(void *arg)
         if (r <= 0)
             continue;
 
+        /* With no process holding the slave, a pty master selects readable
+         * for ever and read() returns 0, or -1 with EIO on macOS.  Left
+         * alone this thread then spins: measured at 99.9% of a core once
+         * the first DTE detached, which starved the media thread badly
+         * enough to matter on the wire -- transmit jitter went from 1.4 ms
+         * to 10 ms and the far end stopped being able to acquire our Phase
+         * 3 signal at all.  Back off instead; a DTE opening the slave again
+         * makes the master readable with real data. */
+        bool idle_eof = false;
+
         if (FD_ISSET(ctrl_pty.master_fd, &fds)) {
             int n = (int)read(ctrl_pty.master_fd, buf, sizeof(buf));
 
@@ -289,6 +299,8 @@ static void *pty_reader_thread(void *arg)
                     handle_online_data_bytes(buf, n);
                 else
                     handle_command_bytes(buf, n);
+            } else if (n == 0 || (n < 0 && errno == EIO)) {
+                idle_eof = true;
             }
         }
 
@@ -299,7 +311,12 @@ static void *pty_reader_thread(void *arg)
             /* Payload only flows while the carrier is up. */
             if (n > 0 && connected)
                 ring_write(&upstream_ring, buf, n);
+            else if (n == 0 || (n < 0 && errno == EIO))
+                idle_eof = true;
         }
+
+        if (idle_eof)
+            usleep(20000);
     }
     return NULL;
 }
