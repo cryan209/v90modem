@@ -60,6 +60,9 @@
    the signal never had. */
 #define V34_GARDNER_DEFAULT_MU              0.005f
 #define V34_GARDNER_DEFAULT_BETA            0.000005f
+/* Symbols the sampling position must stay beyond half a sample before the
+   instant is actually moved.  At 3200 baud this is about 60 ms. */
+#define V34_GARDNER_SLIP_HOLD               200
 
 /*! Gardner timing loop state.  One per receive direction. */
 typedef struct
@@ -84,6 +87,9 @@ typedef struct
     /*! Net whole-sample corrections applied, for logging: a healthy loop on
         a few-ppm offset slips seconds apart, not tens of times a second. */
     int slips;
+    /*! Consecutive symbols the position has spent beyond half a sample,
+        signed by direction.  A whole-sample step needs this to persist. */
+    int hold;
     /*! Most recent normalised error, for tests and diagnostics. */
     float last_error;
 } v34_gardner_state_t;
@@ -96,6 +102,7 @@ static __inline__ void v34_gardner_init(v34_gardner_state_t *g,
     g->beta = beta;
     g->freq = 0.0f;
     g->acc = 0.0f;
+    g->hold = 0;
     g->prev_re = 0.0f;
     g->prev_im = 0.0f;
     g->prev_valid = 0;
@@ -172,21 +179,55 @@ static __inline__ int v34_gardner_update(v34_gardner_state_t *g,
     else if (g->freq < -freq_limit)
         g->freq = -freq_limit;
     /*endif*/
+    /* A whole-sample step needs a SUSTAINED excursion, not an instantaneous
+       one.  Gardner's error carries data self-noise, and once a decode goes
+       wrong the error is not noise but bias -- it reports whatever the
+       garbage looks like.  Measured live: a call sat at 100% ones with freq
+       at noise level and zero slips for forty seconds, and when the peer's
+       DTE began sending, the slip count went 7 -> 12 in a few seconds and
+       the decode was lost, with the symbol error unchanged at 0.10.  The
+       signal was never the problem.  Three slips in one direction move the
+       symbol clock a whole symbol against the transmitter, and the frame
+       phase goes with it -- which the frame-phase sweep cannot recover,
+       because it searches mapping frames, not single symbols.
+
+       So the position may sit past half a sample for a while; only if it
+       stays there does the instant actually move. */
     g->acc += g->mu*err + g->freq;
-    while (g->acc >= 0.5f)
+    if (g->acc > 1.5f)
+        g->acc = 1.5f;
+    else if (g->acc < -1.5f)
+        g->acc = -1.5f;
+    /*endif*/
+    if (g->acc >= 0.5f)
     {
-        correction++;
-        g->acc -= 1.0f;
-        g->slips++;
+        g->hold = (g->hold < 0) ? 1 : g->hold + 1;
+        if (g->hold >= V34_GARDNER_SLIP_HOLD)
+        {
+            correction++;
+            g->acc -= 1.0f;
+            g->slips++;
+            g->hold = 0;
+        }
+        /*endif*/
     }
-    /*endwhile*/
-    while (g->acc <= -0.5f)
+    else if (g->acc <= -0.5f)
     {
-        correction--;
-        g->acc += 1.0f;
-        g->slips--;
+        g->hold = (g->hold > 0) ? -1 : g->hold - 1;
+        if (g->hold <= -V34_GARDNER_SLIP_HOLD)
+        {
+            correction--;
+            g->acc += 1.0f;
+            g->slips--;
+            g->hold = 0;
+        }
+        /*endif*/
     }
-    /*endwhile*/
+    else
+    {
+        g->hold = 0;
+    }
+    /*endif*/
     g->prev_re = now_re;
     g->prev_im = now_im;
     return correction;

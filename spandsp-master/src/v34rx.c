@@ -547,12 +547,19 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
             int ones_pct = 100*s->v90_t3_ones/s->v90_t3_bit_count;
 
             span_log(s->logging, SPAN_LOG_WARNING,
-                     "Rx - V.90 upstream DATA bits: tap=%d ones=%d%%, "
-                     "tap=%d ones=%d%% (over %d bits, timing slips %d)\n",
+                     "Rx - V.90 upstream DATA bits: t=%.1fs tap=%d ones=%d%%, "
+                     "tap=%d ones=%d%% (over %d bits, slips %d, freq %+.6f, "
+                     "sym err %.3f)\n",
+                     (double) s->v90_t3_data_symbols
+                         /baud_rate_parameters[s->baud_rate].baud_rate,
                      s->scrambler_tap, ones_pct,
                      alt_tap,
                      100*s->v90_t3_alt_ones/s->v90_t3_bit_count,
-                     s->v90_t3_bit_count, s->v90_t3_gardner.slips);
+                     s->v90_t3_bit_count, s->v90_t3_gardner.slips,
+                     s->v90_t3_gardner.freq,
+                     s->v90_t3_decision_count
+                         ? s->v90_t3_decision_err/s->v90_t3_decision_count
+                         : 0.0f);
             /* An idle DTE sends marks, so a correctly framed stream reads
                near 100% ones.  A superframe phase off by k reads about 57%:
                one data frame in j lands on the right index and the other six
@@ -10132,6 +10139,9 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
         }
         /*endif*/
         s->v90_t3_suppress_output = s->v90_t3_in_b1;
+        if (!s->v90_t3_in_b1)
+            s->v90_t3_data_symbols++;
+        /*endif*/
         process_primary_symbol(s, &y);
         /* Decision-directed NLMS on the same taps.  The least-squares fit
            over B1's 128 symbols leaves about 1.4% residual energy -- roughly
@@ -10232,9 +10242,24 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                entirely: the loop then never sees its own effect and winds the
                integrator to the clamp.  Measured at 20 ppm, freq ran from
                -2e-5 straight past the -6e-5 it needed to -2e-3.) */
-            s->v90_t3_next_symbol += v34_gardner_update(&s->v90_t3_gardner,
-                                                        y.re, y.im,
-                                                        mid.re, mid.im);
+            {
+                int correction = v34_gardner_update(&s->v90_t3_gardner,
+                                                    y.re, y.im,
+                                                    mid.re, mid.im);
+
+                /* Do not move the symbol clock while the frame phase is
+                   lost.  Gardner's error is only meaningful when the
+                   decisions behind it are; once a decode goes wrong the
+                   detector reports whatever the garbage looks like, and a
+                   few slips in one direction shift the symbol clock a whole
+                   symbol against the transmitter -- which the frame-phase
+                   sweep cannot undo, because it searches mapping frames, not
+                   single symbols.  The fractional part still tracks, so
+                   nothing that could help is frozen. */
+                if (s->v90_t3_sf_locked)
+                    s->v90_t3_next_symbol += correction;
+                /*endif*/
+            }
             if (getenv("ME_V90_UPSTREAM_TIMING_DEBUG"))
             {
                 static int dbg;
