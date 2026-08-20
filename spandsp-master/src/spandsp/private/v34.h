@@ -834,6 +834,7 @@ typedef struct
         search never disturbs alignment; -1 means nothing pending. */
     int64_t v90_t3_data_symbols;
     int v90_t3_sf_force;
+    int v90_t3_df_force;
     bool v90_t3_sf_locked;
     int v90_t3_sf_tries;
     /*! \brief Where B1 starts in the raw ring, and the running per-frame

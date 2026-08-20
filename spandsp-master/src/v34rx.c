@@ -570,7 +570,8 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                              "(%d%% ones after %d steps)\n",
                              ones_pct, s->v90_t3_sf_tries);
                 }
-                else if (s->v90_t3_sf_tries < 2*V34_MAX_SUPER_FRAME_PHASES
+                else if (s->v90_t3_sf_tries
+                             < V34_MAX_SUPER_FRAME_PHASES*s->parms.p
                          &&
                          s->v90_t3_sf_force < 0
                          &&
@@ -588,13 +589,24 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                        boundary where the change lands, so "current + 1" is a
                        walk, not a sweep, and can revisit phases while
                        missing others. */
-                    s->v90_t3_sf_force = s->v90_t3_sf_tries % s->parms.j;
+                    /* Two dimensions, not one.  The superframe index is
+                       the obvious one, but the decoder also has a position
+                       WITHIN the data frame, and B1's end only pins that if
+                       B1 really ends where we think.  Sweeping the seven
+                       superframe phases alone found nothing on a live call
+                       where the symbols were clean and B1 matched at 98.6%,
+                       so sweep the pair: p*j is 112 candidates, and at a
+                       0.4 s window that is under a minute -- affordable
+                       while the peer's DTE is idle or trickling. */
+                    s->v90_t3_sf_force = (s->v90_t3_sf_tries/s->parms.p)
+                                       % s->parms.j;
+                    s->v90_t3_df_force = s->v90_t3_sf_tries % s->parms.p;
                     s->v90_t3_sf_tries++;
                     span_log(s->logging, SPAN_LOG_WARNING,
-                             "Rx - V.90 upstream superframe phase -> %d "
-                             "(step %d, %d%% ones)\n",
-                             s->v90_t3_sf_force, s->v90_t3_sf_tries,
-                             ones_pct);
+                             "Rx - V.90 upstream frame phase -> super %d "
+                             "data %d (step %d, %d%% ones)\n",
+                             s->v90_t3_sf_force, s->v90_t3_df_force,
+                             s->v90_t3_sf_tries, ones_pct);
                 }
                 /*endif*/
             }
@@ -10512,6 +10524,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_in_b1 = true;
     s->v90_t3_data_symbols = 0;
     s->v90_t3_sf_force = -1;
+    s->v90_t3_df_force = 0;
     s->v90_t3_sf_locked = false;
     s->v90_t3_sf_tries = 0;
     {
@@ -11297,7 +11310,9 @@ SPAN_DECLARE(void) v34_put_mapping_frame(v34_rx_state_t *s, int16_t bits[16])
                         {
                             s->super_frame = s->v90_t3_sf_force;
                             s->v0_pattern = (uint16_t) (2*s->super_frame);
-                            s->input_4d = s->super_frame*4*s->parms.p;
+                            s->input_4d = s->super_frame*4*s->parms.p
+                                        + s->v90_t3_df_force*4;
+                            s->data_frame = s->v90_t3_df_force;
                             s->v90_t3_sf_force = -1;
                         }
                         /*endif*/
