@@ -9499,6 +9499,12 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
 
                 s->v90_t3_decision_err += d_re*d_re + d_im*d_im;
                 s->v90_t3_decision_pow += g_re*g_re + g_im*g_im;
+                /* Running estimate of how far the symbols sit from the
+                   constellation, for the timing loop's gate.  Two thirds is
+                   the figure for symbols with no relation to the lattice at
+                   all; a receiver that is decoding reads about 0.10. */
+                s->v90_t3_sym_err_ema += ((d_re*d_re + d_im*d_im)
+                                          - s->v90_t3_sym_err_ema)/256.0f;
                 /* A mean-square distance-to-grid of 2/3 is exactly what
                    symbols bearing no relation to the lattice give (uniform
                    over a cell of spacing 2).  Sweep a scale factor: if some
@@ -10254,11 +10260,21 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                correct way to ignore it: dropping the returned correction
                while the loop had already wrapped its own accumulator moved
                the sampling position by a whole sample instead of leaving it
-               where it was. */
+               where it was.
+
+               The gate is symbol quality, not frame phase.  Gardner is
+               non-data-aided -- it does not care whether the frames decode,
+               only whether the symbols are on the lattice -- so gating it on
+               the frame-phase lock froze the loop exactly when it was still
+               useful: six consecutive calls then never locked at all, and
+               sat at a symbol error of 0.2 where the calls that do lock read
+               0.10. */
             s->v90_t3_next_symbol +=
                 v34_gardner_update(&s->v90_t3_gardner, y.re, y.im,
                                    mid.re, mid.im,
-                                   s->v90_t3_sf_locked ? 1 : 0);
+                                   (s->v90_t3_sym_err_ema
+                                        < V34_V90_T3_TIMING_TRACK_ERR)
+                                       ? 1 : 0);
             if (getenv("ME_V90_UPSTREAM_TIMING_DEBUG"))
             {
                 static int dbg;

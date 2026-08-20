@@ -65,6 +65,10 @@
 /* The widest superframe (j) any V.34 symbol rate uses, so the upstream
    phase search knows how many candidates it can ever have to try. */
 #define V34_MAX_SUPER_FRAME_PHASES          8
+/* Mean square distance to the constellation above which the upstream timing
+   loop holds still: its detector needs symbols that mean something, and 2/3
+   is what symbols unrelated to the lattice give. */
+#define V34_V90_T3_TIMING_TRACK_ERR         0.35f
 
 /*! The offset between x index values, and what they mean in terms of the V.34
     spec numbering */
@@ -803,6 +807,9 @@ typedef struct
     float v90_t3_gain_err[V34_V90_T3_GAIN_TRIALS];
     /*! \brief Decision-directed NLMS step for the upstream equalizer. */
     float v90_t3_dd_mu;
+    /*! \brief Running mean square distance from the constellation, used to
+        decide whether the timing detector is being fed anything real. */
+    float v90_t3_sym_err_ema;
     /*! \brief Gardner timing recovery on the upstream symbol instant. */
     bool v90_t3_timing_enabled;
     v34_gardner_state_t v90_t3_gardner;
