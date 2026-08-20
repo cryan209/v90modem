@@ -469,6 +469,8 @@ static int phase3_tracking_enabled(void)
 }
 /*- End of function --------------------------------------------------------*/
 
+static void v34_reset_rx_data_frame_state(v34_rx_state_t *s, int super_frame);
+
 static int descramble_reg(uint32_t *reg, int scrambler_tap, int in_bit)
 {
     int out_bit;
@@ -537,7 +539,10 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
         /*endif*/
         s->v90_t3_ones += out_bit;
         s->v90_t3_alt_ones += alt_bit;
-        if (++s->v90_t3_bit_count >= 20000)
+        /* While searching, judge on a short window so the whole phase space
+           fits inside the peer's idle period; once locked, report on a long
+           one. */
+        if (++s->v90_t3_bit_count >= (s->v90_t3_sf_locked ? 20000 : 4000))
         {
             int ones_pct = 100*s->v90_t3_ones/s->v90_t3_bit_count;
 
@@ -565,8 +570,17 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                              "(%d%% ones after %d steps)\n",
                              ones_pct, s->v90_t3_sf_tries);
                 }
-                else if (s->v90_t3_sf_tries < 16)
+                else if (s->v90_t3_sf_tries < 16
+                         &&
+                         getenv("ME_V90_UPSTREAM_SF_SEARCH") != NULL)
                 {
+                    /* Opt-in.  Stepping the phase mid-stream does not
+                       enumerate the seven offsets cleanly: resetting the
+                       frame state also resets the mapping-frame position, so
+                       each step shifts the alignment by a partial frame and
+                       the walk wanders (observed: 5, 2, 5, 2, 6).  Kept
+                       because the 57% signature it was built for is real and
+                       worth re-testing, but it has never recovered a call. */
                     s->v90_t3_sf_pending = true;
                 }
                 /*endif*/
@@ -2218,7 +2232,26 @@ static void pack_output_bitstream(v34_rx_state_t *s)
     printf("\n");
 #endif
 
-    bitstream_init(&s->bs, true);
+    /* Bit order of the data-frame unpack.  This is invisible to everything
+       we can test ourselves: the transmitter packs with the same constant, so
+       a loopback cancels it, and an idle DTE sends all ones, which is
+       invariant under a reversal.  Only a foreign peer sending real
+       characters can show it -- and against slmodemd the idle stream decodes
+       at 100% ones while the payload is indistinguishable from noise, with no
+       periodicity at any frame lag.  ME_V90_UPSTREAM_BIT_ORDER=lsb flips it
+       for an A/B. */
+    {
+        static int msb_first = -1;
+
+        if (msb_first < 0)
+        {
+            const char *value = getenv("ME_V90_UPSTREAM_BIT_ORDER");
+
+            msb_first = (value && value[0] == 'l') ? 0 : 1;
+        }
+        /*endif*/
+        bitstream_init(&s->bs, msb_first != 0);
+    }
     u = s->rxbuf;
     /* The first of the I bits might be auxiliary data */
     i = 0;
@@ -10005,9 +10038,8 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                 s->v90_t3_sf_tries++;
                 if (s->parms.j > 0)
                 {
-                    s->super_frame = (s->super_frame + 1) % s->parms.j;
-                    s->v0_pattern = (uint16_t)(2*s->super_frame);
-                    s->input_4d = s->super_frame*4*s->parms.p;
+                    v34_reset_rx_data_frame_state(
+                        s, (s->super_frame + 1) % s->parms.j);
                 }
                 /*endif*/
                 span_log(s->logging, SPAN_LOG_WARNING,
@@ -10069,6 +10101,39 @@ static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
                                               int scrambler_tap,
                                               int trellis_override);
 static int v34_expected_b1_default_tap(v34_rx_state_t *rx);
+
+/* Put the data-frame decoder back into its 10.1.3.1 reset state, at a chosen
+   superframe index.  v34_begin_rx_data() does this once at the E handover
+   with index j-1 (B1 stands in for the final frame of a superframe); the
+   upstream phase search re-does it at a data-frame boundary to try another
+   index.  Poking super_frame alone is not enough -- input_4d, the 4D symbol
+   counter and the Viterbi metrics all have to agree with it, and a partial
+   change explores nothing but corruption. */
+static void v34_reset_rx_data_frame_state(v34_rx_state_t *s, int super_frame)
+{
+    int prior;
+
+    s->step_2d = 0;
+    s->data_frame = 0;
+    s->mapping_frame_count = 0;
+    s->s_bit_cnt = 0;
+    s->aux_bit_cnt = 0;
+    memset(s->xt, 0, sizeof(s->xt));
+    memset(s->x, 0, sizeof(s->x));
+    memset(s->ww, 0, sizeof(s->ww));
+    s->viterbi.ptr = 0;
+    s->viterbi.windup = 15;
+    s->super_frame = super_frame;
+    s->v0_pattern = (uint16_t) (2*super_frame);
+    s->input_4d = super_frame*4*s->parms.p;
+    prior = (s->viterbi.ptr - 1) & 0xF;
+    for (int state = 0;  state < s->viterbi.state_count;  state++)
+    {
+        s->viterbi.vit[prior].cumulative_path_metric[state] =
+            (state == 0)  ?  0U  :  0x3FFFFFFFU;
+    }
+    /*endfor*/
+}
 
 /* One acquisition pass over the currently loaded B1 template. */
 static float v90_t3_acquire_pass(v34_rx_state_t *s,
@@ -10245,9 +10310,9 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
                                         &first, &conjugate, &coarse);
             span_log(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 T/3 B1 template tap=%d trellis=%d: "
-                     "coarse=%.1f%% fit=%.1f%%\n",
+                     "coarse=%.1f%% fit=%.1f%% conjugate=%d\n",
                      candidate_tap[t], trellis,
-                     100.0f*coarse, 100.0f*match);
+                     100.0f*coarse, 100.0f*match, conjugate ? 1 : 0);
             if (match > best_match)
             {
                 best_match = match;
@@ -10339,12 +10404,14 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
              s->bit_rate, s->v90_t3_b1_symbols, s->v90_t3_b1_symbols + 32);
     span_log(s->logging, SPAN_LOG_WARNING,
              "Rx - V.90 upstream B1 acquired at %d Hz T/3 "
-             "(baud=%d carrier=%s sample=%lld, symbols=%d, fit=%.1f%%)\n",
+             "(baud=%d carrier=%s sample=%lld, symbols=%d, fit=%.1f%%, "
+             "conjugate=%d, tap=%d, trellis=%d)\n",
              s->v90_t3_internal_rate,
              baud_rate_parameters[s->baud_rate].baud_rate,
              s->high_carrier ? "high" : "low",
              (long long)best_first, s->v90_t3_b1_symbols,
-             100.0f*best_match);
+             100.0f*best_match, best_conjugate ? 1 : 0, best_tap,
+             best_trellis);
     /* Print the template and the symbols the emitter actually produces from
        the same samples.  Acquisition says these agree to 98.6% of energy;
        the DATA-path probe says the emitted ones are off the lattice.  Both

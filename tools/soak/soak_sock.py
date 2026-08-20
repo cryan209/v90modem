@@ -12,7 +12,9 @@ import os, sys, time, socket, select
 
 HOST, PORT = "tower.net.cryan.nz", 5556
 OUTDIR = sys.argv[1]
-SEND_RATE = 3000          # B/s, under the 3120 B/s V.14 payload capacity of 31200 bps
+SEND_RATE = int(os.environ.get("SOAK_SEND_RATE", "3000"))  # B/s
+# A low SOAK_SEND_RATE leaves the upstream mostly idle, so a decode fault is
+# obvious: idle marks read as ones and the occasional character stands out.
 CHUNK = 512
 PHASES = [(0, 35, False), (35, 70, True), (70, 105, True)]
 # SOAK_SECONDS stretches the three-phase schedule for a long correctness run
