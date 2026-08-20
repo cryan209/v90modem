@@ -623,6 +623,12 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                          ? s->v90_t3_decision_err/s->v90_t3_decision_count
                          : 0.0f,
                      v14_pct, v14_ratio/10);
+            span_log(s->logging, SPAN_LOG_WARNING,
+                     "Rx - V.90 upstream carrier: freq %+.5f rad/sym "
+                     "(%d decision-directed, %d fourth-power updates)\n",
+                     s->v90_t3_carrier.freq,
+                     s->v90_t3_carrier.dd_updates,
+                     s->v90_t3_carrier.nda_updates);
             /* An idle DTE sends marks, so a correctly framed stream reads
                near 100% ones.  A superframe phase off by k reads about 57%:
                one data frame in j lands on the right index and the other six
@@ -697,9 +703,11 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                     s->v90_t3_sf_tries++;
                     span_log(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream frame phase -> super %d "
-                             "data %d (step %d, %d%% ones)\n",
+                             "data %d (step %d, %d%% ones, V.14 %d%% at "
+                             "%dx)\n",
                              s->v90_t3_sf_force, s->v90_t3_df_force,
-                             s->v90_t3_sf_tries, ones_pct);
+                             s->v90_t3_sf_tries, ones_pct, v14_pct,
+                             v14_ratio/10);
                 }
                 /*endif*/
             }
@@ -10163,6 +10171,24 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             z = complex_mulf(&s->v90_t3_fse[tap], &x);
             y = complex_addf(&y, &z);
         }
+        /* Carrier.  The equalizer output is derotated by this receiver's own
+           loop before anything looks at it: decision-directed while the
+           symbols are on the constellation, fourth-power while they are not,
+           because the decisions a decision-directed loop needs are exactly
+           what a spinning constellation does not give. */
+        if (s->v90_t3_carrier_enabled)
+        {
+            float dr;
+            float di;
+
+            v34_carrier_derotate(&s->v90_t3_carrier, y.re, y.im, &dr, &di);
+            v34_carrier_update(&s->v90_t3_carrier, dr, di,
+                               (s->v90_t3_sym_err_ema
+                                    < V34_V90_T3_TIMING_TRACK_ERR) ? 1 : 0);
+            y.re = dr;
+            y.im = di;
+        }
+        /*endif*/
         /* 9.4.2.5/V.90 has the analogue modem "start a new superframe" after
            B1, and 10.1.3.1/V.34 has B1 carry the superframe inversions of the
            FINAL data frame -- which is why v34_begin_rx_data() parks the
@@ -10725,6 +10751,12 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
            meaningless decisions cannot help and might hurt.  Enable with
            ME_V90_UPSTREAM_DD_MU=0.05 once that is fixed. */
         s->v90_t3_dd_mu = value ? (float) atof(value) : 0.02f;
+    }
+    {
+        const char *value = getenv("ME_V90_UPSTREAM_CARRIER");
+
+        s->v90_t3_carrier_enabled = (value == NULL || atoi(value) != 0);
+        v34_carrier_init(&s->v90_t3_carrier);
     }
     {
         const char *value = getenv("ME_V90_UPSTREAM_TIMING");

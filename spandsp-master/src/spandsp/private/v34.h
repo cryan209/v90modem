@@ -29,6 +29,7 @@
 /* Self-contained (plain floats, no spandsp types), so including it here
    costs nothing to the other users of this header. */
 #include "v34_gardner.h"
+#include "v34_carrier.h"
 
 /*! The number of taps in the info data transmit pulse shaping filter */
 #define V34_INFO_TX_FILTER_STEPS            9
@@ -834,6 +835,12 @@ typedef struct
     int v90_t3_fse_good_age;
     int v90_t3_fse_bad_run;
     int v90_t3_fse_restores;
+    /*! \brief Carrier recovery for the upstream, independent of the
+        ordinary V.34 tracker (which ME_V34_DATA_CARRIER_TRACK can switch
+        off, taking the only thing that recovers this constellation with
+        it). */
+    v34_carrier_state_t v90_t3_carrier;
+    bool v90_t3_carrier_enabled;
     /*! \brief Gardner timing recovery on the upstream symbol instant. */
     bool v90_t3_timing_enabled;
     v34_gardner_state_t v90_t3_gardner;
