@@ -39,7 +39,12 @@ for attempt in $(seq 1 "$MAXATTEMPTS"); do
   python3 "$SP/soak_sock.py" "$AD" > "$AD/sock.log" 2>&1 &
   sockpid=$!
   verdict=none
-  for tick in $(seq 1 60); do
+  # How long to wait for a call to announce data mode before giving up on it.
+  # A winning call gets there in about a minute, so the old flat 300 s spent
+  # four of every five minutes waiting on calls that had already lost -- which
+  # matters when reaching data mode is a lottery and the batch is the ticket
+  # supply.  SOAK_WATCH_SEC overrides; the default is unchanged.
+  for tick in $(seq 1 $(( ${SOAK_WATCH_SEC:-300} / 5 )) ); do
     sleep 5
     slice=$(tail -c "+$((off+1))" "$SERVERLOG" 2>/dev/null)
     if echo "$slice" | grep -aq "V.90 startup complete"; then verdict=DATA; break; fi
