@@ -107,7 +107,20 @@
     attempts to make.  Together they sweep the window forward over the
     seconds after E, which is where a B1 the first attempt missed will be. */
 #define V34_V90_T3_ACQ_RETRY_GAP            4800
-#define V34_V90_T3_ACQ_MAX_RETRIES          24
+/*! Few, because the fallback has to be REACHABLE.  Holding out for a good
+    acquisition is only safe if settling for the best one seen costs a couple
+    of seconds rather than the call: measured live on 2026-08-21, a first
+    version at 24 retries rejected the same window seventeen times over a
+    fifteen-second call, never reached the fallback, and delivered no upstream
+    at all -- worse than the poor acquisition it was refusing.  At six the
+    worst case is the old behaviour about three seconds later.
+
+    Retries are also worth little on this peer, and it is worth knowing why
+    before raising this again: B1 sits about 0.35 s past the E anchor, which
+    the very first search window already covers, so a later window does not
+    contain B1 at all.  What the retries buy is another look at the SAME B1
+    with more of the wire either side of it, not a different B1. */
+#define V34_V90_T3_ACQ_MAX_RETRIES          6
 
 /*! Symbol quality at which the frame-phase sweep is allowed to run without
     waiting for marks to prove the line has idle in it.  An open constellation
