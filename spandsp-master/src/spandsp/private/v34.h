@@ -62,6 +62,9 @@
 #define V34_V90_T3_RAW_MASK                 (V34_V90_T3_RAW_SIZE - 1)
 #define V34_V90_T3_B1_MAX_SYMBOLS           256
 #define V34_V90_T3_GAIN_TRIALS              33
+/* The widest superframe (j) any V.34 symbol rate uses, so the upstream
+   phase search knows how many candidates it can ever have to try. */
+#define V34_MAX_SUPER_FRAME_PHASES          8
 
 /*! The offset between x index values, and what they mean in terms of the V.34
     spec numbering */
@@ -823,9 +826,14 @@ typedef struct
     bool v90_t3_bit_dump_tried;
     uint8_t v90_t3_dump_byte;
     int v90_t3_dump_bits;
-    /*! \brief Superframe-phase search over the post-B1 data stream. */
+    /*! \brief Superframe-phase search over the post-B1 data stream.  The
+        peer's superframe counter at B1 is not something B1 tells us, so
+        without this the phase is right about one call in j -- measured, one
+        in six across fourteen calls.  v90_t3_sf_force is the next phase to
+        try, applied by the decoder at its own data-frame boundary so the
+        search never disturbs alignment; -1 means nothing pending. */
     int64_t v90_t3_data_symbols;
-    bool v90_t3_sf_pending;
+    int v90_t3_sf_force;
     bool v90_t3_sf_locked;
     int v90_t3_sf_tries;
     /*! \brief Where B1 starts in the raw ring, and the running per-frame

@@ -570,18 +570,24 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                              "(%d%% ones after %d steps)\n",
                              ones_pct, s->v90_t3_sf_tries);
                 }
-                else if (s->v90_t3_sf_tries < 16
+                else if (s->v90_t3_sf_tries < 2*V34_MAX_SUPER_FRAME_PHASES
                          &&
-                         getenv("ME_V90_UPSTREAM_SF_SEARCH") != NULL)
+                         s->v90_t3_sf_force < 0
+                         &&
+                         s->parms.j > 0)
                 {
-                    /* Opt-in.  Stepping the phase mid-stream does not
-                       enumerate the seven offsets cleanly: resetting the
-                       frame state also resets the mapping-frame position, so
-                       each step shifts the alignment by a partial frame and
-                       the walk wanders (observed: 5, 2, 5, 2, 6).  Kept
-                       because the 57% signature it was built for is real and
-                       worth re-testing, but it has never recovered a call. */
-                    s->v90_t3_sf_pending = true;
+                    /* Try the next phase.  The decoder applies it at its own
+                       frame boundary, so this costs nothing but the window
+                       spent measuring.  j is 7, and a short window is used
+                       until the phase locks, so the whole space fits inside
+                       the peer's idle period. */
+                    s->v90_t3_sf_force = (s->super_frame + 1) % s->parms.j;
+                    s->v90_t3_sf_tries++;
+                    span_log(s->logging, SPAN_LOG_WARNING,
+                             "Rx - V.90 upstream superframe phase -> %d "
+                             "(step %d, %d%% ones)\n",
+                             s->v90_t3_sf_force, s->v90_t3_sf_tries,
+                             ones_pct);
                 }
                 /*endif*/
             }
@@ -10088,30 +10094,6 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
         }
         /*endif*/
         s->v90_t3_suppress_output = s->v90_t3_in_b1;
-        if (!s->v90_t3_in_b1  &&  s->parms.p > 0)
-        {
-            /* Step the phase on a data-frame boundary, where it is the only
-               thing that changes. */
-            if (s->v90_t3_sf_pending
-                &&
-                (s->v90_t3_data_symbols % (8*s->parms.p)) == 0)
-            {
-                s->v90_t3_sf_pending = false;
-                s->v90_t3_sf_tries++;
-                if (s->parms.j > 0)
-                {
-                    v34_reset_rx_data_frame_state(
-                        s, (s->super_frame + 1) % s->parms.j);
-                }
-                /*endif*/
-                span_log(s->logging, SPAN_LOG_WARNING,
-                         "Rx - V.90 upstream superframe phase -> %d (step %d)\n",
-                         s->super_frame, s->v90_t3_sf_tries);
-            }
-            /*endif*/
-            s->v90_t3_data_symbols++;
-        }
-        /*endif*/
         process_primary_symbol(s, &y);
         /* Decision-directed NLMS on the same taps.  The least-squares fit
            over B1's 128 symbols leaves about 1.4% residual energy -- roughly
@@ -10522,7 +10504,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_b1_frame_err = 0.0f;
     s->v90_t3_in_b1 = true;
     s->v90_t3_data_symbols = 0;
-    s->v90_t3_sf_pending = false;
+    s->v90_t3_sf_force = -1;
     s->v90_t3_sf_locked = false;
     s->v90_t3_sf_tries = 0;
     {
@@ -11293,6 +11275,23 @@ SPAN_DECLARE(void) v34_put_mapping_frame(v34_rx_state_t *s, int16_t bits[16])
                         {
                             s->super_frame = 0;
                             s->v0_pattern = 0;
+                        }
+                        /*endif*/
+                        /* The V.90 upstream's superframe phase search steps
+                           here, and only here: this is the decoder's own
+                           frame boundary, so moving the phase costs nothing
+                           else.  An earlier version reset the whole frame
+                           state from the emitter instead, which also zeroed
+                           the mapping-frame position mid-frame -- so each
+                           step shifted alignment by part of a frame and the
+                           search wandered (5, 2, 5, 2, 6) instead of
+                           enumerating the seven phases. */
+                        if (s->v90_t3_sf_force >= 0)
+                        {
+                            s->super_frame = s->v90_t3_sf_force;
+                            s->v0_pattern = (uint16_t) (2*s->super_frame);
+                            s->input_4d = s->super_frame*4*s->parms.p;
+                            s->v90_t3_sf_force = -1;
                         }
                         /*endif*/
                     }
