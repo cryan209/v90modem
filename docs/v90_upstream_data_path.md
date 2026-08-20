@@ -335,3 +335,49 @@ the peer's line is mostly idle; at a full send rate it would need
 replacing with something content-independent, and the V.14 framing score
 that `tools/soak/upbits_align.py` computes offline is the obvious
 candidate.
+
+
+## Why it started slipping after twenty-seven seconds
+
+Two runs settle it, and neither needed a guess:
+
+| peer's DTE | result |
+|---|---|
+| silent | 98-100% ones for 40+ s, **zero slips**, freq at noise level (+/-3e-5, about 10 ppm) |
+| sending | 100% ones until its first byte, then 89, 58, 50 -- slips 7 -> 12 in a few seconds |
+
+So there is no clock drift on this path worth the name, and the trigger
+is the peer's payload rather than elapsed time.  The decisive number is
+the symbol error: **0.10 while decoding at 100% ones, and still 0.10 at
+t=100 s with the bit stream white.**  The signal was never the problem.
+What is lost is frame alignment, and the only thing that moves it is the
+timing loop -- three slips in one direction shift the symbol clock a
+whole symbol against the transmitter, which the frame-phase sweep cannot
+undo because it searches mapping frames, not single symbols.
+
+The slips were spurious.  Gardner's error means something only while the
+symbols do; once they do not, the detector reports bias rather than noise
+and the loop chases it.  Measured on one call: the integrator pinned at
+its -0.002 clamp, 225 corrections requested in forty seconds, on symbols
+sitting at 0.67 -- the "no relation to the lattice" figure.  Three
+changes came out of that:
+
+- A whole-sample step needs the position to stay beyond half a sample for
+  200 symbols, about 60 ms, rather than the instant it first crosses.
+- The loop *holds* when the symbols are not on the lattice.  It has to
+  hold rather than have its correction ignored: dropping the returned
+  correction while the loop had already wrapped its own accumulator moved
+  the sampling position by a whole sample, which is the opposite of
+  leaving it alone.
+- The gate is symbol quality, **not** the frame-phase lock.  Gardner is
+  non-data-aided, so gating on the lock froze it exactly when it was
+  still useful -- six consecutive calls then never locked at all, sitting
+  at a symbol error of 0.2 where the calls that lock read 0.10.
+
+### What this surfaced
+
+Calls fall into two populations.  Some acquire symbols at 0.10 and decode
+once the frame phase is found; others sit at 0.2, or at 0.67 and never
+reach the lattice at all, and no frame phase can rescue those.  That is
+acquisition quality -- the B1 fit and the sampling instant it leaves --
+not timing, and it is the next thing to chase.
