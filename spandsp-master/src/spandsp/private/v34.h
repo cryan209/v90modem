@@ -75,6 +75,12 @@
    symbols above the tracking threshold before the snapshot is restored --
    about a second at 3200 baud, long enough not to fire on a burst. */
 #define V34_V90_T3_FSE_KEEP_ERR             0.20f
+/*! T/3 samples of fresh wire between two acquisition attempts, and the most
+    attempts to make.  Together they sweep the window forward over the
+    seconds after E, which is where a B1 the first attempt missed will be. */
+#define V34_V90_T3_ACQ_RETRY_GAP            4800
+#define V34_V90_T3_ACQ_MAX_RETRIES          24
+
 /*! Symbols after B1 used to check that an acquisition generalises. */
 #define V34_V90_T3_VALIDATE_SYMBOLS         256
 
@@ -908,6 +914,10 @@ typedef struct
     /*! Symbols left in the post-slip window during which the equalizer is
         allowed to adapt at an error that would otherwise gate it off. */
     int v90_t3_recover;
+    /*! Acquisition windows tried, and the ring position the next one waits
+        for.  Without the wait the search repeats on identical samples. */
+    int v90_t3_acq_retries;
+    int64_t v90_t3_acq_retry_at;
     /*! ME_V90_UPSTREAM_SYM_DUMP: the equalized data-era symbols, as text. */
     FILE *v90_t3_sym_dump;
     bool v90_t3_sym_dump_tried;

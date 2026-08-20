@@ -10852,6 +10852,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     /*endif*/
     search_end = s->v90_t3_e_anchor + SEARCH_FORWARD;
     if (s->v90_t3_acquired || s->v90_t3_acquisition_attempted
+        || s->v90_t3_raw_count < s->v90_t3_acq_retry_at
         || s->v90_t3_b1_symbols <= 0
         || s->v90_t3_e_anchor < 0
         || search_end <= search_start
@@ -11019,9 +11020,29 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
                          "Rx - V.90 T/3 B1 rejected: an in-sample fit of "
                          "%.1f%% that does not generalise\n",
                          100.0f*best_match);
-                /* Not a failure of the call -- just of this window.  Let the
-                   search run again when more of the wire has arrived. */
-                s->v90_t3_acquisition_attempted = false;
+                /* Not a failure of the call -- just of this window.  Search
+                   again when more of the wire has arrived, sliding the
+                   window forward: E is detected on the CP bit stream and
+                   lags, so a rejected first attempt usually means B1 is
+                   still ahead of the anchor rather than behind it.  The
+                   backoff is not optional -- without it the search re-runs
+                   on identical samples every symbol, which is tens of
+                   millions of complex MACs per symbol in the media thread,
+                   and the far end hears the stall as a discontinuity. */
+                if (++s->v90_t3_acq_retries <= V34_V90_T3_ACQ_MAX_RETRIES)
+                {
+                    s->v90_t3_acquisition_attempted = false;
+                    s->v90_t3_e_anchor += V34_V90_T3_ACQ_RETRY_GAP;
+                    s->v90_t3_acq_retry_at =
+                        s->v90_t3_raw_count + V34_V90_T3_ACQ_RETRY_GAP;
+                }
+                else
+                {
+                    span_log(s->logging, SPAN_LOG_WARNING,
+                             "Rx - V.90 T/3 B1 giving up after %d windows\n",
+                             s->v90_t3_acq_retries);
+                }
+                /*endif*/
                 return;
             }
             /*endif*/
@@ -12501,6 +12522,8 @@ static bool v90_t3_start(v34_rx_state_t *rx)
         && rx->v90_t3_internal_rate != 9600)
         return false;
     rx->v90_t3_acquisition_attempted = false;
+    rx->v90_t3_acq_retries = 0;
+    rx->v90_t3_acq_retry_at = 0;
     rx->v90_t3_e_anchor = -1;
     rx->v90_t3_in_b1 = false;
     rx->v90_t3_b1_frame_err = 0.0f;
