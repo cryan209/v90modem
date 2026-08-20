@@ -562,6 +562,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
         {
             int ones_pct = 100*s->v90_t3_ones/s->v90_t3_bit_count;
             int v14_pct = 0;
+            int v14_ratio = 0;
 
             /* A second, content-independent lock metric.  The ones fraction
                only says anything while the peer's line is mostly idle: with
@@ -572,30 +573,45 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                and a one stop, so a correctly framed stream has one bit phase
                in ten where both hold.
 
-               Measured and NOT yet fit to gate on: on a line that is mostly
-               idle marks the best phase reads 0-11% even when the decode is
-               perfect, because idle has no start bits at all -- an absolute
-               threshold can never fire.  What it needs is normalising by
-               character occupancy, or simply comparing the best phase
-               against the others.  Logged for now so the next attempt has
-               numbers to work from rather than a guess. */
-            for (int ph = 0;  ph < 10;  ph++)
+               An absolute threshold cannot work: on a mostly-idle line the
+               best phase reads 0-11% even when the decode is perfect,
+               because idle marks contain no start bits.  The level is set by
+               how busy the line is; the RATIO between the best phase and the
+               rest is what says whether the framing is real. */
             {
-                int n = s->v90_t3_v14_count[ph];
-                int pct = n ? 100*s->v90_t3_v14_ok[ph]/n : 0;
+                int score[10];
+                int total = 0;
+                int best_ph = 0;
 
-                if (pct > v14_pct)
-                    v14_pct = pct;
-                /*endif*/
-                s->v90_t3_v14_ok[ph] = 0;
-                s->v90_t3_v14_count[ph] = 0;
+                for (int ph = 0;  ph < 10;  ph++)
+                {
+                    int n = s->v90_t3_v14_count[ph];
+
+                    score[ph] = n ? 100*s->v90_t3_v14_ok[ph]/n : 0;
+                    total += score[ph];
+                    if (score[ph] > score[best_ph])
+                        best_ph = ph;
+                    /*endif*/
+                    s->v90_t3_v14_ok[ph] = 0;
+                    s->v90_t3_v14_count[ph] = 0;
+                }
+                /*endfor*/
+                v14_pct = score[best_ph];
+                /* Judge the best phase against the others, not against an
+                   absolute figure.  How high it can possibly read depends on
+                   how busy the line is -- at a fifth occupancy a correct
+                   phase reads about 20% and the wrong ones about 5%, because
+                   idle marks have no start bit to find -- so the ratio is
+                   the discriminator and the level is not. */
+                v14_ratio = (total > score[best_ph])
+                          ? (10*score[best_ph])/((total - score[best_ph])/9 + 1)
+                          : 0;
             }
-            /*endfor*/
 
             span_log(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 upstream DATA bits: t=%.1fs tap=%d ones=%d%%, "
                      "tap=%d ones=%d%% (over %d bits, slips %d, freq %+.6f, "
-                     "sym err %.3f)\n",
+                     "sym err %.3f, V.14 %d%% at %dx)\n",
                      (double) s->v90_t3_data_symbols
                          /baud_rate_parameters[s->baud_rate].baud_rate,
                      s->scrambler_tap, ones_pct,
@@ -605,7 +621,8 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                      s->v90_t3_gardner.freq,
                      s->v90_t3_decision_count
                          ? s->v90_t3_decision_err/s->v90_t3_decision_count
-                         : 0.0f);
+                         : 0.0f,
+                     v14_pct, v14_ratio/10);
             /* An idle DTE sends marks, so a correctly framed stream reads
                near 100% ones.  A superframe phase off by k reads about 57%:
                one data frame in j lands on the right index and the other six
@@ -619,7 +636,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                and with the lock held, nothing looked for the phase again and
                the rest of the call was lost.  Release it and let the sweep
                run once more. */
-            if (s->v90_t3_sf_locked  &&  ones_pct < 70
+            if (s->v90_t3_sf_locked  &&  ones_pct < 70  &&  v14_ratio < 25
                 &&
                 s->v90_t3_relocks < 8)
             {
@@ -634,14 +651,17 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
             /*endif*/
             if (!s->v90_t3_sf_locked)
             {
-                if (ones_pct >= 75)
+                if (ones_pct >= 75
+                    ||
+                    (v14_pct >= 5  &&  v14_ratio >= 30))
                 {
                     s->v90_t3_sf_locked = true;
                     span_log(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream frame phase locked "
-                             "(%d%% ones, %d%% V.14 framing, after %d "
-                             "steps)\n",
-                             ones_pct, v14_pct, s->v90_t3_sf_tries);
+                             "(%d%% ones, V.14 %d%% at %dx the other phases, "
+                             "after %d steps)\n",
+                             ones_pct, v14_pct, v14_ratio/10,
+                             s->v90_t3_sf_tries);
                 }
                 else if (s->v90_t3_sf_tries
                              < V34_MAX_SUPER_FRAME_PHASES*s->parms.p

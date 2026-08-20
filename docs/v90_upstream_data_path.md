@@ -416,3 +416,32 @@ collapse times -- though one call held for 27 s with the same ring, which
 argues against it.  Doubling the ring is a one-line test and the rig
 would not produce a single Phase 4 call in twenty-five attempts to run
 it.
+
+
+## The lock metric, and why it still cannot be validated
+
+The frame-phase sweep locks on the ones fraction, which only means
+something while the peer's line is mostly idle.  With its DTE sending
+from the first second, no phase reads high and the sweep cannot tell a
+good phase from a bad one -- a whole batch of calls never locked.
+
+V.14 framing is the content-independent replacement: ten-bit characters
+with a zero start and a one stop, so a correct decode has one bit phase
+in ten where both hold.  Two things had to be measured rather than
+assumed, and the second is not settled:
+
+- **An absolute threshold cannot work.**  On a mostly-idle line the best
+  phase reads 0-11% even when the decode is perfect at 100% ones, because
+  idle marks contain no start bits at all.  The level is set by how busy
+  the line is; the ratio between the best phase and the other nine is
+  what says whether the framing is real.  The gate is now that ratio.
+- **The ratio has not yet been seen on a good busy line.**  The readings
+  taken at 1000 B/s -- best phase 19-25%, about twice the others -- came
+  from a call whose symbol error was 0.66, i.e. from garbage, because it
+  had collapsed six seconds in.  Two times is what noise gives.  The gate
+  is set at three times, so it does not fire on that, but nothing yet
+  shows what a correct busy line reads.
+
+Getting that number needs a call that both locks and keeps its symbols
+while the peer transmits, which is the same thing that is missing for
+everything else here.
