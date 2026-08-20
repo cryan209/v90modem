@@ -944,3 +944,64 @@ searching the dump for the pattern and checking the gaps are multiples of 90
 Still open: 60% of the call has an open eye, and the recovered lines are a
 fraction of what the peer sent, so both the outage time after a slip and the
 sweep's dwell are still worth attacking.  Neither is now a mystery.
+
+
+## Live against the rig (2026-08-21): it works, and live acquisition does not
+
+The offline work above was replay only, so it was run against the live
+d-modem/slmodemd rig.  Four calls reached data mode.  Evidence in
+`artifacts/dmodem-soak-0821-shellfix/`.
+
+**The fix does what it was meant to.**  One call
+(`batcha/round1/try3`, 185 s) delivered **504 in-sequence upstream pattern
+lines** with the peer's DTE transmitting from the first second.  That
+configuration is the one the earlier notes record as hopeless -- "a whole
+batch of calls with the peer transmitting from the first second never locked
+at all" -- because the ones fraction cannot tell a correct decode of real
+traffic from noise.  It locks now.
+
+**Downstream is healthy**: 99.6% of pattern lines on one call (66489 of
+66787, 298 missing), 98.6% on another.  One call read 50%; that is
+call-to-call variance, not the pump rate -- the same `SOAK_PTY_RATE=5000`
+gave 99.6% on the next call.
+
+**But every live acquisition is poor, and it is 4 for 4.**  This is the thing
+to fix next, and the measurement is unambiguous because
+`batchb/round2` holds exactly one call, so there is no ambiguity about which
+attempt the tap belongs to:
+
+                          acquires at   fit     out-of-sample  call median  windows <0.05
+    live                  sample   3047  98.3%         0.125        0.114          0.0%
+    replay, same audio    sample 134663 100.0%         0.002        0.002         74.9%
+
+Same samples, same code, fifty times better offline.  The other three live
+calls acquired at 0.118, 0.119 and 0.125 -- never once the 0.002 the replay
+reaches -- and each then ran its whole length at about 0.11, which is far
+above the 0.05 the shell decode needs.  That is why the upstream delivers in
+bursts on one call and nothing at all on the next: it is not the frame-phase
+logic, which is now sound, but the equalizer the call is stuck with.
+
+Live it fitted at ring sample 3047 -- 0.32 s of capture -- so B1 cannot have
+been in the ring and the 98.3% in-sample fit was to something else.
+`V34_V90_T3_VALIDATE_ERR` is 0.40, chosen to separate a real acquisition
+(0.002) from a hopeless one (0.66), and it lets 0.125 through; the retry
+machinery that exists for exactly this never fires.
+
+**A tightened gate was tried and withdrawn.**  Requiring 0.05 while retries
+remain, falling back to 0.40 on the last attempt, breaks the offline T/3
+regression in `vpcm_loopback_test`: that case runs at 21600 bps, where the
+constellation is far bigger and the honest out-of-sample distance is larger,
+and its audio ends long before forty retries at 0.5 s each could run.  The
+same rate-dependence already bit the power half of this check once -- see the
+comment there about a constant ratio rejecting a perfect acquisition -- so an
+absolute distance is the wrong shape for the gate.  It needs to be relative
+to what that rate can achieve, or the retry needs to be driven by something
+other than a fixed threshold.  Not guessed at here.
+
+**A note on tuning `ME_V90_UPSTREAM_DD_MU`.**  A larger step clearly improves
+the eye -- on the round1 tap the median symbol error goes from 0.073 at the
+0.02 default to about 0.011 at anything from 0.05 up.  It is tempting to tune
+it on recovered pattern lines, and that is a trap: across mu = 0.02, 0.05,
+0.1, 0.2, 0.4 the line count reads 5217, 2, 12300, 4955, 2.  The swing is
+whether the frame-phase sweep happened to lock on that run, not the step
+size.  Tune on symbol error; read line counts only as an outcome.
