@@ -204,3 +204,39 @@ Two things fell out of getting the symbols clean:
   and the rest are noise -- 1/7 x 100% + 6/7 x 50% = 57%.  A correctly
   framed idle stream reads near 100%.  j is only 7 wide, so the phase is
   now searched against the marks rather than derived.
+
+## Where it stands, and the next thing to fix (2026-08-20)
+
+With the rate capped to 9600 the upstream decodes **the peer's actual line
+state**: the descrambled idle stream reads 100% ones against the wrong
+descrambler's 50%.  That is the whole chain -- filter, symbols, trellis,
+shell, descrambler -- working.  It then goes to noise about fifteen
+seconds in, while the peer's DTE is still idle (the soak's phase A runs
+thirty-five seconds), so this is a receiver that acquires and then drifts
+off, not one that fails on payload.
+
+**The T/3 receiver has no timing recovery.**  `v90_t3_next_symbol += 3`,
+for the life of the call: exactly three samples per symbol, forever, with
+nothing to correct it.  Anything that moves the peer's symbol clock
+relative to our 8 kHz bearer accumulates without limit -- a few ppm of
+clock offset, or a single sample inserted or dropped anywhere in the RTP
+path, which shifts the grid by a third of a symbol instantly.  It also
+explains why some calls read 50% from their very first window while
+others run correctly for seconds first: that is the size of the offset,
+not luck about anything structural.  `clock_recovery.c` exists in this
+tree for exactly this reason on the other side of the call.
+
+The next piece of work is therefore a timing error detector on this
+branch -- Gardner or Godard on the T/3 stream, adjusting the symbol
+instant -- or, failing that, letting the supervised filter follow the
+drift: its 21 taps span seven symbols and can absorb a fraction of a
+symbol of delay if the adaptation is allowed to track it
+(`ME_V90_UPSTREAM_DD_MU`, currently 0.02, with a gate wide enough to
+fire).
+
+Also ruled out, all measured: bit order (`ME_V90_UPSTREAM_BIT_ORDER=lsb`
+breaks the idle decode too, so MSB-first is right); precoding, non-linear
+coding, shaping, trellis and rate (the peer names every one in its own
+log and they match what we prepare); and a payload bit permutation (no
+periodicity at any frame lag, where a permutation of a 90-bit-periodic
+pattern would keep some).
