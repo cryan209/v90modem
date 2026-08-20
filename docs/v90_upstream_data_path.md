@@ -708,3 +708,22 @@ like that in under two minutes each, which is the point of it.
 Note the score profile is periodic in three samples, as it must be: three
 samples is one symbol at 3200 baud, and a whole-symbol shift still lands on
 the lattice.  A minimum at −1.67 and at +1.33 is one position, not two.
+
+### A trap in long soak batches (2026-08-21)
+
+A batch that has been dialling for a while stops reaching data mode, and it
+looks precisely like the peer refusing to train: the far end reports NO
+CARRIER on dial after dial.  It is not the peer.  `sip_v90_modem` runs out
+of media transports --
+
+    pjsua_media.c  Unable to create media transport: Too many objects of the
+                   specified type (PJ_ETOOMANY) [status=70010]
+
+-- after which every incoming INVITE fails to get a media channel.  Measured
+here after roughly nine calls in one server process.  A batch went 0/9 and
+was read as the peer's Phase 3/4 retrain lottery running cold; six of those
+attempts were genuine retrains, but the later ones never had media at all.
+
+So: **restart the server process between batches**, and treat any attempt
+after the first PJ_ETOOMANY as carrying no information about the modem.
+`tools/soak/soak_verdict.sh` now says so at the top of its report.

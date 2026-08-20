@@ -22,6 +22,19 @@ for d in "$RD"/try*/; do
     printf "%-6s %8s %8s %7s %7s  %s\n" "$n" "${down:-0}" "${up:-0}" "-" "${dur:-0}" "$note"
 done
 echo
+# A long batch degrades in a way that looks exactly like the peer refusing
+# calls: pjsua runs out of media transports (PJ_ETOOMANY), so every later
+# INVITE fails to get a media channel and the peer reports NO CARRIER.
+# Attempts after the first of these say nothing about the modem -- measured
+# 2026-08-21, a batch went 0/9 for this reason and it was read as the peer's
+# retrain lottery.  Restart the server process between batches.
+etoomany=$(grep -ac "PJ_ETOOMANY" "$LOG" 2>/dev/null)
+if [ "${etoomany:-0}" -gt 0 ]; then
+    first=$(grep -an "PJ_ETOOMANY" "$LOG" | head -1 | cut -d: -f1)
+    echo "WARNING: $etoomany PJ_ETOOMANY media-transport failures (first at line $first)."
+    echo "         Attempts after that point never got media; restart sip_v90_modem."
+    echo
+fi
 echo "chain (whole run):"
 for pat in "strict batch recovered" "CP_VALID.*accepted=1" "upstream RX data prepared" \
            "B1 out-of-sample check" "B1 rejected" "upstream B1 acquired" \
