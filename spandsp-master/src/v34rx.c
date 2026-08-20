@@ -563,6 +563,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
             int ones_pct = 100*s->v90_t3_ones/s->v90_t3_bit_count;
             int v14_pct = 0;
             int v14_ratio = 0;
+            int sweep_score = 0;
 
             /* A second, content-independent lock metric.  The ones fraction
                only says anything while the peer's line is mostly idle: with
@@ -667,6 +668,13 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
             if (ones_pct >= 60)
                 s->v90_t3_idle_seen = true;
             /*endif*/
+            /* Score this window for the phase sweep.  Both terms say "the
+               bits have structure a wrong phase would destroy": marks on an
+               idle line, and V.14 start/stop framing on a busy one.  They are
+               measured on the same traffic for every candidate, so they are
+               comparable across candidates even where neither is large. */
+            sweep_score = ones_pct
+                        + ((v14_pct >= 5) ? v14_ratio/10 : 0);
             if (!s->v90_t3_sf_locked)
             {
                 if (ones_pct >= 75
@@ -681,7 +689,12 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                              ones_pct, v14_pct, v14_ratio/10,
                              s->v90_t3_sf_tries);
                 }
-                else if (s->v90_t3_idle_seen
+                else if ((s->v90_t3_idle_seen
+                          ||
+                          (s->v90_t3_sym_err_ema < V34_V90_T3_SWEEP_ERR
+                           &&
+                           s->v90_t3_sweep_episodes
+                               < V34_V90_T3_SWEEP_EPISODES))
                          &&
                          s->v90_t3_sf_tries
                              < V34_MAX_SUPER_FRAME_PHASES*s->parms.p
@@ -711,9 +724,29 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                        so sweep the pair: p*j is 112 candidates, and at a
                        0.4 s window that is under a minute -- affordable
                        while the peer's DTE is idle or trickling. */
+                    /* The window just measured belongs to whatever phase was
+                       applied last time round, so score that one before
+                       moving on.  Step 0 is the phase the receiver arrived
+                       with, which is the one to beat. */
+                    if (s->v90_t3_sf_tries == 0)
+                    {
+                        s->v90_t3_sweep_base = sweep_score;
+                        s->v90_t3_sweep_best = sweep_score;
+                        s->v90_t3_sweep_best_sf = s->super_frame;
+                        s->v90_t3_sweep_best_df = s->data_frame;
+                    }
+                    else if (sweep_score > s->v90_t3_sweep_best)
+                    {
+                        s->v90_t3_sweep_best = sweep_score;
+                        s->v90_t3_sweep_best_sf = s->v90_t3_sweep_last_sf;
+                        s->v90_t3_sweep_best_df = s->v90_t3_sweep_last_df;
+                    }
+                    /*endif*/
                     s->v90_t3_sf_force = (s->v90_t3_sf_tries/s->parms.p)
                                        % s->parms.j;
                     s->v90_t3_df_force = s->v90_t3_sf_tries % s->parms.p;
+                    s->v90_t3_sweep_last_sf = s->v90_t3_sf_force;
+                    s->v90_t3_sweep_last_df = s->v90_t3_df_force;
                     s->v90_t3_sf_tries++;
                     span_log(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream frame phase -> super %d "
@@ -722,6 +755,53 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                              s->v90_t3_sf_force, s->v90_t3_df_force,
                              s->v90_t3_sf_tries, ones_pct, v14_pct,
                              v14_ratio/10);
+                }
+                else if (s->v90_t3_sf_tries > 0
+                         &&
+                         s->v90_t3_sf_tries
+                             >= V34_MAX_SUPER_FRAME_PHASES*s->parms.p
+                         &&
+                         s->v90_t3_sf_force < 0)
+                {
+                    /* Every candidate has been measured.  Go to the best one
+                       -- which is the phase the sweep started from unless
+                       something beat it by a clear margin.
+
+                       Restoring the best rather than stopping wherever the
+                       walk ended is what makes an ungated sweep safe.  The
+                       sweep used to be allowed only once the marks proved an
+                       idle line existed, because a free-running walk wrecks a
+                       decode that is already right; but ones only rises above
+                       60% when the phase is ALREADY correct, so a call that
+                       started on the wrong phase could never run the sweep
+                       that would fix it.  Measured live: 0.10 symbol error --
+                       an open constellation -- for 230 of 310 seconds, 50%
+                       ones throughout, and not one byte of payload.  With the
+                       best candidate restored, a receiver that is already
+                       right wins its own sweep and nothing moves. */
+                    s->v90_t3_sf_force = s->v90_t3_sweep_best_sf;
+                    s->v90_t3_df_force = s->v90_t3_sweep_best_df;
+                    s->v90_t3_sweep_episodes++;
+                    /* Leave the counter at its limit unless another sweep is
+                       still allowed.  The walk this replaces stopped for good
+                       once it had tried everything; letting it restart freely
+                       costs more than it can win -- measured on a recorded
+                       call whose phase was right from the start, repeated
+                       sweeping took the clean fraction from 33% to 21%,
+                       because each candidate resets the Viterbi state.  What
+                       is worth keeping from this branch is not the repetition
+                       but the restore: the old walk simply stopped wherever
+                       it happened to end. */
+                    if (s->v90_t3_sweep_episodes < V34_V90_T3_SWEEP_EPISODES)
+                        s->v90_t3_sf_tries = 0;
+                    /*endif*/
+                    span_log(s->logging, SPAN_LOG_WARNING,
+                             "Rx - V.90 upstream phase sweep done: best "
+                             "super %d data %d scored %d against %d where it "
+                             "started (episode %d)\n",
+                             s->v90_t3_sweep_best_sf, s->v90_t3_sweep_best_df,
+                             s->v90_t3_sweep_best, s->v90_t3_sweep_base,
+                             s->v90_t3_sweep_episodes);
                 }
                 /*endif*/
             }
@@ -11007,14 +11087,36 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
         {
             double mean_dist = dist/counted;
             double mean_power = power/counted;
+            double template_power = 0.0;
+
+            /* Judge the power against the TEMPLATE's, not an absolute.  B1 is
+               drawn from the same constellation as the data that follows, so
+               the two match when the filter is right -- whereas an absolute
+               figure is only ever calibrated for one bit rate, and the offline
+               T/3 regression runs at 21600, where the constellation is far
+               bigger than the 9600 this was first measured at.  Set to a
+               constant, it rejected a perfect acquisition. */
+            for (int n = 0;  n < s->v90_t3_b1_symbols;  n++)
+            {
+                template_power += s->v90_t3_b1[n].re*s->v90_t3_b1[n].re
+                                + s->v90_t3_b1[n].im*s->v90_t3_b1[n].im;
+            }
+            /*endfor*/
+            if (s->v90_t3_b1_symbols > 0)
+                template_power /= s->v90_t3_b1_symbols;
+            else
+                template_power = mean_power;
+            /*endif*/
 
             span_log(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 T/3 B1 out-of-sample check: lattice distance "
-                     "%.3f, symbol power %.1f over %d symbols\n",
-                     mean_dist, mean_power, counted);
+                     "%.3f, symbol power %.1f against the template's %.1f, "
+                     "over %d symbols\n",
+                     mean_dist, mean_power, template_power, counted);
             if (mean_dist > V34_V90_T3_VALIDATE_ERR
                 ||
-                mean_power > V34_V90_T3_VALIDATE_POWER)
+                mean_power
+                    > V34_V90_T3_VALIDATE_POWER_RATIO*template_power)
             {
                 span_log(s->logging, SPAN_LOG_WARNING,
                          "Rx - V.90 T/3 B1 rejected: an in-sample fit of "
@@ -11878,6 +11980,22 @@ SPAN_DECLARE(void) v34_put_mapping_frame(v34_rx_state_t *s, int16_t bits[16])
                            enumerating the seven phases. */
                         if (s->v90_t3_sf_force >= 0)
                         {
+                            /* Clamp at the point of use.  Everything the
+                               decoder derives from these -- the V0 inversion
+                               pattern and the 4D symbol counter -- indexes
+                               state sized for one superframe of p data
+                               frames, so an out-of-range pair is not a wrong
+                               answer but a wild pointer. */
+                            if (s->parms.j > 0)
+                                s->v90_t3_sf_force %= s->parms.j;
+                            else
+                                s->v90_t3_sf_force = 0;
+                            /*endif*/
+                            if (s->parms.p > 0)
+                                s->v90_t3_df_force %= s->parms.p;
+                            else
+                                s->v90_t3_df_force = 0;
+                            /*endif*/
                             s->super_frame = s->v90_t3_sf_force;
                             s->v0_pattern = (uint16_t) (2*s->super_frame);
                             s->input_4d = s->super_frame*4*s->parms.p
@@ -12522,6 +12640,13 @@ static bool v90_t3_start(v34_rx_state_t *rx)
         && rx->v90_t3_internal_rate != 9600)
         return false;
     rx->v90_t3_acquisition_attempted = false;
+    rx->v90_t3_sweep_base = 0;
+    rx->v90_t3_sweep_best = 0;
+    rx->v90_t3_sweep_best_sf = 0;
+    rx->v90_t3_sweep_best_df = 0;
+    rx->v90_t3_sweep_last_sf = 0;
+    rx->v90_t3_sweep_last_df = 0;
+    rx->v90_t3_sweep_episodes = 0;
     rx->v90_t3_acq_retries = 0;
     rx->v90_t3_acq_retry_at = 0;
     rx->v90_t3_e_anchor = -1;

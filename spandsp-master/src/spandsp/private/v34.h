@@ -81,14 +81,27 @@
 #define V34_V90_T3_ACQ_RETRY_GAP            4800
 #define V34_V90_T3_ACQ_MAX_RETRIES          24
 
+/*! Symbol quality at which the frame-phase sweep is allowed to run without
+    waiting for marks to prove the line has idle in it.  An open constellation
+    with white bits is precisely a frame-phase fault. */
+#define V34_V90_T3_SWEEP_ERR                0.15f
+
+/*! How many exhaustive sweeps a call may run off the symbol-quality gate.
+    A full sweep is 112 candidates at a short window each -- worth spending to
+    escape a phase that is simply wrong, but not worth repeating for ever, and
+    measurably costly on a call whose phase was right all along. */
+#define V34_V90_T3_SWEEP_EPISODES           2
+
 /*! Symbols after B1 used to check that an acquisition generalises. */
 #define V34_V90_T3_VALIDATE_SYMBOLS         256
 
 /*! The out-of-sample symbols have to land at least this close to the
-    lattice, and carry no more than this much power, for the fit to be
-    believed.  A good acquisition measures 0.002 and about 6.6. */
+    lattice, and carry no more than this multiple of the B1 template's own
+    power, for the fit to be believed.  A good acquisition measured 0.002 at
+    the template's power; the live failure measured 0.66 at a hundred times
+    it. */
 #define V34_V90_T3_VALIDATE_ERR             0.40f
-#define V34_V90_T3_VALIDATE_POWER           60.0f
+#define V34_V90_T3_VALIDATE_POWER_RATIO     4.0f
 
 /*! Symbols off the constellation before a slip search runs.  A slip is a
     step, not a drift, so this only has to be long enough not to fire on a
@@ -916,6 +929,16 @@ typedef struct
     int v90_t3_recover;
     /*! Acquisition windows tried, and the ring position the next one waits
         for.  Without the wait the search repeats on identical samples. */
+    /*! Exhaustive frame-phase sweep: the score where it started, the best
+        score and phase seen, the phase measured in the last window, and how
+        many sweeps have run. */
+    int v90_t3_sweep_base;
+    int v90_t3_sweep_best;
+    int v90_t3_sweep_best_sf;
+    int v90_t3_sweep_best_df;
+    int v90_t3_sweep_last_sf;
+    int v90_t3_sweep_last_df;
+    int v90_t3_sweep_episodes;
     int v90_t3_acq_retries;
     int64_t v90_t3_acq_retry_at;
     /*! ME_V90_UPSTREAM_SYM_DUMP: the equalized data-era symbols, as text. */

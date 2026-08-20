@@ -8576,7 +8576,12 @@ SPAN_DECLARE(int) v34_release(v34_state_t *s)
 
 SPAN_DECLARE(int) v34_free(v34_state_t *s)
 {
-    /* The upstream symbol dump, if ME_V90_UPSTREAM_SYM_DUMP opened one. */
+    /* The upstream symbol dump, if ME_V90_UPSTREAM_SYM_DUMP opened one.
+       v34_free() accepted NULL before this was added, and callers rely on
+       that. */
+    if (s == NULL)
+        return 0;
+    /*endif*/
     if (s->rx.v90_t3_sym_dump)
     {
         fclose(s->rx.v90_t3_sym_dump);
