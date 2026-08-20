@@ -27,6 +27,13 @@ for attempt in $(seq 1 "$MAX"); do
     echo "=== RUN_UNTIL attempt $attempt/$MAX $(date -u +%H:%M:%SZ)"
     bash "$SP/soak_orchestrate2.sh" "$RUNDIR" "$SERVERLOG" 1 2>&1 \
         | sed 's/^/    /'
+    # soak_orchestrate2.sh always writes v2attempt1, so keep each one:
+    # otherwise the attempt that finally does something interesting has its
+    # pump logs overwritten by the next dial.
+    if [ -d "$RUNDIR/v2attempt1" ]; then
+        rm -rf "$RUNDIR/try$attempt"
+        mv "$RUNDIR/v2attempt1" "$RUNDIR/try$attempt"
+    fi
     if tail -c "+$((start_size + 1))" "$SERVERLOG" 2>/dev/null \
            | grep -aqE "$PATTERN"; then
         echo "=== RUN_UNTIL matched after $attempt attempts:"
