@@ -10169,11 +10169,20 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                     s, s->v90_t3_next_symbol - pre + tap, frac);
                 energy += x.re*x.re + x.im*x.im;
             }
-            /* Reject gross outliers only.  The old 0.5 gate was tighter
-               than the error the equalizer actually leaves, so it never
-               fired once -- which is why an earlier "DD-LMS changes
-               nothing" result meant nothing at all. */
-            if (e_re*e_re + e_im*e_im < 8.0f)
+            /* Adapt only on decisions worth adapting to.  Two gates:
+               reject gross outliers symbol by symbol (the old 0.5 threshold
+               was tighter than the error the equalizer actually leaves, so
+               it never fired once, which is why an early "DD-LMS changes
+               nothing" result meant nothing), and stop entirely when the
+               constellation is not being hit at all.  Measured live: the
+               symbols sat at 0.10 for thirteen seconds, jumped to 0.66 --
+               the figure for symbols bearing no relation to the lattice --
+               and stayed there for the remaining four minutes of the call.
+               Adapting a filter towards decisions that are noise is how it
+               gets walked off, and nothing then re-acquires it. */
+            if (e_re*e_re + e_im*e_im < 8.0f
+                &&
+                s->v90_t3_sym_err_ema < V34_V90_T3_TIMING_TRACK_ERR)
             {
                 float mu = s->v90_t3_dd_mu/energy;
 
@@ -10191,6 +10200,49 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             }
             /*endif*/
         }
+        /* Keep a copy of the filter from when it was demonstrably working,
+           and put it back if the symbols collapse.  The supervised fit onto
+           B1 happens once; after that only decision-directed adaptation
+           carries the filter, and B1 is long gone by the time anything goes
+           wrong, so without a snapshot there is nothing to return to -- a
+           call that loses the constellation stays lost for its whole
+           remaining length (measured: four minutes of it). */
+        if (s->v90_t3_sym_err_ema < V34_V90_T3_FSE_KEEP_ERR)
+        {
+            if (++s->v90_t3_fse_good_age >= 3200)
+            {
+                memcpy(s->v90_t3_fse_good, s->v90_t3_fse,
+                       sizeof(s->v90_t3_fse_good));
+                s->v90_t3_fse_good_valid = true;
+                s->v90_t3_fse_good_age = 0;
+            }
+            /*endif*/
+            s->v90_t3_fse_bad_run = 0;
+        }
+        else if (s->v90_t3_fse_good_valid)
+        {
+            if (++s->v90_t3_fse_bad_run >= V34_V90_T3_FSE_BAD_RUN)
+            {
+                memcpy(s->v90_t3_fse, s->v90_t3_fse_good,
+                       sizeof(s->v90_t3_fse));
+                s->v90_t3_sym_err_ema = 0.0f;
+                s->v90_t3_fse_bad_run = 0;
+                s->v90_t3_fse_good_age = 0;
+                /* The frame phase almost certainly went with it. */
+                s->v90_t3_sf_locked = false;
+                s->v90_t3_sf_tries = 0;
+                s->v90_t3_gardner.freq = 0.0f;
+                s->v90_t3_gardner.acc = 0.0f;
+                s->v90_t3_gardner.hold = 0;
+                s->v90_t3_fse_restores++;
+                span_log(s->logging, SPAN_LOG_WARNING,
+                         "Rx - V.90 upstream symbols lost; restoring the "
+                         "last good equalizer (restore %d)\n",
+                         s->v90_t3_fse_restores);
+            }
+            /*endif*/
+        }
+        /*endif*/
         /* Timing.  This branch used to advance by exactly three samples for
            the life of a call, with nothing to correct it -- so a few ppm
            between the peer's symbol clock and our 8 kHz bearer, or a single
@@ -10586,6 +10638,11 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_df_force = 0;
     s->v90_t3_sf_locked = false;
     s->v90_t3_relocks = 0;
+    s->v90_t3_sym_err_ema = 0.0f;
+    s->v90_t3_fse_good_valid = false;
+    s->v90_t3_fse_good_age = 0;
+    s->v90_t3_fse_bad_run = 0;
+    s->v90_t3_fse_restores = 0;
     s->v90_t3_sf_tries = 0;
     {
         const char *value = getenv("ME_V90_UPSTREAM_DD_MU");

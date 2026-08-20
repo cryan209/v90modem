@@ -69,6 +69,12 @@
    loop holds still: its detector needs symbols that mean something, and 2/3
    is what symbols unrelated to the lattice give. */
 #define V34_V90_T3_TIMING_TRACK_ERR         0.35f
+/* Distance from the constellation below which the equalizer is considered
+   demonstrably good and worth snapshotting, and the number of consecutive
+   symbols above the tracking threshold before the snapshot is restored --
+   about a second at 3200 baud, long enough not to fire on a burst. */
+#define V34_V90_T3_FSE_KEEP_ERR             0.20f
+#define V34_V90_T3_FSE_BAD_RUN              3200
 
 /*! The offset between x index values, and what they mean in terms of the V.34
     spec numbering */
@@ -808,8 +814,18 @@ typedef struct
     /*! \brief Decision-directed NLMS step for the upstream equalizer. */
     float v90_t3_dd_mu;
     /*! \brief Running mean square distance from the constellation, used to
-        decide whether the timing detector is being fed anything real. */
+        decide whether the timing detector and the decision-directed update
+        are being fed anything real. */
     float v90_t3_sym_err_ema;
+    /*! \brief The equalizer from when it was demonstrably working, and the
+        bookkeeping to notice that it no longer is.  B1 is long gone by the
+        time a filter walks off, so without this there is nothing to go back
+        to. */
+    complexf_t v90_t3_fse_good[V34_V90_T3_FSE_TAPS];
+    bool v90_t3_fse_good_valid;
+    int v90_t3_fse_good_age;
+    int v90_t3_fse_bad_run;
+    int v90_t3_fse_restores;
     /*! \brief Gardner timing recovery on the upstream symbol instant. */
     bool v90_t3_timing_enabled;
     v34_gardner_state_t v90_t3_gardner;
