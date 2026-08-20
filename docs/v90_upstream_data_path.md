@@ -381,3 +381,38 @@ once the frame phase is found; others sit at 0.2, or at 0.67 and never
 reach the lattice at all, and no frame phase can rescue those.  That is
 acquisition quality -- the B1 fit and the sampling instant it leaves --
 not timing, and it is the next thing to chase.
+
+
+## The upstream symbols leave the constellation about ten seconds in
+
+The five-minute goal runs isolated the remaining blocker, and it is not
+the timing loop.  On call after call the symbol error sits at 0.10 for
+nine to thirteen seconds and then jumps to about 0.65 -- the figure for
+symbols bearing no relation to the lattice -- and stays there for the
+rest of the call, four minutes of it.  Ruled out by experiment:
+
+- **The timing loop.**  With the symbols gone it holds still by
+  construction: freq frozen, zero slips.  Watching it do so is what
+  showed the collapse is upstream of it.
+- **Our own transmitter.**  `SOAK_PTY_RATE=0` silences the downstream
+  pump; the collapse still happened at about twelve seconds, so it is not
+  echo of what we are sending.
+- **The peer retraining or renegotiating.**  Its own log shows it settled
+  in data mode throughout, Error Energy about 8 and timing offset -0.7
+  ppm -- a healthy receiver, not one about to retrain.
+- **Decision-directed adaptation walking the filter off.**  Worth fixing
+  on its own account and now fixed (it stops when the constellation is
+  not being hit, and the filter is snapshotted while it demonstrably
+  works and restored when it stops), and it *did* extend the good stretch
+  -- but restoring the filter does not recover the call.  On one call it
+  fired 142 times, once a second, each time failing within the second.
+  A filter that no longer fits is a statement about the signal, not the
+  filter.
+
+So something about the received upstream changes ten seconds in and does
+not change back.  One suspect remains unexamined: the raw ring holds
+131072 samples, which at 9.6 kHz is 13.6 s, uncomfortably close to the
+collapse times -- though one call held for 27 s with the same ring, which
+argues against it.  Doubling the ring is a one-line test and the rig
+would not produce a single Phase 4 call in twenty-five attempts to run
+it.
