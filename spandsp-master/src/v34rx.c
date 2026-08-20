@@ -9890,8 +9890,55 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             z = complex_mulf(&s->v90_t3_fse[tap], &x);
             y = complex_addf(&y, &z);
         }
-        s->v90_t3_suppress_output =
-            s->v90_t3_next_symbol < s->v90_t3_publish_symbol;
+        /* 9.4.2.5/V.90 has the analogue modem "start a new superframe" after
+           B1, and 10.1.3.1/V.34 has B1 carry the superframe inversions of the
+           FINAL data frame -- which is why v34_begin_rx_data() parks the
+           receiver at frame j-1.  That only lines up if B1 is exactly one
+           data frame.  If the peer sends several, its superframe counter
+           stays parked for all of them while ours advances, and every bit
+           after that is wrong even though the symbols are perfect (measured:
+           decision error 0.106, output still white).  So find B1's real end
+           on the wire -- it stops looking like the template -- and hold the
+           superframe state until then. */
+        if (s->v90_t3_in_b1  &&  s->v90_t3_b1_symbols > 0)
+        {
+            int64_t idx = (s->v90_t3_next_symbol - s->v90_t3_b1_start)/3;
+            int pos = (int) (idx % s->v90_t3_b1_symbols);
+            float d_re = y.re - s->v90_t3_b1[pos].re;
+            float d_im = y.im - s->v90_t3_b1[pos].im;
+
+            s->v90_t3_b1_frame_err += d_re*d_re + d_im*d_im;
+            if (pos == s->v90_t3_b1_symbols - 1)
+            {
+                float mean = s->v90_t3_b1_frame_err/s->v90_t3_b1_symbols;
+
+                s->v90_t3_b1_frame_err = 0.0f;
+                if (mean < 1.0f)
+                {
+                    /* Still B1: keep the receiver parked on the final frame
+                       of a superframe, exactly as the reset left it. */
+                    if (s->parms.j > 0)
+                    {
+                        s->super_frame = s->parms.j - 1;
+                        s->v0_pattern = (uint16_t)(2*(s->parms.j - 1));
+                        s->input_4d = (s->parms.j - 1)*4*s->parms.p;
+                    }
+                    /*endif*/
+                }
+                else
+                {
+                    span_log(s->logging, SPAN_LOG_WARNING,
+                             "Rx - V.90 upstream B1 ended after %d data frames "
+                             "(frame error %.3f); publishing data\n",
+                             (int) ((idx + 1)/s->v90_t3_b1_symbols), mean);
+                    s->v90_t3_in_b1 = false;
+                }
+                /*endif*/
+            }
+            /*endif*/
+        }
+        /*endif*/
+        s->v90_t3_suppress_output = s->v90_t3_in_b1;
         process_primary_symbol(s, &y);
         /* Decision-directed NLMS on the same taps.  The least-squares fit
            over B1's 128 symbols leaves about 1.4% residual energy -- roughly
@@ -9960,7 +10007,13 @@ static float v90_t3_acquire_pass(v34_rx_state_t *s,
     float best_match = 0.0f;
     int pre = V34_V90_T3_FSE_TAPS/2;
 
-    for (int64_t f = search_start;  f <= search_end;  f++)
+    /* This runs synchronously in the media thread, so its cost is real time
+       the audio path does not get.  A full-resolution scan of 30000 offsets
+       x 2 conjugations x 128 symbols x 6 templates is tens of millions of
+       complex MACs -- hundreds of milliseconds of stall, which the far end
+       sees as a discontinuity and answers with a retrain.  Step a symbol at
+       a time first and refine only around what that finds. */
+    for (int64_t f = search_start;  f <= search_end;  f += 3)
     {
         for (int c = 0;  c < 2;  c++)
         {
@@ -9981,6 +10034,29 @@ static float v90_t3_acquire_pass(v34_rx_state_t *s,
                     break;
                 }
             }
+        }
+    }
+    /* Refine: the coarse pass only looked at every third sample. */
+    for (int k = 0;  k < KEEP;  k++)
+    {
+        for (int d = -2;  d <= 2;  d++)
+        {
+            float q;
+
+            if (d == 0)
+                continue;
+            /*endif*/
+            if (first[k] + d < search_start - V34_V90_T3_RRC_TAPS/2)
+                continue;
+            /*endif*/
+            q = v90_t3_coarse_score(s, first[k] + d + V34_V90_T3_RRC_TAPS/2,
+                                    conjugate[k]);
+            if (q > score[k])
+            {
+                score[k] = q;
+                first[k] += d;
+            }
+            /*endif*/
         }
     }
     for (int k = 0;  k < KEEP;  k++)
@@ -10154,6 +10230,9 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     }
     s->v90_t3_suppress_output = true;
     s->v90_t3_acquired = true;
+    s->v90_t3_b1_start = best_first;
+    s->v90_t3_b1_frame_err = 0.0f;
+    s->v90_t3_in_b1 = true;
     {
         const char *value = getenv("ME_V90_UPSTREAM_DD_MU");
 
@@ -11539,6 +11618,8 @@ static bool v90_t3_start(v34_rx_state_t *rx)
         return false;
     rx->v90_t3_acquisition_attempted = false;
     rx->v90_t3_e_anchor = -1;
+    rx->v90_t3_in_b1 = false;
+    rx->v90_t3_b1_frame_err = 0.0f;
     rx->v90_t3_capture_only = false;
     rx->v90_t3_acquired = false;
     rx->v90_t3_input_count = 0;

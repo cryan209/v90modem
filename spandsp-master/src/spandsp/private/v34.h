@@ -811,6 +811,12 @@ typedef struct
     /*! \brief Capturing into the T/3 ring alongside the normal receiver,
         before the DATA handover. */
     bool v90_t3_capture_only;
+    /*! \brief Where B1 starts in the raw ring, and the running per-frame
+        error against the B1 template, used to find where B1 actually ends
+        rather than assuming it is one data frame long. */
+    int64_t v90_t3_b1_start;
+    float v90_t3_b1_frame_err;
+    bool v90_t3_in_b1;
     /*! \brief Raw-sample index of the E handover, the anchor the B1 search
         works outwards from.  Negative until E is seen. */
     int64_t v90_t3_e_anchor;

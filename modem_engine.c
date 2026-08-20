@@ -276,6 +276,20 @@ void me_set_verbose(int v) { g_me_verbose = v ? 1 : 0; }
 
 static int me_span_flow_level(void);
 
+/* ME_V90_UPSTREAM_MAX_BPS caps the upstream rate we offer in MP.  It has to
+ * reach the receiver's own preparation as well: cap the MP mask alone and the
+ * peer transmits at the capped rate while our B1 template is still built for
+ * the uncapped one, so acquisition never correlates and the upstream is dead
+ * for the whole call. */
+static int me_v90_upstream_cap(int rate)
+{
+    const char *cap = getenv("ME_V90_UPSTREAM_MAX_BPS");
+
+    if (cap && atoi(cap) > 0 && atoi(cap) < rate)
+        return atoi(cap);
+    return rate;
+}
+
 static uint64_t trace_now_ms(void)
 {
     struct timeval tv;
@@ -2593,6 +2607,7 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
 
         if (rate > max_rate)
             rate = max_rate;
+        rate = me_v90_upstream_cap(rate);
         /* trellis code 0 = V34_TRELLIS_16 (v34_tables.h, not exported); the
          * peer's own decode of our Type-0 MP confirms 16-state upstream. */
         if (v34_v90_prepare_upstream_data(g_v34, baud,
@@ -3761,8 +3776,11 @@ static int me_span_flow_level(void)
     const char *value = getenv("ME_V34_SPAN_FLOW_LOG");
     int level = SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL;
 
-    if (value && atoi(value) != 0)
-        level |= SPAN_LOG_FLOW;
+    /* The low bits of the level are a severity *threshold*, not a flag: ORing
+     * in nothing leaves SPAN_LOG_NONE and silences every message, warnings
+     * included.  Quiet means "warnings and worse", which is what the V.90
+     * upstream probes are logged at. */
+    level |= (value && atoi(value) != 0) ? SPAN_LOG_FLOW : SPAN_LOG_WARNING;
     return level;
 }
 
@@ -6952,15 +6970,8 @@ static void enter_v90_phase4_rx_locked(void)
             limit = baud_limit;
         /* The peer picks its upstream rate from the mask our MP offers, and
          * at 31200 the symbols arrive with 3-4 units of error against a
-         * constellation spacing of 2 -- too dense for this path to decode.
-         * ME_V90_UPSTREAM_MAX_BPS caps what we offer, so the rate this path
-         * can actually receive becomes a measurement rather than a guess. */
-        {
-            const char *cap = getenv("ME_V90_UPSTREAM_MAX_BPS");
-
-            if (cap && atoi(cap) > 0 && atoi(cap) < limit)
-                limit = atoi(cap);
-        }
+         * constellation spacing of 2 -- too dense for this path to decode. */
+        limit = me_v90_upstream_cap(limit);
         v90_set_upstream_rate_limit(g_v90, limit);
         ME_LOG("[ME] V.90 upstream selection: %d baud, rate cap %d bps, %s carrier\n",
                baud == 3 ? 3000 : 3200, limit,

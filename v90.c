@@ -406,6 +406,27 @@ static int v90_trn1d_phase_dither(int phase, int amplitude)
  * us the full deadline before we resync; the durable fix is to notice energy
  * returning as something other than S, since §9.3.2.4/§9.3.2.9 make silence
  * here expected rather than diagnostic. */
+/* How long to hold silence after a Jd no-S resync before re-emitting Sd.
+ * Measured against slmodemd: after its own retrain the peer sits in
+ * WaitForSd and gives up after about 1.9 to 3.6 s, while our generic WAIT_JA
+ * fallback is 6 s -- so we were still silent when it quit, every time, and
+ * its log showed "Error Energy = -0.000" throughout.  A short silence still
+ * protects a peer that is genuinely re-ranging; this one just has to land
+ * inside its window. */
+static int v90_wait_ja_resync_samples(void)
+{
+    const char *value = getenv("ME_V90_WAIT_JA_RESYNC_SAMPLES");
+    char *end;
+    long parsed;
+
+    if (value && *value) {
+        parsed = strtol(value, &end, 10);
+        if (end != value && *end == '\0' && parsed >= 0 && parsed <= INT_MAX)
+            return (int) parsed;
+    }
+    return 9600;   /* 1.2 s at 8 kHz */
+}
+
 static int v90_jd_resync_symbols(void)
 {
     const char *value = getenv("ME_V90_JD_RESYNC_SYMBOLS");
@@ -532,6 +553,10 @@ struct v90_state_s {
     bool             dil_requested;
     bool             jd_terminated_by_s;
     bool             jd_terminated_by_su;
+    /* Set when WAIT_JA was entered from the Jd no-S resync rather than at the
+     * start of Phase 3, so the fallback back to Sd can use a deadline that
+     * fits inside the peer's WaitForSd patience. */
+    bool             jd_resync_wait;
     bool             dil_terminate_requested;
     bool             v92_phase3;
     bool             v92_su_seen;
@@ -3078,16 +3103,24 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
     int sign;
 
     switch (s->tx_phase) {
-    case V90_TX_WAIT_JA:
-        if (!s->v92_phase3 && ++s->sample_count >= V90_WAIT_JA_FALLBACK_SAMPLES) {
+    case V90_TX_WAIT_JA: {
+        int wait_limit = s->jd_resync_wait
+                       ? v90_wait_ja_resync_samples()
+                       : V90_WAIT_JA_FALLBACK_SAMPLES;
+
+        if (!s->v92_phase3 && ++s->sample_count >= wait_limit) {
             fprintf(stderr,
-                    "[V90] Phase 3: Ja decode timeout after %.1f ms, starting Sd via interop fallback\n",
+                    "[V90] Phase 3: %s after %.1f ms, starting Sd via interop fallback\n",
+                    s->jd_resync_wait ? "Jd resync silence elapsed"
+                                      : "Ja decode timeout",
                     1000.0 * s->sample_count / 8000.0);
+            s->jd_resync_wait = false;
             s->tx_phase = V90_TX_SD;
             s->sample_count = 0;
             s->rep_count = 0;
         }
         return v90_pcm_idle(s->law);
+    }
 
     case V90_TX_SD_DELAY:
         /* §9.3.1.3: "After receiving Ja, the digital modem may wait for up
@@ -3241,12 +3274,14 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                         "[V90] Phase 3: no S after %d Jd symbols; resyncing to WAIT_JA (peer likely retrained)\n",
                         s->sample_count);
                 s->tx_phase = V90_TX_WAIT_JA;
+                s->jd_resync_wait = true;
                 s->sample_count = 0;
                 s->rep_count = 0;
                 s->jd_bit_pos = 0;
                 s->jd_terminate_requested = false;
                 s->jd_terminated_by_s = false;
                 s->jd_terminated_by_su = false;
+    s->jd_resync_wait = false;
                 return v90_pcm_idle(s->law);
             }
             if (s->jd_terminate_requested && s->jd_bit_pos == 0) {
@@ -3819,6 +3854,7 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->jd_terminate_requested = false;
     s->jd_terminated_by_s = false;
     s->jd_terminated_by_su = false;
+    s->jd_resync_wait = false;
     s->jp_terminate_requested = false;
     s->v92_su_seen = false;
     s->v92_su_bar_seen = false;
@@ -4113,6 +4149,7 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
             s->jd_terminate_requested = false;
             s->jd_terminated_by_s = false;
             s->jd_terminated_by_su = false;
+    s->jd_resync_wait = false;
             s->jp_terminate_requested = false;
             s->v92_su_seen = false;
             s->v92_su_bar_seen = false;
