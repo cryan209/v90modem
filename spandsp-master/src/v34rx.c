@@ -10457,7 +10457,16 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     {
         const char *value = getenv("ME_V90_UPSTREAM_TIMING");
 
-        s->v90_t3_timing_enabled = (value == NULL || atoi(value) != 0);
+        /* Off by default.  The discriminant here -- the energy of the
+           equalized output a third of a symbol either side of the decision
+           instant -- is not a valid timing detector for this signal, and
+           live it fired about thirty slips a second where a real ppm-level
+           offset needs one every few seconds.  It is chasing noise.  The
+           *need* for timing recovery is real and measured (see the header
+           comment); what belongs here is a Gardner detector on the
+           matched-filtered stream, not on the equalizer output.
+           ME_V90_UPSTREAM_TIMING=1 re-enables this one for comparison. */
+        s->v90_t3_timing_enabled = (value != NULL && atoi(value) != 0);
         s->v90_t3_timing_err = 0.0f;
         s->v90_t3_timing_slips = 0;
     }
