@@ -140,7 +140,7 @@ LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c data_stack.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
-TEST_TARGETS = vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v34_phase2_decode_test v34_mp_test v34_data_test v34_duplex_test v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test
+TEST_TARGETS = vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test v34_duplex_test v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test
 TEST_OBJS = vpcm_loopback_test.o v90.o v90_cp_rx.o v90_dil_rx.o v90_dil_measure.o v90_dil_presets.o v90_analogue_tx.o v90_analogue_rx.o v90_analogue_phase3.o v90_analogue_phase4.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_cp_rx.o v92_trn2u.o v92_upstream_data.o v92_upstream_rx.o p3_demod.o
 DECODE_OBJS = vpcm_decode.o v90_dil_measure.o v90_dil_presets.o v34_phase2_decode.o v34_info_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_anspcm_decode.o p3_demod.o v90.o v90_cp_rx.o v91.o vpcm_cp.o v21_fsk_demod.o phase12_decode.o call_init_tone_probe.o v90_dil_rx.o
 ENCODE_OBJS = vpcm_encode.o v90.o v91.o vpcm_cp.o v92_phase4_decode.o
@@ -150,6 +150,7 @@ V42_LINK_TEST_OBJS = v42_link_test.o
 V34_PHASE2_DECODE_TEST_OBJS = v34_phase2_decode_test.o v34_phase2_decode.o
 V34_MP_TEST_OBJS = v34_mp_test.o
 V34_DATA_TEST_OBJS = v34_data_test.o
+V34_GARDNER_TEST_OBJS = v34_gardner_test.o
 V34_DUPLEX_TEST_OBJS = v34_duplex_test.o
 V90_ANALOGUE_TX_TEST_OBJS = v90_analogue_tx_test.o v90_analogue_tx.o v90_analogue_phase4.o v90_dil_measure.o v90.o v90_cp_rx.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o
 V90_ANALOGUE_RX_TEST_OBJS = v90_analogue_rx_test.o v90_analogue_rx.o v90_analogue_phase3.o v90_analogue_phase4.o v90_analogue_tx.o v90_dil_measure.o v90.o v90_cp_rx.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o
@@ -173,6 +174,7 @@ test: $(TEST_TARGETS)
 	./v34_phase2_decode_test
 	./v34_mp_test
 	./v34_data_test
+	./v34_gardner_test
 	./v34_duplex_test 2400 9600 ulaw
 	./v34_duplex_test 2400 9600 alaw
 	./v92_proc_eval_test
@@ -254,6 +256,12 @@ v34_mp_test: $(V34_MP_TEST_OBJS) spandsp
 v34_data_test: $(V34_DATA_TEST_OBJS) spandsp
 	$(CC) $(V34_DATA_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
+# The timing loop is header-only and free of spandsp types, so this one needs
+# nothing but libm -- which is the point: it can be run against a synthetic
+# signal whose true sampling instant is known.
+v34_gardner_test: $(V34_GARDNER_TEST_OBJS)
+	$(CC) $(V34_GARDNER_TEST_OBJS) -o $@ -lm
+
 v90_analogue_tx_test: $(V90_ANALOGUE_TX_TEST_OBJS) spandsp
 	$(CC) $(V90_ANALOGUE_TX_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
@@ -330,6 +338,7 @@ v34_phase2_decode.o: v34_phase2_decode.c v34_phase2_decode.h v90.h v91.h
 v34_phase2_decode_test.o: v34_phase2_decode_test.c v34_phase2_decode.h
 v34_mp_test.o: v34_mp_test.c $(SPANDSP_DIR)/spandsp/v34.h
 v34_data_test.o: v34_data_test.c $(SPANDSP_DIR)/spandsp/v34.h
+v34_gardner_test.o: v34_gardner_test.c $(SPANDSP_DIR)/v34_gardner.h
 v34_duplex_test.o: v34_duplex_test.c $(SPANDSP_DIR)/spandsp/v34.h
 v34_info_decode.o: v34_info_decode.c v34_info_decode.h v90.h
 v21_fsk_demod.o:  v21_fsk_demod.c  v21_fsk_demod.h

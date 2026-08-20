@@ -552,7 +552,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                      s->scrambler_tap, ones_pct,
                      alt_tap,
                      100*s->v90_t3_alt_ones/s->v90_t3_bit_count,
-                     s->v90_t3_bit_count, s->v90_t3_timing_slips);
+                     s->v90_t3_bit_count, s->v90_t3_gardner.slips);
             /* An idle DTE sends marks, so a correctly framed stream reads
                near 100% ones.  A superframe phase off by k reads about 57%:
                one data frame in j lands on the right index and the other six
@@ -9817,6 +9817,38 @@ static complexf_t v90_t3_raw_get(const v34_rx_state_t *s, int64_t index)
     return z;
 }
 
+/* The raw stream at a fractional sample position.  The timing loop corrects
+   in whole samples and keeps the leftover fraction; applying that fraction
+   here is what gives the loop a continuous actuator, and without it the
+   residual timing error can never be smaller than half a sample -- a sixth
+   of a symbol -- which is enough to keep the loop's integrator permanently
+   wound up.  Linear interpolation is adequate: the signal is already
+   band-limited by the receive RRC, and the fractionally spaced equalizer
+   downstream adapts around whatever this leaves. */
+static complexf_t v90_t3_raw_get_frac(const v34_rx_state_t *s,
+                                      int64_t index,
+                                      float frac)
+{
+    complexf_t a;
+    complexf_t b;
+    complexf_t z;
+
+    if (frac < 0.0f)
+    {
+        index--;
+        frac += 1.0f;
+    }
+    /*endif*/
+    a = v90_t3_raw_get(s, index);
+    if (frac <= 1e-4f)
+        return a;
+    /*endif*/
+    b = v90_t3_raw_get(s, index + 1);
+    z.re = a.re + frac*(b.re - a.re);
+    z.im = a.im + frac*(b.im - a.im);
+    return z;
+}
+
 static complexf_t v90_t3_matched_get(const v34_rx_state_t *s, int64_t index)
 {
     complexf_t z = {0.0f, 0.0f};
@@ -9824,6 +9856,33 @@ static complexf_t v90_t3_matched_get(const v34_rx_state_t *s, int64_t index)
     if (index >= 0 && index < s->v90_t3_raw_count
         && index >= s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE)
         z = s->v90_t3_matched[index & V34_V90_T3_RAW_MASK];
+    return z;
+}
+
+/* The matched-filtered stream at a fractional sample position.  The timing
+   detector has to measure the instant the receiver is actually using,
+   fraction included, or it reports an error the data path does not have. */
+static complexf_t v90_t3_matched_get_frac(const v34_rx_state_t *s,
+                                          int64_t index,
+                                          float frac)
+{
+    complexf_t a;
+    complexf_t b;
+    complexf_t z;
+
+    if (frac < 0.0f)
+    {
+        index--;
+        frac += 1.0f;
+    }
+    /*endif*/
+    a = v90_t3_matched_get(s, index);
+    if (frac <= 1e-4f)
+        return a;
+    /*endif*/
+    b = v90_t3_matched_get(s, index + 1);
+    z.re = a.re + frac*(b.re - a.re);
+    z.im = a.im + frac*(b.im - a.im);
     return z;
 }
 
@@ -9967,10 +10026,13 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                 <= s->v90_t3_raw_count)
     {
         complexf_t y = {0.0f, 0.0f};
+        /* The timing loop's leftover fraction of a sample. */
+        float frac = s->v90_t3_timing_enabled ? s->v90_t3_gardner.acc : 0.0f;
+
         for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
         {
-            complexf_t x = v90_t3_raw_get(
-                s, s->v90_t3_next_symbol - pre + tap);
+            complexf_t x = v90_t3_raw_get_frac(
+                s, s->v90_t3_next_symbol - pre + tap, frac);
             complexf_t z;
             if (s->v90_t3_fse_conjugate)
                 x.im = -x.im;
@@ -10067,8 +10129,8 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
 
             for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
             {
-                complexf_t x = v90_t3_raw_get(
-                    s, s->v90_t3_next_symbol - pre + tap);
+                complexf_t x = v90_t3_raw_get_frac(
+                    s, s->v90_t3_next_symbol - pre + tap, frac);
                 energy += x.re*x.re + x.im*x.im;
             }
             /* Reject gross outliers only.  The old 0.5 gate was tighter
@@ -10081,8 +10143,8 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
 
                 for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
                 {
-                    complexf_t x = v90_t3_raw_get(
-                        s, s->v90_t3_next_symbol - pre + tap);
+                    complexf_t x = v90_t3_raw_get_frac(
+                        s, s->v90_t3_next_symbol - pre + tap, frac);
 
                     if (s->v90_t3_fse_conjugate)
                         x.im = -x.im;
@@ -10093,63 +10155,83 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             }
             /*endif*/
         }
-        /* Timing.  Until now this branch advanced by exactly three samples
-           for the life of the call, with nothing to correct it -- so a few
-           ppm between the peer's symbol clock and our 8 kHz bearer, or a
-           single sample inserted or dropped anywhere in the RTP path (a
-           third of a symbol, instantly), accumulated without limit.
-           Measured: the idle stream decodes at 100% ones and then goes to
-           noise about fifteen seconds in, while the peer's DTE is still
-           idle.  An early-late gate closes that: the FSE output is taken a
-           third of a symbol either side of the decision instant, and the
-           side with more energy is the side the true instant has moved
-           towards.  ME_V90_UPSTREAM_TIMING=0 restores the fixed step. */
+        /* Timing.  This branch used to advance by exactly three samples for
+           the life of a call, with nothing to correct it -- so a few ppm
+           between the peer's symbol clock and our 8 kHz bearer, or a single
+           sample inserted or dropped anywhere in the RTP path (a third of a
+           symbol, instantly), accumulated without limit.  Measured against
+           slmodemd: the idle stream decodes at 100% ones and then walks off
+           into noise about fifteen seconds later, while the peer's DTE is
+           still idle.
+
+           Gardner's detector on the MATCHED-FILTERED stream closes it.  It
+           wants the symbol instant and the point halfway back to the
+           previous one; at three samples per symbol that midpoint is exactly
+           the average of the two samples either side of it.  The loop hands
+           back whole samples and keeps the fraction, which the reader above
+           interpolates by -- see v34_gardner.h for why the fraction matters
+           and v34_gardner_test for the S-curve, acquisition, tracking and
+           quiescence it is held to.  ME_V90_UPSTREAM_TIMING=0 restores the
+           fixed step. */
         if (s->v90_t3_timing_enabled)
         {
-            complexf_t early = {0.0f, 0.0f};
-            complexf_t late = {0.0f, 0.0f};
+            /* Gardner wants the symbol instant and the point halfway back to
+               the previous one, taken on the signal the DECISIONS are made
+               on -- which here is the equalizer output, not the matched
+               stream feeding it.  The supervised filter is fitted by least
+               squares and its delay is whatever best matched B1 anywhere
+               within its 21-tap span, so the matched stream's own best
+               instant is not the one the slicer sees: measured on the clean
+               loopback, a detector reading the matched stream reported an
+               error of -0.40 where the true timing error is zero, and drove
+               the loop into inserting symbols on a channel with no drift at
+               all.  One extra filter evaluation, at the half-symbol point,
+               keeps the detector and the decisions looking at the same
+               signal. */
+            complexf_t mid = {0.0f, 0.0f};
 
             for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
             {
-                complexf_t xe = v90_t3_raw_get(
-                    s, s->v90_t3_next_symbol - 1 - pre + tap);
-                complexf_t xl = v90_t3_raw_get(
-                    s, s->v90_t3_next_symbol + 1 - pre + tap);
-                complexf_t ze;
-                complexf_t zl;
+                complexf_t x = v90_t3_raw_get_frac(
+                    s, s->v90_t3_next_symbol - pre + tap - 2,
+                    frac + 0.5f);
+                complexf_t z;
 
                 if (s->v90_t3_fse_conjugate)
-                {
-                    xe.im = -xe.im;
-                    xl.im = -xl.im;
-                }
+                    x.im = -x.im;
                 /*endif*/
-                ze = complex_mulf(&s->v90_t3_fse[tap], &xe);
-                zl = complex_mulf(&s->v90_t3_fse[tap], &xl);
-                early = complex_addf(&early, &ze);
-                late = complex_addf(&late, &zl);
+                z = complex_mulf(&s->v90_t3_fse[tap], &x);
+                mid = complex_addf(&mid, &z);
             }
+            /* The sampling position is next_symbol + acc, and the loop
+               takes a whole sample out of acc whenever it hands one back
+               here, so a correction moves the position by the loop's small
+               step and nothing else -- it is continuous, and the equalizer
+               sees no jump.  (Shifting the taps to "compensate" for the index
+               change, which an earlier version did, cancels the correction
+               entirely: the loop then never sees its own effect and winds the
+               integrator to the clamp.  Measured at 20 ppm, freq ran from
+               -2e-5 straight past the -6e-5 it needed to -2e-3.) */
+            s->v90_t3_next_symbol += v34_gardner_update(&s->v90_t3_gardner,
+                                                        y.re, y.im,
+                                                        mid.re, mid.im);
+            if (getenv("ME_V90_UPSTREAM_TIMING_DEBUG"))
             {
-                float e_pow = early.re*early.re + early.im*early.im;
-                float l_pow = late.re*late.re + late.im*late.im;
-                float y_pow = y.re*y.re + y.im*y.im + 1e-6f;
+                static int dbg;
 
-                s->v90_t3_timing_err += (l_pow - e_pow)/y_pow;
-                if (s->v90_t3_timing_err > V34_V90_T3_TIMING_SLIP)
+                if ((dbg++ % 1600) == 0)
                 {
-                    /* The instant has moved later: take one more sample. */
-                    s->v90_t3_next_symbol++;
-                    s->v90_t3_timing_err = 0.0f;
-                    s->v90_t3_timing_slips++;
-                }
-                else if (s->v90_t3_timing_err < -V34_V90_T3_TIMING_SLIP)
-                {
-                    s->v90_t3_next_symbol--;
-                    s->v90_t3_timing_err = 0.0f;
-                    s->v90_t3_timing_slips--;
+                    fprintf(stderr,
+                            "[T3TIMING] err=%+.4f freq=%+.6f acc=%+.3f "
+                            "slips=%d\n",
+                            s->v90_t3_gardner.last_error,
+                            s->v90_t3_gardner.freq,
+                            s->v90_t3_gardner.acc,
+                            s->v90_t3_gardner.slips);
                 }
                 /*endif*/
             }
+            /*endif*/
         }
         /*endif*/
         s->v90_t3_next_symbol += 3;
@@ -10457,18 +10539,22 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     {
         const char *value = getenv("ME_V90_UPSTREAM_TIMING");
 
-        /* Off by default.  The discriminant here -- the energy of the
-           equalized output a third of a symbol either side of the decision
-           instant -- is not a valid timing detector for this signal, and
-           live it fired about thirty slips a second where a real ppm-level
-           offset needs one every few seconds.  It is chasing noise.  The
-           *need* for timing recovery is real and measured (see the header
-           comment); what belongs here is a Gardner detector on the
-           matched-filtered stream, not on the equalizer output.
-           ME_V90_UPSTREAM_TIMING=1 re-enables this one for comparison. */
-        s->v90_t3_timing_enabled = (value != NULL && atoi(value) != 0);
-        s->v90_t3_timing_err = 0.0f;
-        s->v90_t3_timing_slips = 0;
+        /* On by default: without it this receiver decodes correctly for
+           about fifteen seconds and then walks off, which is what the whole
+           upstream investigation kept running into.  The gains are the ones
+           v34_gardner_test holds to an S-curve, a static offset, a 50 ppm
+           ramp and a perfect clock; ME_V90_UPSTREAM_TIMING=0 goes back to
+           the fixed three-samples-per-symbol step for an A/B. */
+        s->v90_t3_timing_enabled = (value == NULL || atoi(value) != 0);
+        {
+            const char *mu = getenv("ME_V90_UPSTREAM_TIMING_MU");
+            const char *beta = getenv("ME_V90_UPSTREAM_TIMING_BETA");
+
+            v34_gardner_init(&s->v90_t3_gardner,
+                             mu ? (float) atof(mu) : V34_GARDNER_DEFAULT_MU,
+                             beta ? (float) atof(beta)
+                                  : V34_GARDNER_DEFAULT_BETA);
+        }
     }
     /* The supervised filter already maps onto the exact Q9.7 template grid. */
     s->data_symbol_scale = 1.0f;

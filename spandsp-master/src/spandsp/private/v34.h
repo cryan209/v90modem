@@ -26,6 +26,10 @@
 #if !defined(_SPANDSP_PRIVATE_V34_H_)
 #define _SPANDSP_PRIVATE_V34_H_
 
+/* Self-contained (plain floats, no spandsp types), so including it here
+   costs nothing to the other users of this header. */
+#include "v34_gardner.h"
+
 /*! The number of taps in the info data transmit pulse shaping filter */
 #define V34_INFO_TX_FILTER_STEPS            9
 #define V34_TX_FILTER_STEPS                 9
@@ -58,9 +62,6 @@
 #define V34_V90_T3_RAW_MASK                 (V34_V90_T3_RAW_SIZE - 1)
 #define V34_V90_T3_B1_MAX_SYMBOLS           256
 #define V34_V90_T3_GAIN_TRIALS              33
-/* Accumulated early-late imbalance, in units of normalised symbol energy,
-   before the upstream symbol instant is moved by one 8 kHz sample. */
-#define V34_V90_T3_TIMING_SLIP              6.0f
 
 /*! The offset between x index values, and what they mean in terms of the V.34
     spec numbering */
@@ -799,10 +800,9 @@ typedef struct
     float v90_t3_gain_err[V34_V90_T3_GAIN_TRIALS];
     /*! \brief Decision-directed NLMS step for the upstream equalizer. */
     float v90_t3_dd_mu;
-    /*! \brief Early-late timing tracking on the upstream symbol instant. */
+    /*! \brief Gardner timing recovery on the upstream symbol instant. */
     bool v90_t3_timing_enabled;
-    float v90_t3_timing_err;
-    int v90_t3_timing_slips;
+    v34_gardner_state_t v90_t3_gardner;
     /*! \brief First published upstream data bits, for structure checks. */
     uint32_t v90_t3_first_word;
     int v90_t3_first_bits;
