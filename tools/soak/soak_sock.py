@@ -15,7 +15,11 @@ OUTDIR = sys.argv[1]
 SEND_RATE = 3000          # B/s, under the 3120 B/s V.14 payload capacity of 31200 bps
 CHUNK = 512
 PHASES = [(0, 35, False), (35, 70, True), (70, 105, True)]
-END_T = 110
+# SOAK_SECONDS stretches the three-phase schedule for a long correctness run
+# (the default 105 s proves the path; minutes prove it stays up).
+SOAK_SCALE = max(1.0, float(os.environ.get("SOAK_SECONDS", "105"))/105.0)
+PHASES = [(a*SOAK_SCALE, b*SOAK_SCALE, c) for (a, b, c) in PHASES]
+END_T = 110*SOAK_SCALE
 
 s = socket.create_connection((HOST, PORT), timeout=20)
 s.setblocking(False)

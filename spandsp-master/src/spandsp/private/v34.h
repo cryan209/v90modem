@@ -811,6 +811,16 @@ typedef struct
     /*! \brief Capturing into the T/3 ring alongside the normal receiver,
         before the DATA handover. */
     bool v90_t3_capture_only;
+    /*! \brief Raw descrambled upstream bit dump (ME_V90_UPSTREAM_BIT_DUMP). */
+    FILE *v90_t3_bit_dump;
+    bool v90_t3_bit_dump_tried;
+    uint8_t v90_t3_dump_byte;
+    int v90_t3_dump_bits;
+    /*! \brief Superframe-phase search over the post-B1 data stream. */
+    int64_t v90_t3_data_symbols;
+    bool v90_t3_sf_pending;
+    bool v90_t3_sf_locked;
+    int v90_t3_sf_tries;
     /*! \brief Where B1 starts in the raw ring, and the running per-frame
         error against the B1 template, used to find where B1 actually ends
         rather than assuming it is one data frame long. */

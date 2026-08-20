@@ -52,7 +52,7 @@ for attempt in $(seq 1 "$MAXATTEMPTS"); do
   done
   if [ "$verdict" = DATA ]; then
     echo "ATTEMPT $attempt: DATA MODE — letting pumps run the soak schedule"
-    for i in $(seq 1 60); do kill -0 $sockpid 2>/dev/null || break; sleep 5; done
+    for i in $(seq 1 $(( ${SOAK_SECONDS:-105} / 5 + 30 )) ); do kill -0 $sockpid 2>/dev/null || break; sleep 5; done
     for i in $(seq 1 12); do kill -0 $ptypid 2>/dev/null || break; sleep 5; done
     kill $ptypid $sockpid 2>/dev/null
     ssh -o BatchMode=yes $TOWER "docker exec d-modem sh -c 'cat /tmp/slm.log'" > "$AD/slm.log" 2>/dev/null

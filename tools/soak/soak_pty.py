@@ -15,8 +15,12 @@ PTY = "/tmp/modem0"
 OUTDIR = sys.argv[1]
 SEND_RATE = 5000          # B/s, under the 5200 B/s V.14 payload capacity of 52000 bps
 CHUNK = 512
-PHASES = [(0, 35, True), (35, 70, False), (70, 105, True)]  # (start, end, sending)
-END_T = 110
+PHASES = [(0, 35, True), (35, 70, False), (70, 105, True)]
+# SOAK_SECONDS stretches the three-phase schedule for a long correctness run
+# (the default 105 s proves the path; minutes prove it stays up).
+SOAK_SCALE = max(1.0, float(os.environ.get("SOAK_SECONDS", "105"))/105.0)
+PHASES = [(a*SOAK_SCALE, b*SOAK_SCALE, c) for (a, b, c) in PHASES]  # (start, end, sending)
+END_T = 110*SOAK_SCALE
 
 fd = os.open(PTY, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
 attr = termios.tcgetattr(fd)

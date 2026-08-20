@@ -169,3 +169,38 @@ The soak harness (`tools/soak/`) runs the whole thing unattended and
 both directions.  Budget for the rig losing the known Phase-3/4 retrain
 lottery: reaching data mode took 5 attempts in one batch and more than
 24 in another, with no change in between.
+
+
+## The rate was the first half of the answer (2026-08-20)
+
+The upstream had been running at 31200 because that is what the line
+probe supported *downstream*.  Capping what our MP offers, and preparing
+the receiver for the same cap, walks the decision error straight down:
+
+| upstream | decision error | note |
+|---|---|---|
+| 31200 | 0.67 | = 2 x 1/3: no relation to the lattice at all |
+| 19200 | 0.53 | GPA first shows over GPC -- 58% ones against 50% |
+|  9600 | 0.106 | B1's own era 0.081; symbols are on the grid |
+
+`ME_V90_UPSTREAM_MAX_BPS` caps both the MP mask *and*
+`v34_v90_prepare_upstream_data()`.  Capping only the mask is worse than
+not capping: the peer transmits at the capped rate while the B1 template
+is still built for the uncapped one, and acquisition never correlates.
+
+Two things fell out of getting the symbols clean:
+
+- **B1 is not one data frame.**  Measured on the wire (the symbols stop
+  matching the template) it is **two** at this rate.  That matters because
+  10.1.3.1/V.34 has B1 carry the superframe inversions of the *final* data
+  frame -- `v34_begin_rx_data()` parks the receiver at j-1 for exactly that
+  -- and 9.4.2.5/V.90 has the peer start a new superframe afterwards.  With
+  B1 two frames long the peer stays parked for both while we advance, so
+  the superframe phase is wrong from the first data frame onward.  The
+  receiver now finds B1's end on the wire and holds the phase until then.
+- **57% ones is a phase signature, not noise.**  With clean symbols the
+  descrambled idle stream held 55-56% ones for a whole call.  That is what
+  a superframe phase off by k gives: one data frame in j decodes correctly
+  and the rest are noise -- 1/7 x 100% + 6/7 x 50% = 57%.  A correctly
+  framed idle stream reads near 100%.  j is only 7 wide, so the phase is
+  now searched against the marks rather than derived.

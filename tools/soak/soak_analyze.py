@@ -7,8 +7,10 @@ rx_pty.bin the upstream "U%07d\n" stream (sent from socket side).
 import os, re, sys
 
 OUTDIR = sys.argv[1]
-PHASES = {"A (downstream only)": (0, 35), "B (upstream only)": (35, 70),
-          "C (bidirectional)": (70, 105)}
+SOAK_SCALE = max(1.0, float(os.environ.get("SOAK_SECONDS", "105"))/105.0)
+PHASES = {name: (a*SOAK_SCALE, b*SOAK_SCALE) for name, (a, b) in
+          {"A (downstream only)": (0, 35), "B (upstream only)": (35, 70),
+           "C (bidirectional)": (70, 105)}.items()}
 
 def phase_throughput(idx_path):
     rates = {name: 0 for name in PHASES}

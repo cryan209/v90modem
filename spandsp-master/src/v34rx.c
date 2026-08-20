@@ -490,6 +490,35 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
 
     if (s->v90_t3_acquired  &&  !s->v90_t3_suppress_output)
     {
+        /* Raw descrambled bits, before any V.14 framing.  An idle DTE reads
+           100% ones here even if the bits within a data frame are permuted,
+           because all-ones is invariant under a permutation -- and so is the
+           encode/decode loopback test, which uses the same order at both
+           ends.  Only a foreign peer sending real characters can show it, so
+           dump the stream and align it offline against the known pattern.
+           ME_V90_UPSTREAM_BIT_DUMP=<path>. */
+        if (s->v90_t3_bit_dump == NULL  &&  !s->v90_t3_bit_dump_tried)
+        {
+            const char *path = getenv("ME_V90_UPSTREAM_BIT_DUMP");
+
+            s->v90_t3_bit_dump_tried = true;
+            if (path && *path)
+                s->v90_t3_bit_dump = fopen(path, "wb");
+            /*endif*/
+        }
+        /*endif*/
+        if (s->v90_t3_bit_dump)
+        {
+            s->v90_t3_dump_byte = (uint8_t) ((s->v90_t3_dump_byte << 1)
+                                             | (out_bit & 1));
+            if (++s->v90_t3_dump_bits == 8)
+            {
+                fputc(s->v90_t3_dump_byte, s->v90_t3_bit_dump);
+                s->v90_t3_dump_bits = 0;
+            }
+            /*endif*/
+        }
+        /*endif*/
         int alt_tap = (s->scrambler_tap == 4) ? 17 : 4;
         int alt_bit = descramble_reg(&s->v90_t3_alt_scramble, alt_tap, in_bit);
 
@@ -510,14 +539,39 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
         s->v90_t3_alt_ones += alt_bit;
         if (++s->v90_t3_bit_count >= 20000)
         {
+            int ones_pct = 100*s->v90_t3_ones/s->v90_t3_bit_count;
+
             span_log(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 upstream DATA bits: tap=%d ones=%d%%, "
                      "tap=%d ones=%d%% (over %d bits)\n",
-                     s->scrambler_tap,
-                     100*s->v90_t3_ones/s->v90_t3_bit_count,
+                     s->scrambler_tap, ones_pct,
                      alt_tap,
                      100*s->v90_t3_alt_ones/s->v90_t3_bit_count,
                      s->v90_t3_bit_count);
+            /* An idle DTE sends marks, so a correctly framed stream reads
+               near 100% ones.  A superframe phase off by k reads about 57%:
+               one data frame in j lands on the right index and the other six
+               decode to noise (1/7 x 100 + 6/7 x 50).  Measured, not assumed
+               -- 55-56% held steady for a whole call while the symbols
+               themselves were clean at 0.098.  j is only 7 wide, so search
+               it against the marks rather than deriving it. */
+            if (!s->v90_t3_sf_locked)
+            {
+                if (ones_pct >= 75)
+                {
+                    s->v90_t3_sf_locked = true;
+                    span_log(s->logging, SPAN_LOG_WARNING,
+                             "Rx - V.90 upstream superframe phase locked "
+                             "(%d%% ones after %d steps)\n",
+                             ones_pct, s->v90_t3_sf_tries);
+                }
+                else if (s->v90_t3_sf_tries < 16)
+                {
+                    s->v90_t3_sf_pending = true;
+                }
+                /*endif*/
+            }
+            /*endif*/
             s->v90_t3_ones = 0;
             s->v90_t3_alt_ones = 0;
             s->v90_t3_bit_count = 0;
@@ -9939,6 +9993,31 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
         }
         /*endif*/
         s->v90_t3_suppress_output = s->v90_t3_in_b1;
+        if (!s->v90_t3_in_b1  &&  s->parms.p > 0)
+        {
+            /* Step the phase on a data-frame boundary, where it is the only
+               thing that changes. */
+            if (s->v90_t3_sf_pending
+                &&
+                (s->v90_t3_data_symbols % (8*s->parms.p)) == 0)
+            {
+                s->v90_t3_sf_pending = false;
+                s->v90_t3_sf_tries++;
+                if (s->parms.j > 0)
+                {
+                    s->super_frame = (s->super_frame + 1) % s->parms.j;
+                    s->v0_pattern = (uint16_t)(2*s->super_frame);
+                    s->input_4d = s->super_frame*4*s->parms.p;
+                }
+                /*endif*/
+                span_log(s->logging, SPAN_LOG_WARNING,
+                         "Rx - V.90 upstream superframe phase -> %d (step %d)\n",
+                         s->super_frame, s->v90_t3_sf_tries);
+            }
+            /*endif*/
+            s->v90_t3_data_symbols++;
+        }
+        /*endif*/
         process_primary_symbol(s, &y);
         /* Decision-directed NLMS on the same taps.  The least-squares fit
            over B1's 128 symbols leaves about 1.4% residual energy -- roughly
@@ -10233,6 +10312,10 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_b1_start = best_first;
     s->v90_t3_b1_frame_err = 0.0f;
     s->v90_t3_in_b1 = true;
+    s->v90_t3_data_symbols = 0;
+    s->v90_t3_sf_pending = false;
+    s->v90_t3_sf_locked = false;
+    s->v90_t3_sf_tries = 0;
     {
         const char *value = getenv("ME_V90_UPSTREAM_DD_MU");
 
