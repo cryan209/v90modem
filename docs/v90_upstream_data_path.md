@@ -900,3 +900,47 @@ to the millisecond.  A phase shift lands when `++data_frame >= p`, every 16
 mapping frames, so every 40 ms.  The sweep step rate is therefore set by the
 measurement window and not by the boundary, and moving the application to the
 mapping-frame boundary would buy nothing.
+
+
+## The lock metric could not see a correct decode (2026-08-21, later still)
+
+The section above left the lock not holding, and named the release rule as
+the first lead: the soak pattern is mostly digits, `'0'` is 0x30, and
+LSB-first between a zero start bit and a one stop bit that is three ones in
+ten, so a *perfect* decode of the pattern reads 30-40% ones against a rule
+that releases below 70%.  That was the fault, and it was the whole of it.
+
+**5217 pattern-line hits off the same recording, where the run before gave
+14** -- and 5129 of the gaps between them are exact multiples of the 90-bit
+line, so they are runs of the peer's real traffic rather than coincidences.
+The receiver had been finding the phase, decoding correctly, and discarding
+the lock the moment the peer's DTE said anything.
+
+The evidence needed to judge a lock on a busy line was already being computed
+and thrown away.  §9.6.3.3 builds the shell index r0 out of the ring indices
+of the eight 2D symbols of a mapping frame, and the transmitter's own
+construction bounds it to k bits.  An r0 that does not fit cannot have come
+from a correctly grouped frame -- so it is a frame-phase check that owes
+nothing to the content.  `bitstream_put()` truncates silently, so nothing had
+ever looked.
+
+Measured over round1, the separation is clean:
+
+    correct-phase windows   0% in 194 of 202, never above 3%
+    wrong-phase windows     3% or more in 92 of every 100
+
+A standing lock is now judged on that where it is available, falling back on
+the marks only where k is zero, and the sweep ranks candidates by it first,
+weighted so that one percent of bad frames outweighs anything the marks can
+show.
+
+**Read line counts, not the ones fraction, from here on.**  The ones fraction
+was the right instrument while the peer was idle and is actively misleading
+once it is not: a correct decode of digits reads about the same as noise.
+`ME_V90_UPSTREAM_BIT_DUMP` plus `tools/soak/upbits_align.py` -- or just
+searching the dump for the pattern and checking the gaps are multiples of 90
+-- is what says whether the upstream is working.
+
+Still open: 60% of the call has an open eye, and the recovered lines are a
+fraction of what the peer sent, so both the outage time after a slip and the
+sweep's dwell are still worth attacking.  Neither is now a mystery.
