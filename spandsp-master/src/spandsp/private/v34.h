@@ -131,6 +131,40 @@
 #define V34_V90_T3_VALIDATE_ERR             0.40f
 #define V34_V90_T3_VALIDATE_POWER_RATIO     4.0f
 
+/*! What a GOOD acquisition looks like: out-of-sample distance as a FRACTION
+    of the symbol power that carries it.
+
+    V34_V90_T3_VALIDATE_ERR is a last-resort gate, set wide enough to tell a
+    real acquisition (0.002) from a hopeless one (0.66), and at 0.40 it lets
+    through everything in between.  Live that is the whole problem: measured
+    across four consecutive calls against the d-modem rig on 2026-08-21,
+    EVERY acquisition landed at 0.118 to 0.125 and every one of those calls
+    then ran its entire length at a symbol error of about 0.11 -- far above
+    the 0.05 the shell decode needs -- while the same recorded audio replayed
+    offline acquires at 0.002 and holds a median of 0.002.  The retry
+    machinery that exists for exactly this never fired, because 0.125 passes
+    0.40.
+
+    An ABSOLUTE distance cannot be the gate, and this was measured rather
+    than reasoned: the offline T/3 regression runs at 21600, where a fit of
+    99.9-100% honestly reads 0.053 to 0.074 -- so a fixed 0.05 rejects a
+    perfect acquisition.  The same rate-dependence already bit the power half
+    of this check once; see the comment there about a constant ratio
+    rejecting a perfect acquisition.
+
+    Divided by the symbol power it carries, the three populations separate
+    cleanly, and this is the natural normalisation because the ratio is
+    simply the inverse SNR:
+
+        21600 loopback, fit 99.9-100%    0.053-0.074 / 93-120  = 0.00058-0.00061
+        9600 live audio replayed, good   0.002       / 7.1     = 0.00028
+        9600 live, the poor acquisition  0.125       / 7.2     = 0.0174
+
+    0.002 sits at the geometric middle of the tightest gap (at 21600 a closed
+    eye reads 0.67/120 = 0.0056, a good one 0.00061), so it has about a
+    factor of three either side at the worst rate. */
+#define V34_V90_T3_ACQ_GOOD_SNR             0.002f
+
 /*! Symbols off the constellation before a slip search runs.  A slip is a
     step, not a drift, so this only has to be long enough not to fire on a
     noise burst -- and it must be SHORT, because everything that goes wrong
@@ -967,6 +1001,16 @@ typedef struct
     /*! \brief Fast distance-to-lattice estimate, gating the adaptive
         elements; v90_t3_sym_err_ema is the slow one the rest reads. */
     float v90_t3_sym_err_fast;
+    /*! \brief Best acquisition seen so far while holding out for a good one,
+        so that running out of retries settles for the best window rather than
+        whichever one happened to be last. */
+    complexf_t v90_t3_acq_best_coeff[V34_V90_T3_FSE_TAPS];
+    float v90_t3_acq_best_rel;
+    float v90_t3_acq_best_dist;
+    float v90_t3_acq_best_match;
+    int v90_t3_acq_best_conjugate;
+    int64_t v90_t3_acq_best_first;
+    bool v90_t3_acq_best_valid;
     /*! \brief Shell-mapping frames whose index r0 did not fit in k bits.
         The transmitter builds r0 to fit by construction, so one that does not
         says the frame grouping is wrong -- a frame-phase check that owes

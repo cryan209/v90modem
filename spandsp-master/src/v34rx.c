@@ -11258,15 +11258,67 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
                      "%.3f, symbol power %.1f against the template's %.1f, "
                      "over %d symbols\n",
                      mean_dist, mean_power, template_power, counted);
-            if (mean_dist > V34_V90_T3_VALIDATE_ERR
-                ||
-                mean_power
-                    > V34_V90_T3_VALIDATE_POWER_RATIO*template_power)
+            /* Hold out for a GOOD acquisition -- distance as a fraction of
+               the symbol power carrying it, see V34_V90_T3_ACQ_GOOD_SNR --
+               and settle for a merely passable one only when the retries are
+               spent.  Live, the first window after E often does not contain
+               B1 at all yet, and fits 98% to whatever is there; half a second
+               later it does. */
+            double rel = (mean_power > 1e-6)
+                       ? mean_dist/mean_power
+                       : 1.0e9;
+            bool power_ok = (mean_power
+                                 <= V34_V90_T3_VALIDATE_POWER_RATIO
+                                        *template_power);
+            bool good = power_ok  &&  rel <= V34_V90_T3_ACQ_GOOD_SNR;
+            bool passable = power_ok  &&  mean_dist <= V34_V90_T3_VALIDATE_ERR;
+            bool retries_left = (s->v90_t3_acq_retries
+                                     < V34_V90_T3_ACQ_MAX_RETRIES);
+
+            /* Remember the best window seen, so that running out of retries
+               settles for the best rather than for whichever came last. */
+            if (passable
+                &&
+                (!s->v90_t3_acq_best_valid
+                 ||
+                 rel < s->v90_t3_acq_best_rel))
+            {
+                memcpy(s->v90_t3_acq_best_coeff, best_coeff,
+                       sizeof(s->v90_t3_acq_best_coeff));
+                s->v90_t3_acq_best_rel = (float) rel;
+                s->v90_t3_acq_best_dist = (float) mean_dist;
+                s->v90_t3_acq_best_match = best_match;
+                s->v90_t3_acq_best_conjugate = best_conjugate;
+                s->v90_t3_acq_best_first = best_first;
+                s->v90_t3_acq_best_valid = true;
+            }
+            /*endif*/
+            if (!good  &&  !retries_left  &&  s->v90_t3_acq_best_valid)
+            {
+                /* Out of retries: take the best window this call offered. */
+                memcpy(best_coeff, s->v90_t3_acq_best_coeff,
+                       sizeof(best_coeff));
+                best_match = s->v90_t3_acq_best_match;
+                best_conjugate = s->v90_t3_acq_best_conjugate;
+                best_first = s->v90_t3_acq_best_first;
+                span_log(s->logging, SPAN_LOG_WARNING,
+                         "Rx - V.90 T/3 B1 settling for the best of %d "
+                         "windows: distance %.3f (%.5f of its power), "
+                         "in-sample fit %.1f%%\n",
+                         s->v90_t3_acq_retries + 1,
+                         s->v90_t3_acq_best_dist, s->v90_t3_acq_best_rel,
+                         100.0f*best_match);
+                good = true;
+            }
+            /*endif*/
+            if (!good)
             {
                 span_log(s->logging, SPAN_LOG_WARNING,
                          "Rx - V.90 T/3 B1 rejected: an in-sample fit of "
-                         "%.1f%% that does not generalise\n",
-                         100.0f*best_match);
+                         "%.1f%% that does not generalise (distance %.3f, "
+                         "%.5f of its power against a limit of %.5f)\n",
+                         100.0f*best_match, mean_dist, rel,
+                         (double) V34_V90_T3_ACQ_GOOD_SNR);
                 /* Not a failure of the call -- just of this window.  Search
                    again when more of the wire has arrived, sliding the
                    window forward: E is detected on the CP bit stream and
@@ -12822,6 +12874,12 @@ static bool v90_t3_start(v34_rx_state_t *rx)
     rx->v90_t3_phase_pending = false;
     rx->v90_t3_phase_pos = 0;
     rx->v90_t3_acq_retries = 0;
+    rx->v90_t3_acq_best_valid = false;
+    rx->v90_t3_acq_best_rel = 0.0f;
+    rx->v90_t3_acq_best_dist = 0.0f;
+    rx->v90_t3_acq_best_match = 0.0f;
+    rx->v90_t3_acq_best_conjugate = 0;
+    rx->v90_t3_acq_best_first = 0;
     rx->v90_t3_acq_retry_at = 0;
     rx->v90_t3_e_anchor = -1;
     rx->v90_t3_in_b1 = false;
