@@ -580,8 +580,15 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                        frame boundary, so this costs nothing but the window
                        spent measuring.  j is 7, and a short window is used
                        until the phase locks, so the whole space fits inside
-                       the peer's idle period. */
-                    s->v90_t3_sf_force = (s->super_frame + 1) % s->parms.j;
+                       the peer's idle period several times over.
+
+                       Enumerate from a counter rather than stepping from
+                       whatever phase the decoder happens to be on: the
+                       decoder advances between the measurement and the
+                       boundary where the change lands, so "current + 1" is a
+                       walk, not a sweep, and can revisit phases while
+                       missing others. */
+                    s->v90_t3_sf_force = s->v90_t3_sf_tries % s->parms.j;
                     s->v90_t3_sf_tries++;
                     span_log(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream superframe phase -> %d "
