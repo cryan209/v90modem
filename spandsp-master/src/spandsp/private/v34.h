@@ -813,6 +813,14 @@ typedef struct
     float v90_t3_gain_err[V34_V90_T3_GAIN_TRIALS];
     /*! \brief Decision-directed NLMS step for the upstream equalizer. */
     float v90_t3_dd_mu;
+    /*! \brief V.14 framing evidence per bit phase: a correctly decoded
+        async stream has one phase in ten where the start bit is zero and the
+        stop bit is one.  Unlike the ones fraction this works whether or not
+        the peer's DTE is idle. */
+    uint16_t v90_t3_v14_hist;
+    int64_t v90_t3_v14_bits;
+    int v90_t3_v14_ok[10];
+    int v90_t3_v14_count[10];
     /*! \brief Running mean square distance from the constellation, used to
         decide whether the timing detector and the decision-directed update
         are being fed anything real. */

@@ -17,6 +17,12 @@ SEND_RATE = int(os.environ.get("SOAK_SEND_RATE", "3000"))  # B/s
 # obvious: idle marks read as ones and the occasional character stands out.
 CHUNK = 512
 PHASES = [(0, 35, False), (35, 70, True), (70, 105, True)]
+if os.environ.get("SOAK_SOCK_ALWAYS"):
+    # Send for the whole call rather than only the last two thirds.  To ask
+    # whether payload flows correctly for minutes, payload has to be flowing
+    # for minutes -- otherwise most of the capture is idle marks and a clean
+    # result says only that the line is quiet.
+    PHASES = [(0, 105, True)]
 # SOAK_SECONDS stretches the three-phase schedule for a long correctness run
 # (the default 105 s proves the path; minutes prove it stays up).
 SOAK_SCALE = max(1.0, float(os.environ.get("SOAK_SECONDS", "105"))/105.0)

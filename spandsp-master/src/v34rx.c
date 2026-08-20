@@ -539,12 +539,58 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
         /*endif*/
         s->v90_t3_ones += out_bit;
         s->v90_t3_alt_ones += alt_bit;
+        {
+            /* Start bit nine places back, stop bit here. */
+            int start = (s->v90_t3_v14_hist >> 9) & 1;
+            int ph = (int) (s->v90_t3_v14_bits % 10);
+
+            if (s->v90_t3_v14_bits >= 9)
+            {
+                s->v90_t3_v14_count[ph]++;
+                if (start == 0  &&  out_bit == 1)
+                    s->v90_t3_v14_ok[ph]++;
+                /*endif*/
+            }
+            /*endif*/
+            s->v90_t3_v14_hist = ((s->v90_t3_v14_hist << 1) | out_bit) & 0x3FF;
+            s->v90_t3_v14_bits++;
+        }
         /* While searching, judge on a short window so the whole phase space
            fits inside the peer's idle period; once locked, report on a long
            one. */
         if (++s->v90_t3_bit_count >= (s->v90_t3_sf_locked ? 20000 : 4000))
         {
             int ones_pct = 100*s->v90_t3_ones/s->v90_t3_bit_count;
+            int v14_pct = 0;
+
+            /* A second, content-independent lock metric.  The ones fraction
+               only says anything while the peer's line is mostly idle: with
+               its DTE sending, no phase reads high and the sweep cannot tell
+               a good phase from a bad one -- measured, a whole batch of
+               calls with the peer transmitting from the first second never
+               locked at all.  V.14 characters are ten bits with a zero start
+               and a one stop, so a correctly framed stream has one bit phase
+               in ten where both hold.
+
+               Measured and NOT yet fit to gate on: on a line that is mostly
+               idle marks the best phase reads 0-11% even when the decode is
+               perfect, because idle has no start bits at all -- an absolute
+               threshold can never fire.  What it needs is normalising by
+               character occupancy, or simply comparing the best phase
+               against the others.  Logged for now so the next attempt has
+               numbers to work from rather than a guess. */
+            for (int ph = 0;  ph < 10;  ph++)
+            {
+                int n = s->v90_t3_v14_count[ph];
+                int pct = n ? 100*s->v90_t3_v14_ok[ph]/n : 0;
+
+                if (pct > v14_pct)
+                    v14_pct = pct;
+                /*endif*/
+                s->v90_t3_v14_ok[ph] = 0;
+                s->v90_t3_v14_count[ph] = 0;
+            }
+            /*endfor*/
 
             span_log(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 upstream DATA bits: t=%.1fs tap=%d ones=%d%%, "
@@ -592,9 +638,10 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                 {
                     s->v90_t3_sf_locked = true;
                     span_log(s->logging, SPAN_LOG_WARNING,
-                             "Rx - V.90 upstream superframe phase locked "
-                             "(%d%% ones after %d steps)\n",
-                             ones_pct, s->v90_t3_sf_tries);
+                             "Rx - V.90 upstream frame phase locked "
+                             "(%d%% ones, %d%% V.14 framing, after %d "
+                             "steps)\n",
+                             ones_pct, v14_pct, s->v90_t3_sf_tries);
                 }
                 else if (s->v90_t3_sf_tries
                              < V34_MAX_SUPER_FRAME_PHASES*s->parms.p
@@ -10639,6 +10686,10 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_sf_locked = false;
     s->v90_t3_relocks = 0;
     s->v90_t3_sym_err_ema = 0.0f;
+    s->v90_t3_v14_hist = 0;
+    s->v90_t3_v14_bits = 0;
+    memset(s->v90_t3_v14_ok, 0, sizeof(s->v90_t3_v14_ok));
+    memset(s->v90_t3_v14_count, 0, sizeof(s->v90_t3_v14_count));
     s->v90_t3_fse_good_valid = false;
     s->v90_t3_fse_good_age = 0;
     s->v90_t3_fse_bad_run = 0;
