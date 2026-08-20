@@ -276,6 +276,9 @@ void me_set_verbose(int v) { g_me_verbose = v ? 1 : 0; }
 
 static int me_span_flow_level(void);
 
+/* In-place Sd retries already used on the current Phase-3 attempt. */
+static unsigned g_v90_jd_resync_retries = 0;
+
 /* ME_V90_UPSTREAM_MAX_BPS caps the upstream rate we offer in MP.  It has to
  * reach the receiver's own preparation as well: cap the MP mask alone and the
  * peer transmits at the capped rate while our B1 template is still built for
@@ -6959,6 +6962,7 @@ static void enter_v90_phase4_rx_locked(void)
     if (!g_v90 || !g_v34)
         return;
 
+    g_v90_jd_resync_retries = 0;
     ME_LOG("[ME] %s Phase 3 complete; enabling native upstream Phase 4 receiver\n",
            g_v92_active ? "V.92" : "V.90");
     {
@@ -7046,8 +7050,22 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                instead of sending silence while the peer expects INFO0d. */
             if (phase_before == V90_TX_JD
                 && v90_get_tx_phase(g_v90) == V90_TX_WAIT_JA) {
-                (void) restart_v90_phase2_locked("no S after Jd");
-                return false;
+                /* Not every Jd-without-S means the peer went back to Phase 2.
+                 * Measured against slmodemd, the common case is that it is
+                 * sitting in WaitForSd waiting for an Sd it missed, and will
+                 * give up in about 2 s -- and restarting Phase 2 here
+                 * guarantees it never gets one, which its own log shows as
+                 * "Error Energy = -0.000" right up to the retrain.  Let
+                 * v90.c hold its short silence and re-emit Sd once; only fall
+                 * back to the Phase-2 exchange if that is ignored too. */
+                if (g_v90_jd_resync_retries < 1) {
+                    g_v90_jd_resync_retries++;
+                    ME_LOG("[ME] V.90: no S after Jd; re-emitting Sd in place "
+                           "(peer may still be in WaitForSd)\n");
+                } else {
+                    (void) restart_v90_phase2_locked("no S after Jd");
+                    return false;
+                }
             }
         }
 
