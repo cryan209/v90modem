@@ -540,3 +540,42 @@ one mapping frame worked through 9.4/9.5's shell mapping and 9.6's
 trellis by hand against the spec tables, or a known-good V.34 capture
 decoded end to end.  Not another live call: the rig has already said
 everything it can about this one.
+
+
+## Correction, and the single blocker as it now stands
+
+Two things in the previous section were overstated, and both matter:
+
+- The "777 candidates all at chance" measurement was taken **while the
+  sweep was running**, so it scored a moving target.  A correct phase
+  would have held for one window and could not have read much above the
+  20% the occupancy allows, which is inside the 24-29% band observed.  It
+  is weak evidence, not proof that alignment is irrelevant.
+- Running the peer's DTE from the first second (`SOAK_SOCK_ALWAYS`)
+  removed the idle the lock metric needs, so those calls could never lock
+  by construction.  That test was self-defeating.
+
+Run properly -- normal schedule, five minutes, every fix in -- the
+picture is simple and the blocker is one thing:
+
+    downstream   111175 of 111274 lines, 99.9% clean, five minutes
+    upstream     locks immediately at 100% ones, holds clean symbols for
+                 about forty seconds, then the symbol error goes to 0.67
+                 and stays; 337 equalizer restores recover nothing
+
+**The collapse happens on idle traffic too**, forty seconds in, with the
+peer's DTE silent at the time.  So it is not payload, not framing and not
+alignment.  It is not timing (freq at noise, zero slips), not gain (a
+33-point sweep finds no scale), and not the equalizer taps (restoring a
+known-good set 337 times changes nothing).  Carrier recovery extends the
+good stretch from six to thirteen seconds up to thirty or forty, but does
+not prevent it.
+
+Something in the received upstream changes about forty seconds into every
+call and does not change back.  The strongest untested lead is the media
+path rather than the modem: the pty spin fixed earlier in this session
+was exactly that kind of fault, invisible in the modem's own logs and
+lethal on the wire, and it was found by looking at RTP jitter rather than
+at DSP.  Worth checking whether anything periodic happens on this call at
+that scale -- jitter-buffer adaptation, RTCP, a tap flush -- before
+reaching for another DSP hypothesis.
