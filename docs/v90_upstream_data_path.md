@@ -764,3 +764,123 @@ the phase through a slip correction rather than rediscovering it afterwards.
 The recording that shows all of this is
 `artifacts/dmodem-soak-0821-rounds/round1/tap/live-rx.g711`, and
 `v90_upstream_replay` reproduces it in under two minutes.
+
+## The slip carries a carrier step (2026-08-21, later)
+
+The previous section left the upstream acquiring correctly, clean for 36% of
+a call, and losing the frame phase to slips arriving faster than a 45 s sweep
+could chase.  It also treated the slips as an inference from the receiver's
+own behaviour -- one sample deleted at the collapse doubled the clean stretch
+-- rather than as something measured.  Both of those are now settled, and the
+second one changed the answer.
+
+### Measuring the wire instead of the receiver
+
+`tools/measure_timing_slips.py` reads the transmitter's symbol epoch straight
+off a recorded tap.  A V.34 signal with excess bandwidth carries a spectral
+line at the symbol rate in the squared envelope of its analytic signal, and
+the phase of that line IS the epoch, measured against the 8 kHz bearer.  One
+inserted or dropped sample moves it by exactly 360 x baud/8000 degrees -- 144
+at 3200 baud -- and nothing else in a call looks like that.
+
+    tools/measure_timing_slips.py artifacts/dmodem-soak-0821-rounds/round1/tap/live-rx.g711 --from 61
+
+On round1 the phase sits at -119 degrees, steps to -263 at t=129.6 s and back
+at t=130.6: 28 steps in 290 s, net +7.2 ppm, arriving in bursts of three a
+second apart early on and settling to a metronomic +1 every 12 s later.
+
+The RTP is unbroken across every one of them -- 21365 packets, no loss, no
+sequence or timestamp discontinuity, media clock within 4 ppm of wall clock.
+So the slips are inside the peer's own audio generation, not the transport,
+and `DM_RESAMPLER` on the tower remains the place to look if they are ever to
+stop.  The receiver had been reporting 81 corrections against those 28 real
+events, which is the first thing this measurement bought: most of what it was
+correcting was itself.
+
+### Four defects, each hiding the next
+
+**The search span was wider than the thing it searched.**  The score a
+candidate offset is judged by is the distance from the equalized symbols to
+the lattice, and that is periodic in one symbol -- three samples at T/3 --
+because a whole-symbol shift still lands every symbol on the constellation.
+Searching +/-3 samples therefore offered every minimum twice, once at its own
+position and once a symbol away, and the argmin picked between them on noise.
+46 of 81 corrections on round1 were the far copy, 36 of them "+2.67", which is
+-0.33 plus a symbol.  Each one moved the shell decoder within the data frame,
+and the frame-phase sweep cannot undo that: it searches frame labels, not
+single symbols.  The search now covers the half symbol either side and no
+more, in sixths of a sample rather than thirds -- the quantum the peer slips
+by is one 8 kHz sample, which is 1.2 T/3 samples at 3200 baud, and a
+third-of-a-sample grid has no point within 0.13 of it.
+
+**A slip is a passband delay, so it comes with a rotation.**  This is the one
+that mattered, and it is pure bookkeeping about where the mixer sits.  The
+T/3 ring holds complex baseband, mixed down by an angle indexed on the
+ABSOLUTE sample count.  With the received analytic signal a(n) = b(n)e^(jwn),
+a delay of D gives ring'(n) = b(n-D)e^(-jwD): reading D samples further on
+recovers the right baseband sample **rotated by -wD**.  At 3200 baud low
+carrier that is 82 degrees per 8 kHz sample.  The search corrected the delay
+and left the rotation, which is exactly why it kept reporting a flat profile
+with every candidate at 0.65 and nothing to choose between them -- the
+correct sampling instant was in the list and still did not fit the lattice.
+It also explains why recovery ever happened at all: 82 degrees is close
+enough to 90, which V.34's differential mapping makes harmless, that the
+fourth-power carrier estimator sometimes pulled a call back on its own.  That
+is what the "lottery" was.  The scorer now derotates by the carrier loop's
+standing phase -- which it never did, so it had been scoring a signal the
+slicer does not see -- and by the phase the candidate offset implies, and an
+adopted offset carries its rotation into the carrier loop.
+
+**Everything adaptive was gated on a 256-symbol average.**  A slip shuts the
+eye in one symbol, so the decision-directed LMS went on adapting hard onto
+wrong decisions for the hundred symbols the average took to turn round --
+walking off the very filter the slip search needs intact to find the new
+instant.  A fast estimate (1/16 per symbol) now gates the LMS, the timing
+loop and the carrier loop; the slow one still describes the call and drives
+the frame-phase logic.  The search also runs after 48 symbols off the
+constellation rather than 240.
+
+**The frame-phase sweep could not return to its own best candidate.**  It
+recorded absolute (super_frame, data_frame) pairs, and those are free-running
+counters: writing a pair back at a later boundary shifts the labelling by
+that pair minus whatever the counters naturally held THEN, which is not the
+same alignment.  So a sweep that visited the right phase could never go back
+to it.  The phase is now a relative shift in data frames, with an accumulated
+position that names the candidate.  Two things had also been starving the
+sweep outright: an equalizer restore reset its counter, and restores fire as
+often as every 375 ms, so on round1 it never once passed step 1 of 112 in five
+minutes; and the measurement window straddled the superframe boundary where a
+candidate takes effect, so every candidate was scored partly on its
+predecessor.
+
+### What it is worth
+
+Replaying round1 offline, symbols on the lattice go from 35.8% of the call to
+**60.1%**, and the permanent-collapse mode is gone.  The old receiver decoded
+perfectly for 68 s, hit the first burst of three slips, and was still white
+145 s later with the wire provably quiet throughout; it now recovers within
+20 s and runs 73 s clean.  Payload reaches the PTY in bursts for the first
+time on this recording: searching the raw bit dump for the soak pattern finds
+14 `U0` hits after the peer's DTE starts, five of the gaps between them exact
+multiples of the 90-bit line -- real lines, not coincidence.
+
+### What is still open, stated precisely
+
+Frame-phase lock still does not hold.  With clean symbols the sweep locks at
+100% ones and loses it about half a second later, and this is now the whole
+of the remaining fault: 60% of the call has an open eye and only a few
+percent of it is framed correctly.
+
+Two leads, in order.  **The release rule cannot be right on a line carrying
+data.**  It releases a lock at under 70% ones, and the soak pattern `U%07d\n`
+through V.14 framing is mostly digits -- `'0'` is 0x30, which LSB-first
+between a zero start bit and a one stop bit is three ones in ten.  A
+correctly decoded pattern therefore reads 30-40% ones and is indistinguishable
+from noise by that measure, so the receiver throws away good locks as soon as
+the peer says anything.  The V.14 start/stop ratio is there for exactly this
+and reads about 2x on those windows against a 3x lock gate -- close, and worth
+measuring properly rather than tuning blind.  **And the sweep is slower than
+it looks**: a step is applied at a superframe boundary, which is p = 16 data
+frames, so 640 ms, not the 125 ms the short window suggests.  112 candidates
+is over a minute whatever the window is.  Applying a shift at the data-frame
+boundary instead would cut that by sixteen.
