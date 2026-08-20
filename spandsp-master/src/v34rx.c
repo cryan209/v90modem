@@ -10290,7 +10290,10 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     /* Reach back as far as the ring holds: the E detector's lag varies a
        lot between calls (measured from 0.3 s to well over 2.5 s), and a
        search that stops short of it simply never contains B1. */
-    enum { SEARCH_BACK = 30000, SEARCH_FORWARD = 4800 };
+    /* 3.4 s of history was not enough either: the E detector's lag varies a
+       lot per call, and one measured at 79471 samples with B1 long rotated
+       out of the ring by the time the search ran. */
+    enum { SEARCH_BACK = 120000, SEARCH_FORWARD = 4800 };
     int64_t search_start;
     int64_t search_end;
     complexf_t best_coeff[V34_V90_T3_FSE_TAPS];

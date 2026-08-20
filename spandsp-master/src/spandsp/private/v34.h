@@ -54,7 +54,7 @@
 /* Big enough to hold the whole E->B1 era plus the lag of the CP-bitstream E
    detector that anchors the search (about 3.4 s at 9.6 kHz).  B1 is only
    90 ms long and had been passing before the capture even started. */
-#define V34_V90_T3_RAW_SIZE                 32768
+#define V34_V90_T3_RAW_SIZE                 131072
 #define V34_V90_T3_RAW_MASK                 (V34_V90_T3_RAW_SIZE - 1)
 #define V34_V90_T3_B1_MAX_SYMBOLS           256
 #define V34_V90_T3_GAIN_TRIALS              33
