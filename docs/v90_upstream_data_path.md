@@ -727,3 +727,40 @@ attempts were genuine retrains, but the later ones never had media at all.
 So: **restart the server process between batches**, and treat any attempt
 after the first PJ_ETOOMANY as carrying no information about the modem.
 `tools/soak/soak_verdict.sh` now says so at the top of its report.
+
+### Where the upstream stands after the live runs (2026-08-21)
+
+Downstream is done: three consecutive five-minute calls delivered 99.4%,
+100% (zero lines missing of 76288) and 99.6% of their pattern lines.  The
+large downstream losses seen earlier the same day were a soak harness fault
+of mine, not the modem -- the pumps were driving 5000 B/s into a link that
+carries 5200 char/s, and 2000 B/s into a 9600 bps upstream that carries 960.
+Match the rates to the link before reading anything into an integrity figure.
+
+The upstream now gets further than it ever has and still does not carry
+payload, and the reason is specific.  On a live call replayed offline:
+
+  * acquisition is right -- B1 fits at 100%, and the out-of-sample check
+    measures 0.002 against the template's own power;
+  * the symbols are clean for 36% of the call;
+  * but through those clean blocks the descrambled stream reads **49% ones,
+    peaking at 53**, so the frame phase is wrong nearly all the time, and the
+    two moments it does lock (100% and 90% ones) are brief.
+
+The link between those facts is the slip.  This rig's stream really does gain
+or lose a whole 8 kHz sample about every four seconds -- 81 of them replaying
+the recording, against 70 counted live, so it is in the audio and not an
+artefact of the receiver.  Correcting one keeps the symbol timing but can add
+or drop a symbol across the event, which moves the shell decoder's position
+within the data frame; and a full sweep of the 112 (superframe, data-frame)
+candidates takes about forty-five seconds.  A phase fault arriving every four
+seconds cannot be repaired by a search that takes forty-five.
+
+So the next piece of work is not another dialling batch.  Either the slips
+stop -- they are the peer's resampler tracking a few parts per million, and
+the tower d-modem's own `DM_RESAMPLER` is the place to look -- or the frame
+phase has to survive a symbol being inserted or dropped, which means carrying
+the phase through a slip correction rather than rediscovering it afterwards.
+The recording that shows all of this is
+`artifacts/dmodem-soak-0821-rounds/round1/tap/live-rx.g711`, and
+`v90_upstream_replay` reproduces it in under two minutes.
