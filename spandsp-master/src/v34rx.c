@@ -10954,6 +10954,80 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
         s->received_event = V34_EVENT_TRAINING_FAILED;
         return;
     }
+    /* Validate the winner OUT OF SAMPLE before committing to it.  The fit is
+       21 complex taps -- 42 free parameters -- least-squares onto 128
+       symbols, which is only six real equations per parameter, so a quiet or
+       otherwise unremarkable stretch of line can be fitted to 98.8% and mean
+       nothing.  Measured live: a call acquired at 0.32 s with fit=98.8%, B1
+       "ended" after one frame with a frame error of 9.1, and the resulting
+       filter put the data symbols at a mean power of 721 against the
+       template's 6.6 -- ten times the amplitude, on no lattice at all, for
+       the whole call.  An in-sample score cannot see that; the symbols
+       immediately after B1 can.  They are ordinary data, so they must land
+       near the lattice and carry about the template's power if this filter
+       is the right one. */
+    {
+        int64_t after = best_first + 3*s->v90_t3_b1_symbols;
+        int pre = V34_V90_T3_FSE_TAPS/2;
+        double dist = 0.0;
+        double power = 0.0;
+        int counted = 0;
+
+        for (int k = 0;  k < V34_V90_T3_VALIDATE_SYMBOLS;  k++)
+        {
+            int64_t at = after + 3*k;
+            complexf_t y = {0.0f, 0.0f};
+            float t_re;
+            float t_im;
+
+            if (at - pre + V34_V90_T3_FSE_TAPS > s->v90_t3_raw_count)
+                break;
+            /*endif*/
+            for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+            {
+                complexf_t x = v90_t3_raw_get(s, at - pre + tap);
+                complexf_t z;
+
+                if (best_conjugate)
+                    x.im = -x.im;
+                /*endif*/
+                z = complex_mulf(&best_coeff[tap], &x);
+                y = complex_addf(&y, &z);
+            }
+            /*endfor*/
+            t_re = 2.0f*floorf(y.re/2.0f) + 1.0f;
+            t_im = 2.0f*floorf(y.im/2.0f) + 1.0f;
+            dist += (t_re - y.re)*(t_re - y.re) + (t_im - y.im)*(t_im - y.im);
+            power += y.re*y.re + y.im*y.im;
+            counted++;
+        }
+        /*endfor*/
+        if (counted >= V34_V90_T3_VALIDATE_SYMBOLS/2)
+        {
+            double mean_dist = dist/counted;
+            double mean_power = power/counted;
+
+            span_log(s->logging, SPAN_LOG_WARNING,
+                     "Rx - V.90 T/3 B1 out-of-sample check: lattice distance "
+                     "%.3f, symbol power %.1f over %d symbols\n",
+                     mean_dist, mean_power, counted);
+            if (mean_dist > V34_V90_T3_VALIDATE_ERR
+                ||
+                mean_power > V34_V90_T3_VALIDATE_POWER)
+            {
+                span_log(s->logging, SPAN_LOG_WARNING,
+                         "Rx - V.90 T/3 B1 rejected: an in-sample fit of "
+                         "%.1f%% that does not generalise\n",
+                         100.0f*best_match);
+                /* Not a failure of the call -- just of this window.  Let the
+                   search run again when more of the wire has arrived. */
+                s->v90_t3_acquisition_attempted = false;
+                return;
+            }
+            /*endif*/
+        }
+        /*endif*/
+    }
     memcpy(s->v90_t3_fse, best_coeff, sizeof(best_coeff));
     s->v90_t3_training_match = best_match;
     s->v90_t3_fse_conjugate = best_conjugate;

@@ -75,6 +75,15 @@
    symbols above the tracking threshold before the snapshot is restored --
    about a second at 3200 baud, long enough not to fire on a burst. */
 #define V34_V90_T3_FSE_KEEP_ERR             0.20f
+/*! Symbols after B1 used to check that an acquisition generalises. */
+#define V34_V90_T3_VALIDATE_SYMBOLS         256
+
+/*! The out-of-sample symbols have to land at least this close to the
+    lattice, and carry no more than this much power, for the fit to be
+    believed.  A good acquisition measures 0.002 and about 6.6. */
+#define V34_V90_T3_VALIDATE_ERR             0.40f
+#define V34_V90_T3_VALIDATE_POWER           60.0f
+
 /*! Symbols off the constellation before a slip search runs.  A slip is a
     step, not a drift, so this only has to be long enough not to fire on a
     noise burst. */
