@@ -445,3 +445,34 @@ assumed, and the second is not settled:
 Getting that number needs a call that both locks and keeps its symbols
 while the peer transmits, which is the same thing that is missing for
 everything else here.
+
+
+## The upstream carrier, and why ME_V34_DATA_CARRIER_TRACK=0 makes it worse
+
+The symbols leaving the constellation is a CARRIER problem, and the
+evidence is the difference the decision-directed carrier tracker makes:
+
+    tracking off   symbols go from 0.09 to 0.66 within seconds and stay
+                   there -- four minutes of a five-minute call, never
+                   recovering, with restoring the equalizer 142 times
+                   changing nothing
+    tracking on    the same collapse happens, and then it comes BACK:
+                   0.66 at t=4 s, 0.415 at t=34, 0.103 at t=42, and it
+                   goes on acquiring and losing every few tens of seconds
+                   for the rest of the call
+
+Nothing else explains that pair.  A gain error cannot: a 33-point sweep
+from 0.40x to 2.00x found no scale that puts the symbols back.  A stale
+equalizer cannot: restoring a known-good one does not help.  A rotating
+constellation can -- it is uniformly off the lattice, which is exactly
+the 2/3 figure, and only a phase tracker can undo it.
+
+So the receiver is pulling the carrier in and losing it again, on a cycle
+of tens of seconds.  That is a loop that acquires but cannot hold, and it
+is the last thing standing between this path and sustained upstream.
+
+**`ME_V34_DATA_CARRIER_TRACK=0` should not be used on this path.**  It
+was set during an earlier investigation to rule the tracker out as a
+suspect, and it does rule it out -- but it also removes the only thing
+that ever recovers the constellation.  The two calls that delivered real
+payload (1698 lines, and 1329 of 1330 in sequence) both ran with it on.
