@@ -874,6 +874,9 @@ typedef struct
     int v90_t3_sf_force;
     int v90_t3_df_force;
     int v90_t3_relocks;
+    /*! \brief Whether this call has shown idle, so the ones metric means
+        something and the frame-phase sweep is safe to run. */
+    bool v90_t3_idle_seen;
     bool v90_t3_sf_locked;
     int v90_t3_sf_tries;
     /*! \brief Where B1 starts in the raw ring, and the running per-frame

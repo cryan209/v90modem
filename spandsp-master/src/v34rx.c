@@ -655,6 +655,18 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                          ones_pct, s->v90_t3_relocks);
             }
             /*endif*/
+            /* Only sweep where the metric can tell one phase from another.
+               The ones fraction only discriminates while the peer's line has
+               idle in it; on a busy line every phase reads the same, so the
+               sweep steps for ever and destroys a decode that may already be
+               correct.  That is not speculation -- with the sweep free to
+               run, the offline T/3 regression, whose phase is right by
+               construction and whose traffic is pseudo-random, fails.  So
+               require evidence that idle exists on this call before touching
+               anything. */
+            if (ones_pct >= 60)
+                s->v90_t3_idle_seen = true;
+            /*endif*/
             if (!s->v90_t3_sf_locked)
             {
                 if (ones_pct >= 75
@@ -669,7 +681,9 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                              ones_pct, v14_pct, v14_ratio/10,
                              s->v90_t3_sf_tries);
                 }
-                else if (s->v90_t3_sf_tries
+                else if (s->v90_t3_idle_seen
+                         &&
+                         s->v90_t3_sf_tries
                              < V34_MAX_SUPER_FRAME_PHASES*s->parms.p
                          &&
                          s->v90_t3_sf_force < 0
@@ -10730,6 +10744,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_sf_force = -1;
     s->v90_t3_df_force = 0;
     s->v90_t3_sf_locked = false;
+    s->v90_t3_idle_seen = false;
     s->v90_t3_relocks = 0;
     s->v90_t3_sym_err_ema = 0.0f;
     s->v90_t3_v14_hist = 0;
