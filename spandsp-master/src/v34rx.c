@@ -548,11 +548,11 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
 
             span_log(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 upstream DATA bits: tap=%d ones=%d%%, "
-                     "tap=%d ones=%d%% (over %d bits)\n",
+                     "tap=%d ones=%d%% (over %d bits, timing slips %d)\n",
                      s->scrambler_tap, ones_pct,
                      alt_tap,
                      100*s->v90_t3_alt_ones/s->v90_t3_bit_count,
-                     s->v90_t3_bit_count);
+                     s->v90_t3_bit_count, s->v90_t3_timing_slips);
             /* An idle DTE sends marks, so a correctly framed stream reads
                near 100% ones.  A superframe phase off by k reads about 57%:
                one data frame in j lands on the right index and the other six
@@ -10093,6 +10093,65 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             }
             /*endif*/
         }
+        /* Timing.  Until now this branch advanced by exactly three samples
+           for the life of the call, with nothing to correct it -- so a few
+           ppm between the peer's symbol clock and our 8 kHz bearer, or a
+           single sample inserted or dropped anywhere in the RTP path (a
+           third of a symbol, instantly), accumulated without limit.
+           Measured: the idle stream decodes at 100% ones and then goes to
+           noise about fifteen seconds in, while the peer's DTE is still
+           idle.  An early-late gate closes that: the FSE output is taken a
+           third of a symbol either side of the decision instant, and the
+           side with more energy is the side the true instant has moved
+           towards.  ME_V90_UPSTREAM_TIMING=0 restores the fixed step. */
+        if (s->v90_t3_timing_enabled)
+        {
+            complexf_t early = {0.0f, 0.0f};
+            complexf_t late = {0.0f, 0.0f};
+
+            for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+            {
+                complexf_t xe = v90_t3_raw_get(
+                    s, s->v90_t3_next_symbol - 1 - pre + tap);
+                complexf_t xl = v90_t3_raw_get(
+                    s, s->v90_t3_next_symbol + 1 - pre + tap);
+                complexf_t ze;
+                complexf_t zl;
+
+                if (s->v90_t3_fse_conjugate)
+                {
+                    xe.im = -xe.im;
+                    xl.im = -xl.im;
+                }
+                /*endif*/
+                ze = complex_mulf(&s->v90_t3_fse[tap], &xe);
+                zl = complex_mulf(&s->v90_t3_fse[tap], &xl);
+                early = complex_addf(&early, &ze);
+                late = complex_addf(&late, &zl);
+            }
+            {
+                float e_pow = early.re*early.re + early.im*early.im;
+                float l_pow = late.re*late.re + late.im*late.im;
+                float y_pow = y.re*y.re + y.im*y.im + 1e-6f;
+
+                s->v90_t3_timing_err += (l_pow - e_pow)/y_pow;
+                if (s->v90_t3_timing_err > V34_V90_T3_TIMING_SLIP)
+                {
+                    /* The instant has moved later: take one more sample. */
+                    s->v90_t3_next_symbol++;
+                    s->v90_t3_timing_err = 0.0f;
+                    s->v90_t3_timing_slips++;
+                }
+                else if (s->v90_t3_timing_err < -V34_V90_T3_TIMING_SLIP)
+                {
+                    s->v90_t3_next_symbol--;
+                    s->v90_t3_timing_err = 0.0f;
+                    s->v90_t3_timing_slips--;
+                }
+                /*endif*/
+            }
+        }
+        /*endif*/
         s->v90_t3_next_symbol += 3;
     }
 }
@@ -10391,6 +10450,13 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
            meaningless decisions cannot help and might hurt.  Enable with
            ME_V90_UPSTREAM_DD_MU=0.05 once that is fixed. */
         s->v90_t3_dd_mu = value ? (float) atof(value) : 0.02f;
+    }
+    {
+        const char *value = getenv("ME_V90_UPSTREAM_TIMING");
+
+        s->v90_t3_timing_enabled = (value == NULL || atoi(value) != 0);
+        s->v90_t3_timing_err = 0.0f;
+        s->v90_t3_timing_slips = 0;
     }
     /* The supervised filter already maps onto the exact Q9.7 template grid. */
     s->data_symbol_scale = 1.0f;
