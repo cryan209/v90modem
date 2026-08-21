@@ -5536,6 +5536,23 @@ static int phase4_cma_converged(v34_rx_state_t *s, const complexf_t *z)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* How many of the 127 T/2 equalizer taps blind adaptation is allowed to
+   touch, centred on the main tap.  0 (the default) means all of them. */
+static int v34_eq_adapt_span(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *value = getenv("ME_V34_EQ_ADAPT_SPAN");
+
+        cache = (value  &&  atoi(value) > 0)  ?  atoi(value)  :  0;
+    }
+    /*endif*/
+    return cache;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
 {
     int i;
@@ -5614,15 +5631,33 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
         gz.im = 0.1f * cma_delta * error * z->im / norm;
     }
 
-    p = s->eq_step - 1;
-    for (i = 0;  i < V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN;  i++)
     {
-        p = (p - 1) & V34_EQUALIZER_MASK;
-        z1 = complex_conjf(&s->eq_buf[p]);
-        z1 = complex_mulf(&gz, &z1);
-        s->eq_coeff[i] = complex_addf(&s->eq_coeff[i], &z1);
+        int span = v34_eq_adapt_span();
+        int lo = 0;
+        int hi = V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN;
+
+        if (span > 0 && span < hi)
+        {
+            lo = V34_EQUALIZER_PRE_LEN - span/2;
+            hi = lo + span;
+            if (lo < 0)
+                lo = 0;
+            /*endif*/
+        }
+        /*endif*/
+        p = s->eq_step - 1;
+        for (i = 0;  i < V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN;  i++)
+        {
+            p = (p - 1) & V34_EQUALIZER_MASK;
+            if (i < lo  ||  i >= hi)
+                continue;
+            /*endif*/
+            z1 = complex_conjf(&s->eq_buf[p]);
+            z1 = complex_mulf(&gz, &z1);
+            s->eq_coeff[i] = complex_addf(&s->eq_coeff[i], &z1);
+        }
+        /*endfor*/
     }
-    /*endfor*/
 }
 /*- End of function --------------------------------------------------------*/
 
