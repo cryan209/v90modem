@@ -2578,6 +2578,19 @@ static void pack_output_bitstream(v34_rx_state_t *s)
         if (kk < 32  &&  s->r0 >= (int32_t) (1u << kk))
             s->v90_t3_shell_bad++;
         /*endif*/
+        /* The same check is the only honest read on a plain V.34 data mode,
+           where none of the V.90 upstream lock machinery runs: it owes nothing
+           to the content, so it separates "the peer is sending nothing we
+           recognise" from "we are grouping its symbols wrongly".  A correctly
+           grouped stream reads 0%. */
+        if (!s->v90_mode  &&  (s->v90_t3_shell_frames % 512) == 0)
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - DATA: shell index over k=%d bits in %d of %d frames (%d%%)\n",
+                     kk, s->v90_t3_shell_bad, s->v90_t3_shell_frames,
+                     100*s->v90_t3_shell_bad/s->v90_t3_shell_frames);
+        }
+        /*endif*/
         /* k is always < 32, so we always put the entire k bits into a single word */
         bitstream_put(&s->bs, &t, s->r0, kk);
         /* We can rely on this calculation always producing a value for chunk with no
@@ -10234,6 +10247,39 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 (int16_t)(transformed_re * 128.0f * s->data_symbol_scale);
             s->mapping_frame_buf[s->mapping_frame_count++] =
                 (int16_t)(transformed_im * 128.0f * s->data_symbol_scale);
+
+            /* Plain V.34 runs none of the V.90 upstream lock machinery, so it
+               had no read at all on its own data mode.  Distance to the grid
+               says whether the waveform arrives decodable -- 9.x puts every
+               constellation point on odd integers, so a receiver that is
+               tracking reads a small residual and one producing white output
+               reads about two thirds.  Read it against the shell-index check
+               in pack_output_bitstream(): grid small + shell 0% is a working
+               data mode, grid small + shell high is correct symbols grouped
+               wrongly, and grid large is a fault before the mapper. */
+            if (!s->v90_mode)
+            {
+                int who = s->calling_party ? 1 : 0;
+                static double err_sum[2];
+                static int err_count[2];
+                float g_re = transformed_re*s->data_symbol_scale;
+                float g_im = transformed_im*s->data_symbol_scale;
+                float t_re = 2.0f*floorf(g_re/2.0f) + 1.0f;
+                float t_im = 2.0f*floorf(g_im/2.0f) + 1.0f;
+
+                err_sum[who] += (g_re - t_re)*(g_re - t_re)
+                              + (g_im - t_im)*(g_im - t_im);
+                if (++err_count[who] >= 4096)
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - DATA: distance to grid %.4f per symbol over %d symbols\n",
+                             err_sum[who]/err_count[who], err_count[who]);
+                    err_sum[who] = 0.0;
+                    err_count[who] = 0;
+                }
+                /*endif*/
+            }
+            /*endif*/
 
             /* How far the data-mode symbols actually land from the grid.
                V.34 9.x places every constellation point on odd integers, so

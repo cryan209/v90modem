@@ -7628,10 +7628,25 @@ int me_get_data(uint8_t *buf, int max_len)
 /* State query                                                         */
 /* ------------------------------------------------------------------ */
 
+/* ME_DATA_HOLD=1 keeps a call up after a V.42 failure.  The physical modem is
+   still in data mode at that point, and tearing down 750 ms into T400 destroys
+   the evidence needed to tell why detection failed. */
+static bool me_data_hold_locked(void)
+{
+    static int hold = -1;
+
+    if (hold < 0) {
+        const char *v = getenv("ME_DATA_HOLD");
+
+        hold = (v && *v && *v != '0');
+    }
+    return hold != 0;
+}
+
 me_state_t me_get_state(void)
 {
     pthread_mutex_lock(&g_state_mtx);
-    if (g_data_link_failed && g_state == ME_DATA) {
+    if (g_data_link_failed && g_state == ME_DATA && !me_data_hold_locked()) {
         g_data_link_failed = false;
         ME_LOG("[ME] V.42 failure requested call teardown\n");
         trace_phase("V42 link failure -> HANGUP");

@@ -3,6 +3,7 @@
  * datapump bit stream. See data_stack.h for the layer contract.
  */
 
+#include <stdio.h>
 #include "data_stack.h"
 
 #include <spandsp.h>
@@ -239,8 +240,34 @@ int ds_tx_get_bit(data_stack_t *s)
     return bit;
 }
 
+/* DS_RX_BIT_DUMP names a file to receive the data-mode receive bit stream, one
+   ASCII '0'/'1' per bit, before any framing interprets it.  V.42's detection
+   phase is a bit pattern (V.42 Table 1: ODP, then 8-16 ones), so when
+   detection reports an unsupported peer this is the only way to tell a peer
+   that never sent ODP from a receiver that mangled it. */
+static FILE *ds_rx_bit_dump(void)
+{
+    static FILE *f;
+    static int tried;
+
+    if (!tried) {
+        const char *path = getenv("DS_RX_BIT_DUMP");
+
+        tried = 1;
+        if (path && *path)
+            f = fopen(path, "w");
+    }
+    return f;
+}
+
 void ds_rx_put_bit(data_stack_t *s, int bit)
 {
+    FILE *dump = ds_rx_bit_dump();
+
+    if (dump) {
+        fputc((bit == 1) ? '1' : ((bit == 0) ? '0' : 'x'), dump);
+        fflush(dump);
+    }
     if (bit != 0 && bit != 1) {
         s->rx_invalid_bits++;
         s->rx_hunting = 1;
