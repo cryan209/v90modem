@@ -84,5 +84,52 @@ outside this repo -- **d-modem has no inbound call path at all**.  Its pjsua
 setup registers `on_call_state` and calls `pjsua_call_make_call`; there is no
 `on_incoming_call` callback and no `pjsua_call_answer`, so an INVITE to 6000
 is never delivered to the DSP (`ATS0=1` is accepted and nothing rings).
-Adding an accept-and-answer path to `/src/d-modem.c` on the rig is the next
-step for this goal.
+So the rig was given one, and it works -- and the other direction turns out to
+be blocked in the peer as well.
+
+## The rig now takes inbound calls, and it does not help
+
+`/src/d-modem.c` on tower (backups `d-modem.c.bak-pre-inbound`,
+`d-modem.bak-pre-inbound`) now has:
+
+* `on_incoming_call`, answering with 200.  **Listen mode is keyed on an empty
+  `argv[1]`**, which is exactly right: slmodemd's `socket_start()` forks
+  d-modem with `m->dial_string`, which ATD fills in and ATA leaves empty.  In
+  listen mode the account registers (`register_on_acc_add`) so the PBX can
+  route to it, and no outbound call is placed.  Sample flow only starts when
+  the media is up, so slmodemd's answer datapump stays stalled in its read
+  until the call actually connects.
+* `DM_TX_GAIN` and `DM_RX_GAIN`, linear gains on the DSP's output and on what
+  reaches it.  `DM_RS_HEADROOM` cannot serve the second purpose -- it is
+  capped at 1.0 because it is folded into the resampler kernel to stop the
+  loop model clipping.  Both default to 1.0, and the outbound path is
+  otherwise untouched: re-verified after the patch, the peer still dials,
+  completes V.8 and reaches the same call-role recovery.
+
+`tools/soak/v34_originate_call.sh` drives it (`ATA`, wait for the peer's
+REGISTER, then dial, retrying because the PBX does not always route to a
+freshly-registered 6000 -- some attempts are answered before they reach the
+peer, whose log then records no INVITE at all).
+
+**The peer answers the call and then never leaves `V8_ANS_SEND_ANSAM`.**  We
+hear its `ANSam/`, send CM eleven times, and time out waiting for JM.  Its V.8
+answer path does not respond to CM.  Level is not the cause and was measured
+out: `DM_TX_GAIN=4` (its ANSam measured -35 dBm0 at our end, about 12 dB below
+its own calling-mode V.21), `DM_RS_HEADROOM=1.0` and `DM_RX_GAIN=6` (+15.6 dB
+into its DSP) each changed nothing.  Nor is it the `AT+MS` configuration: V.34
+only, and V.92 by default after `AT+MS=11,1,300,33600` is rejected, behave
+identically.
+
+So both directions are dead in the same peer, each in a role its firmware
+never exercises:
+
+| Peer's role | Blocked at |
+|---|---|
+| SIP caller (V.8 caller, V.34 **call** modem) | `TX_PHASE2_CALL` INFO0 recovery, above |
+| SIP answerer (V.8 **answerer**, V.34 answer modem) | `V8_ANS_SEND_ANSAM`; never acts on CM |
+
+The one configuration this peer completes is the one V.90 puts it in: SIP
+caller, so V.8 caller, and V.34 **answer** modem because §9.2.2 hands the
+analogue modem the answer modem's timetable.  Plain V.34 cannot reproduce that
+pairing -- V.34 ties the role to the call direction -- so V.34-only to data
+against this peer needs a fix in its DSP, or a different peer.

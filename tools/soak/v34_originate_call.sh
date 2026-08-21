@@ -19,10 +19,17 @@ PTY=${PTY:-/tmp/v90modem}
 echo "CONTROL: bouncing rig ($SLMODEMD, AT+MS=$MS, auto-answer)"
 ssh -o BatchMode=yes "$TOWER" "docker restart d-modem" >/dev/null 2>&1
 sleep 8
-ssh -o BatchMode=yes "$TOWER" "docker exec -d -e SIP_LOGIN=6000:6000@asterisk.net.cryan.nz -e DM_RESAMPLER=sinc -e DM_RS_HEADROOM=0.25 d-modem sh -c '$SLMODEMD -d9 -e /src/d-modem > /tmp/slm.log 2>&1'" 2>/dev/null
+ssh -o BatchMode=yes "$TOWER" "docker exec -d -e SIP_LOGIN=6000:6000@asterisk.net.cryan.nz -e DM_RESAMPLER=sinc -e DM_RS_HEADROOM=${DM_RS_HEADROOM:-0.25} -e DM_TX_GAIN=${DM_TX_GAIN:-4.0} -e DM_RX_GAIN=${DM_RX_GAIN:-1.0} d-modem sh -c '$SLMODEMD -d9 -e /src/d-modem > /tmp/slm.log 2>&1'" 2>/dev/null
 sleep 12
 
-# Arm the peer to answer: V.34 only, auto-answer on the first ring.
+# Arm the peer to answer: V.34 only, then ATA.
+#
+# ATA is what puts slmodemd off-hook in answer mode, and socket_start() forks
+# d-modem with m->dial_string as argv[1] -- empty after ATA, which the patched
+# d-modem reads as "register and answer the next INVITE".  Sample flow does
+# not start until the media is up, so the answer datapump stays stalled in its
+# read until we dial.  slmodemd's own signal-detect timeout is 12 s, so the
+# dial has to follow within a few seconds.
 (
   printf 'AT\r';   sleep 2
   printf 'ATZ\r';  sleep 2
@@ -30,16 +37,52 @@ sleep 12
   printf 'ATE1V1Q0\r'; sleep 1
   printf 'AT\\N0\r'; sleep 1
   printf 'AT+MS=%s\r' "$MS"; sleep 2
-  printf 'ATS0=1\r'; sleep 2
+  printf 'ATA\r'
   sleep "$HOLD"
 ) | ssh -o BatchMode=yes "$TOWER" docker exec -i d-modem socat /dev/ttySL0,raw,echo=0,b115200 - >"$SERIAL_OUT" 2>&1 &
 armpid=$!
-sleep 12
+# Wait for the peer to actually be registered before dialling: ATA has to
+# fork d-modem, start pjsua and complete a REGISTER first, and dialling ahead
+# of that gets the call routed somewhere else entirely (V.8 then fails against
+# whatever answered).
+for i in $(seq 1 20); do
+    sleep 1
+    if ssh -o BatchMode=yes "$TOWER" \
+        "docker exec d-modem sh -c 'grep -ac \"registration success\" /tmp/slm.log'" \
+        2>/dev/null | grep -qv '^0$'; then
+        echo "CONTROL: peer registered after ${i}s"
+        break
+    fi
+done
 
 off=$(stat -f %z "$SERVERLOG" 2>/dev/null); off=${off:-0}
-python3 "$(dirname "$0")/../pty_dial.py" 6000 --pty "$PTY" --wait "$HOLD" \
-    >"${SERIAL_OUT%.out}.local.out" 2>&1 &
-dialpid=$!
+
+# The PBX does not always route to a freshly-registered 6000 -- some attempts
+# are answered before they reach the peer at all (its log records no INVITE).
+# Retry until the peer actually sees the call.
+dialpid=
+for attempt in 1 2 3; do
+    python3 "$(dirname "$0")/../pty_dial.py" 6000 --pty "$PTY" --wait "$HOLD" \
+        >"${SERIAL_OUT%.out}.local.out" 2>&1 &
+    dialpid=$!
+    got=no
+    for i in $(seq 1 8); do
+        sleep 1
+        if ssh -o BatchMode=yes "$TOWER" \
+            "docker exec d-modem sh -c 'grep -ac \"Incoming call\" /tmp/slm.log'" \
+            2>/dev/null | grep -qv '^0$'; then
+            got=yes; break
+        fi
+    done
+    if [ "$got" = yes ]; then
+        echo "CONTROL: peer took the call on dial attempt $attempt"
+        break
+    fi
+    echo "CONTROL: dial attempt $attempt never reached the peer; retrying"
+    kill "$dialpid" 2>/dev/null || true
+    wait "$dialpid" 2>/dev/null || true
+    sleep 3
+done
 
 outcome=none
 for tick in $(seq 1 $(( HOLD / 5 )) ); do
