@@ -5538,6 +5538,26 @@ static int phase4_cma_converged(v34_rx_state_t *s, const complexf_t *z)
 
 /* How many of the 127 T/2 equalizer taps blind adaptation is allowed to
    touch, centred on the main tap.  0 (the default) means all of them. */
+/* Leakage applied to the blind CMA update: each adapted tap is pulled
+   towards zero by this fraction per update, which caps the misadjustment
+   noise a 127-tap filter accumulates on a near-delta channel without
+   having to choose a span per symbol rate.  0 (the default) disables it. */
+static float v34_eq_leak(void)
+{
+    static float cache = -1.0f;
+
+    if (cache < 0.0f)
+    {
+        const char *value = getenv("ME_V34_EQ_LEAK");
+
+        cache = (value  &&  strtof(value, NULL) > 0.0f)
+              ?  strtof(value, NULL)  :  0.0f;
+    }
+    /*endif*/
+    return cache;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int v34_eq_adapt_span(void)
 {
     static int cache = -1;
@@ -5645,6 +5665,8 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
             /*endif*/
         }
         /*endif*/
+        float keep = 1.0f - v34_eq_leak();
+
         p = s->eq_step - 1;
         for (i = 0;  i < V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN;  i++)
         {
@@ -5654,7 +5676,8 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
             /*endif*/
             z1 = complex_conjf(&s->eq_buf[p]);
             z1 = complex_mulf(&gz, &z1);
-            s->eq_coeff[i] = complex_addf(&s->eq_coeff[i], &z1);
+            s->eq_coeff[i].re = s->eq_coeff[i].re*keep + z1.re;
+            s->eq_coeff[i].im = s->eq_coeff[i].im*keep + z1.im;
         }
         /*endfor*/
     }
