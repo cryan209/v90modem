@@ -5863,19 +5863,26 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
        Spec allows "up to 500 ms" after receiving J, but in the field we can
        miss/late-detect J at this boundary. Use a larger hold-off before
        fallback to avoid transitioning too early. */
-    static const int j_wait_max_bauds[6] =
-    {
-        (2400*1000 + 999)/1000,
-        (2743*1000 + 999)/1000,
-        (2800*1000 + 999)/1000,
-        (3000*1000 + 999)/1000,
-        (3200*1000 + 999)/1000,
-        (3429*1000 + 999)/1000
-    };
+    static const int baud_rate_hz[6] = {2400, 2743, 2800, 3000, 3200, 3429};
+    int j_wait_max_bauds[6];
     int bit;
     int trn_i;
     int trn_q;
     int trn_sym;
+    int j_wait_ms;
+    int i;
+
+    /* V.34 11.3.1.2.6: the answer modem stays in J until it detects the call
+       modem's Phase 3 transition.  This bound is only an interop escape for a
+       peer whose transition we never detect, so it must be longer than any
+       legitimate call-modem Phase 3 (S, S-bar, PP, 2048T of TRN and J) plus
+       the time that modem needs to detect our own J.  A 1000 ms bound was
+       shorter than that at every symbol rate, so it fired on the normal path
+       and raced the answerer into Phase 4 while the caller was still in TRN. */
+    j_wait_ms = getenv("V34_J_WAIT_MAX_MS") ? atoi(getenv("V34_J_WAIT_MAX_MS")) : 4000;
+    for (i = 0;  i < 6;  i++)
+        j_wait_max_bauds[i] = (baud_rate_hz[i]*j_wait_ms + 999)/1000;
+    /*endfor*/
     int j_pat_idx;
 
     /* See V.34/10.1.3.8 */
