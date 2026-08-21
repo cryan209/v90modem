@@ -183,8 +183,12 @@ test: $(TEST_TARGETS)
 	./v34_gardner_test
 	./v34_duplex_test 2400 9600 ulaw
 	./v34_duplex_test 2400 9600 alaw
+	./v34_duplex_test 2743 9600 ulaw
 	./v34_duplex_test 2743 9600 alaw
+	./v34_duplex_test 2800 9600 ulaw
+	./v34_duplex_test 2800 9600 alaw
 	./v34_duplex_test 3000 9600 alaw
+	./v34_duplex_test 3200 9600 ulaw
 	./v92_proc_eval_test
 	./v90_analogue_tx_test
 	./v90_analogue_rx_test
@@ -265,8 +269,12 @@ v34-matrix-test: v34_duplex_test
 v34-duplex-test: v34_duplex_test
 	./v34_duplex_test 2400 9600 ulaw
 	./v34_duplex_test 2400 9600 alaw
+	./v34_duplex_test 2743 9600 ulaw
 	./v34_duplex_test 2743 9600 alaw
+	./v34_duplex_test 2800 9600 ulaw
+	./v34_duplex_test 2800 9600 alaw
 	./v34_duplex_test 3000 9600 alaw
+	./v34_duplex_test 3200 9600 ulaw
 
 v34_duplex_test: $(V34_DUPLEX_TEST_OBJS) spandsp
 	$(CC) $(V34_DUPLEX_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)

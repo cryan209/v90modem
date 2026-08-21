@@ -1236,6 +1236,11 @@ typedef struct
     float phase4_cma_mag;
     int phase4_cma_bauds;
     int phase4_cma_settled;
+    /* T/2 eye selection; see process_primary_half_baud(). */
+    float eye_on_sum;
+    float eye_off_sum;
+    int eye_n;
+    int eye_flips;
     int shaper_t2_num;
     int shaper_t2_den;
     int shaper_t2_acc;

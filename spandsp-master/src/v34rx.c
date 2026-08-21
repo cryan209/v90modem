@@ -138,7 +138,9 @@ static void v34_dump_training_symbol(const char *env_name,
                                      float im,
                                      long rx_power,
                                      float tap_energy,
-                                     float main_tap)
+                                     float main_tap,
+                                     int eq_put_step,
+                                     int timing_corr)
 {
     FILE *f;
 
@@ -151,9 +153,9 @@ static void v34_dump_training_symbol(const char *env_name,
     if ((f = fopen(*path_cache, "a")) == NULL)
         return;
     /*endif*/
-    fprintf(f, "%s %d %.6f %.6f %ld %.6f %.6f\n",
+    fprintf(f, "%s %d %.6f %.6f %ld %.6f %.6f %d %d\n",
             calling_party  ?  "caller"  :  "answer", index, re, im, rx_power,
-            tap_energy, main_tap);
+            tap_energy, main_tap, eq_put_step, timing_corr);
     fclose(f);
 }
 
@@ -7438,7 +7440,9 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                          s->phase3_trn_bits,
                                          sym->re, sym->im,
                                          (long) power_meter_current(&s->power),
-                                         eq_e, eq_main);
+                                         eq_e, eq_main,
+                                         s->eq_put_step,
+                                         s->total_baud_timing_correction);
             }
             for (h = 0;  h < MP_HYPOTHESIS_COUNT;  h++)
             {
@@ -7752,6 +7756,25 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             s->stage = V34_RX_STAGE_PHASE4_TRN;
             s->duration = 0;
             s->scramble_reg = 0;
+            {
+                static int nudge = -1000000;
+
+                if (nudge == -1000000)
+                {
+                    const char *value = getenv("ME_V34_PHASE4_TIMING_NUDGE");
+
+                    nudge = value  ?  atoi(value)  :  0;
+                }
+                /*endif*/
+                if (nudge)
+                {
+                    s->eq_put_step += nudge;
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 4: sampling phase nudged by %d/%d sample\n",
+                             nudge, V34_RX_PULSESHAPER_COEFF_SETS);
+                }
+                /*endif*/
+            }
             phase4_j_detector_reset(s);
             phase4_trn_hyp_reset(s);
             if (s->calling_party)
@@ -8034,7 +8057,9 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                          s->phase4_trn_after_j,
                                          sym->re, sym->im,
                                          (long) power_meter_current(&s->power),
-                                         eq_e, eq_main);
+                                         eq_e, eq_main,
+                                         s->eq_put_step,
+                                         s->total_baud_timing_correction);
                 if (p4_bits_path == NULL)
                     p4_bits_path = getenv("V34_P4TRN_RX_DUMP")
                                  ?  getenv("V34_P4TRN_RX_DUMP")  :  "";
@@ -10415,19 +10440,97 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Which of the two T/2 outputs is the symbol instant.
+ *
+ * The band-edge timing detector recovers the symbol *rate* and pulls the
+ * sampling phase within a T/2 interval, but it cannot resolve which of the two
+ * T/2 outputs per symbol is the eye centre -- that ambiguity is settled purely
+ * by how many T/2 intervals have been generated since the receiver started,
+ * and a single +/-1 correction from the loop can insert or delete one and flip
+ * it for the rest of the call.  Nothing here ever checked.
+ *
+ * Measured over the harness at 9600 bit/s, sweeping a deliberate offset across
+ * a whole symbol: at 2400 baud the eye is at zero offset (normalised scatter
+ * 0.384) and one T/2 away is the worst point in the sweep (0.590), while at
+ * 3200 baud it is the other way round -- zero offset is the worst point of the
+ * whole sweep (0.595) and one T/2 away is the best (0.293).  So the receiver
+ * had been sampling 3200 baud Phase 4 at the eye crossing.  Which way a given
+ * call lands is a coin flip on sample counts, which is why the failures looked
+ * marginal and why every change reshuffled which rows passed.
+ *
+ * All the training signals V.34 uses here -- S, S-bar, PP, TRN and MP -- are
+ * constant modulus, so the eye centre is simply where the equalized output is
+ * largest.  Evaluate both phases during training and take the bigger, with a
+ * margin and a minimum observation so noise cannot flip it, and a cap on the
+ * number of flips so it cannot oscillate. */
+#define V34_EYE_OBSERVE_SYMBOLS         256
+#define V34_EYE_MARGIN                  1.10f
+#define V34_EYE_MAX_FLIPS               4
+
+static int v34_eye_select_enabled(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *value = getenv("ME_V34_EYE_SELECT");
+
+        cache = !(value  &&  strcmp(value, "off") == 0);
+    }
+    /*endif*/
+    return cache;
+}
+
 static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sample)
 {
     complexf_t eq_sample;
+    bool eye_check;
 
     /* Ordinary V.34 uses the historical T/2 front end.  The V.90 DATA-only
        T/3 branch calls process_primary_symbol() directly after its supervised
        B1 equalizer, so both paths share the mapper and protocol state. */
     s->eq_buf[s->eq_step] = *sample;
     s->eq_step = (s->eq_step + 1) & V34_EQUALIZER_MASK;
+    eye_check = (v34_rx_stage_is_primary_training(s->stage)
+                 &&  s->eye_flips < V34_EYE_MAX_FLIPS
+                 &&  v34_eye_select_enabled());
     if ((s->baud_half ^= 1))
+    {
+        if (eye_check)
+        {
+            complexf_t off = equalizer_get(s);
+
+            s->eye_off_sum += sqrtf(off.re*off.re + off.im*off.im);
+        }
+        /*endif*/
         return;
+    }
+    /*endif*/
     pri_symbol_sync(s);
     eq_sample = equalizer_get(s);
+    if (eye_check)
+    {
+        s->eye_on_sum += sqrtf(eq_sample.re*eq_sample.re + eq_sample.im*eq_sample.im);
+        if (++s->eye_n >= V34_EYE_OBSERVE_SYMBOLS)
+        {
+            if (s->eye_off_sum > V34_EYE_MARGIN*s->eye_on_sum)
+            {
+                s->eye_flips++;
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - T/2 eye is on the other phase (off %.1f vs on %.1f over %d symbols); "
+                         "moving the symbol instant (flip %d)\n",
+                         (double) s->eye_off_sum, (double) s->eye_on_sum,
+                         s->eye_n, s->eye_flips);
+                s->baud_half ^= 1;
+            }
+            /*endif*/
+            s->eye_on_sum = 0.0f;
+            s->eye_off_sum = 0.0f;
+            s->eye_n = 0;
+        }
+        /*endif*/
+    }
+    /*endif*/
     process_primary_symbol(s, &eq_sample);
 }
 /*- End of function --------------------------------------------------------*/

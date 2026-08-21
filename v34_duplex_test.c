@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include <spandsp.h>
 
@@ -84,6 +85,15 @@ static void put_bit(void *user_data, int bit)
 
 static int16_t g711_roundtrip(int16_t sample, bool alaw)
 {
+    /* V34_DUPLEX_LINEAR bypasses the codec entirely, so a defect can be
+       attributed to the bearer or exonerated from it.  Diagnostic only: the
+       point of this harness is that the two modems meet through G.711. */
+    static int linear = -1;
+
+    if (linear < 0)
+        linear = (getenv("V34_DUPLEX_LINEAR") != NULL);
+    if (linear)
+        return sample;
     return alaw ? alaw_to_linear(linear_to_alaw(sample))
                 : ulaw_to_linear(linear_to_ulaw(sample));
 }
@@ -177,6 +187,19 @@ static int run_case(int baud, int bps, bool alaw)
             if (answer_abs >= 32760) answer.clipped_samples++;
             answer_rx[i] = g711_roundtrip(call_tx[i], alaw);
             call_rx[i] = g711_roundtrip(answer_tx[i], alaw);
+        }
+        if (getenv("V34_DUPLEX_TXRMS")) {
+            double ca = 0.0, aa = 0.0;
+            int ci = 0, ai = 0;
+            for (int i = 0; i < BLOCK_SAMPLES; i++) {
+                ca += (double)call_tx[i]*call_tx[i];
+                aa += (double)answer_tx[i]*answer_tx[i];
+                if (abs(call_tx[i]) > ci) ci = abs(call_tx[i]);
+                if (abs(answer_tx[i]) > ai) ai = abs(answer_tx[i]);
+            }
+            fprintf(stderr, "[TXRMS] t=%.3f caller_rms=%.0f peak=%d answer_rms=%.0f peak=%d\n",
+                    block*0.020, sqrt(ca/BLOCK_SAMPLES), ci,
+                    sqrt(aa/BLOCK_SAMPLES), ai);
         }
         (void)v34_rx(answer_modem, answer_rx, BLOCK_SAMPLES);
         (void)v34_rx(call_modem, call_rx, BLOCK_SAMPLES);
