@@ -169,6 +169,7 @@ static const char *v34_tx_stage_to_str(int stage)
     case V34_TX_STAGE_SECOND_A: return "SECOND_A";
     case V34_TX_STAGE_L1: return "L1";
     case V34_TX_STAGE_L2: return "L2";
+    case V34_TX_STAGE_POST_L2_WAIT_TONE_B: return "POST_L2_WAIT_TONE_B";
     case V34_TX_STAGE_POST_L2_A: return "POST_L2_A";
     case V34_TX_STAGE_POST_L2_NOT_A: return "POST_L2_NOT_A";
     case V34_TX_STAGE_A_SILENCE: return "A_SILENCE";
@@ -640,6 +641,9 @@ static void v90_wait_rx_l2_init(v34_state_t *s, const char *reason);
 static void l1_l2_signal_init(v34_state_t *s);
 static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len);
 static void second_a_baud_init(v34_state_t *s);
+static void post_l2_wait_tone_b_init(v34_state_t *s);
+static void answer_resume_probe(v34_state_t *s, const char *reason);
+static int post_l2_tone_b_wait_bauds(v34_state_t *s);
 static void pre_info1_a_init(v34_state_t *s);
 static void second_b_baud_init(v34_state_t *s);
 static void v90_wait_tone_a_init(v34_state_t *s, bool preserve_tone_a_event);
@@ -3745,6 +3749,32 @@ static void initial_ab_not_ab_baud_init(v34_state_t *s)
                analogue modem (§9.2.2.1.1), which run the same timetable. */
             s->tx.current_getbaud = get_initial_fdx_a_not_a_baud;
             s->tx.stage = V34_TX_STAGE_INITIAL_A;
+            if (s->rx.stage == V34_RX_STAGE_INFO1C  &&  !s->tx.v90_mode
+                &&
+                s->tx.phase2_probe_sent)
+            {
+                /* 11.2.2.2.1 sends the answer modem back to 11.2.1.2.3, which
+                   waits for Tone B and then reverses Tone A.  A call modem
+                   that has already completed 11.2.1.1.3 does not raise Tone B
+                   again -- it has transmitted its Tone B reversal, gone
+                   silent, and is waiting for the second Tone A reversal and
+                   the L1/L2 probe of 11.2.1.2.5.  Measured against a
+                   SmartLink call modem: after acknowledging the repeated
+                   INFO0c the peer sat in its receive-probe state, transmitting
+                   nothing, while we held Tone A for a Tone B reversal that was
+                   never coming, until it retrained and cleared the call.  The
+                   same peer's own logs show this recovery is meant to be
+                   survivable -- in the answer role it runs the identical
+                   "errorrecovery is initialized in TX_PHASE2" branch and then
+                   goes straight on to transmit L1/L2.  So resume at 11.2.1.2.5
+                   instead: 40 ms of Tone A, the phase reversal, 10 ms more,
+                   and the probe again.  Before the probe has ever gone out
+                   there is nothing to resume and the 11.2.1.2.3 path below
+                   still applies. */
+                answer_resume_probe(s, "re-ranging after INFO0 recovery");
+                return;
+            }
+            /*endif*/
             if (s->rx.stage == V34_RX_STAGE_INFO1C  &&  !s->tx.v90_mode)
             {
                 /* Re-entering the ranging sequence from the §11.2.2.1.1
@@ -3876,7 +3906,12 @@ static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                     }
                     else
                     {
-                        second_a_baud_init(s);
+                        /* Plain V.34 answer modem, 11.2.1.2.6: the Tone A
+                           phase reversal owed here is conditional on Tone B
+                           having been detected, and the call modem raises
+                           Tone B only after it has received this L1/L2
+                           (11.2.1.1.5).  Hold Tone A until then. */
+                        post_l2_wait_tone_b_init(s);
                     }
                     /*endif*/
                 }
@@ -4038,6 +4073,13 @@ static void l1_l2_signal_init(v34_state_t *s)
     s->tx.line_probe_cycles = 0;
     s->tx.line_probe_scaling = 0.0008f*V34_LINE_PROBE_LEVEL_TRIM*s->tx.gain;
     s->tx.current_modulator = (s->tx.v90_mode && !s->tx.calling_party) ? V34_MODULATION_PCM_L1_L2 : V34_MODULATION_L1_L2;
+    /* 11.2.1.2.5 conditions the receiver to detect Tone B as L1 begins, so
+       any Tone B seen earlier in the call (the 11.2.1.1.1 burst that carried
+       INFO0c) is stale by here. */
+    s->rx.tone_b_present = false;
+    if (s->tx.duplex  &&  !s->tx.calling_party  &&  !s->tx.v90_mode)
+        s->tx.phase2_probe_sent = true;
+    /*endif*/
     /* Deliberately does NOT record an L1 stage. s->tx.state is the trellis
        encoder state (see qam_mod(): state = conv_encode_table[state][y4321]),
        not a pipeline stage -- the two fields are one character apart. Writing
@@ -4111,11 +4153,17 @@ static complex_sig_t get_infomarksa_baud(v34_state_t *s)
     {
         /* Same §11.2.2.1.1 recovery as in PRE_INFO1_A - the call modem is
            repeating INFO0c and needs an acknowledged INFO0a to move on. */
+        s->rx.received_event = V34_EVENT_NONE;
+        s->tx.tone_duration = 0;
+        if (s->tx.phase2_probe_sent)
+        {
+            answer_resume_probe(s, "repeated INFO0c during INFOMARKSa");
+            return s->tx.lastbit;
+        }
+        /*endif*/
         span_log(&s->logging, SPAN_LOG_FLOW,
                  "Tx - repeated INFO0c during INFOMARKSa; acknowledging with INFO0a bit 28 (11.2.2.1.1)\n");
-        s->rx.received_event = V34_EVENT_NONE;
         s->tx.info0_acknowledgement = true;
-        s->tx.tone_duration = 0;
         info0_baud_init(s);
         return s->tx.lastbit;
     }
@@ -4140,10 +4188,55 @@ static void infomarksa_baud_init(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.34/11.2.2.2.3 bounds the wait for Tone B at 600 ms plus a round trip
+   delay from the beginning of L2.  This stage begins at the *end* of L2, so
+   counting the whole budget from here is deliberately generous -- the point
+   of the bound is to stop a silent peer wedging the call, not to be tight. */
+static int post_l2_tone_b_wait_bauds(v34_state_t *s)
+{
+    int rtd_bauds;
+
+    rtd_bauds = (s->rx.round_trip_delay_estimate > 0)
+                ? (s->rx.round_trip_delay_estimate*600 + 4000)/8000
+                : 0;
+    return (600*600 + 500)/1000 + rtd_bauds;
+}
+/*- End of function --------------------------------------------------------*/
+
 static complex_sig_t get_second_a_baud(v34_state_t *s)
 {
     switch (s->tx.stage)
     {
+    case V34_TX_STAGE_POST_L2_WAIT_TONE_B:
+        /* V.34/11.2.1.2.6: the answer modem transmits the post-L2 Tone A
+           phase reversal only "when Tone B is detected".  11.2.1.1.3 has the
+           call modem transmit *silence* from its first Tone B reversal until
+           it has received L1 and L2, and 11.2.1.1.5 has it raise Tone B only
+           after that -- so the call modem is not listening for Tone A when
+           our L2 ends.  Reversing off the end of our own L2, as this used to,
+           puts the reversal on the line before the peer starts looking for
+           it: measured against a SmartLink call modem the peer raised Tone B
+           145 ms after our L2 ended, having missed a reversal sent 65 ms
+           before that, and fell into the 11.2.2.1.1 INFO0c recovery from
+           which the call never returned.  Hold Tone A until Tone B is seen.
+
+           On timeout this falls through to the old unconditional behaviour
+           rather than 11.2.2.2.3's return to 11.2.1.2.3, so the change can
+           only add the wait -- never remove a path that used to work. */
+        if (s->rx.tone_b_present
+            ||
+            ++s->tx.tone_duration >= post_l2_tone_b_wait_bauds(s))
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - Tone B %s after %d bauds of post-L2 Tone A; sending the "
+                     "11.2.1.2.6 Tone A phase reversal\n",
+                     s->rx.tone_b_present ? "detected" : "timeout",
+                     s->tx.tone_duration);
+            s->tx.tone_duration = 0;
+            s->tx.stage = V34_TX_STAGE_POST_L2_A;
+        }
+        /*endif*/
+        break;
     case V34_TX_STAGE_POST_L2_A:
         /* Send pure tone for 50ms (V.34/11.2.1.2.6) */
         if (++s->tx.tone_duration == 30)
@@ -4204,12 +4297,41 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
                resend.  info0_baud_init() parks us in INFO0_RETRY, whose
                existing handler returns to Tone A when the next INFO0c
                arrives - §11.2.2.1.1's "proceed according to 11.2.1.1.3". */
-            span_log(&s->logging, SPAN_LOG_FLOW,
-                     "Tx - repeated INFO0c during INFO1c wait; acknowledging with INFO0a bit 28 (11.2.2.1.1)\n");
             s->rx.received_event = V34_EVENT_NONE;
-            s->tx.info0_acknowledgement = true;
             s->tx.tone_duration = 0;
-            info0_baud_init(s);
+            if (s->tx.phase2_probe_sent)
+            {
+                /* 11.2.2.2.1 gives the answer modem two ways out of the INFO0
+                   recovery, and only the first of them transmits anything
+                   new: on INFO0c with bit 28 set, acknowledge; *or*, "if the
+                   answer modem detects Tone B and has received INFO0c, it
+                   shall complete the current INFO0a, and transmit Tone A" --
+                   no fresh INFO0a at all.  Past 11.2.1.2.5 there is no
+                   current INFO0a to complete, so that branch is just Tone A
+                   and the probe.
+                   Take it, because sending the INFO0a is what loses the call
+                   here.  Measured against a SmartLink call modem: it enters
+                   this recovery by itself on reaching its transmit-probe
+                   state, and the acknowledged INFO0a it asks for is the very
+                   thing it cannot survive -- 60 ms after accepting the frame
+                   it re-reads its own info0-received flag as a repeat,
+                   re-enters recovery, leaves it again on detecting our
+                   Tone A, sets the flag from the same cached frame, and
+                   loops until it retrains and clears the call (7 rounds
+                   observed, 0.4-2.6 s apart, always the identical cached
+                   octets).  With no INFO0a it leaves recovery on Tone A,
+                   finds nothing flagged, and drops into its receive-probe
+                   state -- which is what the resumed L1/L2 is for. */
+                answer_resume_probe(s, "repeated INFO0c during the INFO1c wait");
+            }
+            else
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - repeated INFO0c during INFO1c wait; acknowledging with INFO0a bit 28 (11.2.2.1.1)\n");
+                s->tx.info0_acknowledgement = true;
+                info0_baud_init(s);
+            }
+            /*endif*/
         }
         else
         {
@@ -4278,6 +4400,57 @@ static void second_a_baud_init(v34_state_t *s)
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
     s->tx.stage = V34_TX_STAGE_POST_L2_A;
+    s->tx.current_getbaud = get_second_a_baud;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Resume the V.34 answer modem at 11.2.1.2.5 -- the Tone A phase reversal,
+   then L1 and L2 -- after the 11.2.2.2.1 INFO0 recovery.
+   11.2.2.2.1 sends the answer modem back to 11.2.1.2.3, which waits for
+   Tone B and then reverses Tone A.  A call modem that has already completed
+   11.2.1.1.3 does not raise Tone B again: it has sent its Tone B reversal,
+   gone silent, and is waiting for the second Tone A reversal and the probe.
+   Measured against a SmartLink call modem, after acknowledging the repeated
+   INFO0c the peer sat in its receive-probe state transmitting nothing while
+   we held Tone A for a Tone B reversal that was never coming, until it
+   retrained and cleared the call.  The same peer's own logs show the
+   recovery is meant to be survivable -- in the answer role it runs the
+   identical "errorrecovery is initialized in TX_PHASE2" branch and then goes
+   straight on to transmit L1/L2. */
+static void answer_resume_probe(v34_state_t *s, const char *reason)
+{
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - %s with the probe already sent; resuming at the "
+             "11.2.1.2.5 Tone A reversal and L1/L2\n",
+             reason);
+    s->tx.current_getbaud = get_initial_fdx_a_not_a_baud;
+    s->tx.stage = V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN;
+    s->tx.tone_duration = 0;
+    s->tx.persistence2 = 0;
+    s->tx.current_modulator = V34_MODULATION_CC;
+    /* Put the receiver back where it stood at the same point of the first
+       pass: watching for Tone B, with reversal 1 behind it, so the call
+       modem's next Tone B reversal reads as the 11.2.1.2.7 one that arms
+       L1/L2 reception.  Leaving it in INFO1C would drop the peer's probe, and
+       leaving received_event at REVERSAL_2 would make that reversal the
+       third, which arms nothing. */
+    s->rx.stage = V34_RX_STAGE_TONE_B;
+    s->rx.target_bits = (s->rx.duplex)  ?  (109 - (4 + 8 + 4))  :  (111 - (4 + 8 + 4));
+    s->rx.bit_count = 0;
+    s->rx.persistence1 = 0;
+    s->rx.persistence2 = 0;
+    s->rx.received_event = V34_EVENT_REVERSAL_1;
+    s->rx.tone_b_present = false;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void post_l2_wait_tone_b_init(v34_state_t *s)
+{
+    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - post_l2_wait_tone_b_init()\n");
+    s->tx.tone_duration = 0;
+    s->tx.current_modulator = V34_MODULATION_CC;
+    s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
+    s->tx.stage = V34_TX_STAGE_POST_L2_WAIT_TONE_B;
     s->tx.current_getbaud = get_second_a_baud;
 }
 /*- End of function --------------------------------------------------------*/

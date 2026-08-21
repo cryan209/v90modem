@@ -4451,6 +4451,24 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 if (s->v90_mode && s->calling_party && s->info0_received)
                     s->received_event = V34_EVENT_TONE_SEEN;
                 /*endif*/
+                /* 11.2.1.2.6's "when Tone B is detected" is a separate fact
+                   from the reversal ordinal in received_event, so it gets its
+                   own flag rather than an event: the answer modem needs both
+                   at once, and writing TONE_SEEN here would make the next
+                   reversal read as the first.  The carrier gate is the same
+                   one Tone A uses -- 20 same-polarity bits of line noise is
+                   otherwise enough to declare a tone that is not there. */
+                if (s->signal_present  &&  tone_a_carrier_present(s)
+                    &&
+                    !s->tone_b_present)
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Tone B detected (power=%d ref=%d)\n",
+                             s->last_info_rx_power,
+                             s->info_rx_carrier_ref);
+                    s->tone_b_present = true;
+                }
+                /*endif*/
             }
             /*endif*/
             break;

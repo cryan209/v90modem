@@ -314,6 +314,11 @@ enum v34_tx_stages_e
     V34_TX_STAGE_L1,
     /*! \brief L2 is being transmitted */
     V34_TX_STAGE_L2,
+    /*! Answer modem, V.34 11.2.1.2.6: Tone A held after L2 until the call
+        modem's Tone B appears.  Without this the Tone A phase reversal is
+        transmitted while the call modem is still in the 11.2.1.1.5 silence
+        and is never seen. */
+    V34_TX_STAGE_POST_L2_WAIT_TONE_B,
     V34_TX_STAGE_POST_L2_A,
     V34_TX_STAGE_POST_L2_NOT_A,
     V34_TX_STAGE_A_SILENCE,
@@ -730,6 +735,10 @@ typedef struct
         and is transmitting Tone B, so FIRST_A must not wait for another
         INFO0c before sending the Tone A phase reversal. */
     bool phase2_reranging;
+    /*! \brief True once this modem has transmitted the 11.2.1.2.5 L1/L2
+        probe as the V.34 answer modem.  The 11.2.2.2.1 INFO0 recovery
+        resumes differently either side of that point. */
+    bool phase2_probe_sent;
 
     /*! \brief V.90 mode: when true, INFO0 uses V.90 INFO0d format (62 bits)
         instead of standard V.34 INFO0 (49 bits).  Set by external v90 module. */
@@ -1115,6 +1124,12 @@ typedef struct
     /*! \brief The power meter level at which carrier off is declared. */
     int32_t carrier_off_power;
     bool signal_present;
+    /*! \brief True once the far end's CC tone has been present, without a
+        phase reversal, for long enough to count as Tone B.  V.34 11.2.1.2.6
+        gates the answer modem's post-L2 Tone A reversal on this, and unlike
+        the reversal events it must not disturb received_event, which carries
+        the reversal ordinal. */
+    bool tone_b_present;
 
     bitstream_state_t bs;
     uint32_t bitstream;

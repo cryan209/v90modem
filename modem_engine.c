@@ -90,6 +90,7 @@ enum v34_tx_stages_e {
     V34_TX_STAGE_SECOND_A,
     V34_TX_STAGE_L1,
     V34_TX_STAGE_L2,
+    V34_TX_STAGE_POST_L2_WAIT_TONE_B,
     V34_TX_STAGE_POST_L2_A,
     V34_TX_STAGE_POST_L2_NOT_A,
     V34_TX_STAGE_A_SILENCE,
@@ -448,6 +449,7 @@ static const char *v34_tx_stage_name(int stage)
     case V34_TX_STAGE_SECOND_A:                    return "SECOND_A";
     case V34_TX_STAGE_L1:                          return "L1";
     case V34_TX_STAGE_L2:                          return "L2";
+    case V34_TX_STAGE_POST_L2_WAIT_TONE_B:         return "POST_L2_WAIT_TONE_B";
     case V34_TX_STAGE_POST_L2_A:                   return "POST_L2_A";
     case V34_TX_STAGE_POST_L2_NOT_A:               return "POST_L2_NOT_A";
     case V34_TX_STAGE_A_SILENCE:                   return "A_SILENCE";
