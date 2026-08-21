@@ -170,7 +170,7 @@ SRCS += v34_stubs.c
 TEST_OBJS += v34_stubs.o
 endif
 
-.PHONY: all test clean distclean spandsp pjproject v34-tone-matrix v34-duplex-test v32bis-ref-test v32bis-datapump-test v91-serial-pair-test eicon-rx-test g711-path-test FORCE
+.PHONY: all test clean distclean spandsp pjproject v34-tone-matrix v34-duplex-test v34-matrix-test v32bis-ref-test v32bis-datapump-test v91-serial-pair-test eicon-rx-test g711-path-test FORCE
 
 all: $(TARGET) $(TEST_TARGETS)
 
@@ -183,6 +183,8 @@ test: $(TEST_TARGETS)
 	./v34_gardner_test
 	./v34_duplex_test 2400 9600 ulaw
 	./v34_duplex_test 2400 9600 alaw
+	./v34_duplex_test 2743 9600 alaw
+	./v34_duplex_test 3000 9600 alaw
 	./v92_proc_eval_test
 	./v90_analogue_tx_test
 	./v90_analogue_rx_test
@@ -249,9 +251,22 @@ v42_link_test: $(V42_LINK_TEST_OBJS) spandsp
 v34_phase2_decode_test: $(V34_PHASE2_DECODE_TEST_OBJS)
 	$(CC) $(V34_PHASE2_DECODE_TEST_OBJS) -o $@ -lm
 
+# The full V.34 symbol-rate matrix.  Not in `make test`: only the rows listed
+# in that target complete today, and docs/v34_spec_gap.md item 5 tracks the
+# rest.  This target reports every row rather than stopping at the first
+# failure, so it is the one to run when working on the remaining rates.
+v34-matrix-test: v34_duplex_test
+	@for b in 2400 2743 2800 3000 3200 3429; do \
+	  for law in ulaw alaw; do \
+	    ./v34_duplex_test $$b 9600 $$law 2>/dev/null | grep "V.34 duplex" || true; \
+	  done; \
+	done
+
 v34-duplex-test: v34_duplex_test
 	./v34_duplex_test 2400 9600 ulaw
 	./v34_duplex_test 2400 9600 alaw
+	./v34_duplex_test 2743 9600 alaw
+	./v34_duplex_test 3000 9600 alaw
 
 v34_duplex_test: $(V34_DUPLEX_TEST_OBJS) spandsp
 	$(CC) $(V34_DUPLEX_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)

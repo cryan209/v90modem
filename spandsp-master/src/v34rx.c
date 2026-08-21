@@ -251,6 +251,7 @@ static int phase3_rx_dump_count = 0;
 /* Phase 4 CMA runs until the level estimate settles; see phase4_cma_converged(). */
 #define PHASE4_CMA_SETTLE_BAUDS         128
 #define PHASE4_CMA_SETTLE_TOL           0.05f
+#define PHASE4_CMA_MAX_BAUDS            100000
 #define PHASE3_S_ALTERNATING_MIN        24
 #define PHASE3_S_STABLE_WINDOWS         32
 /* Sustained-rotation S detection (see private/v34.h): a +/-90 degrees/symbol
@@ -5474,6 +5475,20 @@ static float phase4_cma_settle_tol(void)
     return cache;
 }
 
+static int phase4_cma_max_bauds(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *value = getenv("ME_V34_PHASE4_CMA_MAX_BAUDS");
+
+        cache = (value  &&  atoi(value) >= 0)  ?  atoi(value)  :  PHASE4_CMA_MAX_BAUDS;
+    }
+    /*endif*/
+    return cache;
+}
+
 static int phase4_cma_converged(v34_rx_state_t *s, const complexf_t *z)
 {
     static int unbounded = -1;
@@ -5504,8 +5519,10 @@ static int phase4_cma_converged(v34_rx_state_t *s, const complexf_t *z)
     else
         s->phase4_cma_mag += 0.02f*(mag - s->phase4_cma_mag);
     /*endif*/
-    if (++s->phase4_cma_bauds >= phase4_cma_settle_bauds()
-        &&  fabsf(s->phase4_cma_mag - 1.0f) <= phase4_cma_settle_tol())
+    s->phase4_cma_bauds++;
+    if ((s->phase4_cma_bauds >= phase4_cma_settle_bauds()
+         &&  fabsf(s->phase4_cma_mag - 1.0f) <= phase4_cma_settle_tol())
+        ||  s->phase4_cma_bauds >= phase4_cma_max_bauds())
     {
         s->phase4_cma_settled = 1;
         span_log(s->logging, SPAN_LOG_FLOW,
