@@ -7436,6 +7436,40 @@ static complex_sig_t get_data_baud(v34_state_t *s)
          * s->tx.data_symbol_scale;
     v.im = FP_Q9_7_TO_F(s->tx.tx_mapping_frame_buf[2*s->tx.tx_mapping_frame_step + 1])
          * s->tx.data_symbol_scale;
+    /* Ground truth for the data mode, in the same Q9.7 units and the same order
+       as the receiver's V34_DATA_FRAME_DUMP, so the two files subtract.  Every
+       other read on a dense constellation is confounded by its own decisions
+       being wrong; this one is not.  Offline diagnosis only. */
+    {
+        static int dump_initialized[2];
+        static FILE *dump_fp[2];
+        int who = s->calling_party ? 1 : 0;
+
+        if (!dump_initialized[who])
+        {
+            const char *path = getenv("V34_DATA_TX_DUMP");
+
+            dump_initialized[who] = 1;
+            if (path  &&  *path)
+            {
+                char p[1024];
+
+                snprintf(p, sizeof(p), "%s.%s", path, who ? "caller" : "answer");
+                dump_fp[who] = fopen(p, "wb");
+            }
+            /*endif*/
+        }
+        /*endif*/
+        if (dump_fp[who])
+        {
+            int16_t xy[2];
+
+            xy[0] = s->tx.tx_mapping_frame_buf[2*s->tx.tx_mapping_frame_step];
+            xy[1] = s->tx.tx_mapping_frame_buf[2*s->tx.tx_mapping_frame_step + 1];
+            fwrite(xy, sizeof(int16_t), 2, dump_fp[who]);
+        }
+        /*endif*/
+    }
     if (++s->tx.tx_mapping_frame_step >= 8)
         s->tx.tx_mapping_frame_step = 0;
     /*endif*/

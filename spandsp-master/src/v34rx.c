@@ -5497,6 +5497,58 @@ static complexf_t equalizer_get(v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* ME_V34_DATA_EQ=0 turns off decision-directed equalizer adaptation in data
+   mode, for A/B against the frozen-tap behaviour it replaces. */
+static int data_mode_eq_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+    {
+        const char *value = getenv("ME_V34_DATA_EQ");
+
+        enabled = (value == NULL  ||  atoi(value) != 0);
+    }
+    /*endif*/
+    return enabled;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Squared distance, in grid units, beyond which a data-mode decision is not
+   trusted to steer the equalizer or the carrier loop.  ME_V34_DATA_EQ_GATE
+   sweeps it; see the note at the call site for what the value costs. */
+/* Integrator gain of the second-order data-mode carrier loop.
+   ME_V34_DATA_FREQ_GAIN sweeps it. */
+static float data_mode_freq_gain(void)
+{
+    static float gain = -1.0f;
+
+    if (gain < 0.0f)
+    {
+        const char *value = getenv("ME_V34_DATA_FREQ_GAIN");
+
+        gain = (value  &&  *value)  ?  (float) atof(value)  :  (1.0f/4096.0f);
+    }
+    /*endif*/
+    return gain;
+}
+/*- End of function --------------------------------------------------------*/
+
+static float data_mode_decision_gate(void)
+{
+    static float gate = -1.0f;
+
+    if (gate < 0.0f)
+    {
+        const char *value = getenv("ME_V34_DATA_EQ_GATE");
+
+        gate = (value  &&  *value)  ?  (float) atof(value)  :  0.35f;
+    }
+    /*endif*/
+    return gate;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complexf_t *target)
 {
     int i;
@@ -10158,9 +10210,100 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 phase = atan2f(corr.im, corr.re);
                 s->phase4_da_derot = (int32_t)
                     (phase*2147483648.0f/3.14159265358979f);
+                /* B1 also gives the residual carrier FREQUENCY, which the
+                   phase term cannot.  Training leaves about 0.7 Hz of it in
+                   this receiver -- 0.105 degrees per symbol at 2400 baud,
+                   measured against the transmitter's own symbols over a
+                   bit-exact loopback -- and nothing in data mode removes it
+                   except the decision-directed loop below.  That loop can
+                   hold a dense constellation but cannot acquire one: at 9600
+                   it pulls the offset out and the drift measures zero, while
+                   at 14400 and above the first decisions are already wrong and
+                   the phase runs away (12748 degrees over one call), which is
+                   why every rate with uncoded Q bits produced white output.
+                   Correlating the two halves of B1 separately gives the
+                   advance per symbol directly: the sequence is known, so this
+                   owes nothing to a decision. */
+                {
+                    /* Correlate the two halves of B1 separately and take the
+                       angle between them: the advance over half the sequence.
+                       Averaging coherently inside each half first is what makes
+                       this work at 96 symbols -- the obvious one-lag
+                       autocorrelation over all of them was tried and reads
+                       0.91 degrees per symbol where the truth is 0.105, because
+                       it never averages the noise down before taking an angle. */
+                    complexf_t c0 = complex_setf(0.0f, 0.0f);
+                    complexf_t c1 = complex_setf(0.0f, 0.0f);
+                    int half = s->v90_t3_b1_symbols/2;
+
+                    for (int i = 0; i < s->v90_t3_b1_symbols; i++)
+                    {
+                        complexf_t o = s->b1_observed[i];
+                        complexf_t e = s->v90_t3_b1[i];
+                        float pr = o.re*e.re + (conjugate ? -o.im*e.im : o.im*e.im);
+                        float pi = (conjugate ? -o.im : o.im)*e.re - o.re*e.im;
+                        complexf_t *acc = (i < half) ? &c0 : &c1;
+
+                        acc->re += pr;
+                        acc->im += pi;
+                    }
+                    /*endfor*/
+                    if (half > 0
+                        &&
+                        (c0.re*c0.re + c0.im*c0.im) > 0.0f
+                        &&
+                        (c1.re*c1.re + c1.im*c1.im) > 0.0f)
+                    {
+                        float d_re = c1.re*c0.re + c1.im*c0.im;
+                        float d_im = c1.im*c0.re - c1.re*c0.im;
+                        float dphi = atan2f(d_im, d_re)/(float) half;
+
+                        /* Half a turn per symbol is not a carrier offset, it is
+                           a wrapped measurement; refuse anything that large. */
+                        if (fabsf(dphi) < 0.2f)
+                        {
+                            s->phase4_da_derot_rate = (int32_t)
+                                (dphi*2147483648.0f/3.14159265358979f);
+                        }
+                        else
+                        {
+                            s->phase4_da_derot_rate = 0;
+                        }
+                        /*endif*/
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - B1 residual carrier: %.4f deg/symbol "
+                                 "(%.2f Hz at this rate)%s\n",
+                                 dphi*180.0f/3.14159265f,
+                                 dphi*180.0f/3.14159265f
+                                   *baud_rate_parameters[s->baud_rate].baud_rate/360.0f,
+                                 (fabsf(dphi) < 0.2f) ? "" : " - rejected as wrapped");
+                    }
+                    else
+                    {
+                        s->phase4_da_derot_rate = 0;
+                    }
+                    /*endif*/
+                }
                 s->data_symbol_conjugate = conjugate;
                 s->data_symbol_rotation = 0;
                 s->data_symbol_scale = (gain > 0.0001f) ? 1.0f/gain : 1.0f;
+                {
+                    /* Tap energy is the equalizer's noise gain.  A converged
+                       FSE that is merely matched sits near 1; one that is
+                       inverting a band edge sits far above it and multiplies
+                       whatever the bearer put in -- which is the difference
+                       between the 37 dB mu-law actually delivers at this level
+                       and the SNR the symbols show. */
+                    float te = 0.0f;
+                    int i;
+
+                    for (i = 0;  i < V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN;  i++)
+                        te += s->eq_coeff[i].re*s->eq_coeff[i].re
+                            + s->eq_coeff[i].im*s->eq_coeff[i].im;
+                    /*endfor*/
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - DATA entry: equalizer tap energy %.4f\n", te);
+                }
                 span_log(s->logging, SPAN_LOG_FLOW,
                          "Rx - B1 acquired: symbols=%d phase=%.2f deg gain=%.4f "
                          "conjugate=%d normalized-correlation=%.3f\n",
@@ -10213,10 +10356,17 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                wander source) is frozen in DATA, so from here only genuine
                carrier drift remains, held by the DD tracker below. */
             {
-                float c = cosf((float) s->phase4_da_derot
-                               *(float) (3.14159265358979/2147483648.0));
-                float sn = sinf((float) s->phase4_da_derot
-                                *(float) (3.14159265358979/2147483648.0));
+                float c;
+                float sn;
+
+                /* Carry the B1-measured residual carrier forward.  Without
+                   this the derotator is a constant and the offset it cannot
+                   see accumulates without limit. */
+                s->phase4_da_derot += (uint32_t) s->phase4_da_derot_rate;
+                c = cosf((float) s->phase4_da_derot
+                         *(float) (3.14159265358979/2147483648.0));
+                sn = sinf((float) s->phase4_da_derot
+                          *(float) (3.14159265358979/2147483648.0));
                 float dr = sym->re*c + sym->im*sn;
                 float di = sym->im*c - sym->re*sn;
 
@@ -10247,6 +10397,53 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 (int16_t)(transformed_re * 128.0f * s->data_symbol_scale);
             s->mapping_frame_buf[s->mapping_frame_count++] =
                 (int16_t)(transformed_im * 128.0f * s->data_symbol_scale);
+
+            /* Decision-directed LMS on the data constellation.
+               Nothing adapted the equalizer in data mode at all: CMA stops in
+               Phase 4 and the taps it leaves are wrong by about 5% on the
+               symbols either side of the main one.  Measured against the
+               transmitter's own symbols over a bit-exact loopback, a linear
+               filter on the TRUE symbols removes 79% of the residual power,
+               so it is ISI and not noise -- and 9.x's dense constellations are
+               where that matters: the same taps that cost 9600 nothing put
+               21600's symbols (RMS ~20 on a grid of spacing 2) a whole
+               decision region away from where they belong.
+               The decision is taken in the grid domain and mapped back
+               through the derotator into the equalizer's own domain, which is
+               where the taps live.  ME_V34_DATA_EQ=0 disables. */
+            if (!s->v90_mode  &&  data_mode_eq_enabled())
+            {
+                float g_re = transformed_re*s->data_symbol_scale;
+                float g_im = transformed_im*s->data_symbol_scale;
+                float t_re = 2.0f*floorf(g_re/2.0f) + 1.0f;
+                float t_im = 2.0f*floorf(g_im/2.0f) + 1.0f;
+                float d2 = (g_re - t_re)*(g_re - t_re)
+                         + (g_im - t_im)*(g_im - t_im);
+
+                /* Adapt only on decisions that are probably right.  Two thirds
+                   is the distance of a symbol with no relation to the lattice,
+                   so half of that keeps the gradient pointing the right way
+                   even while most of the constellation is still smeared. */
+                if (d2 < data_mode_decision_gate()  &&  s->data_symbol_scale > 0.0f)
+                {
+                    complexf_t da_target;
+                    float ct = cosf((float) s->phase4_da_derot
+                                    *(float) (3.14159265358979/2147483648.0));
+                    float st = sinf((float) s->phase4_da_derot
+                                    *(float) (3.14159265358979/2147483648.0));
+                    float ur = t_re/s->data_symbol_scale;
+                    float ui = (s->data_symbol_conjugate ? -t_im : t_im)
+                             / s->data_symbol_scale;
+
+                    /* Undo the zero-delay derotator: the taps see the symbol
+                       before it. */
+                    da_target.re = ur*ct - ui*st;
+                    da_target.im = ui*ct + ur*st;
+                    tune_equalizer(s, sym, &da_target);
+                }
+                /*endif*/
+            }
+            /*endif*/
 
             /* Plain V.34 runs none of the V.90 upstream lock machinery, so it
                had no read at all on its own data mode.  Distance to the grid
@@ -10438,7 +10635,19 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     else if (t_im < -43.0f) t_im = -43.0f;
                     sym_mag = sqrtf(g_re*g_re + g_im*g_im);
                     tgt_mag = sqrtf(t_re*t_re + t_im*t_im);
-                    if (sym_mag > 0.5f && tgt_mag > 0.5f)
+                    /* Only steer on a decision worth trusting.  A dense
+                       constellation makes most decisions wrong until the loops
+                       have converged, and a loop driven by those does not
+                       merely fail to acquire -- the frequency integrator below
+                       accumulates the noise and drives the phase away: measured
+                       at 21600, ungated it produced 0.139 degrees per symbol of
+                       drift and a 17434 degree excursion, worse than no loop at
+                       all.  Two thirds is the distance of a symbol unrelated to
+                       the lattice; half of that keeps the gradient honest. */
+                    if (sym_mag > 0.5f && tgt_mag > 0.5f
+                        &&
+                        ((g_re - t_re)*(g_re - t_re)
+                         + (g_im - t_im)*(g_im - t_im)) < data_mode_decision_gate())
                     {
                         /* Phase error in the transformed (grid) domain equals
                            the error in the equalizer domain: the transform is
@@ -10455,6 +10664,20 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                             error = -error;
                         s->phase4_da_derot +=
                             (int32_t) (error*(1.0f/32.0f)*2147483648.0f/3.14159265f);
+                        /* Second-order: integrate the same error into the
+                           per-symbol advance.  A phase-only loop settles at a
+                           standing error proportional to the residual carrier
+                           and cannot remove it, so whatever B1's estimate left
+                           behind accumulates for the rest of the call -- 0.0089
+                           degrees per symbol still walks a thousand degrees
+                           over a minute, and the decision-directed equalizer
+                           below then adapts onto decisions that the walk has
+                           already made wrong.  Measured, that is what turned a
+                           residual of -24 dB at the start of a 21600 call into
+                           -12 dB by the end. */
+                        s->phase4_da_derot_rate +=
+                            (int32_t) (error*data_mode_freq_gain()
+                                       *2147483648.0f/3.14159265f);
                     }
                 }
             }

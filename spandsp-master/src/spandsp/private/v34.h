@@ -1660,6 +1660,13 @@ typedef struct
         delay, so the rotation is taken out at the equalizer output where the
         loop delay is zero and a deadbeat update is stable. */
     uint32_t phase4_da_derot;
+    /*! \brief Per-symbol advance of that derotator, in the same DDS units: the
+        residual carrier FREQUENCY, which the phase term alone cannot remove.
+        Training leaves about 0.7 Hz here, and 10.1.3.1's B1 is a known
+        sequence long enough to measure it -- without which data mode relies on
+        a decision-directed loop that can hold a dense constellation but never
+        acquire one. */
+    int32_t phase4_da_derot_rate;
     int last_logged_mp_diag_state;
 
     int dft_ptr;

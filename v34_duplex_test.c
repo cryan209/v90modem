@@ -83,8 +83,42 @@ static void put_bit(void *user_data, int bit)
     ep->rx_bits++;
 }
 
+/* V34_DUPLEX_NOISE_DB adds white Gaussian noise at the stated SNR, in dB below
+   the running signal power.  The harness had no way to put a known impairment
+   on the bearer, so nothing could say how much of a symbol-level residual came
+   from the bearer and how much the receiver added to it. */
+static int16_t add_noise(int16_t sample)
+{
+    static float snr_db = -1.0f;
+    static double sp;
+    static long n;
+    double g;
+    int i;
+    double v;
+
+    if (snr_db < 0.0f)
+    {
+        const char *value = getenv("V34_DUPLEX_NOISE_DB");
+
+        snr_db = (value && *value) ? (float) atof(value) : 0.0f;
+    }
+    if (snr_db <= 0.0f)
+        return sample;
+    sp += (double) sample*sample;
+    n++;
+    g = 0.0;
+    for (i = 0; i < 12; i++)
+        g += (double) rand()/RAND_MAX - 0.5;
+    v = sample + g*sqrt(sp/n)*pow(10.0, -snr_db/20.0);
+    if (v > 32000.0) v = 32000.0;
+    if (v < -32000.0) v = -32000.0;
+    return (int16_t) v;
+}
+
 static int16_t g711_roundtrip(int16_t sample, bool alaw)
 {
+    sample = add_noise(sample);
+
     /* V34_DUPLEX_LINEAR bypasses the codec entirely, so a defect can be
        attributed to the bearer or exonerated from it.  Diagnostic only: the
        point of this harness is that the two modems meet through G.711. */
@@ -94,8 +128,22 @@ static int16_t g711_roundtrip(int16_t sample, bool alaw)
         linear = (getenv("V34_DUPLEX_LINEAR") != NULL);
     if (linear)
         return sample;
-    return alaw ? alaw_to_linear(linear_to_alaw(sample))
-                : ulaw_to_linear(linear_to_ulaw(sample));
+    {
+        int16_t out = alaw ? alaw_to_linear(linear_to_alaw(sample))
+                           : ulaw_to_linear(linear_to_ulaw(sample));
+        /* What the codec itself costs, measured on the actual waveform rather
+           than on an assumed one: V34_DUPLEX_G711_SNR=1 reports it. */
+        if (getenv("V34_DUPLEX_G711_SNR")) {
+            static double sp, np;
+            static long n;
+            sp += (double) sample*sample;
+            np += (double)(out - sample)*(out - sample);
+            if (++n % 400000 == 0)
+                fprintf(stderr, "[G711] round-trip SNR %.1f dB over %ld samples\n",
+                        10.0*log10(sp/np), n);
+        }
+        return out;
+    }
 }
 
 static int run_case(int baud, int bps, bool alaw)

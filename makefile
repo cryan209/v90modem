@@ -194,6 +194,19 @@ test: $(TEST_TARGETS)
 	./v34_duplex_test 3000 9600 alaw
 	./v34_duplex_test 3200 9600 ulaw
 	./v34_duplex_test 3200 9600 alaw
+# 21600 bps, where the data-mode carrier and equalizer work shows.  These rows
+# all carried errors or recovered nothing before B1 was made to supply the
+# residual carrier frequency and the equalizer was allowed to adapt in data
+# mode.  2400 baud is deliberately absent: 21600 there is 9 bits per symbol,
+# an 896-point constellation whose symbols sit RMS ~20 on a grid of spacing 2,
+# and the bearer's own noise floor is marginal for it -- see
+# `docs/v34_data_mode_rates.md`.
+	./v34_duplex_test 2800 21600 ulaw
+	./v34_duplex_test 3000 21600 ulaw
+	./v34_duplex_test 3200 21600 ulaw
+	./v34_duplex_test 3200 21600 alaw
+	./v34_duplex_test 3429 21600 ulaw
+	./v34_duplex_test 3429 21600 alaw
 	./v92_proc_eval_test
 	./v90_analogue_tx_test
 	./v90_analogue_rx_test
