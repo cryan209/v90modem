@@ -8661,6 +8661,38 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
         abs_bits = (int) ((ang1 + DDS_PHASE(45.0f)) >> 30) & 0x3;
         mp_decode_domain = s->mp_phase4_force_abs_active ? 1 : s->mp_phase4_domain;
 
+        /* V34_MP_RX_DUMP: one line per Phase 4 symbol -- the differential and
+           absolute quadrant decisions and the symbol magnitude.  10.1.3.9 leaves
+           nothing to search once the constellation is known from J, so when MP
+           will not decode the question is which interpretation of these dibits is
+           right, and that is settled offline against the frame CRC rather than by
+           another hypothesis sweep.  Neither the 17-bit all-ones MP preamble nor
+           a TRN of scrambled ones can discriminate the bit order, so the CRC is
+           the only oracle there is. */
+        {
+            static int mp_dump_checked = 0;
+            static FILE *mp_dump = NULL;
+
+            if (!mp_dump_checked)
+            {
+                const char *path = getenv("V34_MP_RX_DUMP");
+
+                if (path  &&  *path)
+                    mp_dump = fopen(path, "w");
+                /*endif*/
+                mp_dump_checked = 1;
+            }
+            /*endif*/
+            if (mp_dump)
+            {
+                fprintf(mp_dump, "%d %d %d %.4f\n",
+                        s->duration, data_bits, abs_bits,
+                        sqrtf(sym->re*sym->re + sym->im*sym->im));
+                fflush(mp_dump);
+            }
+            /*endif*/
+        }
+
         /* Decision-aided carrier acquisition through the CP/MP stretch.
            The receiver reaches Phase 4 with no coherent lock (the TRN/MP
            "locks" are bit-domain hypothesis latches; CP/MP decode survives

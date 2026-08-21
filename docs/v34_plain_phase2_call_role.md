@@ -63,6 +63,42 @@ so we never send MP-prime and the peer retrains.  That is the frontier
 `docs/v34_spec_gap.md` already names -- foreign-modem data mode after E/B1 --
 reached for the first time.
 
+## Where the Phase 4 MP exchange stands, measured
+
+`V34_MP_RX_DUMP=<file>` writes one line per Phase 4 symbol -- the differential
+and absolute quadrant decisions and the symbol magnitude -- and
+`tools/v34_mp_offline.py` reads it back and tries every interpretation of those
+dibits against the frame CRC.  That is the right oracle and the only one:
+10.1.3.9 leaves nothing to search once J has given the constellation, but
+**neither a TRN of scrambled ones nor MP's own 17-bit all-ones frame sync can
+tell one bit order from the other**, so a preamble-only lock can settle on the
+wrong order over a garbage body -- which is exactly what the live receiver did
+(`ord=b1,b0` after four retries).
+
+What one call's dump (20021 symbols) shows, reading the ones-fraction of the
+descrambled stream in 400-bit windows:
+
+| symbols | descrambled ones | magnitude | what it is |
+|---|---|---|---|
+| 0 - 12800 | 27-55% | 1.0 | not MP -- no 17-ones sync at any spacing |
+| ~12800 | -- | 0.04 | the peer goes silent |
+| 13200 - 16800 | 100% | 1.0 | the peer's Phase 4 TRN |
+| 17200 - 17600 | 78-94% | 0.85 | end of TRN |
+| 18000+ | 100% | 3.3 | a loud tone: it has retrained |
+
+So on this call the peer's Phase 4 TRN begins *after* our MP receive window has
+already been open for several seconds, and it retrains without our ever seeing
+an MP frame.  Relaxing the preamble search to allow two bit errors finds only
+chance-level hits at random spacings in the non-TRN region, under both bit
+orders -- there is no MP there to decode.
+
+The sequencing is what to work on next, not the decoder: our own Phase 4 TRN
+runs 4703 bauds before we transmit MP (the receiver needs it --
+`PHASE4_TRN_READY_MIN_BAUD` was swept and every lower value costs matrix rows),
+and the peer needs to see our MP before it will send MP-prime.  On the one call
+where it did see it (`c29`), its log reads `MP detected, starting MP' txmit`
+followed 20 ms later by `SILENCERETRAIN`.
+
 ## The old reading, and the measurements behind it
 
 Every call, the peer declares
