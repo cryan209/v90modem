@@ -1063,13 +1063,29 @@ Ruled out, each by measurement:
     parameters (`b=24 p=16 w=0 j=7 k=12 b1_symbols=128`), so the B1 template
     is identical.
 
-What is left is the anchor.  The replay wins by sweeping the handover instant
-half a second at a time until one lands -- its first attempts score
-`coarse=7.1%`, nowhere near B1 -- while live has the single anchor its E
-detector gives it and scores `coarse=96.6%`, a near miss with an in-sample fit
-of 98.3-98.8%.  A near miss is what a matched filter returns when the thing it
-is matching straddles an edge of the searched span, and the coarse pass steps
-a symbol at a time from `search_start` while the refine only looks +/-2
-samples around the eight best coarse points.  That is where to look: whether
-`SEARCH_FORWARD` and `SEARCH_BACK` actually bracket B1 on a live anchor, and
-whether the true position survives the KEEP=8 shortlist.
+  * **Anchor position.**  Sweeping the forced handover across a recorded call
+    shows the fit is strictly BIMODAL: anchors from 52.8 s to 54.0 s all give
+    `coarse=98.2% fit=100.0%` and 0.002, and anchors outside that 1.2 s
+    plateau give `coarse=6-8% fit=17-19%`.  There is no intermediate regime,
+    so live's `coarse=96.6% fit=98.3%` is not an anchor effect -- a bad anchor
+    scores 6%, not 96.6%.
+  * **Capture sub-sample phase.**  Live and the replay start their T/3 capture
+    at different points in the 8 kHz stream, so the 8k->9.6k resampler sits on
+    a different phase, and unlike a gain or a rotation that is not something
+    the equalizer's complex taps can absorb.  Shifting the capture start
+    through all six phases one 8 kHz sample at a time gives 100.0% and 0.002
+    every time.
+  * **Template state.**  `v34_build_expected_b1_tap_trellis()` builds a fresh
+    transmitter per attempt, so the scrambler and trellis start clean, and its
+    inputs are identical on both paths -- rate 9600, trellis 0, the same role,
+    and no precoder in V.90 mode.
+
+So live matches the right B1 at the right place with the right template and
+still fits it at 98.3% where offline fits 100.0%.  Every difference cheap
+enough to test from outside has been tested.  What separates the two is the
+receiver STATE that a real call accumulates and a replay does not: live has
+run the whole of V.8, Phase 2, Phase 3 and Phase 4 through the same
+`v34_rx()`, while the replay's receiver is forced straight into Phase 4 CP RX
+having seen a second of audio.  The next step is a direct comparison -- dump
+the live T/3 ring around B1 and the replay's ring for the same wire position,
+and see where they diverge -- rather than another hypothesis from outside.
