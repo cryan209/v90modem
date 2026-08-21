@@ -318,6 +318,10 @@ enum v34_tx_stages_e
         modem's Tone B appears.  Without this the Tone A phase reversal is
         transmitted while the call modem is still in the 11.2.1.1.5 silence
         and is never seen. */
+    /*! Answer modem: Tone A held after the 11.2.2.2.1 INFO0 acknowledgement,
+        giving the call modem time to work through its own recovery and reach
+        its receive-probe state before the 11.2.1.2.5 reversal and L1/L2. */
+    V34_TX_STAGE_POST_INFO0_RESUME_A,
     V34_TX_STAGE_POST_L2_WAIT_TONE_B,
     V34_TX_STAGE_POST_L2_A,
     V34_TX_STAGE_POST_L2_NOT_A,
@@ -743,6 +747,11 @@ typedef struct
         recovery, so a peer that keeps repeating INFO0c gets the probe it is
         waiting for rather than an unbounded INFO0a storm. */
     bool phase2_info0_repeated;
+    /*! \brief How many times 11.2.1.2.5 has been resumed since the INFO0
+        recovery was answered.  The call modem reaches its receive-probe state
+        several seconds later and waits there only about 2 s, so the probe has
+        to be offered more than once to land inside that window. */
+    int phase2_resume_count;
 
     /*! \brief V.90 mode: when true, INFO0 uses V.90 INFO0d format (62 bits)
         instead of standard V.34 INFO0 (49 bits).  Set by external v90 module. */
@@ -1134,6 +1143,10 @@ typedef struct
         the reversal events it must not disturb received_event, which carries
         the reversal ordinal. */
     bool tone_b_present;
+    /*! \brief True once Tone B has been seen and has then stopped.  11.2.1.1.3
+        has the call modem go silent exactly when it is ready to receive the
+        answer modem's L1/L2, so the falling edge is a readiness signal. */
+    bool tone_b_ended;
 
     bitstream_state_t bs;
     uint32_t bitstream;

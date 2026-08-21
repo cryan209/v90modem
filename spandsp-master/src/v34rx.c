@@ -4438,6 +4438,17 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
         break;
     case V34_RX_STAGE_TONE_B:
         /* Answering side */
+        if (!s->signal_present  &&  s->tone_b_present)
+        {
+            /* Tone B has stopped.  11.2.1.1.3 has the call modem transmit
+               silence from its Tone B reversal until it has received L1 and
+               L2, so this falling edge says it is ready for the probe -- and
+               is worth as much to the answer modem as the onset. */
+            span_log(s->logging, SPAN_LOG_FLOW, "Rx - Tone B ended\n");
+            s->tone_b_present = false;
+            s->tone_b_ended = true;
+        }
+        /*endif*/
         if (++s->persistence1 < 10)
             break;
         /*endif*/
@@ -4467,6 +4478,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                              s->last_info_rx_power,
                              s->info_rx_carrier_ref);
                     s->tone_b_present = true;
+                    s->tone_b_ended = false;
                 }
                 /*endif*/
             }

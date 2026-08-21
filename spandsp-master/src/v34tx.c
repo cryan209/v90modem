@@ -169,6 +169,7 @@ static const char *v34_tx_stage_to_str(int stage)
     case V34_TX_STAGE_SECOND_A: return "SECOND_A";
     case V34_TX_STAGE_L1: return "L1";
     case V34_TX_STAGE_L2: return "L2";
+    case V34_TX_STAGE_POST_INFO0_RESUME_A: return "POST_INFO0_RESUME_A";
     case V34_TX_STAGE_POST_L2_WAIT_TONE_B: return "POST_L2_WAIT_TONE_B";
     case V34_TX_STAGE_POST_L2_A: return "POST_L2_A";
     case V34_TX_STAGE_POST_L2_NOT_A: return "POST_L2_NOT_A";
@@ -643,6 +644,7 @@ static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len);
 static void second_a_baud_init(v34_state_t *s);
 static void post_l2_wait_tone_b_init(v34_state_t *s);
 static void answer_resume_probe(v34_state_t *s, const char *reason);
+static int post_info0_resume_bauds(void);
 static int answer_info0_retry_policy(void);
 static int post_l2_tone_b_wait_bauds(v34_state_t *s);
 static void pre_info1_a_init(v34_state_t *s);
@@ -2759,6 +2761,18 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
             initial_ab_not_ab_baud_init(s);
         }
         else if (s->tx.stage == V34_TX_STAGE_INFO0_RETRY
+                 &&  !s->tx.calling_party
+                 &&  !s->tx.v90_mode
+                 &&  s->tx.duplex
+                 &&  s->tx.phase2_probe_sent)
+        {
+            /* The acknowledged INFO0a is complete.  Do not wait here for
+               another INFO0c and do not repeat INFO0a while waiting: this
+               call modem takes the acknowledgement and moves on by itself,
+               and every further INFO0 it sees restarts its recovery. */
+            answer_resume_probe(s, "INFO0 acknowledgement sent");
+        }
+        else if (s->tx.stage == V34_TX_STAGE_INFO0_RETRY
                  && s->rx.received_event == V34_EVENT_INFO0_OK)
         {
             /* A valid INFO0c arrived while we were retrying — go straight to Tone A */
@@ -3027,11 +3041,51 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         break;
     case V34_TX_STAGE_FIRST_NOT_A:
         /* Send phase reversed pure tone until we see another phase reversal */
-        if (s->rx.received_event == V34_EVENT_REVERSAL_1)
+        if (s->rx.received_event == V34_EVENT_REVERSAL_1
+            ||
+            s->rx.tone_b_ended)
         {
-            /* Second reversal seen - wait 40+=1ms */
+            /* Second reversal seen - wait 40+=1ms.
+               Tone B *ending* counts as well: 11.2.1.1.3 has the call modem
+               answer our reversal with its own, hold Tone B 10 ms more and
+               then transmit silence, so the carrier dropping is the same
+               event seen from the other side.  On a call where the reversal
+               itself was missed this is the only evidence of it, and without
+               it the answer modem holds !A forever against a peer that has
+               already gone quiet and is waiting for the probe -- measured
+               against a SmartLink call modem after the 11.2.2.2.1 INFO0
+               recovery. */
+            if (s->rx.tone_b_ended  &&  s->rx.received_event != V34_EVENT_REVERSAL_1)
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - FIRST_NOT_A: Tone B ended without a detected "
+                         "reversal; treating it as 11.2.1.1.3\n");
+            /*endif*/
+            s->rx.tone_b_ended = false;
             s->tx.tone_duration = 0;
             s->tx.stage = V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN;
+        }
+        /*endif*/
+        break;
+    case V34_TX_STAGE_POST_INFO0_RESUME_A:
+        /* Tone A, held before resuming 11.2.1.2.5.  The call modem needs this
+           time: it answers the acknowledged INFO0a by working through its own
+           recovery, and only then reaches the state where it receives L1/L2.
+           Measured against a SmartLink call modem, it got there about 80 ms
+           after taking our INFO0a and then waited 2 s before retraining, so a
+           short hold puts the probe inside that window; reversing immediately,
+           as this used to, put the probe in front of it. */
+        if (s->rx.tone_b_ended
+            ||
+            ++s->tx.tone_duration >= post_info0_resume_bauds())
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - Tone B %s after %d bauds of Tone A following the INFO0 "
+                     "acknowledgement; sending the 11.2.1.2.3 Tone A reversal\n",
+                     s->rx.tone_b_ended ? "ended" : "still up (timeout)",
+                     s->tx.tone_duration);
+            s->tx.tone_duration = 1;
+            s->tx.lastbit.re = -s->tx.lastbit.re;
+            s->tx.stage = V34_TX_STAGE_FIRST_NOT_A;
         }
         /*endif*/
         break;
@@ -4314,6 +4368,20 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
                 s->tx.info0_acknowledgement = (answer_info0_retry_policy() == 1);
                 info0_baud_init(s);
             }
+            else if (s->tx.phase2_probe_sent  &&  s->tx.phase2_info0_repeated)
+            {
+                /* Already answered this recovery.  Hold Tone A rather than
+                   probing again: measured against a SmartLink call modem, an
+                   answer modem that re-ran the 11.2.1.2.5 probe on every
+                   repeated INFO0c drove it round its recovery 20 times in one
+                   call, where holding Tone A let it pass and reach its
+                   receive-probe state.  Its INFO detector is fed the wideband
+                   probe whenever it is not in that state, which is the most
+                   likely source of the INFO0s it kept declaring. */
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - repeated INFO0c after the recovery was answered; "
+                         "holding Tone A (11.2.2.2.1)\n");
+            }
             else if (s->tx.phase2_probe_sent)
             {
                 /* 11.2.2.2.1 gives the answer modem two ways out of the INFO0
@@ -4361,7 +4429,25 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
                 s->rx.received_event = V34_EVENT_NONE;
             }
             /*endif*/
-            if (++s->tx.tone_duration >= info1c_wait_bauds(s))
+            s->tx.tone_duration++;
+            if (s->tx.phase2_info0_repeated
+                &&
+                s->tx.phase2_resume_count < 6
+                &&
+                s->tx.tone_duration >= (600*1500 + 500)/1000)
+            {
+                /* Post-recovery, and no INFO1c yet.  The call modem takes
+                   several seconds of its own recovery to reach the state where
+                   it receives L1/L2, and waits there only about 2 s before
+                   retraining -- measured, it got there 600 ms after our single
+                   resumed probe had finished.  Offer the probe again rather
+                   than sitting on Tone A until the INFO1c deadline. */
+                s->tx.tone_duration = 0;
+                answer_resume_probe(s, "no INFO1c since the INFO0 recovery");
+                break;
+            }
+            /*endif*/
+            if (s->tx.tone_duration >= info1c_wait_bauds(s))
             {
                 /* V.34/11.2.2.2.4: no INFO1c within 2000 ms + two round trip
                    delays.  Of the two permitted responses (retrain per
@@ -4460,17 +4546,48 @@ static int answer_info0_retry_policy(void)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Backstop on the Tone A hold after the INFO0 acknowledgement, in 600ths of a
+   second.  The normal exit is the call modem dropping Tone B, which 11.2.1.1.3
+   has it do exactly when it is ready to receive L1/L2; this only bounds the
+   wait if that never happens.  ME_V34_RESUME_DELAY_MS. */
+static int post_info0_resume_bauds(void)
+{
+    static int initialized = 0;
+    static int bauds = (600*800 + 500)/1000;
+
+    if (!initialized)
+    {
+        const char *value = getenv("ME_V34_RESUME_DELAY_MS");
+
+        if (value  &&  *value)
+        {
+            long ms = strtol(value, NULL, 10);
+
+            if (ms > 0  &&  ms < 5000)
+                bauds = (int) ((600*ms + 500)/1000);
+            /*endif*/
+        }
+        /*endif*/
+        initialized = 1;
+    }
+    /*endif*/
+    return bauds;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void answer_resume_probe(v34_state_t *s, const char *reason)
 {
+    s->tx.phase2_resume_count++;
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Tx - %s with the probe already sent; resuming at the "
              "11.2.1.2.5 Tone A reversal and L1/L2\n",
              reason);
     s->tx.current_getbaud = get_initial_fdx_a_not_a_baud;
-    s->tx.stage = V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN;
+    s->tx.stage = V34_TX_STAGE_POST_INFO0_RESUME_A;
     s->tx.tone_duration = 0;
     s->tx.persistence2 = 0;
     s->tx.current_modulator = V34_MODULATION_CC;
+    s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
     /* Put the receiver back where it stood at the same point of the first
        pass: watching for Tone B, with reversal 1 behind it, so the call
        modem's next Tone B reversal reads as the 11.2.1.2.7 one that arms
@@ -4479,11 +4596,17 @@ static void answer_resume_probe(v34_state_t *s, const char *reason)
        third, which arms nothing. */
     s->rx.stage = V34_RX_STAGE_TONE_B;
     s->rx.target_bits = (s->rx.duplex)  ?  (109 - (4 + 8 + 4))  :  (111 - (4 + 8 + 4));
+    s->rx.persistence1 = 0;
     s->rx.bit_count = 0;
     s->rx.persistence1 = 0;
     s->rx.persistence2 = 0;
-    s->rx.received_event = V34_EVENT_REVERSAL_1;
+    /* Leave the reversal ordinal at the start of the sequence, not part way
+       through it: the resume re-runs 11.2.1.2.3, so the call modem's next
+       Tone B reversal is the one FIRST_NOT_A waits on and the one after it is
+       11.2.1.2.7's, which arms L1/L2 reception -- exactly the first pass. */
+    s->rx.received_event = V34_EVENT_NONE;
     s->rx.tone_b_present = false;
+    s->rx.tone_b_ended = false;
 }
 /*- End of function --------------------------------------------------------*/
 
