@@ -297,6 +297,16 @@ static int phase3_rx_dump_count = 0;
    and below the 128T (~128 baud) S signal, so it is Ja-safe with margin. */
 #define PHASE3_S_DOMINANT_MIN           24
 #define PHASE3_S_DOMINANT_STABLE        48
+/* ...and how long is too long.  The note above records that the sustained
+   rotation detector false-fires on any steady single-frequency input, because
+   a constant differentially demodulates to a constant dibit -- A-law digital
+   silence, which decodes to +/-8 rather than to zero, is exactly such an
+   input.  Raw power does not separate the cases, but *duration* does, and for
+   free: 10.1.3.7 makes S 128T, so a dominant run an order of magnitude longer
+   than that cannot be S however strong it is.  Observed on the 2743 A-law
+   duplex row, a false detection carried a run of 1326 windows where a real one
+   carries at most about 128. */
+#define PHASE3_S_DOMINANT_RUN_MAX       256
 #define PHASE3_PP_ACQUIRE_LOG_INTERVAL  256
 #define PHASE3_PP_BAUD_LOG_INTERVAL     192
 
@@ -7019,6 +7029,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 s->phase3_s_stable_windows++;
             else
                 s->phase3_s_stable_windows = 0;
+            /*endif*/
 
             /* Sustained-rotation tracking: count how long one +/-90 dibit
                (dibit 1 or 3) dominates the 32-baud window.  A change of the
@@ -7091,9 +7102,11 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             && mag_prev > 0.2f
             && ((s->phase3_s_alt_count >= PHASE3_S_ALTERNATING_MIN
                  && s->phase3_s_stable_windows >= PHASE3_S_STABLE_WINDOWS)
-                || s->phase3_s_dom_windows >= PHASE3_S_DOMINANT_STABLE))
+                || (s->phase3_s_dom_windows >= PHASE3_S_DOMINANT_STABLE
+                    &&  s->phase3_s_dom_windows <= PHASE3_S_DOMINANT_RUN_MAX)))
         {
-            bool by_rotation = (s->phase3_s_dom_windows >= PHASE3_S_DOMINANT_STABLE);
+            bool by_rotation = (s->phase3_s_dom_windows >= PHASE3_S_DOMINANT_STABLE
+                                &&  s->phase3_s_dom_windows <= PHASE3_S_DOMINANT_RUN_MAX);
 
             s->phase3_s_present = true;
             s->phase3_s_event_count++;
@@ -7698,11 +7711,17 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
         break;
 
     case V34_RX_STAGE_PHASE4_S:
-        /* Phase 4: Detect the caller's S signal (constant 180° phase reversals).
-           S is data_bits=2 for every baud.  Due to imperfect carrier recovery,
-           we may see errors (~1 in 3 bauds).  Use a window-based detector:
-           count data_bits=2 in last 32 bauds.  S detected when count >= 20/32.
-           After S is confirmed, watch for a sustained drop (S→S-bar transition). */
+        /* Phase 4: detect the far end's S signal.  10.1.3.7 alternates between
+           point 0 and point 0 rotated counterclockwise by 90 degrees, so every
+           baud of S is a +/-90 degree step -- data_bits 1 or 3 with the +45
+           degree bias below, never 2.  This counted data_bits == 2, a 180
+           degree step, which S never produces: the detector was firing on
+           whatever noise happened to land in that quadrant, which is why it
+           needed 128 bauds and only 20 of 32 to declare.  Count the steps S
+           actually makes.  (The transmitter's own comment already said so --
+           "the same absolute-point generator as Phase 3 S rather than the old
+           180 degree differential sequence" -- but this half was never
+           brought along.) */
         ang1 = arctan2(sym->im, sym->re);
         ang2 = arctan2(s->last_sample.im, s->last_sample.re);
         ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
@@ -7713,7 +7732,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
         {
             int idx = (s->duration - 1) & 31;  /* circular index 0-31 */
             int old_was_2 = (s->duration > 32) ? ((s->s_window >> idx) & 1) : 0;
-            int new_is_2 = (data_bits == 2) ? 1 : 0;
+            int new_is_2 = (data_bits == 1  ||  data_bits == 3) ? 1 : 0;
 
             if (new_is_2)
                 s->s_window |= (1u << idx);
@@ -7742,7 +7761,47 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
         }
         #endif
 
-        if (s->duration >= 128 && s->s_detect_count >= 20)
+        /* Pin the handoff to the S-to-S-bar junction rather than to whenever a
+           window threshold happens to cross.  10.1.3.7 alternates S between two
+           points 90 degrees apart and starts S-bar 180 degrees from where S
+           ended, so the differential steps run ...+90,-90,+90 then *two* +90s
+           across the junction before resuming.  That repeat is the only place
+           the alternation breaks, it is where the spec puts the boundary, and
+           it does not move with the law or the symbol rate -- unlike a
+           threshold, which was landing at a different point in S for every row
+           of the matrix. */
+        if (s->phase4_s_bar_left < 0
+            &&
+            s->duration >= 64
+            &&
+            s->s_detect_count >= 24
+            &&
+            (data_bits == 1  ||  data_bits == 3)
+            &&
+            data_bits == s->phase4_s_last_step)
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 4: S-to-S-bar junction at baud %d (win=%d/32); "
+                     "16T of S-bar to go\n",
+                     s->duration, s->s_detect_count);
+            s->phase4_s_bar_left = 16;
+        }
+        /*endif*/
+        if (data_bits == 1  ||  data_bits == 3)
+            s->phase4_s_last_step = data_bits;
+        /*endif*/
+        if (s->phase4_s_bar_left > 0  &&  --s->phase4_s_bar_left == 0)
+        {
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - Phase 4: S-bar complete at baud %d, starting TRN\n",
+                     s->duration);
+            s->duration = 128;
+            s->s_detect_count = 32;
+        }
+        /*endif*/
+        if ((s->duration >= 128 && s->s_detect_count >= 24)
+            ||
+            s->phase4_s_bar_left == 0)
         {
             /* S signal confirmed.  Now transition to S-bar detection.
                We skip explicit S-bar detection since we can't reliably

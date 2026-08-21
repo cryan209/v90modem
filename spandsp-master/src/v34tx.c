@@ -5625,6 +5625,15 @@ static void info1_baud_init(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Rotate a training point by 180 degrees.  Both components, which is what
+   makes it a rotation rather than a reflection about the imaginary axis. */
+static void v34_rotate_180(complex_sig_t *p)
+{
+    p->re = -p->re;
+    p->im = -p->im;
+}
+/*- End of function --------------------------------------------------------*/
+
 static complex_sig_t get_s_not_s_baud(v34_state_t *s)
 {
 #if defined(SPANDSP_USE_FIXED_POINT)
@@ -5657,7 +5666,16 @@ static complex_sig_t get_s_not_s_baud(v34_state_t *s)
         /*endif*/
         if (s->tx.tone_duration == (128 + silence_bauds))
         {
-            s->tx.lastbit.re = -s->tx.lastbit.re;
+            /* 10.1.3.7: S-bar is S rotated by 180 degrees.  Negating only the
+               real part is that rotation *only* where the imaginary part is
+               zero, and the alternation puts a zero real part here every time,
+               so this was a no-op and S-bar went out identical to S.  The call
+               modem's whole Phase 3 hangs off that edge: 11.3.1.1.2 has it
+               begin training its equalizer on PP after detecting the
+               S-to-S-bar transition, so with no transition on the wire it
+               started PP at the wrong offset and its equalizer error pegged at
+               full scale from the first reading, on every call. */
+            v34_rotate_180(&s->tx.lastbit);
             s->tx.stage = V34_TX_STAGE_FIRST_NOT_S;
             s->tx.tone_duration = 0;
         }
@@ -5666,7 +5684,7 @@ static complex_sig_t get_s_not_s_baud(v34_state_t *s)
     case V34_TX_STAGE_FIRST_NOT_S:
         if (++s->tx.tone_duration == 16)
         {
-            s->tx.lastbit.re = -s->tx.lastbit.re;
+            v34_rotate_180(&s->tx.lastbit);
             if (s->tx.duplex  &&  md_bauds > 0)
                 s->tx.stage = V34_TX_STAGE_MD;
             else
@@ -5690,7 +5708,7 @@ static complex_sig_t get_s_not_s_baud(v34_state_t *s)
     case V34_TX_STAGE_SECOND_S:
         if (++s->tx.tone_duration == 128)
         {
-            s->tx.lastbit.re = -s->tx.lastbit.re;
+            v34_rotate_180(&s->tx.lastbit);
             s->tx.stage = V34_TX_STAGE_SECOND_NOT_S;
             s->tx.tone_duration = 0;
         }
@@ -5957,6 +5975,28 @@ static void s_not_s_baud_init(v34_state_t *s)
         preemp_idx = 0;
     }
     /*endif*/
+    {
+        /* Diagnostic override for the Phase 3 transmit shaping, so a peer whose
+           equalizer will not converge can be measured against a flat spectrum
+           without inventing an INFO1.  Not a policy knob: unset, the value the
+           governing INFO1 asked for is used, which is what the spec requires. */
+        const char *env = getenv("ME_V34_TX_PREEMP");
+
+        if (env  &&  *env)
+        {
+            int forced = atoi(env);
+
+            if (forced >= 0  &&  forced <= 10)
+            {
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - Phase 3: ME_V34_TX_PREEMP overrides pre-emphasis %d -> %d\n",
+                         preemp_idx, forced);
+                preemp_idx = forced;
+            }
+            /*endif*/
+        }
+        /*endif*/
+    }
     v34_tx_power(s, -14.0f - (float)power_reduction);
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Tx - Phase 3: applying %d dB power reduction (%.1f dBm0) [from %s]\n",
@@ -5994,6 +6034,11 @@ static void s_not_s_baud_init(v34_state_t *s)
              s->rx.high_carrier ? "high" : "low",
              carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
 
+    /* 10.1.3.7 requires S to "end with the transmission of point 0 rotated
+       counterclockwise by 90 degrees", which this seed already delivers: the
+       swap in get_s_not_s_baud() runs after the stage logic, so the symbols
+       returned alternate 90, 0, 90, ... and the last one before the S-bar
+       rotation is a 90 degree point. */
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
     s->tx.tone_duration = 0;
     s->tx.current_modulator = V34_MODULATION_V34;
@@ -6673,7 +6718,11 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
            for 128T, exactly as the Phase 3 S generator does. */
         if (++s->tx.tone_duration == PHASE4_S_BAUDS)
         {
-            s->tx.lastbit.re = -s->tx.lastbit.re;
+            /* Same defect as the Phase 3 generator had: negating only the real
+               part is a 180 degree rotation only where the imaginary part is
+               zero, and the alternation guarantees it is not, so S-bar went
+               out identical to S. */
+            v34_rotate_180(&s->tx.lastbit);
             s->tx.stage = V34_TX_STAGE_PHASE4_NOT_S;
             s->tx.tone_duration = 0;
             span_log(&s->logging, SPAN_LOG_FLOW,
@@ -6689,11 +6738,11 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
         return s->tx.lastbit;
 
     case V34_TX_STAGE_PHASE4_NOT_S:
-        /* The sign change above gives the normative S-to-S-bar data
-           transition; continue the 90°-separated alternation for 16T. */
+        /* The 180 degree rotation above is the normative S-to-S-bar
+           transition; continue the 90-degree-separated alternation for 16T. */
         if (++s->tx.tone_duration == 16)
         {
-            s->tx.lastbit.re = -s->tx.lastbit.re;
+            v34_rotate_180(&s->tx.lastbit);
             /* V.34 10.1.3.8 initializes the TRN scrambler to zero. */
             s->tx.scramble_reg = 0;
             s->tx.stage = V34_TX_STAGE_PHASE4_TRN;
@@ -6823,6 +6872,10 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
 
 static void phase4_rx_conditioning_init(v34_state_t *s, int initial_stage, const char *reason)
 {
+    /* The S-to-S-bar junction detector starts unarmed; a zeroed struct would
+       otherwise read as "junction already reached". */
+    s->rx.phase4_s_bar_left = -1;
+    s->rx.phase4_s_last_step = -1;
     const char *retain_env;
     bool retain_phase3_frontend;
 

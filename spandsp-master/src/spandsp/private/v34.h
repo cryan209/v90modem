@@ -1147,6 +1147,12 @@ typedef struct
         has the call modem go silent exactly when it is ready to receive the
         answer modem's L1/L2, so the falling edge is a readiness signal. */
     bool tone_b_ended;
+    /*! \brief Previous +/-90 step seen in Phase 4 S, for spotting the
+        S-to-S-bar junction (the one place the alternation repeats). */
+    int phase4_s_last_step;
+    /*! \brief Bauds remaining of S-bar after that junction, or -1 if the
+        junction has not been seen. */
+    int phase4_s_bar_left;
 
     bitstream_state_t bs;
     uint32_t bitstream;
