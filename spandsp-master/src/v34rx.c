@@ -10460,7 +10460,14 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
  *
  * All the training signals V.34 uses here -- S, S-bar, PP, TRN and MP -- are
  * constant modulus, so the eye centre is simply where the equalized output is
- * largest.  Evaluate both phases during training and take the bigger, with a
+ * largest.  It also minimises the spread of that output, and
+ * mean(|z|)^2/mean(|z|^2) is in principle the sharper of the two statistics --
+ * it is 1 for a constant modulus and falls away either side, where the mean
+ * alone separates the phases at 3429 baud by as little as 1.05.  Measured over
+ * 24 rows it is markedly worse (12 zero-error rows against 18), so the mean is
+ * what is used.  Requiring consecutive windows to agree before flipping is
+ * likewise worse (11 rows), because Phase 3 is short and a second 256-symbol
+ * window puts the decision after the point where it can still help.  Evaluate both phases during training and take the bigger, with a
  * margin and a minimum observation so noise cannot flip it, and a cap on the
  * number of flips so it cannot oscillate. */
 #define V34_EYE_OBSERVE_SYMBOLS         256
