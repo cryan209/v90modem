@@ -96,10 +96,20 @@ static int v34_trace_diagnostics(void)
 }
 
 /* Append one equalized training symbol to the file named by the environment
-   variable, if it is set.  This is what localised the Phase 4 collapse above
-   2400 baud: dumping Phase 3 and Phase 4 TRN symbols and comparing their
-   4th-power coherence separates "the constellation is smeared" from "the
-   hypothesis search picked the wrong scrambler". */
+   variable, if it is set.
+ *
+ * A warning about what these dumps will and will not tell you.  4th-power
+ * coherence over the Phase 4 TRN dump looks like a receiver-health metric and
+ * is not one: measured at 3200 baud u-law it reads 0.39-0.47 both in a run
+ * that completes with zero payload errors and in one that never trains at all.
+ * It was read as one here, and the conclusion it supported -- that the
+ * constellation collapses at the Phase 3 -> Phase 4 seam -- is wrong.  The
+ * apparent collapse was comparing ~130 Phase 3 symbols, which this dump only
+ * emits from inside a scoring block and so samples favourably, against 4800
+ * Phase 4 symbols spanning stretches where the far end is not sending TRN.
+ * The MP-stage decision error on the [EQ] line does separate the two cases
+ * (0.077 median passing against 0.583 failing).  Check any metric taken from
+ * here against a known-passing and a known-failing run before believing it. */
 static void v34_dump_training_symbol(const char *env_name,
                                      const char **path_cache,
                                      int calling_party,

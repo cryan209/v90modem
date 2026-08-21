@@ -113,9 +113,7 @@ encoding and precoder coefficients are session state.
       bit-identical to before.
 
    c. **Phase 4 CMA never stopped.**  11.4 begins from the tap solution
-      11.3 already trained, which over this bearer is right (Phase 3 TRN
-      demodulates at 4th-power coherence 0.98 at every rate) but is scaled
-      for Phase 3, not Phase 4.  Blind CMA corrects the level and then
+      11.3 already trained, but scaled for Phase 3, not Phase 4.  Blind CMA corrects the level and then
       keeps reshaping the solution with a phase-blind per-tap gradient;
       the existing 512T bound is keyed on `phase4_trn_after_j`, which only
       advances once J' has been seen, so it could not stop it.  CMA now
@@ -133,10 +131,23 @@ encoding and precoder coefficients are session state.
 
    Diagnostics for this work, all opt-in and all caching their getenv:
    `V34_P3TRN_SYM_DUMP` / `V34_P4TRN_SYM_DUMP` dump equalized training
-   symbols (comparing their 4th-power coherence is what separates "the
-   constellation is smeared" from "the hypothesis search picked the wrong
-   scrambler"), `V34_TRACE` enables the `[EQ]`/`[CMA]`/`[V34 RX]` traces,
-   and `V34_DUPLEX_LOG` gives the harness per-role spandsp flow logs.
+   symbols, `V34_TRACE` enables the `[EQ]`/`[CMA]`/`[V34 RX]` traces, and
+   `V34_DUPLEX_LOG` gives the harness per-role spandsp flow logs.
+
+   **Do not read 4th-power coherence off the Phase 4 TRN dump as a measure
+   of receiver health.**  It was used that way here and the conclusion it
+   supported -- that the constellation collapses at the Phase 3 -> Phase 4
+   seam -- is wrong.  Measured on 3200 baud u-law, the same window reads
+   0.39-0.47 in a run that completes with **zero errors** and in one that
+   fails outright; it does not separate them at all.  The apparent
+   "0.98 -> 0.42 collapse" was comparing a narrow, favourably gated Phase 3
+   sample (that dump only fires inside a scoring block, ~130 symbols) with
+   4800 Phase 4 symbols spanning stretches where the far end is not sending
+   TRN.  The metric that *does* track success is the MP-stage decision
+   error on the `[EQ]` line: 0.077 median in the passing 3200 run against
+   0.583 in the failing one.  The three fixes above are unaffected -- each
+   was validated on training completion and payload bit errors, not on
+   this metric.
 6. Add retrain, rate renegotiation and cleardown tests.
 7. Require a foreign-modem LAPM frame with valid FCS before calling a profile
    hardware-qualified.
