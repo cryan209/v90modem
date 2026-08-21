@@ -10464,8 +10464,9 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
  * margin and a minimum observation so noise cannot flip it, and a cap on the
  * number of flips so it cannot oscillate. */
 #define V34_EYE_OBSERVE_SYMBOLS         256
-#define V34_EYE_MARGIN                  1.10f
+#define V34_EYE_MARGIN                  1.05f
 #define V34_EYE_MAX_FLIPS               4
+#define V34_EYE_MIN_MAG                 0.10f
 
 static int v34_eye_select_enabled(void)
 {
@@ -10481,6 +10482,62 @@ static int v34_eye_select_enabled(void)
     return cache;
 }
 
+static int v34_eye_window(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *value = getenv("ME_V34_EYE_WINDOW");
+
+        cache = (value && atoi(value) > 0) ? atoi(value) : V34_EYE_OBSERVE_SYMBOLS;
+    }
+    /*endif*/
+    return cache;
+}
+
+static float v34_eye_margin(void)
+{
+    static float cache = -1.0f;
+
+    if (cache < 0.0f)
+    {
+        const char *value = getenv("ME_V34_EYE_MARGIN");
+
+        cache = value  ?  strtof(value, NULL)  :  V34_EYE_MARGIN;
+    }
+    /*endif*/
+    return cache;
+}
+
+static int v34_eye_max_flips(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *value = getenv("ME_V34_EYE_MAX_FLIPS");
+
+        cache = value  ?  atoi(value)  :  V34_EYE_MAX_FLIPS;
+    }
+    /*endif*/
+    return cache;
+}
+
+static float v34_eye_min_mag(void)
+{
+    static float cache = -1.0f;
+
+    if (cache < 0.0f)
+    {
+        const char *value = getenv("ME_V34_EYE_MIN_MAG");
+
+        cache = value  ?  strtof(value, NULL)  :  V34_EYE_MIN_MAG;
+    }
+    /*endif*/
+    return cache;
+}
+
 static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sample)
 {
     complexf_t eq_sample;
@@ -10491,8 +10548,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
        B1 equalizer, so both paths share the mapper and protocol state. */
     s->eq_buf[s->eq_step] = *sample;
     s->eq_step = (s->eq_step + 1) & V34_EQUALIZER_MASK;
+    /* Only while there is something on the line.  V.34 11.3.1.2.4 has the
+       answer modem go silent for the whole of the call modem's Phase 3, and
+       two near-zero sums differ by whatever noise decides -- which is a
+       coin-flip chance of moving the symbol instant to the wrong phase just
+       before the far end's Phase 4 S arrives. */
     eye_check = (v34_rx_stage_is_primary_training(s->stage)
-                 &&  s->eye_flips < V34_EYE_MAX_FLIPS
+                 &&  s->eye_flips < v34_eye_max_flips()
                  &&  v34_eye_select_enabled());
     if ((s->baud_half ^= 1))
     {
@@ -10511,9 +10573,20 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     if (eye_check)
     {
         s->eye_on_sum += sqrtf(eq_sample.re*eq_sample.re + eq_sample.im*eq_sample.im);
-        if (++s->eye_n >= V34_EYE_OBSERVE_SYMBOLS)
+        if (++s->eye_n >= v34_eye_window())
         {
-            if (s->eye_off_sum > V34_EYE_MARGIN*s->eye_on_sum)
+            /* Only decide on signal.  V.34 11.3.1.2.4 has the answer modem
+               silent for the whole of the call modem's Phase 3, and two
+               near-zero sums differ by whatever noise decides -- measured at
+               3429 baud, a flip was taken on sums of 15.5 against 13.0, a mean
+               |z| of 0.06, which is silence.  Both phases are compared after
+               the same AGC and equalizer, so their own magnitude is the test
+               to use, not the line power meter: it is the quantity the
+               decision is actually made on. */
+            if (s->eye_on_sum + s->eye_off_sum
+                    > 2.0f*v34_eye_min_mag()*v34_eye_window()
+                &&
+                s->eye_off_sum > v34_eye_margin()*s->eye_on_sum)
             {
                 s->eye_flips++;
                 span_log(s->logging, SPAN_LOG_FLOW,
