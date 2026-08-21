@@ -1227,6 +1227,14 @@ typedef struct
     /*! \brief Current write offset into the equalizer buffer. */
     int eq_put_step;
     int shaper_sets;
+    /* Samples per T/2 interval, as an exact rational in units of
+       1/V34_RX_PULSESHAPER_COEFF_SETS of a sample.  2800 baud is the one
+       V.34 symbol rate whose 8 kHz sample count per symbol (20/7) is not a
+       whole number of coefficient sets, so the increment is carried in
+       shaper_t2_acc rather than rounded. */
+    int shaper_t2_num;
+    int shaper_t2_den;
+    int shaper_t2_acc;
 
 #if defined(SPANDSP_USE_FIXED_POINT)
     /*! \brief The scaling factor assessed by the AGC algorithm. */

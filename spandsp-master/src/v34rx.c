@@ -11640,16 +11640,24 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     float qq;
     float v;
     int32_t power;
-    /* The following lead to integer values for the rx increments per symbol, for each of the 6 baud rates */
-    static const int steps_per_baud[6] =
-    {
-        192*8000/2400,
-        192*8000*7/(2400*8),
-        189*8000*6/(2400*7),
-        192*8000*4/(2400*5),
-        192*8000*3/(2400*4),
-        192*8000*7/(2400*10)
-    };
+    /* Samples per T/2 interval at 8 kHz, in units of 1/192 of a sample (192
+       being V34_RX_PULSESHAPER_COEFF_SETS, the polyphase resolution), as an
+       exact rational num/den.  V.34 5.1 puts symbol rate S = 2400*a/c, so
+       samples per symbol is 10c/3a and per T/2 interval 5c/3a:
+
+         2400 (1/1)  5/3    2743 (8/7)  35/24   2800 (7/6)  10/7
+         3000 (5/4)  4/3    3200 (4/3)  5/4     3429 (10/7) 7/6
+
+       Five of the six are a whole number of coefficient sets.  2800 is not
+       (192*10/7 = 274.29), and this table previously wrote 189 in place of
+       192 for that row alone to force an integer.  That is a 189/192 =
+       1.56% symbol-rate error, and per the project's own rule a sample-rate
+       error of a few ppm already destroys the constellation: 2800 baud never
+       demodulated.  Carry the remainder in shaper_t2_acc instead, so the
+       long-run rate is exact and the residual jitter is under 1/192 of a
+       sample. */
+    static const int t2_num[6] = {192*5, 192*35, 192*10, 192*4, 192*5, 192*7};
+    static const int t2_den[6] = {    3,     24,      7,     3,     4,     6};
 
     /* This branch is internal DSP only. v34_rx() still consumes exactly len
        8 kHz line samples; no sample is inserted into or removed from RTP. */
@@ -11682,7 +11690,15 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     }
     s->shaper_re = v34_rx_shapers_re[s->baud_rate][s->high_carrier];
     s->shaper_im = v34_rx_shapers_im[s->baud_rate][s->high_carrier];
-    s->shaper_sets = steps_per_baud[s->baud_rate];
+    if (s->shaper_t2_num != t2_num[s->baud_rate]
+        ||  s->shaper_t2_den != t2_den[s->baud_rate])
+    {
+        s->shaper_t2_num = t2_num[s->baud_rate];
+        s->shaper_t2_den = t2_den[s->baud_rate];
+        s->shaper_t2_acc = 0;
+    }
+    /*endif*/
+    s->shaper_sets = (2*s->shaper_t2_num + s->shaper_t2_den/2)/s->shaper_t2_den;
     /* Periodic diagnostic: log primary channel RX config on first entry and every 8000 samples */
     if (s->stage >= V34_RX_STAGE_PHASE3_TRAINING && (s->sample_time % 8000) < (unsigned)len)
     {
@@ -11993,7 +12009,10 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
                 /*endif*/
             }
             /*endif*/
-            s->eq_put_step += s->shaper_sets/2;
+            /* Exact rational T/2 advance; see t2_num/t2_den above. */
+            s->shaper_t2_acc += s->shaper_t2_num;
+            s->eq_put_step += s->shaper_t2_acc/s->shaper_t2_den;
+            s->shaper_t2_acc %= s->shaper_t2_den;
 #if defined(SPANDSP_USE_FIXED_POINT)
             qq = vec_circular_dot_prodi16(s->rrc_filter, (*s->shaper_im)[step], V34_RX_FILTER_STEPS, s->rrc_filter_step);
 #else
