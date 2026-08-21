@@ -78,7 +78,52 @@
 #include "spandsp/private/v34.h"
 
 #ifndef V34_TRACE_DIAGNOSTICS
-#define V34_TRACE_DIAGNOSTICS 0
+/* Opt-in diagnostics.  Each caches its getenv() so the check costs nothing
+   on the per-symbol paths that use it. */
+static int v34_diag_flag(const char *name, int *cache)
+{
+    if (*cache < 0)
+        *cache = (getenv(name) != NULL);
+    /*endif*/
+    return *cache;
+}
+
+static int v34_trace_diagnostics(void)
+{
+    static int cache = -1;
+
+    return v34_diag_flag("V34_TRACE", &cache);
+}
+
+/* Append one equalized training symbol to the file named by the environment
+   variable, if it is set.  This is what localised the Phase 4 collapse above
+   2400 baud: dumping Phase 3 and Phase 4 TRN symbols and comparing their
+   4th-power coherence separates "the constellation is smeared" from "the
+   hypothesis search picked the wrong scrambler". */
+static void v34_dump_training_symbol(const char *env_name,
+                                     const char **path_cache,
+                                     int calling_party,
+                                     int index,
+                                     float re,
+                                     float im)
+{
+    FILE *f;
+
+    if (*path_cache == NULL)
+        *path_cache = getenv(env_name)  ?  getenv(env_name)  :  "";
+    /*endif*/
+    if ((*path_cache)[0] == '\0')
+        return;
+    /*endif*/
+    if ((f = fopen(*path_cache, "a")) == NULL)
+        return;
+    /*endif*/
+    fprintf(f, "%s %d %.6f %.6f\n",
+            calling_party  ?  "caller"  :  "answer", index, re, im);
+    fclose(f);
+}
+
+#define V34_TRACE_DIAGNOSTICS v34_trace_diagnostics()
 #endif
 
 /* Phase 3 RX audio capture for offline analysis */
@@ -5197,9 +5242,11 @@ static __inline__ void pri_symbol_sync(v34_rx_state_t *s)
         && (s->duration & 0xFF) == 0
         && s->stage >= V34_RX_STAGE_PHASE3_WAIT_S)
     {
-        fprintf(stderr, "[V34 RX] baud=%d ted_phase=%.1f ted_corr=%d carrier=%.2fHz eq_step=%d\n",
+        fprintf(stderr, "[V34 RX] %s baud=%d ted_phase=%.1f ted_corr=%d carrier=%.2fHz eq_step=%d stage=%s\n",
+                s->calling_party ? "caller" : "answer",
                 s->duration, (double)s->pri_ted.baud_phase, s->total_baud_timing_correction,
-                dds_frequencyf(s->v34_carrier_phase_rate), s->eq_put_step);
+                dds_frequencyf(s->v34_carrier_phase_rate), s->eq_put_step,
+                v34_rx_stage_to_str(s->stage));
     }
 }
 /*- End of function --------------------------------------------------------*/
@@ -5368,8 +5415,10 @@ static void tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complex
     {
         float emag = sqrtf(ez.re*ez.re + ez.im*ez.im);
         float zmag = sqrtf(z->re*z->re + z->im*z->im);
-        fprintf(stderr, "[EQ] baud=%d err=%.4f mag=%.4f target_mag=%.4f delta=%.6f\n",
-                s->duration, emag, zmag, s->eq_target_mag, s->eq_delta);
+        fprintf(stderr, "[EQ] %s baud=%d err=%.4f mag=%.4f target_mag=%.4f delta=%.6f stage=%s\n",
+                s->calling_party ? "caller" : "answer",
+                s->duration, emag, zmag, s->eq_target_mag, s->eq_delta,
+                v34_rx_stage_to_str(s->stage));
     }
     ez.re *= s->eq_delta;
     ez.im *= s->eq_delta;
@@ -5404,7 +5453,14 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
        which symbol was transmitted.  Immune to the decision-directed convergence
        failure that occurs at 25% BER. */
     y_mag2 = z->re*z->re + z->im*z->im;
-    R2 = 1.0f;  /* Fixed unit radius for QPSK — R²=1.0 */
+    /* Fixed unit radius for QPSK.  Measured and ruled out as the cause of the
+       Phase 4 constellation collapse above 2400 baud: the Phase 3 solution
+       delivers |z| ~ 1.47 in this receiver's scale, so CMA does pull the tap
+       gain down 32% at the seam, but driving R2 from the PP-measured
+       eq_target_mag instead moves the level (0.90 -> 1.11) and leaves the
+       4th-power coherence where it was (0.42 -> 0.39).  The collapse is ISI,
+       not gain. */
+    R2 = 1.0f;
     error = R2 - y_mag2;
 
     /* On a real analogue line, the Phase 3 solution is usually useful at
@@ -5422,8 +5478,10 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
     /* Log CMA error periodically */
     if (V34_TRACE_DIAGNOSTICS && ((s->duration & 0xFF) == 0))
     {
-        fprintf(stderr, "[CMA] baud=%d err=%.4f mag=%.4f R=1.0000 delta=%.6f\n",
-                s->duration, error, sqrtf(y_mag2), s->eq_delta);
+        fprintf(stderr, "[CMA] %s baud=%d err=%.4f mag=%.4f R=1.0000 delta=%.6f stage=%s\n",
+                s->calling_party ? "caller" : "answer",
+                s->duration, error, sqrtf(y_mag2), s->eq_delta,
+                v34_rx_stage_to_str(s->stage));
     }
 
     /* Normalized CMA gradient: error * y / |y|² — normalizing by |y|²
@@ -7188,6 +7246,14 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 int score_pct;
 
                 score_pct = (100*best_trn_score + (s->phase3_trn_bits/2))/s->phase3_trn_bits;
+                {
+                    static const char *p3_dump_path = NULL;
+
+                    v34_dump_training_symbol("V34_P3TRN_SYM_DUMP", &p3_dump_path,
+                                             s->calling_party,
+                                             s->phase3_trn_bits,
+                                             sym->re, sym->im);
+                }
                 if (score_pct >= 70
                     &&
                     (s->phase3_trn_lock_hyp < 0  ||  score_pct > s->phase3_trn_lock_score))
@@ -7720,6 +7786,14 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             int lock_raw_sym;
 
             s->phase4_trn_after_j++;
+            {
+                static const char *p4_dump_path = NULL;
+
+                v34_dump_training_symbol("V34_P4TRN_SYM_DUMP", &p4_dump_path,
+                                         s->calling_party,
+                                         s->phase4_trn_after_j,
+                                         sym->re, sym->im);
+            }
             best_h = -1;
             best_score = -1;
             best_tap = -1;
