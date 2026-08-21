@@ -739,6 +739,10 @@ typedef struct
         probe as the V.34 answer modem.  The 11.2.2.2.1 INFO0 recovery
         resumes differently either side of that point. */
     bool phase2_probe_sent;
+    /*! \brief True once INFO0a has been repeated for the 11.2.2.2.1 INFO0
+        recovery, so a peer that keeps repeating INFO0c gets the probe it is
+        waiting for rather than an unbounded INFO0a storm. */
+    bool phase2_info0_repeated;
 
     /*! \brief V.90 mode: when true, INFO0 uses V.90 INFO0d format (62 bits)
         instead of standard V.34 INFO0 (49 bits).  Set by external v90 module. */

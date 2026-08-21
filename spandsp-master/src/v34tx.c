@@ -643,6 +643,7 @@ static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len);
 static void second_a_baud_init(v34_state_t *s);
 static void post_l2_wait_tone_b_init(v34_state_t *s);
 static void answer_resume_probe(v34_state_t *s, const char *reason);
+static int answer_info0_retry_policy(void);
 static int post_l2_tone_b_wait_bauds(v34_state_t *s);
 static void pre_info1_a_init(v34_state_t *s);
 static void second_b_baud_init(v34_state_t *s);
@@ -4299,7 +4300,21 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
                arrives - §11.2.2.1.1's "proceed according to 11.2.1.1.3". */
             s->rx.received_event = V34_EVENT_NONE;
             s->tx.tone_duration = 0;
-            if (s->tx.phase2_probe_sent)
+            if (s->tx.phase2_probe_sent
+                &&
+                answer_info0_retry_policy() != 0
+                &&
+                !s->tx.phase2_info0_repeated)
+            {
+                s->tx.phase2_info0_repeated = true;
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - repeated INFO0c during INFO1c wait; repeating INFO0a "
+                         "with bit 28 %s (11.2.2.2.1, ME_V34_INFO0_RETRY)\n",
+                         (answer_info0_retry_policy() == 1) ? "set" : "clear");
+                s->tx.info0_acknowledgement = (answer_info0_retry_policy() == 1);
+                info0_baud_init(s);
+            }
+            else if (s->tx.phase2_probe_sent)
             {
                 /* 11.2.2.2.1 gives the answer modem two ways out of the INFO0
                    recovery, and only the first of them transmits anything
@@ -4417,6 +4432,34 @@ static void second_a_baud_init(v34_state_t *s)
    recovery is meant to be survivable -- in the answer role it runs the
    identical "errorrecovery is initialized in TX_PHASE2" branch and then goes
    straight on to transmit L1/L2. */
+/* Which of 11.2.2.2.1's answers to a repeated INFO0c the answer modem gives
+   once it is past 11.2.1.2.5.  The clause offers two, and only one of them
+   transmits anything: acknowledge with bit 28, or -- "if the answer modem
+   detects Tone B and has received INFO0c" -- complete the current INFO0a and
+   transmit Tone A, which past 11.2.1.2.5 means no INFO0a at all.  This
+   selects between them so a peer can be measured against both; "noack" is a
+   third, non-conformant setting kept only for that measurement. */
+static int answer_info0_retry_policy(void)
+{
+    static int initialized = 0;
+    static int policy = 1;      /* 0 = none, 1 = acknowledged, 2 = unacknowledged */
+
+    if (!initialized)
+    {
+        const char *value = getenv("ME_V34_INFO0_RETRY");
+
+        if (value  &&  strcmp(value, "none") == 0)
+            policy = 0;
+        else if (value  &&  strcmp(value, "noack") == 0)
+            policy = 2;
+        /*endif*/
+        initialized = 1;
+    }
+    /*endif*/
+    return policy;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void answer_resume_probe(v34_state_t *s, const char *reason)
 {
     span_log(&s->logging, SPAN_LOG_FLOW,
