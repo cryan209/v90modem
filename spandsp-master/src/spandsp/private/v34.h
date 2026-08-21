@@ -1232,6 +1232,10 @@ typedef struct
        V.34 symbol rate whose 8 kHz sample count per symbol (20/7) is not a
        whole number of coefficient sets, so the increment is carried in
        shaper_t2_acc rather than rounded. */
+    /* Phase 4 CMA level convergence; see phase4_cma_converged(). */
+    float phase4_cma_mag;
+    int phase4_cma_bauds;
+    int phase4_cma_settled;
     int shaper_t2_num;
     int shaper_t2_den;
     int shaper_t2_acc;

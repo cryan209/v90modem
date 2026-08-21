@@ -152,12 +152,22 @@ static int run_case(int baud, int bps, bool alaw)
         int call_n = v34_tx(call_modem, call_tx, BLOCK_SAMPLES);
         int answer_n = v34_tx(answer_modem, answer_tx, BLOCK_SAMPLES);
 
-        if (call_n < BLOCK_SAMPLES)
+        if (call_n < BLOCK_SAMPLES) {
+            if (getenv("V34_DUPLEX_SHORT_LOG"))
+                fprintf(stderr, "[SHORT] block=%d caller n=%d rx_stage=%d tx_stage=%d\n",
+                        block, call_n, v34_get_rx_stage(call_modem),
+                        v34_get_tx_stage(call_modem));
             memset(call_tx + call_n, 0,
                    (size_t)(BLOCK_SAMPLES - call_n)*sizeof(call_tx[0]));
-        if (answer_n < BLOCK_SAMPLES)
+        }
+        if (answer_n < BLOCK_SAMPLES) {
+            if (getenv("V34_DUPLEX_SHORT_LOG"))
+                fprintf(stderr, "[SHORT] block=%d answer n=%d rx_stage=%d tx_stage=%d\n",
+                        block, answer_n, v34_get_rx_stage(answer_modem),
+                        v34_get_tx_stage(answer_modem));
             memset(answer_tx + answer_n, 0,
                    (size_t)(BLOCK_SAMPLES - answer_n)*sizeof(answer_tx[0]));
+        }
         for (int i = 0; i < BLOCK_SAMPLES; i++) {
             int call_abs = abs(call_tx[i]);
             int answer_abs = abs(answer_tx[i]);

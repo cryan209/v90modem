@@ -248,6 +248,9 @@ static int phase3_rx_dump_count = 0;
 #define PHASE4_MP_DIBIT_LOG_INTERVAL    1600
 #define PHASE4_MP_REJECT_DETAIL_LOG_INTERVAL 3200
 #define PHASE3_S_BAUD_LOG_INTERVAL      1000
+/* Phase 4 CMA runs until the level estimate settles; see phase4_cma_converged(). */
+#define PHASE4_CMA_SETTLE_BAUDS         128
+#define PHASE4_CMA_SETTLE_TOL           0.05f
 #define PHASE3_S_ALTERNATING_MIN        24
 #define PHASE3_S_STABLE_WINDOWS         32
 /* Sustained-rotation S detection (see private/v34.h): a +/-90 degrees/symbol
@@ -5437,6 +5440,85 @@ static void tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complex
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Has Phase 4 CMA done the job it is there for?
+ *
+ * Track the equalizer output magnitude and declare the level converged once a
+ * settled estimate sits inside a tolerance of the unit circle CMA drives to.
+ * Once it does, CMA stands down for the rest of Phase 4 and the 11.3 solution
+ * is carried into MP unchanged.  Deliberately sticky: a momentary excursion
+ * must not restart the blind gradient, which is the behaviour being removed.
+ * ME_V34_PHASE4_CMA=full restores the unbounded historical loop for A/B. */
+static int phase4_cma_settle_bauds(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *value = getenv("ME_V34_PHASE4_CMA_BAUDS");
+
+        cache = (value && atoi(value) > 0) ? atoi(value) : PHASE4_CMA_SETTLE_BAUDS;
+    }
+    return cache;
+}
+
+static float phase4_cma_settle_tol(void)
+{
+    static float cache = -1.0f;
+
+    if (cache < 0.0f)
+    {
+        const char *value = getenv("ME_V34_PHASE4_CMA_TOL");
+
+        cache = (value && strtof(value, NULL) > 0.0f) ? strtof(value, NULL) : PHASE4_CMA_SETTLE_TOL;
+    }
+    return cache;
+}
+
+static int phase4_cma_converged(v34_rx_state_t *s, const complexf_t *z)
+{
+    static int unbounded = -1;
+    float mag;
+
+    if (unbounded < 0)
+    {
+        const char *value = getenv("ME_V34_PHASE4_CMA");
+
+        unbounded = (value  &&  strcmp(value, "full") == 0);
+    }
+    /*endif*/
+    if (unbounded)
+        return 0;
+    /*endif*/
+    if (s->stage != V34_RX_STAGE_PHASE4_TRN)
+        return 0;
+    /*endif*/
+    if (s->phase4_cma_settled)
+        return 1;
+    /*endif*/
+    mag = sqrtf(z->re*z->re + z->im*z->im);
+    if (!isfinite(mag))
+        return 0;
+    /*endif*/
+    if (s->phase4_cma_mag <= 0.0f)
+        s->phase4_cma_mag = mag;
+    else
+        s->phase4_cma_mag += 0.02f*(mag - s->phase4_cma_mag);
+    /*endif*/
+    if (++s->phase4_cma_bauds >= phase4_cma_settle_bauds()
+        &&  fabsf(s->phase4_cma_mag - 1.0f) <= phase4_cma_settle_tol())
+    {
+        s->phase4_cma_settled = 1;
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4: CMA level converged after %d bauds (|z|=%.3f); "
+                 "holding the Phase 3 tap solution\n",
+                 s->phase4_cma_bauds, (double) s->phase4_cma_mag);
+        return 1;
+    }
+    /*endif*/
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
 {
     int i;
@@ -10072,8 +10154,19 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    the DA loop just fixed. */
                 bool da_owns_eq = v34_rx_stage_is_phase4_frame(s->stage)
                                && s->phase4_da_seeded;
-                if (!t_cma->tx.tx_data_mode && !freeze_mp_cma && !da_owns_eq)
+                /* V.34 11.4: Phase 4 starts from the tap solution 11.3 already
+                   trained on PP and TRN.  What that solution needs is a level
+                   correction, not more shaping -- Phase 3 leaves |z| ~ 1.47 in
+                   this receiver's units and the Phase 4 slicer expects the unit
+                   circle.  Blind CMA supplies the level, but its phase-blind
+                   per-tap gradient keeps walking the trained solution after the
+                   level is right, and above 2400 baud it walks it off: the
+                   Phase 4 TRN hypothesis search then reads a flat 50% ones for
+                   the rest of the call.  Let it converge, then stop it. */
+                if (!t_cma->tx.tx_data_mode && !freeze_mp_cma && !da_owns_eq
+                    && !phase4_cma_converged(s, sym))
                     tune_equalizer_cma(s, sym);
+                /*endif*/
             }
             /*endif*/
 
@@ -12103,7 +12196,6 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
             zz.re = sample.re*z.re - sample.im*z.im;
             zz.im = -sample.re*z.im - sample.im*z.re;
             process_primary_half_baud(s, &zz);
-
         }
         /*endif*/
 #if defined(SPANDSP_USE_FIXED_POINT)
