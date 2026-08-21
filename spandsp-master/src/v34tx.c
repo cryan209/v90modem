@@ -6686,6 +6686,41 @@ static int phase4_trn_max_bauds(const v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Cap on how long Phase 4 TRN is transmitted, in bauds.  11.4.1.2.2 requires
+   at least 512T and allows up to 2000 ms plus a round trip, and the transmit
+   side normally runs until *our* receiver reports itself trained -- which takes
+   4703 bauds, 1960 ms at 2400 baud, i.e. the whole allowance.  A conformant
+   call modem only guarantees 512T of its own TRN and then waits for our MP, so
+   spending the entire budget before sending it leaves the peer's own recovery
+   timer to expire first: measured, it decoded our MP, logged "MP detected,
+   starting MP' txmit", and retrained 20 ms later.  ME_V34_PHASE4_TRN_MAX
+   bounds our TRN independently of the receiver's readiness; 0 (the default)
+   keeps the old behaviour, where the two are tied together. */
+static int phase4_trn_tx_max_bauds(void)
+{
+    static int initialized = 0;
+    static int bauds = 0;
+
+    if (!initialized)
+    {
+        const char *value = getenv("ME_V34_PHASE4_TRN_MAX");
+
+        if (value  &&  *value)
+        {
+            long v = strtol(value, NULL, 10);
+
+            if (v >= PHASE4_TRN_BAUDS  &&  v < 100000)
+                bauds = (int) v;
+            /*endif*/
+        }
+        /*endif*/
+        initialized = 1;
+    }
+    /*endif*/
+    return bauds;
+}
+/*- End of function --------------------------------------------------------*/
+
 static complex_sig_t get_phase4_baud(v34_state_t *s)
 {
     int phase4_trn_guard_bauds;
@@ -6825,7 +6860,9 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
                 mp_or_mph_baud_init(s);
             }
             else if (s->tx.tone_duration >= PHASE4_TRN_BAUDS
-                && s->rx.received_event == V34_EVENT_PHASE4_TRN_READY)
+                && (s->rx.received_event == V34_EVENT_PHASE4_TRN_READY
+                    ||  (phase4_trn_tx_max_bauds() > 0
+                         &&  s->tx.tone_duration >= phase4_trn_tx_max_bauds())))
             {
                 span_log(&s->logging, SPAN_LOG_FLOW,
                          "Tx - Phase 4: TRN complete (%d bauds) and far-end J'/TRN confirmed, starting MP\n",

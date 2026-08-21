@@ -60,9 +60,14 @@ def frames(bits, want_type=None):
                             + bits[i+154:i+170])
                     crc = bits[i+171:i+187]
                 want = crc16(body)
+                # The CRC field goes on the wire most significant bit first,
+                # matching the MSB-first generator above.  Reading it LSB-first
+                # is the bit-reflection of the same value, so a correct frame
+                # still fails -- which is what made a clean 99-frame decode of a
+                # foreign modem's MP look like "no CRC ever validates".
                 got = 0
                 for k, b in enumerate(crc):
-                    got |= (b & 1) << k
+                    got |= (b & 1) << (15 - k)
                 yield (i, t, want == got, want, got)
             i += 1
         else:
@@ -74,7 +79,15 @@ def main():
     absd = [int(r[2]) for r in rows]
     print("symbols: %d" % len(rows))
     best = None
-    for domain_name, dibits in (("diff", diff), ("abs", absd)):
+    # 10.1.3.3/10.1.3.9 rotate the point *clockwise* by Zn*90 degrees, so the
+    # angle difference a receiver measures is -(Zn - Zn-1)*90: the recovered
+    # dibit is the negation of the transmitted one, mod 4.  Try both, because
+    # getting this backwards is a documented trap in this tree (the V.90 CP
+    # decode hit exactly it) and nothing upstream of the CRC can catch it --
+    # an all-ones preamble is invariant under the negation.
+    for domain_name, dibits in (("diff", diff), ("abs", absd),
+                                ("diff-neg", [(-d) & 3 for d in diff]),
+                                ("abs-neg", [(-d) & 3 for d in absd])):
         for order in (0, 1):
             bits = []
             for d in dibits:

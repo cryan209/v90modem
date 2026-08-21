@@ -8984,11 +8984,25 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    not let the reject/no-lock escapes wander off it: there is
                    nothing to search for, and wandering only trades the one
                    correct transform for false preamble hits. */
-                pin_diff_hyp = (v90_cp_rx
-                                && mp_decode_domain == 0
-                                && s->v90_cp_diff_hypothesis >= 0);
+                /* Not just V.90 CP: plain V.34 MP is the same construction.
+                   10.1.3.9 generates the 4-point MP "as described in 10.1.3.3",
+                   which rotates the point CLOCKWISE by Zn*90 degrees, and the
+                   receiver measures the increment counter-clockwise -- so the
+                   recovered dibit is the negation of the transmitted one there
+                   too, fixed by the encoder and the table rather than by the
+                   channel.  Leaving it to the search cost the whole exchange:
+                   measured against a SmartLink call modem, the search settled
+                   on hypothesis 18 with the bit order swapped and decoded
+                   garbage behind a perfect preamble, while replaying the same
+                   symbols through the negation gives 98 frame syncs at exactly
+                   188 bits apart, all Type 1, 97 of them CRC-valid. */
+                pin_diff_hyp = (mp_decode_domain == 0);
                 if (pin_diff_hyp)
-                    hint_h = s->v90_cp_diff_hypothesis;
+                {
+                    hint_h = (v90_cp_rx  &&  s->v90_cp_diff_hypothesis >= 0)
+                           ?  s->v90_cp_diff_hypothesis
+                           :  MP_HYPOTHESIS_DIFF_INVERSE;
+                }
                 /*endif*/
                 strict_mp0_lock = (s->mp_seen == 0 && expected_mp_type == 0);
                 /* Constrain early MP lock to the TRN/J hint until we have

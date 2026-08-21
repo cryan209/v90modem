@@ -181,16 +181,17 @@ test: $(TEST_TARGETS)
 	./v34_mp_test
 	./v34_data_test
 	./v34_gardner_test
-# The rows that recover payload without a single bit error.  Fixing the
-# S-to-S-bar rotation moved which of the marginal rows do that: 3000 u-law
-# joined it (that row used to carry 136 errors) while 2800 A-law and 3429
-# A-law dropped out, both now stalling in the Phase 4 MP exchange with S,
-# S-bar and TRN clean.  `make v34-matrix-test` runs all twelve.
+# The rows that recover payload without a single bit error.  Which of the
+# marginal rows do that keeps moving as Phase 4 is corrected, and the suite
+# says so rather than hiding it: pinning the MP dibit transform to 10.1.3.3's
+# known negation swapped 2800 A-law in for 2800 u-law, leaving the count at
+# nine.  3429 does not train in either law.  `make v34-matrix-test` runs all
+# twelve.
 	./v34_duplex_test 2400 9600 ulaw
 	./v34_duplex_test 2400 9600 alaw
 	./v34_duplex_test 2743 9600 ulaw
 	./v34_duplex_test 2743 9600 alaw
-	./v34_duplex_test 2800 9600 ulaw
+	./v34_duplex_test 2800 9600 alaw
 	./v34_duplex_test 3000 9600 ulaw
 	./v34_duplex_test 3000 9600 alaw
 	./v34_duplex_test 3200 9600 ulaw
