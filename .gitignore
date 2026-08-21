@@ -41,6 +41,8 @@ v34_mp_test
 v34_data_test
 v34_gardner_test
 v34_duplex_test
+v90_upstream_replay
+v90_engine_replay
 
 # Common maps/logs
 *.map
