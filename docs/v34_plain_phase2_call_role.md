@@ -1,4 +1,4 @@
-# Plain V.34 against d-modem: the peer's call-role Phase 2 does not complete
+# Plain V.34 against d-modem: Phase 2 and Phase 3 now complete
 
 Status as of 2026-08-21.  Rig and dial recipe: `tools/soak/v34_lapm_call.sh`
 (peer forced to V.34 only with `AT+MS=34,0,2400,33600`, automode off), server
@@ -29,7 +29,41 @@ Tone B is seen.  Before the fix our receiver then read the peer's INFO0c
 repeats as its L1/L2 probe and "analysed" them; after it, the 11.2.1.2.7 path
 runs on a real Tone B reversal.
 
-## The blocker, and why it is not ours
+## Superseded: the "peer's call-role Phase 2 cannot complete" reading
+
+**That was wrong, and the evidence for it was ours.**  Everything below the
+next heading is kept because the measurements are real and the traps are worth
+knowing, but the conclusion it reached is not.  What the peer needed after the
+11.2.2.2.1 INFO0 recovery was the *first* Tone A phase reversal of 11.2.1.2.3,
+not the probe: that reversal is what makes it answer with its own Tone B
+reversal, fall silent per 11.2.1.1.3, and only then arm its probe receiver.
+See the commit "V.34 Phase 2 completes against the SmartLink peer".
+
+Phase 3 then failed for a second reason, also ours and also invisible to
+loopback: **10.1.3.7's S-bar was never rotated**.  The code wrote the 180
+degree rotation as `lastbit.re = -lastbit.re`, which is a rotation only where
+the imaginary part is zero, and the alternation lands on the zero-real-part
+point every time -- so S-bar went out identical to S and the S-to-S-bar
+transition, which 11.3.1.1.2 hangs the call modem's entire equalizer training
+off, was not on the wire at all.  `tools/v34_phase3_verify.py` is what found
+it: PP correlates at 0.97 against 10.1.3.6's own definition, so PP, the symbol
+rate and the carrier were all right, and stepping back through the symbols
+before it showed the S alternation running unbroken into PP.
+
+Live, with both fixed: `S-S1 is detected, rxsymcnt = 128` where it read 150-152
+before, `equerr` 25132 -> 68 -> 60 where it had been pegged at 32767 from the
+first reading on every call, and the peer goes on to transmit its own PP, TRN
+and J, detect our Phase 4 S, and complete the MP exchange -- it logs `MP
+detected, starting MP' txmit`.
+
+**Where it stops now:** our Phase 4 receiver does not decode the peer's MP.
+Our own Phase 4 TRN ones-lock reaches 99%, so the receiver is tracking, but the
+88-bit MP frames come out with a few bit errors each and no CRC ever validates,
+so we never send MP-prime and the peer retrains.  That is the frontier
+`docs/v34_spec_gap.md` already names -- foreign-modem data mode after E/B1 --
+reached for the first time.
+
+## The old reading, and the measurements behind it
 
 Every call, the peer declares
 
