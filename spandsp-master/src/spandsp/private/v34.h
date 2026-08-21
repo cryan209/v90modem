@@ -1667,6 +1667,15 @@ typedef struct
         a decision-directed loop that can hold a dense constellation but never
         acquire one. */
     int32_t phase4_da_derot_rate;
+    /*! \brief Running mean squared distance of data-mode symbols from the
+        constellation grid, and the baseline it settled at just after B1.  The
+        decision-directed equalizer may only adapt while the first is close to
+        the second: on a real line a disturbance the frozen-tap receiver rides
+        out is one the adapting one turns permanent, because it then trains on
+        decisions the disturbance has already made wrong. */
+    float data_decision_ema;
+    float data_decision_baseline;
+    int data_decision_count;
     int last_logged_mp_diag_state;
 
     int dft_ptr;

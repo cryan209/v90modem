@@ -5534,6 +5534,29 @@ static float data_mode_freq_gain(void)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Step-size scale for the data-mode DD-LMS, relative to the training step.
+   Training's step is sized for a constant-modulus reference that is right every
+   time; data decisions are neither, and on a real channel a step that is fine
+   over a flat loopback walks the taps off: measured live at 3000 baud/9600, the
+   full step took a call that had been sitting at 0.10 from the lattice out to
+   0.66 within twelve thousand symbols and cost three quarters of the payload,
+   while the same call with data-mode adaptation off held 0.10 to the end.
+   ME_V34_DATA_EQ_STEP sweeps it. */
+static float data_mode_eq_step(void)
+{
+    static float step = -1.0f;
+
+    if (step < 0.0f)
+    {
+        const char *value = getenv("ME_V34_DATA_EQ_STEP");
+
+        step = (value  &&  *value)  ?  (float) atof(value)  :  1.0f;
+    }
+    /*endif*/
+    return step;
+}
+/*- End of function --------------------------------------------------------*/
+
 static float data_mode_decision_gate(void)
 {
     static float gate = -1.0f;
@@ -10284,6 +10307,9 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     }
                     /*endif*/
                 }
+                s->data_decision_ema = 0.0f;
+                s->data_decision_baseline = 0.0f;
+                s->data_decision_count = 0;
                 s->data_symbol_conjugate = conjugate;
                 s->data_symbol_rotation = 0;
                 s->data_symbol_scale = (gain > 0.0001f) ? 1.0f/gain : 1.0f;
@@ -10419,12 +10445,38 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 float t_im = 2.0f*floorf(g_im/2.0f) + 1.0f;
                 float d2 = (g_re - t_re)*(g_re - t_re)
                          + (g_im - t_im)*(g_im - t_im);
+                bool healthy;
 
-                /* Adapt only on decisions that are probably right.  Two thirds
-                   is the distance of a symbol with no relation to the lattice,
-                   so half of that keeps the gradient pointing the right way
-                   even while most of the constellation is still smeared. */
-                if (d2 < data_mode_decision_gate()  &&  s->data_symbol_scale > 0.0f)
+                /* How well the receiver is doing, and how well it was doing
+                   once B1 had settled it.  The absolute value means nothing on
+                   its own -- it depends entirely on how dense the constellation
+                   is -- so the baseline is measured on this call rather than
+                   assumed. */
+                s->data_decision_ema += (d2 - s->data_decision_ema)/256.0f;
+                if (s->data_decision_count < 4096)
+                {
+                    s->data_decision_count++;
+                    s->data_decision_baseline = s->data_decision_ema;
+                    healthy = true;
+                }
+                else
+                {
+                    healthy = (s->data_decision_ema
+                               < 2.0f*s->data_decision_baseline + 0.02f);
+                }
+                /*endif*/
+                /* Adapt only on decisions that are probably right, and only
+                   while the receiver as a whole still is.  Without the second
+                   test this loop is a ratchet: measured live at 3000 baud/9600,
+                   a call sitting at 0.10 from the lattice took one disturbance
+                   and went to 0.66 for the rest of the call, delivering 73 of
+                   300 pattern lines, where the same call with data-mode
+                   adaptation off held 0.10 throughout and delivered all 300.
+                   Freezing on the way down leaves exactly that frozen-tap
+                   behaviour as the worst case. */
+                if (healthy
+                    &&  d2 < data_mode_decision_gate()
+                    &&  s->data_symbol_scale > 0.0f)
                 {
                     complexf_t da_target;
                     float ct = cosf((float) s->phase4_da_derot
@@ -10439,7 +10491,13 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                        before it. */
                     da_target.re = ur*ct - ui*st;
                     da_target.im = ui*ct + ur*st;
-                    tune_equalizer(s, sym, &da_target);
+                    {
+                        float saved = s->eq_delta;
+
+                        s->eq_delta *= data_mode_eq_step();
+                        tune_equalizer(s, sym, &da_target);
+                        s->eq_delta = saved;
+                    }
                 }
                 /*endif*/
             }
