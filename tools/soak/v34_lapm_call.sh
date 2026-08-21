@@ -10,6 +10,11 @@ SERVERLOG=${1:?usage: v34_lapm_call.sh server.log [hold-sec] [serial-out]}
 HOLD=${2:-120}
 SERIAL_OUT=${3:-/tmp/v34-lapm-serial.out}
 SLMODEMD=${SLMODEMD:-/src/slmodemd/slmodemd}
+# The rig's own loop model pads its transmit by this factor before the ZOH
+# staircase and 4400 Hz lowpass.  0.25 is -12 dB and is what the V.90 work
+# settled on; it is also most of why this rig's channel measures 16.8 dB and
+# will not carry a dense constellation.
+HEADROOM=${HEADROOM:-0.25}
 MS=${MS:-34,0,2400,33600}
 # Error-control mode for the peer's DTE interface.  \N0 is normal (no error
 # correction) -- it is what the V.90 V.14 soak needs, and with it the peer
@@ -21,7 +26,7 @@ NPARM=${NPARM:-'\\N3'}
 echo "CONTROL: bouncing rig ($SLMODEMD, AT+MS=$MS)"
 ssh -o BatchMode=yes "$TOWER" "docker restart d-modem" >/dev/null 2>&1
 sleep 8
-ssh -o BatchMode=yes "$TOWER" "docker exec -d -e SIP_LOGIN=6000:6000@asterisk.net.cryan.nz -e DM_RESAMPLER=sinc -e DM_RS_HEADROOM=0.25 d-modem sh -c '$SLMODEMD -d9 -e /src/d-modem > /tmp/slm.log 2>&1'" 2>/dev/null
+ssh -o BatchMode=yes "$TOWER" "docker exec -d -e SIP_LOGIN=6000:6000@asterisk.net.cryan.nz -e DM_RESAMPLER=sinc -e DM_RS_HEADROOM=$HEADROOM d-modem sh -c '$SLMODEMD -d9 -e /src/d-modem > /tmp/slm.log 2>&1'" 2>/dev/null
 sleep 12
 
 off=$(stat -f %z "$SERVERLOG" 2>/dev/null); off=${off:-0}
