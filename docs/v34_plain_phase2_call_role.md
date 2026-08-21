@@ -203,3 +203,84 @@ caller, so V.8 caller, and V.34 **answer** modem because §9.2.2 hands the
 analogue modem the answer modem's timetable.  Plain V.34 cannot reproduce that
 pairing -- V.34 ties the role to the call direction -- so V.34-only to data
 against this peer needs a fix in its DSP, or a different peer.
+
+## Data mode and V.42 LAPM reached (2026-08-22)
+
+A plain V.34 call to this rig now completes Phase 4, enters data mode, brings
+up V.42 LAPM, and carries error-free payload: 76 numbered lines written to our
+PTY arrived at the peer's DTE contiguous and byte-exact (`artifacts/
+v34-lapm-20260822T-c50`).  Four things stood in the way, and the last two were
+not in the modem at all.
+
+**1. The peer's MP was decoding all along; the CRC check read it backwards.**
+`tools/v34_mp_offline.py` computed the frame CRC MSB first, as 10.1.2.3.2's
+generator runs, and then read the received CRC *field* LSB first.  Those two
+readings are the bit reflection of one another, so a perfect frame fails.  Read
+the same way round, the c31 dump gives 101 Type 1 frames exactly 188 bits
+apart, 99 of the 100 complete ones bit-identical, and 100 CRC-valid.  Nothing
+was ever wrong with what arrived.
+
+**2. The MP dibit transform is not searchable.**  10.1.3.9 generates the
+4-point MP as in 10.1.3.3, which advances the point index, and
+`training_constellation_4` is ordered so an increasing index rotates
+*clockwise* while the receiver measures the increment counter-clockwise: the
+recovered dibit is always the negation of the transmitted one
+(`MP_HYPOTHESIS_DIFF_INVERSE`), fixed by the encoder and the table rather than
+by the channel.  The V.90 CP decode already pinned exactly this; plain V.34 MP
+now does too.  Left to the search it settled on hypothesis 18 with the bit
+order swapped -- neither a TRN of scrambled ones nor MP's own 17-ones sync can
+tell one bit order from the other, so a wrong lock survives the preamble and
+dies at every CRC.  Suppressing the retry rotation as well was tried and is
+*not* in: with the hypothesis pinned it is redundant, and together the two cost
+the 2400 matrix rows 103 and 418 bit errors.
+
+**3. THE BLOCKER: the receiver refused any first MP that was not Type 0.**  The
+gate was tuned against this tree's own transmitter, which sends Type 0.  The
+type bit says whether the frame carries 11.4.1.2's precoder coefficients, and a
+modem that precodes sends MP1 from its first frame -- every one of the 87
+CRC-valid frames in the c37 dump is Type 1, present in the same dibits the live
+receiver was fed while it locked nothing and timed out at 20000 bauds.  Nothing
+in 10.1.3.9 or 11.4.1.2 orders the types; the CRC is what rejects a false lock.
+With the gate gone, MP1 is accepted, MP' goes out, E is detected, B1 correlates
+at 0.996 and data mode starts.  The loopback matrix *improves*: ten of twelve
+rows recover payload with zero errors, which is every rate that trains at all,
+in both laws.
+
+**4. We asked for a rate we cannot receive.**  Our MP advertised 21600 because
+that is the configured start profile; nothing measured the channel.  The peer's
+receiver did measure it, read `equerr 5610`, and chose 7200 for its own receive
+direction.  At 21600 -- 2400 baud, expanded shaping, an 896-point
+constellation -- the symbols entering the mapper are **white**: mean squared
+distance to 9.x's odd-integer grid is 0.67, the figure for symbols with no
+relation to the lattice at all, and *no* scale or rotation improves it (swept
+over `V34_DATA_FRAME_DUMP`, the best of every gain from 0.4 to 2.5 and every
+angle is 0.657).  The same call path at 4800 reads 0.25 and decodes.  So the
+receiver is good for a small constellation and not a dense one, and
+`ME_V34_BPS=4800` is what the payload run used.  **Rate selection driven by a
+measured receive SNR, as the peer does, is the open work here.**
+
+**5. V.42 "unsupported peer" was correct.**  `tools/soak/v34_lapm_call.sh` sent
+`AT\N0`, which disables error control, so the peer never ran V.42's detection
+phase.  `DS_RX_BIT_DUMP` settled it in one read: its data-mode output was 87%
+ones with a 17249-bit run -- idle mark.  `NPARM` now selects the mode (the peer
+rejects `\N3` with ERROR and does LAPM anyway), and `KEEP=1` holds the call
+after LAPM instead of breaking out of the wait loop, since killing the dial
+closes the peer's serial and drops DTR before a payload test can run.
+
+### Instruments
+
+Plain V.34 data mode had no diagnostics at all; it has two now, and they answer
+different questions.  `Rx - DATA: distance to grid` says whether the waveform
+arrives decodable.  `Rx - DATA: shell index over k bits` is 9.6.3.3's r0 bound,
+which owes nothing to the content, so it separates wrong grouping from wrong
+symbols.  Read together: grid small + shell 0% is a working data mode, grid
+small + shell high is correct symbols grouped wrongly, grid large is a fault
+before the mapper.  `DS_RX_BIT_DUMP` and `ME_DATA_HOLD=1` cover the V.42 layer.
+
+### Still open
+
+* Only 4800 bps is proven.  21600 does not decode (item 4).
+* The handshake is intermittent: two of five calls reached data mode, the rest
+  died in the Phase 2 INFO0 recovery livelock already documented above.
+* 76 of 300 lines were delivered before the hold expired; throughput and
+  sustained stability are unmeasured.
