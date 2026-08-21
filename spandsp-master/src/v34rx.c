@@ -226,7 +226,14 @@ static int phase3_rx_dump_count = 0;
 #define PHASE4_TRN_SCORE_START_BAUD     145
 #define PHASE4_TRN_LOCK_MIN_BITS        64
 #define PHASE4_TRN_READY_MIN_SCORE      65
-#define PHASE4_TRN_READY_MIN_BAUD       4800    /* ~1.5s at 3200 baud; per V.34 §11.4 train on TRN ~2000ms before scanning MP */
+/* How much TRN to train on before scanning for MP.  11.4.1.1.2 and 11.4.1.2.2
+   put TRN at *at least* 512T with MP straight after, so a conformant peer may
+   be transmitting MP well before this -- but the receiver needs the time: swept
+   over the duplex matrix, 512, 1024, 1536 and 2048 each cost more rows than
+   they gained (at 1024 both 2400 rows stop training; at 2048 four rows do).
+   Left at the measured value, and noted here so the next attempt to shorten it
+   starts from the sweep rather than from the clause. */
+#define PHASE4_TRN_READY_MIN_BAUD       4800
 #define PHASE4_TRN_READY_MAX_BAUD       9600    /* ~3s at 3200 baud; V.34 TRN max is 2s */
 #define PHASE4_TRN_RECENT_WINDOW_BAUDS  256
 #define PHASE4_TRN_FREEZE_SCORE         80
