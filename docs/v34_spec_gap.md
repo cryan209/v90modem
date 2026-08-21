@@ -81,20 +81,16 @@ encoding and precoder coefficients are session state.
 5. **In progress:** run `{2400,2743,2800,3000,3200,3429}` with legal
    carrier, rate and asymmetric-rate combinations; assert external sample
    accounting.  `v34_duplex_test <baud> <bps> <ulaw|alaw>` already takes
-   the rate, so the matrix is one loop.  Measured state at 9600 bit/s over
-   the bare G.711 round trip:
+   the rate, so the matrix is one loop, and `make v34-matrix-test` runs
+   all twelve rows without stopping at the first failure.
 
-   | baud | u-law | A-law |
-   |---|---|---|
-   | 2400 | payload, 0 errors | payload, 0 errors |
-   | 2743 | payload, 0/149 errors | payload, 0 errors |
-   | 2800 | no training | no training |
-   | 3000 | no training | payload, 0 errors |
-   | 3200 | no training | no training |
-   | 3429 | no training | no training |
+   When this matrix was first run, every rate except 2400 timed out at
+   60 s with nothing trained.  At 9600 bit/s it now trains 11 of the 12
+   rows and recovers payload without error on 10 of them; those ten are
+   asserted by `make test`.  Open: 3429 u-law does not train, and 3000
+   u-law trains but takes 136 payload errors.
 
-   When this matrix was first run every rate except 2400 timed out at 60 s
-   with nothing trained, and three separate defects were behind that:
+   Four defects, each of which had to fall before the next was visible.
 
    a. **The answerer's 11.3.1.2.6 J-wait bound was 1000 ms**, which no
       conformant call modem can finish Phase 3 inside (S, S-bar, PP, 2048T
@@ -113,41 +109,63 @@ encoding and precoder coefficients are session state.
       bit-identical to before.
 
    c. **Phase 4 CMA never stopped.**  11.4 begins from the tap solution
-      11.3 already trained, but scaled for Phase 3, not Phase 4.  Blind CMA corrects the level and then
-      keeps reshaping the solution with a phase-blind per-tap gradient;
-      the existing 512T bound is keyed on `phase4_trn_after_j`, which only
+      11.3 already trained, but scaled for Phase 3, not Phase 4.  Blind
+      CMA corrects the level and then keeps reshaping the solution; the
+      existing 512T bound is keyed on `phase4_trn_after_j`, which only
       advances once J' has been seen, so it could not stop it.  CMA now
-      stands down once the level estimate settles
-      (`ME_V34_PHASE4_CMA=full` restores the old loop).
+      stands down once the level estimate settles.
 
-   What remains is not the same defect at the remaining rates.  2800, 3200
-   and 3000 u-law now complete the whole of Phase 3 -- far-end J decoded
-   32/32, S detected in both directions, J -> J', Phase 4 TRN -- and both
-   sides reach MP, where MP never passes CRC and the locked hypothesis
-   wanders (preamble 16-17/18 against 18/18 at 2400).  3429 still fails
-   earlier, in Phase 3, with the answerer never detecting the caller's S;
-   it is also the one rate whose RX shaper table is shared between both
-   carriers, and the only rate where both carriers are the same frequency.
+   d. **Nothing ever chose which of the two T/2 outputs per symbol was
+      the eye centre.**  The band-edge detector recovers the symbol rate
+      and pulls the sampling phase within a T/2 interval, but cannot
+      resolve that ambiguity; it was settled by how many T/2 intervals had
+      been generated since the receiver started, and a single +/-1
+      correction from the timing loop can insert or delete one and flip it
+      for the rest of the call.  Sweeping a deliberate offset across a
+      whole symbol, on a bit-exact linear bearer, normalised distance to
+      the nearest 4-point symbol through Phase 4:
 
-   Diagnostics for this work, all opt-in and all caching their getenv:
-   `V34_P3TRN_SYM_DUMP` / `V34_P4TRN_SYM_DUMP` dump equalized training
-   symbols, `V34_TRACE` enables the `[EQ]`/`[CMA]`/`[V34 RX]` traces, and
-   `V34_DUPLEX_LOG` gives the harness per-role spandsp flow logs.
+          2400 baud   offset 0: 0.384   one T/2 away: 0.590
+          3200 baud   offset 0: 0.595   one T/2 away: 0.293
 
-   **Do not read 4th-power coherence off the Phase 4 TRN dump as a measure
-   of receiver health.**  It was used that way here and the conclusion it
-   supported -- that the constellation collapses at the Phase 3 -> Phase 4
-   seam -- is wrong.  Measured on 3200 baud u-law, the same window reads
-   0.39-0.47 in a run that completes with **zero errors** and in one that
-   fails outright; it does not separate them at all.  The apparent
-   "0.98 -> 0.42 collapse" was comparing a narrow, favourably gated Phase 3
-   sample (that dump only fires inside a scoring block, ~130 symbols) with
-   4800 Phase 4 symbols spanning stretches where the far end is not sending
-   TRN.  The metric that *does* track success is the MP-stage decision
-   error on the `[EQ]` line: 0.077 median in the passing 3200 run against
-   0.583 in the failing one.  The three fixes above are unaffected -- each
-   was validated on training completion and payload bit errors, not on
-   this metric.
+      At 2400 zero offset is the eye; at 3200 zero offset is the *worst
+      point of the entire sweep*.  The receiver had been sampling 3200
+      baud Phase 4 at the eye crossing for the whole call, and which way a
+      given call landed was a coin flip on sample counts.  That is why the
+      failures looked like thin margin, and why every change tried before
+      this reshuffled which rows passed rather than growing the set: each
+      one moved the counts.
+
+      All the training signals V.34 uses here -- S, S-bar, PP, TRN and MP
+      -- are constant modulus, so the eye centre is where the equalized
+      output is largest.  Both phases are now evaluated during primary
+      training over 256 symbols and the larger is taken, with a 1.05
+      margin, a minimum magnitude so the decision is never taken on the
+      11.3.1.2.4 silence, and a flip cap so it cannot oscillate.
+      Parameters were chosen over 24 rows (both laws at 4800 and 9600) so
+      as not to fit the twelve that `make test` asserts.
+
+   **Two metrics here are traps, and both were believed for a while.**
+   4th-power coherence over the Phase 4 TRN symbol dump reads 0.39-0.47
+   whether the call completes with zero errors or never trains.  The
+   MP-stage decision error on the `[EQ]` line has its target angle
+   integrated from the *received* dibit, so it measures constellation
+   tightness, not decode correctness -- 3429 reads 0.048 and 2800 reads
+   0.042 while neither trains.  Two things are trustworthy: ground truth
+   against the transmitter's own symbols
+   (`V34_P4TRN_TX_DUMP`/`V34_P4TRN_RX_DUMP` with
+   `tools/v34_trn_ground_truth.py`), and sweeping the sampling instant and
+   looking for the minimum, which is what finally found (d).
+
+   Other diagnostics, all opt-in and all caching their getenv:
+   `V34_P3TRN_SYM_DUMP` / `V34_P4TRN_SYM_DUMP` (equalized symbol, line
+   power, equalizer tap energy and main tap, sampling phase),
+   `V34_MP_TX_BITS` (the transmitted MP0 frame, to diff against a decode),
+   `V34_TRACE` for the `[EQ]`/`[CMA]`/`[V34 RX]` traces,
+   `V34_DUPLEX_LOG` for per-role flow logs, `V34_DUPLEX_TXRMS` for
+   transmit level over time, and `V34_DUPLEX_LINEAR` to bypass G.711 and
+   so attribute a defect to the bearer or exonerate it.
+
 6. Add retrain, rate renegotiation and cleardown tests.
 7. Require a foreign-modem LAPM frame with valid FCS before calling a profile
    hardware-qualified.
