@@ -117,12 +117,28 @@ static int v34_trace_diagnostics(void)
  *
  * Check any metric taken from here against a known-passing *and* a
  * known-failing run before believing it.  Two in a row failed that test. */
+static float v34_eq_tap_energy(const v34_rx_state_t *s, float *main_tap)
+{
+    int i;
+    float e = 0.0f;
+
+    for (i = 0;  i < V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN;  i++)
+        e += s->eq_coeff[i].re*s->eq_coeff[i].re + s->eq_coeff[i].im*s->eq_coeff[i].im;
+    /*endfor*/
+    *main_tap = sqrtf(s->eq_coeff[V34_EQUALIZER_PRE_LEN].re*s->eq_coeff[V34_EQUALIZER_PRE_LEN].re
+                    + s->eq_coeff[V34_EQUALIZER_PRE_LEN].im*s->eq_coeff[V34_EQUALIZER_PRE_LEN].im);
+    return e;
+}
+
 static void v34_dump_training_symbol(const char *env_name,
                                      const char **path_cache,
                                      int calling_party,
                                      int index,
                                      float re,
-                                     float im)
+                                     float im,
+                                     long rx_power,
+                                     float tap_energy,
+                                     float main_tap)
 {
     FILE *f;
 
@@ -135,8 +151,9 @@ static void v34_dump_training_symbol(const char *env_name,
     if ((f = fopen(*path_cache, "a")) == NULL)
         return;
     /*endif*/
-    fprintf(f, "%s %d %.6f %.6f\n",
-            calling_party  ?  "caller"  :  "answer", index, re, im);
+    fprintf(f, "%s %d %.6f %.6f %ld %.6f %.6f\n",
+            calling_party  ?  "caller"  :  "answer", index, re, im, rx_power,
+            tap_energy, main_tap);
     fclose(f);
 }
 
@@ -5495,6 +5512,30 @@ static float phase4_cma_settle_tol(void)
     return cache;
 }
 
+/* Phase 3 keeps adapting through the peer's TRN and Ja so that Ja -- which is
+   data, and needs every symbol right -- is not decoded through a frozen,
+   drifting front end.  What Ja needs from that is the *carrier* loop.  The
+   blind CMA running beside it reshapes taps that PP training has already put
+   where they belong: measured over the G.711 round trip the equalizer is the
+   identity at the end of PP refinement (main tap 0.99 of 1.00 total energy)
+   and has been walked to 0.83 by the time Phase 4 starts, with the off-centre
+   energy quadrupled.  ME_V34_PHASE3_CMA=off keeps the carrier loop and stops
+   the blind tap gradient. */
+static int phase3_cma_disabled(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *value = getenv("ME_V34_PHASE3_CMA");
+
+        cache = (value  &&  strcmp(value, "off") == 0);
+    }
+    /*endif*/
+    return cache;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int phase4_cma_max_bauds(void)
 {
     static int cache = -1;
@@ -7387,6 +7428,18 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             best_trn_h = -1;
             best_trn_score = -1;
             trn_refine_baud = s->duration - PHASE3_PP_TRAIN_BAUDS;
+            {
+                static const char *p3_dump_path = NULL;
+                float eq_main;
+                float eq_e = v34_eq_tap_energy(s, &eq_main);
+
+                v34_dump_training_symbol("V34_P3TRN_SYM_DUMP", &p3_dump_path,
+                                         s->calling_party,
+                                         s->phase3_trn_bits,
+                                         sym->re, sym->im,
+                                         (long) power_meter_current(&s->power),
+                                         eq_e, eq_main);
+            }
             for (h = 0;  h < MP_HYPOTHESIS_COUNT;  h++)
             {
                 int raw_sym;
@@ -7438,14 +7491,6 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 int score_pct;
 
                 score_pct = (100*best_trn_score + (s->phase3_trn_bits/2))/s->phase3_trn_bits;
-                {
-                    static const char *p3_dump_path = NULL;
-
-                    v34_dump_training_symbol("V34_P3TRN_SYM_DUMP", &p3_dump_path,
-                                             s->calling_party,
-                                             s->phase3_trn_bits,
-                                             sym->re, sym->im);
-                }
                 if (score_pct >= 70
                     &&
                     (s->phase3_trn_lock_hyp < 0  ||  score_pct > s->phase3_trn_lock_score))
@@ -7980,11 +8025,34 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             s->phase4_trn_after_j++;
             {
                 static const char *p4_dump_path = NULL;
+                static const char *p4_bits_path = NULL;
+                float eq_main;
+                float eq_e = v34_eq_tap_energy(s, &eq_main);
 
                 v34_dump_training_symbol("V34_P4TRN_SYM_DUMP", &p4_dump_path,
                                          s->calling_party,
                                          s->phase4_trn_after_j,
-                                         sym->re, sym->im);
+                                         sym->re, sym->im,
+                                         (long) power_meter_current(&s->power),
+                                         eq_e, eq_main);
+                if (p4_bits_path == NULL)
+                    p4_bits_path = getenv("V34_P4TRN_RX_DUMP")
+                                 ?  getenv("V34_P4TRN_RX_DUMP")  :  "";
+                /*endif*/
+                if (p4_bits_path[0])
+                {
+                    FILE *f = fopen(p4_bits_path, "a");
+
+                    if (f)
+                    {
+                        fprintf(f, "%s %d %d %d\n",
+                                s->calling_party ? "caller" : "answer",
+                                s->phase4_trn_after_j, data_bits, abs_bits);
+                        fclose(f);
+                    }
+                    /*endif*/
+                }
+                /*endif*/
             }
             best_h = -1;
             best_score = -1;
@@ -10279,11 +10347,13 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
              * TRN is locked, i.e. well past the S detector -- S is carried as
              * phase reversals and must not be tracked out.  Set
              * ME_V34_TRACK_PHASE3=0 to restore the frozen behaviour. */
-            if (s->stage == V34_RX_STAGE_PHASE4_TRN
-                || v34_rx_stage_is_phase4_frame(s->stage)
-                || (s->stage == V34_RX_STAGE_PHASE3_WAIT_S
-                    && s->phase3_tracking_armed
-                    && phase3_tracking_enabled()))
+            if ((s->stage == V34_RX_STAGE_PHASE4_TRN
+                 || v34_rx_stage_is_phase4_frame(s->stage)
+                 || (s->stage == V34_RX_STAGE_PHASE3_WAIT_S
+                     && s->phase3_tracking_armed
+                     && phase3_tracking_enabled()))
+                &&
+                !(s->stage == V34_RX_STAGE_PHASE3_WAIT_S && phase3_cma_disabled()))
             {
                 v34_state_t *t_cma = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
                 /* V.34 11.4.1.1.2/11.4.1.2.2 conditions the receiver on

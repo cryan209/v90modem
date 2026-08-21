@@ -6394,6 +6394,28 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
             }
             /*endif*/
             s->tx.tone_duration++;
+            {
+                static const char *p4trn_path = NULL;
+
+                if (p4trn_path == NULL)
+                    p4trn_path = getenv("V34_P4TRN_TX_DUMP")
+                               ?  getenv("V34_P4TRN_TX_DUMP")  :  "";
+                /*endif*/
+                if (p4trn_path[0])
+                {
+                    FILE *f = fopen(p4trn_path, "a");
+
+                    if (f)
+                    {
+                        fprintf(f, "%s %d %d\n",
+                                s->tx.calling_party ? "caller" : "answer",
+                                s->tx.tone_duration, trn_sym);
+                        fclose(f);
+                    }
+                    /*endif*/
+                }
+                /*endif*/
+            }
             if (s->rx.received_event == V34_EVENT_TRAINING_FAILED)
             {
                 span_log(&s->logging, SPAN_LOG_FLOW,
@@ -6868,6 +6890,22 @@ static void mp_or_mph_baud_init(v34_state_t *s)
 
         log_mp(s->tx.logging, true, &s->tx.mp);
         s->tx.txbits = mp_sequence_tx(&s->tx, &s->tx.mp);
+        if (getenv("V34_MP_TX_BITS"))
+        {
+            /* Diagnostic only: the transmitted MP0 frame, so a receiver's
+               decoded frame can be diffed against the truth.  Crosses no
+               protocol seam -- nothing reads this but a human. */
+            char buf[200];
+            int bi;
+
+            for (bi = 0;  bi < s->tx.txbits  &&  bi < 88;  bi++)
+                buf[bi] = (char) ('0' + ((s->tx.txbuf[bi >> 3] >> (bi & 7)) & 1));
+            /*endfor*/
+            buf[bi] = '\0';
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - MP0 frame bits[0..%d]: %s\n", bi - 1, buf);
+        }
+        /*endif*/
         s->tx.stage = V34_TX_STAGE_MP;
     }
     else
