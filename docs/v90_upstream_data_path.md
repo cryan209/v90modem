@@ -1086,6 +1086,25 @@ enough to test from outside has been tested.  What separates the two is the
 receiver STATE that a real call accumulates and a replay does not: live has
 run the whole of V.8, Phase 2, Phase 3 and Phase 4 through the same
 `v34_rx()`, while the replay's receiver is forced straight into Phase 4 CP RX
-having seen a second of audio.  The next step is a direct comparison -- dump
-the live T/3 ring around B1 and the replay's ring for the same wire position,
-and see where they diverge -- rather than another hypothesis from outside.
+having seen a second of audio.  The next step is a direct comparison rather
+than another hypothesis from outside -- and the reason it has not been done is
+that the tool for it does not exist yet.  `v90_upstream_replay` drives the T/3
+receiver alone, with `v34_force_v90_phase4_cp_rx()` putting it straight into
+Phase 4 after a second of audio; it cannot accumulate the state a real call
+does, which is precisely the difference under investigation.  And
+`sip_v90_modem` has no file input.
+
+So the enabling piece of work is a **full-engine offline replay**: feed a
+recorded `live-rx.g711` into `me_rx_g711()` from the start of the call and let
+the engine run V.8, Phase 2, Phase 3 and Phase 4 off it, exactly as the media
+thread does.  The transmit side can be discarded, the same way the T/3 replay
+discards it -- the peer's recorded audio already contains its responses, and
+the engine's trajectory is deterministic given the same received samples.  If
+that harness reproduces the live 98.3%, the fault is bisectable on the desk in
+minutes; if it reproduces 100.0% instead, the difference is in the media path
+rather than the modem, which is equally worth knowing.
+
+This is the same conclusion, and the same shape of tool, that unblocked the
+forty-second collapse earlier in this document.  It was worth more than
+another night of dialling then, and the four live calls behind this section
+say the same now.
