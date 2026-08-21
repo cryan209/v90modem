@@ -1567,7 +1567,16 @@ typedef struct
     int mp_frame_pos;
     int mp_frame_target;
     int mp_early_rejects;
-    int16_t mp0_vote_counts[88];
+    /* MP0 majority-vote accumulators, one per dibit hypothesis.  Above 2400
+       baud the MP hypothesis churns between frames, so a single accumulator
+       keyed on "the current hypothesis" was reset before it ever reached the
+       three frames the vote needs.  Keeping one bin per hypothesis lets the
+       true one accumulate across the churn. */
+    int16_t mp0_vote_counts[24][88];
+    int mp0_vote_frames_by_hyp[24];
+    /* Consecutive frames read under one uninterrupted lock, per hypothesis. */
+    int mp0_vote_same_lock[24];
+    int mp0_vote_last_hyp;
     int mp0_vote_frames;
     int mp0_vote_hyp;
     int16_t mp1_vote_counts[188];

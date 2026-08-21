@@ -1731,6 +1731,9 @@ static void mp_unlock_after_reject(v34_rx_state_t *s, bool count_tap_reject)
 static void mp_vote_reset(v34_rx_state_t *s)
 {
     memset(s->mp0_vote_counts, 0, sizeof(s->mp0_vote_counts));
+    memset(s->mp0_vote_frames_by_hyp, 0, sizeof(s->mp0_vote_frames_by_hyp));
+    memset(s->mp0_vote_same_lock, 0, sizeof(s->mp0_vote_same_lock));
+    s->mp0_vote_last_hyp = -1;
     s->mp0_vote_frames = 0;
     s->mp0_vote_hyp = -1;
     memset(s->mp1_vote_counts, 0, sizeof(s->mp1_vote_counts));
@@ -9589,17 +9592,33 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                             {
                                 int vi;
 
-                                /* Reset accumulator if hypothesis changed */
-                                if (s->mp_hypothesis != s->mp0_vote_hyp)
-                                {
-                                    memset(s->mp0_vote_counts, 0, sizeof(s->mp0_vote_counts));
-                                    s->mp0_vote_frames = 0;
-                                    s->mp0_vote_hyp = s->mp_hypothesis;
-                                }
+                                /* V.34 11.4 transmits MP continuously, so a
+                                   receiver that cannot decode one frame can
+                                   still combine several.  Accumulate into the
+                                   bin for the hypothesis this frame was read
+                                   under, rather than resetting a single
+                                   accumulator whenever the hypothesis changes:
+                                   above 2400 baud the hypothesis churns
+                                   between frames, so the single accumulator
+                                   never survived to the three frames the vote
+                                   needs. */
+                                int vh = s->mp_hypothesis;
+
+                                if (vh < 0  ||  vh >= MP_HYPOTHESIS_COUNT)
+                                    vh = 0;
+                                /*endif*/
+                                s->mp0_vote_hyp = vh;
                                 /* Accumulate: +1 for '1', -1 for '0' */
                                 for (vi = 0;  vi < 88;  vi++)
-                                    s->mp0_vote_counts[vi] += (s->mp_frame_bits[vi] & 1) ? 1 : -1;
-                                s->mp0_vote_frames++;
+                                    s->mp0_vote_counts[vh][vi] += (s->mp_frame_bits[vi] & 1) ? 1 : -1;
+                                s->mp0_vote_frames_by_hyp[vh]++;
+                                s->mp0_vote_frames = s->mp0_vote_frames_by_hyp[vh];
+                                if (s->mp0_vote_last_hyp == vh)
+                                    s->mp0_vote_same_lock[vh]++;
+                                else
+                                    s->mp0_vote_same_lock[vh] = 1;
+                                /*endif*/
+                                s->mp0_vote_last_hyp = vh;
 
                                 if (s->mp0_vote_frames <= 2 || (s->mp0_vote_frames % 4) == 0)
                                 {
@@ -9618,7 +9637,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                     bool vote_fill_ok;
 
                                     for (vi = 0;  vi < 88;  vi++)
-                                        voted_bits[vi] = (s->mp0_vote_counts[vi] > 0) ? 1 : 0;
+                                        voted_bits[vi] = (s->mp0_vote_counts[vh][vi] > 0) ? 1 : 0;
                                     /* Force known structural bits */
                                     voted_bits[17] = 0;  /* start bit */
                                     voted_bits[18] = 0;  /* type = MP0 */
@@ -9639,14 +9658,34 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                         /* Three identical, perfectly framed
                                            but CRC-invalid MP repetitions are
                                            not timing wobble.  They identify a
-                                           stable wrong dibit order/domain.
-                                           Drop this lock and advance the retry
-                                           mode instead of re-locking it for
-                                           the rest of the Phase-4 deadline. */
-                                        keep_hypothesis = false;
-                                        s->mp_phase4_reject_streak = 2;
+                                           stable wrong dibit order/domain, and
+                                           dropping the lock rather than
+                                           re-locking it for the rest of the
+                                           Phase 4 deadline is what keeps a
+                                           foreign peer from wedging there.
+                                           That inference needs the three
+                                           frames to have come from one
+                                           uninterrupted lock, which is what
+                                           the old single accumulator
+                                           guaranteed by resetting on every
+                                           hypothesis change.  With a bin per
+                                           hypothesis they may instead be three
+                                           separate locks that happen to share
+                                           a hypothesis, and a failed vote then
+                                           says nothing about any of them.
+                                           Keep the drop for the case it was
+                                           written for, and only for that. */
+                                        if (s->mp0_vote_same_lock[vh] >= 3)
+                                        {
+                                            keep_hypothesis = false;
+                                            s->mp_phase4_reject_streak = 2;
+                                        }
+                                        /*endif*/
+                                        s->mp0_vote_same_lock[vh] = 0;
                                         s->mp0_vote_frames = 0;
-                                        memset(s->mp0_vote_counts, 0, sizeof(s->mp0_vote_counts));
+                                        s->mp0_vote_frames_by_hyp[vh] = 0;
+                                        memset(s->mp0_vote_counts[vh], 0,
+                                               sizeof(s->mp0_vote_counts[vh]));
                                     }
                                     else
                                     {
@@ -9658,8 +9697,11 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                         crc_good = true;
                                         fill_good = true;
                                         keep_hypothesis = true;
+                                        s->mp0_vote_same_lock[vh] = 0;
                                         s->mp0_vote_frames = 0;
-                                        memset(s->mp0_vote_counts, 0, sizeof(s->mp0_vote_counts));
+                                        s->mp0_vote_frames_by_hyp[vh] = 0;
+                                        memset(s->mp0_vote_counts[vh], 0,
+                                               sizeof(s->mp0_vote_counts[vh]));
 
                                         /* Process the accepted frame */
                                         if (s->duplex)
