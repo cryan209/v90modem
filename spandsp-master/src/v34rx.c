@@ -10467,6 +10467,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
 #define V34_EYE_MARGIN                  1.05f
 #define V34_EYE_MAX_FLIPS               4
 #define V34_EYE_MIN_MAG                 0.10f
+#define V34_EYE_VOTES                   1
 
 static int v34_eye_select_enabled(void)
 {
@@ -10477,6 +10478,20 @@ static int v34_eye_select_enabled(void)
         const char *value = getenv("ME_V34_EYE_SELECT");
 
         cache = !(value  &&  strcmp(value, "off") == 0);
+    }
+    /*endif*/
+    return cache;
+}
+
+static int v34_eye_votes_needed(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *value = getenv("ME_V34_EYE_VOTES");
+
+        cache = (value && atoi(value) > 0) ? atoi(value) : V34_EYE_VOTES;
     }
     /*endif*/
     return cache;
@@ -10587,7 +10602,17 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                     > 2.0f*v34_eye_min_mag()*v34_eye_window()
                 &&
                 s->eye_off_sum > v34_eye_margin()*s->eye_on_sum)
+                s->eye_votes++;
+            else
+                s->eye_votes = 0;
+            /*endif*/
+            /* Consecutive windows must agree.  At 3429 baud the two phases sit
+               1.17 samples apart and a single window decided by ratios of 1.05
+               to 1.19, so the receiver flipped four times in one call and
+               finished wherever the cap left it. */
+            if (s->eye_votes >= v34_eye_votes_needed())
             {
+                s->eye_votes = 0;
                 s->eye_flips++;
                 span_log(s->logging, SPAN_LOG_FLOW,
                          "Rx - T/2 eye is on the other phase (off %.1f vs on %.1f over %d symbols); "

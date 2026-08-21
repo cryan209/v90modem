@@ -1241,6 +1241,7 @@ typedef struct
     float eye_off_sum;
     int eye_n;
     int eye_flips;
+    int eye_votes;
     int shaper_t2_num;
     int shaper_t2_den;
     int shaper_t2_acc;
