@@ -181,16 +181,14 @@ test: $(TEST_TARGETS)
 	./v34_mp_test
 	./v34_data_test
 	./v34_gardner_test
-# The rows that recover payload without a single bit error.  Which of the
-# marginal rows do that keeps moving as Phase 4 is corrected, and the suite
-# says so rather than hiding it: pinning the MP dibit transform to 10.1.3.3's
-# known negation swapped 2800 A-law in for 2800 u-law, leaving the count at
-# nine.  3429 does not train in either law.  `make v34-matrix-test` runs all
-# twelve.
+# The rows that recover payload without a single bit error.  Every rate that
+# trains at all now does, in both laws; only 3429 does not train, so the two
+# 3429 rows stay out.  `make v34-matrix-test` runs all twelve.
 	./v34_duplex_test 2400 9600 ulaw
 	./v34_duplex_test 2400 9600 alaw
 	./v34_duplex_test 2743 9600 ulaw
 	./v34_duplex_test 2743 9600 alaw
+	./v34_duplex_test 2800 9600 ulaw
 	./v34_duplex_test 2800 9600 alaw
 	./v34_duplex_test 3000 9600 ulaw
 	./v34_duplex_test 3000 9600 alaw

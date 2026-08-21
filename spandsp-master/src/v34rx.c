@@ -8868,10 +8868,17 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             }
         }
 
-        /* During initial Phase 4 MP acquisition, lock only MP0 (type 0).
-           In observed failures, early MP1 locks are almost always false and
-           consume the Phase 4 budget. */
-        expected_mp_type = (s->mp_seen == 0) ? 0 : -1;
+        /* Nothing in 10.1.3.9 or 11.4.1.2 makes MP0 come first: the type bit
+           says whether the frame carries 11.4.1.2's precoder coefficients, and
+           a modem that uses precoding sends MP1 from its first frame.  Locking
+           only MP0 during acquisition was tuned against this tree's own
+           transmitter, which sends Type 0, and it is exactly what blocked a
+           foreign modem: replaying a live SmartLink call's Phase 4 symbols
+           offline recovers 92 frame syncs 188 bits apart with 87 CRC-valid
+           frames, every one of them Type 1, while the live receiver -- given
+           the same dibits -- would not lock any of them.  The CRC is what
+           rejects a false lock; the type bit is not ours to require. */
+        expected_mp_type = -1;
 
             locked_this_symbol = 0;
 
