@@ -78,8 +78,65 @@ encoding and precoder coefficients are session state.
    answerer becomes silent and conditions on caller PP/TRN/J after S/S-bar;
    and 11.4.1.1 now sends caller J-prime followed by at least 512T of TRN,
    rather than sending MP immediately.
-5. Run `{2400,2743,2800,3000,3200,3429}` with legal carrier, rate and
-   asymmetric-rate combinations; assert external sample accounting.
+5. **In progress:** run `{2400,2743,2800,3000,3200,3429}` with legal
+   carrier, rate and asymmetric-rate combinations; assert external sample
+   accounting.  `v34_duplex_test <baud> <bps> <ulaw|alaw>` already takes
+   the rate, so the matrix is one loop.  Measured state at 9600 bit/s over
+   the bare G.711 round trip:
+
+   | baud | u-law | A-law |
+   |---|---|---|
+   | 2400 | payload, 0 errors | payload, 0 errors |
+   | 2743 | payload, 0/149 errors | payload, 0 errors |
+   | 2800 | no training | no training |
+   | 3000 | no training | payload, 0 errors |
+   | 3200 | no training | no training |
+   | 3429 | no training | no training |
+
+   When this matrix was first run every rate except 2400 timed out at 60 s
+   with nothing trained, and three separate defects were behind that:
+
+   a. **The answerer's 11.3.1.2.6 J-wait bound was 1000 ms**, which no
+      conformant call modem can finish Phase 3 inside (S, S-bar, PP, 2048T
+      of TRN and J exceed it at every symbol rate).  The interop escape
+      therefore fired on the normal path, and the answerer ran ahead into
+      Phase 4 while the caller was still in TRN.  2400 passed only because
+      the timing happened to land the other way round.  Now 4000 ms
+      (`V34_J_WAIT_MAX_MS`).
+
+   b. **The receiver ran 2800 baud 1.56% off the symbol rate.**  The T/2
+      accumulator advance is samples-per-symbol in units of 1/192 of a
+      sample, and 2800 is the one rate whose value (192*20/7 = 548.57) is
+      not a whole number of coefficient sets; the table wrote 189 in place
+      of 192 for that row alone to force an integer.  The remainder is now
+      carried, so the long-run rate is exact.  The five exact rates are
+      bit-identical to before.
+
+   c. **Phase 4 CMA never stopped.**  11.4 begins from the tap solution
+      11.3 already trained, which over this bearer is right (Phase 3 TRN
+      demodulates at 4th-power coherence 0.98 at every rate) but is scaled
+      for Phase 3, not Phase 4.  Blind CMA corrects the level and then
+      keeps reshaping the solution with a phase-blind per-tap gradient;
+      the existing 512T bound is keyed on `phase4_trn_after_j`, which only
+      advances once J' has been seen, so it could not stop it.  CMA now
+      stands down once the level estimate settles
+      (`ME_V34_PHASE4_CMA=full` restores the old loop).
+
+   What remains is not the same defect at the remaining rates.  2800, 3200
+   and 3000 u-law now complete the whole of Phase 3 -- far-end J decoded
+   32/32, S detected in both directions, J -> J', Phase 4 TRN -- and both
+   sides reach MP, where MP never passes CRC and the locked hypothesis
+   wanders (preamble 16-17/18 against 18/18 at 2400).  3429 still fails
+   earlier, in Phase 3, with the answerer never detecting the caller's S;
+   it is also the one rate whose RX shaper table is shared between both
+   carriers, and the only rate where both carriers are the same frequency.
+
+   Diagnostics for this work, all opt-in and all caching their getenv:
+   `V34_P3TRN_SYM_DUMP` / `V34_P4TRN_SYM_DUMP` dump equalized training
+   symbols (comparing their 4th-power coherence is what separates "the
+   constellation is smeared" from "the hypothesis search picked the wrong
+   scrambler"), `V34_TRACE` enables the `[EQ]`/`[CMA]`/`[V34 RX]` traces,
+   and `V34_DUPLEX_LOG` gives the harness per-role spandsp flow logs.
 6. Add retrain, rate renegotiation and cleardown tests.
 7. Require a foreign-modem LAPM frame with valid FCS before calling a profile
    hardware-qualified.
