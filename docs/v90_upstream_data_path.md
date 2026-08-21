@@ -1005,3 +1005,71 @@ it on recovered pattern lines, and that is a trap: across mu = 0.02, 0.05,
 0.1, 0.2, 0.4 the line count reads 5217, 2, 12300, 4955, 2.  The swing is
 whether the frame-phase sweep happened to lock on that run, not the step
 size.  Tune on symbol error; read line counts only as an outcome.
+
+
+## The acquisition gate, done properly (2026-08-21, later)
+
+The section above ended with a tightened gate tried and withdrawn because an
+absolute distance broke the 21600 offline regression.  The gate now judges an
+acquisition by its SNR instead, and the live run that followed both validated
+it and caught a regression in the first version of the retry around it.
+
+**Judge it as an inverse SNR, not as a distance.**  Instrumenting the offline
+T/3 regression settles the shape of the gate rather than arguing about it: at
+21600 it acquires with an in-sample fit of 99.9-100% and an honest
+out-of-sample distance of **0.053 to 0.074**, so the 0.05 threshold tried
+first rejects a perfect acquisition.  Divided by the symbol power carrying it
+the populations separate by a factor of thirty:
+
+    21600 loopback, fit 99.9-100%   0.053-0.074 / 93-120 = 0.00058-0.00061
+    9600 live audio replayed, good  0.002       / 7.1    = 0.00028
+    9600 live, the poor one         0.125       / 7.2    = 0.0174
+
+`V34_V90_T3_ACQ_GOOD_SNR` is 0.002, the geometric middle of the tightest gap
+(at 21600 a closed eye reads 0.0056 against a good fit's 0.00061).
+
+**The retry has to have a reachable fallback, and the first version did not.**
+With 24 retries allowed, a live fifteen-second call rejected the same window
+seventeen times, never reached the fallback, and delivered **no upstream at
+all** -- strictly worse than the poor acquisition it was refusing.  Bounded to
+six, the worst case is the old behaviour about three seconds later, and the
+best window seen is adopted rather than the first.  Live confirmation: a later
+call logged six rejects, then `settling for the best of 7 windows`, and
+acquired.  The mechanism does what it says.
+
+Retries are worth less on this peer than the count suggests, and it is worth
+knowing why before raising it: B1 sits about 0.35 s past the E anchor, inside
+the very first search window, so a later window contains no B1 at all.  A
+retry buys another look at the SAME B1 with more wire either side of it.
+
+### The live acquisition gap, with three explanations ruled out
+
+Live never finds a good acquisition.  Across every call measured it lands at
+0.088 to 0.229, and each call then runs its whole length at a symbol error
+between 0.11 and 0.66 -- while the identical recorded audio replayed offline
+acquires at 0.002 and holds a median of 0.002.  The gate makes this visible
+and stops it making things worse; it does not fix it.
+
+Ruled out, each by measurement:
+
+  * **Ring length.**  `v90_upstream_replay` now takes the seconds of history
+    to feed before a forced handover.  At 14, 2, 0.5 and 0.35 seconds it fits
+    the same B1 at 100.0% for an out-of-sample 0.002 every time.  Live has
+    about 0.3 s and that is not what is wrong.
+  * **Different samples.**  The G.711 tap is written from the same buffer the
+    modem then consumes -- `modem_engine.c`, immediately before the loop that
+    feeds the V.34 receiver -- so live and replay see byte-identical audio.
+  * **Different parameters.**  Both paths report the same negotiated frame
+    parameters (`b=24 p=16 w=0 j=7 k=12 b1_symbols=128`), so the B1 template
+    is identical.
+
+What is left is the anchor.  The replay wins by sweeping the handover instant
+half a second at a time until one lands -- its first attempts score
+`coarse=7.1%`, nowhere near B1 -- while live has the single anchor its E
+detector gives it and scores `coarse=96.6%`, a near miss with an in-sample fit
+of 98.3-98.8%.  A near miss is what a matched filter returns when the thing it
+is matching straddles an edge of the searched span, and the coarse pass steps
+a symbol at a time from `search_start` while the refine only looks +/-2
+samples around the eight best coarse points.  That is where to look: whether
+`SEARCH_FORWARD` and `SEARCH_BACK` actually bracket B1 on a live anchor, and
+whether the true position survives the KEEP=8 shortlist.
