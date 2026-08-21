@@ -107,9 +107,16 @@ static int v34_trace_diagnostics(void)
  * apparent collapse was comparing ~130 Phase 3 symbols, which this dump only
  * emits from inside a scoring block and so samples favourably, against 4800
  * Phase 4 symbols spanning stretches where the far end is not sending TRN.
- * The MP-stage decision error on the [EQ] line does separate the two cases
- * (0.077 median passing against 0.583 failing).  Check any metric taken from
- * here against a known-passing and a known-failing run before believing it. */
+ * Nor is the MP-stage decision error on the [EQ] line a substitute.  It does
+ * separate those two particular runs (0.077 median passing against 0.583
+ * failing), but its target angle is integrated from the *received* dibit --
+ * phase4_da_expected_ang += data_bits << 30 -- so it measures how tightly the
+ * symbols cluster on the 4-point grid and says nothing about whether the
+ * dibits are right.  3429 baud reads 0.048 and 2800 reads 0.042 while neither
+ * ever completes training.
+ *
+ * Check any metric taken from here against a known-passing *and* a
+ * known-failing run before believing it.  Two in a row failed that test. */
 static void v34_dump_training_symbol(const char *env_name,
                                      const char **path_cache,
                                      int calling_party,
