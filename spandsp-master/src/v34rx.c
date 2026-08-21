@@ -5573,6 +5573,21 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
     {
         cma_delta *= EQUALIZER_SLOW_ADAPT_RATIO;
     }
+    if (s->stage == V34_RX_STAGE_PHASE4_TRN)
+    {
+        static float mu_scale = -1.0f;
+
+        if (mu_scale < 0.0f)
+        {
+            const char *value = getenv("ME_V34_PHASE4_CMA_MU");
+
+            mu_scale = (value  &&  strtof(value, NULL) > 0.0f)
+                     ?  strtof(value, NULL)  :  1.0f;
+        }
+        /*endif*/
+        cma_delta *= mu_scale;
+    }
+    /*endif*/
 
     /* Log CMA error periodically */
     if (V34_TRACE_DIAGNOSTICS && ((s->duration & 0xFF) == 0))
@@ -10180,9 +10195,15 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    level is right, and above 2400 baud it walks it off: the
                    Phase 4 TRN hypothesis search then reads a flat 50% ones for
                    the rest of the call.  Let it converge, then stop it. */
-                if (!t_cma->tx.tx_data_mode && !freeze_mp_cma && !da_owns_eq
-                    && !phase4_cma_converged(s, sym))
-                    tune_equalizer_cma(s, sym);
+                if (!t_cma->tx.tx_data_mode && !freeze_mp_cma && !da_owns_eq)
+                {
+                    if (!phase4_cma_converged(s, sym))
+                        tune_equalizer_cma(s, sym);
+                    else if (getenv("V34_PHASE4_DD_TRN")
+                             && s->stage == V34_RX_STAGE_PHASE4_TRN)
+                        tune_equalizer(s, sym, &eq_target);
+                    /*endif*/
+                }
                 /*endif*/
             }
             /*endif*/
