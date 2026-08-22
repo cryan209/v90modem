@@ -2309,14 +2309,21 @@ static void notch_filter_apply(notch_filter_t *nf, int16_t *samples, int len)
  */
 static void v90_retire_phase2_cc_notch(void)
 {
-    static bool retired = false;
-
-    if (retired  ||  !g_notch.active)
+    /* g_notch.active is the once-per-call guard: this clears it, and
+       v8_result_handler() re-arms it for the next call.  A static "already
+       retired" latch was tried here and is wrong -- the server runs many calls
+       in one process, so the first call retired the notch and every later call
+       re-armed it at V.8 and could never retire it again.  The call that
+       reaches data mode is rarely the first, so the notch was live in the
+       receive path for exactly the calls that mattered: measured on
+       artifacts/v90-cap-20260822T130820Z-9600, the one call that reached data
+       mode never logged a retirement and ran its whole upstream at 0.139 from
+       the lattice -- the same signature the plain-V.34 notch left. */
+    if (!g_notch.active)
         return;
     if (v34_echo_policy_mode() == V34_ECHO_NOTCH)
         return;
     g_notch.active = false;
-    retired = true;
     ME_LOG("[ME] V.90 Phase 2 CC notch retired at Phase 3: 1200 Hz is inside "
            "the wideband upstream this receiver is now listening to\n");
 }
@@ -5624,8 +5631,39 @@ void me_rx_audio(const int16_t *amp, int len)
                    TX reference comes from the ring buffer with a fixed lookback
                    so that tap[0] corresponds to the most recent TX sample and
                    tap[N] corresponds to N samples ago. */
+                /* ME_V34_ECHO=none takes the canceller out as well, V.90
+                   included.  It is not free: with no echo to cancel, an NLMS
+                   filter's taps random-walk around zero and it injects its own
+                   misadjustment into the receive path, driven by the transmit
+                   reference -- and in V.90 that reference is the downstream
+                   PCM, measured 8.4 dB louder than the upstream we are trying
+                   to receive.  Measured on this rig's taps, the echo it exists
+                   to remove is not there: peak normalised cross-correlation
+                   between our transmit and our receive is 0.0068 over lags 0
+                   to 1024, and a 512-tap least-squares fit of transmit into
+                   receive removes 0.307% of the receive power -- which is
+                   512/160000, exactly the bias of fitting that many taps to
+                   that many samples, i.e. nothing. */
+                /* On V.90 the canceller is now opt-in (ME_V34_ECHO=canceller)
+                   rather than unconditional.  The log it prints is its own
+                   verdict: across the soak runs in artifacts/ its effect on
+                   the receive RMS oscillates around zero (+0.2 to -0.4 dB,
+                   mean nil), and on the batches where the received signal is
+                   digital silence -- pre_rms=0 -- it emits post_rms 60 to 159.
+                   A filter that turns silence into RMS 159 is not removing an
+                   echo, it is adding its own transmit-driven misadjustment,
+                   and against a received upstream of RMS ~1240 that alone
+                   pins the receive SNR at 18-22 dB.  A 31200 bit/s upstream at
+                   3200 baud is 9.75 bits/symbol and wants far more than that,
+                   so the canceller was capping the very thing it sat in front
+                   of -- the same shape of defect as the Phase 2 notch, and
+                   invisible for the same reason: it is applied after the RX
+                   G.711 tap, so every recording exonerates the wire. */
                 if (g_echo_can && notch_active
-                    && (g_mod == ME_MOD_V90 || g_v34_use_echo_can)) {
+                    && v34_echo_policy_mode() != V34_ECHO_NONE
+                    && ((g_mod == ME_MOD_V90
+                         && v34_echo_policy_mode() == V34_ECHO_CANCELLER)
+                        || g_v34_use_echo_can)) {
                     #define EC_TAPS     1024    /* 128ms — covers delay + full tail */
                     static float ec_h[EC_TAPS];   /* adaptive FIR coefficients */
                     static int ec_init_done = 0;

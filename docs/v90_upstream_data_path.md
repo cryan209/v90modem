@@ -1159,3 +1159,86 @@ work is the rest of this document.  The change is kept because the mechanism is
 proven in the plain-V.34 path and a notch inside the received band that nothing
 retires is a defect by inspection, not because it was measured to fix anything
 here.
+
+## The upstream's dominant impairment was our own echo canceller (2026-08-23)
+
+The entry above was written against a receiver whose upstream was white, and it
+closed by saying the notch was not what stopped it.  It was not, and the thing
+that did is next to it: the NLMS echo canceller, unconditional on every V.90
+call, was the largest noise source in the receive path.
+
+Two defects, and the first one hid the second for months.
+
+**(a) The Phase 2 notch retirement only ever fired on the first call of a
+server process.**  `v90_retire_phase2_cc_notch()` guarded itself with a
+`static bool retired`, which is process lifetime, not call lifetime.
+`v8_result_handler()` re-arms the 1200 Hz notch for every call, so call 1
+retired it and calls 2..N re-armed it and could never retire it again -- and on
+this rig the call that reaches data mode is rarely the first.  Read the notch
+lines in `artifacts/v90-cap-20260822T130820Z-9600/server.log` in order: the
+retirement appears once, against the first call, and the call that actually
+reaches data mode (notch armed at line 7931, Phase 3 complete 8519, data mode
+9698) has no retirement line at all.  That call ran its whole upstream at 0.139
+from the lattice -- the same figure the plain-V.34 notch left behind, 17.2 dB.
+`g_notch.active` is already the correct once-per-call guard, since the function
+clears it and V.8 re-arms it, so the latch is redundant within a call and wrong
+across calls.  It is gone.
+
+**(b) The echo canceller was not cancelling an echo.  It was adding one.**
+The canceller prints its own verdict every 8000 samples and nobody had read it:
+across the soak runs in `artifacts/`, its effect on the receive RMS oscillates
+around zero -- +0.2 to -0.4 dB, mean nil -- which is what a filter with nothing
+to remove looks like.  The proof is in the batches where the received signal is
+digital silence: `pre_rms=0 post_rms=106`, `pre_rms=0 post_rms=159`.  A filter
+that turns silence into RMS 159 is not removing anything; it is injecting its
+own transmit-driven misadjustment, and in V.90 the transmit reference is the
+downstream PCM, measured 8.4 dB louder than the upstream we are trying to
+receive.  Against a received upstream of RMS ~1240 that injection alone pins the
+receive SNR at 18-22 dB.  A 31200 bit/s upstream at 3200 baud is 9.75
+bits/symbol and wants far more, so the canceller was capping the exact quantity
+it sat in front of.  There is no echo for it to find, either: peak normalised
+cross-correlation between our transmit and our receive is 0.0068 over lags 0 to
+1024, and a 512-tap least-squares fit of transmit into receive removes 0.307% of
+the receive power -- 512/160000, exactly the bias of fitting that many taps to
+that many samples.
+
+It is the same shape of defect as the notch, and it hid for the same two
+reasons: it is applied **after** the RX G.711 tap, so every recording of a live
+call shows a clean signal and every offline analysis exonerates the wire; and no
+loopback exercises it, because `v34_duplex_test` drives `v34_rx()` directly and
+never runs the engine.
+
+On V.90 the canceller is now opt-in (`ME_V34_ECHO=canceller`).  Measured back to
+back on the same binary, four rounds each:
+
+| | B1 out-of-sample distance | data-mode `sym err` min | intact `U%07d` lines |
+|---|---|---|---|
+| canceller on (`ME_V34_ECHO=canceller`) | 0.657, 0.675 | 0.548, 0.617 | 0, 0 |
+| canceller off (default) | 0.226, 0.226, 0.226 | 0.165, 0.186, 0.165 | **399, 0, 730** |
+
+0.667 is the distance for symbols bearing no relation to the lattice, so with
+the canceller in, B1 itself was white out of sample and the eye never opened at
+all.  The 399 and 730 lines are the peer's own traffic arriving intact on our
+PTY -- the first upstream payload this path has delivered.  B1's in-sample fit
+goes 98.6% -> 100.0% with it out, which is the same statement made where the
+sequence is known.
+
+`artifacts/v90-ecoff-d-233840Z` is kept as the record of the 730-line call.
+
+**What this did not fix.**  Payload is intermittent -- two of three data-mode
+calls delivered it, and the median `sym err` is still 0.666, so the eye is open
+in bursts rather than continuously.  Frame-phase lock still does not hold.
+
+**Two things measured and ruled out along the way, so they are not re-run.**
+The ordinary V.34 data path seeds its carrier loop's *frequency* from B1's two
+halves, because a decision-directed loop cannot acquire a frequency once its
+first decisions are wrong -- that is what made plain V.34 white above 12000
+bit/s.  The T/3 upstream loop never had that seed, and this upstream is well
+past that density, so it looked like the same defect.  It is not: the seed is
+implemented (`ME_V90_UPSTREAM_B1_FREQ=0` disables) and the residual it measures
+on a live call is **0.0229 deg/symbol, 0.20 Hz**, against the 0.1054 deg/symbol
+that was fatal in V.34, and with the canceller out it reads -0.0001.  Residual
+carrier is not this path's problem.  Precoding is not either: V.34 precoder
+coefficients travel from the receiver to the transmitter, and this side only
+ever builds MP type 0 (`v90_build_mp_type0()`), so a conformant peer transmits
+unprecoded.

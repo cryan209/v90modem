@@ -548,6 +548,8 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym);
 static void l1_l2_analysis_init(v34_rx_state_t *s);
 static void equalizer_reset(v34_rx_state_t *s);
 static complexf_t equalizer_get(v34_rx_state_t *s);
+static bool v90_upstream_t2_enabled(void);
+static bool v34_rx_t2_data_path(const v34_rx_state_t *s);
 static void tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complexf_t *target);
 static void create_godard_coeffs(ted_t *coeffs, float carrier, float baud_rate, float alpha);
 static int set_tx_trellis_mode(v34_state_t *s, int trellis_size);
@@ -10607,7 +10609,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                The decision is taken in the grid domain and mapped back
                through the derotator into the equalizer's own domain, which is
                where the taps live.  ME_V34_DATA_EQ=0 disables. */
-            if (!s->v90_mode  &&  data_mode_eq_enabled())
+            if (v34_rx_t2_data_path(s)  &&  data_mode_eq_enabled())
             {
                 float g_re = transformed_re*s->data_symbol_scale;
                 float g_im = transformed_im*s->data_symbol_scale;
@@ -10714,7 +10716,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                in pack_output_bitstream(): grid small + shell 0% is a working
                data mode, grid small + shell high is correct symbols grouped
                wrongly, and grid large is a fault before the mapper. */
-            if (!s->v90_mode)
+            if (v34_rx_t2_data_path(s))
             {
                 int who = s->calling_party ? 1 : 0;
                 static double err_sum[2];
@@ -12870,6 +12872,81 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
         span_log(s->logging, SPAN_LOG_WARNING,
                  "Rx - V.90 upstream B1 template->emitted: %s\n", line);
     }
+    /* Seed the carrier loop's FREQUENCY from B1, exactly as the ordinary V.34
+       data path does (see "Rx - B1 residual carrier" above).  The loop here
+       only ever had decision-directed and fourth-power updates, and neither
+       can ACQUIRE a frequency once the first decisions are already wrong --
+       it holds a lock it cannot take.  In plain V.34 that is precisely what
+       made every rate above 12000 bit/s decode to white, and this upstream is
+       31200 bit/s at 3200 baud, 9.75 bits/symbol, far the other side of that
+       line.  10.1.3.1's B1 is a known sequence, so the estimate owes nothing
+       to a decision: correlate its two halves separately and the angle
+       between them is the advance per symbol.  Averaging coherently inside
+       each half before taking an angle is what makes it work over so few
+       symbols -- the obvious one-lag autocorrelation reads an order of
+       magnitude high because it never averages the noise down first.
+       ME_V90_UPSTREAM_B1_FREQ=0 leaves the loop to acquire on its own. */
+    {
+        const char *e_env = getenv("ME_V90_UPSTREAM_B1_FREQ");
+
+        if (!(e_env  &&  e_env[0] == '0'))
+        {
+            complexf_t c0 = {0.0f, 0.0f};
+            complexf_t c1 = {0.0f, 0.0f};
+            int half = s->v90_t3_b1_symbols/2;
+            int pre = V34_V90_T3_FSE_TAPS/2;
+
+            for (int n = 0;  n < s->v90_t3_b1_symbols;  n++)
+            {
+                complexf_t y = {0.0f, 0.0f};
+                complexf_t *acc = (n < half) ? &c0 : &c1;
+                complexf_t e = s->v90_t3_b1[n];
+
+                for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+                {
+                    complexf_t x = v90_t3_raw_get(s, best_first + 3*n - pre + tap);
+                    complexf_t z;
+
+                    if (s->v90_t3_fse_conjugate)
+                        x.im = -x.im;
+                    /*endif*/
+                    z = complex_mulf(&s->v90_t3_fse[tap], &x);
+                    y = complex_addf(&y, &z);
+                }
+                /*endfor*/
+                /* y * conj(e) */
+                acc->re += y.re*e.re + y.im*e.im;
+                acc->im += y.im*e.re - y.re*e.im;
+            }
+            /*endfor*/
+            if (half > 0
+                &&
+                (c0.re*c0.re + c0.im*c0.im) > 0.0f
+                &&
+                (c1.re*c1.re + c1.im*c1.im) > 0.0f)
+            {
+                float d_re = c1.re*c0.re + c1.im*c0.im;
+                float d_im = c1.im*c0.re - c1.re*c0.im;
+                float dphi = atan2f(d_im, d_re)/(float) half;
+                int ok = (fabsf(dphi) < V34_CARRIER_FREQ_LIMIT);
+
+                /* Anything approaching half a turn per symbol is a wrapped
+                   measurement rather than a carrier offset; refuse it. */
+                if (ok)
+                    s->v90_t3_carrier.freq = dphi;
+                /*endif*/
+                span_log(s->logging, SPAN_LOG_WARNING,
+                         "Rx - V.90 upstream B1 residual carrier: %.4f "
+                         "deg/symbol (%.2f Hz at this rate)%s\n",
+                         dphi*180.0f/3.14159265f,
+                         dphi*180.0f/3.14159265f
+                           *baud_rate_parameters[s->baud_rate].baud_rate/360.0f,
+                         ok ? "" : " - rejected as wrapped");
+            }
+            /*endif*/
+        }
+        /*endif*/
+    }
     v90_t3_emit_ready(s);
 }
 
@@ -14130,6 +14207,16 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
        B1 is only 90 ms long and follows E immediately on the wire, whereas
        the E we anchor on is detected off the CP bit stream and arrives late;
        starting the capture at the handover meant B1 had already gone by. */
+    if (v90_upstream_t2_enabled())
+    {
+        /* Hand the upstream to the ordinary V.34 data receiver instead. */
+        s->rx.v90_t3_prepared = false;
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Rx - V.90 upstream: T/3 branch disabled, using the ordinary "
+                 "T/2 data receiver (ME_V90_UPSTREAM_T2)\n");
+        return 0;
+    }
+    /*endif*/
     if (!s->rx.v90_t3_active  &&  !v90_t3_start(&s->rx))
     {
         s->rx.v90_t3_prepared = false;
@@ -14262,6 +14349,36 @@ static bool v34_build_expected_b1(v34_rx_state_t *rx)
     return v34_build_expected_b1_tap(rx, v34_expected_b1_default_tap(rx));
 }
 
+/* V.90's upstream is an ordinary V.34 signal, so in principle the ordinary
+   V.34 data receiver -- RRC front end, 127-tap T/2 equalizer, DD-LMS and the
+   B1-calibrated derotator -- should decode it.  It has never been asked to:
+   v34_v90_prepare_upstream_data() always hands the upstream to the dedicated
+   T/3 receiver instead.  That choice was made when the ordinary path "phase
+   locked nowhere" live, which is also what plain V.34 looked like before the
+   engine's receive-path notch was found (docs/v34_data_mode_rates.md).
+   ME_V90_UPSTREAM_T2=1 takes the T/3 branch out so the two can be compared on
+   the same call. */
+static bool v90_upstream_t2_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *e = getenv("ME_V90_UPSTREAM_T2");
+
+        cached = (e  &&  (e[0] == '1'  ||  e[0] == 'y'  ||  e[0] == 'Y'))  ?  1  :  0;
+    }
+    /*endif*/
+    return cached != 0;
+}
+
+/* True where the ordinary T/2 data receiver owns this stream: every plain
+   V.34 call, and a V.90 upstream that the T/3 branch did not take. */
+static bool v34_rx_t2_data_path(const v34_rx_state_t *s)
+{
+    return !s->v90_mode  ||  !s->v90_t3_prepared;
+}
+
 static bool v90_t3_start(v34_rx_state_t *rx)
 {
     rx->v90_t3_active = false;
@@ -14381,7 +14498,7 @@ SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
         /*endif*/
     }
     /*endif*/
-    if (!s->rx.v90_mode && v34_build_expected_b1(&s->rx))
+    if (v34_rx_t2_data_path(&s->rx) && v34_build_expected_b1(&s->rx))
         s->rx.b1_acquisition_active = true;
     /* 11.4.1.1.5/11.4.1.2.5 conditions on the complete known B1 before
        unclamping user data.  Buffer B1 to measure gain, phase and conjugation
