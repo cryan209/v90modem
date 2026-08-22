@@ -10673,6 +10673,38 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             }
             /*endif*/
 
+            /* The equalizer's own frequency response, so the question "is
+               this receiver enhancing noise at the band edges?" can be asked
+               of the taps rather than guessed at.  V34_EQ_TAP_DUMP names a
+               file; one line of 2*(PRE+1+POST) floats per 4096 symbols. */
+            {
+                static const char *tap_path = NULL;
+                static int tap_count[2];
+                int who_t = s->calling_party ? 1 : 0;
+
+                if (tap_path == NULL)
+                    tap_path = getenv("V34_EQ_TAP_DUMP") ? getenv("V34_EQ_TAP_DUMP") : "";
+                /*endif*/
+                if (tap_path[0]  &&  ++tap_count[who_t] % 4096 == 0)
+                {
+                    FILE *tf = fopen(tap_path, "a");
+
+                    if (tf)
+                    {
+                        int ti;
+
+                        fprintf(tf, "%s %d", who_t ? "caller" : "answer", tap_count[who_t]);
+                        for (ti = 0;  ti < V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN;  ti++)
+                            fprintf(tf, " %.6g %.6g", s->eq_coeff[ti].re, s->eq_coeff[ti].im);
+                        /*endfor*/
+                        fprintf(tf, "\n");
+                        fclose(tf);
+                    }
+                    /*endif*/
+                }
+                /*endif*/
+            }
+
             /* Plain V.34 runs none of the V.90 upstream lock machinery, so it
                had no read at all on its own data mode.  Distance to the grid
                says whether the waveform arrives decodable -- 9.x puts every
@@ -11190,7 +11222,26 @@ static int v34_eye_select_enabled(void)
     {
         const char *value = getenv("ME_V34_EYE_SELECT");
 
-        cache = !(value  &&  strcmp(value, "off") == 0);
+        cache = !(value  &&  (strcmp(value, "off") == 0
+                              ||  value[0] == '0'
+                              ||  value[0] == 'n'
+                              ||  value[0] == 'N'));
+    }
+    /*endif*/
+    return cache;
+}
+
+static int v34_eye_pp_guard_enabled(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *value = getenv("ME_V34_EYE_PP_GUARD");
+
+        cache = (value  &&  (value[0] == '0'  ||  value[0] == 'n'  ||  value[0] == 'N'))
+              ?  0
+              :  ((value  &&  value[0] == '2')  ?  2  :  1);
     }
     /*endif*/
     return cache;
@@ -11270,6 +11321,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
 {
     complexf_t eq_sample;
     bool eye_check;
+    bool eye_hold;
 
     /* Ordinary V.34 uses the historical T/2 front end.  The V.90 DATA-only
        T/3 branch calls process_primary_symbol() directly after its supervised
@@ -11284,6 +11336,26 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     eye_check = (v34_rx_stage_is_primary_training(s->stage)
                  &&  s->eye_flips < v34_eye_max_flips()
                  &&  v34_eye_select_enabled());
+    /* Never move the symbol instant while 10.1.3.6's PP is being conditioned
+       on.  That
+                    stage is supervised against a known 232-baud sequence with
+                    the AGC frozen, so moving the symbol instant part way
+                    through invalidates every sample after the move and the
+                    equalizer is trained on the wreckage.  Measured at 3429
+                    baud, where 8000/3429 leaves the two T/2 phases only 1.17
+                    samples apart and the decision is closest: a flip landing
+                    inside the window takes the PP mean residual from 0.192 to
+                    0.805, after which TRN never locks (55% ones against 80%),
+                    the far end's J never decodes exactly (d4=3 where a healthy
+                    call reads d4=0) and Phase 3 deadlocks.  2743 baud flips
+                    just *before* PP starts and must keep doing so, which is
+                    why this is scoped to the window rather than to a vote
+                    count: requiring two agreeing windows instead costs
+                    2743/9600 both laws. */
+    eye_hold = (v34_eye_pp_guard_enabled()
+                &&  s->phase3_pp_started
+                &&  (v34_eye_pp_guard_enabled() > 1
+                     ||  s->duration <= PHASE3_PP_TRAIN_BAUDS));
     if ((s->baud_half ^= 1))
     {
         if (eye_check)
@@ -11323,7 +11395,16 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                1.17 samples apart and a single window decided by ratios of 1.05
                to 1.19, so the receiver flipped four times in one call and
                finished wherever the cap left it. */
-            if (s->eye_votes >= v34_eye_votes_needed())
+            if (s->eye_votes >= v34_eye_votes_needed()  &&  eye_hold)
+            {
+                /* Measured, and deliberately not acted on.  See above. */
+                s->eye_votes = 0;
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - T/2 eye favours the other phase (off %.1f vs on %.1f) "
+                         "but PP is being conditioned on; not moving the symbol instant\n",
+                         (double) s->eye_off_sum, (double) s->eye_on_sum);
+            }
+            else if (s->eye_votes >= v34_eye_votes_needed())
             {
                 s->eye_votes = 0;
                 s->eye_flips++;

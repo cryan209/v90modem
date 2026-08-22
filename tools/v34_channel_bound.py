@@ -78,30 +78,31 @@ def main():
         sys.exit("not enough symbols in %s" % a.frames)
 
     n = np.arange(len(x))
-    bb = x*np.exp(-2j*np.pi*a.carrier*n/a.rate)
+    bb0 = x*np.exp(-2j*np.pi*a.carrier*n/a.rate)
     K = 161
     t = np.arange(K) - K//2
     h = np.sinc(2*(a.baud*0.6)/a.rate*t)*np.hamming(K)
-    bb = np.convolve(bb, h/h.sum(), "same")
+    bb = np.convolve(bb0, h/h.sum(), "same")
 
     L = 12
     win = np.hamming(2*L + 1)
 
-    def interp(pos):
+    def interp(pos, sig):
         out = np.zeros(len(pos), complex)
         i0 = np.floor(pos).astype(int)
         for k in range(-L, L + 1):
-            idx = np.clip(i0 + k, 0, len(bb) - 1)
-            out += bb[idx]*np.sinc(pos - (i0 + k))*win[k + L]
+            idx = np.clip(i0 + k, 0, len(sig) - 1)
+            out += sig[idx]*np.sinc(pos - (i0 + k))*win[k + L]
         return out
 
     taps = [int(v) for v in a.taps.split(",")]
 
-    def fit(delay, nt):
+    def fit(delay, nt, sig=None):
+        sig = bb if sig is None else sig
         pos = delay + (np.arange(len(sym)*2 + nt)/(2*a.baud))*a.rate
-        if pos[-1] >= len(bb) - 20 or pos[0] < 20:
+        if pos[-1] >= len(sig) - 20 or pos[0] < 20:
             return None
-        y = interp(pos)
+        y = interp(pos, sig)
         X = np.stack([y[2*i:2*i + nt] for i in range(len(sym))], 0)
         c, *_ = np.linalg.lstsq(X, sym, rcond=None)
         return float(np.mean(np.abs(sym - X@c)**2))
@@ -118,15 +119,59 @@ def main():
         r = fit(delay, nt0)
         if r is not None and r < best[0]:
             best = (r, delay)
+
+    # A fixed equalizer cannot undo a rotation that moves, so the carrier has
+    # to be right to a fraction of a hertz before the residual means anything.
+    # 0.18 Hz -- the difference between 1959 and 3429 baud's exact 1959.18 --
+    # is 19 degrees across a 1024-symbol window, and 19 degrees of unremovable
+    # ramp caps the fit at about 20 dB however good the line is.  It read 20.7
+    # dB on a line that is really 38.  Sweep the offset out, coarse then fine,
+    # at the alignment already found.
+    def sweep(centre, span, step):
+        found = (1e18, centre)
+        f = centre - span
+        while f <= centre + span + 1e-12:
+            trial = bb0*np.exp(-2j*np.pi*f*n/a.rate)
+            r = fit(best[1], nt0, np.convolve(trial, h/h.sum(), "same"))
+            if r is not None and r < found[0]:
+                found = (r, f)
+            f += step
+        return found
+
+    offset = 0.0
+    for span, step in ((5.0, 0.5), (0.5, 0.05), (0.05, 0.005)):
+        _, offset = sweep(offset, span, step)
+    bb = np.convolve(bb0*np.exp(-2j*np.pi*offset*n/a.rate), h/h.sum(), "same")
+    for delay in range(best[1] - 40, best[1] + 40):
+        r = fit(delay, nt0)
+        if r is not None and r < best[0]:
+            best = (r, delay)
+
     power = float(np.mean(np.abs(sym)**2))
-    print("%s: aligned at sample %d, %d symbols from %d"
-          % (a.tap, best[1], len(sym), a.from_symbol))
+    print("%s: aligned at sample %d, carrier %.3f Hz (%+.3f), %d symbols from %d"
+          % (a.tap, best[1], a.carrier + offset, offset, len(sym), a.from_symbol))
+    # Fit on the first half, score on the second.  A held-out figure cannot be
+    # inflated by tap count, which matters because the whole point of the
+    # number is to be compared against a real receiver.
+    def crossval(delay, nt):
+        pos = delay + (np.arange(len(sym)*2 + nt)/(2*a.baud))*a.rate
+        if pos[-1] >= len(bb) - 20 or pos[0] < 20:
+            return None
+        y = interp(pos, bb)
+        X = np.stack([y[2*i:2*i + nt] for i in range(len(sym))], 0)
+        half = len(sym)//2
+        c, *_ = np.linalg.lstsq(X[:half], sym[:half], rcond=None)
+        return float(np.mean(np.abs(sym[half:] - X[half:]@c)**2))
+
     for nt in taps:
         r = fit(best[1], nt)
         if r is None:
             continue
-        print("  best possible linear receiver, %3d T/2 taps: %5.1f dB"
-              % (nt, 10*np.log10(power/r)))
+        xv = crossval(best[1], nt)
+        print("  best possible linear receiver, %3d T/2 taps: %5.1f dB "
+              "(held out: %5.1f dB)"
+              % (nt, 10*np.log10(power/r),
+                 10*np.log10(power/xv) if xv else float("nan")))
     # The bias from fitting nt complex taps to len(sym) observations, so a
     # short window cannot be mistaken for a better channel.
     print("  (overfitting bias at %d taps / %d symbols: %.2f dB)"

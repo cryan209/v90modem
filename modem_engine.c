@@ -2229,6 +2229,26 @@ static bool me_retry_v8_with_alternate_tone_locked(const char *reason, int statu
     return true;
 }
 
+/* Which echo control plain V.34 uses.  "auto" is the default and is decided
+ * by v34_update_echo_policy() below; "none", "notch" and "canceller" force
+ * one for an A/B. */
+enum { V34_ECHO_AUTO = 0, V34_ECHO_NONE, V34_ECHO_NOTCH, V34_ECHO_CANCELLER };
+
+static int v34_echo_policy_mode(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *e = getenv("ME_V34_ECHO");
+
+        cached = V34_ECHO_AUTO;
+        if (e && strcmp(e, "none") == 0)           cached = V34_ECHO_NONE;
+        else if (e && strcmp(e, "notch") == 0)     cached = V34_ECHO_NOTCH;
+        else if (e && strcmp(e, "canceller") == 0) cached = V34_ECHO_CANCELLER;
+    }
+    return cached;
+}
+
 static void notch_filter_init(notch_filter_t *nf, float freq, float q, float fs)
 {
     float w0 = 2.0f * M_PI * freq / fs;
@@ -2303,7 +2323,46 @@ static void v34_update_echo_policy(void)
        when the selected carriers are separated; 3429 has coincident
        carriers and 3200 is normally too close, so use the adaptive echo
        canceller instead of declaring either negotiated profile unusable. */
-    if (separation < 150.0f) {
+    /* ME_V34_ECHO=none disables both.  Neither is free: the notch is 30 Hz
+       wide, which is an impulse response of about 266 samples -- 114 symbols
+       at 3000 baud, against the 63 symbols the receiver's equalizer spans --
+       so where the notch frequency lands inside the received signal's band
+       the receiver cannot undo it, and the damage is invisible to the RX
+       G.711 tap because the tap is upstream of this filter. */
+    /* Is our transmit carrier inside the band the receiver is listening to?
+     * V.34's shaping is 12% excess bandwidth, so the received signal occupies
+     * the RX carrier +/- 0.56 of the RX symbol rate.  At every symbol rate
+     * this pairing reaches, that band is most of the 300-3400 channel and the
+     * TX carrier lands inside it.  Carrier *separation* is the wrong test: at
+     * 3000 baud the two carriers are 200 Hz apart, which passed the old
+     * >= 150 Hz test, and the notch then went in at 2000 Hz -- 200 Hz from
+     * the middle of a signal spanning 120 to 3480. */
+    float rx_lo = rx_carrier - 0.56f*rx_baud;
+    float rx_hi = rx_carrier + 0.56f*rx_baud;
+    bool tx_in_rx_band = (tx_carrier > rx_lo  &&  tx_carrier < rx_hi);
+    int mode = v34_echo_policy_mode();
+
+    if (mode == V34_ECHO_AUTO)
+        mode = tx_in_rx_band ? V34_ECHO_NONE : V34_ECHO_NOTCH;
+
+    if (mode != V34_ECHO_NOTCH) {
+        /* A 30 Hz notch is an impulse response of about 266 samples, 114
+         * symbols at 3000 baud, against the 63 symbols this receiver's
+         * equalizer spans -- so an in-band notch cannot be undone, and the
+         * damage is invisible to the RX G.711 tap because the tap is upstream
+         * of the filter.  Measured live at 3000 baud/9600 against the
+         * SmartLink rig: with the notch the receiver reads 17.4 dB, without
+         * it 34.7 dB, on a wire whose own least-squares bound is 38 dB. */
+        g_notch.active = false;
+        g_v34_use_echo_can = (mode == V34_ECHO_CANCELLER);
+        ME_LOG("[ME] V.34 negotiated echo policy: TX=%d/%s %.1f Hz, "
+               "RX=%d/%s %.1f Hz -> %s (TX carrier %s the %.0f-%.0f Hz "
+               "receive band)\n",
+               tx_baud, tx_high ? "high" : "low", tx_carrier,
+               rx_baud, rx_high ? "high" : "low", rx_carrier,
+               g_v34_use_echo_can ? "adaptive canceller" : "no echo filter",
+               tx_in_rx_band ? "is inside" : "is outside", rx_lo, rx_hi);
+    } else if (separation < 150.0f  &&  v34_echo_policy_mode() == V34_ECHO_AUTO) {
         g_notch.active = false;
         g_v34_use_echo_can = true;
         ME_LOG("[ME] V.34 negotiated echo policy: TX=%d/%s %.1f Hz, "

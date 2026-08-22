@@ -207,6 +207,14 @@ default -- the maximum for the symbol rate -- is wrong on any real line.
 
 ## Beyond 14400 on this rig: no, and the ceiling is the peer's transmitter
 
+> **Superseded — this section's conclusion is wrong.**  Every bound in it was
+> measured with the carrier taken as exact and on calls whose decisions were
+> not clean, and both errors push the number down.  The wire is ~38 dB, not
+> 19.5, and the ceiling was a filter inside our own engine.  The section is
+> kept because its method is sound and its ruled-out causes stay ruled out;
+> read the section after it for what is actually true.
+
+
 14400 is where this rig stops, and the reason is now measured rather than
 inferred.  Every number below is receiver-independent.
 
@@ -279,3 +287,120 @@ unlike everything else in this section it is a defect at our end.  Note the
 peer's `equerr` at 3429 is ~5000 against ~1600 at 3000, so 3429 may well
 measure several dB worse once it does train; that is the first thing to
 measure if it starts working.
+
+
+## 21600 live: the ceiling was a notch filter of our own (2026-08-22)
+
+**Live against the SmartLink rig, at 3000 baud, our receive direction now runs
+at 21600 bit/s** -- 166760 symbols at 0.037 from the lattice, 34.9 dB -- where
+the previous section concluded 14400 was the rig's hard ceiling.  16800 runs at
+0.008-0.013 and 34.4-34.8 dB, at 3000 and at 3429 baud alike.  The peer will
+not transmit above 21600 whatever we ask for (24000 and 26400 both come back as
+`finally txbitrate 21600`), so that is now the far end's limit rather than ours.
+
+### What was wrong, and how it hid
+
+`v34_update_echo_policy()` puts a **30 Hz notch at our own transmit carrier**
+into the receive path, to stop our transmitter's carrier leaking into our
+receiver.  Whether it does so was decided by the *separation* of the two
+carriers: at 3000 baud, TX high (2000 Hz) against RX low (1800 Hz) is 200 Hz
+apart, which passed the `>= 150 Hz` test.  But the received signal is 3000 baud
+at 12% excess bandwidth around 1800 Hz -- it occupies **120 to 3480 Hz**, and
+2000 Hz is 200 Hz from the middle of it.  Carrier separation is the wrong test;
+what matters is whether the notch lands inside the band being received, and at
+every symbol rate this pairing reaches, it does.
+
+A 30 Hz notch has an impulse response about 266 samples long -- 114 symbols at
+3000 baud, against the 63 symbols the receiver's equalizer spans.  It cannot be
+equalized out.  Measured, on otherwise identical back-to-back calls:
+
+| 3000 baud / 9600 | distance to grid | receive SNR |
+|---|---|---|
+| `ME_V34_ECHO=notch` (the old behaviour) | 0.139 | **17.2 dB** |
+| no echo filter (the new default) | 0.002 | **34.8 dB** |
+
+**Two things kept this hidden for a long time.**  The notch is applied *after*
+the RX G.711 tap, so every recording of a live call shows a clean signal and
+every offline analysis of one exonerates the wire.  And `v34_duplex_test` does
+not run the engine at all -- it drives `v34_rx()` directly -- so no loopback
+row could ever show it.  The gap between 30 dB on the loopback and 17 dB live
+was the whole symptom, and it was attributed to the line.
+
+### The instrument that found it
+
+`tools/v34_channel_bound.py` fits the best possible fractionally-spaced
+least-squares equalizer to a recorded tap, given the symbols the receiver
+decided, and reports the residual on **held-out** data.  That bounds every
+linear receiver, so it separates "the wire cannot carry this" from "our
+receiver is not getting it".  On three independent clean calls the wire reads
+**38-39 dB held out** -- transparent, at G.711's own ceiling -- against a
+receiver delivering 17.  A 20 dB gap on a transparent wire is not a channel
+problem, and that is what turned the search inward.
+
+Two traps in using it, both of which produced wrong answers first:
+
+* **The carrier must be right to a fraction of a hertz.**  A fixed equalizer
+  cannot undo a rotation that moves: 0.18 Hz -- the difference between 1959 and
+  3429 baud's exact 1959.18 -- is 19 degrees across a 1024-symbol window, and
+  that unremovable ramp caps the fit at about 20 dB however good the line is.
+  It reported 20.7 dB for a line that is really 38.  The tool now sweeps the
+  offset out and prints what it found.
+* **The decided symbols are the truth only where the call is decoding.**  Run
+  on a marginal call (14400 at 0.35 from the lattice) the fit is being asked to
+  reproduce our own errors, and it reads 19.5 dB on the same wire that a clean
+  9600 call reads 39 on.  Check `distance to grid` first and measure inside a
+  healthy stretch.
+
+Those two together are the whole of why the previous section concluded the
+opposite, including its "the peer's own 9600 Hz transmit tap measures 21.5 dB":
+that measurement used a 14400 call's decisions.  The rig's own transmitter is
+fine.
+
+### What else was tested and is still ruled out
+
+Level (`HEADROOM` 0.25 against 1.0: 18.4 against 18.5 dB), the peer's clock
+(one slip in a whole call), the rig's loop lowpass (built but not in the path),
+and the rig's upstream resampler kernel (`DM_UP_TAPS` 32 against 64: no
+change).  All were measured against a notched receiver, so they were measuring
+the notch's floor -- but they were also all *negative* results, and none of
+them becomes positive now.  `DM_UP_TAPS` and `DM_UP_FC` are plumbed through
+`tools/soak/v34_lapm_call.sh` if anyone wants to re-run them honestly.
+
+### Choosing the echo policy
+
+The default is now: if the transmit carrier falls inside the receive band, use
+**no echo filter**; otherwise the notch as before.  `ME_V34_ECHO` forces
+`none`, `notch` or `canceller` for an A/B.  This rig has no measurable echo at
+all -- if it had any, our transmit (which is uncorrelated with the peer's data)
+would show up as noise in the RX tap and cap the least-squares bound, and the
+bound is 38 dB.  On a real two-wire hybrid there would be echo, and the right
+tool there is the adaptive canceller, not a notch inside the receive band; that
+pairing is untested here, and the one call that forced `canceller` did not
+reach data mode.
+
+### The 3429 row, which needed a fix of its own
+
+3429 baud never trained live and alternated pass/fail by rate parity on the
+loopback -- 9600 fail, 12000 pass, 14400 fail, 16800 pass, 19200 fail, 21600
+pass, identically in both companding laws.  That is not SNR; it is
+deterministic.  The cause is the T/2 eye-phase chooser firing **inside**
+10.1.3.6's supervised PP conditioning.  That stage is trained against a known
+232-baud sequence with the AGC frozen, so moving the symbol instant part way
+through invalidates every sample after the move: measured at 3429, a flip
+inside the window takes the PP mean residual from 0.192 to 0.805, after which
+TRN never locks (55% ones against 80%), the far end's J never decodes exactly
+(d4=3 where a healthy call reads d4=0) and Phase 3 deadlocks with each side
+waiting for the other.
+
+The chooser now measures during PP but does not act until conditioning is done.
+Scoped to the move rather than the measurement, deliberately: suppressing the
+accumulation instead shifts every later window boundary and changed decisions
+long after PP, which cost 3000/21600 u-law 37 bit errors.  And scoped to the
+window rather than to a vote count: 2743 baud flips just *before* PP starts and
+must keep doing so, so requiring two agreeing windows costs 2743/9600 in both
+laws.  `ME_V34_EYE_PP_GUARD=0` restores the old behaviour;
+`ME_V34_EYE_SELECT` now also accepts `0`, having previously only recognised the
+literal `off`.
+
+With that and the echo fix, 3429/16800 runs live at 0.008 from the lattice and
+34.5 dB.
