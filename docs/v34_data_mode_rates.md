@@ -204,3 +204,78 @@ V.34 12.2's rate renegotiation (the peer's `renegDownthresh` /
 `renegUpthresh`, which it computes on every call) is what turns it into a
 rate this modem picks by itself.  Until then the rate is `ME_V34_BPS` and the
 default -- the maximum for the symbol rate -- is wrong on any real line.
+
+## Beyond 14400 on this rig: no, and the ceiling is the peer's transmitter
+
+14400 is where this rig stops, and the reason is now measured rather than
+inferred.  Every number below is receiver-independent.
+
+`tools/v34_channel_bound.py` answers the question that cannot be answered from
+inside the receiver: given a recorded tap and the symbols the receiver
+decided, it fits the **best possible** fractionally-spaced least-squares
+equalizer -- non-causal, as long as you like, solved exactly rather than
+adapted -- and reports the residual.  That is an upper bound on every linear
+receiver, ours included.
+
+On the 14400 call (`artifacts/v34-rate-20260822T081433Z-b3000-14400`):
+
+| measured on | best possible linear receiver |
+|---|---|
+| what we received, whole path | **19.5 dB** (41 taps 18.7, 81 taps 19.2) |
+| our actual receiver, same call | 18.5 dB |
+| **slmodem's own 9600 Hz output**, before any resampler, codec or network | **21.5 dB** |
+
+So our receiver is within **1 dB** of the best any linear receiver could do on
+that recording, and the whole rig path -- 6:5 polyphase resampler, mu-law,
+Asterisk -- costs about 2 dB on top of a source that is already only 21.5 dB.
+**The ceiling is the far modem's own transmitter.**  Its pre-interpolation tap
+is written unconditionally to `/tmp/dm_from_dsp_9600.raw` in the d-modem
+container, which is what makes that row possible; pull it with
+`docker exec d-modem cat` and pass `--rate 9600 --raw16`.
+
+The channel is static, not time-varying: the same fit over 1024, 512, 256 and
+128-symbol windows gives 20.0, 20.2, 20.7 and 21.7 dB, which is one number
+plus each window's overfitting bias.  So there is no time-varying component
+for a smarter receiver to chase.
+
+Four candidate causes were tested on the rig and all four are ruled out:
+
+* **level** -- `HEADROOM=1.0` against the default 0.25 (a 12 dB change in the
+  peer's transmit level): 18.4 dB against 18.5.
+* **timing slips** -- `tools/measure_timing_slips.py` finds one slip in the
+  whole call, where the V.90 soak rounds saw 28 in 290 s.
+* **band clipping** -- the rig's ZOH loop model and its 4400 Hz lowpass are
+  built but *not* in the path; `ACTIVE downstream path: windowed-sinc
+  polyphase interpolator` is, at 257 taps.
+* **the upstream resampler kernel** -- `DM_UP_TAPS=64` against the default 32
+  (both at fc=3700): no improvement, 17.6 dB.  `DM_UP_TAPS` and `DM_UP_FC` are
+  now plumbed through `tools/soak/v34_lapm_call.sh` for anyone re-testing.
+
+### Why 16800 cannot fit inside 19.5 dB, arithmetically
+
+The lattice spacing is always 2 in these units, so at a fixed SNR the absolute
+distance to the grid scales with the constellation's power.  14400 at 3000
+baud runs at mean symbol power 21.7 and distance 0.35.  16800 is 1.74 times
+the power, so the same 18.5 dB puts it at 0.61 -- and 0.667 is white.  That is
+exactly what the live calls show (0.63-0.68 from the first window).  Getting
+16800 to a working 0.35 needs about +2.4 dB, i.e. ~21 dB received, which is
+above what the wire delivers and at the far transmitter's own source limit.
+
+### The one route that is not SNR-limited, and it is ours
+
+16800 at **3429 baud** is 4.9 bits/symbol -- the same density as the 14400 that
+works -- and would fit inside 19.5 dB with room to spare.  It does not train.
+Live at 3429 the peer sets up its modulator and demodulator at 3429/1959,
+reaches `XMITMP`, sits there and then `going into retrain in Handshake`: our
+Phase 4 never completes the MP exchange, at 16800
+(`artifacts/v34-rate-20260822T083436Z-b3429-16800`) and at 9600
+(`...-b3429-9600`) alike, so there is not even an SNR reading for that symbol
+rate.  3429 is the same row that is weakest on the loopback -- 3429/19200 does
+not train there either, and 3429 has been the one row outside `make test`'s
+asserts since the symbol-rate matrix work.
+
+**Fixing 3429 is the whole of the remaining route past 14400 on this rig**, and
+unlike everything else in this section it is a defect at our end.  Note the
+peer's `equerr` at 3429 is ~5000 against ~1600 at 3000, so 3429 may well
+measure several dB worse once it does train; that is the first thing to
+measure if it starts working.
