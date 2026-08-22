@@ -1108,3 +1108,54 @@ This is the same conclusion, and the same shape of tool, that unblocked the
 forty-second collapse earlier in this document.  It was worth more than
 another night of dialling then, and the four live calls behind this section
 say the same now.
+
+## The Phase 2 CC notch was never retired (2026-08-23)
+
+V.90's upstream is V.34-modulated, so it goes through the same receiver as a
+plain V.34 call -- and through the same filter that cost that call 17 dB of
+receive SNR (`docs/v34_data_mode_rates.md`).
+
+`v8_result_handler()` puts a 30 Hz notch on **1200 Hz**, our own CC transmit
+frequency.  Against the Phase 2 CC tones that is exactly right: both signals
+are narrowband, they are 1200 Hz apart, and the notch removes our echo at no
+cost to the 2400 Hz we are listening to.  From Phase 3 on it is the opposite.
+The upstream is then a wideband V.34 signal -- 3200 baud on the low carrier
+spans about 36 to 3620 Hz -- and 1200 Hz is deep inside it.  A 30 Hz notch is
+an impulse response of some 266 samples, about 170 symbols at 3200 baud,
+against the 63 symbols the equalizer spans, so the receiver cannot undo it.
+
+**Nothing retired it.**  `start_v34_training()` disables the notch at 3200 baud
+(91 Hz of carrier separation is too narrow to filter), `v8_result_handler()`
+then re-enables it at 1200 Hz for Phase 2, and the only later clear is on the
+fallback to plain V.34.  Every V.90 soak log in `artifacts/` shows exactly two
+notch lines and no third.  The plain-V.34 fix does not reach this path either:
+`v34_update_echo_policy()` returns immediately when `g_mod != ME_MOD_V34`.
+
+`v90_retire_phase2_cc_notch()` now clears it when Phase 3 starts.
+`ME_V34_ECHO=notch` keeps the old behaviour for an A/B.  The wideband NLMS
+canceller is untouched -- it is gated on `g_mod == ME_MOD_V90` and is the right
+tool against a broadband PCM echo, which a single notch never was.
+
+### What it is worth, and what it is not
+
+Two A/B pairs, `tools/soak/v90_notch_ab.sh`, upstream pumped for the whole call
+(`SOAK_SOCK_ALWAYS=1`), measured as the bytes the upstream actually delivered to
+our PTY:
+
+| run | notch | upstream bytes | DATA-bit reports |
+|---|---|---|---|
+| A  | left in | 37394 (call dropped at 13 s) | 311 |
+| A2 | left in | **0** | 0 |
+| B  | retired | 341967 | 2906 |
+| B2 | retired | 340407 | 2906 |
+
+So the upstream path now runs for the whole call instead of stopping or never
+starting.  **It does not fix the upstream decode.**  The symbols stay white in
+every one of the four runs -- best `sym err` 0.648 and none at all with the
+notch, 0.580 and 0.564 without, against 0.667 for symbols with no relation to
+the lattice -- and not one intact `U%07d` pattern line arrives in any run.
+Whatever is stopping this upstream from decoding, the notch was not it; that
+work is the rest of this document.  The change is kept because the mechanism is
+proven in the plain-V.34 path and a notch inside the received band that nothing
+retires is a defect by inspection, not because it was measured to fix anything
+here.

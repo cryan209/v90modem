@@ -2283,6 +2283,45 @@ static void notch_filter_apply(notch_filter_t *nf, int16_t *samples, int len)
     }
 }
 
+/* V.90's Phase 2 CC notch has to come out before Phase 3.
+ *
+ * v8_result_handler() puts a 30 Hz notch on 1200 Hz, our own CC transmit
+ * frequency, and against the CC tones that is exactly right: both signals are
+ * narrowband and 1200 Hz apart, so the notch removes our echo and costs the
+ * 2400 Hz we are listening to nothing.  From Phase 3 on it is the opposite.
+ * The upstream is then a wideband V.34 signal -- at 3200 baud on the low
+ * carrier it spans about 36 to 3620 Hz -- and 1200 Hz is deep inside it.  A
+ * 30 Hz notch is an impulse response of some 266 samples, about 170 symbols at
+ * 3200 baud, against the 63 symbols the receiver's equalizer spans, so the
+ * receiver cannot undo it.
+ *
+ * Nothing retired it: start_v34_training() disables the notch at 3200 baud
+ * (the 91 Hz carrier separation is too narrow to filter), v8_result_handler()
+ * then re-enables it at 1200 Hz for Phase 2, and the only later clear is on
+ * the fallback to plain V.34.  Every V.90 soak log shows the pair
+ * "Notch filter DISABLED ... 91.4 Hz too narrow" then "V.90 notch filter at
+ * 1200 Hz" and no third line.
+ *
+ * The same mistake in the plain-V.34 path cost 17 dB of receive SNR
+ * (docs/v34_data_mode_rates.md).  ME_V34_ECHO=notch keeps the old behaviour
+ * for an A/B.  The wideband NLMS canceller is untouched: it is gated on
+ * g_mod == ME_MOD_V90 and is the right tool against a broadband PCM echo.
+ */
+static void v90_retire_phase2_cc_notch(void)
+{
+    static bool retired = false;
+
+    if (retired  ||  !g_notch.active)
+        return;
+    if (v34_echo_policy_mode() == V34_ECHO_NOTCH)
+        return;
+    g_notch.active = false;
+    retired = true;
+    ME_LOG("[ME] V.90 Phase 2 CC notch retired at Phase 3: 1200 Hz is inside "
+           "the wideband upstream this receiver is now listening to\n");
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v34_update_echo_policy(void)
 {
     static const int baud_by_code[6] = {2400, 2743, 2800, 3000, 3200, 3429};
@@ -5566,8 +5605,12 @@ void me_rx_audio(const int16_t *amp, int len)
                    startup profile (V.34 10.1.2.3.5/Table 16). */
                 bool notch_active = (rx_stage >= V34_RX_STAGE_PHASE3_WAIT_S) ||
                                     (tx_stage >= V34_TX_STAGE_FIRST_S);
-                if (notch_active)
-                    v34_update_echo_policy();
+                if (notch_active) {
+                    if (g_mod == ME_MOD_V90)
+                        v90_retire_phase2_cc_notch();
+                    else
+                        v34_update_echo_policy();
+                }
                 int16_t filtered[len];
                 memcpy(filtered, amp, len * sizeof(int16_t));
                 /* NLMS echo canceller: subtract our TX echo from the RX signal.
