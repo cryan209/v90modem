@@ -134,3 +134,73 @@ The open item this leaves is the one the peer already implements: **choose the
 rate we ask for from a measured receive SNR** rather than from a configured
 start profile.  The distance-to-grid figure above is exactly the measurement
 that would drive it.
+
+## Live: 9600 was never the ceiling -- 14400 runs on this rig (2026-08-22)
+
+The section above concluded that the rig carries about 9600 and that live
+21600 is out of reach.  The first half of that was wrong, and the reason is
+worth recording because it was hiding in plain sight in the call that
+measured it.
+
+**Every live plain-V.34 call had `ME_V34_BPS=9600` set.**  The rate this modem
+asks for in MP is `min(configured start profile, L1/L2 probe projection)`, and
+the profile was the binding term, so 9600 is what we asked for and 9600 is
+what the peer sent.  Its own log says so: in `artifacts/v34-21600-20260822T-c65`
+the peer measured **its** receive direction at `equerr 1593`, chose data rate 6
+(14400) for what it would accept from us, and then transmitted 9600 -- our
+number, not its own.  The 16.8 dB figure was a correct measurement of a
+channel nobody had asked to work harder.
+
+Asking for more, at 3000 baud, three calls kept under `artifacts/v34-rate-*`
+and driven by the new `tools/soak/v34_rate_call.sh`:
+
+| asked | peer transmitted | distance to grid, our receive | outcome |
+|---|---|---|---|
+| 14400 | 14400 | 0.32-0.39 for 13 s, then 0.65 | decodes, 245 payload lines |
+| 16800 | 16800 | 0.63-0.68 from the first window | white for the whole call |
+| 21600 | 21600 | -- | `NO CARRIER`, 3944 symbols |
+
+The line measures **18 dB** at every one of those rates -- it is the
+constellation that changes, not the channel -- and 18 dB is enough for 4.8
+bits/symbol and not for 5.6.  16800 failing from its *first* window rather
+than degrading is what an SNR cliff looks like; it is not a defect, and
+16800 is clean on the loopback at the same symbol rate.
+
+So `>9600` on this rig is achievable, and 14400 is where it stops.
+
+### Nothing before data mode can measure this line
+
+Both of the places a rate decision could be taken were checked, and neither
+can see the impairment:
+
+* **The Phase-2 L1/L2 probe.**  Extracted from the recording at t=9.02 s of
+  the c65 call, its unoccupied bins read 1.7e-24 -- the rig adds *no* noise,
+  and the code's `if (noise < 1.0f) noise = 1.0f` floor is all that keeps the
+  projection finite.  It reported 37.9 dB for a data mode that then ran at
+  17.6.  The impairment is signal-proportional, and a 21-tone probe on a
+  150 Hz grid puts its own distortion products back on that grid.
+* **The Phase-4 TRN segment**, which is what the peer uses (`V34EQU equerr`
+  feeding `V34DATARATE` thresholds one log line before `txmp bits`).
+  `v34_phase4_trn_measured_rate_n()` implements the measurement; swept over
+  `V34_DUPLEX_NOISE_DB` at 40, 34, 30, 27, 24 and 20 dB it reads 9.8, 8.7,
+  8.4, 8.4, 11.4 and 9.8 dB while the same calls' data mode moves from 0.0018
+  to 0.0285.  It is measuring this receiver's own Phase-4 convergence, not
+  the line.  **Our Phase-4 TRN symbols sit at ~10 dB on a bearer where our
+  own data mode reaches 31 dB** -- 20 dB worse, and the same story as Phase 3
+  ("TRN mean distance to nearest 4-point 0.620").  Until that is closed, the
+  measurement is logged and never applied; `ME_V34_TRN_RATE=1` applies it,
+  which on a clean loopback caps 9600 down to 4800, which is the point.
+
+The one instrument that does see it is the data mode itself, so
+`Rx - DATA: distance to grid` now reports the receive SNR and the rate the
+line will carry alongside the distance, and says plainly when the output is
+white.  The rate mapping is `bits = (snr_db + 13)/6`, calibrated so that this
+one 18 dB channel accepts 14400 and refuses 16800 -- one channel, not a
+derivation.
+
+**Open, and now the whole of it:** closing the loop.  The measurement exists
+and the line's answer is known only *after* the rate has been committed, so
+V.34 12.2's rate renegotiation (the peer's `renegDownthresh` /
+`renegUpthresh`, which it computes on every call) is what turns it into a
+rate this modem picks by itself.  Until then the rate is `ME_V34_BPS` and the
+default -- the maximum for the symbol rate -- is wrong on any real line.

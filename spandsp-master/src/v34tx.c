@@ -7049,6 +7049,29 @@ static int v34_rx_current_trellis_code(const v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Whether the Phase-4 TRN SNR measurement is allowed to constrain the rate
+   this modem asks for.  It is off by default and must stay that way until
+   the Phase-4 receiver is worth measuring: swept over v34_duplex_test with
+   V34_DUPLEX_NOISE_DB from 40 dB down to 20 dB, the measurement does not
+   move (9.7, 9.8, 8.7, 8.4, 8.4, 11.4, 9.8 dB) while the same call's data
+   mode goes from 0.0018 to 0.0285 distance-to-grid.  It is reading this
+   receiver's own Phase-4 convergence, not the line.  The number is still
+   logged, because that constancy is the measurement worth having. */
+static bool v34_trn_rate_selection_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *e = getenv("ME_V34_TRN_RATE");
+
+        cached = (e  &&  (e[0] == '1'  ||  e[0] == 'y'  ||  e[0] == 'Y'))  ?  1  :  0;
+    }
+    /*endif*/
+    return cached != 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_rate_c_to_a)
 {
     int a_to_c;
@@ -7097,6 +7120,33 @@ static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_r
         a_to_c = 1;
     if (!mp_rate_n_is_valid(c_to_a))
         c_to_a = 1;
+    /* 10.1.3.9's rate fields describe what each direction will carry, and
+       nothing above measured what this direction will actually carry: the
+       INFO1 projection is a Phase-2 tone probe of a line whose data-mode
+       impairment is signal-proportional and invisible to it (37.9 dB read
+       against a data mode that then ran at 17.6 dB), and the configured
+       start profile is not a measurement at all.  Asking too high does not
+       degrade gracefully -- above 12000 bit/s the output is white.  See
+       docs/v34_data_mode_rates.md. */
+    {
+        float snr_db = 0.0f;
+        int measured = v34_phase4_trn_measured_rate_n(s, &snr_db);
+
+        if (measured > 0)
+        {
+            int *mine = s->calling_party ? &a_to_c : &c_to_a;
+
+            span_log(tx_log_state(&s->tx), SPAN_LOG_FLOW,
+                     "Tx MP receive-rate: Phase-4 TRN SNR %.1f dB would give "
+                     "%d bps; asking %d bps (measurement %s)\n",
+                     snr_db, measured*2400, (*mine)*2400,
+                     v34_trn_rate_selection_enabled() ? "applied" : "diagnostic only");
+            if (v34_trn_rate_selection_enabled()  &&  measured < *mine)
+                *mine = measured;
+            /*endif*/
+        }
+        /*endif*/
+    }
     *bit_rate_a_to_c = a_to_c;
     *bit_rate_c_to_a = c_to_a;
 }

@@ -1563,6 +1563,18 @@ typedef struct
     uint8_t phase4_j_prev_valid_tap[2][2][2][8];
     uint32_t phase4_j_win_tap[2][2][2][8][16];
     int phase4_trn_after_j;
+    /* V.34 11.4: the Phase-4 TRN segment is a constant-modulus 4-point
+       constellation carried through the converged equalizer, so it is the
+       one place before MP where the receive channel's wideband SNR can be
+       measured on the signal the data mode will actually use.  The L1/L2
+       probe cannot substitute: it is 21 sparse tones, its per-bin ratio
+       carries the DFT's coherent processing gain, and it does not excite
+       whatever signal-proportional distortion the far transmitter adds. */
+    complexf_t phase4_trn_snr_ring[512];
+    int phase4_trn_snr_fill;
+    int phase4_trn_snr_pos;
+    float phase4_trn_snr_db;
+    int phase4_trn_snr_rate_n;
     uint32_t phase4_trn_scramble_tap[2][2][2][24];
     uint16_t phase4_trn_one_count_tap[2][2][2][24];
     uint32_t phase4_trn_scramble[24];

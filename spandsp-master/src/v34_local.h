@@ -35,4 +35,10 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
 void v34_rx_set_primary_channel(v34_state_t *s, int baud_rate, int high_carrier);
 void v34_set_working_parameters(v34_parameters_t *s, int baud_rate, int bit_rate, int expanded);
 
+/* V.34 11.4: the measured receive SNR over the Phase-4 TRN segment, and the
+   largest Table 16 rate index (2400*n bit/s) it will carry.  Returns 0 when
+   no usable measurement exists, in which case the caller must not constrain
+   the rate on its account. */
+int v34_phase4_trn_measured_rate_n(v34_state_t *s, float *snr_db);
+
 /*- End of file ------------------------------------------------------------*/

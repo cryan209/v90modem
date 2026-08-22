@@ -237,6 +237,21 @@ static int phase3_rx_dump_count = 0;
 #define PHASE4_TRN_READY_MAX_BAUD       9600    /* ~3s at 3200 baud; V.34 TRN max is 2s */
 #define PHASE4_TRN_RECENT_WINDOW_BAUDS  256
 #define PHASE4_TRN_FREEZE_SCORE         80
+
+/* Mapping from the Phase-4 TRN SNR measurement to a Table 16 rate index:
+   rate_n = floor((snr_db - offset)/step), so 2400*n bit/s.  Calibrated in
+   docs/v34_data_mode_rates.md. */
+#define V34_TRN_SNR_RATE_OFFSET_DB      4.0
+#define V34_TRN_SNR_RATE_STEP_DB        2.0
+#define PHASE4_TRN_SNR_BLOCK            64
+
+/* Data-mode receive SNR to the rate the line will carry, in bits per symbol:
+   bits = (snr_db + offset)/slope.  6 dB per bit is the QAM ladder's slope;
+   the offset is calibrated so that the one live channel whose behaviour is
+   known -- 18 dB, artifacts/v34-rate-* -- accepts 14400 at 3000 baud and
+   refuses 16800, which is what those three calls did. */
+#define V34_DATA_SNR_RATE_OFFSET_DB     13.0
+#define V34_DATA_SNR_RATE_SLOPE_DB      6.0
 #define MP_HYPOTHESIS_COUNT             24
 #define MP_EARLY_START_ERR_MAX          2
 #define MP_EARLY_START_ERR_FRAME_LIMIT  85
@@ -2340,6 +2355,142 @@ static int mp_highest_enabled_rate(int maximum, int mask)
             return rate;
     }
     return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* V.34 11.4: measure the receive channel over the Phase-4 TRN segment.
+
+   TRN is a constant-modulus 4-point constellation (10.1.3.8) delivered
+   through the same equalizer, timing loop and carrier loop the data mode
+   will use, so the spread of its symbols is the receiver's own honest read
+   on what constellation density the line can carry.  Nothing earlier in the
+   call can substitute.  The L1/L2 probe projection in v34tx.c measures 21
+   sparse tones against a single empty DFT bin: that ratio carries the DFT's
+   coherent processing gain, it never sees a signal-proportional impairment
+   the far transmitter only produces on a wideband signal, and measured
+   against a live line it read 37.9 dB where the data mode that followed ran
+   at 17.6 dB.
+
+   The channel leaves an unknown rotation on the constellation, so recover it
+   first: for points at 45 + 90k degrees, the fourth power of the unit-modulus
+   symbol has a mean argument of 180 + 4*theta, which fixes theta modulo 90 --
+   and modulo 90 is all that is needed, because the measurement is symmetric
+   in the four points.  Rotate the tail onto (+/-a, +/-a) and the per-axis mean
+   and variance give the ratio directly. */
+int v34_phase4_trn_measured_rate_n(v34_state_t *st, float *snr_db)
+{
+    v34_rx_state_t *s = &st->rx;
+    double sig_sum;
+    double noise_sum;
+    double snr;
+    int n;
+    int blocks;
+    int b;
+    int rate_n;
+
+    if (snr_db)
+        *snr_db = 0.0f;
+    /*endif*/
+    n = s->phase4_trn_snr_fill;
+    if (n < PHASE4_TRN_SNR_BLOCK)
+        return 0;
+    /*endif*/
+    /* The residual carrier this receiver cannot remove before data mode is
+       about 0.1 degrees per symbol (docs/v34_data_mode_rates.md), which is
+       54 degrees across the whole ring and would read as noise.  Estimate
+       the rotation per block instead, where it is a few degrees. */
+    blocks = n/PHASE4_TRN_SNR_BLOCK;
+    sig_sum = 0.0;
+    noise_sum = 0.0;
+    for (b = 0;  b < blocks;  b++)
+    {
+        double s4_re;
+        double s4_im;
+        double alpha;
+        double ca;
+        double sa;
+        double ax;
+        double ay;
+        double axx;
+        double ayy;
+        int base;
+        int i;
+
+        base = b*PHASE4_TRN_SNR_BLOCK;
+        s4_re = 0.0;
+        s4_im = 0.0;
+        for (i = 0;  i < PHASE4_TRN_SNR_BLOCK;  i++)
+        {
+            double re = s->phase4_trn_snr_ring[base + i].re;
+            double im = s->phase4_trn_snr_ring[base + i].im;
+            double m2 = re*re + im*im;
+            double u_re;
+            double u_im;
+
+            if (m2 <= 0.0)
+                continue;
+            /*endif*/
+            /* z^4, normalised to unit modulus so a loud symbol does not
+               outvote a quiet one when the rotation is what is wanted. */
+            u_re = (re*re - im*im)/m2;
+            u_im = (2.0*re*im)/m2;
+            s4_re += u_re*u_re - u_im*u_im;
+            s4_im += 2.0*u_re*u_im;
+        }
+        /*endfor*/
+        if (s4_re == 0.0  &&  s4_im == 0.0)
+            continue;
+        /*endif*/
+        /* atan2 gives 180 + 4*theta; the constellation sits at alpha + 90k,
+           and rotating by 45 - alpha puts it on (+/-a, +/-a). */
+        alpha = atan2(s4_im, s4_re)/4.0;
+        ca = cos(0.78539816339744831 - alpha);
+        sa = sin(0.78539816339744831 - alpha);
+        ax = ay = axx = ayy = 0.0;
+        for (i = 0;  i < PHASE4_TRN_SNR_BLOCK;  i++)
+        {
+            double re = s->phase4_trn_snr_ring[base + i].re;
+            double im = s->phase4_trn_snr_ring[base + i].im;
+            double x = re*ca - im*sa;
+            double y = re*sa + im*ca;
+
+            ax += fabs(x);
+            ay += fabs(y);
+            axx += x*x;
+            ayy += y*y;
+        }
+        /*endfor*/
+        ax /= PHASE4_TRN_SNR_BLOCK;
+        ay /= PHASE4_TRN_SNR_BLOCK;
+        axx /= PHASE4_TRN_SNR_BLOCK;
+        ayy /= PHASE4_TRN_SNR_BLOCK;
+        sig_sum += ax*ax + ay*ay;
+        noise_sum += (axx - ax*ax) + (ayy - ay*ay);
+    }
+    /*endfor*/
+    if (sig_sum <= 0.0  ||  noise_sum <= 0.0)
+        return 0;
+    /*endif*/
+    snr = 10.0*log10(sig_sum/noise_sum);
+    span_log(&st->logging, SPAN_LOG_FLOW,
+             "Rx - Phase 4 TRN SNR: %.1f dB over %d symbols (%d blocks), after_j=%d\n",
+             snr, blocks*PHASE4_TRN_SNR_BLOCK, blocks, s->phase4_trn_after_j);
+    if (snr_db)
+        *snr_db = (float) snr;
+    /*endif*/
+    /* Table 16 rate index.  Offset and slope are calibrated in
+       docs/v34_data_mode_rates.md against v34_duplex_test with
+       V34_DUPLEX_NOISE_DB. */
+    rate_n = (int) floor((snr - V34_TRN_SNR_RATE_OFFSET_DB)/V34_TRN_SNR_RATE_STEP_DB);
+    if (rate_n < 1)
+        rate_n = 1;
+    /*endif*/
+    if (rate_n > 14)
+        rate_n = 14;
+    /*endif*/
+    s->phase4_trn_snr_db = (float) snr;
+    s->phase4_trn_snr_rate_n = rate_n;
+    return rate_n;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -8230,6 +8381,25 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             int lock_raw_sym;
 
             s->phase4_trn_after_j++;
+            /* V.34 11.4: keep the tail of the Phase-4 TRN segment.  TRN is
+               constant modulus on the 4-point constellation, so once the
+               equalizer has converged the spread of these symbols is a
+               direct measurement of the receive channel's wideband SNR --
+               through the same filter chain the data mode will use, and on
+               a wideband signal rather than the L1/L2 probe's 21 tones.
+               v34_phase4_trn_measure_snr() reads the ring at MP time. */
+            if (s->phase4_trn_after_j >= PHASE4_TRN_SCORE_START_BAUD)
+            {
+                s->phase4_trn_snr_ring[s->phase4_trn_snr_pos].re = sym->re;
+                s->phase4_trn_snr_ring[s->phase4_trn_snr_pos].im = sym->im;
+                if (++s->phase4_trn_snr_pos >= 512)
+                    s->phase4_trn_snr_pos = 0;
+                /*endif*/
+                if (s->phase4_trn_snr_fill < 512)
+                    s->phase4_trn_snr_fill++;
+                /*endif*/
+            }
+            /*endif*/
             {
                 static const char *p4_dump_path = NULL;
                 static const char *p4_bits_path = NULL;
@@ -10516,6 +10686,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             {
                 int who = s->calling_party ? 1 : 0;
                 static double err_sum[2];
+                static double sig_sum[2];
                 static int err_count[2];
                 float g_re = transformed_re*s->data_symbol_scale;
                 float g_im = transformed_im*s->data_symbol_scale;
@@ -10524,12 +10695,71 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
 
                 err_sum[who] += (g_re - t_re)*(g_re - t_re)
                               + (g_im - t_im)*(g_im - t_im);
+                sig_sum[who] += t_re*t_re + t_im*t_im;
                 if (++err_count[who] >= 4096)
                 {
-                    span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - DATA: distance to grid %.4f per symbol over %d symbols\n",
-                             err_sum[who]/err_count[who], err_count[who]);
+                    double dist = err_sum[who]/err_count[who];
+                    double power = sig_sum[who]/err_count[who];
+
+                    /* The same numbers as a rate, which is the only form in
+                       which they answer the question that matters.  The mean
+                       squared distance is scale-free against the lattice, so
+                       distance against the mean symbol power is the receive
+                       SNR of the constellation actually in use, and 6 dB per
+                       bit per symbol is the slope every QAM ladder has.
+
+                       This is the only measurement in the call that sees what
+                       the data mode sees.  The Phase-2 L1/L2 probe cannot:
+                       measured against this rig it reported no detectable
+                       noise (its empty bins read zero, the line adds none)
+                       while the data mode that followed ran at 18 dB, because
+                       the impairment is signal-proportional and a 21-tone
+                       probe on a 150 Hz grid does not excite it.  The Phase-4
+                       TRN segment cannot either -- see
+                       v34_phase4_trn_measured_rate_n().
+
+                       Live ladder against the SmartLink rig at 3000 baud, all
+                       three calls kept under artifacts/v34-rate-*: 14400
+                       decodes and carries payload at 0.32-0.39 from the
+                       lattice, 16800 is white (0.63-0.68) from its first
+                       window, 21600 loses the call.  The offset below is set
+                       so that an 18 dB line accepts 14400 and refuses 16800;
+                       treat it as calibrated on one channel, not derived. */
+                    if (dist > 0.0  &&  power > 0.0)
+                    {
+                        double snr = 10.0*log10(power/dist);
+                        double bits = (snr + V34_DATA_SNR_RATE_OFFSET_DB)
+                                    / V34_DATA_SNR_RATE_SLOPE_DB;
+                        double baud = 2400.0
+                                    *baud_rate_parameters[s->baud_rate].a
+                                    /baud_rate_parameters[s->baud_rate].c;
+                        int carries = ((int) floor(bits*baud/2400.0))*2400;
+
+                        if (carries < 2400)
+                            carries = 2400;
+                        /*endif*/
+                        if (carries > 33600)
+                            carries = 33600;
+                        /*endif*/
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - DATA: distance to grid %.4f per symbol "
+                                 "over %d symbols; receive SNR %.1f dB, this "
+                                 "line will carry %d bit/s%s\n",
+                                 dist, err_count[who], snr, carries,
+                                 (dist > 0.55)
+                                 ? " -- OUTPUT IS WHITE, the requested rate is"
+                                   " above what this line carries"
+                                 : "");
+                    }
+                    else
+                    {
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - DATA: distance to grid %.4f per symbol over %d symbols\n",
+                                 dist, err_count[who]);
+                    }
+                    /*endif*/
                     err_sum[who] = 0.0;
+                    sig_sum[who] = 0.0;
                     err_count[who] = 0;
                 }
                 /*endif*/
