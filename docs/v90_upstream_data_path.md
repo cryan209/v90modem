@@ -1314,10 +1314,30 @@ now takes `V90_REPLAY_VERBOSE`, without which the slip search, the gain sweep
 and the offset profiles -- everything the receiver tried -- are invisible on a
 replay.
 
-**Open: ask for a rate the upstream can carry.**  `ME_V90_UPSTREAM_MAX_BPS`
-already caps the rate offered in MP and reaches the receiver's B1 preparation
-with it.  36 dB supports roughly 8 bits/symbol, so 24000 bit/s at 3200 baud
-should have about 10 dB of margin where 31200 has none.  This is the same open
+**`ME_V90_UPSTREAM_MAX_BPS` is NOT the lever, and this was measured before
+believing it.**  36 dB supports about 8 bits/symbol, so 24000 bit/s at 3200
+baud should have roughly 10 dB of margin where 31200 has none, and that knob
+caps the rate offered in MP *and* reaches the receiver's B1 preparation.  It
+does not work against this peer: **at `ME_V90_UPSTREAM_MAX_BPS=24000` the
+SmartLink rig replied to none of it.  22 Phase-4 entries across ten attempts,
+14806 MP frames sent, and zero MP' received; an uncapped control on the same
+binary immediately afterwards reached data mode on attempt 1 with 73 MP'.**
+So the peer accepts our MP at 31200 and ignores it at 24000.
+
+The MP frame itself is not the problem in any way this end can see: bits 24:27
+carry `v90_upstream_mask_max_drn()` of the capped mask and bits 36:48 the mask
+itself, so drn and mask are capped together; the mask is an intersection with
+the peer's own offered set, and the "offers no rate <= cap; echoing it
+uncapped" warning never fired.  The likely reading is that the upstream rate is
+already fixed by the Phase 2 V.34 negotiation -- the call trains "3200 baud, up
+to 31200 bps" -- and that MP may select within what CPt and that training
+established but not below it.  If so the cap has to be applied in Phase 2,
+where the V.34 upstream capability is negotiated, rather than at MP.  That is
+the open work, and it is a bigger change than a mask intersection.
+
+Note also that the 36 dB the wire measures is not far off what 31200 wants; a
+rate change is worth perhaps one step, not a rescue.  This is the same open
 item plain V.34 ended on in `docs/v34_data_mode_rates.md` -- choose the rate
-from a measured receive SNR rather than a configured maximum -- and the
-distance-to-grid figure is that measurement in both paths.
+from a measured receive SNR rather than a configured maximum, which in the end
+needs V.34 12.2 renegotiation -- and the distance-to-grid figure is that
+measurement in both paths.
