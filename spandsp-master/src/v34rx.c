@@ -10978,12 +10978,51 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     for (int g = 0;  g < V34_V90_T3_GAIN_TRIALS;  g++)
                         s->v90_t3_gain_err[g] = 0.0f;
                     /*endfor*/
-                    span_log(s->logging, SPAN_LOG_WARNING,
-                             "Rx - V.90 upstream DATA: decision error %.4f "
-                             "per symbol (mean symbol power %.2f) over %d symbols\n",
-                             s->v90_t3_decision_err/s->v90_t3_decision_count,
-                             s->v90_t3_decision_pow/s->v90_t3_decision_count,
-                             s->v90_t3_decision_count);
+                    {
+                        /* Say what the line will carry, not just how far the
+                           symbols are from it.  Nothing before MP measures
+                           this direction -- the rate goes out in MP and the
+                           only honest reading appears once data mode is
+                           running -- so the receiver has to report it even
+                           though it is too late to act on within the call.
+                           Same instrument and same calibration as the plain
+                           V.34 path's "distance to grid"; see
+                           docs/v34_data_mode_rates.md.
+
+                           Measured on artifacts/goal-v90-073744Z and
+                           goal-v90-r2: 35.4 and 36.2 dB, against a wire whose
+                           least-squares bound is 36.3 and 36.9 -- so this is
+                           the line, not the receiver -- while the call was
+                           asking 31200, which at 3200 baud is 9.75
+                           bits/symbol and wants far more. */
+                        float err = s->v90_t3_decision_err
+                                  /s->v90_t3_decision_count;
+                        float pow = s->v90_t3_decision_pow
+                                  /s->v90_t3_decision_count;
+                        float snr = (err > 0.0f  &&  pow > 0.0f)
+                                  ? 10.0f*log10f(pow/err)  :  0.0f;
+                        int baud = baud_rate_parameters[s->baud_rate].baud_rate;
+                        int carries = (int) ((snr + V34_DATA_SNR_RATE_OFFSET_DB)
+                                             /V34_DATA_SNR_RATE_SLOPE_DB
+                                             *baud/2400.0f)*2400;
+
+                        if (carries < 2400)
+                            carries = 2400;
+                        /*endif*/
+                        if (carries > 33600)
+                            carries = 33600;
+                        /*endif*/
+                        span_log(s->logging, SPAN_LOG_WARNING,
+                                 "Rx - V.90 upstream DATA: decision error "
+                                 "%.4f per symbol (mean symbol power %.2f) "
+                                 "over %d symbols; receive SNR %.1f dB, this "
+                                 "line will carry %d bit/s against the %d "
+                                 "asked for%s\n",
+                                 err, pow, s->v90_t3_decision_count, snr,
+                                 carries, (s->bit_rate/2 + 1)*2400,
+                                 (err > 0.55f)
+                                 ? " -- OUTPUT IS WHITE"  :  "");
+                    }
                     s->v90_t3_decision_err = 0.0f;
                     s->v90_t3_decision_pow = 0.0f;
                     s->v90_t3_decision_count = 0;
