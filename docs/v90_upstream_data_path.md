@@ -1314,30 +1314,51 @@ now takes `V90_REPLAY_VERBOSE`, without which the slip search, the gain sweep
 and the offset profiles -- everything the receiver tried -- are invisible on a
 replay.
 
-**`ME_V90_UPSTREAM_MAX_BPS` is NOT the lever, and this was measured before
-believing it.**  36 dB supports about 8 bits/symbol, so 24000 bit/s at 3200
-baud should have roughly 10 dB of margin where 31200 has none, and that knob
-caps the rate offered in MP *and* reaches the receiver's B1 preparation.  It
-does not work against this peer: **at `ME_V90_UPSTREAM_MAX_BPS=24000` the
-SmartLink rig replied to none of it.  22 Phase-4 entries across ten attempts,
-14806 MP frames sent, and zero MP' received; an uncapped control on the same
-binary immediately afterwards reached data mode on attempt 1 with 73 MP'.**
-So the peer accepts our MP at 31200 and ignores it at 24000.
+**The rate was the lever, but it has to be pulled at Phase 2.**  36 dB supports
+about 8 bits/symbol, so 24000 bit/s at 3200 baud should have margin where 31200
+has none.  `ME_V90_UPSTREAM_MAX_BPS` capped the MP upstream-rate mask and the
+receiver's B1 preparation, and that **does not work**: at a 24000 cap the
+SmartLink rig replied to none of it -- **22 Phase-4 entries across ten
+attempts, 14806 MP frames sent, zero MP' received**, while an uncapped control
+on the same binary reached data mode on attempt 1 with 73 MP'.
 
-The MP frame itself is not the problem in any way this end can see: bits 24:27
-carry `v90_upstream_mask_max_drn()` of the capped mask and bits 36:48 the mask
-itself, so drn and mask are capped together; the mask is an intersection with
-the peer's own offered set, and the "offers no rate <= cap; echoing it
-uncapped" warning never fired.  The likely reading is that the upstream rate is
-already fixed by the Phase 2 V.34 negotiation -- the call trains "3200 baud, up
-to 31200 bps" -- and that MP may select within what CPt and that training
-established but not below it.  If so the cap has to be applied in Phase 2,
-where the V.34 upstream capability is negotiated, rather than at MP.  That is
-the open work, and it is a bigger change than a mask intersection.
+The MP frame was not the problem in any way this end can see: bits 24:27 carry
+`v90_upstream_mask_max_drn()` of the capped mask and bits 36:48 the mask
+itself, the mask is an intersection with the peer's own offered set, and the
+"offers no rate <= cap; echoing it uncapped" warning never fired.  What was
+wrong is that **the rate is already fixed by the Phase 2 V.34 negotiation** --
+the call trains "3200 baud, up to 31200 bps" -- and MP may select within what
+that training established but not below it.  Capping the mask left one field
+disagreeing with the INFO1 capability, with `v34_get_current_bit_rate()` and
+with the pump itself, and the peer simply ignored it.
 
-Note also that the 36 dB the wire measures is not far off what 31200 wants; a
-rate change is worth perhaps one step, not a rescue.  This is the same open
-item plain V.34 ended on in `docs/v34_data_mode_rates.md` -- choose the rate
-from a measured receive SNR rather than a configured maximum, which in the end
-needs V.34 12.2 renegotiation -- and the distance-to-grid figure is that
-measurement in both paths.
+The cap therefore binds in `start_v34_training()`, on the `bps` handed to
+`v34_init()`, where every later consumer inherits it by construction.  The V.90
+call site already sets `g_mod` before calling in, so the flag is read before
+the function overwrites it, in the same save/restore shape already used for
+`g_v34_start_baud`.
+
+**Measured on the rig at `ME_V90_UPSTREAM_MAX_BPS=24000`, two consecutive
+calls, against 31200 on the same binary:**
+
+| | 31200 | 24000 run 1 | 24000 run 2 |
+|---|---|---|---|
+| MP' frames | 0 in 22 Phase-4 entries | 73 | 73 |
+| data mode | never | attempt 1 | attempt 1 |
+| decision error per symbol | 0.17-0.21 | 0.044-0.063 | |
+| clean symbol windows | 1.5% | 8.7% | 19.3% |
+| longest unbroken eye | 4.3 s, 7.3 s | 29.6 s | 47.6 s |
+| intact `U%07d` lines | 730, 399, 0 | 7945 | 12657 |
+
+So the upstream now runs for half a minute or more at a stretch instead of a
+few seconds, and delivers an order of magnitude more of the peer's own traffic.
+The receiver's own readout agrees: it reports "this line will carry 24000 bit/s
+against the 24000 asked for", where at 31200 it read 24000 against 31200.
+
+**Still open.**  The eye still shuts eventually -- 19.3% of the best call is
+clean, not all of it -- so this is a large improvement and not a cure, and the
+frame-phase machinery above still has to survive the gaps.  And the rate is a
+fixed environment variable, not something chosen from the measured SNR: closing
+that loop is the same open item as `docs/v34_data_mode_rates.md`, and in the
+end it needs V.34 12.2 renegotiation, because the only honest measurement of
+this direction appears after the rate has been committed.
