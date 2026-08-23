@@ -1242,3 +1242,82 @@ carrier is not this path's problem.  Precoding is not either: V.34 precoder
 coefficients travel from the receiver to the transmitter, and this side only
 ever builds MP type 0 (`v90_build_mp_type0()`), so a conformant peer transmits
 unprecoded.
+
+## The frame phase cannot hold because the symbols are marginal (2026-08-23)
+
+"Frame-phase lock still does not hold" was the standing open item above.  It is
+not a lock defect.  Measured on `artifacts/goal-v90-073744Z` -- a live call that
+reached data mode at 52000 down / 31200 up and delivered 730 intact `U%07d`
+lines -- the receiver decodes cleanly for the first few seconds and then the
+symbols leave the constellation permanently, and for the remaining 95% of the
+call there is nothing for any phase metric to measure.  `v90_upstream_replay`
+reproduces the whole of it off the recorded tap.
+
+**The wire carries 36 dB and we are already getting 35.4 of it.**
+`tools/v34_channel_bound.py`, pointed at the upstream tap with the equalized
+symbols the receiver decided in the clean stretch, fits the best possible
+fractionally-spaced least-squares equalizer and reports **37.4 dB in sample,
+36.3 dB held out** at 81 T/2 taps.  The receiver's own figure over the same
+window is **35.4 dB** (mean symbol power 726, mean squared distance to the
+odd-integer lattice 0.208).  So it is within a dB of everything a linear
+receiver can do, and there is nothing left to win at our end.
+
+**31200 bit/s at 3200 baud is 9.75 bits/symbol, and that needs about what the
+wire has and no more.**  The lattice spacing is 2 whatever the rate, so at
+mean power 726 an uncoded symbol error rate of 1e-6 wants the noise at 4.75
+sigma inside the half-spacing -- 39 dB -- and V.34's trellis coding returns
+about 4 dB of that.  35 dB required against 36.3 available is nought to one dB
+of margin, which is exactly the behaviour observed: it decodes while B1's
+converged filter is fresh, any small disturbance tips it over, and because
+every adaptive element in this receiver is gated on the symbols already being
+good, it can never climb back.
+
+**Four candidate causes for the collapse are measured and ruled out.**  Do not
+re-run them.
+
+- *The wire.*  Level flat at 147-150 RMS and out-of-band/in-band power flat at
+  0.11-0.14 straight through the collapse instant.  The peer keeps sending the
+  same signal.
+- *A timing slip.*  `tools/measure_timing_slips.py` over the collapse: the
+  first slip on this tap is at t=100.25 s, **six seconds after** the symbols
+  are already gone, and there are none before it.
+- *The sampling instant.*  The slip search fires 7238 times and the current
+  position wins every profile it prints -- 0.41-0.46 against 0.60-0.71 at every
+  offset in the half symbol either side.
+- *Rotation, gain and residual carrier frequency.*  Swept offline over the
+  dumped symbols (`ME_V90_UPSTREAM_SYM_DUMP`): the best of every gain 0.6-1.6,
+  every angle, and every frequency +/-0.02 rad/symbol on a post-collapse window
+  is **0.60**, against 0.667 for symbols unrelated to the lattice.  Nothing
+  downstream of the front end can recover it.
+
+**One real defect was found and fixed on the way.**  The equalizer
+snapshot/restore pair was keyed on a fixed distance, `V34_V90_T3_FSE_KEEP_ERR`
+= 0.20, while this receiver's settled operating point on this rig is 0.165-0.22
+-- the threshold sat *inside* the healthy range.  So the recovery path fired on
+a working receiver, installed taps from 3200 symbols ago, which raised the
+error, which triggered the next restore: 287 restores, the first at 4.2 s with
+the error at a healthy 0.213, and the error never below 0.3 again in the
+remaining 107 seconds.  There was no middle zone either -- anything not good
+enough to snapshot counted towards a restore.  The thresholds now come from the
+receiver's own settled error (averaged over the first
+`V34_V90_T3_ERR_BASE_SYMBOLS` after B1 hands over), with a do-nothing zone
+between them.  On that recording the receiver holds to 7.3 s instead of 4.3 s
+and the first restore is a genuine one on a real ramp.  It does not change the
+outcome, because the outcome is set by the rate.
+
+**Two instruments were lying and are fixed.**  The shell log printed
+"shell bad 0%" both for a window in which every mapping frame was well formed
+and for a window with no mapping frames at all -- opposite evidence, identical
+text, and 1964 of 2829 windows on this call were the second kind while their
+symbols were white.  It now reports the frame count.  And `v90_upstream_replay`
+now takes `V90_REPLAY_VERBOSE`, without which the slip search, the gain sweep
+and the offset profiles -- everything the receiver tried -- are invisible on a
+replay.
+
+**Open: ask for a rate the upstream can carry.**  `ME_V90_UPSTREAM_MAX_BPS`
+already caps the rate offered in MP and reaches the receiver's B1 preparation
+with it.  36 dB supports roughly 8 bits/symbol, so 24000 bit/s at 3200 baud
+should have about 10 dB of margin where 31200 has none.  This is the same open
+item plain V.34 ended on in `docs/v34_data_mode_rates.md` -- choose the rate
+from a measured receive SNR rather than a configured maximum -- and the
+distance-to-grid figure is that measurement in both paths.
