@@ -62,6 +62,29 @@ def parse_log(path):
             m = bd.search(line)
             if m:
                 baud = int(m.group(1))
+    if not rows:
+        # Plain V.34: the data-mode metric is "distance to grid", logged once
+        # per 4096 symbols with no timestamp, so time comes from the window
+        # size and the negotiated symbol rate.
+        g = re.compile(r"distance to grid ([0-9.]+) per symbol over (\d+) symbols")
+        gb = re.compile(r"V\.34 training started \([a-z]+, (\d+) baud, up to (\d+) bps")
+        n = 0
+        try:
+            f2 = open(path, "rb")
+        except OSError:
+            return rows, settled, rate, baud
+        with f2:
+            for raw in f2:
+                line = raw.decode("utf-8", "replace")
+                m = gb.search(line)
+                if m:
+                    baud = int(m.group(1))
+                    rate = int(m.group(2))
+                    continue
+                m = g.search(line)
+                if m:
+                    n += int(m.group(2))
+                    rows.append((n/float(baud or 3000), float(m.group(1))))
     return rows, settled, rate, baud
 
 
@@ -96,7 +119,9 @@ def count_lines(path, prefix=b"U"):
         raw = open(path, "rb").read()
     except OSError:
         return 0
-    pat = re.compile(b"^" + prefix + b"[0-9]{7}$", re.M)
+    # The serial captures are CRLF, so an unanchored-right "$" misses every
+    # line: the \r sits between the digits and the newline.
+    pat = re.compile(b"^" + prefix + b"[0-9]{7}\r?$", re.M)
     return len(pat.findall(raw))
 
 
@@ -108,6 +133,13 @@ def summarise(d):
         p = os.path.join(d, sub, "rx_pty.bin")
         if os.path.exists(p):
             lines += count_lines(p)
+    # A V.90 soak counts the peer's U-lines arriving on our PTY; a plain V.34
+    # rate call is the other direction, and its payload lands on the peer's
+    # DTE.  Count whichever this recording holds.
+    if not lines:
+        lines += count_lines(os.path.join(d, "pty_rx.bin"))
+    if not lines:
+        lines += count_lines(os.path.join(d, "call.out"), b"S")
     clean = sum(1 for _, e in rows if e <= WIN_CLEAN)
     total = len(rows)
     # Longest unbroken clean stretch, and when the first collapse happened.
