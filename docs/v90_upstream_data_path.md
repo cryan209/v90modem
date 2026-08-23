@@ -1404,3 +1404,48 @@ loop's own correction count, not a statement about the wire.  The loop is gated
 on `sym_err_fast < V34_V90_T3_TIMING_TRACK_ERR`, so a slip closes the eye, the
 gate shuts, and the loop stops adapting exactly when it is needed -- which is
 why the count stays at zero through seven real slips.
+
+## §9.6 rate renegotiation: implemented, and this peer does not answer it (2026-08-23)
+
+The section above ends by concluding that recovery from one of this peer's
+one-sample timing slips needs a re-acquisition with the reach of the B1 search,
+not a nudge to the state the receiver is already in.  V.90 §9.6 is that
+mechanism and it is now implemented: §9.6.1.1 has the digital modem send Rd for
+384T on a data frame boundary, R̄d for 24T, optional TRN2d and then MP, and the
+analogue modem answer with S, S̄, SCR, CP and -- after E -- **a fresh B1**,
+which is exactly what our upstream receiver acquires against.  V.34 §11.6 says
+the same procedure "can also be used to resynchronize the receiver without
+going through a complete retrain".
+
+What is in the tree: `v34_v90_upstream_carrier_lost()` (symbols at the white
+level for a sustained second, against the receiver's own settled baseline),
+`v90_request_rate_renegotiation()` and `v90_rate_renegotiation_start()`,
+§9.6's data-frame-boundary rule taken at the boundary the engine already tracks
+for the data mapper, §9.6.1.1's "condition its receiver to detect S, S̄ and CP"
+by re-entering the Phase 4 receiver, and §9.6.1's timeout falling back to the
+§9.5.1.1 retrain.  Rd's 384T is a separate constant from startup Ri's "at least
+192T" (§9.4.1.1) because the two clauses differ.
+
+**It is default off (`ME_V90_RENEG=1` enables), because this rig's analogue
+modem does not answer it.**  Two live calls sent Rd for 384T on a data frame
+boundary and received no CP at all; the peer's own log declares
+`SILENCERETRAIN` and it retrains.  On this peer the procedure costs a retrain
+and buys nothing, so the honest default is to leave the link alone.
+
+**One real defect of ours fell out of the first of those calls.**  §9.6.1's
+timeout runs from the Rd→R̄d transition, and that transition needs the peer's
+CPt -- so a peer that never answers never starts the clock, and the transmitter
+held Rd for the rest of the call, which is what provoked the retrain.  §9.6.1
+also says the digital modem "may initiate a retrain at any time during a rate
+renegotiation according to 9.5.1.1", so the wait for an answer is bounded as
+well as the wait for E: three seconds, against a conformant answer of S (128T),
+S̄ (16T) and an SCR of at most 2000 ms.
+
+**Call-to-call variance is large and worth knowing before drawing conclusions
+from one call.**  Upstream lines delivered at 24000 across the session: 7945,
+12657, 7618, 0 and **29194**.  The last is the feature off and is the best
+result this path has produced -- **100% of windows clean and a 115.2 s unbroken
+eye, the whole call** -- because that call met no timing slip at all.  The 0 is
+a call whose eye never settled (baseline 0.338 against the usual 0.045).  So
+the Phase 2 rate cap remains the fix; §9.6 is insurance for a peer that
+implements the other half of the clause.
