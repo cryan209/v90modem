@@ -3992,6 +3992,13 @@ static void start_v22bis_training(void)
 static void start_v34_training(void)
 {
     /* Must be called with g_state_mtx held */
+    /* The V.90 call site sets g_mod before calling in, and this function
+     * overwrites it a line below (the caller puts it back).  Read it first:
+     * on a V.90 call the V.34 engine carries the UPSTREAM, and its rate
+     * ceiling has to be established here rather than at MP.  See the cap
+     * below. */
+    bool v90_upstream = (g_mod == ME_MOD_V90);
+
     g_mod   = ME_MOD_V34;
     g_state = ME_TRAINING;
     g_phase_start_ms = trace_now_ms();
@@ -4014,6 +4021,34 @@ static void start_v34_training(void)
      * gateway+RTP paths, then iterate upward once baseline connectivity is proven.
      */
     int bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(g_v34_start_baud);
+
+    /* ME_V90_UPSTREAM_MAX_BPS has to bind HERE, not at MP.
+     *
+     * Capping only the MP upstream-rate mask does not work against the
+     * SmartLink rig: measured 2026-08-23, at a 24000 cap it replied to none
+     * of our MP -- 22 Phase-4 entries, 14806 MP frames, zero MP' -- while an
+     * uncapped control on the same binary reached data mode on attempt 1 with
+     * 73 MP'.  The MP frame itself was consistent (bits 24:27 carry the max
+     * drn of the same mask that goes into bits 36:48, and the mask is an
+     * intersection with the peer's own offered set), which leaves the rate
+     * already being fixed by what this V.34 engine was trained for: the call
+     * trains "up to 31200 bps" and MP may select within that, not below it.
+     *
+     * Capping the engine's ceiling makes every later consumer agree by
+     * construction -- the INFO1 capability, v34_get_current_bit_rate() which
+     * both MP sites derive from, and the receiver's own B1 preparation --
+     * instead of the MP mask disagreeing with all of them. */
+    if (v90_upstream) {
+        int capped = me_v90_upstream_cap(bps);
+
+        if (capped != bps) {
+            ME_LOG("[ME] V.90 upstream: V.34 ceiling capped %d -> %d bps at "
+                   "Phase 2 (ME_V90_UPSTREAM_MAX_BPS)\n", bps, capped);
+            bps = capped;
+        }
+        /*endif*/
+    }
+    /*endif*/
     data_stack_prepare(bps);
     g_v34 = v34_init(NULL,
                      g_v34_start_baud,
