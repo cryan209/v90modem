@@ -230,7 +230,11 @@ int main(int argc, char *argv[])
          t + ACQUIRE_WINDOW*8000 < sample_count;
          t += 8000/2)
     {
-        rx = make_rx(alaw, baud_code, 0, bps, 0);
+        /* The slip search, the gain sweep and the offset profiles are all
+           logged at FLOW: without them the run says the symbols were lost
+           and not what the receiver tried. */
+        rx = make_rx(alaw, baud_code, 0, bps,
+                     getenv("V90_REPLAY_VERBOSE") != NULL);
         if (!rx)
         {
             fprintf(stderr, "cannot prepare the receiver\n");

@@ -103,6 +103,24 @@
    symbols above the tracking threshold before the snapshot is restored --
    about a second at 3200 baud, long enough not to fire on a burst. */
 #define V34_V90_T3_FSE_KEEP_ERR             0.20f
+/*! The snapshot and restore thresholds as multiples of the receiver's own
+    settled error, and the range they are clamped to.  A fixed threshold
+    cannot work here because the settled figure is a property of the line:
+    measured on the SmartLink rig it is 0.165-0.22, so V34_V90_T3_FSE_KEEP_ERR
+    sits inside the normal operating range and the restore fires on a working
+    receiver -- after which it puts back taps from 3200 symbols ago, which
+    raises the error, which triggers the next restore.  Measured on
+    artifacts/goal-v90-073744Z: 287 restores, the first at 4.2 s with the
+    error at a healthy 0.213, and the error never below 0.3 again in the
+    remaining 107 seconds of the call. */
+#define V34_V90_T3_FSE_KEEP_MULT            1.30f
+#define V34_V90_T3_FSE_LOST_MULT            2.20f
+#define V34_V90_T3_FSE_KEEP_MIN             0.10f
+#define V34_V90_T3_FSE_KEEP_MAX             0.45f
+#define V34_V90_T3_FSE_LOST_MIN             0.35f
+#define V34_V90_T3_FSE_LOST_MAX             0.60f
+/*! Symbols of settled running used to establish that baseline. */
+#define V34_V90_T3_ERR_BASE_SYMBOLS         3200
 /*! T/3 samples of fresh wire between two acquisition attempts, and the most
     attempts to make.  Together they sweep the window forward over the
     seconds after E, which is where a B1 the first attempt missed will be. */
@@ -1006,6 +1024,14 @@ typedef struct
         decide whether the timing detector and the decision-directed update
         are being fed anything real. */
     float v90_t3_sym_err_ema;
+    /*! The distance from the constellation this receiver settles at once B1
+        has handed it a converged filter -- its own operating point, not a
+        constant.  The snapshot/restore thresholds are taken from this: on
+        the SmartLink rig the settled figure is 0.165-0.22, which straddles
+        a fixed 0.20, so an absolute threshold fires the recovery path on a
+        healthy receiver. */
+    float v90_t3_err_base;
+    int v90_t3_err_base_n;
     /*! \brief The equalizer from when it was demonstrably working, and the
         bookkeeping to notice that it no longer is.  B1 is long gone by the
         time a filter walks off, so without this there is nothing to go back

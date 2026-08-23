@@ -755,6 +755,17 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                          : 0.0f,
                      v14_pct, v14_ratio/10,
                      (shell_pct >= 0) ? shell_pct : 0);
+            /* Report the frame count beside the percentage.  Without it a
+               window with no mapping frames at all is indistinguishable from
+               a window in which every frame was well formed: both print 0%,
+               and the release rule treats them as opposite evidence.  On a
+               live call 1964 of 2829 windows printed "shell bad 0%" while
+               their symbols were white, which reads as the strongest possible
+               confirmation of a phase that was in fact wrong. */
+            span_log(s->logging, SPAN_LOG_WARNING,
+                     "Rx - V.90 upstream shell: %d bad of %d frames%s\n",
+                     s->v90_t3_shell_bad, s->v90_t3_shell_frames,
+                     (shell_pct < 0) ? " (no evidence this window)" : "");
             span_log(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 upstream carrier: freq %+.5f rad/sym "
                      "(%d decision-directed, %d fourth-power updates)\n",
@@ -986,6 +997,70 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
     }
     /*endif*/
     return out_bit;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* The distance at which this receiver's filter is worth snapshotting, and
+   the distance at which it has lost the constellation, both as multiples of
+   the error the receiver settled at after B1.  Until the baseline is
+   established the old fixed value stands in, which is what the receiver used
+   to use for the whole call. */
+static float v90_t3_fse_keep_err(v34_rx_state_t *s)
+{
+    float v;
+
+    if (s->v90_t3_err_base_n < V34_V90_T3_ERR_BASE_SYMBOLS)
+        return V34_V90_T3_FSE_KEEP_ERR;
+    /*endif*/
+    v = V34_V90_T3_FSE_KEEP_MULT*s->v90_t3_err_base;
+    if (v < V34_V90_T3_FSE_KEEP_MIN)
+        v = V34_V90_T3_FSE_KEEP_MIN;
+    /*endif*/
+    if (v > V34_V90_T3_FSE_KEEP_MAX)
+        v = V34_V90_T3_FSE_KEEP_MAX;
+    /*endif*/
+    return v;
+}
+/*- End of function --------------------------------------------------------*/
+
+static float v90_t3_fse_lost_err(v34_rx_state_t *s)
+{
+    float v;
+
+    if (s->v90_t3_err_base_n < V34_V90_T3_ERR_BASE_SYMBOLS)
+        return V34_V90_T3_FSE_KEEP_ERR;
+    /*endif*/
+    v = V34_V90_T3_FSE_LOST_MULT*s->v90_t3_err_base;
+    if (v < V34_V90_T3_FSE_LOST_MIN)
+        v = V34_V90_T3_FSE_LOST_MIN;
+    /*endif*/
+    if (v > V34_V90_T3_FSE_LOST_MAX)
+        v = V34_V90_T3_FSE_LOST_MAX;
+    /*endif*/
+    return v;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Whether an equalizer restore also discards the timing loop's frequency.
+   See the call site: the estimate it drops is the peer's clock offset, which
+   the restore has no reason to believe has changed.  ME_V90_TIMING_FREQ_KEEP=0
+   restores the old behaviour for an A/B. */
+static int v90_t3_restore_zeroes_timing_freq(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *e = getenv("ME_V90_TIMING_FREQ_KEEP");
+
+        /* Default is to zero it, as before.  Keeping it was measured on
+           artifacts/goal-v90-073744Z and is slightly worse (30 clean windows
+           against 50), so the knob stays for the next investigation rather
+           than changing behaviour. */
+        cached = (e  &&  atoi(e) != 0) ? 0 : 1;
+    }
+    /*endif*/
+    return cached;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -12133,7 +12208,30 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
         if (s->v90_t3_recover > 0)
             s->v90_t3_recover--;
         /*endif*/
-        if (s->v90_t3_sym_err_ema < V34_V90_T3_FSE_KEEP_ERR)
+        /* Learn the receiver's own operating point before judging it against
+           anything.  B1 hands over a converged filter, so the error settles
+           within a second; average it over the next few thousand symbols and
+           use that, rather than a constant, as the scale for "demonstrably
+           good" and "lost".  See V34_V90_T3_FSE_KEEP_MULT for what the fixed
+           threshold cost. */
+        if (s->v90_t3_err_base_n < V34_V90_T3_ERR_BASE_SYMBOLS)
+        {
+            s->v90_t3_err_base += s->v90_t3_sym_err_ema;
+            s->v90_t3_err_base_n++;
+            if (s->v90_t3_err_base_n == V34_V90_T3_ERR_BASE_SYMBOLS)
+            {
+                s->v90_t3_err_base /= V34_V90_T3_ERR_BASE_SYMBOLS;
+                span_log(s->logging, SPAN_LOG_WARNING,
+                         "Rx - V.90 upstream settled at %.3f from the "
+                         "constellation; keeping the equalizer below %.3f, "
+                         "restoring it above %.3f\n",
+                         s->v90_t3_err_base,
+                         v90_t3_fse_keep_err(s), v90_t3_fse_lost_err(s));
+            }
+            /*endif*/
+        }
+        /*endif*/
+        if (s->v90_t3_sym_err_ema < v90_t3_fse_keep_err(s))
         {
             if (++s->v90_t3_fse_good_age >= 3200)
             {
@@ -12143,6 +12241,15 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                 s->v90_t3_fse_good_age = 0;
             }
             /*endif*/
+            s->v90_t3_fse_bad_run = 0;
+        }
+        else if (s->v90_t3_sym_err_ema < v90_t3_fse_lost_err(s))
+        {
+            /* Neither demonstrably good nor lost.  The old code had no such
+               zone -- anything not good enough to snapshot counted towards a
+               restore -- so a receiver sitting just above its snapshot
+               threshold was being treated as one that had lost the
+               constellation. */
             s->v90_t3_fse_bad_run = 0;
         }
         else if (s->v90_t3_fse_good_valid)
@@ -12170,7 +12277,9 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                    position by up to a whole sample with nothing to
                    compensate -- manufacturing, on the recovery path, exactly
                    the fault the search below is there to undo. */
-                s->v90_t3_gardner.freq = 0.0f;
+                if (v90_t3_restore_zeroes_timing_freq())
+                    s->v90_t3_gardner.freq = 0.0f;
+                /*endif*/
                 s->v90_t3_gardner.hold = 0;
                 s->v90_t3_fse_restores++;
                 span_log(s->logging, SPAN_LOG_WARNING,
@@ -12771,6 +12880,8 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_idle_seen = false;
     s->v90_t3_relocks = 0;
     s->v90_t3_sym_err_ema = 0.0f;
+    s->v90_t3_err_base = 0.0f;
+    s->v90_t3_err_base_n = 0;
     s->v90_t3_sym_err_fast = 0.0f;
     s->v90_t3_shell_frames = 0;
     s->v90_t3_shell_bad = 0;

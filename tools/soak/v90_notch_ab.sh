@@ -19,7 +19,7 @@ LOG="$OUT/server.log"
 cd "$ROOT"
 
 VPCM_G711_TAP_DIR="$OUT" VPCM_ME_VERBOSE=1 V34_DATA_FRAME_DUMP="$OUT/frames" \
-./sip_v90_modem --sip-server asterisk.net.cryan.nz --username 6001 \
+env ${EXTRA_ENV:-} ./sip_v90_modem --sip-server asterisk.net.cryan.nz --username 6001 \
     --password 6001 --pty-link /tmp/modem0 >>"$LOG" 2>&1 &
 srv=$!
 trap 'kill $srv 2>/dev/null' EXIT
