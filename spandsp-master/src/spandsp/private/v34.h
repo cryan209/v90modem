@@ -216,8 +216,12 @@
     sits under 2000, so five thousand is far above a working receiver and far
     below the range where the metric silently inverts. */
 #define V34_V90_T3_DIVERGED_POWER           5000.0f
-/*! Settled symbols used to measure the dispersion constant, after which it
-    is fixed for the call. */
+/*! Symbols the LOCAL transmitter is run for to measure the dispersion
+    constant at the B1 handover.  It is a property of the constellation, so it
+    is known there and never measured from the wire -- measured from received
+    symbols it both needs a settled call, which a call that collapses early
+    never provides, and can feed back on the blind loop's own output (it
+    reached 2.6e10 that way on rate28800-r2 before this was fixed). */
 #define V34_V90_T3_CMA_MEASURE_SYMBOLS      32000
 /*! Symbols one blind episode may run for before it is abandoned. */
 #define V34_V90_T3_CMA_MAX_SYMBOLS          1600

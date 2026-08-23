@@ -1645,10 +1645,17 @@ clean time and longest unbroken hold:
 | 31200-r1 | 7% / 7.3 s | 7% / 7.3 s |
 
 Nothing regresses, 24000 keeps its whole-call hold, and the two rows that move
-are the ones that were collapsing.  Attribution, on 19200: the frequency hold
-alone is 18% -> 48%, and the blind recovery on top of it 48% -> 69%; on
-28800-r1 the hold alone is 17% -> 23% and the pair 23% -> 55%.  Neither is
-worth much without the other.
+are the ones that were collapsing.  Attribution: on 19200 the whole of the gain is the
+frequency hold (18% -> 48%, with the blind loop contributing nothing either
+way); on 28800-r1 the hold alone is 17% -> 23% and the blind loop takes it to
+55%, which it cannot do without the hold.
+
+A 48% -> 69% reading for the blind loop on 19200 appeared once and does not
+reproduce: it came from a build whose dispersion constant was measured off the
+wire as 75.9 where the constellation's own value is 76.0, and that 0.1%
+difference is enough to change where a nonlinear loop ends up.  Treat the
+blind loop's contribution as established only on 28800 and as chaotic
+elsewhere.
 
 **Read the clean TIME, never the window count.**  A white stretch emits short
 windows and a clean one long windows, so a window-weighted percentage inverts
@@ -1660,3 +1667,65 @@ it diverges 22 times (caught by V34_V90_T3_DIVERGED_POWER, which restores the
 snapshot, and that row is still the largest gain in the table).  Two of the
 three collapse well before any lock could be blamed, so there is at least one
 more mechanism here.
+
+## Live verification, and the fact it turned up: no replay reproduces a live call (2026-08-24)
+
+The rate/eye numbers above are all replays.  Run live against the d-modem rig
+(artifacts/live-verify-231747Z), same binary, both knob directions:
+
+| row | fix on | fix off |
+|---|---|---|
+| 28800 | 1% clean, 0.7 s hold, fails at 0.9 s (x2 calls) | 0% clean, 0.7 s hold, fails at 0.9 s |
+| 19200 | 1% clean, 1.7 s hold, fails at 1.1 s | never reached data mode |
+
+**The fix is neither confirmed nor refuted live, because live never gets the
+clean stretch it protects.**  It is also not harmful: the control arm, with
+all three knobs disabled, fails at the same instant.
+
+The reason is worth more than the result.  **The live receiver collapses
+within a second of B1 and every offline path fed the identical recorded
+samples runs for nineteen seconds.**  On
+`artifacts/goal-matrix-115515Z/rate28800-r1`, whose own live call failed at
+0.7 s: `v90_upstream_replay` of its recording holds 19.7 s and reaches 55% of
+the call clean, and `v90_engine_replay` -- which exists precisely to close
+this gap, running V.8, Phase 2, Phase 3 and Phase 4 through the whole engine
+off the same file -- holds 19.7 s as well, in `--fast` and in real time
+alike.  Acquisition is identical to three decimal places (B1 fit 100%,
+out-of-sample 0.103 against live's 0.107, symbol power 437.0 against 438.1),
+so the two paths start in the same place.
+
+Then they part, and the instrument that says how is the timing loop's own
+frequency, printed in every DATA-bits line:
+
+```
+              slips  freq        sym err
+live          0      +0.000002   0.106
+              0      -0.000015   0.123
+              0      -0.000051   0.151
+              0      -0.000064   0.233   <- eye closing
+              0      -0.000064   0.300
+engine replay 0      +0.000023   0.118
+of the same   0      +0.000006   0.115
+recording     0      +0.000009   0.107
+              0      +0.000009   0.107
+              0      -0.000013   0.109
+```
+
+Live walks to -6.4e-5 samples per symbol -- **-64 ppm** -- inside half a second
+and the eye shuts with it; the replay stays inside +/-2e-5 and stays open.  A
+timing loop cannot invent a frequency offset out of samples that do not have
+one, so **the live receiver is not consuming the samples the tap recorded**.
+The tap is written in `me_rx_g711()` before anything else touches the buffer,
+so a recording cannot carry a discrepancy introduced after that point, and a
+frame the live path fails to hand to `v34_rx()` looks to the timing loop
+exactly like a wire running slow.  Ruled out already: RTP (7076 packets, zero
+sequence gaps, zero timestamp jumps, on both the matrix call and today's), the
+notch and the canceller (both off, and both are downstream of the tap in the
+engine replay too), the T/3 ring's history length (14 s, 2 s and 0.4 s all give
+55%), and the feed block size (already 160, matching a 20 ms RTP frame).
+
+**So every rate/eye figure in this document, and every improvement measured
+against them, describes a receiver that is not experiencing the live path's
+dominant impairment.**  That is the first thing to fix here, and it is
+measurable without the rig once the discrepancy is instrumented: count the
+samples `v34_rx()` actually receives against the samples the tap wrote.

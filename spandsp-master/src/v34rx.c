@@ -1179,20 +1179,23 @@ static void v90_t3_blind_recover(v34_rx_state_t *s,
     /*endif*/
     /* Only ever against a dispersion constant this call measured for itself,
        and only once the receiver has an operating point to compare with. */
-    if (s->v90_t3_cma_n < V34_V90_T3_ERR_BASE_SYMBOLS
-        ||
-        s->v90_t3_cma_p2 <= 0.0)
-    {
+    if (s->v90_t3_cma_r2 <= 0.0f)
         return;
-    }
+    /*endif*/
+    /* And not before there is a filter to start from.  CMA is a gradient
+       descent on a surface with local minima: started from the taps a
+       collapse walked off it does not come back (measured -- 95 s of trying),
+       and started from the last snapshot it reopens the eye in under a
+       second.  Arming it earlier than the first snapshot is therefore not
+       "sooner", it is "into the case that does not work": with r2 known at
+       the handover rather than measured over 32000 settled symbols, the loop
+       became able to arm in the first seconds of a call and 19200 fell from
+       69% of the call clean to 48%. */
+    if (!s->v90_t3_fse_good_valid)
+        return;
     /*endif*/
     if (!s->v90_t3_cma_active)
     {
-        /* Only ever from symbols the DD gate accepted, and never while the
-           blind loop is the one producing them. */
-        if (s->v90_t3_cma_n < V34_V90_T3_CMA_MEASURE_SYMBOLS)
-            s->v90_t3_cma_r2 = (float) (s->v90_t3_cma_p4/s->v90_t3_cma_p2);
-        /*endif*/
         /* Judge the start on the SLOW estimate.  The fast one oscillates
            across any threshold while the eye is shut -- measured on
            rate28800-r1 it crosses 0.55 every few tens of symbols -- so a run
@@ -12580,29 +12583,6 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                     s->v90_t3_fse[tap].re += mu*(e_re*x.re + e_im*x.im);
                     s->v90_t3_fse[tap].im += mu*(e_im*x.re - e_re*x.im);
                 }
-                /* While the eye is open, measure what a constant-modulus loop
-                   would need if it ever shuts.  Godard's r2 is a property of
-                   the constellation, and this receiver runs six of them.
-
-                   Only from symbols the receiver is demonstrably decoding,
-                   and only until there are enough of them.  Left to run on
-                   whatever passed the gate, r2 fed back on itself through the
-                   blind loop's own output and reached 2.6e10 on
-                   artifacts/goal-matrix-115515Z/rate28800-r2 -- a dispersion
-                   constant that then drove the taps anywhere at all.  The
-                   constellation does not change during a call, so there is
-                   nothing to keep tracking. */
-                if (s->v90_t3_cma_n < V34_V90_T3_CMA_MEASURE_SYMBOLS
-                    &&
-                    v90_t3_phase_evidence_ok(s))
-                {
-                    double p2 = y.re*y.re + y.im*y.im;
-
-                    s->v90_t3_cma_p2 += p2;
-                    s->v90_t3_cma_p4 += p2*p2;
-                    s->v90_t3_cma_n++;
-                }
-                /*endif*/
             }
             /*endif*/
             v90_t3_blind_recover(s, &y, pre, frac, energy);
@@ -12666,8 +12646,30 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
         /*endif*/
         if (s->v90_t3_err_base_n < V34_V90_T3_ERR_BASE_SYMBOLS)
         {
-            s->v90_t3_err_base += s->v90_t3_sym_err_ema;
-            s->v90_t3_err_base_n++;
+            /* Average only over symbols that are actually settled.  The
+               window is meant to answer "what does this receiver look like
+               when it is working", and a call that loses the constellation
+               inside it does not contribute to that answer: measured live on
+               2026-08-24, a 28800 call that collapsed 0.9 s after B1 recorded
+               a settled figure of 0.281 where its own first windows read
+               0.106, and every threshold derived from it -- the snapshot, the
+               restore, the phase-evidence gate -- was then scaled to a
+               receiver that never existed.
+
+               Skipping the lost symbols rather than taking the window's
+               minimum: the minimum is immune to the same fault, but it
+               estimates the floor rather than the operating point, and
+               measured on the replays it costs 19200 twenty points of clean
+               call (69% -> 48%).  If a call never accumulates a full window
+               of settled symbols the baseline simply never establishes, and
+               the fixed fallbacks stand -- which is the behaviour that
+               predates any of this. */
+            if (s->v90_t3_sym_err_ema < V34_V90_T3_LOST_ERR)
+            {
+                s->v90_t3_err_base += s->v90_t3_sym_err_ema;
+                s->v90_t3_err_base_n++;
+            }
+            /*endif*/
             if (s->v90_t3_err_base_n == V34_V90_T3_ERR_BASE_SYMBOLS)
             {
                 s->v90_t3_err_base /= V34_V90_T3_ERR_BASE_SYMBOLS;
@@ -13356,7 +13358,9 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_cma_p2 = 0.0;
     s->v90_t3_cma_p4 = 0.0;
     s->v90_t3_cma_n = 0;
-    s->v90_t3_cma_r2 = 0.0f;
+    /* NOT r2: this reset runs inside the acquisition, AFTER the B1 template
+       build that measures it from the constellation, so zeroing it here threw
+       the figure away and the blind loop never armed at all. */
     s->v90_t3_cma_active = false;
     s->v90_t3_cma_run = 0;
     s->v90_t3_cma_episodes = 0;
@@ -14938,6 +14942,59 @@ static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
             rx->v90_t3_b1[dst].re = frame[2*n]/128.0f;
             rx->v90_t3_b1[dst].im = frame[2*n + 1]/128.0f;
         }
+    }
+    /* Godard's dispersion constant, from the constellation rather than from
+       the call.  It is E[|x|^4]/E[|x|^2] of the points the far end is
+       actually transmitting, and this local transmitter is generating exactly
+       those -- so it is known here, at the handover, and does not have to be
+       waited for.  Measuring it from the received symbols instead needs
+       thousands of SETTLED ones, which is precisely what a call that
+       collapses early never provides: live on 2026-08-24 a 28800 call lost
+       the constellation 0.9 s after B1, so the blind loop that exists to
+       recover it could never arm.  Keep generating past B1 for the sample --
+       the symbols are still drawn from the same mapper -- and throw them
+       away. */
+    {
+        double p2_sum = 0.0;
+        double p4_sum = 0.0;
+        int n_sym = 0;
+
+        for (int n = 0;  n < rx->v90_t3_b1_symbols;  n++)
+        {
+            double p2 = rx->v90_t3_b1[n].re*rx->v90_t3_b1[n].re
+                      + rx->v90_t3_b1[n].im*rx->v90_t3_b1[n].im;
+
+            p2_sum += p2;
+            p4_sum += p2*p2;
+            n_sym++;
+        }
+        /*endfor*/
+        while (n_sym < V34_V90_T3_CMA_MEASURE_SYMBOLS)
+        {
+            if (v34_get_mapping_frame_state(tx, frame) != 16)
+                break;
+            /*endif*/
+            for (int n = 0;  n < 8;  n++)
+            {
+                double re = frame[2*n]/128.0;
+                double im = frame[2*n + 1]/128.0;
+                double p2 = re*re + im*im;
+
+                p2_sum += p2;
+                p4_sum += p2*p2;
+                n_sym++;
+            }
+            /*endfor*/
+        }
+        /*endwhile*/
+        if (p2_sum > 0.0)
+        {
+            rx->v90_t3_cma_r2 = (float) (p4_sum/p2_sum);
+            rx->v90_t3_cma_n = n_sym;
+            rx->v90_t3_cma_p2 = p2_sum;
+            rx->v90_t3_cma_p4 = p4_sum;
+        }
+        /*endif*/
     }
     v34_free(tx);
     return rx->v90_t3_b1_symbols > 0;
