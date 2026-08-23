@@ -12302,6 +12302,29 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
            use that, rather than a constant, as the scale for "demonstrably
            good" and "lost".  See V34_V90_T3_FSE_KEEP_MULT for what the fixed
            threshold cost. */
+        /* Has the upstream lost carrier?  V.90 9.6's rate renegotiation is
+           the recovery, and the engine drives it; this only has to say when.
+           Judge on the slow estimate, so a burst does not trigger a
+           renegotiation that costs the best part of a second. */
+        if (s->v90_t3_err_base_n >= V34_V90_T3_ERR_BASE_SYMBOLS
+            &&
+            s->v90_t3_sym_err_ema >= V34_V90_T3_LOST_ERR)
+        {
+            if (++s->v90_t3_lost_run == V34_V90_T3_LOST_SYMBOLS)
+            {
+                span_log(s->logging, SPAN_LOG_WARNING,
+                         "Rx - V.90 upstream carrier lost: %.3f from the "
+                         "constellation for %d symbols (settled at %.3f)\n",
+                         s->v90_t3_sym_err_ema, s->v90_t3_lost_run,
+                         s->v90_t3_err_base);
+            }
+            /*endif*/
+        }
+        else
+        {
+            s->v90_t3_lost_run = 0;
+        }
+        /*endif*/
         if (s->v90_t3_err_base_n < V34_V90_T3_ERR_BASE_SYMBOLS)
         {
             s->v90_t3_err_base += s->v90_t3_sym_err_ema;
@@ -12970,6 +12993,8 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_sym_err_ema = 0.0f;
     s->v90_t3_err_base = 0.0f;
     s->v90_t3_err_base_n = 0;
+    s->v90_t3_lost_run = 0;
+    s->v90_t3_lost_reported = 0;
     s->v90_t3_sym_err_fast = 0.0f;
     s->v90_t3_shell_frames = 0;
     s->v90_t3_shell_bad = 0;
@@ -14429,6 +14454,28 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
 SPAN_DECLARE(int) v34_v90_upstream_rx_acquired(v34_state_t *s)
 {
     return s && s->rx.v90_t3_acquired;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_v90_upstream_carrier_lost(v34_state_t *s)
+{
+    if (!s || !s->rx.v90_t3_acquired)
+        return 0;
+    /*endif*/
+    return (s->rx.v90_t3_lost_run >= V34_V90_T3_LOST_SYMBOLS) ? 1 : 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Called when a rate renegotiation has been started for this loss, so the
+   same one does not start another.  The run restarts from zero, so a
+   renegotiation that does not fix anything raises the condition again after
+   another V34_V90_T3_LOST_SYMBOLS rather than immediately. */
+SPAN_DECLARE(void) v34_v90_upstream_clear_carrier_lost(v34_state_t *s)
+{
+    if (!s)
+        return;
+    /*endif*/
+    s->rx.v90_t3_lost_run = 0;
 }
 /*- End of function --------------------------------------------------------*/
 

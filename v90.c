@@ -30,6 +30,21 @@
 
 /* Phase 4 timing constants (ITU-T V.90 §9.4.1) */
 #define V90_RI_SYMBOLS   192  /* Ri duration: at least 192T (§9.4.1.1) */
+/* §9.6.1.1: on a rate renegotiation Rd is 384T and R̄d is 24T, and Rd must
+ * begin on the boundary of a data frame.  Startup's Ri is only "at least
+ * 192T", so the two are deliberately different constants. */
+#define V90_RD_RENEG_SYMBOLS   384
+#define V90_RDBAR_RENEG_SYMBOLS 24
+/* §9.6.1: the digital modem shall initiate a retrain if it does not receive
+ * an E sequence within 5000 ms plus two round-trip delays after transmitting
+ * the Rd→R̄d transition.  At 8000 symbols/s that is 40000 symbols, plus an
+ * allowance for two round trips on this bearer. */
+#define V90_RENEG_E_TIMEOUT_SYMBOLS  (8000*7)
+/* How long to hold Rd waiting for the analogue modem to answer at all.  Its
+ * reply is S for 128T then S̄ for 16T then an optional SCR of up to 2000 ms
+ * before CP, so a conformant answer is well inside two seconds; three is
+ * generous and still far short of the peer's own retrain timer. */
+#define V90_RENEG_ANSWER_TIMEOUT_SYMBOLS  (8000*3)
 #define V90_RI_POST_CP_SYMBOLS 24
 /* V.90 requires at least 2040T and MP within 2000 ms (§9.4.1.2/.3).
  * SmartLink recognizes barred Ri but enables its TRN2d study about 240 ms
@@ -575,6 +590,23 @@ struct v90_state_s {
 
     /* Phase 4 CP state */
     bool             cp_ready;                  /* TRN2d→CP/SUVd transition armed */
+
+    /* V.90 §9.6 rate renegotiation, digital-modem side.
+     *
+     * §9.6 says the procedure "can be initiated at any time during data mode"
+     * and that the data signalling rate may change as a result, so it is both
+     * the speed shift and -- because it ends in a fresh B1 from the analogue
+     * modem, which is what our upstream receiver acquires against -- the
+     * re-acquisition after a loss of carrier.  A search over the state the
+     * receiver is already in has been measured twice not to reach the state
+     * on the far side of one of this peer's one-sample timing slips
+     * (docs/v90_upstream_data_path.md). */
+    bool             reneg_pending;             /* asked for, waiting for a frame boundary */
+    bool             reneg_active;              /* Rd sent, sequence running */
+    bool             reneg_timed_out;           /* §9.6.1: no Ed in time, retrain owed */
+    int64_t          reneg_rbar_symbol;         /* symbol count at the Rd→R̄d transition */
+    int64_t          reneg_symbol_clock;        /* symbols emitted since renegotiation began */
+    int              reneg_count;
     vpcm_cp_frame_t  cp_frame;                  /* CP frame to transmit */
     uint8_t          cp_bits[VPCM_CP_MAX_BITS]; /* Encoded CP bits (one per byte) */
     int              cp_nbits;                  /* Total encoded CP bits */
@@ -753,6 +785,14 @@ static inline uint8_t v90_cp_transport_codeword(v90_state_t *s,
  * selected magnitude.  The barred R that terminates it is four repetitions
  * of ---+++.  Ri uses U_INFO for every data-frame interval and neither
  * sequence is scrambled or differentially encoded. */
+/* §9.4.1.1 gives startup's Ri "at least 192T"; §9.6.1.1 gives a rate
+   renegotiation's Rd exactly 384T.  Same signal, different duration, so the
+   length is a function of which procedure is running. */
+static int v90_ri_length(const v90_state_t *s)
+{
+    return s->reneg_active ? V90_RD_RENEG_SYMBOLS : V90_RI_SYMBOLS;
+}
+
 static inline uint8_t v90_ri_codeword(v90_state_t *s,
                                       int symbol_pos,
                                       bool barred)
@@ -3102,6 +3142,45 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
 {
     int sign;
 
+    /* §9.6.1: the digital modem shall initiate a retrain if it does not
+     * receive an E sequence within 5000 ms plus two round-trip delays after
+     * transmitting the Rd→R̄d transition.  Run the clock here, where every
+     * transmitted symbol passes, and let the engine own the retrain itself. */
+    if (s->reneg_active) {
+        s->reneg_symbol_clock++;
+        if (!s->reneg_timed_out
+            && s->reneg_rbar_symbol >= 0
+            && !s->e_received
+            && s->reneg_symbol_clock - s->reneg_rbar_symbol
+                   > V90_RENEG_E_TIMEOUT_SYMBOLS) {
+            s->reneg_timed_out = true;
+            fprintf(stderr,
+                    "[V90] Rate renegotiation %d: no E within %d symbols of "
+                    "the Rd->R-bar-d transition; a retrain is owed "
+                    "(§9.6.1/§9.5.1.1)\n",
+                    s->reneg_count, V90_RENEG_E_TIMEOUT_SYMBOLS);
+        }
+        /* §9.6.1's own timeout runs from the Rd→R̄d transition, and that
+         * transition needs the analogue modem's CPt.  A peer that does not
+         * answer Rd at all therefore never starts that clock, and the
+         * transmitter holds Rd for the rest of the call -- measured against
+         * the SmartLink rig, which then declares SILENCERETRAIN and retrains,
+         * costing everything after the loss that provoked the renegotiation.
+         * §9.6.1 also says the digital modem "may initiate a retrain at any
+         * time during a rate renegotiation according to 9.5.1.1", so bound
+         * the wait for an answer as well as the wait for E. */
+        if (!s->reneg_timed_out
+            && s->reneg_rbar_symbol < 0
+            && s->reneg_symbol_clock > V90_RENEG_ANSWER_TIMEOUT_SYMBOLS) {
+            s->reneg_timed_out = true;
+            fprintf(stderr,
+                    "[V90] Rate renegotiation %d: no CP within %d symbols of "
+                    "Rd; the peer is not answering, a retrain is owed "
+                    "(§9.6.1/§9.5.1.1)\n",
+                    s->reneg_count, V90_RENEG_ANSWER_TIMEOUT_SYMBOLS);
+        }
+    }
+
     switch (s->tx_phase) {
     case V90_TX_WAIT_JA: {
         int wait_limit = s->jd_resync_wait
@@ -3399,9 +3478,14 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
         /* §8.6.4/§9.4.1.1: Ri is U_INFO with +++--- signs, not idle.
          * Send at least 192T before allowing the analogue modem's CPt.  Do
          * not change to the TRN2d state on that timer: CPt must be accepted
-         * first, after which the transmitter emits the barred R-i ACK. */
+         * first, after which the transmitter emits the barred R-i ACK.
+         * §9.6.1.1: on a rate renegotiation the same signal is Rd and runs
+         * for 384T. */
         if (!s->phase4_hold_logged) {
-            fprintf(stderr, "[V90] Phase 4: Ri (%d symbols)\n", V90_RI_SYMBOLS);
+            fprintf(stderr, "[V90] %s: %s (%d symbols)\n",
+                    s->reneg_active ? "Rate renegotiation" : "Phase 4",
+                    s->reneg_active ? "Rd" : "Ri",
+                    v90_ri_length(s));
             s->phase4_hold_logged = true;
         }
         {
@@ -3461,6 +3545,12 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
              * exact magnitude of the preceding unbarred Ri. */
             uint8_t codeword = v90_ri_codeword(s, s->sample_count, true);
 
+            if (s->sample_count == 0 && s->reneg_active
+                && s->reneg_rbar_symbol < 0) {
+                /* §9.6.1's timeout is measured from the Rd→R̄d transition,
+                   not from the start of the renegotiation. */
+                s->reneg_rbar_symbol = s->reneg_symbol_clock;
+            }
             s->sample_count++;
             if (s->sample_count == V90_RI_POST_CP_SYMBOLS) {
                 fprintf(stderr,
@@ -3706,6 +3796,13 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                 s->tx_phase = V90_TX_DATA;
                 s->sample_count = 0;
                 s->training_complete = true;
+                if (s->reneg_active) {
+                    fprintf(stderr,
+                            "[V90] Rate renegotiation %d complete; data mode "
+                            "resumed after B1d\n", s->reneg_count);
+                    s->reneg_active = false;
+                    s->reneg_rbar_symbol = -1;
+                }
             }
             return codeword;
         }
@@ -4071,7 +4168,7 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
             s->phase4_hold_logged = false;
             return true;
         }
-        if ((s->tx_phase == V90_TX_RI && s->sample_count >= V90_RI_SYMBOLS
+        if ((s->tx_phase == V90_TX_RI && s->sample_count >= v90_ri_length(s)
              && (s->v92_mode
                  ? (s->v92_native_cpu_rx ? s->phase4_mapper_ready
                                          : (s->cp_nbits > 0))
@@ -4955,6 +5052,92 @@ bool v90_get_v92_cpu(const v90_state_t *s, vpcm_cp_frame_t *out)
     if (!s || !out || !s->v92_cpu_received)
         return false;
     *out = s->data_cp_frame;
+    return true;
+}
+
+/* ---- V.90 §9.6 rate renegotiation (digital modem) ---- */
+
+/* §9.6: "The rate renegotiation procedure can be initiated at any time during
+ * data mode.  Data signalling rate and spectral shaping parameters may change
+ * as a result of rate renegotiation."
+ *
+ * For this modem it is also the recovery from a lost upstream.  §9.6.1.1 has
+ * the digital modem send Rd, R̄d, optional TRN2d and then MP, and the analogue
+ * modem answer with S, S̄, SCR, CP and -- after E -- a fresh B1.  That B1 is
+ * what our upstream receiver acquires against, so a renegotiation gives it the
+ * same reach it had at startup.  Nudging the state it is already in does not:
+ * measured twice, no sampling offset within half a symbol and no rotation
+ * recovers the constellation after one of this peer's one-sample timing slips
+ * (docs/v90_upstream_data_path.md).
+ *
+ * The request is only armed here.  §9.6 requires that "rate renegotiation
+ * shall be initiated by the digital modem's transmitter only on the boundary
+ * of a data frame", so the transition itself happens in
+ * v90_rate_renegotiation_due(), which the transmit path calls between frames.
+ */
+bool v90_request_rate_renegotiation(v90_state_t *s)
+{
+    if (!s || !s->training_complete || s->tx_phase != V90_TX_DATA)
+        return false;
+    if (s->reneg_pending || s->reneg_active)
+        return false;
+    s->reneg_pending = true;
+    fprintf(stderr,
+            "[V90] Rate renegotiation requested; starting at the next data "
+            "frame boundary (§9.6.1.1)\n");
+    return true;
+}
+
+bool v90_rate_renegotiation_pending(const v90_state_t *s)
+{
+    return s && s->reneg_pending;
+}
+
+bool v90_rate_renegotiation_active(const v90_state_t *s)
+{
+    return s && (s->reneg_pending || s->reneg_active);
+}
+
+int v90_rate_renegotiation_count(const v90_state_t *s)
+{
+    return s ? s->reneg_count : 0;
+}
+
+/* §9.6.1: "The digital modem shall initiate a retrain according to 9.5.1.1 if
+ * it does not receive an E sequence within 5000 ms plus 2 round-trip delays
+ * after transmitting the Rd - to - Rd transition."  The engine owns the
+ * retrain; this only reports that one is owed. */
+bool v90_rate_renegotiation_timed_out(const v90_state_t *s)
+{
+    return s && s->reneg_timed_out;
+}
+
+/* Begin the renegotiation.  Call only on a data frame boundary: §9.6 requires
+ * it, and the analogue modem's receiver keeps data frame synchronization
+ * through the whole procedure on the strength of it. */
+bool v90_rate_renegotiation_start(v90_state_t *s)
+{
+    if (!s || !s->reneg_pending)
+        return false;
+    s->reneg_pending = false;
+    s->reneg_active = true;
+    s->reneg_timed_out = false;
+    s->reneg_rbar_symbol = -1;
+    s->reneg_symbol_clock = 0;
+    s->reneg_count++;
+    /* Re-enter the Phase 4 sequence at Rd.  Everything from here -- Rd, the
+     * barred Rd, TRN2d, MP/MP', Ed, B1d -- is the same machinery as startup,
+     * which is exactly what §9.6.1.1 describes. */
+    s->tx_phase = V90_TX_RI;
+    s->sample_count = 0;
+    s->cp_ready = false;
+    s->phase4_hold_logged = false;
+    s->phase4_ri_align_remaining = 0;
+    s->training_complete = false;
+    fprintf(stderr,
+            "[V90] Rate renegotiation %d: sending Rd for %dT on a data frame "
+            "boundary (§9.6.1.1)\n",
+            s->reneg_count, V90_RD_RENEG_SYMBOLS);
     return true;
 }
 

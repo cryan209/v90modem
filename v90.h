@@ -296,6 +296,26 @@ const char *v90_rx_event_name(v90_rx_event_t event);
 bool v90_training_complete(v90_state_t *s);
 
 /*
+ * V.90 §9.6 rate renegotiation, digital-modem side.
+ *
+ * §9.6 allows it "at any time during data mode" and lets the data signalling
+ * rate and the spectral shaping parameters change as a result -- so it is the
+ * speed shift.  It is also the re-acquisition after a loss of carrier: the
+ * analogue modem answers with S, S-bar, SCR, CP and then a fresh B1, and B1 is
+ * what the upstream receiver acquires against.
+ *
+ * v90_request_rate_renegotiation() only arms the request.  §9.6 requires the
+ * digital modem's transmitter to start one "only on the boundary of a data
+ * frame", so the transmit path calls v90_rate_renegotiation_start() there.
+ */
+bool v90_request_rate_renegotiation(v90_state_t *s);
+bool v90_rate_renegotiation_pending(const v90_state_t *s);
+bool v90_rate_renegotiation_active(const v90_state_t *s);
+bool v90_rate_renegotiation_start(v90_state_t *s);
+bool v90_rate_renegotiation_timed_out(const v90_state_t *s);
+int  v90_rate_renegotiation_count(const v90_state_t *s);
+
+/*
  * Apply a received CPt, data-mode CP, or CP' frame to Phase 4.  CPt configures
  * TRN2d/MP/Ed; CP configures B1d/data; a repeated data-mode CP may change only
  * its acknowledge bit. V.92 mode retains the CPd compatibility transmitter.

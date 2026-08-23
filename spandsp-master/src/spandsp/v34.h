@@ -584,6 +584,19 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
     9.6 kHz at 3200 baud). */
 SPAN_DECLARE(int) v34_v90_upstream_rx_acquired(v34_state_t *s);
 
+/*! Has the V.90 upstream lost carrier -- the symbols at the white level for
+    long enough that only a re-acquisition will bring them back?  V.90 9.6
+    rate renegotiation is that re-acquisition: it ends in a fresh B1, which is
+    what this receiver acquires against.
+    \param s The V.34 context.
+    \return non-zero if the upstream has lost carrier. */
+SPAN_DECLARE(int) v34_v90_upstream_carrier_lost(v34_state_t *s);
+
+/*! Note that recovery has been started for the current loss, so it is not
+    started twice.
+    \param s The V.34 context. */
+SPAN_DECLARE(void) v34_v90_upstream_clear_carrier_lost(v34_state_t *s);
+
 /*! Read internal V.90 upstream resampler accounting.  Both counts are DSP-side
     diagnostics; the external bearer remains an 8 kHz stream. */
 SPAN_DECLARE(void) v34_v90_upstream_sample_counts(v34_state_t *s,

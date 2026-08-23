@@ -2636,6 +2636,46 @@ static bool g_v34_upstream_data_armed = false;
 static bool g_v34_upstream_data_started = false;
 static int g_v90_upstream_e_run = 0;
 
+/* How many §9.6 rate renegotiations one call may run.  Each costs the best
+ * part of a second of downstream (384T of Rd, 24T of R̄d, TRN2d, the MP
+ * exchange and 48 data frames of B1d), so a link that needs one every few
+ * seconds is not being helped by them and should be left alone rather than
+ * spending the rest of the call renegotiating.  ME_V90_MAX_RENEG overrides. */
+#define ME_V90_MAX_RENEGOTIATIONS_DEFAULT 8
+
+static int me_v90_max_renegotiations(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *e = getenv("ME_V90_MAX_RENEG");
+
+        cached = (e && atoi(e) >= 0) ? atoi(e)
+                                     : ME_V90_MAX_RENEGOTIATIONS_DEFAULT;
+    }
+    return cached;
+}
+#define ME_V90_MAX_RENEGOTIATIONS (me_v90_max_renegotiations())
+
+/* Off by default, and the reason is measured rather than cautious: this rig's
+ * analogue modem does not answer a §9.6 rate renegotiation.  Two live calls
+ * sent Rd for 384T on a data frame boundary and received no CP at all; the
+ * peer's own log declares SILENCERETRAIN and it retrains.  So on this peer the
+ * procedure costs a retrain and buys nothing, and the honest default is to
+ * leave the link alone.  ME_V90_RENEG=1 turns it on for a peer that does
+ * implement §9.6.2, which is what it is here for. */
+static int me_v90_reneg_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *e = getenv("ME_V90_RENEG");
+
+        cached = (e && atoi(e) != 0) ? 1 : 0;
+    }
+    return cached;
+}
+
 static void v90_reset_upstream_data_arming(void)
 {
     g_v34_upstream_data_armed = false;
@@ -7257,8 +7297,74 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
     }
 
     if (g_state == ME_DATA) {
+        int pos = 0;
+
         if (!g_v90)
             return false;
+
+        /* §9.6.1: a rate renegotiation that does not produce an E is
+         * abandoned for a full retrain.  The engine owns the retrain, so it
+         * is the engine that acts on the flag. */
+        if (v90_rate_renegotiation_timed_out(g_v90)) {
+            (void) restart_v90_phase2_locked("rate renegotiation timeout");
+            return false;
+        }
+
+        /* Has the upstream lost carrier?  §9.6 allows a rate renegotiation
+         * "at any time during data mode", and it is the only recovery with
+         * the reach this needs: it ends in a fresh B1 from the analogue
+         * modem, which is what our upstream receiver acquires against.
+         * Nudging the receiver's existing state does not work -- measured
+         * twice, no sampling offset within half a symbol and no rotation
+         * recovers the constellation after one of this peer's one-sample
+         * timing slips (docs/v90_upstream_data_path.md). */
+        if (g_v34 && v34_v90_upstream_carrier_lost(g_v34)
+            && !v90_rate_renegotiation_active(g_v90)) {
+            if (me_v90_reneg_enabled()
+                && v90_rate_renegotiation_count(g_v90) < ME_V90_MAX_RENEGOTIATIONS) {
+                ME_LOG("[ME] V.90 upstream carrier lost; requesting a §9.6 "
+                       "rate renegotiation to re-acquire\n");
+                (void) v90_request_rate_renegotiation(g_v90);
+            }
+            /* Clear it either way: at the cap, the condition would otherwise
+             * be re-raised on every block for the rest of the call. */
+            v34_v90_upstream_clear_carrier_lost(g_v34);
+        }
+
+        /* §9.6: "Rate renegotiation shall be initiated by the digital modem's
+         * transmitter only on the boundary of a data frame."  This is that
+         * boundary -- the point at which the next frame would be mapped. */
+        if (v90_rate_renegotiation_pending(g_v90)
+            && g_v90_data_frame_pos >= V90_DATA_FRAME_LEN) {
+            if (v90_rate_renegotiation_start(g_v90)) {
+                /* §9.6.1.1: "condition its receiver to detect S, S-bar and
+                 * CP".  That is the same receiver state Phase 4 starts in, so
+                 * re-enter it rather than open-coding a second version. */
+                enter_v90_phase4_rx_locked();
+                /* The analogue modem's answer ends in a fresh B1, so let the
+                 * upstream receiver acquire it exactly as it did at startup
+                 * rather than carrying the state that just failed. */
+                g_v34_upstream_data_armed = false;
+                g_v90_upstream_e_run = 0;
+                if (g_v34)
+                    v34_v90_upstream_clear_carrier_lost(g_v34);
+            }
+        }
+
+        /* While the renegotiation runs, the downstream is Rd/R̄d/TRN2d/MP/Ed/
+         * B1d, which is the Phase 4 transmitter, not the data mapper. */
+        if (v90_rate_renegotiation_active(g_v90)
+            && !v90_rate_renegotiation_pending(g_v90)) {
+            while (pos < len && v90_get_tx_phase(g_v90) != V90_TX_DATA) {
+                if (v90_phase3_tx_codewords(g_v90, codewords + pos, 1) != 1)
+                    return false;
+                pos++;
+            }
+            if (pos < len)
+                generate_v90_data_codewords_locked(codewords + pos, len - pos);
+            return true;
+        }
+
         generate_v90_data_codewords_locked(codewords, len);
         return true;
     }
