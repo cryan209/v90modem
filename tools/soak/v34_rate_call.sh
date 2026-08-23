@@ -24,7 +24,7 @@ cd "$ROOT"
 VPCM_G711_TAP_DIR="$OUT" VPCM_ME_VERBOSE=1 ME_V34_SPAN_FLOW_LOG=1 \
 ME_MODE=v34 ME_DATA_FRAMING=lapm \
 ME_V34_BAUD="$BAUD" ME_V34_BPS="$BPS" \
-V34_DATA_FRAME_DUMP="$OUT/frames" \
+V34_DATA_FRAME_DUMP="$OUT/frames" V34_DATA_TX_DUMP="$OUT/frames_tx" \
 env ${EXTRA_ENV:-} ./sip_v90_modem --sip-server asterisk.net.cryan.nz --username 6001 \
     --password 6001 --pty-link /tmp/v90modem >>"$LOG" 2>&1 &
 srv=$!
