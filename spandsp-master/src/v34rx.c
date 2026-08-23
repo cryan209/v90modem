@@ -589,6 +589,10 @@ static int phase3_tracking_enabled(void)
 /*- End of function --------------------------------------------------------*/
 
 static void v34_reset_rx_data_frame_state(v34_rx_state_t *s, int super_frame);
+static bool v90_t3_phase_evidence_ok(v34_rx_state_t *s);
+static complexf_t v90_t3_raw_get_frac(const v34_rx_state_t *s,
+                                      int64_t index,
+                                      float frac);
 
 static int descramble_reg(uint32_t *reg, int scrambler_tap, int in_bit)
 {
@@ -798,6 +802,8 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                anything. */
             if (s->v90_t3_sf_locked
                 &&
+                v90_t3_phase_evidence_ok(s)
+                &&
                 ((shell_pct >= 0)
                      ? (shell_pct >= V34_V90_T3_SHELL_BAD_PCT)
                      : (ones_pct < 70  &&  v14_ratio < 25))
@@ -859,7 +865,9 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                              ones_pct, v14_pct, v14_ratio/10,
                              s->v90_t3_sf_tries);
                 }
-                else if ((s->v90_t3_idle_seen
+                else if (v90_t3_phase_evidence_ok(s)
+                         &&
+                         (s->v90_t3_idle_seen
                           ||
                           (s->v90_t3_sym_err_ema < V34_V90_T3_SWEEP_ERR
                            &&
@@ -1038,6 +1046,225 @@ static float v90_t3_fse_lost_err(v34_rx_state_t *s)
         v = V34_V90_T3_FSE_LOST_MAX;
     /*endif*/
     return v;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Whether what the frame-phase logic is about to read means anything.
+
+   Both its inputs -- the shell-index check that releases a standing lock and
+   the sweep score that ranks candidates -- describe how the bits are GROUPED,
+   and neither can separate a wrong grouping from symbols the eye no longer
+   resolves.  See V34_V90_T3_PHASE_TRUST_MULT.  ME_V90_PHASE_EYE_GATE=0
+   restores the old ungated behaviour for A/B. */
+static bool v90_t3_phase_evidence_ok(v34_rx_state_t *s)
+{
+    static int gate = -1;
+
+    if (gate < 0)
+    {
+        const char *value = getenv("ME_V90_PHASE_EYE_GATE");
+
+        gate = (value  &&  atoi(value) == 0) ? 0 : 1;
+    }
+    /*endif*/
+    if (!gate)
+        return true;
+    /*endif*/
+    if (s->v90_t3_err_base_n < V34_V90_T3_ERR_BASE_SYMBOLS)
+        return s->v90_t3_sym_err_ema < V34_V90_T3_SWEEP_ERR;
+    /*endif*/
+    return s->v90_t3_sym_err_ema
+               <= V34_V90_T3_PHASE_TRUST_MULT*s->v90_t3_err_base;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Blind recovery for an eye that has already shut.
+
+   Every adaptive element in this receiver -- the DD-LMS above, the timing
+   loop, the decision-directed carrier loop, even the slip search -- is gated
+   on the symbols being near the constellation, and each gate is right on its
+   own terms: a decision taken on white symbols is noise, and adapting to it
+   walks the filter off.  Together they are a trap.  Once the eye shuts there
+   is no decision to adapt on, so nothing adapts, so the eye stays shut: on
+   artifacts/goal-matrix-115515Z/rate28800-r1 the receiver ran 19 s at 0.10
+   from the lattice, met a disturbance, and spent the remaining 95 s at 0.66
+   -- the value for symbols bearing no relation to the lattice -- while the
+   wire went on carrying the peer's signal.  Neither a rotation nor a gain
+   recovers those symbols offline (swept +/-45 degrees and +/-15%: 0.65 stays
+   0.62), so it is the filter, not the carrier, and only something that needs
+   no decisions can put the filter back.
+
+   That is CMA.  It has a phase ambiguity, which is already this receiver's
+   normal condition -- the fourth-power carrier loop takes over exactly when
+   the decision-directed one is gated off -- and it is stopped the moment the
+   eye reopens, so the steady state is unchanged: the DD-LMS owns the taps
+   whenever there are decisions worth owning them with. */
+static void v90_t3_blind_recover(v34_rx_state_t *s,
+                                 const complexf_t *y,
+                                 int pre,
+                                 float frac,
+                                 float energy)
+{
+    static int enabled = -1;
+    float p2;
+    float e;
+    float mu;
+
+    if (enabled < 0)
+    {
+        const char *value = getenv("ME_V90_UPSTREAM_CMA");
+
+        /* Default OFF.  The loop is built, bounded and safe, and it does not
+           yet recover these calls: on both 28800 recordings it reopens the
+           eye far enough to hand back only occasionally, and the clean
+           fraction is unchanged.  The one result that looked like a win --
+           17% of the call clean becoming 82% -- was the diverged-receiver
+           artefact V34_V90_T3_DIVERGED_POWER now names, and is not real.
+           Kept, and kept honest, because the DIAGNOSIS it produced stands:
+           the eye is recoverable in principle (episodes did reach 0.11 from
+           0.68 before the dispersion constant was frozen), and every other
+           adaptive element in this receiver is gated on decisions it cannot
+           have while the eye is shut. */
+        enabled = (value  &&  atoi(value) != 0) ? 1 : 0;
+    }
+    /*endif*/
+    if (!enabled)
+        return;
+    /*endif*/
+    /* Only ever against a dispersion constant this call measured for itself,
+       and only once the receiver has an operating point to compare with. */
+    if (s->v90_t3_cma_n < V34_V90_T3_ERR_BASE_SYMBOLS
+        ||
+        s->v90_t3_cma_p2 <= 0.0)
+    {
+        return;
+    }
+    /*endif*/
+    if (!s->v90_t3_cma_active)
+    {
+        /* Only ever from symbols the DD gate accepted, and never while the
+           blind loop is the one producing them. */
+        if (s->v90_t3_cma_n < V34_V90_T3_CMA_MEASURE_SYMBOLS)
+            s->v90_t3_cma_r2 = (float) (s->v90_t3_cma_p4/s->v90_t3_cma_p2);
+        /*endif*/
+        /* Judge the start on the SLOW estimate.  The fast one oscillates
+           across any threshold while the eye is shut -- measured on
+           rate28800-r1 it crosses 0.55 every few tens of symbols -- so a run
+           counted on it never reaches a length worth acting on, while the
+           slow estimate sits steadily at 0.64.  The stop below stays on the
+           fast one, where turning round quickly is what matters. */
+        if (s->v90_t3_sym_err_ema >= V34_V90_T3_LOST_ERR)
+        {
+            if (++s->v90_t3_cma_run >= V34_V90_T3_CMA_START_RUN
+                &&
+                s->v90_t3_cma_episodes < V34_V90_T3_CMA_MAX_EPISODES)
+            {
+                s->v90_t3_cma_active = true;
+                s->v90_t3_cma_episodes++;
+                s->v90_t3_cma_run = 0;
+                /* Start from the last filter that demonstrably worked, where
+                   there is one.  CMA is a gradient descent on a surface with
+                   local minima, and the taps it would otherwise start from
+                   are the ones the collapse walked off -- measured on
+                   rate28800-r1, started from those it never reopened the eye
+                   in 95 s, and started from the snapshot it reopened it in
+                   under a second.  The snapshot alone is not enough either:
+                   restoring it is what the receiver already did, ten times,
+                   and the eye shut again within a second each time.  It is
+                   the pair -- a sane starting point AND a loop that needs no
+                   decisions to leave it -- that recovers the call. */
+                if (s->v90_t3_fse_good_valid)
+                {
+                    memcpy(s->v90_t3_fse, s->v90_t3_fse_good,
+                           sizeof(s->v90_t3_fse));
+                }
+                /*endif*/
+                span_log(s->logging, SPAN_LOG_WARNING,
+                         "Rx - V.90 upstream blind recovery started at %.3f "
+                         "from the constellation (r2 %.1f, episode %d)\n",
+                         s->v90_t3_sym_err_ema, s->v90_t3_cma_r2,
+                         s->v90_t3_cma_episodes);
+            }
+            /*endif*/
+        }
+        else
+        {
+            s->v90_t3_cma_run = 0;
+        }
+        /*endif*/
+        return;
+    }
+    /*endif*/
+    /* Stop as soon as the decisions mean something again -- from here the
+       DD-LMS is strictly better, and CMA left running would fight it. */
+    if (s->v90_t3_sym_err_ema < V34_V90_T3_TIMING_TRACK_ERR)
+    {
+        s->v90_t3_cma_active = false;
+        s->v90_t3_cma_run = 0;
+        /* The snapshot describes the filter that failed.  Let the receiver
+           earn a new one from the taps that are working now, rather than
+           keeping a "last good" the collapse has already disproved. */
+        s->v90_t3_fse_good_valid = false;
+        s->v90_t3_fse_good_age = 0;
+        s->v90_t3_fse_bad_run = 0;
+        span_log(s->logging, SPAN_LOG_WARNING,
+                 "Rx - V.90 upstream blind recovery done: %.3f from the "
+                 "constellation\n", s->v90_t3_sym_err_ema);
+        return;
+    }
+    /*endif*/
+    /* Bounded.  A blind loop that is not converging is stirring the filter,
+       so give up on the episode and put the snapshot back rather than run
+       for the rest of the call. */
+    if (++s->v90_t3_cma_run > V34_V90_T3_CMA_MAX_SYMBOLS)
+    {
+        s->v90_t3_cma_active = false;
+        s->v90_t3_cma_run = 0;
+        if (s->v90_t3_fse_good_valid)
+        {
+            memcpy(s->v90_t3_fse, s->v90_t3_fse_good,
+                   sizeof(s->v90_t3_fse));
+        }
+        /*endif*/
+        span_log(s->logging, SPAN_LOG_WARNING,
+                 "Rx - V.90 upstream blind recovery gave up at %.3f from the "
+                 "constellation\n", s->v90_t3_sym_err_ema);
+        return;
+    }
+    /*endif*/
+    p2 = y->re*y->re + y->im*y->im;
+    /* Godard p=2, normalised so that the step is a fixed FRACTION of the
+       taps whatever the level.  The error is made dimensionless against r2
+       and the gradient divided by the input energy: |y| goes as sqrt(r2),
+       |x| as sqrt(energy) and the taps themselves as sqrt(r2/energy), so
+       what is left is mu times the relative error.  Written with the bare
+       (|y|^2 - r2) instead, the step scales with the constellation and the
+       loop diverges to NaN at 28800 while looking stable at 9600 -- which is
+       exactly the class of rate-dependent fault this whole investigation is
+       about. */
+    e = (p2 - s->v90_t3_cma_r2)/(s->v90_t3_cma_r2 + 1e-6f);
+    /* A blind loop cannot be allowed to run away: without decisions there is
+       nothing to notice that it has. */
+    if (!isfinite(e)  ||  !isfinite(p2)  ||  fabsf(e) > 64.0f)
+        return;
+    /*endif*/
+    mu = V34_V90_T3_CMA_MU/energy;
+    for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+    {
+        complexf_t x = v90_t3_raw_get_frac(
+            s, s->v90_t3_next_symbol - pre + tap, frac);
+        float g_re;
+        float g_im;
+
+        if (s->v90_t3_fse_conjugate)
+            x.im = -x.im;
+        /*endif*/
+        g_re = e*(y->re*x.re + y->im*x.im);
+        g_im = e*(y->im*x.re - y->re*x.im);
+        s->v90_t3_fse[tap].re -= mu*g_re;
+        s->v90_t3_fse[tap].im -= mu*g_im;
+    }
+    /*endfor*/
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -11020,9 +11247,38 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                  "asked for%s\n",
                                  err, pow, s->v90_t3_decision_count, snr,
                                  carries, (s->bit_rate/2 + 1)*2400,
-                                 (err > 0.55f)
+                                 (pow > V34_V90_T3_DIVERGED_POWER)
+                                 ? " -- RECEIVER DIVERGED, this reading means"
+                                   " nothing"
+                                 : (err > 0.55f)
                                  ? " -- OUTPUT IS WHITE"  :  "");
                     }
+                    /* A diverged filter cannot be measured out of, because
+                       the metric it would be measured with has stopped
+                       working -- see V34_V90_T3_DIVERGED_POWER.  Put the last
+                       filter that worked back and let the ordinary machinery
+                       carry on from there. */
+                    if (s->v90_t3_decision_count > 0
+                        &&
+                        s->v90_t3_decision_pow/s->v90_t3_decision_count
+                            > V34_V90_T3_DIVERGED_POWER)
+                    {
+                        span_log(s->logging, SPAN_LOG_WARNING,
+                                 "Rx - V.90 upstream receiver diverged "
+                                 "(mean symbol power %.3g); resetting the "
+                                 "equalizer\n",
+                                 s->v90_t3_decision_pow
+                                     /s->v90_t3_decision_count);
+                        s->v90_t3_cma_active = false;
+                        s->v90_t3_cma_run = 0;
+                        if (s->v90_t3_fse_good_valid)
+                        {
+                            memcpy(s->v90_t3_fse, s->v90_t3_fse_good,
+                                   sizeof(s->v90_t3_fse));
+                        }
+                        /*endif*/
+                    }
+                    /*endif*/
                     s->v90_t3_decision_err = 0.0f;
                     s->v90_t3_decision_pow = 0.0f;
                     s->v90_t3_decision_count = 0;
@@ -12265,8 +12521,32 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                     s->v90_t3_fse[tap].re += mu*(e_re*x.re + e_im*x.im);
                     s->v90_t3_fse[tap].im += mu*(e_im*x.re - e_re*x.im);
                 }
+                /* While the eye is open, measure what a constant-modulus loop
+                   would need if it ever shuts.  Godard's r2 is a property of
+                   the constellation, and this receiver runs six of them.
+
+                   Only from symbols the receiver is demonstrably decoding,
+                   and only until there are enough of them.  Left to run on
+                   whatever passed the gate, r2 fed back on itself through the
+                   blind loop's own output and reached 2.6e10 on
+                   artifacts/goal-matrix-115515Z/rate28800-r2 -- a dispersion
+                   constant that then drove the taps anywhere at all.  The
+                   constellation does not change during a call, so there is
+                   nothing to keep tracking. */
+                if (s->v90_t3_cma_n < V34_V90_T3_CMA_MEASURE_SYMBOLS
+                    &&
+                    v90_t3_phase_evidence_ok(s))
+                {
+                    double p2 = y.re*y.re + y.im*y.im;
+
+                    s->v90_t3_cma_p2 += p2;
+                    s->v90_t3_cma_p4 += p2*p2;
+                    s->v90_t3_cma_n++;
+                }
+                /*endif*/
             }
             /*endif*/
+            v90_t3_blind_recover(s, &y, pre, frac, energy);
         }
         /* Keep a copy of the filter from when it was demonstrably working,
            and put it back if the symbols collapse.  The supervised fit onto
@@ -12363,8 +12643,14 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                constellation. */
             s->v90_t3_fse_bad_run = 0;
         }
-        else if (s->v90_t3_fse_good_valid)
+        else if (s->v90_t3_fse_good_valid  &&  !s->v90_t3_cma_active)
         {
+            /* Not while the blind loop has the taps.  The snapshot is from
+               before the collapse and is exactly the filter that stopped
+               working; putting it back every V34_V90_T3_FSE_BAD_RUN symbols
+               undoes the recovery in progress, which is measurable: with the
+               restore left free to run, CMA reopened the eye ten times on
+               rate28800-r1 and lost it again within a second each time. */
             if (++s->v90_t3_fse_bad_run >= V34_V90_T3_FSE_BAD_RUN)
             {
                 memcpy(s->v90_t3_fse, s->v90_t3_fse_good,
@@ -13007,6 +13293,14 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_fse_bad_run = 0;
     s->v90_t3_fse_restores = 0;
     s->v90_t3_sf_tries = 0;
+    /* Per call, not per process -- this server runs many calls in one. */
+    s->v90_t3_cma_p2 = 0.0;
+    s->v90_t3_cma_p4 = 0.0;
+    s->v90_t3_cma_n = 0;
+    s->v90_t3_cma_r2 = 0.0f;
+    s->v90_t3_cma_active = false;
+    s->v90_t3_cma_run = 0;
+    s->v90_t3_cma_episodes = 0;
     {
         const char *value = getenv("ME_V90_UPSTREAM_DD_MU");
 

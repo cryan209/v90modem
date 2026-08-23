@@ -152,6 +152,61 @@
     with white bits is precisely a frame-phase fault. */
 #define V34_V90_T3_SWEEP_ERR                0.15f
 
+/*! How far above its own settled error the eye may be before the frame-phase
+    machinery -- both the release rule and the sweep steps -- stops believing
+    what it reads.
+
+    Neither piece of evidence the phase logic uses survives a shut eye.  The
+    shell-index check owes nothing to what the peer is SENDING, which is why
+    it replaced the ones fraction, but it owes everything to the symbols being
+    right: 9.6.3.3's r0 is built from eight ring indices, and a ring index the
+    noise moved puts r0 out of range exactly as a wrong grouping does.  The
+    sweep score is worse off still -- on white symbols every candidate reads
+    the same, so stepping is a walk, and each step resets the Viterbi state.
+
+    Measured on artifacts/goal-matrix-115515Z/rate28800-r1: the receiver ran
+    19 s at 0.10-0.12 from the lattice with 0% bad shell frames, met a
+    transient that took it to 0.28, released the lock on the 4% bad frames
+    that transient produced, and then swept -- stepping the phase every
+    0.1 s on symbols already at 0.6 -- and never recovered in the 95 s that
+    remained.  That one collapse is the whole of the "28800 is anomalously
+    bad" reading in docs/v90_upstream_rate_matrix.tsv: it is not the
+    constellation, it is the highest rate whose eye is good enough to lock
+    and tight enough for a transient to look like a phase fault.
+
+    A phase that is genuinely wrong leaves the symbols CLEAN -- 0.10 with 50%
+    ones is the case this machinery exists for -- so gating it on eye health
+    costs it nothing it could ever have fixed. */
+#define V34_V90_T3_PHASE_TRUST_MULT         1.30f
+
+/*! Blind recovery.  Symbols the eye must stay shut for before the
+    constant-modulus loop takes the taps over (half a second at 3200 baud, far
+    longer than any burst and short against the minute-plus a collapse used to
+    cost), the step it adapts at, and the most episodes allowed in a call so a
+    receiver that cannot be recovered does not spend the call being stirred. */
+#define V34_V90_T3_CMA_START_RUN            1600
+#define V34_V90_T3_CMA_MU                   0.3f
+#define V34_V90_T3_CMA_MAX_EPISODES         64
+/*! Mean symbol power above which the receiver is diverged rather than merely
+    wrong, and every reading taken from its output is meaningless.
+
+    The lattice distance is the receiver's own health metric and it is NOT
+    scale-invariant at the top end: the decision is 2*floorf(y/2) + 1, and a
+    float32 above 2^24 has no fractional part left, so EVERY symbol lands
+    exactly on the grid and the distance reads ~0.  Measured while developing
+    the blind-recovery loop below: a run whose taps had run away to a mean
+    symbol power of 1.5e20 reported "decision error 0.0078, receive SNR
+    222.9 dB" for 75 seconds and looked, to every summary built on that
+    figure, like the best call ever recorded.  Any constellation V.34 defines
+    sits under 2000, so five thousand is far above a working receiver and far
+    below the range where the metric silently inverts. */
+#define V34_V90_T3_DIVERGED_POWER           5000.0f
+/*! Settled symbols used to measure the dispersion constant, after which it
+    is fixed for the call. */
+#define V34_V90_T3_CMA_MEASURE_SYMBOLS      32000
+/*! Symbols one blind episode may run for before it is abandoned. */
+#define V34_V90_T3_CMA_MAX_SYMBOLS          1600
+
 /*! How many exhaustive sweeps a call may run off the symbol-quality gate.
     A full sweep is 112 candidates at a short window each -- worth spending to
     escape a phase that is simply wrong, but not worth repeating for ever, and
@@ -1134,6 +1189,25 @@ typedef struct
     /*! Symbols left in the post-slip window during which the equalizer is
         allowed to adapt at an error that would otherwise gate it off. */
     int v90_t3_recover;
+    /*! Blind (constant-modulus) recovery.  The decision-directed loops are
+        all gated on the eye being open -- which is right, since adapting onto
+        wrong decisions is how a filter gets walked off -- but it leaves the
+        receiver with no way back once the eye HAS shut: measured on
+        artifacts/goal-matrix-115515Z, a 26400 call collapsed at 10.6 s and a
+        28800 call at 19.5 s, and neither recovered in the 90-130 s that
+        followed, with the wire provably still carrying the peer's signal.
+        CMA needs no decisions, so it is the one thing that can reopen an eye
+        that is shut.  r2 is Godard's dispersion constant, measured from this
+        call's own settled symbols rather than assumed: it is
+        E[|y|^4]/E[|y|^2] of the constellation actually in use, and that
+        differs by a factor of five across the rates this receiver runs. */
+    double v90_t3_cma_p2;
+    double v90_t3_cma_p4;
+    int64_t v90_t3_cma_n;
+    float v90_t3_cma_r2;
+    bool v90_t3_cma_active;
+    int v90_t3_cma_run;
+    int v90_t3_cma_episodes;
     /*! Acquisition windows tried, and the ring position the next one waits
         for.  Without the wait the search repeats on identical samples. */
     /*! Exhaustive frame-phase sweep: the score where it started, the best

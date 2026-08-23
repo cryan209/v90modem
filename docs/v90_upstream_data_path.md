@@ -1504,3 +1504,91 @@ bits/symbol, the only integer in the sweep.
 Phase 2 cap already sets -- not because its eye is best (19200's is three times
 tighter) but because it is the highest rate whose eye still has margin, and the
 payload is set by uptime rather than by the rate.
+
+## The 28800 anomaly is one collapse, and the receiver has no way back (2026-08-24)
+
+The matrix row above reads 0.301 and 0.292 at 28800 against a power law that
+fits every other rate, and reads it on both repeats.  It is not the
+constellation, and it is not the line.  **`v90_upstream_replay` reproduces the
+whole matrix off the recordings** -- 24000 100% of the call clean with a
+115.4 s hold, 28800 17%, 31200 7%, the same numbers the live calls gave -- so
+the question can be asked deterministically, on the desk, in fifty seconds a
+run.
+
+Replayed, `artifacts/goal-matrix-115515Z/rate28800-r1` runs **19.7 s at 0.10 to
+0.12 from the lattice with 0% bad shell frames -- exactly the figure its own
+B1 out-of-sample check predicted** (0.107 at acquisition) -- meets a
+disturbance at 19.5 s, and spends the remaining **95 s at 0.67**, the value for
+symbols bearing no relation to the lattice.  The mean of those two stretches is
+the 0.30 in the table.  Every rate acquires equally well and the ratio proves
+it: distance over symbol power at the B1 check is 2.8e-4, 2.5e-4, 2.4e-4 and
+3.1e-4 for 24000, 26400, 28800 and 31200.  One channel, one SNR, four
+constellations.
+
+**Why 28800 and not 31200: it is the highest rate whose eye is good enough to
+lock and tight enough for a transient to look like a fault.**  The lock is
+released on the shell-index check -- 9.6.3.3's r0 must fit in k bits -- which
+owes nothing to what the peer is SENDING and was rightly chosen over the ones
+fraction for that reason, but it owes everything to the symbols being right: a
+ring index the noise moved puts r0 out of range exactly as a wrong grouping
+does.  At 19.7 s the transient produced 4% bad frames, over the 3% threshold,
+and the lock went.  31200 never locks in the first place, so it has nothing to
+release; 24000 has the margin never to cross it.
+
+**Then nothing can recover, and that is the deeper defect.**  Every adaptive
+element in this receiver is gated on the symbols being near the constellation
+-- the DD-LMS (`V34_V90_T3_TIMING_TRACK_ERR`), the timing loop, the
+decision-directed carrier loop, and the slip search
+(`V34_V90_T3_SLIP_ACCEPT_ERR`, 0.45, against 0.67) -- and each gate is right on
+its own terms.  Together they are a trap: once the eye shuts there is no
+decision to adapt on, so nothing adapts, so the eye stays shut.  The one escape
+in the tree, restoring the last good equalizer, put back the filter that had
+just stopped working, 255 times in that call, and never reopened anything.
+Offline the collapsed symbols are not recoverable by any rotation or gain
+either -- swept +/-45 degrees and +/-15%, 0.65 stays 0.62 -- so it is the
+filter, not the carrier.
+
+Two fixes are in, and one thing that looked like a third is not:
+
+* **The frame-phase machinery now requires a healthy eye before it believes
+  what it reads** (`v90_t3_phase_evidence_ok()`, `V34_V90_T3_PHASE_TRUST_MULT`,
+  `ME_V90_PHASE_EYE_GATE=0` restores the old behaviour).  Neither the release
+  rule nor the sweep score can separate a wrong grouping from symbols the eye
+  no longer resolves, and the sweep compounds it: on rate28800-r1 it ran **1880
+  sweeps**, stepping the phase every 0.1 s on symbols already at 0.67, each
+  step resetting the Viterbi state.  A phase that is genuinely wrong leaves the
+  symbols CLEAN -- 0.10 with 50% ones is the case that machinery exists for --
+  so gating it on eye health costs it nothing it could ever have fixed.  24000
+  still replays at 100% clean with its 115.4 s hold.
+
+* **A diverged receiver can no longer report a perfect one**
+  (`V34_V90_T3_DIVERGED_POWER`).  The lattice distance is not scale-invariant
+  at the top end: the decision is `2*floorf(y/2) + 1`, and a float32 above 2^24
+  has no fractional part left, so every symbol lands exactly on the grid.  A
+  run whose taps had run away to a mean symbol power of **1.5e20** reported
+  "decision error 0.0078, receive SNR 222.9 dB" for 75 seconds and looked, to
+  every summary built on that number, like the best call ever recorded.  It is
+  now named in the log and the equalizer is reset from the snapshot when it
+  happens.
+
+* **Blind (constant-modulus) recovery is built and is DEFAULT OFF**
+  (`ME_V90_UPSTREAM_CMA=1` enables).  CMA is the one loop that needs no
+  decisions, so in principle it is what reopens an eye that is shut, and it
+  demonstrably can: episodes reached 0.11 and 0.12 from 0.68.  But those
+  episodes were running against a dispersion constant that had fed back on its
+  own output and reached 2.6e10, and with r2 correctly frozen from the settled
+  symbols the loop no longer recovers these calls at all -- the clean fraction
+  is unchanged on both 28800 recordings.  The 17% -> 82% that briefly appeared
+  was the float32 artefact above, not a result.  What is kept is bounded and
+  safe (r2 measured over 32000 settled symbols then fixed, the gradient
+  normalised so the step is a fixed fraction of the taps whatever the
+  constellation -- written with the bare `|y|^2 - r2` it diverges to NaN at
+  28800 while looking stable at 9600 -- episodes capped at 1600 symbols,
+  starting from the last good snapshot and putting it back on giving up).
+
+**Open, and it is now the whole of the upstream's uptime problem: recovering a
+receiver whose eye has shut.**  CMA from a snapshot is not enough on this
+peer; what the collapse most looks like is a timing event that the slip search
+cannot see because the slip search is itself gated off at 0.45.  Re-acquisition
+-- which needs a B1 that has long gone -- or an ungated slip search run on the
+band-edge timing recovery rather than on decisions, are the two candidates.
