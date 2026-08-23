@@ -1449,3 +1449,58 @@ eye, the whole call** -- because that call met no timing slip at all.  The 0 is
 a call whose eye never settled (baseline 0.338 against the usual 0.045).  So
 the Phase 2 rate cap remains the fix; §9.6 is insurance for a peer that
 implements the other half of the clause.
+
+## The rate/time/eye matrix (2026-08-24)
+
+`tools/soak/v90_rate_matrix.sh` sweeps the upstream rate and
+`tools/eye_summary.py` reports the eye at each one, two live calls per rate.
+The table is `docs/v90_upstream_rate_matrix.tsv`.  Every figure is the
+receiver's own distance from the V.34 lattice, where 0.667 is the value for
+symbols bearing no relation to it -- a ceiling, not an error bar.
+
+| rate | settled | CINR dB | clean% | hold s | lines |
+|---|---|---|---|---|---|
+| 19200 | 0.014 / 0.012 | 19.7 / 27.8 | 14 / 74 | 18.9 / 60.5 | 0 / 20433 |
+| 21600 | - / 0.019 | - / 21.7 | - / 2 | - / 8.8 | 0 / 0 |
+| 24000 | 0.045 / 0.039 | 35.3 / 24.6 | **100** / 7 | **115.4** / 21.4 | **29197** / 5621 |
+| 26400 | 0.084 / 0.090 | 26.2 / 26.0 | 4 / 2 | 10.6 / 8.4 | 1206 / 2357 |
+| 28800 | 0.301 / 0.292 | 27.9 / 28.8 | 0 / 0 | 0.5 / 0.7 | 36 / 19 |
+| 31200 | 0.168 / 0.168 | 30.4 / 30.3 | 2 / 1 | 7.3 / 4.0 | 1295 / 649 |
+
+**Three columns, three different stories, and only the first is about the
+rate.**
+
+*Eye quality follows the constellation-power law.*  The lattice spacing is 2 at
+every rate, so `settled` is directly comparable across rows, and it should
+scale as 2^(bits/symbol) at a fixed channel SNR.  Scaling from 19200's 0.013:
+predicted 0.022 / 0.037 / 0.062 / 0.104 / 0.175 for 21600 through 31200,
+measured 0.019 / 0.042 / 0.087 / 0.297 / 0.168.  Four of the five land on it.
+So the channel SNR really is constant across the sweep and each 2400 bit/s
+step spends margin exactly as theory says.
+
+*Hold time does not follow the rate at all.*  19200 gave 18.9 s and then
+60.5 s; 24000 gave 115.4 s and then 21.4 s.  The spread within one rate is
+larger than the difference between rates, because hold time is set by when the
+peer's clock slips, not by the constellation.  **A single call at a given rate
+therefore says almost nothing**, which is why this harness does repeats.
+
+*Payload follows hold time, not rate.*  The best row in the matrix is 24000 at
+29197 lines -- a rate whose eye is three times looser than 19200's -- because
+that call met no slip.  Across the plain-V.34 rate calls the same session the
+proportionality is almost exact: 45.1 s -> 929 lines, 39.6 -> 751, 20.5 -> 390,
+13.7 -> 284, 4.1 -> 91, 2.7 -> 58.
+
+**Open, and reproducible: 28800 is anomalously bad.**  It reads 0.301 and 0.292
+on its two calls against a predicted 0.104, three times worse than the law that
+fits every other row -- and worse than 31200 above it, which matches its own
+prediction (0.168 against 0.175) almost exactly.  Both repeats agree at both
+rates, so this is not call variance.  Something about the 28800 configuration
+at 3200 baud is wrong in a way 31200 is not; the downstream mapper is identical
+across all six rates (D=23, K=18), so it is in the upstream V.34 constellation
+or its frame parameters.  Worth noting 28800 at 3200 baud is exactly 9
+bits/symbol, the only integer in the sweep.
+
+**Practical consequence: 24000 is the rate to run here**, which is what the
+Phase 2 cap already sets -- not because its eye is best (19200's is three times
+tighter) but because it is the highest rate whose eye still has margin, and the
+payload is set by uptime rather than by the rate.
