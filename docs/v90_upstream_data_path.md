@@ -1362,3 +1362,45 @@ fixed environment variable, not something chosen from the measured SNR: closing
 that loop is the same open item as `docs/v34_data_mode_rates.md`, and in the
 end it needs V.34 12.2 renegotiation, because the only honest measurement of
 this direction appears after the rate has been committed.
+
+## What kills the 24000 upstream: the peer's first timing slip (2026-08-23)
+
+With the rate right, the eye stays open for **48 seconds** and then shuts in a
+single window -- 0.059 to 0.670, with `slips 0` reported -- and only flickers
+back afterwards.  It is not a decay: read the CINR trace rather than the
+average, or the constellation, and the shape is a cliff.
+
+**The cliff is the peer's clock.**  `tools/measure_timing_slips.py` over
+`artifacts/goal-v90-p2cap-r2-103404Z` finds the first one-sample slip of the
+whole call at tap t=121.25 s, against a B1 handover at 73.0 s -- data
+**t=48.25 s** -- and the eye shuts at t=49.0 s.  There are seven slips in the
+following eleven seconds, in the bursts this peer is known for.  Receiver-
+independent, measured off the wire, and unambiguous.
+
+**The slip search cannot recover it, and that is now bounded rather than
+suspected.**  `v90_t3_slip_resync()` fires 4470 times over the rest of the call
+and adopts nothing.  Two hypotheses for why were tested and both are wrong:
+
+- *The equalizer had walked off, so every candidate was scored through a
+  filter matched to nothing.*  Scoring the search through the known-good
+  snapshot instead changes the profiles by 0.01 and the outcome not at all
+  (240 of 1402 clean windows either way).  Not committed.
+- *A slip is a passband delay and carries a phase, so the rotation term was
+  wrong.*  `ME_V90_SLIP_ROT_SWEEP=1` sweeps 16 static rotations at the best
+  offset: the best is 0.60 wherever you look, the values repeat with the
+  lattice's own 90 degree period, and the angle
+  `v90_t3_offset_rotation()` computes is already the minimum.  The term is
+  right.
+
+So no (offset, rotation) pair within half a symbol either side and a full turn
+recovers the constellation, just as at 31200 no gain, rotation or residual
+frequency did.  **Recovery from a slip needs a re-acquisition, not a nudge** --
+something with the reach of the B1 acquisition, run again mid-call -- and that
+is the open work.  A search over the state the receiver is already in has now
+been shown twice not to be able to reach it.
+
+Note for whoever picks this up: `slips 0` in the DATA-bits line is the Gardner
+loop's own correction count, not a statement about the wire.  The loop is gated
+on `sym_err_fast < V34_V90_T3_TIMING_TRACK_ERR`, so a slip closes the eye, the
+gate shuts, and the loop stops adapting exactly when it is needed -- which is
+why the count stays at zero through seven real slips.

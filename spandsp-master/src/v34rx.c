@@ -11987,6 +11987,55 @@ static void v90_t3_slip_resync(v34_rx_state_t *s)
     /*endfor*/
     span_log(s->logging, SPAN_LOG_FLOW,
              "Rx - V.90 upstream slip search: base %.3f [%s]\n", base, detail);
+    /* ME_V90_SLIP_ROT_SWEEP: at the best offset, is there ANY static rotation
+     * that opens the eye?  A slip is a passband delay and so carries a phase
+     * -- 82 degrees per 8 kHz sample at 3200 baud low carrier -- which
+     * v90_t3_offset_rotation() is supposed to remove.  If some other angle
+     * scores far better than the one it computes, that term is wrong; if no
+     * angle does, the collapse is not a re-alignable delay at all and the
+     * search cannot be made to fix it.  Diagnostic only. */
+    if (getenv("ME_V90_SLIP_ROT_SWEEP"))
+    {
+        static int sweep_n;
+
+        if (best_offset != 0.0f  &&  (sweep_n++ % 64) == 0)
+        {
+            char rd[512];
+            int rl = 0;
+            float rbest = 1e9f;
+            float rbest_a = 0.0f;
+            float save = s->v90_t3_carrier.phase;
+
+            for (int a = 0;  a < 16;  a++)
+            {
+                float ang = a*(2.0f*3.14159265f/16.0f);
+                float q;
+
+                s->v90_t3_carrier.phase = v34_carrier_wrap(save + ang);
+                q = v90_t3_score_offset(s, best_offset);
+                if (rl < (int) sizeof(rd) - 16)
+                {
+                    rl += snprintf(rd + rl, sizeof(rd) - rl, "%s%d:%.2f",
+                                   rl ? " " : "", (int) (ang*180.0f/3.14159265f), q);
+                }
+                /*endif*/
+                if (q < rbest)
+                {
+                    rbest = q;
+                    rbest_a = ang*180.0f/3.14159265f;
+                }
+                /*endif*/
+            }
+            /*endfor*/
+            s->v90_t3_carrier.phase = save;
+            span_log(s->logging, SPAN_LOG_WARNING,
+                     "Rx - V.90 upstream slip rotation sweep at offset %+.2f: "
+                     "as-computed %.3f, best %.3f at %+.0f deg [%s]\n",
+                     best_offset, best, rbest, rbest_a, rd);
+        }
+        /*endif*/
+    }
+    /*endif*/
     /* Only move for an unambiguous win.  Adopting a marginally better
        position on noise would walk the receiver off a symbol at a time. */
     /* Adopt a clear win rather than only a perfect one.  A slip does not
