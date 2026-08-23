@@ -163,7 +163,10 @@ def summarise(d):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    # Skip anything that is not a call directory: the matrix harness leaves a
+    # <dir>.out beside each one, and a shell glob picks both up.
+    args = [a for a in sys.argv[1:]
+            if not a.startswith("-") and os.path.isdir(a)]
     tsv = "--tsv" in sys.argv
     if not args:
         sys.exit(__doc__)
