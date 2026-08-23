@@ -1592,3 +1592,71 @@ peer; what the collapse most looks like is a timing event that the slip search
 cannot see because the slip search is itself gated off at 0.45.  Re-acquisition
 -- which needs a B1 that has long gone -- or an ungated slip search run on the
 band-edge timing recovery rather than on decisions, are the two candidates.
+
+## The fourth-power carrier estimator was steering the frequency with noise (2026-08-24)
+
+The section above left "recovering a receiver whose eye has shut" open and
+named two candidates.  Neither was it.  **The slip search is not the answer**:
+run verbose over the 28800 collapse it fires 6630 times and its profile is
+**flat at 0.62-0.73 across every offset in the half symbol either side, while
+the position it is already on scores 0.275** -- so the collapse is not a
+re-alignable delay, and relaxing V34_V90_T3_SLIP_ACCEPT_ERR would only buy
+noise.  **Nor is it the line**: 100 ms RMS over the collapse reads 303-318
+throughout, dead steady.  **And it is NOT the DD-LMS ratchet**, which is the
+fix the plain V.34 data mode needed for exactly this shape of failure and is
+therefore the first thing to reach for.  Gating the T/3 DD-LMS on the
+receiver's own settled error (0.096 on that call) rather than the absolute
+0.35 makes it *much* worse: multiples of 3.0, 2.0 and 1.5 all collapse the
+call after 2.0 s where the absolute gate holds it for 19.7 s.  **The
+adaptation between two and four times the settled error is not the receiver
+walking off -- it is what keeps it on.**  `V34_V90_T3_DD_GATE_MULT` is left in
+at 0, with the measurement, so the next person does not spend the round.
+
+What it actually is: **`v34_carrier_update()` switches from the
+decision-directed loop to a fourth-power estimator when the symbols stop
+meaning anything, and that estimator INTEGRATES ITS RESULT INTO THE
+FREQUENCY.**  A fourth-power line is a real thing on the 4-point training
+constellations this loop was written for; on the 768-point shaped
+constellation V.34 uses at 28800 it is almost nothing, so the term adds noise
+to the frequency -- and it runs exactly when the eye is shut, which is the
+moment the receiver can least afford its frequency steered by a guess.  In the
+log it is unmissable once you know: at the collapse the decision-directed
+count freezes at 62538 and the frequency starts wandering, +0.00057, +0.00109,
++0.00048 rad/symbol.
+
+`nda_freq_hold` holds the frequency while unlocked, and is set for the V.90
+upstream loop only (`ME_V90_UPSTREAM_NDA=1` restores the old behaviour; the
+plain V.34 path is untouched).  With the frequency held, the constant-modulus
+recovery from the section above stops being worthless and becomes the other
+half of the fix -- it was reopening the eye into a frequency the estimator had
+meanwhile walked away -- so it is now **default on** at a step of 0.05
+(`ME_V90_UPSTREAM_CMA=0` disables).
+
+Measured over the rate-matrix recordings, one binary, both knob directions,
+clean time and longest unbroken hold:
+
+| row | before | after |
+|---|---|---|
+| 19200-r1 | 18% / 18.7 s | **69% / 36.5 s** |
+| 24000-r1 | 100% / 115.4 s | 100% / 115.4 s |
+| 26400-r1 | 9% / 10.6 s | 9% / 10.6 s |
+| 28800-r1 | 17% / 19.7 s | **55% / 37.1 s** |
+| 28800-r2 | 35% / 22.7 s | 35% / 22.7 s |
+| 31200-r1 | 7% / 7.3 s | 7% / 7.3 s |
+
+Nothing regresses, 24000 keeps its whole-call hold, and the two rows that move
+are the ones that were collapsing.  Attribution, on 19200: the frequency hold
+alone is 18% -> 48%, and the blind recovery on top of it 48% -> 69%; on
+28800-r1 the hold alone is 17% -> 23% and the pair 23% -> 55%.  Neither is
+worth much without the other.
+
+**Read the clean TIME, never the window count.**  A white stretch emits short
+windows and a clean one long windows, so a window-weighted percentage inverts
+the answer -- it read 78% on a call that was 21% clean.
+
+**Open.** 26400, 28800-r2 and 31200 still collapse and stay collapsed; the
+blind loop fires on all of them and does not reopen the eye, and on 28800-r1
+it diverges 22 times (caught by V34_V90_T3_DIVERGED_POWER, which restores the
+snapshot, and that row is still the largest gain in the table).  Two of the
+three collapse well before any lock could be blamed, so there is at least one
+more mechanism here.

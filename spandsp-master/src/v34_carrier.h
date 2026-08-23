@@ -78,6 +78,9 @@ typedef struct
     /*! Counters, for logs: how often each mode has acted. */
     int dd_updates;
     int nda_updates;
+    /*! Zero to hold the frequency while unlocked, letting the fourth-power
+        estimator steer nothing.  See v34_carrier_update(). */
+    int nda_freq_hold;
 } v34_carrier_state_t;
 
 static __inline__ void v34_carrier_init(v34_carrier_state_t *c)
@@ -91,6 +94,7 @@ static __inline__ void v34_carrier_init(v34_carrier_state_t *c)
     c->nda_prev_valid = 0;
     c->dd_updates = 0;
     c->nda_updates = 0;
+    c->nda_freq_hold = 0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -177,7 +181,16 @@ static __inline__ void v34_carrier_update(v34_carrier_state_t *c,
                 float d = v34_carrier_wrap(angle - c->nda_prev_angle);
                 float est = d/(4.0f*V34_CARRIER_NDA_BLOCK);
 
-                c->freq += V34_CARRIER_NDA_TRUST*est;
+                /* Held, where the caller has asked for it.  A fourth-power
+                   line is a real thing on a 4-point training constellation
+                   and a much weaker one on a 768-point shaped data
+                   constellation, so on a dense QAM this term integrates
+                   mostly noise into the frequency -- and it runs exactly
+                   when the eye is shut, which is the moment the receiver can
+                   least afford its frequency to be steered by a guess. */
+                if (!c->nda_freq_hold)
+                    c->freq += V34_CARRIER_NDA_TRUST*est;
+                /*endif*/
                 if (c->freq > V34_CARRIER_FREQ_LIMIT)
                     c->freq = V34_CARRIER_FREQ_LIMIT;
                 else if (c->freq < -V34_CARRIER_FREQ_LIMIT)

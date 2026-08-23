@@ -179,13 +179,28 @@
     costs it nothing it could ever have fixed. */
 #define V34_V90_T3_PHASE_TRUST_MULT         1.30f
 
+/*! How far above its own settled error the decision-directed LMS may still
+    adapt, as a multiple of that error; 0 disables the test and leaves only
+    the absolute one, which is the default because a baseline-relative gate
+    was MEASURED to be much worse here.
+
+    The plain V.34 data mode needed exactly this gate -- there the DD-LMS is a
+    ratchet that turns one disturbance into a permanent collapse -- so it is
+    the obvious thing to reach for, and on this path it is wrong.  Swept on
+    artifacts/goal-matrix-115515Z/rate28800-r1, whose settled error is 0.096:
+    the absolute gate alone holds the call clean for 19.7 s, while multiples
+    of 3.0, 2.0 and 1.5 all collapse it after 2.0 s.  The adaptation between
+    two and four times the settled error is not the receiver walking off -- it
+    is what keeps it on. */
+#define V34_V90_T3_DD_GATE_MULT             0.00f
+
 /*! Blind recovery.  Symbols the eye must stay shut for before the
     constant-modulus loop takes the taps over (half a second at 3200 baud, far
     longer than any burst and short against the minute-plus a collapse used to
     cost), the step it adapts at, and the most episodes allowed in a call so a
     receiver that cannot be recovered does not spend the call being stirred. */
 #define V34_V90_T3_CMA_START_RUN            1600
-#define V34_V90_T3_CMA_MU                   0.3f
+#define V34_V90_T3_CMA_MU                   0.05f
 #define V34_V90_T3_CMA_MAX_EPISODES         64
 /*! Mean symbol power above which the receiver is diverged rather than merely
     wrong, and every reading taken from its output is meaningless.

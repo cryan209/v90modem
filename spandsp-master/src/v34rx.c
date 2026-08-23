@@ -1049,6 +1049,34 @@ static float v90_t3_fse_lost_err(v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Whether the decisions the DD-LMS is about to adapt on are close enough to
+   this receiver's own settled error to be worth adapting on.  See the call
+   site. */
+static bool v90_t3_dd_gate_ok(v34_rx_state_t *s)
+{
+    static float mult = -1.0f;
+
+    if (mult < 0.0f)
+    {
+        const char *value = getenv("ME_V90_UPSTREAM_DD_GATE");
+
+        mult = value ? (float) atof(value) : V34_V90_T3_DD_GATE_MULT;
+        if (mult < 0.0f)
+            mult = 0.0f;
+        /*endif*/
+    }
+    /*endif*/
+    if (mult <= 0.0f
+        ||
+        s->v90_t3_err_base_n < V34_V90_T3_ERR_BASE_SYMBOLS)
+    {
+        return true;
+    }
+    /*endif*/
+    return s->v90_t3_sym_err_fast <= mult*s->v90_t3_err_base;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* Whether what the frame-phase logic is about to read means anything.
 
    Both its inputs -- the shell-index check that releases a standing lock and
@@ -1099,6 +1127,25 @@ static bool v90_t3_phase_evidence_ok(v34_rx_state_t *s)
    the decision-directed one is gated off -- and it is stopped the moment the
    eye reopens, so the steady state is unchanged: the DD-LMS owns the taps
    whenever there are decisions worth owning them with. */
+/* ME_V90_UPSTREAM_CMA_MU sweeps the blind loop's step. */
+static float v90_t3_cma_mu(void)
+{
+    static float mu = -1.0f;
+
+    if (mu < 0.0f)
+    {
+        const char *value = getenv("ME_V90_UPSTREAM_CMA_MU");
+
+        mu = value ? (float) atof(value) : V34_V90_T3_CMA_MU;
+        if (mu <= 0.0f)
+            mu = V34_V90_T3_CMA_MU;
+        /*endif*/
+    }
+    /*endif*/
+    return mu;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v90_t3_blind_recover(v34_rx_state_t *s,
                                  const complexf_t *y,
                                  int pre,
@@ -1114,18 +1161,17 @@ static void v90_t3_blind_recover(v34_rx_state_t *s,
     {
         const char *value = getenv("ME_V90_UPSTREAM_CMA");
 
-        /* Default OFF.  The loop is built, bounded and safe, and it does not
-           yet recover these calls: on both 28800 recordings it reopens the
-           eye far enough to hand back only occasionally, and the clean
-           fraction is unchanged.  The one result that looked like a win --
-           17% of the call clean becoming 82% -- was the diverged-receiver
-           artefact V34_V90_T3_DIVERGED_POWER now names, and is not real.
-           Kept, and kept honest, because the DIAGNOSIS it produced stands:
-           the eye is recoverable in principle (episodes did reach 0.11 from
-           0.68 before the dispersion constant was frozen), and every other
-           adaptive element in this receiver is gated on decisions it cannot
-           have while the eye is shut. */
-        enabled = (value  &&  atoi(value) != 0) ? 1 : 0;
+        /* Default on, but only once the fourth-power carrier term is held:
+           on its own it is worth nothing, because it reopens the eye into a
+           frequency that estimator has meanwhile walked away.  With the hold
+           in, 28800 goes from 23% of the call clean to 55% and its longest
+           hold from 19.7 s to 37.1 s, and 19200 from 48% to 69%.
+
+           Beware the first result this produced -- 17% becoming 82% -- which
+           was the diverged-receiver artefact V34_V90_T3_DIVERGED_POWER now
+           names, measured at a mean symbol power of 1.5e20.
+           ME_V90_UPSTREAM_CMA=0 disables. */
+        enabled = (value  &&  atoi(value) == 0) ? 0 : 1;
     }
     /*endif*/
     if (!enabled)
@@ -1248,7 +1294,7 @@ static void v90_t3_blind_recover(v34_rx_state_t *s,
     if (!isfinite(e)  ||  !isfinite(p2)  ||  fabsf(e) > 64.0f)
         return;
     /*endif*/
-    mu = V34_V90_T3_CMA_MU/energy;
+    mu = v90_t3_cma_mu()/energy;
     for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
     {
         complexf_t x = v90_t3_raw_get_frac(
@@ -12500,7 +12546,20 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                slip search needs intact to find the new sampling instant, and
                the slow average leaves it adapting onto garbage for the
                hundred symbols it takes to turn round. */
+            /* And gate on the receiver's OWN operating point, not only on an
+               absolute.  0.35 is three times the error a 28800 call settles
+               at and eight times a 24000 one, so at the top of the rate
+               ladder it lets the loop go on adapting through decisions that
+               are already substantially wrong -- which is how a filter
+               ratchets away from a working solution rather than falling off
+               it.  The plain V.34 data mode reached the same conclusion from
+               the other end (docs/v34_data_mode_rates.md: a smaller step is
+               the wrong lever; adapt only while the error stays near the
+               baseline that settled just after B1).  ME_V90_UPSTREAM_DD_GATE
+               sweeps the multiple; 0 restores the absolute-only gate. */
             if (e_re*e_re + e_im*e_im < 8.0f
+                &&
+                v90_t3_dd_gate_ok(s)
                 &&
                 (s->v90_t3_sym_err_fast < V34_V90_T3_TIMING_TRACK_ERR
                  ||
@@ -13317,6 +13376,24 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
 
         s->v90_t3_carrier_enabled = (value == NULL || atoi(value) != 0);
         v34_carrier_init(&s->v90_t3_carrier);
+        {
+            const char *value = getenv("ME_V90_UPSTREAM_NDA");
+
+            /* Held by default.  A fourth-power line is a real thing on a
+               4-point training constellation and a much weaker one on the
+               768-point shaped constellation this receiver runs at 28800, so
+               on a dense QAM the term integrates mostly noise into the
+               frequency -- and it runs exactly when the eye is shut, which is
+               the moment the receiver can least afford its frequency steered
+               by a guess.  Measured on the rate matrix replays: holding it
+               takes 19200 from 18% of the call clean to 48% and its longest
+               hold from 18.7 s to 36.2 s, and 28800 from 17% to 23%, with
+               nothing anywhere getting worse.  It is also what makes the
+               blind recovery below worth anything at all.
+               ME_V90_UPSTREAM_NDA=1 restores it. */
+            s->v90_t3_carrier.nda_freq_hold =
+                (value  &&  atoi(value) != 0) ? 0 : 1;
+        }
     }
     {
         const char *value = getenv("ME_V90_UPSTREAM_TIMING");
