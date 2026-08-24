@@ -2196,3 +2196,60 @@ is the cost of the operation removed, and that the operation had no loop to
 close. Note also that the −64 ppm live/replay divergence is consistent with
 this (a spliced stream is not the recorded stream) but is **not** thereby
 proven to be its only cause.
+
+### Validated by undoing the splices on the real calls (2026-08-25)
+
+The injection experiment above measures what a slip costs a clean call. The
+converse is the one that answers "does this lengthen connects", and the
+recordings can answer it: because the tap is written inside `me_rx_g711()`,
+*after* the splice, every recorded call carries its own splices, and the
+server log records each one's sign and brackets it in time between two
+DATA-bits lines. `tools/desplice_call.py` undoes them — a −1 (a dropped
+codeword) by inserting one, a +1 (a duplicated one) by deleting one. Position
+inside the bracket does not matter, because a splice is a net sample offset:
+the compensating edit restores alignment for everything after it wherever it
+lands, corrupting only the ~1600 samples in between. That corruption is damage
+the real fix does **not** cause, so these figures understate it.
+
+`tools/desplice_matrix.sh` replays every call twice. Scored on clean **time**
+and longest unbroken hold, never window counts — a white stretch emits short
+windows and a clean one long windows, so a window-weighted percentage flatters
+a call that spent its seconds white:
+
+| call | splices | as-taped clean / hold | de-spliced clean / hold |
+|---|---|---|---|
+| rate19200-r1 | 3 | 100.7s / 59.8s | 114.8s / **114.8s** |
+| rate19200-r2 | 11 | 114.8s / 114.8s | 114.5s / 89.7s |
+| rate21600-r2 | 24 | 35.5s / 19.0s | **132.0s** / 61.7s |
+| **rate24000-r1** | **0** | 115.4s / 115.4s | **115.4s / 115.4s** |
+| rate24000-r2 | 6 | 81.5s / 44.9s | 93.8s / 43.0s |
+| rate26400-r1 | 11 | 98.0s / 65.5s | 109.6s / 66.2s |
+| rate26400-r2 | 16 | 8.4s / 8.4s | **96.6s** / 69.9s |
+| rate28800-r1 | 5 | 45.3s / 25.5s | 108.7s / 44.4s |
+| rate28800-r2 | 10 | 22.7s / 22.7s | 57.9s / 34.7s |
+| rate31200-r1 | 13 | 8.3s / 8.3s | **100.7s** / 52.7s |
+| rate31200-r2 | 9 | 24.1s / 21.6s | 102.9s / 54.6s |
+| **total** | | **654.7s / 505.9s** | **1146.9s / 747.1s** |
+
+**+75% clean time and +48% longest hold.** Ten of the eleven improve;
+`rate19200-r2` is the one regression (hold 114.8s -> 89.7s), and it is the call
+with the widest brackets, so its compensating edits are the least well placed.
+
+**`rate24000-r1` is the control and it is exact.** It is the only call with no
+splices, and de-splicing it returns **+0.0s clean, +0.0s hold** — byte for
+byte the same result. A method that changed a call with nothing to undo would
+be measuring its own edits; this one does not.
+
+Two ordering facts sit beside it. Counting only in-data splices, the collapse
+follows the first one within **0.4–0.9 s** in five of the eleven calls
+(18.1->19.0, 14.6->15.3, 8.5->9.2, 10.2->10.8, 8.2->8.6) — the timescale of the
+adaptive loops walking off after a disturbance. In the other six the collapse
+comes first, so splices are **not** the sole cause of every collapse.
+
+**What this is not.** It is a measurement of the receiver on a reconstructed
+stream, not of a live call. The live A/B remains open, and note that the
+replay of `rate19200-r1` holds 60 s where its own live call died at 19 s: the
+recording contains the splices and the replay survives them longer than live
+did, so the live/replay divergence of 2026-08-24 is **still unexplained** and
+is not resolved by this. What is established is that removing these edits
+lengthens the connection substantially on every real call that has them.
