@@ -1908,6 +1908,21 @@ static pthread_mutex_t g_cr_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 /* Raw G.711 bearer diagnostics and optional live taps. */
 static uint64_t       g_g711_rx_octets = 0;
+/* Samples actually handed to v34_rx(), against the samples that arrived.
+ *
+ * These must be equal from the moment the V.34 receiver starts, and if they
+ * are not, the receiver's symbol clock runs slow against the wire by exactly
+ * the shortfall -- which its timing loop reports as a frequency offset it
+ * cannot explain.  That is the open question of 2026-08-24: a live 28800 call
+ * walks to -64 ppm and loses the constellation 0.9 s after B1, while both
+ * replays of that call's OWN RECORDING hold the eye for 19.7 s at +/-2 ppm.
+ * The tap is written before anything else touches the buffer, so a frame the
+ * live path fails to feed on is invisible to every recording -- and this
+ * counter is the one place the difference can show.  ME_RX_ACCOUNTING=0
+ * silences it. */
+static uint64_t       g_v34_rx_samples = 0;
+static uint64_t       g_v34_rx_started_at = 0;
+static bool           g_v34_rx_accounting_logged = false;
 static uint64_t       g_g711_tx_octets = 0;
 static uint64_t       g_g711_raw_v90_tx_octets = 0;
 static uint64_t       g_g711_linear_tx_octets = 0;
@@ -4529,6 +4544,9 @@ void me_init(void)
     }
     cr_init(&g_cr, 8000);
     g_g711_rx_octets = 0;
+    g_v34_rx_samples = 0;
+    g_v34_rx_started_at = 0;
+    g_v34_rx_accounting_logged = false;
     g_g711_tx_octets = 0;
     g_g711_raw_v90_tx_octets = 0;
     g_g711_linear_tx_octets = 0;
@@ -5546,6 +5564,38 @@ bool me_rx_g711_slip_permitted(void)
     return !ds0;
 }
 
+/* See g_v34_rx_samples.  Reports the first shortfall and then every further
+ * 8000 samples of it, so a steady leak shows its rate rather than one line. */
+static void me_rx_accounting_check(void)
+{
+    static uint64_t last_reported;
+    uint64_t arrived;
+    uint64_t missing;
+
+    if (g_v34_rx_samples == 0)
+        return;
+    /*endif*/
+    arrived = g_g711_rx_octets - g_v34_rx_started_at;
+    if (arrived <= g_v34_rx_samples)
+        return;
+    /*endif*/
+    missing = arrived - g_v34_rx_samples;
+    if (!g_v34_rx_accounting_logged || missing >= last_reported + 8000) {
+        const char *v = getenv("ME_RX_ACCOUNTING");
+
+        if (!v || atoi(v) != 0) {
+            ME_LOG("[ME] RX sample accounting: %llu of %llu samples never "
+                   "reached v34_rx (%.1f ppm of the wire)\n",
+                   (unsigned long long)missing,
+                   (unsigned long long)arrived,
+                   arrived ? 1.0e6*(double)missing/(double)arrived : 0.0);
+        }
+        g_v34_rx_accounting_logged = true;
+        last_reported = missing;
+    }
+    /*endif*/
+}
+
 void me_rx_audio(const int16_t *amp, int len)
 {
     pthread_mutex_lock(&g_state_mtx);
@@ -5833,8 +5883,13 @@ void me_rx_audio(const int16_t *amp, int len)
                  * as well only produces events about signals that are not
                  * there, and its Phase 3 detectors act on them.
                  */
-                if (!g_v90a_started)
+                if (!g_v90a_started) {
+                    if (g_v34_rx_samples == 0)
+                        g_v34_rx_started_at = g_g711_rx_octets;
+                    g_v34_rx_samples += (uint64_t)len;
                     v34_rx(g_v34, filtered, len);
+                    me_rx_accounting_check();
+                }
                 /* p3_demod J scanner runs AFTER v34_rx so the real-time V.34
                    receiver processes samples first.  The scanner reads the
                    raw companion ring filled beside g_rx_ref_buf, not from
