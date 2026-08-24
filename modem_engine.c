@@ -1921,6 +1921,8 @@ static uint64_t       g_g711_rx_octets = 0;
  * counter is the one place the difference can show.  ME_RX_ACCOUNTING=0
  * silences it. */
 static uint64_t       g_v34_rx_samples = 0;
+/* One-shot: see the arm-phase log in me_rx_audio(). */
+static bool           g_v90_t3_arm_logged = false;
 /* Samples that reached me_rx_audio(), between the two above: it separates
  * "me_rx_g711() did not pass them on" from "the state machine routed them
  * somewhere other than the V.34 receiver". */
@@ -4550,6 +4552,7 @@ void me_init(void)
     cr_init(&g_cr, 8000);
     g_g711_rx_octets = 0;
     g_v34_rx_samples = 0;
+    g_v90_t3_arm_logged = false;
     g_v34_rx_started_at = 0;
     g_rx_audio_samples = 0;
     g_rx_audio_started_at = 0;
@@ -5927,6 +5930,40 @@ void me_rx_audio(const int16_t *amp, int len)
                     g_v34_rx_samples += (uint64_t)len;
                     v34_rx(g_v34, filtered, len);
                     me_rx_accounting_check();
+                    /* The T/3 interpolator is exact-rational 6/5 and begins
+                     * counting input samples at the arm, so which of its five
+                     * phases a call runs on is fixed by the bearer index it
+                     * was armed at.  Offline that residue decides the call:
+                     * swept over eqoff-28800-r1's own recording, two of the
+                     * five phases wind the timing loop to -70 ppm and lose
+                     * the constellation 0.9 s after B1 while three hold for
+                     * the whole file, and the outcome tracks the residue and
+                     * not the handover instant -- k and k+5 agree to every
+                     * printed digit.  Nothing recorded it live, so the five
+                     * 28800 captures of 2026-08-24 cannot say whether the
+                     * live phase is pinned or a lottery.  Both counters are
+                     * exact and both include this block, so their difference
+                     * is the arm index itself. */
+                    if (g_v34_upstream_data_started
+                            && !g_v90_t3_arm_logged) {
+                        int64_t input_8k = 0;
+                        int64_t output_t3 = 0;
+
+                        v34_v90_upstream_sample_counts(g_v34, &input_8k,
+                                                       &output_t3);
+                        if (input_8k > 0) {
+                            int64_t arm = (int64_t)g_g711_rx_octets - input_8k;
+
+                            g_v90_t3_arm_logged = true;
+                            ME_LOG("[ME] V.90 upstream T/3 armed at bearer "
+                                   "sample %lld, interpolator phase %lld of 5 "
+                                   "(%lld samples in, %lld T/3 out)\n",
+                                   (long long)arm,
+                                   (long long)(((arm % 5) + 5) % 5),
+                                   (long long)input_8k,
+                                   (long long)output_t3);
+                        }
+                    }
                 }
                 /* p3_demod J scanner runs AFTER v34_rx so the real-time V.34
                    receiver processes samples first.  The scanner reads the
