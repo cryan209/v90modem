@@ -1764,3 +1764,36 @@ between the two counters to say which, and offline `v90_engine_replay`
 reports no shortfall at all through the same entry point, which is the
 control.  **The live/replay divergence is still real and still unexplained;
 this instrument has only ruled itself out as the answer so far.**
+
+### The live A/B, finished: it does confirm, and the log says which piece
+
+The last two calls changed the answer.  Every 19200 call that reached data
+mode, with the release and sweep counts beside the payload:
+
+| call | hold | payload lines | frame-phase releases | sweep steps |
+|---|---|---|---|---|
+| on r2  | 1.7 s  | 1 | 0 | 11 |
+| on r5  | 40.7 s | 8586 | 0 | 0 |
+| on r6  | **69.7 s** | **15100** | 0 | 1 |
+| off r3 | 39.2 s | 3429 | 1 | 448 |
+| off r5 | 65.7 s | **0** | 4 | 36 |
+
+**23687 payload lines across three calls with the fix on, against 3429 across
+two with it off** -- and payload is the honest measure on this path, not the
+clean fraction.  `off r5` is the row that makes the mechanism visible rather
+than statistical: it held an open eye for 65.7 seconds, 87% of its windows
+clean, and delivered **nothing**, because it released the frame-phase lock
+four times and spent 36 sweep steps hunting for a phase it already had.  That
+is exactly the failure the phase-evidence gate exists to prevent, and no call
+with the gate in released a lock at all.
+
+So the live rig confirms the **phase-evidence gate** specifically: the counts
+it acts on -- releases and sweeps -- separate the arms cleanly, 0 in every
+"on" call against 1 and 4, and 0-11 sweep steps against 448 and 36.  The
+frequency hold and the blind recovery were in the same arm and are not
+isolated by this experiment; they keep the replay evidence and the mechanism
+argument behind them, nothing more.
+
+Three calls against two is still small, and the within-arm spread is large
+(1.7 s and 69.7 s in the same arm).  What is not small is a 65.7-second open
+eye delivering zero bytes with the gate out.
