@@ -5595,6 +5595,14 @@ bool me_rx_g711_slip_permitted(void)
         const char *v = getenv("ME_RX_CLOCK_SLIP");
 
         allowed = (v && atoi(v) != 0) ? 1 : 0;
+        /* Process-scoped on purpose: this is a configuration readout, not
+         * per-call state.  It is logged because a silent regression here
+         * costs every long call and shows up nowhere else -- the splice is
+         * applied after the RX tap, so no recording of a live call can
+         * contain the evidence. */
+        ME_LOG("[ME] RX clock-recovery slips: %s\n",
+               allowed ? "ENABLED (ME_RX_CLOCK_SLIP) — expect collapses"
+                       : "disabled (default)");
     }
     /*endif*/
     if (!allowed)
