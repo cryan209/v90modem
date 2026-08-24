@@ -1892,3 +1892,47 @@ Rx - V.90 upstream data prepare: equalizer saved at baud 4 carrier high,
 the capture instead of having to be inferred.  `me_init()` also prints every
 `ME_`/`V34_`/`VPCM_`/`SIP_`/`SPANDSP_` variable it was started with, because
 the arms of the last A/B cannot be reconstructed from the logs it left.
+
+### The phase sweep: the collapse reproduces offline, and it is periodic in 5
+
+Shifting the forced handover one sample at a time moves the absolute input
+index the exact-rational 6/5 interpolator starts counting at, and therefore
+which input samples land on which of its five phases.  Over
+`eqoff-28800-r1`'s own recording, at the instant its own search picks
+(25.5 s), with 0.4 s of history:
+
+| offset | B1-era | t=0.0 | 0.4 | 0.9 | 1.0 | freq settles at |
+|---|---|---|---|---|---|---|
+| k=0 | 0.1107 | 0.108 | 0.111 | 0.112 | 0.093 | ~0 |
+| k=1 | 0.1113 | 0.125 | 0.114 | 0.132 | 0.112 | ~0 |
+| **k=2** | **0.0940** | 0.087 | **0.215** | **0.449** | **0.602** | **-6.9e-5** |
+| k=3 | 0.1112 | 0.111 | 0.111 | 0.111 | 0.091 | ~0 |
+| **k=4** | **0.0936** | 0.088 | **0.183** | **0.424** | **0.674** | **-7.8e-5** |
+| k=5 | 0.1107 | 0.108 | 0.111 | 0.112 | 0.093 | ~0 |
+
+k=2 is the live call, digit for digit: 0.087, 0.125, 0.215, 0.321, 0.404,
+0.449, 0.602 with the integrator pinned at -6.9e-5 is exactly what
+`artifacts/eqoff-28800-r1/server.log` recorded off the wire.  **The live
+28800 collapse now reproduces offline from a recording**, which is what three
+commits of live A/B were missing.
+
+The period is 5, replicated: k=6, k=7 and k=9 match k=1, k=2 and k=4 to every
+printed digit including the B1-era distance.  Two of the five phases collapse
+and three hold, and the two that collapse are the two that fit B1 *closer* to
+the lattice (0.0936/0.0940 against 0.1107-0.1113) before winding the timing
+loop to -70 ppm.
+
+**The 19200 control shows no phase sensitivity at all.**  The same sweep over
+`on-19200-r6` gives B1-era 0.0118-0.0119 and symbol error 0.012-0.017 on all
+five phases, with freq inside +/-3.5e-5 everywhere.  So this is not "the
+interpolator is broken": 19200 sits ten times closer to the lattice than
+28800 does, and a phase-dependent perturbation that is fatal at 0.11 is
+invisible at 0.014.  28800 has no margin, and the phase is what tips it.
+
+What is *not* established is that this is the whole live cause.  Live died
+5/5 at 28800 while the sweep says 2 phases in 5 fail, so either the live
+starting phase is not uniformly distributed -- the count begins at the
+prepare call, whose instant is set by CP' acceptance and may well correlate
+with the protocol's frame grid -- or the phase is one contributor on top of a
+marginal eye.  The probe for that is cheap and needs no rig: log the prepare
+sample mod 5 and compare it across the five 28800 calls already captured.
