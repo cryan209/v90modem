@@ -1921,6 +1921,11 @@ static uint64_t       g_g711_rx_octets = 0;
  * counter is the one place the difference can show.  ME_RX_ACCOUNTING=0
  * silences it. */
 static uint64_t       g_v34_rx_samples = 0;
+/* Samples that reached me_rx_audio(), between the two above: it separates
+ * "me_rx_g711() did not pass them on" from "the state machine routed them
+ * somewhere other than the V.34 receiver". */
+static uint64_t       g_rx_audio_samples = 0;
+static uint64_t       g_rx_audio_started_at = 0;
 static uint64_t       g_v34_rx_started_at = 0;
 static bool           g_v34_rx_accounting_logged = false;
 static uint64_t       g_g711_tx_octets = 0;
@@ -4546,6 +4551,8 @@ void me_init(void)
     g_g711_rx_octets = 0;
     g_v34_rx_samples = 0;
     g_v34_rx_started_at = 0;
+    g_rx_audio_samples = 0;
+    g_rx_audio_started_at = 0;
     g_v34_rx_accounting_logged = false;
     g_g711_tx_octets = 0;
     g_g711_raw_v90_tx_octets = 0;
@@ -5585,10 +5592,13 @@ static void me_rx_accounting_check(void)
 
         if (!v || atoi(v) != 0) {
             ME_LOG("[ME] RX sample accounting: %llu of %llu samples never "
-                   "reached v34_rx (%.1f ppm of the wire)\n",
+                   "reached v34_rx (%.1f ppm of the wire); %llu reached "
+                   "me_rx_audio\n",
                    (unsigned long long)missing,
                    (unsigned long long)arrived,
-                   arrived ? 1.0e6*(double)missing/(double)arrived : 0.0);
+                   arrived ? 1.0e6*(double)missing/(double)arrived : 0.0,
+                   (unsigned long long)(g_rx_audio_samples
+                                        - g_rx_audio_started_at));
         }
         g_v34_rx_accounting_logged = true;
         last_reported = missing;
@@ -5598,6 +5608,7 @@ static void me_rx_accounting_check(void)
 
 void me_rx_audio(const int16_t *amp, int len)
 {
+    g_rx_audio_samples += (uint64_t)len;
     pthread_mutex_lock(&g_state_mtx);
     me_state_t state = g_state;
     me_modulation_t mod = g_mod;
@@ -5884,8 +5895,12 @@ void me_rx_audio(const int16_t *amp, int len)
                  * there, and its Phase 3 detectors act on them.
                  */
                 if (!g_v90a_started) {
-                    if (g_v34_rx_samples == 0)
+                    if (g_v34_rx_samples == 0) {
                         g_v34_rx_started_at = g_g711_rx_octets;
+                        g_rx_audio_started_at =
+                            g_rx_audio_samples - (uint64_t)len;
+                    }
+                    /*endif*/
                     g_v34_rx_samples += (uint64_t)len;
                     v34_rx(g_v34, filtered, len);
                     me_rx_accounting_check();

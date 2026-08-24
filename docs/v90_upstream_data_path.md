@@ -1729,3 +1729,38 @@ against them, describes a receiver that is not experiencing the live path's
 dominant impairment.**  That is the first thing to fix here, and it is
 measurable without the rig once the discrepancy is instrumented: count the
 samples `v34_rx()` actually receives against the samples the tap wrote.
+
+### The live A/B, completed, and what the sample counter actually says
+
+More live calls at 19200, which is the row where a replay and its own live
+call agree on when the eye shuts (19.1 s against 19.0 s), so it is the one
+worth running.  Counting only the calls that reached data mode -- the rig's
+handshake fails intermittently in Phase 3/4, which none of this touches, and
+those rows carry no information either way:
+
+| arm | data-mode calls | hold | payload lines |
+|---|---|---|---|
+| fix on | 2 | 1.7 s, **40.7 s** | 1, **8586** |
+| fix off | 1 | 39.2 s | 3429 |
+
+At 28800 all five calls (three on, two off) collapse 0.9 s after B1 and
+deliver 19-27 lines, so that rate says nothing about the change.
+
+**Read that as "no harm, and the best live call of the session was with the
+fix on", not as confirmation** -- two calls against one is not a measurement,
+and the spread within one arm (1.7 s and 40.7 s) is larger than the
+difference between the arms.  The defaults stay on because the mechanism
+argument stands on its own and nothing regressed anywhere; they are one env
+var to turn off (`ME_V90_UPSTREAM_NDA=1 ME_V90_UPSTREAM_CMA=0`).
+
+**The sample counter is in and it does NOT show the defect it was built to
+look for.**  It reports a steady 10% of arriving samples never reaching
+`v34_rx()` -- and reports it on the healthiest live call in the session, the
+one that held 40.7 s and delivered 8586 lines, as well as on the ones that
+collapsed.  A shortfall that large would not let any call decode at all, so
+it is almost certainly counting samples that are routed somewhere else by
+design rather than samples that are lost.  `g_rx_audio_samples` now sits
+between the two counters to say which, and offline `v90_engine_replay`
+reports no shortfall at all through the same entry point, which is the
+control.  **The live/replay divergence is still real and still unexplained;
+this instrument has only ruled itself out as the answer so far.**
