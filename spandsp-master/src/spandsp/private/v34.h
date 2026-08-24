@@ -329,6 +329,31 @@
     adopted; anything worse is not a recovered slip. */
 #define V34_V90_T3_SLIP_ACCEPT_ERR          0.45f
 
+/*! Multiple of the receiver's own settled error at which a slip is looked
+    for.  The search used to be armed on the absolute
+    V34_V90_T3_TIMING_TRACK_ERR alone, which is right for a call that settles
+    near it and blind on one that does not: measured live at 19200 the eye
+    settles at 0.013, the wire slips a whole bearer sample, the error steps to
+    0.112 -- eight times its operating point and a clear fault -- and 0.112 is
+    a third of 0.35, so nothing ever looked.  A bearer sample is 1.2 T/3
+    samples here, and a slip is a passband delay, so it arrives with about 82
+    degrees of rotation at 3200 baud on the low carrier.  That is outside the
+    +/-45 degrees a decision-directed carrier loop on a square constellation
+    can pull in, so the loop settles on the wrong lattice point and the
+    symbols come back to the constellation decoding as garbage.
+    Arming the search on that step was tried and does NOT recover the call:
+    on the live 19200 capture above, a multiple of 6 gives 25% of the call
+    clean against 27% with the absolute arm alone, and 3 is no better.  The
+    search finds no offset that scores better, so whatever a bearer slip does
+    to this receiver is not a whole-sample move of the symbol instant that a
+    T/3 search can undo.  Left at 0 -- the behaviour that predates it -- with
+    the measurement beside it, and ME_V90_UPSTREAM_SLIP_MULT to sweep it. */
+#define V34_V90_T3_SLIP_MULT                0.0f
+/*! Never arm the search below this, whatever the settled error: the scorer
+    needs a real degradation to choose between candidates, and an eye that
+    settles very close to the lattice would otherwise re-search on noise. */
+#define V34_V90_T3_SLIP_MULT_MIN            0.05f
+
 /*! Symbols of relaxed adaptation after a corrected slip. */
 #define V34_V90_T3_SLIP_RECOVER             8000
 
@@ -1204,6 +1229,8 @@ typedef struct
     /*! Consecutive symbols spent off the constellation, and how many
         whole-sample slips have been corrected. */
     int v90_t3_slip_run;
+    /*! Multiple of the settled error at which the slip search is armed. */
+    float v90_t3_slip_mult;
     int v90_t3_slips_recovered;
     /*! Symbols left in the post-slip window during which the equalizer is
         allowed to adapt at an error that would otherwise gate it off. */

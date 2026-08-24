@@ -2032,3 +2032,76 @@ is left in with the measurement beside it rather than adopted.
 
 None of this touches plain V.34: `v34_gardner_update()` has exactly one
 caller, the V.90 upstream T/3 receiver.
+
+## What is left at 19200 is the wire, and it is measured
+
+The section above changes the receiver.  This one says what is now in front
+of it, live, at the rate the receiver is best at.
+
+A live 19200 call on 2026-08-25 (`artifacts/det-live3-104534Z/mm-r1`) acquires
+B1 at an out-of-sample lattice distance of **0.011** and holds **0.013** --
+an enormous margin, ten times better than 28800's 0.11 -- for 0.8 s.  Then:
+
+    t=0.8  slips=0  e=0.013
+    t=0.9  slips=0  e=0.048
+    t=1.0  slips=1  e=0.099
+    t=1.1  slips=1  e=0.085     ... and the call never returns to 0.013
+
+**Two things follow, and the first contradicts the previous entry.**
+
+**The replay of that call's own tap reproduces it**: clean 0.013 through
+0.8 s, a whole-sample correction at 1.1 s, and 0.112 immediately after.  The
+"no replay reproduces a live call" result stands only for the 28800 captures
+it was measured on; here the disturbance is in the recorded samples, so it is
+on the wire and not something the live path does to them.
+
+**And the wire is slipping about once a second.**
+`tools/measure_timing_slips.py` reads the transmitter's symbol epoch out of
+the phase of the symbol-rate line in the squared analytic envelope -- it owes
+nothing to our receiver -- and over the 6.5 s around that handover:
+
+    t=162.05  +0.92 sample     t=166.25  -0.91 sample
+    t=163.10  -0.90 sample     t=167.30  +0.91 sample
+    t=164.10  +0.67 sample
+
+Data mode starts at 163.0 s, so the collapse at t=1.1 s **is** the slip at
+164.10 s.  For comparison the 2026-08-21 soak measured 28 slips in 290 s, one
+per ten seconds; this is an order of magnitude worse, and it is the binding
+constraint on a receiver whose eye is otherwise 0.013.
+
+### Two corrections that look right and are not
+
+**The timing loop's whole-sample correction must NOT be derotated.**  A slip
+is a passband delay and the T/3 ring is mixed on the absolute sample count,
+so the slip *search* derotates its own moves by
+`v90_t3_offset_rotation()` -- 68.6 degrees a sample at 3200 baud on the low
+carrier -- and it is tempting to conclude the loop's own corrections need the
+same.  They do not, and the code comment beside the actuator already says
+why: the loop takes the whole sample out of `acc` when it hands one back, so
+the sampling position is continuous and there is no jump to undo.  Adding the
+compensation injects a 68.6 degree kick that is not there: the same call goes
+from 27% clean to 14%, and the error after the slip from 0.112 to 0.615.
+
+**Arming the slip search relative to the settled error does not recover it
+either.**  The search is armed on an absolute 0.35, which is blind on a call
+that settles at 0.018 and steps to 0.112 -- a fault eight times its operating
+point that never crosses the threshold.  Arming it at a multiple of the
+settled error instead (`ME_V90_UPSTREAM_SLIP_MULT`, `V34_V90_T3_SLIP_MULT`)
+gives **25% of the call clean at a multiple of 6 against 27% with the
+absolute arm alone**, and 3 is no better: the search finds no offset that
+scores better than the one it is on.  So whatever a bearer slip does to this
+receiver is not a whole-sample move of the symbol instant that a T/3 search
+can undo.  Default 0 -- the behaviour that predates it -- with the knob and
+the measurement kept.
+
+**Open, and it is now the whole of the live problem at 19200: survive a
+bearer slip.** The eye is not the constraint any more; recovery is.  Whether
+the slips are the peer's audio generation or the rig's resampler is not
+settled here -- the RTP for this call has two losses, both 155 s before data
+mode, and nothing during it.
+
+### Note
+
+`tools/measure_timing_slips.py` needs numpy, which the system python here
+does not have and PEP 668 will not let pip install into.  A throwaway venv is
+the way: `python3 -m venv /tmp/np-venv && /tmp/np-venv/bin/pip install numpy`.

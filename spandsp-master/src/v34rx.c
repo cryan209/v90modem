@@ -12398,6 +12398,32 @@ static void v90_t3_slip_resync(v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/*! The error at which a slip is looked for.  Relative to the receiver's own
+    settled operating point once it has one, because the fault a slip
+    produces is a step away from THAT, not a crossing of any absolute.  Never
+    above the absolute arm, so this can only make the search more alert. */
+static float v90_t3_slip_trigger_err(v34_rx_state_t *s)
+{
+    float v;
+
+    if (s->v90_t3_err_base_n < V34_V90_T3_ERR_BASE_SYMBOLS
+        ||
+        s->v90_t3_slip_mult <= 0.0f)
+    {
+        return V34_V90_T3_TIMING_TRACK_ERR;
+    }
+    /*endif*/
+    v = s->v90_t3_slip_mult*s->v90_t3_err_base;
+    if (v < V34_V90_T3_SLIP_MULT_MIN)
+        v = V34_V90_T3_SLIP_MULT_MIN;
+    /*endif*/
+    if (v > V34_V90_T3_TIMING_TRACK_ERR)
+        v = V34_V90_T3_TIMING_TRACK_ERR;
+    /*endif*/
+    return v;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v90_t3_emit_ready(v34_rx_state_t *s)
 {
     int pre = V34_V90_T3_FSE_TAPS/2;
@@ -12600,7 +12626,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
            as the error says the constellation is gone -- long before the
            equalizer-restore path below, which is for a filter that has been
            walked off gradually and cannot fix a timing step at all. */
-        if (s->v90_t3_sym_err_fast >= V34_V90_T3_TIMING_TRACK_ERR)
+        if (s->v90_t3_sym_err_fast >= v90_t3_slip_trigger_err(s))
         {
             if (++s->v90_t3_slip_run >= V34_V90_T3_SLIP_RUN)
             {
@@ -13423,6 +13449,10 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
             const char *beta = getenv("ME_V90_UPSTREAM_TIMING_BETA");
 
             const char *det = getenv("ME_V90_UPSTREAM_TIMING_DET");
+            const char *sm = getenv("ME_V90_UPSTREAM_SLIP_MULT");
+
+            s->v90_t3_slip_mult = sm ? (float) atof(sm)
+                                     : V34_V90_T3_SLIP_MULT;
 
             v34_gardner_init(&s->v90_t3_gardner,
                              mu ? (float) atof(mu) : V34_GARDNER_DEFAULT_MU,
