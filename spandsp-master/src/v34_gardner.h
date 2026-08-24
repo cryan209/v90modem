@@ -64,6 +64,37 @@
    instant is actually moved.  At 3200 baud this is about 60 ms. */
 #define V34_GARDNER_SLIP_HOLD               200
 
+/*! Timing error detectors this loop can be built from.  They differ only in
+    how e[k] is formed; the loop filter and the fractional actuator below are
+    common to all three. */
+enum
+{
+    /*! Non-data-aided Gardner.  Right during acquisition and on a small
+        constellation; carries data self-noise that grows with the
+        constellation. */
+    V34_GARDNER_DET_GARDNER = 0,
+    /*! Gardner with the decisions substituted into the difference term. */
+    V34_GARDNER_DET_DD = 1,
+    /*! Mueller and Muller.  No mid sample, no self-noise, needs the channel
+        equalized and the carrier derotated. */
+    V34_GARDNER_DET_MM = 2,
+    /*! Mueller and Muller while the eye is open enough for the decisions it
+        rests on to be right, Gardner otherwise.  Mueller and Muller's error
+        is built from the decisions alone, so a sampling instant far enough
+        out droops the amplitude past the slicer boundaries and its S-curve
+        flattens exactly where a loop needs to pull in (measured in
+        v34_gardner_test: the slope falls to a fiftieth between +/-0.05 and
+        +/-0.15 of a symbol on a dense constellation).  Gardner never asks
+        what the symbol was, so it keeps its slope there. */
+    V34_GARDNER_DET_AUTO = 3
+};
+
+/*! Distance from the constellation, in the units the V.90 upstream receiver
+    measures it in, below which the decisions are trustworthy enough to build
+    a timing error from.  A call that is decoding sits at 0.09-0.12 and one
+    that has lost the constellation reads 0.667. */
+#define V34_GARDNER_DECISION_TRUST_ERR      0.20f
+
 /*! Gardner timing loop state.  One per receive direction. */
 typedef struct
 {
@@ -92,6 +123,15 @@ typedef struct
     int hold;
     /*! Most recent normalised error, for tests and diagnostics. */
     float last_error;
+    /*! Which timing error detector to run.  See v34_gardner_error() and the
+        two decision-aided alternatives beside it. */
+    int detector;
+    /*! Previous symbol instant's decision, for the decision-aided
+        detectors.  Held here rather than recomputed so that a caller which
+        already has the decision -- the DD-LMS does -- can simply hand it
+        over. */
+    float prev_dec_re;
+    float prev_dec_im;
 } v34_gardner_state_t;
 
 static __inline__ void v34_gardner_init(v34_gardner_state_t *g,
@@ -108,6 +148,9 @@ static __inline__ void v34_gardner_init(v34_gardner_state_t *g,
     g->prev_valid = 0;
     g->slips = 0;
     g->last_error = 0.0f;
+    g->detector = V34_GARDNER_DET_GARDNER;
+    g->prev_dec_re = 0.0f;
+    g->prev_dec_im = 0.0f;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -125,6 +168,64 @@ static __inline__ float v34_gardner_error(float now_re, float now_im,
 
     /* Re{ conj(mid) * d } */
     return mid_re*d_re + mid_im*d_im;
+}
+/*- End of function --------------------------------------------------------*/
+
+/*! Decision-directed Gardner error.
+
+    Gardner is non-data-aided, which is its virtue during acquisition and its
+    defect once a dense constellation is carrying data: the (y[k] - y[k-1])
+    term is dominated by how far apart two RANDOM points happen to be, and
+    that self-noise grows with the constellation.  Measured on the V.90
+    upstream matrix, the loop is worth having at 19200 (47% of the call
+    clean against 16% with the loop held still) and net-harmful at the top of
+    the ladder, where 26400 and 31200 acquire data mode only with it OFF.
+
+    V.34 puts every constellation point on odd integers, so once the eye is
+    open the decision is free -- and substituting it for y in the difference
+    removes exactly the term that carries the self-noise, leaving the mid
+    sample to say which side of the transition the instant fell on.
+
+        e[k] = Re{ conj(y_mid) * (a[k] - a[k-1]) }
+
+    Same sign convention as v34_gardner_error(): e > 0 means late. */
+static __inline__ float v34_gardner_error_dd(float dec_re, float dec_im,
+                                             float prev_dec_re,
+                                             float prev_dec_im,
+                                             float mid_re, float mid_im)
+{
+    float d_re = dec_re - prev_dec_re;
+    float d_im = dec_im - prev_dec_im;
+
+    return mid_re*d_re + mid_im*d_im;
+}
+/*- End of function --------------------------------------------------------*/
+
+/*! Mueller and Muller timing error (IEEE Trans. Comm. 1976).
+
+        e[k] = Re{ conj(a[k-1])*y[k] - conj(a[k])*y[k-1] }
+
+    It needs no mid sample at all -- one sample per symbol and the decisions
+    -- because it reads the residual intersymbol interference the offset
+    leaves on the neighbours rather than the shape of the transition.  For a
+    Nyquist pulse the expectation is sigma^2*(h(T+tau) - h(T-tau)), which is
+    zero at tau = 0 with no data-dependent term, so it has no self-noise from
+    the constellation at all.  In exchange it needs the channel equalized and
+    the carrier derotated, which by this point in the call both are.
+
+    The expectation is NEGATIVE for a late instant, where Gardner's is
+    positive, so it is negated here: every detector this loop can be built
+    from reports e > 0 for late. */
+static __inline__ float v34_gardner_error_mm(float now_re, float now_im,
+                                             float prev_re, float prev_im,
+                                             float dec_re, float dec_im,
+                                             float prev_dec_re,
+                                             float prev_dec_im)
+{
+    float a = prev_dec_re*now_re + prev_dec_im*now_im;
+    float b = dec_re*prev_re + dec_im*prev_im;
+
+    return b - a;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -147,6 +248,8 @@ static __inline__ float v34_gardner_error(float now_re, float now_im,
 static __inline__ int v34_gardner_update(v34_gardner_state_t *g,
                                          float now_re, float now_im,
                                          float mid_re, float mid_im,
+                                         float dec_re, float dec_im,
+                                         float sym_err,
                                          int track)
 {
     /* A real clock offset is a few hundred ppm at worst; at three samples
@@ -163,6 +266,8 @@ static __inline__ int v34_gardner_update(v34_gardner_state_t *g,
     {
         g->prev_re = now_re;
         g->prev_im = now_im;
+        g->prev_dec_re = dec_re;
+        g->prev_dec_im = dec_im;
         g->prev_valid = 1;
         return 0;
     }
@@ -179,11 +284,32 @@ static __inline__ int v34_gardner_update(v34_gardner_state_t *g,
            detector needs to resume. */
         g->prev_re = now_re;
         g->prev_im = now_im;
+        g->prev_dec_re = dec_re;
+        g->prev_dec_im = dec_im;
         return 0;
     }
     /*endif*/
-    e = v34_gardner_error(now_re, now_im, g->prev_re, g->prev_im,
-                          mid_re, mid_im);
+    switch ((g->detector == V34_GARDNER_DET_AUTO)
+                ? ((sym_err < V34_GARDNER_DECISION_TRUST_ERR)
+                       ? V34_GARDNER_DET_MM : V34_GARDNER_DET_GARDNER)
+                : g->detector)
+    {
+    case V34_GARDNER_DET_DD:
+        e = v34_gardner_error_dd(dec_re, dec_im,
+                                 g->prev_dec_re, g->prev_dec_im,
+                                 mid_re, mid_im);
+        break;
+    case V34_GARDNER_DET_MM:
+        e = v34_gardner_error_mm(now_re, now_im, g->prev_re, g->prev_im,
+                                 dec_re, dec_im,
+                                 g->prev_dec_re, g->prev_dec_im);
+        break;
+    default:
+        e = v34_gardner_error(now_re, now_im, g->prev_re, g->prev_im,
+                              mid_re, mid_im);
+        break;
+    }
+    /*endswitch*/
     /* Normalise so the loop gain does not depend on the signal level, which
        varies with the negotiated constellation. */
     power = now_re*now_re + now_im*now_im
@@ -249,6 +375,8 @@ static __inline__ int v34_gardner_update(v34_gardner_state_t *g,
     /*endif*/
     g->prev_re = now_re;
     g->prev_im = now_im;
+    g->prev_dec_re = dec_re;
+    g->prev_dec_im = dec_im;
     return correction;
 }
 /*- End of function --------------------------------------------------------*/

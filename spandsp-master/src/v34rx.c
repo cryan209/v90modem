@@ -12840,9 +12840,16 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                useful: six consecutive calls then never locked at all, and
                sat at a symbol error of 0.2 where the calls that do lock read
                0.10. */
+            /* The decision the two decision-aided detectors need is the
+               same odd-integer slice the DD-LMS above makes, and V.34 puts
+               every constellation point on that lattice, so it costs
+               nothing to hand it over. */
             s->v90_t3_next_symbol +=
                 v34_gardner_update(&s->v90_t3_gardner, y.re, y.im,
                                    mid.re, mid.im,
+                                   2.0f*floorf(y.re/2.0f) + 1.0f,
+                                   2.0f*floorf(y.im/2.0f) + 1.0f,
+                                   s->v90_t3_sym_err_fast,
                                    (s->v90_t3_sym_err_fast
                                         < V34_V90_T3_TIMING_TRACK_ERR)
                                        ? 1 : 0);
@@ -13415,10 +13422,22 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
             const char *mu = getenv("ME_V90_UPSTREAM_TIMING_MU");
             const char *beta = getenv("ME_V90_UPSTREAM_TIMING_BETA");
 
+            const char *det = getenv("ME_V90_UPSTREAM_TIMING_DET");
+
             v34_gardner_init(&s->v90_t3_gardner,
                              mu ? (float) atof(mu) : V34_GARDNER_DEFAULT_MU,
                              beta ? (float) atof(beta)
                                   : V34_GARDNER_DEFAULT_BETA);
+            /* Which timing error detector.  Non-data-aided Gardner is the
+               one this loop was built on, and it is the wrong one once a
+               dense constellation is carrying data: see v34_gardner.h and
+               docs/v90_upstream_data_path.md for the matrix that says so. */
+            s->v90_t3_gardner.detector =
+                (det == NULL) ? V34_GARDNER_DET_MM
+              : (strcmp(det, "dd") == 0) ? V34_GARDNER_DET_DD
+              : (strcmp(det, "mm") == 0) ? V34_GARDNER_DET_MM
+              : (strcmp(det, "auto") == 0) ? V34_GARDNER_DET_AUTO
+              : V34_GARDNER_DET_GARDNER;
         }
     }
     /* The supervised filter already maps onto the exact Q9.7 template grid. */

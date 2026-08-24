@@ -1936,3 +1936,99 @@ prepare call, whose instant is set by CP' acceptance and may well correlate
 with the protocol's frame grid -- or the phase is one contributor on top of a
 marginal eye.  The probe for that is cheap and needs no rig: log the prepare
 sample mod 5 and compare it across the five 28800 calls already captured.
+
+## The timing loop was the wrong instrument for a constellation carrying data
+
+The previous section left "recovering a receiver whose eye has shut" as the
+whole of the upstream uptime problem, with the collapse reproduced offline
+and traced as far as the interpolator's phase.  It goes one step further
+than that: **the thing that shuts the eye is our own timing loop**, and on
+the reproducible failing phase it is provable in one line.
+
+`v90_upstream_replay artifacts/eqoff-28800-r1/live-rx.g711 ulaw 3200 28800
+25.50025 0.4` -- the k=2 handover phase, which reproduces the live 28800
+collapse digit for digit -- runs 0.087, 0.125, 0.215, 0.321, 0.404, 0.449,
+0.602 with the timing integrator pinned at -6.9e-5.  With
+`ME_V90_UPSTREAM_TIMING=0` the same samples through the same binary hold
+**0.095 for the whole file**.  DD-LMS off, the carrier loop off and the blind
+loop off all still collapse; only the timing loop's removal holds it.
+
+The integrator value is a symptom, not the mechanism.  -7e-5 samples/symbol
+moves the sampling position by 0.05 samples over the 0.4 s in which the error
+goes 0.087 -> 0.215, which is far too little to close an eye; and it is
+*pinned* rather than drifting because the loop's own track gate freezes it
+once the error passes 0.35.  What actually happens is that the loop is
+steering on noise.
+
+### Gardner's error is data self-noise on anything but a training sequence
+
+Gardner's detector is non-data-aided -- that is its virtue during acquisition
+-- and its difference term is `(y[k] - y[k-1])`, so what it reports is
+dominated by how far apart two RANDOM constellation points happened to fall.
+That grows with the constellation while the true timing error does not.  The
+V.34 training sequences this loop was built and tested against are four
+points.  The V.90 upstream is carrying hundreds by 28800 bit/s.
+
+`v34_gardner_test` now measures it, at a small offset because that is the
+regime a loop in lock lives in.  Self-noise per unit of S-curve slope:
+
+| detector | four points | 16 levels per axis |
+|---|---|---|
+| Gardner | 0.27 | **0.77** |
+| decision-directed Gardner | -- | 0.48 |
+| Mueller and Muller | -- | **0.00** |
+
+Mueller and Muller (IEEE Trans. Comm. 1976) reads the residual intersymbol
+interference the offset leaves on the neighbouring symbols rather than the
+shape of the transition:
+
+    e[k] = Re{ conj(a[k-1])*y[k] - conj(a[k])*y[k-1] }
+
+Its expectation is `sigma^2*(h(T-tau) - h(T+tau))`, which is zero at tau = 0
+with no data-dependent term at all -- hence a self-noise of nil, whatever the
+constellation.  V.34 puts every point on odd integers, so the decisions it
+needs are the same slice the DD-LMS already makes.
+
+It is not simply the better detector: its error is built from the decisions
+alone, so an instant far enough out droops the amplitude past the slicer's
+boundaries, the decisions go wrong and its S-curve flattens exactly where a
+loop would need to pull in.  Measured, on 16 levels per axis, the slope falls
+from +0.2175 at +/-0.05 of a symbol to **+0.0004** at +/-0.15.  That costs
+nothing here, because the fractionally spaced equalizer is fitted to B1 by
+least squares and owns acquisition; the loop is only ever asked to track.
+
+### Measured over the recorded rate matrix
+
+`tools/v90_upstream_bench.sh` replays a directory of captures in parallel and
+scores each on clean TIME -- never window counts, for the reason recorded
+above.  One binary, the detector as the only variable, nine calls that reach
+data mode, as total clean seconds:
+
+| detector | total clean | 19200-r1 | 24000-r2 | 26400-r1 | 28800-r1 | 31200-r2 |
+|---|---|---|---|---|---|---|
+| Gardner (was the default) | 318.6 s | 47% | 34% | 9% | 54% | 2% |
+| loop held still | 376.1 s | 16% | 36% | 67% | 55% | 21% |
+| decision-directed Gardner | 390.2 s | 49% | 34% | 67% | 54% | 2% |
+| Gardner, gains 5x slower | 420.6 s | 57% | 35% | 67% | 55% | 20% |
+| **Mueller and Muller** | **492.0 s** | **85%** | **65%** | **86%** | 39% | 20% |
+
+Two things worth reading off that table.  Holding the loop still is *better*
+than running it at four of the rates -- which is what says the loop was
+subtracting rather than adding -- and it is much worse at 19200, where the
+eye has margin to spare and tracking is all that matters.  Every quieter
+detector recovers both ends at once.  The longest unbroken hold on 19200-r1
+goes 36.0 s -> **59.7 s**, and on 26400-r1 10.4 s -> **65.3 s**.
+
+Mueller and Muller is now the default; `ME_V90_UPSTREAM_TIMING_DET=gardner`
+restores the old detector, `dd` and `auto` select the other two.  The single
+regression is 28800-r1, 54% -> 39%.
+
+**A hybrid does not fix that and is measured: `auto` -- Mueller and Muller
+while the error says the decisions are trustworthy, Gardner otherwise --
+totals 379.5 s.** It recovers 28800-r1 to 54% and gives back 19200 (85% ->
+53%), 24000-r2 (65% -> 19%) and 31200-r2 (20% -> 6%).  Switching detectors
+inside a call disturbs the loop more than Gardner's noise costs, so the knob
+is left in with the measurement beside it rather than adopted.
+
+None of this touches plain V.34: `v34_gardner_update()` has exactly one
+caller, the V.90 upstream T/3 receiver.
