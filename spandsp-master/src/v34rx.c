@@ -5936,6 +5936,8 @@ static void report_status_change(v34_rx_state_t *s, int status)
 static void equalizer_save(v34_rx_state_t *s)
 {
     cvec_copyf(s->eq_coeff_save, s->eq_coeff, V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN);
+    s->eq_coeff_save_baud_rate = s->baud_rate;
+    s->eq_coeff_save_high_carrier = s->high_carrier ? 1 : 0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -14784,9 +14786,37 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
     /* CP hypothesis acquisition may move the decision-aided phase tracker,
        but not the Phase-3 equalizer describing the unchanged analogue
        channel.  Restore only coefficients: clearing eq_buf here would lose
-       timing/history at the E→B1 sample boundary. */
-    cvec_copyf(s->rx.eq_coeff, s->rx.eq_coeff_save,
-               V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN);
+       timing/history at the E->B1 sample boundary.
+
+       The taps are only a channel solution on the grid they were adapted on.
+       This function has just retuned the carrier, the shaper and the Godard
+       coefficients to the SELECTED upstream rate, so if the save was taken at
+       another baud rate or carrier assignment the restore puts an equalizer
+       from one grid in front of a demodulator running on another.  Log the
+       pair on every seam, and let ME_V90_UPSTREAM_EQ_RESTORE=0 skip the
+       restore entirely: a live 28800 upstream loses the constellation 0.9 s
+       after B1 while a replay of its own recording -- same samples, same
+       parameters, ring length ruled out by a 14 s / 0.4 s control -- holds it
+       for the whole call, and the equalizer live inherits here and the replay
+       does not is the state that differs. */
+    {
+        const char *restore = getenv("ME_V90_UPSTREAM_EQ_RESTORE");
+
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Rx - V.90 upstream data prepare: equalizer saved at baud %d "
+                 "carrier %s, preparing baud %d carrier %s%s\n",
+                 s->rx.eq_coeff_save_baud_rate,
+                 s->rx.eq_coeff_save_high_carrier ? "high" : "low",
+                 baud_rate,
+                 high_carrier ? "high" : "low",
+                 (restore && atoi(restore) == 0) ? " [restore skipped]" : "");
+        if (!restore || atoi(restore) != 0)
+        {
+            cvec_copyf(s->rx.eq_coeff, s->rx.eq_coeff_save,
+                       V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN);
+        }
+        /*endif*/
+    }
     s->rx.v90_t3_prepared = true;
     s->rx.v90_t3_trellis_size = trellis_size;
     /* This context's externally visible current rate is the selected V.90

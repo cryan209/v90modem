@@ -1797,3 +1797,72 @@ argument behind them, nothing more.
 Three calls against two is still small, and the within-arm spread is large
 (1.7 s and 69.7 s in the same arm).  What is not small is a 65.7-second open
 eye delivering zero bytes with the gate out.
+
+## The 28800 collapse: the equalizer the replay never inherits (2026-08-24)
+
+Five 28800 calls die 0.9 s after B1 in both arms of that A/B, and every
+offline replay of their own recordings holds.  That gap was read as evidence
+that the live path was not feeding the receiver the samples the tap recorded.
+It is not.
+
+`v90_upstream_replay` on `live-verify-231747Z/on-28800-r1/live-rx.g711`
+reproduces the live call's B1 exactly -- same acquisition, `B1-era distance
+0.1055` against the live `0.1035`, same `B1 ended after 2 data frames` -- and
+then does **not** collapse: symbol error stays at 0.10-0.12 and the timing
+integrator inside +/-2e-5 for the whole file, where live walks to -6.4e-5
+within half a second and reaches 0.66 symbol error by t=1.0 s.
+
+Two things follow from measurements rather than argument:
+
+* **Ring length is not the difference.**  Forcing the handover at the same
+  instant with 14 s and with 0.4 s of history -- the live receiver had 0.35 s,
+  prepare at bearer sample ~154,000 and E at ~156,800 -- produces trajectories
+  identical to the printed digit: same `0.1055`, same `freq +0.000015`, same
+  symbol error in every window.  The harness comment naming ring length as
+  "the obvious suspect" can be retired.
+* **The two receivers differ from the first data window, not from a later
+  disturbance.**  Live and replay agree on the decision-directed carrier
+  update counts (384, then 920) but not on the values in those same windows
+  (`freq +0.000002` / `sym err 0.106` live against `+0.000015` / `0.115`).
+  From t=0.4 s the counts part too -- live 1407 against 1448, then live's DD
+  updates all but stop (1514, 1514, 1526) as the fourth-power loop takes over,
+  while the replay keeps adapting on every symbol.
+
+The receiver is deterministic in its input: no wall clock, no threads, no
+block-size dependence (the T/3 resampler is exact-rational and carries its
+state in a sample counter).  The echo canceller never ran in these calls and
+the Phase-2 notch was retired before Phase 3, so `v34_rx()` sees the tap
+byte for byte.  Same samples and same parameters with different trajectories
+leaves receiver state at the handover, and there is exactly one piece of it
+that a live call carries and a replay cannot:
+
+```
+    /* CP hypothesis acquisition may move the decision-aided phase tracker,
+       but not the Phase-3 equalizer ... */
+    cvec_copyf(s->rx.eq_coeff, s->rx.eq_coeff_save, ...);
+```
+
+`v34_v90_prepare_upstream_data()` restores the equalizer saved at entry to
+Phase-4 CPt acquisition -- *after* the same function has retuned the carrier,
+the shaper and the Godard coefficients to the selected upstream rate.  A
+fractionally spaced equalizer's taps are a channel solution on the grid they
+were adapted on.  Live, those taps come out of the real Phase 3/4; in the
+replay `eq_coeff_save` is still the cold-start value, and the cold start is
+the one that survives 28800.  It also fits the rate split: the same taps carry
+19200's `b=48` and not 28800's `b=72`, which is why every 28800 call dies and
+19200 calls run for a minute.
+
+This is a candidate with the alternatives measured away, not a proven cause.
+The A/B that settles it is one live call: `ME_V90_UPSTREAM_EQ_RESTORE=0` skips
+the restore and leaves the receiver on a cold equalizer.  Each seam now logs
+the pair it is reconciling --
+
+```
+Rx - V.90 upstream data prepare: equalizer saved at baud 4 carrier high,
+    preparing baud 4 carrier low
+```
+
+-- so a mismatched baud or carrier assignment across that seam is visible in
+the capture instead of having to be inferred.  `me_init()` also prints every
+`ME_`/`V34_`/`VPCM_`/`SIP_`/`SPANDSP_` variable it was started with, because
+the arms of the last A/B cannot be reconstructed from the logs it left.

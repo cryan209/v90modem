@@ -4587,6 +4587,29 @@ void me_init(void)
         ME_LOG("[ME] V.34 start profile: %d baud / %d bps\n",
                 g_v34_start_baud, effective_bps);
     }
+    /* Every knob this build reads is an environment variable, and a capture
+       that does not record which ones were set cannot be replayed against.
+       The live/replay work of 2026-08-24 lost time to exactly that: the
+       server's own log named one knob, in passing, in a line about a rate
+       cap.  Print the whole set once, at startup, into the same log the
+       capture keeps. */
+    {
+        extern char **environ;
+        int n = 0;
+
+        for (char **e = environ;  e && *e;  e++) {
+            if (strncmp(*e, "ME_", 3) == 0
+                || strncmp(*e, "V34_", 4) == 0
+                || strncmp(*e, "VPCM_", 5) == 0
+                || strncmp(*e, "SIP_", 4) == 0
+                || strncmp(*e, "SPANDSP_", 8) == 0) {
+                ME_LOG("[ME] env: %s\n", *e);
+                n++;
+            }
+        }
+        if (n == 0)
+            ME_LOG("[ME] env: no ME_/V34_/VPCM_/SIP_/SPANDSP_ knobs set\n");
+    }
     g_state = ME_IDLE;
     g_mod   = ME_MOD_NONE;
     v91_live_reset();

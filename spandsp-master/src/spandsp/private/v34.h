@@ -1389,6 +1389,12 @@ typedef struct
     /*! \brief Adaptive equalizer coefficients and sample history for the primary channel. */
     complexf_t eq_coeff[V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN];
     complexf_t eq_coeff_save[V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN];
+    /*! \brief The baud rate and carrier the saved coefficients were trained
+        at.  A fractionally spaced equalizer's taps belong to the grid they
+        were adapted on; restoring them across a rate change is restoring a
+        channel solution to the wrong one. */
+    int eq_coeff_save_baud_rate;
+    int eq_coeff_save_high_carrier;
     complexf_t eq_buf[V34_EQUALIZER_MASK + 1];
     float eq_delta;
     /*! \brief Exponential moving average of equalizer output magnitude for fixed-radius QPSK target. */
