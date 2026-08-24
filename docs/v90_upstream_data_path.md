@@ -1852,10 +1852,36 @@ the one that survives 28800.  It also fits the rate split: the same taps carry
 19200's `b=48` and not 28800's `b=72`, which is why every 28800 call dies and
 19200 calls run for a minute.
 
-This is a candidate with the alternatives measured away, not a proven cause.
-The A/B that settles it is one live call: `ME_V90_UPSTREAM_EQ_RESTORE=0` skips
-the restore and leaves the receiver on a cold equalizer.  Each seam now logs
-the pair it is reconciling --
+**Refuted by the live A/B, same day.**  `ME_V90_UPSTREAM_EQ_RESTORE=0` on a
+live 28800 call reaches data mode on the first attempt and collapses on
+exactly the old schedule: symbol error 0.087 at t=0.0, 0.215 at 0.4 s, 0.449
+at 0.9 s, 0.602 at 1.0 s, with the timing integrator at -6.7e-5 by 0.4 s and
+pinned at -6.9e-5 thereafter, and 22 intact U-lines out of 315,541 bytes over
+a 105 s soak against the restored arm's 27 of 315,625.  A cold equalizer at
+the handover changes nothing, so the state a live call inherits there is not
+what kills 28800.  Capture: `artifacts/eqoff-28800-r1/`.
+
+That call also removes the other standing suspect.  Only 149 samples separate
+its RTP arrivals from what reached the engine (7073 packets, 1,131,680 sample
+times, 1,131,531 fed), against 2235 on `on-28800-r1`, and the two calls
+collapse identically -- so packets lost below the tap are not it either.  And
+the paradox reproduces on this fresh capture: `v90_upstream_replay` over its
+own `live-rx.g711` holds 0.09-0.11 symbol error with freq inside +/-3e-5 for
+the whole file.
+
+What survives is the shape of the thing.  Every live 28800 call settles its
+timing integrator at -6.4e-5 to -7.6e-5 -- about -70 ppm of the sample clock,
+half a sample per second -- and settles there within half a second, while
+every replay of the same samples settles at zero.  The next probe is the
+resampler's phase relative to the wire rather than its coefficients: the
+exact-rational 6/5 interpolator's output instants are fixed by the absolute
+input index it started counting at, live starts that count at the prepare
+call and a replay starts it wherever its search put the handover, and there
+are five distinct phases.  Sweep the forced handover by one sample at a time
+and see whether any offset reproduces -7e-5.
+
+The knob and the seam log stay in either way.  Each seam logs the pair it is
+reconciling --
 
 ```
 Rx - V.90 upstream data prepare: equalizer saved at baud 4 carrier high,
