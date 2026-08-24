@@ -5587,14 +5587,31 @@ int me_cr_get_adjustment(void)
 
 bool me_rx_g711_slip_permitted(void)
 {
-    bool ds0;
+    static int allowed = -1;
 
-    pthread_mutex_lock(&g_state_mtx);
-    /* g_v90a exists only on a call that took the analogue role, and from the
-     * moment it does the downstream is codewords rather than a carrier. */
-    ds0 = (g_v90a != NULL);
-    pthread_mutex_unlock(&g_state_mtx);
-    return !ds0;
+    /* See modem_engine.h: splicing a sample into the received stream costs
+     * the connection and closes no loop, so it is off unless asked for. */
+    if (allowed < 0) {
+        const char *v = getenv("ME_RX_CLOCK_SLIP");
+
+        allowed = (v && atoi(v) != 0) ? 1 : 0;
+    }
+    /*endif*/
+    if (!allowed)
+        return false;
+    /*endif*/
+
+    /* Even when asked for, never on a DS0 stream: in the V.90 analogue role
+     * the received octets *are* the constellation, so an inserted one shifts
+     * every 5.4 data frame after it and desynchronises the 5.3 scrambler. */
+    {
+        bool ds0;
+
+        pthread_mutex_lock(&g_state_mtx);
+        ds0 = (g_v90a != NULL);
+        pthread_mutex_unlock(&g_state_mtx);
+        return !ds0;
+    }
 }
 
 /* See g_v34_rx_samples.  Reports the first shortfall and then every further

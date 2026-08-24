@@ -2105,3 +2105,94 @@ mode, and nothing during it.
 `tools/measure_timing_slips.py` needs numpy, which the system python here
 does not have and PEP 668 will not let pip install into.  A throwaway venv is
 the way: `python3 -m venv /tmp/np-venv && /tmp/np-venv/bin/pip install numpy`.
+
+## The bearer was never lossy — we were splicing the samples ourselves (2026-08-25)
+
+Every entry above chases the upstream eye shutting mid-call, and the last one
+left the live/replay divergence unexplained: a live call dies about a second
+after B1 while both replays of its own recording hold nineteen seconds, with
+the live timing loop walking to −64 ppm that the same samples do not contain.
+
+**The bearer is not the problem, and that is measured, not assumed.** Over
+every RTP trace in `artifacts/` — 1,436,859 packets, segmented by SSRC so
+call boundaries are not counted as gaps — real loss is **35 packets, 13 gap
+events, 0.0024%**. On `goal-matrix-115515Z/rate28800-r1` specifically there is
+no loss at all: 7074 packets, and the RX tap holds 1,131,682 bytes against the
+1,131,840 those packets carry, the 158-byte difference being the partial frame
+at the end. Every sample the wire delivered reached `me_rx_g711()`.
+
+**What killed the calls is `clock_recovery.c`, applied to the received
+stream.** `modem_passthrough_get_frame()` asked `me_cr_get_adjustment()` on
+every pulled frame and, when it answered ±1, duplicated the frame's last
+codeword or dropped it. Across the twelve-call rate matrix:
+
+| call | cr adjustments | outcome |
+|---|---|---|
+| rate24000-r1 | **0** | **115.4 s, 100% clean** |
+| the other eleven | 8 – 81 | all collapse |
+
+The only call in the matrix with no slips is the only one that ran clean.
+
+### The cost of one slip, measured
+
+`tools/inject_sample_slips.py` reproduces the edit byte-exactly on a recording
+that has none — the RX tap is written *inside* `me_rx_g711()`, i.e. after the
+splice, so a recording already contains whatever slips its own call injected
+and can never show what they cost. Replaying `rate24000-r1`:
+
+| injected | clean windows |
+|---|---|
+| nothing | **100%** (578/578), `sym err` 0.037, 0% bad shell frames |
+| one duplicated codeword at 35 s | 2% |
+| … at 50 s | 7% |
+| … at 90 s | 49% |
+| … at 70 s | 100% |
+| … at 110 s | 99% |
+| duplicate at 40 s, **opposite** slip at 60 s | 54% — it *recovers* at the second |
+
+So a slip is not reliably fatal: three of five instants collapse to 0.68 for
+the rest of the call, two are absorbed. One sample is 0.4 T at 3200 baud,
+inside the half-symbol the receiver's slip search covers — but that search is
+gated on the eye still being open, so it helps only when it fires first.
+Surviving the eight slips a quiet call injects is that coin flip won eight
+times, which is exactly why the zero-slip call is the only clean one.
+
+That the *opposite* slip recovers a collapsed call is what proves the mechanism
+is the **net sample offset** rather than the momentary disturbance.
+
+### It was never closing a loop that needed closing
+
+`cr_update()`'s error is RTP timestamp progression against **our host's wall
+clock** — the two oscillators' mismatch. It never measures jitter-buffer
+occupancy, and editing the payload of a frame the buffer has already handed
+over cannot influence occupancy either. Meanwhile the V.34-family receivers
+downstream carry a fractional interpolating timing loop whose entire job is
+that same mismatch, continuously and without splicing; `v34_gardner_test`
+asserts it tracks 50 ppm, against the 7.2 ppm the peer actually drifts
+(`tools/measure_timing_slips.py`). The correction duplicated the receiver's
+job in the one way the receiver cannot absorb.
+
+The splice is now off by default (`ME_RX_CLOCK_SLIP=1` restores it for A/B
+work) and gated identically on all three receive paths — the linear one never
+consulted the existing gate at all. `cr_update()` is still fed, because drift
+is worth measuring; only the splice is gone.
+
+### Loss concealment, and why 160 samples is not one number
+
+A lost packet used to *delete* 160 samples: `get_frame()` returned nothing and
+the code fed nothing. Whether that matters depends on the symbol rate, because
+160 samples is a whole number of symbols only at some of them — 64 at 3200
+baud, 60 at 3000, 48 at 2400, but **68.58 at 3429 and 54.86 at 2743**, where a
+lost packet is a fractional-symbol step of exactly the lethal kind. Replayed at
+3200 baud, losing one packet the way we did costs 1% of the call and concealing
+it costs nothing (99% vs 100%). The receive path now feeds a frame of fill
+(0xFF u-law, 0xD5 A-law) when nothing arrives, so the stream keeps its length,
+and reports `concealed_frames` beside the RTP trace's sequence gaps.
+
+**Caveat on scope.** The recordings already contain the slips their own live
+calls injected, so no replay can show the fix's live benefit — that needs a
+live A/B on the rig, and it is the open confirmation. What is established here
+is the cost of the operation removed, and that the operation had no loop to
+close. Note also that the −64 ppm live/replay divergence is consistent with
+this (a spliced stream is not the recorded stream) but is **not** thereby
+proven to be its only cause.

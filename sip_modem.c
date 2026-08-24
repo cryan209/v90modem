@@ -69,6 +69,10 @@ typedef struct modem_passthrough_port_s {
 } modem_passthrough_port_t;
 
 static int16_t g_tx_linear[SAMPLES_PER_FRAME * 2];
+/* Frames the receive path had nothing for and filled in rather than dropped.
+   Reported with the RTP trace summary so loss concealment is visible next to
+   the sequence gaps that caused it. */
+static uint64_t g_rx_concealed_frames = 0;
 static me_state_t g_last_logged_me_state = ME_IDLE;
 static int g_last_logged_media_connected = 0;
 
@@ -138,6 +142,7 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
     pj_status_t st;
     pjmedia_frame_ext *rx_ext;
     unsigned i;
+    pj_bool_t fed = PJ_FALSE;
 
     if (!port || !frame || !port->downstream_port)
         return PJ_EINVAL;
@@ -156,7 +161,10 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
         st = pjmedia_port_get_frame(port->downstream_port, &audio_in);
         if (st == PJ_SUCCESS && audio_in.type == PJMEDIA_FRAME_TYPE_AUDIO
             && audio_in.buf && audio_in.size >= sizeof(int16_t)) {
-            int adj = me_cr_get_adjustment();
+            /* Same gate as the G.711 paths below -- see
+               me_rx_g711_slip_permitted() in modem_engine.h for why a
+               spliced sample costs the whole connection. */
+            int adj = me_rx_g711_slip_permitted() ? me_cr_get_adjustment() : 0;
 
             byte_count = (unsigned) audio_in.size;
             if (byte_count > sizeof(g_tx_linear))
@@ -165,10 +173,11 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
             if (sample_count > 0) {
                 const int16_t *samples = (const int16_t *) audio_in.buf;
 
-                /* Clock recovery: insert/drop one sample to keep our sample
-                   clock locked to the remote modem's, since the jitter
-                   buffer below is deliberately near-zero (see media_cfg.jb_*)
-                   and cannot absorb long-term clock-rate drift on its own. */
+                /* Clock recovery slips are off by default: the receivers
+                   downstream track the remote oscillator with their own
+                   fractional timing loops, and a spliced sample is a step
+                   they cannot absorb.  Measured, one of them ends the call's
+                   useful life -- me_rx_g711_slip_permitted(). */
                 if (adj > 0 && sample_count < PJ_ARRAY_SIZE(adj_buf)) {
                     memcpy(adj_buf, samples, sample_count * sizeof(int16_t));
                     adj_buf[sample_count] = samples[sample_count - 1];
@@ -191,7 +200,7 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
 
     st = pjmedia_port_get_frame(port->downstream_port, (pjmedia_frame *) rx_ext);
     if (st == PJ_SUCCESS && rx_ext->base.type == PJMEDIA_FRAME_TYPE_EXTENDED) {
-        /* Never on a DS0 stream — see me_rx_g711_slip_permitted(). */
+        /* Off by default — see me_rx_g711_slip_permitted(). */
         int adj = me_rx_g711_slip_permitted() ? me_cr_get_adjustment() : 0;
         static uint8_t adj_g711_buf[PJ_ARRAY_SIZE(g_tx_linear) + 1];
 
@@ -203,6 +212,7 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
             sf_bytes = ((unsigned) sf->bitlen + 7U) >> 3;
             if (sf_bytes == 0 || sf_bytes > PJ_ARRAY_SIZE(g_tx_linear))
                 continue;
+            fed = PJ_TRUE;
 
             /* Apply at most one slip per pulled frame, on the first
                subframe (there is normally exactly one). */
@@ -224,6 +234,7 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
 
         if (sz > PJ_ARRAY_SIZE(g_tx_linear))
             sz = PJ_ARRAY_SIZE(g_tx_linear);
+        fed = PJ_TRUE;
 
         if (adj > 0 && sz < PJ_ARRAY_SIZE(adj_g711_buf) && sz > 0) {
             memcpy(adj_g711_buf, rx_ext->base.buf, sz);
@@ -233,6 +244,32 @@ static pj_status_t modem_passthrough_get_frame(pjmedia_port *this_port,
             me_rx_g711((const uint8_t *)rx_ext->base.buf, (int) sz - 1);
         } else {
             me_rx_g711((const uint8_t *)rx_ext->base.buf, (int)sz);
+        }
+    }
+
+    /* Nothing arrived for this frame -- a lost packet, or a jitter-buffer
+       underrun (the buffer is deliberately near-zero, see media_cfg.jb_*).
+       Feed a frame of fill rather than nothing, so the codeword stream the
+       receiver consumes keeps its length.
+       
+       Feeding nothing DELETES those samples from the stream, and a deletion
+       is a permanent timing offset, not a gap: 160 samples is a whole number
+       of symbols only at some rates (64 at 3200 baud, 60 at 3000, 48 at
+       2400), and at 2743 or 3429 baud it is a fractional-symbol step of
+       exactly the kind measured to end a connection -- see
+       me_rx_g711_slip_permitted() in modem_engine.h.  Replayed over a clean
+       recorded call, losing one packet the way we do today costs 1% of the
+       call and concealing it costs nothing (99% vs 100% clean;
+       tools/inject_sample_slips.py --lose/--conceal). */
+    if (!fed) {
+        static uint8_t fill_buf[PJ_ARRAY_SIZE(g_tx_linear)];
+        unsigned n = port->payload_samples_per_frame;
+        uint8_t fill = (me_get_law() == ME_LAW_ALAW) ? 0xD5 : 0xFF;
+
+        if (n > 0 && n <= PJ_ARRAY_SIZE(fill_buf)) {
+            memset(fill_buf, fill, n);
+            me_rx_g711(fill_buf, (int) n);
+            g_rx_concealed_frames++;
         }
     }
 
@@ -545,10 +582,12 @@ static void rtp_trace_close(const char *direction, rtp_trace_state_t *trace)
         trace->file = NULL;
     }
     PJ_LOG(3, ("sip_modem",
-               "RTP %s trace: packets=%llu sequence_gaps=%llu timestamp_discontinuities=%llu",
+               "RTP %s trace: packets=%llu sequence_gaps=%llu "
+               "timestamp_discontinuities=%llu concealed_frames=%llu",
                direction, (unsigned long long)trace->packets,
                (unsigned long long)trace->sequence_gaps,
-               (unsigned long long)trace->timestamp_discontinuities));
+               (unsigned long long)trace->timestamp_discontinuities,
+               (unsigned long long)g_rx_concealed_frames));
 }
 
 static void rtp_tap_on_destroy(void *arg)

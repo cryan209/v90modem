@@ -144,15 +144,50 @@ void me_cr_update(uint32_t rtp_ts, int64_t local_ns);
 int  me_cr_get_adjustment(void);
 
 /*
- * Is the received G.711 payload a modulated signal, or is it data?
+ * May the receive path splice a sample into the stream the modem consumes?
  *
- * A slip is a timing correction on a modulated carrier: the receiver's timing
- * loop absorbs a repeated or missing sample and nothing is lost.  It is not a
- * timing correction on the digital modem's DS0 output, which is what arrives
- * in the V.90 analogue role -- there the octets *are* the constellation, and
- * inserting one shifts every §5.4 data frame after it and desynchronises the
- * §5.3 scrambler.  Nothing downstream can absorb that, so the slip is skipped
- * and the drift is left to show up where it does no damage.
+ * Default: no, and the default is the whole point.  The premise this gate
+ * used to carry -- "a slip is a timing correction on a modulated carrier,
+ * the receiver's timing loop absorbs a repeated or missing sample and
+ * nothing is lost" -- is measurably false, and it cost every long call.
+ *
+ * Measured on artifacts/goal-matrix-115515Z/rate24000-r1, the one call in
+ * the recorded rate matrix that ran 115.4 s at 100% clean -- and the only
+ * one of the twelve whose log contains no cr_get_adjustment at all, the
+ * other eleven injecting 8 to 81 of them and all eleven collapsing.
+ * Replayed untouched it holds `sym err` 0.037 with 0% bad shell frames.
+ * Duplicating a SINGLE codeword -- byte-exactly what the +1 branch in
+ * sip_modem.c does -- collapses it to 0.68 for the rest of the call at
+ * three of five instants tried (100% clean -> 2%, 7%, 49% at 35 s, 50 s,
+ * 90 s) and is absorbed at the other two (100%, 99% at 70 s, 110 s).  So a
+ * slip is not reliably fatal; it is fatal often enough that surviving the
+ * eight a quiet call injects is a coin flip won eight times, which is why
+ * the zero-slip call is the only one that ran clean.
+ *
+ * That it is sometimes absorbed is consistent rather than puzzling: one
+ * sample is 0.4 T at 3200 baud, inside the half-symbol the receiver's slip
+ * search covers -- but that search is gated on the eye still being open, so
+ * it helps only when it fires first.  Injecting the OPPOSITE slip later
+ * recovers a collapsed call (-> 54%), which is what proves the mechanism is
+ * the NET SAMPLE OFFSET rather than the momentary disturbance: a spliced
+ * sample is a step discontinuity plus, on a passband signal, a carrier
+ * rotation (82 degrees per sample at 3200 baud low carrier), and no
+ * decision-directed loop reacquires through it once the eye has shut.
+ * Reproduce with tools/inject_sample_slips.py.
+ *
+ * It was never closing a loop that needed closing either.  cr_update()'s
+ * error is RTP timestamp progression against OUR HOST's wall clock, not
+ * jitter-buffer occupancy -- and editing the payload of a frame the buffer
+ * has already handed over cannot change occupancy at all.  Meanwhile the
+ * V.34-family receivers downstream carry a fractional interpolating timing
+ * loop whose entire job is that same oscillator mismatch, continuously and
+ * without splicing; v34_gardner_test asserts it tracks 50 ppm, against the
+ * 7.2 ppm the peer actually drifts (tools/measure_timing_slips.py).  So the
+ * correction duplicated the receiver's job in the one way the receiver
+ * cannot absorb.  cr_update() is still fed, because drift is worth
+ * measuring; only the splice is gone.
+ *
+ * ME_RX_CLOCK_SLIP=1 restores the old behaviour for A/B work.
  */
 bool me_rx_g711_slip_permitted(void);
 
