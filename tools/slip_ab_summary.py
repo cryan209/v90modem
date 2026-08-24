@@ -62,6 +62,14 @@ def main():
         log = os.path.join(d, "server.log")
         if not os.path.isfile(log):
             continue
+        # A run's directory exists from the moment it STARTS, so counting it
+        # before v90_notch_ab.sh has printed its last line reports a call that
+        # has not happened yet as a failure.  Wait for that line.
+        done = os.path.join(root, name + ".out")
+        if not (os.path.isfile(done)
+                and "upstream delivered to our PTY" in open(done, errors="replace").read()):
+            print("  (%s still running -- not counted)" % name)
+            continue
         arm = name.split("-")[0]
         cl, tot, best, sp, data = score(log)
         pl = payload(d)
