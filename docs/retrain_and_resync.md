@@ -507,39 +507,58 @@ resume waiting for an L1/L2 probe and INFO1c that never arrive.
 So: **initiation reaches the peer, drives its retrain, and completes our half
 of the tone exchange; the peer then enters a Phase 1 error-recovery livelock
 of its own that this tree has hit before and cannot fix from this end.**
-### Live retest after centralising the retrain waveform
+### Live retest: peer-initiated V.34 now returns to data mode
 
-Retested the centralised restart seam against the SmartLink/slmodemd rig in
-`artifacts/retrain-wire-central-20260825T223439Z`.
+The first peer-response result in
+`artifacts/v34-peer-retrain-response-20260825T224623Z` was invalid.  The
+`ME_TX_DISRUPT_*` hook that removed the data carrier kept running for its full
+1.5 s even after Tone B moved the engine from DATA to TRAINING.  Internal TX
+logs showed Tone A and its reversal, but the hook zeroed them afterwards in
+`me_tx_audio()`; the G.711 wire still carried silence.  SmartLink stayed in
+`RX_PHASE1_CALL` because the test itself erased our response.
 
-* Locally initiated plain V.34 entered `V90_RETRAIN_SILENCE` directly from
-  data mode.  The measured silence was **69.8 ms**, then Tone A; the peer
-  reported `DATAXMIT=>SILENCERETRAIN`, raised Tone B, and accepted our complete
-  answer-modem tone timetable through `RX_PHASE1_CALL received`.  It then hit
-  its known `Repeated info0 ... TX_PHASE1_CALL` firmware livelock and dropped
-  16.2 s later.  This reproduces the previous endpoint with the waveform now
-  selected by the restart helper rather than its caller.
-* The previously untested peer-initiated plain-V.34 response is kept in
-  `artifacts/v34-peer-retrain-response-20260825T224623Z`.  A 1.5 s downstream
-  disruption made the peer go `DATAXMIT=>SILENCERETRAIN=>TONE_AB`; our receiver
-  detected Tone B in DATA after 80 ms, reset, emitted **69.8 ms** silence,
-  Tone A and the §11.2.1.2.3 phase reversal.  The peer did not leave
-  `RX_PHASE1_CALL`: it held Tone B and dropped 4.37 s after initiating.  Thus
-  the detection, engine response, training-state restart seam and waveform
-  all ran on a real peer, but this SmartLink path does not complete.
-* V.90 was exercised in
-  `artifacts/v90-peer-retrain-wire-20260825T223703Z`.  The peer initiated a
-  retrain from Phase 4 (`JaTXMIT=>SILENCERETRAIN=>TONE_AB`); our digital side
-  detected it, entered `V90_RETRAIN_SILENCE`, completed the Phase-2 tone,
-  L1/L2 and INFO1 exchange, and re-entered Phase 3 **2.34 s after detection**.
-  The peer subsequently retrained again after failing to detect Sd/S; four
-  cycles all selected the retrain waveform before the call fell back.  That is
-  the existing Phase-3 interop blocker, not a failure to complete the retrain
-  control exchange.  The requested data-mode TX disruption was not reached,
-  because none of these attempts completed Phase 4.
+The hook now stops as soon as the peer request leaves DATA and latches off for
+the rest of the call.  The latter matters because a successful retrain creates
+a new DATA-entry timestamp: without a per-call completion latch the hook fired
+again 20 s after every recovery and retrained forever.  Native V.90 exposed two
+more holes in the same instrument: its byte-exact G.711 transmitter bypasses
+`me_tx_audio()`, and its DATA handover never populated the shared entry epoch.
+The raw path now substitutes the law's digital-silence codeword while the hook
+is active, with no transcode on the normal path, and both V.90 DATA handovers
+set the epoch.
 
-So both centralised paths are now peer-verified on the wire, including
-peer-initiated responses in plain V.34 and V.90.  None establishes a complete
-return to data mode: locally initiated V.34 is blocked by the peer's documented
-repeated-INFO0 livelock, peer-initiated V.34 stalls in its `RX_PHASE1_CALL`,
-and V.90 reaches Phase 3 before the existing Sd/S blocker.
+The corrected plain-V.34 run is
+`artifacts/v34-peer-retrain-data-20260825T225827Z`:
+
+* The call reached V.42 LAPM at 3000 baud / 9600 bit/s.
+* Twenty seconds into DATA, 1.5 s of deliberate carrier loss made the peer go
+  `DATAXMIT=>SILENCERETRAIN=>TONE_AB`.
+* Our receiver detected Tone B in DATA after 80 ms.  Leaving DATA immediately
+  ended the disruption; the wire then carried **69.8 ms** silence, Tone A and
+  the §11.2.1.2.3 reversal.
+* Phase 2, Phase 3 and Phase 4 completed again.  The engine reported
+  `V.34 retrain complete; resuming the existing data link` and re-entered DATA
+  **11.21 s after detecting Tone B**.  The peer independently reported
+  `finally txbitrate 9600,rxbitrate 9600` and `EXMIT=>DATAXMIT`.
+* LAPM was retained rather than restarted.  The peer's DTE received **1019
+  numbered lines, contiguous with zero gaps** across the outage and retrain.
+  The hook fired once only.
+
+That is a complete, peer-initiated §11.5.1.1/§11.5.2.2 retrain from DATA back
+to DATA, not merely a waveform check.
+
+### V.90 live status
+
+`artifacts/v90-peer-retrain-data-20260825T230105Z` establishes that V.90 can
+also get through retrains to data on this peer: two peer-initiated Phase-3/4
+retrains ran through `V90_RETRAIN_SILENCE` and Phase 2, the second attempt then
+completed Phases 3/4 and entered DATA at 19200 bit/s upstream / 50666 bit/s
+downstream.  It held an open eye for 112.2 s and delivered **23357 contiguous
+U-lines with zero gaps**.
+
+That run reached DATA before the raw-G.711 disruption hook was fixed, so it is
+not a DATA→retrain→DATA proof for V.90.  Subsequent attempts to provoke that
+exact transition were dominated by the existing intermittent Phase-3 Sd/S
+blocker and did not reach initial DATA.  The instrument now reaches the V.90
+raw path and is ready for the next successful handshake; plain V.34 supplies
+the complete end-to-end DATA→retrain→DATA proof above.

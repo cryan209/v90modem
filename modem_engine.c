@@ -2907,7 +2907,16 @@ static bool tx_disrupt_active(void)
 {
     int64_t since;
 
-    if (me_tx_disrupt_after_ms() <= 0 || g_v34_data_entry_ms == 0)
+    /* The test hook exists to remove the DATA carrier until the peer asks for
+       a retrain.  Once that request moves the engine to TRAINING it must get
+       out of the way: otherwise it also erases the §9.5/§11.5 response that
+       the test is meant to put on the wire.  The first live peer-response run
+       exposed exactly that -- internal logs showed Tone A while the G.711 tap
+       still carried the hook's silence, leaving SmartLink in RX_PHASE1_CALL. */
+    if (g_state != ME_DATA
+        || g_tx_disrupt_logged < 0
+        || me_tx_disrupt_after_ms() <= 0
+        || g_v34_data_entry_ms == 0)
         return false;
     since = trace_now_ms() - g_v34_data_entry_ms;
     if (since < me_tx_disrupt_after_ms())
@@ -4290,6 +4299,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
                         }
                         g_state = ME_DATA;
                         g_phase_start_ms = 0;
+                        g_v34_data_entry_ms = trace_now_ms();
                         ME_LOG("[ME] V.90 training complete (upstream V.34 %d bps, downstream PCM %d bps)\n",
                                 rate, downstream_rate);
                         trace_phase("V90 enter DATA: upstream=%d downstream=%d", rate, downstream_rate);
@@ -7767,6 +7777,10 @@ static void enter_v90_data_locked(void)
     }
     g_state = ME_DATA;
     g_phase_start_ms = 0;
+    /* Shared DATA-entry epoch for the §9.5/§11.5 disruption probe.  Plain
+       V.34 set it at its handover, but the native V.90 handover did not, so
+       ME_TX_DISRUPT_AFTER_MS could never exercise a V.90 peer response. */
+    g_v34_data_entry_ms = trace_now_ms();
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     ME_LOG("[ME] %s startup complete (upstream %s %d bps, downstream PCM %d bps)\n",
            g_v92_active ? "V.92" : "V.90",
@@ -8259,7 +8273,11 @@ void me_tx_audio(int16_t *amp, int len)
             ME_LOG("[ME] TX DISRUPT: transmitting silence for %d ms "
                    "(ME_TX_DISRUPT_MS)\n", me_tx_disrupt_ms());
         }
-    } else if (g_tx_disrupt_logged != 0 && g_tx_disrupt_logged > 0) {
+    } else if (g_tx_disrupt_logged > 0) {
+        /* Negative means this once-per-call probe has completed.  A retrain
+           updates g_v34_data_entry_ms when it returns to DATA; without this
+           latch the hook opened another disruption 20 s later and retrained
+           repeatedly for the rest of the call. */
         g_tx_disrupt_logged = -1;
         ME_LOG("[ME] TX DISRUPT: ended, carrier restored\n");
     }
@@ -8521,6 +8539,23 @@ int me_tx_g711(uint8_t *codewords, int count)
         pthread_mutex_unlock(&g_state_mtx);
 
         if (raw_pcm) {
+            /* The V.PCM paths bypass me_tx_audio(), so apply the retrain test
+               hook in the byte-exact G.711 domain as well.  The old hook
+               silently worked only for plain V.34: native V.90 reached DATA
+               but could never provoke the peer retrain it was meant to test.
+               pcm_idle() is the law's digital-silence codeword; no transcode
+               or gain operation is introduced into the normal path. */
+            if (tx_disrupt_active()) {
+                memset(codewords + offset, pcm_idle(), (size_t)chunk);
+                if (g_tx_disrupt_logged == 0) {
+                    g_tx_disrupt_logged = trace_now_ms();
+                    ME_LOG("[ME] TX DISRUPT: transmitting G.711 silence for "
+                           "%d ms (ME_TX_DISRUPT_MS)\n", me_tx_disrupt_ms());
+                }
+            } else if (g_tx_disrupt_logged > 0) {
+                g_tx_disrupt_logged = -1;
+                ME_LOG("[ME] TX DISRUPT: ended, G.711 carrier restored\n");
+            }
             for (int i = 0; i < chunk; i++)
                 linear[i] = pcm_to_linear(codewords[offset + i]);
             buffer_tx_samples_for_echo(linear, chunk);
