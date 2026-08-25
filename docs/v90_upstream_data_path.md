@@ -2348,3 +2348,59 @@ doubles what the rate delivers; it does not make 28800 hold.
 Note the window-count trap again: fixed produced *fewer* windows (12938 vs
 14272) while being clean for longer, because a clean stretch emits long windows
 and a white one short ones. Read seconds and line counts.
+
+### The same A/B at 31200 — the direction agrees, the attribution does not (2026-08-25)
+
+`artifacts/slip-ab-31200-010059Z/`, same harness, six calls per arm.
+
+| run | clean | longest hold | splices | U-lines |
+|---|---|---|---|---|
+| fixed-r1 | — | — | — | no data mode |
+| fixed-r2 | 113.9s | 113.9s | 0 | 22892 |
+| fixed-r3 | 103.5s | 92.6s | 0 | 19141 |
+| fixed-r4 | — | — | — | no data mode |
+| fixed-r5 | 115.6s | 115.6s | 0 | **0** |
+| fixed-r6 | 100.1s | 45.1s | 0 | **0** |
+| **fixed** | **433.1s** | **367.2s** | **0** | **42033** (4 of 6 in data mode) |
+| slip-r1 | — | — | — | no data mode |
+| slip-r2 | 11.7s | 11.7s | 6 | 2373 |
+| slip-r3 | — | — | — | no data mode |
+| slip-r4 | 1.0s | 1.0s | **0** | 170 |
+| slip-r5 | — | — | — | no data mode |
+| slip-r6 | 19.7s | 19.7s | 6 | 4100 |
+| **slip** | **32.4s** | **32.4s** | **12** | **6643** (3 of 6 in data mode) |
+
+On its face that is 13.4x the clean time and 6.3x the payload, flat across
+thresholds 0.20–0.40 (13.5/13.4/13.4/13.3/13.3). **Do not report it that way.**
+
+**The slip arm barely spliced at this rate — 12 corrections across six calls,
+against 93 at 28800 — so the two arms were running nearly the same
+configuration, and a 13x gap between configurations that hardly differ is
+mostly variance.** The tell is `slip-r4`: it made **zero** splices, which makes
+it a fixed-arm call in all but the environment variable, and it managed 1.0s.
+Pooling both arms by what each call actually *did* rather than which arm it was
+in: 0 splices gives 113.9, 103.5, 115.6, 100.1 and **1.0** (mean 86.8s, n=5),
+more than 0 splices gives 11.7 and 19.7 (mean 15.7s, n=2). The direction
+survives that pooling, but with n=2 in one group and an outlier in the other it
+is not an effect size worth quoting.
+
+**What 31200 does establish** is the thing the offline matrix said was
+impossible: `fixed-r2` ran **113.9s — the entire call — unbroken**, and
+delivered 22892 lines, at the rate the recorded matrix scored 2–20% clean and
+"never locks".
+
+**And it shows the frame-phase problem is the binding constraint here, not the
+splice**: `fixed-r5` held a clean eye for the whole 115.6s and delivered
+**zero** payload, as did `fixed-r6` over 100.1s. Two of the four fixed
+data-mode calls produced an open eye and no data. That is the lock problem of
+the entries above, untouched by this change and now the dominant limit at this
+rate.
+
+**Summary across all three rates.** Direction is consistent everywhere;
+attribution is strongest where the arms actually differed:
+
+| rate | data mode f/s | clean f/s | U-lines f/s | splices in slip arm | attribution |
+|---|---|---|---|---|---|
+| 19200 | 2/6, 2/6 | 228.4 / 180.8 | 46716 / 6727 | 22 | fair, but only 2 data-mode calls per arm |
+| 28800 | 6/6, 6/6 | 179.9 / 101.9 | 38338 / 16980 | 93 | **strongest — paired, and the arms really differed** |
+| 31200 | 4/6, 3/6 | 433.1 / 32.4 | 42033 / 6643 | 12 | weak — arms barely differed, large variance |
