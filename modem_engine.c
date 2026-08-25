@@ -2706,6 +2706,59 @@ static int me_v90_reneg_enabled(void)
     return cached;
 }
 
+/* §9.5.1.1 retrain-on-loss bounds.
+ *
+ * A retrain costs the whole Phase 2/3/4 startup -- seconds of downstream --
+ * so it is worth taking only where the alternative is a dead upstream, and
+ * only a few times.  Two bounds: a per-call cap, and a dwell measured from
+ * the last one, so a link that collapses again immediately is left alone
+ * rather than spending the call retraining.  The dwell also covers the case
+ * where the retrain itself fails to reach data mode: the counter advances
+ * whether or not the attempt succeeds. */
+#define ME_V90_MAX_LOSS_RETRAINS_DEFAULT 4
+#define ME_V90_LOSS_RETRAIN_DWELL_MS_DEFAULT 20000
+
+static unsigned g_v90_loss_retrains = 0;
+static int64_t  g_v90_last_loss_retrain_ms = 0;
+
+static int me_v90_max_loss_retrains(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = parse_env_int("ME_V90_RETRAIN_ON_LOSS",
+                               ME_V90_MAX_LOSS_RETRAINS_DEFAULT);
+    return cached;
+}
+
+static int me_v90_loss_retrain_dwell_ms(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = parse_env_int("ME_V90_RETRAIN_ON_LOSS_DWELL_MS",
+                               ME_V90_LOSS_RETRAIN_DWELL_MS_DEFAULT);
+    return cached;
+}
+
+/* True when a §9.5.1.1 retrain for a lost upstream is both allowed and due.
+ * ME_V90_RETRAIN_ON_LOSS=0 restores the old behaviour of holding a link
+ * whose upstream has stopped decoding. */
+static bool v90_retrain_on_loss_due(void)
+{
+    int64_t now;
+
+    if (me_v90_max_loss_retrains() <= 0)
+        return false;
+    if ((int) g_v90_loss_retrains >= me_v90_max_loss_retrains())
+        return false;
+    now = trace_now_ms();
+    if (g_v90_last_loss_retrain_ms != 0
+        && now - g_v90_last_loss_retrain_ms < me_v90_loss_retrain_dwell_ms())
+        return false;
+    return true;
+}
+
 static void v90_reset_upstream_data_arming(void)
 {
     g_v34_upstream_data_armed = false;
@@ -3242,6 +3295,10 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_fallback_v34_logged = false;
     g_v90_fallback_phase4_released = false;
     g_v90_phase2_restarts = 0;
+    /* Per call, not per process: this server runs many calls in one. */
+    g_v90_loss_retrains = 0;
+    g_v90_last_loss_retrain_ms = 0;
+    g_v90_retrain_from_data = false;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     v90_cp_rx_reset(&g_v90_cp_rx);
     v90_cp_rx_clear_votes(&g_v90_cp_rx);
@@ -7516,10 +7573,38 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                 ME_LOG("[ME] V.90 upstream carrier lost; requesting a §9.6 "
                        "rate renegotiation to re-acquire\n");
                 (void) v90_request_rate_renegotiation(g_v90);
+                /* Clear it: at the cap, the condition would otherwise be
+                 * re-raised on every block for the rest of the call. */
+                v34_v90_upstream_clear_carrier_lost(g_v34);
+            } else if (v90_retrain_on_loss_due()) {
+                /* §9.5.1.1.  The renegotiation above is the cheaper of the
+                 * two recoveries and is preferred where the peer implements
+                 * §9.6.2, but this rig's analogue modem answers Rd with
+                 * nothing at all, so with §9.6 unavailable the alternative to
+                 * a retrain is not "leave the link alone" -- it is to keep
+                 * transmitting downstream into a receiver whose eye is shut
+                 * for the rest of the call.  §9.5 puts a retrain at any time,
+                 * and it ends where the upstream receiver can actually start
+                 * again: a fresh B1 off a fresh Phase 4.
+                 *
+                 * v90_retrain_on_loss_due() carries the bounds -- a per-call
+                 * cap and a dwell since the last one -- so a line that is
+                 * simply too poor degrades to the old behaviour of leaving it
+                 * alone rather than retraining in a loop. */
+                v34_v90_upstream_clear_carrier_lost(g_v34);
+                ME_LOG("[ME] V.90 upstream carrier lost and §9.6 is not "
+                       "available; initiating a §9.5.1.1 retrain (%u of %d)\n",
+                       g_v90_loss_retrains + 1, me_v90_max_loss_retrains());
+                g_v90_loss_retrains++;
+                g_v90_last_loss_retrain_ms = trace_now_ms();
+                if (restart_v90_phase2_locked(
+                        "upstream carrier lost in data mode; retraining "
+                        "per 9.5.1.1"))
+                    v34_v90_start_retrain_response(g_v34);
+                return false;
+            } else {
+                v34_v90_upstream_clear_carrier_lost(g_v34);
             }
-            /* Clear it either way: at the cap, the condition would otherwise
-             * be re-raised on every block for the rest of the call. */
-            v34_v90_upstream_clear_carrier_lost(g_v34);
         }
 
         /* §9.6: "Rate renegotiation shall be initiated by the digital modem's
