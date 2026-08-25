@@ -232,6 +232,21 @@
     measurably costly on a call whose phase was right all along. */
 #define V34_V90_T3_SWEEP_EPISODES           2
 
+/*! Frame-phase confirmation.  A wrong grouping cannot produce a shell index
+    that fits k bits (9.6.3.3), but it only FAILS to fit on some frames: the
+    measured overflow rate of a wrong phase is 4-13% per frame, so the
+    probability it reads clean over N frames is about (1-q)^N.  At the coarse
+    window's ~15 frames that is 0.96^15 = 0.54 -- a coin toss, and exactly the
+    ~50% of candidates seen scoring zero on a live call.  At 120 frames it is
+    0.96^120 = 0.007.  So confirm over a window long enough to hold that many
+    mapping frames, and require the frames to actually be there. */
+#define V34_V90_T3_CONFIRM_BITS             9600
+#define V34_V90_T3_CONFIRM_MIN_FRAMES       100
+/*! A coarse window must carry at least this many frames before "zero bad" is
+    treated as evidence at all -- with none, zero bad and no evidence print
+    the same. */
+#define V34_V90_T3_COARSE_MIN_FRAMES        8
+
 /*! Symbols after B1 used to check that an acquisition generalises. */
 #define V34_V90_T3_VALIDATE_SYMBOLS         256
 
@@ -1273,6 +1288,21 @@ typedef struct
     bool v90_t3_idle_seen;
     bool v90_t3_sf_locked;
     int v90_t3_sf_tries;
+    /*! \brief Frame-phase confirmation stage.
+        The coarse sweep measures each candidate over one short window, which
+        is enough for the marks on an idle line and NOT enough for the shell
+        check on a busy one: a wrong phase overflows k bits in only a few
+        percent of frames, so over the ~15 frames a short window holds it
+        reads clean about half the time.  Measured on a live 31200 call, 9 of
+        the 73 candidates visited scored zero bad frames and the sweep had no
+        way to choose between them -- 115 s of open eye and no payload.  So
+        the coarse pass now only SHORTLISTS the candidates it cannot reject,
+        and each is then re-measured over a long window where the same test
+        is decisive. */
+    uint8_t v90_t3_phase_shortlist[32];
+    int v90_t3_shortlist_n;
+    int v90_t3_confirm_pos;
+    bool v90_t3_confirming;
     /*! \brief Where B1 starts in the raw ring, and the running per-frame
         error against the B1 template, used to find where B1 actually ends
         rather than assuming it is one data frame long. */

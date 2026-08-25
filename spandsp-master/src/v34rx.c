@@ -88,6 +88,50 @@ static int v34_diag_flag(const char *name, int *cache)
     return *cache;
 }
 
+/* The frame-phase confirmation stage (see V34_V90_T3_CONFIRM_BITS).  On by
+   default; ME_V90_PHASE_CONFIRM=0 restores the single-pass sweep for A/B
+   work. */
+static int v90_t3_phase_confirm_enabled(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *v = getenv("ME_V90_PHASE_CONFIRM");
+
+        cache = (v  &&  atoi(v) == 0)  ?  0  :  1;
+    }
+    /*endif*/
+    return cache;
+}
+
+/* ME_V90_PHASE_NO_MARKS=1 denies the content-dependent locks (the marks on an
+   idle line, the V.14 ratio on a busy one), leaving only the shell-index
+   evidence.  It exists because the failure this machinery is for -- the peer
+   already transmitting when data mode starts, so no phase ever reads high --
+   does NOT occur in any recording we hold: every tap begins with the peer
+   idle, so phase 0 locks on 100% marks after 0 steps and the sweep is never
+   asked a hard question.  Setting this reproduces the live condition on a
+   recording whose correct answer is known. */
+static int v90_t3_phase_no_marks(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *v = getenv("ME_V90_PHASE_NO_MARKS");
+
+        cache = (v  &&  atoi(v) != 0)  ?  1  :  0;
+    }
+    /*endif*/
+    return cache;
+}
+
+#define V90_T3_PH_SET(s, i)  \
+    ((s)->v90_t3_phase_shortlist[((i) >> 3) & 31] |= (uint8_t) (1u << ((i) & 7)))
+#define V90_T3_PH_GET(s, i)  \
+    (((s)->v90_t3_phase_shortlist[((i) >> 3) & 31] >> ((i) & 7)) & 1)
+
 static int v34_trace_diagnostics(void)
 {
     static int cache = -1;
@@ -689,7 +733,10 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
            was longer than the intervals this peer leaves between the slips
            that disturb the phase in the first place, so the sweep was losing
            a race it did not have to be in. */
-        if (++s->v90_t3_bit_count >= (s->v90_t3_sf_locked ? 4800 : 1200))
+        if (++s->v90_t3_bit_count
+                >= (s->v90_t3_sf_locked
+                    ? 4800
+                    : (s->v90_t3_confirming ? V34_V90_T3_CONFIRM_BITS : 1200)))
         {
             int ones_pct = 100*s->v90_t3_ones/s->v90_t3_bit_count;
             int shell_pct = s->v90_t3_shell_frames
@@ -853,9 +900,11 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                    wrong before releasing.  Measured on round1: 35 locks, most
                    of them in the 75-87% band, and the sweep restarting after
                    each. */
-                if (ones_pct >= 90
-                    ||
-                    (v14_pct >= 5  &&  v14_ratio >= 30))
+                if (!v90_t3_phase_no_marks()
+                    &&
+                    (ones_pct >= 90
+                     ||
+                     (v14_pct >= 5  &&  v14_ratio >= 30)))
                 {
                     s->v90_t3_sf_locked = true;
                     span_log(s->logging, SPAN_LOG_WARNING,
@@ -864,6 +913,106 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                              "after %d steps)\n",
                              ones_pct, v14_pct, v14_ratio/10,
                              s->v90_t3_sf_tries);
+                }
+                else if (s->v90_t3_confirming
+                         &&
+                         !s->v90_t3_phase_pending)
+                {
+                    /* A shortlisted candidate, measured over a long window
+                       where 9.6.3.3 is decisive.  This is the only lock that
+                       owes nothing to what the peer is sending: the marks
+                       need an idle line and the V.14 ratio needs a busy one,
+                       and a call whose DTE trickles satisfies neither. */
+                    int span = s->parms.j*s->parms.p;
+                    int next;
+
+                    /* An idle line cannot answer this question, and the
+                       measurement says so plainly: displaced five data frames
+                       from the phase B1 pins, offsets 5, 6 and 7 all read
+                       100% ones while the peer was idle, and only once its
+                       DTE began sending did the wrong ones fall to 51% and
+                       35%.  Marks are phase-AMBIGUOUS -- a wrong grouping
+                       still decodes a continuous mark to a continuous mark --
+                       so confirming against them would lock whichever
+                       candidate happened to be tried first.  Wait for
+                       traffic instead of answering from silence. */
+                    if (ones_pct >= 90)
+                    {
+                        span_log(s->logging, SPAN_LOG_WARNING,
+                                 "Rx - V.90 upstream frame phase offset %d: "
+                                 "line idle (%d%% ones), no evidence yet\n",
+                                 s->v90_t3_phase_pos, ones_pct);
+                    }
+                    else if (shell_pct == 0
+                        &&
+                        s->v90_t3_shell_frames >= V34_V90_T3_CONFIRM_MIN_FRAMES)
+                    {
+                        s->v90_t3_sf_locked = true;
+                        s->v90_t3_confirming = false;
+                        span_log(s->logging, SPAN_LOG_WARNING,
+                                 "Rx - V.90 upstream frame phase locked on "
+                                 "shell evidence (offset %d, 0 bad of %d "
+                                 "frames, %d%% ones, V.14 %d%% at %dx)\n",
+                                 s->v90_t3_phase_pos, s->v90_t3_shell_frames,
+                                 ones_pct, v14_pct, v14_ratio/10);
+                    }
+                    else
+                    {
+                        /* Rejected.  Drop it from the shortlist so a later
+                           episode does not pay for it again. */
+                        s->v90_t3_phase_shortlist[(s->v90_t3_phase_pos >> 3) & 31]
+                            &= (uint8_t) ~(1u << (s->v90_t3_phase_pos & 7));
+                        span_log(s->logging, SPAN_LOG_WARNING,
+                                 "Rx - V.90 upstream frame phase offset %d "
+                                 "rejected (%d bad of %d frames)\n",
+                                 s->v90_t3_phase_pos, s->v90_t3_shell_bad,
+                                 s->v90_t3_shell_frames);
+                        next = -1;
+                        for (int k = 1;  k <= span;  k++)
+                        {
+                            int cand = (s->v90_t3_phase_pos + k) % span;
+
+                            if (V90_T3_PH_GET(s, cand))
+                            {
+                                next = cand;
+                                break;
+                            }
+                            /*endif*/
+                        }
+                        /*endfor*/
+                        if (next >= 0)
+                        {
+                            s->v90_t3_phase_delta = (next - s->v90_t3_phase_pos
+                                                     + span) % span;
+                            s->v90_t3_phase_pending = true;
+                        }
+                        else
+                        {
+                            /* Nothing survived.  Fall back to the coarse
+                               winner rather than sitting wherever the
+                               confirmation walk ended, and let the ordinary
+                               sweep have another episode if it is allowed
+                               one. */
+                            int delta = ((s->v90_t3_sweep_best_pos
+                                          - s->v90_t3_phase_pos) % span + span)
+                                        % span;
+
+                            s->v90_t3_confirming = false;
+                            if (delta != 0)
+                            {
+                                s->v90_t3_phase_delta = delta;
+                                s->v90_t3_phase_pending = true;
+                            }
+                            /*endif*/
+                            span_log(s->logging, SPAN_LOG_WARNING,
+                                     "Rx - V.90 upstream frame phase "
+                                     "confirmation found nothing; back to "
+                                     "offset %d\n",
+                                     s->v90_t3_sweep_best_pos);
+                        }
+                        /*endif*/
+                    }
+                    /*endif*/
                 }
                 else if (v90_t3_phase_evidence_ok(s)
                          &&
@@ -907,6 +1056,33 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                        applied last time round, so score that one before
                        moving on.  Step 0 is the phase the receiver arrived
                        with, which is the one to beat. */
+                    /* Shortlist rather than rank.  The score cannot separate
+                       candidates that all read zero bad frames, and on a busy
+                       line that is most of the ones worth considering -- so
+                       record which ones the cheap test failed to reject, and
+                       decide between them later where the test has enough
+                       frames to mean something. */
+                    if (s->v90_t3_sf_tries == 0)
+                    {
+                        memset(s->v90_t3_phase_shortlist, 0,
+                               sizeof(s->v90_t3_phase_shortlist));
+                        s->v90_t3_shortlist_n = 0;
+                    }
+                    /*endif*/
+                    if (shell_pct == 0
+                        &&
+                        ones_pct < 90
+                        &&
+                        s->v90_t3_shell_frames >= V34_V90_T3_COARSE_MIN_FRAMES
+                        &&
+                        s->v90_t3_phase_pos < 256
+                        &&
+                        !V90_T3_PH_GET(s, s->v90_t3_phase_pos))
+                    {
+                        V90_T3_PH_SET(s, s->v90_t3_phase_pos);
+                        s->v90_t3_shortlist_n++;
+                    }
+                    /*endif*/
                     if (s->v90_t3_sf_tries == 0)
                     {
                         s->v90_t3_sweep_base = sweep_score;
@@ -964,6 +1140,48 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                     int delta = ((s->v90_t3_sweep_best_pos
                                   - s->v90_t3_phase_pos) % span + span) % span;
 
+                    /* Every candidate has had its cheap look.  If more than
+                       one survived it, the score cannot choose between them
+                       and going to its argmax is picking noise -- confirm
+                       them instead. */
+                    if (v90_t3_phase_confirm_enabled()
+                        &&
+                        s->v90_t3_shortlist_n > 0)
+                    {
+                        int first = -1;
+
+                        for (int k = 0;  k < span;  k++)
+                        {
+                            int cand = (s->v90_t3_phase_pos + k) % span;
+
+                            if (V90_T3_PH_GET(s, cand))
+                            {
+                                first = cand;
+                                break;
+                            }
+                            /*endif*/
+                        }
+                        /*endfor*/
+                        if (first >= 0)
+                        {
+                            s->v90_t3_confirming = true;
+                            s->v90_t3_phase_delta = (first - s->v90_t3_phase_pos
+                                                     + span) % span;
+                            s->v90_t3_phase_pending
+                                = (s->v90_t3_phase_delta != 0);
+                            s->v90_t3_sf_tries = 0;
+                            span_log(s->logging, SPAN_LOG_WARNING,
+                                     "Rx - V.90 upstream phase sweep done: "
+                                     "%d of %d candidates survived; "
+                                     "confirming from offset %d over %d "
+                                     "bits each\n",
+                                     s->v90_t3_shortlist_n, span, first,
+                                     V34_V90_T3_CONFIRM_BITS);
+                            goto v90_t3_window_done;
+                        }
+                        /*endif*/
+                    }
+                    /*endif*/
                     if (delta != 0)
                     {
                         s->v90_t3_phase_delta = delta;
@@ -995,6 +1213,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                 /*endif*/
             }
             /*endif*/
+v90_t3_window_done:
             s->v90_t3_ones = 0;
             s->v90_t3_alt_ones = 0;
             s->v90_t3_bit_count = 0;
@@ -12506,6 +12725,26 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                              "(frame error %.3f); publishing data\n",
                              (int) ((idx + 1)/s->v90_t3_b1_symbols), mean);
                     s->v90_t3_in_b1 = false;
+                    /* ME_V90_PHASE_FORCE_OFFSET=n displaces the decoder n
+                       data frames from the phase B1 pins.  It has to happen
+                       HERE and not at acquisition: applied while B1 is still
+                       running, the shift is absorbed by B1's own pinning and
+                       only the bookkeeping counter moves -- which is exactly
+                       what made the first version of this test useless, since
+                       it reported "offset 5" while decoding perfectly.
+                       Together with ME_V90_PHASE_NO_MARKS it reproduces the
+                       live failure on a recording whose payload is known. */
+                    {
+                        const char *v = getenv("ME_V90_PHASE_FORCE_OFFSET");
+                        int forced = (v != NULL)  ?  atoi(v)  :  0;
+
+                        if (forced > 0)
+                        {
+                            s->v90_t3_phase_delta = forced;
+                            s->v90_t3_phase_pending = true;
+                        }
+                        /*endif*/
+                    }
                 }
                 /*endif*/
             }

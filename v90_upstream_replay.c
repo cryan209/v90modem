@@ -43,12 +43,89 @@ static int sample_count;
 
 static int64_t bits_out;
 
+/* Keep the published bits so the replay can report PAYLOAD, not just a bit
+   count.  Every metric inside the receiver is a proxy -- the marks fraction,
+   the V.14 ratio, the shell-index bound -- and the frame-phase work is
+   precisely where a proxy can read perfect while nothing decodes.  The soak
+   pattern is "U%07d" lines, so counting intact ones is the end-to-end answer
+   and it owes nothing to the receiver's own opinion of itself. */
+static uint8_t *bit_log;
+static int64_t bit_log_len;
+static int64_t bit_log_cap;
+
 static void replay_put_bit(void *user_data, int bit)
 {
     (void) user_data;
-    if (bit >= 0)
-        bits_out++;
+    if (bit < 0)
+        return;
     /*endif*/
+    bits_out++;
+    if (bit_log_len >= bit_log_cap)
+    {
+        int64_t want = bit_log_cap ? bit_log_cap*2 : (1 << 20);
+        uint8_t *bigger = realloc(bit_log, (size_t) want);
+
+        if (bigger == NULL)
+            return;
+        /*endif*/
+        bit_log = bigger;
+        bit_log_cap = want;
+    }
+    /*endif*/
+    bit_log[bit_log_len++] = (uint8_t) (bit & 1);
+}
+/*- End of function --------------------------------------------------------*/
+
+/* V.14 async framing: a zero start bit, eight data bits LSB first, a one stop
+   bit.  The bit phase is not known, so try all ten and keep the best. */
+static int replay_count_pattern_lines(void)
+{
+    int best = 0;
+
+    for (int ph = 0;  ph < 10;  ph++)
+    {
+        int64_t i = ph;
+        int lines = 0;
+        int run = 0;      /* how much of "U" + 7 digits has matched */
+
+        while (i + 9 < bit_log_len)
+        {
+            int c;
+
+            if (bit_log[i] != 0  ||  bit_log[i + 9] != 1)
+            {
+                i++;
+                run = 0;
+                continue;
+            }
+            /*endif*/
+            c = 0;
+            for (int b = 0;  b < 8;  b++)
+                c |= bit_log[i + 1 + b] << b;
+            /*endfor*/
+            i += 10;
+            if (run == 0)
+                run = (c == 'U') ? 1 : 0;
+            else if (c >= '0'  &&  c <= '9')
+            {
+                if (++run == 8)
+                {
+                    lines++;
+                    run = 0;
+                }
+                /*endif*/
+            }
+            else
+                run = (c == 'U') ? 1 : 0;
+            /*endif*/
+        }
+        /*endwhile*/
+        if (lines > best)
+            best = lines;
+        /*endif*/
+    }
+    /*endfor*/
+    return best;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -276,7 +353,9 @@ int main(int argc, char *argv[])
        carrier loops on the way past. */
     bits_out = 0;
     feed(rx, found + ACQUIRE_WINDOW*8000, sample_count);
-    printf("replay: finished, %" PRId64 " bits published\n", bits_out);
+    printf("replay: finished, %" PRId64 " bits published, "
+           "%d intact U%%07d pattern lines\n",
+           bits_out, replay_count_pattern_lines());
     v34_free(rx);
     free(samples);
     return 0;
