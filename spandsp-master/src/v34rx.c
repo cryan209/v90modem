@@ -143,8 +143,23 @@ static int v90_t3_sweep_abs_eye(void)
     return cache;
 }
 
-/* ME_V90_SWEEP_NEEDS_EVIDENCE=0 lets the sweep start without positive
-   evidence that the current phase is wrong, as it used to. */
+/* Require positive evidence that the current phase is wrong before sweeping.
+   OFF by default, on a measurement against it.
+
+   The reasoning was good: B1 pins the phase correctly on almost every call,
+   the live busy-start failure ARRIVED on a good phase and was pushed into a
+   sweep by noise on 15-frame windows, and a sweep that goes wrong is
+   unrecoverable.  But held up to a controlled test it does not pay.  With the
+   marks lock denied in BOTH arms -- which forces every call into the
+   busy-start condition the search actually has to handle -- six calls a side
+   at 28800: the arm that could not sweep made 0 steps and delivered 38362
+   payload lines, and the arm that swept made 224 steps in every call and
+   delivered 49201.  Sweeping 224 steps cost nothing there, and gating it cost
+   about a fifth of the payload.  The 31200 repeat, where the original failure
+   was seen, yielded no data-mode calls at all (the rig spent that session in
+   the "no S after Jd" Phase 3 blocker), so this is decided on 28800 alone.
+
+   ME_V90_SWEEP_NEEDS_EVIDENCE=1 enables it. */
 static int v90_t3_sweep_needs_evidence(void)
 {
     static int cache = -1;
@@ -153,7 +168,7 @@ static int v90_t3_sweep_needs_evidence(void)
     {
         const char *v = getenv("ME_V90_SWEEP_NEEDS_EVIDENCE");
 
-        cache = (v  &&  atoi(v) == 0)  ?  0  :  1;
+        cache = (v  &&  atoi(v) != 0)  ?  1  :  0;
     }
     /*endif*/
     return cache;

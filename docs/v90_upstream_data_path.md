@@ -2534,3 +2534,61 @@ The one idle-start call that delivered nothing (`relgate-r2` at 28800) is a
 separate story worth noting: its shell evidence was computed over **16-17 frames
 per window** where a working call gets 60-67, so it was judging phases on a
 quarter of the evidence.
+
+### Sweeping is not what breaks the busy-start call (2026-08-25)
+
+The 28800 gate A/B established the determinant — **whether the peer is
+transmitting when data mode begins**; idle-start 18 of 19 calls delivered,
+busy-start 0 of 2 — and left an obvious hypothesis. B1 pins the phase
+correctly on almost every call, and the failing busy-start call had **arrived
+on a good phase**: `relgate-r5`'s first windows read 1 bad of 45 frames, then
+0/19, 1/15, 0/16, 1/15, 1/16. On 15-frame windows one bad frame is 7%, so
+noise alone crosses the 3% release threshold. It started a sweep, ran 784
+steps, and never found its way back. The hypothesis: **the sweep destroys a
+phase that was already right, and it is started on noise.**
+
+So sweeping was made to require positive evidence — 120 mapping frames of
+accumulated badness on the phase actually in use, idle windows excluded.
+
+**It does not pay, and the test that says so is the cleanest in this
+sequence.** With the marks lock denied in **both** arms — which forces every
+call into the busy-start condition the search actually has to handle, instead
+of waiting for the one call in ten the rig supplies — six calls a side at
+28800:
+
+| arm | sweep steps | clean | longest hold | U-lines |
+|---|---|---|---|---|
+| evidence required | **0 in all six** | 171.5s | 163.1s | 38362 |
+| sweep freely (old) | **224 in all six** | 203.1s | 182.0s | **49201** |
+
+The gate does exactly what it was built to do — it suppresses the sweep
+entirely — and **sweeping 224 steps costs nothing at 28800, while suppressing
+it costs about a fifth of the payload.** Default off
+(`ME_V90_SWEEP_NEEDS_EVIDENCE=1` enables it), kept with the measurement
+because the reasoning still describes something real about the 31200 failure.
+
+The 31200 repeat, the rate where the failure was actually observed, produced
+**no data-mode calls at all**: that session the rig sat in the documented
+"no S after 42304 Jd" Phase 3 blocker and the peer's V.90 declines, both
+handshake-level and identical in the two arms. Four calls, zero data mode, run
+abandoned rather than burn hours on a rig that was not completing handshakes.
+So this is decided on 28800 alone, and the 31200 case is untested.
+
+**Where this leaves the frame-phase problem.** Three ideas, none of which is a
+fix:
+
+1. **The sweep-permission gate** (absolute vs relative eye) — a real defect
+   fixed, since a sweep that cannot finish cannot help, but its aggregate live
+   result was confounded and withdrawn.
+2. **The confirmation stage** — sound arithmetic, negative live evidence, off.
+3. **Requiring evidence before sweeping** — sound reasoning, measured cost, off.
+
+What is solid is the diagnosis: **the failure is confined to calls where the
+peer is already transmitting when data mode begins**, and in those the marks
+are unavailable and ambiguous, so the phase must be searched — and no search
+tried here does better than the arrival phase B1 supplies. The next thing to
+test is therefore not a better search but **trusting B1 outright on a
+busy start and never sweeping unless the decode is provably broken** — which
+is what idea 3 approximated, but at 120 frames of evidence rather than
+"provably broken", and with a threshold (3% on noisy 15-frame windows) that
+the working calls themselves cross.
