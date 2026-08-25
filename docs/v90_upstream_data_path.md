@@ -2483,3 +2483,54 @@ recordings do not carry. Note the offset must be applied where **B1 ends**, not
 at acquisition: applied earlier it is absorbed by B1's own pinning and only the
 bookkeeping counter moves, which made the first version of that test report
 "offset 5" while decoding perfectly.
+
+### The same gate A/B at 28800 — a null result that corrects the 31200 one (2026-08-25)
+
+`artifacts/gate-ab-28800-*`, six calls per arm, alternated, confirmation stage
+now off so the gate is the only variable.
+
+| arm | calls | data mode | clean | longest hold | U-lines |
+|---|---|---|---|---|---|
+| relative gate | 6 | 6 | 197.0s | 185.4s | 39313 |
+| absolute gate | 6 | 6 | 203.7s | 182.5s | 45839 |
+
+**No difference, and the reason is mechanical: all twelve calls made ZERO sweep
+steps.** Every one started with the peer idle, read 100% ones and locked on
+marks at step 0, so the sweep never ran and the gate that governs it could not
+matter. The two arms were the same binary in effect. This is a null result with
+a mechanism, not evidence against the gate fix.
+
+**It does, however, correct what the 31200 A/B was reported to show.** Splitting
+those twelve calls by whether the peer was transmitting when data mode began:
+
+| | calls | delivered payload |
+|---|---|---|
+| idle at data-mode start | 19 | **18** |
+| **busy at data-mode start** | **2** | **0** |
+
+(21 data-mode calls, both gate A/Bs pooled.)
+
+**Both zero-payload calls in the 31200 A/B are the two busy-start calls, one in
+each arm** — `absgate-r2` (49% ones, 15 sweep steps, 0 lines) and `relgate-r5`
+(48% ones, 784 sweep steps, 0 lines). Every idle-start call in both arms
+delivered 12000-22000 lines. So the aggregate 1.95x/1.67x reported for the gate
+fix came **entirely from idle-start calls, where the sweep gate is irrelevant by
+construction** — it is call-to-call variance in how long each held, not the
+fix. That claim was confounded and is withdrawn.
+
+What the gate fix does demonstrably do is let the sweep run when it is needed:
+784 steps against 15 on the two busy-start calls. **It does not rescue them.**
+
+**The real determinant of this failure is now measured, and it is not the rate
+and not the sweep gate: it is whether the peer is transmitting when data mode
+begins.** Idle, and the marks lock the phase at step 0 and the call works.
+Busy, and the marks are unavailable — and, per the ambiguity noted above, would
+be useless anyway — so the phase must be *searched*, and the search does not
+work, in either arm, at either rate. That is the whole of the remaining problem,
+and it is why 28800 showed nothing: the rig happened to give it twelve idle
+starts.
+
+The one idle-start call that delivered nothing (`relgate-r2` at 28800) is a
+separate story worth noting: its shell evidence was computed over **16-17 frames
+per window** where a working call gets 60-67, so it was judging phases on a
+quarter of the evidence.
