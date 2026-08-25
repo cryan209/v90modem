@@ -507,5 +507,39 @@ resume waiting for an L1/L2 probe and INFO1c that never arrive.
 So: **initiation reaches the peer, drives its retrain, and completes our half
 of the tone exchange; the peer then enters a Phase 1 error-recovery livelock
 of its own that this tree has hit before and cannot fix from this end.**
-Responding to a peer-initiated retrain (§11.5.1.2/§9.5.1.2) is still untested
-live — nothing yet makes this peer start one.
+### Live retest after centralising the retrain waveform
+
+Retested the centralised restart seam against the SmartLink/slmodemd rig in
+`artifacts/retrain-wire-central-20260825T223439Z`.
+
+* Locally initiated plain V.34 entered `V90_RETRAIN_SILENCE` directly from
+  data mode.  The measured silence was **69.8 ms**, then Tone A; the peer
+  reported `DATAXMIT=>SILENCERETRAIN`, raised Tone B, and accepted our complete
+  answer-modem tone timetable through `RX_PHASE1_CALL received`.  It then hit
+  its known `Repeated info0 ... TX_PHASE1_CALL` firmware livelock and dropped
+  16.2 s later.  This reproduces the previous endpoint with the waveform now
+  selected by the restart helper rather than its caller.
+* The previously untested peer-initiated plain-V.34 response is kept in
+  `artifacts/v34-peer-retrain-response-20260825T224623Z`.  A 1.5 s downstream
+  disruption made the peer go `DATAXMIT=>SILENCERETRAIN=>TONE_AB`; our receiver
+  detected Tone B in DATA after 80 ms, reset, emitted **69.8 ms** silence,
+  Tone A and the §11.2.1.2.3 phase reversal.  The peer did not leave
+  `RX_PHASE1_CALL`: it held Tone B and dropped 4.37 s after initiating.  Thus
+  the detection, engine response, training-state restart seam and waveform
+  all ran on a real peer, but this SmartLink path does not complete.
+* V.90 was exercised in
+  `artifacts/v90-peer-retrain-wire-20260825T223703Z`.  The peer initiated a
+  retrain from Phase 4 (`JaTXMIT=>SILENCERETRAIN=>TONE_AB`); our digital side
+  detected it, entered `V90_RETRAIN_SILENCE`, completed the Phase-2 tone,
+  L1/L2 and INFO1 exchange, and re-entered Phase 3 **2.34 s after detection**.
+  The peer subsequently retrained again after failing to detect Sd/S; four
+  cycles all selected the retrain waveform before the call fell back.  That is
+  the existing Phase-3 interop blocker, not a failure to complete the retrain
+  control exchange.  The requested data-mode TX disruption was not reached,
+  because none of these attempts completed Phase 4.
+
+So both centralised paths are now peer-verified on the wire, including
+peer-initiated responses in plain V.34 and V.90.  None establishes a complete
+return to data mode: locally initiated V.34 is blocked by the peer's documented
+repeated-INFO0 livelock, peer-initiated V.34 stalls in its `RX_PHASE1_CALL`,
+and V.90 reaches Phase 3 before the existing Sd/S blocker.
