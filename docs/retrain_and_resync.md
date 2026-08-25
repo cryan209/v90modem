@@ -33,10 +33,11 @@ every V.34 modem has.
 | §9.5.1.2 respond | V.90 digital | yes, in every stage including DATA |
 | §9.5.2.1/.2 | V.90 analogue | yes (Phase 3/4 deadlines) |
 | §9.6.1.1 initiate | V.90 digital | built; **default off**, see below |
-| §9.6.1.2 respond | V.90 digital | **not implemented** — needs an S detector in data mode |
+| §9.6.1.2 respond | V.90 digital | yes, `ME_V90_RENEG_RESPOND=1`; **default off**, unverified against a peer |
 | §11.5.1.1/§11.5.2.1 initiate | plain V.34 | yes, on a receiver that has stopped decoding; bounded |
 | §11.5.1.2/§11.5.2.2 respond | plain V.34 | yes, in every stage including DATA |
 | §11.6 | plain V.34 | **not implemented** |
+| §11.6.1.2 respond | plain V.34 | **not implemented** — the detector exists, the S/S̄/TRN/MP transmit response does not |
 
 `ME_V90_RENEG=1` enables §9.6 initiation.  It is off by default for a
 measured reason and not a cautious one: this rig's analogue modem answers
@@ -127,12 +128,8 @@ against.  Proving the peer answers needs the live rig.
   SmartLink peer answers our Tone B from data mode within its own timeout is
   not known, and the rate at which a retrain recovers a call rather than
   ending it is not known.
-* **§9.6.1.2 and §11.6 are absent.**  Responding to a peer-initiated rate
-  renegotiation needs an S detector that runs in data mode, on a receiver
-  whose eye may be shut — which is the point of it.  Two spectral lines at
-  fc ± baud/2 is the obvious shape, and it is unbuilt and unmeasured.
-  Until it exists, a peer that resynchronises the cheap way is answered with
-  a data mapper running over the top of it.
+* **§9.6.1.2 is behind a knob and §11.6 is absent.**  See below for what the
+  responder is measured on; it has never met a peer that starts one.
 * **The acquisition retry does not rescue acquisition** on the recordings to
   hand: all seven windows fail the in-sample fit in `v90_engine_replay` on
   the three calls that failed at the first.  That is the same live/replay
@@ -140,3 +137,51 @@ against.  Proving the peer answers needs the live rig.
   upstream replay acquires on the same files.  What the change buys is that
   the failure is now observable and recoverable rather than silent and
   terminal.
+
+
+## Responding to a peer's rate renegotiation (§9.6.1.2)
+
+The cheap resynchronisation has to be detected on a receiver whose eye may be
+shut, which is exactly the state it exists to fix — so the detector does not
+look at symbols.  §10.1.3.7's S is the 4-point sequence alternating by 180°,
+i.e. a baseband ±1 at half the symbol rate, so in the passband it is two
+lines at fc ± baud/2 and, inside the RRC band, almost nothing else.  A pair of
+Goertzels against total block energy separates that from a data-mode primary
+channel, whose power is spread across the band by construction, without
+needing the equalizer, the carrier loop or the timing loop to be working.
+
+Two details worth keeping.  **V.34 §5.1 puts the carrier at fc = S·d/e**, not
+2400·d/e, which is why 3200 baud low reads 1828.6 Hz; d/e is the `low_high[]`
+pair in `baud_rate_parameters`.  And **the block length is 10 ms, not the
+20 ms the retrain tone watch uses**, because the window is short: S is 128T
+and S̄ 16T, which is 45 ms at 3200 baud, so three 10 ms blocks fit inside it
+with margin and 20 ms blocks would not reliably.
+
+The response itself needs no new transmitter: §9.6.1.2.2's Rd 384T / R̄d 24T /
+TRN2d / MP is bit for bit what §9.6.1.1.1 sends when we initiate, so the
+event arms the existing request and the transmit path starts it at the next
+data-frame boundary, which §9.6 requires anyway.  The S-to-S̄ transition is
+not separately detected — S is 128T and S̄ 24T and the peer then runs SCR and
+CP for up to 2 s, so the boundary we start on is well inside the window it is
+waiting in.  Answering is a "shall" independent of `ME_V90_RENEG`, which only
+governs whether we *start* one.
+
+**Measured, in both directions:**
+
+* *Negative.*  Over the recorded rate-matrix calls — live data-mode audio at
+  every rate from 19200 to 31200 — the detector fires **zero** times.
+* *Positive.*  Splice 45 ms of synthesized S (two tones at 228.6 and
+  3428.6 Hz, the exact 3200-baud low-carrier pair) into one of those same
+  recordings at t = 60 s and it fires **exactly once**, reporting
+  "30 ms of two tones at 229/3429 Hz".
+
+That bounds the false-positive rate and proves the detector works on the
+signal it names.  It says nothing about a real peer: nothing in the corpus
+renegotiates, every capture being of a call that either held data mode or
+died.  A false detection would take down a working call, so it stays behind
+`ME_V90_RENEG_RESPOND=1` until a peer proves it.
+
+§11.6 for plain V.34 is the remaining gap.  The detector above is
+role-independent in principle, but the plain V.34 *response* is its own
+S 128T / S̄ 16T / TRN / MP transmit sequence rather than the Phase 4
+transmitter the V.90 path reuses, and that does not exist.

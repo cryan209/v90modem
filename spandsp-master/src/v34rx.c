@@ -14184,6 +14184,158 @@ static int v90_t3_primary_rx(v34_rx_state_t *s, const int16_t amp[], int len)
  * returns: with the T/3 upstream receiver active the whole of the
  * rest of that function is skipped in DATA, which is precisely where
  * a peer whose own receiver has failed starts holding Tone A. */
+/* Is the responder for V.90 9.6.2 / V.34 11.6 enabled?
+ *
+ * DEFAULT OFF, and the reason is that it has never been exercised against a
+ * peer that starts one.  Nothing in the recorded corpus renegotiates -- every
+ * capture is of a call that either held data mode or died -- so the only
+ * measurement available is the negative one: over the twelve recorded
+ * rate-matrix calls, more than twenty minutes of live data-mode audio, this
+ * detector fires zero times.  That bounds the false-positive rate and says
+ * nothing at all about the true-positive rate.  A false detection would take
+ * down a working call, so it stays behind the knob until a peer proves it.
+ */
+static int v34_reneg_respond_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *e = getenv("ME_V90_RENEG_RESPOND");
+
+        cached = (e  &&  atoi(e) != 0)  ?  1  :  0;
+    }
+    /*endif*/
+    return cached;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* V.90 9.6.1.2 / V.34 11.6.1.2: the peer has opened a rate renegotiation and
+   we have to answer it.
+ *
+ * The cheap resynchronisation is the one worth having -- V.34 11.6 says
+ * outright that the procedure "can also be used to resynchronize the receiver
+ * without going through a complete retrain" -- but it is also the one that
+ * has to be detected on a receiver whose eye may be shut, which is exactly
+ * the state it exists to fix.  So do not look at symbols.  10.1.3.7's S is
+ * the 4-point sequence alternating by 180 degrees, i.e. a baseband +/-1 at
+ * half the symbol rate, so in the passband it is two lines at fc +/- baud/2
+ * and, inside the RRC band, almost nothing else.  A pair of Goertzels against
+ * total block energy separates it from a data-mode primary channel, whose
+ * power is spread across the band by construction, without needing the
+ * equalizer, the carrier loop or the timing loop to be working.
+
+   V.34 5.1 puts the carrier at fc = S*d/e, with d/e from Table 1 -- which is
+   the low_high[] pair in baud_rate_parameters, and is why 3200 baud low reads
+   1828.6 Hz rather than 2400*4/7.
+
+   Block length is 10 ms because the window is short: S is 128T and S-bar 16T,
+   which is 45 ms at 3200 baud and 42 ms at 3429, so three blocks of 10 ms
+   fits inside it with margin while 20 ms blocks would not reliably. */
+static void v34_rx_watch_peer_reneg_s(v34_rx_state_t *s,
+                                      const int16_t amp[],
+                                      int len)
+{
+    /* 80 samples = 10 ms. */
+    static const int block = 80;
+    const baud_rate_parameters_t *p;
+    float baud;
+    float fc;
+    float lo_coeff;
+    float hi_coeff;
+    int i;
+
+    if (s->stage != V34_RX_STAGE_DATA
+        ||
+        !s->v90_mode
+        ||
+        !v34_reneg_respond_enabled()
+        ||
+        s->baud_rate < 0  ||  s->baud_rate >= 6)
+    {
+        s->reneg_s_lo_g1 = 0.0f;
+        s->reneg_s_lo_g2 = 0.0f;
+        s->reneg_s_hi_g1 = 0.0f;
+        s->reneg_s_hi_g2 = 0.0f;
+        s->reneg_s_energy = 0.0f;
+        s->reneg_s_samples = 0;
+        s->reneg_s_blocks = 0;
+        s->reneg_s_reported = false;
+        return;
+    }
+    /*endif*/
+    p = &baud_rate_parameters[s->baud_rate];
+    baud = 2400.0f*(float) p->a/(float) p->c;
+    fc = baud*(float) p->low_high[s->high_carrier ? 1 : 0].d
+             /(float) p->low_high[s->high_carrier ? 1 : 0].e;
+    lo_coeff = 2.0f*cosf(2.0f*3.14159265358979f*(fc - baud/2.0f)/8000.0f);
+    hi_coeff = 2.0f*cosf(2.0f*3.14159265358979f*(fc + baud/2.0f)/8000.0f);
+
+    for (i = 0;  i < len;  i++)
+    {
+        float x = (float) amp[i];
+        float lo0 = x + lo_coeff*s->reneg_s_lo_g1 - s->reneg_s_lo_g2;
+        float hi0 = x + hi_coeff*s->reneg_s_hi_g1 - s->reneg_s_hi_g2;
+
+        s->reneg_s_lo_g2 = s->reneg_s_lo_g1;
+        s->reneg_s_lo_g1 = lo0;
+        s->reneg_s_hi_g2 = s->reneg_s_hi_g1;
+        s->reneg_s_hi_g1 = hi0;
+        s->reneg_s_energy += x*x;
+        if (++s->reneg_s_samples >= block)
+        {
+            float lo = s->reneg_s_lo_g1*s->reneg_s_lo_g1
+                     + s->reneg_s_lo_g2*s->reneg_s_lo_g2
+                     - lo_coeff*s->reneg_s_lo_g1*s->reneg_s_lo_g2;
+            float hi = s->reneg_s_hi_g1*s->reneg_s_hi_g1
+                     + s->reneg_s_hi_g2*s->reneg_s_hi_g2
+                     - hi_coeff*s->reneg_s_hi_g1*s->reneg_s_hi_g2;
+            /* For a full-block sine the Goertzel power is energy*N/2, so a
+               signal that is entirely these two lines approaches 1.0 here. */
+            float denom = s->reneg_s_energy*(float) block*0.5f;
+            bool two_tone = false;
+
+            /* Same energy floor as the retrain tone watch: mean square over
+               100^2, so line noise and silence never qualify. */
+            if (s->reneg_s_energy > 10000.0f*(float) block
+                &&
+                denom > 0.0f
+                &&
+                lo + hi > 0.60f*denom)
+            {
+                two_tone = true;
+            }
+            /*endif*/
+            if (two_tone)
+                s->reneg_s_blocks++;
+            else
+                s->reneg_s_blocks = 0;
+            /*endif*/
+            s->reneg_s_lo_g1 = 0.0f;
+            s->reneg_s_lo_g2 = 0.0f;
+            s->reneg_s_hi_g1 = 0.0f;
+            s->reneg_s_hi_g2 = 0.0f;
+            s->reneg_s_energy = 0.0f;
+            s->reneg_s_samples = 0;
+            if (s->reneg_s_blocks >= 3  &&  !s->reneg_s_reported)
+            {
+                s->reneg_s_reported = true;
+                s->received_event = V34_EVENT_PEER_RENEG_S;
+                span_log(s->logging, SPAN_LOG_WARNING,
+                         "Rx - S detected in DATA (%d ms of two tones at "
+                         "%.0f/%.0f Hz); the peer has opened a rate "
+                         "renegotiation, answering per 9.6.1.2/11.6.1.2\n",
+                         s->reneg_s_blocks*block/8,
+                         (double) (fc - baud/2.0f), (double) (fc + baud/2.0f));
+            }
+            /*endif*/
+        }
+        /*endif*/
+    }
+    /*endfor*/
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
                                       const int16_t amp[],
                                       int len)
@@ -14330,6 +14482,10 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     /* 9.5.1.2 has no phase qualifier, so watch for the peer's Tone A
      * in every stage this receiver runs in, DATA included. */
     v34_rx_watch_peer_retrain(s, amp, len);
+    /* 9.6 puts a rate renegotiation "at any time during data mode", and the
+     * peer opens one with S.  Same reason for being here rather than below
+     * the T/3 branch: that branch returns. */
+    v34_rx_watch_peer_reneg_s(s, amp, len);
 
     /* This branch is internal DSP only. v34_rx() still consumes exactly len
        8 kHz line samples; no sample is inserted into or removed from RTP. */
@@ -15060,6 +15216,21 @@ SPAN_DECLARE(int) v34_get_rx_event(v34_state_t *s)
 /* The role-independent form.  V.34 11.5 has a retrain response of its own,
    and PEER_RETRAIN is application-owned: left set it would suppress the
    ordinary handshake events for the rest of the call. */
+/* Clear a reported peer rate renegotiation, and re-arm the detector so a
+   later one is reported too. */
+SPAN_DECLARE(void) v34_clear_peer_reneg_s_event(v34_state_t *s)
+{
+    if (!s)
+        return;
+    /*endif*/
+    if (s->rx.received_event == V34_EVENT_PEER_RENEG_S)
+        s->rx.received_event = V34_EVENT_NONE;
+    /*endif*/
+    s->rx.reneg_s_blocks = 0;
+    s->rx.reneg_s_reported = false;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v34_clear_peer_retrain_event(v34_state_t *s)
 {
     if (s  &&  s->rx.received_event == V34_EVENT_PEER_RETRAIN)

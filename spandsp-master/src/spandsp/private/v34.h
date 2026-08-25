@@ -612,7 +612,13 @@ enum v34_events_e
         INFOMARKSa, respond to a retrain for Tone A.  Without this event only
         Tone A could be detected, so the INFO1d re-send was being driven by the
         Tone A trigger -- the wrong branch of that clause. */
-    V34_EVENT_INFOMARKSA_SEEN
+    V34_EVENT_INFOMARKSA_SEEN,
+    /*! The peer has opened a rate renegotiation with S (V.90 9.6.2,
+        V.34 11.6.1.1.1).  The spec calls this the way to "resynchronize
+        the receiver without going through a complete retrain", and it
+        is the only recovery a peer can start that does not cost a
+        startup, so it has to be answered rather than talked over. */
+    V34_EVENT_PEER_RENEG_S
 };
 
 typedef struct
@@ -1177,6 +1183,22 @@ typedef struct
        upstream at all for the rest of the call.  V.90 9.5.1.1 is the only
        thing that can still fix that: a retrain ends in a fresh B1. */
     bool v90_t3_acq_abandoned;
+
+    /* V.90 9.6.2 / V.34 11.6: the peer resynchronising the CHEAP way, by
+       opening a rate renegotiation with S.  S is the 4-point sequence
+       alternating by 180 degrees, so it is two spectral lines at
+       fc +/- baud/2 and almost nothing else -- which is what makes it
+       detectable on a receiver whose eye has shut, the case it exists for.
+       10 ms blocks, because S is 128T and S-bar 16T: 45 ms at 3200 baud is
+       the whole window. */
+    float reneg_s_lo_g1;
+    float reneg_s_lo_g2;
+    float reneg_s_hi_g1;
+    float reneg_s_hi_g2;
+    float reneg_s_energy;
+    int reneg_s_samples;
+    int reneg_s_blocks;
+    bool reneg_s_reported;
 
     /* Plain V.34 data mode: the same "has this receiver stopped decoding"
        question the V.90 upstream answers with v90_t3_sym_err_ema/lost_run.

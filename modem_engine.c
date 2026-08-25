@@ -164,6 +164,7 @@ enum v34_events_e {
     V34_EVENT_E,
     V34_EVENT_PEER_RETRAIN,
     V34_EVENT_INFOMARKSA_SEEN,
+    V34_EVENT_PEER_RENEG_S,
 };
 
 /* Current G.711 law (set by sip_modem.c after codec negotiation). */
@@ -6225,6 +6226,37 @@ void me_rx_audio(const int16_t *amp, int len)
                              * (observed live 2026-07-22 on post-Phase-4
                              * retrains). */
                             v34_v90_start_retrain_response(g_v34);
+                        }
+                    }
+                    if (rx_event == V34_EVENT_PEER_RENEG_S
+                        && g_v90 && !g_v92_active) {
+                        /* §9.6.1.2: "After detecting S, the digital modem
+                         * shall clamp circuit 104 ... After detecting the
+                         * S-to-S-bar transition, the digital modem shall
+                         * transmit signal Rd for 384T and R-bar-d for 24T ...
+                         * and condition its receiver to receive CP."
+                         *
+                         * That transmit sequence is identical to the one
+                         * §9.6.1.1.1 sends when we initiate, so it is the
+                         * same machinery: arm the request, and the transmit
+                         * path starts it at the next data frame boundary,
+                         * which §9.6 requires anyway.  The S-to-S-bar
+                         * transition is not separately detected -- S is 128T
+                         * and S-bar 24T, and the peer then runs SCR and CP
+                         * for up to 2 s, so the boundary we start on is well
+                         * inside the window it is waiting in.
+                         *
+                         * Not gated on me_v90_reneg_enabled(): that knob says
+                         * whether to START one, and §9.6.1.2 is a "shall"
+                         * regardless.  The detector behind the event is
+                         * itself off unless ME_V90_RENEG_RESPOND=1. */
+                        v34_clear_peer_reneg_s_event(g_v34);
+                        if (!v90_rate_renegotiation_active(g_v90)) {
+                            ME_LOG("[ME] V.90: peer opened a §9.6 rate "
+                                   "renegotiation; answering with Rd at the "
+                                   "next data frame boundary\n");
+                            trace_phase("V90 answering peer rate renegotiation");
+                            (void) v90_request_rate_renegotiation(g_v90);
                         }
                     }
                     if (new_e_event && g_v90 && !g_v92_active) {

@@ -430,6 +430,11 @@ SPAN_DECLARE(int) v34_data_carrier_lost(v34_state_t *s);
     \param s The V.34 context. */
 SPAN_DECLARE(void) v34_clear_peer_retrain_event(v34_state_t *s);
 
+/*! \brief Clear a reported peer rate renegotiation (V.90 9.6.2 / V.34 11.6)
+           and re-arm the detector.
+    \param s The V.34 context. */
+SPAN_DECLARE(void) v34_clear_peer_reneg_s_event(v34_state_t *s);
+
 /*! \brief Note that a recovery has been started for the current loss, so the
            same one does not start another.
     \param s The V.34 context. */
