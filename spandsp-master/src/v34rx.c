@@ -14186,6 +14186,8 @@ static int v90_t3_primary_rx(v34_rx_state_t *s, const int16_t amp[], int len)
  * a peer whose own receiver has failed starts holding Tone A. */
 /* Is the responder for V.90 9.6.2 / V.34 11.6 enabled?
  *
+ * Covers both stacks -- V.90 9.6.2 and plain V.34 11.6 send the same S.
+ *
  * DEFAULT OFF, and the reason is that it has never been exercised against a
  * peer that starts one.  Nothing in the recorded corpus renegotiates -- every
  * capture is of a call that either held data mode or died -- so the only
@@ -14217,21 +14219,29 @@ static int v34_reneg_respond_enabled(void)
  * outright that the procedure "can also be used to resynchronize the receiver
  * without going through a complete retrain" -- but it is also the one that
  * has to be detected on a receiver whose eye may be shut, which is exactly
- * the state it exists to fix.  So do not look at symbols.  10.1.3.7's S is
- * the 4-point sequence alternating by 180 degrees, i.e. a baseband +/-1 at
- * half the symbol rate, so in the passband it is two lines at fc +/- baud/2
- * and, inside the RRC band, almost nothing else.  A pair of Goertzels against
- * total block energy separates it from a data-mode primary channel, whose
- * power is spread across the band by construction, without needing the
- * equalizer, the carrier loop or the timing loop to be working.
-
-   V.34 5.1 puts the carrier at fc = S*d/e, with d/e from Table 1 -- which is
-   the low_high[] pair in baud_rate_parameters, and is why 3200 baud low reads
-   1828.6 Hz rather than 2400*4/7.
-
-   Block length is 10 ms because the window is short: S is 128T and S-bar 16T,
-   which is 45 ms at 3200 baud and 42 ms at 3429, so three blocks of 10 ms
-   fits inside it with margin while 20 ms blocks would not reliably. */
+ * the state it exists to fix.  So do not look at symbols.
+ *
+ * 10.1.3.7's S alternates between point 0 of the quarter-superconstellation
+ * and the same point rotated COUNTERCLOCKWISE BY 90 DEGREES.  Ninety, not a
+ * hundred and eighty: a,ja,a,ja,... is a(1+j)/2 plus a(1-j)/2*(-1)^k, so the
+ * energy sits in equal parts on a line at the carrier and a line at
+ * fc +/- baud/2 -- three bins to watch, not two.  Measured on a real S from
+ * this tree's own transmitter, watching only fc +/- baud/2 caught 0.44 of the
+ * block energy and never crossed a 0.60 gate, which is exactly the half the
+ * decomposition predicts.
+ *
+ * Three narrow bins holding most of a block still separates S from a data
+ * mode primary channel, whose power is spread over the band by construction,
+ * and it needs neither the equalizer, the carrier loop nor the timing loop to
+ * be working.
+ *
+ * V.34 5.1 puts the carrier at fc = S*d/e, with d/e from Table 1 -- which is
+ * the low_high[] pair in baud_rate_parameters, and is why 3200 baud low reads
+ * 1828.6 Hz rather than 2400*4/7.
+ *
+ * Block length is 10 ms because the window is short: S is 128T and S-bar 16T,
+ * which is 45 ms at 3200 baud and 42 ms at 3429, so three blocks of 10 ms fit
+ * inside it with margin while 20 ms blocks would not reliably. */
 static void v34_rx_watch_peer_reneg_s(v34_rx_state_t *s,
                                       const int16_t amp[],
                                       int len)
@@ -14241,22 +14251,19 @@ static void v34_rx_watch_peer_reneg_s(v34_rx_state_t *s,
     const baud_rate_parameters_t *p;
     float baud;
     float fc;
-    float lo_coeff;
-    float hi_coeff;
+    float freq[3];
+    float coeff[3];
     int i;
+    int k;
 
     if (s->stage != V34_RX_STAGE_DATA
-        ||
-        !s->v90_mode
         ||
         !v34_reneg_respond_enabled()
         ||
         s->baud_rate < 0  ||  s->baud_rate >= 6)
     {
-        s->reneg_s_lo_g1 = 0.0f;
-        s->reneg_s_lo_g2 = 0.0f;
-        s->reneg_s_hi_g1 = 0.0f;
-        s->reneg_s_hi_g2 = 0.0f;
+        memset(s->reneg_s_g1, 0, sizeof(s->reneg_s_g1));
+        memset(s->reneg_s_g2, 0, sizeof(s->reneg_s_g2));
         s->reneg_s_energy = 0.0f;
         s->reneg_s_samples = 0;
         s->reneg_s_blocks = 0;
@@ -14268,53 +14275,84 @@ static void v34_rx_watch_peer_reneg_s(v34_rx_state_t *s,
     baud = 2400.0f*(float) p->a/(float) p->c;
     fc = baud*(float) p->low_high[s->high_carrier ? 1 : 0].d
              /(float) p->low_high[s->high_carrier ? 1 : 0].e;
-    lo_coeff = 2.0f*cosf(2.0f*3.14159265358979f*(fc - baud/2.0f)/8000.0f);
-    hi_coeff = 2.0f*cosf(2.0f*3.14159265358979f*(fc + baud/2.0f)/8000.0f);
+    freq[0] = fc - baud/2.0f;
+    freq[1] = fc;
+    freq[2] = fc + baud/2.0f;
+    for (k = 0;  k < 3;  k++)
+        coeff[k] = 2.0f*cosf(2.0f*3.14159265358979f*freq[k]/8000.0f);
+    /*endfor*/
 
     for (i = 0;  i < len;  i++)
     {
         float x = (float) amp[i];
-        float lo0 = x + lo_coeff*s->reneg_s_lo_g1 - s->reneg_s_lo_g2;
-        float hi0 = x + hi_coeff*s->reneg_s_hi_g1 - s->reneg_s_hi_g2;
 
-        s->reneg_s_lo_g2 = s->reneg_s_lo_g1;
-        s->reneg_s_lo_g1 = lo0;
-        s->reneg_s_hi_g2 = s->reneg_s_hi_g1;
-        s->reneg_s_hi_g1 = hi0;
+        for (k = 0;  k < 3;  k++)
+        {
+            float g0 = x + coeff[k]*s->reneg_s_g1[k] - s->reneg_s_g2[k];
+
+            s->reneg_s_g2[k] = s->reneg_s_g1[k];
+            s->reneg_s_g1[k] = g0;
+        }
+        /*endfor*/
         s->reneg_s_energy += x*x;
         if (++s->reneg_s_samples >= block)
         {
-            float lo = s->reneg_s_lo_g1*s->reneg_s_lo_g1
-                     + s->reneg_s_lo_g2*s->reneg_s_lo_g2
-                     - lo_coeff*s->reneg_s_lo_g1*s->reneg_s_lo_g2;
-            float hi = s->reneg_s_hi_g1*s->reneg_s_hi_g1
-                     + s->reneg_s_hi_g2*s->reneg_s_hi_g2
-                     - hi_coeff*s->reneg_s_hi_g1*s->reneg_s_hi_g2;
             /* For a full-block sine the Goertzel power is energy*N/2, so a
-               signal that is entirely these two lines approaches 1.0 here. */
+               signal that is entirely these lines approaches 1.0 here. */
             float denom = s->reneg_s_energy*(float) block*0.5f;
-            bool two_tone = false;
+            float sum = 0.0f;
+            bool tonal = false;
 
+            for (k = 0;  k < 3;  k++)
+            {
+                sum += s->reneg_s_g1[k]*s->reneg_s_g1[k]
+                     + s->reneg_s_g2[k]*s->reneg_s_g2[k]
+                     - coeff[k]*s->reneg_s_g1[k]*s->reneg_s_g2[k];
+            }
+            /*endfor*/
             /* Same energy floor as the retrain tone watch: mean square over
                100^2, so line noise and silence never qualify. */
             if (s->reneg_s_energy > 10000.0f*(float) block
                 &&
                 denom > 0.0f
                 &&
-                lo + hi > 0.60f*denom)
+                sum > 0.60f*denom)
             {
-                two_tone = true;
+                tonal = true;
             }
             /*endif*/
-            if (two_tone)
+            if (tonal)
                 s->reneg_s_blocks++;
             else
                 s->reneg_s_blocks = 0;
             /*endif*/
-            s->reneg_s_lo_g1 = 0.0f;
-            s->reneg_s_lo_g2 = 0.0f;
-            s->reneg_s_hi_g1 = 0.0f;
-            s->reneg_s_hi_g2 = 0.0f;
+            {
+                /* Opt-in, and it caches its getenv: what the bins actually
+                   read, for calibrating the ratio against a real S rather
+                   than an assumed one.  This is what found the 90-vs-180
+                   error above. */
+                static int debug = -1;
+
+                if (debug < 0)
+                    debug = (getenv("V34_RENEG_S_DEBUG") != NULL);
+                /*endif*/
+                if (debug)
+                {
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - 11.6 S watch: caller=%d hi=%d "
+                             "%.0f/%.0f/%.0f Hz sum/denom=%.3f energy=%.3g "
+                             "run=%d\n",
+                             s->calling_party, s->high_carrier ? 1 : 0,
+                             (double) freq[0], (double) freq[1],
+                             (double) freq[2],
+                             (denom > 0.0f) ? (double) (sum/denom) : -1.0,
+                             (double) s->reneg_s_energy,
+                             s->reneg_s_blocks);
+                }
+                /*endif*/
+            }
+            memset(s->reneg_s_g1, 0, sizeof(s->reneg_s_g1));
+            memset(s->reneg_s_g2, 0, sizeof(s->reneg_s_g2));
             s->reneg_s_energy = 0.0f;
             s->reneg_s_samples = 0;
             if (s->reneg_s_blocks >= 3  &&  !s->reneg_s_reported)
@@ -14322,11 +14360,11 @@ static void v34_rx_watch_peer_reneg_s(v34_rx_state_t *s,
                 s->reneg_s_reported = true;
                 s->received_event = V34_EVENT_PEER_RENEG_S;
                 span_log(s->logging, SPAN_LOG_WARNING,
-                         "Rx - S detected in DATA (%d ms of two tones at "
-                         "%.0f/%.0f Hz); the peer has opened a rate "
-                         "renegotiation, answering per 9.6.1.2/11.6.1.2\n",
+                         "Rx - S detected in DATA (%d ms at %.0f/%.0f/%.0f Hz); "
+                         "the peer has opened a rate renegotiation, answering "
+                         "per 9.6.1.2/11.6.1.2\n",
                          s->reneg_s_blocks*block/8,
-                         (double) (fc - baud/2.0f), (double) (fc + baud/2.0f));
+                         (double) freq[0], (double) freq[1], (double) freq[2]);
             }
             /*endif*/
         }

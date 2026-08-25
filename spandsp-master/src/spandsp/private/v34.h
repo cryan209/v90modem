@@ -917,6 +917,12 @@ typedef struct
         "assuming the role of a call modem".  Cleared on retrain, which
         returns to V.90 Phase 2 regardless of the analogue modem's choice. */
     bool v90_v34_fallback;
+    /*! \brief V.34 11.6 / V.90 9.6 rate renegotiation in progress on the
+        transmit side.  The sequence is Phase 4's -- S, S-bar, TRN, MP, MP',
+        E, B1 -- so the Phase 4 stages carry it; this only says that it is a
+        renegotiation rather than a startup, which matters at the TRN-to-MP
+        seam: 11.4 waits for the far end's J', and 11.6 has no J at all. */
+    bool reneg_active;
     /*! \brief V.90 PCM law: 0 = µ-law, 1 = A-law */
     int v90_pcm_law;
     /*! \brief V.92 INFO0d extensions.  Table 15 bit 27 advertises V.92
@@ -1185,16 +1191,18 @@ typedef struct
     bool v90_t3_acq_abandoned;
 
     /* V.90 9.6.2 / V.34 11.6: the peer resynchronising the CHEAP way, by
-       opening a rate renegotiation with S.  S is the 4-point sequence
-       alternating by 180 degrees, so it is two spectral lines at
-       fc +/- baud/2 and almost nothing else -- which is what makes it
+       opening a rate renegotiation with S.  10.1.3.7 alternates between one
+       constellation point and the same point rotated counterclockwise by 90
+       degrees -- NOT by 180 -- which decomposes into a DC term and a (-1)^k
+       term in equal parts, so THREE lines: fc and fc +/- baud/2, in equal
+       thirds of the power, and almost nothing else.  That is what makes it
        detectable on a receiver whose eye has shut, the case it exists for.
+       Measured: watching only fc +/- baud/2 caught 0.44 of the block energy
+       on a real S and never crossed a 0.60 gate.
        10 ms blocks, because S is 128T and S-bar 16T: 45 ms at 3200 baud is
        the whole window. */
-    float reneg_s_lo_g1;
-    float reneg_s_lo_g2;
-    float reneg_s_hi_g1;
-    float reneg_s_hi_g2;
+    float reneg_s_g1[3];
+    float reneg_s_g2[3];
     float reneg_s_energy;
     int reneg_s_samples;
     int reneg_s_blocks;

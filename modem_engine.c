@@ -2761,6 +2761,69 @@ static bool retrain_on_loss_due(void)
     return true;
 }
 
+/* V.34 §11.6 rate renegotiation, engine side.
+ *
+ * §11.6 is the cheap resynchronisation -- it keeps the call in data mode and
+ * costs the S/S-bar/TRN/MP exchange rather than a whole startup -- but it
+ * needs a modem at the other end that implements §11.6.1.2.  A retrain needs
+ * only the peer's tone detector, which every V.34 modem has.  So INITIATING
+ * one is off by default for the same measured reason §9.6 is on the V.90
+ * side: the one peer this tree has talked to answers a renegotiation with
+ * nothing.  RESPONDING to one is not gated here -- §11.6.1.2 is a "shall",
+ * and the detector behind the event is itself off unless
+ * ME_V90_RENEG_RESPOND=1.
+ *
+ * §11.6.2.1: "If after transmitting the S-to-S-bar transition, the modem has
+ * not received sequence E for the following timeout period, it shall initiate
+ * the retrain procedure.  If bit 24 in INFO0 is set to 1 (the CME bit) the
+ * timeout period shall be 30 seconds.  If bit 24 in INFO0 is set to 0, the
+ * timeout period shall be 2500 ms plus two round trip delays."  CME is not
+ * advertised here, so the short one applies; the round trip on a SIP bearer
+ * is well under the margin this leaves. */
+#define ME_V34_RENEG_E_TIMEOUT_MS_DEFAULT 4000
+
+static int64_t g_v34_reneg_start_ms = 0;
+
+static int me_v34_reneg_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *e = getenv("ME_V34_RENEG");
+
+        cached = (e && atoi(e) != 0) ? 1 : 0;
+    }
+    return cached;
+}
+
+static int me_v34_reneg_timeout_ms(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = parse_env_int("ME_V34_RENEG_TIMEOUT_MS",
+                               ME_V34_RENEG_E_TIMEOUT_MS_DEFAULT);
+    return cached;
+}
+
+static void v34_reneg_begin_locked(void)
+{
+    g_v34_reneg_start_ms = trace_now_ms();
+}
+
+static void v34_reneg_clear_locked(void)
+{
+    g_v34_reneg_start_ms = 0;
+}
+
+static bool v34_reneg_timed_out_locked(void)
+{
+    if (g_v34_reneg_start_ms == 0)
+        return false;
+    return (trace_now_ms() - g_v34_reneg_start_ms)
+               >= me_v34_reneg_timeout_ms();
+}
+
 static void v90_reset_upstream_data_arming(void)
 {
     g_v34_upstream_data_armed = false;
@@ -3301,6 +3364,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_loss_retrains = 0;
     g_last_loss_retrain_ms = 0;
     g_retrain_from_data = false;
+    g_v34_reneg_start_ms = 0;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     v90_cp_rx_reset(&g_v90_cp_rx);
     v90_cp_rx_clear_votes(&g_v90_cp_rx);
@@ -6336,26 +6400,65 @@ void me_rx_audio(const int16_t *amp, int len)
                          * received, the modem shall proceed in accordance
                          * with 11.8.1"). */
                         v34_clear_peer_retrain_event(g_v34);
+                        v34_reneg_clear_locked();
                         (void) restart_v34_phase2_locked(
                             "peer retrain tone detected; responding per 11.5");
+                    } else if (rx_event == V34_EVENT_PEER_RENEG_S) {
+                        /* §11.6.1.2: the peer has opened a rate
+                         * renegotiation.  Responding is the same sequence it
+                         * is sending -- S, S-bar, TRN, MP -- and by here its
+                         * S is already detected, which is all §11.6.1.2.1
+                         * asks for before §11.6.1.2.2 starts ours. */
+                        v34_clear_peer_reneg_s_event(g_v34);
+                        if (!v34_rate_renegotiation_active(g_v34)
+                            && v34_start_rate_renegotiation(g_v34) == 0) {
+                            ME_LOG("[ME] V.34: peer opened a §11.6 rate "
+                                   "renegotiation; answering with S/S-bar/TRN/MP\n");
+                            trace_phase("V34 answering peer rate renegotiation");
+                            v34_reneg_begin_locked();
+                        }
+                    } else if (v34_rate_renegotiation_active(g_v34)) {
+                        /* §11.6.2: "If after transmitting the S-to-S-bar
+                         * transition, the modem has not received sequence E
+                         * for the following timeout period, it shall initiate
+                         * the retrain procedure." */
+                        if (v34_reneg_timed_out_locked()) {
+                            v34_reneg_clear_locked();
+                            ME_LOG("[ME] V.34 §11.6 rate renegotiation "
+                                   "produced no E; falling back to a §11.5 "
+                                   "retrain\n");
+                            (void) restart_v34_phase2_locked(
+                                "rate renegotiation timeout");
+                        }
                     } else if (v34_data_carrier_lost(g_v34)
                                && retrain_on_loss_due()) {
-                        /* §11.5.1.1/§11.5.2.1: initiating.  §11.6 is the
-                         * cheaper recovery and would be preferable, but it
-                         * needs a responding modem; a retrain needs only the
-                         * peer's tone detector, which every V.34 modem has.
-                         * Bounded by the same per-call cap and dwell as the
-                         * V.90 path, so a line that is simply too poor is
-                         * left alone rather than retrained in a loop. */
+                        /* §11.6 first where the peer implements it -- it is
+                         * the cheap resynchronisation and keeps the call in
+                         * data mode -- and §11.5.1.1/§11.5.2.1 otherwise.  A
+                         * retrain needs only the peer's tone detector, which
+                         * every V.34 modem has; a renegotiation needs a
+                         * responding modem.  Either way bounded by the same
+                         * per-call cap and dwell as the V.90 path, so a line
+                         * that is simply too poor is left alone rather than
+                         * recovered in a loop. */
                         v34_clear_data_carrier_lost(g_v34);
-                        ME_LOG("[ME] V.34 data mode has stopped decoding; "
-                               "initiating a §11.5 retrain (%u of %d)\n",
-                               g_loss_retrains + 1,
-                               me_max_loss_retrains());
                         g_loss_retrains++;
                         g_last_loss_retrain_ms = trace_now_ms();
-                        (void) restart_v34_phase2_locked(
-                            "data mode stopped decoding; retraining per 11.5");
+                        if (me_v34_reneg_enabled()
+                            && v34_start_rate_renegotiation(g_v34) == 0) {
+                            ME_LOG("[ME] V.34 data mode has stopped decoding; "
+                                   "initiating a §11.6 rate renegotiation "
+                                   "(%u of %d)\n",
+                                   g_loss_retrains, me_max_loss_retrains());
+                            v34_reneg_begin_locked();
+                        } else {
+                            ME_LOG("[ME] V.34 data mode has stopped decoding; "
+                                   "initiating a §11.5 retrain (%u of %d)\n",
+                                   g_loss_retrains, me_max_loss_retrains());
+                            (void) restart_v34_phase2_locked(
+                                "data mode stopped decoding; retraining "
+                                "per 11.5");
+                        }
                     }
                 }
 

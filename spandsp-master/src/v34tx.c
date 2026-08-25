@@ -6721,6 +6721,29 @@ static int phase4_trn_tx_max_bauds(void)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* How long a rate renegotiation transmits TRN before MP.
+ *
+ * 11.6.1.1.1: "The modem may then transmit signal TRN for a maximum of
+ * 2000 ms plus a round trip delay, followed by sequence MP."  So the length
+ * is ours to choose up to that cap, and what it buys is equalizer
+ * reconvergence: the receiver has just been re-seeded and TRN is the only
+ * known signal it gets before a data constellation returns.
+ * ME_V34_RENEG_TRN_BAUDS overrides the Phase 4 minimum. */
+static int v34_reneg_trn_bauds(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *e = getenv("ME_V34_RENEG_TRN_BAUDS");
+
+        cached = (e  &&  atoi(e) > 0)  ?  atoi(e)  :  PHASE4_TRN_BAUDS;
+    }
+    /*endif*/
+    return cached;
+}
+/*- End of function --------------------------------------------------------*/
+
 static complex_sig_t get_phase4_baud(v34_state_t *s)
 {
     int phase4_trn_guard_bauds;
@@ -6848,7 +6871,21 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
                 return zero;
             }
             /*endif*/
-            if (s->tx.v90_v34_fallback
+            if (s->tx.reneg_active
+                && s->tx.tone_duration >= v34_reneg_trn_bauds())
+            {
+                /* V.34 11.6.1.1.1/11.6.1.2.2: "The modem may then transmit
+                   signal TRN for a maximum of 2000 ms, followed by sequence
+                   MP."  A renegotiation has no J and no J', so the
+                   far-end-confirmation branch below cannot fire and would
+                   hold TRN until the guard; the length is ours to choose,
+                   and the Phase 4 minimum is what retrains the peer. */
+                span_log(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - 11.6 rate renegotiation: TRN complete (%d bauds), starting MP\n",
+                         s->tx.tone_duration);
+                mp_or_mph_baud_init(s);
+            }
+            else if (s->tx.v90_v34_fallback
                 && s->tx.tone_duration >= PHASE4_TRN_BAUDS)
             {
                 /* V.34 fallback call-modem role: our TRN follows our own J'
@@ -7529,6 +7566,16 @@ static complex_sig_t get_data_baud(v34_state_t *s)
 
 static void data_baud_init(v34_state_t *s)
 {
+    if (s->tx.reneg_active)
+    {
+        /* 11.6.1.1.4/11.6.1.2.4: B1 then data.  The renegotiation is over at
+           this point, and the flag must not survive into the next one -- the
+           TRN-to-MP seam reads it. */
+        s->tx.reneg_active = false;
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - 11.6 rate renegotiation complete; B1 then data\n");
+    }
+    /*endif*/
     /* Update TX parms from the MP-negotiated rate for our transmit direction */
     {
         int tx_rate_n;
@@ -8654,6 +8701,91 @@ SPAN_DECLARE(void) v34_v90_start_analogue_retrain(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.34 11.6 rate renegotiation, plain V.34.
+ *
+ * 11.6's own words: "The rate renegotiation procedure can be initiated at any
+ * time during data mode to change to a new data signalling rate.  This
+ * procedure can also be used to resynchronize the receiver without going
+ * through a complete retrain."  The second sentence is the reason this
+ * exists here -- it is the cheap recovery, and until now plain V.34 had only
+ * the expensive one.
+ *
+ * The signal sequence is Phase 4's, exactly: S for 128T, S-bar for 16T,
+ * optional TRN, then MP, MP', a single 20-bit E, B1, and data (Figure 22).
+ * So this does not build a second transmitter -- it re-enters the Phase 4
+ * stages, which is also why the seam that needs care is TRN-to-MP: 11.4 waits
+ * on the far end's J', and 11.6 has no J at all.  get_phase4_baud() reads
+ * tx.reneg_active there.
+ *
+ * Both roles run the same sequence.  The only difference 11.6.1.1 and
+ * 11.6.1.2 draw is ORDER -- the initiator sends S first, the responder sends
+ * S after detecting the initiator's -- and by the time the responder is
+ * called it has already detected S, so from here the two are identical.
+ *
+ * The receiver is conditioned at PHASE4_S rather than the PHASE4_TRN that
+ * startup uses, because 11.6.1.1.2 and 11.6.1.2.1 both say "After detecting
+ * signal S ... be conditioned to detect the S-to-S-bar transition": there is
+ * a real far-end S to find here, where at startup the answerer's own S is
+ * already in flight and it goes straight to conditioning on TRN.
+ *
+ * The frontend is deliberately re-seeded rather than retained.  A
+ * renegotiation is asked for precisely when the receiver needs
+ * resynchronising, and S/S-bar/TRN is a known signal to re-converge on.
+ */
+SPAN_DECLARE(int) v34_start_rate_renegotiation(v34_state_t *s)
+{
+    if (!s)
+        return -1;
+    /*endif*/
+    if (s->rx.stage != V34_RX_STAGE_DATA)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - 11.6 rate renegotiation refused: not in data mode "
+                 "(rx stage %d)\n",
+                 s->rx.stage);
+        return -1;
+    }
+    /*endif*/
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - 11.6 rate renegotiation: transmitting S (128T) then S-bar "
+             "(16T), TRN and MP\n");
+
+    s->tx.reneg_active = true;
+
+    /* 11.6.1.1.1: S goes out immediately.  Not V34_TX_STAGE_PHASE4_WAIT --
+       that transmits 11.3.1.2.4's silence, which belongs to startup. */
+    s->primary_channel_active = true;
+    s->tx.current_modulator = V34_MODULATION_V34;
+    s->tx.stage = V34_TX_STAGE_PHASE4_S;
+    s->tx.tone_duration = 0;
+    s->tx.diff = 0;
+    s->tx.current_getbaud = get_phase4_baud;
+    s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP),
+                                    TRAINING_SCALE(0.0f));
+    s->tx.baud_phase = 0;
+    s->tx.rrc_filter_step = 0;
+    memset(s->tx.rrc_filter_re, 0, sizeof(s->tx.rrc_filter_re));
+    memset(s->tx.rrc_filter_im, 0, sizeof(s->tx.rrc_filter_im));
+
+    /* The previous exchange's MP must not be read as this one's.  The rest of
+       the MP state is rebuilt by mp_or_mph_baud_init() at the TRN seam and
+       reset on the receive side by phase4_rx_conditioning_init() below. */
+    s->rx.last_rx_mp_valid = false;
+    s->tx.mp.mp_acknowledged = false;
+    s->tx.negotiated_rates_valid = false;
+
+    phase4_rx_conditioning_init(s, V34_RX_STAGE_PHASE4_S,
+                                "11.6 rate renegotiation: S, S-bar, TRN, MP");
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_rate_renegotiation_active(v34_state_t *s)
+{
+    return (s  &&  s->tx.reneg_active)  ?  1  :  0;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v34_v90_start_retrain_response(v34_state_t *s)
 {
     if (!s  ||  !s->tx.v90_mode  ||  s->calling_party)
@@ -9020,6 +9152,10 @@ SPAN_DECLARE(int) v34_restart(v34_state_t *s, int baud_rate, int bit_rate, bool 
     s->duplex =
     s->rx.duplex =
     s->tx.duplex = duplex;
+    /* A restart is a retrain or a fresh startup; either way any renegotiation
+       in flight is over.  Left set, it would change the Phase 4 TRN-to-MP
+       seam on the next startup. */
+    s->tx.reneg_active = false;
 
     /* Select the default half-duplex configuration */
     s->rx.half_duplex_source =

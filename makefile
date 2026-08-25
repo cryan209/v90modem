@@ -211,6 +211,26 @@ test: $(TEST_TARGETS)
 	./v34_duplex_test 3200 21600 alaw
 	./v34_duplex_test 3429 21600 ulaw
 	./v34_duplex_test 3429 21600 alaw
+# V.34 11.6 rate renegotiation, the resynchronisation that does not cost a
+# retrain.  Each row runs to data mode, has the CALLER initiate 11.6, leaves
+# the answerer to detect its S and respond through the same public entry point
+# the engine uses, and then requires 8000 bits of payload in BOTH directions
+# with zero errors on the far side of it.  Every symbol rate that trains does
+# this at 9600 in both laws.  21600 is deliberately absent: it renegotiates
+# and comes back decoding -- B1 correlation 0.99, shell index 0-1% -- but some
+# rows carry bit errors afterwards, and a longer TRN (which 11.6.1.1.1 permits
+# up to 2000 ms) does not help, so the cause is not equalizer reconvergence
+# and is not understood.  See docs/retrain_and_resync.md.
+	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2400 9600 ulaw
+	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2400 9600 alaw
+	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2743 9600 ulaw
+	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2743 9600 alaw
+	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2800 9600 ulaw
+	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2800 9600 alaw
+	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3000 9600 ulaw
+	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3000 9600 alaw
+	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3200 9600 ulaw
+	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3200 9600 alaw
 	./v92_proc_eval_test
 	./v90_analogue_tx_test
 	./v90_analogue_rx_test

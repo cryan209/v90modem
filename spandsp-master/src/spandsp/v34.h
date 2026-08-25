@@ -435,6 +435,21 @@ SPAN_DECLARE(void) v34_clear_peer_retrain_event(v34_state_t *s);
     \param s The V.34 context. */
 SPAN_DECLARE(void) v34_clear_peer_reneg_s_event(v34_state_t *s);
 
+/*! \brief Start a V.34 11.6 rate renegotiation from data mode.  The spec
+           offers this as the way to "resynchronize the receiver without going
+           through a complete retrain": it re-runs Phase 4's S, S-bar, TRN, MP,
+           MP', E and B1 without returning to Phase 2.  Both roles run the same
+           sequence; 11.6.1.1 and 11.6.1.2 differ only in who sends S first,
+           and a responder calls this having already detected the initiator's.
+    \param s The V.34 context.
+    \return 0 on success, -1 if the context is not in data mode. */
+SPAN_DECLARE(int) v34_start_rate_renegotiation(v34_state_t *s);
+
+/*! \brief Is a V.34 11.6 rate renegotiation in progress?
+    \param s The V.34 context.
+    \return non-zero while one is running. */
+SPAN_DECLARE(int) v34_rate_renegotiation_active(v34_state_t *s);
+
 /*! \brief Note that a recovery has been started for the current loss, so the
            same one does not start another.
     \param s The V.34 context. */
