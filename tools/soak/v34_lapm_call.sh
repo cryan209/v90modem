@@ -34,7 +34,10 @@ MS=${MS:-34,0,2400,33600}
 # never runs V.42's detection phase, so a V.42 call against it correctly
 # reports an unsupported peer.  \N3 is auto-reliable: LAPM if the far end
 # offers it, buffered if not.
-NPARM=${NPARM:-'\\N3'}
+# printf's %s does not interpret escapes, so this must hold ONE backslash:
+# '\\N3' sends the literal AT\\N3, which the peer answers with ERROR (seen on
+# every call until 2026-08-26).
+NPARM=${NPARM:-'\N3'}
 
 echo "CONTROL: bouncing rig ($SLMODEMD, AT+MS=$MS)"
 ssh -o BatchMode=yes "$TOWER" "docker restart d-modem" >/dev/null 2>&1

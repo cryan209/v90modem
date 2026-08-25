@@ -2766,12 +2766,27 @@ static bool retrain_on_loss_due(void)
  * §11.6 is the cheap resynchronisation -- it keeps the call in data mode and
  * costs the S/S-bar/TRN/MP exchange rather than a whole startup -- but it
  * needs a modem at the other end that implements §11.6.1.2.  A retrain needs
- * only the peer's tone detector, which every V.34 modem has.  So INITIATING
- * one is off by default for the same measured reason §9.6 is on the V.90
- * side: the one peer this tree has talked to answers a renegotiation with
- * nothing.  RESPONDING to one is not gated here -- §11.6.1.2 is a "shall",
- * and the detector behind the event is itself off unless
- * ME_V90_RENEG_RESPOND=1.
+ * only the peer's tone detector, which every V.34 modem has.
+ *
+ * INITIATING one is ON by default, and the reason is measured live rather
+ * than inherited.  The V.90 §9.6 note -- "this rig's analogue modem answers
+ * Rd with nothing" -- does NOT transfer: that is a different procedure with a
+ * different signal, and asked the §11.6 way this same peer answers.  Two live
+ * calls, 2026-08-26 (artifacts/reneg-live-r1, -r2): it responded to our S in
+ * both.  In r1 the exchange completed, the rate moved 9600 -> 12000, B1
+ * re-acquired at correlation 1.000, and 1203 numbered lines reached its DTE
+ * with ZERO gaps across the renegotiation.  In r2 its MP never CRC-validated
+ * and §11.6.2.1's timeout fell back to a §11.5 retrain.
+ *
+ * One of two is thin, but the trade is not: the failure path lands exactly
+ * where the code would have gone without §11.6, and retrain_on_loss_due()
+ * already bounds the whole thing to four attempts a call.  So the worst case
+ * is a few seconds of renegotiation before the same retrain, and the best
+ * case keeps the link and the error-control layer up.  ME_V34_RENEG=0
+ * disables it.
+ *
+ * RESPONDING to one is not gated here -- §11.6.1.2 is a "shall", and the
+ * detector behind the event is itself off unless ME_V90_RENEG_RESPOND=1.
  *
  * §11.6.2.1: "If after transmitting the S-to-S-bar transition, the modem has
  * not received sequence E for the following timeout period, it shall initiate
@@ -2788,11 +2803,8 @@ static int me_v34_reneg_enabled(void)
 {
     static int cached = -1;
 
-    if (cached < 0) {
-        const char *e = getenv("ME_V34_RENEG");
-
-        cached = (e && atoi(e) != 0) ? 1 : 0;
-    }
+    if (cached < 0)
+        cached = parse_env_int("ME_V34_RENEG", 1) ? 1 : 0;
     return cached;
 }
 
@@ -2809,6 +2821,34 @@ static int me_v34_reneg_timeout_ms(void)
 static void v34_reneg_begin_locked(void)
 {
     g_v34_reneg_start_ms = trace_now_ms();
+}
+
+/* ME_V34_RENEG_AFTER_MS=<n> opens a §11.6 rate renegotiation n ms after the
+ * call reaches data mode, once.  A TEST HOOK, and it exists because the only
+ * unanswered question about §11.6 is whether a real peer implements
+ * §11.6.1.2 -- and the engine's own trigger is a receiver that has stopped
+ * decoding, which a healthy call never produces.  The analogue role has had
+ * the same knob (ME_V90_ANALOGUE_RATE_RENEGOTIATE_MS) for the same reason.
+ * Zero, the default, means never. */
+static int64_t g_v34_data_entry_ms = 0;
+static bool    g_v34_reneg_probe_done = false;
+
+static int me_v34_reneg_after_ms(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = parse_env_int("ME_V34_RENEG_AFTER_MS", 0);
+    return cached;
+}
+
+static bool v34_reneg_probe_due_locked(void)
+{
+    if (me_v34_reneg_after_ms() <= 0 || g_v34_reneg_probe_done)
+        return false;
+    if (g_v34_data_entry_ms == 0)
+        return false;
+    return (trace_now_ms() - g_v34_data_entry_ms) >= me_v34_reneg_after_ms();
 }
 
 static void v34_reneg_clear_locked(void)
@@ -3365,6 +3405,8 @@ static void cleanup_v34_v90_training_locked(void)
     g_last_loss_retrain_ms = 0;
     g_retrain_from_data = false;
     g_v34_reneg_start_ms = 0;
+    g_v34_data_entry_ms = 0;
+    g_v34_reneg_probe_done = false;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     v90_cp_rx_reset(&g_v90_cp_rx);
     v90_cp_rx_clear_votes(&g_v90_cp_rx);
@@ -4198,6 +4240,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
                     }
                     g_state = ME_DATA;
                     g_phase_start_ms = 0;
+                    g_v34_data_entry_ms = trace_now_ms();
                     ME_LOG("[ME] V.34 training complete (%d bps)\n", rate);
                     trace_phase("V34 enter DATA: rate=%d", rate);
                     /* §11.5 never takes CONNECT back; a retrain only clamps
@@ -6429,6 +6472,14 @@ void me_rx_audio(const int16_t *amp, int len)
                                    "retrain\n");
                             (void) restart_v34_phase2_locked(
                                 "rate renegotiation timeout");
+                        }
+                    } else if (v34_reneg_probe_due_locked()) {
+                        g_v34_reneg_probe_done = true;
+                        if (v34_start_rate_renegotiation(g_v34) == 0) {
+                            ME_LOG("[ME] V.34: ME_V34_RENEG_AFTER_MS probe; "
+                                   "opening a §11.6 rate renegotiation\n");
+                            trace_phase("V34 reneg probe");
+                            v34_reneg_begin_locked();
                         }
                     } else if (v34_data_carrier_lost(g_v34)
                                && retrain_on_loss_due()) {

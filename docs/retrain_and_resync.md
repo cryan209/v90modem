@@ -36,7 +36,7 @@ every V.34 modem has.
 | §9.6.1.2 respond | V.90 digital | yes, `ME_V90_RENEG_RESPOND=1`; **default off**, unverified against a peer |
 | §11.5.1.1/§11.5.2.1 initiate | plain V.34 | yes, on a receiver that has stopped decoding; bounded |
 | §11.5.1.2/§11.5.2.2 respond | plain V.34 | yes, in every stage including DATA |
-| §11.6.1.1 initiate | plain V.34 | yes, `ME_V34_RENEG=1`; **default off**, unverified against a peer |
+| §11.6.1.1 initiate | plain V.34 | yes, **on by default** — verified live, see below |
 | §11.6.1.2 respond | plain V.34 | yes, `ME_V90_RENEG_RESPOND=1`; **default off** |
 | §11.6.2.1 recovery | plain V.34 | yes — no E within the timeout falls back to a §11.5 retrain |
 
@@ -125,10 +125,10 @@ against.  Proving the peer answers needs the live rig.
 
 ## What is not established
 
-* **No live verification.**  Every figure here is offline.  Whether the
-  SmartLink peer answers our Tone B from data mode within its own timeout is
-  not known, and the rate at which a retrain recovers a call rather than
-  ending it is not known.
+* **The retrain paths have no live verification.**  Whether the SmartLink
+  peer answers our Tone B from data mode within its own timeout is not known,
+  and the rate at which a retrain recovers a call rather than ending it is not
+  known.  §11.6 *is* verified live — see the last section.
 * **§9.6.1.2 is behind a knob and §11.6 is absent.**  See below for what the
   responder is measured on; it has never met a peer that starts one.
 * **The acquisition retry does not rescue acquisition in `v90_engine_replay`**:
@@ -295,3 +295,72 @@ modem.
   DTE before it stops.  Under V.42 the frame CRC discards them, which is the
   normal protection; without error control they reach the DTE.
 * **No live verification**, as everywhere else in this note.
+
+
+## Live: §11.6 against the SmartLink rig (2026-08-26)
+
+Two calls, plain V.34 at 3000 baud / 9600 bps with V.42 LAPM, our side
+initiating a renegotiation 20 s into data mode via `ME_V34_RENEG_AFTER_MS`.
+Kept as `artifacts/reneg-live-r1` and `-r2`.
+
+**The peer implements §11.6.1.2.**  It detected our S and responded with its
+own MP in both calls.  This is worth stating plainly because the assumption
+carried over from §9.6 was the opposite — and that assumption does not
+transfer: §9.6 is a different procedure with a different signal, and the note
+"this rig's analogue modem answers Rd with nothing" was measured on *that*.
+
+**r1 — the whole procedure, and it changed the rate:**
+
+```
+Tx - 11.6 rate renegotiation: transmitting S (128T) then S-bar (16T), TRN and MP
+Tx - 11.6 rate renegotiation: TRN complete (512 bauds), starting MP
+Rx - MP0 diag: ... crc_ok=1 fill_ok=1
+Rx - Phase 4 negotiated: a2c=12000 bps c2a=9600 bps
+Tx - far-end MP received, switching to MP'
+Rx - Phase 4 MP microstate=COMPLETE (E detected)
+Rx - B1 acquired: symbols=120 ... normalized-correlation=1.000
+Tx - data_baud_init(): rate=12000 bps
+```
+
+and the peer's own log agrees from its side: `V34DATARATE, finally txbitrate
+9600, rxbitrate 12000`, then `txstate XMITMP=>EXMIT`.
+
+So this was a real **rate** renegotiation, not merely a resync: the link came
+back at 12000 where it had been running at 9600.  Afterwards the data mode
+measured **0.0023–0.0025 from the grid, 0% bad shell frames over 7680–13312
+frames, ~35 dB**, held for the rest of the call.
+
+**And the DTE stream did not break.**  1203 numbered lines reached the peer's
+DTE, contiguous, **zero gaps** across the renegotiation.  That is §11.5/§11.6
+working as written — circuit 104 clamped for the duration, the error-control
+link above it untouched — and it is the direct payoff of *not* re-running
+`data_stack_start_online()` on the way back in.
+
+**r2 — the failure path, and §11.6.2.1 fired correctly:**
+
+The peer responded, but its MP never CRC-validated (five frames, `crc_ok=0`,
+garbled start bits).  No E arrived, the timeout expired, and:
+
+```
+[ME] V.34 §11.6 rate renegotiation produced no E; falling back to a §11.5 retrain
+[ME] V.34: rate renegotiation timeout; restarting Phase 2 (3000 baud / 9600 bps)
+```
+
+with the transmitter walking INITIAL_PREAMBLE → INFO0 → INITIAL_A → FIRST_A.
+356 lines, zero gaps, before the call was ended.
+
+**Why initiating is on by default.**  One of two converging is thin, but the
+trade is not: the failure path lands exactly where the code would have gone
+without §11.6 at all, and `retrain_on_loss_due()` already bounds the whole
+thing to four attempts per call.  Worst case is a few seconds of
+renegotiation before the same retrain; best case keeps the link and the
+error-control layer up.  `ME_V34_RENEG=0` disables it.
+
+**What r2 does not establish:** the call was ended shortly after the fallback,
+so whether that §11.5 retrain went on to reconnect is not known.
+
+**`ME_V34_RENEG_AFTER_MS=<n>` is a test hook**, not a feature: it opens a
+renegotiation n ms after data mode, once.  It exists because the engine's own
+trigger is a receiver that has stopped decoding, which a healthy call never
+produces, and the only open question about §11.6 was whether a real peer
+answers.  The analogue role has had the same knob for the same reason.
