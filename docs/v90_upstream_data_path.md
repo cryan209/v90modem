@@ -2299,3 +2299,52 @@ frame-phase-lock problem of the entries above, which is independent of this
 change and still open; it is also why payload is not purely a function of hold.
 The 3-splice call surviving while the 19-splice call broke at 35s is exactly
 the dose-response the offline injection predicted.
+
+### The same A/B at 28800 (2026-08-25)
+
+19200 gave only two data-mode calls per arm. 28800 gives twelve for twelve, so
+this is the properly paired comparison — and it is the rate the offline work
+found collapsing hardest, which makes it the sharper test.
+`artifacts/slip-ab-28800-001150Z/`.
+
+| run | clean | longest hold | splices | U-lines |
+|---|---|---|---|---|
+| fixed-r1 | 40.7s | 31.5s | 0 | 9588 |
+| fixed-r2 | 22.1s | 22.0s | 0 | 5800 |
+| fixed-r3 | 22.3s | 20.9s | 0 | 0 |
+| fixed-r4 | 31.6s | 31.5s | 0 | 7650 |
+| fixed-r5 | 31.6s | 31.5s | 0 | 7650 |
+| fixed-r6 | 31.6s | 31.5s | 0 | 7650 |
+| **fixed** | **179.9s** | **168.9s** | **0** | **38338** |
+| slip-r1 | 17.4s | 9.3s | 28 | 0 |
+| slip-r2 | 9.3s | 7.5s | 38 | 2247 |
+| slip-r3 | 14.2s | 8.5s | 8 | 3478 |
+| slip-r4 | 34.3s | 19.1s | 5 | 5196 |
+| slip-r5 | 3.3s | 3.3s | 7 | 0 |
+| slip-r6 | 23.4s | 23.4s | 7 | 6059 |
+| **slip** | **101.9s** | **71.1s** | **93** | **16980** |
+
+**1.77x the clean time, 2.4x the longest hold, 2.26x the payload, six of six
+reaching data mode in both arms.** As at 19200, reachability is untouched.
+
+**Three of the fixed rows are identical to the decimal (31.6/31.5/7650) and
+that is not a harness fault** — it was checked, because live calls do not
+repeat like that. The server logs differ in size, so the calls are distinct;
+what is identical is *where a slow drift crosses the 0.30 cutoff*. At 28800 the
+eye sits at 0.23-0.25 for the first half-minute and then creeps, so the metric
+is measuring a threshold crossing rather than an event, and the deterministic
+drift rate puts the crossing in the same place. **So check the threshold
+sensitivity before believing any of these numbers at this rate** — swept from
+0.20 to 0.40 the fixed/slip ratio is 1.86, 1.82, 1.77, 1.79, 1.73, i.e. flat.
+The conclusion does not depend on the cutoff. The payload counts do not depend
+on it at all.
+
+**What this does NOT say: 28800 is not fixed.** Both arms are white for most of
+the call — median `sym err` 0.663 (fixed) and 0.665 (slip), with only 11% and
+6% of windows under 0.30. The splice was one impairment on top of the collapse
+described in the entries above, not the collapse itself. Removing it roughly
+doubles what the rate delivers; it does not make 28800 hold.
+
+Note the window-count trap again: fixed produced *fewer* windows (12938 vs
+14272) while being clean for longer, because a clean stretch emits long windows
+and a white one short ones. Read seconds and line counts.
