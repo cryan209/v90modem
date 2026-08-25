@@ -88,9 +88,23 @@ static int v34_diag_flag(const char *name, int *cache)
     return *cache;
 }
 
-/* The frame-phase confirmation stage (see V34_V90_T3_CONFIRM_BITS).  On by
-   default; ME_V90_PHASE_CONFIRM=0 restores the single-pass sweep for A/B
-   work. */
+/* The frame-phase confirmation stage (see V34_V90_T3_CONFIRM_BITS).
+   OFF by default, and the reason is a measurement against it.
+
+   The theory is sound and the arithmetic behind V34_V90_T3_CONFIRM_BITS still
+   holds, but the one live call in which this code has ever actually run says
+   it does not work: relgate-r5 of artifacts/gate-ab-31200-*, the only call of
+   twelve whose sweep ever reached its completion branch (784 steps, 7
+   completions), locked five times on shell evidence and delivered ZERO
+   payload across 111.8 s of open eye, while the other eleven locked on marks
+   and carried 20000 lines apiece.  Whatever the shell bound is worth over 133
+   frames, it is not enough on its own to choose among the candidates the
+   coarse pass leaves -- or this implementation picks the first clean one
+   where it should pick the best.
+
+   Left in, off, with the evidence beside it: the diagnosis it came from is
+   still the right one and the next attempt should start here rather than from
+   scratch.  ME_V90_PHASE_CONFIRM=1 enables it. */
 static int v90_t3_phase_confirm_enabled(void)
 {
     static int cache = -1;
@@ -99,7 +113,7 @@ static int v90_t3_phase_confirm_enabled(void)
     {
         const char *v = getenv("ME_V90_PHASE_CONFIRM");
 
-        cache = (v  &&  atoi(v) == 0)  ?  0  :  1;
+        cache = (v  &&  atoi(v) != 0)  ?  1  :  0;
     }
     /*endif*/
     return cache;

@@ -2404,3 +2404,82 @@ attribution is strongest where the arms actually differed:
 | 19200 | 2/6, 2/6 | 228.4 / 180.8 | 46716 / 6727 | 22 | fair, but only 2 data-mode calls per arm |
 | 28800 | 6/6, 6/6 | 179.9 / 101.9 | 38338 / 16980 | 93 | **strongest — paired, and the arms really differed** |
 | 31200 | 4/6, 3/6 | 433.1 / 32.4 | 42033 / 6643 | 12 | weak — arms barely differed, large variance |
+
+## The frame-phase lock: one real fix, one idea that failed (2026-08-25)
+
+The 31200 A/B left "an open eye and no data" as the binding limit: two of four
+data-mode calls held a clean constellation for 100-115 s and delivered nothing.
+
+### What the failing call actually shows
+
+`fixed-r5` of `artifacts/slip-ab-31200-010059Z`: 115.6 s clean, `sym err` 0.16,
+**0 payload**. Its sweep made **73 steps of 112 and never completed** — zero
+"phase sweep done" lines in the whole call. So the enumeration never finished,
+the best candidate was never restored, and the receiver sat on whatever phase
+it had.
+
+**The sweep's permission was gated on the wrong yardstick.**
+`v90_t3_phase_evidence_ok()` judges the eye *relative* to what this call's own
+settled at, but the sweep branch re-tested it against the absolute
+`V34_V90_T3_SWEEP_ERR` of 0.15. 31200 decodes happily at 0.16-0.23 —
+comfortably inside the 0.30 at which the constellation is still open, and
+entirely outside 0.15. Measured on that call: **2% of its 2976 windows were
+under 0.15**, and the peer was never idle so `idle_seen` never became true.
+The sweep was permitted in one window in fifty. Fixed by dropping the second,
+absolute test and keeping the relative one plus the episode cap
+(`ME_V90_SWEEP_EYE_ABS=1` restores it).
+
+**Live A/B at 31200, six calls per arm, arms alternated:**
+
+| arm | calls | data mode | clean | longest hold | U-lines |
+|---|---|---|---|---|---|
+| relative gate (fix) | 6 | **5** | **552.3s** | **463.2s** | **81642** |
+| absolute gate (old) | 6 | 4 | 283.4s | 230.7s | 48810 |
+
+**1.95x the clean time, 2.0x the longest hold, 1.67x the payload.** It does
+**not** eliminate the failure: `relgate-r5` still held 111.8 s of clean eye and
+delivered zero.
+
+### The confirmation stage — built, measured, and turned off
+
+The first diagnosis was that the sweep judges each of its 112 candidates over
+one 1200-bit window (~15 mapping frames), which is enough for the marks on an
+idle line and not for the 9.6.3.3 shell bound on a busy one: at the measured
+4% per-frame overflow rate of a wrong phase, 0.96^15 = 0.54, so a wrong
+candidate reads clean about half the time. On `fixed-r5`, **9 of the 73
+candidates visited scored zero bad frames** and the score could not choose
+between them. That arithmetic is still right.
+
+The fix built for it — shortlist the survivors of the coarse pass, re-measure
+each over 9600 bits (~130 frames, 0.96^130 = 0.005), lock on shell evidence
+alone — **is off by default, because the one live call in which it ever ran
+says it does not work.** `relgate-r5` is the only call of the twelve whose
+sweep reached its completion branch (784 steps, 7 completions); it locked five
+times on shell evidence and delivered **zero** payload, while the other eleven
+locked on marks and carried ~20000 lines each. Either the shell bound over 130
+frames is still not enough to choose among the coarse survivors, or this
+implementation takes the first clean candidate where it should take the best.
+`ME_V90_PHASE_CONFIRM=1` enables it; the code and the reasoning are left in
+place because the diagnosis is still the right starting point.
+
+### Two facts worth keeping
+
+**Idle marks are phase-AMBIGUOUS.** Displaced five data frames from the phase
+B1 pins, offsets 5, 6 and 7 all read **100% ones** while the peer was idle, and
+only when its DTE began sending did the wrong ones fall to 51% and 35%: a wrong
+grouping still decodes a continuous mark to a continuous mark. So a lock taken
+on marks during idle can be a wrong phase that merely looks right, and the
+search must be run against traffic. Both stages now exclude idle windows.
+
+**The failure has no offline reproduction, and that is now established rather
+than suspected.** Every tap in the tree arrives on the correct phase with the
+peer idle, so phase 0 locks on 100% marks after 0 steps and the sweep is never
+asked a hard question. Five recordings replay byte-identical with every knob
+here on or off (22058/30721/28727/14575/2510 lines). `ME_V90_PHASE_NO_MARKS=1`
+denies the content-dependent locks and `ME_V90_PHASE_FORCE_OFFSET=n` displaces
+the decoder n data frames, which together reproduce the *conditions* — but
+even then both arms recover, so the live failure has an ingredient these
+recordings do not carry. Note the offset must be applied where **B1 ends**, not
+at acquisition: applied earlier it is absorbed by B1's own pinning and only the
+bookkeeping counter moves, which made the first version of that test report
+"offset 5" while decoding perfectly.
