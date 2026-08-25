@@ -5,6 +5,7 @@ Clean TIME, not window counts -- a white stretch emits short windows and a
 clean one long windows, so a window-weighted percentage flatters a call that
 spent most of its seconds white.
 """
+import gzip
 import os
 import re
 import sys
@@ -20,7 +21,8 @@ def score(log):
     prev = clean = total = run = best = 0.0
     splices = 0
     data = False
-    with open(log, errors="replace") as fh:
+    op = gzip.open if log.endswith(".gz") else open
+    with op(log, "rt", errors="replace") as fh:
         for line in fh:
             if "enter DATA after B1" in line:
                 data = True
@@ -60,6 +62,8 @@ def main():
     for name in sorted(os.listdir(root)):
         d = os.path.join(root, name)
         log = os.path.join(d, "server.log")
+        if not os.path.isfile(log):
+            log += ".gz"          # kept compressed once a run is archived
         if not os.path.isfile(log):
             continue
         # A run's directory exists from the moment it STARTS, so counting it

@@ -2253,3 +2253,49 @@ recording contains the splices and the replay survives them longer than live
 did, so the live/replay divergence of 2026-08-24 is **still unexplained** and
 is not resolved by this. What is established is that removing these edits
 lengthens the connection substantially on every real call that has them.
+
+### The live A/B: confirmed, and it does not touch the handshake (2026-08-25)
+
+Twelve live calls against the rig at 19200, six per arm, **arms alternated
+rather than run in blocks** so a drifting rig cannot masquerade as an effect,
+one binary, `ME_RX_CLOCK_SLIP` the only variable. Each run greps its own
+server log to confirm the knob took effect in that call.
+`artifacts/slip-ab-211840Z/`, harness `tools/soak/v90_slip_ab.sh`.
+
+| arm | calls | reached data mode | clean | longest hold | U-lines | splices |
+|---|---|---|---|---|---|---|
+| fixed (default) | 6 | 2 | 228.4s | 228.4s | **46716** | **0** |
+| slip (`ME_RX_CLOCK_SLIP=1`) | 6 | 2 | 180.8s | 147.5s | 6727 | 22 |
+
+**Data-mode reachability is identical — 2 of 6 either way — so the change does
+not touch the handshake.** That matters, because the first two calls of the
+session came out 0/2 fixed against 2/2 slip and looked like a regression. It
+was chance: across 228 recorded runs in `artifacts/` the base rate of a run
+reaching data mode is 0.57, which puts that split at p≈0.06, and a Fisher
+exact test on 0/2 vs 2/2 is p≈0.17. **Do not read a live arm before it has
+finished** — a run's directory exists from the moment it starts, and scoring it
+early reports a call that has not happened yet as a failure; that misread
+happened twice here before `slip_ab_summary.py` learned to wait for
+`v90_notch_ab.sh`'s last line.
+
+Conditioned on the calls that reached data mode, two per arm:
+
+- **Both fixed calls held the entire call unbroken** — 114.8s and 113.6s with
+  `clean == hold`, i.e. not one window left the lattice — and delivered
+  **23353 and 23363 intact `U%07d` lines**.
+- The slip calls: one broke at 35.0s after 19 splices (6727 lines), the other
+  had only 3 splices, held 112.5s, and delivered **zero**.
+
+**6.9x the payload, and every fixed call ran the whole call clean.** Read the
+line counts, not the byte percentages, and note the two arms' clean seconds
+(228.4 vs 180.8) understate it badly: the slip arm's second call contributes
+112.5 clean seconds that carried no payload at all.
+
+**Honest limits.** Two data-mode calls per arm is small, and the arms are not
+separated on longest hold (114.8s vs 112.5s) — what separates them is that the
+fixed arm did it on *both* calls and delivered payload on both. That
+`slip-r2` held a clean eye for 112.5s and delivered nothing is the
+frame-phase-lock problem of the entries above, which is independent of this
+change and still open; it is also why payload is not purely a function of hold.
+The 3-splice call surviving while the 19-splice call broke at 35s is exactly
+the dose-response the offline injection predicted.
