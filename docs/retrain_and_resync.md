@@ -137,43 +137,42 @@ against.  Proving the peer answers needs the live rig.
   acquires on the same files.  What the change buys *there* is that the
   failure is observable and recoverable rather than silent and terminal.
 
-  In `v90_upstream_replay` it changes the outcome, but **not consistently for
-  the better** — same recordings, two binaries differing only in this change,
-  run sequentially:
+  In `v90_upstream_replay` the payload counts move a great deal, in both
+  directions — and **that is not a measurement of this change.**  Pin the
+  handover instant instead of letting the harness search for it
+  (`v90_upstream_replay <tap> ulaw <baud> <bps> <seconds>`) and the two
+  binaries are **identical**: same window count, same mean symbol error to
+  three decimals, logs that diff clean, on all three calls tried.
 
-  | call | before | | after | | |
-  | --- | --- | --- | --- | --- | --- |
-  | | handover | lines | handover | lines | |
-  | rate19200-r1 | 26.0 s | 22058 | 23.0 s | 18144 | **−17.7%** |
-  | rate24000-r1 | 25.5 s | 30721 | 22.5 s | 30721 | 0 |
-  | rate28800-r1 | 25.5 s | 14575 | 22.5 s | 20201 | **+38.6%** |
-  | | | 67354 | | 69066 | +2.5% |
+  | call | pinned at | base | after |
+  | --- | --- | --- | --- |
+  | rate19200-r1 | 26.0 s | 585 windows, 0.150 | 585 windows, 0.150 |
+  | rate24000-r2 | 25.5 s | 1040 windows, 0.358 | 1040 windows, 0.358 |
+  | rate28800-r1 | 25.5 s | 1939 windows, 0.583 | 1939 windows, 0.583 |
 
-  The mechanism is consistent even though the outcome is not: the harness
-  sweeps candidate handover instants in order and takes the first that
-  acquires, and every row moves ~3 s earlier, because the old code gave up on
-  that earlier candidate after one window while the new one slides the anchor
-  forward and acquires inside it.  **Whether the earlier candidate is the
-  better filter is call-dependent**, and on this sample it is a wash with
-  large swings either way.  Do not read the 28800 row on its own.
+  So **the receiver at a given anchor is unchanged.**  What the retry changes
+  is which candidate instant the harness's outer sweep settles on: every call
+  moves about 3 s earlier, because the earlier candidate is no longer
+  abandoned after a single window.  With the sweep free to choose, the same
+  four calls read 22058→18144, 30721→30721, 23019→12151 and 14575→20201 —
+  −10% overall and ±40% per call, which is a measurement of an **unranked
+  candidate search**, not of this change.
 
-  That is the "every change reshuffles which cases pass" signature
-  `docs/v34_symbol_rate_matrix` work warns about, and it says the acquisition
-  has no ranking across candidate instants: the in-sample bail rejects a
-  window before the out-of-sample scoring that `v90_t3_acq_best_*` uses, so an
-  earlier candidate wins on ORDER rather than on quality.  Ranking candidates
-  the way windows within a candidate are already ranked is the obvious next
-  step and is not done.
+  The search was already unranked; the retry only made it visible.  The
+  in-sample bail rejects a window before the out-of-sample scoring that
+  `v90_t3_acq_best_*` uses, so a candidate instant wins on ORDER and nothing
+  else.  Ranking candidate instants the way windows within a candidate are
+  already ranked is the obvious next step and is not done here.
 
-  What is not in doubt is the half this change exists for: three of the twelve
-  recorded calls previously carried NOTHING at all, terminally and silently,
-  and no longer can.
+  **Read the pinned rows, not the swept ones.**  A live call has no outer
+  sweep: it has one E anchor, it used to get one shot at it, and it now gets
+  up to seven sliding forward.
 
   The price is CPU: seven least-squares searches per candidate instead of one.
   Live that is bounded by the existing `V34_V90_T3_ACQ_RETRY_GAP` backoff to
   one search per 0.5 s at 3200 baud, which is the budget the out-of-sample
   path was already tuned against; offline in the sweep harness it is a
-  straight 7x, because the harness fast-forwards the backoff.
+  straight 7x per candidate, because the harness fast-forwards the backoff.
 
   Note the two failure kinds now share one retry counter.  That is the safe
   direction: a call that spends some of the budget on in-sample failures
