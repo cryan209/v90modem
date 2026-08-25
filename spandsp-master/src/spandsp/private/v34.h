@@ -1173,6 +1173,11 @@ typedef struct
         acquires against in the first place. */
     int v90_t3_lost_run;
 
+    /* Set when B1 acquisition has run out of windows and there is no
+       upstream at all for the rest of the call.  V.90 9.5.1.1 is the only
+       thing that can still fix that: a retrain ends in a fresh B1. */
+    bool v90_t3_acq_abandoned;
+
     /* Plain V.34 data mode: the same "has this receiver stopped decoding"
        question the V.90 upstream answers with v90_t3_sym_err_ema/lost_run.
        V.34 11.5/11.6 give a receiver that cannot recover a retrain and a

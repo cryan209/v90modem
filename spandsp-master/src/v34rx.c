@@ -13442,6 +13442,37 @@ static float v90_t3_acquire_pass(v34_rx_state_t *s,
 }
 /*- End of function --------------------------------------------------------*/
 
+/* A rejected acquisition window is not a failed call: E is detected on the CP
+   bit stream and lags, so a first attempt usually means B1 is still ahead of
+   the anchor.  Slide forward and search again when more wire has arrived.
+   The backoff is not optional -- without it the search re-runs on identical
+   samples every symbol, which is tens of millions of complex MACs per symbol
+   in the media thread, and the far end hears the stall as a discontinuity.
+
+   When the windows run out there is no upstream at all for the rest of the
+   call, so say so rather than falling silent: V.90 9.5.1.1 is the only
+   recovery with the reach to fix it, and a retrain ends in a fresh B1. */
+static void v90_t3_acq_retry_or_abandon(v34_rx_state_t *s, const char *why)
+{
+    if (++s->v90_t3_acq_retries <= V34_V90_T3_ACQ_MAX_RETRIES)
+    {
+        s->v90_t3_acquisition_attempted = false;
+        s->v90_t3_e_anchor += V34_V90_T3_ACQ_RETRY_GAP;
+        s->v90_t3_acq_retry_at = s->v90_t3_raw_count + V34_V90_T3_ACQ_RETRY_GAP;
+    }
+    else
+    {
+        s->v90_t3_acq_abandoned = true;
+        span_log(s->logging, SPAN_LOG_WARNING,
+                 "Rx - V.90 T/3 B1 giving up after %d windows (%s); the "
+                 "upstream has no carrier and only a retrain can give it "
+                 "one\n",
+                 s->v90_t3_acq_retries, why);
+    }
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v90_t3_try_acquire(v34_rx_state_t *s)
 {
     /* The E handover is only a coarse anchor: it is detected on the CP bit
@@ -13584,7 +13615,15 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
                  "(first=%lld coarse=%.1f%% fit=%.1f%% tap=%d trellis=%d)\n",
                  (long long)best_first, 100.0f*best_coarse,
                  100.0f*best_match, best_tap, best_trellis);
-        s->received_event = V34_EVENT_TRAINING_FAILED;
+        /* This used to return without arming a retry, leaving
+           v90_t3_acquisition_attempted set -- so the ONE window that happened
+           to be in front of the anchor decided the whole call, and a call
+           that missed it carried no upstream for its entire life with nothing
+           logged after this line.  Measured on three of the recorded rate
+           matrix calls: one "acquisition failed" and then 115 s of silence.
+           It is the same situation the out-of-sample rejection below handles
+           by sliding the window forward, so handle it the same way. */
+        v90_t3_acq_retry_or_abandon(s, "in-sample fit");
         return;
     }
     /* Validate the winner OUT OF SAMPLE before committing to it.  The fit is
@@ -13735,20 +13774,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
                    on identical samples every symbol, which is tens of
                    millions of complex MACs per symbol in the media thread,
                    and the far end hears the stall as a discontinuity. */
-                if (++s->v90_t3_acq_retries <= V34_V90_T3_ACQ_MAX_RETRIES)
-                {
-                    s->v90_t3_acquisition_attempted = false;
-                    s->v90_t3_e_anchor += V34_V90_T3_ACQ_RETRY_GAP;
-                    s->v90_t3_acq_retry_at =
-                        s->v90_t3_raw_count + V34_V90_T3_ACQ_RETRY_GAP;
-                }
-                else
-                {
-                    span_log(s->logging, SPAN_LOG_WARNING,
-                             "Rx - V.90 T/3 B1 giving up after %d windows\n",
-                             s->v90_t3_acq_retries);
-                }
-                /*endif*/
+                v90_t3_acq_retry_or_abandon(s, "out-of-sample distance");
                 return;
             }
             /*endif*/
@@ -15376,7 +15402,16 @@ SPAN_DECLARE(int) v34_v90_upstream_rx_acquired(v34_state_t *s)
 
 SPAN_DECLARE(int) v34_v90_upstream_carrier_lost(v34_state_t *s)
 {
-    if (!s || !s->rx.v90_t3_acquired)
+    if (!s)
+        return 0;
+    /*endif*/
+    /* An upstream that never acquired at all is the same condition as one
+       that has stopped decoding, and worse: the call has carried nothing
+       since B1.  Both are what 9.5.1.1 is for. */
+    if (s->rx.v90_t3_acq_abandoned)
+        return 1;
+    /*endif*/
+    if (!s->rx.v90_t3_acquired)
         return 0;
     /*endif*/
     return (s->rx.v90_t3_lost_run >= V34_V90_T3_LOST_SYMBOLS) ? 1 : 0;
@@ -15393,6 +15428,7 @@ SPAN_DECLARE(void) v34_v90_upstream_clear_carrier_lost(v34_state_t *s)
         return;
     /*endif*/
     s->rx.v90_t3_lost_run = 0;
+    s->rx.v90_t3_acq_abandoned = false;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -15639,6 +15675,7 @@ static bool v90_t3_start(v34_rx_state_t *rx)
     rx->v90_t3_phase_pending = false;
     rx->v90_t3_phase_pos = 0;
     rx->v90_t3_acq_retries = 0;
+    rx->v90_t3_acq_abandoned = false;
     rx->v90_t3_acq_best_valid = false;
     rx->v90_t3_acq_best_rel = 0.0f;
     rx->v90_t3_acq_best_dist = 0.0f;
