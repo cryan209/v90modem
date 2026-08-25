@@ -113,6 +113,22 @@ static int v90_t3_phase_confirm_enabled(void)
    idle, so phase 0 locks on 100% marks after 0 steps and the sweep is never
    asked a hard question.  Setting this reproduces the live condition on a
    recording whose correct answer is known. */
+/* ME_V90_SWEEP_EYE_ABS=1 restores the absolute eye test that used to gate the
+   frame-phase sweep, for A/B work.  See the comment at its call site. */
+static int v90_t3_sweep_abs_eye(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *v = getenv("ME_V90_SWEEP_EYE_ABS");
+
+        cache = (v  &&  atoi(v) != 0)  ?  1  :  0;
+    }
+    /*endif*/
+    return cache;
+}
+
 static int v90_t3_phase_no_marks(void)
 {
     static int cache = -1;
@@ -1016,9 +1032,31 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                 }
                 else if (v90_t3_phase_evidence_ok(s)
                          &&
+                         /* Eye health is already judged, one condition
+                            up, by v90_t3_phase_evidence_ok() -- and it is
+                            judged RELATIVE to what this call's own eye
+                            settled at.  This term used to re-test it against
+                            the absolute V34_V90_T3_SWEEP_ERR, and that is
+                            the wrong yardstick at the high rates: 31200
+                            decodes happily at 0.16-0.23, comfortably inside
+                            the 0.30 at which the constellation is still
+                            open, and entirely outside 0.15.
+                            Measured on the live call fixed-r5, which held an
+                            open eye for 115.6 s and delivered nothing: 2% of
+                            its 2976 windows were under 0.15 and the peer was
+                            never idle, so the sweep was permitted in one
+                            window in fifty.  It crawled to step 73 of 112
+                            and stopped there -- the enumeration never
+                            finished, so the best candidate was never
+                            restored and nothing downstream of the sweep,
+                            including the confirmation stage, could run at
+                            all.  Keep the episode cap; drop the second,
+                            absolute eye test. */
                          (s->v90_t3_idle_seen
                           ||
-                          (s->v90_t3_sym_err_ema < V34_V90_T3_SWEEP_ERR
+                          ((!v90_t3_sweep_abs_eye()
+                            ||
+                            s->v90_t3_sym_err_ema < V34_V90_T3_SWEEP_ERR)
                            &&
                            s->v90_t3_sweep_episodes
                                < V34_V90_T3_SWEEP_EPISODES))
