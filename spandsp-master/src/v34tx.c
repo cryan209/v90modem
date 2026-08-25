@@ -3004,8 +3004,39 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
             s->tx.tone_duration = 1;
             s->tx.stage = V34_TX_STAGE_FIRST_NOT_A;
         }
+        else if (!s->tx.v90_mode
+                 &&
+                 s->tx.retrain_omit_info0
+                 &&
+                 s->rx.tone_b_present)
+        {
+            /* 11.5 omits the INFO0 exchange, so the INFO0c shortcut below can
+               never fire on a retrain and FIRST_A waits for ever: measured
+               live, the peer holds Tone B and drops the call 3.06 s later on
+               its unanswered-tone timeout (artifacts/retrain-live-c2, where
+               the receiver logs "Tone B detected" and the transmitter never
+               moves).  11.2.1.2.3's actual condition is "After Tone B is
+               detected and Tone A has been transmitted for at least 50 ms",
+               and INITIAL_A served the 50 ms, so this is the normative test
+               rather than a workaround.
+
+               It reads rx.tone_b_present, not V34_EVENT_TONE_SEEN: that flag
+               exists precisely because "Tone B is detected" is a separate
+               fact from the reversal ordinal that shares the single
+               received_event slot, and using the event here would make the
+               peer's next reversal read as its first.  Scoped to the retrain
+               so an ordinary startup keeps its established INFO0c timing. */
+            span_log(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - FIRST_A: Tone B detected and INFO0 omitted by 11.5, "
+                     "sending !A (11.2.1.2.3)\n");
+            s->tx.retrain_omit_info0 = false;
+            s->tx.lastbit.re = -s->tx.lastbit.re;
+            s->tx.tone_duration = 1;
+            s->tx.stage = V34_TX_STAGE_FIRST_NOT_A;
+        }
         else if (!s->tx.v90_mode  &&  s->rx.received_event == V34_EVENT_INFO0_OK)
         {
+            s->tx.retrain_omit_info0 = false;
             span_log(&s->logging, SPAN_LOG_FLOW, "Tx - FIRST_A: INFO0c received OK, sending !A (11.2.1.2.3)\n");
             /* First reversal seen - send a phase reversal back */
             s->tx.lastbit.re = -s->tx.lastbit.re;
@@ -8834,6 +8865,8 @@ SPAN_DECLARE(void) v34_start_retrain(v34_state_t *s)
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.current_getbaud = get_v90_wait_info1a_baud;
     s->tx.tone_duration = 0;
+    /* 11.5 omits the INFO0 exchange, so FIRST_A must not wait for one. */
+    s->tx.retrain_omit_info0 = true;
     s->tx.stage = V34_TX_STAGE_V90_RETRAIN_SILENCE;
     s->rx.received_event = V34_EVENT_NONE;
     s->rx.persistence1 = 0;
@@ -9211,6 +9244,9 @@ SPAN_DECLARE(int) v34_restart(v34_state_t *s, int baud_rate, int bit_rate, bool 
        in flight is over.  Left set, it would change the Phase 4 TRN-to-MP
        seam on the next startup. */
     s->tx.reneg_active = false;
+    /* v34_start_retrain() sets this again if this restart is a retrain.  It
+       must not survive into an ordinary startup, where INFO0 does arrive. */
+    s->tx.retrain_omit_info0 = false;
 
     /* Select the default half-duplex configuration */
     s->rx.half_duplex_source =

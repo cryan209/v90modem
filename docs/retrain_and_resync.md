@@ -408,7 +408,7 @@ paths are unchanged.
 count expired in 18 ms and the transmitter fell straight through into
 INITIAL_PREAMBLE/INFO0 — i.e. defect (a) again, by a different route.
 
-### Open: the exchange stalls at the Tone A phase reversal
+### Fixed: the Tone A phase reversal (and what stops it now)
 
 With both fixed, `c2` puts the conformant sequence on the wire — 70 ms of
 silence, then Tone A — and the peer answers by going SILENCERETRAIN →
@@ -427,7 +427,60 @@ and carrier state all tuned for a data constellation, where a fresh call
 reaches the tone stages from a reset front end.  `b2` is evidence that simply
 sending INFO0 instead does not help: it drops at the same 3.1 s.
 
-So: **initiation is proven to reach the peer and provoke its response; the
-handshake that follows does not complete, and the reversal is where it
-stops.**  Responding to a peer-initiated retrain (§11.5.1.2/§9.5.1.2) is
-still untested live — nothing yet makes this peer start one.
+**The receiver was detecting Tone B all along** — `Rx - Tone B detected
+(power=9441985 ref=9462494)` is right there in `c2`'s log.  It just never told
+the transmitter.  Two gates, both pre-existing:
+
+* `V34_EVENT_TONE_SEEN` is published only when `v90_mode && calling_party &&
+  info0_received`, so on a plain V.34 call it is never published at all.
+* FIRST_A's plain-V.34 condition is `received_event == V34_EVENT_INFO0_OK` —
+  and §11.5 **omits the INFO0 exchange**, so it can never fire on a retrain.
+
+The transmitter therefore waited for an INFO0 that the spec says will not
+come, while the peer held Tone B and dropped on its timeout.
+
+The fix reads `rx.tone_b_present` — the dedicated flag that exists precisely
+because "Tone B is detected" is a separate fact from the reversal ordinal
+sharing the single `received_event` slot — and only when `tx.retrain_omit_info0`
+is set, so an ordinary startup keeps its established INFO0c timing.  This is
+§11.2.1.2.3's actual condition ("After Tone B is detected and Tone A has been
+transmitted for at least 50 ms"; INITIAL_A served the 50 ms), so it is the
+normative test rather than a workaround.
+
+**Live, `d2` and `d3`, reproduced identically:**
+
+```
+Tx - FIRST_A: Tone B detected and INFO0 omitted by 11.5, sending !A (11.2.1.2.3)
+Tx - FIRST_NOT_A: Tone B ended without a detected reversal; treating it as 11.2.1.1.3
+    ... FIRST_NOT_A_REVERSAL -> SECOND_A -> POST_L2_WAIT_TONE_B -> POST_L2_A
+    ... -> POST_L2_NOT_A -> A_SILENCE -> PRE_INFO1_A
+```
+
+The whole §11.2.1.2 answer-modem timetable now runs on a retrain, the peer
+accepts it (`V34RETRAIN, RX_PHASE1_CALL received`), and **the 3.06 s
+unanswered-tone drop is gone: the call now lives 15.3 s past the retrain
+instead of 3.4 s.**
+
+### Open: the peer's own Phase 1 livelock
+
+What stops it now is in the peer, and it is already documented:
+
+```
+V34RETRAIN, RX_PHASE1_CALL received
+microstate RX_PHASE1_CALL=>TX_PHASE1_CALL
+Repeated info0 is detected, errorrecovery is initialized in TX_PHASE1_CALL
+```
+
+That is the same `Repeated info0 is detected` livelock in the shipped
+SmartLink DSP that `docs/v34_plain_phase2_call_role.md` records as the
+blocker for plain-V.34 *origination* — reproduced there on two peer binaries,
+with all three permitted responses measured and all three failing.  Its
+recovery has one exit, receiving an INFO0a, which `TX_PHASE1_CALL` reads as a
+repeat, and it loops until it gives up.  Our side sits in the §11.2.1.2.5
+resume waiting for an L1/L2 probe and INFO1c that never arrive.
+
+So: **initiation reaches the peer, drives its retrain, and completes our half
+of the tone exchange; the peer then enters a Phase 1 error-recovery livelock
+of its own that this tree has hit before and cannot fix from this end.**
+Responding to a peer-initiated retrain (§11.5.1.2/§9.5.1.2) is still untested
+live — nothing yet makes this peer start one.

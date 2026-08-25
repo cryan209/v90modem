@@ -923,6 +923,12 @@ typedef struct
         renegotiation rather than a startup, which matters at the TRN-to-MP
         seam: 11.4 waits for the far end's J', and 11.6 has no J at all. */
     bool reneg_active;
+    /*! \brief This Phase 2 was entered by a V.34 11.5 / V.90 9.5 retrain, in
+        which the INFO0 exchange is omitted.  FIRST_A's plain-V.34 condition
+        is otherwise "INFO0c received", which on a retrain never happens --
+        so it waits, the peer holds Tone B, and drops on its unanswered-tone
+        timeout (measured: 3.06 s, artifacts/retrain-live-c2). */
+    bool retrain_omit_info0;
     /*! \brief V.90 PCM law: 0 = µ-law, 1 = A-law */
     int v90_pcm_law;
     /*! \brief V.92 INFO0d extensions.  Table 15 bit 27 advertises V.92
