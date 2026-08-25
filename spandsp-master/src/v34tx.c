@@ -4772,14 +4772,27 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
 
     if (s->tx.stage == V34_TX_STAGE_V90_RETRAIN_SILENCE)
     {
-        /* V.90 §9.5.1.2/§9.5.2: after 70 ± 5 ms of silence, transmit the
-           role's tone and resume Phase 2 after the omitted INFO0 exchange. */
+        /* V.90 §9.5.1.2/§9.5.2 and V.34 §11.5: after 70 +/- 5 ms of silence,
+           transmit the role's tone and resume Phase 2 with the INFO0
+           exchange omitted.
+ 
+           Which tone is OURS follows the role, not the call direction.  V.34
+           gives Tone A to the answer modem (§11.2.1.2, §11.5.2.1) and Tone B
+           to the call modem (§11.2.1.1, §11.5.1.1); V.90 keeps both
+           timetables and hands them to the other end of the call, so its
+           analogue modem -- the caller -- is the Tone A side.  Both cases are
+           "calling_party and v90_mode agree", which is the same predicate the
+           receiver already picks its carrier on.  This used to read
+           `s->calling_party` alone: identical whenever v90_mode is 1, and
+           wrong for plain V.34, which never reached this stage until §11.5
+           was implemented. */
         if (++s->tx.tone_duration >= 42)
         {
-            if (s->calling_party)
+            if (s->calling_party == s->tx.v90_mode)
             {
                 span_log(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - V.90 analogue: retrain silence complete; transmitting Tone A and awaiting Tone B\n");
+                         "Tx - retrain silence complete; transmitting Tone A "
+                         "and awaiting Tone B\n");
                 s->tx.tone_duration = 0;
                 s->rx.received_event = V34_EVENT_NONE;
                 s->rx.persistence1 = 0;
@@ -8783,6 +8796,48 @@ SPAN_DECLARE(int) v34_start_rate_renegotiation(v34_state_t *s)
 SPAN_DECLARE(int) v34_rate_renegotiation_active(v34_state_t *s)
 {
     return (s  &&  s->tx.reneg_active)  ?  1  :  0;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* V.34 §11.5: start a retrain, either initiating (§11.5.1.1/§11.5.2.1) or
+ * responding (§11.5.1.2/§11.5.2.2).  Both say the same thing about the wire:
+ * "turn OFF circuit 106, clamp circuit 104 to binary one and transmit silence
+ * for 70 +/- 5 ms", then hold this role's tone.
+ *
+ * That last part is why this exists rather than a plain v34_restart().  A
+ * restart re-enters Phase 2 at INITIAL_PREAMBLE/INFO0, which puts a MODULATED
+ * control-channel carrier in front of a peer that is waiting for a tone.
+ * Measured live against the SmartLink rig, 2026-08-26
+ * (artifacts/retrain-live-b2): it detected our retrain request and started
+ * its own -- "V34RETRAIN, retrain request detected" then "Retrain started" --
+ * and then dropped the call 3.1 s later, DP_DISC and NO CARRIER, while we
+ * were sending INFO0 at it.  The V.90 side has known this since 2026-07-22
+ * and has had v34_v90_start_retrain_response() for it; plain V.34 had
+ * nothing, and §11.5.1.1's "condition its receiver to ... receive INFO0a" was
+ * misread as licence for the TRANSMITTER to send INFO0 instead of the tone.
+ * It is not: it says what to do IF the peer sends one.
+ */
+SPAN_DECLARE(void) v34_start_retrain(v34_state_t *s)
+{
+    if (!s)
+        return;
+    /*endif*/
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Tx - V.34 11.5 retrain: 70 ms of silence, then Tone %c\n",
+             (s->calling_party == s->tx.v90_mode) ? 'A' : 'B');
+    /* The stage alone is not enough: V34_TX_STAGE_V90_RETRAIN_SILENCE is
+       handled inside get_v90_wait_info1a_baud(), and its 42-baud silence is
+       70 ms only at the 600-baud CONTROL channel rate.  Left on whatever
+       generator was running, the count expired in 18 ms at 3000 baud and the
+       transmitter fell straight through into INITIAL_PREAMBLE/INFO0 --
+       measured live, artifacts/retrain-live-c1. */
+    s->tx.current_modulator = V34_MODULATION_CC;
+    s->tx.current_getbaud = get_v90_wait_info1a_baud;
+    s->tx.tone_duration = 0;
+    s->tx.stage = V34_TX_STAGE_V90_RETRAIN_SILENCE;
+    s->rx.received_event = V34_EVENT_NONE;
+    s->rx.persistence1 = 0;
+    s->rx.persistence2 = 0;
 }
 /*- End of function --------------------------------------------------------*/
 

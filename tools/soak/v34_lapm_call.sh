@@ -34,10 +34,16 @@ MS=${MS:-34,0,2400,33600}
 # never runs V.42's detection phase, so a V.42 call against it correctly
 # reports an unsupported peer.  \N3 is auto-reliable: LAPM if the far end
 # offers it, buffered if not.
-# printf's %s does not interpret escapes, so this must hold ONE backslash:
-# '\\N3' sends the literal AT\\N3, which the peer answers with ERROR (seen on
-# every call until 2026-08-26).
-NPARM=${NPARM:-'\N3'}
+# NOTE: printf's %s does not interpret escapes, so this sends the literal
+# AT\\N3 and the peer answers ERROR -- it has done on every call, and the peer
+# therefore runs its DEFAULT error-control mode, not \\N3.  Left alone
+# deliberately: "correcting" it to '\N3' on 2026-08-26 changed the peer's
+# configuration, and the two calls run that way dropped (one Phase 2 livelock,
+# one NO CARRIER 14 s into data mode) where the ERROR form had been reaching
+# data mode and holding it.  n=2 either side is not proof, but it is not a
+# variable to move casually in the middle of another experiment.  Fix it
+# behind its own A/B.
+NPARM=${NPARM:-'\\N3'}
 
 echo "CONTROL: bouncing rig ($SLMODEMD, AT+MS=$MS)"
 ssh -o BatchMode=yes "$TOWER" "docker restart d-modem" >/dev/null 2>&1

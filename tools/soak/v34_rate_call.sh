@@ -40,7 +40,7 @@ echo "CONTROL: server up, $BAUD baud / $BPS bps"
 python3 "$SP/v34_rate_pty.py" "$OUT" &
 pty=$!
 
-KEEP=1 NPARM='\N3' bash "$SP/v34_lapm_call.sh" "$LOG" "$HOLD" "$OUT/call.out"
+KEEP=1 NPARM='\\N3' bash "$SP/v34_lapm_call.sh" "$LOG" "$HOLD" "$OUT/call.out"
 rc=$?
 kill $pty 2>/dev/null; wait $pty 2>/dev/null
 sleep 1

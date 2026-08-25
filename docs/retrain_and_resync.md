@@ -364,3 +364,70 @@ renegotiation n ms after data mode, once.  It exists because the engine's own
 trigger is a receiver that has stopped decoding, which a healthy call never
 produces, and the only open question about §11.6 was whether a real peer
 answers.  The analogue role has had the same knob for the same reason.
+
+
+## Live: the retrain paths against the SmartLink rig (2026-08-26)
+
+Provoked with `ME_V34_RETRAIN_AFTER_MS`, a test hook that initiates a §11.5
+retrain n ms into data mode (the engine's own trigger is a receiver that has
+stopped decoding, which a healthy call never produces).  Kept as
+`artifacts/retrain-live-b2`, `-c1`, `-c2`.
+
+**The peer recognises our retrain, and says so in its own log:**
+
+```
+VPcmV34Main: Retrain Detected by Tone detector !
+V34HSHAKE: txstate DATAXMIT=>SILENCERETRAIN
+V34HSHAKE: txstate SILENCERETRAIN=>TONE_AB
+V34RETRAIN, SILENCERETRAIN finished
+```
+
+So §11.5.1.1 initiation reaches a real V.34 modem and starts its §11.5.1.2
+response.  **Two defects had to be fixed to get that far, and only a live
+call could have found either.**
+
+**(a) We restarted into INFO0 instead of the tone.**
+`restart_v34_phase2_locked()` used `v34_restart()`, which re-enters Phase 2 at
+INITIAL_PREAMBLE/INFO0 — a *modulated control-channel carrier* in front of a
+peer that is waiting for a tone.  §11.5.1.1's "condition its receiver to
+detect Tone A **and receive INFO0a**" had been misread as licence for the
+transmitter to send INFO0; it says what to do *if* the peer sends one.  The
+V.90 side has known this since 2026-07-22 and has
+`v34_v90_start_retrain_response()` for it; plain V.34 had nothing.  New
+`v34_start_retrain()`, and the tone is picked by role — `calling_party ==
+v90_mode` is the Tone A side, which is Tone A for the V.34 answer modem
+(§11.5.2.1) and for the V.90 analogue modem alike.  The stage handler's old
+`if (s->calling_party)` is identical whenever `v90_mode` is 1, so the V.90
+paths are unchanged.
+
+**(b) The 70 ms of silence lasted 18 ms.**
+`V34_TX_STAGE_V90_RETRAIN_SILENCE` is handled inside
+`get_v90_wait_info1a_baud()`, and its `>= 42` count is 70 ms only at the
+**600-baud control channel** rate.  Setting the stage without also setting
+`current_getbaud` left the data-mode generator running at 3000 baud, so the
+count expired in 18 ms and the transmitter fell straight through into
+INITIAL_PREAMBLE/INFO0 — i.e. defect (a) again, by a different route.
+
+### Open: the exchange stalls at the Tone A phase reversal
+
+With both fixed, `c2` puts the conformant sequence on the wire — 70 ms of
+silence, then Tone A — and the peer answers by going SILENCERETRAIN →
+TONE_AB.  Then **both sides wait, and the peer drops the call after 3.06 s**
+(`DP_DISC`, `NO CARRIER`).
+
+Our side sits at `rx=TONE_B tx=FIRST_A` with signal plainly present
+(`carrier=1 sig=1 pwr=~7e6`) and never publishes a Tone B detection, so it
+never sends the **Tone A phase reversal** that §11.2.1.2.4 owes the peer and
+that §11.5.1.2 leaves it waiting for.  3.06 s is the same "about 3.1 s"
+unanswered-tone timeout the V.90 notes record for this peer.
+
+The likely cause is that the tone detector is being asked to work with a
+front end that has just come out of a 3000-baud data mode — AGC, equalizer
+and carrier state all tuned for a data constellation, where a fresh call
+reaches the tone stages from a reset front end.  `b2` is evidence that simply
+sending INFO0 instead does not help: it drops at the same 3.1 s.
+
+So: **initiation is proven to reach the peer and provoke its response; the
+handshake that follows does not complete, and the reversal is where it
+stops.**  Responding to a peer-initiated retrain (§11.5.1.2/§9.5.1.2) is
+still untested live — nothing yet makes this peer start one.

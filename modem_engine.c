@@ -2851,6 +2851,70 @@ static bool v34_reneg_probe_due_locked(void)
     return (trace_now_ms() - g_v34_data_entry_ms) >= me_v34_reneg_after_ms();
 }
 
+/* ME_V34_RETRAIN_AFTER_MS=<n> initiates a §11.5.1.1/§11.5.2.1 retrain n ms
+ * after data mode, once.  The sibling of the knob above and a TEST HOOK for
+ * the same reason: the engine's own trigger is a receiver that has stopped
+ * decoding, and a healthy call never produces one. */
+static bool g_v34_retrain_probe_done = false;
+
+static int me_v34_retrain_after_ms(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = parse_env_int("ME_V34_RETRAIN_AFTER_MS", 0);
+    return cached;
+}
+
+static bool v34_retrain_probe_due_locked(void)
+{
+    if (me_v34_retrain_after_ms() <= 0 || g_v34_retrain_probe_done)
+        return false;
+    if (g_v34_data_entry_ms == 0)
+        return false;
+    return (trace_now_ms() - g_v34_data_entry_ms) >= me_v34_retrain_after_ms();
+}
+
+/* ME_TX_DISRUPT_AFTER_MS / ME_TX_DISRUPT_MS transmit silence for a window,
+ * n ms after data mode.  A TEST HOOK, and the only way to exercise the half
+ * of §9.5/§11.5 that matters most: a peer whose receiver has failed holding
+ * its retrain tone at us while we are in data mode.  Nothing else provokes
+ * it -- the rig will not fail on demand -- and that is the path where three
+ * defects were stacked, so it should not stay untested against a real modem.
+ * Silence rather than noise: it is what a real carrier loss looks like, and
+ * it cannot be mistaken for a signal we meant to send. */
+static int64_t g_tx_disrupt_logged = 0;
+
+static int me_tx_disrupt_after_ms(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = parse_env_int("ME_TX_DISRUPT_AFTER_MS", 0);
+    return cached;
+}
+
+static int me_tx_disrupt_ms(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = parse_env_int("ME_TX_DISRUPT_MS", 1500);
+    return cached;
+}
+
+static bool tx_disrupt_active(void)
+{
+    int64_t since;
+
+    if (me_tx_disrupt_after_ms() <= 0 || g_v34_data_entry_ms == 0)
+        return false;
+    since = trace_now_ms() - g_v34_data_entry_ms;
+    if (since < me_tx_disrupt_after_ms())
+        return false;
+    return since < (int64_t) me_tx_disrupt_after_ms() + me_tx_disrupt_ms();
+}
+
 static void v34_reneg_clear_locked(void)
 {
     g_v34_reneg_start_ms = 0;
@@ -3407,6 +3471,8 @@ static void cleanup_v34_v90_training_locked(void)
     g_v34_reneg_start_ms = 0;
     g_v34_data_entry_ms = 0;
     g_v34_reneg_probe_done = false;
+    g_v34_retrain_probe_done = false;
+    g_tx_disrupt_logged = 0;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     v90_cp_rx_reset(&g_v90_cp_rx);
     v90_cp_rx_clear_votes(&g_v90_cp_rx);
@@ -3478,6 +3544,13 @@ static bool restart_v34_phase2_locked(const char *reason)
         g_retrain_from_data = true;
         g_state = ME_TRAINING;
         g_phase_start_ms = trace_now_ms();
+        /* §11.5 puts silence and then this role's tone on the wire, NOT the
+           INFO0 exchange v34_restart() re-enters at.  Measured live
+           (artifacts/retrain-live-b2): the peer detected the retrain request,
+           started its own, and dropped the call 3.1 s later while we sent it
+           INFO0.  Same shape as the V.90 path, which has had
+           v34_v90_start_retrain_response() since 2026-07-22. */
+        v34_start_retrain(g_v34);
     }
     ME_LOG("[ME] V.34: %s; restarting Phase 2 (%d baud / %d bps)\n",
            reason ? reason : "restart requested", baud, bps);
@@ -6473,6 +6546,13 @@ void me_rx_audio(const int16_t *amp, int len)
                             (void) restart_v34_phase2_locked(
                                 "rate renegotiation timeout");
                         }
+                    } else if (v34_retrain_probe_due_locked()) {
+                        g_v34_retrain_probe_done = true;
+                        ME_LOG("[ME] V.34: ME_V34_RETRAIN_AFTER_MS probe; "
+                               "initiating a §11.5 retrain\n");
+                        v34_reneg_clear_locked();
+                        (void) restart_v34_phase2_locked(
+                            "retrain probe (ME_V34_RETRAIN_AFTER_MS)");
                     } else if (v34_reneg_probe_due_locked()) {
                         g_v34_reneg_probe_done = true;
                         if (v34_start_rate_renegotiation(g_v34) == 0) {
@@ -8170,6 +8250,20 @@ void me_tx_audio(int16_t *amp, int len)
 
     default:
         break;
+    }
+
+    if (tx_disrupt_active()) {
+        /* ME_TX_DISRUPT_*: deliberate carrier loss, to make the far end's
+           receiver fail and start a retrain we can then be seen to answer. */
+        memset(amp, 0, sizeof(int16_t) * (size_t) len);
+        if (g_tx_disrupt_logged == 0) {
+            g_tx_disrupt_logged = trace_now_ms();
+            ME_LOG("[ME] TX DISRUPT: transmitting silence for %d ms "
+                   "(ME_TX_DISRUPT_MS)\n", me_tx_disrupt_ms());
+        }
+    } else if (g_tx_disrupt_logged != 0 && g_tx_disrupt_logged > 0) {
+        g_tx_disrupt_logged = -1;
+        ME_LOG("[ME] TX DISRUPT: ended, carrier restored\n");
     }
 
     /* Buffer TX samples for the echo canceller.

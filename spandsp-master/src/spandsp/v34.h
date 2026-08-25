@@ -416,6 +416,14 @@ SPAN_DECLARE(void) v34_v90_clear_peer_retrain_event(v34_state_t *s);
     \param s The modem context. */
 SPAN_DECLARE(void) v34_v90_start_retrain_response(v34_state_t *s);
 
+/*! \brief Start a V.34 11.5 retrain: 70 ms of silence, then this role's tone
+           (Tone A for the answer modem, Tone B for the call modem), with the
+           INFO0 exchange omitted.  Use INSTEAD of restarting into Phase 2 at
+           INFO0, which puts a modulated carrier in front of a peer that is
+           waiting for a tone.
+    \param s The V.34 context. */
+SPAN_DECLARE(void) v34_start_retrain(v34_state_t *s);
+
 /*! \brief Has the plain V.34 data mode stopped decoding?  V.34 11.5/11.6
            give a receiver in that state a retrain and a rate renegotiation;
            this is what says it is in it.
