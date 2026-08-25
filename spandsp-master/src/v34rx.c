@@ -143,6 +143,22 @@ static int v90_t3_sweep_abs_eye(void)
     return cache;
 }
 
+/* ME_V90_SWEEP_NEEDS_EVIDENCE=0 lets the sweep start without positive
+   evidence that the current phase is wrong, as it used to. */
+static int v90_t3_sweep_needs_evidence(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *v = getenv("ME_V90_SWEEP_NEEDS_EVIDENCE");
+
+        cache = (v  &&  atoi(v) == 0)  ?  0  :  1;
+    }
+    /*endif*/
+    return cache;
+}
+
 static int v90_t3_phase_no_marks(void)
 {
     static int cache = -1;
@@ -1046,6 +1062,27 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                 }
                 else if (v90_t3_phase_evidence_ok(s)
                          &&
+                         /* Sweeping is the dangerous act, so it needs
+                            positive cause.  B1 pins the phase correctly on
+                            almost every call -- 18 of 19 idle-start calls
+                            decode from step 0 -- and the live busy-start
+                            call relgate-r5 ARRIVED on a good phase (1 bad of
+                            45 frames, then 0/19, 1/15, 0/16) and was pushed
+                            over the 3% threshold by noise on 15-frame
+                            windows.  It swept 784 steps and never found its
+                            way back: 111.8 s of open eye, no payload.  So
+                            require evidence accumulated over
+                            V34_V90_T3_WRONG_MIN_FRAMES before starting, and
+                            once started let the enumeration finish. */
+                         (s->v90_t3_sf_tries > 0
+                          ||
+                          !v90_t3_sweep_needs_evidence()
+                          ||
+                          (s->v90_t3_wrong_frames >= V34_V90_T3_WRONG_MIN_FRAMES
+                           &&
+                           100*s->v90_t3_wrong_bad/s->v90_t3_wrong_frames
+                               >= V34_V90_T3_SHELL_BAD_PCT))
+                         &&
                          /* Eye health is already judged, one condition
                             up, by v90_t3_phase_evidence_ok() -- and it is
                             judged RELATIVE to what this call's own eye
@@ -1153,6 +1190,12 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                        labels cannot. */
                     s->v90_t3_phase_delta = 1;
                     s->v90_t3_phase_pending = true;
+                    if (s->v90_t3_sf_tries == 0)
+                    {
+                        s->v90_t3_wrong_bad = 0;
+                        s->v90_t3_wrong_frames = 0;
+                    }
+                    /*endif*/
                     s->v90_t3_sf_tries++;
                     span_log(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream frame phase +1 frame "
@@ -1266,6 +1309,23 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
             }
             /*endif*/
 v90_t3_window_done:
+            /* Evidence about the phase the receiver is on NOW.  Only while no
+               sweep is in progress: mid-sweep the window belongs to whichever
+               candidate is being tried.  Idle windows are excluded, since a
+               wrong grouping still decodes a mark to a mark. */
+            if (!s->v90_t3_sf_locked  &&  s->v90_t3_sf_tries == 0
+                &&
+                ones_pct < 90)
+            {
+                s->v90_t3_wrong_bad += s->v90_t3_shell_bad;
+                s->v90_t3_wrong_frames += s->v90_t3_shell_frames;
+            }
+            else if (s->v90_t3_sf_locked)
+            {
+                s->v90_t3_wrong_bad = 0;
+                s->v90_t3_wrong_frames = 0;
+            }
+            /*endif*/
             s->v90_t3_ones = 0;
             s->v90_t3_alt_ones = 0;
             s->v90_t3_bit_count = 0;

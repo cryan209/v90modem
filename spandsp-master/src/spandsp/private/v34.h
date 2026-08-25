@@ -246,6 +246,9 @@
     treated as evidence at all -- with none, zero bad and no evidence print
     the same. */
 #define V34_V90_T3_COARSE_MIN_FRAMES        8
+/*! How many mapping frames of evidence must accumulate before the receiver
+    will believe the phase it is on is wrong and start a sweep. */
+#define V34_V90_T3_WRONG_MIN_FRAMES         120
 
 /*! Symbols after B1 used to check that an acquisition generalises. */
 #define V34_V90_T3_VALIDATE_SYMBOLS         256
@@ -1299,6 +1302,18 @@ typedef struct
         the coarse pass now only SHORTLISTS the candidates it cannot reject,
         and each is then re-measured over a long window where the same test
         is decisive. */
+    /*! \brief Evidence, accumulated over many windows, that the phase the
+        receiver is CURRENTLY on is wrong -- the precondition for starting a
+        sweep at all.  A single search window holds ~15 mapping frames, and
+        on that little evidence one or two bad frames is noise: the live
+        busy-start call relgate-r5 arrived on a good phase (1 bad of 45, then
+        0/19, 1/15, 0/16) and was pushed over the 3% threshold by exactly that
+        noise, swept 784 steps, and never found its way back -- 111.8 s of
+        open eye and no payload.  B1 pins the phase correctly on almost every
+        call (18 of 19 idle-start calls decode from step 0), so sweeping is
+        the dangerous act and needs positive, well-evidenced cause. */
+    int v90_t3_wrong_bad;
+    int v90_t3_wrong_frames;
     uint8_t v90_t3_phase_shortlist[32];
     int v90_t3_shortlist_n;
     int v90_t3_confirm_pos;
