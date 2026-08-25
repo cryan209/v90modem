@@ -4086,7 +4086,21 @@ static void v34_put_bit_cb(void *user_data, int bit)
 
                         if (downstream_rate <= 0)
                             downstream_rate = V90_RATE_BPS;
-                        data_stack_start_online(downstream_rate, g_calling_party);
+                        /* The second way into data mode, and it needs the
+                           same §9.5/§11.5 treatment as
+                           enter_v90_data_locked(): a retrain clamps 104 and
+                           nothing more, so the error-control link above the
+                           physical layer survives it. */
+                        if (g_retrain_from_data) {
+                            g_retrain_from_data = false;
+                            g_data_connect_rate = downstream_rate;
+                            ME_LOG("[ME] V.90 retrain complete; resuming the "
+                                   "existing data link (%d bps)\n",
+                                   downstream_rate);
+                        } else {
+                            data_stack_start_online(downstream_rate,
+                                                    g_calling_party);
+                        }
                         g_state = ME_DATA;
                         g_phase_start_ms = 0;
                         ME_LOG("[ME] V.90 training complete (upstream V.34 %d bps, downstream PCM %d bps)\n",
@@ -4094,7 +4108,8 @@ static void v34_put_bit_cb(void *user_data, int bit)
                         trace_phase("V90 enter DATA: upstream=%d downstream=%d", rate, downstream_rate);
                         v90_reset_data_mode(g_v90);
                         g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
-                        if (g_data_framing != DS_FRAMING_V42) {
+                        if (g_data_framing != DS_FRAMING_V42
+                            && !g_data_connect_reported) {
                             g_data_connect_reported = true;
                             di_on_connected(downstream_rate);
                         }
