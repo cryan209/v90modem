@@ -130,13 +130,42 @@ against.  Proving the peer answers needs the live rig.
   ending it is not known.
 * **§9.6.1.2 is behind a knob and §11.6 is absent.**  See below for what the
   responder is measured on; it has never met a peer that starts one.
-* **The acquisition retry does not rescue acquisition** on the recordings to
-  hand: all seven windows fail the in-sample fit in `v90_engine_replay` on
-  the three calls that failed at the first.  That is the same live/replay
-  divergence `docs/v90_upstream_data_path.md` records — the standalone
-  upstream replay acquires on the same files.  What the change buys is that
-  the failure is now observable and recoverable rather than silent and
-  terminal.
+* **The acquisition retry does not rescue acquisition in `v90_engine_replay`**:
+  all seven windows fail the in-sample fit on the three calls that failed at
+  the first.  That is the same live/replay divergence
+  `docs/v90_upstream_data_path.md` records — the standalone upstream replay
+  acquires on the same files.  What the change buys *there* is that the
+  failure is observable and recoverable rather than silent and terminal.
+
+  In `v90_upstream_replay` it does more than that, and the A/B is clean —
+  same recordings, two binaries differing only in this change, run
+  sequentially:
+
+  | call | before | | after | |
+  | --- | --- | --- | --- | --- |
+  | | handover | lines | handover | lines |
+  | rate24000-r1 | 25.5 s | 30721 | **22.5 s** | 30721 |
+  | rate28800-r1 | 25.5 s | 14575 | **22.5 s** | **20201** |
+
+  The mechanism is the one intended: the harness sweeps candidate handover
+  instants in order and takes the first that acquires, and at 22.5 s the old
+  code gave up after one window and moved on, while the new one slides the
+  anchor forward and acquires inside that same candidate.  The earlier
+  handover is the better filter — at 28800 it is worth **38.6% more intact
+  pattern lines**, and at 24000, which was already delivering every line it
+  could, it costs nothing.
+
+  The price is CPU: seven least-squares searches per candidate instead of
+  one.  Live that is bounded by the existing `V34_V90_T3_ACQ_RETRY_GAP`
+  backoff to one search per 0.5 s at 3200 baud, which is the budget the
+  out-of-sample path was already tuned against; offline in the sweep harness
+  it is a straight 7x, because the harness fast-forwards the backoff.
+
+  Note the two failure kinds now share one retry counter.  That is the safe
+  direction: a call that spends some of the budget on in-sample failures
+  reaches the "settle for the best window seen" fallback sooner, and the
+  fallback being REACHABLE is what `V34_V90_T3_ACQ_MAX_RETRIES` was cut to
+  six for in the first place.
 
 
 ## Responding to a peer's rate renegotiation (§9.6.1.2)
