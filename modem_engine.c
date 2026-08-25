@@ -752,7 +752,7 @@ static unsigned        g_v90_phase2_restarts = 0;
  * Re-running data_stack_start_online() on the way back in would tear LAPM
  * down and force a fresh XID against a peer whose link is still up, so the
  * re-entry path consults this instead. */
-static bool            g_v90_retrain_from_data = false;
+static bool            g_retrain_from_data = false;
 static v90_cp_rx_t    g_v90_cp_rx;
 /* V.92 is only selected after both INFO0 frames explicitly advertise it.
  * V.8's QC packet is a hint, not a data-pump selection. */
@@ -2706,7 +2706,7 @@ static int me_v90_reneg_enabled(void)
     return cached;
 }
 
-/* §9.5.1.1 retrain-on-loss bounds.
+/* Retrain-on-loss bounds, shared by V.90 §9.5.1.1 and plain V.34 §11.5.
  *
  * A retrain costs the whole Phase 2/3/4 startup -- seconds of downstream --
  * so it is worth taking only where the alternative is a dead upstream, and
@@ -2718,10 +2718,10 @@ static int me_v90_reneg_enabled(void)
 #define ME_V90_MAX_LOSS_RETRAINS_DEFAULT 4
 #define ME_V90_LOSS_RETRAIN_DWELL_MS_DEFAULT 20000
 
-static unsigned g_v90_loss_retrains = 0;
-static int64_t  g_v90_last_loss_retrain_ms = 0;
+static unsigned g_loss_retrains = 0;
+static int64_t  g_last_loss_retrain_ms = 0;
 
-static int me_v90_max_loss_retrains(void)
+static int me_max_loss_retrains(void)
 {
     static int cached = -1;
 
@@ -2731,7 +2731,7 @@ static int me_v90_max_loss_retrains(void)
     return cached;
 }
 
-static int me_v90_loss_retrain_dwell_ms(void)
+static int me_loss_retrain_dwell_ms(void)
 {
     static int cached = -1;
 
@@ -2741,20 +2741,21 @@ static int me_v90_loss_retrain_dwell_ms(void)
     return cached;
 }
 
-/* True when a §9.5.1.1 retrain for a lost upstream is both allowed and due.
+/* True when a retrain for a receiver that has stopped decoding is both
+ * allowed and due -- V.90 §9.5.1.1 or plain V.34 §11.5.1.1/§11.5.2.1.
  * ME_V90_RETRAIN_ON_LOSS=0 restores the old behaviour of holding a link
- * whose upstream has stopped decoding. */
-static bool v90_retrain_on_loss_due(void)
+ * whose receiver has stopped decoding. */
+static bool retrain_on_loss_due(void)
 {
     int64_t now;
 
-    if (me_v90_max_loss_retrains() <= 0)
+    if (me_max_loss_retrains() <= 0)
         return false;
-    if ((int) g_v90_loss_retrains >= me_v90_max_loss_retrains())
+    if ((int) g_loss_retrains >= me_max_loss_retrains())
         return false;
     now = trace_now_ms();
-    if (g_v90_last_loss_retrain_ms != 0
-        && now - g_v90_last_loss_retrain_ms < me_v90_loss_retrain_dwell_ms())
+    if (g_last_loss_retrain_ms != 0
+        && now - g_last_loss_retrain_ms < me_loss_retrain_dwell_ms())
         return false;
     return true;
 }
@@ -3296,9 +3297,9 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_fallback_phase4_released = false;
     g_v90_phase2_restarts = 0;
     /* Per call, not per process: this server runs many calls in one. */
-    g_v90_loss_retrains = 0;
-    g_v90_last_loss_retrain_ms = 0;
-    g_v90_retrain_from_data = false;
+    g_loss_retrains = 0;
+    g_last_loss_retrain_ms = 0;
+    g_retrain_from_data = false;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     v90_cp_rx_reset(&g_v90_cp_rx);
     v90_cp_rx_clear_votes(&g_v90_cp_rx);
@@ -3345,6 +3346,38 @@ static void cleanup_v34_v90_training_locked(void)
  * intentionally preserves the overall training timeout: a broken bearer
  * still falls back rather than retrying indefinitely.
  */
+/* Plain V.34 §11.5: back to Phase 2 from wherever we are, keeping the DTE
+ * link.  The V.90 path has restart_v90_phase2_locked(); this is its plain
+ * V.34 counterpart, and like it, §11.5 says only "turn OFF circuit 106,
+ * clamp circuit 104 to binary one" -- the error-control link above the
+ * physical layer survives a retrain, so the data stack is not touched. */
+static bool restart_v34_phase2_locked(const char *reason)
+{
+    int baud;
+    int bps;
+
+    if (g_mod != ME_MOD_V34 || !g_v34)
+        return false;
+
+    baud = g_v34_start_baud ? g_v34_start_baud : 3200;
+    bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(baud);
+    if (v34_restart(g_v34, baud, bps, true) != 0) {
+        ME_LOG("[ME] V.34 Phase 2 restart failed (%d baud, %d bps)\n",
+               baud, bps);
+        trace_phase("V34 Phase2 restart failed");
+        return false;
+    }
+    if (g_state == ME_DATA) {
+        g_retrain_from_data = true;
+        g_state = ME_TRAINING;
+        g_phase_start_ms = trace_now_ms();
+    }
+    ME_LOG("[ME] V.34: %s; restarting Phase 2 (%d baud / %d bps)\n",
+           reason ? reason : "restart requested", baud, bps);
+    trace_phase("V34 restart Phase2: %d/%d", baud, bps);
+    return true;
+}
+
 static bool restart_v90_phase2_locked(const char *reason)
 {
     int bps;
@@ -3422,7 +3455,7 @@ static bool restart_v90_phase2_locked(const char *reason)
        its `if (!g_v90) return false` and the call went quiet in both
        directions rather than resynchronising. */
     if (g_state == ME_DATA) {
-        g_v90_retrain_from_data = true;
+        g_retrain_from_data = true;
         g_state = ME_TRAINING;
         g_phase_start_ms = trace_now_ms();
         ME_LOG("[ME] V.90: retraining out of data mode; DTE data clamped, "
@@ -4070,12 +4103,27 @@ static void v34_put_bit_cb(void *user_data, int bit)
                         g_v90_completion_deferred_logged = true;
                     }
                 } else {
-                    data_stack_start_online(rate, g_calling_party);
+                    /* §11.5 clamps 104 for the duration of a retrain and
+                       nothing more: the error-control link above the physical
+                       layer survives it, so a re-entry after a retrain keeps
+                       the data stack rather than restarting LAPM against a
+                       peer still in the middle of its own connection. */
+                    if (g_retrain_from_data) {
+                        g_retrain_from_data = false;
+                        g_data_connect_rate = rate;
+                        ME_LOG("[ME] V.34 retrain complete; resuming the "
+                               "existing data link (%d bps)\n", rate);
+                    } else {
+                        data_stack_start_online(rate, g_calling_party);
+                    }
                     g_state = ME_DATA;
                     g_phase_start_ms = 0;
                     ME_LOG("[ME] V.34 training complete (%d bps)\n", rate);
                     trace_phase("V34 enter DATA: rate=%d", rate);
-                    if (g_data_framing != DS_FRAMING_V42) {
+                    /* §11.5 never takes CONNECT back; a retrain only clamps
+                       104 while it runs, so do not re-report it. */
+                    if (g_data_framing != DS_FRAMING_V42
+                        && !g_data_connect_reported) {
                         g_data_connect_reported = true;
                         di_on_connected(rate);
                     }
@@ -6226,6 +6274,44 @@ void me_rx_audio(const int16_t *amp, int len)
                     }
                 }
 
+                /* Plain V.34 §11.5/§11.6.  The V.90 path above has had a
+                 * retrain response since 2026-07-22; plain V.34 never did,
+                 * so a peer that gave up and held its tone was answered with
+                 * a data mapper still running over the top of it, and the
+                 * call died where §11.5.1.2 says to resynchronise. */
+                if (g_mod == ME_MOD_V34 && g_v34) {
+                    if (rx_event == V34_EVENT_PEER_RETRAIN) {
+                        /* §11.5.1.2/§11.5.2.2: silence, then our own tone,
+                         * then back to §11.2.1.  v34_restart() re-enters
+                         * Phase 2 from INFO0, which is the branch both
+                         * §11.5.1.1 and §11.5.2.1 name for a peer that sends
+                         * INFO0 rather than a bare tone ("If INFO0a is
+                         * received, the modem shall proceed in accordance
+                         * with 11.8.1"). */
+                        v34_clear_peer_retrain_event(g_v34);
+                        (void) restart_v34_phase2_locked(
+                            "peer retrain tone detected; responding per 11.5");
+                    } else if (v34_data_carrier_lost(g_v34)
+                               && retrain_on_loss_due()) {
+                        /* §11.5.1.1/§11.5.2.1: initiating.  §11.6 is the
+                         * cheaper recovery and would be preferable, but it
+                         * needs a responding modem; a retrain needs only the
+                         * peer's tone detector, which every V.34 modem has.
+                         * Bounded by the same per-call cap and dwell as the
+                         * V.90 path, so a line that is simply too poor is
+                         * left alone rather than retrained in a loop. */
+                        v34_clear_data_carrier_lost(g_v34);
+                        ME_LOG("[ME] V.34 data mode has stopped decoding; "
+                               "initiating a §11.5 retrain (%u of %d)\n",
+                               g_loss_retrains + 1,
+                               me_max_loss_retrains());
+                        g_loss_retrains++;
+                        g_last_loss_retrain_ms = trace_now_ms();
+                        (void) restart_v34_phase2_locked(
+                            "data mode stopped decoding; retraining per 11.5");
+                    }
+                }
+
                 if (g_mod == ME_MOD_V90 && g_v90 && !g_v92_active) {
                     int s_events = v34_get_phase3_s_event_count(g_v34);
 
@@ -7387,12 +7473,12 @@ static void enter_v90_data_locked(void)
     downstream_rate = (v90_data_bits_per_frame(g_v90) * 8000) / 6;
     if (downstream_rate <= 0)
         downstream_rate = V90_RATE_BPS;
-    if (g_v90_retrain_from_data) {
+    if (g_retrain_from_data) {
         /* §9.5/§11.5 retrain: the physical layer has re-trained under a link
            that never went down.  Re-arming the data stack here would restart
            LAPM against a peer still in the middle of its own connection, so
            only the rate is refreshed. */
-        g_v90_retrain_from_data = false;
+        g_retrain_from_data = false;
         g_data_connect_rate = downstream_rate;
         ME_LOG("[ME] V.90 retrain complete; resuming the existing data link "
                "(downstream %d bps)\n", downstream_rate);
@@ -7576,7 +7662,7 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                 /* Clear it: at the cap, the condition would otherwise be
                  * re-raised on every block for the rest of the call. */
                 v34_v90_upstream_clear_carrier_lost(g_v34);
-            } else if (v90_retrain_on_loss_due()) {
+            } else if (retrain_on_loss_due()) {
                 /* §9.5.1.1.  The renegotiation above is the cheaper of the
                  * two recoveries and is preferred where the peer implements
                  * §9.6.2, but this rig's analogue modem answers Rd with
@@ -7587,16 +7673,16 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                  * and it ends where the upstream receiver can actually start
                  * again: a fresh B1 off a fresh Phase 4.
                  *
-                 * v90_retrain_on_loss_due() carries the bounds -- a per-call
+                 * retrain_on_loss_due() carries the bounds -- a per-call
                  * cap and a dwell since the last one -- so a line that is
                  * simply too poor degrades to the old behaviour of leaving it
                  * alone rather than retraining in a loop. */
                 v34_v90_upstream_clear_carrier_lost(g_v34);
                 ME_LOG("[ME] V.90 upstream carrier lost and §9.6 is not "
                        "available; initiating a §9.5.1.1 retrain (%u of %d)\n",
-                       g_v90_loss_retrains + 1, me_v90_max_loss_retrains());
-                g_v90_loss_retrains++;
-                g_v90_last_loss_retrain_ms = trace_now_ms();
+                       g_loss_retrains + 1, me_max_loss_retrains());
+                g_loss_retrains++;
+                g_last_loss_retrain_ms = trace_now_ms();
                 if (restart_v90_phase2_locked(
                         "upstream carrier lost in data mode; retraining "
                         "per 9.5.1.1"))

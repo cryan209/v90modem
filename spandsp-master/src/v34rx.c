@@ -11444,6 +11444,41 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 err_sum[who] += (g_re - t_re)*(g_re - t_re)
                               + (g_im - t_im)*(g_im - t_im);
                 sig_sum[who] += t_re*t_re + t_im*t_im;
+                /* The same distance, kept on the state as a running estimate
+                   so the engine can act on it rather than only read it in a
+                   log line.  V.34 11.5 and 11.6 both exist for a receiver
+                   that has stopped decoding, and neither can be reached
+                   without first noticing that it has. */
+                {
+                    float d = (g_re - t_re)*(g_re - t_re)
+                            + (g_im - t_im)*(g_im - t_im);
+
+                    s->data_grid_err_ema += (d - s->data_grid_err_ema)/256.0f;
+                    if (s->data_grid_symbols < V34_DATA_LOST_SETTLE_SYMBOLS)
+                    {
+                        /* Give the EMA and the receiver time to settle after
+                           B1 before any of this counts. */
+                        s->data_grid_symbols++;
+                        s->data_lost_run = 0;
+                    }
+                    else if (s->data_grid_err_ema >= V34_DATA_LOST_ERR)
+                    {
+                        if (++s->data_lost_run == V34_DATA_LOST_SYMBOLS)
+                        {
+                            span_log(s->logging, SPAN_LOG_WARNING,
+                                     "Rx - V.34 data mode has stopped "
+                                     "decoding: %.3f from the grid for %d "
+                                     "symbols (2/3 is white)\n",
+                                     s->data_grid_err_ema, s->data_lost_run);
+                        }
+                        /*endif*/
+                    }
+                    else
+                    {
+                        s->data_lost_run = 0;
+                    }
+                    /*endif*/
+                }
                 if (++err_count[who] >= 4096)
                 {
                     double dist = err_sum[who]/err_count[who];
@@ -14129,12 +14164,12 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
 {
     int i;
 
-    /* The spec-mandated form of the same check: V.90 9.3.1 and 9.4.1 both
-     * require "If Tone A is detected during Phase 3/4, the digital modem
-     * shall respond to retrain according to 9.5.1.2".  A peer initiating a
-     * retrain (9.5.2.1) sends 70 +/- 5 ms of silence and then holds 2400 Hz
-     * Tone A until it hears our Tone B -- the SmartLink peer gives up and
-     * drops the call about 3.1 s in.  The silence detector above can miss
+    /* The spec-mandated form of the same check: V.90 9.3.1/9.4.1 and 9.5.1.2,
+     * and V.34 11.5.1.2, all require a modem that detects the peer's retrain
+     * tone to respond to a retrain rather than carry on.  A peer initiating a
+     * retrain (V.90 9.5.2.1, V.34 11.5.x) sends 70 +/- 5 ms of silence and
+     * then holds its tone until it hears ours -- the SmartLink peer gives up
+     * and drops the call about 3.1 s in.  The silence detector above can miss
      * the gap when transport filtering rings into it (the interop rig's
      * 257-tap polyphase resampler shaves the observed 80 ms gap below the
      * 60 ms threshold), so detect the tone itself: a Goertzel bin at
@@ -14145,12 +14180,20 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
      * sustained single-bin ratio.  The same reasoning is what makes it safe
      * to run in DATA: the upstream there is a full V.34 primary channel,
      * whose power is spread over the whole band by construction. */
-    if (s->v90_mode
-        && v34_rx_stage_watches_retrain(s->stage))
+    if (v34_rx_stage_watches_retrain(s->stage))
     {
-        /* 2*cos(2*pi*2400/8000) */
-        static const float tone_a_coeff = -0.6180339887f;
-        /* 160 samples = 20 ms per block; bin 48 lands exactly on 2400 Hz. */
+        /* Which tone the peer holds follows its ROLE, not the call
+           direction.  V.34 11.2.1.1/11.2.1.2 give Tone B to the call modem
+           and Tone A to the answer modem; V.90 8.2.3.1 keeps both timetables
+           and hands them to the other end of the call.  That is exactly the
+           predicate the control-channel receive carrier is already chosen on
+           a few thousand lines up -- so the tone to listen for is simply the
+           frequency this receiver is tuned to. */
+        const bool listen_tone_a = (s->calling_party != s->v90_mode);
+        /* 2*cos(2*pi*f/8000).  160 samples = 20 ms per block, and both 2400
+           and 1200 Hz land exactly on a bin (48 and 24). */
+        const float tone_a_coeff = listen_tone_a ? -0.6180339887f
+                                                 :  1.1755705046f;
         static const int tone_a_block = 160;
 
         for (i = 0;  i < len;  i++)
@@ -14196,8 +14239,10 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
                     s->phase34_tone_a_reported = true;
                     s->received_event = V34_EVENT_PEER_RETRAIN;
                     span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Tone A detected in stage %s (%d ms); peer initiated "
-                             "a V.90 retrain (9.5.2.1), reporting peer retrain per 9.4.1/9.5.1.2\n",
+                             "Rx - Tone %c detected in stage %s (%d ms); peer initiated "
+                             "a retrain, reporting peer retrain per V.90 9.5.1.2 / "
+                             "V.34 11.5.1.2\n",
+                             listen_tone_a ? 'A' : 'B',
                              v34_rx_stage_to_str(s->stage),
                              s->phase34_tone_a_blocks*tone_a_block/8);
                 }
@@ -14986,6 +15031,23 @@ SPAN_DECLARE(int) v34_get_rx_event(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* The role-independent form.  V.34 11.5 has a retrain response of its own,
+   and PEER_RETRAIN is application-owned: left set it would suppress the
+   ordinary handshake events for the rest of the call. */
+SPAN_DECLARE(void) v34_clear_peer_retrain_event(v34_state_t *s)
+{
+    if (s  &&  s->rx.received_event == V34_EVENT_PEER_RETRAIN)
+        s->rx.received_event = V34_EVENT_NONE;
+    /*endif*/
+    if (s)
+    {
+        s->rx.phase34_tone_a_blocks = 0;
+        s->rx.phase34_tone_a_reported = false;
+    }
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v34_v90_clear_peer_retrain_event(v34_state_t *s)
 {
     if (s && s->rx.received_event == V34_EVENT_PEER_RETRAIN)
@@ -15331,6 +15393,33 @@ SPAN_DECLARE(void) v34_v90_upstream_clear_carrier_lost(v34_state_t *s)
         return;
     /*endif*/
     s->rx.v90_t3_lost_run = 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* V.34 11.5/11.6: a receiver that has stopped decoding is what both the
+   retrain and the rate renegotiation exist for.  Plain V.34 had no read on
+   its own data mode at all, so neither could ever be reached. */
+SPAN_DECLARE(int) v34_data_carrier_lost(v34_state_t *s)
+{
+    if (!s)
+        return 0;
+    /*endif*/
+    return (s->rx.data_lost_run >= V34_DATA_LOST_SYMBOLS) ? 1 : 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Called when a recovery has been started for this loss, so the same one does
+   not start another.  The run restarts from zero and the settle window is
+   re-armed, so a recovery that does not fix anything raises the condition
+   again only after the receiver has had time to converge. */
+SPAN_DECLARE(void) v34_clear_data_carrier_lost(v34_state_t *s)
+{
+    if (!s)
+        return;
+    /*endif*/
+    s->rx.data_lost_run = 0;
+    s->rx.data_grid_symbols = 0;
+    s->rx.data_grid_err_ema = 0.0f;
 }
 /*- End of function --------------------------------------------------------*/
 

@@ -416,6 +416,25 @@ SPAN_DECLARE(void) v34_v90_clear_peer_retrain_event(v34_state_t *s);
     \param s The modem context. */
 SPAN_DECLARE(void) v34_v90_start_retrain_response(v34_state_t *s);
 
+/*! \brief Has the plain V.34 data mode stopped decoding?  V.34 11.5/11.6
+           give a receiver in that state a retrain and a rate renegotiation;
+           this is what says it is in it.
+    \param s The V.34 context.
+    \return non-zero if the received symbols have been off the constellation
+            for long enough to be a failure rather than a burst. */
+SPAN_DECLARE(int) v34_data_carrier_lost(v34_state_t *s);
+
+/*! \brief Clear a reported peer retrain, role-independently.  The event is
+           application-owned; left set it suppresses the ordinary handshake
+           events for the rest of the call.
+    \param s The V.34 context. */
+SPAN_DECLARE(void) v34_clear_peer_retrain_event(v34_state_t *s);
+
+/*! \brief Note that a recovery has been started for the current loss, so the
+           same one does not start another.
+    \param s The V.34 context. */
+SPAN_DECLARE(void) v34_clear_data_carrier_lost(v34_state_t *s);
+
 /*! Start the analogue-modem side of V.90 §9.5.2 after v34_restart(): 70 ± 5 ms
     silence, Tone A, Tone B detection/reversals, then §9.2.2.1.4.  This is used
     for both initiating (§9.5.2.1) and responding (§9.5.2.2), since the latter

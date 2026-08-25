@@ -128,6 +128,14 @@
     burst, and short against the 48 s this link runs clean for. */
 #define V34_V90_T3_LOST_ERR                 0.55f
 #define V34_V90_T3_LOST_SYMBOLS             3200
+/*! The same three figures for the plain V.34 data mode, which had no read on
+    its own health at all.  Same threshold and the same reasoning: 2/3 is the
+    mean squared distance for symbols bearing no relation to 9.x's odd-integer
+    grid, so 0.55 is well clear of a merely noisy eye.  The settle window
+    keeps B1 and the first moments after it out of the judgement. */
+#define V34_DATA_LOST_ERR                   0.55f
+#define V34_DATA_LOST_SYMBOLS               3200
+#define V34_DATA_LOST_SETTLE_SYMBOLS        3200
 /*! T/3 samples of fresh wire between two acquisition attempts, and the most
     attempts to make.  Together they sweep the window forward over the
     seconds after E, which is where a B1 the first attempt missed will be. */
@@ -1164,6 +1172,16 @@ typedef struct
         renegotiation ends in a fresh B1, which is what this receiver
         acquires against in the first place. */
     int v90_t3_lost_run;
+
+    /* Plain V.34 data mode: the same "has this receiver stopped decoding"
+       question the V.90 upstream answers with v90_t3_sym_err_ema/lost_run.
+       V.34 11.5/11.6 give a receiver that cannot recover a retrain and a
+       rate renegotiation, and neither can be reached without first noticing.
+       Mean squared distance from the odd-integer grid of 9.x, as an EMA, and
+       a run length above the "white" threshold. */
+    float data_grid_err_ema;
+    int data_grid_symbols;
+    int data_lost_run;
     int v90_t3_lost_reported;
     /*! \brief The equalizer from when it was demonstrably working, and the
         bookkeeping to notice that it no longer is.  B1 is long gone by the
