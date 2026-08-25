@@ -24,7 +24,11 @@ SPANDSP_HOST_STAMP := $(SPANDSP_ROOT)/.build-host
 PJ_CFLAGS   ?=
 PJ_LIBS     ?=
 TIFF_LDFLAGS := $(shell pkg-config --libs libtiff-4 2>/dev/null || echo "-L$(HOMEBREW_PREFIX)/lib -ltiff")
-SYSTEM_LIBS ?= $(TIFF_LDFLAGS) -lssl -lcrypto -lm -lpthread
+# Homebrew keeps OpenSSL keg-only, so it is not on the default library path
+# and a bare -lssl fails to link ("ld: library 'ssl' not found").  Ask
+# pkg-config, then fall back to the keg.
+OPENSSL_LDFLAGS := $(shell pkg-config --libs openssl 2>/dev/null || echo "-L$(HOMEBREW_PREFIX)/opt/openssl@3/lib -lssl -lcrypto")
+SYSTEM_LIBS ?= $(TIFF_LDFLAGS) $(OPENSSL_LDFLAGS) -lm -lpthread
 PJ_BUILD_PREREQ ?=
 
 ifneq ($(and $(filter 1,$(USE_LOCAL_PJPROJECT)),$(wildcard $(PJ_LOCAL_MAKEFILE))),)
