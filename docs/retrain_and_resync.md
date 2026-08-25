@@ -36,8 +36,9 @@ every V.34 modem has.
 | §9.6.1.2 respond | V.90 digital | yes, `ME_V90_RENEG_RESPOND=1`; **default off**, unverified against a peer |
 | §11.5.1.1/§11.5.2.1 initiate | plain V.34 | yes, on a receiver that has stopped decoding; bounded |
 | §11.5.1.2/§11.5.2.2 respond | plain V.34 | yes, in every stage including DATA |
-| §11.6 | plain V.34 | **not implemented** |
-| §11.6.1.2 respond | plain V.34 | **not implemented** — the detector exists, the S/S̄/TRN/MP transmit response does not |
+| §11.6.1.1 initiate | plain V.34 | yes, `ME_V34_RENEG=1`; **default off**, unverified against a peer |
+| §11.6.1.2 respond | plain V.34 | yes, `ME_V90_RENEG_RESPOND=1`; **default off** |
+| §11.6.2.1 recovery | plain V.34 | yes — no E within the timeout falls back to a §11.5 retrain |
 
 `ME_V90_RENEG=1` enables §9.6 initiation.  It is off by default for a
 measured reason and not a cautious one: this rig's analogue modem answers
@@ -223,7 +224,74 @@ renegotiates, every capture being of a call that either held data mode or
 died.  A false detection would take down a working call, so it stays behind
 `ME_V90_RENEG_RESPOND=1` until a peer proves it.
 
-§11.6 for plain V.34 is the remaining gap.  The detector above is
-role-independent in principle, but the plain V.34 *response* is its own
-S 128T / S̄ 16T / TRN / MP transmit sequence rather than the Phase 4
-transmitter the V.90 path reuses, and that does not exist.
+## §11.6 for plain V.34 — and the defect that hid it
+
+This is the only part of this note that is verified end to end rather than
+reasoned about, so read it before the rest.
+
+**It builds no second transmitter.**  Figure 22's sequence — S 128T, S̄ 16T,
+TRN, MP, MP′, a single 20-bit E, B1, data — is Phase 4's exactly, so
+`v34_start_rate_renegotiation()` re-enters the Phase 4 stages from data mode.
+Two seams need care:
+
+* **TRN → MP.**  §11.4 waits on the far end's J′; §11.6 has no J at all, so
+  the confirmation the startup path waits for can never arrive.
+  `get_phase4_baud()` reads `tx.reneg_active` there and goes to MP at the
+  Phase 4 minimum.  §11.6.1.1.1 permits up to 2000 ms and
+  `ME_V34_RENEG_TRN_BAUDS` exposes that — **raising it is measured not to
+  help**, so the default is the minimum.
+* **Where the receiver starts.**  At PHASE4_S, not the PHASE4_TRN that
+  startup uses: §11.6.1.1.2 and §11.6.1.2.1 both say "After detecting signal
+  S … be conditioned to detect the S-to-S̄ transition", and here there is a
+  real far-end S to find.
+
+Both roles run the same sequence.  §11.6.1.1 and §11.6.1.2 differ only in who
+sends S first, and a responder is called having already detected the
+initiator's.
+
+### The defect: S is 90°, not 180°
+
+§10.1.3.7 alternates between one point and the same point **rotated
+counterclockwise by 90 degrees**.  That is not a 180° alternation, and the
+difference is the whole detector: a, ja, a, ja, … is a(1+j)/2 plus
+a(1−j)/2·(−1)^k, so the energy sits in **equal parts on a line at the carrier
+and a line at fc ± baud/2** — three bins, not two.
+
+Watching only fc ± baud/2 caught **0.44** of the block energy on a real S,
+exactly the half the decomposition predicts, and never crossed the 0.60 gate.
+No responder ever answered, and every symptom pointed at the transmit side.
+`V34_RENEG_S_DEBUG=1` prints the ratio per block; that is what found it.
+
+### What the test asserts
+
+`v34_duplex_test` gained `V34_DUPLEX_RENEG=<bits>`.  It runs two real modems
+to data mode over a G.711 round trip, has the **caller** initiate §11.6,
+leaves the **answerer** to detect its S and respond through the same public
+entry point the engine uses — not by being told — and then requires 8000 bits
+of payload in **both** directions with **zero errors** on the far side.
+
+Ten rows in `make test`: every symbol rate that trains, both laws, all ten
+passing.  3429 is absent because it does not train at all.
+
+The payload check crosses no seam.  Sixteen consecutive outputs of the
+harness's LFSR *are* the state that produced the first of them, so the
+receiver re-derives the transmitter's position from the bits it actually
+demodulated, then validates that position over 64 bits before believing it
+and slides forward if it does not hold.  **The first version was off by
+sixteen bits** — it set the state and predicted from it without advancing
+past the bits already consumed — and reported a perfect receiver (0.0138 from
+the grid, 0% bad shell frames) as 50% bit errors.  A resync that cannot
+restart and report failure cannot tell its own mis-anchoring from a broken
+modem.
+
+### What it does not cover
+
+* **21600 is deliberately not asserted.**  It renegotiates and comes back
+  decoding — B1 correlation 0.99, shell index 0–1% — but some rows carry bit
+  errors afterwards, and a longer TRN does not help, so the cause is not
+  equalizer reconvergence and is not understood.
+* **§11.6.1.2.1's "clamp circuit 104" is approximate.**  The detector needs
+  30 ms of S to fire, so the responder delivers ~50–90 bits of garbage to the
+  DTE before it stops.  Under V.42 the frame CRC discards them, which is the
+  normal protection; without error control they reach the DTE.
+* **No live verification**, as everywhere else in this note.
