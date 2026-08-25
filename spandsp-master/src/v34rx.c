@@ -513,6 +513,21 @@ static bool v34_rx_stage_is_primary_training(int stage)
         || stage == V34_RX_STAGE_V90_CP;
 }
 
+/* Where a peer-initiated retrain has to be watched for.
+ *
+ * V.90 9.5.1.2 ("After detecting Tone A for more than 50 ms, the digital
+ * modem shall ...") and V.34 11.5.1.2 carry no phase qualifier at all, and
+ * 9.6 puts a rate renegotiation -- which a peer may abandon into a retrain --
+ * "at any time during data mode".  The detector below was nevertheless gated
+ * on the training stages alone, so a peer that gave up on our upstream and
+ * retrained during DATA held Tone A into a receiver that was not listening
+ * for it, and the call died instead of resynchronising. */
+static bool v34_rx_stage_watches_retrain(int stage)
+{
+    return v34_rx_stage_is_primary_training(stage)
+        || stage == V34_RX_STAGE_DATA;
+}
+
 static const char *v34_event_to_str(int event)
 {
     switch (event)
@@ -14103,6 +14118,108 @@ static int v90_t3_primary_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     return 0;
 }
 
+/* V.90 9.5.1.2 / V.34 11.5.1.2 retrain watch.  Split out of
+ * primary_channel_rx() so it can run before the data-mode branch
+ * returns: with the T/3 upstream receiver active the whole of the
+ * rest of that function is skipped in DATA, which is precisely where
+ * a peer whose own receiver has failed starts holding Tone A. */
+static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
+                                      const int16_t amp[],
+                                      int len)
+{
+    int i;
+
+    /* The spec-mandated form of the same check: V.90 9.3.1 and 9.4.1 both
+     * require "If Tone A is detected during Phase 3/4, the digital modem
+     * shall respond to retrain according to 9.5.1.2".  A peer initiating a
+     * retrain (9.5.2.1) sends 70 +/- 5 ms of silence and then holds 2400 Hz
+     * Tone A until it hears our Tone B -- the SmartLink peer gives up and
+     * drops the call about 3.1 s in.  The silence detector above can miss
+     * the gap when transport filtering rings into it (the interop rig's
+     * 257-tap polyphase resampler shaves the observed 80 ms gap below the
+     * 60 ms threshold), so detect the tone itself: a Goertzel bin at
+     * 2400 Hz against total block energy.  A modulated primary channel
+     * (CPt/SCR/CP on the 1800 Hz carrier) spreads its power across the
+     * band, and the periodic Phase 3 line spectra (S at 600/3000 Hz, J/Ja
+     * harmonics) never put most of it in one bin, so require a dominant,
+     * sustained single-bin ratio.  The same reasoning is what makes it safe
+     * to run in DATA: the upstream there is a full V.34 primary channel,
+     * whose power is spread over the whole band by construction. */
+    if (s->v90_mode
+        && v34_rx_stage_watches_retrain(s->stage))
+    {
+        /* 2*cos(2*pi*2400/8000) */
+        static const float tone_a_coeff = -0.6180339887f;
+        /* 160 samples = 20 ms per block; bin 48 lands exactly on 2400 Hz. */
+        static const int tone_a_block = 160;
+
+        for (i = 0;  i < len;  i++)
+        {
+            float x = (float) amp[i];
+            float g0 = x + tone_a_coeff*s->phase34_tone_a_g1 - s->phase34_tone_a_g2;
+
+            s->phase34_tone_a_g2 = s->phase34_tone_a_g1;
+            s->phase34_tone_a_g1 = g0;
+            s->phase34_tone_a_energy += x*x;
+            if (++s->phase34_tone_a_samples >= tone_a_block)
+            {
+                float g1 = s->phase34_tone_a_g1;
+                float g2 = s->phase34_tone_a_g2;
+                float tone_power = g1*g1 + g2*g2 - tone_a_coeff*g1*g2;
+                /* For a full-block sine, tone_power ~= energy*N/2, so this
+                   ratio approaches 1.0 for a pure tone. */
+                float denom = s->phase34_tone_a_energy*(float) tone_a_block*0.5f;
+                bool tonal = false;
+
+                /* Energy floor: mean square > 100^2 keeps line noise and the
+                   Jd-wait silence from ever qualifying. */
+                if (s->phase34_tone_a_energy > 10000.0f*(float) tone_a_block
+                    &&  denom > 0.0f
+                    &&  tone_power > 0.70f*denom)
+                {
+                    tonal = true;
+                }
+                /*endif*/
+                if (tonal)
+                    s->phase34_tone_a_blocks++;
+                else
+                    s->phase34_tone_a_blocks = 0;
+                /*endif*/
+                s->phase34_tone_a_g1 = 0.0f;
+                s->phase34_tone_a_g2 = 0.0f;
+                s->phase34_tone_a_energy = 0.0f;
+                s->phase34_tone_a_samples = 0;
+                /* 4 blocks = 80 ms, satisfying the "more than 50 ms" of
+                   9.5.1.2 with margin against a chance tonal block. */
+                if (s->phase34_tone_a_blocks >= 4  &&  !s->phase34_tone_a_reported)
+                {
+                    s->phase34_tone_a_reported = true;
+                    s->received_event = V34_EVENT_PEER_RETRAIN;
+                    span_log(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Tone A detected in stage %s (%d ms); peer initiated "
+                             "a V.90 retrain (9.5.2.1), reporting peer retrain per 9.4.1/9.5.1.2\n",
+                             v34_rx_stage_to_str(s->stage),
+                             s->phase34_tone_a_blocks*tone_a_block/8);
+                }
+                /*endif*/
+            }
+            /*endif*/
+        }
+        /*endfor*/
+    }
+    else
+    {
+        s->phase34_tone_a_g1 = 0.0f;
+        s->phase34_tone_a_g2 = 0.0f;
+        s->phase34_tone_a_energy = 0.0f;
+        s->phase34_tone_a_samples = 0;
+        s->phase34_tone_a_blocks = 0;
+        s->phase34_tone_a_reported = false;
+    }
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
 static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
 {
     int i;
@@ -14138,6 +14255,10 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
        sample. */
     static const int t2_num[6] = {192*5, 192*35, 192*10, 192*4, 192*5, 192*7};
     static const int t2_den[6] = {    3,     24,      7,     3,     4,     6};
+
+    /* 9.5.1.2 has no phase qualifier, so watch for the peer's Tone A
+     * in every stage this receiver runs in, DATA included. */
+    v34_rx_watch_peer_retrain(s, amp, len);
 
     /* This branch is internal DSP only. v34_rx() still consumes exactly len
        8 kHz line samples; no sample is inserted into or removed from RTP. */
@@ -14268,92 +14389,6 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     {
         s->phase34_silence_samples = 0;
         s->phase34_retrain_reported = false;
-    }
-    /*endif*/
-    /* The spec-mandated form of the same check: V.90 9.3.1 and 9.4.1 both
-     * require "If Tone A is detected during Phase 3/4, the digital modem
-     * shall respond to retrain according to 9.5.1.2".  A peer initiating a
-     * retrain (9.5.2.1) sends 70 +/- 5 ms of silence and then holds 2400 Hz
-     * Tone A until it hears our Tone B -- the SmartLink peer gives up and
-     * drops the call about 3.1 s in.  The silence detector above can miss
-     * the gap when transport filtering rings into it (the interop rig's
-     * 257-tap polyphase resampler shaves the observed 80 ms gap below the
-     * 60 ms threshold), so detect the tone itself: a Goertzel bin at
-     * 2400 Hz against total block energy.  A modulated primary channel
-     * (CPt/SCR/CP on the 1800 Hz carrier) spreads its power across the
-     * band, and the periodic Phase 3 line spectra (S at 600/3000 Hz, J/Ja
-     * harmonics) never put most of it in one bin, so require a dominant,
-     * sustained single-bin ratio. */
-    if (s->v90_mode
-        && v34_rx_stage_is_primary_training(s->stage))
-    {
-        /* 2*cos(2*pi*2400/8000) */
-        static const float tone_a_coeff = -0.6180339887f;
-        /* 160 samples = 20 ms per block; bin 48 lands exactly on 2400 Hz. */
-        static const int tone_a_block = 160;
-
-        for (i = 0;  i < len;  i++)
-        {
-            float x = (float) amp[i];
-            float g0 = x + tone_a_coeff*s->phase34_tone_a_g1 - s->phase34_tone_a_g2;
-
-            s->phase34_tone_a_g2 = s->phase34_tone_a_g1;
-            s->phase34_tone_a_g1 = g0;
-            s->phase34_tone_a_energy += x*x;
-            if (++s->phase34_tone_a_samples >= tone_a_block)
-            {
-                float g1 = s->phase34_tone_a_g1;
-                float g2 = s->phase34_tone_a_g2;
-                float tone_power = g1*g1 + g2*g2 - tone_a_coeff*g1*g2;
-                /* For a full-block sine, tone_power ~= energy*N/2, so this
-                   ratio approaches 1.0 for a pure tone. */
-                float denom = s->phase34_tone_a_energy*(float) tone_a_block*0.5f;
-                bool tonal = false;
-
-                /* Energy floor: mean square > 100^2 keeps line noise and the
-                   Jd-wait silence from ever qualifying. */
-                if (s->phase34_tone_a_energy > 10000.0f*(float) tone_a_block
-                    &&  denom > 0.0f
-                    &&  tone_power > 0.70f*denom)
-                {
-                    tonal = true;
-                }
-                /*endif*/
-                if (tonal)
-                    s->phase34_tone_a_blocks++;
-                else
-                    s->phase34_tone_a_blocks = 0;
-                /*endif*/
-                s->phase34_tone_a_g1 = 0.0f;
-                s->phase34_tone_a_g2 = 0.0f;
-                s->phase34_tone_a_energy = 0.0f;
-                s->phase34_tone_a_samples = 0;
-                /* 4 blocks = 80 ms, satisfying the "more than 50 ms" of
-                   9.5.1.2 with margin against a chance tonal block. */
-                if (s->phase34_tone_a_blocks >= 4  &&  !s->phase34_tone_a_reported)
-                {
-                    s->phase34_tone_a_reported = true;
-                    s->received_event = V34_EVENT_PEER_RETRAIN;
-                    span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Tone A detected in stage %s (%d ms); peer initiated "
-                             "a V.90 retrain (9.5.2.1), reporting peer retrain per 9.4.1/9.5.1.2\n",
-                             v34_rx_stage_to_str(s->stage),
-                             s->phase34_tone_a_blocks*tone_a_block/8);
-                }
-                /*endif*/
-            }
-            /*endif*/
-        }
-        /*endfor*/
-    }
-    else
-    {
-        s->phase34_tone_a_g1 = 0.0f;
-        s->phase34_tone_a_g2 = 0.0f;
-        s->phase34_tone_a_energy = 0.0f;
-        s->phase34_tone_a_samples = 0;
-        s->phase34_tone_a_blocks = 0;
-        s->phase34_tone_a_reported = false;
     }
     /*endif*/
     /* The mirror image of the check above, for the Jd wait.

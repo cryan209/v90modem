@@ -745,6 +745,14 @@ static bool           g_v90_fallback_v34_logged = false;
 static bool           g_v90_fallback_phase4_released = false;
 static int            g_v90_phase3_s_events = 0;
 static unsigned        g_v90_phase2_restarts = 0;
+/* Set when a Phase 2 restart is entered from data mode -- a V.90 §9.5 /
+ * V.34 §11.5 retrain rather than a failed startup.  §11.5 says only "turn
+ * OFF circuit 106, clamp circuit 104 to binary one": the DTE data is held,
+ * the physical layer retrains, and the error-control link above it survives.
+ * Re-running data_stack_start_online() on the way back in would tear LAPM
+ * down and force a fresh XID against a peer whose link is still up, so the
+ * re-entry path consults this instead. */
+static bool            g_v90_retrain_from_data = false;
 static v90_cp_rx_t    g_v90_cp_rx;
 /* V.92 is only selected after both INFO0 frames explicitly advertise it.
  * V.8's QC packet is a hint, not a data-pump selection. */
@@ -3349,6 +3357,20 @@ static bool restart_v90_phase2_locked(const char *reason)
     v34_set_put_aux_bit(g_v34, v34_put_aux_bit_cb, NULL);
     v34_set_put_phase4_bit(g_v34, v90_live_cp_bit, NULL);
     notch_filter_init(&g_notch, 1200.0f, 30.0f, 8000.0f);
+
+    /* §9.5/§11.5 puts a retrain at "any time", data mode included, and the
+       transmitter must leave the data mapper for the Phase 2 tone exchange.
+       Nothing else moves the engine state back, so a retrain taken from data
+       mode used to leave g_state at ME_DATA: the V.90 transmit path then hit
+       its `if (!g_v90) return false` and the call went quiet in both
+       directions rather than resynchronising. */
+    if (g_state == ME_DATA) {
+        g_v90_retrain_from_data = true;
+        g_state = ME_TRAINING;
+        g_phase_start_ms = trace_now_ms();
+        ME_LOG("[ME] V.90: retraining out of data mode; DTE data clamped, "
+               "error-control link retained (§9.5/§11.5)\n");
+    }
 
     g_v90_phase2_restarts++;
     trace_phase("V90 restart Phase2: attempt=%u profile=3200/%d",
@@ -7308,7 +7330,18 @@ static void enter_v90_data_locked(void)
     downstream_rate = (v90_data_bits_per_frame(g_v90) * 8000) / 6;
     if (downstream_rate <= 0)
         downstream_rate = V90_RATE_BPS;
-    data_stack_start_online(downstream_rate, g_calling_party);
+    if (g_v90_retrain_from_data) {
+        /* §9.5/§11.5 retrain: the physical layer has re-trained under a link
+           that never went down.  Re-arming the data stack here would restart
+           LAPM against a peer still in the middle of its own connection, so
+           only the rate is refreshed. */
+        g_v90_retrain_from_data = false;
+        g_data_connect_rate = downstream_rate;
+        ME_LOG("[ME] V.90 retrain complete; resuming the existing data link "
+               "(downstream %d bps)\n", downstream_rate);
+    } else {
+        data_stack_start_online(downstream_rate, g_calling_party);
+    }
     g_state = ME_DATA;
     g_phase_start_ms = 0;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
@@ -7319,7 +7352,10 @@ static void enter_v90_data_locked(void)
     trace_phase("%s enter DATA after B1: upstream=%d downstream=%d",
                 g_v92_active ? "V92" : "V90",
                 upstream_rate, downstream_rate);
-    if (g_data_framing != DS_FRAMING_V42) {
+    if (g_data_connect_reported) {
+        /* A retrain, not a new connection: the DTE was told CONNECT once and
+           §11.5 never takes it back -- it only clamps 104 for the duration. */
+    } else if (g_data_framing != DS_FRAMING_V42) {
         g_data_connect_reported = true;
         di_on_connected(downstream_rate);
     } else {
