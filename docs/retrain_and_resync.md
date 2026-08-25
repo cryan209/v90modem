@@ -137,29 +137,43 @@ against.  Proving the peer answers needs the live rig.
   acquires on the same files.  What the change buys *there* is that the
   failure is observable and recoverable rather than silent and terminal.
 
-  In `v90_upstream_replay` it does more than that, and the A/B is clean —
-  same recordings, two binaries differing only in this change, run
-  sequentially:
+  In `v90_upstream_replay` it changes the outcome, but **not consistently for
+  the better** — same recordings, two binaries differing only in this change,
+  run sequentially:
 
-  | call | before | | after | |
-  | --- | --- | --- | --- | --- |
-  | | handover | lines | handover | lines |
-  | rate24000-r1 | 25.5 s | 30721 | **22.5 s** | 30721 |
-  | rate28800-r1 | 25.5 s | 14575 | **22.5 s** | **20201** |
+  | call | before | | after | | |
+  | --- | --- | --- | --- | --- | --- |
+  | | handover | lines | handover | lines | |
+  | rate19200-r1 | 26.0 s | 22058 | 23.0 s | 18144 | **−17.7%** |
+  | rate24000-r1 | 25.5 s | 30721 | 22.5 s | 30721 | 0 |
+  | rate28800-r1 | 25.5 s | 14575 | 22.5 s | 20201 | **+38.6%** |
+  | | | 67354 | | 69066 | +2.5% |
 
-  The mechanism is the one intended: the harness sweeps candidate handover
-  instants in order and takes the first that acquires, and at 22.5 s the old
-  code gave up after one window and moved on, while the new one slides the
-  anchor forward and acquires inside that same candidate.  The earlier
-  handover is the better filter — at 28800 it is worth **38.6% more intact
-  pattern lines**, and at 24000, which was already delivering every line it
-  could, it costs nothing.
+  The mechanism is consistent even though the outcome is not: the harness
+  sweeps candidate handover instants in order and takes the first that
+  acquires, and every row moves ~3 s earlier, because the old code gave up on
+  that earlier candidate after one window while the new one slides the anchor
+  forward and acquires inside it.  **Whether the earlier candidate is the
+  better filter is call-dependent**, and on this sample it is a wash with
+  large swings either way.  Do not read the 28800 row on its own.
 
-  The price is CPU: seven least-squares searches per candidate instead of
-  one.  Live that is bounded by the existing `V34_V90_T3_ACQ_RETRY_GAP`
-  backoff to one search per 0.5 s at 3200 baud, which is the budget the
-  out-of-sample path was already tuned against; offline in the sweep harness
-  it is a straight 7x, because the harness fast-forwards the backoff.
+  That is the "every change reshuffles which cases pass" signature
+  `docs/v34_symbol_rate_matrix` work warns about, and it says the acquisition
+  has no ranking across candidate instants: the in-sample bail rejects a
+  window before the out-of-sample scoring that `v90_t3_acq_best_*` uses, so an
+  earlier candidate wins on ORDER rather than on quality.  Ranking candidates
+  the way windows within a candidate are already ranked is the obvious next
+  step and is not done.
+
+  What is not in doubt is the half this change exists for: three of the twelve
+  recorded calls previously carried NOTHING at all, terminally and silently,
+  and no longer can.
+
+  The price is CPU: seven least-squares searches per candidate instead of one.
+  Live that is bounded by the existing `V34_V90_T3_ACQ_RETRY_GAP` backoff to
+  one search per 0.5 s at 3200 baud, which is the budget the out-of-sample
+  path was already tuned against; offline in the sweep harness it is a
+  straight 7x, because the harness fast-forwards the backoff.
 
   Note the two failure kinds now share one retry counter.  That is the safe
   direction: a call that spends some of the budget on in-sample failures
