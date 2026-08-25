@@ -97,9 +97,7 @@ def main():
     print("%-8s %8s %9s %9s %8s %10s" %
           ("arm", "calls", "data", "clean_s", "hold_s", "U-lines"))
     print("-" * 60)
-    for arm in ("fixed", "slip"):
-        if arm not in arms:
-            continue
+    for arm in sorted(arms):
         cl, best, sp, pl, n, dm = arms[arm]
         print("%-8s %8d %9d %8.1fs %8.1fs %10d   (%d splices)" %
               (arm, n, dm, cl, best, pl, sp))
