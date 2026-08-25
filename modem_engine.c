@@ -3544,14 +3544,14 @@ static bool restart_v34_phase2_locked(const char *reason)
         g_retrain_from_data = true;
         g_state = ME_TRAINING;
         g_phase_start_ms = trace_now_ms();
-        /* §11.5 puts silence and then this role's tone on the wire, NOT the
-           INFO0 exchange v34_restart() re-enters at.  Measured live
-           (artifacts/retrain-live-b2): the peer detected the retrain request,
-           started its own, and dropped the call 3.1 s later while we sent it
-           INFO0.  Same shape as the V.90 path, which has had
-           v34_v90_start_retrain_response() since 2026-07-22. */
-        v34_start_retrain(g_v34);
     }
+    /* §11.5 always puts silence and then this role's tone on the wire, NOT
+       the INFO0 exchange v34_restart() re-enters at.  This must not be scoped
+       to ME_DATA: a peer may initiate a retrain during Phases 2-4, and a
+       retrain already in progress has g_state == ME_TRAINING while retaining
+       g_retrain_from_data.  In either case sending INFO0 here leaves the peer
+       waiting for the tone required by §11.5.1.2/§11.5.2.2. */
+    v34_start_retrain(g_v34);
     ME_LOG("[ME] V.34: %s; restarting Phase 2 (%d baud / %d bps)\n",
            reason ? reason : "restart requested", baud, bps);
     trace_phase("V34 restart Phase2: %d/%d", baud, bps);
@@ -3641,6 +3641,14 @@ static bool restart_v90_phase2_locked(const char *reason)
         ME_LOG("[ME] V.90: retraining out of data mode; DTE data clamped, "
                "error-control link retained (§9.5/§11.5)\n");
     }
+
+    /* Every caller of this helper is a §9.5 retrain, not a fresh startup:
+       peer request, failed Jd/S exchange, failed §9.6, or carrier loss.
+       §9.5.1.1 and §9.5.1.2 both require 70 ms silence followed by Tone B
+       from the digital modem and omit INFO0.  Centralising that seam also
+       keeps timeout and training-stage retrains from accidentally emitting
+       v34_restart()'s INITIAL_PREAMBLE/INFO0d instead. */
+    v34_v90_start_retrain_response(g_v34);
 
     g_v90_phase2_restarts++;
     trace_phase("V90 restart Phase2: attempt=%u profile=3200/%d",
@@ -6410,18 +6418,9 @@ void me_rx_audio(const int16_t *amp, int len)
                         /* §9.5.1.2 response: restart the answerer Phase 2 flow.
                          * This frees g_v90; later blocks in this poll are all
                          * guarded on g_v90. */
-                        if (restart_v90_phase2_locked(
-                                "peer retrain (Tone A/silence) during Phase 3/4; "
-                                "responding per 9.5.1.2")) {
-                            /* §9.5 skips the INFO0 exchange: enter 70 ms
-                             * silence then Tone B directly instead of the
-                             * INITIAL_PREAMBLE/INFO0d start, whose modulated
-                             * carrier the SmartLink peer's Tone B detector
-                             * does not reliably accept during its L2 window
-                             * (observed live 2026-07-22 on post-Phase-4
-                             * retrains). */
-                            v34_v90_start_retrain_response(g_v34);
-                        }
+                        (void) restart_v90_phase2_locked(
+                            "peer retrain (Tone A/silence) during Phase 3/4; "
+                            "responding per 9.5.1.2");
                     }
                     if (rx_event == V34_EVENT_PEER_RENEG_S
                         && g_v90 && !g_v92_active) {
@@ -7964,10 +7963,9 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                        g_loss_retrains + 1, me_max_loss_retrains());
                 g_loss_retrains++;
                 g_last_loss_retrain_ms = trace_now_ms();
-                if (restart_v90_phase2_locked(
-                        "upstream carrier lost in data mode; retraining "
-                        "per 9.5.1.1"))
-                    v34_v90_start_retrain_response(g_v34);
+                (void) restart_v90_phase2_locked(
+                    "upstream carrier lost in data mode; retraining "
+                    "per 9.5.1.1");
                 return false;
             } else {
                 v34_v90_upstream_clear_carrier_lost(g_v34);

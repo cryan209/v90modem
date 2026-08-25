@@ -104,6 +104,31 @@ out the receiver says so, and `v34_v90_upstream_carrier_lost()` reports it:
 an upstream that never acquired is the same condition as one that has stopped
 decoding, and worse, since the call has carried nothing since B1.
 
+## The retrain wire sequence now belongs to the restart seam
+
+Two later gaps had the same cause: the code reset the Phase-2 state, but did
+not always select §9.5/§11.5's retrain waveform afterwards.
+
+* Plain V.34 called `v34_start_retrain()` only when `g_state == ME_DATA`.
+  A peer may request a retrain during Phases 2-4, and a data-mode retrain that
+  is already under way has already moved the engine to `ME_TRAINING`; both
+  paths therefore fell through to `v34_restart()`'s INFO0 waveform instead of
+  the required 70 ms silence and role-appropriate tone.  Every caller of
+  `restart_v34_phase2_locked()` is a §11.5 path, so the retrain waveform is
+  now selected unconditionally after the reset.
+* V.90 selected the 70 ms silence/Tone B response only at two call sites.
+  The failed-Jd/S path and a timed-out §9.6 exchange reset to Phase 2 and then
+  emitted INITIAL_PREAMBLE/INFO0d.  Every caller of
+  `restart_v90_phase2_locked()` is likewise a §9.5 path, so the helper now
+  selects §9.5.1's silence/Tone B sequence itself; callers can no longer omit
+  it or apply it twice.
+
+This is protocol logic, not an interop workaround: V.90 §9.5.1.1/.2 and V.34
+§11.5.1/.2 both prescribe silence followed by the role's tone, independent of
+the phase from which retraining starts.  `v90_engine_replay` now shows the
+failed-acquisition recovery entering `tx=V90_RETRAIN_SILENCE`; previously that
+same timeout entered INFO0.
+
 ## How to see it work
 
 `v90_engine_replay` runs V.8 and Phases 2-4 through the whole engine off a
