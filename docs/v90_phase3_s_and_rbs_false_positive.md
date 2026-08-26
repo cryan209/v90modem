@@ -1673,3 +1673,52 @@ descriptor line in ours.
 descriptor, so Sd can start without waiting on the parse. It is a bypass of the
 Ja-parse lottery rather than a fix for it, and whether it converts these calls
 has not been measured.
+
+## 35. Which one: neither. The Ja bits differ from identical samples (2026-08-26)
+
+§34 left the Ja descriptor parse as the cause and two candidates for *why*: our
+capture starting too late, or the Ja demodulating badly. **Both are wrong, and
+the measurement that settles it also rules out the line.**
+
+The instrument is a timestamp on the existing `Ja search input` line
+(`t=%.3fs` off `g_rx_audio_samples`), which is what makes the capture length
+comparable between runs at all.
+
+Replaying a call that recovers the descriptor (`trn1d-ab-063857Z/control-r1`)
+against one that never does (`trn1d-knee-075140Z/control-r1`):
+
+- **The capture does not start late.** Both begin at exactly `t=9.740s` with 94
+  bits, and accumulate at the same 6400 bits/s (2 bits per symbol at 3200 baud).
+  The first **48** `Ja search input` lines of the two runs are *identical*; they
+  diverge only where the good one reports `parsed=1`.
+- **The signal is not worse.** The two recordings are **byte-identical for their
+  first 13.94 s** — which contains the whole Ja window. The peer's handshake is
+  deterministic and the container is restarted per attempt, so two different
+  calls put the same samples on the wire. Any explanation involving line
+  quality, level or noise is therefore excluded by construction.
+- **The receiver is deterministic**: each recording gives the same answer on
+  every replay (0 recoveries and 6 recoveries, repeatedly).
+
+So the same samples, fed to the same code, produce a bit stream that parses in
+one run and not the other. Dumping hypothesis 8 from both at ~13000 bits shows
+why that is possible: the two captures are **13086 and 13080 bits** — a
+**6-bit (3-symbol) difference in where the capture begins** — and the contents
+are not a shifted copy of one another (best agreement over any shift in
+±64 bits is **0.64**, i.e. unrelated). A three-symbol difference in the instant
+the receiver enters the Ja capture stage changes *every bit that follows*, not
+merely their alignment.
+
+**That is the Ja-parse lottery, and it is ours.** The 24-hypothesis search
+covers the constellation rotation and the sliding window covers the frame start,
+but neither covers the state the capture is anchored to. Note what this rules
+out for future sessions: it is not the hypothesis (hypothesis 8 carries the
+preambles in the failing call too — 3 of them, at an exact 1574-bit spacing), not
+preamble brittleness (tolerating up to 3 bit errors in the 17 ones finds no
+further frames), not the throttle (pinning hypothesis 8 ahead of the search
+changes the parse point not at all — measured, and reverted for that reason),
+and not the wire.
+
+**Open**: what the capture anchors to, and why entering three symbols earlier or
+later destroys the decode rather than shifting it. `ME_V90_JA_DUMP_EARLY=1`
+dumps all 24 hypotheses *before* the search, so a run that parses can be
+compared against one that does not; that is the tool this needs next.

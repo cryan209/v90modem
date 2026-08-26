@@ -4079,8 +4079,9 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
                                                     V90_DIL_CAPTURE_MAX_BITS);
                 if (n > longest) { longest = n; longest_h = h; }
             }
-            ME_LOG("[ME] V.90 Ja search input: v34=%d parsed=%d rx_stage=%d "
+            ME_LOG("[ME] V.90 Ja search input: t=%.3fs v34=%d parsed=%d rx_stage=%d "
                    "longest_hyp_len=%d (hyp %d)\n",
+                   (double)g_rx_audio_samples / 8000.0,
                    g_v34 ? 1 : 0, g_v90_dil_parse_logged ? 1 : 0,
                    g_v34 ? v34_get_rx_stage(g_v34) : -1, longest, longest_h);
         }
@@ -4103,6 +4104,21 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
        consistent across repeated calls -- i.e. most of that time was spent
        waiting for the next throttled attempt, not for more real signal.
        Env-tunable for measurement; default kept at 512. */
+    if (!g_v90_dil_hyp_dumped && first_bits >= v90_ja_dump_min_bits()
+        && getenv("ME_V90_JA_DUMP_EARLY")) {
+        const char *pfx = getenv("ME_V90_JA_DUMP_PREFIX");
+        if (pfx && *pfx) {
+            char path[1024];
+            for (int h = 0; h < 24; h++) {
+                int nb = v34_v90_copy_phase3_ja_bits(g_v34, h, unpacked,
+                                                     V90_DIL_CAPTURE_MAX_BITS);
+                snprintf(path, sizeof(path), "%s-hyp%d.bits", pfx, h);
+                FILE *fp = fopen(path, "wb");
+                if (fp) { fwrite(unpacked, 1, (size_t)nb, fp); fclose(fp); }
+            }
+            g_v90_dil_hyp_dumped = true;
+        }
+    }
     int retry_bits = parse_env_int("ME_V90_DIL_HYP_RETRY_BITS", 512);
     if (retry_bits < 0)
         retry_bits = 512;
