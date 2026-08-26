@@ -1453,11 +1453,17 @@ static bool v90_cp_power_within_limit(const v90_state_t *s,
     fprintf(stderr,
             "[V90] Phase 4: %s -- 8.5.2 average power %.0f (%.1f dBm0) "
             "exceeds Table 15's %.0f (%.1f dBm0 declared in INFO0d) by "
-            "%.1f dB, over the %.1f dB margin, and its codec-output set is "
-            "over too, so there is nothing to substitute%s\n",
+            "%.1f dB, over the %.1f dB margin%s%s\n",
             what, sqrt(wire), 20.0 * log10(sqrt(wire) / 16017.0),
             sqrt(limit), v90_declared_max_tx_dbm0(),
             10.0 * log10(wire / limit), margin,
+            (codec <= allowed && cp->codec_constellations_differ)
+                ? ", and its codec-output set is within it -- the peer has "
+                  "assumed a digital pad this bearer does not have, but "
+                  "substituting is off (ME_V90_CP_PAD_REPAIR=1 enables it; "
+                  "the rig measured it as harmful)"
+                : ", and its codec-output set is over too, so there is "
+                  "nothing to substitute",
             v90_cp_power_enforced() ? "; refusing the frame"
                                     : "; transmitting it anyway");
     return !v90_cp_power_enforced();
