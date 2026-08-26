@@ -746,6 +746,16 @@ static bool           g_v90_fallback_v34_logged = false;
 /* Consecutive Phase 3 attempts that ended without a CRC-valid Ja descriptor.
  * Per call, not per process -- this server runs many calls in one. */
 static int            g_v90_ja_failed_attempts = 0;
+/* g_rx_audio_samples at the FIRST Phase 3 entry of this call, 0 if not yet.
+ * Deliberately the AUDIO clock and not the wall clock: it is the same quantity
+ * in a live call and in a replay, so this trigger can be tested offline at all
+ * -- a wall-clock deadline never elapses under `--fast` and would have been
+ * verifiable only against the rig.  The
+ * Ja deadline is cumulative across retrains rather than per attempt: the peer
+ * retrains at 1.88-2.24 s (§34) and a healthy descriptor arrives a median
+ * 0.3 s after Phase 3 entry, so any per-attempt deadline long enough to be
+ * safe is longer than the peer's own patience and can never fire first. */
+static uint64_t       g_v90_phase3_first_samples = 0;
 
 /* How many consecutive Phase 3 attempts may end without a CRC-valid Ja
  * descriptor before we stop asking for V.90 and continue as plain V.34.
@@ -780,6 +790,49 @@ static int            g_v90_ja_failed_attempts = 0;
  * which is three retrains downstream of the actual cause.
  *
  * ME_V90_JA_CONCEDE_ATTEMPTS=0 disables conceding entirely. */
+/* Seconds of Phase 3, cumulative over a call, after which we stop asking for
+ * V.90 if no CRC-valid Ja descriptor has arrived.
+ *
+ * This is the trigger that works, and the attempt count below is the one that
+ * does not: an attempt ends when the PEER retrains, so that counter runs on
+ * the peer's clock and cannot decide before it does -- measured live, at a
+ * threshold of 3 our concession never fired once in four calls because the
+ * peer declared first every time (docs §35m).
+ *
+ * Priced on the corpus the same way as §35l, anchored at Phase 3 entry, over
+ * 1286 calls that entered Phase 3 (tools/ja_deadline_cost.py).  A healthy
+ * descriptor arrives a median 0.3 s after Phase 3 entry (p90 6.6 s, max
+ * 40.6 s), and conceding at T would abandon:
+ *
+ *      8 s -> 56 calls that recovered anyway, FOUR of which reached data mode
+ *     15 s ->  8, one of which reached data mode
+ *     20 s ->  3, NONE of which reached data mode      <- default
+ *     30 s ->  1, none
+ *     45 s ->  0
+ *
+ * 20 s is the knee: the last value that loses no call which would have reached
+ * V.90 data mode, while still firing on 167 calls that were never going to get
+ * a descriptor, a median 10.4 s before they gave up by themselves.  0 disables
+ * the deadline. */
+static int v90_ja_deadline_seconds(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *env = getenv("ME_V90_JA_DEADLINE_SEC");
+
+        cached = 20;
+        if (env && *env) {
+            char *end;
+            long parsed = strtol(env, &end, 10);
+
+            if (end != env && *end == '\0' && parsed >= 0 && parsed <= 600)
+                cached = (int) parsed;
+        }
+    }
+    return cached;
+}
+
 static int v90_ja_concede_attempts(void)
 {
     static int cached = -1;
@@ -820,6 +873,23 @@ static bool           g_v92_info0_peer_short_phase2 = false;
 static bool           g_v92_info0_mutual = false;
 static bool           g_v92_info0_peer_logged = false;
 static bool           g_v92_active = false;
+
+/* Stop asking for V.90 and let the restarted Phase 2 be plain V.34.
+ * §9.5.1.2 is answered by the caller either way -- the peer may be holding
+ * Tone A and something has to reply to it; all this changes is whether the
+ * next Phase 2 still offers V.90. */
+static void v90_concede_to_v34_locked(const char *why)
+{
+    if (g_mod != ME_MOD_V90 || g_v92_active)
+        return;
+    ME_LOG("[ME] V.90: %s; conceding V.90 and continuing as plain V.34 "
+           "(this modem's corpus says a call in this state does not recover; "
+           "ME_V90_JA_DEADLINE_SEC=0 ME_V90_JA_CONCEDE_ATTEMPTS=0 disable)\n",
+           why);
+    trace_phase("V90 conceded -> plain V.34: %s", why);
+    g_mod = ME_MOD_V34;
+}
+
 static v92_p3_rx_t    g_v92_p3_rx;
 static bool           g_v92_p3_rx_active = false;
 static bool           g_v92_p3_rx_result_applied = false;
@@ -3530,6 +3600,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_fallback_v34_logged = false;
     g_v90_fallback_phase4_released = false;
     g_v90_ja_failed_attempts = 0;
+    g_v90_phase3_first_samples = 0;
     g_v90_dil_capture_start_logged = false;
     g_v90_phase2_restarts = 0;
     /* Per call, not per process: this server runs many calls in one. */
@@ -3943,6 +4014,12 @@ static bool v90_ja_heuristic_allowed(const char *source)
  * whole of Phase 3 run late and on timers rather than in step with the peer. */
 static void v90_note_ja_confirmed_by_descriptor(void)
 {
+    /* Restart the deadline clock: it measures Phase 3 time WITHOUT a
+     * descriptor, so a call that has just had one starts again from zero.
+     * Anchored once per call it would instead measure time since the first
+     * Phase 3 entry ever, and a call that ran data mode for a minute and then
+     * retrained would be past the deadline on its first failed attempt. */
+    g_v90_phase3_first_samples = 0;
     bool accepted;
 
     if (!g_v90 || !g_v34)
@@ -6521,6 +6598,28 @@ void me_rx_audio(const int16_t *amp, int len)
                     g_last_v90_bridge_rx_stage = rx_stage;
                     g_last_v90_bridge_tx_stage = tx_stage;
                     g_last_v90_bridge_rx_event = rx_event;
+                    /* Our own deadline, cumulative over the call.  Checked
+                     * here because this poll runs per RX frame and the
+                     * attempt-count trigger below can only fire when the PEER
+                     * retrains -- which is why it never fires first (§35m). */
+                    /* Not gated on g_v90_phase3_started: the clock measures
+                     * time spent trying V.90 since the first Phase 3 entry,
+                     * which is what the corpus priced, and a call that keeps
+                     * failing spends most of it back in Phase 2 restarts --
+                     * gated, the deadline can only be tested during the very
+                     * attempts that are failing and routinely misses. */
+                    if (v90_ja_deadline_seconds() > 0
+                        && !g_v90_pending_dil_valid
+                        && g_v90_phase3_first_samples != 0
+                        && g_rx_audio_samples - g_v90_phase3_first_samples
+                           >= (uint64_t) v90_ja_deadline_seconds() * 8000u) {
+                        char why[128];
+
+                        snprintf(why, sizeof(why),
+                                 "%d s of Phase 3 with no CRC-valid Ja descriptor",
+                                 v90_ja_deadline_seconds());
+                        v90_concede_to_v34_locked(why);
+                    }
                     if (new_retrain_event && g_v90 && !g_v92_active) {
                         /* The peer gave up on Phase 3/4 and initiated a
                          * retrain: 70 ms silence then Tone A, waiting for our
@@ -6567,19 +6666,13 @@ void me_rx_audio(const int16_t *amp, int len)
                          * to it.  What changes here is only whether the Phase 2
                          * we just restarted still asks for V.90. */
                         if (v90_ja_concede_attempts() > 0
-                            && g_v90_ja_failed_attempts >= v90_ja_concede_attempts()
-                            && g_mod == ME_MOD_V90
-                            && !g_v92_active) {
-                            ME_LOG("[ME] V.90: %d Phase 3 attempts ended with no "
-                                   "CRC-valid Ja descriptor; conceding V.90 and "
-                                   "continuing as plain V.34 (this modem's corpus "
-                                   "says a call that has failed this many times "
-                                   "does not recover; ME_V90_JA_CONCEDE_ATTEMPTS=0 "
-                                   "disables)\n",
-                                   g_v90_ja_failed_attempts);
-                            trace_phase("V90 conceded after %d Ja failures -> plain V.34",
-                                        g_v90_ja_failed_attempts);
-                            g_mod = ME_MOD_V34;
+                            && g_v90_ja_failed_attempts >= v90_ja_concede_attempts()) {
+                            char why[128];
+
+                            snprintf(why, sizeof(why),
+                                     "%d Phase 3 attempts ended with no CRC-valid "
+                                     "Ja descriptor", g_v90_ja_failed_attempts);
+                            v90_concede_to_v34_locked(why);
                         }
                     }
                     if (rx_event == V34_EVENT_PEER_RENEG_S
@@ -7774,6 +7867,8 @@ static void prepare_v90_phase3_locked(void)
             }
             v90_start_phase3(g_v90, info1a.u_info);
             g_v90_phase3_started = true;
+            if (g_v90_phase3_first_samples == 0)
+                g_v90_phase3_first_samples = g_rx_audio_samples;
             g_v90_completion_deferred_logged = false;
             g_v90_wait_info1_logged = false;
             g_v90_reject_info1a_logged = false;

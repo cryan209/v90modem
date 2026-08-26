@@ -2305,3 +2305,61 @@ says what happened, when it happened, and why.
    decision point against the 4 calls a side a live A/B was buying. Reach for
    it before booking rig time: the live A/B in flight while this was written
    could not have detected an 18% cost at its sample size.
+
+### 35m. The attempt count runs on the peer's clock; a deadline does not (2026-08-26)
+
+The concession shipped counting Phase 3 attempts. **Live, at the corpus-priced
+threshold of 3, it never fired once** — `artifacts/concede-ab-t3-111704Z`, 11
+calls over two arms:
+
+| arm | V.90 data mode | gave up on V.90 | by whom |
+|---|---|---|---|
+| concede (3) | 5/6 calls | 2/6, mean 54.4 s | **`peer` both times** |
+| persist (0) | 4/5 calls | 2/5, mean 71.9 s | `peer` both times |
+
+**The reason is structural, not a threshold that needs tuning: an attempt ends
+when the PEER retrains, so the counter runs on the peer's clock.** The peer
+gives up on its third failed attempt too, so at 3 the two decisions are a race
+our side cannot win, and at 2 (§35l) it fires early enough to abandon 18% of the
+calls it fires on. There is no integer in between. The trigger is wrong, not the
+number.
+
+**A deadline of our own is the fix**, and it is priced the same way — the whole
+corpus predates the feature. Anchored at Phase 3 entry over the 1286 calls that
+reach it (`tools/ja_deadline_cost.py`), a healthy descriptor arrives a **median
+0.3 s** after Phase 3 entry (p90 6.6 s, max 40.6 s), and conceding after T
+seconds without one would abandon:
+
+| T | fires | recovered later | …reached V.90 data mode |
+|---|---|---|---|
+| 8 s | 220 | 56 | **4** |
+| 15 s | 172 | 8 | 1 |
+| **20 s** | 167 | 3 | **0** |
+| 30 s | 165 | 1 | 0 |
+| 45 s | 164 | 0 | 0 |
+
+**20 s is the knee** — the last value that loses no call which would have
+reached V.90 data mode, while still firing on 167 calls that never got a
+descriptor, a median 10.4 s before they gave up by themselves.
+`ME_V90_JA_DEADLINE_SEC` (0 disables); the attempt count stays as a secondary
+trigger at 3, where it is harmless and, on this peer, usually inert.
+
+Three details, each of which was wrong first and caught by a replay:
+
+1. **The clock is the AUDIO clock, not the wall clock.** A wall-clock deadline
+   never elapses under `--fast`, so it could only ever have been verified
+   against the rig — in a tree whose recurring lesson is that live and replay
+   disagree. `g_rx_audio_samples` is the same quantity in both.
+2. **The anchor resets whenever a descriptor is recovered**, so it measures
+   Phase 3 time *without* one. Anchored once per call, a call that ran data
+   mode for a minute and then retrained would be past the deadline on its first
+   failed attempt.
+3. **The check is not gated on being in Phase 3.** A call that keeps failing
+   spends most of its time back in Phase 2 restarts, and gated, the deadline can
+   only be tested during the attempts that are failing — it missed the failing
+   recording entirely by 2 s.
+
+Verified on the two recordings, deadline alone: the failing one concedes once
+and loses no V.90 data mode (it reached none), the successful one concedes
+**never** and keeps both its data-mode entries and all 6 Ja recoveries.
+`make test` unaffected.
