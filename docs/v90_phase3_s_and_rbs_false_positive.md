@@ -2448,3 +2448,41 @@ own**, and §33's p = 0.14 was already saying so.
 and 4008T shows an intermediate length can inherit those costs with none of the
 benefit. What the sweep settles is the shape: whatever 16008T does, it does it
 somewhere between 8004T and 16008T, and not gradually.
+
+### 36a. Pooled: the TRN1d effect is real, and still not adoptable (2026-08-27)
+
+§36 noted that its control arm won once and that §33's clean 3/4 vs 0/4 had
+weakened to 3/4 vs 1/8 (p = 0.067). A six-repeat rerun
+(`artifacts/trn1d-16008b-131324Z`) settles it. Pooled over all three runs by
+`tools/trn1d_pool.py`, which groups by the TRN1d length each log **reports**
+rather than by directory name, so a mislabelled run cannot pool into the wrong
+arm:
+
+| TRN1d | calls | first-attempt wins | mean downstream |
+|---|---|---|---|
+| 2496 (default) | 14 | **1/14 (7%)** | 52000 |
+| 4008 | 4 | 0/4 | 38666 |
+| 8004 | 4 | 0/4 | 52000 |
+| **16008** | 10 | **8/10 (80%)** | 40000 |
+
+- **16008 vs the default: p = 0.000489.** Against the 106-call corpus base rate
+  it is p = 4e-7. The effect §33 could only suggest at p = 0.14 is now
+  established.
+- **4008 and 8004 vs the default: p = 1.000 each** — not underpowered, simply
+  nothing. The knee (§36) stands: whatever 16008T does happens between 8004T
+  and 16008T.
+- **The pooled default lands at 1/14 = 7%, on top of the corpus's 6.6%.** So
+  §36's stray control win was the expected occasional one, and the base rate
+  was never in question.
+
+**And the cost is equally firm.** Every one of the six 16008T calls in this run
+came out at **40000 bps against the control's 52000 — a 23% penalty, on all six
+— and two of the six fell back to V.34.** The control fell back on none of its
+six, and held 52000 on all six.
+
+**So the conclusion of §33 is unchanged and now rests on real numbers rather
+than one call each way: `ME_V90_TRN1D_SYMBOLS=16008` reliably buys the first
+Phase 4 attempt and reliably costs a quarter of the downstream rate.** It stays
+an experiment. What it is good for is diagnosis — it is the one lever known to
+move the first-attempt failure, so it is the control to reach for when testing
+any *explanation* of that failure, rather than a setting to ship.
