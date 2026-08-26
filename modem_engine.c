@@ -743,6 +743,48 @@ static bool           g_v90_completion_deferred_logged = false;
 static bool           g_v90_wait_info1_logged = false;
 static bool           g_v90_reject_info1a_logged = false;
 static bool           g_v90_fallback_v34_logged = false;
+/* Consecutive Phase 3 attempts that ended without a CRC-valid Ja descriptor.
+ * Per call, not per process -- this server runs many calls in one. */
+static int            g_v90_ja_failed_attempts = 0;
+
+/* How many consecutive Phase 3 attempts may end without a CRC-valid Ja
+ * descriptor before we stop asking for V.90 and continue as plain V.34.
+ *
+ * §9.3.1.3 has the digital modem transmit Sd once it detects Ja, and gives it
+ * no way to give up -- so this bound is ours, and it is set from what the peer
+ * does.  Measured on this rig (docs/v90_phase3_s_and_rbs_false_positive.md
+ * §34): the peer waits 1.88-2.24 s in WaitForSd, retrains when no Sd arrives,
+ * and on the THIRD such cycle gives up itself -- `drop to V34 requested` --
+ * after which its INFO1a is a plain V.34 offer that our strict validator
+ * rejects, which is the misleading "V.90 declined by peer INFO1a" line.
+ *
+ * Conceding at 2 therefore lands in the same place the call was going anyway,
+ * one cycle (~7 s) earlier, and says so plainly.  It costs at most one attempt
+ * that might have parsed; §35j is why that is a good trade on this evidence --
+ * when the descriptor fails it is because the peer never sends a whole one, a
+ * condition no later attempt repairs, while a healthy call parses on its
+ * first.  ME_V90_JA_CONCEDE_ATTEMPTS=0 disables conceding entirely.
+ *
+ * NOT verified live: the rig would not hold a call while this was written. */
+static int v90_ja_concede_attempts(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *env = getenv("ME_V90_JA_CONCEDE_ATTEMPTS");
+
+        cached = 2;
+        if (env && *env) {
+            char *end;
+            long parsed = strtol(env, &end, 10);
+
+            if (end != env && *end == '\0' && parsed >= 0 && parsed <= 32)
+                cached = (int) parsed;
+        }
+    }
+    return cached;
+}
+
 static bool           g_v90_fallback_phase4_released = false;
 static int            g_v90_phase3_s_events = 0;
 static unsigned        g_v90_phase2_restarts = 0;
@@ -3473,6 +3515,8 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_reject_info1a_logged = false;
     g_v90_fallback_v34_logged = false;
     g_v90_fallback_phase4_released = false;
+    g_v90_ja_failed_attempts = 0;
+    g_v90_dil_capture_start_logged = false;
     g_v90_phase2_restarts = 0;
     /* Per call, not per process: this server runs many calls in one. */
     g_loss_retrains = 0;
@@ -3595,6 +3639,12 @@ static bool restart_v90_phase2_locked(const char *reason)
     g_v90_reject_info1a_logged = false;
     g_v90_fallback_v34_logged = false;
     g_v90_fallback_phase4_released = false;
+    /* NOT g_v90_ja_failed_attempts: this runs on every retrain restart, and
+     * the whole point of that counter is to survive them and count how many
+     * Phase 3 attempts in a row failed.  It resets per call, beside
+     * g_v90_phase2_restarts, which is scoped the same way for the same
+     * reason. */
+    g_v90_dil_capture_start_logged = false;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     v90_reset_upstream_data_arming();
     g_v92_active = false;
@@ -6469,6 +6519,14 @@ void me_rx_audio(const int16_t *amp, int len)
                          * a link error after ~3.1 s of unanswered Tone A
                          * (observed live 2026-07-22). */
                         bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_RETRAIN);
+                        /* Did this attempt ever recover a descriptor?  Read it
+                         * before the reset below clears the flag. */
+                        bool had_descriptor = g_v90_pending_dil_valid;
+
+                        if (had_descriptor)
+                            g_v90_ja_failed_attempts = 0;
+                        else
+                            g_v90_ja_failed_attempts++;
 
                         g_v90_phase3_s_events = 0;
                         g_v90_pending_dil_valid = false;
@@ -6490,6 +6548,25 @@ void me_rx_audio(const int16_t *amp, int len)
                         (void) restart_v90_phase2_locked(
                             "peer retrain (Tone A/silence) during Phase 3/4; "
                             "responding per 9.5.1.2");
+                        /* §9.5.1.2 is answered above whatever we decide next --
+                         * the peer is holding Tone A and something has to reply
+                         * to it.  What changes here is only whether the Phase 2
+                         * we just restarted still asks for V.90. */
+                        if (v90_ja_concede_attempts() > 0
+                            && g_v90_ja_failed_attempts >= v90_ja_concede_attempts()
+                            && g_mod == ME_MOD_V90
+                            && !g_v92_active) {
+                            ME_LOG("[ME] V.90: %d Phase 3 attempts ended with no "
+                                   "CRC-valid Ja descriptor; conceding V.90 and "
+                                   "continuing as plain V.34 (the peer gives up "
+                                   "after 3 and offers a V.34 INFO1a; this reaches "
+                                   "the same place sooner and by our own decision. "
+                                   "ME_V90_JA_CONCEDE_ATTEMPTS=0 disables)\n",
+                                   g_v90_ja_failed_attempts);
+                            trace_phase("V90 conceded after %d Ja failures -> plain V.34",
+                                        g_v90_ja_failed_attempts);
+                            g_mod = ME_MOD_V34;
+                        }
                     }
                     if (rx_event == V34_EVENT_PEER_RENEG_S
                         && g_v90 && !g_v92_active) {

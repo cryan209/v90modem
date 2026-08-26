@@ -2207,3 +2207,50 @@ repeat every 1574 bits in this call and 1702 in a healthy one, and why the clean
 prefix is 1519 bits in one frame and 1096 in the next rather than a fixed
 truncation point. Both are properties of what the peer put on the wire, which is
 where this investigation stops being about our receiver.
+
+### 35k. Conceding, implemented (2026-08-26)
+
+§35j established that when the Ja descriptor fails here it is because the peer
+never sends a whole one — so there is nothing to decode and nothing a better
+parser could do. What was left was the behaviour: we sat silent in
+`V90_TX_WAIT_JA` while the peer retrained three times, gave up itself
+(`drop to V34 requested`), and offered a plain V.34 INFO1a that our strict
+validator then rejected — logged, misleadingly, as "V.90 declined by peer
+INFO1a" (§34).
+
+`g_v90_ja_failed_attempts` counts consecutive Phase 3 attempts that ended
+without a CRC-valid descriptor, and at 2 (`ME_V90_JA_CONCEDE_ATTEMPTS`, 0
+disables) the engine keeps `g_mod = ME_MOD_V34` for the Phase 2 it has just
+restarted, and says so.
+
+**§9.5.1.2 is answered either way** — the peer is holding Tone A and something
+must reply to it, so `restart_v90_phase2_locked()` still runs. The only thing
+conceding changes is whether the restarted Phase 2 still asks for V.90.
+
+**Why 2**: the peer's own threshold is 3, so conceding at 2 arrives one cycle
+(~7 s) earlier at the place the call was already going. It costs at most one
+attempt that might have parsed, and §35j is why that is a good trade on this
+evidence — a failing call's descriptor is never complete, which no later
+attempt repairs, while a healthy call parses on its first.
+
+Measured on the two recordings, one binary, the knob the only variable:
+
+| | concede on (default) | `ME_V90_JA_CONCEDE_ATTEMPTS=0` |
+|---|---|---|
+| failing recording | **concedes after 2 attempts** | falls through to "declined by peer INFO1a" |
+| successful recording | **no concession**, 6 Ja recoveries, Phase 4 as before | identical |
+
+`make test` unaffected.
+
+**The bug this found on the way is worth keeping in mind**: the counter was
+first reset inside `restart_v90_phase2_locked()`, which runs on *every* retrain
+— so it never exceeded 1 and the concession never fired. A counter whose whole
+purpose is to survive retrains must be scoped per call, beside
+`g_v90_phase2_restarts`, which is scoped that way for exactly the same reason.
+The comment there now says so.
+
+**Not verified live.** The rig would not hold a call while this was written
+(§33's aborted sweep), so what is proven is the decision logic on recorded
+calls, not its effect on a live one. The live question it raises is whether
+conceding at 2 ever loses a call that would have parsed on attempt 3 — nothing
+in the corpus does, but the corpus is not the rig on a bad day.
