@@ -1271,10 +1271,30 @@ bool v90_repair_smartlink_dummy_cpt(vpcm_cp_frame_t *cp)
  * same 4128, because attempt 1's CPt sets codec_constellations_differ and
  * claims a 6 dB digital pad between our output and the codec.  On this bearer
  * there is no such pad -- the RTP payload IS the DS0 the far-end D/A sees --
- * so the pad is the peer's DIL alignment error, and the constellation to put
- * on the wire is the codec-output one it named.  That is the repair: it is a
- * no-op whenever the two sets agree (attempt 2, and the data-mode CP), and
- * only bites when a peer asserts a pad this bearer cannot have.
+ * so transmitting the codec-output set it named looked like the repair.
+ *
+ * IT IS NOT, AND THE RIG SAYS SO.  The overdrive is real and worth reporting,
+ * but it is NOT why the first Phase 4 attempt retrains, and substituting the
+ * codec set makes things worse.  The peer grades Phase 4 in a "linear mapping
+ * study in TRN2" whose duration its own log prints, and across six live calls
+ * that duration is deterministic to the millisecond:
+ *
+ *   repair on   0.060, 0.061, 0.060 s -> retrain
+ *   repair off  1.821, 1.820 s        -> retrain
+ *   any arm, second attempt  2.760 s  -> completes, data mode
+ *
+ * So the peer wants the transmit-side levels it asked for, and sending the
+ * codec set fails its study 30x sooner.  Two further live results rule the
+ * level story out altogether: a first attempt whose CPt claims NO pad at all
+ * (wire 4129 == codec 4129, with ME_V90_TRN1D_SYMBOLS=8004) still retrains,
+ * and a 2001 ms TRN1d gets the first attempt to data mode while the CPt is
+ * QUIETER than ever (wire 2391 / codec 1146) -- at 40000 bps instead of
+ * 52000, and the call then destabilised.  Whatever the first attempt fails
+ * on, it is not this.
+ *
+ * The check therefore stays as a measurement and a log line -- it is what
+ * made the peer's mis-measured pad visible -- and the substitution is behind
+ * ME_V90_CP_PAD_REPAIR=1, default off.
  *
  * The margin is deliberately loose.  A conformant peer's own finite-precision
  * design can land slightly over (this one's working constellation is 1.2 dB
@@ -1314,6 +1334,11 @@ static bool v90_cp_power_enforced(void)
     return cached != 0;
 }
 
+/*
+ * DEFAULT OFF, on live evidence against it -- see the header below.  Kept
+ * because the measurement it rests on is real and the log line is what makes
+ * the peer's mis-measured pad visible at all.
+ */
 static bool v90_cp_pad_repair_enabled(void)
 {
     static int cached = -1;
@@ -1321,7 +1346,7 @@ static bool v90_cp_pad_repair_enabled(void)
     if (cached < 0) {
         const char *env = getenv("ME_V90_CP_PAD_REPAIR");
 
-        cached = (env && *env) ? (atoi(env) != 0) : 1;
+        cached = (env && *env) ? (atoi(env) != 0) : 0;
     }
     return cached != 0;
 }
@@ -1415,7 +1440,8 @@ static bool v90_cp_power_within_limit(const v90_state_t *s,
                 "codec-output constellation is within Table 15 -- the peer "
                 "has assumed a digital pad between us that this bearer does "
                 "not have.  Transmitting the codec-output constellation "
-                "instead (ME_V90_CP_PAD_REPAIR=0 leaves it alone; "
+                "instead (this is ME_V90_CP_PAD_REPAIR=1, which the rig "
+                "measured as HARMFUL and which is off by default; "
                 "ME_V90_CP_POWER_MARGIN_DB=24 disables the check "
                 "altogether and restores the pre-2026-08-26 behaviour).\n",
                 what, 10.0*log10(wire/limit), v90_declared_max_tx_dbm0());
