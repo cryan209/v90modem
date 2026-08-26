@@ -2486,3 +2486,98 @@ Phase 4 attempt and reliably costs a quarter of the downstream rate.** It stays
 an experiment. What it is good for is diagnosis — it is the one lever known to
 move the first-attempt failure, so it is the control to reach for when testing
 any *explanation* of that failure, rather than a setting to ship.
+
+## 37. The peer is deterministic, its level estimate is one G.711 chord out, and TRN2d is not the lever (2026-08-27)
+
+§33/§36/§36a treated the first-attempt failure as a statistical effect and
+spent four to six calls per arm on it. It is not statistical. Read from the
+peer's own log rather than from whether the call later reached data mode, the
+outcome is a **deterministic function of the TRN1d length**, repeating to three
+decimal places across independent calls in different sessions:
+
+| TRN1d | peer's first Phase 4 study | `ph4Mean…UpdateRatio` | level factor | Ucodes | rate |
+|---|---|---|---|---|---|
+| 2496 (default) | **retrain** | **2.047** every time | **2.00** | 62 | 52000 |
+| 4008 | retrain | 2.492 every time | 0.96 | 16 | 38666 |
+| 8004 | retrain | 1.630 every time | 2.00 | 58 | 52000 |
+| 16008 | **done** | 1.374 every time | 0.96 | 19 | 40000 |
+
+Scored over **every** call in `artifacts/` that transmitted Phase 3 and has a
+peer log beside it — 234 calls — by the peer's own first study verdict rather
+than by the downstream consequence §36a counted:
+
+| TRN1d | first study retrains | |
+|---|---|---|
+| 2496 | **187 / 213** | 88% |
+| 4008 | 4 / 4 | |
+| 8004 | 5 / 5 | |
+| 16008 | 2 / 11 | 18% |
+
+**Read the peer's first study, not "did attempt 1 reach data mode".** It is the
+same fact ~15 s earlier, it is one line in its log, and it is not diluted by
+everything that happens afterwards. `tools/peer_phase4_report.py` prints it.
+
+### The level factor, and why it is checkable
+
+The peer prints the constellation it designed, including the linear value it
+**measured** for each of our Ucodes (`linearMapping of constel`). A Ucode's
+linear magnitude is fixed by G.711 —
+`mag(u) = (((2*(u&15) + 33) << (u>>4)) - 33) * 2` — so measured/true is a
+number with a right answer. Across the corpus it takes **exactly two values,
+1.00 and 2.00, and nothing in between**: 240 calls at 2.00 and 15 at 0.96.
+One whole G.711 chord. That is not a noisy measurement, it is a discrete
+decision of the peer's level estimator, and TRN1d length flips it.
+
+Our transmit side is identical in both cases and provably correct: the dominant
+magnitude in `live-tx.g711` is **1886 in every arm**, which is exactly
+`mag(78)` for the UINFO=78 the call negotiated. So the factor of two is the
+peer's, not ours.
+
+Our own §8.5.2 check follows the same flip. At 2496T the peer's CPt asks us to
+transmit at RMS 8364, **7.4 dB above the −13.0 dBm0 maximum we declared in
+INFO0d** — the warning §31 added. At 16008T that warning does not appear at
+all: the CPt is inside Table 15. So §36a's "16008T reliably costs a quarter of
+the downstream rate" is more precisely **16008T stops the peer over-designing
+by one chord**; whether 1.00 or 2.00 is the correct absolute calibration of
+this rig is *not* settled by this, and 52000 demonstrably carries data here, so
+on this (essentially noiseless) bearer the optimism is currently harmless.
+
+### The peer's conditioning window is fixed, so TRN1d displaces Jd
+
+The peer's Phase 3 takes the **same 8.68–8.82 s** in every arm, and its
+internal transitions are identical to the centisecond: `WaitForSd` →
+`waitForJd` at +3.599 s → `TRN2Designer` at +7.96 s → study at +8.7 s.
+Longer TRN1d does not lengthen the peer's Phase 3; it changes what fills a
+**fixed 3.6 s conditioning window**. At the default that window is 0.31 s of
+TRN1d and 3.29 s of Jd; at 16008T it is 2.00 s of TRN1d and 1.6 s of Jd.
+
+That is a mechanism rather than a coincidence. TRN1d is §8.4.5's scrambled
+ones — the peer can regenerate it and train **data-aided**; Jd is framed data
+at the same ±UINFO magnitude that it cannot predict. §9.3.2.5 only obliges the
+analogue modem to train on the *first 2040T*; this one plainly wants far more,
+and takes whatever we give it.
+
+### TRN2d is not the lever — measured, not argued
+
+The obvious alternative was TRN2d, because over 853 Phase 4 study windows in
+`artifacts/` the peer's study → `Null MP @ end of TRN2d` interval is **1.300 s
+in every single one** while `V90_TRN2D_DEFAULT_SYMBOLS` is 4000T = 500 ms — so
+the peer spends 62% of the window in which it grades our TRN2d looking at our
+MP instead. §9.4.1.2/§9.4.1.3 allow up to 2000 ms, and §9.4.2 puts no bound on
+the analogue side, so lengthening it is free of spec risk; and because TRN2d is
+transmitted *after* CPt has fixed the constellation, it cannot move the rate.
+
+`tools/soak/v90_trn2d_ab.sh`, `artifacts/trn2d-ab-212417Z`, one call per arm
+(the peer being deterministic):
+
+| TRN2d | first study | ratio | level | Ucodes |
+|---|---|---|---|---|
+| 3996 (default) | retrain | 2.047 | 1.998 | 62 |
+| 10398 (1300 ms) | retrain | **2.546** | 1.998 | 62 |
+| 12000 (1500 ms) | retrain | **2.399** | 1.998 | 62 |
+
+**Refuted, and slightly the wrong way.** The level factor and constellation
+size are untouched, exactly as predicted, which is the control that says the
+arms really did differ only in TRN2d. The harness and the negative are kept
+because "the peer studies MP for 62% of its TRN2d window" is a true and
+surprising fact about this peer that will otherwise be rediscovered.

@@ -42,7 +42,8 @@ def peer_studies(path):
 
 def score_call(d):
     log = os.path.join(d, "server.log")
-    trn, first_win, rate, retrains, fell_back = None, False, None, 0, False
+    trn, trn2, first_win, rate, retrains, fell_back = (
+        None, None, False, None, 0, False)
     seen_restart = False
     if os.path.exists(log):
         with open(log, errors="replace") as fh:
@@ -50,6 +51,9 @@ def score_call(d):
                 m = re.search(r"TRN1d complete \((\d+) symbols\)", line)
                 if m and trn is None:
                     trn = int(m.group(1))
+                m = re.search(r"TRN2d \((\d+) mapped symbols", line)
+                if m and trn2 is None:
+                    trn2 = int(m.group(1))
                 if "restarting Phase 2" in line:
                     retrains += 1
                     seen_restart = True
@@ -69,7 +73,7 @@ def score_call(d):
                 ulines += len(re.findall(rb"(?m)^U\d{7}$", fh.read()))
         if "slm.log" in files:
             studies += peer_studies(os.path.join(root, "slm.log"))
-    return dict(trn=trn, first_win=first_win, rate=rate, retrains=retrains,
+    return dict(trn=trn, trn2=trn2, first_win=first_win, rate=rate, retrains=retrains,
                 fell_back=fell_back, ulines=ulines, studies=studies)
 
 
@@ -84,12 +88,12 @@ def main(outdir):
 
     for arm in sorted(arms):
         print(f"\n=== {arm}")
-        print(f"{'call':16} {'TRN1d':>6} {'1st?':>5} {'rate':>6} "
+        print(f"{'call':16} {'TRN1d':>6} {'TRN2d':>6} {'1st?':>5} {'rate':>6} "
               f"{'retr':>4} {'U-lines':>8}  peer studies")
         wins = rates = n = 0
         for name, s in arms[arm]:
             st = " ".join(f"{d:.2f}/{o}" for d, o in s["studies"][:4])
-            print(f"{name:16} {str(s['trn']):>6} "
+            print(f"{name:16} {str(s['trn']):>6} {str(s['trn2']):>6} "
                   f"{'YES' if s['first_win'] else 'no':>5} "
                   f"{str(s['rate'] or '-'):>6} {s['retrains']:>4} "
                   f"{s['ulines']:>8}  {st}"
