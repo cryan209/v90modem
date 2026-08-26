@@ -2049,3 +2049,57 @@ rather than at the instant the peer began it (tens of ms), and the dumped
 attempt is one of the three cycles above rather than a fourth — the spread
 across all three is shown rather than a single figure precisely because that
 choice does not change the conclusion.
+
+### 35h. A single frame cannot be parsed on this capture, and here is the proof (2026-08-26)
+
+§35g concluded that the peer offers about three descriptor repeats and that the
+decode therefore has to succeed on one or two. **Attempting that establishes
+something stronger and less welcome: on this capture no frame is ever received
+completely, so no parser can succeed, however tolerant.** The lever is not the
+parse.
+
+The tool that makes this checkable is already in the tree: this peer's exact
+descriptor is a fixture (`v90_dil_load_smartlink_adi_qc()`, 1704 bits), so a
+capture can be compared against ground truth instead of against itself.
+
+**The descriptor is genuinely being received, and bit-exactly:**
+
+- The frame at bit 15668 matches the fixture **bit for bit for its first 1519 of
+  1701 bits**, and its header decodes perfectly — `N=144 LSP=120 LTP=120`, the
+  same values the successful call recovers.
+- The frame at 17242 matches for its first 1096 bits, header equally perfect.
+- The two on-wire frames agree with **each other** for their first 1096 bits and
+  then disagree in 194 places, all between 1096 and 1541.
+
+**And it is never complete:**
+
+- `descriptor_bits` is 1701 with the CRC at **bit 1683** — inside the damaged
+  tail of every copy.
+- Brute-forcing the CRC over **every** `crc_start` from 200 to 1900 on all three
+  frames finds **no valid position at all** (the same search on the fixture
+  finds exactly one, 1683, which validates the CRC model).
+- The tail is not a bit slip: realigning it by -6..+6 bits leaves 44-56%
+  disagreement at every shift, i.e. random at all of them.
+
+**Why the existing voting cannot rescue it, precisely:** the third frame is
+truncated to 280 bits by the peer's retrain, so beyond that offset there are
+exactly **two** repeats — and with two repeats every disagreement is a tie
+(`ones*2 == available`). The code records ties for brute force and bails at
+`V90_JA_VOTE_MAX_DIFFS` (12). There are **194**. Raising the cap is not the
+answer: 2^194 is not a search, and a tie carries no information about which of
+the two bits is right.
+
+**So the requested change was not made, because it cannot work here.** What
+would make a single frame parseable is a per-bit reliability — the distance of
+each symbol from its decision — carried alongside the captured bits, so that
+ties are broken by confidence instead of brute force, and so that a
+soft-decision parse can use the 89%-clean frame it already has. That is real
+work and it is the right next step; it is not a tolerance knob.
+
+**The finding underneath it is the more interesting one, and it is new**: this
+receiver produces **bit-exact output for 1096-1519 bits and then breaks**, twice,
+in the middle of frames it was decoding perfectly. That is ~0.17-0.24 s at
+6400 bit/s. Something disturbs the receiver on roughly that period, and since
+the descriptor needs 1701 consecutive good bits (0.27 s), that disturbance —
+not the parser, not convergence, not the hypothesis — is what stands between
+this call and a decode.
