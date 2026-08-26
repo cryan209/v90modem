@@ -7448,6 +7448,32 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
     }
     /*endif*/
 
+    /* Experiment (docs 35e): arm Phase 3 tracking without waiting for a TRN
+       lock.  The adaptation that converges this stage's constellation is
+       gated on phase3_tracking_armed, which is set only once the TRN
+       hypothesis locks at >=70%.  In the V.90 digital role the peer enters
+       JaTXMIT at the same instant it enters Phase 3 (measured: 772.931916 vs
+       772.931933), so there is no TRN in this window at all and the lock has
+       to be found on Ja itself -- which costs ~0.75 s of a peer budget of
+       1.88 s before the equalizer starts converging.
+       ME_V90_JA_EARLY_TRACK=1 arms it on stage entry instead. */
+    if (s->stage == V34_RX_STAGE_PHASE3_WAIT_S  &&  !s->phase3_tracking_armed)
+    {
+        static int early_track = -1;
+
+        if (early_track < 0)
+        {
+            const char *v = getenv("ME_V90_JA_EARLY_TRACK");
+
+            early_track = (v  &&  atoi(v) != 0);
+        }
+        /*endif*/
+        if (early_track)
+            s->phase3_tracking_armed = true;
+        /*endif*/
+    }
+    /*endif*/
+
     /* Phase 3 S signal detection state machine */
     switch (s->stage)
     {

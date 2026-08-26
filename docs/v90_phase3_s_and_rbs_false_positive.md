@@ -1888,3 +1888,61 @@ preambles), preamble brittleness (tolerating 3 errors in the 17 ones finds no
 further frames), the retry throttle (pinning the hypothesis moves the parse
 point not at all), the descrambler (self-synchronising by inspection), the
 capture start (§35c: a pure shift, 1.0000 agreement), and the wire.
+
+### 35e. Converging faster: 1.19 s -> 0.38 s, and it does not (yet) buy a frame (2026-08-26)
+
+§35d put the Ja decode's whole problem in one number: the receiver's
+constellation converges 1.19 s into a peer budget of 1.88 s, leaving under three
+descriptor repeats. **The 1.19 s is now 0.38 s. What that does not do — on the
+recordings available — is produce more usable Ja frames, and the reason is worth
+recording before anyone repeats the experiment.**
+
+**What converges it is CMA, and it is load-bearing.** With
+`ME_V34_PHASE3_CMA=off` the tightness never leaves 0.39-0.46 and the good
+recording's 6 recoveries become 0. It is not, as the note beside it suggests
+elsewhere, only walking good taps astray in this stage — here it is the only
+thing closing the constellation.
+
+**What delays it is the arming gate.** The adaptation is gated on
+`phase3_tracking_armed`, set only when the TRN hypothesis locks at >= 70%.
+`V34_RX_STAGE_PHASE3_WAIT_S` is entered expecting the peer's TRN — but in the
+V.90 digital role **this peer enters `JaTXMIT` at the same instant it enters
+Phase 3** (772.931916 against 772.931933 in its own log), so there is no TRN in
+the window at all and the lock has to be found on Ja itself. That is the flat
+~0.75 s at 0.41-0.46 before the tightness curve even begins to fall.
+
+`ME_V90_JA_EARLY_TRACK=1` arms tracking on stage entry instead. Measured on both
+recordings, first 200-symbol window under 0.20:
+
+| | default | early-track |
+|---|---|---|
+| good recording | 3800 sym = **1.19 s** | 1200 sym = **0.38 s** |
+| failing recording | 3800 sym = **1.19 s** | 1200 sym = **0.38 s** |
+
+with the good recording still recovering the descriptor 6 times, i.e. no
+regression, and `make test` unaffected. On the peer's 1.88 s budget that turns
+0.69 s of converged time into 1.50 s — **2.8 Ja frames into 6.1**.
+
+**And it buys nothing measurable here.** The failing recording's capture holds
+exactly **3 preambles at 15668, 17242, 18816 with the fix and without it —
+identical count, identical positions.** So the frames absent from the first
+15000 bits are not absent because we demodulated them badly before converging;
+they are not there. **§35d's inference that "the early frames are missing
+because they were demodulated before the receiver converged" is therefore
+withdrawn** — the timing coincidence was real, the causation was not tested, and
+when tested it fails.
+
+A replay cannot show more than this: the recording's peer gave up at 1.88 s, so
+no amount of converging sooner can conjure Ja that was never transmitted. The
+claim this change can support is exactly the measured one — **the receiver is
+usable 0.81 s earlier in a window where 1.88 s is all there is** — and whether
+that converts a live call is a live question.
+
+**Default off** (`ME_V90_JA_EARLY_TRACK=1` enables). Arming early deliberately
+bypasses a gate whose comment warns that S is carried as phase reversals and
+must not be tracked out; with no live evidence of benefit, that trade is not one
+to take by default.
+
+**Open**: why the failing call's descriptor frames start only at bit 15668 when
+the peer says it was transmitting Ja from the first instant of Phase 3. That,
+not convergence, is now the thing to explain.
