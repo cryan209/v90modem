@@ -2363,3 +2363,45 @@ Verified on the two recordings, deadline alone: the failing one concedes once
 and loses no V.90 data mode (it reached none), the successful one concedes
 **never** and keeps both its data-mode entries and all 6 Ja recoveries.
 `make test` unaffected.
+
+### 35n. The deadline live: safe, and inert against this peer (2026-08-27)
+
+`artifacts/deadline-ab-115632Z`, 9 calls, arms alternated, the attempt count
+disabled in both so the deadline is the only variable
+(`ME_V90_JA_DEADLINE_SEC=20` against `0`, confirmed in each run's log).
+
+| arm | V.90 data mode | gave up on V.90 | by whom |
+|---|---|---|---|
+| deadline (20 s) | **4/4 calls** | 1/4, at 104.9 s | `peer` |
+| persist | 4/5 calls | 1/5, at 33.6 s | `peer` |
+
+**Cost: none.** Every call in the deadline arm reached V.90 data mode, which is
+what the corpus predicted (0 of 1286 lost at 20 s) and what mattered most.
+
+**Buy: none observed. The deadline did not fire once.** The rig was in a good
+spell — 8 of 9 calls reached data mode — so it had almost nothing to fire on,
+and the one call that never got a descriptor fell in the *persist* arm. That
+call is still the useful measurement, as a counterfactual: Phase 3 entry at
+13.1 s, peer gave up at 33.6 s, so a 20 s deadline would have fired at 33.1 s —
+**0.5 s earlier.**
+
+**So at 20 s the deadline is nearly as inert against this peer as the attempt
+count was, and for a related reason**: this peer abandons V.90 about 20 s after
+Phase 3 entry, so a 20 s deadline is in a photo finish with it. The corpus
+median saving of 10.4 s (§35m) comes from calls where the peer dragged on far
+longer than it does in this session — the metric is real but its population is
+not this afternoon's.
+
+**What that leaves.** The deadline is worth keeping: it is measured, costs
+nothing live or on the corpus, and bounds the long tail the corpus contains
+(167 calls that never got a descriptor, some running well past a minute). It is
+**not** a fix for the common case on this rig. Buying more would mean a shorter
+deadline, and the corpus prices that honestly — 15 s fires on 172 calls but
+loses one that reached V.90 data mode, so it is not free, and on this evidence
+0.5 s of median saving does not buy a lost call.
+
+**A gap this run exposed and closed**: nothing in the server log stated the
+trigger configuration, so "did the knob take effect" was unanswerable from the
+artifact alone — exactly the hole that let the §35k counter reset go unnoticed.
+The harness's `env:` line covers it for these runs, and it is what makes the
+table above checkable rather than asserted.
