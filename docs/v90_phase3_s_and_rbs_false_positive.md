@@ -1620,3 +1620,56 @@ determinant is whether the peer is transmitting when data mode begins
 (`docs/v90_upstream_data_path.md`: idle-start 18/19 calls deliver, busy-start
 0/2), and nothing here controls for it. Eight calls cannot separate that from an
 effect of TRN1d length, and it should not be read as one.
+
+## 34. "V.90 declined by peer INFO1a" is a symptom three retrains downstream (2026-08-26)
+
+A batch of calls that would not reach data mode logged
+`V.90 declined by peer INFO1a; continuing as plain V.34` four times, which reads
+like a negotiation failure. **It is not one. The peer does not decline V.90; it
+gives up on it, and our log reports the giving-up rather than the cause.**
+
+The chain, read off the peer's log and ours on the same call
+(`artifacts/trn1d-knee-075140Z/control-r1`):
+
+1. The peer enters Phase 3 and sets `V90Phase3Demodulator: initial state set to
+   WaitForSd` — it is waiting for **our** Sd.
+2. We receive its Ja and **suppress** the start of Sd: §9.3.1.3 starts Sd only on
+   a CRC-valid DIL descriptor, and on this attempt the descriptor never parsed.
+   `tx_phase=1` is `V90_TX_WAIT_JA` — we sat silent for the whole attempt.
+3. The peer times out in `WaitForSd` after **1.88 s, 2.24 s, 1.88 s** on the three
+   attempts and retrains each time (`retrain requested !!` out of `JaTXMIT`).
+4. On the third it escalates: `VPcmFloModem (V90): drop to V34 requested !!`,
+   `Initiating retrain, requested DP is 34`.
+5. Its next INFO1a is therefore a plain V.34 offer — `U_INFO=9`,
+   `downstream_code=4`, where V.90 needs 6 — which our strict validator correctly
+   rejects, and *that* is the line we log.
+
+So the log line is accurate and its timing is misleading: by the time it appears,
+the call was lost three retrains earlier. **The cause is the Ja DIL descriptor
+parse.**
+
+That the parse is the discriminator is measurable over the whole corpus. Scoring
+every capture in `artifacts/` that got as far as transmitting Phase 3:
+
+| | captures | parsed a Ja DIL descriptor |
+|---|---|---|
+| reached data mode | 108 | **108/108** |
+| never reached data mode | 35 | 28/35 |
+
+Parsing Ja is **necessary and not sufficient** — no call has ever reached data
+mode without it. In the calls that work, the descriptor comes back as
+`parsed Ja DIL descriptor: N=144 LSP=120 LTP=120`, recovered with
+`V.34 hypothesis 8`; in the failing attempts nothing validates and the
+`Ja heuristic suppressed (v34rx), awaiting descriptor` line is the last thing
+before the peer's retrain.
+
+**Do not diagnose this from the two modems' clocks.** They differ by a per-call
+offset (`docs/v34_plain_phase2_call_role.md` records a round lost to exactly
+that); what is safe is the peer's own `enterPhase3` → `retrain requested`
+interval, which is internal to its log, and the *presence or absence* of the
+descriptor line in ours.
+
+**Untested lead**: `ME_V90_DIL_PROFILE=smartlink-adi-qc` pre-loads this peer's
+descriptor, so Sd can start without waiting on the parse. It is a bypass of the
+Ja-parse lottery rather than a fix for it, and whether it converts these calls
+has not been measured.
