@@ -6696,14 +6696,24 @@ void me_rx_audio(const int16_t *amp, int len)
                                         g_v90_phase3_s_events, echo);
                             continue;
                         }
-                        /* Structural confirmation: run p3_demod on the
-                           recent RX window and require it to classify the
-                           region as a genuine S/S-bar pattern (6-symbol
-                           repeating, 3+ unique dibits).  This is the gate
-                           that stops a faulty S from cutting DIL short —
-                           the Courier case where a false S fired at
-                           0.25-0.5 of a DIL cycle. */
-                        if (!v90_p3_confirm_signal_locked(P3_SIGNAL_S)) {
+                        /* Structural confirmation protects DIL's early-exit
+                           seam, where one false event can discard the rest of
+                           a long impairment study.  Do NOT make it a second
+                           veto during Jd.  v34rx has already required at least
+                           64 equalized symbols of §10.1.3.7's alternating or
+                           dominant-rotation structure before publishing this
+                           event; §9.3.2.7's S itself is only 128T.  Re-running
+                           p3_demod over a 200 ms window (mostly the preceding
+                           silence/Jd interval) rejected SmartLink's real,
+                           weaker S at RMS 652 while accepting the same signal
+                           at RMS 845.  The peer had reached waitForJd and then
+                           waited for our J'd until we timed out, making the
+                           supposed confidence gate the intermittent failure.
+                           Echo, silence, RX/TX ratio and Tone-A gates still
+                           apply in Jd; retain this extra classifier only for
+                           the DIL termination it was introduced to protect. */
+                        if ((int)v90_get_tx_phase(g_v90) == V90_TX_DIL
+                            && !v90_p3_confirm_signal_locked(P3_SIGNAL_S)) {
                             fprintf(stderr,
                                     "[ME] V.90 strict RX event: index=%d event=S tx_phase=%d "
                                     "REJECTED by p3_demod structural check (no 6-symbol S pattern) "
@@ -7569,8 +7579,8 @@ static void prepare_v90_phase3_locked(void)
                     retrain_delay = parse_env_int("ME_V90_SD_DELAY_RETRAIN_MS", 0);
                     if (retrain_delay < 0)
                         retrain_delay = 0;
-                    if (retrain_delay > 5000)
-                        retrain_delay = 5000;
+                    if (retrain_delay > 500)
+                        retrain_delay = 500;
                     ME_LOG("[ME] V.90: retrained attempt %u; fixed Sd delay %d ms "
                            "(ME_V90_SD_DELAY_RETRAIN_MS)\n",
                            g_v90_phase2_restarts, retrain_delay);

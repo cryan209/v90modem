@@ -691,7 +691,7 @@ static int v90_sd_delay_samples(const v90_state_t *s)
     value = getenv("ME_V90_SD_DELAY_MS");
     if (value && *value) {
         parsed = strtol(value, &end, 10);
-        if (end != value && *end == '\0' && parsed >= 0 && parsed <= 5000)
+        if (end != value && *end == '\0' && parsed >= 0 && parsed <= 500)
             return (int) (parsed * 8);   /* ms -> samples at 8000 Hz */
     }
     return 0;
@@ -712,8 +712,9 @@ void v90_set_sd_delay_ms(v90_state_t *s, int ms)
         s->sd_delay_override_samples = -1;
         return;
     }
-    if (ms > 5000)
-        ms = 5000;
+    /* V.90 §9.3.1.3 permits no more than 500 ms. */
+    if (ms > 500)
+        ms = 500;
     s->sd_delay_override_samples = ms * 8;
 }
 
@@ -3360,7 +3361,6 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                 s->jd_terminate_requested = false;
                 s->jd_terminated_by_s = false;
                 s->jd_terminated_by_su = false;
-    s->jd_resync_wait = false;
                 return v90_pcm_idle(s->law);
             }
             if (s->jd_terminate_requested && s->jd_bit_pos == 0) {
