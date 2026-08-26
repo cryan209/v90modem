@@ -12,6 +12,7 @@
 #include "v90.h"
 #include "vpcm_cp.h"
 #include "v92_phase4_decode.h"
+#include "v90_dil_measure.h"
 
 #include <spandsp.h>
 
@@ -608,6 +609,10 @@ struct v90_state_s {
     int64_t          reneg_symbol_clock;        /* symbols emitted since renegotiation began */
     int              reneg_count;
     vpcm_cp_frame_t  cp_frame;                  /* CP frame to transmit */
+    /* The CPt/CP exactly as the peer sent it.  cp_frame/data_cp_frame may
+     * carry the 8.5.2 pad repair below, and a repeated frame has to be
+     * compared against what arrived, not against what we chose to send. */
+    vpcm_cp_frame_t  cp_frame_rx;
     uint8_t          cp_bits[VPCM_CP_MAX_BITS]; /* Encoded CP bits (one per byte) */
     int              cp_nbits;                  /* Total encoded CP bits */
     int              cp_bit_pos;                /* Current bit index in cp_bits */
@@ -634,6 +639,7 @@ struct v90_state_s {
 
     /* V.90 data-mode CP and negotiated modulus/shaping mapper. */
     vpcm_cp_frame_t  data_cp_frame;
+    vpcm_cp_frame_t  data_cp_frame_rx;
     bool             data_cp_received;
     bool             data_mapper_ready;
     int              data_mapper_k;
@@ -1240,6 +1246,197 @@ bool v90_repair_smartlink_dummy_cpt(vpcm_cp_frame_t *cp)
     return vpcm_cp_validate(cp, NULL, 0);
 }
 
+/*
+ * V.90 8.5.2: the analogue modem "shall design constellations such that their
+ * average power ... does not exceed the limit given in Table 15 corresponding
+ * to the maximum digital modem transmit power specified in INFO0d".  The
+ * digital modem is the one that then has to TRANSMIT that constellation, and
+ * the Table 15 NOTE makes the check ours: "the digital modem should ensure
+ * that its calculations give results greater than or equal to the results
+ * that would be calculated using infinite precision arithmetic", and "the
+ * actions that a digital modem takes when a constellation set is found to
+ * have an average power above the appropriate limit are a national matter".
+ * Nothing here checked, so whatever CPt asked for is what went on the DS0.
+ *
+ * Measured on artifacts/sd-jd-gate-fix-r2-013643Z: the peer's FIRST CPt
+ * selected Ucodes 46 68 81 88 95 99 103 107 and the second, after the
+ * retrain, 33 53 65 72 79 83 87 91 -- the same ladder shape one G.711 chord
+ * higher, which is exactly the self-similarity trap DIL alignment falls into
+ * (u and u+16 differ by exactly 2x).  Honouring the first put our TRN2d out
+ * at RMS 8364, -5.6 dBm0, against the -13 dBm0 maximum our own INFO0d
+ * announced; the peer never sent CP and retrained 2.4 s later.  The second is
+ * RMS 4129 and reaches data mode.
+ *
+ * Both frames are LEGAL where 8.5.2 measures: their codec-output sets are the
+ * same 4128, because attempt 1's CPt sets codec_constellations_differ and
+ * claims a 6 dB digital pad between our output and the codec.  On this bearer
+ * there is no such pad -- the RTP payload IS the DS0 the far-end D/A sees --
+ * so the pad is the peer's DIL alignment error, and the constellation to put
+ * on the wire is the codec-output one it named.  That is the repair: it is a
+ * no-op whenever the two sets agree (attempt 2, and the data-mode CP), and
+ * only bites when a peer asserts a pad this bearer cannot have.
+ *
+ * The margin is deliberately loose.  A conformant peer's own finite-precision
+ * design can land slightly over (this one's working constellation is 1.2 dB
+ * over), and the two cases here are a whole chord -- 6 dB -- apart, so the
+ * threshold sits in the middle of that gap rather than fitted to either edge.
+ */
+static double v90_declared_max_tx_dbm0(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *value = getenv("ME_V90_MAX_TX_DBM0_CODE");
+        long parsed;
+        char *end;
+
+        cached = V90_INFO0D_MAX_POWER_CODE;
+        if (value && *value) {
+            parsed = strtol(value, &end, 10);
+            if (end != value && *end == '\0' && parsed >= 0 && parsed <= 31)
+                cached = (int) parsed;
+        }
+    }
+    return -0.5 * (double) (cached + 1);
+}
+
+/* Opt-in: refuse a frame that is over Table 15 and cannot be repaired.
+ * Default off -- see v90_cp_power_within_limit()'s header. */
+static bool v90_cp_power_enforced(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *env = getenv("ME_V90_CP_POWER_ENFORCE");
+
+        cached = (env && *env) ? (atoi(env) != 0) : 0;
+    }
+    return cached != 0;
+}
+
+static bool v90_cp_pad_repair_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *env = getenv("ME_V90_CP_PAD_REPAIR");
+
+        cached = (env && *env) ? (atoi(env) != 0) : 1;
+    }
+    return cached != 0;
+}
+
+static double v90_cp_power_margin_db(void)
+{
+    static int cached = 0;
+    static double value = 3.0;
+
+    if (!cached) {
+        const char *env = getenv("ME_V90_CP_POWER_MARGIN_DB");
+        char *end;
+
+        cached = 1;
+        if (env && *env) {
+            double parsed = strtod(env, &end);
+
+            if (end != env && *end == '\0' && parsed >= 0.0 && parsed <= 24.0)
+                value = parsed;
+        }
+    }
+    return value;
+}
+
+static double v90_cp_set_power(const vpcm_cp_frame_t *cp,
+                               bool codec_side,
+                               int k,
+                               v90_law_t law)
+{
+    uint8_t masks[6][VPCM_CP_MASK_BYTES];
+    int mi[6];
+
+    for (int i = 0; i < V90_FRAME_LEN; i++) {
+        int constellation = cp->dfi[i];
+        const uint8_t *src = (codec_side && cp->codec_constellations_differ)
+                           ? cp->codec_masks[constellation]
+                           : cp->masks[constellation];
+
+        memcpy(masks[i], src, VPCM_CP_MASK_BYTES);
+        mi[i] = vpcm_cp_mask_population(src);
+    }
+    return v90_dil_constellation_power(masks, mi, k, law);
+}
+
+/*
+ * Returns false only when rejection has been asked for explicitly.  The
+ * default is to repair what can be repaired and to report the rest: our own
+ * analogue role knowingly puts CPt above Table 15 (v90_analogue_phase4.c
+ * builds it from the UNCAPPED plan, because power-thinning it fell the Eicon
+ * card back to Phase 3 in run 86), so a blanket refusal would reject frames
+ * this project itself emits, on no evidence that refusing helps.  What IS
+ * measured is the transmit level -- see below.
+ */
+static bool v90_cp_power_within_limit(const v90_state_t *s,
+                                      const vpcm_cp_frame_t *cp,
+                                      int k,
+                                      const char *what,
+                                      vpcm_cp_frame_t *repaired)
+{
+    double wire;
+    double codec;
+    double limit;
+    double margin;
+    double allowed;
+
+    if (!s || !cp || !repaired || k <= 0)
+        return true;
+    /* Bit 38 of INFO0d says where the power is measured, and this modem
+     * announces the codec output, so 8.5.2's own check is the codec-side
+     * one.  The wire-side figure is what WE actually put on the DS0. */
+    codec = v90_cp_set_power(cp, true, k, s->law);
+    wire = v90_cp_set_power(cp, false, k, s->law);
+    limit = v90_dil_power_limit(v90_declared_max_tx_dbm0());
+    if (codec <= 0.0 || wire <= 0.0 || limit <= 0.0)
+        return true;                    /* nothing to compare against */
+    margin = v90_cp_power_margin_db();
+    allowed = limit * pow(10.0, margin / 10.0);
+    if (getenv("V90_CP_POWER_DEBUG"))
+        fprintf(stderr,
+                "[V90] 8.5.2 %s power: k=%d wire_rms=%.0f codec_rms=%.0f "
+                "limit_rms=%.0f margin=%.1f dB codec_differ=%d\n",
+                what, k, sqrt(wire), sqrt(codec), sqrt(limit), margin,
+                cp->codec_constellations_differ ? 1 : 0);
+    if (wire <= allowed)
+        return true;
+    if (codec <= allowed && cp->codec_constellations_differ
+        && v90_cp_pad_repair_enabled()) {
+        fprintf(stderr,
+                "[V90] Phase 4: %s asks us to transmit %.1f dB above the "
+                "%.1f dBm0 maximum our INFO0d announced, while its "
+                "codec-output constellation is within Table 15 -- the peer "
+                "has assumed a digital pad between us that this bearer does "
+                "not have.  Transmitting the codec-output constellation "
+                "instead (ME_V90_CP_PAD_REPAIR=0 leaves it alone; "
+                "ME_V90_CP_POWER_MARGIN_DB=24 disables the check "
+                "altogether and restores the pre-2026-08-26 behaviour).\n",
+                what, 10.0*log10(wire/limit), v90_declared_max_tx_dbm0());
+        for (int i = 0; i < VPCM_CP_MAX_CONSTELLATIONS; i++)
+            memcpy(repaired->masks[i], cp->codec_masks[i],
+                   VPCM_CP_MASK_BYTES);
+        return true;
+    }
+    fprintf(stderr,
+            "[V90] Phase 4: %s -- 8.5.2 average power %.0f (%.1f dBm0) "
+            "exceeds Table 15's %.0f (%.1f dBm0 declared in INFO0d) by "
+            "%.1f dB, over the %.1f dB margin, and its codec-output set is "
+            "over too, so there is nothing to substitute%s\n",
+            what, sqrt(wire), 20.0 * log10(sqrt(wire) / 16017.0),
+            sqrt(limit), v90_declared_max_tx_dbm0(),
+            10.0 * log10(wire / limit), margin,
+            v90_cp_power_enforced() ? "; refusing the frame"
+                                    : "; transmitting it anyway");
+    return !v90_cp_power_enforced();
+}
+
 static bool v90_build_mp_type0(v90_state_t *s, bool acknowledge)
 {
     uint16_t crc;
@@ -1333,7 +1530,10 @@ static bool v90_configure_phase4_mapper(v90_state_t *s,
     if (product < (1ULL << s->phase4_k))
         return false;
 
+    s->cp_frame_rx = *cp;
     s->cp_frame = *cp;
+    if (!v90_cp_power_within_limit(s, cp, s->phase4_k, "CPt", &s->cp_frame))
+        return false;
     v90_scrambler_init(&s->phase4_scrambler);
     s->phase4_prev_sign = 0;
     memset(&s->phase4_shaper, 0, sizeof(s->phase4_shaper));
@@ -1395,8 +1595,12 @@ static bool v90_configure_data_mapper(v90_state_t *s,
     }
     if (product < (1ULL << s->data_mapper_k))
         return false;
-
+    s->data_cp_frame_rx = *cp;
     s->data_cp_frame = *cp;
+    if (!v90_cp_power_within_limit(s, cp, s->data_mapper_k, "CP",
+                                   &s->data_cp_frame))
+        return false;
+
     s->data_cp_received = true;
     s->data_mapper_ready = true;
     v90_reset_negotiated_data_mapper(s);
@@ -4306,7 +4510,7 @@ bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp)
         if (!s->phase4_mapper_ready)
             return v90_configure_phase4_mapper(s, cp);
 
-        expected = s->cp_frame;
+        expected = s->cp_frame_rx;
         received = *cp;
         expected.acknowledge = false;
         received.acknowledge = false;
@@ -4340,7 +4544,7 @@ bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp)
     }
 
     /* Repeated data-mode CP/CP' frames may change only acknowledge. */
-    expected = s->data_cp_frame;
+    expected = s->data_cp_frame_rx;
     received = *cp;
     expected.acknowledge = false;
     received.acknowledge = false;
@@ -5032,8 +5236,10 @@ bool v90_set_v92_cpu(v90_state_t *s, const vpcm_cp_frame_t *cpu)
         return true;
     }
 
-    /* Repeated CPu/CPu' frames may change only the acknowledge bit. */
-    expected = s->data_cp_frame;
+    /* Repeated CPu/CPu' frames may change only the acknowledge bit.  Compare
+     * against what arrived, not against data_cp_frame, which may carry the
+     * 8.5.2 pad repair. */
+    expected = s->data_cp_frame_rx;
     received = *cpu;
     expected.acknowledge = false;
     received.acknowledge = false;

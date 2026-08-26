@@ -820,7 +820,13 @@ static int info0_sequence_tx(v34_tx_state_t *s)
         bitstream_put(&bs, &t, 7, 4);
         /* 33:37    Maximum digital modem transmit power.
                     Represented in -0.5 dBm0 steps: 0 = -0.5 dBm0, 31 = -16 dBm0.
-                    -13 dBm0 -> code = (13 - 0.5) / 0.5 = 25. */
+                    -13 dBm0 -> code = (13 - 0.5) / 0.5 = 25.
+                    KEEP IN SYNC with V90_INFO0D_MAX_POWER_CODE in v90.h:
+                    8.5.2/Table 15 makes this the ceiling the analogue modem
+                    designs its constellation against, and v90.c rejects a
+                    CPt/CP whose average power exceeds it.  This file is not
+                    on that header's include path, so the two literals are
+                    checked by eye. */
         bitstream_put(&bs, &t, 25, 5);
         /* 38       Power measurement at codec output (1) or modem terminals (0).
                     SIP/RTP = codec output */

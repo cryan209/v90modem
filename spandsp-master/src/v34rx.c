@@ -14444,6 +14444,26 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
                 else
                     s->phase34_tone_a_blocks = 0;
                 /*endif*/
+                {
+                    static int tdebug = -1;
+
+                    if (tdebug < 0)
+                        tdebug = (getenv("V34_RETRAIN_TONE_DEBUG") != NULL);
+                    /*endif*/
+                    if (tdebug)
+                    {
+                        span_log(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - retrain tone watch: stage=%s dur=%d "
+                                 "meansq=%.0f ratio=%.3f tonal=%d run=%d\n",
+                                 v34_rx_stage_to_str(s->stage),
+                                 s->duration,
+                                 (double) (s->phase34_tone_a_energy/(float) tone_a_block),
+                                 (denom > 0.0f) ? (double) (tone_power/denom) : -1.0,
+                                 tonal ? 1 : 0,
+                                 s->phase34_tone_a_blocks);
+                    }
+                    /*endif*/
+                }
                 s->phase34_tone_a_g1 = 0.0f;
                 s->phase34_tone_a_g2 = 0.0f;
                 s->phase34_tone_a_energy = 0.0f;

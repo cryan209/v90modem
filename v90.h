@@ -22,6 +22,19 @@
 /* V.90 downstream encoder state */
 typedef struct v90_state_s v90_state_t;
 
+/*
+ * INFO0d bits 33:37, the maximum digital modem transmit power, in -0.5 dBm0
+ * steps (code 0 = -0.5 dBm0, code 31 = -16 dBm0).  8.5.2/Table 15 makes this
+ * the ceiling the analogue modem must design its constellations against, so
+ * the number the transmitter announces and the number the Phase 4 mapper
+ * enforces have to be the same one.
+ *
+ * KEEP IN SYNC with the literal in prepare_info0d()'s "33:37" bitstream_put
+ * in spandsp-master/src/v34tx.c -- that file is not on this header's include
+ * path, so the compiler cannot check it for you.
+ */
+#define V90_INFO0D_MAX_POWER_CODE 25    /* -13 dBm0 */
+
 #define V90_DIL_MAX_PAT_BITS 128
 #define V90_DIL_MAX_SEGMENTS 255
 
