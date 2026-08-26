@@ -7437,12 +7437,16 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
         /*endif*/
         if (ja_sym_fp)
         {
-            float pair[2];
+            float rec[3];
 
-            pair[0] = sym->re;
-            pair[1] = sym->im;
-            fwrite(pair, sizeof(float), 2, ja_sym_fp);
-            fflush(ja_sym_fp);
+            rec[0] = sym->re;
+            rec[1] = sym->im;
+            /* Sample clock at this symbol, so a gap in the SYMBOL stream can
+               be told apart from a gap in the captured BITS: a hole in the
+               bits with a continuous sample time means the capture dropped
+               them, a jump here means the sample feed did. */
+            rec[2] = (float) s->qam_sample_time;
+            fwrite(rec, sizeof(float), 3, ja_sym_fp);
         }
         /*endif*/
     }
@@ -7598,6 +7602,36 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         cap_valid[h] = 1;
                         if (s->phase3_ja_capture_hyp_len[h] + 2 <= (int) sizeof(s->phase3_ja_capture_hyp[h]))
                         {
+                            /* One sample-clock stamp per APPENDED bit pair, for
+                               hypothesis 8 only.  The symbol dump above is taken
+                               before the switch and so records every symbol; if
+                               this stream has a gap the symbol stream does not,
+                               the bits were lost between demodulation and the
+                               capture rather than on the wire. */
+                            if (h == 8)
+                            {
+                                static FILE *bt_fp = NULL;
+                                static int bt_tried = 0;
+
+                                if (!bt_tried)
+                                {
+                                    const char *p = getenv("ME_V90_JA_BITTIME_DUMP");
+
+                                    bt_tried = 1;
+                                    if (p  &&  p[0] != '\0')
+                                        bt_fp = fopen(p, "wb");
+                                    /*endif*/
+                                }
+                                /*endif*/
+                                if (bt_fp)
+                                {
+                                    float v = (float) s->qam_sample_time;
+
+                                    fwrite(&v, sizeof(float), 1, bt_fp);
+                                }
+                                /*endif*/
+                            }
+                            /*endif*/
                             s->phase3_ja_capture_hyp[h][s->phase3_ja_capture_hyp_len[h]++] = (uint8_t) (dbit[0] & 1);
                             s->phase3_ja_capture_hyp[h][s->phase3_ja_capture_hyp_len[h]++] = (uint8_t) (dbit[1] & 1);
                             /* Trajectory of the parser's actual input.  The ME

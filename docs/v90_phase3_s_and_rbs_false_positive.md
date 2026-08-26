@@ -2103,3 +2103,55 @@ in the middle of frames it was decoding perfectly. That is ~0.17-0.24 s at
 the descriptor needs 1701 consecutive good bits (0.27 s), that disturbance —
 not the parser, not convergence, not the hypothesis — is what stands between
 this call and a decode.
+
+### 35i. Nothing is disturbing the receiver — §35h's premise is refuted (2026-08-26)
+
+§35h inferred that "something disturbs the receiver on roughly a 0.2 s period,"
+from the fact that captured frames match ground truth for 1096-1519 bits and
+then stop matching. **Three continuity measurements say there is no such
+disturbance, and the inference was wrong.**
+
+1. **The wire is continuous.** At the instant of the first divergence — bit
+   18338 of the capture, placed on the recording via the capture-start log — the
+   received audio reads RMS 307-314 in every 20 ms block across +/-160 ms.
+   There is no dropout, and the flatness makes that robust to the slop in the
+   time mapping.
+2. **The symbol stream is continuous.** Stamping every `PHASE3_WAIT_S` symbol
+   with `qam_sample_time` (`ME_V90_JA_SYM_DUMP`, now three floats) gives 270648
+   symbols whose clock steps 2, 3, 2, 3 — the 2.5 samples per symbol of 3200
+   baud — with exactly **16** larger gaps, all 0.28-3.4 s, which are the
+   retrain intervals between attempts.
+3. **The captured-bit stream is continuous.** Stamping every *appended* bit pair
+   (`ME_V90_JA_BITTIME_DUMP`) gives the **same 16 gaps and no others**. So no
+   bits are lost between demodulation and the capture either.
+
+There is no 20 ms hole, no periodic break, and nothing to find on a 0.2 s
+period. **§35h's closing paragraph is withdrawn.**
+
+**What is real, and is now the open question**: our captured frame matches the
+in-tree fixture of this peer's descriptor for 1096-1519 bits, and realigning the
+remainder by **+128 bits** restores an exact match (1.9% over 480 bits).
+Alongside that, the observed preamble spacing is **1574** while the fixture
+descriptor is **1702** bits — and 1702 - 1574 = **128**. Three independent
+numbers agreeing on 128 is not a coincidence.
+
+But the obvious reading — that this call's frame is 128 bits shorter than the
+fixture's layout, so our parser's `descriptor_bits = 1701` reads the CRC from
+the wrong place — **is already excluded**: §35h brute-forced every `crc_start`
+from 200 to 1900 on all three frames and found no valid CRC at any of them,
+1556 (= 1574 - 18) included. So the frame does not validate under the short
+layout either.
+
+That leaves two candidates, and this session has no measurement that separates
+them: either the frames carry real bit errors *as well as* a length difference,
+or this call's descriptor differs in content from the `ADI_QC` fixture and the
+"matches ground truth" comparisons are measuring agreement with the wrong
+reference. **Deciding it needs a capture of a call that succeeds, dumped and
+compared against the same fixture** — if a successful frame also diverges at
++128, the fixture is the wrong reference and every conclusion drawn from it here
+needs re-reading.
+
+*Method note*: the two stamped dumps are the useful residue of this section.
+Continuity of the wire, of the symbols, and of the captured bits are three
+different claims, and this session assumed all three from one measurement more
+than once before measuring them separately.
