@@ -1946,3 +1946,57 @@ to take by default.
 **Open**: why the failing call's descriptor frames start only at bit 15668 when
 the peer says it was transmitting Ja from the first instant of Phase 3. That,
 not convergence, is now the thing to explain.
+
+### 35f. What is in the first 15000 bits: the same thing a successful call has (2026-08-26)
+
+§35e ended by asking what occupies the capture before the descriptor frames
+appear. **The answer that matters is that a call which succeeds has the same
+thing, in the same quantity, and parses immediately afterwards — so it is not
+pathological and it is not the failure.**
+
+Measured on the failing recording's hypothesis-8 capture (19096 bits):
+
+- **ones 0.30-0.33 and no preamble** for the first ~13500 bits, then the
+  fraction rises to 0.37-0.41 and the three descriptor preambles follow at
+  **15668, 17242, 18816** — spaced exactly 1574, the frame period.
+- **It is not a repeating pattern.** Correlating against V.34's 16-bit J
+  (`0000100110010001`) over the leading stretch gives 0.582 at its best phase
+  and best rotation, and a periodicity scan at 16, 32, 48, 64, 90, 128, 206 and
+  1574 bits reads 0.558-0.583 throughout — no period, at any of them.
+- **Converging sooner does not reveal more of it.** With
+  `ME_V90_JA_EARLY_TRACK=1` (§35e, constellation tight 0.8 s earlier) the
+  capture holds the same 3 preambles at the same 3 positions.
+
+And the control that settles its status: **the successful recording's capture
+reads 0.33 0.33 0.30 0.31 0.32 0.31 0.32 0.32 over its first 13086 bits with
+zero preambles — statistically identical — and that call recovers the descriptor
+at ~13150 bits, immediately after.** A leading stretch of aperiodic, ~32%-ones
+content with no descriptor in it is simply what this peer's Phase 3 looks like
+before the descriptor starts.
+
+So the failing call is not receiving something wrong. It is receiving the same
+preamble-free lead-in as a working call, and the peer's `WaitForSd` patience
+runs out shortly after that lead-in ends, having got three frames in.
+
+**Two traps recorded, because both produced confident wrong answers in this
+session:**
+
+1. **`--fast` replay shifts stage entry between runs.** The banner says
+   wall-clock timers will not match a live call, and the consequence is that two
+   replays of *different* files enter `PHASE3_WAIT_S` at different audio
+   samples. Bit-for-bit comparison of captures **across recordings is therefore
+   meaningless**, which is what §35a had already concluded on other grounds and
+   what an "agreement 0.53 over shared audio" measurement here confirms.
+2. **The dump is not necessarily attempt 1.** It fires on the first attempt to
+   reach its bit threshold, and on a call that retrains repeatedly that can be a
+   later one — the new `V.90 Ja capture: first bits at t=` line (exact to the
+   frame, against the 500 ms sampling of the periodic line) is what makes this
+   checkable, and on the failing recording it reads `t=9.740s` while that call's
+   first S rejection is at `rx_sample=60320`, i.e. 7.54 s. **Pin the attempt
+   before attributing anything to it.**
+
+**Open**: the descriptor's position *within the peer's Ja* — whether this peer
+sends the descriptor only after a fixed lead-in, which would make the budget in
+§35d tighter than it looks and make conceding (§34) the better of the three
+options. That needs the peer's Ja timeline anchored against our capture on a
+single call, which the new capture-start line now makes possible.

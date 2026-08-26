@@ -1936,6 +1936,7 @@ static bool           g_v90_t3_arm_logged = false;
  * "me_rx_g711() did not pass them on" from "the state machine routed them
  * somewhere other than the V.34 receiver". */
 static uint64_t       g_rx_audio_samples = 0;
+static bool           g_v90_dil_capture_start_logged = false;
 static uint64_t       g_rx_audio_started_at = 0;
 static uint64_t       g_v34_rx_started_at = 0;
 static bool           g_v34_rx_accounting_logged = false;
@@ -4093,6 +4094,16 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
                                              0,
                                              unpacked,
                                              V90_DIL_CAPTURE_MAX_BITS);
+    /* Exact anchor for the capture.  The periodic line below is sampled every
+     * 25 RX frames, i.e. 500 ms, which is far too coarse to say where in the
+     * peer's Phase 3 the capture begins -- and that is the difference between
+     * "these bits are the peer's J" and "these bits are its Ja".  Log the
+     * first bit's arrival to the frame. */
+    if (first_bits > 0 && !g_v90_dil_capture_start_logged) {
+        g_v90_dil_capture_start_logged = true;
+        ME_LOG("[ME] V.90 Ja capture: first bits at t=%.3fs (%d bits)\n",
+               (double)g_rx_audio_samples / 8000.0, first_bits);
+    }
     if (first_bits < 206)
         return false;
     /* This is called every RX audio frame (~20ms), but the 24-hypothesis x
@@ -4114,6 +4125,11 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
                                                      V90_DIL_CAPTURE_MAX_BITS);
                 snprintf(path, sizeof(path), "%s-hyp%d.bits", pfx, h);
                 FILE *fp = fopen(path, "wb");
+                if (fp) { fwrite(unpacked, 1, (size_t)nb, fp); fclose(fp); }
+                nb = v34_v90_copy_phase3_ja_raw_bits(g_v34, h, unpacked,
+                                                     V90_DIL_CAPTURE_MAX_BITS);
+                snprintf(path, sizeof(path), "%s-hyp%d.rawbits", pfx, h);
+                fp = fopen(path, "wb");
                 if (fp) { fwrite(unpacked, 1, (size_t)nb, fp); fclose(fp); }
             }
             g_v90_dil_hyp_dumped = true;
