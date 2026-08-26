@@ -2405,3 +2405,46 @@ trigger configuration, so "did the knob take effect" was unanswerable from the
 artifact alone — exactly the hole that let the §35k counter reset go unnoticed.
 The harness's `env:` line covers it for these runs, and it is what makes the
 table above checkable rather than asserted.
+
+## 36. The TRN1d knee is above 8004, and 4008 is the worst of both (2026-08-27)
+
+§33 measured 16008T (2001 ms) against the 2496T default and found the first
+Phase 4 attempt reaching data mode 3 times in 4 against 0 in 4, at a real cost
+in rate and stability. This fills in between them:
+`artifacts/trn1d-knee-122741Z`, 4 repeats of control / 4008 / 8004, interleaved,
+**with both give-up triggers pinned off in every arm** (`34406f6`) so TRN1d
+length is the only variable and the run stays comparable to §33's.
+
+| arm | first-attempt wins | downstream | reached data | fell to V.34 |
+|---|---|---|---|---|
+| control 2496T | **1/4** | 52000 | 4/4 | 0/4 |
+| **4008T** | **0/4** | **38666** | 4/4 | **4/4** |
+| **8004T** | **0/4** | 52000 | 4/4 | 0/4 |
+| (§33) 16008T | 3/4 | 40000-46666 | 4/4 | 2/4 |
+
+**The knee is above 8004T.** Neither intermediate length wins a first attempt,
+and both carry the control's attempt-1 signature (`1.82 s -> retrain`). So the
+effect at 16008T is a threshold near ~2 s of TRN1d, not "longer is better" —
+and §32's lone 8004T call, which also failed to win, now has an arm behind it
+rather than being an anecdote.
+
+**4008T is the worst setting measured.** All four calls: 38666 bps against the
+control's 52000, a 26% rate cost, **and a fall back to V.34 on every one** —
+deterministically, with the same peer study sequence each time
+(`1.82/retrain 2.76/done 13.40/retrain 2.76/done`, the 13.40 s study unique to
+this arm). It buys nothing and costs more than 16008T does. **8004T is simply
+the control**: same rate, same signatures, no benefit and no cost.
+
+**The control won one, and that matters for §33's claim.** `control-r4` took its
+first attempt to data mode with a `2.76/done` study — the first time this run's
+default arm has done so, and entirely consistent with the corpus base rate of
+**7/106 = 6.6%** (§33). Pooling both runs' controls, 16008T's advantage is
+**3/4 against 1/8, p = 0.067** — no longer the clean 3/4 vs 0/4 of §33.
+Against the whole 106-call corpus it stays strong (p = 0.0021), but the honest
+statement is that **a single afternoon's control arm cannot carry this on its
+own**, and §33's p = 0.14 was already saying so.
+
+**Nothing here makes 16008T adoptable** — §33's rate and stability costs stand,
+and 4008T shows an intermediate length can inherit those costs with none of the
+benefit. What the sweep settles is the shape: whatever 16008T does, it does it
+somewhere between 8004T and 16008T, and not gradually.
