@@ -2254,3 +2254,54 @@ The comment there now says so.
 calls, not its effect on a live one. The live question it raises is whether
 conceding at 2 ever loses a call that would have parsed on attempt 3 — nothing
 in the corpus does, but the corpus is not the rig on a bad day.
+
+### 35l. Pricing the concession from the corpus: the threshold was wrong (2026-08-26)
+
+§35k shipped the concession at **2** consecutive failed Phase 3 attempts,
+reasoned rather than measured: the peer gives up at 3, so 2 looked like a free
+cycle. **It is not free. Measured, it throws away nearly a fifth of the calls
+it fires on.**
+
+The measurement needs no rig and no control arm, which is the point worth
+keeping. Conceding can only cost a call that *would* have recovered on a later
+attempt, so the question is narrow:
+
+> given a call that has already failed Ja N times, does it ever succeed after?
+
+**Every capture in `artifacts/` predates this code, so the whole corpus is
+already the "persist" arm.** `tools/ja_concede_cost.py` walks each call's Phase
+3 attempt sequence — segmenting by call, since one `server.log` holds however
+many calls the peer dialled — and counts recoveries after the decision point.
+Over **1345 calls**:
+
+| threshold | calls reaching it | would be abandoned despite recovering | of those, reached V.90 data mode |
+|---|---|---|---|
+| **2** | 325 | **59 (18.2%)** | **7** |
+| **3** | 171 | 1 (0.6%) | 0 |
+| 4 | 67 | 0 | — |
+| 5 | 15 | 0 | — |
+
+**Attempt 3 recovers Ja often enough to be worth waiting for**, and seven calls
+in the corpus went from a double failure all the way to V.90 data mode. The
+default is now **3**, where the single loss in 171 never reached data mode
+anyway.
+
+**What that costs the feature is honesty about its benefit.** At 3 the
+concession no longer saves the ~7 s §35k claimed — it fires about when the peer
+gives up by itself. What remains is that the decision and the log line are
+**ours**: instead of the peer dropping to V.34 and our strict validator
+rejecting the plain-V.34 INFO1a that follows — reported as "V.90 declined by
+peer INFO1a", three retrains downstream of the actual cause (§34) — the engine
+says what happened, when it happened, and why.
+
+**Two method notes, both of which produced wrong numbers first:**
+
+1. **Segment by call.** A run's `server.log` held three calls in the first live
+   run scored here, and a run-level reading cheerfully reported "conceded at
+   24.3 s" and "reached V.90 data mode at 50666" from *different* calls in the
+   same file. The concession is per call by design and must be scored that way.
+2. **A corpus recorded under the old behaviour is a free control arm**, and a
+   much larger one than the rig can produce in an afternoon — n=325 at the
+   decision point against the 4 calls a side a live A/B was buying. Reach for
+   it before booking rig time: the live A/B in flight while this was written
+   could not have detected an 18% cost at its sample size.

@@ -758,14 +758,28 @@ static int            g_v90_ja_failed_attempts = 0;
  * after which its INFO1a is a plain V.34 offer that our strict validator
  * rejects, which is the misleading "V.90 declined by peer INFO1a" line.
  *
- * Conceding at 2 therefore lands in the same place the call was going anyway,
- * one cycle (~7 s) earlier, and says so plainly.  It costs at most one attempt
- * that might have parsed; §35j is why that is a good trade on this evidence --
- * when the descriptor fails it is because the peer never sends a whole one, a
- * condition no later attempt repairs, while a healthy call parses on its
- * first.  ME_V90_JA_CONCEDE_ATTEMPTS=0 disables conceding entirely.
+ * The threshold is 3, and it was measured rather than reasoned.  Every capture
+ * in artifacts/ predates this code and so records exactly the behaviour that
+ * prices it: 1345 calls, of which 325 reach two consecutive Ja failures.
+ * Conceding at each threshold would abandon this many calls that went on to
+ * recover a descriptor anyway (docs §35l, tools/ja_concede_cost.py):
  *
- * NOT verified live: the rig would not hold a call while this was written. */
+ *     2 -> 59 of 325 (18.2%), SEVEN of which reached V.90 data mode
+ *     3 ->  1 of 171 ( 0.6%), none of which reached data mode
+ *     4 ->  0 of  67
+ *
+ * So 2 -- the value this shipped with for an afternoon, chosen because the
+ * peer gives up at 3 and it looked like a free cycle -- throws away nearly a
+ * fifth of the calls it fires on.  Attempt 3 recovers Ja often enough to be
+ * worth waiting for, and this modem's own corpus says so.
+ *
+ * At 3 the concession no longer saves time: it fires about when the peer gives
+ * up itself.  What it still buys is that the decision, and the log line, are
+ * ours -- instead of the peer dropping to V.34 and our strict validator
+ * rejecting its INFO1a, reported as "V.90 declined by peer INFO1a" (§34),
+ * which is three retrains downstream of the actual cause.
+ *
+ * ME_V90_JA_CONCEDE_ATTEMPTS=0 disables conceding entirely. */
 static int v90_ja_concede_attempts(void)
 {
     static int cached = -1;
@@ -773,7 +787,7 @@ static int v90_ja_concede_attempts(void)
     if (cached < 0) {
         const char *env = getenv("ME_V90_JA_CONCEDE_ATTEMPTS");
 
-        cached = 2;
+        cached = 3;
         if (env && *env) {
             char *end;
             long parsed = strtol(env, &end, 10);
@@ -6558,10 +6572,10 @@ void me_rx_audio(const int16_t *amp, int len)
                             && !g_v92_active) {
                             ME_LOG("[ME] V.90: %d Phase 3 attempts ended with no "
                                    "CRC-valid Ja descriptor; conceding V.90 and "
-                                   "continuing as plain V.34 (the peer gives up "
-                                   "after 3 and offers a V.34 INFO1a; this reaches "
-                                   "the same place sooner and by our own decision. "
-                                   "ME_V90_JA_CONCEDE_ATTEMPTS=0 disables)\n",
+                                   "continuing as plain V.34 (this modem's corpus "
+                                   "says a call that has failed this many times "
+                                   "does not recover; ME_V90_JA_CONCEDE_ATTEMPTS=0 "
+                                   "disables)\n",
                                    g_v90_ja_failed_attempts);
                             trace_phase("V90 conceded after %d Ja failures -> plain V.34",
                                         g_v90_ja_failed_attempts);
