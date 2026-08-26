@@ -1722,3 +1722,58 @@ and not the wire.
 later destroys the decode rather than shifting it. `ME_V90_JA_DUMP_EARLY=1`
 dumps all 24 hypotheses *before* the search, so a run that parses can be
 compared against one that does not; that is the tool this needs next.
+
+### 35a. Correction: §35's comparison was not controlled (2026-08-26)
+
+**§35 claimed the two calls' Ja windows contain byte-identical audio. They do
+not, and the bit-level comparison built on that is void.** The arithmetic, which
+§35 should have done:
+
+- The replay prints `call starts at 2.88 s`, so the engine's sample counter is
+  offset from file position by 23040 samples. The two recordings are identical
+  to file byte 111520, i.e. **engine sample 88480**.
+- The Ja capture begins around engine sample **77920** and the good run's parse
+  lands at about **94357**.
+
+So only the first ~10500 samples of the capture come from shared audio, and the
+parse itself happens **after** the recordings diverge. The right conclusion is
+the dull one: two different calls received different Ja, and comparing their bit
+streams says nothing about our decoder.
+
+Two things from §35 do survive, because they are single-recording facts:
+**the receiver is deterministic** (same file, same dump, byte-identical across
+runs — checked), and **hypothesis 8 carries the failing call's preambles**
+(3 of them at an exact 1574-bit spacing), so the search is not the problem.
+The claim that the *signal* is exonerated is withdrawn.
+
+Also withdrawn: "the capture does not start late". The `Ja search input` line is
+sampled once per 25 RX frames, i.e. every 500 ms, so two runs both first
+reporting `rx_stage=10` at `t=9.740s` are equal only to within half a second —
+which is more than enough to account for the 6-bit difference in capture length.
+**That log cannot resolve the capture start, and no claim should rest on it.**
+
+### 35b. What the capture is anchored to, from the code
+
+Reading the fill site (`spandsp-master/src/v34rx.c`, the `PHASE3_WAIT_S` J/J'
+detector) rather than inferring it from behaviour, each captured pair of bits is
+produced from:
+
+1. **The symbol decisions** — `map_phase4_raw_bits(data_bits, h)`, so everything
+   the equalizer, carrier and timing loops do feeds straight in.
+2. **The previous symbol**, via `phase3_j_prev_valid[h]` / `phase3_j_prev_z[h]`:
+   Ja is differentially encoded, so a bit pair is emitted only once a previous
+   symbol exists, and its value is a phase *difference*.
+3. **The descrambler register** `phase3_j_scramble[h]` — but this is **not** an
+   anchor: `descramble_reg()` shifts in the *input* bit
+   (`*reg = (*reg << 1) | in_bit`), which is self-synchronising, so any initial
+   state washes out within 23 bits.
+4. **When the capture starts**, since (2) chains from the first captured symbol.
+   The arrays are zeroed at two sites (v34rx.c:8607 and :16195), so a reset
+   mid-Ja restarts that chain.
+
+So the parts that can make the same signal decode differently are the symbol
+decisions and the differential chain's starting point — **not** the descrambler
+and **not** the hypothesis. That is where an experiment should be aimed, and it
+needs **one recording** with the capture start deliberately perturbed, not two
+different calls: §35's mistake was to vary the recording and the decoder state
+together and attribute the result to the decoder.
