@@ -2000,3 +2000,52 @@ sends the descriptor only after a fixed lead-in, which would make the budget in
 §35d tighter than it looks and make conceding (§34) the better of the three
 options. That needs the peer's Ja timeline anchored against our capture on a
 single call, which the new capture-start line now makes possible.
+
+### 35g. Anchored: the descriptor does not start until ~70% of the peer's patience is gone (2026-08-26)
+
+The two clocks cannot be aligned directly — the peer's log spans ~1000 s and
+many calls, its timestamps wrap, and the recording covers a whole server run —
+but they do not need to be. **The two timelines share a terminating event: the
+peer's retrain both ends its own Phase 3 and resets our capture.** That is
+enough, and it uses only three measured quantities: our exact bit count, the
+peer's own interval, and the shared end.
+
+Our capture at the dump is **19096 bits at 6400 bit/s (2 bits/symbol at 3200
+baud, confirmed by §35c's shift test) = 2.98 s**, ending at the retrain. The
+peer's own `enterPhase3` -> `retrain requested` intervals in the same log are
+**1.88, 2.24 and 1.88 s**. So our capture begins **0.74-1.10 s before the peer
+enters Phase 3 at all**, and the leading 4760-7064 bits are not Ja — they
+predate it. Placing the three descriptor preambles inside the peer's own window:
+
+| preamble | into the peer's Ja (1.88 s cycle) | (2.24 s cycle) |
+|---|---|---|
+| bit 15668 | **1.34 s** | 1.70 s |
+| bit 17242 | 1.59 s | 1.95 s |
+| bit 18816 | **1.84 s** | 2.20 s |
+
+**The descriptor does not begin until roughly 70-76% of the peer's patience has
+already elapsed, and the frames run right up to the deadline** — the last one
+lands 0.04 s before the peer gives up, on every cycle.
+
+**This reorders §35d's priorities, and retires the first of them.**
+
+1. ~~Converge faster~~. **Cannot help.** There is nothing to decode before
+   1.34 s, and the receiver is already converged at 1.19 s by default — let
+   alone 0.38 s with §35e's early arming. That is why early arming produced not
+   one additional preamble: it was made ready sooner for a signal that had not
+   started. §35e stays in the tree as a measured, default-off improvement to a
+   quantity that turns out not to be binding.
+2. **Do more with two or three frames. This is the whole of it.** The peer
+   offers about three descriptor repeats and never more, by its own timing, so
+   the decode must succeed on one or two of them. `v90_dil_try_repeated_frames()`
+   votes across repeats and wants several; a soft-decision or erasure-tolerant
+   parse of a single frame is what this peer's timing actually calls for.
+3. **Concede when it fails** (§34) — still right, and now clearly the cheap
+   half: the failure mode is structural, not marginal, so a call that misses
+   those three frames will not recover by waiting.
+
+*Assumptions, both small*: our capture ends when we **detect** the retrain
+rather than at the instant the peer began it (tens of ms), and the dumped
+attempt is one of the three cycles above rather than a fourth — the spread
+across all three is shown rather than a single figure precisely because that
+choice does not change the conclusion.
