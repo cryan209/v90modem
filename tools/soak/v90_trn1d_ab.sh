@@ -16,21 +16,25 @@
 # ends of it, so its own log is the instrument for the first question; ours is
 # the instrument for the second.
 #
-#   v90_trn1d_ab.sh <outdir> [repeats] [trn1d-symbols]
+# The third argument is a comma-separated list, so a knee can be swept with
+# every length interleaved against every other and against the control rather
+# than run as separate blocks.
+#
+#   v90_trn1d_ab.sh <outdir> [repeats] [trn1d-symbols,...]
 set -u
-OUT=${1:?usage: v90_trn1d_ab.sh outdir [repeats] [trn1d-symbols]}
+OUT=${1:?usage: v90_trn1d_ab.sh outdir [repeats] [trn1d-symbols,...]}
 REPEATS=${2:-4}
-TRN=${3:-16008}
+TRNS=${3:-16008}
 SP="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SP/../.." && pwd)"
 mkdir -p "$OUT"
 
 for r in $(seq 1 "$REPEATS"); do
-  for arm in control trn$TRN; do
+  for arm in control $(echo "$TRNS" | tr ',' '\n' | sed 's/^/trn/'); do
     d="$OUT/$arm-r$r"
     [ -d "$d" ] && { echo "CONTROL: $arm r$r present, skipping"; continue; }
     if [ "$arm" = control ]; then extra=""
-    else                         extra="ME_V90_TRN1D_SYMBOLS=$TRN"; fi
+    else                         extra="ME_V90_TRN1D_SYMBOLS=${arm#trn}"; fi
     echo "CONTROL: $(date -u +%H:%M:%SZ) arm=$arm repeat=$r"
     # One call per run: the unit of this experiment is a call, and letting the
     # orchestrator redial would mix arms' worth of calls into one directory.
@@ -40,5 +44,5 @@ for r in $(seq 1 "$REPEATS"); do
 done
 
 echo
-echo "CONTROL: TRN1d A/B, $TRN vs default"
+echo "CONTROL: TRN1d A/B, $TRNS vs default"
 python3 "$ROOT/tools/trn1d_ab_summary.py" "$OUT"
