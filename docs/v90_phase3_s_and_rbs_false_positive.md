@@ -1359,3 +1359,55 @@ unaffected. Retained from earlier sections: per-port `no echo-cancel enable` /
 
 Note also: port 2/21's long-running call is a **live call to an Asterisk
 extension**, not the stuck call section 28 assumed. Do not clear it.
+
+## 30. SOLVED against SmartLink: the S confidence gate WAS the intermittency (2026-08-26)
+
+The long-running intermittent `no S after 42304 Jd symbols` retrain loop is fixed,
+and the cause was ours: the p3_demod structural check in `me_rx_audio()` was vetoing
+the peer's real §9.3.2.7 S.
+
+That check exists for section 6's problem — DIL's §9.3.2.10 early exit, where a single
+false S discards the rest of a long impairment study. **It should never have been a
+second veto during Jd.** Three reasons, all measurable:
+
+- `v34rx.c` has already required at least 64 equalized symbols of §10.1.3.7's
+  alternating or dominant-rotation structure before it publishes the event
+  (`PHASE3_S_DOMINANT_MIN`/`STABLE`), so the event is not a bare threshold crossing.
+- §9.3.2.7's S is only **128T** — 40 ms at 3200 baud. Re-running p3_demod over a
+  200 ms window scores mostly the *preceding* silence and Jd interval, so its
+  6-symbol-pattern test is being asked about a region that is largely not S.
+- It is level-sensitive in exactly the way that produces intermittency. On the live
+  rig it **rejected the real S at `rx_rms=653` and accepted the identical signal at
+  `rx_rms=845`**. The peer had reached `waitForJd` and then sat waiting for a J'd we
+  never sent, until our own §9.3.1.5 deadline fired and both sides retrained.
+
+Now applied only when `v90_get_tx_phase() == V90_TX_DIL`. The echo-correlation,
+silence, RX/TX ratio and Tone-A gates are unchanged and still apply during Jd.
+
+Two smaller defects fell out beside it:
+
+- The Jd interop-resync path set `jd_resync_wait = true` and then cleared it four
+  lines later (a stray paste, visible in the indentation), so `V90_TX_WAIT_JA` always
+  used `V90_WAIT_JA_FALLBACK_SAMPLES` rather than the resync window it had just
+  chosen.
+- `ME_V90_SD_DELAY_MS` and `ME_V90_SD_DELAY_RETRAIN_MS` clamped at 5000 ms. §9.3.1.3
+  reads "After receiving Ja, the digital modem **may wait for up to 500 ms** and shall
+  then transmit signal Sd for 384T"; both clamps are now 500.
+
+Measured over the live captures in `artifacts/sd-*`, before and after:
+
+| run | S events accepted | p3 rejects | `no S after 42304` | Phase 2 retrains |
+|---|---|---|---|---|
+| `sd-phase-sweep-011320Z` | 10 of 47 | 37 | 26 | 146 |
+| `sd-delay250-fixed-005458Z` | 2 of 10 | 8 | 22 | 53 |
+| `sd-jdwait5s-010714Z` | 1 of 4 | 3 | 0 | — |
+| **`sd-jd-gate-fix-013254Z`** | **2 of 2** | **0** | **0** | **5** |
+| **`sd-jd-gate-fix-r2-013643Z`** | **2 of 2** | **0** | **0** | **5** |
+
+Both post-fix runs complete Phase 3 (S at 21392 Jd symbols, 2.67 s — well inside
+§9.3.2.7's 5000 ms), reach Phase 4 CPt/TRN2d/MP and acquire B1 at 100% fit.
+
+**Still open, and a different problem**: the first Phase 4 attempt in each post-fix
+run ends in `Peer retrained during tx_phase=15` after the post-CPt classifier walks
+`repeating-CPt` -> `CP-sync-candidate-incomplete`; the *second* attempt is the one
+that reaches B1. That is CP acquisition, not S detection.
