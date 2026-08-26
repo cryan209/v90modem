@@ -1777,3 +1777,50 @@ and **not** the hypothesis. That is where an experiment should be aimed, and it
 needs **one recording** with the capture start deliberately perturbed, not two
 different calls: §35's mistake was to vary the recording and the decoder state
 together and attribute the result to the decoder.
+
+### 35c. The capture start is not the anchor — refuted by experiment (2026-08-26)
+
+§35b named four things the Ja capture is anchored to and pointed at *where the
+capture starts* as the one worth testing. **It is not the cause. Tested on one
+recording, with only the chain's starting point varying, the decode is
+completely insensitive to it.**
+
+`ME_V90_JA_CAPTURE_SKIP_SYMBOLS=K` (v34rx.c) makes the receiver behave as if it
+had entered `PHASE3_WAIT_S` K symbols later: while the count is short of K it
+captures nothing and holds the differential chain unstarted
+(`phase3_j_prev_valid[h] = 0`), so the first captured symbol is the one at the
+perturbed offset. Default 0 leaves the receiver exactly as it was.
+
+Swept over a recording that recovers the descriptor
+(`artifacts/trn1d-ab-063857Z/control-r1`), K = 0, 1, 2, 3, 5, 8, 13, 21, 50,
+100, 400, 1000: **six recoveries at every one of the twelve.** And the captured
+bits are not merely still parseable, they are the *same bits*:
+
+| K | capture | vs K=0 |
+|---|---|---|
+| 3 | 13080 bits | **agreement 1.0000 at shift +6**, 0.50 at shift 0 |
+| 50 | — | **agreement 1.0000 at shift +100**, 0.50 at shift 0 |
+
+Two bits per symbol, shifted by exactly the perturbation, bit for bit. That is
+the descrambler self-synchronising and the differential chain reproducing the
+same values from the same symbols — precisely what §35b predicted from the code,
+now measured.
+
+**This also disposes of the observation that started the whole line of enquiry.**
+The two calls in §35 differed by 13086 vs 13080 bits — the same 6-bit signature
+K=3 produces — but their contents were *uncorrelated* (0.58 at the best shift).
+A genuine capture-start difference gives a **perfect** shift. So that 6-bit
+difference was a coincidence, and the two calls differed in their received
+signal, exactly as §35a's arithmetic said.
+
+**By elimination, three of the four anchors are now excluded**: the descrambler
+(self-synchronising, by inspection), the hypothesis (8 carries the failing
+call's preambles too), and the capture start (this experiment). What is left is
+**the symbol decisions themselves** — the equalizer, carrier and timing loops —
+which is consistent with what the failing call's dump shows: three preambles, all
+in the last half-second of the capture, and none before.
+
+*Harness note*: an early version of this sweep wrapped each replay in
+`timeout 40` and reported zero recoveries for every K >= 3. The replay needs
+longer than that; those zeros were the truncation, not the modem. Give each run
+its full time.

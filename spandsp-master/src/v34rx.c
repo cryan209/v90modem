@@ -437,6 +437,45 @@ static int phase3_rx_dump_count = 0;
 #define PHASE3_PP_ACQUIRE_LOG_INTERVAL  256
 #define PHASE3_PP_BAUD_LOG_INTERVAL     192
 
+/* Test instrument: behave as if the receiver had entered PHASE3_WAIT_S this
+   many symbols later than it did, so the Ja capture's differential chain
+   starts somewhere else on the SAME recording.  The capture is anchored to
+   the symbol decisions and to phase3_j_prev_z/prev_valid, which chain forward
+   from the first captured symbol; the descrambler is self-synchronising and
+   so is not an anchor.  Sweeping this is the controlled version of the
+   comparison in docs/v90_phase3_s_and_rbs_false_positive.md 35a, which varied
+   the recording and the decoder state together and could attribute nothing.
+   Zero (the default) leaves the receiver exactly as it was. */
+static int v90_ja_capture_skip_symbols(void)
+{
+    static int initialized = 0;
+    static int skip = 0;
+
+    if (!initialized)
+    {
+        const char *value;
+
+        value = getenv("ME_V90_JA_CAPTURE_SKIP_SYMBOLS");
+        if (value  &&  value[0] != '\0')
+        {
+            char *end = NULL;
+            long parsed = strtol(value, &end, 10);
+
+            if (end != value  &&  end  &&  *end == '\0'
+                &&  parsed > 0  &&  parsed <= 100000)
+            {
+                skip = (int) parsed;
+            }
+            /*endif*/
+        }
+        /*endif*/
+        initialized = 1;
+    }
+    /*endif*/
+    return skip;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int v90_phase3_j_lookahead_bits(void)
 {
     static int initialized = 0;
@@ -7463,6 +7502,19 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 memset(cap_bit0, 0, sizeof(cap_bit0));
                 memset(cap_bit1, 0, sizeof(cap_bit1));
                 memset(cap_valid, 0, sizeof(cap_valid));
+                if ((int) (s->phase3_j_bits >> 1) < v90_ja_capture_skip_symbols())
+                {
+                    /* Not yet "in" the stage: capture nothing and hold the
+                       differential chain unstarted, so the first captured
+                       symbol is the one at the perturbed offset. */
+                    for (h = 0;  h < MP_HYPOTHESIS_COUNT;  h++)
+                    {
+                        s->phase3_j_prev_valid[h] = 0;
+                        s->phase3_j_scramble[h] = 0;
+                    }
+                    /*endfor*/
+                }
+                else
                 for (h = 0;  h < MP_HYPOTHESIS_COUNT;  h++)
                 {
                     int raw_sym;
