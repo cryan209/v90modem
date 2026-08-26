@@ -1411,3 +1411,83 @@ Both post-fix runs complete Phase 3 (S at 21392 Jd symbols, 2.67 s — well insi
 run ends in `Peer retrained during tx_phase=15` after the post-CPt classifier walks
 `repeating-CPt` -> `CP-sync-candidate-incomplete`; the *second* attempt is the one
 that reaches B1. That is CP acquisition, not S detection.
+
+## 31. The first Phase 4 attempt transmitted 7.4 dB hot (2026-08-26)
+
+Section 30 left "the first Phase 4 attempt always ends in `Peer retrained during
+tx_phase=15`" as open, and separate from S detection. It is, and it is ours.
+
+**It reproduces offline, deterministically**, which nothing in the upstream work
+does:
+
+```bash
+./v90_engine_replay artifacts/sd-jd-gate-fix-r2-013643Z/live-rx.g711 ulaw --fast
+```
+
+The peer's retrain is a real 2400 Hz Tone A — there are exactly six pure-tone
+stretches in that whole recording (three in Phase 2, three around the retrain),
+all at mean square 8868394, and the detector's own Goertzel reads ratio 1.000.
+The `V34_RETRAIN_TONE_DEBUG` print added here is what established that; the
+detector had no visibility at all, and "which of the three PEER_RETRAIN sites
+fired" cost a round of guessing before it existed.
+
+**What made the peer retrain is the level we transmitted.** Its first CPt selects
+Ucodes `46 68 81 88 95 99 103 107`; the one after the retrain selects
+`33 53 65 72 79 83 87 91` — the same ladder shape one G.711 chord higher, which
+is exactly the self-similarity trap DIL alignment falls into (`u` and `u+16`
+differ by exactly 2×; see `docs/v90_constellation_selection.md`).
+
+Both frames set `codec_constellations_differ`, and **their codec-output sets are
+the same 4128**. So §8.5.2 is satisfied where the Recommendation measures it —
+"the measurement point specified by bit 38 of INFO0d", which we set to the codec
+output — and the peer is conformant. It has mis-measured the *pad*: its first CPt
+asserts 6 dB of digital loss between our output and the far codec.
+
+Nothing on this side looked at any of it. We transmitted the frame's
+transmit-side Ucodes literally:
+
+| | wire RMS | dBm0 | codec RMS | outcome |
+|---|---|---|---|---|
+| attempt 1 CPt | **8364** | **-5.6** | 4128 | peer retrains 2.4 s later |
+| attempt 2 CPt | 4129 | -11.8 | 4129 | CP, CP', B1, data mode |
+| data-mode CP | 4014 | -12.0 | 4014 | — |
+
+Our own INFO0d announces a maximum transmit power of **-13 dBm0** (code 25), so
+attempt 1 put TRN2d and MP on the DS0 7.4 dB above what we had told the peer we
+would ever send.
+
+**The fix follows from the bearer, not from a threshold.** There is no pad to
+claim here — the RTP payload *is* the DS0 the far-end D/A sees — so when a CPt or
+CP asks us to transmit above our declared Table 15 limit while naming a
+codec-output set that is within it, we transmit the codec-output set. It is a
+no-op whenever the two agree, which is every frame in every working capture.
+
+A/B on one recording, one variable (`ME_V90_CP_PAD_REPAIR`): first-attempt
+TRN2d/MP moves **-5.6 dBm0 → -11.8 dBm0**, the level the working attempt uses,
+with the second attempt and the data-mode CP byte-identical.
+
+No false positives across six calls: it fires on the first attempt of both
+captures carrying this failure (`sd-jd-gate-fix-013254Z` and `-r2-013643Z`, the
+same figures to the digit) and on none of four that reach data mode
+(`goal-matrix-115515Z/rate19200-r1`, `rate24000-r1`, `rate28800-r1`,
+`slip-ab-28800-001150Z/fixed-r1`), where the wire and codec sets are equal.
+
+**Deliberately not a rejection.** Our own analogue role builds CPt from the
+*uncapped* plan on purpose — power-thinning it fell the Eicon card back to Phase 3
+in run 86 (`docs/v90_analogue_role.md`) — so refusing every over-Table-15 frame
+would reject frames this project itself emits, on no evidence that refusing
+helps. An unrepairable frame is logged and transmitted;
+`ME_V90_CP_POWER_ENFORCE=1` refuses it instead. That tension is real and is now
+visible in the log rather than hidden.
+
+Knobs: `ME_V90_CP_PAD_REPAIR=0` (leave the frame alone),
+`ME_V90_CP_POWER_MARGIN_DB` (default 3 dB — the middle of the 6 dB chord that
+separates the two cases, rather than a value fitted to either edge; 24 disables
+the check and restores the previous behaviour), `ME_V90_MAX_TX_DBM0_CODE`,
+`V90_CP_POWER_DEBUG`, `V34_RETRAIN_TONE_DEBUG`.
+
+**Open:** not verified live — the recording's peer behaves as recorded whatever we
+transmit, so only a rig call can show whether the quieter first attempt survives.
+Also open, and noticed on the way: INFO0d's bits 29:32 (nominal Phase 2 power)
+and 33:37 (maximum transmit power) are both filled in from the same -13 dBm0
+measurement in `prepare_info0d()`, which conflates two different fields.
