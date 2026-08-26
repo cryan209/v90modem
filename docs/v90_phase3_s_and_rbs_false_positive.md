@@ -1491,3 +1491,78 @@ transmit, so only a rig call can show whether the quieter first attempt survives
 Also open, and noticed on the way: INFO0d's bits 29:32 (nominal Phase 2 power)
 and 33:37 (maximum transmit power) are both filled in from the same -13 dBm0
 measurement in `prepare_info0d()`, which conflates two different fields.
+
+## 32. Live: the pad repair is refuted, and the peer grades Phase 4 with a stopwatch (2026-08-26)
+
+Section 31's fix was offline-only, and it does not survive contact with the rig.
+**The overdrive it found is real; it is not why the first Phase 4 attempt
+retrains.**
+
+The instrument that settles it is the peer's own log. SmartLink grades Phase 4 in
+a *linear mapping study in TRN2* and prints both ends of it:
+
+```
+V90Phase4Demodulator reset & enable linear mapping study in TRN2.
+V90Phase4Demodulator: disable linear mapping study          <- completed
+VPcmFloModem (V90): retrain requested !!                    <- gave up
+```
+
+Across six live calls that duration is deterministic to the millisecond:
+
+| arm | attempt-1 study | outcome |
+|---|---|---|
+| `ME_V90_CP_PAD_REPAIR=1` | **0.060, 0.061, 0.060 s** | retrain |
+| `ME_V90_CP_PAD_REPAIR=0` | **1.821, 1.820 s** | retrain |
+| either arm, attempt 2 | **2.760 s** | completes, data mode |
+
+So the peer wants the transmit-side levels it asked for, and substituting the
+codec-output set fails its study **30× sooner**. The repair is default off, and
+the numbers are in the code beside it.
+
+Two further live results rule the level story out altogether:
+
+- With `ME_V90_TRN1D_SYMBOLS=8004`, attempt 1's CPt claims **no pad at all**
+  (wire 4129 == codec 4129, the same figures as the attempt that always works)
+  — and it **still retrains**.
+- With `ME_V90_TRN1D_SYMBOLS=16008` (2001 ms), attempt 1's study **completes at
+  2.760 s and the first attempt reaches data mode** — while its CPt is *quieter*
+  than any seen (wire 2391 / codec 1146).
+
+**Whatever the first attempt fails on, it is not the constellation power.**
+
+### The one lead that did move it
+
+TRN1d length. §9.3.1.4 gives the digital modem 4000 ms from the start of TRN1d to
+the start of Jd, and we send 2496T = 312 ms. At 16008T = 2001 ms the first attempt
+went to data mode on the one call tried. **It is not adoptable as it stands**: the
+downstream came out at **40000 bps against the usual 52000**, because the peer
+then designs a much quieter constellation, and the call later retrained out of
+data mode twice and fell back to V.34. 8004T (1000 ms) did not help at all.
+
+That is one call each and the rate cost is real, so it is a lead, not a result.
+Note also that §21 of this document records 30000T making the *Courier* retrain
+sooner — for a different reason (it eats Jd's airtime against §9.3.2.7's deadline,
+which TRN1d does not move), so the two findings do not conflict, but neither
+generalises to the other peer.
+
+### What the peer's log says the sequence actually is
+
+Worth writing down, because it is the first clear view of the far side of §9.4:
+
+```
+Dil study Terminated. Enter error relaxation period.
+V90TRN2Designer : ADI design report :
+VPcmFloModem (V90): Building CPt, CPt length = 428
+V90Demodulator: enter Phase 4
+End of CP #1..#7 tx.... (terminateCpNot=1)      <- its CPt sequence, ~500 ms
+GetV90CpBits: Indicating CP termination !!!!
+V90Phase4Demodulator reset & enable linear mapping study in TRN2.   <- +200 ms
+   ... 2.760 s if it converges, or "retrain requested" if it does not
+```
+
+Its `V90ConnectionEvaluator (phase4)` trips at `pdsnrCurrentV34DropThreshPhase4
+= +250.000`, and its `V90Demodulator: Error Energy` climbs 0.56 → 113 → 222 → 247
+→ 248.8 into that threshold. The evaluator's `reset called !` appears only once
+per call, before the first Phase 3 — so the second attempt may simply be
+*ungraded* rather than better, which is worth testing directly before assuming
+attempt 2 proves anything about signal quality.
