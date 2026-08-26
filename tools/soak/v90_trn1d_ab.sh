@@ -33,8 +33,13 @@ for r in $(seq 1 "$REPEATS"); do
   for arm in control $(echo "$TRNS" | tr ',' '\n' | sed 's/^/trn/'); do
     d="$OUT/$arm-r$r"
     [ -d "$d" ] && { echo "CONTROL: $arm r$r present, skipping"; continue; }
-    if [ "$arm" = control ]; then extra=""
-    else                         extra="ME_V90_TRN1D_SYMBOLS=${arm#trn}"; fi
+    # Both give-up triggers are disabled in EVERY arm.  They post-date the
+    # first 16008 measurement, and a call that concedes V.90 part way through
+    # is not a TRN1d datum -- with them live the sweep would vary two things at
+    # once and would not be comparable to artifacts/trn1d-ab-063857Z.
+    common="ME_V90_JA_DEADLINE_SEC=0 ME_V90_JA_CONCEDE_ATTEMPTS=0"
+    if [ "$arm" = control ]; then extra="$common"
+    else                         extra="$common ME_V90_TRN1D_SYMBOLS=${arm#trn}"; fi
     echo "CONTROL: $(date -u +%H:%M:%SZ) arm=$arm repeat=$r"
     # One call per run: the unit of this experiment is a call, and letting the
     # orchestrator redial would mix arms' worth of calls into one directory.
