@@ -7413,6 +7413,41 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
     }
     /*endif*/
 
+    /* Opt-in dump of the equalized symbols this stage decides on.  Ja is
+       carried on the 4-point training constellation, so the distance from
+       these to the nearest constellation point is the direct measure of
+       whether the symbol decisions -- the last of the four anchors in
+       docs/v90_phase3_s_and_rbs_false_positive.md 35b -- are sound.  Nothing
+       else in Phase 3 exposes them: the existing dumps are TRN and Phase 4.
+       Two floats per symbol, opt-in via ME_V90_JA_SYM_DUMP. */
+    if (s->stage == V34_RX_STAGE_PHASE3_WAIT_S)
+    {
+        static FILE *ja_sym_fp = NULL;
+        static int ja_sym_tried = 0;
+
+        if (!ja_sym_tried)
+        {
+            const char *path = getenv("ME_V90_JA_SYM_DUMP");
+
+            ja_sym_tried = 1;
+            if (path  &&  path[0] != '\0')
+                ja_sym_fp = fopen(path, "wb");
+            /*endif*/
+        }
+        /*endif*/
+        if (ja_sym_fp)
+        {
+            float pair[2];
+
+            pair[0] = sym->re;
+            pair[1] = sym->im;
+            fwrite(pair, sizeof(float), 2, ja_sym_fp);
+            fflush(ja_sym_fp);
+        }
+        /*endif*/
+    }
+    /*endif*/
+
     /* Phase 3 S signal detection state machine */
     switch (s->stage)
     {

@@ -1824,3 +1824,67 @@ in the last half-second of the capture, and none before.
 `timeout 40` and reported zero recoveries for every K >= 3. The replay needs
 longer than that; those zeros were the truncation, not the modem. Give each run
 its full time.
+
+### 35d. The symbol decisions are sound. The problem is that they arrive late (2026-08-26)
+
+The last of §35b's four anchors, and the answer is not the one the elimination
+implied. **The symbol decisions are not bad. They are late, and the peer's
+budget is what they are late against.**
+
+Nothing in Phase 3 exposed these symbols — the existing dumps are TRN and
+Phase 4 — so `ME_V90_JA_SYM_DUMP=<path>` now writes the equalized symbols this
+stage decides on, two floats each, while the receiver is in `PHASE3_WAIT_S`.
+Ja rides the 4-point training constellation, so the honest metric is the mean
+distance to the nearest constellation point, normalised by mean magnitude and
+**minimised over rotation** — Ja is differentially encoded, so an absolute-angle
+metric measures the carrier's standing phase rather than the constellation.
+
+Measured over the first attempt of both recordings, per 500 symbols:
+
+```
+good  0.44 0.43 0.42 0.44 0.39 0.36 0.28 0.20 0.20 0.15 0.12 0.21 0.17 0.10 ...
+bad   0.44 0.43 0.42 0.44 0.39 0.36 0.28 0.20 0.18 0.18 0.28 0.18 0.17 0.11 ...
+```
+
+Two things follow, and the first is a check on the method rather than a result:
+**the two are identical for the first eight windows**, which is exactly the
+shared-audio prefix of §35a — so the instrument agrees with the arithmetic.
+And **both calls converge**, from 0.44 to 0.10-0.20. The failing call's
+constellation is not worse.
+
+The number that matters is *when*. Both reach their first 200-symbol window
+under 0.20 at **symbol 3800 — 1.19 s into the capture**, to the symbol.
+Against the peer's measured `WaitForSd` budget of **1.88 s** (§34), that leaves
+
+```
+1.88 - 1.19 = 0.69 s, and a Ja frame is 1574 bits / 6400 bit/s = 0.246 s
+            = 2.8 frames
+```
+
+**and the failing call's dump contains exactly 3 preambles, all in the last half
+second.** The early frames are missing because they were demodulated before the
+receiver converged, not because they were absent from the wire.
+
+So the whole of Phase 3's Ja decode gets **under three descriptor repeats** in
+which to produce a CRC-valid frame, having spent nearly two thirds of the peer's
+patience converging. Whether a call parses is then decided by whether those two
+or three frames happen to be clean — which is the "Ja-parse lottery", now with a
+mechanism and a budget rather than a shrug.
+
+**Where the work goes, in order of how much they are worth:**
+
+1. **Converge faster.** 1.19 s of a 1.88 s budget is the whole problem. This is
+   the same receiver whose Phase 3 TRN mean distance was recorded elsewhere in
+   this repo as 0.620 — its training performance is a known weak spot.
+2. **Do more with two or three noisy repeats.** `v90_dil_try_repeated_frames()`
+   votes across repeats, which needs several; a soft-decision or
+   erasure-tolerant parse over two would use what is actually available.
+3. **Concede when it fails** — the option in §34: we currently neither decode
+   nor concede, and let the peer retrain three times before it drops to V.34.
+
+**Ruled out, and none of them worth revisiting**: the hypothesis search (all
+3530 corpus recoveries are hypothesis 8, and 8 carries the failing call's
+preambles), preamble brittleness (tolerating 3 errors in the 17 ones finds no
+further frames), the retry throttle (pinning the hypothesis moves the parse
+point not at all), the descrambler (self-synchronising by inspection), the
+capture start (§35c: a pure shift, 1.0000 agreement), and the wire.
