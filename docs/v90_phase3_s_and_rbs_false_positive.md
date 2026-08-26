@@ -2155,3 +2155,55 @@ needs re-reading.
 Continuity of the wire, of the symbols, and of the captured bits are three
 different claims, and this session assumed all three from one measurement more
 than once before measuring them separately.
+
+### 35j. The fixture is the right reference, and the failing call's descriptor is never whole (2026-08-26)
+
+§35i left two candidates for the `+128` anomaly and named the experiment that
+separates them: dump a call that **succeeds** and compare it against the same
+fixture. Done, and it is decisive.
+
+`ME_V90_JA_DUMP_ON_PARSE=<prefix>` writes the frame that actually parsed, from
+the capture offset it parsed at — any other dump answers a different question,
+which is how §35f came to compare a frame from the wrong attempt.
+
+**A successful frame matches the fixture bit for bit: 0 differences over all
+1701 bits.** So `v90_dil_load_smartlink_adi_qc()` is exactly what this peer
+transmits, the comparisons in §35h-35i were against the right reference, and
+"this call's descriptor differs in content" is eliminated.
+
+That makes the failing call's numbers mean what they appeared to:
+
+| frame | vs fixture | first divergence |
+|---|---|---|
+| @15668 | 84/1701 differ (4.9%) | **1519** |
+| @17242 | 264/1701 differ (15.5%) | **1096** |
+| @17370 (= 15668 + 1702) | 795/1701 differ (46.7%) | 1 |
+
+The last row is the test of the obvious escape — that the preamble at 17242 is
+spurious and the true next frame sits one descriptor-length on. **It is not**:
+17370 is random against the fixture, so the frames genuinely start **1574 bits
+apart**, while a complete descriptor is **1702**.
+
+**Consecutive descriptors therefore overlap by 128 bits, which no clean
+transmission can do. In this call the descriptor is never sent whole** — each
+frame begins correctly (perfect header, exact fixture match for its first 1096
+or 1519 bits) and is cut short before the 1683rd bit where its CRC lives. That
+is why no `crc_start` from 200 to 1900 validates on any frame, and it closes the
+question §35h opened: **no parser, however tolerant, can recover a descriptor
+that does not finish.**
+
+Together with §35i's three continuity results — the wire, the symbol stream and
+the captured bits all unbroken — the receiver is exonerated. **What arrives is
+not a complete descriptor.**
+
+**This settles the choice left open in §34 and §35g: conceding is the right
+behaviour**, not a consolation for a decoder we have not made good enough. On a
+call in this state there is nothing to decode, and the current conduct — sitting
+silent in `V90_TX_WAIT_JA` while the peer retrains three times and drops to
+V.34 — is strictly worse than saying so early.
+
+**Not explained, and honestly not needed for that conclusion**: why the frames
+repeat every 1574 bits in this call and 1702 in a healthy one, and why the clean
+prefix is 1519 bits in one frame and 1096 in the next rather than a fixed
+truncation point. Both are properties of what the peer put on the wire, which is
+where this investigation stops being about our receiver.

@@ -3761,6 +3761,33 @@ static bool v90_dil_capture_try_parse_at(int start)
     if (!v90_parse_dil_descriptor(&desc, shifted, shifted_bits))
         return false;
 
+    /* Dump the frame that actually parsed, at the offset it parsed from.
+     * Comparing a SUCCESSFUL frame against the in-tree fixture is what decides
+     * whether that fixture is the right reference for this peer at all -- see
+     * docs/v90_phase3_s_and_rbs_false_positive.md 35i.  A dump taken on any
+     * other attempt, or at any other offset, answers a different question. */
+    {
+        const char *pfx = getenv("ME_V90_JA_DUMP_ON_PARSE");
+
+        if (pfx && *pfx) {
+            char path[1024];
+            FILE *fp;
+
+            snprintf(path, sizeof(path), "%s-parsed.bits", pfx);
+            fp = fopen(path, "wb");
+            if (fp) {
+                for (int i = 0; i < shifted_bits; i++) {
+                    uint8_t bit = (uint8_t) v90_dil_capture_get_bit(start + i);
+
+                    fwrite(&bit, 1, 1, fp);
+                }
+                fclose(fp);
+            }
+            ME_LOG("[ME] V.90 Ja: parsed frame dumped from capture offset %d "
+                   "(%d bits available)\n", start, shifted_bits);
+        }
+    }
+
     g_v90_pending_dil = desc;
     g_v90_pending_dil_valid = true;
     if (g_v90)
