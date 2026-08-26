@@ -1566,3 +1566,57 @@ Its `V90ConnectionEvaluator (phase4)` trips at `pdsnrCurrentV34DropThreshPhase4
 per call, before the first Phase 3 — so the second attempt may simply be
 *ungraded* rather than better, which is worth testing directly before assuming
 attempt 2 proves anything about signal quality.
+
+## 33. Live: the TRN1d lead replicates, and so does its price (2026-08-26)
+
+§32 left `ME_V90_TRN1D_SYMBOLS=16008` (2001 ms, against the 312 ms default) as a
+lead on one call: the first Phase 4 attempt reached data mode, where it otherwise
+always retrains, but at 40000 bps instead of 52000 and the call then destabilised.
+Both halves of that now have a sample.
+
+`tools/soak/v90_trn1d_ab.sh` runs the two arms **alternated rather than blocked**,
+one call per run, with `ME_V90_TRN1D_SYMBOLS` the only variable, and
+`tools/trn1d_ab_summary.py` scores them. Four calls a side, kept as
+`artifacts/trn1d-ab-063857Z/`:
+
+| call | TRN1d | attempt 1 | attempt-1 study | downstream | retrains | U-lines |
+|---|---|---|---|---|---|---|
+| control-r1 | 2496 | no | 1.82 / retrain | 52000 | 3 | 0 |
+| control-r2 | 2496 | no | 1.82 / retrain | 52000 | 1 | 0 |
+| control-r3 | 2496 | no | 1.82 / retrain | 52000 | 1 | 0 |
+| control-r4 | 2496 | no | 1.82 / retrain | 52000 | 2 | 189 |
+| trn16008-r1 | 16008 | **YES** | 2.76 / done | 40000 | 4 | 8607 |
+| trn16008-r2 | 16008 | **YES** | 2.76 / done | 40000 | 4 | 0 (fell to V.34) |
+| trn16008-r3 | 16008 | no | 1.82 / retrain | 46666 | 4 | 1848 (fell to V.34) |
+| trn16008-r4 | 16008 | **YES** | 2.76 / done | 40000 | 4 | 7510 |
+
+**The claim replicates: 3/4 against 0/4.** Four a side cannot carry that on its own
+(Fisher exact, two-sided, p = 0.14), but the control arm is not the only evidence
+about the default — scoring **every capture in `artifacts/` that ran the default
+TRN1d and reached data mode**, the first attempt wins **7 of 106**, so the base
+rate is about 6.6% and 3/4 against it is p = 0.002. Those 106 span many code
+versions, so they are context rather than a controlled arm; the controlled arm is
+today's 0/4.
+
+**The price replicates too, and it is uniform rather than occasional.** Every
+control call landed at 52000; every 16008 call landed at 40000 or 46666, because
+the peer designs a quieter constellation off the longer TRN1d. All four 16008
+calls took **4** retrains against the control's 1–3, and **two of the four fell
+back to V.34**, which no control call did. So the trade is not "the first attempt
+for free": it is roughly 12 kbit/s of downstream and a call that holds less well,
+in exchange for skipping one retrain cycle of about 15 s. **That is a bad trade on
+this rig, and the knob stays an experiment.**
+
+**The peer's study duration is a fingerprint, and it is worth trusting.** Across
+all 113 scored captures, an attempt-1 study of **2.76 s / disable** means the
+attempt reaches data mode and **1.82 s / retrain** means it does not — including
+the one 16008 call that lost, which carries the control's signature exactly. It
+identifies the outcome about 15 s before our own log does.
+
+**One observation deliberately left unattributed**: the 16008 arm delivered
+**17965 intact `U%07d` lines against the control's 189**, despite the lower rate
+and the worse stability. That is the upstream frame-phase lock, whose measured
+determinant is whether the peer is transmitting when data mode begins
+(`docs/v90_upstream_data_path.md`: idle-start 18/19 calls deliver, busy-start
+0/2), and nothing here controls for it. Eight calls cannot separate that from an
+effect of TRN1d length, and it should not be read as one.
