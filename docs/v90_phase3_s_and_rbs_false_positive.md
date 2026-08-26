@@ -2581,3 +2581,90 @@ size are untouched, exactly as predicted, which is the control that says the
 arms really did differ only in TRN2d. The harness and the negative are kept
 because "the peer studies MP for 62% of its TRN2d window" is a true and
 surprising fact about this peer that will otherwise be rediscovered.
+
+## 38. The first-attempt failure is fixed, and §33/§36a's "rate cost" was an artefact of stopping the sweep at 16008T (2026-08-27)
+
+§36a concluded that `ME_V90_TRN1D_SYMBOLS=16008` "reliably buys the first Phase 4
+attempt and reliably costs a quarter of the downstream rate", and left it as an
+experiment on that basis. **The rate cost is not a property of long TRN1d. It is
+a property of 16008T,** and the sweep had stopped exactly there.
+
+§37 established that the peer's first Phase 4 study verdict is deterministic per
+TRN1d length, so one call characterises a length. Sweeping past 16008T
+(`artifacts/trn1d-long-*`, one call each):
+
+| TRN1d | ms | first study | level factor | Ucodes | downstream | retrains |
+|---|---|---|---|---|---|---|
+| 2496 (old default) | 312 | **retrain** 2.047 | 2.00 | 62 | 52000 | 1 |
+| 10008 | 1251 | retrain 1.706 | 1.02 | 28 | 40000 | |
+| 12000 | 1500 | retrain 1.834 | 2.00 | 57 | 50666 | |
+| 14004 | 1751 | retrain 1.527 | 2.00 | 65 | 52000 | |
+| 16008 | 2001 | **done** 1.374 | **0.95** | **19** | **40000** | |
+| **20004** | 2500 | **done** 1.295 | 2.00 | **70** | **52000** | **0** |
+| 24000 | 3000 | **done** | 2.00 | | **53333** | |
+| 28800 | 3600 | **done** | 2.00 | | 52000 | 0 |
+| 30000 | 3750 | **done** | 2.00 | | **53333** | 0 |
+
+**16008T is a dip, not the operating point.** It is the shortest length whose
+study ratio falls under the peer's gate (~1.45, judging by 14004T's 1.527
+failing and the default's occasional 1.422 passing), and it happens also to be
+one of the lengths where the peer's level estimator picks the *other* G.711
+chord (§37) — which is what collapses it to 19 Ucodes and 40000 bps. Every
+length past it clears the gate **and** keeps the 2.00 reading and the large
+constellation.
+
+### The A/B
+
+`tools/soak/v90_trn1d_ab.sh`, arms alternated, one call per run,
+`artifacts/trn1d-long-ab-*`, four repeats:
+
+| arm | first Phase 4 attempt reaches data | downstream | intact upstream U-lines |
+|---|---|---|---|
+| 2496 (old default) | **0/4** | 52000 | **0** |
+| **20004** | **4/4** | 52000 | **48187** |
+| **30000** | **4/4** | **53333** | **61408** |
+
+Every call in every arm reached data mode, so this is not a reachability
+effect — it is whether the call spends a retrain cycle (~15 s) getting there.
+Fisher exact is p = 0.029 per arm on 0/4 vs 4/4; against the corpus base rate
+for the old default (26 completed first studies in 213 calls, 12.2%) each arm's
+4/4 is p = 2.2e-4, and pooled with the one-call-each sweep above the long
+arms are **12/12**. The old default's four calls delivered **no upstream
+payload at all**.
+
+### Why 20004T is the default and 30000T is not
+
+30000T measures marginally better here and is what the Eicon Diva Server —
+the only other real V.90 digital modem in this corpus — transmits. But
+§9.3.2.7 lets the analogue modem retrain if it does not receive Jd within
+4500 ms of the end of Ja. Sd + S̄d is 432T = 54 ms, so:
+
+- 20004T starts Jd 2.55 s in, leaving **~1.9 s** of that budget;
+- 30000T starts Jd 3.80 s in, leaving **~0.7 s**.
+
+**§21 measured exactly that hazard live**, against the USR Courier, which
+retrained *sooner* at 30000T for this reason. 20004T takes the whole benefit
+measured against SmartLink while staying far from a deadline another peer is
+known to enforce. 30000T remains available via `ME_V90_TRN1D_SYMBOLS` and is
+now verified live rather than inferred from a capture.
+
+`v90_jd_s_wait_symbols()` subtracts TRN1d from the same §9.3.1.5 budget, so the
+total from the start of TRN1d is unchanged; at 20004T it still leaves 24796T
+(3.1 s) of Jd wait.
+
+### Test fallout worth knowing
+
+Four loopback tests bounded their Phase 3 spin on a symbol count sized against
+the *old default* rather than against §9.3.1.4's 32000T ceiling, and two of
+them reused one cumulative counter for later per-stage bounds of 200 symbols —
+so a longer TRN1d made a `< 200` wait fail before it started. Both are fixed by
+bounding on the spec and resetting the counter per stage. **A test bound tied to
+a default is a test that fails the next time the default moves.**
+
+### What this does not claim
+
+The peer's level factor of 2.00 versus 0.95 (§37) is still unexplained, and
+which is the correct absolute calibration of this rig is still unsettled. What
+§38 shows is only that the length that wins the first attempt *and* the length
+that flips the level estimate are different lengths, so the two effects are
+separable and the rate cost was never the price of the fix.

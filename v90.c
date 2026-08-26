@@ -97,21 +97,46 @@ static int v90_trn2d_symbols(void)
 #define V90_SD_REPS     64
 #define V90_SD_BAR_REPS 8
 
-/* TRN1d: the spec requires ≥2040T (§9.3.1.4), and 2040 is already
- * exactly 340 six-symbol data frames.  Start Jd immediately afterward so
- * the receiver's reference-Ucode acquisition is not fed extra TRN1d signs. */
-/* §9.3.1.4 makes TRN1d a *minimum* of 2040T, and only requires Jd to start
- * within 4000 ms of TRN1d's start -- so sending the bare minimum leaves ~3.7 s
- * of headroom unused.  §9.3.2.5 has the analogue modem condition its equaliser
- * on the *first 2040T*, so transmitting exactly 2040T gives a peer that arms
- * even slightly late a short training sequence and no way to recover.
+/* TRN1d: §9.3.1.4 makes it a *minimum* of 2040T and only requires Jd to start
+ * within 4000 ms of TRN1d's start.  §9.3.2.5 obliges the analogue modem to
+ * train its equaliser on the *first 2040T*, so 2040T is conformant -- but it
+ * is the floor of a signal whose entire purpose is conditioning the far
+ * receiver, and no real digital modem sits there.
  *
- * Live against the USR Courier (2026-07-25) that is the observed failure: it
- * detects our Sd->S-bar-d and goes silent per §9.3.2.4 (correctly), then never
- * decodes Jd, never sends S, and retrains exactly at its §9.3.2.7 deadline
- * (5.0 s after the end of Ja).  Default 2500T = 312 ms adds margin while
- * v90_jd_s_wait_symbols() below subtracts it from the same §9.3.1.5 budget, so
- * the total from the start of TRN1d is unchanged. */
+ * Live against the USR Courier (2026-07-25): at the bare minimum it detects
+ * our Sd->S-bar-d and goes silent per §9.3.2.4 (correctly), then never decodes
+ * Jd, never sends S, and retrains at its §9.3.2.7 deadline.
+ *
+ * The default was 2496T (312 ms) for a long time, and against SmartLink that
+ * cost the FIRST Phase 4 attempt on 187 of the 213 such calls in artifacts/:
+ * the peer's own "linear mapping study in TRN2" ran 1.82 s and asked for a
+ * retrain, deterministically, with the same
+ * ph4MeanErrorEnergyBeforeToAfterUpdateRatio to three decimals every time.
+ * The peer's Phase 3 conditioning window is a FIXED 3.6 s whatever we send
+ * (WaitForSd -> waitForJd at +3.599 s on every call at every length), so TRN1d
+ * length does not lengthen its Phase 3 -- it decides how much of that window
+ * is §8.4.5's scrambled ones, which the peer can regenerate and train
+ * data-aided, rather than Jd, which it cannot.  At 312 ms it was 8.7%.
+ *
+ * 20004T = 2500 ms.  Live A/B, arms alternated, one call per run
+ * (artifacts/trn1d-long-ab-*): the first Phase 4 attempt reaches data mode
+ * 4/4 at 20004T and 4/4 at 30000T against 0/4 for the old default, at the
+ * SAME 52000 bps (53333 at 30000T) -- and the default arm delivered 0 intact
+ * upstream lines across its four calls against 48187 and 61408.
+ * See docs/v90_phase3_s_and_rbs_false_positive.md §38.
+ *
+ * Why 20004T and not the Eicon reference 30000T, which measures marginally
+ * better here: §9.3.2.7 lets the analogue modem retrain if it does not receive
+ * Jd within 4500 ms of the end of Ja.  Sd+S-bar-d is 54 ms, so 20004T starts
+ * Jd 2.55 s in and leaves ~1.9 s of that budget, where 30000T starts it 3.80 s
+ * in and leaves ~0.7 s -- and §21 measured exactly that hazard live against the
+ * Courier, which retrained SOONER at 30000T.  20004T takes the whole benefit
+ * measured here while staying far from a deadline another peer is known to
+ * enforce.
+ *
+ * v90_jd_s_wait_symbols() subtracts this from the same §9.3.1.5 budget, so the
+ * total from the start of TRN1d is unchanged; at 20004T it still leaves
+ * 24796T (3.1 s) of Jd wait. */
 #define V90_TRN1D_MIN_LEN 2040
 
 static int v90_trn1d_len(void)
@@ -127,9 +152,9 @@ static int v90_trn1d_len(void)
          * alignment from that point on.  A TRN1d that is not a whole number of
          * 6-symbol frames shifts Jd, J'd and DIL out of frame alignment for the
          * rest of Phase 3, which is exactly the kind of thing that leaves the
-         * peer unable to decode Jd at all.  2040 (=6*340) was compliant; 2500
-         * is not (2500/6 = 416.67), so default to 2496 = 6*416. */
-        cached = 2496;
+         * peer unable to decode Jd at all.  20004 = 6*3334; the round 20000 is
+         * not (20000/6 = 3333.33). */
+        cached = 20004;
         if (value && *value) {
             char *end;
             long parsed = strtol(value, &end, 10);
@@ -150,10 +175,9 @@ static int v90_trn1d_len(void)
              * v90_jd_s_wait_symbols() subtracts this from the same budget and
              * stays positive here: at 32000T it still leaves 12800T of Jd wait.
              *
-             * The *default* is deliberately unchanged.  30000T is unverified
-             * against a live peer, and SmartLink is known to be timing
-             * sensitive in this phase (see V90_SD_REPS above), so it is offered
-             * as an experiment via ME_V90_TRN1D_SYMBOLS, not adopted. */
+             * 30000T is now verified against a live peer: 4/4 first Phase 4
+             * attempts and 53333 bps against SmartLink (§38).  It is still not
+             * the default, for the §9.3.2.7 Jd-airtime reason above. */
             if (end != value && *end == '\0'
                 && parsed >= V90_TRN1D_MIN_LEN && parsed <= 32000)
                 cached = (int) parsed;

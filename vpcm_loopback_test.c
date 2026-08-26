@@ -655,7 +655,11 @@ static bool test_v90_dil_generation_matches_section_8_4_1(v91_law_t law)
         return false;
     }
 
-    while (v90_get_tx_phase(tx) != V90_TX_JD && phase_spin < 10000) {
+    /* Bound this on the SPEC's ceiling, not on the current default: §9.3.1.4
+     * allows TRN1d up to 4000 ms = 32000T, and Sd+S-bar-d is another 432T, so
+     * 40000 clears any legal setting.  A bound tied to the default silently
+     * becomes a failing test the next time the default moves. */
+    while (v90_get_tx_phase(tx) != V90_TX_JD && phase_spin < 40000) {
         v90_phase3_tx(tx, &throwaway, 1);
         phase_spin++;
     }
@@ -1758,7 +1762,7 @@ static bool test_v90_jd_resync_request(v91_law_t law)
     if (!v90_handle_rx_event(tx, V90_RX_EVENT_J))
         goto done;
 
-    while (v90_get_tx_phase(tx) != V90_TX_JD && symbols++ < 20000)
+    while (v90_get_tx_phase(tx) != V90_TX_JD && symbols++ < 60000)
         v90_phase3_tx_codewords(tx, &codeword, 1);
     if (v90_get_tx_phase(tx) != V90_TX_JD) {
         fprintf(stderr, "V.90 Jd resync test did not reach Jd\n");
@@ -1861,7 +1865,11 @@ done:
 
 static bool test_v90_strict_receiver_events(v91_law_t law)
 {
-    enum { MAX_SYMBOLS = 20000 };
+    /* Sized against §9.3.1.4's ceiling (TRN1d up to 32000T) rather than the
+     * current default, and generously, because the counter is not reset
+     * between the successive phase-spin loops below -- it is a cumulative
+     * budget for the whole of Phase 3. */
+    enum { MAX_SYMBOLS = 60000 };
     static const int first_trn_ucode[6] = {1, 96, 127, 127, 127, 127};
     static const bool first_trn_positive[6] = {true, false, true, false, true, false};
     static const int first_b1_ucode[6] = {1, 64, 31, 112, 127, 127};
@@ -1906,6 +1914,7 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
         fprintf(stderr, "V.90 strict event test could not accept Ja\n");
         goto done;
     }
+    symbols = 0;                /* per-stage bounds, not cumulative */
     while (v90_get_tx_phase(tx) != V90_TX_JD && symbols++ < MAX_SYMBOLS)
         v90_phase3_tx_codewords(tx, &codeword, 1);
     if (v90_get_tx_phase(tx) != V90_TX_JD) {
@@ -1929,6 +1938,7 @@ static bool test_v90_strict_receiver_events(v91_law_t law)
         goto done;
     }
 
+    symbols = 0;                /* per-stage bounds below, not cumulative */
     while (v90_get_tx_phase(tx) != V90_TX_RI && symbols++ < MAX_SYMBOLS)
         v90_phase3_tx_codewords(tx, &codeword, 1);
     if (v90_get_tx_phase(tx) != V90_TX_RI) {
@@ -2294,7 +2304,11 @@ static void v90_cp_test_frame_handler(void *user_data, const vpcm_cp_diag_t *dia
 
 static bool test_v90_shaped_phase4(v91_law_t law)
 {
-    enum { MAX_SYMBOLS = 20000 };
+    /* Sized against §9.3.1.4's ceiling (TRN1d up to 32000T) rather than the
+     * current default, and generously, because the counter is not reset
+     * between the successive phase-spin loops below -- it is a cumulative
+     * budget for the whole of Phase 3. */
+    enum { MAX_SYMBOLS = 60000 };
     v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
     const char *law_name = (law == V91_LAW_ALAW) ? "alaw" : "ulaw";
     int first_magnitudes[3][VPCM_CP_FRAME_INTERVALS] = {{0}};
@@ -3301,7 +3315,11 @@ static bool test_v92_native_cpu_receiver(void)
 
 static bool test_v92_phase3_transitions(void)
 {
-    enum { MAX_SYMBOLS = 20000 };
+    /* Sized against §9.3.1.4's ceiling (TRN1d up to 32000T) rather than the
+     * current default, and generously, because the counter is not reset
+     * between the successive phase-spin loops below -- it is a cumulative
+     * budget for the whole of Phase 3. */
+    enum { MAX_SYMBOLS = 60000 };
     v90_state_t *tx = NULL;
     vpcm_cp_frame_t cpt;
     uint8_t codeword = 0;
@@ -3320,6 +3338,7 @@ static bool test_v92_phase3_transitions(void)
         fprintf(stderr, "V.92 Phase 3 test did not accept strict Ja\n");
         goto done;
     }
+    symbols = 0;                /* per-stage bounds, not cumulative */
     while (v90_get_tx_phase(tx) != V90_TX_JD && symbols++ < MAX_SYMBOLS)
         v90_phase3_tx_codewords(tx, &codeword, 1);
     if (v90_get_tx_phase(tx) != V90_TX_JD) {
@@ -4038,7 +4057,7 @@ static bool v92_test_upstream_send(v92_trn2u_tx_t *utx,
 
 static bool test_v92_native_cpu_phase4(v91_law_t law)
 {
-    enum { MAX_SYMBOLS = 20000, TRN2D_MAX = 16000, RI_POST_CP = 24 };
+    enum { MAX_SYMBOLS = 60000, TRN2D_MAX = 16000, RI_POST_CP = 24 };
     const bool alaw = (law == V91_LAW_ALAW);
     v90_law_t v90_law = alaw ? V90_LAW_ALAW : V90_LAW_ULAW;
     v90_state_t *tx = v90_init_data_pump(v90_law);
@@ -4078,11 +4097,13 @@ static bool test_v92_native_cpu_phase4(v91_law_t law)
     v90_start_phase3(tx, 66);
     if (!v90_handle_rx_event(tx, V90_RX_EVENT_J))
         goto done;
+    symbols = 0;                /* per-stage bounds, not cumulative */
     while (v90_get_tx_phase(tx) != V90_TX_JD && symbols++ < MAX_SYMBOLS)
         v90_phase3_tx_codewords(tx, &codeword, 1);
     if (v90_get_tx_phase(tx) != V90_TX_JD
         || !v90_handle_rx_event(tx, V90_RX_EVENT_S))
         goto done;
+    symbols = 0;                /* per-stage bounds below, not cumulative */
     while (v90_get_tx_phase(tx) != V90_TX_RI && symbols++ < MAX_SYMBOLS)
         v90_phase3_tx_codewords(tx, &codeword, 1);
     if (v90_get_tx_phase(tx) != V90_TX_RI)
