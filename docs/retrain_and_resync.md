@@ -892,3 +892,53 @@ working downstream on the upstream's account. What would settle it is the same
 experiment §39 used — 600 s calls, arms alternated, `ME_V90_RENEG` the only
 variable, scored on carried time and line counts — not a shorter run and not
 an argument.
+
+### Initiating §9.6 on upstream loss: measured over 600 s calls, and it does not pay (2026-08-28)
+
+The §9.6 fix above makes initiating a renegotiation a real option again, so the
+experiment §39 used for the retrain on the *same* trigger was run for it:
+`tools/soak/v90_reneg_ab.sh`, three repeats a side, **600 s calls, arms
+alternated**, one binary, `ME_V90_RENEG` the only variable, no other overrides
+(`artifacts/reneg-ab-225015Z`). Note what the control arm is: with
+`ME_V90_RETRAIN_ON_LOSS` at 0 since §39, the control does *nothing* on upstream
+loss, so this is "cheap resync vs leave it alone", not "resync vs retrain".
+
+**The result is in the completion count, and it needs no line counting at all:
+six renegotiations were requested across the three `reneg` calls and none
+completed.** Five reached §9.6.1's timeout; the sixth was on a call that died
+first.
+
+| arm | calls | data mode | §9.6 requested | completed | carried | downstream lines | upstream lines |
+|---|---|---|---|---|---|---|---|
+| control | 3 | 3 | 0 | – | 1540 s | 424390 | 196281 |
+| reneg | 3 | 3 | 6 | **0** | 1317 s | 328459 | 131625 |
+
+**Why it fails on this trigger when the probe completes 3/3.** The probe opens a
+renegotiation on a *healthy* call; the engine's trigger is
+`v34_v90_upstream_carrier_lost()`, i.e. a receiver whose eye has already shut.
+The CP window reports say the rest: the healthy probe decoded **59** CRC-valid
+CP frames and ran CP → MP′ → CP′ → Ed → B1d, while the five loss-triggered
+windows decoded **4, 2, 3 and 1** valid frames and never reached CP′ or Ed at
+all. So the fix works on this trigger too — CP *does* decode, which it never
+did before — but not enough of it survives to carry the exchange, and the
+procedure needs a receiver that is at least intermittently working, which is
+precisely what the trigger says we do not have.
+
+**What the throughput columns are and are not.** They point the same way, and
+they are not worth an effect size: n=3 a side, one dead call in each arm
+(`reneg-r2` at 67 s, `control-r2` at 283 s) and one control call that lost
+683844 downstream lines on its own account. The completion count is the
+finding; the line counts merely fail to contradict it.
+
+**`ME_V90_RENEG` therefore stays default 0.** Enabling it buys ~17 s of
+Rd/R̄d/TRN2d/MP on the downstream per attempt, up to
+`ME_V90_MAX_RENEGOTIATIONS` (8) times a call, and recovers nothing — the same
+conclusion §39 reached about the retrain on the same trigger, for the same
+reason: the upstream's eye collapse (`docs/v90_upstream_data_path.md`) is not a
+thing a fresh Phase 4 fixes. §9.6 remains fully implemented, verified live 3/3
+when opened on a working link, and answered whenever the *peer* opens one.
+
+**What would change the answer** is fixing the upstream collapse itself, not
+this knob. A useful smaller step would be to gate initiation on the upstream
+being *recoverable* rather than merely lost — the CP-window valid-frame count
+is exactly that measurement, and the split here (59 against 1–4) is clean.
