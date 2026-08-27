@@ -3083,6 +3083,45 @@ static bool g_v90_reneg_probe_done = false;
  * answer to Rd, cleared when it hands over to the CP search. */
 static bool g_v90_reneg_await_s = false;
 
+/* §9.6's CP window, measured rather than inferred.  "The peer does not send
+ * CP" and "we do not decode it" look identical from the engine's own logs,
+ * which say nothing at all while the renegotiation runs.  Snapshot the
+ * Table-14 framer's counters when the CP search is armed and report the
+ * delta when the renegotiation ends, so the window is classified by what the
+ * framer actually saw: no sync candidate at all (nothing CP-shaped on the
+ * wire), sync but structural rejects (frame boundary wrong), CRC rejects
+ * (boundary right, symbols wrong), or semantic rejects (frame intact, a
+ * field this endpoint cannot use). */
+static v90_cp_rx_t g_v90_reneg_cp_rx_mark;
+static bool g_v90_reneg_cp_rx_marked = false;
+
+static void v90_reneg_cp_mark_locked(void)
+{
+    g_v90_reneg_cp_rx_mark = g_v90_cp_rx;
+    g_v90_reneg_cp_rx_marked = true;
+}
+
+static void v90_reneg_cp_report_locked(const char *why)
+{
+    const v90_cp_rx_t *a = &g_v90_reneg_cp_rx_mark;
+    const v90_cp_rx_t *b = &g_v90_cp_rx;
+
+    if (!g_v90_reneg_cp_rx_marked)
+        return;
+    g_v90_reneg_cp_rx_marked = false;
+    ME_LOG("[ME] V.90 §9.6 CP window (%s): bits=%llu sync=%u valid=%u "
+           "rejected=%u (crc=%u structure=%u semantic=%u) voted=%u\n",
+           why ? why : "end",
+           (unsigned long long)(b->input_bits - a->input_bits),
+           (unsigned)(b->sync_candidates - a->sync_candidates),
+           (unsigned)(b->valid_frames - a->valid_frames),
+           (unsigned)(b->rejected_frames - a->rejected_frames),
+           (unsigned)(b->crc_rejected_frames - a->crc_rejected_frames),
+           (unsigned)(b->structure_rejected_frames - a->structure_rejected_frames),
+           (unsigned)(b->semantic_rejected_frames - a->semantic_rejected_frames),
+           (unsigned)(b->voted_frames_accepted - a->voted_frames_accepted));
+}
+
 static int me_v90_reneg_after_ms(void)
 {
     static int cached = -1;
@@ -3299,6 +3338,27 @@ static void v90_live_cp_bit(void *user_data, int bit)
                 trace_phase("V90 upstream E -> V34 RX DATA");
             }
             return;
+        }
+    }
+    /* V90_RENEG_BIT_DUMP: the recovered Phase-4 bit stream while a §9.6
+     * renegotiation's CP search is armed, one ASCII '0'/'1' per bit.  The
+     * framer's counters say whether a frame was found; this says what the
+     * stream looked like, which is what separates "the peer sent SCR and
+     * nothing else" from "CP was there and we demodulated it wrongly". */
+    if (g_v90_reneg_cp_rx_marked) {
+        static FILE *reneg_dump = NULL;
+        static int reneg_dump_checked = 0;
+
+        if (!reneg_dump_checked) {
+            const char *path = getenv("V90_RENEG_BIT_DUMP");
+
+            reneg_dump_checked = 1;
+            if (path && path[0])
+                reneg_dump = fopen(path, "wb");
+        }
+        if (reneg_dump) {
+            fputc(bit ? '1' : '0', reneg_dump);
+            fflush(reneg_dump);
         }
     }
     rejected_before = g_v90_cp_rx.rejected_frames;
@@ -8348,6 +8408,7 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
          * abandoned for a full retrain.  The engine owns the retrain, so it
          * is the engine that acts on the flag. */
         if (v90_rate_renegotiation_timed_out(g_v90)) {
+            v90_reneg_cp_report_locked("timeout");
             (void) restart_v90_phase2_locked("rate renegotiation timeout");
             return false;
         }
@@ -8476,6 +8537,7 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                    "conditioning the receiver for CP\n");
             trace_phase("V90 reneg S answer seen, CP search");
             v34_v90_force_reneg_cp_rx(g_v34);
+            v90_reneg_cp_mark_locked();
         }
 
         /* While the renegotiation runs, the downstream is Rd/R̄d/TRN2d/MP/Ed/

@@ -6643,6 +6643,59 @@ static int phase4_cma_converged(v34_rx_state_t *s, const complexf_t *z)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.90 9.6.1.1.1's CP conditioning trains on Figure 8's SCR.  Same settle
+   rule as phase4_cma_converged(), but that one is scoped to
+   V34_RX_STAGE_PHASE4_TRN and a renegotiation has no TRN stage of its own:
+   the receiver is put straight into V34_RX_STAGE_V90_CP, where CMA is frozen
+   for the good reason that at STARTUP the taps arriving there were trained by
+   Phase 3 moments earlier.  Measured on a replay of a live renegotiation
+   (artifacts/reneg-eq/reneg-r1): with the freeze in force the equalizer
+   output sat at |z| = 18-22 against the slicer's unit circle for the whole
+   window, descrambled SCR read 68% ones instead of ~100%, and the Table-14
+   framer took 381 false syncs and not one CRC-valid frame. */
+static int v90_reneg_cma_converged(v34_rx_state_t *s, const complexf_t *z)
+{
+    float mag;
+
+    if (!s->reneg_cp_train)
+        return 1;
+    /*endif*/
+    mag = sqrtf(z->re*z->re + z->im*z->im);
+    if (!isfinite(mag))
+        return 0;
+    /*endif*/
+    if (s->reneg_cma_mag <= 0.0f)
+        s->reneg_cma_mag = mag;
+    else
+        s->reneg_cma_mag += 0.02f*(mag - s->reneg_cma_mag);
+    /*endif*/
+    s->reneg_cma_bauds++;
+    if (s->reneg_cma_bauds >= phase4_cma_settle_bauds()
+        &&
+        fabsf(s->reneg_cma_mag - 1.0f) <= phase4_cma_settle_tol())
+    {
+        s->reneg_cp_train = 0;
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - V.90 9.6: CP-stage CMA converged on SCR after %d bauds "
+                 "(|z|=%.3f); freezing the taps for CP\n",
+                 s->reneg_cma_bauds, (double) s->reneg_cma_mag);
+        return 1;
+    }
+    /*endif*/
+    if (s->reneg_cma_bauds >= phase4_cma_max_bauds())
+    {
+        s->reneg_cp_train = 0;
+        span_log(s->logging, SPAN_LOG_FLOW,
+                 "Rx - V.90 9.6: CP-stage CMA gave up after %d bauds "
+                 "(|z|=%.3f)\n",
+                 s->reneg_cma_bauds, (double) s->reneg_cma_mag);
+        return 1;
+    }
+    /*endif*/
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* How many of the 127 T/2 equalizer taps blind adaptation is allowed to
    touch, centred on the main tap.  0 (the default) means all of them. */
 /* Leakage applied to the blind CMA update: each adapted tap is pulled
@@ -10325,7 +10378,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         {
                             int replay_len;
 
-                            replay_len = s->mp_frame_pos;
+                            replay_len = s->v90_cp_stream ? 0 : s->mp_frame_pos;
                             for (int replay = 0; replay < replay_len; replay++)
                             {
                                 int replay_bit;
@@ -10374,7 +10427,55 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
         s->duration++;
         if (v90_cp_rx)
         {
-            if (s->mp_hypothesis >= 0 && !locked_this_symbol)
+            if (s->v90_cp_stream)
+            {
+                /* V.90 9.6.1.1.1's CP, streamed rather than searched.
+                 *
+                 * The emit below is conditional on a V.34 MP hypothesis being
+                 * LOCKED, which is a startup arrangement: there the search
+                 * finds the preamble, replays the frame so far and then
+                 * streams.  A renegotiation breaks it.  Figure 8/V.90 puts up
+                 * to 2000 ms of SCR in front of CP, SCR descrambles to a solid
+                 * run of ones, so the 17-one preamble gate reads 18/18 for the
+                 * whole of it: measured on a replay of a live renegotiation
+                 * (artifacts/reneg-eq/reneg-r1) the search locked and was
+                 * rejected 91 times inside the window, the framer was handed
+                 * only the fragments those locks covered, and not one frame
+                 * ever synced -- 91 rejects, all structural, no CRC reject at
+                 * all, which is what "the boundary was never even plausible"
+                 * looks like.
+                 *
+                 * There is nothing to search for.  The domain is differential,
+                 * the dibit transform is the fixed negation (see
+                 * MP_HYPOTHESIS_DIFF_INVERSE), the scrambler is the analogue
+                 * modem's GPA (tap 4) and the bit order is b0,b1 -- all four
+                 * fixed by 8.5.2/10.1.3.3 and the constellation table, not by
+                 * the channel.  So decode every symbol that way and let the
+                 * Table-14 framer own sync, length, CRC and semantics, which
+                 * it is written to do.  Running exactly this over the same
+                 * recording's symbols offline recovers 47 CP frames, every gap
+                 * exactly 700 bits and every consecutive pair bit-identical.
+                 */
+                int raw;
+                int in0;
+                int in1;
+                int hyp = (s->v90_cp_diff_hypothesis >= 0)
+                        ?  s->v90_cp_diff_hypothesis
+                        :  MP_HYPOTHESIS_DIFF_INVERSE;
+
+                raw = map_phase4_raw_bits(data_bits, hyp);
+                phase4_unpack_ordered_bits(raw, s->mp_phase4_default_bit_order,
+                                           &in0, &in1);
+                s->put_phase4_bit(s->put_phase4_bit_user_data,
+                                  descramble_reg(&s->v90_cp_stream_reg,
+                                                 s->mp_phase4_default_scrambler_tap,
+                                                 in0));
+                s->put_phase4_bit(s->put_phase4_bit_user_data,
+                                  descramble_reg(&s->v90_cp_stream_reg,
+                                                 s->mp_phase4_default_scrambler_tap,
+                                                 in1));
+            }
+            else if (s->mp_hypothesis >= 0 && !locked_this_symbol)
             {
                 s->put_phase4_bit(s->put_phase4_bit_user_data, bits[0] & 1);
                 s->put_phase4_bit(s->put_phase4_bit_user_data, bits[1] & 1);
@@ -12095,16 +12196,26 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    TRN lock) can drive converged taps to infinity.  Bound Phase
                    4 refinement to its first 512T and freeze it for all framed
                    Phase-4 signalling. */
-                bool freeze_mp_cma = (s->stage == V34_RX_STAGE_V90_CP)
-                                  || v34_rx_stage_is_phase4_frame(s->stage)
-                                  || (s->stage == V34_RX_STAGE_PHASE4_TRN
-                                      && s->phase4_trn_after_j >= 512);
+                bool freeze_mp_cma = ((s->stage == V34_RX_STAGE_V90_CP)
+                                      || v34_rx_stage_is_phase4_frame(s->stage)
+                                      || (s->stage == V34_RX_STAGE_PHASE4_TRN
+                                          && s->phase4_trn_after_j >= 512))
+                                  && !s->reneg_cp_train;
                 /* Once the decision-aided Phase 4 tracker owns the taps
                    (data-aided LMS above), CMA must stand down or the two
                    fight: CMA's phase-blind gradient re-randomizes the phase
                    the DA loop just fixed. */
+                /* ...except while 9.6's CP conditioning is still finding the
+                   LEVEL.  The DA loop is decision-directed and its decisions
+                   are meaningless at 27x the slicer's unit circle, which is
+                   where a renegotiation's fresh equalizer starts: measured on
+                   artifacts/reneg-eq/reneg-r1 it seeded on the third symbol
+                   and stood CMA down for the whole window, leaving |z| at 27
+                   and the descrambled SCR at 68% ones.  Level first, then
+                   phase. */
                 bool da_owns_eq = v34_rx_stage_is_phase4_frame(s->stage)
-                               && s->phase4_da_seeded;
+                               && s->phase4_da_seeded
+                               && !s->reneg_cp_train;
                 /* V.34 11.4: Phase 4 starts from the tap solution 11.3 already
                    trained on PP and TRN.  What that solution needs is a level
                    correction, not more shaping -- Phase 3 leaves |z| ~ 1.47 in
@@ -12116,7 +12227,13 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    the rest of the call.  Let it converge, then stop it. */
                 if (!t_cma->tx.tx_data_mode && !freeze_mp_cma && !da_owns_eq)
                 {
-                    if (!phase4_cma_converged(s, sym))
+                    if (s->reneg_cp_train)
+                    {
+                        if (!v90_reneg_cma_converged(s, sym))
+                            tune_equalizer_cma(s, sym);
+                        /*endif*/
+                    }
+                    else if (!phase4_cma_converged(s, sym))
                         tune_equalizer_cma(s, sym);
                     else if (getenv("V34_PHASE4_DD_TRN")
                              && s->stage == V34_RX_STAGE_PHASE4_TRN)
@@ -15374,6 +15491,12 @@ SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
     /* V.90 upstream uses the analogue-modem scrambler polynomial (tap 4 in
        SpanDSP's zero-based representation).  Retry rotation still explores
        alternate order/domain/tap choices after rejected CP hypotheses. */
+    /* Startup conditioning: the taps arriving here were trained by Phase 3
+       moments ago and must not be walked.  Only the renegotiation path below
+       turns training back on. */
+    s->rx.reneg_cp_train = 0;
+    s->rx.v90_cp_stream = 0;
+    s->rx.v90_cp_stream_reg = 0;
     s->rx.scrambler_tap = 4;
     s->rx.mp_phase4_default_scrambler_tap = 4;
     s->rx.mp_phase4_default_bit_order = 0;
@@ -15436,8 +15559,41 @@ SPAN_DECLARE(void) v34_v90_force_reneg_cp_rx(v34_state_t *s)
     if (!s)
         return;
     /*endif*/
+    /* Hand the receiver back to the ordinary V.34 primary channel.
+       §9.6.1.1.1's S, S-bar, SCR and CP are the Phase-4 4-point signals the
+       T/2 chain demodulates; the T/3 branch is the DATA-mode upstream
+       receiver, fitted to the negotiated data constellation by a supervised
+       least-squares solve over B1.  It does not stop at the seam on its own:
+       v90_t3_put_sample() calls v90_t3_emit_ready() whenever it has acquired,
+       and that calls process_primary_symbol() directly.  So every symbol the
+       CP stage saw during a renegotiation came from the data receiver --
+       instrumented on artifacts/reneg-eq/reneg-r1, all 42496 of them -- with
+       |z| pinned at 26.8 against the 4-point slicer's unit circle whatever
+       the T/2 equalizer did, which is why resetting that equalizer and
+       unfreezing its CMA changed nothing at all.  The upstream re-acquires
+       from the renegotiation's own B1 afterwards, which is what
+       v34_v90_prepare_upstream_data() is for and what the engine already
+       arms by clearing its upstream-armed flag here. */
+    s->rx.v90_t3_active = false;
+    s->rx.v90_t3_acquired = false;
+    s->rx.v90_t3_capture_only = false;
+    s->rx.v90_t3_prepared = false;
+
     v34_force_v90_phase4_cp_rx(s);
     equalizer_reset(&s->rx);
+    /* A fresh equalizer is only half of it: V34_RX_STAGE_V90_CP freezes blind
+       adaptation, so without this nothing trains what was just reset. */
+    s->rx.reneg_cp_train = 1;
+    s->rx.reneg_cma_mag = 0.0f;
+    s->rx.reneg_cma_bauds = 0;
+    if (!getenv("ME_V90_RENEG_CP_STREAM")
+        ||
+        atoi(getenv("ME_V90_RENEG_CP_STREAM")) != 0)
+    {
+        s->rx.v90_cp_stream = 1;
+        s->rx.v90_cp_stream_reg = 0;
+    }
+    /*endif*/
     /* Save the FRESH taps: the periodic equalizer restore would otherwise put
        the stale ones back a few hundred milliseconds later. */
     equalizer_save(&s->rx);

@@ -1552,6 +1552,23 @@ typedef struct
     float phase4_cma_mag;
     int phase4_cma_bauds;
     int phase4_cma_settled;
+    /* V.90 9.6.1.1.1: a rate renegotiation's CP conditioning starts from a
+       fresh equalizer -- the one it would otherwise preserve was last trained
+       before data mode, tens of seconds earlier, because the T/3 upstream
+       receiver owns data mode.  A fresh equalizer needs training, and the
+       ordinary V90_CP freeze (right at startup, where Phase 3 has just
+       trained the taps) means nothing ever trains it.  Set while Figure 8's
+       SCR is being used as that training material, and cleared as soon as
+       the level settles. */
+    int reneg_cp_train;
+    /* V.90 9.6: stream every descrambled CP-stage bit to the Table-14 framer
+       with the pinned transform, instead of only the bits a hypothesis lock
+       happens to cover.  Its own scrambler register, so the lock/unlock churn
+       of the V.34 MP search cannot disturb it. */
+    int v90_cp_stream;
+    uint32_t v90_cp_stream_reg;
+    float reneg_cma_mag;
+    int reneg_cma_bauds;
     /* T/2 eye selection; see process_primary_half_baud(). */
     float eye_on_sum;
     float eye_off_sum;
