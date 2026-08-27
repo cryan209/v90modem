@@ -40,12 +40,49 @@ every V.34 modem has.
 | §11.6.1.2 respond | plain V.34 | yes, `ME_V90_RENEG_RESPOND=1`; **default off** |
 | §11.6.2.1 recovery | plain V.34 | yes — no E within the timeout falls back to a §11.5 retrain |
 
-`ME_V90_RENEG=1` enables §9.6 initiation.  It is off by default for a
-measured reason and not a cautious one: this rig's analogue modem answers
-384T of Rd with nothing at all, its own log declares SILENCERETRAIN, and it
-retrains.  On a peer that implements §9.6.2 it is the better recovery and
-should be preferred; the engine tries it first when it is enabled and falls
-through to §9.5.1.1 when it is not.
+`ME_V90_RENEG=1` enables §9.6 initiation.  It is off by default because it is
+**unverified against a real peer** -- not, as this note used to say, because
+the peer refuses to answer.  That claim was ours.
+
+**Retracted (2026-08-27): "this rig's analogue modem answers 384T of Rd with
+nothing at all".**  We never transmitted 384T of Rd.  §9.6.1.1.1 makes Rd
+exactly 384T terminated by 24T of R̄d; the only code that advanced that state
+lived in the CP **receive** path and was gated on a far-end CPt, which is
+§9.4.1.2's *startup* rule, where the barred Ri acknowledges the analogue
+modem's CPt.  In a renegotiation the peer cannot send CP until it has seen
+Rd, R̄d and MP -- so each side waited for the other and Rd ran until the call
+ended.
+
+Demodulated out of the transmit taps of the very two calls the default was
+set from, with `tools/v90_rd_verify.py`:
+
+| capture | startup Ri | renegotiation Rd |
+| --- | --- | --- |
+| `artifacts/goal-v90-reneg-112546Z` | 3804T + **24T** barred | **89120T (11.1 s), no barred symbol** |
+| `artifacts/goal-v90-reneg-b-113038Z` | 3822T + **24T** barred | **24160T (3.0 s), no barred symbol** |
+
+The startup Ri in the same files terminates correctly, which is what makes
+the renegotiation rows unambiguous.  The peer was never given the signal
+§9.6.1.2 requires it to detect, so neither call says anything about whether
+it implements the clause -- and the peer demonstrably *does* implement the
+V.34 §11.6 form (below): it detected our S, renegotiated 9600 -> 12000 and
+kept LAPM up across the change.
+
+Fixed in `v90.c`: on a renegotiation Rd terminates on its own 384T count and
+R̄d is unconditional, per §9.6.1.1.1's "transmit signal Rd for 384T and R̄d
+for 24T.  After transmitting R̄d, the digital modem shall optionally transmit
+TRN2d for no more than 2000 ms followed by MP sequences".  Replaying
+`goal-v90-reneg-b-113038Z` through the fixed engine now puts **384T + 24T
+exactly** on the transmit tap.
+
+**Still open: whether the peer answers.**  A recording's peer behaves as
+recorded whatever we transmit, so this is proven *conformant* and not proven
+*answered*.  `ME_V90_RENEG_AFTER_MS=<n>` provokes one on a healthy call
+(`tools/soak/v90_reneg_probe.sh`); the rig spent 2026-08-27 in the §34
+Ja-parse blocker and did not reach V.90 data mode in 13 calls, so the live
+test is owed.  On a peer that implements §9.6.2 this is the better recovery
+and should be preferred; the engine tries it first when it is enabled and
+falls through to §9.5.1.1 when it is not.
 
 ## Bounds
 

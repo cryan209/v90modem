@@ -3741,6 +3741,39 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
          * first, after which the transmitter emits the barred R-i ACK.
          * §9.6.1.1: on a rate renegotiation the same signal is Rd and runs
          * for 384T. */
+        /* §9.6.1.1.1: "transmit signal Rd for 384T and R̄d for 24T.  After
+         * transmitting R̄d, the digital modem shall optionally transmit
+         * TRN2d for no more than 2000 ms followed by MP sequences and shall
+         * condition its receiver to receive CP sequences."  So on a rate
+         * renegotiation Rd is terminated by its OWN 384T count, and the
+         * barred form is unconditional.
+         *
+         * That is NOT true of §9.4.1.2's startup Ri, whose barred form
+         * ACKNOWLEDGES the analogue modem's CPt -- and the only code that
+         * advanced this state lives in the CP receive path, so it required a
+         * CPt that §9.6 gives the peer no way to send yet: it responds with
+         * CP only after seeing Rd, R̄d and MP.  Each side waited for the
+         * other.  Measured on the two captures the "this peer does not
+         * answer Rd" default was set from (artifacts/goal-v90-reneg-*): we
+         * transmitted 24160T and 89120T of unterminated Rd -- 3.0 s and
+         * 11.1 s -- and never one barred symbol, against the 384T + 24T the
+         * clause asks for.  The peer was never given the signal it is
+         * required to detect. */
+        if (s->reneg_active && s->sample_count >= v90_ri_length(s)
+            && !s->cp_ready) {
+            fprintf(stderr,
+                    "[V90] Rate renegotiation %d: Rd complete (%dT); "
+                    "barred Rd (%dT) per §9.6.1.1.1\n",
+                    s->reneg_count, s->sample_count, V90_RI_POST_CP_SYMBOLS);
+            /* cp_ready here means "clear to send the barred form", which in
+             * §9.6 is unconditional; it is not a claim that a CPt arrived. */
+            s->cp_ready = true;
+            s->sample_count = 0;
+            s->phase4_ri_align_remaining = 0;
+            s->phase4_hold_logged = false;
+            s->tx_phase = V90_TX_RI_ACK;
+            return v90_phase3_codeword(s);
+        }
         if (!s->phase4_hold_logged) {
             fprintf(stderr, "[V90] %s: %s (%d symbols)\n",
                     s->reneg_active ? "Rate renegotiation" : "Phase 4",

@@ -2815,13 +2815,33 @@ static int me_v90_max_renegotiations(void)
 }
 #define ME_V90_MAX_RENEGOTIATIONS (me_v90_max_renegotiations())
 
-/* Off by default, and the reason is measured rather than cautious: this rig's
- * analogue modem does not answer a §9.6 rate renegotiation.  Two live calls
- * sent Rd for 384T on a data frame boundary and received no CP at all; the
- * peer's own log declares SILENCERETRAIN and it retrains.  So on this peer the
- * procedure costs a retrain and buys nothing, and the honest default is to
- * leave the link alone.  ME_V90_RENEG=1 turns it on for a peer that does
- * implement §9.6.2, which is what it is here for. */
+/* Off by default -- but NOT for the reason this comment used to give, which
+ * was wrong, and wrong in the direction that blamed the peer.
+ *
+ * It used to read: "this rig's analogue modem does not answer a §9.6 rate
+ * renegotiation.  Two live calls sent Rd for 384T on a data frame boundary
+ * and received no CP at all."  We never sent Rd for 384T.  §9.6.1.1.1 makes
+ * Rd exactly 384T terminated by 24T of R̄d, and the only code that advanced
+ * that state lived in the CP receive path, gated on a far-end CPt -- which is
+ * §9.4.1.2's STARTUP rule, where the barred Ri acknowledges the peer's CPt.
+ * In a renegotiation the peer cannot send CP until it has seen Rd, R̄d and
+ * MP, so each side waited for the other.  Demodulated out of the transmit
+ * taps of the very two calls the default was set from
+ * (artifacts/goal-v90-reneg-112546Z and -b-113038Z, via
+ * tools/v90_rd_verify.py): 89120T and 24160T of unterminated Rd -- 11.1 s and
+ * 3.0 s -- and not one barred symbol.  The peer was never given the signal
+ * §9.6.1.2 requires it to detect, so those calls say nothing about whether it
+ * implements the clause.  Fixed in v90.c; the same recording now produces
+ * 384T + 24T exactly.
+ *
+ * Still off by default only because it is UNVERIFIED against a real peer:
+ * a recording's peer behaves as recorded whatever we transmit, so the fix is
+ * proven conformant and not yet proven answered.  Turn it on with
+ * ME_V90_RENEG=1, and use ME_V90_RENEG_AFTER_MS to provoke one on a healthy
+ * call (tools/soak/v90_reneg_probe.sh).  Note the peer DOES implement the
+ * V.34 §11.6 form -- verified live, it answered our S, renegotiated 9600 ->
+ * 12000 and kept LAPM up -- so there is now no evidence for the old
+ * assumption at all. */
 static int me_v90_reneg_enabled(void)
 {
     static int cached = -1;
@@ -3039,6 +3059,43 @@ static int me_v34_retrain_after_ms(void)
     if (cached < 0)
         cached = parse_env_int("ME_V34_RETRAIN_AFTER_MS", 0);
     return cached;
+}
+
+/* ME_V90_RENEG_AFTER_MS=<n> opens a §9.6 rate renegotiation n ms after the
+ * call reaches V.90 data mode, once.  A TEST HOOK, exactly like plain V.34's
+ * ME_V34_RENEG_AFTER_MS above and for the same reason: the engine's own
+ * trigger is an upstream receiver that has stopped decoding, so a healthy
+ * call never produces one, and the open question is what a real peer does
+ * with Rd.
+ *
+ * The claim this exists to test is that this rig's analogue modem "answers
+ * 384T of Rd with nothing at all".  That was inferred from two calls in which
+ * the peer retrained and its log said SILENCERETRAIN -- which is the name of
+ * the state where the peer TRANSMITS silence before its own Tone A, not a
+ * report that it heard silence from us.  The same peer does implement §11.6
+ * (verified live: it answered our S, changed the rate and kept LAPM up), so
+ * the inference is worth re-testing against our own transmitted Rd.
+ *
+ * Uses the shared DATA-entry epoch, which the native V.90 handover sets.
+ * Zero, the default, means never. */
+static bool g_v90_reneg_probe_done = false;
+
+static int me_v90_reneg_after_ms(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = parse_env_int("ME_V90_RENEG_AFTER_MS", 0);
+    return cached;
+}
+
+static bool v90_reneg_probe_due_locked(void)
+{
+    if (me_v90_reneg_after_ms() <= 0 || g_v90_reneg_probe_done)
+        return false;
+    if (g_v34_data_entry_ms == 0)
+        return false;
+    return (trace_now_ms() - g_v34_data_entry_ms) >= me_v90_reneg_after_ms();
 }
 
 static bool v34_retrain_probe_due_locked(void)
@@ -3658,6 +3715,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v34_reneg_start_ms = 0;
     g_v34_data_entry_ms = 0;
     g_v34_reneg_probe_done = false;
+    g_v90_reneg_probe_done = false;
     g_v34_retrain_probe_done = false;
     g_tx_disrupt_logged = 0;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
@@ -8242,6 +8300,21 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
             return false;
         }
 
+        /* ME_V90_RENEG_AFTER_MS test hook: open a §9.6 renegotiation on a
+         * HEALTHY call, which is the only way to see what this peer does
+         * with Rd.  Deliberately not gated on me_v90_reneg_enabled(): the
+         * point of the probe is to answer the question that knob's default
+         * rests on. */
+        if (v90_reneg_probe_due_locked()
+            && !v90_rate_renegotiation_active(g_v90)
+            && !v90_rate_renegotiation_pending(g_v90)) {
+            g_v90_reneg_probe_done = true;
+            ME_LOG("[ME] V.90: ME_V90_RENEG_AFTER_MS probe; requesting a "
+                   "§9.6 rate renegotiation\n");
+            trace_phase("V90 reneg probe");
+            (void) v90_request_rate_renegotiation(g_v90);
+        }
+
         /* Has the upstream lost carrier?  §9.6 allows a rate renegotiation
          * "at any time during data mode", and it is the only recovery with
          * the reach this needs: it ends in a fresh B1 from the analogue
@@ -8263,8 +8336,10 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
             } else if (retrain_on_loss_due(me_v90_max_loss_retrains())) {
                 /* §9.5.1.1.  The renegotiation above is the cheaper of the
                  * two recoveries and is preferred where the peer implements
-                 * §9.6.2, but this rig's analogue modem answers Rd with
-                 * nothing at all, so with §9.6 unavailable the alternative to
+                 * §9.6.2.  ("This rig's analogue modem answers Rd with
+                 * nothing at all" used to stand here; it was our own
+                 * unterminated Rd -- see me_v90_reneg_enabled().)  With §9.6
+                 * unavailable the alternative to
                  * a retrain is not "leave the link alone" -- it is to keep
                  * transmitting downstream into a receiver whose eye is shut
                  * for the rest of the call.  §9.5 puts a retrain at any time,
