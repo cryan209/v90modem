@@ -562,3 +562,54 @@ exact transition were dominated by the existing intermittent Phase-3 Sd/S
 blocker and did not reach initial DATA.  The instrument now reaches the V.90
 raw path and is ready for the next successful handshake; plain V.34 supplies
 the complete end-to-end DATA→retrain→DATA proof above.
+
+## §9.5.1.1 on V.90 upstream loss: measured over long calls, and now default off (2026-08-27)
+
+The V.90 §9.5.1.1 initiation added earlier reasoned, at the call site, that
+"the alternative to a retrain is not 'leave the link alone' -- it is to keep
+transmitting downstream into a receiver whose eye is shut for the rest of the
+call". Over the 105 s soak schedule that was untestable. Over 600 s it is
+**exactly backwards**, because the receiver whose eye is shut is at *our* end
+and the downstream is fine.
+
+The six-call long soak of the shipping defaults
+(`artifacts/v90-longsoak-233217Z`, `docs/v90_phase3_s_and_rbs_false_positive.md`
+§39) connected cleanly every time — first Phase 4 attempt 6/6 — but only one
+call *held*, and in four of the five that did not, the first disruption after
+data mode was our own detector firing on the upstream while the downstream was
+delivering perfectly.
+
+`tools/soak/v90_loss_retrain_ab.sh`, arms alternated, three 600 s calls each,
+`ME_V90_RETRAIN_ON_LOSS` the only variable (`artifacts/lossretrain-ab-*`):
+
+| | retrains after data | carried | downstream lines / missing | upstream lines |
+|---|---|---|---|---|
+| cap 4 (old default) | 1 / 0 / 4 | 373 / 629 / 629 s | 490775 / **491** | 185229 |
+| **cap 0** | **0 / 0 / 0** | **629 / 629 / 629 s** | **667084 / 107** | 156321 |
+
+Holding the link delivers **36% more downstream lines with a fifth of the
+losses** — all three calls at the ceiling of what the schedule can send
+(222378, 222306, 222400) — against **16% fewer upstream lines**, on a direction
+that is more than 45% incomplete in *both* arms. The retrain was buying nothing
+and costing the clean, faster direction. §9.5.1.1 says the digital modem
+**may** retrain at any time, so both policies conform.
+
+**The two caps are now different, and deliberately.** Plain V.34 is symmetric —
+one modulation, one receiver each way, so a receiver that has stopped decoding
+means half the link is dead and there is nothing to protect by waiting. That
+cap stays at **4** (`ME_V34_RETRAIN_ON_LOSS`). V.90 is not symmetric: PCM
+downstream at 52000 and V.34 upstream at 31200, failing independently, and on
+this rig it is always the upstream, with the frame-phase/eye collapse of
+`docs/v90_upstream_data_path.md` that a fresh handshake does not fix. That cap
+is now **0** (`ME_V90_RETRAIN_ON_LOSS=4` restores the old behaviour).
+
+**This is not "give up on recovery".** §9.5.2.1 has the *analogue* modem
+retrain if *its* receiver fails, and we already follow that. So a genuinely
+two-directional failure is still recovered; what is no longer done is tearing
+down a working downstream on our own receiver's account.
+
+**Limits worth stating.** Three calls a side, one peer, on an essentially
+noiseless bearer where the downstream never fails. On a real line where the
+downstream *does* degrade, §9.5.2.1 is what has to catch it, and that path has
+no long-call measurement behind it yet. The upstream's 45% incompleteness is
+untouched by any of this and remains the open problem.

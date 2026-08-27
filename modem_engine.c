@@ -2837,25 +2837,74 @@ static int me_v90_reneg_enabled(void)
 /* Retrain-on-loss bounds, shared by V.90 §9.5.1.1 and plain V.34 §11.5.
  *
  * A retrain costs the whole Phase 2/3/4 startup -- seconds of downstream --
- * so it is worth taking only where the alternative is a dead upstream, and
- * only a few times.  Two bounds: a per-call cap, and a dwell measured from
- * the last one, so a link that collapses again immediately is left alone
- * rather than spending the call retraining.  The dwell also covers the case
- * where the retrain itself fails to reach data mode: the counter advances
- * whether or not the attempt succeeds. */
-#define ME_V90_MAX_LOSS_RETRAINS_DEFAULT 4
+ * so it is worth taking only where the alternative is a dead link, and only a
+ * few times.  Two bounds: a per-call cap, and a dwell measured from the last
+ * one, so a link that collapses again immediately is left alone rather than
+ * spending the call retraining.  The dwell also covers the case where the
+ * retrain itself fails to reach data mode: the counter advances whether or
+ * not the attempt succeeds.
+ *
+ * THE TWO CAPS ARE DIFFERENT, and deliberately.
+ *
+ * Plain V.34 is symmetric: one modulation, one receiver each way, so a
+ * receiver that has stopped decoding means half the link is dead and there is
+ * nothing to protect by waiting.  That cap stays at 4.
+ *
+ * V.90 is NOT symmetric.  The downstream is PCM at 52000 and the upstream is
+ * V.34 at 31200, they fail independently, and on this rig it is always the
+ * upstream that fails -- the frame-phase/eye collapse in
+ * docs/v90_upstream_data_path.md, which a fresh handshake does not fix.  The
+ * comment that used to sit at the call site argued that the alternative to a
+ * retrain was "to keep transmitting downstream into a receiver whose eye is
+ * shut for the rest of the call".  Measured over 600 s calls, that is exactly
+ * backwards, because the receiver whose eye is shut is at OUR end and the
+ * downstream is fine:
+ *
+ *   artifacts/lossretrain-ab-*, arms alternated, three 600 s calls each,
+ *   ME_V90_RETRAIN_ON_LOSS the only variable --
+ *     cap 4:  1/0/4 retrains, carried 373/629/629 s,
+ *             downstream 490775 lines with 491 missing, upstream 185229
+ *     cap 0:  0/0/0 retrains, carried 629/629/629 s,
+ *             downstream 667084 lines with 107 missing, upstream 156321
+ *
+ * So holding the link delivers 36% more downstream lines with a fifth of the
+ * losses -- all three calls at the ceiling of what the schedule can send --
+ * against 16% fewer upstream lines, on a direction that is more than 45%
+ * incomplete in BOTH arms.  The retrain was buying nothing and costing the
+ * clean, faster direction.  §9.5.1.1 says the digital modem MAY retrain at
+ * any time, so both policies conform.
+ *
+ * There is also a responder for the case this gives up: §9.5.2.1 has the
+ * ANALOGUE modem retrain if ITS receiver fails, and we follow that (the
+ * peer-retrain path).  So a genuinely two-directional failure is still
+ * recovered; what is no longer done is tearing down a working downstream on
+ * our own receiver's account.
+ *
+ * ME_V90_RETRAIN_ON_LOSS=4 restores the old V.90 behaviour. */
+#define ME_V90_MAX_LOSS_RETRAINS_DEFAULT 0
+#define ME_V34_MAX_LOSS_RETRAINS_DEFAULT 4
 #define ME_V90_LOSS_RETRAIN_DWELL_MS_DEFAULT 20000
 
 static unsigned g_loss_retrains = 0;
 static int64_t  g_last_loss_retrain_ms = 0;
 
-static int me_max_loss_retrains(void)
+static int me_v90_max_loss_retrains(void)
 {
     static int cached = -1;
 
     if (cached < 0)
         cached = parse_env_int("ME_V90_RETRAIN_ON_LOSS",
                                ME_V90_MAX_LOSS_RETRAINS_DEFAULT);
+    return cached;
+}
+
+static int me_v34_max_loss_retrains(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = parse_env_int("ME_V34_RETRAIN_ON_LOSS",
+                               ME_V34_MAX_LOSS_RETRAINS_DEFAULT);
     return cached;
 }
 
@@ -2871,15 +2920,14 @@ static int me_loss_retrain_dwell_ms(void)
 
 /* True when a retrain for a receiver that has stopped decoding is both
  * allowed and due -- V.90 §9.5.1.1 or plain V.34 §11.5.1.1/§11.5.2.1.
- * ME_V90_RETRAIN_ON_LOSS=0 restores the old behaviour of holding a link
- * whose receiver has stopped decoding. */
-static bool retrain_on_loss_due(void)
+ * The caller passes its own cap because the two are different; see above. */
+static bool retrain_on_loss_due(int cap)
 {
     int64_t now;
 
-    if (me_max_loss_retrains() <= 0)
+    if (cap <= 0)
         return false;
-    if ((int) g_loss_retrains >= me_max_loss_retrains())
+    if ((int) g_loss_retrains >= cap)
         return false;
     now = trace_now_ms();
     if (g_last_loss_retrain_ms != 0
@@ -6814,7 +6862,8 @@ void me_rx_audio(const int16_t *amp, int len)
                             v34_reneg_begin_locked();
                         }
                     } else if (v34_data_carrier_lost(g_v34)
-                               && retrain_on_loss_due()) {
+                               && retrain_on_loss_due(
+                                      me_v34_max_loss_retrains())) {
                         /* §11.6 first where the peer implements it -- it is
                          * the cheap resynchronisation and keeps the call in
                          * data mode -- and §11.5.1.1/§11.5.2.1 otherwise.  A
@@ -6832,12 +6881,12 @@ void me_rx_audio(const int16_t *amp, int len)
                             ME_LOG("[ME] V.34 data mode has stopped decoding; "
                                    "initiating a §11.6 rate renegotiation "
                                    "(%u of %d)\n",
-                                   g_loss_retrains, me_max_loss_retrains());
+                                   g_loss_retrains, me_v34_max_loss_retrains());
                             v34_reneg_begin_locked();
                         } else {
                             ME_LOG("[ME] V.34 data mode has stopped decoding; "
                                    "initiating a §11.5 retrain (%u of %d)\n",
-                                   g_loss_retrains, me_max_loss_retrains());
+                                   g_loss_retrains, me_v34_max_loss_retrains());
                             (void) restart_v34_phase2_locked(
                                 "data mode stopped decoding; retraining "
                                 "per 11.5");
@@ -8211,7 +8260,7 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                 /* Clear it: at the cap, the condition would otherwise be
                  * re-raised on every block for the rest of the call. */
                 v34_v90_upstream_clear_carrier_lost(g_v34);
-            } else if (retrain_on_loss_due()) {
+            } else if (retrain_on_loss_due(me_v90_max_loss_retrains())) {
                 /* §9.5.1.1.  The renegotiation above is the cheaper of the
                  * two recoveries and is preferred where the peer implements
                  * §9.6.2, but this rig's analogue modem answers Rd with
@@ -8229,7 +8278,7 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                 v34_v90_upstream_clear_carrier_lost(g_v34);
                 ME_LOG("[ME] V.90 upstream carrier lost and §9.6 is not "
                        "available; initiating a §9.5.1.1 retrain (%u of %d)\n",
-                       g_loss_retrains + 1, me_max_loss_retrains());
+                       g_loss_retrains + 1, me_v90_max_loss_retrains());
                 g_loss_retrains++;
                 g_last_loss_retrain_ms = trace_now_ms();
                 (void) restart_v90_phase2_locked(
