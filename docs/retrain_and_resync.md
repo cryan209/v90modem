@@ -742,3 +742,108 @@ noiseless bearer where the downstream never fails. On a real line where the
 downstream *does* degrade, §9.5.2.1 is what has to catch it, and that path has
 no long-call measurement behind it yet. The upstream's 45% incompleteness is
 untouched by any of this and remains the open problem.
+
+## §9.6, closed offline: the peer's CP decodes and the renegotiation completes (2026-08-28)
+
+The previous section left "CP does not decode" open, with a measured lead (the
+CP conditioning preserves a stale equalizer) and the honest note that starting
+from a fresh one did not fix it. It could not have: three defects sat behind
+each other, and the fresh equalizer was the second of them.
+
+**The instrument that broke it open is an offline reproduction, which this
+problem turned out to have.**
+
+```bash
+ME_V90_RENEG_AFTER_MS=20000 ME_V90_RENEG=1 ./v90_engine_replay artifacts/reneg-eq/reneg-r1/live-rx.g711 ulaw
+```
+
+runs V.8, Phases 2–4, data mode and the renegotiation off the recording and
+reproduces the live failure to the millisecond — the peer's S is at a fixed
+position in the audio, so the replay meets it where the live call did. Every
+measurement below is from that command, and every one of them was invisible
+before, because the engine's logs said *nothing at all* while a renegotiation
+ran. Two diagnostics landed with the fix and should be reached for first next
+time: a `[ME] V.90 §9.6 CP window` line at the end of the window (bits, sync
+candidates, valid frames, and rejects split into CRC / structure / semantic),
+and `V90_RENEG_BIT_DUMP=<path>` for the recovered bit stream. The first
+reading of the window classified it immediately: **381 sync candidates, 0
+valid, 382 rejects, all structural, not one CRC reject** — "the frame boundary
+was never even plausible", which is a different problem from "the symbols are
+wrong".
+
+### (a) The DATA-mode upstream receiver never let go of the seam
+
+§9.6.1.1.1's S, S̄, SCR and CP are the Phase-4 four-point signals the ordinary
+T/2 chain demodulates. The T/3 branch is the *data-mode* upstream receiver,
+and it does not stand down on its own: `v90_t3_put_sample()` calls
+`v90_t3_emit_ready()` whenever it has acquired, and that calls
+`process_primary_symbol()` directly. Instrumented, **all 42496 symbols the CP
+stage saw during the renegotiation came from the data receiver** — whose
+equalizer is a supervised least-squares fit to B1 over the negotiated *data*
+constellation. `|z|` sat at **26.8** against the four-point slicer's unit
+circle for the whole window, whatever the T/2 equalizer did. That is why last
+session's fresh equalizer changed nothing: it was resetting a filter whose
+output nobody was using.
+
+### (b) Nothing was allowed to train the fresh equalizer
+
+`V34_RX_STAGE_V90_CP` freezes blind CMA. That is right at startup, where Phase
+3 trained those taps moments earlier, and wrong at a renegotiation, where they
+were last trained before data mode. With the freeze lifted, the
+decision-directed Phase-4 tracker took ownership on the **third symbol** and
+stood CMA down again — and a decision-directed loop is meaningless at 27× the
+unit circle. Both now stand aside while the CP conditioning finds the *level*,
+on Figure 8's SCR, which is scrambled ones and therefore constant modulus,
+i.e. training material. **Level first, then phase.** Measured: `|z|` 1.377 →
+1.049 in 1599 bauds. (`phase4_cma_converged()` could not be reused as-is: it
+is scoped to `V34_RX_STAGE_PHASE4_TRN`, and a renegotiation has no TRN stage
+of its own.)
+
+### (c) The framer only ever saw the fragments a hypothesis lock covered
+
+The bits reaching the Table-14 framer are emitted under `mp_hypothesis >= 0`.
+That is a startup arrangement — the V.34 MP search finds the preamble, replays
+the frame so far, then streams — and a renegotiation breaks it: SCR
+descrambles to a **solid run of ones**, so the 17-one preamble gate reads
+18/18 for up to 2000 ms. The search locked and was rejected 91 times inside
+the window and the framer was handed only those fragments.
+
+**There is nothing to search for.** The domain is differential, the dibit
+transform is the fixed negation (`MP_HYPOTHESIS_DIFF_INVERSE`), the scrambler
+is the analogue modem's GPA (tap 4) and the bit order is b0,b1 — all four
+fixed by §8.5.2/§10.1.3.3 and the constellation table, not by the channel.
+Decoding **every** symbol that way, offline over the same recording's symbols,
+recovers the SCR as 1.5 s of unbroken ones and then **47 CP frames, every gap
+exactly 700 bits and every consecutive pair bit-identical**. So the
+demodulation had been right all along; only the framer's view of it was not.
+The framer owns sync, length, CRC and semantics, which is what it is written
+to do. Scoped to the renegotiation (`ME_V90_RENEG_CP_STREAM=0` disables);
+startup keeps the search.
+
+### Result
+
+The window now reports **59 valid frames, 700 bits, drn=19** — the length the
+peer's own log says it built — and the sequence runs to the end: `valid
+far-end data-mode CP` → MP′ → `valid far-end CP′` → `Ed (12 symbols)` → `B1d`
+→ **`Rate renegotiation 1 complete; data mode resumed after B1d`**.
+
+Scored across the four recordings that carry a peer-answered renegotiation,
+one variable, both arms built from the same tree: **renegotiation 1 completes
+4/4 with these fixes and 0/4 without**, every baseline arm ending in §9.6.1's
+timeout.
+
+**Not established: whether the peer accepts our Ed and resumes.** A
+recording's peer behaves as recorded, and this one never received an Ed to
+answer — its CP′ in the capture is a genuine response to the plain MP we were
+sending at the time, not to an MP′ we never sent. Initiating therefore stays
+default off (`ME_V90_RENEG=1`) until a live call says otherwise;
+`ME_V90_RENEG_AFTER_MS=<n>` provokes one on a healthy call
+(`tools/soak/v90_reneg_probe.sh`).
+
+**Method note, and it is the fourth time in this project.** The failing thing
+was ours and the evidence was in our own signal path, not in the peer's
+behaviour: the premise that had to be tested was not "does the peer send CP"
+but "what do our own symbols say", and the answer came from decoding the
+receiver's own dumped dibits with the settings the code itself pins. When a
+receiver locks a perfect preamble and then rejects every frame, dump the bits
+and decode them outside the receiver before changing anything inside it.
