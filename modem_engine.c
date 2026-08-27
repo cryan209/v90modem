@@ -4087,7 +4087,24 @@ static bool v90_ja_heuristic_allowed(const char *source)
         && received.downstream_rate_code <= 5)
         return true;
 
-    fallback_ms = parse_env_int("ME_V90_JA_HEURISTIC_FALLBACK_MS", 0);
+    /* §9.3.1.3: "After receiving Ja, the digital modem may wait for up to
+     * 500 ms and shall then transmit signal Sd for 384T".  The condition is
+     * RECEIVING Ja -- a signal -- not decoding a CRC-valid DIL descriptor out
+     * of it, and the wait it allows is bounded.  Suppressing the heuristic
+     * with no bound waits instead for the 6000 ms interop fallback in
+     * v90.c, which is 12x the clause's allowance and far past this peer's
+     * patience: measured 2026-08-27, SmartLink enters WaitForSd, receives
+     * digital silence from us (its own log: "Error Energy = -0.000" for the
+     * whole window) and retrains after ~1.9 s.  On a rig sitting in the §34
+     * Ja-parse blocker that cost 0 of 25 calls any V.90 data mode at all;
+     * with the clause's own 500 ms, calls reached data mode again.
+     *
+     * It does not disturb a healthy call, which is what makes 500 the right
+     * default rather than a rescue knob: §35k measured a healthy descriptor
+     * arriving a median 0.3 s into Phase 3, so the bound is only reached when
+     * the descriptor is late or never coming -- exactly the case where the
+     * old behaviour deadlocked.  0 restores the unbounded wait. */
+    fallback_ms = parse_env_int("ME_V90_JA_HEURISTIC_FALLBACK_MS", 500);
     if (first_suppressed_ms == 0)
         first_suppressed_ms = trace_now_ms();
     else if (fallback_ms > 0
@@ -4359,6 +4376,31 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
                    (double)g_rx_audio_samples / 8000.0,
                    g_v34 ? 1 : 0, g_v90_dil_parse_logged ? 1 : 0,
                    g_v34 ? v34_get_rx_stage(g_v34) : -1, longest, longest_h);
+        }
+    }
+    /* V90_JA_BIT_DUMP=<path> writes every hypothesis' accumulated Ja bits as
+     * one ASCII line of '0'/'1' per hypothesis, rewritten each time this runs.
+     * The parser's verdict is a single bool; when it says no, the only way to
+     * find out WHY is to look at the bits it was handed against Table 12. */
+    {
+        const char *dump = getenv("V90_JA_BIT_DUMP");
+
+        if (dump && *dump && g_v34) {
+            FILE *f = fopen(dump, "w");
+
+            if (f) {
+                for (int h = 0; h < 24; h++) {
+                    int n = v34_v90_copy_phase3_ja_bits(g_v34, h, unpacked,
+                                                        V90_DIL_CAPTURE_MAX_BITS);
+                    if (n <= 0)
+                        continue;
+                    fprintf(f, "hyp%d %d ", h, n);
+                    for (int b = 0; b < n; b++)
+                        fputc((unpacked[b] & 1) ? '1' : '0', f);
+                    fputc('\n', f);
+                }
+                fclose(f);
+            }
         }
     }
     if (!g_v34 || g_v90_dil_parse_logged)

@@ -75,7 +75,49 @@ TRN2d for no more than 2000 ms followed by MP sequences".  Replaying
 `goal-v90-reneg-b-113038Z` through the fixed engine now puts **384T + 24T
 exactly** on the transmit tap.
 
-**Still open: whether the peer answers.**  A recording's peer behaves as
+**ANSWERED LIVE (2026-08-27): the peer detects it, and two more defects of
+ours were behind that.**  With a conformant Rd the SmartLink peer prints a
+message this project's corpus had never contained --
+`VPcmFloModem (V90): rate renegotiation detected !!` -- followed by
+`setV90RateReneg called` and its Phase 4 `linear mapping study in TRN2`.  So
+it implements §9.6.1.2, and the old default rested on a signal it was never
+given.
+
+Two further defects, each found by the peer's own stopwatch, and its verdict
+is DETERMINISTIC per setting -- one call characterises an arm, exactly as
+§33 found for TRN1d:
+
+| arm | peer study | first retrain after detection |
+| --- | --- | --- |
+| Rd fix only, TRN2d 4000T | **failed 0/4** | 0.82 s x4 |
+| + TRN2d 16000T | **succeeded 4/4** | 2.32 s x4 |
+| + MP acknowledgement reset | **succeeded 3/3** | none within 5 s |
+
+**(a) The renegotiation's TRN2d was at the startup length.**  §9.6.1.1.1
+allows TRN2d "for no more than 2000 ms" and we sent 4000T = 500 ms -- the
+§9.4.1.2 startup value, which has its own measured tuning (§38: 10398T and
+12000T both graded WORSE at startup, so the two must not share a knob).  But
+startup gives the peer 20004T of TRN1d to train against and §9.6.1.1.1 gives
+it nothing but TRN2d, and this peer's study needs ~2.76 s.  At 500 ms it gave
+up after 0.54 s.  New `ME_V90_RENEG_TRN2D_SYMBOLS`, default 16000 (the
+clause's ceiling).
+
+**(b) The renegotiation opened on MP', not MP.**  §9.6.1.1.1 transmits MP and
+conditions the receiver to receive CP; §9.6.1.2.3 sends MP' only *after* a CP
+arrives.  `cp_ack_received`/`data_cp_received` are latched from the startup
+that reached data mode, so we offered the acknowledged form before this
+procedure had seen a single CP.  Same family as the Rd defect -- startup
+state carried into §9.6.  Both are now cleared in
+`v90_rate_renegotiation_start()`.
+
+**Where it stops now:** the peer's study succeeds and it does not retrain,
+but it sends no CP, so after 56000 symbols we take §9.6.1's own timeout and
+fall through to the §9.5.1.1 retrain -- the correct, clause-defined
+behaviour, and a bounded cost rather than the old hang.  Its
+`setV90RateReneg called, rrn type = 0, constel size = 0` is the next thread
+to pull.  Initiation stays default off until a renegotiation completes.
+
+**Superseded: whether the peer answers.**  A recording's peer behaves as
 recorded whatever we transmit, so this is proven *conformant* and not proven
 *answered*.  `ME_V90_RENEG_AFTER_MS=<n>` provokes one on a healthy call
 (`tools/soak/v90_reneg_probe.sh`); the rig spent 2026-08-27 in the §34

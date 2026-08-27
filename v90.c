@@ -55,6 +55,48 @@
  * environment override for controlled receiver-conditioning A/B work. */
 #define V90_TRN2D_DEFAULT_SYMBOLS 4000
 
+/* §9.6.1.1.1 lets a rate renegotiation's TRN2d run "for no more than
+ * 2000 ms" -- 16000T at 8000 symbols/s -- where §9.4.1.2's startup TRN2d has
+ * its own minimum of 2040T and its own measured tuning (see
+ * docs/v90_phase3_s_and_rbs_false_positive.md §38, where 10398T and 12000T
+ * both graded WORSE than the 4000T default at startup).  They are different
+ * budgets and must not share a knob.
+ *
+ * Startup gets a Phase 3 the peer can train against -- 20004T of TRN1d ahead
+ * of Jd -- and a renegotiation gets none of that: §9.6.1.1.1 is Rd, R̄d,
+ * TRN2d, MP and nothing else, so TRN2d is the ONLY training material the
+ * peer's Phase 4 study has.  Measured against the SmartLink rig
+ * (artifacts/jafb-500): its "linear mapping study in TRN2" needs ~2.76 s to
+ * complete -- the §33 fingerprint, unchanged here -- and against 4000T
+ * (500 ms) of renegotiation TRN2d it gave up after 0.54 s and retrained, on
+ * all of the renegotiations tried.  So default to the clause's ceiling.
+ *
+ * ME_V90_RENEG_TRN2D_SYMBOLS overrides; §9.6.1.1.1's 2000 ms is the cap. */
+#define V90_RENEG_TRN2D_DEFAULT_SYMBOLS 16000
+
+static int v90_reneg_trn2d_symbols(void)
+{
+    static int cached;
+
+    if (cached == 0) {
+        const char *value = getenv("ME_V90_RENEG_TRN2D_SYMBOLS");
+        char *end;
+        long parsed;
+
+        cached = V90_RENEG_TRN2D_DEFAULT_SYMBOLS;
+        if (value && *value) {
+            parsed = strtol(value, &end, 10);
+            if (end != value && *end == '\0'
+                && parsed >= 2040 && parsed <= 16000)
+                cached = (int)parsed;
+        }
+        cached -= cached % V90_FRAME_LEN;
+        if (cached < 2040)
+            cached = 2040;
+    }
+    return cached;
+}
+
 static int v90_trn2d_symbols(void)
 {
     static int cached;
@@ -3399,6 +3441,13 @@ bool v90_analyse_dil_descriptor(const v90_dil_desc_t *desc, v90_dil_analysis_t *
 }
 
 /* Generate one raw G.711 codeword for the Phase 3/4 transmit sequence. */
+/* §9.4.1.2 startup TRN2d, or §9.6.1.1.1's renegotiation TRN2d. */
+static int v90_trn2d_symbols_for(const v90_state_t *s)
+{
+    return (s && s->reneg_active) ? v90_reneg_trn2d_symbols()
+                                  : v90_trn2d_symbols();
+}
+
 static uint8_t v90_phase3_codeword(v90_state_t *s)
 {
     int sign;
@@ -3848,7 +3897,7 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
             if (s->sample_count == V90_RI_POST_CP_SYMBOLS) {
                 fprintf(stderr,
                         "[V90] Phase 4: CPt accepted; TRN2d (%d mapped symbols, D=%d, K=%d)\n",
-                        v90_trn2d_symbols(), s->phase4_d, s->phase4_k);
+                        v90_trn2d_symbols_for(s), s->phase4_d, s->phase4_k);
                 /* The 24th barred R-i symbol completes the CPt
                  * acknowledgement (§9.4.1.1).  Expose TRN2d immediately
                  * after returning that symbol so the next codeword is the
@@ -3862,7 +3911,7 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
             uint8_t codeword = v90_phase4_codeword(s, V90_PHASE4_INPUT_ONES);
 
             s->sample_count++;
-            if (s->sample_count >= V90_RI_POST_CP_SYMBOLS + v90_trn2d_symbols()) {
+            if (s->sample_count >= V90_RI_POST_CP_SYMBOLS + v90_trn2d_symbols_for(s)) {
                 if (s->v92_mode) {
                     /* §9.6.1.1.1/V.92: TRN2d done; condition for SUVu and
                      * transmit SUVd sequences over the TRN2d mapper. */
@@ -5429,6 +5478,19 @@ bool v90_rate_renegotiation_start(v90_state_t *s)
     s->phase4_hold_logged = false;
     s->phase4_ri_align_remaining = 0;
     s->training_complete = false;
+    /* §9.6.1.1.1 has the renegotiation transmit MP and "condition its
+     * receiver to receive CP sequences"; §9.6.1.2.3 sends MP' only AFTER a CP
+     * has been received.  The acknowledgement state is latched from the
+     * startup that got us into data mode, so without clearing it the
+     * renegotiation opens on MP' -- the acknowledged form -- before this
+     * procedure has seen a single CP, and the peer is offered the answer to a
+     * question it has not asked.  Measured against the SmartLink rig
+     * (artifacts/reneg-trn2d): its Phase 4 study SUCCEEDS on our TRN2d and it
+     * then retrains 0.80 s later, which is where that lands.  Same family as
+     * the Rd defect above -- startup state carried into §9.6. */
+    s->cp_ack_received = false;
+    s->data_cp_received = false;
+    (void) v90_build_mp_type0(s, false);
     fprintf(stderr,
             "[V90] Rate renegotiation %d: sending Rd for %dT on a data frame "
             "boundary (§9.6.1.1)\n",

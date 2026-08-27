@@ -41,9 +41,9 @@ mkdir -p "$OUT"
 # byte server.log and no call at all, which reads exactly like a rig that is
 # refusing to connect.  That silently burned five of six calls once; fail
 # fast instead.
-if pgrep -f sip_v90_modem > /dev/null 2>&1; then
+if pgrep -x sip_v90_modem > /dev/null 2>&1; then
   echo "CONTROL: a sip_v90_modem is already running -- kill it first:"
-  pgrep -lf sip_v90_modem | sed 's/^/  /'
+  pgrep -lx sip_v90_modem | sed 's/^/  /'
   exit 1
 fi
 
@@ -59,7 +59,7 @@ for r in $(seq 1 "$CALLS"); do
   # every attempt and there is no V.90 data mode to renegotiate from at
   # all.  It preloads this peer's known descriptor so Sd can start; it is
   # a bypass, not a fix, and it is here only so §9.6 can be reached.
-  EXTRA_ENV="ME_V90_RENEG_AFTER_MS=$AFTER ME_V90_RENEG=1 ${DIL_PROFILE:+ME_V90_DIL_PROFILE=$DIL_PROFILE}" \
+  EXTRA_ENV="ME_V90_RENEG_AFTER_MS=$AFTER ME_V90_RENEG=1 ${DIL_PROFILE:+ME_V90_DIL_PROFILE=$DIL_PROFILE} ${MORE_ENV:-}" \
     SOAK_SECONDS="$SECS" bash "$SP/v90_notch_ab.sh" "$d" 3 > "$d.out" 2>&1
   echo "  --- our side ---"
   grep -aE "RENEG_AFTER_MS probe|Rate renegotiation|renegotiation (timeout|timed out)|rate renegotiation" \
