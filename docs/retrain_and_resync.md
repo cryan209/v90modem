@@ -847,3 +847,48 @@ but "what do our own symbols say", and the answer came from decoding the
 receiver's own dumped dibits with the settings the code itself pins. When a
 receiver locks a perfect preamble and then rejects every frame, dump the bits
 and decode them outside the receiver before changing anything inside it.
+
+### Verified LIVE: 3/3, and the peer resumes data mode (2026-08-28)
+
+Three calls against the rig with `tools/soak/v90_reneg_probe.sh`, our side
+opening a renegotiation 20 s into data mode
+(`artifacts/reneg-cpstream-222512Z`). **All three printed `Rate renegotiation
+1 complete; data mode resumed after B1d`**, against a standing record of 0 for
+4 before this change, every one of which ended in §9.6.1's timeout.
+
+**The confirmation that matters is in the peer's own log, and it is one word.**
+Its startup builds `CPnot on **MP** receive`; during the renegotiation it
+builds
+
+```
+<621.271583> VPcmFloModem (V90): rate renegotiation detected !!
+<622.792002> V90Phase4Demodulator: disable linear mapping study      <- our TRN2d graded OK
+<622.793334> VPcmFloModem (V90): Building CP, CP length = 700
+<623.291438> VPcmFloModem (V90): Building CPnot on MPnot receive     <- our MP-PRIME
+<623.452262> V34HSHAKE: txstate EXMIT=>DATAXMIT
+```
+
+`MPnot` is MP′, and we only send MP′ after decoding a CP — so the peer is
+reporting our half of the fix from its own side. It then returns to
+`DATAXMIT`, i.e. it accepts the exchange and resumes data mode, which is
+exactly the question a recording could not answer. All three calls ran their
+full 105 s soak schedule through the renegotiation with data flowing both
+ways.
+
+**One trap, and the control is why it is not in the result.** The peer's DTE
+receives nothing for about 30 s in the middle of every one of these calls,
+identically to the byte, which looks exactly like a renegotiation cost. It is
+not: two control calls with no renegotiation at all
+(`artifacts/reneg-control-223605Z`) show the **same 30 s freeze at the same
+byte count** (174591), and the renegotiation arm actually froze slightly later
+than the control. It is a pre-existing property of the rig's DTE path. A
+deterministic outage sitting near a change is not evidence about the change.
+
+**Initiating stays default off** (`ME_V90_RENEG=1`), deliberately. The engine's
+own trigger is an upstream receiver that has stopped decoding, and on this rig
+that is the chronically broken direction, so turning it on would re-open
+exactly what §39 closed when `ME_V90_RETRAIN_ON_LOSS` went to 0: tearing at a
+working downstream on the upstream's account. What would settle it is the same
+experiment §39 used — 600 s calls, arms alternated, `ME_V90_RENEG` the only
+variable, scored on carried time and line counts — not a shorter run and not
+an argument.
