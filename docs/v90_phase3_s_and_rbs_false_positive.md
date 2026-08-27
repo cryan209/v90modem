@@ -2668,3 +2668,51 @@ which is the correct absolute calibration of this rig is still unsettled. What
 §38 shows is only that the length that wins the first attempt *and* the length
 that flips the level estimate are different lengths, so the two effects are
 separable and the rate cost was never the price of the fix.
+
+## 39. Long soak of the shipping defaults: the startup fix holds, and what is left is ours too (2026-08-27)
+
+§38's A/B ran the standard 105 s schedule, which proves the path exists. Six
+calls at **600 s** with **no `ME_*` overrides at all** — the defaults as shipped
+— `artifacts/v90-longsoak-233217Z`, `tools/soak/v90_long_soak.sh`:
+
+| call | rate | restarts before / after data | carried | downstream | upstream |
+|---|---|---|---|---|---|
+| r1 | 52000 | 0 / 7 | 198 s | 31847 lines, 25334 missing | 11713, 6169 missing |
+| r2 | 52000 | 0 / 3 | 629 s | 138345, 62108 missing | 85022, 64863 missing |
+| **r3** | 52000 | **0 / 0** | **629 s** | **222377 lines, 4 missing** | 64767, 35193 missing |
+| r4 | 52000 | 0 / 6 | 611 s | 135029, 87282 missing | 55882, 51312 missing |
+| r5 | 52000 | 0 / 5 | 148 s | 36694, 35972 missing | 14011, 14237 missing |
+| r6 | 52000 | 0 / 5 | 239 s | 65389, 39001 missing | 31878, 32523 missing |
+
+**The startup contract is fixed and stays fixed: 6/6 calls reached data mode
+and 6/6 did it on the first Phase 4 attempt**, at 52000 bps, over ten-minute
+calls. That is the whole of what §38 claimed, held for 40 minutes of data mode.
+
+**What the long schedule exposes is a different defect, and it is also ours.**
+Only r3 held. In **four of the five** calls that did not, the first disruption
+after data mode is our own detector:
+
+```
+Rx - V.90 upstream carrier lost: 0.704 from the constellation for 3200
+symbols (settled at 0.155)
+V.90 upstream carrier lost and §9.6 is not available; initiating a
+§9.5.1.1 retrain (1 of 4)
+```
+
+The **downstream at that moment is perfect** — r3, which never triggered,
+delivered **222377 lines with 4 missing over ten minutes**, and every other
+call's downstream is clean right up to the retrain. So we tear down a working
+direction to chase the known-broken one, and a retrain does not fix the
+upstream: its problem is the frame-phase/eye collapse documented in
+`docs/v90_upstream_data_path.md`, which survives a fresh handshake.
+
+§9.5.1.1 says the digital modem **may** initiate a retrain at any time, so both
+policies conform and the question is purely which pays.
+`tools/soak/v90_loss_retrain_ab.sh` runs it, alternated, at 600 s.
+
+**Read `carried`, not the schedule length.** Every call completes its 600 s
+schedule whatever happens; `carried` is the last moment the link actually
+delivered a byte, so r1's "198 s" is a call that spent two thirds of its life
+handshaking. And read **line counts, not byte percentages**: an unlocked
+receiver emits garbage that inflates the byte total, which is why r5 reads
+"95% of 346634 B" while missing half its downstream lines.

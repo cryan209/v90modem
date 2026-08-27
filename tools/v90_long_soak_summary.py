@@ -71,8 +71,11 @@ def call_stats(d):
         a = os.path.join(d, att[-1])
         down = seq_stats(os.path.join(a, "rx_sock.bin"), PAT_D)
         up = seq_stats(os.path.join(a, "rx_pty.bin"), PAT_U)
-        # Both pumps stamp a wall time against a byte count; the last stamp is
-        # how long the schedule actually ran.
+        # Both pumps stamp a wall time against a byte count, so the last stamp
+        # is the last moment the link DELIVERED anything -- not how long the
+        # schedule ran, which is always SOAK_SECONDS.  A call that completes
+        # its schedule but stops carrying at 198 s of 600 is the interesting
+        # case and this is the column that shows it.
         for idx in ("rx_sock.idx", "rx_pty.idx"):
             p = os.path.join(a, idx)
             if not os.path.exists(p):
@@ -109,7 +112,7 @@ def main(outdir):
     first_clean = sum(1 for _, s in rows
                       if s["rate"] and s["retr_before"] == 0)
     reached = sum(1 for _, s in rows if s["rate"])
-    print(f"{'call':10} {'TRN1d':>6} {'rate':>6} {'retr':>5} {'held':>7}  "
+    print(f"{'call':10} {'TRN1d':>6} {'rate':>6} {'retr':>5} {'carried':>7}  "
           f"downstream / upstream")
     for name, s in rows:
         print(f"{name:10} {str(s['trn']):>6} {str(s['rate'] or '-'):>6} "
@@ -124,7 +127,7 @@ def main(outdir):
     um = sum(s["up"][3] for _, s in rows if s["up"])
     ul = sum(s["up"][0] for _, s in rows if s["up"])
     print(f"downstream {dl} lines, {dm} missing; upstream {ul} lines, "
-          f"{um} missing; total held "
+          f"{um} missing; total carried "
           f"{sum(s['hold'] for _, s in rows):.0f}s")
 
 
