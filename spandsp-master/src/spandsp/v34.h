@@ -555,6 +555,15 @@ SPAN_DECLARE(void) v34_force_phase4(v34_state_t *s);
     not run there. */
 SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s);
 
+/* V.90 9.6.1.1.1 renegotiation receive conditioning: S, S-bar, then CP. */
+SPAN_DECLARE(void) v34_v90_condition_rx_for_reneg_s(v34_state_t *s);
+
+/* V.90 9.6.1.1.1: watch for the analogue modem's S answer to our own Rd. */
+SPAN_DECLARE(void) v34_v90_watch_reneg_s(v34_state_t *s, int on);
+
+/* V.90 9.6.1.1.1 CP conditioning for a rate renegotiation (fresh equalizer). */
+SPAN_DECLARE(void) v34_v90_force_reneg_cp_rx(v34_state_t *s);
+
 /*! Force the primary-channel receiver into Phase 3 PP/TRN conditioning.
     Intended for offline V.90 replay after INFO1 has already been decoded;
     the trained equalizer is preserved by a later v34_force_phase4(). */

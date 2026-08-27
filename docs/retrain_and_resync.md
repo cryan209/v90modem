@@ -110,6 +110,56 @@ procedure had seen a single CP.  Same family as the Rd defect -- startup
 state carried into §9.6.  Both are now cleared in
 `v90_rate_renegotiation_start()`.
 
+**The peer DOES send CP -- the premise was wrong (2026-08-28).**  Its own log,
+during a renegotiation:
+
+```
++1.520  V90Phase4Demodulator: disable linear mapping study   (our TRN2d graded OK)
++1.520  VPcmFloModem (V90): Building CP, CP length = 700 (clr=0)
++2.020  VPcmFloModem (V90): Building CPnot on MP receive, CPnot length = 700
++7.060  V34HSHAKE: txstate DATAXMIT=>SILENCERETRAIN
+```
+
+So it grades our TRN2d, builds CP, **receives our MP** and builds CP' -- the
+whole of §9.6.1.2.3 -- and gives up ~5 s later because no Ed comes back.
+**We are not decoding its CP.**  Identical in three consecutive
+renegotiations.
+
+**Fourth defect: we never conditioned the receiver for the S answer.**
+§9.6.1.1.1 says "condition its receiver to detect S, S-bar, **and CP**", and
+Figure 8/V.90 says why -- the analogue modem answers Rd with S (128T), S-bar
+(16T) and an optional SCR of up to 2000 ms, and only THEN sends CP.
+`enter_v90_phase4_rx_locked()` is the STARTUP conditioning and goes straight
+to the CP search, which is right there (after DIL the peer begins repeated
+CPt at once, and startup Phase 4 contains no S at all) and wrong here.
+Measured: the peer's S is on the wire **258 ms after our R-bar-d and 40 ms
+long -- 128T at 3200 baud, §9.6.2.1.1 to the symbol -- with 98.7% of the
+block energy in §10.1.3.7's three bins**, and we logged no S detection of any
+kind.
+
+**Detect it spectrally, not on the constellation.**  Conditioning
+`V34_RX_STAGE_PHASE4_S` declared S on ordinary data-mode symbols **140 ms**
+after being armed -- 170 ms *before* the peer's real S -- and the CP search
+then ran through the transition it exists to find.  The §9.6.1.2 responder's
+three-bin Goertzel needs neither equalizer, carrier loop nor timing loop; it
+now runs for our own renegotiation too (`v34_v90_watch_reneg_s()`), and its
+gate on `V34_RX_STAGE_DATA` had to be relaxed because by then the receiver is
+in `V34_RX_STAGE_V90_CP` -- so the DATA gate silently disabled exactly the
+case the initiating clause requires.  Live: S detected at **+339 ms**, 1:1
+with every renegotiation.
+
+**Still not decoding, and the next lead is the equalizer.**  The CP
+conditioning deliberately preserves the Phase-3 channel solution (§9.4.2.2
+"assumes the channel is static through this seam"), which is right at startup
+and wrong here: at a renegotiation that solution was last trained before data
+mode, tens of seconds earlier, because the T/3 upstream receiver owns data
+mode.  The `[EQ]` trace during a renegotiation's CP stage reads **mag=26.8
+against target_mag=1.29** -- about 20x out.  Figure 8's SCR is training
+material (scrambled ones, constant modulus), so
+`v34_v90_force_reneg_cp_rx()` now starts from a clean equalizer and lets the
+SCR train it.  **That alone does not make CP decode** -- four renegotiations,
+no CP accepted in the window, §9.6.1's timeout each time.  Open.
+
 **Where it stops now:** the peer's study succeeds and it does not retrain,
 but it sends no CP, so after 56000 symbols we take §9.6.1's own timeout and
 fall through to the §9.5.1.1 retrain -- the correct, clause-defined

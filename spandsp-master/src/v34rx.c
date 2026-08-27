@@ -6494,8 +6494,11 @@ static void tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complex
         return;
     }
     /*endif*/
-    /* Log equalizer error magnitude periodically */
-    if ((s->duration & 0xFF) == 0)
+    /* Keep the live modem path quiet by default.  This hook runs every 256
+     * baud updates during V.90 CP; synchronous stderr writes can consume the
+     * entire media-tick margin during a long loopback.  Opt in only when the
+     * equalizer trace is explicitly requested. */
+    if (getenv("ME_V34_EQ_DIAG") && (s->duration & 0xFF) == 0)
     {
         float emag = sqrtf(ez.re*ez.re + ez.im*ez.im);
         float zmag = sqrtf(z->re*z->re + z->im*z->im);
@@ -14403,9 +14406,15 @@ static void v34_rx_watch_peer_reneg_s(v34_rx_state_t *s,
     int i;
     int k;
 
-    if (s->stage != V34_RX_STAGE_DATA
+    /* Responding (§9.6.1.2) is a data-mode watch by definition.  Detecting the
+       answer to a renegotiation WE opened is not: by then the receiver has
+       been conditioned for CP and its stage is V34_RX_STAGE_V90_CP, so gating
+       on DATA silently disabled exactly the case §9.6.1.1.1 requires.  The
+       watch flag is only ever armed across our own Rd, so it carries its own
+       scope. */
+    if ((s->stage != V34_RX_STAGE_DATA  &&  !s->reneg_s_watch)
         ||
-        !v34_reneg_respond_enabled()
+        (!v34_reneg_respond_enabled()  &&  !s->reneg_s_watch)
         ||
         s->baud_rate < 0  ||  s->baud_rate >= 6)
     {
@@ -15309,6 +15318,31 @@ SPAN_DECLARE(void) v34_set_put_phase4_bit(v34_state_t *s,
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.90 §9.6.1.1.1: arm/disarm the watch for the analogue modem's S answer to
+   our own Rd.  Figure 8/V.90 puts S (128T), S-bar (16T) and an optional SCR
+   of up to 2000 ms between our R-bar-d and the peer's CP, and the clause says
+   to "condition its receiver to detect S, S-bar, and CP".
+
+   The receiver stays in V34_RX_STAGE_DATA while this is armed, deliberately:
+   the S detector above is spectral (three narrow bins of §10.1.3.7) and needs
+   neither equalizer, carrier loop nor timing loop, whereas the constellation
+   detector in V34_RX_STAGE_PHASE4_S declared S on ordinary data-mode symbols
+   140 ms after being armed -- 170 ms before the peer's real S was on the wire
+   -- and the CP search then ran straight through the transition it exists to
+   find. */
+SPAN_DECLARE(void) v34_v90_watch_reneg_s(v34_state_t *s, int on)
+{
+    if (!s)
+        return;
+    /*endif*/
+    s->rx.reneg_s_watch = (on != 0);
+    s->rx.reneg_s_reported = false;
+    s->rx.reneg_s_blocks = 0;
+    s->rx.reneg_s_samples = 0;
+    s->rx.reneg_s_energy = 0.0f;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
 {
     if (!s || !s->rx.v90_mode || s->rx.calling_party || !s->rx.put_phase4_bit)
@@ -15377,6 +15411,38 @@ SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
 
     span_log(&s->logging, SPAN_LOG_FLOW,
              "Rx - V.90 Phase 4: immediate CPt acquisition armed (tap=4, domain=diff, order=b0,b1)\n");
+}
+/*- End of function --------------------------------------------------------*/
+
+/* V.90 §9.6.1.1.1 CP conditioning, for a RATE RENEGOTIATION rather than
+   startup.
+
+   The startup path above deliberately preserves the Phase-3 channel solution,
+   because §9.4.2.2 assumes the channel is static across that seam and Phase 3
+   has only just finished training it.  A renegotiation has no such seam: the
+   equalizer it would preserve was last trained before data mode, tens of
+   seconds earlier, and the ordinary receive chain has been idle throughout
+   because the T/3 upstream receiver owns data mode.  Measured live against
+   the SmartLink rig, the [EQ] trace during a renegotiation's CP stage reads
+   mag=26.8 against target_mag=1.29 -- the preserved solution is ~20x out, and
+   the peer's CP, which is on the wire and 700 bits long, decoded not once.
+
+   Figure 8/V.90 provides for exactly this: between S-bar and CP the analogue
+   modem sends an optional SCR for up to 2000 ms, and SCR is scrambled ones --
+   constant modulus, i.e. training material.  So start from a clean equalizer
+   and let the SCR train it, rather than carrying a stale one into CP. */
+SPAN_DECLARE(void) v34_v90_force_reneg_cp_rx(v34_state_t *s)
+{
+    if (!s)
+        return;
+    /*endif*/
+    v34_force_v90_phase4_cp_rx(s);
+    equalizer_reset(&s->rx);
+    /* Save the FRESH taps: the periodic equalizer restore would otherwise put
+       the stale ones back a few hundred milliseconds later. */
+    equalizer_save(&s->rx);
+    span_log(&s->logging, SPAN_LOG_FLOW,
+             "Rx - V.90 9.6: CP conditioning with a fresh equalizer; SCR trains it\n");
 }
 /*- End of function --------------------------------------------------------*/
 

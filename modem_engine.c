@@ -3079,6 +3079,9 @@ static int me_v34_retrain_after_ms(void)
  * Uses the shared DATA-entry epoch, which the native V.90 handover sets.
  * Zero, the default, means never. */
 static bool g_v90_reneg_probe_done = false;
+/* §9.6.1.1.1: set while the receiver is watching for the peer's S/S-bar
+ * answer to Rd, cleared when it hands over to the CP search. */
+static bool g_v90_reneg_await_s = false;
 
 static int me_v90_reneg_after_ms(void)
 {
@@ -3716,6 +3719,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v34_data_entry_ms = 0;
     g_v34_reneg_probe_done = false;
     g_v90_reneg_probe_done = false;
+    g_v90_reneg_await_s = false;
     g_v34_retrain_probe_done = false;
     g_tx_disrupt_logged = 0;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
@@ -6824,7 +6828,13 @@ void me_rx_audio(const int16_t *amp, int len)
                         }
                     }
                     if (rx_event == V34_EVENT_PEER_RENEG_S
-                        && g_v90 && !g_v92_active) {
+                        && g_v90 && !g_v92_active
+                        && !v90_rate_renegotiation_active(g_v90)) {
+                        /* §9.6.1.2 responds to a renegotiation the PEER
+                         * opened.  While one of OURS is running, the same S
+                         * is Figure 8/V.90's answer to our Rd, not a new
+                         * request -- responding to it would open a second
+                         * renegotiation inside the first. */
                         /* §9.6.1.2: "After detecting S, the digital modem
                          * shall clamp circuit 104 ... After detecting the
                          * S-to-S-bar transition, the digital modem shall
@@ -8413,10 +8423,35 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
         if (v90_rate_renegotiation_pending(g_v90)
             && g_v90_data_frame_pos >= V90_DATA_FRAME_LEN) {
             if (v90_rate_renegotiation_start(g_v90)) {
-                /* §9.6.1.1: "condition its receiver to detect S, S-bar and
-                 * CP".  That is the same receiver state Phase 4 starts in, so
-                 * re-enter it rather than open-coding a second version. */
+                /* §9.6.1.1.1: "condition its receiver to detect S, S-bar,
+                 * and CP".  Figure 8/V.90 is why all three are named: the
+                 * analogue modem answers Rd with S for 128T, S-bar for 16T
+                 * and an optional SCR of up to 2000 ms, and only THEN sends
+                 * CP.  enter_v90_phase4_rx_locked() is the STARTUP
+                 * conditioning and goes straight to the CP search, which is
+                 * right there -- after DIL the peer begins repeated CPt at
+                 * once and startup Phase 4 contains no S at all -- but here
+                 * it leaves the receiver hunting CP through the peer's S, so
+                 * the S-to-S-bar transition that re-anchors the frame goes by
+                 * unnoticed.  Measured (artifacts/reneg-mp): the peer's S is
+                 * on the wire 258 ms after our R-bar-d and 40 ms long -- 128T
+                 * at 3200 baud, §9.6.2.1.1 to the symbol -- with 98.7% of the
+                 * block energy in §10.1.3.7's three bins, and we logged no S
+                 * detection of any kind. */
                 enter_v90_phase4_rx_locked();
+                if (!g_v92_active) {
+                    /* Leave the receiver in DATA and watch for S spectrally.
+                     * The constellation detector in V34_RX_STAGE_PHASE4_S
+                     * declared S on ordinary data-mode symbols 140 ms after
+                     * being armed, 170 ms before the peer's real S was on the
+                     * wire, and the CP search then ran straight through the
+                     * transition it exists to find. */
+                    v34_v90_watch_reneg_s(g_v34, 1);
+                    g_v90_reneg_await_s = true;
+                    ME_LOG("[ME] V.90 §9.6.1.1.1: watching for the peer's S "
+                           "answer to Rd before the CP search\n");
+                    trace_phase("V90 reneg watching for peer S");
+                }
                 /* The analogue modem's answer ends in a fresh B1, so let the
                  * upstream receiver acquire it exactly as it did at startup
                  * rather than carrying the state that just failed. */
@@ -8425,6 +8460,22 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                 if (g_v34)
                     v34_v90_upstream_clear_carrier_lost(g_v34);
             }
+        }
+
+        /* §9.6.1.1.1's hand-off: the receiver was conditioned to detect the
+         * peer's S and the S-to-S-bar transition; once that has gone by,
+         * Figure 8/V.90 puts an optional SCR of up to 2000 ms and then CP on
+         * the wire, so switch to the CP search.  v34rx advances PHASE4_S to
+         * PHASE4_TRN at the junction because that is where plain V.34 §11.6
+         * goes; in V.90 the same junction is where CP begins. */
+        if (g_v90_reneg_await_s && g_v34
+            && v34_get_rx_event(g_v34) == V34_EVENT_PEER_RENEG_S) {
+            g_v90_reneg_await_s = false;
+            v34_v90_watch_reneg_s(g_v34, 0);
+            ME_LOG("[ME] V.90 §9.6.1.1.1: peer S answer detected; "
+                   "conditioning the receiver for CP\n");
+            trace_phase("V90 reneg S answer seen, CP search");
+            v34_v90_force_reneg_cp_rx(g_v34);
         }
 
         /* While the renegotiation runs, the downstream is Rd/R̄d/TRN2d/MP/Ed/

@@ -8830,6 +8830,35 @@ SPAN_DECLARE(int) v34_start_rate_renegotiation(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.90 §9.6.1.1.1: after Rd/R-bar-d the DIGITAL modem shall "condition its
+   receiver to detect S, S-bar, and CP".  Figure 8/V.90 says why: the analogue
+   modem answers Rd with S for 128T, S-bar for 16T and an optional SCR of up
+   to 2000 ms, and only THEN sends CP.
+
+   v34_force_v90_phase4_cp_rx() is the STARTUP conditioning and jumps straight
+   to V34_RX_STAGE_V90_CP, which is right there -- after DIL the analogue
+   modem begins repeated CPt immediately and there is no S in startup Phase 4
+   at all.  Used for a renegotiation it puts the receiver in a CP search while
+   the peer is still transmitting S, so the S/S-bar transition that re-anchors
+   the frame goes by unnoticed and no CP is ever decoded.
+
+   Measured against the SmartLink rig (artifacts/reneg-mp): the peer's S is
+   there on the wire 258 ms after our R-bar-d, 40 ms long -- 128T at 3200 baud,
+   exactly §9.6.2.1.1 -- with 98.7% of the block energy in §10.1.3.7's three
+   bins, and our log recorded no S detection of any kind.
+
+   This is the same conditioning §11.6 already uses (v34_start_rate_renegotiation
+   above), receive side only: V.90's digital modem transmits Rd here, not S. */
+SPAN_DECLARE(void) v34_v90_condition_rx_for_reneg_s(v34_state_t *s)
+{
+    if (!s)
+        return;
+    /*endif*/
+    phase4_rx_conditioning_init(s, V34_RX_STAGE_PHASE4_S,
+                                "9.6 rate renegotiation: S, S-bar, then CP");
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v34_rate_renegotiation_active(v34_state_t *s)
 {
     return (s  &&  s->tx.reneg_active)  ?  1  :  0;

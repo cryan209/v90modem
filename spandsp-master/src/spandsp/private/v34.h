@@ -1213,6 +1213,12 @@ typedef struct
     int reneg_s_samples;
     int reneg_s_blocks;
     bool reneg_s_reported;
+    /* V.90 §9.6.1.1.1: armed while WE have opened a rate renegotiation and are
+       waiting for the analogue modem's S answer (Figure 8/V.90).  The
+       ME_V90_RENEG_RESPOND knob governs RESPONDING to a peer-initiated one;
+       detecting the answer to our own is a "shall" of the initiating clause,
+       so it must not depend on that knob. */
+    bool reneg_s_watch;
 
     /* Plain V.34 data mode: the same "has this receiver stopped decoding"
        question the V.90 upstream answers with v90_t3_sym_err_ema/lost_run.
