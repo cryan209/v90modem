@@ -2731,3 +2731,56 @@ index is right by instrumenting the dumps against a common clock — write the
 receiver's sample counter into both dumps, or emit one dump only. Until the
 mapping is pinned, this tool cannot say anything about the V.90 upstream, and
 the "is it the wire or us" question stays open on this path.
+
+### Mapping pinned; the bound still will not fit, and the reason has moved (2026-08-28)
+
+`ME_V90_UPSTREAM_SYM_DUMP` now records, per symbol, the receiver's
+**input-sample counter** (its position in the recorded 8 kHz tap), the **T/3
+symbol position** (which pins the sub-sample phase — the input sample is 5/6 of
+it) and the **carrier-loop phase** used to derotate that symbol.
+
+**That alone was worth doing, and it settles the contradiction above.** On
+`gated-r3`, symbol 1 sits at input sample **140562**, not the 180000 the
+handover instant implies — a **16000-symbol error**, orders of magnitude
+outside what any equalizer fit tolerates, which is why every fit was a null.
+Spacing measures **2.4999 samples/symbol** across two million symbols, so the
+dump is contiguous. With the mapping recorded, the onset is at tap sample
+**4380562 = 547.6 s**, which is exactly the DATA-bits series' 67% reading plus
+the 17.6 s before data mode. **The DATA-bits index was right and the frames-dump
+index was wrong**; the "91% through" figure should be discarded.
+
+**The bound still does not fit, and the previously-suspected causes are now
+ruled out.** With alignment pinned to ±30 samples at half-sample resolution:
+
+| window | 41 T/2 taps |
+|---|---|
+| clean, symbol 1000000 (t=330 s) | 0.3 dB |
+| clean, symbol 1690000 (t=545.7 s, just before the onset) | 0.3 dB |
+| after the onset, symbol 1700000 (t=548.8 s) | 0.3 dB |
+
+* **Not the loop phase.** It is recorded now and it is tiny (0.0023 rad);
+  undoing the derotation changes the fit by nothing at either 256 or 1024
+  symbols.
+* **Not the window length.** The residual gets *worse* with more data — 5.9 dB
+  at 64 symbols, 2.1 at 128, 0.8 at 256, 0.2 at 1024 — which is the signature
+  of 41 complex taps overfitting 64 symbols and no real fit at any length, not
+  of a slowly time-varying channel.
+* **Not the reference scale or rotation.** Calibrated from the receiver's own
+  reported mean symbol power (706.10) the scale is 0.989, and a rotation sweep
+  puts the symbols 0.155 from the odd-integer lattice against the receiver's
+  own 0.1465. (A *blind* scale sweep is degenerate — it shrinks the
+  constellation until everything lands in one cell, "finding" 0.370 and four
+  points. Calibrate from the power.)
+
+So the open question has moved and is sharper: **a 41-tap T/2 least-squares
+filter cannot reproduce this receiver's own equalized output from the recorded
+tap, and it should be able to — the receiver computes exactly such a filter
+over the T/3 baseband.** Something in the path between the 8 kHz tap and the
+T/3 symbol stream is not being modelled: the resampler to 9600 Hz, the mixing
+timebase (`v90_t3_output_count/9600` rather than the tap's own index), or the
+timing loop's per-symbol interpolation, which makes the symbol spacing not
+exactly `rate/baud` in tap time. **That is the thing to settle next**, and it
+can be settled without a rig: take the receiver's own FSE taps and its own
+interpolation positions and reproduce one symbol by hand from the tap. Until
+the model reproduces the receiver, the bound cannot be trusted to say anything
+about the wire.
