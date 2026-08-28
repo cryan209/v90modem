@@ -1337,3 +1337,51 @@ loss on the CP′ frame ends the window — not because any loop drifts, but
 because 192 symbols of concealed silence take the constellation and nothing in
 this stage can acquire twice. Recovering from that, rather than avoiding it,
 is the open work.
+
+### Is the CP′ loss general? No — one window in the whole corpus (2026-08-28)
+
+The previous section traced a failing §9.6 window to three lost RTP packets on
+the CP′ frame. The obvious next question is whether that is what §9.6 failure
+*is*, so every reneg recording in `artifacts/` was scanned two ways: its
+`rtp-rx.csv` for gaps, and a replay for what the CP window itself saw. The CP
+window report now carries `dead_blocks`/`dead_samples` — blocks of digital
+silence handed to the receiver while the window was armed, counted in the
+engine because **a recording cannot supply this**: the tap is written before
+the feed, so a concealed loss and a quiet peer look identical in the file.
+
+**The answer is no.**
+
+| recording | trigger | CP windows | dead blocks |
+|---|---|---|---|
+| `reneg-cpstream-222512Z` r1–r3 | probe | `valid=6 cp_ack=1` ×3 | 0 |
+| `reneg-defaults` r1–r3 | probe | `cp_ack=1` ×3 | 0 |
+| `reneg-mp` r1–r4, `reneg-s` r1–r4, `reneg-s2` r1–r3, `reneg-s3` r2, `reneg-s4` r1–r3 | probe | `cp_ack=1` ×15 | 0 |
+| `reneg-trn2d` r1–r4 | probe | `valid=15 cp_ack=1` ×4 | **162 (3.24 s)** |
+| `reneg-ab-225015Z` reneg-r1 | upstream loss | `valid=4 cp_ack=0`, `valid=0 cp_ack=0` | **4 (0.08 s)**, 0 |
+| `reneg-ab-225015Z` reneg-r3 | upstream loss | `valid=3 cp_ack=0`, `valid=1 cp_ack=0` | **0**, 0 |
+
+Every probe-triggered renegotiation in the corpus completes — 21 windows,
+`cp_ack=1` in all of them — and every loss-triggered one fails. **The packet
+loss is unique to reneg-r1's first window.** `reneg-r3` fails in exactly the
+same way, twice, on a bearer with no loss at all and no silence in either
+window, so loss is a *sufficient* cause for the one window it appears in and
+not the explanation for §9.6 failing on the upstream-loss trigger. What those
+have in common is still what the trigger says: the upstream had collapsed.
+
+`reneg-trn2d` is the useful control on the other side — **162 dead blocks,
+3.24 s of silence in the window, and it completes anyway** with 15 valid CP
+frames. Dead line in the window is not by itself fatal; what killed reneg-r1
+was 192 symbols of it landing *inside the CP burst*, on the frame that ends
+the exchange.
+
+**Two method notes.** Segment an RTP trace by SSRC before believing a gap: a
+`server.log` and its trace hold several calls, and unsegmented these files
+report "618,648,847 lost packets" where the truth is a new SSRC. Of the
+apparent anomalies across all reneg traces, all but one are call boundaries or
+multi-second media pauses; the single mid-call loss is reneg-r1's three
+packets. And the probe hooks needed one more fix to run this at all:
+`enter_v90_data_locked()` is the native V.90 data-entry site and it sets
+`g_v34_data_entry_ms` too — missed when these hooks were moved onto the media
+clock, so `g_v34_data_entry_samples` stayed 0 there and every V.90 probe fired
+the instant data mode was entered, before the peer had renegotiated anything.
+The symptom was "no CP window" on recordings that demonstrably contain one.

@@ -3120,6 +3120,15 @@ static v90_cp_rx_t g_v90_reneg_cp_rx_mark;
 static bool g_v90_reneg_cp_rx_marked = false;
 /* Whether the CP' that ENDS §9.6.1.2.3 was decoded in the current window. */
 static bool g_v90_reneg_cp_ack_seen = false;
+/* Blocks of digital silence handed to the receiver while the CP window was
+ * armed.  A lost packet is concealed as silence, and 192 symbols of it takes
+ * the constellation and does not give it back -- measured on
+ * artifacts/reneg-ab-225015Z/reneg-r1, whose RTP trace carries exactly one
+ * loss in 32868 packets, three packets, on the frame where §9.6.1.2.3's CP'
+ * is due.  A recording cannot show this on its own: the tap is written before
+ * the feed, so the count has to be taken here. */
+static unsigned g_v90_reneg_dead_blocks = 0;
+static unsigned g_v90_reneg_dead_samples = 0;
 
 
 static void v90_reneg_cp_mark_locked(void)
@@ -3127,6 +3136,8 @@ static void v90_reneg_cp_mark_locked(void)
     g_v90_reneg_cp_rx_mark = g_v90_cp_rx;
     g_v90_reneg_cp_rx_marked = true;
     g_v90_reneg_cp_ack_seen = false;
+    g_v90_reneg_dead_blocks = 0;
+    g_v90_reneg_dead_samples = 0;
 }
 
 
@@ -3139,7 +3150,8 @@ static void v90_reneg_cp_report_locked(const char *why)
         return;
     g_v90_reneg_cp_rx_marked = false;
     ME_LOG("[ME] V.90 §9.6 CP window (%s): bits=%llu sync=%u valid=%u "
-           "cp_ack=%d rejected=%u (crc=%u structure=%u semantic=%u) voted=%u\n",
+           "cp_ack=%d rejected=%u (crc=%u structure=%u semantic=%u) voted=%u "
+           "dead_blocks=%u dead_samples=%u\n",
            why ? why : "end",
            (unsigned long long)(b->input_bits - a->input_bits),
            (unsigned)(b->sync_candidates - a->sync_candidates),
@@ -3149,7 +3161,9 @@ static void v90_reneg_cp_report_locked(const char *why)
            (unsigned)(b->crc_rejected_frames - a->crc_rejected_frames),
            (unsigned)(b->structure_rejected_frames - a->structure_rejected_frames),
            (unsigned)(b->semantic_rejected_frames - a->semantic_rejected_frames),
-           (unsigned)(b->voted_frames_accepted - a->voted_frames_accepted));
+           (unsigned)(b->voted_frames_accepted - a->voted_frames_accepted),
+           g_v90_reneg_dead_blocks,
+           g_v90_reneg_dead_samples);
 }
 
 static int me_v90_reneg_after_ms(void)
@@ -6611,6 +6625,22 @@ void me_rx_audio(const int16_t *amp, int len)
                 }
                 int16_t filtered[len];
                 memcpy(filtered, amp, len * sizeof(int16_t));
+                /* A block of digital silence inside an armed §9.6 CP window.
+                 * See g_v90_reneg_dead_blocks. */
+                if (g_v90_reneg_cp_rx_marked) {
+                    int nonzero = 0;
+
+                    for (int i = 0; i < len; i++) {
+                        if (amp[i] != 0) {
+                            nonzero = 1;
+                            break;
+                        }
+                    }
+                    if (!nonzero) {
+                        g_v90_reneg_dead_blocks++;
+                        g_v90_reneg_dead_samples += (unsigned)len;
+                    }
+                }
                 /* NLMS echo canceller: subtract our TX echo from the RX signal.
                    Critical for V.90 where broadband PCM TX overwhelms the
                    upstream V.34 signal through the FXS hybrid.
@@ -8306,6 +8336,7 @@ static void enter_v90_data_locked(void)
        V.34 set it at its handover, but the native V.90 handover did not, so
        ME_TX_DISRUPT_AFTER_MS could never exercise a V.90 peer response. */
     g_v34_data_entry_ms = trace_now_ms();
+    g_v34_data_entry_samples = g_rx_audio_samples;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     ME_LOG("[ME] %s startup complete (upstream %s %d bps, downstream PCM %d bps)\n",
            g_v92_active ? "V.92" : "V.90",
