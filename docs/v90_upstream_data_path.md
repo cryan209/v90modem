@@ -2685,3 +2685,49 @@ merely stopped equalizing it. **Note the two documented traps before trusting
 it: the carrier must be right to a fraction of a hertz, and the decided symbols
 are truth only where the call is actually decoding — so it must be anchored on
 the clean side of the onset.**
+
+### `tools/v34_channel_bound.py` across the onset: attempted, and BLOCKED (2026-08-28)
+
+The section above named this as the instrument to run next, because it is the
+one measurement that does not rest on the receiver's own decisions. It was
+run, and it does **not** currently apply to the V.90 upstream. **No bound was
+obtained, and no number from this attempt should be quoted.**
+
+What it needs is a recorded tap plus *the symbols the receiver decided*, and on
+this path both of those are harder than on the plain-V.34 path it was written
+for.
+
+* **Its reference input is `V34_DATA_FRAME_DUMP`,** the plain-V.34 data-frame
+  dump. That file does get written on a V.90 upstream replay, and its
+  distance-to-grid tracks the receiver's own `sym err` (0.149, and the onset in
+  the right place) — but the symbols in it are not the data-mode constellation
+  in the form the tool assumes: `|re|` takes only the values 18 and 19, over 24
+  distinct points. (A small point set is not itself wrong here — the peer's DTE
+  is largely idle, so few constellation points are used — but the corner-only
+  distribution is.)
+* **The T/3 receiver's own `ME_V90_UPSTREAM_SYM_DUMP` needs calibrating.** It
+  writes the FSE output before the decision path's `data_symbol_scale`, so it
+  has to be scaled onto V.34's odd-integer lattice first. A blind scale sweep
+  is degenerate — it shrinks the constellation until everything lands in one
+  cell (it "found" 0.370, giving four points). Calibrating instead from the
+  receiver's own reported mean symbol power (706.10) gives a scale of 0.989,
+  which is self-consistent, but see the next point.
+* **THE BLOCKER: the two dumps disagree about where the onset is.** The frames
+  dump puts it at symbol 1849600 of 2022104, **91% through the call**; the
+  receiver's own DATA-bits window series puts it at window 3467 of 5160,
+  **67% through**. Both cannot be right, so the symbol-index → tap-sample
+  mapping is not established, and without it the tool's alignment search is
+  being pointed at the wrong part of the recording.
+
+Every fit attempted returned a null — 0.3 dB at 41/81/161 taps, unchanged by
+the conjugate of the reference or by carriers of 1828.571, −1828.571, 1920 and
+1646 Hz. **That is not evidence that no alignment exists**: a full-call delay
+scan was also tried and also found nothing, but it stepped 200 samples at a
+time while a 21-tap T/2 fit tolerates only about ±12, so it would step over the
+true alignment. It is evidence that the alignment was never found.
+
+**What the next session should do first**, before any of this: resolve which
+index is right by instrumenting the dumps against a common clock — write the
+receiver's sample counter into both dumps, or emit one dump only. Until the
+mapping is pinned, this tool cannot say anything about the V.90 upstream, and
+the "is it the wire or us" question stays open on this path.
