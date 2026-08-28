@@ -1499,3 +1499,48 @@ One more thing seen and not explained: at symbol ~5500 the main tap jumps to
 exactly 1.00000 at 0.00°, which is the signature of an `equalizer_reset()`,
 and the call logs only two S detections in total, so it is not a second CP
 conditioning.
+
+### Do the slews line up with RTP jitter? No (2026-08-29)
+
+`tools/rtp_jitter_scan.py` (new) segments a trace by SSRC and reports loss,
+timestamp discontinuities and arrival jitter, and takes a list of RTP
+timestamps so a receiver-side event can be checked against the wire. The five
+slews sit at window-start + 955, 5452, 8890, 12162 and 16165 samples, i.e. RTP
+timestamps 2140955, 2145452, 2148890, 2152162 and 2156165.
+
+Around every one of them the wire is ordinary:
+
+| slew | worst jitter within ±300 ms | mean \|jitter\| |
+|---|---|---|
+| symbol 382 | −1.31 ms | 0.51 ms |
+| symbol 2181 | +2.31 ms | 0.61 ms |
+| symbol 3556 | −1.56 ms | 0.55 ms |
+| symbol 4865 | −2.01 ms | 0.57 ms |
+| symbol 6466 | +2.84 ms | 0.77 ms |
+
+against a call-wide mean of 0.55 ms and a p99 of 2.52 ms — so each slew's
+neighbourhood is at or below the ordinary p99 of the same call. The call has
+**8** packets over 10 ms in 32881, and the only cluster inside the CP window
+is at ts 2171680–2172320: one packet 75.3 ms late followed by four arriving
+15–20 ms early, a burst caught up. That is **symbol 12672** — 6200 symbols
+after the last slew and well after the CP burst ended — in the stretch that is
+already the peer's data mode. Loss is 0 and timestamp discontinuities are 0
+(as established earlier), and the T/3 slip counters read 0 throughout the
+call, so no clock-recovery splicing touched the samples either.
+
+Note what jitter could do even in principle: the RX tap is written from the
+jitter buffer's *output*, so arrival timing reaches the recording only through
+the buffer's own adaptation — a drop, an insert or a concealment. There are
+none here. A clean trace therefore exonerates the bearer for anything visible
+in the recording; a dirty one would not by itself have convicted it.
+
+**One attempt that produced nothing, recorded so it is not repeated.** An
+independent estimate of the peer's carrier phase straight from the recording —
+fourth power of the passband samples, Goertzel on the 4×fc line at 7314.3 Hz,
+which should strip the 4-point modulation — is pure noise on this signal:
+the line magnitude is negligible and the recovered phase moves ±30° block to
+block everywhere, slews or not. That matches this project's existing note that
+fourth-power metrics on this waveform are a trap. So "the slews are on the
+wire" still rests on elimination inside the receiver (AGC, carrier NCO,
+symbol clock and equalizer taps all provably static across them) and not on an
+independent measurement of the wire.
