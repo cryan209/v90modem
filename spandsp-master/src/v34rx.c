@@ -80,6 +80,48 @@
 #ifndef V34_TRACE_DIAGNOSTICS
 /* Opt-in diagnostics.  Each caches its getenv() so the check costs nothing
    on the per-symbol paths that use it. */
+/* How many times one rate renegotiation may re-acquire its CP conditioning
+   after the line goes dead.  A window is about seven seconds; a line that
+   drops out more often than this is not one a renegotiation can rescue. */
+#define V34_V90_RENEG_CP_MAX_REACQUIRES 8
+
+static int v90_reneg_cp_reacquire_blocks(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *v = getenv("ME_V90_RENEG_CP_REACQUIRE_BLOCKS");
+
+        cached = (v  &&  atoi(v) > 0)  ?  atoi(v)  :  2;
+    }
+    /*endif*/
+    return cached;
+}
+
+static int v90_reneg_cp_reacquire_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *v = getenv("ME_V90_RENEG_CP_REACQUIRE");
+
+        /* DEFAULT OFF.  It does not recover the constellation after the loss
+           that motivated it -- 22.5 degrees from the 4-point family either
+           way, which is this metric's white -- and the only positive is a
+           second window on one recording (0 -> 2 CRC-valid CP frames).  One
+           recording is not a measurement; see the write-up. */
+        cached = (v  &&  atoi(v) == 1)  ?  1  :  0;
+    }
+    /*endif*/
+    return cached;
+}
+
+/* RMS of the block of line samples the receiver was last handed, read by
+   V90_RENEG_SYM_DUMP; set in primary_channel_rx(). */
+static double v90_reneg_feed_rms = 0.0;
+
 static int v34_diag_flag(const char *name, int *cache)
 {
     if (*cache < 0)
@@ -6691,6 +6733,7 @@ static int v90_reneg_cma_converged(v34_rx_state_t *s, const complexf_t *z)
         &&
         fabsf(s->reneg_cma_mag - 1.0f) <= phase4_cma_settle_tol())
     {
+        s->reneg_cp_settled = 1;
         /* Whether to keep adapting through the peer's CP burst.
          *
          * Freezing here copies the startup rule, and the reason startup
@@ -10509,6 +10552,50 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         ?  s->v90_cp_diff_hypothesis
                         :  MP_HYPOTHESIS_DIFF_INVERSE;
 
+                /* V90_RENEG_SYM_DUMP: one line per symbol of the 9.6 CP
+                   window -- the decision AND the two loops that could be
+                   taking it away.  The window's bit stream shows the peer's
+                   SCR and five 700-bit CP frames and then a run of exact
+                   zeros, on a line whose RMS never moves, so what is needed
+                   is not another look at the bits but a read of the front
+                   end across that instant: the AGC scaling, the equalizer's
+                   level estimate, the carrier loop's frequency, and the
+                   input power meter, which says whether the collapse is on
+                   this side of the demodulator at all.  A run of exact zeros
+                   out of a self-synchronizing descrambler is a CONSTANT raw
+                   dibit, so data_bits is here too. */
+                {
+                    static int reneg_sym_checked = 0;
+                    static FILE *reneg_sym = NULL;
+
+                    if (!reneg_sym_checked)
+                    {
+                        const char *path = getenv("V90_RENEG_SYM_DUMP");
+
+                        if (path  &&  *path)
+                            reneg_sym = fopen(path, "w");
+                        /*endif*/
+                        reneg_sym_checked = 1;
+                    }
+                    /*endif*/
+                    if (reneg_sym)
+                    {
+                        fprintf(reneg_sym,
+                                "%d %d %.5f %.2f %.6f %.5f %.3f %ld %.1f %d\n",
+                                s->duration,
+                                data_bits,
+                                sqrtf(sym->re*sym->re + sym->im*sym->im),
+                                (double) (180.0f/3.14159265f)
+                                    *atan2f(sym->im, sym->re),
+                                (double) s->agc_scaling,
+                                (double) s->eq_target_mag,
+                                (double) dds_frequencyf(s->v34_carrier_phase_rate),
+                                (long) power_meter_current(&s->power),
+                                v90_reneg_feed_rms,
+                                s->total_baud_timing_correction);
+                    }
+                    /*endif*/
+                }
                 raw = map_phase4_raw_bits(data_bits, hyp);
                 phase4_unpack_ordered_bits(raw, s->mp_phase4_default_bit_order,
                                            &in0, &in1);
@@ -14936,6 +15023,95 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
      * the T/3 branch: that branch returns. */
     v34_rx_watch_peer_reneg_s(s, amp, len);
 
+    /* V90_RENEG_SYM_DUMP's last column: the RMS of the block of line samples
+       this call was handed, kept here so the dump can say whether a collapse
+       inside the receiver was preceded by one at its own input.  A recording
+       is written before any of this runs, so comparing the dump against the
+       file only proves the file; comparing it against THIS proves the feed. */
+    {
+        double sum = 0.0;
+        int k;
+
+        for (k = 0;  k < len;  k++)
+            sum += (double) amp[k]*amp[k];
+        /*endfor*/
+        v90_reneg_feed_rms = (len > 0) ? sqrt(sum/len) : 0.0;
+    }
+
+    /* V.90 9.6: re-acquire the CP conditioning after a dead stretch of line.
+     *
+     * Measured on artifacts/reneg-ab-225015Z/reneg-r1, which is the failing
+     * renegotiation this work reproduces offline.  Its RTP trace carries
+     * exactly one loss in 32868 packets -- three packets, 480 samples -- and
+     * it lands on the frame where 9.6.1.2.3's terminating CP-prime is due.
+     * Concealed as digital silence it costs 192 symbols, and the receiver
+     * never comes back: the absolute constellation reads 0.9 degrees from the
+     * 4-point family just before the gap and 14 degrees just after, settling
+     * at 22.5 -- the mean for symbols distributed uniformly in angle -- for
+     * the remaining 14000 symbols of the window.  Nothing in the front end
+     * explains that: the AGC scaling never moves (its adaptation is inhibited
+     * on the silence by its own power gate), the carrier loop's frequency
+     * never moves (its error term is zero on zero input), the Godard timing
+     * loop's total correction never moves, and freezing the taps
+     * (ME_V90_RENEG_CP_ADAPT=0) changes neither the angle nor the frame
+     * count.  What is missing is a way BACK: the CP conditioning's
+     * acquisition -- a fresh equalizer trained by Figure 8's SCR -- is
+     * one-shot, so once it has converged there is nothing left that can
+     * re-acquire, while the peer is still repeating CP and still supplying
+     * material to acquire on.
+     *
+     * So treat a block of digital silence the way the seam itself is treated:
+     * on the first live block after one, re-arm exactly what
+     * v34_v90_force_reneg_cp_rx() arms.  Bounded per renegotiation, because a
+     * line that is dead repeatedly is not one this can rescue.
+     * ME_V90_RENEG_CP_REACQUIRE=1 enables it; it is default OFF, on the
+     * measurement in docs/retrain_and_resync.md. */
+    if (s->stage == V34_RX_STAGE_V90_CP  &&  len > 0)
+    {
+        if (v90_reneg_feed_rms == 0.0)
+        {
+            s->reneg_cp_silent_blocks++;
+        }
+        else if (s->reneg_cp_silent_blocks > 0)
+        {
+            int blocks = s->reneg_cp_silent_blocks;
+
+            s->reneg_cp_silent_blocks = 0;
+            /* Only after the acquisition has already SUCCEEDED, and only for
+               a stretch long enough to matter.  Re-arming while it is still
+               converging destroys the very convergence it is meant to
+               restore: fired on every silent block, this window never
+               converged at all (23.2 degrees from the 4-point family
+               throughout, 0 valid frames, against 1.5 degrees and 4 frames
+               with it left alone).  The test is reneg_cp_settled and NOT
+               reneg_cp_train, which with ME_V90_RENEG_CP_ADAPT at its default
+               is never cleared at all. */
+            if (v90_reneg_cp_reacquire_enabled()
+                &&
+                s->reneg_cp_settled
+                &&
+                blocks >= v90_reneg_cp_reacquire_blocks()
+                &&
+                s->reneg_cp_reacquires < V34_V90_RENEG_CP_MAX_REACQUIRES)
+            {
+                s->reneg_cp_reacquires++;
+                equalizer_reset(s);
+                s->reneg_cp_train = 1;
+                s->reneg_cma_mag = 0.0f;
+                s->reneg_cma_bauds = 0;
+                equalizer_save(s);
+                span_log(s->logging, SPAN_LOG_FLOW,
+                         "Rx - V.90 9.6: %d block(s) of dead line in the CP "
+                         "window; re-acquiring on the peer's repeated CP "
+                         "(re-acquisition %d)\n",
+                         blocks, s->reneg_cp_reacquires);
+            }
+            /*endif*/
+        }
+        /*endif*/
+    }
+    /*endif*/
+
     /* This branch is internal DSP only. v34_rx() still consumes exactly len
        8 kHz line samples; no sample is inserted into or removed from RTP. */
     if (s->v90_t3_active)
@@ -15704,6 +15880,9 @@ SPAN_DECLARE(void) v34_v90_force_reneg_cp_rx(v34_state_t *s)
     s->rx.reneg_cp_train = 1;
     s->rx.reneg_cma_mag = 0.0f;
     s->rx.reneg_cma_bauds = 0;
+    s->rx.reneg_cp_silent_blocks = 0;
+    s->rx.reneg_cp_reacquires = 0;
+    s->rx.reneg_cp_settled = 0;
     if (!getenv("ME_V90_RENEG_CP_STREAM")
         ||
         atoi(getenv("ME_V90_RENEG_CP_STREAM")) != 0)

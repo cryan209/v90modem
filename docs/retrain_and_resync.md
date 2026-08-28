@@ -1261,3 +1261,79 @@ receiver dies mid-burst 2 s in. The next thing to measure is what collapses —
 the tap adaptation is already refuted (frozen and adapting both give
 `valid=4`), so the candidates left are the AGC/level normalisation and the
 carrier loop, neither of which has been read across this instant.
+
+### Correction: the lost CP′ is three lost RTP packets, and the AGC and carrier loop are innocent (2026-08-28)
+
+**The previous section is wrong on its central claim and is corrected here.**
+It reported that the received audio was flat across the §9.6 CP window, and
+concluded the collapse was inside our receiver. The RMS scan behind that was
+taken at the wrong offset in the file: `v90_engine_replay` starts feeding at
+`find_call_start()`, 2.88 s into this recording, so engine sample *n* is file
+offset *n* + 23040, and the scan was looking 2.88 s — and, because the arming
+instant was taken from the nearest preceding `RX dump mark` rather than
+measured, a further 5.5 s — away from the event.
+
+**What is actually there.** The recording contains two runs of digital
+silence in the window: 160 samples at file offset 1097920 and **480 samples at
+1102560**, 4640 samples apart. The receiver's own feed shows exactly the same
+two, 64 and 192 symbols long and 1856 symbols apart — the same 4640 samples —
+so the mapping is now pinned by the data rather than assumed. And
+`rtp-rx.csv` names the cause: in **32868 packets the call has exactly one
+anomaly**, at `seq=21476 timestamp=1102400 seq_delta=4 ts_delta=640` —
+**three lost packets** — landing on the frame where §9.6.1.2.3's terminating
+CP′ is due.
+
+**The AGC and the carrier loop, read across it** — which is what the new
+`V90_RENEG_SYM_DUMP` exists for. It writes one line per CP-window symbol:
+symbol, raw dibit, |z|, absolute angle, `agc_scaling`, `eq_target_mag`, the
+carrier loop's frequency, the input power meter, the RMS of the block of line
+samples the receiver was handed, and the Godard loop's accumulated timing
+correction.
+
+| quantity | before the gap | during | after |
+|---|---|---|---|
+| input block RMS | 1254 | **0.0** | 1234 |
+| input power meter | 1.55e6 | **0** | 1.53e6 |
+| `agc_scaling` | 0.001812 | 0.001812 | 0.001812 |
+| carrier frequency | 1828.571 Hz | 1828.571 | 1828.571 |
+| `total_baud_timing_correction` | −8 | −8 | −8 |
+| \|z\| | 1.002 | 0 | 0.904 |
+| angle to the 4-point family | **0.92°** | — | **13.9°, then 22.5°** |
+
+So **neither loop moves at all**, and neither is capable of moving: the AGC's
+adaptation is inhibited on silence by its own `power > 10` gate, and the
+carrier loop's error term is `sym->im*eq_target.re − sym->re*eq_target.im`,
+which is identically zero on a zero symbol. Freezing the taps as well
+(`ME_V90_RENEG_CP_ADAPT=0`) changes neither the angle nor the frame count.
+What the gap costs is the *constellation*, and it never comes back: 22.5° is
+the mean for symbols distributed uniformly in angle, i.e. this metric's white,
+for the remaining 14000 symbols of the window.
+
+**Read the angle, not the magnitude.** |z| after the gap is 0.904 — within
+10% of where it was — while the phase is white. A level check cannot see this
+failure at all; the distance of the absolute angle to the nearest 45°+90°*k*
+separates the two cases cleanly (0.92 against 22.5).
+
+**A guard was built and it is default off** (`ME_V90_RENEG_CP_REACQUIRE=1`
+enables). The reasoning is sound — the CP conditioning's acquisition, a fresh
+equalizer trained on Figure 8's SCR, is one-shot, so after a dead stretch
+there is nothing left that can re-acquire while the peer is still repeating CP
+— and it exposed a real sub-defect on the way: **`reneg_cp_train` is not the
+"acquisition finished" signal.** With `ME_V90_RENEG_CP_ADAPT` at its default
+the taps keep adapting through the CP burst and that flag is *never* cleared,
+so a guard gated on it can never fire. A separate sticky `reneg_cp_settled`,
+set when the level first settles, is what the guard now tests. But the guard
+does not do what it was built to do: it does not restore the constellation
+(22.5° either way), and the only positive is a second window on one recording
+(0 → 2 CRC-valid CP frames, 0 → 11 sync candidates). Fired unconditionally on
+every silent block it is actively destructive — 23.2° from the 4-point family
+for the whole window and 0 valid frames, against 1.5° and 4 with it left
+alone — because it re-arms during acquisition and destroys the convergence it
+is meant to restore. One recording is not a measurement, so it stays off.
+
+**Where this leaves §9.6 against this rig.** The peer answers, sends SCR and
+five CRC-valid 700-bit CP frames over a working line, and a single three-packet
+loss on the CP′ frame ends the window — not because any loop drifts, but
+because 192 symbols of concealed silence take the constellation and nothing in
+this stage can acquire twice. Recovering from that, rather than avoiding it,
+is the open work.

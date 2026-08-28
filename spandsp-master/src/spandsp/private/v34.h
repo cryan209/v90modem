@@ -1574,6 +1574,16 @@ typedef struct
     uint32_t v90_cp_stream_reg;
     float reneg_cma_mag;
     int reneg_cma_bauds;
+    /* V.90 9.6: consecutive blocks of digital silence seen in the CP window,
+       and how many times this renegotiation has re-acquired after one.  A
+       lost packet is concealed as silence and costs the constellation; the
+       acquisition that would recover it is otherwise one-shot. */
+    int reneg_cp_silent_blocks;
+    int reneg_cp_reacquires;
+    /* Set once the CP-stage level has settled on SCR.  reneg_cp_train is NOT
+       that signal: with ME_V90_RENEG_CP_ADAPT at its default the taps keep
+       adapting through the CP burst, so the flag never clears. */
+    int reneg_cp_settled;
     /* T/2 eye selection; see process_primary_half_baud(). */
     float eye_on_sum;
     float eye_off_sum;
