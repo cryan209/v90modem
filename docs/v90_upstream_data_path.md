@@ -2592,3 +2592,96 @@ busy start and never sweeping unless the decode is provably broken** — which
 is what idea 3 approximated, but at 120 frames of evidence rather than
 "provably broken", and with a threshold (3% on noisy 15-frame windows) that
 the working calls themselves cross.
+
+## The live/replay divergence is closed, and the collapse narrows to the signal (2026-08-28)
+
+Two results, and the first one changes how this file's remaining work should be
+done.
+
+### `v90_upstream_replay` now reproduces a live call window for window
+
+The entry above records the divergence as the thing blocking everything else:
+*"a live call dies at 0.9 s where both replays of its own recording hold 19.7 s"*,
+and warns that *"every rate/eye figure in this document, and every improvement
+measured against one, describes a receiver that is not experiencing the live
+path's dominant impairment."*
+
+That is no longer true. Replaying a live 600 s call
+(`artifacts/renegviab-ab-010014Z/gated-r3`) reproduces its own live run's
+clean/broken structure essentially window for window:
+
+| | run lengths (clean, broken, clean, …) |
+|---|---|
+| live | 3467, 6, 309, 8, 20, 15, 15, 59, 21, 56 |
+| replay | 3467, 6, 309, 8, 20, 14, 15, 60, 20, 57 |
+
+The most likely cause is the splice removal — with `ME_RX_CLOCK_SLIP` default
+off, the live path no longer edits the sample stream after the tap is written,
+so a recording is finally a faithful record of what the live receiver consumed.
+**Consequence: the upstream can now be worked on entirely offline**, and the
+bisection below took an afternoon rather than a rig session per hypothesis.
+
+### That call is 89% clean, which also dates the figures above
+
+`gated-r3` runs **3467 consecutive clean windows — about 530 s — before its
+first break**, and is 89% clean over the call. The rate-matrix era figures in
+the sections above (17%, 55%, "45% incomplete") predate the splice fix, the
+Mueller-and-Müller timing detector, the echo-canceller and notch removals, and
+should not be quoted as the current state.
+
+### What the collapse is not
+
+Bisected against the reproduction, scored on clean-window percentage and on the
+first unbroken run:
+
+| arm | first unbroken run |
+|---|---|
+| default | 3467 |
+| `ME_V90_UPSTREAM_TIMING=0` (timing loop frozen) | 3467 |
+| `ME_V90_UPSTREAM_CMA=0` (blind recovery off) | 3467 |
+| `ME_V90_UPSTREAM_NDA=1` (fourth-power carrier restored) | 3467 |
+| `ME_V90_UPSTREAM_DD_GATE=1.5 / 2.0 / 3.0` | 3467 / 3467 / 3467 |
+| `ME_V90_UPSTREAM_DD_GATE=0.2` (LMS effectively frozen) | **2818 — worse** |
+| `ME_V90_UPSTREAM_TIMING_DET=gardner` | 26, 0% clean |
+
+**Every adaptive element can be frozen and the onset does not move by a single
+window.** That is what says the onset is not a loop instability: a ratchet moves
+when you stop the ratchet. (Freezing the LMS outright is *worse*, reproducing
+the earlier finding in the new environment.)
+
+Also ruled out at the onset:
+
+* **Not a timing slip.** The slip search does fire there, repeatedly, and its
+  profile is flat at **0.59–0.75 across every offset in ±1.5 samples** while the
+  position it is already on scores **0.276**. No offset recovers it. (The four
+  slips this call *does* adopt are all later, windows 4335–4803.)
+* **Not the level.** 20 ms RMS is 304–314 straight through, with no step.
+* **Not the bearer.** 32904 RTP packets, **0 sequence gaps and 0 timestamp
+  jumps** over the whole call.
+* **Not our own recovery machinery.** The first equalizer restore is at window
+  3784 and the first blind recovery at 4351 — both *after* the onset, so they
+  are consequences.
+* **Not a step.** Successive slip searches over the onset read base
+  **0.276 → 0.371 → 0.473 → 0.527**: it degrades over about a second. A window
+  mean makes that look instantaneous (0.141 → 0.482 between two windows), which
+  is how it has been read before.
+
+### Where that leaves it
+
+The onset is in the received signal, it is progressive over ~1 s, it is not a
+timing slip, not a level change, not the bearer, and not caused by any adaptive
+element in this receiver. The remaining candidate is a genuine change in the
+channel or the peer's transmitter that a fractionally-spaced decision-directed
+equalizer of this length cannot follow — **but that is where the evidence
+points, not something measured**, and a coarse spectral comparison across the
+onset was attempted and is too noisy on a data signal to support any claim.
+
+The next instrument this needs is one that does not rest on our own decisions:
+the plain-V.34 path has `tools/v34_channel_bound.py`, which fits the best
+possible least-squares equalizer to a recorded tap given the receiver's decided
+symbols and so bounds every linear receiver. Run across the onset it would say
+directly whether the channel stopped being equalizable or whether our receiver
+merely stopped equalizing it. **Note the two documented traps before trusting
+it: the carrier must be right to a fraction of a hertz, and the decided symbols
+are truth only where the call is actually decoding — so it must be anchored on
+the clean side of the onset.**
