@@ -3094,11 +3094,47 @@ static bool g_v90_reneg_await_s = false;
  * field this endpoint cannot use). */
 static v90_cp_rx_t g_v90_reneg_cp_rx_mark;
 static bool g_v90_reneg_cp_rx_marked = false;
+/* Whether the CP' that ENDS §9.6.1.2.3 was decoded in the current window. */
+static bool g_v90_reneg_cp_ack_seen = false;
+/* Set when a §9.6 attempt on this call timed out without ever decoding a CP'.
+ * See v90_reneg_viable_locked(). */
+static bool g_v90_reneg_no_cp_ack = false;
 
 static void v90_reneg_cp_mark_locked(void)
 {
     g_v90_reneg_cp_rx_mark = g_v90_cp_rx;
     g_v90_reneg_cp_rx_marked = true;
+    g_v90_reneg_cp_ack_seen = false;
+}
+
+/* Is a §9.6 rate renegotiation worth opening on this call?
+ *
+ * The engine's own trigger is an upstream receiver that has stopped decoding,
+ * and measured over 600 s calls (artifacts/reneg-ab-225015Z) a renegotiation
+ * opened on THAT condition never completed: six attempts, none finished, five
+ * taking §9.6.1's timeout.  The discriminating fact is not how much CP was
+ * decoded -- it is whether the CP' that §9.6.1.2.3 ends with was decoded at
+ * all.  Scoped to the renegotiation windows, the three calls that completed
+ * read 6 frames as 0,0,0,0,0,1 -- the acknowledged frame last, which is what
+ * releases Ed -- and the four that timed out read 4, 3, 2 and 1 frames, every
+ * one of them ack=0.  So the peer's CP' is the single frame being missed, and
+ * "how many CP frames" (6 against 1-4, at the same instants) is a side effect
+ * of losing the tail of its burst, not the signal.
+ *
+ * Retries do not recover it and measurably decay -- within one call the
+ * successive attempts decoded 4 then 2 then 1 frames -- so one attempt that
+ * ends without a CP' is taken as this call's answer.  Nothing here limits a
+ * renegotiation the PEER opens (§9.6.1.2 is a "shall"), and nothing limits one
+ * on a call where an attempt did complete.
+ *
+ * ME_V90_RENEG_VIABILITY=0 restores the old behaviour for an A/B. */
+static bool v90_reneg_viable_locked(void)
+{
+    const char *value = getenv("ME_V90_RENEG_VIABILITY");
+
+    if (value && atoi(value) == 0)
+        return true;
+    return !g_v90_reneg_no_cp_ack;
 }
 
 static void v90_reneg_cp_report_locked(const char *why)
@@ -3110,11 +3146,12 @@ static void v90_reneg_cp_report_locked(const char *why)
         return;
     g_v90_reneg_cp_rx_marked = false;
     ME_LOG("[ME] V.90 §9.6 CP window (%s): bits=%llu sync=%u valid=%u "
-           "rejected=%u (crc=%u structure=%u semantic=%u) voted=%u\n",
+           "cp_ack=%d rejected=%u (crc=%u structure=%u semantic=%u) voted=%u\n",
            why ? why : "end",
            (unsigned long long)(b->input_bits - a->input_bits),
            (unsigned)(b->sync_candidates - a->sync_candidates),
            (unsigned)(b->valid_frames - a->valid_frames),
+           g_v90_reneg_cp_ack_seen ? 1 : 0,
            (unsigned)(b->rejected_frames - a->rejected_frames),
            (unsigned)(b->crc_rejected_frames - a->crc_rejected_frames),
            (unsigned)(b->structure_rejected_frames - a->structure_rejected_frames),
@@ -3278,8 +3315,14 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
                 source ? source : "unknown",
                 diag->frame.v90_compatibility ? "CP" : "CPt",
                 diag->nbits, (unsigned)diag->frame.drn, accepted ? 1 : 0);
-    if (accepted)
+    if (accepted) {
         v90_cp_live_mark_accepted_locked(diag);
+        /* §9.6.1.2.3's CP' is what releases Ed, and whether it was decoded is
+         * the one fact that separates a renegotiation that completes from one
+         * that takes §9.6.1's timeout.  See v90_reneg_viable_locked(). */
+        if (g_v90_reneg_cp_rx_marked && frame->acknowledge)
+            g_v90_reneg_cp_ack_seen = true;
+    }
     /* The peer's data-mode CP carries everything the upstream receiver needs
      * (baud, rate, constellation); its acknowledge bit is about the handshake,
      * not about the parameters.  Waiting for an acknowledged CP' meant that
@@ -3780,6 +3823,9 @@ static void cleanup_v34_v90_training_locked(void)
     g_v34_reneg_probe_done = false;
     g_v90_reneg_probe_done = false;
     g_v90_reneg_await_s = false;
+    g_v90_reneg_cp_rx_marked = false;
+    g_v90_reneg_cp_ack_seen = false;
+    g_v90_reneg_no_cp_ack = false;
     g_v34_retrain_probe_done = false;
     g_tx_disrupt_logged = 0;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
@@ -8407,8 +8453,24 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
         /* §9.6.1: a rate renegotiation that does not produce an E is
          * abandoned for a full retrain.  The engine owns the retrain, so it
          * is the engine that acts on the flag. */
+        /* Report the window on the way out either way: a renegotiation that
+         * completed and one that timed out differ by exactly one frame, and
+         * only logging the failures hides that. */
+        if (g_v90_reneg_cp_rx_marked
+            && !v90_rate_renegotiation_active(g_v90)
+            && !v90_rate_renegotiation_timed_out(g_v90))
+            v90_reneg_cp_report_locked("complete");
+
         if (v90_rate_renegotiation_timed_out(g_v90)) {
+            bool had_cp_ack = g_v90_reneg_cp_ack_seen;
+
             v90_reneg_cp_report_locked("timeout");
+            if (!had_cp_ack && !g_v90_reneg_no_cp_ack) {
+                g_v90_reneg_no_cp_ack = true;
+                ME_LOG("[ME] V.90 §9.6: this attempt never decoded the CP' "
+                       "that ends §9.6.1.2.3; not opening another on this "
+                       "call (ME_V90_RENEG_VIABILITY=0 restores retries)\n");
+            }
             (void) restart_v90_phase2_locked("rate renegotiation timeout");
             return false;
         }
@@ -8439,6 +8501,7 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
         if (g_v34 && v34_v90_upstream_carrier_lost(g_v34)
             && !v90_rate_renegotiation_active(g_v90)) {
             if (me_v90_reneg_enabled()
+                && v90_reneg_viable_locked()
                 && v90_rate_renegotiation_count(g_v90) < ME_V90_MAX_RENEGOTIATIONS) {
                 ME_LOG("[ME] V.90 upstream carrier lost; requesting a §9.6 "
                        "rate renegotiation to re-acquire\n");
