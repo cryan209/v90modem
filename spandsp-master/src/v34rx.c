@@ -13165,6 +13165,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             float dr;
             float di;
 
+            s->v90_t3_dump_phase = s->v90_t3_carrier.phase;
             v34_carrier_derotate(&s->v90_t3_carrier, y.re, y.im, &dr, &di);
             v34_carrier_update(&s->v90_t3_carrier, dr, di,
                                (s->v90_t3_sym_err_fast
@@ -13264,8 +13265,23 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             /*endif*/
             if (s->v90_t3_sym_dump)
             {
-                fprintf(s->v90_t3_sym_dump, "%d %.4f %.4f\n",
-                        s->v90_t3_data_symbols, y.re, y.im);
+                /* Fourth column: the receiver's own INPUT-SAMPLE counter at
+                   the moment this symbol was emitted, i.e. the position in the
+                   recorded 8 kHz tap.  Without it the symbol index has to be
+                   mapped to the tap by assuming a start instant and an exact
+                   symbol rate, and that assumption was wrong -- this dump and
+                   the DATA-bits window series put the same collapse at 91% and
+                   67% of a call respectively.  Anything that fits a recorded
+                   tap against these symbols (tools/v34_channel_bound.py) needs
+                   the alignment to a few samples, so record it rather than
+                   deriving it.  Fifth column is the T/3 symbol position, which
+                   pins the sub-sample phase: the input sample is 5/6 of it. */
+                fprintf(s->v90_t3_sym_dump,
+                        "%d %.4f %.4f %" PRId64 " %" PRId64 " %.6f\n",
+                        s->v90_t3_data_symbols, y.re, y.im,
+                        (int64_t) s->qam_sample_time,
+                        (int64_t) s->v90_t3_next_symbol,
+                        (double) s->v90_t3_dump_phase);
             }
             /*endif*/
         }

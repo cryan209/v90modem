@@ -1244,6 +1244,11 @@ typedef struct
         off, taking the only thing that recovers this constellation with
         it). */
     v34_carrier_state_t v90_t3_carrier;
+    /*! The carrier-loop phase actually used to derotate the symbol being
+        dumped, for ME_V90_UPSTREAM_SYM_DUMP.  The dumped symbol is
+        POST-derotation, so without this no fixed linear filter maps the
+        recorded tap to it and any least-squares channel fit reads a null. */
+    float v90_t3_dump_phase;
     bool v90_t3_carrier_enabled;
     /*! \brief Gardner timing recovery on the upstream symbol instant. */
     bool v90_t3_timing_enabled;
