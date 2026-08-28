@@ -1105,3 +1105,62 @@ instant nobody is correcting. A receiver sampling off the eye centre is white
 in exactly the way measured here, and it would explain why the SCR — 1.4 s of
 free training material — buys nothing. Re-acquiring the symbol instant at the
 §9.6 seam, as a fresh Phase 4 does, is the next thing to try.
+
+### Re-acquiring the symbol instant at the §9.6 seam: tried, refuted, not kept (2026-08-28)
+
+The previous section's lead was that the T/2 chain's sampling instant is frozen
+for the whole of data mode, so at the seam it is stale against a peer whose
+clock has walked — and that a receiver off the eye centre would be white in
+exactly the way the failing renegotiation measures. Implemented: at
+`v34_v90_force_reneg_cp_rx()`, clear the band-edge detector's accumulators the
+way `process_rx_info1a()` does when the rate is selected, and re-arm the T/2
+eye-phase chooser, whose per-call flip cap is normally spent by Phase 3 — so
+the one mechanism that can fix a half-symbol error was disabled exactly when it
+was needed. Figure 8's SCR is constant modulus and up to 2000 ms long, which
+is the material that chooser wants.
+
+**It made things slightly worse and its premise is directly refuted.** Three
+runs each way on the offline reproduction of a failing call:
+
+| arm | result |
+|---|---|
+| re-acquire the instant | `valid=3 cp_ack=0`, timeout — 3/3 |
+| leave it frozen | `valid=4 cp_ack=0`, timeout — 3/3 |
+
+and the eye chooser *did* act (`moving the symbol instant (flip 1)` after the
+re-arm), while the angle through the SCR was **unchanged at 21.8°**. So the
+sampling instant is not what the failing receiver is missing. Reverted.
+
+**Correction to the previous section, which called that 21.8° "white".** It is
+not. The mean is the same as a uniform distribution's, but the spread is not:
+**sd 3.1°, with 2254 of 2700 symbols in a single decile.** That is a tight
+cluster — a *stable ~22° rotation of the raw carrier phase*, not an absent
+constellation. Two things follow. The dumped angle is `ang1`, taken **before**
+the decision-aided derotator, and §8.5.2's CP is differentially decoded, so a
+constant rotation is absorbed and is not by itself harmful — which the failing
+case demonstrates by decoding 4 CP frames while sitting at 22°. And "mean 22.5
+means white" is only true with the spread beside it: **quote the sd, or the
+metric will tell you the opposite of what is happening.**
+
+**A second lead, also refuted.** The amplitude dip at +2.0 s (|z| 0.53, and
+0.033 in one run) lands exactly where CP′ is due, and
+`mp_v90_cp_reset_at_carrier_gap()` discards the Table-14 search on a
+carrier-off reading — an obvious candidate for losing precisely that frame.
+Counted in the window with FLOW logging on, it fires **2 times in the failing
+call and 3 times in the completing one**. Not the differentiator.
+
+**Where this leaves it.** Four mechanisms have now been tested against the
+offline reproduction — tap adaptation, the symbol instant, the carrier angle
+and the carrier-gap reset — and none separates the two cases, while the level
+converges identically in both. What does separate them is what the trigger
+already said: the failing call is one whose upstream had *collapsed*, which is
+why the renegotiation was opened at all. That is consistent with the A/B
+result (§9.6 on the loss trigger: 6 attempts, 0 completions) and with keeping
+`ME_V90_RENEG` default off. A renegotiation is a resynchronisation, not a
+repair for a line that has stopped carrying the upstream, and no amount of
+re-conditioning at the seam changes that.
+
+**The asset from this round is the harness, not a fix:** a live loss-triggered
+call now reproduces offline, window for window (`valid=4 cp_ack=0` against its
+own live `valid=4 cp_ack=0`), which is what let four hypotheses be killed in an
+afternoon instead of four rig sessions.
