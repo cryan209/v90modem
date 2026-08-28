@@ -13155,6 +13155,62 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             z = complex_mulf(&s->v90_t3_fse[tap], &x);
             y = complex_addf(&y, &z);
         }
+        /* V90_T3_SYMBOL_PROBE=<data symbol index>: everything that went into
+           ONE symbol, so the whole chain from the recorded tap to the
+           equalizer output can be reproduced outside this receiver and checked
+           stage by stage.  That is the only way to establish whether an
+           offline model of this path -- tools/v34_channel_bound.py's among
+           them -- is describing the receiver or something else. */
+        {
+            static int probe_sym = -2;
+
+            if (probe_sym == -2)
+            {
+                const char *value = getenv("V90_T3_SYMBOL_PROBE");
+
+                probe_sym = value ? atoi(value) : -1;
+            }
+            /*endif*/
+            if (probe_sym >= 0  &&  s->v90_t3_data_symbols == probe_sym
+                &&  !s->v90_t3_in_b1)
+            {
+                fprintf(stderr,
+                        "[T3PROBE] symbol=%d next_symbol=%" PRId64
+                        " pre=%d frac=%.9f conjugate=%d rate=%d fc=%.6f"
+                        " input_count=%" PRId64 " next_output=%" PRId64
+                        " raw_count=%" PRId64 " qam_sample_time=%" PRId64
+                        " y=(%.9f,%.9f)\n",
+                        s->v90_t3_data_symbols,
+                        (int64_t) s->v90_t3_next_symbol, pre, (double) frac,
+                        s->v90_t3_fse_conjugate ? 1 : 0,
+                        s->v90_t3_internal_rate,
+                        (double) carrier_frequency(s->baud_rate, s->high_carrier),
+                        (int64_t) s->v90_t3_input_count,
+                        (int64_t) s->v90_t3_next_output,
+                        (int64_t) s->v90_t3_raw_count,
+                        (int64_t) s->qam_sample_time,
+                        (double) y.re, (double) y.im);
+                for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+                {
+                    complexf_t x = v90_t3_raw_get_frac(
+                        s, s->v90_t3_next_symbol - pre + tap, frac);
+                    complexf_t r0 = v90_t3_raw_get(
+                        s, s->v90_t3_next_symbol - pre + tap);
+
+                    fprintf(stderr,
+                            "[T3PROBE] tap=%2d fse=(%.9f,%.9f)"
+                            " raw=(%.9f,%.9f) rawfrac=(%.9f,%.9f) idx=%" PRId64 "\n",
+                            tap,
+                            (double) s->v90_t3_fse[tap].re,
+                            (double) s->v90_t3_fse[tap].im,
+                            (double) r0.re, (double) r0.im,
+                            (double) x.re, (double) x.im,
+                            (int64_t) (s->v90_t3_next_symbol - pre + tap));
+                }
+                /*endfor*/
+            }
+            /*endif*/
+        }
         /* Carrier.  The equalizer output is derotated by this receiver's own
            loop before anything looks at it: decision-directed while the
            symbols are on the constellation, fourth-power while they are not,
