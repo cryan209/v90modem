@@ -85,6 +85,22 @@
    drops out more often than this is not one a renegotiation can rescue. */
 #define V34_V90_RENEG_CP_MAX_REACQUIRES 8
 
+/* Whether §9.6's streamed CP window keeps the decision-aided derotator and
+   its data-aided LMS.  Default off; see the call site. */
+static int v90_reneg_cp_da_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *v = getenv("ME_V90_RENEG_CP_DA");
+
+        cached = (v  &&  atoi(v) == 1)  ?  1  :  0;
+    }
+    /*endif*/
+    return cached;
+}
+
 static int v90_reneg_cp_reacquire_blocks(void)
 {
     static int cached = -1;
@@ -9998,7 +10014,29 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             }
             float da_sym_mag2 = sym->re*sym->re + sym->im*sym->im;
 
-            if (!da_enabled || s->mp_hypothesis < 0)
+            /* V.90 9.6: the decision-aided derotator and its data-aided LMS
+               are driven by the V.34 MP hypothesis machinery, and while the
+               renegotiation's CP is being STREAMED that machinery decodes
+               nothing -- the domain, dibit transform, scrambler tap and bit
+               order are all fixed by 8.5.2/10.1.3.3, which is why
+               v90_cp_stream exists.  What it still does is lock on Figure 8's
+               SCR, whose descrambled 18/18 ones satisfy the preamble gate for
+               the whole 2.5 s of it, get rejected by the Table-14 framer, and
+               lock again -- and every one of those re-locks RE-SEEDS the
+               derotator, which snaps the current symbol onto the 45-degree
+               family and then drags the taps there through tune_equalizer().
+               Measured on artifacts/reneg-ab-225015Z/reneg-r3, whose first CP
+               window decodes 3 of 5 frames on a steady line: the unwrapped
+               residual carrier phase is FLAT to 0.002 deg/symbol between
+               events and steps by +25, +24, +27, +25, -20 and +23 degrees at
+               six instants, each one a re-lock.  So the loop is not tracking
+               the channel here, it is stepping the constellation around on
+               its own decisions.  ME_V90_RENEG_CP_DA=1 restores it. */
+            if (s->v90_cp_stream  &&  !v90_reneg_cp_da_enabled())
+            {
+                s->phase4_da_active = 0;
+            }
+            else if (!da_enabled || s->mp_hypothesis < 0)
             {
                 s->phase4_da_active = 0;
             }
@@ -10592,7 +10630,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     if (reneg_sym)
                     {
                         fprintf(reneg_sym,
-                                "%d %d %.5f %.2f %.6f %.5f %.3f %ld %.1f %d\n",
+                                "%d %d %.5f %.2f %.6f %.5f %.6f %ld %.1f %d %ld %.2f %.2f %.5f\n",
                                 s->duration,
                                 data_bits,
                                 sqrtf(sym->re*sym->re + sym->im*sym->im),
@@ -10603,7 +10641,18 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                 (double) dds_frequencyf(s->v34_carrier_phase_rate),
                                 (long) power_meter_current(&s->power),
                                 v90_reneg_feed_rms,
-                                s->total_baud_timing_correction);
+                                s->total_baud_timing_correction,
+                                (long) s->qam_sample_time,
+                                (double) (uint32_t) s->carrier_phase
+                                    *(360.0/4294967296.0),
+                                (double) (180.0f/3.14159265f)
+                                    *atan2f(s->eq_coeff[V34_EQUALIZER_PRE_LEN].im,
+                                            s->eq_coeff[V34_EQUALIZER_PRE_LEN].re),
+                                (double) sqrtf(
+                                    s->eq_coeff[V34_EQUALIZER_PRE_LEN].re
+                                        *s->eq_coeff[V34_EQUALIZER_PRE_LEN].re
+                                  + s->eq_coeff[V34_EQUALIZER_PRE_LEN].im
+                                        *s->eq_coeff[V34_EQUALIZER_PRE_LEN].im));
                     }
                     /*endif*/
                 }

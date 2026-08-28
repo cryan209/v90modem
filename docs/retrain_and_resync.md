@@ -1443,3 +1443,59 @@ CP-stage acquisition wanders between 1° and 26° during 2.5 s of constant-
 modulus SCR on a steady line, when the completing calls hold it. That is the
 same "acquire once, no way back" shape as the previous section, and neither
 tap adaptation nor the line explains it.
+
+### It is not the acquisition wandering: five phase slews arrive on the wire (2026-08-29)
+
+The previous section left "why does the CP-stage acquisition wander between 1°
+and 26° during 2.5 s of constant-modulus SCR" as the open question.
+**Correction: nothing in this receiver wanders.** `V90_RENEG_SYM_DUMP` gained
+four columns for this — the input sample counter (`qam_sample_time`), the
+carrier NCO's phase, and the equalizer main tap's angle and magnitude — and
+they are what makes "ours or the wire" decidable without leaving the receiver.
+Over `reneg-ab-225015Z/reneg-r3`'s first CP window:
+
+| quantity | across the whole window |
+|---|---|
+| `agc_scaling` | 0.001812, unchanged |
+| carrier frequency register | **bit-identical**, 1828.571411 Hz, first sample to last |
+| NCO phase against an exact ramp | residual ≤ 0.07°, **not one step above 1°** |
+| symbol clock | 2/3 samples alternating, **zero cumulative drift** over 7200 symbols |
+| `total_baud_timing_correction` | −8, never moves |
+| equalizer main tap | magnitude 0.83421, angle −0.03°, constant to five decimals |
+
+So the carrier loop never fires, the timing loop never fires, the AGC never
+moves and the taps are frozen. What actually happens is **five discrete
+carrier-phase slews of +21.7° to +24.2°, each completed in 3 to 10 symbols**,
+at symbols 382, 2181, 3556, 4865 and 6466 — with the phase flat to
+0.002°/symbol between them and the cluster tight throughout (sd 1.5–3°).
+
+**Folded into "distance to the 45° family" that reads as a wander through 23°
+and 36°, which is what the previous section reported.** It is a *stepping*
+constellation, not a smeared one: quote the spread, or this metric describes
+the opposite of what is happening — the same trap this document has recorded
+once already.
+
+**The control says it is this recording and not the procedure.** The same
+detector over a completing call's CP window: `reneg-defaults/reneg-r2` —
+**zero** mid-window slews (one at symbol 43, during initial acquisition);
+`reneg-cpstream-222512Z/reneg-r1` — clean to symbol 6904, where its window
+ends and the peer's data mode resumes. Only the failing recording has them,
+and it has five.
+
+**And the last one lands where it does the damage.** Symbol 6466 is bit 12932,
+inside frame 5 of the CP burst (12584–13284) — the frame immediately before
+where §9.6.1.2.3's CP′ is due — and the frame grid breaks exactly there: the
+next sync is at 13156, **+572 instead of +700**.
+
+**Not established: where the slews come from.** With every element of the
+receiver provably static across them they are in the received signal, but the
+mechanism is open. One symbol of carrier phase at 3200 baud and 1828.571 Hz
+is 205.7°, which folds to **25.7°** — close to the measured 21.7–24.2 — so a
+one-symbol slip in the peer's transmitter is the obvious candidate and this
+peer is already known to slip. Against it: a symbol slip displaces the bit
+stream by 2 bits, and the grid break measures 128. A lead, not a conclusion.
+
+One more thing seen and not explained: at symbol ~5500 the main tap jumps to
+exactly 1.00000 at 0.00°, which is the signature of an `equalizer_reset()`,
+and the call logs only two S detections in total, so it is not a second CP
+conditioning.
