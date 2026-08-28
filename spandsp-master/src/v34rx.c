@@ -6643,6 +6643,23 @@ static int phase4_cma_converged(v34_rx_state_t *s, const complexf_t *z)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Whether 9.6's CP conditioning keeps adapting once the level has settled.
+   See the call site for why the startup freeze does not carry over. */
+static int v90_reneg_cp_adapt_through_burst(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *value = getenv("ME_V90_RENEG_CP_ADAPT");
+
+        cache = (value  &&  atoi(value) == 0)  ?  0  :  1;
+    }
+    /*endif*/
+    return cache;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* V.90 9.6.1.1.1's CP conditioning trains on Figure 8's SCR.  Same settle
    rule as phase4_cma_converged(), but that one is scoped to
    V34_RX_STAGE_PHASE4_TRN and a renegotiation has no TRN stage of its own:
@@ -6674,6 +6691,27 @@ static int v90_reneg_cma_converged(v34_rx_state_t *s, const complexf_t *z)
         &&
         fabsf(s->reneg_cma_mag - 1.0f) <= phase4_cma_settle_tol())
     {
+        /* Whether to keep adapting through the peer's CP burst.
+         *
+         * Freezing here copies the startup rule, and the reason startup
+         * freezes does not apply: there the taps arriving at the CP stage were
+         * trained by Phase 3 moments earlier and blind CMA can only walk them
+         * off, while here they were trained seconds ago on SCR and there is no
+         * trained solution to protect.  Both signals in this window are
+         * constant modulus -- Figure 8's SCR is scrambled ones and 8.5.2's CP
+         * goes out through J's 4-point modulation -- so CMA is legitimate
+         * across the whole of it, which is not true of the startup seam.
+         * ME_V90_RENEG_CP_ADAPT=0 restores the freeze for an A/B. */
+        if (v90_reneg_cp_adapt_through_burst())
+        {
+            s->reneg_cma_bauds = 0;
+            span_log(s->logging, SPAN_LOG_FLOW,
+                     "Rx - V.90 9.6: CP-stage CMA level reached (|z|=%.3f); "
+                     "keeping the taps adapting through the CP burst\n",
+                     (double) s->reneg_cma_mag);
+            return 0;
+        }
+        /*endif*/
         s->reneg_cp_train = 0;
         span_log(s->logging, SPAN_LOG_FLOW,
                  "Rx - V.90 9.6: CP-stage CMA converged on SCR after %d bauds "
@@ -9862,9 +9900,17 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             /*endif*/
             if (mp_dump)
             {
-                fprintf(mp_dump, "%d %d %d %.4f\n",
+                /* Fifth column is the ABSOLUTE angle in degrees.  The
+                   4-point Phase-4 constellation sits on the 45-degree family,
+                   so the distance from it -- min over k of |ang - (45+90k)|
+                   -- is a per-symbol read on whether the receiver is holding
+                   the constellation, which the magnitude alone cannot give
+                   (a diverged equalizer can hold a steady modulus).
+                   tools/v34_mp_offline.py indexes columns 1 and 2 only. */
+                fprintf(mp_dump, "%d %d %d %.4f %.2f\n",
                         s->duration, data_bits, abs_bits,
-                        sqrtf(sym->re*sym->re + sym->im*sym->im));
+                        sqrtf(sym->re*sym->re + sym->im*sym->im),
+                        (double) (180.0f/3.14159265f)*atan2f(sym->im, sym->re));
                 fflush(mp_dump);
             }
             /*endif*/
@@ -16316,6 +16362,9 @@ SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
 
     if (!s)
         return -1;
+    /* 9.6's CP-stage training does not outlive the CP stage. */
+    s->rx.reneg_cp_train = 0;
+    s->rx.v90_cp_stream = 0;
     s->rx.step_2d = 0;
     s->rx.data_frame = 0;
     s->rx.mapping_frame_count = 0;
@@ -16423,6 +16472,9 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.bit_rate = bit_rate;
     s->rx.high_carrier = high_carrier;
     s->rx.training_failed_reported = false;
+    /* 9.6's CP-stage training does not outlive the CP stage. */
+    s->rx.reneg_cp_train = 0;
+    s->rx.v90_cp_stream = 0;
     s->rx.v90_t3_prepared = false;
     s->rx.v90_t3_active = false;
     /* Phase 3/4 peer-retrain detectors: a restart returns to Phase 2, where
