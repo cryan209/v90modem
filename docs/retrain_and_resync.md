@@ -1385,3 +1385,61 @@ packets. And the probe hooks needed one more fix to run this at all:
 clock, so `g_v34_data_entry_samples` stayed 0 there and every V.90 probe fired
 the instant data mode was entered, before the peer had renegotiated anything.
 The symptom was "no CP window" on recordings that demonstrably contain one.
+
+### Why reneg-r3 fails on a clean bearer, and one default that changes (2026-08-29)
+
+`reneg-ab-225015Z/reneg-r3` is the counterexample from the previous section:
+two §9.6 CP windows, `valid=3 cp_ack=0` and `valid=1 cp_ack=0`, with no RTP
+loss and no dead line at all. It has two separate answers.
+
+**Its second window fails because the CP-stage taps keep adapting, and that
+is now the default no longer.** `ME_V90_RENEG_CP_ADAPT=0` turns that window
+into `valid=6 cp_ack=1` and `Rate renegotiation 1 complete`. The knob was
+introduced default-on with a sound-sounding argument — both signals in the
+window are constant modulus, so blind CMA is legitimate across the whole of
+it — and a measurement that found it neutral; **that measurement was one
+recording.** Over all 26 reneg recordings in `artifacts/` (28 CP windows,
+one binary, the knob the only variable):
+
+| arm | windows completing |
+|---|---|
+| adapting (old default) | 24 / 28 |
+| frozen once the level settles | **25 / 28** |
+
+Neutral on 27 windows, one failure turned into a completion, **nothing worse
+anywhere**. So the default is now to freeze, `ME_V90_RENEG_CP_ADAPT=1`
+restores adapting. CMA is phase-blind: when it is not needed it does exactly
+what the startup path's own comment says, keeps walking a solution that was
+already right.
+
+**Its first window fails for a different reason, and the peer is not it.**
+The acquisition never holds still: the absolute constellation reads 1.3° from
+the 4-point family at symbol 1000, **23–26° (white) at symbols 3000–4000**,
+back to 7–9° at 5000–6000, on a feed whose RMS never leaves 1216–1254. The
+SCR shows it directly — where a completing call descrambles SCR to **one
+unbroken run of 9433 ones**, r3's breaks into runs of 3560, 2731 and 2090
+with false syncs between them, i.e. real symbol errors during the training
+material. Then 5 CP frames land on the 700-bit grid, only 3 pass CRC, and
+the frames after them are off-grid (gaps 572 and 705 against 700) and
+structurally rejected. Freezing the taps does not change this window at all
+(`valid=3` either way) — the wander is not CMA.
+
+**The peer did its part.** `v2attempt1/slm.log` for that renegotiation reads
+`rate renegotiation detected !!` → `Building CP, CP length = 700` →
+`Building CPnot on **MPnot** receive` — it decoded our MP′ — and then
+`EXMIT=>DATAXMIT` **0.16 s later**. Two things follow. Its CP′ was on the
+wire for only ~500 symbols, about 1.4 frames, so a receiver that is wandering
+gets one or two attempts at it and no more. And the white stretch that fills
+the rest of our window afterwards is **the peer's resumed data-mode signal
+seen through a 4-point slicer**, not a receiver collapse: the peer considers
+the exchange finished and has moved on while we sit out §9.6.1's seven-second
+E timeout. Comparing the logs of a failing and a completing renegotiation on
+the `MP` / `MPnot` wording alone does not separate them, though — the
+completing `reneg-defaults` r2 reads `on MP receive` — so do not use that as a
+success marker.
+
+**What is left.** The remaining question for r3's first window is why the
+CP-stage acquisition wanders between 1° and 26° during 2.5 s of constant-
+modulus SCR on a steady line, when the completing calls hold it. That is the
+same "acquire once, no way back" shape as the previous section, and neither
+tap adaptation nor the line explains it.

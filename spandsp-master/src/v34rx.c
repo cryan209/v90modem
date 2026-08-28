@@ -6695,7 +6695,18 @@ static int v90_reneg_cp_adapt_through_burst(void)
     {
         const char *value = getenv("ME_V90_RENEG_CP_ADAPT");
 
-        cache = (value  &&  atoi(value) == 0)  ?  0  :  1;
+        /* DEFAULT OFF -- freeze once the level has settled.  It was on, on
+           the argument that both signals in the window are constant modulus
+           so blind CMA is legitimate throughout, and on a measurement that
+           found it neutral -- but that measurement was one recording.  Over
+           the 26 reneg recordings in artifacts/ (28 CP windows), freezing is
+           neutral on 27 and turns one failure into a completion:
+           reneg-ab-225015Z/reneg-r3's second window goes from valid=1
+           cp_ack=0 to valid=6 cp_ack=1.  No recording is worse.  CMA is
+           phase-blind, so what it costs when it is not needed is exactly
+           what the startup path's comment says: it keeps walking a solution
+           that was already right. */
+        cache = (value  &&  atoi(value) == 1)  ?  1  :  0;
     }
     /*endif*/
     return cache;
