@@ -1215,3 +1215,49 @@ and a `--fast` replay now opens the probe at a deterministic point in the
 recording. Note the consequence when choosing a recording: the probe fires at
 that point in the *audio*, so a recording whose peer answered a renegotiation
 somewhere else will not answer this one.
+
+### Where the peer's CP burst is lost: the wire is steady, the collapse is ours (2026-08-28)
+
+The open question left above was that we decode the *head* of the peer's CP
+burst and lose the tail including §9.6.1.2.3's terminating CP′, and the working
+explanation was the one the trigger suggested — a call whose upstream had
+collapsed. **At the seam that explanation does not hold: the line is steady
+right through the window, and the loss is in our receiver.**
+
+Method: `V90_RENEG_BIT_DUMP` on the offline reproduction
+(`ME_V90_RENEG=1 ./v90_engine_replay artifacts/reneg-ab-225015Z/reneg-r1/live-rx.g711 ulaw --fast`),
+then read the stream *outside* the receiver — the same method that found the
+framer defect earlier in this document. The window's first 42624 bits contain,
+in order:
+
+- a run of **9238 ones** — Figure 8's SCR, exactly as §9.6.1.1.1 describes;
+- **five CP frames at a spacing of exactly 700 bits** (9724, 10424, 11124,
+  11824, 12524), pairwise near-identical, which is the peer's repeated CP and
+  matches its own log's `CP length = 700`;
+- at bit ~13215 — where the sixth frame is due at 13224 — **a run of about
+  225 zero bits**;
+- and after it, nothing structured ever again: the two later sync candidates
+  (13497, 13928) are off the 700-bit grid and their bodies differ from a good
+  frame in ~300 of 700 bits, i.e. noise.
+
+So the burst is not truncated by the peer. **The received audio across the
+whole window is flat**: 400-sample RMS over the 3.7 s from the CP conditioning
+reads 297–325 with no dip whatsoever, and certainly no 35 ms gap where the
+zeros are. The peer is transmitting and we stop demodulating.
+
+Two things worth keeping about the zero run. It sits at ~2.06 s into the
+window, which is where the earlier section measured `|z|` falling to 0.033 —
+the same event. And a run of *exact zeros* out of a self-synchronizing
+descrambler means its input was a constant raw dibit for ~112 symbols, not
+noise: with the equalized magnitude that small the differential product
+underflows and every symbol decides the same way. So the signature to look for
+is not "bit errors" but a stretch of the output going quiet.
+
+**What this changes.** "A renegotiation is a resynchronisation, not a repair
+for a line that has stopped carrying the upstream" is still the right reading
+of the A/B result, but it is not the reason *this* window fails: the peer
+answers, sends SCR and five good CP frames over a steady line, and our CP-stage
+receiver dies mid-burst 2 s in. The next thing to measure is what collapses —
+the tap adaptation is already refuted (frozen and adapting both give
+`valid=4`), so the candidates left are the AGC/level normalisation and the
+carrier loop, neither of which has been read across this instant.
