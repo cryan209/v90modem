@@ -1002,3 +1002,51 @@ measure, and unlike the count it is a real mechanism.
 The offline replay and the live call are the same engine on the same samples
 and still do not produce comparable window statistics, because the window
 boundaries differ. Score an A/B inside one harness, or state the units.
+
+
+### The viability gate, tested live and withdrawn (2026-08-28)
+
+The gate above was tested with the experiment it deserved —
+`tools/soak/v90_reneg_viability_ab.sh`, `ME_V90_RENEG_VIABILITY` the only
+variable, **both** arms with `ME_V90_RENEG=1`, 600 s calls, arms alternated
+(`artifacts/renegviab-ab-010014Z`) — and **the first informative call refuted
+it**:
+
+```
+ungated-r3  attempt 1 -> no E within 56000 symbols        (timeout, no CP')
+            attempt 2 -> Rate renegotiation 1 complete    (valid=4 cp_ack=1)
+```
+
+A retry after a CP′-less timeout **completed**. The gate would have suppressed
+it. One counterexample is enough to withdraw a rule of the form "never retry
+after X", and there is nothing on the other side: every call in the gated arm
+had exactly **one** upstream-carrier-loss event, so the gate never suppressed
+anything there and that arm says nothing about it.
+
+| call | §9.6 attempts | completed |
+|---|---|---|
+| gated-r1 / r2 / r3 | 1 / 1 / 1 | 0 / 0 / 0 |
+| ungated-r1 / r2 / r3 | 1 / 0 / **2** | 0 / 0 / **1** |
+
+**The gated arm's better totals are not evidence for it** — 1206 s carried
+against 687 s, but two ungated calls died at 40 s and 46 s, so that is call
+quality on a rough session, not the variable. Quoting it would be the same
+error as the count.
+
+**And the completing retry kills the count framing too.** It completed on
+**4** CP frames — inside the 1–4 range every *failing* attempt sat in. So
+whether the terminating CP′ lands varies attempt to attempt: it is a
+per-attempt condition, not a property of the call, and neither the count nor
+the CP′ can be read as "this upstream cannot carry §9.6".
+
+Withdrawn in full. Kept, because they are what caught it: `cp_ack` in the
+CP-window report, and printing that report on completion as well as on
+timeout.
+
+**Two lessons, both about the same mistake made twice in a row.** The gate was
+proposed off a number from a different harness, and when that was corrected it
+was rebuilt off a within-call trend from a single call (4 → 2 → 1 frames).
+Neither was a measurement. **A rule that forbids something needs a
+counterexample search, not a supporting anecdote** — and the cheapest such
+search here was one alternated A/B that found the counterexample in three
+calls a side.
