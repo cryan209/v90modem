@@ -1050,3 +1050,58 @@ Neither was a measurement. **A rule that forbids something needs a
 counterexample search, not a supporting anecdote** — and the cheapest such
 search here was one alternated A/B that found the counterexample in three
 calls a side.
+
+### Keeping the CP-stage taps adapting: done, and measured neutral (2026-08-28)
+
+The freeze at CMA convergence copied the startup rule, and that rule does not
+carry over: at startup the taps arriving at the CP stage were trained by Phase
+3 moments earlier and blind CMA can only walk them off, whereas at a
+renegotiation they were trained seconds ago on SCR and there is no trained
+solution to protect. Both signals in this window are constant modulus —
+Figure 8's SCR is scrambled ones, §8.5.2's CP goes out through J's 4-point
+modulation — so CMA is legitimate across the whole of it. Changed;
+`ME_V90_RENEG_CP_ADAPT=0` restores the freeze.
+
+**It changes nothing, and this is the first time this question has had a
+harness that could say so.** Replaying a live *loss-triggered* call
+(`artifacts/reneg-ab-225015Z/reneg-r1`) reaches the same renegotiation and the
+same window offline — `valid=4 cp_ack=0` against its own live `valid=4
+cp_ack=0` — so the failing case is now reproducible on the desk. Three runs
+each way:
+
+| arm | result |
+|---|---|
+| adapting | `valid=4 cp_ack=0`, timeout — 3/3 |
+| frozen | `valid=4 cp_ack=0`, timeout — 3/3 |
+| adapting, on the completing recording | `valid=6 cp_ack=1`, complete — 3/3 |
+
+**Why it could not have helped, from the same harness: the level was never the
+problem.** Dumping the CP-stage symbols of a completing and a failing
+renegotiation side by side (`V34_MP_RX_DUMP`, which now carries the absolute
+angle):
+
+| | magnitude | angle from the 4-point family |
+|---|---|---|
+| completes | 1.167 → 1.05 | **~3°** through SCR, 0.6° through CP |
+| times out | 1.167 → 1.05 (identical) | **~21.8°** for the whole 1.4 s of SCR |
+
+**22.5° is the mean for symbols distributed uniformly in angle** — it is this
+metric's white, not a rotation, the same trap as 0.667 for distance-to-grid.
+So the failing receiver has no constellation at all through the SCR it is
+given, acquires only at +1.5 s as CP starts, decodes 4 frames, and collapses
+again at +2.05 s (|z| = 0.033) exactly where frames 5, 6 and the CP′ are due.
+A level-restoring loop cannot supply what is missing there.
+
+**Ruled out on the way:** an early/false S detection, which was the obvious
+suspect — both calls put the first CP frame at +1.62…+1.64 s after the peer's
+S, so the detection is correctly timed in both and the failing case simply
+stops early.
+
+**The lead this leaves is timing, not taps.** The T/2 chain's symbol timing is
+frozen for the whole of data mode (the T/3 branch returns before it), and the
+failing call had been in data mode for 132 s against the completing one's 46 s
+— three times as long for the peer's clock to walk away from a sampling
+instant nobody is correcting. A receiver sampling off the eye centre is white
+in exactly the way measured here, and it would explain why the SCR — 1.4 s of
+free training material — buys nothing. Re-acquiring the symbol instant at the
+§9.6 seam, as a fresh Phase 4 does, is the next thing to try.
