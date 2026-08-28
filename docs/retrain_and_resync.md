@@ -942,3 +942,63 @@ when opened on a working link, and answered whenever the *peer* opens one.
 this knob. A useful smaller step would be to gate initiation on the upstream
 being *recoverable* rather than merely lost — the CP-window valid-frame count
 is exactly that measurement, and the split here (59 against 1–4) is clean.
+
+### Gating repeat §9.6 attempts, and a correction to how the last one was scored (2026-08-28)
+
+The section above closed with "gate initiation on the upstream being
+recoverable — the CP-window valid-frame count is exactly that measurement, and
+the split here (59 against 1–4) is clean". **The split was not clean, because
+the two numbers were not measured the same way.** 59 came from an *offline
+replay* window spanning 13 s and several of the peer's CP bursts; the 1–4 came
+from *live* loss-triggered windows. Measured live against live, scoped to the
+renegotiation windows themselves:
+
+| case | CP frames decoded | ack pattern | outcome |
+|---|---|---|---|
+| probe, healthy link (3 calls) | 6 | `0,0,0,0,0,1` | completes |
+| loss-triggered (4 windows) | 4, 3, 2, 1 | all `0` | §9.6.1 timeout |
+
+and they arrive at the same instants — +1617…+2158 ms after the peer's S in
+the completing calls, +1553…+2015 ms in the failing ones. The peer's own log
+is identical in both cases too: `rate renegotiation detected` → 1.24 s study →
+`Building CP` → CP #1..#5 → CP′ → `EXMIT=>DATAXMIT`, 2.2 s end to end, whether
+we are healthy or not.
+
+**So the count is a side effect and the signal is a single frame.** What
+separates the two outcomes is whether §9.6.1.2.3's terminating **CP′** is
+decoded — that is the frame that releases Ed. A threshold on the count would
+have been asked to separate 6 from 4.
+
+**The gate is therefore:** a §9.6 attempt that takes §9.6.1's timeout without
+ever decoding a CP′ is this call's answer, and no further renegotiation is
+opened on it. It does not touch a renegotiation the *peer* opens (§9.6.1.2 is
+a "shall"), nor a call where an attempt did complete. Retries were measured
+not to recover it and to decay — within one call the successive attempts
+decoded 4, then 2, then 1 frames — so on the A/B's own data this turns 6
+attempts across three calls into 3, halving the Rd/R̄d/TRN2d/MP the downstream
+spends on attempts already known to be futile.
+`ME_V90_RENEG_VIABILITY=0` restores retries.
+
+Verified both ways offline on `artifacts/reneg-eq/reneg-r1`, three runs each:
+the completing path reports `valid=6 cp_ack=1` and the gate stays silent, and
+the forced-failure path (`ME_V90_RENEG_CP_STREAM=0`, `valid=0` in 3 of 3)
+reports `cp_ack=0` and the gate fires. The CP-window report now carries
+`cp_ack` and is printed on completion as well as on timeout — the two outcomes
+differ by exactly one frame, and logging only the failures hid that.
+
+**This makes an enabled renegotiation cheaper; it does not make one worth
+enabling.** `ME_V90_RENEG` stays default 0.
+
+**The open question this leaves is better posed than the one it replaces:** we
+decode the head of the peer's CP burst and lose its tail, including the CP′ —
+4 of 6 frames, then 3, then 2, then 1 as the call degrades. That is a receiver
+that works for ~300 ms after its SCR-trained equalizer is frozen and then
+stops. Whether the taps should keep adapting through the CP burst (they are
+frozen at convergence, by the same reasoning that freezes them at startup —
+where Phase 3 has just trained them and CP is short) is the next thing to
+measure, and unlike the count it is a real mechanism.
+
+**Method note.** Two numbers from different harnesses are not a measurement.
+The offline replay and the live call are the same engine on the same samples
+and still do not produce comparable window statistics, because the window
+boundaries differ. Score an A/B inside one harness, or state the units.
