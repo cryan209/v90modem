@@ -130,10 +130,12 @@ tools/__pycache__/
 /artifacts/v92-slmodem-tower/
 /artifacts/v92-usb-cx93001/
 
-# Hardware-run bulk output.  artifacts/ is otherwise tracked on purpose:
-# artifacts/eicon-digital-downstream/ is the foreign downstream fixture
-# v90_analogue_rx_test runs in `make test`, and it is a hardware capture that
-# cannot be regenerated.  These two are per-run dumps nothing reads.
-artifacts/eicon-live/
-artifacts/pdf_text/
+# Hardware-run bulk output.  New run directories under artifacts/ and captures/
+# are not committed: they are per-run dumps of live calls, and the corpus is
+# already large.  Fixtures the tests read (artifacts/eicon-digital-downstream/,
+# artifacts/eicon-phase4-downstream/, the reneg/goal replay recordings, ...)
+# are ALREADY TRACKED, and .gitignore does not affect tracked files, so they
+# keep working; `git add -f` a new one that a test needs to read.
+artifacts/
+captures/
 artifacts/courier-ja-3200low/README.md
