@@ -326,6 +326,7 @@ bool v90_rate_renegotiation_pending(const v90_state_t *s);
 bool v90_rate_renegotiation_active(const v90_state_t *s);
 bool v90_rate_renegotiation_start(v90_state_t *s);
 bool v90_rate_renegotiation_timed_out(const v90_state_t *s);
+void v90_rate_renegotiation_note_answer(v90_state_t *s);
 int  v90_rate_renegotiation_count(const v90_state_t *s);
 
 /*

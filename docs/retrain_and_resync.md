@@ -1164,3 +1164,54 @@ re-conditioning at the seam changes that.
 call now reproduces offline, window for window (`valid=4 cp_ack=0` against its
 own live `valid=4 cp_ack=0`), which is what let four hypotheses be killed in an
 afternoon instead of four rig sessions.
+
+### §9.6's unanswered-attempt timeout was dead code, and the probe hooks could not run under `--fast` (2026-08-28)
+
+Two defects in the §9.6 machinery, both of them in the way of the work rather
+than in the protocol.
+
+**(a) The unanswered-attempt timeout could never fire.**
+`V90_RENEG_ANSWER_TIMEOUT_SYMBOLS` exists so that a renegotiation the peer
+ignores completely gives up sooner than §9.6.1's seven-second E timeout — but
+it was gated on `reneg_rbar_symbol < 0`, i.e. "still transmitting Rd". That
+was right while Rd ran until a far-end CPt arrived; since Rd terminates on its
+own 384T count (§9.6.1.1.1, fixed earlier in this document) that window is
+**48 ms** against the timeout's 3 s, so the branch was unreachable and every
+unanswered attempt ran the full E window. Confirmed on the reproduction: an
+attempt with no S and no CP anywhere in it logged `no E within 56000 symbols`.
+
+It now measures from the Rd→R̄d transition and is gated on nothing having been
+observed — `v90_rate_renegotiation_note_answer()` is called when the peer's S
+is detected and when the Table-14 framer takes a sync candidate inside an
+armed CP window, so **an attempt the peer answers keeps §9.6.1's full E
+window** and only a genuinely silent one is cut short. The bound is 4 s, from
+the measured shape of a conformant answer on this rig: S ~260 ms after R̄d and
+the first CP frame ~1.9 s after it. §9.6.1 permits the earlier exit —
+"the digital modem may initiate a retrain at any time during a rate
+renegotiation according to 9.5.1.1" — and its five seconds is a ceiling on how
+long to wait, not a floor.
+
+Measured on the offline reproduction (`artifacts/reneg-ab-225015Z/reneg-r1`,
+which carries three attempts), one binary, before and after:
+
+| attempt | peer answer | before | after |
+|---|---|---|---|
+| 1 | S seen, `valid=4 cp_ack=0` | E timeout, 7 s | **unchanged** — E timeout, 7 s |
+| 2 | S seen, `valid=0` | E timeout, 7 s | **unchanged** — E timeout, 7 s |
+| 3 | nothing | E timeout, 7 s | **no-answer timeout, 4 s** |
+
+The CP-window reports are identical in the answered attempts, which is the
+control: this changes when we give up on silence and nothing else.
+
+**(b) `ME_V90_RENEG_AFTER_MS` (and its `ME_V34_*` siblings) measured wall-clock
+time, so they never fired under `v90_engine_replay --fast`.** That is the one
+harness this whole investigation runs on — a `--fast` replay consumes a 600 s
+recording in a fraction of the time, so a 20000 ms probe simply never came
+due, and the alternative was 600 s of desk time per experiment. They now
+measure **received audio** since data-mode entry (`g_rx_audio_samples`, the
+8 kHz media clock), which is what "n ms into data mode" always meant. Live
+behaviour is unchanged — the two clocks agree on a call running in real time —
+and a `--fast` replay now opens the probe at a deterministic point in the
+recording. Note the consequence when choosing a recording: the probe fires at
+that point in the *audio*, so a recording whose peer answered a renegotiation
+somewhere else will not answer this one.

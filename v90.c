@@ -41,11 +41,22 @@
  * the Rd→R̄d transition.  At 8000 symbols/s that is 40000 symbols, plus an
  * allowance for two round trips on this bearer. */
 #define V90_RENEG_E_TIMEOUT_SYMBOLS  (8000*7)
-/* How long to hold Rd waiting for the analogue modem to answer at all.  Its
- * reply is S for 128T then S̄ for 16T then an optional SCR of up to 2000 ms
- * before CP, so a conformant answer is well inside two seconds; three is
- * generous and still far short of the peer's own retrain timer. */
-#define V90_RENEG_ANSWER_TIMEOUT_SYMBOLS  (8000*3)
+/* How long to wait for the analogue modem to answer the renegotiation at
+ * all, measured from the Rd→R̄d transition.  Its reply per Figure 8/V.90 is
+ * S for 128T, S̄ for 16T, an optional SCR of up to 2000 ms and then CP;
+ * measured against the SmartLink rig the S lands ~260 ms after R̄d and the
+ * first CP frame ~1.9 s after it, so four seconds covers a conformant answer
+ * with room to spare and still cuts an unanswered attempt well short of
+ * §9.6.1's full seven-second E timeout.  §9.6.1 permits that: it says the
+ * digital modem "may initiate a retrain at any time during a rate
+ * renegotiation according to 9.5.1.1", and its own five-second bound is a
+ * ceiling on how long to wait, not a floor.
+ *
+ * NOTE this used to be gated on reneg_rbar_symbol < 0 -- "still holding Rd"
+ * -- which was right only while Rd ran until a far-end CPt arrived.  Since
+ * Rd terminates on its own 384T count (§9.6.1.1.1) that window is 48 ms, so
+ * the branch was dead: every unanswered attempt ran the full E timeout. */
+#define V90_RENEG_ANSWER_TIMEOUT_SYMBOLS  (8000*4)
 #define V90_RI_POST_CP_SYMBOLS 24
 /* V.90 requires at least 2040T and MP within 2000 ms (§9.4.1.2/.3).
  * SmartLink recognizes barred Ri but enables its TRN2d study about 240 ms
@@ -671,6 +682,7 @@ struct v90_state_s {
     bool             reneg_pending;             /* asked for, waiting for a frame boundary */
     bool             reneg_active;              /* Rd sent, sequence running */
     bool             reneg_timed_out;           /* §9.6.1: no Ed in time, retrain owed */
+    bool             reneg_answer_seen;         /* peer's S, or a CP frame, observed */
     int64_t          reneg_rbar_symbol;         /* symbol count at the Rd→R̄d transition */
     int64_t          reneg_symbol_clock;        /* symbols emitted since renegotiation began */
     int              reneg_count;
@@ -3470,23 +3482,23 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                     "(§9.6.1/§9.5.1.1)\n",
                     s->reneg_count, V90_RENEG_E_TIMEOUT_SYMBOLS);
         }
-        /* §9.6.1's own timeout runs from the Rd→R̄d transition, and that
-         * transition needs the analogue modem's CPt.  A peer that does not
-         * answer Rd at all therefore never starts that clock, and the
-         * transmitter holds Rd for the rest of the call -- measured against
-         * the SmartLink rig, which then declares SILENCERETRAIN and retrains,
-         * costing everything after the loss that provoked the renegotiation.
-         * §9.6.1 also says the digital modem "may initiate a retrain at any
-         * time during a rate renegotiation according to 9.5.1.1", so bound
-         * the wait for an answer as well as the wait for E. */
+        /* An attempt the peer never answers at all: no S, no CP sync, and
+         * so nothing to wait for.  §9.6.1's E timeout is seven seconds of
+         * dead downstream on that path, so bound the wait for an ANSWER
+         * separately and let the engine take the §9.5.1.1 retrain it would
+         * have taken anyway.  An attempt that HAS been answered keeps the
+         * full E window. */
         if (!s->reneg_timed_out
-            && s->reneg_rbar_symbol < 0
-            && s->reneg_symbol_clock > V90_RENEG_ANSWER_TIMEOUT_SYMBOLS) {
+            && s->reneg_rbar_symbol >= 0
+            && !s->reneg_answer_seen
+            && !s->e_received
+            && s->reneg_symbol_clock - s->reneg_rbar_symbol
+                   > V90_RENEG_ANSWER_TIMEOUT_SYMBOLS) {
             s->reneg_timed_out = true;
             fprintf(stderr,
-                    "[V90] Rate renegotiation %d: no CP within %d symbols of "
-                    "Rd; the peer is not answering, a retrain is owed "
-                    "(§9.6.1/§9.5.1.1)\n",
+                    "[V90] Rate renegotiation %d: no answer within %d symbols "
+                    "of the Rd->R-bar-d transition; the peer is not "
+                    "answering, a retrain is owed (§9.6.1/§9.5.1.1)\n",
                     s->reneg_count, V90_RENEG_ANSWER_TIMEOUT_SYMBOLS);
         }
     }
@@ -5447,6 +5459,15 @@ int v90_rate_renegotiation_count(const v90_state_t *s)
     return s ? s->reneg_count : 0;
 }
 
+/* The peer has answered this renegotiation: its S was detected, or a CP
+ * frame arrived.  Either is enough to stop the unanswered-attempt timeout
+ * and let the attempt run §9.6.1's full E window. */
+void v90_rate_renegotiation_note_answer(v90_state_t *s)
+{
+    if (s && s->reneg_active)
+        s->reneg_answer_seen = true;
+}
+
 /* §9.6.1: "The digital modem shall initiate a retrain according to 9.5.1.1 if
  * it does not receive an E sequence within 5000 ms plus 2 round-trip delays
  * after transmitting the Rd - to - Rd transition."  The engine owns the
@@ -5466,6 +5487,7 @@ bool v90_rate_renegotiation_start(v90_state_t *s)
     s->reneg_pending = false;
     s->reneg_active = true;
     s->reneg_timed_out = false;
+    s->reneg_answer_seen = false;
     s->reneg_rbar_symbol = -1;
     s->reneg_symbol_clock = 0;
     s->reneg_count++;

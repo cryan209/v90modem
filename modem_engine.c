@@ -3026,7 +3026,31 @@ static void v34_reneg_begin_locked(void)
  * the same knob (ME_V90_ANALOGUE_RATE_RENEGOTIATE_MS) for the same reason.
  * Zero, the default, means never. */
 static int64_t g_v34_data_entry_ms = 0;
+/* g_rx_audio_samples at the same instant.  The *_AFTER_MS test hooks below
+ * are the only way to open a renegotiation or a retrain on a healthy call,
+ * and every one of them was measured off trace_now_ms() -- the host's wall
+ * clock.  That makes them unusable in the one harness this work depends on:
+ * v90_engine_replay --fast consumes the recording faster than real time, so
+ * a 20000 ms probe simply never fires, and without --fast a 600 s call costs
+ * 600 s of desk time per experiment.  The received-audio counter is the
+ * media clock -- 8 kHz on this bearer live and in replay alike -- so these
+ * hooks now measure the elapsed audio, which is what "n ms into data mode"
+ * was always meant to name.  Live behaviour is unchanged: the two clocks
+ * agree on a call that is running in real time. */
+static uint64_t g_v34_data_entry_samples = 0;
 static bool    g_v34_reneg_probe_done = false;
+
+/* Milliseconds of received audio since this call entered data mode, or 0 if
+ * it has not.  Declared here because the probe hooks below all need it;
+ * g_rx_audio_samples is defined above. */
+static int64_t data_mode_elapsed_ms(void)
+{
+    if (g_v34_data_entry_ms == 0)
+        return 0;
+    if (g_rx_audio_samples <= g_v34_data_entry_samples)
+        return 0;
+    return (int64_t)((g_rx_audio_samples - g_v34_data_entry_samples) / 8u);
+}
 
 static int me_v34_reneg_after_ms(void)
 {
@@ -3043,7 +3067,7 @@ static bool v34_reneg_probe_due_locked(void)
         return false;
     if (g_v34_data_entry_ms == 0)
         return false;
-    return (trace_now_ms() - g_v34_data_entry_ms) >= me_v34_reneg_after_ms();
+    return data_mode_elapsed_ms() >= me_v34_reneg_after_ms();
 }
 
 /* ME_V34_RETRAIN_AFTER_MS=<n> initiates a §11.5.1.1/§11.5.2.1 retrain n ms
@@ -3143,7 +3167,7 @@ static bool v90_reneg_probe_due_locked(void)
         return false;
     if (g_v34_data_entry_ms == 0)
         return false;
-    return (trace_now_ms() - g_v34_data_entry_ms) >= me_v90_reneg_after_ms();
+    return data_mode_elapsed_ms() >= me_v90_reneg_after_ms();
 }
 
 static bool v34_retrain_probe_due_locked(void)
@@ -3152,7 +3176,7 @@ static bool v34_retrain_probe_due_locked(void)
         return false;
     if (g_v34_data_entry_ms == 0)
         return false;
-    return (trace_now_ms() - g_v34_data_entry_ms) >= me_v34_retrain_after_ms();
+    return data_mode_elapsed_ms() >= me_v34_retrain_after_ms();
 }
 
 /* ME_TX_DISRUPT_AFTER_MS / ME_TX_DISRUPT_MS transmit silence for a window,
@@ -3198,7 +3222,7 @@ static bool tx_disrupt_active(void)
         || me_tx_disrupt_after_ms() <= 0
         || g_v34_data_entry_ms == 0)
         return false;
-    since = trace_now_ms() - g_v34_data_entry_ms;
+    since = data_mode_elapsed_ms();
     if (since < me_tx_disrupt_after_ms())
         return false;
     return since < (int64_t) me_tx_disrupt_after_ms() + me_tx_disrupt_ms();
@@ -3336,6 +3360,7 @@ static void v90_live_cp_frame(void *user_data, const vpcm_cp_diag_t *diag)
 static void v90_live_cp_bit(void *user_data, int bit)
 {
     uint32_t rejected_before;
+    uint32_t sync_before;
 
     (void)user_data;
     /* After CP' is accepted, the next thing on this channel is the peer's E
@@ -3377,7 +3402,13 @@ static void v90_live_cp_bit(void *user_data, int bit)
         }
     }
     rejected_before = g_v90_cp_rx.rejected_frames;
+    sync_before = g_v90_cp_rx.sync_candidates;
     (void)v90_cp_rx_put_bit(&g_v90_cp_rx, bit);
+    /* A CP-shaped frame boundary on the wire is an answer even where the S
+     * detector missed it -- §9.6.1.2.3's CP is the substance of the reply. */
+    if (g_v90 && g_v90_reneg_cp_rx_marked
+        && g_v90_cp_rx.sync_candidates != sync_before)
+        v90_rate_renegotiation_note_answer(g_v90);
     if (g_v34 && g_v90_cp_rx.rejected_frames != rejected_before)
         v34_reject_v90_phase4_hypothesis(g_v34);
 }
@@ -3792,6 +3823,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_retrain_from_data = false;
     g_v34_reneg_start_ms = 0;
     g_v34_data_entry_ms = 0;
+    g_v34_data_entry_samples = 0;
     g_v34_reneg_probe_done = false;
     g_v90_reneg_probe_done = false;
     g_v90_reneg_await_s = false;
@@ -4729,6 +4761,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
                         g_state = ME_DATA;
                         g_phase_start_ms = 0;
                         g_v34_data_entry_ms = trace_now_ms();
+                        g_v34_data_entry_samples = g_rx_audio_samples;
                         ME_LOG("[ME] V.90 training complete (upstream V.34 %d bps, downstream PCM %d bps)\n",
                                 rate, downstream_rate);
                         trace_phase("V90 enter DATA: upstream=%d downstream=%d", rate, downstream_rate);
@@ -4761,6 +4794,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
                     g_state = ME_DATA;
                     g_phase_start_ms = 0;
                     g_v34_data_entry_ms = trace_now_ms();
+                    g_v34_data_entry_samples = g_rx_audio_samples;
                     ME_LOG("[ME] V.34 training complete (%d bps)\n", rate);
                     trace_phase("V34 enter DATA: rate=%d", rate);
                     /* §11.5 never takes CONNECT back; a retrain only clamps
@@ -8563,6 +8597,9 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
             trace_phase("V90 reneg S answer seen, CP search");
             v34_v90_force_reneg_cp_rx(g_v34);
             v90_reneg_cp_mark_locked();
+            /* The peer is answering, so this attempt gets §9.6.1's full E
+             * window rather than the unanswered-attempt bound. */
+            v90_rate_renegotiation_note_answer(g_v90);
         }
 
         /* While the renegotiation runs, the downstream is Rd/R̄d/TRN2d/MP/Ed/
