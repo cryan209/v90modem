@@ -2784,3 +2784,39 @@ can be settled without a rig: take the receiver's own FSE taps and its own
 interpolation positions and reproduce one symbol by hand from the tap. Until
 the model reproduces the receiver, the bound cannot be trusted to say anything
 about the wire.
+
+### Reproducing one symbol by hand: stage A exact, stage B 26% off (2026-08-28)
+
+`V90_T3_SYMBOL_PROBE=<data symbol index>` dumps everything that went into one
+symbol: `next_symbol`, the timing loop's fraction, the conjugate flag, the
+internal rate and carrier, the input/output sample counters, all 21 FSE taps,
+and the raw ring values at both the integer and the interpolated positions.
+
+**Stage A — the output is the dot product, exactly.** On `gated-r3` symbol
+1000000, `y = Σ fse[tap]·rawfrac[tap]` reproduces the receiver's own symbol to
+**4.5e-06**. The final stage is understood and the probe is trustworthy.
+
+**Stage B — the front end does not reproduce.** Rebuilding the raw stream from
+the tap the way the receiver does — 63-tap Blackman Hilbert delayed 31 samples,
+exact 6/5 windowed-sinc resample to 9600 Hz, mix at −2π·fc·j/9600 — matches the
+receiver's own `raw` values to a coherence of only **0.74 (26% residual)**,
+best at an input-sample shift of **2.40** with a constant gain of 0.90 and a
+rotation of −150°. The gain and rotation are harmless (any equalizer fit
+absorbs them). The 26% is not, and the 2.40-sample offset says the model's
+notion of where an output sample sits in tap time is wrong by more than two
+samples.
+
+**So the front end is where every offline model of this path has been wrong**,
+and it is the likeliest reason `tools/v34_channel_bound.py` returns a null
+here: it models a **T/2** filter on the **8 kHz** tap, while this receiver runs
+a **T/3** filter on a **Hilbert-analytic 9600 Hz** stream — and even a
+reconstruction built to match that chain step for step is 26% off.
+
+**Nothing about the wire can be concluded until stage B reproduces.** The
+remaining discrepancy is small enough to be one specific thing — the publication
+delay in the resampler's `while (8000*next_output <= internal_rate*(n - half))`
+condition, the exact input index the analytic signal is stamped with, or the
+Hilbert kernel's sign convention — and the probe now makes each of those a
+one-run experiment rather than a guess. Fix stage B first, then the bound
+becomes a straight T/3 least-squares fit on the reconstructed 9600 Hz stream,
+which is the same computation the tool already does with a different stride.
