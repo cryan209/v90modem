@@ -488,6 +488,43 @@ static int test_dense_constellation(void)
 }
 /*- End of function --------------------------------------------------------*/
 
+static int test_external_resync_shift(void)
+{
+    v34_gardner_state_t g;
+    int correction;
+    int failed = 0;
+
+    v34_gardner_init(&g, V34_GARDNER_DEFAULT_MU,
+                     V34_GARDNER_DEFAULT_BETA);
+    g.acc = 0.40f;
+    g.hold = V34_GARDNER_SLIP_HOLD - 1;
+    correction = v34_gardner_shift(&g, 2.0f/3.0f);
+    if (correction != 1 || fabsf(g.acc - (1.0f/15.0f)) > 1e-6f
+        || g.hold != 0)
+    {
+        printf("  FAIL: +2/3 resync shift left correction=%d acc=%.6f hold=%d\n",
+               correction, g.acc, g.hold);
+        failed = 1;
+    }
+    /*endif*/
+
+    g.acc = -0.40f;
+    g.hold = -V34_GARDNER_SLIP_HOLD + 1;
+    correction = v34_gardner_shift(&g, -2.0f/3.0f);
+    if (correction != -1 || fabsf(g.acc + (1.0f/15.0f)) > 1e-6f
+        || g.hold != 0)
+    {
+        printf("  FAIL: -2/3 resync shift left correction=%d acc=%.6f hold=%d\n",
+               correction, g.acc, g.hold);
+        failed = 1;
+    }
+    /*endif*/
+
+    printf("  external resync shift: %s\n", failed ? "FAILED" : "OK");
+    return failed;
+}
+/*- End of function --------------------------------------------------------*/
+
 int main(void)
 {
     int failed = 0;
@@ -498,6 +535,7 @@ int main(void)
     failed |= test_acquire();
     failed |= test_track();
     failed |= test_quiescent();
+    failed |= test_external_resync_shift();
     if (failed)
     {
         printf("v34_gardner_test: FAILED\n");

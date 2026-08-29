@@ -1640,6 +1640,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     int data_seconds;
     uint8_t downstream_drn;
     uint8_t upstream_drn;
+    bool ok;
 
     if (!session || !params)
         return false;
@@ -1652,6 +1653,15 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     downstream_rx = NULL;
     native_caller = NULL;
     native_answerer = NULL;
+    down_data_in = NULL;
+    down_data_out = NULL;
+    up_data_in = NULL;
+    up_data_out = NULL;
+    down_pcm_tx = NULL;
+    down_pcm_rx = NULL;
+    up_pcm_tx = NULL;
+    up_pcm_rx = NULL;
+    ok = false;
     data_seconds = params->data_seconds;
     if (data_seconds <= 0)
         data_seconds = 10;
@@ -1674,10 +1684,10 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
                                  V90_INFO1A_BITS);
     v91_default_dil_init(&default_dil);
     if (!vpcm_v92_init_digital_dil_from_ja(&digital_dil, params->echo_limited))
-        return false;
+        goto done;
     vpcm_v90_copy_dil_to_v91_compat(&digital_dil_compat, &digital_dil);
     if (!v90_analyse_dil_descriptor(&digital_dil, &digital_dil_analysis))
-        return false;
+        goto done;
     local_report.phase3_digital_dil = digital_dil;
     local_report.phase3_digital_dil_valid = true;
     local_report.phase3_digital_dil_analysis = digital_dil_analysis;
@@ -1696,7 +1706,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         || v91_tx_ez_codewords(&caller_startup, startup_buf, (int) sizeof(startup_buf)) != V91_EZ_SYMBOLS
         || v91_tx_ez_codewords(&answerer_startup, phase1_peer_buf, (int) sizeof(phase1_peer_buf)) != V91_EZ_SYMBOLS
         || !vpcm_v90_record_duplex(io, startup_buf, phase1_peer_buf, V91_EZ_SYMBOLS)) {
-        return false;
+        goto done;
     }
 
     vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE2);
@@ -1708,7 +1718,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
                                        &answerer_bit_sink,
                                        &native_caller,
                                        &native_answerer)) {
-        return false;
+        goto done;
     }
     if (local_report.phase2_received_info1a_valid) {
         local_report.analogue_info1a.u_info = local_report.phase2_received_info1a.u_info;
@@ -1745,7 +1755,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
                                                         NULL);
     if (startup_len <= 0
         || !v91_note_received_dil(&answerer_startup, &digital_dil_compat, NULL)) {
-        return false;
+        goto done;
     }
     vpcm_v92_select_profile_from_dil(&digital_dil_analysis, &downstream_drn, &upstream_drn);
 
@@ -1758,7 +1768,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         || !v91_note_received_dil(&caller_startup, &default_dil, NULL)
         || (!local_report.phase3_native_analogue_completed
             && !vpcm_v90_record_simplex(io, params->law, false, startup_buf, startup_len))) {
-        return false;
+        goto done;
     }
 
     vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE3);
@@ -1768,7 +1778,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         || !v91_rx_scr_codewords(&caller_startup, scr_buf, 18, false)
         || (!local_report.phase3_native_analogue_completed
             && !vpcm_v90_record_simplex(io, params->law, false, scr_buf, 18))) {
-        return false;
+        goto done;
     }
 
     /* Phase 4 is still approximated internally by the shared CP/B1
@@ -1793,7 +1803,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         || !vpcm_cp_frames_equal(&local_report.cp_down_offer, &cp_rx)
         || (!local_report.phase4_native_analogue_completed
             && !vpcm_v90_record_simplex(io, params->law, true, cp_buf, cp_len))) {
-        return false;
+        goto done;
     }
 
     local_report.cp_down_ack = local_report.cp_down_offer;
@@ -1808,7 +1818,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         || !vpcm_cp_frames_equal(&local_report.cp_down_ack, &cp_rx)
         || (!local_report.phase4_native_analogue_completed
             && !vpcm_v90_record_simplex(io, params->law, false, cp_buf, cp_len))) {
-        return false;
+        goto done;
     }
 
     vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE4);
@@ -1820,7 +1830,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         || !v91_rx_b1_codewords(&answerer_startup, b1_buf, V91_B1_SYMBOLS, &local_report.cp_down_ack)
         || (!local_report.phase4_native_analogue_completed
             && !vpcm_v90_record_simplex(io, params->law, true, b1_buf, V91_B1_SYMBOLS))) {
-        return false;
+        goto done;
     }
 
     vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE4);
@@ -1841,7 +1851,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         || !vpcm_cp_frames_equal(&local_report.cp_up_offer, &cp_rx)
         || (!local_report.phase4_native_analogue_completed
             && !vpcm_v90_record_simplex(io, params->law, false, cp_buf, cp_len))) {
-        return false;
+        goto done;
     }
 
     local_report.cp_up_ack = local_report.cp_up_offer;
@@ -1856,7 +1866,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         || !vpcm_cp_frames_equal(&local_report.cp_up_ack, &cp_rx)
         || (!local_report.phase4_native_analogue_completed
             && !vpcm_v90_record_simplex(io, params->law, true, cp_buf, cp_len))) {
-        return false;
+        goto done;
     }
 
     vpcm_v90_session_set_state(session, VPCM_V90_MODEM_PHASE4);
@@ -1868,7 +1878,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         || !v91_rx_b1_codewords(&caller_startup, b1_buf, V91_B1_SYMBOLS, &local_report.cp_up_ack)
         || (!local_report.phase4_native_analogue_completed
             && !vpcm_v90_record_simplex(io, params->law, false, b1_buf, V91_B1_SYMBOLS))) {
-        return false;
+        goto done;
     }
 
     vpcm_v90_session_set_state(session, VPCM_V90_MODEM_DATA);
@@ -1878,10 +1888,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
         || !downstream_rx
         || !v91_activate_data_mode(&answerer_tx, &local_report.cp_up_ack)
         || !v91_activate_data_mode(&caller_rx, &local_report.cp_up_ack)) {
-        v90_free(downstream_tx);
-        v90_free(downstream_rx);
-        v34_free(native_caller);
-        return false;
+        goto done;
     }
 
     data_frames = vpcm_v90_frames_from_seconds(data_seconds);
@@ -1908,18 +1915,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     up_pcm_rx = (uint8_t *) malloc((size_t) total_codewords);
     if (!down_data_in || !down_data_out || !up_data_in || !up_data_out
         || !down_pcm_tx || !down_pcm_rx || !up_pcm_tx || !up_pcm_rx) {
-        free(down_data_in);
-        free(down_data_out);
-        free(up_data_in);
-        free(up_data_out);
-        free(down_pcm_tx);
-        free(down_pcm_rx);
-        free(up_pcm_tx);
-        free(up_pcm_rx);
-        v90_free(downstream_tx);
-        v90_free(downstream_rx);
-        v34_free(native_caller);
-        return false;
+        goto done;
     }
 
     vpcm_v90_fill_pattern(down_data_in, down_total_bytes, params->seed_base ^ 0x00D04E00U);
@@ -1943,18 +1939,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
                                  total_codewords,
                                  down_total_bytes, up_total_bytes,
                                  &local_report.cp_up_ack)) {
-        free(down_data_in);
-        free(down_data_out);
-        free(up_data_in);
-        free(up_data_out);
-        free(down_pcm_tx);
-        free(down_pcm_rx);
-        free(up_pcm_tx);
-        free(up_pcm_rx);
-        v90_free(downstream_tx);
-        v90_free(downstream_rx);
-        v34_free(native_caller);
-        return false;
+        goto done;
     }
 
     if (!vpcm_v90_expect_equal("V.90 downstream payload", down_data_in, down_data_out, down_total_bytes)
@@ -1963,18 +1948,7 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
                                                 &answerer_bit_sink, up_data_out))
         || (!native_caller
             && !vpcm_v90_expect_equal("V.92 upstream payload", up_data_in, up_data_out, up_total_bytes))) {
-        free(down_data_in);
-        free(down_data_out);
-        free(up_data_in);
-        free(up_data_out);
-        free(down_pcm_tx);
-        free(down_pcm_rx);
-        free(up_pcm_tx);
-        free(up_pcm_rx);
-        v90_free(downstream_tx);
-        v90_free(downstream_rx);
-        v34_free(native_caller);
-        return false;
+        goto done;
     }
 
     local_report.data_seconds = data_seconds;
@@ -2029,6 +2003,9 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
                          up_data_out,
                          local_report.sample_up_data_len);
 
+    ok = true;
+
+done:
     free(down_data_in);
     free(down_data_out);
     free(up_data_in);
@@ -2042,9 +2019,11 @@ bool vpcm_v90_session_run_startup_contract(vpcm_v90_session_t *session,
     v34_free(native_caller);
     v34_free(native_answerer);
 
+    if (!ok)
+        vpcm_v90_session_set_state(session, VPCM_V90_MODEM_CLEARDOWN);
     if (report)
         *report = local_report;
-    return true;
+    return ok;
 }
 
 const char *vpcm_v90_modem_state_to_str(vpcm_v90_modem_state_t state)

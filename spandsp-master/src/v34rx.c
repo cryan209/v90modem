@@ -13133,6 +13133,13 @@ static void v90_t3_slip_resync(v34_rx_state_t *s)
         if (step == 0)
             continue;
         /*endif*/
+        /* With the fractional timing actuator disabled, only whole-sample
+           candidates can actually be applied.  Scoring a sixth-sample point
+           and then applying only its carrier rotation creates a correction
+           that never existed in the sample stream. */
+        if (!s->v90_t3_timing_enabled && step % 6 != 0)
+            continue;
+        /*endif*/
         q = v90_t3_score_offset(s, offset);
         if (len < (int) sizeof(detail) - 16)
         {
@@ -13221,17 +13228,11 @@ static void v90_t3_slip_resync(v34_rx_state_t *s)
        the correction wanted is a multiply by exp(+j*rot). */
     s->v90_t3_carrier.phase = v34_carrier_wrap(
         s->v90_t3_carrier.phase - v90_t3_offset_rotation(s, best_offset));
-    s->v90_t3_next_symbol += (int) floorf(best_offset);
     if (s->v90_t3_timing_enabled)
-    {
-        s->v90_t3_gardner.acc += best_offset - floorf(best_offset);
-        while (s->v90_t3_gardner.acc >= 1.0f)
-        {
-            s->v90_t3_gardner.acc -= 1.0f;
-            s->v90_t3_next_symbol++;
-        }
-        /*endwhile*/
-    }
+        s->v90_t3_next_symbol += v34_gardner_shift(&s->v90_t3_gardner,
+                                                   best_offset);
+    else
+        s->v90_t3_next_symbol += (int) best_offset;
     /*endif*/
     s->v90_t3_sym_err_ema = best;
     s->v90_t3_sym_err_fast = best;

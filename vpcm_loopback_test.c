@@ -385,6 +385,7 @@ static bool test_v90_dil_rx_roundtrip(v91_law_t law);
 static bool test_v90_smartlink_dil_profile(void);
 static bool test_v90_phase3_raw_codeword_parity(v91_law_t law);
 static bool test_v90_jd_resync_request(v91_law_t law);
+static bool test_v90_startup_contract_failure_cleanup(void);
 static bool test_v90_data_codeword_state(v91_law_t law);
 static bool test_v90_strict_receiver_events(v91_law_t law);
 static bool test_v90_shaped_phase4(v91_law_t law);
@@ -10134,6 +10135,95 @@ static bool run_v90_v92_startup_contract_path_or_skip(v91_law_t law)
     return test_v90_v92_startup_contract_path(law);
 }
 
+typedef struct {
+    vpcm_v90_session_t *session;
+    bool failed_in_data;
+} vpcm_v90_contract_failure_ctx_t;
+
+static bool vpcm_v90_contract_failure_simplex(void *user_data,
+                                              v91_law_t law,
+                                              bool digital_to_analogue,
+                                              const uint8_t *tx_codewords,
+                                              int codeword_len)
+{
+    (void)user_data;
+    (void)law;
+    (void)digital_to_analogue;
+    (void)tx_codewords;
+    (void)codeword_len;
+    return true;
+}
+
+static bool vpcm_v90_contract_failure_duplex(void *user_data,
+                                             const uint8_t *digital_tx_codewords,
+                                             const uint8_t *analogue_tx_codewords,
+                                             int codeword_len)
+{
+    vpcm_v90_contract_failure_ctx_t *ctx =
+        (vpcm_v90_contract_failure_ctx_t *)user_data;
+
+    (void)digital_tx_codewords;
+    (void)analogue_tx_codewords;
+    (void)codeword_len;
+    if (ctx && ctx->session
+        && ctx->session->state == VPCM_V90_MODEM_DATA) {
+        ctx->failed_in_data = true;
+        return false;
+    }
+    return true;
+}
+
+/* A startup contract is an all-or-cleardown operation.  Exercise the late
+ * failure path, after native Phase 3/4 has returned both live V.34 endpoints
+ * and the data buffers have been allocated.  This is the path that used to
+ * leak the answer endpoint and leave the public session claiming DATA. */
+static bool test_v90_startup_contract_failure_cleanup(void)
+{
+    vpcm_v90_session_t session;
+    vpcm_v90_startup_contract_params_t params;
+    vpcm_v90_startup_contract_io_t io;
+    vpcm_v90_startup_contract_report_t report;
+    vpcm_v90_contract_failure_ctx_t ctx;
+
+    vpcm_log("Test: V.90 startup contract late-failure cleardown");
+    memset(&params, 0, sizeof(params));
+    params.law = V91_LAW_ULAW;
+    params.v92_mode = true;
+    params.seed_base = 0x90FA1100U;
+    params.data_seconds = 1;
+    memset(&io, 0, sizeof(io));
+    memset(&report, 0, sizeof(report));
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.session = &session;
+    io.record_simplex_g711 = vpcm_v90_contract_failure_simplex;
+    io.record_duplex_g711 = vpcm_v90_contract_failure_duplex;
+    io.user_data = &ctx;
+
+    if (vpcm_v90_session_run_startup_contract(&session, &params, &io, &report)) {
+        fprintf(stderr, "V.90 startup contract accepted an injected data-recording failure\n");
+        return false;
+    }
+    if (!ctx.failed_in_data
+        || session.state != VPCM_V90_MODEM_CLEARDOWN
+        || session.data_mode_active) {
+        fprintf(stderr,
+                "V.90 startup contract failure state mismatch: injected=%d state=%s data=%d\n",
+                ctx.failed_in_data ? 1 : 0,
+                vpcm_v90_modem_state_to_str(session.state),
+                session.data_mode_active ? 1 : 0);
+        return false;
+    }
+    if (!report.phase2_completed || !report.phase4_native_analogue_completed) {
+        fprintf(stderr,
+                "V.90 startup contract discarded partial failure diagnostics: phase2=%d phase4=%d\n",
+                report.phase2_completed ? 1 : 0,
+                report.phase4_native_analogue_completed ? 1 : 0);
+        return false;
+    }
+    vpcm_log("PASS: V.90 startup contract late failure enters CLEARDOWN");
+    return true;
+}
+
 static bool test_v91_codeword_loopback(v91_law_t law)
 {
     v91_state_t tx;
@@ -10537,7 +10627,8 @@ static bool run_vpcm_session_suite(void)
         && test_v91_startup_to_data_robbed_bit_safe_rate(V91_LAW_ULAW)
         && test_v91_startup_to_data_robbed_bit_safe_rate(V91_LAW_ALAW)
         && run_v90_v92_startup_contract_path_or_skip(V91_LAW_ULAW)
-        && run_v90_v92_startup_contract_path_or_skip(V91_LAW_ALAW);
+        && run_v90_v92_startup_contract_path_or_skip(V91_LAW_ALAW)
+        && test_v90_startup_contract_failure_cleanup();
 }
 
 static bool run_vpcm_primitive_suite(void)

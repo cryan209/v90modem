@@ -154,6 +154,38 @@ static __inline__ void v34_gardner_init(v34_gardner_state_t *g,
 }
 /*- End of function --------------------------------------------------------*/
 
+/*! Move the sampling instant by an externally selected fractional offset.
+
+    The slip-resynchronisation search can choose a position in fractions of a
+    sample, outside the ordinary Gardner update.  Keep the same representation
+    as the loop itself: return the whole-sample part to the caller and retain a
+    fraction in [-0.5, 0.5).  Leaving (for example) +0.67 in acc would put the
+    supposedly corrected receiver straight back beyond the loop's half-sample
+    slip threshold and manufacture a second correction after the hold time.
+
+    \return Whole samples to add to the caller's symbol position. */
+static __inline__ int v34_gardner_shift(v34_gardner_state_t *g, float offset)
+{
+    int correction = 0;
+
+    g->acc += offset;
+    while (g->acc >= 0.5f)
+    {
+        g->acc -= 1.0f;
+        correction++;
+    }
+    /*endwhile*/
+    while (g->acc < -0.5f)
+    {
+        g->acc += 1.0f;
+        correction--;
+    }
+    /*endwhile*/
+    g->hold = 0;
+    return correction;
+}
+/*- End of function --------------------------------------------------------*/
+
 /*! Raw Gardner error for one symbol, unnormalised.
     \param now_re,now_im   Equalizer output at this symbol instant.
     \param prev_re,prev_im Equalizer output at the previous instant.
