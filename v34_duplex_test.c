@@ -434,6 +434,16 @@ static int run_case(int baud, int bps, bool alaw)
         }
     }
 
+    /* NOTE on `errors` when V34_DUPLEX_RENEG is set: this is the WHOLE-RUN
+       bit_errors count, and it spans the renegotiation seam, where §11.6.1.2.1's
+       "clamp circuit 104" is approximate -- the responder cannot clamp until its
+       detector has seen ~30 ms of S, so it delivers a stretch of garbage to the
+       DTE first (V.42's frame CRC is what discards it on a real link).  Half of
+       those bits match the LFSR by chance, so a clean run still reports a
+       nonzero figure here: 51-89 across the ten rate rows, varying with where
+       the seam lands.  The PASS CRITERION is post_reneg_errors on the line
+       below, which must be 0 in both directions -- do not read this one as the
+       result. */
     printf("V.34 duplex %d baud/%d bps/%s: trained=%d/%d "
            "rx_bits=%d/%d errors=%d/%d time=%.2fs\n",
            baud, bps, alaw ? "alaw" : "ulaw",
