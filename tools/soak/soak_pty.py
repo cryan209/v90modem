@@ -19,9 +19,10 @@ SEND_RATE = int(os.environ.get("SOAK_PTY_RATE", "5000"))  # B/s
 # is being disturbed by the downstream we are sending.
 CHUNK = 512
 PHASES = [(0, 35, True), (35, 70, False), (70, 105, True)]
-# SOAK_SECONDS stretches the three-phase schedule for a long correctness run
-# (the default 105 s proves the path; minutes prove it stays up).
-SOAK_SCALE = max(1.0, float(os.environ.get("SOAK_SECONDS", "105"))/105.0)
+# SOAK_SECONDS scales the schedule in either direction.  The 105 s default
+# proves the path; short diagnostic calls isolate startup measurements without
+# waiting for a later upstream resync, while longer calls prove that it holds.
+SOAK_SCALE = max(0.05, float(os.environ.get("SOAK_SECONDS", "105"))/105.0)
 PHASES = [(a*SOAK_SCALE, b*SOAK_SCALE, c) for (a, b, c) in PHASES]  # (start, end, sending)
 END_T = 110*SOAK_SCALE
 

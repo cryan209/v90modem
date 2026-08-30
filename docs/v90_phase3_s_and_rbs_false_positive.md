@@ -2749,8 +2749,32 @@ ceiling: usable DIL resolution is being lost between the byte-exact RTP stream
 and SmartLink's detector.
 
 `tools/soak/soak_orchestrate2.sh` now passes an opt-in `DM_RX_GAIN` through to
-the peer. The next bounded experiment is a gain sweep at 20004T and 30000T,
-scored on pad-fit error, Mi and clipping before changing any default. Do not
-raise `DM_RS_HEADROOM`: it is inside the interpolation kernel and relaxing its
-worst-case bound reintroduces nonlinear clipping, which `findPadGain()` cannot
-undo.
+the peer. The subsequent short-call sweep (10 s after CONNECT, before the
+known upstream-resync event) found that more gain is not monotonically better:
+
+| TRN1d / gain | pad error | noise | dMin | `m[1..6]` | rate | peak / clipping |
+|---|---:|---:|---:|---|---:|---:|
+| 20004 / 1.0 | 11599 | 9.97 | 77 | 52/52/52/52/52/52 | 52000 | 9531 / 0 |
+| 20004 / **2.0** | **2042** | **7.74** | **62** | 57/57/57/57/58/58 | **53333** | 19290 / 0 |
+| 20004 / 2.5 | 1818 | 7.77 | 62 | 54/55/55/55/55/55 | 52000 | 23827 / 0 |
+| 20004 / 3.0 | 4601 | 8.30 | 66 | 54/55/55/55/55/55 | 52000 | 28592 / 0 |
+| 20004 / 3.25 | 2115 | 7.82 | 62 | 57/57/57/57/58/58 | 53333 | **30975 / 0** |
+| 24000 / 2.0 | 2179 | 8.60 | 68 | 52/52/52/52/52/52 | 52000 | 20424 / 0 |
+| 30000 / 1.0 | 1489 | 8.48 | 67 | 57/57/57/57/58/58 | 53333 | 8720 / 0 |
+| 30000 / 2.0 | **463** | 8.15 | 65 | 57/57/57/57/58/58 | 53333 | 17440 / 0 |
+
+The SmartLink estimator is crossing discrete internal calibration/pruning
+boundaries, not following a simple amplitude/SNR curve. **2.0 is the safe
+measured operating point**: it produces the best noise/dMin result and 53333
+at the shipping TRN1d while retaining 41% of the int16 range above the observed
+peak. 3.25 sometimes produces the same rate but leaves only 5.5%, so normal
+call-to-call peak variation can clip it. Combining 2.0 with longer TRN1d is not
+additive and does not unlock another rate.
+
+The 30000/2.0 arm drives pad-fit error down to 463 yet leaves Mi at 57/58. Gain
+is therefore ruled out as the remaining 53333 -> 56000 blocker: the next loss
+is relative interpolation error and the peer's dMin/constellation pruning.
+Do not raise `DM_RS_HEADROOM`: it is inside the interpolation kernel and
+relaxing its worst-case bound reintroduces nonlinear clipping, which
+`findPadGain()` cannot undo. The next bridge experiment must improve the
+8 -> 9.6 kHz waveform itself while retaining exact DS0 edge timing.

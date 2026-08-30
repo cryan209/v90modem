@@ -23,9 +23,10 @@ if os.environ.get("SOAK_SOCK_ALWAYS"):
     # for minutes -- otherwise most of the capture is idle marks and a clean
     # result says only that the line is quiet.
     PHASES = [(0, 105, True)]
-# SOAK_SECONDS stretches the three-phase schedule for a long correctness run
-# (the default 105 s proves the path; minutes prove it stays up).
-SOAK_SCALE = max(1.0, float(os.environ.get("SOAK_SECONDS", "105"))/105.0)
+# SOAK_SECONDS scales the schedule in either direction.  The 105 s default
+# proves the path; short diagnostic calls isolate startup measurements without
+# waiting for a later upstream resync, while longer calls prove that it holds.
+SOAK_SCALE = max(0.05, float(os.environ.get("SOAK_SECONDS", "105"))/105.0)
 PHASES = [(a*SOAK_SCALE, b*SOAK_SCALE, c) for (a, b, c) in PHASES]
 END_T = 110*SOAK_SCALE
 
