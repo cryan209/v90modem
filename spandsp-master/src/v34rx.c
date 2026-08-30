@@ -15959,7 +15959,33 @@ SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
         return -1;
     /* 9.6's CP-stage training does not outlive the CP stage. */
     s->rx.reneg_cp_train = 0;
-    s->rx.v90_cp_stream = 0;
+    /* Startup CP uses the 24-hypothesis search; 9.6 streams.  The pinning
+       argument does not distinguish them -- domain, dibit transform,
+       scrambler tap and bit order are fixed by 8.5.2/10.1.3.3 and the
+       constellation table in BOTH -- so it is worth knowing whether the
+       search is needed here.  ME_V90_CP_STREAM_STARTUP=1 streams instead.
+
+       MEASURED, AND THE ANSWER IS THAT IT IS NEEDED.  On the startup CP
+       receive itself streaming is indistinguishable -- vpcm_loopback_test
+       reports sync=10 valid=5 rejected=4 (crc=1 structure=3) accepted=1/1/0
+       rx_data=1 either way, differing only in delivering 6242 bits against
+       6240, since it emits every symbol rather than starting at a lock.  But
+       `make test` fails with it on: the 11.6 renegotiation row 2400/9600/ulaw
+       comes back with 24 post-renegotiation bit errors on the answerer
+       against 0, reproducibly, and the caller's resync restarts go 5 -> 12.
+       So the search is doing something at startup that the Table 14 framer
+       does not do for itself, and the streamed path is NOT a drop-in here the
+       way it is for 9.6.
+
+       Left in, default off, with the measurement beside it: the question will
+       come up again the next time someone reads the 24-hypothesis machinery
+       and concludes it is dead weight.  It is not. */
+    {
+        const char *v = getenv("ME_V90_CP_STREAM_STARTUP");
+
+        s->rx.v90_cp_stream = (v  &&  atoi(v) != 0) ? 1 : 0;
+        s->rx.v90_cp_stream_reg = 0;
+    }
     s->rx.step_2d = 0;
     s->rx.data_frame = 0;
     s->rx.mapping_frame_count = 0;
