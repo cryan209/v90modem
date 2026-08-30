@@ -148,6 +148,48 @@ static double v90_reneg_feed_rms = 0.0;
    float ops PER SYMBOL: at 3200 baud roughly 1 Mflop/s, which is around half
    the arithmetic budget of this whole receiver on an embedded target.
    ME_V90_UPSTREAM_GAIN_SWEEP=0 turns it off. */
+/* PHASE4_TRN spends most of its length discovering the MP decode's
+   domain/tap/bit-order and publishing them as phase4_trn_lock_*, which the MP
+   case then uses as its lock hint.  All three are fixed by 8.5.2/10.1.3.3 and
+   the ordering of training_constellation_4, so the discovery looks removable
+   -- exactly the reasoning that ME_V90_CP_STREAM_STARTUP measured and found
+   false for the MP search itself.  ME_V34_TRN_HINT=0 withholds the hint and
+   lets MP start from the pinned defaults, which is the same question one
+   stage earlier. */
+/* The PHASE3_WAIT_S counterpart of ME_V34_TRN_HINT: this stage publishes
+   phase3_j_lock_hyp, which the MP case falls back to when PHASE4_TRN has not
+   produced a lock (see the hint_h line in the MP stage).  ME_V34_J_HINT=0
+   withholds it. */
+static int v34_j_hint_enabled(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *v = getenv("ME_V34_J_HINT");
+
+        cache = (v && *v) ? (atoi(v) != 0) : 1;
+    }
+    /*endif*/
+    return cache;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int v34_trn_hint_enabled(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *v = getenv("ME_V34_TRN_HINT");
+
+        cache = (v && *v) ? (atoi(v) != 0) : 1;
+    }
+    /*endif*/
+    return cache;
+}
+/*- End of function --------------------------------------------------------*/
+
 int v34_rx_gain_sweep_enabled(void)
 {
     static int cache = -1;
@@ -8103,7 +8145,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                 v90_ja_already_consumed = (!s->calling_party
                                                           && s->v90_mode
                                                           && s->phase3_j_trn16 >= 0);
-                                s->phase3_j_lock_hyp = best_h;
+                                s->phase3_j_lock_hyp = v34_j_hint_enabled() ? best_h : -1;
                                 s->phase3_j_trn16 = pat;
                                 s->phase3_s_detect_armed = true;
                                 if (!s->calling_party && !v90_ja_already_consumed)
@@ -8252,7 +8294,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         {
                             s->phase3_trn_lock_hyp = best_trn_h;
                             s->phase3_trn_lock_score = score_pct;
-                            s->phase3_j_lock_hyp = best_trn_h;
+                            s->phase3_j_lock_hyp = v34_j_hint_enabled() ? best_trn_h : -1;
                             s->phase3_tracking_armed = true;
                             span_log(s->logging, SPAN_LOG_FLOW,
                                      "Rx - Phase 3 TRN: lock hint hyp=%d ones=%d/%d (%d%%)\n",
@@ -8840,7 +8882,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 {
                     s->phase3_trn_lock_hyp = best_trn_h;
                     s->phase3_trn_lock_score = score_pct;
-                    s->phase3_j_lock_hyp = best_trn_h;
+                    s->phase3_j_lock_hyp = v34_j_hint_enabled() ? best_trn_h : -1;
                     span_log(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 3 TRN refine: lock hint hyp=%d ones=%d/%d (%d%%)\n",
                              best_trn_h, best_trn_score, s->phase3_trn_bits, score_pct);
@@ -9600,8 +9642,8 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         && (s->phase4_trn_lock_hyp < 0
                             || score_pct > s->phase4_trn_lock_score))
                     {
-                        s->phase4_trn_lock_hyp = best_h;
-                        s->phase4_trn_lock_score = score_pct;
+                        s->phase4_trn_lock_hyp = v34_trn_hint_enabled() ? best_h : -1;
+                        s->phase4_trn_lock_score = v34_trn_hint_enabled() ? score_pct : -1;
                         s->phase4_trn_lock_tap = best_tap;
                         s->phase4_trn_lock_order = best_order;
                         s->phase4_trn_lock_domain = best_domain;
@@ -9763,8 +9805,8 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             else if (trn_best_h >= 0  &&  trn_best_h < MP_HYPOTHESIS_COUNT)
             {
                 /* Use final TRN best hypothesis at MP handoff. */
-                s->phase4_trn_lock_hyp = trn_best_h;
-                s->phase4_trn_lock_score = trn_best_score_pct;
+                s->phase4_trn_lock_hyp = v34_trn_hint_enabled() ? trn_best_h : -1;
+                s->phase4_trn_lock_score = v34_trn_hint_enabled() ? trn_best_score_pct : -1;
                 s->phase4_trn_lock_domain = trn_best_domain;
                 s->phase4_trn_lock_tap = trn_best_tap;
                 s->phase4_trn_lock_order = trn_best_order;
