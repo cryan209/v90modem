@@ -70,6 +70,12 @@ struct v17_rx_state_s
     /*! \brief A user specified opaque pointer passed to the qam_report callback
                routine. */
     void *qam_user_data;
+#if defined(SPANDSP_USE_FIXED_POINTx)
+    void (*symbol_sink)(void *user_data, const complexi16_t *symbol);
+#else
+    void (*symbol_sink)(void *user_data, const complexf_t *symbol);
+#endif
+    void *symbol_sink_user_data;
 
 #if defined(SPANDSP_USE_FIXED_POINTx)
     /*! \brief The scaling factor assessed by the AGC algorithm. */

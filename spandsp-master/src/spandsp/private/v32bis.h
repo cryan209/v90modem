@@ -47,6 +47,14 @@ struct v32bis_state_s
 
     uint16_t permitted_rates_signal;
 
+    /* One §5.2 conditioning sequence, two identical Table 5 words and one
+       Table 6 word.  Later reactive phases refill this buffer rather than
+       duplicating the V.17 pulse shaper. */
+    uint8_t startup_tx_symbols[256 + 16 + 1280 + 16 + 8];
+    int startup_tx_symbol_count;
+    int startup_tx_symbol_pos;
+    int startup_rx_symbol_count;
+
     /*! \brief Error and flow logging control */
     logging_state_t logging;
 };

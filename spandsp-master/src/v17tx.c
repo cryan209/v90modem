@@ -249,9 +249,18 @@ static __inline__ complexf_t getbaud(v17_tx_state_t *s)
     int bits;
 #if defined(SPANDSP_USE_FIXED_POINT)
     static const complexi16_t zero = {0, 0};
+    complexi16_t external_symbol;
 #else
     static const complexf_t zero = {0.0f, 0.0f};
+    complexf_t external_symbol;
 #endif
+
+    /* V.32bis shares this modulator and pulse shaper, but has its own §5/§6
+       symbol sequence.  A source installed by v32bis.c owns the baud stream;
+       V.17's fax training remains exactly the default when it is absent. */
+    if (s->symbol_source != NULL
+        && s->symbol_source(s->symbol_source_user_data, &external_symbol) == 0)
+        return external_symbol;
 
     if (s->in_training)
     {

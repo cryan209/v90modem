@@ -100,6 +100,12 @@ struct v17_tx_state_s
     int bits_per_symbol;
     /*! \brief The get_bit function in use at any instant. */
     span_get_bit_func_t current_get_bit;
+#if defined(SPANDSP_USE_FIXED_POINT)
+    int (*symbol_source)(void *user_data, complexi16_t *symbol);
+#else
+    int (*symbol_source)(void *user_data, complexf_t *symbol);
+#endif
+    void *symbol_source_user_data;
     /*! \brief Error and flow logging control */
     logging_state_t logging;
 };

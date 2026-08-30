@@ -139,6 +139,78 @@ static int test_startup_logic(void)
     return 0;
 }
 
+static int test_symbol_domain_handoff(int alaw)
+{
+    int16_t audio[160];
+    int16_t bearer[160];
+    uint32_t tx_bits = 1;
+    uint32_t rx_bits = 2;
+    v32bis_state_t *tx;
+    v32bis_state_t *rx;
+    int i;
+    int block;
+    int queued;
+
+    tx = v32bis_init(NULL, 4800, true, get_bit, &tx_bits, put_bit, NULL);
+    rx = v32bis_init(NULL, 4800, false, get_bit, &rx_bits, put_bit, NULL);
+    if (tx == NULL  ||  rx == NULL)
+    {
+        fprintf(stderr, "V.32bis symbol-domain modem initialisation failed\n");
+        if (tx != NULL)
+            v32bis_free(tx);
+        if (rx != NULL)
+            v32bis_free(rx);
+        return -1;
+    }
+    queued = v32bis_prepare_startup_tx(tx,
+                                       V32BIS_RATE_4800
+                                     | V32BIS_RATE_7200
+                                     | V32BIS_RATE_9600
+                                     | V32BIS_RATE_12000
+                                     | V32BIS_RATE_14400);
+    if (queued != 1576)
+    {
+        fprintf(stderr, "V.32bis queued %d startup symbols, expected 1576\n", queued);
+        v32bis_free(tx);
+        v32bis_free(rx);
+        return -1;
+    }
+
+    /* Exercise the actual 8 kHz pulse shaper and RX carrier/timing/FSE seam
+       through each G.711 law, not a symbol-array shortcut. */
+    for (block = 0;  block < 50;  block++)
+    {
+        if (v32bis_tx(tx, audio, 160) != 160)
+        {
+            fprintf(stderr, "V.32bis startup pulse shaper stopped early\n");
+            v32bis_free(tx);
+            v32bis_free(rx);
+            return -1;
+        }
+        for (i = 0;  i < 160;  i++)
+        {
+            bearer[i] = alaw ? alaw_to_linear(linear_to_alaw(audio[i]))
+                              : ulaw_to_linear(linear_to_ulaw(audio[i]));
+        }
+        v32bis_rx(rx, bearer, 160);
+    }
+    if (v32bis_startup_tx_symbols_sent(tx) != queued
+        || v32bis_startup_rx_symbols_seen(rx) < 1500)
+    {
+        fprintf(stderr,
+                "V.32bis %s symbol handoff failed: tx=%d rx=%d\n",
+                alaw ? "A-law" : "u-law",
+                v32bis_startup_tx_symbols_sent(tx),
+                v32bis_startup_rx_symbols_seen(rx));
+        v32bis_free(tx);
+        v32bis_free(rx);
+        return -1;
+    }
+    v32bis_free(tx);
+    v32bis_free(rx);
+    return 0;
+}
+
 int main(void)
 {
     static const int rates[] = {4800, 7200, 9600, 12000, 14400};
@@ -147,7 +219,9 @@ int main(void)
     v32bis_state_t *modem;
     size_t i;
 
-    if (test_startup_logic() != 0)
+    if (test_startup_logic() != 0
+        || test_symbol_domain_handoff(0) != 0
+        || test_symbol_domain_handoff(1) != 0)
         return 1;
 
     if (v32bis_init(NULL, 12345, true, get_bit, &bits, put_bit, NULL) != NULL)

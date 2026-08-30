@@ -441,6 +441,118 @@ SPAN_DECLARE(int) v32bis_decode_startup_word(bool calling_party,
 }
 /*- End of function --------------------------------------------------------*/
 
+#if defined(SPANDSP_USE_FIXED_POINT)
+static int v32bis_startup_symbol_source(void *user_data, complexi16_t *symbol)
+#else
+static int v32bis_startup_symbol_source(void *user_data, complexf_t *symbol)
+#endif
+{
+    v32bis_state_t *s;
+    int state;
+
+    s = (v32bis_state_t *) user_data;
+    if (s->startup_tx_symbol_count <= 0)
+        return -1;
+    if (s->startup_tx_symbol_pos < s->startup_tx_symbol_count)
+        state = s->startup_tx_symbols[s->startup_tx_symbol_pos++];
+    else
+        state = s->startup_tx_symbols[s->startup_tx_symbol_count - 1];
+    *symbol = v17_v32bis_4800_constellation[state & 3];
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+#if defined(SPANDSP_USE_FIXED_POINTx)
+static void v32bis_startup_symbol_sink(void *user_data, const complexi16_t *symbol)
+#else
+static void v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
+#endif
+{
+    v32bis_state_t *s;
+
+    (void) symbol;
+    s = (v32bis_state_t *) user_data;
+    s->startup_rx_symbol_count++;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_prepare_startup_tx(v32bis_state_t *s, int remote_rates)
+{
+    uint8_t word_states[8];
+    uint16_t word;
+    uint32_t trn_reg;
+    uint32_t word_reg;
+    int trn_diff;
+    int word_diff;
+    int local_rates;
+    int offered_rates;
+    int selected_rate;
+    int count;
+
+    if (s == NULL
+        || v32bis_decode_rate_signal(s->permitted_rates_signal, &local_rates) != 0
+        || !valid_rate_mask(remote_rates))
+        return -1;
+    offered_rates = local_rates & remote_rates;
+    selected_rate = v32bis_select_common_rate(local_rates, remote_rates);
+    if (selected_rate == 0)
+        return -1;
+
+    count = v32bis_build_conditioning(s->calling_party,
+                                      1280,
+                                      s->startup_tx_symbols,
+                                      &trn_reg,
+                                      &trn_diff);
+    if (count < 0  ||  v32bis_build_rate_signal(offered_rates, &word) != 0)
+        return -1;
+    word_reg = trn_reg;
+    word_diff = trn_diff;
+    if (v32bis_encode_startup_word(s->calling_party,
+                                   word,
+                                   &word_reg,
+                                   &word_diff,
+                                   word_states) != 8)
+        return -1;
+    /* Section 6 requires at least two identical consecutive R words. */
+    memcpy(&s->startup_tx_symbols[count], word_states, sizeof(word_states));
+    count += (int) sizeof(word_states);
+    memcpy(&s->startup_tx_symbols[count], word_states, sizeof(word_states));
+    count += (int) sizeof(word_states);
+
+    if (v32bis_build_e_signal(selected_rate, &word) != 0)
+        return -1;
+    word_reg = trn_reg;
+    word_diff = trn_diff;
+    if (v32bis_encode_startup_word(s->calling_party,
+                                   word,
+                                   &word_reg,
+                                   &word_diff,
+                                   word_states) != 8)
+        return -1;
+    memcpy(&s->startup_tx_symbols[count], word_states, sizeof(word_states));
+    count += (int) sizeof(word_states);
+
+    s->startup_tx_symbol_count = count;
+    s->startup_tx_symbol_pos = 0;
+    s->bit_rate = selected_rate;
+    s->tx.symbol_source = v32bis_startup_symbol_source;
+    s->tx.symbol_source_user_data = s;
+    return count;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_startup_tx_symbols_sent(v32bis_state_t *s)
+{
+    return (s != NULL) ? s->startup_tx_symbol_pos : 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_startup_rx_symbols_seen(v32bis_state_t *s)
+{
+    return (s != NULL) ? s->startup_rx_symbol_count : 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v32bis_set_supported_bit_rates(v32bis_state_t *s, int rates)
 {
     uint16_t word;
@@ -480,6 +592,9 @@ SPAN_DECLARE(int) v32bis_rx_restart(v32bis_state_t *s, int bit_rate)
         return -1;
     if (v17_rx_restart(&s->rx, bit_rate, false) != 0)
         return -1;
+    s->startup_rx_symbol_count = 0;
+    s->rx.symbol_sink = v32bis_startup_symbol_sink;
+    s->rx.symbol_sink_user_data = s;
     s->bit_rate = bit_rate;
     return 0;
 }
@@ -494,6 +609,13 @@ SPAN_DECLARE(int) v32bis_restart(v32bis_state_t *s, int bit_rate)
         return -1;
     if (v17_rx_restart(&s->rx, bit_rate, false) != 0)
         return -1;
+    s->startup_tx_symbol_count = 0;
+    s->startup_tx_symbol_pos = 0;
+    s->startup_rx_symbol_count = 0;
+    s->tx.symbol_source = NULL;
+    s->tx.symbol_source_user_data = NULL;
+    s->rx.symbol_sink = v32bis_startup_symbol_sink;
+    s->rx.symbol_sink_user_data = s;
     s->bit_rate = bit_rate;
     return 0;
 }

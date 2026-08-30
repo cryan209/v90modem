@@ -61,11 +61,20 @@ decodes startup words through Table 1 while carrying the TRN handoff state.
 The native regression is pinned bit-for-bit to the Python reference for both
 caller and answerer, including final scrambler and differential states.
 
-This is still infrastructure, not a working modem claim. `v32bis_tx()` and
-`v32bis_rx()` still delegate directly to V.17; the new startup symbols are not
-yet feeding the V.17 pulse shaper or recovered from its equalizer, and the
-allocated echo canceller is not yet in the sample path. The next native seam
-is therefore symbol-domain TX/RX handoff, not more startup bit logic.
+The symbol-domain seam is connected. `v32bis_prepare_startup_tx()` queues one
+§5/§6 burst (conditioning, two identical R words, and E); `v32bis_tx()` feeds
+those exact complex states through the existing V.17 1800 Hz/2400-baud pulse
+shaper, while `v32bis_rx()` delivers symbols from the shared carrier, timing
+and fractionally-spaced-equalizer front end to the V.32bis state machine rather
+than running the V.17 fax-training switch. The native regression exercises
+that path through both PCMU and PCMA at 8 kHz and requires the complete 1576
+symbol burst to cross the seam.
+
+This is still infrastructure, not a working modem claim. The RX symbol sink
+does not yet acquire the S/S-bar boundary or decode the received R/E words,
+the burst is not yet a reactive caller/answerer §6 state machine, and the
+allocated echo canceller is not yet in the sample path. Those are now the
+remaining startup tasks; the pulse shaper/equalizer handoff itself is covered.
 
 `make v32bis-test` runs the native smoke test plus all Python reference,
 SpanDSP-comparison, waveform, and datapump tests.

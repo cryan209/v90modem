@@ -646,6 +646,14 @@ static void process_half_baud(v17_rx_state_t *s, const complexf_t *sample)
     z = equalizer_get(s);
 
     constellation_state = 0;
+    if (s->symbol_sink != NULL)
+    {
+        /* V.32bis owns training and rate-word interpretation, while this V.17
+           front end continues to supply timing, carrier mixing and the FSE. */
+        s->symbol_sink(s->symbol_sink_user_data, &z);
+        target = &zero;
+        goto report_symbol;
+    }
     switch (s->training_stage)
     {
     case TRAINING_STAGE_NORMAL_OPERATION:
@@ -1114,6 +1122,7 @@ static void process_half_baud(v17_rx_state_t *s, const complexf_t *sample)
         break;
     }
     /*endswitch*/
+report_symbol:
     if (s->qam_report)
     {
 #if defined(SPANDSP_USE_FIXED_POINT)

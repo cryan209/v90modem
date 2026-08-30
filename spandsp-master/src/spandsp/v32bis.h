@@ -190,6 +190,16 @@ SPAN_DECLARE(int) v32bis_decode_startup_word(bool calling_party,
                                              int *diff_state,
                                              uint16_t *word);
 
+/*! Queue one native startup burst (conditioning, two identical Table 5 words,
+    and Table 6 E) into the shared V.17 pulse shaper.  The remote mask is the
+    already-received R word for this phase. */
+SPAN_DECLARE(int) v32bis_prepare_startup_tx(v32bis_state_t *s, int remote_rates);
+
+/*! Number of startup symbols supplied to the TX pulse shaper or delivered by
+    the RX carrier/timing/equalizer front end. */
+SPAN_DECLARE(int) v32bis_startup_tx_symbols_sent(v32bis_state_t *s);
+SPAN_DECLARE(int) v32bis_startup_rx_symbols_seen(v32bis_state_t *s);
+
 /*! Report the current operating bit rate of a V.32bis modem context.
     \brief Report the current operating bit rate of a V.22bis modem context
     \param s The modem context. */
