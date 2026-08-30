@@ -164,10 +164,10 @@ am__libspandsp_la_SOURCES_DIST = ademco_contactid.c adsi.c agc_float.c \
 	time_scale.c timezone.c tone_detect.c tone_generate.c v150_1.c \
 	v150_1_sse.c v17rx.c v17tx.c v18.c v22bis_rx.c v22bis_tx.c \
 	v27ter_rx.c v27ter_tx.c v29rx.c v29tx.c v42.c v42bis.c v8.c \
-	v80.c vector_float.c vector_int.c v32bis.c v34rx.c v34tx.c \
+	v80.c vector_float.c vector_int.c v32bis.c v34rx.c v34rx_data.c v34tx.c \
 	v34_logging.c ssl_fax.c
 @COND_V32BIS_TRUE@am__objects_1 = v32bis.lo
-@COND_V34_TRUE@am__objects_2 = v34rx.lo v34tx.lo v34_logging.lo
+@COND_V34_TRUE@am__objects_2 = v34rx.lo v34rx_data.lo v34tx.lo v34_logging.lo
 @COND_SSLFAX_TRUE@am__objects_3 = ssl_fax.lo
 am_libspandsp_la_OBJECTS = ademco_contactid.lo adsi.lo agc_float.lo \
 	alloc.lo async.lo at_interpreter.lo awgn.lo bell_r2_mf.lo \
@@ -266,7 +266,7 @@ am__depfiles_remade = ./$(DEPDIR)/ademco_contactid.Plo \
 	./$(DEPDIR)/v27ter_rx.Plo ./$(DEPDIR)/v27ter_tx.Plo \
 	./$(DEPDIR)/v29rx.Plo ./$(DEPDIR)/v29tx.Plo \
 	./$(DEPDIR)/v32bis.Plo ./$(DEPDIR)/v34_logging.Plo \
-	./$(DEPDIR)/v34rx.Plo ./$(DEPDIR)/v34tx.Plo \
+	./$(DEPDIR)/v34rx.Plo ./$(DEPDIR)/v34rx_data.Plo ./$(DEPDIR)/v34tx.Plo \
 	./$(DEPDIR)/v42.Plo ./$(DEPDIR)/v42bis.Plo ./$(DEPDIR)/v8.Plo \
 	./$(DEPDIR)/v80.Plo ./$(DEPDIR)/vector_float.Plo \
 	./$(DEPDIR)/vector_int.Plo
@@ -524,6 +524,7 @@ AM_CPPFLAGS = -I$(top_builddir)
 lib_LTLIBRARIES = libspandsp.la
 @COND_V32BIS_TRUE@V32BIS_SOURCES = v32bis.c
 @COND_V34_TRUE@V34_SOURCES = v34rx.c \
+@COND_V34_TRUE@              v34rx_data.c \
 @COND_V34_TRUE@              v34tx.c \
 @COND_V34_TRUE@              v34_logging.c
 
