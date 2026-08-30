@@ -5,12 +5,19 @@
 # until an initial attempt survives to DATA, then lets the pumps run.
 # Set SLMODEM_DIAG=1 to run the peer at -d9 -l11 and preserve its framed
 # sample/bit log, TRN2 interposer pairs, and bridge PCM taps with the attempt.
+# DM_RX_GAIN (default 1.0) sweeps post-resampler downstream gain without
+# changing the transmitted G.711 stream or the resampler's clipping bound.
 SP="$(cd "$(dirname "$0")" && pwd)"
 SOAKDIR="$1"
 SERVERLOG="$2"
 TOWER=root@tower.net.cryan.nz
 MAXATTEMPTS="${3:-8}"
 SLMODEM_DIAG="${SLMODEM_DIAG:-0}"
+DM_RX_GAIN="${DM_RX_GAIN:-1.0}"
+if ! [[ "$DM_RX_GAIN" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]; then
+  echo "invalid DM_RX_GAIN: $DM_RX_GAIN" >&2
+  exit 2
+fi
 
 collect_peer_diag() {
   ad="$1"
@@ -45,9 +52,9 @@ bounce_rig() {
   ssh -o BatchMode=yes $TOWER "docker restart d-modem" >/dev/null 2>&1
   sleep 8
   if [ "$SLMODEM_DIAG" = 1 ]; then
-    ssh -o BatchMode=yes $TOWER "docker exec d-modem sh -c 'rm -f /tmp/slm.log /tmp/smartlink-trn2d-pairs.s16 /tmp/slmodem.log.slamr0 /tmp/dm_to_dsp.raw /tmp/dm_to_dsp_9600.raw /tmp/dm_from_dsp.raw /tmp/dm_from_dsp_9600.raw'; docker exec -d -e SIP_LOGIN=6000:6000@asterisk.net.cryan.nz -e DM_RESAMPLER=sinc -e DM_RS_HEADROOM=0.25 d-modem sh -c 'cd /tmp && /src/slmodemd/slmodemd_trnref -d9 -l11 -e /src/d-modem > /tmp/slm.log 2>&1'; sleep 12; docker exec -d d-modem sh -c 'socat TCP-LISTEN:5556,reuseaddr,fork FILE:/dev/ttySL0,raw,echo=0'" 2>/dev/null
+    ssh -o BatchMode=yes $TOWER "docker exec d-modem sh -c 'rm -f /tmp/slm.log /tmp/smartlink-trn2d-pairs.s16 /tmp/slmodem.log.slamr0 /tmp/dm_to_dsp.raw /tmp/dm_to_dsp_9600.raw /tmp/dm_from_dsp.raw /tmp/dm_from_dsp_9600.raw'; docker exec -d -e SIP_LOGIN=6000:6000@asterisk.net.cryan.nz -e DM_RESAMPLER=sinc -e DM_RS_HEADROOM=0.25 -e DM_RX_GAIN=$DM_RX_GAIN d-modem sh -c 'cd /tmp && /src/slmodemd/slmodemd_trnref -d9 -l11 -e /src/d-modem > /tmp/slm.log 2>&1'; sleep 12; docker exec -d d-modem sh -c 'socat TCP-LISTEN:5556,reuseaddr,fork FILE:/dev/ttySL0,raw,echo=0'" 2>/dev/null
   else
-    ssh -o BatchMode=yes $TOWER "docker exec -d -e SIP_LOGIN=6000:6000@asterisk.net.cryan.nz -e DM_RESAMPLER=sinc -e DM_RS_HEADROOM=0.25 d-modem sh -c '/src/slmodemd/slmodemd_trnref -d9 -e /src/d-modem > /tmp/slm.log 2>&1'; sleep 12; docker exec -d d-modem sh -c 'socat TCP-LISTEN:5556,reuseaddr,fork FILE:/dev/ttySL0,raw,echo=0'" 2>/dev/null
+    ssh -o BatchMode=yes $TOWER "docker exec -d -e SIP_LOGIN=6000:6000@asterisk.net.cryan.nz -e DM_RESAMPLER=sinc -e DM_RS_HEADROOM=0.25 -e DM_RX_GAIN=$DM_RX_GAIN d-modem sh -c '/src/slmodemd/slmodemd_trnref -d9 -e /src/d-modem > /tmp/slm.log 2>&1'; sleep 12; docker exec -d d-modem sh -c 'socat TCP-LISTEN:5556,reuseaddr,fork FILE:/dev/ttySL0,raw,echo=0'" 2>/dev/null
   fi
   sleep 2
   at=$( (printf 'AT\r'; sleep 2) | nc -4 -w 5 tower.net.cryan.nz 5556 2>/dev/null )

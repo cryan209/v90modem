@@ -2716,3 +2716,41 @@ delivered a byte, so r1's "198 s" is a call that spent two thirds of its life
 handshaking. And read **line counts, not byte percentages**: an unlocked
 receiver emits garbage that inflates the byte total, which is why r5 reads
 "95% of 346634 B" while missing half its downstream lines.
+
+## 40. The 52000 selection is level-sensitive at the peer DSP input (2026-08-30)
+
+The SIP leg is PCMU passthrough, but the SmartLink endpoint is not a raw DS0
+consumer: `d-modem` decodes the octets and resamples 8000 -> 9600 Hz before
+feeding its fixed-rate DSP. The live harness deliberately runs that bridge's
+257-tap sinc path at 0.25 headroom so no near-Nyquist V.90 sequence can clip.
+On a matched default-TRN1d call, its captured DSP input peaked at only 9531 on
+a +/-32768 interface. This left enough measured margin to test gain separately
+from resampling, timing and the transmitted DIL.
+
+`DM_RX_GAIN=2` applies +6.02 dB *after* the resampler. It changed none of our
+G.711 codewords, retained zero clipped samples (captured peak 19290), and moved
+the peer's first connection one rate step:
+
+| peer measurement | gain 1.0 | gain 2.0 |
+|---|---:|---:|
+| TRN1d initial variance | 956/729/598/498/730/542 | 889/701/535/473/660/543 |
+| best DIL pad-fit error | 11599 | **2042** |
+| Phase-4 noise energy | 9.97 | **7.74** |
+| current dMin | 77 | **62** |
+| final `m[1..6]` | 52/52/52/52/52/52 | **57/57/57/57/58/58** |
+| initial downstream | 52000 | **53333** |
+
+The 53333 data phase ran with error energy falling from about 9 to 6 until our
+digital modem's upstream-discontinuity detector explicitly requested a resync;
+SmartLink then reported `REMOTE RETRAIN - Energy Drop detected`. That later
+retrain is therefore not evidence that the higher downstream rate failed its
+PDSNR gate. The gain arm proves instead that 52000 is not a bearer or capability
+ceiling: usable DIL resolution is being lost between the byte-exact RTP stream
+and SmartLink's detector.
+
+`tools/soak/soak_orchestrate2.sh` now passes an opt-in `DM_RX_GAIN` through to
+the peer. The next bounded experiment is a gain sweep at 20004T and 30000T,
+scored on pad-fit error, Mi and clipping before changing any default. Do not
+raise `DM_RS_HEADROOM`: it is inside the interpolation kernel and relaxing its
+worst-case bound reintroduces nonlinear clipping, which `findPadGain()` cannot
+undo.
