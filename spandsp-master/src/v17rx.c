@@ -649,9 +649,20 @@ static void process_half_baud(v17_rx_state_t *s, const complexf_t *sample)
     if (s->symbol_sink != NULL)
     {
         /* V.32bis owns training and rate-word interpretation, while this V.17
-           front end continues to supply timing, carrier mixing and the FSE. */
-        s->symbol_sink(s->symbol_sink_user_data, &z);
-        target = &zero;
+           front end continues to supply timing, carrier mixing and the FSE.
+           Once V.32bis knows a TRN target it returns its 4-point index so the
+           shared carrier loop and LMS equalizer can train on the real signal. */
+        constellation_state = s->symbol_sink(s->symbol_sink_user_data, &z);
+        if (constellation_state >= 0  &&  constellation_state < 4)
+        {
+            target = &v17_v32bis_4800_constellation[constellation_state];
+            track_carrier(s, &z, target);
+            tune_equalizer(s, &z, target);
+        }
+        else
+        {
+            target = &zero;
+        }
         goto report_symbol;
     }
     switch (s->training_stage)

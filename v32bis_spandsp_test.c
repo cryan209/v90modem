@@ -26,6 +26,34 @@ static void put_bit(void *user_data, int bit)
     (void) bit;
 }
 
+typedef struct
+{
+    uint32_t state;
+    int total;
+    int errors;
+} bit_stats_t;
+
+static int pattern_bit(void *user_data)
+{
+    uint32_t *state = (uint32_t *) user_data;
+    int bit = *state & 1;
+
+    *state = (*state >> 1) ^ ((uint32_t) -(int32_t) bit & 0x80200003U);
+    return bit;
+}
+
+static void collect_bit(void *user_data, int bit)
+{
+    bit_stats_t *stats = (bit_stats_t *) user_data;
+    int expected;
+
+    if (bit < 0)
+        return;
+    expected = pattern_bit(&stats->state);
+    stats->total++;
+    stats->errors += (bit != expected);
+}
+
 static int test_startup_logic(void)
 {
     static const int rates[] = {4800, 7200, 9600, 12000, 14400};
@@ -143,16 +171,16 @@ static int test_symbol_domain_handoff(int alaw)
 {
     int16_t audio[160];
     int16_t bearer[160];
-    uint32_t tx_bits = 1;
-    uint32_t rx_bits = 2;
+    uint32_t transmitted = 0x13579BDFU;
+    bit_stats_t received = {0x13579BDFU, 0, 0};
     v32bis_state_t *tx;
     v32bis_state_t *rx;
     int i;
     int block;
     int queued;
 
-    tx = v32bis_init(NULL, 4800, true, get_bit, &tx_bits, put_bit, NULL);
-    rx = v32bis_init(NULL, 4800, false, get_bit, &rx_bits, put_bit, NULL);
+    tx = v32bis_init(NULL, 4800, true, pattern_bit, &transmitted, put_bit, NULL);
+    rx = v32bis_init(NULL, 4800, false, pattern_bit, &transmitted, collect_bit, &received);
     if (tx == NULL  ||  rx == NULL)
     {
         fprintf(stderr, "V.32bis symbol-domain modem initialisation failed\n");
@@ -162,12 +190,7 @@ static int test_symbol_domain_handoff(int alaw)
             v32bis_free(rx);
         return -1;
     }
-    queued = v32bis_prepare_startup_tx(tx,
-                                       V32BIS_RATE_4800
-                                     | V32BIS_RATE_7200
-                                     | V32BIS_RATE_9600
-                                     | V32BIS_RATE_12000
-                                     | V32BIS_RATE_14400);
+    queued = v32bis_prepare_startup_tx(tx, V32BIS_RATE_4800);
     if (queued != 1576)
     {
         fprintf(stderr, "V.32bis queued %d startup symbols, expected 1576\n", queued);
@@ -195,13 +218,20 @@ static int test_symbol_domain_handoff(int alaw)
         v32bis_rx(rx, bearer, 160);
     }
     if (v32bis_startup_tx_symbols_sent(tx) != queued
-        || v32bis_startup_rx_symbols_seen(rx) < 1500)
+        || v32bis_startup_rx_symbols_seen(rx) < 1500
+        || !v32bis_startup_complete(rx)
+        || v32bis_startup_remote_rates(rx) != V32BIS_RATE_4800
+        || v32bis_current_bit_rate(rx) != 4800
+        || received.total < 1000
+        || received.errors != 0)
     {
         fprintf(stderr,
-                "V.32bis %s symbol handoff failed: tx=%d rx=%d\n",
+                "V.32bis %s handoff failed: tx=%d rx=%d data=%d/%d errors\n",
                 alaw ? "A-law" : "u-law",
                 v32bis_startup_tx_symbols_sent(tx),
-                v32bis_startup_rx_symbols_seen(rx));
+                v32bis_startup_rx_symbols_seen(rx),
+                received.errors,
+                received.total);
         v32bis_free(tx);
         v32bis_free(rx);
         return -1;

@@ -199,6 +199,8 @@ SPAN_DECLARE(int) v32bis_prepare_startup_tx(v32bis_state_t *s, int remote_rates)
     the RX carrier/timing/equalizer front end. */
 SPAN_DECLARE(int) v32bis_startup_tx_symbols_sent(v32bis_state_t *s);
 SPAN_DECLARE(int) v32bis_startup_rx_symbols_seen(v32bis_state_t *s);
+SPAN_DECLARE(bool) v32bis_startup_complete(v32bis_state_t *s);
+SPAN_DECLARE(int) v32bis_startup_remote_rates(v32bis_state_t *s);
 
 /*! Report the current operating bit rate of a V.32bis modem context.
     \brief Report the current operating bit rate of a V.22bis modem context

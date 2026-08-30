@@ -55,6 +55,22 @@ struct v32bis_state_s
     int startup_tx_symbol_pos;
     int startup_rx_symbol_count;
 
+    int startup_rx_stage;
+    complexf_t startup_rx_acq[64];
+    int startup_rx_acq_count;
+    complexf_t startup_rx_gain;
+    int startup_rx_sbar_run;
+    int startup_rx_sbar_remaining;
+    uint32_t startup_rx_trn_reg;
+    int startup_rx_trn_pos;
+    int startup_rx_trn_diff;
+    uint8_t startup_rx_word_states[8];
+    int startup_rx_word_pos;
+    uint16_t startup_rx_first_r;
+    int startup_remote_rates;
+    int startup_selected_rate;
+    bool startup_complete;
+
     /*! \brief Error and flow logging control */
     logging_state_t logging;
 };

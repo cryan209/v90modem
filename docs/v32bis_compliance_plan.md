@@ -70,11 +70,28 @@ than running the V.17 fax-training switch. The native regression exercises
 that path through both PCMU and PCMA at 8 kHz and requires the complete 1576
 symbol burst to cross the seam.
 
-This is still infrastructure, not a working modem claim. The RX symbol sink
-does not yet acquire the S/S-bar boundary or decode the received R/E words,
-the burst is not yet a reactive caller/answerer §6 state machine, and the
-allocated echo canceller is not yet in the sample path. Those are now the
-remaining startup tasks; the pulse shaper/equalizer handoff itself is covered.
+The receive seam is now live rather than a symbol counter. It acquires S
+without an oracle by fitting both alternating phases over a 64-symbol window,
+detects the S-to-S-bar transition structurally, regenerates the
+role-directional 1280T TRN sequence, and uses its known symbols to train the
+shared carrier loop and LMS FSE. It then decodes and validates both repeated
+Table 5 R words and Table 6 E from the recovered TRN scrambler/differential
+state. PCMU and PCMA tests require that blind acquisition complete and that the
+received offer and selected rate agree with the transmitted words.
+
+E now hands the recovered scrambler and differential state to the existing
+V.17 data decoder, while the transmitter hands its matching state to the V.17
+data encoder and switches constellations without a waveform reset. The native
+regression proves more than 1000 arbitrary PRBS bits with zero errors at 4800
+bit/s through both G.711 laws. The same path acquires and negotiates all five
+rates, but dense-mode data is not yet clean enough to claim: decision-directed
+carrier/equalizer operation after the TRN handoff still degrades at 7200 and
+above.
+
+This is still not a live modem claim. `v32bis_prepare_startup_tx()` emits a
+self-contained test burst rather than the reactive caller/answerer §6
+sequence, the allocated echo canceller is not yet in the duplex sample path,
+and V.8/modem-engine/V.42/PTY integration has not landed.
 
 `make v32bis-test` runs the native smoke test plus all Python reference,
 SpanDSP-comparison, waveform, and datapump tests.
@@ -179,7 +196,7 @@ Blind (oracle-free) startup word decoding:
 
 ### Phase 1: Spec-Locked Tables and Bit-Level Logic
 
-Status: in progress
+Status: complete in the Python oracle; native startup/data mappings covered
 
 - Encode the supported bit rates and bits/symbol relationships.
 - Implement the differential quadrant encoder from Table 1/V.32bis.
@@ -196,7 +213,7 @@ Exit criteria:
 
 ### Phase 2: Scrambling, Framing, and Rate Sequences
 
-Status: pending
+Status: native transmit and blind receive complete; reactive duplex ordering pending
 
 - Implement transmit and receive scramblers with caller/answerer directionality.
 - Implement startup rate-sequence exchange.
@@ -209,7 +226,7 @@ Exit criteria:
 
 ### Phase 3: Passband Modulation and Receiver Front End
 
-Status: pending
+Status: working through zero-BER 4800 data; dense-rate tracking pending
 
 - Pulse shaping
 - Carrier generation and recovery

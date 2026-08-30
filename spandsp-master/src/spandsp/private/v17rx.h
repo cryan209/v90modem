@@ -71,9 +71,9 @@ struct v17_rx_state_s
                routine. */
     void *qam_user_data;
 #if defined(SPANDSP_USE_FIXED_POINTx)
-    void (*symbol_sink)(void *user_data, const complexi16_t *symbol);
+    int (*symbol_sink)(void *user_data, const complexi16_t *symbol);
 #else
-    void (*symbol_sink)(void *user_data, const complexf_t *symbol);
+    int (*symbol_sink)(void *user_data, const complexf_t *symbol);
 #endif
     void *symbol_sink_user_data;
 

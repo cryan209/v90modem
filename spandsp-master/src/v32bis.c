@@ -451,28 +451,409 @@ static int v32bis_startup_symbol_source(void *user_data, complexf_t *symbol)
     int state;
 
     s = (v32bis_state_t *) user_data;
-    if (s->startup_tx_symbol_count <= 0)
+    if (s->startup_tx_symbol_count <= 0
+        || s->startup_tx_symbol_pos >= s->startup_tx_symbol_count)
+    {
+        s->tx.symbol_source = NULL;
+        s->tx.symbol_source_user_data = NULL;
         return -1;
-    if (s->startup_tx_symbol_pos < s->startup_tx_symbol_count)
-        state = s->startup_tx_symbols[s->startup_tx_symbol_pos++];
-    else
-        state = s->startup_tx_symbols[s->startup_tx_symbol_count - 1];
+    }
+    state = s->startup_tx_symbols[s->startup_tx_symbol_pos++];
     *symbol = v17_v32bis_4800_constellation[state & 3];
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
 
+enum
+{
+    V32BIS_RX_SEARCH_S = 0,
+    V32BIS_RX_S_BAR,
+    V32BIS_RX_TRN,
+    V32BIS_RX_R_FIRST,
+    V32BIS_RX_R_SECOND,
+    V32BIS_RX_E,
+    V32BIS_RX_DATA
+};
+
+static float startup_power(const complexf_t *z)
+{
+    return z->re*z->re + z->im*z->im;
+}
+/*- End of function --------------------------------------------------------*/
+
+static complexf_t startup_gain_observation(const complexf_t *z, int state)
+{
+    const complexf_t *p;
+    complexf_t gain;
+    float power;
+
+    p = &v17_v32bis_4800_constellation[state & 3];
+    power = startup_power(p);
+    gain.re = (z->re*p->re + z->im*p->im)/power;
+    gain.im = (z->im*p->re - z->re*p->im)/power;
+    return gain;
+}
+/*- End of function --------------------------------------------------------*/
+
+static bool startup_try_acquire_s(v32bis_state_t *s)
+{
+    complexf_t gains[2];
+    complexf_t predicted;
+    complexf_t error;
+    const complexf_t *p;
+    float input_power;
+    float reference_power;
+    float error_power[2];
+    float metric;
+    float best_metric;
+    int best;
+    int parity;
+    int i;
+
+    if (s->startup_rx_acq_count < 64)
+        return false;
+    best = -1;
+    best_metric = 1.0e30f;
+    for (parity = 0;  parity < 2;  parity++)
+    {
+        gains[parity].re = 0.0f;
+        gains[parity].im = 0.0f;
+        reference_power = 0.0f;
+        for (i = 0;  i < 64;  i++)
+        {
+            p = &v17_v32bis_4800_constellation[(i + parity) & 1];
+            gains[parity].re += s->startup_rx_acq[i].re*p->re
+                              + s->startup_rx_acq[i].im*p->im;
+            gains[parity].im += s->startup_rx_acq[i].im*p->re
+                              - s->startup_rx_acq[i].re*p->im;
+            reference_power += startup_power(p);
+        }
+        gains[parity].re /= reference_power;
+        gains[parity].im /= reference_power;
+        error_power[parity] = 0.0f;
+        input_power = 0.0f;
+        for (i = 0;  i < 64;  i++)
+        {
+            p = &v17_v32bis_4800_constellation[(i + parity) & 1];
+            predicted.re = gains[parity].re*p->re - gains[parity].im*p->im;
+            predicted.im = gains[parity].re*p->im + gains[parity].im*p->re;
+            error.re = s->startup_rx_acq[i].re - predicted.re;
+            error.im = s->startup_rx_acq[i].im - predicted.im;
+            error_power[parity] += startup_power(&error);
+            input_power += startup_power(&s->startup_rx_acq[i]);
+        }
+        metric = error_power[parity]/input_power;
+        if (metric < best_metric)
+        {
+            best_metric = metric;
+            best = parity;
+        }
+    }
+    if (best < 0  ||  best_metric > 0.08f)
+        return false;
+    s->startup_rx_gain = gains[best];
+#if !defined(SPANDSP_USE_FIXED_POINTx)
+    /* Put the S-derived complex gain into the shared FSE immediately.  TRN
+       can then train against canonical 4-point targets instead of asking LMS
+       to remove an arbitrary carrier rotation and the channel together. */
+    reference_power = startup_power(&s->startup_rx_gain);
+    if (reference_power > 1.0e-6f)
+    {
+        complexf_t inverse;
+        complexf_t tap;
+
+        inverse.re = s->startup_rx_gain.re/reference_power;
+        inverse.im = -s->startup_rx_gain.im/reference_power;
+        for (i = 0;  i < V17_EQUALIZER_LEN;  i++)
+        {
+            tap = s->rx.eq_coeff[i];
+            s->rx.eq_coeff[i].re = tap.re*inverse.re - tap.im*inverse.im;
+            s->rx.eq_coeff[i].im = tap.re*inverse.im + tap.im*inverse.re;
+        }
+        s->startup_rx_gain.re = 1.0f;
+        s->startup_rx_gain.im = 0.0f;
+    }
+#endif
+    s->startup_rx_sbar_run = 0;
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int startup_nearest_state(const v32bis_state_t *s, const complexf_t *z)
+{
+    complexf_t predicted;
+    float distance;
+    float best_distance;
+    int best;
+    int state;
+
+    best = 0;
+    best_distance = 1.0e30f;
+    for (state = 0;  state < 4;  state++)
+    {
+        predicted.re = s->startup_rx_gain.re*v17_v32bis_4800_constellation[state].re
+                     - s->startup_rx_gain.im*v17_v32bis_4800_constellation[state].im;
+        predicted.im = s->startup_rx_gain.re*v17_v32bis_4800_constellation[state].im
+                     + s->startup_rx_gain.im*v17_v32bis_4800_constellation[state].re;
+        predicted.re = z->re - predicted.re;
+        predicted.im = z->im - predicted.im;
+        distance = startup_power(&predicted);
+        if (distance < best_distance)
+        {
+            best_distance = distance;
+            best = state;
+        }
+    }
+    return best;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void startup_track_gain(v32bis_state_t *s, const complexf_t *z, int state)
+{
+    complexf_t observation;
+
+    observation = startup_gain_observation(z, state);
+    s->startup_rx_gain.re = 0.99f*s->startup_rx_gain.re + 0.01f*observation.re;
+    s->startup_rx_gain.im = 0.99f*s->startup_rx_gain.im + 0.01f*observation.im;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int startup_enter_data_rx(v32bis_state_t *s,
+                                 int bit_rate,
+                                 uint32_t descrambler_register,
+                                 int diff_state)
+{
+    complexf_t inverse;
+    complexf_t tap;
+    float gain_power;
+    int i;
+
+    switch (bit_rate)
+    {
+    case 14400:
+        s->rx.constellation = v17_v32bis_14400_constellation;
+        s->rx.space_map = 0;
+        s->rx.bits_per_symbol = 6;
+        break;
+    case 12000:
+        s->rx.constellation = v17_v32bis_12000_constellation;
+        s->rx.space_map = 1;
+        s->rx.bits_per_symbol = 5;
+        break;
+    case 9600:
+        s->rx.constellation = v17_v32bis_9600_constellation;
+        s->rx.space_map = 2;
+        s->rx.bits_per_symbol = 4;
+        break;
+    case 7200:
+        s->rx.constellation = v17_v32bis_7200_constellation;
+        s->rx.space_map = 3;
+        s->rx.bits_per_symbol = 3;
+        break;
+    case 4800:
+        s->rx.constellation = v17_v32bis_4800_constellation;
+        s->rx.space_map = 0;
+        s->rx.bits_per_symbol = 2;
+        break;
+    default:
+        return -1;
+    }
+    /* The startup detector estimates the one-tap complex channel while the
+       V.17 FSE remains in its neutral state.  Transfer that estimate into the
+       FSE before handing dense data decisions back to V.17. */
+    gain_power = startup_power(&s->startup_rx_gain);
+    if (gain_power <= 1.0e-6f)
+        return -1;
+    inverse.re = s->startup_rx_gain.re/gain_power;
+    inverse.im = -s->startup_rx_gain.im/gain_power;
 #if defined(SPANDSP_USE_FIXED_POINTx)
-static void v32bis_startup_symbol_sink(void *user_data, const complexi16_t *symbol)
+    (void) tap;
+    (void) inverse;
 #else
-static void v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
+    for (i = 0;  i < V17_EQUALIZER_LEN;  i++)
+    {
+        tap = s->rx.eq_coeff[i];
+        s->rx.eq_coeff[i].re = tap.re*inverse.re - tap.im*inverse.im;
+        s->rx.eq_coeff[i].im = tap.re*inverse.im + tap.im*inverse.re;
+    }
+#endif
+    s->rx.bit_rate = bit_rate;
+    s->rx.diff = diff_state;
+    s->rx.scramble_reg = descrambler_register;
+    s->rx.training_stage = 0;  /* TRAINING_STAGE_NORMAL_OPERATION */
+    s->rx.training_count = 0;
+    for (i = 0;  i < 8;  i++)
+        s->rx.distances[i] = (i == 0) ? 0.0f : 99.0f;
+    memset(s->rx.full_path_to_past_state_locations, 0,
+           sizeof(s->rx.full_path_to_past_state_locations));
+    memset(s->rx.past_state_locations, 0,
+           sizeof(s->rx.past_state_locations));
+    s->rx.trellis_ptr = 14;
+    s->rx.symbol_sink = NULL;
+    s->rx.symbol_sink_user_data = NULL;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void startup_finish_word(v32bis_state_t *s)
+{
+    uint32_t reg;
+    uint16_t word;
+    int diff;
+    int rates;
+    int rate;
+    bool remote_calling_party;
+
+    reg = s->startup_rx_trn_reg;
+    diff = s->startup_rx_trn_diff;
+    remote_calling_party = !s->calling_party;
+    if (v32bis_decode_startup_word(remote_calling_party,
+                                   s->startup_rx_word_states,
+                                   &reg,
+                                   &diff,
+                                   &word) != 8)
+    {
+        s->startup_rx_stage = V32BIS_RX_SEARCH_S;
+        return;
+    }
+    if (s->startup_rx_stage == V32BIS_RX_R_FIRST)
+    {
+        if (v32bis_decode_rate_signal(word, &rates) != 0)
+        {
+            s->startup_rx_stage = V32BIS_RX_SEARCH_S;
+            return;
+        }
+        s->startup_rx_first_r = word;
+        s->startup_remote_rates = rates;
+        s->startup_rx_stage = V32BIS_RX_R_SECOND;
+    }
+    else if (s->startup_rx_stage == V32BIS_RX_R_SECOND)
+    {
+        if (word != s->startup_rx_first_r
+            || v32bis_decode_rate_signal(word, &rates) != 0)
+        {
+            s->startup_rx_stage = V32BIS_RX_SEARCH_S;
+            return;
+        }
+        s->startup_rx_stage = V32BIS_RX_E;
+    }
+    else if (s->startup_rx_stage == V32BIS_RX_E)
+    {
+        if (v32bis_decode_e_signal(word, &rate) != 0
+            || (rate_to_mask(rate) & s->startup_remote_rates) == 0)
+        {
+            s->startup_rx_stage = V32BIS_RX_SEARCH_S;
+            return;
+        }
+        if (startup_enter_data_rx(s, rate, reg, diff) != 0)
+        {
+            s->startup_rx_stage = V32BIS_RX_SEARCH_S;
+            return;
+        }
+        s->startup_selected_rate = rate;
+        s->bit_rate = rate;
+        s->startup_complete = true;
+        s->startup_rx_stage = V32BIS_RX_DATA;
+    }
+    s->startup_rx_word_pos = 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+#if defined(SPANDSP_USE_FIXED_POINTx)
+static int v32bis_startup_symbol_sink(void *user_data, const complexi16_t *symbol)
+#else
+static int v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
 #endif
 {
     v32bis_state_t *s;
+    complexf_t z;
+    int remote_tap;
+    int expected;
+    int state;
 
-    (void) symbol;
     s = (v32bis_state_t *) user_data;
+#if defined(SPANDSP_USE_FIXED_POINTx)
+    z.re = symbol->re;
+    z.im = symbol->im;
+#else
+    z = *symbol;
+#endif
     s->startup_rx_symbol_count++;
+    switch (s->startup_rx_stage)
+    {
+    case V32BIS_RX_SEARCH_S:
+        if (startup_power(&z) < 10.0f)
+            return -1;
+        if (s->startup_rx_acq_count < 64)
+            s->startup_rx_acq[s->startup_rx_acq_count++] = z;
+        else
+        {
+            memmove(&s->startup_rx_acq[0],
+                    &s->startup_rx_acq[1],
+                    63*sizeof(s->startup_rx_acq[0]));
+            s->startup_rx_acq[63] = z;
+        }
+        if (startup_try_acquire_s(s))
+            s->startup_rx_stage = V32BIS_RX_S_BAR;
+        return -1;
+    case V32BIS_RX_S_BAR:
+        state = startup_nearest_state(s, &z);
+        if (s->startup_rx_sbar_run == 0)
+        {
+            if (state == V32BIS_STARTUP_C)
+                s->startup_rx_sbar_run = 1;
+        }
+        else
+        {
+            expected = (s->startup_rx_sbar_run & 1)
+                     ? V32BIS_STARTUP_D : V32BIS_STARTUP_C;
+            if (state == expected)
+                s->startup_rx_sbar_run++;
+            else
+                s->startup_rx_sbar_run = (state == V32BIS_STARTUP_C) ? 1 : 0;
+        }
+        if (s->startup_rx_sbar_run >= 8)
+        {
+            s->startup_rx_sbar_remaining = 8;
+            s->startup_rx_stage = V32BIS_RX_TRN;
+            s->startup_rx_trn_pos = -8;
+            s->startup_rx_trn_reg = 0;
+            s->startup_rx_trn_diff = V32BIS_STARTUP_A;
+        }
+        return -1;
+    case V32BIS_RX_TRN:
+        if (s->startup_rx_trn_pos < 0)
+        {
+            s->startup_rx_trn_pos++;
+            return -1;
+        }
+        remote_tap = (!s->calling_party) ? 17 : 4;
+        expected = startup_scramble_bit(&s->startup_rx_trn_reg, remote_tap, 1);
+        state = startup_scramble_bit(&s->startup_rx_trn_reg, remote_tap, 1);
+        if (s->startup_rx_trn_pos < 256)
+            expected = expected ? V32BIS_STARTUP_C : V32BIS_STARTUP_A;
+        else
+            expected |= state << 1;
+        startup_track_gain(s, &z, expected);
+        s->startup_rx_trn_diff = expected;
+        if (++s->startup_rx_trn_pos >= 1280)
+        {
+            s->startup_rx_stage = V32BIS_RX_R_FIRST;
+            s->startup_rx_word_pos = 0;
+        }
+        return expected;
+    case V32BIS_RX_R_FIRST:
+    case V32BIS_RX_R_SECOND:
+    case V32BIS_RX_E:
+        state = startup_nearest_state(s, &z);
+        s->startup_rx_word_states[s->startup_rx_word_pos++] = (uint8_t) state;
+        if (s->startup_rx_word_pos >= 8)
+            startup_finish_word(s);
+        return -1;
+    case V32BIS_RX_DATA:
+    default:
+        return -1;
+    }
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -496,6 +877,11 @@ SPAN_DECLARE(int) v32bis_prepare_startup_tx(v32bis_state_t *s, int remote_rates)
     offered_rates = local_rates & remote_rates;
     selected_rate = v32bis_select_common_rate(local_rates, remote_rates);
     if (selected_rate == 0)
+        return -1;
+    /* Select the post-E data constellation before the burst starts.  The
+       external startup source bypasses it until E is complete, so this reset
+       cannot introduce a waveform seam. */
+    if (v17_tx_restart(&s->tx, selected_rate, false, false) != 0)
         return -1;
 
     count = v32bis_build_conditioning(s->calling_party,
@@ -535,6 +921,13 @@ SPAN_DECLARE(int) v32bis_prepare_startup_tx(v32bis_state_t *s, int remote_rates)
     s->startup_tx_symbol_count = count;
     s->startup_tx_symbol_pos = 0;
     s->bit_rate = selected_rate;
+    /* Section 6.1: E hands its scrambler/differential state to B1/data and
+       initializes the convolutional encoder to zero. */
+    s->tx.scramble_reg = word_reg;
+    s->tx.diff = word_diff;
+    s->tx.convolution = 0;
+    s->tx.in_training = false;
+    s->tx.current_get_bit = s->tx.get_bit;
     s->tx.symbol_source = v32bis_startup_symbol_source;
     s->tx.symbol_source_user_data = s;
     return count;
@@ -550,6 +943,36 @@ SPAN_DECLARE(int) v32bis_startup_tx_symbols_sent(v32bis_state_t *s)
 SPAN_DECLARE(int) v32bis_startup_rx_symbols_seen(v32bis_state_t *s)
 {
     return (s != NULL) ? s->startup_rx_symbol_count : 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(bool) v32bis_startup_complete(v32bis_state_t *s)
+{
+    return s != NULL  &&  s->startup_complete;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_startup_remote_rates(v32bis_state_t *s)
+{
+    return (s != NULL) ? s->startup_remote_rates : 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void startup_rx_reset(v32bis_state_t *s)
+{
+    s->startup_rx_symbol_count = 0;
+    s->startup_rx_stage = V32BIS_RX_SEARCH_S;
+    s->startup_rx_acq_count = 0;
+    s->startup_rx_sbar_run = 0;
+    s->startup_rx_sbar_remaining = 0;
+    s->startup_rx_trn_reg = 0;
+    s->startup_rx_trn_pos = 0;
+    s->startup_rx_trn_diff = V32BIS_STARTUP_A;
+    s->startup_rx_word_pos = 0;
+    s->startup_rx_first_r = 0;
+    s->startup_remote_rates = 0;
+    s->startup_selected_rate = 0;
+    s->startup_complete = false;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -592,7 +1015,7 @@ SPAN_DECLARE(int) v32bis_rx_restart(v32bis_state_t *s, int bit_rate)
         return -1;
     if (v17_rx_restart(&s->rx, bit_rate, false) != 0)
         return -1;
-    s->startup_rx_symbol_count = 0;
+    startup_rx_reset(s);
     s->rx.symbol_sink = v32bis_startup_symbol_sink;
     s->rx.symbol_sink_user_data = s;
     s->bit_rate = bit_rate;
@@ -611,7 +1034,7 @@ SPAN_DECLARE(int) v32bis_restart(v32bis_state_t *s, int bit_rate)
         return -1;
     s->startup_tx_symbol_count = 0;
     s->startup_tx_symbol_pos = 0;
-    s->startup_rx_symbol_count = 0;
+    startup_rx_reset(s);
     s->tx.symbol_source = NULL;
     s->tx.symbol_source_user_data = NULL;
     s->rx.symbol_sink = v32bis_startup_symbol_sink;
