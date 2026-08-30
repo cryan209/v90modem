@@ -70,6 +70,7 @@
 #include "spandsp/v29rx.h"
 #include "spandsp/v22bis.h"
 #if defined(SPANDSP_SUPPORT_V32BIS)
+#include "spandsp/godard.h"
 #include "spandsp/v17tx.h"
 #include "spandsp/v17rx.h"
 #include "spandsp/modem_echo.h"
@@ -95,6 +96,7 @@
 #include "spandsp/private/modem_echo.h"
 #include "spandsp/private/v22bis.h"
 #if defined(SPANDSP_SUPPORT_V32BIS)
+#include "spandsp/private/godard.h"
 #include "spandsp/private/v17tx.h"
 #include "spandsp/private/v17rx.h"
 #include "spandsp/private/modem_echo.h"

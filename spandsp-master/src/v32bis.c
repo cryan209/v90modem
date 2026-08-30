@@ -59,6 +59,7 @@
 #include "spandsp/arctan2.h"
 #include "spandsp/dds.h"
 #include "spandsp/complex_filters.h"
+#include "spandsp/godard.h"
 
 #include "spandsp/modem_echo.h"
 #include "spandsp/v29rx.h"
@@ -70,6 +71,7 @@
 
 #include "spandsp/private/logging.h"
 #include "spandsp/private/power_meter.h"
+#include "spandsp/private/godard.h"
 #include "spandsp/private/v17tx.h"
 #include "spandsp/private/v17rx.h"
 #include "spandsp/private/v32bis.h"
@@ -133,6 +135,12 @@ SPAN_DECLARE(int) v32bis_rx_fillin(v32bis_state_t *s, int len)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(void) v32bis_rx_set_signal_cutoff(v32bis_state_t *s, float cutoff)
+{
+    v17_rx_set_signal_cutoff(&s->rx, cutoff);
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v32bis_tx_power(v32bis_state_t *s, float power)
 {
     v17_tx_power(&s->tx, power);
@@ -153,16 +161,26 @@ SPAN_DECLARE(void) v32bis_set_put_bit(v32bis_state_t *s, span_put_bit_func_t put
 
 SPAN_DECLARE(int) v32bis_set_supported_bit_rates(v32bis_state_t *s, int rates)
 {
-    s->permitted_rates_signal = (rates & 0x1660) | 0x8990;
-    //Rate signal sync test is (value & 0x888F) == 0x8880
-    //E signal sync test is (value & 0x888F) == 0x888F
+    const int valid_rates = V32BIS_RATE_14400
+                          | V32BIS_RATE_12000
+                          | V32BIS_RATE_9600
+                          | V32BIS_RATE_7200
+                          | V32BIS_RATE_4800;
+
+    if ((rates & valid_rates) == 0  ||  (rates & ~valid_rates) != 0)
+        return -1;
+    /* ITU-T V.32bis Table 5: R1/R2/R3 use the rate-signal framing bits
+       around the enabled-rate field. */
+    s->permitted_rates_signal = (rates & valid_rates) | 0x8990;
+    /* Rate signal sync test is (value & 0x888F) == 0x8880.
+       E signal sync test is (value & 0x888F) == 0x888F. */
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
 
 SPAN_DECLARE(int) v32bis_current_bit_rate(v32bis_state_t *s)
 {
-    return 14400;
+    return s->bit_rate;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -172,11 +190,37 @@ SPAN_DECLARE(logging_state_t *) v32bis_get_logging_state(v32bis_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static bool valid_bit_rate(int bit_rate)
+{
+    return bit_rate == 4800
+        || bit_rate == 7200
+        || bit_rate == 9600
+        || bit_rate == 12000
+        || bit_rate == 14400;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_rx_restart(v32bis_state_t *s, int bit_rate)
+{
+    if (!valid_bit_rate(bit_rate))
+        return -1;
+    if (v17_rx_restart(&s->rx, bit_rate, false) != 0)
+        return -1;
+    s->bit_rate = bit_rate;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v32bis_restart(v32bis_state_t *s, int bit_rate)
 {
+    if (!valid_bit_rate(bit_rate))
+        return -1;
     span_log(&s->rx.logging, SPAN_LOG_FLOW, "Restarting V.32bis, %dbps\n", bit_rate);
-    v17_tx_restart(&s->tx, bit_rate, false, false);
-    v17_rx_restart(&s->rx, bit_rate, false);
+    if (v17_tx_restart(&s->tx, bit_rate, false, false) != 0)
+        return -1;
+    if (v17_rx_restart(&s->rx, bit_rate, false) != 0)
+        return -1;
+    s->bit_rate = bit_rate;
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
@@ -189,6 +233,8 @@ SPAN_DECLARE(v32bis_state_t *) v32bis_init(v32bis_state_t *s,
                                            span_put_bit_func_t put_bit,
                                            void *put_bit_user_data)
 {
+    if (!valid_bit_rate(bit_rate))
+        return NULL;
     if (s == NULL)
     {
         if ((s = (v32bis_state_t *) span_alloc(sizeof(*s))) == NULL)
@@ -203,7 +249,7 @@ SPAN_DECLARE(v32bis_state_t *) v32bis_init(v32bis_state_t *s,
     /* V.32bis never uses TEP */
     v17_tx_init(&s->tx, bit_rate, false, get_bit, get_bit_user_data);
     v17_rx_init(&s->rx, bit_rate, put_bit, put_bit_user_data);
-    s->ec = modem_echo_can_init(256);
+    s->ec = modem_echo_can_segment_init(256);
 
     /* Initialise things which are not quite like V.17 */
     if (s->calling_party)
@@ -229,14 +275,18 @@ SPAN_DECLARE(v32bis_state_t *) v32bis_init(v32bis_state_t *s,
 
 SPAN_DECLARE(int) v32bis_release(v32bis_state_t *s)
 {
-    modem_echo_can_free(s->ec);
-    s->ec = NULL;
+    if (s->ec != NULL)
+    {
+        modem_echo_can_segment_free(s->ec);
+        s->ec = NULL;
+    }
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
 
 SPAN_DECLARE(int) v32bis_free(v32bis_state_t *s)
 {
+    v32bis_release(s);
     span_free(s);
     return 0;
 }

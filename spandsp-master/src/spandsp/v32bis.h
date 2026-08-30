@@ -65,7 +65,7 @@ extern "C"
 /*! Reinitialise an existing V.32bis modem receive context.
     \brief Reinitialise an existing V.32bis modem receive context.
     \param s The modem context.
-    \param bit_rate The bit rate of the modem. Valid values are 1200 and 2400.
+    \param bit_rate The bit rate of the modem. Valid values are 4800, 7200, 9600, 12000 and 14400.
     \return 0 for OK, -1 for bad parameter */
 SPAN_DECLARE(int) v32bis_rx_restart(v32bis_state_t *s, int bit_rate);
 

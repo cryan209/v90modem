@@ -43,6 +43,26 @@ reference, but `spandsp-master/tests/v32bis_tests.c` explicitly marks its
 V.32bis support as work in progress. It is not sufficient evidence of
 compliance.
 
+## Native SpanDSP Baseline
+
+The project build now configures the bundled SpanDSP with both
+`--enable-v34` and `--enable-v32bis`. Enabling the dormant code exposed and
+fixed its stale Godard-header dependency, obsolete echo-canceller API calls,
+and incomplete public lifecycle API. `v32bis_spandsp_test` pins honest
+initialisation and restart behaviour at 4800, 7200, 9600, 12000 and 14400
+bit/s, supported-rate validation, signal-cutoff forwarding, and waveform
+output from the inherited V.17 modulation core.
+
+This is infrastructure, not a working modem claim. `v32bis_tx()` and
+`v32bis_rx()` still delegate directly to V.17, the V.32bis startup/rate
+exchange has not been connected to them, and the allocated echo canceller is
+not yet in the sample path. The next native milestone is to drive the
+Table 5/Table 6 rate words and the startup traces already validated by the
+Python reference through this C datapump.
+
+`make v32bis-test` runs the native smoke test plus all Python reference,
+SpanDSP-comparison, waveform, and datapump tests.
+
 ## Reference vs SpanDSP
 
 The Python reference layer follows the ITU-T Recommendation by default.

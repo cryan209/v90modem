@@ -24,11 +24,13 @@ SPANDSP_HOST_STAMP := $(SPANDSP_ROOT)/.build-host
 PJ_CFLAGS   ?=
 PJ_LIBS     ?=
 TIFF_LDFLAGS := $(shell pkg-config --libs libtiff-4 2>/dev/null || echo "-L$(HOMEBREW_PREFIX)/lib -ltiff")
+JPEG_CFLAGS := $(shell pkg-config --cflags libjpeg 2>/dev/null || echo "-I$(HOMEBREW_PREFIX)/opt/jpeg-turbo/include")
+JPEG_LDFLAGS := $(shell pkg-config --libs libjpeg 2>/dev/null || echo "-L$(HOMEBREW_PREFIX)/opt/jpeg-turbo/lib -ljpeg")
 # Homebrew keeps OpenSSL keg-only, so it is not on the default library path
 # and a bare -lssl fails to link ("ld: library 'ssl' not found").  Ask
 # pkg-config, then fall back to the keg.
 OPENSSL_LDFLAGS := $(shell pkg-config --libs openssl 2>/dev/null || echo "-L$(HOMEBREW_PREFIX)/opt/openssl@3/lib -lssl -lcrypto")
-SYSTEM_LIBS ?= $(TIFF_LDFLAGS) $(OPENSSL_LDFLAGS) -lm -lpthread
+SYSTEM_LIBS ?= $(TIFF_LDFLAGS) $(JPEG_LDFLAGS) $(OPENSSL_LDFLAGS) -lm -lpthread
 PJ_BUILD_PREREQ ?=
 
 ifneq ($(and $(filter 1,$(USE_LOCAL_PJPROJECT)),$(wildcard $(PJ_LOCAL_MAKEFILE))),)
@@ -144,7 +146,7 @@ LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c data_stack.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
-TEST_TARGETS = vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test v90_upstream_replay v90_engine_replay v34_duplex_test v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test
+TEST_TARGETS = vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test v90_upstream_replay v90_engine_replay v34_duplex_test v32bis_spandsp_test v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test
 TEST_OBJS = vpcm_loopback_test.o v90.o v90_cp_rx.o v90_dil_rx.o v90_dil_measure.o v90_dil_presets.o v90_analogue_tx.o v90_analogue_rx.o v90_analogue_phase3.o v90_analogue_phase4.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_cp_rx.o v92_trn2u.o v92_upstream_data.o v92_upstream_rx.o p3_demod.o
 DECODE_OBJS = vpcm_decode.o v90_dil_measure.o v90_dil_presets.o v34_phase2_decode.o v34_info_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_anspcm_decode.o p3_demod.o v90.o v90_cp_rx.o v91.o vpcm_cp.o v21_fsk_demod.o phase12_decode.o call_init_tone_probe.o v90_dil_rx.o
 ENCODE_OBJS = vpcm_encode.o v90.o v91.o vpcm_cp.o v92_phase4_decode.o v90_dil_measure.o v90_dil_presets.o
@@ -162,6 +164,7 @@ V90_UPSTREAM_REPLAY_OBJS = v90_upstream_replay.o
 # the part being replaced.
 V90_ENGINE_REPLAY_OBJS = v90_engine_replay.o $(filter-out sip_modem.o,$(OBJS))
 V34_DUPLEX_TEST_OBJS = v34_duplex_test.o
+V32BIS_SPANDSP_TEST_OBJS = v32bis_spandsp_test.o
 V90_ANALOGUE_TX_TEST_OBJS = v90_analogue_tx_test.o v90_analogue_tx.o v90_analogue_phase4.o v90_dil_measure.o v90.o v90_cp_rx.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o
 V90_ANALOGUE_RX_TEST_OBJS = v90_analogue_rx_test.o v90_analogue_rx.o v90_analogue_phase3.o v90_analogue_phase4.o v90_analogue_tx.o v90_dil_measure.o v90.o v90_cp_rx.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o
 # v92_proc_eval_test.c includes phase12_decode.c directly (its evaluator is
@@ -174,7 +177,7 @@ SRCS += v34_stubs.c
 TEST_OBJS += v34_stubs.o
 endif
 
-.PHONY: all test clean distclean spandsp pjproject v34-tone-matrix v34-duplex-test v34-matrix-test v32bis-ref-test v32bis-datapump-test v91-serial-pair-test eicon-rx-test g711-path-test FORCE
+.PHONY: all test clean distclean spandsp pjproject v34-tone-matrix v34-duplex-test v34-matrix-test v32bis-ref-test v32bis-datapump-test v32bis-test v91-serial-pair-test eicon-rx-test g711-path-test FORCE
 
 all: $(TARGET) $(TEST_TARGETS)
 
@@ -231,6 +234,7 @@ test: $(TEST_TARGETS)
 	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3000 9600 alaw
 	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3200 9600 ulaw
 	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3200 9600 alaw
+	./v32bis_spandsp_test
 	./v92_proc_eval_test
 	./v90_analogue_tx_test
 	./v90_analogue_rx_test
@@ -269,9 +273,15 @@ g711-path-test:
 
 v32bis-ref-test:
 	python3 -m unittest discover -s tools/v32bis_ref -t .
+	python3 -m unittest tools/test_v32bis_compare_spandsp.py \
+		tools/test_v32bis_spec_policy.py tools/test_v32bis_tcm.py \
+		tools/test_v32bis_wav_harness.py
 
 v32bis-datapump-test:
 	python3 -m unittest discover -s tools/v32bis_datapump -t .
+
+v32bis-test: v32bis_spandsp_test v32bis-ref-test v32bis-datapump-test
+	./v32bis_spandsp_test
 
 $(TARGET): $(OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)
@@ -335,6 +345,9 @@ v34_data_test: $(V34_DATA_TEST_OBJS) spandsp
 v34_gardner_test: $(V34_GARDNER_TEST_OBJS)
 	$(CC) $(V34_GARDNER_TEST_OBJS) -o $@ -lm
 
+v32bis_spandsp_test: $(V32BIS_SPANDSP_TEST_OBJS) spandsp
+	$(CC) $(V32BIS_SPANDSP_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+
 # Not a test: a tool for replaying a recorded call into the upstream
 # receiver, so faults that only show after tens of seconds can be bisected
 # without waiting on the rig.
@@ -369,11 +382,17 @@ $(SPANDSP_LIB): FORCE
 		fi; \
 		rm -f "$(SPANDSP_HOST_STAMP)"; \
 	fi; \
+	if [ -f "$(SPANDSP_ROOT)/config.status" ] && \
+	   ! grep -q '^#define SPANDSP_SUPPORT_V32BIS 1' "$(SPANDSP_DIR)/spandsp.h"; then \
+		echo "Reconfiguring SpanDSP to enable V.32bis support..."; \
+		$(MAKE) -C "$(SPANDSP_ROOT)" distclean >/dev/null 2>&1 || true; \
+	fi; \
 	if [ ! -f "$(SPANDSP_ROOT)/config.status" ]; then \
-		echo "Configuring SpanDSP with V.34 support for $$current_host..."; \
+		echo "Configuring SpanDSP with V.34 and V.32bis support for $$current_host..."; \
 		(cd "$(SPANDSP_ROOT)" && \
-		 CFLAGS="$(TIFF_CFLAGS)" LDFLAGS="$(TIFF_LDFLAGS)" \
-		 ./configure --enable-v34); \
+		 CFLAGS="$(TIFF_CFLAGS) $(JPEG_CFLAGS)" \
+		 LDFLAGS="$(TIFF_LDFLAGS) $(JPEG_LDFLAGS)" \
+		 ./configure --enable-v34 --enable-v32bis); \
 	fi; \
 	$(MAKE) -C "$(SPANDSP_ROOT)"; \
 	printf '%s\n' "$$current_host" > "$(SPANDSP_HOST_STAMP)"
@@ -424,6 +443,7 @@ v34_gardner_test.o: v34_gardner_test.c $(SPANDSP_DIR)/v34_gardner.h
 v90_upstream_replay.o: v90_upstream_replay.c $(SPANDSP_DIR)/spandsp/v34.h
 v90_engine_replay.o: v90_engine_replay.c modem_engine.h
 v34_duplex_test.o: v34_duplex_test.c $(SPANDSP_DIR)/spandsp/v34.h
+v32bis_spandsp_test.o: v32bis_spandsp_test.c $(SPANDSP_DIR)/spandsp/v32bis.h spandsp
 v34_info_decode.o: v34_info_decode.c v34_info_decode.h v90.h
 v21_fsk_demod.o:  v21_fsk_demod.c  v21_fsk_demod.h
 phase12_decode.o: phase12_decode.c phase12_decode.h v21_fsk_demod.h v34_info_decode.h v90.h v8bis_decode.h

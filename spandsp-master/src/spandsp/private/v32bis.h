@@ -43,7 +43,7 @@ struct v32bis_state_s
 
     v17_rx_state_t rx;
     v17_tx_state_t tx;
-    modem_echo_can_state_t *ec;
+    modem_echo_can_segment_state_t *ec;
 
     uint16_t permitted_rates_signal;
 
