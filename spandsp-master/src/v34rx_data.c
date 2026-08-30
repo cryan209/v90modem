@@ -77,6 +77,29 @@
 #include "v34_tables.h"
 #include "v34rx_internal.h"
 
+/* ME_V90_DATA_LEAN=1 drops the measurement this stage carries and keeps only
+   what steers the receiver -- the shape an embedded build of this file needs.
+   Gated here rather than deleted so the two can be run against each other on
+   the same recording, which is the only way to know that a block that LOOKS
+   like instrumentation is not quietly load-bearing.  Two in this file are:
+   v90_t3_sym_err_ema / _fast gate the timing loop, the DD-LMS and the carrier
+   loop, and the V34_V90_T3_DIVERGED_POWER branch stands CMA down and restores
+   the last good taps.  Neither is gated. */
+static int v34_rx_data_lean(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *v = getenv("ME_V90_DATA_LEAN");
+
+        cache = (v && *v) ? (atoi(v) != 0) : 0;
+    }
+    /*endif*/
+    return cache;
+}
+/*- End of function --------------------------------------------------------*/
+
 void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
 {
         if (s->b1_acquisition_active)
@@ -401,7 +424,8 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 int who_t = s->calling_party ? 1 : 0;
 
                 if (tap_path == NULL)
-                    tap_path = getenv("V34_EQ_TAP_DUMP") ? getenv("V34_EQ_TAP_DUMP") : "";
+                    tap_path = (getenv("V34_EQ_TAP_DUMP") && !v34_rx_data_lean())
+                              ? getenv("V34_EQ_TAP_DUMP") : "";
                 /*endif*/
                 if (tap_path[0]  &&  ++tap_count[who_t] % 4096 == 0)
                 {
@@ -443,9 +467,14 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 float t_re = 2.0f*floorf(g_re/2.0f) + 1.0f;
                 float t_im = 2.0f*floorf(g_im/2.0f) + 1.0f;
 
-                err_sum[who] += (g_re - t_re)*(g_re - t_re)
-                              + (g_im - t_im)*(g_im - t_im);
-                sig_sum[who] += t_re*t_re + t_im*t_im;
+                if (!v34_rx_data_lean())
+                {
+                    err_sum[who] += (g_re - t_re)*(g_re - t_re)
+                                  + (g_im - t_im)*(g_im - t_im);
+                    sig_sum[who] += t_re*t_re + t_im*t_im;
+                    err_count[who]++;
+                }
+                /*endif*/
                 /* The same distance, kept on the state as a running estimate
                    so the engine can act on it rather than only read it in a
                    log line.  V.34 11.5 and 11.6 both exist for a receiver
@@ -481,7 +510,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     }
                     /*endif*/
                 }
-                if (++err_count[who] >= 4096)
+                if (err_count[who] >= 4096)
                 {
                     double dist = err_sum[who]/err_count[who];
                     double power = sig_sum[who]/err_count[who];
@@ -557,7 +586,8 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                that is producing white output has a large one.  This is the
                only direct read on whether an upstream failure is in the
                waveform or after it. */
-            if (s->v90_t3_acquired  &&  s->v90_t3_suppress_output)
+            if (s->v90_t3_acquired  &&  s->v90_t3_suppress_output
+                &&  !v34_rx_data_lean())
             {
                 /* Same measure over the B1 era, where the symbols are known
                    to match their template.  If B1 is on the lattice and the
@@ -612,7 +642,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    scaling one -- V.34's per-rate modulation factor being the
                    obvious candidate -- and if none does, the symbols are not
                    a scaled version of the constellation at all. */
-                if (v34_rx_gain_sweep_enabled())
+                if (v34_rx_gain_sweep_enabled()  &&  !v34_rx_data_lean())
                 {
                     for (int g = 0;  g < V34_V90_T3_GAIN_TRIALS;  g++)
                     {
@@ -634,7 +664,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     char gains[256];
                     int len = 0;
 
-                    if (!v34_rx_gain_sweep_enabled())
+                    if (!v34_rx_gain_sweep_enabled()  ||  v34_rx_data_lean())
                         goto skip_gain_report;
                     /*endif*/
                     for (int g = 0;  g < V34_V90_T3_GAIN_TRIALS;  g++)
@@ -697,6 +727,12 @@ skip_gain_report:
                         if (carries > 33600)
                             carries = 33600;
                         /*endif*/
+                        /* Report only.  The accumulators behind it are NOT
+                           gated: v90_t3_decision_err/_pow/_count also feed the
+                           DATA-bits line's sym err column and the divergence
+                           branch below, and their 3200-symbol reset cadence is
+                           what defines that column's window. */
+                        if (!v34_rx_data_lean())
                         span_log(s->logging, SPAN_LOG_WARNING,
                                  "Rx - V.90 upstream DATA: decision error "
                                  "%.4f per symbol (mean symbol power %.2f) "
@@ -843,7 +879,8 @@ skip_gain_report:
                 static int rms_log_enabled = -1;
 
                 if (rms_log_enabled < 0)
-                    rms_log_enabled = (getenv("V34_DATA_FRAME_RMS_LOG") != NULL);
+                    rms_log_enabled = (getenv("V34_DATA_FRAME_RMS_LOG") != NULL)
+                                    && !v34_rx_data_lean();
                 if (rms_log_enabled)
                 {
                     float rms_sum = 0;
@@ -864,7 +901,8 @@ skip_gain_report:
 
                 if (!dump_initialized[dump_index])
                 {
-                    const char *path = getenv("V34_DATA_FRAME_DUMP");
+                    const char *path = v34_rx_data_lean()
+                                     ? NULL : getenv("V34_DATA_FRAME_DUMP");
 
                     dump_initialized[dump_index] = 1;
                     if (path && *path)
