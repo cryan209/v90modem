@@ -13104,7 +13104,7 @@ static float v90_t3_score_offset(v34_rx_state_t *s, float offset)
     recent past at each whole-sample offset and take the one that puts the
     symbols back on the lattice.  A slip is a step, so the recent past is
     already on the far side of it and scores it correctly. */
-static void v90_t3_slip_resync(v34_rx_state_t *s)
+static bool v90_t3_slip_resync(v34_rx_state_t *s)
 {
     float base;
     float best;
@@ -13221,7 +13221,7 @@ static void v90_t3_slip_resync(v34_rx_state_t *s)
         ||
         best > 0.6f*base)
     {
-        return;
+        return false;
     }
     /*endif*/
     /* Take the phase with the timing.  Derotation is by exp(-j*phase), and
@@ -13252,6 +13252,7 @@ static void v90_t3_slip_resync(v34_rx_state_t *s)
              "Rx - V.90 upstream slip of %+.2f sample(s) corrected "
              "(lattice distance %.3f -> %.3f, %d so far)\n",
              best_offset, base, best, s->v90_t3_slips_recovered);
+    return true;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -13580,13 +13581,51 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             if (++s->v90_t3_slip_run >= V34_V90_T3_SLIP_RUN)
             {
                 s->v90_t3_slip_run = 0;
-                v90_t3_slip_resync(s);
+                if (v90_t3_slip_resync(s))
+                {
+                    s->v90_t3_resync_misses = 0;
+                }
+                else if (s->v90_t3_err_base_n >= V34_V90_T3_ERR_BASE_SYMBOLS
+                         && s->v90_t3_sym_err_fast
+                                >= fmaxf(V34_V90_T3_RESYNC_ERR_MIN,
+                                         V34_V90_T3_RESYNC_ERR_MULT
+                                            *s->v90_t3_err_base))
+                {
+                    if (s->v90_t3_resync_misses
+                            < V34_V90_T3_RESYNC_MISSES)
+                    {
+                        s->v90_t3_resync_misses++;
+                    }
+                    /* V.90 9.6 says the digital and analogue receivers shall
+                       maintain data-frame synchronization during the rate
+                       renegotiation.  V.34 11.6 says receiver
+                       resynchronization uses training followed by MP, E and
+                       B1, after which a new superframe begins.  Once the
+                       bounded timing search has failed repeatedly, tell the
+                       engine while the peer can still hear that exchange;
+                       silently shifting mapper/frame state is not conformant
+                       recovery and did not recover the controlled slip. */
+                    if (s->v90_t3_resync_misses
+                            >= V34_V90_T3_RESYNC_MISSES
+                        && !s->v90_t3_resync_required)
+                    {
+                        s->v90_t3_resync_required = true;
+                        span_log(s->logging, SPAN_LOG_WARNING,
+                                 "Rx - V.90 upstream abrupt discontinuity: "
+                                 "%d local timing searches failed; requesting "
+                                 "9.6/11.6 training-and-B1 resynchronization\n",
+                                 s->v90_t3_resync_misses);
+                    }
+                    /*endif*/
+                }
+                /*endif*/
             }
             /*endif*/
         }
         else
         {
             s->v90_t3_slip_run = 0;
+            s->v90_t3_resync_misses = 0;
         }
         /*endif*/
         if (s->v90_t3_recover > 0)
@@ -14351,6 +14390,8 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_err_base = 0.0f;
     s->v90_t3_err_base_n = 0;
     s->v90_t3_lost_run = 0;
+    s->v90_t3_resync_misses = 0;
+    s->v90_t3_resync_required = false;
     s->v90_t3_lost_reported = 0;
     s->v90_t3_sym_err_fast = 0.0f;
     s->v90_t3_shell_frames = 0;
@@ -16385,6 +16426,22 @@ SPAN_DECLARE(void) v34_v90_upstream_clear_carrier_lost(v34_state_t *s)
     /*endif*/
     s->rx.v90_t3_lost_run = 0;
     s->rx.v90_t3_acq_abandoned = false;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_v90_upstream_resync_required(v34_state_t *s)
+{
+    return s && s->rx.v90_t3_acquired && s->rx.v90_t3_resync_required;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_v90_upstream_clear_resync_required(v34_state_t *s)
+{
+    if (!s)
+        return;
+    /*endif*/
+    s->rx.v90_t3_resync_required = false;
+    s->rx.v90_t3_resync_misses = 0;
 }
 /*- End of function --------------------------------------------------------*/
 

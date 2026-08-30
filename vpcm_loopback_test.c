@@ -395,6 +395,7 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law);
 static bool test_v90_v34_rx_stage_isolation(void);
 static bool test_v90_v90cp_upstream_data_reconfiguration(void);
 static bool test_v90_upstream_t3_b1_acquisition(void);
+static bool test_v90_upstream_t3_resync_request(void);
 static bool test_v90_adaptive_ja_acceptance(void);
 static bool test_v90_negotiated_data_rates(v91_law_t law);
 static bool test_v90_spectral_shaping(v91_law_t law);
@@ -5804,6 +5805,100 @@ static bool test_v90_upstream_t3_b1_acquisition(void)
     return true;
 }
 
+/* V.90 §9.6 / V.34 §11.6 do not define resynchronization as a private
+   receiver-state nudge.  They define a training exchange ending in E/B1 and
+   a new superframe.  Prove that an established T/3 receiver reports an
+   abrupt, locally irreparable discontinuity early enough for the engine to
+   open that exchange, rather than waiting for the one-second carrier-loss
+   fallback. */
+static bool test_v90_upstream_t3_resync_request(void)
+{
+    v90_t3_test_bits_t sent = {.state = 0x90B1D47AU};
+    v90_t3_test_bits_t received = {0};
+    v34_state_t *tx = NULL;
+    v34_state_t *rx = NULL;
+    int16_t linear[160];
+    int16_t wire[160];
+    int signalled_block = -1;
+    bool ok = false;
+
+    vpcm_log("Test: V.90 §9.6 early upstream resynchronization request");
+    tx = v34_init(NULL, 3200, 21600, false, true,
+                  v90_t3_test_get_bit, &sent,
+                  vpcm_v34_dummy_put_bit, NULL);
+    rx = v34_init(NULL, 3200, 21600, false, true,
+                  vpcm_v34_dummy_get_bit, NULL,
+                  v90_t3_test_put_bit, &received);
+    if (!tx || !rx)
+        goto done;
+    v34_set_v90_mode(tx, 0);
+    v34_set_v90_mode(rx, 0);
+    v34_set_put_phase4_bit(rx, vpcm_v34_dummy_put_bit, NULL);
+    v34_force_v90_phase4_cp_rx(rx);
+    if (v34_v90_prepare_upstream_data(rx, 4, 0, 21600, 0) != 0
+        || v34_begin_rx_data(rx) != 0
+        || v34_v90_begin_tx_data(tx, 9, 0, 0, 0, NULL) != 0)
+    {
+        fprintf(stderr, "V.90 resync-request setup failed\n");
+        goto done;
+    }
+
+    /* Four seconds beyond B1 is enough to establish the receiver's own
+       3200-symbol clean baseline. */
+    for (int block = 0; block < 240; block++) {
+        int produced = v34_tx(tx, linear, 160);
+
+        if (produced < 0)
+            goto done;
+        for (int i = produced; i < 160; i++)
+            linear[i] = 0;
+        for (int i = 0; i < 160; i++)
+            wire[i] = ulaw_to_linear(linear_to_ulaw(linear[i]));
+        if (v34_rx(rx, wire, 160) != 0)
+            goto done;
+    }
+    if (!v34_v90_upstream_rx_acquired(rx)
+        || v34_v90_upstream_resync_required(rx)
+        || v34_v90_upstream_carrier_lost(rx))
+    {
+        fprintf(stderr, "V.90 resync-request clean baseline was not healthy\n");
+        goto done;
+    }
+
+    /* Samples with no continuation under any local timing offset.  The event
+       must precede carrier_lost, proving the protocol exchange can start
+       while the peer may still hear Rd. */
+    memset(wire, 0, sizeof(wire));
+    for (int block = 0; block < 20; block++) {
+        if (v34_rx(rx, wire, 160) != 0)
+            goto done;
+        if (v34_v90_upstream_resync_required(rx)) {
+            signalled_block = block;
+            break;
+        }
+    }
+    if (signalled_block < 0 || v34_v90_upstream_carrier_lost(rx)) {
+        fprintf(stderr,
+                "V.90 resync request was not early (block=%d carrier_lost=%d)\n",
+                signalled_block, v34_v90_upstream_carrier_lost(rx));
+        goto done;
+    }
+    v34_v90_upstream_clear_resync_required(rx);
+    if (v34_v90_upstream_resync_required(rx)) {
+        fprintf(stderr, "V.90 resync request did not clear\n");
+        goto done;
+    }
+    ok = true;
+    vpcm_log("PASS: V.90 resync requested after %d ms, before carrier loss",
+             (signalled_block + 1)*20);
+done:
+    if (tx)
+        v34_free(tx);
+    if (rx)
+        v34_free(rx);
+    return ok;
+}
+
 static void vpcm_packed_bits_to_str(const uint8_t *buf, int bit_count, char *out, size_t out_size)
 {
     int i;
@@ -10638,6 +10733,7 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_v90cp_upstream_data_reconfiguration()
         && test_v90_adaptive_ja_acceptance()
         && test_v90_upstream_t3_b1_acquisition()
+        && test_v90_upstream_t3_resync_request()
         && test_v92_ja_strict_descriptor_parsing()
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ULAW)
         && test_v90_dil_generation_matches_section_8_4_1(V91_LAW_ALAW)

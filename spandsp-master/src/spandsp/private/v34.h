@@ -128,6 +128,15 @@
     burst, and short against the 48 s this link runs clean for. */
 #define V34_V90_T3_LOST_ERR                 0.55f
 #define V34_V90_T3_LOST_SYMBOLS             3200
+/*! A discontinuity is reported before the one-second carrier-loss timer when
+    this many consecutive early slip searches cannot find a viable local
+    timing solution.  Three 48-symbol windows are about 45 ms at 3200 baud:
+    long enough to reject an isolated burst, but early enough to begin the
+    V.90 9.6 / V.34 11.6 training-and-B1 resynchronization while the peer can
+    still decode its opener. */
+#define V34_V90_T3_RESYNC_MISSES            3
+#define V34_V90_T3_RESYNC_ERR_MIN           0.50f
+#define V34_V90_T3_RESYNC_ERR_MULT          2.0f
 /*! The same three figures for the plain V.34 data mode, which had no read on
     its own health at all.  Same threshold and the same reasoning: 2/3 is the
     mean squared distance for symbols bearing no relation to 9.x's odd-integer
@@ -1190,6 +1199,15 @@ typedef struct
         renegotiation ends in a fresh B1, which is what this receiver
         acquires against in the first place. */
     int v90_t3_lost_run;
+    /*! Consecutive failed local timing searches after a settled receiver
+        suffers an abrupt constellation step, and the sticky event handed to
+        the engine.  V.90 9.6 requires data-frame synchronization through
+        rate renegotiation; V.34 11.6 defines receiver resynchronization as a
+        training/MP/E exchange ending in a fresh B1 and superframe.  A blind
+        local state shift is therefore only a bounded first aid, not the
+        protocol recovery. */
+    int v90_t3_resync_misses;
+    bool v90_t3_resync_required;
 
     /* Set when B1 acquisition has run out of windows and there is no
        upstream at all for the rest of the call.  V.90 9.5.1.1 is the only

@@ -2834,14 +2834,12 @@ static int me_v90_max_renegotiations(void)
  * implements the clause.  Fixed in v90.c; the same recording now produces
  * 384T + 24T exactly.
  *
- * Still off by default only because it is UNVERIFIED against a real peer:
- * a recording's peer behaves as recorded whatever we transmit, so the fix is
- * proven conformant and not yet proven answered.  Turn it on with
- * ME_V90_RENEG=1, and use ME_V90_RENEG_AFTER_MS to provoke one on a healthy
- * call (tools/soak/v90_reneg_probe.sh).  Note the peer DOES implement the
- * V.34 §11.6 form -- verified live, it answered our S, renegotiated 9600 ->
- * 12000 and kept LAPM up -- so there is now no evidence for the old
- * assumption at all. */
+ * The repaired exchange is now verified against the SmartLink peer: all
+ * healthy probe-triggered attempts completed.  This broad knob remains off
+ * because chronic carrier-loss triggers mostly started too late and spent
+ * downstream without restoring the upstream.  Abrupt discontinuities have
+ * their own standards-required early path below and do not depend on this
+ * broad loss policy.  ME_V90_RENEG_AFTER_MS remains the healthy-call probe. */
 static int me_v90_reneg_enabled(void)
 {
     static int cached = -1;
@@ -8518,6 +8516,37 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
             (void) v90_request_rate_renegotiation(g_v90);
         }
 
+        /* A receiver that was settled and then stepped abruptly off the
+         * constellation gets one bounded local timing search.  If that
+         * cannot find a viable solution, do not wait for the one-second
+         * carrier-loss timer: by then the analogue modem may no longer
+         * decode Rd.  V.90 §9.6 permits renegotiation at any time in DATA,
+         * requires both sides to preserve data-frame synchronization, and
+         * starts the actual signal on the next data-frame boundary below.
+         * V.34 §11.6 explicitly defines this exchange as receiver
+         * resynchronization: training, MP/E, B1, then a new superframe.
+         *
+         * This narrow trigger is mandatory protocol recovery, independent
+         * of ME_V90_RENEG, which only governs the broad chronic-loss policy.
+         * It is bounded by the same per-call cap so a bad line cannot spend
+         * the whole call renegotiating. */
+        if (g_v34 && v34_v90_upstream_resync_required(g_v34)
+            && !v90_rate_renegotiation_active(g_v90)
+            && !v90_rate_renegotiation_pending(g_v90)) {
+            if (v90_rate_renegotiation_count(g_v90)
+                    < ME_V90_MAX_RENEGOTIATIONS) {
+                ME_LOG("[ME] V.90 upstream discontinuity; requesting early "
+                       "§9.6/§11.6 training-and-B1 resynchronization\n");
+                trace_phase("V90 upstream discontinuity resync");
+                (void) v90_request_rate_renegotiation(g_v90);
+            } else {
+                ME_LOG("[ME] V.90 upstream discontinuity; §9.6 per-call cap "
+                       "reached\n");
+            }
+            v34_v90_upstream_clear_resync_required(g_v34);
+            v34_v90_upstream_clear_carrier_lost(g_v34);
+        }
+
         /* Has the upstream lost carrier?  §9.6 allows a rate renegotiation
          * "at any time during data mode", and it is the only recovery with
          * the reach this needs: it ends in a fresh B1 from the analogue
@@ -8527,7 +8556,8 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
          * recovers the constellation after one of this peer's one-sample
          * timing slips (docs/v90_upstream_data_path.md). */
         if (g_v34 && v34_v90_upstream_carrier_lost(g_v34)
-            && !v90_rate_renegotiation_active(g_v90)) {
+            && !v90_rate_renegotiation_active(g_v90)
+            && !v90_rate_renegotiation_pending(g_v90)) {
             if (me_v90_reneg_enabled()
                 && v90_rate_renegotiation_count(g_v90) < ME_V90_MAX_RENEGOTIATIONS) {
                 ME_LOG("[ME] V.90 upstream carrier lost; requesting a §9.6 "
@@ -8603,11 +8633,17 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                            "answer to Rd before the CP search\n");
                     trace_phase("V90 reneg watching for peer S");
                 }
-                /* The analogue modem's answer ends in a fresh B1, so let the
-                 * upstream receiver acquire it exactly as it did at startup
-                 * rather than carrying the state that just failed. */
-                g_v34_upstream_data_armed = false;
-                g_v90_upstream_e_run = 0;
+                /* The analogue modem's answer ends in a fresh E/B1, so let
+                 * the upstream receiver acquire it exactly as it did at
+                 * startup rather than carrying the state that just failed.
+                 * Reset STARTED as well as ARMED: §9.6.1.2.3 puts E/B1 after
+                 * CP', and v90_live_cp_bit() deliberately ignores E while
+                 * STARTED remains true.  Leaving the pre-renegotiation value
+                 * set completed the downstream exchange but stranded the
+                 * upstream receiver forever in V90_CP. */
+                v90_reset_upstream_data_arming();
+                if (g_v34)
+                    v34_v90_upstream_clear_resync_required(g_v34);
                 if (g_v34)
                     v34_v90_upstream_clear_carrier_lost(g_v34);
             }

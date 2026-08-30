@@ -1544,3 +1544,66 @@ fourth-power metrics on this waveform are a trap. So "the slews are on the
 wire" still rests on elimination inside the receiver (AGC, carrier NCO,
 symbol clock and equalizer taps all provably static across them) and not on an
 independent measurement of the wire.
+
+### Resynchronization is an exchange, not a receiver nudge (2026-08-30)
+
+The controlled one-sample replay finally makes the architectural error plain.
+The receiver notices the step within 48 symbols and searches every locally
+applicable timing offset. None produces a viable constellation: the first
+post-step profile has a base distance of 0.310 and candidates at 0.62–0.74;
+later profiles settle at the white level. It then spends a full second proving
+`carrier_lost`, by which time the peer may no longer decode the recovery
+opener. Restoring the old equalizer 132 times does not recover it.
+
+The specifications do not promise that a private timing or mapper-state shift
+can resynchronize this channel:
+
+* V.90 §9.6 permits rate renegotiation at any time in DATA, requires both
+  receivers to maintain data-frame synchronization during it, and requires a
+  digital-originated exchange to begin on a data-frame boundary. The analogue
+  answer contains S/S-bar, optional SCR, CP/CP′, E and B1.
+* V.34 §11.6 explicitly says the rate-renegotiation procedure may be used to
+  resynchronize the receiver. It uses training followed by MP/E/B1, and after
+  B1 begins a new superframe. V.34 §12.5 uses the same principle for primary-
+  channel resynchronization: S/S-bar, PP, B1, then data.
+
+So the local timing search remains bounded first aid, but a settled receiver
+whose error steps to at least 0.50 and twice its baseline now reports a sticky
+protocol-resync event after three failed 48-symbol searches. The engine acts
+on it immediately, independently of the broad `ME_V90_RENEG` chronic-loss
+policy, and queues the existing §9.6 exchange. `v90.c` still enforces the
+required data-frame boundary. The per-call renegotiation cap still bounds a
+line that repeatedly collapses.
+
+The synthetic T/3 regression establishes a clean baseline, feeds a sustained
+discontinuity with no valid local continuation, and sees the event after
+**60 ms**, before the one-second carrier-loss flag. On the recorded slmodemd
+one-sample injection, the same event now appears before `carrier_lost`; the
+old binary only reached the latter. A replay cannot complete the exchange
+because its peer waveform is immutable, so completion was checked separately
+on the live rig.
+
+The first live call exposed a second, independent seam bug. The peer detected
+the renegotiation, sent CP/CP′/E/B1 and returned to DATA, and our downstream
+exchange completed, but the upstream T/3 receiver stayed in `V90_CP`.
+`g_v34_upstream_data_armed` had been cleared at renegotiation start while
+`g_v34_upstream_data_started` retained its pre-renegotiation `true`. After
+CP′ re-armed the receiver, `v90_live_cp_bit()` therefore ignored the new E by
+design and never called `v34_begin_rx_data()`. The §9.6 start now uses the
+same full arming reset as startup, including `started=false`.
+
+**Live result after that fix:** a 105-second SmartLink call with
+`ME_RX_CLOCK_SLIP=1` introduced four receive-path sample discontinuities. The
+first three all completed bilaterally before the scheduled teardown:
+
+1. abrupt-discontinuity event and §9.6 request on the next data-frame boundary;
+2. peer log: `rate renegotiation detected`, CP, CP′, return to Data Phase;
+3. our log: upstream E detected, a new T/3 B1 acquired at 100% fit, new settled
+   constellation baseline;
+4. downstream `Rate renegotiation N complete` after B1d.
+
+The fourth exchange began in the final seconds and was cut off by the harness,
+not by a protocol timeout. The call delivered 4,341 intact upstream pattern
+lines and 39,026 downstream lines. This is the first controlled proof here
+that a one-sample receive discontinuity leads all the way through the
+specification's resynchronization exchange to a fresh upstream B1, repeatedly.

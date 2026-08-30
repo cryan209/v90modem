@@ -653,6 +653,20 @@ SPAN_DECLARE(int) v34_v90_upstream_carrier_lost(v34_state_t *s);
     \param s The V.34 context. */
 SPAN_DECLARE(void) v34_v90_upstream_clear_carrier_lost(v34_state_t *s);
 
+/*! Has an established V.90 upstream receiver suffered an abrupt
+    discontinuity which its bounded local timing search cannot repair?
+    V.90 9.6 and V.34 11.6 require the actual receiver resynchronization to
+    use the training exchange ending in E/B1, with a new superframe.
+    This event is intentionally earlier and narrower than carrier_lost.
+    \param s The V.34 context.
+    \return non-zero if the engine should request protocol resynchronization. */
+SPAN_DECLARE(int) v34_v90_upstream_resync_required(v34_state_t *s);
+
+/*! Clear a reported abrupt-discontinuity resynchronization request after the
+    engine has accepted it.
+    \param s The V.34 context. */
+SPAN_DECLARE(void) v34_v90_upstream_clear_resync_required(v34_state_t *s);
+
 /*! Read internal V.90 upstream resampler accounting.  Both counts are DSP-side
     diagnostics; the external bearer remains an 8 kHz stream. */
 SPAN_DECLARE(void) v34_v90_upstream_sample_counts(v34_state_t *s,
