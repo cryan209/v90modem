@@ -51,6 +51,17 @@ enum
     V32BIS_RATE_4800 = 0x0020
 };
 
+/* State labels used by the V.32bis section 5.2 conditioning signal.  Their
+   numeric values are also the Table 1 differential states used for startup
+   words. */
+enum
+{
+    V32BIS_STARTUP_A = 0,
+    V32BIS_STARTUP_B = 1,
+    V32BIS_STARTUP_D = 2,
+    V32BIS_STARTUP_C = 3
+};
+
 /*!
     V.32bis modem descriptor. This defines the working state for a single instance
     of a V.32bis modem.
@@ -141,6 +152,43 @@ SPAN_DECLARE(void) v32bis_tx_power(v32bis_state_t *s, float power);
     \param rates The bit rate mask
     \return 0 for OK, -1 for bad parameter. */
 SPAN_DECLARE(int) v32bis_set_supported_bit_rates(v32bis_state_t *s, int rates);
+
+/*! Build or decode the Table 5 rate signal. */
+SPAN_DECLARE(int) v32bis_build_rate_signal(int rates, uint16_t *word);
+SPAN_DECLARE(int) v32bis_decode_rate_signal(uint16_t word, int *rates);
+
+/*! Build or decode the Table 6 E signal. */
+SPAN_DECLARE(int) v32bis_build_e_signal(int bit_rate, uint16_t *word);
+SPAN_DECLARE(int) v32bis_decode_e_signal(uint16_t word, int *bit_rate);
+
+/*! Select the highest rate present in both Table 5 masks, or zero when the
+    modems have no common rate. */
+SPAN_DECLARE(int) v32bis_select_common_rate(int local_rates, int remote_rates);
+
+/*! Generate section 5.2's S, S-bar and TRN conditioning states.  `states`
+    must hold 272 + trn_symbols entries.  The returned scrambler and
+    differential state are the state at the TRN-to-rate-word handoff. */
+SPAN_DECLARE(int) v32bis_build_conditioning(bool calling_party,
+                                             int trn_symbols,
+                                             uint8_t states[],
+                                             uint32_t *scrambler_register,
+                                             int *diff_state);
+
+/*! Scramble and Table-1 encode one 16-bit startup word, least-significant
+    bit first.  `scrambler_register` and `diff_state` are updated in place. */
+SPAN_DECLARE(int) v32bis_encode_startup_word(bool calling_party,
+                                             uint16_t word,
+                                             uint32_t *scrambler_register,
+                                             int *diff_state,
+                                             uint8_t states[8]);
+
+/*! Invert `v32bis_encode_startup_word` for a received R or E word.  The
+    calling-party argument describes the remote transmitter. */
+SPAN_DECLARE(int) v32bis_decode_startup_word(bool calling_party,
+                                             const uint8_t states[8],
+                                             uint32_t *descrambler_register,
+                                             int *diff_state,
+                                             uint16_t *word);
 
 /*! Report the current operating bit rate of a V.32bis modem context.
     \brief Report the current operating bit rate of a V.22bis modem context

@@ -53,12 +53,19 @@ initialisation and restart behaviour at 4800, 7200, 9600, 12000 and 14400
 bit/s, supported-rate validation, signal-cutoff forwarding, and waveform
 output from the inherited V.17 modulation core.
 
-This is infrastructure, not a working modem claim. `v32bis_tx()` and
-`v32bis_rx()` still delegate directly to V.17, the V.32bis startup/rate
-exchange has not been connected to them, and the allocated echo canceller is
-not yet in the sample path. The next native milestone is to drive the
-Table 5/Table 6 rate words and the startup traces already validated by the
-Python reference through this C datapump.
+The clause-level startup logic is now native too. SpanDSP builds and validates
+Table 5 R1/R2/R3 words, builds and validates the one-rate Table 6 E word,
+selects the highest common rate, generates §5.2's 256T S / 16T S-bar / TRN
+conditioning stream with the direction-specific scrambler, and encodes and
+decodes startup words through Table 1 while carrying the TRN handoff state.
+The native regression is pinned bit-for-bit to the Python reference for both
+caller and answerer, including final scrambler and differential states.
+
+This is still infrastructure, not a working modem claim. `v32bis_tx()` and
+`v32bis_rx()` still delegate directly to V.17; the new startup symbols are not
+yet feeding the V.17 pulse shaper or recovered from its equalizer, and the
+allocated echo canceller is not yet in the sample path. The next native seam
+is therefore symbol-domain TX/RX handoff, not more startup bit logic.
 
 `make v32bis-test` runs the native smoke test plus all Python reference,
 SpanDSP-comparison, waveform, and datapump tests.

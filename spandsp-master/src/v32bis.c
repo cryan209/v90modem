@@ -159,21 +159,295 @@ SPAN_DECLARE(void) v32bis_set_put_bit(v32bis_state_t *s, span_put_bit_func_t put
 }
 /*- End of function --------------------------------------------------------*/
 
+#define V32BIS_VALID_RATE_MASK   (V32BIS_RATE_14400 | V32BIS_RATE_12000 \
+                                | V32BIS_RATE_9600 | V32BIS_RATE_7200 \
+                                | V32BIS_RATE_4800)
+#define V32BIS_RATE_FIXED_BITS   0x0190
+#define V32BIS_RATE_SYNC_MASK    0x888F
+#define V32BIS_RATE_SYNC_VALUE   0x0080
+#define V32BIS_E_FIXED_BITS      0x899F
+#define V32BIS_E_SYNC_MASK       0xE99F
+#define V32BIS_S_SYMBOLS         256
+#define V32BIS_S_BAR_SYMBOLS     16
+#define V32BIS_SCRAMBLER_MASK    0x7FFFFF
+
+static bool valid_rate_mask(int rates)
+{
+    return (rates & V32BIS_VALID_RATE_MASK) != 0
+        && (rates & ~V32BIS_VALID_RATE_MASK) == 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int rate_to_mask(int bit_rate)
+{
+    switch (bit_rate)
+    {
+    case 4800:
+        return V32BIS_RATE_4800;
+    case 7200:
+        return V32BIS_RATE_7200;
+    case 9600:
+        return V32BIS_RATE_9600;
+    case 12000:
+        return V32BIS_RATE_12000;
+    case 14400:
+        return V32BIS_RATE_14400;
+    default:
+        return 0;
+    }
+    /*endswitch*/
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_build_rate_signal(int rates, uint16_t *word)
+{
+    if (word == NULL  ||  !valid_rate_mask(rates))
+        return -1;
+    /* ITU-T V.32bis Table 5.  Bits 4 and 8 advertise V.32 operation at
+       4800 and 9600 bit/s; this implementation supports both. */
+    *word = (uint16_t) (V32BIS_RATE_FIXED_BITS | rates);
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_decode_rate_signal(uint16_t word, int *rates)
+{
+    int decoded;
+
+    if (rates == NULL  ||  (word & V32BIS_RATE_SYNC_MASK) != V32BIS_RATE_SYNC_VALUE)
+        return -1;
+    decoded = word & V32BIS_VALID_RATE_MASK;
+    if (!valid_rate_mask(decoded))
+        return -1;
+    *rates = decoded;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_build_e_signal(int bit_rate, uint16_t *word)
+{
+    int rate;
+
+    if (word == NULL  ||  (rate = rate_to_mask(bit_rate)) == 0)
+        return -1;
+    /* ITU-T V.32bis Table 6 requires exactly one selected rate. */
+    *word = (uint16_t) (V32BIS_E_FIXED_BITS | rate);
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_decode_e_signal(uint16_t word, int *bit_rate)
+{
+    int rates;
+
+    if (bit_rate == NULL  ||  (word & V32BIS_E_SYNC_MASK) != V32BIS_E_FIXED_BITS)
+        return -1;
+    rates = word & V32BIS_VALID_RATE_MASK;
+    switch (rates)
+    {
+    case V32BIS_RATE_4800:
+        *bit_rate = 4800;
+        break;
+    case V32BIS_RATE_7200:
+        *bit_rate = 7200;
+        break;
+    case V32BIS_RATE_9600:
+        *bit_rate = 9600;
+        break;
+    case V32BIS_RATE_12000:
+        *bit_rate = 12000;
+        break;
+    case V32BIS_RATE_14400:
+        *bit_rate = 14400;
+        break;
+    default:
+        return -1;
+    }
+    /*endswitch*/
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_select_common_rate(int local_rates, int remote_rates)
+{
+    int common;
+
+    if (!valid_rate_mask(local_rates)  ||  !valid_rate_mask(remote_rates))
+        return 0;
+    common = local_rates & remote_rates;
+    if (common & V32BIS_RATE_14400)
+        return 14400;
+    if (common & V32BIS_RATE_12000)
+        return 12000;
+    if (common & V32BIS_RATE_9600)
+        return 9600;
+    if (common & V32BIS_RATE_7200)
+        return 7200;
+    if (common & V32BIS_RATE_4800)
+        return 4800;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int startup_scramble_bit(uint32_t *reg, int tap, int input)
+{
+    int output;
+
+    output = (input ^ (*reg >> tap) ^ (*reg >> 22)) & 1;
+    *reg = ((*reg << 1) | (uint32_t) output) & V32BIS_SCRAMBLER_MASK;
+    return output;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_build_conditioning(bool calling_party,
+                                             int trn_symbols,
+                                             uint8_t states[],
+                                             uint32_t *scrambler_register,
+                                             int *diff_state)
+{
+    uint32_t reg;
+    int tap;
+    int i;
+    int b0;
+    int b1;
+    int state;
+
+    if (states == NULL  ||  scrambler_register == NULL  ||  diff_state == NULL
+        ||  trn_symbols < 256)
+        return -1;
+    for (i = 0;  i < V32BIS_S_SYMBOLS;  i++)
+        states[i] = (i & 1) ? V32BIS_STARTUP_B : V32BIS_STARTUP_A;
+    for (i = 0;  i < V32BIS_S_BAR_SYMBOLS;  i++)
+        states[V32BIS_S_SYMBOLS + i] = (i & 1) ? V32BIS_STARTUP_D : V32BIS_STARTUP_C;
+
+    /* ITU-T V.32bis section 5.2.3 initializes TRN's scrambler to zero. */
+    reg = 0;
+    tap = calling_party ? 17 : 4;
+    state = V32BIS_STARTUP_A;
+    for (i = 0;  i < trn_symbols;  i++)
+    {
+        b0 = startup_scramble_bit(&reg, tap, 1);
+        b1 = startup_scramble_bit(&reg, tap, 1);
+        if (i < 256)
+            state = b0 ? V32BIS_STARTUP_C : V32BIS_STARTUP_A;
+        else
+            state = b0 | (b1 << 1);
+        states[V32BIS_S_SYMBOLS + V32BIS_S_BAR_SYMBOLS + i] = (uint8_t) state;
+    }
+    /* Section 6.1 derives the differential state from the last TRN state.
+       The normal-startup scrambler carry is the explicit project policy in
+       docs/v32bis_compliance_plan.md; renegotiation resets it instead. */
+    *scrambler_register = reg;
+    *diff_state = state;
+    return V32BIS_S_SYMBOLS + V32BIS_S_BAR_SYMBOLS + trn_symbols;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_encode_startup_word(bool calling_party,
+                                             uint16_t word,
+                                             uint32_t *scrambler_register,
+                                             int *diff_state,
+                                             uint8_t states[8])
+{
+    static const uint8_t differential_encoder[4][4] =
+    {
+        {2, 3, 0, 1},
+        {0, 2, 1, 3},
+        {3, 1, 2, 0},
+        {1, 0, 3, 2}
+    };
+    uint32_t reg;
+    int tap;
+    int state;
+    int i;
+    int b0;
+    int b1;
+
+    if (scrambler_register == NULL  ||  diff_state == NULL  ||  states == NULL
+        ||  *diff_state < 0  ||  *diff_state > 3)
+        return -1;
+    reg = *scrambler_register & V32BIS_SCRAMBLER_MASK;
+    tap = calling_party ? 17 : 4;
+    state = *diff_state;
+    for (i = 0;  i < 8;  i++)
+    {
+        b0 = startup_scramble_bit(&reg, tap, (word >> (2*i)) & 1);
+        b1 = startup_scramble_bit(&reg, tap, (word >> (2*i + 1)) & 1);
+        state = differential_encoder[state][b0 | (b1 << 1)];
+        states[i] = (uint8_t) state;
+    }
+    *scrambler_register = reg;
+    *diff_state = state;
+    return 8;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int startup_descramble_bit(uint32_t *reg, int tap, int input)
+{
+    int output;
+
+    output = (input ^ (*reg >> tap) ^ (*reg >> 22)) & 1;
+    *reg = ((*reg << 1) | (uint32_t) (input & 1)) & V32BIS_SCRAMBLER_MASK;
+    return output;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_decode_startup_word(bool calling_party,
+                                             const uint8_t states[8],
+                                             uint32_t *descrambler_register,
+                                             int *diff_state,
+                                             uint16_t *word)
+{
+    /* Table 1's 4800 bit/s differential transform is self-inverse when each
+       row is indexed by the received state. */
+    static const uint8_t differential_decoder[4][4] =
+    {
+        {2, 3, 0, 1},
+        {0, 2, 1, 3},
+        {3, 1, 2, 0},
+        {1, 0, 3, 2}
+    };
+    uint32_t reg;
+    uint16_t decoded;
+    int tap;
+    int previous;
+    int dibit;
+    int i;
+    int b0;
+    int b1;
+
+    if (states == NULL  ||  descrambler_register == NULL  ||  diff_state == NULL
+        ||  word == NULL  ||  *diff_state < 0  ||  *diff_state > 3)
+        return -1;
+    reg = *descrambler_register & V32BIS_SCRAMBLER_MASK;
+    tap = calling_party ? 17 : 4;
+    previous = *diff_state;
+    decoded = 0;
+    for (i = 0;  i < 8;  i++)
+    {
+        if (states[i] > 3)
+            return -1;
+        dibit = differential_decoder[previous][states[i]];
+        previous = states[i];
+        b0 = startup_descramble_bit(&reg, tap, dibit & 1);
+        b1 = startup_descramble_bit(&reg, tap, (dibit >> 1) & 1);
+        decoded |= (uint16_t) (b0 << (2*i));
+        decoded |= (uint16_t) (b1 << (2*i + 1));
+    }
+    *descrambler_register = reg;
+    *diff_state = previous;
+    *word = decoded;
+    return 8;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v32bis_set_supported_bit_rates(v32bis_state_t *s, int rates)
 {
-    const int valid_rates = V32BIS_RATE_14400
-                          | V32BIS_RATE_12000
-                          | V32BIS_RATE_9600
-                          | V32BIS_RATE_7200
-                          | V32BIS_RATE_4800;
+    uint16_t word;
 
-    if ((rates & valid_rates) == 0  ||  (rates & ~valid_rates) != 0)
+    if (v32bis_build_rate_signal(rates, &word) != 0)
         return -1;
-    /* ITU-T V.32bis Table 5: R1/R2/R3 use the rate-signal framing bits
-       around the enabled-rate field. */
-    s->permitted_rates_signal = (rates & valid_rates) | 0x8990;
-    /* Rate signal sync test is (value & 0x888F) == 0x8880.
-       E signal sync test is (value & 0x888F) == 0x888F. */
+    s->permitted_rates_signal = word;
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
