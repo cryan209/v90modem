@@ -464,3 +464,102 @@ If you want this mapping to become operational rather than documentary:
 4. Correlate them with `modem_engine` state transitions and the existing `trace_phase(...)` output.
 
 That will give a much cleaner view of where a call is failing than the current single `ME_TRAINING` bucket.
+
+## Which stage machinery is load-bearing (2026-08-31)
+
+The document above repeatedly names TRN hypothesis formation and MP hypothesis
+lock as the interesting seams. This section records what happens when each is
+withheld, because the answer is not what reading the code suggests.
+
+The reasoning that makes them look removable is sound as far as it goes: for
+V.90 CP and for plain V.34 MP alike, the decode has no free parameters. The
+domain is differential, the dibit transform is the fixed negation, the
+scrambler is the analogue modem's GPA (tap 4) and the bit order is `b0,b1` --
+all fixed by §8.5.2/§10.1.3.3 and the ordering of `training_constellation_4`,
+not by the channel. That argument is *correct*, and it is what made §9.6's
+streamed CP work where the searched path recovered nothing (`valid=6` against
+`valid=0` with 91 sync candidates and zero CRC rejects). The mistake is
+concluding that the search machinery is therefore dead weight everywhere.
+
+Three knobs, each default at current behaviour, each withholding one thing:
+
+| knob | withholds | result |
+| --- | --- | --- |
+| `ME_V90_CP_STREAM_STARTUP=1` | the 24-hypothesis search at *startup* CP, streaming instead as §9.6 does | §11.6 row 2400/9600/ulaw returns **24 post-renegotiation bit errors** on the answerer against 0, reproducibly; caller resync restarts 5 → 12 |
+| `ME_V34_TRN_HINT=0` | `phase4_trn_lock_*`, produced by `PHASE4_TRN` | plain V.34 **does not train at all** -- `trained=0/0`, zero bits, 60 s timeout, at 3200/21600 as well as 2400/9600 |
+| `ME_V34_J_HINT=0` | `phase3_j_lock_hyp`, produced by `PHASE3_WAIT_S` | no change anywhere available: `make test` green, `v90_engine_replay` of `artifacts/reneg-eq/reneg-r1` line-for-line identical, both duplex rows unchanged |
+
+The MP stage chooses between the two hints with
+
+```c
+hint_h = mp_phase4_has_pinned_trn_lock(s) ? s->phase4_trn_lock_hyp
+                                          : s->phase3_j_lock_hyp;
+```
+
+so the 2×2 isolates them. On `v34_duplex_test 2400 9600 ulaw`:
+
+| | | |
+| --- | --- | --- |
+| TRN=1 J=1 | `trained=1/1 rx_bits=16480/16096 errors=0/0` | |
+| TRN=1 J=0 | `trained=1/1 rx_bits=16480/16096 errors=0/0` | identical |
+| TRN=0 J=1 | `trained=0/0`, 60 s timeout | |
+| TRN=0 J=0 | `trained=0/0`, 60 s timeout | identical |
+
+**`PHASE4_TRN`'s hint is what makes MP lock.** With the TRN lock present the J
+hint is not consulted; with it absent the J hint *is* consulted and does not
+rescue anything. So the J hint is never decisive on any path in the suite or on
+that recording.
+
+State that as measured, though: **never decisive in available coverage**, not
+*dead*. It exists for a call whose TRN does not lock, and nothing here produces
+one -- `ME_V34_TRN_HINT=0` produces that condition artificially but also
+prevents training, so it cannot distinguish "the fallback is useless" from
+"the fallback cannot work alone". Settling it needs a live call whose Phase 4
+TRN fails to lock while the rest of the handshake survives. Until then
+`PHASE3_WAIT_S` is the only reduction candidate in the receiver that has not
+been refuted, and it is not confirmed either.
+
+### The trap, three times over
+
+Each of these changes passes the metric belonging to the stage it changes, and
+is caught only by a system-level test:
+
+- streaming startup CP leaves the **CP receive itself byte-identical** --
+  `vpcm_loopback_test` reports `sync=10 valid=5 rejected=4 (crc=1 structure=3)
+  accepted=1/1/0 rx_data=1` either way, differing only in delivering 6242 bits
+  against 6240 -- and breaks a §11.6 row;
+- withholding the TRN hint leaves that **same CP receive line byte-identical**,
+  because the V.90 native path does not use the V.34 MP hint, while plain V.34
+  stops dead;
+- and in `V34_RX_STAGE_DATA`, `v90_t3_sym_err_ema`/`_fast` and the
+  `V34_V90_T3_DIVERGED_POWER` branch sit *inside* the reporting block and read
+  exactly like instrumentation, while gating the timing loop, the DD-LMS, the
+  carrier loop, and the equalizer restore.
+
+For contrast, the one reduction that did hold: `ME_V90_DATA_LEAN=1` drops the
+measurement from `V34_RX_STAGE_DATA` -- the 33-trial per-symbol gain sweep, the
+`err_sum`/`sig_sum` accumulation behind "distance to grid", the B1-era
+distance, and the file dumps -- and is identical over 1423 + 578 + 1620 windows
+on three recordings plus four plain-V.34 duplex rows. That stage was
+measurement wrapped around a decoder. These three are not.
+
+### Consequence for an embedded port
+
+`v34rx.c` will not shrink much by stripping stages: of the four large cases,
+only `V34_RX_STAGE_DATA` reduced, `V34_RX_STAGE_V90_CP` and
+`V34_RX_STAGE_PHASE4_TRN` are refuted by measurement, and
+`V34_RX_STAGE_PHASE3_WAIT_S` is unsettled. The hypothesis machinery is the
+receiver, not scaffolding around it. Savings for a small target have to come
+from the layers around it instead -- pjproject, the fax half of SpanDSP
+(`t30`/`t31`/`t4`/`t38`/`at_interpreter`/`v150_1`/`v18` alone are ~29k lines),
+and `v34tx.c`'s data-mode mapper, which the V.90 digital role never uses
+because Phase 3 and Phase 4 are PCM codewords rather than modulation.
+
+Lifting a stage to its own translation unit is a separate question from
+reducing it, and the two do not have the same answer. `V34_RX_STAGE_DATA` is
+now `v34rx_data.c`; `PHASE3_WAIT_S` and `PHASE4_TRN` would lift as cleanly
+(both are self-contained -- they write `ang1/2/3`, `data_bits` and
+`phase3_abs_bits` themselves and read no enclosing local), but
+`V34_RX_STAGE_V90_CP` would not: it is the hub of the MP family, with 18
+helpers private to it and 22 more shared with other stages that would have to
+become external symbols in `libspandsp`.
