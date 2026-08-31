@@ -15,6 +15,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include <math.h>
 
 #include "spandsp.h"
 
@@ -98,9 +99,14 @@ int main(int argc, char *argv[])
     if (getenv("V34_HDX_LOG"))
     {
         span_log_set_level(v34_get_logging_state(call_modem),
-                           SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL | SPAN_LOG_FLOW);
+                           SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_TAG | SPAN_LOG_FLOW);
         span_log_set_level(v34_get_logging_state(answ_modem),
-                           SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL | SPAN_LOG_FLOW);
+                           SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_TAG | SPAN_LOG_FLOW);
+        /* Both modems log to the same stderr. Without distinct tags the two
+           are indistinguishable, and a diagnostic read off the wrong one sends
+           the investigation after a fault that is not there. */
+        span_log_set_tag(v34_get_logging_state(call_modem), "SRC");
+        span_log_set_tag(v34_get_logging_state(answ_modem), "RCP");
     }
 
     for (block = 0;  block < blocks;  block++)
@@ -114,6 +120,23 @@ int main(int argc, char *argv[])
         v34_rx(answ_modem, answ_rx, BLOCK_SAMPLES);
         v34_rx(call_modem, call_rx, BLOCK_SAMPLES);
 
+        if (getenv("V34_HDX_RMS"))
+        {
+            double e = 0.0;
+            double f = 0.0;
+            int k;
+
+            for (k = 0;  k < BLOCK_SAMPLES;  k++)
+            {
+                e += (double) call_tx[k]*call_tx[k];
+                f += (double) answ_tx[k]*answ_tx[k];
+            }
+            printf("  %7.3fs  src tx rms %8.1f  rcp tx rms %8.1f  (src stage %d)\n",
+                   block*BLOCK_SAMPLES/8000.0,
+                   sqrt(e/BLOCK_SAMPLES), sqrt(f/BLOCK_SAMPLES),
+                   v34_get_tx_stage(call_modem));
+        }
+        /*endif*/
         if (getenv("V34_HDX_STAGES"))
         {
             static int p_ct = -1, p_at = -1, p_cr = -1, p_ar = -1;

@@ -5192,8 +5192,17 @@ static int info0_target_bits(v34_rx_state_t *s)
 {
     /* Payload+CRC length of an INFO0 sequence, excluding the sync code, the
        fill bits and the postamble.  Matches the value v34_rx_restart() picks
-       when the receiver is first conditioned for INFO0. */
-    return (s->duplex)  ?  (49 - (4 + 8 + 4))  :  (51 - (4 + 8 + 4));
+       when the receiver is first conditioned for INFO0.
+
+       INFO0 is 49 bits (Table 7, bits 0:48) in BOTH modes: V.34 10.2.2 says
+       the Phase 2 signals for half-duplex "are identical to those specified in
+       10.1.2, except that INFO1a and INFO1c are replaced by INFOh".  INFO0 is
+       not replaced.  Returning INFOh's 51 bits here made the receiver read two
+       bits too many, so the INFO0 CRC failed on a bit-exact loopback and the
+       single-bit recovery below "fixed" it by flipping bit 33 -- the first bit
+       past the true 33-bit payload -- on every call. */
+    (void) s;
+    return 49 - (4 + 8 + 4);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -5775,6 +5784,18 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                             if (!s->info0_received)
                                 s->received_event = V34_EVENT_INFO0_OK;
                             s->info0_received = true;
+                            /* Condition the receiver exactly as the ordinary
+                               INFO0 path does.  This raised INFO0_OK and
+                               returned without touching the stage, so a
+                               recovered INFO0 left the receiver still hunting
+                               INFO0 while the transmitter had already moved on:
+                               V.34 11.2.1.1.2 / 12.2.1.1.2 require the receiver
+                               to be conditioned for the far tone and its phase
+                               reversal at this point, and it never was, so the
+                               reversal was never reported. */
+                            s->stage = (s->calling_party)
+                                     ? V34_RX_STAGE_TONE_A
+                                     : V34_RX_STAGE_TONE_B;
                             recovered_info0 = 1;
                             break;
                         }
@@ -13025,7 +13046,10 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     /*endif*/
     s->shaper_sets = (2*s->shaper_t2_num + s->shaper_t2_den/2)/s->shaper_t2_den;
     /* Periodic diagnostic: log primary channel RX config on first entry and every 8000 samples */
-    if (s->stage >= V34_RX_STAGE_PHASE3_TRAINING && (s->sample_time % 8000) < (unsigned)len)
+    /* Gated at PHASE3_TRAINING this printed nothing for a receiver sitting in
+       PHASE3_WAIT_S, which is exactly where a wrong symbol rate or carrier
+       stops S being found. */
+    if (s->stage >= V34_RX_STAGE_PHASE3_WAIT_S && (s->sample_time % 8000) < (unsigned)len)
     {
         V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - primary_channel_rx: baud_rate=%d high_carrier=%d carrier=%.1fHz agc=%.5f power=%ld shaper_sets=%d\n",
@@ -14848,8 +14872,11 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
        a legal index, so this must not be left at the zero-initialised value. */
     s->rx.v90_cp_diff_hypothesis = -1;
     s->rx.stage = V34_RX_STAGE_INFO0;
-    /* The next info message will be INFO0 or INFOH, depending whether we are in half or full duplex mode. */
-    s->rx.target_bits = (s->rx.duplex)  ?  (49 - (4 + 8 + 4))  :  (51 - (4 + 8 + 4));
+    /* The stage above says INFO0, so the length must be INFO0's.  INFOh is only
+       ever the next message once the stage has moved to V34_RX_STAGE_INFOH,
+       which is where its 51 bits are set; setting them here contradicted the
+       stage on the line above and truncated nothing but broke the CRC. */
+    s->rx.target_bits = 49 - (4 + 8 + 4);
 
     s->rx.mp_count = -1;
     s->rx.mp_len = 0;

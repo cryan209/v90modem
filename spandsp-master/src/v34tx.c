@@ -677,6 +677,7 @@ static int answer_info0_retry_policy(void);
 static int post_l2_tone_b_wait_bauds(v34_state_t *s);
 static void pre_info1_a_init(v34_state_t *s);
 static void second_b_baud_init(v34_state_t *s);
+static void v34_condition_rx_for_infoh(v34_state_t *s);
 static void v90_wait_tone_a_init(v34_state_t *s, bool preserve_tone_a_event);
 static void v90_wait_info1a_init(v34_state_t *s);
 static void v90_v34_fallback_wait_init(v34_state_t *s);
@@ -5392,6 +5393,18 @@ static void v90_v34_fallback_wait_init(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static void v34_condition_rx_for_infoh(v34_state_t *s)
+{
+    /* V.34 10.2.2: in half-duplex, INFO1a and INFO1c are replaced by INFOh,
+       which Table 22 defines as 51 bits (0:50).  INFO0 itself is unchanged. */
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+               "Tx - half-duplex: conditioned the receiver for INFOh (51 bits)\n");
+    s->rx.stage = V34_RX_STAGE_INFOH;
+    s->rx.target_bits = 51 - (4 + 8 + 4);
+    s->rx.bit_count = 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 static complex_sig_t get_second_b_baud(v34_state_t *s)
 {
     switch (s->tx.stage)
@@ -5444,6 +5457,12 @@ static void second_b_baud_init(v34_state_t *s)
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
     s->tx.stage = V34_TX_STAGE_HDX_POST_L2_B;
     s->tx.current_getbaud = get_second_b_baud;
+    /* V.34 12.2.1.1.4: "the call modem shall transmit Tone B AND CONDITION ITS
+       RECEIVER TO RECEIVE INFOh" -- one clause, both actions, at this moment.
+       Nothing else can do it here: the duplex receiver arms itself for INFO1a
+       on the third Tone A reversal, and half-duplex 12.2.1.2 has only ONE Tone
+       A reversal (12.2.1.2.3), so that trigger can never fire on this path. */
+    v34_condition_rx_for_infoh(s);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -5467,7 +5486,18 @@ static complex_sig_t get_infoh_baud(v34_state_t *s)
         V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                    "Tx - half-duplex recipient: INFOh sent, silent while receiving Phase 3\n");
         tx_silence_init(s, 30000);
-        /* "condition its receiver to detect S followed by S-bar" */
+        /* "condition its receiver to detect S followed by S-bar".  That means
+           the PRIMARY channel: 10.2.3 transmits all of Phase 3 at the selected
+           symbol rate and carrier, while this receiver is still on the 600 baud
+           control channel it used for INFO0/INFOh.  Arming the S detector alone
+           left demod=TONES and the recipient never saw the source's S.
+
+           v34_force_phase3_rx() is the usual way in, but it starts with
+           s_not_s_baud_init() and would have the recipient TRANSMIT S, which is
+           exactly what 12.3.2.1 forbids.  Take the receive half only. */
+        reset_primary_rx_frontend_for_phase3(s);
+        s->primary_channel_active = true;
+        s->rx.current_demodulator = V34_MODULATION_V34;
         v34_v90_arm_phase3_s_detector(s);
     }
     /*endif*/

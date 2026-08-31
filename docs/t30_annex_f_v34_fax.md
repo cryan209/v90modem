@@ -125,6 +125,49 @@ An early reading of a trace here was wrong for exactly that reason.
 12.4.1.1 silence is distinguishable from 12.3.1.1's, which shares neither its
 meaning nor its follow-on.
 
+## Phase 2 receiver conditioning: INFO0 was being read as INFOh
+
+Three defects, and the first is the root of the other two.
+
+1. **`info0_target_bits()` returned INFOh's length for INFO0.**  It read
+   `(s->duplex) ? 49 - 16 : 51 - 16`, and `v34_rx_restart()` conditioned the
+   receiver the same way on the line immediately after setting the stage to
+   `V34_RX_STAGE_INFO0`.  But 10.2.2 says the half-duplex Phase 2 signals "are
+   identical to those specified in 10.1.2, **except that INFO1a and INFO1c are
+   replaced by INFOh**" -- INFO0 is not replaced, and Table 7 makes it 49 bits
+   (0:48) in both modes.  The receiver therefore read two bits too many and the
+   INFO0 CRC failed on a bit-exact loopback, on every call.
+
+2. **The INFO0 single-bit-error recovery hid it.**  With the CRC failing, that
+   path flipped each bit in turn looking for one that made the CRC zero, found
+   **bit 33** -- the first bit past the true 33-bit payload -- and declared
+   success.  Both modems did this on every call:
+   `Rx - INFO0 single-bit recovery: flipped bit 33, CRC now 0`.  A deterministic
+   "single-bit error" at a fixed position on a clean loopback is not noise; it
+   is a length error being papered over.
+
+3. **That recovery path raised `V34_EVENT_INFO0_OK` and returned WITHOUT
+   setting the stage.**  The ordinary INFO0 path sets
+   `stage = calling_party ? TONE_A : TONE_B` alongside raising the event
+   (11.2.1.1.2 / 12.2.1.1.2: condition the receiver for the far tone and its
+   phase reversal).  The recovery path did not, so the transmitter moved on
+   while the receiver was still hunting INFO0 and never reported the Tone A
+   phase reversal.  This is a real bug in its own right -- it would do the same
+   on any line where the recovery legitimately fires, in V.34 and V.90 too.
+
+A fourth, in the transmitter: **12.2.1.1.4 is one clause with two actions** --
+"the call modem shall transmit Tone B **and condition its receiver to receive
+INFOh**" -- and only the first was done.  Nothing else could do it here: the
+duplex receiver arms itself for INFO1a on the *third* Tone A reversal, and
+half-duplex 12.2.1.2 has only **one** (12.2.1.2.3), so that trigger can never
+fire on this path.  New `v34_condition_rx_for_infoh()`, called from
+`second_b_baud_init()`.
+
+With those, Phase 2 completes: both receivers condition at 0.18 s instead of
+never, the source receives INFOh, and -- because the recipient now leaves Tone A
+on `rx.tone_b_present` rather than on the 2000 ms bound -- the whole exchange
+runs on events rather than timers.
+
 ## Where it stands
 
 The source now runs Phase 2, Phase 3 and the whole of 12.4's transmit chain --
@@ -135,19 +178,33 @@ The roles are now right: the recipient sends INFOh, goes silent and sits in
 `V34_RX_STAGE_PHASE3_WAIT_S` waiting for the source's S, which is 12.3.2.1
 exactly, and the source starts Phase 3 only on `V34_EVENT_INFOH_OK`.
 
-**It still does not complete, and the blocker has moved to Phase 2.**  The
-source stalls in `V34_TX_STAGE_HDX_FIRST_B_INFO_SEEN`, which waits for
-`V34_EVENT_REVERSAL_1` -- the Tone A phase reversal of 12.2.1.1.2.  The
-recipient transmits that reversal on time (`HDX_FIRST_NOT_A` at 0.22 s), but
-the source's receiver is still in `V34_RX_STAGE_INFO0` when it arrives and
-never reports it, so the source never transmits its Tone B reversal, L1 or L2,
-`rx.tone_b_present` never becomes true at the recipient, and the recipient
-falls out of Tone A on the 2000 ms bound instead of on the event.
+**The source side now runs the whole of clause 12's transmit sequence, in
+order, driven by the far end rather than by timers:**
 
-That is a Phase 2 conditioning defect, not a Phase 3 one, and it was there
-before: the old trace only got further because the recipient was wrongly
-transmitting S/S-bar/PP/TRN, whose energy carried the source's detectors along.
-Fixing the roles removed that accident and left the real state visible.
+    0.18  both receivers conditioned (src TONE_A, rcp TONE_B)
+    0.28  src Tone B reversal, then L1/L2
+    0.86  src conditioned for INFOh
+    0.90  rcp leaves Tone A on Tone B DETECTED, sends INFOh
+    1.04  src has INFOh -> 12.3.1.1 silence
+    1.10  src S, then S-bar
+    1.24  src TRN, for 1.06 s (INFOh asked for 30 x 35 ms = 1050 ms)
+    2.30  src 12.4.1.1 silence -> PPh -> ALT -> MPh
+
+The TRN length is the check worth reading there: it is the INFOh field being
+honoured, which is what the earlier index-versus-rate defect broke.
+
+**It still does not complete.**  The recipient is armed in
+`V34_RX_STAGE_PHASE3_WAIT_S` on the primary channel and does not detect the
+source's S.  It is receiving signal, so this is detection, not absence: the S
+is 128T -- 40 ms at 3200 baud -- and arrives about 60 ms after the recipient's
+primary-channel front end is reset, which may simply be too soon for the AGC
+and the detector's 64-symbol window.  Separately, by the time the source
+reaches PPh/ALT/MPh it has moved to the CONTROL channel (10.2.4: 600 baud,
+1200 Hz from the call modem) while the recipient is still tuned to the primary
+channel at 1920 Hz, so 12.4.2.1's "conditions its receiver to detect signal
+PPh" is not being done either.
+
+Both are Phase 3 and control-channel receive gaps, not Phase 2 ones.
 
 No payload crosses in either direction, and no claim is made that it does.
 
@@ -156,11 +213,8 @@ is inside a `!duplex` branch or a diagnostic, and the full suite is green.
 
 ## Order of work from here
 
-1. Phase 2 receiver conditioning: on INFO0a the call modem must condition its
-   receiver to detect Tone A and its phase reversal (12.2.1.1.2).  The rx does
-   set `V34_RX_STAGE_TONE_A` on INFO0 receipt, but the source's receiver was
-   observed still in `V34_RX_STAGE_INFO0` well after its transmitter had acted
-   on `V34_EVENT_INFO0_OK`; find out why those two disagree.
+1. The recipient's S detection (12.3.2.2), then conditioning its receiver for
+   PPh on the control channel (12.4.2.1) so it can answer PPh with PPh and ALT.
 2. `half_duplex_state` actually read: 12.5's primary channel turn-off and
    12.6's control channel turn-off are the source/recipient turnarounds, and
    nothing consumes the mode today.
