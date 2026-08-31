@@ -10834,6 +10834,47 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
         /* The timing loop's leftover fraction of a sample. */
         float frac = s->v90_t3_timing_enabled ? s->v90_t3_gardner.acc : 0.0f;
 
+#if defined(V34_FIXED_POINT)
+        /* Integer FSE.  Taps live in the wide Q1.46 accumulator and are
+           narrowed to Q1.30 here; port/v34_fixed.h has the measurements,
+           including why a Q1.30 accumulator does not stall but instead tracks
+           its own quantisation noise and settles at 0.666 from the lattice. */
+        {
+            v34_fx_complex_t xr[V34_V90_T3_FSE_TAPS];
+            v34_fx_complex_t zf;
+            int32_t frac_q16 = (int32_t) (frac*65536.0f);
+
+            if (!s->v90_t3_fx_primed)
+            {
+                for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+                {
+                    s->v90_t3_fse_fx[tap].re = v34_fx_from_float(s->v90_t3_fse[tap].re, V34_FX_TAP_SHIFT);
+                    s->v90_t3_fse_fx[tap].im = v34_fx_from_float(s->v90_t3_fse[tap].im, V34_FX_TAP_SHIFT);
+                }
+                /*endfor*/
+                v34_fx_lms_init(s->v90_t3_fse_acc, s->v90_t3_fse_fx, V34_V90_T3_FSE_TAPS);
+                s->v90_t3_fx_primed = 1;
+            }
+            /*endif*/
+            v34_fx_lms_taps(s->v90_t3_fse_fx, s->v90_t3_fse_acc, V34_V90_T3_FSE_TAPS);
+            for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+            {
+                xr[tap] = v34_fx_ring_get_frac(s->v90_t3_raw_fx,
+                                               s->v90_t3_next_symbol - pre + tap,
+                                               frac_q16,
+                                               s->v90_t3_raw_count,
+                                               V34_V90_T3_RAW_SIZE,
+                                               V34_V90_T3_RAW_MASK);
+                if (s->v90_t3_fse_conjugate)
+                    xr[tap].im = -xr[tap].im;
+                /*endif*/
+            }
+            /*endfor*/
+            zf = v34_fx_fse(s->v90_t3_fse_fx, xr, V34_V90_T3_FSE_TAPS);
+            y.re = v34_fx_to_float(zf.re, V34_FX_RING_SHIFT);
+            y.im = v34_fx_to_float(zf.im, V34_FX_RING_SHIFT);
+        }
+#else
         for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
         {
             complexf_t x = v90_t3_raw_get_frac(
@@ -10844,6 +10885,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             z = complex_mulf(&s->v90_t3_fse[tap], &x);
             y = complex_addf(&y, &z);
         }
+#endif
         /* V90_T3_SYMBOL_PROBE=<data symbol index>: everything that went into
            ONE symbol, so the whole chain from the recorded tap to the
            equalizer output can be reproduced outside this receiver and checked
@@ -11088,6 +11130,42 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                   &&
                   s->v90_t3_sym_err_fast < V34_V90_T3_SLIP_ACCEPT_ERR)))
             {
+#if defined(V34_FIXED_POINT)
+                /* Integer NLMS into the wide accumulator.  energy is passed as
+                   the plain real-units value the float path already computed;
+                   mixing Q-formats through the divide is what silently
+                   truncated every correction to zero in the first draft. */
+                {
+                    v34_fx_complex_t xr[V34_V90_T3_FSE_TAPS];
+                    int32_t frac_q16 = (int32_t) (frac*65536.0f);
+
+                    for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+                    {
+                        xr[tap] = v34_fx_ring_get_frac(s->v90_t3_raw_fx,
+                                                       s->v90_t3_next_symbol - pre + tap,
+                                                       frac_q16,
+                                                       s->v90_t3_raw_count,
+                                                       V34_V90_T3_RAW_SIZE,
+                                                       V34_V90_T3_RAW_MASK);
+                        if (s->v90_t3_fse_conjugate)
+                            xr[tap].im = -xr[tap].im;
+                        /*endif*/
+                    }
+                    /*endfor*/
+                    v34_fx_lms_update(s->v90_t3_fse_acc, xr, V34_V90_T3_FSE_TAPS,
+                                      v34_fx_from_float(e_re, V34_FX_RING_SHIFT),
+                                      v34_fx_from_float(e_im, V34_FX_RING_SHIFT),
+                                      v34_fx_from_float(s->v90_t3_dd_mu, V34_FX_TAP_SHIFT),
+                                      (int64_t) energy);
+                    v34_fx_lms_taps(s->v90_t3_fse_fx, s->v90_t3_fse_acc, V34_V90_T3_FSE_TAPS);
+                    for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+                    {
+                        s->v90_t3_fse[tap].re = v34_fx_to_float(s->v90_t3_fse_fx[tap].re, V34_FX_TAP_SHIFT);
+                        s->v90_t3_fse[tap].im = v34_fx_to_float(s->v90_t3_fse_fx[tap].im, V34_FX_TAP_SHIFT);
+                    }
+                    /*endfor*/
+                }
+#else
                 float mu = s->v90_t3_dd_mu/energy;
 
                 for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
@@ -11101,6 +11179,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                     s->v90_t3_fse[tap].re += mu*(e_re*x.re + e_im*x.im);
                     s->v90_t3_fse[tap].im += mu*(e_im*x.re - e_re*x.im);
                 }
+#endif
             }
             /*endif*/
             v90_t3_blind_recover(s, &y, pre, frac, energy);
@@ -12182,6 +12261,17 @@ static void v90_t3_put_sample(v34_rx_state_t *s, complexf_t value)
        the adaptive filter owns the complete channel rather than inverting a
        separately truncated matched filter. */
     s->v90_t3_raw[s->v90_t3_raw_count & V34_V90_T3_RAW_MASK] = mixed;
+#if defined(V34_FIXED_POINT)
+    /* One conversion per INPUT sample.  The FSE reads the ring 21 times per
+       symbol, so converting here rather than per tap is what makes a
+       fixed-point FSE cheaper than the float one on an FPU-less part. */
+    {
+        v34_fx_complex_t *q = &s->v90_t3_raw_fx[s->v90_t3_raw_count & V34_V90_T3_RAW_MASK];
+
+        q->re = v34_fx_from_float(mixed.re, V34_FX_RING_SHIFT);
+        q->im = v34_fx_from_float(mixed.im, V34_FX_RING_SHIFT);
+    }
+#endif
     s->v90_t3_matched[s->v90_t3_raw_count & V34_V90_T3_RAW_MASK] = filtered;
     s->v90_t3_raw_count++;
     s->v90_t3_output_count++;

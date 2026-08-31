@@ -300,4 +300,56 @@ static __inline__ void v34_fx_lms_update(v34_fx_acc_t *acc,
     /*endfor*/
 }
 
+
+/* ---- Ring access -------------------------------------------------------
+ *
+ * The FSE reads the T/3 ring through a linear interpolation at the timing
+ * loop's leftover fraction, so a fixed-point FSE needs a fixed-point ring and
+ * a fixed-point interpolator, or the conversion cost per tap swamps the
+ * saving.  The ring is written ONCE per input sample (9600/s) and read 21
+ * times per symbol (67200/s), so the conversion belongs on the write side.
+ *
+ * frac is Q16 in [0,1).
+ */
+static __inline__ v34_fx_complex_t v34_fx_ring_get(const v34_fx_complex_t *ring,
+                                                   int64_t index,
+                                                   int64_t count,
+                                                   int64_t size,
+                                                   int64_t mask)
+{
+    v34_fx_complex_t z = {0, 0};
+
+    if (index >= 0  &&  index < count  &&  index >= count - size)
+        z = ring[index & mask];
+    /*endif*/
+    return z;
+}
+
+static __inline__ v34_fx_complex_t v34_fx_ring_get_frac(const v34_fx_complex_t *ring,
+                                                        int64_t index,
+                                                        int32_t frac_q16,
+                                                        int64_t count,
+                                                        int64_t size,
+                                                        int64_t mask)
+{
+    v34_fx_complex_t a;
+    v34_fx_complex_t b;
+    v34_fx_complex_t z;
+
+    if (frac_q16 < 0)
+    {
+        index--;
+        frac_q16 += 65536;
+    }
+    /*endif*/
+    a = v34_fx_ring_get(ring, index, count, size, mask);
+    if (frac_q16 <= 6)                      /* the float path's 1e-4 */
+        return a;
+    /*endif*/
+    b = v34_fx_ring_get(ring, index + 1, count, size, mask);
+    z.re = a.re + (int32_t) (((int64_t) frac_q16*(b.re - a.re)) >> 16);
+    z.im = a.im + (int32_t) (((int64_t) frac_q16*(b.im - a.im)) >> 16);
+    return z;
+}
+
 #endif

@@ -122,6 +122,10 @@
    was sized for the OFFSET to the frame rather than for the frame.  A ring
    does not need that -- the search runs every ME_V90_DIL_HYP_RETRY_BITS (512)
    new bits, so a descriptor is scanned ~32 times before it ages out. */
+#if defined(V34_FIXED_POINT)
+#include "v34_fixed.h"
+#endif
+
 #define V34_JA_CAPTURE_BITS                 16384
 #define V34_JA_CAPTURE_BYTES                (V34_JA_CAPTURE_BITS/8)
 
@@ -1594,6 +1598,16 @@ typedef struct
     float v90_t3_rrc_coeff[V34_V90_T3_RRC_TAPS];
     complexf_t v90_t3_rrc[V34_V90_T3_RRC_TAPS];
     int v90_t3_rrc_pos;
+#if defined(V34_FIXED_POINT)
+    /* Fixed-point mirror of the ring, written once per input sample so the
+       FSE and its NLMS can run entirely in integer arithmetic.  Only present
+       in a fixed-point build; see port/v34_fixed.h for the formats and the
+       measurements behind them. */
+    v34_fx_complex_t v90_t3_raw_fx[V34_V90_T3_RAW_SIZE];
+    v34_fx_complex_t v90_t3_fse_fx[V34_V90_T3_FSE_TAPS];
+    v34_fx_acc_t v90_t3_fse_acc[V34_V90_T3_FSE_TAPS];
+    int v90_t3_fx_primed;
+#endif
     complexf_t v90_t3_raw[V34_V90_T3_RAW_SIZE];
     complexf_t v90_t3_matched[V34_V90_T3_RAW_SIZE];
     int64_t v90_t3_raw_count;
