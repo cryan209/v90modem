@@ -150,6 +150,33 @@ away, which flatters the row where the restore was the wrong call and destroys
 the row where it was the right one.  A one-sided reading of that table sends
 the search after an arithmetic defect that does not exist.
 
+## Confirmation on a set that was not used to find the defects
+
+The rows above are the recordings the debugging ran on, so on their own they
+cannot rule out having tuned to them.  `goal-matrix-115515Z` also holds a
+second capture of each rate, used for nothing during that work.  Both arms
+built from the same tree, both pinned to the same handover per row:
+
+    row               float          fixed          delta
+    19200-r2@349.5     460/0.013      460/0.013     +0.000
+    21600-r2@468.0    2068/0.664     1986/0.664     +0.000
+    24000-r2@22.5     1107/0.656      973/0.617     -0.039
+    26400-r2@86.5     2304/0.666     2304/0.668     +0.002
+    28800-r2@22.5     1138/0.670     1138/0.669     -0.001
+    31200-r2@86.5     2428/0.666     2451/0.666     +0.000
+
+21600 does not appear in the r1 set at all, so that row is a rate the fixes
+were never measured against.  **19200-r2 is the one to read**: the rate whose
+r1 recording carried the entire regression decodes at 0.013 here, identically
+in both arms.
+
+**But most of this table cannot demonstrate a correct decode, and a delta of
++0.000 does not mean what it looks like.**  Four of the six rows sit at
+0.664-0.670 in BOTH arms -- that is white (0.667 is the figure for symbols
+unrelated to the lattice), so those rows say the two datapaths agree, not that
+either works.  A receiver that fails exactly as float fails still scores
++0.000.  The rows carrying information are 19200-r2 and 24000-r2.
+
 ## Two method notes worth more than the fix
 
 **A kernel test that passes is not evidence the kernel is right in situ.**
