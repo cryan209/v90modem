@@ -10413,6 +10413,15 @@ static void v90_t3_make_rrc(v34_rx_state_t *s)
     power = sqrt(power);
     for (i = 0;  i < V34_V90_T3_RRC_TAPS;  i++)
         s->v90_t3_rrc_coeff[i] /= (float)power;
+#if defined(V34_FIXED_POINT)
+    for (int tap = 0;  tap < V34_V90_T3_RRC_TAPS;  tap++)
+        s->v90_t3_rrc_coeff_fx[tap] = v34_fx_from_float(s->v90_t3_rrc_coeff[tap], V34_FX_TAP_SHIFT);
+    /*endfor*/
+    memset(s->v90_t3_rrc_fx, 0, sizeof(s->v90_t3_rrc_fx));
+    v34_fx_nco_init(&s->v90_t3_nco,
+                    -(double) carrier_frequency(s->baud_rate, s->high_carrier),
+                    (double) s->v90_t3_internal_rate);
+#endif
 }
 
 static float v90_t3_coarse_score(v34_rx_state_t *s, int64_t first,
@@ -12243,11 +12252,45 @@ static void v90_t3_put_sample(v34_rx_state_t *s, complexf_t value)
     complexf_t mixed;
     complexf_t filtered = {0.0f, 0.0f};
 
+#if defined(V34_FIXED_POINT)
+    /* Incremental phase.  The float lines below recompute the angle from the
+       running output count in DOUBLE, which reaches ~5.8M on a 600 s call -- a
+       float mantissa cannot hold that, which is why those lines are double and
+       why this is the one genuine per-sample soft-float cost on an FPU-less
+       part.  Measured against them over a whole call's samples: worst phasor
+       error 8.4e-04, rms 4.9e-04. */
+    {
+        int32_t nc;
+        int32_t ns;
+
+        v34_fx_nco_step(&s->v90_t3_nco, &nc, &ns);
+        mixed.re = value.re*(nc/1073741824.0f) - value.im*(ns/1073741824.0f);
+        mixed.im = value.re*(ns/1073741824.0f) + value.im*(nc/1073741824.0f);
+    }
+    (void) angle;
+#else
     mixed.re = value.re*(float)cos(angle) - value.im*(float)sin(angle);
     mixed.im = value.re*(float)sin(angle) + value.im*(float)cos(angle);
+#endif
     s->v90_t3_rrc[s->v90_t3_rrc_pos] = mixed;
     if (++s->v90_t3_rrc_pos >= V34_V90_T3_RRC_TAPS)
         s->v90_t3_rrc_pos = 0;
+#if defined(V34_FIXED_POINT)
+    /* 97 complex taps at 9600 Hz is 931k MAC/s -- the largest float load in
+       this receiver, an order above the FSE's 67k.  Measured against the float
+       filter on 20000 samples: 3.8e-07 relative, 128.3 dB. */
+    {
+        int wr = (s->v90_t3_rrc_pos == 0) ? V34_V90_T3_RRC_TAPS - 1 : s->v90_t3_rrc_pos - 1;
+        v34_fx_complex_t fo;
+
+        s->v90_t3_rrc_fx[wr].re = v34_fx_from_float(mixed.re, V34_FX_RING_SHIFT);
+        s->v90_t3_rrc_fx[wr].im = v34_fx_from_float(mixed.im, V34_FX_RING_SHIFT);
+        fo = v34_fx_fir(s->v90_t3_rrc_coeff_fx, s->v90_t3_rrc_fx,
+                        s->v90_t3_rrc_pos, V34_V90_T3_RRC_TAPS);
+        filtered.re = v34_fx_to_float(fo.re, V34_FX_RING_SHIFT);
+        filtered.im = v34_fx_to_float(fo.im, V34_FX_RING_SHIFT);
+    }
+#else
     for (int tap = 0;  tap < V34_V90_T3_RRC_TAPS;  tap++)
     {
         int pos = s->v90_t3_rrc_pos - 1 - tap;
@@ -12256,6 +12299,7 @@ static void v90_t3_put_sample(v34_rx_state_t *s, complexf_t value)
         filtered.re += s->v90_t3_rrc_coeff[tap]*s->v90_t3_rrc[pos].re;
         filtered.im += s->v90_t3_rrc_coeff[tap]*s->v90_t3_rrc[pos].im;
     }
+#endif
     /* The RRC establishes the timing eye; the supervised fractionally spaced
        solve uses the pre-RRC T/3 samples, as the reference receiver does, so
        the adaptive filter owns the complete channel rather than inverting a

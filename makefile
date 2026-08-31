@@ -163,6 +163,15 @@ V90_UPSTREAM_REPLAY_OBJS = v90_upstream_replay.o
 PORT_CP_STREAM_TEST_OBJS = port/cp_stream_test.o port/cp_stream.o v90_cp_rx.o vpcm_cp.o
 # ESP32 port, layer 3: the V.90 upstream DATA feed-forward decode core.
 PORT_DATA_RX_TEST_OBJS = port/data_rx_test.o port/data_rx.o
+# Fixed-point datapath (V34_FIXED_POINT).  Not a default: on an ESP32-S3 the
+# FPU makes float faster and smaller, and this is for the FPU-less parts
+# (ESP32-C3/C6, RV32IMC).  To build it:
+#   make clean
+#   ( cd spandsp-master/src && make libspandsp.la \
+#       CPPFLAGS="-DV34_FIXED_POINT -I$(PWD)/port" )
+#   make CFLAGS="$(CFLAGS) -DV34_FIXED_POINT" PORT_FIXED_OBJ=port/v34_fixed.o
+PORT_FIXED_OBJ =
+
 # ESP32 port: fixed-point kernels, checked against float on real probe data.
 PORT_V34_FIXED_TEST_OBJS = port/v34_fixed_test.o
 PORT_V34_FIXED_LMS_TEST_OBJS = port/v34_fixed_lms_test.o
@@ -171,7 +180,7 @@ PORT_V34_FIXED_SOLVE_TEST_OBJS = port/v34_fixed_solve_test.o
 # recorded call can be run through V.8 and Phases 2-4 exactly as the media
 # thread runs it.  Everything $(TARGET) links except sip_modem.o, which is
 # the part being replaced.
-V90_ENGINE_REPLAY_OBJS = v90_engine_replay.o $(filter-out sip_modem.o,$(OBJS))
+V90_ENGINE_REPLAY_OBJS = v90_engine_replay.o $(filter-out sip_modem.o,$(OBJS)) $(PORT_FIXED_OBJ)
 V34_DUPLEX_TEST_OBJS = v34_duplex_test.o
 V32BIS_SPANDSP_TEST_OBJS = v32bis_spandsp_test.o
 V90_ANALOGUE_TX_TEST_OBJS = v90_analogue_tx_test.o v90_analogue_tx.o v90_analogue_phase4.o v90_dil_measure.o v90.o v90_cp_rx.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o
@@ -292,8 +301,8 @@ v32bis-datapump-test:
 v32bis-test: v32bis_spandsp_test v32bis-ref-test v32bis-datapump-test
 	./v32bis_spandsp_test
 
-$(TARGET): $(OBJS) spandsp $(PJ_BUILD_PREREQ)
-	$(CC) $(OBJS) -o $@ $(LDFLAGS)
+$(TARGET): $(OBJS) $(PORT_FIXED_OBJ) spandsp $(PJ_BUILD_PREREQ)
+	$(CC) $(OBJS) $(PORT_FIXED_OBJ) -o $@ $(LDFLAGS)
 
 vpcm_loopback_test: $(TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(TEST_OBJS) -o $@ $(LDFLAGS)

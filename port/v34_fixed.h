@@ -352,4 +352,65 @@ static __inline__ v34_fx_complex_t v34_fx_ring_get_frac(const v34_fx_complex_t *
     return z;
 }
 
+
+/* ---- Front end: NCO and the receive RRC --------------------------------
+ *
+ * v90_t3_put_sample() is the per-INPUT-sample work, and it is the largest
+ * float load in the receiver: a 97-tap complex RRC at 9600 Hz is 931k MAC/s
+ * against the FSE's 67k, and the mixer recomputes its phase in double from the
+ * absolute output count on every sample.
+ *
+ * THE MIXER PHASE IS WHY THIS NEEDS AN NCO, NOT JUST A FORMAT CHANGE.  The
+ * float path computes angle = -2*pi*fc*n/rate with n the running output count,
+ * which reaches ~5.8M on a 600 s call -- a float's 24-bit mantissa cannot hold
+ * that, which is exactly why the existing code uses double there and why it is
+ * the one genuine per-sample soft-float cost on an FPU-less part.  An
+ * incremental phase accumulator has no such term: phase += inc each sample, in
+ * uint32, wrapping for free.  The frequency error is one part in 2^32 of the
+ * sample rate, 1.1e-6 Hz, or 6.7e-4 cycles over a whole call.
+ *
+ * Sine table: quarter wave, 1024 entries, Q30, linearly interpolated.  Peak
+ * error is about 1.2e-6 of full scale -- three orders below the ring's Q17.14
+ * LSB, so the table is not the limit.
+ */
+#define V34_FX_SIN_BITS     10
+#define V34_FX_SIN_SIZE     (1 << V34_FX_SIN_BITS)
+
+typedef struct
+{
+    uint32_t phase;
+    uint32_t inc;
+    int32_t sine[V34_FX_SIN_SIZE + 1];      /* quarter wave, Q30 */
+} v34_fx_nco_t;
+
+void v34_fx_nco_init(v34_fx_nco_t *n, double freq, double rate);
+void v34_fx_nco_step(v34_fx_nco_t *n, int32_t *cos_q30, int32_t *sin_q30);
+
+/* Complex FIR with real coefficients -- the receive RRC.  coeff is Q1.30,
+ * samples and result are Q17.14, accumulation in int64. */
+static __inline__ v34_fx_complex_t v34_fx_fir(const int32_t *coeff,
+                                              const v34_fx_complex_t *hist,
+                                              int pos, int n)
+{
+    int64_t ar = 0;
+    int64_t ai = 0;
+    v34_fx_complex_t out;
+    int k;
+
+    for (k = 0;  k < n;  k++)
+    {
+        int p = pos - 1 - k;
+
+        if (p < 0)
+            p += n;
+        /*endif*/
+        ar += (int64_t) coeff[k]*hist[p].re;
+        ai += (int64_t) coeff[k]*hist[p].im;
+    }
+    /*endfor*/
+    out.re = (int32_t) (ar >> V34_FX_TAP_SHIFT);
+    out.im = (int32_t) (ai >> V34_FX_TAP_SHIFT);
+    return out;
+}
+
 #endif
