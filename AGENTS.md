@@ -191,6 +191,8 @@ DTE's compressed image data to the TIFF files T.30 transfers. SpanDSP's own
 class 2 command handlers are `TODO` stubs and are not used. One deviation is
 deliberate and documented: `+FDT` takes the page before it reports `+FCS`,
 because SpanDSP's T.30 needs the document to exist by the DIS it receives.
+`+FBO`'s phase C bit order is applied — the default order is LSB first, the
+same one T.31's class 1 path uses with no reversal.
 
 Neither class has hardware interop. See `docs/fax_class_at.md`.
 

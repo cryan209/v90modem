@@ -481,6 +481,36 @@ static void session_start(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* T.32 8.5.3.4 +FBO -- phase C bit order                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The octets T.4 hands us are transmitted LSB first: t4_tx_get_bit() takes
+ * bit 0 of each octet first, and T.31's class 1 path does the same with the
+ * DTE's own octets and no reversal at all.  So the stream this module carries
+ * by default is the one a class 1 DTE sees, which is +FBO's direct order --
+ * +FBO=0 changes nothing, and the reversed setting flips each phase C octet
+ * on its way across the DTE link.
+ *
+ * +FBO has two halves: the phase C image data, and the negotiation frame data
+ * a DTE reads with +FNR.  0 is direct in both and 3 is reversed in both; of
+ * the two mixed values this takes 1 as "phase C reversed", the reading that
+ * puts the phase C bit in the low position.  Nothing here reports negotiation
+ * frames to the DTE, so the other half has nothing to act on and 0/1 behave
+ * as 2/3 do.
+ */
+static int phase_c_reversed(void)
+{
+    return (p_bo & 1) != 0;
+}
+
+static void reverse_bits(uint8_t *buf, int len)
+{
+    for (int i = 0; i < len; i++)
+        buf[i] = bit_reverse8(buf[i]);
+}
+
+/* ------------------------------------------------------------------ */
 /* +FDT: taking a page from the DTE (T.32 8.3.3)                       */
 /* ------------------------------------------------------------------ */
 
@@ -583,8 +613,13 @@ static int send_page_to_dte(int page)
         t4_tx_free(tx);
         return 0;
     }
-    while ((len = t4_tx_get(tx, buf, sizeof(buf))) > 0)
+    while ((len = t4_tx_get(tx, buf, sizeof(buf))) > 0) {
+        /* Reverse first: DLE stuffing is about the octets that appear on the
+         * DTE link, so it has to see the octets the DTE will read. */
+        if (phase_c_reversed())
+            reverse_bits(buf, len);
         emit_stuffed(buf, len);
+    }
     t4_tx_end_page(tx);
     t4_tx_free(tx);
 
@@ -643,13 +678,19 @@ void fc2_dte_bytes(const uint8_t *buf, int len)
         }
 
         if (n >= (int) sizeof(clean)) {
-            if (spool_rx)
+            if (spool_rx) {
+                if (phase_c_reversed())
+                    reverse_bits(clean, n);
                 t4_rx_put(spool_rx, clean, (size_t) n);
+            }
             n = 0;
         }
     }
-    if (n && spool_rx)
+    if (n && spool_rx) {
+        if (phase_c_reversed())
+            reverse_bits(clean, n);
         t4_rx_put(spool_rx, clean, (size_t) n);
+    }
 
     if (finished) {
         spool_close();

@@ -242,7 +242,15 @@ static void pump(fax_state_t *peer, int frames)
 
 /* Turn a TIFF into the compressed stream a class 2.0 DTE hands to +FDT, DLE
  * stuffed and terminated by <DLE><ETX> (T.32 3.2, 8.3.3). */
-static int encode_page_for_dte(const char *path, int compression,
+static uint8_t reverse8(uint8_t v)
+{
+    v = (uint8_t) (((v & 0xF0) >> 4) | ((v & 0x0F) << 4));
+    v = (uint8_t) (((v & 0xCC) >> 2) | ((v & 0x33) << 2));
+    v = (uint8_t) (((v & 0xAA) >> 1) | ((v & 0x55) << 1));
+    return v;
+}
+
+static int encode_page_for_dte(const char *path, int compression, int reversed,
                                uint8_t *out, int max)
 {
     t4_tx_state_t *tx;
@@ -262,11 +270,15 @@ static int encode_page_for_dte(const char *path, int compression,
     }
     while ((len = t4_tx_get(tx, buf, sizeof(buf))) > 0) {
         for (int i = 0; i < len; i++) {
+            uint8_t byte = reversed ? reverse8(buf[i]) : buf[i];
+
             if (n + 2 >= max)
                 break;
-            if (buf[i] == 0x10)
+            /* T.32 3.2's stuffing applies to the octets on the DTE link, so
+             * it sees the octet after any +FBO reversal. */
+            if (byte == 0x10)
                 out[n++] = 0x10;
-            out[n++] = buf[i];
+            out[n++] = byte;
         }
     }
     t4_tx_end_page(tx);
@@ -282,6 +294,10 @@ static int encode_page_for_dte(const char *path, int compression,
 /* ------------------------------------------------------------------ */
 /* The two sessions                                                    */
 /* ------------------------------------------------------------------ */
+
+/* The unstuffed phase C octets the DCE handed the DTE, per +FBO setting. */
+static uint8_t cap_buf[2][1 << 18];
+static int     cap_len[2];
 
 static const char *SRC_TIFF  = "/tmp/fc2_test_src.tif";
 static const char *PEER_RX   = "/tmp/fc2_test_peer_rx.tif";
@@ -334,7 +350,7 @@ static void test_parameters(void)
 }
 
 /* Class 2.0 sends a page (T.32 8.3.3) to a plain fax terminal. */
-static void test_transmit(void)
+static void test_transmit(int fbo)
 {
     static uint8_t page[1 << 20];
     fax_state_t *peer;
@@ -342,7 +358,7 @@ static void test_transmit(void)
     int bad;
     int n;
 
-    printf("+FDT: class 2.0 sends a page\n");
+    printf("+FDT: class 2.0 sends a page (+FBO=%d)\n", fbo);
 
     unlink(PEER_RX);
     fc2_select(0);
@@ -350,6 +366,7 @@ static void test_transmit(void)
 
     dte_reset();
     at("AT+FLI=\"sender\"");
+    { char cmd[32]; snprintf(cmd, sizeof(cmd), "AT+FBO=%d", fbo); at(cmd); }
     /* MH, fine resolution, no ECM: the plainest thing a fax machine sends. */
     at("AT+FIS=1,3,0,2,0,0,0,0,0");
     at("ATD5551234");
@@ -359,7 +376,8 @@ static void test_transmit(void)
     at("AT+FDT");
     check(dte_saw("CONNECT"), "AT+FDT answers CONNECT");
 
-    n = encode_page_for_dte(SRC_TIFF, T4_COMPRESSION_T4_1D, page, sizeof(page));
+    n = encode_page_for_dte(SRC_TIFF, T4_COMPRESSION_T4_1D, fbo & 1,
+                            page, sizeof(page));
     check(n > 0, "the test page encodes to a class 2.0 data stream");
 
     dte_reset();
@@ -393,7 +411,7 @@ static void test_transmit(void)
 }
 
 /* Class 2.0 receives a page (T.32 8.3.4) from a plain fax terminal. */
-static void test_receive(void)
+static void test_receive(int fbo)
 {
     fax_state_t *peer;
     t4_rx_state_t *decode;
@@ -403,7 +421,7 @@ static void test_receive(void)
     int saw_dle = 0;
     int start;
 
-    printf("+FDR: class 2.0 receives a page\n");
+    printf("+FDR: class 2.0 receives a page (+FBO=%d)\n", fbo);
 
     unlink(DTE_RX);
     fc2_select(0);
@@ -411,6 +429,7 @@ static void test_receive(void)
 
     dte_reset();
     at("AT+FLI=\"receiver\"");
+    { char cmd[32]; snprintf(cmd, sizeof(cmd), "AT+FBO=%d", fbo); at(cmd); }
     at("AT+FCR=1");
     at("AT+FIS=1,3,0,2,0,0,0,0,0");
     at("ATA");
@@ -467,13 +486,21 @@ static void test_receive(void)
                 saw_dle = 0;
                 if (byte == 0x03)
                     break;              /* <DLE><ETX> ends the page */
-                if (byte == 0x10)
-                    t4_rx_put(decode, &byte, 1);
+                if (byte != 0x10)
+                    continue;           /* a control sequence, not data */
             } else if (byte == 0x10) {
                 saw_dle = 1;
-            } else {
-                t4_rx_put(decode, &byte, 1);
+                continue;
             }
+
+            /* Record what came off the link, before undoing +FBO, so the two
+             * settings can be compared against each other. */
+            if (cap_len[fbo & 1] < (int) sizeof(cap_buf[0]))
+                cap_buf[fbo & 1][cap_len[fbo & 1]++] = byte;
+
+            if (fbo & 1)
+                byte = reverse8(byte);
+            t4_rx_put(decode, &byte, 1);
         }
         t4_rx_end_page(decode);
         t4_rx_free(decode);
@@ -487,6 +514,35 @@ static void test_receive(void)
 
     fax_free(peer);
     fc2_on_disconnected();
+}
+
+/*
+ * The round trips above would also pass if +FBO did nothing, because the test
+ * reverses on both sides of a setting that was ignored.  This compares the two
+ * streams the DCE actually put on the DTE link.
+ */
+static void test_bit_order_is_real(void)
+{
+    int mismatched = 0;
+
+    printf("+FBO: the setting reaches the DTE link\n");
+    check(cap_len[0] > 0 && cap_len[0] == cap_len[1],
+          "both settings delivered a page of the same length");
+    if (cap_len[0] == 0 || cap_len[0] != cap_len[1])
+        return;
+
+    for (int i = 0; i < cap_len[0]; i++) {
+        if (cap_buf[1][i] != reverse8(cap_buf[0][i]))
+            mismatched++;
+    }
+    check(mismatched == 0,
+          "+FBO=1 delivers the bit reverse of what +FBO=0 delivers");
+    if (mismatched)
+        printf("       (%d of %d octets)\n", mismatched, cap_len[0]);
+
+    /* And they are genuinely different octets, not a palindrome. */
+    check(memcmp(cap_buf[0], cap_buf[1], (size_t) cap_len[0]) != 0,
+          "the two streams differ");
 }
 
 int main(void)
@@ -507,8 +563,18 @@ int main(void)
     fc2_select(1);
 
     test_parameters();
-    test_transmit();
-    test_receive();
+    test_transmit(0);
+    test_receive(0);
+
+    /*
+     * T.32 8.5.3.4.  The same two sessions with the phase C octets reversed on
+     * the DTE link: the pages must still arrive intact, which they can only do
+     * if the reversal is applied in both directions and in the right place
+     * relative to the DLE stuffing.
+     */
+    test_transmit(1);
+    test_receive(1);
+    test_bit_order_is_real();
 
     fc2_release();
 

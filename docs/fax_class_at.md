@@ -92,8 +92,22 @@ so nothing here touches libtiff:
 - `+FDR` — the received TIFF page goes back out through `t4_tx` in the
   negotiated format, so the DTE gets a stream a fax machine would have sent.
 
-`+FBO` (bit order) is accepted and stored but not applied; the stream is in
-T.4's own order both ways.
+### +FBO, phase C bit order (8.5.3.4)
+
+The octets T.4 hands us are transmitted LSB first — `t4_tx_get_bit()` takes bit
+0 of each octet first, and T.31's class 1 path does the same with the DTE's own
+octets and no reversal at all. So the stream this module carries by default is
+the one a class 1 DTE sees, which is `+FBO`'s **direct** order: `+FBO=0` changes
+nothing, and the reversed setting flips each phase C octet on its way across
+the DTE link. The reversal is applied *before* DLE stuffing on the way out and
+*after* unstuffing on the way in, because T.32 3.2's stuffing is about the
+octets that appear on the link.
+
+`+FBO` has two halves: the phase C image data, and the negotiation frame data a
+DTE reads with `+FNR`. 0 is direct in both and 3 is reversed in both; of the two
+mixed values this takes 1 as "phase C reversed", the reading that puts the phase
+C bit in the low position. Nothing here reports negotiation frames to the DTE,
+so the other half has nothing to act on and 0/1 behave as 2/3 do.
 
 ## Implemented
 
@@ -138,6 +152,15 @@ image data in and out — and **compares the page that arrives against the page
 that was sent, raster by raster**. Both directions pass with zero differing
 rows.
 
+It then runs both sessions again at `+FBO=1`, reversing on the DTE side, and
+requires the pages to arrive intact — which they can only do if the DCE
+reverses in both directions and in the right place relative to the stuffing.
+On the transmit side that round trip is its own control (an ignored `+FBO`
+would put a reversed page on the line and the far end would reject it); on the
+receive side it is not, since the test would be undoing a reversal that never
+happened, so the two captured DTE streams are compared directly and must be
+bit reverses of each other, and must differ.
+
 That comparison is the point. The interesting failures here all report `OK`: a
 page that negotiates and transfers as garbage, or a stream handed to the DTE in
 a format it did not ask for, would pass a result-code check.
@@ -151,6 +174,7 @@ an `ATE0` that must still reach T.31, and the way back to class 0), which
 
 - Class 2 (the pre-standard `AT+FCLASS=2`) — only 2.0 is offered. The two are
   not compatible, and 2.0 is the ITU-T one.
+- `+FBO`'s negotiation-frame half, which needs `+FNR` frame reporting first.
 - Polling (`+FSP`, `+FLP`, `+FPI` beyond storing the ID), sub-addressing,
   passwords and non-standard frames (`+FSA`, `+FPW`, `+FNS`, `+FPA`) — parsed
   where they are simple parameters, but nothing acts on them.
