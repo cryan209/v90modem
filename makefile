@@ -146,7 +146,7 @@ LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c data_stack.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
-TEST_TARGETS = port_cp_stream_test port_data_rx_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test v90_upstream_replay v90_engine_replay v34_duplex_test v32bis_spandsp_test v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test
+TEST_TARGETS = port_cp_stream_test port_data_rx_test port_v34_fixed_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test v90_upstream_replay v90_engine_replay v34_duplex_test v32bis_spandsp_test v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test
 TEST_OBJS = vpcm_loopback_test.o v90.o v90_cp_rx.o v90_dil_rx.o v90_dil_measure.o v90_dil_presets.o v90_analogue_tx.o v90_analogue_rx.o v90_analogue_phase3.o v90_analogue_phase4.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_cp_rx.o v92_trn2u.o v92_upstream_data.o v92_upstream_rx.o p3_demod.o
 DECODE_OBJS = vpcm_decode.o v90_dil_measure.o v90_dil_presets.o v34_phase2_decode.o v34_info_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_anspcm_decode.o p3_demod.o v90.o v90_cp_rx.o v91.o vpcm_cp.o v21_fsk_demod.o phase12_decode.o call_init_tone_probe.o v90_dil_rx.o
 ENCODE_OBJS = vpcm_encode.o v90.o v91.o vpcm_cp.o v92_phase4_decode.o v90_dil_measure.o v90_dil_presets.o
@@ -163,6 +163,8 @@ V90_UPSTREAM_REPLAY_OBJS = v90_upstream_replay.o
 PORT_CP_STREAM_TEST_OBJS = port/cp_stream_test.o port/cp_stream.o v90_cp_rx.o vpcm_cp.o
 # ESP32 port, layer 3: the V.90 upstream DATA feed-forward decode core.
 PORT_DATA_RX_TEST_OBJS = port/data_rx_test.o port/data_rx.o
+# ESP32 port: fixed-point kernels, checked against float on real probe data.
+PORT_V34_FIXED_TEST_OBJS = port/v34_fixed_test.o
 # The whole engine with the SIP front end swapped for a file reader, so a
 # recorded call can be run through V.8 and Phases 2-4 exactly as the media
 # thread runs it.  Everything $(TARGET) links except sip_modem.o, which is
@@ -302,6 +304,9 @@ vpcm_encode: $(ENCODE_OBJS) spandsp $(PJ_BUILD_PREREQ)
 
 v92_trn2u_replay: $(V92_REPLAY_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(V92_REPLAY_OBJS) -o $@ $(LDFLAGS)
+
+port_v34_fixed_test: $(PORT_V34_FIXED_TEST_OBJS)
+	$(CC) $(PORT_V34_FIXED_TEST_OBJS) -o $@ -lm
 
 port_data_rx_test: $(PORT_DATA_RX_TEST_OBJS)
 	$(CC) $(PORT_DATA_RX_TEST_OBJS) -o $@ -lm
