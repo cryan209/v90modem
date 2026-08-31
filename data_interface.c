@@ -112,6 +112,10 @@ static int          split_mode = 0;
  */
 static t31_state_t *t31        = NULL;
 static at_state_t  *at         = NULL;
+/* T.31 owns both the DTE command parser and the fax datapumps.  The PTY
+ * reader issues +F commands while the RTP media callbacks call t31_rx/tx;
+ * SpanDSP's state machine is not re-entrant across that boundary. */
+static pthread_mutex_t t31_mtx = PTHREAD_MUTEX_INITIALIZER;
 static int          di_mode    = 0; /* Mode A: 0=command, 1=online data */
 static volatile int connected  = 0; /* carrier is up */
 static volatile int running    = 0;
@@ -197,7 +201,11 @@ static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
 
     case AT_MODEM_CONTROL_HANGUP:
     case AT_MODEM_CONTROL_ONHOOK:
-        if (hangup_cb)
+        /* A remote SIP teardown is reported to T.31 as HANGUP so it can
+         * flush its datapumps.  Do not feed that notification back into the
+         * engine as a new local ATH: di_on_disconnected() has already cleared
+         * connected, and the engine has just returned to ME_IDLE. */
+        if (hangup_cb && connected)
             hangup_cb(cb_user_data);
         break;
 
@@ -318,8 +326,10 @@ static void fc2_dispatch_line(void)
     if (!fc2_at_line(fc2_line)) {
         int n = snprintf(line, sizeof(line), "%s\r", fc2_line);
 
+        pthread_mutex_lock(&t31_mtx);
         t31_at_rx(t31, line, n);
         sync_fax_class();
+        pthread_mutex_unlock(&t31_mtx);
     }
     fc2_line_len = 0;
 }
@@ -351,8 +361,10 @@ static void handle_command_bytes(const uint8_t *buf, int n)
         return;
     }
 
+    pthread_mutex_lock(&t31_mtx);
     t31_at_rx(t31, (const char *)buf, n);
     sync_fax_class();
+    pthread_mutex_unlock(&t31_mtx);
     if (!split_mode && connected && di_mode == 0
         && at->at_rx_mode == AT_MODE_CONNECTED) {
         di_mode = 1;
@@ -591,7 +603,9 @@ void di_on_connected(int rate)
     }
 
     if (di_fax_active()) {
+        pthread_mutex_lock(&t31_mtx);
         t31_call_event(t31, AT_CALL_EVENT_CONNECTED);
+        pthread_mutex_unlock(&t31_mtx);
         return;
     }
 
@@ -621,8 +635,10 @@ void di_on_disconnected(void)
 
     if (di_fax_active()) {
         /* Lets T.31 stop its datapumps and flush any pending DLE ETX. */
+        pthread_mutex_lock(&t31_mtx);
         t31_call_event(t31, AT_CALL_EVENT_HANGUP);
         at_put_response_code(at, AT_RESPONSE_CODE_NO_CARRIER);
+        pthread_mutex_unlock(&t31_mtx);
         return;
     }
     at_call_event(at, AT_CALL_EVENT_HANGUP);
@@ -631,9 +647,11 @@ void di_on_disconnected(void)
 
 void di_on_ring(void)
 {
-    if (di_fax_active())
+    if (di_fax_active()) {
+        pthread_mutex_lock(&t31_mtx);
         t31_call_event(t31, AT_CALL_EVENT_ALERTING);
-    else
+        pthread_mutex_unlock(&t31_mtx);
+    } else
         at_call_event(at, AT_CALL_EVENT_ALERTING);
 }
 
@@ -665,11 +683,18 @@ int di_write_data(const uint8_t *buf, int len)
  */
 int di_fax_active(void)
 {
-    return (at && at->fclass_mode != 0);
+    int active;
+
+    pthread_mutex_lock(&t31_mtx);
+    active = (at && at->fclass_mode != 0);
+    pthread_mutex_unlock(&t31_mtx);
+    return active;
 }
 
 int di_fax_rx(const int16_t *amp, int len)
 {
+    int n;
+
     if (!amp || len <= 0)
         return 0;
     /* Class 2.0 runs T.30 in the DCE, so its audio belongs to fax_class2.c;
@@ -680,7 +705,10 @@ int di_fax_rx(const int16_t *amp, int len)
         return 0;
     /* t31_rx() does not modify the samples; the non-const prototype is
      * SpanDSP's, shared with paths that do. */
-    return t31_rx(t31, (int16_t *) amp, len);
+    pthread_mutex_lock(&t31_mtx);
+    n = t31_rx(t31, (int16_t *) amp, len);
+    pthread_mutex_unlock(&t31_mtx);
+    return n;
 }
 
 int di_fax_tx(int16_t *amp, int len)
@@ -693,7 +721,9 @@ int di_fax_tx(int16_t *amp, int len)
         return fc2_tx(amp, len);
     if (!t31)
         return 0;
+    pthread_mutex_lock(&t31_mtx);
     n = t31_tx(t31, amp, len);
+    pthread_mutex_unlock(&t31_mtx);
     if (n < 0)
         n = 0;
     if (n < len)
