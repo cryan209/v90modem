@@ -559,6 +559,21 @@ fixed-compare:
 		  "`grep -o 'sym err [0-9.]*' .fixcmp-$$f.log | awk '{print $$3}' | sort -g | awk '{a[NR]=$$1} END{print (NR? a[int(NR/2)+1] : \"n/a\")}'`" \
 		  "`grep -o 'shell bad [0-9]*%' .fixcmp-$$f.log | grep -o '[0-9]*' | sort -n | awk '{a[NR]=$$1} END{print (NR? a[int(NR/2)+1] : \"n/a\")}'`"; \
 	done
+	@# A recording on which neither arm acquires B1 produces no symbol-error
+	@# figures at all, and the two arms then "agree" on nothing.  Say so, loudly:
+	@# a comparison harness that reports n/a is worse than one that fails.
+	@for f in float fixed; do \
+		if [ "`grep -c 'B1 acquired' .fixcmp-$$f.log`" = "0" ]; then \
+			echo "  !! $$f never acquired B1 on this recording"; \
+			echo "     (`grep -o 'B1 giving up[^;]*' .fixcmp-$$f.log | head -1`)"; \
+			vacuous=1; \
+		fi; \
+	done; \
+	if [ -n "$$vacuous" ]; then \
+		echo "  !! the comparison above is VACUOUS -- the arms agree because"; \
+		echo "     neither decoded anything.  Pick a recording that acquires."; \
+		exit 1; \
+	fi
 
 clean:
 	rm -f $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(V92_REPLAY_OBJS) $(DATA_STACK_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test

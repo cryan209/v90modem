@@ -96,8 +96,9 @@
    the logs differ for a reason that has nothing to do with the receiver.  Its
    medians do agree (0.039 and 0.660 at both sizes).
 
-   And rebuild EVERYTHING when changing it.  spandsp-master/src/*.o, .libs/*.o
-   and *.lo do not rebuild on a header change any more than the repo objects
+   And rebuild EVERYTHING when changing it.  The spandsp objects under
+   spandsp-master/src (.o, .libs, .lo alike) do not rebuild on a header
+   change any more than the repo objects
    do; a partial rebuild here segfaults in v34_rx_phase3_wait_s_symbol reading
    s->last_sample at a stale offset, which looks exactly like a DSP failure and
    is not one. */

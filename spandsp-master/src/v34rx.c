@@ -10986,7 +10986,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                 &&  !s->v90_t3_in_b1)
             {
                 fprintf(stderr,
-                        "[T3PROBE] symbol=%d next_symbol=%" PRId64
+                        "[T3PROBE] symbol=%" PRId64 " next_symbol=%" PRId64
                         " pre=%d frac=%.9f conjugate=%d rate=%d fc=%.6f"
                         " input_count=%" PRId64 " next_output=%" PRId64
                         " raw_count=%" PRId64 " qam_sample_time=%" PRId64
@@ -11144,7 +11144,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                    deriving it.  Fifth column is the T/3 symbol position, which
                    pins the sub-sample phase: the input sample is 5/6 of it. */
                 fprintf(s->v90_t3_sym_dump,
-                        "%d %.4f %.4f %" PRId64 " %" PRId64 " %.6f\n",
+                        "%" PRId64 " %.4f %.4f %" PRId64 " %" PRId64 " %.6f\n",
                         s->v90_t3_data_symbols, y.re, y.im,
                         (int64_t) s->qam_sample_time,
                         (int64_t) s->v90_t3_next_symbol,

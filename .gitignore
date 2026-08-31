@@ -143,3 +143,9 @@ artifacts/courier-ja-3200low/README.md
 # fixed/float build-mode stamp and fixed-compare scratch logs
 .build-mode
 .fixcmp-*.log
+v32bis_spandsp_test
+port_cp_stream_test
+port_data_rx_test
+port_v34_fixed_test
+port_v34_fixed_lms_test
+port_v34_fixed_solve_test
