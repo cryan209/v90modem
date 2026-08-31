@@ -546,14 +546,33 @@ T.30 never had a document, so the call collapses on its own account within the
 first second and the DCN lands after the far end has stopped listening. That is
 the scenario, not the implementation, and the weaker claim is the honest one.
 
-`test_multipage_transmit` sends two pages, the first ended with MPS and the
-second with EOP, and requires the far end to hold **both, in order, each the
-one that was sent** — plus a check that the two pages differ, so "both intact"
+`test_multipage_transmit` runs at `EC=0`, `EC=2` and `EC=1`, and the ECM arms
+also check the DCS's frame size and the `T4_FCD` lengths across both pages --
+T.30 A.1 rebuilds the ECM block per page, so a size carried over from a stale
+partial page would show there. It sends two pages, the first ended with MPS
+and the second with EOP, and requires the far end to hold **both, in order,
+each the one that was sent** — plus a check that the two pages differ, so "both intact"
 means something. It runs twice, with the call answered after the document and
 again **between** the pages. The second needs a realistic gap to be worth
 anything: at 3 s it passes with the deferred start removed, because T.30 has
 not yet given up on having no document; at 10 s it does not, which is what
 makes it a test of the deferral rather than of nothing.
+
+`test_multipage_receive` is the other direction, and is where the class 2.0
+bookkeeping and T.30's ECM buffering meet: one `+FDR` per page, with the post
+page response held between them, then a last `+FDR` that takes no page and
+ends the session. It runs at all three EC settings and checks each page's
+image, its `+FET:` (0 = MPS after the first, 2 = EOP after the last) and its
+line counts.
+
+**The two pages are deliberately different lengths**, 80 rows and 72. The
+counts are latched when a page ends and held until the DTE collects it, and
+with pages of equal length a latch that was never updated would report the
+right number for the second page as well -- the test would pass on a modem
+that only ever measured page one. Both failure modes are confirmed to bite:
+reading the statistics when the DTE asks, as the code did before, fails page
+one of every arm and page two of the ECM ones; latching only the first page
+fails page two of all three.
 
 `test_unfinished_document_discarded` hands over a page that says another
 follows, drops the call, and makes a second one — deliberately without leaving

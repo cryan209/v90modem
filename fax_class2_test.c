@@ -82,6 +82,66 @@ static int write_test_tiff(const char *path)
 }
 
 /*
+ * The same, as a document of several pages -- each with its own row_variant,
+ * so "page two arrived" means something.  This is what the far end transmits
+ * in the multi-page receive test.
+ */
+/*
+ * Each page of the far end's document is a different length as well as a
+ * different pattern.  Both matter: 8.4.3's line counts are latched when the
+ * page ends and held until the DTE collects it, and pages of equal length
+ * would report the right number even if the latch were never updated.
+ */
+static int page_rows(int page)
+{
+    return IMAGE_ROWS - 8 * page;
+}
+
+static int write_test_tiff_pages(const char *path, int pages)
+{
+    TIFF *tif;
+    uint8_t row[IMAGE_WIDTH / 8];
+    int saved = row_variant;
+
+    if ((tif = TIFFOpen(path, "w")) == NULL)
+        return 0;
+    for (int page = 0; page < pages; page++) {
+        row_variant = page;
+        TIFFSetField(tif, TIFFTAG_IMAGEWIDTH, IMAGE_WIDTH);
+        TIFFSetField(tif, TIFFTAG_IMAGELENGTH, page_rows(page));
+        TIFFSetField(tif, TIFFTAG_BITSPERSAMPLE, 1);
+        TIFFSetField(tif, TIFFTAG_SAMPLESPERPIXEL, 1);
+        TIFFSetField(tif, TIFFTAG_COMPRESSION, COMPRESSION_CCITTFAX4);
+        TIFFSetField(tif, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_MINISWHITE);
+        TIFFSetField(tif, TIFFTAG_FILLORDER, FILLORDER_LSB2MSB);
+        TIFFSetField(tif, TIFFTAG_ROWSPERSTRIP, -1L);
+        TIFFSetField(tif, TIFFTAG_XRESOLUTION, 204.0);
+        TIFFSetField(tif, TIFFTAG_YRESOLUTION, 196.0);
+        TIFFSetField(tif, TIFFTAG_RESOLUTIONUNIT, RESUNIT_INCH);
+        TIFFSetField(tif, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+        TIFFSetField(tif, TIFFTAG_SUBFILETYPE, FILETYPE_PAGE);
+        TIFFSetField(tif, TIFFTAG_PAGENUMBER, (uint16_t) page, (uint16_t) pages);
+
+        for (int y = 0; y < page_rows(page); y++) {
+            make_row(row, y);
+            if (TIFFWriteScanline(tif, row, (uint32_t) y, 0) < 0) {
+                TIFFClose(tif);
+                row_variant = saved;
+                return 0;
+            }
+        }
+        if (!TIFFWriteDirectory(tif)) {
+            TIFFClose(tif);
+            row_variant = saved;
+            return 0;
+        }
+    }
+    TIFFClose(tif);
+    row_variant = saved;
+    return 1;
+}
+
+/*
  * Read a page back and compare it against what make_row() would have put
  * there.  Returns the number of differing rows, or -1 if the page could not
  * be read at all.
@@ -455,6 +515,9 @@ static const char *PEER_RX   = "/tmp/fc2_test_peer_rx.tif";
 static const char *PEER_TX   = "/tmp/fc2_test_peer_tx.tif";
 static const char *DTE_RX    = "/tmp/fc2_test_dte_rx.tif";
 static const char *MULTI_TIFF = "/tmp/fc2_test_multi.tif";
+/* The far end's own multi-page document, kept separate from the one the DTE
+ * feeds through +FDT so neither test can be fed the other's file. */
+static const char *PEER_MULTI = "/tmp/fc2_test_peer_multi.tif";
 
 static void test_parameters(void)
 {
@@ -1221,14 +1284,15 @@ static int  send_page_via_fdt(int variant, int ppm)
     return 1;
 }
 
-static void test_multipage_transmit(int connect_midway)
+static void test_multipage_transmit(int connect_midway, int ec)
 {
     fax_state_t *peer;
+    char cmd[40];
     int rows = 0;
     int bad;
 
-    printf("multi-page +FDT, call answered %s (T.32 8.3.3.3, 8.3.3.7)\n",
-           connect_midway ? "between the pages" : "after the document");
+    printf("multi-page +FDT, call answered %s (EC=%d) (T.32 8.3.3.3, 8.3.3.7)\n",
+           connect_midway ? "between the pages" : "after the document", ec);
 
     peer_ecm = 1;
     peer_t6 = 1;
@@ -1242,7 +1306,7 @@ static void test_multipage_transmit(int connect_midway)
 
     at("AT+FLI=\"sender\"");
     at("AT+FNR=0,1,0,0");
-    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+    snprintf(cmd, sizeof(cmd), "AT+FIS=1,3,0,2,0,%d,0,0,0", ec); at(cmd);
     at("ATD5551234");
 
     /* Page one, ended with MPS: another page of the same format follows. */
@@ -1306,6 +1370,179 @@ static void test_multipage_transmit(int connect_midway)
     bad = compare_page(PEER_RX, 0, &rows);
     check(bad > 0, "the two pages are not the same image");
     row_variant = 0;
+
+    if (ec) {
+        /* Both pages go out in error correction mode, at the frame size the
+         * DCS names.  T.30 A.1 restarts the ECM block per page, so a size
+         * that came from a stale partial page would show here. */
+        check(peer_saw_dcs_ecm64 == (ec == 1),
+              "the DCS says which ECM frame size is in use");
+        check(peer_fcd_count > 2 && peer_fcd_max == ((ec == 1) ? 64 : 256),
+              "both pages go out in frames of that size");
+        if (peer_fcd_max != ((ec == 1) ? 64 : 256))
+            printf("       (%d FCD frames, %d..%d octets, DCS bit 28 = %d)\n",
+                   peer_fcd_count, peer_fcd_min, peer_fcd_max,
+                   peer_saw_dcs_ecm64);
+    }
+
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
+/*
+ * The other direction: a multi-page document arriving, one +FDR per page.
+ * This is where the class 2.0 bookkeeping and T.30's ECM buffering meet.  A
+ * receiving DCE hands over one page and then holds the post page response
+ * (8.3.4.3) until the next +FDR releases it, so the pages are strictly
+ * interleaved with the DTE -- and 8.4.3's line counts are latched per page
+ * when the page ends, which is only safe because that hold stops T.30
+ * starting the next one.  Two pages is what tells a latch that is reused
+ * from a latch that is overwritten.
+ *
+ * 8.4.4.1 Table 19: <ppm> 1 is MPS, another page follows; 2 is EOP, that is
+ * the document.  The last +FDR takes no page and ends the session (Table 17).
+ */
+static void test_multipage_receive(int ec)
+{
+    fax_state_t *peer;
+    t4_rx_state_t *decode;
+    char cmd[40];
+    int rows = 0;
+    int bad;
+
+    printf("multi-page +FDR: two pages, one +FDR each (EC=%d)\n", ec);
+
+    unlink(DTE_RX);
+    if (!write_test_tiff_pages(PEER_MULTI, 2)) {
+        check(0, "the far end's two-page document is written");
+        return;
+    }
+
+    peer_ecm = 1;
+    peer_t6 = 1;
+    peer_nsf = NULL;
+    peer_nss = NULL;
+    peer_interrupt = 0;
+
+    fc2_select(0);
+    fc2_select(1);
+
+    dte_reset();
+    at("AT+FLI=\"receiver\"");
+    at("AT+FNR=0,1,0,0");
+    at("AT+FBO=0");
+    at("AT+FCR=1");
+    snprintf(cmd, sizeof(cmd), "AT+FIS=1,3,0,2,0,%d,0,0,0", ec); at(cmd);
+    at("ATA");
+
+    peer = peer_start(1, PEER_MULTI, NULL);
+    check(peer != NULL, "the far-end fax terminal starts");
+    if (!peer)
+        return;
+
+    fc2_on_connected();
+
+    for (int page = 0; page < 2; page++) {
+        char want[48];
+        const char *body;
+        int start;
+        int saw_dle = 0;
+
+        dte_reset();
+        at("AT+FDR");
+        pump_until(peer, 60 * 50, "+FPS:");
+
+        snprintf(want, sizeof(want), "+FPS:1,%d,0,0,0", page_rows(page));
+        check(dte_saw(want), page ? "page two reports its own line counts"
+                                  : "page one reports its line counts");
+        if (!dte_saw(want)) {
+            const char *p = dte_find("+FPS:");
+
+            if (p)
+                printf("       (reported %.24s)\n", p);
+        }
+
+        /* T.32 8.4.4.1 Table 19: <ppm> 0 is MPS, another page of the same
+         * document; 2 is EOP, the end of it. */
+        check(dte_saw(page ? "+FET:2" : "+FET:0"),
+              page ? "the last page is followed by EOP"
+                   : "the first page is followed by MPS");
+        if (!dte_saw(page ? "+FET:2" : "+FET:0")) {
+            const char *p = dte_find("+FET:");
+
+            printf("       (page %d: %.8s)\n", page + 1,
+                   p ? p : "no +FET at all");
+        }
+
+        /* And the page itself, decoded back off the DTE link. */
+        body = dte_find("CONNECT\r\n");
+        check(body != NULL, "the page follows CONNECT");
+        if (!body)
+            break;
+        start = (int) (body - dte_buf) + 9;
+
+        row_variant = page;
+        decode = t4_rx_init(NULL, DTE_RX, T4_COMPRESSION_T4_2D);
+        check(decode != NULL, "the decoder for the DTE stream starts");
+        if (!decode)
+            break;
+        t4_rx_set_rx_encoding(decode, T4_COMPRESSION_T4_1D);
+        t4_rx_set_image_width(decode, IMAGE_WIDTH);
+        t4_rx_start_page(decode);
+        for (int i = start; i < dte_len; i++) {
+            uint8_t byte = (uint8_t) dte_buf[i];
+
+            if (saw_dle) {
+                saw_dle = 0;
+                if (byte == 0x03)
+                    break;
+                if (byte != 0x10)
+                    continue;
+            } else if (byte == 0x10) {
+                saw_dle = 1;
+                continue;
+            }
+            t4_rx_put(decode, &byte, 1);
+        }
+        t4_rx_end_page(decode);
+        t4_rx_release(decode);
+        t4_rx_free(decode);
+
+        bad = compare_page(DTE_RX, 0, &rows);
+        check(bad == 0 && rows == page_rows(page),
+              page ? "page two is the page the far end sent"
+                   : "page one is the page the far end sent");
+        if (bad != 0 || rows != page_rows(page))
+            printf("       (page %d: %d rows, %d differing)\n",
+                   page + 1, rows, bad);
+
+        /* The pages must differ, or "each is the page that was sent" is
+         * satisfied by any two identical ones. */
+        if (page == 1) {
+            row_variant = 0;
+            bad = compare_page(DTE_RX, 0, &rows);
+            check(bad > 0, "the two pages are not the same image");
+        }
+        row_variant = 0;
+    }
+
+    /* Table 17: the +FDR that releases the last response ends the session. */
+    dte_reset();
+    release_post_page(peer);
+    check(dte_saw("+FHS:"), "the last +FDR ends the session");
+    check(peer_done && peer_status == T30_ERR_OK,
+          "the far end reports a good session");
+
+    if (ec) {
+        check(peer_saw_dcs_ecm64 == (ec == 1),
+              "the far end's DCS says which ECM frame size is in use");
+        check(peer_fcd_count > 2 && peer_fcd_max == ((ec == 1) ? 64 : 256),
+              "both pages arrive in frames of that size");
+        if (peer_fcd_max != ((ec == 1) ? 64 : 256))
+            printf("       (%d FCD frames, %d..%d octets, DCS bit 28 = %d)\n",
+                   peer_fcd_count, peer_fcd_min, peer_fcd_max,
+                   peer_saw_dcs_ecm64);
+    }
 
     fax_free(peer);
     fc2_on_disconnected();
@@ -2064,8 +2301,15 @@ int main(void)
     test_receive(1, 2);
     test_bit_order_is_real();
     test_fnr();
-    test_multipage_transmit(0);
-    test_multipage_transmit(1);
+    test_multipage_transmit(0, 0);
+    test_multipage_transmit(1, 0);
+    /* The same, in error correction mode -- and at both frame sizes, since
+     * T.30 A.1 rebuilds the ECM block per page. */
+    test_multipage_transmit(0, 2);
+    test_multipage_transmit(1, 1);
+    test_multipage_receive(0);
+    test_multipage_receive(2);
+    test_multipage_receive(1);
     test_unfinished_document_discarded();
     test_post_page_hold();
     test_held_response_timeout();

@@ -230,6 +230,9 @@ chooses, the receiver asks in DIS bit 7 -- and the DCS now says which. It also
 read bit 28 inverted, which is latent for a receiver and bites on a
 turnaround. The EC=1 tests grade the DCS bit **and** the T4_FCD payload
 lengths at the far end: either alone passes a modem that does not do it.
+Multi-page runs both ways at all three EC settings; on receive **the two pages
+are different lengths on purpose**, since equal ones let a line-count latch
+that is never updated report the right number for page two as well.
 
 Neither class has hardware interop. See `docs/fax_class_at.md`.
 
