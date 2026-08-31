@@ -127,6 +127,46 @@ reverse the octets in those reports and nothing else. Note 3 is explicit that
 `+FBO` does **not** affect the `+FNC`, `+FNF` or `+FNS` responses, so those
 stay in the frame's own order.
 
+### Procedure interrupts: +FIE, +FVO (8.5.2.1, 8.4.4.2, 8.3.3.8, 8.3.4.8)
+
+There are two of them and they go opposite ways.
+
+**A transmitting DTE asks** with 8.3.3.8's `<DLE><pri>`, embedded in the phase C
+stream before the page terminator. T.30 carries the request in the post page
+message, which becomes a PRI-Q, and the remote grants by answering PIN or PIP.
+
+**A receiving DTE asks** by setting `+FPS` to 4 (PIN) or 5 (PIP) before the
+`+FDR`, which makes T.30's post page *response* a PIN or PIP.
+
+`+FIE=1` enables all of it. With `+FIE=0` (the default) a remote's requests are
+ignored and not reported, and the PRI-Q codes in `+FET:` are replaced by their
+non-PRI equivalents, as 8.5.2.1 requires. With `+FIE=1` a received PRI-Q is
+reported in `+FET:` and `+FPS` is adjusted to 4 or 5, so the DTE can leave it in
+place to accept or overwrite it to refuse.
+
+`+FVO` (8.4.4.2) is reported when the interrupt has been negotiated. The
+session is suspended, the DCE stays off-hook and `+FCLASS` is unchanged; the
+DTE decides whether to resume or hang up.
+
+While implementing this, 8.3.3.7 turned out to specify the **page terminator**
+too, and this had it wrong: a transmitted page ends with `<DLE><ppm>` — `,` for
+MPS, `;` for EOM, `.` for EOP — not `<DLE><ETX>`, which is the *receive*
+direction's terminator (8.3.4.4). All three are accepted now, and `<DLE><ETX>`
+is kept as a lenient synonym for EOP because that is what a stream-oriented DTE
+tends to send. Table 15 also shows a `+FDT` completing with `OK` or `ERROR` and
+nothing else, so the `+FPS:` report this used to emit there is gone — 8.4.3
+scopes that report to `+FDR`, and the page status goes into the `+FPS`
+parameter, which `AT+FPS?` reads.
+
+**One change to the vendored SpanDSP.** Its receiver has the interrupt case as
+an empty `if (s->remote_interrupts_allowed) { }` TODO, so a receiving station
+could never answer PIP or PIN. The post page response now honours
+`local_interrupt_pending` — PIP in place of MCF, PIN in place of RTN, which is
+the same page verdict with the request attached. It is guarded by a flag that
+is false unless a DTE explicitly asks, so ordinary sessions are untouched, and
+it is what makes both directions testable: the far end in the test grants an
+interrupt because of it. Removing it fails four checks.
+
 ### +FNS, non-standard frames (8.5.1.6, 8.4.2.4)
 
 `AT+FNS="<hex octets>"` loads the FIF of a non-standard frame, up to 90 octets.
@@ -219,12 +259,13 @@ this implements.
 Actions: `+FDT` (8.3.3), `+FDR` (8.3.4), `+FKS` (8.3.5), `+FIP` (8.3.6).
 Parameters: `+FCC` (8.5.1.1), `+FIS` (8.5.1.2), `+FCS` (8.5.1.3),
 `+FLI`/`+FPI` (8.5.1.5), `+FCR` (8.5.1.9), `+FPS` (8.5.2.2), `+FHS` (8.5.2.7),
-`+FNS` (8.5.1.6), `+FNR` (8.5.1.11), `+FBU` (8.5.1.10), `+FLP` (8.5.1.7), `+FSP` (8.5.1.8), `+FAP` (8.5.1.12),
+`+FNS` (8.5.1.6), `+FIE` (8.5.2.1), `+FNR` (8.5.1.11), `+FBU` (8.5.1.10), `+FLP` (8.5.1.7), `+FSP` (8.5.1.8), `+FAP` (8.5.1.12),
 `+FSA`/`+FPA`/`+FPW` (8.5.1.13), `+FBS` (8.5.3.2), `+FBO` (8.5.3.4), `+FMI`/`+FMM`/`+FMR`,
 and the accepted-and-stored set `+FCQ +FIE +FCT +FMS +FEA +FFC +FAA +FRY`.
 Reports: `+FCS:` for the negotiated session, `+FIS:`/`+FTC:` for the far end's
 capabilities, `+FCI:`/`+FTI:`/`+FPI:` for its identification, `+FNF:` for its
-non-standard frames (and `+FNC:`/`+FNS:` for the other two kinds),
+non-standard frames (and `+FNC:`/`+FNS:` for the other two kinds), `+FVO` for
+a negotiated procedure interrupt,
 `+FHT:`/`+FHR:` for the HDLC frames themselves, `+FPO`
 for its offer to be polled, `+FPS:<ppr>,<lc>,
 <blc>,<cblc>,<lbc>` and `+FET:<ppm>` per page, `+FHS:` at the end of the
@@ -289,10 +330,16 @@ pause to get ready does not get it.
 
 **The post page response is not held for the DTE.** 8.5.2.2 and 8.3.4.3 let a
 receiving DTE write a modified `+FPS` before the next `+FDR`, which releases the
-post page message — that is how a DTE requests a retrain or a procedure
-interrupt. Here T.30 answers on its own and `+FPS:` is a report of what it did.
-Procedure interrupts (`+FIE`, `+FVO`, the PRI-Q codes) are accepted as
-parameters and never acted on.
+post page message — that is how a DTE would request a retrain, or a procedure
+interrupt after seeing the page. Here T.30 answers on its own, so a receive-side
+`+FPS` request has to be in before the page completes; the tests set it with the
+`+FDR` that starts the reception. Requesting a *retrain* (`+FPS=2`) this way is
+not implemented at all.
+
+**`+FVO` on a transmit-side interrupt does not accompany the `+FDT` result.**
+Table 15 pairs them, but a `+FDT` issued before the call has already completed
+by the time the far end grants anything — the ordering deviation above. The
+`+FVO` still reaches the DTE, on its own.
 
 ## Reading the specifications
 
@@ -335,6 +382,14 @@ the received DIS from echoing our own parameters back; both would look right
 otherwise. The `+FNF:` check uses an NSF the far end was given, so the hex is
 compared against a known frame.
 
+`test_procedure_interrupt` checks both directions **on the wire**, from the far
+end's own frame handler, because both are a substitution inside a frame that
+gets sent either way — a session that ignored the request entirely still
+completes and still reports `OK`. It covers `<DLE><pri>` turning the post page
+message into a PRI-Q, the far end granting with PIP, the `+FVO` that follows,
+`+FIE=0` suppressing it, the `+FET:` substitution in both settings, and a
+receive-side `+FPS=5` turning the post page response into a PIP.
+
 `test_fns` checks the parameter's own rules and then that the octets **reach
 the far end** — captured by a real-time frame handler on the peer as the frame
 arrives, because T.30 frees its received-frame store in `release_resources()`
@@ -364,7 +419,6 @@ an `ATE0` that must still reach T.31, and the way back to class 0), which
 
 - Class 2 (the pre-standard `AT+FCLASS=2`) — only 2.0 is offered. The two are
   not compatible, and 2.0 is the ITU-T one.
-- Procedure interrupts — see the deviations above.
 - `+FDD`/`+FIT`/`+FLO`/`+FPR` — these are T.31 DTE-link parameters and stay
   with the T.31 interpreter.
 - T.38 — `t31_init()` is given no T.38 packet handler and the context is put in

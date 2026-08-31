@@ -195,7 +195,9 @@ because SpanDSP's T.30 needs the document to exist by the DIS it receives.
 same one T.31's class 1 path uses with no reversal. `+FNR` negotiation
 reporting is implemented off SpanDSP's real-time frame handler, and so are
 `+FBU`'s `+FHT:`/`+FHR:` frame reports, `+FNS` non-standard frames and polling
-(`+FLP`, `+FSP`, `+FPO`). **Watch the FCF low bit**: in DIS/DTC, CSI/CIG and
+(`+FLP`, `+FSP`, `+FPO`) and procedure interrupts (`+FIE`, `+FVO`, `<DLE><pri>`
+— which needed a small addition to SpanDSP's receiver, where answering PIP/PIN
+was an empty TODO). **Watch the FCF low bit**: in DIS/DTC, CSI/CIG and
 NSF/NSC it is a real distinction, but in DCS, TSI and NSS it is a don't-care
 set from whether a DIS was received, so those must be matched with `& 0xFE` —
 matching TSI exactly reported every calling station's TSI as a CSI.

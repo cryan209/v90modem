@@ -39,6 +39,17 @@
 #define DLE 0x10
 #define ETX 0x03
 
+/*
+ * T.32 transparent data commands, the <DLE><chr> pairs a transmitting DTE
+ * embeds in the phase C stream.  8.3.3.7's three post page messages end the
+ * page and say what follows; 8.3.3.8's <pri> asks for a procedure interrupt.
+ * T.50 cell references, so 2/12 is 0x2C and so on.
+ */
+#define T32_PPM_MPS 0x2C    /* another page, same format */
+#define T32_PPM_EOM 0x3B    /* another document, re-negotiate in phase B */
+#define T32_PPM_EOP 0x2E    /* no more pages or documents */
+#define T32_PRI     0x21    /* request a procedure interrupt */
+
 /* T.30's HDLC address and control fields, which SpanDSP keeps private. */
 #define T30_ADDRESS_FIELD               0xFF
 #define T30_CONTROL_NON_FINAL_FRAME     0x03
@@ -95,6 +106,7 @@ static fc2_params_t     p_cs;              /* +FCS, negotiated (read only) */
 static char             local_id[21];      /* +FLI */
 static char             polling_id[21];    /* +FPI */
 static int              p_cr;              /* +FCR, willing to receive */
+static int              p_ie;              /* +FIE, procedure interrupts */
 static int              p_lp;              /* +FLP, a document is pollable */
 static int              p_sp;              /* +FSP, we want to poll */
 static int              p_ap[3];           /* +FAP: sub-address, SEP, PWD reporting */
@@ -113,7 +125,7 @@ static uint8_t          nsf_fif[FNS_MAX_OCTETS];
 static int              nsf_fif_len;
 static int              p_bo;              /* +FBO, phase C bit order */
 static int              p_bu;              /* +FBU, HDLC frame reporting */
-static int              p_cq, p_ie, p_ct, p_ms, p_ea, p_ffc, p_aa, p_ry;
+static int              p_cq, p_ct, p_ms, p_ea, p_ffc, p_aa, p_ry;
 
 /* T.32 8.5.1.11 +FNR: which negotiation messages get reported to the DTE. */
 static struct {
@@ -144,6 +156,9 @@ static int              rx_pages_given;    /* pages handed to the DTE */
 static int              fdr_pending;       /* DTE is waiting in +FDR */
 static int              fdt_await_page;    /* +FDT is waiting for the page to go */
 static int              remote_pollable;   /* the remote's DIS had bit 9 set */
+static int              interrupt_negotiated; /* +FVO reported, session suspended */
+static int              interrupt_requested;  /* the DTE sent <DLE><pri> */
+static int              page_ppm = T32_PPM_EOP; /* how the DTE ended the page */
 static int              dtc_seen;          /* a DTC arrived: we are being polled */
 static int              dtc_refused;       /* ... and +FLP was 0 */
 static uint8_t          last_ident_fcf;    /* CSI, CIG or TSI */
@@ -709,6 +724,18 @@ static int phase_d_handler(void *user_data, int result)
     if (known) {
         /* A response to a page we sent. */
         page_status = v;
+        /*
+         * T.32 8.4.4.2: PIN and PIP are the remote granting a procedure
+         * interrupt.  The session is suspended and the DCE stays off-hook
+         * with +FCLASS unchanged; the DTE decides whether to resume or hang
+         * up.  Reported here rather than beside the +FDT's result code
+         * because the +FDT may already have completed -- see the ordering
+         * deviation in docs/fax_class_at.md.
+         */
+        if (p_ie && (v == 4 || v == 5) && !interrupt_negotiated) {
+            interrupt_negotiated = 1;
+            queue_line("\r\n+FVO\r\n");
+        }
     }
 
     v = t30_ppm_to_fet(result, &known);
@@ -717,6 +744,21 @@ static int phase_d_handler(void *user_data, int result)
          * quality checking off the page status is 1, which is what this DCE
          * reports -- T.30's own error correction is what decides. */
         page_status = 1;
+        if (v >= 3) {
+            /*
+             * A PRI-Q: the remote is asking for a procedure interrupt.
+             * T.32 8.5.2.1 -- with +FIE=0 they are ignored and not reported,
+             * and the +FET: report carries the non-PRI equivalent; with
+             * +FIE=1 the PRI-Q is reported and +FPS is adjusted to 4 or 5 so
+             * the DTE can leave it in place to accept, or overwrite it to
+             * refuse.
+             */
+            if (p_ie) {
+                page_status = (v == 5) ? 5 : 4;
+            } else {
+                v -= 3;
+            }
+        }
         pending_fet = v;
         have_fet = 1;
     }
@@ -740,9 +782,14 @@ static int phase_d_handler(void *user_data, int result)
              * and it completes with ERROR if the remote rejected the page
              * (RTN or PIN) rather than OK.
              */
+            /*
+             * T.32 8.3.3.4 and Table 15: the +FDT completes with OK or ERROR
+             * and nothing else.  The page status goes into the +FPS
+             * parameter, which the DTE can read; 8.4.3's +FPS: REPORT belongs
+             * to +FDR, not here.
+             */
             fdt_await_page = 0;
             tx_tiff_ready = 0;
-            queue_line("\r\n+FPS:%d\r\n", page_status);
             queue_line("\r\n%s\r\n",
                        (page_status == 2 || page_status == 4) ? "ERROR" : "OK");
         }
@@ -800,6 +847,14 @@ static void session_start(void)
     t30_set_supported_compressions(t30, df_to_supported_compressions(p_is.df));
     t30_set_supported_bilevel_resolutions(t30, vr_to_resolutions(p_is.vr));
     t30_set_ecm_capability(t30, p_is.ec != 0);
+    /* T.32 8.5.2.1: whether the remote's procedure interrupt requests are
+     * accepted and negotiated, or ignored. */
+    t30_remote_interrupts_allowed(t30, p_ie ? true : false);
+    /* A <DLE><pri> that arrived while the page was being spooled, before
+     * there was a T.30 to tell -- the usual order, since the DTE hands the
+     * page over before the call is answered. */
+    if (interrupt_requested)
+        t30_local_interrupt_request(t30, true);
 
     /* T.32 8.5.1.13 and 8.5.1.12: the addressing this session offers. */
     if (sub_address[0])
@@ -1044,15 +1099,34 @@ void fc2_dte_bytes(const uint8_t *buf, int len)
 
         if (dte_saw_dle) {
             dte_saw_dle = 0;
-            if (byte == ETX) {
+            /*
+             * T.32 8.3.3.7: the DTE ends the page with <DLE><ppm>, and the
+             * code says what it intends next.  <DLE><ETX> is not one of the
+             * three, but it is what a stream-oriented DTE tends to send and
+             * what the receive direction uses, so it is accepted as EOP.
+             */
+            if (byte == T32_PPM_MPS || byte == T32_PPM_EOM
+                || byte == T32_PPM_EOP || byte == ETX) {
+                page_ppm = (byte == ETX) ? T32_PPM_EOP : byte;
                 finished = 1;
                 break;
+            }
+            if (byte == T32_PRI) {
+                /*
+                 * T.32 8.3.3.8: request a procedure interrupt.  T.30 carries
+                 * it in the post page message, which becomes a PRI-Q, so this
+                 * only has to be recorded before the page ends.
+                 */
+                if (fax)
+                    t30_local_interrupt_request(fax_get_t30_state(fax), true);
+                interrupt_requested = 1;
+                continue;
             }
             if (byte == DLE) {
                 clean[n++] = DLE;       /* stuffed DLE */
             } else {
-                /* T.32 3.2: any other <DLE><chr> is a control sequence we do
-                 * not implement; drop it rather than corrupt the image. */
+                /* T.32 3.2: any other <DLE><chr> is a command we do not
+                 * implement; drop it rather than corrupt the image. */
             }
         } else if (byte == DLE) {
             dte_saw_dle = 1;
@@ -1087,7 +1161,6 @@ void fc2_dte_bytes(const uint8_t *buf, int len)
         } else {
             /* +FDT ahead of the call, which is the ordinary sequence: the
              * page is spooled and will go out when the call connects. */
-            put_line("\r\n+FPS:%d\r\n", page_status);
             put_ok();
         }
     }
@@ -1487,7 +1560,12 @@ int fc2_at_line(const char *line)
     else if (match(&t, "+FBO"))  ok = num_param(t, &p_bo, 0, 3, "(0-3)");
     else if (match(&t, "+FBU"))  ok = num_param(t, &p_bu, 0, 1, "(0,1)");
     else if (match(&t, "+FCQ"))  ok = num_param(t, &p_cq, 0, 2, "(0-2),(0-2)");
-    else if (match(&t, "+FIE"))  ok = num_param(t, &p_ie, 0, 1, "(0,1)");
+    else if (match(&t, "+FIE")) {
+        ok = num_param(t, &p_ie, 0, 1, "(0,1)");
+        /* T.32 8.5.2.1: it takes effect on the session in progress too. */
+        if (ok && fax)
+            t30_remote_interrupts_allowed(fax_get_t30_state(fax), p_ie ? true : false);
+    }
     else if (match(&t, "+FCT"))  ok = num_param(t, &p_ct, 0, 255, "(0-255)");
     else if (match(&t, "+FMS"))  ok = num_param(t, &p_ms, 0, 5, "(0-5)");
     else if (match(&t, "+FEA"))  ok = num_param(t, &p_ea, 0, 1, "(0,1)");
@@ -1566,6 +1644,17 @@ int fc2_at_line(const char *line)
         if (!call_up || !p_cr) {
             ok = 0;
         } else {
+            /*
+             * T.32 8.3.4.8: a receiving DTE asks for a procedure interrupt by
+             * setting +FPS to 4 (PIN) or 5 (PIP) before the post page +FDR,
+             * which is what releases the response.  T.30 carries the request
+             * in that response.
+             */
+            if ((page_status == 4 || page_status == 5) && fax) {
+                t30_local_interrupt_request(fax_get_t30_state(fax),
+                                            page_status == 5);
+                interrupt_requested = 1;
+            }
             fdr_pending = 1;
             ok = 1;
         }
@@ -1625,6 +1714,9 @@ void fc2_select(int on)
         tx_pages_sent = 0;
         tx_tiff_ready = 0;
         dte_mode = FC2_IDLE;
+        interrupt_requested = 0;
+        interrupt_negotiated = 0;
+        page_ppm = T32_PPM_EOP;
         report_len = 0;
     } else if (!on && selected) {
         session_stop();

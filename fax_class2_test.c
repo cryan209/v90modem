@@ -196,6 +196,11 @@ static const uint8_t *peer_nsf;
 static int          peer_nsf_len;
 static const uint8_t *peer_nss;
 static int          peer_nss_len;
+static int          peer_interrupt;   /* the far end asks for / grants one */
+
+/* The post page message and response the far end put on the wire. */
+static int          peer_saw_ppm;
+static int          peer_saw_ppr;
 
 /*
  * What the far end saw arrive, captured as the frames arrive.  T.30 frees its
@@ -210,7 +215,25 @@ static void peer_frame_handler(void *user_data, bool incoming,
                                const uint8_t *msg, int len)
 {
     (void) user_data;
-    if (!incoming || len < 3)
+    if (len < 3)
+        return;
+    /*
+     * send_simple_frame() ORs the "a DIS was received" bit into the FCF, so a
+     * post page message from a calling station is 0x2F where the constant is
+     * 0x2E.  Mask it off, exactly as T.30's own dispatcher does -- comparing
+     * these exactly captures nothing at all from one side of the call.
+     */
+    switch (msg[2] & 0xFE) {
+    case (T30_MPS & 0xFE): case (T30_EOM & 0xFE): case (T30_EOP & 0xFE):
+    case (T30_PRI_MPS & 0xFE): case (T30_PRI_EOM & 0xFE): case (T30_PRI_EOP & 0xFE):
+        peer_saw_ppm = msg[2] & 0xFE;
+        break;
+    case (T30_MCF & 0xFE): case (T30_RTN & 0xFE): case (T30_RTP & 0xFE):
+    case (T30_PIN & 0xFE): case (T30_PIP & 0xFE):
+        peer_saw_ppr = msg[2] & 0xFE;
+        break;
+    }
+    if (!incoming)
         return;
     /* NSS carries the same don't-care low bit as TSI and DCS do. */
     if ((msg[2] & 0xFE) == (T30_NSS & 0xFE)
@@ -244,6 +267,11 @@ static fax_state_t *peer_start(int calling, const char *tx_file, const char *rx_
     t30_set_phase_e_handler(t30, peer_phase_e, NULL);
     t30_set_real_time_frame_handler(t30, peer_frame_handler, NULL);
     peer_saw_nss_len = 0;
+    peer_saw_ppm = 0;
+    peer_saw_ppr = 0;
+    t30_remote_interrupts_allowed(t30, true);
+    if (peer_interrupt)
+        t30_local_interrupt_request(t30, true);
     if (tx_file)
         t30_set_tx_file(t30, tx_file, -1, -1);
     if (rx_file)
@@ -431,7 +459,9 @@ static void test_transmit(int fbo)
         int chunk = (n - off > 512) ? 512 : n - off;
         fc2_dte_bytes(page + off, chunk);
     }
-    check(dte_saw("+FPS:1"), "the spooled page is acknowledged");
+    /* T.32 8.3.3.4: a +FDT completes with OK or ERROR; 8.4.3's +FPS: report
+     * belongs to +FDR. */
+    check(dte_saw("OK") && !dte_saw("+FPS:"), "the spooled page is acknowledged");
 
     peer = peer_start(0, NULL, PEER_RX);
     check(peer != NULL, "the far-end fax terminal starts");
@@ -734,6 +764,205 @@ static void test_bit_order_is_real(void)
     /* And they are genuinely different octets, not a palindrome. */
     check(memcmp(cap_buf[0], cap_buf[1], (size_t) cap_len[0]) != 0,
           "the two streams differ");
+}
+
+/*
+ * T.32 8.5.2.1 +FIE and 8.4.4.2 +FVO -- procedure interrupts.
+ *
+ * There are two of them and they go opposite ways.  A transmitting DTE asks
+ * with 8.3.3.8's <DLE><pri>, which makes T.30's post page message a PRI-Q, and
+ * the remote grants by answering PIN or PIP.  A receiving DTE asks by setting
+ * +FPS to 4 or 5 before the post page +FDR, which makes T.30's post page
+ * RESPONSE a PIN or PIP.  Both are checked on the wire, from the far end's own
+ * frame handler, because both are a substitution inside a frame that gets sent
+ * either way -- a session that ignored the request entirely still completes.
+ */
+static void run_interrupt_tx_session(const char *fie, int send_pri)
+{
+    static uint8_t page[1 << 20];
+    fax_state_t *peer;
+    int n;
+
+    fc2_select(0);
+    fc2_select(1);
+    unlink(PEER_RX);
+
+    at("AT+FLI=\"sender\"");
+    at(fie);
+    at("AT+FNR=0,1,0,0");
+    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+    at("ATD5551234");
+    at("AT+FDT");
+
+    n = encode_page_for_dte(SRC_TIFF, T4_COMPRESSION_T4_1D, 0, page, sizeof(page));
+    /* Strip the <DLE><ETX> the encoder appended; this session ends the page
+     * itself, with 8.3.3.7's <DLE><ppm> and optionally 8.3.3.8's <DLE><pri>
+     * before it. */
+    if (n >= 2)
+        n -= 2;
+    for (int off = 0; off < n; off += 512) {
+        int chunk = (n - off > 512) ? 512 : n - off;
+        fc2_dte_bytes(page + off, chunk);
+    }
+    if (send_pri) {
+        static const uint8_t pri[2] = { 0x10, 0x21 };   /* <DLE><pri> */
+        fc2_dte_bytes(pri, 2);
+    }
+    {
+        static const uint8_t eop[2] = { 0x10, 0x2E };   /* <DLE><ppm>, EOP */
+        fc2_dte_bytes(eop, 2);
+    }
+
+    peer = peer_start(0, NULL, PEER_RX);
+    if (!peer)
+        return;
+    dte_reset();
+    fc2_on_connected();
+    pump(peer, 60 * 50);
+    for (int i = 0; i < 20; i++)
+        fc2_poll();
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
+static void test_procedure_interrupt(void)
+{
+    int rows = 0;
+
+    printf("+FIE/+FVO: procedure interrupts (T.32 8.5.2.1, 8.4.4.2)\n");
+
+    fc2_select(0);
+    fc2_select(1);
+    dte_reset();
+    at("AT+FIE=1");
+    check(dte_saw("OK"), "AT+FIE=1 is accepted");
+    dte_reset();
+    at("AT+FIE?");
+    check(dte_saw("1"), "AT+FIE? reads it back");
+    dte_reset();
+    at("AT+FIE=2");
+    check(dte_saw("ERROR"), "AT+FIE=2 is out of range");
+
+    peer_ecm = 1;
+    peer_t6 = 1;
+    peer_nsf = NULL;
+    peer_nss = NULL;
+
+    /* 8.3.3.7's <DLE><ppm> terminates the page, with no interrupt asked for. */
+    peer_interrupt = 0;
+    run_interrupt_tx_session("AT+FIE=1", 0);
+    check(peer_saw_ppm == (T30_EOP & 0xFE),
+          "<DLE><ppm> ends the page with the plain post page message");
+    check(compare_page(PEER_RX, 0, &rows) == 0 && rows == IMAGE_ROWS,
+          "and the page still arrives intact");
+    check(!dte_saw("+FVO"), "no +FVO when no interrupt was asked for");
+
+    /*
+     * 8.3.3.8: with <DLE><pri> the post page message becomes a PRI-Q.  The
+     * far end here grants it, answering PIP, which is 8.4.4.2's +FVO.
+     */
+    peer_interrupt = 1;
+    run_interrupt_tx_session("AT+FIE=1", 1);
+    check(peer_saw_ppm == (T30_PRI_EOP & 0xFE),
+          "<DLE><pri> makes the post page message a PRI-Q");
+    check(peer_saw_ppr == (T30_PIP & 0xFE) || peer_saw_ppr == (T30_PIN & 0xFE),
+          "the far end grants it with PIP or PIN");
+    check(dte_saw("+FVO"), "the granted interrupt is reported as +FVO");
+    dte_reset();
+    at("AT+FPS?");
+    check(dte_saw("5") || dte_saw("4"),
+          "and the +FPS parameter carries the PIP/PIN page status");
+
+    /* 8.5.2.1: with +FIE=0 the grant is not reported. */
+    run_interrupt_tx_session("AT+FIE=0", 1);
+    check(!dte_saw("+FVO"), "+FIE=0 does not report the interrupt");
+
+    /*
+     * 8.5.2.1 the other way: a PRI-Q from the far end.  With +FIE=1 the
+     * +FET: report carries the PRI-Q code and +FPS is adjusted to 4 or 5;
+     * with +FIE=0 the report carries the non-PRI equivalent.  The far end is
+     * the transmitter here, so it is the one sending the PRI-Q.
+     */
+    for (int fie = 1; fie >= 0; fie--) {
+        fax_state_t *peer;
+        char cmd[16];
+
+        fc2_select(0);
+        fc2_select(1);
+        snprintf(cmd, sizeof(cmd), "AT+FIE=%d", fie);
+        at(cmd);
+        at("AT+FCR=1");
+        at("AT+FNR=0,1,0,0");
+        at("AT+FIS=1,3,0,2,0,0,0,0,0");
+        at("ATA");
+        peer_interrupt = 1;
+        peer = peer_start(1, PEER_TX, NULL);
+        if (!peer)
+            continue;
+        dte_reset();
+        fc2_on_connected();
+        at("AT+FDR");
+        pump(peer, 60 * 50);
+        for (int i = 0; i < 20; i++)
+            fc2_poll();
+        check(peer_saw_ppm == (T30_PRI_EOP & 0xFE),
+              "the far end sends a PRI-Q post page message");
+        if (fie) {
+            /* Table 19: 5 is PRI-EOP. */
+            check(dte_saw("+FET:5"), "+FIE=1 reports the PRI-Q in +FET:");
+            check(dte_saw("+FPS:5,") || dte_saw("+FPS:4,"),
+                  "+FIE=1 adjusts +FPS to 4 or 5");
+        } else {
+            /* Table 19: PRI-EOP reported as its non-PRI equivalent, EOP=2. */
+            check(dte_saw("+FET:2"), "+FIE=0 reports the non-PRI equivalent");
+            check(!dte_saw("+FET:5"), "and not the PRI-Q code");
+        }
+        fax_free(peer);
+        fc2_on_disconnected();
+    }
+    /*
+     * 8.3.4.8 the other way round: a RECEIVING DTE asks for an interrupt by
+     * setting +FPS to 4 or 5, which makes T.30's post page RESPONSE a PIN or
+     * PIP.  SpanDSP left that as a TODO, so it is a small addition to its
+     * receiver; the check is that the far end sees the PIP on the wire.
+     *
+     * The request has to be in before the page completes.  8.3.4.3 has the
+     * DCE hold the post page response until the next +FDR releases it, which
+     * would give the DTE a window after seeing the page; this DCE does not
+     * hold it (see the deviations in docs/fax_class_at.md), so +FPS is set
+     * with the +FDR that starts the reception.
+     */
+    {
+        fax_state_t *peer;
+
+        fc2_select(0);
+        fc2_select(1);
+        at("AT+FIE=1");
+        at("AT+FCR=1");
+        at("AT+FNR=0,1,0,0");
+        at("AT+FIS=1,3,0,2,0,0,0,0,0");
+        at("ATA");
+        peer_interrupt = 0;
+        peer = peer_start(1, PEER_TX, NULL);
+        if (peer) {
+            dte_reset();
+            fc2_on_connected();
+            at("AT+FPS=5");            /* PIP: page good, interrupt requested */
+            at("AT+FDR");
+            pump(peer, 60 * 50);
+            for (int i = 0; i < 20; i++)
+                fc2_poll();
+            check(peer_saw_ppr == (T30_PIP & 0xFE),
+                  "+FPS=5 before +FDR answers the page with PIP (8.3.4.8)");
+            if (peer_saw_ppr != (T30_PIP & 0xFE))
+                printf("       (far end saw post page response 0x%02X)\n",
+                       peer_saw_ppr);
+            fax_free(peer);
+        }
+        fc2_on_disconnected();
+    }
+
+    peer_interrupt = 0;
 }
 
 /*
@@ -1208,6 +1437,7 @@ int main(void)
     test_receive(1);
     test_bit_order_is_real();
     test_fnr();
+    test_procedure_interrupt();
     test_fns();
     test_fbu();
     test_poll_remote();

@@ -3339,6 +3339,17 @@ static void assess_copy_quality(t30_state_t *s, uint8_t fcf)
         break;
     }
     /*endswitch*/
+    if (s->local_interrupt_pending)
+    {
+        /* T.30 5.3.6.2.5/5.3.6.2.6 - a receiver requests a procedure interrupt
+           by answering the post page message with PIP or PIN in place of the
+           MCF or RTN it would otherwise send.  PIP and PIN carry the same page
+           verdict as MCF and RTN respectively, so the choice follows the copy
+           quality that was just decided. */
+        s->last_rx_page_result = (s->last_rx_page_result == T30_RTN)  ?  T30_PIN  :  T30_PIP;
+        span_log(&s->logging, SPAN_LOG_FLOW, "Requesting a procedure interrupt with %s\n", t30_frametype(s->last_rx_page_result));
+    }
+    /*endif*/
     set_state(s, T30_STATE_III_Q);
     send_simple_frame(s, s->last_rx_page_result);
 }
