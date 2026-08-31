@@ -19,6 +19,7 @@
 
 #include "data_interface.h"
 #include "modem_engine.h"
+#include "fax_class2.h"
 
 #include <spandsp.h>
 #include <spandsp/private/logging.h>
@@ -117,6 +118,16 @@ static volatile int running    = 0;
 static pthread_t    reader_tid;
 static ring_t       upstream_ring;
 
+/*
+ * Class 2.0 (T.32) line assembly.  T.31 does its own line buffering, but in
+ * class 2.0 the +F commands are ours, so a line has to be complete before it
+ * can be offered to fax_class2.c -- and what is not a +F command goes on to
+ * the T.31 interpreter, which owns the S registers, echo and result codes.
+ */
+#define FC2_LINE_MAX 512
+static char fc2_line[FC2_LINE_MAX];
+static int  fc2_line_len;
+
 /* TIES escape state (Mode A online data mode) */
 #define ESCAPE_GUARD_MS 1000
 static int      esc_count = 0;
@@ -206,6 +217,38 @@ static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
 }
 
 /* ------------------------------------------------------------------ */
+/* Class 2.0 (T.32) callbacks                                          */
+/* ------------------------------------------------------------------ */
+
+static void fc2_write(const uint8_t *buf, int len, void *user_data)
+{
+    (void)user_data;
+    if (ctrl_pty.master_fd >= 0)
+        write(ctrl_pty.master_fd, buf, (size_t)len);
+}
+
+static void fc2_dial(const char *number, void *user_data)
+{
+    (void)user_data;
+    if (dial_cb && number && number[0])
+        dial_cb(number, cb_user_data);
+}
+
+static void fc2_answer(void *user_data)
+{
+    (void)user_data;
+    if (answer_cb)
+        answer_cb(cb_user_data);
+}
+
+static void fc2_hangup(void *user_data)
+{
+    (void)user_data;
+    if (hangup_cb)
+        hangup_cb(cb_user_data);
+}
+
+/* ------------------------------------------------------------------ */
 /* Mode A escape ("+++") and command/data byte handling               */
 /* ------------------------------------------------------------------ */
 
@@ -251,9 +294,65 @@ static void handle_online_data_bytes(const uint8_t *buf, int n)
 
 /* Mode A command-mode bytes: feed the AT interpreter, then honour ATO by
  * following SpanDSP's own mode switch back to online data. */
+/* AT+FCLASS=2.0 selects class 2.0 and AT+FCLASS=0 leaves it; fclass_mode is
+ * T.31's, so this follows it rather than parsing +FCLASS twice. */
+static void sync_fax_class(void)
+{
+    int want = (at && at->fclass_mode == 3);
+
+    if (want != fc2_active()) {
+        fc2_select(want);
+        if (!want)
+            fc2_line_len = 0;
+    }
+}
+
+/* One class 2.0 line: ours if fax_class2.c claims it, T.31's otherwise. */
+static void fc2_dispatch_line(void)
+{
+    char line[FC2_LINE_MAX + 2];
+
+    fc2_line[fc2_line_len] = '\0';
+    if (fc2_line_len == 0)
+        return;
+    if (!fc2_at_line(fc2_line)) {
+        int n = snprintf(line, sizeof(line), "%s\r", fc2_line);
+
+        t31_at_rx(t31, line, n);
+        sync_fax_class();
+    }
+    fc2_line_len = 0;
+}
+
+static void handle_class2_bytes(const uint8_t *buf, int n)
+{
+    for (int i = 0; i < n; i++) {
+        if (fc2_in_dte_data()) {
+            /* T.32 3.2: DLE-stuffed image data until <DLE><ETX>.  Hand over
+             * the whole of the rest of the block; fax_class2.c finds the end
+             * and stops there. */
+            fc2_dte_bytes(buf + i, n - i);
+            return;
+        }
+        if (buf[i] == '\r' || buf[i] == '\n') {
+            fc2_dispatch_line();
+        } else if (fc2_line_len < FC2_LINE_MAX - 1) {
+            if (at && at->p.echo)
+                write(ctrl_pty.master_fd, &buf[i], 1);
+            fc2_line[fc2_line_len++] = (char) buf[i];
+        }
+    }
+}
+
 static void handle_command_bytes(const uint8_t *buf, int n)
 {
+    if (fc2_active()) {
+        handle_class2_bytes(buf, n);
+        return;
+    }
+
     t31_at_rx(t31, (const char *)buf, n);
+    sync_fax_class();
     if (!split_mode && connected && di_mode == 0
         && at->at_rx_mode == AT_MODE_CONNECTED) {
         di_mode = 1;
@@ -286,6 +385,11 @@ static void *pty_reader_thread(void *arg)
         struct timeval tv = { .tv_sec = 0, .tv_usec = 50000 }; /* 50 ms */
 
         int r = select(maxfd + 1, &fds, NULL, NULL, &tv);
+
+        /* Class 2.0 reports raised by the media thread are emitted here, and
+         * so is the page a +FDR has been waiting for. */
+        if (fc2_active())
+            fc2_poll();
 
         /* Escape timer: three withheld '+' followed by a silent guard time */
         if (!split_mode && di_mode == 1 && esc_count == 3
@@ -395,6 +499,8 @@ static int di_start(void)
     t31_set_transmit_on_idle(t31, true);
     at_set_at_rx_mode(at, AT_MODE_ONHOOK_COMMAND);
 
+    fc2_init(fc2_write, fc2_dial, fc2_answer, fc2_hangup, NULL);
+
     running = 1;
     if (pthread_create(&reader_tid, NULL, pty_reader_thread, NULL) != 0) {
         perror("pthread_create");
@@ -444,6 +550,7 @@ void di_close(void)
     running = 0;
     pthread_join(reader_tid, NULL);
 
+    fc2_release();
     if (t31) { t31_free(t31); t31 = NULL; at = NULL; }
     di_pty_close(&data_pty);
     di_pty_close(&ctrl_pty);
@@ -476,6 +583,13 @@ void di_on_connected(int rate)
      * OK and sit in off-hook command mode, waiting for the class 1 action
      * commands that carry T.30.  A CONNECT <rate> here would be a data-mode
      * result code the fax DTE is not expecting. */
+    if (fc2_active()) {
+        /* T.32: the DCE runs T.30 from here.  The DTE hears about the call
+         * through the session reports (+FCS, +FPS, +FHS), not CONNECT. */
+        fc2_on_connected();
+        return;
+    }
+
     if (di_fax_active()) {
         t31_call_event(t31, AT_CALL_EVENT_CONNECTED);
         return;
@@ -500,6 +614,11 @@ void di_on_disconnected(void)
     di_mode = 0;
     esc_count = 0;
     at_set_at_rx_mode(at, AT_MODE_ONHOOK_COMMAND);
+    if (fc2_active()) {
+        fc2_on_disconnected();
+        return;
+    }
+
     if (di_fax_active()) {
         /* Lets T.31 stop its datapumps and flush any pending DLE ETX. */
         t31_call_event(t31, AT_CALL_EVENT_HANGUP);
@@ -551,7 +670,13 @@ int di_fax_active(void)
 
 int di_fax_rx(const int16_t *amp, int len)
 {
-    if (!t31 || !amp || len <= 0)
+    if (!amp || len <= 0)
+        return 0;
+    /* Class 2.0 runs T.30 in the DCE, so its audio belongs to fax_class2.c;
+     * class 1 leaves T.30 to the DTE and the audio to T.31's datapumps. */
+    if (fc2_active())
+        return fc2_rx(amp, len);
+    if (!t31)
         return 0;
     /* t31_rx() does not modify the samples; the non-const prototype is
      * SpanDSP's, shared with paths that do. */
@@ -562,7 +687,11 @@ int di_fax_tx(int16_t *amp, int len)
 {
     int n;
 
-    if (!t31 || !amp || len <= 0)
+    if (!amp || len <= 0)
+        return 0;
+    if (fc2_active())
+        return fc2_tx(amp, len);
+    if (!t31)
         return 0;
     n = t31_tx(t31, amp, len);
     if (n < 0)

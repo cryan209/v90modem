@@ -156,7 +156,24 @@ int main(void)
     printf("T.31 capability reporting:\n");
     expect("ATE0",         "OK",        300);
     expect("AT+GCAP",      "+GCAP:+FCLASS", 300);
-    expect("AT+FCLASS=?",  "0,1,1.0",   300);
+    expect("AT+FCLASS=?",  "0,1,1.0,2.0", 300);
+
+    /*
+     * Class 2.0 (T.32) is a different module behind the same PTY, so check it
+     * is reached through it: a +F command that only fax_class2.c answers, a
+     * non-fax command that must still reach the T.31 interpreter, and the way
+     * back out to class 0.
+     */
+    printf("class 2.0 selection (T.32):\n");
+    expect("AT+FCLASS=2.0", "OK",        300);
+    expect("AT+FCLASS?",   "2.0",        300);
+    expect("AT+FCC?",      "1,5,0,2,3,2,0,7,0", 300);
+    expect("AT+FLI=\"4412345\"", "OK",   300);
+    expect("AT+FLI?",      "4412345",    300);
+    expect("ATE0",         "OK",         300);  /* passed on to T.31 */
+    expect("AT+FCLASS=0",  "OK",         300);
+    expect("AT+FCLASS?",   "0",          300);
+
     expect("AT+FCLASS=1",  "OK",        300);
     expect("AT+FCLASS?",   "1",         300);
     expect("AT+FTM=?",     "24,48,72",  300);

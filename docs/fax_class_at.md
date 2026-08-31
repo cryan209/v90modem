@@ -1,4 +1,4 @@
-# Fax service class over the AT interface (T.31)
+# Fax service classes over the AT interface (T.31 class 1, T.32 class 2.0)
 
 ## What was wrong
 
@@ -63,13 +63,102 @@ state machine advances on samples, not wall time: without it `+FTS`, `+FRS` and
 the `CONNECT` after `+FTM` never complete, which looks like rejection and is
 not.
 
+# Class 2.0 (T.32)
+
+Class 1 and class 2.0 are the two divisions of labour between DTE and DCE.
+Class 1 puts T.30 in the DTE, which drives every HDLC frame and image carrier
+itself. **Class 2.0 puts T.30 in the modem**: the DTE declares its capabilities
+(`+FCC`), reads what was negotiated (`+FCS`), and hands over or takes back page
+image data (`+FDT`/`+FDR`). That is a whole fax terminal, not a command set, so
+`fax_class2.c` is a T.32 command layer over SpanDSP's `fax_state_t` — a
+complete T.30 terminal with the same fax datapumps under it.
+
+SpanDSP's own `+F` class 2 command handlers are `TODO` stubs, so none of this
+comes from the library's AT layer; only the `+FCLASS` list is SpanDSP's, and it
+now advertises `0,1,1.0,2.0`. While class 2.0 is selected the DTE's AT lines go
+to `fax_class2.c`; a line it does not claim goes on to the T.31 interpreter,
+which keeps ownership of the S registers, echo and result-code settings.
+
+## Image data
+
+T.32 carries compressed T.4/T.6 image data across the DTE link, and SpanDSP's
+T.30 sends and receives TIFF files. SpanDSP's own T.4 codec bridges the two,
+so nothing here touches libtiff:
+
+- `+FDT` — the DTE's compressed page goes through `t4_rx`, which writes the
+  TIFF T.30 transmits. That also recovers the row count, which the DTE never
+  states, and rejects a page the DTE garbled rather than putting it on the
+  line.
+- `+FDR` — the received TIFF page goes back out through `t4_tx` in the
+  negotiated format, so the DTE gets a stream a fax machine would have sent.
+
+`+FBO` (bit order) is accepted and stored but not applied; the stream is in
+T.4's own order both ways.
+
+## Implemented
+
+Actions: `+FDT` (8.3.3), `+FDR` (8.3.4), `+FKS` (8.3.5), `+FIP` (8.3.6).
+Parameters: `+FCC` (8.5.1.1), `+FIS` (8.5.1.2), `+FCS` (8.5.1.3),
+`+FLI`/`+FPI` (8.5.1.5), `+FCR` (8.5.1.9), `+FPS` (8.5.2.2), `+FHS` (8.5.2.7),
+`+FBS` (8.5.3.2), `+FBO` (8.5.3.4), `+FMI`/`+FMM`/`+FMR`, and the accepted-and
+-stored set `+FCQ +FIE +FCT +FMS +FEA +FFC +FNR +FAA +FRY`. Reports: `+FCS:`
+after Phase B, `+FCI:`/`+FTI:` for the remote's identification, `+FPS:` per
+page, `+FHS:` at the end of the session.
+
+An omitted subparameter keeps its current value, which is what `,` means in a
+T.32 list — `AT+FIS=,5` changes BR alone.
+
+## Deviations, and why
+
+**`+FDT` takes the page before it reports `+FCS`.** T.32 8.3.3 has the DCE
+complete Phase B, report the negotiated session parameters, and then take the
+page. SpanDSP's T.30 decides what to do at the DIS it receives and needs the
+document to exist by then, so a `+FDT` here answers `CONNECT` and takes the
+page first. The DTE still gets its `+FCS` report — after the data rather than
+before it. In the ordinary sequence (`+FDT` straight after `ATD`, while the
+call is still being set up) the spool is complete long before Phase B, and
+where the report lands is the only difference the DTE can see. A DTE that
+adapts its image format to the reported `+FCS` will not see it in time.
+
+**`+FHS` mapping is coarse.** T.30's completion codes are finer grained than
+T.32's two-digit status. The ones with a clear counterpart are mapped; the rest
+fall back on the "unspecified phase B/C/D error" codes, choosing the phase from
+where the failure was. Inventing a precise code for an error T.32 does not
+enumerate would be worse than reporting the phase honestly.
+
+**`+FBS` reports `0,0`.** There is no separate DTE buffer to report a size for;
+`t4_rx` consumes the stream as it arrives.
+
+## Coverage
+
+`fax_class2_test` (in `make test`) runs a whole session each way against a
+plain SpanDSP fax terminal, so nothing is graded by the code under test. It
+drives the class 2.0 side exactly as a DTE does — AT lines in, DLE-stuffed
+image data in and out — and **compares the page that arrives against the page
+that was sent, raster by raster**. Both directions pass with zero differing
+rows.
+
+That comparison is the point. The interesting failures here all report `OK`: a
+page that negotiates and transfers as garbage, or a stream handed to the DTE in
+a format it did not ask for, would pass a result-code check.
+
+`fax_class_test` covers the other half — that class 2.0 is *reachable* through
+the real PTY the DTE sees (`AT+FCLASS=2.0`, a `+FCC?` only this module answers,
+an `ATE0` that must still reach T.31, and the way back to class 0), which
+`fax_class2_test` bypasses by calling the module directly.
+
 ## Not done
 
-- Class 2/2.0 (`AT+FCLASS=2`, `=2.0`) — the `+F` service-class-2 commands are
-  parsed but their handlers in SpanDSP are `TODO` stubs, and `AT+FCLASS=2.0`
-  correctly answers `ERROR` against the advertised `0,1,1.0`.
+- Class 2 (the pre-standard `AT+FCLASS=2`) — only 2.0 is offered. The two are
+  not compatible, and 2.0 is the ITU-T one.
+- Polling (`+FSP`, `+FLP`, `+FPI` beyond storing the ID), sub-addressing,
+  passwords and non-standard frames (`+FSA`, `+FPW`, `+FNS`, `+FPA`) — parsed
+  where they are simple parameters, but nothing acts on them.
+- `+FDD`/`+FIT`/`+FLO`/`+FPR` — these are T.31 DTE-link parameters and stay
+  with the T.31 interpreter.
 - T.38 — `t31_init()` is given no T.38 packet handler and the context is put in
   audio mode.
 - No hardware interop: as with everything else here, the automated tests cover
   offline and loopback paths only. A real fax session against a far-end fax
-  machine is unverified.
+  machine is unverified — and for class 2.0 that includes the `+FDT` ordering
+  deviation above, which no loopback against our own sequencing can expose.

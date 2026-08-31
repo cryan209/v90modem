@@ -3807,8 +3807,9 @@ static const char *at_cmd_plus_FCLASS(at_state_t *s, const char *t)
     t += 7;
     /* T.31 says the reply string should be "0,1.0", however making
        it "0,1,1.0" makes things compatible with a lot more software
-       that may be expecting a pre-T.31 modem. */
-    if (!parse_string_list_out(s, &t, &s->fclass_mode, 1, NULL, "0,1,1.0"))
+       that may be expecting a pre-T.31 modem.  2.0 is the T.32 service
+       class, where the DCE runs T.30 rather than the DTE. */
+    if (!parse_string_list_out(s, &t, &s->fclass_mode, 3, NULL, "0,1,1.0,2.0"))
         return NULL;
     /*endif*/
     return t;
