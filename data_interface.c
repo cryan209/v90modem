@@ -337,7 +337,7 @@ static void handle_class2_bytes(const uint8_t *buf, int n)
         if (buf[i] == '\r' || buf[i] == '\n') {
             fc2_dispatch_line();
         } else if (fc2_line_len < FC2_LINE_MAX - 1) {
-            if (at && at->p.echo)
+            if (at && at->p.echo && !fc2_echo_suppressed())
                 write(ctrl_pty.master_fd, &buf[i], 1);
             fc2_line[fc2_line_len++] = (char) buf[i];
         }

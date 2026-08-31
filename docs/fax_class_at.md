@@ -121,11 +121,31 @@ round. Note 2 to 8.5.3.4 confirms the placement too — "transparency mechanisms
 (e.g. for `<DLE>` characters) shall be applied to the data **after reversal**,
 i.e. as the data will be transmitted on the DTE-DCE link".
 
-The phase B/D half is **not** applied. It governs T.30 control messages
-reported in the `+FHT:`/`+FHR:` reports of 8.6, which are enabled by `+FBU`
-(8.5.1.10) and are not implemented, so there is nothing for it to act on and
-0/1 behave as 2/3 do. Note 3 is explicit that `+FBO` does **not** affect the
-`+FNC`, `+FNF` or `+FNS` responses, so those stay in the frame's own order.
+The phase B/D half governs T.30 control messages as they appear in the
+`+FHT:`/`+FHR:` reports of 8.6, which `+FBU` enables — so `+FBO=2` and `+FBO=3`
+reverse the octets in those reports and nothing else. Note 3 is explicit that
+`+FBO` does **not** affect the `+FNC`, `+FNF` or `+FNS` responses, so those
+stay in the frame's own order.
+
+### +FBU, HDLC frame reporting (8.5.1.10, 8.6)
+
+`+FBU=1` reports every T.30 phase B and phase D frame, in both directions, as
+`+FHT:` (sent) and `+FHR:` (received) followed by the octets in hex. It comes
+off the same real-time frame handler `+FNR` uses.
+
+8.6 requires the HDLC flags and FCS to be dropped, which is already the frame
+SpanDSP hands over, and requires the report to precede the response derived
+from it — so a received DIS reports as `+FHR: FF 13 80 ...`, the form of 8.6's
+own worked example, and lands before the `+FIS:` it produced.
+
+**ECM phase C data frames are excluded**, as 8.6 requires. They reach the same
+handler — SpanDSP sends them through `send_frame()` like any other — and are
+identified the way SpanDSP's own SSL-fax handler identifies them: a non-final
+frame carrying `T4_FCD` or `T4_RCP`.
+
+8.6 also says command echo must be off while `+FBU` is set: the reports are
+unsolicited and interleave with whatever the DTE is typing. `ATE` is left
+alone; the echo is suppressed only while `+FBU` is on.
 
 ### +FNR, negotiation message reporting (8.5.1.11)
 
@@ -164,12 +184,13 @@ this implements.
 Actions: `+FDT` (8.3.3), `+FDR` (8.3.4), `+FKS` (8.3.5), `+FIP` (8.3.6).
 Parameters: `+FCC` (8.5.1.1), `+FIS` (8.5.1.2), `+FCS` (8.5.1.3),
 `+FLI`/`+FPI` (8.5.1.5), `+FCR` (8.5.1.9), `+FPS` (8.5.2.2), `+FHS` (8.5.2.7),
-`+FNR` (8.5.1.11), `+FLP` (8.5.1.7), `+FSP` (8.5.1.8), `+FAP` (8.5.1.12),
+`+FNR` (8.5.1.11), `+FBU` (8.5.1.10), `+FLP` (8.5.1.7), `+FSP` (8.5.1.8), `+FAP` (8.5.1.12),
 `+FSA`/`+FPA`/`+FPW` (8.5.1.13), `+FBS` (8.5.3.2), `+FBO` (8.5.3.4), `+FMI`/`+FMM`/`+FMR`,
 and the accepted-and-stored set `+FCQ +FIE +FCT +FMS +FEA +FFC +FAA +FRY`.
 Reports: `+FCS:` for the negotiated session, `+FIS:`/`+FTC:` for the far end's
 capabilities, `+FCI:`/`+FTI:`/`+FPI:` for its identification, `+FNF:` for its
-non-standard frames, `+FPO` for its offer to be polled, `+FPS:<ppr>,<lc>,
+non-standard frames, `+FHT:`/`+FHR:` for the HDLC frames themselves, `+FPO`
+for its offer to be polled, `+FPS:<ppr>,<lc>,
 <blc>,<cblc>,<lbc>` and `+FET:<ppm>` per page, `+FHS:` at the end of the
 session. 8.3.3.4's rule that `+FDT` ends in `ERROR` when the remote rejected
 the page (RTN or PIN) rather than `OK` is implemented.
@@ -278,6 +299,14 @@ the received DIS from echoing our own parameters back; both would look right
 otherwise. The `+FNF:` check uses an NSF the far end was given, so the hex is
 compared against a known frame.
 
+`test_fbu` checks the reports against what T.30 must have exchanged — a
+received DIS as `FF 13 80 ...`, the DCS we send, the report landing before the
+`+FIS:` it produced, and `+FBO=2` reversing all of it to `FF C8 01 ...`. The
+ECM exclusion is checked on a session that **actually runs ECM**, since the
+absence of an FCD report in a session that has no ECM would prove nothing;
+that check was confirmed to bite by removing the exclusion and watching it
+fail.
+
 `test_poll_remote` and `test_be_polled` run polled sessions both ways — this
 DCE polling a far end that has a document, and a far end polling a document
 this DCE offered — and compare the page in each. A polled transfer that reports
@@ -292,8 +321,6 @@ an `ATE0` that must still reach T.31, and the way back to class 0), which
 
 - Class 2 (the pre-standard `AT+FCLASS=2`) — only 2.0 is offered. The two are
   not compatible, and 2.0 is the ITU-T one.
-- `+FBO`'s phase B/D half, and the `+FBU`/`+FHT:`/`+FHR:` frame reporting it
-  applies to.
 - `+FNS` (sending a non-standard frame), and the `+FNC:`/`+FNS:` reports.
 - Procedure interrupts — see the deviations above.
 - `+FDD`/`+FIT`/`+FLO`/`+FPR` — these are T.31 DTE-link parameters and stay

@@ -193,8 +193,8 @@ deliberate and documented: `+FDT` takes the page before it reports `+FCS`,
 because SpanDSP's T.30 needs the document to exist by the DIS it receives.
 `+FBO`'s phase C bit order is applied — the default order is LSB first, the
 same one T.31's class 1 path uses with no reversal. `+FNR` negotiation
-reporting is implemented off SpanDSP's real-time frame handler, and so is
-polling (`+FLP`, `+FSP`, `+FPO`).
+reporting is implemented off SpanDSP's real-time frame handler, and so are
+`+FBU`'s `+FHT:`/`+FHR:` frame reports and polling (`+FLP`, `+FSP`, `+FPO`).
 
 **The T-series specifications are in `ITU Docs/`** — T.31, T.32 (+ Amd 1),
 T.30, T.4, T.6 — and reading T.32 against code that had been written from

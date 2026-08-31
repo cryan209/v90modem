@@ -706,6 +706,125 @@ static void test_bit_order_is_real(void)
 }
 
 /*
+ * T.32 8.5.1.10 and 8.6.  +FBU reports every phase B and phase D HDLC frame
+ * in both directions.  This runs a transmit session and checks the reports
+ * against what T.30 must have exchanged, then repeats it at +FBO=2 -- the
+ * half of the bit order parameter that has nothing to act on until +FBU
+ * exists.
+ */
+static void run_fbu_session(const char *fbu, const char *fbo, const char *fis)
+{
+    static uint8_t page[1 << 20];
+    fax_state_t *peer;
+    int n;
+
+    fc2_select(0);
+    fc2_select(1);
+    unlink(PEER_RX);
+
+    at("AT+FLI=\"sender\"");
+    at(fbu);
+    at(fbo);
+    at("AT+FNR=1,1,1,1");
+    at(fis);
+    at("ATD5551234");
+    at("AT+FDT");
+    n = encode_page_for_dte(SRC_TIFF, T4_COMPRESSION_T4_1D, 0, page, sizeof(page));
+    for (int off = 0; off < n; off += 512) {
+        int chunk = (n - off > 512) ? 512 : n - off;
+        fc2_dte_bytes(page + off, chunk);
+    }
+
+    peer = peer_start(0, NULL, PEER_RX);
+    if (!peer)
+        return;
+    dte_reset();
+    fc2_on_connected();
+    pump(peer, 60 * 50);
+    for (int i = 0; i < 20; i++)
+        fc2_poll();
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
+static void test_fbu(void)
+{
+    printf("+FBU: HDLC frame reporting (T.32 8.5.1.10, 8.6)\n");
+
+    dte_reset();
+    at("AT+FBU=1");
+    check(dte_saw("OK"), "AT+FBU=1 is accepted");
+    check(fc2_echo_suppressed(), "+FBU=1 suppresses command echo (8.6)");
+    dte_reset();
+    at("AT+FBU=0");
+    check(!fc2_echo_suppressed(), "+FBU=0 restores it");
+    dte_reset();
+    at("AT+FBU=2");
+    check(dte_saw("ERROR"), "AT+FBU=2 is out of range");
+
+    peer_ecm = 1;
+    peer_t6 = 1;
+    peer_nsf = NULL;
+
+    run_fbu_session("AT+FBU=0", "AT+FBO=0", "AT+FIS=1,3,0,2,0,0,0,0,0");
+    check(!dte_saw("+FHR:") && !dte_saw("+FHT:"),
+          "+FBU=0 reports no frames");
+
+    run_fbu_session("AT+FBU=1", "AT+FBO=0", "AT+FIS=1,3,0,2,0,0,0,0,0");
+    check(dte_saw("+FHR:"), "+FBU=1 reports received frames");
+    check(dte_saw("+FHT:"), "+FBU=1 reports transmitted frames");
+
+    /*
+     * The frames themselves.  A transmit session must exchange a DIS from the
+     * far end and a DCS from us, and 8.6 requires the address and control
+     * fields to be kept and the FCS dropped -- so a received DIS reports as
+     * "FF 13 80 ...", which is the form of the worked example in 8.6.
+     */
+    check(dte_saw("+FHR: FF 13 80 "), "a received DIS reports as 8.6 shows");
+    check(dte_saw("+FHT: FF 13 83 "), "the DCS we send is reported");
+
+    /* 8.6: the frame report precedes the response derived from it. */
+    {
+        const char *dis = dte_find("+FHR: FF 13 80 ");
+        const char *fis = dte_find("+FIS:");
+
+        check(dis && fis && dis < fis,
+              "the frame report precedes the +FIS: it produced");
+    }
+
+    /*
+     * 8.6: ECM phase C data frames are excluded.  That has to be checked on a
+     * session that actually runs ECM -- the run above has none, so the
+     * absence of an FCD report there would prove nothing.  T4_FCD is 0x06 in
+     * a non-final frame (FF 03 06 ...), and an ECM page is hundreds of them.
+     */
+    run_fbu_session("AT+FBU=1", "AT+FBO=0", "AT+FIS=1,3,0,2,0,2,0,0,0");
+    {
+        const char *fcs = dte_find("+FCS:");
+        int vr, br, wd, ln, df, ec = 0;
+
+        check(fcs && sscanf(fcs, "+FCS:%d,%d,%d,%d,%d,%d",
+                            &vr, &br, &wd, &ln, &df, &ec) == 6 && ec != 0,
+              "the ECM control session negotiated ECM");
+    }
+    check(dte_saw("+FHT:") && dte_saw("+FHR:"),
+          "control frames are still reported in an ECM session");
+    check(!dte_saw("+FHT: FF 03 06 "),
+          "ECM phase C data frames are not reported");
+
+    /*
+     * T.32 8.5.3.4: +FBO=2 selects reversed bit order for phase B/D data,
+     * which is exactly these reports.  The DIS above reverses octet by octet:
+     * FF -> FF, 13 -> C8, 80 -> 01.
+     */
+    run_fbu_session("AT+FBU=1", "AT+FBO=2", "AT+FIS=1,3,0,2,0,0,0,0,0");
+    check(dte_saw("+FHR: FF C8 01 "),
+          "+FBO=2 reverses the bit order of the frame reports");
+    check(!dte_saw("+FHR: FF 13 80 "),
+          "and the direct form is gone");
+}
+
+/*
  * T.32 8.5.1.7/8.5.1.8 polling.  Two whole sessions: one where the far end
  * offers a document and this DCE polls it (+FSP, +FPO, +FDR), and one where
  * this DCE offers a document and the far end polls it (+FLP, DTC).  A polled
@@ -910,6 +1029,7 @@ int main(void)
     test_receive(1);
     test_bit_order_is_real();
     test_fnr();
+    test_fbu();
     test_poll_remote();
     test_be_polled(1);
     test_be_polled(0);

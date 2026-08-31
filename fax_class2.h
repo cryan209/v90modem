@@ -58,6 +58,13 @@ int fc2_at_line(const char *line);
  * them.
  */
 int  fc2_in_dte_data(void);
+
+/*
+ * True while T.32 8.6 requires command echo to be off, which it does whenever
+ * +FBU HDLC frame reporting is on: the reports are unsolicited and interleave
+ * with whatever the DTE is typing.
+ */
+int  fc2_echo_suppressed(void);
 void fc2_dte_bytes(const uint8_t *buf, int len);
 
 /* Call progress from the engine. */

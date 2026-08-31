@@ -39,6 +39,10 @@
 #define DLE 0x10
 #define ETX 0x03
 
+/* T.30's HDLC address and control fields, which SpanDSP keeps private. */
+#define T30_ADDRESS_FIELD               0xFF
+#define T30_CONTROL_NON_FINAL_FRAME     0x03
+
 /* ------------------------------------------------------------------ */
 /* T.32 session parameters (8.5.1.1 +FCC, 8.5.1.2 +FIS, 8.5.1.3 +FCS)  */
 /* ------------------------------------------------------------------ */
@@ -98,6 +102,7 @@ static char             sub_address[21];   /* +FSA */
 static char             sel_poll_address[21]; /* +FPA */
 static char             password[21];      /* +FPW */
 static int              p_bo;              /* +FBO, phase C bit order */
+static int              p_bu;              /* +FBU, HDLC frame reporting */
 static int              p_cq, p_ie, p_ct, p_ms, p_ea, p_ffc, p_aa, p_ry;
 
 /* T.32 8.5.1.11 +FNR: which negotiation messages get reported to the DTE. */
@@ -422,6 +427,7 @@ static int parse_params(const char *s, fc2_params_t *p)
 /* ------------------------------------------------------------------ */
 
 static void update_negotiated_params(void);
+static int  phase_bd_reversed(void);
 
 /* T.30's control frames put the FIF at msg[3], so bit n of the FIF (numbered
  * from 1, as T.30 Table 2 numbers them) lives here.  This is SpanDSP's own
@@ -496,6 +502,33 @@ static void real_time_frame_handler(void *user_data, bool incoming,
     if (len < 3)
         return;
     fcf = msg[2];
+
+    /*
+     * T.32 8.5.1.10 and 8.6.  Every phase B and phase D frame, in both
+     * directions, as hex.  8.6: "The DCE shall delete HDLC Flags and FCS
+     * octets" -- which is already the frame SpanDSP hands over -- and "the
+     * DCE shall report these frames before the corresponding responses are
+     * generated", so this comes before everything else here.
+     *
+     * "This facility does not apply to ECM Phase C data frames": those reach
+     * the same handler, and are the non-final frames carrying FCD or RCP.
+     */
+    if (p_bu
+        && !(len > 2 && msg[0] == T30_ADDRESS_FIELD
+             && msg[1] == T30_CONTROL_NON_FINAL_FRAME
+             && (fcf == T4_FCD || fcf == T4_RCP))) {
+        char hex[3 * 64 + 16];
+        int n = 0;
+
+        for (int i = 0; i < len && n < (int) sizeof(hex) - 4; i++) {
+            uint8_t octet = phase_bd_reversed() ? bit_reverse8(msg[i]) : msg[i];
+
+            n += snprintf(hex + n, sizeof(hex) - (size_t) n,
+                          (i == 0) ? "%02X" : " %02X", octet);
+        }
+        hex[n] = '\0';
+        queue_line("\r\n%s: %s\r\n", incoming ? "+FHR" : "+FHT", hex);
+    }
 
     if (incoming && (fcf == T30_DIS || fcf == T30_DTC)) {
         if (p_nr.rpr) {
@@ -802,6 +835,19 @@ static void session_start(void)
 static int phase_c_reversed(void)
 {
     return (p_bo & 1) != 0;
+}
+
+/*
+ * The other half of +FBO: T.30 phase B and phase D control messages, which
+ * reach the DTE only in 8.6's +FHT:/+FHR: reports.  8.5.3.4's Table 27 puts
+ * that in bit 1 of the value.  The direct order is the octets as T.30 has
+ * them -- 8.6's own worked example is "+FHR: FF 13 80 00 4E 78 FE AD", an
+ * address, a control field and a DIS whose FCF is 0x80, which is exactly the
+ * frame SpanDSP hands over.
+ */
+static int phase_bd_reversed(void)
+{
+    return (p_bo & 2) != 0;
 }
 
 static void reverse_bits(uint8_t *buf, int len)
@@ -1219,6 +1265,7 @@ static void params_reset(void)
     p_ap[0] = p_ap[1] = p_ap[2] = 0;
     sub_address[0] = sel_poll_address[0] = password[0] = '\0';
     p_bo = 0;
+    p_bu = 0;
     p_cq = 0; p_ie = 0; p_ct = 30; p_ms = 0; p_ea = 0;
     p_ffc = 0; p_aa = 0; p_ry = 3;
     /* T.32 8.5.1.11 default: no negotiation reporting. */
@@ -1319,6 +1366,7 @@ int fc2_at_line(const char *line)
     else if (match(&t, "+FPW"))  ok = str_param(t, password, sizeof(password));
     else if (match(&t, "+FAP"))  ok = fap_param(t);
     else if (match(&t, "+FBO"))  ok = num_param(t, &p_bo, 0, 3, "(0-3)");
+    else if (match(&t, "+FBU"))  ok = num_param(t, &p_bu, 0, 1, "(0,1)");
     else if (match(&t, "+FCQ"))  ok = num_param(t, &p_cq, 0, 2, "(0-2),(0-2)");
     else if (match(&t, "+FIE"))  ok = num_param(t, &p_ie, 0, 1, "(0,1)");
     else if (match(&t, "+FCT"))  ok = num_param(t, &p_ct, 0, 255, "(0-255)");
@@ -1464,6 +1512,23 @@ void fc2_select(int on)
     }
     selected = on ? 1 : 0;
     pthread_mutex_unlock(&fc2_mtx);
+}
+
+/*
+ * T.32 8.6: "the DTE should not attempt to change serial port rate or parity
+ * with +FBU set, and DTE commands shall not be echoed."  The reports arrive
+ * unsolicited, interleaved with whatever the DTE is typing, so an echo makes
+ * the stream ambiguous.  ATE is left alone -- this suppresses the echo only
+ * while +FBU is on.
+ */
+int fc2_echo_suppressed(void)
+{
+    int r;
+
+    pthread_mutex_lock(&fc2_mtx);
+    r = selected && p_bu;
+    pthread_mutex_unlock(&fc2_mtx);
+    return r;
 }
 
 int fc2_active(void)
