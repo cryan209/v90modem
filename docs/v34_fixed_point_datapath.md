@@ -165,6 +165,41 @@ quietly destroyed the previously working case (residual 2.3e-09 -> 2.0, taps
 114 dB -> 60 dB).  It showed up only because the R=14 control was re-run;
 without it, it would have shipped.
 
+## Live against the rig
+
+The offline matrix is deterministic and is the instrument that finds defects.
+The live A/B answers a different question -- whether the integer receiver
+carries a real call -- and it does.  A fixed-point build reaches V.90 data
+mode on the first Phase 4 attempt at 31200 upstream / 52000 downstream, zero
+retrains, B1 fit 100%, and delivers ~21000 intact upstream lines.
+
+Two alternated runs against the SmartLink rig, five calls a side, one binary
+per arm, `ME_*` untouched.  Every call in both runs reached data mode, so
+**the arithmetic does not affect the handshake**; what it affected was whether
+a call that lost the eye ever got it back.
+
+    run                       fixedpt                    floatpt
+    before the two fixes      355.0s / 47875 lines       566.5s / 101697 lines
+    after                     558.3s / 90860 lines       423.1s / 66467 lines
+
+**Do not read the reversal as the integer path being better.**  It is not, and
+the honest conclusion is that the two are no longer distinguishable here: the
+float arm of the second run contains a 14.0 s call that delivered nothing, and
+one bad call moves a five-call total more than any arithmetic does.  What the
+rig contributes swamps what the datapath does, in both directions.
+
+The mechanism is better evidence than the totals.  Before the fixes the fixed
+arm's bad calls were TERMINAL -- 0.0 s clean, or one clean run and then white
+for the rest of the call -- because nothing could put the equalizer back.
+After them its imperfect calls break and RECOVER (109.8 s clean over an 86.3 s
+longest hold; 104.9 s over 83.1 s), which is the restore, the blind loop and
+re-acquisition doing their job.  The float arm shows the same shape, i.e. both
+arms are now simply experiencing the line.
+
+Read clean TIME and intact U-lines, never byte percentages: an unlocked
+receiver emits garbage, which inflates the byte total on exactly the calls
+that delivered least.
+
 ## Comparing the two
 
 Offline, on a recording:
