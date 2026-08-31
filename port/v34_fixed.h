@@ -74,4 +74,107 @@ static __inline__ v34_fx_complex_t v34_fx_fse(const v34_fx_complex_t *taps,
     return out;
 }
 
+
+/* ---- Decision-directed NLMS -------------------------------------------
+ *
+ * tap += (mu/energy) * e * conj(x), the update in v90_t3_emit_ready().
+ *
+ * THE FAILURE MODE, AND IT IS NOT THE TEXTBOOK ONE.  With mu = 0.02
+ * (v90_t3_dd_mu) and NLMS normalisation a correction is about
+ * 0.02*|e|/(42*|x|); at a settled error of 0.01 and |x| ~ 3000 that is 1.6e-9,
+ * under two LSBs of the Q1.30 the taps are stored in.  The expected result is
+ * a stall -- corrections round to zero, the filter freezes.  Measured, that is
+ * NOT what happens.  port/v34_fixed_lms_test.c sweeps the accumulator width
+ * against a float NLMS on the same data, 200000 symbols:
+ *
+ *     accumulator   residual/symbol   taps vs float   tap[0] updates/1000
+ *     Q1.30         6.66e-01          -17.5 dB        1000
+ *     Q1.34         6.62e-01           +0.6 dB        1000
+ *     Q1.38         3.20e-09          113.9 dB         646
+ *     Q1.42         1.96e-09          114.0 dB         529
+ *     Q1.46         2.97e-09          114.0 dB         676
+ *
+ * The narrow accumulators update every single symbol -- they are not stalled.
+ * They are being driven by their own quantisation noise instead of the
+ * gradient, and settle at 0.666, which is precisely the mean-square
+ * distance-to-grid of symbols bearing no relation to the lattice.  A stall
+ * would have been obvious; this looks like a working adaptive filter and
+ * produces white output.
+ *
+ * The cliff is between Q1.34 and Q1.38.  Taps are therefore carried in Q1.46
+ * inside int64 -- eight bits past the cliff -- and narrowed to Q1.30 only when
+ * the filter is applied.  Above the cliff the fixed loop converges to the same
+ * filter as float to 114 dB, and its residual is actually LOWER (3e-09 against
+ * 6.9e-06), because a 46-bit accumulator carries the tiny corrections that
+ * float32's 24-bit mantissa rounds away.
+ */
+typedef struct { int64_t re, im; } v34_fx_acc_t;
+
+#ifndef V34_FX_ACC_SHIFT
+#define V34_FX_ACC_SHIFT    46
+#endif
+
+static __inline__ void v34_fx_lms_init(v34_fx_acc_t *acc,
+                                       const v34_fx_complex_t *taps, int n)
+{
+    int k;
+
+    for (k = 0;  k < n;  k++)
+    {
+        acc[k].re = (int64_t) taps[k].re << (V34_FX_ACC_SHIFT - V34_FX_TAP_SHIFT);
+        acc[k].im = (int64_t) taps[k].im << (V34_FX_ACC_SHIFT - V34_FX_TAP_SHIFT);
+    }
+}
+
+/* Narrow the wide accumulator back to the taps the FSE uses. */
+static __inline__ void v34_fx_lms_taps(v34_fx_complex_t *taps,
+                                       const v34_fx_acc_t *acc, int n)
+{
+    int k;
+
+    for (k = 0;  k < n;  k++)
+    {
+        taps[k].re = (int32_t) (acc[k].re >> (V34_FX_ACC_SHIFT - V34_FX_TAP_SHIFT));
+        taps[k].im = (int32_t) (acc[k].im >> (V34_FX_ACC_SHIFT - V34_FX_TAP_SHIFT));
+    }
+}
+
+/* One NLMS step.
+ *
+ * err is Q17.14 like the ring.  energy is sum(|x|^2) as a PLAIN int64 in
+ * real units (the caller has it already), NOT a Q-format value -- mixing
+ * formats through a divide is how the first version of this silently
+ * truncated every correction to zero.
+ *
+ * Derivation, kept because the shift is not guessable:
+ *   pr   = sum(err*ring)          -> value (e.x) scaled by 2^28
+ *   want acc += mu * (e.x)/energy scaled by 2^ACC
+ *   so   acc += (mu_q30/2^30) * (pr/2^28) / energy * 2^ACC
+ *             = pr * mu_q30 / energy >> (30 + 28 - ACC)
+ * With ACC = 46 that is a LEFT shift of 12, so do it before the divide to
+ * keep the small corrections this exists to preserve.
+ */
+static __inline__ void v34_fx_lms_update(v34_fx_acc_t *acc,
+                                         const v34_fx_complex_t *ring,
+                                         int n,
+                                         int32_t err_re, int32_t err_im,
+                                         int32_t mu_q30,
+                                         int64_t energy)
+{
+    int k;
+
+    if (energy <= 0)
+        return;
+    /*endif*/
+    for (k = 0;  k < n;  k++)
+    {
+        int64_t pr = ((int64_t) err_re*ring[k].re + (int64_t) err_im*ring[k].im) >> 14;
+        int64_t pi = ((int64_t) err_im*ring[k].re - (int64_t) err_re*ring[k].im) >> 14;
+
+        acc[k].re += (((pr*mu_q30) >> 2)/energy) << 2;
+        acc[k].im += (((pi*mu_q30) >> 2)/energy) << 2;
+    }
+    /*endfor*/
+}
+
 #endif
