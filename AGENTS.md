@@ -194,7 +194,11 @@ because SpanDSP's T.30 needs the document to exist by the DIS it receives.
 `+FBO`'s phase C bit order is applied — the default order is LSB first, the
 same one T.31's class 1 path uses with no reversal. `+FNR` negotiation
 reporting is implemented off SpanDSP's real-time frame handler, and so are
-`+FBU`'s `+FHT:`/`+FHR:` frame reports and polling (`+FLP`, `+FSP`, `+FPO`).
+`+FBU`'s `+FHT:`/`+FHR:` frame reports, `+FNS` non-standard frames and polling
+(`+FLP`, `+FSP`, `+FPO`). **Watch the FCF low bit**: in DIS/DTC, CSI/CIG and
+NSF/NSC it is a real distinction, but in DCS, TSI and NSS it is a don't-care
+set from whether a DIS was received, so those must be matched with `& 0xFE` —
+matching TSI exactly reported every calling station's TSI as a CSI.
 
 **The T-series specifications are in `ITU Docs/`** — T.31, T.32 (+ Amd 1),
 T.30, T.4, T.6 — and reading T.32 against code that had been written from

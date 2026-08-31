@@ -194,6 +194,31 @@ static int          peer_ecm = 1;
 static int          peer_t6 = 1;
 static const uint8_t *peer_nsf;
 static int          peer_nsf_len;
+static const uint8_t *peer_nss;
+static int          peer_nss_len;
+
+/*
+ * What the far end saw arrive, captured as the frames arrive.  T.30 frees its
+ * received-frame store in release_resources() immediately after the phase E
+ * handler, so t30_get_rx_nss() after a session is always empty -- an
+ * observation about SpanDSP's lifetimes, not about the frame.
+ */
+static uint8_t      peer_saw_nss[128];
+static int          peer_saw_nss_len;
+
+static void peer_frame_handler(void *user_data, bool incoming,
+                               const uint8_t *msg, int len)
+{
+    (void) user_data;
+    if (!incoming || len < 3)
+        return;
+    /* NSS carries the same don't-care low bit as TSI and DCS do. */
+    if ((msg[2] & 0xFE) == (T30_NSS & 0xFE)
+        && len - 3 <= (int) sizeof(peer_saw_nss)) {
+        memcpy(peer_saw_nss, msg + 3, (size_t) (len - 3));
+        peer_saw_nss_len = len - 3;
+    }
+}
 
 static fax_state_t *peer_start(int calling, const char *tx_file, const char *rx_file)
 {
@@ -208,6 +233,8 @@ static fax_state_t *peer_start(int calling, const char *tx_file, const char *rx_
     t30_set_ecm_capability(t30, peer_ecm ? true : false);
     if (peer_nsf)
         t30_set_tx_nsf(t30, peer_nsf, peer_nsf_len);
+    if (peer_nss)
+        t30_set_tx_nss(t30, peer_nss, peer_nss_len);
     t30_set_supported_compressions(t30, T4_COMPRESSION_T4_1D
                                         | T4_COMPRESSION_T4_2D
                                         | (peer_t6 ? T4_COMPRESSION_T6 : 0));
@@ -215,6 +242,8 @@ static fax_state_t *peer_start(int calling, const char *tx_file, const char *rx_
                                                | T4_COMPRESSION_T4_2D
                                                | T4_COMPRESSION_T6);
     t30_set_phase_e_handler(t30, peer_phase_e, NULL);
+    t30_set_real_time_frame_handler(t30, peer_frame_handler, NULL);
+    peer_saw_nss_len = 0;
     if (tx_file)
         t30_set_tx_file(t30, tx_file, -1, -1);
     if (rx_file)
@@ -633,7 +662,9 @@ static void test_fnr(void)
     /* Everything on, against a far end that supports T.6 and ECM. */
     run_fnr_session("AT+FNR=1,1,1,1");
     check(dte_saw("+FIS:"), "rpr=1: the remote's capabilities are reported");
-    check(dte_saw("+FNF:AD000102"), "nsr=1: the NSF frame is reported as hex");
+    /* T.32 8.4.2.4: the FIF in hex, "separated by spaces". */
+    check(dte_saw("+FNF:AD 00 01 02"),
+          "nsr=1: the NSF frame is reported as spaced hex");
     check(dte_saw("+FCI:\"peer\""), "idr=1: the remote's identification is reported");
     check(dte_count("+FCS:") == 1,
           "tpr=1 reports the session result exactly once");
@@ -703,6 +734,150 @@ static void test_bit_order_is_real(void)
     /* And they are genuinely different octets, not a palindrome. */
     check(memcmp(cap_buf[0], cap_buf[1], (size_t) cap_len[0]) != 0,
           "the two streams differ");
+}
+
+/*
+ * T.32 8.5.1.6 +FNS.  The parameter's own rules first, then a session that
+ * checks the octets actually reached the far end -- a +FNS that parsed
+ * perfectly and put nothing on the line would pass every syntax check.
+ */
+static void test_fns(void)
+{
+    static const uint8_t nss[] = { 0xAD, 0x11, 0x22 };
+    fax_state_t *peer;
+
+    printf("+FNS: non-standard frame sending (T.32 8.5.1.6)\n");
+
+    fc2_select(0);
+    fc2_select(1);
+
+    dte_reset();
+    at("AT+FNS=?");
+    check(dte_saw("(90)"), "AT+FNS=? reports the octet capacity");
+
+    dte_reset();
+    at("AT+FNS=\"AD0102\"");
+    at("AT+FNS?");
+    check(dte_saw("\"AD0102\""), "AT+FNS= sets the FIF");
+
+    /* 8.5.1.6: "each use appends data to the data entered previously". */
+    dte_reset();
+    at("AT+FNS=\"0304\"");
+    at("AT+FNS?");
+    check(dte_saw("\"AD01020304\""), "a second AT+FNS appends");
+
+    /* 8.5.1.6: "Spaces between octets shall be ignored by the DCE." */
+    dte_reset();
+    at("AT+FNS=\"\"");
+    at("AT+FNS=\"AD 01 02\"");
+    at("AT+FNS?");
+    check(dte_saw("\"AD0102\""), "spaces between octets are ignored");
+
+    dte_reset();
+    at("AT+FNS=\"\"");
+    at("AT+FNS?");
+    check(dte_saw("\"\""), "AT+FNS=\"\" resets it to the null string");
+
+    dte_reset();
+    at("AT+FNS=\"ADXY\"");
+    check(dte_saw("ERROR"), "a non-hex character is refused");
+    dte_reset();
+    at("AT+FNS=\"AD0\"");
+    check(dte_saw("ERROR"), "a half octet is refused");
+
+    /* Over the 90 octet limit. */
+    {
+        char cmd[256];
+        int n = 0;
+
+        at("AT+FNS=\"\"");
+        n += snprintf(cmd + n, sizeof(cmd) - (size_t) n, "AT+FNS=\"");
+        for (int i = 0; i < 91; i++)
+            n += snprintf(cmd + n, sizeof(cmd) - (size_t) n, "AD");
+        snprintf(cmd + n, sizeof(cmd) - (size_t) n, "\"");
+        dte_reset();
+        at(cmd);
+        check(dte_saw("ERROR"), "more than 90 octets is refused");
+    }
+
+    /*
+     * And it reaches the far end.  We call, so our non-standard frame travels
+     * with the DCS -- which makes it an NSS (8.5.1.6: "NSF sent with DIS; NSS
+     * sent with DCS; NSC sent with DTC").
+     */
+    at("AT+FNS=\"\"");
+    at("AT+FNS=\"AD5566\"");
+    peer_ecm = 1;
+    peer_t6 = 1;
+    peer_nsf = NULL;
+    peer_nss = NULL;
+    {
+        static uint8_t page[1 << 20];
+        int n;
+
+        at("AT+FIS=1,3,0,2,0,0,0,0,0");
+        at("ATD5551234");
+        at("AT+FDT");
+        n = encode_page_for_dte(SRC_TIFF, T4_COMPRESSION_T4_1D, 0,
+                                page, sizeof(page));
+        for (int off = 0; off < n; off += 512) {
+            int chunk = (n - off > 512) ? 512 : n - off;
+            fc2_dte_bytes(page + off, chunk);
+        }
+        unlink(PEER_RX);
+        peer = peer_start(0, NULL, PEER_RX);
+        dte_reset();
+        fc2_on_connected();
+        pump(peer, 60 * 50);
+        for (int i = 0; i < 20; i++)
+            fc2_poll();
+    }
+    if (peer) {
+        static const uint8_t want[] = { 0xAD, 0x55, 0x66 };
+
+        check(peer_saw_nss_len == (int) sizeof(want)
+              && memcmp(peer_saw_nss, want, sizeof(want)) == 0,
+              "the +FNS octets arrive at the far end in an NSS frame");
+        if (peer_saw_nss_len != (int) sizeof(want))
+            printf("       (far end received %d octets)\n", peer_saw_nss_len);
+        fax_free(peer);
+    }
+    fc2_on_disconnected();
+
+    /* The other direction: a received NSS is 8.4.2.4's +FNS: report. */
+    fc2_select(0);
+    fc2_select(1);
+    at("AT+FCR=1");
+    at("AT+FNR=0,0,1,1");
+    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+    at("ATA");
+    peer_nss = nss;
+    peer_nss_len = (int) sizeof(nss);
+    peer = peer_start(1, PEER_TX, NULL);
+    if (peer) {
+        dte_reset();
+        fc2_on_connected();
+        at("AT+FDR");
+        pump(peer, 60 * 50);
+        for (int i = 0; i < 20; i++)
+            fc2_poll();
+        check(dte_saw("+FNS:AD 11 22"),
+              "a received NSS is reported as +FNS: (8.4.2.4)");
+        check(!dte_saw("+FNF:AD 11 22"),
+              "and not as +FNF:, which is the NSF report");
+        /*
+         * The far end is the transmitter here, so its identification arrives
+         * in a TSI -- whose FCF carries the "a DIS was received" low bit, so
+         * it is 0x43 rather than 0x42.  Matching it exactly reported every
+         * such TSI as a CSI instead.
+         */
+        check(dte_saw("+FTI:\"peer\""),
+              "a transmitting far end's TSI is reported as +FTI:");
+        check(!dte_saw("+FCI:\"peer\""), "and not as +FCI:");
+        fax_free(peer);
+    }
+    fc2_on_disconnected();
+    peer_nss = NULL;
 }
 
 /*
@@ -870,8 +1045,12 @@ static void test_poll_remote(void)
     check(peer_done && peer_status == T30_ERR_OK,
           "the far end reports a good polled session");
     check(dte_saw("+FPO"), "the remote's offer to be polled is reported");
-    check(dte_saw("+FCI:\"peer\"") || dte_saw("+FTI:\"peer\""),
-          "the remote's identification is reported");
+    /*
+     * We called, so the far end's identification arrives in a CSI and is
+     * 8.4.2.3's +FCI:.  Written as an either/or this assertion passed while
+     * every TSI was being misreported as a CSI, so it is exact now.
+     */
+    check(dte_saw("+FCI:\"peer\""), "the remote's CSI is reported as +FCI:");
 
     /* The page itself, checked before any query -- a query resets the
      * capture the page is in. */
@@ -1029,6 +1208,7 @@ int main(void)
     test_receive(1);
     test_bit_order_is_real();
     test_fnr();
+    test_fns();
     test_fbu();
     test_poll_remote();
     test_be_polled(1);

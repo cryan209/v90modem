@@ -127,6 +127,41 @@ reverse the octets in those reports and nothing else. Note 3 is explicit that
 `+FBO` does **not** affect the `+FNC`, `+FNF` or `+FNS` responses, so those
 stay in the frame's own order.
 
+### +FNS, non-standard frames (8.5.1.6, 8.4.2.4)
+
+`AT+FNS="<hex octets>"` loads the FIF of a non-standard frame, up to 90 octets.
+Which frame carries it is T.30's decision, not the DTE's — NSF goes with a DIS,
+NSS with a DCS, NSC with a DTC — so the one string is offered for all three and
+whichever frame gets sent takes it.
+
+The octet values need no transformation. 8.5.1.6 says each octet is sent LSB
+first, so `"D8A2"` is the bit pattern `0001101101000101` on the line, which is
+what HDLC does with the octets `0xD8, 0xA2`. 8.4.2.4 reports received frames in
+the same convention, and 8.6's `+FHR:` example agrees.
+
+Per 8.5.1.6: spaces between octets are ignored, a repeated `+FNS` **appends**,
+`+FNS=""` resets to the null string, and `+FNS=?` reports the capacity. A
+half octet or a non-hex character is refused.
+
+Received non-standard frames are 8.4.2.4's three separate reports — `+FNF:` for
+an NSF, `+FNC:` for an NSC, `+FNS:` for an NSS — with the FIF in hex,
+**separated by spaces**. Earlier versions reported all three as `+FNF:` with the
+octets run together; both were wrong.
+
+#### The FCF low bit
+
+T.30 uses the low bit of the FCF two different ways, and getting it wrong is
+silent. In DIS/DTC, CSI/CIG and NSF/NSC it is a real distinction and the values
+must be matched exactly. In DCS, TSI and NSS it is a don't-care that SpanDSP
+sets from whether a DIS has been received — so a TSI arrives as `0x42` or
+`0x43` — and those must be matched with it masked off, which is what T.30's own
+dispatcher does.
+
+Matching TSI and NSS exactly meant every TSI from a *calling* station was
+reported as a `+FCI:` instead of a `+FTI:`, and a received NSS was never
+reported at all. The polling test had hidden the first of those by asserting
+`+FCI:` **or** `+FTI:`; it is exact now, and there is a test for each.
+
 ### +FBU, HDLC frame reporting (8.5.1.10, 8.6)
 
 `+FBU=1` reports every T.30 phase B and phase D frame, in both directions, as
@@ -184,12 +219,13 @@ this implements.
 Actions: `+FDT` (8.3.3), `+FDR` (8.3.4), `+FKS` (8.3.5), `+FIP` (8.3.6).
 Parameters: `+FCC` (8.5.1.1), `+FIS` (8.5.1.2), `+FCS` (8.5.1.3),
 `+FLI`/`+FPI` (8.5.1.5), `+FCR` (8.5.1.9), `+FPS` (8.5.2.2), `+FHS` (8.5.2.7),
-`+FNR` (8.5.1.11), `+FBU` (8.5.1.10), `+FLP` (8.5.1.7), `+FSP` (8.5.1.8), `+FAP` (8.5.1.12),
+`+FNS` (8.5.1.6), `+FNR` (8.5.1.11), `+FBU` (8.5.1.10), `+FLP` (8.5.1.7), `+FSP` (8.5.1.8), `+FAP` (8.5.1.12),
 `+FSA`/`+FPA`/`+FPW` (8.5.1.13), `+FBS` (8.5.3.2), `+FBO` (8.5.3.4), `+FMI`/`+FMM`/`+FMR`,
 and the accepted-and-stored set `+FCQ +FIE +FCT +FMS +FEA +FFC +FAA +FRY`.
 Reports: `+FCS:` for the negotiated session, `+FIS:`/`+FTC:` for the far end's
 capabilities, `+FCI:`/`+FTI:`/`+FPI:` for its identification, `+FNF:` for its
-non-standard frames, `+FHT:`/`+FHR:` for the HDLC frames themselves, `+FPO`
+non-standard frames (and `+FNC:`/`+FNS:` for the other two kinds),
+`+FHT:`/`+FHR:` for the HDLC frames themselves, `+FPO`
 for its offer to be polled, `+FPS:<ppr>,<lc>,
 <blc>,<cblc>,<lbc>` and `+FET:<ppm>` per page, `+FHS:` at the end of the
 session. 8.3.3.4's rule that `+FDT` ends in `ERROR` when the remote rejected
@@ -299,6 +335,13 @@ the received DIS from echoing our own parameters back; both would look right
 otherwise. The `+FNF:` check uses an NSF the far end was given, so the hex is
 compared against a known frame.
 
+`test_fns` checks the parameter's own rules and then that the octets **reach
+the far end** — captured by a real-time frame handler on the peer as the frame
+arrives, because T.30 frees its received-frame store in `release_resources()`
+immediately after the phase E handler, so `t30_get_rx_nss()` after a session is
+always empty. That is a fact about SpanDSP's lifetimes, not about the frame; a
+test that read it there would have reported a working `+FNS` as broken.
+
 `test_fbu` checks the reports against what T.30 must have exchanged — a
 received DIS as `FF 13 80 ...`, the DCS we send, the report landing before the
 `+FIS:` it produced, and `+FBO=2` reversing all of it to `FF C8 01 ...`. The
@@ -321,7 +364,6 @@ an `ATE0` that must still reach T.31, and the way back to class 0), which
 
 - Class 2 (the pre-standard `AT+FCLASS=2`) — only 2.0 is offered. The two are
   not compatible, and 2.0 is the ITU-T one.
-- `+FNS` (sending a non-standard frame), and the `+FNC:`/`+FNS:` reports.
 - Procedure interrupts — see the deviations above.
 - `+FDD`/`+FIT`/`+FLO`/`+FPR` — these are T.31 DTE-link parameters and stay
   with the T.31 interpreter.

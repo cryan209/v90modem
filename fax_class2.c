@@ -101,6 +101,16 @@ static int              p_ap[3];           /* +FAP: sub-address, SEP, PWD report
 static char             sub_address[21];   /* +FSA */
 static char             sel_poll_address[21]; /* +FPA */
 static char             password[21];      /* +FPW */
+
+/*
+ * T.32 8.5.1.6 +FNS: the FIF of the non-standard frame this DCE sends.  Which
+ * frame carries it is decided by T.30 rather than by the DTE -- NSF goes with
+ * a DIS, NSS with a DCS, NSC with a DTC -- so the one string is offered for
+ * all three and whichever frame gets sent takes it.
+ */
+#define FNS_MAX_OCTETS 90
+static uint8_t          nsf_fif[FNS_MAX_OCTETS];
+static int              nsf_fif_len;
 static int              p_bo;              /* +FBO, phase C bit order */
 static int              p_bu;              /* +FBU, HDLC frame reporting */
 static int              p_cq, p_ie, p_ct, p_ms, p_ea, p_ffc, p_aa, p_ry;
@@ -569,12 +579,20 @@ static void real_time_frame_handler(void *user_data, bool incoming,
      * frame that carried it.
      */
     if (incoming) {
-        switch (fcf) {
-        case T30_CSI: last_ident_fcf = T30_CSI; break;
-        case T30_CIG: last_ident_fcf = T30_CIG; break;
-        case T30_TSI: last_ident_fcf = T30_TSI; break;
-        default: break;
-        }
+        /*
+         * The low bit of an FCF is a real distinction in some frames and a
+         * don't-care in others.  CSI/CIG are a pair and are told apart by it;
+         * TSI's low bit is set from whether a DIS has been received, so it
+         * arrives as 0x42 or 0x43 and has to be matched with it masked off --
+         * which is what T.30 itself does.  Comparing TSI exactly missed every
+         * one sent by a calling station.
+         */
+        if (fcf == T30_CSI)
+            last_ident_fcf = T30_CSI;
+        else if (fcf == T30_CIG)
+            last_ident_fcf = T30_CIG;
+        else if ((fcf & 0xFE) == (T30_TSI & 0xFE))
+            last_ident_fcf = T30_TSI;
         /* T.32 8.5.1.7: with no document offered for polling, a DTC is a
          * command we cannot honour -- Table 20's "COMREC invalid command". */
         if (fcf == T30_DTC) {
@@ -584,15 +602,27 @@ static void real_time_frame_handler(void *user_data, bool incoming,
         }
     }
 
+    /*
+     * T.32 8.4.2.4: one response per received non-standard frame, and a
+     * different response for each of the three -- +FNF: for NSF, +FNC: for
+     * NSC, +FNS: for NSS.  The FIF only ("beginning with the country code,
+     * but not including the FCS"), in hex, separated by spaces.
+     */
     if (incoming && p_nr.nsr
-        && (fcf == T30_NSF || fcf == T30_NSC || fcf == T30_NSS)) {
-        char hex[3 * 64 + 8];
+        && (fcf == T30_NSF || fcf == T30_NSC
+            || (fcf & 0xFE) == (T30_NSS & 0xFE))) {
+        /* NSF and NSC are a pair told apart by the low bit; NSS carries the
+         * same don't-care bit as TSI and DCS do. */
+        const char *report = (fcf == T30_NSF) ? "+FNF"
+                           : (fcf == T30_NSC) ? "+FNC" : "+FNS";
+        char hex[3 * FNS_MAX_OCTETS + 8];
         int n = 0;
 
-        for (int i = 3; i < len && n < (int) sizeof(hex) - 3; i++)
-            n += snprintf(hex + n, sizeof(hex) - (size_t) n, "%02X", msg[i]);
+        for (int i = 3; i < len && n < (int) sizeof(hex) - 4; i++)
+            n += snprintf(hex + n, sizeof(hex) - (size_t) n,
+                          (i == 3) ? "%02X" : " %02X", msg[i]);
         hex[n] = '\0';
-        queue_line("\r\n+FNF:%s\r\n", hex);
+        queue_line("\r\n%s:%s\r\n", report, hex);
     }
 }
 
@@ -780,6 +810,13 @@ static void session_start(void)
         t30_set_tx_password(t30, password);
     if (polling_id[0])
         t30_set_tx_polled_sub_address(t30, polling_id);
+
+    /* T.32 8.5.1.6.  T.30 picks the frame; all three carry the same FIF. */
+    if (nsf_fif_len > 0) {
+        t30_set_tx_nsf(t30, nsf_fif, nsf_fif_len);
+        t30_set_tx_nsc(t30, nsf_fif, nsf_fif_len);
+        t30_set_tx_nss(t30, nsf_fif, nsf_fif_len);
+    }
 
     /*
      * The page the DTE handed us in +FDT, if any.
@@ -1211,6 +1248,86 @@ static int fnr_param(const char *t)
     return 1;
 }
 
+/*
+ * T.32 8.5.1.6 +FNS="<hex octets>".  Up to 90 octets; spaces between them are
+ * ignored; a repeated +FNS APPENDS to what is there already, and +FNS=""
+ * resets it to the null string.  +FNS=? reports the number of octets the
+ * parameter can hold.
+ *
+ * The octet values need no transformation: 8.5.1.6 says each octet is sent
+ * LSB first, so "D8A2" is the bit pattern 0001101101000101 on the line, and
+ * that is what HDLC does with the octets 0xD8, 0xA2 -- the same convention
+ * 8.4.2.4 reports received frames in.
+ */
+static int fns_param(const char *t)
+{
+    uint8_t work[FNS_MAX_OCTETS];
+    int n = 0;
+    const char *v;
+    int digits = 0;
+    int value = 0;
+
+    if (t[0] == '?' && t[1] == '\0') {
+        char hex[3 * FNS_MAX_OCTETS + 8];
+        int k = 0;
+
+        for (int i = 0; i < nsf_fif_len && k < (int) sizeof(hex) - 4; i++)
+            k += snprintf(hex + k, sizeof(hex) - (size_t) k, "%02X", nsf_fif[i]);
+        hex[k] = '\0';
+        put_line("\r\n\"%s\"\r\n", hex);
+        put_ok();
+        return 1;
+    }
+    if (t[0] == '=' && t[1] == '?' && t[2] == '\0') {
+        put_line("\r\n(%d)\r\n", FNS_MAX_OCTETS);
+        put_ok();
+        return 1;
+    }
+    if (t[0] != '=')
+        return 0;
+
+    v = t + 1;
+    if (*v == '"')
+        v++;
+    for (; *v && *v != '"'; v++) {
+        int d;
+
+        if (*v == ' ')
+            continue;               /* 8.5.1.6: spaces are ignored */
+        if (*v >= '0' && *v <= '9')
+            d = *v - '0';
+        else if (*v >= 'A' && *v <= 'F')
+            d = *v - 'A' + 10;
+        else if (*v >= 'a' && *v <= 'f')
+            d = *v - 'a' + 10;
+        else
+            return 0;
+        value = (value << 4) | d;
+        if (++digits == 2) {
+            if (n >= FNS_MAX_OCTETS)
+                return 0;
+            work[n++] = (uint8_t) value;
+            digits = 0;
+            value = 0;
+        }
+    }
+    if (digits)
+        return 0;                   /* a half octet is not an octet */
+
+    if (n == 0) {
+        /* +FNS="" resets the parameter. */
+        nsf_fif_len = 0;
+        put_ok();
+        return 1;
+    }
+    if (nsf_fif_len + n > FNS_MAX_OCTETS)
+        return 0;
+    memcpy(nsf_fif + nsf_fif_len, work, (size_t) n);
+    nsf_fif_len += n;
+    put_ok();
+    return 1;
+}
+
 /* T.32 8.5.1.12 +FAP=<sub>,<sep>,<pwd>: which addressing frames get reported. */
 static int fap_param(const char *t)
 {
@@ -1264,6 +1381,7 @@ static void params_reset(void)
     p_sp = 0;
     p_ap[0] = p_ap[1] = p_ap[2] = 0;
     sub_address[0] = sel_poll_address[0] = password[0] = '\0';
+    nsf_fif_len = 0;
     p_bo = 0;
     p_bu = 0;
     p_cq = 0; p_ie = 0; p_ct = 30; p_ms = 0; p_ea = 0;
@@ -1364,6 +1482,7 @@ int fc2_at_line(const char *line)
     else if (match(&t, "+FSA"))  ok = str_param(t, sub_address, sizeof(sub_address));
     else if (match(&t, "+FPA"))  ok = str_param(t, sel_poll_address, sizeof(sel_poll_address));
     else if (match(&t, "+FPW"))  ok = str_param(t, password, sizeof(password));
+    else if (match(&t, "+FNS"))  ok = fns_param(t);
     else if (match(&t, "+FAP"))  ok = fap_param(t);
     else if (match(&t, "+FBO"))  ok = num_param(t, &p_bo, 0, 3, "(0-3)");
     else if (match(&t, "+FBU"))  ok = num_param(t, &p_bu, 0, 1, "(0,1)");
