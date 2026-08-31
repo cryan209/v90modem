@@ -58,8 +58,31 @@
 #define V34_V90_T3_FSE_TAPS                 21
 /* Big enough to hold the whole E->B1 era plus the lag of the CP-bitstream E
    detector that anchors the search (about 3.4 s at 9.6 kHz).  B1 is only
-   90 ms long and had been passing before the capture even started. */
-#define V34_V90_T3_RAW_SIZE                 131072
+   90 ms long and had been passing before the capture even started.
+
+   This is TWO complexf_t rings, so it dominates sizeof(v34_rx_state_t): at the
+   old 131072 they were 1 MB each and the receive state was 5229 KB, which is
+   ten times an ESP32-S3's whole SRAM.  131072 is 13.65 s -- four times the
+   3.4 s the paragraph above derives -- and the margin was never measured.
+
+   Swept on artifacts/reneg-eq/reneg-r1 through v90_engine_replay, which has a
+   single handover like a live call: 32768, 16384 and 8192 all produce output
+   IDENTICAL to 131072, line for line; 4096 (0.42 s) breaks acquisition (B1
+   acq 3 -> 0).  Set to the derivation's own figure rather than to the floor,
+   since one recording cannot bound the E->B1 gap on every call -- but 8192 is
+   known to work here if a port needs the further 4x.
+
+   Do NOT sweep this with v90_upstream_replay: it searches the handover
+   instant, so changing the lookback changes which candidate it settles on and
+   the logs differ for a reason that has nothing to do with the receiver.  Its
+   medians do agree (0.039 and 0.660 at both sizes).
+
+   And rebuild EVERYTHING when changing it.  spandsp-master/src/*.o, .libs/*.o
+   and *.lo do not rebuild on a header change any more than the repo objects
+   do; a partial rebuild here segfaults in v34_rx_phase3_wait_s_symbol reading
+   s->last_sample at a stale offset, which looks exactly like a DSP failure and
+   is not one. */
+#define V34_V90_T3_RAW_SIZE                 32768
 #define V34_V90_T3_RAW_MASK                 (V34_V90_T3_RAW_SIZE - 1)
 #define V34_V90_T3_B1_MAX_SYMBOLS           256
 #define V34_V90_T3_GAIN_TRIALS              33
