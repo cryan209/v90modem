@@ -262,6 +262,9 @@ static const uint8_t *peer_nss;
 static int          peer_nss_len;
 static int          peer_interrupt;   /* the far end asks for / grants one */
 static int          peer_ecm_octets = 256; /* the far end's DIS/DTC bit 7 preference */
+static int          peer_retransmit;  /* the far end resends a page it is told is bad */
+static int          peer_reject_pages; /* how many received pages the far end answers with RTN */
+static int          peer_pages_judged;
 
 /*
  * The ECM frame size actually used, taken off the wire at the far end: the
@@ -288,12 +291,29 @@ static int          peer_saw_dcn;
 static uint8_t      peer_saw_nss[128];
 static int          peer_saw_nss_len;
 
+/*
+ * The T.30 control frames the far end sent and received, in order, as a
+ * single line.  A rejected page is a long sequence with several plausible
+ * ways to go wrong, and "the far end holds the wrong pages" says nothing
+ * about which; the trace is printed only when a check in that test failed.
+ */
+static char peer_trace[4096];
+static int  peer_trace_len;
+static int  peer_trace_on;
+
 static void peer_frame_handler(void *user_data, bool incoming,
                                const uint8_t *msg, int len)
 {
     (void) user_data;
     if (len < 3)
         return;
+    if (peer_trace_on && msg[2] != T4_FCD && msg[2] != T4_RCP
+        && peer_trace_len < (int) sizeof(peer_trace) - 40) {
+        peer_trace_len += snprintf(peer_trace + peer_trace_len,
+                                   sizeof(peer_trace) - (size_t) peer_trace_len,
+                                   "%s%s ", incoming ? "<" : ">",
+                                   t30_frametype(msg[2]));
+    }
     /*
      * send_simple_frame() ORs the "a DIS was received" bit into the FCF, so a
      * post page message from a calling station is 0x2F where the constant is
@@ -347,6 +367,16 @@ static fax_state_t *peer_start(int calling, const char *tx_file, const char *rx_
     t30_set_tx_ident(t30, "peer");
     t30_set_ecm_capability(t30, peer_ecm ? true : false);
     t30_set_ecm_frame_size(t30, peer_ecm_octets);
+    /* T.30 5.3.6.3: a transmitter that gets RTN retrains and may send the
+     * page again.  SpanDSP only does so when it is told it can; without this
+     * it moves on to the next page instead, and the retransmission this test
+     * is about never happens. */
+    t30_set_retransmit_capable(t30, peer_retransmit ? true : false);
+    /* The far end refuses the first peer_reject_pages pages it receives.  It
+     * holds its own post page response and releases it from pump(), which is
+     * the same mechanism the DCE under test uses for its DTE. */
+    t30_set_post_page_response_hold(t30, peer_reject_pages > 0);
+    peer_pages_judged = 0;
     if (peer_nsf)
         t30_set_tx_nsf(t30, peer_nsf, peer_nsf_len);
     if (peer_nss)
@@ -400,6 +430,13 @@ static void pump(fax_state_t *peer, int frames)
 
         fax_rx(peer, a, 160);
         fc2_rx(b, 160);
+
+        if (peer_reject_pages > 0) {
+            int ppr = (peer_pages_judged < peer_reject_pages) ? T30_RTN : T30_MCF;
+
+            if (t30_release_post_page_response(fax_get_t30_state(peer), ppr) == 0)
+                peer_pages_judged++;
+        }
 
         fc2_poll();
         if (peer_done)
@@ -1549,6 +1586,332 @@ static void test_multipage_receive(int ec)
 }
 
 /*
+ * T.32 Annex II.8, "receive one page with line errors and retransmission".
+ * The DTE reads the page, does not like it, and writes +FPS=2 before the
+ * +FDR that releases the response -- so RTN goes on the wire, the far end
+ * retrains and sends the same page again, and that repeat has to reach the
+ * DTE as a page of its own.  Mid-document, so what follows the repeat is the
+ * rest of the document rather than the end of the call.
+ *
+ * The far end's document is two pages of different lengths, and page one is
+ * the one rejected, so "the page came again" is checked by its content and
+ * its line count rather than by a page simply arriving.
+ */
+static void test_page_rejected_rtn(int ec)
+{
+    fax_state_t *peer;
+    t4_rx_state_t *decode;
+    char cmd[40];
+    char want[48];
+    int expect_page;
+    int rows = 0;
+    int bad;
+
+    printf("+FPS=2 mid-document%s (EC=%d) (T.32 II.8)\n",
+           ec ? ": ECM has no RTN" : ": RTN and retransmit", ec);
+
+    unlink(DTE_RX);
+    if (!write_test_tiff_pages(PEER_MULTI, 2)) {
+        check(0, "the far end's two-page document is written");
+        return;
+    }
+
+    peer_ecm = 1;
+    peer_t6 = 1;
+    peer_nsf = NULL;
+    peer_nss = NULL;
+    peer_interrupt = 0;
+    peer_retransmit = 1;
+
+    fc2_select(0);
+    fc2_select(1);
+
+    dte_reset();
+    at("AT+FLI=\"receiver\"");
+    at("AT+FNR=0,1,0,0");
+    at("AT+FBO=0");
+    at("AT+FCR=1");
+    snprintf(cmd, sizeof(cmd), "AT+FIS=1,3,0,2,0,%d,0,0,0", ec); at(cmd);
+    at("ATA");
+
+    peer = peer_start(1, PEER_MULTI, NULL);
+    check(peer != NULL, "the far-end fax terminal starts");
+    if (!peer) {
+        peer_retransmit = 0;
+        return;
+    }
+
+    fc2_on_connected();
+
+    /* Page one, as sent the first time. */
+    dte_reset();
+    at("AT+FDR");
+    pump_until(peer, 60 * 50, "+FPS:");
+    snprintf(want, sizeof(want), "+FPS:1,%d,0,0,0", page_rows(0));
+    check(dte_saw(want), "page one arrives and is reported");
+
+    /*
+     * T.32 8.5.2.2 and Table 23: the DTE overwrites the verdict.  2 is RTN,
+     * "page bad, retrain requested" -- the everyday reason the post page
+     * response is held for the DTE at all.  The +FDR that releases it is also
+     * the one that collects whatever comes next.
+     */
+    dte_reset();
+    at("AT+FPS=2");
+    peer_saw_ppr = 0;
+    at("AT+FDR");
+    pump_until(peer, 90 * 50, "+FPS:");
+    for (int i = 0; i < 20; i++)
+        fc2_poll();
+
+    if (ec) {
+        /*
+         * T.30 Table 5, note 2 to RTN: "RTN is not applicable to the optional
+         * T.4 error correction mode."  ECM repairs a page frame by frame --
+         * the receiver answers a partial page with MCF or PPR and there is no
+         * signal for "bad page, retrain" -- so the DTE's +FPS=2 cannot be
+         * honoured, MCF goes out and the document carries on to page two.
+         * Pinned rather than left implicit: it looks exactly like the held
+         * response being ignored, which is a real bug in the non-ECM case,
+         * and the difference is worth stating.
+         */
+        check(peer_saw_ppr == (T30_MCF & 0xFE),
+              "in ECM the page cannot be refused, so MCF goes out (T.30 note 2)");
+        expect_page = 1;
+    } else {
+        check(peer_saw_ppr == (T30_RTN & 0xFE),
+              "the DTE's +FPS=2 reaches the far end as RTN");
+        /* T.32 II.8: RTN forces back to phase B, so the session parameters
+         * are negotiated again and reported again. */
+        check(dte_saw("+FCS:"), "the retrain is reported to the DTE");
+        expect_page = 0;
+    }
+    if (peer_saw_ppr != (ec ? (T30_MCF & 0xFE) : (T30_RTN & 0xFE)))
+        printf("       (far end saw post page response 0x%02X)\n", peer_saw_ppr);
+
+    check(dte_saw("CONNECT"), "the next page follows CONNECT");
+    snprintf(want, sizeof(want), "+FPS:1,%d,0,0,0", page_rows(expect_page));
+    check(dte_saw(want), ec ? "page two follows, its own line count with it"
+                            : "page one arrives again, with its own line count");
+    if (!dte_saw(want)) {
+        const char *p = dte_find("+FPS:");
+
+        printf("       (reported %.24s)\n", p ? p : "nothing");
+    }
+
+    /* And it is the page it should be -- in the non-ECM arm, page one again
+     * rather than page two arriving early. */
+    {
+        const char *body = dte_find("CONNECT\r\n");
+        int saw_dle = 0;
+        int start;
+
+        check(body != NULL, "the page follows CONNECT");
+        if (body) {
+            start = (int) (body - dte_buf) + 9;
+            row_variant = expect_page;
+            decode = t4_rx_init(NULL, DTE_RX, T4_COMPRESSION_T4_2D);
+            check(decode != NULL, "the decoder for the DTE stream starts");
+            if (decode) {
+                t4_rx_set_rx_encoding(decode, T4_COMPRESSION_T4_1D);
+                t4_rx_set_image_width(decode, IMAGE_WIDTH);
+                t4_rx_start_page(decode);
+                for (int i = start; i < dte_len; i++) {
+                    uint8_t byte = (uint8_t) dte_buf[i];
+
+                    if (saw_dle) {
+                        saw_dle = 0;
+                        if (byte == 0x03)
+                            break;
+                        if (byte != 0x10)
+                            continue;
+                    } else if (byte == 0x10) {
+                        saw_dle = 1;
+                        continue;
+                    }
+                    t4_rx_put(decode, &byte, 1);
+                }
+                t4_rx_end_page(decode);
+                t4_rx_release(decode);
+                t4_rx_free(decode);
+                bad = compare_page(DTE_RX, 0, &rows);
+                check(bad == 0 && rows == page_rows(expect_page),
+                      ec ? "and it is page two"
+                         : "and it is page one, not the next page");
+                if (bad != 0 || rows != page_rows(expect_page))
+                    printf("       (%d rows, %d differing)\n", rows, bad);
+            }
+            row_variant = 0;
+        }
+    }
+
+    if (!ec) {
+        /* Accept it this time, and take the rest of the document. */
+        dte_reset();
+        at("AT+FPS=1");
+        at("AT+FDR");
+        pump_until(peer, 90 * 50, "+FPS:");
+        for (int i = 0; i < 20; i++)
+            fc2_poll();
+        snprintf(want, sizeof(want), "+FPS:1,%d,0,0,0", page_rows(1));
+        check(dte_saw(want), "page two follows the accepted page");
+        if (!dte_saw(want)) {
+            const char *p = dte_find("+FPS:");
+
+            printf("       (reported %.24s)\n", p ? p : "nothing");
+        }
+    }
+    check(dte_saw("+FET:2"), "the document ends with EOP");
+
+    dte_reset();
+    at("AT+FPS=1");
+    release_post_page(peer);
+    check(dte_saw("+FHS:"), "the last +FDR ends the session");
+    check(peer_done && peer_status == T30_ERR_OK,
+          "the far end reports a good session");
+
+    row_variant = 0;
+    peer_retransmit = 0;
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
+/*
+ * T.32 Annex II.7, "send one page with line errors and retransmission", the
+ * transmit half of the same story: the far end answers a page with RTN, the
+ * +FDT completes with ERROR rather than OK (8.3.3.4), +FPS reads back the 2
+ * that says why (Table 23), and the DTE hands the page over again.
+ */
+static void test_transmit_page_rejected(void)
+{
+    fax_state_t *peer;
+    int failures_before = failures;
+    int rows = 0;
+    int bad;
+
+    printf("+FDT: a page the far end rejects with RTN (T.32 II.7)\n");
+
+    peer_ecm = 1;
+    peer_t6 = 1;
+    peer_nsf = NULL;
+    peer_nss = NULL;
+    peer_interrupt = 0;
+    peer_reject_pages = 1;
+
+    fc2_select(0);
+    fc2_select(1);
+    unlink(PEER_RX);
+
+    at("AT+FLI=\"sender\"");
+    at("AT+FNR=0,1,0,0");
+    /* No ECM: T.30 Table 5 note 2 puts RTN outside it, so a rejected page is
+     * only a thing that can happen here. */
+    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+    at("ATD5551234");
+
+    /* Two pages: the first ends with MPS, so the rejection lands in the
+     * middle of the document rather than at the end of the procedure. */
+    dte_reset();
+    check(send_page_via_fdt(0, 0x2C), "page one is handed over");
+    check(dte_saw("OK"), "and acknowledged");
+    check(send_page_via_fdt(1, 0x2E), "page two is handed over");
+
+    peer = peer_start(0, NULL, PEER_RX);
+    check(peer != NULL, "the far-end fax terminal starts");
+    if (!peer) {
+        peer_reject_pages = 0;
+        return;
+    }
+
+    dte_reset();
+    fc2_on_connected();
+
+    /* Up to the far end's verdict on page one, so +FPS can be read while it
+     * still says what the far end thought -- T.32 II.7's [AT+FPS?] step. */
+    for (int i = 0; i < 90 * 50 && peer_saw_ppr == 0; i++)
+        pump(peer, 1);
+    check(peer_saw_ppr == (T30_RTN & 0xFE), "the far end rejects page one with RTN");
+
+    /*
+     * T.32 II.7's "[AT+FPS?] -> 2" step.  The far end's frame handler sees
+     * RTN as it goes out, so this side still has to receive and demodulate
+     * it -- hence the wait rather than a fixed pump.  Table 23: 2 is "page
+     * bad, retrain requested".  Nothing else covers that mapping in the
+     * transmit direction, and page_status returns to 1 as soon as a page is
+     * accepted, so it can only be read here.
+     */
+    {
+        int saw_two = 0;
+
+        for (int i = 0; i < 200 && !saw_two; i++) {
+            dte_reset();
+            at("AT+FPS?");
+            for (int k = 0; k < 5; k++)
+                fc2_poll();
+            saw_two = dte_saw("\r\n2\r\n");
+            if (!saw_two)
+                pump(peer, 10);
+        }
+        check(saw_two, "+FPS? reads back the far end's verdict as 2");
+    }
+
+    dte_reset();
+    pump(peer, 90 * 50);
+    pump_regardless(peer, 5 * 50);
+
+    /* T.32 II.7: "RTN forces back to phase B", so the session is negotiated
+     * again -- and the DCE reports the new parameters, at the rate it stepped
+     * down to. */
+    /* T.32 II.7: "RTN forces back to Phase B".  The buffer was cleared after
+     * the rejection, so any +FCS: here belongs to the renegotiation. */
+    check(dte_count("+FCS:") >= 1, "the retrain is reported to the DTE");
+    check(dte_saw("+FHS:00"), "and the session completes normally");
+    check(peer_done && peer_status == T30_ERR_OK,
+          "the far end reports a good session");
+
+    /*
+     * What the far end holds is the whole point: page one, then page one
+     * again after the retrain, then page two.  It keeps the copy it refused,
+     * which is its own business -- what matters here is that the rejected
+     * page was sent a second time and that page two still followed it.  A
+     * DCE that skipped the bad page would leave two pages and the wrong one
+     * missing, and would still report a good session.
+     */
+    {
+        TIFF *t = TIFFOpen(PEER_RX, "r");
+        int pages = 0;
+
+        if (t) {
+            do
+                pages++;
+            while (TIFFReadDirectory(t));
+            TIFFClose(t);
+        }
+        check(pages == 3, "the far end holds the rejected page, the repeat and page two");
+        if (pages != 3)
+            printf("       (%d pages)\n", pages);
+    }
+    row_variant = 0;
+    bad = compare_page(PEER_RX, 1, &rows);
+    check(bad == 0 && rows == IMAGE_ROWS, "the repeat is page one, sent again");
+    if (bad != 0 || rows != IMAGE_ROWS)
+        printf("       (repeat: %d rows, %d differing)\n", rows, bad);
+    row_variant = 1;
+    bad = compare_page(PEER_RX, 2, &rows);
+    check(bad == 0 && rows == IMAGE_ROWS, "and page two followed it");
+    if (bad != 0 || rows != IMAGE_ROWS)
+        printf("       (page two: %d rows, %d differing)\n", rows, bad);
+    row_variant = 0;
+
+    if (failures != failures_before)
+        printf("       (T.30 frames at the far end: %s)\n", peer_trace);
+
+    peer_reject_pages = 0;
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
+/*
  * A document the DTE never finished must not survive the call it belonged to.
  * Pages accumulate now, so an abandoned one would be appended to by the next
  * +FDT and transmitted on somebody else's call.  This stays inside one
@@ -2310,6 +2673,9 @@ int main(void)
     test_multipage_receive(0);
     test_multipage_receive(2);
     test_multipage_receive(1);
+    test_page_rejected_rtn(0);
+    test_page_rejected_rtn(2);
+    test_transmit_page_rejected();
     test_unfinished_document_discarded();
     test_post_page_hold();
     test_held_response_timeout();

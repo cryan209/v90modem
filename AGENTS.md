@@ -234,6 +234,16 @@ Multi-page runs both ways at all three EC settings; on receive **the two pages
 are different lengths on purpose**, since equal ones let a line-count latch
 that is never updated report the right number for page two as well.
 
+A page rejected mid-document is covered both ways (T.32 II.7 and II.8), and
+**in ECM the rejection cannot happen**: T.30 Table 5 note 2, "RTN is not
+applicable to the optional T.4 error correction mode", so a DTE's `+FPS=2`
+becomes MCF and the document carries on. That looks exactly like the held
+response being ignored, so both are asserted. The far end needs
+`t30_set_retransmit_capable()` before it will resend at all. **Gap:** at EOP
+rather than MPS the call ends with `+FHS:20` instead of II.7's DTE-driven
+retry; setting `retransmit_capable` on our own T.30 was measured to change
+nothing mid-document and to be refused by this peer at EOP, so it is not set.
+
 Neither class has hardware interop. See `docs/fax_class_at.md`.
 
 `docs/` holds a design note or investigation write-up per phase. Read the relevant one before changing that phase.

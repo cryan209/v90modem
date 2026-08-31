@@ -574,6 +574,47 @@ reading the statistics when the DTE asks, as the code did before, fails page
 one of every arm and page two of the ECM ones; latching only the first page
 fails page two of all three.
 
+`test_page_rejected_rtn` is T.32 Annex II.8, "receive one page with line
+errors and retransmission", mid-document: the DTE writes `+FPS=2` before the
+`+FDR` that releases the response, so RTN goes on the wire, the far end
+retrains and sends the same page again, and that repeat has to reach the DTE
+as a page of its own before the document carries on. The far end has to be
+told it may retransmit (`t30_set_retransmit_capable()`); without that SpanDSP
+moves on to the next page instead and there is nothing to test.
+
+**The ECM arm of it asserts the opposite, and that is the point.** T.30
+Table 5, note 2 to RTN: *"RTN is not applicable to the optional T.4 error
+correction mode."* ECM repairs a page frame by frame -- the receiver answers a
+partial page with MCF or PPR and there is no signal for "bad page, retrain" --
+so a DTE's `+FPS=2` cannot be honoured, MCF goes out and page two follows. On
+the wire that is indistinguishable from the held response being ignored, which
+*is* a real bug in the non-ECM case, so the two are pinned separately: with
+the DTE's verdict ignored, the non-ECM arm fails six checks and the ECM arm
+fails none.
+
+`test_transmit_page_rejected` is the other half, Annex II.7. The far end
+refuses page one with RTN -- through the same held-response API the DCE uses
+for its own DTE -- and the checks are II.7's own steps: RTN on the wire,
+`AT+FPS?` reading back 2 (Table 23, and nothing else covers that mapping in
+the transmit direction), a `+FCS:` from the renegotiation that II.7 calls "RTN
+forces back to Phase B", and the far end ending up with the rejected page, the
+repeat, and page two after it. A DCE that skipped the bad page would leave two
+pages, the wrong one missing, and still report a good session. The `+FPS?`
+read has to wait for the frame: the far end's handler sees RTN as it goes out,
+and this side still has to demodulate it -- read too early it says 1, which is
+what a fixed pump did.
+
+**Two things it does not cover, both measured.** The rejection is at MPS,
+mid-document. At **EOP** -- the last page -- SpanDSP sends DCN and the call
+ends with `+FHS:20`, where II.7 has the DTE hand the page over again; the
+obvious lever, `t30_set_retransmit_capable()`, makes it retrain and resend
+instead, which this far end answers with DCN and "unexpected message", and it
+changes nothing at all mid-document, where both settings already retransmit.
+So it is not set, and end-of-document RTN remains a gap rather than a
+behaviour with a test. And II.7's ordering (`+FDT` completing with ERROR after
+the far end's verdict) does not arise here for the reason in *Deviations*: the
+`+FDT` completes when the page is spooled, before the call.
+
 `test_unfinished_document_discarded` hands over a page that says another
 follows, drops the call, and makes a second one — deliberately without leaving
 class 2.0 in between, since that clears everything and would hide the leak.
