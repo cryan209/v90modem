@@ -12,6 +12,43 @@
  * It exists for the FPU-less parts: ESP32-C3/C6/H2 are RV32IMC with no F
  * extension, so every float operation there is a libgcc call.
  *
+ * NOT YET EQUIVALENT TO THE FLOAT PATH.  Run against the recorded rate matrix
+ * (v90_upstream_replay, ME_V90_DATA_LEAN=1, five calls) this matches float on
+ * four and REGRESSES on one:
+ *
+ *     call        float  n/median/clean%      fixed  n/median/clean%
+ *     24000-r1     578 / 0.038 / 100.0%        578 / 0.038 / 100.0%   identical
+ *     26400-r1    1180 / 0.619 /  35.9%       1169 / 0.656 /  36.4%
+ *     28800-r1    1607 / 0.660 /  24.0%       1608 / 0.661 /  23.8%
+ *     31200-r1    2716 / 0.664 /   2.0%       2716 / 0.666 /   2.0%
+ *     19200-r1     820 / 0.383 /  40.2%       1109 / 0.656 /  22.1%   WORSE
+ *
+ * 19200-r1 with the handover PINNED at 26.0 s, so this is not the sweep
+ * artefact CLAUDE.md warns about -- the gap widens: float 548 windows, median
+ * 0.016, 84.3% clean; fixed 915 windows, median 0.600, 35.2%.  B1 acquisition
+ * is IDENTICAL in both (coarse 97.9%, fit 100.0%, out-of-sample 0.015), so the
+ * front end is fine.  The per-eighth trajectory shows what happens:
+ *
+ *     float   0.014 0.022 0.015 0.204 0.355 0.156 0.015 0.019   recovers
+ *     fixed   0.023 0.018 0.559 0.666 0.661 0.631 0.598 0.220   does not
+ *
+ * It starts EQUAL and then walks off, which is the adaptive filter, not the
+ * arithmetic of any single operation.
+ *
+ * THE LIKELY CAUSE, AND THE REASON ONE RECORDING WAS NOT ENOUGH: mean symbol
+ * power across the corpus is 740 (reneg-eq/r1, where every format here was
+ * derived), 740 (31200-r1), 267 (26400-r1), 52 (19200-r1) and 1.75 (28800-r1)
+ * -- 423:1 in power, 21:1 in amplitude.  Q17.14 has FIXED absolute resolution.
+ * Formats calibrated at one signal level cannot span that, and the LMS is
+ * where it shows first because its corrections scale with the signal.  The fix
+ * is block floating point: carry a per-call exponent on the ring and the taps
+ * rather than a fixed binary point.  Not done.
+ *
+ * Note 28800-r1 matching is not evidence of health -- float is already white
+ * there (median 0.660), so there was nothing to lose.  The comparison only
+ * carries information where float decodes well, which is 24000-r1 (identical)
+ * and 19200-r1 (regressed).  One for one.
+ *
  * FORMATS, DERIVED FROM MEASURED DATA rather than chosen
  *
  * Taken from V90_T3_SYMBOL_PROBE on artifacts/reneg-eq/reneg-r1, one real
