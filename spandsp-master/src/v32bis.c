@@ -513,7 +513,16 @@ static int v32bis_startup_symbol_source(void *user_data, complexf_t *symbol)
         return -1;
     }
     state = s->startup_tx_symbols[s->startup_tx_symbol_pos++];
+#if defined(SPANDSP_USE_FIXED_POINT)
+    /* v17_v32bis_tx_constellation_maps.h is generated under
+       SPANDSP_USE_FIXED_POINTx, so its tables are float whatever the library is
+       built as, while symbol_source takes complexi16_t under --enable-fixed-point.
+       Convert at the seam rather than silently mismatching the types. */
+    symbol->re = (int16_t) v17_v32bis_4800_constellation[state & 3].re;
+    symbol->im = (int16_t) v17_v32bis_4800_constellation[state & 3].im;
+#else
     *symbol = v17_v32bis_4800_constellation[state & 3];
+#endif
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
