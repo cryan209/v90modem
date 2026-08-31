@@ -937,6 +937,142 @@ static void test_held_response_timeout(void)
 }
 
 /*
+ * T.32 8.5.2.6 the other way: "For transmission (+FDT), when this timeout is
+ * reached, the DCE shall properly terminate any Phase C data transfer in
+ * progress, then execute an implied +FKS orderly abort command."  A DTE that
+ * opens +FDT, takes its CONNECT and then stops feeding the page leaves the DCE
+ * with nothing to send and nothing to wait for; without this the module sits
+ * in data mode for the rest of the call, with the DTE's bytes -- including any
+ * command it tries -- read as image data.
+ */
+static void test_transmit_timeout(int feed_part)
+{
+    static uint8_t page[1 << 20];
+    fax_state_t *peer;
+    int n;
+
+    printf("+FCT: a +FDT that %s times out (T.32 8.5.2.6)\n",
+           feed_part ? "stalls part way" : "sends nothing at all");
+
+    peer_ecm = 1;
+    peer_t6 = 1;
+    peer_nsf = NULL;
+    peer_nss = NULL;
+    peer_interrupt = 0;
+
+    fc2_select(0);
+    fc2_select(1);
+    unlink(PEER_RX);
+
+    at("AT+FCT=1");
+    at("AT+FBU=1");
+    at("AT+FNR=0,1,0,0");
+    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+    at("ATD5551234");
+
+    peer = peer_start(0, NULL, PEER_RX);
+    check(peer != NULL, "the far-end fax terminal starts");
+    if (!peer)
+        return;
+
+    dte_reset();
+    fc2_on_connected();
+
+    /* Open the page and hand over a third of it, then stop. */
+    at("AT+FDT");
+    check(dte_saw("CONNECT"), "AT+FDT answers CONNECT");
+    if (feed_part) {
+        n = encode_page_for_dte(SRC_TIFF, T4_COMPRESSION_T4_1D, 0,
+                                page, sizeof(page));
+        fc2_dte_bytes(page, n / 3);
+    }
+    check(fc2_in_dte_data(), "the DCE is taking the page");
+
+    dte_reset();
+    pump_regardless(peer, 6 * 50);
+
+    check(!fc2_in_dte_data(), "the stalled transfer is terminated");
+    /*
+     * The DCN is asserted on our own transmit path, through the +FBU frame
+     * report, which is generated inside send_frame() -- so it says the frame
+     * went out.  Not at the far end: a stalled +FDT means T.30 never had a
+     * document, so the call collapses on its own account within the first
+     * second and the DCN arrives after the far end has stopped listening.
+     * That is the scenario, not the implementation.
+     */
+    check(dte_saw("+FHT: FF 13 FA"), "a DCN goes out (T30_DCN, 0xFA)");
+    check(dte_saw("+FHS:02"), "the DTE is told with +FHS:02");
+
+    /* And the DTE is back in command mode: a plain AT command is answered
+     * rather than swallowed as image data. */
+    dte_reset();
+    at("AT+FCT?");
+    check(dte_saw("1"), "and AT commands are understood again");
+
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
+/*
+ * The other half of the transmit timeout: a DTE that is feeding the page, just
+ * slowly.  +FCT bounds the wait for the DTE, so every block it hands over has
+ * to restart it -- otherwise a page that takes longer than +FCT to cross a
+ * slow DTE link is aborted in the middle of a transfer that is going fine.
+ */
+static void test_transmit_timeout_not_tripped(void)
+{
+    static uint8_t page[1 << 20];
+    fax_state_t *peer;
+    int n;
+
+    printf("+FCT: a slow but live +FDT is not aborted (T.32 8.5.2.6)\n");
+
+    peer_ecm = 1;
+    peer_t6 = 1;
+    peer_nsf = NULL;
+    peer_nss = NULL;
+    peer_interrupt = 0;
+
+    fc2_select(0);
+    fc2_select(1);
+    unlink(PEER_RX);
+
+    at("AT+FCT=1");
+    at("AT+FNR=0,1,0,0");
+    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+    at("ATD5551234");
+
+    peer = peer_start(0, NULL, PEER_RX);
+    if (!peer)
+        return;
+
+    dte_reset();
+    fc2_on_connected();
+    at("AT+FDT");
+    n = encode_page_for_dte(SRC_TIFF, T4_COMPRESSION_T4_1D, 0, page, sizeof(page));
+
+    /* Four blocks, 0.6 s of call between them: 2.4 s in total against a +FCT
+     * of one second, with no gap longer than the timeout. */
+    for (int i = 0; i < 4; i++) {
+        int off = (n * i) / 4;
+        int end = (n * (i + 1)) / 4;
+
+        /* Keep the terminating <DLE><ETX> out of the last block, so the
+         * transfer is still open when the checks run. */
+        if (i == 3)
+            end -= 2;
+        fc2_dte_bytes(page + off, end - off);
+        pump_regardless(peer, 30);
+    }
+
+    check(fc2_in_dte_data(), "the transfer is still open after 2.4 s");
+    check(!dte_saw("+FHS:02"), "and nothing was aborted");
+
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
+/*
  * T.32 8.5.2.1 +FIE and 8.4.4.2 +FVO -- procedure interrupts.
  *
  * There are two of them and they go opposite ways.  A transmitting DTE asks
@@ -1601,6 +1737,9 @@ int main(void)
     test_fnr();
     test_post_page_hold();
     test_held_response_timeout();
+    test_transmit_timeout(1);
+    test_transmit_timeout(0);
+    test_transmit_timeout_not_tripped();
     test_procedure_interrupt();
     test_fns();
     test_fbu();

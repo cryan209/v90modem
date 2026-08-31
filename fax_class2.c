@@ -477,6 +477,7 @@ static int parse_params(const char *s, fc2_params_t *p)
 
 static void update_negotiated_params(void);
 static int  phase_bd_reversed(void);
+static void fct_arm(void);
 
 /* T.30's control frames put the FIF at msg[3], so bit n of the FIF (numbered
  * from 1, as T.30 Table 2 numbers them) lives here.  This is SpanDSP's own
@@ -1132,6 +1133,7 @@ void fc2_dte_bytes(const uint8_t *buf, int len)
         pthread_mutex_unlock(&fc2_mtx);
         return;
     }
+    fct_arm();          /* the DTE is still feeding us */
 
     for (int i = 0; i < len && !finished; i++) {
         uint8_t byte = buf[i];
@@ -1680,6 +1682,12 @@ int fc2_at_line(const char *line)
         } else if (spool_open()) {
             dte_mode = FC2_DTE_TX_DATA;
             dte_saw_dle = 0;
+            /*
+             * T.32 8.5.2.6 for the transmit direction.  The DCE has nothing
+             * left to send and is waiting on the DTE; +FCT bounds that, and
+             * every byte the DTE hands over resets it.
+             */
+            fct_arm();
             put_line("\r\nCONNECT\r\n");
             ok = 1;
         }
@@ -1826,6 +1834,37 @@ void fc2_on_disconnected(void)
     pthread_mutex_unlock(&fc2_mtx);
 }
 
+/* Start or restart the +FCT wait.  Callers hold the lock. */
+static void fct_arm(void)
+{
+    fct_deadline = (p_ct > 0) ? rx_samples + (uint64_t) p_ct * 8000u : 0;
+}
+
+/*
+ * T.32 8.5.2.6.  For reception: send a DCN and run an implied orderly abort.
+ * For transmission: "properly terminate any Phase C data transfer in
+ * progress, then execute an implied +FKS orderly abort command" -- which is
+ * the same DCN, after throwing away the half a page the DTE left behind.
+ * Callers hold the lock.
+ */
+static void fct_expired(void)
+{
+    fct_deadline = 0;
+
+    if (dte_mode == FC2_DTE_TX_DATA) {
+        if (spool_rx) {
+            t4_rx_free(spool_rx);
+            spool_rx = NULL;
+        }
+        tx_tiff_ready = 0;
+        dte_mode = FC2_IDLE;
+        dte_saw_dle = 0;
+    }
+    orderly_abort = 1;
+    if (fax)
+        t30_disconnect(fax_get_t30_state(fax));
+}
+
 int fc2_rx(const int16_t *amp, int len)
 {
     int r = 0;
@@ -1835,19 +1874,8 @@ int fc2_rx(const int16_t *amp, int len)
         r = fax_rx(fax, (int16_t *) amp, len);
 
     rx_samples += (uint64_t) len;
-    if (fct_deadline && rx_samples >= fct_deadline) {
-        /*
-         * T.32 8.5.2.6: "For reception (+FDR), when this timeout is reached,
-         * the DCE shall send the T.30 DCN response to the remote station and
-         * execute an implied orderly abort command."  The phase E that
-         * follows is what reports +FHS to the DTE.
-         */
-        fct_deadline = 0;
-        if (fax) {
-            orderly_abort = 1;
-            t30_disconnect(fax_get_t30_state(fax));
-        }
-    }
+    if (fct_deadline && rx_samples >= fct_deadline)
+        fct_expired();
     pthread_mutex_unlock(&fc2_mtx);
     return r;
 }
@@ -1963,9 +1991,9 @@ void fc2_poll(void)
              * has, and is waiting for the +FDR that releases the post page
              * response.  +FCT bounds that wait.
              */
-            if (start_fct && p_ct > 0) {
+            if (start_fct) {
                 pthread_mutex_lock(&fc2_mtx);
-                fct_deadline = rx_samples + (uint64_t) p_ct * 8000u;
+                fct_arm();
                 pthread_mutex_unlock(&fc2_mtx);
             }
         } else {

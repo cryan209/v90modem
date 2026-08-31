@@ -165,8 +165,16 @@ post page message after a few seconds and gives up after a few repeats, well
 inside the default 30 s. So on a real call a dawdling DTE loses it to T.30
 before `+FCT` fires; the timeout is the DTE-facing bound, not the only one.
 
-**`+FCT` is not applied to the transmit side.** 8.5.2.6 covers `+FDT` too,
-where the timeout should terminate the transfer and run an implied `+FKS`.
+`+FCT` bounds the transmit side as well, which 8.5.2.6 covers in the same
+breath: "For transmission (`+FDT`), when this timeout is reached, the DCE shall
+properly terminate any Phase C data transfer in progress, then execute an
+implied `+FKS` orderly abort command." The wait it bounds there is a `+FDT`
+that has been opened — `CONNECT` given — and is not being fed. Without it the
+module sits in data mode for the rest of the call, reading everything the DTE
+types, including any command it tries to escape with, as image data. Every
+block the DTE hands over restarts the timer, so a page that takes longer than
+`+FCT` to cross a slow DTE link is not aborted in the middle of a transfer that
+is going fine.
 
 ### Procedure interrupts: +FIE, +FVO (8.5.2.1, 8.4.4.2, 8.3.3.8, 8.3.4.8)
 
@@ -431,6 +439,23 @@ removing the hold and watching it fail.
 `test_held_response_timeout` sets `+FCT=2`, takes a page and then has the DTE
 say nothing at all, requiring a DCN at the far end, `+FHS:02` at the DTE and
 the outstanding command to complete. Disabling the expiry fails all three.
+
+`test_transmit_timeout` opens a `+FDT` and stalls it, both after part of a page
+and after none of it — two cases, because the timer is armed at `CONNECT` and
+restarted per block, and the partial-feed case alone does not exercise the
+first. It requires the transfer to be terminated, a DCN to go out, `+FHS:02`,
+and plain AT commands to be understood again rather than swallowed as image
+data. The DCN is asserted on **our own transmit path**, through the `+FBU`
+frame report, which is generated inside `send_frame()`: a stalled `+FDT` means
+T.30 never had a document, so the call collapses on its own account within the
+first second and the DCN lands after the far end has stopped listening. That is
+the scenario, not the implementation, and the weaker claim is the honest one.
+
+`test_transmit_timeout_not_tripped` feeds a page in four blocks over 2.4 s
+against a `+FCT` of one second, with no gap longer than the timeout, and
+requires the transfer to still be open. Without the per-block restart it is
+aborted; that half of the mechanism had no test until this one, and the
+restart was measured to be uncovered before it was written.
 
 `test_procedure_interrupt` checks both directions **on the wire**, from the far
 end's own frame handler, because both are a substitution inside a frame that
