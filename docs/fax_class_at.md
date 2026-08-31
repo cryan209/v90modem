@@ -604,16 +604,49 @@ read has to wait for the frame: the far end's handler sees RTN as it goes out,
 and this side still has to demodulate it -- read too early it says 1, which is
 what a fixed pump did.
 
-**Two things it does not cover, both measured.** The rejection is at MPS,
-mid-document. At **EOP** -- the last page -- SpanDSP sends DCN and the call
-ends with `+FHS:20`, where II.7 has the DTE hand the page over again; the
-obvious lever, `t30_set_retransmit_capable()`, makes it retrain and resend
-instead, which this far end answers with DCN and "unexpected message", and it
-changes nothing at all mid-document, where both settings already retransmit.
-So it is not set, and end-of-document RTN remains a gap rather than a
-behaviour with a test. And II.7's ordering (`+FDT` completing with ERROR after
-the far end's verdict) does not arise here for the reason in *Deviations*: the
-`+FDT` completes when the page is spooled, before the call.
+Both run twice: the rejection **mid-document**, at MPS, and at **EOP**, the
+last page of the document. The two are not the same case, and everything
+below was needed to make the second work at all -- before it, a page refused
+at the end of a document ended the call with `+FHS:20` and the DTE got no
+second chance.
+
+**Three fixes, each of which fails the tests on its own.**
+
+*The transmitter gave up.* T.30 Figure 5-2c has a transmitter whose page is
+refused ask "CAPABLE RE-XMIT?", and go back to phase B and repeat the page if
+it is, or send DCN if it is not. SpanDSP defaults to not, which is
+conformant -- but a class 2.0 DCE is capable: the page it sent is still in the
+document the DTE handed over, which is exactly what II.7 has the DTE hand over
+a second time. `t30_set_retransmit_capable()` is now set. Note it changes
+nothing mid-document, where both settings already retransmit; it is the EOP
+branch of the figure that differs.
+
+*The receiver would not take the page back.* Figure 5-2d sends a receiver
+which responded RTN or RTP to **B**, "go to beginning of phase B", with no
+distinction between EOP and MPS -- but `process_state_iii_q()` had no case for
+DCS at all, so the transmitter's fresh training landed in the default arm and
+the call was torn down as an unexpected frame. That is the "unexpected
+message" a rejected page used to produce, and it is a receiver-side bug that
+this DCE would have hit against any far end that retransmits.
+
+*And the document was closed before the verdict.* `assess_copy_quality()`
+released the T.4 receiver as soon as the post page message was EOP -- before
+the copy quality was decided, and long before the DTE releases a held
+response. The repeat then reopened the output file, truncating the pages
+already received and restarting their numbering, so the page reached the DCE
+and could not be handed to the DTE (`CONNECT` followed by `ERROR`). The
+teardown is now deferred to when the response is settled, and skipped
+altogether when that response is RTN or RTP, since the document is not over.
+A visible consequence: a far end now files the copy it refused at the end of a
+document, as it already did mid-document.
+
+**What it still does not cover**: II.7's ordering, where `+FDT` completes with
+ERROR after the far end's verdict, does not arise here for the reason in
+*Deviations* -- the `+FDT` completes when the page is spooled, before the
+call. The retransmission is therefore driven by the DCE rather than by the
+DTE's second `+FDT`, and the bytes come from the document the DTE already
+handed over. A DTE that follows II.7 literally and re-feeds the page would be
+adding a page, not replacing one.
 
 `test_unfinished_document_discarded` hands over a page that says another
 follows, drops the call, and makes a second one — deliberately without leaving

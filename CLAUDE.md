@@ -239,10 +239,15 @@ A page rejected mid-document is covered both ways (T.32 II.7 and II.8), and
 applicable to the optional T.4 error correction mode", so a DTE's `+FPS=2`
 becomes MCF and the document carries on. That looks exactly like the held
 response being ignored, so both are asserted. The far end needs
-`t30_set_retransmit_capable()` before it will resend at all. **Gap:** at EOP
-rather than MPS the call ends with `+FHS:20` instead of II.7's DTE-driven
-retry; setting `retransmit_capable` on our own T.30 was measured to change
-nothing mid-document and to be refused by this peer at EOP, so it is not set.
+`t30_set_retransmit_capable()` before it will resend at all. A page refused at **EOP**, the last of the document, needed three fixes and
+each fails the tests alone: the transmitter gave up (T.30 Figure 5-2c's
+"CAPABLE RE-XMIT?" -- `t30_set_retransmit_capable()` is now set, and changes
+nothing mid-document); the receiver had no DCS case in `process_state_iii_q()`
+so the retrain Figure 5-2d requires was torn down as an unexpected frame; and
+`assess_copy_quality()` released the T.4 receiver on the EOP before the
+verdict, so the repeat reopened and truncated the output file and the page
+could not be handed to the DTE. **Still a deviation:** the DCE resends from
+the document the DTE already gave it, rather than II.7's second `+FDT`.
 
 Neither class has hardware interop. See `docs/fax_class_at.md`.
 

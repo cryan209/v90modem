@@ -3332,6 +3332,23 @@ static int process_rx_dcs(t30_state_t *s, const uint8_t *msg, int len)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* The end of a document is only the end if the page was accepted. A page
+   refused with RTN (or marked poor with RTP) is repeated after a retrain, so
+   the T.4 receiver has to stay open for it. */
+static void settle_rx_after_post_page_response(t30_state_t *s)
+{
+    if (!s->terminate_rx_after_response)
+        return;
+    /*endif*/
+    s->terminate_rx_after_response = false;
+    if (s->last_rx_page_result == T30_RTN  ||  s->last_rx_page_result == T30_RTP)
+        rx_start_page(s);
+    else
+        terminate_operation_in_progress(s);
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
 static void assess_copy_quality(t30_state_t *s, uint8_t fcf)
 {
     int quality;
@@ -3369,9 +3386,23 @@ static void assess_copy_quality(t30_state_t *s, uint8_t fcf)
         s->phase_d_handler(s->phase_d_user_data, fcf);
     /*endif*/
     if (fcf == T30_EOP)
-        terminate_operation_in_progress(s);
+    {
+        /* The document is over - unless this page is refused, in which case
+           Figure 5-2d/T.30 sends us back to the beginning of phase B and the
+           transmitter repeats it. Releasing the T.4 receiver here would
+           reopen the file for the repeat, truncating the pages already
+           received and restarting their numbering, so hold on to it until
+           the response is settled. When it is held, that is not until the
+           application releases it. */
+        s->terminate_rx_after_response = true;
+        if (!s->hold_post_page_response)
+            settle_rx_after_post_page_response(s);
+        /*endif*/
+    }
     else
+    {
         rx_start_page(s);
+    }
     /*endif*/
 
     switch (quality)
@@ -3446,6 +3477,7 @@ SPAN_DECLARE(int) t30_release_post_page_response(t30_state_t *s, int ppr)
         s->last_rx_page_result = ppr;
     /*endif*/
     span_log(&s->logging, SPAN_LOG_FLOW, "Releasing the %s post page response\n", t30_frametype(s->last_rx_page_result));
+    settle_rx_after_post_page_response(s);
     set_state(s, T30_STATE_III_Q);
     send_simple_frame(s, s->last_rx_page_result);
     return 0;
@@ -5047,6 +5079,24 @@ static void process_state_iii_q(t30_state_t *s, const uint8_t *msg, int len)
         set_state(s, T30_STATE_III_Q);
         send_simple_frame(s, s->last_rx_page_result);
         break;
+    case T30_DCS:
+        /* Figure 5-2d/T.30: a receiver which responded RTN or RTP goes to the
+           beginning of phase B, so the transmitter may come back with fresh
+           training and repeat the page. Without this the DCS lands in the
+           default case below and the call is torn down as an unexpected
+           frame - which is what happened to every page refused at the end of
+           a document, since T30_EOP had also released the T.4 receiver. */
+        if (s->last_rx_page_result == T30_RTN  ||  s->last_rx_page_result == T30_RTP)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW, "Retraining after %s\n", t30_frametype(s->last_rx_page_result));
+            /* If the refused page ended the document the T.4 receiver has
+               been released; process_rx_dcs() opens another one when the
+               operation in progress is not already a receive. */
+            process_rx_dcs(s, msg, len);
+            break;
+        }
+        /*endif*/
+        /* Fall through */
     case T30_DIS:
         if (msg[2] == T30_DTC)
             process_rx_dis_dtc(s, msg, len);

@@ -69,6 +69,11 @@ struct t30_state_s
     int supported_t30_features;
     /*! \brief True is ECM mode handling is enabled. */
     bool ecm_allowed;
+    /*! \brief True if the T.4 receiver should be released once the post page
+               response for the last page of a document has been settled. It
+               cannot be released before then, since a page refused with RTN
+               is repeated and reopening the file would truncate it. */
+    bool terminate_rx_after_response;
     /*! \brief The number of octets per ECM frame this terminal prefers, as a
                receiver -- 64 or 256. 64 sets bit 7 of the DIS/DTC, per
                T.30 Table 2. As a transmitter it is the size used when the far

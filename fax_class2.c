@@ -926,6 +926,16 @@ static void session_start(void)
      * DIS/DTC is how a receiver asks, so this is a preference in both
      * directions rather than a setting. */
     t30_set_ecm_frame_size(t30, (p_is.ec == 1) ? 64 : 256);
+    /*
+     * T.30 Figure 5-2c: a transmitter whose page is refused with RTN asks
+     * "CAPABLE RE-XMIT?", and goes back to phase B and repeats the page if it
+     * is, or sends DCN if it is not.  A class 2.0 DCE is: the page it sent is
+     * still in the document the DTE handed over, which is what T.32 Annex
+     * II.7 has the DTE hand over a second time.  Without this the call is
+     * dropped as soon as a page is refused at the end of a document, and the
+     * DTE gets no second chance at all.
+     */
+    t30_set_retransmit_capable(t30, true);
     /* T.32 8.5.2.1: whether the remote's procedure interrupt requests are
      * accepted and negotiated, or ignored. */
     t30_remote_interrupts_allowed(t30, p_ie ? true : false);

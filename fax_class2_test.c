@@ -1777,19 +1777,121 @@ static void test_page_rejected_rtn(int ec)
 }
 
 /*
+ * The receive side of the same end-of-document case: the DTE refuses the
+ * LAST page.  T.30 Figure 5-2d sends a receiver which responded RTN back to
+ * the beginning of phase B, and it does not distinguish EOP from MPS -- but
+ * the T.4 receiver has been released by then, and a receiver which treated
+ * the EOP as the end of the call answers the transmitter's fresh DCS as an
+ * unexpected frame and drops it.  Mid-document works without any of that,
+ * which is why this needs its own test.
+ */
+static void test_receive_last_page_rejected(void)
+{
+    fax_state_t *peer;
+    char want[48];
+
+    printf("+FPS=2 on the last page: RTN and retransmit (T.32 II.8)\n");
+
+    unlink(DTE_RX);
+    if (!write_test_tiff_pages(PEER_MULTI, 2)) {
+        check(0, "the far end's two-page document is written");
+        return;
+    }
+
+    peer_ecm = 1;
+    peer_t6 = 1;
+    peer_nsf = NULL;
+    peer_nss = NULL;
+    peer_interrupt = 0;
+    peer_retransmit = 1;
+
+    fc2_select(0);
+    fc2_select(1);
+
+    dte_reset();
+    at("AT+FLI=\"receiver\"");
+    at("AT+FNR=0,1,0,0");
+    at("AT+FBO=0");
+    at("AT+FCR=1");
+    /* No ECM: T.30 Table 5 note 2 puts RTN outside it. */
+    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+    at("ATA");
+
+    peer = peer_start(1, PEER_MULTI, NULL);
+    check(peer != NULL, "the far-end fax terminal starts");
+    if (!peer) {
+        peer_retransmit = 0;
+        return;
+    }
+
+    fc2_on_connected();
+
+    /* Page one, accepted. */
+    dte_reset();
+    at("AT+FDR");
+    pump_until(peer, 60 * 50, "+FPS:");
+    snprintf(want, sizeof(want), "+FPS:1,%d,0,0,0", page_rows(0));
+    check(dte_saw(want), "page one arrives and is reported");
+
+    /* Page two -- the last one, so the far end ends it with EOP. */
+    dte_reset();
+    at("AT+FPS=1");
+    at("AT+FDR");
+    pump_until(peer, 90 * 50, "+FPS:");
+    snprintf(want, sizeof(want), "+FPS:1,%d,0,0,0", page_rows(1));
+    check(dte_saw(want), "page two arrives and is reported");
+    check(dte_saw("+FET:2"), "and is the end of the document");
+
+    /* Refuse it. */
+    dte_reset();
+    at("AT+FPS=2");
+    peer_saw_ppr = 0;
+    at("AT+FDR");
+    pump_until(peer, 120 * 50, "+FPS:");
+    for (int i = 0; i < 20; i++)
+        fc2_poll();
+
+    check(peer_saw_ppr == (T30_RTN & 0xFE),
+          "the DTE's +FPS=2 reaches the far end as RTN");
+    if (peer_saw_ppr != (T30_RTN & 0xFE))
+        printf("       (far end saw post page response 0x%02X)\n", peer_saw_ppr);
+    check(dte_saw("+FCS:"), "the retrain is reported to the DTE");
+    snprintf(want, sizeof(want), "+FPS:1,%d,0,0,0", page_rows(1));
+    check(dte_saw(want), "page two arrives again, with its own line count");
+    if (!dte_saw(want)) {
+        const char *p = dte_find("+FPS:");
+
+        printf("       (reported %.24s)\n", p ? p : "nothing");
+    }
+    check(dte_saw("+FET:2"), "and is still the end of the document");
+
+    dte_reset();
+    at("AT+FPS=1");
+    release_post_page(peer);
+    check(dte_saw("+FHS:"), "the last +FDR ends the session");
+    check(peer_done && peer_status == T30_ERR_OK,
+          "the far end reports a good session");
+
+    peer_retransmit = 0;
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
+/*
  * T.32 Annex II.7, "send one page with line errors and retransmission", the
  * transmit half of the same story: the far end answers a page with RTN, the
  * +FDT completes with ERROR rather than OK (8.3.3.4), +FPS reads back the 2
  * that says why (Table 23), and the DTE hands the page over again.
  */
-static void test_transmit_page_rejected(void)
+static void test_transmit_page_rejected(int at_eop)
 {
     fax_state_t *peer;
     int failures_before = failures;
     int rows = 0;
     int bad;
 
-    printf("+FDT: a page the far end rejects with RTN (T.32 II.7)\n");
+    printf("+FDT: a page the far end rejects with RTN, %s (T.32 II.7)\n",
+           at_eop ? "at the end of the document" : "mid-document");
 
     peer_ecm = 1;
     peer_t6 = 1;
@@ -1809,12 +1911,22 @@ static void test_transmit_page_rejected(void)
     at("AT+FIS=1,3,0,2,0,0,0,0,0");
     at("ATD5551234");
 
-    /* Two pages: the first ends with MPS, so the rejection lands in the
-     * middle of the document rather than at the end of the procedure. */
+    /*
+     * Mid-document the rejected page ends with MPS and another follows.  At
+     * the end of the document it ends with EOP, which T.30 Figure 5-2c
+     * treats differently: the transmitter asks whether it is capable of
+     * retransmission, and a terminal which is not sends DCN and ends the
+     * call there.
+     */
     dte_reset();
-    check(send_page_via_fdt(0, 0x2C), "page one is handed over");
-    check(dte_saw("OK"), "and acknowledged");
-    check(send_page_via_fdt(1, 0x2E), "page two is handed over");
+    if (at_eop) {
+        check(send_page_via_fdt(0, 0x2E), "the page is handed over");
+        check(dte_saw("OK"), "and acknowledged");
+    } else {
+        check(send_page_via_fdt(0, 0x2C), "page one is handed over");
+        check(dte_saw("OK"), "and acknowledged");
+        check(send_page_via_fdt(1, 0x2E), "page two is handed over");
+    }
 
     peer = peer_start(0, NULL, PEER_RX);
     check(peer != NULL, "the far-end fax terminal starts");
@@ -1877,8 +1989,29 @@ static void test_transmit_page_rejected(void)
      * DCE that skipped the bad page would leave two pages and the wrong one
      * missing, and would still report a good session.
      */
+    /*
+     * The direct evidence that the page went twice: the far end reached a
+     * post page decision once for the refusal and once for the repeat -- and
+     * once more for page two, mid-document.  This is what a DCE that gave up
+     * on the rejection would not produce, and it does not depend on how the
+     * far end files a page it refused.
+     */
+    check(peer_pages_judged == (at_eop ? 2 : 3),
+          "the far end judged the page twice: refused, then accepted");
+    if (peer_pages_judged != (at_eop ? 2 : 3))
+        printf("       (%d post page decisions)\n", peer_pages_judged);
+
+    /*
+     * And the pages it holds are the pages: the copy it refused, the repeat
+     * after it, and -- mid-document -- page two.  This far end keeps the
+     * refused copy in both cases; it only used to drop the one at the end of
+     * a document because its T.4 receiver had been released on the EOP before
+     * the verdict was known, which is the same defect that stopped the repeat
+     * being received at all.
+     */
     {
         TIFF *t = TIFFOpen(PEER_RX, "r");
+        int want = at_eop ? 2 : 3;
         int pages = 0;
 
         if (t) {
@@ -1887,20 +2020,22 @@ static void test_transmit_page_rejected(void)
             while (TIFFReadDirectory(t));
             TIFFClose(t);
         }
-        check(pages == 3, "the far end holds the rejected page, the repeat and page two");
-        if (pages != 3)
-            printf("       (%d pages)\n", pages);
+        check(pages == want, "the far end holds the refused copy and the repeat");
+        if (pages != want)
+            printf("       (%d pages, wanted %d)\n", pages, want);
     }
     row_variant = 0;
     bad = compare_page(PEER_RX, 1, &rows);
-    check(bad == 0 && rows == IMAGE_ROWS, "the repeat is page one, sent again");
+    check(bad == 0 && rows == IMAGE_ROWS, "the repeat is the page, sent again");
     if (bad != 0 || rows != IMAGE_ROWS)
         printf("       (repeat: %d rows, %d differing)\n", rows, bad);
-    row_variant = 1;
-    bad = compare_page(PEER_RX, 2, &rows);
-    check(bad == 0 && rows == IMAGE_ROWS, "and page two followed it");
-    if (bad != 0 || rows != IMAGE_ROWS)
-        printf("       (page two: %d rows, %d differing)\n", rows, bad);
+    if (!at_eop) {
+        row_variant = 1;
+        bad = compare_page(PEER_RX, 2, &rows);
+        check(bad == 0 && rows == IMAGE_ROWS, "and page two followed it");
+        if (bad != 0 || rows != IMAGE_ROWS)
+            printf("       (page two: %d rows, %d differing)\n", rows, bad);
+    }
     row_variant = 0;
 
     if (failures != failures_before)
@@ -2675,7 +2810,9 @@ int main(void)
     test_multipage_receive(1);
     test_page_rejected_rtn(0);
     test_page_rejected_rtn(2);
-    test_transmit_page_rejected();
+    test_receive_last_page_rejected();
+    test_transmit_page_rejected(0);
+    test_transmit_page_rejected(1);
     test_unfinished_document_discarded();
     test_post_page_hold();
     test_held_response_timeout();
