@@ -5542,6 +5542,22 @@ void me_on_sip_connected(void)
         g_calling_party = !g_calling_party;
     trace_phase("SIP media connected: role=%s", g_calling_party ? "caller" : "answerer");
 
+    /* A selected fax service class owns the bearer from this point.  T.31
+     * Class 1 drives T.30 from the DTE and Class 2.0 drives it in
+     * fax_class2.c; in either case V.8/V.34 negotiation is a data-modem
+     * startup sequence and would overwrite the fax tones. */
+    if (di_fax_active()) {
+        g_state = ME_DATA;
+        g_mod = ME_MOD_NONE;
+        g_phase_start_ms = 0;
+        pthread_mutex_unlock(&g_state_mtx);
+        trace_phase("SIP media connected: fax service class owns audio");
+        ME_LOG("[ME] SIP connected as %s, handing audio to fax service class\n",
+               g_calling_party ? "caller" : "answerer");
+        di_on_connected(0);
+        return;
+    }
+
     if (g_v8) {
         v8_free(g_v8);
         g_v8 = NULL;
