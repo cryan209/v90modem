@@ -851,10 +851,15 @@ typedef struct
     bool calling_party;
     /*! \brief True if this is a full duplex modem. */
     bool duplex;
-    /*! The current source end when in half-duplex mode */
-    bool half_duplex_source;
-    /*! The current operating state when in half-duplex mode */
-    bool half_duplex_state;
+    /*! The current source end when in half-duplex mode. One of
+        V34_HALF_DUPLEX_SOURCE or V34_HALF_DUPLEX_RECIPIENT. */
+    int half_duplex_source;
+    /*! The current operating state when in half-duplex mode. One of
+        V34_HALF_DUPLEX_CONTROL_CHANNEL, _PRIMARY_CHANNEL or _SILENCE.
+        NOT a bool: those are 2, 3 and 4, so a bool collapses all three to
+        true and no reader can tell the control channel from the primary
+        channel from silence. */
+    int half_duplex_state;
     /*! \brief */
     int bit_rate;
     /*! \brief The callback function used to get the next bit to be transmitted. */
@@ -1141,6 +1146,8 @@ typedef struct
     span_sample_timer_t phase2_entry_sample_time;
 
     logging_state_t *logging;
+    /*! \brief V.34 12.4.1.1: start PPh when the current silence ends. */
+    bool hdx_pph_after_silence;
 } v34_tx_state_t;
 
 typedef struct
@@ -1227,10 +1234,15 @@ typedef struct
     bool calling_party;
     /*! \brief True if this is a full duplex modem. */
     bool duplex;
-    /*! The current source end when in half-duplex mode */
-    bool half_duplex_source;
-    /*! The current operating state when in half-duplex mode */
-    bool half_duplex_state;
+    /*! The current source end when in half-duplex mode. One of
+        V34_HALF_DUPLEX_SOURCE or V34_HALF_DUPLEX_RECIPIENT. */
+    int half_duplex_source;
+    /*! The current operating state when in half-duplex mode. One of
+        V34_HALF_DUPLEX_CONTROL_CHANNEL, _PRIMARY_CHANNEL or _SILENCE.
+        NOT a bool: those are 2, 3 and 4, so a bool collapses all three to
+        true and no reader can tell the control channel from the primary
+        channel from silence. */
+    int half_duplex_state;
     /*! \brief */
     int bit_rate;
     /*! \brief The callback function used to put each bit received. */
@@ -2213,10 +2225,15 @@ struct v34_state_s
     bool calling_party;
     /*! \brief True if this is a full duplex modem. */
     bool duplex;
-    /*! The current source end when in half-duplex mode */
-    bool half_duplex_source;
-    /*! The current operating state when in half-duplex mode */
-    bool half_duplex_state;
+    /*! The current source end when in half-duplex mode. One of
+        V34_HALF_DUPLEX_SOURCE or V34_HALF_DUPLEX_RECIPIENT. */
+    int half_duplex_source;
+    /*! The current operating state when in half-duplex mode. One of
+        V34_HALF_DUPLEX_CONTROL_CHANNEL, _PRIMARY_CHANNEL or _SILENCE.
+        NOT a bool: those are 2, 3 and 4, so a bool collapses all three to
+        true and no reader can tell the control channel from the primary
+        channel from silence. */
+    int half_duplex_state;
     /*! \brief The bit rate of the modem. */
     int bit_rate;
 

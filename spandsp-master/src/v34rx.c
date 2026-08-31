@@ -5315,6 +5315,20 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                     V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - V.90 caller: expecting INFO1d (109 bits) from digital answerer\n");
                 }
+                else if (!s->duplex)
+                {
+                    /* V.34 10.2.2: in half-duplex operation INFO1a and INFO1c
+                       are replaced by INFOh, which Table 22 defines as 51 bits.
+                       V34_RX_STAGE_INFOH was never assigned anywhere in the
+                       tree, so the receiver could not enter the stage that
+                       decodes it and INFOh was transmitted and never received.
+                       12.2.1.1.4 / 12.2.2.2.4: condition the receiver for
+                       INFOh at this point. */
+                    s->target_bits = 51 - (4 + 8 + 4);
+                    s->stage = V34_RX_STAGE_INFOH;
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                             "Rx - half-duplex: expecting INFOh (51 bits)\n");
+                }
                 else
                 {
                     /* Standard V.34: next info message will be INFO1a */

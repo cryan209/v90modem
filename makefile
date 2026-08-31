@@ -185,6 +185,7 @@ PORT_V34_FIXED_SOLVE_TEST_OBJS = port/v34_fixed_solve_test.o
 # the part being replaced.
 V90_ENGINE_REPLAY_OBJS = v90_engine_replay.o $(filter-out sip_modem.o,$(OBJS))
 V34_DUPLEX_TEST_OBJS = v34_duplex_test.o
+V34_HDX_TEST_OBJS = v34_hdx_test.o
 V32BIS_SPANDSP_TEST_OBJS = v32bis_spandsp_test.o
 V90_ANALOGUE_TX_TEST_OBJS = v90_analogue_tx_test.o v90_analogue_tx.o v90_analogue_phase4.o v90_dil_measure.o v90.o v90_cp_rx.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o
 V90_ANALOGUE_RX_TEST_OBJS = v90_analogue_rx_test.o v90_analogue_rx.o v90_analogue_phase3.o v90_analogue_phase4.o v90_analogue_tx.o v90_dil_measure.o v90.o v90_cp_rx.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o
@@ -368,6 +369,9 @@ v34-duplex-test: v34_duplex_test
 
 v34_duplex_test: $(V34_DUPLEX_TEST_OBJS) spandsp
 	$(CC) $(V34_DUPLEX_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+
+v34_hdx_test: $(V34_HDX_TEST_OBJS) spandsp
+	$(CC) $(V34_HDX_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
 v34_mp_test: $(V34_MP_TEST_OBJS) spandsp
 	$(CC) $(V34_MP_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)

@@ -704,6 +704,7 @@ static void pph_baud_init(v34_state_t *s);
 static void first_alt_baud_init(v34_state_t *s);
 static void second_alt_baud_init(v34_state_t *s);
 static void sh_baud_init(v34_state_t *s);
+static void hdx_control_channel_start_init(v34_state_t *s);
 
 static void reset_primary_rx_frontend_for_phase3(v34_state_t *s)
 {
@@ -1427,11 +1428,19 @@ static void prepare_v90_info1a(v34_state_t *s)
 
 static void prepare_infoh(v34_state_t *s)
 {
+    /* V.34 Table 22.  Bits 27:29 are a 3 bit SYMBOL RATE INDEX, an integer
+       between 0 and 5 where 0 is 2400 and 5 is 3429 -- not a rate and not a
+       bit rate code.  This was 14, which does not fit the field at all: it
+       truncates to 6, one past the last legal index, so the recipient
+       advertised a symbol rate that does not exist and the source's TRN
+       length, which is derived from it, came out as a single baud. */
     s->tx.infoh.power_reduction = 0;
     s->tx.infoh.length_of_trn = 30;
-    s->tx.infoh.use_high_carrier = 0;
+    s->tx.infoh.use_high_carrier = s->tx.high_carrier;
     s->tx.infoh.preemphasis_filter = 0;
-    s->tx.infoh.baud_rate = 14;
+    s->tx.infoh.baud_rate = (s->tx.baud_rate < 0)
+                          ? 0
+                          : ((s->tx.baud_rate > 5) ? 5 : s->tx.baud_rate);
     s->tx.infoh.trn16 = 0;
 }
 /*- End of function --------------------------------------------------------*/
@@ -6330,6 +6339,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
     int trn_i;
     int trn_q;
     int trn_sym;
+    int trn_bauds;
     int j_wait_ms;
     int i;
 
@@ -6379,10 +6389,34 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
         /* In half-duplex modem the length of the training comes from the INFOh message, in 35ms increments.
            In full-duplex, send enough TRN for the remote equalizer to converge before
            the J pattern starts. 2048 bauds (~597ms at 3429 baud) is standard. */
-        if ((!s->tx.duplex  &&  ++s->tx.tone_duration >= s->rx.infoh.length_of_trn*35*s->rx.infoh.baud_rate/1000)
-            ||
-            (s->tx.duplex  &&  ++s->tx.tone_duration >= 2048))
+        /* V.34 Table 22 bits 15:21 give the TRN length in 35 ms increments, and
+           bits 27:29 give the symbol rate as an INDEX between 0 and 5.  This
+           multiplied by the index rather than by the rate it selects, so at
+           3200 baud (index 4) a 20 unit request became 20*35*4/1000 = 2 bauds
+           of TRN instead of 2240. */
+        trn_bauds = (s->tx.duplex)
+                  ? 2048
+                  : s->rx.infoh.length_of_trn*35
+                    *baud_rate_hz[(s->rx.infoh.baud_rate < 6) ? s->rx.infoh.baud_rate : 5]/1000;
+        if (++s->tx.tone_duration >= trn_bauds)
         {
+            if (!s->tx.duplex)
+            {
+                /* V.34 12.3.1.3: after transmitting TRN the half-duplex modem
+                   proceeds to transmit and receive using the control channel
+                   according to 12.4.  There is no J in half-duplex -- J belongs
+                   to the duplex Phase 3 of 11.3 -- and going there left the
+                   control channel start-up unreachable, so PPh and ALT were
+                   never transmitted at all. */
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                           "Tx - TRN complete (%d bauds), starting the control channel\n",
+                           s->tx.tone_duration);
+                s->tx.tone_duration = 0;
+                s->tx.diff = trn_i;
+                hdx_control_channel_start_init(s);
+                break;
+            }
+            /*endif*/
             V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - TRN complete (%d bauds), starting J\n",
                      s->tx.tone_duration);
             s->tx.stage = V34_TX_STAGE_J;
@@ -7410,7 +7444,11 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
 
 static void mp_or_mph_baud_init(v34_state_t *s)
 {
-    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - mp_baud_init()\n");
+    /* Say which of the two this actually is. Hardcoding "mp_baud_init" here
+       made every half-duplex trace read as though the duplex 11.4 MP had been
+       taken when the 12.4 MPh branch below had in fact run. */
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - %s()\n",
+               (s->tx.duplex) ? "mp_baud_init" : "mph_baud_init");
     s->tx.current_modulator = V34_MODULATION_V34;
 
     if (s->tx.duplex
@@ -7796,6 +7834,21 @@ static complex_sig_t get_pph_baud(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static void hdx_control_channel_start_init(v34_state_t *s)
+{
+    /* V.34 12.4.1.1: the source modem conditions its receiver to detect PPh,
+       and after a silent interval of 70 +/- 5 ms sends PPh followed by ALT for
+       a minimum of 16T.  tx_silence() counts tone_duration in SAMPLES and never
+       calls the getbaud, so the follow-on is a flag it checks, in the same shape
+       as the existing training_stage 0x100 hand-off. */
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - hdx_control_channel_start_init()\n");
+    s->tx.hdx_pph_after_silence = true;
+    s->tx.tone_duration = milliseconds_to_samples(70);
+    s->tx.current_modulator = V34_MODULATION_SILENCE;
+    s->tx.stage = V34_TX_STAGE_HDX_POST_L2_SILENCE;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void pph_baud_init(v34_state_t *s)
 {
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - pph_baud_init()\n");
@@ -8161,6 +8214,12 @@ static int tx_silence(v34_state_t *s, int16_t amp[], int max_len)
         {
             s->tx.training_stage = 0x101;
             transmission_preamble_init(s);
+        }
+        else if (s->tx.hdx_pph_after_silence)
+        {
+            /* V.34 12.4.1.1: the 70 ms silence has run, so start PPh. */
+            s->tx.hdx_pph_after_silence = false;
+            pph_baud_init(s);
         }
         /*endif*/
     }
