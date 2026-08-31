@@ -8000,10 +8000,10 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     s->put_aux_bit(s->put_aux_bit_user_data, b1);
                 }
                 /* Persist Ja bits for offline analyzers even when no aux callback is armed. */
-                if (s->phase3_ja_capture_len + 2 <= (int) sizeof(s->phase3_ja_capture))
+                if (s->phase3_ja_capture_len + 2 <= V34_JA_CAPTURE_BITS)
                 {
-                    s->phase3_ja_capture[s->phase3_ja_capture_len++] = (uint8_t) (b0 & 1);
-                    s->phase3_ja_capture[s->phase3_ja_capture_len++] = (uint8_t) (b1 & 1);
+                    v34_ja_bit_set(s->phase3_ja_capture, s->phase3_ja_capture_len++, b0);
+                    v34_ja_bit_set(s->phase3_ja_capture, s->phase3_ja_capture_len++, b1);
                 }
                 s->phase3_ja_bits += 2;
                 s->phase3_ja_hyp = h;
@@ -13689,6 +13689,7 @@ SPAN_DECLARE(int) v34_v90_copy_phase3_ja_bits(v34_state_t *s,
                                                int max_bits)
 {
     int len;
+    int i;
 
     if (!s || !bits || max_bits <= 0
         || hypothesis < 0 || hypothesis >= MP_HYPOTHESIS_COUNT)
@@ -13696,7 +13697,9 @@ SPAN_DECLARE(int) v34_v90_copy_phase3_ja_bits(v34_state_t *s,
     len = s->rx.phase3_ja_capture_hyp_len[hypothesis];
     if (len > max_bits)
         len = max_bits;
-    memcpy(bits, s->rx.phase3_ja_capture_hyp[hypothesis], (size_t) len);
+    /* Stored packed; callers still get one byte per bit. */
+    for (i = 0;  i < len;  i++)
+        bits[i] = (uint8_t) v34_ja_bit_get(s->rx.phase3_ja_capture_hyp[hypothesis], i);
     return len;
 }
 /*- End of function --------------------------------------------------------*/
@@ -13707,6 +13710,7 @@ SPAN_DECLARE(int) v34_v90_copy_phase3_ja_raw_bits(v34_state_t *s,
                                                    int max_bits)
 {
     int len;
+    int i;
 
     if (!s || !bits || max_bits <= 0
         || hypothesis < 0 || hypothesis >= MP_HYPOTHESIS_COUNT)
@@ -13714,7 +13718,9 @@ SPAN_DECLARE(int) v34_v90_copy_phase3_ja_raw_bits(v34_state_t *s,
     len = s->rx.phase3_ja_capture_hyp_raw_len[hypothesis];
     if (len > max_bits)
         len = max_bits;
-    memcpy(bits, s->rx.phase3_ja_capture_hyp_raw[hypothesis], (size_t) len);
+    /* Stored packed; callers still get one byte per bit. */
+    for (i = 0;  i < len;  i++)
+        bits[i] = (uint8_t) v34_ja_bit_get(s->rx.phase3_ja_capture_hyp_raw[hypothesis], i);
     return len;
 }
 /*- End of function --------------------------------------------------------*/

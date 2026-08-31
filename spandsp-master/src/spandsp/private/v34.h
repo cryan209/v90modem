@@ -83,6 +83,28 @@
    s->last_sample at a stale offset, which looks exactly like a DSP failure and
    is not one. */
 #define V34_V90_T3_RAW_SIZE                 32768
+
+/* Ja capture geometry.  V34_JA_CAPTURE_BITS is the capacity in bits; the
+   arrays hold it packed 8 to a byte.  The stage logs "need ~16340 to parse",
+   so this leaves 4x headroom -- the length is deliberately NOT reduced here,
+   because packing is bit-for-bit neutral and shortening is not. */
+#define V34_JA_CAPTURE_BITS                 65536
+#define V34_JA_CAPTURE_BYTES                (V34_JA_CAPTURE_BITS/8)
+
+static __inline__ int v34_ja_bit_get(const uint8_t *cap, int bit)
+{
+    return (cap[bit >> 3] >> (bit & 7)) & 1;
+}
+
+static __inline__ void v34_ja_bit_set(uint8_t *cap, int bit, int value)
+{
+    uint8_t m = (uint8_t) (1u << (bit & 7));
+
+    if (value & 1)
+        cap[bit >> 3] |= m;
+    else
+        cap[bit >> 3] &= (uint8_t) ~m;
+}
 #define V34_V90_T3_RAW_MASK                 (V34_V90_T3_RAW_SIZE - 1)
 #define V34_V90_T3_B1_MAX_SYMBOLS           256
 #define V34_V90_T3_GAIN_TRIALS              33
@@ -1899,11 +1921,16 @@ typedef struct
     uint8_t phase3_ja_prev_valid[24];
     int phase3_ja_bits;
     int phase3_ja_hyp;
-    uint8_t phase3_ja_capture[65536];
+    /* Ja capture, PACKED 8 bits per byte.  These three used to store one bit
+       per byte, which cost 8x: at 24 hypotheses x 65536 the pair below was
+       3072 KB and, with their _raw twin, 59% of sizeof(v34_rx_state_t).  The
+       *_len fields are still counts of BITS, so nothing outside this struct
+       changed units; use the accessors below rather than indexing directly. */
+    uint8_t phase3_ja_capture[V34_JA_CAPTURE_BYTES];
     int phase3_ja_capture_len;
-    uint8_t phase3_ja_capture_hyp[24][65536];
+    uint8_t phase3_ja_capture_hyp[24][V34_JA_CAPTURE_BYTES];
     int phase3_ja_capture_hyp_len[24];
-    uint8_t phase3_ja_capture_hyp_raw[24][65536];
+    uint8_t phase3_ja_capture_hyp_raw[24][V34_JA_CAPTURE_BYTES];
     int phase3_ja_capture_hyp_raw_len[24];
     int phase4_j_seen;
     int phase4_j_lock_hyp;

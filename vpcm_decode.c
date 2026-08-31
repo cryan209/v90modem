@@ -28150,7 +28150,7 @@ static bool decode_v34_pass_mode(const int16_t *samples,
         if (n > (int) sizeof(result->ja_aux_bits) - 1)
             n = (int) sizeof(result->ja_aux_bits) - 1;
         for (int i = 0; i < n; i++)
-            result->ja_aux_bits[i] = (v34->rx.phase3_ja_capture[i] & 1U) ? '1' : '0';
+            result->ja_aux_bits[i] = v34_ja_bit_get(v34->rx.phase3_ja_capture, i) ? '1' : '0';
         result->ja_aux_bits[n] = '\0';
         result->ja_aux_bit_len = n;
         if (result->ja_observed_bits <= 0)
@@ -28176,7 +28176,7 @@ static bool decode_v34_pass_mode(const int16_t *samples,
             n = (int) sizeof(result->ja_aux_hyp_bits[h]) - 1;
         result->ja_aux_hyp_bit_len[h] = n;
         for (int i = 0; i < n; i++)
-            result->ja_aux_hyp_bits[h][i] = (v34->rx.phase3_ja_capture_hyp[h][i] & 1U) ? '1' : '0';
+            result->ja_aux_hyp_bits[h][i] = v34_ja_bit_get(v34->rx.phase3_ja_capture_hyp[h], i) ? '1' : '0';
         result->ja_aux_hyp_bits[h][n] = '\0';
 
         if (raw_n < 0)
@@ -28185,7 +28185,7 @@ static bool decode_v34_pass_mode(const int16_t *samples,
             raw_n = (int) sizeof(result->ja_aux_hyp_raw_bits[h]) - 1;
         result->ja_aux_hyp_raw_bit_len[h] = raw_n;
         for (int i = 0; i < raw_n; i++)
-            result->ja_aux_hyp_raw_bits[h][i] = (v34->rx.phase3_ja_capture_hyp_raw[h][i] & 1U) ? '1' : '0';
+            result->ja_aux_hyp_raw_bits[h][i] = v34_ja_bit_get(v34->rx.phase3_ja_capture_hyp_raw[h], i) ? '1' : '0';
         result->ja_aux_hyp_raw_bits[h][raw_n] = '\0';
     }
 

@@ -141,11 +141,11 @@ static void phase3_ja_capture_append(v34_rx_state_t *s, int bit0, int bit1)
     if (!s)
         return;
     /*endif*/
-    if (s->phase3_ja_capture_len + 2 > (int) sizeof(s->phase3_ja_capture))
+    if (s->phase3_ja_capture_len + 2 > V34_JA_CAPTURE_BITS)
         return;
     /*endif*/
-    s->phase3_ja_capture[s->phase3_ja_capture_len++] = (uint8_t) (bit0 & 1);
-    s->phase3_ja_capture[s->phase3_ja_capture_len++] = (uint8_t) (bit1 & 1);
+    v34_ja_bit_set(s->phase3_ja_capture, s->phase3_ja_capture_len++, bit0);
+    v34_ja_bit_set(s->phase3_ja_capture, s->phase3_ja_capture_len++, bit1);
     s->phase3_ja_bits += 2;
     if (s->phase3_ja_bits == 2 || (s->phase3_ja_bits % 256) == 0)
     {
@@ -283,7 +283,7 @@ void v34_rx_phase3_wait_s_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         cap_bit0[h] = dbit[0];
                         cap_bit1[h] = dbit[1];
                         cap_valid[h] = 1;
-                        if (s->phase3_ja_capture_hyp_len[h] + 2 <= (int) sizeof(s->phase3_ja_capture_hyp[h]))
+                        if (s->phase3_ja_capture_hyp_len[h] + 2 <= V34_JA_CAPTURE_BITS)
                         {
                             /* One sample-clock stamp per APPENDED bit pair, for
                                hypothesis 8 only.  The symbol dump above is taken
@@ -315,8 +315,10 @@ void v34_rx_phase3_wait_s_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                 /*endif*/
                             }
                             /*endif*/
-                            s->phase3_ja_capture_hyp[h][s->phase3_ja_capture_hyp_len[h]++] = (uint8_t) (dbit[0] & 1);
-                            s->phase3_ja_capture_hyp[h][s->phase3_ja_capture_hyp_len[h]++] = (uint8_t) (dbit[1] & 1);
+                            v34_ja_bit_set(s->phase3_ja_capture_hyp[h],
+                                           s->phase3_ja_capture_hyp_len[h]++, dbit[0]);
+                            v34_ja_bit_set(s->phase3_ja_capture_hyp[h],
+                                           s->phase3_ja_capture_hyp_len[h]++, dbit[1]);
                             /* Trajectory of the parser's actual input.  The ME
                                side samples this every 200 calls, which is too
                                coarse to tell "grew to 11k and was wiped" from
@@ -332,10 +334,12 @@ void v34_rx_phase3_wait_s_symbol(v34_rx_state_t *s, const complexf_t *sym)
                             /*endif*/
                         }
                         /*endif*/
-                        if (s->phase3_ja_capture_hyp_raw_len[h] + 2 <= (int) sizeof(s->phase3_ja_capture_hyp_raw[h]))
+                        if (s->phase3_ja_capture_hyp_raw_len[h] + 2 <= V34_JA_CAPTURE_BITS)
                         {
-                            s->phase3_ja_capture_hyp_raw[h][s->phase3_ja_capture_hyp_raw_len[h]++] = (uint8_t) (in_sym & 1);
-                            s->phase3_ja_capture_hyp_raw[h][s->phase3_ja_capture_hyp_raw_len[h]++] = (uint8_t) ((in_sym >> 1) & 1);
+                            v34_ja_bit_set(s->phase3_ja_capture_hyp_raw[h],
+                                           s->phase3_ja_capture_hyp_raw_len[h]++, in_sym);
+                            v34_ja_bit_set(s->phase3_ja_capture_hyp_raw[h],
+                                           s->phase3_ja_capture_hyp_raw_len[h]++, in_sym >> 1);
                         }
                         /*endif*/
                         s->phase3_j_stream[h] = ((s->phase3_j_stream[h] << 1) | (uint32_t) dbit[0]) & 0xFFFFFFFFU;
