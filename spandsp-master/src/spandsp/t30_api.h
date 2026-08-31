@@ -475,6 +475,26 @@ SPAN_DECLARE(int) t30_set_ecm_capability(t30_state_t *s, bool enabled);
     \return 0 if OK, else -1. */
 SPAN_DECLARE(int) t30_set_ecm_frame_size(t30_state_t *s, int octets);
 
+/*! Hold a page retransmission until the application releases it. A page
+    refused with RTN is normally repeated at once, from the document the T.30
+    context already has. Where the application owns the image - a T.32 class
+    2.0 DCE, whose DTE hands the page over again with a second +FDT - it needs
+    the procedure to stop after the RTN so it can replace the document first.
+    While a retransmission is held, T.30 sends nothing and waits for
+    t30_resume_retransmission(). Requires t30_set_retransmit_capable().
+    \brief Hold page retransmissions for the application.
+    \param s The T.30 context.
+    \param hold True to hold retransmissions. */
+SPAN_DECLARE(void) t30_set_retransmit_hold(t30_state_t *s, bool hold);
+
+/*! Resume a page retransmission which was held for the application, with
+    whatever document is now set. The procedure returns to phase B and the
+    document is sent from its first page.
+    \brief Resume a held page retransmission.
+    \param s The T.30 context.
+    \return 0 if a retransmission was pending and has been started, else -1. */
+SPAN_DECLARE(int) t30_resume_retransmission(t30_state_t *s);
+
 /*! Specify if page retransmission is allowed by a T.30 context.
     \brief Select page retransmission capable.
     \param s The T.30 context.

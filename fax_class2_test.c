@@ -1967,6 +1967,26 @@ static void test_transmit_page_rejected(int at_eop)
         check(saw_two, "+FPS? reads back the far end's verdict as 2");
     }
 
+    /*
+     * T.32 II.7's second `AT+FDT`: the DTE hands the page over again, and
+     * that copy is what goes on the line -- the DCE does not repeat one of
+     * its own.  Mid-document the DTE supplies the rest of the document from
+     * the refused page onwards, since the procedure goes back to phase B and
+     * starts the document it is given from its first page.
+     *
+     * At the end of a document it hands over a DIFFERENT image, which is what
+     * makes this a test of where the bytes came from: a DCE that repeated its
+     * own copy would put the first page on the line a second time and pass
+     * every other check here.  T.32 does not require the two to match; the
+     * DTE simply sends a page.
+     */
+    dte_reset();
+    check(send_page_via_fdt(at_eop ? 1 : 0, at_eop ? 0x2E : 0x2C),
+          "the DTE hands a page over again");
+    if (!at_eop)
+        check(send_page_via_fdt(1, 0x2E), "and page two after it");
+    check(dte_saw("CONNECT"), "the second +FDT answers CONNECT");
+
     dte_reset();
     pump(peer, 90 * 50);
     pump_regardless(peer, 5 * 50);
@@ -2024,9 +2044,22 @@ static void test_transmit_page_rejected(int at_eop)
         if (pages != want)
             printf("       (%d pages, wanted %d)\n", pages, want);
     }
+    /* The refused copy is the page that was sent first. */
     row_variant = 0;
+    bad = compare_page(PEER_RX, 0, &rows);
+    check(bad == 0 && rows == IMAGE_ROWS, "the refused copy is the page first sent");
+    if (bad != 0 || rows != IMAGE_ROWS)
+        printf("       (refused copy: %d rows, %d differing)\n", rows, bad);
+
+    /*
+     * And the repeat is the page the DTE handed over the second time.  At
+     * EOP that is a different image from the first attempt, so this fails on
+     * a DCE that resends its own copy.
+     */
+    row_variant = at_eop ? 1 : 0;
     bad = compare_page(PEER_RX, 1, &rows);
-    check(bad == 0 && rows == IMAGE_ROWS, "the repeat is the page, sent again");
+    check(bad == 0 && rows == IMAGE_ROWS,
+          "the repeat is the page the DTE handed over, not the DCE's copy");
     if (bad != 0 || rows != IMAGE_ROWS)
         printf("       (repeat: %d rows, %d differing)\n", rows, bad);
     if (!at_eop) {
@@ -2041,6 +2074,72 @@ static void test_transmit_page_rejected(int at_eop)
     if (failures != failures_before)
         printf("       (T.30 frames at the far end: %s)\n", peer_trace);
 
+    peer_reject_pages = 0;
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
+/*
+ * The other side of holding the procedure for the DTE: if the page is never
+ * handed over, the DCE cannot wait for ever.  T.32 8.5.2.6's +FCT bounds it,
+ * exactly as it bounds a +FDT that is opened and not fed -- "properly
+ * terminate any Phase C data transfer in progress, then execute an implied
+ * +FKS orderly abort command".  Without this the far end sits in phase B
+ * after its RTN until its own T.30 timers give up, and the DTE is told
+ * nothing at all.
+ */
+static void test_rejected_page_never_resent(void)
+{
+    fax_state_t *peer;
+
+    printf("+FCT: a refused page the DTE never resends (T.32 8.5.2.6)\n");
+
+    peer_ecm = 1;
+    peer_t6 = 1;
+    peer_nsf = NULL;
+    peer_nss = NULL;
+    peer_interrupt = 0;
+    peer_reject_pages = 1;
+
+    fc2_select(0);
+    fc2_select(1);
+    unlink(PEER_RX);
+
+    at("AT+FCT=2");
+    at("AT+FLI=\"sender\"");
+    at("AT+FNR=0,1,0,0");
+    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+    at("ATD5551234");
+
+    dte_reset();
+    check(send_page_via_fdt(0, 0x2E), "the page is handed over");
+    check(dte_saw("OK"), "and acknowledged");
+
+    peer = peer_start(0, NULL, PEER_RX);
+    check(peer != NULL, "the far-end fax terminal starts");
+    if (!peer) {
+        peer_reject_pages = 0;
+        at("AT+FCT=30");
+        return;
+    }
+
+    dte_reset();
+    peer_saw_dcn = 0;
+    fc2_on_connected();
+    for (int i = 0; i < 90 * 50 && peer_saw_ppr == 0; i++)
+        pump(peer, 1);
+    check(peer_saw_ppr == (T30_RTN & 0xFE), "the far end rejects the page with RTN");
+
+    /* And now the DTE says nothing at all.  Six seconds against a +FCT of
+     * two. */
+    dte_reset();
+    pump_regardless(peer, 6 * 50);
+
+    check(peer_saw_dcn, "the far end is told with a DCN");
+    /* T.32 Table 20: 02 is "call aborted, from +FKS or <CAN>". */
+    check(dte_saw("+FHS:02"), "the DTE is told with +FHS:02");
+
+    at("AT+FCT=30");
     peer_reject_pages = 0;
     fax_free(peer);
     fc2_on_disconnected();
@@ -2813,6 +2912,7 @@ int main(void)
     test_receive_last_page_rejected();
     test_transmit_page_rejected(0);
     test_transmit_page_rejected(1);
+    test_rejected_page_never_resent();
     test_unfinished_document_discarded();
     test_post_page_hold();
     test_held_response_timeout();

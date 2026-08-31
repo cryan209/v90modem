@@ -802,6 +802,15 @@ SPAN_DECLARE(int) t30_set_ecm_frame_size(t30_state_t *s, int octets)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(void) t30_set_retransmit_hold(t30_state_t *s, bool hold)
+{
+    s->retransmit_held = hold;
+    if (!hold)
+        s->retransmit_pending = false;
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) t30_set_retransmit_capable(t30_state_t *s, bool enabled)
 {
     s->retransmit_capable = enabled;

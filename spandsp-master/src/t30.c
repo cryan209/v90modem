@@ -3121,6 +3121,21 @@ static int restart_sending_document(t30_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* T.30 Figure 5-2c, the "CAPABLE RE-XMIT?" branch, where the application owns
+   the image: stop after the RTN and wait, rather than repeating the page from
+   the document we already have. */
+static int hold_retransmission(t30_state_t *s)
+{
+    if (!s->retransmit_capable  ||  !s->retransmit_held)
+        return false;
+    /*endif*/
+    span_log(&s->logging, SPAN_LOG_FLOW, "Holding the page retransmission for the application\n");
+    s->retransmit_pending = true;
+    s->retries = 0;
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int start_receiving_document(t30_state_t *s)
 {
     if (s->rx_file[0] == '\0')
@@ -3480,6 +3495,46 @@ SPAN_DECLARE(int) t30_release_post_page_response(t30_state_t *s, int ppr)
     settle_rx_after_post_page_response(s);
     set_state(s, T30_STATE_III_Q);
     send_simple_frame(s, s->last_rx_page_result);
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) t30_resume_retransmission(t30_state_t *s)
+{
+    if (!s->retransmit_pending)
+        return -1;
+    /*endif*/
+    s->retransmit_pending = false;
+    span_log(&s->logging, SPAN_LOG_FLOW, "Resuming the held page retransmission\n");
+    /* The application may have replaced the document, so this starts from the
+       beginning of whatever is now set rather than restarting the page the
+       old one was on. */
+    terminate_operation_in_progress(s);
+    s->operation_in_progress = OPERATION_IN_PROGRESS_NONE;
+    if (step_fallback_entry(s) < 0)
+    {
+        /* We have fallen back as far as we can go. Give up. */
+        t30_set_status(s, T30_ERR_CANNOT_TRAIN);
+        send_dcn(s);
+        return -1;
+    }
+    /*endif*/
+    queue_phase(s, T30_PHASE_B_TX);
+    if (start_sending_document(s))
+    {
+        send_dcn(s);
+        return -1;
+    }
+    /*endif*/
+    if (build_dcs(s))
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW, "The far end is incompatible\n");
+        send_dcn(s);
+        return -1;
+    }
+    /*endif*/
+    s->retries = 0;
+    send_dcs_sequence(s, true);
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
@@ -4942,6 +4997,9 @@ static void process_state_ii_q(t30_state_t *s, const uint8_t *msg, int len)
             if (s->phase_d_handler)
                 s->phase_d_handler(s->phase_d_user_data, fcf);
             /*endif*/
+            if (hold_retransmission(s))
+                break;
+            /*endif*/
             if (!s->retransmit_capable)
             {
                 /* Send the next page, regardless of the problem with the current one. */
@@ -4987,6 +5045,9 @@ static void process_state_ii_q(t30_state_t *s, const uint8_t *msg, int len)
             s->retries = 0;
             if (s->phase_d_handler)
                 s->phase_d_handler(s->phase_d_user_data, fcf);
+            /*endif*/
+            if (hold_retransmission(s))
+                break;
             /*endif*/
             if (s->retransmit_capable)
             {

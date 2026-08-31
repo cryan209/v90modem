@@ -81,6 +81,11 @@ struct t30_state_s
     int preferred_octets_per_ecm_frame;
     /*! \brief True if we are capable of retransmitting pages */
     bool retransmit_capable;
+    /*! \brief True if a page refused with RTN should not be repeated until
+               the application supplies the document again. */
+    bool retransmit_held;
+    /*! \brief True while such a repeat is waiting for the application. */
+    bool retransmit_pending;
 
     /*! \brief The received DCS, formatted as an ASCII string, for inclusion
                in the TIFF file. */

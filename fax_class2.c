@@ -147,6 +147,14 @@ static int              dte_saw_dle;
 static t4_rx_state_t   *spool_rx;
 static char             tx_tiff[128];
 static int              tx_tiff_ready;     /* a page is spooled and unsent */
+/*
+ * T.32 Annex II.7: a page the far end refused with RTN is sent again, and the
+ * DTE is the one that hands it over -- another +FDT with the same page.  T.30
+ * is held after the RTN (t30_set_retransmit_hold) so that the second +FDT
+ * builds a fresh document, which is then what goes on the line.
+ */
+static int              retransmit_wanted; /* a page was refused; T.30 is held */
+static int              tx_docs_built;     /* so each document gets its own file */
 static int              tx_pages_sent;
 
 /* +FDR: T.30's received pages land in this TIFF; t4_tx reads them back. */
@@ -792,6 +800,16 @@ static int phase_d_handler(void *user_data, int result)
          * because the +FDT may already have completed -- see the ordering
          * deviation in docs/fax_class_at.md.
          */
+        /*
+         * T.32 8.3.3.4 and II.7: the page was refused, so the DCE reports
+         * ERROR and waits for the DTE to hand it over again.  T.30 is holding
+         * the retransmission; +FCT bounds how long, exactly as it bounds a
+         * +FDT that is opened and not fed.
+         */
+        if (v == 2 && !retransmit_wanted) {
+            retransmit_wanted = 1;
+            fct_arm();
+        }
         if (p_ie && (v == 4 || v == 5) && !interrupt_negotiated) {
             interrupt_negotiated = 1;
             queue_line("\r\n+FVO\r\n");
@@ -936,6 +954,12 @@ static void session_start(void)
      * DTE gets no second chance at all.
      */
     t30_set_retransmit_capable(t30, true);
+    /*
+     * ...but the page that goes again is the DTE's, not this DCE's copy.
+     * T.32 II.7 has the DTE hand it over with a second +FDT, so T.30 stops
+     * after the RTN and waits for spool_close() to release it.
+     */
+    t30_set_retransmit_hold(t30, true);
     /* T.32 8.5.2.1: whether the remote's procedure interrupt requests are
      * accepted and negotiated, or ignored. */
     t30_remote_interrupts_allowed(t30, p_ie ? true : false);
@@ -1075,7 +1099,17 @@ static int spool_open(void)
         return 1;
     }
 
-    make_temp_name(tx_tiff, sizeof(tx_tiff), "tx");
+    {
+        /*
+         * A document per file.  The retransmitted one has to be a different
+         * file from the one T.30 is still holding open: it reopens by name
+         * when the retransmission is released.
+         */
+        char tag[24];
+
+        snprintf(tag, sizeof(tag), "tx%d", tx_docs_built++);
+        make_temp_name(tx_tiff, sizeof(tx_tiff), tag);
+    }
     unlink(tx_tiff);
 
     /*
@@ -1139,8 +1173,18 @@ static void spool_close(int ppm)
     doc_complete = 1;
 
     /* A session already under way takes the document straight away. */
-    if (fax)
+    if (fax) {
         t30_set_tx_file(fax_get_t30_state(fax), tx_tiff, -1, -1);
+        if (retransmit_wanted) {
+            /*
+             * T.32 II.7: "AT+FDT ... send [new] DCS -> get good DCS.  RTN
+             * forces back to Phase B."  The document the DTE has just handed
+             * over is what goes, from its first page.
+             */
+            retransmit_wanted = 0;
+            t30_resume_retransmission(fax_get_t30_state(fax));
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1887,6 +1931,7 @@ void fc2_select(int on)
         rx_page_bad_rows = 0;
         rx_page_bad_run = 0;
         dcs_ecm_64 = 0;
+        retransmit_wanted = 0;
         tx_pages_sent = 0;
         tx_tiff_ready = 0;
         dte_mode = FC2_IDLE;
@@ -1978,6 +2023,7 @@ static void fct_arm(void)
 static void fct_expired(void)
 {
     fct_deadline = 0;
+    retransmit_wanted = 0;
 
     if (dte_mode == FC2_DTE_TX_DATA) {
         spool_abandon();

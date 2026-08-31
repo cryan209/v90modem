@@ -640,13 +640,40 @@ altogether when that response is RTN or RTP, since the document is not over.
 A visible consequence: a far end now files the copy it refused at the end of a
 document, as it already did mid-document.
 
-**What it still does not cover**: II.7's ordering, where `+FDT` completes with
-ERROR after the far end's verdict, does not arise here for the reason in
-*Deviations* -- the `+FDT` completes when the page is spooled, before the
-call. The retransmission is therefore driven by the DCE rather than by the
-DTE's second `+FDT`, and the bytes come from the document the DTE already
-handed over. A DTE that follows II.7 literally and re-feeds the page would be
-adding a page, not replacing one.
+**The page that goes again is the DTE's, handed over with a second `+FDT`.**
+That is II.7's own model, and it needed T.30 to stop after the RTN rather than
+repeat a page it already had. `t30_set_retransmit_hold()` does that: the
+"CAPABLE RE-XMIT?" branch of Figure 5-2c sets a pending flag and sends
+nothing, and `t30_resume_retransmission()` starts the document that is set
+*now*, from its first page. On this side the refusal marks the session, the
+next `+FDT` opens a fresh document file -- a new one each time, since T.30
+reopens by name and is still holding the old one -- and `spool_close()`
+releases the retransmission when the DTE finishes it.
+
+Mid-document the DTE supplies the rest of the document from the refused page
+onwards, not just the one page, because the procedure goes back to phase B and
+the document it is given starts at page one. That falls out of T.30 rather
+than being a choice here: phase B is the beginning of a document.
+
+**The EOP test hands over a different image the second time**, and that is
+what makes it a test of provenance rather than of retransmission: a DCE that
+repeated its own copy would put the first page on the line again and pass
+every other check. Removing the hold fails exactly that one assertion and
+nothing else. T.32 does not require the two pages to match -- the DTE simply
+sends a page.
+
+`test_rejected_page_never_resent` is the other side of holding a procedure for
+a DTE: if the page never comes, 8.5.2.6's `+FCT` ends the call with a DCN and
+`+FHS:02`, exactly as it does for a `+FDT` that is opened and not fed.
+Without the timer being armed on the refusal, the far end sits in phase B
+after its RTN until its own T.30 timers give up and the DTE is told nothing;
+that is two failing checks.
+
+**What it still does not match**: II.7 has the `+FDT` itself complete with
+ERROR once the far end's verdict arrives. Here it has already completed, for
+the reason in *Deviations* -- the `+FDT` completes when the page is spooled,
+which on this DCE can be before the call is even answered. The DTE learns the
+verdict from `+FPS` instead.
 
 `test_unfinished_document_discarded` hands over a page that says another
 follows, drops the call, and makes a second one — deliberately without leaving
