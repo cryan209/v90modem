@@ -80,18 +80,74 @@ V34_HDX_LOG=1 ./v34_hdx_test ... 2>&1 | grep -oE "(Tx|Rx) - [a-z0-9_]+_init\(\)"
    INFO1a and INFO1c with INFOh in half-duplex, and the receiver already knew
    its 51 bit length in two places; only the stage assignment was missing.
 
+## The Phase 3 sequencing, and the role inversion behind it
+
+12.2.1.2.6 and 12.2.2.1.6 both end with the same sentence -- "After sending
+INFOh, the modem proceeds according to **12.3.2**" -- and 12.2.1.1.4 and
+12.2.2.2.4 both end with "After receiving INFOh, the modem shall proceed
+according to **12.3.1**".  So the rule is role-based and does not depend on the
+call direction at all:
+
+- **whoever SENDS INFOh is the recipient**, and per 12.3.2.1 transmits silence
+  and conditions its receiver to detect S followed by S-bar;
+- **whoever RECEIVES INFOh is the source**, and per 12.3.1.1 transmits silence
+  for 70 +/- 5 ms, then S for 128T, S-bar for 16T, then PP, then TRN.
+
+`get_infoh_baud()` branched on `calling_party` instead, which is not the same
+thing, and the two roles came out **swapped**: the answerer called
+`s_not_s_baud_init()` and transmitted S/S-bar/PP/TRN, which is the source's job
+under 12.3.1, while the caller was given `tx_silence_init(s, 30000)` -- thirty
+seconds of silence -- and never started Phase 3 at all.  Three more defects sat
+behind that:
+
+- **`V34_EVENT_INFOH_OK` was never raised anywhere in the tree.**  It is
+  defined, it has a name string, and `V34_TX_STAGE_HDX_POST_L2_B` waits on it
+  (12.2.1.1.4) -- but the receiver raised `V34_EVENT_INFO1_OK` on decoding
+  INFOh, so the source could never leave that stage.
+- **`V34_TX_STAGE_HDX_POST_L2_SILENCE` was a dead end.**  It counted out
+  12.3.1.1's 75 ms and then did nothing, so even a source that got there would
+  have stopped.  It now calls `s_not_s_baud_init()`.
+- **INFOh was sent on a stopwatch.**  12.2.1.2.6 says "After Tone B is
+  detected, the answer modem continues transmitting Tone A for 25 ms, then
+  sends INFOh", and the code had a flat 100 baud timer with
+  `//if (s->rx.received_event == V34_EVENT_REVERSAL_2)` commented out beside
+  it.  INFOh therefore went out whether or not the call modem had reached
+  12.2.1.1.4 and conditioned its receiver to receive it -- and it had not, so
+  INFOh was transmitted once, into a peer still hunting Tone A, and was never
+  received.  Now gated on `rx.tone_b_present`, bounded by 12.2.1.4.3's 2000 ms
+  rather than the old 167 ms.
+
+One more thing was in the way of reading any of this: **the stage enums do not
+start at zero.**  `v34_rx_stages_e` starts at 1, so a numeric stage trace is
+off by one against a naive extraction, and `V34_RX_STAGE_INFOH` is 2, not 0.
+An early reading of a trace here was wrong for exactly that reason.
+`V34_TX_STAGE_HDX_CC_SILENCE` is appended at the end of the tx enum so the
+12.4.1.1 silence is distinguishable from 12.3.1.1's, which shares neither its
+meaning nor its follow-on.
+
 ## Where it stands
 
 The source now runs Phase 2, Phase 3 and the whole of 12.4's transmit chain --
 INFOh, S/S-bar, PP, TRN, silence, **PPh, ALT, MPh** -- where before it went
 INFOh, S/S-bar, PP, TRN and then straight into the duplex MP.
 
-It does **not** complete.  The next defect is sequencing on the receive side:
-in the trace `TRN complete` still appears BEFORE `expecting INFOh`, so Phase 3
-is being started by something other than INFOh receipt, while 12.3.1.1 says
-"After receiving INFOh".  Related, `get_infoh_baud()` branches its follow-on on
-`calling_party` rather than on source/recipient, which hardcodes 12.2.2
-("answer modem as source") and cannot serve 12.2.1.
+The roles are now right: the recipient sends INFOh, goes silent and sits in
+`V34_RX_STAGE_PHASE3_WAIT_S` waiting for the source's S, which is 12.3.2.1
+exactly, and the source starts Phase 3 only on `V34_EVENT_INFOH_OK`.
+
+**It still does not complete, and the blocker has moved to Phase 2.**  The
+source stalls in `V34_TX_STAGE_HDX_FIRST_B_INFO_SEEN`, which waits for
+`V34_EVENT_REVERSAL_1` -- the Tone A phase reversal of 12.2.1.1.2.  The
+recipient transmits that reversal on time (`HDX_FIRST_NOT_A` at 0.22 s), but
+the source's receiver is still in `V34_RX_STAGE_INFO0` when it arrives and
+never reports it, so the source never transmits its Tone B reversal, L1 or L2,
+`rx.tone_b_present` never becomes true at the recipient, and the recipient
+falls out of Tone A on the 2000 ms bound instead of on the event.
+
+That is a Phase 2 conditioning defect, not a Phase 3 one, and it was there
+before: the old trace only got further because the recipient was wrongly
+transmitting S/S-bar/PP/TRN, whose energy carried the source's detectors along.
+Fixing the roles removed that accident and left the real state visible.
 
 No payload crosses in either direction, and no claim is made that it does.
 
@@ -100,7 +156,11 @@ is inside a `!duplex` branch or a diagnostic, and the full suite is green.
 
 ## Order of work from here
 
-1. The 12.3.1.1 sequencing above, so Phase 3 follows INFOh.
+1. Phase 2 receiver conditioning: on INFO0a the call modem must condition its
+   receiver to detect Tone A and its phase reversal (12.2.1.1.2).  The rx does
+   set `V34_RX_STAGE_TONE_A` on INFO0 receipt, but the source's receiver was
+   observed still in `V34_RX_STAGE_INFO0` well after its transmitter had acted
+   on `V34_EVENT_INFO0_OK`; find out why those two disagree.
 2. `half_duplex_state` actually read: 12.5's primary channel turn-off and
    12.6's control channel turn-off are the source/recipient turnarounds, and
    nothing consumes the mode today.

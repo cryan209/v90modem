@@ -213,6 +213,7 @@ static const char *v34_tx_stage_to_str(int stage)
     case V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN: return "V90_PHASE2_B_INFO0_SEEN";
     case V34_TX_STAGE_V90_RETRAIN_SILENCE: return "V90_RETRAIN_SILENCE";
     case V34_TX_STAGE_V34_FALLBACK_WAIT_J: return "V34_FALLBACK_WAIT_J";
+    case V34_TX_STAGE_HDX_CC_SILENCE: return "HDX_CC_SILENCE";
     case V34_TX_STAGE_INFO1: return "INFO1";
     case V34_TX_STAGE_FIRST_B: return "FIRST_B";
     case V34_TX_STAGE_FIRST_B_INFO_SEEN: return "FIRST_B_INFO_SEEN";
@@ -3750,11 +3751,31 @@ static complex_sig_t get_initial_hdx_a_not_a_baud(v34_state_t *s)
         /*endif*/
         return zero;
     case V34_TX_STAGE_HDX_SECOND_A:
-        /* Send pure tone (V.34/12.2.1.2.5) */
-        if (++s->tx.tone_duration >= 100)
-        //if (s->rx.received_event == V34_EVENT_REVERSAL_2)
+        /* V.34 12.2.1.2.5: the answer modem transmits Tone A and conditions its
+           receiver to detect Tone B.  12.2.1.2.6: "After Tone B is detected,
+           the answer modem continues transmitting Tone A for 25 ms, then sends
+           INFOh."
+
+           The condition was a flat 100 baud timer with the real one commented
+           out beside it, so INFOh went out on a stopwatch whether or not the
+           call modem had reached 12.2.1.1.4 and conditioned its receiver to
+           receive it.  It had not: INFOh was transmitted once, into a peer
+           still hunting Tone A, and was never received.  Same shape as the
+           post-L2 Tone A defect in docs/v34_plain_phase2_call_role.md -- send
+           only when the far end is listening.
+
+           The bound is 12.2.1.4.3's 2000 ms from the start of Tone A, at the
+           600 baud control channel rate, rather than the old 167 ms. */
+        if (s->rx.tone_b_present  ||  ++s->tx.tone_duration >= (600*2000)/1000)
         {
-            /* Second reversal seen - continue sending pure tone for 25ms */
+            if (!s->rx.tone_b_present)
+            {
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                           "Tx - half-duplex recipient: no Tone B within 2000 ms, "
+                           "sending INFOh anyway\n");
+            }
+            /*endif*/
+            /* Continue sending pure tone for 25 ms, then INFOh */
             s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.tone_duration = 1;
             s->tx.stage = V34_TX_STAGE_HDX_SECOND_A_WAIT;
@@ -5394,10 +5415,17 @@ static complex_sig_t get_second_b_baud(v34_state_t *s)
         /*endif*/
         break;
     case V34_TX_STAGE_HDX_POST_L2_SILENCE:
-        /* Send silence for 75ms (V.34/12.3.1.1) */
+        /* V.34 12.3.1.1: after receiving INFOh the source modem transmits
+           silence for 70 +/- 5 ms, THEN signal S for 128T followed by S-bar
+           for 16T, followed by PP.  This counted the 75 ms out and then did
+           nothing at all, so the source sat here for the rest of the call and
+           the recipient ended up transmitting Phase 3 in its place. */
         if (++s->tx.tone_duration == 45)
         {
             s->tx.tone_duration = 0;
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                       "Tx - half-duplex source: INFOh received, starting Phase 3 S/S-bar\n");
+            s_not_s_baud_init(s);
         }
         /*endif*/
         return zero;
@@ -5426,11 +5454,21 @@ static complex_sig_t get_infoh_baud(v34_state_t *s)
     bit = get_data_bit(&s->tx);
     if (s->tx.txptr >= s->tx.txbits)
     {
-        if (s->tx.calling_party)
-            tx_silence_init(s, 30000);
-        else
-            s_not_s_baud_init(s);
-        /*endif*/
+        /* V.34 12.2.1.2.6 and 12.2.2.1.6 both end "After sending INFOh, the
+           modem proceeds according to 12.3.2" -- so whichever modem sends
+           INFOh is the RECIPIENT, whatever the call direction.  12.3.2.1 then
+           has it transmit SILENCE and condition its receiver to detect S
+           followed by S-bar.
+
+           This branched on calling_party instead, which is not the same thing:
+           the answerer transmitted S/S-bar/PP/TRN, which is the SOURCE's job
+           under 12.3.1, while the caller went silent for 30 s and never
+           started Phase 3 at all.  The two roles were simply swapped. */
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                   "Tx - half-duplex recipient: INFOh sent, silent while receiving Phase 3\n");
+        tx_silence_init(s, 30000);
+        /* "condition its receiver to detect S followed by S-bar" */
+        v34_v90_arm_phase3_s_detector(s);
     }
     /*endif*/
     if (bit)
@@ -7845,7 +7883,7 @@ static void hdx_control_channel_start_init(v34_state_t *s)
     s->tx.hdx_pph_after_silence = true;
     s->tx.tone_duration = milliseconds_to_samples(70);
     s->tx.current_modulator = V34_MODULATION_SILENCE;
-    s->tx.stage = V34_TX_STAGE_HDX_POST_L2_SILENCE;
+    s->tx.stage = V34_TX_STAGE_HDX_CC_SILENCE;
 }
 /*- End of function --------------------------------------------------------*/
 

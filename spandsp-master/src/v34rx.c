@@ -5638,7 +5638,12 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                     break;
                 case V34_RX_STAGE_INFOH:
                     process_rx_infoh(s, &s->infoh, s->info_buf);
-                    s->received_event = V34_EVENT_INFO1_OK;
+                    /* V34_EVENT_INFOH_OK is what the half-duplex transmitter
+                       waits on in V34_TX_STAGE_HDX_POST_L2_B (12.2.1.1.4).  It
+                       was defined, named and waited on, but NEVER RAISED
+                       anywhere in the tree, so the source modem could not leave
+                       that stage and Phase 3 never started. */
+                    s->received_event = V34_EVENT_INFOH_OK;
                     break;
                 case V34_RX_STAGE_INFO1C:
                     process_rx_info1c(s, &s->info1c, s->info_buf);

@@ -114,6 +114,23 @@ int main(int argc, char *argv[])
         v34_rx(answ_modem, answ_rx, BLOCK_SAMPLES);
         v34_rx(call_modem, call_rx, BLOCK_SAMPLES);
 
+        if (getenv("V34_HDX_STAGES"))
+        {
+            static int p_ct = -1, p_at = -1, p_cr = -1, p_ar = -1;
+            int ct = v34_get_tx_stage(call_modem);
+            int at = v34_get_tx_stage(answ_modem);
+            int cr = v34_get_rx_stage(call_modem);
+            int ar = v34_get_rx_stage(answ_modem);
+
+            if (ct != p_ct  ||  at != p_at  ||  cr != p_cr  ||  ar != p_ar)
+            {
+                printf("  %7.3fs  src tx=%-2d rx=%-2d | rcp tx=%-2d rx=%-2d\n",
+                       block*BLOCK_SAMPLES/8000.0, ct, cr, at, ar);
+                p_ct = ct;  p_at = at;  p_cr = cr;  p_ar = ar;
+            }
+            /*endif*/
+        }
+        /*endif*/
         if (v34_get_tx_stage(call_modem) > best_call_tx)
             best_call_tx = v34_get_tx_stage(call_modem);
         if (v34_get_tx_stage(answ_modem) > best_answ_tx)

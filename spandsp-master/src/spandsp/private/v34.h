@@ -691,7 +691,12 @@ enum v34_tx_stages_e
         leads Phase 3 with S/S-bar/PP/TRN/J (V.34 §11.3.1.1.1-11.3.1.1.3).
         Appended at the end of the enum so every earlier value stays stable;
         the application mirrors this enum value-for-value. */
-    V34_TX_STAGE_V34_FALLBACK_WAIT_J
+    V34_TX_STAGE_V34_FALLBACK_WAIT_J,
+    /*! \brief V.34 12.4.1.1: the 70 +/- 5 ms silent interval that opens
+        control channel start-up, before PPh.  Distinct from
+        V34_TX_STAGE_HDX_POST_L2_SILENCE, which is 12.3.1.1's silence before
+        S/S-bar.  Appended so every earlier value stays stable. */
+    V34_TX_STAGE_HDX_CC_SILENCE
 };
 
 enum v34_events_e
