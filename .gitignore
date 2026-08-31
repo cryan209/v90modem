@@ -139,3 +139,7 @@ tools/__pycache__/
 artifacts/
 captures/
 artifacts/courier-ja-3200low/README.md
+
+# fixed/float build-mode stamp and fixed-compare scratch logs
+.build-mode
+.fixcmp-*.log

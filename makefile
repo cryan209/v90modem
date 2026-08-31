@@ -163,14 +163,17 @@ V90_UPSTREAM_REPLAY_OBJS = v90_upstream_replay.o
 PORT_CP_STREAM_TEST_OBJS = port/cp_stream_test.o port/cp_stream.o v90_cp_rx.o vpcm_cp.o
 # ESP32 port, layer 3: the V.90 upstream DATA feed-forward decode core.
 PORT_DATA_RX_TEST_OBJS = port/data_rx_test.o port/data_rx.o
-# Fixed-point datapath (V34_FIXED_POINT).  Not a default: on an ESP32-S3 the
-# FPU makes float faster and smaller, and this is for the FPU-less parts
-# (ESP32-C3/C6, RV32IMC).  To build it:
-#   make clean
-#   ( cd spandsp-master/src && make libspandsp.la \
-#       CPPFLAGS="-DV34_FIXED_POINT -I$(PWD)/port" )
-#   make CFLAGS="$(CFLAGS) -DV34_FIXED_POINT" PORT_FIXED_OBJ=port/v34_fixed.o
-PORT_FIXED_OBJ =
+# Fixed-point datapath.  `make fixed` builds it, `make float` (or plain `make`)
+# goes back.  Not a default: on an ESP32-S3 the FPU makes float both faster and
+# smaller, and this is for the FPU-less parts (ESP32-C3/C6, RV32IMC).
+#
+# The two modes CANNOT share objects -- V34_FIXED_POINT changes the layout of
+# v34_rx_state_t -- and this makefile has no header dependencies, so a stale
+# object linked across a mode switch gives impossible values at runtime rather
+# than a link error.  BUILD_MODE_STAMP records which mode the tree is in and
+# the targets clean when it changes; do not defeat it.
+BUILD_MODE_STAMP = .build-mode
+FIXED_CPPFLAGS = -DV34_FIXED_POINT -I$(CURDIR)/port
 
 # ESP32 port: fixed-point kernels, checked against float on real probe data.
 PORT_V34_FIXED_TEST_OBJS = port/v34_fixed_test.o
@@ -180,7 +183,7 @@ PORT_V34_FIXED_SOLVE_TEST_OBJS = port/v34_fixed_solve_test.o
 # recorded call can be run through V.8 and Phases 2-4 exactly as the media
 # thread runs it.  Everything $(TARGET) links except sip_modem.o, which is
 # the part being replaced.
-V90_ENGINE_REPLAY_OBJS = v90_engine_replay.o $(filter-out sip_modem.o,$(OBJS)) $(PORT_FIXED_OBJ)
+V90_ENGINE_REPLAY_OBJS = v90_engine_replay.o $(filter-out sip_modem.o,$(OBJS))
 V34_DUPLEX_TEST_OBJS = v34_duplex_test.o
 V32BIS_SPANDSP_TEST_OBJS = v32bis_spandsp_test.o
 V90_ANALOGUE_TX_TEST_OBJS = v90_analogue_tx_test.o v90_analogue_tx.o v90_analogue_phase4.o v90_dil_measure.o v90.o v90_cp_rx.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o
@@ -195,7 +198,7 @@ SRCS += v34_stubs.c
 TEST_OBJS += v34_stubs.o
 endif
 
-.PHONY: all test clean distclean spandsp pjproject v34-tone-matrix v34-duplex-test v34-matrix-test v32bis-ref-test v32bis-datapump-test v32bis-test v91-serial-pair-test eicon-rx-test g711-path-test FORCE
+.PHONY: all test clean distclean fixed float fixed-compare spandsp pjproject v34-tone-matrix v34-duplex-test v34-matrix-test v32bis-ref-test v32bis-datapump-test v32bis-test v91-serial-pair-test eicon-rx-test g711-path-test FORCE
 
 all: $(TARGET) $(TEST_TARGETS)
 
@@ -301,8 +304,8 @@ v32bis-datapump-test:
 v32bis-test: v32bis_spandsp_test v32bis-ref-test v32bis-datapump-test
 	./v32bis_spandsp_test
 
-$(TARGET): $(OBJS) $(PORT_FIXED_OBJ) spandsp $(PJ_BUILD_PREREQ)
-	$(CC) $(OBJS) $(PORT_FIXED_OBJ) -o $@ $(LDFLAGS)
+$(TARGET): $(OBJS) spandsp $(PJ_BUILD_PREREQ)
+	$(CC) $(OBJS) -o $@ $(LDFLAGS)
 
 vpcm_loopback_test: $(TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(TEST_OBJS) -o $@ $(LDFLAGS)
@@ -513,11 +516,55 @@ pjproject:
 	$(MAKE) -C "$(PJ_LOCAL_ROOT)" lib; \
 	printf '%s\n' "$$current_host" > "$(PJ_HOST_STAMP)"
 
+# Switch the tree to the integer datapath.  Rebuilds spandsp too, because
+# v34rx.c and the private header both change under the flag.
+fixed:
+	@if [ "`cat $(BUILD_MODE_STAMP) 2>/dev/null`" != "fixed" ]; then \
+		echo "switching build mode -> fixed (full rebuild)"; \
+		$(MAKE) clean >/dev/null; \
+		rm -f $(SPANDSP_DIR)/*.o $(SPANDSP_DIR)/.libs/*.o $(SPANDSP_DIR)/*.lo; \
+	fi
+	@echo fixed > $(BUILD_MODE_STAMP)
+	$(MAKE) -C $(SPANDSP_DIR) libspandsp.la CPPFLAGS="$(FIXED_CPPFLAGS)"
+	$(MAKE) $(TARGET) v90_engine_replay v90_upstream_replay \
+		CFLAGS="$(CFLAGS) -DV34_FIXED_POINT"
+	@echo "built with V34_FIXED_POINT; \`make float\` to go back"
+
+# Back to the floating-point datapath (the default everything else assumes).
+float:
+	@if [ "`cat $(BUILD_MODE_STAMP) 2>/dev/null`" = "fixed" ]; then \
+		echo "switching build mode -> float (full rebuild)"; \
+		$(MAKE) clean >/dev/null; \
+		rm -f $(SPANDSP_DIR)/*.o $(SPANDSP_DIR)/.libs/*.o $(SPANDSP_DIR)/*.lo; \
+		$(MAKE) -C $(SPANDSP_DIR) libspandsp.la; \
+	fi
+	@echo float > $(BUILD_MODE_STAMP)
+	$(MAKE) all
+
+# Compare the two on a recording.  This is the check that matters for the
+# fixed path: the arithmetic differs, so the logs cannot be identical -- what
+# has to match is the acquisition structure and the decode quality.
+fixed-compare:
+	@test -n "$(REC)" || { echo "usage: make fixed-compare REC=artifacts/.../live-rx.g711"; exit 2; }
+	$(MAKE) float >/dev/null
+	./v90_engine_replay $(REC) ulaw --fast > .fixcmp-float.log 2>&1 || true
+	$(MAKE) fixed >/dev/null
+	./v90_engine_replay $(REC) ulaw --fast > .fixcmp-fixed.log 2>&1 || true
+	@for f in float fixed; do \
+		printf "  %-6s B1=%-2s E=%-2s DATA=%-2s Ja=%-2s median sym err %s shell bad %s%%\n" $$f \
+		  "`grep -c 'B1 acquired' .fixcmp-$$f.log`" \
+		  "`grep -c 'upstream E detected' .fixcmp-$$f.log`" \
+		  "`grep -c 'enter DATA after B1' .fixcmp-$$f.log`" \
+		  "`grep -c 'Ja descriptor recovered' .fixcmp-$$f.log`" \
+		  "`grep -o 'sym err [0-9.]*' .fixcmp-$$f.log | awk '{print $$3}' | sort -g | awk '{a[NR]=$$1} END{print (NR? a[int(NR/2)+1] : \"n/a\")}'`" \
+		  "`grep -o 'shell bad [0-9]*%' .fixcmp-$$f.log | grep -o '[0-9]*' | sort -n | awk '{a[NR]=$$1} END{print (NR? a[int(NR/2)+1] : \"n/a\")}'`"; \
+	done
+
 clean:
 	rm -f $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(V92_REPLAY_OBJS) $(DATA_STACK_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test
 
 distclean: clean
-	rm -f "$(SPANDSP_HOST_STAMP)" "$(PJ_HOST_STAMP)"
+	rm -f "$(SPANDSP_HOST_STAMP)" "$(PJ_HOST_STAMP)" $(BUILD_MODE_STAMP)
 	@if [ -f "$(SPANDSP_ROOT)/Makefile" ]; then \
 		$(MAKE) -C "$(SPANDSP_ROOT)" distclean >/dev/null 2>&1 || true; \
 	fi
