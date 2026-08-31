@@ -307,13 +307,26 @@ agreed. The DCS passes through the same real-time frame handler `+FNR` and
 `+FBU` use, in whichever direction it goes, and the bit is latched there.
 Mask the FCF with `0xFE` as everywhere else: a DCS's low bit is a don't-care.
 
-One fix belongs to SpanDSP rather than to this layer, and is in the vendored
-tree. `t30.c` set `octets_per_ecm_frame` from that bit the wrong way round --
-`? 256 : 64` against Table 2's `0 = 256 octets, 1 = 64 octets` -- so a
-terminal that received a DCS and then transmitted used the frame size the DCS
-had not asked for. It is latent for a receiving DCE, which never builds a
-partial page in that call, and would bite the first time a session turned
-around.
+**EC=1, T.30 A.3.2's other frame size, did not exist at all.** SpanDSP never
+set DIS bit 7, never set DCS bit 28, and chose the size with a comment saying
+so -- "Always use 256 octets per ECM frame, whatever the other end says it is
+capable of". A DTE could ask for `EC=1` and get 256-octet frames with nothing
+on the wire to say otherwise, in either role.
+
+Three fixes in the vendored tree, and the split between them is A.3.1's: the
+*transmitting* terminal chooses the frame size, and the *receiving* terminal
+expresses a preference in bit 7 of its DIS/DTC. So a receiving DCE can only
+ask, and a transmitting one decides. New `t30_set_ecm_frame_size()` carries
+the preference; `build_dis_or_dtc()` puts it in bit 7; `set_from_dis()`
+honours the far end's bit 7, or this terminal's own preference where the far
+end expresses none; and `build_dcs()` sets bit 28 to say which size is in use.
+256 stays the default in both roles, because Table 2 note 42 lets a
+transmitter ignore the request and a receiver must handle 256 regardless.
+
+And one that was simply inverted: `set_from_dcs()` read bit 28 as
+`? 256 : 64`, against Table 2's `0 = 256 octets, 1 = 64 octets`, so a terminal
+that received a DCS and then transmitted used the frame size the DCS had not
+asked for.
 
 ### +FBU, HDLC frame reporting (8.5.1.10, 8.6)
 
@@ -484,13 +497,24 @@ That comparison is the point. The interesting failures here all report `OK`: a
 page that negotiates and transfers as garbage, or a stream handed to the DTE in
 a format it did not ask for, would pass a result-code check.
 
-`test_transmit` and `test_receive` each run twice more, at `EC=2`, so the page
-comparison and the line counts are checked in error correction mode as well as
-without it -- every transfer test used to be `EC=0`, which is why the zeroed
+`test_transmit` and `test_receive` each run twice more, at `EC=2` and `EC=1`,
+so the page comparison and the line counts are checked in error correction
+mode as well as without it -- every transfer test used to be `EC=0`, which is why the zeroed
 line counts above survived a green suite. Removing the latch fails exactly the
 two ECM receive rows and nothing else, which is what makes them a test of it.
 Each also asserts `+FCS`'s EC field, against a far end that is ECM-capable in
-both arms, so it separates reporting the DCS from echoing our own offer back.
+every arm, so it separates reporting the DCS from echoing our own offer back.
+
+The `EC=1` rows are graded **on the wire, from the far end's own frame
+handler**: the DCS's bit 28, and the payload length of the `T4_FCD` frames
+that carry the page. The bit alone would not do -- a DCS that says 64 and then
+sends 256-octet frames passes a bit check and fails against a real peer -- and
+the frame lengths alone would not either, since the receiver reassembles the
+page from frames that carry their own lengths, so a peer that ignored bit 28
+entirely would still deliver an intact page. The two directions test different
+halves and are separately confirmed to bite: withholding DIS bit 7 fails the
+three receive assertions and nothing else, because transmitting is driven by
+our own preference; withholding the `set_from_dis()` change fails all six.
 
 `test_fnr` runs the same session shape with reporting off, fully on, and then
 **against a far end configured the other way** — T.6 and ECM disabled. Our own

@@ -464,6 +464,17 @@ SPAN_DECLARE(void) t30_set_iaf_mode(t30_state_t *s, int iaf);
     \return 0 if OK, else -1. */
 SPAN_DECLARE(int) t30_set_ecm_capability(t30_state_t *s, bool enabled);
 
+/*! Specify the ECM frame size this terminal prefers. T.30 Table 2 allows 256
+    or 64 octets per frame. The transmitting terminal chooses, honouring the
+    preference the receiving terminal expresses in bit 7 of its DIS/DTC; this
+    sets both that bit, and the size used when transmitting to a far end which
+    expresses no preference.
+    \brief Select the preferred ECM frame size.
+    \param s The T.30 context.
+    \param octets 64 or 256.
+    \return 0 if OK, else -1. */
+SPAN_DECLARE(int) t30_set_ecm_frame_size(t30_state_t *s, int octets);
+
 /*! Specify if page retransmission is allowed by a T.30 context.
     \brief Select page retransmission capable.
     \param s The T.30 context.

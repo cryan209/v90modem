@@ -222,8 +222,14 @@ reports zeros and every page of every error-corrected fax was reported as
 `+FPS:1,0,0,0,0` -- a good status with no lines. The counts are now latched in
 the phase D handler. `+FCS`'s EC is read off DCS bit 28 (0 = 256 octets,
 1 = 64) rather than echoed from `+FIS`, since T.30 note 42 lets a transmitter
-ignore a 64-octet request; and the vendored SpanDSP had that bit inverted in
-`t30.c`, which is latent for a receiver and would bite on a turnaround.
+ignore a 64-octet request. **EC=1 did not exist**: the vendored SpanDSP never
+set DIS bit 7 or DCS bit 28 and hardcoded 256 "whatever the other end says",
+so a DTE could ask for 64-octet frames and silently get 256. New
+`t30_set_ecm_frame_size()`, with T.30 A.3.1's split -- the transmitter
+chooses, the receiver asks in DIS bit 7 -- and the DCS now says which. It also
+read bit 28 inverted, which is latent for a receiver and bites on a
+turnaround. The EC=1 tests grade the DCS bit **and** the T4_FCD payload
+lengths at the far end: either alone passes a modem that does not do it.
 
 Neither class has hardware interop. See `docs/fax_class_at.md`.
 

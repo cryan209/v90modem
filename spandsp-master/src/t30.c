@@ -1440,6 +1440,16 @@ int t30_build_dis_or_dtc(t30_state_t *s)
         /* ECM allowed */
         set_ctrl_bit(s->local_dis_dtc_frame, T30_DIS_BIT_ECM_CAPABLE);
 
+        /* T.30 Table 2 bit 7: "0" = 256 octets preferred, "1" = 64 octets
+           preferred. This is only a preference - Table 2 note 42 lets the
+           transmitting terminal ignore it, so a receiver must be able to
+           handle 256 octet frames whatever it asks for here. */
+        if (s->preferred_octets_per_ecm_frame == 64)
+            set_ctrl_bit(s->local_dis_dtc_frame, T30_DIS_BIT_64_OCTET_ECM_FRAMES_PREFERRED);
+        else
+            clr_ctrl_bit(s->local_dis_dtc_frame, T30_DIS_BIT_64_OCTET_ECM_FRAMES_PREFERRED);
+        /*endif*/
+
         /* Only offer the option of fancy compression schemes, if we are
            also offering the ECM option needed to support them. */
         if ((s->supported_compressions & T4_COMPRESSION_T6))
@@ -1930,7 +1940,20 @@ static int build_dcs(t30_state_t *s)
     /*endswitch*/
 
     if (s->error_correcting_mode)
+    {
         set_ctrl_bit(s->dcs_frame, T30_DCS_BIT_ECM_MODE);
+        /* T.30 Table 2 bit 28: frame size, "0" = 256 octets, "1" = 64
+           octets. Only valid when ECM is selected (note 7). */
+        if (s->octets_per_ecm_frame == 64)
+            set_ctrl_bit(s->dcs_frame, T30_DCS_BIT_64_OCTET_ECM_FRAMES);
+        else
+            clr_ctrl_bit(s->dcs_frame, T30_DCS_BIT_64_OCTET_ECM_FRAMES);
+        /*endif*/
+    }
+    else
+    {
+        clr_ctrl_bit(s->dcs_frame, T30_DCS_BIT_64_OCTET_ECM_FRAMES);
+    }
     /*endif*/
 
     if ((s->iaf & T30_IAF_MODE_FLOW_CONTROL)  &&  test_ctrl_bit(s->far_dis_dtc_frame, T30_DIS_BIT_T38_FLOW_CONTROL_CAPABLE))
@@ -2003,8 +2026,22 @@ static int analyze_rx_dis_dtc(t30_state_t *s, const uint8_t *msg, int len)
     /*endif*/
 
     s->error_correcting_mode = (s->ecm_allowed  &&  test_ctrl_bit(s->far_dis_dtc_frame, T30_DIS_BIT_ECM_CAPABLE));
-    /* Always use 256 octets per ECM frame, whatever the other end says it is capable of */
-    s->octets_per_ecm_frame = 256;
+    /* The transmitting terminal chooses the ECM frame size (T.30 A.3.1), and
+       the receiving terminal expresses a preference in bit 7 of its DIS/DTC.
+       Honour that preference, and otherwise use whatever this terminal has
+       been told to prefer. A receiver has to handle 256 octet frames in any
+       case (Table 2 note 42), so 256 stays the default. */
+    if (test_ctrl_bit(s->far_dis_dtc_frame, T30_DIS_BIT_64_OCTET_ECM_FRAMES_PREFERRED)
+        ||
+        s->preferred_octets_per_ecm_frame == 64)
+    {
+        s->octets_per_ecm_frame = 64;
+    }
+    else
+    {
+        s->octets_per_ecm_frame = 256;
+    }
+    /*endif*/
 
     /* Now we know if we are going to use ECM, select the compressions which we can use. */
     s->mutual_compressions = s->supported_compressions;
@@ -7694,6 +7731,9 @@ SPAN_DECLARE(t30_state_t *) t30_init(t30_state_t *s,
        get 1D and 2D encoding right. Quite a lot get other things wrong. */
     s->supported_output_compressions = T4_COMPRESSION_T4_2D | T4_COMPRESSION_JPEG;
     s->local_min_scan_time_code = T30_MIN_SCAN_0MS;
+    /* T.30 Table 2 note 42: a receiver must handle 256 octet ECM frames
+       whatever it prefers, so 256 is the safe default in both roles. */
+    s->preferred_octets_per_ecm_frame = 256;
     s->max_command_tries = DEFAULT_MAX_COMMAND_TRIES;
     s->max_response_tries = DEFAULT_MAX_RESPONSE_TRIES;
     span_log_init(&s->logging, SPAN_LOG_NONE, NULL);

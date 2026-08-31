@@ -921,6 +921,11 @@ static void session_start(void)
     t30_set_supported_compressions(t30, df_to_supported_compressions(p_is.df));
     t30_set_supported_bilevel_resolutions(t30, vr_to_resolutions(p_is.vr));
     t30_set_ecm_capability(t30, p_is.ec != 0);
+    /* T.32 8.5.1.2 EC: 1 asks for 64-octet ECM frames, 2 for 256.  T.30 A.3.1
+     * gives the choice to the transmitting terminal and Table 2 bit 7 of the
+     * DIS/DTC is how a receiver asks, so this is a preference in both
+     * directions rather than a setting. */
+    t30_set_ecm_frame_size(t30, (p_is.ec == 1) ? 64 : 256);
     /* T.32 8.5.2.1: whether the remote's procedure interrupt requests are
      * accepted and negotiated, or ignored. */
     t30_remote_interrupts_allowed(t30, p_ie ? true : false);

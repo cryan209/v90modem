@@ -201,6 +201,18 @@ static int          peer_nsf_len;
 static const uint8_t *peer_nss;
 static int          peer_nss_len;
 static int          peer_interrupt;   /* the far end asks for / grants one */
+static int          peer_ecm_octets = 256; /* the far end's DIS/DTC bit 7 preference */
+
+/*
+ * The ECM frame size actually used, taken off the wire at the far end: the
+ * DCS's T.30 Table 2 bit 28, and the payload length of the T4_FCD frames that
+ * carry the page.  An FCD frame is address, control, FCF, a frame number and
+ * then the octets, so 64-octet frames arrive as len - 4 == 64.
+ */
+static int          peer_saw_dcs_ecm64 = -1;
+static int          peer_fcd_min;
+static int          peer_fcd_max;
+static int          peer_fcd_count;
 
 /* The post page message and response the far end put on the wire. */
 static int          peer_saw_ppm;
@@ -230,6 +242,19 @@ static void peer_frame_handler(void *user_data, bool incoming,
      */
     if ((msg[2] & 0xFE) == (T30_DCN & 0xFE))
         peer_saw_dcn = 1;
+    /* The DCS's low bit is a don't-care, as everywhere else. */
+    if ((msg[2] & 0xFE) == (T30_DCS & 0xFE) && len > 3 + 3) {
+        peer_saw_dcs_ecm64 = (msg[3 + 3] & (1 << 3)) ? 1 : 0;   /* bit 28 */
+    }
+    if (msg[2] == T4_FCD && len >= 4) {
+        int octets = len - 4;
+
+        if (peer_fcd_count == 0 || octets < peer_fcd_min)
+            peer_fcd_min = octets;
+        if (octets > peer_fcd_max)
+            peer_fcd_max = octets;
+        peer_fcd_count++;
+    }
     switch (msg[2] & 0xFE) {
     case (T30_MPS & 0xFE): case (T30_EOM & 0xFE): case (T30_EOP & 0xFE):
     case (T30_PRI_MPS & 0xFE): case (T30_PRI_EOM & 0xFE): case (T30_PRI_EOP & 0xFE):
@@ -261,6 +286,7 @@ static fax_state_t *peer_start(int calling, const char *tx_file, const char *rx_
     t30 = fax_get_t30_state(f);
     t30_set_tx_ident(t30, "peer");
     t30_set_ecm_capability(t30, peer_ecm ? true : false);
+    t30_set_ecm_frame_size(t30, peer_ecm_octets);
     if (peer_nsf)
         t30_set_tx_nsf(t30, peer_nsf, peer_nsf_len);
     if (peer_nss)
@@ -277,6 +303,10 @@ static fax_state_t *peer_start(int calling, const char *tx_file, const char *rx_
     peer_saw_ppm = 0;
     peer_saw_ppr = 0;
     peer_saw_dcn = 0;
+    peer_saw_dcs_ecm64 = -1;
+    peer_fcd_min = 0;
+    peer_fcd_max = 0;
+    peer_fcd_count = 0;
     t30_remote_interrupts_allowed(t30, true);
     if (peer_interrupt)
         t30_local_interrupt_request(t30, true);
@@ -543,6 +573,27 @@ static void test_transmit(int fbo, int ec)
         snprintf(want, sizeof(want), "+FCS:1,3,0,2,0,%d,", ec);
         check(dte_saw(want), "+FCS: reports the negotiated error correction");
     }
+    if (ec) {
+        /*
+         * T.30 A.3.1: the transmitting terminal chooses the frame size, and
+         * Table 2 bit 28 of the DCS is where it says which.  Checked against
+         * the octets the far end actually received, because a DCS that says
+         * 64 and then sends 256-octet frames would pass a bit check and fail
+         * against a real peer -- and a receiver that ignored bit 28 would
+         * still reassemble the page here, since the frames carry their own
+         * lengths.
+         */
+        int want64 = (ec == 1);
+
+        check(peer_saw_dcs_ecm64 == want64,
+              "the DCS says which ECM frame size is in use");
+        check(peer_fcd_count > 1 && peer_fcd_max == (want64 ? 64 : 256),
+              "the page goes out in frames of that size");
+        if (peer_fcd_max != (want64 ? 64 : 256))
+            printf("       (%d FCD frames, %d..%d octets, DCS bit 28 = %d)\n",
+                   peer_fcd_count, peer_fcd_min, peer_fcd_max,
+                   peer_saw_dcs_ecm64);
+    }
 
     bad = compare_page(PEER_RX, 0, &rows);
     check(bad == 0 && rows == IMAGE_ROWS,
@@ -570,6 +621,10 @@ static void test_receive(int fbo, int ec)
     printf("+FDR: class 2.0 receives a page (+FBO=%d, EC=%d)\n", fbo, ec);
 
     unlink(DTE_RX);
+    /* test_bit_order_is_real() compares the two captures against each other,
+     * so each session replaces its own rather than appending to it -- this
+     * now runs more than once per +FBO setting. */
+    cap_len[fbo & 1] = 0;
     fc2_select(0);
     fc2_select(1);
 
@@ -623,6 +678,25 @@ static void test_receive(int fbo, int ec)
         check(got == ec, "+FCS: reports the negotiated error correction");
         if (got != ec)
             printf("       (EC=%d, wanted %d)\n", got, ec);
+    }
+    if (ec) {
+        /*
+         * The other direction of T.30 A.3.1: here this DCE is the receiver,
+         * so all it can do is ask, with Table 2 bit 7 of its DIS -- which is
+         * what +FIS's EC=1 has to reach.  The far end honours it (note 42
+         * allows it not to), so the frames on the wire are the proof that the
+         * request left this end at all.
+         */
+        int want64 = (ec == 1);
+
+        check(peer_saw_dcs_ecm64 == want64,
+              "the far end's DCS says which ECM frame size is in use");
+        check(peer_fcd_count > 1 && peer_fcd_max == (want64 ? 64 : 256),
+              "the page arrives in frames of that size");
+        if (peer_fcd_max != (want64 ? 64 : 256))
+            printf("       (%d FCD frames, %d..%d octets, DCS bit 28 = %d)\n",
+                   peer_fcd_count, peer_fcd_min, peer_fcd_max,
+                   peer_saw_dcs_ecm64);
     }
     /* T.32 8.4.4.1 Table 19: 2 is EOP, no more pages or documents. */
     check(dte_saw("+FET:2"), "+FDR reported the remote's post page message");
@@ -1967,6 +2041,16 @@ int main(void)
      */
     test_transmit(0, 2);
     test_receive(0, 2);
+
+    /*
+     * EC=1 is the same mode with T.30 A.3.2's other frame size, 64 octets.
+     * The transmitting terminal chooses (A.3.1) and the receiving terminal
+     * asks in bit 7 of its DIS, so each direction exercises a different half:
+     * transmitting, this DCE puts 64 in the DCS and sends 64-octet frames;
+     * receiving, its DIS asks and the far end honours it.
+     */
+    test_transmit(0, 1);
+    test_receive(0, 1);
 
     /*
      * T.32 8.5.3.4.  The same two sessions with the phase C octets reversed on

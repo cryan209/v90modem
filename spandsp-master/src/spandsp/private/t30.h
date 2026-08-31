@@ -69,6 +69,11 @@ struct t30_state_s
     int supported_t30_features;
     /*! \brief True is ECM mode handling is enabled. */
     bool ecm_allowed;
+    /*! \brief The number of octets per ECM frame this terminal prefers, as a
+               receiver -- 64 or 256. 64 sets bit 7 of the DIS/DTC, per
+               T.30 Table 2. As a transmitter it is the size used when the far
+               end expresses no preference of its own. */
+    int preferred_octets_per_ecm_frame;
     /*! \brief True if we are capable of retransmitting pages */
     bool retransmit_capable;
 
