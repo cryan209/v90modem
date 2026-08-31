@@ -77,6 +77,32 @@
 #include "v34_tables.h"
 #include "v34rx_internal.h"
 
+/* V34_RX_LEAN_BUILD compiles the measurement OUT rather than skipping it at
+   run time.  ME_V90_DATA_LEAN below is a runtime flag, which is what makes the
+   two arms A/B-able on the desk -- but a static cache is not something the
+   compiler can fold, so with it alone every gated block, every log and every
+   double stays linked.  Measured on xtensa-esp-elf (ESP32-S3, -Os): defining
+   this drops .text 9373 -> 7022 bytes (-25%) and removes six of the seven
+   soft-float double helpers this object pulls in -- __adddf3, __divdf3,
+   __fixdfsi, __floatsidf, __gtdf2 and __muldf3, leaving only one float->double
+   promotion.  The S3's FPU is single-precision, so each of those is a libgcc
+   software call.
+
+   None of that arithmetic is in the decode.  The slice, the two error means,
+   the DD-LMS and the carrier loop are pure float; the doubles are the varargs
+   promotions in the log calls and the report block's own accumulators
+   (static double err_sum/sig_sum, and 10.0*log10() using the double log10
+   rather than log10f).  So this is a diagnostics switch, not a numerics one.
+
+   Default builds are unaffected: undefined, everything below is exactly as it
+   was, and the runtime flag still works. */
+#if defined(V34_RX_LEAN_BUILD)
+#define v34_rx_data_lean()      1
+#define V34_DATA_LOG(...)       ((void) 0)
+#else
+#define V34_DATA_LOG(...)       span_log(__VA_ARGS__)
+#endif
+
 /* ME_V90_DATA_LEAN=1 drops the measurement this stage carries and keeps only
    what steers the receiver -- the shape an embedded build of this file needs.
    Gated here rather than deleted so the two can be run against each other on
@@ -85,6 +111,7 @@
    v90_t3_sym_err_ema / _fast gate the timing loop, the DD-LMS and the carrier
    loop, and the V34_V90_T3_DIVERGED_POWER branch stands CMA down and restores
    the last good taps.  Neither is gated. */
+#if !defined(V34_RX_LEAN_BUILD)
 static int v34_rx_data_lean(void)
 {
     static int cache = -1;
@@ -98,6 +125,7 @@ static int v34_rx_data_lean(void)
     /*endif*/
     return cache;
 }
+#endif
 /*- End of function --------------------------------------------------------*/
 
 void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
@@ -203,7 +231,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                             s->phase4_da_derot_rate = 0;
                         }
                         /*endif*/
-                        span_log(s->logging, SPAN_LOG_FLOW,
+                        V34_DATA_LOG(s->logging, SPAN_LOG_FLOW,
                                  "Rx - B1 residual carrier: %.4f deg/symbol "
                                  "(%.2f Hz at this rate)%s\n",
                                  dphi*180.0f/3.14159265f,
@@ -237,10 +265,10 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         te += s->eq_coeff[i].re*s->eq_coeff[i].re
                             + s->eq_coeff[i].im*s->eq_coeff[i].im;
                     /*endfor*/
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_DATA_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - DATA entry: equalizer tap energy %.4f\n", te);
                 }
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_DATA_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - B1 acquired: symbols=%d phase=%.2f deg gain=%.4f "
                          "conjugate=%d normalized-correlation=%.3f\n",
                          s->v90_t3_b1_symbols, phase*180.0f/3.14159265f,
@@ -424,8 +452,12 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 int who_t = s->calling_party ? 1 : 0;
 
                 if (tap_path == NULL)
+                    #if defined(V34_RX_LEAN_BUILD)
+                    tap_path = "";
+#else
                     tap_path = (getenv("V34_EQ_TAP_DUMP") && !v34_rx_data_lean())
                               ? getenv("V34_EQ_TAP_DUMP") : "";
+#endif
                 /*endif*/
                 if (tap_path[0]  &&  ++tap_count[who_t] % 4096 == 0)
                 {
@@ -496,7 +528,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     {
                         if (++s->data_lost_run == V34_DATA_LOST_SYMBOLS)
                         {
-                            span_log(s->logging, SPAN_LOG_WARNING,
+                            V34_DATA_LOG(s->logging, SPAN_LOG_WARNING,
                                      "Rx - V.34 data mode has stopped "
                                      "decoding: %.3f from the grid for %d "
                                      "symbols (2/3 is white)\n",
@@ -510,7 +542,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     }
                     /*endif*/
                 }
-                if (err_count[who] >= 4096)
+                if (!v34_rx_data_lean()  &&  err_count[who] >= 4096)
                 {
                     double dist = err_sum[who]/err_count[who];
                     double power = sig_sum[who]/err_count[who];
@@ -555,7 +587,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         if (carries > 33600)
                             carries = 33600;
                         /*endif*/
-                        span_log(s->logging, SPAN_LOG_FLOW,
+                        V34_DATA_LOG(s->logging, SPAN_LOG_FLOW,
                                  "Rx - DATA: distance to grid %.4f per symbol "
                                  "over %d symbols; receive SNR %.1f dB, this "
                                  "line will carry %d bit/s%s\n",
@@ -567,7 +599,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     }
                     else
                     {
-                        span_log(s->logging, SPAN_LOG_FLOW,
+                        V34_DATA_LOG(s->logging, SPAN_LOG_FLOW,
                                  "Rx - DATA: distance to grid %.4f per symbol over %d symbols\n",
                                  dist, err_count[who]);
                     }
@@ -603,7 +635,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                   + (g_im - t_im)*(g_im - t_im);
                 if (++s->v90_t3_b1_err_count == 128)
                 {
-                    span_log(s->logging, SPAN_LOG_WARNING,
+                    V34_DATA_LOG(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream B1-era distance to grid: "
                              "%.4f per symbol over %d symbols\n",
                              s->v90_t3_b1_err/s->v90_t3_b1_err_count,
@@ -682,7 +714,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         }
                         /*endif*/
                     }
-                    span_log(s->logging, SPAN_LOG_WARNING,
+                    V34_DATA_LOG(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream gain sweep: best=%.2f at %.3f "
                              "[%s]\n",
                              0.40f + 0.05f*best_g,
@@ -727,13 +759,14 @@ skip_gain_report:
                         if (carries > 33600)
                             carries = 33600;
                         /*endif*/
-                        /* Report only.  The accumulators behind it are NOT
+                        /* Report only, and folded away entirely under
+                           V34_RX_LEAN_BUILD.  The accumulators behind it are NOT
                            gated: v90_t3_decision_err/_pow/_count also feed the
                            DATA-bits line's sym err column and the divergence
                            branch below, and their 3200-symbol reset cadence is
                            what defines that column's window. */
                         if (!v34_rx_data_lean())
-                        span_log(s->logging, SPAN_LOG_WARNING,
+                        V34_DATA_LOG(s->logging, SPAN_LOG_WARNING,
                                  "Rx - V.90 upstream DATA: decision error "
                                  "%.4f per symbol (mean symbol power %.2f) "
                                  "over %d symbols; receive SNR %.1f dB, this "
@@ -757,7 +790,7 @@ skip_gain_report:
                         s->v90_t3_decision_pow/s->v90_t3_decision_count
                             > V34_V90_T3_DIVERGED_POWER)
                     {
-                        span_log(s->logging, SPAN_LOG_WARNING,
+                        V34_DATA_LOG(s->logging, SPAN_LOG_WARNING,
                                  "Rx - V.90 upstream receiver diverged "
                                  "(mean symbol power %.3g); resetting the "
                                  "equalizer\n",
@@ -879,8 +912,12 @@ skip_gain_report:
                 static int rms_log_enabled = -1;
 
                 if (rms_log_enabled < 0)
+                    #if defined(V34_RX_LEAN_BUILD)
+                    rms_log_enabled = 0;
+#else
                     rms_log_enabled = (getenv("V34_DATA_FRAME_RMS_LOG") != NULL)
                                     && !v34_rx_data_lean();
+#endif
                 if (rms_log_enabled)
                 {
                     float rms_sum = 0;
@@ -901,8 +938,12 @@ skip_gain_report:
 
                 if (!dump_initialized[dump_index])
                 {
+                    #if defined(V34_RX_LEAN_BUILD)
+                    const char *path = NULL;
+#else
                     const char *path = v34_rx_data_lean()
                                      ? NULL : getenv("V34_DATA_FRAME_DUMP");
+#endif
 
                     dump_initialized[dump_index] = 1;
                     if (path && *path)
