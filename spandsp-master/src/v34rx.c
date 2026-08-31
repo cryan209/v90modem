@@ -79,6 +79,36 @@
 
 #include "v34rx_internal.h"
 
+/* V34_RX_LEAN_BUILD: compile the diagnostics out, as v34rx_data.c does.  This
+   file carries 213 V34_RX_LOG() calls and 13 *_DUMP environment gates; the log
+   calls are the expensive ones, because every float argument is promoted to
+   double by C's default argument promotion and the ESP32-S3's FPU is
+   single-precision, so each promotion is a libgcc software call.
+
+   ONLY the diagnostics go.  The ~40 ME_* behaviour knobs stay exactly as they
+   are -- they select algorithms (timing detector, echo policy, eye selection,
+   CMA bounds) and several are load-bearing defaults with measurements behind
+   them.  A build that silently pinned those would be a different modem.
+
+   Undefined by default; nothing about a normal build changes. */
+#if defined(V34_RX_LEAN_BUILD)
+#define V34_RX_LOG(...)             ((void) 0)
+#define V34_DIAG_GETENV(name)       ((const char *) 0)
+/* Every stdio use in this file is a *_DUMP block.  Their getenv is already
+   NULL above, so they never run -- but the FILE* they test is a static the
+   compiler will not always prove unreachable, and two of them sit inside
+   process_primary_symbol() with (double) casts in their argument lists.
+   Removing stdio outright folds them and takes the promotions with it. */
+#define fopen(a, b)                 ((FILE *) 0)
+#define fclose(a)                   ((void) 0)
+#define fflush(a)                   ((void) 0)
+#define fwrite(a, b, c, d)          ((size_t) 0)
+#define fprintf(...)                ((void) 0)
+#else
+#define V34_RX_LOG(...)             span_log(__VA_ARGS__)
+#define V34_DIAG_GETENV(name)       getenv(name)
+#endif
+
 #ifndef V34_TRACE_DIAGNOSTICS
 #define V34_TRACE_DIAGNOSTICS v34_rx_trace_diagnostics()
 /* Opt-in diagnostics.  Each caches its getenv() so the check costs nothing
@@ -624,7 +654,7 @@ static void v34_rx_log_state_change(v34_rx_state_t *s)
     if (s->last_logged_stage != s->stage
         || s->last_logged_demodulator != s->current_demodulator)
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - stage=%s (%d) demod=%s (%d)\n",
                  v34_rx_stage_to_str(s->stage), s->stage,
                  v34_demodulator_to_str(s->current_demodulator), s->current_demodulator);
@@ -633,7 +663,7 @@ static void v34_rx_log_state_change(v34_rx_state_t *s)
     }
     if (s->last_logged_event != s->received_event)
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - event=%s (%d)\n",
                  v34_event_to_str(s->received_event), s->received_event);
         s->last_logged_event = s->received_event;
@@ -666,13 +696,13 @@ static void v34_rx_log_mp_diag_state(v34_rx_state_t *s, int state, const char *r
     /*endif*/
     if (reason && reason[0])
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - Phase 4 MP microstate=%s (%s)\n",
                  v34_mp_diag_state_to_str(state), reason);
     }
     else
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - Phase 4 MP microstate=%s\n",
                  v34_mp_diag_state_to_str(state));
     }
@@ -798,7 +828,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
            ME_V90_UPSTREAM_BIT_DUMP=<path>. */
         if (s->v90_t3_bit_dump == NULL  &&  !s->v90_t3_bit_dump_tried)
         {
-            const char *path = getenv("ME_V90_UPSTREAM_BIT_DUMP");
+            const char *path = V34_DIAG_GETENV("ME_V90_UPSTREAM_BIT_DUMP");
 
             s->v90_t3_bit_dump_tried = true;
             if (path && *path)
@@ -826,7 +856,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
             s->v90_t3_first_word = (s->v90_t3_first_word << 1) | out_bit;
             if ((++s->v90_t3_first_bits % 32) == 0)
             {
-                span_log(s->logging, SPAN_LOG_WARNING,
+                V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                          "Rx - V.90 upstream first data bits %d-%d: %08X\n",
                          s->v90_t3_first_bits - 32, s->v90_t3_first_bits - 1,
                          (unsigned) s->v90_t3_first_word);
@@ -920,7 +950,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                           : 0;
             }
 
-            span_log(s->logging, SPAN_LOG_WARNING,
+            V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 upstream DATA bits: t=%.1fs tap=%d ones=%d%%, "
                      "tap=%d ones=%d%% (over %d bits, slips %d, freq %+.6f, "
                      "sym err %.3f, V.14 %d%% at %dx, shell bad %d%%)\n",
@@ -943,11 +973,11 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                live call 1964 of 2829 windows printed "shell bad 0%" while
                their symbols were white, which reads as the strongest possible
                confirmation of a phase that was in fact wrong. */
-            span_log(s->logging, SPAN_LOG_WARNING,
+            V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 upstream shell: %d bad of %d frames%s\n",
                      s->v90_t3_shell_bad, s->v90_t3_shell_frames,
                      (shell_pct < 0) ? " (no evidence this window)" : "");
-            span_log(s->logging, SPAN_LOG_WARNING,
+            V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 upstream carrier: freq %+.5f rad/sym "
                      "(%d decision-directed, %d fourth-power updates)\n",
                      s->v90_t3_carrier.freq,
@@ -990,7 +1020,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                 s->v90_t3_sf_locked = false;
                 s->v90_t3_sf_tries = 0;
                 s->v90_t3_relocks++;
-                span_log(s->logging, SPAN_LOG_WARNING,
+                V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                          "Rx - V.90 upstream lost frame phase (%d%% ones); "
                          "sweeping again (release %d)\n",
                          ones_pct, s->v90_t3_relocks);
@@ -1037,7 +1067,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                      (v14_pct >= 5  &&  v14_ratio >= 30)))
                 {
                     s->v90_t3_sf_locked = true;
-                    span_log(s->logging, SPAN_LOG_WARNING,
+                    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream frame phase locked "
                              "(%d%% ones, V.14 %d%% at %dx the other phases, "
                              "after %d steps)\n",
@@ -1068,7 +1098,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                        traffic instead of answering from silence. */
                     if (ones_pct >= 90)
                     {
-                        span_log(s->logging, SPAN_LOG_WARNING,
+                        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                                  "Rx - V.90 upstream frame phase offset %d: "
                                  "line idle (%d%% ones), no evidence yet\n",
                                  s->v90_t3_phase_pos, ones_pct);
@@ -1079,7 +1109,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                     {
                         s->v90_t3_sf_locked = true;
                         s->v90_t3_confirming = false;
-                        span_log(s->logging, SPAN_LOG_WARNING,
+                        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                                  "Rx - V.90 upstream frame phase locked on "
                                  "shell evidence (offset %d, 0 bad of %d "
                                  "frames, %d%% ones, V.14 %d%% at %dx)\n",
@@ -1092,7 +1122,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                            episode does not pay for it again. */
                         s->v90_t3_phase_shortlist[(s->v90_t3_phase_pos >> 3) & 31]
                             &= (uint8_t) ~(1u << (s->v90_t3_phase_pos & 7));
-                        span_log(s->logging, SPAN_LOG_WARNING,
+                        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                                  "Rx - V.90 upstream frame phase offset %d "
                                  "rejected (%d bad of %d frames)\n",
                                  s->v90_t3_phase_pos, s->v90_t3_shell_bad,
@@ -1134,7 +1164,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                                 s->v90_t3_phase_pending = true;
                             }
                             /*endif*/
-                            span_log(s->logging, SPAN_LOG_WARNING,
+                            V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                                      "Rx - V.90 upstream frame phase "
                                      "confirmation found nothing; back to "
                                      "offset %d\n",
@@ -1281,7 +1311,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                     }
                     /*endif*/
                     s->v90_t3_sf_tries++;
-                    span_log(s->logging, SPAN_LOG_WARNING,
+                    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream frame phase +1 frame "
                              "(step %d of %d, from offset %d, %d%% ones, "
                              "V.14 %d%% at %dx)\n",
@@ -1349,7 +1379,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                             s->v90_t3_phase_pending
                                 = (s->v90_t3_phase_delta != 0);
                             s->v90_t3_sf_tries = 0;
-                            span_log(s->logging, SPAN_LOG_WARNING,
+                            V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                                      "Rx - V.90 upstream phase sweep done: "
                                      "%d of %d candidates survived; "
                                      "confirming from offset %d over %d "
@@ -1381,7 +1411,7 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                     if (s->v90_t3_sweep_episodes < V34_V90_T3_SWEEP_EPISODES)
                         s->v90_t3_sf_tries = 0;
                     /*endif*/
-                    span_log(s->logging, SPAN_LOG_WARNING,
+                    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream phase sweep done: best "
                              "offset %d scored %d against %d where it "
                              "started; going back %d frames (episode %d)\n",
@@ -1643,7 +1673,7 @@ static void v90_t3_blind_recover(v34_rx_state_t *s,
                            sizeof(s->v90_t3_fse));
                 }
                 /*endif*/
-                span_log(s->logging, SPAN_LOG_WARNING,
+                V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                          "Rx - V.90 upstream blind recovery started at %.3f "
                          "from the constellation (r2 %.1f, episode %d)\n",
                          s->v90_t3_sym_err_ema, s->v90_t3_cma_r2,
@@ -1671,7 +1701,7 @@ static void v90_t3_blind_recover(v34_rx_state_t *s,
         s->v90_t3_fse_good_valid = false;
         s->v90_t3_fse_good_age = 0;
         s->v90_t3_fse_bad_run = 0;
-        span_log(s->logging, SPAN_LOG_WARNING,
+        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                  "Rx - V.90 upstream blind recovery done: %.3f from the "
                  "constellation\n", s->v90_t3_sym_err_ema);
         return;
@@ -1690,7 +1720,7 @@ static void v90_t3_blind_recover(v34_rx_state_t *s,
                    sizeof(s->v90_t3_fse));
         }
         /*endif*/
-        span_log(s->logging, SPAN_LOG_WARNING,
+        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                  "Rx - V.90 upstream blind recovery gave up at %.3f from the "
                  "constellation\n", s->v90_t3_sym_err_ema);
         return;
@@ -2206,14 +2236,14 @@ static void mp_phase4_update_auto_domain(v34_rx_state_t *s, const int diff_hist[
         && s->mp_phase4_diff_collapse_streak >= 1)
     {
         s->mp_phase4_force_abs_active = 1;
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - Phase 4: auto-domain fallback enabled (diff dibits collapsed); forcing abs decode\n");
     }
     else if (s->mp_phase4_force_abs_active
              && s->mp_phase4_diff_recover_streak >= 2)
     {
         s->mp_phase4_force_abs_active = 0;
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - Phase 4: auto-domain fallback cleared (diff dibits recovered); restoring configured domain=%s\n",
                  v34_rx_phase4_trn_domain_name(s->mp_phase4_domain));
     }
@@ -2319,14 +2349,14 @@ static void mp_phase4_rotate_retry_mode(v34_rx_state_t *s, const char *reason)
             if (s->mp_phase4_nolock_count >= 3)
             {
                 s->mp_phase4_reject_streak = 3;
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 4: %s; TRN hint hyp=%d failed %d times, broadening MP search\n",
                          reason, s->phase4_trn_lock_hyp, s->mp_phase4_nolock_count);
             }
             else
             {
                 v34_rx_mp_reset_hypothesis_search(s);
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 4: %s; keeping TRN-locked MP settings (hyp=%d, dom=%s, tap=%d, ord=%s)\n",
                          reason, s->phase4_trn_lock_hyp,
                          v34_rx_phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
@@ -2342,14 +2372,14 @@ static void mp_phase4_rotate_retry_mode(v34_rx_state_t *s, const char *reason)
     v34_rx_mp_reset_hypothesis_search(s);
     if (s->mp_phase4_retry_mode == 0)
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - Phase 4: %s; restoring MP descrambler defaults (dom=%s, tap=%d, ord=%s)\n",
                  reason, v34_rx_phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
                  v34_rx_phase4_trn_order_name(s->mp_phase4_bit_order));
     }
     else
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - Phase 4: %s; switching MP descrambler retry mode=%d (dom=%s, tap=%d, ord=%s)\n",
                  reason, s->mp_phase4_retry_mode,
                  v34_rx_phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
@@ -2363,7 +2393,7 @@ static void mp_unlock_after_reject(v34_rx_state_t *s, bool count_tap_reject)
 {
     const int tap_switch_rejects = 3;
 
-    span_log(s->logging, SPAN_LOG_FLOW,
+    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
              "Rx - Phase 4: unlock MP hypothesis=%d after rejected frame\n",
              s->mp_hypothesis);
     s->mp_early_rejects = 0;
@@ -2396,7 +2426,7 @@ static void mp_unlock_after_reject(v34_rx_state_t *s, bool count_tap_reject)
         {
             s->mp_phase4_retry_mode = (s->mp_phase4_retry_mode + 1) & 0x7;
             mp_phase4_apply_retry_mode(s, s->mp_phase4_retry_mode);
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 4: pinned TRN lock with %d rejects, switching MP retry mode=%d (dom=%s, tap=%d, ord=%s)\n",
                      s->mp_phase4_reject_streak, s->mp_phase4_retry_mode,
                      v34_rx_phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
@@ -2406,7 +2436,7 @@ static void mp_unlock_after_reject(v34_rx_state_t *s, bool count_tap_reject)
         /*endif*/
         s->mp_frame_pos = 0;
         s->mp_frame_target = 0;
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - Phase 4: keeping TRN-locked MP hypothesis/settings after reject (hyp=%d, streak=%d, dom=%s, tap=%d, ord=%s)\n",
                  s->phase4_trn_lock_hyp, s->mp_phase4_reject_streak,
                  v34_rx_phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
@@ -2419,7 +2449,7 @@ static void mp_unlock_after_reject(v34_rx_state_t *s, bool count_tap_reject)
     {
         s->mp_phase4_retry_mode = (s->mp_phase4_retry_mode + 1) & 0x7;
         mp_phase4_apply_retry_mode(s, s->mp_phase4_retry_mode);
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - Phase 4: after %d rejects, MP retry mode=%d (dom=%s, tap=%d, ord=%s)\n",
                  s->mp_phase4_reject_streak, s->mp_phase4_retry_mode,
                  v34_rx_phase4_trn_domain_name(s->mp_phase4_domain), s->scrambler_tap,
@@ -2943,7 +2973,7 @@ static void log_mp_frame_diag(v34_rx_state_t *s, const uint8_t bits[], int type,
 {
     if (type == 0)
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - MP0 diag: sync[0..16]=all1 start17=%d type18=%d reserved19=%d "
                  "start34=%d start51=%d start68=%d crc_rx=0x%04X crc_res=0x%04X "
                  "fill85..87=%d%d%d crc_ok=%d fill_ok=%d\n",
@@ -2955,7 +2985,7 @@ static void log_mp_frame_diag(v34_rx_state_t *s, const uint8_t bits[], int type,
     }
     else
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - MP1 diag: sync[0..16]=all1 start17=%d type18=%d reserved19=%d "
                  "starts34/51/68/85/102/119/136/153/170=%d%d%d%d%d%d%d%d%d "
                  "crc_rx=0x%04X crc_res=0x%04X fill187=%d crc_ok=%d fill_ok=%d\n",
@@ -2988,7 +3018,7 @@ static void log_mp_lock_seed(v34_rx_state_t *s,
 
     bits32_to_str(preamble_stream, tail);
     frame_bits_to_str(s->mp_frame_bits, 0, 24, seed_bits);
-    span_log(s->logging, SPAN_LOG_FLOW,
+    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
              "Rx - Phase 4: MP lock seed hyp=%d type=%d score=%d/18 bit%d pending=%s%d "
              "frame_pos=%d target=%d preamble=0b%s seeded[0..23]=%s\n",
              hyp, type_bit, score, bit_pos,
@@ -3128,7 +3158,7 @@ int v34_phase4_trn_measured_rate_n(v34_state_t *st, float *snr_db)
         return 0;
     /*endif*/
     snr = 10.0*log10(sig_sum/noise_sum);
-    span_log(&st->logging, SPAN_LOG_FLOW,
+    V34_RX_LOG(&st->logging, SPAN_LOG_FLOW,
              "Rx - Phase 4 TRN SNR: %.1f dB over %d symbols (%d blocks), after_j=%d\n",
              snr, blocks*PHASE4_TRN_SNR_BLOCK, blocks, s->phase4_trn_after_j);
     if (snr_db)
@@ -3238,7 +3268,7 @@ static bool mp_apply_parameters(v34_state_t *s, const mp_t *remote)
     s->bit_rate = rx_rate_n*2400;
     v34_set_working_parameters(&s->rx.parms, s->rx.baud_rate, s->rx.bit_rate,
                                s->tx.mp.expanded_shaping);
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_RX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Rx - Phase 4 negotiated: a2c=%d bps c2a=%d bps; "
              "RX rate=%d bps trellis=%d nonlinear=%d expanded=%d\n",
              s->tx.negotiated_rate_a_to_c*2400,
@@ -3256,7 +3286,7 @@ static bool mp_semantic_ok_phase4(v34_rx_state_t *s, const mp_t *mp, int type, c
 
     if (mp->type != type)
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - Phase 4: MP%d semantic reject (type mismatch frame=%d parsed=%d)\n",
                  type, type, mp->type);
         return false;
@@ -3264,7 +3294,7 @@ static bool mp_semantic_ok_phase4(v34_rx_state_t *s, const mp_t *mp, int type, c
     /*endif*/
     if (bits[19] != 0)
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - Phase 4: MP%d reserved19=%d (expected 0), tolerating\n",
                  type, bits[19]);
     }
@@ -3272,7 +3302,7 @@ static bool mp_semantic_ok_phase4(v34_rx_state_t *s, const mp_t *mp, int type, c
     if (mp->bit_rate_a_to_c < 1  ||  mp->bit_rate_a_to_c > 14
         ||  mp->bit_rate_c_to_a < 1  ||  mp->bit_rate_c_to_a > 14)
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - Phase 4: MP%d semantic reject (rate fields out of range a_to_c=%d c_to_a=%d)\n",
                  type, mp->bit_rate_a_to_c, mp->bit_rate_c_to_a);
         return false;
@@ -3280,7 +3310,7 @@ static bool mp_semantic_ok_phase4(v34_rx_state_t *s, const mp_t *mp, int type, c
     /*endif*/
     if (mp->trellis_size < V34_TRELLIS_16  ||  mp->trellis_size > V34_TRELLIS_64)
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - Phase 4: MP%d semantic reject (invalid trellis code=%d)\n",
                  type, mp->trellis_size);
         return false;
@@ -3288,7 +3318,7 @@ static bool mp_semantic_ok_phase4(v34_rx_state_t *s, const mp_t *mp, int type, c
     /*endif*/
     if ((mp->signalling_rate_mask & 0x3FFF) == 0)
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - Phase 4: MP%d semantic reject (empty signalling_rate_mask=0x%04X)\n",
                  type, mp->signalling_rate_mask & 0x7FFF);
         return false;
@@ -3296,7 +3326,7 @@ static bool mp_semantic_ok_phase4(v34_rx_state_t *s, const mp_t *mp, int type, c
     /*endif*/
     if (mp->signalling_rate_mask & 0x4000)
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - Phase 4: MP%d reserved rate-mask bit set (0x%04X), tolerating for analog interop\n",
                  type, mp->signalling_rate_mask & 0x7FFF);
     }
@@ -3304,7 +3334,7 @@ static bool mp_semantic_ok_phase4(v34_rx_state_t *s, const mp_t *mp, int type, c
     bit_idx = mp->bit_rate_a_to_c - 1;
     if (!(mp->signalling_rate_mask & (1 << bit_idx)))
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - Phase 4: MP%d a_to_c rate %d missing from mask 0x%04X, tolerating for analog interop\n",
                  type, mp->bit_rate_a_to_c, mp->signalling_rate_mask & 0x7FFF);
     }
@@ -3312,7 +3342,7 @@ static bool mp_semantic_ok_phase4(v34_rx_state_t *s, const mp_t *mp, int type, c
     bit_idx = mp->bit_rate_c_to_a - 1;
     if (!(mp->signalling_rate_mask & (1 << bit_idx)))
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - Phase 4: MP%d c_to_a rate %d missing from mask 0x%04X, tolerating for analog interop\n",
                  type, mp->bit_rate_c_to_a, mp->signalling_rate_mask & 0x7FFF);
     }
@@ -3333,7 +3363,7 @@ void v34_rx_pack_output_bitstream(v34_rx_state_t *s)
     int bb;
     int kk;
 
-    span_log(s->logging,
+    V34_RX_LOG(s->logging,
              SPAN_LOG_FLOW,
              "Rx - Packed %p %8X - %X %X %X %X - %2X %2X %2X %2X %2X %2X %2X %2X\n",
              s,
@@ -3392,7 +3422,7 @@ void v34_rx_pack_output_bitstream(v34_rx_state_t *s)
            grouped stream reads 0%. */
         if (!s->v90_mode  &&  (s->v90_t3_shell_frames % 512) == 0)
         {
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - DATA: shell index over k=%d bits in %d of %d frames (%d%%)\n",
                      kk, s->v90_t3_shell_bad, s->v90_t3_shell_frames,
                      100*s->v90_t3_shell_bad/s->v90_t3_shell_frames);
@@ -3873,7 +3903,7 @@ static void viterbi_update_path_metrics(viterbi_t *s,
     uint32_t metric;
     int prev_ptr;
 
-    if (getenv("SPANDSP_V34_DIAG_VITERBI"))
+    if (V34_DIAG_GETENV("SPANDSP_V34_DIAG_VITERBI"))
     {
         static int diag_state = 0;
         static int diag_count = 0;
@@ -4210,7 +4240,7 @@ static int process_rx_info0(v34_rx_state_t *s, uint8_t buf[])
         /* 41       Reserved */
         s->info0d_reserved_41 = bitstream_get(&bs, &t, 1);
         s->info0d_extensions_valid = true;
-        span_log(s->logging, SPAN_LOG_FLOW, "Rx INFO0d (V.90): PCM law=%s, ack=%d\n",
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx INFO0d (V.90): PCM law=%s, ack=%d\n",
                  s->far_capabilities.tx_clock_source ? "A-law" : "u-law",
                  s->info0_acknowledgement);
     }
@@ -4222,7 +4252,7 @@ static int process_rx_info0(v34_rx_state_t *s, uint8_t buf[])
         s->info0_acknowledgement = bitstream_get(&bs, &t, 1);
         if (s->v90_mode)
         {
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx INFO0a V.92 flags: capability(bit26)=%d, short-phase2(bit27)=%d\n",
                      (raw_26_27 & 0x01U) != 0,
                      (raw_26_27 & 0x02U) != 0);
@@ -4372,20 +4402,20 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
             /*endif*/
             s->v90_v34_fallback = true;
 
-            span_log(s->logging, SPAN_LOG_FLOW, "Rx INFO1a (V.90 Table 11 - V.34 selected):\n");
-            span_log(s->logging, SPAN_LOG_FLOW, "  Power reduction = %d dB + %d dB additional\n",
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx INFO1a (V.90 Table 11 - V.34 selected):\n");
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "  Power reduction = %d dB + %d dB additional\n",
                      info1a->power_reduction, info1a->additional_power_reduction);
-            span_log(s->logging, SPAN_LOG_FLOW, "  Length of MD = %dms\n", info1a->md*35);
-            span_log(s->logging, SPAN_LOG_FLOW, "  High carrier (digital->analogue) = %d\n", info1a->use_high_carrier);
-            span_log(s->logging, SPAN_LOG_FLOW, "  Pre-emphasis filter = %d\n", info1a->preemphasis_filter);
-            span_log(s->logging, SPAN_LOG_FLOW, "  Projected max rate = %d (%d bps)\n",
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "  Length of MD = %dms\n", info1a->md*35);
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "  High carrier (digital->analogue) = %d\n", info1a->use_high_carrier);
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "  Pre-emphasis filter = %d\n", info1a->preemphasis_filter);
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "  Projected max rate = %d (%d bps)\n",
                      info1a->max_data_rate, info1a->max_data_rate*2400);
-            span_log(s->logging, SPAN_LOG_FLOW, "  Symbol rate analogue->digital = %d\n", info1a->baud_rate_a_to_c);
-            span_log(s->logging, SPAN_LOG_FLOW, "  Symbol rate digital->analogue = %d\n", info1a->baud_rate_c_to_a);
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "  Symbol rate analogue->digital = %d\n", info1a->baud_rate_a_to_c);
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "  Symbol rate digital->analogue = %d\n", info1a->baud_rate_c_to_a);
             if (info1a->freq_offset == -512)
-                span_log(s->logging, SPAN_LOG_FLOW, "  Frequency offset not available\n");
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "  Frequency offset not available\n");
             else
-                span_log(s->logging, SPAN_LOG_FLOW, "  Frequency offset = %fHz\n", info1a->freq_offset*0.02f);
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "  Frequency offset = %fHz\n", info1a->freq_offset*0.02f);
 
             /* The analogue modem transmits Phase 3 at the a->c symbol rate.
                V.34 §10.1.2.3.4/Table 12: carrier and pre-emphasis are those
@@ -4404,15 +4434,15 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
         }
         else
         {
-            span_log(s->logging, SPAN_LOG_FLOW, "Rx INFO1a (V.90 Table 10):\n");
-            span_log(s->logging, SPAN_LOG_FLOW, "  Length of MD = %dms\n", info1a->md*35);
-            span_log(s->logging, SPAN_LOG_FLOW, "  U_INFO = %d\n", info1a->max_data_rate);
-            span_log(s->logging, SPAN_LOG_FLOW, "  Upstream symbol rate code = %d\n", info1a->baud_rate_a_to_c);
-            span_log(s->logging, SPAN_LOG_FLOW, "  Downstream rate code = %d (8000 PCM)\n", info1a->baud_rate_c_to_a);
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx INFO1a (V.90 Table 10):\n");
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "  Length of MD = %dms\n", info1a->md*35);
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "  U_INFO = %d\n", info1a->max_data_rate);
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "  Upstream symbol rate code = %d\n", info1a->baud_rate_a_to_c);
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "  Downstream rate code = %d (8000 PCM)\n", info1a->baud_rate_c_to_a);
             if (info1a->freq_offset == -512)
-                span_log(s->logging, SPAN_LOG_FLOW, "  Frequency offset not available\n");
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "  Frequency offset not available\n");
             else
-                span_log(s->logging, SPAN_LOG_FLOW, "  Frequency offset = %fHz\n", info1a->freq_offset*0.02f);
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "  Frequency offset = %fHz\n", info1a->freq_offset*0.02f);
 
             /* V.90 §8.2.3.2 Tables 9/10: INFO1a selects the upstream row;
                bits 32:33 are reserved and do not repeat its carrier choice.
@@ -4537,7 +4567,7 @@ static void v90_enter_phase3_from_info1a(v34_rx_state_t *s)
            scramble our own TX with GPC (tap 17).  The earlier tap-17 RX
            choice here dated from before the role mapping was pinned down
            (2026-07-19, when the whole fallback Phase 3 was desynced). */
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - V.90: INFO1a declined PCM (downstream code=%d, not 6); "
                  "V.34 fallback, we take the call-modem role (RX descrambler GPA/tap 4, TX GPC/tap 17)\n",
                  s->info1a.baud_rate_c_to_a);
@@ -4873,7 +4903,7 @@ static void info_log_candidate_diag(v34_rx_state_t *s, const uint8_t in[25], int
     /*endif*/
     info_bits_to_str(full_bits, sizeof(full_bits), bits, nbits);
 
-    span_log(s->logging, SPAN_LOG_FLOW,
+    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
              "Rx - info candidate diag: stage=%s bits=%d crc=0x%04x sig=%d pwr=%" PRId32 " peak=%" PRId32 " bit_count=%d duration=%d\n",
              v34_rx_stage_to_str(s->stage),
              nbits,
@@ -4885,19 +4915,19 @@ static void info_log_candidate_diag(v34_rx_state_t *s, const uint8_t in[25], int
              s->duration);
     if (nbits <= 64)
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - info candidate bits=%s\n",
                  full_bits);
     }
     else
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - info candidate prefix=%s suffix=%s\n",
                  prefix,
                  suffix);
     }
     /*endif*/
-    span_log(s->logging, SPAN_LOG_FLOW,
+    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
              "Rx - info candidate shift CRCs: -2=0x%04x -1=0x%04x 0=0x%04x +1=0x%04x +2=0x%04x\n",
              shift_crc[0], shift_crc[1], shift_crc[2], shift_crc[3], shift_crc[4]);
 }
@@ -5147,7 +5177,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
     /* Put info0, info1, tone A or tone B bits */
     s->bitstream = (s->bitstream << 1) | bit;
     if (++put_info_bit_count % 600 == 0)
-        span_log(s->logging, SPAN_LOG_FLOW, "Rx - info_rx bits=%d bitstream=0x%03x stage=%d\n",
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - info_rx bits=%d bitstream=0x%03x stage=%d\n",
                  put_info_bit_count, (int)(s->bitstream & 0xFFF), s->stage);
     /* Log only sync code matches and CRC results (verbose bit logging removed) */
     switch (s->stage)
@@ -5171,7 +5201,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
             s->v90_infomarksa_run = 0;
             if (++s->persistence2 == 20)
             {
-                span_log(s->logging, SPAN_LOG_FLOW, "Rx - Tone A detected\n");
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - Tone A detected\n");
                 /* Only set TONE_SEEN if we haven't already seen a reversal —
                    otherwise we'd overwrite REVERSAL_1 and the next reversal
                    would be misidentified as the first instead of the second. */
@@ -5202,7 +5232,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
         /*endif*/
         if (s->v90_infomarksa_run == 20)
         {
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - INFOMARKSa detected (%d consecutive ones)\n",
                      s->v90_infomarksa_run);
             if (s->received_event == V34_EVENT_NONE
@@ -5238,16 +5268,16 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
             switch (s->phase2_reversal_count)
             {
             case 1:
-                span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 1 in tone A\n");
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - reversal 1 in tone A\n");
                 s->received_event = V34_EVENT_REVERSAL_1;
                 break;
             case 2:
-                span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 2 in tone A\n");
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - reversal 2 in tone A\n");
                 s->received_event = V34_EVENT_REVERSAL_2;
                 l1_l2_analysis_init(s);
                 break;
             default:
-                span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 3 in tone A\n");
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - reversal 3 in tone A\n");
                 s->received_event = V34_EVENT_REVERSAL_3;
                 if (s->v90_mode && s->calling_party)
                 {
@@ -5255,7 +5285,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                        from the digital answerer. */
                     s->target_bits = 109 - (4 + 8 + 4);
                     s->stage = V34_RX_STAGE_INFO1C;
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - V.90 caller: expecting INFO1d (109 bits) from digital answerer\n");
                 }
                 else
@@ -5281,7 +5311,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                silence from its Tone B reversal until it has received L1 and
                L2, so this falling edge says it is ready for the probe -- and
                is worth as much to the answer modem as the onset. */
-            span_log(s->logging, SPAN_LOG_FLOW, "Rx - Tone B ended\n");
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - Tone B ended\n");
             s->tone_b_present = false;
             s->tone_b_ended = true;
         }
@@ -5310,7 +5340,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                     &&
                     !s->tone_b_present)
                 {
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - Tone B detected (power=%d ref=%d)\n",
                              s->last_info_rx_power,
                              s->info_rx_carrier_ref);
@@ -5333,20 +5363,20 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
             switch (s->received_event)
             {
             case V34_EVENT_REVERSAL_2:
-                span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 3 in tone B\n");
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - reversal 3 in tone B\n");
                 s->tone_ab_hop_time = s->sample_time + time_offset;
                 s->received_event = V34_EVENT_REVERSAL_3;
                 break;
             case V34_EVENT_REVERSAL_1:
                 /* TODO: Need to avoid getting here falsely, just because the tone has resumed */
-                span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 2 in tone B\n");
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - reversal 2 in tone B\n");
                 s->tone_ab_hop_time = s->sample_time + time_offset;
                 s->received_event = V34_EVENT_REVERSAL_2;
                 if (s->v90_mode)
                 {
                     /* V.90 §8.2.3.2 Table 10: analog modem sends INFO1a (70 bits),
                        not INFO1c (109 bits) as in standard V.34 */
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - V.90 mode: expecting INFO1a (70 bits) from analog modem\n");
                     s->target_bits = 70 - (4 + 8 + 4);
                     s->stage = V34_RX_STAGE_INFO1A;
@@ -5359,7 +5389,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 l1_l2_analysis_init(s);
                 break;
             default:
-                span_log(s->logging, SPAN_LOG_FLOW, "Rx - reversal 1 in tone B\n");
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - reversal 1 in tone B\n");
                 s->tone_ab_hop_time = s->sample_time + time_offset;
                 s->received_event = V34_EVENT_REVERSAL_1;
                 break;
@@ -5426,7 +5456,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
         /* Look for info message sync code */
         if ((s->bitstream & 0x3FF) == 0x372)
         {
-            span_log(s->logging, SPAN_LOG_FLOW, "Rx - info sync code detected\n");
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - info sync code detected\n");
             s->crc = 0xFFFF;
             s->bit_count = 1;
         }
@@ -5457,7 +5487,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
             if (tail != 0)
                 s->info_buf[(s->bit_count >> 3)] = bit_reverse8(s->bitstream & 0xFF);
             /*endif*/
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - repeated INFO0c during INFO1c wait (11.2.2.1.1 recovery)\n");
             process_rx_info0(s, s->info_buf);
             s->received_event = V34_EVENT_INFO0_OK;
@@ -5476,7 +5506,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 if (tail != 0)
                     s->info_buf[(s->target_bits >> 3)] = bit_reverse8(s->bitstream & 0xFF);
             }
-            span_log(s->logging, SPAN_LOG_FLOW, "Rx - info CRC result 0x%x (target_bits=%d)\n", s->crc, s->target_bits);
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - info CRC result 0x%x (target_bits=%d)\n", s->crc, s->target_bits);
             {
                 int nbytes = (s->target_bits + 7) / 8;
                 if (nbytes > 25) nbytes = 25;
@@ -5484,7 +5514,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 int hoff = 0;
                 for (int hh = 0; hh < nbytes; hh++)
                     hoff += snprintf(hexbuf + hoff, sizeof(hexbuf) - hoff, " %02x", s->info_buf[hh]);
-                span_log(s->logging, SPAN_LOG_FLOW, "Rx - info raw bytes:%s\n", hexbuf);
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - info raw bytes:%s\n", hexbuf);
             }
             if (s->crc == 0)
             {
@@ -5510,7 +5540,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                         process_rx_info1a(s, &s->info1a, s->info_buf);
                         if (s->v90_mode)
                         {
-                            span_log(s->logging, SPAN_LOG_FLOW,
+                            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                      "Rx - V.90: INFO1a received, switching to Phase 3 primary channel RX\n");
                             v90_enter_phase3_from_info1a(s);
                         }
@@ -5580,7 +5610,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                         /* V.90 §9.2.1.1.8: INFO1a received — now proceed to Phase 3.
                            Switch RX from CC demodulator to primary channel for
                            upstream V.34 reception. */
-                        span_log(s->logging, SPAN_LOG_FLOW,
+                        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                  "Rx - V.90: INFO1a received, switching to Phase 3 primary channel RX\n");
                         v90_enter_phase3_from_info1a(s);
                         s->received_event = V34_EVENT_NONE;
@@ -5622,11 +5652,11 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 if (v90_info1a_search
                     && try_info_boundary_recovery(recovered_info, s->info_buf, s->target_bits, &recovery_shift, NULL))
                 {
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - INFO1a boundary recovery succeeded with %d-bit shift\n",
                              recovery_shift);
                     process_rx_info1a(s, &s->info1a, recovered_info);
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - V.90: recovered INFO1a, switching to Phase 3 primary channel RX\n");
                     v90_enter_phase3_from_info1a(s);
                     s->received_event = V34_EVENT_NONE;
@@ -5637,12 +5667,12 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 if (v90_info1a_search
                     && try_info_local_slip_recovery(recovered_info, s->info_buf, s->target_bits, &recovery_pivot, &recovery_shift))
                 {
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - INFO1a local-slip recovery succeeded at bit %d with suffix shift %d\n",
                              recovery_pivot,
                              recovery_shift);
                     process_rx_info1a(s, &s->info1a, recovered_info);
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - V.90: recovered INFO1a via local-slip recovery, switching to Phase 3 primary channel RX\n");
                     v90_enter_phase3_from_info1a(s);
                     s->received_event = V34_EVENT_NONE;
@@ -5653,7 +5683,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 if (v90_info1a_search
                     && info_has_valid_prefix_crc(s->info_buf, s->target_bits, 33, &prefix_crc))
                 {
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - INFO1a candidate contains a valid 33-bit INFO0a prefix (crc=0x%04x); treating it as repeated INFO0a, not INFO1a\n",
                              prefix_crc);
                     process_rx_info0(s, s->info_buf);
@@ -5692,7 +5722,7 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                         }
                         if (test_crc == 0)
                         {
-                            span_log(s->logging, SPAN_LOG_FLOW,
+                            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                      "Rx - INFO0 single-bit recovery: flipped bit %d, CRC now 0\n",
                                      flip);
                             process_rx_info0(s, s->info_buf);
@@ -5829,7 +5859,7 @@ static int info_rx(v34_rx_state_t *s, const int16_t amp[], int len)
             && (s->stage == V34_RX_STAGE_INFO0 || s->stage == V34_RX_STAGE_TONE_A || s->stage == V34_RX_STAGE_TONE_B)
             && (s->duration == 400 || s->duration == 800 || s->duration == 1600 || s->duration == 3200))
         {
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - V.90 Phase 2 waiting for carrier: stage=%d power=%" PRId32 " on=%" PRId32 " off=%" PRId32 "\n",
                      s->stage, power, s->carrier_on_power, s->carrier_off_power);
         }
@@ -5837,7 +5867,7 @@ static int info_rx(v34_rx_state_t *s, const int16_t amp[], int len)
         {
             if (power < s->carrier_off_power)
             {
-span_log(s->logging, SPAN_LOG_FLOW, "Signal down\n");
+V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Signal down\n");
                 s->signal_present = false;
                 s->persistence2 = 0;
             }
@@ -5847,7 +5877,7 @@ span_log(s->logging, SPAN_LOG_FLOW, "Signal down\n");
         {
             if (power > s->carrier_on_power)
             {
-span_log(s->logging, SPAN_LOG_FLOW, "Signal up\n");
+V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Signal up\n");
                 s->signal_present = true;
                 s->persistence2 = 0;
                 /* Reset phase tracking so stale last_angles don't
@@ -5900,10 +5930,10 @@ span_log(s->logging, SPAN_LOG_FLOW, "Signal up\n");
            a reversal (bitstream stuck at 0x000) against a real remote
            modem despite signal_present staying true and the raw carrier
            measuring correct in an offline capture. */
-        if (getenv("V34_DUMP_INFO_RX")
+        if (V34_DIAG_GETENV("V34_DUMP_INFO_RX")
             && s->stage == V34_RX_STAGE_INFO0 && (s->duration % 400) == 0)
         {
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - info_rx sample: t=%d ii=%.4f qq=%.4f agc=%.5f zz=(%.4f,%.4f) angdeg=%.2f pdeltadeg=%.2f blip=%d\n",
                      s->duration, (double) ii, (double) qq, (double) s->agc_scaling,
                      (double) zz.re, (double) zz.im,
@@ -5944,7 +5974,7 @@ span_log(s->logging, SPAN_LOG_FLOW, "Signal up\n");
     if (V34_DEBUG_INFO_RX_DIAG
         && s->duration % 8000 < (unsigned)len)
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx info_rx diag: ref=%d gate=%d carrier=%d "
                  "stage=%d sig=%d pwr=%d bits=%d\n",
                  s->info_rx_carrier_ref,
@@ -6290,9 +6320,9 @@ static complexf_t equalizer_get(v34_rx_state_t *s)
        center tap if the equalizer has blown up. */
     if (!isfinite(z.re) || !isfinite(z.im))
     {
-        if (getenv("ME_V34_DUMP_MP_DIBITS"))
+        if (V34_DIAG_GETENV("ME_V34_DUMP_MP_DIBITS"))
         {
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - EQUALIZER DIVERGED (NaN/Inf) at duration=%d stage=%d; resetting to identity coeffs\n",
                      s->duration, s->stage);
         }
@@ -6401,7 +6431,7 @@ void v34_rx_tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complex
      * baud updates during V.90 CP; synchronous stderr writes can consume the
      * entire media-tick margin during a long loopback.  Opt in only when the
      * equalizer trace is explicitly requested. */
-    if (getenv("ME_V34_EQ_DIAG") && (s->duration & 0xFF) == 0)
+    if (V34_DIAG_GETENV("ME_V34_EQ_DIAG") && (s->duration & 0xFF) == 0)
     {
         float emag = sqrtf(ez.re*ez.re + ez.im*ez.im);
         float zmag = sqrtf(z->re*z->re + z->im*z->im);
@@ -6535,7 +6565,7 @@ static int phase4_cma_converged(v34_rx_state_t *s, const complexf_t *z)
         ||  s->phase4_cma_bauds >= phase4_cma_max_bauds())
     {
         s->phase4_cma_settled = 1;
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - Phase 4: CMA level converged after %d bauds (|z|=%.3f); "
                  "holding the Phase 3 tap solution\n",
                  s->phase4_cma_bauds, (double) s->phase4_cma_mag);
@@ -6620,7 +6650,7 @@ static int v90_reneg_cma_converged(v34_rx_state_t *s, const complexf_t *z)
         if (v90_reneg_cp_adapt_through_burst())
         {
             s->reneg_cma_bauds = 0;
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - V.90 9.6: CP-stage CMA level reached (|z|=%.3f); "
                      "keeping the taps adapting through the CP burst\n",
                      (double) s->reneg_cma_mag);
@@ -6628,7 +6658,7 @@ static int v90_reneg_cma_converged(v34_rx_state_t *s, const complexf_t *z)
         }
         /*endif*/
         s->reneg_cp_train = 0;
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - V.90 9.6: CP-stage CMA converged on SCR after %d bauds "
                  "(|z|=%.3f); freezing the taps for CP\n",
                  s->reneg_cma_bauds, (double) s->reneg_cma_mag);
@@ -6638,7 +6668,7 @@ static int v90_reneg_cma_converged(v34_rx_state_t *s, const complexf_t *z)
     if (s->reneg_cma_bauds >= phase4_cma_max_bauds())
     {
         s->reneg_cp_train = 0;
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - V.90 9.6: CP-stage CMA gave up after %d bauds "
                  "(|z|=%.3f)\n",
                  s->reneg_cma_bauds, (double) s->reneg_cma_mag);
@@ -6809,7 +6839,7 @@ static void track_carrier(v34_rx_state_t *s, const complexf_t *z, const complexf
 
     s->v34_carrier_phase_rate += (int32_t) (s->carrier_track_i*error);
     s->carrier_phase += (int32_t) (s->carrier_track_p*error);
-    //span_log(s->logging, SPAN_LOG_FLOW, "Rx - Im = %15.5f   f = %15.5f\n", error, dds_frequencyf(s->v34_carrier_phase_rate));
+    //V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - Im = %15.5f   f = %15.5f\n", error, dds_frequencyf(s->v34_carrier_phase_rate));
     //printf("XXX Im = %15.5f   f = %15.5f   %f %f %f %f (%f %f)\n", error, dds_frequencyf(s->v34_carrier_phase_rate), target->re, target->im, z->re, z->im, s->carrier_track_i, s->carrier_track_p);
 }
 /*- End of function --------------------------------------------------------*/
@@ -6837,7 +6867,7 @@ static __inline__ void put_bit(v34_rx_state_t *s, int bit)
            buggy modems mean you cannot rely on this. Therefore we don't bother
            testing for ones, but just rely on a constellation mismatch measurement. */
         out_bit = v34_rx_descramble(s, bit);
-        //span_log(s->logging, SPAN_LOG_FLOW, "Rx - A 1 is really %d\n", out_bit);
+        //V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - A 1 is really %d\n", out_bit);
     }
     /*endif*/
 }
@@ -7035,7 +7065,7 @@ static int perform_l1_l2_analysis(v34_rx_state_t *s)
     /*endfor*/
     for (i = 0;  i < 25;  i++)
     {
-        span_log(s->logging, SPAN_LOG_DEBUG, "DFT %4d, %12.5f, %12.5f, %12.5f\n",
+        V34_RX_LOG(s->logging, SPAN_LOG_DEBUG, "DFT %4d, %12.5f, %12.5f, %12.5f\n",
                  i,
                  (i + 1)*150.0f,
                  s->l1_l2_gains[i],
@@ -7049,7 +7079,7 @@ static int perform_l1_l2_analysis(v34_rx_state_t *s)
 
 static void l1_l2_analysis_init(v34_rx_state_t *s)
 {
-    span_log(s->logging, SPAN_LOG_FLOW, "Rx - Expect L1/L2\n");
+    V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - Expect L1/L2\n");
     s->dft_ptr = 0;
     s->base_phase = 42.0;
     s->l1_l2_duration = 0;
@@ -7084,10 +7114,10 @@ static int l1_l2_analysis(v34_rx_state_t *s, const int16_t amp[], int len)
             /* We now have 160 samples, so process the 3 cycles we should have in the buffer. */
             perform_l1_l2_analysis(s);
             s->dft_ptr = 0;
-            span_log(s->logging, SPAN_LOG_DEBUG, "L1/L2 analysis x %d\n", s->l1_l2_duration);
+            V34_RX_LOG(s->logging, SPAN_LOG_DEBUG, "L1/L2 analysis x %d\n", s->l1_l2_duration);
             if (++s->l1_l2_duration > 20)
             {
-                span_log(s->logging, SPAN_LOG_FLOW, "L1/L2 analysis done\n");
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "L1/L2 analysis done\n");
                 s->phase2_l2_count++;
                 s->received_event = V34_EVENT_L2_SEEN;
                 s->current_demodulator = V34_MODULATION_TONES;
@@ -7179,7 +7209,7 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
         {
             /* E is 20 consecutive ones, which signals the end of the MPh messages,
                and the start of actual user data */
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - CC: E signal detected, MP exchange complete\n");
             s->mp_seen = 2;
             if (s->duplex)
@@ -7234,7 +7264,7 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
                             /*endif*/
                             t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
                             if (!mp_apply_parameters(t, &mp))
-                                span_log(&t->logging, SPAN_LOG_FLOW,
+                                V34_RX_LOG(&t->logging, SPAN_LOG_FLOW,
                                          "Rx - CC MP directional encoder/rate negotiation failed\n");
                         }
                         else
@@ -7248,7 +7278,7 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
                             }
                             /*endif*/
                             if (set_trellis_mode(t, mph.trellis_size))
-                                span_log(&t->logging, SPAN_LOG_FLOW, "Rx - Unexpected trellis size code %d\n", mph.trellis_size);
+                                V34_RX_LOG(&t->logging, SPAN_LOG_FLOW, "Rx - Unexpected trellis size code %d\n", mph.trellis_size);
                         }
                         /*endif*/
                         s->mp_seen = 1;
@@ -7436,7 +7466,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
 
         if (!ja_sym_tried)
         {
-            const char *path = getenv("ME_V90_JA_SYM_DUMP");
+            const char *path = V34_DIAG_GETENV("ME_V90_JA_SYM_DUMP");
 
             ja_sym_tried = 1;
             if (path  &&  path[0] != '\0')
@@ -7590,7 +7620,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
 
             if (s->duration <= 4 || (s->duration % PHASE3_PP_ACQUIRE_LOG_INTERVAL) == 0)
             {
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 3 PP acquire baud %d: mag=%.3f data_bits=%d phase=%d score=%d hold=%d/%d\n",
                          s->duration, mag, data_bits,
                          s->phase3_pp_phase, s->phase3_pp_phase_score,
@@ -7662,7 +7692,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    PP symbols at the current magnitude.  Freezing prevents AGC from
                    fighting the LMS equalizer adaptation. */
                 s->agc_scaling_save = s->agc_scaling;
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 3: PP start detected (phase=%d score=%d after %d bauds), starting supervised PP conditioning (agc frozen at %.6f)\n",
                          s->phase3_pp_phase, s->phase3_pp_phase_score, acquire_bauds, s->agc_scaling);
             }
@@ -7699,7 +7729,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
 
                 if (!isfinite(sym_mag) || sym_mag <= 0.0f || sym_mag > PHASE3_PP_MAG_SANITY_MAX)
                 {
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 3: PP conditioning symbol magnitude out of range (mag=%.3f), clamping target scale and resetting equalizer\n",
                              sym_mag);
                     sym_mag = 1.0f;
@@ -7744,7 +7774,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
 
             if (pp_baud == 1)
             {
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 3: conditioning on aligned PP sequence (%d bauds)\n",
                          PHASE3_PP_TRAIN_BAUDS);
             }
@@ -7755,7 +7785,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 float pct = (s->phase3_pp_obs > 0)
                             ? (100.0f*s->phase3_pp_match/(float) s->phase3_pp_obs)
                             : 0.0f;
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 3 PP baud %d: mag=%.3f data_bits=%d lag8=%d/%d (%.1f%%) phase=%d score=%d\n",
                          pp_baud, mag, data_bits,
                          s->phase3_pp_match, s->phase3_pp_obs, pct,
@@ -7767,13 +7797,13 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 float pct = (s->phase3_pp_obs > 0)
                             ? (100.0f*s->phase3_pp_match/(float) s->phase3_pp_obs)
                             : 0.0f;
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 3: PP mean residual %.3f over %d bauds\n",
                          (s->phase3_pp_resid_count > 0)
                              ? s->phase3_pp_resid_sum/s->phase3_pp_resid_count
                              : -1.0f,
                          s->phase3_pp_resid_count);
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 3: PP conditioning complete (lag8=%d/%d, %.1f%%, phase=%d, score=%d), refining with first %dT of TRN\n",
                          s->phase3_pp_match, s->phase3_pp_obs, pct,
                          s->phase3_pp_phase, s->phase3_pp_phase_score, PHASE3_TRN_REFINE_BAUDS);
@@ -7845,7 +7875,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             }
             if (trn_refine_baud == 1)
             {
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 3: PP complete, using first %dT of TRN for equalizer refinement\n",
                          PHASE3_TRN_REFINE_BAUDS);
             }
@@ -7862,13 +7892,13 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     s->phase3_trn_lock_hyp = best_trn_h;
                     s->phase3_trn_lock_score = score_pct;
                     s->phase3_j_lock_hyp = v34_rx_j_hint_enabled() ? best_trn_h : -1;
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 3 TRN refine: lock hint hyp=%d ones=%d/%d (%d%%)\n",
                              best_trn_h, best_trn_score, s->phase3_trn_bits, score_pct);
                 }
                 else if ((s->phase3_trn_bits % 512) == 0)
                 {
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 3 TRN refine: best hyp=%d ones=%d/%d (%d%%) tap=%d\n",
                              best_trn_h, best_trn_score, s->phase3_trn_bits, score_pct,
                              s->scrambler_tap);
@@ -7878,13 +7908,13 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             /*endif*/
             if (trn_refine_baud == PHASE3_TRN_REFINE_BAUDS)
             {
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 3: TRN mean distance to nearest 4-point %.3f over %d symbols\n",
                          (s->phase3_trn_resid_count > 0)
                              ? s->phase3_trn_resid_sum/s->phase3_trn_resid_count
                              : -1.0f,
                          s->phase3_trn_resid_count);
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 3: first %dT of TRN processed; equalizer frozen, waiting for J-handling stage\n",
                          PHASE3_TRN_REFINE_BAUDS);
                 /* This transition wipes phase3_ja_capture_hyp[] below, which is
@@ -7918,7 +7948,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         /*endif*/
                     }
                     /*endfor*/
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 3: DISCARDING %d captured Ja bits (longest hyp=%d) on re-entry to WAIT_S\n",
                              cap_max, cap_max_h);
                 }
@@ -8006,7 +8036,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 s->phase3_ja_hyp = h;
                 if (s->phase3_ja_bits == 2 || (s->phase3_ja_bits % 256) == 0)
                 {
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 3 Ja capture: emitted %d bits using hyp=%d\n",
                              s->phase3_ja_bits, h);
                 }
@@ -8059,7 +8089,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
         if (s->duration <= 10 || (s->duration % 500) == 0)
         {
             float mag = sqrtf(sym->re * sym->re + sym->im * sym->im);
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 4 S baud %d: mag=%.3f data_bits=%d win=%d/32\n",
                      s->duration, mag, data_bits, s->s_detect_count);
         }
@@ -8094,7 +8124,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             &&
             data_bits == s->phase4_s_last_step)
         {
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 4: S-to-S-bar junction at baud %d (win=%d/32); "
                      "16T of S-bar to go\n",
                      s->duration, s->s_detect_count);
@@ -8106,7 +8136,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
         /*endif*/
         if (s->phase4_s_bar_left > 0  &&  --s->phase4_s_bar_left == 0)
         {
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 4: S-bar complete at baud %d, starting TRN\n",
                      s->duration);
             s->duration = 128;
@@ -8122,7 +8152,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                distinguish S-bar from S with this demodulator quality.
                Instead, wait a fixed time for the caller's S-bar(16T) + TRN(≥512T)
                to pass, then go straight to MP detection. */
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 4: S signal confirmed (baud %d, win=%d/32), "
                      "waiting for S-bar + TRN\n",
                      s->duration, s->s_detect_count);
@@ -8141,7 +8171,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 s->phase4_j_seen = 1;
                 s->phase4_trn_after_j = 0;
                 s->phase4_j_lock_hyp = s->phase3_j_lock_hyp;
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 4: caller detected answerer S handoff; starting direct TRN scoring (phase3 hyp=%d)\n",
                          s->phase3_j_lock_hyp);
             }
@@ -8152,7 +8182,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             /* If S wasn't confidently detected within a long guard interval,
                don't stall forever in Phase 4 S detection. Advance to TRN/MP
                search so the handshake can continue. */
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 4: S detect timeout (%d bauds, win=%d/32), "
                      "forcing TRN/MP search\n",
                      s->duration, s->s_detect_count);
@@ -8172,7 +8202,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 if (nudge)
                 {
                     s->eq_put_step += nudge;
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 4: sampling phase nudged by %d/%d sample\n",
                              nudge, V34_RX_PULSESHAPER_COEFF_SETS);
                 }
@@ -8185,7 +8215,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 s->phase4_j_seen = 1;
                 s->phase4_trn_after_j = 0;
                 s->phase4_j_lock_hyp = s->phase3_j_lock_hyp;
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 4: caller forcing direct TRN scoring after S timeout (phase3 hyp=%d)\n",
                          s->phase3_j_lock_hyp);
             }
@@ -8203,7 +8233,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
 
         if (s->duration >= 16)
         {
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 4: S-bar complete (%d bauds), starting TRN detection\n",
                      s->duration);
             s->stage = V34_RX_STAGE_PHASE4_TRN;
@@ -8216,7 +8246,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 s->phase4_j_seen = 1;
                 s->phase4_trn_after_j = 0;
                 s->phase4_j_lock_hyp = s->phase3_j_lock_hyp;
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 4: caller finished S-bar; starting direct TRN scoring (phase3 hyp=%d)\n",
                          s->phase3_j_lock_hyp);
             }
@@ -8267,7 +8297,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
 
             if (!mp_dump_checked)
             {
-                const char *path = getenv("V34_MP_RX_DUMP");
+                const char *path = V34_DIAG_GETENV("V34_MP_RX_DUMP");
 
                 if (path  &&  *path)
                     mp_dump = fopen(path, "w");
@@ -8409,7 +8439,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     da_target.im = sinf(tang);
                     v34_rx_tune_equalizer(s, sym, &da_target);
                 }
-                if (getenv("V34_DA_TRACK_LOG") && (s->duration % 256) == 0)
+                if (V34_DIAG_GETENV("V34_DA_TRACK_LOG") && (s->duration % 256) == 0)
                 {
                     fprintf(stderr,
                             "[DA] baud=%d err=%.1fdeg derot=%.1fdeg timing_corr=%d baud_phase=%.1f\n",
@@ -8434,7 +8464,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
            dibits, which points upstream at symbol demodulation (equalizer/
            carrier/timing feeding the angle computation below) rather than
            this file's bit-level decode logic. See rig/README.md. */
-        if (getenv("ME_V34_DUMP_MP_DIBITS") && s->mp_seen == 0 && s->duration < 6000)
+        if (V34_DIAG_GETENV("ME_V34_DUMP_MP_DIBITS") && s->mp_seen == 0 && s->duration < 6000)
         {
             /* coefmag/rawmag (diagnostic, 2026-07-19): distinguishes a
                zeroed-coefficient equalizer from a genuinely-silent input —
@@ -8447,7 +8477,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             for (ci = 0;  ci < V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN;  ci++)
                 coefmag += sqrtf(s->eq_coeff[ci].re*s->eq_coeff[ci].re + s->eq_coeff[ci].im*s->eq_coeff[ci].im);
             rawp = (s->eq_step - 1) & V34_EQUALIZER_MASK;
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - MP raw dibit dump: baud=%d diff=%d abs=%d re=%.4f im=%.4f mag=%.4f ang1deg=%.2f coefmag=%.4f rawmag=%.4f\n",
                      s->duration, data_bits, abs_bits,
                      (double) sym->re, (double) sym->im,
@@ -8476,7 +8506,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     {
                         float mag = sqrtf(sym->re*sym->re + sym->im*sym->im);
                         float ang_deg = atan2f(sym->im, sym->re) * 180.0f / 3.14159265f;
-                        span_log(s->logging, SPAN_LOG_FLOW,
+                        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                  "Rx - Phase 4 MP dibit dist (400 bauds): diff=[%d,%d,%d,%d] abs=[%d,%d,%d,%d] mag=%.3f ang=%.1f\n",
                                  dibit_hist[0], dibit_hist[1], dibit_hist[2], dibit_hist[3],
                                  abs_hist[0], abs_hist[1], abs_hist[2], abs_hist[3],
@@ -8542,7 +8572,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 if (v90_cp_rx && s->mp_signal_settle_bauds > 0)
                 {
                     mp_v90_cp_reset_at_carrier_gap(s);
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - V.90 Phase 4: CP carrier gap; reset Table-14 search to first-CPt initial state\n");
                 }
                 /*endif*/
@@ -8859,7 +8889,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                          chosen_pending_bit);
                     }
                     locked_this_symbol = 1;
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 4: locked MP hypothesis=%d, type_bit=%d preamble_score=%d/18 at bit%d (baud %d), frame start armed%s\n",
                              chosen_hyp, chosen_type_bit, chosen_score, chosen_bit_pos,
                              s->duration + 1, chosen_pending_valid ? " (+1 pending bit)" : "");
@@ -8926,7 +8956,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
 
                     if (!reneg_sym_checked)
                     {
-                        const char *path = getenv("V90_RENEG_SYM_DUMP");
+                        const char *path = V34_DIAG_GETENV("V90_RENEG_SYM_DUMP");
 
                         if (path  &&  *path)
                             reneg_sym = fopen(path, "w");
@@ -8991,7 +9021,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             && s->duration >= PHASE4_MP_TIMEOUT_BAUDS
             && s->received_event != V34_EVENT_TRAINING_FAILED)
         {
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 4: MP timeout (%d bauds without successful MP frame); signalling failure\n",
                      s->duration);
             s->received_event = V34_EVENT_TRAINING_FAILED;
@@ -9014,7 +9044,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     && s->mp_phase4_reject_streak < MP_HINT_STRICT_REJECTS)
                 {
                     s->mp_phase4_reject_streak = MP_HINT_STRICT_REJECTS;
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 4: no MP lock at baud %d with pinned hint hyp=%d for %d windows; broadening MP search beyond hint-only\n",
                              s->duration, s->phase4_trn_lock_hyp, s->mp_phase4_nolock_count);
                 }
@@ -9031,7 +9061,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     if ((s->duration % PHASE4_MP_NOLOCK_LOG_INTERVAL) == 0
                         || best_sc >= (MP_PREAMBLE_SCORE_MIN - 1))
                     {
-                        span_log(s->logging, SPAN_LOG_FLOW,
+                        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                  "Rx - Phase 4: no MP lock at baud %d; best_score=%d/%d hint_hyp=%d hint_bs=0x%08X (dom=%s%s, tap=%d, ord=%s)\n",
                                  s->duration, best_sc, MP_PREAMBLE_SCORE_MIN,
                                  s->phase4_trn_lock_hyp,
@@ -9067,7 +9097,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             && (s->duration <= 6 || (s->duration % PHASE4_MP_BAUD_LOG_INTERVAL) == 0))
         {
             float mag = sqrtf(sym->re * sym->re + sym->im * sym->im);
-            span_log(s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - Phase 4 MP baud %d: mag=%.3f data_bits=%d descr=%d,%d "
                      "bitstream=0x%08X hyp=%d\n",
                      s->duration, mag, data_bits, bits[0], bits[1],
@@ -9108,12 +9138,12 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                normal CRC and semantic checks still decide
                                whether this hypothesis is valid. */
                             s->mp_count = 0;
-                            span_log(s->logging, SPAN_LOG_FLOW,
+                            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                      "Rx - Phase 4: holding MP hypothesis=%d after preamble timeout; restarting local wait\n",
                                      s->mp_hypothesis);
                             break;
                         }
-                        span_log(s->logging, SPAN_LOG_FLOW,
+                        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                  "Rx - Phase 4: unlock MP hypothesis=%d (no preamble within %d bits)\n",
                                  s->mp_hypothesis, s->mp_count);
                         if (mp_phase4_has_pinned_trn_lock(s))
@@ -9121,7 +9151,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                             /* Keep TRN-locked descrambler settings, just reset
                                hypothesis search to re-scan for preamble */
                             v34_rx_mp_reset_hypothesis_search(s);
-                            span_log(s->logging, SPAN_LOG_FLOW,
+                            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                      "Rx - Phase 4: preamble timeout; keeping TRN-locked settings, resetting preamble search\n");
                         }
                         else
@@ -9149,7 +9179,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                        contain enough ones that combining it with the first few
                        E bits falsely detects E up to 18 symbols early. */
                     v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_COMPLETE, "E detected");
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 4: E signal detected, MP exchange complete — transitioning to DATA mode\n");
                     /* Use the same reset-state B1 entry as the offline and
                        V.90 paths.  The old inline subset left every Viterbi
@@ -9163,7 +9193,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         report_status_change(s, SIG_STATUS_TRAINING_FAILED);
                         break;
                     }
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - DATA mode: parms b=%d k=%d q=%d m=%d p=%d j=%d l=%d r=%d w=%d\n",
                              s->parms.b, s->parms.k, s->parms.q, s->parms.m,
                              s->parms.p, s->parms.j, s->parms.l, s->parms.r, s->parms.w);
@@ -9211,7 +9241,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         if (s->mp_seen == 0)
                         {
                             bits32_to_str(s->bitstream, tail);
-                            span_log(s->logging, SPAN_LOG_FLOW,
+                            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                      "Rx - Phase 4: MP preamble detected (baud %d): "
                                      "score=%d/18 17x'1'+start(0)+type(%d), target=%d bits, "
                                      "frame body starts at frame_idx=19 (includes inserted start bits), tail=0b%s\n",
@@ -9256,7 +9286,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                                    : MP_EARLY_START_ERR_MAX;
                             if (s->mp_early_rejects <= 3  ||  (s->mp_early_rejects % 8) == 0)
                             {
-                                span_log(s->logging, SPAN_LOG_FLOW,
+                                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                          "Rx - Phase 4: MP%d start-bit mismatch at frame_idx=%d body_idx=%d data_idx=%d value=%d "
                                          "(expected 0), start_err_count=%d max=%d%s\n",
                                          type_now, idx, idx - 19 + 1, data_idx, bits[i],
@@ -9295,7 +9325,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                             s->mp_early_rejects++;
                             if (s->mp_early_rejects <= 3  ||  (s->mp_early_rejects % 8) == 0)
                             {
-                                span_log(s->logging, SPAN_LOG_FLOW,
+                                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                          "Rx - Phase 4: MP%d reserved bit mismatch at frame_idx=19 value=%d "
                                          "(expected 0), early_reject_count=%d max=%d%s\n",
                                          type_now, bits[i], s->mp_early_rejects, early_reject_max,
@@ -9334,7 +9364,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                             int data_idx;
 
                             data_idx = mp_data_bit_index(type_now, frame_idx);
-                            span_log(s->logging, SPAN_LOG_FLOW,
+                            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                      "Rx - Phase 4 MP body_idx=%d frame_idx=%d data_idx=%d value=%d frame_pos=%d/%d\n",
                                      s->bit_count, frame_idx, data_idx, bits[i],
                                      s->mp_frame_pos, s->mp_frame_target);
@@ -9350,7 +9380,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     if (!mp_start_bit_ok(type, 17, s->mp_frame_bits[17]))
                     {
                         s->mp_early_rejects++;
-                        span_log(s->logging, SPAN_LOG_FLOW,
+                        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                  "Rx - Phase 4: MP%d start-bit mismatch at frame_idx=17 body_idx=0 data_idx=-1 value=%d "
                                  "(expected 0), start_err_count=%d (continuing until CRC)\n",
                                  type, s->mp_frame_bits[17], s->mp_early_rejects);
@@ -9375,7 +9405,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         {
                             crc_good = mp_crc_ok(s->mp_frame_bits, type, &rx_crc, &residual_crc);
                             fill_good = mp_fill_ok(s->mp_frame_bits, type);
-                            span_log(s->logging, SPAN_LOG_FLOW,
+                            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                      "Rx - Phase 4: MP%d recovered via bit-slip=%d before CRC/fill check\n",
                                      type, recovered_slip);
                         }
@@ -9383,7 +9413,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         {
                             crc_good = mp_crc_ok(s->mp_frame_bits, type, &rx_crc, &residual_crc);
                             fill_good = mp_fill_ok(s->mp_frame_bits, type);
-                            span_log(s->logging, SPAN_LOG_FLOW,
+                            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                      "Rx - Phase 4: MP%d recovered via boundary-slip at frame_idx=%d slip=%d before CRC/fill check\n",
                                      type, recovered_boundary, recovered_slip);
                         }
@@ -9397,7 +9427,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         {
                             crc_good = mp_crc_ok(s->mp_frame_bits, type, &rx_crc, &residual_crc);
                             fill_good = mp_fill_ok(s->mp_frame_bits, type);
-                            span_log(s->logging, SPAN_LOG_FLOW,
+                            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                      "Rx - Phase 4: MP%d recovered via double-boundary-slip (%d,%d) and (%d,%d) before CRC/fill check\n",
                                      type,
                                      recovered_boundary,
@@ -9412,7 +9442,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         {
                             crc_good = mp_crc_ok(s->mp_frame_bits, type, &rx_crc, &residual_crc);
                             fill_good = mp_fill_ok(s->mp_frame_bits, type);
-                            span_log(s->logging, SPAN_LOG_FLOW,
+                            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                      "Rx - Phase 4: MP%d recovered via boundary-bruteforce (%d boundary adjustments) before CRC/fill check\n",
                                      type, recovered_changes);
                         }
@@ -9474,7 +9504,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                         t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
                                         if (!mp_apply_parameters(t, &mp))
                                         {
-                                            span_log(&t->logging, SPAN_LOG_FLOW,
+                                            V34_RX_LOG(&t->logging, SPAN_LOG_FLOW,
                                                      "Rx - MP directional encoder/rate negotiation failed "
                                                      "(local mask=0x%04X remote=0x%04X)\n",
                                                      t->tx.mp.signalling_rate_mask & 0x3FFF,
@@ -9491,14 +9521,14 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                             {
                                 if (!starts_good)
                                 {
-                                    span_log(s->logging, SPAN_LOG_FLOW,
+                                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                              "Rx - Phase 4: MP%d accepting frame with %d start-bit mismatches because CRC/fill are valid\n",
                                              type, start_err_count);
                                 }
                                 /*endif*/
                                 if (first_mp_accept)
                                 {
-                                    span_log(s->logging, SPAN_LOG_FLOW,
+                                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                              "Rx - Phase 4: MP%d frame accepted (%d bits)\n",
                                              type, s->mp_frame_target);
                                 }
@@ -9519,10 +9549,10 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                    before dropping back to global search. */
                                 s->mp_early_rejects = 0;
                                 s->mp_count = 0;
-                                span_log(s->logging, SPAN_LOG_FLOW,
+                                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                          "Rx - Phase 4: MP%d rejected (semantic checks failed)\n",
                                          type);
-                                span_log(s->logging, SPAN_LOG_FLOW,
+                                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                          "Rx - Phase 4: keeping MP hypothesis=%d after semantic reject; retrying local preamble reacquire\n",
                                          s->mp_hypothesis);
                                 v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_SYNC, "semantic reject; reacquiring preamble");
@@ -9539,7 +9569,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                locally instead of immediately jumping to global search. */
                             keep_hypothesis = (s->mp_hypothesis >= 0
                                                && starts_acceptable);
-                            span_log(s->logging, SPAN_LOG_FLOW,
+                            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                      "Rx - Phase 4: MP%d rejected (crc_ok=%d fill_ok=%d starts_ok=%d starts_acceptable=%d start_err_count=%d max=%d)\n",
                                      type, crc_good, fill_good, starts_good, starts_acceptable, start_err_count, start_err_accept_max);
                             /* Dump first 70 frame bits for diagnosis */
@@ -9550,7 +9580,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                 for (d = 0; d < dlen && d < (int)sizeof(dump) - 1; d++)
                                     dump[d] = '0' + (s->mp_frame_bits[d] & 1);
                                 dump[d] = '\0';
-                                span_log(s->logging, SPAN_LOG_FLOW,
+                                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                          "Rx - Phase 4: MP frame bits[0..%d]: %s\n",
                                          dlen - 1, dump);
                             }
@@ -9589,7 +9619,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
 
                                 if (s->mp0_vote_frames <= 2 || (s->mp0_vote_frames % 4) == 0)
                                 {
-                                    span_log(s->logging, SPAN_LOG_FLOW,
+                                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                              "Rx - Phase 4: MP0 vote accumulator: %d frames (hyp=%d)\n",
                                              s->mp0_vote_frames, s->mp0_vote_hyp);
                                 }
@@ -9616,7 +9646,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                     vote_crc_ok = mp_crc_ok(voted_bits, 0, &vote_rx_crc, &vote_res_crc);
                                     vote_fill_ok = mp_fill_ok(voted_bits, 0);
 
-                                    span_log(s->logging, SPAN_LOG_FLOW,
+                                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                              "Rx - Phase 4: MP0 majority-vote result: crc_ok=%d fill_ok=%d crc=0x%04X res=0x%04X (%d frames)\n",
                                              vote_crc_ok, vote_fill_ok, vote_rx_crc, vote_res_crc, s->mp0_vote_frames);
 
@@ -9682,7 +9712,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                                 t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
                                                 if (mp_apply_parameters(t, &mp))
                                                 {
-                                                    span_log(s->logging, SPAN_LOG_FLOW,
+                                                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                                              "Rx - Phase 4: MP0 ACCEPTED via majority vote (%d frames)\n",
                                                              accepted_vote_frames);
                                                     s->mp_seen = 1;
@@ -9714,7 +9744,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                     s->mp1_vote_counts[vi] += (s->mp_frame_bits[vi] & 1) ? 1 : -1;
                                 s->mp1_vote_frames++;
 
-                                span_log(s->logging, SPAN_LOG_FLOW,
+                                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                          "Rx - Phase 4: MP1 vote accumulator: %d frames (hyp=%d)\n",
                                          s->mp1_vote_frames, s->mp1_vote_hyp);
 
@@ -9745,7 +9775,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                     vote_crc_ok = mp_crc_ok(voted_bits, 1, &vote_rx_crc, &vote_res_crc);
                                     vote_fill_ok = mp_fill_ok(voted_bits, 1);
 
-                                    span_log(s->logging, SPAN_LOG_FLOW,
+                                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                              "Rx - Phase 4: MP1 majority-vote result: crc_ok=%d fill_ok=%d crc=0x%04X res=0x%04X (%d frames)\n",
                                              vote_crc_ok, vote_fill_ok, vote_rx_crc, vote_res_crc, s->mp1_vote_frames);
 
@@ -9776,7 +9806,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                                 t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
                                                 if (mp_apply_parameters(t, &mp))
                                                 {
-                                                    span_log(s->logging, SPAN_LOG_FLOW,
+                                                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                                              "Rx - Phase 4: MP1 ACCEPTED via majority vote\n");
                                                     s->mp_seen = 1;
                                                     if (s->mp_accepted_baud == 0)
@@ -9795,7 +9825,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                             {
                                 s->mp_early_rejects = 0;
                                 s->mp_count = 0;
-                                span_log(s->logging, SPAN_LOG_FLOW,
+                                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                          "Rx - Phase 4: keeping MP hypothesis=%d after CRC-only reject; retrying local preamble reacquire\n",
                                          s->mp_hypothesis);
                                 v34_rx_log_mp_diag_state(s, V34_MP_DIAG_STATE_DET_SYNC, "CRC-only reject; reacquiring preamble");
@@ -10188,7 +10218,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             {
                 /* Measured, and deliberately not acted on.  See above. */
                 s->eye_votes = 0;
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - T/2 eye favours the other phase (off %.1f vs on %.1f) "
                          "but PP is being conditioned on; not moving the symbol instant\n",
                          (double) s->eye_off_sum, (double) s->eye_on_sum);
@@ -10197,7 +10227,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             {
                 s->eye_votes = 0;
                 s->eye_flips++;
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - T/2 eye is on the other phase (off %.1f vs on %.1f over %d symbols); "
                          "moving the symbol instant (flip %d)\n",
                          (double) s->eye_off_sum, (double) s->eye_on_sum,
@@ -10665,7 +10695,7 @@ static bool v90_t3_slip_resync(v34_rx_state_t *s)
         /*endif*/
     }
     /*endfor*/
-    span_log(s->logging, SPAN_LOG_FLOW,
+    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
              "Rx - V.90 upstream slip search: base %.3f [%s]\n", base, detail);
     /* ME_V90_SLIP_ROT_SWEEP: at the best offset, is there ANY static rotation
      * that opens the eye?  A slip is a passband delay and so carries a phase
@@ -10708,7 +10738,7 @@ static bool v90_t3_slip_resync(v34_rx_state_t *s)
             }
             /*endfor*/
             s->v90_t3_carrier.phase = save;
-            span_log(s->logging, SPAN_LOG_WARNING,
+            V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 upstream slip rotation sweep at offset %+.2f: "
                      "as-computed %.3f, best %.3f at %+.0f deg [%s]\n",
                      best_offset, best, rbest, rbest_a, rd);
@@ -10758,7 +10788,7 @@ static bool v90_t3_slip_resync(v34_rx_state_t *s)
        way down have to be let go of. */
     s->v90_t3_gardner.freq = 0.0f;
     s->v90_t3_gardner.hold = 0;
-    span_log(s->logging, SPAN_LOG_WARNING,
+    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
              "Rx - V.90 upstream slip of %+.2f sample(s) corrected "
              "(lattice distance %.3f -> %.3f, %d so far)\n",
              best_offset, base, best, s->v90_t3_slips_recovered);
@@ -10926,7 +10956,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                 }
                 else
                 {
-                    span_log(s->logging, SPAN_LOG_WARNING,
+                    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                              "Rx - V.90 upstream B1 ended after %d data frames "
                              "(frame error %.3f); publishing data\n",
                              (int) ((idx + 1)/s->v90_t3_b1_symbols), mean);
@@ -10970,7 +11000,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
         {
             if (!s->v90_t3_sym_dump_tried)
             {
-                const char *path = getenv("ME_V90_UPSTREAM_SYM_DUMP");
+                const char *path = V34_DIAG_GETENV("ME_V90_UPSTREAM_SYM_DUMP");
 
                 s->v90_t3_sym_dump_tried = true;
                 if (path)
@@ -11120,7 +11150,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                         && !s->v90_t3_resync_required)
                     {
                         s->v90_t3_resync_required = true;
-                        span_log(s->logging, SPAN_LOG_WARNING,
+                        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                                  "Rx - V.90 upstream abrupt discontinuity: "
                                  "%d local timing searches failed; requesting "
                                  "9.6/11.6 training-and-B1 resynchronization\n",
@@ -11157,7 +11187,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
         {
             if (++s->v90_t3_lost_run == V34_V90_T3_LOST_SYMBOLS)
             {
-                span_log(s->logging, SPAN_LOG_WARNING,
+                V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                          "Rx - V.90 upstream carrier lost: %.3f from the "
                          "constellation for %d symbols (settled at %.3f)\n",
                          s->v90_t3_sym_err_ema, s->v90_t3_lost_run,
@@ -11199,7 +11229,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             if (s->v90_t3_err_base_n == V34_V90_T3_ERR_BASE_SYMBOLS)
             {
                 s->v90_t3_err_base /= V34_V90_T3_ERR_BASE_SYMBOLS;
-                span_log(s->logging, SPAN_LOG_WARNING,
+                V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                          "Rx - V.90 upstream settled at %.3f from the "
                          "constellation; keeping the equalizer below %.3f, "
                          "restoring it above %.3f\n",
@@ -11266,7 +11296,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                 /*endif*/
                 s->v90_t3_gardner.hold = 0;
                 s->v90_t3_fse_restores++;
-                span_log(s->logging, SPAN_LOG_WARNING,
+                V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                          "Rx - V.90 upstream symbols lost; restoring the "
                          "last good equalizer (restore %d)\n",
                          s->v90_t3_fse_restores);
@@ -11377,7 +11407,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                                    (s->v90_t3_sym_err_fast
                                         < V34_V90_T3_TIMING_TRACK_ERR)
                                        ? 1 : 0);
-            if (getenv("ME_V90_UPSTREAM_TIMING_DEBUG"))
+            if (V34_DIAG_GETENV("ME_V90_UPSTREAM_TIMING_DEBUG"))
             {
                 static int dbg;
 
@@ -11545,7 +11575,7 @@ static void v90_t3_acq_retry_or_abandon(v34_rx_state_t *s, const char *why)
     else
     {
         s->v90_t3_acq_abandoned = true;
-        span_log(s->logging, SPAN_LOG_WARNING,
+        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                  "Rx - V.90 T/3 B1 giving up after %d windows (%s); the "
                  "upstream has no carrier and only a retrain can give it "
                  "one\n",
@@ -11604,7 +11634,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
         || s->v90_t3_raw_count < search_end
              + 3*s->v90_t3_b1_symbols + V34_V90_T3_FSE_TAPS)
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - V.90 T/3 B1 search held: acquired=%d attempted=%d "
                  "b1=%d anchor=%" PRId64 " start=%" PRId64 " end=%" PRId64
                  " raw=%" PRId64 "\n",
@@ -11657,7 +11687,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
             /*endif*/
             match = v90_t3_acquire_pass(s, search_start, search_end, coeff,
                                         &first, &conjugate, &coarse);
-            span_log(s->logging, SPAN_LOG_WARNING,
+            V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 T/3 B1 template tap=%d trellis=%d: "
                      "coarse=%.1f%% fit=%.1f%% conjugate=%d\n",
                      candidate_tap[t], trellis,
@@ -11692,7 +11722,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
        the known-bad 28.8 kbit/s solution is only about 93%. */
     if (best_match < 0.95f)
     {
-        span_log(s->logging, SPAN_LOG_WARNING,
+        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                  "Rx - V.90 T/3 B1 acquisition failed "
                  "(first=%lld coarse=%.1f%% fit=%.1f%% tap=%d trellis=%d)\n",
                  (long long)best_first, 100.0f*best_coarse,
@@ -11781,7 +11811,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
                 template_power = mean_power;
             /*endif*/
 
-            span_log(s->logging, SPAN_LOG_WARNING,
+            V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                      "Rx - V.90 T/3 B1 out-of-sample check: lattice distance "
                      "%.3f, symbol power %.1f against the template's %.1f, "
                      "over %d symbols\n",
@@ -11829,7 +11859,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
                 best_match = s->v90_t3_acq_best_match;
                 best_conjugate = s->v90_t3_acq_best_conjugate;
                 best_first = s->v90_t3_acq_best_first;
-                span_log(s->logging, SPAN_LOG_WARNING,
+                V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                          "Rx - V.90 T/3 B1 settling for the best of %d "
                          "windows: distance %.3f (%.5f of its power), "
                          "in-sample fit %.1f%%\n",
@@ -11841,7 +11871,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
             /*endif*/
             if (!good)
             {
-                span_log(s->logging, SPAN_LOG_WARNING,
+                V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                          "Rx - V.90 T/3 B1 rejected: an in-sample fit of "
                          "%.1f%% that does not generalise (distance %.3f, "
                          "%.5f of its power against a limit of %.5f)\n",
@@ -12001,12 +12031,12 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->data_symbol_rotation = 0;
     s->data_symbol_conjugate = false;
     s->phase4_da_derot = 0;
-    span_log(s->logging, SPAN_LOG_WARNING,
+    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
              "Rx - V.90 upstream frame parms: b=%d p=%d w=%d j=%d k=%d "
              "bit_rate=%d b1_symbols=%d publish=+%d symbols\n",
              s->parms.b, s->parms.p, s->parms.w, s->parms.j, s->parms.k,
              s->bit_rate, s->v90_t3_b1_symbols, s->v90_t3_b1_symbols + 32);
-    span_log(s->logging, SPAN_LOG_WARNING,
+    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
              "Rx - V.90 upstream B1 acquired at %d Hz T/3 "
              "(baud=%d carrier=%s sample=%lld, symbols=%d, fit=%.1f%%, "
              "conjugate=%d, tap=%d, trellis=%d)\n",
@@ -12045,7 +12075,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
                             s->v90_t3_b1[n].re, s->v90_t3_b1[n].im,
                             y.re, y.im);
         }
-        span_log(s->logging, SPAN_LOG_WARNING,
+        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                  "Rx - V.90 upstream B1 template->emitted: %s\n", line);
     }
     /* Seed the carrier loop's FREQUENCY from B1, exactly as the ordinary V.34
@@ -12111,7 +12141,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
                 if (ok)
                     s->v90_t3_carrier.freq = dphi;
                 /*endif*/
-                span_log(s->logging, SPAN_LOG_WARNING,
+                V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                          "Rx - V.90 upstream B1 residual carrier: %.4f "
                          "deg/symbol (%.2f Hz at this rate)%s\n",
                          dphi*180.0f/3.14159265f,
@@ -12424,11 +12454,11 @@ static void v34_rx_watch_peer_reneg_s(v34_rx_state_t *s,
                 static int debug = -1;
 
                 if (debug < 0)
-                    debug = (getenv("V34_RENEG_S_DEBUG") != NULL);
+                    debug = (V34_DIAG_GETENV("V34_RENEG_S_DEBUG") != NULL);
                 /*endif*/
                 if (debug)
                 {
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - 11.6 S watch: caller=%d hi=%d "
                              "%.0f/%.0f/%.0f Hz sum/denom=%.3f energy=%.3g "
                              "run=%d\n",
@@ -12449,7 +12479,7 @@ static void v34_rx_watch_peer_reneg_s(v34_rx_state_t *s,
             {
                 s->reneg_s_reported = true;
                 s->received_event = V34_EVENT_PEER_RENEG_S;
-                span_log(s->logging, SPAN_LOG_WARNING,
+                V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
                          "Rx - S detected in DATA (%d ms at %.0f/%.0f/%.0f Hz); "
                          "the peer has opened a rate renegotiation, answering "
                          "per 9.6.1.2/11.6.1.2\n",
@@ -12538,11 +12568,11 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
                     static int tdebug = -1;
 
                     if (tdebug < 0)
-                        tdebug = (getenv("V34_RETRAIN_TONE_DEBUG") != NULL);
+                        tdebug = (V34_DIAG_GETENV("V34_RETRAIN_TONE_DEBUG") != NULL);
                     /*endif*/
                     if (tdebug)
                     {
-                        span_log(s->logging, SPAN_LOG_FLOW,
+                        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                  "Rx - retrain tone watch: stage=%s dur=%d "
                                  "meansq=%.0f ratio=%.3f tonal=%d run=%d\n",
                                  v34_rx_stage_to_str(s->stage),
@@ -12564,7 +12594,7 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
                 {
                     s->phase34_tone_a_reported = true;
                     s->received_event = V34_EVENT_PEER_RETRAIN;
-                    span_log(s->logging, SPAN_LOG_FLOW,
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - Tone %c detected in stage %s (%d ms); peer initiated "
                              "a retrain, reporting peer retrain per V.90 9.5.1.2 / "
                              "V.34 11.5.1.2\n",
@@ -12712,7 +12742,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
                 s->reneg_cma_mag = 0.0f;
                 s->reneg_cma_bauds = 0;
                 equalizer_save(s);
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - V.90 9.6: %d block(s) of dead line in the CP "
                          "window; re-acquiring on the peer's repeated CP "
                          "(re-acquisition %d)\n",
@@ -12748,7 +12778,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
        high_carrier is set from v34_rx_restart based on calling_party flag. */
     if (s->baud_rate < 0 || s->baud_rate > 5)
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - ERROR: baud_rate=%d out of range (expected 0-5), forcing to 4\n",
                  s->baud_rate);
         s->baud_rate = 4;  /* V34_BAUD_RATE_3200 */
@@ -12767,7 +12797,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     /* Periodic diagnostic: log primary channel RX config on first entry and every 8000 samples */
     if (s->stage >= V34_RX_STAGE_PHASE3_TRAINING && (s->sample_time % 8000) < (unsigned)len)
     {
-        span_log(s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                  "Rx - primary_channel_rx: baud_rate=%d high_carrier=%d carrier=%.1fHz agc=%.5f power=%ld shaper_sets=%d\n",
                  s->baud_rate, s->high_carrier, dds_frequencyf(s->v34_carrier_phase_rate),
                  (double)s->agc_scaling, (long)power_meter_current(&s->power), s->shaper_sets);
@@ -12840,7 +12870,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
             {
                 s->phase34_retrain_reported = true;
                 s->received_event = V34_EVENT_PEER_RETRAIN;
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - far end abandoned Phase 3/4 (%d ms silence in stage %s); "
                          "reporting peer retrain\n",
                          s->phase34_silence_samples/8, v34_rx_stage_to_str(s->stage));
@@ -12895,7 +12925,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
             {
                 s->phase3_energy_retrain_reported = true;
                 s->received_event = V34_EVENT_PEER_RETRAIN;
-                span_log(s->logging, SPAN_LOG_FLOW,
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - Phase 3: %d ms of energy during the Jd wait with no S; "
                          "far end has left V.90, reporting peer retrain\n",
                          s->phase3_energy_samples/8);
@@ -13249,7 +13279,7 @@ SPAN_DECLARE(int) v34_rx_fillin(v34_state_t *s, int len)
 
     /* We want to sustain the current state (i.e carrier on<->carrier off), and
        try to sustain the carrier phase. We should probably push the filters, as well */
-    span_log(&s->logging, SPAN_LOG_FLOW, "Rx - Fill-in %d samples\n", len);
+    V34_RX_LOG(&s->logging, SPAN_LOG_FLOW, "Rx - Fill-in %d samples\n", len);
     for (i = 0;  i < len;  i++)
     {
 #if defined(SPANDSP_USE_FIXED_POINT)
@@ -13298,7 +13328,7 @@ SPAN_DECLARE(int) v34_rx(v34_state_t *s, const int16_t amp[], int len)
     if (s->rx.received_event == V34_EVENT_TRAINING_FAILED
         && !s->rx.training_failed_reported)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Rx - signalling training failure to host\n");
         report_status_change(&s->rx, SIG_STATUS_TRAINING_FAILED);
         s->rx.training_failed_reported = true;
@@ -13438,7 +13468,7 @@ SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
     v34_rx_mp_reset_hypothesis_search(&s->rx);
     v34_rx_mp_vote_reset(&s->rx);
 
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_RX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Rx - V.90 Phase 4: immediate CPt acquisition armed (tap=4, domain=diff, order=b0,b1)\n");
 }
 /*- End of function --------------------------------------------------------*/
@@ -13506,7 +13536,7 @@ SPAN_DECLARE(void) v34_v90_force_reneg_cp_rx(v34_state_t *s)
     /* Save the FRESH taps: the periodic equalizer restore would otherwise put
        the stale ones back a few hundred milliseconds later. */
     equalizer_save(&s->rx);
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_RX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Rx - V.90 9.6: CP conditioning with a fresh equalizer; SCR trains it\n");
 }
 /*- End of function --------------------------------------------------------*/
@@ -13529,7 +13559,7 @@ SPAN_DECLARE(void) v34_reject_v90_phase4_hypothesis(v34_state_t *s)
         s->rx.mp_count = 0;
         s->rx.mp_frame_pos = 0;
         s->rx.mp_frame_target = 0;
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Rx - V.90 Phase 4: strict CP reject; holding MP hypothesis=%d for repeated CP\n",
                  s->rx.mp_hypothesis);
         return;
@@ -13538,7 +13568,7 @@ SPAN_DECLARE(void) v34_reject_v90_phase4_hypothesis(v34_state_t *s)
        seed.  Advance the existing domain/tap/bit-order retry state as well;
        merely clearing mp_hypothesis retries the same decode mode forever. */
     mp_unlock_after_reject(&s->rx, true);
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_RX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Rx - V.90 Phase 4: strict CP framer rejected hypothesis; resuming preamble search\n");
 }
 /*- End of function --------------------------------------------------------*/
@@ -13638,7 +13668,7 @@ SPAN_DECLARE(void) v34_v90_arm_phase3_s_detector(v34_state_t *s)
     {
         if (s->rx.phase3_j_trn16)
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_RX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Rx - V.90: TRN lock (hyp=%d %d%%, 4-point mapping) overrides "
                      "canonical-J trn16=1; arming S detector as 4-point\n",
                      s->rx.phase3_trn_lock_hyp, s->rx.phase3_trn_lock_score);
@@ -13672,7 +13702,7 @@ SPAN_DECLARE(void) v34_v90_arm_phase3_s_detector(v34_state_t *s)
        informational; the S detector does not use it. */
     s->rx.phase3_s_detect_armed = true;
 
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_RX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Rx - V.90: analogue Ja consumed; armed clean Phase 3 S detector (trn=%s)\n",
              (s->rx.phase3_j_trn16 < 0)
                 ? "unknown"
@@ -13869,7 +13899,7 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
     {
         const char *restore = getenv("ME_V90_UPSTREAM_EQ_RESTORE");
 
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Rx - V.90 upstream data prepare: equalizer saved at baud %d "
                  "carrier %s, preparing baud %d carrier %s%s\n",
                  s->rx.eq_coeff_save_baud_rate,
@@ -13907,7 +13937,7 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
     {
         /* Hand the upstream to the ordinary V.34 data receiver instead. */
         s->rx.v90_t3_prepared = false;
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_RX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Rx - V.90 upstream: T/3 branch disabled, using the ordinary "
                  "T/2 data receiver (ME_V90_UPSTREAM_T2)\n");
         return 0;
