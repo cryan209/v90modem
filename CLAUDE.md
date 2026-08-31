@@ -197,7 +197,10 @@ reporting is implemented off SpanDSP's real-time frame handler, and so are
 `+FBU`'s `+FHT:`/`+FHR:` frame reports, `+FNS` non-standard frames and polling
 (`+FLP`, `+FSP`, `+FPO`) and procedure interrupts (`+FIE`, `+FVO`, `<DLE><pri>`
 — which needed a small addition to SpanDSP's receiver, where answering PIP/PIN
-was an empty TODO). **Watch the FCF low bit**: in DIS/DTC, CSI/CIG and
+was an empty TODO). The post page response is **held** for the DTE per 8.3.4.3,
+so a receiving session needs one more `+FDR` than it has pages; that needed a
+second SpanDSP addition (`t30_set_post_page_response_hold()`). **Watch the FCF
+low bit**: in DIS/DTC, CSI/CIG and
 NSF/NSC it is a real distinction, but in DCS, TSI and NSS it is a don't-care
 set from whether a DIS was received, so those must be matched with `& 0xFE` —
 matching TSI exactly reported every calling station's TSI as a CSI.

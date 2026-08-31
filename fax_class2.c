@@ -387,6 +387,20 @@ static int t30_ppm_to_fet(int result, int *known)
     return 0;
 }
 
+/* T.32 Table 23 the other way: the +FPS value the DTE left, as the T.30 post
+ * page response to send.  A value the DCE cannot express falls back on MCF. */
+static int fps_to_t30_ppr(int fps)
+{
+    switch (fps) {
+    case 1:  return T30_MCF;
+    case 2:  return T30_RTN;
+    case 3:  return T30_RTP;
+    case 4:  return T30_PIN;
+    case 5:  return T30_PIP;
+    default: return T30_MCF;
+    }
+}
+
 /* T.32 Table 23: the post page response, for +FPS. */
 static int t30_ppr_to_fps(int result, int *known)
 {
@@ -850,6 +864,14 @@ static void session_start(void)
     /* T.32 8.5.2.1: whether the remote's procedure interrupt requests are
      * accepted and negotiated, or ignored. */
     t30_remote_interrupts_allowed(t30, p_ie ? true : false);
+
+    /*
+     * T.32 8.3.4.3 and 8.4.3: the receiving DCE holds the post page response
+     * until the DTE releases it with the next +FDR, so the DTE can read the
+     * page status and change it -- to refuse a page it did not like (+FPS=2),
+     * or to ask for a procedure interrupt (+FPS=4 or 5).
+     */
+    t30_set_post_page_response_hold(t30, true);
     /* A <DLE><pri> that arrived while the page was being spooled, before
      * there was a T.30 to tell -- the usual order, since the DTE hands the
      * page over before the call is answered. */
@@ -1645,15 +1667,19 @@ int fc2_at_line(const char *line)
             ok = 0;
         } else {
             /*
-             * T.32 8.3.4.8: a receiving DTE asks for a procedure interrupt by
-             * setting +FPS to 4 (PIN) or 5 (PIP) before the post page +FDR,
-             * which is what releases the response.  T.30 carries the request
-             * in that response.
+             * T.32 8.3.4.3: this +FDR releases the post page response the DCE
+             * has been holding, with whatever the DTE left in +FPS -- 8.5.2.2
+             * and 8.4.3.  A +FPS of 4 or 5 is 8.3.4.8's procedure interrupt
+             * request, and Table 17 pairs that release with a +FVO.
              */
-            if ((page_status == 4 || page_status == 5) && fax) {
-                t30_local_interrupt_request(fax_get_t30_state(fax),
-                                            page_status == 5);
-                interrupt_requested = 1;
+            if (fax
+                && t30_release_post_page_response(fax_get_t30_state(fax),
+                                                  fps_to_t30_ppr(page_status)) == 0) {
+                if (p_ie && (page_status == 4 || page_status == 5)
+                    && !interrupt_negotiated) {
+                    interrupt_negotiated = 1;
+                    queue_line("\r\n+FVO\r\n");
+                }
             }
             fdr_pending = 1;
             ok = 1;
@@ -1850,10 +1876,13 @@ void fc2_poll(void)
     /*
      * The end of the session is reported only once the DTE has taken every
      * page: T.32 8.5.2.7's +FHS ends the +FDR, and a page still waiting here
-     * would be lost.
+     * would be lost.  A +FDR that released the last post page response is
+     * still outstanding at this point, and Table 17 is explicit that this is
+     * what completes it -- "EOP received, end of session, +FHS:00, OK".
      */
-    if (session_done && hangup_code >= 0 && !fdr_pending && !have_page
+    if (session_done && hangup_code >= 0 && !have_page
         && rx_pages_done == rx_pages_given) {
+        fdr_pending = 0;
         finish_session = 1;
         code = hangup_code;
         session_done = 0;

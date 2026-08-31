@@ -281,6 +281,13 @@ static fax_state_t *peer_start(int calling, const char *tx_file, const char *rx_
     return f;
 }
 
+/*
+ * T.32 8.3.4.3: the DCE holds the post page response until the DTE releases it
+ * with another +FDR.  A receiving session therefore needs one more +FDR than
+ * it has pages, and the last one is what the +FHS: completes.
+ */
+static void release_post_page(fax_state_t *peer);
+
 /* One 20 ms frame each way, then whatever the DCE has queued for the DTE. */
 static void pump(fax_state_t *peer, int frames)
 {
@@ -300,6 +307,33 @@ static void pump(fax_state_t *peer, int frames)
         if (peer_done)
             return;
     }
+}
+
+/*
+ * Pump until the DCE has said something in particular, then stop.  A held post
+ * page response has to be released promptly -- T.30's own timers do not wait
+ * for a DTE, and the far end gives up after a few repeats of its post page
+ * message -- so a receive test cannot simply pump for the whole call and then
+ * release.
+ */
+static void pump_until(fax_state_t *peer, int frames, const char *needle)
+{
+    for (int i = 0; i < frames; i++) {
+        pump(peer, 1);
+        fc2_poll();
+        if (dte_find(needle))
+            return;
+        if (peer_done)
+            return;
+    }
+}
+
+static void release_post_page(fax_state_t *peer)
+{
+    at("AT+FDR");
+    pump(peer, 30 * 50);
+    for (int i = 0; i < 20; i++)
+        fc2_poll();
 }
 
 /* ------------------------------------------------------------------ */
@@ -519,14 +553,12 @@ static void test_receive(int fbo)
     dte_reset();
     fc2_on_connected();
     at("AT+FDR");
-    pump(peer, 60 * 50);
+    pump_until(peer, 60 * 50, "+FPS:");
+    /* T.32 8.3.4.3: release the post page response so the session can end. */
+    release_post_page(peer);
 
     check(peer_done, "the far end reached T.30 phase E");
     check(peer_status == T30_ERR_OK, "the far end reports a good session");
-
-    /* Drain the reports the session finished with. */
-    for (int i = 0; i < 20; i++)
-        fc2_poll();
 
     check(dte_saw("+FCS:"), "+FDR reported the session parameters");
     check(dte_saw("CONNECT"), "+FDR answered CONNECT");
@@ -767,6 +799,68 @@ static void test_bit_order_is_real(void)
 }
 
 /*
+ * T.32 8.3.4.3, 8.4.3 and 8.5.2.2: the DCE holds the post page response until
+ * the DTE releases it with the next +FDR, so the DTE can read the page status
+ * and change it.  Two things have to be true and the first is easy to miss: it
+ * must not go out BEFORE the release, and the DTE's value must be what goes
+ * out.  A DCE that sent MCF straight away and ignored +FPS would still pass a
+ * page comparison and still report OK.
+ */
+static void test_post_page_hold(void)
+{
+    fax_state_t *peer;
+
+    printf("post page response held for the DTE (T.32 8.3.4.3, 8.4.3)\n");
+
+    peer_ecm = 1;
+    peer_t6 = 1;
+    peer_nsf = NULL;
+    peer_nss = NULL;
+    peer_interrupt = 0;
+
+    fc2_select(0);
+    fc2_select(1);
+    at("AT+FCR=1");
+    at("AT+FNR=0,1,0,0");
+    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+    at("ATA");
+
+    peer = peer_start(1, PEER_TX, NULL);
+    check(peer != NULL, "the far-end fax terminal starts");
+    if (!peer)
+        return;
+
+    dte_reset();
+    fc2_on_connected();
+    at("AT+FDR");
+    pump_until(peer, 60 * 50, "+FPS:");
+
+    check(dte_saw("+FPS:1,"), "the page arrives and is reported good");
+
+    /*
+     * There is deliberately no "and nothing has gone out yet" check here.
+     * One was written and measured: it reads 0 with the hold removed as well,
+     * so it cannot fail and proves nothing.  The assertion below is what
+     * carries this -- without the hold an MCF goes out at the end of the page
+     * and the DTE's RTN never does, so it fails, which was confirmed by
+     * removing the hold and watching it.
+     */
+
+    /* T.32 8.5.2.2: the DTE writes a different verdict.  2 is RTN, "page bad,
+     * retrain requested" -- the everyday reason to hold the response. */
+    at("AT+FPS=2");
+    release_post_page(peer);
+
+    check(peer_saw_ppr == (T30_RTN & 0xFE),
+          "the DTE's +FPS=2 is what reaches the far end, as RTN");
+    if (peer_saw_ppr != (T30_RTN & 0xFE))
+        printf("       (far end saw post page response 0x%02X)\n", peer_saw_ppr);
+
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
+/*
  * T.32 8.5.2.1 +FIE and 8.4.4.2 +FVO -- procedure interrupts.
  *
  * There are two of them and they go opposite ways.  A transmitting DTE asks
@@ -902,9 +996,8 @@ static void test_procedure_interrupt(void)
         dte_reset();
         fc2_on_connected();
         at("AT+FDR");
-        pump(peer, 60 * 50);
-        for (int i = 0; i < 20; i++)
-            fc2_poll();
+        pump_until(peer, 60 * 50, "+FPS:");
+        release_post_page(peer);
         check(peer_saw_ppm == (T30_PRI_EOP & 0xFE),
               "the far end sends a PRI-Q post page message");
         if (fie) {
@@ -923,14 +1016,8 @@ static void test_procedure_interrupt(void)
     /*
      * 8.3.4.8 the other way round: a RECEIVING DTE asks for an interrupt by
      * setting +FPS to 4 or 5, which makes T.30's post page RESPONSE a PIN or
-     * PIP.  SpanDSP left that as a TODO, so it is a small addition to its
-     * receiver; the check is that the far end sees the PIP on the wire.
-     *
-     * The request has to be in before the page completes.  8.3.4.3 has the
-     * DCE hold the post page response until the next +FDR releases it, which
-     * would give the DTE a window after seeing the page; this DCE does not
-     * hold it (see the deviations in docs/fax_class_at.md), so +FPS is set
-     * with the +FDR that starts the reception.
+     * PIP.  In the order 8.5.2.2 describes: take the page, read the status
+     * the DCE reported, write a new one, and let the next +FDR release it.
      */
     {
         fax_state_t *peer;
@@ -947,11 +1034,12 @@ static void test_procedure_interrupt(void)
         if (peer) {
             dte_reset();
             fc2_on_connected();
-            at("AT+FPS=5");            /* PIP: page good, interrupt requested */
             at("AT+FDR");
-            pump(peer, 60 * 50);
-            for (int i = 0; i < 20; i++)
-                fc2_poll();
+            pump_until(peer, 60 * 50, "+FPS:");
+            check(dte_saw("+FPS:1,"), "the page was reported as good");
+            /* Now overwrite it: PIP is "page good, interrupt requested". */
+            at("AT+FPS=5");
+            release_post_page(peer);
             check(peer_saw_ppr == (T30_PIP & 0xFE),
                   "+FPS=5 before +FDR answers the page with PIP (8.3.4.8)");
             if (peer_saw_ppr != (T30_PIP & 0xFE))
@@ -1087,9 +1175,8 @@ static void test_fns(void)
         dte_reset();
         fc2_on_connected();
         at("AT+FDR");
-        pump(peer, 60 * 50);
-        for (int i = 0; i < 20; i++)
-            fc2_poll();
+        pump_until(peer, 60 * 50, "+FPS:");
+        release_post_page(peer);
         check(dte_saw("+FNS:AD 11 22"),
               "a received NSS is reported as +FNS: (8.4.2.4)");
         check(!dte_saw("+FNF:AD 11 22"),
@@ -1267,9 +1354,8 @@ static void test_poll_remote(void)
     dte_reset();
     fc2_on_connected();
     at("AT+FDR");
-    pump(peer, 60 * 50);
-    for (int i = 0; i < 20; i++)
-        fc2_poll();
+    pump_until(peer, 60 * 50, "+FPS:");
+    release_post_page(peer);
 
     check(peer_done && peer_status == T30_ERR_OK,
           "the far end reports a good polled session");
@@ -1437,6 +1523,7 @@ int main(void)
     test_receive(1);
     test_bit_order_is_real();
     test_fnr();
+    test_post_page_hold();
     test_procedure_interrupt();
     test_fns();
     test_fbu();

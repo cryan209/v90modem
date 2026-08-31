@@ -3295,7 +3295,17 @@ static int process_rx_dcs(t30_state_t *s, const uint8_t *msg, int len)
 static void assess_copy_quality(t30_state_t *s, uint8_t fcf)
 {
     int quality;
-    
+
+    if (s->post_page_response_held)
+    {
+        /* The response to this post page message has already been worked out,
+           and is waiting for the application to release it. A repeat of the
+           message from the far end, which is what it does when we do not
+           answer promptly, must not be assessed as a new page. */
+        span_log(&s->logging, SPAN_LOG_FLOW, "Post page message repeated while the response is held\n");
+        return;
+    }
+    /*endif*/
     quality = copy_quality(s);
     switch (quality)
     {
@@ -3350,8 +3360,42 @@ static void assess_copy_quality(t30_state_t *s, uint8_t fcf)
         span_log(&s->logging, SPAN_LOG_FLOW, "Requesting a procedure interrupt with %s\n", t30_frametype(s->last_rx_page_result));
     }
     /*endif*/
+    if (s->hold_post_page_response)
+    {
+        /* Hold it until the application releases it, so it can inspect and
+           change the response first. */
+        s->post_page_response_held = true;
+        span_log(&s->logging, SPAN_LOG_FLOW, "Holding the %s post page response\n", t30_frametype(s->last_rx_page_result));
+        return;
+    }
+    /*endif*/
     set_state(s, T30_STATE_III_Q);
     send_simple_frame(s, s->last_rx_page_result);
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) t30_set_post_page_response_hold(t30_state_t *s, bool hold)
+{
+    s->hold_post_page_response = hold;
+    if (!hold)
+        s->post_page_response_held = false;
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) t30_release_post_page_response(t30_state_t *s, int ppr)
+{
+    if (!s->post_page_response_held)
+        return -1;
+    /*endif*/
+    s->post_page_response_held = false;
+    if (ppr >= 0)
+        s->last_rx_page_result = ppr;
+    /*endif*/
+    span_log(&s->logging, SPAN_LOG_FLOW, "Releasing the %s post page response\n", t30_frametype(s->last_rx_page_result));
+    set_state(s, T30_STATE_III_Q);
+    send_simple_frame(s, s->last_rx_page_result);
+    return 0;
 }
 /*- End of function --------------------------------------------------------*/
 

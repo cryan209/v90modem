@@ -598,6 +598,24 @@ SPAN_DECLARE(void) t30_set_document_put_handler(t30_state_t *s, t30_document_put
     \param s The T.30 context.
     \return A pointer to the logging context, or NULL.
 */
+/*! Hold back the post page response, so the application can inspect and change
+    it before it is sent. This is what ITU-T T.32 8.3.4.3 and 8.4.3 require of a
+    service class 2.0 DCE: the receiving DTE reads the page status, may modify
+    it, and releases the response with its next +FDR command.
+    \brief Hold back the post page response.
+    \param s The T.30 context.
+    \param hold True to hold post page responses. */
+SPAN_DECLARE(void) t30_set_post_page_response_hold(t30_state_t *s, bool hold);
+
+/*! Release a held post page response.
+    \brief Release a held post page response.
+    \param s The T.30 context.
+    \param ppr The T.30 post page response to send (T30_MCF, T30_RTN, T30_RTP,
+           T30_PIN or T30_PIP), or a negative value to send the one the DCE
+           worked out for itself.
+    \return 0 if a response was released, -1 if none was being held. */
+SPAN_DECLARE(int) t30_release_post_page_response(t30_state_t *s, int ppr);
+
 SPAN_DECLARE(logging_state_t *) t30_get_logging_state(t30_state_t *s);
 
 #if defined(__cplusplus)

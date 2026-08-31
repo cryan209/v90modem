@@ -127,6 +127,30 @@ reverse the octets in those reports and nothing else. Note 3 is explicit that
 `+FBO` does **not** affect the `+FNC`, `+FNF` or `+FNS` responses, so those
 stay in the frame's own order.
 
+### The post page response is held for the DTE (8.3.4.3, 8.4.3, 8.5.2.2)
+
+A receiving DCE does not answer the far end's post page message on its own. It
+works out the response, reports the page to the DTE, and **holds** it; the
+DTE's next `+FDR` releases it, carrying whatever the DTE left in `+FPS`. That
+is how a DTE refuses a page it did not like (`+FPS=2`, RTN, retrain requested)
+or asks for a procedure interrupt (`+FPS=4`/`5`) after seeing it.
+
+So a receiving session needs **one more `+FDR` than it has pages**, and the last
+one is what Table 17 completes with `+FHS:` and `OK`.
+
+**A second change to the vendored SpanDSP**, which sends the response the moment
+the page ends. `t30_set_post_page_response_hold()` makes it stop there instead,
+and `t30_release_post_page_response(s, ppr)` sends it with the DTE's verdict.
+A repeat of the post page message while the response is held — which is what
+the far end does when nobody answers — is ignored rather than assessed as a new
+page. Both are guarded by a flag nothing sets unless a class 2.0 DTE is
+driving, so ordinary sessions are untouched.
+
+**The DTE has to be quick.** T.30's timers do not wait for it: the far end
+repeats its post page message after a few seconds and gives up after a few
+repeats. Nothing here bounds the wait, so a DTE that sits on a held response
+loses the call.
+
 ### Procedure interrupts: +FIE, +FVO (8.5.2.1, 8.4.4.2, 8.3.3.8, 8.3.4.8)
 
 There are two of them and they go opposite ways.
@@ -136,7 +160,8 @@ stream before the page terminator. T.30 carries the request in the post page
 message, which becomes a PRI-Q, and the remote grants by answering PIN or PIP.
 
 **A receiving DTE asks** by setting `+FPS` to 4 (PIN) or 5 (PIP) before the
-`+FDR`, which makes T.30's post page *response* a PIN or PIP.
+`+FDR` that releases the held post page response, which makes that response a
+PIN or PIP.
 
 `+FIE=1` enables all of it. With `+FIE=0` (the default) a remote's requests are
 ignored and not reported, and the PRI-Q codes in `+FET:` are replaced by their
@@ -328,13 +353,9 @@ direction rather than on an invented value.
 that sends `<DC2>` is unharmed — it is discarded — but a DTE relying on the
 pause to get ready does not get it.
 
-**The post page response is not held for the DTE.** 8.5.2.2 and 8.3.4.3 let a
-receiving DTE write a modified `+FPS` before the next `+FDR`, which releases the
-post page message — that is how a DTE would request a retrain, or a procedure
-interrupt after seeing the page. Here T.30 answers on its own, so a receive-side
-`+FPS` request has to be in before the page completes; the tests set it with the
-`+FDR` that starts the reception. Requesting a *retrain* (`+FPS=2`) this way is
-not implemented at all.
+**A retrain requested with `+FPS=2` is sent, but nothing follows it up.** The
+RTN reaches the far end, and what it does about it is its business; this DCE
+does not re-request the page.
 
 **`+FVO` on a transmit-side interrupt does not accompany the `+FDT` result.**
 Table 15 pairs them, but a `+FDT` issued before the call has already completed
@@ -381,6 +402,14 @@ a format it did not ask for, would pass a result-code check.
 the received DIS from echoing our own parameters back; both would look right
 otherwise. The `+FNF:` check uses an NSF the far end was given, so the hex is
 compared against a known frame.
+
+`test_post_page_hold` takes a page, overwrites the good verdict the DCE
+reported with `+FPS=2`, and requires **RTN** on the wire at the far end. There
+is deliberately no "and nothing was sent before the release" check beside it: one
+was written and measured, it reads the same with the hold removed, so it cannot
+fail. The RTN assertion is what carries it — without the hold an MCF goes out at
+the end of the page and the DTE's RTN never does — and that was confirmed by
+removing the hold and watching it fail.
 
 `test_procedure_interrupt` checks both directions **on the wire**, from the far
 end's own frame handler, because both are a substitution inside a frame that

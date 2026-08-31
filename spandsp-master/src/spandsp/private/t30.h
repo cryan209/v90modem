@@ -243,6 +243,12 @@ struct t30_state_s
 
     /*! \brief True if a local T.30 interrupt is pending. */
     bool local_interrupt_pending;
+    /*! \brief True if the post page response should be held back until the
+               application releases it. This lets a T.32 service class 2.0 DTE
+               inspect and modify the response before it is sent. */
+    bool hold_post_page_response;
+    /*! \brief True while a post page response is being held back. */
+    bool post_page_response_held;
     /*! \brief The common ground in compression schemes between the local and far ends. */
     int mutual_compressions;
     /*! \brief The common group of supported bi-level image resolutions. */
