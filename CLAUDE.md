@@ -246,8 +246,15 @@ nothing mid-document); the receiver had no DCS case in `process_state_iii_q()`
 so the retrain Figure 5-2d requires was torn down as an unexpected frame; and
 `assess_copy_quality()` released the T.4 receiver on the EOP before the
 verdict, so the repeat reopened and truncated the output file and the page
-could not be handed to the DTE. **Still a deviation:** the DCE resends from
-the document the DTE already gave it, rather than II.7's second `+FDT`.
+could not be handed to the DTE. The page that goes again is the DTE's, from
+II.7's second `+FDT`: `t30_set_retransmit_hold()` stops T.30 after the RTN
+instead of repeating a page it already has, and `t30_resume_retransmission()`
+starts whatever document is set by then. Mid-document the DTE supplies the
+rest of the document, since phase B starts a document at page one. **The EOP
+test hands over a DIFFERENT image the second time** -- that is what makes it a
+test of provenance; a DCE resending its own copy passes everything else.
+`+FCT` bounds the wait, or the far end sits in phase B until its own timers
+give up.
 
 Neither class has hardware interop. See `docs/fax_class_at.md`.
 
