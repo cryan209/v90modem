@@ -81,12 +81,78 @@ received offer and selected rate agree with the transmitted words.
 
 E now hands the recovered scrambler and differential state to the existing
 V.17 data decoder, while the transmitter hands its matching state to the V.17
-data encoder and switches constellations without a waveform reset. The native
-regression proves more than 1000 arbitrary PRBS bits with zero errors at 4800
-bit/s through both G.711 laws. The same path acquires and negotiates all five
-rates, but dense-mode data is not yet clean enough to claim: decision-directed
-carrier/equalizer operation after the TRN handoff still degrades at 7200 and
-above.
+data encoder and switches constellations without a waveform reset.
+
+## The B1 segment, and the seam it exposed
+
+A real 6 B1 marks segment now sits between E and data on both sides: the
+transmitter forces mark bits through the ordinary V.17 encoder
+(`v32bis_b1_bits_remaining`), and the receiver regenerates the same symbols and
+uses them as **supervised** training targets on the data constellation.
+
+The regeneration is exact.  Dumping the transmitter's symbol index against the
+receiver's reconstruction gives **0 mismatches in 128 symbols at every one of
+the five rates, in both laws** -- so B1 is not a suspect for anything below,
+and the training targets are right.
+
+Two defects sat at the handoff, both invisible at 4800 and fatal above it:
+
+- **The trellis emits the symbol from `t - 15`**, so its first 15 symbols of
+  output after the handoff are traceback fill.  Those bits must be neither
+  delivered to circuit 104 nor **shifted into the descrambler**: the V.32bis
+  descrambler is a 23 bit self-synchronizing register, and letting the fill in
+  destroys the seed taken from the end of B1.  The symptom was 11 bit errors
+  confined to the first 24 bits at 7200.
+  Suppressing *more* bits is the wrong fix and was measured: it deletes real
+  data and desynchronizes the stream (11 errors becomes 976).
+- **`s->diff` is updated from the trellis output on every symbol**, fill
+  included, so the differential state seeded from the end of B1 was overwritten
+  before the first real symbol used it.  The residue was a single wrong line
+  bit, which the descrambler tripled into errors at bits 1, 19 and 24 -- `n`,
+  `n+18` and `n+23`, the answerer's two descrambler taps.  Read that signature
+  directly: it says one bit, not three.
+
+With both fixed, **4800 and 7200 recover the PRBS with zero errors in both
+G.711 laws**, and those two rows are asserted in `make test`.
+
+## Why 9600 and above are still open
+
+Not the handoff, and not B1.  Measured during supervised TRN, with known
+targets on a clean loopback:
+
+    carrier phase error   within 0.1 degree
+    gain ratio            1.00
+    equalized |error|     0.227 rising to 0.55 of a unit over 1280 symbols
+
+Carrier and AGC are therefore exonerated; the residual is dispersive, and it
+**grows with training**.  That is gradient noise: the shared V.17 LMS step is
+unnormalized and fixed, so once converged it keeps injecting noise
+proportional to the input energy.  A frozen equalizer is not the answer either
+-- it breaks even 4800, so the equalizer is doing real work.
+
+The step is now annealed: fast for the first 160 TRN symbols, then a tenth of
+that.  It stops the growth (plateau 0.42 instead of 0.55) and takes 9600 from
+258 bit errors to 21.  Swept over both laws at all five rates, 160/320/640 fast
+symbols give 4539/5144/5415 total bit errors.
+
+The floor of 0.42 is what remains, against a constellation half-spacing of 1.0.
+A 4 or 8 point decision survives it; 32, 64 and 128 point ones do not.  The
+principled fix is an energy-normalized step, which is implemented behind
+`V32BIS_NLMS=1` and **is not the default**, because at the `eq_delta` the plain
+step was tuned for it is worse -- 9433 total bit errors against 5144.  It needs
+its own step retune before it can be adopted, and that retune is the open work.
+
+`v17rx.c` and `v17tx.c` are shared with the V.17 fax modems, so all of the
+above is scoped to the V.32bis path and the full suite is green.
+
+Diagnostics, all env-gated: `V32BIS_B1_SYMBOLS` (B1 length; longer does not
+help, 256 measured slightly worse), `V32BIS_TRN_FAST`, `V32BIS_EQ_SLOW`,
+`V32BIS_NLMS`.
+
+This is still not a live modem claim. `v32bis_prepare_startup_tx()` emits a
+self-contained test burst rather than the reactive caller/answerer 6
+sequence, the allocated echo canceller is not yet in the duplex sample path,
+and V.8/modem-engine/V.42/PTY integration has not landed.
 
 This is still not a live modem claim. `v32bis_prepare_startup_tx()` emits a
 self-contained test burst rather than the reactive caller/answerer §6

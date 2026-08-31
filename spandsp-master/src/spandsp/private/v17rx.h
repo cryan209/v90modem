@@ -76,6 +76,9 @@ struct v17_rx_state_s
     int (*symbol_sink)(void *user_data, const complexf_t *symbol);
 #endif
     void *symbol_sink_user_data;
+    bool symbol_sink_uses_data_constellation;
+    /*! \brief Normalize the equalizer LMS step by the buffer energy (V.32bis). */
+    bool eq_normalized_lms;
 
 #if defined(SPANDSP_USE_FIXED_POINTx)
     /*! \brief The scaling factor assessed by the AGC algorithm. */
@@ -143,6 +146,8 @@ struct v17_rx_state_s
     int diff;
     /*! \brief The register for the data scrambler. */
     uint32_t scramble_reg;
+    /*! \brief Post-B1 trellis traceback bits hidden while circuit 104 is clamped. */
+    int v32bis_data_bits_suppress;
     /*! \brief Scrambler tap */
     int scrambler_tap;
 

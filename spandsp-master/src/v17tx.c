@@ -302,7 +302,12 @@ static __inline__ complexf_t getbaud(v17_tx_state_t *s)
     bits = 0;
     for (i = 0;  i < s->bits_per_symbol;  i++)
     {
-        if ((bit = s->current_get_bit(s->get_bit_user_data)) == SIG_STATUS_END_OF_DATA)
+        if (s->v32bis_b1_bits_remaining > 0)
+        {
+            bit = 1;
+            s->v32bis_b1_bits_remaining--;
+        }
+        else if ((bit = s->current_get_bit(s->get_bit_user_data)) == SIG_STATUS_END_OF_DATA)
         {
             /* End of real data. Switch to the fake get_bit routine, until we
                have shut down completely. */
@@ -448,6 +453,7 @@ SPAN_DECLARE(int) v17_tx_restart(v17_tx_state_t *s, int bit_rate, bool tep, bool
     }
     /*endswitch*/
     s->bit_rate = bit_rate;
+    s->v32bis_b1_bits_remaining = 0;
     /* NB: some modems seem to use 3 instead of 1 for long training */
     s->diff = (short_train)  ?  0  :  1;
 #if defined(SPANDSP_USE_FIXED_POINT)

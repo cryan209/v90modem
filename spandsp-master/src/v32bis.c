@@ -170,6 +170,60 @@ SPAN_DECLARE(void) v32bis_set_put_bit(v32bis_state_t *s, span_put_bit_func_t put
 #define V32BIS_S_SYMBOLS         256
 #define V32BIS_S_BAR_SYMBOLS     16
 #define V32BIS_SCRAMBLER_MASK    0x7FFFFF
+/*! The V.17 equalizer LMS step, fast and annealed. Kept in step with
+    EQUALIZER_FAST_ADAPTION_DELTA in v17rx.c. */
+#define V32BIS_EQ_DELTA_FAST     (0.21f/33)
+#define V32BIS_EQ_DELTA_SLOW     (v32bis_eq_delta_slow())
+/*! TRN symbols spent at the fast step before annealing. */
+#define V32BIS_TRN_FAST_SYMBOLS  (v32bis_trn_fast_symbols())
+
+/*! Energy-normalized LMS. Default OFF: measured over the five rate rows in
+    both laws it is worse than the plain step at the step size the plain step
+    was tuned for (9433 bit errors against 5144), so it needs its own eq_delta
+    retune before it can be adopted. V32BIS_NLMS=1 enables it. */
+static bool v32bis_use_nlms(void)
+{
+    const char *e = getenv("V32BIS_NLMS");
+
+    return (e != NULL  &&  atoi(e) != 0);
+}
+/*- End of function --------------------------------------------------------*/
+
+static float v32bis_eq_delta_slow(void)
+{
+    const char *e = getenv("V32BIS_EQ_SLOW");
+
+    return (e != NULL) ? (float) atof(e)*V32BIS_EQ_DELTA_FAST
+                       : 0.1f*V32BIS_EQ_DELTA_FAST;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int v32bis_trn_fast_symbols(void)
+{
+    const char *e = getenv("V32BIS_TRN_FAST");
+    int n;
+
+    if (e != NULL  &&  (n = atoi(e)) >= 0)
+        return n;
+    /* Swept over both laws at all five rates: 160/320/640 give 4539/5144/5415
+       total bit errors at the 0.1 anneal. */
+    return 160;
+}
+/*- End of function --------------------------------------------------------*/
+/*! ITU-T V.32bis 6.  B1 is the marks segment between E and data. */
+#define V32BIS_B1_SYMBOLS        (v32bis_b1_symbols())
+
+static int v32bis_b1_symbols(void)
+{
+    const char *e = getenv("V32BIS_B1_SYMBOLS");
+    int n;
+
+    if (e != NULL  &&  (n = atoi(e)) > 0)
+        return n;
+    return 128;
+}
+/*- End of function --------------------------------------------------------*/
+
 
 static bool valid_rate_mask(int rates)
 {
@@ -472,8 +526,15 @@ enum
     V32BIS_RX_R_FIRST,
     V32BIS_RX_R_SECOND,
     V32BIS_RX_E,
+    V32BIS_RX_B1,
     V32BIS_RX_DATA
 };
+
+#if defined(SPANDSP_USE_FIXED_POINTx)
+static int v32bis_startup_symbol_sink(void *user_data, const complexi16_t *symbol);
+#else
+static int v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol);
+#endif
 
 static float startup_power(const complexf_t *z)
 {
@@ -618,6 +679,47 @@ static void startup_track_gain(v32bis_state_t *s, const complexf_t *z, int state
 }
 /*- End of function --------------------------------------------------------*/
 
+static int startup_b1_symbol(v32bis_state_t *s)
+{
+    static const uint8_t differential_4800[4][4] =
+    {
+        {2, 3, 0, 1}, {0, 2, 1, 3}, {3, 1, 2, 0}, {1, 0, 3, 2}
+    };
+    static const uint8_t differential_coded[4][4] =
+    {
+        {0, 1, 2, 3}, {1, 2, 3, 0}, {2, 3, 0, 1}, {3, 0, 1, 2}
+    };
+    static const uint8_t convolutional[8][4] =
+    {
+        {0, 2, 3, 1}, {4, 7, 5, 6}, {1, 3, 2, 0}, {7, 4, 6, 5},
+        {2, 0, 1, 3}, {6, 5, 7, 4}, {3, 1, 0, 2}, {5, 6, 4, 7}
+    };
+    int bits;
+    int bit;
+    int i;
+    int tap;
+
+    tap = (!s->calling_party) ? 17 : 4;
+    bits = 0;
+    for (i = 0;  i < s->rx.bits_per_symbol;  i++)
+    {
+        bit = startup_scramble_bit(&s->startup_rx_b1_reg, tap, 1);
+        bits |= bit << i;
+    }
+    if (s->rx.bits_per_symbol == 2)
+    {
+        s->startup_rx_b1_diff = differential_4800[s->startup_rx_b1_diff][bits & 3];
+        return s->startup_rx_b1_diff;
+    }
+    s->startup_rx_b1_diff = differential_coded[s->startup_rx_b1_diff][bits & 3];
+    s->startup_rx_b1_convolution =
+        convolutional[s->startup_rx_b1_convolution][s->startup_rx_b1_diff];
+    return ((bits << 1) & 0x78)
+         | (s->startup_rx_b1_diff << 1)
+         | ((s->startup_rx_b1_convolution >> 2) & 1);
+}
+/*- End of function --------------------------------------------------------*/
+
 static int startup_enter_data_rx(v32bis_state_t *s,
                                  int bit_rate,
                                  uint32_t descrambler_register,
@@ -752,8 +854,14 @@ static void startup_finish_word(v32bis_state_t *s)
         }
         s->startup_selected_rate = rate;
         s->bit_rate = rate;
-        s->startup_complete = true;
-        s->startup_rx_stage = V32BIS_RX_DATA;
+        s->startup_rx_b1_pos = 0;
+        s->startup_rx_b1_reg = reg;
+        s->startup_rx_b1_diff = diff;
+        s->startup_rx_b1_convolution = 0;
+        s->startup_rx_stage = V32BIS_RX_B1;
+        s->rx.symbol_sink = v32bis_startup_symbol_sink;
+        s->rx.symbol_sink_user_data = s;
+        s->rx.symbol_sink_uses_data_constellation = true;
     }
     s->startup_rx_word_pos = 0;
 }
@@ -836,6 +944,20 @@ static int v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
             expected |= state << 1;
         startup_track_gain(s, &z, expected);
         s->startup_rx_trn_diff = expected;
+        /* The V.17 LMS step is unnormalized and fixed.  Held at the fast value
+           for the whole of TRN it converges in a couple of hundred symbols and
+           then adds gradient noise for the remaining thousand: measured over
+           TRN the equalized error RISES from 0.23 to 0.55 of a unit while
+           carrier phase stays inside 0.1 degree and gain at 1.00, so the
+           residual is dispersive, not a loop that has lost lock.  A 4 point
+           decision does not care; a 128 point one cannot survive it.  Converge
+           fast, then anneal. */
+        /* v17_rx_restart() clears this, and it runs after init, so it has to be
+           (re)asserted from inside the startup path rather than at init. */
+        s->rx.eq_normalized_lms = v32bis_use_nlms();
+        s->rx.eq_delta = (s->startup_rx_trn_pos < V32BIS_TRN_FAST_SYMBOLS)
+                       ? V32BIS_EQ_DELTA_FAST
+                       : V32BIS_EQ_DELTA_SLOW;
         if (++s->startup_rx_trn_pos >= 1280)
         {
             s->startup_rx_stage = V32BIS_RX_R_FIRST;
@@ -850,6 +972,38 @@ static int v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
         if (s->startup_rx_word_pos >= 8)
             startup_finish_word(s);
         return -1;
+    case V32BIS_RX_B1:
+        state = startup_b1_symbol(s);
+        if (++s->startup_rx_b1_pos >= V32BIS_B1_SYMBOLS)
+        {
+            s->rx.scramble_reg = s->startup_rx_b1_reg;
+            s->rx.diff = s->startup_rx_b1_diff;
+            for (expected = 0;  expected < 8;  expected++)
+                s->rx.distances[expected] = 99.0f;
+            s->rx.distances[s->startup_rx_b1_convolution] = 0.0f;
+            memset(s->rx.full_path_to_past_state_locations, 0,
+                   sizeof(s->rx.full_path_to_past_state_locations));
+            memset(s->rx.past_state_locations, 0,
+                   sizeof(s->rx.past_state_locations));
+            s->rx.trellis_ptr = 14;
+            /* The trellis emits the symbol from t - (V17_TRELLIS_LOOKBACK_DEPTH - 1),
+               so its first 15 symbols of output are traceback fill rather than
+               B1.  Those bits must be neither delivered to circuit 104 nor
+               shifted into the descrambler: scramble_reg is seeded above with
+               the last 23 line bits of B1, which is exactly what the first real
+               data bit needs, and letting the fill in destroys it.  The uncoded
+               4800 bit/s mode has no trellis and so no fill to hide. */
+            s->rx.v32bis_data_bits_suppress =
+                (s->rx.bits_per_symbol == 2)
+              ? 0
+              : (V17_TRELLIS_LOOKBACK_DEPTH - 1)*s->rx.bits_per_symbol;
+            s->startup_complete = true;
+            s->startup_rx_stage = V32BIS_RX_DATA;
+            s->rx.symbol_sink = NULL;
+            s->rx.symbol_sink_user_data = NULL;
+            s->rx.symbol_sink_uses_data_constellation = false;
+        }
+        return state;
     case V32BIS_RX_DATA:
     default:
         return -1;
@@ -926,6 +1080,7 @@ SPAN_DECLARE(int) v32bis_prepare_startup_tx(v32bis_state_t *s, int remote_rates)
     s->tx.scramble_reg = word_reg;
     s->tx.diff = word_diff;
     s->tx.convolution = 0;
+    s->tx.v32bis_b1_bits_remaining = V32BIS_B1_SYMBOLS*s->tx.bits_per_symbol;
     s->tx.in_training = false;
     s->tx.current_get_bit = s->tx.get_bit;
     s->tx.symbol_source = v32bis_startup_symbol_source;
@@ -970,6 +1125,10 @@ static void startup_rx_reset(v32bis_state_t *s)
     s->startup_rx_trn_diff = V32BIS_STARTUP_A;
     s->startup_rx_word_pos = 0;
     s->startup_rx_first_r = 0;
+    s->startup_rx_b1_pos = 0;
+    s->startup_rx_b1_reg = 0;
+    s->startup_rx_b1_diff = V32BIS_STARTUP_A;
+    s->startup_rx_b1_convolution = 0;
     s->startup_remote_rates = 0;
     s->startup_selected_rate = 0;
     s->startup_complete = false;
@@ -1018,6 +1177,7 @@ SPAN_DECLARE(int) v32bis_rx_restart(v32bis_state_t *s, int bit_rate)
     startup_rx_reset(s);
     s->rx.symbol_sink = v32bis_startup_symbol_sink;
     s->rx.symbol_sink_user_data = s;
+
     s->bit_rate = bit_rate;
     return 0;
 }
@@ -1039,6 +1199,7 @@ SPAN_DECLARE(int) v32bis_restart(v32bis_state_t *s, int bit_rate)
     s->tx.symbol_source_user_data = NULL;
     s->rx.symbol_sink = v32bis_startup_symbol_sink;
     s->rx.symbol_sink_user_data = s;
+
     s->bit_rate = bit_rate;
     return 0;
 }

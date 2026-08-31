@@ -31,6 +31,8 @@ typedef struct
     uint32_t state;
     int total;
     int errors;
+    int first_err;
+    int last_err;
 } bit_stats_t;
 
 static int pattern_bit(void *user_data)
@@ -51,7 +53,15 @@ static void collect_bit(void *user_data, int bit)
         return;
     expected = pattern_bit(&stats->state);
     stats->total++;
-    stats->errors += (bit != expected);
+    if (bit != expected)
+    {
+        if (stats->errors == 0)
+            stats->first_err = stats->total;
+        stats->last_err = stats->total;
+        stats->errors++;
+        if (getenv("V32BIS_ERR_DUMP"))
+            fprintf(stderr, "  err at bit %d\n", stats->total);
+    }
 }
 
 static int test_startup_logic(void)
@@ -167,20 +177,20 @@ static int test_startup_logic(void)
     return 0;
 }
 
-static int test_symbol_domain_handoff(int alaw)
+static int test_symbol_domain_handoff(int alaw, int bit_rate, int rate_mask)
 {
     int16_t audio[160];
     int16_t bearer[160];
     uint32_t transmitted = 0x13579BDFU;
-    bit_stats_t received = {0x13579BDFU, 0, 0};
+    bit_stats_t received = {0x13579BDFU, 0, 0, 0, 0};
     v32bis_state_t *tx;
     v32bis_state_t *rx;
     int i;
     int block;
     int queued;
 
-    tx = v32bis_init(NULL, 4800, true, pattern_bit, &transmitted, put_bit, NULL);
-    rx = v32bis_init(NULL, 4800, false, pattern_bit, &transmitted, collect_bit, &received);
+    tx = v32bis_init(NULL, bit_rate, true, pattern_bit, &transmitted, put_bit, NULL);
+    rx = v32bis_init(NULL, bit_rate, false, pattern_bit, &transmitted, collect_bit, &received);
     if (tx == NULL  ||  rx == NULL)
     {
         fprintf(stderr, "V.32bis symbol-domain modem initialisation failed\n");
@@ -190,7 +200,7 @@ static int test_symbol_domain_handoff(int alaw)
             v32bis_free(rx);
         return -1;
     }
-    queued = v32bis_prepare_startup_tx(tx, V32BIS_RATE_4800);
+    queued = v32bis_prepare_startup_tx(tx, rate_mask);
     if (queued != 1576)
     {
         fprintf(stderr, "V.32bis queued %d startup symbols, expected 1576\n", queued);
@@ -220,18 +230,22 @@ static int test_symbol_domain_handoff(int alaw)
     if (v32bis_startup_tx_symbols_sent(tx) != queued
         || v32bis_startup_rx_symbols_seen(rx) < 1500
         || !v32bis_startup_complete(rx)
-        || v32bis_startup_remote_rates(rx) != V32BIS_RATE_4800
-        || v32bis_current_bit_rate(rx) != 4800
+        || v32bis_startup_remote_rates(rx) != rate_mask
+        || v32bis_current_bit_rate(rx) != bit_rate
         || received.total < 1000
         || received.errors != 0)
     {
         fprintf(stderr,
-                "V.32bis %s handoff failed: tx=%d rx=%d data=%d/%d errors\n",
+                "V.32bis %s %d bit/s handoff failed: tx=%d rx=%d "
+                "rate=%d data=%d bits %d errors\n",
                 alaw ? "A-law" : "u-law",
+                bit_rate,
                 v32bis_startup_tx_symbols_sent(tx),
                 v32bis_startup_rx_symbols_seen(rx),
-                received.errors,
-                received.total);
+                v32bis_current_bit_rate(rx),
+                received.total,
+                received.errors);
+        fprintf(stderr, "  first error bit %d, last %d\n", received.first_err, received.last_err);
         v32bis_free(tx);
         v32bis_free(rx);
         return -1;
@@ -249,9 +263,47 @@ int main(void)
     v32bis_state_t *modem;
     size_t i;
 
-    if (test_startup_logic() != 0
-        || test_symbol_domain_handoff(0) != 0
-        || test_symbol_domain_handoff(1) != 0)
+    static const struct
+    {
+        int bit_rate;
+        int mask;
+        int asserted;
+    } handoff_rates[] =
+    {
+        /* 4800 and 7200 recover the PRBS with zero errors in both laws.
+           9600 and above do not yet: the shared V.17 equalizer's LMS step is
+           unnormalized, and the gradient noise it leaves (0.42 of a unit
+           against a constellation half-spacing of 1.0) is survivable by a 4 or
+           8 point decision and not by a 32, 64 or 128 point one.  Those rows
+           are measured and reported rather than asserted or hidden.
+           See docs/v32bis_compliance_plan.md. */
+        {4800, V32BIS_RATE_4800, 1},
+        {7200, V32BIS_RATE_7200, 1},
+        {9600, V32BIS_RATE_9600, 0},
+        {12000, V32BIS_RATE_12000, 0},
+        {14400, V32BIS_RATE_14400, 0}
+    };
+    size_t r;
+
+    int handoff_failures = 0;
+
+    if (test_startup_logic() != 0)
+        return 1;
+    for (r = 0;  r < sizeof(handoff_rates)/sizeof(handoff_rates[0]);  r++)
+    {
+        int bad = 0;
+
+        if (test_symbol_domain_handoff(0, handoff_rates[r].bit_rate, handoff_rates[r].mask) != 0)
+            bad++;
+        if (test_symbol_domain_handoff(1, handoff_rates[r].bit_rate, handoff_rates[r].mask) != 0)
+            bad++;
+        if (bad != 0  &&  handoff_rates[r].asserted)
+            handoff_failures++;
+        else if (bad != 0)
+            fprintf(stderr, "  (%d bit/s is a known-open rate, not asserted)\n",
+                    handoff_rates[r].bit_rate);
+    }
+    if (handoff_failures != 0)
         return 1;
 
     if (v32bis_init(NULL, 12345, true, get_bit, &bits, put_bit, NULL) != NULL)

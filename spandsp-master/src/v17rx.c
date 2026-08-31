@@ -301,12 +301,31 @@ static void tune_equalizer(v17_rx_state_t *s, const complexi16_t *z, const compl
 static void tune_equalizer(v17_rx_state_t *s, const complexf_t *z, const complexf_t *target)
 {
     complexf_t err;
+    float delta;
+    float energy;
+    int i;
 
     /* Find the x and y mismatch from the exact constellation position. */
     err = complex_subf(target, z);
     //span_log(&s->logging, SPAN_LOG_FLOW, "Equalizer error %f\n", sqrt(err.re*err.re + err.im*err.im));
-    err.re *= s->eq_delta;
-    err.im *= s->eq_delta;
+    delta = s->eq_delta;
+    if (s->eq_normalized_lms)
+    {
+        /* The plain LMS step is unnormalized, so its residual gradient noise
+           scales with the input energy.  V.17 fax only ever has to survive that
+           on constellations up to 128 points at a fixed training level; V.32bis
+           has to hold a dense constellation through a data phase, where the
+           noise floor it leaves is what decides the error rate.  Normalizing by
+           the buffer energy makes the step scale invariant. */
+        energy = 0.0f;
+        for (i = 0;  i < V17_EQUALIZER_LEN;  i++)
+            energy += s->eq_buf[i].re*s->eq_buf[i].re + s->eq_buf[i].im*s->eq_buf[i].im;
+        /*endfor*/
+        delta *= (float) V17_EQUALIZER_LEN/(energy + 1.0f);
+    }
+    /*endif*/
+    err.re *= delta;
+    err.im *= delta;
     cvec_circular_lmsf(s->eq_buf, s->eq_coeff, V17_EQUALIZER_LEN, s->eq_step, &err);
 }
 #endif
@@ -362,6 +381,15 @@ static __inline__ void put_bit(v17_rx_state_t *s, int bit)
 
     /* We need to strip the last part of the training - the test period of all 1s -
        before we let data go to the application. */
+    if (s->v32bis_data_bits_suppress > 0  &&  s->training_stage == TRAINING_STAGE_NORMAL_OPERATION)
+    {
+        /* V.32bis: trellis traceback fill from before the B1 handoff. It is not
+           data, and it is not the line bit sequence either, so it must not be
+           shifted into the self-synchronizing descrambler. */
+        s->v32bis_data_bits_suppress--;
+        return;
+    }
+    /*endif*/
     out_bit = descramble(s, bit);
     if (s->training_stage == TRAINING_STAGE_NORMAL_OPERATION)
     {
@@ -578,7 +606,13 @@ static int decode_baud(v17_rx_state_t *s, complexf_t *z)
 
     /* Differentially decode */
     raw = (nearest & 0x3C) | v17_differential_decoder[s->diff][nearest & 0x03];
-    s->diff = nearest & 0x03;
+    /* V.32bis: while the trellis is still emitting traceback fill from before
+       the B1 handoff, hold the differential state seeded from the end of B1.
+       The first real data symbol's differential predecessor is the last B1
+       symbol, not the last fill symbol. */
+    if (s->v32bis_data_bits_suppress == 0)
+        s->diff = nearest & 0x03;
+    /*endif*/
     for (i = 0;  i < s->bits_per_symbol;  i++)
     {
         put_bit(s, raw);
@@ -653,9 +687,13 @@ static void process_half_baud(v17_rx_state_t *s, const complexf_t *sample)
            Once V.32bis knows a TRN target it returns its 4-point index so the
            shared carrier loop and LMS equalizer can train on the real signal. */
         constellation_state = s->symbol_sink(s->symbol_sink_user_data, &z);
-        if (constellation_state >= 0  &&  constellation_state < 4)
+        if (constellation_state >= 0
+            && ((!s->symbol_sink_uses_data_constellation && constellation_state < 4)
+                || (s->symbol_sink_uses_data_constellation && constellation_state < 128)))
         {
-            target = &v17_v32bis_4800_constellation[constellation_state];
+            target = s->symbol_sink_uses_data_constellation
+                   ? &s->constellation[constellation_state]
+                   : &v17_v32bis_4800_constellation[constellation_state];
             track_carrier(s, &z, target);
             tune_equalizer(s, &z, target);
         }
@@ -1422,6 +1460,9 @@ SPAN_DECLARE(int) v17_rx_restart(v17_rx_state_t *s, int bit_rate, int short_trai
     }
     /*endswitch*/
     s->bit_rate = bit_rate;
+    s->symbol_sink_uses_data_constellation = false;
+    s->v32bis_data_bits_suppress = 0;
+    s->eq_normalized_lms = false;
 #if defined(SPANDSP_USE_FIXED_POINTx)
     vec_zeroi16(s->rrc_filter, sizeof(s->rrc_filter)/sizeof(s->rrc_filter[0]));
 #else

@@ -67,6 +67,10 @@ struct v32bis_state_s
     uint8_t startup_rx_word_states[8];
     int startup_rx_word_pos;
     uint16_t startup_rx_first_r;
+    int startup_rx_b1_pos;
+    uint32_t startup_rx_b1_reg;
+    int startup_rx_b1_diff;
+    int startup_rx_b1_convolution;
     int startup_remote_rates;
     int startup_selected_rate;
     bool startup_complete;

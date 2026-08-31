@@ -100,6 +100,8 @@ struct v17_tx_state_s
     int bits_per_symbol;
     /*! \brief The get_bit function in use at any instant. */
     span_get_bit_func_t current_get_bit;
+    /*! \brief V.32bis §6 B1 mark bits remaining before circuit 104 opens. */
+    int v32bis_b1_bits_remaining;
 #if defined(SPANDSP_USE_FIXED_POINT)
     int (*symbol_source)(void *user_data, complexi16_t *symbol);
 #else
