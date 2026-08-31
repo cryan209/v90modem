@@ -169,6 +169,8 @@ static uint64_t         rx_samples;
 static uint64_t         fct_deadline;      /* 0 when no timeout is running */
 static int              orderly_abort;     /* the DCE ended the call itself */
 static int              page_ppm = T32_PPM_EOP; /* how the DTE ended the page */
+static int              doc_pages;         /* pages spooled for this document */
+static int              doc_complete;      /* the DTE ended one with EOP */
 static int              dtc_seen;          /* a DTC arrived: we are being polled */
 static int              dtc_refused;       /* ... and +FLP was 0 */
 static uint8_t          last_ident_fcf;    /* CSI, CIG or TSI */
@@ -997,12 +999,26 @@ static void make_temp_name(char *out, size_t max, const char *tag)
     snprintf(out, max, "/tmp/v90modem-fax-%s-%d.tif", tag, (int) getpid());
 }
 
+/*
+ * Open a page for the DTE to fill.  T.32 8.3.3.3 has the DTE issue a +FDT for
+ * every page, and 8.3.3.7's <DLE><ppm> at the end of each one says whether
+ * another follows -- so the pages of a document accumulate into a single
+ * multi-page TIFF, which is what T.30 needs in order to send MPS between them
+ * and EOP after the last.  A second +FDT while a document is open therefore
+ * adds a page to the one already being built rather than starting a new file.
+ */
 static int spool_open(void)
 {
     int compression = df_to_compression(p_is.df);
 
     if (compression == 0)
         return 0;
+
+    if (spool_rx) {
+        /* Another page of the document already in hand. */
+        t4_rx_start_page(spool_rx);
+        return 1;
+    }
 
     make_temp_name(tx_tiff, sizeof(tx_tiff), "tx");
     unlink(tx_tiff);
@@ -1027,16 +1043,47 @@ static int spool_open(void)
     return 1;
 }
 
-static void spool_close(void)
+/*
+ * Throw away a document the DTE never finished.  Before pages accumulated,
+ * every +FDT closed its spool, so there was nothing to leak; now a document
+ * can be left half built, and it must not survive into the next call -- the
+ * next +FDT would append to it and transmit somebody else's page.
+ */
+static void spool_abandon(void)
+{
+    if (spool_rx) {
+        t4_rx_free(spool_rx);
+        spool_rx = NULL;
+    }
+    doc_pages = 0;
+    doc_complete = 0;
+    tx_tiff_ready = 0;
+}
+
+/*
+ * End the page the DTE has just handed over.  If its <DLE><ppm> said another
+ * follows, the document stays open and the next +FDT adds to it; only EOP
+ * finishes it and releases it to T.30.
+ */
+static void spool_close(int ppm)
 {
     if (!spool_rx)
         return;
     t4_rx_end_page(spool_rx);
+
+    if (ppm != T32_PPM_EOP) {
+        /* MPS or EOM: T.32 8.3.3.7 says more is coming. */
+        doc_pages++;
+        return;
+    }
+
     t4_rx_free(spool_rx);
     spool_rx = NULL;
+    doc_pages++;
     tx_tiff_ready = 1;
+    doc_complete = 1;
 
-    /* A session already under way takes the page straight away. */
+    /* A session already under way takes the document straight away. */
     if (fax)
         t30_set_tx_file(fax_get_t30_state(fax), tx_tiff, -1, -1);
 }
@@ -1191,17 +1238,28 @@ void fc2_dte_bytes(const uint8_t *buf, int len)
     }
 
     if (finished) {
-        spool_close();
+        spool_close(page_ppm);
         dte_mode = FC2_IDLE;
         dte_saw_dle = 0;
-        if (call_up) {
-            /* The page goes out on this call; the DTE hears about it when it
-             * has (phase_d_handler). */
+        fct_deadline = 0;
+
+        if (!doc_complete) {
+            /*
+             * T.32 8.3.3.7 MPS or EOM: the DTE has more to hand over, and
+             * 8.3.3.3 has it issue another +FDT for each page.  The document
+             * is not transmitted until it is complete, so this page is
+             * acknowledged as taken -- see the ordering deviation in
+             * docs/fax_class_at.md, of which this is the same one.
+             */
+            put_ok();
+        } else if (call_up) {
+            /* The document goes out on this call; the DTE hears about it when
+             * it has (phase_d_handler). */
             fdt_await_page = 1;
             session_start();
         } else {
             /* +FDT ahead of the call, which is the ordinary sequence: the
-             * page is spooled and will go out when the call connects. */
+             * document is spooled and goes out when the call connects. */
             put_ok();
         }
     }
@@ -1756,10 +1814,7 @@ void fc2_release(void)
 {
     pthread_mutex_lock(&fc2_mtx);
     session_stop();
-    if (spool_rx) {
-        t4_rx_free(spool_rx);
-        spool_rx = NULL;
-    }
+    spool_abandon();
     selected = 0;
     pthread_mutex_unlock(&fc2_mtx);
 }
@@ -1780,10 +1835,14 @@ void fc2_select(int on)
         interrupt_negotiated = 0;
         orderly_abort = 0;
         fct_deadline = 0;
+        doc_pages = 0;
+        doc_complete = 0;
         page_ppm = T32_PPM_EOP;
         report_len = 0;
+        spool_abandon();
     } else if (!on && selected) {
         session_stop();
+        spool_abandon();
     }
     selected = on ? 1 : 0;
     pthread_mutex_unlock(&fc2_mtx);
@@ -1820,7 +1879,14 @@ void fc2_on_connected(void)
 {
     pthread_mutex_lock(&fc2_mtx);
     call_up = 1;
-    session_start();
+    /*
+     * Not while the DTE is still handing over a multi-page document: T.30
+     * would start with half of it and send EOP after the first page.  The
+     * +FDT that ends the document starts the session instead, and +FCT bounds
+     * how long a DTE may leave it half done.
+     */
+    if (!spool_rx && !(dte_mode == FC2_DTE_TX_DATA))
+        session_start();
     pthread_mutex_unlock(&fc2_mtx);
 }
 
@@ -1831,6 +1897,9 @@ void fc2_on_disconnected(void)
     if (hangup_code < 0)
         hangup_code = 0x03;             /* T.32 8.5.2.7: call dropped */
     session_stop();
+    /* A document the DTE never finished belongs to the call that ended. */
+    spool_abandon();
+    dte_mode = FC2_IDLE;
     pthread_mutex_unlock(&fc2_mtx);
 }
 
@@ -1852,11 +1921,7 @@ static void fct_expired(void)
     fct_deadline = 0;
 
     if (dte_mode == FC2_DTE_TX_DATA) {
-        if (spool_rx) {
-            t4_rx_free(spool_rx);
-            spool_rx = NULL;
-        }
-        tx_tiff_ready = 0;
+        spool_abandon();
         dte_mode = FC2_IDLE;
         dte_saw_dle = 0;
     }

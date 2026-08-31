@@ -200,7 +200,8 @@ reporting is implemented off SpanDSP's real-time frame handler, and so are
 was an empty TODO). The post page response is **held** for the DTE per 8.3.4.3,
 so a receiving session needs one more `+FDR` than it has pages. `+FCT` bounds
 both waits it creates — the held response, and a `+FDT` that is opened and not
-fed; that needed two more SpanDSP additions
+fed. Multi-page documents accumulate into one TIFF, since T.30 takes MPS/EOP
+from the page count; that needed two more SpanDSP additions
 (`t30_set_post_page_response_hold()` and `t30_disconnect()`). **Watch the FCF
 low bit**: in DIS/DTC, CSI/CIG and
 NSF/NSC it is a real distinction, but in DCS, TSI and NSS it is a don't-care

@@ -127,6 +127,33 @@ reverse the octets in those reports and nothing else. Note 3 is explicit that
 `+FBO` does **not** affect the `+FNC`, `+FNF` or `+FNS` responses, so those
 stay in the frame's own order.
 
+### Multi-page documents (8.3.3.3, 8.3.3.7)
+
+T.32 8.3.3.3 has the DTE issue a `+FDT` for every page, and 8.3.3.7's
+`<DLE><ppm>` at the end of each one says whether another follows. So the pages
+of a document **accumulate into a single multi-page TIFF**, which is exactly
+what T.30 needs in order to send MPS between pages and EOP after the last: it
+takes the post page message from the page count, and this way the count is
+right. A `+FDT` while a document is open adds to it rather than starting a new
+file.
+
+The document is not transmitted until the DTE ends a page with EOP, and T.30 is
+not started while one is still being handed over — started on half a document
+it sends the first page and an EOP after it. If the call is answered mid-way,
+the `+FDT` that completes the document is what starts the session; `+FCT`
+bounds how long a DTE may leave one half done, and a document that is never
+finished is discarded when the call ends.
+
+`<DLE>;` (EOM, "another document, renegotiate in Phase B") is accepted and
+keeps the document open like MPS. Whether T.30 then sends EOM or MPS follows
+the **actual** page formats — `t4_tx_next_page_has_different_format()` — rather
+than the DTE's code, so an EOM between two pages of the same format goes out as
+MPS.
+
+A non-final `+FDT` is answered `OK` as soon as the page is taken, since nothing
+has been transmitted yet; only the final one waits for the far end and reports
+its verdict. That is the same ordering deviation as below, not a new one.
+
 ### The post page response is held for the DTE (8.3.4.3, 8.4.3, 8.5.2.2)
 
 A receiving DCE does not answer the far end's post page message on its own. It
@@ -451,6 +478,20 @@ T.30 never had a document, so the call collapses on its own account within the
 first second and the DCN lands after the far end has stopped listening. That is
 the scenario, not the implementation, and the weaker claim is the honest one.
 
+`test_multipage_transmit` sends two pages, the first ended with MPS and the
+second with EOP, and requires the far end to hold **both, in order, each the
+one that was sent** — plus a check that the two pages differ, so "both intact"
+means something. It runs twice, with the call answered after the document and
+again **between** the pages. The second needs a realistic gap to be worth
+anything: at 3 s it passes with the deferred start removed, because T.30 has
+not yet given up on having no document; at 10 s it does not, which is what
+makes it a test of the deferral rather than of nothing.
+
+`test_unfinished_document_discarded` hands over a page that says another
+follows, drops the call, and makes a second one — deliberately without leaving
+class 2.0 in between, since that clears everything and would hide the leak.
+The second call must carry its own page and only its own page.
+
 `test_transmit_timeout_not_tripped` feeds a page in four blocks over 2.4 s
 against a `+FCT` of one second, with no gap longer than the timeout, and
 requires the transfer to still be open. Without the per-block restart it is
@@ -494,6 +535,8 @@ an `ATE0` that must still reach T.31, and the way back to class 0), which
 
 - Class 2 (the pre-standard `AT+FCLASS=2`) — only 2.0 is offered. The two are
   not compatible, and 2.0 is the ITU-T one.
+- Multi-*document* transmit: `<DLE>;` keeps one document open rather than
+  ending it and renegotiating, as above.
 - `+FDD`/`+FIT`/`+FLO`/`+FPR` — these are T.31 DTE-link parameters and stay
   with the T.31 interpreter.
 - T.38 — `t31_init()` is given no T.38 packet handler and the context is put in

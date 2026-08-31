@@ -31,8 +31,12 @@ static int failures;
 /* ------------------------------------------------------------------ */
 
 /* One byte per 8 pixels, MSB first, as TIFF and T.4 both want. */
+static int row_variant;     /* shifts the pattern, so pages are distinguishable */
+
 static void make_row(uint8_t *row, int y)
 {
+    y += row_variant * 7;
+
     int stride = IMAGE_WIDTH / 8;
 
     memset(row, 0xFF, (size_t) stride);          /* white */
@@ -420,6 +424,7 @@ static const char *SRC_TIFF  = "/tmp/fc2_test_src.tif";
 static const char *PEER_RX   = "/tmp/fc2_test_peer_rx.tif";
 static const char *PEER_TX   = "/tmp/fc2_test_peer_tx.tif";
 static const char *DTE_RX    = "/tmp/fc2_test_dte_rx.tif";
+static const char *MULTI_TIFF = "/tmp/fc2_test_multi.tif";
 
 static void test_parameters(void)
 {
@@ -1067,6 +1072,199 @@ static void test_transmit_timeout_not_tripped(void)
 
     check(fc2_in_dte_data(), "the transfer is still open after 2.4 s");
     check(!dte_saw("+FHS:02"), "and nothing was aborted");
+
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
+/*
+ * T.32 8.3.3.3 and 8.3.3.7: a document of several pages is one +FDT per page,
+ * each ended by a <DLE><ppm> that says whether another follows -- "," for MPS
+ * and "." for EOP.  The far end must end up with both pages, in order and
+ * distinct from each other; a DCE that sent the first page twice, or only the
+ * last one, would still complete the session and still report OK.
+ */
+static int  send_page_via_fdt(int variant, int ppm)
+{
+    static uint8_t page[1 << 20];
+    int n;
+
+    /*
+     * Its own file: SRC_TIFF is the shared one every other test compares
+     * against, and writing a variant into it makes those tests compare a page
+     * they never sent.
+     */
+    row_variant = variant;
+    if (!write_test_tiff(MULTI_TIFF))
+        return 0;
+    at("AT+FDT");
+    n = encode_page_for_dte(MULTI_TIFF, T4_COMPRESSION_T4_1D, 0, page, sizeof(page));
+    if (n < 2)
+        return 0;
+    n -= 2;                     /* drop the encoder's <DLE><ETX> */
+    for (int off = 0; off < n; off += 512) {
+        int chunk = (n - off > 512) ? 512 : n - off;
+        fc2_dte_bytes(page + off, chunk);
+    }
+    {
+        uint8_t end[2] = { 0x10, (uint8_t) ppm };
+        fc2_dte_bytes(end, 2);
+    }
+    row_variant = 0;
+    return 1;
+}
+
+static void test_multipage_transmit(int connect_midway)
+{
+    fax_state_t *peer;
+    int rows = 0;
+    int bad;
+
+    printf("multi-page +FDT, call answered %s (T.32 8.3.3.3, 8.3.3.7)\n",
+           connect_midway ? "between the pages" : "after the document");
+
+    peer_ecm = 1;
+    peer_t6 = 1;
+    peer_nsf = NULL;
+    peer_nss = NULL;
+    peer_interrupt = 0;
+
+    fc2_select(0);
+    fc2_select(1);
+    unlink(PEER_RX);
+
+    at("AT+FLI=\"sender\"");
+    at("AT+FNR=0,1,0,0");
+    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+    at("ATD5551234");
+
+    /* Page one, ended with MPS: another page of the same format follows. */
+    dte_reset();
+    check(send_page_via_fdt(0, 0x2C), "page one is handed over");
+    check(dte_saw("OK"), "and acknowledged");
+
+    peer = peer_start(0, NULL, PEER_RX);
+    check(peer != NULL, "the far-end fax terminal starts");
+    if (!peer)
+        return;
+
+    /*
+     * The interesting order: the call is answered while the DTE still has a
+     * page to hand over.  T.30 must not be started on half a document, or it
+     * sends the first page and an EOP after it.
+     */
+    if (connect_midway) {
+        dte_reset();
+        fc2_on_connected();
+        /*
+         * Three seconds, not a token frame or two: T.30 started with no
+         * document has that long to decide it has nothing to do and give up,
+         * which is the thing the deferred start exists to prevent.  A short
+         * gap passes either way and proves nothing.
+         */
+        pump(peer, 10 * 50);
+    }
+
+    /* Page two, ended with EOP: that is the document. */
+    dte_reset();
+    check(send_page_via_fdt(1, 0x2E), "page two is handed over");
+
+    if (!connect_midway) {
+        dte_reset();
+        fc2_on_connected();
+    }
+    pump(peer, 90 * 50);
+    for (int i = 0; i < 20; i++)
+        fc2_poll();
+
+    check(peer_done && peer_status == T30_ERR_OK,
+          "the far end reports a good session");
+
+    /* Both pages, in order, each the one that was sent. */
+    row_variant = 0;
+    bad = compare_page(PEER_RX, 0, &rows);
+    check(bad == 0 && rows == IMAGE_ROWS, "page one arrived intact");
+    if (bad != 0 || rows != IMAGE_ROWS)
+        printf("       (page 1: %d rows, %d differing)\n", rows, bad);
+
+    row_variant = 1;
+    bad = compare_page(PEER_RX, 1, &rows);
+    check(bad == 0 && rows == IMAGE_ROWS, "page two arrived intact, and second");
+    if (bad != 0 || rows != IMAGE_ROWS)
+        printf("       (page 2: %d rows, %d differing)\n", rows, bad);
+    row_variant = 0;
+
+    /* And they really are different pages, so "both intact" means something. */
+    row_variant = 1;
+    bad = compare_page(PEER_RX, 0, &rows);
+    check(bad > 0, "the two pages are not the same image");
+    row_variant = 0;
+
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
+/*
+ * A document the DTE never finished must not survive the call it belonged to.
+ * Pages accumulate now, so an abandoned one would be appended to by the next
+ * +FDT and transmitted on somebody else's call.  This stays inside one
+ * +FCLASS=2.0 selection deliberately -- leaving and re-entering class 2.0
+ * clears everything anyway, and would hide the leak.
+ */
+static void test_unfinished_document_discarded(void)
+{
+    static uint8_t page[1 << 20];
+    fax_state_t *peer;
+    int rows = 0;
+    int bad;
+    int n;
+
+    printf("an unfinished document does not outlive its call\n");
+
+    peer_ecm = 1;
+    peer_t6 = 1;
+    peer_nsf = NULL;
+    peer_nss = NULL;
+    peer_interrupt = 0;
+
+    fc2_select(0);
+    fc2_select(1);
+    at("AT+FNR=0,1,0,0");
+    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+
+    /* Call one: hand over a page that says another follows, then hang up. */
+    at("ATD5551234");
+    check(send_page_via_fdt(1, 0x2C), "a page is handed over with MPS");
+    fc2_on_disconnected();
+
+    /* Call two, no +FCLASS in between: one page, complete. */
+    unlink(PEER_RX);
+    at("ATD5551234");
+    at("AT+FDT");
+    n = encode_page_for_dte(SRC_TIFF, T4_COMPRESSION_T4_1D, 0, page, sizeof(page));
+    for (int off = 0; off < n; off += 512) {
+        int chunk = (n - off > 512) ? 512 : n - off;
+        fc2_dte_bytes(page + off, chunk);
+    }
+
+    peer = peer_start(0, NULL, PEER_RX);
+    if (!peer)
+        return;
+    dte_reset();
+    fc2_on_connected();
+    pump(peer, 90 * 50);
+    for (int i = 0; i < 20; i++)
+        fc2_poll();
+
+    check(peer_done && peer_status == T30_ERR_OK,
+          "the second call completes");
+    row_variant = 0;
+    bad = compare_page(PEER_RX, 0, &rows);
+    check(bad == 0 && rows == IMAGE_ROWS,
+          "its first page is the page it was given");
+    /* And there is no second page carried over from the abandoned document. */
+    check(compare_page(PEER_RX, 1, &rows) < 0,
+          "and the abandoned page did not come with it");
 
     fax_free(peer);
     fc2_on_disconnected();
@@ -1735,6 +1933,9 @@ int main(void)
     test_receive(1);
     test_bit_order_is_real();
     test_fnr();
+    test_multipage_transmit(0);
+    test_multipage_transmit(1);
+    test_unfinished_document_discarded();
     test_post_page_hold();
     test_held_response_timeout();
     test_transmit_timeout(1);
