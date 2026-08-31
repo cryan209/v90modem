@@ -215,6 +215,16 @@ codes assigned across the wrong phases and directions, `+FCS:` not suppressed
 by `+FNR`'s tpr, `+FPS:` missing its four line counts, `+FDT` not ending in
 `ERROR` on a rejected page). Read the clause before extending this.
 
+**ECM is the ordinary case and was the least tested part of it.** Every
+transfer test used to run `EC=0`, and with ECM negotiated T.30 releases the
+T.4 receiver before the DTE collects the page, so `t30_get_transfer_statistics()`
+reports zeros and every page of every error-corrected fax was reported as
+`+FPS:1,0,0,0,0` -- a good status with no lines. The counts are now latched in
+the phase D handler. `+FCS`'s EC is read off DCS bit 28 (0 = 256 octets,
+1 = 64) rather than echoed from `+FIS`, since T.30 note 42 lets a transmitter
+ignore a 64-octet request; and the vendored SpanDSP had that bit inverted in
+`t30.c`, which is latent for a receiver and would bite on a turnaround.
+
 Neither class has hardware interop. See `docs/fax_class_at.md`.
 
 `docs/` holds a design note or investigation write-up per phase. Read the relevant one before changing that phase.

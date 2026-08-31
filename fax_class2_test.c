@@ -478,15 +478,16 @@ static void test_parameters(void)
 }
 
 /* Class 2.0 sends a page (T.32 8.3.3) to a plain fax terminal. */
-static void test_transmit(int fbo)
+static void test_transmit(int fbo, int ec)
 {
     static uint8_t page[1 << 20];
     fax_state_t *peer;
+    char cmd[40];
     int rows = 0;
     int bad;
     int n;
 
-    printf("+FDT: class 2.0 sends a page (+FBO=%d)\n", fbo);
+    printf("+FDT: class 2.0 sends a page (+FBO=%d, EC=%d)\n", fbo, ec);
 
     unlink(PEER_RX);
     fc2_select(0);
@@ -496,9 +497,11 @@ static void test_transmit(int fbo)
     at("AT+FLI=\"sender\"");
     /* T.32 Table 22: +FCS: is reported only with +FNR's tpr set. */
     at("AT+FNR=0,1,0,0");
-    { char cmd[32]; snprintf(cmd, sizeof(cmd), "AT+FBO=%d", fbo); at(cmd); }
-    /* MH, fine resolution, no ECM: the plainest thing a fax machine sends. */
-    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+    snprintf(cmd, sizeof(cmd), "AT+FBO=%d", fbo); at(cmd);
+    /* MH, fine resolution.  EC=0 is the plainest thing a fax machine sends;
+     * EC=2 is T.30 Annex A error correction with 256-octet frames, which is
+     * what every modern peer negotiates. */
+    snprintf(cmd, sizeof(cmd), "AT+FIS=1,3,0,2,0,%d,0,0,0", ec); at(cmd);
     at("ATD5551234");
     check(dial_seen, "ATD reached the engine");
 
@@ -531,6 +534,15 @@ static void test_transmit(int fbo)
     check(peer_done, "the far end reached T.30 phase E");
     check(peer_status == T30_ERR_OK, "the far end reports a good session");
     check(dte_saw("+FCS:"), "the DTE was told the negotiated session parameters");
+    {
+        /* T.32 8.5.1.3: the EC subparameter of what was actually negotiated.
+         * The far end is ECM-capable in both cases, so this separates
+         * reporting the session from echoing the offer back. */
+        char want[40];
+
+        snprintf(want, sizeof(want), "+FCS:1,3,0,2,0,%d,", ec);
+        check(dte_saw(want), "+FCS: reports the negotiated error correction");
+    }
 
     bad = compare_page(PEER_RX, 0, &rows);
     check(bad == 0 && rows == IMAGE_ROWS,
@@ -543,7 +555,7 @@ static void test_transmit(int fbo)
 }
 
 /* Class 2.0 receives a page (T.32 8.3.4) from a plain fax terminal. */
-static void test_receive(int fbo)
+static void test_receive(int fbo, int ec)
 {
     fax_state_t *peer;
     t4_rx_state_t *decode;
@@ -553,7 +565,9 @@ static void test_receive(int fbo)
     int saw_dle = 0;
     int start;
 
-    printf("+FDR: class 2.0 receives a page (+FBO=%d)\n", fbo);
+    char cmd2[40];
+
+    printf("+FDR: class 2.0 receives a page (+FBO=%d, EC=%d)\n", fbo, ec);
 
     unlink(DTE_RX);
     fc2_select(0);
@@ -564,7 +578,7 @@ static void test_receive(int fbo)
     at("AT+FNR=0,1,0,0");
     { char cmd[32]; snprintf(cmd, sizeof(cmd), "AT+FBO=%d", fbo); at(cmd); }
     at("AT+FCR=1");
-    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+    snprintf(cmd2, sizeof(cmd2), "AT+FIS=1,3,0,2,0,%d,0,0,0", ec); at(cmd2);
     at("ATA");
 
     peer = peer_start(1, PEER_TX, NULL);
@@ -590,6 +604,25 @@ static void test_receive(int fbo)
 
         snprintf(want, sizeof(want), "+FPS:1,%d,0,0,0", IMAGE_ROWS);
         check(dte_saw(want), "+FDR reported the page status with line counts");
+        if (!dte_saw(want)) {
+            const char *p = dte_find("+FPS:");
+
+            if (p)
+                printf("       (reported %.24s)\n", p);
+        }
+        /* T.32 8.5.1.3 EC: 0 off, 1 ECM with 64-octet frames, 2 with 256.
+         * The far end is ECM-capable either way, so this separates reporting
+         * what the DCS settled from echoing our own +FIS offer back.  Only
+         * the EC field is asserted: the rest is the far end's page, whose
+         * resolution is its own business. */
+        const char *p = dte_find("+FCS:");
+        int vr, br, wd, ln, df, got = -1;
+
+        if (p)
+            sscanf(p, "+FCS:%d,%d,%d,%d,%d,%d", &vr, &br, &wd, &ln, &df, &got);
+        check(got == ec, "+FCS: reports the negotiated error correction");
+        if (got != ec)
+            printf("       (EC=%d, wanted %d)\n", got, ec);
     }
     /* T.32 8.4.4.1 Table 19: 2 is EOP, no more pages or documents. */
     check(dte_saw("+FET:2"), "+FDR reported the remote's post page message");
@@ -1920,8 +1953,20 @@ int main(void)
     fc2_select(1);
 
     test_parameters();
-    test_transmit(0);
-    test_receive(0);
+    test_transmit(0, 0);
+    test_receive(0, 0);
+
+    /*
+     * The same two sessions in T.30 Annex A error correction mode.  ECM is
+     * what a real peer negotiates, and it is not a variation on the plain
+     * session from the DCE's point of view: T.30 buffers the page and
+     * releases the T.4 receiver that counted its lines before the DTE
+     * collects it, so 8.4.3's line counts have to be latched at the end of
+     * the page.  Without that every page of every ECM fax is reported to the
+     * DTE as "+FPS:1,0,0,0,0".
+     */
+    test_transmit(0, 2);
+    test_receive(0, 2);
 
     /*
      * T.32 8.5.3.4.  The same two sessions with the phase C octets reversed on
@@ -1929,8 +1974,10 @@ int main(void)
      * if the reversal is applied in both directions and in the right place
      * relative to the DLE stuffing.
      */
-    test_transmit(1);
-    test_receive(1);
+    test_transmit(1, 0);
+    test_receive(1, 0);
+    test_transmit(1, 2);
+    test_receive(1, 2);
     test_bit_order_is_real();
     test_fnr();
     test_multipage_transmit(0);

@@ -153,6 +153,25 @@ static int              tx_pages_sent;
 static char             rx_tiff[128];
 static int              rx_pages_done;     /* pages complete in rx_tiff */
 static int              rx_pages_given;    /* pages handed to the DTE */
+/*
+ * T.32 8.4.3's line counts for the page the DTE has yet to collect.  They are
+ * latched at the end of the page rather than read when the DTE asks, because
+ * in an ECM session SpanDSP has released the T.4 receiver by then and
+ * t30_get_transfer_statistics() reports zeros: a receiving DTE was told
+ * "+FPS:1,0,0,0,0" for every page of every error-corrected fax.  There is
+ * only ever one page outstanding here -- 8.3.4.3's held post page response
+ * stops T.30 starting the next one until the DTE releases it.
+ */
+/*
+ * T.30 Table 2 bit 28 of the DCS that set this session up: "0 = 256 octets,
+ * 1 = 64 octets".  Which of T.32's two ECM values +FCS reports is a fact
+ * about the frame on the wire, not about what this DTE asked for in +FIS.
+ */
+static int              dcs_ecm_64;
+
+static int              rx_page_rows;
+static int              rx_page_bad_rows;
+static int              rx_page_bad_run;
 static int              fdr_pending;       /* DTE is waiting in +FDR */
 static int              fdt_await_page;    /* +FDT is waiting for the page to go */
 static int              remote_pollable;   /* the remote's DIS had bit 9 set */
@@ -556,6 +575,17 @@ static void real_time_frame_handler(void *user_data, bool incoming,
     fcf = msg[2];
 
     /*
+     * The DCS is where the frame size is settled (T.30 Table 2 bits 27 and
+     * 28), in whichever direction it goes -- so latch it before anything
+     * below reports the negotiated parameters.  The low bit of a DCS FCF is a
+     * don't-care set from whether a DIS was received, hence the mask.
+     */
+    if ((fcf & 0xFE) == (T30_DCS & 0xFE)) {
+        dcs_ecm_64 = fif_bit(msg, len, T30_DCS_BIT_ECM_MODE)
+                     && fif_bit(msg, len, T30_DCS_BIT_64_OCTET_ECM_FRAMES);
+    }
+
+    /*
      * T.32 8.5.1.10 and 8.6.  Every phase B and phase D frame, in both
      * directions, as hex.  8.6: "The DCE shall delete HDLC Flags and FCS
      * octets" -- which is already the frame SpanDSP hands over -- and "the
@@ -677,7 +707,10 @@ static void update_negotiated_params(void)
     t30_get_transfer_statistics(fax_get_t30_state(fax), &t);
     p_cs = p_is;
     p_cs.br = bps_to_br(t.bit_rate);
-    p_cs.ec = t.error_correcting_mode ? p_is.ec : 0;
+    /* T.32 8.5.1.3: 1 is ECM with 64-octet frames, 2 with 256.  Taken from
+     * the DCS rather than echoed from +FIS -- T.30 note 42 lets a transmitter
+     * ignore a 64-octet request, so an offer is not what was agreed. */
+    p_cs.ec = t.error_correcting_mode ? (dcs_ecm_64 ? 1 : 2) : 0;
     p_cs.df = compression_to_df(t.compression);
     p_cs.vr = (t.y_resolution > 100) ? 1 : 0;
     if (t.width > 0 && t.width != 1728)
@@ -790,6 +823,13 @@ static int phase_d_handler(void *user_data, int result)
         have_fet = 1;
     }
 
+    if (t.pages_rx > rx_pages_done) {
+        /* T.32 8.4.3 <lc>, <blc> and <cblc>, taken while the T.4 receiver
+         * that counted them is still alive.  See the note beside them. */
+        rx_page_rows = t.length;
+        rx_page_bad_rows = t.bad_rows;
+        rx_page_bad_run = t.longest_bad_row_run;
+    }
     if (t.pages_rx > rx_pages_done && remote_pollable) {
         /* T.32 8.5.1.8: the DCE resets +FSP after a polled document is
          * received. */
@@ -1828,6 +1868,10 @@ void fc2_select(int on)
         unlink(rx_tiff);
         rx_pages_done = 0;
         rx_pages_given = 0;
+        rx_page_rows = 0;
+        rx_page_bad_rows = 0;
+        rx_page_bad_run = 0;
+        dcs_ecm_64 = 0;
         tx_pages_sent = 0;
         tx_tiff_ready = 0;
         dte_mode = FC2_IDLE;
@@ -1993,8 +2037,6 @@ void fc2_poll(void)
     }
 
     if (fdr_pending && rx_pages_done > rx_pages_given) {
-        t30_stats_t t;
-
         have_page = 1;
         page = rx_pages_given;
         rx_pages_given++;
@@ -2005,12 +2047,9 @@ void fc2_poll(void)
         report_fet = have_fet;
         fet = pending_fet;
         have_fet = 0;
-        if (fax) {
-            t30_get_transfer_statistics(fax_get_t30_state(fax), &t);
-            page_rows = t.length;
-            page_bad_rows = t.bad_rows;
-            page_bad_run = t.longest_bad_row_run;
-        }
+        page_rows = rx_page_rows;
+        page_bad_rows = rx_page_bad_rows;
+        page_bad_run = rx_page_bad_run;
     }
 
     /*

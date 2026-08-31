@@ -279,6 +279,42 @@ reported as a `+FCI:` instead of a `+FTI:`, and a received NSS was never
 reported at all. The polling test had hidden the first of those by asserting
 `+FCI:` **or** `+FTI:`; it is exact now, and there is a test for each.
 
+### Error correction mode (T.30 Annex A, +FIS/+FCS EC)
+
+ECM is what any modern peer negotiates, so this is the ordinary case rather
+than a variation on it. `+FIS`'s and `+FCS`'s EC subparameter is 0 for off, 1
+for 64-octet ECM frames and 2 for 256-octet ones; `+FCC` offers 2 and that is
+also the default `+FIS`.
+
+Two things about it are not shared with a plain session.
+
+**8.4.3's line counts have to be latched at the end of the page.** They come
+from SpanDSP's T.4 receiver, and in an ECM session T.30 has released that
+receiver by the time the DTE collects the page --
+`t30_get_transfer_statistics()` then reports zeros, because the operation it
+reads from has finished. The page itself arrives intact, so this fails in the
+one way that is easy to miss: every page of every error-corrected fax was
+reported to the DTE as `+FPS:1,0,0,0,0`, a good status with nothing received.
+The counts are now taken in the phase D handler, where the page has just ended
+and the receiver that counted it is still alive, and held until the `+FDR`
+that collects the page. Only one page is ever outstanding, because 8.3.4.3's
+held post page response stops T.30 starting the next one.
+
+**+FCS's EC is read off the DCS, not echoed from +FIS.** T.30 Table 2 bit 28
+of the DCS is the frame size -- 0 is 256 octets, 1 is 64 -- and note 42 lets a
+transmitter ignore a request for 64, so what the DTE offered is not what was
+agreed. The DCS passes through the same real-time frame handler `+FNR` and
+`+FBU` use, in whichever direction it goes, and the bit is latched there.
+Mask the FCF with `0xFE` as everywhere else: a DCS's low bit is a don't-care.
+
+One fix belongs to SpanDSP rather than to this layer, and is in the vendored
+tree. `t30.c` set `octets_per_ecm_frame` from that bit the wrong way round --
+`? 256 : 64` against Table 2's `0 = 256 octets, 1 = 64 octets` -- so a
+terminal that received a DCS and then transmitted used the frame size the DCS
+had not asked for. It is latent for a receiving DCE, which never builds a
+partial page in that call, and would bite the first time a session turned
+around.
+
 ### +FBU, HDLC frame reporting (8.5.1.10, 8.6)
 
 `+FBU=1` reports every T.30 phase B and phase D frame, in both directions, as
@@ -447,6 +483,14 @@ bit reverses of each other, and must differ.
 That comparison is the point. The interesting failures here all report `OK`: a
 page that negotiates and transfers as garbage, or a stream handed to the DTE in
 a format it did not ask for, would pass a result-code check.
+
+`test_transmit` and `test_receive` each run twice more, at `EC=2`, so the page
+comparison and the line counts are checked in error correction mode as well as
+without it -- every transfer test used to be `EC=0`, which is why the zeroed
+line counts above survived a green suite. Removing the latch fails exactly the
+two ECM receive rows and nothing else, which is what makes them a test of it.
+Each also asserts `+FCS`'s EC field, against a far end that is ECM-capable in
+both arms, so it separates reporting the DCS from echoing our own offer back.
 
 `test_fnr` runs the same session shape with reporting off, fully on, and then
 **against a far end configured the other way** — T.6 and ECM disabled. Our own

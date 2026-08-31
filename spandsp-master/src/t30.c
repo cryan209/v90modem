@@ -2259,7 +2259,10 @@ static int analyze_rx_dcs(t30_state_t *s, const uint8_t *msg, int len)
     /*endif*/
 
     s->error_correcting_mode = (test_ctrl_bit(dcs_frame, T30_DCS_BIT_ECM_MODE) != 0);
-    s->octets_per_ecm_frame = test_ctrl_bit(dcs_frame, T30_DCS_BIT_64_OCTET_ECM_FRAMES)  ?  256  :  64;
+    /* T.30 Table 2 bit 28: "Frame size 0 = 256 octets, Frame size 1 = 64
+       octets". This was the wrong way round, so a terminal that received a
+       DCS and then transmitted used the frame size the DCS did not ask for. */
+    s->octets_per_ecm_frame = test_ctrl_bit(dcs_frame, T30_DCS_BIT_64_OCTET_ECM_FRAMES)  ?  64  :  256;
 
     s->x_resolution = -1;
     s->y_resolution = -1;
