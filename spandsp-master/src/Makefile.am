@@ -81,6 +81,7 @@ if COND_V34
 V34_SOURCES = v34rx.c \
               v34rx_data.c \
               v34rx_phase3.c \
+              v34rx_phase4_trn.c \
               v34tx.c \
               v34_logging.c
 endif

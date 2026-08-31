@@ -70,6 +70,44 @@ int v34_rx_trace_diagnostics(void);
 #define PHASE3_S_DOMINANT_STABLE        48
 #define PHASE3_S_DOMINANT_RUN_MAX       256
 
+/* Phase 4 TRN constants, shared with v34rx_phase4_trn.c.  The rationale
+   below travels with them -- see the note in the PHASE3 block about what
+   happens when a #define is moved away from its comment. */
+#define PHASE4_TRN_SCORE_START_BAUD     145
+#define PHASE4_TRN_LOCK_MIN_BITS        64
+#define PHASE4_TRN_READY_MIN_SCORE      65
+/* How much TRN to train on before scanning for MP.  11.4.1.1.2 and 11.4.1.2.2
+   put TRN at *at least* 512T with MP straight after, so a conformant peer may
+   be transmitting MP well before this -- but the receiver needs the time: swept
+   over the duplex matrix, 512, 1024, 1536 and 2048 each cost more rows than
+   they gained (at 1024 both 2400 rows stop training; at 2048 four rows do).
+   Left at the measured value, and noted here so the next attempt to shorten it
+   starts from the sweep rather than from the clause. */
+#define PHASE4_TRN_READY_MIN_BAUD       4800
+#define PHASE4_TRN_READY_MAX_BAUD       9600    /* ~3s at 3200 baud; V.34 TRN max is 2s */
+#define PHASE4_TRN_RECENT_WINDOW_BAUDS  256
+#define PHASE4_TRN_FREEZE_SCORE         80
+#define PHASE4_J_PROGRESS_LOG_INTERVAL  32
+#define V34_DEBUG_IQ_LOG                0
+
+/* Shared with v34rx_phase4_trn.c (V34_RX_STAGE_PHASE4_TRN). */
+int          v34_rx_descramble(v34_rx_state_t *s, int in_bit);
+void         v34_rx_mp_reset_hypothesis_search(v34_rx_state_t *s);
+void         v34_rx_mp_vote_reset(v34_rx_state_t *s);
+const char  *v34_rx_phase4_trn_domain_name(int domain_idx);
+void         v34_rx_phase4_trn_hyp_reset(v34_rx_state_t *s);
+const char  *v34_rx_phase4_trn_order_name(int order_idx);
+float        v34_rx_eq_tap_energy(const v34_rx_state_t *s, float *main_tap);
+void         v34_rx_dump_training_symbol(const char *env_name,
+                                         const char **path_cache,
+                                         int calling_party, int index,
+                                         float re, float im, long rx_power,
+                                         float tap_energy, float main_tap,
+                                         int eq_put_step, int timing_corr);
+
+/* V34_RX_STAGE_PHASE4_TRN, lifted to v34rx_phase4_trn.c. */
+void         v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym);
+
 /* Shared with v34rx_phase3.c (V34_RX_STAGE_PHASE3_WAIT_S). */
 int      v34_rx_descramble_reg(uint32_t *reg, int scrambler_tap, int in_bit);
 int      v34_rx_map_phase4_raw_bits(int dibit, int hypothesis);
