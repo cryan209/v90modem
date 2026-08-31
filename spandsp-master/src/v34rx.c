@@ -1591,6 +1591,30 @@ static float v90_t3_cma_mu(void)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* The fixed-point FSE runs from its OWN copy of the taps: v90_t3_fse_fx, and
+   the wide accumulator behind it, seeded from the float array once at prime
+   time and thereafter advanced only by the integer NLMS.  Every OTHER writer
+   of the float taps -- the equalizer restore, the blind CMA loop, and a fresh
+   B1 acquisition -- therefore has no effect at all in a fixed-point build
+   unless it says so here.  Clearing the prime flag makes the next symbol
+   re-seed the integer taps (and re-choose the ring's binary point from the
+   level now present, which is the right thing after the level has moved).
+
+   This is not a theoretical gap.  On rate19200-r1 the two datapaths track each
+   other to 0.01 of the lattice for nine tenths of the call, both meet the same
+   disturbance, and float then recovers to 0.10 while fixed stays at 0.76 for
+   the remaining 150 s -- because every mechanism that exists to recover was
+   writing taps the receiver had stopped reading. */
+static void v90_t3_fse_taps_replaced(v34_rx_state_t *s)
+{
+#if defined(V34_FIXED_POINT)
+    s->v90_t3_fx_primed = 0;
+#else
+    (void) s;
+#endif
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v90_t3_blind_recover(v34_rx_state_t *s,
                                  const complexf_t *y,
                                  int pre,
@@ -1671,6 +1695,7 @@ static void v90_t3_blind_recover(v34_rx_state_t *s,
                 {
                     memcpy(s->v90_t3_fse, s->v90_t3_fse_good,
                            sizeof(s->v90_t3_fse));
+                    v90_t3_fse_taps_replaced(s);
                 }
                 /*endif*/
                 V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
@@ -1718,6 +1743,7 @@ static void v90_t3_blind_recover(v34_rx_state_t *s,
         {
             memcpy(s->v90_t3_fse, s->v90_t3_fse_good,
                    sizeof(s->v90_t3_fse));
+            v90_t3_fse_taps_replaced(s);
         }
         /*endif*/
         V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
@@ -1759,6 +1785,7 @@ static void v90_t3_blind_recover(v34_rx_state_t *s,
         s->v90_t3_fse[tap].im -= mu*g_im;
     }
     /*endfor*/
+    v90_t3_fse_taps_replaced(s);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -11382,6 +11409,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             {
                 memcpy(s->v90_t3_fse, s->v90_t3_fse_good,
                        sizeof(s->v90_t3_fse));
+                v90_t3_fse_taps_replaced(s);
                 s->v90_t3_fse_bad_run = 0;
                 s->v90_t3_fse_good_age = 0;
                 /* The lock goes with it -- the bits cannot be trusted
@@ -12004,6 +12032,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
         /*endif*/
     }
     memcpy(s->v90_t3_fse, best_coeff, sizeof(best_coeff));
+    v90_t3_fse_taps_replaced(s);
     s->v90_t3_training_match = best_match;
     s->v90_t3_fse_conjugate = best_conjugate;
     s->v90_t3_next_symbol = best_first;
