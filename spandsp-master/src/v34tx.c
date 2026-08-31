@@ -78,6 +78,33 @@
 #include "spandsp/private/modem_echo.h"
 #include "spandsp/private/v34.h"
 
+/* V34_RX_LEAN_BUILD compiles the diagnostics out, as in v34rx.c and
+   v34rx_data.c.  (The name says RX because that is where it started; it gates
+   the whole V.34 modem's diagnostics, transmit included.)  202 V34_TX_LOG()
+   calls and four *_DUMP gates go; the ~13 ME_* behaviour knobs stay, because
+   they choose INFO0 retry policy, pre-emphasis, TRN lengths and the analogue
+   role's INFO1 timing, several with measurements behind them.
+
+   The transmit side matters less than the receiver for an embedded V.90
+   digital modem -- Phase 3 and Phase 4 go out as PCM codewords, not
+   modulation, so only Phase 2's control channel and tones come from here --
+   but the log calls carry the same float->double varargs promotions, and the
+   S3's FPU is single-precision.
+
+   Undefined by default; nothing about a normal build changes. */
+#if defined(V34_RX_LEAN_BUILD)
+#define V34_TX_LOG(...)             ((void) 0)
+#define V34_DIAG_GETENV(name)       ((const char *) 0)
+#define fopen(a, b)                 ((FILE *) 0)
+#define fclose(a)                   ((void) 0)
+#define fflush(a)                   ((void) 0)
+#define fwrite(a, b, c, d)          ((size_t) 0)
+#define fprintf(...)                ((void) 0)
+#else
+#define V34_TX_LOG(...)             span_log(__VA_ARGS__)
+#define V34_DIAG_GETENV(name)       getenv(name)
+#endif
+
 #include "v22bis_tx_rrc.h"
 
 #include "v34_tx_2400_rrc.h"
@@ -398,7 +425,7 @@ static void v34_tx_log_state_change_at(v34_state_t *s, int sample_offset)
             samples_to_ms_tenths(now - s->tx.phase2_entry_sample_time,
                                  &total_ms,
                                  &total_tenths);
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - timing [%s]: %s/%s took %d.%01d ms (phase 2 t=%d.%01d ms)\n",
                      role,
                      v34_tx_stage_to_str(s->tx.last_logged_stage),
@@ -408,7 +435,7 @@ static void v34_tx_log_state_change_at(v34_state_t *s, int sample_offset)
         }
         else
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - timing [%s]: %s/%s took %d.%01d ms\n",
                      role,
                      v34_tx_stage_to_str(s->tx.last_logged_stage),
@@ -419,7 +446,7 @@ static void v34_tx_log_state_change_at(v34_state_t *s, int sample_offset)
     }
     /*endif*/
 
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - [%s] stage=%s (%d) mod=%s (%d)\n",
              role,
              v34_tx_stage_to_str(s->tx.stage), s->tx.stage,
@@ -432,7 +459,7 @@ static void v34_tx_log_state_change_at(v34_state_t *s, int sample_offset)
         samples_to_ms_tenths(now - s->tx.phase2_entry_sample_time,
                              &total_ms,
                              &total_tenths);
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - timing [%s]: Phase 2 complete in %d.%01d ms, handing off to Phase 3\n",
                  role, total_ms, total_tenths);
         s->tx.phase2_entry_sample_time = -1;
@@ -767,7 +794,7 @@ static int info0_sequence_tx(v34_tx_state_t *s)
     {
         /* V.90 INFO0d frame (ITU-T V.90 Table 7) — 62 bits total.
            Transmitted by the digital modem (answerer) at 1200 Hz carrier. */
-        span_log(tx_log_state(s), SPAN_LOG_FLOW, "Tx INFO0d (V.90):\n");
+        V34_TX_LOG(tx_log_state(s), SPAN_LOG_FLOW, "Tx INFO0d (V.90):\n");
         bitstream_init(&bs, true);
         t = s->txbuf;
         /* 0:3      Fill bits: 1111. */
@@ -801,7 +828,7 @@ static int info0_sequence_tx(v34_tx_state_t *s)
            bit 27 advertises V.92 capability.  Keep both clear by default so
            a V.90 application cannot accidentally select a procedure it has
            not enabled explicitly. */
-        span_log(tx_log_state(s), SPAN_LOG_FLOW,
+        V34_TX_LOG(tx_log_state(s), SPAN_LOG_FLOW,
                  "Tx INFO0d V.92 flags: short-phase2(bit26)=%d, capability(bit27)=%d\n",
                  s->v92_short_phase2_requested ? 1 : 0,
                  s->v92_info0_capable ? 1 : 0);
@@ -846,7 +873,7 @@ static int info0_sequence_tx(v34_tx_state_t *s)
         /* Extra postamble for byte alignment */
         bitstream_put(&bs, &t, 0, 8);
         bitstream_flush(&bs, &t);
-        span_log(tx_log_state(s), SPAN_LOG_FLOW,
+        V34_TX_LOG(tx_log_state(s), SPAN_LOG_FLOW,
                  "  PCM law: %s, nominal power: -13 dBm0, max power: -13 dBm0\n",
                  s->v90_pcm_law ? "A-law" : "u-law");
         return 62;
@@ -1044,7 +1071,7 @@ static int v34_l2_probe_result(v34_state_t *s,
             return 0;
         if (snr_max_n > 14)
             snr_max_n = 14;
-        span_log(tx_log_state(&s->tx), SPAN_LOG_FLOW,
+        V34_TX_LOG(tx_log_state(&s->tx), SPAN_LOG_FLOW,
                  "Tx INFO1d measured probe: baud=%d carrier=%s pre=%d ripple=%.2f snr=%.1f dB rate=%d\n",
                  baud_rate_parameters[baud_idx].baud_rate,
                  best_carrier ? "high" : "low", best_filter,
@@ -1161,7 +1188,7 @@ static void prepare_info1c(v34_state_t *s)
         /* The 3429-HI carrier selector that occupied bit 70 in V.34/V.90
            becomes the PCM-upstream capability bit in V.92 Table 17. */
         s->tx.info1c.rate_data[V34_BAUD_RATE_3429].use_high_carrier = false;
-        span_log(tx_log_state(&s->tx), SPAN_LOG_FLOW,
+        V34_TX_LOG(tx_log_state(&s->tx), SPAN_LOG_FLOW,
                  "Tx INFO1d V.92 Table 17 selected (bit70 PCM-upstream=%d)\n",
                  s->tx.v92_pcm_upstream_capable ? 1 : 0);
     }
@@ -1262,7 +1289,7 @@ static void prepare_info1a(v34_state_t *s)
         s->tx.info1a.use_high_carrier = false;
         s->tx.info1a.preemphasis_filter = 0;
         s->tx.info1a.max_data_rate = 0;
-        span_log(&s->logging, SPAN_LOG_WARNING,
+        V34_TX_LOG(&s->logging, SPAN_LOG_WARNING,
                  "Tx INFO1a: no legal measured duplex symbol-rate pair\n");
     }
     else
@@ -1288,7 +1315,7 @@ static void prepare_info1a(v34_state_t *s)
 
     s->tx.info1a.baud_rate_a_to_c = answer_to_call;
     s->tx.info1a.baud_rate_c_to_a = call_to_answer;
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx INFO1a measured selection: answer->call=%d baud/%s, "
              "call->answer=%d baud/%s, projected=%d bps\n",
              baud_rate_parameters[answer_to_call].baud_rate,
@@ -1567,8 +1594,8 @@ static int v90_info1a_sequence_tx(v34_tx_state_t *s, info1a_t *info1a)
     uint16_t crc;
     bitstream_state_t bs;
 
-    span_log(tx_log_state(s), SPAN_LOG_FLOW, "Tx INFO1a (V.90 Table 10):\n");
-    span_log(tx_log_state(s), SPAN_LOG_FLOW, "  MD = %dms, U_INFO = %d, upstream rate code = %d, downstream rate code = %d\n",
+    V34_TX_LOG(tx_log_state(s), SPAN_LOG_FLOW, "Tx INFO1a (V.90 Table 10):\n");
+    V34_TX_LOG(tx_log_state(s), SPAN_LOG_FLOW, "  MD = %dms, U_INFO = %d, upstream rate code = %d, downstream rate code = %d\n",
              info1a->md*35, info1a->max_data_rate, info1a->baud_rate_a_to_c, info1a->baud_rate_c_to_a);
     bitstream_init(&bs, true);
     t = s->txbuf;
@@ -1765,7 +1792,7 @@ static int mp_sequence_tx(v34_tx_state_t *s, mp_t *mp)
             dbg_bits[i] = (char) ('0' + (int) bitstream_get(&dbg_bs, &dbg_p, 1));
         /*endfor*/
         dbg_bits[dbg_len] = '\0';
-        span_log(tx_log_state(s), SPAN_LOG_FLOW,
+        V34_TX_LOG(tx_log_state(s), SPAN_LOG_FLOW,
                  "Tx - MP%d bits[0..%d]: %s\n",
                  mp->type, dbg_len - 1, dbg_bits);
     }
@@ -2020,7 +2047,7 @@ static void parse_primary_channel_bitstream(v34_tx_state_t *s)
        captured reset-state B1 frame.  Zero (and an unset variable) is the
        normative I1,I2,I3 order. */
     {
-        const char *perm_env = getenv("SPANDSP_V34_DIAG_I_PERM");
+        const char *perm_env = V34_DIAG_GETENV("SPANDSP_V34_DIAG_I_PERM");
         static const uint8_t permutation[6][3] =
         {
             {0, 1, 2}, {0, 2, 1}, {1, 0, 2},
@@ -2042,7 +2069,7 @@ static void parse_primary_channel_bitstream(v34_tx_state_t *s)
         }
         /*endif*/
     }
-    span_log(tx_log_state(s),
+    V34_TX_LOG(tx_log_state(s),
              SPAN_LOG_FLOW,
              "Tx - Parsed %p %8X - %X %X %X %X - %2X %2X %2X %2X %2X %2X %2X %2X\n",
              s,
@@ -2484,7 +2511,7 @@ SPAN_DECLARE(int) v34_get_mapping_frame(v34_tx_state_t *s, int16_t bits[16])
             y4321 = conv_encode_input[subsets[0]][subsets[1]];
             {
                 const char *perm_env =
-                    getenv("SPANDSP_V34_DIAG_Y_PERM");
+                    V34_DIAG_GETENV("SPANDSP_V34_DIAG_Y_PERM");
                 int perm = perm_env ? atoi(perm_env) : 0;
 
                 if (perm > 0  &&  perm < 24)
@@ -2618,7 +2645,7 @@ static void transmission_preamble_init(v34_state_t *s)
 {
     /* Send some bits as the modulator starts up, to allow things to stabilise before the
        important data goes out. */
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - transmission_preamble_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - transmission_preamble_init()\n");
     s->tx.txbits = 16;
     s->tx.txptr = 0;
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
@@ -2666,7 +2693,7 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                        makes spec-following analogue modems treat the repeat
                        itself as a recovery trigger, restart Phase 2, and
                        deadlock the INFO exchange. */
-                    span_log(&s->logging, SPAN_LOG_FLOW,
+                    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                              "Tx - V.90: INFO0a received OK, proceeding to Tone B (9.2.1.1.2)\n");
                     v90_arm_tone_a_detection(s, "INFO0a received error-free");
                     s->rx.received_event = V34_EVENT_NONE;
@@ -2680,13 +2707,13 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                 /*endif*/
                 if (!s->tx.info0_acknowledgement)
                 {
-                    span_log(&s->logging, SPAN_LOG_FLOW,
+                    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                              "Tx - V.90: INFO0a received OK, setting INFO0d acknowledgement bit and repeating INFO0d\n");
                     s->tx.info0_acknowledgement = true;
                 }
                 else
                 {
-                    span_log(&s->logging, SPAN_LOG_FLOW,
+                    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                              "Tx - V.90: INFO0a received again (ack=%d), checking exit condition\n",
                              s->rx.info0_acknowledgement);
                 }
@@ -2710,7 +2737,7 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                     reason = "Tone A reversal detected after INFO0a";
                 else
                     reason = "Tone A detected after INFO0a";
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: %s; completing INFO0d and resuming the Tone B/reversal transaction\n",
                          reason);
                 initial_ab_not_ab_baud_init(s);
@@ -2720,7 +2747,7 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                      || s->tx.stage == V34_TX_STAGE_INFO0_RETRY)
             {
                 s->tx.info0_retry_count++;
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: INFO0d retry %d (rx_event=%d, rx_stage=%d, rx_ack=%d, rx_info0=%d, pers2=%d)\n",
                          s->tx.info0_retry_count,
                          s->rx.received_event,
@@ -2742,7 +2769,7 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                        info0_received went stale, so the ack-guard condition can
                        never be satisfied -- follow the peer into the reversal
                        transaction instead of resending INFO0d until Link Error. */
-                    span_log(&s->logging, SPAN_LOG_FLOW,
+                    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                              "Tx - V.90: INFO0d retry guard reached (retry=%d, ack=%d, info0=%d); resuming the Tone B/reversal transaction\n",
                              s->tx.info0_retry_count,
                              s->tx.info0_acknowledgement,
@@ -2782,7 +2809,7 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                  && s->rx.received_event == V34_EVENT_INFO0_OK)
         {
             /* A valid INFO0c arrived while we were retrying — go straight to Tone A */
-            span_log(&s->logging, SPAN_LOG_FLOW, "Tx - INFO0_RETRY: INFO0c received OK, switching to Tone A\n");
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - INFO0_RETRY: INFO0c received OK, switching to Tone A\n");
             initial_ab_not_ab_baud_init(s);
         }
         else
@@ -2801,7 +2828,7 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
 
 static void info0_baud_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - info0_baud_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - info0_baud_init()\n");
     s->tx.txbits = info0_sequence_tx(&s->tx);
     s->tx.txptr = 0;
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
@@ -2815,7 +2842,7 @@ static void v90_arm_tone_a_detection(v34_state_t *s, const char *reason)
 {
     if (s->rx.stage != V34_RX_STAGE_TONE_A)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: %s, conditioning RX for Tone A detection\n",
                  reason);
         s->rx.stage = V34_RX_STAGE_TONE_A;
@@ -2828,10 +2855,10 @@ static void v90_arm_tone_a_detection(v34_state_t *s, const char *reason)
 
 static void v90_wait_rx_l2_init(v34_state_t *s, const char *reason)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.90: %s, completing INFO0d recovery and sending Tone B\n",
              reason);
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.90: arming RX for analog L1/L2 analysis during Tone B\n");
     s->rx.dft_ptr = 0;
     s->rx.base_phase = 42.0f;
@@ -2890,7 +2917,7 @@ static void v90_prime_info0a_tone_a_rx(v34_state_t *s, const char *reason)
                                   || s->rx.bit_count > 0
                                   || s->rx.persistence1 > 0
                                   || s->rx.persistence2 > 0));
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.90: %s, conditioning RX for INFO0a and Tone A detection%s\n",
              reason,
              preserve_active_search ? " (preserving active Phase 2 acquisition)" : "");
@@ -2942,7 +2969,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
                 /* INFO0 was already received and a reversal arrived during
                    INITIAL_A — skip FIRST_A and go straight to the 40ms
                    delay before sending our reversal back. */
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - INITIAL_A: INFO0 + reversal already seen, skipping FIRST_A\n");
                 s->tx.tone_duration = 0;
                 s->tx.stage = V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN;
@@ -2970,7 +2997,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
                having run for 50 ms, both of which already hold: INITIAL_A
                served the 50 ms and the recovery handshake established that
                the peer is in Tone B. */
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - FIRST_A: re-ranging after INFO0 recovery, sending !A without waiting for INFO0c\n");
             s->tx.phase2_reranging = false;
             s->tx.lastbit.re = -s->tx.lastbit.re;
@@ -3003,7 +3030,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
                there would deadlock.  V.34 keeps the INFO0_OK shortcut below,
                which is sound for it because the call modem's Tone B is already
                running by then. */
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - FIRST_A: INFO0d received and Tone B detected, sending !A (9.2.2.1.3)\n");
             /* Transmit our first phase reversal */
             s->tx.lastbit.re = -s->tx.lastbit.re;
@@ -3032,7 +3059,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
                received_event slot, and using the event here would make the
                peer's next reversal read as its first.  Scoped to the retrain
                so an ordinary startup keeps its established INFO0c timing. */
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - FIRST_A: Tone B detected and INFO0 omitted by 11.5, "
                      "sending !A (11.2.1.2.3)\n");
             s->tx.retrain_omit_info0 = false;
@@ -3043,7 +3070,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         else if (!s->tx.v90_mode  &&  s->rx.received_event == V34_EVENT_INFO0_OK)
         {
             s->tx.retrain_omit_info0 = false;
-            span_log(&s->logging, SPAN_LOG_FLOW, "Tx - FIRST_A: INFO0c received OK, sending !A (11.2.1.2.3)\n");
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - FIRST_A: INFO0c received OK, sending !A (11.2.1.2.3)\n");
             /* First reversal seen - send a phase reversal back */
             s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.tone_duration = 1;
@@ -3054,7 +3081,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         {
             /* Reversal arrived after INFO0 was received but before we could
                check for INFO0_OK — the event was overwritten. */
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - FIRST_A: reversal seen (INFO0 already received), sending !A\n");
             s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.tone_duration = 0;
@@ -3069,7 +3096,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
                INFO0 was correctly received.  Repeat INFO0a.  Tone detection
                after a good INFO0 is not this case -- it is the §9.2.2.1.3
                trigger above. */
-            span_log(&s->logging, SPAN_LOG_FLOW, "Tx - FIRST_A: bad event %d, retrying INFO0a\n",
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - FIRST_A: bad event %d, retrying INFO0a\n",
                      s->rx.received_event);
             /* Go back to sending INFO0a until we get a clean INFO0c */
             info0_baud_init(s);
@@ -3093,7 +3120,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
                against a SmartLink call modem after the 11.2.2.2.1 INFO0
                recovery. */
             if (s->rx.tone_b_ended  &&  s->rx.received_event != V34_EVENT_REVERSAL_1)
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - FIRST_NOT_A: Tone B ended without a detected "
                          "reversal; treating it as 11.2.1.1.3\n");
             /*endif*/
@@ -3115,7 +3142,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
             ||
             ++s->tx.tone_duration >= post_info0_resume_bauds())
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - Tone B %s after %d bauds of Tone A following the INFO0 "
                      "acknowledgement; sending the 11.2.1.2.3 Tone A reversal\n",
                      s->rx.tone_b_ended ? "ended" : "still up (timeout)",
@@ -3148,7 +3175,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
                    The analogue modem takes the L1/L2 branch below: §9.2.2.1.5
                    has it transmit the probe right off its own 10 ms of Tone A,
                    exactly as the V.34 answer modem does in §11.2.1.2.5. */
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: sending Tone B, waiting for analog L1/L2\n");
                 s->tx.tone_duration = 0;
                 s->tx.stage = V34_TX_STAGE_V90_WAIT_RX_L2;
@@ -3175,7 +3202,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
             if (l2_received)
                 v90_phase2_consume_l2(s);
             /*endif*/
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: analog L1/L2 %s after %d bauds, waiting for Tone A reversal\n",
                      l2_received ? "received" : "timeout",
                      s->tx.tone_duration);
@@ -3202,7 +3229,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
             recoveries = v90_note_phase2_info0_recovery(s);
             if (recoveries <= 2)
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: repeated INFO0a while waiting for Tone A reversal after analog L1/L2; treating it as stale and staying on Tone B (recovery %d)\n",
                          recoveries);
                 s->rx.v90_repeated_info0a_pending = false;
@@ -3212,7 +3239,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
             }
             else
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: repeated INFO0a persists while waiting for Tone A reversal after %d stale repeats; forcing B reversal path instead of restarting INFO0d\n",
                          recoveries);
                 s->rx.v90_repeated_info0a_pending = false;
@@ -3230,7 +3257,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
             /* Some peers keep leaking INFO0a decodes into the later Tone A
                window. At this point the L1/L2 exchange is already complete, so
                treat them as stale and continue waiting for the Tone A reversal. */
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: ignoring stale %s while waiting for Tone A reversal\n",
                      "bad INFO0a");
             s->rx.received_event = V34_EVENT_NONE;
@@ -3257,7 +3284,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
                sending INFO1a.  Tone presence alone must never trigger this
                transition; the absolute 900 ms + RTD deadline is the
                9.2.1.2.4 recovery. */
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: Tone A %s (event=%d) after %d bauds, delaying 40ms for B reversal\n",
                      reversal_received ? "reversal transaction completed"
                      : "reversal timeout (9.2.1.2.4 recovery)",
@@ -3288,7 +3315,7 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         /* V.90 §9.2.1.1.6: send Tone B for 10ms after reversal, then L1/L2 */
         if (++s->tx.tone_duration == 6)
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: sending digital L1/L2\n");
             l1_l2_signal_init(s);
         }
@@ -3309,7 +3336,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
         /* V.90 digital answerer: Tone B window after INFO0d (§9.2.1.1.1). */
         if (++s->tx.tone_duration % 600 == 0)
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90 PHASE2_B: baud=%d rx_event=%d rx_stage=%d sig=%d pers1=%d pers2=%d demod=%d\n",
                      s->tx.tone_duration,
                      s->rx.received_event, s->rx.stage,
@@ -3318,7 +3345,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
         }
         if (s->rx.info0_received)
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: INFO0a received, continuing Tone B and waiting for Tone A reversal\n");
             s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
             s->rx.received_event = V34_EVENT_NONE;
@@ -3329,7 +3356,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                to decode a clean INFO0a frame. Treat the observed reversal as
                sufficient Phase 2 progress and continue instead of looping on
                INFO0d retries forever. */
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: Tone A reversal arrived before clean INFO0a, continuing Phase 2 using reversal fallback\n");
             v90_phase2_consume_reversal(s);
             s->tx.tone_duration = 1;
@@ -3342,13 +3369,13 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                immediately dropping back into INFO0d retries. */
             if (s->tx.tone_duration == 1 || s->tx.tone_duration % 120 == 0)
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: Tone A detected before clean INFO0a, holding Tone B and waiting for INFO0a or reversal\n");
             }
         }
         else if (s->rx.received_event == V34_EVENT_INFO0_BAD)
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: bad INFO0a during initial Tone B, repeating INFO0d\n");
             info0_baud_init(s);
         }
@@ -3376,7 +3403,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
            live Phase 2 loop). */
         if (v90_phase2_reversal_pending(s))
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: first Tone A reversal transaction completed; scheduling Tone B reversal\n");
             v90_phase2_consume_reversal(s);
             s->rx.v90_repeated_info0a_pending = false;
@@ -3387,7 +3414,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
         else if (s->rx.received_event == V34_EVENT_INFO0_OK
                  || s->rx.v90_repeated_info0a_pending)
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: repeated INFO0a during Tone B, repeating INFO0d with acknowledgement\n");
             s->tx.info0_acknowledgement = true;
             info0_baud_init(s);
@@ -3429,7 +3456,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                 /* V.90: clear stale REVERSAL_1 from first exchange so we wait
                    for the actual second Tone A reversal. Keep persistence intact
                    so we don't miss a reversal that arrives before re-detecting Tone A. */
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: entering FIRST_B_SILENCE, clearing event (was %d) for second A reversal\n",
                          s->rx.received_event);
                 s->rx.v90_repeated_info0a_pending = false;
@@ -3446,7 +3473,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                event ordinal, or the event may already have been overwritten
                by the immediately following L1.  The durable counter is the
                authority. */
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: second Tone A reversal transaction completed; receiving analogue L1/L2\n");
             v90_phase2_consume_reversal(s);
             s->rx.received_event = V34_EVENT_NONE;
@@ -3467,7 +3494,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
             recoveries = v90_note_phase2_info0_recovery(s);
             if (recoveries <= 2)
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: repeated INFO0a while waiting for second Tone A reversal; re-sending acknowledged INFO0d to recover Phase 2 (recovery %d)\n",
                          recoveries);
                 s->tx.info0_acknowledgement = true;
@@ -3480,7 +3507,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
             }
             else
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: repeated INFO0a persists while waiting for second Tone A reversal after %d recoveries; forcing Tone B/L1/L2 path instead of another INFO0d loop\n",
                          recoveries);
                 s->rx.v90_repeated_info0a_pending = false;
@@ -3534,7 +3561,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
             if (v90_phase2_l2_pending(s))
             {
                 v90_phase2_consume_l2(s);
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: analogue L1/L2 transaction completed after a missed second reversal; transmitting Tone B and waiting for the next Tone A reversal\n");
                 s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
                 s->tx.tone_duration = 0;
@@ -3584,7 +3611,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
             if (s->tx.v90_mode)
             {
                 /* V.90 answerer: clear stale L2_SEEN so Tone A reversal detection starts fresh */
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: entering SECOND_B, clearing L2_SEEN for fresh Tone A reversal detection\n");
                 s->rx.received_event = V34_EVENT_NONE;
                 s->rx.persistence1 = 0;
@@ -3604,7 +3631,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                Normal progress is the next durable reversal transaction. */
             if (v90_phase2_reversal_pending(s))
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: Tone A reversal transaction completed at SECOND_B after %d bauds (event=%d), delaying 40ms\n",
                          s->tx.tone_duration, s->rx.received_event);
                 v90_phase2_consume_reversal(s);
@@ -3616,7 +3643,7 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                 /* V.90 §9.2.1.2.4 recovery: the deadline is absolute from
                    the second received Tone A reversal, not a seven-second
                    local stage timer. */
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: Tone A reversal recovery deadline reached at SECOND_B after %d bauds\n",
                          s->tx.tone_duration);
                 s->tx.tone_duration = 1;
@@ -3801,7 +3828,7 @@ static complex_sig_t get_initial_hdx_b_not_b_baud(v34_state_t *s)
 
 static void initial_ab_not_ab_baud_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - initial_ab_not_ab_baud_init() [calling=%d duplex=%d sample_time=%d]\n",
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - initial_ab_not_ab_baud_init() [calling=%d duplex=%d sample_time=%d]\n",
              s->tx.calling_party, s->tx.duplex, s->tx.sample_time);
     s->tx.tone_duration = 0;
     s->tx.current_modulator = V34_MODULATION_CC;
@@ -3881,7 +3908,7 @@ static void initial_ab_not_ab_baud_init(v34_state_t *s)
                    INFO1d as an ordinary part of §9.2.2.1.8, so this guard
                    would misfire there; its own re-ranging comes through
                    §9.2.2.2.x instead. */
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - re-ranging after INFO0 recovery; conditioning RX for Tone B + INFO0 (11.2.1.2.2)\n");
                 s->rx.stage = V34_RX_STAGE_TONE_B;
                 s->rx.target_bits = (s->rx.duplex)  ?  (49 - (4 + 8 + 4))  :  (51 - (4 + 8 + 4));
@@ -3968,7 +3995,7 @@ static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                            direction, both answers to what INFO1d offered), so
                            the V.34 call-modem branch below is wrong twice
                            over. */
-                        span_log(&s->logging, SPAN_LOG_FLOW,
+                        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                                  "Tx - V.90 analogue modem: L2 done, Tone A + reversal + silence (9.2.2.1.6)\n");
                         second_a_baud_init(s);
                     }
@@ -3987,7 +4014,7 @@ static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                             || s->rx.received_event == V34_EVENT_REVERSAL_3
                             || s->rx.signal_present)
                         {
-                            span_log(&s->logging, SPAN_LOG_FLOW,
+                            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                                      "Tx - V.90: Tone A already present at end of L2; sending INFO1d without a carrier gap\n");
                             info1_baud_init(s);
                         }
@@ -4115,7 +4142,7 @@ static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                             &&  s->rx.guard_carrier_valid
                             &&  s->rx.guard_carrier_db > -2.5f)
                         {
-                            span_log(&s->logging, SPAN_LOG_FLOW,
+                            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                                      "Tx - V.90: end of PCM L2 but peer still holds Tone A (guard %+.1f dB); waiting rather than sending INFO1d early\n",
                                      s->rx.guard_carrier_db);
                             tone_a_evidence = false;
@@ -4128,7 +4155,7 @@ static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                                INFO1A.  REVERSAL_3 is therefore positive Tone A
                                evidence, not a stale event; dropping it here
                                created a 650 ms silence before INFO1d on V.92. */
-                            span_log(&s->logging, SPAN_LOG_FLOW,
+                            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                                      "Tx - V.90: Tone A at end of PCM L2 (event=%d guard=%+.1f dB valid=%d); sending INFO1d without a carrier gap\n",
                                      s->rx.received_event,
                                      s->rx.guard_carrier_db,
@@ -4160,7 +4187,7 @@ static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
 
 static void l1_l2_signal_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - l2_l2_signal_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - l2_l2_signal_init()\n");
     s->tx.line_probe_step = 0;
     s->tx.line_probe_cycles = 0;
     s->tx.line_probe_scaling = 0.0008f*V34_LINE_PROBE_LEVEL_TRIM*s->tx.gain;
@@ -4232,7 +4259,7 @@ static complex_sig_t get_infomarksa_baud(v34_state_t *s)
        modulator, i.e. a phase reversal every baud. */
     if (s->rx.received_event == V34_EVENT_INFO1_OK)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - INFO1c received after %d bauds of INFOMARKSa, sending INFO1a (11.2.2.2.4)\n",
                  s->tx.tone_duration);
         s->rx.received_event = V34_EVENT_NONE;
@@ -4253,7 +4280,7 @@ static complex_sig_t get_infomarksa_baud(v34_state_t *s)
             return s->tx.lastbit;
         }
         /*endif*/
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - repeated INFO0c during INFOMARKSa; acknowledging with INFO0a bit 28 (11.2.2.1.1)\n");
         s->tx.info0_acknowledgement = true;
         info0_baud_init(s);
@@ -4271,7 +4298,7 @@ static complex_sig_t get_infomarksa_baud(v34_state_t *s)
 
 static void infomarksa_baud_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - infomarksa_baud_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - infomarksa_baud_init()\n");
     s->tx.tone_duration = 0;
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
@@ -4319,7 +4346,7 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
             ||
             ++s->tx.tone_duration >= post_l2_tone_b_wait_bauds(s))
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - Tone B %s after %d bauds of post-L2 Tone A; sending the "
                      "11.2.1.2.6 Tone A phase reversal\n",
                      s->rx.tone_b_present ? "detected" : "timeout",
@@ -4372,7 +4399,7 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
            left for Phase 3 without ever reading its line-probe results. */
         if (s->rx.received_event == V34_EVENT_INFO1_OK)
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - %s received after %d bauds of Tone A, sending INFO1a (%s)\n",
                      (s->tx.v90_mode  &&  s->tx.calling_party) ? "INFO1d" : "INFO1c",
                      s->tx.tone_duration,
@@ -4398,7 +4425,7 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
                 !s->tx.phase2_info0_repeated)
             {
                 s->tx.phase2_info0_repeated = true;
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - repeated INFO0c during INFO1c wait; repeating INFO0a "
                          "with bit 28 %s (11.2.2.2.1, ME_V34_INFO0_RETRY)\n",
                          (answer_info0_retry_policy() == 1) ? "set" : "clear");
@@ -4415,7 +4442,7 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
                    receive-probe state.  Its INFO detector is fed the wideband
                    probe whenever it is not in that state, which is the most
                    likely source of the INFO0s it kept declaring. */
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - repeated INFO0c after the recovery was answered; "
                          "holding Tone A (11.2.2.2.1)\n");
             }
@@ -4446,7 +4473,7 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
             }
             else
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - repeated INFO0c during INFO1c wait; acknowledging with INFO0a bit 28 (11.2.2.1.1)\n");
                 s->tx.info0_acknowledgement = true;
                 info0_baud_init(s);
@@ -4460,7 +4487,7 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
                 /* A corrupt INFO1c is not a handshake failure - the call
                    modem repeats it.  Drop the event so it cannot be mistaken
                    for a later one, and keep waiting. */
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - INFO1c received with bad CRC at baud %d; continuing to wait\n",
                          s->tx.tone_duration);
                 s->rx.received_event = V34_EVENT_NONE;
@@ -4505,7 +4532,7 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
                        Server is such a peer -- it cycles its INFO receive
                        states waiting for INFO1a, whose bits 37:39 are what
                        its firmware reads to choose the V.90 page. */
-                    span_log(&s->logging, SPAN_LOG_FLOW,
+                    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                              "Tx - no INFO1d within %d bauds; sending INFO1a anyway "
                              "(ME_V90_ANALOGUE_INFO1D_TIMEOUT=info1a)\n",
                              s->tx.tone_duration);
@@ -4514,7 +4541,7 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
                     break;
                 }
                 /*endif*/
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - no %s within %d bauds; sending INFOMARKSa (%s)\n",
                          (s->tx.v90_mode  &&  s->tx.calling_party) ? "INFO1d" : "INFO1c",
                          s->tx.tone_duration,
@@ -4533,7 +4560,7 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
 
 static void second_a_baud_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - second_a_baud_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - second_a_baud_init()\n");
     s->tx.tone_duration = 0;
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
@@ -4615,7 +4642,7 @@ static int post_info0_resume_bauds(void)
 static void answer_resume_probe(v34_state_t *s, const char *reason)
 {
     s->tx.phase2_resume_count++;
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - %s with the probe already sent; resuming at the "
              "11.2.1.2.5 Tone A reversal and L1/L2\n",
              reason);
@@ -4649,7 +4676,7 @@ static void answer_resume_probe(v34_state_t *s, const char *reason)
 
 static void post_l2_wait_tone_b_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - post_l2_wait_tone_b_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - post_l2_wait_tone_b_init()\n");
     s->tx.tone_duration = 0;
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
@@ -4664,7 +4691,7 @@ static void pre_info1_a_init(v34_state_t *s)
        answer modem (§11.2.1.2.8); the V.90 analogue modem reaches it as the
        *calling* party (§9.2.2.1.8), which is the same signal for the same
        reason -- the peer is waiting to see Tone A before it sends its INFO1. */
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - pre_info1_a_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - pre_info1_a_init()\n");
     s->tx.tone_duration = 0;
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
@@ -4692,7 +4719,7 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
     timeout_bauds = (600*650 + 500)/1000 + rtd_bauds;
     if (s->rx.received_event == V34_EVENT_INFO1_OK)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: INFO1a received while waiting for Tone A, proceeding directly to Phase 3 handoff\n");
         s->tx.v90_info1a_fast_retries = 0;
         s->tx.v90_info1a_total_retries = 0;
@@ -4704,7 +4731,7 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
 
     if (s->rx.received_event == V34_EVENT_INFO0_OK)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: ignoring stale repeated INFO0a while waiting for Tone A before INFO1d\n");
         s->rx.received_event = V34_EVENT_NONE;
         s->rx.persistence1 = 0;
@@ -4715,7 +4742,7 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
 
     if (s->rx.received_event == V34_EVENT_INFO0_BAD)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: ignoring stale bad INFO0a while waiting for Tone A before INFO1d\n");
         s->rx.received_event = V34_EVENT_NONE;
         s->rx.persistence1 = 0;
@@ -4735,7 +4762,7 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
     {
         if ((s->tx.tone_duration % 120) == 0)
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: holding INFO1d, peer still in Tone A (guard %+.1f dB) at %d bauds\n",
                      s->rx.guard_carrier_db,
                      s->tx.tone_duration);
@@ -4754,7 +4781,7 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
             && (s->rx.received_event == V34_EVENT_TONE_SEEN
                 || s->rx.received_event == V34_EVENT_REVERSAL_1))
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: ignoring early Tone A indication before INFO1d (event=%d) at %d bauds\n",
                      s->rx.received_event,
                      s->tx.tone_duration);
@@ -4765,7 +4792,7 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
         }
         /*endif*/
         /* Tone A detected (or timeout) — proceed to INFO1d */
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: %s (event=%d signal=%d) after %d bauds, sending INFO1d\n",
                  (s->tx.tone_duration >= timeout_bauds) ? "Timeout"
                  : (((s->rx.received_event == V34_EVENT_TONE_SEEN)
@@ -4827,7 +4854,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         {
             if (s->calling_party == s->tx.v90_mode)
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - retrain silence complete; transmitting Tone A "
                          "and awaiting Tone B\n");
                 s->tx.tone_duration = 0;
@@ -4841,7 +4868,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
                 return zero;
             }
             /*endif*/
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: retrain-response silence complete; transmitting Tone B and awaiting Tone A reversal\n");
             /* V.90 §9.2.1.1.8: "Any subsequent retrains shall use Phase 2 of
                V.90 regardless of the analogue modem's choice of operating
@@ -4849,7 +4876,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
                answerer scrambler taps for the fresh Phase 2/3. */
             if (s->tx.v90_v34_fallback  ||  s->rx.v90_v34_fallback)
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: clearing V.34-fallback state for retrain\n");
                 s->tx.v90_v34_fallback = false;
                 s->rx.v90_v34_fallback = false;
@@ -4913,7 +4940,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
 
     if (s->rx.received_event == V34_EVENT_INFO1_OK)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: INFO1a received after %d bauds of wait, proceeding to Phase 3 handoff\n",
                  s->tx.tone_duration);
         s->tx.v90_phase2_info0_recovery_loops = 0;
@@ -4939,7 +4966,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
 
     if (s->rx.received_event == V34_EVENT_INFO1_BAD)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: INFO1a candidate failed CRC at %d bauds, continuing to wait\n",
                  s->tx.tone_duration);
         s->rx.received_event = V34_EVENT_NONE;
@@ -4953,7 +4980,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
 
         if (recoveries <= V90_INFO1A_MAX_INFO0_RECOVERIES)
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: repeated INFO0a arrived while waiting for INFO1a; re-sending acknowledged INFO0d to recover Phase 2 (recovery %d)\n",
                      recoveries);
             s->tx.info0_acknowledgement = true;
@@ -4975,7 +5002,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
            stormed INFO0d until the peer answered with Link Error.  Hold for
            INFO1a instead; the §9.2.1.2.6 timeout path below then drives the
            Tone A / INFOMARKSa recovery, keeping the reversal progress intact. */
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: repeated INFO0a persists after %d INFO0d recoveries while waiting for INFO1a; holding for INFO1a/timeout instead of another INFO0d loop\n",
                  recoveries);
         s->rx.v90_repeated_info0a_pending = false;
@@ -5000,14 +5027,14 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
             s->tx.v90_info1a_total_retries++;
             s->tx.v90_info1a_fast_retries = 0;
             s->tx.tone_duration = 0;
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: INFOMARKSa while waiting for INFO1a; re-sending INFO1d per 9.2.1.2.6 (total=%d)\n",
                      s->tx.v90_info1a_total_retries);
             info1_baud_init(s);
             return zero;
         }
         /*endif*/
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: INFOMARKSa after %d INFO1d re-sends; leaving it to the 9.2.1.2.6 deadline\n",
                  s->tx.v90_info1a_total_retries);
     }
@@ -5038,7 +5065,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
                INFOMARKSa, not to Tone A. */
             s->tx.v90_info1a_retrain_responses++;
             v90_phase2_reset_transactions(s);
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: Tone A after INFO1a deadline (event=%d at %d bauds); responding to retrain per 9.5.1.2 (response %d)\n",
                      s->rx.received_event,
                      s->tx.tone_duration,
@@ -5053,7 +5080,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
             return zero;
         }
         /*endif*/
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: %signoring Tone A/reversal while waiting for INFO1a (event=%d) at %d bauds; continuing to wait for INFO1a until timeout\n",
                  (s->tx.tone_duration < V90_INFO1A_TONE_GUARD_BAUDS) ? "early " : "",
                  s->rx.received_event,
@@ -5073,7 +5100,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         s->tx.v90_info1a_total_retries++;
         if (s->tx.v90_info1a_total_retries >= max_total_retries)
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: aborting after %d INFO1a retries with repeated carrier loss and no valid INFO1a\n",
                      s->tx.v90_info1a_total_retries);
             s->rx.training_failed_reported = false;
@@ -5083,7 +5110,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
             return zero;
         }
         /*endif*/
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: carrier absent while waiting for INFO1a after %d bauds; fast retrying INFO1d (fast retries=%d total=%d)\n",
                  s->tx.tone_duration,
                  s->tx.v90_info1a_fast_retries,
@@ -5103,7 +5130,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
         s->tx.v90_info1a_total_retries++;
         if (s->tx.v90_info1a_total_retries >= max_total_retries)
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: aborting after %d INFO1a recovery attempts with repeated carrier loss and no valid INFO1a\n",
                      s->tx.v90_info1a_total_retries);
             s->rx.training_failed_reported = false;
@@ -5113,7 +5140,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
             return zero;
         }
         /*endif*/
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: exhausted fast INFO1d retries with carrier still absent; restarting Phase 2 from acknowledged INFO0d (total=%d)\n",
                  s->tx.v90_info1a_total_retries);
         s->tx.v90_info1a_fast_retries = 0;
@@ -5163,7 +5190,7 @@ wait_timeout_check:
         {
             s->tx.v90_info1a_retrain_responses++;
             v90_phase2_reset_transactions(s);
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: INFO1a deadline, guard/carrier %+.1f dB (valid=%d) => Tone A; responding to retrain per 9.5.1.2 (response %d)\n",
                      s->rx.guard_carrier_db,
                      s->rx.guard_carrier_valid,
@@ -5184,7 +5211,7 @@ wait_timeout_check:
         s->tx.v90_info1a_fast_retries = 0;
         if (s->tx.v90_info1a_total_retries >= max_total_retries)
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: aborting after %d INFO1a timeouts without valid INFO1a; signalling training failure\n",
                      s->tx.v90_info1a_total_retries);
             s->rx.training_failed_reported = false;
@@ -5194,7 +5221,7 @@ wait_timeout_check:
             return zero;
         }
         /*endif*/
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: INFO1a wait timeout after %d bauds (~700ms + RTD), re-sending INFO1d (timeout retries=%d)\n",
                  s->tx.tone_duration,
                  s->tx.v90_info1a_total_retries);
@@ -5207,7 +5234,7 @@ wait_timeout_check:
 
 static void v90_wait_tone_a_init(v34_state_t *s, bool preserve_tone_a_event)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - v90_wait_tone_a_init(): waiting for Tone A before INFO1d%s\n",
              preserve_tone_a_event ? " (preserving prior Tone A indication)" : "");
     s->tx.v90_phase2_info0_recovery_loops = 0;
@@ -5237,7 +5264,7 @@ static void v90_wait_tone_a_init(v34_state_t *s, bool preserve_tone_a_event)
 
 static void v90_wait_info1a_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.90: INFO1d complete, sending silence, waiting for INFO1a with Tone A recovery armed\n");
     s->tx.tone_duration = 0;
     /* Use CC modulation so we get a per-baud callback while transmitting silence. */
@@ -5259,7 +5286,7 @@ static void v90_wait_info1a_init(v34_state_t *s)
            mid-accumulation when the last repeat finishes.  Zeroing the
            accumulator or yanking the stage back to TONE_A here would
            destroy that in-flight frame. */
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.90: INFO1a already accumulating (%d bits) at end of INFO1d; preserving it\n",
                  s->rx.bit_count);
     }
@@ -5297,7 +5324,7 @@ static complex_sig_t get_v34_fallback_wait_baud(v34_state_t *s)
     if (s->rx.received_event == V34_EVENT_J
         ||  s->rx.phase3_j_trn16 >= 0)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.34 fallback: far-end Phase 3 J %s after %d bauds of silence; responding with S/S-bar\n",
                  (s->rx.received_event == V34_EVENT_J) ? "event" : "decode",
                  s->tx.tone_duration);
@@ -5311,7 +5338,7 @@ static complex_sig_t get_v34_fallback_wait_baud(v34_state_t *s)
         /* Interop escape hatch: if the peer's J never decodes, respond anyway
            rather than dying silent -- the peer's own recovery (INFOMARKSa) can
            still resynchronise on our Phase 3. */
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.34 fallback: no far-end J after %d bauds; starting our Phase 3 anyway\n",
                  s->tx.tone_duration);
         s_not_s_baud_init(s);
@@ -5323,7 +5350,7 @@ static complex_sig_t get_v34_fallback_wait_baud(v34_state_t *s)
 
 static void v90_v34_fallback_wait_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.90 declined -> V.34 fallback (9.2.1.1.8): call-modem role; "
              "silence while far end leads Phase 3 (S/S-bar/PP/TRN/J)\n");
     s->tx.v90_v34_fallback = true;
@@ -5374,7 +5401,7 @@ static complex_sig_t get_second_b_baud(v34_state_t *s)
 static void second_b_baud_init(v34_state_t *s)
 {
     /* This is for half-duplex */
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - second_b_baud_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - second_b_baud_init()\n");
     s->tx.tone_duration = 0;
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
@@ -5406,7 +5433,7 @@ static complex_sig_t get_infoh_baud(v34_state_t *s)
 
 static void infoh_baud_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - infoh_baud_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - infoh_baud_init()\n");
     prepare_infoh(s);
     s->tx.txbits = infoh_sequence_tx(&s->tx, &s->tx.infoh);
     s->tx.txbits += 8;
@@ -5436,7 +5463,7 @@ static complex_sig_t get_v34_call_phase3_wait_baud(v34_state_t *s)
        receiving the answerer's S/S-bar, PP, first 512T of TRN and J. */
     if (s->rx.received_event == V34_EVENT_J)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.34 caller: far-end J received, starting local Phase 3 S/S-bar\n");
         s->rx.received_event = V34_EVENT_NONE;
         s->tx.phase3_call_wait_j = false;
@@ -5454,7 +5481,7 @@ static complex_sig_t get_v34_call_info1a_wait_baud(v34_state_t *s)
        its answer-to-call baud/carrier parameters. */
     if (s->rx.received_event == V34_EVENT_INFO1_OK)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.34 caller: INFO1a received; conditioning for answerer Phase 3\n");
         s->rx.received_event = V34_EVENT_NONE;
         s_not_s_baud_init(s);
@@ -5469,7 +5496,7 @@ static void v34_call_phase3_wait_init(v34_state_t *s)
 {
     s->tx.phase3_call_wait_j = false;
     s->tx.current_getbaud = get_v34_call_info1a_wait_baud;
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.34 caller: INFO1c complete; silent while receiving INFO1a\n");
 }
 /*- End of function --------------------------------------------------------*/
@@ -5504,13 +5531,13 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
             {
                 s->tx.tone_duration++;
                 s->tx.txptr = 0;
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: repeating INFO1a contiguously (%d/%d)\n",
                          s->tx.tone_duration, info1a_repeats(s));
             }
             else
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: INFO1a complete, entering Phase 3 S/!S handoff\n");
                 s->tx.tone_duration = 0;
                 s_not_s_baud_init(s);
@@ -5536,7 +5563,7 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
                    subsequent sync word to acquire. */
                 s->tx.tone_duration++;
                 s->tx.txptr = 0;
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: repeating INFO1d contiguously (%d/4)\n",
                          s->tx.tone_duration);
             }
@@ -5584,7 +5611,7 @@ static int info1a_repeats(v34_state_t *s)
 
 static void info1_baud_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - info1_baud_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - info1_baud_init()\n");
     if (s->tx.v90_mode && s->tx.calling_party)
     {
         /* V.90 §8.2.3.2 Table 10: analog (calling) modem sends INFO1a
@@ -5598,7 +5625,7 @@ static void info1_baud_init(v34_state_t *s)
            V.90 §8.2.3.2 Table 9: digital modem (answerer) sends INFO1d
            which is identical to V.34 INFO1c. */
         if (s->tx.v90_mode)
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx INFO1d (%s):\n",
                      s->tx.v92_info1d_mode
                          ? "V.92 Table 17" : "V.90 Table 9");
@@ -5622,7 +5649,7 @@ static void info1_baud_init(v34_state_t *s)
         int pos = 0;
         for (int di = 0;  di < nbytes && pos < (int)sizeof(hexbuf) - 4;  di++)
             pos += snprintf(hexbuf + pos, sizeof(hexbuf) - pos, " %02X", s->tx.txbuf[di]);
-        span_log(&s->logging, SPAN_LOG_FLOW, "Tx INFO1d raw frame (%d bits, %d bytes):%s\n", s->tx.txbits, nbytes, hexbuf);
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx INFO1d raw frame (%d bits, %d bytes):%s\n", s->tx.txbits, nbytes, hexbuf);
     }
 #if 0
 #if defined(SPANDSP_USE_FIXED_POINT)
@@ -5642,7 +5669,7 @@ static void info1_baud_init(v34_state_t *s)
     if (s->tx.v90_mode)
     {
         s->tx.tone_duration = 0;
-        span_log(&s->logging, SPAN_LOG_FLOW, "Tx - V.90: INFO1d will start with one arbitrary-phase point\n");
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - V.90: INFO1d will start with one arbitrary-phase point\n");
     }
     /*endif*/
     if (s->tx.v90_mode  &&  !s->tx.calling_party)
@@ -5859,7 +5886,7 @@ static void s_not_s_baud_init(v34_state_t *s)
     int baud_idx;
     int carrier_idx;
 
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - s_not_s_baud_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - s_not_s_baud_init()\n");
     if (s->tx.v90_v34_fallback  &&  s->rx.info1a_received)
     {
         /* V.90 §9.2.1.1.8 V.34 fallback, call-modem role.  Table 11 dictates
@@ -5878,7 +5905,7 @@ static void s_not_s_baud_init(v34_state_t *s)
         /*endif*/
         s->tx.high_carrier = s->rx.info1a.use_high_carrier;
         s->tx.v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->tx.baud_rate, s->tx.high_carrier));
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - Phase 3 (V.34 fallback, call role): S/!S at %d baud, %s carrier\n",
                  baud_rate_parameters[s->tx.baud_rate].baud_rate,
                  s->tx.high_carrier ? "high" : "low");
@@ -5903,7 +5930,7 @@ static void s_not_s_baud_init(v34_state_t *s)
     else if (!s->tx.calling_party)
     {
         int silence_bauds = (baud_rate_parameters[s->tx.baud_rate].baud_rate*70 + 500)/1000;
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - Phase 3 (answerer): INFO1a -> silence 70ms (~%d bauds) -> S/!S\n",
                  silence_bauds);
     }
@@ -5979,7 +6006,7 @@ static void s_not_s_baud_init(v34_state_t *s)
             preemp_idx = s->rx.info1c.rate_data[baud_idx].pre_emphasis;
             if (s->tx.high_carrier != s->rx.info1c.rate_data[baud_idx].use_high_carrier)
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - Phase 3: INFO1d selects the %s carrier at %d baud "
                          "(was %s); retuning to %.0f Hz\n",
                          s->rx.info1c.rate_data[baud_idx].use_high_carrier ? "high" : "low",
@@ -6038,7 +6065,7 @@ static void s_not_s_baud_init(v34_state_t *s)
 
             if (forced >= 0  &&  forced <= 10)
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - Phase 3: ME_V34_TX_PREEMP overrides pre-emphasis %d -> %d\n",
                          preemp_idx, forced);
                 preemp_idx = forced;
@@ -6048,7 +6075,7 @@ static void s_not_s_baud_init(v34_state_t *s)
         /*endif*/
     }
     v34_tx_power(s, -14.0f - (float)power_reduction);
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - Phase 3: applying %d dB power reduction (%.1f dBm0) [from %s]\n",
              power_reduction, -14.0f - (float)power_reduction,
              (info1_source)  ?  info1_source  :  "default, no INFO1 received");
@@ -6064,7 +6091,7 @@ static void s_not_s_baud_init(v34_state_t *s)
                                baud_idx,
                                carrier_idx);
         s->tx.pre_emphasis_coeffs = s->tx.pre_emphasis_norm_coeffs;
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - Phase 3: applying pre-emphasis filter %d (baud %d, %s carrier), "
                  "normalised to unity band power\n",
                  preemp_idx, baud_rate_parameters[baud_idx].baud_rate,
@@ -6072,12 +6099,12 @@ static void s_not_s_baud_init(v34_state_t *s)
     }
     else
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - Phase 3: no pre-emphasis (index %d)\n", preemp_idx);
     }
     /*endif*/
 
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - Phase 3: TX carrier=%s (%.0f Hz), RX carrier=%s (%.0f Hz)\n",
              s->tx.high_carrier ? "high" : "low",
              carrier_frequency(s->tx.baud_rate, s->tx.high_carrier),
@@ -6130,7 +6157,7 @@ static void s_not_s_baud_init(v34_state_t *s)
                channel training. Preserve that live V.90 Phase 3 receive
                context instead of regressing back to Tone B while TX enters
                S/!S. */
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: INFO1a already decoded, preserving primary-channel RX across S/!S handoff\n");
             s->rx.current_demodulator = V34_MODULATION_V34;
             if (s->rx.stage < V34_RX_STAGE_PHASE3_TRAINING)
@@ -6141,7 +6168,7 @@ static void s_not_s_baud_init(v34_state_t *s)
             s->rx.current_demodulator = V34_MODULATION_TONES;
             /* RX hasn't reached INFO1a yet — stay on TONE_B and wait
                for reversals to trigger the natural transition. */
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: keeping RX on CC demod (TONE_B) for INFO1a reception\n");
             s->rx.stage = V34_RX_STAGE_TONE_B;
             s->rx.received_event = V34_EVENT_REVERSAL_1;
@@ -6228,7 +6255,7 @@ static void s_not_s_baud_init(v34_state_t *s)
     s->rx.mp_phase4_retry_mode = 0;
     s->rx.received_event = V34_EVENT_NONE;
     reset_primary_rx_frontend_for_phase3(s);
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Rx - Phase 3: primary demod active; acquiring far-end PP for equalizer conditioning\n");
 }
 /*- End of function --------------------------------------------------------*/
@@ -6243,13 +6270,13 @@ static complex_sig_t get_pp_baud(v34_state_t *s)
     i = s->tx.tone_duration%PP_PERIOD_SYMBOLS;
     if (++s->tx.tone_duration == 1)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - Phase 3: PP transmission started (%d symbols)\n",
                  PP_TOTAL_SYMBOLS);
     }
     if (s->tx.tone_duration == PP_TOTAL_SYMBOLS)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - Phase 3: PP transmission complete (%d symbols), starting TRN\n",
                  s->tx.tone_duration);
         trn_baud_init(s);
@@ -6264,7 +6291,7 @@ static complex_sig_t get_pp_baud(v34_state_t *s)
 
 static void pp_baud_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - pp_baud_init() [Phase 3 PP: %d-symbol sequence]\n",
              PP_TOTAL_SYMBOLS);
     s->tx.tone_duration = 0;
@@ -6356,7 +6383,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             ||
             (s->tx.duplex  &&  ++s->tx.tone_duration >= 2048))
         {
-            span_log(&s->logging, SPAN_LOG_FLOW, "Tx - TRN complete (%d bauds), starting J\n",
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - TRN complete (%d bauds), starting J\n",
                      s->tx.tone_duration);
             s->tx.stage = V34_TX_STAGE_J;
             s->tx.persistence2 = j_pattern[j_pat_idx];
@@ -6499,7 +6526,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                     {
                         /* Caller: terminate J only after far-end J is decoded so
                            MP type (4-point/16-point) is known from J per spec. */
-                        span_log(&s->logging, SPAN_LOG_FLOW,
+                        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                                  "Tx - far-end S detected and J decoded (trn=%s), switching J -> J'\n",
                                  s->rx.phase3_j_trn16 ? "16-point" : "4-point");
                         s->tx.stage = V34_TX_STAGE_J_DASHED;
@@ -6508,7 +6535,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                     }
                     else if ((s->tx.tone_duration % 64) == 0)
                     {
-                        span_log(&s->logging, SPAN_LOG_FLOW,
+                        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                                  "Tx - far-end S detected, waiting for explicit J decode before J' (J bits=%d)\n",
                                  s->rx.phase3_j_bits);
                     }
@@ -6605,7 +6632,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                         s->rx.mp_phase4_default_bit_order = 0;
                         s->rx.mp_phase4_alt_order_active = 0;
                         s->rx.mp_phase4_retry_mode = 0;
-                        span_log(&s->logging, SPAN_LOG_FLOW,
+                        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                                  "Tx - Phase 3: first S transition seen, MD indicated (%d x35ms); "
                                  "waiting %d samples for next S transition\n",
                                  md_units, md_wait_samples);
@@ -6613,7 +6640,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                     }
                     /*endif*/
 
-                    span_log(&s->logging, SPAN_LOG_FLOW,
+                    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                              "Tx - far-end %s detected, starting Phase 4 wait\n",
                              (s->rx.received_event == V34_EVENT_J_DASHED)
                                 ? "J'"
@@ -6632,7 +6659,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                 {
                     /* Interop fallback: if the peer's Phase 3 transition is not
                        detected reliably, move to Phase 4 after the allowed wait. */
-                    span_log(&s->logging, SPAN_LOG_FLOW,
+                    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                              "Tx - Phase 3: J wait timeout (%d bauds), starting Phase 4 wait\n",
                              s->tx.tone_duration);
                     phase4_wait_init(s);
@@ -6678,7 +6705,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
                    then TRN before MP.  This was accidentally restricted to
                    the V.90 fallback path, so plain V.34 put MP where the
                    answer modem was still conditioning on TRN. */
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.34 caller: J' complete, transmitting Phase 4 TRN before MP\n");
                 s->tx.scramble_reg = 0;
                 s->tx.stage = V34_TX_STAGE_PHASE4_TRN;
@@ -6701,8 +6728,8 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
 
 static void trn_baud_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - trn_baud_init()\n");
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - trn_baud_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - Phase 3 TRN mode: %s-point (infoh.trn16=%d)\n",
              s->tx.infoh.trn16 ? "16" : "4", s->tx.infoh.trn16);
     s->tx.tone_duration = 0;
@@ -6807,7 +6834,7 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
            modem shall transmit silence." */
         if (++s->tx.tone_duration >= PHASE4_WAIT_BAUDS)
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - Phase 4: wait complete, starting S signal\n");
             /* V.34 10.1.3.7: S alternates two points separated by 90°.
                Use the same absolute-point generator as Phase 3 S rather than
@@ -6833,7 +6860,7 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
             v34_rotate_180(&s->tx.lastbit);
             s->tx.stage = V34_TX_STAGE_PHASE4_NOT_S;
             s->tx.tone_duration = 0;
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - Phase 4: S complete (%d bauds), starting S-bar (16T)\n",
                      PHASE4_S_BAUDS);
         }
@@ -6855,7 +6882,7 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
             s->tx.scramble_reg = 0;
             s->tx.stage = V34_TX_STAGE_PHASE4_TRN;
             s->tx.tone_duration = 0;
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - Phase 4: S-bar complete, starting TRN (>=512T, mode=%s-point)\n",
                      s->tx.infoh.trn16 ? "16" : "4");
         }
@@ -6894,8 +6921,8 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
                 static const char *p4trn_path = NULL;
 
                 if (p4trn_path == NULL)
-                    p4trn_path = getenv("V34_P4TRN_TX_DUMP")
-                               ?  getenv("V34_P4TRN_TX_DUMP")  :  "";
+                    p4trn_path = V34_DIAG_GETENV("V34_P4TRN_TX_DUMP")
+                               ?  V34_DIAG_GETENV("V34_P4TRN_TX_DUMP")  :  "";
                 /*endif*/
                 if (p4trn_path[0])
                 {
@@ -6914,7 +6941,7 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
             }
             if (s->rx.received_event == V34_EVENT_TRAINING_FAILED)
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - Phase 4: TRN training failed after %d bauds, dropping call\n",
                          s->tx.tone_duration);
                 s->tx.current_getbaud = NULL;
@@ -6930,7 +6957,7 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
                    far-end-confirmation branch below cannot fire and would
                    hold TRN until the guard; the length is ours to choose,
                    and the Phase 4 minimum is what retrains the peer. */
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - 11.6 rate renegotiation: TRN complete (%d bauds), starting MP\n",
                          s->tx.tone_duration);
                 mp_or_mph_baud_init(s);
@@ -6941,7 +6968,7 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
                 /* V.34 fallback call-modem role: our TRN follows our own J'
                    (§11.4.1.1.1); there is no far-end J' to wait for -- the
                    answerer moves to MP off our TRN.  512T minimum then MP. */
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - Phase 4 (V.34 fallback): TRN complete (%d bauds), starting MP\n",
                          s->tx.tone_duration);
                 mp_or_mph_baud_init(s);
@@ -6951,14 +6978,14 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
                     ||  (phase4_trn_tx_max_bauds() > 0
                          &&  s->tx.tone_duration >= phase4_trn_tx_max_bauds())))
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - Phase 4: TRN complete (%d bauds) and far-end J'/TRN confirmed, starting MP\n",
                          s->tx.tone_duration);
                 mp_or_mph_baud_init(s);
             }
             else if (s->tx.tone_duration == PHASE4_TRN_BAUDS)
             {
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - Phase 4: local TRN minimum reached (%d bauds), waiting for far-end J'/TRN confirmation\n",
                          s->tx.tone_duration);
             }
@@ -6970,13 +6997,13 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
                        J'/TRN yet, switching to MP only pollutes the peer's TRN
                        detector and creates a false late handoff. Hold TRN
                        until explicit PHASE4_TRN_READY arrives. */
-                    span_log(&s->logging, SPAN_LOG_FLOW,
+                    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                              "Tx - Phase 4: TRN guard reached (%d bauds ~= 2000 ms) without far-end J'/TRN confirmation; continuing TRN\n",
                              s->tx.tone_duration);
                 }
                 else if ((s->tx.tone_duration % 512) == 0)
                 {
-                    span_log(&s->logging, SPAN_LOG_FLOW,
+                    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                              "Tx - Phase 4: TRN guard exceeded (%d bauds) without far-end J'/TRN confirmation; continuing TRN\n",
                              s->tx.tone_duration);
                 }
@@ -7094,7 +7121,7 @@ static void phase4_rx_conditioning_init(v34_state_t *s, int initial_stage, const
         s->rx.total_baud_timing_correction = 0;
     }
 
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Rx - Phase 4: conditioned for %s (stage=%d, baud_rate=%d, high_carrier=%d, carrier=%.1f Hz, frontend=%s)\n",
              reason ? reason : "Phase 4 startup",
              s->rx.stage,
@@ -7223,7 +7250,7 @@ static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_r
         {
             int *mine = s->calling_party ? &a_to_c : &c_to_a;
 
-            span_log(tx_log_state(&s->tx), SPAN_LOG_FLOW,
+            V34_TX_LOG(tx_log_state(&s->tx), SPAN_LOG_FLOW,
                      "Tx MP receive-rate: Phase-4 TRN SNR %.1f dB would give "
                      "%d bps; asking %d bps (measurement %s)\n",
                      snr_db, measured*2400, (*mine)*2400,
@@ -7246,7 +7273,7 @@ static complex_sig_t get_v34_answer_phase3_wait_j_baud(v34_state_t *s)
     if (s->rx.received_event == V34_EVENT_J
         || s->rx.received_event == V34_EVENT_J_DASHED)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - V.34 answerer: caller J received, starting Phase 4 S\n");
         s->rx.received_event = V34_EVENT_NONE;
         phase4_wait_init(s);
@@ -7274,14 +7301,14 @@ static void v34_answer_phase3_wait_j_init(v34_state_t *s)
     s->rx.phase3_pp_corr_weight = 0.0f;
     s->tx.tone_duration = 0;
     s->tx.current_getbaud = get_v34_answer_phase3_wait_j_baud;
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.34 answerer: caller S received; silent while acquiring PP/TRN/J\n");
 }
 /*- End of function --------------------------------------------------------*/
 
 static void phase4_wait_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - phase4_wait_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - phase4_wait_init()\n");
     s->primary_channel_active = true;
     s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.stage = V34_TX_STAGE_PHASE4_WAIT;
@@ -7323,11 +7350,11 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
         if (s->tx.tone_duration <= MP_TX_SILENCE_BAUDS)
         {
             if (s->tx.tone_duration == 1)
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - MP: transmitting silence for %d bauds (echo test)\n",
                          MP_TX_SILENCE_BAUDS);
             if (s->tx.tone_duration == MP_TX_SILENCE_BAUDS)
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - MP: silence period complete, starting MP TX\n");
             return zero;
         }
@@ -7349,7 +7376,7 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
                 s->tx.mp.mp_acknowledged = 1;
                 s->tx.txbits = mp_sequence_tx(&s->tx, &s->tx.mp);
                 s->tx.txptr = 0;
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - far-end MP received, switching to MP'\n");
                 /* V.34 11.4.1.1.3/11.4.1.2.4 requires a complete MP'
                    sequence before E.  Do not observe the already-received
@@ -7383,7 +7410,7 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
 
 static void mp_or_mph_baud_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - mp_baud_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - mp_baud_init()\n");
     s->tx.current_modulator = V34_MODULATION_V34;
 
     if (s->tx.duplex
@@ -7468,7 +7495,7 @@ static void mp_or_mph_baud_init(v34_state_t *s)
                 buf[bi] = (char) ('0' + ((s->tx.txbuf[bi >> 3] >> (bi & 7)) & 1));
             /*endfor*/
             buf[bi] = '\0';
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - MP0 frame bits[0..%d]: %s\n", bi - 1, buf);
         }
         /*endif*/
@@ -7490,7 +7517,7 @@ static void mp_or_mph_baud_init(v34_state_t *s)
        DO NOT touch RX state here — the RX progresses independently
        through TRN/J' conditioning into MP decode.
        The RX stage was set in phase4_wait_init(). */
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - MP transmission starting (RX conditioned for J'/TRN/MP)\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - MP transmission starting (RX conditioned for J'/TRN/MP)\n");
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -7506,7 +7533,7 @@ static complex_sig_t get_e_baud(v34_state_t *s)
     s->tx.diff = (s->tx.diff + bit) & 3;
     if (++s->tx.tone_duration == 10)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - E minimum reached (>=20 bits)\n");
     }
     /*endif*/
@@ -7525,7 +7552,7 @@ static complex_sig_t get_e_baud(v34_state_t *s)
 
 static void e_baud_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - e_baud_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - e_baud_init()\n");
     s->tx.tone_duration = 0;
     s->tx.stage = V34_TX_STAGE_HDX_E;
     s->tx.current_getbaud = get_e_baud;
@@ -7550,7 +7577,7 @@ static complex_sig_t get_data_baud(v34_state_t *s)
             v34_get_mapping_frame(&s->tx, s->tx.tx_mapping_frame_buf);
             s->tx.current_get_bit = saved_get_bit;
             if (++s->tx.b1_frames_sent == s->tx.parms.p)
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - B1 complete (%d all-ones mapping frames)\n",
                          s->tx.parms.p);
         }
@@ -7584,7 +7611,7 @@ static complex_sig_t get_data_baud(v34_state_t *s)
 
         if (!dump_initialized[who])
         {
-            const char *path = getenv("V34_DATA_TX_DUMP");
+            const char *path = V34_DIAG_GETENV("V34_DATA_TX_DUMP");
 
             dump_initialized[who] = 1;
             if (path  &&  *path)
@@ -7622,7 +7649,7 @@ static void data_baud_init(v34_state_t *s)
            this point, and the flag must not survive into the next one -- the
            TRN-to-MP seam reads it. */
         s->tx.reneg_active = false;
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - 11.6 rate renegotiation complete; B1 then data\n");
     }
     /*endif*/
@@ -7647,7 +7674,7 @@ static void data_baud_init(v34_state_t *s)
         v34_set_working_parameters(&s->tx.parms, s->tx.baud_rate, s->tx.bit_rate,
                                    remote_mp->expanded_shaping);
         s->tx.use_non_linear_encoder = remote_mp->use_non_linear_encoder;
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - data_baud_init(): rate=%d bps (N=%d code=%d) "
                  "b=%d k=%d q=%d m=%d p=%d j=%d l=%d\n",
                  tx_rate_n * 2400, tx_rate_n, s->tx.bit_rate,
@@ -7681,7 +7708,7 @@ static void data_baud_init(v34_state_t *s)
     s->tx.p.re = 0;
     s->tx.p.im = 0;
     s->tx.z = 0;
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - data_baud_init(): trellis state on entry state=%d y0=%d "
              "(V.34/9.6 requires 0; forcing)\n",
              s->tx.state, s->tx.y0);
@@ -7737,7 +7764,7 @@ static void data_baud_init(v34_state_t *s)
             {
                 float rms = (float) sqrt(energy/symbols);
                 s->tx.data_symbol_scale = V34_NOMINAL_SYMBOL_RMS/rms;
-                span_log(&s->logging, SPAN_LOG_FLOW,
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - data modulation normalization: mapper_rms=%.4f "
                          "target=%.4f scale=%.5f (V.34 10.1.3)\n",
                          rms, V34_NOMINAL_SYMBOL_RMS,
@@ -7750,7 +7777,7 @@ static void data_baud_init(v34_state_t *s)
     s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.tx_data_mode = true;
     s->tx.current_getbaud = get_data_baud;
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - switching to DATA mode\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - switching to DATA mode\n");
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -7771,7 +7798,7 @@ static complex_sig_t get_pph_baud(v34_state_t *s)
 
 static void pph_baud_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - pph_baud_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - pph_baud_init()\n");
     s->tx.tone_duration = 0;
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.stage = V34_TX_STAGE_HDX_PPH;
@@ -7817,7 +7844,7 @@ static complex_sig_t get_second_alt_baud(v34_state_t *s)
 
 static void second_alt_baud_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - second_alt_baud_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - second_alt_baud_init()\n");
     s->tx.tone_duration = 0;
     s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.scramble_reg = 0;
@@ -7856,7 +7883,7 @@ static complex_sig_t get_first_alt_baud(v34_state_t *s)
 
 static void first_alt_baud_init(v34_state_t *s)
 {
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - first_alt_baud_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - first_alt_baud_init()\n");
     s->tx.tone_duration = 0;
     s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.scramble_reg = 0;
@@ -7891,7 +7918,7 @@ static complex_sig_t get_sh_baud(v34_state_t *s)
 static void sh_baud_init(v34_state_t *s)
 {
     /* This is the beginning of half-duplex control channel startup */
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - sh_baud_init()\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - sh_baud_init()\n");
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
     s->tx.tone_duration = 0;
     s->tx.current_modulator = V34_MODULATION_V34;
@@ -7956,7 +7983,7 @@ static int tx_v34_modulation(v34_state_t *s, int16_t amp[], int max_len)
             {
                 if (!s->tx.getbaud_null_logged)
                 {
-                    span_log(&s->logging, SPAN_LOG_ERROR,
+                    V34_TX_LOG(&s->logging, SPAN_LOG_ERROR,
                              "Tx - NULL current_getbaud in V34 modulator (stage=%d mod=%d); silencing further\n",
                              s->tx.stage, s->tx.current_modulator);
                     s->tx.getbaud_null_logged = true;
@@ -8066,7 +8093,7 @@ static int tx_cc_modulation(v34_state_t *s, int16_t amp[], int max_len)
             s->tx.baud_phase -= 40;
             if (s->tx.current_getbaud == NULL)
             {
-                span_log(&s->logging, SPAN_LOG_ERROR,
+                V34_TX_LOG(&s->logging, SPAN_LOG_ERROR,
                          "Tx - NULL current_getbaud in CC modulator (stage=%d mod=%d)\n",
                          s->tx.stage, s->tx.current_modulator);
                 v = zero;
@@ -8161,7 +8188,7 @@ SPAN_DECLARE(void) v34_set_v90_u_info(v34_state_t *s, int u_info)
         return;
     /*endif*/
     s->tx.v90_u_info = u_info;
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - V.90 analogue role: U_INFO = %d\n", u_info);
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - V.90 analogue role: U_INFO = %d\n", u_info);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -8213,10 +8240,10 @@ SPAN_DECLARE(int) v34_tx_start_external_symbols(v34_state_t *s,
     s->tx.current_getbaud = get_external_baud;
     s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.getbaud_null_logged = false;
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - external symbols: inherited gain %.4f (pre-emphasis idx %d)\n",
              (double)s->tx.gain, s->tx.pre_emphasis_idx);
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - external symbol source started (%d baud, %s carrier)\n",
              baud_rate_parameters[s->tx.baud_rate].baud_rate,
              high_carrier  ?  "high"  :  "low");
@@ -8238,7 +8265,7 @@ SPAN_DECLARE(int) v34_v90_resume_external_symbols(v34_state_t *s,
     s->tx.current_getbaud = get_external_baud;
     s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.tx_data_mode = false;
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.90 rate renegotiation: preserving modulator phase for S/S-bar/CP\n");
     return 0;
 }
@@ -8256,7 +8283,7 @@ SPAN_DECLARE(void) v34_tx_stop_external_symbols(v34_state_t *s)
         s->tx.current_getbaud = get_silence_baud;
     }
     /*endif*/
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - external symbol source stopped\n");
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - external symbol source stopped\n");
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -8502,7 +8529,7 @@ SPAN_DECLARE(int) v34_v90_begin_tx_data(v34_state_t *s,
     s->tx.current_getbaud = get_data_baud;
     s->tx.tx_data_mode = true;
     s->primary_channel_active = true;
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.90 analogue handover to B1/data: N=%d (%d bps), "
              "trellis=%d nonlinear=%d expanded=%d\n",
              bit_rate_n, bit_rate_n*2400, trellis_size,
@@ -8720,12 +8747,12 @@ SPAN_DECLARE(void) v34_force_phase4(v34_state_t *s)
     if (s->tx.current_getbaud == get_phase4_baud
         || s->tx.stage >= V34_TX_STAGE_PHASE4_WAIT)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - v34_force_phase4(): already in Phase 4 path (stage=%d)\n",
                  s->tx.stage);
         return;
     }
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - v34_force_phase4(): external V.90 Phase 3 complete, handing TX/RX to native Phase 4\n");
     phase4_wait_init(s);
 }
@@ -8738,7 +8765,7 @@ SPAN_DECLARE(void) v34_v90_start_analogue_retrain(v34_state_t *s)
     /* V.90 §9.5.2.1/.2: both analogue procedures start with 70 ms silence
        followed by Tone A.  The ordinary initial preamble is deliberately
        skipped because §9.5 resumes at §9.2.2.1.3, after INFO0. */
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.90 analogue retrain armed; 70 ms silence then Tone A (9.5.2)\n");
     v90_phase2_reset_transactions(s);
     s->tx.current_modulator = V34_MODULATION_CC;
@@ -8789,14 +8816,14 @@ SPAN_DECLARE(int) v34_start_rate_renegotiation(v34_state_t *s)
     /*endif*/
     if (s->rx.stage != V34_RX_STAGE_DATA)
     {
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - 11.6 rate renegotiation refused: not in data mode "
                  "(rx stage %d)\n",
                  s->rx.stage);
         return -1;
     }
     /*endif*/
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - 11.6 rate renegotiation: transmitting S (128T) then S-bar "
              "(16T), TRN and MP\n");
 
@@ -8888,7 +8915,7 @@ SPAN_DECLARE(void) v34_start_retrain(v34_state_t *s)
     if (!s)
         return;
     /*endif*/
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.34 11.5 retrain: 70 ms of silence, then Tone %c\n",
              (s->calling_party == s->tx.v90_mode) ? 'A' : 'B');
     /* The stage alone is not enough: V34_TX_STAGE_V90_RETRAIN_SILENCE is
@@ -8926,7 +8953,7 @@ SPAN_DECLARE(void) v34_v90_start_retrain_response(v34_state_t *s)
        V90_RETRAIN_SILENCE -> Tone B -> PHASE2_B_INFO0_SEEN path the INFO1a
        deadline handler uses; repeated INFO0a from peers that do re-run INFO0
        still triggers the acknowledged-INFO0d recovery from that state. */
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.90: peer retrain response armed; 70 ms silence then Tone B (9.5.1.2)\n");
     v90_phase2_reset_transactions(s);
     s->tx.current_modulator = V34_MODULATION_CC;
@@ -8994,7 +9021,7 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
             s->rx.last_logged_stage = -1;
             s->rx.last_logged_event = -1;
             s->rx.last_logged_demodulator = -1;
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "V.90 caller mode: re-primed RX for INFO0d detection (62 bits)\n");
         }
         /*endif*/
@@ -9004,7 +9031,7 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
         if (s->tx.training_stage == 0x100
             && s->tx.current_modulator == V34_MODULATION_SILENCE)
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "V.90 caller mode: skipping duplicate Phase 2 startup silence\n");
             s->tx.tone_duration = 0;
             s->tx.training_stage = 0x101;
@@ -9046,7 +9073,7 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
             s->rx.last_logged_stage = -1;
             s->rx.last_logged_event = -1;
             s->rx.last_logged_demodulator = -1;
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "V.90 mode: re-primed answerer RX for INFO0 detection\n");
         }
         /*endif*/
@@ -9058,7 +9085,7 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
         if (s->tx.training_stage == 0x100
             && s->tx.current_modulator == V34_MODULATION_SILENCE)
         {
-            span_log(&s->logging, SPAN_LOG_FLOW,
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "V.90 mode: skipping duplicate Phase 2 startup silence; V.8 already supplied 75 ms\n");
             s->tx.tone_duration = 0;
             s->tx.training_stage = 0x101;
@@ -9067,7 +9094,7 @@ SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law)
         /*endif*/
     }
 
-    span_log(&s->logging, SPAN_LOG_FLOW,
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "V.90 mode enabled (%s, PCM law: %s)\n",
              s->calling_party ? "caller/analog" : "answerer/digital",
              pcm_law ? "A-law" : "u-law");
@@ -9261,7 +9288,7 @@ SPAN_DECLARE(int) v34_restart(v34_state_t *s, int baud_rate, int bit_rate, bool 
     int baud_rate_code;
     int high_carrier;
 
-    span_log(&s->logging, SPAN_LOG_FLOW, "Tx - Restarting V.34, %d baud, %dbps\n", baud_rate, bit_rate);
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - Restarting V.34, %d baud, %dbps\n", baud_rate, bit_rate);
     if ((bit_rate_code = bit_rate_to_code(bit_rate)) < 0)
         return -1;
     /*endif*/
@@ -9298,7 +9325,7 @@ SPAN_DECLARE(int) v34_restart(v34_state_t *s, int baud_rate, int bit_rate, bool 
     {
         int tx_high = s->calling_party ? true : false;
         int rx_high = s->calling_party ? false : true;
-        span_log(&s->logging, SPAN_LOG_FLOW,
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Tx - Carrier assignment: %s, TX=%s (%.0f Hz), RX=%s (%.0f Hz)\n",
                  s->calling_party ? "caller" : "answerer",
                  tx_high ? "high" : "low",
