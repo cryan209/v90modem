@@ -99,8 +99,56 @@ call        FLOAT                 FIXED Q17.14          FIXED + BFP
 31200-r1    2716 / 0.664 /  2.0%  2716 / 0.666 /  2.0%  2716 / 0.664 /  2.0%
 ```
 
-(windows / median sym err / clean.)  All five match float exactly with BFP,
-window count included.
+(windows / median sym err / clean.)  That table is from commit 814eab3a.  It
+does NOT reproduce: re-run against the tree it shipped in, the float arm
+matches its float column on all five rows while the fixed arm reads
+1117 / 0.658 on 19200-r1 -- the pre-BFP number.  The cause was the tap-copy
+defect in the next section, not the ring format; BFP is still right and still
+needed, but it was never what made 19200-r1 match.  Re-run a claim like this
+against the tree that ships it.
+
+## The integer taps are a SEPARATE COPY, and everything else must say so
+
+The integer FSE does not read `v90_t3_fse[]`.  It reads `v90_t3_fse_fx[]`,
+narrowed from the wide accumulator `v90_t3_fse_acc[]`, which is seeded from
+the float array **once** -- at prime time, under `v90_t3_fx_primed` -- and
+thereafter advanced only by the integer NLMS.
+
+So any other code that replaces the float taps has no effect at all in a
+fixed-point build unless it clears that flag.  There are five such writers,
+and every one of them is a recovery mechanism:
+
+- the equalizer restore, `memcpy(v90_t3_fse, v90_t3_fse_good, ...)`, three sites
+- the blind CMA loop
+- a fresh B1 acquisition, `memcpy(v90_t3_fse, best_coeff, ...)`
+
+Until this was fixed, **the fixed-point receiver had no recovery at all** --
+not a degraded one, none.  `v90_t3_fse_taps_replaced()` now clears the prime
+flag at each of those sites, so the next symbol re-seeds the integer taps and
+re-chooses the ring's binary point from the level now present.  It is a no-op
+in a float build.
+
+**The defect is invisible to every metric taken at acquisition.**  On
+rate19200-r1 the two arms are identical there -- same sample 137539, 100% fit,
+out-of-sample 0.015, symbol power 52.0, because the B1 solve is `double` in
+both -- and they track each other to 0.01 of the lattice for nine tenths of
+the call.  What differs only appears once something has gone wrong and the
+receiver tries to fix it.  Per 20000-symbol block:
+
+```
+float  0.10 0.10 0.12 0.12 0.11 0.11 0.11 0.11 0.11 0.33 0.69 0.74 0.18 0.10 0.10 ...
+fixed  0.12 0.10 0.12 0.12 0.11 0.11 0.11 0.11 0.11 0.38 0.77 0.76 0.76 0.76 0.76 ...
+```
+
+Both meet the same disturbance in the recording; float recovers and fixed
+stays white for the remaining 150 s.
+
+**Read a whole matrix before naming a cause.**  26400's fixed arm scored
+BETTER than float (0.190 against 0.619) for exactly the reason 19200 scored
+worse: a receiver that never restores keeps a filter float would have thrown
+away, which flatters the row where the restore was the wrong call and destroys
+the row where it was the right one.  A one-sided reading of that table sends
+the search after an arithmetic defect that does not exist.
 
 ## Two method notes worth more than the fix
 
