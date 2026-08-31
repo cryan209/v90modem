@@ -10904,6 +10904,28 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                          "Rx - V.90 fixed-point ring: peak %.1f -> Q%d\n",
                          peak, s->v90_t3_fx_rshift);
 
+                /* The integer ring has already been filled, one sample at a
+                   time, at the PREVIOUS binary point -- so changing the shift
+                   and walking away leaves the FSE reading a ring holding two
+                   different formats.  Re-convert what is already there from
+                   the float ring it was derived from.
+
+                   This was measured NEUTRAL when priming happened once, at
+                   acquisition, and nothing had yet moved the taps.  It stops
+                   being neutral now that a restore re-primes: restores fire
+                   several times a second, so the mixed-format window is no
+                   longer a one-off at the start of a call. */
+                for (scan = 0;  scan < V34_V90_T3_RAW_SIZE;  scan++)
+                {
+                    int idx = (s->v90_t3_raw_count - 1 - scan) & V34_V90_T3_RAW_MASK;
+
+                    s->v90_t3_raw_fx[idx].re =
+                        v34_fx_from_float(s->v90_t3_raw[idx].re, s->v90_t3_fx_rshift);
+                    s->v90_t3_raw_fx[idx].im =
+                        v34_fx_from_float(s->v90_t3_raw[idx].im, s->v90_t3_fx_rshift);
+                }
+                /*endfor*/
+
                 for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
                 {
                     s->v90_t3_fse_fx[tap].re = v34_fx_from_float(s->v90_t3_fse[tap].re, V34_FX_TAP_SHIFT);
