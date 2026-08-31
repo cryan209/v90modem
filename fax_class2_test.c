@@ -188,6 +188,13 @@ static void peer_phase_e(void *user_data, int completion_code)
     peer_done = 1;
 }
 
+/* Capability knobs, so a +FNR report can be checked against a far end that was
+ * deliberately configured differently from our own parameters. */
+static int          peer_ecm = 1;
+static int          peer_t6 = 1;
+static const uint8_t *peer_nsf;
+static int          peer_nsf_len;
+
 static fax_state_t *peer_start(int calling, const char *tx_file, const char *rx_file)
 {
     fax_state_t *f = fax_init(NULL, calling ? true : false);
@@ -198,10 +205,12 @@ static fax_state_t *peer_start(int calling, const char *tx_file, const char *rx_
     fax_set_transmit_on_idle(f, true);
     t30 = fax_get_t30_state(f);
     t30_set_tx_ident(t30, "peer");
-    t30_set_ecm_capability(t30, true);
+    t30_set_ecm_capability(t30, peer_ecm ? true : false);
+    if (peer_nsf)
+        t30_set_tx_nsf(t30, peer_nsf, peer_nsf_len);
     t30_set_supported_compressions(t30, T4_COMPRESSION_T4_1D
                                         | T4_COMPRESSION_T4_2D
-                                        | T4_COMPRESSION_T6);
+                                        | (peer_t6 ? T4_COMPRESSION_T6 : 0));
     t30_set_supported_output_compressions(t30, T4_COMPRESSION_T4_1D
                                                | T4_COMPRESSION_T4_2D
                                                | T4_COMPRESSION_T6);
@@ -516,6 +525,139 @@ static void test_receive(int fbo)
     fc2_on_disconnected();
 }
 
+/* Count the occurrences of a report prefix in what the DTE was sent. */
+static int dte_count(const char *needle)
+{
+    int n = (int) strlen(needle);
+    int count = 0;
+
+    for (int i = 0; i + n <= dte_len; i++) {
+        if (memcmp(dte_buf + i, needle, (size_t) n) == 0)
+            count++;
+    }
+    return count;
+}
+
+/*
+ * T.32 8.5.1.11 +FNR.  Run a transmit-shaped session, which is the one where
+ * the remote sends the DIS and we send the DCS, so all four reports have
+ * something to report.
+ */
+static void run_fnr_session(const char *fnr)
+{
+    static uint8_t page[1 << 20];
+    fax_state_t *peer;
+    int n;
+
+    fc2_select(0);
+    fc2_select(1);
+    unlink(PEER_RX);
+
+    at("AT+FLI=\"sender\"");
+    at(fnr);
+    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+    at("ATD5551234");
+    at("AT+FDT");
+
+    n = encode_page_for_dte(SRC_TIFF, T4_COMPRESSION_T4_1D, 0, page, sizeof(page));
+    for (int off = 0; off < n; off += 512) {
+        int chunk = (n - off > 512) ? 512 : n - off;
+        fc2_dte_bytes(page + off, chunk);
+    }
+
+    peer = peer_start(0, NULL, PEER_RX);
+    if (!peer)
+        return;
+    dte_reset();
+    fc2_on_connected();
+    pump(peer, 60 * 50);
+    for (int i = 0; i < 20; i++)
+        fc2_poll();
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
+static void test_fnr(void)
+{
+    static const uint8_t nsf[] = { 0xAD, 0x00, 0x01, 0x02 };
+
+    printf("+FNR: negotiation message reporting (T.32 8.5.1.11)\n");
+
+    dte_reset();
+    at("AT+FNR=1,1,1,1");
+    check(dte_saw("OK"), "AT+FNR=1,1,1,1 is accepted");
+    dte_reset();
+    at("AT+FNR?");
+    check(dte_saw("1,1,1,1"), "AT+FNR? reads the four flags back");
+    dte_reset();
+    at("AT+FNR=0,1");
+    at("AT+FNR?");
+    check(dte_saw("0,1,1,1"), "an omitted flag keeps its value");
+    dte_reset();
+    at("AT+FNR=2,0,0,0");
+    check(dte_saw("ERROR"), "a flag outside (0,1) is refused");
+    dte_reset();
+    at("AT+FNR=?");
+    check(dte_saw("(0,1),(0,1),(0,1),(0,1)"), "AT+FNR=? reports the ranges");
+
+    /* Reporting off: only the session result, which is not a +FNR report. */
+    peer_ecm = 1;
+    peer_t6 = 1;
+    peer_nsf = nsf;
+    peer_nsf_len = (int) sizeof(nsf);
+    run_fnr_session("AT+FNR=0,0,0,0");
+    check(!dte_saw("+FIS:"), "rpr=0: the remote's capabilities are not reported");
+    check(!dte_saw("+FNF:"), "nsr=0: non-standard frames are not reported");
+    check(!dte_saw("+FCI:") && !dte_saw("+FTI:"),
+          "idr=0: the remote's identification is not reported");
+    check(dte_count("+FCS:") == 1, "the session result is reported exactly once");
+
+    /* Everything on, against a far end that supports T.6 and ECM. */
+    run_fnr_session("AT+FNR=1,1,1,1");
+    check(dte_saw("+FIS:"), "rpr=1: the remote's capabilities are reported");
+    check(dte_saw("+FNF:AD000102"), "nsr=1: the NSF frame is reported as hex");
+    check(dte_saw("+FCI:\"peer\""), "idr=1: the remote's identification is reported");
+    check(dte_count("+FCS:") == 1,
+          "tpr=1 moves the session result, it does not duplicate it");
+    {
+        const char *fis = dte_find("+FIS:");
+        int vr, br, wd, ln, df, ec;
+
+        if (fis && sscanf(fis, "+FIS:%d,%d,%d,%d,%d,%d",
+                          &vr, &br, &wd, &ln, &df, &ec) == 6) {
+            check(df == 3, "+FIS reports the far end's T.6 capability");
+            check(ec != 0, "+FIS reports the far end's ECM capability");
+        } else {
+            check(0, "+FIS: is a subparameter list");
+        }
+    }
+
+    /*
+     * The same report against a far end configured the other way.  Our own
+     * +FIS defaults would give df=3 and ec=2, so this is what separates
+     * decoding the DIS from echoing our own parameters back.
+     */
+    peer_ecm = 0;
+    peer_t6 = 0;
+    peer_nsf = NULL;
+    run_fnr_session("AT+FNR=1,0,0,0");
+    {
+        const char *fis = dte_find("+FIS:");
+        int vr, br, wd, ln, df, ec;
+
+        if (fis && sscanf(fis, "+FIS:%d,%d,%d,%d,%d,%d",
+                          &vr, &br, &wd, &ln, &df, &ec) == 6) {
+            check(df < 3, "+FIS follows a far end without T.6");
+            check(ec == 0, "+FIS follows a far end without ECM");
+        } else {
+            check(0, "+FIS: is a subparameter list");
+        }
+    }
+    check(!dte_saw("+FNF:"), "no NSF is reported when the far end sends none");
+    peer_ecm = 1;
+    peer_t6 = 1;
+}
+
 /*
  * The round trips above would also pass if +FBO did nothing, because the test
  * reverses on both sides of a setting that was ignored.  This compares the two
@@ -575,6 +717,7 @@ int main(void)
     test_transmit(1);
     test_receive(1);
     test_bit_order_is_real();
+    test_fnr();
 
     fc2_release();
 

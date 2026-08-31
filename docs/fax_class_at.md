@@ -106,18 +106,46 @@ octets that appear on the link.
 `+FBO` has two halves: the phase C image data, and the negotiation frame data a
 DTE reads with `+FNR`. 0 is direct in both and 3 is reversed in both; of the two
 mixed values this takes 1 as "phase C reversed", the reading that puts the phase
-C bit in the low position. Nothing here reports negotiation frames to the DTE,
-so the other half has nothing to act on and 0/1 behave as 2/3 do.
+C bit in the low position. The negotiation half is **not** applied: the one
+negotiation report that carries frame octets, `+FNF:`, renders them as hex text
+rather than as octets on the link, and which order that hex should be in is a
+convention there is no spec text to hand to settle. It is reported in the
+frame's own order. So 0/1 behave as 2/3 do.
+
+### +FNR, negotiation message reporting (8.5.1.11)
+
+`AT+FNR=<rpr>,<tpr>,<idr>,<nsr>`, four flags, default all zero. This used to be
+parsed as a single value, so the `AT+FNR=1,1,1,1` fax software actually sends
+answered `ERROR`.
+
+The reports come from a `t30_set_real_time_frame_handler()`, which is the only
+place the negotiation messages exist *as messages* — by Phase B they have
+become state.
+
+- **rpr** — `+FIS:` decoded from the received DIS/DTC: what the far end says it
+  can do. Only the fields T.32 has a subparameter for are read; the ones this
+  DCE cannot act on (BF, JP) are reported as zero rather than guessed at.
+- **tpr** — `+FCS:` from the DCS we send.
+- **idr** — `+FCI:`/`+FTI:` with the remote's identification. Reported from
+  Phase B rather than from the CSI/TSI frame, because the frame handler runs
+  *before* T.30 decodes the identification.
+- **nsr** — `+FNF:` with the FIF of a received NSF/NSC/NSS frame, in hex.
+
+`+FCS:` is reported exactly once either way: `tpr` moves it to the DCS instant
+rather than adding a second one. With `tpr` clear the Phase B report still goes
+out, because a transmit session has no other moment at which the DTE learns
+what was negotiated (see the `+FDT` deviation above).
 
 ## Implemented
 
 Actions: `+FDT` (8.3.3), `+FDR` (8.3.4), `+FKS` (8.3.5), `+FIP` (8.3.6).
 Parameters: `+FCC` (8.5.1.1), `+FIS` (8.5.1.2), `+FCS` (8.5.1.3),
 `+FLI`/`+FPI` (8.5.1.5), `+FCR` (8.5.1.9), `+FPS` (8.5.2.2), `+FHS` (8.5.2.7),
-`+FBS` (8.5.3.2), `+FBO` (8.5.3.4), `+FMI`/`+FMM`/`+FMR`, and the accepted-and
--stored set `+FCQ +FIE +FCT +FMS +FEA +FFC +FNR +FAA +FRY`. Reports: `+FCS:`
-after Phase B, `+FCI:`/`+FTI:` for the remote's identification, `+FPS:` per
-page, `+FHS:` at the end of the session.
+`+FNR` (8.5.1.11), `+FBS` (8.5.3.2), `+FBO` (8.5.3.4), `+FMI`/`+FMM`/`+FMR`,
+and the accepted-and-stored set `+FCQ +FIE +FCT +FMS +FEA +FFC +FAA +FRY`.
+Reports: `+FCS:` for the negotiated session, `+FIS:` for the far end's
+capabilities, `+FCI:`/`+FTI:` for its identification, `+FNF:` for its
+non-standard frames, `+FPS:` per page, `+FHS:` at the end of the session.
 
 An omitted subparameter keeps its current value, which is what `,` means in a
 T.32 list — `AT+FIS=,5` changes BR alone.
@@ -165,6 +193,13 @@ That comparison is the point. The interesting failures here all report `OK`: a
 page that negotiates and transfers as garbage, or a stream handed to the DTE in
 a format it did not ask for, would pass a result-code check.
 
+`test_fnr` runs the same session shape with reporting off, fully on, and then
+**against a far end configured the other way** — T.6 and ECM disabled. Our own
+`+FIS` defaults are `DF=3, EC=2`, so that last one is what separates decoding
+the received DIS from echoing our own parameters back; both would look right
+otherwise. The `+FNF:` check uses an NSF the far end was given, so the hex is
+compared against a known frame.
+
 `fax_class_test` covers the other half — that class 2.0 is *reachable* through
 the real PTY the DTE sees (`AT+FCLASS=2.0`, a `+FCC?` only this module answers,
 an `ATE0` that must still reach T.31, and the way back to class 0), which
@@ -174,7 +209,7 @@ an `ATE0` that must still reach T.31, and the way back to class 0), which
 
 - Class 2 (the pre-standard `AT+FCLASS=2`) — only 2.0 is offered. The two are
   not compatible, and 2.0 is the ITU-T one.
-- `+FBO`'s negotiation-frame half, which needs `+FNR` frame reporting first.
+- `+FBO`'s negotiation-frame half — see above.
 - Polling (`+FSP`, `+FLP`, `+FPI` beyond storing the ID), sub-addressing,
   passwords and non-standard frames (`+FSA`, `+FPW`, `+FNS`, `+FPA`) — parsed
   where they are simple parameters, but nothing acts on them.

@@ -25,6 +25,7 @@
 #include "fax_class2.h"
 
 #include <spandsp.h>
+#include <spandsp/private/t30_dis_dtc_dcs_bits.h>
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -91,7 +92,15 @@ static char             local_id[21];      /* +FLI */
 static char             polling_id[21];    /* +FPI */
 static int              p_cr;              /* +FCR, willing to receive */
 static int              p_bo;              /* +FBO, phase C bit order */
-static int              p_cq, p_ie, p_ct, p_ms, p_ea, p_ffc, p_nr, p_aa, p_ry;
+static int              p_cq, p_ie, p_ct, p_ms, p_ea, p_ffc, p_aa, p_ry;
+
+/* T.32 8.5.1.11 +FNR: which negotiation messages get reported to the DTE. */
+static struct {
+    int rpr;    /* receive message reporting  -- the remote's DIS/DTC */
+    int tpr;    /* transmit message reporting -- the DCS we send */
+    int idr;    /* ID reporting               -- +FCI/+FTI */
+    int nsr;    /* non-standard frame reporting -- +FNF */
+} p_nr;
 
 static fax_state_t     *fax;
 static int              call_up;
@@ -333,8 +342,112 @@ static int parse_params(const char *s, fc2_params_t *p)
 /* T.30 session                                                        */
 /* ------------------------------------------------------------------ */
 
-static void update_negotiated_params(void)
+static void update_negotiated_params(void);
+
+/* T.30's control frames put the FIF at msg[3], so bit n of the FIF (numbered
+ * from 1, as T.30 Table 2 numbers them) lives here.  This is SpanDSP's own
+ * test_ctrl_bit(), which is private to t30.c. */
+#define fif_bit(msg, len, bit) \
+    (((3 + (((bit) - 1) / 8)) < (len)) \
+     && ((msg)[3 + (((bit) - 1) / 8)] & (1 << (((bit) - 1) % 8))))
+
+/*
+ * Decode a received DIS or DTC into the T.32 subparameters +FIS reports: what
+ * the remote says it can do.  Only the fields T.32 has a subparameter for are
+ * read, and the ones this DCE cannot act on (BF, JP) are reported as zero
+ * rather than guessed at.
+ *
+ * The modem-type bits are T.30 Table 2 bits 11-14.  V.17 is only valid
+ * combined with V.29 and V.27ter, so the highest rate is read off the
+ * highest bit present, which is how T.30 builds them.
+ */
+static void dis_to_params(const uint8_t *msg, int len, fc2_params_t *p)
 {
+    memset(p, 0, sizeof(*p));
+
+    p->vr = fif_bit(msg, len, T30_DIS_BIT_200_200_CAPABLE) ? 1 : 0;
+
+    if (fif_bit(msg, len, T30_DIS_BIT_MODEM_TYPE_4))
+        p->br = 5;                                      /* V.17, 14400 */
+    else if (fif_bit(msg, len, T30_DIS_BIT_MODEM_TYPE_1))
+        p->br = 3;                                      /* V.29, 9600 */
+    else if (fif_bit(msg, len, T30_DIS_BIT_MODEM_TYPE_2))
+        p->br = 1;                                      /* V.27ter, 4800 */
+    else
+        p->br = 0;                                      /* V.27ter, 2400 */
+
+    if (fif_bit(msg, len, T30_DIS_BIT_215MM_255MM_303MM_WIDTH_CAPABLE))
+        p->wd = 2;
+    else if (fif_bit(msg, len, T30_DIS_BIT_215MM_255MM_WIDTH_CAPABLE))
+        p->wd = 1;
+
+    if (fif_bit(msg, len, T30_DIS_BIT_UNLIMITED_LENGTH_CAPABLE))
+        p->ln = 2;
+    else if (fif_bit(msg, len, T30_DIS_BIT_A4_B4_LENGTH_CAPABLE))
+        p->ln = 1;
+
+    if (fif_bit(msg, len, T30_DIS_BIT_T6_CAPABLE))
+        p->df = 3;
+    else if (fif_bit(msg, len, T30_DIS_BIT_2D_CAPABLE))
+        p->df = 1;
+
+    if (fif_bit(msg, len, T30_DIS_BIT_ECM_CAPABLE)) {
+        p->ec = fif_bit(msg, len, T30_DIS_BIT_64_OCTET_ECM_FRAMES_PREFERRED)
+                ? 1 : 2;
+    }
+
+    /* T.30 Table 2 bits 21-24, in the order T.32's ST subparameter uses. */
+    p->st = (fif_bit(msg, len, T30_DIS_BIT_MIN_SCAN_LINE_TIME_CAPABILITY_1) ? 1 : 0)
+          | (fif_bit(msg, len, T30_DIS_BIT_MIN_SCAN_LINE_TIME_CAPABILITY_2) ? 2 : 0)
+          | (fif_bit(msg, len, T30_DIS_BIT_MIN_SCAN_LINE_TIME_CAPABILITY_3) ? 4 : 0);
+}
+
+/*
+ * T.32 8.5.1.11.  Every T.30 control frame passes through here, in both
+ * directions, which is the only place the negotiation messages exist as
+ * messages -- by Phase B they have become state.
+ */
+static void real_time_frame_handler(void *user_data, bool incoming,
+                                    const uint8_t *msg, int len)
+{
+    char params[64];
+    uint8_t fcf;
+
+    (void) user_data;
+    if (len < 3)
+        return;
+    fcf = msg[2];
+
+    if (incoming && (fcf == T30_DIS || fcf == T30_DTC) && p_nr.rpr) {
+        fc2_params_t remote;
+
+        dis_to_params(msg, len, &remote);
+        params_to_string(&remote, params, sizeof(params));
+        queue_line("\r\n+FIS:%s\r\n", params);
+    }
+
+    if (!incoming && (fcf & 0xFE) == (T30_DCS & 0xFE) && p_nr.tpr) {
+        /* The rate is already chosen by the time the DCS goes out, so the
+         * session parameters here are the ones this frame is setting up. */
+        update_negotiated_params();
+        params_to_string(&p_cs, params, sizeof(params));
+        queue_line("\r\n+FCS:%s\r\n", params);
+    }
+
+    if (incoming && p_nr.nsr
+        && (fcf == T30_NSF || fcf == T30_NSC || fcf == T30_NSS)) {
+        char hex[3 * 64 + 8];
+        int n = 0;
+
+        for (int i = 3; i < len && n < (int) sizeof(hex) - 3; i++)
+            n += snprintf(hex + n, sizeof(hex) - (size_t) n, "%02X", msg[i]);
+        hex[n] = '\0';
+        queue_line("\r\n+FNF:%s\r\n", hex);
+    }
+}
+
+static void update_negotiated_params(void)
+{  /* forward declared above for the real-time frame handler */
     t30_stats_t t;
 
     if (!fax)
@@ -365,12 +478,21 @@ static int phase_b_handler(void *user_data, int result)
 
     t30_get_transfer_statistics(fax_get_t30_state(fax), &t);
     ident = t30_get_rx_ident(fax_get_t30_state(fax));
-    if (ident && ident[0]) {
-        /* T.32 8.5.1.5.  We hear the remote's CSI when we called it and its
-         * TSI when it called us. */
+    if (ident && ident[0] && p_nr.idr) {
+        /* T.32 8.5.1.5, gated by +FNR's idr.  We hear the remote's CSI when
+         * we called it and its TSI when it called us.  Reported here rather
+         * than from the CSI/TSI frame itself because T.30 has decoded the
+         * identification by now and the frame handler runs before it does. */
         queue_line("\r\n%s:\"%s\"\r\n", calling_party ? "+FCI" : "+FTI", ident);
     }
-    queue_line("\r\n+FCS:%s\r\n", params);
+    /*
+     * 8.5.1.3's session result.  With +FNR's tpr set, the frame handler has
+     * already reported this from the DCS itself, so it is not repeated; with
+     * tpr clear it still goes out, because a transmit session has no other
+     * moment at which the DTE learns what was negotiated.
+     */
+    if (!p_nr.tpr)
+        queue_line("\r\n+FCS:%s\r\n", params);
     return T30_ERR_OK;
 }
 
@@ -449,6 +571,9 @@ static void session_start(void)
     t30_set_phase_b_handler(t30, phase_b_handler, NULL);
     t30_set_phase_d_handler(t30, phase_d_handler, NULL);
     t30_set_phase_e_handler(t30, phase_e_handler, NULL);
+    /* T.32 8.5.1.11 +FNR reporting; the handler checks the flags itself, so
+     * it is always registered and changing +FNR mid-call takes effect. */
+    t30_set_real_time_frame_handler(t30, real_time_frame_handler, NULL);
 
     t30_set_tx_ident(t30, local_id[0] ? local_id : "");
     t30_set_supported_modems(t30, br_to_modems(p_is.br));
@@ -817,6 +942,54 @@ static int list_param(const char *t, fc2_params_t *p, int read_only)
     return 0;
 }
 
+/*
+ * T.32 8.5.1.11 +FNR=<rpr>,<tpr>,<idr>,<nsr>.  Four flags, not one value: the
+ * single-parameter form this used to be parsed as answered ERROR to the
+ * AT+FNR=1,1,1,1 that fax software actually sends.
+ */
+static int fnr_param(const char *t)
+{
+    int *field[4] = { &p_nr.rpr, &p_nr.tpr, &p_nr.idr, &p_nr.nsr };
+    int work[4] = { p_nr.rpr, p_nr.tpr, p_nr.idr, p_nr.nsr };
+    const char *s;
+    int idx = 0;
+
+    if (t[0] == '?' && t[1] == '\0') {
+        put_line("\r\n%d,%d,%d,%d\r\n", p_nr.rpr, p_nr.tpr, p_nr.idr, p_nr.nsr);
+        put_ok();
+        return 1;
+    }
+    if (t[0] == '=' && t[1] == '?' && t[2] == '\0') {
+        put_line("\r\n(0,1),(0,1),(0,1),(0,1)\r\n");
+        put_ok();
+        return 1;
+    }
+    if (t[0] != '=')
+        return 0;
+
+    for (s = t + 1; *s && idx < 4; ) {
+        if (*s == ',') {
+            s++;
+            idx++;
+            continue;
+        }
+        if (*s != '0' && *s != '1')
+            return 0;
+        work[idx] = *s - '0';
+        s++;
+        if (*s == ',') {
+            s++;
+            idx++;
+        } else if (*s != '\0') {
+            return 0;
+        }
+    }
+    for (int i = 0; i < 4; i++)
+        *field[i] = work[i];
+    put_ok();
+    return 1;
+}
+
 static void params_reset(void)
 {
     p_cc = fc2_caps;
@@ -825,7 +998,9 @@ static void params_reset(void)
     p_cr = 1;
     p_bo = 0;
     p_cq = 0; p_ie = 0; p_ct = 30; p_ms = 0; p_ea = 0;
-    p_ffc = 0; p_nr = 0; p_aa = 0; p_ry = 3;
+    p_ffc = 0; p_aa = 0; p_ry = 3;
+    /* T.32 8.5.1.11 default: no negotiation reporting. */
+    p_nr.rpr = p_nr.tpr = p_nr.idr = p_nr.nsr = 0;
     page_status = 1;
     local_id[0] = '\0';
     polling_id[0] = '\0';
@@ -920,7 +1095,7 @@ int fc2_at_line(const char *line)
     else if (match(&t, "+FMS"))  ok = num_param(t, &p_ms, 0, 5, "(0-5)");
     else if (match(&t, "+FEA"))  ok = num_param(t, &p_ea, 0, 1, "(0,1)");
     else if (match(&t, "+FFC"))  ok = num_param(t, &p_ffc, 0, 3, "(0-3)");
-    else if (match(&t, "+FNR"))  ok = num_param(t, &p_nr, 0, 1, "(0,1),(0,1),(0,1),(0,1)");
+    else if (match(&t, "+FNR"))  ok = fnr_param(t);
     else if (match(&t, "+FAA"))  ok = num_param(t, &p_aa, 0, 1, "(0,1)");
     else if (match(&t, "+FRY"))  ok = num_param(t, &p_ry, 0, 255, "(0-255)");
     else if (match(&t, "+FPS")) {
