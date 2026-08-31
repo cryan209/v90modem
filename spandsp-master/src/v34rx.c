@@ -10855,6 +10855,28 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
 
             if (!s->v90_t3_fx_primed)
             {
+                /* Block floating point: pick the ring's binary point from the
+                   level actually present, instead of the Q17.14 that one
+                   recording suggested.  Scan the live ring rather than trust a
+                   reported power -- this is the number the format has to fit. */
+                float peak = 0.0f;
+                int scan;
+
+                for (scan = 0;  scan < 4096;  scan++)
+                {
+                    complexf_t v = v90_t3_raw_get(s, s->v90_t3_raw_count - 1 - scan);
+                    float m = fabsf(v.re) > fabsf(v.im) ? fabsf(v.re) : fabsf(v.im);
+
+                    if (m > peak)
+                        peak = m;
+                    /*endif*/
+                }
+                /*endfor*/
+                s->v90_t3_fx_rshift = v34_fx_choose_rshift(peak);
+                span_log(s->logging, SPAN_LOG_WARNING,
+                         "Rx - V.90 fixed-point ring: peak %.1f -> Q%d\n",
+                         peak, s->v90_t3_fx_rshift);
+
                 for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
                 {
                     s->v90_t3_fse_fx[tap].re = v34_fx_from_float(s->v90_t3_fse[tap].re, V34_FX_TAP_SHIFT);
@@ -10880,8 +10902,8 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             }
             /*endfor*/
             zf = v34_fx_fse(s->v90_t3_fse_fx, xr, V34_V90_T3_FSE_TAPS);
-            y.re = v34_fx_to_float(zf.re, V34_FX_RING_SHIFT);
-            y.im = v34_fx_to_float(zf.im, V34_FX_RING_SHIFT);
+            y.re = v34_fx_to_float(zf.re, s->v90_t3_fx_rshift);
+            y.im = v34_fx_to_float(zf.im, s->v90_t3_fx_rshift);
         }
 #else
         for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
@@ -11162,10 +11184,10 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                     }
                     /*endfor*/
                     v34_fx_lms_update(s->v90_t3_fse_acc, xr, V34_V90_T3_FSE_TAPS,
-                                      v34_fx_from_float(e_re, V34_FX_RING_SHIFT),
-                                      v34_fx_from_float(e_im, V34_FX_RING_SHIFT),
+                                      v34_fx_from_float(e_re, s->v90_t3_fx_rshift),
+                                      v34_fx_from_float(e_im, s->v90_t3_fx_rshift),
                                       v34_fx_from_float(s->v90_t3_dd_mu, V34_FX_TAP_SHIFT),
-                                      (int64_t) energy);
+                                      (int64_t) energy, s->v90_t3_fx_rshift);
                     v34_fx_lms_taps(s->v90_t3_fse_fx, s->v90_t3_fse_acc, V34_V90_T3_FSE_TAPS);
                     for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
                     {
@@ -12283,12 +12305,14 @@ static void v90_t3_put_sample(v34_rx_state_t *s, complexf_t value)
         int wr = (s->v90_t3_rrc_pos == 0) ? V34_V90_T3_RRC_TAPS - 1 : s->v90_t3_rrc_pos - 1;
         v34_fx_complex_t fo;
 
-        s->v90_t3_rrc_fx[wr].re = v34_fx_from_float(mixed.re, V34_FX_RING_SHIFT);
-        s->v90_t3_rrc_fx[wr].im = v34_fx_from_float(mixed.im, V34_FX_RING_SHIFT);
+        int rs2 = s->v90_t3_fx_rshift ? s->v90_t3_fx_rshift : V34_FX_RING_SHIFT;
+
+        s->v90_t3_rrc_fx[wr].re = v34_fx_from_float(mixed.re, rs2);
+        s->v90_t3_rrc_fx[wr].im = v34_fx_from_float(mixed.im, rs2);
         fo = v34_fx_fir(s->v90_t3_rrc_coeff_fx, s->v90_t3_rrc_fx,
                         s->v90_t3_rrc_pos, V34_V90_T3_RRC_TAPS);
-        filtered.re = v34_fx_to_float(fo.re, V34_FX_RING_SHIFT);
-        filtered.im = v34_fx_to_float(fo.im, V34_FX_RING_SHIFT);
+        filtered.re = v34_fx_to_float(fo.re, rs2);
+        filtered.im = v34_fx_to_float(fo.im, rs2);
     }
 #else
     for (int tap = 0;  tap < V34_V90_T3_RRC_TAPS;  tap++)
@@ -12312,8 +12336,10 @@ static void v90_t3_put_sample(v34_rx_state_t *s, complexf_t value)
     {
         v34_fx_complex_t *q = &s->v90_t3_raw_fx[s->v90_t3_raw_count & V34_V90_T3_RAW_MASK];
 
-        q->re = v34_fx_from_float(mixed.re, V34_FX_RING_SHIFT);
-        q->im = v34_fx_from_float(mixed.im, V34_FX_RING_SHIFT);
+        int rs = s->v90_t3_fx_rshift ? s->v90_t3_fx_rshift : V34_FX_RING_SHIFT;
+
+        q->re = v34_fx_from_float(mixed.re, rs);
+        q->im = v34_fx_from_float(mixed.im, rs);
     }
 #endif
     s->v90_t3_matched[s->v90_t3_raw_count & V34_V90_T3_RAW_MASK] = filtered;

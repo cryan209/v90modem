@@ -10,6 +10,12 @@
 #include <math.h>
 #include "v34_fixed.h"
 
+#ifndef RSHIFT
+#define RSHIFT V34_FX_RING_SHIFT
+#endif
+#ifndef AMPL
+#define AMPL 1000.0f
+#endif
 #define NTAP  21
 #define NSYM  200000
 
@@ -43,7 +49,7 @@ int main(void)
         float nre = 0.0f, nim = 0.0f;
 
         for (k = 4; k > 0; k--) { xr[k] = xr[k-1]; xi[k] = xi[k-1]; }
-        xr[0] = sre*1000.0f; xi[0] = sim*1000.0f;
+        xr[0] = sre*AMPL; xi[0] = sim*AMPL;
         for (k = 0; k < 5; k++) { nre += h_re[k]*xr[k] - h_im[k]*xi[k];
                                   nim += h_re[k]*xi[k] + h_im[k]*xr[k]; }
         for (k = NTAP-1; k > 0; k--) { xr[k] = xr[k-1]; xi[k] = xi[k-1]; }
@@ -65,21 +71,21 @@ int main(void)
         }
 
         for (k = 0; k < NTAP; k++) {
-            ring[k].re = v34_fx_from_float(xr[k], V34_FX_RING_SHIFT);
-            ring[k].im = v34_fx_from_float(xi[k], V34_FX_RING_SHIFT);
+            ring[k].re = v34_fx_from_float(xr[k], RSHIFT);
+            ring[k].im = v34_fx_from_float(xi[k], RSHIFT);
         }
         v34_fx_lms_taps(taps, acc, NTAP);
         v34_fx_complex_t z = v34_fx_fse(taps, ring, NTAP);
-        float zr = v34_fx_to_float(z.re, V34_FX_RING_SHIFT);
-        float zi = v34_fx_to_float(z.im, V34_FX_RING_SHIFT);
+        float zr = v34_fx_to_float(z.re, RSHIFT);
+        float zi = v34_fx_to_float(z.im, RSHIFT);
         float ztr = 2.0f*floorf(zr/2.0f) + 1.0f, zti = 2.0f*floorf(zi/2.0f) + 1.0f;
-        int64_t e_fx_re = v34_fx_from_float(ztr - zr, V34_FX_RING_SHIFT);
-        int64_t e_fx_im = v34_fx_from_float(zti - zi, V34_FX_RING_SHIFT);
+        int64_t e_fx_re = v34_fx_from_float(ztr - zr, RSHIFT);
+        int64_t e_fx_im = v34_fx_from_float(zti - zi, RSHIFT);
         v34_fx_acc_t before = acc[0];
         v34_fx_lms_update(acc, ring, NTAP,
                           (int32_t) e_fx_re, (int32_t) e_fx_im,
                           v34_fx_from_float(0.02f, V34_FX_TAP_SHIFT),
-                          (int64_t) energy);
+                          (int64_t) energy, RSHIFT);
         if (i >= NSYM - 1000 && acc[0].re != before.re) moved++;
 
         if (i >= NSYM - 20000) {

@@ -1607,6 +1607,7 @@ typedef struct
     v34_fx_complex_t v90_t3_fse_fx[V34_V90_T3_FSE_TAPS];
     v34_fx_acc_t v90_t3_fse_acc[V34_V90_T3_FSE_TAPS];
     int v90_t3_fx_primed;
+    int v90_t3_fx_rshift;
     /* Front end: incremental phase instead of recomputing -2*pi*fc*n/rate in
        double from the absolute output count, and the receive RRC in Q1.30. */
     v34_fx_nco_t v90_t3_nco;
