@@ -350,6 +350,12 @@ static void test_parameters(void)
     at("AT+FCR=2");
     check(dte_saw("ERROR"), "AT+FCR=2 is out of range");
 
+    /* T.32 8.3.4: +FDR is an ERROR on-hook, whatever +FCR says. */
+    dte_reset();
+    at("AT+FCR=1");
+    at("AT+FDR");
+    check(dte_saw("ERROR"), "AT+FDR on hook is refused");
+
     dte_reset();
     at("AT+FBS?");
     check(dte_saw("0,0"), "AT+FBS? is read only");
@@ -375,6 +381,8 @@ static void test_transmit(int fbo)
 
     dte_reset();
     at("AT+FLI=\"sender\"");
+    /* T.32 Table 22: +FCS: is reported only with +FNR's tpr set. */
+    at("AT+FNR=0,1,0,0");
     { char cmd[32]; snprintf(cmd, sizeof(cmd), "AT+FBO=%d", fbo); at(cmd); }
     /* MH, fine resolution, no ECM: the plainest thing a fax machine sends. */
     at("AT+FIS=1,3,0,2,0,0,0,0,0");
@@ -438,6 +446,7 @@ static void test_receive(int fbo)
 
     dte_reset();
     at("AT+FLI=\"receiver\"");
+    at("AT+FNR=0,1,0,0");
     { char cmd[32]; snprintf(cmd, sizeof(cmd), "AT+FBO=%d", fbo); at(cmd); }
     at("AT+FCR=1");
     at("AT+FIS=1,3,0,2,0,0,0,0,0");
@@ -462,7 +471,15 @@ static void test_receive(int fbo)
 
     check(dte_saw("+FCS:"), "+FDR reported the session parameters");
     check(dte_saw("CONNECT"), "+FDR answered CONNECT");
-    check(dte_saw("+FPS:1"), "+FDR reported the page status");
+    /* T.32 8.4.3: +FPS:<ppr>,<lc>,<blc>,<cblc>,<lbc> -- status and counts. */
+    {
+        char want[32];
+
+        snprintf(want, sizeof(want), "+FPS:1,%d,0,0,0", IMAGE_ROWS);
+        check(dte_saw(want), "+FDR reported the page status with line counts");
+    }
+    /* T.32 8.4.4.1 Table 19: 2 is EOP, no more pages or documents. */
+    check(dte_saw("+FET:2"), "+FDR reported the remote's post page message");
     check(dte_saw("+FHS:"), "the end of the session was reported");
 
     /*
@@ -610,7 +627,8 @@ static void test_fnr(void)
     check(!dte_saw("+FNF:"), "nsr=0: non-standard frames are not reported");
     check(!dte_saw("+FCI:") && !dte_saw("+FTI:"),
           "idr=0: the remote's identification is not reported");
-    check(dte_count("+FCS:") == 1, "the session result is reported exactly once");
+    check(dte_count("+FCS:") == 0,
+          "tpr=0 suppresses the +FCS: report (Table 22/T.32)");
 
     /* Everything on, against a far end that supports T.6 and ECM. */
     run_fnr_session("AT+FNR=1,1,1,1");
@@ -618,7 +636,7 @@ static void test_fnr(void)
     check(dte_saw("+FNF:AD000102"), "nsr=1: the NSF frame is reported as hex");
     check(dte_saw("+FCI:\"peer\""), "idr=1: the remote's identification is reported");
     check(dte_count("+FCS:") == 1,
-          "tpr=1 moves the session result, it does not duplicate it");
+          "tpr=1 reports the session result exactly once");
     {
         const char *fis = dte_find("+FIS:");
         int vr, br, wd, ln, df, ec;
@@ -687,6 +705,180 @@ static void test_bit_order_is_real(void)
           "the two streams differ");
 }
 
+/*
+ * T.32 8.5.1.7/8.5.1.8 polling.  Two whole sessions: one where the far end
+ * offers a document and this DCE polls it (+FSP, +FPO, +FDR), and one where
+ * this DCE offers a document and the far end polls it (+FLP, DTC).  A polled
+ * transfer that reports +FPO and then delivers nothing would pass a
+ * result-code check, so both compare the page.
+ */
+static void test_poll_remote(void)
+{
+    fax_state_t *peer;
+    t4_rx_state_t *decode;
+    const char *body;
+    int rows = 0;
+    int bad;
+    int saw_dle = 0;
+    int start;
+
+    printf("+FSP: this DCE polls the far end (T.32 8.5.1.8)\n");
+
+    unlink(DTE_RX);
+    fc2_select(0);
+    fc2_select(1);
+
+    at("AT+FLI=\"poller\"");
+    at("AT+FCR=1");
+    at("AT+FNR=1,1,1,1");
+    at("AT+FSP=1");
+    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+    at("ATD5551234");            /* the poller places the call */
+
+    /* The far end answers with a document available, which sets DIS bit 9. */
+    peer = peer_start(0, PEER_TX, NULL);
+    check(peer != NULL, "the far-end fax terminal starts");
+    if (!peer)
+        return;
+
+    dte_reset();
+    fc2_on_connected();
+    at("AT+FDR");
+    pump(peer, 60 * 50);
+    for (int i = 0; i < 20; i++)
+        fc2_poll();
+
+    check(peer_done && peer_status == T30_ERR_OK,
+          "the far end reports a good polled session");
+    check(dte_saw("+FPO"), "the remote's offer to be polled is reported");
+    check(dte_saw("+FCI:\"peer\"") || dte_saw("+FTI:\"peer\""),
+          "the remote's identification is reported");
+
+    /* The page itself, checked before any query -- a query resets the
+     * capture the page is in. */
+    body = dte_find("CONNECT\r\n");
+    check(body != NULL, "the polled page follows CONNECT");
+    if (!body)
+        goto done;
+    start = (int) (body - dte_buf);
+    decode = t4_rx_init(NULL, DTE_RX, T4_COMPRESSION_T4_1D
+                                      | T4_COMPRESSION_T4_2D
+                                      | T4_COMPRESSION_T6);
+    if (decode) {
+        t4_rx_set_rx_encoding(decode, T4_COMPRESSION_T4_1D);
+        t4_rx_set_image_width(decode, IMAGE_WIDTH);
+        t4_rx_set_x_resolution(decode, T4_X_RESOLUTION_R8);
+        t4_rx_set_y_resolution(decode, T4_Y_RESOLUTION_FINE);
+        t4_rx_start_page(decode);
+        for (int i = start; i < dte_len; i++) {
+            uint8_t byte = (uint8_t) dte_buf[i];
+
+            if (saw_dle) {
+                saw_dle = 0;
+                if (byte == 0x03)
+                    break;
+                if (byte != 0x10)
+                    continue;
+            } else if (byte == 0x10) {
+                saw_dle = 1;
+                continue;
+            }
+            t4_rx_put(decode, &byte, 1);
+        }
+        t4_rx_end_page(decode);
+        t4_rx_free(decode);
+        bad = compare_page(DTE_RX, 0, &rows);
+        check(bad == 0 && rows == IMAGE_ROWS,
+              "the polled page is the page the far end offered");
+        if (bad != 0 || rows != IMAGE_ROWS)
+            printf("       (%d rows, %d differing)\n", rows, bad);
+    }
+
+    dte_reset();
+    at("AT+FSP?");
+    check(dte_saw("0"), "the DCE resets +FSP after a polled document arrives");
+
+done:
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
+static void test_be_polled(int flp)
+{
+    static uint8_t page[1 << 20];
+    fax_state_t *peer;
+    int rows = 0;
+    int bad;
+    int n;
+
+    printf("+FLP=%d: the far end polls this DCE (T.32 8.5.1.7)\n", flp);
+
+    unlink(PEER_RX);
+    fc2_select(0);
+    fc2_select(1);
+
+    at("AT+FLI=\"polled\"");
+    at("AT+FNR=0,1,0,0");
+    { char cmd[32]; snprintf(cmd, sizeof(cmd), "AT+FLP=%d", flp); at(cmd); }
+    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+    at("ATA");                   /* the polled station answers */
+
+    dte_reset();
+    at("AT+FDT");
+    check(dte_saw("CONNECT"), "AT+FDT answers CONNECT");
+    n = encode_page_for_dte(SRC_TIFF, T4_COMPRESSION_T4_1D, 0, page, sizeof(page));
+    for (int off = 0; off < n; off += 512) {
+        int chunk = (n - off > 512) ? 512 : n - off;
+        fc2_dte_bytes(page + off, chunk);
+    }
+
+    /* The far end calls in with nothing to send and somewhere to put a page,
+     * which is what makes it poll. */
+    peer = peer_start(1, NULL, PEER_RX);
+    check(peer != NULL, "the far-end fax terminal starts");
+    if (!peer)
+        return;
+
+    dte_reset();
+    fc2_on_connected();
+    pump(peer, 60 * 50);
+    for (int i = 0; i < 20; i++)
+        fc2_poll();
+
+    if (flp) {
+        check(peer_done && peer_status == T30_ERR_OK,
+              "the far end reports a good polled session");
+        bad = compare_page(PEER_RX, 0, &rows);
+        check(bad == 0 && rows == IMAGE_ROWS,
+              "the far end polled the page that was offered");
+        if (bad != 0 || rows != IMAGE_ROWS)
+            printf("       (%d rows, %d differing)\n", rows, bad);
+        dte_reset();
+        at("AT+FLP?");
+        check(dte_saw("0"), "the DCE resets +FLP after a polled document is sent");
+    } else {
+        /* T.32 8.5.1.7: with no document offered, the DTC is refused and the
+         * call ends with that status rather than transferring the page. */
+        /*
+         * A conformant far end reads DIS bit 9, sees no document on offer and
+         * gives up without ever sending a DTC -- which is the point of the
+         * bit.  So this is what is observable here; the +FHS:23 that 8.5.1.7
+         * specifies for a DTC that arrives anyway is implemented but needs a
+         * peer that sends one unsolicited, which this one will not.
+         */
+        check(peer_status != T30_ERR_OK,
+              "with +FLP=0 the far end does not get a document");
+        check(compare_page(PEER_RX, 0, &rows) < 0,
+              "with +FLP=0 no page reaches the far end at all");
+        dte_reset();
+        at("AT+FHS?");
+        check(!dte_saw("00"), "the refused session reports a hangup cause");
+    }
+
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
 int main(void)
 {
     TIFFSetWarningHandler(NULL);
@@ -718,6 +910,9 @@ int main(void)
     test_receive(1);
     test_bit_order_is_real();
     test_fnr();
+    test_poll_remote();
+    test_be_polled(1);
+    test_be_polled(0);
 
     fc2_release();
 

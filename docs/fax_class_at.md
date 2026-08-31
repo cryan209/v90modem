@@ -48,6 +48,18 @@ One fix in the vendored SpanDSP: `at_cmd_plus_GCAP()` answered only the
 `AT+GCAP?` form, so the bare `AT+GCAP` V.250 6.1.9 defines — the form fax
 software probes with — got a bare `OK`, which reads as "no fax support".
 
+## Reading the specifications
+
+`ITU Docs/` has T.31, T.32 (and its Amd 1), T.30, T.4 and T.6. Reading T.32
+against the code it had already produced found four things wrong, which is
+worth recording: the `+FHS` codes were assigned across the wrong phases and
+directions, `tpr=0` must *suppress* the `+FCS:` report rather than leave it
+unconditional, `+FPS:` carries four line counts this had reduced to one, and
+`+FDT` must end in `ERROR` when the remote rejects the page. It also confirmed
+two readings that had been taken on internal evidence alone — `+FBO`'s value
+map and its stuffing order — and turned a "not done because the convention is
+unsettled" into a "not done, and Note 3 says not to".
+
 ## Coverage
 
 `fax_class_test` (in `make test`) drives the real PTY a DTE sees. It asserts
@@ -103,14 +115,17 @@ the DTE link. The reversal is applied *before* DLE stuffing on the way out and
 *after* unstuffing on the way in, because T.32 3.2's stuffing is about the
 octets that appear on the link.
 
-`+FBO` has two halves: the phase C image data, and the negotiation frame data a
-DTE reads with `+FNR`. 0 is direct in both and 3 is reversed in both; of the two
-mixed values this takes 1 as "phase C reversed", the reading that puts the phase
-C bit in the low position. The negotiation half is **not** applied: the one
-negotiation report that carries frame octets, `+FNF:`, renders them as hex text
-rather than as octets on the link, and which order that hex should be in is a
-convention there is no spec text to hand to settle. It is reported in the
-frame's own order. So 0/1 behave as 2/3 do.
+Table 27/T.32 settles the four values, and the reading taken here was right:
+`+FBO=1` is reversed phase C with direct phase B/D, `+FBO=2` the other way
+round. Note 2 to 8.5.3.4 confirms the placement too — "transparency mechanisms
+(e.g. for `<DLE>` characters) shall be applied to the data **after reversal**,
+i.e. as the data will be transmitted on the DTE-DCE link".
+
+The phase B/D half is **not** applied. It governs T.30 control messages
+reported in the `+FHT:`/`+FHR:` reports of 8.6, which are enabled by `+FBU`
+(8.5.1.10) and are not implemented, so there is nothing for it to act on and
+0/1 behave as 2/3 do. Note 3 is explicit that `+FBO` does **not** affect the
+`+FNC`, `+FNF` or `+FNS` responses, so those stay in the frame's own order.
 
 ### +FNR, negotiation message reporting (8.5.1.11)
 
@@ -122,33 +137,71 @@ The reports come from a `t30_set_real_time_frame_handler()`, which is the only
 place the negotiation messages exist *as messages* — by Phase B they have
 become state.
 
-- **rpr** — `+FIS:` decoded from the received DIS/DTC: what the far end says it
-  can do. Only the fields T.32 has a subparameter for are read; the ones this
-  DCE cannot act on (BF, JP) are reported as zero rather than guessed at.
-- **tpr** — `+FCS:` from the DCS we send.
+- **rpr** — `+FIS:` decoded from a received DIS, `+FTC:` from a DTC: what the
+  far end says it can do. Only the fields T.32 has a subparameter for are read;
+  the ones this DCE cannot act on (BF, JP) are reported as zero rather than
+  guessed at.
+- **tpr** — `+FCS:`, from the DCS we send in a transmit session (Table 13) and
+  at the `+FDR` in a receive session (Table 16).
 - **idr** — `+FCI:`/`+FTI:` with the remote's identification. Reported from
   Phase B rather than from the CSI/TSI frame, because the frame handler runs
   *before* T.30 decodes the identification.
 - **nsr** — `+FNF:` with the FIF of a received NSF/NSC/NSS frame, in hex.
 
-`+FCS:` is reported exactly once either way: `tpr` moves it to the DCS instant
-rather than adding a second one. With `tpr` clear the Phase B report still goes
-out, because a transmit session has no other moment at which the DTE learns
-what was negotiated (see the `+FDT` deviation above).
+Table 22 is explicit that `tpr=0` **suppresses** the `+FCS:` report while still
+loading the `+FCS` parameter, so `AT+FCS?` reads it either way. Note 1 to that
+table spells out the consequence the DTE then lives with: without the report it
+must send the format T.30 mandates (normal resolution, A4 length, 1728 wide,
+1-D) or enable `+FFC` conversion.
+
+Table 13 gates the `+FCS:` of a `+FDT` on the *first* subparameter rather than
+the second, which contradicts both Table 22 and Table 16. Table 22 is the
+definitive per-switch description and Table 16 agrees with it, so `tpr` is what
+this implements.
 
 ## Implemented
 
 Actions: `+FDT` (8.3.3), `+FDR` (8.3.4), `+FKS` (8.3.5), `+FIP` (8.3.6).
 Parameters: `+FCC` (8.5.1.1), `+FIS` (8.5.1.2), `+FCS` (8.5.1.3),
 `+FLI`/`+FPI` (8.5.1.5), `+FCR` (8.5.1.9), `+FPS` (8.5.2.2), `+FHS` (8.5.2.7),
-`+FNR` (8.5.1.11), `+FBS` (8.5.3.2), `+FBO` (8.5.3.4), `+FMI`/`+FMM`/`+FMR`,
+`+FNR` (8.5.1.11), `+FLP` (8.5.1.7), `+FSP` (8.5.1.8), `+FAP` (8.5.1.12),
+`+FSA`/`+FPA`/`+FPW` (8.5.1.13), `+FBS` (8.5.3.2), `+FBO` (8.5.3.4), `+FMI`/`+FMM`/`+FMR`,
 and the accepted-and-stored set `+FCQ +FIE +FCT +FMS +FEA +FFC +FAA +FRY`.
-Reports: `+FCS:` for the negotiated session, `+FIS:` for the far end's
-capabilities, `+FCI:`/`+FTI:` for its identification, `+FNF:` for its
-non-standard frames, `+FPS:` per page, `+FHS:` at the end of the session.
+Reports: `+FCS:` for the negotiated session, `+FIS:`/`+FTC:` for the far end's
+capabilities, `+FCI:`/`+FTI:`/`+FPI:` for its identification, `+FNF:` for its
+non-standard frames, `+FPO` for its offer to be polled, `+FPS:<ppr>,<lc>,
+<blc>,<cblc>,<lbc>` and `+FET:<ppm>` per page, `+FHS:` at the end of the
+session. 8.3.3.4's rule that `+FDT` ends in `ERROR` when the remote rejected
+the page (RTN or PIN) rather than `OK` is implemented.
 
 An omitted subparameter keeps its current value, which is what `,` means in a
 T.32 list — `AT+FIS=,5` changes BR alone.
+
+## Polling (8.5.1.7, 8.5.1.8, 8.4.2.2)
+
+**Being polled — `+FLP`.** `+FLP=1` offers the spooled `+FDT` page for polling;
+T.30's DIS bit 9 carries the offer, and SpanDSP sets that bit from having a
+document to send, so what `+FLP` gates is whether the document is offered at
+all. Only the answering side's DIS carries the bit, so a *calling* DCE hands
+its page over regardless — there it is an ordinary send, not an offer to be
+polled. The DCE resets `+FLP` to 0 once a polled document has gone.
+
+**Polling — `+FSP`.** `+FSP=1` says the DTE can receive a polled document. A
+received DIS with bit 9 set then raises the `+FPO` response, and the DTE
+answers it with `+FDR` (to poll) or `+FDT` (if it would rather send). 8.5.1.8's
+note makes `+FCR=0` act as `+FSP=0`, which this follows: with no receive
+capability there is nothing to poll into. The DCE resets `+FSP` to 0 once a
+polled document has arrived.
+
+`+FSA`, `+FPA`, `+FPW` and `+FPI` supply the sub-address, selective polling
+address, password and polling ID those sessions carry, and `+FAP` controls
+whether the corresponding received frames are reported.
+
+`+FLP=0` and a DTC that arrives anyway is specified as an orderly disconnect
+with `+FHS:23`, and that is implemented — but it is **not** covered by the
+tests, because a conformant far end reads DIS bit 9, sees no offer and gives up
+without ever sending a DTC. That is the point of the bit, and it is what the
+`+FLP=0` test asserts instead.
 
 ## Deviations, and why
 
@@ -162,14 +215,39 @@ call is still being set up) the spool is complete long before Phase B, and
 where the report lands is the only difference the DTE can see. A DTE that
 adapts its image format to the reported `+FCS` will not see it in time.
 
-**`+FHS` mapping is coarse.** T.30's completion codes are finer grained than
-T.32's two-digit status. The ones with a clear counterpart are mapped; the rest
-fall back on the "unspecified phase B/C/D error" codes, choosing the phase from
-where the failure was. Inventing a precise code for an error T.32 does not
-enumerate would be worse than reporting the phase honestly.
+**`+FHS` mapping is approximate.** T.30's completion codes are finer grained
+than T.32's status. The mapping now follows Table 20/T.32, which is organised
+by phase *and direction* — 40-4F is transmit phase C and 90-9F is receive phase
+C, so a code is only right alongside the direction it happened in. Codes with
+no counterpart fall back on the "unspecified" code for their phase and
+direction rather than on an invented value.
 
 **`+FBS` reports `0,0`.** There is no separate DTE buffer to report a size for;
 `t4_rx` consumes the stream as it arrives.
+
+**No `<DC2>` handshake.** 8.3.4 has the DTE send `<DC2>` after the `+FDR`
+`CONNECT` to start the data flowing. This DCE starts sending immediately. A DTE
+that sends `<DC2>` is unharmed — it is discarded — but a DTE relying on the
+pause to get ready does not get it.
+
+**The post page response is not held for the DTE.** 8.5.2.2 and 8.3.4.3 let a
+receiving DTE write a modified `+FPS` before the next `+FDR`, which releases the
+post page message — that is how a DTE requests a retrain or a procedure
+interrupt. Here T.30 answers on its own and `+FPS:` is a report of what it did.
+Procedure interrupts (`+FIE`, `+FVO`, the PRI-Q codes) are accepted as
+parameters and never acted on.
+
+## Reading the specifications
+
+`ITU Docs/` has T.31, T.32 (and its Amd 1), T.30, T.4 and T.6. Reading T.32
+against the code it had already produced found four things wrong, which is
+worth recording: the `+FHS` codes were assigned across the wrong phases and
+directions, `tpr=0` must *suppress* the `+FCS:` report rather than leave it
+unconditional, `+FPS:` carries four line counts this had reduced to one, and
+`+FDT` must end in `ERROR` when the remote rejects the page. It also confirmed
+two readings that had been taken on internal evidence alone — `+FBO`'s value
+map and its stuffing order — and turned a "not done because the convention is
+unsettled" into a "not done, and Note 3 says not to".
 
 ## Coverage
 
@@ -200,6 +278,11 @@ the received DIS from echoing our own parameters back; both would look right
 otherwise. The `+FNF:` check uses an NSF the far end was given, so the hex is
 compared against a known frame.
 
+`test_poll_remote` and `test_be_polled` run polled sessions both ways — this
+DCE polling a far end that has a document, and a far end polling a document
+this DCE offered — and compare the page in each. A polled transfer that reports
+`+FPO` and then delivers nothing would pass a result-code check.
+
 `fax_class_test` covers the other half — that class 2.0 is *reachable* through
 the real PTY the DTE sees (`AT+FCLASS=2.0`, a `+FCC?` only this module answers,
 an `ATE0` that must still reach T.31, and the way back to class 0), which
@@ -209,10 +292,10 @@ an `ATE0` that must still reach T.31, and the way back to class 0), which
 
 - Class 2 (the pre-standard `AT+FCLASS=2`) — only 2.0 is offered. The two are
   not compatible, and 2.0 is the ITU-T one.
-- `+FBO`'s negotiation-frame half — see above.
-- Polling (`+FSP`, `+FLP`, `+FPI` beyond storing the ID), sub-addressing,
-  passwords and non-standard frames (`+FSA`, `+FPW`, `+FNS`, `+FPA`) — parsed
-  where they are simple parameters, but nothing acts on them.
+- `+FBO`'s phase B/D half, and the `+FBU`/`+FHT:`/`+FHR:` frame reporting it
+  applies to.
+- `+FNS` (sending a non-standard frame), and the `+FNC:`/`+FNS:` reports.
+- Procedure interrupts — see the deviations above.
 - `+FDD`/`+FIT`/`+FLO`/`+FPR` — these are T.31 DTE-link parameters and stay
   with the T.31 interpreter.
 - T.38 — `t31_init()` is given no T.38 packet handler and the context is put in

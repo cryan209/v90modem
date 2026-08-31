@@ -91,6 +91,12 @@ static fc2_params_t     p_cs;              /* +FCS, negotiated (read only) */
 static char             local_id[21];      /* +FLI */
 static char             polling_id[21];    /* +FPI */
 static int              p_cr;              /* +FCR, willing to receive */
+static int              p_lp;              /* +FLP, a document is pollable */
+static int              p_sp;              /* +FSP, we want to poll */
+static int              p_ap[3];           /* +FAP: sub-address, SEP, PWD reporting */
+static char             sub_address[21];   /* +FSA */
+static char             sel_poll_address[21]; /* +FPA */
+static char             password[21];      /* +FPW */
 static int              p_bo;              /* +FBO, phase C bit order */
 static int              p_cq, p_ie, p_ct, p_ms, p_ea, p_ffc, p_aa, p_ry;
 
@@ -122,10 +128,16 @@ static int              rx_pages_done;     /* pages complete in rx_tiff */
 static int              rx_pages_given;    /* pages handed to the DTE */
 static int              fdr_pending;       /* DTE is waiting in +FDR */
 static int              fdt_await_page;    /* +FDT is waiting for the page to go */
+static int              remote_pollable;   /* the remote's DIS had bit 9 set */
+static int              dtc_seen;          /* a DTC arrived: we are being polled */
+static int              dtc_refused;       /* ... and +FLP was 0 */
+static uint8_t          last_ident_fcf;    /* CSI, CIG or TSI */
 
 static int              session_done;
 static int              hangup_code = -1;  /* +FHS, -1 = not reported yet */
 static int              page_status = 1;   /* +FPS */
+static int              pending_fet;       /* +FET, the remote's post page message */
+static int              have_fet;
 
 /* Reports raised under the lock (often from the media thread) and emitted by
  * fc2_poll() on the DTE thread. */
@@ -259,38 +271,105 @@ static int br_to_modems(int br)
 }
 
 /*
- * T.32 8.5.2.7 +FHS.  T.30's completion codes are finer grained than T.32's
- * two-digit status, so this maps the ones with a clear T.32 counterpart and
- * falls back on the "unspecified phase B/C/D error" codes for the rest,
- * choosing the phase from where the failure was.  The fallback is deliberate:
- * inventing a precise code for an error T.32 does not enumerate would be
- * worse than reporting the phase honestly.
+ * T.32 8.5.2.7 and Table 20/T.32.  T.30's completion codes are finer grained
+ * than T.32's status, and the table is organised by phase and direction --
+ * 40-4F is transmit phase C and 90-9F is receive phase C, so a code is only
+ * right alongside the direction it happened in.  Codes with no counterpart
+ * fall back on the "unspecified" code for their phase and direction rather
+ * than on an invented value.
  */
 static int t30_status_to_fhs(int status, int transmitting)
 {
     switch (status) {
-    case T30_ERR_OK:            return 0x00;
-    case T30_ERR_CEDTONE:       return 0x11;
-    case T30_ERR_T0_EXPIRED:    return 0x11;
-    case T30_ERR_T1_EXPIRED:    return 0x11;
-    case T30_ERR_INCOMPATIBLE:  return 0x21;
+    case T30_ERR_OK:            return 0x00;   /* normal end of connection */
+    case T30_ERR_CALLDROPPED:   return 0x03;
+    case T30_ERR_CEDTONE:       return 0x05;   /* answer without CED */
+    case T30_ERR_T0_EXPIRED:    return 0x04;   /* ringback, no answer */
+    case T30_ERR_T1_EXPIRED:    return 0x11;   /* no answer, T.30 T1 */
+
+    /* 20-3F, transmit phase B */
+    case T30_ERR_INCOMPATIBLE:  return 0x21;   /* remote cannot receive/send */
     case T30_ERR_RX_INCAPABLE:  return 0x21;
     case T30_ERR_TX_INCAPABLE:  return 0x21;
     case T30_ERR_NORESSUPPORT:  return 0x21;
     case T30_ERR_NOSIZESUPPORT: return 0x21;
-    case T30_ERR_CANNOT_TRAIN:  return transmitting ? 0x22 : 0x43;
-    case T30_ERR_TX_GOTDCN:     return 0x23;
-    case T30_ERR_TX_NODIS:      return 0x22;
+    case T30_ERR_NOPOLL:        return 0x23;   /* COMREC invalid command */
+    case T30_ERR_TX_INVALRSP:   return 0x28;   /* RSPREC invalid response */
+    case T30_ERR_TX_NODIS:      return 0x26;   /* DIS/DTC 3 times, no DCS */
+    case T30_ERR_TX_GOTDCN:     return 0x22;   /* COMREC error, tx phase B */
     case T30_ERR_TX_PHBDEAD:    return 0x20;
-    case T30_ERR_TX_PHDDEAD:    return 0x70;
-    case T30_ERR_TX_BADDCS:     return 0x22;
-    case T30_ERR_TX_BADPG:      return 0x71;
-    case T30_ERR_RX_NOCARRIER:  return 0x50;
-    case T30_ERR_RX_NOEOL:      return 0x50;
-    case T30_ERR_RX_NOFAX:      return 0x43;
-    case T30_ERR_CALLDROPPED:   return 0x03;
-    default:                    return transmitting ? 0x20 : 0x40;
+    case T30_ERR_CANNOT_TRAIN:  return transmitting ? 0x27 : 0x70;
+    case T30_ERR_TX_BADDCS:     return 0x24;   /* RSPREC error */
+
+    /* 40-4F, transmit phase C */
+    case T30_ERR_TX_BADPG:      return 0x41;   /* unspecified image format */
+    case T30_ERR_BADPAGE:       return 0x41;
+    case T30_ERR_BADTIFF:       return 0x42;   /* image conversion error */
+    case T30_ERR_BADTIFFHDR:    return 0x42;
+    case T30_ERR_NOPAGE:        return 0x42;
+    case T30_ERR_FILEERROR:     return 0x42;
+
+    /* 50-6F, transmit phase D */
+    case T30_ERR_TX_PHDDEAD:    return 0x50;
+    case T30_ERR_TX_T5EXP:      return 0x50;
+
+    /* 70-8F, receive phase B */
+    case T30_ERR_RX_INVALCMD:   return 0x72;   /* COMREC error */
+    case T30_ERR_RX_GOTDCS:     return 0x72;
+    case T30_ERR_RX_NOFAX:      return 0x72;
+    case T30_ERR_RX_T2EXPDCN:
+    case T30_ERR_RX_T2EXPD:
+    case T30_ERR_RX_T2EXPFAX:
+    case T30_ERR_RX_T2EXPMPS:
+    case T30_ERR_RX_T2EXPRR:
+    case T30_ERR_RX_T2EXP:      return 0x73;   /* T.30 T2, page not received */
+
+    /* 90-9F, receive phase C */
+    case T30_ERR_RX_NOEOL:      return 0x91;   /* missing EOL after 5 s */
+    case T30_ERR_RX_ECMPHD:     return 0x92;   /* bad CRC or frame, ECM */
+    case T30_ERR_RX_NOCARRIER:  return 0x90;
+
+    /* A0-BF, receive phase D */
+    case T30_ERR_RX_DCNWHY:
+    case T30_ERR_RX_DCNDATA:
+    case T30_ERR_RX_DCNFAX:
+    case T30_ERR_RX_DCNPHD:
+    case T30_ERR_RX_DCNRRD:
+    case T30_ERR_RX_DCNNORTN:   return 0xA2;   /* COMREC invalid response */
+
+    default:                    return transmitting ? 0x20 : 0x70;
     }
+}
+
+/* T.32 Table 19: the remote's post page message, for the +FET: report. */
+static int t30_ppm_to_fet(int result, int *known)
+{
+    *known = 1;
+    switch (result) {
+    case T30_MPS:     return 0;
+    case T30_EOM:     return 1;
+    case T30_EOP:     return 2;
+    case T30_PRI_MPS: return 3;
+    case T30_PRI_EOM: return 4;
+    case T30_PRI_EOP: return 5;
+    }
+    *known = 0;
+    return 0;
+}
+
+/* T.32 Table 23: the post page response, for +FPS. */
+static int t30_ppr_to_fps(int result, int *known)
+{
+    *known = 1;
+    switch (result) {
+    case T30_MCF: return 1;    /* page good */
+    case T30_RTN: return 2;    /* page bad, retrain requested */
+    case T30_RTP: return 3;    /* page good, retrain requested */
+    case T30_PIN: return 4;    /* page bad, interrupt requested */
+    case T30_PIP: return 5;    /* page good, interrupt requested */
+    }
+    *known = 0;
+    return 0;
 }
 
 static void params_to_string(const fc2_params_t *p, char *out, size_t max)
@@ -418,12 +497,29 @@ static void real_time_frame_handler(void *user_data, bool incoming,
         return;
     fcf = msg[2];
 
-    if (incoming && (fcf == T30_DIS || fcf == T30_DTC) && p_nr.rpr) {
-        fc2_params_t remote;
+    if (incoming && (fcf == T30_DIS || fcf == T30_DTC)) {
+        if (p_nr.rpr) {
+            fc2_params_t remote;
 
-        dis_to_params(msg, len, &remote);
-        params_to_string(&remote, params, sizeof(params));
-        queue_line("\r\n+FIS:%s\r\n", params);
+            dis_to_params(msg, len, &remote);
+            params_to_string(&remote, params, sizeof(params));
+            /* T.32 Table 22: a DIS is the remote's receiver parameters and a
+             * DTC its transmitter's, which is the +FTC: report. */
+            queue_line("\r\n%s:%s\r\n", (fcf == T30_DTC) ? "+FTC" : "+FIS",
+                       params);
+        }
+        /*
+         * T.32 8.4.2.2.  Table 2/T.30 bit 9 says the remote has a document to
+         * poll.  +FSP=0 inhibits the report, and 8.5.1.8's note makes +FCR=0
+         * act as +FSP=0 -- with no receive capability we could not poll it.
+         * The report goes after +FIS: and before the final result code, which
+         * is where the queue puts it.
+         */
+        if (fcf == T30_DIS && p_sp && p_cr
+            && fif_bit(msg, len, T30_DIS_BIT_READY_TO_TRANSMIT_FAX_DOCUMENT)) {
+            remote_pollable = 1;
+            queue_line("\r\n+FPO\r\n");
+        }
     }
 
     if (!incoming && (fcf & 0xFE) == (T30_DCS & 0xFE) && p_nr.tpr) {
@@ -432,6 +528,27 @@ static void real_time_frame_handler(void *user_data, bool incoming,
         update_negotiated_params();
         params_to_string(&p_cs, params, sizeof(params));
         queue_line("\r\n+FCS:%s\r\n", params);
+    }
+
+    /*
+     * CSI, CIG and TSI all decode into T.30's one identification field, so
+     * which of T.32 8.4.2.3's three reports it is has to be taken from the
+     * frame that carried it.
+     */
+    if (incoming) {
+        switch (fcf) {
+        case T30_CSI: last_ident_fcf = T30_CSI; break;
+        case T30_CIG: last_ident_fcf = T30_CIG; break;
+        case T30_TSI: last_ident_fcf = T30_TSI; break;
+        default: break;
+        }
+        /* T.32 8.5.1.7: with no document offered for polling, a DTC is a
+         * command we cannot honour -- Table 20's "COMREC invalid command". */
+        if (fcf == T30_DTC) {
+            dtc_seen = 1;
+            if (!p_lp)
+                dtc_refused = 1;
+        }
     }
 
     if (incoming && p_nr.nsr
@@ -479,59 +596,92 @@ static int phase_b_handler(void *user_data, int result)
     t30_get_transfer_statistics(fax_get_t30_state(fax), &t);
     ident = t30_get_rx_ident(fax_get_t30_state(fax));
     if (ident && ident[0] && p_nr.idr) {
-        /* T.32 8.5.1.5, gated by +FNR's idr.  We hear the remote's CSI when
-         * we called it and its TSI when it called us.  Reported here rather
-         * than from the CSI/TSI frame itself because T.30 has decoded the
-         * identification by now and the frame handler runs before it does. */
-        queue_line("\r\n%s:\"%s\"\r\n", calling_party ? "+FCI" : "+FTI", ident);
+        /*
+         * T.32 8.4.2.3: +FCI: for a CSI, +FTI: for a TSI, +FPI: for a CIG.
+         * Reported here rather than from the frame itself because T.30 has
+         * decoded the identification by now and the frame handler runs
+         * before it does; the frame handler recorded which one it was.
+         */
+        const char *report = "+FCI";
+
+        if (last_ident_fcf == T30_TSI)
+            report = "+FTI";
+        else if (last_ident_fcf == T30_CIG)
+            report = "+FPI";
+        queue_line("\r\n%s:\"%s\"\r\n", report, ident);
     }
     /*
-     * 8.5.1.3's session result.  With +FNR's tpr set, the frame handler has
-     * already reported this from the DCS itself, so it is not repeated; with
-     * tpr clear it still goes out, because a transmit session has no other
-     * moment at which the DTE learns what was negotiated.
+     * T.32 Table 22 is explicit that tpr=0 suppresses the +FCS: report while
+     * still loading the +FCS parameter, so there is no report here: a
+     * transmit session gets it from the DCS we send (the frame handler) and a
+     * receive session from the +FDR, per Tables 13 and 16.  Note 1 to Table
+     * 22 spells out the consequence the DTE then lives with -- it must send
+     * the T.30 mandated format, or enable +FFC conversion.
      */
-    if (!p_nr.tpr)
-        queue_line("\r\n+FCS:%s\r\n", params);
+    (void) params;
     return T30_ERR_OK;
 }
 
-/* T.30 Phase D: a page has been transferred (T.32 8.5.2.2 +FPS). */
+/*
+ * T.30 Phase D.  T.32 8.4.3 and 8.4.4.1: the receiving DCE reports the page
+ * status with its line counts, then the remote's post page message; the
+ * transmitting DCE learns from the remote's response whether the page was
+ * accepted, which is what 8.3.3.4 makes the +FDT command's OK or ERROR.
+ *
+ * SpanDSP hands this one handler both sides of that: on a page we received
+ * `result` is the remote's post page COMMAND (MPS/EOM/EOP), and on a page we
+ * sent it is the remote's post page RESPONSE (MCF/RTN/RTP/PIN/PIP).
+ */
 static int phase_d_handler(void *user_data, int result)
 {
     t30_stats_t t;
+    int known;
+    int v;
 
     (void) user_data;
 
     t30_get_transfer_statistics(fax_get_t30_state(fax), &t);
-    switch (result) {
-    case T30_MPS:
-    case T30_EOM:
-    case T30_EOP:
-        page_status = 1;                    /* page good */
-        break;
-    case T30_MCF:
+
+    v = t30_ppr_to_fps(result, &known);
+    if (known) {
+        /* A response to a page we sent. */
+        page_status = v;
+    }
+
+    v = t30_ppm_to_fet(result, &known);
+    if (known) {
+        /* A command about a page we received.  T.32 8.5.2.3: with copy
+         * quality checking off the page status is 1, which is what this DCE
+         * reports -- T.30's own error correction is what decides. */
         page_status = 1;
-        break;
-    case T30_RTN:
-        page_status = 2;                    /* page bad, retrain requested */
-        break;
-    case T30_RTP:
-        page_status = 3;                    /* page good, retrain requested */
-        break;
-    default:
-        break;
+        pending_fet = v;
+        have_fet = 1;
+    }
+
+    if (t.pages_rx > rx_pages_done && remote_pollable) {
+        /* T.32 8.5.1.8: the DCE resets +FSP after a polled document is
+         * received. */
+        p_sp = 0;
     }
     rx_pages_done = t.pages_rx;
     if (t.pages_tx > tx_pages_sent) {
+        if (dtc_seen) {
+            /* T.32 8.5.1.7: and resets +FLP after a polled document is
+             * sent. */
+            p_lp = 0;
+        }
         tx_pages_sent = t.pages_tx;
         if (fdt_await_page) {
-            /* T.32 8.3.3: the +FDT completes when the page has been sent, not
-             * when the DTE finished handing it over. */
+            /*
+             * T.32 8.3.3.4: the +FDT completes when the page has been sent,
+             * and it completes with ERROR if the remote rejected the page
+             * (RTN or PIN) rather than OK.
+             */
             fdt_await_page = 0;
             tx_tiff_ready = 0;
             queue_line("\r\n+FPS:%d\r\n", page_status);
-            queue_line("\r\nOK\r\n");
+            queue_line("\r\n%s\r\n",
+                       (page_status == 2 || page_status == 4) ? "ERROR" : "OK");
         }
     }
     return T30_ERR_OK;
@@ -542,7 +692,14 @@ static void phase_e_handler(void *user_data, int completion_code)
 {
     (void) user_data;
 
-    hangup_code = t30_status_to_fhs(completion_code, tx_tiff_ready || tx_pages_sent > 0);
+    if (dtc_refused && completion_code != T30_ERR_OK) {
+        /* T.32 8.5.1.7: a DTC received with no document offered for polling
+         * ends the call with this status. */
+        hangup_code = 0x23;
+    } else {
+        hangup_code = t30_status_to_fhs(completion_code,
+                                        tx_tiff_ready || tx_pages_sent > 0);
+    }
     session_done = 1;
 }
 
@@ -581,8 +738,26 @@ static void session_start(void)
     t30_set_supported_bilevel_resolutions(t30, vr_to_resolutions(p_is.vr));
     t30_set_ecm_capability(t30, p_is.ec != 0);
 
-    /* The page the DTE handed us in +FDT, if any. */
-    if (tx_tiff_ready)
+    /* T.32 8.5.1.13 and 8.5.1.12: the addressing this session offers. */
+    if (sub_address[0])
+        t30_set_tx_sub_address(t30, sub_address);
+    if (sel_poll_address[0])
+        t30_set_tx_selective_polling_address(t30, sel_poll_address);
+    if (password[0])
+        t30_set_tx_password(t30, password);
+    if (polling_id[0])
+        t30_set_tx_polled_sub_address(t30, polling_id);
+
+    /*
+     * The page the DTE handed us in +FDT, if any.
+     *
+     * T.32 8.5.1.7: DIS bit 9 -- "I have a document to poll" -- is set from
+     * having a document to send, so offering one at all is what +FLP gates.
+     * Only the answering side's DIS carries that bit, so a calling DCE hands
+     * the page over regardless: there it is an ordinary send, not an offer to
+     * be polled.
+     */
+    if (tx_tiff_ready && (calling_party || p_lp))
         t30_set_tx_file(t30, tx_tiff, -1, -1);
 
     /*
@@ -990,12 +1165,59 @@ static int fnr_param(const char *t)
     return 1;
 }
 
+/* T.32 8.5.1.12 +FAP=<sub>,<sep>,<pwd>: which addressing frames get reported. */
+static int fap_param(const char *t)
+{
+    int work[3] = { p_ap[0], p_ap[1], p_ap[2] };
+    const char *s;
+    int idx = 0;
+
+    if (t[0] == '?' && t[1] == '\0') {
+        put_line("\r\n%d,%d,%d\r\n", p_ap[0], p_ap[1], p_ap[2]);
+        put_ok();
+        return 1;
+    }
+    if (t[0] == '=' && t[1] == '?' && t[2] == '\0') {
+        put_line("\r\n(0,1),(0,1),(0,1)\r\n");
+        put_ok();
+        return 1;
+    }
+    if (t[0] != '=')
+        return 0;
+
+    for (s = t + 1; *s && idx < 3; ) {
+        if (*s == ',') {
+            s++;
+            idx++;
+            continue;
+        }
+        if (*s != '0' && *s != '1')
+            return 0;
+        work[idx] = *s - '0';
+        s++;
+        if (*s == ',') {
+            s++;
+            idx++;
+        } else if (*s != '\0') {
+            return 0;
+        }
+    }
+    for (int i = 0; i < 3; i++)
+        p_ap[i] = work[i];
+    put_ok();
+    return 1;
+}
+
 static void params_reset(void)
 {
     p_cc = fc2_caps;
     p_is = fc2_defaults;
     p_cs = fc2_defaults;
     p_cr = 1;
+    p_lp = 0;
+    p_sp = 0;
+    p_ap[0] = p_ap[1] = p_ap[2] = 0;
+    sub_address[0] = sel_poll_address[0] = password[0] = '\0';
     p_bo = 0;
     p_cq = 0; p_ie = 0; p_ct = 30; p_ms = 0; p_ea = 0;
     p_ffc = 0; p_aa = 0; p_ry = 3;
@@ -1088,6 +1310,14 @@ int fc2_at_line(const char *line)
     else if (match(&t, "+FLI"))  ok = str_param(t, local_id, sizeof(local_id));
     else if (match(&t, "+FPI"))  ok = str_param(t, polling_id, sizeof(polling_id));
     else if (match(&t, "+FCR"))  ok = num_param(t, &p_cr, 0, 1, "(0,1)");
+    /* T.32 8.5.1.7/8.5.1.8: polling, offered and requested. */
+    else if (match(&t, "+FLP"))  ok = num_param(t, &p_lp, 0, 1, "(0,1)");
+    else if (match(&t, "+FSP"))  ok = num_param(t, &p_sp, 0, 1, "(0,1)");
+    /* T.32 8.5.1.13: the addressing a polled or polling session carries. */
+    else if (match(&t, "+FSA"))  ok = str_param(t, sub_address, sizeof(sub_address));
+    else if (match(&t, "+FPA"))  ok = str_param(t, sel_poll_address, sizeof(sel_poll_address));
+    else if (match(&t, "+FPW"))  ok = str_param(t, password, sizeof(password));
+    else if (match(&t, "+FAP"))  ok = fap_param(t);
     else if (match(&t, "+FBO"))  ok = num_param(t, &p_bo, 0, 3, "(0-3)");
     else if (match(&t, "+FCQ"))  ok = num_param(t, &p_cq, 0, 2, "(0-2),(0-2)");
     else if (match(&t, "+FIE"))  ok = num_param(t, &p_ie, 0, 1, "(0,1)");
@@ -1160,10 +1390,18 @@ int fc2_at_line(const char *line)
             ok = 1;
         }
     } else if (match(&t, "+FDR")) {
-        /* T.32 8.3.4.  If a page is already in, it goes now; otherwise the
-         * DTE waits here until one is (fc2_poll). */
-        fdr_pending = 1;
-        ok = 1;
+        /*
+         * T.32 8.3.4: "The +FDR command shall result in an ERROR result code
+         * if the DCE is on-hook or if the capability to receive is missing or
+         * disabled (+FCR=0)."  Otherwise, if a page is already in it goes
+         * now; if not the DTE waits here until one is (fc2_poll).
+         */
+        if (!call_up || !p_cr) {
+            ok = 0;
+        } else {
+            fdr_pending = 1;
+            ok = 1;
+        }
     } else {
         handled = 0;
     }
@@ -1295,6 +1533,10 @@ void fc2_poll(void)
     int pending_len;
     int have_page = 0;
     int page = 0;
+    int page_rows = 0, page_bad_rows = 0, page_bad_run = 0;
+    int report_fcs = 0;
+    int report_fet = 0;
+    int fet = 0;
     int finish_session = 0;
     int code = 0;
 
@@ -1310,11 +1552,23 @@ void fc2_poll(void)
     }
 
     if (fdr_pending && rx_pages_done > rx_pages_given) {
+        t30_stats_t t;
+
         have_page = 1;
         page = rx_pages_given;
         rx_pages_given++;
         fdr_pending = 0;
         params_to_string(&p_cs, params, sizeof(params));
+        report_fcs = p_nr.tpr;
+        report_fet = have_fet;
+        fet = pending_fet;
+        have_fet = 0;
+        if (fax) {
+            t30_get_transfer_statistics(fax_get_t30_state(fax), &t);
+            page_rows = t.length;
+            page_bad_rows = t.bad_rows;
+            page_bad_run = t.longest_bad_row_run;
+        }
     }
 
     /*
@@ -1334,11 +1588,23 @@ void fc2_poll(void)
         emit_raw(pending, pending_len);
 
     if (have_page) {
-        /* T.32 8.3.4: the session results, then CONNECT, then the page. */
-        put_line("\r\n+FCS:%s\r\n", params);
+        /* T.32 Table 16: the session parameters (if +FNR's tpr allows), then
+         * CONNECT, then the page. */
+        if (report_fcs)
+            put_line("\r\n+FCS:%s\r\n", params);
         put_line("\r\nCONNECT\r\n");
         if (send_page_to_dte(page)) {
-            put_line("\r\n+FPS:%d\r\n", page_status);
+            /*
+             * T.32 8.4.3: +FPS:<ppr>,<lc>,<blc>,<cblc>,<lbc> -- the page
+             * status and the line counts.  The lost octet count is zero
+             * because nothing here drops data on the way to the DTE; it is
+             * buffered as a whole page.
+             */
+            put_line("\r\n+FPS:%d,%d,%d,%d,0\r\n",
+                     page_status, page_rows, page_bad_rows, page_bad_run);
+            /* T.32 8.4.4.1: what the remote says comes next. */
+            if (report_fet)
+                put_line("\r\n+FET:%d\r\n", fet);
             put_ok();
         } else {
             put_error();
