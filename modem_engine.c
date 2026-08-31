@@ -5312,6 +5312,12 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
 void me_init(void)
 {
     pthread_mutex_init(&g_state_mtx, NULL);
+    /* Report the arithmetic libspandsp was built with, not the flag this
+       object saw: an A/B of the two datapaths has to be able to confirm from
+       the log which arm ran, and a -D in CFLAGS can leave the library and the
+       application disagreeing without any other symptom. */
+    fprintf(stderr, "[ME] V.34 datapath: %s\n",
+            v34_datapath_is_fixed_point() ? "fixed point" : "floating point");
     v90_cp_live_worker_start();
     {
         const char *mode = getenv("ME_MODE");

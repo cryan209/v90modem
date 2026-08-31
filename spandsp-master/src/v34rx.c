@@ -14151,6 +14151,20 @@ SPAN_DECLARE(void) v34_v90_upstream_clear_carrier_lost(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Which arithmetic this library was compiled with.  Reported at startup so a
+   live A/B of the two datapaths can confirm from the log which arm ran -- and
+   so a libspandsp built one way against an application built the other cannot
+   pass unnoticed, which is the failure mode a -D flag in CFLAGS invites. */
+SPAN_DECLARE(int) v34_datapath_is_fixed_point(void)
+{
+#if defined(V34_FIXED_POINT)
+    return 1;
+#else
+    return 0;
+#endif
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v34_v90_upstream_resync_required(v34_state_t *s)
 {
     return s && s->rx.v90_t3_acquired && s->rx.v90_t3_resync_required;

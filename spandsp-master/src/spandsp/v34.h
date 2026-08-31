@@ -424,6 +424,14 @@ SPAN_DECLARE(void) v34_v90_start_retrain_response(v34_state_t *s);
     \param s The V.34 context. */
 SPAN_DECLARE(void) v34_start_retrain(v34_state_t *s);
 
+/*! \brief Which arithmetic this library was compiled with.  Reported at
+           startup so a live A/B of the two datapaths can confirm from the log
+           which arm ran, and so a libspandsp built one way against an
+           application built the other cannot pass unnoticed -- which is the
+           failure mode a -D in CFLAGS invites.
+    \return non-zero if built with V34_FIXED_POINT. */
+SPAN_DECLARE(int) v34_datapath_is_fixed_point(void);
+
 /*! \brief Has the plain V.34 data mode stopped decoding?  V.34 11.5/11.6
            give a receiver in that state a retrain and a rate renegotiation;
            this is what says it is in it.
