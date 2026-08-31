@@ -34,6 +34,20 @@ for arm in fixedpt floatpt; do
     echo "CONTROL: missing $BIN/sip_v90_modem.$arm -- build both arms first"; exit 2; }
 done
 
+# Fail fast if anything already holds the SIP port.  A stray server makes every
+# call in the batch die at bind() with no call placed at all, which reads
+# exactly like a rig refusing to connect.  Note the usual `pgrep -x
+# sip_v90_modem` does NOT catch it here: SERVER_BIN runs the arms as
+# sip_v90_modem.fixedpt / .floatpt, so the process name no longer matches --
+# that is how a previous run of THIS script was left running under a
+# concurrent one, and its first call was lost before anyone noticed.
+if lsof -nP -iUDP:5060 >/dev/null 2>&1; then
+  echo "CONTROL: UDP 5060 is already held -- refusing to start:"
+  lsof -nP -iUDP:5060 2>/dev/null | sed 's/^/  /'
+  echo "CONTROL: pkill -f 'sip_v90_modem\.(fixedpt|floatpt)' if it is a stale arm"
+  exit 2
+fi
+
 for r in $(seq 1 "$REPEATS"); do
   for arm in fixedpt floatpt; do
     d="$OUT/$arm-r$r"
