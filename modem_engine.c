@@ -4579,10 +4579,18 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
     int retry_bits = parse_env_int("ME_V90_DIL_HYP_RETRY_BITS", 512);
     if (retry_bits < 0)
         retry_bits = 512;
-    if (first_bits < V90_DIL_CAPTURE_MAX_BITS
-        && first_bits < g_v90_dil_hyp_last_bits + retry_bits)
-        return false;
-    g_v90_dil_hyp_last_bits = first_bits;
+    /* Throttle on the TOTAL bits ever captured, not on what the copy-out
+     * returned.  The capture is a ring now, so the returned length saturates
+     * at the window size while bits keep arriving; keying the throttle on it
+     * would satisfy "no new bits since last time" forever and stop the search
+     * the moment the ring filled. */
+    {
+        int total_bits = v34_v90_phase3_ja_total_bits(g_v34, 0);
+
+        if (total_bits < g_v90_dil_hyp_last_bits + retry_bits)
+            return false;
+        g_v90_dil_hyp_last_bits = total_bits;
+    }
 
     for (int hypothesis = 0; hypothesis < 24; hypothesis++) {
         int bits;

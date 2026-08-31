@@ -103,11 +103,26 @@
    is not one. */
 #define V34_V90_T3_RAW_SIZE                 8192
 
-/* Ja capture geometry.  V34_JA_CAPTURE_BITS is the capacity in bits; the
-   arrays hold it packed 8 to a byte.  The stage logs "need ~16340 to parse",
-   so this leaves 4x headroom -- the length is deliberately NOT reduced here,
-   because packing is bit-for-bit neutral and shortening is not. */
-#define V34_JA_CAPTURE_BITS                 65536
+/* Ja capture geometry.  A RING of V34_JA_CAPTURE_BITS bits, packed 8 to a
+   byte.  The *_len counters keep counting TOTAL bits appended -- they are not
+   clamped to the ring -- so a caller can tell "the window is full" from "the
+   peer stopped talking", and the engine's re-search throttle still has a
+   monotonic quantity to key on.  Use v34_ja_window_bits()/v34_ja_window_get()
+   to read; they translate a position within the retained window to a ring slot.
+
+   Sized from what the decode actually consumes, not from how long Ja runs.  A
+   full DIL descriptor on this peer is ~1701 bits (N=144), and
+   v90_dil_try_repeated_frames() votes across up to V90_JA_VOTE_MAX_REPEATS (6)
+   of them, so the decode never looks further back than ~10200 bits; the
+   comment on that constant puts the peer's whole Ja window at ~1.62 s (~7800
+   bits).  16384 is 1.6x the voting span and 2.1x the peer's entire Ja burst.
+
+   It used to be 65536 with no wrap, which is why the captures saturated: the
+   descriptor can start late (one measured case at bit 16340), so the buffer
+   was sized for the OFFSET to the frame rather than for the frame.  A ring
+   does not need that -- the search runs every ME_V90_DIL_HYP_RETRY_BITS (512)
+   new bits, so a descriptor is scanned ~32 times before it ages out. */
+#define V34_JA_CAPTURE_BITS                 16384
 #define V34_JA_CAPTURE_BYTES                (V34_JA_CAPTURE_BITS/8)
 
 static __inline__ int v34_ja_bit_get(const uint8_t *cap, int bit)
@@ -123,6 +138,27 @@ static __inline__ void v34_ja_bit_set(uint8_t *cap, int bit, int value)
         cap[bit >> 3] |= m;
     else
         cap[bit >> 3] &= (uint8_t) ~m;
+}
+
+/* Append one bit to the ring.  total is the running count of bits EVER
+   appended; it is the caller's and is not clamped. */
+static __inline__ void v34_ja_append(uint8_t *cap, int total, int value)
+{
+    v34_ja_bit_set(cap, total % V34_JA_CAPTURE_BITS, value);
+}
+
+/* How many bits the ring still holds, given the total ever appended. */
+static __inline__ int v34_ja_window_bits(int total)
+{
+    return (total < V34_JA_CAPTURE_BITS) ? total : V34_JA_CAPTURE_BITS;
+}
+
+/* Read position i of the retained window, oldest first. */
+static __inline__ int v34_ja_window_get(const uint8_t *cap, int total, int i)
+{
+    int base = (total < V34_JA_CAPTURE_BITS) ? 0 : (total % V34_JA_CAPTURE_BITS);
+
+    return v34_ja_bit_get(cap, (base + i) % V34_JA_CAPTURE_BITS);
 }
 #define V34_V90_T3_RAW_MASK                 (V34_V90_T3_RAW_SIZE - 1)
 #define V34_V90_T3_B1_MAX_SYMBOLS           256
