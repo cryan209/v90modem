@@ -65,12 +65,24 @@
    ten times an ESP32-S3's whole SRAM.  131072 is 13.65 s -- four times the
    3.4 s the paragraph above derives -- and the margin was never measured.
 
-   Swept on artifacts/reneg-eq/reneg-r1 through v90_engine_replay, which has a
-   single handover like a live call: 32768, 16384 and 8192 all produce output
-   IDENTICAL to 131072, line for line; 4096 (0.42 s) breaks acquisition (B1
-   acq 3 -> 0).  Set to the derivation's own figure rather than to the floor,
-   since one recording cannot bound the E->B1 gap on every call -- but 8192 is
-   known to work here if a port needs the further 4x.
+   Swept through v90_engine_replay, which has a single handover like a live
+   call.  On artifacts/reneg-eq/reneg-r1: 32768, 16384 and 8192 all produce
+   output IDENTICAL to 131072, line for line; 4096 (0.42 s) breaks acquisition
+   (B1 acq 3 -> 0).  Widened to every recording in artifacts/ whose engine
+   replay reaches B1 -- reneg-eq/reneg-r1, reneg-ab-225015Z/{control-r2,
+   reneg-r1, reneg-r2, reneg-r3} and renegviab-ab-010014Z/gated-r3, 13
+   acquisitions and 175793 receiver lines -- and 8192 is identical to 32768 on
+   all six.
+
+   Sized from the measurement rather than the corpus floor.  The B1 fits land
+   at samples 2941, 2951 and 5099 back from the anchor, so the deepest lookback
+   actually used is ~5100 and 4096 breaks precisely because it is below that.
+   8192 is only 1.6x that depth; 16384 is 3.2x.  Every recording here is the
+   same SmartLink peer on one rig, a different modem may sit deeper, and the
+   failure mode is silent -- a call that never acquires carries no upstream at
+   all for its whole life and logs one line about it.  So: 16384 shipped, and
+   8192 verified across the corpus for an embedded build that needs the other
+   64 KB per ring.
 
    Do NOT sweep this with v90_upstream_replay: it searches the handover
    instant, so changing the lookback changes which candidate it settles on and
@@ -82,7 +94,7 @@
    do; a partial rebuild here segfaults in v34_rx_phase3_wait_s_symbol reading
    s->last_sample at a stale offset, which looks exactly like a DSP failure and
    is not one. */
-#define V34_V90_T3_RAW_SIZE                 32768
+#define V34_V90_T3_RAW_SIZE                 16384
 
 /* Ja capture geometry.  V34_JA_CAPTURE_BITS is the capacity in bits; the
    arrays hold it packed 8 to a byte.  The stage logs "need ~16340 to parse",
