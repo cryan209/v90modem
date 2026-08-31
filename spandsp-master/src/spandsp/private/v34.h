@@ -74,15 +74,22 @@
    acquisitions and 175793 receiver lines -- and 8192 is identical to 32768 on
    all six.
 
-   Sized from the measurement rather than the corpus floor.  The B1 fits land
-   at samples 2941, 2951 and 5099 back from the anchor, so the deepest lookback
-   actually used is ~5100 and 4096 breaks precisely because it is below that.
-   8192 is only 1.6x that depth; 16384 is 3.2x.  Every recording here is the
-   same SmartLink peer on one rig, a different modem may sit deeper, and the
-   failure mode is silent -- a call that never acquires carries no upstream at
-   all for its whole life and logs one line about it.  So: 16384 shipped, and
-   8192 verified across the corpus for an embedded build that needs the other
-   64 KB per ring.
+   Sized from the measurement.  The B1 fits land at samples 2941, 2951 and 5099
+   back from the anchor, so the deepest lookback the corpus actually uses is
+   ~5100 -- which is why 4096 breaks and 8192 does not.  8192 is 1.6x that
+   depth.
+
+   KNOW WHAT THAT MARGIN IS AND IS NOT.  Every recording behind it is the same
+   SmartLink peer on one rig; a peer that anchors its E detector deeper would
+   need more.  The failure mode is silent and total: a call that does not
+   acquire carries no upstream for its whole life and says so in one log line
+   ("V.90 T/3 B1 acquisition failed"), so if that line starts appearing against
+   a new peer, this constant is the first thing to raise -- 16384 is equally
+   verified here and doubles the depth for another 64 KB per ring.
+
+   Shipped at 8192 deliberately: the embedded target this was sized for has
+   ~512 KB of SRAM in total, and two 64 KB rings is a different proposition
+   from two 128 KB ones.
 
    Do NOT sweep this with v90_upstream_replay: it searches the handover
    instant, so changing the lookback changes which candidate it settles on and
@@ -94,7 +101,7 @@
    do; a partial rebuild here segfaults in v34_rx_phase3_wait_s_symbol reading
    s->last_sample at a stale offset, which looks exactly like a DSP failure and
    is not one. */
-#define V34_V90_T3_RAW_SIZE                 16384
+#define V34_V90_T3_RAW_SIZE                 8192
 
 /* Ja capture geometry.  V34_JA_CAPTURE_BITS is the capacity in bits; the
    arrays hold it packed 8 to a byte.  The stage logs "need ~16340 to parse",
