@@ -566,6 +566,14 @@ SPAN_DECLARE(int) t30_call_active(t30_state_t *s);
     \param s The T.30 context. */
 SPAN_DECLARE(void) t30_terminate(t30_state_t *s);
 
+/*! Disconnect a fax call in an orderly way, by sending a DCN to the far end
+    and then ending the call. This is what a T.32 service class 2.0 DCE does
+    for the +FKS command and for a +FCT timeout, where the Recommendation asks
+    for a DCN rather than for the line simply going quiet.
+    \brief Disconnect a fax call in an orderly way.
+    \param s The T.30 context. */
+SPAN_DECLARE(void) t30_disconnect(t30_state_t *s);
+
 /*! Inform the T.30 engine of a status change in the front end (end of tx, rx signal change, etc.).
     \brief Inform the T.30 engine of a status change in the front end (end of tx, rx signal change, etc.).
     \param user_data The T.30 context.

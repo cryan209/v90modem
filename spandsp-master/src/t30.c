@@ -3374,6 +3374,19 @@ static void assess_copy_quality(t30_state_t *s, uint8_t fcf)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(void) t30_disconnect(t30_state_t *s)
+{
+    /* An orderly disconnect: tell the far end with a DCN, rather than just
+       going quiet, so it knows the call ended on purpose. */
+    if (s->phase == T30_PHASE_CALL_FINISHED)
+        return;
+    /*endif*/
+    span_log(&s->logging, SPAN_LOG_FLOW, "Disconnecting at the application's request\n");
+    s->post_page_response_held = false;
+    send_dcn(s);
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) t30_set_post_page_response_hold(t30_state_t *s, bool hold)
 {
     s->hold_post_page_response = hold;

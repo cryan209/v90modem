@@ -198,8 +198,9 @@ reporting is implemented off SpanDSP's real-time frame handler, and so are
 (`+FLP`, `+FSP`, `+FPO`) and procedure interrupts (`+FIE`, `+FVO`, `<DLE><pri>`
 — which needed a small addition to SpanDSP's receiver, where answering PIP/PIN
 was an empty TODO). The post page response is **held** for the DTE per 8.3.4.3,
-so a receiving session needs one more `+FDR` than it has pages; that needed a
-second SpanDSP addition (`t30_set_post_page_response_hold()`). **Watch the FCF
+so a receiving session needs one more `+FDR` than it has pages, bounded by
+`+FCT`; that needed two more SpanDSP additions
+(`t30_set_post_page_response_hold()` and `t30_disconnect()`). **Watch the FCF
 low bit**: in DIS/DTC, CSI/CIG and
 NSF/NSC it is a real distinction, but in DCS, TSI and NSS it is a don't-care
 set from whether a DIS was received, so those must be matched with `& 0xFE` —

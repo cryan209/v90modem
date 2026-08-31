@@ -201,6 +201,7 @@ static int          peer_interrupt;   /* the far end asks for / grants one */
 /* The post page message and response the far end put on the wire. */
 static int          peer_saw_ppm;
 static int          peer_saw_ppr;
+static int          peer_saw_dcn;
 
 /*
  * What the far end saw arrive, captured as the frames arrive.  T.30 frees its
@@ -223,6 +224,8 @@ static void peer_frame_handler(void *user_data, bool incoming,
      * 0x2E.  Mask it off, exactly as T.30's own dispatcher does -- comparing
      * these exactly captures nothing at all from one side of the call.
      */
+    if ((msg[2] & 0xFE) == (T30_DCN & 0xFE))
+        peer_saw_dcn = 1;
     switch (msg[2] & 0xFE) {
     case (T30_MPS & 0xFE): case (T30_EOM & 0xFE): case (T30_EOP & 0xFE):
     case (T30_PRI_MPS & 0xFE): case (T30_PRI_EOM & 0xFE): case (T30_PRI_EOP & 0xFE):
@@ -269,6 +272,7 @@ static fax_state_t *peer_start(int calling, const char *tx_file, const char *rx_
     peer_saw_nss_len = 0;
     peer_saw_ppm = 0;
     peer_saw_ppr = 0;
+    peer_saw_dcn = 0;
     t30_remote_interrupts_allowed(t30, true);
     if (peer_interrupt)
         t30_local_interrupt_request(t30, true);
@@ -326,6 +330,19 @@ static void pump_until(fax_state_t *peer, int frames, const char *needle)
         if (peer_done)
             return;
     }
+}
+
+/*
+ * pump() stops as soon as the far end has finished, which is not what a test
+ * of our own shutdown wants: the DCE still needs audio to run its own phase E
+ * out after the DCN has gone.
+ */
+static void pump_regardless(fax_state_t *peer, int frames)
+{
+    for (int i = 0; i < frames; i++)
+        pump(peer, 1);
+    for (int i = 0; i < 20; i++)
+        fc2_poll();
 }
 
 static void release_post_page(fax_state_t *peer)
@@ -855,6 +872,65 @@ static void test_post_page_hold(void)
           "the DTE's +FPS=2 is what reaches the far end, as RTN");
     if (peer_saw_ppr != (T30_RTN & 0xFE))
         printf("       (far end saw post page response 0x%02X)\n", peer_saw_ppr);
+
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
+/*
+ * T.32 8.5.2.6 +FCT bounds the wait for the +FDR that releases a held post
+ * page response: "when this timeout is reached, the DCE shall send the T.30
+ * DCN response to the remote station and execute an implied orderly abort
+ * command."  Without it a DTE that stops answering leaves the call hanging on
+ * T.30's own timers with nothing reported to the DTE at all.
+ */
+static void test_held_response_timeout(void)
+{
+    fax_state_t *peer;
+
+    printf("+FCT: the held response times out (T.32 8.5.2.6)\n");
+
+    fc2_select(0);
+    fc2_select(1);
+    dte_reset();
+    at("AT+FCT?");
+    check(dte_saw("30"), "AT+FCT? defaults to 30 seconds (1Eh)");
+    dte_reset();
+    at("AT+FCT=2");
+    check(dte_saw("OK"), "AT+FCT= sets it");
+
+    peer_ecm = 1;
+    peer_t6 = 1;
+    peer_nsf = NULL;
+    peer_nss = NULL;
+    peer_interrupt = 0;
+
+    at("AT+FCR=1");
+    at("AT+FNR=0,1,0,0");
+    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+    at("ATA");
+
+    peer = peer_start(1, PEER_TX, NULL);
+    check(peer != NULL, "the far-end fax terminal starts");
+    if (!peer)
+        return;
+
+    dte_reset();
+    fc2_on_connected();
+    at("AT+FDR");
+    pump_until(peer, 60 * 50, "+FPS:");
+    check(dte_saw("+FPS:1,"), "the page arrives and is reported");
+
+    /* And now the DTE says nothing at all.  Three seconds against a +FCT of
+     * two. */
+    dte_reset();
+    pump_regardless(peer, 6 * 50);
+
+    check(peer_saw_dcn, "the far end is told with a DCN");
+    /* T.32 Table 20: 02 is "call aborted, from +FKS or <CAN>", which is what
+     * 8.5.2.6's implied orderly abort is. */
+    check(dte_saw("+FHS:02"), "the DTE is told with +FHS:02");
+    check(dte_saw("OK"), "and the outstanding command completes");
 
     fax_free(peer);
     fc2_on_disconnected();
@@ -1524,6 +1600,7 @@ int main(void)
     test_bit_order_is_real();
     test_fnr();
     test_post_page_hold();
+    test_held_response_timeout();
     test_procedure_interrupt();
     test_fns();
     test_fbu();

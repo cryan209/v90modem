@@ -146,10 +146,27 @@ the far end does when nobody answers — is ignored rather than assessed as a ne
 page. Both are guarded by a flag nothing sets unless a class 2.0 DTE is
 driving, so ordinary sessions are untouched.
 
-**The DTE has to be quick.** T.30's timers do not wait for it: the far end
-repeats its post page message after a few seconds and gives up after a few
-repeats. Nothing here bounds the wait, so a DTE that sits on a held response
-loses the call.
+**The wait is bounded by `+FCT`** (8.5.2.6), which is what T.32 already
+provides for it: "how long the DCE will wait for a command after having
+transmitted all available Phase C data", 1 s units, default and mandatory value
+30 s. On expiry the receive side does what 8.5.2.6 asks — sends a T.30 DCN to
+the far end and executes an implied orderly abort — and reports `+FHS:02`,
+Table 20's "call aborted, from +FKS or `<CAN>`", which is what an implied abort
+is. `+FCT=0` disables the timeout; the Recommendation does not say what 0 means,
+and that is the reading T.31's `+FIT` uses for the same value.
+
+Sending the DCN needed a third small SpanDSP addition, `t30_disconnect()`: the
+library can be told the far end hung up, but had no way to hang up *politely*.
+`+FKS` uses it too — 8.3.5 asks for "a DCN message at the next opportunity",
+and it previously just dropped the line.
+
+**T.30's own timers are usually tighter than `+FCT`.** The far end repeats its
+post page message after a few seconds and gives up after a few repeats, well
+inside the default 30 s. So on a real call a dawdling DTE loses it to T.30
+before `+FCT` fires; the timeout is the DTE-facing bound, not the only one.
+
+**`+FCT` is not applied to the transmit side.** 8.5.2.6 covers `+FDT` too,
+where the timeout should terminate the transfer and run an implied `+FKS`.
 
 ### Procedure interrupts: +FIE, +FVO (8.5.2.1, 8.4.4.2, 8.3.3.8, 8.3.4.8)
 
@@ -284,7 +301,7 @@ this implements.
 Actions: `+FDT` (8.3.3), `+FDR` (8.3.4), `+FKS` (8.3.5), `+FIP` (8.3.6).
 Parameters: `+FCC` (8.5.1.1), `+FIS` (8.5.1.2), `+FCS` (8.5.1.3),
 `+FLI`/`+FPI` (8.5.1.5), `+FCR` (8.5.1.9), `+FPS` (8.5.2.2), `+FHS` (8.5.2.7),
-`+FNS` (8.5.1.6), `+FIE` (8.5.2.1), `+FNR` (8.5.1.11), `+FBU` (8.5.1.10), `+FLP` (8.5.1.7), `+FSP` (8.5.1.8), `+FAP` (8.5.1.12),
+`+FNS` (8.5.1.6), `+FIE` (8.5.2.1), `+FCT` (8.5.2.6), `+FNR` (8.5.1.11), `+FBU` (8.5.1.10), `+FLP` (8.5.1.7), `+FSP` (8.5.1.8), `+FAP` (8.5.1.12),
 `+FSA`/`+FPA`/`+FPW` (8.5.1.13), `+FBS` (8.5.3.2), `+FBO` (8.5.3.4), `+FMI`/`+FMM`/`+FMR`,
 and the accepted-and-stored set `+FCQ +FIE +FCT +FMS +FEA +FFC +FAA +FRY`.
 Reports: `+FCS:` for the negotiated session, `+FIS:`/`+FTC:` for the far end's
@@ -410,6 +427,10 @@ was written and measured, it reads the same with the hold removed, so it cannot
 fail. The RTN assertion is what carries it — without the hold an MCF goes out at
 the end of the page and the DTE's RTN never does — and that was confirmed by
 removing the hold and watching it fail.
+
+`test_held_response_timeout` sets `+FCT=2`, takes a page and then has the DTE
+say nothing at all, requiring a DCN at the far end, `+FHS:02` at the DTE and
+the outstanding command to complete. Disabling the expiry fails all three.
 
 `test_procedure_interrupt` checks both directions **on the wire**, from the far
 end's own frame handler, because both are a substitution inside a frame that

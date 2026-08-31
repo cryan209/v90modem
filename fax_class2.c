@@ -158,6 +158,16 @@ static int              fdt_await_page;    /* +FDT is waiting for the page to go
 static int              remote_pollable;   /* the remote's DIS had bit 9 set */
 static int              interrupt_negotiated; /* +FVO reported, session suspended */
 static int              interrupt_requested;  /* the DTE sent <DLE><pri> */
+
+/*
+ * T.32 8.5.2.6 +FCT: how long the DCE waits for a command after it has passed
+ * on all the phase C data it has.  Measured on the received audio, which is
+ * the media clock the rest of this project times by, so it runs at the same
+ * rate offline as it does on a call.
+ */
+static uint64_t         rx_samples;
+static uint64_t         fct_deadline;      /* 0 when no timeout is running */
+static int              orderly_abort;     /* the DCE ended the call itself */
 static int              page_ppm = T32_PPM_EOP; /* how the DTE ended the page */
 static int              dtc_seen;          /* a DTC arrived: we are being polled */
 static int              dtc_refused;       /* ... and +FLP was 0 */
@@ -816,7 +826,14 @@ static void phase_e_handler(void *user_data, int completion_code)
 {
     (void) user_data;
 
-    if (dtc_refused && completion_code != T30_ERR_OK) {
+    if (orderly_abort) {
+        /*
+         * T.32 Table 20 code 02, "call aborted, from +FKS or <CAN>".  A +FCT
+         * timeout is 8.5.2.6's "implied orderly abort command", so it reports
+         * as the abort it is rather than as whatever T.30 made of the DCN.
+         */
+        hangup_code = 0x02;
+    } else if (dtc_refused && completion_code != T30_ERR_OK) {
         /* T.32 8.5.1.7: a DTC received with no document offered for polling
          * ends the call with this status. */
         hangup_code = 0x23;
@@ -1622,7 +1639,17 @@ int fc2_at_line(const char *line)
         put_ok();
         ok = 1;
     } else if (match(&t, "+FKS")) {
-        /* T.32 8.3.5: terminate the session in an orderly way. */
+        /*
+         * T.32 8.3.5: "terminate the session in an orderly manner.  In
+         * particular, it will send a DCN message at the next opportunity and
+         * hang up" -- so the far end is told, rather than the line just going
+         * quiet.  On-hook, it is simply OK.
+         */
+        if (fax) {
+            orderly_abort = 1;
+            fct_deadline = 0;
+            t30_disconnect(fax_get_t30_state(fax));
+        }
         session_stop();
         pthread_mutex_unlock(&fc2_mtx);
         if (hangup_cb)
@@ -1681,6 +1708,7 @@ int fc2_at_line(const char *line)
                     queue_line("\r\n+FVO\r\n");
                 }
             }
+            fct_deadline = 0;       /* the command +FCT was waiting for */
             fdr_pending = 1;
             ok = 1;
         }
@@ -1742,6 +1770,8 @@ void fc2_select(int on)
         dte_mode = FC2_IDLE;
         interrupt_requested = 0;
         interrupt_negotiated = 0;
+        orderly_abort = 0;
+        fct_deadline = 0;
         page_ppm = T32_PPM_EOP;
         report_len = 0;
     } else if (!on && selected) {
@@ -1803,6 +1833,21 @@ int fc2_rx(const int16_t *amp, int len)
     pthread_mutex_lock(&fc2_mtx);
     if (fax)
         r = fax_rx(fax, (int16_t *) amp, len);
+
+    rx_samples += (uint64_t) len;
+    if (fct_deadline && rx_samples >= fct_deadline) {
+        /*
+         * T.32 8.5.2.6: "For reception (+FDR), when this timeout is reached,
+         * the DCE shall send the T.30 DCN response to the remote station and
+         * execute an implied orderly abort command."  The phase E that
+         * follows is what reports +FHS to the DTE.
+         */
+        fct_deadline = 0;
+        if (fax) {
+            orderly_abort = 1;
+            t30_disconnect(fax_get_t30_state(fax));
+        }
+    }
     pthread_mutex_unlock(&fc2_mtx);
     return r;
 }
@@ -1837,6 +1882,7 @@ void fc2_poll(void)
     int page = 0;
     int page_rows = 0, page_bad_rows = 0, page_bad_run = 0;
     int report_fcs = 0;
+    int start_fct = 0;
     int report_fet = 0;
     int fet = 0;
     int finish_session = 0;
@@ -1862,6 +1908,7 @@ void fc2_poll(void)
         fdr_pending = 0;
         params_to_string(&p_cs, params, sizeof(params));
         report_fcs = p_nr.tpr;
+        start_fct = 1;
         report_fet = have_fet;
         fet = pending_fet;
         have_fet = 0;
@@ -1911,6 +1958,16 @@ void fc2_poll(void)
             if (report_fet)
                 put_line("\r\n+FET:%d\r\n", fet);
             put_ok();
+            /*
+             * T.32 8.5.2.6: the DCE has now passed on all the phase C data it
+             * has, and is waiting for the +FDR that releases the post page
+             * response.  +FCT bounds that wait.
+             */
+            if (start_fct && p_ct > 0) {
+                pthread_mutex_lock(&fc2_mtx);
+                fct_deadline = rx_samples + (uint64_t) p_ct * 8000u;
+                pthread_mutex_unlock(&fc2_mtx);
+            }
         } else {
             put_error();
         }
