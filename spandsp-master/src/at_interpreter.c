@@ -4230,11 +4230,13 @@ static const char *at_cmd_plus_GCAP(at_state_t *s, const char *t)
        +ES         +E (error control) commands +ES, +EB, +ER, +EFCS, and +ETBM
        +DS         +D (data compression) commands +DS and +DR */
     /* TODO: make this adapt to the configuration we really have. */
+    /* V.250 6.1.9 defines +GCAP as an action command, so the bare form is the
+       one a DTE normally sends; fax software probes with it to find out
+       whether the +F command set is there at all.  Answering only the "?"
+       form leaves that probe with a bare OK, which reads as "no fax". */
+    at_put_response(s, "+GCAP:+FCLASS");
     if (t[0] == '?')
-    {
-        at_put_response(s, "+GCAP:+FCLASS");
         t += 1;
-    }
     /*endif*/
     return t;
 }

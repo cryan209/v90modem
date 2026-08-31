@@ -79,4 +79,16 @@ int di_read_data(uint8_t *buf, int max_len);
  */
 int di_write_data(const uint8_t *buf, int len);
 
+/*
+ * Fax service class (T.31).  di_fax_active() is non-zero once the DTE has
+ * selected a fax class with AT+FCLASS=1 or 1.0; while it is, the call's
+ * audio belongs to the T.31 fax datapumps rather than the data modem, and
+ * the engine feeds them through di_fax_rx()/di_fax_tx().  Both take linear
+ * 16-bit PCM at 8 kHz; di_fax_tx() always fills the whole buffer, padding
+ * with silence when the fax transmitter has nothing to send.
+ */
+int di_fax_active(void);
+int di_fax_rx(const int16_t *amp, int len);
+int di_fax_tx(int16_t *amp, int len);
+
 #endif /* DATA_INTERFACE_H */

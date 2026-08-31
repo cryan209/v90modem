@@ -96,6 +96,20 @@ static di_pty_t     ctrl_pty  = { .master_fd = -1 };
 static di_pty_t     data_pty  = { .master_fd = -1 };
 static int          split_mode = 0;
 
+/*
+ * The AT interpreter is SpanDSP's T.31 fax modem (T.31 8.2/8.3), whose own
+ * at_state_t carries the Hayes command set.  Running it here rather than a
+ * bare at_init() is what makes the +F command set work: the class 1 action
+ * commands (+FTM/+FRM/+FTH/+FRH/+FTS/+FRS) are dispatched by
+ * process_class1_cmd() to a class 1 handler, and T.31 supplies one along with
+ * the V.21/V.27ter/V.29/V.17 fax datapumps it drives.  With no such handler
+ * every one of those commands answers ERROR.
+ *
+ * AT+FCLASS=0 leaves the data path exactly as before -- T.31 is then only an
+ * AT parser and the engine owns the audio.  A non-zero FCLASS makes the fax
+ * datapumps the audio path instead; see di_fax_active().
+ */
+static t31_state_t *t31        = NULL;
 static at_state_t  *at         = NULL;
 static int          di_mode    = 0; /* Mode A: 0=command, 1=online data */
 static volatile int connected  = 0; /* carrier is up */
@@ -153,9 +167,10 @@ static int at_tx_handler(void *user_data,
  * op  — one of the AT_MODEM_CONTROL_* enum values
  * num — dial string (for CALL), or NULL
  */
-static int at_modem_control_handler(void *user_data,
+static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
                                     int op, const char *num)
 {
+    (void)t31_state;
     (void)user_data;
 
     switch (op) {
@@ -238,7 +253,7 @@ static void handle_online_data_bytes(const uint8_t *buf, int n)
  * following SpanDSP's own mode switch back to online data. */
 static void handle_command_bytes(const uint8_t *buf, int n)
 {
-    at_interpreter(at, (const char *)buf, n);
+    t31_at_rx(t31, (const char *)buf, n);
     if (!split_mode && connected && di_mode == 0
         && at->at_rx_mode == AT_MODE_CONNECTED) {
         di_mode = 1;
@@ -367,18 +382,24 @@ static void di_pty_close(di_pty_t *p)
 static int di_start(void)
 {
     ring_init(&upstream_ring);
-    at = at_init(NULL, at_tx_handler, NULL,
-                 at_modem_control_handler, NULL);
-    if (!at) {
-        fprintf(stderr, "di_open: at_init failed\n");
+    t31 = t31_init(NULL, at_tx_handler, NULL,
+                   at_modem_control_handler, NULL, NULL, NULL);
+    if (!t31) {
+        fprintf(stderr, "di_open: t31_init failed\n");
         return -1;
     }
+    at = t31_get_at_state(t31);
+    /* Audio mode, and keep generating silence when the fax transmitter is
+     * idle: the RTP path needs a sample for every timeslot either way. */
+    t31_set_mode(t31, false);
+    t31_set_transmit_on_idle(t31, true);
     at_set_at_rx_mode(at, AT_MODE_ONHOOK_COMMAND);
 
     running = 1;
     if (pthread_create(&reader_tid, NULL, pty_reader_thread, NULL) != 0) {
         perror("pthread_create");
-        at_free(at);
+        t31_free(t31);
+        t31 = NULL;
         at = NULL;
         return -1;
     }
@@ -423,7 +444,7 @@ void di_close(void)
     running = 0;
     pthread_join(reader_tid, NULL);
 
-    if (at) { at_free(at); at = NULL; }
+    if (t31) { t31_free(t31); t31 = NULL; at = NULL; }
     di_pty_close(&data_pty);
     di_pty_close(&ctrl_pty);
     split_mode = 0;
@@ -451,6 +472,15 @@ void di_on_connected(int rate)
     esc_count = 0;
     last_data_byte_ms = now_ms();
 
+    /* A fax class call reports its own result: T.31 8.2 has the modem answer
+     * OK and sit in off-hook command mode, waiting for the class 1 action
+     * commands that carry T.30.  A CONNECT <rate> here would be a data-mode
+     * result code the fax DTE is not expecting. */
+    if (di_fax_active()) {
+        t31_call_event(t31, AT_CALL_EVENT_CONNECTED);
+        return;
+    }
+
     if (split_mode) {
         /* Control port stays in command mode; data port goes live. */
         at_set_at_rx_mode(at, AT_MODE_OFFHOOK_COMMAND);
@@ -470,13 +500,22 @@ void di_on_disconnected(void)
     di_mode = 0;
     esc_count = 0;
     at_set_at_rx_mode(at, AT_MODE_ONHOOK_COMMAND);
+    if (di_fax_active()) {
+        /* Lets T.31 stop its datapumps and flush any pending DLE ETX. */
+        t31_call_event(t31, AT_CALL_EVENT_HANGUP);
+        at_put_response_code(at, AT_RESPONSE_CODE_NO_CARRIER);
+        return;
+    }
     at_call_event(at, AT_CALL_EVENT_HANGUP);
     at_put_response_code(at, AT_RESPONSE_CODE_NO_CARRIER);
 }
 
 void di_on_ring(void)
 {
-    at_call_event(at, AT_CALL_EVENT_ALERTING);
+    if (di_fax_active())
+        t31_call_event(t31, AT_CALL_EVENT_ALERTING);
+    else
+        at_call_event(at, AT_CALL_EVENT_ALERTING);
 }
 
 int di_read_data(uint8_t *buf, int max_len)
@@ -493,4 +532,42 @@ int di_write_data(const uint8_t *buf, int len)
     if (fd < 0 || !data_port_active())
         return 0;
     return (int)write(fd, buf, (size_t)len);
+}
+
+/* ------------------------------------------------------------------ */
+/* Fax (T.31 class 1) audio path                                       */
+/* ------------------------------------------------------------------ */
+
+/*
+ * True while the DTE has selected a fax service class (T.31 8.2: AT+FCLASS=1
+ * or 1.0).  The engine consults this to hand the call's audio to the fax
+ * datapumps instead of running the V.8/V.34/V.90 startup, which is what a
+ * fax call needs -- T.30 does its own negotiation in the DTE above us.
+ */
+int di_fax_active(void)
+{
+    return (at && at->fclass_mode != 0);
+}
+
+int di_fax_rx(const int16_t *amp, int len)
+{
+    if (!t31 || !amp || len <= 0)
+        return 0;
+    /* t31_rx() does not modify the samples; the non-const prototype is
+     * SpanDSP's, shared with paths that do. */
+    return t31_rx(t31, (int16_t *) amp, len);
+}
+
+int di_fax_tx(int16_t *amp, int len)
+{
+    int n;
+
+    if (!t31 || !amp || len <= 0)
+        return 0;
+    n = t31_tx(t31, amp, len);
+    if (n < 0)
+        n = 0;
+    if (n < len)
+        memset(amp + n, 0, sizeof(int16_t) * (size_t)(len - n));
+    return len;
 }

@@ -6487,9 +6487,69 @@ static void me_rx_accounting_check(void)
     /*endif*/
 }
 
+/* ------------------------------------------------------------------ */
+/* Fax (T.31 class 1) audio                                            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * With a fax service class selected (AT+FCLASS=1), the call's audio belongs
+ * to T.31's fax datapumps, not to the data modem: T.30 negotiation happens in
+ * the DTE above the +FTM/+FRM/+FTH/+FRH commands, so there is no V.8 exchange
+ * and no V.34/V.90 startup to run.  These wrappers convert the G.711 the
+ * bearer carries to the linear PCM SpanDSP's fax modems take, in the chunk
+ * size the rest of this file uses.
+ */
+static bool me_fax_rx_g711(const uint8_t *codewords, int count)
+{
+    int offset;
+
+    if (!di_fax_active())
+        return false;
+
+    for (offset = 0; offset < count; ) {
+        int16_t linear[320];
+        int chunk = count - offset;
+
+        if (chunk > (int)(sizeof(linear) / sizeof(linear[0])))
+            chunk = (int)(sizeof(linear) / sizeof(linear[0]));
+        for (int i = 0; i < chunk; i++)
+            linear[i] = pcm_to_linear(codewords[offset + i]);
+        di_fax_rx(linear, chunk);
+        offset += chunk;
+    }
+    return true;
+}
+
+static bool me_fax_tx_g711(uint8_t *codewords, int count)
+{
+    int offset;
+
+    if (!di_fax_active())
+        return false;
+
+    for (offset = 0; offset < count; ) {
+        int16_t linear[320];
+        int chunk = count - offset;
+
+        if (chunk > (int)(sizeof(linear) / sizeof(linear[0])))
+            chunk = (int)(sizeof(linear) / sizeof(linear[0]));
+        di_fax_tx(linear, chunk);
+        for (int i = 0; i < chunk; i++)
+            codewords[offset + i] = linear_to_pcm(linear[i]);
+        offset += chunk;
+    }
+    return true;
+}
+
 void me_rx_audio(const int16_t *amp, int len)
 {
     g_rx_audio_samples += (uint64_t)len;
+
+    if (di_fax_active()) {
+        di_fax_rx(amp, len);
+        return;
+    }
+
     pthread_mutex_lock(&g_state_mtx);
     me_state_t state = g_state;
     me_modulation_t mod = g_mod;
@@ -8721,6 +8781,11 @@ static void buffer_tx_samples_for_echo(const int16_t *amp, int len)
 
 void me_tx_audio(int16_t *amp, int len)
 {
+    if (di_fax_active()) {
+        di_fax_tx(amp, len);
+        return;
+    }
+
     pthread_mutex_lock(&g_state_mtx);
     me_state_t state = g_state;
     pthread_mutex_unlock(&g_state_mtx);
@@ -9010,6 +9075,13 @@ void me_rx_g711(const uint8_t *codewords, int count)
 
     me_g711_capture_rx(codewords, count);
 
+    if (me_fax_rx_g711(codewords, count)) {
+        pthread_mutex_lock(&g_state_mtx);
+        g_g711_rx_octets += (uint64_t)count;
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+
     pthread_mutex_lock(&g_state_mtx);
     first_sample = g_g711_rx_octets;
     g_g711_rx_octets += (uint64_t)count;
@@ -9192,6 +9264,15 @@ int me_tx_g711(uint8_t *codewords, int count)
 
     if (!codewords || count <= 0)
         return 0;
+
+    if (me_fax_tx_g711(codewords, count)) {
+        pthread_mutex_lock(&g_state_mtx);
+        g_g711_tx_octets += (uint64_t)count;
+        pthread_mutex_unlock(&g_state_mtx);
+        if (g_g711_tx_tap)
+            (void)fwrite(codewords, 1, (size_t)count, g_g711_tx_tap);
+        return count;
+    }
 
     if (voice_tx_test_fill(codewords, count)) {
         pthread_mutex_lock(&g_state_mtx);
