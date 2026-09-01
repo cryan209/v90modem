@@ -110,6 +110,27 @@ int hsf_fxo_get_information(struct hsf_dev *d, uint8_t info[5])
 		if (r == 5)
 			return 0;
 	}
+
+	/*
+	 * The device can end up in a state where descriptor reads still work but
+	 * vendor requests do not answer at all (LIBUSB_ERROR_IO, IOKit
+	 * kIOReturnNotResponding -- distinct from a STALL, which is an active
+	 * rejection).  An explicit SET_CONFIGURATION 1 brings it back.  The
+	 * likely cause is this driver's own SET_CONFIGURATION 0 during the
+	 * firmware upload: osusb.c ignores the return of both, so a failed
+	 * restore leaves the device unconfigured and silent.
+	 */
+	unsigned char cfg = 0;
+	libusb_control_transfer(d->h, LIBUSB_ENDPOINT_IN, LIBUSB_REQUEST_GET_CONFIGURATION,
+				0, 0, &cfg, 1, CTRL_TIMEOUT_MS);
+	libusb_control_transfer(d->h, LIBUSB_ENDPOINT_OUT, LIBUSB_REQUEST_SET_CONFIGURATION,
+				1, 0, NULL, 0, 5000);
+
+	for (int i = 0; i < 3; i++) {
+		int r = vendor_in(d, CD2_GET_INFROMATION, 0, (uint16_t)i, info, 5);
+		if (r == 5)
+			return 0;
+	}
 	return -EIO;
 }
 
