@@ -16,8 +16,12 @@
  *     succeeding proves nothing about the wire.  Use GET_INFROMATION as the
  *     liveness check, and bracket any probing with it.
  *
- * Do not call libusb_reset_device() on this part: it drops off the bus and
- * needs a physical replug.
+ * Do not call libusb_reset_device() on this part.  Measured on libusb 1.0.29
+ * against a device that had stopped answering EP0: the darwin backend reports
+ * "timeout waiting for reenumerate", libusb then crashes on the stale handle,
+ * and the device DISAPPEARS FROM THE BUS -- zero entries in ioreg and
+ * system_profiler afterwards.  It needs a physical replug, so this is not a
+ * recovery path, it is a way to spend one.
  */
 
 #include "hsf_fxo.h"
