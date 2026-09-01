@@ -637,7 +637,13 @@ static void test_transmit(int fbo, int ec)
 
     dte_reset();
     at("AT+FDT");
-    check(dte_saw("CONNECT"), "AT+FDT answers CONNECT");
+    /*
+     * T.32 8.3.3 and Table 16: the CONNECT follows phase B, and there has
+     * been no phase B -- the call has not been answered.  The page is handed
+     * over anyway here, which is a DTE running ahead of its DCE; the spool is
+     * open, so it is taken.
+     */
+    check(!dte_saw("CONNECT"), "AT+FDT does not answer CONNECT before the call");
 
     n = encode_page_for_dte(SRC_TIFF, T4_COMPRESSION_T4_1D, fbo & 1,
                             page, sizeof(page));
@@ -669,6 +675,14 @@ static void test_transmit(int fbo, int ec)
     check(peer_done, "the far end reached T.30 phase E");
     check(peer_status == T30_ERR_OK, "the far end reports a good session");
     check(dte_saw("+FCS:"), "the DTE was told the negotiated session parameters");
+    /* And the CONNECT that was waiting for phase B, after that report. */
+    {
+        const char *fcs = dte_find("+FCS:");
+        const char *conn = dte_find("CONNECT");
+
+        check(conn != NULL, "the CONNECT follows once the call is up");
+        check(fcs && conn && fcs < conn, "after the +FCS: report (8.3.3)");
+    }
     /* T.32 8.3.3.4 and Table 15: now the page has gone and the far end has
      * accepted it, the +FDT completes -- with OK, and nothing else. */
     check(dte_saw("OK") && !dte_saw("+FPS:"), "the +FDT completes after phase D");
@@ -1909,6 +1923,102 @@ static void test_receive_last_page_rejected(void)
 }
 
 /*
+ * A +FDT issued before the call is answered, driven the way T.32 has it
+ * rather than the way the other tests do: the DTE dials, opens the page and
+ * then WAITS.  Table 16 puts the +FDT after +FCO, so this sequence is a DTE
+ * running ahead of its DCE -- and the DCE's answer is simply to wait too.
+ * Nothing is handed over until the CONNECT arrives, which it can only do
+ * after the call is up and phase B has run, so this is the case the ordering
+ * exists for and the one the other transmit tests never exercise.
+ */
+static void test_fdt_before_the_call(void)
+{
+    static uint8_t page[1 << 20];
+    fax_state_t *peer;
+    int rows = 0;
+    int bad;
+    int n;
+
+    printf("+FDT before the call: CONNECT waits for phase B (T.32 8.3.3)\n");
+
+    unlink(PEER_RX);
+    peer_ecm = 1;
+    peer_t6 = 1;
+    peer_nsf = NULL;
+    peer_nss = NULL;
+    peer_interrupt = 0;
+
+    fc2_select(0);
+    fc2_select(1);
+
+    dte_reset();
+    at("AT+FLI=\"sender\"");
+    at("AT+FNR=0,1,0,0");
+    at("AT+FBO=0");
+    at("AT+FIS=1,3,0,2,0,0,0,0,0");
+    at("ATD5551234");
+
+    dte_reset();
+    at("AT+FDT");
+    check(!dte_saw("CONNECT"), "no CONNECT while the call is being set up");
+
+    peer = peer_start(0, NULL, PEER_RX);
+    check(peer != NULL, "the far-end fax terminal starts");
+    if (!peer)
+        return;
+
+    fc2_on_connected();
+    check(!dte_saw("CONNECT"), "and none the moment the call is answered");
+
+    /* Phase B has to run first, which takes audio. */
+    for (int i = 0; i < 60 * 50 && !dte_saw("CONNECT"); i++)
+        pump(peer, 1);
+    check(dte_saw("+FCS:"), "phase B is reported once the call is up");
+    check(dte_saw("CONNECT"), "and then CONNECT");
+    {
+        const char *fcs = dte_find("+FCS:");
+        const char *conn = dte_find("CONNECT");
+
+        check(fcs && conn && fcs < conn, "in that order (8.3.3, Table 16)");
+    }
+
+    /* Only now does the DTE hand the page over. */
+    dte_reset();
+    n = encode_page_for_dte(SRC_TIFF, T4_COMPRESSION_T4_1D, 0, page, sizeof(page));
+    check(n > 0, "the test page encodes to a class 2.0 data stream");
+    for (int off = 0; off < n; off += 512) {
+        int chunk = (n - off > 512) ? 512 : n - off;
+
+        fc2_dte_bytes(page + off, chunk);
+    }
+    check(!dte_saw("OK") && !dte_saw("ERROR"),
+          "no result code before the page has gone");
+
+    for (int i = 0; i < 90 * 50; i++) {
+        pump(peer, 1);
+        if (dte_saw("OK") || dte_saw("ERROR"))
+            break;
+    }
+    check(dte_saw("OK") && !dte_saw("ERROR"),
+          "the +FDT completes with OK after phase D");
+
+    pump(peer, 30 * 50);
+    for (int i = 0; i < 20; i++)
+        fc2_poll();
+    check(peer_done && peer_status == T30_ERR_OK,
+          "the far end reports a good session");
+
+    bad = compare_page(PEER_RX, 0, &rows);
+    check(bad == 0 && rows == IMAGE_ROWS,
+          "the page the far end received is the page that was sent");
+    if (bad != 0 || rows != IMAGE_ROWS)
+        printf("       (%d rows, %d differing)\n", rows, bad);
+
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
+/*
  * T.32 8.3.3.4: "The DCE shall acknowledge the end of the data by returning
  * the OK or ERROR result code to the DTE, after Phase D is completed."  That
  * is per page, not per document, so a multi-page document has the DTE hand
@@ -2952,7 +3062,8 @@ static void test_be_polled(int flp)
 
     dte_reset();
     at("AT+FDT");
-    check(dte_saw("CONNECT"), "AT+FDT answers CONNECT");
+    /* 8.3.3: no CONNECT until phase B, and the call has not been answered. */
+    check(!dte_saw("CONNECT"), "AT+FDT does not answer CONNECT before the call");
     n = encode_page_for_dte(SRC_TIFF, T4_COMPRESSION_T4_1D, 0, page, sizeof(page));
     for (int off = 0; off < n; off += 512) {
         int chunk = (n - off > 512) ? 512 : n - off;
@@ -3070,6 +3181,7 @@ int main(void)
     test_multipage_receive(0);
     test_multipage_receive(2);
     test_multipage_receive(1);
+    test_fdt_before_the_call();
     test_page_at_a_time(0);
     test_page_at_a_time(2);
     test_page_rejected_rtn(0);

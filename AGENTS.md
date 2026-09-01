@@ -194,12 +194,15 @@ produces the `+FCS:` report and `CONNECT` follows it, so a DTE that adapts its
 image to the negotiated parameters has them in time. SpanDSP takes everything
 for the DCS from the image it is about to send, so the format is *declared*
 instead (`t30_set_tx_image_format()`, from what `+FIS` settled) and phase B
-completes without a file. A `+FDT` issued *before* the call is up has no phase
-B to run and still answers `CONNECT` first — outside 8.3.3's model, and the
-one piece of that deviation left. Two traps: `more_pages_pending` must not be
-set when no `+FDT` is open, or T.30 transmits on a polling session; and `+FCT`
-belongs with the `CONNECT`, since until then the DCE waits on the far end, not
-its DTE. **The result code is separate** — 8.3.3.4 puts the OK or ERROR after
+completes without a file. A `+FDT` issued *before* the call is up waits
+too — for the call, then for phase B — which also let the deferred session
+start in `fc2_on_connected()` go, since T.30 no longer takes half a document
+and sends EOP. Traps: `more_pages_pending` must not be
+set when no `+FDT` is open, or T.30 transmits on a polling session; `+FCT` belongs with the
+`CONNECT` and only if the DTE still owes a page, since until then the DCE
+waits on the far end, and a DTE that ran ahead is not being waited for at all;
+and the CFR hold must NOT test `more_pages_pending`, which may have gone false
+because the page arrived during phase B. **The result code is separate** — 8.3.3.4 puts the OK or ERROR after
 that page's phase D, taken from the far end's response (MCF/RTP/PIP → OK,
 RTN/PIN → ERROR) rather than from the page count, since a refused page is
 never counted as sent and is exactly the case that must report ERROR. That

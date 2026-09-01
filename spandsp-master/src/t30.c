@@ -4331,10 +4331,14 @@ static void process_state_d_post_tcf(t30_state_t *s, const uint8_t *msg, int len
         span_log(&s->logging, SPAN_LOG_FLOW, "Trainability test succeeded\n");
         s->retries = 0;
         s->short_train = true;
-        if (s->operation_in_progress != OPERATION_IN_PROGRESS_T4_TX  &&  s->more_pages_pending)
+        if (s->operation_in_progress != OPERATION_IN_PROGRESS_T4_TX)
         {
-            /* Phase B is done on a declared format and the document is still
-               to come. Wait for it, exactly as at any other page boundary. */
+            /* Phase B was completed on a declared format, so there is no
+               image open yet: we got here only because the application said
+               it had a document, and it has not handed it over. Wait for it,
+               exactly as at any other page boundary. This deliberately does
+               not test more_pages_pending, which by now may have gone false
+               precisely BECAUSE the page arrived while phase B was running. */
             span_log(&s->logging, SPAN_LOG_FLOW, "Waiting for the application to supply the first page\n");
             s->tx_next_page_in_file = 0;
             s->next_page_pending = true;

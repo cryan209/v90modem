@@ -281,12 +281,28 @@ reported at all. The polling test had hidden the first of those by asserting
 
 ### Phase B first, then the page (8.3.3, Table 16)
 
-On a connected call the first `+FDT` no longer answers `CONNECT` at once. T.30
-runs Phase B, the DCS going out produces the `+FCS:` report, and `CONNECT`
-follows it — so a DTE which adapts its image to the negotiated session
-parameters has them in time, which is the whole point of the ordering. Later
-pages of the same document answer `CONNECT` immediately, since Phase B is
-already done.
+The first `+FDT` of a call no longer answers `CONNECT` at once. T.30 runs
+Phase B, the DCS going out produces the `+FCS:` report, and `CONNECT` follows
+it — so a DTE which adapts its image to the negotiated session parameters has
+them in time, which is the whole point of the ordering. Later pages of the
+same document answer `CONNECT` immediately, since Phase B is already done.
+
+That holds for a `+FDT` issued **before** the call is answered as well. Table
+16 puts the `+FDT` after `+FCO`, so that sequence is a DTE running ahead of
+its DCE, and the answer is simply to wait longer — for the call, and then for
+Phase B. `test_fdt_before_the_call` drives exactly that and hands nothing over
+until the `CONNECT` arrives; it is the only transmit test that does, since the
+others all run ahead, and it is the one the ordering exists for.
+
+**The deferred session start is gone with it.** `fc2_on_connected()` used to
+refuse to start T.30 while the DTE still had a document open, because T.30
+would take half of it and send EOP after the first page. Streaming removes the
+reason: T.30 is told the document continues past what it holds, completes
+Phase B, keeps the post page message at MPS and waits. Starting on connection
+is what lets a `+FDT` issued before the call reach Phase B at all. The two
+multi-page tests that cover the old behaviour — including the one that answers
+the call *between* the pages — pass unchanged, which is what says the guard
+was subsumed rather than merely removed.
 
 The obstacle was that SpanDSP's T.30 takes everything it needs for the DCS
 from the image it is about to send, and there is no image yet. So the format
@@ -299,8 +315,12 @@ in the same window — otherwise the `+FCS:` report that Phase B exists to
 produce would carry DF=0, VR=0.
 
 The waiting is the same mechanism as between pages: the CFR handler holds when
-there is no image and more pages are pending, and `t30_resume_next_page()`
-releases it at page 0.
+there is no image open, and `t30_resume_next_page()` releases it at page 0.
+**It deliberately does not test `more_pages_pending` there**, which by that
+point may have gone false precisely *because* the page arrived while Phase B
+was running — the reason to hold is that Phase B completed on a declared
+format and nothing has been opened, and the only way to reach that state is
+having claimed a document.
 
 **`more_pages_pending` must not be true merely because no `+FDT` has been
 issued.** T.30 reads it as "there is a document to send", so on a polling
@@ -308,10 +328,13 @@ session it made this DCE transmit instead of poll — two tests, and a good
 reminder that the flag means "the DTE has a document open", not "the file is
 short".
 
-**`+FCT` moved with the `CONNECT`.** 8.5.2.6 bounds the DCE waiting on its
-DTE, and between the `+FDT` and the `CONNECT` it is waiting on the far end;
-armed at the old point, a `+FCT` of one second aborted the call in the middle
-of Phase B. One visible consequence in the tests: the DCN that abort sends is
+**`+FCT` moved with the `CONNECT`, and only if the DTE still owes a page.**
+8.5.2.6 bounds the DCE waiting on its DTE, and between the `+FDT` and the
+`CONNECT` it is waiting on the far end; armed at the old point, a `+FCT` of
+one second aborted the call in the middle of Phase B. It is also not armed at
+all for a DTE which ran ahead and has already handed the whole page over —
+nothing is being waited for, and arming it there aborts the call in the middle
+of transmitting that page. One visible consequence in the tests: the DCN that abort sends is
 now `FF 13 FB` rather than `FA`, because a DIS has been received by then and
 the FCF's low bit follows that.
 
@@ -498,16 +521,7 @@ without ever sending a DTC. That is the point of the bit, and it is what the
 
 ## Deviations, and why
 
-**`+FDT` before the call is answered takes the page first.** T.32 8.3.3 has
-the DCE complete Phase B, report the negotiated session parameters, and then
-take the page — and on a connected call that is now what happens. A `+FDT`
-issued *before* the call is up has no Phase B to run, so it answers `CONNECT`
-straight away and takes the page, and the `+FCS` report arrives later. That
-sequence is outside 8.3.3's model, which describes a `+FDT` in Phase B; it is
-kept because it is what a DTE that dials and hands the page over in one go
-does, and because the deferred-start behaviour depends on it.
-
-**The result code is no longer part of that**, and used to be. 8.3.3.4 —
+**The ordering deviation is gone.** 8.3.3.4 —
 "The DCE shall acknowledge the end of the data by returning the OK or ERROR
 result code to the DTE, after Phase D is completed. The DCE shall return OK if
 the remote facsimile station accepted the page (local DCE received MCF, RTP or

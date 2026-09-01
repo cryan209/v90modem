@@ -671,9 +671,15 @@ static void real_time_frame_handler(void *user_data, bool incoming,
              */
             fdt_await_connect = 0;
             queue_line("\r\nCONNECT\r\n");
-            /* 8.5.2.6 starts bounding the DTE now that it is the DCE's turn
-             * to wait for it. */
-            fct_arm();
+            /*
+             * 8.5.2.6 starts bounding the DTE now that it is the DCE's turn
+             * to wait for it -- but only if it still owes us the page.  A DTE
+             * which ran ahead of the CONNECT and has already handed the whole
+             * page over is not being waited for, and arming the timer against
+             * it aborts the call in the middle of transmitting that page.
+             */
+            if (dte_mode == FC2_DTE_TX_DATA)
+                fct_arm();
         }
     }
 
@@ -1922,12 +1928,18 @@ int fc2_at_line(const char *line)
         } else if (spool_open()) {
             dte_mode = FC2_DTE_TX_DATA;
             dte_saw_dle = 0;
-            if (call_up && !phase_b_done) {
+            if (!phase_b_done) {
                 /*
                  * T.32 8.3.3 and Table 16: phase B, then the +FCS: report,
                  * then CONNECT.  T.30 runs it on the format declared in
                  * session_start() and waits for the page afterwards, so this
                  * command stays open until the DCS goes out.
+                 *
+                 * That holds whether or not the call has been answered yet.
+                 * Table 16 puts the +FDT after +FCO, so a +FDT before the
+                 * call simply waits longer -- for the call, and then for
+                 * phase B.  session_start() does nothing until the call is
+                 * up, and the connection runs it.
                  */
                 fdt_await_connect = 1;
                 tx_page_flow();
@@ -2090,13 +2102,16 @@ void fc2_on_connected(void)
     pthread_mutex_lock(&fc2_mtx);
     call_up = 1;
     /*
-     * Not while the DTE is still handing over a multi-page document: T.30
-     * would start with half of it and send EOP after the first page.  The
-     * +FDT that ends the document starts the session instead, and +FCT bounds
-     * how long a DTE may leave it half done.
+     * This used to wait until the DTE had finished handing the document over,
+     * because T.30 would otherwise start with half of it and send EOP after
+     * the first page.  It no longer has to: T.30 is told the document
+     * continues past what it holds, so it completes phase B, keeps the post
+     * page message at MPS and waits at the page boundary.  Starting here is
+     * what lets 8.3.3's ordering work for a +FDT issued before the call --
+     * phase B, the +FCS: report, then CONNECT, and only then the page.
      */
-    if (!spool_rx && !(dte_mode == FC2_DTE_TX_DATA))
-        session_start();
+    session_start();
+    tx_page_flow();
     pthread_mutex_unlock(&fc2_mtx);
 }
 
