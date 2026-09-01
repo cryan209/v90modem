@@ -84,15 +84,65 @@ contains no 0xA6. The firmware holds the relay table and the scripts select from
 it, which is why `hsf_smart_relays[]` is still worth having and still is not
 something we transmit.
 
-## Open, and how to close it
+## Verified against the device (2026-09-01)
 
-**Nothing here is confirmed against hardware.** The device did not answer
-`CD2_GET_INFROMATION` at the end of the session that produced this note and
-wants a physical replug, which is the documented recovery for a wedged EP0.
+All of it holds. Every script id the driver enqueues is **accepted by the real
+part**, and each one reports its own completion code back on the interrupt
+endpoint -- `09 01` for script 9, `05 01` for script 5, `0a 01` for script 10,
+`03 01` for the off-hook script, `02 01` for script 2. That is the `27 nn`
+opcode every template ends with, arriving from the device: the assembler's
+output executes, and `wValue = 0xFF01` is right.
 
-The one question a single hardware session answers is **which script ungates the
-bulk pipes** -- the pipes NAK until the codec is started, and 9/5/6 are the
-candidates. `hsf_fxo_probe --script N` sends one script with a
-`CD2_GET_INFROMATION` either side, so a script that wedges the device is
-reported as such rather than being blamed on the next one. Then
-`--start-codec --stream 5` and `--hook off`.
+One identification gained hardware support. Feeding the bulk OUT pipe while each
+script runs in isolation, **only scripts 6 and 9 open it** (1120 bytes accepted,
+against 0 for 1, 2, 3, 4, 5, 7, 10 and 12) -- the two the disassembly called
+session bring-up and session end.
+
+### Two defects of ours had to be fixed to see any of this
+
+**The CD2 bootloader answers EP0 for only about three seconds.** Polling every
+20 ms across a replug: the device appears, answers ~120 consecutive
+`GET_INFROMATION` reporting family 01 (bootloader, wants firmware), and then
+goes silent for good. The vendor driver uploads firmware on match, within
+milliseconds; a probe started by hand is minutes late and meets a device that
+has simply finished waiting. **This is the whole of the "wedged EP0" folklore in
+`hsf_fxo.c`** -- it was never wedged, and the recovery written for it could not
+have helped.
+
+What hid it is worth keeping: libusb's darwin backend serves `GET_DESCRIPTOR`
+for device *and* config out of IOKit's cache, so both keep succeeding after the
+device has stopped answering anything at all. A liveness check built on them
+reports a healthy device indefinitely. Only requests that reach the wire tell
+the truth -- a string descriptor read is the cheapest honest one.
+
+`hsf_fxo_probe --wait N` polls for the window **on a live EP0** (presence is not
+the signal: the device sits on the bus long after it stops answering) and acts
+inside it. Once firmware is running the device stays up indefinitely, so this
+matters only for the upload.
+
+**And two instruments were lying.** `hsf_fxo_stop()` freed transfers libusb
+still owned -- a use-after-free surfacing inside `libusb_exit()` -- so every
+probe run ended in SIGSEGV and lost whatever stdout was buffered; runs
+alternated between working and printing nothing, which reads as flaky hardware.
+And `rx_errors` counted `LIBUSB_TRANSFER_CANCELLED`, which is our own shutdown,
+so an RX ring that was armed and correctly waiting reported "31 of 32 transfers
+failed". Both are fixed; `--stream` now also prints the first real RX status.
+
+## Open: what starts the codec
+
+The bulk pipes still carry no samples. What is measured:
+
+* RX is armed and waiting -- first status `CANCELLED`, i.e. our own teardown,
+  with zero genuine errors. The device simply sends nothing.
+* TX is accepted only after script 6 or 9, and then stops at a fixed **1120
+  bytes** (1248 at 64-byte packets, 1216 at 32) however long the run. That is a
+  ~1.2 kB FIFO filling once and never draining, so the codec is not clocking.
+  Packet size is not the gate.
+* Neither going off-hook (script 3, which completes and reports `03 01`) nor
+  running every enqueued script in the driver's own order changes either.
+
+So the codec is started by something other than the eleven scripts, or by one of
+them carrying patch bytes we have not supplied -- scripts 2, 10 and 12 take
+parameters (one 16-bit value, two 16-bit values, and a byte) and were tested
+only with their unpatched templates. Those parameters are the obvious next
+thread, along with what `hsfusbcd2165_`'s callers pass around it.

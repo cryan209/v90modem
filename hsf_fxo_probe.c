@@ -73,9 +73,11 @@ int main(int argc, char **argv)
 	bool do_load = false;
 	bool do_start = false;
 	int  stream_secs = 0;
-	int  script_id = -1;
+	int  script_ids[16];
+	int  n_scripts = 0;
 	int  hook = -1;
 	int  wait_secs = 0;
+	bool do_feed = false;
 
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--load")) {
@@ -83,16 +85,28 @@ int main(int argc, char **argv)
 		} else if (!strcmp(argv[i], "--stream") && i + 1 < argc) {
 			stream_secs = atoi(argv[++i]);
 		} else if (!strcmp(argv[i], "--script") && i + 1 < argc) {
-			script_id = atoi(argv[++i]);
+			/* Comma-separated, so a sequence runs inside one session
+			 * rather than across opens. */
+			for (char *p = argv[++i]; *p && n_scripts < 16; ) {
+				script_ids[n_scripts++] = atoi(p);
+				while (*p && *p != ',')
+					p++;
+				if (*p == ',')
+					p++;
+			}
 		} else if (!strcmp(argv[i], "--start-codec")) {
 			do_start = true;
+		} else if (!strcmp(argv[i], "--feed")) {
+			do_feed = true;
 		} else if (!strcmp(argv[i], "--wait") && i + 1 < argc) {
 			wait_secs = atoi(argv[++i]);
 		} else if (!strcmp(argv[i], "--hook") && i + 1 < argc) {
 			hook = !strcmp(argv[++i], "off");
 		} else {
 			fprintf(stderr, "usage: %s [--load] [--script ID] [--start-codec]"
-				" [--hook on|off] [--wait SECONDS] [--stream SECONDS]\n",
+				" [--script ID[,ID...]]"
+				" [--hook on|off] [--wait SECONDS] [--feed]"
+				" [--stream SECONDS]\n",
 				argv[0]);
 			return 2;
 		}
@@ -174,13 +188,14 @@ int main(int argc, char **argv)
 	/* Bracket every script with GET_INFROMATION.  Gotcha 2 in hsf_fxo.c: a
 	 * cached descriptor read proves nothing, and a wedged EP0 makes the next
 	 * request lie about the one before it. */
-	if (script_id >= 0) {
-		int r = hsf_fxo_script_run(d, (unsigned)script_id, NULL, 0);
+	for (int i = 0; i < n_scripts; i++) {
+		int r = hsf_fxo_script_run(d, (unsigned)script_ids[i], NULL, 0);
 		uint8_t after[5];
 		int live = hsf_fxo_get_information(d, after);
-		printf("script %d: load %s, device %s\n", script_id,
+		printf("script %d: load %s, device %s\n", script_ids[i],
 		       r == 0 ? "accepted" : "rejected",
 		       live < 0 ? "NOT RESPONDING" : "alive");
+		usleep(50 * 1000);
 	}
 
 	if (do_start) {
@@ -212,16 +227,49 @@ int main(int argc, char **argv)
 			hsf_fxo_close(d);
 			return 1;
 		}
-		printf("streaming for %ds...\n", stream_secs);
-		sleep((unsigned)stream_secs);
+		printf("streaming for %ds%s...\n", stream_secs,
+		       do_feed ? " (feeding u-law silence out)" : "");
+		if (do_feed) {
+			/* A bulk codec has no isochronous clock, so the device may
+			 * only produce RX while the host is giving it OUT data to
+			 * play.  160 bytes per 20 ms is 8 kHz. */
+			/* HSF_FEED_CHUNK lets the packet size be varied: the bulk
+			 * endpoints are 64 B, so a 160 B buffer ends in a short
+			 * packet, which some devices treat as end-of-stream. */
+			const char *cs = getenv("HSF_FEED_CHUNK");
+			size_t chunk = cs ? (size_t)atoi(cs) : 160;
+			if (chunk == 0 || chunk > 256)
+				chunk = 160;
+			uint8_t silence[256];
+			memset(silence, 0xff, sizeof(silence));
+			for (int ms = 0; ms < stream_secs * 1000; ms += 20) {
+				size_t want = 160;
+				while (want) {
+					size_t n = want < chunk ? want : chunk;
+					if (hsf_fxo_tx_submit(d, silence, n) < 0)
+						break;
+					want -= n;
+				}
+				usleep(20 * 1000);
+			}
+		} else {
+			sleep((unsigned)stream_secs);
+		}
 		hsf_fxo_stop(d);
 
 		struct hsf_stats s;
 		hsf_fxo_stats(d, &s);
+		static const char *st[] = { "COMPLETED", "ERROR", "TIMED_OUT",
+					    "CANCELLED", "STALL", "NO_DEVICE", "OVERFLOW" };
 		printf("rx %llu bytes in %lu packets, tx %llu, rx_err %llu, notifications %llu\n",
 		       (unsigned long long)s.rx_bytes, g_rx_packets,
 		       (unsigned long long)s.tx_bytes, (unsigned long long)s.rx_errors,
 		       (unsigned long long)s.notifications);
+		if (s.rx_first_error) {
+			int v = s.rx_first_error - 1;
+			printf("first rx status: %s (%d)\n",
+			       (v >= 0 && v < 7) ? st[v] : "?", v);
+		}
 
 		if (s.rx_bytes) {
 			double rate = (double)s.rx_bytes / stream_secs;

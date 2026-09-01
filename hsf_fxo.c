@@ -302,8 +302,17 @@ static void LIBUSB_CALL on_rx(struct libusb_transfer *t)
 		d->stats.rx_bytes += (uint64_t)t->actual_length;
 		if (d->cb.rx_samples && t->actual_length > 0)
 			d->cb.rx_samples(t->buffer, (size_t)t->actual_length, d->cb.user);
-	} else if (t->status != LIBUSB_TRANSFER_TIMED_OUT) {
+	} else if (t->status != LIBUSB_TRANSFER_TIMED_OUT &&
+		   t->status != LIBUSB_TRANSFER_CANCELLED) {
+		/* CANCELLED is our own hsf_fxo_stop(), not a device fault.  Counting
+		 * it read as "31 of 32 RX transfers failed" on a ring that was
+		 * simply armed and waiting, which is a very different diagnosis. */
 		d->stats.rx_errors++;
+		/* Counting these told us nothing for a whole session: a stall, a
+		 * NAK timeout and a dead pipe are different faults with different
+		 * fixes.  Keep the first status seen. */
+		if (!d->stats.rx_first_error)
+			d->stats.rx_first_error = (int)t->status + 1;
 	}
 
 	/* osusb.c re-arms from the upper layer on every completion; the RX ring
