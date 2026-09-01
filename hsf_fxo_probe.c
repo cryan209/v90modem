@@ -9,10 +9,14 @@
  *   ./hsf_fxo_probe                                    # info only
  *   ./hsf_fxo_probe --load                             # load firmware if needed
  *   ./hsf_fxo_probe --load --stream 5                  # then stream for 5s
+ *   ./hsf_fxo_probe --load --script 9                  # send one script
+ *   ./hsf_fxo_probe --load --start-codec --stream 5    # scripts 9,5,9 then stream
+ *   ./hsf_fxo_probe --load --start-codec --hook off --stream 5
  *
- * Streaming will report nothing until the codec is started, which needs the
- * CD2_CONTROL_SCRIPT body we do not have -- the bulk pipes NAK until then.
- * That is expected, not a bug in this tool.
+ * --script is the instrument for the open question, which is WHICH script
+ * ungates the bulk pipes.  Send them one at a time: every attempt is bracketed
+ * with GET_INFROMATION, so a script that wedges the device is reported as such
+ * rather than being blamed on the next one.
  */
 
 #include "hsf_fxo.h"
@@ -58,15 +62,25 @@ static void on_notify(const struct hsf_notification *n, void *user)
 int main(int argc, char **argv)
 {
 	bool do_load = false;
+	bool do_start = false;
 	int  stream_secs = 0;
+	int  script_id = -1;
+	int  hook = -1;
 
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--load")) {
 			do_load = true;
 		} else if (!strcmp(argv[i], "--stream") && i + 1 < argc) {
 			stream_secs = atoi(argv[++i]);
+		} else if (!strcmp(argv[i], "--script") && i + 1 < argc) {
+			script_id = atoi(argv[++i]);
+		} else if (!strcmp(argv[i], "--start-codec")) {
+			do_start = true;
+		} else if (!strcmp(argv[i], "--hook") && i + 1 < argc) {
+			hook = !strcmp(argv[++i], "off");
 		} else {
-			fprintf(stderr, "usage: %s [--load] [--stream SECONDS]\n", argv[0]);
+			fprintf(stderr, "usage: %s [--load] [--script ID] [--start-codec]"
+				" [--hook on|off] [--stream SECONDS]\n", argv[0]);
 			return 2;
 		}
 	}
@@ -117,6 +131,37 @@ int main(int argc, char **argv)
 			}
 		printf("eeprom[0..%d]: %s\n", er - 1,
 		       all_zero ? "all zero (config lives host-side, per osnvm.c)" : "non-zero");
+	}
+
+	/* Bracket every script with GET_INFROMATION.  Gotcha 2 in hsf_fxo.c: a
+	 * cached descriptor read proves nothing, and a wedged EP0 makes the next
+	 * request lie about the one before it. */
+	if (script_id >= 0) {
+		int r = hsf_fxo_script_run(d, (unsigned)script_id, NULL, 0);
+		uint8_t after[5];
+		int live = hsf_fxo_get_information(d, after);
+		printf("script %d: load %s, device %s\n", script_id,
+		       r == 0 ? "accepted" : "rejected",
+		       live < 0 ? "NOT RESPONDING" : "alive");
+	}
+
+	if (do_start) {
+		int r = hsf_fxo_script_start_codec(d);
+		uint8_t after[5];
+		int live = hsf_fxo_get_information(d, after);
+		printf("start codec (scripts 9,5,9): %s, device %s\n",
+		       r == 0 ? "accepted" : "rejected",
+		       live < 0 ? "NOT RESPONDING" : "alive");
+	}
+
+	if (hook >= 0) {
+		int r = hsf_fxo_script_set_hook(d, hook != 0);
+		uint8_t after[5];
+		int live = hsf_fxo_get_information(d, after);
+		printf("hook %s (script %d): %s, device %s\n",
+		       hook ? "off" : "on", hook ? 3 : 4,
+		       r == 0 ? "accepted" : "rejected",
+		       live < 0 ? "NOT RESPONDING" : "alive");
 	}
 
 	if (stream_secs > 0) {

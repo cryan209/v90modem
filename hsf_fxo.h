@@ -12,9 +12,10 @@
  *   IF1  CDC sub 1 (Direct Line Control Model), proto 0xff, interrupt IN 0x82
  *
  * IF1's DLCM subclass is cosmetic -- every CDC PSTN class request (SET_HOOK_STATE
- * included) stalls.  Line control is the vendor CD2_CONTROL_SCRIPT request, whose
- * payloads are generated at runtime by Conexant's closed hsfusbcd2 and are NOT
- * yet known.  See hsf_fxo_script_*() below.
+ * included) stalls.  Line control is the vendor CD2_CONTROL_SCRIPT request; its
+ * request framing and its script bodies are now recovered from Conexant's closed
+ * hsfusbcd2 rather than captured, and live in hsf_scripts.h.  See the line
+ * control section below.
  *
  * What IS known and implemented here comes from the GPL half of hsfmodem-7.80
  * (modules/osusb.c, modules/cnxthwusb_common.c, modules/imported/include/*.h).
@@ -127,32 +128,64 @@ struct hsf_stats {
 };
 void hsf_fxo_stats(const struct hsf_dev *d, struct hsf_stats *out);
 
-/* Line control -- NOT YET IMPLEMENTED ------------------------------------- */
+/* Line control ------------------------------------------------------------ */
 
 /*
- * These are the whole of the remaining unknown.  Each is one CD2_CONTROL_SCRIPT
- * request whose body is a DAA register/delay sequence built by hsfusbcd2.
+ * CD2_CONTROL_SCRIPT is the whole of line control, and the request framing is
+ * now known.  hsfusbcd2210_ (.text 0x2c40) issues it as
  *
- * What the GPL source pins down about the request itself:
- *   - bmRequestType 0x41 (vendor | interface | OUT)   osusb.c:1375
- *   - wIndex 1 is the load index and REQUIRES a body  osusb.c:1364
- *       ASSERT(!(1 == Index && nBytes == 0));
- *   - wIndex 3 deletes the script, and STALLS as a matter of course
- *       osusb.c:766 special-cases it so the driver does not retry
- *   - a stall on this request is routine, not an error
+ *     bmRequestType 0x41 (vendor | interface | OUT)
+ *     bRequest      2    (CD2_CONTROL_SCRIPT)
+ *     wValue        0xFF01, or 0xFF02 for script 8 alone (.text 0x2ea7)
+ *     wIndex        1 to load, 3 to delete (a delete stalls, and that is normal)
+ *     body          the assembled script
  *
- * Measured on the device, all with a GET_INFROMATION positive control either
- * side: empty bodies stall at every index and leave the device healthy; short
- * zero-filled bodies at wIndex 1 never succeed and kill vendor dispatch, so a
- * non-empty body gets further into the loader before rejection.
+ * wValue was the missing piece: everything here previously sent 0, which no
+ * body can survive.  wIndex 1 was right all along.
  *
- * Obtain the real bodies with a usbmon/USBPcap capture of the vendor driver
- * doing one action at a time; the firmware upload, which we fully understand,
- * anchors the trace.  Then fill these in -- nothing else in this file changes.
+ * The body is NOT the template held in the driver's table.  Templates are an
+ * intermediate language; hsfusbcd290_ (.text 0x6f20) assembles them -- resolving
+ * labels into absolute offsets and remapping one opcode range -- and the result
+ * is what goes on the wire.  tools/hsf_scripts.py reimplements that assembler
+ * and generates hsf_scripts.h, which is what this file sends.
+ *
+ * Scripts are enqueued by hsfusbcd2176_ (.text 0x3070) with a script id, the
+ * wIndex, and up to eight patch bytes written into the template BEFORE assembly.
+ * hsf_scripts.h carries the patch offsets already translated into the assembled
+ * body (no offset lands on a remapped operand, so a patch is a plain byte
+ * store).  Only ids 1-10 and 12 are ever enqueued by any of the 19 call sites.
  */
+enum hsf_script_id {
+	/* Identified from the relay-code dispatch in hsfusbcd2185_ (.text 0x47b0),
+	 * which routes DEVMGR_DAA_RELAY_CODE 2, 3 and 8-11 -- every off-hook and
+	 * pulse-dial state -- to one script and 4-7, the on-hook states, to the
+	 * other.  hsfusbcd2180_ and hsfusbcd2166_ are the direct entry points. */
+	HSF_SCRIPT_OFF_HOOK    = 3,
+	HSF_SCRIPT_ON_HOOK     = 4,
+
+	/* Enqueued in order by hsfusbcd2165_ (.text 0x4480), the function that
+	 * zeroes the whole per-call state block: 9, then 5, then 9 again.  This
+	 * is the session bring-up, and so the best candidate for what ungates the
+	 * bulk pipes.  NOT confirmed against hardware. */
+	HSF_SCRIPT_SESSION_A   = 9,
+	HSF_SCRIPT_SESSION_B   = 5,
+
+	/* hsfusbcd2195_ / hsfusbcd2201_, which set the "stopping" flag first. */
+	HSF_SCRIPT_SESSION_END = 6,
+
+	/* hsfusbcd2187_ (.text 0x32f0) dispatches 21 signal ids onto it, and sends
+	 * it with wIndex 3 -- delete -- to stop one.  Tone/cadence generation. */
+	HSF_SCRIPT_SIGNAL      = 8,
+
+	/* hsfusbcd2220_ (.text 0x6910) patches three bytes: two context values
+	 * divided by 1000 (so milliseconds) and one literal.  Pulse dialling. */
+	HSF_SCRIPT_PULSE       = 7,
+};
+
 /*
- * The DAA relay control words ARE known, even though the script framing that
- * carries them is not.
+ * The DAA relay control words ARE known, even though nothing in the assembled
+ * scripts carries one -- the firmware holds the table and the scripts select
+ * from it, which is why the off-hook script contains no 0xA6.
  *
  * configtypes.h:407 DEVMGR_DAA_RELAY_CODE indexes a 12-entry table; hsf.cty
  * ships the values per country and per DAA type, and hsfcadmus2smart.inf says
@@ -191,10 +224,20 @@ enum hsf_daa_relay {
  * the base profile and is the one to check a capture against first. */
 extern const uint16_t hsf_smart_relays[HSF_RELAY_COUNT];
 
-int hsf_fxo_script_load(struct hsf_dev *d, const uint8_t *body, size_t len);
+/* Load one assembled body.  wvalue is 0xFF01 for every script but 8. */
+int hsf_fxo_script_load(struct hsf_dev *d, uint16_t wvalue,
+			const uint8_t *body, size_t len);
 int hsf_fxo_script_delete(struct hsf_dev *d);
 
-int hsf_fxo_script_start_codec(struct hsf_dev *d);	/* -ENOSYS */
-int hsf_fxo_script_set_hook(struct hsf_dev *d, bool off_hook);	/* -ENOSYS */
+/*
+ * Send the script with the given id from hsf_scripts.h, patching in up to
+ * npatch bytes first.  Returns -EINVAL for an id with no template.
+ */
+int hsf_fxo_script_run(struct hsf_dev *d, unsigned id,
+		       const uint8_t *patch, size_t npatch);
+
+/* HSF_SCRIPT_SESSION_A, _B, _A -- the hsfusbcd2165_ order.  Unverified. */
+int hsf_fxo_script_start_codec(struct hsf_dev *d);
+int hsf_fxo_script_set_hook(struct hsf_dev *d, bool off_hook);
 
 #endif /* HSF_FXO_H */

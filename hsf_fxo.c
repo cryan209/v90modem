@@ -21,6 +21,7 @@
  */
 
 #include "hsf_fxo.h"
+#include "hsf_scripts.h"
 
 #include <errno.h>
 #include <libusb.h>	/* include path comes from LIBUSB_CFLAGS in makefile */
@@ -483,12 +484,13 @@ const uint16_t hsf_smart_relays[HSF_RELAY_COUNT] = {
 	[HSF_RELAY_OFFHOOK_PULSECLEAR]           = 0x80A4,
 };
 
-int hsf_fxo_script_load(struct hsf_dev *d, const uint8_t *body, size_t len)
+int hsf_fxo_script_load(struct hsf_dev *d, uint16_t wvalue,
+			const uint8_t *body, size_t len)
 {
 	if (len == 0)
 		return -EINVAL;		/* osusb.c:1364 asserts against this */
 	int r = vendor_out(d, RT_VENDOR_IF_OUT, CD2_CONTROL_SCRIPT,
-			   0, 1, body, (uint16_t)len);
+			   wvalue, 1, body, (uint16_t)len);
 	return r < 0 ? -EIO : 0;
 }
 
@@ -497,20 +499,56 @@ int hsf_fxo_script_delete(struct hsf_dev *d)
 	/* wIndex 3.  A stall here is normal: osusb.c:766 declines to retry it
 	 * precisely because the device answers a delete with EPIPE. */
 	libusb_control_transfer(d->h, RT_VENDOR_IF_OUT, CD2_CONTROL_SCRIPT,
-				0, 3, NULL, 0, CTRL_TIMEOUT_MS);
+				0xFF01, 3, NULL, 0, CTRL_TIMEOUT_MS);
 	unwedge(d);
 	return 0;
 }
 
+int hsf_fxo_script_run(struct hsf_dev *d, unsigned id,
+		       const uint8_t *patch, size_t npatch)
+{
+	if (id >= sizeof hsf_scripts / sizeof hsf_scripts[0])
+		return -EINVAL;
+	const struct hsf_script *s = &hsf_scripts[id];
+	if (!s->body || !s->len)
+		return -EINVAL;
+	if (npatch > s->npatch)
+		npatch = s->npatch;
+
+	/* The driver patches the template and assembles afterwards; the offsets
+	 * in hsf_scripts.h are already carried through that assembly, and none
+	 * of them lands on an opcode the assembler rewrites, so a byte store at
+	 * the translated offset is exactly what the vendor path produces. */
+	uint8_t body[256];
+	if (s->len > sizeof body)
+		return -EMSGSIZE;
+	memcpy(body, s->body, s->len);
+	for (size_t i = 0; i < npatch; i++) {
+		if (s->patch_off[i] >= s->len)
+			return -EINVAL;
+		body[s->patch_off[i]] = patch[i];
+	}
+
+	return hsf_fxo_script_load(d, s->wvalue, body, s->len);
+}
+
 int hsf_fxo_script_start_codec(struct hsf_dev *d)
 {
-	(void)d;
-	return -ENOSYS;		/* body unknown -- see hsf_fxo.h */
+	/* hsfusbcd2165_ runs 9, 5, 9 in that order.  Which of them ungates the
+	 * bulk pipes is not established -- the probe is the instrument for that,
+	 * one script at a time with a GET_INFROMATION either side. */
+	int r = hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_A, NULL, 0);
+	if (r < 0)
+		return r;
+	r = hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_B, NULL, 0);
+	if (r < 0)
+		return r;
+	return hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_A, NULL, 0);
 }
 
 int hsf_fxo_script_set_hook(struct hsf_dev *d, bool off_hook)
 {
-	(void)d;
-	(void)off_hook;
-	return -ENOSYS;		/* body unknown -- see hsf_fxo.h */
+	return hsf_fxo_script_run(d,
+				  off_hook ? HSF_SCRIPT_OFF_HOOK : HSF_SCRIPT_ON_HOOK,
+				  NULL, 0);
 }
