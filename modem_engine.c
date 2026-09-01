@@ -1916,6 +1916,8 @@ static uint64_t me_training_timeout_ms(void)
 /* V.34 RX stage tracking — used for notch filter activation and diagnostics */
 static int g_last_rx_stage = 0;            /* Last logged RX stage */
 static int g_last_tx_stage = 0;            /* Last logged TX stage */
+static bool g_v34hdx_fax_control_started = false;
+static int g_v34hdx_fax_mode = V34_HALF_DUPLEX_CONTROL_CHANNEL;
 
 /* TX sample ring buffer.  Feeds the optional NLMS canceller and the Phase 3
    far-end-S echo gate (which needs it even when the canceller is off).
@@ -4756,6 +4758,8 @@ static int v34_get_bit_cb(void *user_data)
     int bit;
 
     (void)user_data;
+    if (g_v34hdx_fax_control_started && di_fax_active())
+        return di_fax_v34hdx_get_bit();
     bit = ds_tx_get_bit(&g_data_stack);
     return (bit == DS_TX_NO_DATA) ? SIG_STATUS_END_OF_DATA : bit;
 }
@@ -4819,6 +4823,10 @@ static int me_span_flow_level(void)
 static void v34_put_bit_cb(void *user_data, int bit)
 {
     (void)user_data;
+    if (g_v34hdx_fax_control_started && di_fax_active()) {
+        di_fax_v34hdx_put_bit(bit);
+        return;
+    }
     if (bit < 0) {
         /* Status event from V.34 training state machine */
         trace_phase("V34 rx status=%s (%d)", signal_status_to_str(bit), bit);
@@ -4962,6 +4970,8 @@ static void start_v34hdx_training(void)
     g_training_tx_samples = 0;
     g_last_rx_stage = 0;
     g_last_tx_stage = 0;
+    g_v34hdx_fax_control_started = false;
+    g_v34hdx_fax_mode = V34_HALF_DUPLEX_CONTROL_CHANNEL;
 
     if (g_v34) {
         v34_free(g_v34);
@@ -6845,6 +6855,39 @@ void me_rx_audio(const int16_t *amp, int len)
                                 v34_tx_stage_name(tx_stage), tx_stage);
                     g_last_rx_stage = rx_stage;
                     g_last_tx_stage = tx_stage;
+                }
+
+                /* T.30 Annex F/F.3.1.4: once PPh/MPh/E has completed, HDLC
+                   frames replace V.21 on V.34's 1200 bit/s control channel.
+                   Keep the probe behaviour when no Class 2 T.30 terminal is
+                   active; that path intentionally records idle user bits. */
+                if (!g_v34hdx_fax_control_started
+                    && di_fax_active()
+                    && v34_get_hdx_control_channel_ready(g_v34)) {
+                    int primary_rate = v34_get_hdx_negotiated_bit_rate(g_v34);
+
+                    di_on_connected(primary_rate);
+                    if (di_fax_v34hdx_start_control(primary_rate) == 0) {
+                        g_v34hdx_fax_control_started = true;
+                        g_v34hdx_fax_mode = V34_HALF_DUPLEX_CONTROL_CHANNEL;
+                        g_phase_start_ms = 0;
+                        ME_LOG("[ME] T.30 Annex F attached to V.34 control channel "
+                               "(primary %d bit/s)\n", primary_rate);
+                        trace_phase("V34HDX enter T30 control: primary=%d",
+                                    primary_rate);
+                    }
+                }
+
+                if (g_v34hdx_fax_control_started) {
+                    int requested_mode = di_fax_v34hdx_get_mode();
+
+                    if (requested_mode != g_v34hdx_fax_mode) {
+                        ME_LOG("[ME] T.30 Annex F channel request: %s\n",
+                               requested_mode == V34_HALF_DUPLEX_PRIMARY_CHANNEL
+                                   ? "primary" : "control");
+                        v34_half_duplex_change_mode(g_v34, requested_mode);
+                        g_v34hdx_fax_mode = requested_mode;
+                    }
                 }
 
                 /* Begin echo control at Phase 3.  Plain V.34 retunes this from

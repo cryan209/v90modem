@@ -2128,6 +2128,50 @@ void fc2_on_disconnected(void)
     pthread_mutex_unlock(&fc2_mtx);
 }
 
+int fc2_v34hdx_start_control(int primary_bit_rate)
+{
+    int r = -1;
+
+    pthread_mutex_lock(&fc2_mtx);
+    if (selected && call_up) {
+        session_start();
+        if (fax)
+            r = fax_v34hdx_start_control(fax, primary_bit_rate);
+    }
+    pthread_mutex_unlock(&fc2_mtx);
+    return r;
+}
+
+int fc2_v34hdx_get_bit(void)
+{
+    int bit = SIG_STATUS_END_OF_DATA;
+
+    pthread_mutex_lock(&fc2_mtx);
+    if (fax)
+        bit = fax_v34hdx_get_bit(fax);
+    pthread_mutex_unlock(&fc2_mtx);
+    return bit;
+}
+
+void fc2_v34hdx_put_bit(int bit)
+{
+    pthread_mutex_lock(&fc2_mtx);
+    if (fax)
+        fax_v34hdx_put_bit(fax, bit);
+    pthread_mutex_unlock(&fc2_mtx);
+}
+
+int fc2_v34hdx_get_mode(void)
+{
+    int mode = V34_HALF_DUPLEX_SILENCE;
+
+    pthread_mutex_lock(&fc2_mtx);
+    if (fax)
+        mode = fax_v34hdx_get_mode(fax);
+    pthread_mutex_unlock(&fc2_mtx);
+    return mode;
+}
+
 /* Start or restart the +FCT wait.  Callers hold the lock. */
 static void fct_arm(void)
 {

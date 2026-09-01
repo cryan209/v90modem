@@ -8211,6 +8211,17 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                          "Rx - Phase 3: PP conditioning complete (lag8=%d/%d, %.1f%%, phase=%d, score=%d), refining with first %dT of TRN\n",
                          s->phase3_pp_match, s->phase3_pp_obs, pct,
                          s->phase3_pp_phase, s->phase3_pp_phase_score, PHASE3_TRN_REFINE_BAUDS);
+                if (s->hdx_primary_resync)
+                {
+                    v34_state_t *t;
+
+                    t = (v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx));
+                    s->hdx_primary_resync = false;
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                             "Rx - 12.5.2: PP complete; conditioning data decoder for B1\n");
+                    v34_begin_rx_data(t);
+                }
+                /*endif*/
             }
             /*endif*/
         }
@@ -8574,6 +8585,20 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             ||
             s->phase4_s_bar_left == 0)
         {
+            if (s->hdx_primary_resync)
+            {
+                /* V.34 12.5.2 has PP immediately after S/S-bar and B1
+                   immediately after PP; there is no TRN/MP exchange. */
+                s->stage = V34_RX_STAGE_PHASE3_TRAINING;
+                s->duration = 0;
+                phase3_pp_reset(s);
+                s->phase3_pp_resid_sum = 0.0f;
+                s->phase3_pp_resid_count = 0;
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                         "Rx - 12.5.2: S/S-bar complete; acquiring PP before B1\n");
+                break;
+            }
+            /*endif*/
             /* S signal confirmed.  Now transition to S-bar detection.
                We skip explicit S-bar detection since we can't reliably
                distinguish S-bar from S with this demodulator quality.

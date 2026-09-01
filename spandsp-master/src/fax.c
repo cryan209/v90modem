@@ -256,6 +256,52 @@ SPAN_DECLARE(int) fax_tx(fax_state_t *s, int16_t *amp, int max_len)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) fax_v34hdx_start_control(fax_state_t *s, int primary_bit_rate)
+{
+    if (s == NULL || primary_bit_rate <= 0)
+        return -1;
+    /* T.30 Annex F/F.3.1.4: after V.34 start-up, T.30 frames use HDLC on
+       the V.34 control channel.  Annex F has no TCF and requires ECM. */
+    s->v34hdx_external = true;
+    s->v34hdx_primary_bit_rate = primary_bit_rate;
+    s->v34hdx_requested_mode = V34_HALF_DUPLEX_CONTROL_CHANNEL;
+    t30_set_supported_modems(&s->t30, s->t30.supported_modems | T30_SUPPORT_V34HDX);
+    t30_set_ecm_capability(&s->t30, true);
+    t30_set_iaf_mode(&s->t30, s->t30.iaf | T30_IAF_MODE_NO_TCF);
+    hdlc_rx_init(&s->modems.hdlc_rx, false, true, HDLC_FRAMING_OK_THRESHOLD,
+                 fax_modems_hdlc_accept, &s->modems);
+    /* The ordinary answer path reaches this transition when CED completes.
+       V.8/V.34 already replaced CED here, so release the initial DIS sequence
+       directly into the external control-channel HDLC queue. */
+    t30_front_end_status(&s->t30, T30_FRONT_END_SEND_STEP_COMPLETE);
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) fax_v34hdx_put_bit(fax_state_t *s, int bit)
+{
+    if (s == NULL || !s->v34hdx_external)
+        return;
+    hdlc_rx_put_bit(&s->modems.hdlc_rx, bit);
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) fax_v34hdx_get_bit(fax_state_t *s)
+{
+    if (s == NULL || !s->v34hdx_external)
+        return SIG_STATUS_END_OF_DATA;
+    return hdlc_tx_get_bit(&s->modems.hdlc_tx);
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) fax_v34hdx_get_mode(fax_state_t *s)
+{
+    return (s && s->v34hdx_external)
+         ? s->v34hdx_requested_mode
+         : V34_HALF_DUPLEX_SILENCE;
+}
+/*- End of function --------------------------------------------------------*/
+
 #if defined(SPANDSP_SUPPORT_SSLFAX)
 static int fax_get_phase(void *user_data)
 {
@@ -273,6 +319,28 @@ static void fax_set_rx_type(void *user_data, int type, int bit_rate, int short_t
 
     s = (fax_state_t *) user_data;
     t = &s->modems;
+    /* T.30 Annex F/F.3.1.5 uses the primary channel for phase C and the
+       control channel for phases B and D.  The ordinary fax front end asks
+       for a legacy fast modem here; translate that request for the external
+       V.34 datapump. */
+    if (s->v34hdx_external)
+    {
+        switch (type)
+        {
+        case T30_MODEM_V17:
+        case T30_MODEM_V27TER:
+        case T30_MODEM_V29:
+            s->v34hdx_requested_mode = V34_HALF_DUPLEX_PRIMARY_CHANNEL;
+            break;
+        case T30_MODEM_V21:
+            s->v34hdx_requested_mode = V34_HALF_DUPLEX_CONTROL_CHANNEL;
+            break;
+        default:
+            break;
+        }
+        /*endswitch*/
+    }
+    /*endif*/
 #if defined(SPANDSP_SUPPORT_SSLFAX)
     if (s->t30.sslfax.server  &&  type != T30_MODEM_DONE)
     {

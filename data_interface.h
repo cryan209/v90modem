@@ -90,5 +90,9 @@ int di_write_data(const uint8_t *buf, int len);
 int di_fax_active(void);
 int di_fax_rx(const int16_t *amp, int len);
 int di_fax_tx(int16_t *amp, int len);
+int di_fax_v34hdx_start_control(int primary_bit_rate);
+int di_fax_v34hdx_get_bit(void);
+void di_fax_v34hdx_put_bit(int bit);
+int di_fax_v34hdx_get_mode(void);
 
 #endif /* DATA_INTERFACE_H */

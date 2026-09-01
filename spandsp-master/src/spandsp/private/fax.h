@@ -44,6 +44,11 @@ struct fax_state_s
 
     /*! \brief Error and flow logging control */
     logging_state_t logging;
+
+    /*! \brief An external V.34 clause 12 modem owns the audio transport. */
+    bool v34hdx_external;
+    int v34hdx_primary_bit_rate;
+    int v34hdx_requested_mode;
 };
 
 #endif

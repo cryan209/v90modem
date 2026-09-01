@@ -1583,6 +1583,8 @@ typedef struct
     /*! \brief Bauds remaining of S-bar after that junction, or -1 if the
         junction has not been seen. */
     int phase4_s_bar_left;
+    /*! V.34 12.5.2 resynchronization: S/S-bar, PP, then B1/data (no TRN/MP). */
+    bool hdx_primary_resync;
 
     bitstream_state_t bs;
     uint32_t bitstream;

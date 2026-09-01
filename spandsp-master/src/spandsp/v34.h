@@ -390,6 +390,9 @@ SPAN_DECLARE(int) v34_get_tx_stage(v34_state_t *s);
     \return The negotiated rate in bit/s, or 0. */
 SPAN_DECLARE(int) v34_get_hdx_negotiated_bit_rate(v34_state_t *s);
 
+/*! True after the clause 12 PPh/MPh/E exchange has entered control data. */
+SPAN_DECLARE(bool) v34_get_hdx_control_channel_ready(v34_state_t *s);
+
 /*! Get the U_INFO value from the received INFO1a (V.90 mode).
     \param s The modem context.
     \return The U_INFO Ucode (0-127), or 0 if not yet received. */

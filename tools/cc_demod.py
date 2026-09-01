@@ -12,6 +12,47 @@ shares no code with either end.  Same reasoning as the V.90 9.6 CP work.
 """
 import argparse, cmath, math, sys
 
+def crc_itu16_bits(bits, crc=0xFFFF):
+    """SpanDSP/ITU reflected CRC, with bits supplied first-on-wire first."""
+    for bit in bits:
+        if (bit ^ crc) & 1:
+            crc = (crc >> 1) ^ 0x8408
+        else:
+            crc >>= 1
+    return crc
+
+def uint_lsb(bits):
+    return sum(bit << i for i, bit in enumerate(bits))
+
+def describe_binary_frame(bits, sync_at):
+    """Independently grade the two short V.34 binary-DPSK INFO frames."""
+    start = sync_at - 4
+    if start < 0:
+        return
+    # Both frames begin with four fill ones and the same eight-bit sync.
+    if bits[start:sync_at] != [1, 1, 1, 1]:
+        return
+    if start + 51 <= len(bits):
+        frame = bits[start:start + 51]
+        # Table 22: CRC covers fields 12:30 and is followed by bits 31:46.
+        residue = crc_itu16_bits(frame[12:47])
+        if frame[47:51] == [1, 1, 1, 1] and residue == 0:
+            print("       INFOh Table 22: power=%d TRN=%dms carrier=%s preemphasis=%d baud-index=%d trn=%s CRC=OK" %
+                  (uint_lsb(frame[12:15]),
+                   uint_lsb(frame[15:22])*35,
+                   "high" if frame[22] else "low",
+                   uint_lsb(frame[23:27]),
+                   uint_lsb(frame[27:30]),
+                   "16-point" if frame[30] else "4-point"))
+
+    if start + 49 <= len(bits):
+        frame = bits[start:start + 49]
+        # Table 7: CRC covers fields 12:28 and is followed by bits 29:44.
+        residue = crc_itu16_bits(frame[12:45])
+        if frame[45:49] == [1, 1, 1, 1] and residue == 0:
+            print("       INFO0 Table 7: 2743=%d 2800=%d 3429=%d 3000(L/H)=%d/%d 3200(L/H)=%d/%d CRC=OK" %
+                  tuple(frame[12:19]))
+
 def ulaw2lin(u):
     u = ~u & 0xFF
     t = ((u & 0x0F) << 3) + 0x84
@@ -99,6 +140,7 @@ def main():
               % (100.0*sum(bits)/max(1,len(bits)), hits[:12] if hits else "(none)"))
         for j in hits[:4]:
             print("     @%5d (t=%.4fs): %s" % (j, a.t0 + (j + off)/a.baud, s[j:j+56]))
+            describe_binary_frame(bits, j)
         return
 
     # Differential decode: 10.2.4 rotates the point by Zn*90 where Zn is the

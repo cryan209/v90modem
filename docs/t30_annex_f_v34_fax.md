@@ -725,13 +725,73 @@ other candidate.
 
 Evidence: `artifacts/v90-hardware/20260901T054120Z-canon-hdx-r5`.
 
+### Why the Canon could not have accepted that INFOh: it was sent before the post-L2 Tone B
+
+The independent decoder now grades the frames rather than only printing their
+bits.  On the fifth call it reports the Canon's INFO0 as CRC-valid with every
+optional symbol rate and both 3000/3200 carriers enabled, and our INFOh as
+CRC-valid with the Table 22 fields shown above.  The proposed carrier/rate
+capability mismatch is therefore closed for this call.
+
+The modem log contains the timing defect directly:
+
+```
+Rx - Tone B detected                         # the initial 12.2.1.2.2 Tone B
+HDX_FIRST_A_SILENCE took 666.6 ms            # L2 was not detected; timeout
+HDX_SECOND_A took 1.7 ms                     # one baud, not a new detection
+HDX_SECOND_A_WAIT took 25 ms
+INFOh
+```
+
+`HDX_FIRST_A_SILENCE` took its 400-baud/670 ms bound without
+`V34_EVENT_L2_SEEN`, then entered 12.2.1.2.5 without conditioning the receiver
+to detect Tone B and without clearing `rx.tone_b_present`.  That flag still
+described the initial Tone B from before L1/L2.  `HDX_SECOND_A` consumed it on
+its first callback, so the recipient transmitted Tone A for 1.7 ms and then
+INFOh.  The source could not detect Tone A, return the new Tone B, and arm its
+INFOh receiver in one baud.  The frame was correct but sent while the Canon
+was not listening for it.
+
+The transition now implements both actions in 12.2.1.2.5: it transmits Tone A,
+sets `V34_RX_STAGE_TONE_B`, clears the tone detector persistence and discards
+the stale latch.  INFOh remains gated by a fresh Tone B per 12.2.1.2.6.  The
+2400/9600 and 3200/9600 u-law focused loopbacks still carry the bidirectional
+control channel with zero errors, and the complete `make test` suite passes.
+
+The next listener call at 18:07:54 proved that merely
+clearing the Tone-B latch was insufficient: the receive callback re-detected
+the continuously present old carrier before the transmitter emitted its next
+baud, so `HDX_SECOND_A` still lasted 1.7 ms.  The following audio remained a
+single steady carrier; the local transition to `PHASE3_WAIT_S` was not evidence
+that the Canon had accepted INFOh.  `HDX_SECOND_A` now requires 30T (50 ms) of
+Tone A before a detected Tone B can release the 25 ms tail and INFOh.  This is
+the same post-L2 conditioning guard already used by the duplex path and remains
+inside 12.2.1.4.3's 2000 ms recovery bound.
+
+The relinked 50 ms call made the remaining ordering measurable.  INFOh sync
+started at 7.298 s, while the Canon's clean returned 1200 Hz Tone B did not
+start until about 7.40 s; the preceding receive audio was still L2 probing.
+The `L2_SEEN` event was missed and the 400T/667 ms fallback therefore left the
+receive window while the foreign modem was still probing.  The missed-L2
+fallback is now 600T/1000 ms.  A detected L2 still advances immediately, and
+the clause 12.2.1.4.3 2000 ms recovery ceiling is unchanged.
+
+The next live Canon call (`20260901T062117Z-canon-hdx-l2-1000ms-linked`)
+validated the modem-layer result.  `HDX_FIRST_A_SILENCE` lasted 1000 ms, the
+fresh Tone B was detected, INFOh was accepted, S/S-bar was detected by the
+alternation path, PP/TRN trained, both PPh sequences completed, and both MPh
+messages plus E were exchanged.  The negotiated primary receive rate was
+21600 bit/s and the modem entered control-channel data (`tx stage 70`, `rx
+CC`).  The remaining failure is above V.34: the SIP probe logs `fax_active=0`
+and supplies idle control-channel bits because no T.30 Annex F session is
+attached.
+
 ### Still open
 
-Why the Canon does not accept a structurally correct INFOh.  It holds Tone B for eight seconds and
-then twelve more, and 12.2.1.3.4 gives it 2000 ms before it gives up on an
-INFOh that has not arrived -- so on the evidence it never took ours.  That is
-the next thing to settle, and it wants the INFOh demodulated out of our own
-transmit tap and checked against Table 22 before anything else is changed.
+The clause 12 modem start-up is now live-interoperable with the Canon.  What is
+still open is the fax layer: connect T.30 Annex F HDLC to the 1200 bit/s
+control-channel byte interface, implement the primary/control turnarounds, and
+route the image through the negotiated 21600 bit/s primary channel.
 
 Evidence: `artifacts/v90-hardware/20260901T050547Z-canon-hdx-phase2` and
 `-051717Z-canon-hdx-r2`.

@@ -102,6 +102,34 @@ instrument. Still absent: MPh bit 27's 2400 bit/s control channel (only the
 12.4.3/12.4.4 recovery procedures, so a missed PPh is still a dead call. See
 `docs/t30_annex_f_v34_fax.md`.
 
+**The first Canon INFOh was valid but 12.2.1.2.5 was incomplete.**  The
+independent control-channel decoder now verifies both the Canon INFO0 and our
+INFOh CRCs and fields; the Canon supports the selected 2400-high combination.
+The call had timed out waiting for L2, however, and entered post-L2 Tone A with
+the *initial* Tone-B latch still set. It therefore sent Tone A for one baud
+(1.7 ms) and INFOh before the Canon could return the new Tone B and arm for
+INFOh. The transition now conditions `V34_RX_STAGE_TONE_B` and clears the
+stale detector state as 12.2.1.2.5 requires. Full tests pass; a new Canon call
+is still required for hardware confirmation. See `docs/t30_annex_f_v34_fax.md`.
+
+**Fresh Tone B also needs a transmit-time guard.**  The next Canon call showed
+that the RX callback can re-detect continuously present old Tone B before the
+TX callback emits one baud, leaving `HDX_SECOND_A` at 1.7 ms despite the latch
+clear.  The gate now requires 30T/50 ms of post-L2 Tone A before accepting Tone
+B, while retaining 12.2.1.4.3's 2000 ms bound.
+
+**The Canon's L2 outlasts the old missed-event fallback.**  In the relinked
+capture INFOh sync began at 7.298 s but the actual returned 1200 Hz Tone B did
+not begin until about 7.40 s; RX was still L2 when the 400T/667 ms fallback
+fired.  That fallback is now 600T/1000 ms. A real `L2_SEEN` remains immediate
+and the 2000 ms recovery ceiling is unchanged.
+
+**Canon V.34 HDX modem start-up now completes live.**  Capture
+`20260901T062117Z-canon-hdx-l2-1000ms-linked` reaches S/S-bar, PP/TRN, PPh,
+both MPh messages, E, and control-channel data at a negotiated 21600 bit/s
+primary rate.  The observed fax failure is now above the modem: the SIP probe
+has `fax_active=0` and no T.30 Annex F session consumes the control channel.
+
 **Commit straight to `main`.** This is a single-maintainer repo with a linear history; do not open a feature branch for a change unless asked. (Agent defaults often say to branch off the default branch — that default does not apply here.)
 
 ## Platform (macOS Apple Silicon)

@@ -72,6 +72,19 @@ SPAN_DECLARE(int) fax_rx_fillin(fax_state_t *s, int len);
 */
 SPAN_DECLARE(int) fax_tx(fax_state_t *s, int16_t *amp, int max_len);
 
+/*! Attach an already-trained V.34 clause 12 control channel to T.30 Annex F.
+    V.34 F.3.1.4 carries T.30 HDLC on the control channel instead of V.21. */
+SPAN_DECLARE(int) fax_v34hdx_start_control(fax_state_t *s, int primary_bit_rate);
+
+/*! Supply one received V.34 control-channel bit to T.30's HDLC receiver. */
+SPAN_DECLARE(void) fax_v34hdx_put_bit(fax_state_t *s, int bit);
+
+/*! Get one T.30 HDLC bit for the V.34 control-channel transmitter. */
+SPAN_DECLARE(int) fax_v34hdx_get_bit(fax_state_t *s);
+
+/*! Return the V.34 half-duplex channel currently requested by T.30. */
+SPAN_DECLARE(int) fax_v34hdx_get_mode(fax_state_t *s);
+
 /*! Select whether silent audio will be sent when FAX transmit is idle.
     \brief Select whether silent audio will be sent when FAX transmit is idle.
     \param s The FAX context.

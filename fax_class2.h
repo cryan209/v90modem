@@ -71,6 +71,12 @@ void fc2_dte_bytes(const uint8_t *buf, int len);
 void fc2_on_connected(void);
 void fc2_on_disconnected(void);
 
+/* External V.34 Annex F control-channel transport. */
+int  fc2_v34hdx_start_control(int primary_bit_rate);
+int  fc2_v34hdx_get_bit(void);
+void fc2_v34hdx_put_bit(int bit);
+int  fc2_v34hdx_get_mode(void);
+
 /* Audio, linear 16-bit PCM at 8 kHz.  fc2_tx() always fills the buffer. */
 int fc2_rx(const int16_t *amp, int len);
 int fc2_tx(int16_t *amp, int len);

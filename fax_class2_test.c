@@ -14,6 +14,7 @@
 #include "fax_class2.h"
 
 #include <spandsp.h>
+#include <spandsp/private/hdlc.h>
 #include <tiffio.h>
 
 #include <stdio.h>
@@ -236,6 +237,42 @@ static void check(int cond, const char *what)
         printf("  FAIL %s\n", what);
         failures++;
     }
+}
+
+static uint8_t v34hdx_frame[64];
+static int v34hdx_frame_len;
+
+static void v34hdx_hdlc_accept(void *user_data, const uint8_t *msg, int len, int ok)
+{
+    (void) user_data;
+    if (ok && len > 0 && len <= (int) sizeof(v34hdx_frame)) {
+        memcpy(v34hdx_frame, msg, (size_t) len);
+        v34hdx_frame_len = len;
+    }
+}
+
+static void test_v34hdx_control_dis(void)
+{
+    hdlc_rx_state_t rx;
+
+    printf("V.34 Annex F control channel: initial DIS over external HDLC\n");
+    fc2_select(0);
+    fc2_select(1);
+    fc2_on_connected();
+    v34hdx_frame_len = 0;
+    hdlc_rx_init(&rx, false, true, 5, v34hdx_hdlc_accept, NULL);
+    check(fc2_v34hdx_start_control(21600) == 0,
+          "the trained V.34 control channel attaches to T.30");
+    for (int i = 0; i < 20000 && v34hdx_frame_len == 0; i++) {
+        int bit = fc2_v34hdx_get_bit();
+
+        if (bit == 0 || bit == 1)
+            hdlc_rx_put_bit(&rx, bit);
+    }
+    check(v34hdx_frame_len >= 3
+          && (v34hdx_frame[2] & 0xFE) == (T30_DIS & 0xFE),
+          "T.30 emits a CRC-valid DIS frame through V.34 user bits");
+    fc2_on_disconnected();
 }
 
 /* ------------------------------------------------------------------ */
@@ -3134,6 +3171,7 @@ int main(void)
     fc2_init(dce_write, dce_dial, dce_answer, dce_hangup, NULL);
     fc2_select(1);
 
+    test_v34hdx_control_dis();
     test_parameters();
     test_transmit(0, 0);
     test_receive(0, 0);

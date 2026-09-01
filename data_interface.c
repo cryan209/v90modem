@@ -730,3 +730,24 @@ int di_fax_tx(int16_t *amp, int len)
         memset(amp + n, 0, sizeof(int16_t) * (size_t)(len - n));
     return len;
 }
+
+int di_fax_v34hdx_start_control(int primary_bit_rate)
+{
+    return fc2_active() ? fc2_v34hdx_start_control(primary_bit_rate) : -1;
+}
+
+int di_fax_v34hdx_get_bit(void)
+{
+    return fc2_active() ? fc2_v34hdx_get_bit() : SIG_STATUS_END_OF_DATA;
+}
+
+void di_fax_v34hdx_put_bit(int bit)
+{
+    if (fc2_active())
+        fc2_v34hdx_put_bit(bit);
+}
+
+int di_fax_v34hdx_get_mode(void)
+{
+    return fc2_active() ? fc2_v34hdx_get_mode() : V34_HALF_DUPLEX_SILENCE;
+}

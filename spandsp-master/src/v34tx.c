@@ -3763,9 +3763,28 @@ static complex_sig_t get_initial_hdx_a_not_a_baud(v34_state_t *s)
         /* Send silence, as we wait for L2 (V.34/12.2.1.2.3) */
         if (s->rx.received_event == V34_EVENT_L2_SEEN
             ||
-            ++s->tx.tone_duration >= 400)
+            ++s->tx.tone_duration >= 600)
         {
-            /* L2 recognised */
+            /* V.34 12.2.1.2.5: after L1/L2, transmit
+               Tone A AND condition the receiver to detect the source's new
+               Tone B.  The old code did only the transmit half and left
+               tone_b_present latched from 12.2.1.2.2's initial Tone B.  On a
+               foreign fax whose L2 did not raise L2_SEEN, SECOND_A therefore
+               consumed that stale latch after one baud and sent INFOh before
+               the source could detect Tone A and return Tone B.
+
+               The nominal L1 + L2 bound is 660 ms.  The Canon/SIP capture has
+               the probing signal still present when the old 400T/667 ms
+               fallback fires, and its actual post-L2 Tone B begins about
+               180 ms later.  When L2_SEEN is missed, allow 600T/1000 ms here;
+               detected L2 still advances immediately, and 12.2.1.4.3's
+               2000 ms recovery bound remains the outer limit. */
+            s->rx.stage = V34_RX_STAGE_TONE_B;
+            s->rx.persistence1 = 0;
+            s->rx.persistence2 = 0;
+            s->rx.received_event = V34_EVENT_NONE;
+            s->rx.tone_b_present = false;
+            s->rx.tone_b_ended = false;
             s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.tone_duration = 1;
             s->tx.stage = V34_TX_STAGE_HDX_SECOND_A;
@@ -3788,7 +3807,17 @@ static complex_sig_t get_initial_hdx_a_not_a_baud(v34_state_t *s)
 
            The bound is 12.2.1.4.3's 2000 ms from the start of Tone A, at the
            600 baud control channel rate, rather than the old 167 ms. */
-        if (s->rx.tone_b_present  ||  ++s->tx.tone_duration >= (600*2000)/1000)
+        ++s->tx.tone_duration;
+        /* The receive path may process several control-channel bauds before
+           this transmit callback runs, so clearing tone_b_present at the
+           12.2.1.2.5 transition is not by itself a fresh-Tone-B test: a
+           continuously present pre-L2 Tone B can be re-declared before the
+           first Tone-A baud is sent.  Give the source one Tone-A detection
+           interval (30T = 50 ms, matching the established post-L2 guard in
+           the duplex path) before accepting Tone B.  This remains well inside
+           12.2.1.4.3's 2000 ms recovery bound. */
+        if ((s->tx.tone_duration >= 30  &&  s->rx.tone_b_present)
+            ||  s->tx.tone_duration >= (600*2000)/1000)
         {
             if (!s->rx.tone_b_present)
             {
@@ -9012,6 +9041,15 @@ SPAN_DECLARE(int) v34_get_hdx_negotiated_bit_rate(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(bool) v34_get_hdx_control_channel_ready(v34_state_t *s)
+{
+    return s != NULL
+           && !s->duplex
+           && s->rx.stage == V34_RX_STAGE_CC
+           && s->tx.stage == V34_TX_STAGE_HDX_CC_DATA;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v34_get_tx_stage(v34_state_t *s)
 {
     return s->tx.stage;
@@ -9540,6 +9578,19 @@ SPAN_DECLARE(int) v34_half_duplex_change_mode(v34_state_t *s, int mode)
         s->rx.half_duplex_state =
         s->tx.half_duplex_state =
         s->half_duplex_state = mode;
+        if (s->half_duplex_source == V34_HALF_DUPLEX_RECIPIENT)
+        {
+            /* V.34 12.6.3.2 and 12.5.2: the recipient becomes silent and
+               conditions its receiver for S/S-bar, PP and B1. */
+            s->tx.current_modulator = V34_MODULATION_SILENCE;
+            s->tx.current_getbaud = get_silence_baud;
+            s->rx.hdx_primary_resync = true;
+            phase4_rx_conditioning_init(s, V34_RX_STAGE_PHASE4_S,
+                                        "12.5.2 S/S-bar, PP, then B1");
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "V.34 12.5.2: recipient entering primary-channel resynchronization\n");
+        }
+        /*endif*/
         break;
     case V34_HALF_DUPLEX_SILENCE:
         s->rx.half_duplex_state =
