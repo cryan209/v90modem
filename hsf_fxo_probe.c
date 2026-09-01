@@ -1,0 +1,171 @@
+/*
+ * hsf_fxo_probe.c -- bring up the Conexant HSF USB modem and report what it does.
+ *
+ * Replaces the throwaway Python probes used to work this device out.  Needs the
+ * hardware (0572:1300) attached; it is deliberately NOT part of `make test`.
+ *
+ *   make hsf_fxo_probe
+ *   ./tools/hsf_extract_rom.py <path>/c2firmware.h     # once, makes hsf_rom_image.bin
+ *   ./hsf_fxo_probe                                    # info only
+ *   ./hsf_fxo_probe --load                             # load firmware if needed
+ *   ./hsf_fxo_probe --load --stream 5                  # then stream for 5s
+ *
+ * Streaming will report nothing until the codec is started, which needs the
+ * CD2_CONTROL_SCRIPT body we do not have -- the bulk pipes NAK until then.
+ * That is expected, not a bug in this tool.
+ */
+
+#include "hsf_fxo.h"
+
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+static unsigned long g_rx_packets;
+static unsigned char g_first[64];
+static size_t        g_first_len;
+static unsigned long g_hist[256];
+
+static void on_rx(const uint8_t *data, size_t len, void *user)
+{
+	(void)user;
+	g_rx_packets++;
+	for (size_t i = 0; i < len; i++)
+		g_hist[data[i]]++;
+	if (g_first_len < sizeof(g_first)) {
+		size_t n = sizeof(g_first) - g_first_len;
+		if (n > len)
+			n = len;
+		memcpy(g_first + g_first_len, data, n);
+		g_first_len += n;
+	}
+}
+
+static void on_notify(const struct hsf_notification *n, void *user)
+{
+	(void)user;
+	printf("  NOTIFICATION bmRequestType=0x%02x code=0x%02x "
+	       "wValue=0x%04x wIndex=%u wLength=%u",
+	       n->bmRequestType, n->bNotification, n->wValue, n->wIndex, n->wLength);
+	for (size_t i = 0; i < n->data_len; i++)
+		printf("%s%02x", i ? "" : "  data=", n->data[i]);
+	printf("\n");
+	fflush(stdout);
+}
+
+int main(int argc, char **argv)
+{
+	bool do_load = false;
+	int  stream_secs = 0;
+
+	for (int i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "--load")) {
+			do_load = true;
+		} else if (!strcmp(argv[i], "--stream") && i + 1 < argc) {
+			stream_secs = atoi(argv[++i]);
+		} else {
+			fprintf(stderr, "usage: %s [--load] [--stream SECONDS]\n", argv[0]);
+			return 2;
+		}
+	}
+
+	struct hsf_dev *d = hsf_fxo_open();
+	if (!d) {
+		fprintf(stderr, "no HSF modem (%04x:%04x) found, or it could not be opened\n",
+			HSF_VID, HSF_PID);
+		return 1;
+	}
+
+	uint8_t info[5];
+	if (hsf_fxo_get_information(d, info) < 0) {
+		fprintf(stderr, "CD2_GET_INFROMATION failed -- replug the device\n");
+		hsf_fxo_close(d);
+		return 1;
+	}
+	const char *fam = info[2] == HSF_FAMILY_BOOTLOADER ? "bootloader, wants firmware"
+			: info[2] == HSF_FAMILY_HCF        ? "HCF"
+			: info[2] == HSF_FAMILY_HSF        ? "HSF, firmware running"
+			                                   : "unknown";
+	printf("info = %02x %02x %02x %02x %02x   (%s)\n",
+	       info[0], info[1], info[2], info[3], info[4], fam);
+
+	if (do_load && info[2] == HSF_FAMILY_BOOTLOADER) {
+		printf("loading firmware...\n");
+		int r = hsf_fxo_load_firmware(d, NULL);
+		if (r < 0) {
+			fprintf(stderr, "firmware load failed: %d%s\n", r,
+				r == -ENOENT ? " (run tools/hsf_extract_rom.py first)" : "");
+			hsf_fxo_close(d);
+			return 1;
+		}
+		hsf_fxo_get_information(d, info);
+		printf("info = %02x %02x %02x %02x %02x   (%s)\n",
+		       info[0], info[1], info[2], info[3], info[4],
+		       info[2] == HSF_FAMILY_HSF ? "HSF, firmware running" : "unexpected");
+	}
+
+	uint8_t eeprom[64];
+	int er = hsf_fxo_read_eeprom(d, 0, eeprom, sizeof(eeprom));
+	if (er > 0) {
+		bool all_zero = true;
+		for (int i = 0; i < er; i++)
+			if (eeprom[i]) {
+				all_zero = false;
+				break;
+			}
+		printf("eeprom[0..%d]: %s\n", er - 1,
+		       all_zero ? "all zero (config lives host-side, per osnvm.c)" : "non-zero");
+	}
+
+	if (stream_secs > 0) {
+		struct hsf_callbacks cb = {
+			.rx_samples   = on_rx,
+			.notification = on_notify,
+		};
+		if (hsf_fxo_start(d, &cb) < 0) {
+			fprintf(stderr, "could not start streaming\n");
+			hsf_fxo_close(d);
+			return 1;
+		}
+		printf("streaming for %ds...\n", stream_secs);
+		sleep((unsigned)stream_secs);
+		hsf_fxo_stop(d);
+
+		struct hsf_stats s;
+		hsf_fxo_stats(d, &s);
+		printf("rx %llu bytes in %lu packets, tx %llu, rx_err %llu, notifications %llu\n",
+		       (unsigned long long)s.rx_bytes, g_rx_packets,
+		       (unsigned long long)s.tx_bytes, (unsigned long long)s.rx_errors,
+		       (unsigned long long)s.notifications);
+
+		if (s.rx_bytes) {
+			double rate = (double)s.rx_bytes / stream_secs;
+			printf("~%.0f bytes/s -> %.0f Hz if 8-bit, %.0f Hz if 16-bit\n",
+			       rate, rate, rate / 2.0);
+			printf("first bytes:");
+			for (size_t i = 0; i < g_first_len; i++)
+				printf(" %02x", g_first[i]);
+			printf("\n");
+			/* An on-hook line is silence, so the modal byte names the
+			 * encoding: 0xff u-law, 0xd5 A-law, 0x00 linear. */
+			unsigned long best = 0;
+			int mode = 0;
+			for (int i = 0; i < 256; i++)
+				if (g_hist[i] > best) {
+					best = g_hist[i];
+					mode = i;
+				}
+			printf("modal byte 0x%02x (%s)\n", mode,
+			       mode == 0xff ? "u-law silence" :
+			       mode == 0xd5 ? "A-law silence" :
+			       mode == 0x00 ? "linear zero"   : "?");
+		} else {
+			printf("no samples -- the codec is gated behind CD2_CONTROL_SCRIPT\n");
+		}
+	}
+
+	hsf_fxo_close(d);
+	return 0;
+}

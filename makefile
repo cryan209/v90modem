@@ -143,6 +143,11 @@ CFLAGS = -Wall -Wextra -O2 -g \
 
 LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
+# libusb, for the Conexant HSF USB modem line interface (hsf_fxo.c).  Only the
+# hsf_fxo_probe target needs it; the SIP modem does not link against it.
+LIBUSB_CFLAGS := $(shell pkg-config --cflags libusb-1.0 2>/dev/null || echo "-I$(HOMEBREW_PREFIX)/include/libusb-1.0")
+LIBUSB_LIBS   := $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo "-L$(HOMEBREW_PREFIX)/lib -lusb-1.0")
+
 SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c fax_class2.c data_stack.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
@@ -160,6 +165,7 @@ V34_GARDNER_TEST_OBJS = v34_gardner_test.o
 FAX_CLASS_TEST_OBJS = fax_class_test.o data_interface.o fax_class2.o
 FAX_CLASS2_TEST_OBJS = fax_class2_test.o fax_class2.o
 V90_UPSTREAM_REPLAY_OBJS = v90_upstream_replay.o
+HSF_FXO_PROBE_OBJS = hsf_fxo_probe.o hsf_fxo.o
 # ESP32 port, layer 2: the streamed V.90 CP decode standing alone, with the
 # Table 14 framer it feeds.  No V.34 receiver.
 PORT_CP_STREAM_TEST_OBJS = port/cp_stream_test.o port/cp_stream.o v90_cp_rx.o vpcm_cp.o
@@ -340,6 +346,13 @@ v32bis-test: v32bis_spandsp_test v32bis-ref-test v32bis-datapump-test
 
 $(TARGET): $(OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)
+
+# Needs the Conexant HSF USB modem attached, so it is not in TEST_TARGETS and
+# does not run under `make test`.
+hsf_fxo_probe: $(HSF_FXO_PROBE_OBJS)
+	$(CC) $(HSF_FXO_PROBE_OBJS) -o $@ $(LIBUSB_LIBS) -lpthread
+
+hsf_fxo.o hsf_fxo_probe.o: CFLAGS += $(LIBUSB_CFLAGS)
 
 vpcm_loopback_test: $(TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(TEST_OBJS) -o $@ $(LDFLAGS)
