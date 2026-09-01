@@ -285,6 +285,13 @@ int main(int argc, char **argv)
 		       (unsigned long long)s.rx_bytes, g_rx_packets,
 		       (unsigned long long)s.tx_bytes, (unsigned long long)s.rx_errors,
 		       (unsigned long long)s.notifications);
+		printf("tx_err %llu%s\n", (unsigned long long)s.tx_errors,
+		       s.tx_first_error ? "" : "");
+		if (s.tx_first_error) {
+			int v = s.tx_first_error - 1;
+			printf("first tx status: %s (%d)\n",
+			       (v >= 0 && v < 7) ? st[v] : "?", v);
+		}
 		if (s.rx_first_error) {
 			int v = s.rx_first_error - 1;
 			printf("first rx status: %s (%d)\n",

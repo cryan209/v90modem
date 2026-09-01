@@ -126,6 +126,7 @@ struct hsf_stats {
 	uint64_t underruns;		/* tx ring empty when a transfer completed */
 	uint64_t notifications;
 	int      rx_first_error;	/* libusb_transfer_status + 1, 0 if none */
+	int      tx_first_error;
 };
 void hsf_fxo_stats(const struct hsf_dev *d, struct hsf_stats *out);
 

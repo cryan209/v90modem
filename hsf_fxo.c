@@ -344,8 +344,15 @@ static void LIBUSB_CALL on_tx(struct libusb_transfer *t)
 		d->stats.tx_bytes += (uint64_t)t->actual_length;
 		if (d->cb.tx_done)
 			d->cb.tx_done((size_t)t->actual_length, d->cb.user);
-	} else {
+	} else if (t->status != LIBUSB_TRANSFER_CANCELLED) {
 		d->stats.tx_errors++;
+		/* Same lesson as the RX side: a stall, a NAK timeout and a
+		 * cancelled transfer are different faults.  A STALL here means
+		 * the device REJECTED what we sent and the pipe stays halted
+		 * until cleared -- which looks exactly like "it stopped
+		 * accepting data". */
+		if (!d->stats.tx_first_error)
+			d->stats.tx_first_error = (int)t->status + 1;
 	}
 	xfer_done(d);
 }
