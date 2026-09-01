@@ -154,7 +154,12 @@ void hsf_fxo_stats(const struct hsf_dev *d, struct hsf_stats *out);
  * wIndex, and up to eight patch bytes written into the template BEFORE assembly.
  * hsf_scripts.h carries the patch offsets already translated into the assembled
  * body (no offset lands on a remapped operand, so a patch is a plain byte
- * store).  Only ids 1-10 and 12 are ever enqueued by any of the 19 call sites.
+ * store).
+ *
+ * EVERY id 0-33 is enqueued -- id 34 is the queue's end sentinel.  Do not
+ * enumerate them by the four-push call pattern: sites that share an argument
+ * tail push only the id and jump into another site's call, which hides script
+ * 11 (hsfusbcd2261_) and the whole 0/14-33 signal range (hsfusbcd2187_).
  */
 enum hsf_script_id {
 	/* Identified from the relay-code dispatch in hsfusbcd2185_ (.text 0x47b0),
@@ -174,9 +179,14 @@ enum hsf_script_id {
 	/* hsfusbcd2195_ / hsfusbcd2201_, which set the "stopping" flag first. */
 	HSF_SCRIPT_SESSION_END = 6,
 
-	/* hsfusbcd2187_ (.text 0x32f0) dispatches 21 signal ids onto it, and sends
-	 * it with wIndex 3 -- delete -- to stop one.  Tone/cadence generation. */
+	/* hsfusbcd2187_ (.text 0x32f0) is the signal generator.  Its jump table at
+	 * .rodata 0x2d0 maps 21 signal ids onto scripts -- signal 0 to script 0,
+	 * and signal n to script n+13 for n = 1..20 -- so scripts 0 and 14-33 are
+	 * the tone/cadence set, each taking patch bytes from that function's own
+	 * caller.  Signal ids 0x15/0x16 instead drive script 8, with wIndex 3
+	 * (delete) to stop whatever signal is running. */
 	HSF_SCRIPT_SIGNAL      = 8,
+	HSF_SCRIPT_SIGNAL_BASE = 13,	/* + signal id, for signal 1..20 */
 
 	/* hsfusbcd2220_ (.text 0x6910) patches three bytes: two context values
 	 * divided by 1000 (so milliseconds) and one literal.  Pulse dialling. */

@@ -64,8 +64,20 @@ true).
 ## Which script is which
 
 `hsfusbcd2176_` (.text 0x3070) enqueues `(ctx, script_id, wIndex, patch[8])`.
-Across all 19 call sites only ids **1-10 and 12** are ever enqueued, and wIndex
-is 1 everywhere except two sites that pass 3 for script 8.
+**Every id 0-33 is enqueued** (34 is the queue's end sentinel), and wIndex is 1
+everywhere except two sites that pass 3 for script 8.
+
+Do not enumerate the ids by the four-push call pattern -- it gives the wrong
+answer twice. Sites that share an argument tail push only the id and jump into
+another site's `call`, which hides script 11 (`hsfusbcd2261_`) and, more
+importantly, the entire signal range: **`hsfusbcd2187_`'s jump table at
+`.rodata 0x2d0` maps 21 signal ids onto scripts -- signal 0 to script 0, and
+signal n to script n+13 for n = 1..20** -- twenty arms, each pushing
+`(patch buffer, wIndex 1, script id)` and jumping to the shared tail at 0x332e.
+So scripts 0 and 14-33 are the tone/cadence set, and they take patch bytes from
+`hsfusbcd2187_`'s own caller. **Template 26, the 158-byte one with seven patch
+bytes, is signal id 13.** Signal ids 0x15/0x16 instead drive script 8, with
+wIndex 3 (delete) to stop whatever signal is running.
 
 Identified:
 
@@ -234,8 +246,17 @@ Eliminated, each by measurement rather than inference:
 * all twelve scripts, patched and unpatched, on-hook and off-hook, alone and in
   the driver's own order.
 
+* the tone/cadence scripts. Template 26 is **not** an unsent configuration
+  block, which is what the last round guessed: it is signal id 13, one of the
+  twenty `hsfusbcd2187_` sends. All of 0 and 14-33 were tried on the device on
+  top of the session scripts; they load and run (15, 27, 32 and 33 report their
+  own completion within the window, the rest run past it as a tone would) and
+  none produces a sample.
+
 What is left is firmware state the scripts read rather than carry. The relay
 values are the proof it exists: the off-hook script contains no 0xA6, so the
-firmware holds that table and something must load it. Template 26 -- 158 bytes,
-seven patch bytes, by far the largest, and in no enqueued path -- remains the
-best candidate for what does, and finding its sender is the next thread.
+firmware holds that table and something must load it. With the script space now
+fully mapped and every one of the 34 exercised, that loader is not a script --
+which points at the country/profile data the vendor stack holds host-side
+(`hsf.cty`, `osnvm.c`) and at `CD2_WRITE_EEPROM`, whose CRC-16-CCITT download
+path is the only unexercised control path left in the driver.

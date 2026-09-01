@@ -262,13 +262,25 @@ CALL_SITES = {
     11: [("hsfusbcd2261_+0x66", 1)],
     12: [("hsfusbcd2261_", 1)],
 }
+# hsfusbcd2187_ (.text 0x32f0) is the signal generator, and its jump table at
+# .rodata 0x2d0 maps 21 signal ids onto scripts: signal 0 -> script 0, and
+# signal n -> script n+13 for n = 1..20.  Every arm pushes (patch buffer,
+# wIndex 1, script id) and jumps into the shared tail at 0x332e, which is why
+# none of them matches a search for the four-push call pattern -- the same trap
+# script 11 sets, twenty times over.  Signal ids 0x15/0x16 instead drive script
+# 8 with wIndex 1 or 3 (3 = delete, i.e. stop the running signal).
+for _n in range(1, 21):
+    CALL_SITES[_n + 13] = [(f"hsfusbcd2187_ signal {_n}", 1)]
+CALL_SITES[0] = [("hsfusbcd2187_ signal 0", 1)]
 
 # Two notes that only the call sites give you:
 #
 #  - Scripts 2 and 10 have npatch = 0.  Their callers (hsfusbcd2200_ with one
 #    16-bit value, hsfusbcd2202_ with two) fill a patch buffer that the table
 #    then discards, so those scripts take NO parameters however they are called.
-#    Only 7 (three bytes) and 11/12 (two) are really parametrised.
+#    Only 7 (three bytes) and 11/12 (two) are really parametrised among the
+#    session/hook scripts -- but most of the SIGNAL scripts are, and they get
+#    their patch bytes from hsfusbcd2187_'s own caller.
 #
 #  - Script 11 is enqueued, and is easy to miss: hsfusbcd2261_ pushes $0xb and
 #    jumps into script 12's argument tail rather than repeating the four pushes,
