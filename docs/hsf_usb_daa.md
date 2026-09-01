@@ -239,6 +239,57 @@ compiled-in `g_DefaultCountryCode` / `g_FactoryProfile`, never touching the
 device EEPROM. Our own probe reading it back as all zero is the expected state,
 not a missing provisioning step.
 
+## The notification endpoint, and ring detection working on a live line
+
+The interrupt endpoint carries two distinct things, and telling them apart is
+what made the DAA legible:
+
+    bmRequestType 0xc1, bNotification 0x02 always
+    wValue 1   a script completed: data[0] = script id, data[1] = status
+               (0x01 succeeded, 0x80 did not)
+    wValue 2   an asynchronous device event: data[0] = event code,
+               data[1] carries a state bit in 0x80
+    wIndex     a millisecond timestamp
+
+**Event code 8 is RING, and the timestamps prove it rather than assuming it.**
+With the modem on-hook on a live ATA extension and a call placed to it, 278
+events arrived carrying only `0x0800` and `0x0880` -- one bit toggling. Their
+`wIndex` spacing alternates **14 ms / 25 ms**, a 39 ms period = **25.6 Hz**,
+which is the DAA reporting each half cycle of the 25 Hz ring voltage; and the
+bursts are separated by **~190 ms (x5)** and **~2000 ms (x3)**, the
+400/200/400/2000 double-ring cadence. So `0x80` in data[1] is the instantaneous
+ring polarity, not a ring-start/stop flag.
+
+That settles something this investigation had been quietly assuming in the other
+direction: **the DAA works, the line is live, and the device is not dead.** The
+silent codec is a specific fault, not a broken part.
+
+The earlier guess in `hsf_fxo.h` that these would be the CDC PSTN codes
+(RING_DETECT 0x09, AUX_JACK_HOOK_STATE 0x08) was wrong; they are Conexant's own.
+
+### Hook control is NOT confirmed, and the evidence points the other way
+
+The device has two LEDs, one always on and one that follows something. Observed
+across three deliberate sequences:
+
+* after a sweep that sent scripts 11/12 carrying the real `hsf_smart_relays`
+  off-hook value 0xA6, the second LED was **on**;
+* a toggle loop using scripts 3/4 ended on-hook and the LED was **off**;
+* a second toggle loop using scripts 3/4 only, starting from off, produced
+  **no change at all** across four 8-second holds.
+
+The consistent reading is that **script 4 (on-hook) works and script 3
+(off-hook) does not**, and that what actually seized the line was scripts 11/12
+carrying a relay value. If that is right it reverses the claim made earlier in
+this document that the firmware holds the relay table -- the host would have to
+supply it, and 11/12 would be the real hook control. It is not yet proven: the
+firmware accepts *any* operand for 11/12 with status 0x01, so the completion
+byte cannot distinguish a valid relay word from a rejected one, and the LED
+observations are three data points read by eye.
+
+Seizing via scripts 11/12 with 0xA6 and listening for dial tone still yields
+zero RX, so this does not by itself explain the silent codec.
+
 ## Open: what starts the codec
 
 Eliminated, each by measurement rather than inference:

@@ -56,9 +56,21 @@ static void on_rx(const uint8_t *data, size_t len, void *user)
 	}
 }
 
+static unsigned long g_ring_events;
+
 static void on_notify(const struct hsf_notification *n, void *user)
 {
 	(void)user;
+	/* Ring arrives as a half-cycle toggle at 25 Hz, so printing every one
+	 * buries everything else -- count them and print the first. */
+	if (n->wValue == 2 && n->data_len >= 1 && n->data[0] == HSF_EVENT_RING) {
+		if (g_ring_events++)
+			return;
+		printf("  RING detected (event 0x%02x); further ring edges counted only\n",
+		       n->data[0]);
+		fflush(stdout);
+		return;
+	}
 	printf("  NOTIFICATION bmRequestType=0x%02x code=0x%02x "
 	       "wValue=0x%04x wIndex=%u wLength=%u",
 	       n->bmRequestType, n->bNotification, n->wValue, n->wIndex, n->wLength);
@@ -285,6 +297,8 @@ int main(int argc, char **argv)
 		       (unsigned long long)s.rx_bytes, g_rx_packets,
 		       (unsigned long long)s.tx_bytes, (unsigned long long)s.rx_errors,
 		       (unsigned long long)s.notifications);
+		if (g_ring_events)
+			printf("ring edges: %lu\n", g_ring_events);
 		printf("tx_err %llu%s\n", (unsigned long long)s.tx_errors,
 		       s.tx_first_error ? "" : "");
 		if (s.tx_first_error) {

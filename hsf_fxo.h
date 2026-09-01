@@ -52,10 +52,38 @@ enum hsf_family {
 /*
  * A device notification.  osusb.c:851 casts the interrupt payload straight to a
  * USB setup packet, so the header is bmRequestType/bRequest/wValue/wIndex/
- * wLength, little-endian, followed by wLength bytes.  The notification CODES are
- * not known -- the CDC PSTN ones (RING_DETECT 0x09, AUX_JACK_HOOK_STATE 0x08)
- * are the obvious guess but are unconfirmed on this device.
+ * wLength, little-endian, followed by wLength bytes.
+ *
+ * Measured on the device 2026-09-01, and NOT the CDC PSTN codes the earlier
+ * guess here proposed:
+ *
+ *   bmRequestType 0xc1, bNotification 0x02 always.
+ *   wValue 1  -- a script completed.  data[0] is the script id, data[1] a
+ *                status: 0x01 succeeded, 0x80 did not (script 8 with no signal
+ *                id selected is the one that reports 0x80).
+ *   wValue 2  -- an asynchronous device event.  data[0] is the event code and
+ *                data[1] carries a state bit in 0x80.
+ *   wIndex    -- a millisecond timestamp, which is what makes the events
+ *                readable as a waveform.
+ *
+ * hsfusbcd2196_ (.text 0x3cf0) is the driver's handler; it requires
+ * bNotification 2, copies data[] to its context and dispatches on data[0]
+ * through a 34-entry table at .rodata 0x324.  The data[0] == 5 case is what
+ * starts the driver's data pump, so a script-5 completion is the "begin
+ * streaming" signal.
  */
+
+/*
+ * Event code 8 is RING, and the timestamps prove it rather than assuming it.
+ * With the modem on-hook on a live line and a call placed to it, 278 events
+ * arrived carrying only 0x0800 and 0x0880 -- i.e. one bit toggling.  Their
+ * wIndex spacing alternates 14 ms / 25 ms, a 39 ms period = 25.6 Hz, which is
+ * the DAA reporting each half cycle of the 25 Hz ring voltage; and the bursts
+ * are separated by ~190 ms (x5) and ~2000 ms (x3), which is the 400/200/400/2000
+ * double-ring cadence.  So bit 0x80 of data[1] is the instantaneous ring
+ * polarity, not a ring-start/ring-stop flag.
+ */
+#define HSF_EVENT_RING 0x08
 struct hsf_notification {
 	uint8_t  bmRequestType;
 	uint8_t  bNotification;
