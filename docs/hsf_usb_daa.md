@@ -462,3 +462,42 @@ Two practical limits, both measured: the completion payload caps at about six
 bytes, so reads must be batched four at a time (sixteen per script silently
 returns five); and the completion can arrive after a short stream window, so a
 miss is a timing artefact rather than a failed read and must be retried.
+
+
+## The scripts made observable: what each one actually touches
+
+With `03 <reg>` reading and `0b <reg> <val>` writing, the register file can be
+dumped either side of a script, which finally makes the scripts observable
+instead of inferred. Differential dump of 0x00-0x2F, one script at a time:
+
+| script | control registers changed |
+|--------|---------------------------|
+| 9      | none |
+| 5      | `1e 00->44`, `1f 2c->a8`, `21 00->08` |
+| **3 (off-hook)** | **none** |
+| **4 (on-hook)**  | **none** |
+
+Two registers change on every step and are not effects of the scripts:
+**`reg07` increments by one per script**, so it is a script-execution counter --
+which independently proves the scripts run -- and `reg06` changes on every read,
+so it is free-running (a timer).
+
+**Scripts 3 and 4 touch no hardware register at all.** They are accepted, they
+execute (the counter moves), they report status 0x01, and they change nothing.
+So the doubt raised earlier in this document -- withdrawn once for resting on an
+LED -- is now confirmed on a real instrument: **this driver has never taken the
+line off-hook.** The `DEVMGR_DAA_RELAY_CODE` dispatch in `hsfusbcd2185_` that
+identifies 3 and 4 as the hook scripts is good disassembly, but on this device
+those scripts are inert.
+
+The registers script 5 *does* write are suggestive: 0x1E, 0x1F, 0x20 and 0x21
+are exactly the ones the firmware manipulates bit by bit (`ANL #0fh/#7eh/#f0h/
+#f7h`, `ORL`, individual reads), and 0x1F lands on 0xA8 -- inside the
+`hsf_smart_relays` range 0xA0-0xBD. That makes 0x1F the leading candidate for
+the relay register, and `0b 1f a6` would be the seize.
+
+**Not yet established:** writing 0x1F directly was attempted and the result is
+inconclusive -- the ad-hoc read path used for the check picked up stale
+completions from the preceding session scripts rather than its own, so nothing
+can be concluded from it either way. Redo it through `hsf_regdump.py`, which
+retries and matches its own completion.
