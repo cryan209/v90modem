@@ -267,28 +267,49 @@ silent codec is a specific fault, not a broken part.
 The earlier guess in `hsf_fxo.h` that these would be the CDC PSTN codes
 (RING_DETECT 0x09, AUX_JACK_HOOK_STATE 0x08) was wrong; they are Conexant's own.
 
-### Hook control is NOT confirmed, and the evidence points the other way
+### Hook control is UNKNOWN, and the LED is not a usable instrument
 
-The device has two LEDs, one always on and one that follows something. Observed
-across three deliberate sequences:
+An earlier version of this section claimed, from LED observations, that script 4
+(on-hook) works while script 3 (off-hook) is inert, and that scripts 11/12
+carrying a relay value are the real hook control. **That is withdrawn.** It was
+built on three by-eye observations with no control, and it does not survive
+testing:
 
-* after a sweep that sent scripts 11/12 carrying the real `hsf_smart_relays`
-  off-hook value 0xA6, the second LED was **on**;
-* a toggle loop using scripts 3/4 ended on-hook and the LED was **off**;
-* a second toggle loop using scripts 3/4 only, starting from off, produced
-  **no change at all** across four 8-second holds.
+* a clean A/B -- script 4 baseline, then scripts 9,5,12 with relay 0xA6, then
+  script 4, then scripts 9,5,3, each held 10-12 s -- lit the LED on **neither**
+  arm;
+* the obvious confound, that every LED-on observation coincided with
+  `--feed --stream`, was tested directly (15 s quiet / 15 s streaming / 15 s
+  quiet, no hook script at all) and the LED **stayed off**, so it is not a data
+  light either;
+* a four-way bisection of everything that differed between the original sweep
+  and the failed A/B -- script 11 with 0xA6, script 11 with relay *code* 3,
+  script 12 with relay code 3, and script 3 with streaming -- lit **none** of
+  them.
 
-The consistent reading is that **script 4 (on-hook) works and script 3
-(off-hook) does not**, and that what actually seized the line was scripts 11/12
-carrying a relay value. If that is right it reverses the claim made earlier in
-this document that the firmware holds the relay table -- the host would have to
-supply it, and 11/12 would be the real hook control. It is not yet proven: the
-firmware accepts *any* operand for 11/12 with status 0x01, so the completion
-byte cannot distinguish a valid relay word from a rejected one, and the LED
-observations are three data points read by eye.
+So the LED-on state has not been reproduced in seven controlled attempts, and
+the original observation cannot be attributed to any script. The timeline also
+rules out the reading that produced the withdrawn claim: the relay-patch sweep
+ran *after* the LED was reported on, so it cannot have caused it.
 
-Seizing via scripts 11/12 with 0xA6 and listening for dial tone still yields
-zero RX, so this does not by itself explain the silent codec.
+**Hook control is therefore unverified in both directions.** Script 3 and
+script 4 are identified from the `DEVMGR_DAA_RELAY_CODE` dispatch in
+`hsfusbcd2185_`, which is solid disassembly, and both are accepted by the device
+with status 0x01 -- but nothing has confirmed that a relay actually moves. The
+firmware accepts *any* operand for scripts 11/12 with status 0x01, so the
+completion byte cannot distinguish a valid relay value from a rejected one, and
+there is no other instrument in software.
+
+The next instrument should be one that does not depend on reading an LED: the
+ATA's own port state, or Asterisk seeing a seizure on the extension the modem is
+wired to. A confirmed off-hook there also gives dial tone, which is the clean
+test of the audio path.
+
+**Lesson, and it is the same one this project's notes carry a dozen times: an
+uncontrolled observation that fits a story is not a measurement.** The confound
+here (streaming vs not) was present from the first observation and went
+unexamined until the story it supported was contradicted.
+
 
 ## Open: what starts the codec
 
