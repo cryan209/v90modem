@@ -89,6 +89,8 @@ int main(int argc, char **argv)
 	int  n_scripts = 0;
 	int  hook = -1;
 	int  wait_secs = 0;
+	const char *rom_path = NULL;
+	bool need_bootloader = false;
 	bool do_feed = false;
 	uint8_t patch[8];
 	size_t  n_patch = 0;
@@ -112,6 +114,10 @@ int main(int argc, char **argv)
 			}
 		} else if (!strcmp(argv[i], "--start-codec")) {
 			do_start = true;
+		} else if (!strcmp(argv[i], "--bootloader")) {
+			need_bootloader = true;
+		} else if (!strcmp(argv[i], "--rom") && i + 1 < argc) {
+			rom_path = argv[++i];
 		} else if (!strcmp(argv[i], "--raw") && i + 1 < argc) {
 			/* Hand-built wire body, for opcodes no shipped template
 			 * contains.  The firmware's own dispatch table is the
@@ -140,6 +146,7 @@ int main(int argc, char **argv)
 		} else {
 			fprintf(stderr, "usage: %s [--load] [--script ID] [--start-codec]"
 				" [--script ID[,ID...]] [--patch B[,B...]]"
+				" [--rom PATH] [--bootloader]"
 				" [--hook on|off] [--wait SECONDS] [--feed]"
 				" [--stream SECONDS]\n",
 				argv[0]);
@@ -160,8 +167,17 @@ int main(int argc, char **argv)
 		for (int t = 0; t < wait_secs * 50; t++) {
 			d = hsf_fxo_open();
 			if (d) {
-				if (hsf_fxo_get_information(d, info) == 0)
-					break;
+				if (hsf_fxo_get_information(d, info) == 0) {
+					/* --bootloader: keep waiting unless the
+					 * device actually wants firmware.  Without
+					 * this, --load silently no-ops on a device
+					 * that is already running, which ran a
+					 * whole patched-firmware experiment against
+					 * the stock image. */
+					if (!need_bootloader ||
+					    info[2] == HSF_FAMILY_BOOTLOADER)
+						break;
+				}
 				hsf_fxo_close(d);
 				d = NULL;
 			}
@@ -194,7 +210,7 @@ int main(int argc, char **argv)
 
 	if (do_load && info[2] == HSF_FAMILY_BOOTLOADER) {
 		printf("loading firmware...\n");
-		int r = hsf_fxo_load_firmware(d, NULL);
+		int r = hsf_fxo_load_firmware(d, rom_path);
 		if (r < 0) {
 			fprintf(stderr, "firmware load failed: %d%s\n", r,
 				r == -ENOENT ? " (run tools/hsf_extract_rom.py first)" : "");

@@ -530,3 +530,41 @@ The payloads also pin the execution model: `27 nn` **sets** a single result
 byte and `26` **appends** it. Opcodes returning `5a5a` left the marker value
 in place; those returning `5a0001` zeroed it. So report code, register read and
 append all share one accumulator.
+
+
+## Running our own code on the device
+
+**The firmware image is CRC-protected, and that is why two patched images were
+refused.** CRC-16-CCITT, poly 0x1021, init 0xFFFF, over everything but the last
+two bytes: on the stock image that is **0x05b9**, which is exactly the trailing
+two bytes. `CD2_UPLOAD_FIRMWARE` returns EIO for any image whose trailer does
+not match. The first refusal was blamed on the image growing by 14 bytes, and
+that was wrong -- a size-neutral patch was refused too, which is what forced
+looking for a checksum.
+
+With the CRC recomputed, **a modified image loads and runs**: the device goes
+bootloader (family 01) -> HSF (family 03) and answers normally afterwards. That
+is arbitrary code execution on the controller, and it is the prerequisite for
+dumping the mask ROM, since nothing in the shipped opcode set reads code memory
+and the F4/F5 register file is not code memory either (indices 0x40-0x5f and
+0x60-0x7f read identical -- the file mirrors, it does not extend).
+
+`tools/hsf_patch_fw.py` patches and fixes the CRC; `hsf_fxo_probe --rom PATH
+--bootloader` loads a chosen image, where `--bootloader` makes `--wait` keep
+waiting until the device actually wants firmware -- without it `--load` silently
+no-ops on an already-running device, which wasted a whole experiment.
+
+**The result-byte hunt does not work, and it casts doubt on the dispatch
+table.** The stub was placed over opcode 0x23's supposed handler at 0x02a9 (the
+opcode is being replaced, so its own slot is the space to use, and the image has
+no filler runs to borrow). Every completion then came back as five 0xAA bytes
+instead of the expected three, with or without preserving R0 -- so the
+interpreter is running away, not executing a clean replacement handler.
+
+The likely reason is the caveat recorded earlier and never resolved: **several
+of the 46 in-image dispatch targets land mid-instruction under linear
+disassembly, which a real entry point cannot.** 0x02a9 disassembles cleanly by
+luck; that does not make it opcode 0x23's entry. Until the real dispatch
+mechanism is identified -- the 105-entry LJMP table at 0x62 matching the opcode
+count may simply be a coincidence -- patching a handler is patching the wrong
+thing.
