@@ -699,6 +699,7 @@ static int mp_rate_n_is_valid(int rate_n);
 static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_rate_c_to_a);
 static void mp_or_mph_baud_init(v34_state_t *s);
 static void e_baud_init(v34_state_t *s);
+static void cc_data_baud_init(v34_state_t *s);
 static void data_baud_init(v34_state_t *s);
 
 /* Control channel startup routines */
@@ -7417,6 +7418,18 @@ static complex_sig_t get_hdx_recipient_phase3_baud(v34_state_t *s)
                    "Tx - half-duplex recipient: source S detected; training on PP/TRN (12.3.2.2)\n");
     }
     /*endif*/
+    if (s->rx.received_event == V34_EVENT_PPH)
+    {
+        /* V.34 12.4.2.1: "After detecting signal PPh, it shall transmit signal
+           PPh, train its control channel equalizer using signal PPh, and
+           condition its receiver to receive MPh from the source modem."
+           12.4.2.2 then follows PPh with ALT, which get_pph_baud() does. */
+        s->rx.received_event = V34_EVENT_NONE;
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                   "Tx - half-duplex recipient: source PPh detected; answering with PPh (12.4.2.1)\n");
+        pph_baud_init(s);
+    }
+    /*endif*/
     return zero;
 }
 /*- End of function --------------------------------------------------------*/
@@ -7548,6 +7561,19 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
             }
             /*endif*/
         }
+        else if (s->rx.mp_seen >= 1)
+        {
+            /* 12.4.1.3/12.4.2.4: "When the modem has received at least one MPh
+               sequence and the modem is sending MPh sequences, the modem shall
+               complete the current MPh and send a single 20-bit E sequence."
+               This test is at the end of a complete MPh, which is where the
+               clause puts it.  There is no MPh' -- the half-duplex exchange
+               has no acknowledge bit, so unlike the duplex 11.4 MP the far
+               end's first sequence is the whole condition. */
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - MPh received from the far end; sending E (12.4.1.3)\n");
+            e_baud_init(s);
+        }
         else
         {
             /* Restart the message */
@@ -7568,7 +7594,10 @@ static void mp_or_mph_baud_init(v34_state_t *s)
        taken when the 12.4 MPh branch below had in fact run. */
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - %s()\n",
                (s->tx.duplex) ? "mp_baud_init" : "mph_baud_init");
-    s->tx.current_modulator = V34_MODULATION_V34;
+    /* 10.2.4.4: MPh sequences are transmitted using the control channel
+       modulation at 1200 bit/s.  The duplex 11.4 MP is a primary channel
+       signal, so only the duplex branch keeps the V.34 modulator. */
+    s->tx.current_modulator = (s->tx.duplex) ? V34_MODULATION_V34 : V34_MODULATION_CC;
 
     if (s->tx.duplex
         && (s->tx.calling_party  ||  s->tx.v90_v34_fallback)
@@ -7700,10 +7729,59 @@ static complex_sig_t get_e_baud(v34_state_t *s)
        boundary. */
     if (s->tx.tone_duration >= 10)
     {
-        data_baud_init(s);
+        if (s->tx.duplex)
+            data_baud_init(s);
+        else
+            cc_data_baud_init(s);
+        /*endif*/
     }
     /*endif*/
     return training_constellation_4[s->tx.diff];
+}
+/*- End of function --------------------------------------------------------*/
+
+static complex_sig_t get_cc_data_baud(v34_state_t *s)
+{
+    int bit;
+    int i;
+    int data_bits;
+
+    /* V.34 12.4.1.4/12.4.2.5: after sending E the modem transmits user control
+       channel data.  10.2.4 puts two bits per symbol at 1200 bit/s, scrambled,
+       with the differential encoder enabled -- the same modulation ALT, E and
+       MPh have just used, with real data in place of the training pattern. */
+    data_bits = 0;
+    for (i = 0;  i < 2;  i++)
+    {
+        bit = s->tx.current_get_bit(s->tx.get_bit_user_data);
+        if (bit == SIG_STATUS_END_OF_DATA)
+        {
+            s->tx.current_get_bit = fake_get_bit;
+            bit = 1;
+        }
+        else
+        {
+            bit &= 1;
+        }
+        /*endif*/
+        data_bits |= scramble(&s->tx, bit) << i;
+    }
+    /*endfor*/
+    s->tx.diff = (s->tx.diff + data_bits) & 3;
+    return training_constellation_4[s->tx.diff];
+}
+/*- End of function --------------------------------------------------------*/
+
+static void cc_data_baud_init(v34_state_t *s)
+{
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - cc_data_baud_init()\n");
+    s->tx.current_modulator = V34_MODULATION_CC;
+    s->tx.stage = V34_TX_STAGE_HDX_CC_DATA;
+    s->tx.tone_duration = 0;
+    s->tx.current_getbaud = get_cc_data_baud;
+    s->half_duplex_state =
+    s->tx.half_duplex_state =
+    s->rx.half_duplex_state = V34_HALF_DUPLEX_CONTROL_CHANNEL;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -7945,8 +8023,11 @@ static complex_sig_t get_pph_baud(v34_state_t *s)
     /* This is the beginning of half-duplex control channel restart */
     /* The 8 symbol PPh signal, which is repeated 4 times, to make a 32 symbol sequence */
     /* See V.34/10.2.4.5 */
-    i = s->tx.tone_duration & 0x7;
-    if (++s->tx.tone_duration == PPH_SYMBOLS*PPH_REPEATS)
+    /* pph_symbols[] already holds the whole signal -- PPH_SYMBOLS is
+       8*PPH_REPEATS, the four periods of 10.2.4.5, not one period.  Running
+       to PPH_SYMBOLS*PPH_REPEATS transmitted PPh four times over. */
+    i = s->tx.tone_duration;
+    if (++s->tx.tone_duration >= PPH_SYMBOLS)
         second_alt_baud_init(s);
     /*endif*/
     return pph_symbols[i];
@@ -7961,6 +8042,11 @@ static void hdx_control_channel_start_init(v34_state_t *s)
        calls the getbaud, so the follow-on is a flag it checks, in the same shape
        as the existing training_stage 0x100 hand-off. */
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - hdx_control_channel_start_init()\n");
+    /* "The source modem shall condition its receiver to detect signal PPh" is
+       the first sentence of 12.4.1.1, before the silence and its own PPh.
+       Without it the source stayed on the primary channel demodulator hunting
+       PP while the recipient's control channel went by. */
+    v34_condition_rx_for_pph(s, "12.4.1.1, before the control channel silence");
     s->tx.hdx_pph_after_silence = true;
     s->tx.tone_duration = milliseconds_to_samples(70);
     s->tx.current_modulator = V34_MODULATION_SILENCE;
@@ -7991,21 +8077,17 @@ static complex_sig_t get_second_alt_baud(v34_state_t *s)
     s->tx.diff = (s->tx.diff + bit) & 3;
     if (++s->tx.tone_duration >= 16)
     {
-        /* We have reached the absolute minimum allowed for the duration of ALT */
-        if (s->tx.tone_duration >= 120)
+        /* We have reached the absolute minimum allowed for the duration of ALT.
+           12.4.1.2 has the source send MPh "after receiving signal PPh", and
+           within 120T of it; 12.4.2.3 has the recipient send MPh after ALT for
+           at least 16T and no more than 120T.  The source's ALT therefore ends
+           on the far-end PPh, not on a timer -- ending it on the timer alone
+           put MPh in front of a peer that had not yet started its own control
+           channel. */
+        if (s->rx.received_event == V34_EVENT_PPH  ||  s->tx.tone_duration >= 120)
         {
-            /* TODO: Should allow for early termination. */
-            if (1)
-            {
-                /* Control channel training */
-                mp_or_mph_baud_init(s);
-            }
-            else
-            {
-                /* Control channel resynchronisation */
-                e_baud_init(s);
-            }
-            /*endif*/
+            /* Control channel training */
+            mp_or_mph_baud_init(s);
         }
         /*endif*/
     }
@@ -8018,7 +8100,10 @@ static void second_alt_baud_init(v34_state_t *s)
 {
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - second_alt_baud_init()\n");
     s->tx.tone_duration = 0;
-    s->tx.current_modulator = V34_MODULATION_V34;
+    /* 10.2.4.2: ALT is transmitted using the CONTROL CHANNEL modulation.
+       Sent on the primary channel modulator it came out at the Phase 3 symbol
+       rate and carrier, where no control channel receiver could read it. */
+    s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.scramble_reg = 0;
     s->tx.diff = 0;
     s->tx.stage = V34_TX_STAGE_HDX_SECOND_ALT;
@@ -8057,7 +8142,8 @@ static void first_alt_baud_init(v34_state_t *s)
 {
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - first_alt_baud_init()\n");
     s->tx.tone_duration = 0;
-    s->tx.current_modulator = V34_MODULATION_V34;
+    /* 10.2.4.2: ALT uses the control channel modulation. */
+    s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.scramble_reg = 0;
     s->tx.diff = 0;
     s->tx.stage = V34_TX_STAGE_HDX_FIRST_ALT;
@@ -8093,7 +8179,9 @@ static void sh_baud_init(v34_state_t *s)
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - sh_baud_init()\n");
     s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
     s->tx.tone_duration = 0;
-    s->tx.current_modulator = V34_MODULATION_V34;
+    /* 10.2.3.3: "Signals Sh and Sh-bar are transmitted using the control
+       channel modulation described in 10.2.4." */
+    s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.stage = V34_TX_STAGE_HDX_SH;
     s->tx.current_getbaud = get_sh_baud;
 }

@@ -31,6 +31,11 @@ void log_infoh(logging_state_t *log, bool tx, const infoh_t *infoh);
 void log_mp(logging_state_t *log, bool tx, const mp_t *mp);
 void log_mph(logging_state_t *log, bool tx, const mph_t *mph);
 
+/* V.34 12.4.1.1/12.4.2.1: condition the receiver to detect signal PPh on the
+   half-duplex control channel.  Both the source and the recipient turn on
+   this, and it is the only way into V34_RX_STAGE_CC. */
+void v34_condition_rx_for_pph(v34_state_t *s, const char *why);
+
 int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier);
 void v34_rx_set_primary_channel(v34_state_t *s, int baud_rate, int high_carrier);
 void v34_set_working_parameters(v34_parameters_t *s, int baud_rate, int bit_rate, int expanded);

@@ -31,6 +31,28 @@ Adding a source file means updating `SRCS` **and** the relevant `*_OBJS` lists i
 
 **The makefile has no header dependencies** (`%.o: %.c` at `makefile:243`, no `-MMD`). Editing a `.h` does not rebuild the `.c` files that include it, so a struct field added or reordered leaves stale objects linked against the old layout — the symptom is impossible values at runtime, not a link error. `rm` the affected `.o` files (or `make clean`) after touching any header.
 
+**SpanDSP had the same hole, worse.** `spandsp-master/src/Makefile` listed
+`v34rx_data.lo`, `v34rx_phase3.lo` and `v34rx_phase4_trn.lo` in the object list
+but did not `include` their `.deps/*.Plo` files, so those three had **no header
+dependencies at all** and a change to `spandsp/private/v34.h` left them
+compiled against the old `v34_rx_state_t` layout while every other file
+rebuilt. Fixed 2026-09-01 (the `include` lines are in `Makefile` and
+`Makefile.in`). The symptom was impossible field values -- `demod=UNKNOWN (18)`
+-- and it cost a session three wrong conclusions about the half-duplex
+receiver, each "measured" against a binary that was not what the source said.
+If a header change produces behaviour that contradicts the source, check what
+actually recompiled before believing the measurement.
+
+**The half-duplex V.34 (clause 12) control channel now runs end to end.**
+`v34_hdx_test <baud> <bps> <ulaw|alaw> <seconds>` drives a source and a
+recipient at each other through Phase 2, Phase 3 and 12.4's PPh/ALT/MPh/E, and
+grades the control channel user data that follows against the far end's
+generator. Eleven of the twelve rows carry it with zero errors both ways and
+run in `make test`. The rate negotiation of 12.4.1.3/12.4.2.4 is NOT done --
+every MPh goes out with `Max data rate = 0` -- and neither are the 12.4.3/12.4.4
+recovery procedures, so a missed PPh is a dead call. See
+`docs/t30_annex_f_v34_fax.md`.
+
 **Commit straight to `main`.** This is a single-maintainer repo with a linear history; do not open a feature branch for a change unless asked. (Agent defaults often say to branch off the default branch — that default does not apply here.)
 
 ## Platform (macOS Apple Silicon)

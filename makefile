@@ -146,7 +146,7 @@ LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 SRCS   = sip_modem.c modem_engine.c clock_recovery.c data_interface.c fax_class2.c data_stack.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
-TEST_TARGETS = port_cp_stream_test port_data_rx_test port_v34_fixed_test port_v34_fixed_lms_test port_v34_fixed_solve_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test fax_class_test fax_class2_test v90_upstream_replay v90_engine_replay v34_duplex_test v32bis_spandsp_test v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test
+TEST_TARGETS = port_cp_stream_test port_data_rx_test port_v34_fixed_test port_v34_fixed_lms_test port_v34_fixed_solve_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test fax_class_test fax_class2_test v90_upstream_replay v90_engine_replay v34_duplex_test v32bis_spandsp_test v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test v34_hdx_test
 TEST_OBJS = vpcm_loopback_test.o v90.o v90_cp_rx.o v90_dil_rx.o v90_dil_measure.o v90_dil_presets.o v90_analogue_tx.o v90_analogue_rx.o v90_analogue_phase3.o v90_analogue_phase4.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_cp_rx.o v92_trn2u.o v92_upstream_data.o v92_upstream_rx.o p3_demod.o
 DECODE_OBJS = vpcm_decode.o v90_dil_measure.o v90_dil_presets.o v34_phase2_decode.o v34_info_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_anspcm_decode.o p3_demod.o v90.o v90_cp_rx.o v91.o vpcm_cp.o v21_fsk_demod.o phase12_decode.o call_init_tone_probe.o v90_dil_rx.o
 ENCODE_OBJS = vpcm_encode.o v90.o v91.o vpcm_cp.o v92_phase4_decode.o v90_dil_measure.o v90_dil_presets.o
@@ -260,6 +260,27 @@ test: $(TEST_TARGETS)
 	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3000 9600 alaw
 	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3200 9600 ulaw
 	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3200 9600 alaw
+# V.34 clause 12 half-duplex: the control channel start-up of 12.4, run
+# end to end between a source and a recipient over G.711.  Each row goes
+# through Phase 2 (INFOh), Phase 3 (S/S-bar/PP/TRN), then PPh, ALT, the MPh
+# exchange and E, and is graded on the control channel USER DATA that follows
+# -- the far end's generator, aligned and compared bit for bit -- because a
+# bit count only says a modulator ran.  Eleven of the twelve rows carry it
+# without a single error in both directions; 2400 u-law carries three errors
+# in one direction (a short burst 12834 bits in, at the same place whatever
+# the primary symbol rate, so it is the control channel's own timing loop and
+# not the primary channel) and stays out until that is understood.
+	./v34_hdx_test 2400 9600 alaw
+	./v34_hdx_test 2743 9600 ulaw
+	./v34_hdx_test 2743 9600 alaw
+	./v34_hdx_test 2800 9600 ulaw
+	./v34_hdx_test 2800 9600 alaw
+	./v34_hdx_test 3000 9600 ulaw
+	./v34_hdx_test 3000 9600 alaw
+	./v34_hdx_test 3200 9600 ulaw
+	./v34_hdx_test 3200 9600 alaw
+	./v34_hdx_test 3429 9600 ulaw
+	./v34_hdx_test 3429 9600 alaw
 	./v32bis_spandsp_test
 	./v92_proc_eval_test
 	./v90_analogue_tx_test

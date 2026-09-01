@@ -435,6 +435,34 @@ static int phase3_rx_dump_count = 0;
 #include "v34_shell_map.h"
 #include "v34_probe_signals.h"
 
+/*! V.34 12.4 control channel PPh acquisition.  PPh is 32 symbols at 600 baud,
+    so a decay giving the correlator a memory of roughly one PPh and a minimum
+    of two 8-symbol periods before it may fire keeps a decision inside the
+    signal that carries it. */
+/*! The correlator's memory is matched to PPh's own length -- 1/(1 - 0.985) is
+    about 64 T/2 steps, which is the 32 symbols of 10.2.4.5 -- so the whole
+    signal contributes and the silence before it has decayed away.
+    The decision is taken on the winning PHASE being stable, not on the score
+    alone: the control channel has no equalizer and its band edge timing
+    recovery gets nothing to converge on until PPh itself starts, so the
+    normalised score tops out well short of 1 and how far short of it depends
+    on where in the eye this receiver happened to start.  At 3200 baud it
+    peaked at 0.742 against 0.805 at 3429 -- with the same, correct, phase
+    winning every step in both.  A score gate alone therefore separates the
+    symbol rates from each other rather than a real PPh from noise, which a
+    stable argmax does not. */
+#define PPH_ACQUIRE_DECAY       0.94f
+#define PPH_ACQUIRE_MIN_BAUDS   16
+#define PPH_ACQUIRE_SCORE_MIN   0.55f
+#define PPH_ACQUIRE_HOLD_STEPS  8
+
+/*! The half-duplex recipient leaves the primary channel for the control
+    channel on 12.4.1.1's 70 +/- 5 ms of silence.  32 symbols is 10 ms at 3200
+    baud and 13 ms at 2400, comfortably inside it, and far longer than any gap
+    a live TRN symbol can produce. */
+#define HDX_TRN_END_SILENCE_BAUDS   32
+#define HDX_TRN_END_SILENCE_MAG2    0.04f
+
 #if !defined(M_PI)
 /* C99 systems may not define M_PI */
 #define M_PI 3.14159265358979323846264338327
@@ -632,6 +660,7 @@ static const char *v34_event_to_str(int event)
     case V34_EVENT_J: return "J";
     case V34_EVENT_J_DASHED: return "J_DASHED";
     case V34_EVENT_PHASE4_TRN_READY: return "PHASE4_TRN_READY";
+    case V34_EVENT_PPH: return "PPH";
     default: return "UNKNOWN";
     }
 }
@@ -7241,6 +7270,123 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
     s->eq_step = (s->eq_step + 1) & V34_EQUALIZER_MASK;
 #endif
 
+    if (s->stage == V34_RX_STAGE_CC  &&  !s->pph_detected)
+    {
+        /* V.34 12.4.1.1/12.4.2.1: the modem conditions its receiver to detect
+           signal PPh.  PPh (10.2.4.5) is four periods of a fixed 8-symbol
+           sequence carrying neither the scrambler nor the differential
+           encoder, so it is found by correlating the control channel symbols
+           against the known pattern.  The control channel has no equalizer
+           and starts on an arbitrary carrier phase, so the score is
+           |correlation| normalised by the signal energy, exactly as the
+           primary channel's PP acquisition at 11.3.1.2.4 does.
+
+           This runs at the T/2 rate, ABOVE the baud_half gate, and keeps a
+           correlator bank for each parity.  PPh is only 32 symbols and it is
+           preceded by 12.4.1.1's 70 ms of silence, which leaves the band edge
+           timing recovery nothing to converge on: whichever of the two T/2
+           outputs is the eye centre is therefore decided by the correlation
+           itself, and baud_half is aligned to the winner.  The same ambiguity
+           on the primary channel is documented in docs/v34_symbol_rate_matrix
+           terms -- a receiver that samples at the eye crossing looks exactly
+           like one with no signal. */
+        int phase;
+        int best_phase;
+        int best_half;
+        float best_score;
+        float mag;
+
+        s->pph_hunt_bauds++;
+        mag = sqrtf(sample->re*sample->re + sample->im*sample->im);
+        s->pph_corr_energy = PPH_ACQUIRE_DECAY*s->pph_corr_energy + mag*mag;
+        s->pph_corr_weight = PPH_ACQUIRE_DECAY*s->pph_corr_weight + 1.0f;
+        best_phase = 0;
+        best_half = 0;
+        best_score = -1.0f;
+        {
+            int half = s->baud_half;
+            for (phase = 0;  phase < 8;  phase++)
+            {
+                complexf_t cand;
+                float corr_mag;
+                float denom;
+                float score;
+
+                /* pph_symbols[] is the whole 32 symbol signal, but it is the
+                   8 symbol period repeated four times, so an 8-entry phase
+                   search covers it. */
+                cand = pph_symbols[((s->pph_hunt_bauds >> 1) + phase)%8];
+                s->pph_corr[half][phase].re = PPH_ACQUIRE_DECAY*s->pph_corr[half][phase].re
+                                            + sample->re*cand.re + sample->im*cand.im;
+                s->pph_corr[half][phase].im = PPH_ACQUIRE_DECAY*s->pph_corr[half][phase].im
+                                            + sample->im*cand.re - sample->re*cand.im;
+                corr_mag = sqrtf(s->pph_corr[half][phase].re*s->pph_corr[half][phase].re
+                               + s->pph_corr[half][phase].im*s->pph_corr[half][phase].im);
+                denom = sqrtf(s->pph_corr_energy*s->pph_corr_weight);
+                score = (denom > 0.0001f) ? corr_mag/denom : 0.0f;
+                if (score > best_score)
+                {
+                    best_score = score;
+                    best_phase = phase;
+                    best_half = half;
+                }
+                /*endif*/
+            }
+            /*endfor*/
+        }
+        /* The hold is counted PER PARITY.  Steps alternate between the two
+           banks, so comparing against the previous step's winner compares two
+           different correlators and the count can never accumulate. */
+        if (best_score >= PPH_ACQUIRE_SCORE_MIN  &&  best_phase == s->pph_best_phase[best_half])
+            s->pph_hold_steps[best_half]++;
+        else
+            s->pph_hold_steps[best_half] = 0;
+        /*endif*/
+        s->pph_best_phase[best_half] = best_phase;
+        if (s->pph_hunt_bauds >= PPH_ACQUIRE_MIN_BAUDS
+            &&
+            s->pph_hold_steps[best_half] >= PPH_ACQUIRE_HOLD_STEPS)
+        {
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                     "Rx - CC: PPh detected after %d T/2 steps (phase=%d half=%d score=%.3f held=%d)\n",
+                     s->pph_hunt_bauds, best_phase, best_half, best_score,
+                     s->pph_hold_steps[best_half]);
+            s->pph_detected = true;
+            s->received_event = V34_EVENT_PPH;
+            /* Take whole bauds from the T/2 output the correlation chose.
+               The correlator only ever scores the bank for the parity of the
+               step it is on, so a detection always lands ON the winning
+               parity: the next step is the loser and must be skipped, the one
+               after is the winner and must be processed.  The gate below is
+               "toggle, then return if the result is 1", which makes 0 the
+               right value here whichever parity won -- setting it to
+               best_half instead aligned one modem correctly and the other
+               onto the eye crossing, and the two behaved completely
+               differently for that reason alone. */
+            s->baud_half = 0;
+            /* Everything from here is ALT, MPh and E, which the scanner below
+               reads out of the descrambled differential bit stream.  Start it
+               from a clean slate rather than from whatever PPh left behind. */
+            s->bitstream = 0;
+            s->mp_seen = 0;
+            s->mp_count = -1;
+            s->crc = 0xFFFF;
+            s->bit_count = 0;
+            memset(&s->last_sample, 0, sizeof(s->last_sample));
+            return;
+        }
+        else if ((s->pph_hunt_bauds % 600) == 0)
+        {
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                     "Rx - CC: hunting PPh, %d T/2 steps, best score %.3f at phase %d half %d\n",
+                     s->pph_hunt_bauds, best_score, best_phase, best_half);
+        }
+        /*endif*/
+        s->baud_half ^= 1;
+        return;
+    }
+    /*endif*/
+
     /* On alternate insertions we have a whole baud and must process it. */
     if ((s->baud_half ^= 1))
         return;
@@ -7252,6 +7398,14 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
     ang2 = arctan2(s->last_sample.im, s->last_sample.re);
     ang3 = ang1 - ang2 + DDS_PHASE(45.0f);
     data_bits = (ang3 >> 30) & 0x3;
+    /* 10.2.4 advances the point index by the dibit, and
+       training_constellation_4[] is ordered so an increasing index rotates
+       CLOCKWISE while this measures the difference counter-clockwise, so the
+       recovered dibit is the NEGATION of the transmitted one.  The same fact
+       is pinned in the V.90 9.4 CP decode and in the duplex 11.4 MP decode;
+       it is a property of the encoder and the table, not of the channel, so
+       there is nothing here to search for. */
+    data_bits = (4 - data_bits) & 0x3;
 
     /* Descramble the data bits. */
     for (i = 0;  i < 2;  i++)
@@ -7601,6 +7755,38 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
         v34_state_t *t;
 
         t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
+        if (s->hdx_await_trn_end)
+        {
+            /* 12.4.2.1, armed once the recipient has trained on PP and TRN.
+               The move to the control channel is taken on the SILENCE that
+               ends Phase 3 -- 12.4.1.1's 70 +/- 5 ms -- rather than on the
+               INFOh TRN length, because the arithmetic gives the length of
+               TRN and not the instant this receiver started counting it: the
+               PP acquisition ahead of it takes a variable number of symbols,
+               and at 2743 and 3000 baud that offset was enough to put the
+               recipient on the control channel after the source's 32 symbols
+               of PPh had already gone by, with nothing to lock to for the
+               rest of the call.  The silence is unambiguous, needs no
+               arithmetic, and is where the clause itself puts the boundary. */
+            float hdx_mag2 = sym->re*sym->re + sym->im*sym->im;
+
+            if (hdx_mag2 < HDX_TRN_END_SILENCE_MAG2)
+            {
+                if (++s->hdx_silence_bauds >= HDX_TRN_END_SILENCE_BAUDS)
+                {
+                    s->hdx_await_trn_end = false;
+                    v34_condition_rx_for_pph(t, "12.4.2.1, on the silence ending the source's Phase 3");
+                    return;
+                }
+                /*endif*/
+            }
+            else
+            {
+                s->hdx_silence_bauds = 0;
+            }
+            /*endif*/
+        }
+        /*endif*/
         /* Differential symbols must be measured in one consistent domain.
            last_sample is the previous equalizer output, so using the newest
            raw T/2 input here compared unrelated points and made TRN/Ja bits
@@ -8019,6 +8205,29 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                              "Rx - Phase 3: DISCARDING %d captured Ja bits (longest hyp=%d) on re-entry to WAIT_S\n",
                              cap_max, cap_max_h);
                 }
+                if (!s->duplex)
+                {
+                    /* V.34 12.3.2.2 ends the recipient's Phase 3 at PP and
+                       TRN -- there is no J in half-duplex -- and 12.4.2.1 has
+                       it condition its receiver to detect signal PPh.  Falling
+                       into PHASE3_WAIT_S ran the duplex J/Ja scanners over the
+                       rest of the source's TRN and the recipient never
+                       listened to the control channel at all.
+
+                       The move must wait for the END of TRN, not for the
+                       refinement window: a control channel demodulator pointed
+                       at a second of primary channel TRN has its band edge
+                       timing recovery locked to noise by the time PPh -- all
+                       32 symbols of it -- arrives.  The length is the one this
+                       modem asked for in INFOh (Table 22 bits 15:21, 35 ms
+                       units), so it is arithmetic rather than detection. */
+                    s->hdx_await_trn_end = true;
+                    s->hdx_silence_bauds = 0;
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                             "Rx - Phase 3: half-duplex recipient trained; waiting for the end of TRN before the control channel (12.4.2.1)\n");
+                    return;
+                }
+                /*endif*/
                 s->stage = V34_RX_STAGE_PHASE3_WAIT_S;
                 s->duration = 0;
                 s->s_detect_count = 0;
@@ -13544,6 +13753,44 @@ SPAN_DECLARE(int) v34_rx_fillin(v34_state_t *s, int len)
     }
     /*endfor*/
     return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+void v34_condition_rx_for_pph(v34_state_t *s, const char *why)
+{
+    V34_RX_LOG(&s->logging, SPAN_LOG_FLOW,
+             "Rx - CC: conditioned to detect PPh (%s)\n", why);
+    s->rx.stage = V34_RX_STAGE_CC;
+    s->rx.current_demodulator = V34_MODULATION_CC;
+    s->rx.received_event = V34_EVENT_NONE;
+    s->rx.pph_detected = false;
+    s->rx.pph_hunt_bauds = 0;
+    s->rx.pph_corr_energy = 0.0f;
+    s->rx.pph_corr_weight = 0.0f;
+    memset(s->rx.pph_corr, 0, sizeof(s->rx.pph_corr));
+    s->rx.pph_best_phase[0] = s->rx.pph_best_phase[1] = -1;
+    s->rx.pph_hold_steps[0] = s->rx.pph_hold_steps[1] = 0;
+    s->rx.hdx_await_trn_end = false;
+    s->rx.hdx_silence_bauds = 0;
+    s->rx.mp_seen = 0;
+    s->rx.mp_count = -1;
+    s->rx.mp_remote_ack_seen = 0;
+    s->rx.bitstream = 0;
+    s->rx.bit_count = 0;
+    s->rx.crc = 0xFFFF;
+    s->rx.duration = 0;
+    s->rx.baud_half = 0;
+    memset(&s->rx.last_sample, 0, sizeof(s->rx.last_sample));
+    /* The control channel demodulator runs its own band edge timing recovery
+       over the 600 baud RRC, so give it a clean filter history rather than
+       whatever the primary channel left in it. */
+    s->rx.rrc_filter_step = 0;
+    memset(s->rx.rrc_filter, 0, sizeof(s->rx.rrc_filter));
+    s->rx.eq_put_step = 0;
+    memset(s->rx.cc_ted.symbol_sync_low, 0, sizeof(s->rx.cc_ted.symbol_sync_low));
+    memset(s->rx.cc_ted.symbol_sync_high, 0, sizeof(s->rx.cc_ted.symbol_sync_high));
+    memset(s->rx.cc_ted.symbol_sync_dc_filter, 0, sizeof(s->rx.cc_ted.symbol_sync_dc_filter));
+    s->rx.cc_ted.baud_phase = 0;
 }
 /*- End of function --------------------------------------------------------*/
 

@@ -1074,6 +1074,9 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/v32bis.Plo@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/v34_logging.Plo@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/v34rx.Plo@am__quote@ # am--include-marker
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/v34rx_data.Plo@am__quote@ # am--include-marker
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/v34rx_phase3.Plo@am__quote@ # am--include-marker
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/v34rx_phase4_trn.Plo@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/v34tx.Plo@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/v42.Plo@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/v42bis.Plo@am__quote@ # am--include-marker
@@ -1391,6 +1394,9 @@ distclean: distclean-am
 	-rm -f ./$(DEPDIR)/v32bis.Plo
 	-rm -f ./$(DEPDIR)/v34_logging.Plo
 	-rm -f ./$(DEPDIR)/v34rx.Plo
+	-rm -f ./$(DEPDIR)/v34rx_data.Plo
+	-rm -f ./$(DEPDIR)/v34rx_phase3.Plo
+	-rm -f ./$(DEPDIR)/v34rx_phase4_trn.Plo
 	-rm -f ./$(DEPDIR)/v34tx.Plo
 	-rm -f ./$(DEPDIR)/v42.Plo
 	-rm -f ./$(DEPDIR)/v42bis.Plo
@@ -1541,6 +1547,9 @@ maintainer-clean: maintainer-clean-am
 	-rm -f ./$(DEPDIR)/v32bis.Plo
 	-rm -f ./$(DEPDIR)/v34_logging.Plo
 	-rm -f ./$(DEPDIR)/v34rx.Plo
+	-rm -f ./$(DEPDIR)/v34rx_data.Plo
+	-rm -f ./$(DEPDIR)/v34rx_phase3.Plo
+	-rm -f ./$(DEPDIR)/v34rx_phase4_trn.Plo
 	-rm -f ./$(DEPDIR)/v34tx.Plo
 	-rm -f ./$(DEPDIR)/v42.Plo
 	-rm -f ./$(DEPDIR)/v42bis.Plo

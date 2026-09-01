@@ -696,7 +696,10 @@ enum v34_tx_stages_e
         control channel start-up, before PPh.  Distinct from
         V34_TX_STAGE_HDX_POST_L2_SILENCE, which is 12.3.1.1's silence before
         S/S-bar.  Appended so every earlier value stays stable. */
-    V34_TX_STAGE_HDX_CC_SILENCE
+    V34_TX_STAGE_HDX_CC_SILENCE,
+    /*! \brief V.34 12.4.1.4/12.4.2.5: user data on the half-duplex control
+        channel, after the MPh exchange and E. */
+    V34_TX_STAGE_HDX_CC_DATA
 };
 
 enum v34_events_e
@@ -737,7 +740,10 @@ enum v34_events_e
         the receiver without going through a complete retrain", and it
         is the only recovery a peer can start that does not cost a
         startup, so it has to be answered rather than talked over. */
-    V34_EVENT_PEER_RENEG_S
+    V34_EVENT_PEER_RENEG_S,
+    /*! \brief V.34 12.4: signal PPh detected on the half-duplex control
+        channel.  Both 12.4.1.1 and 12.4.2.1 turn on it. */
+    V34_EVENT_PPH
 };
 
 typedef struct
@@ -2069,6 +2075,33 @@ typedef struct
     int phase4_trn_recent_score;
     uint8_t phase4_trn_recent_symbol_ones[256];
     uint8_t phase4_trn_recent_active;
+
+    /*! \brief V.34 12.4 half-duplex control channel start-up: PPh detection.
+        PPh (10.2.4.5) is four periods of a fixed 8-symbol sequence, sent
+        unscrambled and undifferentiated, so it is found by correlating the
+        control channel symbols against the known pattern.  |correlation| is
+        used, which is invariant to the arbitrary carrier phase the CC
+        demodulator starts with -- there is no equalizer on this channel. */
+    complexf_t pph_corr[2][8];
+    float pph_corr_energy;
+    float pph_corr_weight;
+    /*! \brief Set once PPh has been detected in V34_RX_STAGE_CC, so the
+        detector stops and the MPh scanner below owns the symbol stream. */
+    bool pph_detected;
+    /*! \brief Symbols spent in V34_RX_STAGE_CC hunting PPh, for 12.4.3.2 and
+        12.4.4.1's three second bounds and for the detection log. */
+    int pph_hunt_bauds;
+    /*! \brief The winning PPh correlator phase on the previous T/2 step, and
+        how many consecutive steps it has won for. */
+    int pph_best_phase[2];
+    int pph_hold_steps[2];
+    /*! \brief V.34 12.4.2.1: set once the half-duplex recipient has trained on
+        the source's PP and TRN, so the primary channel receiver watches for
+        the silence that ends Phase 3 and then moves to the control channel. */
+    bool hdx_await_trn_end;
+    /*! \brief Consecutive near-zero primary channel symbols seen while
+        hdx_await_trn_end is set. */
+    int hdx_silence_bauds;
 
     /* MP or MPh receive tracking data */
     int mp_count;

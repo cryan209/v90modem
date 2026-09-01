@@ -251,15 +251,143 @@ No payload crosses in either direction, and no claim is made that it does.
 `v34tx.c` and `v34rx.c` are shared with V.90 and plain V.34; every change above
 is inside a `!duplex` branch or a diagnostic, and the full suite is green.
 
+## The control channel receiver, and 12.4 end to end
+
+Steps 1 and 2 below are now done: **the source and the recipient complete the
+whole of 12.4 -- PPh, ALT, the MPh exchange and E -- and control channel user
+data crosses in both directions.**  `v34_hdx_test` now grades that data rather
+than counting it (the far end's generator, aligned once and then compared bit
+for bit; a bit count only says a modulator ran), and eleven of the twelve
+symbol-rate/law rows carry it with **zero errors in both directions**.  They
+run in `make test`.
+
+**Read the build note at the end of this section before anything else.**  Most
+of the time this took went to a stale-object trap, and three of the findings
+below were first "measured" against binaries that were not what the source
+said.
+
+### Everything above the wire was on the wrong modulation
+
+10.2.4 puts ALT (10.2.4.2), E (10.2.4.3), MPh (10.2.4.4) and PPh (10.2.4.5) on
+the **control channel** modulation -- 600 baud, 1200 Hz from the call modem and
+2400 Hz from the answer modem -- and 10.2.3.3 says the same of Sh and Sh-bar.
+Only PPh was on it.  ALT, MPh and Sh went out through `V34_MODULATION_V34`, at
+the Phase 3 symbol rate and carrier, where no control channel receiver could
+have read them however good it was.  `get_e_baud()` then ran into
+`data_baud_init()`, the duplex primary channel data mode, where 12.4.1.4 wants
+control channel data; that is the new `cc_data_baud_init()`.
+
+`get_pph_baud()` also ran PPh four times over: `PPH_SYMBOLS` is already
+`8*PPH_REPEATS`, the whole 32 symbol signal, and the loop ran to
+`PPH_SYMBOLS*PPH_REPEATS`.  It was invisible because the table is 8-periodic
+and the index was masked to 3 bits.
+
+### The receive side: V34_MODULATION_CC was never selected, anywhere
+
+`cc_rx()` and `process_cc_half_baud()` -- RRC, band edge timing recovery,
+differential demodulation, and a complete MPh and E scanner -- were **dead
+code**.  `V34_MODULATION_CC` is assigned to `rx.current_demodulator` nowhere in
+the tree; Phase 2's INFO exchange is done by `info_rx()` instead.  So "there is
+no control-channel receive path" was half right: the demodulator existed and
+nothing could reach it.
+
+New `v34_condition_rx_for_pph()` is the way in, called from 12.4.1.1 on the
+source and from the end of Phase 3 on the recipient.  New in
+`process_cc_half_baud()` is the PPh detector: PPh carries neither the scrambler
+nor the differential encoder, so it is found by correlating against the known
+8-symbol period, scored as |correlation| normalised by signal energy -- which
+is invariant to the arbitrary carrier phase the control channel starts on, the
+same shape as the primary channel's PP acquisition at 11.3.1.2.4.
+
+Two things about that detector are worth keeping.
+
+**It runs at the T/2 rate, above the `baud_half` gate, with a correlator bank
+per parity.**  PPh is 32 symbols and 12.4.1.1 puts 70 ms of silence in front of
+it, so the band edge timing recovery has nothing to converge on until PPh
+itself starts: which of the two T/2 outputs is the eye centre has to be decided
+by the correlation.  Getting the alignment back wrong is not subtle and it is
+asymmetric -- setting `baud_half` to the winning parity rather than to 0 (the
+gate is "toggle, then return if the result is 1") aligned one modem onto the
+eye and the other onto the eye crossing, and the two then behaved completely
+differently on a bit-exact loopback with nothing else to tell them apart.
+
+**The decision is taken on the winning PHASE being stable, not on the score.**
+With no equalizer and a timing loop that has not converged, the normalised
+score tops out well short of 1, and how far short depends on where in the eye
+this receiver happened to start: 0.742 at 3200 baud against 0.805 at 3429, with
+the same, correct, phase winning every step in both.  A score gate at 0.80
+therefore separated the symbol rates from each other rather than a real PPh
+from noise.  A longer coherent memory does not fix it and makes it much worse
+(decay 0.985, matched to PPh's own 32 symbols, peaks at 0.24) -- the received
+PPh is not coherent over its whole length, which is itself worth knowing.
+
+### The dibit is the negation of the transmitted one, here too
+
+MPh would not decode until `process_cc_half_baud()` negated the recovered
+dibit.  10.2.4 advances the point index by the dibit and
+`training_constellation_4[]` is ordered so an increasing index rotates
+clockwise while the receiver measures the difference counter-clockwise.  This
+is the same fact already pinned in the V.90 9.4 CP decode and in the duplex
+11.4 MP decode -- a property of the encoder and the table, not of the channel.
+
+### The recipient leaves the primary channel on silence, not on arithmetic
+
+12.4.2.1 has the recipient condition its receiver for PPh after Phase 3.  The
+first version computed the moment from INFOh's TRN length (Table 22 bits 15:21,
+35 ms units).  That gives the length of TRN and *not* the instant this receiver
+started counting it -- the PP acquisition ahead of it takes a variable number of
+symbols -- and at 2743 and 3000 baud the offset was enough to put the recipient
+on the control channel after the source's 32 symbols of PPh had already gone
+by, with nothing to lock to for the rest of the call.  It now moves on the
+silence that ends Phase 3, which is 12.4.1.1's own 70 +/- 5 ms and needs no
+arithmetic at all.
+
+### What the recipient's S detection was actually resting on
+
+12.3.2.1 has the recipient detect S with nothing before it, but
+`phase3_s_detect_armed` is only ever set by the J/Ja machinery -- and
+**half-duplex has no J**.  `v34_v90_arm_phase3_s_detector()` is called from the
+INFOh transmitter, which is what arms it here; without that call the recipient
+would sit in `PHASE3_WAIT_S` for the whole call.  Worth knowing before anyone
+tidies that call site away as V.90-specific.
+
+### The one row that does not pass, and what it is not
+
+2400 baud u-law carries **three bit errors in 20574 bits**, one direction only,
+in a burst 23 bits wide.  It is at rx index 12834 -- the same index whatever the
+primary symbol rate, and the control channel is 600 baud regardless of the
+primary rate -- so it is the control channel's own timing recovery and not the
+primary channel.  The row stays out of `make test` until that is understood.
+`V34_HDX_ERRPOS=1` prints the positions.
+
+### The build trap: three v34 objects had no header dependencies at all
+
+`spandsp-master/src/Makefile` (and `Makefile.in`) listed `v34rx_data.lo`,
+`v34rx_phase3.lo` and `v34rx_phase4_trn.lo` in `am__objects_2`, so they linked,
+but **did not `include` their `.deps/*.Plo` files** -- the generated Makefile
+predates those sources being split out and was hand-patched incompletely.  So
+any change to `spandsp/private/v34.h` left those three objects compiled against
+the OLD `v34_rx_state_t` layout, silently, while everything else rebuilt.  The
+symptom is not a link error: it is impossible field values.  `Rx - stage=
+PHASE3_WAIT_S demod=UNKNOWN (18)` is what it looked like here, and it cost this
+session three separate wrong conclusions -- including "the recipient does not
+detect S at HEAD", which was measured twice against mixed builds and is not
+true.  The `include` lines are added now.  The lesson generalises: on this tree,
+when a change to a header produces behaviour that contradicts the source, check
+what actually recompiled before believing the measurement.
+
 ## Order of work from here
 
-1. **A control-channel receiver.**  PPh detection first, since both 12.4.1.1
-   and 12.4.2.1 turn on it, then ALT, MPh and the 20-bit E.  Everything below
-   waits on this.  The transmit halves (`pph_baud_init()`,
-   `second_alt_baud_init()`, `mph_baud_init()`, `e_baud_init()`) are done.
-2. Wire 12.4 end to end: source detects PPh -> trains -> MPh -> E; recipient
-   detects PPh -> sends PPh, ALT, MPh -> E.  Both then have a rate from the
-   MPh exchange.
+1. ~~A control-channel receiver.~~  Done -- see the section above.
+2. ~~Wire 12.4 end to end.~~  Done, both roles, control channel data crossing
+   in both directions.  **What is NOT done is the rate:** 12.4.1.3 and 12.4.2.4
+   determine the primary channel rate from both MPh sequences, and
+   `prepare_mph()` leaves the fields empty -- every MPh on the wire carries
+   `Max data rate = 0` and `Signalling rate mask = 0x0000`, so there is
+   nothing to negotiate from.  That is the next thing.
+2a. The 12.4.3 and 12.4.4 recovery procedures.  A missed PPh, MPh or E is a
+   **control channel retrain (12.8.1)** after three seconds, not a
+   retransmission, and none of it exists.  Today a missed PPh is a dead call.
 3. `half_duplex_state` actually read: 12.5's primary channel turn-off and
    12.6's control channel turn-off are the source/recipient turnarounds, and
    nothing consumes the mode today.
