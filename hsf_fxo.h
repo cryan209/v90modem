@@ -150,6 +150,47 @@ void hsf_fxo_stats(const struct hsf_dev *d, struct hsf_stats *out);
  * doing one action at a time; the firmware upload, which we fully understand,
  * anchors the trace.  Then fill these in -- nothing else in this file changes.
  */
+/*
+ * The DAA relay control words ARE known, even though the script framing that
+ * carries them is not.
+ *
+ * configtypes.h:407 DEVMGR_DAA_RELAY_CODE indexes a 12-entry table; hsf.cty
+ * ships the values per country and per DAA type, and hsfcadmus2smart.inf says
+ * this part is "DAA Type: SMART", so SMART_RELAYS is our column.  cvtinf.pl
+ * pads them from 16 to 32 bits (DAA_RELAY_TYPE), so the wire value is
+ * 0x000080xx.
+ *
+ * Differencing the states that vary in one property decodes the low byte:
+ *   bit 4  phone jack connected to line   (0xB* vs 0xA*)
+ *   bit 3  caller ID / on-hook monitor    (0xBD/0xB5, 0xAD/0xA5)
+ *   bit 1  off-hook          } complementary
+ *   bit 0  on-hook           }
+ *   bit 2  set in every state -- constant
+ *
+ * Note index 6: on-hook, phone isolated, monitor ENABLED.  That is the DAA
+ * listening to the line without seizing it -- the caller-ID path -- which is
+ * how ring and line-in-use are observed before going off-hook.
+ */
+enum hsf_daa_relay {
+	HSF_RELAY_GPIO_MASK                   = 0,
+	HSF_RELAY_GPIO_DEFAULT                = 1,
+	HSF_RELAY_OFFHOOK_PHONETOLINE         = 2,
+	HSF_RELAY_OFFHOOK_PHONEOFFLINE        = 3,	/* the normal modem seize */
+	HSF_RELAY_ONHOOK_PHONETOLINE_CALLID   = 4,
+	HSF_RELAY_ONHOOK_PHONETOLINE_NOCALLID = 5,
+	HSF_RELAY_ONHOOK_PHONEOFFLINE_CALLID  = 6,	/* listen without seizing */
+	HSF_RELAY_ONHOOK_PHONEOFFLINE_NOCALLID = 7,
+	HSF_RELAY_OFFHOOK_PULSE_MAKE          = 8,
+	HSF_RELAY_OFFHOOK_PULSE_BREAK         = 9,
+	HSF_RELAY_OFFHOOK_PULSESETUP          = 10,
+	HSF_RELAY_OFFHOOK_PULSECLEAR          = 11,
+	HSF_RELAY_COUNT                       = 12,
+};
+
+/* SMART_RELAYS, hsf.cty Profile\0000.  Per-country profiles may differ; this is
+ * the base profile and is the one to check a capture against first. */
+extern const uint16_t hsf_smart_relays[HSF_RELAY_COUNT];
+
 int hsf_fxo_script_load(struct hsf_dev *d, const uint8_t *body, size_t len);
 int hsf_fxo_script_delete(struct hsf_dev *d);
 

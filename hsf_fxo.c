@@ -446,6 +446,22 @@ void hsf_fxo_stats(const struct hsf_dev *d, struct hsf_stats *out)
 
 /* -------------------------------------------------------------- line control */
 
+/* hsf.cty Profile\0000 SMART_RELAYS, little-endian 16-bit as written there. */
+const uint16_t hsf_smart_relays[HSF_RELAY_COUNT] = {
+	[HSF_RELAY_GPIO_MASK]                    = 0xFFFF,
+	[HSF_RELAY_GPIO_DEFAULT]                 = 0x80B5,
+	[HSF_RELAY_OFFHOOK_PHONETOLINE]          = 0x80B6,
+	[HSF_RELAY_OFFHOOK_PHONEOFFLINE]         = 0x80A6,
+	[HSF_RELAY_ONHOOK_PHONETOLINE_CALLID]    = 0x80BD,
+	[HSF_RELAY_ONHOOK_PHONETOLINE_NOCALLID]  = 0x80B5,
+	[HSF_RELAY_ONHOOK_PHONEOFFLINE_CALLID]   = 0x80AD,
+	[HSF_RELAY_ONHOOK_PHONEOFFLINE_NOCALLID] = 0x80A5,
+	[HSF_RELAY_OFFHOOK_PULSE_MAKE]           = 0x80A4,
+	[HSF_RELAY_OFFHOOK_PULSE_BREAK]          = 0x80A5,
+	[HSF_RELAY_OFFHOOK_PULSESETUP]           = 0x80A4,
+	[HSF_RELAY_OFFHOOK_PULSECLEAR]           = 0x80A4,
+};
+
 int hsf_fxo_script_load(struct hsf_dev *d, const uint8_t *body, size_t len)
 {
 	if (len == 0)
