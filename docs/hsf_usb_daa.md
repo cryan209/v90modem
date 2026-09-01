@@ -225,13 +225,19 @@ the two candidates above, from the driver side alone.
 Matching the driver's exact granularity (64-byte RX transfers, 128-byte TX)
 changes nothing: still zero RX.
 
-There is one more control path in the driver, and it is deliberately not
-exercised here: `hsfusbcd2188_` CRCs a host buffer with CRC-16-CCITT (poly
-0x1021) and writes it to the device in 64-byte blocks via `CD2_WRITE_EEPROM`,
-driven by `hsfusbcd2168_` which sets a length and resets a position. That is a
-provisioning/download path rather than anything in the per-call flow, and an
-EEPROM write is persistent, so it stays untried without a reason to think it is
-the gate.
+There is one more control path in the driver -- `hsfusbcd2188_` CRCs a host
+buffer with CRC-16-CCITT (poly 0x1021) and writes it in 64-byte blocks via
+`CD2_WRITE_EEPROM`, driven by `hsfusbcd2168_`. **It is irrelevant to this part,
+and the GPL source says so twice over.** `cnxthwusb_common.c:250` sets
+`UpdateEEPROM` only inside `#if TARGET_HCF_FAMILY`, and only when a download
+pipe at endpoint **0x03** is present with 64-byte packets; this device is HSF,
+not HCF, and its configuration descriptor has no endpoint 0x03 at all (0x01 and
+0x81 on IF0, 0x82 on IF1). So `cbUsbEEPROM_Restore` (`osusb.c:354`) can never
+fire here. And the configuration itself does not live on the device: `NVM_Read`
+in `osnvm.c` reads host-side dynamic parameters and falls back to the
+compiled-in `g_DefaultCountryCode` / `g_FactoryProfile`, never touching the
+device EEPROM. Our own probe reading it back as all zero is the expected state,
+not a missing provisioning step.
 
 ## Open: what starts the codec
 
@@ -257,6 +263,7 @@ What is left is firmware state the scripts read rather than carry. The relay
 values are the proof it exists: the off-hook script contains no 0xA6, so the
 firmware holds that table and something must load it. With the script space now
 fully mapped and every one of the 34 exercised, that loader is not a script --
-which points at the country/profile data the vendor stack holds host-side
-(`hsf.cty`, `osnvm.c`) and at `CD2_WRITE_EEPROM`, whose CRC-16-CCITT download
-path is the only unexercised control path left in the driver.
+and the country/profile data the vendor stack holds host-side (`hsf.cty`,
+`osnvm.c`) is consumed by the ENGINE rather than sent to the device, so it is
+not a loader either. What loads the firmware's relay table is genuinely not
+identified, and no path in this driver is a candidate for it.
