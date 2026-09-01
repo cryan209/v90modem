@@ -2299,6 +2299,32 @@ static void me_log_v8_peer_summary(const v8_parms_t *result)
     }
 }
 
+/* V.34 fax probe (T.30 Annex F / V.34 clause 12), opt-in.
+ *
+ * Default OFF, and it must stay that way: this is the shared production call
+ * path, and offering V.34 half-duplex changes what every DATA peer sees in
+ * our JM.  With it set the answerer adds V8_MOD_V34HDX to its JM offer, so a
+ * calling fax's CM -- a Canon TR7560 sends 81 85 d4 90 07, offering exactly
+ * that -- intersects with something instead of nothing, and the far end
+ * proceeds into V.34 Phase 2 where its INFOh, PPh, ALT and MPh can be
+ * recorded.
+ *
+ * This does NOT make a working fax.  T.30 Annex F does not exist here, so
+ * nothing consumes the primary channel and no image is transferred; the
+ * point is the RECORDING.  Every receive path in the clause 12 work is fed
+ * by our own transmitter today, which is exactly the arrangement that hides
+ * a wrong-but-self-consistent assumption. */
+static bool me_v34_fax_probe(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *v = getenv("ME_V34_FAX_PROBE");
+        cached = (v && atoi(v) != 0);
+    }
+    return cached != 0;
+}
+
 static int me_start_or_restart_v8_locked(int answer_tone)
 {
     v8_parms_t v8_parms;
@@ -2324,6 +2350,14 @@ static int me_start_or_restart_v8_locked(int answer_tone)
     v8_parms.jm_cm.modulations        = V8_MOD_V34 | V8_MOD_V22;
     if (g_advertise_v90)
         v8_parms.jm_cm.modulations   |= V8_MOD_V90;
+    if (me_v34_fax_probe() && !g_calling_party) {
+        /* Answerer only.  A calling fax is the SOURCE in V.34 12.2.1 ("call
+           modem as source modem"), which makes this end the RECIPIENT, and
+           that is the one pairing the clause 12 code has ever run. */
+        v8_parms.jm_cm.modulations   |= V8_MOD_V34HDX;
+        ME_LOG("[ME] V.34 fax probe: offering V.34 half-duplex in JM "
+               "(ME_V34_FAX_PROBE)\n");
+    }
     v8_parms.jm_cm.protocols          = V8_PROTOCOL_LAPM_V42;
     if (g_advertise_v90 && me_v90_analogue_role()) {
         /*
@@ -3930,7 +3964,15 @@ static bool restart_v34_phase2_locked(const char *reason)
 
     baud = g_v34_start_baud ? g_v34_start_baud : 3200;
     bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(baud);
-    if (v34_restart(g_v34, baud, bps, true) != 0) {
+    /* Keep the half-duplex role across a retrain.  The `true` here was
+       unconditional, so a clause 12 call that took a retrain for any reason
+       came back as a full-duplex V.34 data modem: measured against a Canon
+       TR7560, the stage trace goes HDX_INITIAL_A ... HDX_SECOND_A_WAIT and
+       then, after the retrain, INITIAL_A / FIRST_A / L1_L2 / PRE_INFO1_A --
+       the plain V.34 answer-modem timetable, which a fax machine cannot
+       complete.  A retrain is a fresh start-up of the SAME call, and V.34
+       12.8 keeps it half-duplex. */
+    if (v34_restart(g_v34, baud, bps, v34_is_duplex(g_v34)) != 0) {
         ME_LOG("[ME] V.34 Phase 2 restart failed (%d baud, %d bps)\n",
                baud, bps);
         trace_phase("V34 Phase2 restart failed");
@@ -4901,6 +4943,75 @@ static void start_v22bis_training(void)
 }
 
 /* Start V.34 training — used when V.8 negotiates V.34 */
+/* V.34 12.2/12.3/12.4 as the RECIPIENT, for the fax probe.  Deliberately a
+   separate function rather than a flag through start_v34_training(): that one
+   carries the V.90 upstream rate cap, the echo canceller and the notch policy,
+   none of which belong to a half-duplex fax call, and threading a duplex flag
+   through all of it would put a second meaning on paths this project has
+   tuned against three different data peers. */
+static void start_v34hdx_training(void)
+{
+    /* Must be called with g_state_mtx held */
+    int bps;
+
+    g_mod   = ME_MOD_V34;
+    g_state = ME_TRAINING;
+    g_phase_start_ms = trace_now_ms();
+    g_training_rx_energy = 0;
+    g_training_rx_count  = 0;
+    g_training_tx_samples = 0;
+    g_last_rx_stage = 0;
+    g_last_tx_stage = 0;
+
+    if (g_v34) {
+        v34_free(g_v34);
+        g_v34 = NULL;
+    }
+    bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(g_v34_start_baud);
+    g_v34 = v34_init(NULL,
+                     g_v34_start_baud,
+                     bps,
+                     g_calling_party,
+                     false,         /* half duplex: V.34 clause 12 */
+                     v34_get_bit_cb, NULL,
+                     v34_put_bit_cb, NULL);
+    if (!g_v34) {
+        ME_LOG("[ME] V.34 fax probe: v34_init(half duplex) failed\n");
+        me_hangup();
+        return;
+    }
+    {
+        logging_state_t *log = v34_get_logging_state(g_v34);
+
+        if (log)
+            span_log_set_level(log, me_span_flow_level());
+    }
+    v34_tx_power(g_v34, -10.0f);
+    /* 12.2.1 is "call modem as source modem": the calling fax transmits the
+       image on the primary channel, so it is the source and we are the
+       recipient.  12.2.1.2.6 then has this end send INFOh, and 12.3.2.1 has
+       it go silent and wait for the source's S. */
+    v34_half_duplex_change_mode(g_v34, V34_HALF_DUPLEX_RECIPIENT);
+
+    /* No echo canceller and no notch.  Both are tuned for the V.90/V.34 data
+       paths, both are applied AFTER the RX G.711 tap, and both have been the
+       answer to a "the line is bad" investigation in this project twice
+       already.  A probe whose entire output is a recording must not have an
+       unretired filter in front of it. */
+    if (g_echo_can) {
+        modem_echo_can_segment_free(g_echo_can);
+        g_echo_can = NULL;
+    }
+    g_notch.active = 0;
+    g_v34_use_echo_can = false;
+    g_tx_buf_wr = 0;
+    g_tx_buf_rd = 0;
+
+    ME_LOG("[ME] V.34 fax probe: half-duplex clause 12 started as RECIPIENT "
+           "(%d baud, ceiling %d bps)\n", g_v34_start_baud, bps);
+    trace_phase("enter TRAINING: mod=V34HDX role=recipient");
+}
+
 static void start_v34_training(void)
 {
     /* Must be called with g_state_mtx held */
@@ -5308,6 +5419,16 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
            disabled the notch — but we need it for Phase 2 CC echo removal. */
         notch_filter_init(&g_notch, 1200.0f, 30.0f, 8000.0f);
         ME_LOG("[ME] V.90 notch filter at 1200 Hz (our CC TX), RX CC at 2400 Hz\n");
+
+    } else if (result->jm_cm.modulations & V8_MOD_V34HDX) {
+        /* V.34 12.4 half-duplex, i.e. a T.30 Annex F fax.  Only reachable
+           with ME_V34_FAX_PROBE set, because that is the only way
+           V8_MOD_V34HDX gets into our JM offer in the first place. */
+        ME_LOG("[ME] V.8 negotiated V.34 HALF-DUPLEX (clause 12 / T.30 Annex F), "
+               "peer call function=%s\n",
+               v8_call_function_to_str(result->jm_cm.call_function));
+        trace_phase("V8 selected V34 half-duplex");
+        start_v34hdx_training();
 
     } else if (result->jm_cm.modulations & V8_MOD_V34) {
         ME_LOG("[ME] V.8 negotiated V.34 (full duplex, up to 33.6 kbps)\n");

@@ -536,6 +536,99 @@ and it immediately caught two conventions loopback could never have shown.
 
 Evidence: `artifacts/v90-hardware/20260901T045727Z-canon-v8-cm-fixed`.
 
+## Stage 2: the Canon accepts V.34 half-duplex, and three defects follow
+
+With `ME_V34_FAX_PROBE=1` the answerer adds V8_MOD_V34HDX to its JM, so the
+intersection with the Canon's CM is no longer empty:
+
+```
+Far end offers: V.17 half-duplex, V.21 duplex, V.27ter duplex, V.29 half-duplex, V.34 half-duplex supported
+Will offer: V.34 half-duplex supported
+```
+
+**The Canon takes it.**  The call goes from six seconds to forty-two, it stops
+being a V.8 rejection and becomes a V.34 clause 12 call, and our side runs the
+whole half-duplex Phase 2 -- INFO0, HDX_INITIAL_A, FIRST_A, the !A reversal,
+FIRST_A_SILENCE, SECOND_A -- and transmits **INFOh at tx_t = 0.912 s**, which
+is 12.2.1.2.6 followed properly.  It then goes silent per 12.3.2.1 and
+conditions its receiver for S.
+
+That is the first time any of this code has faced a foreign implementation.
+Three defects came out of two calls, and not one of them is reachable from the
+loopback.
+
+### 1. The S detector fires on the source's Tone B
+
+`Rx - Phase 3: far-end S detected ... via=rotation alt=0/32 dom=3:32/32`.  The
+sustained-rotation path exists for a V.90 peer and the comment beside it
+already warned that it false-fires on any single-frequency tone, because a pure
+tone differentially demodulates to a constant dibit.  Half-duplex walks
+straight into it: 12.2.1.1.4 has the source hold Tone B until it has received
+INFOh, so the tone is still on the line at the instant 12.3.2.1 has us fall
+silent and start looking for S.
+
+Measured on the recording rather than inferred -- at that instant the received
+audio is a pure 1200 Hz tone, Goertzel 3885 against 47 at 1800 Hz and 7 at
+2400 Hz.  Tone B.  Our own Tone B detector said so 80 ms later.
+
+The rotation path is now duplex-only.  Nothing is lost: 10.1.3.7's S alternates
+between a point and the same point rotated 90 degrees, so a real S is found on
+the ALTERNATION path, which is how the loopback detects it and how all sixteen
+`make test` rows still pass.
+
+### 2. The retrain watcher calls that same Tone B a retrain
+
+With the S false positive gone, the next thing fires instead:
+`Rx - Tone B detected in stage PHASE3_WAIT_S (80 ms); peer initiated a retrain`.
+9.5.1.2 and 11.5.1.2 are about a peer interrupting an established link.  At the
+half-duplex Phase 2-to-3 seam the source's tone is the ordinary tail of Phase
+2 -- 12.2.1.1.4 holds it until INFOh arrives and 12.3.1.1 adds 70 ms of silence
+before S -- so it is guaranteed to be there.  The watcher now stands down for
+`!duplex` in PHASE3_WAIT_S.
+
+A loopback cannot show either of these: there both ends are the same code with
+no propagation or processing delay, so the source's tone stops at exactly the
+moment the recipient stops listening.
+
+### 3. A retrain silently converts the call to full duplex
+
+`restart_v34_phase2_locked()` called `v34_restart(..., true)` with the duplex
+flag hardcoded.  The stage trace says the rest: HDX_INITIAL_A ... HDX_SECOND_A
+_WAIT, retrain, then **INITIAL_A / FIRST_A / FIRST_NOT_A / L1_L2 /
+POST_L2_WAIT_TONE_B / PRE_INFO1_A / INFOMARKSA** -- the plain V.34 answer-modem
+timetable, which no fax machine can complete.  A retrain is a fresh start-up of
+the same call and 12.8 keeps it half-duplex; new `v34_is_duplex()` passes the
+role back.
+
+### The instrument that made this readable, and the one that lied
+
+Stage changes now carry `tx_t=`, the position in the TRANSMITTER'S OWN sample
+stream.  Everything else available was a dwell or a wall clock, and neither can
+be laid against a recording.
+
+**That matters because this session produced a confident wrong answer from
+exactly that mistake.**  Reading `live-tx.g711` against `live-rx.g711` gave
+"our INFOh reaches the wire 7.95 s after the Canon's Tone B, against
+12.2.1.2.6's 25 ms" -- a precise, spec-referenced, entirely false claim.  INFOh
+goes out at 0.912 s.  The burst being measured was the post-retrain INFOMARKSa
+of a call that had already fallen back to duplex.  `modem_engine.c` carries a
+comment recording the same error costing an earlier session an 8 s
+misalignment and a confident "our transmitter is silent during the stall";
+the file lengths matching to 140 ms is not evidence that the two streams share
+a time origin.  **Do not cross-read the two taps.  Stamp the event in the
+stream you are going to look at.**
+
+### Still open
+
+Whether the Canon accepts our INFOh.  It holds Tone B for eight seconds and
+then twelve more, and 12.2.1.3.4 gives it 2000 ms before it gives up on an
+INFOh that has not arrived -- so on the evidence it never took ours.  That is
+the next thing to settle, and it wants the INFOh demodulated out of our own
+transmit tap and checked against Table 22 before anything else is changed.
+
+Evidence: `artifacts/v90-hardware/20260901T050547Z-canon-hdx-phase2` and
+`-051717Z-canon-hdx-r2`.
+
 ## Order of work from here
 
 1. ~~A control-channel receiver.~~  Done -- see the section above.

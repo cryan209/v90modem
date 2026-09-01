@@ -891,10 +891,29 @@ void v34_rx_phase3_wait_s_symbol(v34_rx_state_t *s, const complexf_t *sym)
             && mag_prev > 0.2f
             && ((s->phase3_s_alt_count >= PHASE3_S_ALTERNATING_MIN
                  && s->phase3_s_stable_windows >= PHASE3_S_STABLE_WINDOWS)
-                || (s->phase3_s_dom_windows >= PHASE3_S_DOMINANT_STABLE
+                /* The sustained-rotation path is DUPLEX ONLY.  The note above
+                   says it false-fires on any single-frequency tone, because a
+                   pure tone differentially demodulates to a constant dibit,
+                   and half-duplex walks straight into that: V.34 12.2.1.1.4
+                   has the call modem hold Tone B while it waits for our
+                   INFOh, and 12.3.2.1 then has this end go silent and arm the
+                   S detector -- pointed at a peer that is still transmitting
+                   a tone.  Measured against a Canon TR7560 sending a V.34
+                   fax: the detector fired with alt=0/32 dom=3:32/32, and the
+                   received audio at that instant is a pure 1200 Hz tone (1200
+                   Hz Goertzel 3885 against 47 at 1800 and 7 at 2400) -- Tone
+                   B, which our own Tone B detector then reported 80 ms later
+                   as a peer retrain.  There is nothing to lose by excluding
+                   it here: 10.1.3.7's S alternates between a point and the
+                   same point rotated 90 degrees, so a real S shows up on the
+                   ALTERNATION path (alt=32/32), which is how the half-duplex
+                   loopback detects it. */
+                || (s->duplex
+                    &&  s->phase3_s_dom_windows >= PHASE3_S_DOMINANT_STABLE
                     &&  s->phase3_s_dom_windows <= PHASE3_S_DOMINANT_RUN_MAX)))
         {
-            bool by_rotation = (s->phase3_s_dom_windows >= PHASE3_S_DOMINANT_STABLE
+            bool by_rotation = (s->duplex
+                                &&  s->phase3_s_dom_windows >= PHASE3_S_DOMINANT_STABLE
                                 &&  s->phase3_s_dom_windows <= PHASE3_S_DOMINANT_RUN_MAX);
 
             s->phase3_s_present = true;

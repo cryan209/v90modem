@@ -1,0 +1,1282 @@
+[ME] V.34 datapath: floating point
+17:05:47.507         os_core_unix.c !pjlib 2.16 for POSIX initialized
+17:05:47.508         sip_endpoint.c  .Creating endpoint instance...
+17:05:47.508                  pjlib  .select() I/O Queue created (0xac8c52018)
+17:05:47.509         sip_endpoint.c  .Module "mod-msg-print" registered
+17:05:47.509        sip_transport.c  .Transport manager created.
+17:05:47.509           pjsua_core.c  .PJSUA state changed: NULL --> CREATED
+17:05:47.562        coreaudio_dev.c  core audio detected 3 devices
+17:05:47.562        coreaudio_dev.c   dev_id 78: MacBook Air Microphone  (in=1, out=0) 48000Hz
+17:05:47.562        coreaudio_dev.c   dev_id 71: MacBook Air Speakers  (in=0, out=2) 48000Hz
+17:05:47.562        coreaudio_dev.c   dev_id 83: iPhone69 Microphone  (in=1, out=0) 48000Hz
+17:05:47.562        coreaudio_dev.c  core audio initialized
+17:05:47.565           pjsua_core.c  .pjsua version 2.16 for Darwin-25.5/arm64 initialized
+17:05:47.565              sip_modem  Binding SIP/RTP to local address 10.69.220.8
+17:05:47.565              sip_modem  G.711 passthrough enabled
+[DI] modem PTY slave: /dev/ttys005 (symlink: /tmp/v90faxprobe)
+17:05:47.567              sip_modem  RTP media base port: 41000
+17:05:47.568              sip_modem  SIP V.90 modem ready. PTY link: /tmp/v90faxprobe
+17:05:47.568              sip_modem  ME trace (startup): state=IDLE mod=NONE law=ULAW role=answerer media=down phase_ms=0 v34_rx=0 v34_tx=0 v90_rx=-1 v90_tx=-1 v90_event=-1 phase3=0 s_events=0 dil=0 cp_bits=0 cp_valid=0 cp_rejected=0 v92=0 trn2u=0 trn2u_symbols=0 trn2u_ones=0 cpu_bits=0 cpu_valid=0 cpu_rejected=0 g711_rx=0 g711_tx=0 raw_v90_tx=0 linear_tx=0
+17:05:47.576            pjsua_acc.c  ....sip:6000@asterisk.net.cryan.nz: registration success, status=200 (OK), will re-register in 299 seconds
+17:06:32.721              sip_modem  ...RTP clock-recovery tap installed on call 0 media 0
+17:06:32.721              sip_modem  ..Incoming call from "VG224 Port 2/22" <sip:8422@192.168.88.122>
+17:06:32.721              sip_modem  .........Call 0 state: EARLY
+17:06:32.722              sip_modem  ..RING 1/2
+17:06:38.723              sip_modem !RING 2/2
+17:06:38.723              sip_modem  Auto-answering after 2 rings
+17:06:38.725              sip_modem  .....Installed G.711 passthrough stream wrapper (160 samples/frame)
+17:06:38.725              sip_modem  ...Codec: PCMU (u-law passthrough)
+17:06:38.725              sip_modem  ...Media clock wired: conf 1 <-> 0
+17:06:38.725              sip_modem  ...ME trace (media-connected): state=V8 mod=NONE law=ULAW role=answerer media=up phase_ms=0 v34_rx=0 v34_tx=0 v90_rx=-1 v90_tx=-1 v90_event=-1 phase3=0 s_events=0 dil=0 cp_bits=0 cp_valid=0 cp_rejected=0 v92=0 trn2u=0 trn2u_symbols=0 trn2u_ones=0 cpu_bits=0 cpu_valid=0 cpu_rejected=0 g711_rx=0 g711_tx=0 raw_v90_tx=0 linear_tx=0
+17:06:38.725              sip_modem  .......Call 0 state: CONNECTING
+17:06:38.729              sip_modem  ...Call 0 state: CONFIRMED
+17:06:38.729              sip_modem  ME trace (state-change): state=V8 mod=NONE law=ULAW role=answerer media=up phase_ms=4 v34_rx=0 v34_tx=0 v90_rx=-1 v90_tx=-1 v90_event=-1 phase3=0 s_events=0 dil=0 cp_bits=0 cp_valid=0 cp_rejected=0 v92=0 trn2u=0 trn2u_symbols=0 trn2u_ones=0 cpu_bits=0 cpu_valid=0 cpu_rejected=0 g711_rx=0 g711_tx=0 raw_v90_tx=0 linear_tx=0
+FLOW [proto@0x101343baf] >CM:  81 85 d4 90 07
+FLOW [proto@0x101343baf] >CM:  81 85 d4 90 07
+FLOW [proto@0x101343baf] Decoding
+FLOW [proto@0x101343baf] T.30 Tx FAX
+FLOW [proto@0x101343baf] Far end offers: FLOW [proto@0x101343baf] V.17 half-duplex, V.21 duplex, V.27ter duplex, V.29 half-duplex, V.34 half-duplex supported
+FLOW [proto@0x101343baf] Will offer: FLOW [proto@0x101343baf] V.34 half-duplex supported
+FLOW [proto@0x101343baf] PCM unavailable
+FLOW [proto@0x101343baf] >CM:  81 85 d4 90 07
+FLOW [proto@0x101343baf] >CM:  81 01 d4 90 07
+FLOW [proto@0x101343baf] >CM:  81 85 d4 90 07
+FLOW [proto@0x101343baf] >CM:  81 85 d4 90 07
+FLOW [proto@0x101343baf] >CM:  81 85 d4 90 07
+FLOW [proto@0x101343baf] >CM:  81 85 d4 90 07
+FLOW [proto@0x101343baf] >CM:  81 85 d4 90 07
+FLOW [proto@0x101343baf] >CM:  81 85 d4 90 07
+FLOW [proto@0x101343baf] >CM:  81 85 d4 90 07
+FLOW [proto@0x101343baf] >CM:  81 85 d4 07
+FLOW [proto@0x101343baf] CM recognised
+[ME] V.8 peer offer: call function=T.30 Tx FAX, modulations=V.17 half-duplex,V.21 duplex,V.27ter duplex,V.29 half-duplex,V.34 half-duplex
+[ME] V.8 peer summary: protocol=None, PSTN=PSTN access unknown, PCM=PCM unavailable, NSF=absent, T.66=-1
+FLOW [proto@0x101343baf] <JM:  81 85 10 10 47 8d
+FLOW [proto@0x101343baf] >CM:  81 85 d4 90 07
+FLOW [proto@0x101343baf] <JM:  81 85 10 10 47 8d
+FLOW [proto@0x101343baf] >CM:  81 85 d4 90 07
+FLOW [proto@0x101343baf] <JM:  81 85 10 10 47 8d
+FLOW [proto@0x101343baf] >CM:  81 85 d4 90 07
+FLOW [proto@0x101343baf] >CM:  81 85 d4 90 07
+FLOW [proto@0x101343baf] <JM:  81 85 10 10 47 8d
+FLOW [proto@0x101343baf] CJ recognised
+FLOW [proto@0x101343baf] FSK ends (13/160) 1 11
+FLOW [proto@0x101343baf] Negotiation succeeded
+[ME] V.8 peer offer: call function=T.30 Tx FAX, modulations=V.17 half-duplex,V.21 duplex,V.27ter duplex,V.29 half-duplex,V.34 half-duplex
+[ME] V.8 peer summary: protocol=None, PSTN=PSTN access unknown, PCM=PCM unavailable, NSF=absent, T.66=-1
+FLOW [proto@0x1013092be] Rx - stage=INFO0 (1) demod=TONES (2)
+FLOW [proto@0x1013092be] Rx - event=NONE (0)
+FLOW [proto@0x1013092be] Signal up
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=11314772 gate=1414346 carrier=1 stage=1 sig=1 pwr=11267404 bits=0
+FLOW [proto@0x1013092be] Tx - [digital] stage=UNKNOWN (0) mod=SILENCE (5)
+17:06:45.031              sip_modem !ME trace (state-change): state=TRAINING mod=V34 law=ULAW role=answerer media=up phase_ms=6 v34_rx=1 v34_tx=0 v90_rx=-1 v90_tx=-1 v90_event=-1 phase3=0 s_events=0 dil=0 cp_bits=0 cp_valid=0 cp_rejected=0 v92=0 trn2u=0 trn2u_symbols=0 trn2u_ones=0 cpu_bits=0 cpu_valid=0 cpu_rejected=0 g711_rx=50320 g711_tx=50400 raw_v90_tx=0 linear_tx=50400
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=11479757 gate=1434969 carrier=0 stage=1 sig=1 pwr=21980 bits=0
+FLOW [proto@0x1013092be] Signal down
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=11257733 gate=1407216 carrier=0 stage=1 sig=0 pwr=1954 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=11040000 gate=1380000 carrier=0 stage=1 sig=0 pwr=2121 bits=0
+FLOW [proto@0x1013092be] Tx - transmission_preamble_init()
+FLOW [proto@0x1013092be] Tx - timing [digital]: UNKNOWN/SILENCE took 76.6 ms (phase 2 t=0.0 ms)
+FLOW [proto@0x1013092be] Tx - [digital] stage=INITIAL_PREAMBLE (1) mod=CC (1)
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=10617092 gate=1327136 carrier=0 stage=1 sig=0 pwr=1641 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=10411753 gate=1301469 carrier=0 stage=1 sig=0 pwr=1766 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=10210387 gate=1276298 carrier=0 stage=1 sig=0 pwr=3399 bits=0
+FLOW [proto@0x1013092be] Signal up
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=10012918 gate=1251614 carrier=1 stage=1 sig=1 pwr=6439445 bits=0
+FLOW [proto@0x1013092be] Tx - info0_baud_init()
+FLOW [proto@0x1013092be] Tx INFO0:
+FLOW [proto@0x1013092be]   Baud rate 2400 low high
+FLOW [proto@0x1013092be]   Baud rate 2743 low high
+FLOW [proto@0x1013092be]   Baud rate 2800 low high
+FLOW [proto@0x1013092be]   Baud rate 3000 low high
+FLOW [proto@0x1013092be]   Baud rate 3200 low high
+FLOW [proto@0x1013092be]   Baud rate 3429 low high
+FLOW [proto@0x1013092be]   3429 baud allowed
+FLOW [proto@0x1013092be]   Tx power reduction supported
+FLOW [proto@0x1013092be]   Max different between Tx and Rx baud rates is 5
+FLOW [proto@0x1013092be]   Constellations up to 1664 supported
+FLOW [proto@0x1013092be]   Tx clock source - internal
+FLOW [proto@0x1013092be]   Message not from a CME modem
+FLOW [proto@0x1013092be]   INFO0 frame not acknowledged
+FLOW [proto@0x1013092be] Tx - timing [digital]: INITIAL_PREAMBLE/CC took 25.0 ms (phase 2 t=25.0 ms)
+FLOW [proto@0x1013092be] Tx - [digital] stage=INFO0 (2) mod=CC (1)
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=9819267 gate=1227408 carrier=1 stage=1 sig=1 pwr=7663211 bits=0
+FLOW [proto@0x1013092be] Rx - info sync code detected
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=9629361 gate=1203670 carrier=1 stage=1 sig=1 pwr=8004179 bits=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=9443129 gate=1180391 carrier=1 stage=1 sig=1 pwr=7513913 bits=9
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=9260500 gate=1157562 carrier=1 stage=1 sig=1 pwr=7402915 bits=15
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=9081404 gate=1135175 carrier=1 stage=1 sig=1 pwr=8065128 bits=21
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=8905773 gate=1113221 carrier=1 stage=1 sig=1 pwr=8310099 bits=27
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=8733539 gate=1091692 carrier=1 stage=1 sig=1 pwr=8590565 bits=32
+FLOW [proto@0x1013092be] Rx - info CRC result 0x0 (target_bits=33)
+FLOW [proto@0x1013092be] Rx - info raw bytes: ff 20 7a 2e 17
+FLOW [proto@0x1013092be] Rx INFO0:
+FLOW [proto@0x1013092be]   Baud rate 2400 low high
+FLOW [proto@0x1013092be]   Baud rate 2743 low high
+FLOW [proto@0x1013092be]   Baud rate 2800 low high
+FLOW [proto@0x1013092be]   Baud rate 3000 low high
+FLOW [proto@0x1013092be]   Baud rate 3200 low high
+FLOW [proto@0x1013092be]   Baud rate 3429 low high
+FLOW [proto@0x1013092be]   3429 baud allowed
+FLOW [proto@0x1013092be]   Tx power reduction not supported
+FLOW [proto@0x1013092be]   Max different between Tx and Rx baud rates is 0
+FLOW [proto@0x1013092be]   Constellations up to 1664 supported
+FLOW [proto@0x1013092be]   Tx clock source - internal
+FLOW [proto@0x1013092be]   Message not from a CME modem
+FLOW [proto@0x1013092be]   INFO0 frame not acknowledged
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=8564634 gate=1070579 carrier=1 stage=6 sig=1 pwr=7660280 bits=0
+FLOW [proto@0x1013092be] Tx - initial_ab_not_ab_baud_init() [calling=0 duplex=0 sample_time=1440]
+FLOW [proto@0x1013092be] Tx - timing [digital]: INFO0/CC took 81.6 ms (phase 2 t=106.6 ms)
+FLOW [proto@0x1013092be] Tx - [digital] stage=HDX_INITIAL_A (50) mod=CC (1)
+FLOW [proto@0x1013092be] Rx - stage=TONE_B (6) demod=TONES (2)
+FLOW [proto@0x1013092be] Rx - event=INFO0_OK (5)
+FLOW [proto@0x1013092be] Tx - timing [digital]: HDX_INITIAL_A/CC took 50.0 ms (phase 2 t=156.6 ms)
+FLOW [proto@0x1013092be] Tx - [digital] stage=HDX_FIRST_A (51) mod=CC (1)
+FLOW [proto@0x1013092be] Tx - timing [digital]: HDX_FIRST_A/CC took 1.6 ms (phase 2 t=158.2 ms)
+FLOW [proto@0x1013092be] Tx - [digital] stage=HDX_FIRST_NOT_A (52) mod=CC (1)
+FLOW [proto@0x1013092be] Rx - Tone B detected (power=7229794 ref=7919126)
+FLOW [proto@0x1013092be] Tx - timing [digital]: HDX_FIRST_NOT_A/CC took 8.3 ms (phase 2 t=166.6 ms)
+FLOW [proto@0x1013092be] Tx - [digital] stage=HDX_FIRST_A_SILENCE (53) mod=CC (1)
+FLOW [proto@0x1013092be] Rx - reversal 1 in tone B
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7804011 gate=975501 carrier=1 stage=6 sig=1 pwr=7654803 bits=0
+FLOW [proto@0x1013092be] Rx - event=REVERSAL_1 (2)
+FLOW [proto@0x1013092be] Tx - timing [digital]: HDX_FIRST_A_SILENCE/CC took 666.6 ms (phase 2 t=833.2 ms)
+FLOW [proto@0x1013092be] Tx - [digital] stage=HDX_SECOND_A (54) mod=CC (1)
+FLOW [proto@0x1013092be] Tx - timing [digital]: HDX_SECOND_A/CC took 1.7 ms (phase 2 t=835.0 ms)
+FLOW [proto@0x1013092be] Tx - [digital] stage=HDX_SECOND_A_WAIT (55) mod=CC (1)
+FLOW [proto@0x1013092be] Tx - infoh_baud_init()
+FLOW [proto@0x1013092be] Tx INFO0h:
+FLOW [proto@0x1013092be]   Minimum power reduction = 0dB
+FLOW [proto@0x1013092be]   Length of TRN = 1050ms
+FLOW [proto@0x1013092be]   High carrier
+FLOW [proto@0x1013092be]   Pre-emphasis filter = 0
+FLOW [proto@0x1013092be]   Baud rate = 2400
+FLOW [proto@0x1013092be]   Training constellation = 4 state
+FLOW [proto@0x1013092be] Rx - info_rx bits=600 bitstream=0x000 stage=6
+FLOW [proto@0x1013092be] Tx - half-duplex recipient: INFOh sent, silent while receiving Phase 3
+FLOW [proto@0x1013092be] Tx - hdx_recipient_phase3_init()
+FLOW [proto@0x1013092be] Rx - V.90: analogue Ja consumed; armed clean Phase 3 S detector (trn=unknown)
+FLOW [proto@0x1013092be] Rx - stage=PHASE3_WAIT_S (10) demod=V34 (0)
+FLOW [proto@0x1013092be] Rx - event=NONE (0)
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1800.0Hz agc=0.00170 power=9011179 shaper_sets=640
+FLOW [proto@0x1013092be] Rx - Phase 3 WAIT_S heartbeat: dur=1 demod=0 event=0 j_bits=0 trn_bits=0 trn_hint=-1/-1%
+FLOW [proto@0x1013092be] Rx - Phase 3 S baud 1: mag=0.000 data_bits=0 alt=0/32 stable=0 dom=0:1/32 rev=0/32 counts=1,0,0,0
+FLOW [proto@0x1013092be] Rx - Phase 3 Ja capture: emitted 2 bits using hyp=0
+FLOW [proto@0x1013092be] Rx - Phase 3 S baud 2: mag=0.000 data_bits=0 alt=0/32 stable=0 dom=0:2/32 rev=0/32 counts=2,0,0,0
+FLOW [proto@0x1013092be] Rx - Phase 3 S baud 3: mag=0.000 data_bits=0 alt=0/32 stable=0 dom=0:3/32 rev=0/32 counts=3,0,0,0
+FLOW [proto@0x1013092be] Rx - Phase 3 S baud 4: mag=0.000 data_bits=0 alt=0/32 stable=0 dom=0:4/32 rev=0/32 counts=4,0,0,0
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1800.0Hz agc=0.00074 power=8713794 shaper_sets=640
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1800.0Hz agc=0.00073 power=8791182 shaper_sets=640
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1800.0Hz agc=0.00073 power=8891279 shaper_sets=640
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1800.0Hz agc=0.00073 power=8797004 shaper_sets=640
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1800.0Hz agc=0.00074 power=8493152 shaper_sets=640
+FLOW [proto@0x1013092be] Rx - Phase 3 Ja capture: emitted 256 bits using hyp=0
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1800.0Hz agc=0.00073 power=8833954 shaper_sets=640
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1800.0Hz agc=0.00073 power=8938361 shaper_sets=640
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1800.0Hz agc=0.00072 power=9064142 shaper_sets=640
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1800.0Hz agc=0.00129 power=2849267 shaper_sets=640
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1800.0Hz agc=0.00082 power=7064657 shaper_sets=640
+FLOW [proto@0x1013092be] Rx - Phase 3 WAIT_S heartbeat: dur=256 demod=0 event=0 j_bits=510 trn_bits=0 trn_hint=-1/-1%
+FLOW [proto@0x1013092be] Rx - Phase 3 Ja capture: emitted 512 bits using hyp=0
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1800.0Hz agc=0.00081 power=7190314 shaper_sets=640
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1800.0Hz agc=0.00081 power=7183146 shaper_sets=640
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1800.0Hz agc=0.00081 power=7187756 shaper_sets=640
+FLOW [proto@0x1013092be] Rx - Phase 3: far-end S detected after J decode (count=1 via=rotation role=answerer alt=0/32 stable=0 dom=3:32/32 domwin=48 rev=0/32 bits=638 trn=16-point power=7306514 carrier_ref=14304427)
+FLOW [proto@0x1013092be] Tx - half-duplex recipient: source S detected; training on PP/TRN (12.3.2.2)
+FLOW [proto@0x1013092be] Rx - stage=PHASE3_TRAINING (11) demod=V34 (0)
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1800.0Hz agc=0.00081 power=7104928 shaper_sets=640
+FLOW [proto@0x1013092be] Rx - Phase 3 PP acquire baud 1: mag=1.520 data_bits=3 phase=0 score=1000 hold=1/12
+FLOW [proto@0x1013092be] Rx - Phase 3 PP acquire baud 2: mag=1.583 data_bits=3 phase=23 score=1000 hold=1/12
+FLOW [proto@0x1013092be] Rx - Phase 3 PP acquire baud 3: mag=1.508 data_bits=3 phase=36 score=1000 hold=1/12
+FLOW [proto@0x1013092be] Rx - Phase 3 PP acquire baud 4: mag=1.532 data_bits=3 phase=36 score=1000 hold=2/12
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1799.8Hz agc=0.00081 power=7121004 shaper_sets=640
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1799.6Hz agc=0.00081 power=7115473 shaper_sets=640
+FLOW [proto@0x1013092be] Rx - Tone B detected in stage PHASE3_TRAINING (80 ms); peer initiated a retrain, reporting peer retrain per V.90 9.5.1.2 / V.34 11.5.1.2
+FLOW [proto@0x1013092be] Rx - primary_channel_rx: baud_rate=0 high_carrier=1 carrier=1799.4Hz agc=0.00081 power=7113006 shaper_sets=640
+FLOW [proto@0x1013092be] Tx - Restarting V.34, 2400 baud, 21600bps
+FLOW [proto@0x1013092be] Tx - Carrier assignment: answerer, TX=low (1600 Hz), RX=high (1800 Hz)
+FLOW [proto@0x1013092be] Tx - V.34 11.5 retrain: 70 ms of silence, then Tone A
+FLOW [proto@0x1013092be] Tx - [digital] stage=V90_RETRAIN_SILENCE (25) mod=CC (1)
+FLOW [proto@0x1013092be] Rx - stage=INFO0 (1) demod=TONES (2)
+FLOW [proto@0x1013092be] Rx - event=NONE (0)
+FLOW [proto@0x1013092be] Tx - retrain silence complete; transmitting Tone A and awaiting Tone B
+FLOW [proto@0x1013092be] Tx - initial_ab_not_ab_baud_init() [calling=0 duplex=1 sample_time=10240]
+FLOW [proto@0x1013092be] Tx - timing [digital]: V90_RETRAIN_SILENCE/CC took 69.8 ms
+FLOW [proto@0x1013092be] Tx - [digital] stage=INITIAL_A (3) mod=CC (1)
+FLOW [proto@0x1013092be] Rx - stage=TONE_B (6) demod=TONES (2)
+FLOW [proto@0x1013092be] Tx - timing [digital]: INITIAL_A/CC took 50.0 ms
+FLOW [proto@0x1013092be] Tx - [digital] stage=FIRST_A (4) mod=CC (1)
+FLOW [proto@0x1013092be] Tx - FIRST_A: Tone B detected and INFO0 omitted by 11.5, sending !A (11.2.1.2.3)
+FLOW [proto@0x1013092be] Tx - timing [digital]: FIRST_A/CC took 1.7 ms
+FLOW [proto@0x1013092be] Tx - [digital] stage=FIRST_NOT_A (5) mod=CC (1)
+FLOW [proto@0x1013092be] Rx - info_rx bits=1200 bitstream=0x000 stage=6
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7706582 gate=963322 carrier=1 stage=6 sig=1 pwr=7133468 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=1800 bitstream=0x000 stage=6
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7749663 gate=968707 carrier=1 stage=6 sig=1 pwr=7031040 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=2400 bitstream=0x000 stage=6
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7799080 gate=974885 carrier=1 stage=6 sig=1 pwr=7169391 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=3000 bitstream=0x000 stage=6
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7786665 gate=973333 carrier=1 stage=6 sig=1 pwr=7139127 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=3600 bitstream=0x000 stage=6
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7799076 gate=974884 carrier=1 stage=6 sig=1 pwr=7233982 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=4200 bitstream=0x000 stage=6
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7777520 gate=972190 carrier=1 stage=6 sig=1 pwr=7273517 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=4800 bitstream=0x000 stage=6
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7919814 gate=989976 carrier=1 stage=6 sig=1 pwr=7386371 bits=0
+FLOW [proto@0x1013092be] Rx - reversal 1 in tone B
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7713167 gate=964145 carrier=1 stage=6 sig=1 pwr=982740 bits=0
+FLOW [proto@0x1013092be] Rx - event=REVERSAL_1 (2)
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7564002 gate=945500 carrier=1 stage=6 sig=1 pwr=7241221 bits=0
+FLOW [proto@0x1013092be] Tx - timing [digital]: FIRST_NOT_A/CC took 7860.0 ms
+FLOW [proto@0x1013092be] Tx - [digital] stage=FIRST_NOT_A_REVERSAL_SEEN (6) mod=CC (1)
+FLOW [proto@0x1013092be] Rx - info_rx bits=5400 bitstream=0x000 stage=6
+FLOW [proto@0x1013092be] Tx - timing [digital]: FIRST_NOT_A_REVERSAL_SEEN/CC took 40.0 ms
+FLOW [proto@0x1013092be] Tx - [digital] stage=SECOND_A (7) mod=CC (1)
+FLOW [proto@0x1013092be] Tx - l2_l2_signal_init()
+FLOW [proto@0x1013092be] Tx - timing [digital]: SECOND_A/CC took 10.0 ms
+FLOW [proto@0x1013092be] Tx - [digital] stage=SECOND_A (7) mod=L1_L2 (3)
+FLOW [proto@0x1013092be] Rx - reversal 2 in tone B
+FLOW [proto@0x1013092be] Rx - Expect L1/L2
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=9374627 gate=1171828 carrier=1 stage=7 sig=1 pwr=8358681 bits=0
+FLOW [proto@0x1013092be] Rx - stage=L1_L2 (7) demod=L1_L2 (3)
+FLOW [proto@0x1013092be] Rx - event=REVERSAL_2 (3)
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=40325155 gate=5040644 carrier=1 stage=7 sig=1 pwr=34990466 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=40244005 gate=5030500 carrier=0 stage=7 sig=1 pwr=768664 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=39465561 gate=4933195 carrier=0 stage=7 sig=1 pwr=389266 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=38702176 gate=4837772 carrier=0 stage=7 sig=1 pwr=317829 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=37953557 gate=4744194 carrier=0 stage=7 sig=1 pwr=367816 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=37219421 gate=4652427 carrier=0 stage=7 sig=1 pwr=654300 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=36499484 gate=4562435 carrier=1 stage=7 sig=1 pwr=6004936 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=33756340 gate=4219542 carrier=0 stage=7 sig=1 pwr=92813 bits=0
+FLOW [proto@0x1013092be] Signal down
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=33103380 gate=4137922 carrier=0 stage=7 sig=0 pwr=541 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=31835135 gate=3979391 carrier=0 stage=7 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=30023295 gate=3752911 carrier=0 stage=7 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=29442563 gate=3680320 carrier=0 stage=7 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=28314579 gate=3539322 carrier=0 stage=7 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=27766903 gate=3470862 carrier=0 stage=7 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=27229816 gate=3403727 carrier=0 stage=7 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=26703118 gate=3337889 carrier=0 stage=7 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=26186610 gate=3273326 carrier=0 stage=7 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=25680093 gate=3210011 carrier=0 stage=7 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=25183377 gate=3147922 carrier=0 stage=7 sig=0 pwr=3 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=24696269 gate=3087033 carrier=0 stage=7 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=24218582 gate=3027322 carrier=0 stage=7 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=23750136 gate=2968767 carrier=0 stage=7 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=22840252 gate=2855031 carrier=0 stage=7 sig=0 pwr=2 bits=0
+FLOW [proto@0x1013092be] Tx - post_l2_wait_tone_b_init()
+FLOW [proto@0x1013092be] Tx - timing [digital]: SECOND_A/L1_L2 took 568.3 ms
+FLOW [proto@0x1013092be] Tx - [digital] stage=POST_L2_WAIT_TONE_B (11) mod=CC (1)
+FLOW [proto@0x1013092be] L1/L2 analysis done
+FLOW [proto@0x1013092be] Rx - stage=INFO1C (3) demod=TONES (2)
+FLOW [proto@0x1013092be] Rx - event=L2_SEEN (11)
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=20715145 gate=2589393 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=20314468 gate=2539308 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=19921542 gate=2490192 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=19158348 gate=2394793 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=18787786 gate=2348473 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=18424394 gate=2303049 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=18068031 gate=2258503 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=17718561 gate=2214820 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=17375851 gate=2171981 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=17039768 gate=2129971 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Signal up
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=23410632 gate=2926329 carrier=1 stage=3 sig=1 pwr=23410632 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=26619819 gate=3327477 carrier=1 stage=3 sig=1 pwr=19520356 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=6000 bitstream=0x000 stage=3
+FLOW [proto@0x1013092be] Tx - Tone B timeout after 360 bauds of post-L2 Tone A; sending the 11.2.1.2.6 Tone A phase reversal
+FLOW [proto@0x1013092be] Tx - timing [digital]: POST_L2_WAIT_TONE_B/CC took 599.7 ms
+FLOW [proto@0x1013092be] Tx - [digital] stage=POST_L2_A (12) mod=CC (1)
+FLOW [proto@0x1013092be] Tx - timing [digital]: POST_L2_A/CC took 50.0 ms
+FLOW [proto@0x1013092be] Tx - [digital] stage=POST_L2_NOT_A (13) mod=CC (1)
+FLOW [proto@0x1013092be] Tx - timing [digital]: POST_L2_NOT_A/CC took 10.0 ms
+FLOW [proto@0x1013092be] Tx - [digital] stage=A_SILENCE (14) mod=CC (1)
+FLOW [proto@0x1013092be] Tx - timing [digital]: A_SILENCE/CC took 1.7 ms
+FLOW [proto@0x1013092be] Tx - [digital] stage=PRE_INFO1_A (15) mod=CC (1)
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=22817415 gate=2852176 carrier=1 stage=3 sig=1 pwr=20189921 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=6600 bitstream=0x000 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=22514950 gate=2814368 carrier=1 stage=3 sig=1 pwr=19841633 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=22297773 gate=2787221 carrier=1 stage=3 sig=1 pwr=13378210 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=22606388 gate=2825798 carrier=1 stage=3 sig=1 pwr=19412594 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=7200 bitstream=0x000 stage=3
+FLOW [proto@0x1013092be] Tx - no INFO1c within 1200 bauds; sending INFOMARKSa (11.2.2.2.4)
+FLOW [proto@0x1013092be] Tx - infomarksa_baud_init()
+FLOW [proto@0x1013092be] Tx - timing [digital]: PRE_INFO1_A/CC took 2000.0 ms
+FLOW [proto@0x1013092be] Tx - [digital] stage=INFOMARKSA (16) mod=CC (1)
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=21840455 gate=2730056 carrier=1 stage=3 sig=1 pwr=16214895 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=7800 bitstream=0x000 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=21886461 gate=2735807 carrier=1 stage=3 sig=1 pwr=16435123 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=8400 bitstream=0x000 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=21707347 gate=2713418 carrier=1 stage=3 sig=1 pwr=16654914 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=9000 bitstream=0x000 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=21763166 gate=2720395 carrier=1 stage=3 sig=1 pwr=16569868 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=9600 bitstream=0x000 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=21811986 gate=2726498 carrier=1 stage=3 sig=1 pwr=16951563 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=10200 bitstream=0x000 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=21431829 gate=2678978 carrier=1 stage=3 sig=1 pwr=16664952 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=10800 bitstream=0x000 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=22490168 gate=2811271 carrier=1 stage=3 sig=1 pwr=9513765 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=22055151 gate=2756893 carrier=1 stage=3 sig=1 pwr=9298046 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=21628554 gate=2703569 carrier=1 stage=3 sig=1 pwr=9297916 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=21210210 gate=2651276 carrier=1 stage=3 sig=1 pwr=9297171 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=20799959 gate=2599994 carrier=1 stage=3 sig=1 pwr=9297939 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=20397643 gate=2549705 carrier=0 stage=3 sig=1 pwr=413414 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=20003109 gate=2500388 carrier=0 stage=3 sig=1 pwr=4550 bits=0
+FLOW [proto@0x1013092be] Signal down
+FLOW [proto@0x1013092be] Signal up
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=19616207 gate=2452025 carrier=0 stage=3 sig=1 pwr=1689511 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=11400 bitstream=0x000 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7788722 gate=973590 carrier=1 stage=3 sig=1 pwr=7371727 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=12000 bitstream=0x000 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7868046 gate=983505 carrier=1 stage=3 sig=1 pwr=7365790 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=12600 bitstream=0x000 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7794275 gate=974284 carrier=1 stage=3 sig=1 pwr=7206857 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=13200 bitstream=0x000 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7799783 gate=974972 carrier=1 stage=3 sig=1 pwr=7257932 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=13800 bitstream=0x000 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7880744 gate=985093 carrier=1 stage=3 sig=1 pwr=7289132 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=14400 bitstream=0x000 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7722531 gate=965316 carrier=0 stage=3 sig=1 pwr=459085 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7573186 gate=946648 carrier=0 stage=3 sig=1 pwr=5045 bits=0
+FLOW [proto@0x1013092be] Signal down
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7426729 gate=928341 carrier=0 stage=3 sig=0 pwr=2177 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7283106 gate=910388 carrier=0 stage=3 sig=0 pwr=2271 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7142262 gate=892782 carrier=0 stage=3 sig=0 pwr=29 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7004141 gate=875517 carrier=0 stage=3 sig=0 pwr=2 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=6868692 gate=858586 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=6735864 gate=841983 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=6605604 gate=825700 carrier=0 stage=3 sig=0 pwr=3 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=6352597 gate=794074 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=6229752 gate=778719 carrier=0 stage=3 sig=0 pwr=27 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=6109284 gate=763660 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=5875292 gate=734411 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=5761679 gate=720209 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=5650266 gate=706283 carrier=0 stage=3 sig=0 pwr=22 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=5433854 gate=679231 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=5328780 gate=666097 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=5225739 gate=653217 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=5124692 gate=640586 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4928423 gate=616052 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4833126 gate=604140 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4739675 gate=592459 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4648030 gate=581003 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4558156 gate=569769 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4470023 gate=558752 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4298836 gate=537354 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4134211 gate=516776 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=3975892 gate=496986 carrier=0 stage=3 sig=0 pwr=25 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=3899020 gate=487377 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=3823638 gate=477954 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=3749712 gate=468714 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=3677215 gate=459651 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=3606122 gate=450765 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=3536405 gate=442050 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=3468036 gate=433504 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=3400990 gate=425123 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=3335238 gate=416904 carrier=0 stage=3 sig=0 pwr=23 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=3270760 gate=408845 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=3207530 gate=400941 carrier=0 stage=3 sig=0 pwr=3 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=3145523 gate=393190 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=3025085 gate=378135 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2966607 gate=370825 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2909260 gate=363657 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2853023 gate=356627 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2797874 gate=349734 carrier=0 stage=3 sig=0 pwr=7 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=15000 bitstream=0xc00 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2743792 gate=342974 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2690755 gate=336344 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2638744 gate=329843 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2587739 gate=323467 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2537720 gate=317215 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2488670 gate=311083 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2440568 gate=305071 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2393397 gate=299174 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2347138 gate=293392 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2301774 gate=287721 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2257289 gate=282161 carrier=0 stage=3 sig=0 pwr=4 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2170881 gate=271360 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2128926 gate=266115 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=2047440 gate=255930 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1969072 gate=246134 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1931022 gate=241377 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1857116 gate=232139 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1786041 gate=223255 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1751532 gate=218941 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1684504 gate=210563 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1651960 gate=206495 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1620043 gate=202505 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1588743 gate=198592 carrier=0 stage=3 sig=0 pwr=20 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1558051 gate=194756 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1527951 gate=190993 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1498434 gate=187304 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1469488 gate=183686 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1441101 gate=180137 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1413264 gate=176658 carrier=0 stage=3 sig=0 pwr=7 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1385965 gate=173245 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1359194 gate=169899 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1307196 gate=163399 carrier=0 stage=3 sig=0 pwr=2 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1281949 gate=160243 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1257191 gate=157148 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1232912 gate=154114 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1209103 gate=151137 carrier=0 stage=3 sig=0 pwr=7 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1185755 gate=148219 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1162856 gate=145357 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1140402 gate=142550 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1096788 gate=137098 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1075612 gate=134451 carrier=0 stage=3 sig=0 pwr=2 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=1014508 gate=126813 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=975716 gate=121964 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=956882 gate=119610 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=938411 gate=117301 carrier=0 stage=3 sig=0 pwr=3 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=920300 gate=115037 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=868036 gate=108504 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=851285 gate=106410 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=818747 gate=102343 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=802949 gate=100368 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=787458 gate=98432 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=742756 gate=92844 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=728426 gate=91053 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=714376 gate=89297 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=700594 gate=87574 carrier=0 stage=3 sig=0 pwr=23 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=687082 gate=85885 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=673832 gate=84229 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=660837 gate=82604 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=648093 gate=81011 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=635596 gate=79449 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=599538 gate=74942 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=587980 gate=73497 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=554631 gate=69328 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=543941 gate=67992 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=533459 gate=66682 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=523179 gate=65397 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=513098 gate=64137 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=503211 gate=62901 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=493519 gate=61689 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=484010 gate=60501 carrier=0 stage=3 sig=0 pwr=23 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=474686 gate=59335 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=465546 gate=58193 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=456581 gate=57072 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=414284 gate=51785 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=406311 gate=50788 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=398492 gate=49811 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=15600 bitstream=0x300 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=383304 gate=47913 carrier=0 stage=3 sig=0 pwr=7 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=375927 gate=46990 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=368691 gate=46086 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=361603 gate=45200 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=354648 gate=44331 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=347823 gate=43477 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=341138 gate=42642 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=334578 gate=41822 carrier=0 stage=3 sig=0 pwr=22 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=315648 gate=39456 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=309586 gate=38698 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=297802 gate=37225 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=292081 gate=36510 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=286466 gate=35808 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=270276 gate=33784 carrier=0 stage=3 sig=0 pwr=27 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=265093 gate=33136 carrier=0 stage=3 sig=0 pwr=23 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=260006 gate=32500 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=255014 gate=31876 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=245318 gate=30664 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=236003 gate=29500 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=231478 gate=28934 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=227040 gate=28380 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=222687 gate=27835 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=214233 gate=26779 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=210129 gate=26266 carrier=0 stage=3 sig=0 pwr=22 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=202157 gate=25269 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=194492 gate=24311 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=190769 gate=23846 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=183534 gate=22941 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=176578 gate=22072 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=169899 gate=21237 carrier=0 stage=3 sig=0 pwr=29 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=166651 gate=20831 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=157284 gate=19660 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=151326 gate=18915 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=148446 gate=18555 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=145618 gate=18202 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=140113 gate=17514 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=137448 gate=17181 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=134818 gate=16852 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=132258 gate=16532 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=129740 gate=16217 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=127260 gate=15907 carrier=0 stage=3 sig=0 pwr=7 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=122464 gate=15308 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=115617 gate=14452 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=111263 gate=13907 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=109158 gate=13644 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=99188 gate=12398 carrier=0 stage=3 sig=0 pwr=7 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=97311 gate=12163 carrier=0 stage=3 sig=0 pwr=24 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=95471 gate=11933 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=91896 gate=11487 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=90136 gate=11267 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=88454 gate=11056 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=86774 gate=10846 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=85137 gate=10642 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=83537 gate=10442 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=81937 gate=10242 carrier=0 stage=3 sig=0 pwr=22 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=80416 gate=10052 carrier=0 stage=3 sig=0 pwr=0 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=77399 gate=9674 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=71755 gate=8969 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=70395 gate=8799 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=67790 gate=8473 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=65249 gate=8156 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=64049 gate=8006 carrier=0 stage=3 sig=0 pwr=7 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=62849 gate=7856 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=61649 gate=7706 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=59395 gate=7424 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=57168 gate=7146 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=56128 gate=7016 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=16200 bitstream=0x481 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=55088 gate=6886 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=54048 gate=6756 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=53026 gate=6628 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=50146 gate=6268 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=48303 gate=6037 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=47423 gate=5927 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=46543 gate=5817 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=45663 gate=5707 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=44807 gate=5600 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=44007 gate=5500 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41607 gate=5200 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=40102 gate=5012 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=38662 gate=4832 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=37942 gate=4742 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=35902 gate=4487 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=35262 gate=4407 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=34622 gate=4327 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=33982 gate=4247 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=32710 gate=4088 carrier=0 stage=3 sig=0 pwr=20 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=32150 gate=4018 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=31590 gate=3948 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=31030 gate=3878 carrier=0 stage=3 sig=0 pwr=24 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=30470 gate=3808 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=29350 gate=3668 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=28790 gate=3598 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=26853 gate=3356 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=25893 gate=3236 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=25413 gate=3176 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=24473 gate=3059 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=23673 gate=2959 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=22873 gate=2859 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=22473 gate=2809 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=22073 gate=2759 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=21273 gate=2659 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=20873 gate=2609 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=20474 gate=2559 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=20154 gate=2519 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=19834 gate=2479 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=19514 gate=2439 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=19194 gate=2399 carrier=0 stage=3 sig=0 pwr=20 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=17914 gate=2239 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=17594 gate=2199 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=17274 gate=2159 carrier=0 stage=3 sig=0 pwr=3 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=16954 gate=2119 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=16331 gate=2041 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=16091 gate=2011 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=15851 gate=1981 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=15611 gate=1951 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=15371 gate=1921 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=14891 gate=1861 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=14651 gate=1831 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=14411 gate=1801 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=14171 gate=1771 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=13931 gate=1741 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=13451 gate=1681 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=13211 gate=1651 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=12971 gate=1621 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=12731 gate=1591 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=12263 gate=1532 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=11943 gate=1492 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=11783 gate=1472 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=11463 gate=1432 carrier=0 stage=3 sig=0 pwr=20 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=11303 gate=1412 carrier=0 stage=3 sig=0 pwr=22 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=11143 gate=1392 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=10503 gate=1312 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=10183 gate=1272 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=9863 gate=1232 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=16800 bitstream=0x030 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=9543 gate=1192 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=9223 gate=1152 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=9063 gate=1132 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=8903 gate=1112 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=8743 gate=1092 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=8583 gate=1072 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=8423 gate=1052 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=8147 gate=1018 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=8067 gate=1008 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7987 gate=998 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7907 gate=988 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7827 gate=978 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7747 gate=968 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7667 gate=958 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7507 gate=938 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7427 gate=928 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7347 gate=918 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7267 gate=908 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7187 gate=898 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=7027 gate=878 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=6867 gate=858 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=6627 gate=828 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=6547 gate=818 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=6467 gate=808 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=6307 gate=788 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=6227 gate=778 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=6147 gate=768 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=6067 gate=758 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=5987 gate=748 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=5907 gate=738 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=5747 gate=718 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=5667 gate=708 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=5587 gate=698 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=5347 gate=668 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=5267 gate=658 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=5187 gate=648 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=5107 gate=638 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=5027 gate=628 carrier=0 stage=3 sig=0 pwr=4 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4787 gate=598 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4707 gate=588 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4627 gate=578 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4547 gate=568 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4387 gate=548 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4307 gate=538 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4227 gate=528 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4147 gate=518 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=0 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=2 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=0 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=17400 bitstream=0x023 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=3 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=0 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=0 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=2 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=7 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=20 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=3 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=2 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=18000 bitstream=0x000 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=25 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=20 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=4 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=25 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=18600 bitstream=0x214 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=4 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=20 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=7 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=20 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=22 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=3 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=20 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=7 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=4 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=1 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=23 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=19200 bitstream=0x000 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=3 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=0 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=2 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=7 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=1 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=20 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=0 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=3 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=1 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=27 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=23 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=25 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=1 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=19800 bitstream=0xd02 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=2 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=23 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=2 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=25 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=0 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=7 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=1 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=2 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=7 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=3 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=20400 bitstream=0x492 stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=7 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=26 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=21 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=20 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=26 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=35 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=4 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=20 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=11 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=8 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=5 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=21000 bitstream=0x0ca stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=7 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=13 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=17 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=16 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=9 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=10 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=19 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=14 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=12 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=6 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=18 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=4095 gate=511 carrier=0 stage=3 sig=0 pwr=15 bits=0
+FLOW [proto@0x1013092be] Signal up
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=78361110 gate=9795138 carrier=1 stage=3 sig=1 pwr=61266075 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=76845327 gate=9605665 carrier=1 stage=3 sig=1 pwr=38843435 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=75358861 gate=9419857 carrier=1 stage=3 sig=1 pwr=38671806 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=73901151 gate=9237643 carrier=1 stage=3 sig=1 pwr=36416526 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=72471642 gate=9058955 carrier=1 stage=3 sig=1 pwr=36311332 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=71069785 gate=8883723 carrier=1 stage=3 sig=1 pwr=37583173 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=69695045 gate=8711880 carrier=1 stage=3 sig=1 pwr=37560272 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=68346897 gate=8543362 carrier=1 stage=3 sig=1 pwr=38063182 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=67024830 gate=8378103 carrier=1 stage=3 sig=1 pwr=37547398 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=65728339 gate=8216042 carrier=1 stage=3 sig=1 pwr=38065455 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=64456923 gate=8057115 carrier=1 stage=3 sig=1 pwr=37547020 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=63210101 gate=7901262 carrier=1 stage=3 sig=1 pwr=37554539 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=61987397 gate=7748424 carrier=1 stage=3 sig=1 pwr=37597950 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=60788349 gate=7598543 carrier=1 stage=3 sig=1 pwr=38055626 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=59612494 gate=7451561 carrier=1 stage=3 sig=1 pwr=37547500 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=58459384 gate=7307423 carrier=1 stage=3 sig=1 pwr=37539990 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=57328580 gate=7166072 carrier=1 stage=3 sig=1 pwr=38103374 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=56219651 gate=7027456 carrier=1 stage=3 sig=1 pwr=37501964 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=55132172 gate=6891521 carrier=1 stage=3 sig=1 pwr=38108154 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=54065731 gate=6758216 carrier=1 stage=3 sig=1 pwr=37593778 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=53019920 gate=6627490 carrier=1 stage=3 sig=1 pwr=37593466 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=51994338 gate=6499292 carrier=1 stage=3 sig=1 pwr=38049027 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=50988596 gate=6373574 carrier=1 stage=3 sig=1 pwr=37506001 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=50002305 gate=6250288 carrier=1 stage=3 sig=1 pwr=38016051 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=49035098 gate=6129387 carrier=1 stage=3 sig=1 pwr=37543236 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=48086599 gate=6010824 carrier=1 stage=3 sig=1 pwr=38104688 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=47156448 gate=5894556 carrier=1 stage=3 sig=1 pwr=37601164 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=46244290 gate=5780536 carrier=1 stage=3 sig=1 pwr=38048856 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=45349775 gate=5668721 carrier=1 stage=3 sig=1 pwr=37593340 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=44472561 gate=5559070 carrier=1 stage=3 sig=1 pwr=37540595 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=43612320 gate=5451540 carrier=1 stage=3 sig=1 pwr=37544684 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=42768720 gate=5346090 carrier=1 stage=3 sig=1 pwr=38052639 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41941436 gate=5242679 carrier=1 stage=3 sig=1 pwr=37509021 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41804560 gate=5225570 carrier=1 stage=3 sig=1 pwr=38050898 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41824602 gate=5228075 carrier=1 stage=3 sig=1 pwr=37543373 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41805008 gate=5225626 carrier=1 stage=3 sig=1 pwr=38048397 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41824506 gate=5228063 carrier=1 stage=3 sig=1 pwr=37600439 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41807115 gate=5225889 carrier=1 stage=3 sig=1 pwr=37540326 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41806147 gate=5225768 carrier=1 stage=3 sig=1 pwr=37544754 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41805060 gate=5225632 carrier=1 stage=3 sig=1 pwr=37537774 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41805628 gate=5225703 carrier=1 stage=3 sig=1 pwr=37544669 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41805056 gate=5225632 carrier=1 stage=3 sig=1 pwr=38055214 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41825166 gate=5228145 carrier=1 stage=3 sig=1 pwr=38058673 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41823638 gate=5227954 carrier=1 stage=3 sig=1 pwr=38053855 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41770267 gate=5221283 carrier=1 stage=3 sig=1 pwr=38017015 bits=0
+FLOW [proto@0x1013092be] Rx - info_rx bits=21600 bitstream=0xbff stage=3
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41819868 gate=5227483 carrier=1 stage=3 sig=1 pwr=38106455 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41826654 gate=5228331 carrier=1 stage=3 sig=1 pwr=38054325 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41825137 gate=5228142 carrier=1 stage=3 sig=1 pwr=38051504 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41774722 gate=5221840 carrier=1 stage=3 sig=1 pwr=38020932 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41823710 gate=5227963 carrier=1 stage=3 sig=1 pwr=37593145 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41808097 gate=5226012 carrier=1 stage=3 sig=1 pwr=38048517 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41822287 gate=5227785 carrier=1 stage=3 sig=1 pwr=38053653 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41850080 gate=5231260 carrier=1 stage=3 sig=1 pwr=38055364 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41824738 gate=5228092 carrier=1 stage=3 sig=1 pwr=38054032 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41824686 gate=5228085 carrier=1 stage=3 sig=1 pwr=38054365 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41823303 gate=5227912 carrier=1 stage=3 sig=1 pwr=38106988 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41826674 gate=5228334 carrier=1 stage=3 sig=1 pwr=37544659 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41804880 gate=5225610 carrier=1 stage=3 sig=1 pwr=38055183 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41824756 gate=5228094 carrier=1 stage=3 sig=1 pwr=37543060 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41803163 gate=5225395 carrier=1 stage=3 sig=1 pwr=38051984 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41824613 gate=5228076 carrier=1 stage=3 sig=1 pwr=38108494 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41827139 gate=5228392 carrier=1 stage=3 sig=1 pwr=38107582 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41827104 gate=5228388 carrier=1 stage=3 sig=1 pwr=38054736 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41824743 gate=5228092 carrier=1 stage=3 sig=1 pwr=37540128 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41806137 gate=5225767 carrier=1 stage=3 sig=1 pwr=38053151 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41825093 gate=5228136 carrier=1 stage=3 sig=1 pwr=38051150 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41824608 gate=5228076 carrier=1 stage=3 sig=1 pwr=37547612 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41830976 gate=5228872 carrier=1 stage=3 sig=1 pwr=38052069 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41825050 gate=5228131 carrier=1 stage=3 sig=1 pwr=37600865 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41805268 gate=5225658 carrier=1 stage=3 sig=1 pwr=38051357 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41773288 gate=5221661 carrier=1 stage=3 sig=1 pwr=38019672 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41822028 gate=5227753 carrier=1 stage=3 sig=1 pwr=38053612 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41768595 gate=5221074 carrier=1 stage=3 sig=1 pwr=38015545 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41821707 gate=5227713 carrier=1 stage=3 sig=1 pwr=38050626 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41575535 gate=5196941 carrier=1 stage=3 sig=1 pwr=37561856 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41805520 gate=5225690 carrier=1 stage=3 sig=1 pwr=38051053 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41823558 gate=5227944 carrier=1 stage=3 sig=1 pwr=38055150 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41825167 gate=5228145 carrier=1 stage=3 sig=1 pwr=38058325 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41850254 gate=5231281 carrier=1 stage=3 sig=1 pwr=38058326 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41825285 gate=5228160 carrier=1 stage=3 sig=1 pwr=38054116 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41823671 gate=5227958 carrier=1 stage=3 sig=1 pwr=37544531 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41804876 gate=5225609 carrier=1 stage=3 sig=1 pwr=38050947 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41773284 gate=5221660 carrier=1 stage=3 sig=1 pwr=38019669 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41823424 gate=5227928 carrier=1 stage=3 sig=1 pwr=38101505 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41826706 gate=5228338 carrier=1 stage=3 sig=1 pwr=37547596 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41806015 gate=5225751 carrier=1 stage=3 sig=1 pwr=38051466 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41849796 gate=5231224 carrier=1 stage=3 sig=1 pwr=38062489 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41825440 gate=5228180 carrier=1 stage=3 sig=1 pwr=38054134 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41575668 gate=5196958 carrier=1 stage=3 sig=1 pwr=37506105 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41804888 gate=5225611 carrier=1 stage=3 sig=1 pwr=38051299 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41825024 gate=5228128 carrier=1 stage=3 sig=1 pwr=37540513 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41805560 gate=5225695 carrier=1 stage=3 sig=1 pwr=38051059 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41770320 gate=5221290 carrier=1 stage=3 sig=1 pwr=38017061 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41823326 gate=5227915 carrier=1 stage=3 sig=1 pwr=38111230 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41770680 gate=5221335 carrier=1 stage=3 sig=1 pwr=38017378 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41820276 gate=5227534 carrier=1 stage=3 sig=1 pwr=38103588 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41826543 gate=5228317 carrier=1 stage=3 sig=1 pwr=38055952 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41823362 gate=5227920 carrier=1 stage=3 sig=1 pwr=37542843 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41766759 gate=5220844 carrier=1 stage=3 sig=1 pwr=38067114 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41825613 gate=5228201 carrier=1 stage=3 sig=1 pwr=38051230 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41762577 gate=5220322 carrier=1 stage=3 sig=1 pwr=38010253 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41822082 gate=5227760 carrier=1 stage=3 sig=1 pwr=38106804 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41769606 gate=5221200 carrier=1 stage=3 sig=1 pwr=38016434 bits=0
+FLOW [proto@0x1013092be] Rx info_rx diag: ref=41823572 gate=5227946 carrier=1 stage=3 sig=1 pwr=38053851 bits=0
+17:07:21.645          pjsua_media.c  .......
+  [DISCONNECTED] To: "VG224 Port 2/22" <sip:8422@192.168.88.122>;tag=be653717-0ccb-45ca-857e-77d271dcbda7
+    Call time: 00h:00m:42s, 1st res in 2 ms, conn in 6010ms
+    #0 audio PCMU @8kHz, sendrecv, peer=192.168.88.122:12036
+       SRTP status: Not active Crypto-suite: 
+       RX pt=0, last update:00h:00m:04.021s ago
+          total 2.1Kpkt 342.8KB (428.6KB +IP hdr) @avg=63.9Kbps/79.8Kbps
+          pkt loss=0 (0.0%), discrd=0 (0.0%), dup=0 (0.0%), reord=0 (0.0%)
+                (msec)    min     avg     max     last    dev
+          loss period:   0.000   0.000   0.000   0.000   0.000
+          jitter     :   0.000   0.365   1.750   0.375   0.212
+       TX pt=0, ptime=20, last update:00h:00m:02.899s ago
+          total 2.1Kpkt 343.3KB (429.2KB +IP hdr) @avg=63.9Kbps/79.9Kbps
+          pkt loss=0 (0.0%), dup=0 (0.0%), reorder=0 (0.0%)
+                (msec)    min     avg     max     last    dev 
+          loss period:   0.000   0.000   0.000   0.000   0.000
+          jitter     :   0.250   0.500   0.750   0.375   0.139
+       RTT msec      :   3.082   3.708   4.562   3.128   0.496
+17:07:21.645              sip_modem  ......Call 0 state: DISCONNECTED
+17:07:21.646              sip_modem  ME trace (state-change): state=IDLE mod=NONE law=ULAW role=answerer media=down phase_ms=0 v34_rx=0 v34_tx=0 v90_rx=-1 v90_tx=-1 v90_event=-1 phase3=0 s_events=0 dil=0 cp_bits=0 cp_valid=0 cp_rejected=0 v92=0 trn2u=0 trn2u_symbols=0 trn2u_ones=0 cpu_bits=0 cpu_valid=0 cpu_rejected=0 g711_rx=342240 g711_tx=343360 raw_v90_tx=0 linear_tx=343360
+17:07:21.646              sip_modem  ME trace (media-down): state=IDLE mod=NONE law=ULAW role=answerer media=down phase_ms=0 v34_rx=0 v34_tx=0 v90_rx=-1 v90_tx=-1 v90_event=-1 phase3=0 s_events=0 dil=0 cp_bits=0 cp_valid=0 cp_rejected=0 v92=0 trn2u=0 trn2u_symbols=0 trn2u_ones=0 cpu_bits=0 cpu_valid=0 cpu_rejected=0 g711_rx=342240 g711_tx=343360 raw_v90_tx=0 linear_tx=343360
+17:10:41.577            pjsua_acc.c  ....sip:6000@asterisk.net.cryan.nz: registration success, status=200 (OK), will re-register in 299 seconds
+17:10:47.490              sip_modem !Shutting down...
+17:10:47.566            pjsua_acc.c  .....sip:6000@asterisk.net.cryan.nz: unregistration success
+17:10:48.570                timer.c  .Dumping timer heap:
+17:10:48.570                timer.c  .  Cur size: 0 entries, max: 3070

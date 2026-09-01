@@ -13127,6 +13127,24 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
      * sustained single-bin ratio.  The same reasoning is what makes it safe
      * to run in DATA: the upstream there is a full V.34 primary channel,
      * whose power is spread over the whole band by construction. */
+    /* NOT in half-duplex Phase 3.  V.34 12.2.1.1.4 has the source hold Tone B
+       until it has received INFOh, and 12.3.1.1 gives it a further 70 ms of
+       silence before S -- so the source's tone is NECESSARILY still on the
+       line at the moment 12.3.2.1 has this end fall silent and start looking
+       for S.  It is the ordinary tail of Phase 2, not a retrain request, and
+       9.5.1.2/11.5.1.2 are about a peer that interrupts an established link.
+       Measured against a Canon TR7560 sending a V.34 fax: INFOh goes out at
+       tx_t=0.912 s, the recipient goes silent, and 308 ms later the watcher
+       calls the still-present Tone B a peer retrain and tears the call down
+       before Phase 3 has begun.  A loopback cannot show this -- there both
+       ends are the same code with no propagation or processing delay, so the
+       source's tone stops exactly when the recipient stops listening. */
+    if (!s->duplex  &&  s->stage == V34_RX_STAGE_PHASE3_WAIT_S)
+    {
+        s->phase34_tone_a_blocks = 0;
+        return;
+    }
+    /*endif*/
     if (v34_rx_stage_watches_retrain(s->stage))
     {
         /* Which tone the peer holds follows its ROLE, not the call

@@ -235,6 +235,13 @@ SPAN_DECLARE(int) v34_half_duplex_change_mode(v34_state_t *s, int mode);
     \return 0 for OK, -1 for bad parameter */
 SPAN_DECLARE(int) v34_restart(v34_state_t *s, int baud_rate, int bit_rate, bool duplex);
 
+/*! \brief True when this modem is running V.34 clause 12 half-duplex.  A
+           retrain must pass this back to v34_restart(): the role is a
+           property of the call, not of the restart.
+    \param s The modem context.
+    \return true if half-duplex operation is NOT in use (i.e. duplex). */
+SPAN_DECLARE(bool) v34_is_duplex(v34_state_t *s);
+
 /*! Initialise a V.34 modem context. This must be called before the first
     use of the context, to initialise its contents.
     \brief Initialise a V.34 modem context.

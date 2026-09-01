@@ -48,6 +48,12 @@ fi
 # and would make a negative result meaningless.
 echo "fax_v8_probe: registering as $SIP_USER on $SIP_SERVER (SIP $LOCAL_PORT, RTP $RTP_PORT)"
 echo "fax_v8_probe: dial $EXT from the fax machine"
+# ME_V34_FAX_PROBE=1 adds V.34 half-duplex to the answerer's JM offer, so a
+# calling fax's CM intersects with something and it proceeds into V.34 Phase 2.
+# Set FAX_PROBE=0 for the stage 1 behaviour (record the CM only).  This does
+# NOT make a working fax: T.30 Annex F does not exist here, so nothing
+# consumes the primary channel.  The point is the recording.
+ME_V34_FAX_PROBE="${FAX_PROBE:-1}" \
 ME_V34_SPAN_FLOW_LOG=1 \
 SIP_FORCE_PCMU=1 \
 exec python3 tools/v90_hardware_interop.py \

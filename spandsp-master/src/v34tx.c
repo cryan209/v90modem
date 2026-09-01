@@ -447,11 +447,21 @@ static void v34_tx_log_state_change_at(v34_state_t *s, int sample_offset)
     }
     /*endif*/
 
+    /* tx_t is this transmitter's OWN sample counter, in seconds.  Every other
+       timestamp available here is a dwell or a wall clock, and neither can be
+       laid against a recording: the transmit and receive taps are written from
+       different call sites, and reading one with the other's timeline is
+       recorded a few lines below in modem_engine.c as having produced a
+       confident "our transmitter is silent during the stall" out of an 8 s
+       misalignment.  A stage change stamped with the position in the stream
+       the transmitter itself produced can be looked up in live-tx.g711
+       directly, with no cross-stream assumption at all. */
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
-             "Tx - [%s] stage=%s (%d) mod=%s (%d)\n",
+             "Tx - [%s] stage=%s (%d) mod=%s (%d) tx_t=%.3fs\n",
              role,
              v34_tx_stage_to_str(s->tx.stage), s->tx.stage,
-             v34_modulation_to_str(s->tx.current_modulator), s->tx.current_modulator);
+             v34_modulation_to_str(s->tx.current_modulator), s->tx.current_modulator,
+             (double) now/8000.0);
 
     if (s->tx.stage == V34_TX_STAGE_FIRST_S
         &&
@@ -9662,6 +9672,12 @@ static int baud_rate_to_code(int baud_rate)
     }
     /*endfor*/
     return -1;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(bool) v34_is_duplex(v34_state_t *s)
+{
+    return (s)  ?  s->duplex  :  true;
 }
 /*- End of function --------------------------------------------------------*/
 

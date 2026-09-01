@@ -61,6 +61,30 @@ reporting our own state. Nothing about clause 12 is established by this: our
 JM offers no fax modulation, so the call ended after six seconds without a
 single Phase 2 signal.
 
+**V.34 fax stage 2: the Canon accepts V.34 half-duplex (2026-09-01).** With
+`ME_V34_FAX_PROBE=1` (default OFF -- it changes what every DATA peer sees in
+our JM) the answerer offers V8_MOD_V34HDX, the Canon takes it, and our clause
+12 code runs the whole half-duplex Phase 2 and transmits **INFOh at tx_t =
+0.912 s**, per 12.2.1.2.6. First time any of it has faced a foreign
+implementation; three defects came out of two calls and none is reachable from
+the loopback. (1) The S detector's sustained-rotation path fires on the
+source's Tone B -- 12.2.1.1.4 holds that tone until INFOh arrives, so it is
+guaranteed present when 12.3.2.1 arms the S detector; measured as a pure
+1200 Hz tone on the recording. Now duplex-only. (2) With that fixed the RETRAIN
+watcher calls the same Tone B a peer retrain; it now stands down for `!duplex`
+in PHASE3_WAIT_S. (3) `restart_v34_phase2_locked()` hardcoded `duplex = true`,
+so any retrain silently converted a clause 12 call into a plain V.34 data call
+(the stage trace goes HDX_* then INITIAL_A/L1_L2/PRE_INFO1_A). New
+`v34_is_duplex()`. **Stage changes now carry `tx_t=`, the position in the
+TRANSMITTER'S OWN sample stream** -- because cross-reading `live-tx.g711`
+against `live-rx.g711` produced a confident, precise, entirely false "our INFOh
+is 7.95 s late"; the burst measured was a post-retrain INFOMARKSa. Matching
+file lengths are NOT evidence of a shared time origin, and `modem_engine.c`
+already carries a comment about the same mistake costing an earlier session an
+8 s misalignment. Open: whether the Canon accepts our INFOh -- it holds Tone B
+for 8 s and then 12 more, and 12.2.1.3.4 gives it 2000 ms, so on the evidence
+it never took ours.
+
 **The half-duplex V.34 (clause 12) control channel now runs end to end.**
 `v34_hdx_test <baud> <bps> <ulaw|alaw> <seconds>` drives a source and a
 recipient at each other through Phase 2, Phase 3 and 12.4's PPh/ALT/MPh/E, and

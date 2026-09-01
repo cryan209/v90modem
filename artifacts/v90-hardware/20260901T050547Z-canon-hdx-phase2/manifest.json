@@ -1,0 +1,52 @@
+{
+  "command": [
+    "/Users/scottcryan/v90modem/sip_v90_modem",
+    "--sip-server",
+    "asterisk.net.cryan.nz",
+    "--username",
+    "6000",
+    "--password",
+    "<redacted>",
+    "--local-port",
+    "5064",
+    "--rtp-port",
+    "41000",
+    "--pty-link",
+    "/tmp/v90faxprobe"
+  ],
+  "duration_limit_seconds": 300,
+  "files": {
+    "live-rx.g711": {
+      "bytes": 342240,
+      "sha256": "04d4fd6ea243607a77f73043b694e845789ea7fc19c9678611114027d76cbb85"
+    },
+    "live-tx.g711": {
+      "bytes": 343360,
+      "sha256": "24bab1901b6717b64a59cf71902c0cd412c0828c729275a377726e1dfc0236b2"
+    },
+    "modem.log": {
+      "bytes": 123664,
+      "sha256": "9dbc81e5ec66d64a7b2e474003844b285330df94b1564e1eca85fac546800e2a"
+    },
+    "rtp-rx.csv": {
+      "bytes": 141253,
+      "sha256": "623861bb9b6937d442b7c05c93c1aad5c227a322105a4cd52fab7a36b4fc09de"
+    },
+    "rtp-tx.csv": {
+      "bytes": 136740,
+      "sha256": "30d134590836de54947d3b44ade4e99e4b9da5de63d262146ff56104a85b1c45"
+    },
+    "summary.json": {
+      "bytes": 7869,
+      "sha256": "f36d0837d7cec75ecea251061c39a58e9d8578bcb370a6063154d5e91976751a"
+    }
+  },
+  "git_head": "3672c754dcf6b8e0e86c4eac7247ecb3249f110f",
+  "label": "canon-hdx-phase2",
+  "platform": "macOS-26.5.1-arm64-arm-64bit-Mach-O",
+  "process_return_code": 0,
+  "python": "3.14.6",
+  "schema": 1,
+  "started_utc": "20260901T050547Z",
+  "stopped_at_duration_limit": true
+}
