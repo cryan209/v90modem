@@ -188,10 +188,18 @@ then answer `ERROR`, which reads as a working interface and is not.
 `2.0` is T.32 class 2.0, where **the DCE runs T.30**: `fax_class2.c` is a T.32
 command layer over SpanDSP's `fax_state_t`, with `t4_rx`/`t4_tx` bridging the
 DTE's compressed image data to the TIFF files T.30 transfers. SpanDSP's own
-class 2 command handlers are `TODO` stubs and are not used. One deviation is
-deliberate and documented: `+FDT` takes the page before it reports `+FCS`,
-because SpanDSP's T.30 needs a document to exist by the DIS it receives.
-**Its result code is not part of that** — 8.3.3.4 puts the OK or ERROR after
+class 2 command handlers are `TODO` stubs and are not used. **8.3.3's ordering
+is followed on a connected call**: the first `+FDT` runs phase B, the DCS
+produces the `+FCS:` report and `CONNECT` follows it, so a DTE that adapts its
+image to the negotiated parameters has them in time. SpanDSP takes everything
+for the DCS from the image it is about to send, so the format is *declared*
+instead (`t30_set_tx_image_format()`, from what `+FIS` settled) and phase B
+completes without a file. A `+FDT` issued *before* the call is up has no phase
+B to run and still answers `CONNECT` first — outside 8.3.3's model, and the
+one piece of that deviation left. Two traps: `more_pages_pending` must not be
+set when no `+FDT` is open, or T.30 transmits on a polling session; and `+FCT`
+belongs with the `CONNECT`, since until then the DCE waits on the far end, not
+its DTE. **The result code is separate** — 8.3.3.4 puts the OK or ERROR after
 that page's phase D, taken from the far end's response (MCF/RTP/PIP → OK,
 RTN/PIN → ERROR) rather than from the page count, since a refused page is
 never counted as sent and is exactly the case that must report ERROR. That

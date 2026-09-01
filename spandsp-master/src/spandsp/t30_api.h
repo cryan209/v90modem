@@ -495,6 +495,30 @@ SPAN_DECLARE(void) t30_set_retransmit_hold(t30_state_t *s, bool hold);
     \return 0 if a retransmission was pending and has been started, else -1. */
 SPAN_DECLARE(int) t30_resume_retransmission(t30_state_t *s);
 
+/*! Declare the image format the document will be sent in, so that phase B can
+    be completed before any of it exists. T.32 8.3.3 has a class 2.0 DCE
+    complete phase B, report the negotiated session parameters to its DTE and
+    only then take the page - so the format has to come from what was
+    negotiated with the DTE (+FIS, +FDT=DF,VR,WD,LN) rather than from an image
+    nobody has yet. Used with t30_set_more_pages_pending(), which is what
+    makes T.30 wait for that first page rather than treating an absent
+    document as nothing to send.
+    \brief Declare the transmit image format.
+    \param s The T.30 context.
+    \param compression A T4_COMPRESSION_ value.
+    \param image_width The image width in pixels.
+    \param width_code The T.30 width code for that width.
+    \param x_resolution The horizontal resolution.
+    \param y_resolution The vertical resolution.
+    \param resolution The T4_RESOLUTION_ code. */
+SPAN_DECLARE(void) t30_set_tx_image_format(t30_state_t *s,
+                                           int compression,
+                                           int image_width,
+                                           int width_code,
+                                           int x_resolution,
+                                           int y_resolution,
+                                           int resolution);
+
 /*! Declare that the document continues beyond the pages the file currently
     holds. An application which is fed its pages one at a time - a T.32 class
     2.0 DCE, whose DTE hands over a page per +FDT and says with the

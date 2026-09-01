@@ -154,6 +154,13 @@ static int              tx_tiff_ready;     /* a page is spooled and unsent */
  * builds a fresh document, which is then what goes on the line.
  */
 static int              retransmit_wanted; /* a page was refused; T.30 is held */
+/*
+ * T.32 8.3.3 and Table 16: a +FDT issued on a connected call completes phase
+ * B first, reports the negotiated session parameters, and only then answers
+ * CONNECT.  These track that: the DCS going out is what says phase B is done.
+ */
+static int              phase_b_done;      /* a DCS has gone out on this call */
+static int              fdt_await_connect; /* a +FDT is waiting for phase B */
 static int              tx_docs_built;     /* so each document gets its own file */
 static int              tx_pages_sent;
 
@@ -647,12 +654,27 @@ static void real_time_frame_handler(void *user_data, bool incoming,
         }
     }
 
-    if (!incoming && (fcf & 0xFE) == (T30_DCS & 0xFE) && p_nr.tpr) {
-        /* The rate is already chosen by the time the DCS goes out, so the
-         * session parameters here are the ones this frame is setting up. */
-        update_negotiated_params();
-        params_to_string(&p_cs, params, sizeof(params));
-        queue_line("\r\n+FCS:%s\r\n", params);
+    if (!incoming && (fcf & 0xFE) == (T30_DCS & 0xFE)) {
+        phase_b_done = 1;
+        if (p_nr.tpr) {
+            /* The rate is already chosen by the time the DCS goes out, so the
+             * session parameters here are the ones this frame is setting up. */
+            update_negotiated_params();
+            params_to_string(&p_cs, params, sizeof(params));
+            queue_line("\r\n+FCS:%s\r\n", params);
+        }
+        if (fdt_await_connect) {
+            /*
+             * T.32 8.3.3 and Table 16: the +FDT's CONNECT follows the phase B
+             * report, so a DTE that adapts its image to the negotiated
+             * session parameters has them before it sends anything.
+             */
+            fdt_await_connect = 0;
+            queue_line("\r\nCONNECT\r\n");
+            /* 8.5.2.6 starts bounding the DTE now that it is the DCE's turn
+             * to wait for it. */
+            fct_arm();
+        }
     }
 
     /*
@@ -969,6 +991,19 @@ static void session_start(void)
      * after the RTN and waits for spool_close() to release it.
      */
     t30_set_retransmit_hold(t30, true);
+    /*
+     * T.32 8.3.3: phase B is completed and its result reported to the DTE
+     * before the DTE hands a page over, so the format T.30 negotiates has to
+     * come from what this DCE and its DTE settled on in +FIS -- there is no
+     * image to take it from yet.  Harmless when a document does exist: the
+     * file wins.
+     */
+    t30_set_tx_image_format(t30, df_to_compression(p_is.df), 1728, 0,
+                            T4_X_RESOLUTION_R8,
+                            (p_is.vr & 1) ? T4_Y_RESOLUTION_FINE
+                                          : T4_Y_RESOLUTION_STANDARD,
+                            (p_is.vr & 1) ? T4_RESOLUTION_R8_FINE
+                                          : T4_RESOLUTION_R8_STANDARD);
     /* T.32 8.5.2.1: whether the remote's procedure interrupt requests are
      * accepted and negotiated, or ignored. */
     t30_remote_interrupts_allowed(t30, p_ie ? true : false);
@@ -1185,7 +1220,16 @@ static void tx_page_flow(void)
     if (!fax)
         return;
     t30 = fax_get_t30_state(fax);
-    t30_set_more_pages_pending(t30, !doc_complete || doc_pages > doc_pages_sent + 1);
+    /*
+     * "The document continues past what T.30 has": either the DTE has a page
+     * open that it has not finished, or pages are spooled beyond the one
+     * being sent.  It must NOT be true merely because no +FDT has been
+     * issued -- T.30 reads it as "there is a document to send", and on a
+     * polling session that would make this DCE transmit instead of poll.
+     */
+    t30_set_more_pages_pending(t30,
+                               (spool_rx != NULL && !doc_complete)
+                               || doc_pages > doc_pages_sent + 1);
     if (doc_pages > doc_pages_sent)
         t30_resume_next_page(t30);      /* a no-op unless one is waiting */
 }
@@ -1878,13 +1922,33 @@ int fc2_at_line(const char *line)
         } else if (spool_open()) {
             dte_mode = FC2_DTE_TX_DATA;
             dte_saw_dle = 0;
-            /*
-             * T.32 8.5.2.6 for the transmit direction.  The DCE has nothing
-             * left to send and is waiting on the DTE; +FCT bounds that, and
-             * every byte the DTE hands over resets it.
-             */
-            fct_arm();
-            put_line("\r\nCONNECT\r\n");
+            if (call_up && !phase_b_done) {
+                /*
+                 * T.32 8.3.3 and Table 16: phase B, then the +FCS: report,
+                 * then CONNECT.  T.30 runs it on the format declared in
+                 * session_start() and waits for the page afterwards, so this
+                 * command stays open until the DCS goes out.
+                 */
+                fdt_await_connect = 1;
+                tx_page_flow();
+                session_start();
+                tx_page_flow();
+            } else {
+                /*
+                 * T.32 8.5.2.6 for the transmit direction.  The DCE has
+                 * nothing left to send and is waiting on the DTE; +FCT bounds
+                 * that, and every byte the DTE hands over resets it.  It is
+                 * armed with the CONNECT, since until then the DCE is waiting
+                 * on the far end rather than on its DTE.
+                 */
+                fct_arm();
+                /*
+                 * Phase B is already done -- a later page of the document --
+                 * or the call is not up yet, which is outside 8.3.3's model
+                 * and is the remaining half of the ordering deviation.
+                 */
+                put_line("\r\nCONNECT\r\n");
+            }
             ok = 1;
         }
     } else if (match(&t, "+FDR")) {
@@ -1971,6 +2035,8 @@ void fc2_select(int on)
         rx_page_bad_run = 0;
         dcs_ecm_64 = 0;
         retransmit_wanted = 0;
+        phase_b_done = 0;
+        fdt_await_connect = 0;
         tx_pages_sent = 0;
         tx_tiff_ready = 0;
         dte_mode = FC2_IDLE;

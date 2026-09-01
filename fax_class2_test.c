@@ -1200,7 +1200,14 @@ static void test_transmit_timeout(int feed_part)
 
     /* Open the page and hand over a third of it, then stop. */
     at("AT+FDT");
-    check(dte_saw("CONNECT"), "AT+FDT answers CONNECT");
+    /*
+     * T.32 8.3.3 and Table 16: on a connected call the CONNECT follows phase
+     * B, so it takes audio to arrive -- see "A page at a time" in
+     * docs/fax_class_at.md.
+     */
+    for (int i = 0; i < 60 * 50 && !dte_saw("CONNECT"); i++)
+        pump(peer, 1);
+    check(dte_saw("CONNECT"), "AT+FDT answers CONNECT after phase B");
     if (feed_part) {
         n = encode_page_for_dte(SRC_TIFF, T4_COMPRESSION_T4_1D, 0,
                                 page, sizeof(page));
@@ -1215,12 +1222,17 @@ static void test_transmit_timeout(int feed_part)
     /*
      * The DCN is asserted on our own transmit path, through the +FBU frame
      * report, which is generated inside send_frame() -- so it says the frame
-     * went out.  Not at the far end: a stalled +FDT means T.30 never had a
-     * document, so the call collapses on its own account within the first
-     * second and the DCN arrives after the far end has stopped listening.
-     * That is the scenario, not the implementation.
+     * went out.  Not at the far end: by the time 8.5.2.6's abort fires the
+     * far end has been waiting through the whole timeout with nothing
+     * arriving, and what it makes of the DCN is its own business.
+     *
+     * FA or FB: the low bit of an FCF is a don't-care in a DCN, set from
+     * whether a DIS has been received.  It is FB here because phase B
+     * completed before the DTE stalled -- 8.3.3's ordering -- and was FA when
+     * the +FDT was answered before any of that happened.
      */
-    check(dte_saw("+FHT: FF 13 FA"), "a DCN goes out (T30_DCN, 0xFA)");
+    check(dte_saw("+FHT: FF 13 FA") || dte_saw("+FHT: FF 13 FB"),
+          "a DCN goes out (T30_DCN)");
     check(dte_saw("+FHS:02"), "the DTE is told with +FHS:02");
 
     /* And the DTE is back in command mode: a plain AT command is answered
@@ -1299,20 +1311,29 @@ static void test_transmit_timeout_not_tripped(void)
  * distinct from each other; a DCE that sent the first page twice, or only the
  * last one, would still complete the session and still report OK.
  */
+static int  send_page_data(int variant, int ppm);
+
 static int  send_page_via_fdt(int variant, int ppm)
 {
-    static uint8_t page[1 << 20];
-    int n;
 
     /*
      * Its own file: SRC_TIFF is the shared one every other test compares
      * against, and writing a variant into it makes those tests compare a page
      * they never sent.
      */
+    at("AT+FDT");
+    return send_page_data(variant, ppm);
+}
+
+/* The same without the +FDT, for a caller which has already issued one. */
+static int  send_page_data(int variant, int ppm)
+{
+    static uint8_t page[1 << 20];
+    int n;
+
     row_variant = variant;
     if (!write_test_tiff(MULTI_TIFF))
         return 0;
-    at("AT+FDT");
     n = encode_page_for_dte(MULTI_TIFF, T4_COMPRESSION_T4_1D, 0, page, sizeof(page));
     if (n < 2)
         return 0;
@@ -1930,7 +1951,34 @@ static void test_page_at_a_time(int ec)
         int last = (page == 1);
 
         dte_reset();
-        check(send_page_via_fdt(page, last ? 0x2E : 0x2C),
+        at("AT+FDT");
+        if (page == 0) {
+            /*
+             * T.32 8.3.3 and Table 16: the first +FDT on a connected call
+             * runs phase B, reports the negotiated session parameters and
+             * only then answers CONNECT -- so a DTE which adapts its image to
+             * the +FCS: report has it in time.  Checked before any page has
+             * been handed over, and in order.
+             */
+            check(!dte_saw("CONNECT"),
+                  "the first +FDT does not answer CONNECT at once");
+            for (int i = 0; i < 60 * 50 && !dte_saw("CONNECT"); i++)
+                pump(peer, 1);
+            check(dte_saw("+FCS:"), "phase B is reported to the DTE");
+            check(dte_saw("CONNECT"), "and then CONNECT follows");
+            {
+                const char *fcs = dte_find("+FCS:");
+                const char *conn = dte_find("CONNECT");
+
+                check(fcs && conn && fcs < conn,
+                      "in that order (8.3.3, Table 16)");
+            }
+        } else {
+            /* Phase B is done, so this one answers straight away. */
+            check(dte_saw("CONNECT"), "a later +FDT answers CONNECT at once");
+        }
+
+        check(send_page_data(page, last ? 0x2E : 0x2C),
               last ? "page two is handed over" : "page one is handed over");
         /*
          * Nothing yet: the page has not been through phase D.  This is the

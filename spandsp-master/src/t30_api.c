@@ -802,6 +802,25 @@ SPAN_DECLARE(int) t30_set_ecm_frame_size(t30_state_t *s, int octets)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(void) t30_set_tx_image_format(t30_state_t *s,
+                                           int compression,
+                                           int image_width,
+                                           int width_code,
+                                           int x_resolution,
+                                           int y_resolution,
+                                           int resolution)
+{
+    s->line_compression = compression;
+    s->line_image_type = T4_IMAGE_TYPE_BILEVEL;
+    s->image_width = image_width;
+    s->line_width_code = width_code;
+    s->x_resolution = x_resolution;
+    s->y_resolution = y_resolution;
+    s->current_page_resolution = resolution;
+    s->tx_image_format_declared = true;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) t30_set_more_pages_pending(t30_state_t *s, bool pending)
 {
     s->more_pages_pending = pending;

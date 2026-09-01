@@ -1753,12 +1753,22 @@ static int build_dcs(t30_state_t *s)
     int use_bilevel;
     int image_type;
 
-    /* Reacquire page information, in case the image was resized, flattened, etc. */
-    s->current_page_resolution = t4_tx_get_tx_resolution(&s->t4.tx);
-    s->x_resolution = t4_tx_get_tx_x_resolution(&s->t4.tx);
-    s->y_resolution = t4_tx_get_tx_y_resolution(&s->t4.tx);
-    s->image_width = t4_tx_get_tx_image_width(&s->t4.tx);
-    image_type = t4_tx_get_tx_image_type(&s->t4.tx);
+    if (s->operation_in_progress == OPERATION_IN_PROGRESS_T4_TX)
+    {
+        /* Reacquire page information, in case the image was resized, flattened, etc. */
+        s->current_page_resolution = t4_tx_get_tx_resolution(&s->t4.tx);
+        s->x_resolution = t4_tx_get_tx_x_resolution(&s->t4.tx);
+        s->y_resolution = t4_tx_get_tx_y_resolution(&s->t4.tx);
+        s->image_width = t4_tx_get_tx_image_width(&s->t4.tx);
+        image_type = t4_tx_get_tx_image_type(&s->t4.tx);
+    }
+    else
+    {
+        /* There is no image yet - phase B is being completed on the format
+           the application declared. */
+        image_type = s->line_image_type;
+    }
+    /*endif*/
 
     /* Make a DCS frame based on local issues and the latest received DIS/DTC frame.
        Negotiate the result based on what both parties can do. */
@@ -3053,6 +3063,17 @@ static int start_sending_document(t30_state_t *s)
 
     if (s->tx_file[0] == '\0')
     {
+        if (s->more_pages_pending  &&  s->tx_image_format_declared)
+        {
+            /* The application has declared what the document will be, but has
+               not been given it yet - a T.32 class 2.0 DCE, whose DTE takes
+               the negotiated session parameters from phase B before it hands
+               a page over. Complete phase B on the declared format and wait
+               for the page. */
+            span_log(&s->logging, SPAN_LOG_FLOW, "No document yet; sending on the declared format\n");
+            return 0;
+        }
+        /*endif*/
         /* There is nothing to send */
         span_log(&s->logging, SPAN_LOG_FLOW, "No document to send\n");
         return -1;
@@ -3239,8 +3260,9 @@ static int process_rx_dis_dtc(t30_state_t *s, const uint8_t *msg, int len)
         /*endif*/
     }
     /*endif*/
-    /* Try to send something */
-    if (s->tx_file[0])
+    /* Try to send something. A declared image format with more pages pending
+       is a document too - one the application has not handed over yet. */
+    if (s->tx_file[0]  ||  (s->more_pages_pending  &&  s->tx_image_format_declared))
     {
         span_log(&s->logging, SPAN_LOG_FLOW, "Trying to send file '%s'\n", s->tx_file);
         if (!test_ctrl_bit(s->far_dis_dtc_frame, T30_DIS_BIT_READY_TO_RECEIVE_FAX_DOCUMENT))
@@ -4309,6 +4331,16 @@ static void process_state_d_post_tcf(t30_state_t *s, const uint8_t *msg, int len
         span_log(&s->logging, SPAN_LOG_FLOW, "Trainability test succeeded\n");
         s->retries = 0;
         s->short_train = true;
+        if (s->operation_in_progress != OPERATION_IN_PROGRESS_T4_TX  &&  s->more_pages_pending)
+        {
+            /* Phase B is done on a declared format and the document is still
+               to come. Wait for it, exactly as at any other page boundary. */
+            span_log(&s->logging, SPAN_LOG_FLOW, "Waiting for the application to supply the first page\n");
+            s->tx_next_page_in_file = 0;
+            s->next_page_pending = true;
+            break;
+        }
+        /*endif*/
         if (s->error_correcting_mode)
         {
             set_state(s, T30_STATE_IV);
@@ -7782,6 +7814,22 @@ SPAN_DECLARE(void) t30_get_transfer_statistics(t30_state_t *s, t30_stats_t *t)
         break;
     default:
         memset(&stats, 0, sizeof(stats));
+        if (s->tx_image_format_declared)
+        {
+            /* Phase B has been completed on a declared format, and the image
+               it describes has not arrived yet. Report what was negotiated,
+               not zeros. */
+            stats.type = s->line_image_type;
+            stats.image_type = s->line_image_type;
+            stats.compression = s->line_compression;
+            stats.width = s->image_width;
+            stats.image_width = s->image_width;
+            stats.x_resolution = s->x_resolution;
+            stats.y_resolution = s->y_resolution;
+            stats.image_x_resolution = s->x_resolution;
+            stats.image_y_resolution = s->y_resolution;
+        }
+        /*endif*/
         break;
     }
     /*endswitch*/

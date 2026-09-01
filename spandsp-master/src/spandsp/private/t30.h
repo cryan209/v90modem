@@ -86,6 +86,10 @@ struct t30_state_s
     bool retransmit_held;
     /*! \brief True while such a repeat is waiting for the application. */
     bool retransmit_pending;
+    /*! \brief True if the transmit image format has been declared by the
+               application, so phase B can be completed before the first page
+               of the document exists. */
+    bool tx_image_format_declared;
     /*! \brief True if the application has another page for the document
                which is not in the file yet. The post page message is then
                MPS rather than EOP, and the procedure waits at the page
