@@ -195,6 +195,24 @@ int main(int argc, char **argv)
 		       all_zero ? "all zero (config lives host-side, per osnvm.c)" : "non-zero");
 	}
 
+	/*
+	 * Arm the pipes BEFORE sending any script.  The vendor driver keeps its
+	 * RX ring posted continuously and starts the data pump from inside the
+	 * notification handler (hsfusbcd2196_, the data[0]==5 case), i.e. within
+	 * microseconds of the script completing.  Sending a script with no URBs
+	 * posted and starting the ring afterwards is a different experiment from
+	 * the one the driver runs, and it is the one this probe used to do.
+	 */
+	struct hsf_callbacks cb = {
+		.rx_samples   = on_rx,
+		.notification = on_notify,
+	};
+	if (stream_secs > 0 && hsf_fxo_start(d, &cb) < 0) {
+		fprintf(stderr, "could not start streaming\n");
+		hsf_fxo_close(d);
+		return 1;
+	}
+
 	/* Bracket every script with GET_INFROMATION.  Gotcha 2 in hsf_fxo.c: a
 	 * cached descriptor read proves nothing, and a wedged EP0 makes the next
 	 * request lie about the one before it. */
@@ -229,15 +247,6 @@ int main(int argc, char **argv)
 	}
 
 	if (stream_secs > 0) {
-		struct hsf_callbacks cb = {
-			.rx_samples   = on_rx,
-			.notification = on_notify,
-		};
-		if (hsf_fxo_start(d, &cb) < 0) {
-			fprintf(stderr, "could not start streaming\n");
-			hsf_fxo_close(d);
-			return 1;
-		}
 		printf("streaming for %ds%s...\n", stream_secs,
 		       do_feed ? " (feeding u-law silence out)" : "");
 		if (do_feed) {

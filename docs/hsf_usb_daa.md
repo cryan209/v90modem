@@ -155,13 +155,33 @@ set, and it produces no notification at all unless script 9 has run first. That
 fits a script that needs a signal id: `hsfusbcd2187_` dispatches 21 of them but
 the enqueue passes no patches, so the id must reach the firmware another way.
 
-**The Linux driver does nothing special for the data path.** `cnxthwusb_probe`
-finds the endpoints, allocates URBs, downloads firmware and registers the TTY --
-there is no codec start at attach. The engine arms RX through
-`hsfusbcd2267_`, which fetches a buffer and a length, **clamps it to 0x100** and
-calls `OsUsbMakeDataReceiveRequest`; that is byte for byte what this transport
-already does, 256-byte bulk IN transfers included. So the host side is not the
-gate and never was.
+**What the Linux driver does with the codec: nothing.** This was worth checking
+properly rather than inferring from the GPL half, and the closed driver is
+unambiguous.
+
+`cnxthwusb_probe` finds the endpoints, allocates URBs, downloads firmware and
+registers the TTY -- no codec start at attach. The data pump is started from
+inside **`hsfusbcd2196_`, which is the NOTIFICATION HANDLER**: it checks
+`msg[0] == 0xc1`, takes `msg[1]` as 1 or 2, copies `msg[8..]` into the context
+and dispatches on the first payload byte -- the completing script id -- through
+a 34-entry table at `.rodata 0x324`. The **`data[0] == 5`** case falls through
+into the pump start. So it is the completion of **script 5** that tells the host
+to stream.
+
+And that start does no hardware configuration whatsoever. In full: zero a block
+of counters, set two flags (`ctx->0x218 = 1`, `ctx->0x21c = 1`, both trivial
+setters), prime **4** TX buffers, arm **16** RX URBs via `hsfusbcd2267_`, which
+fetches a buffer and a length and **clamps it to 0x100**. No sample rate, no
+format, no enable, no alternate setting -- the device has none to select, which
+its own configuration descriptor confirms (two interfaces, one alt setting each,
+64-byte bulk pair on IF0 and a 64-byte interrupt on IF1). Notification ids 14-33
+share a handler that stores the payload and calls `OsEventSet`, i.e. async
+events the engine waits on, not requests for more scripts.
+
+The probe now mirrors that order -- pipes armed before any script is sent, as
+the driver's ring always is -- because sending a script with no URBs posted and
+starting the ring afterwards is a different experiment from the driver's. It
+changes nothing: `9,5,9` and script 5 alone both still yield zero RX.
 
 ## Open: what starts the codec
 
@@ -177,9 +197,20 @@ The bulk pipes still carry no samples. What is measured:
 * None of the twelve scripts changes it, patched or not, on-hook or off-hook,
   alone or in the driver's own order.
 
-What is left is the state the scripts *read*. The relay values live in the
-firmware, not in the scripts (the off-hook script contains no 0xA6), so
-something loads them -- most likely the country/config path, whose template
-(26, seven patch bytes, 158 bytes and by far the largest) is not in the enqueued
-set at all. Finding what sends it is the next thread; `hsfusbcd2165_`'s
-surroundings and the `ctx+0x68` device-variant flag are where to start.
+What is left is not in the transport and not in the driver, both of which are
+now fully accounted for. Two candidates remain, in order of plausibility:
+
+1. **In-band configuration on the bulk OUT pipe.** The GPL layer passes engine
+   buffers through untouched in both directions, so whether the first OUT
+   buffers carry a header or a configuration block is the closed engine's
+   business and is not visible from `osusb.c` at all. The fixed ~1.2 kB TX
+   acceptance would fit a device waiting on a command it never received; we send
+   u-law silence, which is not obviously a valid anything.
+2. **Firmware state the scripts read rather than carry.** The relay values live
+   in the firmware -- the off-hook script contains no 0xA6 -- so something loads
+   them. Template 26 (158 bytes, seven patch bytes, by far the largest) is the
+   obvious candidate and is in no enqueued path, so finding what sends it, if
+   anything does, would settle whether that matters.
+
+Reversing `hsfengine-i386.O`'s use of the data pipes is the way to decide
+between them, and is a larger job than anything done here so far.
