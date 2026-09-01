@@ -87,7 +87,7 @@ Identified:
 | 4 | on-hook. The same dispatch routes 4-7, the on-hook states, here |
 | 8 | tone/cadence. `hsfusbcd2187_` (.text 0x32f0) dispatches 21 signal ids onto it, and sends it with wIndex 3 (delete) to stop one |
 | 7 | pulse dialling. `hsfusbcd2220_` patches three bytes: two context values divided by 1000 (milliseconds) and one literal, matching the template's 3 patch offsets |
-| 9, 5 | session bring-up. `hsfusbcd2165_` (.text 0x4480), the function that zeroes the whole per-call state block, runs 9, then 5, then 9 |
+| 9, 5 | session bring-up. `hsfusbcd2165_` (.text 0x4480) sends 9, waits up to 1400 ms for its event, then sends 5. A second 9 is only the timeout retry path |
 | 6 | session end. `hsfusbcd2195_` / `hsfusbcd2201_` set the stopping flag first |
 | 2, 10, 12 | parametrised; 2 takes one 16-bit value, 10 takes two, 12 takes a byte |
 
@@ -106,9 +106,8 @@ opcode every template ends with, arriving from the device: the assembler's
 output executes, and `wValue = 0xFF01` is right.
 
 One identification gained hardware support. Feeding the bulk OUT pipe while each
-script runs in isolation, **only scripts 6 and 9 open it** (1120 bytes accepted,
-against 0 for 1, 2, 3, 4, 5, 7, 10 and 12) -- the two the disassembly called
-session bring-up and session end.
+script runs in isolation, **only scripts 6 and 9 open it** -- the two the
+disassembly called session bring-up and session end.
 
 ### Two defects of ours had to be fixed to see any of this
 
@@ -190,10 +189,27 @@ its own configuration descriptor confirms (two interfaces, one alt setting each,
 share a handler that stores the payload and calls `OsEventSet`, i.e. async
 events the engine waits on, not requests for more scripts.
 
-The probe now mirrors that order -- pipes armed before any script is sent, as
-the driver's ring always is -- because sending a script with no URBs posted and
-starting the ring afterwards is a different experiment from the driver's. It
-changes nothing: `9,5,9` and script 5 alone both still yield zero RX.
+The original probe still differed from the driver in two decisive ways. It
+misread a conditional branch in `hsfusbcd2165_` as an unconditional sequence
+and sent `9,5,9`; the second 9 actually belongs only to the 1400 ms timeout
+retry. It also filled the TX pipe by polling from the main loop. The driver
+primes four 128-byte writes and submits the next slice immediately from every
+TX completion callback. The probe now does exactly that and waits for each
+script completion before advancing.
+
+**That starts the codec transport.** On the attached 0572:1300, the normal
+script 9 completion followed by script 5 produced, in a 20-second capture,
+841,472 RX bytes in 13,148 packets with zero USB errors. Every packet was 64
+bytes. Independent 10- and 5-second runs produced 421,376 and 211,520 bytes,
+again continuously and without errors. Script 6 stops the session and a new
+9/5 start works again.
+
+The bytes are not G.711 codewords. Read provisionally as four-byte frames, the
+stream contains two signed 16-bit little-endian slots and runs at about 10.5 to
+10.6 thousand frames/s over these short wall-clock measurements, plausibly the
+device's 10.6667 kHz internal clock. The exact slot meanings and clock still
+need a controlled line signal; do not build an audio converter around that
+provisional interpretation yet.
 
 ## The engine/driver data interface: two shared rings, no framing
 
@@ -222,8 +238,9 @@ driver ships slices of them as bulk URBs. There is no header, no framing and no
 in-band configuration -- there is nowhere to put one.** That kills the first of
 the two candidates above, from the driver side alone.
 
-Matching the driver's exact granularity (64-byte RX transfers, 128-byte TX)
-changes nothing: still zero RX.
+The driver's exact granularity is 64-byte RX transfers and 128-byte TX
+transfers. Continuous completion-driven TX refill, rather than granularity by
+itself, proved essential to making that transport run.
 
 There is one more control path in the driver -- `hsfusbcd2188_` CRCs a host
 buffer with CRC-16-CCITT (poly 0x1021) and writes it in 64-byte blocks via
@@ -311,34 +328,43 @@ here (streaming vs not) was present from the first observation and went
 unexamined until the story it supported was contradicted.
 
 
-## Open: what starts the codec
+## Open: hook control and exact sample framing
 
-Eliminated, each by measurement rather than inference:
+The transport-start question is closed. The remaining audio-path work is to
+identify the two 16-bit slots with a controlled tone, measure the clock over a
+longer interval, and verify which script/profile combination physically seizes
+the line. Sending script 3 after start did not yield RX in the first trial, so
+off-hook must not yet be treated as a single context-free script operation.
 
-* the transport (the driver arms RX exactly as we do, same 0x100 clamp);
-* the driver's codec setup (there is none -- no rate, no format, no enable);
-* alternate settings (the device has one per interface);
-* ordering (pipes are now armed before any script, as the driver's ring is);
-* transfer granularity (64/128 as well as 160/256);
-* in-band framing on the data pipes (two raw shared rings, nowhere for a header);
-* all twelve scripts, patched and unpatched, on-hook and off-hook, alone and in
-  the driver's own order.
+### Exact driver off-hook sequence (2026-09-02)
 
-* the tone/cadence scripts. Template 26 is **not** an unsent configuration
-  block, which is what the last round guessed: it is signal id 13, one of the
-  twenty `hsfusbcd2187_` sends. All of 0 and 14-33 were tried on the device on
-  top of the session scripts; they load and run (15, 27, 32 and 33 report their
-  own completion within the window, the rest run past it as a tone would) and
-  none produces a sample.
+`hsfusbcd2185_` settles the question. For relay codes 2, 3 and 8-11 it stores
+the engine-supplied relay word at `ctx+0x8c4`, but never reads or transmits that
+word. It calls `hsfusbcd2250_`, which queues the complete script 8 body with
+`wIndex=3`, then queues script 3 and clears `ctx+0x8c0`. Thus the country
+profile's `0x80B6`/`0x80A6` value is bookkeeping on this USB variant, not a
+missing firmware upload.
 
-What is left is firmware state the scripts read rather than carry. The relay
-values are the proof it exists: the off-hook script contains no 0xA6, so the
-firmware holds that table and something must load it. With the script space now
-fully mapped and every one of the 34 exercised, that loader is not a script --
-and the country/profile data the vendor stack holds host-side (`hsf.cty`,
-`osnvm.c`) is consumed by the ENGINE rather than sent to the device, so it is
-not a loader either. What loads the firmware's relay table is genuinely not
-identified, and no path in this driver is a candidate for it.
+`hsf_fxo_script_set_hook()` now reproduces that sequence, including the odd
+Linux behavior where the script-8 delete normally completes with EPIPE but the
+driver proceeds to script 3. Tested live after a clean firmware reload: script
+9, script 5 and script 3 all completed with status 1, the data pump delivered
+631,552 bytes in 2,467 256-byte packets over 15 seconds with no USB errors, and
+the receive values remained the same DC-like 0x0157/0x0000 pair. Therefore no
+unreproduced engine profile or relay argument remains in the host driver call
+path. Either the accepted script does not seize this particular DAA, or these
+four-byte units are not yet being interpreted at their true sample boundary;
+an independently observed ATA seizure is the next discriminator.
+
+That discriminator is now settled. The attached line is FXS 1 on a Grandstream
+HT802 (extension 6004). Its own authenticated status page showed **On Hook**
+before the test and **Off Hook** after script 3. A capture begun with the same
+9/5/3 run, before dial tone could time out, delivered 506,942 bytes over 12
+seconds with no USB errors and still contained only the DC-like two-slot
+values. Thus script 3 really does operate the relay and seize the ATA. The
+remaining fault is specifically between the seized DAA audio and our
+interpretation/routing of the bulk sample stream; neither hook control nor ATA
+timeout can explain the silence.
 
 
 ## Inside the device: the firmware is 8051, and it has been opened up
@@ -554,17 +580,16 @@ and the F4/F5 register file is not code memory either (indices 0x40-0x5f and
 waiting until the device actually wants firmware -- without it `--load` silently
 no-ops on an already-running device, which wasted a whole experiment.
 
-**The result-byte hunt does not work, and it casts doubt on the dispatch
-table.** The stub was placed over opcode 0x23's supposed handler at 0x02a9 (the
-opcode is being replaced, so its own slot is the space to use, and the image has
-no filler runs to borrow). Every completion then came back as five 0xAA bytes
-instead of the expected three, with or without preserving R0 -- so the
-interpreter is running away, not executing a clean replacement handler.
+**The result-byte hunt does not work, and live hardware now rules out the
+table assumption.** The stub was placed over opcode 0x23's supposed handler at
+0x02a9. A minimal four-byte replacement (`MOV 51h,#c3h / RET`) was loaded with
+a valid CRC and the device returned to family 03, but executing a script with
+opcode 0x23 produced no script completion and only an unrelated empty CDC
+notification (`a1 20`). A larger MOVC reader failed the same way. Therefore
+0x02a9 is live firmware code but not opcode 0x23's replaceable handler; the
+105-entry structure matching the opcode count is not sufficient evidence that
+it is the script dispatch. Patching it corrupts another path.
 
-The likely reason is the caveat recorded earlier and never resolved: **several
-of the 46 in-image dispatch targets land mid-instruction under linear
-disassembly, which a real entry point cannot.** 0x02a9 disassembles cleanly by
-luck; that does not make it opcode 0x23's entry. Until the real dispatch
-mechanism is identified -- the 105-entry LJMP table at 0x62 matching the opcode
-count may simply be a coincidence -- patching a handler is patching the wrong
-thing.
+The next trustworthy instrument is a capture of the real Linux vendor stack
+starting a call. That observes the engine-to-driver initialization without
+guessing at the controller's mask-ROM interpreter.

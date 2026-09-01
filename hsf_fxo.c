@@ -599,14 +599,20 @@ const uint16_t hsf_smart_relays[HSF_RELAY_COUNT] = {
 	[HSF_RELAY_OFFHOOK_PULSECLEAR]           = 0x80A4,
 };
 
-int hsf_fxo_script_load(struct hsf_dev *d, uint16_t wvalue,
-			const uint8_t *body, size_t len)
+static int script_load_index(struct hsf_dev *d, uint16_t wvalue,
+			     uint16_t windex, const uint8_t *body, size_t len)
 {
 	if (len == 0)
 		return -EINVAL;		/* osusb.c:1364 asserts against this */
 	int r = vendor_out(d, RT_VENDOR_IF_OUT, CD2_CONTROL_SCRIPT,
-			   wvalue, 1, body, (uint16_t)len);
+			   wvalue, windex, body, (uint16_t)len);
 	return r < 0 ? -EIO : 0;
+}
+
+int hsf_fxo_script_load(struct hsf_dev *d, uint16_t wvalue,
+			const uint8_t *body, size_t len)
+{
+	return script_load_index(d, wvalue, 1, body, len);
 }
 
 int hsf_fxo_script_delete(struct hsf_dev *d)
@@ -619,8 +625,8 @@ int hsf_fxo_script_delete(struct hsf_dev *d)
 	return 0;
 }
 
-int hsf_fxo_script_run(struct hsf_dev *d, unsigned id,
-		       const uint8_t *patch, size_t npatch)
+static int script_run_index(struct hsf_dev *d, unsigned id, uint16_t windex,
+			    const uint8_t *patch, size_t npatch)
 {
 	if (id >= sizeof hsf_scripts / sizeof hsf_scripts[0])
 		return -EINVAL;
@@ -644,25 +650,41 @@ int hsf_fxo_script_run(struct hsf_dev *d, unsigned id,
 		body[s->patch_off[i]] = patch[i];
 	}
 
-	return hsf_fxo_script_load(d, s->wvalue, body, s->len);
+	return script_load_index(d, s->wvalue, windex, body, s->len);
+}
+
+int hsf_fxo_script_run(struct hsf_dev *d, unsigned id,
+		       const uint8_t *patch, size_t npatch)
+{
+	return script_run_index(d, id, 1, patch, npatch);
 }
 
 int hsf_fxo_script_start_codec(struct hsf_dev *d)
 {
-	/* hsfusbcd2165_ runs 9, 5, 9 in that order.  Which of them ungates the
-	 * bulk pipes is not established -- the probe is the instrument for that,
-	 * one script at a time with a GET_INFROMATION either side. */
+	/* hsfusbcd2165_ sends 9 and waits up to 0x578/1400 ms.  On the normal
+	 * completion path it then sends 5 and returns.  A second 9 is only the
+	 * timeout retry; treating 9,5,9 as an unconditional sequence was a
+	 * disassembly error and left the codec in the wrong state. */
 	int r = hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_A, NULL, 0);
 	if (r < 0)
 		return r;
-	r = hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_B, NULL, 0);
-	if (r < 0)
-		return r;
-	return hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_A, NULL, 0);
+	return hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_B, NULL, 0);
 }
 
 int hsf_fxo_script_set_hook(struct hsf_dev *d, bool off_hook)
 {
+	/* hsfusbcd2185_ does not dispatch an off-hook relay code directly to
+	 * script 3.  At .text 0x4870 it first calls hsfusbcd2250_, which queues
+	 * the complete script-8 body with wIndex 3, and only then queues script
+	 * 3.  Sending an empty delete request or script 3 alone is not the same
+	 * firmware transition. */
+	if (off_hook) {
+		int r = script_run_index(d, HSF_SCRIPT_SIGNAL, 3, NULL, 0);
+		/* The delete request normally completes with EPIPE.  osusb.c's
+		 * control completion path explicitly declines to retry wIndex 3;
+		 * hsfusbcd2185_ nevertheless queues script 3 immediately afterwards. */
+		(void)r;
+	}
 	return hsf_fxo_script_run(d,
 				  off_hook ? HSF_SCRIPT_OFF_HOOK : HSF_SCRIPT_ON_HOOK,
 				  NULL, 0);

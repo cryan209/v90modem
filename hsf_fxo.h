@@ -18,7 +18,7 @@
  * control section below.
  *
  * What IS known and implemented here comes from the GPL half of hsfmodem-7.80
- * (modules/osusb.c, modules/cnxthwusb_common.c, modules/imported/include/*.h).
+ * (modules/osusb.c, modules/cnxthwusb_common.c and the imported headers).
  */
 
 #ifndef HSF_FXO_H
@@ -276,7 +276,7 @@ int hsf_fxo_script_delete(struct hsf_dev *d);
 int hsf_fxo_script_run(struct hsf_dev *d, unsigned id,
 		       const uint8_t *patch, size_t npatch);
 
-/* HSF_SCRIPT_SESSION_A, _B, _A -- the hsfusbcd2165_ order.  Unverified. */
+/* HSF_SCRIPT_SESSION_A then _B.  _A is retried only after a 1400 ms timeout. */
 int hsf_fxo_script_start_codec(struct hsf_dev *d);
 int hsf_fxo_script_set_hook(struct hsf_dev *d, bool off_hook);
 

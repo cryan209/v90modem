@@ -11,7 +11,7 @@
  *   ./hsf_fxo_probe --load                             # load firmware if needed
  *   ./hsf_fxo_probe --load --stream 5                  # then stream for 5s
  *   ./hsf_fxo_probe --load --script 9                  # send one script
- *   ./hsf_fxo_probe --load --start-codec --stream 5    # scripts 9,5,9 then stream
+ *   ./hsf_fxo_probe --load --start-codec --stream 5    # script 9 completion, then 5
  *   ./hsf_fxo_probe --load --start-codec --hook off --stream 5
  *
  * --wait is not a convenience.  The CD2 bootloader answers EP0 for only about
@@ -22,29 +22,49 @@
  * merely finished waiting.  --wait polls for the window and acts inside it, so
  * run it FIRST and replug the device while it waits.
  *
- * --script is the instrument for the open question, which is WHICH script
- * ungates the bulk pipes.  Send them one at a time: every attempt is bracketed
- * with GET_INFROMATION, so a script that wedges the device is reported as such
- * rather than being blamed on the next one.
+ * --script remains useful for exercising individual firmware operations.  The
+ * normal stream start is --start-codec; it mirrors the closed Linux driver.
  */
 
 #include "hsf_fxo.h"
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 static unsigned long g_rx_packets;
 static unsigned char g_first[64];
 static size_t        g_first_len;
 static unsigned long g_hist[256];
+static unsigned long g_rx_len_hist[257];
+static bool          g_feed_tx;
+static FILE         *g_rx_file;
+
+static void on_tx_done(size_t len, void *user)
+{
+	struct hsf_dev *d = user;
+	(void)len;
+	if (!g_feed_tx)
+		return;
+	/* Match hsfusbcd2269_: every completion immediately obtains and submits
+	 * the next engine-ring slice.  Polling from main at 10/20 ms leaves a gap
+	 * at precisely the point the device is asking for its next block. */
+	uint8_t zero[128] = {0};
+	(void)hsf_fxo_tx_submit(d, zero, sizeof zero);
+}
 
 static void on_rx(const uint8_t *data, size_t len, void *user)
 {
 	(void)user;
 	g_rx_packets++;
+	if (len <= 256)
+		g_rx_len_hist[len]++;
+	if (g_rx_file)
+		fwrite(data, 1, len, g_rx_file);
 	for (size_t i = 0; i < len; i++)
 		g_hist[data[i]]++;
 	if (g_first_len < sizeof(g_first)) {
@@ -57,10 +77,21 @@ static void on_rx(const uint8_t *data, size_t len, void *user)
 }
 
 static unsigned long g_ring_events;
+static pthread_mutex_t g_notify_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_notify_cond = PTHREAD_COND_INITIALIZER;
+static unsigned        g_script_done[34];
+static uint8_t         g_script_status[34];
 
 static void on_notify(const struct hsf_notification *n, void *user)
 {
 	(void)user;
+	if (n->wValue == 1 && n->data_len >= 2 && n->data[0] < 34) {
+		pthread_mutex_lock(&g_notify_lock);
+		g_script_done[n->data[0]]++;
+		g_script_status[n->data[0]] = n->data[1];
+		pthread_cond_broadcast(&g_notify_cond);
+		pthread_mutex_unlock(&g_notify_lock);
+	}
 	/* Ring arrives as a half-cycle toggle at 25 Hz, so printing every one
 	 * buries everything else -- count them and print the first. */
 	if (n->wValue == 2 && n->data_len >= 1 && n->data[0] == HSF_EVENT_RING) {
@@ -80,6 +111,38 @@ static void on_notify(const struct hsf_notification *n, void *user)
 	fflush(stdout);
 }
 
+static int wait_script(unsigned id, unsigned before, int timeout_ms)
+{
+	struct timespec until;
+	clock_gettime(CLOCK_REALTIME, &until);
+	until.tv_sec += timeout_ms / 1000;
+	until.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
+	if (until.tv_nsec >= 1000000000L) {
+		until.tv_sec++;
+		until.tv_nsec -= 1000000000L;
+	}
+
+	pthread_mutex_lock(&g_notify_lock);
+	while (id < 34 && g_script_done[id] == before) {
+		int r = pthread_cond_timedwait(&g_notify_cond, &g_notify_lock, &until);
+		if (r == ETIMEDOUT) {
+			pthread_mutex_unlock(&g_notify_lock);
+			return -ETIMEDOUT;
+		}
+	}
+	int status = id < 34 ? g_script_status[id] : 0;
+	pthread_mutex_unlock(&g_notify_lock);
+	return status == 0x01 ? 0 : -EIO;
+}
+
+static unsigned script_count(unsigned id)
+{
+	pthread_mutex_lock(&g_notify_lock);
+	unsigned n = id < 34 ? g_script_done[id] : 0;
+	pthread_mutex_unlock(&g_notify_lock);
+	return n;
+}
+
 int main(int argc, char **argv)
 {
 	bool do_load = false;
@@ -90,6 +153,7 @@ int main(int argc, char **argv)
 	int  hook = -1;
 	int  wait_secs = 0;
 	const char *rom_path = NULL;
+	const char *rx_path = NULL;
 	bool need_bootloader = false;
 	bool do_feed = false;
 	uint8_t patch[8];
@@ -139,6 +203,8 @@ int main(int argc, char **argv)
 			}
 		} else if (!strcmp(argv[i], "--feed")) {
 			do_feed = true;
+		} else if (!strcmp(argv[i], "--rx-out") && i + 1 < argc) {
+			rx_path = argv[++i];
 		} else if (!strcmp(argv[i], "--wait") && i + 1 < argc) {
 			wait_secs = atoi(argv[++i]);
 		} else if (!strcmp(argv[i], "--hook") && i + 1 < argc) {
@@ -148,6 +214,7 @@ int main(int argc, char **argv)
 				" [--script ID[,ID...]] [--patch B[,B...]]"
 				" [--rom PATH] [--bootloader]"
 				" [--hook on|off] [--wait SECONDS] [--feed]"
+				" [--rx-out PATH]"
 				" [--stream SECONDS]\n",
 				argv[0]);
 			return 2;
@@ -246,12 +313,36 @@ int main(int argc, char **argv)
 	 */
 	struct hsf_callbacks cb = {
 		.rx_samples   = on_rx,
+		.tx_done      = on_tx_done,
 		.notification = on_notify,
+		.user         = d,
 	};
+	if (rx_path) {
+		g_rx_file = fopen(rx_path, "wb");
+		if (!g_rx_file) {
+			perror(rx_path);
+			hsf_fxo_close(d);
+			return 1;
+		}
+	}
+	g_feed_tx = do_feed;
 	if (stream_secs > 0 && hsf_fxo_start(d, &cb) < 0) {
 		fprintf(stderr, "could not start streaming\n");
 		hsf_fxo_close(d);
 		return 1;
+	}
+
+	/* The vendor starts its data pump from INSIDE the script-5 completion
+	 * callback.  Have TX requests waiting before that edge; submitting the
+	 * first sample only after script 5 has completed gives a clocked
+	 * codec an immediate underrun.  The engine ring is signed 16-bit PCM
+	 * (hsfengine4716_ stores with MOVW and advances its index in samples), not
+	 * G.711: zero is the correct preload silence. */
+	if (do_feed && stream_secs > 0) {
+		uint8_t zero[128] = {0};
+		for (int i = 0; i < 4; i++)
+			if (hsf_fxo_tx_submit(d, zero, sizeof zero) < 0)
+				break;
 	}
 
 	/* Bracket every script with GET_INFROMATION.  Gotcha 2 in hsf_fxo.c: a
@@ -279,10 +370,24 @@ int main(int argc, char **argv)
 	}
 
 	if (do_start) {
-		int r = hsf_fxo_script_start_codec(d);
+		static const unsigned seq[] = {
+			HSF_SCRIPT_SESSION_A, HSF_SCRIPT_SESSION_B
+		};
+		int r = 0;
+		for (size_t i = 0; i < sizeof seq / sizeof seq[0]; i++) {
+			unsigned before = script_count(seq[i]);
+			r = hsf_fxo_script_run(d, seq[i], NULL, 0);
+			if (r < 0)
+				break;
+			r = wait_script(seq[i], before, 2000);
+			if (r < 0) {
+				fprintf(stderr, "script %u completion timed out or failed\n", seq[i]);
+				break;
+			}
+		}
 		uint8_t after[5];
 		int live = hsf_fxo_get_information(d, after);
-		printf("start codec (scripts 9,5,9): %s, device %s\n",
+		printf("start codec (script 9 completion, then script 5): %s, device %s\n",
 		       r == 0 ? "accepted" : "rejected",
 		       live < 0 ? "NOT RESPONDING" : "alive");
 	}
@@ -299,30 +404,10 @@ int main(int argc, char **argv)
 
 	if (stream_secs > 0) {
 		printf("streaming for %ds%s...\n", stream_secs,
-		       do_feed ? " (feeding u-law silence out)" : "");
+		       do_feed ? " (feeding signed-linear silence out)" : "");
 		if (do_feed) {
-			/* A bulk codec has no isochronous clock, so the device may
-			 * only produce RX while the host is giving it OUT data to
-			 * play.  160 bytes per 20 ms is 8 kHz. */
-			/* HSF_FEED_CHUNK lets the packet size be varied: the bulk
-			 * endpoints are 64 B, so a 160 B buffer ends in a short
-			 * packet, which some devices treat as end-of-stream. */
-			const char *cs = getenv("HSF_FEED_CHUNK");
-			size_t chunk = cs ? (size_t)atoi(cs) : 160;
-			if (chunk == 0 || chunk > 256)
-				chunk = 160;
-			uint8_t silence[256];
-			memset(silence, 0xff, sizeof(silence));
-			for (int ms = 0; ms < stream_secs * 1000; ms += 20) {
-				size_t want = 160;
-				while (want) {
-					size_t n = want < chunk ? want : chunk;
-					if (hsf_fxo_tx_submit(d, silence, n) < 0)
-						break;
-					want -= n;
-				}
-				usleep(20 * 1000);
-			}
+			/* on_tx_done maintains the four-deep pipeline without a gap. */
+			sleep((unsigned)stream_secs);
 		} else {
 			sleep((unsigned)stream_secs);
 		}
@@ -336,6 +421,11 @@ int main(int argc, char **argv)
 		       (unsigned long long)s.rx_bytes, g_rx_packets,
 		       (unsigned long long)s.tx_bytes, (unsigned long long)s.rx_errors,
 		       (unsigned long long)s.notifications);
+		printf("rx packet lengths:");
+		for (int i = 0; i <= 256; i++)
+			if (g_rx_len_hist[i])
+				printf(" %d:%lu", i, g_rx_len_hist[i]);
+		printf("\n");
 		if (g_ring_events)
 			printf("ring edges: %lu\n", g_ring_events);
 		printf("tx_err %llu%s\n", (unsigned long long)s.tx_errors,
@@ -353,14 +443,14 @@ int main(int argc, char **argv)
 
 		if (s.rx_bytes) {
 			double rate = (double)s.rx_bytes / stream_secs;
-			printf("~%.0f bytes/s -> %.0f Hz if 8-bit, %.0f Hz if 16-bit\n",
-			       rate, rate, rate / 2.0);
+			printf("~%.0f bytes/s -> %.0f frames/s if two 16-bit slots\n",
+			       rate, rate / 4.0);
 			printf("first bytes:");
 			for (size_t i = 0; i < g_first_len; i++)
 				printf(" %02x", g_first[i]);
 			printf("\n");
-			/* An on-hook line is silence, so the modal byte names the
-			 * encoding: 0xff u-law, 0xd5 A-law, 0x00 linear. */
+			/* This is only a byte-frequency diagnostic.  The ring is
+			 * signed-linear samples, not G.711 codewords. */
 			unsigned long best = 0;
 			int mode = 0;
 			for (int i = 0; i < 256; i++)
@@ -368,15 +458,17 @@ int main(int argc, char **argv)
 					best = g_hist[i];
 					mode = i;
 				}
-			printf("modal byte 0x%02x (%s)\n", mode,
-			       mode == 0xff ? "u-law silence" :
-			       mode == 0xd5 ? "A-law silence" :
-			       mode == 0x00 ? "linear zero"   : "?");
+			printf("modal raw byte 0x%02x%s\n", mode,
+			       mode == 0x00 ? " (linear zero/padding)" : "");
 		} else {
-			printf("no samples -- the codec is gated behind CD2_CONTROL_SCRIPT\n");
+			printf("no samples received\n");
 		}
 	}
 
+	if (g_rx_file) {
+		fclose(g_rx_file);
+		g_rx_file = NULL;
+	}
 	hsf_fxo_close(d);
 	return 0;
 }

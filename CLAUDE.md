@@ -279,6 +279,8 @@ Each module's header comment states its role and the spec sections it implements
 
 ## Fax service class (T.31 class 1, T.32 class 2.0)
 
+- **Correction: the HSF codec transport is now running continuously (2026-09-02).** The second script 9 in the earlier `9,5,9` reading is only `hsfusbcd2165_`'s 1400 ms timeout retry. The normal path waits for script 9's event, sends script 5, and starts the data pump from script 5's completion callback. The pump primes four 128-byte TX buffers and refills immediately on every completion; reproducing that, rather than polling TX from the probe's main loop, yields continuous 64-byte RX packets. A 20-second live run returned 841,472 bytes in 13,148 packets with zero USB errors; 10- and 5-second repeats returned 421,376 and 211,520 bytes. The shared engine rings carry signed-linear samples, apparently two 16-bit slots per four-byte frame at roughly a 10.6667 kHz device clock, but the slot meanings and exact rate remain provisional pending a controlled tone. Open now: physical off-hook/profile sequencing and exact sample framing, not transport start. -- `docs/hsf_usb_daa.md`
+
 `AT+FCLASS=?` reports `0,1,1.0,2.0`. `0` is the data modem and is unchanged.
 
 `1`/`1.0` is T.31 class 1: T.30 stays in the DTE, the class 1 action commands
