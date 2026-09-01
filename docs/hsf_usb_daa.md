@@ -183,34 +183,59 @@ the driver's ring always is -- because sending a script with no URBs posted and
 starting the ring afterwards is a different experiment from the driver's. It
 changes nothing: `9,5,9` and script 5 alone both still yield zero RX.
 
+## The engine/driver data interface: two shared rings, no framing
+
+Reversing far enough to answer the framing question did not need the 880 kB of
+stripped `hsfengine` text -- the driver side names the whole interface.
+
+`hsfusbcd2167_` (.text 0x6430) is the open call. Its fourth and fifth arguments
+are descriptors carrying a buffer pointer at +4, and it stores them as
+
+    ctx+0x894   RX ring base
+    ctx+0x870   TX ring base
+    ctx+0x934   ring size
+    ctx+0x876   TX chunk = 0x80 (128)
+    ctx+0x874   RX chunk = 0x40 (64)
+
+`hsfusbcd2273_` is the TX length accessor: it computes
+`write_ptr(0x8a2) - read_ptr(0x8a4)`, clamps to the chunk size, advances the read
+pointer with wraparound against the ring size, and returns a byte count; its
+partner returns `0x870 + offset`. The RX side is the same shape around
+`0x894`. `hsfusbcd2269_` then hands that pointer and length straight to
+`OsUsbMakeDataTransmitRequest`, and `hsfusbcd2267_` to
+`OsUsbMakeDataReceiveRequest`, each clamped to 0x100.
+
+**So the engine and the driver share two plain circular sample buffers, and the
+driver ships slices of them as bulk URBs. There is no header, no framing and no
+in-band configuration -- there is nowhere to put one.** That kills the first of
+the two candidates above, from the driver side alone.
+
+Matching the driver's exact granularity (64-byte RX transfers, 128-byte TX)
+changes nothing: still zero RX.
+
+There is one more control path in the driver, and it is deliberately not
+exercised here: `hsfusbcd2188_` CRCs a host buffer with CRC-16-CCITT (poly
+0x1021) and writes it to the device in 64-byte blocks via `CD2_WRITE_EEPROM`,
+driven by `hsfusbcd2168_` which sets a length and resets a position. That is a
+provisioning/download path rather than anything in the per-call flow, and an
+EEPROM write is persistent, so it stays untried without a reason to think it is
+the gate.
+
 ## Open: what starts the codec
 
-The bulk pipes still carry no samples. What is measured:
+Eliminated, each by measurement rather than inference:
 
-* RX is armed and waiting -- first status `CANCELLED`, i.e. our own teardown,
-  with zero genuine errors. The device simply sends nothing, and the driver
-  arms it exactly as we do.
-* TX is accepted only after script 6 or 9, and then stops at a fixed **1120
-  bytes** (1248 at 64-byte packets, 1216 at 32) however long the run. That is a
-  ~1.2 kB FIFO filling once and never draining, so the codec is not clocking.
-  Packet size is not the gate.
-* None of the twelve scripts changes it, patched or not, on-hook or off-hook,
-  alone or in the driver's own order.
+* the transport (the driver arms RX exactly as we do, same 0x100 clamp);
+* the driver's codec setup (there is none -- no rate, no format, no enable);
+* alternate settings (the device has one per interface);
+* ordering (pipes are now armed before any script, as the driver's ring is);
+* transfer granularity (64/128 as well as 160/256);
+* in-band framing on the data pipes (two raw shared rings, nowhere for a header);
+* all twelve scripts, patched and unpatched, on-hook and off-hook, alone and in
+  the driver's own order.
 
-What is left is not in the transport and not in the driver, both of which are
-now fully accounted for. Two candidates remain, in order of plausibility:
-
-1. **In-band configuration on the bulk OUT pipe.** The GPL layer passes engine
-   buffers through untouched in both directions, so whether the first OUT
-   buffers carry a header or a configuration block is the closed engine's
-   business and is not visible from `osusb.c` at all. The fixed ~1.2 kB TX
-   acceptance would fit a device waiting on a command it never received; we send
-   u-law silence, which is not obviously a valid anything.
-2. **Firmware state the scripts read rather than carry.** The relay values live
-   in the firmware -- the off-hook script contains no 0xA6 -- so something loads
-   them. Template 26 (158 bytes, seven patch bytes, by far the largest) is the
-   obvious candidate and is in no enqueued path, so finding what sends it, if
-   anything does, would settle whether that matters.
-
-Reversing `hsfengine-i386.O`'s use of the data pipes is the way to decide
-between them, and is a larger job than anything done here so far.
+What is left is firmware state the scripts read rather than carry. The relay
+values are the proof it exists: the off-hook script contains no 0xA6, so the
+firmware holds that table and something must load it. Template 26 -- 158 bytes,
+seven patch bytes, by far the largest, and in no enqueued path -- remains the
+best candidate for what does, and finding its sender is the next thread.

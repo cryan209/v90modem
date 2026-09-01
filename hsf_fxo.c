@@ -452,12 +452,19 @@ int hsf_fxo_start(struct hsf_dev *d, const struct hsf_callbacks *cb)
 				       HSF_NOTIFY_SIZE, on_notify, d, 0);
 	xfer_submit(d, d->notify);
 
+	/* The driver's own RX granularity is ctx+0x874 = 64, not the 0x100 clamp
+	 * in hsfusbcd2267_; HSF_RX_SIZE lets that be varied. */
+	const char *rs = getenv("HSF_RX_SIZE");
+	int rx_size = rs ? atoi(rs) : HSF_XFER_SIZE;
+	if (rx_size <= 0 || rx_size > HSF_XFER_SIZE)
+		rx_size = HSF_XFER_SIZE;
+
 	for (size_t i = 0; i < HSF_NUM_RX; i++) {
 		d->rx[i] = libusb_alloc_transfer(0);
 		if (!d->rx[i])
 			return -ENOMEM;
 		libusb_fill_bulk_transfer(d->rx[i], d->h, EP_BULK_IN, d->rx_buf[i],
-					  HSF_XFER_SIZE, on_rx, d, 0);
+					  rx_size, on_rx, d, 0);
 		xfer_submit(d, d->rx[i]);
 	}
 	for (size_t i = 0; i < HSF_NUM_TX; i++) {
