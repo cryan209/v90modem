@@ -13,12 +13,16 @@ comes back in a handful of round trips instead of one per register.
 import argparse, re, subprocess, sys
 
 PROBE = "./hsf_fxo_probe"
+MARK = 0x5A              # leading "27 5a" so a completion can be told from a
+                         # stale one left by an earlier script -- reading the
+                         # first notification that turns up gave a previous
+                         # attempt the wrong answer entirely
 PER_SCRIPT = 4           # MEASURED: the completion payload caps at ~6 bytes,
                          # so 16 reads per script silently returned only 5
 
 
 def read_block(regs, secs=3, tries=3):
-    body = "".join(f"03{r:02x}26" for r in regs) + "2701" + "28" + "36"
+    body = f"27{MARK:02x}" + "".join(f"03{r:02x}26" for r in regs) + "2701" + "28" + "36"
     # The completion can land after a short stream window, so retry rather than
     # reporting a timing miss as a failed read.
     for _ in range(tries):
@@ -32,6 +36,9 @@ def read_block(regs, secs=3, tries=3):
                 m = re.search(r"data=([0-9a-f]+)", l)
                 if m:
                     b = bytes.fromhex(m.group(1))
+                    if not b or b[0] != MARK:
+                        continue          # somebody else's completion
+                    b = b[1:]
                     if b and b[-1] == 0x01:
                         b = b[:-1]        # the trailing 27 01
                     return b, True
@@ -42,9 +49,34 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--lo", type=lambda x: int(x, 0), default=0x00)
     ap.add_argument("--hi", type=lambda x: int(x, 0), default=0x60)
+    ap.add_argument("--write", nargs=2, metavar=("REG", "VAL"),
+                    help="0b <reg> <val>, with a read-back either side")
+    ap.add_argument("--read", metavar="REGS",
+                    help="comma-separated registers to read once")
     ap.add_argument("--verify", action="store_true",
                     help="read 0x2d and 0x01 separately first as a control")
     a = ap.parse_args()
+
+    if a.read:
+        rs = [int(x, 0) for x in a.read.split(",")]
+        v, alive = read_block(rs)
+        print("  " + " ".join(f"{r:02x}={('%02x' % x) if v and i < len(v) else '??'}"
+                              for i, (r, x) in enumerate(zip(rs, (v or b'\xff' * len(rs))))))
+        return
+
+    if a.write:
+        reg, val = (int(x, 0) for x in a.write)
+        before, alive = read_block([reg])
+        body = f"27{MARK:02x}0b{reg:02x}{val:02x}2701" + "28" + "36"
+        r = subprocess.run([PROBE, "--raw", body, "--stream", "3"],
+                           capture_output=True, text=True, timeout=60)
+        ok = "accepted" in (r.stdout + r.stderr)
+        after, alive = read_block([reg])
+        print(f"  reg 0x{reg:02x}: before={before.hex() if before else '??'} "
+              f"write 0x{val:02x} {'accepted' if ok else 'REJECTED'} "
+              f"after={after.hex() if after else '??'}"
+              f"{'' if alive else '   DEVICE WEDGED'}")
+        return
 
     if a.verify:
         # A single lucky value proves nothing; two registers that are known to

@@ -407,11 +407,13 @@ operands with a byte the `26` appended between them. It also explains the
 odd 3- and 4-byte payloads seen earlier from the shipped scripts (script 32 is
 `52 00 | 27 20 | 26 | 27 01 | 28 | 36` and reports `20 04 01`).
 
-**Opcode 0x0b writes a control register.** Shipped scripts contain `0b 1c a0`
-and `0b 1d a0`, and the firmware register map has exactly `MOV f4h,#1ch /
-MOV f5h,#a0h` and the same for 0x1d. So `0b <reg> <val>` is
-"select register, store value" -- host-side write access to the chip's whole
-internal control plane, which is what the codec enable lives in.
+**Opcode 0x0b was thought to write a control register. It does not.** Shipped
+scripts contain `0b 1c a0` and `0b 1d a0`, and the firmware register map has
+exactly `MOV f4h,#1ch / MOV f5h,#a0h` and the same for 0x1d, which looked
+conclusive. Tested with read-back either side, it is not: `0b 1f a6` and
+`0b 1f a5` are both accepted and leave the register at 0x98, and `0b 1e 55`
+wedges the device. The correspondence was pattern-matching, not proof. What
+0x0b actually does is unknown, and there is no confirmed write primitive.
 
 **The matching read is opcode 0x03, and it works.** With `0x26` as the sink, one opcode
 that loads the result byte from a control register would make the register file
@@ -496,8 +498,15 @@ are exactly the ones the firmware manipulates bit by bit (`ANL #0fh/#7eh/#f0h/
 `hsf_smart_relays` range 0xA0-0xBD. That makes 0x1F the leading candidate for
 the relay register, and `0b 1f a6` would be the seize.
 
-**Not yet established:** writing 0x1F directly was attempted and the result is
-inconclusive -- the ad-hoc read path used for the check picked up stale
-completions from the preceding session scripts rather than its own, so nothing
-can be concluded from it either way. Redo it through `hsf_regdump.py`, which
-retries and matches its own completion.
+**Redone properly, and it fails.** `hsf_regdump.py` now tags every script with a
+leading `27 5a` and accepts only completions whose payload starts with that
+marker, which removes the stale-completion problem that made the first attempt
+worthless. With that: `0b 1f a6` and `0b 1f a5` are accepted and change nothing
+(`before=98 after=98`), and `0b 1e 55` wedges the device. Register 0x1F also
+reads 0x2c, 0xa8 and 0x98 at different times without being written, so it is
+hardware-driven.
+
+So the host can READ the whole control plane but has no proven way to write it,
+and the relay register -- if 0x1F is even it -- is not settable this way. Script
+5 does change 0x1E/0x1F/0x21, so the firmware can set them; what the host cannot
+yet do is ask it to.
