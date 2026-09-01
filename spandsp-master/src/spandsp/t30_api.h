@@ -495,6 +495,27 @@ SPAN_DECLARE(void) t30_set_retransmit_hold(t30_state_t *s, bool hold);
     \return 0 if a retransmission was pending and has been started, else -1. */
 SPAN_DECLARE(int) t30_resume_retransmission(t30_state_t *s);
 
+/*! Declare that the document continues beyond the pages the file currently
+    holds. An application which is fed its pages one at a time - a T.32 class
+    2.0 DCE, whose DTE hands over a page per +FDT and says with the
+    <DLE><ppm> which ends it whether another follows - cannot put the whole
+    document in a file before transmission starts. With this set the post page
+    message is MPS rather than EOP when the file runs out, and the procedure
+    then waits at the page boundary until t30_resume_next_page() is called
+    with the page in place.
+    \brief Declare that more pages are to come.
+    \param s The T.30 context.
+    \param pending True if the document continues. */
+SPAN_DECLARE(void) t30_set_more_pages_pending(t30_state_t *s, bool pending);
+
+/*! Resume a document at a page boundary which was waiting for the
+    application, with the page now in the file.
+    \brief Resume at a held page boundary.
+    \param s The T.30 context.
+    \return 0 if a page boundary was pending and the page has been started,
+            else -1. */
+SPAN_DECLARE(int) t30_resume_next_page(t30_state_t *s);
+
 /*! Specify if page retransmission is allowed by a T.30 context.
     \brief Select page retransmission capable.
     \param s The T.30 context.

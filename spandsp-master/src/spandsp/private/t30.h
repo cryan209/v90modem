@@ -86,6 +86,15 @@ struct t30_state_s
     bool retransmit_held;
     /*! \brief True while such a repeat is waiting for the application. */
     bool retransmit_pending;
+    /*! \brief True if the application has another page for the document
+               which is not in the file yet. The post page message is then
+               MPS rather than EOP, and the procedure waits at the page
+               boundary for t30_resume_next_page(). */
+    bool more_pages_pending;
+    /*! \brief True while a page boundary is waiting for the application. */
+    bool next_page_pending;
+    /*! \brief The page of the file to resume at. */
+    int tx_next_page_in_file;
 
     /*! \brief The received DCS, formatted as an ASCII string, for inclusion
                in the TIFF file. */

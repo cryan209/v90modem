@@ -279,6 +279,39 @@ reported as a `+FCI:` instead of a `+FTI:`, and a received NSS was never
 reported at all. The polling test had hidden the first of those by asserting
 `+FCI:` **or** `+FTI:`; it is exact now, and there is a test for each.
 
+### A page at a time (8.3.3.3, 8.3.3.4)
+
+8.3.3.4's ordering is not just a matter of when a result code is printed. It
+requires the OK for page one to come after page one's phase D, and 8.3.3.3 has
+the DTE issue a `+FDT` per page — so a conformant DTE hands over page two only
+after page one has been sent and answered for, and a DCE therefore **cannot**
+have the whole document before it starts transmitting. This module used to
+assemble one, because SpanDSP's T.30 takes its pages from a TIFF and decides
+MPS against EOP by whether the file has another page.
+
+Two additions to the vendored SpanDSP make it stream instead.
+`t30_set_more_pages_pending()` says the document continues past what the file
+holds, which is what makes the post page message MPS when the file runs out;
+the procedure then waits at that page boundary, and `t30_resume_next_page()`
+reopens the file at the page which has since been appended and carries on.
+Both the ECM and non-ECM page-advance paths go through one helper.
+
+On this side `tx_page_flow()` keeps the two in step, and has to be called from
+`fc2_poll()` rather than from the phase D handler: T.30 reaches the page
+boundary *after* phase D has run, so a release issued from there is always one
+event too early.
+
+The one that took the longest to see: at that call site
+`t4_tx_get_current_page_in_file()` is already the page being asked for, not
+the page just sent, because `tx_end_page()` has run. The `+ 1` that is correct
+in `check_next_tx_step()` is off by one here, and the symptom was a document
+resuming one page beyond its end.
+
+`test_page_at_a_time` drives it the way a conformant DTE does -- nothing fed
+until the previous page has been answered for -- and checks both pages arrive
+in order. With `more_pages_pending` never set, page one goes out with EOP and
+page two never arrives.
+
 ### Error correction mode (T.30 Annex A, +FIS/+FCS EC)
 
 ECM is what any modern peer negotiates, so this is the ordinary case rather
@@ -431,13 +464,23 @@ without ever sending a DTC. That is the point of the bit, and it is what the
 
 **`+FDT` takes the page before it reports `+FCS`.** T.32 8.3.3 has the DCE
 complete Phase B, report the negotiated session parameters, and then take the
-page. SpanDSP's T.30 decides what to do at the DIS it receives and needs the
+page. SpanDSP's T.30 decides what to do at the DIS it receives and needs a
 document to exist by then, so a `+FDT` here answers `CONNECT` and takes the
 page first. The DTE still gets its `+FCS` report — after the data rather than
 before it. In the ordinary sequence (`+FDT` straight after `ATD`, while the
-call is still being set up) the spool is complete long before Phase B, and
-where the report lands is the only difference the DTE can see. A DTE that
-adapts its image format to the reported `+FCS` will not see it in time.
+call is still being set up) the page is taken long before Phase B, and where
+the report lands is the only difference the DTE can see. A DTE that adapts its
+image format to the reported `+FCS` will not see it in time.
+
+**The result code is no longer part of that**, and used to be. 8.3.3.4 —
+"The DCE shall acknowledge the end of the data by returning the OK or ERROR
+result code to the DTE, after Phase D is completed. The DCE shall return OK if
+the remote facsimile station accepted the page (local DCE received MCF, RTP or
+PIP frames); the DCE shall return ERROR if the remote facsimile station
+rejected the page (local DCE received RTN or PIN frames)" — is now followed as
+written, for every page. It is taken from the response itself rather than from
+the page count, because a page the far end refused was never counted as sent,
+and that is precisely the case which has to report ERROR.
 
 **`+FHS` mapping is approximate.** T.30's completion codes are finer grained
 than T.32's status. The mapping now follows Table 20/T.32, which is organised
@@ -454,14 +497,11 @@ direction rather than on an invented value.
 that sends `<DC2>` is unharmed — it is discarded — but a DTE relying on the
 pause to get ready does not get it.
 
-**A retrain requested with `+FPS=2` is sent, but nothing follows it up.** The
-RTN reaches the far end, and what it does about it is its business; this DCE
-does not re-request the page.
-
-**`+FVO` on a transmit-side interrupt does not accompany the `+FDT` result.**
-Table 15 pairs them, but a `+FDT` issued before the call has already completed
-by the time the far end grants anything — the ordering deviation above. The
-`+FVO` still reaches the DTE, on its own.
+Two deviations that used to be here are gone with it: a retrain requested with
+`+FPS=2` is now followed up (the far end repeats the page and the repeat
+reaches the DTE), and `+FVO` on a transmit-side interrupt now accompanies the
+`+FDT` result code Table 15 pairs it with, since both come out of the same
+phase D and in that order.
 
 ## Reading the specifications
 
@@ -640,7 +680,8 @@ altogether when that response is RTN or RTP, since the document is not over.
 A visible consequence: a far end now files the copy it refused at the end of a
 document, as it already did mid-document.
 
-**The page that goes again is the DTE's, handed over with a second `+FDT`.**
+**The page that goes again is the DTE's, handed over with a second `+FDT`,**
+and the `+FDT` it refused completes with ERROR first.
 That is II.7's own model, and it needed T.30 to stop after the RTN rather than
 repeat a page it already had. `t30_set_retransmit_hold()` does that: the
 "CAPABLE RE-XMIT?" branch of Figure 5-2c sets a pending flag and sends

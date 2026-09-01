@@ -197,6 +197,7 @@ static uint64_t         fct_deadline;      /* 0 when no timeout is running */
 static int              orderly_abort;     /* the DCE ended the call itself */
 static int              page_ppm = T32_PPM_EOP; /* how the DTE ended the page */
 static int              doc_pages;         /* pages spooled for this document */
+static int              doc_pages_sent;    /* of those, pages T.30 has sent */
 static int              doc_complete;      /* the DTE ended one with EOP */
 static int              dtc_seen;          /* a DTC arrived: we are being polled */
 static int              dtc_refused;       /* ... and +FLP was 0 */
@@ -505,6 +506,7 @@ static int parse_params(const char *s, fc2_params_t *p)
 /* ------------------------------------------------------------------ */
 
 static void update_negotiated_params(void);
+static void tx_page_flow(void);
 static int  phase_bd_reversed(void);
 static void fct_arm(void);
 
@@ -800,19 +802,40 @@ static int phase_d_handler(void *user_data, int result)
          * because the +FDT may already have completed -- see the ordering
          * deviation in docs/fax_class_at.md.
          */
+        if (p_ie && (v == 4 || v == 5) && !interrupt_negotiated) {
+            interrupt_negotiated = 1;
+            queue_line("\r\n+FVO\r\n");
+        }
+
         /*
-         * T.32 8.3.3.4 and II.7: the page was refused, so the DCE reports
-         * ERROR and waits for the DTE to hand it over again.  T.30 is holding
-         * the retransmission; +FCT bounds how long, exactly as it bounds a
-         * +FDT that is opened and not fed.
+         * T.32 8.3.3.4: "The DCE shall acknowledge the end of the data by
+         * returning the OK or ERROR result code to the DTE, after Phase D is
+         * completed.  The DCE shall return OK if the remote facsimile station
+         * accepted the page (local DCE received MCF, RTP or PIP frames); the
+         * DCE shall return ERROR if the remote facsimile station rejected the
+         * page (local DCE received RTN or PIN frames)."  This is the response
+         * itself rather than the page count, because a page the far end
+         * refused was never counted as sent, and that is exactly the case
+         * that has to report ERROR.
+         *
+         * Table 15: a +FDT completes with OK or ERROR and nothing else.  The
+         * verdict itself goes into +FPS, which the DTE can read; 8.4.3's
+         * +FPS: report belongs to +FDR.
+         */
+        if (fdt_await_page) {
+            fdt_await_page = 0;
+            queue_line("\r\n%s\r\n",
+                       (v == 2 || v == 4) ? "ERROR" : "OK");
+        }
+
+        /*
+         * T.32 II.7: the page was refused, so the DTE hands it over again
+         * with another +FDT.  T.30 is holding the retransmission; +FCT bounds
+         * how long, exactly as it bounds a +FDT that is opened and not fed.
          */
         if (v == 2 && !retransmit_wanted) {
             retransmit_wanted = 1;
             fct_arm();
-        }
-        if (p_ie && (v == 4 || v == 5) && !interrupt_negotiated) {
-            interrupt_negotiated = 1;
-            queue_line("\r\n+FVO\r\n");
         }
     }
 
@@ -860,24 +883,10 @@ static int phase_d_handler(void *user_data, int result)
              * sent. */
             p_lp = 0;
         }
+        doc_pages_sent += t.pages_tx - tx_pages_sent;
         tx_pages_sent = t.pages_tx;
-        if (fdt_await_page) {
-            /*
-             * T.32 8.3.3.4: the +FDT completes when the page has been sent,
-             * and it completes with ERROR if the remote rejected the page
-             * (RTN or PIN) rather than OK.
-             */
-            /*
-             * T.32 8.3.3.4 and Table 15: the +FDT completes with OK or ERROR
-             * and nothing else.  The page status goes into the +FPS
-             * parameter, which the DTE can read; 8.4.3's +FPS: REPORT belongs
-             * to +FDR, not here.
-             */
-            fdt_await_page = 0;
+        if (doc_complete && doc_pages_sent >= doc_pages)
             tx_tiff_ready = 0;
-            queue_line("\r\n%s\r\n",
-                       (page_status == 2 || page_status == 4) ? "ERROR" : "OK");
-        }
     }
     return T30_ERR_OK;
 }
@@ -1099,6 +1108,11 @@ static int spool_open(void)
         return 1;
     }
 
+    /* A new document: its pages are counted from zero, and the counts are
+     * per document because more than one can go out on a call. */
+    doc_pages = 0;
+    doc_pages_sent = 0;
+    doc_complete = 0;
     {
         /*
          * A document per file.  The retransmitted one has to be a different
@@ -1145,6 +1159,7 @@ static void spool_abandon(void)
         spool_rx = NULL;
     }
     doc_pages = 0;
+    doc_pages_sent = 0;
     doc_complete = 0;
     tx_tiff_ready = 0;
 }
@@ -1154,36 +1169,68 @@ static void spool_abandon(void)
  * follows, the document stays open and the next +FDT adds to it; only EOP
  * finishes it and releases it to T.30.
  */
+/*
+ * Keep T.30 fed with the pages the DTE has handed over.  Two things, and both
+ * have to be re-evaluated every time either side moves: whether the document
+ * continues past the page being sent -- which is what makes the post page
+ * message MPS rather than EOP -- and whether a page boundary T.30 is waiting
+ * at can be released now.  T.30 reaches that boundary after its phase D
+ * handler has run, so the release cannot be done from there.  Callers hold
+ * the lock.
+ */
+static void tx_page_flow(void)
+{
+    t30_state_t *t30;
+
+    if (!fax)
+        return;
+    t30 = fax_get_t30_state(fax);
+    t30_set_more_pages_pending(t30, !doc_complete || doc_pages > doc_pages_sent + 1);
+    if (doc_pages > doc_pages_sent)
+        t30_resume_next_page(t30);      /* a no-op unless one is waiting */
+}
+
 static void spool_close(int ppm)
 {
+    /* T.32 8.3.3.7: MPS or EOM says another page of the document follows. */
+    int more = (ppm != T32_PPM_EOP);   /* 8.3.3.7: another page follows */
+
     if (!spool_rx)
         return;
     t4_rx_end_page(spool_rx);
-
-    if (ppm != T32_PPM_EOP) {
-        /* MPS or EOM: T.32 8.3.3.7 says more is coming. */
-        doc_pages++;
-        return;
-    }
-
-    t4_rx_free(spool_rx);
-    spool_rx = NULL;
     doc_pages++;
-    tx_tiff_ready = 1;
-    doc_complete = 1;
 
-    /* A session already under way takes the document straight away. */
-    if (fax) {
-        t30_set_tx_file(fax_get_t30_state(fax), tx_tiff, -1, -1);
-        if (retransmit_wanted) {
-            /*
-             * T.32 II.7: "AT+FDT ... send [new] DCS -> get good DCS.  RTN
-             * forces back to Phase B."  The document the DTE has just handed
-             * over is what goes, from its first page.
-             */
-            retransmit_wanted = 0;
-            t30_resume_retransmission(fax_get_t30_state(fax));
-        }
+    if (!more) {
+        t4_rx_free(spool_rx);
+        spool_rx = NULL;
+        doc_complete = 1;
+    }
+    tx_tiff_ready = 1;
+
+    if (!fax)
+        return;
+
+    /*
+     * 8.3.3.4 has the +FDT for a page complete after that page's phase D, so
+     * the DTE hands the pages over one at a time and a document cannot be
+     * assembled before transmission starts.  T.30 is told the document
+     * continues past what the file holds -- which is what makes the post page
+     * message MPS rather than EOP -- and waits at each page boundary for the
+     * page that has not arrived yet.
+     */
+    t30_set_tx_file(fax_get_t30_state(fax), tx_tiff, -1, -1);
+
+    if (retransmit_wanted) {
+        /*
+         * T.32 II.7: "AT+FDT ... send [new] DCS -> get good DCS.  RTN forces
+         * back to Phase B."  The document the DTE has just handed over is
+         * what goes, from its first page.
+         */
+        retransmit_wanted = 0;
+        t30_set_more_pages_pending(fax_get_t30_state(fax), more);
+        t30_resume_retransmission(fax_get_t30_state(fax));
+    } else {
+        tx_page_flow();
     }
 }
 
@@ -1342,25 +1389,17 @@ void fc2_dte_bytes(const uint8_t *buf, int len)
         dte_saw_dle = 0;
         fct_deadline = 0;
 
-        if (!doc_complete) {
-            /*
-             * T.32 8.3.3.7 MPS or EOM: the DTE has more to hand over, and
-             * 8.3.3.3 has it issue another +FDT for each page.  The document
-             * is not transmitted until it is complete, so this page is
-             * acknowledged as taken -- see the ordering deviation in
-             * docs/fax_class_at.md, of which this is the same one.
-             */
-            put_ok();
-        } else if (call_up) {
-            /* The document goes out on this call; the DTE hears about it when
-             * it has (phase_d_handler). */
-            fdt_await_page = 1;
+        /*
+         * T.32 8.3.3.4: "The DCE shall acknowledge the end of the data by
+         * returning the OK or ERROR result code to the DTE, after Phase D is
+         * completed."  So nothing is answered here, whether or not the
+         * document is finished and whether or not the call is up yet; the
+         * result code follows the far end's verdict on this page, in
+         * phase_d_handler().
+         */
+        fdt_await_page = 1;
+        if (call_up)
             session_start();
-        } else {
-            /* +FDT ahead of the call, which is the ordinary sequence: the
-             * document is spooled and goes out when the call connects. */
-            put_ok();
-        }
     }
     pthread_mutex_unlock(&fc2_mtx);
 }
@@ -1940,6 +1979,7 @@ void fc2_select(int on)
         orderly_abort = 0;
         fct_deadline = 0;
         doc_pages = 0;
+        doc_pages_sent = 0;
         doc_complete = 0;
         page_ppm = T32_PPM_EOP;
         report_len = 0;
@@ -2091,6 +2131,9 @@ void fc2_poll(void)
         pthread_mutex_unlock(&fc2_mtx);
         return;
     }
+    /* T.30 may be waiting at a page boundary for a page the DTE has since
+     * handed over. */
+    tx_page_flow();
     pending_len = report_len;
     if (pending_len) {
         memcpy(pending, report_q, (size_t) pending_len);

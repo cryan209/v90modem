@@ -644,6 +644,31 @@ static int terminate_operation_in_progress(t30_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static int tx_start_page(t30_state_t *s);
+
+/* Move on to the next page of the document, or wait for the application to
+   hand it over. Returns 0 when the page has been started, 1 when the
+   procedure is now waiting for t30_resume_next_page(), and -1 on failure. */
+static int advance_to_next_tx_page(t30_state_t *s)
+{
+    /* tx_end_page() has already run, so this is the page we are about to
+       ask for rather than the one just sent. */
+    s->tx_next_page_in_file = t4_tx_get_current_page_in_file(&s->t4.tx);
+    if (tx_start_page(s) == 0)
+        return 0;
+    /*endif*/
+    if (s->more_pages_pending)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW, "Waiting for the application to supply page %d\n", s->tx_next_page_in_file);
+        s->next_page_pending = true;
+        s->retries = 0;
+        return 1;
+    }
+    /*endif*/
+    return -1;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int tx_start_page(t30_state_t *s)
 {
     if (t4_tx_start_page(&s->t4.tx))
@@ -917,6 +942,14 @@ static uint8_t check_next_tx_step(t30_state_t *s)
     int more;
 
     res = t4_tx_next_page_has_different_format(&s->t4.tx);
+    if (res < 0  &&  s->more_pages_pending)
+    {
+        /* The file has run out, but the application has another page for this
+           document which it has not handed over yet. */
+        span_log(&s->logging, SPAN_LOG_FLOW, "More pages to come from the application\n");
+        return (s->local_interrupt_pending)  ?  T30_PRI_MPS  :  T30_MPS;
+    }
+    /*endif*/
     if (res == 0)
     {
         span_log(&s->logging, SPAN_LOG_FLOW, "More pages to come with the same format\n");
@@ -3499,6 +3532,48 @@ SPAN_DECLARE(int) t30_release_post_page_response(t30_state_t *s, int ppr)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) t30_resume_next_page(t30_state_t *s)
+{
+    if (!s->next_page_pending)
+        return -1;
+    /*endif*/
+    s->next_page_pending = false;
+    span_log(&s->logging, SPAN_LOG_FLOW, "Resuming at page %d\n", s->tx_next_page_in_file);
+    /* The page was appended to the file after it was opened, so it is reopened
+       here, positioned at that page. */
+    s->tx_start_page = s->tx_next_page_in_file;
+    if (start_sending_document(s))
+    {
+        send_dcn(s);
+        return -1;
+    }
+    /*endif*/
+    if (tx_start_page(s))
+    {
+        send_dcn(s);
+        return -1;
+    }
+    /*endif*/
+    if (s->error_correcting_mode)
+    {
+        if (get_partial_ecm_page(s) > 0)
+        {
+            set_state(s, T30_STATE_IV);
+            queue_phase(s, T30_PHASE_C_ECM_TX);
+            send_first_ecm_frame(s);
+        }
+        /*endif*/
+    }
+    else
+    {
+        set_state(s, T30_STATE_I);
+        queue_phase(s, T30_PHASE_C_NON_ECM_TX);
+    }
+    /*endif*/
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) t30_resume_retransmission(t30_state_t *s)
 {
     if (!s->retransmit_pending)
@@ -4890,9 +4965,10 @@ static void process_state_ii_q(t30_state_t *s, const uint8_t *msg, int len)
                 s->phase_d_handler(s->phase_d_user_data, fcf);
             /*endif*/
             /* Transmit the next page */
-            if (tx_start_page(s))
+            if (advance_to_next_tx_page(s))
             {
-                /* TODO: recover */
+                /* Either waiting for the application to hand the page over,
+                   or there is no page and nothing to recover with. */
                 break;
             }
             /*endif*/
@@ -5237,9 +5313,10 @@ static void process_state_iv_pps_null(t30_state_t *s, const uint8_t *msg, int le
                 if (s->phase_d_handler)
                     s->phase_d_handler(s->phase_d_user_data, fcf);
                 /*endif*/
-                if (tx_start_page(s))
+                if (advance_to_next_tx_page(s))
                 {
-                    /* TODO: recover */
+                    /* Either waiting for the application to hand the page
+                       over, or there is no page at all. */
                     break;
                 }
                 /*endif*/
@@ -5362,9 +5439,10 @@ static void process_state_iv_pps_q(t30_state_t *s, const uint8_t *msg, int len)
                 if (s->phase_d_handler)
                     s->phase_d_handler(s->phase_d_user_data, fcf);
                 /*endif*/
-                if (tx_start_page(s))
+                if (advance_to_next_tx_page(s))
                 {
-                    /* TODO: recover */
+                    /* Either waiting for the application to hand the page
+                       over, or there is no page at all. */
                     break;
                 }
                 /*endif*/
@@ -5503,9 +5581,10 @@ static void process_state_iv_pps_rnr(t30_state_t *s, const uint8_t *msg, int len
                 if (s->phase_d_handler)
                     s->phase_d_handler(s->phase_d_user_data, fcf);
                 /*endif*/
-                if (tx_start_page(s))
+                if (advance_to_next_tx_page(s))
                 {
-                    /* TODO: recover */
+                    /* Either waiting for the application to hand the page
+                       over, or there is no page at all. */
                     break;
                 }
                 /*endif*/

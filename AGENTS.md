@@ -190,7 +190,20 @@ command layer over SpanDSP's `fax_state_t`, with `t4_rx`/`t4_tx` bridging the
 DTE's compressed image data to the TIFF files T.30 transfers. SpanDSP's own
 class 2 command handlers are `TODO` stubs and are not used. One deviation is
 deliberate and documented: `+FDT` takes the page before it reports `+FCS`,
-because SpanDSP's T.30 needs the document to exist by the DIS it receives.
+because SpanDSP's T.30 needs a document to exist by the DIS it receives.
+**Its result code is not part of that** — 8.3.3.4 puts the OK or ERROR after
+that page's phase D, taken from the far end's response (MCF/RTP/PIP → OK,
+RTN/PIN → ERROR) rather than from the page count, since a refused page is
+never counted as sent and is exactly the case that must report ERROR. That
+ordering means a conformant DTE hands over page two only after page one has
+been answered for, so the DCE **cannot** assemble a document before it starts
+transmitting: `t30_set_more_pages_pending()` makes the post page message MPS
+when the file runs out and `t30_resume_next_page()` reopens it at the page
+since appended. Two traps there — the release must come from `fc2_poll()`, not
+the phase D handler, because T.30 reaches the page boundary *after* phase D;
+and at that site `t4_tx_get_current_page_in_file()` is already the page being
+asked for, so `check_next_tx_step()`'s `+ 1` is off by one and a document
+resumes one page past its end.
 `+FBO`'s phase C bit order is applied — the default order is LSB first, the
 same one T.31's class 1 path uses with no reversal. `+FNR` negotiation
 reporting is implemented off SpanDSP's real-time frame handler, and so are

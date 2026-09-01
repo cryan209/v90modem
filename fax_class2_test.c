@@ -648,9 +648,14 @@ static void test_transmit(int fbo, int ec)
         int chunk = (n - off > 512) ? 512 : n - off;
         fc2_dte_bytes(page + off, chunk);
     }
-    /* T.32 8.3.3.4: a +FDT completes with OK or ERROR; 8.4.3's +FPS: report
-     * belongs to +FDR. */
-    check(dte_saw("OK") && !dte_saw("+FPS:"), "the spooled page is acknowledged");
+    /*
+     * T.32 8.3.3.4: "The DCE shall acknowledge the end of the data by
+     * returning the OK or ERROR result code to the DTE, after Phase D is
+     * completed."  The call has not even been answered yet, so there is
+     * nothing to acknowledge with.
+     */
+    check(!dte_saw("OK") && !dte_saw("ERROR"),
+          "the +FDT is not acknowledged before the page has gone");
 
     peer = peer_start(0, NULL, PEER_RX);
     check(peer != NULL, "the far-end fax terminal starts");
@@ -664,6 +669,9 @@ static void test_transmit(int fbo, int ec)
     check(peer_done, "the far end reached T.30 phase E");
     check(peer_status == T30_ERR_OK, "the far end reports a good session");
     check(dte_saw("+FCS:"), "the DTE was told the negotiated session parameters");
+    /* T.32 8.3.3.4 and Table 15: now the page has gone and the far end has
+     * accepted it, the +FDT completes -- with OK, and nothing else. */
+    check(dte_saw("OK") && !dte_saw("+FPS:"), "the +FDT completes after phase D");
     {
         /* T.32 8.5.1.3: the EC subparameter of what was actually negotiated.
          * The far end is ECM-capable in both cases, so this separates
@@ -1349,7 +1357,9 @@ static void test_multipage_transmit(int connect_midway, int ec)
     /* Page one, ended with MPS: another page of the same format follows. */
     dte_reset();
     check(send_page_via_fdt(0, 0x2C), "page one is handed over");
-    check(dte_saw("OK"), "and acknowledged");
+    /* T.32 8.3.3.4: no result code until the page has been sent and answered
+     * for -- the call has not been answered yet. */
+    check(!dte_saw("OK") && !dte_saw("ERROR"), "and not yet acknowledged");
 
     peer = peer_start(0, NULL, PEER_RX);
     check(peer != NULL, "the far-end fax terminal starts");
@@ -1878,6 +1888,91 @@ static void test_receive_last_page_rejected(void)
 }
 
 /*
+ * T.32 8.3.3.4: "The DCE shall acknowledge the end of the data by returning
+ * the OK or ERROR result code to the DTE, after Phase D is completed."  That
+ * is per page, not per document, so a multi-page document has the DTE hand
+ * over page one, wait for its OK, and only then hand over page two -- which
+ * means the DCE cannot have the whole document before it starts
+ * transmitting.  This drives it exactly that way, one page at a time, with
+ * nothing fed until the previous page has been answered for.
+ */
+static void test_page_at_a_time(int ec)
+{
+    fax_state_t *peer;
+    char cmd[40];
+    int rows = 0;
+    int bad;
+
+    printf("+FDT: a page at a time, OK after each phase D (EC=%d) (T.32 8.3.3.4)\n", ec);
+
+    peer_ecm = 1;
+    peer_t6 = 1;
+    peer_nsf = NULL;
+    peer_nss = NULL;
+    peer_interrupt = 0;
+
+    fc2_select(0);
+    fc2_select(1);
+    unlink(PEER_RX);
+
+    at("AT+FLI=\"sender\"");
+    at("AT+FNR=0,1,0,0");
+    snprintf(cmd, sizeof(cmd), "AT+FIS=1,3,0,2,0,%d,0,0,0", ec); at(cmd);
+    at("ATD5551234");
+
+    peer = peer_start(0, NULL, PEER_RX);
+    check(peer != NULL, "the far-end fax terminal starts");
+    if (!peer)
+        return;
+    fc2_on_connected();
+
+    for (int page = 0; page < 2; page++) {
+        int last = (page == 1);
+
+        dte_reset();
+        check(send_page_via_fdt(page, last ? 0x2E : 0x2C),
+              last ? "page two is handed over" : "page one is handed over");
+        /*
+         * Nothing yet: the page has not been through phase D.  This is the
+         * whole of the ordering -- the old behaviour answered OK here, before
+         * the page had been anywhere near the line.
+         */
+        check(!dte_saw("OK") && !dte_saw("ERROR"),
+              "no result code before the page has gone");
+
+        /* Now let it go, and wait for the far end's verdict on it. */
+        for (int i = 0; i < 90 * 50; i++) {
+            pump(peer, 1);
+            if (dte_saw("OK") || dte_saw("ERROR"))
+                break;
+        }
+        check(dte_saw("OK"), last ? "page two completes with OK after phase D"
+                                  : "page one completes with OK after phase D");
+        check(!dte_saw("ERROR"), "and not with ERROR");
+    }
+
+    pump(peer, 30 * 50);
+    for (int i = 0; i < 20; i++)
+        fc2_poll();
+
+    check(peer_done && peer_status == T30_ERR_OK,
+          "the far end reports a good session");
+
+    /* And the pages are the pages, in order: a DCE which answered the DTE
+     * early and then sent something else would pass every check above. */
+    row_variant = 0;
+    bad = compare_page(PEER_RX, 0, &rows);
+    check(bad == 0 && rows == IMAGE_ROWS, "page one arrived intact");
+    row_variant = 1;
+    bad = compare_page(PEER_RX, 1, &rows);
+    check(bad == 0 && rows == IMAGE_ROWS, "page two arrived intact, and second");
+    row_variant = 0;
+
+    fax_free(peer);
+    fc2_on_disconnected();
+}
+
+/*
  * T.32 Annex II.7, "send one page with line errors and retransmission", the
  * transmit half of the same story: the far end answers a page with RTN, the
  * +FDT completes with ERROR rather than OK (8.3.3.4), +FPS reads back the 2
@@ -1921,10 +2016,14 @@ static void test_transmit_page_rejected(int at_eop)
     dte_reset();
     if (at_eop) {
         check(send_page_via_fdt(0, 0x2E), "the page is handed over");
-        check(dte_saw("OK"), "and acknowledged");
+        /* T.32 8.3.3.4: no result code until the page has been sent and answered
+     * for -- the call has not been answered yet. */
+    check(!dte_saw("OK") && !dte_saw("ERROR"), "and not yet acknowledged");
     } else {
         check(send_page_via_fdt(0, 0x2C), "page one is handed over");
-        check(dte_saw("OK"), "and acknowledged");
+        /* T.32 8.3.3.4: no result code until the page has been sent and answered
+     * for -- the call has not been answered yet. */
+    check(!dte_saw("OK") && !dte_saw("ERROR"), "and not yet acknowledged");
         check(send_page_via_fdt(1, 0x2E), "page two is handed over");
     }
 
@@ -2113,7 +2212,9 @@ static void test_rejected_page_never_resent(void)
 
     dte_reset();
     check(send_page_via_fdt(0, 0x2E), "the page is handed over");
-    check(dte_saw("OK"), "and acknowledged");
+    /* T.32 8.3.3.4: no result code until the page has been sent and answered
+     * for -- the call has not been answered yet. */
+    check(!dte_saw("OK") && !dte_saw("ERROR"), "and not yet acknowledged");
 
     peer = peer_start(0, NULL, PEER_RX);
     check(peer != NULL, "the far-end fax terminal starts");
@@ -2313,6 +2414,20 @@ static void test_procedure_interrupt(void)
     check(peer_saw_ppr == (T30_PIP & 0xFE) || peer_saw_ppr == (T30_PIN & 0xFE),
           "the far end grants it with PIP or PIN");
     check(dte_saw("+FVO"), "the granted interrupt is reported as +FVO");
+    /*
+     * T.32 Table 15 pairs the +FVO with the +FDT's result code, which it
+     * could not do while the +FDT completed at spool time.  Both come out of
+     * the same phase D now, and in that order.
+     */
+    {
+        const char *vo = dte_find("+FVO");
+        const char *ok = dte_find("\r\nOK\r\n");
+        const char *err = dte_find("\r\nERROR\r\n");
+        const char *res = (ok && (!err || ok < err)) ? ok : err;
+
+        check(vo && res && vo < res,
+              "and it precedes the +FDT result code it belongs to");
+    }
     dte_reset();
     at("AT+FPS?");
     check(dte_saw("5") || dte_saw("4"),
@@ -2907,6 +3022,8 @@ int main(void)
     test_multipage_receive(0);
     test_multipage_receive(2);
     test_multipage_receive(1);
+    test_page_at_a_time(0);
+    test_page_at_a_time(2);
     test_page_rejected_rtn(0);
     test_page_rejected_rtn(2);
     test_receive_last_page_rejected();

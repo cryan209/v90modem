@@ -802,6 +802,12 @@ SPAN_DECLARE(int) t30_set_ecm_frame_size(t30_state_t *s, int octets)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(void) t30_set_more_pages_pending(t30_state_t *s, bool pending)
+{
+    s->more_pages_pending = pending;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) t30_set_retransmit_hold(t30_state_t *s, bool hold)
 {
     s->retransmit_held = hold;
