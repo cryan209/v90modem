@@ -391,3 +391,40 @@ that is possible -- or the enable needs more than this one call. Resolving which
 is the next step, and the way in is the mask-ROM interpreter: the wire opcodes
 our scripts *do* use dispatch there, so dumping 0xd000+ off the device would
 settle the opcode map outright.
+
+
+## Toward a mask-ROM dump: a read channel exists, a read opcode has not been found
+
+**The EEPROM is not code memory.** `CD2_READ_EEPROM` swept over
+wValue 0x0000-0xf000 returns 32 zero bytes at address 0 and 0xFF everywhere
+above -- a real serial EEPROM, programmed at the bottom and erased above. The
+mask ROM is not aliased there.
+
+**Script opcode 0x26 appends a byte to the completion notification**, which is
+an exfiltration channel. Proven directly: the hand-built body
+`27 AA | 26 | 27 01 | 28 | 36` comes back as `aa 00 01` -- the two `27`
+operands with a byte the `26` appended between them. It also explains the
+odd 3- and 4-byte payloads seen earlier from the shipped scripts (script 32 is
+`52 00 | 27 20 | 26 | 27 01 | 28 | 36` and reports `20 04 01`).
+
+**Opcode 0x0b writes a control register.** Shipped scripts contain `0b 1c a0`
+and `0b 1d a0`, and the firmware register map has exactly `MOV f4h,#1ch /
+MOV f5h,#a0h` and the same for 0x1d. So `0b <reg> <val>` is
+"select register, store value" -- host-side write access to the chip's whole
+internal control plane, which is what the codec enable lives in.
+
+**What is missing is the matching read.** With `0x26` as the sink, one opcode
+that loads the result byte from a control register would make the register file
+readable, and the same primitive pointed at code memory would dump the ROM.
+Startup does `MOV f4h,#2dh / MOV f5h,#c0h`, so register 0x2d reading back 0xC0
+is a ready-made oracle. Thirty-three candidate opcodes were tried as
+`<op> 2d | 26 | 27 01 | 28 | 36` and **none returned 0xC0**; four (0x00, 0x02,
+0x0c, 0x0e) completed with the appended byte still 0x00, and the rest did not
+complete at all, which most likely means their operand length differs from the
+template-language width and the script was malformed.
+
+**Sweeping the remaining opcodes needs someone at the machine: opcode 0x0f
+wedges the device**, and recovery is a physical replug (the firmware is
+volatile, so a replug is a clean reset -- but it cannot be done in software).
+That is the only thing standing between here and a full opcode map, and a full
+opcode map is what turns the mask ROM from unreadable into a dump.
