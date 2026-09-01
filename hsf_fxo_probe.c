@@ -92,6 +92,8 @@ int main(int argc, char **argv)
 	bool do_feed = false;
 	uint8_t patch[8];
 	size_t  n_patch = 0;
+	uint8_t raw[256];
+	size_t  n_raw = 0;
 
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--load")) {
@@ -110,6 +112,17 @@ int main(int argc, char **argv)
 			}
 		} else if (!strcmp(argv[i], "--start-codec")) {
 			do_start = true;
+		} else if (!strcmp(argv[i], "--raw") && i + 1 < argc) {
+			/* Hand-built wire body, for opcodes no shipped template
+			 * contains.  The firmware's own dispatch table is the
+			 * only guide to what these do. */
+			const char *h = argv[++i];
+			for (; h[0] && h[1] && n_raw < sizeof raw; h += 2) {
+				unsigned v;
+				if (sscanf(h, "%2x", &v) != 1)
+					break;
+				raw[n_raw++] = (uint8_t)v;
+			}
 		} else if (!strcmp(argv[i], "--patch") && i + 1 < argc) {
 			for (char *p = argv[++i]; *p && n_patch < 8; ) {
 				patch[n_patch++] = (uint8_t)strtoul(p, NULL, 0);
@@ -228,6 +241,16 @@ int main(int argc, char **argv)
 	/* Bracket every script with GET_INFROMATION.  Gotcha 2 in hsf_fxo.c: a
 	 * cached descriptor read proves nothing, and a wedged EP0 makes the next
 	 * request lie about the one before it. */
+	if (n_raw) {
+		int r = hsf_fxo_script_load(d, 0xFF01, raw, n_raw);
+		uint8_t after[5];
+		int live = hsf_fxo_get_information(d, after);
+		printf("raw script (%zu bytes): %s, device %s\n", n_raw,
+		       r == 0 ? "accepted" : "REJECTED",
+		       live < 0 ? "NOT RESPONDING" : "alive");
+		usleep(50 * 1000);
+	}
+
 	for (int i = 0; i < n_scripts; i++) {
 		int r = hsf_fxo_script_run(d, (unsigned)script_ids[i],
 					   n_patch ? patch : NULL, n_patch);

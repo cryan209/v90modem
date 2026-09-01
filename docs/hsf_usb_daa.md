@@ -339,3 +339,55 @@ and the country/profile data the vendor stack holds host-side (`hsf.cty`,
 `osnvm.c`) is consumed by the ENGINE rather than sent to the device, so it is
 not a loader either. What loads the firmware's relay table is genuinely not
 identified, and no path in this driver is a candidate for it.
+
+
+## Inside the device: the firmware is 8051, and it has been opened up
+
+The 7399-byte `ROM_IMAGE` the bootloader wants is **8051 code loaded at address
+0**. File offset 0x28 proves it -- a textbook startup: `MOV R0,#7fh / CLR A /
+MOV @R0,A / DJNZ R0` clearing internal RAM, then `MOV SP,#6ah`, then
+`LJMP 0c9ah`. `tools/hsf_firmware.py` (with `tools/d8051.py`) disassembles it.
+
+Two structures matter.
+
+**A 105-entry LJMP dispatch table at 0x62.** 105 is 0x69, exactly the size of
+the script opcode space, so this is very likely the interpreter's dispatch.
+Targets at 0xd7xx-0xd9xx are on-chip mask ROM we do not have; **46 of the 105
+land inside the uploaded image** and can be read. *Not settled:* several of
+those 46 land mid-instruction under linear disassembly, so either the
+interpreter enters shared code at computed points or this table is not the
+script dispatch. Do not build on it without resolving that.
+
+**SFR 0xF4 / 0xF5 are an indexed control register file** -- write a register
+number to F4, then read or modify F5. This is the chip's internal control
+plane, it is where a codec enable must live, and `--regs` maps it: **107 access
+sites across 40 register indices**. Register 1 is the busiest and the only one
+whose bits are set and cleared individually from several places
+(`ORL #04h/#10h/#80h`, `ANL #7fh/#fbh`).
+
+### A routine shaped exactly like the codec start
+
+At 0x0c26, reached from dispatch entries 0x54/0x58/0x5c/0x60/0x64/0x68:
+
+    MOV F4,#01h        ; select control register 1
+    MOV R7,F5          ; read it
+    JB  ACC.4, skip    ; already started?
+    LCALL 1d4fh        ; init
+    LCALL 1b11h        ; init
+    MOV F4,#01h
+    ORL F5,#10h        ; set bit 4 -- the "started" latch
+    ...
+    SETB AFh           ; SETB EA: global interrupt enable
+
+An idempotent start guarded by a latch bit, ending in enabling interrupts. No
+script we ship contains those opcodes, so this path has never run.
+
+**Tried and it did not work.** `hsf_fxo_probe --raw <hex>` sends a hand-built
+wire body; `5400 2740 2701 28 36` and the 0x58 and 0x68 equivalents are all
+accepted by the device with the session scripts loaded, and produce no samples.
+So either those wire opcodes do not actually reach 0x0c26 -- which would mean
+the 0x62 table is not the script dispatch, and the mid-instruction targets say
+that is possible -- or the enable needs more than this one call. Resolving which
+is the next step, and the way in is the mask-ROM interpreter: the wire opcodes
+our scripts *do* use dispatch there, so dumping 0xd000+ off the device would
+settle the opcode map outright.
