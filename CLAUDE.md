@@ -43,6 +43,24 @@ receiver, each "measured" against a binary that was not what the source said.
 If a header change produces behaviour that contradicts the source, check what
 actually recompiled before believing the measurement.
 
+**V.34 fax, stage 1 against a real machine (2026-09-01).** A Canon PIXMA
+TR7560 (33.6 kbit/s Super G3) dialled in over the VG224 ATA and its V.8 CM is
+`81 85 d4 90 07` -- call function **T.30 Tx FAX**, modulations **V.34
+half-duplex**, V.27ter, V.29, V.17, V.21. So a real Super G3 fax does offer
+V.34 over this SIP/ATA path and the bearer carries the V.8 exchange intact
+(PCMU, zero loss). `tools/fax_v8_probe.sh` runs it; it needs no fax code at
+all, because the only thing that has to happen is that we present ANSam.
+**The first run reported an empty modulation list, and that was ours**:
+`process_modulation_mode()` intersected the peer's CM with our own JM offer and
+then stored the result in the only field that records what the peer asked for,
+so a machine requesting V.34 fax was reported as offering nothing. The peer's
+offer is now kept separately in `jm_cm.peer_modulations` (JM construction
+unchanged), and the engine's V.8 summary carries the call function and that
+list. Fifth time in this project that a claim about a peer was an instrument
+reporting our own state. Nothing about clause 12 is established by this: our
+JM offers no fax modulation, so the call ended after six seconds without a
+single Phase 2 signal.
+
 **The half-duplex V.34 (clause 12) control channel now runs end to end.**
 `v34_hdx_test <baud> <bps> <ulaw|alaw> <seconds>` drives a source and a
 recipient at each other through Phase 2, Phase 3 and 12.4's PPh/ALT/MPh/E, and

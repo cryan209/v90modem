@@ -444,6 +444,98 @@ true.  The `include` lines are added now.  The lesson generalises: on this tree,
 when a change to a header produces behaviour that contradicts the source, check
 what actually recompiled before believing the measurement.
 
+## Stage 1 against real hardware: a Canon TR7560 offers V.34 fax (2026-09-01)
+
+None of the clause 12 work above has been near a peer -- `v34_hdx_test` is the
+only caller of `v34_half_duplex_change_mode()` in the tree, the engine builds a
+duplex modem unconditionally, and `t30.c` contains zero V.34 references -- so
+before writing anything that depends on a real machine's behaviour, the cheap
+question was asked first: **does a real Super G3 fax offer V.34 over this
+SIP/ATA path at all?**  Super G3 is routinely lost to an ATA's own fax handling
+or to transcoding, and a negative there would have made everything downstream
+pointless.
+
+`tools/fax_v8_probe.sh` answers it with no new modem code.  The server answers
+as an ordinary data modem; the only thing that matters is that it presents
+ANSam, because that is what makes a calling fax send its V.8 CM.  A Canon
+PIXMA TR7560 (33.6 kbit/s Super G3) dialled in over the VG224 ATA.
+
+**Its CM is `81 85 d4 90 07`, repeated identically a dozen times:**
+
+| octet | tag | meaning |
+| --- | --- | --- |
+| `81` | 0x01 call function | value 4, **T.30 Tx FAX** |
+| `85` | 0x05 modulation | bit 7 set: **V.34 half-duplex**; V.34 duplex and V.90 clear |
+| `d4` | extension | V.27ter, V.29, V.17 |
+| `90` | extension | V.21 |
+| `07` | 0x07 PCM modem availability | PCM unavailable |
+
+So the answer is yes, and the ATA passes the V.8 exchange through intact: the
+RTP was PCMU with zero loss over 312 packets, and the CM arrived clean.
+
+### The instrument said the opposite, and it was ours
+
+The first run reported `T.30 Tx FAX` and then **an empty modulation list**,
+which reads as "this machine does not offer V.34 fax".  It offers all five.
+
+`process_modulation_mode()` in `v8.c` ended with
+
+```c
+    if (!s->calling_party)
+        modulations &= s->parms.jm_cm.modulations;
+    s->result.jm_cm.modulations = modulations;
+    v8_log_supported_modulations(s, modulations);
+```
+
+The intersection is deliberate and stays: `s->result.jm_cm.modulations` is what
+the outgoing JM is built from, and an answerer must not echo back modulations
+it cannot do.  What was wrong is that it is the ONLY record of the peer's
+offer -- it is what the log prints, and what the result handler hands to
+everything above V.8.  Our JM offer on this call is a data one, so the
+intersection with a fax's CM is empty, and both the log and the engine reported
+a machine that had just asked for V.34 fax as offering nothing at all.
+
+The peer's offer is now kept in `jm_cm.peer_modulations`, untouched, and the JM
+construction is unchanged.  The log says both, which makes the asymmetry
+visible in one line rather than hiding it:
+
+```
+Far end offers: V.17 half-duplex, V.21 duplex, V.27ter duplex, V.29 half-duplex, V.34 half-duplex supported
+Will offer:  supported
+```
+
+and the engine gained the two fields its V.8 summary had never carried -- the
+call function and the peer's modulations, which between them are the whole of
+what the far end is asking for:
+
+```
+[ME] V.8 peer offer: call function=T.30 Tx FAX, modulations=V.17 half-duplex,V.21 duplex,V.27ter duplex,V.29 half-duplex,V.34 half-duplex
+```
+
+**This is the fifth time in this project that a claim about a peer turned out
+to be an instrument reporting our own state.**  The rule from the V.90 notes --
+check your own signal path before believing a statement about the far end --
+applies to decoded fields as much as to waveforms.
+
+### What this does and does not establish
+
+It establishes that the machine offers V.34 fax, that the bearer carries the
+V.8 exchange, and that we now record what a peer asks for.  It establishes
+nothing about clause 12: our JM offers no fax modulation, so `Negotiation
+succeeded` on an empty intersection and the Canon hung up after six seconds
+without transmitting a single Phase 2 signal.
+
+Stage 2 is to answer that CM with a JM offering V.34 half-duplex and T.30, so
+the Canon proceeds into Phase 2 and its INFOh, PPh, ALT and MPh can be
+recorded.  That matters more than it sounds: every receive path in the clause
+12 work is fed by our own transmitter, so the PPh detector, the dibit
+negation, the MPh field layout and the control channel AGC working point are
+all currently validated only against themselves.  The Eicon downstream fixture
+is in this tree precisely because it is the one recording we did not generate,
+and it immediately caught two conventions loopback could never have shown.
+
+Evidence: `artifacts/v90-hardware/20260901T045727Z-canon-v8-cm-fixed`.
+
 ## Order of work from here
 
 1. ~~A control-channel receiver.~~  Done -- see the section above.

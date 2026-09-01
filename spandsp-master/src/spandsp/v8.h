@@ -125,7 +125,20 @@ typedef struct v8_state_s v8_state_t;
 struct v8_cm_jm_parms_s
 {
     int32_t call_function;
+    /*! The modulations this end will OFFER.  On an answerer this is the
+        intersection of the far end's CM with what this modem supports,
+        because it is what the outgoing JM is built from -- so it is NOT a
+        record of what the far end asked for.  Read peer_modulations for
+        that. */
     uint32_t modulations;
+    /*! The modulations the far end actually listed in its CM or JM, before
+        any intersection with what this modem supports.  A real Canon
+        TR7560 offering V.34 fax sends CM 81 85 d4 90 07 -- call function
+        T.30 Tx FAX, and V.34 half-duplex, V.27ter, V.29, V.17 and V.21 --
+        and every one of those bits was being masked away on the answerer,
+        so both the log and the result handler reported the peer as
+        offering nothing at all. */
+    uint32_t peer_modulations;
     int32_t protocols;
     int32_t pstn_access;
     int32_t nsf;

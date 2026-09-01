@@ -1,0 +1,91 @@
+[ME] V.34 datapath: floating point
+16:57:28.417         os_core_unix.c !pjlib 2.16 for POSIX initialized
+16:57:28.417         sip_endpoint.c  .Creating endpoint instance...
+16:57:28.418                  pjlib  .select() I/O Queue created (0xbd902e018)
+16:57:28.418         sip_endpoint.c  .Module "mod-msg-print" registered
+16:57:28.418        sip_transport.c  .Transport manager created.
+16:57:28.418           pjsua_core.c  .PJSUA state changed: NULL --> CREATED
+16:57:30.202        coreaudio_dev.c  core audio detected 3 devices
+16:57:30.203        coreaudio_dev.c   dev_id 78: MacBook Air Microphone  (in=1, out=0) 48000Hz
+16:57:30.203        coreaudio_dev.c   dev_id 71: MacBook Air Speakers  (in=0, out=2) 48000Hz
+16:57:30.203        coreaudio_dev.c   dev_id 83: iPhone69 Microphone  (in=1, out=0) 48000Hz
+16:57:30.203        coreaudio_dev.c  core audio initialized
+16:57:30.204           pjsua_core.c  .pjsua version 2.16 for Darwin-25.5/arm64 initialized
+16:57:30.204              sip_modem  Binding SIP/RTP to local address 10.69.220.8
+16:57:30.204              sip_modem  G.711 passthrough enabled
+[DI] modem PTY slave: /dev/ttys013 (symlink: /tmp/v90faxprobe)
+16:57:30.205              sip_modem  RTP media base port: 41000
+16:57:30.208              sip_modem  SIP V.90 modem ready. PTY link: /tmp/v90faxprobe
+16:57:30.208              sip_modem  ME trace (startup): state=IDLE mod=NONE law=ULAW role=answerer media=down phase_ms=0 v34_rx=0 v34_tx=0 v90_rx=-1 v90_tx=-1 v90_event=-1 phase3=0 s_events=0 dil=0 cp_bits=0 cp_valid=0 cp_rejected=0 v92=0 trn2u=0 trn2u_symbols=0 trn2u_ones=0 cpu_bits=0 cpu_valid=0 cpu_rejected=0 g711_rx=0 g711_tx=0 raw_v90_tx=0 linear_tx=0
+16:57:30.215            pjsua_acc.c  ....sip:6000@asterisk.net.cryan.nz: registration success, status=200 (OK), will re-register in 299 seconds
+16:59:08.377              sip_modem  ...RTP clock-recovery tap installed on call 0 media 0
+16:59:08.377              sip_modem  ..Incoming call from "VG224 Port 2/22" <sip:8422@192.168.88.122>
+16:59:08.378              sip_modem  .........Call 0 state: EARLY
+16:59:08.378              sip_modem  ..RING 1/2
+16:59:14.381              sip_modem  RING 2/2
+16:59:14.381              sip_modem  Auto-answering after 2 rings
+16:59:14.382              sip_modem  .....Installed G.711 passthrough stream wrapper (160 samples/frame)
+16:59:14.382              sip_modem  ...Codec: PCMU (u-law passthrough)
+16:59:14.382              sip_modem  ...Media clock wired: conf 1 <-> 0
+16:59:14.382              sip_modem  ...ME trace (media-connected): state=V8 mod=NONE law=ULAW role=answerer media=up phase_ms=0 v34_rx=0 v34_tx=0 v90_rx=-1 v90_tx=-1 v90_event=-1 phase3=0 s_events=0 dil=0 cp_bits=0 cp_valid=0 cp_rejected=0 v92=0 trn2u=0 trn2u_symbols=0 trn2u_ones=0 cpu_bits=0 cpu_valid=0 cpu_rejected=0 g711_rx=0 g711_tx=0 raw_v90_tx=0 linear_tx=0
+16:59:14.382              sip_modem  .......Call 0 state: CONNECTING
+16:59:14.386              sip_modem  ME trace (state-change): state=V8 mod=NONE law=ULAW role=answerer media=up phase_ms=4 v34_rx=0 v34_tx=0 v90_rx=-1 v90_tx=-1 v90_event=-1 phase3=0 s_events=0 dil=0 cp_bits=0 cp_valid=0 cp_rejected=0 v92=0 trn2u=0 trn2u_symbols=0 trn2u_ones=0 cpu_bits=0 cpu_valid=0 cpu_rejected=0 g711_rx=0 g711_tx=0 raw_v90_tx=0 linear_tx=0
+16:59:14.386              sip_modem  ...Call 0 state: CONFIRMED
+FLOW [proto@0x102e9b6e9] >CM:  81 85 d4 90 07
+FLOW [proto@0x102e9b6e9] >CM:  81 85 d4 90 07
+FLOW [proto@0x102e9b6e9] Decoding
+FLOW [proto@0x102e9b6e9] T.30 Tx FAX
+FLOW [proto@0x102e9b6e9] Far end offers: FLOW [proto@0x102e9b6e9] V.17 half-duplex, V.21 duplex, V.27ter duplex, V.29 half-duplex, V.34 half-duplex supported
+FLOW [proto@0x102e9b6e9] Will offer: FLOW [proto@0x102e9b6e9]  supported
+FLOW [proto@0x102e9b6e9] PCM unavailable
+FLOW [proto@0x102e9b6e9] >CM:  81 85 d4 90 07
+FLOW [proto@0x102e9b6e9] >CM:  81 85 d4 90 07
+FLOW [proto@0x102e9b6e9] >CM:  81 85 d4 90 07
+FLOW [proto@0x102e9b6e9] >CM:  81 85 d4 90 07
+FLOW [proto@0x102e9b6e9] >CM:  81 85 d4 90 07
+FLOW [proto@0x102e9b6e9] >CM:  81 85 d4 90 07
+FLOW [proto@0x102e9b6e9] >CM:  81 85 d4 90 07
+FLOW [proto@0x102e9b6e9] >CM:  81 85 d4 90 07
+FLOW [proto@0x102e9b6e9] >CM:  81 85 d4 90 07
+FLOW [proto@0x102e9b6e9] CM recognised
+[ME] V.8 peer offer: call function=T.30 Tx FAX, modulations=V.17 half-duplex,V.21 duplex,V.27ter duplex,V.29 half-duplex,V.34 half-duplex
+[ME] V.8 peer summary: protocol=None, PSTN=PSTN access unknown, PCM=PCM unavailable, NSF=absent, T.66=-1
+FLOW [proto@0x102e9b6e9] <JM:  81 05 10 10 47 8d
+FLOW [proto@0x102e9b6e9] >CM:  81 85 d4 90 07 18 81 85 d4 90 07
+FLOW [proto@0x102e9b6e9] <JM:  81 05 10 10 47 8d
+FLOW [proto@0x102e9b6e9] >CM:  81 85 d4 90 07
+FLOW [proto@0x102e9b6e9] <JM:  81 05 10 10 47 8d
+FLOW [proto@0x102e9b6e9] >CM:  81 85 d4 90 07
+FLOW [proto@0x102e9b6e9] <JM:  81 05 10 10 47 8d
+FLOW [proto@0x102e9b6e9] Carrier drop while waiting for CJ - treating as CJ
+FLOW [proto@0x102e9b6e9] CJ recognised
+FLOW [proto@0x102e9b6e9] FSK ends (13/160) 1 11
+FLOW [proto@0x102e9b6e9] Negotiation succeeded
+[ME] V.8 peer offer: call function=T.30 Tx FAX, modulations=V.17 half-duplex,V.21 duplex,V.27ter duplex,V.29 half-duplex,V.34 half-duplex
+[ME] V.8 peer summary: protocol=None, PSTN=PSTN access unknown, PCM=PCM unavailable, NSF=absent, T.66=-1
+16:59:20.643              sip_modem !ME trace (state-change): state=HANGUP mod=NONE law=ULAW role=answerer media=up phase_ms=6261 v34_rx=0 v34_tx=0 v90_rx=-1 v90_tx=-1 v90_event=-1 phase3=0 s_events=0 dil=0 cp_bits=0 cp_valid=0 cp_rejected=0 v92=0 trn2u=0 trn2u_symbols=0 trn2u_ones=0 cpu_bits=0 cpu_valid=0 cpu_rejected=0 g711_rx=50080 g711_tx=50080 raw_v90_tx=0 linear_tx=50080
+16:59:20.644          pjsua_media.c  ..
+  [CONFIRMED] To: "VG224 Port 2/22" <sip:8422@192.168.88.122>;tag=8ffce46e-ff7a-4787-a32a-34079721a2f7
+    Call time: 00h:00m:06s, 1st res in 3 ms, conn in 6011ms
+    #0 audio PCMU @8kHz, sendrecv, peer=192.168.88.122:13478
+       SRTP status: Not active Crypto-suite: 
+       RX pt=0, last update:00h:00m:01.042s ago
+          total 311pkt 49.7KB (62.2KB +IP hdr) @avg=63.5Kbps/79.4Kbps
+          pkt loss=0 (0.0%), discrd=0 (0.0%), dup=0 (0.0%), reord=0 (0.0%)
+                (msec)    min     avg     max     last    dev
+          loss period:   0.000   0.000   0.000   0.000   0.000
+          jitter     :   0.000   0.171   0.500   0.125   0.118
+       TX pt=0, ptime=20, last update:00h:00m:01.240s ago
+          total 313pkt 50.0KB (62.6KB +IP hdr) @avg=63.9Kbps/79.9Kbps
+          pkt loss=0 (0.0%), dup=0 (0.0%), reorder=0 (0.0%)
+                (msec)    min     avg     max     last    dev 
+          loss period:   0.000   0.000   0.000   0.000   0.000
+          jitter     :   0.375   0.375   0.375   0.375   0.000
+       RTT msec      :   3.112   3.112   3.112   3.112   0.000
+16:59:20.644              sip_modem  .Call 0 state: DISCONNECTED
+16:59:20.648              sip_modem  ME trace (state-change): state=IDLE mod=NONE law=ULAW role=answerer media=down phase_ms=0 v34_rx=0 v34_tx=0 v90_rx=-1 v90_tx=-1 v90_event=-1 phase3=0 s_events=0 dil=0 cp_bits=0 cp_valid=0 cp_rejected=0 v92=0 trn2u=0 trn2u_symbols=0 trn2u_ones=0 cpu_bits=0 cpu_valid=0 cpu_rejected=0 g711_rx=50080 g711_tx=50080 raw_v90_tx=0 linear_tx=50080
+16:59:20.648              sip_modem !ME trace (media-down): state=IDLE mod=NONE law=ULAW role=answerer media=down phase_ms=0 v34_rx=0 v34_tx=0 v90_rx=-1 v90_tx=-1 v90_event=-1 phase3=0 s_events=0 dil=0 cp_bits=0 cp_valid=0 cp_rejected=0 v92=0 trn2u=0 trn2u_symbols=0 trn2u_ones=0 cpu_bits=0 cpu_valid=0 cpu_rejected=0 g711_rx=50080 g711_tx=50080 raw_v90_tx=0 linear_tx=50080
+17:01:27.968              sip_modem !Shutting down...
+17:01:28.188            pjsua_acc.c  .....sip:6000@asterisk.net.cryan.nz: unregistration success
+17:01:29.199                timer.c  .Dumping timer heap:
+17:01:29.199                timer.c  .  Cur size: 0 entries, max: 3070

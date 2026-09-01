@@ -416,6 +416,19 @@ static const uint8_t *process_modulation_mode(v8_state_t *s, const uint8_t *p)
         /*endif*/
     }
     /*endif*/
+    /* Keep what the far end ASKED FOR.  jm_cm.modulations below is
+       overwritten with an intersection because it is what the outgoing JM is
+       built from, and that destroyed the only record of the peer's offer --
+       in both the log and the result handler, which is where anything above
+       V.8 would have to look to decide what the peer wants.  Measured
+       against a Canon TR7560 offering V.34 fax: its CM carries V.34
+       half-duplex, V.27ter, V.29, V.17 and V.21, and the answerer logged and
+       reported "nothing supported", because our own JM offer is a data one
+       and the intersection was empty. */
+    s->result.jm_cm.peer_modulations = modulations;
+    span_log(&s->logging, SPAN_LOG_FLOW, "Far end offers: ");
+    v8_log_supported_modulations(s, modulations);
+
     /* Intersect the received modulations with what we actually support.
        The JM should only advertise modulations the answerer can do, not
        echo back everything the caller offered.  Without this, a V.92
@@ -423,8 +436,14 @@ static const uint8_t *process_modulation_mode(v8_state_t *s, const uint8_t *p)
        V.92 quick-connect instead of standard V.34 CJ. */
     if (!s->calling_party)
         modulations &= s->parms.jm_cm.modulations;
+    /*endif*/
+    if (modulations != s->result.jm_cm.peer_modulations)
+    {
+        span_log(&s->logging, SPAN_LOG_FLOW, "Will offer: ");
+        v8_log_supported_modulations(s, modulations);
+    }
+    /*endif*/
     s->result.jm_cm.modulations = modulations;
-    v8_log_supported_modulations(s, modulations);
     return p;
 }
 /*- End of function --------------------------------------------------------*/
@@ -527,6 +546,7 @@ static void cm_jm_decode(v8_state_t *s)
     s->cm_jm_data[s->cm_jm_len] = 0;
 
     s->result.jm_cm.modulations = 0;
+    s->result.jm_cm.peer_modulations = 0;
     p = s->cm_jm_data;
 
     while (*p)
@@ -584,6 +604,7 @@ static bool cm_jm_decode_saved(v8_state_t *s)
     s->cm_jm_data[s->cm_jm_len] = 0;
 
     s->result.jm_cm.modulations = 0;
+    s->result.jm_cm.peer_modulations = 0;
     p = s->cm_jm_data;
 
     while (*p)

@@ -2248,6 +2248,32 @@ static const char *me_v92_anspcm_level_to_str(int level)
 
 static void me_log_v8_peer_summary(const v8_parms_t *result)
 {
+    /* The call function and the modulations the peer offered are the two
+       fields that say what the far end actually wants, and neither was
+       reported.  A Canon TR7560 calling in to send a V.34 fax was summarised
+       here as "protocol=None, PSTN=unknown, PCM=PCM unavailable" -- nothing
+       that would tell anyone it had asked for T.30 Tx FAX over V.34
+       half-duplex.  peer_modulations, not modulations: the latter is the
+       intersection this modem will OFFER, which on a fax call is empty. */
+    {
+        char mods[256];
+        int n = 0;
+        int i;
+
+        mods[0] = '\0';
+        for (i = 0;  i < 32;  i++)
+        {
+            if ((result->jm_cm.peer_modulations & (1u << i)))
+                n += snprintf(mods + n, (n < (int) sizeof(mods)) ? sizeof(mods) - n : 0,
+                              "%s%s", (n > 0) ? "," : "",
+                              v8_modulation_to_str(result->jm_cm.peer_modulations & (1u << i)));
+            /*endif*/
+        }
+        /*endfor*/
+        fprintf(stderr, "[ME] V.8 peer offer: call function=%s, modulations=%s\n",
+                v8_call_function_to_str(result->jm_cm.call_function),
+                (mods[0] != '\0') ? mods : "none");
+    }
     fprintf(stderr,
             "[ME] V.8 peer summary: protocol=%s, PSTN=%s, PCM=%s, NSF=%s, T.66=%d\n",
             v8_protocol_to_str(result->jm_cm.protocols),
