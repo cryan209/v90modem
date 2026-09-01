@@ -618,9 +618,49 @@ the file lengths matching to 140 ms is not evidence that the two streams share
 a time origin.  **Do not cross-read the two taps.  Stamp the event in the
 stream you are going to look at.**
 
+### Verified: the first two fixes work, and the real blocker is ours
+
+A third call with all three landed: **no retrain, no false S.**  The stage
+trace runs INFO0 / HDX_INITIAL_A / HDX_FIRST_A / HDX_FIRST_NOT_A /
+HDX_FIRST_A_SILENCE / HDX_SECOND_A / HDX_SECOND_A_WAIT, INFOh is sent, and the
+receiver then sits in PHASE3_WAIT_S waiting for S -- which is 12.3.2.1 exactly.
+The call is no longer torn down.
+
+**But our transmitter is EXACTLY zero from tx_t 0.22 s to the end of the
+call.**  Not small -- zero, block after block, measured on `live-tx.g711`:
+
+```
+  7.325 s  rms=5108      <- Tone A
+  7.350 s  rms=206
+  7.375 s  rms=0
+  ...                    <- and every block after it, for 20 s
+```
+
+The first 667 ms of that is 12.2.1.2.3's silence and is correct.  What is not
+correct is that it never ends: the state machine leaves HDX_FIRST_A_SILENCE at
+tx_t = 0.910 s and walks HDX_SECOND_A, HDX_SECOND_A_WAIT and INFOh -- all of
+which return `s->tx.lastbit` and should be Tone A or a modulated tone -- while
+the wire stays at zero.  So the Canon never sees the 12.2.1.2.5 Tone A and
+never sees INFOh, which is why it holds Tone B for **twenty seconds** and never
+transmits S: 12.2.1.1.4 has it wait for exactly that.
+
+`tools/cc_demod.py` confirms it from outside the modem, decoding 10.1.2.3.1's
+binary DPSK (1 bit per symbol, 180 degrees for a 1, unscrambled -- NOT the
+quaternary 10.2.4 control channel that ALT, E and MPh use).  Our INFO0a is
+there at 7.268 s with a clean `01110010` frame sync; there is no second frame
+anywhere after it, and the window that should contain INFOh demodulates to a
+mean |z| of zero.
+
+The stage log now carries `lastbit=`, because every Phase 2 tone stage returns
+it and a zero there is a silent transmitter whatever the state machine
+believes.  On the loopback it reads `(4,0)` and `(-4,0)` through this exact
+sequence and Tone A resumes correctly, so whatever goes wrong is not visible
+there.  Reading it live is the next step and takes one call.
+
 ### Still open
 
-Whether the Canon accepts our INFOh.  It holds Tone B for eight seconds and
+Why the transmitter stays at zero, and hence whether the Canon accepts our
+INFOh.  It holds Tone B for eight seconds and
 then twelve more, and 12.2.1.3.4 gives it 2000 ms before it gives up on an
 INFOh that has not arrived -- so on the evidence it never took ours.  That is
 the next thing to settle, and it wants the INFOh demodulated out of our own

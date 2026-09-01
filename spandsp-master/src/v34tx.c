@@ -457,11 +457,19 @@ static void v34_tx_log_state_change_at(v34_state_t *s, int sample_offset)
        the transmitter itself produced can be looked up in live-tx.g711
        directly, with no cross-stream assumption at all. */
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
-             "Tx - [%s] stage=%s (%d) mod=%s (%d) tx_t=%.3fs\n",
+             "Tx - [%s] stage=%s (%d) mod=%s (%d) tx_t=%.3fs lastbit=(%.0f,%.0f)\n",
              role,
              v34_tx_stage_to_str(s->tx.stage), s->tx.stage,
              v34_modulation_to_str(s->tx.current_modulator), s->tx.current_modulator,
-             (double) now/8000.0);
+             (double) now/8000.0,
+             /* The Phase 2 tone stages all return lastbit, so a zero here is
+                a silent transmitter whatever the state machine believes it is
+                doing -- which is exactly what a Canon TR7560 saw: our output
+                is EXACTLY zero from the 12.2.1.2.3 silence onwards, through
+                SECOND_A, SECOND_A_WAIT and INFOh, while the stage trace
+                walked all three. */
+             (double) s->tx.lastbit.re,
+             (double) s->tx.lastbit.im);
 
     if (s->tx.stage == V34_TX_STAGE_FIRST_S
         &&
