@@ -76,9 +76,46 @@ struct hsf_dev {
 	pthread_t       thread;
 	bool            running;
 	bool            streaming;
+	int             inflight;	/* transfers libusb still owns */
 };
 
 /* ------------------------------------------------------------------ helpers */
+
+/*
+ * A submitted transfer belongs to libusb until its callback runs, and freeing
+ * one before that is undefined -- in practice a use-after-free inside
+ * libusb_exit().  Everything that submits goes through here, and every callback
+ * that declines to re-submit calls xfer_done(), so hsf_fxo_stop() can wait for
+ * the ring to drain instead of guessing.
+ */
+static int xfer_submit(struct hsf_dev *d, struct libusb_transfer *t)
+{
+	pthread_mutex_lock(&d->lock);
+	d->inflight++;
+	pthread_mutex_unlock(&d->lock);
+	int r = libusb_submit_transfer(t);
+	if (r < 0) {
+		pthread_mutex_lock(&d->lock);
+		d->inflight--;
+		pthread_mutex_unlock(&d->lock);
+	}
+	return r;
+}
+
+static void xfer_done(struct hsf_dev *d)
+{
+	pthread_mutex_lock(&d->lock);
+	d->inflight--;
+	pthread_mutex_unlock(&d->lock);
+}
+
+static int xfer_inflight(struct hsf_dev *d)
+{
+	pthread_mutex_lock(&d->lock);
+	int n = d->inflight;
+	pthread_mutex_unlock(&d->lock);
+	return n;
+}
 
 /*
  * Gotcha 1.  Called on every control failure rather than selectively.
@@ -271,8 +308,14 @@ static void LIBUSB_CALL on_rx(struct libusb_transfer *t)
 
 	/* osusb.c re-arms from the upper layer on every completion; the RX ring
 	 * has no other pacing, so re-submit unless we are shutting down. */
-	if (d->streaming && libusb_submit_transfer(t) < 0)
+	if (!d->streaming) {
+		xfer_done(d);
+		return;
+	}
+	if (libusb_submit_transfer(t) < 0) {
 		d->stats.rx_errors++;
+		xfer_done(d);
+	}
 }
 
 static void LIBUSB_CALL on_tx(struct libusb_transfer *t)
@@ -295,6 +338,7 @@ static void LIBUSB_CALL on_tx(struct libusb_transfer *t)
 	} else {
 		d->stats.tx_errors++;
 	}
+	xfer_done(d);
 }
 
 static void LIBUSB_CALL on_notify(struct libusb_transfer *t)
@@ -323,8 +367,12 @@ static void LIBUSB_CALL on_notify(struct libusb_transfer *t)
 
 	/* The notify URB is the one transfer osusb.c re-arms in its own
 	 * completion routine (osusb.c:870) rather than from the upper layer. */
-	if (d->running)
-		libusb_submit_transfer(t);
+	if (!d->running) {
+		xfer_done(d);
+		return;
+	}
+	if (libusb_submit_transfer(t) < 0)
+		xfer_done(d);
 }
 
 static void *event_thread(void *arg)
@@ -393,7 +441,7 @@ int hsf_fxo_start(struct hsf_dev *d, const struct hsf_callbacks *cb)
 		return -ENOMEM;
 	libusb_fill_interrupt_transfer(d->notify, d->h, EP_NOTIFY, d->notify_buf,
 				       HSF_NOTIFY_SIZE, on_notify, d, 0);
-	libusb_submit_transfer(d->notify);
+	xfer_submit(d, d->notify);
 
 	for (size_t i = 0; i < HSF_NUM_RX; i++) {
 		d->rx[i] = libusb_alloc_transfer(0);
@@ -401,7 +449,7 @@ int hsf_fxo_start(struct hsf_dev *d, const struct hsf_callbacks *cb)
 			return -ENOMEM;
 		libusb_fill_bulk_transfer(d->rx[i], d->h, EP_BULK_IN, d->rx_buf[i],
 					  HSF_XFER_SIZE, on_rx, d, 0);
-		libusb_submit_transfer(d->rx[i]);
+		xfer_submit(d, d->rx[i]);
 	}
 	for (size_t i = 0; i < HSF_NUM_TX; i++) {
 		d->tx[i] = libusb_alloc_transfer(0);
@@ -421,16 +469,34 @@ void hsf_fxo_stop(struct hsf_dev *d)
 {
 	if (!d->running)
 		return;
+
+	/* Order matters.  Clearing these two flags first stops the callbacks
+	 * re-arming, so a cancelled transfer stays cancelled. */
 	d->streaming = false;
 	d->running = false;
 
 	for (size_t i = 0; i < HSF_NUM_RX; i++)
 		if (d->rx[i])
 			libusb_cancel_transfer(d->rx[i]);
+	for (size_t i = 0; i < HSF_NUM_TX; i++)
+		if (d->tx[i] && d->tx_busy[i])
+			libusb_cancel_transfer(d->tx[i]);
 	if (d->notify)
 		libusb_cancel_transfer(d->notify);
 
 	pthread_join(d->thread, NULL);
+
+	/*
+	 * The event thread exits on !running, which it may well have observed
+	 * BEFORE the cancellations were reaped -- so pump events here until
+	 * libusb has handed every transfer back.  Freeing one it still owns is
+	 * a use-after-free that surfaces inside libusb_exit(), which is exactly
+	 * what this used to do: every probe run ended in SIGSEGV, and the crash
+	 * was silently truncating the output it was there to collect.
+	 */
+	struct timeval tv = { .tv_sec = 0, .tv_usec = 50 * 1000 };
+	for (int i = 0; i < 40 && xfer_inflight(d) > 0; i++)
+		libusb_handle_events_timeout_completed(d->ctx, &tv, NULL);
 
 	for (size_t i = 0; i < HSF_NUM_RX; i++)
 		if (d->rx[i]) {
@@ -477,7 +543,7 @@ int hsf_fxo_tx_submit(struct hsf_dev *d, const uint8_t *data, size_t len)
 	memcpy(d->tx_buf[slot], data, len);
 	libusb_fill_bulk_transfer(d->tx[slot], d->h, EP_BULK_OUT, d->tx_buf[slot],
 				  (int)len, on_tx, d, 0);
-	if (libusb_submit_transfer(d->tx[slot]) < 0) {
+	if (xfer_submit(d, d->tx[slot]) < 0) {
 		pthread_mutex_lock(&d->lock);
 		d->tx_busy[slot] = false;
 		pthread_mutex_unlock(&d->lock);

@@ -7,11 +7,20 @@
  *   make hsf_fxo_probe
  *   ./tools/hsf_extract_rom.py <path>/c2firmware.h     # once, makes hsf_rom_image.bin
  *   ./hsf_fxo_probe                                    # info only
+ *   ./hsf_fxo_probe --wait 60 --load --script 9        # THE ONE THAT WORKS
  *   ./hsf_fxo_probe --load                             # load firmware if needed
  *   ./hsf_fxo_probe --load --stream 5                  # then stream for 5s
  *   ./hsf_fxo_probe --load --script 9                  # send one script
  *   ./hsf_fxo_probe --load --start-codec --stream 5    # scripts 9,5,9 then stream
  *   ./hsf_fxo_probe --load --start-codec --hook off --stream 5
+ *
+ * --wait is not a convenience.  The CD2 bootloader answers EP0 for only about
+ * THREE SECONDS after it enumerates and then goes silent for good (measured
+ * 2026-09-01: ~120 successful GET_INFROMATION at 25 ms intervals, then nothing).
+ * The vendor driver uploads firmware on match, within milliseconds; a probe
+ * started by hand is minutes late and finds a device that looks wedged and is
+ * merely finished waiting.  --wait polls for the window and acts inside it, so
+ * run it FIRST and replug the device while it waits.
  *
  * --script is the instrument for the open question, which is WHICH script
  * ungates the bulk pipes.  Send them one at a time: every attempt is bracketed
@@ -66,6 +75,7 @@ int main(int argc, char **argv)
 	int  stream_secs = 0;
 	int  script_id = -1;
 	int  hook = -1;
+	int  wait_secs = 0;
 
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--load")) {
@@ -76,27 +86,55 @@ int main(int argc, char **argv)
 			script_id = atoi(argv[++i]);
 		} else if (!strcmp(argv[i], "--start-codec")) {
 			do_start = true;
+		} else if (!strcmp(argv[i], "--wait") && i + 1 < argc) {
+			wait_secs = atoi(argv[++i]);
 		} else if (!strcmp(argv[i], "--hook") && i + 1 < argc) {
 			hook = !strcmp(argv[++i], "off");
 		} else {
 			fprintf(stderr, "usage: %s [--load] [--script ID] [--start-codec]"
-				" [--hook on|off] [--stream SECONDS]\n", argv[0]);
+				" [--hook on|off] [--wait SECONDS] [--stream SECONDS]\n",
+				argv[0]);
 			return 2;
 		}
 	}
 
-	struct hsf_dev *d = hsf_fxo_open();
-	if (!d) {
-		fprintf(stderr, "no HSF modem (%04x:%04x) found, or it could not be opened\n",
-			HSF_VID, HSF_PID);
-		return 1;
-	}
-
+	struct hsf_dev *d = NULL;
 	uint8_t info[5];
-	if (hsf_fxo_get_information(d, info) < 0) {
-		fprintf(stderr, "CD2_GET_INFROMATION failed -- replug the device\n");
-		hsf_fxo_close(d);
-		return 1;
+
+	if (wait_secs > 0) {
+		printf("waiting up to %ds for the bootloader window -- REPLUG THE DEVICE NOW\n",
+		       wait_secs);
+		fflush(stdout);
+		/* Poll on a live EP0, not on mere presence: the device sits on the
+		 * bus long after it has stopped answering, so presence is not the
+		 * signal.  20 ms is comfortably inside a ~3 s window. */
+		for (int t = 0; t < wait_secs * 50; t++) {
+			d = hsf_fxo_open();
+			if (d) {
+				if (hsf_fxo_get_information(d, info) == 0)
+					break;
+				hsf_fxo_close(d);
+				d = NULL;
+			}
+			usleep(20 * 1000);
+		}
+		if (!d) {
+			fprintf(stderr, "the window never opened\n");
+			return 1;
+		}
+	} else {
+		d = hsf_fxo_open();
+		if (!d) {
+			fprintf(stderr, "no HSF modem (%04x:%04x) found, or it could not be opened\n",
+				HSF_VID, HSF_PID);
+			return 1;
+		}
+		if (hsf_fxo_get_information(d, info) < 0) {
+			fprintf(stderr, "CD2_GET_INFROMATION failed.  The CD2 bootloader answers "
+				"EP0 for only ~3s after it enumerates; try --wait N and replug.\n");
+			hsf_fxo_close(d);
+			return 1;
+		}
 	}
 	const char *fam = info[2] == HSF_FAMILY_BOOTLOADER ? "bootloader, wants firmware"
 			: info[2] == HSF_FAMILY_HCF        ? "HCF"
