@@ -78,6 +78,8 @@ int main(int argc, char **argv)
 	int  hook = -1;
 	int  wait_secs = 0;
 	bool do_feed = false;
+	uint8_t patch[8];
+	size_t  n_patch = 0;
 
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--load")) {
@@ -96,6 +98,14 @@ int main(int argc, char **argv)
 			}
 		} else if (!strcmp(argv[i], "--start-codec")) {
 			do_start = true;
+		} else if (!strcmp(argv[i], "--patch") && i + 1 < argc) {
+			for (char *p = argv[++i]; *p && n_patch < 8; ) {
+				patch[n_patch++] = (uint8_t)strtoul(p, NULL, 0);
+				while (*p && *p != ',')
+					p++;
+				if (*p == ',')
+					p++;
+			}
 		} else if (!strcmp(argv[i], "--feed")) {
 			do_feed = true;
 		} else if (!strcmp(argv[i], "--wait") && i + 1 < argc) {
@@ -104,7 +114,7 @@ int main(int argc, char **argv)
 			hook = !strcmp(argv[++i], "off");
 		} else {
 			fprintf(stderr, "usage: %s [--load] [--script ID] [--start-codec]"
-				" [--script ID[,ID...]]"
+				" [--script ID[,ID...]] [--patch B[,B...]]"
 				" [--hook on|off] [--wait SECONDS] [--feed]"
 				" [--stream SECONDS]\n",
 				argv[0]);
@@ -189,7 +199,8 @@ int main(int argc, char **argv)
 	 * cached descriptor read proves nothing, and a wedged EP0 makes the next
 	 * request lie about the one before it. */
 	for (int i = 0; i < n_scripts; i++) {
-		int r = hsf_fxo_script_run(d, (unsigned)script_ids[i], NULL, 0);
+		int r = hsf_fxo_script_run(d, (unsigned)script_ids[i],
+					   n_patch ? patch : NULL, n_patch);
 		uint8_t after[5];
 		int live = hsf_fxo_get_information(d, after);
 		printf("script %d: load %s, device %s\n", script_ids[i],

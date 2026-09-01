@@ -128,21 +128,58 @@ And `rx_errors` counted `LIBUSB_TRANSFER_CANCELLED`, which is our own shutdown,
 so an RX ring that was armed and correctly waiting reported "31 of 32 transfers
 failed". Both are fixed; `--stream` now also prints the first real RX status.
 
+## The patch bytes, and what the Linux driver actually does
+
+**Scripts 2 and 10 take no parameters.** Their table entries have `npatch = 0`,
+so although `hsfusbcd2200_` fills a patch buffer with one 16-bit value and
+`hsfusbcd2202_` with two, the driver discards both. Only 7 (three bytes) and
+11/12 (two) are really parametrised, which rules out the "unpatched templates"
+theory for 2 and 10 without needing the hardware.
+
+**Script 11 is enqueued as well** -- twelve scripts, not eleven. It is easy to
+miss: `hsfusbcd2261_` pushes `$0xb` and jumps into script 12's argument tail
+rather than repeating the four pushes, so it does not match a search for the
+call pattern. That function sets **both** patch bytes to the same value, 1 or 2
+(0x12/0x13/0x14/0x17 on the device variant selected by `ctx+0x68`), and picks
+11 or 12 on a flag. Their templates are near-identical and their opcodes recur
+in the hook scripts -- 12 is `2f xx 32 xx`, which is exactly the pair inside the
+off-hook script 3, and 11 is `31 xx 2f xx`, whose `0x31` opens the on-hook
+script 4. So 11/12 are the parametrised forms of the same relay operations.
+
+Tested on the device with `--patch 1,1` and `--patch 2,2`: both accepted, both
+reporting their own completion (`0b 01`, `0c 01`). No codec.
+
+**The completion notification's second byte is a status.** Everything above
+returns `nn 01`; script 8, the tone/signal script, returns **`08 80`** -- bit 7
+set, and it produces no notification at all unless script 9 has run first. That
+fits a script that needs a signal id: `hsfusbcd2187_` dispatches 21 of them but
+the enqueue passes no patches, so the id must reach the firmware another way.
+
+**The Linux driver does nothing special for the data path.** `cnxthwusb_probe`
+finds the endpoints, allocates URBs, downloads firmware and registers the TTY --
+there is no codec start at attach. The engine arms RX through
+`hsfusbcd2267_`, which fetches a buffer and a length, **clamps it to 0x100** and
+calls `OsUsbMakeDataReceiveRequest`; that is byte for byte what this transport
+already does, 256-byte bulk IN transfers included. So the host side is not the
+gate and never was.
+
 ## Open: what starts the codec
 
 The bulk pipes still carry no samples. What is measured:
 
 * RX is armed and waiting -- first status `CANCELLED`, i.e. our own teardown,
-  with zero genuine errors. The device simply sends nothing.
+  with zero genuine errors. The device simply sends nothing, and the driver
+  arms it exactly as we do.
 * TX is accepted only after script 6 or 9, and then stops at a fixed **1120
   bytes** (1248 at 64-byte packets, 1216 at 32) however long the run. That is a
   ~1.2 kB FIFO filling once and never draining, so the codec is not clocking.
   Packet size is not the gate.
-* Neither going off-hook (script 3, which completes and reports `03 01`) nor
-  running every enqueued script in the driver's own order changes either.
+* None of the twelve scripts changes it, patched or not, on-hook or off-hook,
+  alone or in the driver's own order.
 
-So the codec is started by something other than the eleven scripts, or by one of
-them carrying patch bytes we have not supplied -- scripts 2, 10 and 12 take
-parameters (one 16-bit value, two 16-bit values, and a byte) and were tested
-only with their unpatched templates. Those parameters are the obvious next
-thread, along with what `hsfusbcd2165_`'s callers pass around it.
+What is left is the state the scripts *read*. The relay values live in the
+firmware, not in the scripts (the off-hook script contains no 0xA6), so
+something loads them -- most likely the country/config path, whose template
+(26, seven patch bytes, 158 bytes and by far the largest) is not in the enqueued
+set at all. Finding what sends it is the next thread; `hsfusbcd2165_`'s
+surroundings and the `ctx+0x68` device-variant flag are where to start.

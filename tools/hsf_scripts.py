@@ -259,8 +259,22 @@ CALL_SITES = {
     8:  [("hsfusbcd2187_", 3), ("hsfusbcd2247_", 1), ("hsfusbcd2250_", 3)],
     9:  [("hsfusbcd2165_+0xcd", 1), ("hsfusbcd2165_+0x126", 1)],
     10: [("hsfusbcd2202_", 1)],
+    11: [("hsfusbcd2261_+0x66", 1)],
     12: [("hsfusbcd2261_", 1)],
 }
+
+# Two notes that only the call sites give you:
+#
+#  - Scripts 2 and 10 have npatch = 0.  Their callers (hsfusbcd2200_ with one
+#    16-bit value, hsfusbcd2202_ with two) fill a patch buffer that the table
+#    then discards, so those scripts take NO parameters however they are called.
+#    Only 7 (three bytes) and 11/12 (two) are really parametrised.
+#
+#  - Script 11 is enqueued, and is easy to miss: hsfusbcd2261_ pushes $0xb and
+#    jumps into script 12's argument tail rather than repeating the four pushes,
+#    so it does not match a naive search for the call pattern.  That function
+#    sets both patch bytes to the same value -- 1 or 2 here, and 0x12/0x13/0x14/
+#    0x17 on the device variant selected by ctx+0x68.
 
 
 def script_wvalue(script_id):
