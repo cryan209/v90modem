@@ -148,6 +148,14 @@ int main(int argc, char *argv[])
     int bps = (argc > 2) ? atoi(argv[2]) : 9600;
     int alaw = (argc > 3  &&  strcmp(argv[3], "alaw") == 0);
     double seconds = (argc > 4) ? atof(argv[4]) : 20.0;
+    /* An optional second bit rate lets the two ends be configured
+       differently, which is the only way to see V.34 12.4.1.3/12.4.2.4 do
+       anything: with both ends the same, a negotiation that ignored the far
+       end entirely would give the same answer. */
+    int answ_bps = (argc > 5) ? atoi(argv[5]) : bps;
+    int expect_bps = (bps < answ_bps) ? bps : answ_bps;
+    int call_rate;
+    int answ_rate;
     static endpoint_t call_e;
     static endpoint_t answ_e;
     static const uint32_t call_seed = 0x13579BDFU;
@@ -182,7 +190,7 @@ int main(int argc, char *argv[])
        it; the control channel is bidirectional throughout. */
     call_modem = v34_init(NULL, baud, bps, true, false,
                           get_bit, &call_e, put_bit, &call_e);
-    answ_modem = v34_init(NULL, baud, bps, false, false,
+    answ_modem = v34_init(NULL, baud, answ_bps, false, false,
                           get_bit, &answ_e, put_bit, &answ_e);
     if (call_modem == NULL  ||  answ_modem == NULL)
     {
@@ -270,6 +278,10 @@ int main(int argc, char *argv[])
     printf("  answer (recipient) tx stage %2d (max %2d)  rx stage %2d (max %2d)\n",
            v34_get_tx_stage(answ_modem), best_answ_tx,
            v34_get_rx_stage(answ_modem), best_answ_rx);
+    call_rate = v34_get_hdx_negotiated_bit_rate(call_modem);
+    answ_rate = v34_get_hdx_negotiated_bit_rate(answ_modem);
+    printf("  MPh rate (12.4.1.3/12.4.2.4): source tx %d bit/s, recipient rx %d bit/s (expected %d)\n",
+           call_rate, answ_rate, expect_bps);
     printf("  payload bits: call out %d in %d, answer out %d in %d\n",
            call_e.bits_out, call_e.bits_in, answ_e.bits_out, answ_e.bits_in);
     call_errors = grade_rx(&call_e, answ_seed, &call_graded, &call_offset);
@@ -286,7 +298,8 @@ int main(int argc, char *argv[])
         printf("  control channel data answer<-call: %d errors in %d bits (offset %d)\n",
                answ_errors, answ_graded, answ_offset);
     /*endif*/
-    failed = (call_errors != 0  ||  answ_errors != 0);
+    failed = (call_errors != 0  ||  answ_errors != 0
+              ||  call_rate != expect_bps  ||  answ_rate != expect_bps);
     v34_free(call_modem);
     v34_free(answ_modem);
     return failed;

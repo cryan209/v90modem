@@ -704,6 +704,7 @@ static void data_baud_init(v34_state_t *s);
 
 /* Control channel startup routines */
 static void pph_baud_init(v34_state_t *s);
+static void prepare_mph(v34_state_t *s);
 static void first_alt_baud_init(v34_state_t *s);
 static void second_alt_baud_init(v34_state_t *s);
 static void sh_baud_init(v34_state_t *s);
@@ -7587,6 +7588,103 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.34 12.4: the half-duplex symbol rate is the one INFOh settled (Table 22
+   bits 27:29).  The recipient chose it and sent it; the source read it out of
+   the INFOh it received.  Every rate field in MPh is relative to it, because
+   Table 16's bit rate / symbol rate mapping is what says which data signalling
+   rates the primary channel can carry at all. */
+static int hdx_negotiated_baud_rate(const v34_state_t *s)
+{
+    int baud;
+
+    baud = (s->tx.half_duplex_source == V34_HALF_DUPLEX_SOURCE)
+         ? s->rx.infoh.baud_rate
+         : s->tx.infoh.baud_rate;
+    if (baud < 0  ||  baud > 5)
+        baud = s->tx.baud_rate;
+    /*endif*/
+    if (baud < 0  ||  baud > 5)
+        baud = 0;
+    /*endif*/
+    return baud;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* The Table 16 rates this modem can carry at the negotiated symbol rate, as
+   MPh Table 23 bits 35:49 -- bit 35 is 2400 bit/s, bit 48 is 33600. */
+int v34_hdx_rate_mask(int baud_rate)
+{
+    int mask;
+    int i;
+
+    mask = 0;
+    for (i = 0;  i < 14;  i++)
+    {
+        if (baud_rate_parameters[baud_rate].mappings[i*2].b > 0)
+            mask |= (1 << i);
+        /*endif*/
+    }
+    /*endfor*/
+    return mask;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void prepare_mph(v34_state_t *s)
+{
+    int baud;
+    int mask;
+    int max_n;
+    bool source;
+
+    /* V.34 Table 23.  Every field was left at zero, so every MPh on the wire
+       carried "Maximum data signalling rate = 0" and an empty capability mask
+       and 12.4.1.3/12.4.2.4 had nothing to negotiate from. */
+    source = (s->tx.half_duplex_source == V34_HALF_DUPLEX_SOURCE);
+    baud = hdx_negotiated_baud_rate(s);
+    mask = v34_hdx_rate_mask(baud);
+
+    /* Bits 20:23, "Maximum data signalling rate", is this modem's own
+       ceiling.  Half-duplex has ONE primary channel -- 3.11/3.14 put the
+       source at the transmitting end -- so the source's ceiling is its
+       transmitter's and the recipient's is its receiver's. */
+    max_n = source
+          ? ((s->tx.parms.max_bit_rate_code >> 1) + 1)
+          : ((s->rx.parms.max_bit_rate_code >> 1) + 1);
+    if (max_n > 14)
+        max_n = 14;
+    /*endif*/
+    if (max_n < 1)
+        max_n = 1;
+    /*endif*/
+    max_n = mp_highest_masked_rate(max_n, mask);
+    if (max_n < 1)
+        max_n = 1;
+    /*endif*/
+
+    s->tx.mph.type = 0;
+    s->tx.mph.max_data_rate = max_n;
+    s->tx.mph.signalling_rate_mask = mask;
+    /* Table 23 bits 29:32 select the REMOTE-END transmitter, so they carry
+       this modem's own receiver's requirements, exactly as the duplex Table 20
+       fields do.  On the source they describe a primary channel direction that
+       does not exist in half-duplex; they are still sent, and are still this
+       receiver's answer if 12.6 ever turns the link round. */
+    s->tx.mph.trellis_size = v34_rx_current_trellis_code(&s->rx);
+    s->tx.mph.use_non_linear_encoder = s->rx.use_non_linear_encoder;
+    s->tx.mph.expanded_shaping = s->rx.parms.expanded_shaping;
+    /* Bit 27 asks the far end's control channel transmitter for 1200 or 2400
+       bit/s.  10.2.4's 2400 bit/s mode puts four bits on each symbol by
+       selecting a point from the quarter superconstellation with Q1/Q2 rather
+       than always point 0; this modem only implements the two-bit form, so
+       asking for 2400 would be asking for something it could not then read.
+       Bit 50 follows: 12.4 note to Table 23 allows asymmetric control channel
+       rates only when BOTH modems set it. */
+    s->tx.mph.control_channel_2400 = 0;
+    s->tx.mph.asymmetric_rates_allowed = false;
+    memset(s->tx.mph.precoder_coeffs, 0, sizeof(s->tx.mph.precoder_coeffs));
+}
+/*- End of function --------------------------------------------------------*/
+
 static void mp_or_mph_baud_init(v34_state_t *s)
 {
     /* Say which of the two this actually is. Hardcoding "mp_baud_init" here
@@ -7689,6 +7787,11 @@ static void mp_or_mph_baud_init(v34_state_t *s)
     }
     else
     {
+        /* The offer was built in pph_baud_init(), at the start of 12.4, and
+           must not be rebuilt here: mph_apply_parameters() has by then
+           configured this modem's working parameters from the negotiation,
+           and rebuilding the offer from them would make the second MPh
+           disagree with the first. */
         s->tx.txbits = mph_sequence_tx(&s->tx, &s->tx.mph);
         s->tx.stage = V34_TX_STAGE_HDX_MPH;
     }
@@ -8057,6 +8160,14 @@ static void hdx_control_channel_start_init(v34_state_t *s)
 static void pph_baud_init(v34_state_t *s)
 {
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - pph_baud_init()\n");
+    /* Build this modem's MPh offer at the START of 12.4 rather than when it
+       comes to be transmitted.  12.4.1.3/12.4.2.4 settle the rate from BOTH
+       modems' MPh sequences, and the far end's can arrive first: the source
+       holds ALT until it sees the recipient's PPh, so the recipient's MPh is
+       already on the wire while the source is still in ALT.  Built at
+       transmit time, the local half of the negotiation was still all zeroes
+       when the remote half arrived, and the intersection was empty. */
+    prepare_mph(s);
     s->tx.tone_duration = 0;
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.stage = V34_TX_STAGE_HDX_PPH;
@@ -8874,6 +8985,12 @@ SPAN_DECLARE(int) v34_get_round_trip_delay_samples(v34_state_t *s)
 SPAN_DECLARE(int) v34_get_v90_tx_u_info(v34_state_t *s)
 {
     return (s && s->tx.v90_mode && s->calling_party) ? s->tx.v90_u_info : 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_get_hdx_negotiated_bit_rate(v34_state_t *s)
+{
+    return (s)  ?  s->tx.hdx_negotiated_rate_n*2400  :  0;
 }
 /*- End of function --------------------------------------------------------*/
 

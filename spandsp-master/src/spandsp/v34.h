@@ -374,6 +374,15 @@ SPAN_DECLARE(int) v34_get_v90_tx_u_info(v34_state_t *s);
     \return The current TX stage (v34_tx_stages_e value). */
 SPAN_DECLARE(int) v34_get_tx_stage(v34_state_t *s);
 
+/*! \brief The half-duplex primary channel data signalling rate settled by the
+           V.34 12.4 MPh exchange, in bit/s, or 0 if no MPh has been received.
+           12.4.1.3 and 12.4.2.4 are the same rule read from the two ends, so
+           the source's transmit rate and the recipient's receive rate are the
+           same number and both modems return it.
+    \param s The modem context.
+    \return The negotiated rate in bit/s, or 0. */
+SPAN_DECLARE(int) v34_get_hdx_negotiated_bit_rate(v34_state_t *s);
+
 /*! Get the U_INFO value from the received INFO1a (V.90 mode).
     \param s The modem context.
     \return The U_INFO Ucode (0-127), or 0 if not yet received. */

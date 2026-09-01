@@ -460,6 +460,22 @@ static int phase3_rx_dump_count = 0;
     channel on 12.4.1.1's 70 +/- 5 ms of silence.  32 symbols is 10 ms at 3200
     baud and 13 ms at 2400, comfortably inside it, and far longer than any gap
     a live TRN symbol can produce. */
+/*! The control channel gets its own AGC.  It used to run on whatever the
+    PRIMARY channel's AGC happened to be left at, which on the source is the
+    untouched reset default -- 12.3.1 has the source TRANSMITTING throughout
+    Phase 3, so its receiver adapts to nothing at all -- and that put its
+    control channel symbols at |z| ~ 4.4 against the recipient's 1.43.  The
+    differential decode does not care about gain, but `cc_symbol_sync()`'s
+    band edge timing loop is fed the scaled sample and its loop gain is
+    therefore proportional to it: at 4.4 the timing jitters enough to put
+    isolated symbols over the decision boundary.  Measured on the 12.4 control
+    channel data of the half-duplex loopback, 3000 baud u-law, with the far
+    end's generator as truth: 87 bit errors at the inherited 0.0017 and zero
+    at 0.001, 0.00055 and 0.0003 alike.  PPh, ALT and MPh are all constant
+    modulus, so the loop has good material to converge on before any data. */
+#define CC_AGC_TARGET_MAG           1.4f
+#define CC_AGC_ADAPT_SHIFT          6
+
 #define HDX_TRN_END_SILENCE_BAUDS   32
 #define HDX_TRN_END_SILENCE_MAG2    0.04f
 
@@ -3332,6 +3348,88 @@ static bool mp_apply_parameters(v34_state_t *s, const mp_t *remote)
              rx_rate_n*2400, s->tx.mp.trellis_size,
              s->tx.mp.use_non_linear_encoder,
              s->tx.mp.expanded_shaping);
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* V.34 12.4.1.3 and 12.4.2.4 settle the primary channel data signalling rate,
+   and they are the same sentence read from the two ends:
+
+     "The source modem's transmit rate shall be the maximum rate enabled that
+      is less than or equal to the data signalling rates specified in both
+      modems' MPh sequences."
+     "The recipient modem's receive rate shall be the maximum rate enabled
+      that is less than or equal to the data signalling rates specified in
+      both modems' MPh sequences."
+
+   Half-duplex has one primary channel, so the two clauses necessarily produce
+   the same number and each end configures its own half of it.  "Enabled" is
+   Table 23 bits 35:49 -- a rate the far end did not offer is not enabled at
+   the far end -- so the mask is the intersection.
+
+   Unlike the duplex 11.4 negotiation there is no direction to keep straight
+   and no acknowledge bit: MPh has neither, which is why 12.4.1.3 turns on
+   having received "at least one MPh sequence" rather than on an MP'. */
+static bool mph_apply_parameters(v34_state_t *s, const mph_t *remote)
+{
+    int mask;
+    int ceiling;
+    int rate_n;
+    int baud;
+    bool source;
+
+    source = (s->tx.half_duplex_source == V34_HALF_DUPLEX_SOURCE);
+    baud = source ? s->tx.baud_rate : s->rx.baud_rate;
+    mask = s->tx.mph.signalling_rate_mask & remote->signalling_rate_mask;
+    ceiling = (s->tx.mph.max_data_rate < remote->max_data_rate)
+            ? s->tx.mph.max_data_rate
+            : remote->max_data_rate;
+    if (ceiling > 14)
+        ceiling = 14;
+    /*endif*/
+    for (rate_n = ceiling;  rate_n >= 1;  rate_n--)
+    {
+        if (mask & (1 << (rate_n - 1)))
+            break;
+        /*endif*/
+    }
+    /*endfor*/
+    if (rate_n < 1)
+    {
+        V34_RX_LOG(&s->logging, SPAN_LOG_FLOW,
+                 "Rx - MPh 12.4 rate negotiation found nothing in common "
+                 "(local max=%d mask=0x%04X, remote max=%d mask=0x%04X)\n",
+                 s->tx.mph.max_data_rate, s->tx.mph.signalling_rate_mask & 0x7FFF,
+                 remote->max_data_rate, remote->signalling_rate_mask & 0x7FFF);
+        return false;
+    }
+    /*endif*/
+    s->tx.hdx_negotiated_rate_n = rate_n;
+    s->bit_rate = rate_n*2400;
+    /* The bit rate CODE is the index into Table 16's mapping for the symbol
+       rate; 2*(N - 1) is the code for N*2400 bit/s.  Only the end that owns
+       the primary channel direction has working parameters to set: the source
+       transmits it and the recipient receives it. */
+    if (source)
+    {
+        s->tx.bit_rate = (rate_n - 1)*2;
+        v34_set_working_parameters(&s->tx.parms, s->tx.baud_rate, s->tx.bit_rate,
+                                   remote->expanded_shaping);
+        s->tx.use_non_linear_encoder = remote->use_non_linear_encoder;
+    }
+    else
+    {
+        s->rx.bit_rate = (rate_n - 1)*2;
+        v34_set_working_parameters(&s->rx.parms, s->rx.baud_rate, s->rx.bit_rate,
+                                   s->tx.mph.expanded_shaping);
+    }
+    /*endif*/
+    V34_RX_LOG(&s->logging, SPAN_LOG_FLOW,
+             "Rx - MPh 12.4.%d: primary channel %s rate %d bit/s "
+             "(local max=%d remote max=%d, common mask=0x%04X, symbol rate index %d)\n",
+             source ? 1 : 2, source ? "transmit" : "receive", rate_n*2400,
+             s->tx.mph.max_data_rate, remote->max_data_rate, mask & 0x7FFF,
+             baud);
     return true;
 }
 /*- End of function --------------------------------------------------------*/
@@ -7393,6 +7491,28 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
     /*endif*/
     cc_symbol_sync(s);
 
+    if (s->stage == V34_RX_STAGE_CC)
+    {
+        float cc_mag = sqrtf(sample->re*sample->re + sample->im*sample->im);
+
+        s->cc_level += (cc_mag - s->cc_level)/(1 << CC_AGC_ADAPT_SHIFT);
+        if (s->cc_level > 0.01f)
+        {
+            float want = s->agc_scaling*CC_AGC_TARGET_MAG/s->cc_level;
+
+            /* Bounded per baud, so one outlier cannot move the working point
+               and the gain is constant across any single symbol. */
+            if (want > s->agc_scaling*1.02f)
+                want = s->agc_scaling*1.02f;
+            else if (want < s->agc_scaling*0.98f)
+                want = s->agc_scaling*0.98f;
+            /*endif*/
+            s->agc_scaling = want;
+        }
+        /*endif*/
+    }
+    /*endif*/
+
     /* Slice the phase difference, to get a pair of data bits */
     ang1 = arctan2(sample->im, sample->re);
     ang2 = arctan2(s->last_sample.im, s->last_sample.re);
@@ -7415,6 +7535,35 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
     }
     /*endfor*/
 
+    if (s->mp_seen >= 2  &&  V34_DIAG_GETENV("V34_CC_SYM_STATS"))
+    {
+        /* The control channel had no quality instrument at all.  |z| is the
+           AGC's working point; the phase error is the distance of the
+           differential angle from the CENTRE of its quadrant, so 0 degrees is
+           a perfect eye and 45 is the decision boundary. */
+        uint32_t resid = ang3 & 0x3FFFFFFFu;
+        float deg = fabsf((float) resid*90.0f/1073741824.0f - 45.0f);
+
+        s->cc_stat_sum += sqrtf(sample->re*sample->re + sample->im*sample->im);
+        s->cc_stat_err += deg;
+        if (deg > s->cc_stat_worst)
+            s->cc_stat_worst = deg;
+        /*endif*/
+        if (++s->cc_stat_n >= 2000)
+        {
+            fprintf(stderr, "[CC] %s |z|=%.3f phase error from centre: mean %.2f deg worst %.2f deg\n",
+                    s->calling_party ? "rx 2400Hz" : "rx 1200Hz",
+                    (double) (s->cc_stat_sum/s->cc_stat_n),
+                    (double) (s->cc_stat_err/s->cc_stat_n),
+                    (double) s->cc_stat_worst);
+            s->cc_stat_sum = 0.0f;
+            s->cc_stat_err = 0.0f;
+            s->cc_stat_worst = 0.0f;
+            s->cc_stat_n = 0;
+        }
+        /*endif*/
+    }
+    /*endif*/
     /* Scan for MP/MPh and HDLC messages. */
     for (i = 0;  i < 2;  i++)
     {
@@ -7500,6 +7649,8 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
                             /*endif*/
                             if (set_trellis_mode(t, mph.trellis_size))
                                 V34_RX_LOG(&t->logging, SPAN_LOG_FLOW, "Rx - Unexpected trellis size code %d\n", mph.trellis_size);
+                            /*endif*/
+                            mph_apply_parameters(t, &mph);
                         }
                         /*endif*/
                         s->mp_seen = 1;
@@ -13768,6 +13919,7 @@ void v34_condition_rx_for_pph(v34_state_t *s, const char *why)
     s->rx.pph_corr_energy = 0.0f;
     s->rx.pph_corr_weight = 0.0f;
     memset(s->rx.pph_corr, 0, sizeof(s->rx.pph_corr));
+    s->rx.cc_level = 0.0f;
     s->rx.pph_best_phase[0] = s->rx.pph_best_phase[1] = -1;
     s->rx.pph_hold_steps[0] = s->rx.pph_hold_steps[1] = 0;
     s->rx.hdx_await_trn_end = false;

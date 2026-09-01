@@ -263,13 +263,12 @@ test: $(TEST_TARGETS)
 # V.34 clause 12 half-duplex: the control channel start-up of 12.4, run
 # end to end between a source and a recipient over G.711.  Each row goes
 # through Phase 2 (INFOh), Phase 3 (S/S-bar/PP/TRN), then PPh, ALT, the MPh
-# exchange and E, and is graded on the control channel USER DATA that follows
-# -- the far end's generator, aligned and compared bit for bit -- because a
-# bit count only says a modulator ran.  Eleven of the twelve rows carry it
-# without a single error in both directions; 2400 u-law carries three errors
-# in one direction (a short burst 12834 bits in, at the same place whatever
-# the primary symbol rate, so it is the control channel's own timing loop and
-# not the primary channel) and stays out until that is understood.
+# exchange and E, and is checked on two things: the 12.4.1.3/12.4.2.4 rate,
+# which both ends must settle on the same value, and the control channel USER
+# DATA that follows, graded against the far end's generator bit for bit -- a
+# bit count only says a modulator ran.  All twelve symbol-rate/law rows carry
+# it without a single error in either direction.
+	./v34_hdx_test 2400 9600 ulaw
 	./v34_hdx_test 2400 9600 alaw
 	./v34_hdx_test 2743 9600 ulaw
 	./v34_hdx_test 2743 9600 alaw
@@ -281,6 +280,15 @@ test: $(TEST_TARGETS)
 	./v34_hdx_test 3200 9600 alaw
 	./v34_hdx_test 3429 9600 ulaw
 	./v34_hdx_test 3429 9600 alaw
+# The fifth argument configures the RECIPIENT differently from the source,
+# which is the only way to see 12.4.1.3/12.4.2.4 do anything: with both ends
+# the same, a negotiation that ignored the far end's MPh entirely would give
+# the same answer.  Either end may be the lower one, and the settled rate is
+# asserted against the minimum.
+	./v34_hdx_test 3200 9600 ulaw 20 21600
+	./v34_hdx_test 3200 21600 ulaw 20 9600
+	./v34_hdx_test 3429 14400 alaw 20 19200
+	./v34_hdx_test 3429 28800 alaw 20 4800
 	./v32bis_spandsp_test
 	./v92_proc_eval_test
 	./v90_analogue_tx_test

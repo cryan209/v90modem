@@ -351,14 +351,82 @@ INFOh transmitter, which is what arms it here; without that call the recipient
 would sit in `PHASE3_WAIT_S` for the whole call.  Worth knowing before anyone
 tidies that call site away as V.90-specific.
 
-### The one row that does not pass, and what it is not
+### The rate: 12.4.1.3 and 12.4.2.4
 
-2400 baud u-law carries **three bit errors in 20574 bits**, one direction only,
-in a burst 23 bits wide.  It is at rx index 12834 -- the same index whatever the
-primary symbol rate, and the control channel is 600 baud regardless of the
-primary rate -- so it is the control channel's own timing recovery and not the
-primary channel.  The row stays out of `make test` until that is understood.
-`V34_HDX_ERRPOS=1` prints the positions.
+INFOh carries no data signalling rate at all -- Table 22 is power reduction,
+TRN length, carrier, pre-emphasis, symbol rate and the TRN constellation -- so
+MPh is the whole of the rate negotiation, and every MPh this modem sent went
+out with `Maximum data signalling rate = 0` and an empty capability mask.
+There was nothing to negotiate from.
+
+`prepare_mph()` now fills Table 23 from the symbol rate INFOh settled: bits
+35:49 are the Table 16 rates that symbol rate can carry (0x01FF at 2400 baud
+= 2400 to 21600, 0x3FFE at 3429 = 4800 to 33600), and bits 20:23 are this
+modem's own ceiling within them -- the source's transmitter's, the recipient's
+receiver's, because half-duplex has one primary channel and 3.11/3.14 put the
+source at the transmitting end.
+
+`mph_apply_parameters()` is the other half.  12.4.1.3 and 12.4.2.4 are the same
+sentence read from the two ends -- "the maximum rate enabled that is less than
+or equal to the data signalling rates specified in both modems' MPh sequences"
+-- so they necessarily produce the same number and each end configures its own
+side of it.  "Enabled" is the mask, and a rate the far end did not offer is not
+enabled at the far end, so it is the intersection.  Unlike the duplex 11.4
+negotiation there is no direction to keep straight and no acknowledge bit,
+which is why 12.4.1.3 turns on having received "at least one MPh sequence"
+rather than on an MP'.
+
+**The offer has to be built at the START of 12.4, not when MPh comes to be
+transmitted.**  The source holds ALT until it sees the recipient's PPh, so the
+recipient's MPh is already on the wire while the source is still in ALT: built
+at transmit time, the local half of the negotiation was still all zeroes when
+the remote half arrived and the intersection was empty.  It is built in
+`pph_baud_init()`, and deliberately not rebuilt afterwards -- by then
+`mph_apply_parameters()` has configured this modem's working parameters from
+the negotiation, and rebuilding the offer from them would make the second MPh
+disagree with the first.
+
+`v34_get_hdx_negotiated_bit_rate()` reports it, and `v34_hdx_test` takes an
+optional fifth argument that configures the recipient differently from the
+source.  That argument is the point: with both ends the same, a negotiation
+that ignored the far end's MPh entirely would give the same answer.  Four
+asymmetric rows are in `make test`, either end lower.
+
+### The control channel had no AGC, and that was the last of the bit errors
+
+Filling in MPh changed the control channel waveform, and three symbol rates
+went from clean to 64, 87 and 9 bit errors -- always in the same direction, the
+source's receiver, which is the 2400 Hz one.  The content dependence was real:
+zeroing the MPh body again restored them.
+
+The cause was not the content.  **`cc_rx()` had no AGC of its own** -- a comment
+said "CC channel AGC not needed, Phase 2 works with fixed scaling", which was
+true only because this path had never once run -- so it used whatever the
+PRIMARY channel's AGC had been left at.  On the recipient that is a value
+adapted to the source's Phase 3.  On the source it is the untouched reset
+default, because 12.3.1 has the source TRANSMITTING throughout Phase 3 and its
+receiver adapts to nothing at all.  Measured: control channel symbols at
+|z| = 4.4 on the source against 1.43 on the recipient, and a differential phase
+sitting 13 degrees from the centre of its quadrant against 5.
+
+A differential decode does not care about gain.  `cc_symbol_sync()` does:
+the band edge timing loop is fed the scaled sample and its loop gain is
+proportional to it, so at 4.4 the timing jitters enough to push isolated
+symbols over the decision boundary.  Swept directly, 3000 baud u-law: **87 bit
+errors at the inherited 0.0017 and zero at 0.001, 0.00055 and 0.0003 alike.**
+
+The control channel now runs its own AGC to a defined working point, adapting
+during PPh, ALT and MPh, which are all constant modulus.  With it, **all twelve
+symbol-rate/law rows carry the control channel data with zero errors in BOTH
+directions** -- including the 2400 baud u-law three-error burst that was left
+open as "the control channel's own timing recovery", which is exactly what it
+turned out to be.
+
+`V34_CC_SYM_STATS=1` prints the working point and the eye: |z|, and the mean
+and worst distance of the differential angle from the centre of its quadrant,
+where 0 degrees is perfect and 45 is the decision boundary.  There was no
+quality instrument for this channel at all before.  `V34_HDX_ERRPOS=1` prints
+the positions of any payload bit errors.
 
 ### The build trap: three v34 objects had no header dependencies at all
 
@@ -379,12 +447,16 @@ what actually recompiled before believing the measurement.
 ## Order of work from here
 
 1. ~~A control-channel receiver.~~  Done -- see the section above.
-2. ~~Wire 12.4 end to end.~~  Done, both roles, control channel data crossing
-   in both directions.  **What is NOT done is the rate:** 12.4.1.3 and 12.4.2.4
-   determine the primary channel rate from both MPh sequences, and
-   `prepare_mph()` leaves the fields empty -- every MPh on the wire carries
-   `Max data rate = 0` and `Signalling rate mask = 0x0000`, so there is
-   nothing to negotiate from.  That is the next thing.
+2. ~~Wire 12.4 end to end, including the 12.4.1.3/12.4.2.4 rate.~~  Done, both
+   roles, control channel data crossing in both directions with the rate
+   settled from both MPh sequences.  **One piece of MPh is deliberately not
+   implemented: bit 27, the control channel data signalling rate.**  10.2.4's
+   2400 bit/s mode puts four bits on each symbol by selecting a point from the
+   quarter superconstellation with Q1/Q2 rather than always point 0; this
+   modem only implements the two-bit form, so it asks for 1200 (and sets bit
+   50, asymmetric control channel rates, to 0).  That is honest rather than
+   convenient -- asking for 2400 would be asking for something it could not
+   then read.
 2a. The 12.4.3 and 12.4.4 recovery procedures.  A missed PPh, MPh or E is a
    **control channel retrain (12.8.1)** after three seconds, not a
    retransmission, and none of it exists.  Today a missed PPh is a dead call.

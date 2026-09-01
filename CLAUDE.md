@@ -47,10 +47,17 @@ actually recompiled before believing the measurement.
 `v34_hdx_test <baud> <bps> <ulaw|alaw> <seconds>` drives a source and a
 recipient at each other through Phase 2, Phase 3 and 12.4's PPh/ALT/MPh/E, and
 grades the control channel user data that follows against the far end's
-generator. Eleven of the twelve rows carry it with zero errors both ways and
-run in `make test`. The rate negotiation of 12.4.1.3/12.4.2.4 is NOT done --
-every MPh goes out with `Max data rate = 0` -- and neither are the 12.4.3/12.4.4
-recovery procedures, so a missed PPh is a dead call. See
+generator. All twelve rows carry it with zero errors in both
+directions, and the 12.4.1.3/12.4.2.4 rate is settled from both MPh sequences
+(four `make test` rows configure the two ends differently, which is the only
+way to see the negotiation do anything). **The control channel now has its own
+AGC**: it used to inherit the PRIMARY channel's, which on the source is the
+untouched reset default because 12.3.1 has it transmitting throughout Phase 3,
+and `cc_symbol_sync()`'s loop gain is proportional to it -- 87 bit errors at
+the inherited value and zero at any lower one. `V34_CC_SYM_STATS=1` is the eye
+instrument. Still absent: MPh bit 27's 2400 bit/s control channel (only the
+1200 bit/s two-bit form exists, and it advertises that honestly), and the
+12.4.3/12.4.4 recovery procedures, so a missed PPh is still a dead call. See
 `docs/t30_annex_f_v34_fax.md`.
 
 **Commit straight to `main`.** This is a single-maintainer repo with a linear history; do not open a feature branch for a change unless asked. (Agent defaults often say to branch off the default branch — that default does not apply here.)

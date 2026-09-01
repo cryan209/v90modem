@@ -1123,6 +1123,13 @@ typedef struct
     bool negotiated_rates_valid;
     int negotiated_rate_a_to_c;
     int negotiated_rate_c_to_a;
+    /*! \brief V.34 12.4.1.3/12.4.2.4: the half-duplex primary channel data
+        signalling rate settled by the MPh exchange, as Table 16's N, so the
+        rate is N*2400 bit/s.  Zero until an MPh has been received.  Kept
+        apart from the duplex pair above: half-duplex has one primary channel
+        direction, not two, and no acknowledge bit to distinguish a first
+        offer from a settled one. */
+    int hdx_negotiated_rate_n;
 
     int persistence2;
 
@@ -2088,6 +2095,14 @@ typedef struct
     /*! \brief Set once PPh has been detected in V34_RX_STAGE_CC, so the
         detector stops and the MPh scanner below owns the symbol stream. */
     bool pph_detected;
+    /*! \brief The control channel's own AGC level estimate.  See
+        CC_AGC_TARGET_MAG in v34rx.c for why it cannot inherit the primary
+        channel's. */
+    float cc_level;
+    float cc_stat_sum;
+    float cc_stat_err;
+    float cc_stat_worst;
+    int cc_stat_n;
     /*! \brief Symbols spent in V34_RX_STAGE_CC hunting PPh, for 12.4.3.2 and
         12.4.4.1's three second bounds and for the detection log. */
     int pph_hunt_bauds;
