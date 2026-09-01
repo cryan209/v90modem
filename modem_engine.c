@@ -9428,6 +9428,29 @@ int me_tx_g711(uint8_t *codewords, int count)
     if (!codewords || count <= 0)
         return 0;
 
+    /* Which transmit path a call actually takes, once a second.  A Canon
+       TR7560 was sent EXACTLY zero for twenty seconds while the V.34 state
+       machine walked HDX_SECOND_A, HDX_SECOND_A_WAIT and INFOh, and neither
+       "Training TX: RMS" nor "TX PCM dump" appeared in the log -- so the
+       samples were not being discarded downstream, the branch that generates
+       them was never reached.  me_tx_audio() memsets the buffer first, so
+       every way of missing it produces silence that looks identical on the
+       wire.  Name the path instead of inferring it. */
+    {
+        static uint64_t path_samples = 0;
+        static int last_path = -1;
+        int path;
+
+        path_samples += (uint64_t)count;
+        path = di_fax_active() ? 3 : 0;
+        if (path_samples >= 8000  ||  path != last_path) {
+            path_samples = 0;
+            last_path = path;
+            ME_LOG("[ME] TX path: state=%d mod=%d fax_active=%d v34=%p v22bis=%p\n",
+                   (int)g_state, (int)g_mod, di_fax_active() ? 1 : 0,
+                   (void *)g_v34, (void *)g_v22bis);
+        }
+    }
     if (me_fax_tx_g711(codewords, count)) {
         pthread_mutex_lock(&g_state_mtx);
         g_g711_tx_octets += (uint64_t)count;

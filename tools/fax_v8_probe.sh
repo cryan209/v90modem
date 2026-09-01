@@ -48,6 +48,12 @@ fi
 # and would make a negative result meaningless.
 echo "fax_v8_probe: registering as $SIP_USER on $SIP_SERVER (SIP $LOCAL_PORT, RTP $RTP_PORT)"
 echo "fax_v8_probe: dial $EXT from the fax machine"
+# --verbose is REQUIRED, not cosmetic: ME_LOG() is gated on it, so without it
+# every [ME] engine diagnostic is silently absent -- and absent diagnostics
+# read exactly like a branch that never ran.  That misreading cost a session
+# here: "no Training TX: RMS line, so the transmit branch was never reached"
+# was drawn from a log that could not have contained it.
+#
 # ME_V34_FAX_PROBE=1 adds V.34 half-duplex to the answerer's JM offer, so a
 # calling fax's CM intersects with something and it proceeds into V.34 Phase 2.
 # Set FAX_PROBE=0 for the stage 1 behaviour (record the CM only).  This does
@@ -65,4 +71,5 @@ exec python3 tools/v90_hardware_interop.py \
     --password "$SIP_PASS" \
     --local-port "$LOCAL_PORT" \
     --rtp-port "$RTP_PORT" \
-    --pty-link /tmp/v90faxprobe
+    --pty-link /tmp/v90faxprobe \
+    --verbose

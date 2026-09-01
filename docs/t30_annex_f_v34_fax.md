@@ -657,10 +657,77 @@ believes.  On the loopback it reads `(4,0)` and `(-4,0)` through this exact
 sequence and Tone A resumes correctly, so whatever goes wrong is not visible
 there.  Reading it live is the next step and takes one call.
 
+### The silent transmitter was correct, and two of my own readings were not
+
+**Retract the previous section's conclusion.**  The transmitter is not stuck.
+Measured in ONE stream on the fifth call's own transmit tap:
+
+```
+  6.55 - 7.20 s  silence      <- 12.2.1.2.3, 650 ms, correct
+  7.20 - 7.35 s  rms 4073, 5105, 5117   <- SECOND_A Tone A, then INFOh
+  7.375 s on     zero          <- 12.3.2.1, correct, and permanent until S
+```
+
+The permanent zero after 7.375 s IS the clause: 12.3.2.1 has the recipient
+transmit silence and wait for the source's S.  It is supposed to last forever
+if S never comes, and S never comes.
+
+Two mistakes produced the earlier account, and both are worth recording because
+both are easy to repeat here.
+
+**`ME_LOG()` is gated on `--verbose`, which `tools/fax_v8_probe.sh` did not
+pass.**  So `Training TX: RMS`, `TX PCM dump` and `V.8 tx: RMS` were all absent
+from every capture -- and absent diagnostics read exactly like a branch that
+never ran.  A whole paragraph of "the samples were not discarded downstream,
+the branch was never reached" was drawn from a log that could not have
+contained the evidence either way.  With `--verbose` the same call logs
+`Training TX: RMS` 36 times.  The flag is in the script now, with a comment.
+
+**And the burst at 7.2 s is INFOh, not INFO0a.**  The earlier reading had the
+mapping off by one signal, which is how "no INFOh anywhere after INFO0a"
+happened: it was looking after the wrong burst.
+
+### Our INFOh is correct, and the Canon still ignores it
+
+`tools/cc_demod.py` recovers that burst as a clean 10.1.2.3.1 binary DPSK
+frame, and every Table 22 field matches what `prepare_infoh()` set:
+
+| field | decoded | prepare_infoh() |
+| --- | --- | --- |
+| 12:14 power reduction | 0 | 0 |
+| 15:21 length of TRN | 30 (1050 ms) | 30 |
+| 22 high carrier | 1 | `s->tx.high_carrier` |
+| 23:26 pre-emphasis | 0 | 0 |
+| 27:29 symbol rate | 0 (2400 baud) | `s->tx.baud_rate` |
+| 30 TRN 16-point | 0 | 0 |
+
+So a well-formed INFOh reaches the wire at 7.2 s, and the Canon holds Tone B
+for twenty seconds afterwards -- 12.2.1.1.4 says it does that while waiting for
+an INFOh it has not accepted.
+
+### The lead, by inspection of Table 22
+
+Bit 22 is specified as "Set to 1 indicates the high carrier frequency is to be
+used in data mode transmission.  **This must be consistent with the
+capabilities indicated in the source modem's INFO0**", and bits 27:29 pick the
+symbol rate the same way.  `prepare_infoh()` sets both from THIS modem's
+configured `s->tx.high_carrier` and `s->tx.baud_rate`, and reads the received
+INFO0 nowhere at all.  We are instructing the Canon to use 2400 baud with the
+HIGH carrier because that is how this end happens to be configured, not
+because it offered it.
+
+That is a defect by inspection whatever the Canon's INFO0 turns out to say, and
+checking it is the next step: decode the Canon's INFO0 (it is in every
+recording, and `cc_demod.py --binary --carrier 1200` reads the call modem's
+side), then build INFOh from the intersection rather than from our own
+configuration.  The CRC at bits 31:46 has not been verified either and is the
+other candidate.
+
+Evidence: `artifacts/v90-hardware/20260901T054120Z-canon-hdx-r5`.
+
 ### Still open
 
-Why the transmitter stays at zero, and hence whether the Canon accepts our
-INFOh.  It holds Tone B for eight seconds and
+Why the Canon does not accept a structurally correct INFOh.  It holds Tone B for eight seconds and
 then twelve more, and 12.2.1.3.4 gives it 2000 ms before it gives up on an
 INFOh that has not arrived -- so on the evidence it never took ours.  That is
 the next thing to settle, and it wants the INFOh demodulated out of our own
