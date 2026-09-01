@@ -43,6 +43,8 @@ v34_gardner_test
 v34_duplex_test
 v90_upstream_replay
 v90_engine_replay
+hsf_fxo_probe
+hsf_rom_image.bin
 
 # Common maps/logs
 *.map
