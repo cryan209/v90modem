@@ -510,3 +510,23 @@ So the host can READ the whole control plane but has no proven way to write it,
 and the relay register -- if 0x1F is even it -- is not settable this way. Script
 5 does change 0x1E/0x1F/0x21, so the firmware can set them; what the host cannot
 yet do is ask it to.
+
+
+## The opcode sweep, finished
+
+All 102 well-formed opcodes tested against the register-0x2D-reads-0xC0 oracle
+(`tools/hsf_opcode_sweep.py`, resumable, marker-matched). **`0x03` is the only
+opcode in the entire 105-opcode space that reads a control register.** No write
+primitive exists that this oracle can see.
+
+The sweep ran to completion with no wedges once the worklist used the real
+per-opcode operand widths from the assembler's jump table. Sending `<op> 2d` to
+an opcode taking zero or three operands desyncs the interpreter's parse, and a
+desynced parse is what had been wedging the device -- each wedge costing a
+physical replug. Opcode 0x0b wedges at every operand count tried and is skipped
+outright.
+
+The payloads also pin the execution model: `27 nn` **sets** a single result
+byte and `26` **appends** it. Opcodes returning `5a5a` left the marker value
+in place; those returning `5a0001` zeroed it. So report code, register read and
+append all share one accumulator.

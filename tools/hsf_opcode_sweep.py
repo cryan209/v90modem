@@ -18,13 +18,52 @@ repeated work.  Re-run with --resume after replugging.
     ./tools/hsf_opcode_sweep.py --resume
 """
 import argparse, json, os, re, subprocess, sys, time
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                      "..", "hsf_sweep_state.json")
 PROBE = "./hsf_fxo_probe"
 ORACLE_REG = 0x2D
 ORACLE_VAL = "c0"
+MARK = 0x5A              # see hsf_regdump.py: without a marker, a stale
+                         # completion from the previous script gets read as this
+                         # script's answer, which has produced a wrong result once
 TAIL = "26" + "2701" + "28" + "36"
+
+# Known to wedge the device (recovery is a physical replug), so never re-sent:
+#   0x0f with one operand, 0x0b with one operand (it needs reg+val),
+#   0x0b/0x1e writes.
+SKIP = {"0f/1", "0b/1", "0b/2", "0b/3"}
+
+
+def operand_widths():
+    """Bytes each opcode consumes, from the assembler's own jump table.
+
+    Sending "<op> 2d" to an opcode that takes zero or three operands desyncs the
+    interpreter's parse, and a desynced parse is what wedges the device -- each
+    wedge costing a physical replug.  Using the real width per opcode keeps the
+    scripts well formed.
+    """
+    import hsf_scripts as H
+    e = H.ELF(os.environ.get("HSF_OBJ", os.path.expanduser(
+        "~/hsfmodem-src/hsfmodem-7.80.02.06oem/modules/imported/hsfusbcd2-i386.O")))
+    jt = H.read_jump_table(e)
+    w = {}
+    for op in range(0x69):
+        h = jt[op]
+        if h in H._FIXED_WIDTH:
+            w[op] = H._FIXED_WIDTH[h] - 1        # minus the opcode byte
+        elif h in (0x7031,):
+            w[op] = 2
+        elif h in (0x7033,):
+            w[op] = 1
+        elif h == 0x70e3:
+            w[op] = 1 if op == 0x1B else 2
+        elif h == 0x718b:
+            w[op] = 1
+        else:
+            w[op] = None                          # variable or unknown: skip
+    return w
 
 
 def load():
@@ -69,20 +108,29 @@ def main():
 
     st = load() if a.resume or os.path.exists(STATE) else {"done": {}, "hits": [],
                                                            "wedged_by": None}
-    todo = [(op, n) for op in range(0x69) for n in range(1, a.nops + 1)
-            if f"{op:02x}/{n}" not in st["done"]]
+    widths = operand_widths()
+    todo = [(op, widths[op]) for op in range(0x69)
+            if widths.get(op) is not None
+            and f"{op:02x}/{widths[op]}" not in st["done"]]
     print(f"{len(todo)} combinations left of {0x69 * a.nops}", flush=True)
 
     for op, n in todo:
         key = f"{op:02x}/{n}"
-        operands = f"{ORACLE_REG:02x}" + "00" * (n - 1)
-        raw = f"{op:02x}{operands}{TAIL}"
+        if key in SKIP:
+            st["done"][key] = {"comp": [], "alive": True, "skipped": True}
+            save(st)
+            print(f"op 0x{op:02x} n={n}: skipped (known to wedge)", flush=True)
+            continue
+        operands = (f"{ORACLE_REG:02x}" + "00" * (n - 1)) if n else ""
+        raw = f"27{MARK:02x}{op:02x}{operands}{TAIL}"
         try:
             comp, alive = run(raw)
         except subprocess.TimeoutExpired:
             comp, alive = [], False
         st["done"][key] = {"comp": comp, "alive": alive}
-        hit = any(ORACLE_VAL in c for c in comp)
+        # only this script's completion counts: it starts with the marker
+        comp = [c for c in comp if c.startswith(f"{MARK:02x}")]
+        hit = any(ORACLE_VAL in c[2:] for c in comp)
         if hit:
             st["hits"].append(key)
         if not alive:
