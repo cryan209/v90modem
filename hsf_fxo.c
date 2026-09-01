@@ -76,11 +76,33 @@ struct hsf_dev {
 
 /* ------------------------------------------------------------------ helpers */
 
-/* Gotcha 1.  Cheap, and the difference between a readable device and a wedged
- * one, so it is called on every control failure rather than selectively. */
-static void unwedge(struct hsf_dev *d)
+/*
+ * Gotcha 1.  Called on every control failure rather than selectively.
+ *
+ * NOTE (measured 2026-09-01, libusb 1.0.29): libusb_clear_halt(h, 0) DOES NOT
+ * WORK ON macOS and never has.  The darwin backend resolves an endpoint address
+ * to a pipeRef by searching the CLAIMED INTERFACES, and EP0 belongs to none of
+ * them, so every call returns LIBUSB_ERROR_NOT_FOUND with
+ *
+ *     darwin_clear_halt: endpoint not found on any open interface
+ *
+ * on stderr.  This function was therefore a no-op on the one platform it was
+ * written for, and gotcha 1's remedy has never actually been in force here --
+ * the same shape of defect as the rest of this project's instrument bugs.
+ *
+ * The portable equivalent is the standard request libusb_clear_halt would have
+ * sent, so send it directly.  It needs EP0 to be answering, which it is after a
+ * STALL (an active rejection) and is not after the device has stopped
+ * responding altogether; the return is reported so the two are distinguishable
+ * instead of both looking like success.
+ */
+static int unwedge(struct hsf_dev *d)
 {
-	libusb_clear_halt(d->h, 0);
+	/* CLEAR_FEATURE(ENDPOINT_HALT=0) on endpoint 0, recipient endpoint. */
+	int r = libusb_control_transfer(d->h, LIBUSB_RECIPIENT_ENDPOINT,
+					LIBUSB_REQUEST_CLEAR_FEATURE, 0, 0,
+					NULL, 0, CTRL_TIMEOUT_MS);
+	return r < 0 ? r : 0;
 }
 
 static int vendor_in(struct hsf_dev *d, uint8_t req, uint16_t val, uint16_t idx,
