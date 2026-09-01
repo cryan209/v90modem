@@ -3397,6 +3397,19 @@ static int process_rx_dcs(t30_state_t *s, const uint8_t *msg, int len)
         queue_phase(s, T30_PHASE_C_NON_ECM_RX);
         timer_t2_start(s);
     }
+    else
+    {
+        /* T.30 Annex F.3.2.1: V.34 fax has no TCF and FTT is not used.
+           A recipient that accepts DCS returns CFR on the control channel,
+           then changes to the primary channel for the ECM message.  The old
+           NO_TCF path returned here without scheduling either operation, so
+           it accepted each repeated DCS silently until the source sent DCN. */
+        s->short_train = true;
+        rx_start_page(s);
+        set_phase(s, T30_PHASE_B_TX);
+        set_state(s, T30_STATE_F_CFR);
+        send_cfr_sequence(s, true);
+    }
     /*endif*/
     return 0;
 }

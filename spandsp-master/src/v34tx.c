@@ -7909,7 +7909,13 @@ static complex_sig_t get_cc_data_baud(v34_state_t *s)
         bit = s->tx.current_get_bit(s->tx.get_bit_user_data);
         if (bit == SIG_STATUS_END_OF_DATA)
         {
-            s->tx.current_get_bit = fake_get_bit;
+            /* V.34 12.4.1.4/12.4.2.5 and T.30 F.3.1.4 keep the control
+               channel up between procedural frames.  END_OF_DATA therefore
+               means an idle mark for this bit, not that the user-bit source
+               can be detached permanently.  In a live fax the V.34
+               transmitter can reach this point just before T.30 is attached;
+               replacing the callback here then turns the entire session into
+               continuous ones and the initial DIS is never transmitted. */
             bit = 1;
         }
         else
