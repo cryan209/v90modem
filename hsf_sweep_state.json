@@ -1,0 +1,120 @@
+{
+ "done": {
+  "00/1": {
+   "comp": [],
+   "alive": true
+  },
+  "00/2": {
+   "comp": [],
+   "alive": true
+  },
+  "01/1": {
+   "comp": [
+    "0001"
+   ],
+   "alive": true
+  },
+  "01/2": {
+   "comp": [],
+   "alive": true
+  },
+  "02/1": {
+   "comp": [
+    "0001"
+   ],
+   "alive": true
+  },
+  "02/2": {
+   "comp": [],
+   "alive": true
+  },
+  "03/1": {
+   "comp": [
+    "c001"
+   ],
+   "alive": true
+  },
+  "03/2": {
+   "comp": [],
+   "alive": true
+  },
+  "04/1": {
+   "comp": [
+    "01"
+   ],
+   "alive": true
+  },
+  "04/2": {
+   "comp": [],
+   "alive": true
+  },
+  "05/1": {
+   "comp": [
+    "01"
+   ],
+   "alive": true
+  },
+  "05/2": {
+   "comp": [],
+   "alive": true
+  },
+  "06/1": {
+   "comp": [
+    "01"
+   ],
+   "alive": true
+  },
+  "06/2": {
+   "comp": [],
+   "alive": true
+  },
+  "07/1": {
+   "comp": [
+    "01"
+   ],
+   "alive": true
+  },
+  "07/2": {
+   "comp": [],
+   "alive": true
+  },
+  "08/1": {
+   "comp": [
+    "01"
+   ],
+   "alive": true
+  },
+  "08/2": {
+   "comp": [],
+   "alive": true
+  },
+  "09/1": {
+   "comp": [
+    "01"
+   ],
+   "alive": true
+  },
+  "09/2": {
+   "comp": [],
+   "alive": true
+  },
+  "0a/1": {
+   "comp": [
+    "01"
+   ],
+   "alive": true
+  },
+  "0a/2": {
+   "comp": [],
+   "alive": true
+  },
+  "0b/1": {
+   "comp": [],
+   "alive": false
+  }
+ },
+ "hits": [
+  "03/1"
+ ],
+ "wedged_by": "0b/1"
+}

@@ -413,7 +413,7 @@ MOV f5h,#a0h` and the same for 0x1d. So `0b <reg> <val>` is
 "select register, store value" -- host-side write access to the chip's whole
 internal control plane, which is what the codec enable lives in.
 
-**What is missing is the matching read.** With `0x26` as the sink, one opcode
+**The matching read is opcode 0x03, and it works.** With `0x26` as the sink, one opcode
 that loads the result byte from a control register would make the register file
 readable, and the same primitive pointed at code memory would dump the ROM.
 Startup does `MOV f4h,#2dh / MOV f5h,#c0h`, so register 0x2d reading back 0xC0
@@ -428,3 +428,37 @@ wedges the device**, and recovery is a physical replug (the firmware is
 volatile, so a replug is a clean reset -- but it cannot be done in software).
 That is the only thing standing between here and a full opcode map, and a full
 opcode map is what turns the mask ROM from unreadable into a dump.
+
+
+## The control register file is readable from the host
+
+`03 <reg>` loads a control register into the script result byte; `26` appends
+that byte to the completion notification. Found by sweeping the opcode space
+against the firmware's own oracle -- startup does `MOV f4h,#2dh / MOV f5h,#c0h`,
+so register 0x2D must read 0xC0, and **0x03 was the only opcode that returned
+it**. `tools/hsf_opcode_sweep.py` does the sweep (resumable, because some
+opcodes wedge the device and recovery is a physical replug);
+`tools/hsf_regdump.py` does the reading.
+
+Verified rather than assumed: reading 0x2D, then 0x01, then 0x2D again returns
+`c0`, `90`, `c0` -- reproducible and register-dependent, which a constant or a
+fluke would not be. Three further cross-checks against the firmware agree:
+reg 0x2D = 0xc0, regs 0x1C/0x1D = 0xa0 and reg 0x03 = 0xad are all values the
+firmware is seen writing.
+
+The live control plane on a device with firmware running and no scripts sent:
+
+    00: 01 90 00 ad 40 00 67 00 00 00 00 00 ff 00 ff 00
+    10: 00 00 00 00 00 00 00 00 00 00 00 00 a0 a0 00 2c
+    20: 00 00 ff 11 80 00 80 00 04 04 08 10 02 c0 40 00
+
+**Register 1 reads 0x90, so bit 4 -- the "started" latch tested and set by the
+enable routine at 0x0c26 -- is ALREADY SET.** That kills the theory in the
+previous section that the codec had never been started: it has, before we send
+anything. The routine at 0x0c26 is still a start sequence, but reaching it is
+not what the silent codec is waiting for.
+
+Two practical limits, both measured: the completion payload caps at about six
+bytes, so reads must be batched four at a time (sixteen per script silently
+returns five); and the completion can arrive after a short stream window, so a
+miss is a timing artefact rather than a failed read and must be retried.
