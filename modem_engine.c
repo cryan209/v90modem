@@ -2311,11 +2311,9 @@ static void me_log_v8_peer_summary(const v8_parms_t *result)
  * proceeds into V.34 Phase 2 where its INFOh, PPh, ALT and MPh can be
  * recorded.
  *
- * This does NOT make a working fax.  T.30 Annex F does not exist here, so
- * nothing consumes the primary channel and no image is transferred; the
- * point is the RECORDING.  Every receive path in the clause 12 work is fed
- * by our own transmitter today, which is exactly the arrangement that hides
- * a wrong-but-self-consistent assumption. */
+ * The same opt-in now also keeps a selected fax service class from taking the
+ * legacy linear-audio shortcut: after clause 12 start-up, T.30 attaches to
+ * the V.34 control-channel bit callbacks instead. */
 static bool me_v34_fax_probe(void)
 {
     static int cached = -1;
@@ -5699,11 +5697,11 @@ void me_on_sip_connected(void)
         g_calling_party = !g_calling_party;
     trace_phase("SIP media connected: role=%s", g_calling_party ? "caller" : "answerer");
 
-    /* A selected fax service class owns the bearer from this point.  T.31
+    /* A selected legacy fax service class owns the bearer from this point.  T.31
      * Class 1 drives T.30 from the DTE and Class 2.0 drives it in
      * fax_class2.c; in either case V.8/V.34 negotiation is a data-modem
      * startup sequence and would overwrite the fax tones. */
-    if (di_fax_active()) {
+    if (di_fax_active() && !me_v34_fax_probe()) {
         g_state = ME_DATA;
         g_mod = ME_MOD_NONE;
         g_phase_start_ms = 0;
@@ -6676,7 +6674,9 @@ static bool me_fax_rx_g711(const uint8_t *codewords, int count)
 {
     int offset;
 
-    if (!di_fax_active())
+    /* Annex F keeps the bearer in V.8/V.34; T.30 is attached to the V.34
+       control-channel bit callbacks after clause 12 start-up. */
+    if (!di_fax_active() || me_v34_fax_probe())
         return false;
 
     for (offset = 0; offset < count; ) {
@@ -6697,7 +6697,7 @@ static bool me_fax_tx_g711(uint8_t *codewords, int count)
 {
     int offset;
 
-    if (!di_fax_active())
+    if (!di_fax_active() || me_v34_fax_probe())
         return false;
 
     for (offset = 0; offset < count; ) {
@@ -6718,7 +6718,7 @@ void me_rx_audio(const int16_t *amp, int len)
 {
     g_rx_audio_samples += (uint64_t)len;
 
-    if (di_fax_active()) {
+    if (di_fax_active() && !me_v34_fax_probe()) {
         di_fax_rx(amp, len);
         return;
     }
@@ -8987,7 +8987,7 @@ static void buffer_tx_samples_for_echo(const int16_t *amp, int len)
 
 void me_tx_audio(int16_t *amp, int len)
 {
-    if (di_fax_active()) {
+    if (di_fax_active() && !me_v34_fax_probe()) {
         di_fax_tx(amp, len);
         return;
     }
@@ -9485,7 +9485,7 @@ int me_tx_g711(uint8_t *codewords, int count)
         int path;
 
         path_samples += (uint64_t)count;
-        path = di_fax_active() ? 3 : 0;
+        path = di_fax_active() && !me_v34_fax_probe() ? 3 : 0;
         if (path_samples >= 8000  ||  path != last_path) {
             path_samples = 0;
             last_path = path;

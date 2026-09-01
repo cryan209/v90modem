@@ -167,7 +167,7 @@ void v34_rx_phase3_wait_s_symbol(v34_rx_state_t *s, const complexf_t *sym)
            In real channels, phase/mapping ambiguity can move S away from a
            fixed symbol index, so don't hardcode data_bits==2. */
         {
-            float mag_now;
+            float mag_now = sqrtf(sym->re * sym->re + sym->im * sym->im);
             float mag_prev;
             float dot;
             int idx;
@@ -854,9 +854,49 @@ void v34_rx_phase3_wait_s_symbol(v34_rx_state_t *s, const complexf_t *sym)
             }
             /*endif*/
 
+            /* V.34 12.3.1.1.1-.2: after receiving INFOh the source stops
+               Tone B, transmits 70 +/- 5 ms of silence, and only then sends
+               S.  Tone B and the sustained-rotation form of S are identical
+               to a differential-dibit-only detector; this mandatory gap is
+               the protocol discriminator.  Sixteen 2400-baud symbols is
+               only 6.7 ms, well below the specified gap but long enough to
+               ride through an isolated bad decision.  The 32-symbol
+               dominant window deliberately does not matter when the current
+               equalized magnitude has collapsed in the silence. */
+            if (!s->duplex && !s->phase3_hdx_tone_b_cleared)
+            {
+                if (!s->phase3_hdx_tone_b_seen
+                    && mag_now > 0.2f
+                    && dominant_count >= PHASE3_S_DOMINANT_MIN
+                    && (dominant_symbol == 1 || dominant_symbol == 3))
+                {
+                    s->phase3_hdx_tone_b_seen = true;
+                    s->phase3_hdx_gap_bauds = 0;
+                }
+                else if (s->phase3_hdx_tone_b_seen)
+                {
+                    if (mag_now <= 0.2f || dominant_count < 20)
+                    {
+                        if (++s->phase3_hdx_gap_bauds >= 16)
+                        {
+                            s->phase3_hdx_tone_b_cleared = true;
+                            span_log(s->logging, SPAN_LOG_FLOW,
+                                     "Rx - Phase 3: half-duplex Tone B/silence transition observed; arming rotation-form S detector (12.3.1.1)\n");
+                        }
+                        /*endif*/
+                    }
+                    else
+                    {
+                        s->phase3_hdx_gap_bauds = 0;
+                    }
+                    /*endif*/
+                }
+                /*endif*/
+            }
+            /*endif*/
+
             /* Independent reversal detector:
                count bauds where current symbol is close to 180° from previous. */
-            mag_now = sqrtf(sym->re * sym->re + sym->im * sym->im);
             mag_prev = sqrtf(s->last_sample.re * s->last_sample.re
                              + s->last_sample.im * s->last_sample.im);
             dot = sym->re*s->last_sample.re + sym->im*s->last_sample.im;
@@ -908,11 +948,11 @@ void v34_rx_phase3_wait_s_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    same point rotated 90 degrees, so a real S shows up on the
                    ALTERNATION path (alt=32/32), which is how the half-duplex
                    loopback detects it. */
-                || (s->duplex
+                || ((s->duplex || s->phase3_hdx_tone_b_cleared)
                     &&  s->phase3_s_dom_windows >= PHASE3_S_DOMINANT_STABLE
                     &&  s->phase3_s_dom_windows <= PHASE3_S_DOMINANT_RUN_MAX)))
         {
-            bool by_rotation = (s->duplex
+            bool by_rotation = ((s->duplex || s->phase3_hdx_tone_b_cleared)
                                 &&  s->phase3_s_dom_windows >= PHASE3_S_DOMINANT_STABLE
                                 &&  s->phase3_s_dom_windows <= PHASE3_S_DOMINANT_RUN_MAX);
 

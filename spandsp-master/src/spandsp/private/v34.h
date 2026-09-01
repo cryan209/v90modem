@@ -1969,6 +1969,13 @@ typedef struct
     int phase3_s_dom_windows;   /* consecutive bauds the 32-window is dominated by a +/-90 dibit */
     int phase3_s_dom_symbol;    /* the currently dominant differential dibit (1 or 3), else -1 */
     int phase3_s_fired_symbol;  /* dibit whose rotation set the current phase3_s_present, else -1 */
+    /* V.34 12.3.1.1 puts 70 +/- 5 ms of silence between the source's Tone B
+       and S.  Both can look like sustained rotation to the differential
+       detector, so half-duplex enables that detector only after observing
+       the mandatory gap. */
+    bool phase3_hdx_tone_b_seen;
+    bool phase3_hdx_tone_b_cleared;
+    int phase3_hdx_gap_bauds;
     int phase3_s_pos;
     uint8_t phase3_pp_lag8[8];
     int phase3_pp_obs;

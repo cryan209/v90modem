@@ -7492,6 +7492,9 @@ static void hdx_recipient_phase3_init(v34_state_t *s)
      * there never runs. The duplex answerer's 11.3.1.2.4 wait does the same.
      */
     s->tx.tone_duration = 0;
+    s->rx.phase3_hdx_tone_b_seen = false;
+    s->rx.phase3_hdx_tone_b_cleared = false;
+    s->rx.phase3_hdx_gap_bauds = 0;
     s->tx.current_getbaud = get_hdx_recipient_phase3_baud;
 }
 /*- End of function --------------------------------------------------------*/
