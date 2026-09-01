@@ -17,10 +17,30 @@ channel modulation of 10.2.4), and clause 12 itself (12.2 Phase 2, 12.3
 Phase 3, 12.4 control channel start-up, 12.5 primary channel resync and
 turn-off, 12.6 control channel turn-off and parameter change).
 
-**`ITU Docs/` holds no T-series Recommendations at all.**  T.30 is not there,
-so the Annex F layer has no local normative source.  Anything written against
-it will be written without the document this repo's own rules require citing;
-get T.30 before starting that layer.
+**That was true when this note was written and is not any more.** The fax
+service class work put T.30, T.31, T.32 (+ Amd 1), T.4 and T.6 in `ITU Docs/`.
+Annex F is at `T-REC-T.30-200509-I!!PDF-E.pdf`, clause F.1 to F.5, and it is
+short. Its substance:
+
+- **ECM is mandatory** for every V.34 fax message (F.3).
+- **No TCF.** After DCS the source sends control channel flags and waits; the
+  recipient answers CFR, and **FTT is not used** (F.3.2.1).
+- T.30's binary procedural data goes on the **control channel**, the message
+  and RCP on the **primary channel** (F.3.1.3).
+- After 12.4/V.34's control channel start-up both terminals send HDLC flags
+  and receive HDLC frames at the rate MPh settled, at least two flags before
+  the first frame after any start-up, resync or retrain (F.3.1.4).
+- The turnarounds are counted, not timed: the recipient sends flags until it
+  sees **40 consecutive 1s** then goes silent; the source sends 1s until the
+  flags stop and at least 40 have gone, then **70 +/- 5 ms** of silence, the
+  primary channel resync signal, T.4 A.3.1 sync, and the message
+  (F.3.2.2/F.3.2.3, and again per page at F.3.4.4/F.3.4.5).
+- Phase D: primary channel turn-off, then control channel resync **or**
+  start-up if the rate is to change; the post-message command follows on the
+  control channel (F.3.4.1-F.3.4.3).
+
+So the Annex F layer no longer lacks a normative source. What it lacks is the
+control channel underneath it.
 
 ## What was already here
 
@@ -193,18 +213,38 @@ order, driven by the far end rather than by timers:**
 The TRN length is the check worth reading there: it is the INFOh field being
 honoured, which is what the earlier index-versus-rate defect broke.
 
-**It still does not complete.**  The recipient is armed in
-`V34_RX_STAGE_PHASE3_WAIT_S` on the primary channel and does not detect the
-source's S.  It is receiving signal, so this is detection, not absence: the S
-is 128T -- 40 ms at 3200 baud -- and arrives about 60 ms after the recipient's
-primary-channel front end is reset, which may simply be too soon for the AGC
-and the detector's 64-symbol window.  Separately, by the time the source
-reaches PPh/ALT/MPh it has moved to the CONTROL channel (10.2.4: 600 baud,
-1200 Hz from the call modem) while the recipient is still tuned to the primary
-channel at 1920 Hz, so 12.4.2.1's "conditions its receiver to detect signal
-PPh" is not being done either.
+**The recipient's S detection was not the problem, and that guess was wrong.**
+It detects the source's S perfectly well -- `Rx - Phase 3: far-end S detected
+... power=4444960` is in the log at every symbol rate. What was missing was a
+**consumer**: every site that acts on `V34_EVENT_S` is inside
+`if (s->tx.duplex)` and inside the J stage, and 12.3.1.3 has no J in
+half-duplex, so the recipient detected S and sat where it was.
 
-Both are Phase 3 and control-channel receive gaps, not Phase 2 ones.
+The recipient now has its own Phase 3 watcher.  12.3.2.2's "detect S, then
+S-bar, then train on PP and TRN" is the same receive conditioning the duplex
+answerer uses at 11.3.1.2.4, so `get_hdx_recipient_phase3_baud()` reuses it
+without the transmitter, which in half-duplex has nothing to send.  Measured:
+the recipient's receiver reaches `PHASE3_TRAINING` instead of stopping at
+`PHASE3_WAIT_S`, at 2400, 3000, 3200 and 3429 baud alike.
+
+**One trap worth keeping.**  The first version installed the watcher with
+`tx_silence_init()`, and it never ran: `V34_MODULATION_SILENCE` makes the
+sample loop call `tx_silence()`, which never consults `current_getbaud`.  A
+silent stage that has to *watch* for something must keep a real modulator and
+return `zero` from its getbaud -- which is exactly what the duplex answerer's
+wait does, and why that one works.
+
+**It still does not complete.**  Both sides are now stuck at the control
+channel.  The source, having sent its 12.4.1.1 silence, is transmitting PPh,
+ALT and MPh and its receiver is still acquiring PP on the **primary** channel
+(`PP acquire baud 512: mag=0.000`) rather than detecting PPh on the control
+channel.  The recipient trains through PP and TRN and then has nowhere to go:
+12.4.2.1's "conditions its receiver to detect signal PPh" needs a control
+channel receiver that does not exist.
+
+That is the gap, and it is one thing rather than two: **there is no
+control-channel receive path for PPh, ALT, MPh or E.**  The transmit side of
+all four is built.
 
 No payload crosses in either direction, and no claim is made that it does.
 
@@ -213,10 +253,25 @@ is inside a `!duplex` branch or a diagnostic, and the full suite is green.
 
 ## Order of work from here
 
-1. The recipient's S detection (12.3.2.2), then conditioning its receiver for
-   PPh on the control channel (12.4.2.1) so it can answer PPh with PPh and ALT.
-2. `half_duplex_state` actually read: 12.5's primary channel turn-off and
+1. **A control-channel receiver.**  PPh detection first, since both 12.4.1.1
+   and 12.4.2.1 turn on it, then ALT, MPh and the 20-bit E.  Everything below
+   waits on this.  The transmit halves (`pph_baud_init()`,
+   `second_alt_baud_init()`, `mph_baud_init()`, `e_baud_init()`) are done.
+2. Wire 12.4 end to end: source detects PPh -> trains -> MPh -> E; recipient
+   detects PPh -> sends PPh, ALT, MPh -> E.  Both then have a rate from the
+   MPh exchange.
+3. `half_duplex_state` actually read: 12.5's primary channel turn-off and
    12.6's control channel turn-off are the source/recipient turnarounds, and
    nothing consumes the mode today.
-3. Control channel data at 1200/2400 bit/s (10.2.4) as a byte interface.
-4. Only then T.30 Annex F -- and not before the Recommendation is to hand.
+4. Control channel data at 1200/2400 bit/s (10.2.4) as a byte interface, then
+   HDLC over it -- F.3.1.4 wants flags and frames, which is what T.30 needs.
+5. T.30 Annex F itself: DIS bit 6 and the V.8 route into fax, T.30's frames on
+   the control channel instead of V.21, no TCF, the 40-ones/70 ms turnarounds,
+   image on the primary channel, ECM forced on.
+6. `fax.c` datapump wiring and a `T30_MODEM_V34HDX` row in
+   `fallback_sequence[]` -- without which T.30 can never select it however
+   much of the rest works.
+7. T.32 Amd 1's BR 6-D and amended EC in `fax_class2.c`; class 1 in `t31.c`.
+
+Steps 1 and 2 are the whole of the modem layer.  Steps 5 to 7 are the fax
+layer and are mostly plumbing once 1 to 4 exist.

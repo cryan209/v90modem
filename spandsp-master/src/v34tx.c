@@ -707,6 +707,7 @@ static void first_alt_baud_init(v34_state_t *s);
 static void second_alt_baud_init(v34_state_t *s);
 static void sh_baud_init(v34_state_t *s);
 static void hdx_control_channel_start_init(v34_state_t *s);
+static void hdx_recipient_phase3_init(v34_state_t *s);
 
 static void reset_primary_rx_frontend_for_phase3(v34_state_t *s)
 {
@@ -5485,7 +5486,7 @@ static complex_sig_t get_infoh_baud(v34_state_t *s)
            started Phase 3 at all.  The two roles were simply swapped. */
         V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                    "Tx - half-duplex recipient: INFOh sent, silent while receiving Phase 3\n");
-        tx_silence_init(s, 30000);
+        hdx_recipient_phase3_init(s);
         /* "condition its receiver to detect S followed by S-bar".  That means
            the PRIMARY channel: 10.2.3 transmits all of Phase 3 at the selected
            symbol rate and carrier, while this receiver is still on the 600 baud
@@ -7381,6 +7382,56 @@ static complex_sig_t get_v34_answer_phase3_wait_j_baud(v34_state_t *s)
         phase4_wait_init(s);
     }
     return zero;
+}
+/*- End of function --------------------------------------------------------*/
+
+/*
+ * V.34 12.3.2.2: the recipient is silent through the source's Phase 3. It
+ * detects S, then the S-to-S-bar transition, and then trains its primary
+ * channel receiver on PP and TRN. There is no J in half-duplex -- J belongs
+ * to the duplex Phase 3 of 11.3 -- so nothing here waits for one, and what
+ * follows TRN is 12.4's control channel start-up rather than Phase 4.
+ */
+static complex_sig_t get_hdx_recipient_phase3_baud(v34_state_t *s)
+{
+    if (s->rx.stage == V34_RX_STAGE_PHASE3_WAIT_S
+        &&
+        s->rx.received_event == V34_EVENT_S)
+    {
+        s->rx.received_event = V34_EVENT_NONE;
+        /* The same receive conditioning the duplex answerer uses at
+           11.3.1.2.4 -- PHASE3_TRAINING acquires PP and then TRN -- without
+           its transmitter, which has nothing to send here. */
+        s->rx.current_demodulator = V34_MODULATION_V34;
+        s->rx.stage = V34_RX_STAGE_PHASE3_TRAINING;
+        s->rx.duration = 0;
+        s->rx.phase3_pp_started = 0;
+        s->rx.phase3_pp_acquire_hits = 0;
+        s->rx.phase3_pp_phase = -1;
+        s->rx.phase3_pp_phase_score = -1;
+        memset(s->rx.phase3_pp_error, 0, sizeof(s->rx.phase3_pp_error));
+        memset(s->rx.phase3_pp_corr, 0, sizeof(s->rx.phase3_pp_corr));
+        s->rx.phase3_pp_corr_energy = 0.0f;
+        s->rx.phase3_pp_corr_weight = 0.0f;
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                   "Tx - half-duplex recipient: source S detected; training on PP/TRN (12.3.2.2)\n");
+    }
+    /*endif*/
+    return zero;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void hdx_recipient_phase3_init(v34_state_t *s)
+{
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - hdx_recipient_phase3_init()\n");
+    /*
+     * Silent per 12.3.2.1, but shaped from a getbaud returning zero rather
+     * than from V34_MODULATION_SILENCE: the silence modulator calls
+     * tx_silence() and never consults current_getbaud, so a watcher installed
+     * there never runs. The duplex answerer's 11.3.1.2.4 wait does the same.
+     */
+    s->tx.tone_duration = 0;
+    s->tx.current_getbaud = get_hdx_recipient_phase3_baud;
 }
 /*- End of function --------------------------------------------------------*/
 
