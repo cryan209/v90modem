@@ -239,20 +239,36 @@ deliberate gaps (900, 1200, 1800, 2400) stay empty as the noise reference.
 side for the downstream, the HSF side for the upstream:
 
 ```bash
-ME_SOUNDER=1 ME_G711_CAPTURE=/tmp/sound ./sip_v90_modem --sip-server ... 
+ME_SOUNDER=1 VPCM_G711_TAP_DIR=<run> ./sip_v90_modem --sip-server ...
 ```
 
 `ME_SOUNDER` replaces that side's transmit with the sounder for the whole call
-(no handshake happens), and `ME_G711_CAPTURE` records the exact codewords it
-sent.  Then, against the coupler's `hsf-rx.raw`:
+(no handshake happens, so the engine's own V.8 timeout ends the call after
+about twelve seconds -- which is ample).  The transmit tap is
+`VPCM_G711_TAP_DIR`, which writes `<run>/live-tx.g711`; `ME_G711_CAPTURE`
+records the RECEIVE side only and is not the reference.  Then, against the
+coupler's `hsf-rx.raw`:
 
 ```bash
-python3 tools/hsf_probe_response.py hsf-rx.raw --sounder --reference /tmp/sound.tx.ulaw
+python3 tools/hsf_probe_response.py hsf-rx.raw --sounder --reference <run>/live-tx.g711
 ```
 
 With `--reference` the result is a true two-port response, RX/TX: the transmit
 path's own µ-law quantisation and whatever level the generator chose are in the
 reference rather than in the answer.
+
+**Verified on the wire, 2026-09-03**: with `ME_SOUNDER=1` the digital side's
+transmit tap carries all 25 tones at equal amplitude (~990 each), the empty
+bins 38 dB down, RMS 3510 and peak 9852 -- the self-check's numbers, through
+the real G.711 passthrough.  The measurement itself did not complete: on two
+calls the analogue leg carried digital silence in BOTH directions while SIP
+signalling was healthy (call CONFIRMED, media wired, and the far end received
+95280 octets of silence at RMS 1.2 from the ATA), so there was nothing to
+measure.  The HSF was off-hook throughout -- its own dial digits are in the
+recording at RMS 25000 as hybrid echo, and the standing DC offset never changed
+-- and a third call returned `rx 0 bytes in 0 packets`, the codec transport
+having stopped altogether.  That is a rig state to sort out with the device in
+hand, not a property of the sounder.
 
 The generator is checked in `make test` before it costs a call, because a
 transmit-only signal cannot be verified after the fact -- a rig session that

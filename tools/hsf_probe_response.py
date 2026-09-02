@@ -68,10 +68,10 @@ def goertzel(samples, start, n, freq, rate):
 
 def read_ulaw_or_pcm(path):
     """A G.711 capture or a 16-bit tap, told apart by the file's extension."""
-    if path.endswith('.ulaw') or path.endswith('.alaw'):
+    if path.endswith(('.ulaw', '.alaw', '.g711')):
         with open(path, 'rb') as f:
             data = f.read()
-        alaw = path.endswith('.alaw')
+        alaw = path.endswith('.alaw')   # VPCM_G711_TAP_DIR writes .g711 in the call's law
         return [g711_decode(b, alaw) for b in data]
     return read_pcm(path)
 
