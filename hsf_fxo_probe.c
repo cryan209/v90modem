@@ -257,6 +257,7 @@ int main(int argc, char **argv)
 	bool end_session = true;
 	bool session_ended = false;
 	bool stream_open = false;
+	bool stream_open_alt = false;
 	char dtmf = '\0';
 	uint8_t patch[8];
 	size_t  n_patch = 0;
@@ -330,6 +331,9 @@ int main(int argc, char **argv)
 			}
 		} else if (!strcmp(argv[i], "--stream-open")) {
 			stream_open = true;
+		} else if (!strcmp(argv[i], "--stream-open-alt")) {
+			stream_open = true;
+			stream_open_alt = true;
 		} else if (!strcmp(argv[i], "--tx-block") && i + 1 < argc) {
 			g_tx_block = (size_t)strtoul(argv[++i], NULL, 0);
 			if (g_tx_block < 1 || g_tx_block > 256)
@@ -691,6 +695,35 @@ int main(int argc, char **argv)
 
 		r = hsf_fxo_script_run(d, HSF_SCRIPT_SIGNAL, NULL, 0);
 		printf("stream open (script 8): %s\n", r == 0 ? "sent" : "rejected");
+
+		/*
+		 * hsfusbcd2227_ -> hsfusbcd2252_, the codec register programming
+		 * that stream open does after the ring setup and which nothing
+		 * here had ever performed.  Each is hsfusbcd2200_(ctx, flags,
+		 * value, addr), which sends script 2 ONLY when flags bit 0 is set
+		 * -- so the three calls with flags 2 emit nothing -- and builds a
+		 * 16-bit big-endian word (addr & 0x1fff) | value | 0x2000.
+		 *
+		 * The shadows at ctx+0x8d0..0x8dc are zero on a fresh session, so
+		 * the words below are that sequence with zero shadows.  Two calls
+		 * have a second form taken when ctx+0x8d4 is zero AND ctx+0x1c8's
+		 * byte 0 bit 0 is clear (0xA028 for the fourth, 0x25B5 for the
+		 * last); --stream-open-alt selects those.
+		 */
+		static const uint16_t regs[] = {
+			0x2004, 0xA208, 0xF000, 0xA228, 0x6000, 0x25B4
+		};
+		static const uint16_t regs_alt[] = {
+			0x2004, 0xA208, 0xF000, 0xA028, 0x6000, 0x25B5
+		};
+		const uint16_t *w = stream_open_alt ? regs_alt : regs;
+		for (size_t k = 0; k < sizeof regs / sizeof regs[0]; k++) {
+			uint8_t rp[8] = { (uint8_t)(w[k] >> 8), (uint8_t)(w[k] & 0xff) };
+			int rr = hsf_fxo_script_run(d, 2, rp, sizeof rp);
+			printf("  stream open reg write 0x%04x: %s\n", w[k],
+			       rr == 0 ? "sent" : "rejected");
+			usleep(5 * 1000);
+		}
 
 		/* Arm the data rings and prime AFTER the open, as the driver
 		 * does from hsfusbcd2196_ rather than at attach. */

@@ -426,9 +426,38 @@ submits refused.  Note 2944 exceeds the 2496-2527 capacity bound measured
 earlier, so that bound describes mid-sequence runs and is not a constant of the
 part either.
 
-What remains unsent from the list above is **script 2** (`hsfusbcd2200_`) and
-**script 10** (`hsfusbcd2202_`, wIndex 1, patch carrying 0x8000) -- the two that
-take real parameters and have never gone out patched.
+**Scripts 2 and 10 are register writes, and both are now sent with the driver's
+own parameters.  Neither moves TX.**
+
+`hsfusbcd2200_(ctx, flags, value, addr)` builds a 16-bit big-endian word
+`(addr & 0x1fff) | value | 0x2000` into patch[0..1] and sends script 2 -- but
+**only when flags bit 0 is set**, so call sites passing 2 emit nothing at all.
+`hsfusbcd2202_(ctx, idx)` sends script 10 with two words, `| 0x6000` and
+`| 0xa000`, whose bodies come from `.rodata` tables at 0x1f0 and 0x1e0 indexed
+by `idx`; the code clears exactly the bits those tables set (`dh &= ~0x06`,
+`ah &= ~0x10`), so idx 0-7 is a 2-bit field at 0x0600 plus a 1-bit flag at
+0x1000.
+
+The important find is **`hsfusbcd2227_` -> `hsfusbcd2252_`, a codec register
+programming sequence that stream open runs and nothing here had ever
+performed**.  Nine calls, of which the three with flags 2 send nothing, leaving
+six words -- with the ctx+0x8d0..0x8dc shadows zero, as they are on a fresh
+session: **0x2004, 0xA208, 0xF000, 0xA228, 0x6000, 0x25B4** (two have a second
+form, 0xA028 and 0x25B5, taken when ctx+0x8d4 is zero and ctx+0x1c8 byte 0 bit
+0 is clear -- `--stream-open-alt`).
+
+Measured, all on a healthy part: the six writes are accepted (notifications 4
+-> 12) and TX reads **2560**, the alt form **2432**, the control **2432**.  The
+script 10 sweep over all eight indices gives 2432-2688 with RX unchanged.
+**Nothing shifts the transmit path.**
+
+So the driver-visible sequence is now reproduced end to end -- session 9/5,
+stream open's script 1 query and script 8, the six codec register writes, the
+0x80/0x40 granularities, the 4 TX / 16 RX prime, RX-credited pacing, the script
+11 stop and the script 6 session end -- **and TX still fills its FIFO once and
+stops.**  The remaining caveat inside the driver is that those six words assume
+zero shadows; ctx+0x8d0..0x8dc are written from the profile/config path, so a
+real session may program different values.
 
 ### TX drained once, unreproduced in 16 runs (2026-09-02)
 
