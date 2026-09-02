@@ -1,12 +1,17 @@
 #!/bin/bash
-# Does our DTMF reach the LINE?  off-hook return must exceed the on-hook
-# control, which is pure internal codec loopback.
+# Does our DTMF reach the LINE?  Compare the line tone during a dial against
+# an off-hook silence control.  On-hook is not the control: this codec returns
+# TX through a strong internal loopback on-hook and suppresses it off-hook.
 set -euo pipefail
 tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/hsf-tx-line.XXXXXX")
 trap 'rm -rf "$tmpdir"' EXIT
 run() {
-  local cfg=$1 name=$2 raw="$tmpdir/$2.raw" log="$tmpdir/$2.log"
-  if ! env $cfg HSF_CALL_INIT=1 ./hsf_fxo_probe --call-seq --dial 9898 --dial-amp 20000 \
+  local cfg=$1 mode=$2 name=$3 raw="$tmpdir/$3.raw" log="$tmpdir/$3.log"
+  local tx_args=(--feed)
+  if [[ $mode == dial ]]; then
+    tx_args=(--dial 9898 --dial-amp 20000)
+  fi
+  if ! env $cfg HSF_CALL_INIT=1 ./hsf_fxo_probe --call-seq "${tx_args[@]}" \
        --stream 8 --rx-out "$raw" >"$log" 2>&1; then
     cat "$log" >&2
     return 1
@@ -21,19 +26,19 @@ import struct, cmath, math
 import sys
 FS=16000.0
 rx=[x[0] for x in struct.iter_unpack('<h',open(sys.argv[1],'rb').read())]
-W=1600; best=0
 def amp(s,f):
     N=len(s); k=f*N/FS
     return 2*abs(sum(s[j]*cmath.exp(-2j*math.pi*k*j/N) for j in range(N)))/N
-for i in range(int(FS*0.9),int(FS*2.2),W):
-    s=rx[i:i+W]; m=sum(s)/W; s=[x-m for x in s]
-    best=max(best,(amp(s,852)+amp(s,1477))/2)
-print("%.0f"%best)
+def band(t0,t1):
+    s=rx[int(FS*t0):int(FS*t1)]
+    m=sum(s)/len(s); s=[x-m for x in s]
+    return amp(s,400)
+print("pre=%.0f during=%.0f"%(band(.2,.9),band(1.2,2.5)))
 PY
 }
 for cfg in "" "HSF_TRAIL2_REG=0x35b7"; do
   label=${cfg:-default}
-  off=$(run "$cfg" "${label//[^A-Za-z0-9]/_}-off")
-  on=$(run "$cfg HSF_NO_HOOK=1" "${label//[^A-Za-z0-9]/_}-on")
-  echo "cfg='${cfg:-default}'  off-hook=$off  on-hook(loopback)=$on"
+  dial=$(run "$cfg" dial "${label//[^A-Za-z0-9]/_}-dial")
+  silence=$(run "$cfg" silence "${label//[^A-Za-z0-9]/_}-silence")
+  echo "cfg='${cfg:-default}'  dial[$dial]  silence[$silence]"
 done

@@ -1169,6 +1169,14 @@ int main(int argc, char **argv)
 						wait_script(HSF_SCRIPT_OFF_HOOK, b3, 1400);
 				}
 			}
+			/* TX is already running while the control plane is assembled, so
+			 * fill_tx() has advanced (and, with the two-second late sequence,
+			 * exhausted) the dial programme before the final line state exists.
+			 * Start the actual dial delay at the completed call transition. */
+			g_dial_pos = 0;
+			g_dial_samples = 0;
+			g_dial_gap = false;
+			g_dial_waited = 0;
 			goto codec_done;
 		}
 		if (vendor_seq) {

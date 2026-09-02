@@ -2269,3 +2269,31 @@ fresh temporary capture for every arm and aborts if the probe fails or produces
 no samples.  Previously it reused `/tmp/tt.raw`, so running it with no attached
 device printed a plausible stale result (`491 / 491`) instead of reporting that
 no experiment had occurred.
+
+## TX does reach the line; the on-hook control tested the wrong thing
+
+The retraction above was itself wrong.  The fresh-capture fix exposed why: this
+codec has a strong **internal TX-to-RX loopback while on-hook**, and that return
+is suppressed when the DAA goes off-hook.  For the transmitted `9898` pair the
+on-hook receive bins reach roughly 12000 while off-hook they are only 200-300.
+Requiring the off-hook return to exceed on-hook therefore grades a correctly
+switched transmit path as a failure.
+
+The valid control is off-hook DTMF against off-hook silence, watching the signal
+already known to come from the line.  On the same live line and complete call
+sequence, in 100 ms windows:
+
+    DTMF:    400 Hz = ~5340 before digits, then 3-8 while digits are sent
+    silence: 400 Hz = ~5340 continuously over the identical interval
+
+The line tone stops exactly when DTMF begins and does not stop when the same TX
+pipe carries silence.  That is an externally generated response, not our own
+hybrid or internal loopback: **the USB HSF interface accepts our TX frames and
+they reach the analogue line.**
+
+One more timing defect was exposed while making that measurement.  TX is armed
+during control-plane setup, so the dial generator used to advance during the
+prime and could exhaust all digits before the optional two-second late
+transition completed.  The dial programme is now restarted after the final
+call transition.  `tools/hsf_tx_reaches_line.sh` now grades dial versus silence
+from fresh captures and no longer uses the invalid on-hook comparison.
