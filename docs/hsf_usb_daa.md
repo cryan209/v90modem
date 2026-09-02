@@ -1681,12 +1681,9 @@ completion.  **Every script is accepted** (script 8's own completion is the
 `08 80` form and the probe's waiter does not match it, which is cosmetic), the
 device stays alive, and **receive still delivers nothing and transmit still
 does not drain.**  So the remaining difference is *not* the order or content of
-the control transfers.  It is in how the bulk transfers are armed around them:
-the vendor submits its first bulk pair from script 5's completion callback,
-where this probe calls `hsf_fxo_start()` before the script sequence runs and
-has no way to express the vendor's ordering.  That is the next thing to change,
-and it is a restructuring of the probe rather than a new discovery about the
-device.
+the control transfers.  It is in how the bulk transfers are armed around them.  (The
+guess made here -- that the vendor arms from script 5's completion -- was drawn
+from a single instance and is **refuted** in the next section.)
 
 **Why usbmon has not simply ended this.**  It records what crossed the wire; it
 does not record the host-side structure that produced it -- which URB was
@@ -1696,3 +1693,65 @@ that structure is the part that matters, and it has to be inferred and then
 tested rather than read off.  What the capture does give, and what nothing else
 did, is an exact target and a cheap way to tell how far off we are: the receive
 rate.
+
+## Arming bulk from script 5's completion: built, tested, and the premise was wrong
+
+The probe now *can* do it.  `hsf_fxo_start()` used to submit the whole RX ring
+before any script had been sent, and the four TX primes went out from `main()`;
+there was no way to express "submit the first bulk pair when this script
+completes".  Now `arm_bulk_now()` is called from the notification callback, on
+the libusb event thread, which is where the driver's own pump lives:
+
+* `--vendor-seq` replays the driver's session bring-up in full -- both init
+  cycles (each ending with script 6 and script 4), then the call's
+  `2(0x35b7), 8, 9, 5` -- with `CD2_READ_EEPROM` and the early TX prime
+  suppressed, because the vendor issues neither.
+* `--arm-on-5` keeps the codec open in the order that empirically yields
+  receive and moves only the arming point.
+* `codec_open_prelude()` is factored out so the register writes can be run
+  before or after the session start.
+
+**Both arms measured, and arming from script 5's completion is worse in every
+configuration.**  In the one configuration that receives at all, moving only
+the arming point takes it from **253760 bytes to 0**; the full `--vendor-seq`
+replay -- control plane byte-identical to the vendor's -- receives nothing
+either.
+
+**The premise was wrong, and one query shows it.  The vendor sends script 5
+three times in that capture and only the third is followed by any bulk at all:**
+
+    script 5 @   2.403  ->   0 bulk transfers in the next 0.5 s
+    script 5 @   8.835  ->   0 bulk transfers in the next 0.5 s
+    script 5 @  23.169  -> 251 bulk transfers in the next 0.5 s
+
+So script 5 does not start the datapump.  The correlation was read off the
+single instance next to the stream start -- n=1 -- and the two counterexamples
+were in the same file the whole time.  What distinguishes the third is not
+anything on the wire: it is the one where the DTE had asked for a call.
+
+**That is the real answer to "why has usbmon not ended this".**  The datapump
+start is not a side effect of any control transfer, so no amount of replaying
+control transfers will produce it.  It is a decision the closed engine makes,
+and the engine sits above the USB layer -- usbmon can only show that the
+decision was taken, never what took it.  This also retires the standing plan of
+making the probe's bring-up look more like the vendor's: the bring-up is now
+byte-identical and it changes nothing.
+
+### What was worth keeping
+
+* **One real correction to the codec register programming.**  Our six script-2
+  words were `2004 a208 f200 aae8 6040 25b4`; the vendor's are
+  `2004 a208 f200 aae8 6040 35b4`.  Five of six matched; the last differed by
+  one bit, which by the probe's own formula is `ctx+0x8dc`, so **reg_dc =
+  0x1000** and that is now the default.  The words are byte-identical to the
+  vendor's now.  It does not change what the device does, and it removes a
+  discrepancy that would otherwise have to be re-investigated later.
+* `tools/hsf_seqdiff.py`, which is what made any of this visible.
+* Every knob above is default off, so the shipping path is unchanged.
+
+### The standing measurement
+
+Receive rate remains the fingerprint, and it has not moved: **21178 Hz for our
+session against 16000 Hz for the vendor's**, unchanged by the byte-identical
+control plane.  Whatever configures the codec is not reachable through the
+script interface at all.

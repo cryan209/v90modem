@@ -117,6 +117,40 @@ static void fill_tx(uint8_t *buf)
 }
 
 /*
+ * Arming the data rings FROM SCRIPT 5'S COMPLETION, which is what the vendor
+ * driver does and what this probe could not previously express.
+ *
+ * Read off usbmon (docs/hsf_usb_daa.md): the vendor's first bulk transfer is
+ * submitted at the instant script 5's completion notification arrives, not
+ * before the script sequence and not from a later poll in the main loop.  This
+ * probe called hsf_fxo_start() -- which submits the whole RX ring -- before any
+ * script had been sent, so the device saw bulk transfers against a session it
+ * had not yet opened.
+ *
+ * The submit therefore has to happen inside the notification callback, on the
+ * libusb event thread, which is exactly where the driver does it (its RX and TX
+ * completion handlers tail-jump into the same pump).
+ */
+static bool           g_arm_on_session_b;
+static volatile bool  g_armed;
+
+static void arm_bulk_now(struct hsf_dev *d)
+{
+	if (g_armed)
+		return;
+	g_armed = true;
+	hsf_fxo_arm_rx(d);
+	if (!g_feed_tx)
+		return;
+	uint8_t first[256];
+	for (int i = 0; i < 4; i++) {
+		fill_tx(first);
+		if (hsf_fxo_tx_submit(d, first, g_tx_block) < 0)
+			break;
+	}
+}
+
+/*
  * The driver's pacing, which is not what this probe originally did.
  *
  * Both completions land in the same pump.  hsfusbcd2184_ (RX done) credits the
@@ -195,7 +229,7 @@ static uint8_t         g_script_status[34];
 
 static void on_notify(const struct hsf_notification *n, void *user)
 {
-	(void)user;
+	struct hsf_dev *nd = user;
 	if (n->wValue == 1 && n->data_len >= 2 && n->data[0] < 34) {
 		/*
 		 * Most scripts reply with two bytes, <id> <status>.  SCRIPT 1 IS
@@ -222,6 +256,13 @@ static void on_notify(const struct hsf_notification *n, void *user)
 		}
 		pthread_cond_broadcast(&g_notify_cond);
 		pthread_mutex_unlock(&g_notify_lock);
+
+		/* The vendor's arming point.  Do it here, in the callback, not
+		 * back in main: the driver submits its first bulk pair from
+		 * this completion and the device evidently cares. */
+		if (g_arm_on_session_b && nd &&
+		    n->data[0] == HSF_SCRIPT_SESSION_B)
+			arm_bulk_now(nd);
 	}
 	/* Ring arrives as a half-cycle toggle at 25 Hz, so printing every one
 	 * buries everything else -- count them and print the first. */
@@ -274,6 +315,90 @@ static unsigned script_count(unsigned id)
 	return n;
 }
 
+/*
+ * The codec open: script 1 (the query), script 8, and the six script-2 register
+ * writes.  Factored out because the ORDER of this relative to the 9/5 session
+ * start is the whole question -- the vendor runs it BEFORE, this probe ran it
+ * after.  See codec_open_prelude()'s two callers.
+ */
+static int codec_open_prelude(struct hsf_dev *d, unsigned reg_d6, unsigned reg_da,
+			      unsigned reg_dc, unsigned reg_e4)
+{
+	unsigned before1 = script_count(1);
+	int r = hsf_fxo_script_run(d, 1, NULL, 0);
+	if (r == 0)
+		r = wait_script(1, before1, 1400);
+	if (r < 0) {
+		unsigned again = script_count(1);
+		r = hsf_fxo_script_run(d, 1, NULL, 0);	/* the one retry */
+		if (r == 0)
+			r = wait_script(1, again, 1400);
+	}
+	printf("stream open (script 1): %s", 
+	       r == 0 ? "completed" : "no completion in 2x1400ms");
+	if (g_script1_seen)
+		printf("  reply payload %02x %02x -> ctx+0x68 mode %d",
+		       g_script1_reply[0], g_script1_reply[1], g_script1_mode);
+	printf("\n");
+
+	r = hsf_fxo_script_run(d, HSF_SCRIPT_SIGNAL, NULL, 0);
+	printf("stream open (script 8): %s\n", r == 0 ? "sent" : "rejected");
+
+	/*
+	 * hsfusbcd2227_ -> hsfusbcd2252_, the codec register programming
+	 * that stream open does after the ring setup and which nothing
+	 * here had ever performed.  Each is hsfusbcd2200_(ctx, flags,
+	 * value, addr), which sends script 2 ONLY when flags bit 0 is set
+	 * -- so the three calls with flags 2 emit nothing -- and builds a
+	 * 16-bit big-endian word (addr & 0x1fff) | value | 0x2000.
+	 *
+	 * The shadows at ctx+0x8d0..0x8dc are zero on a fresh session, so
+	 * the words below are that sequence with zero shadows.  Two calls
+	 * have a second form taken when ctx+0x8d4 is zero AND ctx+0x1c8's
+	 * byte 0 bit 0 is clear (0xA028 for the fourth, 0x25B5 for the
+	 * last); --stream-open-alt selects those.
+	 */
+	/*
+	 * hsfusbcd2169_ -- which stream open calls right after script 8 --
+	 * initialises the shadows this sequence reads, and three of them
+	 * are UNCONDITIONAL: ctx+0x8d0 = 0x40, 0x8d2 = 0x800,
+	 * 0x8d4 = 0x200.  Taking them as zero (as this probe first did)
+	 * gets three of the six words wrong.
+	 *
+	 * The rest come from the config struct at ctx+0x1c8 and from
+	 * ctx+0x58, none of which is visible from here:
+	 *   0x8d6 = 0/0x200/0x400/0x600 from (cfg[0] >> 1) & 7
+	 *   0x8da = 0x1000 if (cfg[0] & 0x10) or ctx+0x58, else 0
+	 *   0x8dc = 0/0x800/0x1000/0x1800 from (cfg[0] >> 5) & 7
+	 *   0x8e4 = 0 if cfg[0] & 1, else 0x80 if cfg[1] & 1, else 0xC0
+	 * (0x8d8 is set too but only feeds a flags-2 call, which sends
+	 * nothing, so it does not matter here.)
+	 *
+	 * --regs d6,da,dc,e4 sweeps them; the default is the all-zero
+	 * config, which is 0xC0 for 0x8e4 rather than 0.
+	 */
+	const uint16_t d0 = 0x40, d2 = 0x800, d4 = 0x200;
+	uint16_t w4 = (uint16_t)((reg_e4 | 0x20 | d2 | reg_da) | 0x208);
+	uint16_t regs[6] = {
+		(uint16_t)((0x004 & 0x1fff) | 0x2000),
+		(uint16_t)((0x208 & 0x1fff) | 0x8000 | 0x2000),
+		(uint16_t)(((d4 | 0x1000) & 0x1fff) | 0xC000 | 0x2000),
+		(uint16_t)((w4 & 0x1fff) | 0x8000 | 0x2000),
+		(uint16_t)(((reg_d6 | d0) & 0x1fff) | 0x4000 | 0x2000),
+		(uint16_t)(((reg_dc | 0x5b4) & 0x1fff) | 0x2000),
+	};
+	const uint16_t *w = regs;
+	for (size_t k = 0; k < sizeof regs / sizeof regs[0]; k++) {
+		uint8_t rp[8] = { (uint8_t)(w[k] >> 8), (uint8_t)(w[k] & 0xff) };
+		int rr = hsf_fxo_script_run(d, 2, rp, sizeof rp);
+		printf("  stream open reg write 0x%04x: %s\n", w[k],
+		       rr == 0 ? "sent" : "rejected");
+		usleep(5 * 1000);
+	}
+
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	bool do_load = false;
@@ -286,6 +411,7 @@ int main(int argc, char **argv)
 	const char *rom_path = NULL;
 	const char *rx_path = NULL;
 	bool vendor_seq = false;
+	bool arm_on_5 = false;
 	bool need_bootloader = false;
 	bool do_feed = false;
 	int  do_reset = 0;		/* 1 = CD2_RESET, 2 = CD2_WAKEONRING */
@@ -295,7 +421,15 @@ int main(int argc, char **argv)
 	bool end_session = true;
 	bool session_ended = false;
 	bool stream_open = false;
-	unsigned reg_d6 = 0, reg_da = 0, reg_dc = 0, reg_e4 = 0xC0;
+	/*
+	 * reg_dc = 0x1000 is not a guess: with these four values the six
+	 * script-2 codec register words this probe emits are BYTE-IDENTICAL to
+	 * the vendor driver's, captured on the wire --
+	 * 2004 a208 f200 aae8 6040 35b4.  It was 0 here, which made the last
+	 * word 0x25b4 and was the only one of the six that differed.
+	 * (Correcting it does not by itself change what the device does.)
+	 */
+	unsigned reg_d6 = 0, reg_da = 0, reg_dc = 0x1000, reg_e4 = 0xC0;
 	char dtmf = '\0';
 	uint8_t patch[8];
 	size_t  n_patch = 0;
@@ -322,6 +456,8 @@ int main(int argc, char **argv)
 				if (*p == ',')
 					p++;
 			}
+		} else if (!strcmp(argv[i], "--arm-on-5")) {
+			arm_on_5 = true;
 		} else if (!strcmp(argv[i], "--vendor-seq")) {
 			vendor_seq = true;
 			do_start = true;
@@ -619,7 +755,9 @@ int main(int argc, char **argv)
 	}
 
 	uint8_t eeprom[64];
-	int er = hsf_fxo_read_eeprom(d, 0, eeprom, sizeof(eeprom));
+	/* The vendor driver never issues CD2_READ_EEPROM; --vendor-seq is a
+	 * replay, so it does not either. */
+	int er = vendor_seq ? -1 : hsf_fxo_read_eeprom(d, 0, eeprom, sizeof(eeprom));
 	if (er > 0) {
 		bool all_zero = true;
 		for (int i = 0; i < er; i++)
@@ -654,7 +792,7 @@ int main(int argc, char **argv)
 		}
 	}
 	g_feed_tx = do_feed;
-	if (stream_open)
+	if (stream_open || vendor_seq)
 		hsf_fxo_defer_rx(d, true);
 	if (stream_secs > 0 && hsf_fxo_start(d, &cb) < 0) {
 		fprintf(stderr, "could not start streaming\n");
@@ -666,8 +804,14 @@ int main(int argc, char **argv)
 	 * closed driver's host-side pump calls its ring accessor from the script-5
 	 * completion arm, this device only starts continuous RX when bulk OUT is
 	 * already queued.  A post-completion-only prime was tested live and
-	 * returned just 1598 RX bytes before the pipe stopped. */
-	if (do_feed && stream_secs > 0) {
+	 * returned just 1598 RX bytes before the pipe stopped.
+	 *
+	 * --vendor-seq skips it: that experiment predates both the correct
+	 * script order and the correct codec register value (0x35b4, not
+	 * 0x25b4), so it was measuring a session the device had not opened.
+	 * Under --vendor-seq the prime happens in arm_bulk_now(), from script
+	 * 5's completion, which is where the driver does it. */
+	if (do_feed && stream_secs > 0 && !vendor_seq) {
 		uint8_t first[256];
 		for (int i = 0; i < 4; i++) {
 			fill_tx(first);
@@ -737,23 +881,57 @@ int main(int argc, char **argv)
 		 *   script 5   wIndex 1      -> bulk begins on its completion
 		 */
 		if (vendor_seq) {
-			struct { unsigned id; uint16_t idx; } vs[] = {
-				{ 1, 1 }, { HSF_SCRIPT_SIGNAL, 1 }, { 2, 1 },
-				{ HSF_SCRIPT_SIGNAL, 3 }, { HSF_SCRIPT_SIGNAL, 1 },
-				{ HSF_SCRIPT_SESSION_A, 1 }, { HSF_SCRIPT_SESSION_B, 1 },
-			};
-			uint8_t info[5];
-			hsf_fxo_get_information(d, info);
-			int ch = hsf_fxo_clear_notify_halt(d);
-			printf("vendor-seq: clear halt ep 0x82 -> %d\n", ch);
-			for (size_t i = 0; i < sizeof vs / sizeof vs[0]; i++) {
-				unsigned before = script_count(vs[i].id);
-				int rr = hsf_fxo_script_run_index(d, vs[i].id, vs[i].idx,
-								  NULL, 0);
-				int w = (rr == 0) ? wait_script(vs[i].id, before, 1400) : -1;
-				printf("vendor-seq: script %u wIndex %u -> send %d, completion %d\n",
-				       vs[i].id, vs[i].idx, rr, w);
+			/*
+			 * The full replay, read off usbmon.  The driver runs a
+			 * complete init cycle TWICE at load -- each one opening
+			 * a session and then closing it again with script 6 and
+			 * going on-hook with script 4 -- and the actual call is
+			 * only script 2, 8, 9, 5.  So the codec register
+			 * programming belongs to INIT, not to the call, and a
+			 * probe that does it once as part of the call has the
+			 * device in a state the driver never leaves it in.
+			 */
+			for (int cycle = 0; cycle < 2; cycle++) {
+				uint8_t info[5];
+				hsf_fxo_get_information(d, info);
+				hsf_fxo_clear_notify_halt(d);
+				codec_open_prelude(d, reg_d6, reg_da, reg_dc, reg_e4);
+				hsf_fxo_script_run_index(d, HSF_SCRIPT_SIGNAL, 3, NULL, 0);
+				hsf_fxo_script_run_index(d, HSF_SCRIPT_SIGNAL, 1, NULL, 0);
+				unsigned c9 = script_count(HSF_SCRIPT_SESSION_A);
+				if (hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_A, NULL, 0) == 0)
+					wait_script(HSF_SCRIPT_SESSION_A, c9, 1400);
+				unsigned c5 = script_count(HSF_SCRIPT_SESSION_B);
+				if (hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_B, NULL, 0) == 0)
+					wait_script(HSF_SCRIPT_SESSION_B, c5, 1400);
+				unsigned c6 = script_count(HSF_SCRIPT_SESSION_END);
+				if (hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_END, NULL, 0) == 0)
+					wait_script(HSF_SCRIPT_SESSION_END, c6, 1400);
+				unsigned c4 = script_count(HSF_SCRIPT_ON_HOOK);
+				if (hsf_fxo_script_run(d, HSF_SCRIPT_ON_HOOK, NULL, 0) == 0)
+					wait_script(HSF_SCRIPT_ON_HOOK, c4, 1400);
+				hsf_fxo_script_run_index(d, HSF_SCRIPT_SIGNAL, 1, NULL, 0);
+				printf("vendor-seq: init cycle %d done\n", cycle + 1);
 			}
+
+			/* The call itself: script 2 (0x35b7), 8, 9, 5. */
+			uint8_t p2[8] = { 0x35, 0xb7 };
+			hsf_fxo_script_run(d, 2, p2, sizeof p2);
+			hsf_fxo_script_run_index(d, HSF_SCRIPT_SIGNAL, 1, NULL, 0);
+			unsigned b9 = script_count(HSF_SCRIPT_SESSION_A);
+			int r9 = hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_A, NULL, 0);
+			int w9 = (r9 == 0) ? wait_script(HSF_SCRIPT_SESSION_A, b9, 1400) : -1;
+			printf("vendor-seq: script 9 -> send %d, completion %d\n", r9, w9);
+
+			/* From here the arming is the CALLBACK's job. */
+			g_arm_on_session_b = true;
+			unsigned b5 = script_count(HSF_SCRIPT_SESSION_B);
+			int r5 = hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_B, NULL, 0);
+			int w5 = (r5 == 0) ? wait_script(HSF_SCRIPT_SESSION_B, b5, 1400) : -1;
+			printf("vendor-seq: script 5 -> send %d, completion %d, "
+			       "bulk armed from callback: %s\n",
+			       r5, w5, g_armed ? "yes" : "NO");
+
 			uint8_t after[5];
 			printf("vendor-seq: device %s\n",
 			       hsf_fxo_get_information(d, after) < 0 ? "NOT RESPONDING" : "alive");
@@ -798,87 +976,39 @@ codec_done: ;
 	 * so the order is the point of this flag.
 	 */
 	if (stream_open) {
-		unsigned before1 = script_count(1);
-		int r = hsf_fxo_script_run(d, 1, NULL, 0);
-		if (r == 0)
-			r = wait_script(1, before1, 1400);
-		if (r < 0) {
-			unsigned again = script_count(1);
-			r = hsf_fxo_script_run(d, 1, NULL, 0);	/* the one retry */
-			if (r == 0)
-				r = wait_script(1, again, 1400);
-		}
-		printf("stream open (script 1): %s", 
-		       r == 0 ? "completed" : "no completion in 2x1400ms");
-		if (g_script1_seen)
-			printf("  reply payload %02x %02x -> ctx+0x68 mode %d",
-			       g_script1_reply[0], g_script1_reply[1], g_script1_mode);
-		printf("\n");
-
-		r = hsf_fxo_script_run(d, HSF_SCRIPT_SIGNAL, NULL, 0);
-		printf("stream open (script 8): %s\n", r == 0 ? "sent" : "rejected");
+		codec_open_prelude(d, reg_d6, reg_da, reg_dc, reg_e4);
 
 		/*
-		 * hsfusbcd2227_ -> hsfusbcd2252_, the codec register programming
-		 * that stream open does after the ring setup and which nothing
-		 * here had ever performed.  Each is hsfusbcd2200_(ctx, flags,
-		 * value, addr), which sends script 2 ONLY when flags bit 0 is set
-		 * -- so the three calls with flags 2 emit nothing -- and builds a
-		 * 16-bit big-endian word (addr & 0x1fff) | value | 0x2000.
+		 * Arm the data rings and prime AFTER the open, as the driver
+		 * does from hsfusbcd2196_ rather than at attach.
 		 *
-		 * The shadows at ctx+0x8d0..0x8dc are zero on a fresh session, so
-		 * the words below are that sequence with zero shadows.  Two calls
-		 * have a second form taken when ctx+0x8d4 is zero AND ctx+0x1c8's
-		 * byte 0 bit 0 is clear (0xA028 for the fourth, 0x25B5 for the
-		 * last); --stream-open-alt selects those.
+		 * --arm-on-5 instead re-runs the 9/5 session start after the
+		 * codec open and arms from SCRIPT 5'S COMPLETION CALLBACK, which
+		 * is where the vendor driver submits its first bulk pair.  This
+		 * is the one configuration that combines the two things known
+		 * separately to matter: the register writes in the order that
+		 * empirically yields receive, and the vendor's arming point.
 		 */
-		/*
-		 * hsfusbcd2169_ -- which stream open calls right after script 8 --
-		 * initialises the shadows this sequence reads, and three of them
-		 * are UNCONDITIONAL: ctx+0x8d0 = 0x40, 0x8d2 = 0x800,
-		 * 0x8d4 = 0x200.  Taking them as zero (as this probe first did)
-		 * gets three of the six words wrong.
-		 *
-		 * The rest come from the config struct at ctx+0x1c8 and from
-		 * ctx+0x58, none of which is visible from here:
-		 *   0x8d6 = 0/0x200/0x400/0x600 from (cfg[0] >> 1) & 7
-		 *   0x8da = 0x1000 if (cfg[0] & 0x10) or ctx+0x58, else 0
-		 *   0x8dc = 0/0x800/0x1000/0x1800 from (cfg[0] >> 5) & 7
-		 *   0x8e4 = 0 if cfg[0] & 1, else 0x80 if cfg[1] & 1, else 0xC0
-		 * (0x8d8 is set too but only feeds a flags-2 call, which sends
-		 * nothing, so it does not matter here.)
-		 *
-		 * --regs d6,da,dc,e4 sweeps them; the default is the all-zero
-		 * config, which is 0xC0 for 0x8e4 rather than 0.
-		 */
-		const uint16_t d0 = 0x40, d2 = 0x800, d4 = 0x200;
-		uint16_t w4 = (uint16_t)((reg_e4 | 0x20 | d2 | reg_da) | 0x208);
-		uint16_t regs[6] = {
-			(uint16_t)((0x004 & 0x1fff) | 0x2000),
-			(uint16_t)((0x208 & 0x1fff) | 0x8000 | 0x2000),
-			(uint16_t)(((d4 | 0x1000) & 0x1fff) | 0xC000 | 0x2000),
-			(uint16_t)((w4 & 0x1fff) | 0x8000 | 0x2000),
-			(uint16_t)(((reg_d6 | d0) & 0x1fff) | 0x4000 | 0x2000),
-			(uint16_t)(((reg_dc | 0x5b4) & 0x1fff) | 0x2000),
-		};
-		const uint16_t *w = regs;
-		for (size_t k = 0; k < sizeof regs / sizeof regs[0]; k++) {
-			uint8_t rp[8] = { (uint8_t)(w[k] >> 8), (uint8_t)(w[k] & 0xff) };
-			int rr = hsf_fxo_script_run(d, 2, rp, sizeof rp);
-			printf("  stream open reg write 0x%04x: %s\n", w[k],
-			       rr == 0 ? "sent" : "rejected");
-			usleep(5 * 1000);
-		}
-
-		/* Arm the data rings and prime AFTER the open, as the driver
-		 * does from hsfusbcd2196_ rather than at attach. */
-		hsf_fxo_arm_rx(d);
-		if (do_feed) {
-			uint8_t first[256];
-			for (int i = 0; i < 4; i++) {
-				fill_tx(first);
-				if (hsf_fxo_tx_submit(d, first, g_tx_block) < 0)
-					break;
+		if (arm_on_5) {
+			hsf_fxo_script_run_index(d, HSF_SCRIPT_SIGNAL, 1, NULL, 0);
+			unsigned a9 = script_count(HSF_SCRIPT_SESSION_A);
+			if (hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_A, NULL, 0) == 0)
+				wait_script(HSF_SCRIPT_SESSION_A, a9, 1400);
+			g_arm_on_session_b = true;
+			unsigned a5 = script_count(HSF_SCRIPT_SESSION_B);
+			if (hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_B, NULL, 0) == 0)
+				wait_script(HSF_SCRIPT_SESSION_B, a5, 1400);
+			printf("arm-on-5: bulk armed from callback: %s\n",
+			       g_armed ? "yes" : "NO");
+		} else {
+			hsf_fxo_arm_rx(d);
+			if (do_feed) {
+				uint8_t first[256];
+				for (int i = 0; i < 4; i++) {
+					fill_tx(first);
+					if (hsf_fxo_tx_submit(d, first, g_tx_block) < 0)
+						break;
+				}
 			}
 		}
 	}
