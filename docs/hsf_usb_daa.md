@@ -2395,3 +2395,22 @@ end-to-end voice/modem band is approximately **300--3000 Hz**, with measurable
 but increasingly attenuated response through 3.4--3.6 kHz and a hard network
 cutoff above it.  This grades the HSF, ATA, call path and echo server together;
 it is not the isolated analogue response of the HSF DAA.
+
+`--pcm-code-test` repeats a deterministic synthetic sequence over the actual
+mu-law Ucode range this implementation advertises (`U_INFO=78`), with random
+signs, two 16 kHz HSF samples per 8 kHz PCM symbol and a five-second post-dial
+answer guard.  Through 9099 the broadband sequence has its strongest returned
+correlation at 476 samples / 29.750 ms, `-0.690820` when scored on the larger
+symbols.  A fixed gain/polarity correction recovers only 0.44% of samples as
+the exact original mu-law level.  A trained 65-tap linear equalizer improves
+that to **2.16% exact**, 6.19% within one quantizer level and 76.38% correct
+sign, with 4.98 dB waveform SNR.  Median error is 15 mu-law level ranks.
+
+Therefore the 9099 round trip is useful as an audio-path and frequency-response
+test but **not as a transparent PCM-codeword path**.  That is expected to be a
+much harsher path than V.90 downstream: this experiment crosses the HSF D/A,
+ATA A/D, echo service, ATA D/A and HSF A/D, whereas V.90's digital modem places
+G.711 codewords directly on the DS0 and the analogue client receives the result
+after one network D/A.  Failure to recover codewords through 9099 does not show
+that the HSF cannot receive a real V.90 downstream; it shows that a V.90 stream
+cannot be looped through this echo call and remain codeword-exact.

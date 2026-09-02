@@ -118,6 +118,18 @@ static double   g_echo_tone;          /* Hz, 0 = off */
 static double   g_echo_amp = 8000.0;
 static double   g_echo_on_ms = 50.0;
 static bool     g_echo_sweep;
+static bool     g_pcm_code_test;
+static uint16_t g_pcm_lfsr = 0xace1;
+static int16_t  g_ulaw_sample;
+static unsigned g_ulaw_repeat;
+
+static int16_t ulaw_decode(uint8_t u)
+{
+	u = (uint8_t)~u;
+	int t = ((u & 0x0f) << 3) + 0x84;
+	t <<= (u & 0x70) >> 4;
+	return (int16_t)((u & 0x80) ? (0x84 - t) : (t - 0x84));
+}
 /* --tx-out writes exactly what we hand the device, so the received stream can
  * be CROSS-CORRELATED against it.  A single-bin tone detector cannot separate
  * our own hybrid sidetone from a network echo, and is contaminated by whatever
@@ -137,6 +149,31 @@ static bool dial_sample(int16_t *out)
 		return true;
 	}
 	if (g_dial[g_dial_pos] == '\0') {
+		if (g_pcm_code_test) {
+			/* Let the echo service answer before replaying a real 8 kHz
+			 * G.711/V.90 stream.  The HSF bulk pipe is 16 ksample/s, so
+			 * each decoded codeword occupies two output samples. */
+			if (g_echo_n++ < (unsigned)(5 * g_tx_rate)) {
+				*out = 0;
+				return true;
+			}
+			if (g_ulaw_repeat == 0) {
+				/* Deterministic maximal-length PRBS selecting the
+				 * negotiated V.90 Ucode 0..78 and sign. */
+				unsigned lsb = g_pcm_lfsr & 1u;
+				g_pcm_lfsr >>= 1;
+				if (lsb)
+					g_pcm_lfsr ^= 0xb400u;
+				unsigned ucode = g_pcm_lfsr % 79u; /* local U_INFO=78 */
+				unsigned sign = (g_pcm_lfsr >> 8) & 1u;
+				int c = ((0xffu - ucode) & 0x7fu) | (sign ? 0x80u : 0u);
+				g_ulaw_sample = c == EOF ? 0 : ulaw_decode((uint8_t)c);
+				g_ulaw_repeat = 2;
+			}
+			*out = g_ulaw_sample;
+			g_ulaw_repeat--;
+			return true;
+		}
 		if (g_echo_tone <= 0 && !g_echo_sweep)
 			return false;
 		if (g_echo_sweep) {
@@ -611,6 +648,9 @@ int main(int argc, char **argv)
 			g_echo_tone = atof(argv[++i]);
 		} else if (!strcmp(argv[i], "--echo-sweep")) {
 			g_echo_sweep = true;
+		} else if (!strcmp(argv[i], "--pcm-code-test")) {
+			g_pcm_code_test = true;
+			do_feed = true;
 		} else if (!strcmp(argv[i], "--dial-amp") && i + 1 < argc) {
 			g_dial_amp = atof(argv[++i]);
 		} else if (!strcmp(argv[i], "--call-seq")) {
