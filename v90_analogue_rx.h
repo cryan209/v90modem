@@ -117,6 +117,10 @@ int v90_analogue_rx_jd_symbols(const v90_analogue_rx_t *s);
 int v90_analogue_rx_jd_frames(const v90_analogue_rx_t *s);
 int v90_analogue_rx_dil_symbols(const v90_analogue_rx_t *s);
 
+/* §8.4.4's W, as learned off the wire (see sd_hunt_slot()).  Over an analogue
+ * bearer this is a Ucode on the slicer\'s scaled ladder, not the far end\'s. */
+int v90_analogue_rx_w(const v90_analogue_rx_t *s);
+
 /* Table 13 bit 47: the constellation the digital modem will train with. */
 bool v90_analogue_rx_jd_trn16(const v90_analogue_rx_t *s);
 /* The 72 bits of the last Jd frame that passed structure and CRC. */

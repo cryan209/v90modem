@@ -39,9 +39,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <spandsp.h>
+
 #include "v90.h"
 #include "v90_analogue_phase3.h"
 #include "v90_analogue_rx.h"
+#include "v90_analogue_linear.h"
 #include "v90_dil_presets.h"
 
 static int failures;
@@ -155,6 +158,92 @@ static void test_fixture(const fixture_t *fx)
            (events & V90A_RX_EVENT_JD_PRIME) ? "yes" : "no");
 
     v90_analogue_rx_free(rx);
+    free(data);
+}
+
+/*
+ * The same fixture over an ANALOGUE bearer: levels, not codewords.
+ *
+ * The digital-bearer tests above hand the receiver the exact octets.  A
+ * two-wire line does not: what arrives is the level the far D/A produced,
+ * scaled by the line's loss and sitting on the codec's DC offset.  Nothing in
+ * §8.4 changes -- one G.711 level per DS0 interval either way -- so the same
+ * receiver must acquire Sd, S̄d, TRN1d and Jd once v90_analogue_linear.c has
+ * sliced the levels back into Ucodes.
+ *
+ * The attenuation is deliberately not a round number and the DC offset is the
+ * ~900 counts the HSF codec actually adds (docs/hsf_analogue_v90_coupler.md),
+ * so a slicer that quietly assumed unity gain or a zero mean fails here.
+ */
+static void test_linear_bearer(const fixture_t *fx)
+{
+    v90_analogue_rx_config_t cfg;
+    v90_analogue_rx_t *rx;
+    v90a_linear_t *lin;
+    uint8_t *data;
+    unsigned events = 0;
+    long len;
+
+    printf("§9.3.2 receive over an analogue bearer (levels) against %s\n", fx->path);
+
+    if ((data = read_file(fx->path, &len)) == NULL) {
+        printf("  SKIP: fixture not present\n");
+        return;
+    }
+
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.law = V90_LAW_ULAW;
+    cfg.u_info = fx->u_info;
+    rx = v90_analogue_rx_init(&cfg);
+    lin = v90a_linear_init(V90_LAW_ULAW);
+    if (rx == NULL  ||  lin == NULL) {
+        printf("  FAIL: receiver did not initialise\n");
+        failures++;
+        v90_analogue_rx_free(rx);
+        v90a_linear_free(lin);
+        free(data);
+        return;
+    }
+
+    for (long off = 0; off < len; off += 160) {
+        int n = (int) ((len - off < 160) ? (len - off) : 160);
+        int16_t amp[160];
+        uint8_t sliced[480];
+        int got;
+
+        for (int i = 0; i < n; i++)
+            amp[i] = (int16_t) (ulaw_to_linear(data[off + i])*0.37 + 900.0);
+        got = v90a_linear_put(lin, amp, n, sliced, (int) sizeof(sliced));
+        if (got > 0)
+            events |= v90_analogue_rx_put(rx, sliced, got);
+        if (!v90a_linear_locked(lin)
+            &&  v90_analogue_rx_stage(rx) != V90A_RX_HUNT_SD)
+            v90a_linear_lock(lin);
+    }
+
+    CHECK((events & V90A_RX_EVENT_SD) != 0, "Sd never acquired");
+    CHECK((events & V90A_RX_EVENT_SD_BAR) != 0,
+          "§9.3.2.4's Sd-to-S̄d transition never seen — Ja would never end");
+    CHECK((events & V90A_RX_EVENT_TRN1D) != 0, "TRN1d never started");
+    CHECK((events & V90A_RX_EVENT_JD) != 0, "no Jd frame passed structure and CRC");
+    /* The level ladder is scaled, so the Ucode indices are not the digital
+     * bearer's; the *structure* is what has to survive.  A whole TRN1d within
+     * a few per cent of the 30000T the digital path reads says the S̄d→TRN1d
+     * boundary was found on the level ratio, not on a lucky codeword match. */
+    CHECK(v90_analogue_rx_trn1d_symbols(rx) > fx->trn1d_symbols*95/100,
+          "TRN1d %d symbols, expected about %d",
+          v90_analogue_rx_trn1d_symbols(rx), fx->trn1d_symbols);
+
+    printf("  gain %.4f from line level %.0f: Sd %d reps at W=%d, S̄d %d reps, "
+           "TRN1d %dT, Jd %d frames\n",
+           v90a_linear_gain(lin), v90a_linear_level(lin),
+           v90_analogue_rx_sd_reps(rx), v90_analogue_rx_w(rx),
+           v90_analogue_rx_sd_bar_reps(rx),
+           v90_analogue_rx_trn1d_symbols(rx),
+           v90_analogue_rx_jd_frames(rx));
+
+    v90_analogue_rx_free(rx);
+    v90a_linear_free(lin);
     free(data);
 }
 
@@ -1102,6 +1191,8 @@ int main(int argc, char *argv[])
 
     for (i = 0; i < sizeof(fixtures)/sizeof(fixtures[0]); i++)
         test_fixture(&fixtures[i]);
+    for (i = 0; i < sizeof(fixtures)/sizeof(fixtures[0]); i++)
+        test_linear_bearer(&fixtures[i]);
     for (i = 0; i < sizeof(fixtures)/sizeof(fixtures[0]); i++)
         test_driven_by_fixture(&fixtures[i]);
     test_dil_stage();

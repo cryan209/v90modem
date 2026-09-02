@@ -861,6 +861,11 @@ int v90_analogue_rx_jd_symbols(const v90_analogue_rx_t *s)   { return s ? s->jd_
 int v90_analogue_rx_jd_frames(const v90_analogue_rx_t *s)    { return s ? s->jd_frames : 0; }
 int v90_analogue_rx_dil_symbols(const v90_analogue_rx_t *s)  { return s ? s->dil_len : 0; }
 
+int v90_analogue_rx_w(const v90_analogue_rx_t *s)
+{
+    return s ? s->w_ucode : 0;
+}
+
 bool v90_analogue_rx_jd_trn16(const v90_analogue_rx_t *s)
 {
     return s ? s->jd_trn16 : false;

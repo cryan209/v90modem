@@ -28,6 +28,7 @@
 #include "v90_cp_live.h"
 #include "v90_cp_rx.h"
 #include "v90_analogue_phase3.h"
+#include "v90_analogue_linear.h"
 #include "v90_dil_presets.h"
 #include "p3_demod.h"
 #include "v92_cp_rx.h"
@@ -1831,6 +1832,19 @@ static bool me_v90_analogue_role(void)
  */
 static v90_analogue_phase3_t *g_v90a = NULL;
 static bool     g_v90a_started = false;
+/*
+ * The slicer that lets the analogue role run over a real analogue line.
+ *
+ * On a digital bearer the codewords arrive byte-exact and this stays NULL --
+ * me_rx_g711() feeds the receiver directly.  On a two-wire line the samples
+ * reach me_rx_audio() as levels instead, and this turns them back into §8.4's
+ * codeword stream (v90_analogue_linear.h).
+ */
+static v90a_linear_t *g_v90a_linear = NULL;
+/* Set while me_rx_g711() is forwarding its own linear copy to me_rx_audio(),
+ * so the codeword path is not run twice on one call's samples. */
+static bool     g_rx_from_g711 = false;
+static void me_v90_analogue_rx_codewords_locked(const uint8_t *codewords, int count);
 static bool     g_v90a_complete_logged = false;
 static bool     g_v90a_failed_logged = false;
 static bool     g_v90a_retrain_logged = false;
@@ -3884,6 +3898,8 @@ static void cleanup_v34_v90_training_locked(void)
     /* Before g_v34: the analogue Phase 3 borrows it as its modulator. */
     if (g_v90a) {
         v90_analogue_phase3_free(g_v90a);
+        v90a_linear_free(g_v90a_linear);
+        g_v90a_linear = NULL;
         g_v90a = NULL;
     }
     g_v90a_started = false;
@@ -4145,6 +4161,8 @@ static bool restart_v90_analogue_phase2_locked(const char *reason)
 
     if (g_v90a) {
         v90_analogue_phase3_free(g_v90a);
+        v90a_linear_free(g_v90a_linear);
+        g_v90a_linear = NULL;
         g_v90a = NULL;
     }
     g_v90a_started = false;
@@ -6787,6 +6805,50 @@ void me_rx_audio(const int16_t *amp, int len)
         return;
     }
 
+    /*
+     * The analogue role over an analogue bearer.
+     *
+     * §8.4's Phase 3 signals and §8.6's Phase 4 ones are one G.711 level per
+     * DS0 interval, so the receiver is a codeword state machine -- but on a
+     * two-wire line nothing hands us codewords, only the levels they produced.
+     * Slice them back (v90_analogue_linear.c) and run exactly the receiver the
+     * digital bearer runs.  Skipped when these samples are me_rx_g711()'s own
+     * linear copy, where the real codewords have already been fed.
+     */
+    if (!g_rx_from_g711 && g_v90a_started && g_v90a && g_v90a_linear
+        && (state == ME_TRAINING || state == ME_DATA)) {
+        int offset = 0;
+
+        while (offset < len) {
+            uint8_t codewords[576];
+            int chunk = len - offset;
+            int n;
+
+            if (chunk > 256)
+                chunk = 256;
+            n = v90a_linear_put(g_v90a_linear, amp + offset, chunk,
+                                codewords, (int)sizeof(codewords));
+            if (n > 0) {
+                pthread_mutex_lock(&g_state_mtx);
+                if (g_v90a_started && g_v90a)
+                    me_v90_analogue_rx_codewords_locked(codewords, n);
+                pthread_mutex_unlock(&g_state_mtx);
+                /* §8.4.4's W is learned off the wire and everything after Sd
+                 * is identified by its level relative to it, so the gain that
+                 * acquired Sd is the one the rest of Phase 3 must keep. */
+                if (!v90a_linear_locked(g_v90a_linear)
+                    && v90_analogue_phase3_rx_stage(g_v90a) != V90A_RX_HUNT_SD) {
+                    v90a_linear_lock(g_v90a_linear);
+                    ME_LOG("[ME] V.90 analogue: level slicer locked, "
+                           "line level %.0f, gain %.4f\n",
+                           v90a_linear_level(g_v90a_linear),
+                           v90a_linear_gain(g_v90a_linear));
+                }
+            }
+            offset += chunk;
+        }
+    }
+
     /* Check for phase timeouts */
     if (g_phase_start_ms > 0) {
         uint64_t elapsed = trace_now_ms() - g_phase_start_ms;
@@ -8080,6 +8142,8 @@ static void prepare_v90_analogue_phase3_locked(void)
         return;
     }
     g_v90a_started = true;
+    v90a_linear_free(g_v90a_linear);
+    g_v90a_linear = v90a_linear_init(cfg.law);
     ME_LOG("[ME] V.90 analogue Phase 3 started: symbol-rate code %d, %s carrier, U_INFO=%d, "
            "Ja descriptor N=%u (%d bits), RTD=%d samples\n",
            cfg.baud_rate_code, cfg.high_carrier ? "high" : "low",
@@ -9339,6 +9403,111 @@ static void me_g711_capture_rx(const uint8_t *codewords, int count)
     }
 }
 
+/*
+ * The analogue role's Phase 3/4 receive work, in the codeword domain.
+ *
+ * Factored out of me_rx_g711() because a digital bearer is not the only way
+ * these codewords arrive: on a two-wire analogue line the samples reach
+ * me_rx_audio() as levels, and v90_analogue_linear.c slices them back into
+ * the same stream.  Both bearers run the same receiver.  g_state_mtx is held.
+ */
+static void me_v90_analogue_rx_codewords_locked(const uint8_t *codewords, int count)
+{
+    unsigned events;
+    uint8_t data_bits[2048];
+    int nbits;
+
+
+    /* Phase 3 and Phase 4/data are one byte-exact DS0 stream.  The Phase 4
+     * receiver changes from CPt to CP at Ed and retains that mapper into
+     * data, so it must continue to receive after ME_DATA is entered. */
+    events = v90_analogue_phase3_rx(g_v90a, codewords, count);
+    g_v90a_rx_codewords += (uint64_t) count;
+    if (events & V90A4_RX_EVENT_CLEARDOWN) {
+        /* §9.7: MP drn=0 is a completed cleardown indication, not a
+         * malformed MP and not a retrain request. */
+        ME_LOG("[ME] V.90 analogue: peer requested §9.7 cleardown (MP drn=0)\n");
+        trace_phase("V90a peer cleardown");
+        g_state = ME_HANGUP;
+    }
+    if (events & V90A_EVENT_TONE_B_RETRAIN) {
+        /* §9.3.2/§9.4.2/§9.6.2: sustained Tone B is the digital modem's
+         * retrain request; answer with §9.5.2.2, not a fresh V.8 call. */
+        ME_LOG("[ME] V.90 analogue: Tone B >50 ms; responding with §9.5.2.2 retrain\n");
+        (void) restart_v90_analogue_phase2_locked("peer Tone B");
+    }
+    me_v90_analogue_progress_locked();
+    if ((events & V90A4_RX_EVENT_DATA)
+        && g_state == ME_TRAINING
+        && v90_analogue_phase3_data_ready(g_v90a)) {
+        const vpcm_cp_frame_t *cp = v90_analogue_phase3_cp(g_v90a);
+        int downstream_rate = cp ? (int)vpcm_cp_drn_to_bps(cp->drn) : 0;
+        int upstream_rate = v90_analogue_phase3_upstream_rate(g_v90a);
+
+        if (downstream_rate <= 0)
+            downstream_rate = V90_RATE_BPS;
+        /* The stack's line bit rate clocks its transmitted V.42/V.14
+         * stream.  In the analogue role that stream is the V.34 upstream,
+         * not the faster PCM downstream; using 56 kbit/s here made V.42's
+         * detection timers expire while bits left at 12–26.4 kbit/s. */
+        data_stack_start_online(upstream_rate > 0 ? upstream_rate
+                                                  : downstream_rate,
+                                g_calling_party);
+        g_state = ME_DATA;
+        g_phase_start_ms = 0;
+        ME_LOG("[ME] V.90 analogue startup complete after B1d "
+               "(upstream V.34 %d bps, downstream PCM %d bps)\n",
+               upstream_rate, downstream_rate);
+        trace_phase("V90a enter DATA after B1d: upstream=%d downstream=%d",
+                    upstream_rate, downstream_rate);
+        if (g_data_framing != DS_FRAMING_V42) {
+            g_data_connect_reported = true;
+            di_on_connected(downstream_rate);
+        } else {
+            ME_LOG("[ME] V.90 analogue carrier ready; waiting for V.42 LAPM\n");
+        }
+    }
+    while ((nbits = v90_analogue_phase3_get_data_bits(
+                g_v90a, data_bits, (int)sizeof(data_bits))) > 0) {
+        for (int i = 0; i < nbits; i++) {
+            int data_bit = data_bits[i] & 1U;
+
+            if (g_v90a_data_diag_bits < 4096) {
+                g_v90a_data_diag_bits++;
+                if (!data_bit)
+                    g_v90a_data_diag_zeros++;
+                if (g_v90a_data_diag_bits == 4096) {
+                    ME_LOG("[ME] V.90 analogue first 4096 downstream data "
+                           "bits: %d zeroes, %d marks\n",
+                           g_v90a_data_diag_zeros,
+                           4096 - g_v90a_data_diag_zeros);
+                }
+            }
+            if (data_bit == 0 && g_v90a_data_bits_seen > 0
+                && g_v90a_data_adp_window_bits == 44
+                && g_v90a_data_adp_window == ((1ULL << 44) - 1ULL)) {
+                ME_LOG("[ME] V.90 analogue first downstream zero at bit %llu\n",
+                       (unsigned long long)g_v90a_data_bits_seen);
+            }
+            /* V.42 §7.2.1 Table 3: (E), 12 marks, (C), 12 marks. */
+            g_v90a_data_adp_window =
+                (g_v90a_data_adp_window >> 1) | ((uint64_t)data_bit << 43);
+            if (g_v90a_data_adp_window_bits < 44)
+                g_v90a_data_adp_window_bits++;
+            if (g_v90a_data_adp_window_bits == 44
+                && g_v90a_data_adp_window == 0xFFFA1BFFE8AULL) {
+                g_v90a_data_adp_count++;
+                ME_LOG("[ME] V.90 analogue decoded V.42 ADP #%d at "
+                       "downstream bit %llu\n",
+                       g_v90a_data_adp_count,
+                       (unsigned long long)(g_v90a_data_bits_seen - 43));
+            }
+            g_v90a_data_bits_seen++;
+            ds_rx_put_bit(&g_data_stack, data_bit);
+        }
+    }
+}
+
 void me_rx_g711(const uint8_t *codewords, int count)
 {
     int offset;
@@ -9366,98 +9535,7 @@ void me_rx_g711(const uint8_t *codewords, int count)
         v91_live_receive_codewords_locked(codewords, count);
     if (g_v90a_started && g_v90a
         && (g_state == ME_TRAINING || g_state == ME_DATA)) {
-        unsigned events;
-        uint8_t data_bits[2048];
-        int nbits;
-
-        /* Phase 3 and Phase 4/data are one byte-exact DS0 stream.  The Phase 4
-         * receiver changes from CPt to CP at Ed and retains that mapper into
-         * data, so it must continue to receive after ME_DATA is entered. */
-        events = v90_analogue_phase3_rx(g_v90a, codewords, count);
-        g_v90a_rx_codewords += (uint64_t) count;
-        if (events & V90A4_RX_EVENT_CLEARDOWN) {
-            /* §9.7: MP drn=0 is a completed cleardown indication, not a
-             * malformed MP and not a retrain request. */
-            ME_LOG("[ME] V.90 analogue: peer requested §9.7 cleardown (MP drn=0)\n");
-            trace_phase("V90a peer cleardown");
-            g_state = ME_HANGUP;
-        }
-        if (events & V90A_EVENT_TONE_B_RETRAIN) {
-            /* §9.3.2/§9.4.2/§9.6.2: sustained Tone B is the digital modem's
-             * retrain request; answer with §9.5.2.2, not a fresh V.8 call. */
-            ME_LOG("[ME] V.90 analogue: Tone B >50 ms; responding with §9.5.2.2 retrain\n");
-            (void) restart_v90_analogue_phase2_locked("peer Tone B");
-        }
-        me_v90_analogue_progress_locked();
-        if ((events & V90A4_RX_EVENT_DATA)
-            && g_state == ME_TRAINING
-            && v90_analogue_phase3_data_ready(g_v90a)) {
-            const vpcm_cp_frame_t *cp = v90_analogue_phase3_cp(g_v90a);
-            int downstream_rate = cp ? (int)vpcm_cp_drn_to_bps(cp->drn) : 0;
-            int upstream_rate = v90_analogue_phase3_upstream_rate(g_v90a);
-
-            if (downstream_rate <= 0)
-                downstream_rate = V90_RATE_BPS;
-            /* The stack's line bit rate clocks its transmitted V.42/V.14
-             * stream.  In the analogue role that stream is the V.34 upstream,
-             * not the faster PCM downstream; using 56 kbit/s here made V.42's
-             * detection timers expire while bits left at 12–26.4 kbit/s. */
-            data_stack_start_online(upstream_rate > 0 ? upstream_rate
-                                                      : downstream_rate,
-                                    g_calling_party);
-            g_state = ME_DATA;
-            g_phase_start_ms = 0;
-            ME_LOG("[ME] V.90 analogue startup complete after B1d "
-                   "(upstream V.34 %d bps, downstream PCM %d bps)\n",
-                   upstream_rate, downstream_rate);
-            trace_phase("V90a enter DATA after B1d: upstream=%d downstream=%d",
-                        upstream_rate, downstream_rate);
-            if (g_data_framing != DS_FRAMING_V42) {
-                g_data_connect_reported = true;
-                di_on_connected(downstream_rate);
-            } else {
-                ME_LOG("[ME] V.90 analogue carrier ready; waiting for V.42 LAPM\n");
-            }
-        }
-        while ((nbits = v90_analogue_phase3_get_data_bits(
-                    g_v90a, data_bits, (int)sizeof(data_bits))) > 0) {
-            for (int i = 0; i < nbits; i++) {
-                int data_bit = data_bits[i] & 1U;
-
-                if (g_v90a_data_diag_bits < 4096) {
-                    g_v90a_data_diag_bits++;
-                    if (!data_bit)
-                        g_v90a_data_diag_zeros++;
-                    if (g_v90a_data_diag_bits == 4096) {
-                        ME_LOG("[ME] V.90 analogue first 4096 downstream data "
-                               "bits: %d zeroes, %d marks\n",
-                               g_v90a_data_diag_zeros,
-                               4096 - g_v90a_data_diag_zeros);
-                    }
-                }
-                if (data_bit == 0 && g_v90a_data_bits_seen > 0
-                    && g_v90a_data_adp_window_bits == 44
-                    && g_v90a_data_adp_window == ((1ULL << 44) - 1ULL)) {
-                    ME_LOG("[ME] V.90 analogue first downstream zero at bit %llu\n",
-                           (unsigned long long)g_v90a_data_bits_seen);
-                }
-                /* V.42 §7.2.1 Table 3: (E), 12 marks, (C), 12 marks. */
-                g_v90a_data_adp_window =
-                    (g_v90a_data_adp_window >> 1) | ((uint64_t)data_bit << 43);
-                if (g_v90a_data_adp_window_bits < 44)
-                    g_v90a_data_adp_window_bits++;
-                if (g_v90a_data_adp_window_bits == 44
-                    && g_v90a_data_adp_window == 0xFFFA1BFFE8AULL) {
-                    g_v90a_data_adp_count++;
-                    ME_LOG("[ME] V.90 analogue decoded V.42 ADP #%d at "
-                           "downstream bit %llu\n",
-                           g_v90a_data_adp_count,
-                           (unsigned long long)(g_v90a_data_bits_seen - 43));
-                }
-                g_v90a_data_bits_seen++;
-                ds_rx_put_bit(&g_data_stack, data_bit);
-            }
-        }
+        me_v90_analogue_rx_codewords_locked(codewords, count);
     }
     if (g_v92_p3_rx_active && g_v92_active && g_state == ME_TRAINING) {
         for (int i = 0; i < count; i++) {
@@ -9518,6 +9596,9 @@ void me_rx_g711(const uint8_t *codewords, int count)
         return;
     }
 
+    /* The codeword work above has already been done for these samples; say so,
+     * or me_rx_audio() slices them a second time (v90_analogue_linear.h). */
+    g_rx_from_g711 = true;
     for (offset = 0; offset < count; ) {
         int16_t linear[320];
         int chunk = count - offset;
@@ -9529,6 +9610,7 @@ void me_rx_g711(const uint8_t *codewords, int count)
         me_rx_audio(linear, chunk);
         offset += chunk;
     }
+    g_rx_from_g711 = false;
 }
 
 int me_tx_g711(uint8_t *codewords, int count)
