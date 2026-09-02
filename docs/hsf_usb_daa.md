@@ -1467,3 +1467,94 @@ has now held sixteen -- but the six-run sequence that first included script 11
 degraded at run 5, so the two settings have not been separated and the run
 count before failure varies by load.  What is solid is that a session must be
 ended; how much of `hsfusbcd2265_`'s stop pair matters is not measured.
+
+## The vendor driver, captured on real hardware (2026-09-02)
+
+The instrument the previous entry asked for now exists.  The Linux vendor stack
+runs, binds and completes a call under a Debian 7 guest on `tower`, and
+`usbmon` has the whole thing.  See `tools/linux-capture/README.md` for the
+recipe; the captures are `artifacts/hsf-usbmon/`.
+
+**Kernel 3.2 was the fix, exactly as predicted.**  The 3.13 attempt oopsed in
+`hsfengine1901_` during probe, and its last line was the shim's own
+`OsThreadSchedule: no thread` -- the `OSSCHED` patch that 3.13's
+`kthread_work` path forces.  On 3.2 that path does not exist, **no patch is
+needed**, and the blob runs the code the vendor shipped: modules load, the
+device binds, `/dev/ttySHSF0` answers `AT`, and `ATX3DT123` dials and returns
+`NO CARRIER`.  Building natively in the guest also retires the whole
+cross-build apparatus -- no container, no `IMPORTED_ARCH`, no `-DRETPOLINE`
+(that flag was only ever needed because trusty's kernel was built with it).
+
+### `tools/hsf_scripts.py` is verified against the wire
+
+Every `CD2_CONTROL_SCRIPT` the vendor driver issued on a live call was compared
+against the assembler's output for the same script id.  **Six of seven match
+byte for byte**, and the seventh (script 2, the tone/cadence script) differs
+only in its two patch bytes, which is what a patched template is supposed to
+do -- it appears eight times in one call carrying `35b7`, `2004`, `a208`,
+`f200`, `aae8`, `6040`, `35b4`, `aac8`.  So the reconstruction of the +0x18
+opcode remap, the label resolution, the shortened assembled length,
+`wValue = 0xFF01/0xFF02` and `wIndex` is correct, on hardware, for real
+traffic.  That was the whole open question of the static-analysis entry above.
+
+### The bring-up, in full, and what starts the datapump
+
+The control plane on a working call is **only** scripts -- no `SET_INTERFACE`,
+no altsetting change, no firmware upload (this part already holds firmware).
+The complete sequence from driver load is:
+
+    CD2_GET_INFROMATION           (rt=0xc0 req=0x00, 5 bytes)
+    CLEAR_FEATURE(ENDPOINT_HALT)  on endpoint 0x82   <-- host-side, easy to miss
+    CONTROL_SCRIPT  wValue=0xFF01 len=57   (script 1)
+    CONTROL_SCRIPT  wValue=0xFF02 len=61   (script 8)
+    CONTROL_SCRIPT  wValue=0xFF01 len=51   (script 2)
+    ...
+    CONTROL_SCRIPT  wValue=0xFF02 wIndex=1 (script 8)  -> completion 08 80
+    CONTROL_SCRIPT  wValue=0xFF01 len=11   (script 9)  -> completion 09 01
+    CONTROL_SCRIPT  wValue=0xFF01 len=22   (script 5)  -> completion 05 01
+    <<< first BULK OUT, 128 bytes, at the same instant as the first BULK IN
+
+**This confirms the 2026-09-02 correction exactly**: the pump starts from
+script 5's completion, script 9 precedes it, and the second script 9 in the old
+`9,5,9` reading really was only `hsfusbcd2165_`'s timeout retry.  Nothing else
+gates the bulk pipe.
+
+### The rate is 16000 Hz mono, and "~21240 Hz" is withdrawn
+
+Two independent measurements agree, and **one of them does not depend on
+timing at all**, which is what settles it:
+
+* **Content.**  The call dialled `123`, so the bulk-OUT stream carries DTMF at
+  frequencies fixed by spec.  The two strongest bins in the loudest window are
+  in the ratio of **697 and 1336 Hz -- digit `2` -- and both give fs = 16039
+  and 16001 Hz, agreeing to 0.24%.**  Digits `1` and `3` are off by ~10%, so
+  the identification is unambiguous.  A byte-rate measurement can be wrong
+  about the clock; a tone cannot.
+* **Timing.**  250.3 bulk transfers/s x 128 bytes = 16021 Hz as mono int16, on
+  both captures independently (10.9 s and 9.9 s of streaming).
+
+So the format is **signed 16-bit little-endian, mono, 16000 Hz**, 128-byte
+transfers = 64 samples = 4 ms, 250 transfers/s each way.  The earlier
+"~21240 Hz mono" and the "two 16-bit slots at 10.6667 kHz" before it were both
+taken from a byte rate measured on macOS against a stream nothing was pacing;
+the "identical byte rate, which is exactly why the wrong framing survived"
+warning applies to the 21240 figure too.
+
+The bulk-OUT stream from a working driver is real transmit audio: 175212
+samples, peak +20000 (a clean generator cap), RMS 1776 overall and 6669 in the
+DTMF burst.  **That is the byte sequence this whole exercise was for**, and it
+is now on disk to compare our own transmit path against.
+
+### Still open
+
+* Our own probe's transmit path has not yet been re-tested against these
+  numbers.  The rate correction alone (16000 vs 21240) is a 33% error in every
+  tone we have ever generated, which would put a 697 Hz DTMF row tone at
+  925 Hz -- outside any detector's band, and consistent with "our DTMF never
+  appears" while receive looked fine.  **That is a hypothesis, not a result**:
+  it has not been tested.
+* The `CLEAR_FEATURE(ENDPOINT_HALT)` on endpoint `0x82` at bring-up is not
+  known to be load-bearing; it is simply present in the vendor sequence and
+  absent from ours.
+* The captures were taken with `ATX3DT123` into a line that returns
+  `NO CARRIER`, so nothing here exercises a connected call's datapump.

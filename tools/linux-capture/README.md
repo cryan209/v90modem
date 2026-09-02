@@ -2,76 +2,77 @@
 
 The point is the one thing neither source reading nor probing the device could
 give us: **the bulk-OUT byte sequence the vendor driver uses to make this part
-transmit.**  Every host-side layer has now been reproduced from static analysis
-and the transmit FIFO still never drains, so the remaining move is to watch the
-real driver drive real hardware.
+transmit.**
 
-## Recipe (verified as far as "driver loads, binds, and creates ttys")
+**This now works.**  The stack loads, binds, dials and streams under Debian 7,
+and the captures are in `artifacts/hsf-usbmon/`.  Findings are written up in
+`docs/hsf_usb_daa.md` ("The vendor driver, captured on real hardware").
 
-Host used: `tower`, x86_64, Unraid 6.12 -- qemu + KVM present, **no SLIRP**, so
-networking is a tap on `br0`.
+## Recipe
 
-1. **Guest**: Ubuntu 14.04 cloud image (kernel 3.13).  cloud-init seed built on
-   macOS with `hdiutil makehybrid -iso -default-volume-name cidata`.
-   **trusty's archives are GONE from old-releases**, so apt inside the guest is
-   dead -- do not plan on installing anything there.
-2. **USB passthrough** by vid:pid, so a replug re-attaches:
-   `-device qemu-xhci,id=xhci -device usb-host,bus=xhci.0,vendorid=0x0572,productid=0x1300`
-   **Replug the device AFTER the guest is up.**  This part's bootloader answers
-   EP0 for only ~3 s after it enumerates, so a device attached at qemu start
-   has gone silent before the guest enumerates it.
-3. **Build the modules off-guest** (no compiler in the guest): copy the guest's
-   `/usr/src/linux-headers-*` out and build in a `gcc:4.9` container -- the
-   kernel was built with gcc 4.8 and a modern gcc cannot compile 3.13:
+Host: `tower`, x86_64, Unraid 6.12 -- qemu + KVM, **no SLIRP**, so networking
+is a tap on `br0`.  Everything lives in `/mnt/user/domains/hsfcap/wheezy`.
 
-       docker run --rm -e KCPPFLAGS=-DRETPOLINE -v $PWD:/w -w /w gcc:4.9 sh -c \
-         'cp -a usr/src/linux-headers-* /usr/src/; cd hsfmodem-linux &&
-          make -C modules all IMPORTED_ARCH=x86_64 \
-               CNXT_KERNELSRC=/usr/src/linux-headers-3.13.0-170-generic'
+**Use kernel 3.2, not 3.13.**  On 3.13 the shim's `OSSCHED` (8 pointers, 64
+bytes, embedded in the blob's own structures so it cannot be enlarged) is too
+small for the `>=3.8` `kthread_work` path, and the workaround in
+`osservices-ossched.patch` gets as far as an oops in `hsfengine1901_` during
+probe.  Pre-3.8 avoids that path entirely and **needs no patch at all**.
 
-   * `IMPORTED_ARCH=x86_64` is required: `uname -i` returns "unknown" in a
-     container and the build then looks for `makeflags-unknown.mak`.
-   * `KCPPFLAGS=-DRETPOLINE` is required: without it vermagic lacks
-     `retpoline ` and insmod refuses the module.
-   * the `GPL/hda` sub-build fails on `sound/driver.h`; the makefile ignores it
-     and it is irrelevant to a USB device.
-4. **Load order**: `hsfosspec, hsfengine, hsfserial, hsfsoar, hsfusbcd2`.
+1. **Rootfs**: `mkroot.sh` then `mkroot2.sh`, both run inside a `debian:wheezy`
+   container over a bind mount.  They install kernel 3.2, headers,
+   `build-essential`, `usbutils`, `tcpdump`, sshd and a DHCP client, and set up
+   serial autologin.  Debian 7's archive is still served by
+   `archive.debian.org`, so **apt works** -- unlike trusty, whose archives are
+   gone.  `Acquire::Check-Valid-Until false` and the `wheezy/updates` security
+   line are both required (without security, `libc6-dev` is uninstallable).
+2. **Disk**: `docker export` the container into an ext4 image.  A modern
+   `mkfs.ext4` writes features 3.2 cannot read -- create it with
+   `-O ^metadata_csum,^64bit,^metadata_csum_seed,^orphan_file`, or the guest
+   fails to mount root (`unsupported optional features (2000)`) and then, once
+   that is fixed, drops to a maintenance shell because wheezy's `e2fsck`
+   rejects `orphan_file` as `FEATURE_C12`.
+3. **Boot** with `run-wheezy.sh`: qemu loads `vmlinuz`/`initrd` straight off
+   the host, so there is no bootloader and no installer.  USB passthrough is by
+   vid:pid so a replug re-attaches.
+4. **Build in the guest** -- there is a compiler in it now, so no container and
+   no cross-build:
+
+       make -C modules all IMPORTED_ARCH=x86_64
+
+   `IMPORTED_ARCH` is still needed (`uname -i` returns "unknown"); `-DRETPOLINE`
+   is **not** -- that was only ever trusty's vermagic.  The `GPL/hda` sub-build
+   fails on `sound/driver.h`; the makefile ignores it and it is irrelevant to a
+   USB device.
+5. **Load order**: `hsfosspec, hsfengine, hsfserial, hsfsoar, hsfusbcd2`.
    Without `hsfsoar`, `hsfusbcd2` fails on `GetSOARLibInterface`.
-   `/dev/ttySHSF0-7` appear once `hsfserial` is in.
+6. **Userspace**: `make install IMPORTED_ARCH=x86_64`, then
+   `hsfconfig --auto --country=NEW_ZEALAND`.  Without it the driver logs
+   `NVM_Open: cannot create instance ... err=-2` and `hsfdcpd returned -2` on
+   every probe.  **hsfconfig unloads the modules when it finishes** -- reload
+   them before capturing.
 
-## The one source fix needed
+## Capturing
 
-`osservices-ossched.patch`, against `modules/osservices.c`.
+* `capture-full.sh` -- the definitive one.  Starts `tcpdump` **before** the
+  driver loads, so the capture carries enumeration, interface claiming, the
+  whole `CD2_CONTROL_SCRIPT` bring-up and the bulk datapump on a live dial.
+* `capture-at.sh` -- same but via the usbmon *text* interface.  Note it
+  **truncates payloads at 32 bytes**, which loses the tail of every script body
+  and all of the bulk audio.  Prefer the pcap.
+* `capture-run.sh` -- driver load plus a USB reset, no call.
 
-The shim's `OSSCHED` is `8*sizeof(void*)` = 64 bytes and **the blob embeds it
-in its own structures, so it cannot be enlarged** -- that is exactly what the
-`sizeof()` guard in `OsInit` protects.  On 3.13 the `>=3.8` path wraps a
-`struct kthread_work` plus two pointers = 72 bytes, so the module refuses to
-load with `OSSCHED too small (64 < 72)`.  The patch stores a POINTER to a
-separately allocated `kwork_data`, so the blob's storage holds 8 bytes and its
-layout is untouched.
+Decode with `tools/hsf_pcap.py` (pcap, full payloads) or `tools/hsf_usbmon.py`
+(text).  `hsf_pcap.py --bulk-out` writes the transmit stream as a raw file.
 
-## Open: it oopses in the blob during USB probe
+The device's bootloader answers EP0 for only ~3 s after it enumerates, so if a
+firmware upload is ever needed the driver must already be loaded when the part
+appears; `usbreset.c` in the guest resets it through qemu to re-open that
+window.  In practice the part came up already holding firmware and no
+`CD2_UPLOAD_FIRMWARE` was ever issued.
 
-    RIP  hsfengine1901_+0x16/0xc0 [hsfengine]
-         usb_probe_device -> driver_probe_device -> generic_probe
+## Guest access
 
-Two leads, and the second subsumes the first:
-
-* The firmware download had already failed once ("Firmware download failed")
-  because the driver loaded ~17 minutes after the device enumerated, far past
-  the ~3 s bootloader window.  Probing a device in that state may simply be
-  unsupported.
-* **Use a kernel older than 3.8.**  That avoids the `kthread_work` path
-  entirely, so this patch is not needed at all and the shim runs the code the
-  vendor actually shipped and tested.  Debian 7 (kernel 3.2) is the obvious
-  target: `archive.debian.org` still serves it, and kernel headers can be
-  fetched as a `.deb` and `dpkg -x`'d without working apt.
-
-## Then
-
-`tools/hsf_capture.sh` runs inside the guest, one action per file.  Note it was
-written for the CONTROL plane and says the datapump underrunning "does not
-matter" -- for the transmit question the datapump is the whole point, so add a
-capture of a live connection carrying bulk traffic.  Decode with
-`tools/hsf_usbmon.py`.
+`ssh hsfcap` (see `~/.ssh/config`).  **OpenSSH 6.0 predates ed25519**, so the
+guest needs an RSA key and the client needs
+`PubkeyAcceptedAlgorithms +ssh-rsa` / `HostkeyAlgorithms +ssh-rsa`.
