@@ -220,6 +220,31 @@ enum hsf_script_id {
 	/* hsfusbcd2220_ (.text 0x6910) patches three bytes: two context values
 	 * divided by 1000 (so milliseconds) and one literal.  Pulse dialling. */
 	HSF_SCRIPT_PULSE       = 7,
+
+	/* hsfusbcd2261_ (.text 0x37f0) is the ONLY producer of these two, and it
+	 * is a start/stop pair around one path code: it builds an 8-byte patch of
+	 * zeros, writes the code into bytes 0 AND 1, and then enqueues script 12
+	 * when its second argument is non-zero and script 11 when it is zero.
+	 *
+	 * The code comes from the first argument, and from the hardware variant
+	 * at ctx+0x68: on the ordinary part 0 -> 0x02 and 1 -> 0x01 (2 and 3 do
+	 * nothing at all), and on the 0x68 == 1 variant 0 -> 0x14, 1 -> 0x13,
+	 * 2 -> 0x12, 3 -> 0x17.
+	 *
+	 * Where they are sent is what makes them interesting for the transmit
+	 * path.  hsfusbcd2167_ (.text 0x6430) is the stream-open entry -- it is
+	 * the function that sets the TX granularity to 0x80 and the RX to 0x40 at
+	 * .text 0x6480 -- and on the way in it sends script 8 with wIndex 1
+	 * (hsfusbcd2247_) and then 2261_(3, 1), i.e. START.  hsfusbcd2265_, the
+	 * stop counterpart, sends 2261_(3, 0) and 2261_(1, 0), i.e. STOP twice.
+	 * Off-hook (hsfusbcd2180_) is followed by 2261_(2, 1) and on-hook
+	 * (hsfusbcd2166_, hsfusbcd2185_) by 2261_(2, 0).
+	 *
+	 * NOT confirmed against hardware.  These are the scripts that have only
+	 * ever been sent as unpatched templates, and the patch byte is the whole
+	 * of their meaning. */
+	HSF_SCRIPT_PATH_START  = 12,
+	HSF_SCRIPT_PATH_STOP   = 11,
 };
 
 /*

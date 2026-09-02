@@ -50,10 +50,15 @@ static double        g_dtmf_phase_hi;
 static double        g_dtmf_freq_lo;
 static double        g_dtmf_freq_hi;
 static int           g_tx_slot = -1;
+static unsigned      g_tx_prime_blocks;
+static unsigned      g_tx_blocks;
 
 static void fill_tx(uint8_t buf[128])
 {
 	memset(buf, 0, 128);
+	g_tx_blocks++;
+	if (g_tx_blocks <= g_tx_prime_blocks)
+		return;
 	if (!g_dtmf_tx)
 		return;
 	/* RX strongly suggests four-byte frames.  Put the same signed sample in
@@ -190,6 +195,10 @@ int main(int argc, char **argv)
 	char dtmf = '\0';
 	uint8_t patch[8];
 	size_t  n_patch = 0;
+	int     post_ids[16];
+	int     n_post = 0;
+	uint8_t post_patch[8];
+	size_t  n_post_patch = 0;
 	uint8_t raw[256];
 	size_t  n_raw = 0;
 
@@ -225,6 +234,27 @@ int main(int argc, char **argv)
 					break;
 				raw[n_raw++] = (uint8_t)v;
 			}
+		} else if (!strcmp(argv[i], "--post-script") && i + 1 < argc) {
+			/* Scripts sent AFTER the session is up and the TX ring is
+			 * primed, which is where hsfusbcd2167_ sends script 8 and
+			 * then the 2261_ start pair.  Order matters here and is not
+			 * known, so it is a separate flag rather than a fixed
+			 * sequence. */
+			for (char *p = argv[++i]; *p && n_post < 16; ) {
+				post_ids[n_post++] = atoi(p);
+				while (*p && *p != ',')
+					p++;
+				if (*p == ',')
+					p++;
+			}
+		} else if (!strcmp(argv[i], "--post-patch") && i + 1 < argc) {
+			for (char *p = argv[++i]; *p && n_post_patch < 8; ) {
+				post_patch[n_post_patch++] = (uint8_t)strtoul(p, NULL, 0);
+				while (*p && *p != ',')
+					p++;
+				if (*p == ',')
+					p++;
+			}
 		} else if (!strcmp(argv[i], "--patch") && i + 1 < argc) {
 			for (char *p = argv[++i]; *p && n_patch < 8; ) {
 				patch[n_patch++] = (uint8_t)strtoul(p, NULL, 0);
@@ -244,6 +274,8 @@ int main(int argc, char **argv)
 				fprintf(stderr, "--tx-slot must be 0 or 1\n");
 				return 2;
 			}
+		} else if (!strcmp(argv[i], "--tx-prime-blocks") && i + 1 < argc) {
+			g_tx_prime_blocks = (unsigned)strtoul(argv[++i], NULL, 0);
 		} else if (!strcmp(argv[i], "--rx-out") && i + 1 < argc) {
 			rx_path = argv[++i];
 		} else if (!strcmp(argv[i], "--wait") && i + 1 < argc) {
@@ -255,7 +287,8 @@ int main(int argc, char **argv)
 				" [--script ID[,ID...]] [--patch B[,B...]]"
 				" [--rom PATH] [--bootloader]"
 				" [--hook on|off] [--wait SECONDS] [--feed] [--dtmf DIGIT]"
-				" [--tx-slot 0|1]"
+				" [--tx-slot 0|1] [--tx-prime-blocks N]"
+				" [--post-script ID[,ID...]] [--post-patch B[,B...]]"
 				" [--rx-out PATH]"
 				" [--stream SECONDS]\n",
 				argv[0]);
@@ -457,6 +490,18 @@ int main(int argc, char **argv)
 		       hook ? "off" : "on", hook ? 3 : 4,
 		       r == 0 ? "accepted" : "rejected",
 		       live < 0 ? "NOT RESPONDING" : "alive");
+	}
+
+	for (int i = 0; i < n_post; i++) {
+		int r = hsf_fxo_script_run(d, (unsigned)post_ids[i],
+					   n_post_patch ? post_patch : NULL,
+					   n_post_patch);
+		uint8_t after[5];
+		int live = hsf_fxo_get_information(d, after);
+		printf("post script %d: load %s, device %s\n", post_ids[i],
+		       r == 0 ? "accepted" : "rejected",
+		       live < 0 ? "NOT RESPONDING" : "alive");
+		usleep(50 * 1000);
 	}
 
 	if (stream_secs > 0) {

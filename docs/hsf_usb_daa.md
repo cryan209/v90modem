@@ -272,6 +272,115 @@ the waveform generator, in the sample-register/DMA data element.  Feeding a
 tone into only the first or second apparent word position tests two wire-format
 hypotheses; it does not reproduce an engine channel selection.
 
+**Correction after tracing beyond the shared rings:** “no framing” above is
+true only of the USB driver's view.  The driver does not add a header, but the
+engine fills the shared ring with records produced by its DMA/sample-register
+layer; the ring is not the waveform generator's `int16_t[]` itself.
+`hsfengine2244_` is the receive-side record parser.  It consumes a first byte,
+selects the record class with `byte0 & 3`, consumes a second byte, and derives
+an index from `byte1 >> 1` plus a flag from `byte1 & 1` before dispatching the
+payload to `hsfengine1172_`, `hsfengine1175_`, or `hsfengine1166_`.  The latter
+writes the decoded payload into the 4096-byte FIFO at object `+0x64`; the raw
+USB FIFO is the separate 4096-byte FIFO at `+0x3c`.  In the other direction,
+the engine must perform the inverse record construction before the USB driver
+can ship the bytes.
+
+This also explains the live TX result.  Raw signed-16 DTMF, duplicated into
+both apparent word positions or placed in either position alone, is accepted
+only until the device's roughly 2.4 kB input FIFO fills.  Adding a second
+four-block kick exactly at script 5 completion changed nothing: a five-second
+run still stopped at 2432 TX bytes while RX delivered 211712 bytes without an
+error.  The missing operation is therefore not another USB prime and not a
+choice between two PCM slots; it is the engine's TX DMA-record encoder (and
+possibly its initial sample-register records).  Do not feed bare PCM to bulk
+OUT and treat FIFO acceptance as transmitted audio.
+
+The tempting direct inverse of that grammar is now disproved.  Prefixing each
+128-byte OUT block with class 0 plus a rolling seven-bit index stopped after
+1280 bytes; class 2 stopped after 1152 bytes and also stopped continuous RX.
+Bare PCM had reached 2432 bytes.  Both engine record classes are therefore on
+the engine's internal side of the sample-register layer, not the USB wire side.
+The probe's experimental encoder was removed rather than leaving a known-wrong
+protocol selectable.
+
+Nor does this parser settle the earlier slot question.  The live USB capture
+still aligns consistently as `[nonzero signed-16, zero signed-16]` four-byte
+units, but those are the output of `samplereg_c.c`; they are not the records
+consumed by `hsfengine2244_`.  The exact inverse must be taken from the
+sample-register packer, not inferred by applying the DMA FIFO parser directly
+to endpoint bytes.
+
+### The sample-register lane is settled
+
+The actual packer is the `hsfengine1780_` / `hsfengine1049_` path, adjacent to
+the `DMA FIFO INIT FAILED` reference that identifies this compilation unit.
+`hsfengine1780_` clears its staging samples and calls `hsfengine1049_` with the
+generated signed-16 buffer.  The DMA FIFO was configured by `hsfengine1047_`
+with a stride of **2** and lane offset **1**, so `hsfengine1049_` performs the
+equivalent of:
+
+    wire[2*i + 0] = 0;
+    wire[2*i + 1] = tx_sample[i];
+
+The receive sibling, `hsfengine1787_` / `hsfengine1043_`, copies one selected
+lane into the engine's contiguous receive buffer and can swap adjacent lanes
+for a hardware variant.  Thus the first apparent word is not TX on this path;
+TX is the second signed-16 word.
+
+That packing alone is still insufficient to make the firmware consume OUT
+continuously.  A live lane-1 test with eight initial 128-byte blocks of exact
+zero before DTMF again stopped at **2432 bytes**, identical to unprimed bare
+PCM, while RX delivered 211712 bytes in five seconds without error.  Therefore
+“prime” is not merely silent audio in the correct lane.  The remaining delta
+is the DMA FIFO's producer/consumer state transition or its DCP initialization,
+not sample layout.
+
+### The stream-open scripts, and the one surface never tried
+
+The transmit stall is now bounded from the driver side.  `hsfusbcd2269_` is the
+only caller of `OsUsbMakeDataTransmitRequest` and it is a plain bulk submit of
+at most 0x100 bytes taken from a host ring whose TX granularity (`ctx+0x876`)
+is **0x80** against the RX granularity (`ctx+0x874`) of **0x40** -- so 128-byte
+OUT blocks and 64-byte IN packets are the driver's own sizes, and the probe
+already matches both.  `hsfusbcd2196_` primes **four** TX requests and
+**sixteen** RX requests from the notification handler, which the probe also
+matches.  The two calls immediately before that priming, `hsfusbcd2248_` and
+`hsfusbcd2245_`, are bare setters of `ctx+0x21c` and `ctx+0x218`; there is no
+control request there.  **Nothing the host does to the USB pipes is missing.**
+
+What is missing is on the script side, and it is the one surface these notes
+already named as untested: the patch bytes.  `hsfusbcd2261_` (.text 0x37f0) is
+a start/stop pair around a single path code.  It zeroes an 8-byte patch buffer,
+writes one code into bytes 0 **and** 1, and enqueues **script 12** when its
+second argument is non-zero and **script 11** when it is zero.  The code comes
+from the first argument and from the hardware variant at `ctx+0x68`: on the
+ordinary part 0 -> 0x02 and 1 -> 0x01, with 2 and 3 doing nothing at all, and
+on the `0x68 == 1` variant 0 -> 0x14, 1 -> 0x13, 2 -> 0x12, 3 -> 0x17.
+
+The call sites are what make this the transmit lead rather than one more
+script.  `hsfusbcd2167_` is the **stream-open** entry -- it is the function that
+writes the 0x80/0x40 granularities at .text 0x6480 -- and on the way in it
+sends **script 8 with wIndex 1** (`hsfusbcd2247_`) and then `2261_(3, 1)`, a
+START.  `hsfusbcd2265_`, the stop counterpart, sends `2261_(3, 0)` and
+`2261_(1, 0)`, two STOPs.  Off-hook (`hsfusbcd2180_`) is followed by
+`2261_(2, 1)` and on-hook (`hsfusbcd2166_`, `hsfusbcd2185_`) by `2261_(2, 0)`.
+So a session that has run 9 and 5 has brought the *codec* up -- which is what
+the continuous RX shows -- and has not yet opened the *stream*, which is where
+both the granularities and the start code are set.
+
+`--post-script ID[,ID...]` with `--post-patch B[,B...]` sends scripts after the
+session is up and the TX ring is primed, because the order relative to the
+prime is not known and should be swept rather than guessed:
+
+    ./hsf_fxo_probe --start-codec --feed --dtmf 5 --stream 5 \
+        --post-script 8,12 --post-patch 0x17,0x17
+
+**Untested against hardware.**  The prediction it makes is specific: if this is
+the gate, TX stops being a ~2.4 kB one-shot FIFO fill and starts completing
+continuously, at the same 128-byte granularity, for the whole run.  If TX still
+stops at 2432 bytes with every code in both variants' tables, the gate is not
+in the script layer and the next place to look is the firmware's own consumer.
+
 There is one more control path in the driver -- `hsfusbcd2188_` CRCs a host
 buffer with CRC-16-CCITT (poly 0x1021) and writes it in 64-byte blocks via
 `CD2_WRITE_EEPROM`, driven by `hsfusbcd2168_`. **It is irrelevant to this part,
