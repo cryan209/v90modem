@@ -278,7 +278,34 @@ Asterisk reaches in 48 ms -- and went **Avail**.
 at a clean AC-RMS of 762 with no clipping, where before it carried an AC-RMS of
 3 from the moment the digits went out.
 
-**Still blocked, and it is now the analogue front end.**  The moment the call
+**THE SOUNDING IS DONE, and the band above 3750 Hz is measured (2026-09-03).**
+The answer was already in the recordings: the window between the digits and the
+far end's answer carries our transmit at close to unity gain and does NOT clip,
+and the sounder is in it.  Two-port, against a recording of the codewords we
+sent:
+
+| Hz | dB | Hz | dB | Hz | dB |
+|---|---|---|---|---|---|
+| 150-3450 | flat within 2.4 | 3600 | -4.3 | 3800 | -10.3 |
+| 3450 | -2.4 | 3750 | **-8.4** | 3850 | -12.7 |
+|  |  |  |  | 3900 | -16.3 |
+|  |  |  |  | 3950 | **-22.8** |
+
+Noise floor -39 dB, so the 3950 Hz point sits 16 dB clear of it and is a
+measurement rather than a floor reading.  **It repeats within 0.2 dB over a
+37 dB range of transmit level** (RMS 3510, 702 and 50), and its 3750 Hz value
+agrees with V.34's own probe to 0.1 dB -- a different signal, in a different
+session.
+
+So the path does not stop at 3750: it rolls off smoothly to -22.8 dB at 3950.
+The zero-excess-bandwidth reading that ruled out non-data-aided timing recovery
+holds only in the sense that what is left up there is 20 dB down -- there is
+energy against the 4 kHz Nyquist, not a dead band.  Folding this into the
+equaliser's test channel is NOT done: the magnitudes are solid but reconstructing
+an impulse response from them produced a two-lobed pulse, so the phase handling
+needs checking before the model is changed.
+
+**Still open, and it is the analogue front end.**  The moment the call
 CONNECTS the received signal jumps to AC-RMS 18640, clipping 23% of samples, a
 hard-limited waveform whose zero crossings put it at about 210 Hz.  It is not
 what we transmit: dropping the sounder from RMS 3500 to 702 -- 14 dB, confirmed
