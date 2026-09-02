@@ -722,6 +722,23 @@ int hsf_fxo_script_run(struct hsf_dev *d, unsigned id,
 	return script_run_index(d, id, 1, patch, npatch);
 }
 
+int hsf_fxo_script_run_index(struct hsf_dev *d, unsigned id, uint16_t windex,
+			     const uint8_t *patch, size_t npatch)
+{
+	return script_run_index(d, id, windex, patch, npatch);
+}
+
+/*
+ * The vendor driver clears a halt on the interrupt-IN endpoint at the top of
+ * every session bring-up -- observed on the wire (docs/hsf_usb_daa.md), not
+ * derived from the blob.  Note this is endpoint 0x82, which IS inside a
+ * claimed interface, unlike the EP0 clear that cannot work on darwin.
+ */
+int hsf_fxo_clear_notify_halt(struct hsf_dev *d)
+{
+	return libusb_clear_halt(d->h, EP_NOTIFY);
+}
+
 int hsf_fxo_script_start_codec(struct hsf_dev *d)
 {
 	/* hsfusbcd2165_ sends 9 and waits up to 0x578/1400 ms.  On the normal

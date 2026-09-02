@@ -368,6 +368,14 @@ int hsf_fxo_script_delete(struct hsf_dev *d);
 int hsf_fxo_script_run(struct hsf_dev *d, unsigned id,
 		       const uint8_t *patch, size_t npatch);
 
+/* As hsf_fxo_script_run, but with an explicit wIndex.  The vendor uses wIndex
+ * 3 on script 8 as a delete, and 1 everywhere else. */
+int hsf_fxo_script_run_index(struct hsf_dev *d, unsigned id, uint16_t windex,
+			     const uint8_t *patch, size_t npatch);
+
+/* CLEAR_FEATURE(ENDPOINT_HALT) on the interrupt-IN endpoint 0x82. */
+int hsf_fxo_clear_notify_halt(struct hsf_dev *d);
+
 /* HSF_SCRIPT_SESSION_A then _B.  _A is retried only after a 1400 ms timeout. */
 int hsf_fxo_script_start_codec(struct hsf_dev *d);
 int hsf_fxo_script_set_hook(struct hsf_dev *d, bool off_hook);

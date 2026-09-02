@@ -285,6 +285,7 @@ int main(int argc, char **argv)
 	int  wait_secs = 0;
 	const char *rom_path = NULL;
 	const char *rx_path = NULL;
+	bool vendor_seq = false;
 	bool need_bootloader = false;
 	bool do_feed = false;
 	int  do_reset = 0;		/* 1 = CD2_RESET, 2 = CD2_WAKEONRING */
@@ -321,6 +322,9 @@ int main(int argc, char **argv)
 				if (*p == ',')
 					p++;
 			}
+		} else if (!strcmp(argv[i], "--vendor-seq")) {
+			vendor_seq = true;
+			do_start = true;
 		} else if (!strcmp(argv[i], "--start-codec")) {
 			do_start = true;
 		} else if (!strcmp(argv[i], "--bootloader")) {
@@ -714,6 +718,47 @@ int main(int argc, char **argv)
 		const bool sig_first = getenv("HSF_SIGNAL_FIRST") != NULL;
 		const unsigned *seq = sig_first ? seq_signal : seq_plain;
 		const size_t seq_n = sig_first ? 3 : 2;
+
+		/*
+		 * --vendor-seq replays the session bring-up EXACTLY as the
+		 * vendor driver performs it, read off usbmon rather than out of
+		 * the blob (docs/hsf_usb_daa.md).  The driver runs this whole
+		 * unit, and the probe's own order was inverted: it sent 9 and 5
+		 * FIRST and only then the script 1 / 8 / 2 prelude.
+		 *
+		 *   CD2_GET_INFROMATION
+		 *   CLEAR_FEATURE(HALT) ep 0x82
+		 *   script 1   wIndex 1      (the query; 4-byte reply)
+		 *   script 8   wIndex 1
+		 *   script 2   wIndex 1
+		 *   script 8   wIndex 3      (delete)
+		 *   script 8   wIndex 1
+		 *   script 9   wIndex 1
+		 *   script 5   wIndex 1      -> bulk begins on its completion
+		 */
+		if (vendor_seq) {
+			struct { unsigned id; uint16_t idx; } vs[] = {
+				{ 1, 1 }, { HSF_SCRIPT_SIGNAL, 1 }, { 2, 1 },
+				{ HSF_SCRIPT_SIGNAL, 3 }, { HSF_SCRIPT_SIGNAL, 1 },
+				{ HSF_SCRIPT_SESSION_A, 1 }, { HSF_SCRIPT_SESSION_B, 1 },
+			};
+			uint8_t info[5];
+			hsf_fxo_get_information(d, info);
+			int ch = hsf_fxo_clear_notify_halt(d);
+			printf("vendor-seq: clear halt ep 0x82 -> %d\n", ch);
+			for (size_t i = 0; i < sizeof vs / sizeof vs[0]; i++) {
+				unsigned before = script_count(vs[i].id);
+				int rr = hsf_fxo_script_run_index(d, vs[i].id, vs[i].idx,
+								  NULL, 0);
+				int w = (rr == 0) ? wait_script(vs[i].id, before, 1400) : -1;
+				printf("vendor-seq: script %u wIndex %u -> send %d, completion %d\n",
+				       vs[i].id, vs[i].idx, rr, w);
+			}
+			uint8_t after[5];
+			printf("vendor-seq: device %s\n",
+			       hsf_fxo_get_information(d, after) < 0 ? "NOT RESPONDING" : "alive");
+			goto codec_done;
+		}
 		int r = 0;
 		for (size_t i = 0; i < seq_n; i++) {
 			unsigned before = script_count(seq[i]);
@@ -731,6 +776,7 @@ int main(int argc, char **argv)
 		printf("start codec (script 9 completion, then script 5): %s, device %s\n",
 		       r == 0 ? "accepted" : "rejected",
 		       live < 0 ? "NOT RESPONDING" : "alive");
+codec_done: ;
 	}
 
 	/*

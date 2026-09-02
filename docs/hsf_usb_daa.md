@@ -1606,10 +1606,26 @@ So the transmit pipe is not stalled by anything we put in it; the device's
 playback consumer is not clocking.  That is the whole problem, and it is
 upstream of every sample-format question.
 
-**That also explains where "~21240 Hz" came from.**  Our receive path
-free-runs -- it reads as fast as the device will answer -- so its byte rate is
-a property of our polling, not of the codec.  The vendor's is paced by the
-device (one RX and one TX per pass) and reads 32000 B/s exactly.
+**Where "~21240 Hz" came from was NOT our polling, and saying so was wrong.**
+The obvious explanation -- that our receive free-runs while the vendor's is
+paced -- predicts that changing how we ask would change the byte rate.  It does
+not.  Over a 2x2 of RX transfer size and TX block size, 5 s each:
+
+    rx128 tx128   211776 B in 1655 packets   42355 B/s
+    rx128 tx256   211712 B in 1654 packets   42342 B/s
+    rx256 tx128   211840 B in  828 packets   42368 B/s
+    rx256 tx256   211712 B in  827 packets   42342 B/s
+
+**Invariant to a quarter of a percent while the packet count doubles**, so the
+rate is the device's, not ours.  The device delivers **21178 Hz to our session
+and 16000 Hz to the vendor's**, on the same part minutes apart.
+
+That is the most useful thing in this entry, because it makes session state
+**measurable in one number before transmit is even attempted**: our session is
+not merely missing a transmit trigger, the codec is running in a different mode
+from the vendor's.  A configuration change that does not move receive from
+21178 towards 16000 has not reproduced the vendor's session, whatever else it
+does.
 
 **And it retires a measurement this document leaned on.**  The 400 Hz NZ dial
 tone was used to confirm receive was working, at an assumed rate.  It cannot
@@ -1632,3 +1648,51 @@ reader is paced by the device, as the vendor's DTMF measurement above is.
 * In the default receive mode our bulk-IN completions carry **-121
   (EREMOTEIO)** and deliver nothing; only `--stream-open-alt` receives at all
   in this environment.  Why those two modes differ is not explained here.
+
+## Replaying the vendor's session bring-up exactly: necessary reading, not sufficient
+
+Identifying every control transfer by script id -- matching each body against
+`tools/hsf_scripts.py`'s output, patched bodies included -- turns the two
+captures into sequences that can be read side by side.  Done that way the
+difference is not subtle, and it should have been the first thing checked.
+
+The vendor's session bring-up is a fixed eleven-step unit, which it runs twice
+at driver load (each time ending the session with 6 and going on-hook with 4)
+and once more for the actual call:
+
+    CD2_GET_INFROMATION
+    CLEAR_FEATURE(ENDPOINT_HALT) ep 0x82
+    script 1  wIndex 1        (the query -- 4-byte reply)
+    script 8  wIndex 1
+    script 2  wIndex 1        (patched)
+    script 8  wIndex 3        (delete)
+    script 8  wIndex 1
+    script 9  wIndex 1
+    script 5  wIndex 1        -> first bulk transfer on its completion
+
+Ours sent `9, 5` and only afterwards the `1, 8, 2` prelude -- **the prelude and
+the session start were inverted** -- plus a `CD2` vendor-IN `req=0x03` the
+vendor never issues, and never the `CLEAR_FEATURE` on `0x82`.  That also
+explains why testing script 8 alone before 9/5 made things worse: script 8
+without the script 1 query in front of it is not the vendor's sequence either.
+
+`--vendor-seq` replays the unit above exactly, in order, waiting on each
+completion.  **Every script is accepted** (script 8's own completion is the
+`08 80` form and the probe's waiter does not match it, which is cosmetic), the
+device stays alive, and **receive still delivers nothing and transmit still
+does not drain.**  So the remaining difference is *not* the order or content of
+the control transfers.  It is in how the bulk transfers are armed around them:
+the vendor submits its first bulk pair from script 5's completion callback,
+where this probe calls `hsf_fxo_start()` before the script sequence runs and
+has no way to express the vendor's ordering.  That is the next thing to change,
+and it is a restructuring of the probe rather than a new discovery about the
+device.
+
+**Why usbmon has not simply ended this.**  It records what crossed the wire; it
+does not record the host-side structure that produced it -- which URB was
+outstanding when, how many, and from which callback the next was submitted.
+For a device whose codec only clocks when it is driven in a particular shape,
+that structure is the part that matters, and it has to be inferred and then
+tested rather than read off.  What the capture does give, and what nothing else
+did, is an exact target and a cheap way to tell how far off we are: the receive
+rate.
