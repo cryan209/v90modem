@@ -77,9 +77,21 @@ def main():
         reg, val = (int(x, 0) for x in a.write)
         before, alive = read_block([reg])
         body = f"27{MARK:02x}0b{reg:02x}{val:02x}2701" + "28" + "36"
-        r = subprocess.run([PROBE, "--raw", body, "--stream", "3"],
-                           capture_output=True, text=True, timeout=60)
-        ok = "accepted" in (r.stdout + r.stderr)
+        cmd = [PROBE, "--raw", body, "--stream", "3"]
+        if a.live:
+            # Write while the stream is actually running.  Registers whose bit
+            # 7 is hardware-owned refuse the write at idle (0x1c reads back
+            # 0x20 however it is written), so an idle-only write cannot test
+            # anything about a running channel.
+            cmd = [PROBE, "--raw", body, "--raw-post", "--start-codec",
+                   "--stream-open", "--feed", "--stream", "4"]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+        out = r.stdout + r.stderr
+        ok = "accepted" in out
+        if a.live:
+            for l in out.splitlines():
+                if l.startswith("rx ") and " tx " in l:
+                    print("   " + l.strip())
         after, alive = read_block([reg])
         print(f"  reg 0x{reg:02x}: before={before.hex() if before else '??'} "
               f"write 0x{val:02x} {'accepted' if ok else 'REJECTED'} "

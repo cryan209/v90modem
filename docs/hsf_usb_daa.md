@@ -272,6 +272,57 @@ the waveform generator, in the sample-register/DMA data element.  Feeding a
 tone into only the first or second apparent word position tests two wire-format
 hypotheses; it does not reproduce an engine channel selection.
 
+### Opcode 0x0b IS a register write -- the note saying otherwise was wrong
+
+These notes record "Opcode 0x0b was thought to write a control register.  It
+does not", on the evidence that `0b 1f a5` is accepted and leaves register 0x1f
+at 0x98.  **That conclusion is withdrawn.**  Measured with the 0x03 read as the
+oracle:
+
+    reg 0x24: before=80  write 0x55 accepted  after=55
+    reg 0x24: before=55  write 0x80 accepted  after=80
+
+Unbiased, and it sticks.  What misled the earlier test is that **writability is
+per register and per bit**, and 0x1f is one of the partial ones:
+
+    reg 0x1c: before=20  write 0xa0  -> 20    bit 7 REFUSED at idle
+    reg 0x1e: before=00  write 0xa0  -> a0    fully writable
+    reg 0x1f: before=3c  write 0xa0  -> 1c    partially writable
+    reg 0x06: before=f7  write 0xa0  -> 34    dynamic, hardware-driven
+
+`0x1c` refusing bit 7 at idle is consistent with 0xa0 being a hardware-owned
+"channel running" state rather than something the host sets, which is what the
+idle/streaming dump suggested.
+
+The firmware side agrees.  At 0x0a03/0x0a18/0x0a27/0x0a32 there is one handler
+family sharing a shape -- register index from R5, value from R4 -- providing
+**read, write, OR-set and AND-clear**:
+
+    A = R5 + 0x40 ; MOV f4h,A      then  MOV R1,f5h      (read)
+                                         MOV f5h,R4      (write)
+                                         ORL f5h,A       (set bits)
+                                         A = R4 ^ 0xff ; ANL f5h,A  (clear bits)
+
+Each ends `MOV A,#02h/#03h; RET`, which is the operand width the driver's own
+table carries.  **They are not in the 0x62 dispatch table and nothing in the
+image references them**, so they are reached by computed dispatch, most likely
+from the mask ROM at 0xd7xx -- more evidence that the 0x62 table is not the
+script dispatch.  Note the `+ 0x40` bias in the handler, which the measured
+writes show is NOT present at the script level, so something compensates it
+before R5.
+
+Also new: `MOV f6h,R1` / `MOV A,f7h` appear beside the F4/F5 accesses at 0x15d3
+and 0x17f4, so **SFR F6/F7 is a SECOND indexed file** that these notes had not
+recorded.
+
+**Two cautions, both learned the hard way.**  Register writes **persist across
+runs** -- an idle `0x1e = 0xa0` set here was still there on the next session --
+so a sweep pollutes its own later arms unless each write is restored.  And
+writing **0xff to 0x1e during a live stream wedged the part** (RX fell to 60160
+mid-run and every later run failed until a replug), so 0xff is too blunt a
+first probe on a register whose bits are unknown; use the OR-set and AND-clear
+forms one bit at a time.
+
 ### The control register file, dumped IDLE and STREAMING (2026-09-02)
 
 `tools/hsf_regdump.py --live` now brings the session up and opens the stream
