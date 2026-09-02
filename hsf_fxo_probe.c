@@ -279,6 +279,7 @@ int main(int argc, char **argv)
 	int  do_reset = 0;		/* 1 = CD2_RESET, 2 = CD2_WAKEONRING */
 	unsigned reset_value = 0, reset_index = 0;
 	int  reset_rt = -1;		/* -1 sweeps all four framings */
+	int  trickle_ms = 0;
 	bool end_session = true;
 	bool session_ended = false;
 	bool stream_open = false;
@@ -373,6 +374,12 @@ int main(int argc, char **argv)
 			reg_d6 = v[0]; reg_da = v[1]; reg_dc = v[2]; reg_e4 = v[3];
 		} else if (!strcmp(argv[i], "--stream-open-alt")) {
 			stream_open = true;
+		} else if (!strcmp(argv[i], "--tx-trickle") && i + 1 < argc) {
+			/* Feed one block every N ms from the main loop instead of
+			 * from RX credit.  Far below the codec rate, so the FIFO
+			 * cannot be overrun: if the device consumes at all, the
+			 * accepted total must exceed its ~2.5 kB capacity. */
+			trickle_ms = atoi(argv[++i]);
 		} else if (!strcmp(argv[i], "--tx-block") && i + 1 < argc) {
 			g_tx_block = (size_t)strtoul(argv[++i], NULL, 0);
 			if (g_tx_block < 1 || g_tx_block > 256)
@@ -834,9 +841,15 @@ int main(int argc, char **argv)
 	if (stream_secs > 0) {
 		printf("streaming for %ds%s...\n", stream_secs,
 		       do_feed ? " (feeding signed-linear silence out)" : "");
-		if (do_feed) {
-			/* on_tx_done maintains the four-deep pipeline without a gap. */
-			sleep((unsigned)stream_secs);
+		if (trickle_ms > 0) {
+			g_tx_pace_rx = false;	/* main loop owns the feed */
+			int n = stream_secs * 1000 / trickle_ms;
+			for (int k = 0; k < n; k++) {
+				uint8_t b[256];
+				fill_tx(b);
+				(void)hsf_fxo_tx_submit(d, b, g_tx_block);
+				usleep((useconds_t)trickle_ms * 1000);
+			}
 		} else {
 			sleep((unsigned)stream_secs);
 		}

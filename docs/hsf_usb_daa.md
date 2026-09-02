@@ -272,6 +272,52 @@ the waveform generator, in the sample-register/DMA data element.  Feeding a
 tone into only the first or second apparent word position tests two wire-format
 hypotheses; it does not reproduce an engine channel selection.
 
+### The playback consumer never starts -- proven rate-independently
+
+The transmit stall has been described as a FIFO that "fills once and stops",
+which left open whether we were simply overrunning the device.  We are not.
+
+**Trickle test.**  One 64-byte block every 20 ms -- 3.2 kB/s, **thirteen times
+slower than the 42.5 kB/s codec rate** -- for 8 seconds, offering **25600
+bytes**, ten times the FIFO's capacity.  The device accepted **2560** and then
+never acknowledged another byte.  Identical to feeding at full rate.
+
+So the ~2.5 kB is the FIFO filling once, and nothing drains it at any speed.
+**The playback path never starts.**  That is now established independently of
+rate, and it means the following are all ruled out as causes, each by
+measurement rather than argument:
+
+* **overrun / feed rate** -- 13x slower changes nothing
+* **frame format and sample layout** -- swept, and a consumer reading the wrong
+  layout would still consume
+* **sample rate** -- the correct 21240 Hz makes no difference
+* **pacing discipline** -- RX-credited and free-running are identical
+* **transfer size** -- 32 to 256 bytes all cap at the same byte total
+* **the script layer** -- all fifteen arms of the code sweep, tx 2432 throughout
+* **the driver sequence** -- reproduced end to end with correct operands
+* **hook state** -- identical on-hook and off-hook, to the byte
+* **contention on macOS** -- `AppleUSBCDCCompositeDevice` is attached but
+  `!matched`, and quitting the two applications holding
+  `AppleUSBHostDeviceUserClient` on the device (Chrome and ChatGPT, found in
+  `ioreg`) changed nothing
+
+Meanwhile **receive is fully working** on the same runs: 170-212 kB per run of
+real line audio, with dial tone at 6x the on-hook floor.  So the device clocks,
+digitises, and delivers -- and does not consume.
+
+**Endpoint sanity, since it was never checked:** the device is
+`0572:1300 "USB HSF Modem"`, one configuration, two interfaces -- iface 0 class
+0x0a (CDC Data) with `ep 0x01 BULK OUT` and `ep 0x81 BULK IN`, both
+wMaxPacketSize 64, and iface 1 class 0x02/0x01 (CDC ACM) with `ep 0x82`
+INTERRUPT.  `0x01` is what the vendor driver uses for DataOutPipe, so the
+endpoint is right.
+
+**And the mask ROM is NOT required for this.**  An earlier entry concluded the
+work was blocked on dumping it.  That was wrong for transmit: the driver sends
+audio by writing bulk OUT to endpoint 0x01 and nothing more, so a correct host
+sequence is sufficient by construction.  The mask ROM matters for understanding
+the DAA and script dispatch, not for making this device transmit.
+
 ### The sample rate is ~21240 Hz mono 16-bit, and TX still reaches nothing
 
 **Rate.**  The receive stream is a plain signed-16 LE stream at **~21240 Hz**,
