@@ -76,3 +76,27 @@ window.  In practice the part came up already holding firmware and no
 `ssh hsfcap` (see `~/.ssh/config`).  **OpenSSH 6.0 predates ed25519**, so the
 guest needs an RSA key and the client needs
 `PubkeyAcceptedAlgorithms +ssh-rsa` / `HostkeyAlgorithms +ssh-rsa`.
+
+## Making the vendor driver narrate its own data path
+
+`modules/osusb.c` is GPL source and the blob reaches the bus only through it,
+so it can be made to log exactly what the blob asks for -- which usbmon cannot
+show, because usbmon records what crossed the wire and not the host-side
+structure that produced it.
+
+`_DEBUG` alone is **not** enough: `dbg` is defined as a no-op elsewhere and
+`osusb.c`'s `#ifndef dbg` guard therefore never fires.  Force it, near the top
+of `osusb.c` (just before `#define Working TRUE`):
+
+    #undef dbg
+    #define dbg(format, arg...) printk(KERN_DEBUG "hsfdbg: " format "\n" , ## arg)
+
+then `make -C modules all IMPORTED_ARCH=x86_64` and reload.  `dmesg | grep
+hsfdbg` then carries every `OsUsbMakeDataReceiveRequest` /
+`...TransmitRequest` / `...ControlRequest` with its size and buffer.
+
+Gotchas: `rmmod` fails with "in use" if a tty is still open or the interface is
+bound (`fuser -k /dev/ttySHSF0`, then unbind under
+`/sys/bus/usb/drivers/hsfusbcd2/`), and once the refcount is stuck only a guest
+restart clears it.  If `insmod` says "File exists" the OLD module is still
+loaded and you are reading stale behaviour.

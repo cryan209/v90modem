@@ -1854,3 +1854,70 @@ it cost several runs in this session that were scored as real results.  The
 claims are now checked, a kernel driver is detached first, and a failure aborts
 with a message.  (`libusb_set_auto_detach_kernel_driver()` is 1.0.16+ and the
 capture guest ships 1.0.11, so the detach is explicit.)
+
+## What is the vendor driver doing that we cannot?  On the wire: nothing.
+
+The USB layer of the vendor stack is **GPL source we have** (`modules/osusb.c`),
+and the blob reaches the bus only through it.  Every entry point already carries
+a `dbg()`, so the driver can be made to narrate its own data path.  It is not
+enabled by `_DEBUG` alone -- `dbg` is defined as a no-op elsewhere and the
+`#ifndef dbg` guard in `osusb.c` never fires -- so it needs an explicit
+`#undef dbg` / `#define dbg(...) printk(...)`.  With that, on a live call:
+
+    OsUsbMakeDataReceiveRequest:  ... pBuf=ffff880000090080 nBytes=128
+    OsUsbMakeDataTransmitRequest: ule=ffff8800798ca200 pBuf=ffff880000080a80 nBytes=128
+    OsUsbMakeDataReceiveRequest:  ... pBuf=ffff880000090100 nBytes=128
+    OsUsbMakeDataTransmitRequest: ule=ffff8800798ca200 pBuf=ffff880000080b00 nBytes=128
+    ...
+
+So the driver's host-side structure, measured rather than disassembled:
+
+* 32 receive and 32 transmit URBs are allocated (`NUM_RECEIVE_URBS` /
+  `NUM_SEND_URBS` in `modules/include/osusb.h`) but **exactly one of each is
+  outstanding at a time** -- the transmit `ule` address is identical on every
+  pass, one buffer reused.
+* **Receive is submitted first, then transmit**, 128 bytes each, strictly
+  alternating, each re-submitted from its own completion.
+* **"The driver primes four 128-byte writes" is wrong.**  That came from the
+  disassembly; the runtime says one.
+
+**And copying it exactly makes things worse, not better.**  With one transmit
+primed, one receive in flight and 128 bytes both ways -- the vendor's structure
+to the letter -- we receive **0 bytes**; with our four primed we receive 211904.
+
+That is the answer to the question.  **On the USB wire the vendor driver is
+doing nothing we cannot do.**  The control plane is byte-identical, the data
+path structure is now known and reproducible, and reproducing it faithfully
+yields less than our own arrangement does.  What it has that we do not is
+`hsfengine.ko` -- the closed DSP.  This part is a codec and a DAA; the modem is
+in the blob.  The scripts are how the engine's decisions reach the chip, not the
+decisions themselves, which is exactly why replaying them changes nothing: our
+off-hook is accepted and the DAA does not move, because nothing is deciding to
+move it.
+
+Every measurement in this document is consistent with that single reading, and
+none of them required it to be guessed:
+
+* on-hook and off-hook are the same signal
+* receive is a DC level, not audio
+* transmit never drains
+* a byte-identical control plane changes neither
+
+### Consequence for the work
+
+Reimplementing the USB layer was never going to produce a working modem, because
+the modem is not in the USB layer.  Two honest options remain, and they are very
+different sizes:
+
+1. **Run the vendor stack and tap it.**  It works today on kernel 3.2, presents
+   `/dev/ttySHSF0`, and its bulk stream is the line audio in a known format
+   (signed 16-bit LE, mono, 16000 Hz).  All the tooling for that now exists.
+2. **Reverse the engine's DAA and codec bring-up** -- what `hsfengine.ko`
+   decides, not what `hsfusbcd2` transmits.  That is a far larger job than the
+   USB layer was, and nothing learned so far reduces it.
+
+The `dbg()` instrumentation is the tool that settles questions of this shape,
+and it should be reached for before any further inference from usbmon: usbmon
+shows what crossed the wire, the shim log shows what the blob asked for, and the
+gap between those two is where every wrong conclusion in this document has come
+from.

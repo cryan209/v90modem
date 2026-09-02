@@ -813,7 +813,15 @@ int main(int argc, char **argv)
 	 * 5's completion, which is where the driver does it. */
 	if (do_feed && stream_secs > 0 && !vendor_seq) {
 		uint8_t first[256];
-		for (int i = 0; i < 4; i++) {
+		/* The driver's own runtime log (osusb.c dbg, _DEBUG in osusb.c)
+		 * shows it keeps exactly ONE transmit URB outstanding -- the same
+		 * ule address every pass -- submitting one RX then one TX and
+		 * re-submitting each from its completion.  "Primes four" came
+		 * from the disassembly and is not what it does.  HSF_TX_PRIME
+		 * makes the depth an experiment. */
+		const char *tp = getenv("HSF_TX_PRIME");
+		int nprime = tp ? atoi(tp) : 4;
+		for (int i = 0; i < nprime; i++) {
 			fill_tx(first);
 			if (hsf_fxo_tx_submit(d, first, g_tx_block) < 0)
 				break;
