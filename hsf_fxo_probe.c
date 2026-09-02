@@ -736,6 +736,12 @@ int main(int argc, char **argv)
 	const char *dial_delay_ms = getenv("HSF_DIAL_DELAY_MS");
 	if (dial_delay_ms)
 		g_dial_delay = (unsigned)strtoul(dial_delay_ms, NULL, 0) * 16;
+	const char *dial_tone_ms = getenv("HSF_DIAL_TONE_MS");
+	if (dial_tone_ms)
+		g_dial_tone_len = (unsigned)strtoul(dial_tone_ms, NULL, 0) * 16;
+	const char *dial_gap_ms = getenv("HSF_DIAL_GAP_MS");
+	if (dial_gap_ms)
+		g_dial_gap_len = (unsigned)strtoul(dial_gap_ms, NULL, 0) * 16;
 
 	struct hsf_dev *d = NULL;
 	uint8_t info[5];
