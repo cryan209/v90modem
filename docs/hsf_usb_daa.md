@@ -406,10 +406,20 @@ outstanding transfers stay un-acknowledged with an infinite timeout,
 while RX continues at full rate throughout.  Nothing is erroring.  The device
 simply stops consuming bulk OUT, and its input FIFO never empties.
 
-So all three host-side candidates are now refuted by measurement rather than by
+**Off-hook is refuted too, and this time on a healthy part.**  These notes
+already said "off-hook does not change it", but that was measured before the
+missing session end was found, so it was almost certainly taken on a degraded
+device.  Re-run clean, back to back with an on-hook control: on-hook **rx
+211584 / tx 2432 / 817 refused**, off-hook **rx 211584 / tx 2432 / 817
+refused** -- identical to the byte, with the off-hook script accepted and its
+completion visible as a fourth notification.  The firmware's OUT consumer is
+not gated on the DAA state.
+
+So all four host-side candidates are now refuted by measurement rather than by
 argument: the **pipes** (sizes, prime depths and ordering all match
 `hsfusbcd2196_`), the **script layer** (all fifteen arms, tx 2432 without
-exception), and the **pacing** (both disciplines, tx 2432).  What starts the
+exception), and the **pacing** (both disciplines, tx 2432), and the **hook state** (identical
+to the byte).  What starts the
 firmware's OUT consumer is a device-side question, and the register file and
 the 8051 image are where it has to be answered.
 
