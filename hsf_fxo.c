@@ -766,6 +766,79 @@ int hsf_fxo_clear_notify_halt(struct hsf_dev *d)
 	return libusb_clear_halt(d->h, EP_NOTIFY);
 }
 
+/*
+ * The two things the vendor driver's init does that nothing here ever did: a
+ * USB port reset and a SET_CONFIGURATION.  Both are plainly in the capture --
+ * the driver resets the port, re-reads the descriptors, sets configuration 1,
+ * and does it TWICE before the call -- and both are ordinary standard requests
+ * we simply never issued.  A reset invalidates the claims, so they are dropped
+ * and retaken around it.
+ */
+/*
+ * Script 2's patch offsets are 15 and 16, big-endian.  Taken from the vendor
+ * driver's own traffic: every script-2 body it sends is the template with
+ * exactly those two bytes replaced (f0 f1 -> 20 04, a2 08, f2 00, aa e8,
+ * 60 40, 35 b4).
+ *
+ * tools/hsf_scripts.py reports npatch=0 for this script, so
+ * hsf_fxo_script_run() clamps the patch count to zero and sends the RAW
+ * TEMPLATE.  Every codec register write this probe ever made was therefore the
+ * same no-op body -- six identical transfers that configured nothing -- which
+ * is invisible unless the wire is compared byte for byte, because the script id
+ * and length are right.
+ */
+#define HSF_SCRIPT2_PATCH_OFF 15
+
+int hsf_fxo_script2_reg(struct hsf_dev *d, uint16_t word)
+{
+	/* the table is positional: hsf_scripts[2] IS script 2 */
+	if (2 >= sizeof hsf_scripts / sizeof hsf_scripts[0])
+		return -EINVAL;
+	const struct hsf_script *s = &hsf_scripts[2];
+	if (s->len < HSF_SCRIPT2_PATCH_OFF + 2)
+		return -EINVAL;
+	uint8_t body[256];
+	if (s->len > sizeof body)
+		return -EMSGSIZE;
+	memcpy(body, s->body, s->len);
+	body[HSF_SCRIPT2_PATCH_OFF]     = (uint8_t)(word >> 8);
+	body[HSF_SCRIPT2_PATCH_OFF + 1] = (uint8_t)(word & 0xff);
+	return hsf_fxo_script_load(d, s->wvalue, body, s->len);
+}
+
+int hsf_fxo_bus_reset(struct hsf_dev *d)
+{
+	libusb_release_interface(d->h, IF_DATA);
+	libusb_release_interface(d->h, IF_CTRL);
+	int r = libusb_reset_device(d->h);
+	if (r < 0)
+		return r;
+	for (int ifn = 0; ifn < 2; ifn++) {
+		int which = ifn ? IF_CTRL : IF_DATA;
+		if (libusb_kernel_driver_active(d->h, which) == 1)
+			libusb_detach_kernel_driver(d->h, which);
+		int cr = libusb_claim_interface(d->h, which);
+		if (cr < 0)
+			return cr;
+	}
+	return 0;
+}
+
+int hsf_fxo_set_configuration(struct hsf_dev *d)
+{
+	/* SET_CONFIGURATION must not be issued while interfaces are claimed. */
+	libusb_release_interface(d->h, IF_DATA);
+	libusb_release_interface(d->h, IF_CTRL);
+	int r = libusb_set_configuration(d->h, 1);
+	for (int ifn = 0; ifn < 2; ifn++) {
+		int which = ifn ? IF_CTRL : IF_DATA;
+		if (libusb_kernel_driver_active(d->h, which) == 1)
+			libusb_detach_kernel_driver(d->h, which);
+		libusb_claim_interface(d->h, which);
+	}
+	return r;
+}
+
 int hsf_fxo_script_start_codec(struct hsf_dev *d)
 {
 	/* hsfusbcd2165_ sends 9 and waits up to 0x578/1400 ms.  On the normal

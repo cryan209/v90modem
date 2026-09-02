@@ -337,8 +337,7 @@ static unsigned script_count(unsigned id)
  */
 static int script2_reg(struct hsf_dev *d, uint16_t w)
 {
-	uint8_t p[8] = { (uint8_t)(w >> 8), (uint8_t)(w & 0xff) };
-	int r = hsf_fxo_script_run(d, 2, p, sizeof p);
+	int r = hsf_fxo_script2_reg(d, w);
 	printf("  call-seq reg 0x%04x: %s\n", w, r == 0 ? "sent" : "REJECTED");
 	usleep(5 * 1000);
 	return r;
@@ -784,7 +783,8 @@ int main(int argc, char **argv)
 	uint8_t eeprom[64];
 	/* The vendor driver never issues CD2_READ_EEPROM; --vendor-seq is a
 	 * replay, so it does not either. */
-	int er = vendor_seq ? -1 : hsf_fxo_read_eeprom(d, 0, eeprom, sizeof(eeprom));
+	int er = (vendor_seq || call_seq) ? -1 :
+		 hsf_fxo_read_eeprom(d, 0, eeprom, sizeof(eeprom));
 	if (er > 0) {
 		bool all_zero = true;
 		for (int i = 0; i < er; i++)
@@ -838,7 +838,7 @@ int main(int argc, char **argv)
 	 * 0x25b4), so it was measuring a session the device had not opened.
 	 * Under --vendor-seq the prime happens in arm_bulk_now(), from script
 	 * 5's completion, which is where the driver does it. */
-	if (do_feed && stream_secs > 0 && !vendor_seq) {
+	if (do_feed && stream_secs > 0 && !vendor_seq && !call_seq) {
 		uint8_t first[256];
 		/* The driver's own runtime log (osusb.c dbg, _DEBUG in osusb.c)
 		 * shows it keeps exactly ONE transmit URB outstanding -- the same
@@ -919,9 +919,62 @@ int main(int argc, char **argv)
 			/* The driver runs a full init pass (script 1 + the six codec
 			 * registers) before any call.  HSF_CALL_INIT=1 reproduces
 			 * that ahead of the call sequence. */
-			if (getenv("HSF_CALL_INIT")) {
+			/*
+			 * The vendor's INIT, which --call-seq needs to have run
+			 * once and which this probe could not previously do.  The
+			 * capture shows it is not just scripts: the driver resets
+			 * the USB port, re-reads the descriptors and issues
+			 * SET_CONFIGURATION, and runs the whole unit TWICE, each
+			 * cycle ending by closing the session (6) and going
+			 * on-hook (4).  HSF_CALL_INIT=N runs N cycles.
+			 */
+			const char *ci = getenv("HSF_CALL_INIT");
+			int cycles = ci ? atoi(ci) : 0;
+			for (int cyc = 0; cyc < cycles; cyc++) {
+				/* NO bus reset and NO SET_CONFIGURATION here: the
+				 * COLD init capture has neither.  They appear in
+				 * cap-full only because that was a SECOND driver
+				 * load.  HSF_INIT_RESET=1 puts them back. */
+				if (getenv("HSF_INIT_RESET")) {
+					hsf_fxo_bus_reset(d);
+					hsf_fxo_set_configuration(d);
+				}
+				uint8_t inf[5];
+				hsf_fxo_get_information(d, inf);
 				hsf_fxo_clear_notify_halt(d);
 				codec_open_prelude(d, reg_d6, reg_da, reg_dc, reg_e4);
+				hsf_fxo_script_run_index(d, HSF_SCRIPT_SIGNAL, 3, NULL, 0);
+				hsf_fxo_script_run_index(d, HSF_SCRIPT_SIGNAL, 1, NULL, 0);
+				unsigned i9 = script_count(HSF_SCRIPT_SESSION_A);
+				if (hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_A, NULL, 0) == 0)
+					wait_script(HSF_SCRIPT_SESSION_A, i9, 1400);
+				unsigned i5 = script_count(HSF_SCRIPT_SESSION_B);
+				if (hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_B, NULL, 0) == 0)
+					wait_script(HSF_SCRIPT_SESSION_B, i5, 1400);
+				unsigned i6 = script_count(HSF_SCRIPT_SESSION_END);
+				if (hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_END, NULL, 0) == 0)
+					wait_script(HSF_SCRIPT_SESSION_END, i6, 1400);
+				unsigned i4 = script_count(HSF_SCRIPT_ON_HOOK);
+				if (hsf_fxo_script_run(d, HSF_SCRIPT_ON_HOOK, NULL, 0) == 0)
+					wait_script(HSF_SCRIPT_ON_HOOK, i4, 1400);
+				hsf_fxo_script_run_index(d, HSF_SCRIPT_SIGNAL, 1, NULL, 0);
+				printf("  call-seq: init cycle %d done\n", cyc + 1);
+			}
+			/*
+			 * Prime the transmit ring HERE -- after any init cycle
+			 * and before the call registers.  This device only
+			 * starts continuous receive when bulk OUT is already
+			 * queued, but queueing it before the init (which is what
+			 * main() used to do) puts transfers against a session the
+			 * init then tears down with script 6.
+			 */
+			if (do_feed) {
+				uint8_t pre[256];
+				for (int i = 0; i < 4; i++) {
+					fill_tx(pre);
+					if (hsf_fxo_tx_submit(d, pre, g_tx_block) < 0)
+						break;
+				}
 			}
 			static const uint16_t regs[] = {
 				0x35b7, 0x2004, 0xa208, 0xf200,

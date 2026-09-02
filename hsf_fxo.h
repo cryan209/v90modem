@@ -376,6 +376,15 @@ int hsf_fxo_script_run_index(struct hsf_dev *d, unsigned id, uint16_t windex,
 /* CLEAR_FEATURE(ENDPOINT_HALT) on the interrupt-IN endpoint 0x82. */
 int hsf_fxo_clear_notify_halt(struct hsf_dev *d);
 
+/* Write one codec register via script 2 (patch offsets 15/16, big-endian).
+ * hsf_fxo_script_run() cannot do this: the generated table says npatch=0. */
+int hsf_fxo_script2_reg(struct hsf_dev *d, uint16_t word);
+
+/* USB port reset and SET_CONFIGURATION -- both part of the vendor driver's
+ * init and neither previously issued by this probe. */
+int hsf_fxo_bus_reset(struct hsf_dev *d);
+int hsf_fxo_set_configuration(struct hsf_dev *d);
+
 /* HSF_SCRIPT_SESSION_A then _B.  _A is retried only after a 1400 ms timeout. */
 int hsf_fxo_script_start_codec(struct hsf_dev *d);
 int hsf_fxo_script_set_hook(struct hsf_dev *d, bool off_hook);

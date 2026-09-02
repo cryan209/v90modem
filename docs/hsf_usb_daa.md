@@ -1976,3 +1976,74 @@ open item, with a working 16 kHz full-duplex transport underneath it.
 
 For the stated goal -- a very basic telephony sound card -- the transport half
 is done and the remaining half is one question: what takes the DAA off-hook.
+
+## The vendor driver is no longer needed: line audio, off-hook, 16 kHz, cold
+
+**Every codec register write this probe ever made was the raw template.**
+
+`tools/hsf_scripts.py` reports `patches=0` for script 2, so `hsf_scripts.h`
+carries `npatch = 0` for it, and `hsf_fxo_script_run()` clamps the caller's
+patch count to that -- silently.  So all six "register writes" went out as six
+identical unpatched bodies and configured nothing.  Compared on the wire against
+the vendor:
+
+    TEMPLATE          071c801c0c800b1ca03d1e07191702f0f1...
+    VENDOR  x6        ... 1702 2004 ...  a208 ...  f200 ...  aae8 ...  6040 ...  35b4
+    OURS    x6        ... 1702 f0f1 ...  f0f1 ...  f0f1 ...  f0f1 ...  f0f1 ...  f0f1
+
+The offsets are **15 and 16, big-endian**, and the vendor's traffic shows them
+in every single script-2 body.  `hsf_fxo_script2_reg()` writes them directly
+rather than going through the generated patch table.
+
+**This is why "the control plane is byte-identical" was wrong**, and the way it
+was wrong is worth keeping: `tools/hsf_seqdiff.py` identifies a script by
+allowing up to six differing bytes, so it labelled the vendor's
+"script 2 (patched)" and ours "script 2" -- and both read as "script 2 matches"
+at a glance.  A fuzzy matcher built to tolerate patch bytes cannot then be used
+to prove two streams identical.  Two whole sessions were spent concluding the
+device must need something not on the wire, when the wire had it all along.
+
+### Result
+
+With the patch applied, on a **cold** device -- fresh VM, vendor driver never
+loaded -- `--call-seq` with one init cycle:
+
+    run 1: rx 128768 bytes in 503 packets, tx 129792, rx_err 0
+    run 2: rx 128832 bytes in 504 packets, tx 129792, rx_err 0
+    run 3: rx 128832 bytes in 504 packets, tx 129792, rx_err 0
+
+    run 1: rate=16096 Hz  400Hz amplitude=4391.9  in-band power=22357639.8
+    run 2: rate=16104 Hz  400Hz amplitude=3405.6  in-band power=14025164.3
+    run 3: rate=16104 Hz  400Hz amplitude=2950.2  in-band power=10127452.5
+
+**Three for three.**  Sixteen kHz full duplex, transmit draining at the same
+rate as receive, and the 400 Hz New Zealand dial tone at full amplitude on the
+receive stream -- against 0.06 and an in-band power of 0.0 before the fix.  The
+DAA is off-hook, the codec is running, and no part of the vendor stack is
+loaded.
+
+That is the basic telephony sound card: **s16le, mono, 16 kHz, full duplex,
+off-hook, ours.**
+
+Sequence, in full, from a cold device:
+
+    [init]  GET_INFROMATION, CLEAR_FEATURE(HALT) ep 0x82, script 1, script 8,
+            script 2 x 0x2004 0xa208 0xf200 0xaae8 0x6040 0x35b4,
+            script 8 wIndex 3, script 8, script 9, script 5,
+            script 6, script 4, script 8
+    [prime] four 128-byte bulk OUT
+    [call]  script 2 x 0x35b7 0x2004 0xa208 0xf200 0xaae8 0x6040 0x35b4,
+            script 8, script 9, script 5, arm bulk,
+            script 8 wIndex 3, script 3 (off-hook), script 2 x 0xaac8
+
+### Open
+
+* A USB reset between runs is needed; without one a second run in the same
+  process lifetime gets nothing.  The session teardown is not returning the part
+  to a startable state.
+* Our receive is **much hotter than the vendor's** -- 400 Hz at ~3000-4400
+  against its 183, and the stream reaches full scale -- so the receive gain is
+  not the vendor's and may be clipping.  That is a gain register, not a
+  structural problem.
+* Transmit is proven only in the sense that the pipe drains at the codec rate;
+  no tone has yet been confirmed on the line.
