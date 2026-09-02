@@ -9,9 +9,10 @@ run() {
   local cfg=$1 mode=$2 name=$3 raw="$tmpdir/$3.raw" log="$tmpdir/$3.log"
   local tx_args=(--feed)
   if [[ $mode == dial ]]; then
-    tx_args=(--dial 9898 --dial-amp 20000)
+    tx_args=(--dial 9099 --dial-amp 20000)
   fi
-  if ! env $cfg HSF_CALL_INIT=1 ./hsf_fxo_probe --call-seq "${tx_args[@]}" \
+  if ! env $cfg HSF_CALL_INIT=1 HSF_DIAL_DELAY_MS=0 \
+       ./hsf_fxo_probe --call-seq "${tx_args[@]}" \
        --stream 8 --rx-out "$raw" >"$log" 2>&1; then
     cat "$log" >&2
     return 1
@@ -36,7 +37,7 @@ def band(t0,t1):
 print("pre=%.0f during=%.0f"%(band(.2,.9),band(1.2,2.5)))
 PY
 }
-for cfg in "" "HSF_TRAIL2_REG=0x35b7"; do
+for cfg in ""; do
   label=${cfg:-default}
   dial=$(run "$cfg" dial "${label//[^A-Za-z0-9]/_}-dial")
   silence=$(run "$cfg" silence "${label//[^A-Za-z0-9]/_}-silence")

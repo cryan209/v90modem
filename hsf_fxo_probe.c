@@ -733,6 +733,9 @@ int main(int argc, char **argv)
 			return 2;
 		}
 	}
+	const char *dial_delay_ms = getenv("HSF_DIAL_DELAY_MS");
+	if (dial_delay_ms)
+		g_dial_delay = (unsigned)strtoul(dial_delay_ms, NULL, 0) * 16;
 
 	struct hsf_dev *d = NULL;
 	uint8_t info[5];
@@ -1392,6 +1395,18 @@ codec_done: ;
 				r = wait_script(HSF_SCRIPT_SESSION_END, before6, 2000);
 			printf("session end (script 6): %s\n",
 			       r == 0 ? "completed" : "no completion within 2s");
+
+			/* hsfusbcd2195_/hsfusbcd2201_ closes the session with
+			 * script 6 and then hsfusbcd2166_/hsfusbcd2185_ returns
+			 * the DAA relay on-hook with script 4.  Omitting the latter
+			 * leaves the ATA port seized between otherwise independent
+			 * probe runs, so the next run has no dial tone to grade. */
+			unsigned before4 = script_count(HSF_SCRIPT_ON_HOOK);
+			int r4 = hsf_fxo_script_run(d, HSF_SCRIPT_ON_HOOK, NULL, 0);
+			if (r4 == 0)
+				r4 = wait_script(HSF_SCRIPT_ON_HOOK, before4, 2000);
+			printf("on-hook (script 4): %s\n",
+			       r4 == 0 ? "completed" : "no completion within 2s");
 			session_ended = true;
 		}
 

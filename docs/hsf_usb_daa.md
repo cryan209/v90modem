@@ -2334,3 +2334,26 @@ If line TX remains absent, the remaining difference is not an un-replayed
 engine control operation; it must be in the bulk sample stream as consumed in
 that route, the physical line/port state, or a stateful effect that requires
 executing the route modes rather than merely reproducing their final writes.
+
+## Live 9099 result: TX reaches the exchange; teardown was incomplete
+
+The decisive Mac run uses the normal observable off-hook route and starts the
+digits immediately after its final transition (`HSF_DIAL_DELAY_MS=0`).  Two
+otherwise identical runs measured the line's 400 Hz dial tone over one-second
+windows:
+
+    silence TX:  4706, 5229, 5228, 5228, 5228
+    dial 9099:    567, 0.5, 1.1, 0.6, 1.0
+
+Thus the bulk samples are not disappearing inside the USB codec: the exchange
+removes dial tone on receipt of the digits.  Number 9099 did not return an
+answer or echo signal during the following eleven seconds, so this run proves
+digit collection but does not provide a line-quality measurement.
+
+The run also exposed a separate probe error.  The closed teardown is script 11
+(stream stop), script 6 (session end), then script 4 (on-hook).  The streaming
+path omitted script 4, leaving the ATA port seized between trials and making a
+later silent control appear to have lost dial tone.  It now sends and waits for
+script 4 before closing the USB session.  The late `0x35b7 -> script 8/index 3
+-> script 3` transition suppresses the receive view in this setup, so it is not
+used by the dial-versus-silence grader.
