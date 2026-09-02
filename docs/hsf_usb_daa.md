@@ -379,28 +379,33 @@ The prediction it makes is specific: if this is the gate, TX stops being a
 ~2.4 kB one-shot FIFO fill and starts completing continuously, at the same
 128-byte granularity, for the whole run.
 
-### TX HAS DRAINED ONCE (2026-09-02)
+### TX drained once, unreproduced in 16 runs (2026-09-02)
 
 With `hsfusbcd2265_`'s stream stop added to the teardown -- script 11 ahead of
-script 6 -- the fourth of six identical runs transmitted **102400 bytes**
+script 6 -- one run transmitted **102400 bytes**
 against the 2432-byte ceiling every previous run in this investigation has hit.
 It was very nearly symmetric with receive (**101888** RX), which is what
 RX-credited feeding predicts once the device is actually consuming, so the
 codec drained the OUT FIFO for the whole four seconds.
 
-**It is not reproducible on demand and must not be reported as a fix.**  Six
-identical commands: runs 1-3 normal (tx 2560, 2432, 2432), run 4 the one above,
-runs 5-6 dead (rx 0, the degraded state).  Two things point away from "script
-11 starts the transmitter" as a simple explanation: the effect appeared on the
-fourth run rather than the first, and **RX fell to 25.5 kB/s in that run from
-the usual 42.4** -- so the part had entered a different mode, not merely started
-draining a buffer it was already filling.  25600 B/s is 6400 four-byte frames
-per second.
+**It did not reproduce, and on the evidence it is more likely a symptom than a
+success.**  A fresh firmware load followed by **sixteen** identical runs gives
+tx 2432 every time, RX steady at 169500-169700, and no degradation at all.  The
+one drain came instead at roughly the twelfth run of an older load, in the six-
+run sequence whose runs 5 and 6 were dead -- i.e. **immediately before that part
+failed** -- and in that run **RX had fallen to 25.5 kB/s from the usual 42.4**.
+A device that starts consuming OUT correctly should not also start producing
+less; a device sliding into the state where it produces nothing might do
+exactly that.  So "the OUT consumer can run" is NOT established, and the
+earlier wording claiming it is has been withdrawn.  What can be said is that
+there exists a state in which the FIFO empties, and that state is adjacent to
+the failure.
 
-What is established is narrower and still worth a lot: **the OUT consumer can
-run.**  Every previous result bounded the host side and left "what starts the
-firmware's consumer" as an open question with no evidence it could be answered
-at all.  There is now a state in which it demonstrably does.
+A methodological note, since it nearly went into the record as a result: the
+first reproduction attempt printed `<-- DRAINED` against all eight runs.  That
+was an awk string comparison -- `gsub()` had made the field a string, so
+`"2432" > "10000"` is true lexically.  **Force the numeric compare** (`$8+0`)
+in any harness that flags a threshold.
 
 ### 2432 is not a constant of the device: the FIFO is 2496-2527 bytes
 
@@ -971,3 +976,10 @@ it is the script dispatch. Patching it corrupts another path.
 The next trustworthy instrument is a capture of the real Linux vendor stack
 starting a call. That observes the engine-to-driver initialization without
 guessing at the controller's mask-ROM interpreter.
+
+**Script 11's own contribution to stability is unproven.**  Script 6 alone took
+the part from dying on run 2 to four clean runs, and script 6 plus script 11
+has now held sixteen -- but the six-run sequence that first included script 11
+degraded at run 5, so the two settings have not been separated and the run
+count before failure varies by load.  What is solid is that a session must be
+ended; how much of `hsfusbcd2265_`'s stop pair matters is not measured.
