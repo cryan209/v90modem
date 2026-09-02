@@ -166,6 +166,7 @@ FAX_CLASS_TEST_OBJS = fax_class_test.o data_interface.o fax_class2.o
 FAX_CLASS2_TEST_OBJS = fax_class2_test.o fax_class2.o
 V90_UPSTREAM_REPLAY_OBJS = v90_upstream_replay.o
 HSF_FXO_PROBE_OBJS = hsf_fxo_probe.o hsf_fxo.o
+HSF_V90_COUPLER_OBJS = hsf_v90_coupler.o hsf_fxo.o $(filter-out sip_modem.o,$(OBJS))
 # ESP32 port, layer 2: the streamed V.90 CP decode standing alone, with the
 # Table 14 framer it feeds.  No V.34 receiver.
 PORT_CP_STREAM_TEST_OBJS = port/cp_stream_test.o port/cp_stream.o v90_cp_rx.o vpcm_cp.o
@@ -352,7 +353,10 @@ $(TARGET): $(OBJS) spandsp $(PJ_BUILD_PREREQ)
 hsf_fxo_probe: $(HSF_FXO_PROBE_OBJS)
 	$(CC) $(HSF_FXO_PROBE_OBJS) -o $@ $(LIBUSB_LIBS) -lpthread -lm
 
-hsf_fxo.o hsf_fxo_probe.o: CFLAGS += $(LIBUSB_CFLAGS)
+hsf_v90_coupler: $(HSF_V90_COUPLER_OBJS) spandsp $(PJ_BUILD_PREREQ)
+	$(CC) $(HSF_V90_COUPLER_OBJS) -o $@ $(LDFLAGS) $(LIBUSB_LIBS)
+
+hsf_fxo.o hsf_fxo_probe.o hsf_v90_coupler.o: CFLAGS += $(LIBUSB_CFLAGS)
 
 vpcm_loopback_test: $(TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(TEST_OBJS) -o $@ $(LDFLAGS)

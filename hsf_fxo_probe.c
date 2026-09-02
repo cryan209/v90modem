@@ -37,6 +37,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifdef HSF_V90_COUPLER
+#include "modem_engine.h"
+#endif
+
 static unsigned long g_rx_packets;
 static unsigned char g_first[64];
 static size_t        g_first_len;
@@ -138,6 +142,13 @@ static int16_t ulaw_decode(uint8_t u)
 static FILE    *g_tx_file;
 static unsigned g_echo_n;
 
+#ifdef HSF_V90_COUPLER
+static bool     g_v90_couple;
+static bool     g_v90_started;
+static unsigned g_v90_postdial_samples;
+static unsigned g_v90_start_delay_samples = 6500u * 16u;
+#endif
+
 /* Returns false once the string is finished. */
 static bool dial_sample(int16_t *out)
 {
@@ -237,6 +248,29 @@ static void fill_tx_inner(uint8_t *buf)
 	g_tx_blocks++;
 	if (g_tx_blocks <= g_tx_prime_blocks)
 		return;
+#ifdef HSF_V90_COUPLER
+	if (g_v90_couple && g_dial && g_dial[g_dial_pos] == '\0') {
+		size_t out_samples = g_tx_block / 2;
+		if (!g_v90_started) {
+			/* Leave the measured PBX answer interval after the final DTMF
+			 * gap before starting V.8 CI (6001 answers after two rings). */
+			if (g_v90_postdial_samples < g_v90_start_delay_samples) {
+				g_v90_postdial_samples += (unsigned)out_samples;
+				return;
+			}
+			me_on_sip_connected();
+			g_v90_started = true;
+			fprintf(stderr, "[HSF-COUPLER] physical call connected; starting analogue V.90 engine\n");
+		}
+		int16_t modem[128];
+		size_t n = out_samples / 2;
+		me_tx_audio(modem, (int)n);
+		int16_t *dst = (int16_t *)buf;
+		for (size_t i = 0; i < n; i++)
+			dst[2*i] = dst[2*i + 1] = modem[i];
+		return;
+	}
+#endif
 	if (g_dial) {
 		int16_t *ds = (int16_t *)buf;
 		size_t nf = g_tx_block / 2;
@@ -366,6 +400,17 @@ static void on_rx(const uint8_t *data, size_t len, void *user)
 		memcpy(g_first + g_first_len, data, n);
 		g_first_len += n;
 	}
+#ifdef HSF_V90_COUPLER
+	if (g_v90_started) {
+		const int16_t *src = (const int16_t *)data;
+		int16_t modem[128];
+		size_t ns = len / 2;
+		size_t n = ns / 2;
+		for (size_t i = 0; i < n; i++)
+			modem[i] = (int16_t)(((int32_t)src[2*i] + src[2*i + 1]) / 2);
+		me_rx_audio(modem, (int)n);
+	}
+#endif
 	if (g_feed_tx && g_tx_pace_rx) {
 		/* hsfusbcd2212_ hands the engine 64 * (rx_bytes / 128).  A 128-byte
 		 * unit is 64 samples, so that quantity is a SAMPLE count, not a
@@ -651,6 +696,11 @@ int main(int argc, char **argv)
 		} else if (!strcmp(argv[i], "--pcm-code-test")) {
 			g_pcm_code_test = true;
 			do_feed = true;
+#ifdef HSF_V90_COUPLER
+		} else if (!strcmp(argv[i], "--v90-couple")) {
+			g_v90_couple = true;
+			do_feed = true;
+#endif
 		} else if (!strcmp(argv[i], "--dial-amp") && i + 1 < argc) {
 			g_dial_amp = atof(argv[++i]);
 		} else if (!strcmp(argv[i], "--call-seq")) {
@@ -798,6 +848,22 @@ int main(int argc, char **argv)
 	const char *dial_gap_ms = getenv("HSF_DIAL_GAP_MS");
 	if (dial_gap_ms)
 		g_dial_gap_len = (unsigned)strtoul(dial_gap_ms, NULL, 0) * 16;
+#ifdef HSF_V90_COUPLER
+	if (g_v90_couple) {
+		const char *start_delay_ms = getenv("HSF_V90_START_DELAY_MS");
+		if (start_delay_ms)
+			g_v90_start_delay_samples =
+				(unsigned)strtoul(start_delay_ms, NULL, 0) * 16;
+		if (!g_dial) {
+			fprintf(stderr, "--v90-couple requires --dial NUMBER\n");
+			return 2;
+		}
+		me_set_verbose(1);
+		me_init();
+		me_set_law(ME_LAW_ULAW);
+		me_dial(g_dial);
+	}
+#endif
 
 	struct hsf_dev *d = NULL;
 	uint8_t info[5];
@@ -1553,6 +1619,13 @@ codec_done: ;
 		fclose(g_rx_file);
 		g_rx_file = NULL;
 	}
+#ifdef HSF_V90_COUPLER
+	if (g_v90_couple) {
+		if (g_v90_started)
+			me_on_sip_disconnected();
+		me_destroy();
+	}
+#endif
 	hsf_fxo_close(d);
 	return 0;
 }
