@@ -2297,3 +2297,40 @@ prime and could exhaust all digits before the optional two-second late
 transition completed.  The dial programme is now restarted after the final
 call transition.  `tools/hsf_tx_reaches_line.sh` now grades dial versus silence
 from fresh captures and no longer uses the invalid on-hook comparison.
+
+## The closed driver's analogue-routing method
+
+Static tracing of the shipped x86-64 objects identifies the routine rather
+than inferring it from script traffic.  `hsfengine769_` dispatches engine event
+`0x20`; it takes the 64-bit mode value from the event payload and calls vtable
+slot `+0x88`.  In the USB object that slot is `hsfusbcd2230_`.
+
+`hsfusbcd2230_(ctx, mode)` accepts modes 0 through 5.  Modes 0 through 3 map to
+four two-bit routing states (0, 3, 1, 2 respectively); 4 and 5 make no register
+change.  It then read-modify-writes three cached device words through
+`hsfusbcd2185_`/`hsfusbcd2194_`:
+
+* the selected register's low two bits;
+* the `0x00c0` field in the `0xaa**` register family;
+* conditionally, bit `0x0200` in the next selector.
+
+`hsfusbcd2194_` is the hardware writer.  It preserves the low 13 bits, combines
+the selector carried in the high bits, adds `0x2000`, and queues the resulting
+two-byte value through the same script-2 path already decoded here.  Thus the
+closed engine's analogue route change is **not a hidden USB request**: its only
+device-visible effect is a set of script-2 register words.  The live vendor
+capture contains those effects (`35b7 ... aae8 ... 35b4`, then `aac8`) and the
+probe already replays them byte-for-byte.
+
+The older 32-bit build has a separately useful view of the hook branch in
+`hsfusbcd2185_`: relay states 2, 3 and 8 through 11 call `hsfusbcd2250_`, which
+queues script 8 with wIndex 3, followed by script 3.  States 4 through 7 take
+the on-hook branch.  Again, that is the exact `script 8/index 3 -> script 3`
+transition visible in usbmon and now present in `--call-seq`.
+
+So reverse engineering rules out the proposed missing closed-driver TX gate:
+the gate has been found, and all of its bus-visible writes are already sent.
+If line TX remains absent, the remaining difference is not an un-replayed
+engine control operation; it must be in the bulk sample stream as consumed in
+that route, the physical line/port state, or a stateful effect that requires
+executing the route modes rather than merely reproducing their final writes.
