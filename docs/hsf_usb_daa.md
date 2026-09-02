@@ -2207,3 +2207,55 @@ Two things that cost time and should not next time:
   itself -- what `--wait` already polls.  (`libusb_get_configuration()` remains
   useless in the other direction: it is served from IOKit's cache and succeeds
   on a dead device.)
+
+## Transmit does NOT reach the line, and the earlier claim that it did was uncontrolled
+
+Run on the Mac with a live line, dialling 9898.  **Receive is good**: rms 2785,
+no clipping, 400 Hz on the line in a multi-second cadence.  (An earlier reading
+of "steady 2620" was an averaging artefact of 0.5 s windows against a cadence
+several seconds long.)
+
+**The trailing `0xaac8` write is required for receive to carry the line at
+all.**  Sweeping it:
+
+    trail=0xaac8   400 Hz per 0.5 s: 4217 5255 576 1 1 1 1 1479 3154 3786 ...
+    trail=0xaae8   400 Hz per 0.5 s: 0 17 73 16 0 0 0 0 0 0 ...
+    trail=0        400 Hz per 0.5 s: 0 20 61 17 0 0 0 0 0 0 ...
+
+With `0xaae8` (bit 0x20 set) or the write omitted, the line is simply not there.
+So that bit gates the receive path, and the vendor clearing it right after
+off-hook is not incidental.
+
+### The control that settles transmit
+
+**Compare the DTMF returned in the receive stream off-hook against the SAME run
+on-hook.**  On-hook the DAA relay is open: there is no line and no hybrid, so
+anything that comes back is internal codec loopback.  Measured:
+
+    OFF-hook  during dial: 852 Hz = 444   1477 Hz = 479
+    ON-hook   during dial: 852 Hz = 448   1477 Hz = 503
+
+**Identical.**  So everything we have been seeing return is loopback inside the
+part, and **our transmit is not reaching the line.**  That is also why the line
+tone never responds to dialling.
+
+**This retracts "transmit reaches the line", which this document asserted from
+the 1209 Hz return through the hybrid.**  That measurement had no on-hook
+control, and with one it does not survive.  Receive was controlled that way
+(on-hook rms 146 against off-hook 23687) and stands; transmit was not, and does
+not.  Same experiment, one arm controlled and one not, in the same session.
+
+### Tried and rejected
+
+* **Transmit level.**  `--dial-amp` at 12000, 20000 and 28000 -- the vendor's own
+  DTMF peaks at 20000 -- changes nothing; the line tone is unmoved and the
+  on-hook and off-hook returns stay equal.
+* **A second `0x35b7` after off-hook**, which the vendor's capture does send
+  (23.113, then again at 25.269) and we did not.  `HSF_TRAIL2_REG` /
+  `HSF_TRAIL2_MS`: off-hook 480 against on-hook 491, still equal.
+
+So the transmit path to the DAA is disabled by something not yet identified.
+Given `0xaac8`'s bit 0x20 gates receive, a companion bit for transmit in the
+same register family is the obvious place to look, and the off-hook/on-hook
+comparison above is the test to sweep against -- it is binary and needs no
+assumption about what the line is doing.

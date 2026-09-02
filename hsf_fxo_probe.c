@@ -1151,6 +1151,16 @@ int main(int argc, char **argv)
 			unsigned trail = tr ? (unsigned)strtoul(tr, NULL, 0) : 0xaac8;
 			if (trail)
 				script2_reg(d, (uint16_t)trail);
+			/* The vendor's capture sends a SECOND 0x35b7 about 2 s after
+			 * off-hook (cap-full at 23.113 then again at 25.269) and we
+			 * never did.  HSF_TRAIL2_REG / HSF_TRAIL2_MS make it an
+			 * experiment; 0 disables. */
+			const char *t2 = getenv("HSF_TRAIL2_REG");
+			if (t2) {
+				const char *t2ms = getenv("HSF_TRAIL2_MS");
+				usleep((useconds_t)(t2ms ? atoi(t2ms) : 2000) * 1000);
+				script2_reg(d, (uint16_t)strtoul(t2, NULL, 0));
+			}
 			goto codec_done;
 		}
 		if (vendor_seq) {
