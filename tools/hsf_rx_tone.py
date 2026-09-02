@@ -28,10 +28,13 @@ def goertzel(x, f, rate=RATE):
     return math.sqrt(max(s1*s1 + s2*s2 - c*s1*s2, 0.0)) / max(len(x), 1)
 
 def load(path, slot=0):
+    """The capture is a plain signed-16 LE stream.  It is NOT four-byte frames:
+    a capture reads b702 ba02 c402 ... = 695, 698, 708, consecutive samples.
+    The 5b 01 00 00 pattern in the notes came from an earlier build and taking
+    it as the frame layout made this tool read every other sample."""
     d = open(path, "rb").read()
-    n = len(d) // 4
-    f = struct.unpack("<%dh" % (n * 2), d[:n * 4])
-    return list(f[slot::2])
+    n = len(d) // 2
+    return list(struct.unpack("<%dh" % n, d[:n * 2]))
 
 def main():
     for path in sys.argv[1:]:

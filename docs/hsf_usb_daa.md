@@ -272,6 +272,49 @@ the waveform generator, in the sample-register/DMA data element.  Feeding a
 tone into only the first or second apparent word position tests two wire-format
 hypotheses; it does not reproduce an engine channel selection.
 
+### WITHDRAWN: both entries below are WRONG.  RX works, off-hook works.
+
+The two entries that follow -- "the RX stream is not audio" and "the DAA never
+goes off-hook" -- are **retracted in full**.  Both were analysis errors of mine,
+stacked:
+
+* The tone tool read the capture as **four-byte frames** on the strength of the
+  `5b 01 00 00` pattern recorded elsewhere in this document.  The capture is a
+  **plain signed-16 LE stream** (`b702 ba02 c402 ...` = 695, 698, 708,
+  consecutive samples), so the tool was reading every other sample.
+* It searched for **350 + 440 Hz**, which is US dial tone.  **This line is in
+  New Zealand, where dial tone is 400 Hz.**
+* The sample rate is **~21240 Hz mono 16-bit**, straight from the measured byte
+  rate (42480 B/s), not the "two 16-bit slots at 10.67 kHz" in these notes --
+  which yields the identical byte rate, which is exactly why the wrong framing
+  survived so long.
+
+Measured properly, with a rate-agnostic peak search and then the correct bins:
+
+    on-hook                        400 Hz 0.014   rms 1.65   (nothing)
+    OFF-HOOK                       400 Hz 0.084   rms 2.44   6x, plus a clean
+                                                             2x harmonic
+    off-hook, transmitting DTMF 5  400 Hz 0.090   697 Hz 0.005  1336 Hz 0.003
+
+**So the DAA does go off-hook, the codec does digitise the line, and receive
+works.**  What does not work is transmit: our DTMF never appears (0.003-0.005,
+the noise floor) and the dial tone is not even disturbed, which it would be if
+our tones reached the line.
+
+That restores the original framing of this work -- **RX carries line audio, TX
+is the hurdle** -- and everything the two retracted entries concluded from
+"neither direction works" goes with them.  The register findings in them stand
+(0x0b writes; 0x18/0x1a track the ADC sample; script 3 leaves 0x01-0x04
+unchanged); only the conclusions drawn about the analogue path are void.
+
+**Method note, and it is the same one three times in one session: a health
+check that counts bytes cannot tell a working modem from a clocking codec, and
+a tone check with the wrong framing, the wrong sample rate and the wrong
+country's dial tone cannot tell a working line from a dead one.**  Derive the
+rate from the measured byte rate, search rate-agnostically for a peak before
+testing named frequencies, and check what dial tone is where the line actually
+is.
+
 ### THE DAA NEVER GOES OFF-HOOK -- and the off-hook script lies (2026-09-02)
 
 With a live line and dial tone confirmed present on it, off-hook produces no
