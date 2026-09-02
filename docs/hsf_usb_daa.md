@@ -2152,3 +2152,28 @@ on the same line minutes apart**.  Our receive path agrees with the reference;
 it was clipping because the line was genuinely sending a loud tone.
 
 That also retires the plan to hunt for a gain register.
+
+### Does any of this still need Linux?
+
+**No, for the probe itself.**  Linux was only ever needed to run the *vendor
+driver* for the usbmon capture; nothing in the working sequence requires it at
+runtime, which the cold run proves -- no vendor module loaded.  `hsf_fxo_probe`
+is pure libusb, builds clean on macOS, and the calls that differ by platform
+degrade safely there:
+
+* `libusb_kernel_driver_active()` returns `NOT_SUPPORTED` on darwin, so the
+  `== 1` guard is false and the detach is skipped -- and a claim that then fails
+  now aborts loudly instead of silently running against a device that refuses
+  every transfer.
+* `libusb_reset_device()` is only reached through `hsf_fxo_bus_reset()`, which
+  is behind `HSF_INIT_RESET` and off by default.
+
+**The one real gap is the reset between runs.**  A second run in the same
+process lifetime currently gets nothing, and on Linux that is worked around
+with an external `USBDEVFS_RESET`.  macOS has no equivalent, and this file's own
+note records that `libusb_reset_device()` on darwin times out re-enumerating and
+takes the device off the bus entirely -- so on a Mac the first run should work
+and a repeat may wedge with only a physical replug to recover.
+
+That makes "session teardown does not return the part to a startable state" the
+item to fix for macOS, rather than anything about the platform.
