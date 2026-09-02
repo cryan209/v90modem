@@ -272,6 +272,40 @@ the waveform generator, in the sample-register/DMA data element.  Feeding a
 tone into only the first or second apparent word position tests two wire-format
 hypotheses; it does not reproduce an engine channel selection.
 
+### THE RX STREAM IS NOT AUDIO, AND "RX WORKS" WAS NEVER TESTED (2026-09-02)
+
+Every health check in this investigation counts bytes.  None checked that the
+bytes are audio, so the whole session's framing -- "receive works, transmit is
+the hurdle" -- rested on an assumption nobody had tested.  It is false.
+
+Captured off-hook while transmitting DTMF and analysed (`tools/hsf_rx_tone.py`,
+Goertzel over dial tone and the transmitted digit):
+
+    42480 frames, DC 694.7, RMS 2.5
+    350 Hz 0.60x floor   440 Hz 0.94x   697 Hz 0.95x   1336 Hz 1.62x
+
+**No dial tone off-hook, and no trace of our own transmitted digit.**  Both
+16-bit slots carry the same flat value: slot 0 spans 682-708 with **22 distinct
+values in 42480 frames**, slot 1 684-702 with 19.  That is an ADC reading
+nothing -- a DC level with a few LSBs of noise -- not a line.
+
+And the DC value identifies two registers.  **695 = 0x02B7**, exactly the range
+`0x18`/`0x1a` were seen oscillating in (0x02b2..0x02b7).  They are not DMA
+pointers, which is why they never wrapped: **they are the current ADC sample**.
+
+One more thing the captures settle, recorded in the probe as a quirk and never
+followed up: **RX only flows while OUT is being fed.**  The two captures
+without `--feed` returned **rx = 0**; the one with it returned 169920 bytes.  A
+device that will not produce IN without OUT is clocking both directions
+together.
+
+**Consequence: "RX works, TX does not" is withdrawn.**  Neither direction
+carries audio.  The digital interface clocks and the codec's analogue side is
+idle, so the TX FIFO not draining is plausibly that same condition rather than
+a transmit-specific fault -- which is consistent with every transmit-specific
+hypothesis in this document coming back null.  Every result above that used RX
+byte count as "healthy" is measuring the transport, not the modem.
+
 ### Opcode 0x0b IS a register write -- the note saying otherwise was wrong
 
 These notes record "Opcode 0x0b was thought to write a control register.  It
