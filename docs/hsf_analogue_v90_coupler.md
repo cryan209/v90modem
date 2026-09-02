@@ -183,6 +183,46 @@ is required anyway: at 3600 Hz the pulse's first neighbours carry **±0.14** of
 the main tap's 0.80, and the G.711 ladder's steps near the top are finer than
 that, so no slicer can recover the levels however well the instant is chosen.
 
+## The channel, measured
+
+The far end transmits V.34's line probing signal during Phase 2 -- 21 cosines
+of **equal amplitude** from 150 Hz to 3750 Hz (V.34 11.2.3; the table is in
+`spandsp-master/src/make_v34_probe_signals.c`) -- so every recorded call that
+reached Phase 2 contains a complete channel sounding, and equal transmit
+amplitudes are what make it one.  `tools/hsf_probe_response.py` finds it
+without needing the call's log or its clock (nothing else on this line has
+substantial energy at both 150 Hz and 3750 Hz) and reports magnitude and phase.
+
+Measured on `artifacts/hsf-v90/call-c1`, and **identical to 0.1 dB in all nine
+recorded calls that got far enough to carry a probe**:
+
+| Hz | dB | phase | Hz | dB | phase |
+|---|---|---|---|---|---|
+| 150 | -0.4 | -1° | 2250 | -0.7 | +24° |
+| 300 | -0.1 | -19° | 2550 | -0.9 | +27° |
+| 450 | -0.1 | -20° | 2700 | -1.2 | +27° |
+| 600 | 0.0 | -18° | 2850 | -1.3 | +25° |
+| 750 | -0.0 | -15° | 3000 | -1.4 | +21° |
+| 1050 | -0.2 | -6° | 3150 | -1.7 | +15° |
+| 1350 | -0.4 | +3° | 3300 | -1.8 | +4° |
+| 1500 | -0.4 | +7° | 3450 | -2.5 | -14° |
+| 1650 | -0.4 | +12° | 3600 | -4.4 | -40° |
+| 1950 | -0.5 | +19° | 3750 | -8.4 | -72° |
+
+Empty-bin noise floor -50 dB; bulk delay 0.90 ms removed from the phases, so
+what is left is group-delay distortion.
+
+**This is much kinder than the brickwall the equaliser was tuned against, and
+it changes the conclusion.**  There is usable energy right up against the 4 kHz
+Nyquist of the 8 kHz symbol rate -- -8.4 dB at 3750 -- where the guessed
+3600 Hz low-pass had none at all.  So the "zero excess bandwidth" reading that
+ruled out non-data-aided timing recovery is still true in kind (the last
+250 Hz is unmeasured, since the probe stops there) but nothing like as
+absolute; and the intersymbol interference is far milder than assumed.  The
+measurement is now the test's channel: `hsf_measured_response[]` in
+`v90_analogue_rx_test.c`, with TRN1d's converged dispersion falling from 0.033
+on the guess to 0.0013-0.020 on the real thing.
+
 ## The equaliser, and what it now recovers
 
 `v90_analogue_fse.c` is that equaliser: 32 T/2 taps, NLMS, CMA on §8.4.5's
@@ -194,8 +234,8 @@ before the decimation.  Measured over a zero-order-hold channel band-limited to
 | what | result |
 |---|---|
 | §8.4.5 TRN1d signs | 100% at every phase |
-| §8.6 constellation sized for this line | 89-92% of codewords exact (40-82% with frozen taps) |
-| §9.3.2.9 DIL verdict | 90-91 of a clean bearer's 121 usable Ucodes, **0 wrongly claimed** |
+| §8.6 constellation sized for this line | 89-92% of codewords exact (20-78% with frozen taps) |
+| §9.3.2.9 DIL verdict | 90-93 of a clean bearer's 121 usable Ucodes, **0 wrongly claimed** |
 
 The DIL row is the one that matters and it took the right question to see it.
 Scored on exact codeword recovery the DIL reads 25%, which looks like a
@@ -210,11 +250,10 @@ transmits a constellation the line cannot carry for the rest of the call.
 ## Open
 
 * None of this has a live call behind it.
-* The channel model is a guess.  At 3600 Hz a tenth of the band sits above the
-  point where the symbol-rate-folded response is identically zero, ISI-free is
-  impossible whatever the equaliser does, and the constellation row falls to
-  59-73%.  Which the real HSF path resembles is unmeasured, and measuring it
-  off a recorded call is worth more than any further tuning.
+* What the path does above 3750 Hz is still unmeasured -- the probe stops
+  there -- and that last 250 Hz is exactly what decides whether a symbol-rate
+  timing tone exists at all.  A sounder of our own (our transmit is not
+  constrained to V.34's grid) would settle it.
 * Nothing tracks a sample-rate offset between the two ends.  At T/2 that shows
   up as the tap set walking off its span, not as a phase error.
 * §8.4.4's Sd arrives before TRN1d has trained anything, so the first 48 ms of

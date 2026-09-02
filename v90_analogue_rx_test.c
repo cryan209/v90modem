@@ -253,7 +253,7 @@ static void test_linear_bearer(const fixture_t *fx)
  *
  * Channel model, and it is the one the coupler faces: the far codec holds each
  * G.711 level for a whole DS0 interval, the line and the two codecs band-limit
- * the result to 3600 Hz, and we sample at 16 kHz on a clock sharing no phase
+ * the result, and we sample at 16 kHz on a clock sharing no phase
  * with the far end's.  So y(t) = sum_k a_k p(t - k) with p the zero-order hold
  * through that low-pass, sampled at t = n/2 + phi.
  *
@@ -271,74 +271,118 @@ static void test_linear_bearer(const fixture_t *fx)
 #define FSE_SPAN     8
 #define FSE_GRID     512
 /*
- * Two channels, and the difference between them is a result.
+ * The channel, MEASURED rather than modelled.
  *
- * FSE_BW_HARD is 3600 Hz.  A symbol rate of 8 kHz has its Nyquist frequency at
- * 4 kHz, so a channel that stops at 3600 leaves 400 Hz -- a tenth of the band --
- * in which the symbol-rate-folded response is identically zero whatever the
- * equaliser does.  An ISI-free response is then not merely hard but impossible,
- * and the residual that leaves is about 9% of the level, which is larger than
- * the G.711 ladder's steps.  That is the same zero-excess-bandwidth fact that
- * ruled out non-data-aided timing recovery, seen from the other side.
+ * The far end transmits V.34's line probing signal in Phase 2 -- 21 cosines of
+ * equal amplitude from 150 Hz to 3750 Hz -- so a recorded call contains a
+ * complete channel sounding, and tools/hsf_probe_response.py pulls it out.  The
+ * table below is what the real HSF path does, taken off
+ * artifacts/hsf-v90/call-c1 and identical to 0.1 dB in the nine recorded calls
+ * that got far enough to carry a probe.  It covers everything between the two
+ * modems: the far end's G.711 transmit and its D/A reconstruction, the SIP leg,
+ * the ATA, the two-wire line and the HSF codec's own receive filter.
  *
- * FSE_BW_SOFT is 3840 Hz, which leaves a 160 Hz dead band, and is what the
- * assertions below run against.  Which of the two the real HSF path resembles
- * is NOT known -- the coupler's channel response has never been measured -- and
- * measuring it off a recorded call is worth more than any further tuning here.
+ * It is much kinder than the brickwall this test used to guess at, and the
+ * difference decides things.  Flat within 1.5 dB to 3000 Hz, -2.5 dB at 3450,
+ * -4.4 at 3600 and -8.4 at 3750 -- so there IS usable energy right up against
+ * the 4 kHz Nyquist of the 8 kHz symbol rate, where the guessed 3600 Hz
+ * low-pass had none at all.  The phase is smooth and its residual after the
+ * bulk delay is removed reaches -72 degrees at 3750, which is ordinary
+ * band-edge group delay and exactly what a fractionally-spaced equaliser is
+ * for.
+ *
+ * Two caveats belong with it.  The probe stops at 3750, so what the path does
+ * in the last 250 Hz is not measured -- it is taken as nothing here, which is
+ * the pessimistic reading.  And 900, 1200, 1800 and 2400 Hz are gaps in the
+ * probe itself (they are its noise references), so those are interpolated from
+ * their neighbours, which the smoothness of everything around them justifies.
  */
-#define FSE_BW_HARD  0.45
-#define FSE_BW_SOFT  0.48
-#define FSE_BW       FSE_BW_HARD
+
+/* Measured on artifacts/hsf-v90/call-c1/hsf-rx.raw, probe at 16.440 s. */
+static const struct { int freq; double db; double phase; }
+    hsf_measured_response[] = {
+        { 150,   -0.38,  -0.0168},
+        { 300,   -0.13,  -0.3326},
+        { 450,   -0.05,  -0.3526},
+        { 600,    0.00,  -0.3144},
+        { 750,   -0.05,  -0.2560},
+        {1050,   -0.20,  -0.1053},
+        {1350,   -0.41,  +0.0516},
+        {1500,   -0.37,  +0.1283},
+        {1650,   -0.36,  +0.2004},
+        {1950,   -0.54,  +0.3263},
+        {2100,   -0.64,  +0.3795},
+        {2250,   -0.69,  +0.4231},
+        {2550,   -0.90,  +0.4700},
+        {2700,   -1.19,  +0.4657},
+        {2850,   -1.27,  +0.4377},
+        {3000,   -1.45,  +0.3708},
+        {3150,   -1.66,  +0.2559},
+        {3300,   -1.83,  +0.0660},
+        {3450,   -2.51,  -0.2383},
+        {3600,   -4.36,  -0.6970},
+        {3750,   -8.42,  -1.2625},
+    };
+
 #define FSE_LOSS     0.37
 
-static double *fse_pulse_table(double bw)
-{
-    static double tab[2][2*FSE_SPAN*FSE_GRID + 1];
-    static double built[2] = {0.0, 0.0};
-    int slot = (bw > 0.465) ? 1 : 0;
-
-    if (built[slot] == bw)
-        return tab[slot];
-    for (int i = 0; i <= 2*FSE_SPAN*FSE_GRID; i++) {
-        double t = (double) i/FSE_GRID - FSE_SPAN;
-        double sum = 0.0;
-        int steps = 64;
-
-        /* One symbol of zero-order hold through a windowed-sinc low-pass. */
-        for (int j = 0; j < steps; j++) {
-            double u = (j + 0.5)/steps;
-            double x = t - u;
-            double sinc;
-
-            if (fabs(x) > FSE_SPAN)
-                continue;
-            sinc = (fabs(x) < 1e-9) ? 2.0*bw
-                                    : sin(2.0*M_PI*bw*x)/(M_PI*x);
-            sum += sinc*(0.54 + 0.46*cos(M_PI*x/FSE_SPAN))/steps;
-        }
-        tab[slot][i] = sum;
-    }
-    built[slot] = bw;
-    return tab[slot];
-}
-
-static double fse_pulse_bw(double t, double bw)
-{
-    const double *tab = fse_pulse_table(bw);
-    double f;
-    int i;
-
-    if (fabs(t) >= FSE_SPAN)
-        return 0.0;
-    f = (t + FSE_SPAN)*FSE_GRID;
-    i = (int) f;
-    f -= i;
-    return tab[i]*(1.0 - f) + tab[i + 1]*f;
-}
-
+/*
+ * The channel's response to one DS0 sample, from the measurement above.
+ *
+ * The probe was generated by the far end AS 8 kHz PCM samples, so what the
+ * table holds is already the transfer function from a sample sequence to our
+ * 16 kHz stream -- the reconstruction filter, the zero-order hold and
+ * everything else are inside it, and modelling any of them again would be
+ * counting them twice.  t is in symbols.
+ */
 static double fse_pulse(double t)
 {
-    return fse_pulse_bw(t, FSE_BW);
+    static double tab[2*FSE_SPAN*FSE_GRID + 1];
+    static bool built = false;
+
+    if (!built) {
+        int n = (int) (sizeof(hsf_measured_response)
+                       /sizeof(hsf_measured_response[0]));
+        double peak = 0.0;
+
+        for (int i = 0; i <= 2*FSE_SPAN*FSE_GRID; i++) {
+            double u = (double) i/FSE_GRID - FSE_SPAN;
+            double sum = 0.0;
+
+            for (int k = 0; k < n; k++) {
+                double a = pow(10.0, hsf_measured_response[k].db/20.0);
+
+                sum += a*cos(2.0*M_PI*hsf_measured_response[k].freq*u/8000.0
+                             + hsf_measured_response[k].phase);
+            }
+            /*
+             * Windowed to the span this pulse is used over.  Twenty-one
+             * samples of a spectrum reconstruct a response that repeats every
+             * 1/150 s -- 53 symbols -- and those repeats are an artefact of
+             * having sampled the spectrum, not something the line does.
+             */
+            sum *= 0.5*(1.0 + cos(M_PI*u/FSE_SPAN));
+            tab[i] = sum;
+            if (fabs(sum) > peak)
+                peak = fabs(sum);
+        }
+        if (peak > 0.0) {
+            for (int i = 0; i <= 2*FSE_SPAN*FSE_GRID; i++)
+                tab[i] /= peak;
+        }
+        /*endif*/
+        built = true;
+    }
+    /*endif*/
+    if (fabs(t) >= FSE_SPAN)
+        return 0.0;
+    {
+        double f = (t + FSE_SPAN)*FSE_GRID;
+        int i = (int) f;
+
+        f -= i;
+        return tab[i]*(1.0 - f) + tab[i + 1]*f;
+    }
 }
 
 /*
@@ -443,7 +487,7 @@ static bool fse_run(const char *path, long first, long count, double phi,
  * capture -- a real Phase 4, 22 Ucodes -- this recovers 14% of codewords with
  * frozen taps and no arrangement of the loop does better, because that
  * constellation was chosen for a clean digital bearer: its steps are ~6% apart
- * and the residual after equalising a 3600 Hz line is ~9%.  Which is what
+ * and the residual after equalising this line is a few per cent.  Which is what
  * §9.3.2.9's DIL measurement and §8.5.2's constellation selection exist to
  * prevent.  So the constellations here are ones an analogue modem on this line
  * would actually ask for, and the DIL is the real §8.4.1 sequence.
@@ -527,7 +571,7 @@ static uint8_t *fse_ml_build(fse_ml_stream_t which, long *len_out,
 
 /* Run one stream through the channel and report exact codeword recovery over
  * the body, plus how many decisions the equaliser refused. */
-static double fse_multilevel_run(fse_ml_stream_t which, double phi, double bw,
+static double fse_multilevel_run(fse_ml_stream_t which, double phi,
                                  v90a_fse_mode_t after, int *rejected_out,
                                  double *ucode_err_out,
                                  uint8_t **rx_out, long *nrx_out)
@@ -573,7 +617,7 @@ static double fse_multilevel_run(fse_ml_stream_t which, double phi, double bw,
                 continue;
             }
             for (long m = -FSE_SPAN; m <= FSE_SPAN; m++)
-                acc += ulaw_to_linear(tx[k + m])*fse_pulse_bw(t - (k + m), bw);
+                acc += ulaw_to_linear(tx[k + m])*fse_pulse(t - (k + m));
             amp[h] = (int16_t) (acc*FSE_LOSS);
         }
         if (k == FSE_ML_SWITCH) {
@@ -726,7 +770,7 @@ static void test_fse_dil_measurement(void)
         int offset = 0;
         double score = 0.0;
 
-        if (fse_multilevel_run(FSE_ML_DIL, phi, FSE_BW_SOFT, V90A_FSE_DD,
+        if (fse_multilevel_run(FSE_ML_DIL, phi, V90A_FSE_DD,
                                NULL, NULL, &rx, &nrx) < 0.0  ||  rx == NULL) {
             printf("  SKIP: could not build the stream\n");
             return;
@@ -784,38 +828,34 @@ static void test_fse_multilevel(void)
         for (int p = 0; p < 4; p++) {
             double phi = p/4.0;
             int rejected = 0;
-            double soft_err = 0.0;
-            double soft_frozen = fse_multilevel_run(streams[i].which, phi,
-                                                    FSE_BW_SOFT,
-                                                    V90A_FSE_FROZEN, NULL, NULL,
-                                                    NULL, NULL);
-            double soft = fse_multilevel_run(streams[i].which, phi,
-                                             FSE_BW_SOFT, V90A_FSE_DD,
-                                             &rejected, &soft_err, NULL, NULL);
-            double hard = fse_multilevel_run(streams[i].which, phi,
-                                             FSE_BW_HARD, V90A_FSE_DD, NULL,
-                                             NULL, NULL, NULL);
+            double dd_err = 0.0;
+            double frozen = fse_multilevel_run(streams[i].which, phi,
+                                               V90A_FSE_FROZEN, NULL, NULL,
+                                               NULL, NULL);
+            double dd = fse_multilevel_run(streams[i].which, phi,
+                                           V90A_FSE_DD,
+                                           &rejected, &dd_err, NULL, NULL);
 
-            if (soft < 0.0  ||  hard < 0.0  ||  soft_frozen < 0.0) {
+            if (dd < 0.0  ||  frozen < 0.0) {
                 printf("    SKIP: could not build the stream\n");
                 return;
             }
             /*
-             * Only the 3840 Hz channel is asserted, and only for the
-             * constellation an analogue modem on this line would ask for.  The
+             * Asserted only for the constellation an analogue modem on this
+             * line would ask for.  The
              * DIL deliberately probes the whole ladder -- that is what it is
              * for -- so most of its Ucodes are not separable over any real line
              * and exact recovery of them is not the measurement §9.3.2.9 wants;
              * its number is here to be read, not to pass.
              */
             if (streams[i].which == FSE_ML_SPARSE) {
-                CHECK(soft > 0.85,
+                CHECK(dd > 0.85,
                       "sampling phase %.3f: %.2f%% of codewords exact",
-                      phi, soft*100.0);
-                CHECK(soft >= soft_frozen,
+                      phi, dd*100.0);
+                CHECK(dd >= frozen,
                       "sampling phase %.3f: decision-directed %.2f%% is worse "
                       "than frozen taps %.2f%%",
-                      phi, soft*100.0, soft_frozen*100.0);
+                      phi, dd*100.0, frozen*100.0);
             }
             /*
              * The DIL row is REPORTED AND NOT ASSERTED, and the reason is that
@@ -836,11 +876,10 @@ static void test_fse_multilevel(void)
              * v90_dil_ucode_set() of the descriptor this side authored, and
              * the row does not move without it.  The metric was the problem.)
              */
-            printf("    phase %.3f -> 3840 Hz %.2f%% exact (frozen %.2f%%), "
-                   "3600 Hz %.2f%%, upper-ladder level error %.2f Ucodes, "
-                   "%d decisions refused\n",
-                   phi, soft*100.0, soft_frozen*100.0, hard*100.0, soft_err,
-                   rejected);
+            printf("    phase %.3f -> %.2f%% of codewords exact "
+                   "(frozen taps %.2f%%), upper-ladder level error %.2f "
+                   "Ucodes, %d decisions refused\n",
+                   phi, dd*100.0, frozen*100.0, dd_err, rejected);
         }
     }
 }
@@ -852,9 +891,8 @@ static void test_fse(void)
     const long trn1d_count = 24000;
     double worst = 1.0;
 
-    printf("T/2 fractionally-spaced equaliser on TRN1d, band-limited bearer\n");
-    printf("  channel: zero-order hold through a 3600 Hz low-pass, "
-           "symbol-spaced taps");
+    printf("T/2 fractionally-spaced equaliser on TRN1d, measured HSF channel\n");
+    printf("  channel: measured on the rig, symbol-spaced taps");
     for (int m = -2; m <= 2; m++)
         printf(" %+.3f", fse_pulse(m + 0.5));
     printf("\n");
