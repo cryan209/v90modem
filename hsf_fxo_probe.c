@@ -257,7 +257,7 @@ int main(int argc, char **argv)
 	bool end_session = true;
 	bool session_ended = false;
 	bool stream_open = false;
-	bool stream_open_alt = false;
+	unsigned reg_d6 = 0, reg_da = 0, reg_dc = 0, reg_e4 = 0xC0;
 	char dtmf = '\0';
 	uint8_t patch[8];
 	size_t  n_patch = 0;
@@ -331,9 +331,17 @@ int main(int argc, char **argv)
 			}
 		} else if (!strcmp(argv[i], "--stream-open")) {
 			stream_open = true;
+		} else if (!strcmp(argv[i], "--regs") && i + 1 < argc) {
+			char *q = argv[++i];
+			unsigned v[4] = { 0, 0, 0, 0xC0 };
+			for (int k = 0; k < 4 && *q; k++) {
+				v[k] = (unsigned)strtoul(q, &q, 0);
+				if (*q == ',')
+					q++;
+			}
+			reg_d6 = v[0]; reg_da = v[1]; reg_dc = v[2]; reg_e4 = v[3];
 		} else if (!strcmp(argv[i], "--stream-open-alt")) {
 			stream_open = true;
-			stream_open_alt = true;
 		} else if (!strcmp(argv[i], "--tx-block") && i + 1 < argc) {
 			g_tx_block = (size_t)strtoul(argv[++i], NULL, 0);
 			if (g_tx_block < 1 || g_tx_block > 256)
@@ -710,13 +718,36 @@ int main(int argc, char **argv)
 		 * byte 0 bit 0 is clear (0xA028 for the fourth, 0x25B5 for the
 		 * last); --stream-open-alt selects those.
 		 */
-		static const uint16_t regs[] = {
-			0x2004, 0xA208, 0xF000, 0xA228, 0x6000, 0x25B4
+		/*
+		 * hsfusbcd2169_ -- which stream open calls right after script 8 --
+		 * initialises the shadows this sequence reads, and three of them
+		 * are UNCONDITIONAL: ctx+0x8d0 = 0x40, 0x8d2 = 0x800,
+		 * 0x8d4 = 0x200.  Taking them as zero (as this probe first did)
+		 * gets three of the six words wrong.
+		 *
+		 * The rest come from the config struct at ctx+0x1c8 and from
+		 * ctx+0x58, none of which is visible from here:
+		 *   0x8d6 = 0/0x200/0x400/0x600 from (cfg[0] >> 1) & 7
+		 *   0x8da = 0x1000 if (cfg[0] & 0x10) or ctx+0x58, else 0
+		 *   0x8dc = 0/0x800/0x1000/0x1800 from (cfg[0] >> 5) & 7
+		 *   0x8e4 = 0 if cfg[0] & 1, else 0x80 if cfg[1] & 1, else 0xC0
+		 * (0x8d8 is set too but only feeds a flags-2 call, which sends
+		 * nothing, so it does not matter here.)
+		 *
+		 * --regs d6,da,dc,e4 sweeps them; the default is the all-zero
+		 * config, which is 0xC0 for 0x8e4 rather than 0.
+		 */
+		const uint16_t d0 = 0x40, d2 = 0x800, d4 = 0x200;
+		uint16_t w4 = (uint16_t)((reg_e4 | 0x20 | d2 | reg_da) | 0x208);
+		uint16_t regs[6] = {
+			(uint16_t)((0x004 & 0x1fff) | 0x2000),
+			(uint16_t)((0x208 & 0x1fff) | 0x8000 | 0x2000),
+			(uint16_t)(((d4 | 0x1000) & 0x1fff) | 0xC000 | 0x2000),
+			(uint16_t)((w4 & 0x1fff) | 0x8000 | 0x2000),
+			(uint16_t)(((reg_d6 | d0) & 0x1fff) | 0x4000 | 0x2000),
+			(uint16_t)(((reg_dc | 0x5b4) & 0x1fff) | 0x2000),
 		};
-		static const uint16_t regs_alt[] = {
-			0x2004, 0xA208, 0xF000, 0xA028, 0x6000, 0x25B5
-		};
-		const uint16_t *w = stream_open_alt ? regs_alt : regs;
+		const uint16_t *w = regs;
 		for (size_t k = 0; k < sizeof regs / sizeof regs[0]; k++) {
 			uint8_t rp[8] = { (uint8_t)(w[k] >> 8), (uint8_t)(w[k] & 0xff) };
 			int rr = hsf_fxo_script_run(d, 2, rp, sizeof rp);

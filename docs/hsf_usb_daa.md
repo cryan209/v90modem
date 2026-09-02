@@ -451,13 +451,38 @@ Measured, all on a healthy part: the six writes are accepted (notifications 4
 script 10 sweep over all eight indices gives 2432-2688 with RX unchanged.
 **Nothing shifts the transmit path.**
 
-So the driver-visible sequence is now reproduced end to end -- session 9/5,
-stream open's script 1 query and script 8, the six codec register writes, the
-0x80/0x40 granularities, the 4 TX / 16 RX prime, RX-credited pacing, the script
-11 stop and the script 6 session end -- **and TX still fills its FIFO once and
-stops.**  The remaining caveat inside the driver is that those six words assume
-zero shadows; ctx+0x8d0..0x8dc are written from the profile/config path, so a
-real session may program different values.
+**The shadows are not zero, and taking them as zero got three of the six words
+wrong.**  `hsfusbcd2169_`, which stream open calls immediately after script 8,
+sets `ctx+0x8d0 = 0x40`, `0x8d2 = 0x800` and `0x8d4 = 0x200`
+**unconditionally**; the rest derive from the config struct at `ctx+0x1c8` and
+from `ctx+0x58`:
+
+    0x8d6 = 0 / 0x200 / 0x400 / 0x600   from (cfg[0] >> 1) & 7
+    0x8da = 0x1000 if (cfg[0] & 0x10) or ctx+0x58, else 0
+    0x8dc = 0 / 0x800 / 0x1000 / 0x1800 from (cfg[0] >> 5) & 7
+    0x8e4 = 0 if cfg[0] & 1, else 0x80 if cfg[1] & 1, else 0xC0
+
+(`0x8d8` is set as well but only feeds a flags-2 call, which sends nothing.)
+Note `0x8e4`'s default is **0xC0, not 0**.  Corrected, the all-zero-config
+sequence is **0x2004, 0xA208, 0xF200, 0xAAE8, 0x6040, 0x25B4** -- against the
+0x2004, 0xA208, 0xF000, 0xA228, 0x6000, 0x25B4 first sent.
+
+**Still nothing.**  The corrected words give tx 2560, and sweeping each unknown
+independently (`--regs d6,da,dc,e4`, twelve combinations covering every value
+of all four fields) gives **2432 or 2560 in every one**, RX unchanged at
+169600-169920.
+
+So the driver-visible sequence is now reproduced end to end **with the correct
+operands** -- session 9/5, stream open's script 1 query and script 8,
+`hsfusbcd2169_`'s shadows, the six codec register writes, the 0x80/0x40
+granularities, the 4 TX / 16 RX prime, RX-credited pacing, the script 11 stop
+and the script 6 session end -- **and TX still fills its FIFO once and stops.**
+
+That is now a strong negative result rather than a gap: **nothing the cd2
+driver does to this device starts its OUT consumer.**  Whatever does is either
+in the engine's own interaction with the part (the engine is what fills the TX
+ring, and it is closed), in the content or framing of the OUT data itself, or
+in a firmware-side condition no host software drives at all.
 
 ### TX drained once, unreproduced in 16 runs (2026-09-02)
 
