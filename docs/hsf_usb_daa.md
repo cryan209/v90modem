@@ -300,10 +300,44 @@ tone, RMS 1.7 against 2.5.  The high byte does not take -- `0b 02 80` leaves
 0x02 at 0x00 -- so either 0x03 is a shadow rather than the pin drive, or the
 relay needs something beyond these two registers.
 
-**This is where the work should resume**, and it is a far better-localised
-question than the transmit stall: what actually drives the DAA relay, given
-that the script the driver uses for off-hook demonstrably does not touch the
-register holding the relay word.
+**What drives the relay, as far as the uploaded image goes.**  Registers 0x02
+and 0x03 are a pair.  The init routine at 0x1489 sets `0x02 = 0xff` and
+`0x03 = 0xad`, and 0x02 reads back 0x00 in every dump, so **0x02 looks like a
+write-only direction/enable mask and 0x03 the data**.  The power-down path at
+0x12c4 writes `0xad` to BOTH before `ORL PCON,#01h`, which is the idle state.
+
+The hook operation itself is **bit 1 of register 3**, and the firmware does it
+in two leaf routines that contain nothing else:
+
+    19cf:  MOV f4h,#03h ; ORL f5h,#02h ; RET      set bit 1
+    1cc5:  MOV f4h,#03h ; ANL f5h,#fdh ; RET      clear bit 1
+
+**Neither is called from anywhere in the uploaded image** -- no LCALL or LJMP to
+either address exists in the 7399 bytes -- exactly like the register opcode
+handlers at 0x0a03/0x0a18/0x0a27/0x0a32.  So the DAA sequencing lives in the
+on-chip mask ROM at 0xd7xx that we do not have, and the uploaded image only
+supplies the primitives it calls.
+
+Driving those primitives from the host is not sufficient.  All three values
+were written directly and all three stick in the register:
+
+    0x03 = 0xb6   OFFHOOK_PHONETOLINE from SMART_RELAYS   -- no dial tone
+    0x03 = 0xaf   bit 1 set, the firmware's own operation -- no dial tone
+    0x03 = 0xad   bit 1 clear, the idle state             -- no dial tone
+
+(350/440 Hz never rise together above the off-tone floor; the strongest single
+reading was 350 Hz at 2.9x with 440 Hz at 0.8x, which is noise, not dial tone.)
+
+**So the register is not the relay drive on its own.**  Either the pin drive
+needs `0x02`'s mask set to something other than what init leaves, or -- more
+likely given the leaf-routine structure -- the mask ROM does more around those
+two calls than flip the bit, and the sequence matters.
+
+**This is the point to resume from, and it now has a concrete prerequisite: the
+mask ROM.**  `docs/hsf_usb_daa.md`'s own "Toward a mask-ROM dump" section is no
+longer a side quest -- the DAA sequencing, the script opcode dispatch and the
+relay drive are all in there, and every one of them is now known to be absent
+from the uploaded image.
 
 ### THE RX STREAM IS NOT AUDIO, AND "RX WORKS" WAS NEVER TESTED (2026-09-02)
 
