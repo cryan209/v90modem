@@ -502,13 +502,23 @@ int hsf_fxo_start(struct hsf_dev *d, const struct hsf_callbacks *cb)
 	if (rx_size <= 0 || rx_size > HSF_XFER_SIZE)
 		rx_size = HSF_XFER_SIZE;
 
+	/* How many RX transfers are in flight at once.  This ring holds 32 and
+	 * used to submit all of them; the vendor driver keeps exactly ONE bulk
+	 * IN outstanding and re-submits it from the completion (hsfusbcd2212_
+	 * submits one RX and one TX per pass).  HSF_RX_INFLIGHT makes the depth
+	 * an experiment rather than an assumption. */
+	const char *ri = getenv("HSF_RX_INFLIGHT");
+	size_t inflight = ri ? (size_t)atoi(ri) : HSF_NUM_RX;
+	if (inflight < 1 || inflight > HSF_NUM_RX)
+		inflight = HSF_NUM_RX;
+
 	for (size_t i = 0; i < HSF_NUM_RX; i++) {
 		d->rx[i] = libusb_alloc_transfer(0);
 		if (!d->rx[i])
 			return -ENOMEM;
 		libusb_fill_bulk_transfer(d->rx[i], d->h, EP_BULK_IN, d->rx_buf[i],
 					  rx_size, on_rx, d, 0);
-		if (!d->defer_rx)
+		if (!d->defer_rx && i < inflight)
 			xfer_submit(d, d->rx[i]);
 	}
 	for (size_t i = 0; i < HSF_NUM_TX; i++) {

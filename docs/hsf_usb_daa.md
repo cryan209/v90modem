@@ -1534,7 +1534,20 @@ timing at all**, which is what settles it:
   both captures independently (10.9 s and 9.9 s of streaming).
 
 So the format is **signed 16-bit little-endian, mono, 16000 Hz**, 128-byte
-transfers = 64 samples = 4 ms, 250 transfers/s each way.  The earlier
+transfers = 64 samples = 4 ms, 250 transfers/s each way.
+
+**Mono at 16000 was asserted here before it was established, and the two
+readings it had to beat are indistinguishable by tone content.**  A stream of
+4-byte frames carrying two identical 16-bit slots at 8000 Hz is the same
+waveform as mono at 16000, so the DTMF measurement above gives 695.3 and
+1335.9 Hz for BOTH readings -- split the vendor's transmit stream into even and
+odd samples and each half reads the same pair at 8000 Hz.  What separates them
+is **phase**: if the slots are consecutive samples of one 16 kHz stream, slot 1
+lags slot 0 by `2*pi*f/16000`; if they are duplicates, by zero.  Measured on
+the vendor's own burst, slot1 - slot0 is **+15.64 deg where mono-16k predicts
++15.68** (697 Hz) and **+30.18 deg where it predicts +30.06** (1336 Hz).  Two
+tones, agreeing to a tenth of a degree.  It is mono 16000; the two-slot reading
+is refuted rather than merely unfavoured.  The earlier
 "~21240 Hz mono" and the "two 16-bit slots at 10.6667 kHz" before it were both
 taken from a byte rate measured on macOS against a stream nothing was pacing;
 the "identical byte rate, which is exactly why the wrong framing survived"
@@ -1547,14 +1560,75 @@ is now on disk to compare our own transmit path against.
 
 ### Still open
 
-* Our own probe's transmit path has not yet been re-tested against these
-  numbers.  The rate correction alone (16000 vs 21240) is a 33% error in every
-  tone we have ever generated, which would put a 697 Hz DTMF row tone at
-  925 Hz -- outside any detector's band, and consistent with "our DTMF never
-  appears" while receive looked fine.  **That is a hypothesis, not a result**:
-  it has not been tested.
 * The `CLEAR_FEATURE(ENDPOINT_HALT)` on endpoint `0x82` at bring-up is not
   known to be load-bearing; it is simply present in the vendor sequence and
   absent from ours.
 * The captures were taken with `ATX3DT123` into a line that returns
   `NO CARRIER`, so nothing here exercises a connected call's datapump.
+
+## The 16 kHz rate, tested against our transmit path: it changes nothing
+
+The entry above proposed that the rate error might be why our transmit reaches
+nothing -- a 697 Hz row tone synthesized at 21240 and clocked out at 16000
+emerges at 697 x 16000/21240 = **525 Hz**, low, not high (an earlier draft had
+that ratio inverted and said 925 Hz).  It was labelled a hypothesis.  **It is
+now tested and it is refuted**, and the refutation is not subtle.
+
+`hsf_fxo_probe --tx-rate` makes the synthesis rate a runtime knob (default now
+16000, was a hardcoded 21240).  Run against the real part -- one binary, one
+variable, off-hook, feeding DTMF `1`, a device reset between every run, two
+repeats a side:
+
+    rate=21240 rep=1   rx 253888   tx 2816
+    rate=16000 rep=1   rx 253824   tx 2688
+    rate=21240 rep=2   rx 253760   tx 2688
+    rate=16000 rep=2   rx 253952   tx 2688
+
+**Transmit throughput is identical, and it is 1.4% of what the vendor driver
+achieves on the same hardware minutes earlier** (2688 bytes in 6 s against
+~190 kB).  Nothing we synthesize can reach the line at any frequency, so the
+rate cannot be the blocker.  This confirms "the playback consumer never starts
+-- proven rate-independently" at a third rate.
+
+### What the stall actually is, from usbmon on our own probe
+
+Captured the same way as the vendor (`artifacts/hsf-usbmon/probe-txstall.pcap`)
+the asymmetry is stark:
+
+* **bulk IN runs, and runs FASTER than the vendor's** -- 827 good completions
+  in 5.1 s, ~41.5 kB/s, against the vendor's device-paced 32.0 kB/s.
+* **bulk OUT is accepted and then barely completes** -- 52 submissions in
+  5.3 s, 21 of them completing with status 0, while the probe's own counter
+  reports **819 submissions refused because the TX ring was full**.  The device
+  drains us at roughly **4 transfers/s against the vendor's 250**.
+
+So the transmit pipe is not stalled by anything we put in it; the device's
+playback consumer is not clocking.  That is the whole problem, and it is
+upstream of every sample-format question.
+
+**That also explains where "~21240 Hz" came from.**  Our receive path
+free-runs -- it reads as fast as the device will answer -- so its byte rate is
+a property of our polling, not of the codec.  The vendor's is paced by the
+device (one RX and one TX per pass) and reads 32000 B/s exactly.
+
+**And it retires a measurement this document leaned on.**  The 400 Hz NZ dial
+tone was used to confirm receive was working, at an assumed rate.  It cannot
+confirm a rate: a free-running reader that duplicates samples stretches the
+waveform in sample-index by exactly the factor by which its nominal rate is
+too high, so **the dial tone reads 400 Hz under both interpretations**.
+Measured here it sits at bin 156 of 8192 = 402.9 Hz at 21158 -- which is why
+the wrong rate looked confirmed.  A tone can calibrate a rate only when the
+reader is paced by the device, as the vendor's DTMF measurement above is.
+
+### Tried and rejected
+
+* **RX in-flight depth.**  The probe submitted all 32 RX transfers at once
+  where the vendor keeps one outstanding.  `HSF_RX_INFLIGHT` makes it a knob;
+  at 1, 2 and 4 the result is unchanged (no RX at all in the default mode).
+* **Script 8 before the 9/5 pair.**  The vendor issues `HSF_SCRIPT_SIGNAL`
+  (`wValue=0xFF02`, completion `08 80`) immediately before 9 and 5, and we
+  never did.  `HSF_SIGNAL_FIRST=1` sends it: receive then stops entirely
+  (0 bytes against 253k).  **Worse, not better**; default off.
+* In the default receive mode our bulk-IN completions carry **-121
+  (EREMOTEIO)** and deliver nothing; only `--stream-open-alt` receives at all
+  in this environment.  Why those two modes differ is not explained here.

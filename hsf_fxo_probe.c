@@ -45,6 +45,17 @@ static unsigned long g_rx_len_hist[257];
 static bool          g_feed_tx;
 static FILE         *g_rx_file;
 static bool          g_dtmf_tx;
+/*
+ * The device clocks the bulk stream at 16000 Hz -- measured on the vendor
+ * driver's own traffic, from DTMF the driver generated for a dialled digit, so
+ * the figure comes from spec-fixed tone frequencies rather than from a byte
+ * rate (docs/hsf_usb_daa.md, "The vendor driver, captured on real hardware").
+ * It was 21240.0 here, taken from a byte rate measured against a stream
+ * nothing was pacing.  Synthesizing at 21240 and clocking out at 16000 lands a
+ * 697 Hz row tone on 525 Hz, which no DTMF detector is listening for.
+ * --tx-rate overrides it, so the two can be A/B'd on one binary.
+ */
+static double        g_tx_rate = 16000.0;
 static double        g_dtmf_phase_lo;
 static double        g_dtmf_phase_hi;
 static double        g_dtmf_freq_lo;
@@ -98,8 +109,8 @@ static void fill_tx(uint8_t *buf)
 			if (g_tx_slot < 0 || g_tx_slot == 1)
 				s[2*i + 1] = v;
 		}
-		g_dtmf_phase_lo += 2.0 * M_PI * g_dtmf_freq_lo / 21240.0;
-		g_dtmf_phase_hi += 2.0 * M_PI * g_dtmf_freq_hi / 21240.0;
+		g_dtmf_phase_lo += 2.0 * M_PI * g_dtmf_freq_lo / g_tx_rate;
+		g_dtmf_phase_hi += 2.0 * M_PI * g_dtmf_freq_hi / g_tx_rate;
 		if (g_dtmf_phase_lo >= 2.0 * M_PI) g_dtmf_phase_lo -= 2.0 * M_PI;
 		if (g_dtmf_phase_hi >= 2.0 * M_PI) g_dtmf_phase_hi -= 2.0 * M_PI;
 	}
@@ -405,6 +416,8 @@ int main(int argc, char **argv)
 			reset_index = (unsigned)strtoul(argv[++i], NULL, 0);
 		} else if (!strcmp(argv[i], "--feed")) {
 			do_feed = true;
+		} else if (!strcmp(argv[i], "--tx-rate") && i + 1 < argc) {
+			g_tx_rate = atof(argv[++i]);
 		} else if (!strcmp(argv[i], "--dtmf") && i + 1 < argc) {
 			dtmf = argv[++i][0];
 			do_feed = true;
@@ -684,11 +697,25 @@ int main(int argc, char **argv)
 	}
 
 	if (do_start) {
-		static const unsigned seq[] = {
+		/*
+		 * The vendor driver, captured on real hardware (2026-09-02),
+		 * issues HSF_SCRIPT_SIGNAL (8, wValue=0xFF02) immediately
+		 * BEFORE the 9/5 pair -- completion 08 80 -- and only then does
+		 * the first bulk transfer go out.  This probe never sent it.
+		 * HSF_SIGNAL_FIRST makes that an experiment rather than an
+		 * assumption; see docs/hsf_usb_daa.md.
+		 */
+		static const unsigned seq_plain[] = {
 			HSF_SCRIPT_SESSION_A, HSF_SCRIPT_SESSION_B
 		};
+		static const unsigned seq_signal[] = {
+			HSF_SCRIPT_SIGNAL, HSF_SCRIPT_SESSION_A, HSF_SCRIPT_SESSION_B
+		};
+		const bool sig_first = getenv("HSF_SIGNAL_FIRST") != NULL;
+		const unsigned *seq = sig_first ? seq_signal : seq_plain;
+		const size_t seq_n = sig_first ? 3 : 2;
 		int r = 0;
-		for (size_t i = 0; i < sizeof seq / sizeof seq[0]; i++) {
+		for (size_t i = 0; i < seq_n; i++) {
 			unsigned before = script_count(seq[i]);
 			r = hsf_fxo_script_run(d, seq[i], NULL, 0);
 			if (r < 0)
