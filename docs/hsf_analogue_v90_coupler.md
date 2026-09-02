@@ -183,12 +183,43 @@ is required anyway: at 3600 Hz the pulse's first neighbours carry **±0.14** of
 the main tap's 0.80, and the G.711 ladder's steps near the top are finer than
 that, so no slicer can recover the levels however well the instant is chosen.
 
+## The equaliser, and what it now recovers
+
+`v90_analogue_fse.c` is that equaliser: 32 T/2 taps, NLMS, CMA on §8.4.5's
+TRN1d, handed over to a decision-directed loop as soon as the ladder is
+calibrated.  Fed from the coupler's 16 kHz stream through `me_rx_v90a_16k()`,
+before the decimation.  Measured over a zero-order-hold channel band-limited to
+3840 Hz, with the sampling phase swept across a whole symbol:
+
+| what | result |
+|---|---|
+| §8.4.5 TRN1d signs | 100% at every phase |
+| §8.6 constellation sized for this line | 89-92% of codewords exact (40-82% with frozen taps) |
+| §9.3.2.9 DIL verdict | 90-91 of a clean bearer's 121 usable Ucodes, **0 wrongly claimed** |
+
+The DIL row is the one that matters and it took the right question to see it.
+Scored on exact codeword recovery the DIL reads 25%, which looks like a
+failure and is not: it probes the whole ladder deliberately, most of a real
+ladder is not separable over a real line, and finding that out is its purpose.
+Scored on its VERDICT -- which Ucodes arrived distinguishable from their
+neighbours -- it recovers three quarters of them and, in the direction that
+matters, claims none it should not.  Missing a usable Ucode costs a little
+rate; calling an unusable one usable puts it in CP and the digital modem then
+transmits a constellation the line cannot carry for the rest of the call.
+
 ## Open
 
-* The V.90 analogue Phase 3 receiver needs a T/2 fractionally-spaced equaliser
-  on the 16 kHz stream, per the section above.  That is the whole of the
-  remaining V.90 work on this path, and it subsumes both the sampling phase and
-  the intersymbol interference.
+* None of this has a live call behind it.
+* The channel model is a guess.  At 3600 Hz a tenth of the band sits above the
+  point where the symbol-rate-folded response is identically zero, ISI-free is
+  impossible whatever the equaliser does, and the constellation row falls to
+  59-73%.  Which the real HSF path resembles is unmeasured, and measuring it
+  off a recorded call is worth more than any further tuning.
+* Nothing tracks a sample-rate offset between the two ends.  At T/2 that shows
+  up as the tap set walking off its span, not as a phase error.
+* §8.4.4's Sd arrives before TRN1d has trained anything, so the first 48 ms of
+  Phase 3 go through an unconverged equaliser and §9.3.2.4's Sd-to-S̄d
+  transition is the ordering problem left.
 * V.34 Phase 3 acquisition needs to work at an arbitrary sampling phase.
 * Both V.22bis directions are lossy and the HSF-to-digital direction delivers
   no intact lines at all (bytes arrive, so bits flow and are corrupted).  A

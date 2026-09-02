@@ -283,6 +283,20 @@ int v90_dil_generate_codewords(v90_law_t law,
                                const v90_dil_desc_t *desc,
                                uint8_t *out,
                                int len);
+/*
+ * The distinct Ucodes a descriptor's cycle puts on the line, ascending.
+ *
+ * The analogue modem authored the descriptor (§8.4.1 sends it in Ja), so it
+ * knows every level that is coming -- and a receiver over an analogue bearer
+ * has to be told, or it slices §8.4.1's DIL onto all 128 Ucodes and decides
+ * between levels the far end is not transmitting.  Returns the count written,
+ * or 0 for a descriptor that disables DIL.
+ */
+int v90_dil_ucode_set(v90_law_t law,
+                      const v90_dil_desc_t *desc,
+                      uint8_t *out,
+                      int max);
+
 int v90_dil_descriptor_bit_len(const v90_dil_desc_t *desc);
 bool v90_build_dil_descriptor_bits(uint8_t *buf,
                                    int buf_len,

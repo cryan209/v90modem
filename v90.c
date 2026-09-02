@@ -3049,6 +3049,46 @@ static uint8_t v90_dil_symbol_codeword(v90_law_t law,
     return v90_pcm_signed_codeword(law, ucode, sp_bit);
 }
 
+int v90_dil_ucode_set(v90_law_t law,
+                      const v90_dil_desc_t *desc,
+                      uint8_t *out,
+                      int max)
+{
+    bool seen[128];
+    uint8_t *cycle;
+    int cycle_len;
+    int n = 0;
+
+    if (desc == NULL  ||  out == NULL  ||  max <= 0)
+        return 0;
+    if ((cycle_len = v90_dil_cycle_len(desc)) <= 0)
+        return 0;
+    if ((cycle = malloc((size_t) cycle_len)) == NULL)
+        return 0;
+    /* Generated rather than derived from the descriptor's fields: §8.4.1's
+     * segmentation is what decides which Ucodes a cycle actually visits, and
+     * that logic already exists and is tested.  One cycle covers all of it by
+     * definition. */
+    if (v90_dil_generate_codewords(law, desc, cycle, cycle_len) != cycle_len) {
+        free(cycle);
+        return 0;
+    }
+    memset(seen, 0, sizeof(seen));
+    for (int i = 0; i < cycle_len; i++) {
+        int ucode;
+
+        v90_codeword_decompose(law, cycle[i], &ucode, NULL);
+        if (ucode >= 0  &&  ucode < 128)
+            seen[ucode] = true;
+    }
+    free(cycle);
+    for (int u = 0; u < 128  &&  n < max; u++) {
+        if (seen[u])
+            out[n++] = (uint8_t) u;
+    }
+    return n;
+}
+
 int v90_dil_cycle_len(const v90_dil_desc_t *desc)
 {
     int total;

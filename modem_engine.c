@@ -9631,20 +9631,28 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
     }
     /*
      * §8.4.1's DIL is a level ladder, so from here the decisions are ordinary
-     * ones and the step comes down to match.
+     * ones and the step comes down to match -- and the slicer is told which
+     * levels those are.
      *
-     * The constellation is cleared with it, and that is a known hole rather
-     * than a choice: this side AUTHORED the DIL descriptor in Ja and knows
-     * exactly which Ucodes are coming, but nothing passes them to the slicer,
-     * so it falls back to all 128 -- whose decision regions are fine enough
-     * that the equaliser refuses nearly every decision and effectively freezes.
-     * Measured on the test channel, that leaves §9.3.2.9's levels about 4.6
-     * Ucodes out where a known constellation is 0.1.
+     * It can be told exactly, because this side AUTHORED the descriptor: §8.4.1
+     * sends it to the digital modem in Ja and §9.3.2.9 has the analogue modem
+     * "receive the DIL sequence it requested", so every Ucode that is about to
+     * arrive is known before it does.  Without that the slicer falls back to
+     * all 128 and spends the DIL deciding between levels the far end is not
+     * transmitting -- and, worse, its decision regions become so fine that the
+     * equaliser refuses nearly every decision and effectively freezes.
      */
     if (v90_analogue_phase3_rx_stage(g_v90a) >= V90A_RX_DIL
         &&  !g_v90a_dil_tracking) {
+        uint8_t set[128];
+        int n = 0;
+
         g_v90a_dil_tracking = true;
-        v90a_linear_set_constellation(g_v90a_linear, NULL, 0);
+        if (g_v90a_dil_valid)
+            n = v90_dil_ucode_set((g_law == ME_LAW_ALAW) ? V90_LAW_ALAW
+                                                         : V90_LAW_ULAW,
+                                  &g_v90a_dil, set, (int) sizeof(set));
+        v90a_linear_set_constellation(g_v90a_linear, n > 0 ? set : NULL, n);
         v90a_fse_set_mu(g_v90a_fse, V90A_FSE_MU_TRACK);
         if (v90a_fse_mode(g_v90a_fse) == V90A_FSE_CMA) {
             /* TRN1d never gave us a Ucode, so nothing is calibrated and a
@@ -9653,8 +9661,10 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
             v90a_fse_set_mode(g_v90a_fse, V90A_FSE_FROZEN);
         }
         /*endif*/
-        ME_LOG("[ME] V.90 analogue: DIL; equaliser %s, dispersion %.4f, "
-               "tap centre %.2f symbols, %d decisions used and %d refused\n",
+        ME_LOG("[ME] V.90 analogue: DIL over %d requested Ucodes; equaliser %s, "
+               "dispersion %.4f, tap centre %.2f symbols, "
+               "%d decisions used and %d refused\n",
+               n,
                v90a_fse_mode(g_v90a_fse) == V90A_FSE_DD ? "tracking"
                                                         : "frozen",
                v90a_fse_dispersion(g_v90a_fse),
