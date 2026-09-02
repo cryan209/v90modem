@@ -439,7 +439,39 @@ leaves the bus entirely.  A STALL from `--reset` is a real answer (the device
 actively rejecting the opcode at that framing) and is reported as distinct from
 an I/O error; the worst case is the replug the workflow already needs.
 
-**Live, device-recipient OUT, wValue and wIndex zero: STALL.**  The device
+**Live, firmware running: `CD2_RESET` is ACCEPTED and `CD2_WAKEONRING` is
+not.**  Device-recipient OUT with both fields zero, on family 03, request 5
+completes (`ACCEPTED (0)`) while request 6 is rejected at all four framings
+(device/interface x OUT/IN, STALL each time).  The firmware discriminates, so
+acceptance is evidence of a handler rather than of an ignored opcode -- and the
+same request 5 at the same framing is STALLED by the **bootloader**, which is
+the cleanest control available: one opcode, one framing, two firmwares, two
+answers.  What it does is unknown; the family stays 03, so it is not a reset of
+the part.
+
+**The wValue sweep that followed is VOID and its numbers must not be quoted.**
+It appeared to show wValue 0 giving 127488 RX bytes, 1 giving 64, and >= 2
+giving zero -- a clean-looking monotone.  Alternating a wValue = 0 arm between
+the others broke it (0 read 0, 0, 127488, 0), and the decisive control was
+running with **no `--reset` at all**: four consecutive runs, `rx = 0` every
+time.  **The device had degraded into a state where the codec does not start,
+and stayed there**, so the sweep was measuring that decay against run order,
+not the parameter.  EP0 still answers, scripts 9 and 5 still complete and still
+report on the interrupt endpoint, and TX still fills its FIFO -- only the audio
+stream is gone, which is why nothing in the per-run output flagged it.
+
+Two procedural consequences for anything driven from this probe:
+
+* **This part degrades across runs and does not recover on its own.**  A
+  multi-run sweep must reload firmware between arms, or it measures run order.
+  Only a replug reaches the bootloader window, so a sweep of N settings costs N
+  replugs -- which is the cost `CD2_RESET` was hoped to remove.
+* **Every arm needs a verified-good baseline immediately before it.**  "Scripts
+  accepted, device alive, TX accepted" was all true on a part producing no
+  audio at all; the only honest health check is RX bytes actually arriving.
+
+**Live, on the BOOTLOADER, device-recipient OUT, wValue and wIndex zero:
+STALL.**  The device
 actively rejects `CD2_RESET` at that framing.  That is a real answer but a
 narrow one, and the run does not yet settle the question, for two reasons.
 
