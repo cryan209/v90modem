@@ -379,6 +379,57 @@ The prediction it makes is specific: if this is the gate, TX stops being a
 ~2.4 kB one-shot FIFO fill and starts completing continuously, at the same
 128-byte granularity, for the whole run.
 
+### What the driver actually does at stream open -- script 1, which we never sent
+
+Extracting every `hsfusbcd2176_` call site with its script id gives the whole
+sequence in one place, and it contains a script this probe had never sent.
+
+    hsfusbcd2165_   session start:  9 (wIndex 1), 5 (wIndex 1), 9 again on a
+                                    1400 ms timeout -- the retry, not a third step
+    hsfusbcd2167_   stream open:    hsfusbcd2241_ -> SCRIPT 1 (wIndex 1)
+                                    hsfusbcd2247_ -> script 8 (wIndex 1)
+                                    then granularities 0x80 TX / 0x40 RX,
+                                    then hsfusbcd2196_'s 4 TX / 16 RX prime
+    hsfusbcd2265_   stream stop:    2261_(3,0), 2261_(1,0) -> script 11
+    hsfusbcd2195_/2201_  session end: 6, and 4
+    hsfusbcd2180_/2166_/2185_  hook: 3 off, 4 on
+    hsfusbcd2220_   pulse dial:     7
+    hsfusbcd2187_/2250_  signals:   8 (wIndex 3 to delete)
+    hsfusbcd2200_ / hsfusbcd2202_:  2, and 10 (wIndex 1, patch carrying 0x8000)
+
+**Script 1 is a QUERY, and it is the first thing stream open does.**
+`hsfusbcd2241_` clears an event, sends it, waits **1400 ms**, retries once on
+timeout, then calls `hsfusbcd2239_(ctx, 4)` -- a FOUR byte read, where every
+other script's completion is two -- and sets `ctx+0x911` into `ctx+0x930` and
+**`ctx+0x68` from (byte `0x912` == 1)**.  That is the mode this document
+previously took for a hardware variant: it is the device's own answer to script
+1.
+
+Live, this part replies **`01 00 00 01`**, so byte `0x912` is 0 and **the mode
+is 0** -- measured now rather than assumed, which retrospectively justifies the
+mode-0 reading of `hsfusbcd2261_` (args 2 and 3 inert, stop = script 11 with
+0x01).
+
+Two defects of ours fell out of sending it.  The completion parser took byte 1
+as the status, which is right for a two-byte reply and reports script 1's
+`01 00 00 01` as a **failure**; the status is the last byte.  And the probe
+armed the notification pipe and both data rings together at attach, where the
+driver has notify up from attach but primes the bulk rings only at stream open
+-- so script 1 went into an already-running stream and **collapsed RX to 2366
+bytes**.  With the rings deferred (`hsf_fxo_defer_rx()` / `hsf_fxo_arm_rx()`,
+`--stream-open`) the driver's order runs intact: RX 168832 against a control's
+169792.
+
+**It does not unblock TX.**  In the full order transmit reaches 2944 bytes and
+stops, against 2432 for the control -- still a FIFO that fills once, with 650
+submits refused.  Note 2944 exceeds the 2496-2527 capacity bound measured
+earlier, so that bound describes mid-sequence runs and is not a constant of the
+part either.
+
+What remains unsent from the list above is **script 2** (`hsfusbcd2200_`) and
+**script 10** (`hsfusbcd2202_`, wIndex 1, patch carrying 0x8000) -- the two that
+take real parameters and have never gone out patched.
+
 ### TX drained once, unreproduced in 16 runs (2026-09-02)
 
 With `hsfusbcd2265_`'s stream stop added to the teardown -- script 11 ahead of

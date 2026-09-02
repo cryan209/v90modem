@@ -55,6 +55,9 @@ static unsigned      g_tx_blocks;
 static bool          g_tx_pace_rx = true;	/* credit TX from RX, as the driver does */
 static size_t        g_tx_block = 128;	/* hsfusbcd2167_ sets ctx+0x876 = 0x80 */
 static size_t        g_rx_credit;
+static uint8_t       g_script1_reply[2];
+static int           g_script1_mode;
+static bool          g_script1_seen;
 
 static void fill_tx(uint8_t *buf)
 {
@@ -158,9 +161,29 @@ static void on_notify(const struct hsf_notification *n, void *user)
 {
 	(void)user;
 	if (n->wValue == 1 && n->data_len >= 2 && n->data[0] < 34) {
+		/*
+		 * Most scripts reply with two bytes, <id> <status>.  SCRIPT 1 IS
+		 * DIFFERENT: it is hsfusbcd2241_'s stream-open query and replies
+		 * with FOUR, and hsfusbcd2239_ is called with a length of 4 to
+		 * read it.  Live this part answers 01 00 00 01, and the driver
+		 * takes ctx+0x911 (byte 1) and ctx+0x912 (byte 2) as payload --
+		 * ctx+0x68, the mode deciding whether scripts 11 and 12 do
+		 * anything, is set from (byte 2 == 1) -- which leaves the LAST
+		 * byte as the status.
+		 *
+		 * Reading byte 1 as the status for a four-byte reply therefore
+		 * reports a successful script 1 as a failure, which is exactly
+		 * what it did the first time it was sent in order.
+		 */
 		pthread_mutex_lock(&g_notify_lock);
 		g_script_done[n->data[0]]++;
-		g_script_status[n->data[0]] = n->data[1];
+		g_script_status[n->data[0]] = n->data[n->data_len - 1];
+		if (n->data[0] == 1 && n->data_len >= 4) {
+			g_script1_reply[0] = n->data[1];
+			g_script1_reply[1] = n->data[2];
+			g_script1_mode = (n->data[2] == 1);
+			g_script1_seen = true;
+		}
 		pthread_cond_broadcast(&g_notify_cond);
 		pthread_mutex_unlock(&g_notify_lock);
 	}
@@ -233,6 +256,7 @@ int main(int argc, char **argv)
 	int  reset_rt = -1;		/* -1 sweeps all four framings */
 	bool end_session = true;
 	bool session_ended = false;
+	bool stream_open = false;
 	char dtmf = '\0';
 	uint8_t patch[8];
 	size_t  n_patch = 0;
@@ -304,6 +328,8 @@ int main(int argc, char **argv)
 				if (*p == ',')
 					p++;
 			}
+		} else if (!strcmp(argv[i], "--stream-open")) {
+			stream_open = true;
 		} else if (!strcmp(argv[i], "--tx-block") && i + 1 < argc) {
 			g_tx_block = (size_t)strtoul(argv[++i], NULL, 0);
 			if (g_tx_block < 1 || g_tx_block > 256)
@@ -352,6 +378,7 @@ int main(int argc, char **argv)
 				" [--post-script ID[,ID...]] [--post-patch B[,B...]]"
 				" [--reset|--wake-on-ring] [--reset-value N] [--reset-index N]"
 				" [--reset-rt 0|1|2|3] [--no-end-session] [--tx-free-run]"
+				" [--stream-open]"
 				" [--rx-out PATH]"
 				" [--stream SECONDS]\n",
 				argv[0]);
@@ -557,6 +584,8 @@ int main(int argc, char **argv)
 		}
 	}
 	g_feed_tx = do_feed;
+	if (stream_open)
+		hsf_fxo_defer_rx(d, true);
 	if (stream_secs > 0 && hsf_fxo_start(d, &cb) < 0) {
 		fprintf(stderr, "could not start streaming\n");
 		hsf_fxo_close(d);
@@ -622,6 +651,58 @@ int main(int argc, char **argv)
 		printf("start codec (script 9 completion, then script 5): %s, device %s\n",
 		       r == 0 ? "accepted" : "rejected",
 		       live < 0 ? "NOT RESPONDING" : "alive");
+	}
+
+	/*
+	 * hsfusbcd2167_'s stream open, in its own order, which is NOT what this
+	 * probe did.  It runs after the 9/5 session and before the ring is
+	 * primed:
+	 *
+	 *   hsfusbcd2241_  script 1, wIndex 1, wait up to 1400 ms, retry once.
+	 *                  This is a QUERY: the reply is four bytes rather than
+	 *                  the usual two, hsfusbcd2239_(ctx, 4) reads it, and
+	 *                  ctx+0x68 -- the mode that decides whether scripts 11
+	 *                  and 12 do anything at all -- is set from reply byte
+	 *                  0x912.  Live this part answers 01 00 00 01, so byte
+	 *                  0x912 is 0 and the mode is 0.
+	 *   hsfusbcd2247_  script 8, wIndex 1.
+	 *   then the granularities (0x80 TX, 0x40 RX) and the 4 TX / 16 RX prime.
+	 *
+	 * Sending script 1 into an already-running stream instead collapses RX,
+	 * so the order is the point of this flag.
+	 */
+	if (stream_open) {
+		unsigned before1 = script_count(1);
+		int r = hsf_fxo_script_run(d, 1, NULL, 0);
+		if (r == 0)
+			r = wait_script(1, before1, 1400);
+		if (r < 0) {
+			unsigned again = script_count(1);
+			r = hsf_fxo_script_run(d, 1, NULL, 0);	/* the one retry */
+			if (r == 0)
+				r = wait_script(1, again, 1400);
+		}
+		printf("stream open (script 1): %s", 
+		       r == 0 ? "completed" : "no completion in 2x1400ms");
+		if (g_script1_seen)
+			printf("  reply payload %02x %02x -> ctx+0x68 mode %d",
+			       g_script1_reply[0], g_script1_reply[1], g_script1_mode);
+		printf("\n");
+
+		r = hsf_fxo_script_run(d, HSF_SCRIPT_SIGNAL, NULL, 0);
+		printf("stream open (script 8): %s\n", r == 0 ? "sent" : "rejected");
+
+		/* Arm the data rings and prime AFTER the open, as the driver
+		 * does from hsfusbcd2196_ rather than at attach. */
+		hsf_fxo_arm_rx(d);
+		if (do_feed) {
+			uint8_t first[256];
+			for (int i = 0; i < 4; i++) {
+				fill_tx(first);
+				if (hsf_fxo_tx_submit(d, first, g_tx_block) < 0)
+					break;
+			}
+		}
 	}
 
 	if (hook >= 0) {

@@ -331,6 +331,18 @@ extern const uint16_t hsf_smart_relays[HSF_RELAY_COUNT];
  * close and re-open afterwards.  Worst case is the replug the workflow already
  * requires.
  */
+/*
+ * The notification pipe and the data rings are armed together by
+ * hsf_fxo_start(), which is NOT the driver's order: the notify pipe is up from
+ * attach, while the bulk rings are only primed at stream open -- after
+ * hsfusbcd2241_'s script 1 query and hsfusbcd2247_'s script 8.  Sending script
+ * 1 into rings that are already running collapses receive.  Call
+ * hsf_fxo_defer_rx() before hsf_fxo_start() to hold the RX ring back, then
+ * hsf_fxo_arm_rx() once the stream-open scripts have run.
+ */
+void hsf_fxo_defer_rx(struct hsf_dev *d, bool defer);
+int  hsf_fxo_arm_rx(struct hsf_dev *d);
+
 int hsf_fxo_reset(struct hsf_dev *d, unsigned rt, uint16_t wvalue, uint16_t windex);
 int hsf_fxo_wake_on_ring(struct hsf_dev *d, unsigned rt, uint16_t wvalue, uint16_t windex);
 

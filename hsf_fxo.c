@@ -67,6 +67,7 @@ struct hsf_dev {
 	uint8_t                 rx_buf[HSF_NUM_RX][HSF_XFER_SIZE];
 	uint8_t                 tx_buf[HSF_NUM_TX][HSF_XFER_SIZE];
 	bool                    tx_busy[HSF_NUM_TX];
+	bool                    defer_rx;
 	struct libusb_transfer *notify;
 	uint8_t                 notify_buf[HSF_NOTIFY_SIZE];
 
@@ -507,7 +508,8 @@ int hsf_fxo_start(struct hsf_dev *d, const struct hsf_callbacks *cb)
 			return -ENOMEM;
 		libusb_fill_bulk_transfer(d->rx[i], d->h, EP_BULK_IN, d->rx_buf[i],
 					  rx_size, on_rx, d, 0);
-		xfer_submit(d, d->rx[i]);
+		if (!d->defer_rx)
+			xfer_submit(d, d->rx[i]);
 	}
 	for (size_t i = 0; i < HSF_NUM_TX; i++) {
 		d->tx[i] = libusb_alloc_transfer(0);
@@ -570,6 +572,22 @@ void hsf_fxo_stop(struct hsf_dev *d)
 		libusb_free_transfer(d->notify);
 		d->notify = NULL;
 	}
+}
+
+void hsf_fxo_defer_rx(struct hsf_dev *d, bool defer)
+{
+	d->defer_rx = defer;
+}
+
+int hsf_fxo_arm_rx(struct hsf_dev *d)
+{
+	if (!d->streaming)
+		return -EINVAL;
+	for (size_t i = 0; i < HSF_NUM_RX; i++)
+		if (d->rx[i] && xfer_submit(d, d->rx[i]) < 0)
+			return -EIO;
+	d->defer_rx = false;
+	return 0;
 }
 
 int hsf_fxo_tx_submit(struct hsf_dev *d, const uint8_t *data, size_t len)
