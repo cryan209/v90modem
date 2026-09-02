@@ -257,6 +257,20 @@ With `--reference` the result is a true two-port response, RX/TX: the transmit
 path's own µ-law quantisation and whatever level the generator chose are in the
 reference rather than in the answer.
 
+**The silence is specific to the 6001 leg, not to the ATA (2026-09-03).**
+Dialling an invalid extension (9999) from the same port, in the same session,
+delivers a loud continuous tone for the whole call -- AC-RMS 18600, clipping
+22% of samples, for 25 s.  Dialling 6001 delivers an AC-RMS of 3.  So the FXS
+audio path works after digit collection, and the ATA is not muting the port:
+what goes quiet is the call that connects to our own modem.  On that call the
+SIP side is healthy (CONFIRMED, media wired) and our end receives 95280 octets
+of DIGITAL SILENCE from the ATA -- not noise, which is what a codec mismatch
+would give -- so the ATA has a media path up and is putting nothing into it.
+That is a PBX/ATA question about the 6001 leg (a re-INVITE to direct media, or
+the port being held), and it is where to look next; the coupler's own register
+writes are byte-identical to the working session's, so it is not our
+configuration.
+
 **The rig's receive path is saturating (2026-09-03).**  Off-hook and not
 dialling, the HSF hears dial tone -- 400 Hz, steady for 35 s, so the line and
 the DAA are alive -- but the samples are pinned at ±32767 for 69% of a window,
