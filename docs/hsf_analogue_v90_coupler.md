@@ -257,6 +257,29 @@ With `--reference` the result is a true two-port response, RX/TX: the transmit
 path's own µ-law quantisation and whatever level the generator chose are in the
 reference rather than in the answer.
 
+**The rig's receive path is saturating (2026-09-03).**  Off-hook and not
+dialling, the HSF hears dial tone -- 400 Hz, steady for 35 s, so the line and
+the DAA are alive -- but the samples are pinned at ±32767 for 69% of a window,
+a hard-clipped waveform, where the same dial tone in the previous session's
+`call-c1` peaks at 10383 and never clips.  And once digits go out the receive
+stream drops to an AC-RMS of **3 counts** and stays there, through the whole of
+a connected call, in both directions (the far end receives 95280 octets at
+RMS 1.2 from the ATA).  No measurement is possible in that state, and neither
+end of it -- 80 dB apart -- looks like a linear path.  Sorting out the receive
+level is the prerequisite for the sounding, and it is a rig question, not a
+code one.
+
+Two things that looked like faults and were not, recorded so they are not
+chased again.  `rx 0 bytes in 0 packets` from the coupler means **no transmit
+feed**, not a stopped codec: the data pump refills RX on TX completion, so a
+run without `--feed` (or without the engine driving transmit) delivers nothing
+and says so in its own log -- the streaming runs print "feeding signed-linear
+silence out" and the dead ones do not.  And `--wait --load --script 9` was
+blamed for it; it is innocent.  Note also that `--wait` alone returns the
+instant EP0 answers, so on a device whose firmware is already running it exits
+immediately and never sees a replug: **`--bootloader` is what makes it wait for
+the window**, which is exactly what its comment says.
+
 **Verified on the wire, 2026-09-03**: with `ME_SOUNDER=1` the digital side's
 transmit tap carries all 25 tones at equal amplitude (~990 each), the empty
 bins 38 dB down, RMS 3510 and peak 9852 -- the self-check's numbers, through
