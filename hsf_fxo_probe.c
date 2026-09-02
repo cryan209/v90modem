@@ -325,6 +325,11 @@ static int v90_replay(void)
 	int16_t  in[128], modem[64], out[64];
 
 	while (done < want && fread(in, sizeof(in[0]), 128, f) == 128) {
+		/* The T/2 equaliser gets the stream as the device delivered it:
+		 * the fractional delay below is a hand-set sampling phase, and
+		 * the whole point of a fractionally-spaced equaliser is that it
+		 * does not need one. */
+		me_rx_v90a_16k(in, 128);
 		v90_rx_fracdelay(in, 128);
 		for (int i = 0; i < 64; i++)
 			modem[i] = (int16_t)(((int32_t)in[2*i] + in[2*i + 1]) / 2);
@@ -628,6 +633,9 @@ static void on_rx(const uint8_t *data, size_t len, void *user)
 		if (ns > 256)
 			ns = 256, n = 128;
 		memcpy(wide, data, ns * sizeof(wide[0]));
+		/* Before the fractional delay, and before the decimation: see the
+		 * note in v90_replay(). */
+		me_rx_v90a_16k(wide, (int)ns);
 		v90_rx_fracdelay(wide, ns);
 		const int16_t *src = wide;
 		for (size_t i = 0; i < n; i++)

@@ -45,6 +45,7 @@
 #include "v90_analogue_phase3.h"
 #include "v90_analogue_rx.h"
 #include "v90_analogue_linear.h"
+#include "v90_analogue_fse.h"
 #include "v90_dil_presets.h"
 
 static int failures;
@@ -245,6 +246,198 @@ static void test_linear_bearer(const fixture_t *fx)
     v90_analogue_rx_free(rx);
     v90a_linear_free(lin);
     free(data);
+}
+
+/*
+ * The T/2 fractionally-spaced equaliser, over a band-limited analogue channel.
+ *
+ * Channel model, and it is the one the coupler faces: the far codec holds each
+ * G.711 level for a whole DS0 interval, the line and the two codecs band-limit
+ * the result to 3600 Hz, and we sample at 16 kHz on a clock sharing no phase
+ * with the far end's.  So y(t) = sum_k a_k p(t - k) with p the zero-order hold
+ * through that low-pass, sampled at t = n/2 + phi.
+ *
+ * The signal is §8.4.5's TRN1d -- scrambled ones on one Ucode, so ±U, constant
+ * modulus, signs unknown -- which is what CMA needs and what the analogue modem
+ * is given 30000T of.  What is asserted is the thing that matters and the thing
+ * the raw slicer could not do at any sampling phase: that the SIGNS come back.
+ * They are the scrambler's output, so recovering them is recovering TRN1d, and
+ * §8.4.2's Jd rides on the same mapping.
+ *
+ * phi is swept over a whole symbol, which is both half-symbol positions of the
+ * 16 kHz grid: an equaliser that only worked at one of them would be a
+ * symbol-spaced equaliser wearing a disguise.
+ */
+#define FSE_SPAN     8
+#define FSE_GRID     512
+#define FSE_BW       0.45          /* 3600 Hz, normalised to the 8 kHz symbol rate */
+#define FSE_LOSS     0.37
+
+static double *fse_pulse_table(void)
+{
+    static double tab[2*FSE_SPAN*FSE_GRID + 1];
+    static bool built = false;
+
+    if (built)
+        return tab;
+    for (int i = 0; i <= 2*FSE_SPAN*FSE_GRID; i++) {
+        double t = (double) i/FSE_GRID - FSE_SPAN;
+        double sum = 0.0;
+        int steps = 64;
+
+        /* One symbol of zero-order hold through a windowed-sinc low-pass. */
+        for (int j = 0; j < steps; j++) {
+            double u = (j + 0.5)/steps;
+            double x = t - u;
+            double sinc;
+
+            if (fabs(x) > FSE_SPAN)
+                continue;
+            sinc = (fabs(x) < 1e-9) ? 2.0*FSE_BW
+                                    : sin(2.0*M_PI*FSE_BW*x)/(M_PI*x);
+            sum += sinc*(0.54 + 0.46*cos(M_PI*x/FSE_SPAN))/steps;
+        }
+        tab[i] = sum;
+    }
+    built = true;
+    return tab;
+}
+
+static double fse_pulse(double t)
+{
+    const double *tab = fse_pulse_table();
+    double f;
+    int i;
+
+    if (fabs(t) >= FSE_SPAN)
+        return 0.0;
+    f = (t + FSE_SPAN)*FSE_GRID;
+    i = (int) f;
+    f -= i;
+    return tab[i]*(1.0 - f) + tab[i + 1]*f;
+}
+
+/*
+ * Run TRN1d through the channel at sampling phase phi and report how much of
+ * the sign stream the equaliser recovers, once converged.
+ */
+static bool fse_run(const char *path, long first, long count, double phi,
+                    double *match_out, double *disp_out, double *centre_out)
+{
+    v90a_fse_t *fse;
+    uint8_t *data;
+    long len;
+    double *y;
+    int8_t *tx;
+    int ny = 0;
+    int best_match = -1;
+    int best_delay = 0;
+    long settled;
+
+    if ((data = read_file(path, &len)) == NULL)
+        return false;
+    if (first + count + FSE_SPAN >= len) {
+        free(data);
+        return false;
+    }
+    fse = v90a_fse_init(32, 0.0);
+    y = malloc(sizeof(double)*(size_t) (count + 2));
+    tx = malloc((size_t) count);
+    if (fse == NULL  ||  y == NULL  ||  tx == NULL) {
+        free(fse); free(y); free(tx); free(data);
+        return false;
+    }
+    v90a_fse_set_mode(fse, V90A_FSE_CMA);
+
+    for (long k = 0; k < count; k++)
+        tx[k] = (data[first + k] & 0x80) ? 1 : -1;
+
+    for (long k = FSE_SPAN; k < count - FSE_SPAN; k++) {
+        int16_t amp[2];
+
+        /* The two 16 kHz samples inside symbol k. */
+        for (int h = 0; h < 2; h++) {
+            double t = k + 0.5*h + phi;
+            double v = 0.0;
+
+            for (long m = -FSE_SPAN; m <= FSE_SPAN; m++)
+                v += ulaw_to_linear(data[first + k + m])*fse_pulse(t - (k + m));
+            amp[h] = (int16_t) (v*FSE_LOSS);
+        }
+        ny += v90a_fse_put(fse, amp, 2, y + ny, (int) (count + 2 - ny));
+    }
+
+    /* Alignment is not known in advance -- it is exactly what the equaliser
+     * absorbed -- so search it, over the settled part of the run only. */
+    settled = ny/2;
+    /* The search has to span the whole start-up latency, not just the
+     * equaliser's own delay: the AGC priming and the delay line together
+     * swallow the first ~150 symbols before an output appears, so a window of a
+     * couple of dozen symbols around the identity mapping finds nothing and
+     * reports chance.  Which it did. */
+    for (int delay = -32; delay <= 512; delay++) {
+        int match = 0;
+        int total = 0;
+
+        for (long j = settled; j < ny; j++) {
+            long k = j + FSE_SPAN + delay;
+
+            if (k < 0  ||  k >= count)
+                continue;
+            total++;
+            if ((y[j] >= 0.0 ? 1 : -1) == tx[k])
+                match++;
+        }
+        if (total > 0  &&  match > best_match) {
+            best_match = match;
+            best_delay = delay;
+        }
+    }
+    *match_out = (double) best_match/(double) (ny - settled);
+    *disp_out = v90a_fse_dispersion(fse);
+    *centre_out = v90a_fse_centre(fse);
+    (void) best_delay;
+
+    v90a_fse_free(fse);
+    free(y);
+    free(tx);
+    free(data);
+    return true;
+}
+
+static void test_fse(void)
+{
+    /* TRN1d on this fixture starts at 67367 and runs 30000T (§8.4.5). */
+    const long trn1d_start = 67400;
+    const long trn1d_count = 24000;
+    double worst = 1.0;
+
+    printf("T/2 fractionally-spaced equaliser on TRN1d, band-limited bearer\n");
+    printf("  channel: zero-order hold through a 3600 Hz low-pass, "
+           "symbol-spaced taps");
+    for (int m = -2; m <= 2; m++)
+        printf(" %+.3f", fse_pulse(m + 0.5));
+    printf("\n");
+
+    for (int p = 0; p < 8; p++) {
+        double phi = p/8.0;
+        double match, disp, centre;
+
+        if (!fse_run(fixtures[0].path, trn1d_start, trn1d_count, phi,
+                     &match, &disp, &centre)) {
+            printf("  SKIP: fixture not present\n");
+            return;
+        }
+        if (match < worst)
+            worst = match;
+        CHECK(match > 0.99,
+              "sampling phase %.3f: %.2f%% of TRN1d's signs recovered",
+              phi, match*100.0);
+        printf("    phase %.3f -> signs %.2f%%, dispersion %.4f, "
+               "tap centre %.2f symbols\n",
+               phi, match*100.0, disp, centre);
+    }
+    printf("  worst phase: %.2f%% of signs\n", worst*100.0);
 }
 
 /*
@@ -1195,6 +1388,7 @@ int main(int argc, char *argv[])
         test_linear_bearer(&fixtures[i]);
     for (i = 0; i < sizeof(fixtures)/sizeof(fixtures[0]); i++)
         test_driven_by_fixture(&fixtures[i]);
+    test_fse();
     test_dil_stage();
     for (int sr = 0; sr <= 3; sr++)
         test_phase4_receive(sr);

@@ -123,6 +123,16 @@ void me_tx_audio(int16_t *amp, int len);
  * live PJMEDIA entry points when the negotiated codec is PCMU or PCMA.
  */
 void me_rx_g711(const uint8_t *codewords, int count);
+/*
+ * The analogue role's downstream, at 16 kHz -- two samples per DS0 interval.
+ *
+ * A caller with an analogue bearer of its own (the HSF coupler) passes the
+ * stream here BEFORE it decimates for me_rx_audio(): the V.90 downstream can
+ * only be recovered from T/2 samples, and doing it here rather than in the
+ * caller keeps the equaliser in the modem where it can be tested.  Harmless on
+ * any other call -- it returns unless the analogue role is running Phase 3.
+ */
+void me_rx_v90a_16k(const int16_t *amp, int len);
 int  me_tx_g711(uint8_t *codewords, int count);
 
 /* Flush the live G.711 tap files (VPCM_G711_TAP_DIR).  The taps are fully

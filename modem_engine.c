@@ -29,6 +29,7 @@
 #include "v90_cp_rx.h"
 #include "v90_analogue_phase3.h"
 #include "v90_analogue_linear.h"
+#include "v90_analogue_fse.h"
 #include "v90_dil_presets.h"
 #include "p3_demod.h"
 #include "v92_cp_rx.h"
@@ -1841,6 +1842,18 @@ static bool     g_v90a_started = false;
  * codeword stream (v90_analogue_linear.h).
  */
 static v90a_linear_t *g_v90a_linear = NULL;
+/*
+ * The T/2 equaliser, when the caller supplies its own 16 kHz stream
+ * (v90_analogue_fse.h).  On a two-wire line this is what actually recovers the
+ * downstream: the slicer alone cannot, because the sampling phase and the
+ * line's intersymbol interference are both outside its reach.  NULL on a
+ * digital bearer, where there is nothing to equalise.
+ */
+static v90a_fse_t *g_v90a_fse = NULL;
+/* Set by the first me_rx_v90a_16k() of a call.  The 8 kHz path then stops
+ * slicing: the two would otherwise feed the same receiver twice, once well and
+ * once badly. */
+static bool     g_v90a_16k = false;
 /* Set while me_rx_g711() is forwarding its own linear copy to me_rx_audio(),
  * so the codeword path is not run twice on one call's samples. */
 static bool     g_rx_from_g711 = false;
@@ -3900,6 +3913,9 @@ static void cleanup_v34_v90_training_locked(void)
         v90_analogue_phase3_free(g_v90a);
         v90a_linear_free(g_v90a_linear);
         g_v90a_linear = NULL;
+        v90a_fse_free(g_v90a_fse);
+        g_v90a_fse = NULL;
+        g_v90a_16k = false;
         g_v90a = NULL;
     }
     g_v90a_started = false;
@@ -4163,6 +4179,9 @@ static bool restart_v90_analogue_phase2_locked(const char *reason)
         v90_analogue_phase3_free(g_v90a);
         v90a_linear_free(g_v90a_linear);
         g_v90a_linear = NULL;
+        v90a_fse_free(g_v90a_fse);
+        g_v90a_fse = NULL;
+        g_v90a_16k = false;
         g_v90a = NULL;
     }
     g_v90a_started = false;
@@ -6815,7 +6834,7 @@ void me_rx_audio(const int16_t *amp, int len)
      * digital bearer runs.  Skipped when these samples are me_rx_g711()'s own
      * linear copy, where the real codewords have already been fed.
      */
-    if (!g_rx_from_g711 && g_v90a_started && g_v90a && g_v90a_linear
+    if (!g_rx_from_g711 && !g_v90a_16k && g_v90a_started && g_v90a && g_v90a_linear
         && (state == ME_TRAINING || state == ME_DATA)) {
         int offset = 0;
 
@@ -9506,6 +9525,98 @@ static void me_v90_analogue_rx_codewords_locked(const uint8_t *codewords, int co
             ds_rx_put_bit(&g_data_stack, data_bit);
         }
     }
+}
+
+/*
+ * The analogue role fed from the caller's own 16 kHz stream.
+ *
+ * Two samples per DS0 interval is what makes the downstream recoverable over a
+ * two-wire line at all.  Sampled at T/2 the line's response and the caller's
+ * sampling phase are one linear filter, so a fractionally-spaced equaliser
+ * inverts both together -- and it has to, because at 8 kHz neither is
+ * reachable: the bearer has zero excess bandwidth, so there is no timing tone
+ * to find the instant with, and the channel's first neighbours are coarser than
+ * the µ-law ladder's steps near the top (docs/hsf_analogue_v90_coupler.md).
+ *
+ * The equalised symbols come out at one per DS0 interval with their modulus
+ * pinned to §8.4.5's TRN1d level, which is exactly what the level slicer above
+ * already knows how to turn into codewords, so the rest of the path is
+ * unchanged from the digital bearer's.
+ */
+void me_rx_v90a_16k(const int16_t *amp, int len)
+{
+    if (amp == NULL  ||  len <= 0)
+        return;
+    pthread_mutex_lock(&g_state_mtx);
+    if (!g_v90a_started  ||  g_v90a == NULL
+        ||  (g_state != ME_TRAINING  &&  g_state != ME_DATA)) {
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    if (g_v90a_fse == NULL) {
+        g_v90a_fse = v90a_fse_init(0, 0.0);
+        if (g_v90a_fse == NULL) {
+            pthread_mutex_unlock(&g_state_mtx);
+            return;
+        }
+        v90a_fse_set_mode(g_v90a_fse, V90A_FSE_CMA);
+        ME_LOG("[ME] V.90 analogue: T/2 equaliser on the 16 kHz stream\n");
+    }
+    if (!g_v90a_16k) {
+        g_v90a_16k = true;
+        if (g_v90a_linear == NULL)
+            g_v90a_linear = v90a_linear_init((g_law == ME_LAW_ALAW)
+                                             ? V90_LAW_ALAW : V90_LAW_ULAW);
+    }
+    /*
+     * §8.4.4's Sd, §8.4.5's TRN1d and §8.4.2's Jd are all one Ucode with a sign
+     * on it, so the constant-modulus assumption holds across the whole of
+     * Phase 3 up to the DIL -- which by §8.4.1 is a level ladder and is where
+     * it stops holding.  Freeze there rather than let CMA pull a genuinely
+     * multilevel signal onto one circle.
+     */
+    if (v90_analogue_phase3_rx_stage(g_v90a) >= V90A_RX_DIL
+        &&  v90a_fse_mode(g_v90a_fse) == V90A_FSE_CMA) {
+        v90a_fse_set_mode(g_v90a_fse, V90A_FSE_FROZEN);
+        ME_LOG("[ME] V.90 analogue: equaliser frozen at the DIL, "
+               "dispersion %.4f, tap centre %.2f symbols\n",
+               v90a_fse_dispersion(g_v90a_fse),
+               v90a_fse_centre(g_v90a_fse));
+    }
+    for (int offset = 0; offset < len; ) {
+        double sym[128];
+        int16_t scaled[128];
+        uint8_t codewords[192];
+        int chunk = len - offset;
+        int nsym;
+        int ncode;
+
+        if (chunk > 256)
+            chunk = 256;
+        nsym = v90a_fse_put(g_v90a_fse, amp + offset, chunk,
+                            sym, (int)(sizeof(sym)/sizeof(sym[0])));
+        offset += chunk;
+        for (int i = 0; i < nsym; i++) {
+            /* Back into the units the slicer measures its own gain in.  The
+             * scale is arbitrary -- the slicer maps whatever level it sees onto
+             * its reference Ucode -- so only the headroom matters. */
+            double v = sym[i]*3000.0;
+
+            if (v > 32000.0)
+                v = 32000.0;
+            else if (v < -32000.0)
+                v = -32000.0;
+            scaled[i] = (int16_t) v;
+        }
+        ncode = v90a_linear_put(g_v90a_linear, scaled, nsym,
+                                codewords, (int)sizeof(codewords));
+        if (ncode > 0)
+            me_v90_analogue_rx_codewords_locked(codewords, ncode);
+        if (!v90a_linear_locked(g_v90a_linear)
+            &&  v90_analogue_phase3_rx_stage(g_v90a) != V90A_RX_HUNT_SD)
+            v90a_linear_lock(g_v90a_linear);
+    }
+    pthread_mutex_unlock(&g_state_mtx);
 }
 
 void me_rx_g711(const uint8_t *codewords, int count)
