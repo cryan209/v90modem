@@ -397,6 +397,50 @@ the same probe on the same part now reports 855 packets of **256** bytes in
 five seconds, at 43788 B/s against the earlier 42073 B/s.  Same stream, same
 rate, different aggregation -- so read the byte rate, not the packet length.
 
+### The loader is already faithful; the unexercised surface is CD2_RESET
+
+Checked line by line against `OsUsbFWDownload` (`modules/osusb.c:448`), the
+loader here matches the vendor's: `SET_CONFIGURATION 0` before the upload and
+`SET_CONFIGURATION 1` after (both with their returns ignored, as the driver
+does), the notification-pipe drain that discards bogus CDC ACM notifications,
+the 50 ms sleep the driver's own comment calls load-bearing ("without this,
+downloads occasionally fail"), 64-byte blocks with wValue = total size and
+wIndex = running offset, and the ten 100 ms polls afterwards.  The only
+divergence is cosmetic -- `CD2_GET_INFROMATION`'s wIndex is the retry counter
+in both, and the device answers on the first attempt either way.  **There is no
+missing step in the loader.**
+
+What is missing is two whole requests.  Conexant's own header names seven
+(`modules/imported/include/usbhalos.h:551`, `CD2REQUESTTYPE`) and the shipped
+driver issues **five**: every control transfer in `hsfusbcd2-i386.O` is request
+0, 1, 2, 3 or 4.  **`CD2_RESET` (5) and `CD2_WAKEONRING` (6) are never sent at
+all.**
+
+One near-miss is worth recording so it is not rediscovered: `hsfusbcd2210_`
+calls `hsfusbcd2120_(5)` on the path where the notify pipe is unarmed, which
+reads exactly like a reset being issued before the notify request is re-armed.
+It is not.  `hsfusbcd2120_` is a two-instruction tail jump to `OsSleep`, so
+that 5 is five milliseconds.
+
+The framing of both is therefore unknown -- direction, wValue and wIndex are
+guesses, and `hsf_fxo_reset()` uses the shape every other OUT vendor request in
+this part uses (device recipient, no data stage).  `--reset` sends it,
+`--wake-on-ring` sends the other, and `--reset-value`/`--reset-index` sweep the
+fields.  The probe then closes, re-opens and reports what came back, which is
+the actual measurement: **family 01 means the bootloader window is open again
+without a replug.**
+
+That is the reason to care.  The CD2 bootloader answers EP0 for only about
+three seconds after it enumerates, so every firmware experiment is currently
+timed by hand against a physical replug.  `libusb_reset_device()` is not an
+alternative and has already been tried -- the darwin backend times out
+re-enumerating, libusb 1.0.29 crashes on the stale handle, and the device
+leaves the bus entirely.  A STALL from `--reset` is a real answer (the device
+actively rejecting the opcode at that framing) and is reported as distinct from
+an I/O error; the worst case is the replug the workflow already needs.
+
+**Untested against hardware.**
+
 There is one more control path in the driver -- `hsfusbcd2188_` CRCs a host
 buffer with CRC-16-CCITT (poly 0x1021) and writes it in 64-byte blocks via
 `CD2_WRITE_EEPROM`, driven by `hsfusbcd2168_`. **It is irrelevant to this part,

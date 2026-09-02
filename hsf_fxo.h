@@ -290,6 +290,33 @@ enum hsf_daa_relay {
 extern const uint16_t hsf_smart_relays[HSF_RELAY_COUNT];
 
 /* Load one assembled body.  wvalue is 0xFF01 for every script but 8. */
+/*
+ * CD2_RESET and CD2_WAKEONRING are named in Conexant's own header
+ * (modules/imported/include/usbhalos.h:551, CD2REQUESTTYPE) and the shipped
+ * driver issues NEITHER: every control transfer in hsfusbcd2-i386.O is
+ * request 0, 1, 2, 3 or 4.  The one place a reset looked like it might live --
+ * hsfusbcd2210_ calling hsfusbcd2120_(5) on the path where the notify pipe is
+ * unarmed -- is not one: hsfusbcd2120_ tail-jumps to OsSleep, so that 5 is
+ * five milliseconds.
+ *
+ * So the framing is unknown: direction, wValue and wIndex are all guesses, and
+ * the shape here is the one every other OUT-direction vendor request in this
+ * part uses (device recipient, no data stage).  Sweep rather than assume.
+ *
+ * The reason to care is the workflow.  The CD2 bootloader answers EP0 for only
+ * about three seconds after it enumerates, so every firmware experiment needs a
+ * physical replug timed by hand.  A working CD2_RESET would replace that.  Note
+ * that libusb_reset_device() is NOT an alternative and has been tried: the
+ * darwin backend times out re-enumerating, libusb 1.0.29 then crashes on the
+ * stale handle, and the device leaves the bus entirely.
+ *
+ * Both invalidate the handle by construction if they do anything at all --
+ * close and re-open afterwards.  Worst case is the replug the workflow already
+ * requires.
+ */
+int hsf_fxo_reset(struct hsf_dev *d, uint16_t wvalue, uint16_t windex);
+int hsf_fxo_wake_on_ring(struct hsf_dev *d, uint16_t wvalue, uint16_t windex);
+
 int hsf_fxo_script_load(struct hsf_dev *d, uint16_t wvalue,
 			const uint8_t *body, size_t len);
 int hsf_fxo_script_delete(struct hsf_dev *d);

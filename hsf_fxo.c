@@ -292,6 +292,22 @@ int hsf_fxo_load_firmware(struct hsf_dev *d, const char *rom_path)
 	return rc;
 }
 
+int hsf_fxo_reset(struct hsf_dev *d, uint16_t wvalue, uint16_t windex)
+{
+	/* No unwedge() on failure: the point of this request is to change the
+	 * device's state, so a recovery that re-drives SET_CONFIGURATION would
+	 * confuse "the reset did nothing" with "the reset worked and we undid
+	 * it".  The raw libusb result is what the caller needs to see. */
+	return libusb_control_transfer(d->h, RT_VENDOR_DEV_OUT, CD2_RESET,
+				       wvalue, windex, NULL, 0, CTRL_TIMEOUT_MS);
+}
+
+int hsf_fxo_wake_on_ring(struct hsf_dev *d, uint16_t wvalue, uint16_t windex)
+{
+	return libusb_control_transfer(d->h, RT_VENDOR_DEV_OUT, CD2_WAKEONRING,
+				       wvalue, windex, NULL, 0, CTRL_TIMEOUT_MS);
+}
+
 /* ------------------------------------------------------------- transfer ring */
 
 static void LIBUSB_CALL on_rx(struct libusb_transfer *t)
