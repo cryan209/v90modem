@@ -126,11 +126,69 @@ so it is not on by default either.
 * `--pty-link PATH` gives the coupler a DTE.
 * `HSF_RX_DELAY`, `HSF_RX_DELAY_STEP`/`_PERIOD_MS`, `HSF_TX_GAIN`.
 
+## Symbol timing: non-data-aided recovery is impossible on this bearer
+
+The obvious next step after the level slicer (`v90_analogue_linear.c`) was a
+symbol timing loop, so the caller's sampling phase would stop mattering and
+`HSF_RX_DELAY` could go.  It was built -- a cubic/windowed-sinc interpolator,
+a maximum-mean-square phase acquisition, an early-late energy tracker and a
+Mueller and Muller tracker -- and then **withdrawn, because the signal carries
+no timing information to recover**.
+
+The reason is that the V.90 downstream has **zero excess bandwidth**.  Its
+symbol rate is 8 kHz and the line passes at most ~3.6 kHz, so there is no pair
+of frequencies `f` and `f - 8000` both inside the channel, and therefore no
+symbol-rate spectral line for any nonlinearity to lock to.  Equivalently: the
+received process is stationary, not cyclostationary, so its statistics do not
+depend on where in the symbol it is sampled -- and every non-data-aided timing
+detector is some estimate of that dependence.
+
+Measured, on the Eicon fixture through a zero-order hold and a 3600 Hz
+low-pass, mean square against sampling instant swept across a whole symbol with
+a 64-tap windowed-sinc interpolator:
+
+| instant | 0.000 | 0.250 | 0.500 | 0.750 |
+|---|---|---|---|---|
+| mean square | 5.026e5 | 5.026e5 | 5.024e5 | 5.026e5 |
+
+**0.04% across the entire symbol** -- flat, and far below the interpolator's own
+passband loss, which is what every phase estimate built on it actually locked
+to (all of them settled at the caller's own instant whatever phase the channel
+was given).  Widening the model channel to 4400 Hz brings the variation up to
+1.7%, which is the control: the metric works when there is excess bandwidth and
+this bearer has none.
+
+That is not an obscure case -- it is the case Mueller and Muller was written
+for.  Baud-rate timing recovery with no excess bandwidth has to be
+**decision-directed**, and a decision here means a G.711 level recovered
+through the channel, which needs the equaliser.  Hard-limited M&M was tried to
+avoid that (the full ladder is so dense that a correct decision is within a per
+cent of the sample it came from, and the detector cancels itself); it has a
+correct S-curve but its self-noise wandered 2% of a symbol on a byte-exact
+fixture, where the right answer is to sit still.
+
+So the ordering is settled, and it is the opposite of the one attempted:
+
+1. A **fractionally-spaced equaliser at T/2**, fed the HSF's own 16 kHz stream
+   before the decimation rather than the engine's 8 kHz.  An FSE absorbs the
+   sampling phase by construction -- that is why the V.34 receiver in this tree
+   uses one -- so "works at any sampling phase" falls out of it rather than
+   needing a loop of its own.  §8.4.5's TRN1d is 30000T of constant-modulus
+   scrambled ones, which is 3.75 s of ideal CMA training material.
+2. Then decision-directed M&M on the equalised symbols, for the sample-rate
+   drift only.
+
+That also settles the level question the slicer left open, since an equaliser
+is required anyway: at 3600 Hz the pulse's first neighbours carry **±0.14** of
+the main tap's 0.80, and the G.711 ladder's steps near the top are finer than
+that, so no slicer can recover the levels however well the instant is chosen.
+
 ## Open
 
-* The V.90 analogue Phase 3 receiver needs to recover codewords from an
-  analogue waveform rather than slice exact ones.  That is the whole of the
-  remaining V.90 work on this path.
+* The V.90 analogue Phase 3 receiver needs a T/2 fractionally-spaced equaliser
+  on the 16 kHz stream, per the section above.  That is the whole of the
+  remaining V.90 work on this path, and it subsumes both the sampling phase and
+  the intersymbol interference.
 * V.34 Phase 3 acquisition needs to work at an arbitrary sampling phase.
 * Both V.22bis directions are lossy and the HSF-to-digital direction delivers
   no intact lines at all (bytes arrive, so bits flow and are corrupted).  A
