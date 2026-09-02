@@ -379,6 +379,37 @@ The prediction it makes is specific: if this is the gate, TX stops being a
 ~2.4 kB one-shot FIFO fill and starts completing continuously, at the same
 128-byte granularity, for the whole run.
 
+**THE PROBE WAS KILLING THE PART, AND IT WAS ONE MISSING SCRIPT.**  Script 6
+is `hsfusbcd2195_`/`hsfusbcd2201_`'s session end, and nothing here had ever
+sent it: every run opened a session with 9 and 5 and abandoned it.  The cost
+was not visible in any per-run signal except one.  A freshly loaded part served
+**one** streaming run and then produced no audio at all -- while EP0 kept
+answering, scripts 9 and 5 kept completing and reporting on the interrupt
+endpoint, and TX kept filling its FIFO.  Measured: baseline 127232 RX bytes,
+next run 320, next 0, and no recovery without a replug and a reload.  With
+script 6 sent before the host-side teardown (so the notification ring is still
+posted and its completion can be seen), four consecutive runs hold **127424,
+127552, 127360, 127488**.  It is now sent by default; `--no-end-session`
+reproduces the old behaviour deliberately.
+
+Two things this invalidates upward.  **Any multi-run measurement taken before
+this is suspect** -- it was a decay against run order with the setting along
+for the ride, which is exactly how the `CD2_RESET` wValue sweep produced a
+clean-looking monotone out of nothing.  And **the wobbling TX counts were the
+same artefact**: 1152, 1408 and 2688 all came from degraded or
+abandoned-session runs.  On a healthy part TX is **2432 exactly, every time**,
+so the constant is real and is the signature to read.
+
+**The script layer is REFUTED, on a healthy part, across the whole table.**
+All fifteen arms of `tools/hsf_tx_gate_sweep.sh` -- six codes (0x02, 0x01,
+0x14, 0x13, 0x12, 0x17) in both orderings, plus script 12 alone for three of
+them -- give **tx = 2432 without exception**, with RX between 127424 and 133760
+throughout, so the part was healthy for every one.  Neither `hsfusbcd2261_`'s
+start code, nor the script-8 stream-open pairing, nor the ordering relative to
+the session bring-up moves the transmit path at all.  By the test set out when
+this lead was opened, the gate is **not in the script layer**, and the
+firmware's own OUT consumer is next.
+
 **Live, code 0x17 sent after the session: REFUTED.**  `--post-script 8,12
 --post-patch 0x17,0x17` leaves TX at **2432 bytes**, the same figure bare PCM
 reaches, while RX delivers 218942 bytes in five seconds with no error.  Script

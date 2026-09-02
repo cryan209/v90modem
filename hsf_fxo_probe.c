@@ -195,6 +195,7 @@ int main(int argc, char **argv)
 	int  do_reset = 0;		/* 1 = CD2_RESET, 2 = CD2_WAKEONRING */
 	unsigned reset_value = 0, reset_index = 0;
 	int  reset_rt = -1;		/* -1 sweeps all four framings */
+	bool end_session = true;
 	char dtmf = '\0';
 	uint8_t patch[8];
 	size_t  n_patch = 0;
@@ -266,6 +267,9 @@ int main(int argc, char **argv)
 				if (*p == ',')
 					p++;
 			}
+		} else if (!strcmp(argv[i], "--no-end-session")) {
+			/* Only to reproduce the degradation deliberately. */
+			end_session = false;
 		} else if (!strcmp(argv[i], "--reset")) {
 			do_reset = 1;
 		} else if (!strcmp(argv[i], "--wake-on-ring")) {
@@ -303,7 +307,7 @@ int main(int argc, char **argv)
 				" [--tx-slot 0|1] [--tx-prime-blocks N]"
 				" [--post-script ID[,ID...]] [--post-patch B[,B...]]"
 				" [--reset|--wake-on-ring] [--reset-value N] [--reset-index N]"
-				" [--reset-rt 0|1|2|3]"
+				" [--reset-rt 0|1|2|3] [--no-end-session]"
 				" [--rx-out PATH]"
 				" [--stream SECONDS]\n",
 				argv[0]);
@@ -607,6 +611,27 @@ int main(int argc, char **argv)
 		} else {
 			sleep((unsigned)stream_secs);
 		}
+
+		/*
+		 * Script 6 is hsfusbcd2195_/hsfusbcd2201_'s session end, and until
+		 * now nothing in this probe has ever sent it: every run opened a
+		 * session with 9 and 5 and abandoned it.  That is the obvious
+		 * suspect for a part that serves exactly one streaming run per
+		 * firmware load and then produces no audio at all.
+		 *
+		 * Sent BEFORE hsf_fxo_stop() so the notification ring is still
+		 * posted and the script's own completion code can be seen; the
+		 * host-side teardown is ours and the device knows nothing about it.
+		 */
+		if (end_session) {
+			unsigned before6 = script_count(HSF_SCRIPT_SESSION_END);
+			int r = hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_END, NULL, 0);
+			if (r == 0)
+				r = wait_script(HSF_SCRIPT_SESSION_END, before6, 2000);
+			printf("session end (script 6): %s\n",
+			       r == 0 ? "completed" : "no completion within 2s");
+		}
+
 		hsf_fxo_stop(d);
 
 		struct hsf_stats s;
