@@ -379,6 +379,29 @@ The prediction it makes is specific: if this is the gate, TX stops being a
 ~2.4 kB one-shot FIFO fill and starts completing continuously, at the same
 128-byte granularity, for the whole run.
 
+### TX HAS DRAINED ONCE (2026-09-02)
+
+With `hsfusbcd2265_`'s stream stop added to the teardown -- script 11 ahead of
+script 6 -- the fourth of six identical runs transmitted **102400 bytes**
+against the 2432-byte ceiling every previous run in this investigation has hit.
+It was very nearly symmetric with receive (**101888** RX), which is what
+RX-credited feeding predicts once the device is actually consuming, so the
+codec drained the OUT FIFO for the whole four seconds.
+
+**It is not reproducible on demand and must not be reported as a fix.**  Six
+identical commands: runs 1-3 normal (tx 2560, 2432, 2432), run 4 the one above,
+runs 5-6 dead (rx 0, the degraded state).  Two things point away from "script
+11 starts the transmitter" as a simple explanation: the effect appeared on the
+fourth run rather than the first, and **RX fell to 25.5 kB/s in that run from
+the usual 42.4** -- so the part had entered a different mode, not merely started
+draining a buffer it was already filling.  25600 B/s is 6400 four-byte frames
+per second.
+
+What is established is narrower and still worth a lot: **the OUT consumer can
+run.**  Every previous result bounded the host side and left "what starts the
+firmware's consumer" as an open question with no evidence it could be answered
+at all.  There is now a state in which it demonstrably does.
+
 ### 2432 is not a constant of the device: the FIFO is 2496-2527 bytes
 
 The transmit stall was described for a long time by the byte count at which it

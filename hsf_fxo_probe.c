@@ -673,6 +673,19 @@ int main(int argc, char **argv)
 		 * the ordering is load-bearing and not merely convenient for
 		 * observing the completion. */
 		if (end_session) {
+			/* hsfusbcd2265_ is the stream stop and runs BEFORE the
+			 * session end: 2261_(3,0) then 2261_(1,0), which in the
+			 * default mode 0 is one script 11 carrying 0x01 in both
+			 * patch bytes. */
+			uint8_t stop[8] = { HSF_SCRIPT_STOP_CODE, HSF_SCRIPT_STOP_CODE };
+			unsigned before11 = script_count(HSF_SCRIPT_PATH_STOP);
+			int rs = hsf_fxo_script_run(d, HSF_SCRIPT_PATH_STOP,
+						    stop, sizeof stop);
+			if (rs == 0)
+				rs = wait_script(HSF_SCRIPT_PATH_STOP, before11, 2000);
+			printf("stream stop (script 11): %s\n",
+			       rs == 0 ? "completed" : "no completion within 2s");
+
 			unsigned before6 = script_count(HSF_SCRIPT_SESSION_END);
 			int r = hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_END, NULL, 0);
 			if (r == 0)

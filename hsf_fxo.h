@@ -245,6 +245,23 @@ enum hsf_script_id {
 	 * of their meaning. */
 	HSF_SCRIPT_PATH_START  = 12,
 	HSF_SCRIPT_PATH_STOP   = 11,
+
+	/*
+	 * ctx+0x68 is NOT a hardware variant, which these notes first assumed.
+	 * hsfusbcd2308_ (.text 0x1d30) is a property handler whose jump table
+	 * sets it to 0, 1, 2 or 3 from an upper-layer call, so it is a runtime
+	 * MODE, and 0 is the default.
+	 *
+	 * In mode 0 the table above collapses: 2261_(0,*) -> code 0x02,
+	 * 2261_(1,*) -> code 0x01, and 2261_(2,*) and 2261_(3,*) DO NOTHING AT
+	 * ALL.  Two consequences.  The stream-open start, 2261_(3,1), is a
+	 * no-op -- so the vendor never sends script 12 there in this
+	 * configuration, which is worth knowing before reading anything into a
+	 * sweep of its codes.  And hsfusbcd2265_'s stop pair, 2261_(3,0) then
+	 * 2261_(1,0), reduces to a single real call: script 11 with both patch
+	 * bytes 0x01.
+	 */
+	HSF_SCRIPT_STOP_CODE   = 0x01,
 };
 
 /*
