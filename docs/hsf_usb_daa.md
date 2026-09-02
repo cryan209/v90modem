@@ -356,15 +356,17 @@ path. Either the accepted script does not seize this particular DAA, or these
 four-byte units are not yet being interpreted at their true sample boundary;
 an independently observed ATA seizure is the next discriminator.
 
-That discriminator is now settled. The attached line is FXS 1 on a Grandstream
-HT802 (extension 6004). Its own authenticated status page showed **On Hook**
-before the test and **Off Hook** after script 3. A capture begun with the same
-9/5/3 run, before dial tone could time out, delivered 506,942 bytes over 12
-seconds with no USB errors and still contained only the DC-like two-slot
-values. Thus script 3 really does operate the relay and seize the ATA. The
-remaining fault is specifically between the seized DAA audio and our
-interpretation/routing of the bulk sample stream; neither hook control nor ATA
-timeout can explain the silence.
+The hook discriminator is now settled. The attached line is FXS 1 on a
+Grandstream HT802 (extension 6004). Its own authenticated status page showed
+**On Hook** before the test and **Off Hook** after script 3, so script 3 really
+does operate the relay and seize the ATA. A capture begun with the same 9/5/3
+run delivered 506,942 bytes over 12 seconds with no USB errors and contained
+only the DC-like two-slot values. **That does not yet grade the audio path:**
+this ATA is on another network, is not connected to Asterisk, and reports the
+port Not Registered, so there is no established reason it should supply dial
+tone. The next audio test needs a known analogue stimulus or a registered/live
+FXS source; silence from this isolated ATA is not evidence of broken codec
+routing.
 
 
 ## Inside the device: the firmware is 8051, and it has been opened up

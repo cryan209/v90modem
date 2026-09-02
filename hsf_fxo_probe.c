@@ -29,6 +29,7 @@
 #include "hsf_fxo.h"
 
 #include <errno.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +44,32 @@ static unsigned long g_hist[256];
 static unsigned long g_rx_len_hist[257];
 static bool          g_feed_tx;
 static FILE         *g_rx_file;
+static bool          g_dtmf_tx;
+static double        g_dtmf_phase_lo;
+static double        g_dtmf_phase_hi;
+static double        g_dtmf_freq_lo;
+static double        g_dtmf_freq_hi;
+
+static void fill_tx(uint8_t buf[128])
+{
+	memset(buf, 0, 128);
+	if (!g_dtmf_tx)
+		return;
+	/* RX strongly suggests four-byte frames.  Put the same signed sample in
+	 * both candidate 16-bit slots so either possible audio lane carries the
+	 * digit without putting two different time instants into one frame. */
+	int16_t *s = (int16_t *)buf;
+	for (size_t i = 0; i < 32; i++) {
+		int16_t v = (int16_t)(3500.0 * (sin(g_dtmf_phase_lo) +
+						 sin(g_dtmf_phase_hi)));
+		s[2*i] = v;
+		s[2*i + 1] = v;
+		g_dtmf_phase_lo += 2.0 * M_PI * g_dtmf_freq_lo / 10666.666667;
+		g_dtmf_phase_hi += 2.0 * M_PI * g_dtmf_freq_hi / 10666.666667;
+		if (g_dtmf_phase_lo >= 2.0 * M_PI) g_dtmf_phase_lo -= 2.0 * M_PI;
+		if (g_dtmf_phase_hi >= 2.0 * M_PI) g_dtmf_phase_hi -= 2.0 * M_PI;
+	}
+}
 
 static void on_tx_done(size_t len, void *user)
 {
@@ -53,8 +80,9 @@ static void on_tx_done(size_t len, void *user)
 	/* Match hsfusbcd2269_: every completion immediately obtains and submits
 	 * the next engine-ring slice.  Polling from main at 10/20 ms leaves a gap
 	 * at precisely the point the device is asking for its next block. */
-	uint8_t zero[128] = {0};
-	(void)hsf_fxo_tx_submit(d, zero, sizeof zero);
+	uint8_t next[128];
+	fill_tx(next);
+	(void)hsf_fxo_tx_submit(d, next, sizeof next);
 }
 
 static void on_rx(const uint8_t *data, size_t len, void *user)
@@ -156,6 +184,7 @@ int main(int argc, char **argv)
 	const char *rx_path = NULL;
 	bool need_bootloader = false;
 	bool do_feed = false;
+	char dtmf = '\0';
 	uint8_t patch[8];
 	size_t  n_patch = 0;
 	uint8_t raw[256];
@@ -203,6 +232,9 @@ int main(int argc, char **argv)
 			}
 		} else if (!strcmp(argv[i], "--feed")) {
 			do_feed = true;
+		} else if (!strcmp(argv[i], "--dtmf") && i + 1 < argc) {
+			dtmf = argv[++i][0];
+			do_feed = true;
 		} else if (!strcmp(argv[i], "--rx-out") && i + 1 < argc) {
 			rx_path = argv[++i];
 		} else if (!strcmp(argv[i], "--wait") && i + 1 < argc) {
@@ -213,7 +245,7 @@ int main(int argc, char **argv)
 			fprintf(stderr, "usage: %s [--load] [--script ID] [--start-codec]"
 				" [--script ID[,ID...]] [--patch B[,B...]]"
 				" [--rom PATH] [--bootloader]"
-				" [--hook on|off] [--wait SECONDS] [--feed]"
+				" [--hook on|off] [--wait SECONDS] [--feed] [--dtmf DIGIT]"
 				" [--rx-out PATH]"
 				" [--stream SECONDS]\n",
 				argv[0]);
@@ -223,6 +255,20 @@ int main(int argc, char **argv)
 
 	struct hsf_dev *d = NULL;
 	uint8_t info[5];
+	if (dtmf) {
+		static const char keys[] = "123A456B789C*0#D";
+		static const double rows[] = {697, 770, 852, 941};
+		static const double cols[] = {1209, 1336, 1477, 1633};
+		const char *p = strchr(keys, dtmf);
+		if (!p) {
+			fprintf(stderr, "invalid DTMF digit: %c\n", dtmf);
+			return 2;
+		}
+		size_t n = (size_t)(p - keys);
+		g_dtmf_freq_lo = rows[n / 4];
+		g_dtmf_freq_hi = cols[n % 4];
+		g_dtmf_tx = true;
+	}
 
 	if (wait_secs > 0) {
 		printf("waiting up to %ds for the bootloader window -- REPLUG THE DEVICE NOW\n",
@@ -339,10 +385,12 @@ int main(int argc, char **argv)
 	 * (hsfengine4716_ stores with MOVW and advances its index in samples), not
 	 * G.711: zero is the correct preload silence. */
 	if (do_feed && stream_secs > 0) {
-		uint8_t zero[128] = {0};
-		for (int i = 0; i < 4; i++)
+		uint8_t zero[128];
+		for (int i = 0; i < 4; i++) {
+			fill_tx(zero);
 			if (hsf_fxo_tx_submit(d, zero, sizeof zero) < 0)
 				break;
+		}
 	}
 
 	/* Bracket every script with GET_INFROMATION.  Gotcha 2 in hsf_fxo.c: a

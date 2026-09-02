@@ -350,7 +350,7 @@ $(TARGET): $(OBJS) spandsp $(PJ_BUILD_PREREQ)
 # Needs the Conexant HSF USB modem attached, so it is not in TEST_TARGETS and
 # does not run under `make test`.
 hsf_fxo_probe: $(HSF_FXO_PROBE_OBJS)
-	$(CC) $(HSF_FXO_PROBE_OBJS) -o $@ $(LIBUSB_LIBS) -lpthread
+	$(CC) $(HSF_FXO_PROBE_OBJS) -o $@ $(LIBUSB_LIBS) -lpthread -lm
 
 hsf_fxo.o hsf_fxo_probe.o: CFLAGS += $(LIBUSB_CFLAGS)
 
