@@ -26,6 +26,29 @@ static const int empty_bins[] = {900, 1200, 1800, 2400};
  * rather than a floor reading.
  */
 #define TARGET_RMS      3500.0
+/*
+ * ...but the level has to be settable, because the constraint that binds is at
+ * the FAR end.  Measured on the HSF coupler's path, a sounding at the default
+ * arrives clipping 23% of its samples, and a clipped receive is exactly the
+ * failure this signal is least able to survive: the flat tops put energy into
+ * the empty bins, so the noise floor reads high and every weak tone at the top
+ * of the band -- the ones the sounding exists to measure -- is dismissed.  The
+ * measurement is two-port (RX against a recording of TX), so dropping the level
+ * costs nothing: it is divided out.
+ */
+static double sounder_rms(void)
+{
+    const char *v = getenv("ME_SOUNDER_RMS");
+    double rms = TARGET_RMS;
+
+    if (v != NULL  &&  v[0] != '\0') {
+        double parsed = atof(v);
+
+        if (parsed >= 50.0  &&  parsed <= 8000.0)
+            rms = parsed;
+    }
+    return rms;
+}
 
 const int *v90_sounder_tones(int *count)
 {
@@ -70,7 +93,7 @@ void v90_sounder_block_linear(int16_t *out)
             block[i] = acc;
             sum_sq += acc*acc;
         }
-        scale = TARGET_RMS/sqrt(sum_sq/V90_SOUNDER_BLOCK);
+        scale = sounder_rms()/sqrt(sum_sq/V90_SOUNDER_BLOCK);
         for (int i = 0; i < V90_SOUNDER_BLOCK; i++)
             block[i] *= scale;
         built = true;

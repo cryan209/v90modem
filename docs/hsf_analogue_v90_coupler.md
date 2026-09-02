@@ -257,30 +257,36 @@ With `--reference` the result is a true two-port response, RX/TX: the transmit
 path's own µ-law quantisation and whatever level the generator chose are in the
 reference rather than in the answer.
 
-**The ATA receives our audio and does not put it on the line (2026-09-03).**
-With `SIP_LOG_LEVEL=5` the SIP side is unremarkable and rules itself out: one
-INVITE and **no re-INVITE**, PCMU offered and answered, `a=sendrecv` both ways,
-peer media at 192.168.88.122:17950 and ours at 10.69.220.8:4000 over the
-tunnel.  The end-of-call statistics settle it -- **TX 600 packets, 96.0 KB, and
-the far end's own RTCP reports 0.7% loss on that stream**, which it can only do
-for a stream it is receiving.  So our audio arrives at the ATA, is the codec
-both ends agreed, and the line still carries an AC-RMS of 3.  The ATA does not
-even play local ringback into the line during the six seconds it holds our
-180 Ringing.
+**The PBX could not reach the ATA, and that is fixed (2026-09-03).**  Asterisk
+IS 192.168.88.122 -- the "ATA L1" peer in the SIP dialogue is Asterisk relaying
+extension 6004, not the ATA itself, which is a separate device.  Its registered
+contact was `sip:6004@172.16.0.126:32700`, the ATA's own LAN address, and
+Asterisk has no route there: `pjsip show contacts` read **Unavail, RTT nan**,
+and a ping from Asterisk to 172.16.0.126 loses 100% where this Mac, on that
+LAN, reaches it in 7 ms.  So Asterisk received our RTP (its own RTCP reported
+0.7% loss on our 600 packets) and forwarded it to an address that does not
+exist from where it stands, while the ATA -> Asterisk direction worked because
+that one is outbound.  Textbook one-way audio, and nothing to do with the modem.
 
-Two inferences from the round before this one were wrong and are withdrawn.
-"Our end receives digital silence from the ATA, so the ATA is putting nothing
-into its media path" -- the coupler feeds *silence* into the line by design, so
-the ATA relaying silence is correct behaviour and not a symptom.  And "dialling
-9999 proves the FXS audio path works after digit collection" proves less than
-it looked: an invalid number is very likely rejected by the ATA itself, so its
-reorder tone is generated locally and never travels over RTP -- it shows tone
-INJECTION works, not that received RTP reaches the line, which is the thing in
-question.
+`/etc/asterisk/pjsip.conf`, the `[endpoint-modem]` template, now carries
+`rewrite_contact=yes` and `rtp_symmetric=yes`, so Asterisk uses the address the
+packets actually arrive from rather than the one in the Contact header.  The
+ATA re-registered as `sip:6004@10.69.111.2:32700` -- its OpenVPN address, which
+Asterisk reaches in 48 ms -- and went **Avail**.
 
-What remains is the ATA at 192.168.88.122: it accepts the call, receives our
-RTP, and bridges none of it to the FXS port.  That needs its own logs or
-configuration, and is outside what this end can see.
+**Verified by the line itself**: after the fix a dialled call carries ringback
+at a clean AC-RMS of 762 with no clipping, where before it carried an AC-RMS of
+3 from the moment the digits went out.
+
+**Still blocked, and it is now the analogue front end.**  The moment the call
+CONNECTS the received signal jumps to AC-RMS 18640, clipping 23% of samples, a
+hard-limited waveform whose zero crossings put it at about 210 Hz.  It is not
+what we transmit: dropping the sounder from RMS 3500 to 702 -- 14 dB, confirmed
+on the transmit tap -- changed the received level not at all and the clipped
+sample count by 26 in 16000.  Ringback, one-way and before answer, is clean;
+whatever this is arrives with the answer.  Until it is understood the sounding
+cannot be made, because a clipped receive destroys exactly the weak top-of-band
+tones the sounding exists to measure.
 
 **The rig's receive path is saturating (2026-09-03).**  Off-hook and not
 dialling, the HSF hears dial tone -- 400 Hz, steady for 35 s, so the line and
