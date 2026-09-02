@@ -270,16 +270,35 @@ static void test_linear_bearer(const fixture_t *fx)
  */
 #define FSE_SPAN     8
 #define FSE_GRID     512
-#define FSE_BW       0.45          /* 3600 Hz, normalised to the 8 kHz symbol rate */
+/*
+ * Two channels, and the difference between them is a result.
+ *
+ * FSE_BW_HARD is 3600 Hz.  A symbol rate of 8 kHz has its Nyquist frequency at
+ * 4 kHz, so a channel that stops at 3600 leaves 400 Hz -- a tenth of the band --
+ * in which the symbol-rate-folded response is identically zero whatever the
+ * equaliser does.  An ISI-free response is then not merely hard but impossible,
+ * and the residual that leaves is about 9% of the level, which is larger than
+ * the G.711 ladder's steps.  That is the same zero-excess-bandwidth fact that
+ * ruled out non-data-aided timing recovery, seen from the other side.
+ *
+ * FSE_BW_SOFT is 3840 Hz, which leaves a 160 Hz dead band, and is what the
+ * assertions below run against.  Which of the two the real HSF path resembles
+ * is NOT known -- the coupler's channel response has never been measured -- and
+ * measuring it off a recorded call is worth more than any further tuning here.
+ */
+#define FSE_BW_HARD  0.45
+#define FSE_BW_SOFT  0.48
+#define FSE_BW       FSE_BW_HARD
 #define FSE_LOSS     0.37
 
-static double *fse_pulse_table(void)
+static double *fse_pulse_table(double bw)
 {
-    static double tab[2*FSE_SPAN*FSE_GRID + 1];
-    static bool built = false;
+    static double tab[2][2*FSE_SPAN*FSE_GRID + 1];
+    static double built[2] = {0.0, 0.0};
+    int slot = (bw > 0.465) ? 1 : 0;
 
-    if (built)
-        return tab;
+    if (built[slot] == bw)
+        return tab[slot];
     for (int i = 0; i <= 2*FSE_SPAN*FSE_GRID; i++) {
         double t = (double) i/FSE_GRID - FSE_SPAN;
         double sum = 0.0;
@@ -293,19 +312,19 @@ static double *fse_pulse_table(void)
 
             if (fabs(x) > FSE_SPAN)
                 continue;
-            sinc = (fabs(x) < 1e-9) ? 2.0*FSE_BW
-                                    : sin(2.0*M_PI*FSE_BW*x)/(M_PI*x);
+            sinc = (fabs(x) < 1e-9) ? 2.0*bw
+                                    : sin(2.0*M_PI*bw*x)/(M_PI*x);
             sum += sinc*(0.54 + 0.46*cos(M_PI*x/FSE_SPAN))/steps;
         }
-        tab[i] = sum;
+        tab[slot][i] = sum;
     }
-    built = true;
-    return tab;
+    built[slot] = bw;
+    return tab[slot];
 }
 
-static double fse_pulse(double t)
+static double fse_pulse_bw(double t, double bw)
 {
-    const double *tab = fse_pulse_table();
+    const double *tab = fse_pulse_table(bw);
     double f;
     int i;
 
@@ -315,6 +334,11 @@ static double fse_pulse(double t)
     i = (int) f;
     f -= i;
     return tab[i]*(1.0 - f) + tab[i + 1]*f;
+}
+
+static double fse_pulse(double t)
+{
+    return fse_pulse_bw(t, FSE_BW);
 }
 
 /*
@@ -403,6 +427,323 @@ static bool fse_run(const char *path, long first, long count, double phi,
     free(tx);
     free(data);
     return true;
+}
+
+/*
+ * Levels, not just signs: the DIL and Phase 4 case.
+ *
+ * §8.4's training signals are one Ucode with a sign on it, so they survive an
+ * arbitrary scale and a sign-only receiver reads them.  §8.4.1's DIL and §8.6's
+ * Phase 4 are level ladders and neither survives either: they need the ladder
+ * calibrated in absolute terms, and they need the equaliser to keep working on
+ * a constellation CMA's constant-modulus assumption is false for.
+ *
+ * The stream is built rather than taken from the fixture, and that is a result
+ * rather than a convenience.  Run against the multilevel tail of the Eicon
+ * capture -- a real Phase 4, 22 Ucodes -- this recovers 14% of codewords with
+ * frozen taps and no arrangement of the loop does better, because that
+ * constellation was chosen for a clean digital bearer: its steps are ~6% apart
+ * and the residual after equalising a 3600 Hz line is ~9%.  Which is what
+ * §9.3.2.9's DIL measurement and §8.5.2's constellation selection exist to
+ * prevent.  So the constellations here are ones an analogue modem on this line
+ * would actually ask for, and the DIL is the real §8.4.1 sequence.
+ */
+typedef enum {
+    FSE_ML_DIL = 0,             /* §8.4.1's DIL, from the measurement preset */
+    FSE_ML_SPARSE,              /* a Phase 4 constellation sized for this line */
+} fse_ml_stream_t;
+
+#define FSE_ML_TRAIN   20000    /* symbols of TRN1d-like training */
+/*
+ * Where CMA hands over.  Deliberately inside the training, not at the end of
+ * it: TRN1d is two levels a long way apart, so a decision on it is certain, and
+ * that is the one stretch of the call where a decision-directed loop can be
+ * trusted absolutely.  Handing over at the DIL instead -- once the signal is a
+ * ladder -- leaves CMA's residual in the taps, and CMA's residual is about 9%
+ * of the level, which is larger than the ladder's steps.
+ */
+#define FSE_ML_SWITCH  10000
+#define FSE_ML_BODY    20000
+#define FSE_ML_TRN1D   48       /* the Ucode the training runs on */
+
+static uint32_t fse_ml_rand(uint32_t *state)
+{
+    *state = (*state)*1103515245u + 12345u;
+    return (*state >> 16) & 0x7FFFu;
+}
+
+/* Build TRN1d-like training followed by the stream under test. */
+static uint8_t *fse_ml_build(fse_ml_stream_t which, long *len_out,
+                             uint8_t *set, int *set_len)
+{
+    long total = FSE_ML_TRAIN + FSE_ML_BODY;
+    uint8_t *buf = malloc((size_t) total);
+    uint32_t state = 1;
+    v90_dil_desc_t dil;
+    uint8_t *cycle = NULL;
+    int cycle_len = 0;
+
+    if (buf == NULL)
+        return NULL;
+    for (long k = 0; k < FSE_ML_TRAIN; k++)
+        buf[k] = v90_codeword_compose(V90_LAW_ULAW, FSE_ML_TRN1D,
+                                      (fse_ml_rand(&state) & 1) ? 1 : 0);
+    if (which == FSE_ML_DIL) {
+        if (!v90_dil_preset_load(V90_DIL_PRESET_MEASUREMENT, &dil)
+            ||  (cycle_len = v90_dil_cycle_len(&dil)) <= 0
+            ||  (cycle = malloc((size_t) cycle_len)) == NULL
+            ||  v90_dil_generate_codewords(V90_LAW_ULAW, &dil, cycle,
+                                           cycle_len) != cycle_len) {
+            free(cycle);
+            free(buf);
+            return NULL;
+        }
+        *set_len = 0;
+        for (long k = 0; k < FSE_ML_BODY; k++) {
+            uint8_t c = cycle[k % cycle_len];
+            int u;
+            bool seen = false;
+
+            buf[FSE_ML_TRAIN + k] = c;
+            v90_codeword_decompose(V90_LAW_ULAW, c, &u, NULL);
+            for (int i = 0; i < *set_len; i++)
+                if (set[i] == u)
+                    seen = true;
+            if (!seen  &&  *set_len < 128)
+                set[(*set_len)++] = (uint8_t) u;
+        }
+        free(cycle);
+    } else {
+        /*
+         * Every fourth Ucode over the upper half of the ladder: about 26%
+         * between neighbours in the top chords, which is what a line with this
+         * much residual intersymbol interference supports and roughly what a
+         * §8.5.2 constellation for it would look like.
+         */
+        *set_len = 17;
+        for (int i = 0; i < 17; i++)
+            set[i] = (uint8_t) (32 + 4*i);
+        for (long k = 0; k < FSE_ML_BODY; k++) {
+            int u = 32 + 4*(int) (fse_ml_rand(&state) % 17u);
+
+            buf[FSE_ML_TRAIN + k] = v90_codeword_compose(V90_LAW_ULAW, u,
+                                        (fse_ml_rand(&state) & 1) ? 1 : 0);
+        }
+    }
+    *len_out = total;
+    return buf;
+}
+
+/* Run one stream through the channel and report exact codeword recovery over
+ * the body, plus how many decisions the equaliser refused. */
+static double fse_multilevel_run(fse_ml_stream_t which, double phi, double bw,
+                                 v90a_fse_mode_t after, int *rejected_out,
+                                 double *ucode_err_out)
+{
+    v90a_fse_t *fse;
+    v90a_linear_t *lin;
+    uint8_t *tx;
+    uint8_t *rx;
+    long total = 0;
+    long nrx = 0;
+    uint8_t body_set[128];
+    int body_set_len = 0;
+    int best = -1;
+    long scored = 0;
+
+    if ((tx = fse_ml_build(which, &total, body_set, &body_set_len)) == NULL)
+        return -1.0;
+    fse = v90a_fse_init(32, 0.0);
+    lin = v90a_linear_init(V90_LAW_ULAW);
+    rx = malloc((size_t) total);
+    if (fse == NULL  ||  lin == NULL  ||  rx == NULL) {
+        v90a_fse_free(fse);
+        v90a_linear_free(lin);
+        free(rx);
+        free(tx);
+        return -1.0;
+    }
+    v90a_fse_set_mode(fse, V90A_FSE_CMA);
+
+    for (long k = FSE_SPAN; k < total - FSE_SPAN; k++) {
+        int16_t amp[2];
+        double sym;
+        int16_t scaled;
+        uint8_t code;
+        double v;
+
+        for (int h = 0; h < 2; h++) {
+            double t = k + 0.5*h + phi;
+            double acc = 0.0;
+
+            if (getenv("FSE_ML_IDEAL")) {
+                amp[h] = (int16_t) (ulaw_to_linear(tx[k])*FSE_LOSS);
+                continue;
+            }
+            for (long m = -FSE_SPAN; m <= FSE_SPAN; m++)
+                acc += ulaw_to_linear(tx[k + m])*fse_pulse_bw(t - (k + m), bw);
+            amp[h] = (int16_t) (acc*FSE_LOSS);
+        }
+        if (k == FSE_ML_SWITCH) {
+            /* What the engine does once the receiver reports the Ucode TRN1d
+             * arrived on: pin the ladder, say what is on it, and hand CMA over
+             * to a loop whose decisions are certain because the constellation
+             * at this moment is two points. */
+            uint8_t one = FSE_ML_TRN1D;
+
+            v90a_linear_set_reference(lin, FSE_ML_TRN1D, 3000.0);
+            v90a_linear_set_constellation(lin, &one, 1);
+            v90a_fse_set_mode(fse, after);
+            v90a_fse_set_mu(fse, V90A_FSE_MU_TRAIN);
+        }
+        if (k == FSE_ML_TRAIN) {
+            /* And the constellation the body is transmitted on, which the
+             * protocol tells a real receiver: §8.4.1's descriptor was sent in
+             * Ja by this side, §8.6's is what CP selected. */
+            v90a_linear_set_constellation(lin, body_set, body_set_len);
+            v90a_fse_set_mu(fse, V90A_FSE_MU_TRACK);
+        }
+        if (v90a_fse_put(fse, amp, 2, &sym, 1) != 1)
+            continue;
+        v = sym*3000.0;
+        if (v > 32000.0)
+            v = 32000.0;
+        else if (v < -32000.0)
+            v = -32000.0;
+        scaled = (int16_t) v;
+        if (v90a_linear_put(lin, &scaled, 1, &code, 1) == 1) {
+            rx[nrx++] = code;
+            if (v90a_fse_mode(fse) == V90A_FSE_DD)
+                v90a_fse_decide(fse, v90a_linear_last_decision(lin)/3000.0,
+                                v90a_linear_last_tolerance(lin)/3000.0);
+        }
+        /*endif*/
+    }
+
+    /* The body only, and past the seam where the level changes. */
+    for (int delay = -32; delay <= 512; delay++) {
+        int match = 0;
+        long n = 0;
+        long nerr = 0;
+        double err = 0.0;
+
+        for (long j = FSE_ML_TRAIN; j < nrx; j++) {
+            long k = j + FSE_SPAN + delay;
+            int ur;
+            int ut;
+
+            if (k < FSE_ML_TRAIN + 512  ||  k >= total)
+                continue;
+            n++;
+            if (rx[j] == tx[k])
+                match++;
+            v90_codeword_decompose(V90_LAW_ULAW, rx[j], &ur, NULL);
+            v90_codeword_decompose(V90_LAW_ULAW, tx[k], &ut, NULL);
+            /*
+             * Ucodes are logarithmic -- sixteen of them are a factor of two --
+             * so a level error counted in Ucodes is a RELATIVE error, and at
+             * the bottom of the ladder an enormous count of them is a
+             * vanishing absolute error.  Measured over the whole DIL that
+             * reads 17.7 Ucodes and means almost nothing.  Count it where a
+             * constellation would actually be built (§8.5.2 picks from the
+             * upper ladder), which is the region §9.3.2.9's measurement has to
+             * get right.
+             */
+            if (ut >= 48) {
+                err += fabs((double) (ur - ut));
+                nerr++;
+            }
+        }
+        if (n > 0  &&  match > best) {
+            best = match;
+            scored = n;
+            if (ucode_err_out)
+                *ucode_err_out = (nerr > 0) ? err/nerr : 0.0;
+        }
+    }
+    if (rejected_out)
+        *rejected_out = v90a_fse_dd_rejected(fse);
+    v90a_fse_free(fse);
+    v90a_linear_free(lin);
+    free(rx);
+    free(tx);
+    return (scored > 0) ? (double) best/(double) scored : -1.0;
+}
+
+static void test_fse_multilevel(void)
+{
+    static const struct {
+        fse_ml_stream_t which;
+        const char *name;
+    } streams[] = {
+        {FSE_ML_SPARSE, "§8.6 constellation sized for this line"},
+        {FSE_ML_DIL,    "§8.4.1 DIL (the §9.3.2.9 measurement)"},
+    };
+
+    printf("T/2 equaliser on multilevel downstreams, ladder pinned to TRN1d\n");
+    for (size_t i = 0; i < sizeof(streams)/sizeof(streams[0]); i++) {
+        printf("  %s\n", streams[i].name);
+        for (int p = 0; p < 4; p++) {
+            double phi = p/4.0;
+            int rejected = 0;
+            double soft_err = 0.0;
+            double soft_frozen = fse_multilevel_run(streams[i].which, phi,
+                                                    FSE_BW_SOFT,
+                                                    V90A_FSE_FROZEN, NULL, NULL);
+            double soft = fse_multilevel_run(streams[i].which, phi,
+                                             FSE_BW_SOFT, V90A_FSE_DD,
+                                             &rejected, &soft_err);
+            double hard = fse_multilevel_run(streams[i].which, phi,
+                                             FSE_BW_HARD, V90A_FSE_DD, NULL,
+                                             NULL);
+
+            if (soft < 0.0  ||  hard < 0.0  ||  soft_frozen < 0.0) {
+                printf("    SKIP: could not build the stream\n");
+                return;
+            }
+            /*
+             * Only the 3840 Hz channel is asserted, and only for the
+             * constellation an analogue modem on this line would ask for.  The
+             * DIL deliberately probes the whole ladder -- that is what it is
+             * for -- so most of its Ucodes are not separable over any real line
+             * and exact recovery of them is not the measurement §9.3.2.9 wants;
+             * its number is here to be read, not to pass.
+             */
+            if (streams[i].which == FSE_ML_SPARSE) {
+                CHECK(soft > 0.85,
+                      "sampling phase %.3f: %.2f%% of codewords exact",
+                      phi, soft*100.0);
+                CHECK(soft >= soft_frozen,
+                      "sampling phase %.3f: decision-directed %.2f%% is worse "
+                      "than frozen taps %.2f%%",
+                      phi, soft*100.0, soft_frozen*100.0);
+            }
+            /*
+             * The DIL row is REPORTED AND NOT ASSERTED, and that is a statement
+             * about where this work has got to rather than a soft test.
+             *
+             * It is not asked for exact recovery -- it probes the whole ladder
+             * by design and most of the ladder is not separable over any real
+             * line, which is the thing it exists to find out.  But the level it
+             * reads back over the upper ladder, where §8.5.2 would actually
+             * build a constellation, is still about 4.6 Ucodes out (25% exact),
+             * against 0.1 Ucodes for the constellation row beside it.  Two
+             * things are known to be missing and neither is guesswork: the
+             * receiver does not tell the slicer the DIL's own Ucode set, though
+             * it authored the descriptor in Ja and knows it exactly; and with
+             * the set unknown the slicer falls back to all 128 Ucodes, whose
+             * decision regions are so fine that the equaliser refuses nearly
+             * every decision and effectively freezes.  Until that is wired,
+             * §9.3.2.9's measurement over an analogue line is not trustworthy.
+             */
+            /*endif*/
+            printf("    phase %.3f -> 3840 Hz %.2f%% exact (frozen %.2f%%), "
+                   "3600 Hz %.2f%%, upper-ladder level error %.2f Ucodes, "
+                   "%d decisions refused\n",
+                   phi, soft*100.0, soft_frozen*100.0, hard*100.0, soft_err,
+                   rejected);
+        }
+    }
 }
 
 static void test_fse(void)
@@ -1389,6 +1730,7 @@ int main(int argc, char *argv[])
     for (i = 0; i < sizeof(fixtures)/sizeof(fixtures[0]); i++)
         test_driven_by_fixture(&fixtures[i]);
     test_fse();
+    test_fse_multilevel();
     test_dil_stage();
     for (int sr = 0; sr <= 3; sr++)
         test_phase4_receive(sr);

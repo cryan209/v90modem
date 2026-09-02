@@ -121,6 +121,17 @@ int v90_analogue_rx_dil_symbols(const v90_analogue_rx_t *s);
  * bearer this is a Ucode on the slicer\'s scaled ladder, not the far end\'s. */
 int v90_analogue_rx_w(const v90_analogue_rx_t *s);
 
+/*
+ * §8.4.5's TRN1d Ucode, as taken off the wire.
+ *
+ * Not U_INFO: a digital modem need not honour the value we asked for (an Eicon
+ * card told 78 transmits Sd at W = 64 and TRN1d at 48), and this is what it
+ * actually sent.  It is the one absolute level in Phase 3 that both ends agree
+ * on, which is what calibrates an analogue receiver's ladder
+ * (v90a_linear_set_reference()).  0 until TRN1d has been acquired.
+ */
+int v90_analogue_rx_trn1d_ucode(const v90_analogue_rx_t *s);
+
 /* Table 13 bit 47: the constellation the digital modem will train with. */
 bool v90_analogue_rx_jd_trn16(const v90_analogue_rx_t *s);
 /* The 72 bits of the last Jd frame that passed structure and CRC. */

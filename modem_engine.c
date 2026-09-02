@@ -1854,6 +1854,17 @@ static v90a_fse_t *g_v90a_fse = NULL;
  * slicing: the two would otherwise feed the same receiver twice, once well and
  * once badly. */
 static bool     g_v90a_16k = false;
+/* Whether the G.711 ladder has been calibrated against the TRN1d Ucode the
+ * receiver learned; until it has, a level means nothing in absolute terms. */
+static bool     g_v90a_ladder_set = false;
+static bool     g_v90a_dil_tracking = false;
+/*
+ * The equaliser's unit modulus, in the slicer's input units.  Arbitrary -- it
+ * cancels out of the calibration -- so it is chosen for headroom: §8.4.4's Sd
+ * is 6.6 dB above the TRN1d level this is pinned to, and §8.6's constellations
+ * reach higher still.
+ */
+#define V90A_FSE_SCALE  3000.0
 /* Set while me_rx_g711() is forwarding its own linear copy to me_rx_audio(),
  * so the codeword path is not run twice on one call's samples. */
 static bool     g_rx_from_g711 = false;
@@ -3916,6 +3927,8 @@ static void cleanup_v34_v90_training_locked(void)
         v90a_fse_free(g_v90a_fse);
         g_v90a_fse = NULL;
         g_v90a_16k = false;
+        g_v90a_ladder_set = false;
+        g_v90a_dil_tracking = false;
         g_v90a = NULL;
     }
     g_v90a_started = false;
@@ -4182,6 +4195,8 @@ static bool restart_v90_analogue_phase2_locked(const char *reason)
         v90a_fse_free(g_v90a_fse);
         g_v90a_fse = NULL;
         g_v90a_16k = false;
+        g_v90a_ladder_set = false;
+        g_v90a_dil_tracking = false;
         g_v90a = NULL;
     }
     g_v90a_started = false;
@@ -9569,49 +9584,117 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
                                              ? V90_LAW_ALAW : V90_LAW_ULAW);
     }
     /*
-     * §8.4.4's Sd, §8.4.5's TRN1d and §8.4.2's Jd are all one Ucode with a sign
-     * on it, so the constant-modulus assumption holds across the whole of
-     * Phase 3 up to the DIL -- which by §8.4.1 is a level ladder and is where
-     * it stops holding.  Freeze there rather than let CMA pull a genuinely
-     * multilevel signal onto one circle.
+     * Calibrate the ladder as soon as TRN1d has been acquired.
+     *
+     * CMA pins the equaliser's output modulus to §8.4.5's TRN1d level, and the
+     * receiver has just learned which Ucode that is off the wire -- so the
+     * absolute scale of the whole ladder follows, without measuring a peak and
+     * without trusting the U_INFO we asked for.  That is what §8.4.1's DIL and
+     * §8.6's Phase 4 need: the training signals are one level with a sign on
+     * them and survive an arbitrary scale, and nothing after them does.
+     */
+    if (!g_v90a_ladder_set) {
+        const v90_analogue_rx_t *rx = v90_analogue_phase3_rx_state(g_v90a);
+        int trn1d = (rx != NULL) ? v90_analogue_rx_trn1d_ucode(rx) : 0;
+
+        if (trn1d > 0) {
+            uint8_t one = (uint8_t) trn1d;
+
+            v90a_linear_set_reference(g_v90a_linear, trn1d, V90A_FSE_SCALE);
+            /*
+             * And say what is on the line, which right now is that one Ucode
+             * and nothing else.  Slicing §8.4.5's TRN1d onto all 128 Ucodes is
+             * not merely wasteful: it makes the decision region meaningless,
+             * and the region is what tells the equaliser whether to believe a
+             * decision.  Measured, full-ladder tolerances refused 29567
+             * decisions out of 30000 on a signal where every one of them was
+             * certain.
+             */
+            v90a_linear_set_constellation(g_v90a_linear, &one, 1);
+            g_v90a_ladder_set = true;
+            /*
+             * Hand CMA over here rather than at the DIL.  This is the one
+             * stretch of the call where a decision-directed loop is not a
+             * gamble -- two levels, a long way apart -- so it is where the
+             * equaliser should be converged, at a step near unity, before the
+             * signal stops being that easy.  Handing over at the DIL instead
+             * leaves CMA's residual in the taps, and CMA's residual is larger
+             * than the ladder's steps: on the test channel, exact codeword
+             * recovery afterwards is 52% that way and 92% this way.
+             */
+            v90a_fse_set_mu(g_v90a_fse, V90A_FSE_MU_TRAIN);
+            v90a_fse_set_mode(g_v90a_fse, V90A_FSE_DD);
+            ME_LOG("[ME] V.90 analogue: ladder calibrated on TRN1d Ucode %d, "
+                   "equaliser decision-directed (dispersion %.4f)\n",
+                   trn1d, v90a_fse_dispersion(g_v90a_fse));
+        }
+    }
+    /*
+     * §8.4.1's DIL is a level ladder, so from here the decisions are ordinary
+     * ones and the step comes down to match.
+     *
+     * The constellation is cleared with it, and that is a known hole rather
+     * than a choice: this side AUTHORED the DIL descriptor in Ja and knows
+     * exactly which Ucodes are coming, but nothing passes them to the slicer,
+     * so it falls back to all 128 -- whose decision regions are fine enough
+     * that the equaliser refuses nearly every decision and effectively freezes.
+     * Measured on the test channel, that leaves §9.3.2.9's levels about 4.6
+     * Ucodes out where a known constellation is 0.1.
      */
     if (v90_analogue_phase3_rx_stage(g_v90a) >= V90A_RX_DIL
-        &&  v90a_fse_mode(g_v90a_fse) == V90A_FSE_CMA) {
-        v90a_fse_set_mode(g_v90a_fse, V90A_FSE_FROZEN);
-        ME_LOG("[ME] V.90 analogue: equaliser frozen at the DIL, "
-               "dispersion %.4f, tap centre %.2f symbols\n",
-               v90a_fse_dispersion(g_v90a_fse),
-               v90a_fse_centre(g_v90a_fse));
-    }
-    for (int offset = 0; offset < len; ) {
-        double sym[128];
-        int16_t scaled[128];
-        uint8_t codewords[192];
-        int chunk = len - offset;
-        int nsym;
-        int ncode;
-
-        if (chunk > 256)
-            chunk = 256;
-        nsym = v90a_fse_put(g_v90a_fse, amp + offset, chunk,
-                            sym, (int)(sizeof(sym)/sizeof(sym[0])));
-        offset += chunk;
-        for (int i = 0; i < nsym; i++) {
-            /* Back into the units the slicer measures its own gain in.  The
-             * scale is arbitrary -- the slicer maps whatever level it sees onto
-             * its reference Ucode -- so only the headroom matters. */
-            double v = sym[i]*3000.0;
-
-            if (v > 32000.0)
-                v = 32000.0;
-            else if (v < -32000.0)
-                v = -32000.0;
-            scaled[i] = (int16_t) v;
+        &&  !g_v90a_dil_tracking) {
+        g_v90a_dil_tracking = true;
+        v90a_linear_set_constellation(g_v90a_linear, NULL, 0);
+        v90a_fse_set_mu(g_v90a_fse, V90A_FSE_MU_TRACK);
+        if (v90a_fse_mode(g_v90a_fse) == V90A_FSE_CMA) {
+            /* TRN1d never gave us a Ucode, so nothing is calibrated and a
+             * decision-directed loop would be adapting on levels that mean
+             * nothing.  Stop instead. */
+            v90a_fse_set_mode(g_v90a_fse, V90A_FSE_FROZEN);
         }
-        ncode = v90a_linear_put(g_v90a_linear, scaled, nsym,
-                                codewords, (int)sizeof(codewords));
-        if (ncode > 0)
-            me_v90_analogue_rx_codewords_locked(codewords, ncode);
+        /*endif*/
+        ME_LOG("[ME] V.90 analogue: DIL; equaliser %s, dispersion %.4f, "
+               "tap centre %.2f symbols, %d decisions used and %d refused\n",
+               v90a_fse_mode(g_v90a_fse) == V90A_FSE_DD ? "tracking"
+                                                        : "frozen",
+               v90a_fse_dispersion(g_v90a_fse),
+               v90a_fse_centre(g_v90a_fse),
+               v90a_fse_dd_used(g_v90a_fse),
+               v90a_fse_dd_rejected(g_v90a_fse));
+    }
+    /*
+     * One symbol at a time, deliberately.
+     *
+     * The decision an equaliser adapts on has to be the decision for the symbol
+     * whose delay line is still in place, so the equaliser, the slicer and the
+     * feedback run in lockstep rather than in batches.  At 8000 symbols a
+     * second the call overhead is nothing and the alternative is silently
+     * adapting every symbol of a block on the last one's decision.
+     */
+    for (int offset = 0; offset + 1 < len; offset += 2) {
+        double sym;
+        int16_t scaled;
+        uint8_t codeword;
+        double v;
+
+        if (v90a_fse_put(g_v90a_fse, amp + offset, 2, &sym, 1) != 1)
+            continue;
+        v = sym*V90A_FSE_SCALE;
+        if (v > 32000.0)
+            v = 32000.0;
+        else if (v < -32000.0)
+            v = -32000.0;
+        scaled = (int16_t) v;
+        if (v90a_linear_put(g_v90a_linear, &scaled, 1, &codeword, 1) == 1) {
+            me_v90_analogue_rx_codewords_locked(&codeword, 1);
+            if (v90a_fse_mode(g_v90a_fse) == V90A_FSE_DD)
+                v90a_fse_decide(g_v90a_fse,
+                                v90a_linear_last_decision(g_v90a_linear)
+                                    /V90A_FSE_SCALE,
+                                v90a_linear_last_tolerance(g_v90a_linear)
+                                    /V90A_FSE_SCALE);
+        }
+        /*endif*/
         if (!v90a_linear_locked(g_v90a_linear)
             &&  v90_analogue_phase3_rx_stage(g_v90a) != V90A_RX_HUNT_SD)
             v90a_linear_lock(g_v90a_linear);

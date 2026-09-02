@@ -68,14 +68,36 @@ int v90a_fse_put(v90a_fse_t *s, const int16_t *amp, int len,
                  double *out, int max);
 
 void v90a_fse_set_mode(v90a_fse_t *s, v90a_fse_mode_t mode);
+/* The NLMS step.  Acquisition and tracking want different ones: the step that
+ * pulls the taps out of a saddle is far too large to sit at, since a gradient
+ * loop's residual error is proportional to it. */
+void v90a_fse_set_mu(v90a_fse_t *s, double mu);
+/*
+ * The two steps a call uses, and they differ by more than an order of
+ * magnitude because they are doing different jobs.
+ *
+ * MU_TRAIN is for decision-directed adaptation on §8.4.5's TRN1d, where the
+ * constellation is two points a long way apart and every decision is therefore
+ * right: an NLMS step near unity is a projection, not a gamble, and the whole
+ * point is to be converged before the signal stops being that easy.  It is
+ * worth a lot -- at the hardest sampling phase, exact codeword recovery on the
+ * multilevel stream that follows goes 52% -> 92% between 0.01 and this.
+ *
+ * MU_TRACK is for everything after, where decisions are ordinary and a gradient
+ * loop's residual error is proportional to its step.
+ */
+#define V90A_FSE_MU_TRAIN   0.5
+#define V90A_FSE_MU_TRACK   0.02
 v90a_fse_mode_t v90a_fse_mode(const v90a_fse_t *s);
 
 /*
- * The decision for the symbol most recently emitted, for V90A_FSE_DD.  Call it
- * once per symbol, before the next v90a_fse_put(); a symbol left without one is
- * simply not adapted on.
+ * The decision for the symbol most recently emitted, for V90A_FSE_DD, and the
+ * half-width of the region that decision was taken inside
+ * (v90a_linear_last_tolerance()).  Call it once per symbol, before the next
+ * v90a_fse_put(); a symbol left without one is simply not adapted on, and one
+ * whose sample fell in the outer half of its region is refused as unreliable.
  */
-void v90a_fse_decide(v90a_fse_t *s, double decision);
+void v90a_fse_decide(v90a_fse_t *s, double decision, double tolerance);
 
 /*
  * Diagnostics.
@@ -87,6 +109,11 @@ void v90a_fse_decide(v90a_fse_t *s, double decision);
  * v90_analogue_rx_test.
  */
 double v90a_fse_dispersion(const v90a_fse_t *s);
+/* Decisions adapted on, and decisions refused as untrustworthy.  A run where
+ * the second is climbing is a receiver losing the constellation, not a channel
+ * being tracked. */
+int v90a_fse_dd_used(const v90a_fse_t *s);
+int v90a_fse_dd_rejected(const v90a_fse_t *s);
 double v90a_fse_level(const v90a_fse_t *s);      /* input AGC level */
 int v90a_fse_symbols(const v90a_fse_t *s);
 /* Where the energy of the tap set sits, in symbols from the first tap: a

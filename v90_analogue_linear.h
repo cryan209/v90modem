@@ -57,6 +57,38 @@ int v90a_linear_put(v90a_linear_t *s,
                     const int16_t *amp, int len,
                     uint8_t *out, int max);
 
+/*
+ * Calibrate the ladder against a KNOWN level, and lock.
+ *
+ * This is the exact form of what lock() does by measurement, and it is what
+ * makes the levels -- not just the signs -- recoverable over an analogue line.
+ * The equaliser's CMA pins its output modulus to §8.4.5's TRN1d level, and the
+ * receiver learns TRN1d's Ucode off the wire (v90_analogue_rx_trn1d_ucode()),
+ * so between them the absolute scale of the whole G.711 ladder is known rather
+ * than assumed -- which §8.4.1's DIL and §8.6's Phase 4 need and §8.4's
+ * training signals did not.
+ */
+void v90a_linear_set_reference(v90a_linear_t *s, int ucode, double level);
+
+/* The level the most recently emitted codeword was decided to be, in the same
+ * units as the input.  This is the reference an equaliser adapts against; it is
+ * unambiguous only while the slicer is emitting one codeword per call, which is
+ * what it does once locked. */
+double v90a_linear_last_decision(const v90a_linear_t *s);
+/* Half the distance from that decision to its nearer neighbour on the ladder,
+ * in the same units: the region the slice was taken inside, and the only
+ * meaningful scale for "was this decision reliable". */
+double v90a_linear_last_tolerance(const v90a_linear_t *s);
+
+/*
+ * The Ucodes the far end is actually transmitting, when they are known --
+ * §8.4.5's single TRN1d Ucode, §8.4.1's DIL ladder, §8.6's selected
+ * constellation.  NULL or n == 0 restores slicing onto the whole G.711 ladder,
+ * which is the right thing only when nothing is known.
+ */
+void v90a_linear_set_constellation(v90a_linear_t *s,
+                                   const uint8_t *ucodes, int n);
+
 /* Freeze the gain.  Call once the receiver has acquired Sd: everything after
  * that point is identified by its level *relative* to Sd. */
 void v90a_linear_lock(v90a_linear_t *s);

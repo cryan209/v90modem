@@ -866,6 +866,11 @@ int v90_analogue_rx_w(const v90_analogue_rx_t *s)
     return s ? s->w_ucode : 0;
 }
 
+int v90_analogue_rx_trn1d_ucode(const v90_analogue_rx_t *s)
+{
+    return s ? s->trn1d_ucode : 0;
+}
+
 bool v90_analogue_rx_jd_trn16(const v90_analogue_rx_t *s)
 {
     return s ? s->jd_trn16 : false;
