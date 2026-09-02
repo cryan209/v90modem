@@ -379,6 +379,40 @@ The prediction it makes is specific: if this is the gate, TX stops being a
 ~2.4 kB one-shot FIFO fill and starts completing continuously, at the same
 128-byte granularity, for the whole run.
 
+### The host side is now fully bounded, and the stall is device-side
+
+Following the driver's pump rather than sampling it settles how TX is meant to
+be driven.  **Both** completions land in the same function: `hsfusbcd2184_`
+(RX done) credits the received byte count, divides by `0x876` = 128 and adds
+the quotient to `ctx+0x8ac`; `hsfusbcd2186_` (TX done) does the same for the
+transmitted count into `ctx+0x8a6`; both tail-jump to `hsfusbcd2212_`.  And
+`hsfusbcd2212_` **returns immediately when `ctx+0x8ac` is zero** -- no RX units
+pending, no work -- otherwise submitting exactly one RX and one TX request and
+decrementing both counters.  So TX is credited by RX, 128 bytes out per 128
+bytes in, which is what a synchronous codec wants; TX completions re-enter the
+pump but are not themselves a refill trigger.
+
+This probe had been free-running a four-deep TX pipeline off its own
+completions with no reference to RX at all.  That is now fixed (`--tx-free-run`
+restores it) because it is what the driver does -- but **it is measured neutral
+on the stall**: RX-paced 211520 RX / **tx 2432**, free-run 211392 RX /
+**tx 2432**, back to back on a healthy part.
+
+What that leaves is unambiguous, and the counter that shows it is new
+(`tx submits refused (ring full)`): on a five-second run the device accepts
+**19 blocks -- 2432 bytes -- and then never acknowledges another**, all 32
+outstanding transfers stay un-acknowledged with an infinite timeout,
+`tx_err 0`, and **817 submits are refused because the ring never drains**,
+while RX continues at full rate throughout.  Nothing is erroring.  The device
+simply stops consuming bulk OUT, and its input FIFO never empties.
+
+So all three host-side candidates are now refuted by measurement rather than by
+argument: the **pipes** (sizes, prime depths and ordering all match
+`hsfusbcd2196_`), the **script layer** (all fifteen arms, tx 2432 without
+exception), and the **pacing** (both disciplines, tx 2432).  What starts the
+firmware's OUT consumer is a device-side question, and the register file and
+the 8051 image are where it has to be answered.
+
 **THE PROBE WAS KILLING THE PART, AND IT WAS ONE MISSING SCRIPT.**  Script 6
 is `hsfusbcd2195_`/`hsfusbcd2201_`'s session end, and nothing here had ever
 sent it: every run opened a session with 9 and 5 and abandoned it.  The cost

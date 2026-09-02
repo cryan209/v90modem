@@ -52,6 +52,8 @@ static double        g_dtmf_freq_hi;
 static int           g_tx_slot = -1;
 static unsigned      g_tx_prime_blocks;
 static unsigned      g_tx_blocks;
+static bool          g_tx_pace_rx = true;	/* credit TX from RX, as the driver does */
+static size_t        g_rx_credit;
 
 static void fill_tx(uint8_t buf[128])
 {
@@ -79,15 +81,44 @@ static void fill_tx(uint8_t buf[128])
 	}
 }
 
+/*
+ * The driver's pacing, which is not what this probe originally did.
+ *
+ * Both completions land in the same pump.  hsfusbcd2184_ (RX done) credits the
+ * received byte count, divides by 0x876 = 128, and adds the quotient to
+ * ctx+0x8ac; hsfusbcd2186_ (TX done) does the same for the transmitted count
+ * into ctx+0x8a6; both then tail-jump to hsfusbcd2212_.  And hsfusbcd2212_
+ * RETURNS IMMEDIATELY when ctx+0x8ac is zero -- no RX units pending, no work --
+ * otherwise submitting exactly one RX and one TX and decrementing both.
+ *
+ * So TX is credited by RX: 128 bytes out for every 128 bytes in, which is what
+ * a synchronous codec wants.  Feeding TX from its own completions alone, as
+ * this probe did, free-runs a four-deep pipeline against a device that is
+ * clocking at a fixed rate, and overruns it.
+ */
+static void tx_pump(struct hsf_dev *d)
+{
+	while (g_rx_credit >= 128) {
+		uint8_t next[128];
+		fill_tx(next);
+		if (hsf_fxo_tx_submit(d, next, sizeof next) < 0)
+			break;
+		g_rx_credit -= 128;
+	}
+}
+
 static void on_tx_done(size_t len, void *user)
 {
 	struct hsf_dev *d = user;
 	(void)len;
 	if (!g_feed_tx)
 		return;
-	/* Match hsfusbcd2269_: every completion immediately obtains and submits
-	 * the next engine-ring slice.  Polling from main at 10/20 ms leaves a gap
-	 * at precisely the point the device is asking for its next block. */
+	if (g_tx_pace_rx) {
+		/* A TX completion also re-enters the pump, but the pump does
+		 * nothing without RX credit -- so this is not a refill site. */
+		tx_pump(d);
+		return;
+	}
 	uint8_t next[128];
 	fill_tx(next);
 	(void)hsf_fxo_tx_submit(d, next, sizeof next);
@@ -109,6 +140,10 @@ static void on_rx(const uint8_t *data, size_t len, void *user)
 			n = len;
 		memcpy(g_first + g_first_len, data, n);
 		g_first_len += n;
+	}
+	if (g_feed_tx && g_tx_pace_rx) {
+		g_rx_credit += len;
+		tx_pump(user);
 	}
 }
 
@@ -267,6 +302,9 @@ int main(int argc, char **argv)
 				if (*p == ',')
 					p++;
 			}
+		} else if (!strcmp(argv[i], "--tx-free-run")) {
+			/* The old behaviour: refill from TX completions alone. */
+			g_tx_pace_rx = false;
 		} else if (!strcmp(argv[i], "--no-end-session")) {
 			/* Only to reproduce the degradation deliberately. */
 			end_session = false;
@@ -307,7 +345,7 @@ int main(int argc, char **argv)
 				" [--tx-slot 0|1] [--tx-prime-blocks N]"
 				" [--post-script ID[,ID...]] [--post-patch B[,B...]]"
 				" [--reset|--wake-on-ring] [--reset-value N] [--reset-index N]"
-				" [--reset-rt 0|1|2|3] [--no-end-session]"
+				" [--reset-rt 0|1|2|3] [--no-end-session] [--tx-free-run]"
 				" [--rx-out PATH]"
 				" [--stream SECONDS]\n",
 				argv[0]);
@@ -649,8 +687,9 @@ int main(int argc, char **argv)
 		printf("\n");
 		if (g_ring_events)
 			printf("ring edges: %lu\n", g_ring_events);
-		printf("tx_err %llu%s\n", (unsigned long long)s.tx_errors,
-		       s.tx_first_error ? "" : "");
+		printf("tx_err %llu, tx submits refused (ring full) %llu\n",
+		       (unsigned long long)s.tx_errors,
+		       (unsigned long long)s.underruns);
 		if (s.tx_first_error) {
 			int v = s.tx_first_error - 1;
 			printf("first tx status: %s (%d)\n",
