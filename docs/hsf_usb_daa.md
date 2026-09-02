@@ -242,6 +242,36 @@ The driver's exact granularity is 64-byte RX transfers and 128-byte TX
 transfers. Continuous completion-driven TX refill, rather than granularity by
 itself, proved essential to making that transport run.
 
+### What the HSF engine does on TX completion
+
+The completion path is a producer/consumer handshake, not a request to replay
+the completed USB buffer.  `hsfusbcd2186_` first raises the engine event
+`STATUS_TX_DATA_AVAILABLE` (`0x10024`) and converts the completed byte count
+into a count of free 128-byte ring chunks.  It then enters `hsfusbcd2212_`.
+For all newly free chunks that routine calls the engine's registered producer
+callback with the exact replacement byte count, and only after that callback
+has advanced the ring write side does it call `hsfusbcd2269_` to submit the
+newly produced slices.  Thus the closed engine is paced by completed chunks:
+
+    TX URB complete -> advertise free chunks -> engine fills those bytes
+                    -> driver submits the filled 128-byte ring slices
+
+The corresponding engine event handler is `hsfengine565_`.  Its `0x10024`
+branch calls `hsfengine660_(..., 2, 1)`, which merely sets the TX-available
+condition under a critical section, and then falls through to the same session
+pump (`hsfengine824_`) used after an RX event.  Audio generation therefore
+happens in the engine session pump, outside the USB completion callback; the
+callback only accounts capacity and wakes it.
+
+The modem waveform generators themselves write contiguous little-endian
+signed-16 samples (for example `hsfengine4712_` stores one generated `AX` per
+sample and `hsfengine4716_` writes 16-bit silence).  Consequently the two
+alternating 16-bit words visible on bulk RX cannot yet be labelled “TX slot”
+and “RX slot”.  Any zero-word insertion or device-specific packing lies below
+the waveform generator, in the sample-register/DMA data element.  Feeding a
+tone into only the first or second apparent word position tests two wire-format
+hypotheses; it does not reproduce an engine channel selection.
+
 There is one more control path in the driver -- `hsfusbcd2188_` CRCs a host
 buffer with CRC-16-CCITT (poly 0x1021) and writes it in 64-byte blocks via
 `CD2_WRITE_EEPROM`, driven by `hsfusbcd2168_`. **It is irrelevant to this part,

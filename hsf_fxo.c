@@ -331,17 +331,13 @@ static void LIBUSB_CALL on_tx(struct libusb_transfer *t)
 {
 	struct hsf_dev *d = t->user_data;
 
-	pthread_mutex_lock(&d->lock);
-	for (size_t i = 0; i < HSF_NUM_TX; i++) {
-		if (d->tx[i] == t) {
-			d->tx_busy[i] = false;
-			break;
-		}
-	}
-	pthread_mutex_unlock(&d->lock);
-
 	if (t->status == LIBUSB_TRANSFER_COMPLETED) {
 		d->stats.tx_bytes += (uint64_t)t->actual_length;
+		/* Match osusb.c's UsbTransmitDataCompletionRoutine ordering: the
+		 * upper-layer refill callback runs while this request is still
+		 * reserved, then ChangeUrbListEntryState() releases it.  Releasing
+		 * first lets the callback resubmit the transfer whose completion
+		 * callback is still executing, which is not what the driver does. */
 		if (d->cb.tx_done)
 			d->cb.tx_done((size_t)t->actual_length, d->cb.user);
 	} else if (t->status != LIBUSB_TRANSFER_CANCELLED) {
@@ -354,6 +350,15 @@ static void LIBUSB_CALL on_tx(struct libusb_transfer *t)
 		if (!d->stats.tx_first_error)
 			d->stats.tx_first_error = (int)t->status + 1;
 	}
+
+	pthread_mutex_lock(&d->lock);
+	for (size_t i = 0; i < HSF_NUM_TX; i++) {
+		if (d->tx[i] == t) {
+			d->tx_busy[i] = false;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&d->lock);
 	xfer_done(d);
 }
 

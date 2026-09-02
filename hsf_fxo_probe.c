@@ -49,6 +49,7 @@ static double        g_dtmf_phase_lo;
 static double        g_dtmf_phase_hi;
 static double        g_dtmf_freq_lo;
 static double        g_dtmf_freq_hi;
+static int           g_tx_slot = -1;
 
 static void fill_tx(uint8_t buf[128])
 {
@@ -62,8 +63,10 @@ static void fill_tx(uint8_t buf[128])
 	for (size_t i = 0; i < 32; i++) {
 		int16_t v = (int16_t)(3500.0 * (sin(g_dtmf_phase_lo) +
 						 sin(g_dtmf_phase_hi)));
-		s[2*i] = v;
-		s[2*i + 1] = v;
+		if (g_tx_slot < 0 || g_tx_slot == 0)
+			s[2*i] = v;
+		if (g_tx_slot < 0 || g_tx_slot == 1)
+			s[2*i + 1] = v;
 		g_dtmf_phase_lo += 2.0 * M_PI * g_dtmf_freq_lo / 10666.666667;
 		g_dtmf_phase_hi += 2.0 * M_PI * g_dtmf_freq_hi / 10666.666667;
 		if (g_dtmf_phase_lo >= 2.0 * M_PI) g_dtmf_phase_lo -= 2.0 * M_PI;
@@ -235,6 +238,12 @@ int main(int argc, char **argv)
 		} else if (!strcmp(argv[i], "--dtmf") && i + 1 < argc) {
 			dtmf = argv[++i][0];
 			do_feed = true;
+		} else if (!strcmp(argv[i], "--tx-slot") && i + 1 < argc) {
+			g_tx_slot = atoi(argv[++i]);
+			if (g_tx_slot < 0 || g_tx_slot > 1) {
+				fprintf(stderr, "--tx-slot must be 0 or 1\n");
+				return 2;
+			}
 		} else if (!strcmp(argv[i], "--rx-out") && i + 1 < argc) {
 			rx_path = argv[++i];
 		} else if (!strcmp(argv[i], "--wait") && i + 1 < argc) {
@@ -246,6 +255,7 @@ int main(int argc, char **argv)
 				" [--script ID[,ID...]] [--patch B[,B...]]"
 				" [--rom PATH] [--bootloader]"
 				" [--hook on|off] [--wait SECONDS] [--feed] [--dtmf DIGIT]"
+				" [--tx-slot 0|1]"
 				" [--rx-out PATH]"
 				" [--stream SECONDS]\n",
 				argv[0]);
@@ -378,17 +388,16 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* The vendor starts its data pump from INSIDE the script-5 completion
-	 * callback.  Have TX requests waiting before that edge; submitting the
-	 * first sample only after script 5 has completed gives a clocked
-	 * codec an immediate underrun.  The engine ring is signed 16-bit PCM
-	 * (hsfengine4716_ stores with MOVW and advances its index in samples), not
-	 * G.711: zero is the correct preload silence. */
+	/* Prime the controller before the session-start edge.  Although the
+	 * closed driver's host-side pump calls its ring accessor from the script-5
+	 * completion arm, this device only starts continuous RX when bulk OUT is
+	 * already queued.  A post-completion-only prime was tested live and
+	 * returned just 1598 RX bytes before the pipe stopped. */
 	if (do_feed && stream_secs > 0) {
-		uint8_t zero[128];
+		uint8_t first[128];
 		for (int i = 0; i < 4; i++) {
-			fill_tx(zero);
-			if (hsf_fxo_tx_submit(d, zero, sizeof zero) < 0)
+			fill_tx(first);
+			if (hsf_fxo_tx_submit(d, first, sizeof first) < 0)
 				break;
 		}
 	}
