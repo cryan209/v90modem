@@ -321,6 +321,29 @@ static unsigned script_count(unsigned id)
  * start is the whole question -- the vendor runs it BEFORE, this probe ran it
  * after.  See codec_open_prelude()'s two callers.
  */
+/*
+ * The vendor driver's CALL sequence, read off the wire in exact order
+ * (docs/hsf_usb_daa.md).  This is NOT the init sequence, and the difference is
+ * the point: at a call the driver sends NO script 1, writes SEVEN codec
+ * registers beginning with 0x35b7, starts the session, goes off-hook, and then
+ * writes an EIGHTH register 0xaac8 -- which is 0xaae8 with bit 0x20 cleared,
+ * the same register with one bit toggled immediately after the DAA takes the
+ * line.  Nothing this probe did had that trailing write.
+ *
+ *   2 x 0x35b7, 0x2004, 0xa208, 0xf200, 0xaae8, 0x6040, 0x35b4
+ *   8 wIndex 1 / 9 / 5          -> bulk
+ *   8 wIndex 3 / 3 (off-hook)
+ *   2 x 0xaac8
+ */
+static int script2_reg(struct hsf_dev *d, uint16_t w)
+{
+	uint8_t p[8] = { (uint8_t)(w >> 8), (uint8_t)(w & 0xff) };
+	int r = hsf_fxo_script_run(d, 2, p, sizeof p);
+	printf("  call-seq reg 0x%04x: %s\n", w, r == 0 ? "sent" : "REJECTED");
+	usleep(5 * 1000);
+	return r;
+}
+
 static int codec_open_prelude(struct hsf_dev *d, unsigned reg_d6, unsigned reg_da,
 			      unsigned reg_dc, unsigned reg_e4)
 {
@@ -412,6 +435,7 @@ int main(int argc, char **argv)
 	const char *rx_path = NULL;
 	bool vendor_seq = false;
 	bool arm_on_5 = false;
+	bool call_seq = false;
 	bool need_bootloader = false;
 	bool do_feed = false;
 	int  do_reset = 0;		/* 1 = CD2_RESET, 2 = CD2_WAKEONRING */
@@ -458,6 +482,9 @@ int main(int argc, char **argv)
 			}
 		} else if (!strcmp(argv[i], "--arm-on-5")) {
 			arm_on_5 = true;
+		} else if (!strcmp(argv[i], "--call-seq")) {
+			call_seq = true;
+			do_start = true;
 		} else if (!strcmp(argv[i], "--vendor-seq")) {
 			vendor_seq = true;
 			do_start = true;
@@ -792,7 +819,7 @@ int main(int argc, char **argv)
 		}
 	}
 	g_feed_tx = do_feed;
-	if (stream_open || vendor_seq)
+	if (stream_open || vendor_seq || call_seq)
 		hsf_fxo_defer_rx(d, true);
 	if (stream_secs > 0 && hsf_fxo_start(d, &cb) < 0) {
 		fprintf(stderr, "could not start streaming\n");
@@ -888,6 +915,52 @@ int main(int argc, char **argv)
 		 *   script 9   wIndex 1
 		 *   script 5   wIndex 1      -> bulk begins on its completion
 		 */
+		if (call_seq) {
+			/* The driver runs a full init pass (script 1 + the six codec
+			 * registers) before any call.  HSF_CALL_INIT=1 reproduces
+			 * that ahead of the call sequence. */
+			if (getenv("HSF_CALL_INIT")) {
+				hsf_fxo_clear_notify_halt(d);
+				codec_open_prelude(d, reg_d6, reg_da, reg_dc, reg_e4);
+			}
+			static const uint16_t regs[] = {
+				0x35b7, 0x2004, 0xa208, 0xf200,
+				0xaae8, 0x6040, 0x35b4
+			};
+			for (size_t i = 0; i < sizeof regs / sizeof regs[0]; i++)
+				script2_reg(d, regs[i]);
+			hsf_fxo_script_run_index(d, HSF_SCRIPT_SIGNAL, 1, NULL, 0);
+			unsigned b9 = script_count(HSF_SCRIPT_SESSION_A);
+			if (hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_A, NULL, 0) == 0)
+				wait_script(HSF_SCRIPT_SESSION_A, b9, 1400);
+			unsigned b5 = script_count(HSF_SCRIPT_SESSION_B);
+			if (hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_B, NULL, 0) == 0)
+				wait_script(HSF_SCRIPT_SESSION_B, b5, 1400);
+			/* bulk runs from here, as it does for the driver */
+			hsf_fxo_arm_rx(d);
+			if (do_feed) {
+				uint8_t first[256];
+				for (int i = 0; i < 4; i++) {
+					fill_tx(first);
+					if (hsf_fxo_tx_submit(d, first, g_tx_block) < 0)
+						break;
+				}
+			}
+			g_armed = true;
+			/* off-hook, then the trailing register write */
+			hsf_fxo_script_run_index(d, HSF_SCRIPT_SIGNAL, 3, NULL, 0);
+			unsigned b3 = script_count(HSF_SCRIPT_OFF_HOOK);
+			if (hsf_fxo_script_run(d, HSF_SCRIPT_OFF_HOOK, NULL, 0) == 0)
+				wait_script(HSF_SCRIPT_OFF_HOOK, b3, 1400);
+			printf("  call-seq: off-hook sent\n");
+			/* HSF_TRAIL_REG overrides the trailing post-off-hook write
+			 * (0 skips it) so its effect can be isolated. */
+			const char *tr = getenv("HSF_TRAIL_REG");
+			unsigned trail = tr ? (unsigned)strtoul(tr, NULL, 0) : 0xaac8;
+			if (trail)
+				script2_reg(d, (uint16_t)trail);
+			goto codec_done;
+		}
 		if (vendor_seq) {
 			/*
 			 * The full replay, read off usbmon.  The driver runs a

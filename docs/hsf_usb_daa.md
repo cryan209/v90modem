@@ -1921,3 +1921,58 @@ and it should be reached for before any further inference from usbmon: usbmon
 shows what crossed the wire, the shim log shows what the blob asked for, and the
 gap between those two is where every wrong conclusion in this document has come
 from.
+
+## The transport works: 16 kHz bidirectional, TX draining, at the vendor's rate
+
+The blocker was that I had been replaying the driver's **init** sequence and
+calling it the call.  They are different, and the difference is the whole
+thing.  Pulled out of the capture in exact order, the CALL does:
+
+    script 2 reg 0x35b7          <- SEVEN register writes, and this one first
+    script 2 reg 0x2004
+    script 2 reg 0xa208
+    script 2 reg 0xf200
+    script 2 reg 0xaae8
+    script 2 reg 0x6040
+    script 2 reg 0x35b4
+    script 8  wIndex 1
+    script 9
+    script 5
+    <<< bulk stream running
+    script 8  wIndex 3
+    script 3                     <- off-hook
+    script 2 reg 0xaac8          <- an EIGHTH write, AFTER off-hook
+
+No script 1 at a call -- that is init-only -- and the leading `0x35b7` and the
+trailing `0xaac8` were both absent from everything this probe had ever sent.
+
+`--call-seq` replays exactly that.  **Transmit drains for the first time:**
+
+    rx 160832 bytes in 629 packets, tx 161792, rx_err 0
+
+That is **16077 Hz in and 16179 Hz out**, 1:1, sustained -- the vendor's own
+rate, against a transmit path that had never exceeded ~2.5 kB before stalling.
+Reproducible: two consecutive runs identical to the byte.
+
+**Precondition, and it is honest to state it as one:** this works only after the
+vendor driver has been loaded and unloaded once.  Cold, or after a bare USB
+reset, `--call-seq` gets nothing.  So the vendor's init pass leaves device state
+we still cannot produce ourselves, and the call sequence then runs on top of it.
+Isolating that init is now the smallest remaining gap, and it is a much smaller
+one than "reverse the engine".
+
+**The trailing `0xaac8` is not what does it** -- `HSF_TRAIL_REG` was measured at
+`0xaac8`, `0xaae8` and skipped, and the transport runs identically in all three.
+It is the seven-register call sequence.
+
+### What is left: the line
+
+The stream is now **digital silence, not the old DC offset** -- min -1, max 0,
+in-band power 0.0, DC -0.4, where the broken configuration sat at DC +690 with
+±2 of dither.  That is a different and much healthier codec state; what is
+missing is the analogue path.  Off-hook is sent in the right place and the line
+does not arrive, so the DAA is still the open item -- but it is now the *only*
+open item, with a working 16 kHz full-duplex transport underneath it.
+
+For the stated goal -- a very basic telephony sound card -- the transport half
+is done and the remaining half is one question: what takes the DAA off-hook.
