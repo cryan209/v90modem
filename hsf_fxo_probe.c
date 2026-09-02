@@ -54,6 +54,21 @@ static unsigned      g_tx_prime_blocks;
 static unsigned      g_tx_blocks;
 static bool          g_tx_pace_rx = true;	/* credit TX from RX, as the driver does */
 static size_t        g_tx_block = 128;	/* hsfusbcd2167_ sets ctx+0x876 = 0x80 */
+/*
+ * The driver's own accounting says TX is HALF the received byte rate, and that
+ * TX frames are 2 bytes rather than 4.  hsfusbcd2184_ divides accumulated
+ * RECEIVED bytes by ctx+0x876 = 128 -- the TX granularity, not the RX one --
+ * into ctx+0x8ac, and hsfusbcd2212_ then hands the engine
+ * ctx+0x874 * units = 64 * (rx_bytes / 128) = rx_bytes / 2, as BOTH the
+ * receive length and the transmit length.
+ *
+ * That matches the frame layout on the wire: a received frame is four bytes
+ * carrying one 16-bit sample and one zero slot (5b 01 00 00), so the audio is
+ * half the byte rate, and the transmit side is a plain 16-bit mono stream.
+ * This probe had been sending 4-byte two-slot frames at 1:1 with RX bytes,
+ * i.e. twice the rate in the wrong format.
+ */
+static bool          g_tx_mono = true;
 static size_t        g_rx_credit;
 static uint8_t       g_script1_reply[2];
 static int           g_script1_mode;
@@ -71,13 +86,18 @@ static void fill_tx(uint8_t *buf)
 	 * both candidate 16-bit slots so either possible audio lane carries the
 	 * digit without putting two different time instants into one frame. */
 	int16_t *s = (int16_t *)buf;
-	for (size_t i = 0; i < g_tx_block / 4; i++) {
+	size_t frames = g_tx_mono ? g_tx_block / 2 : g_tx_block / 4;
+	for (size_t i = 0; i < frames; i++) {
 		int16_t v = (int16_t)(3500.0 * (sin(g_dtmf_phase_lo) +
 						 sin(g_dtmf_phase_hi)));
-		if (g_tx_slot < 0 || g_tx_slot == 0)
-			s[2*i] = v;
-		if (g_tx_slot < 0 || g_tx_slot == 1)
-			s[2*i + 1] = v;
+		if (g_tx_mono) {
+			s[i] = v;
+		} else {
+			if (g_tx_slot < 0 || g_tx_slot == 0)
+				s[2*i] = v;
+			if (g_tx_slot < 0 || g_tx_slot == 1)
+				s[2*i + 1] = v;
+		}
 		g_dtmf_phase_lo += 2.0 * M_PI * g_dtmf_freq_lo / 10666.666667;
 		g_dtmf_phase_hi += 2.0 * M_PI * g_dtmf_freq_hi / 10666.666667;
 		if (g_dtmf_phase_lo >= 2.0 * M_PI) g_dtmf_phase_lo -= 2.0 * M_PI;
@@ -146,7 +166,7 @@ static void on_rx(const uint8_t *data, size_t len, void *user)
 		g_first_len += n;
 	}
 	if (g_feed_tx && g_tx_pace_rx) {
-		g_rx_credit += len;
+		g_rx_credit += g_tx_mono ? len / 2 : len;
 		tx_pump(user);
 	}
 }
@@ -346,6 +366,9 @@ int main(int argc, char **argv)
 			g_tx_block = (size_t)strtoul(argv[++i], NULL, 0);
 			if (g_tx_block < 1 || g_tx_block > 256)
 				g_tx_block = 128;
+		} else if (!strcmp(argv[i], "--tx-quad")) {
+			/* The old 4-byte two-slot frames at 1:1 with RX bytes. */
+			g_tx_mono = false;
 		} else if (!strcmp(argv[i], "--tx-free-run")) {
 			/* The old behaviour: refill from TX completions alone. */
 			g_tx_pace_rx = false;

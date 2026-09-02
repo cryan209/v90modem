@@ -478,6 +478,29 @@ operands** -- session 9/5, stream open's script 1 query and script 8,
 granularities, the 4 TX / 16 RX prime, RX-credited pacing, the script 11 stop
 and the script 6 session end -- **and TX still fills its FIFO once and stops.**
 
+**The ring itself holds no gate, and the accounting says TX is half the RX byte
+rate in a different frame format.**  `hsfusbcd2273_` takes the contiguous run
+between `ctx+0x8a4` (submit) and `ctx+0x8a2` (completed), and `0x8a2` is
+advanced by `hsfusbcd2186_` on TX completion -- so the ring is shared memory the
+engine writes in place during the callback at `ctx+0x20`, and the driver never
+copies transmit data at all.  Nothing there gates the device.
+
+The accounting is more interesting.  `hsfusbcd2184_` divides accumulated
+**received** bytes by `ctx+0x876` = 128 -- the TX granularity, not the RX one --
+into `ctx+0x8ac`, and `hsfusbcd2212_` hands the engine
+`ctx+0x874 * units = 64 * (rx_bytes / 128) = rx_bytes / 2` as **both** the
+receive and the transmit length.  So the driver asks for **half** the received
+byte count, which matches the frame layout already on record here -- a received
+frame is four bytes carrying one 16-bit sample and one zero slot
+(`5b 01 00 00`) -- and means the transmit side is a **plain 16-bit mono stream
+at 2 bytes per frame**, not the 4-byte two-slot frames this probe was sending
+at 1:1 with RX.  Fixed (`--tx-quad` restores the old form).
+
+**No effect: tx 2432 mono against 2560 quad.**  In hindsight it could not have
+had one -- the FIFO never drains, so feeding it at half the rate in a different
+layout only fills it more slowly.  It is in because it is what the driver does,
+not because it helps.
+
 That is now a strong negative result rather than a gap: **nothing the cd2
 driver does to this device starts its OUT consumer.**  Whatever does is either
 in the engine's own interaction with the part (the engine is what fills the TX
