@@ -13130,6 +13130,179 @@ static void v34_rx_watch_peer_reneg_s(v34_rx_state_t *s,
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Phase 3 far-end S, measured on the line samples rather than on equalized
+ * symbols.
+ *
+ * The constellation-domain detector in v34rx_phase3.c needs an open eye, and
+ * an eye needs the sampling instant to be near the centre of the far end's
+ * symbol.  Over a digital bearer that is free: both ends run off the same
+ * 8 kHz grid.  Over a real analogue line it is not, and measured against this
+ * project's own digital modem through a Conexant HSF DAA, sweeping the receive
+ * sampling phase over one 16 kHz sample makes the difference between reaching
+ * Phase 4 and sitting in PHASE3_WAIT_S for the whole call -- about a tenth of
+ * the phases work.  In the same recording, at a failing phase, the three-bin
+ * measurement below reads 0.933 with a 50 ms run, which is 10.1.3.7's S
+ * (128T + 16T = 60 ms at 2400 baud) seen plainly.  So S is detectable at any
+ * phase; only this detector was.
+ *
+ * Detecting S is enough to unblock the rest, because PP conditioning that
+ * follows carries the T/2 eye-phase chooser, which is what fixes the instant.
+ *
+ * Opt-in (V34_PHASE3_S_SPECTRAL=1): it publishes V34_EVENT_S without any of
+ * the J/TRN evidence the alternation path carries, so it is deliberately not
+ * on the default path that the symbol-rate matrix and the loopback tests
+ * exercise. */
+static int v34_phase3_s_spectral_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+    {
+        const char *v = V34_DIAG_GETENV("V34_PHASE3_S_SPECTRAL");
+
+        enabled = (v  &&  atoi(v) != 0);
+    }
+    /*endif*/
+    return enabled;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v34_rx_watch_phase3_s(v34_rx_state_t *s,
+                                  const int16_t amp[],
+                                  int len)
+{
+    static const int block = 80;        /* 10 ms */
+    const baud_rate_parameters_t *p;
+    float baud;
+    float fc;
+    float freq[3];
+    float coeff[3];
+    int i;
+    int k;
+
+    if (!v34_phase3_s_spectral_enabled()
+        ||
+        s->stage != V34_RX_STAGE_PHASE3_WAIT_S
+        ||
+        s->phase3_s_present
+        ||
+        s->baud_rate < 0  ||  s->baud_rate >= 6)
+    {
+        memset(s->p3s_g1, 0, sizeof(s->p3s_g1));
+        memset(s->p3s_g2, 0, sizeof(s->p3s_g2));
+        s->p3s_energy = 0.0f;
+        s->p3s_samples = 0;
+        s->p3s_blocks = 0;
+        {
+            static int dbg = -1;
+
+            if (dbg < 0)
+                dbg = (V34_DIAG_GETENV("V34_PHASE3_S_DEBUG") != NULL);
+            /*endif*/
+            if (dbg  &&  s->stage == V34_RX_STAGE_PHASE3_WAIT_S)
+            {
+                V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                         "Rx - Phase 3 S watch idle: enabled=%d present=%d baud_rate=%d\n",
+                         v34_phase3_s_spectral_enabled(), s->phase3_s_present,
+                         s->baud_rate);
+            }
+            /*endif*/
+        }
+        return;
+    }
+    /*endif*/
+    p = &baud_rate_parameters[s->baud_rate];
+    baud = 2400.0f*(float) p->a/(float) p->c;
+    fc = baud*(float) p->low_high[s->high_carrier ? 1 : 0].d
+             /(float) p->low_high[s->high_carrier ? 1 : 0].e;
+    freq[0] = fc - baud/2.0f;
+    freq[1] = fc;
+    freq[2] = fc + baud/2.0f;
+    for (k = 0;  k < 3;  k++)
+        coeff[k] = 2.0f*cosf(2.0f*3.14159265358979f*freq[k]/8000.0f);
+    /*endfor*/
+
+    for (i = 0;  i < len;  i++)
+    {
+        float x = (float) amp[i];
+
+        for (k = 0;  k < 3;  k++)
+        {
+            float g0 = x + coeff[k]*s->p3s_g1[k] - s->p3s_g2[k];
+
+            s->p3s_g2[k] = s->p3s_g1[k];
+            s->p3s_g1[k] = g0;
+        }
+        /*endfor*/
+        s->p3s_energy += x*x;
+        if (++s->p3s_samples >= block)
+        {
+            float denom = s->p3s_energy*(float) block*0.5f;
+            float sum = 0.0f;
+
+            for (k = 0;  k < 3;  k++)
+            {
+                sum += s->p3s_g1[k]*s->p3s_g1[k]
+                     + s->p3s_g2[k]*s->p3s_g2[k]
+                     - coeff[k]*s->p3s_g1[k]*s->p3s_g2[k];
+            }
+            /*endfor*/
+            if (s->p3s_energy > 10000.0f*(float) block
+                &&
+                denom > 0.0f
+                &&
+                sum > 0.60f*denom)
+            {
+                s->p3s_blocks++;
+            }
+            else
+            {
+                s->p3s_blocks = 0;
+            }
+            /*endif*/
+            {
+                static int debug = -1;
+
+                if (debug < 0)
+                    debug = (V34_DIAG_GETENV("V34_PHASE3_S_DEBUG") != NULL);
+                /*endif*/
+                if (debug)
+                {
+                    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                             "Rx - Phase 3 S watch: %.0f/%.0f/%.0f Hz "
+                             "sum/denom=%.3f energy=%.3g run=%d\n",
+                             (double) freq[0], (double) freq[1],
+                             (double) freq[2],
+                             (denom > 0.0f) ? (double) (sum/denom) : -1.0,
+                             (double) s->p3s_energy, s->p3s_blocks);
+                }
+                /*endif*/
+            }
+            memset(s->p3s_g1, 0, sizeof(s->p3s_g1));
+            memset(s->p3s_g2, 0, sizeof(s->p3s_g2));
+            s->p3s_energy = 0.0f;
+            s->p3s_samples = 0;
+            if (s->p3s_blocks >= 3)
+            {
+                s->p3s_blocks = 0;
+                s->phase3_s_present = true;
+                s->phase3_s_event_count++;
+                s->phase3_s_fired_symbol = -1;
+                s->received_event = V34_EVENT_S;
+                span_log(s->logging, SPAN_LOG_WARNING,
+                         "Rx - Phase 3: far-end S detected in the sample domain "
+                         "(count=%d, %.0f/%.0f/%.0f Hz)\n",
+                         s->phase3_s_event_count,
+                         (double) freq[0], (double) freq[1], (double) freq[2]);
+            }
+            /*endif*/
+        }
+        /*endif*/
+    }
+    /*endfor*/
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
                                       const int16_t amp[],
                                       int len)
@@ -13318,6 +13491,9 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
      * peer opens one with S.  Same reason for being here rather than below
      * the T/3 branch: that branch returns. */
     v34_rx_watch_peer_reneg_s(s, amp, len);
+    /* 10.1.3.7's S, found on the line rather than on the constellation, for a
+     * bearer whose symbol clock is not phase-locked to our sample grid. */
+    v34_rx_watch_phase3_s(s, amp, len);
 
     /* V90_RENEG_SYM_DUMP's last column: the RMS of the block of line samples
        this call was handed, kept here so the dump can say whether a collapse

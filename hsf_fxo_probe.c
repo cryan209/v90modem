@@ -39,6 +39,7 @@
 
 #ifdef HSF_V90_COUPLER
 #include "modem_engine.h"
+#include "data_interface.h"
 #endif
 
 static unsigned long g_rx_packets;
@@ -146,7 +147,214 @@ static unsigned g_echo_n;
 static bool     g_v90_couple;
 static bool     g_v90_started;
 static unsigned g_v90_postdial_samples;
-static unsigned g_v90_start_delay_samples = 6500u * 16u;
+static unsigned g_v90_start_delay_samples = 60000u * 16u;
+/* Answer detection.  The first attempt started the engine on a fixed post-dial
+ * delay and so ran V.8 into ringback: the 10 s V.8 timeout expired at the very
+ * moment the far end answered.  Ringback here is 400/450 Hz and the answering
+ * modem's ANSam is 2100 Hz, so a Goertzel at 2100 Hz separates them.  The
+ * delay above is now only a backstop. */
+static volatile bool g_v90_answered;
+static unsigned      g_v90_ans_good;
+static unsigned      g_v90_ans_bad;
+#define HSF_ANS_BLOCK   320u          /* 20 ms at 16 kHz */
+#define HSF_ANS_NEEDED   10u          /* 200 ms of 2100 Hz */
+static int16_t  g_v90_ans_buf[HSF_ANS_BLOCK];
+static unsigned g_v90_ans_fill;
+
+static void v90_answer_block(const int16_t *s)
+{
+	/* Goertzel at 2100 Hz, and the block energy, so the test is a ratio and
+	 * not an absolute level. */
+	double w = 2.0 * M_PI * 2100.0 / 16000.0;
+	double coeff = 2.0 * cos(w), q1 = 0.0, q2 = 0.0, energy = 0.0;
+
+	for (unsigned i = 0; i < HSF_ANS_BLOCK; i++) {
+		double x = s[i];
+		double q0 = coeff * q1 - q2 + x;
+		q2 = q1;
+		q1 = q0;
+		energy += x * x;
+	}
+	double mag2 = q1 * q1 + q2 * q2 - coeff * q1 * q2;
+	if (energy < 1.0)
+		energy = 1.0;
+	/* mag2 of a pure tone is (A*N/2)^2; its energy is A*A*N/2. */
+	double frac = mag2 / (energy * HSF_ANS_BLOCK / 2.0);
+
+	if (energy / HSF_ANS_BLOCK > 40000.0 && frac > 0.5) {
+		g_v90_ans_bad = 0;
+		if (++g_v90_ans_good >= HSF_ANS_NEEDED)
+			g_v90_answered = true;
+	} else if (++g_v90_ans_bad >= 3) {
+		g_v90_ans_good = 0;
+	}
+}
+
+/* The HSF receive stream carries a standing DC offset -- measured at 908
+ * counts against a 5000-count ANSam on a live call.  SpanDSP's ANS/ANSam
+ * detector rejects the tone outright on that: the same recorded audio with the
+ * offset removed is recognised as ANSam/ in 1.4 s, and as-is it is never
+ * recognised in 70 s.  Every level and slicer decision downstream has the same
+ * exposure, so the offset is removed once, here, where the samples enter the
+ * modem.  One pole at 40 Hz: -0.08 dB at 300 Hz, so it costs the signal band
+ * nothing. */
+static double g_dc_px, g_dc_py;
+
+/* Receive sampling phase.  The device streams 16 kHz and the engine wants
+ * 8 kHz, so something has to choose where the 8 kHz grid falls -- and on a
+ * recorded call that choice decides whether V.34 Phase 3 trains at all.  Swept
+ * as a pure fractional delay over one 16 kHz sample on `run-095727Z-v34`, with
+ * a no-op resample as the control and a low-pass-only arm to separate
+ * filtering from phase: 0.000-0.500 stay in PHASE3_WAIT_S for the whole call,
+ * 0.625-0.875 reach PHASE4_MP, and the low-pass arm changes nothing.  Same
+ * failure the symbol-rate matrix work found inside the receiver -- at the
+ * wrong instant the equalized symbols sit at the eye crossing and §10.1.3.7's
+ * S has no structure to detect.
+ *
+ * HSF_RX_DELAY is a phase in 16 kHz samples over an arbitrary origin (the
+ * interpolator carries a fixed one-sample pipeline delay of its own, which
+ * costs nothing -- only the phase matters).  Catmull-Rom, so the interpolation
+ * itself is not a low-pass that could be doing the work by accident.  Swept
+ * through this knob and replayed on three recorded calls, the fraction of
+ * phases that reach Phase 4 is 1/10, 2/10 and 9/10 -- so the sensitivity is
+ * real but its severity is per call.  0.8 is the only value that reaches
+ * Phase 4 on more than one of them, and the only one that reaches PHASE4_MP,
+ * so it is the default; 0.0 (the obvious choice) is the value that fails on
+ * all three. */
+static double  g_rx_delay = 0.8;
+/* Transmit gain into the DAA.  The far end hears our upstream across a 2-wire
+ * hybrid that also returns its own transmit, so level is the one lever this
+ * side has on that direction. */
+static double  g_tx_gain = 1.0;
+/* HSF_RX_DELAY_STEP / _PERIOD_MS walk that phase during the call.  About a
+ * tenth of the phases acquire, and the phase a given call happens to land on
+ * is arbitrary, so a call that sits on a bad one stays on it for good.
+ * Stepping between V.34 Phase 2 restarts gives each attempt a fresh draw. */
+static double   g_rx_delay_step;
+static unsigned g_rx_delay_period_samples;
+static unsigned g_rx_delay_samples;
+static int16_t g_rx_hist[4];
+static bool    g_rx_hist_primed;
+
+static void v90_rx_fracdelay(int16_t *s, size_t n)
+{
+	if (g_rx_delay_step != 0.0 && g_rx_delay_period_samples) {
+		g_rx_delay_samples += (unsigned)n;
+		if (g_rx_delay_samples >= g_rx_delay_period_samples) {
+			g_rx_delay_samples = 0;
+			g_rx_delay += g_rx_delay_step;
+			while (g_rx_delay >= 2.0)
+				g_rx_delay -= 2.0;
+			fprintf(stderr, "[HSF-COUPLER] receive phase -> %.3f\n",
+				g_rx_delay);
+		}
+	}
+
+	double mu = 1.0 - g_rx_delay;    /* delay d -> read d back from newest */
+	int    whole = 0;
+
+	if (mu < 0.0) {
+		whole = (int)(-mu) + 1;
+		mu += whole;
+	}
+	(void)whole;
+	if (!g_rx_hist_primed) {
+		for (int i = 0; i < 4; i++)
+			g_rx_hist[i] = s[0];
+		g_rx_hist_primed = true;
+	}
+	for (size_t i = 0; i < n; i++) {
+		double p0 = g_rx_hist[0], p1 = g_rx_hist[1];
+		double p2 = g_rx_hist[2], p3 = g_rx_hist[3];
+		double a0 = -0.5*p0 + 1.5*p1 - 1.5*p2 + 0.5*p3;
+		double a1 =       p0 - 2.5*p1 + 2.0*p2 - 0.5*p3;
+		double a2 = -0.5*p0           + 0.5*p2;
+		double y  = ((a0*mu + a1)*mu + a2)*mu + p1;
+
+		g_rx_hist[0] = g_rx_hist[1];
+		g_rx_hist[1] = g_rx_hist[2];
+		g_rx_hist[2] = g_rx_hist[3];
+		g_rx_hist[3] = s[i];
+		s[i] = (int16_t)(y > 32767.0 ? 32767.0 : y < -32768.0 ? -32768.0 : y);
+	}
+}
+
+static void v90_dc_block(int16_t *s, size_t n)
+{
+	const double a = 0.9686;        /* exp(-2*pi*40/8000) */
+
+	for (size_t i = 0; i < n; i++) {
+		double x = s[i];
+		g_dc_py = a * (g_dc_py + x - g_dc_px);
+		g_dc_px = x;
+		s[i] = (int16_t)(g_dc_py > 32767.0 ? 32767.0
+				 : g_dc_py < -32768.0 ? -32768.0 : g_dc_py);
+	}
+}
+
+static const char *g_v90_pty_link;
+static const char *g_v90_replay_path;
+static double      g_v90_replay_from;
+static double      g_v90_replay_secs = 60.0;
+
+/* Offline reproduction of the analogue side.  The recorded receive tap is the
+ * 16 kHz stream this probe reads from the device, so the replay decimates it
+ * exactly as on_rx() does and drives the engine with the same block size.
+ * There is no line to transmit into, so the engine's transmit is discarded --
+ * which is faithful for anything the far end does not react to, and is the
+ * whole of the V.8 receive question. */
+static int v90_replay(void)
+{
+	FILE *f = fopen(g_v90_replay_path, "rb");
+
+	if (!f) {
+		perror(g_v90_replay_path);
+		return 1;
+	}
+	if (fseek(f, (long)(g_v90_replay_from * 16000.0) * 2, SEEK_SET) != 0) {
+		perror("fseek");
+		fclose(f);
+		return 1;
+	}
+	me_on_sip_connected();
+	fprintf(stderr, "[HSF-REPLAY] %s from %.2fs for %.1fs\n",
+		g_v90_replay_path, g_v90_replay_from, g_v90_replay_secs);
+
+	size_t   want = (size_t)(g_v90_replay_secs * 8000.0);
+	size_t   done = 0;
+	int16_t  in[128], modem[64], out[64];
+
+	while (done < want && fread(in, sizeof(in[0]), 128, f) == 128) {
+		v90_rx_fracdelay(in, 128);
+		for (int i = 0; i < 64; i++)
+			modem[i] = (int16_t)(((int32_t)in[2*i] + in[2*i + 1]) / 2);
+		v90_dc_block(modem, 64);
+		me_rx_audio(modem, 64);
+		me_tx_audio(out, 64);
+		done += 64;
+	}
+	fprintf(stderr, "[HSF-REPLAY] fed %zu samples (%.2fs)\n", done, done / 8000.0);
+	me_on_sip_disconnected();
+	fclose(f);
+	return 0;
+}
+
+static void v90_answer_watch(const int16_t *s, size_t n)
+{
+	while (n) {
+		size_t take = HSF_ANS_BLOCK - g_v90_ans_fill;
+		if (take > n)
+			take = n;
+		memcpy(g_v90_ans_buf + g_v90_ans_fill, s, take * sizeof(*s));
+		g_v90_ans_fill += (unsigned)take;
+		s += take;
+		n -= take;
+		if (g_v90_ans_fill == HSF_ANS_BLOCK) {
+			v90_answer_block(g_v90_ans_buf);
+			g_v90_ans_fill = 0;
+		}
+	}
+}
 #endif
 
 /* Returns false once the string is finished. */
@@ -252,22 +460,30 @@ static void fill_tx_inner(uint8_t *buf)
 	if (g_v90_couple && g_dial && g_dial[g_dial_pos] == '\0') {
 		size_t out_samples = g_tx_block / 2;
 		if (!g_v90_started) {
-			/* Leave the measured PBX answer interval after the final DTMF
-			 * gap before starting V.8 CI (6001 answers after two rings). */
-			if (g_v90_postdial_samples < g_v90_start_delay_samples) {
+			/* Start V.8 when the far end actually answers, not on a timer:
+			 * ringback lasts as long as it lasts, and starting into it burns
+			 * the 10 s V.8 timeout before ANSam arrives. */
+			if (!g_v90_answered
+			    && g_v90_postdial_samples < g_v90_start_delay_samples) {
 				g_v90_postdial_samples += (unsigned)out_samples;
 				return;
 			}
 			me_on_sip_connected();
 			g_v90_started = true;
-			fprintf(stderr, "[HSF-COUPLER] physical call connected; starting analogue V.90 engine\n");
+			fprintf(stderr,
+				"[HSF-COUPLER] starting analogue V.90 engine (%s)\n",
+				g_v90_answered ? "ANSam detected" : "backstop delay");
 		}
 		int16_t modem[128];
 		size_t n = out_samples / 2;
 		me_tx_audio(modem, (int)n);
 		int16_t *dst = (int16_t *)buf;
-		for (size_t i = 0; i < n; i++)
-			dst[2*i] = dst[2*i + 1] = modem[i];
+		for (size_t i = 0; i < n; i++) {
+			double v = modem[i]*g_tx_gain;
+			int16_t o = (int16_t)(v > 32767.0 ? 32767.0
+					      : v < -32768.0 ? -32768.0 : v);
+			dst[2*i] = dst[2*i + 1] = o;
+		}
 		return;
 	}
 #endif
@@ -401,13 +617,22 @@ static void on_rx(const uint8_t *data, size_t len, void *user)
 		g_first_len += n;
 	}
 #ifdef HSF_V90_COUPLER
+	if (g_v90_couple && !g_v90_started && g_dial && g_dial[g_dial_pos] == '\0')
+		v90_answer_watch((const int16_t *)data, len / 2);
 	if (g_v90_started) {
-		const int16_t *src = (const int16_t *)data;
+		int16_t wide[256];
 		int16_t modem[128];
 		size_t ns = len / 2;
 		size_t n = ns / 2;
+
+		if (ns > 256)
+			ns = 256, n = 128;
+		memcpy(wide, data, ns * sizeof(wide[0]));
+		v90_rx_fracdelay(wide, ns);
+		const int16_t *src = wide;
 		for (size_t i = 0; i < n; i++)
 			modem[i] = (int16_t)(((int32_t)src[2*i] + src[2*i + 1]) / 2);
+		v90_dc_block(modem, n);
 		me_rx_audio(modem, (int)n);
 	}
 #endif
@@ -819,6 +1044,16 @@ int main(int argc, char **argv)
 			g_tx_prime_blocks = (unsigned)strtoul(argv[++i], NULL, 0);
 		} else if (!strcmp(argv[i], "--rx-out") && i + 1 < argc) {
 			rx_path = argv[++i];
+#ifdef HSF_V90_COUPLER
+		} else if (!strcmp(argv[i], "--pty-link") && i + 1 < argc) {
+			g_v90_pty_link = argv[++i];
+		} else if (!strcmp(argv[i], "--rx-replay") && i + 1 < argc) {
+			g_v90_replay_path = argv[++i];
+		} else if (!strcmp(argv[i], "--replay-from") && i + 1 < argc) {
+			g_v90_replay_from = atof(argv[++i]);
+		} else if (!strcmp(argv[i], "--replay-secs") && i + 1 < argc) {
+			g_v90_replay_secs = atof(argv[++i]);
+#endif
 		} else if (!strcmp(argv[i], "--wait") && i + 1 < argc) {
 			wait_secs = atoi(argv[++i]);
 		} else if (!strcmp(argv[i], "--hook") && i + 1 < argc) {
@@ -861,7 +1096,34 @@ int main(int argc, char **argv)
 		me_set_verbose(1);
 		me_init();
 		me_set_law(ME_LAW_ULAW);
+		if (g_v90_pty_link && di_open(g_v90_pty_link) < 0) {
+			fprintf(stderr, "failed to open PTY %s\n", g_v90_pty_link);
+			return 1;
+		}
 		me_dial(g_dial);
+	}
+	{
+		const char *d = getenv("HSF_RX_DELAY");
+		const char *st = getenv("HSF_RX_DELAY_STEP");
+		const char *pe = getenv("HSF_RX_DELAY_PERIOD_MS");
+
+		if (d)
+			g_rx_delay = atof(d);
+		if (st)
+			g_rx_delay_step = atof(st);
+		if (getenv("HSF_TX_GAIN"))
+			g_tx_gain = atof(getenv("HSF_TX_GAIN"));
+		g_rx_delay_period_samples =
+			(unsigned)strtoul(pe ? pe : "4000", NULL, 0) * 16u;
+	}
+	if (g_v90_replay_path) {
+		me_set_verbose(1);
+		me_init();
+		me_set_law(ME_LAW_ULAW);
+		me_dial("replay");
+		int rc = v90_replay();
+		me_destroy();
+		return rc;
 	}
 #endif
 

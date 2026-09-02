@@ -698,20 +698,40 @@ static int v22bis_get_bit_cb(void *user_data)
     return (bit == DS_TX_NO_DATA) ? SIG_STATUS_END_OF_DATA : bit;
 }
 
+/* Set once V.22bis has actually trained, so a later carrier drop is read as a
+ * lost connection rather than as part of the handshake. */
+static bool g_v22bis_trained;
+
 static void v22bis_put_bit_cb(void *user_data, int bit)
 {
     (void)user_data;
     if (bit < 0) {
-        if (bit == SIG_STATUS_CARRIER_UP || bit == SIG_STATUS_TRAINING_SUCCEEDED)
+        /* CARRIER_UP is not a connection.  V.22bis brings the carrier up at
+         * the start of its own training sequence, and taking that as the
+         * connect reported CONNECT to the DTE while the modem had not trained
+         * -- measured over a real analogue line, where both ends reported
+         * "training complete" 8 ms after V.8 and then dropped 60 ms later on
+         * the CARRIER_DOWN that follows the V.8 tail.  Only
+         * TRAINING_SUCCEEDED means trained. */
+        if (bit == SIG_STATUS_CARRIER_UP) {
+            ME_LOG("[ME] V.22bis carrier up\n");
+        } else if (bit == SIG_STATUS_TRAINING_SUCCEEDED) {
+            g_v22bis_trained = true;
             on_training_complete(ME_MOD_V22BIS, 2400, "V.22bis");
-        else if (bit == SIG_STATUS_TRAINING_FAILED || bit == SIG_STATUS_CARRIER_DOWN) {
+        } else if (bit == SIG_STATUS_TRAINING_FAILED
+                   || (bit == SIG_STATUS_CARRIER_DOWN && g_v22bis_trained)) {
             ME_LOG("[ME] V.22bis fallback failed (%s), hanging up\n",
                     signal_status_to_str(bit));
             trace_phase("V22BIS training failed (%s) -> hangup",
                         signal_status_to_str(bit));
             me_hangup();
             return;
+        } else if (bit == SIG_STATUS_CARRIER_DOWN) {
+            /* Before training: the far end has stopped transmitting for the
+             * moment.  Keep waiting -- the training timeout still bounds it. */
+            ME_LOG("[ME] V.22bis carrier down before training; still waiting\n");
         }
+        /*endif*/
         return;
     }
 
@@ -1767,7 +1787,15 @@ static modem_echo_can_segment_state_t *g_echo_can = NULL;
 /* Selected once in me_init() from ME_MODE.  Keeping this at the V.8 offer
  * boundary lets plain V.34 exercise SpanDSP without entering any V.90/V.92
  * branches.  Values: v34, v90 (default), v92. */
+/* When the plain-V.34 receiver entered V34_RX_STAGE_PHASE3_WAIT_S, for
+ * ME_V34_PHASE3_S_TIMEOUT_MS. */
+static uint64_t g_v34_phase3_wait_s_ms;
 static bool g_advertise_v90 = true;
+/* ME_MODE=v22 offers V.22bis alone in CM/JM.  It exists for a bearer whose far
+ * end is a real analogue line rather than a digital G.711 path: V.22bis has
+ * its own timing recovery and does not assume the peer's symbol clock is
+ * phase-locked to our sample grid, which the V.34 Phase 3 acquisition does. */
+static bool g_advertise_v34 = true;
 static bool g_enable_v92 = false;
 static const char *g_mode_name = "v90";
 
@@ -2347,7 +2375,9 @@ static int me_start_or_restart_v8_locked(int answer_tone)
     else
         v8_parms.v92            = -1;
     v8_parms.jm_cm.call_function      = V8_CALL_V_SERIES;
-    v8_parms.jm_cm.modulations        = V8_MOD_V34 | V8_MOD_V22;
+    v8_parms.jm_cm.modulations        = V8_MOD_V22;
+    if (g_advertise_v34)
+        v8_parms.jm_cm.modulations   |= V8_MOD_V34;
     if (g_advertise_v90)
         v8_parms.jm_cm.modulations   |= V8_MOD_V90;
     if (me_v34_fax_probe() && !g_calling_party) {
@@ -4933,6 +4963,7 @@ static void start_v22bis_training(void)
     /* Must be called with g_state_mtx held */
     g_mod   = ME_MOD_V22BIS;
     g_state = ME_TRAINING;
+    g_v22bis_trained = false;
     g_phase_start_ms = trace_now_ms();
     trace_phase("enter TRAINING: mod=V22BIS role=%s", g_calling_party ? "caller" : "answerer");
     data_stack_prepare(2400);
@@ -5487,6 +5518,11 @@ void me_init(void)
             g_advertise_v90 = false;
             g_enable_v92 = false;
             g_mode_name = "v34";
+        } else if (strcmp(mode, "v22") == 0) {
+            g_advertise_v90 = false;
+            g_advertise_v34 = false;
+            g_enable_v92 = false;
+            g_mode_name = "v22";
         } else if (strcmp(mode, "v90") == 0) {
             g_advertise_v90 = true;
             g_enable_v92 = false;
@@ -5505,7 +5541,8 @@ void me_init(void)
         g_v90_analogue_role = g_advertise_v90
                            && role && strcmp(role, "analogue") == 0;
         ME_LOG("[ME] Modem mode: %s (V.8 offer %s)\n", g_mode_name,
-               g_advertise_v90 ? "V90|V34|V22" : "V34|V22");
+               g_advertise_v90 ? "V90|V34|V22"
+                               : (g_advertise_v34 ? "V34|V22" : "V22"));
         if (!g_advertise_v90 && role && strcmp(role, "analogue") == 0)
             ME_LOG("[ME] ME_V90_ROLE=analogue ignored in v34 mode\n");
         if (g_v90_analogue_role)
@@ -7336,6 +7373,38 @@ void me_rx_audio(const int16_t *amp, int len)
                  * a data mapper still running over the top of it, and the
                  * call died where §11.5.1.2 says to resynchronise. */
                 if (g_mod == ME_MOD_V34 && g_v34) {
+                    /* Plain V.34 can sit in PHASE3_WAIT_S for the whole call
+                     * when the far end's symbol clock is not phase-locked to
+                     * our sample grid -- measured over a Conexant HSF DAA
+                     * against this project's own digital modem, where about a
+                     * tenth of the receive sampling phases acquire and the
+                     * rest never see 10.1.3.7's S at all.  Nothing in the
+                     * default path bounds that wait: the peer completes its
+                     * own Phase 3, goes to data mode and stops sending S, so
+                     * the one attempt is the whole call.  ME_V34_PHASE3_S_
+                     * TIMEOUT_MS restarts Phase 2 instead, which gives the
+                     * next attempt a fresh draw.  Default 0 (off) -- on a
+                     * digital bearer this never fires and the wait is bounded
+                     * by the training timeout as before. */
+                    if (rx_stage == V34_RX_STAGE_PHASE3_WAIT_S) {
+                        int limit = parse_env_int("ME_V34_PHASE3_S_TIMEOUT_MS", 0);
+
+                        if (g_v34_phase3_wait_s_ms == 0)
+                            g_v34_phase3_wait_s_ms = trace_now_ms();
+                        else if (limit > 0
+                                 && trace_now_ms() - g_v34_phase3_wait_s_ms
+                                    > (uint64_t) limit) {
+                            g_v34_phase3_wait_s_ms = 0;
+                            ME_LOG("[ME] V.34: no far-end S after %d ms in "
+                                   "PHASE3_WAIT_S; restarting Phase 2\n", limit);
+                            (void) restart_v34_phase2_locked(
+                                "no far-end S (ME_V34_PHASE3_S_TIMEOUT_MS)");
+                            pthread_mutex_unlock(&g_state_mtx);
+                            return;
+                        }
+                    } else {
+                        g_v34_phase3_wait_s_ms = 0;
+                    }
                     if (rx_event == V34_EVENT_PEER_RETRAIN) {
                         /* §11.5.1.2/§11.5.2.2: silence, then our own tone,
                          * then back to §11.2.1.  v34_restart() re-enters

@@ -357,6 +357,10 @@ hsf_v90_coupler: $(HSF_V90_COUPLER_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(HSF_V90_COUPLER_OBJS) -o $@ $(LDFLAGS) $(LIBUSB_LIBS)
 
 hsf_fxo.o hsf_fxo_probe.o hsf_v90_coupler.o: CFLAGS += $(LIBUSB_CFLAGS)
+# hsf_v90_coupler.c is a two-line wrapper that #includes hsf_fxo_probe.c.
+# This makefile has no header dependencies, so without this line an edit to
+# the probe silently leaves the coupler linked against the previous build.
+hsf_v90_coupler.o: hsf_fxo_probe.c hsf_fxo.h modem_engine.h data_interface.h
 
 vpcm_loopback_test: $(TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(TEST_OBJS) -o $@ $(LDFLAGS)

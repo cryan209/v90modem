@@ -1360,6 +1360,20 @@ typedef struct
        on a real S and never crossed a 0.60 gate.
        10 ms blocks, because S is 128T and S-bar 16T: 45 ms at 3200 baud is
        the whole window. */
+    /* Sample-domain Phase 3 S watch.  Same three-bin measurement as the 9.6
+       renegotiation watch, run in V34_RX_STAGE_PHASE3_WAIT_S: 10.1.3.7's S is
+       two lines at fc +/- baud/2 plus one at fc, so it can be found without
+       the equalizer, carrier loop or timing loop -- which is the whole point,
+       because the constellation-domain detector needs the eye and on a real
+       analogue line the far end's symbol clock is not phase-locked to our
+       sample grid. */
+    float p3s_g1[3];
+    float p3s_g2[3];
+    float p3s_energy;
+    int p3s_samples;
+    int p3s_blocks;
+    bool p3s_reported;
+
     float reneg_s_g1[3];
     float reneg_s_g2[3];
     float reneg_s_energy;
