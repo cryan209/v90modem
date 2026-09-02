@@ -1816,3 +1816,41 @@ Note the macOS measurements in the retraction entry higher up ("off-hook 400 Hz
 directly contradicted -- but they are of exactly the shape that this mistake
 produces, and they should be re-taken with an absolute amplitude before being
 relied on again.
+
+## Our off-hook does nothing: on-hook and off-hook are the same signal
+
+Measured directly, same binary, same session, `--hook` the only variable:
+
+    hook=on    DC=+689.5  mean|delta|=1.86  400Hz=0.21  min=676 max=1023
+    hook=off   DC=+690.7  mean|delta|=1.69  400Hz=0.08  min=652 max=721
+
+**Indistinguishable.**  Script 3 is accepted, the device stays alive, and the
+line does not change -- against the vendor driver, which on the same line
+minutes earlier moves the DC to +913 and puts the 400 Hz dial tone on at
+amplitude 183.
+
+So the retracted entry above -- "the DAA never goes off-hook, the off-hook
+script changes nothing" -- **is correct on this host, and its retraction was
+the amplitude-vs-bin mistake**: the 6x figure that overturned it was a bin
+reading without a magnitude beside it, which is the same slip that produced a
+"dial tone" of 0.1 LSB and a 1638400 Hz calibration in this session.
+
+That collapses the whole picture into one fault.  The DAA stays on-hook, so
+there is no line to capture and nothing to drive: no receive audio, no playback
+clock, no transmit.  Rate, arming point, script order and sample format were
+all downstream of it.
+
+### A defect that was wedging the device and hiding behind all of it
+
+`hsf_fxo_open()` claimed both interfaces and **discarded both return values**,
+under a comment asserting "both claims succeed; neither interface has a driver
+child".  That is false whenever a kernel driver is attached -- exactly the case
+after the vendor `hsfusbcd2` has been loaded, which is now routine here.  The
+failure is silent in the worst way: the probe runs to completion, usbfs refuses
+every transfer, and the only trace is a dmesg line nothing was reading
+(`usbfs: did not claim interface 0 before use`).  A run in that state reports
+zero bytes and zero notifications, which reads exactly like a dead device -- and
+it cost several runs in this session that were scored as real results.  The
+claims are now checked, a kernel driver is detached first, and a failure aborts
+with a message.  (`libusb_set_auto_detach_kernel_driver()` is 1.0.16+ and the
+capture guest ships 1.0.11, so the detach is explicit.)

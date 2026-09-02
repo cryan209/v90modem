@@ -459,9 +459,36 @@ struct hsf_dev *hsf_fxo_open(void)
 		return NULL;
 	}
 
-	/* Both claims succeed; neither interface has a driver child. */
-	libusb_claim_interface(d->h, IF_DATA);
-	libusb_claim_interface(d->h, IF_CTRL);
+	/*
+	 * This used to read "both claims succeed; neither interface has a driver
+	 * child" and DISCARD both return values.  That is false whenever a
+	 * kernel driver is attached -- the vendor hsfusbcd2, or cdc_acm on a
+	 * host that binds it -- and the failure is silent in the worst way: the
+	 * probe runs to completion, every transfer is rejected by usbfs, and the
+	 * only trace is a dmesg line ("did not claim interface 0 before use")
+	 * that nothing here was reading.  A run in that state reports zero
+	 * received bytes and no notifications, which is indistinguishable from
+	 * a device that is ignoring us.
+	 */
+	/* libusb_set_auto_detach_kernel_driver() is 1.0.16+; the capture guest
+	 * ships 1.0.11, so detach explicitly instead. */
+	for (int ifn = 0; ifn < 2; ifn++) {
+		int which = ifn ? IF_CTRL : IF_DATA;
+		if (libusb_kernel_driver_active(d->h, which) == 1 &&
+		    libusb_detach_kernel_driver(d->h, which) < 0)
+			fprintf(stderr, "hsf_fxo: interface %d has a kernel driver "
+					"and it could not be detached\n", which);
+		int cr = libusb_claim_interface(d->h, which);
+		if (cr < 0) {
+			fprintf(stderr, "hsf_fxo: claim interface %d failed: %s "
+					"-- every transfer will be refused\n",
+				which, libusb_error_name(cr));
+			libusb_close(d->h);
+			libusb_exit(d->ctx);
+			free(d);
+			return NULL;
+		}
+	}
 
 	pthread_mutex_init(&d->lock, NULL);
 	return d;
