@@ -192,11 +192,17 @@ int hsf_fxo_get_information(struct hsf_dev *d, uint8_t info[5])
 	libusb_control_transfer(d->h, LIBUSB_ENDPOINT_OUT, LIBUSB_REQUEST_SET_CONFIGURATION,
 				1, 0, NULL, 0, 5000);
 
+	int last = 0;
 	for (int i = 0; i < 3; i++) {
-		int r = vendor_in(d, CD2_GET_INFROMATION, 0, (uint16_t)i, info, 5);
-		if (r == 5)
+		last = vendor_in(d, CD2_GET_INFROMATION, 0, (uint16_t)i, info, 5);
+		if (last == 5)
 			return 0;
 	}
+	/* Report WHY.  "GET_INFROMATION failed" alone sent a session chasing the
+	 * bootloader window when the real cause was another driver owning the
+	 * interfaces -- LIBUSB_ERROR_NOT_FOUND / _BUSY / _ACCESS say so. */
+	fprintf(stderr, "hsf_fxo: CD2_GET_INFROMATION -> %s (%d)\n",
+		last < 0 ? libusb_error_name(last) : "short read", last);
 	return -EIO;
 }
 

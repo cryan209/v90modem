@@ -2168,12 +2168,42 @@ degrade safely there:
 * `libusb_reset_device()` is only reached through `hsf_fxo_bus_reset()`, which
   is behind `HSF_INIT_RESET` and off by default.
 
-**The one real gap is the reset between runs.**  A second run in the same
-process lifetime currently gets nothing, and on Linux that is worked around
-with an external `USBDEVFS_RESET`.  macOS has no equivalent, and this file's own
-note records that `libusb_reset_device()` on darwin times out re-enumerating and
-takes the device off the bus entirely -- so on a Mac the first run should work
-and a repeat may wedge with only a physical replug to recover.
+**Verified on the Mac, and the predicted problem does not exist.**  Three
+consecutive runs with no reset of any kind:
 
-That makes "session teardown does not return the part to a startable state" the
-item to fix for macOS, rather than anything about the platform.
+    run 1: rx 128704 bytes in 503 packets, tx 129664
+    run 2: rx 128704 bytes in 503 packets, tx 129664
+    run 3: rx 128832 bytes in 504 packets, tx 129792
+
+16088 Hz, full duplex, identical every time.  So **the reset between runs is a
+Linux/qemu-passthrough artefact, not a teardown defect** -- the prediction that
+macOS would wedge on a repeat was wrong, and macOS is in fact the better
+behaved of the two.
+
+### Getting it running on macOS, and a liveness test that lies
+
+The part answers EP0 for only ~3 s after it enumerates.  A device that has been
+sitting -- for example one just moved from another machine, which power-cycles
+it -- is silent, and every request STALLs.  `--wait N --load` polls for the next
+window; **replug the device while it polls**, and it uploads firmware inside the
+window and continues.  After that `CD2_GET_INFROMATION` answers
+`01 02 03 03 00` (family 03, firmware running) and the call sequence runs
+normally.
+
+Two things that cost time and should not next time:
+
+* **`CD2_GET_INFROMATION failed` now reports the libusb error name.**  The bare
+  message sent this session chasing `AppleUSBCDCCompositeDevice`, which had
+  indeed matched both interfaces -- and is a red herring: **both
+  `libusb_claim_interface()` calls SUCCEED on darwin** even so.
+  `LIBUSB_ERROR_PIPE` (a STALL, an active rejection) is the signature of the
+  closed bootloader window; `libusb_detach_kernel_driver()` returning
+  `LIBUSB_ERROR_ACCESS` on darwin is normal and harmless.
+* **A string descriptor is NOT a reliable liveness test for this part**, despite
+  the note earlier in this document recommending exactly that.  After a
+  successful replug, with the device fully alive and answering vendor requests,
+  `libusb_get_string_descriptor_ascii(1)` still returns `LIBUSB_ERROR_IO`.  It
+  gives a false negative.  The honest liveness test is `CD2_GET_INFROMATION`
+  itself -- what `--wait` already polls.  (`libusb_get_configuration()` remains
+  useless in the other direction: it is served from IOKit's cache and succeeds
+  on a dead device.)
