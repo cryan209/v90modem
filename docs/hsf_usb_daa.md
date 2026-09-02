@@ -2382,3 +2382,16 @@ peaks at 11158 with no clipping.  USB carried 1,281,792 bytes TX and 1,280,832
 bytes RX over 40 seconds with zero transfer errors or refused submissions.
 This is the first end-to-end proof through USB TX, the analogue line, the
 called service, and USB RX, rather than an inference from dial-tone removal.
+
+A repeating stepped sweep (`--echo-sweep`) measures that complete path at 100
+Hz intervals, using 250 ms tone / 250 ms silence per bin and the second cycle
+after 9099 has answered.  Relative to the returned 1 kHz level, 200--2000 Hz
+stays between +0.1 and -2.8 dB; 100 Hz is rejected at -13.5 dB.  The upper
+roll-off is -4.8 dB at 3.0 kHz, -5.8 dB at 3.2 kHz, -7.0 dB at 3.4 kHz,
+-9.2 dB at 3.6 kHz and -17.6 dB at 3.7 kHz.  The 100 Hz-bin ripple is partly
+the coherent sum of local hybrid return and the 31.875 ms remote copy, so do
+not interpret each alternating point as a standalone codec notch.  The useful
+end-to-end voice/modem band is approximately **300--3000 Hz**, with measurable
+but increasingly attenuated response through 3.4--3.6 kHz and a hard network
+cutoff above it.  This grades the HSF, ATA, call path and echo server together;
+it is not the isolated analogue response of the HSF DAA.

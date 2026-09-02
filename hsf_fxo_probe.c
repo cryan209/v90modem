@@ -117,6 +117,7 @@ static double       g_dial_amp = 8000.0;
 static double   g_echo_tone;          /* Hz, 0 = off */
 static double   g_echo_amp = 8000.0;
 static double   g_echo_on_ms = 50.0;
+static bool     g_echo_sweep;
 /* --tx-out writes exactly what we hand the device, so the received stream can
  * be CROSS-CORRELATED against it.  A single-bin tone detector cannot separate
  * our own hybrid sidetone from a network echo, and is contaminated by whatever
@@ -136,8 +137,21 @@ static bool dial_sample(int16_t *out)
 		return true;
 	}
 	if (g_dial[g_dial_pos] == '\0') {
-		if (g_echo_tone <= 0)
+		if (g_echo_tone <= 0 && !g_echo_sweep)
 			return false;
+		if (g_echo_sweep) {
+			/* Repeating 100--4000 Hz stepped sweep: 250 ms tone and
+			 * 250 ms silence per bin.  Repetition ensures the low bins
+			 * are measured again after a slow echo service answers. */
+			unsigned dwell = (unsigned)(g_tx_rate / 2.0);
+			unsigned on = dwell / 2;
+			unsigned step = (g_echo_n / dwell) % 40;
+			unsigned ph = g_echo_n % dwell;
+			double f = 100.0 * (step + 1);
+			double t = (double)g_echo_n++ / g_tx_rate;
+			*out = (ph < on) ? (int16_t)(g_echo_amp * sin(2*M_PI*f*t)) : 0;
+			return true;
+		}
 		/* A burst SHORT relative to the network round trip, so an echo
 		 * returns as a separate blip instead of overlapping the
 		 * hybrid's local sidetone.  250 ms cannot distinguish them. */
@@ -595,6 +609,8 @@ int main(int argc, char **argv)
 			g_echo_on_ms = atof(argv[++i]);
 		} else if (!strcmp(argv[i], "--echo-tone") && i + 1 < argc) {
 			g_echo_tone = atof(argv[++i]);
+		} else if (!strcmp(argv[i], "--echo-sweep")) {
+			g_echo_sweep = true;
 		} else if (!strcmp(argv[i], "--dial-amp") && i + 1 < argc) {
 			g_dial_amp = atof(argv[++i]);
 		} else if (!strcmp(argv[i], "--call-seq")) {
