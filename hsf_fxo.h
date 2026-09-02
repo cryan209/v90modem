@@ -314,8 +314,19 @@ extern const uint16_t hsf_smart_relays[HSF_RELAY_COUNT];
  * close and re-open afterwards.  Worst case is the replug the workflow already
  * requires.
  */
-int hsf_fxo_reset(struct hsf_dev *d, uint16_t wvalue, uint16_t windex);
-int hsf_fxo_wake_on_ring(struct hsf_dev *d, uint16_t wvalue, uint16_t windex);
+int hsf_fxo_reset(struct hsf_dev *d, unsigned rt, uint16_t wvalue, uint16_t windex);
+int hsf_fxo_wake_on_ring(struct hsf_dev *d, unsigned rt, uint16_t wvalue, uint16_t windex);
+
+/* rt selector for the two above.  CD2_CONTROL_SCRIPT is an INTERFACE-recipient
+ * request in this part while CD2_UPLOAD_FIRMWARE is a DEVICE-recipient one, so
+ * the recipient is not a constant here and cannot be assumed for an opcode
+ * nobody sends. */
+enum hsf_reset_rt {
+	HSF_RT_DEV_OUT = 0,
+	HSF_RT_IF_OUT  = 1,
+	HSF_RT_DEV_IN  = 2,
+	HSF_RT_IF_IN   = 3,
+};
 
 int hsf_fxo_script_load(struct hsf_dev *d, uint16_t wvalue,
 			const uint8_t *body, size_t len);

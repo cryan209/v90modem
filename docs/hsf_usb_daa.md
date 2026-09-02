@@ -439,7 +439,30 @@ leaves the bus entirely.  A STALL from `--reset` is a real answer (the device
 actively rejecting the opcode at that framing) and is reported as distinct from
 an I/O error; the worst case is the replug the workflow already needs.
 
-**Untested against hardware.**
+**Live, device-recipient OUT, wValue and wIndex zero: STALL.**  The device
+actively rejects `CD2_RESET` at that framing.  That is a real answer but a
+narrow one, and the run does not yet settle the question, for two reasons.
+
+The first is that the part was **already in the bootloader** when it was sent
+(`info = 01 02 01 03 00`), so what was tested is whether the *bootloader*
+implements request 5 -- not whether the running firmware does, which is the
+case that matters.  Retest with family 03.
+
+The second is a defect in the probe, now fixed, and it is the kind that
+manufactures a result: the re-open check reported "the window is open, no
+replug needed" on family 01 **alone**, without comparing against the family
+before the request.  A device that was already in the bootloader and completely
+untouched therefore read as a success.  It now compares, and says
+"STILL the bootloader it already was -- proves nothing" for exactly that case;
+only a 03 -> 01 transition is reported as a reset.  (The follow-up run makes
+the point independently: the window closed on its own about three seconds
+later, as it always does, so nothing had re-enumerated.)
+
+The framing is also no longer assumed.  `CD2_CONTROL_SCRIPT` is an
+INTERFACE-recipient request in this part while `CD2_UPLOAD_FIRMWARE` is a
+DEVICE-recipient one, so the recipient is not a constant and cannot be guessed
+for an opcode nobody sends.  `--reset` now sweeps device/interface x OUT/IN and
+stops at the first framing that is not rejected; `--reset-rt 0..3` pins one.
 
 There is one more control path in the driver -- `hsfusbcd2188_` CRCs a host
 buffer with CRC-16-CCITT (poly 0x1021) and writes it in 64-byte blocks via

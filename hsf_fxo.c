@@ -53,6 +53,7 @@
 #define RT_VENDOR_DEV_IN   (LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE | LIBUSB_ENDPOINT_IN)
 #define RT_VENDOR_DEV_OUT  (LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_DEVICE | LIBUSB_ENDPOINT_OUT)
 #define RT_VENDOR_IF_OUT   (LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_INTERFACE | LIBUSB_ENDPOINT_OUT)
+#define RT_VENDOR_IF_IN    (LIBUSB_REQUEST_TYPE_VENDOR | LIBUSB_RECIPIENT_INTERFACE | LIBUSB_ENDPOINT_IN)
 
 #define CTRL_TIMEOUT_MS 1000
 #define FW_BLOCK_SIZE   64	/* osusb.c FW_BLOCK_SIZE */
@@ -292,20 +293,33 @@ int hsf_fxo_load_firmware(struct hsf_dev *d, const char *rom_path)
 	return rc;
 }
 
-int hsf_fxo_reset(struct hsf_dev *d, uint16_t wvalue, uint16_t windex)
+static int reset_like(struct hsf_dev *d, uint8_t req, unsigned rt,
+		      uint16_t wvalue, uint16_t windex)
 {
-	/* No unwedge() on failure: the point of this request is to change the
+	static const uint8_t rts[4] = {
+		RT_VENDOR_DEV_OUT, RT_VENDOR_IF_OUT,
+		RT_VENDOR_DEV_IN,  RT_VENDOR_IF_IN,
+	};
+	uint8_t in = (rt & 2) != 0;
+	uint8_t buf[8];
+
+	/* No unwedge() on failure: the point of these requests is to change the
 	 * device's state, so a recovery that re-drives SET_CONFIGURATION would
-	 * confuse "the reset did nothing" with "the reset worked and we undid
-	 * it".  The raw libusb result is what the caller needs to see. */
-	return libusb_control_transfer(d->h, RT_VENDOR_DEV_OUT, CD2_RESET,
-				       wvalue, windex, NULL, 0, CTRL_TIMEOUT_MS);
+	 * confuse "it did nothing" with "it worked and we undid it".  The raw
+	 * libusb result is what the caller needs to see. */
+	return libusb_control_transfer(d->h, rts[rt & 3], req, wvalue, windex,
+				       in ? buf : NULL, in ? (uint16_t)sizeof buf : 0,
+				       CTRL_TIMEOUT_MS);
 }
 
-int hsf_fxo_wake_on_ring(struct hsf_dev *d, uint16_t wvalue, uint16_t windex)
+int hsf_fxo_reset(struct hsf_dev *d, unsigned rt, uint16_t wvalue, uint16_t windex)
 {
-	return libusb_control_transfer(d->h, RT_VENDOR_DEV_OUT, CD2_WAKEONRING,
-				       wvalue, windex, NULL, 0, CTRL_TIMEOUT_MS);
+	return reset_like(d, CD2_RESET, rt, wvalue, windex);
+}
+
+int hsf_fxo_wake_on_ring(struct hsf_dev *d, unsigned rt, uint16_t wvalue, uint16_t windex)
+{
+	return reset_like(d, CD2_WAKEONRING, rt, wvalue, windex);
 }
 
 /* ------------------------------------------------------------- transfer ring */

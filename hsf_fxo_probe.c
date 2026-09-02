@@ -194,6 +194,7 @@ int main(int argc, char **argv)
 	bool do_feed = false;
 	int  do_reset = 0;		/* 1 = CD2_RESET, 2 = CD2_WAKEONRING */
 	unsigned reset_value = 0, reset_index = 0;
+	int  reset_rt = -1;		/* -1 sweeps all four framings */
 	char dtmf = '\0';
 	uint8_t patch[8];
 	size_t  n_patch = 0;
@@ -271,6 +272,8 @@ int main(int argc, char **argv)
 			do_reset = 2;
 		} else if (!strcmp(argv[i], "--reset-value") && i + 1 < argc) {
 			reset_value = (unsigned)strtoul(argv[++i], NULL, 0);
+		} else if (!strcmp(argv[i], "--reset-rt") && i + 1 < argc) {
+			reset_rt = atoi(argv[++i]);
 		} else if (!strcmp(argv[i], "--reset-index") && i + 1 < argc) {
 			reset_index = (unsigned)strtoul(argv[++i], NULL, 0);
 		} else if (!strcmp(argv[i], "--feed")) {
@@ -300,6 +303,7 @@ int main(int argc, char **argv)
 				" [--tx-slot 0|1] [--tx-prime-blocks N]"
 				" [--post-script ID[,ID...]] [--post-patch B[,B...]]"
 				" [--reset|--wake-on-ring] [--reset-value N] [--reset-index N]"
+				" [--reset-rt 0|1|2|3]"
 				" [--rx-out PATH]"
 				" [--stream SECONDS]\n",
 				argv[0]);
@@ -377,25 +381,51 @@ int main(int argc, char **argv)
 
 	if (do_reset) {
 		const char *name = do_reset == 1 ? "CD2_RESET" : "CD2_WAKEONRING";
-		int r = do_reset == 1
-			? hsf_fxo_reset(d, (uint16_t)reset_value, (uint16_t)reset_index)
-			: hsf_fxo_wake_on_ring(d, (uint16_t)reset_value, (uint16_t)reset_index);
-		/* A STALL is the device ACTIVELY REJECTING the request, which is a
-		 * real answer: the opcode is not implemented at this framing.  An
-		 * I/O error is not the same thing and must not be reported as one. */
-		/* libusb error codes, spelled out rather than including libusb.h
-		 * here: -9 LIBUSB_ERROR_PIPE, -4 LIBUSB_ERROR_NO_DEVICE. */
-		printf("%s (wValue=0x%04x wIndex=0x%04x): %s (%d)\n", name,
-		       reset_value, reset_index,
-		       r >= 0    ? "ACCEPTED"
-		       : r == -9 ? "STALL (device rejected it)"
-		       : r == -4 ? "device left the bus"
-		                 : "error", r);
+		static const char *rtname[4] = {
+			"device/OUT", "interface/OUT", "device/IN", "interface/IN"
+		};
+		uint8_t before = info[2];
+		int changed = 0;
 
-		/* Whatever it did, the handle describes a device that may no longer
-		 * be there.  Re-open and ask what came back -- family 01 would mean
-		 * the bootloader window is open again, without a replug, which is
-		 * the whole point of trying this. */
+		/* Sweep the framing unless one was named.  A single STALL settles
+		 * nothing: CD2_CONTROL_SCRIPT is interface-recipient in this part
+		 * while CD2_UPLOAD_FIRMWARE is device-recipient, so the recipient
+		 * cannot be assumed for an opcode nobody sends. */
+		for (int rt = reset_rt >= 0 ? reset_rt : 0;
+		     rt <= (reset_rt >= 0 ? reset_rt : 3); rt++) {
+			int r = do_reset == 1
+				? hsf_fxo_reset(d, (unsigned)rt, (uint16_t)reset_value,
+						(uint16_t)reset_index)
+				: hsf_fxo_wake_on_ring(d, (unsigned)rt, (uint16_t)reset_value,
+						       (uint16_t)reset_index);
+			/* libusb codes spelled out rather than including libusb.h:
+			 * -9 LIBUSB_ERROR_PIPE, -4 LIBUSB_ERROR_NO_DEVICE.  A STALL
+			 * is the device ACTIVELY REJECTING the opcode, which is a
+			 * real answer and not the same as an I/O error. */
+			printf("%s %-14s wValue=0x%04x wIndex=0x%04x: %s (%d)\n",
+			       name, rtname[rt & 3], reset_value, reset_index,
+			       r >= 0    ? "ACCEPTED"
+			       : r == -9 ? "STALL (device rejected it)"
+			       : r == -4 ? "device left the bus"
+			                 : "error", r);
+			if (r >= 0 || r == -4) {
+				changed = 1;
+				break;
+			}
+		}
+
+		if (!changed) {
+			printf("every framing tried was rejected;"
+			       " %s is not implemented this way\n", name);
+			hsf_fxo_close(d);
+			return 1;
+		}
+
+		/* The handle may now describe a device that is gone.  Re-open and
+		 * compare the family AGAINST WHAT IT WAS: reporting "the bootloader
+		 * window is open" on family 01 alone claims a result for a device
+		 * that was already in the bootloader and untouched, which is exactly
+		 * what the first live run of this did. */
 		hsf_fxo_close(d);
 		d = NULL;
 		for (int t = 0; t < 150; t++) {
@@ -405,14 +435,17 @@ int main(int argc, char **argv)
 				continue;
 			uint8_t again[5];
 			if (hsf_fxo_get_information(d, again) == 0) {
-				printf("re-enumerated after %d ms: info = %02x %02x %02x %02x %02x   (%s)\n",
+				printf("after %d ms: info = %02x %02x %02x %02x %02x   (%s)\n",
 				       (t + 1) * 20, again[0], again[1], again[2],
 				       again[3], again[4],
-				       again[2] == HSF_FAMILY_BOOTLOADER
-					       ? "BOOTLOADER -- the window is open, no replug needed"
-				       : again[2] == HSF_FAMILY_HSF
-					       ? "still running firmware -- the request did not reset it"
-					       : "unknown");
+				       again[2] == before && before == HSF_FAMILY_BOOTLOADER
+					       ? "STILL the bootloader it already was -- proves nothing"
+				       : again[2] == before
+					       ? "UNCHANGED -- the request did not reset it"
+				       : again[2] == HSF_FAMILY_BOOTLOADER
+					       ? "family 03 -> 01: IT RESET, and the window is open"
+					              " without a replug"
+					       : "family changed, but not to the bootloader");
 				break;
 			}
 			hsf_fxo_close(d);
