@@ -2252,10 +2252,20 @@ not.  Same experiment, one arm controlled and one not, in the same session.
   on-hook and off-hook returns stay equal.
 * **A second `0x35b7` after off-hook**, which the vendor's capture does send
   (23.113, then again at 25.269) and we did not.  `HSF_TRAIL2_REG` /
-  `HSF_TRAIL2_MS`: off-hook 480 against on-hook 491, still equal.
+  `HSF_TRAIL2_MS`: off-hook 480 against on-hook 491, still equal.  That test
+  replayed only the register write, however, while the wire capture follows it
+  immediately with script 8 wIndex 3 and script 3.  The probe now replays that
+  complete late transition when `HSF_TRAIL2_REG` is set; it still needs a live
+  hardware run.
 
 So the transmit path to the DAA is disabled by something not yet identified.
 Given `0xaac8`'s bit 0x20 gates receive, a companion bit for transmit in the
 same register family is the obvious place to look, and the off-hook/on-hook
 comparison above is the test to sweep against -- it is binary and needs no
 assumption about what the line is doing.
+
+The test driver itself now fails closed: `tools/hsf_tx_reaches_line.sh` uses a
+fresh temporary capture for every arm and aborts if the probe fails or produces
+no samples.  Previously it reused `/tmp/tt.raw`, so running it with no attached
+device printed a plausible stale result (`491 / 491`) instead of reporting that
+no experiment had occurred.

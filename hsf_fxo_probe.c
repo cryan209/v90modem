@@ -1152,14 +1152,22 @@ int main(int argc, char **argv)
 			if (trail)
 				script2_reg(d, (uint16_t)trail);
 			/* The vendor's capture sends a SECOND 0x35b7 about 2 s after
-			 * off-hook (cap-full at 23.113 then again at 25.269) and we
-			 * never did.  HSF_TRAIL2_REG / HSF_TRAIL2_MS make it an
-			 * experiment; 0 disables. */
+			 * off-hook, immediately followed by script 8 wIndex 3 and
+			 * script 3 again.  Replaying only the register write did not
+			 * test that observed transition.  HSF_TRAIL2_REG / _MS make
+			 * the complete late sequence an experiment; 0 disables. */
 			const char *t2 = getenv("HSF_TRAIL2_REG");
 			if (t2) {
 				const char *t2ms = getenv("HSF_TRAIL2_MS");
 				usleep((useconds_t)(t2ms ? atoi(t2ms) : 2000) * 1000);
 				script2_reg(d, (uint16_t)strtoul(t2, NULL, 0));
+				hsf_fxo_script_run_index(d, HSF_SCRIPT_SIGNAL, 3, NULL, 0);
+				if (!getenv("HSF_NO_HOOK")) {
+					unsigned b3 = script_count(HSF_SCRIPT_OFF_HOOK);
+					if (hsf_fxo_script_run(d, HSF_SCRIPT_OFF_HOOK,
+					                           NULL, 0) == 0)
+						wait_script(HSF_SCRIPT_OFF_HOOK, b3, 1400);
+				}
 			}
 			goto codec_done;
 		}
