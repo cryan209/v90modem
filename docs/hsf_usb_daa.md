@@ -1755,3 +1755,64 @@ Receive rate remains the fingerprint, and it has not moved: **21178 Hz for our
 session against 16000 Hz for the vendor's**, unchanged by the byte-identical
 control plane.  Whatever configures the codec is not reachable through the
 script interface at all.
+
+## What configures the codec rate: the wrong question -- our receive is not audio
+
+Chasing the 21178 / 16000 discrepancy answered a different and larger question.
+
+**There is no control transfer that sets a sample rate.**  Listing *everything*
+on the wire before the vendor's datapump starts -- standard, class and vendor
+requests alike, not just scripts -- gives only: descriptor reads,
+`CD2_GET_INFROMATION`, `CLEAR_FEATURE(HALT)` on `0x82`, two USB port resets with
+re-enumeration and `SET_CONFIGURATION`, and the scripts.  Nothing carries a
+rate.  And our six script-2 codec words are now byte-identical to the vendor's,
+so it is not there either.
+
+**The rate is the device's, not our polling** -- receive byte totals are
+identical with 1, 2, 8 or 32 URBs in flight (211776 / 211840 / 211840 / 211776
+in 5 s) as well as across transfer sizes.  So the two sessions really do run at
+different rates.
+
+**But the rate difference is a symptom.  Our receive stream is not line audio at
+all -- it is a DC level.**  Compared against the vendor's own receive stream,
+taken off the same line minutes apart, in the same units:
+
+    ours off-hook, silent   DC=+692  400Hz= 0.06  697Hz= 0.07   in-band power=      0.0
+    ours off-hook + DTMF    DC=+690  400Hz= 0.17  697Hz= 0.38   in-band power=      0.1
+    ours off-hook + DTMF    DC=+690  400Hz= 0.13  697Hz= 0.43   in-band power=      0.1
+    VENDOR (control)        DC=+913  400Hz=183.19 697Hz=218.67  in-band power= 890690.6
+
+Nine million times the in-band power.  The vendor's stream carries the 400 Hz
+NZ dial tone at amplitude 183 **and its own transmitted DTMF coming back
+through the hybrid** (695.3, 1335.9 and 1476.6 Hz for the `123` it dialled),
+which is both the proof that the line is live and the detector we should have
+been using all along.  Ours carries a flat DC of ~690 and quantisation noise:
+adjacent samples differ by a mean of **1.8** against the vendor's **612**.
+
+So the standing framing of this work -- "RX carries line audio, TX is the
+hurdle" -- does not hold on this host.  **Neither direction works.**  The codec
+is emitting a DC level and consuming nothing, which explains the transmit stall,
+the absent playback clock and the odd byte rate as one fault rather than three.
+A codec whose analogue path is not running has no reason to produce 16000 Hz.
+
+That also makes the next step concrete and much better posed than "find the
+transmit trigger": **get the receive stream to carry the line.**  It is a cheap,
+unambiguous, one-number test -- in-band power, with the vendor capture as a
+known-good control on the same line -- and nothing about transmit can be
+assessed until it passes.
+
+### A correction, and the same mistake twice
+
+Earlier in this session I reported "the dial tone at 402.9 Hz is present in both
+recordings", from a bin index, **without checking its magnitude**.  It is
+0.1 LSB -- noise.  The same slip produced an earlier bogus `fs=1638400 Hz`
+calibration off a DC bin.  A peak's *position* means nothing until its
+*amplitude* is quoted beside it; in this document that has now caused two
+confident wrong statements, and the in-band-power column above exists so it
+cannot happen a third time.
+
+Note the macOS measurements in the retraction entry higher up ("off-hook 400 Hz
+0.084 against on-hook 0.014, 6x") are a different host and setup and are not
+directly contradicted -- but they are of exactly the shape that this mistake
+produces, and they should be re-taken with an absolute amplitude before being
+relied on again.
