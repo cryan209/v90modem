@@ -85,12 +85,80 @@ static uint8_t       g_script1_reply[2];
 static int           g_script1_mode;
 static bool          g_script1_seen;
 
+/*
+ * DTMF dialling: a digit string sent as proper bursts rather than one tone held
+ * forever.  A held tone is not a digit -- exchanges collect on the tone's
+ * leading edge and need silence between digits -- which is why holding 697+1209
+ * never made the exchange cut dial tone.  ITU-T Q.23: 40 ms minimum tone and
+ * 40 ms minimum gap; 120/80 here is comfortably inside every collector.
+ */
+static const struct { char d; double lo, hi; } g_dtmf_tab[] = {
+	{'1',697,1209},{'2',697,1336},{'3',697,1477},{'A',697,1633},
+	{'4',770,1209},{'5',770,1336},{'6',770,1477},{'B',770,1633},
+	{'7',852,1209},{'8',852,1336},{'9',852,1477},{'C',852,1633},
+	{'*',941,1209},{'0',941,1336},{'#',941,1477},{'D',941,1633},
+};
+static const char  *g_dial;
+static size_t       g_dial_pos;
+static unsigned     g_dial_samples;      /* samples emitted in this phase */
+static bool         g_dial_gap;
+static unsigned     g_dial_tone_len  = 120 * 16;   /* 120 ms at 16 kHz */
+static unsigned     g_dial_gap_len   =  80 * 16;
+static unsigned     g_dial_delay     = 1000 * 16;  /* wait before dialling */
+static unsigned     g_dial_waited;
+static double       g_dial_amp = 8000.0;
+
+/* Returns false once the string is finished. */
+static bool dial_sample(int16_t *out)
+{
+	if (!g_dial || !*g_dial)
+		return false;
+	if (g_dial_waited < g_dial_delay) {
+		g_dial_waited++;
+		*out = 0;
+		return true;
+	}
+	if (g_dial[g_dial_pos] == '\0')
+		return false;
+	if (g_dial_gap) {
+		*out = 0;
+		if (++g_dial_samples >= g_dial_gap_len) {
+			g_dial_samples = 0;
+			g_dial_gap = false;
+			g_dial_pos++;
+		}
+		return true;
+	}
+	char c = g_dial[g_dial_pos];
+	double lo = 0, hi = 0;
+	for (size_t i = 0; i < sizeof g_dtmf_tab / sizeof g_dtmf_tab[0]; i++)
+		if (g_dtmf_tab[i].d == c) { lo = g_dtmf_tab[i].lo; hi = g_dtmf_tab[i].hi; }
+	if (lo == 0) { g_dial_pos++; return true; }
+	double t = (double)g_dial_samples / g_tx_rate;
+	*out = (int16_t)(g_dial_amp * (sin(2*M_PI*lo*t) + sin(2*M_PI*hi*t)) / 2.0);
+	if (++g_dial_samples >= g_dial_tone_len) {
+		g_dial_samples = 0;
+		g_dial_gap = true;
+	}
+	return true;
+}
+
 static void fill_tx(uint8_t *buf)
 {
 	memset(buf, 0, g_tx_block);
 	g_tx_blocks++;
 	if (g_tx_blocks <= g_tx_prime_blocks)
 		return;
+	if (g_dial) {
+		int16_t *ds = (int16_t *)buf;
+		size_t nf = g_tx_block / 2;
+		for (size_t i = 0; i < nf; i++) {
+			int16_t sm = 0;
+			dial_sample(&sm);
+			ds[i] = sm;
+		}
+		return;
+	}
 	if (!g_dtmf_tx)
 		return;
 	/* RX strongly suggests four-byte frames.  Put the same signed sample in
@@ -481,6 +549,11 @@ int main(int argc, char **argv)
 			}
 		} else if (!strcmp(argv[i], "--arm-on-5")) {
 			arm_on_5 = true;
+		} else if (!strcmp(argv[i], "--dial") && i + 1 < argc) {
+			g_dial = argv[++i];
+			do_feed = true;
+		} else if (!strcmp(argv[i], "--dial-amp") && i + 1 < argc) {
+			g_dial_amp = atof(argv[++i]);
 		} else if (!strcmp(argv[i], "--call-seq")) {
 			call_seq = true;
 			do_start = true;
@@ -976,11 +1049,27 @@ int main(int argc, char **argv)
 						break;
 				}
 			}
-			static const uint16_t regs[] = {
+			static const uint16_t regs_default[] = {
 				0x35b7, 0x2004, 0xa208, 0xf200,
 				0xaae8, 0x6040, 0x35b4
 			};
-			for (size_t i = 0; i < sizeof regs / sizeof regs[0]; i++)
+			uint16_t regs[8];
+			size_t nregs = sizeof regs_default / sizeof regs_default[0];
+			memcpy(regs, regs_default, sizeof regs_default);
+			/* HSF_CALL_REGS=w,w,... overrides the call's codec register
+			 * words, so the gain field can be swept without a rebuild.
+			 * Receive currently clips ~13% of samples, so one of these
+			 * is 20-plus dB hot against the vendor's setting. */
+			const char *cr2 = getenv("HSF_CALL_REGS");
+			if (cr2) {
+				nregs = 0;
+				char buf[128];
+				snprintf(buf, sizeof buf, "%s", cr2);
+				for (char *tok = strtok(buf, ","); tok && nregs < 8;
+				     tok = strtok(NULL, ","))
+					regs[nregs++] = (uint16_t)strtoul(tok, NULL, 0);
+			}
+			for (size_t i = 0; i < nregs; i++)
 				script2_reg(d, regs[i]);
 			hsf_fxo_script_run_index(d, HSF_SCRIPT_SIGNAL, 1, NULL, 0);
 			unsigned b9 = script_count(HSF_SCRIPT_SESSION_A);
@@ -1001,11 +1090,18 @@ int main(int argc, char **argv)
 			}
 			g_armed = true;
 			/* off-hook, then the trailing register write */
-			hsf_fxo_script_run_index(d, HSF_SCRIPT_SIGNAL, 3, NULL, 0);
-			unsigned b3 = script_count(HSF_SCRIPT_OFF_HOOK);
-			if (hsf_fxo_script_run(d, HSF_SCRIPT_OFF_HOOK, NULL, 0) == 0)
-				wait_script(HSF_SCRIPT_OFF_HOOK, b3, 1400);
-			printf("  call-seq: off-hook sent\n");
+			/* HSF_NO_HOOK=1 runs the identical sequence but stays
+			 * ON-HOOK -- the control that says whether what arrives
+			 * on the receive stream is the line at all. */
+			if (!getenv("HSF_NO_HOOK")) {
+				hsf_fxo_script_run_index(d, HSF_SCRIPT_SIGNAL, 3, NULL, 0);
+				unsigned b3 = script_count(HSF_SCRIPT_OFF_HOOK);
+				if (hsf_fxo_script_run(d, HSF_SCRIPT_OFF_HOOK, NULL, 0) == 0)
+					wait_script(HSF_SCRIPT_OFF_HOOK, b3, 1400);
+				printf("  call-seq: off-hook sent\n");
+			} else {
+				printf("  call-seq: STAYING ON-HOOK (control)\n");
+			}
 			/* HSF_TRAIL_REG overrides the trailing post-off-hook write
 			 * (0 skips it) so its effect can be isolated. */
 			const char *tr = getenv("HSF_TRAIL_REG");

@@ -2047,3 +2047,62 @@ Sequence, in full, from a cold device:
   structural problem.
 * Transmit is proven only in the sense that the pipe drains at the codec rate;
   no tone has yet been confirmed on the line.
+
+## Toward a call: transmit reaches the line, the DAA switches, and the rig is now the blocker
+
+`--dial <digits>` sends proper DTMF bursts (120 ms tone, 80 ms gap, ITU-T Q.23
+wants 40/40) instead of one tone held forever.  A held tone is not a digit --
+collectors trigger on the leading edge and need silence between digits -- which
+is why holding 697+1209 never made the exchange cut dial tone.
+
+**Transmit reaches the line.**  The detector is the vendor's own: a tone we
+transmit comes back through the hybrid.  Measured in the 1209 Hz bin (the
+column tone for digit 1), against three runs with no transmit:
+
+    no DTMF   1209 Hz = 66.1 / 23.5 / 53.2
+    WITH DTMF 1209 Hz = 1182.4
+
+**The DAA switches.**  The same sequence with `HSF_NO_HOOK=1` -- identical but
+for script 3 -- is the control:
+
+    ON-hook    clip= 0.00%   loudest-window rms=   146   (and 151 on a repeat)
+    OFF-hook   clip=12.78%   loudest-window rms= 23687
+
+Silent on-hook, loud off-hook.  That is the DAA working, and it is the first
+time this project has had that as a controlled measurement rather than an
+inference.
+
+### Two corrections
+
+**The "400 Hz dial tone at amplitude 3969" in the previous entry is not
+reliable.**  It was computed on a signal that clips 13% of its samples, and a
+hard-clipped burst train has energy in every bin including 400 Hz.  Measured
+properly the off-hook signal is a **cadenced ~680 Hz burst train**, roughly
+0.15 s on and 0.15 s off, driving the converter to both rails -- 32767 and
+-32768 are the two most common values in the file.  There is line audio
+off-hook; its identification as dial tone was an artefact.
+
+**And an intermediate claim in the same session that on-hook showed the same
+bursts was wrong** -- that run's stream had stopped early and the pattern was
+what preceded it.  Repeated cleanly with a reset, on-hook is silent.
+
+### The receive gain is ~20-30 dB too hot
+
+13% of samples at the rails is unusable, and sweeping the one candidate field
+(`w4`, the `0xaae8` word: `0xaaa8` / `0xaa28` / `0xaa08`) moves the level a few
+dB and does not stop the clipping.  Which register holds the receive gain is
+not yet identified.
+
+### The call test is blocked on the rig, not on this code
+
+The vendor driver -- the known-good reference on the same hardware -- can no
+longer complete a call either.  `ATX4D6001` (X4 = dial-tone and busy detection)
+returns **nothing at all in 35 s**: no `NO DIALTONE`, no `NO CARRIER`, no
+`CONNECT`.  Its own receive stream off-hook now reads dominant 47 Hz, i.e. no
+tone.  Earlier the same day `ATX3DT123` returned `NO CARRIER` promptly and its
+receive carried the 400 Hz dial tone at amplitude 183 plus its own DTMF
+returning.
+
+So the line's state has changed under the experiment.  Until dialling a SIP
+endpoint from this line works for the VENDOR driver, a call test says nothing
+about ours, and the next step is to check the ATA/line rather than the code.
