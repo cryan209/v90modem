@@ -2106,3 +2106,49 @@ returning.
 So the line's state has changed under the experiment.  Until dialling a SIP
 endpoint from this line works for the VENDOR driver, a call test says nothing
 about ours, and the next step is to check the ATA/line rather than the code.
+
+## The echo call: the instrument is right, the line is not
+
+`--dial <digits> --echo-tone <Hz> --echo-on-ms <n> --tx-out <path>` dials, then
+emits short tone bursts, and dumps **exactly what we hand the device** so the
+received stream can be cross-correlated against it.
+
+**Use the correlation, not a tone bin.**  A single-bin detector cannot separate
+our own hybrid sidetone from a network echo, and on this line it is simply
+wrong: the 1000 Hz bin reads 2000-3000 in ~150 ms runs every ~300 ms, which is
+not our 50 ms burst at all -- it is the line's own cadenced tone leaking into
+that bin.  Two readings were taken off it before that was noticed.
+
+Cross-correlating transmit against receive over the last ten seconds, lags 0 to
+300 ms:
+
+       0.0 ms  -0.0203     <- local hybrid sidetone, polarity inverted
+      25.0 ms  -0.0062
+      50.0 ms  +0.0000
+     ... nothing above +/-0.0011 anywhere out to 300 ms
+
+**No echo at any delay.**  The lag-0 term is our own sidetone.  Dialled at both
+9898 and 9099.
+
+### What the line is actually doing
+
+As soon as we go off-hook it returns a tone at **~680 Hz, 135 ms on / 165 ms
+off** -- a fast congestion/reorder cadence, not dial tone -- loud enough to clip
+13% of samples.  One earlier call to 9898 did show 400 Hz ringback for ~9 s
+followed by a change of character at 9.5 s that looked like an answer; it has
+not reproduced since.
+
+**The vendor driver cannot dial either**: `ATX4D6001` returns nothing at all in
+35 s -- no `NO DIALTONE`, no `NO CARRIER`, no `CONNECT`.  So this is the line or
+the ATA, not the host code, and no call test on it can say anything about ours.
+
+### Correction: the receive gain is NOT wrong
+
+The previous entry concluded receive was "20-30 dB too hot" from 13% clipping.
+That was the line, not the gain.  With the line quiet, the same configuration
+measures **rms 146 on-hook and 7960 off-hook with 0.10% clipping, and a dominant
+of 47 Hz -- which is exactly what the VENDOR driver's own receive stream reads
+on the same line minutes apart**.  Our receive path agrees with the reference;
+it was clipping because the line was genuinely sending a loud tone.
+
+That also retires the plan to hunt for a gain register.

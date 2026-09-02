@@ -108,6 +108,23 @@ static unsigned     g_dial_delay     = 1000 * 16;  /* wait before dialling */
 static unsigned     g_dial_waited;
 static double       g_dial_amp = 8000.0;
 
+/*
+ * After the digits, emit a distinctive tone in bursts so an echo test has
+ * something to correlate: 250 ms on, 750 ms off.  Dialling an echo service and
+ * looking for this coming back is the one test that exercises transmit and
+ * receive together, end to end, over a real call.
+ */
+static double   g_echo_tone;          /* Hz, 0 = off */
+static double   g_echo_amp = 8000.0;
+static double   g_echo_on_ms = 50.0;
+/* --tx-out writes exactly what we hand the device, so the received stream can
+ * be CROSS-CORRELATED against it.  A single-bin tone detector cannot separate
+ * our own hybrid sidetone from a network echo, and is contaminated by whatever
+ * cadenced tone the line happens to be playing; a correlation peak at a
+ * non-zero lag is unambiguous. */
+static FILE    *g_tx_file;
+static unsigned g_echo_n;
+
 /* Returns false once the string is finished. */
 static bool dial_sample(int16_t *out)
 {
@@ -118,8 +135,19 @@ static bool dial_sample(int16_t *out)
 		*out = 0;
 		return true;
 	}
-	if (g_dial[g_dial_pos] == '\0')
-		return false;
+	if (g_dial[g_dial_pos] == '\0') {
+		if (g_echo_tone <= 0)
+			return false;
+		/* A burst SHORT relative to the network round trip, so an echo
+		 * returns as a separate blip instead of overlapping the
+		 * hybrid's local sidetone.  250 ms cannot distinguish them. */
+		unsigned period = (unsigned)g_tx_rate;                    /* 1 s */
+		unsigned on     = (unsigned)(g_tx_rate * g_echo_on_ms / 1000.0);
+		unsigned ph = g_echo_n++ % period;
+		double t = (double)g_echo_n / g_tx_rate;
+		*out = (ph < on) ? (int16_t)(g_echo_amp * sin(2*M_PI*g_echo_tone*t)) : 0;
+		return true;
+	}
 	if (g_dial_gap) {
 		*out = 0;
 		if (++g_dial_samples >= g_dial_gap_len) {
@@ -143,7 +171,16 @@ static bool dial_sample(int16_t *out)
 	return true;
 }
 
+static void fill_tx_inner(uint8_t *buf);
+
 static void fill_tx(uint8_t *buf)
+{
+	fill_tx_inner(buf);
+	if (g_tx_file)
+		fwrite(buf, 1, g_tx_block, g_tx_file);
+}
+
+static void fill_tx_inner(uint8_t *buf)
 {
 	memset(buf, 0, g_tx_block);
 	g_tx_blocks++;
@@ -552,6 +589,12 @@ int main(int argc, char **argv)
 		} else if (!strcmp(argv[i], "--dial") && i + 1 < argc) {
 			g_dial = argv[++i];
 			do_feed = true;
+		} else if (!strcmp(argv[i], "--tx-out") && i + 1 < argc) {
+			g_tx_file = fopen(argv[++i], "wb");
+		} else if (!strcmp(argv[i], "--echo-on-ms") && i + 1 < argc) {
+			g_echo_on_ms = atof(argv[++i]);
+		} else if (!strcmp(argv[i], "--echo-tone") && i + 1 < argc) {
+			g_echo_tone = atof(argv[++i]);
 		} else if (!strcmp(argv[i], "--dial-amp") && i + 1 < argc) {
 			g_dial_amp = atof(argv[++i]);
 		} else if (!strcmp(argv[i], "--call-seq")) {
