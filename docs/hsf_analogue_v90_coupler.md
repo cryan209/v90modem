@@ -223,6 +223,48 @@ measurement is now the test's channel: `hsf_measured_response[]` in
 `v90_analogue_rx_test.c`, with TRN1d's converged dispersion falling from 0.033
 on the guess to 0.0013-0.020 on the real thing.
 
+## A sounder of our own, for above 3750 Hz
+
+V.34's probe stops at 3750, and the last 250 Hz below the 4 kHz Nyquist of the
+8 kHz DS0 symbol rate is what decides whether a symbol-rate timing tone exists
+at all -- and how much intersymbol interference the analogue receiver has to
+undo.  Our own transmit is not constrained to V.34's 150 Hz grid, so
+`v90_sounder.c` puts 25 tones on a 50 Hz grid: V.34's own set to 3750 (so a
+sounding overlaps the probe and the two compare directly) plus 3800, 3850,
+3900 and 3950.  The block is 160 samples at 8 kHz, so every tone is an exact
+multiple of the block rate and nothing leaks between bins; V.34's four
+deliberate gaps (900, 1200, 1800, 2400) stay empty as the noise reference.
+
+**Running it needs one call.**  On the end that should transmit -- the digital
+side for the downstream, the HSF side for the upstream:
+
+```bash
+ME_SOUNDER=1 ME_G711_CAPTURE=/tmp/sound ./sip_v90_modem --sip-server ... 
+```
+
+`ME_SOUNDER` replaces that side's transmit with the sounder for the whole call
+(no handshake happens), and `ME_G711_CAPTURE` records the exact codewords it
+sent.  Then, against the coupler's `hsf-rx.raw`:
+
+```bash
+python3 tools/hsf_probe_response.py hsf-rx.raw --sounder --reference /tmp/sound.tx.ulaw
+```
+
+With `--reference` the result is a true two-port response, RX/TX: the transmit
+path's own µ-law quantisation and whatever level the generator chose are in the
+reference rather than in the answer.
+
+The generator is checked in `make test` before it costs a call, because a
+transmit-only signal cannot be verified after the fact -- a rig session that
+comes back with a strange response could not tell whether the line did that or
+the generator did.  The check runs it through the µ-law quantiser it will go
+out through and asserts every tone is there (the weakest sits 37.7 dB over the
+empty bins) and that the peak keeps 10 dB of headroom (Schroeder phases give a
+crest factor of 2.74).  Clipping is the failure that matters: it would put
+energy straight into the empty bins, the floor would read high, and every weak
+tone above 3600 Hz would be dismissed as noise -- which looks exactly like the
+answer the sounder exists to find.
+
 ## The equaliser, and what it now recovers
 
 `v90_analogue_fse.c` is that equaliser: 32 T/2 taps, NLMS, CMA on §8.4.5's
@@ -250,10 +292,8 @@ transmits a constellation the line cannot carry for the rest of the call.
 ## Open
 
 * None of this has a live call behind it.
-* What the path does above 3750 Hz is still unmeasured -- the probe stops
-  there -- and that last 250 Hz is exactly what decides whether a symbol-rate
-  timing tone exists at all.  A sounder of our own (our transmit is not
-  constrained to V.34's grid) would settle it.
+* What the path does above 3750 Hz is still unmeasured.  The sounder to
+  settle it is built and self-checked (below); it needs one rig call.
 * Nothing tracks a sample-rate offset between the two ends.  At T/2 that shows
   up as the tap set walking off its span, not as a phase error.
 * §8.4.4's Sd arrives before TRN1d has trained anything, so the first 48 ms of

@@ -26,6 +26,12 @@ import sys
 TONES = [150, 300, 450, 600, 750, 1050, 1350, 1500, 1650, 1950, 2100,
          2250, 2550, 2700, 2850, 3000, 3150, 3300, 3450, 3600, 3750]
 
+# Our own sounder (v90_sounder.h) is V.34's grid plus the band its probe
+# cannot reach.  V.34's four deliberate gaps stay empty in both, because a
+# sounding with no empty bins cannot tell a weak tone from the floor.
+SOUNDER_TONES = TONES + [3800, 3850, 3900, 3950]
+EMPTY_BINS = [900, 1200, 1800, 2400]
+
 
 # The transmitted phase of each tone, degrees (V.34 11.2.3; the table is in
 # spandsp-master/src/make_v34_probe_signals.c).  Without these the received
@@ -58,6 +64,35 @@ def goertzel(samples, start, n, freq, rate):
     re = s1 - s2*math.cos(2.0*math.pi*freq/rate)
     im = s2*math.sin(2.0*math.pi*freq/rate)
     return math.sqrt(re*re + im*im)*2.0/n
+
+
+def read_ulaw_or_pcm(path):
+    """A G.711 capture or a 16-bit tap, told apart by the file's extension."""
+    if path.endswith('.ulaw') or path.endswith('.alaw'):
+        with open(path, 'rb') as f:
+            data = f.read()
+        alaw = path.endswith('.alaw')
+        return [g711_decode(b, alaw) for b in data]
+    return read_pcm(path)
+
+
+def g711_decode(code, alaw):
+    if alaw:
+        code ^= 0x55
+        seg = (code & 0x70) >> 4
+        mant = code & 0x0F
+        if seg:
+            val = ((mant << 1) + 33) << (seg - 1)
+        else:
+            val = (mant << 1) + 1
+        val <<= 3
+        return val if (code & 0x80) else -val
+    code = ~code & 0xFF
+    seg = (code & 0x70) >> 4
+    mant = code & 0x0F
+    val = (((mant << 1) + 33) << seg) - 33
+    val <<= 2
+    return -val if (code & 0x80) else val
 
 
 def read_pcm(path):
@@ -116,8 +151,21 @@ def main():
     ap.add_argument('--list', action='store_true')
     ap.add_argument('--at', type=float, default=-1.0)
     ap.add_argument('--emit-c', action='store_true')
+    ap.add_argument('--sounder', action='store_true',
+                    help='our own sounder (50 Hz grid to 3950) rather than '
+                         "V.34's probe")
+    ap.add_argument('--reference', default=None,
+                    help='the transmitted stream (ME_G711_CAPTURE .ulaw or a '
+                         'raw 8 kHz s16le tap).  With it the result is a true '
+                         'two-port response, RX/TX, and the transmit path\'s '
+                         'own quantisation is in the reference rather than in '
+                         'the answer.')
+    ap.add_argument('--reference-rate', type=int, default=8000)
     args = ap.parse_args()
 
+    global TONES
+    if args.sounder:
+        TONES = SOUNDER_TONES
     samples = read_pcm(args.path)
     rate = args.rate
     win = int(rate*args.window_ms/1000.0)
@@ -149,31 +197,84 @@ def main():
           % (args.path, (lo + start)/float(rate), score, int(1000*win/rate)))
 
     resp = [(f,) + goertzel_c(region, start, win, f, rate) for f in TONES]
-    mags = [(f, math.hypot(re, im)) for f, re, im in resp]
-    peak = max(m for _, m in mags)
-    if peak <= 0.0:
-        print('silent', file=sys.stderr)
+
+    # The transmitted spectrum.
+    #
+    # With --reference it is MEASURED, from a capture of the codewords that
+    # actually went out, which makes the result a true two-port response: the
+    # transmit path's own quantisation, and any level the generator chose, are
+    # in the reference rather than in the answer.  Without one, the only thing
+    # that can stand in is V.34's own definition -- equal amplitudes and a
+    # known phase per tone -- which is exact for its probe and available for
+    # nothing else.
+    if args.reference:
+        ref = read_ulaw_or_pcm(args.reference)
+        rwin = int(args.reference_rate*args.window_ms/1000.0)
+        rwin -= rwin % int(args.reference_rate/50)
+        rstart = max(0, (len(ref) - rwin)//2)
+        tx = {}
+        for f in TONES:
+            re, im = goertzel_c(ref, rstart, rwin, f, args.reference_rate)
+            tx[f] = (math.hypot(re, im), math.atan2(im, re))
+        print('  transmit measured from %s' % args.reference)
+    elif all(f in TX_PHASE for f in TONES):
+        tx = {f: (1.0, math.pi*TX_PHASE[f]/180.0) for f in TONES}
+    else:
+        print('this signal needs --reference: its transmitted spectrum is not '
+              'defined by a Recommendation', file=sys.stderr)
         return 1
 
-    # A noise reference from frequencies the probe deliberately leaves empty
-    # (900, 1200, 1800, 2400, 3900): anything at those is the line, not the
-    # far end, so a tone within a few dB of them is not a measurement.
-    floor = [goertzel(region, start, win, f, rate)
-             for f in (900, 1200, 1800, 2400, 3900)]
-    floor_db = 20.0*math.log10(max(sum(floor)/len(floor), 1e-9)/peak)
-    print('  empty-bin floor %.1f dB' % floor_db)
-    # Phase, with the transmitted phase removed and the bulk delay fitted out.
-    # The window start is arbitrary, so an overall linear-in-frequency term is
-    # not a property of the channel; what is left after removing it is the
-    # group-delay distortion, which is the half of the response an equaliser
-    # has to undo and the half a magnitude plot cannot show.
-    raw = []
+    mags = []
+    angs = []
     for f, re, im in resp:
-        ang = math.atan2(im, re) - math.pi*TX_PHASE[f]/180.0
-        raw.append((f, ang))
+        tx_m, tx_a = tx[f]
+        if tx_m <= 0.0:
+            continue
+        mags.append((f, math.hypot(re, im)/tx_m))
+        angs.append((f, math.atan2(im, re) - tx_a))
+    peak = max(m for _, m in mags)
+
+    # A noise reference from the frequencies the signal deliberately leaves
+    # empty: anything there is the line or the quantiser, not the far end, so a
+    # tone within a few dB of them is not a measurement.
+    floor = [goertzel(region, start, win, f, rate) for f in EMPTY_BINS]
+    floor_ref = 1.0
+    if args.reference:
+        floor_ref = sum(tx[f][0] for f in TONES)/len(TONES)
+    floor_db = 20.0*math.log10(max(sum(floor)/len(floor), 1e-9)
+                               /(peak*floor_ref))
+    print('  empty-bin floor %.1f dB' % floor_db)
+
+    # Phase, with the transmitted phase already removed above and the bulk
+    # delay fitted out here.  The window start is arbitrary, so an overall
+    # linear-in-frequency term is not a property of the channel; what is left
+    # is the group-delay distortion, which is the half of the response a
+    # magnitude plot cannot show and the half a fractionally-spaced equaliser
+    # exists to undo.
+    # The bulk delay first, then the residual -- not a straight line fit to an
+    # unwrapped sequence.  Unwrapping by "closest to the previous point" only
+    # works while consecutive steps stay inside half a turn, and this grid is
+    # not uniform: it steps 150 Hz over most of the band and 50 Hz at the top,
+    # so one delay makes steps of two different sizes and a sequential unwrap
+    # slips exactly where the interesting tones are.  Estimating the delay from
+    # the evenly spaced part, removing it, and unwrapping what is left avoids
+    # the question.
+    steps = []
+    for a, b in zip(angs, angs[1:]):
+        span = b[0] - a[0]
+        if span != 150:
+            continue
+        d = (b[1] - a[1]) % (2.0*math.pi)
+        if d > math.pi:
+            d -= 2.0*math.pi
+        steps.append(-d/(2.0*math.pi*span))
+    steps.sort()
+    tau = steps[len(steps)//2] if steps else 0.0
+
     unwrapped = []
     prev = 0.0
-    for i, (f, ang) in enumerate(raw):
+    for i, (f, ang) in enumerate(angs):
+        ang += 2.0*math.pi*f*tau
         if i:
             while ang - prev > math.pi:
                 ang -= 2.0*math.pi
@@ -189,12 +290,12 @@ def main():
     den = n*sxx - sx*sx
     slope = (n*sxy - sx*sy)/den if den else 0.0
     inter = (sy - slope*sx)/n
-    print('  bulk delay %.2f ms removed' % (-slope/(2.0*math.pi)*1000.0))
+    print('  bulk delay %.2f ms removed' % ((tau - slope/(2.0*math.pi))*1000.0))
 
     print('  freq     dB    phase')
     phases = []
     for (f, m), (_, ang) in zip(mags, unwrapped):
-        db = 20.0*math.log10(max(m, 1e-9)/peak)
+        db = 20.0*math.log10(max(m, 1e-12)/peak)
         res = ang - (slope*f + inter)
         phases.append((f, db, res))
         bar = '#'*max(0, int(40 + db))

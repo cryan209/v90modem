@@ -46,6 +46,7 @@
 #include "v90_analogue_rx.h"
 #include "v90_analogue_linear.h"
 #include "v90_analogue_fse.h"
+#include "v90_sounder.h"
 #include "v90_dil_presets.h"
 
 static int failures;
@@ -335,6 +336,27 @@ static const struct { int freq; double db; double phase; }
  * everything else are inside it, and modelling any of them again would be
  * counting them twice.  t is in symbols.
  */
+/* One frequency's amplitude over samples[start:start+n]. */
+static double fse_goertzel(const double *samples, int start, int n,
+                           double freq, double rate)
+{
+    double k = 2.0*cos(2.0*M_PI*freq/rate);
+    double s1 = 0.0;
+    double s2 = 0.0;
+    double re;
+    double im;
+
+    for (int i = start; i < start + n; i++) {
+        double s0 = samples[i] + k*s1 - s2;
+
+        s2 = s1;
+        s1 = s0;
+    }
+    re = s1 - s2*cos(2.0*M_PI*freq/rate);
+    im = s2*sin(2.0*M_PI*freq/rate);
+    return sqrt(re*re + im*im)*2.0/n;
+}
+
 static double fse_pulse(double t)
 {
     static double tab[2*FSE_SPAN*FSE_GRID + 1];
@@ -710,6 +732,127 @@ static double fse_multilevel_run(fse_ml_stream_t which, double phi,
     /*endif*/
     free(tx);
     return (scored > 0) ? (double) best/(double) scored : -1.0;
+}
+
+/*
+ * The sounder, checked before it costs a call.
+ *
+ * It is a transmit-only measurement signal, so nothing about it can be
+ * verified after the fact: a rig session that comes back with a strange
+ * response cannot tell whether the line did that or the generator did.  So
+ * check the generator here, through the µ-law quantiser it will actually go
+ * out through, against the two ways it can be wrong -- a tone missing or weak,
+ * and energy landing where the floor is read from.
+ *
+ * The crest factor is checked for the same reason.  Twenty-five cosines all
+ * starting at zero peak together at over five times their RMS; clipping that
+ * peak would put energy straight into the empty bins, so the floor would read
+ * high and every weak tone above 3600 Hz would be dismissed as noise -- a
+ * failure that looks exactly like the answer the sounder exists to find.
+ */
+static void test_sounder(void)
+{
+    int16_t block[V90_SOUNDER_BLOCK];
+    uint8_t codewords[V90_SOUNDER_BLOCK*4];
+    double linear[V90_SOUNDER_BLOCK*4];
+    const int *tones;
+    const int *empties;
+    int ntones = 0;
+    int nempty = 0;
+    int phase = 0;
+    double peak = 0.0;
+    double sum_sq = 0.0;
+    double weakest = 1e30;
+    int weakest_f = 0;
+    double loudest_empty = 0.0;
+    int loudest_empty_f = 0;
+    int n = (int) (sizeof(codewords)/sizeof(codewords[0]));
+
+    printf("channel sounder (v90_sounder.c)\n");
+    tones = v90_sounder_tones(&ntones);
+    empties = v90_sounder_empty_bins(&nempty);
+
+    v90_sounder_block_linear(block);
+    for (int i = 0; i < V90_SOUNDER_BLOCK; i++) {
+        sum_sq += (double) block[i]*block[i];
+        if (fabs((double) block[i]) > peak)
+            peak = fabs((double) block[i]);
+    }
+    {
+        double rms = sqrt(sum_sq/V90_SOUNDER_BLOCK);
+
+        CHECK(rms > 3000.0  &&  rms < 4000.0,
+              "RMS %.0f is not the intended transmit level", rms);
+        /*
+         * What matters is headroom, not the crest factor itself: a clipped
+         * peak puts energy into the empty bins, the floor reads high, and
+         * every weak tone above 3600 Hz is then dismissed as noise -- which
+         * looks exactly like the answer the sounder exists to find.  Schroeder
+         * phases give 2.74 here (they are optimal for a contiguous comb and
+         * this one has four deliberate gaps), so the peak sits at about a
+         * third of full scale.
+         */
+        CHECK(peak < 20000.0,
+              "peak %.0f leaves under 4 dB of headroom", peak);
+        printf("  %d tones, RMS %.0f, peak %.0f, crest factor %.2f\n",
+               ntones, rms, peak, peak/rms);
+    }
+
+    /* Through the quantiser, exactly as it goes out. */
+    v90_sounder_fill(V90_LAW_ULAW, codewords, n, &phase);
+    CHECK(phase == (n % V90_SOUNDER_BLOCK),
+          "the block phase did not advance across the fill");
+    for (int i = 0; i < n; i++)
+        linear[i] = (double) ulaw_to_linear(codewords[i]);
+
+    for (int k = 0; k < ntones; k++) {
+        double m = fse_goertzel(linear, 0, n, tones[k], 8000.0);
+
+        if (m < weakest) {
+            weakest = m;
+            weakest_f = tones[k];
+        }
+    }
+    for (int k = 0; k < nempty; k++) {
+        double m = fse_goertzel(linear, 0, n, empties[k], 8000.0);
+
+        if (m > loudest_empty) {
+            loudest_empty = m;
+            loudest_empty_f = empties[k];
+        }
+    }
+    CHECK(loudest_empty > 0.0  &&  weakest/loudest_empty > 10.0,
+          "weakest tone (%d Hz) is only %.1f dB over the loudest empty bin "
+          "(%d Hz)", weakest_f,
+          20.0*log10(weakest/(loudest_empty > 0.0 ? loudest_empty : 1e-9)),
+          loudest_empty_f);
+    /* For validating the analysis end offline: the same codewords the engine
+     * transmits, so tools/hsf_probe_response.py can be run over a synthetic
+     * channel before it is run over a real one. */
+    {
+        const char *path = getenv("V90_SOUNDER_DUMP");
+
+        if (path != NULL  &&  path[0] != '\0') {
+            FILE *f = fopen(path, "wb");
+
+            if (f != NULL) {
+                uint8_t out[V90_SOUNDER_BLOCK];
+                int p2 = 0;
+
+                for (int i = 0; i < 500; i++) {
+                    v90_sounder_fill(V90_LAW_ULAW, out, V90_SOUNDER_BLOCK, &p2);
+                    fwrite(out, 1, sizeof(out), f);
+                }
+                fclose(f);
+                printf("  wrote %s (10 s of sounder codewords)\n", path);
+            }
+        }
+    }
+    printf("  weakest tone %d Hz, %.1f dB over the empty bins "
+           "(loudest %d Hz)\n",
+           weakest_f,
+           20.0*log10(weakest/(loudest_empty > 0.0 ? loudest_empty : 1e-9)),
+           loudest_empty_f);
 }
 
 /*
@@ -1866,6 +2009,7 @@ int main(int argc, char *argv[])
         test_linear_bearer(&fixtures[i]);
     for (i = 0; i < sizeof(fixtures)/sizeof(fixtures[0]); i++)
         test_driven_by_fixture(&fixtures[i]);
+    test_sounder();
     test_fse();
     test_fse_multilevel();
     test_fse_dil_measurement();

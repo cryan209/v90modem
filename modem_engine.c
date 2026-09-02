@@ -30,6 +30,7 @@
 #include "v90_analogue_phase3.h"
 #include "v90_analogue_linear.h"
 #include "v90_analogue_fse.h"
+#include "v90_sounder.h"
 #include "v90_dil_presets.h"
 #include "p3_demod.h"
 #include "v92_cp_rx.h"
@@ -9817,6 +9818,22 @@ void me_rx_g711(const uint8_t *codewords, int count)
     g_rx_from_g711 = false;
 }
 
+/* Cached: this is read on every transmit frame. */
+static bool me_sounder_active(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *v = getenv("ME_SOUNDER");
+
+        cached = (v != NULL  &&  v[0] != '\0'  &&  v[0] != '0') ? 1 : 0;
+        if (cached)
+            ME_LOG("[ME] ME_SOUNDER set: transmitting the channel sounder "
+                   "instead of a modem signal for this whole call\n");
+    }
+    return cached != 0;
+}
+
 int me_tx_g711(uint8_t *codewords, int count)
 {
     int offset;
@@ -9849,6 +9866,37 @@ int me_tx_g711(uint8_t *codewords, int count)
                    (void *)g_v34, (void *)g_v22bis);
         }
     }
+    /*
+     * ME_SOUNDER=1 replaces this side's transmit with the channel sounder
+     * (v90_sounder.h) for the whole call.  It is a measurement mode, not a
+     * modem: no handshake happens, and whichever end sets it is the end doing
+     * the transmitting, so the same flag sounds the downstream from the
+     * digital side and the upstream from the analogue one.
+     *
+     * Pair it with ME_G711_CAPTURE, which records these exact codewords: the
+     * response is then RX/TX and the transmit path's own µ-law quantisation is
+     * inside the reference rather than inside the answer.
+     */
+    if (me_sounder_active()) {
+        static int phase;
+        static uint64_t logged;
+
+        v90_sounder_fill((g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW,
+                         codewords, count, &phase);
+        logged += (uint64_t) count;
+        if (logged >= 8000) {
+            int n = 0;
+
+            logged = 0;
+            (void) v90_sounder_tones(&n);
+            ME_LOG("[ME] sounder: transmitting %d tones to 3950 Hz\n", n);
+        }
+        /*endif*/
+        if (g_g711_tx_tap)
+            (void) fwrite(codewords, 1, (size_t) count, g_g711_tx_tap);
+        return count;
+    }
+    /*endif*/
     if (me_fax_tx_g711(codewords, count)) {
         pthread_mutex_lock(&g_state_mtx);
         g_g711_tx_octets += (uint64_t)count;
