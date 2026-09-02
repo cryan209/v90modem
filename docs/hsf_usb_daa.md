@@ -272,6 +272,39 @@ the waveform generator, in the sample-register/DMA data element.  Feeding a
 tone into only the first or second apparent word position tests two wire-format
 hypotheses; it does not reproduce an engine channel selection.
 
+### The "DMA record encoder" does not exist as described (2026-09-02)
+
+The entry below hypothesised that the engine fills the shared ring with
+*records* from its DMA/sample-register layer, and that the missing TX operation
+was that record encoder.  Read directly, it is not.
+
+`hsfengine1049_` is the FIFO writer, and `hsfengine1047_(obj, stride, offset)`
+configures it.  With the ring base at `obj->0x1c`, the write index at `0xc`,
+stride at `0x20` and offset at `0x24`, it writes **raw 16-bit samples**:
+
+    stride 2:  ring16[(idx + i) * 2 + offset] = src16[i]
+    stride 3:  the same sample written to THREE consecutive slots
+    stride 1:  a straight copy
+
+No headers, no class byte, no record framing of any kind.  `hsfengine1784_`
+creates both FIFOs and configures **both** with **stride 2, offset 1**.
+
+Two corrections to what is written below.  The claimed packing
+`wire[2i+0] = 0; wire[2i+1] = tx_sample` is wrong in its first half: the
+untouched slot is **left as it was**, never zeroed -- only the offset slot is
+written.  And the record grammar of `hsfengine2244_` belongs to the DMA FIFO
+unit (`dmafifo_c.c`), which is the DMA-based hardware families' path; nothing
+establishes that the USB path routes through it at all, since the cd2 driver
+hands the engine a buffer pointer in the `ctx+0x20` callback and the engine
+writes into it in place.
+
+**None of it can explain the stall, and that is the point worth keeping.**  The
+device accepts 19 blocks and then stops acknowledging OUT forever; its FIFO
+fills once and never empties.  No sample layout, lane choice, frame size or
+feed rate can produce that symptom -- a consumer reading the wrong slot would
+still *consume*.  Format hypotheses have been tested repeatedly against a
+symptom that format cannot cause, this session included.
+
 **Correction after tracing beyond the shared rings:** “no framing” above is
 true only of the USB driver's view.  The driver does not add a header, but the
 engine fills the shared ring with records produced by its DMA/sample-register
