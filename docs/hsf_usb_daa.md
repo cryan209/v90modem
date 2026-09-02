@@ -2359,13 +2359,16 @@ script 4 before closing the USB session.  The late `0x35b7 -> script 8/index 3
 used by the dial-versus-silence grader.
 
 A follow-up to `9898`, whose expected behaviour is ringback, three pips, then
-continuous silence, confirms collection more directly.  With a 750 ms settle
-the capture contains ringback at approximately 3.5--4.8 s and 6.5--7.8 s, then
-changes near 8.5 s to a continuing 400 Hz failure/reorder tone.  A conservative
-retry (1000 ms settle, 200 ms digits, 150 ms gaps, lower amplitude) does the
-same.  The transmitted file decodes exactly as `9 8 9 8`; the expected pips and
-post-answer silence never arrive.  At this point the failure is beyond the HSF
-bulk TX and DTMF path, in the routing or availability of the called service.
+continuous silence, is less conclusive than first reported.  With a 750 ms
+settle the capture contains two cadenced tone intervals, then changes near
+8.5 s to the continuing 400 Hz **New Zealand number-unobtainable tone**.  A
+conservative retry (1000 ms settle, 200 ms digits, 150 ms gaps, lower amplitude)
+does the same.  The samples handed to USB decode exactly as `9 8 9 8`, and dial
+tone is removed, but number-unobtainable does not prove the exchange decoded
+all four digits correctly.  The remaining fault may therefore still be in the
+analogue level/twist presented by the HSF path, or in routing/availability of
+the called service; this capture does not distinguish them.  The expected pips
+and post-answer silence never arrive.
 
 `HSF_DIAL_TONE_MS` and `HSF_DIAL_GAP_MS` expose the two cadence values so this
 collector-margin check remains reproducible without another source edit.
