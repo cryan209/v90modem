@@ -21,13 +21,20 @@ PER_SCRIPT = 4           # MEASURED: the completion payload caps at ~6 bytes,
                          # so 16 reads per script silently returned only 5
 
 
-def read_block(regs, secs=3, tries=3):
+def read_block(regs, secs=3, tries=3, live=False):
     body = f"27{MARK:02x}" + "".join(f"03{r:02x}26" for r in regs) + "2701" + "28" + "36"
     # The completion can land after a short stream window, so retry rather than
     # reporting a timing miss as a failed read.
     for _ in range(tries):
-        r = subprocess.run([PROBE, "--raw", body, "--stream", str(secs)],
-                           capture_output=True, text=True, timeout=90)
+        cmd = [PROBE, "--raw", body, "--stream", str(secs)]
+        if live:
+            # Dump the file while the device is actually streaming: bring the
+            # session up and open the stream first, and send the read script
+            # afterwards.  An idle dump and a streaming one are different
+            # measurements and were being conflated.
+            cmd = [PROBE, "--raw", body, "--raw-post", "--start-codec",
+                   "--stream-open", "--feed", "--stream", str(secs)]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
         o = r.stdout + r.stderr
         if "NOT RESPONDING" in o or "GET_INFROMATION failed" in o:
             return None, False
@@ -53,13 +60,15 @@ def main():
                     help="0b <reg> <val>, with a read-back either side")
     ap.add_argument("--read", metavar="REGS",
                     help="comma-separated registers to read once")
+    ap.add_argument("--live", action="store_true",
+                    help="dump while a session is up and streaming")
     ap.add_argument("--verify", action="store_true",
                     help="read 0x2d and 0x01 separately first as a control")
     a = ap.parse_args()
 
     if a.read:
         rs = [int(x, 0) for x in a.read.split(",")]
-        v, alive = read_block(rs)
+        v, alive = read_block(rs, live=a.live)
         print("  " + " ".join(f"{r:02x}={('%02x' % x) if v and i < len(v) else '??'}"
                               for i, (r, x) in enumerate(zip(rs, (v or b'\xff' * len(rs))))))
         return
@@ -93,7 +102,7 @@ def main():
     r = a.lo
     while r < a.hi:
         blk = list(range(r, min(r + PER_SCRIPT, a.hi)))
-        b, alive = read_block(blk)
+        b, alive = read_block(blk, live=a.live)
         if not alive:
             print(f"wedged reading 0x{blk[0]:02x}..0x{blk[-1]:02x}; replug")
             break

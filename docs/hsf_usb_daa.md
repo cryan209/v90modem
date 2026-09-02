@@ -272,6 +272,50 @@ the waveform generator, in the sample-register/DMA data element.  Feeding a
 tone into only the first or second apparent word position tests two wire-format
 hypotheses; it does not reproduce an engine channel selection.
 
+### The control register file, dumped IDLE and STREAMING (2026-09-02)
+
+`tools/hsf_regdump.py --live` now brings the session up and opens the stream
+before sending the read script (`--raw-post` in the probe), so an idle dump and
+a streaming one are separate measurements rather than the same one twice.  The
+oracle holds in both (`0x2d = 0xc0`).
+
+    idle  00: 05 90 00 ad 40 00 59 02 00 00 00 00 ff 00 ff 00
+          10: 00 00 00 00 00 00 00 00 00 00 00 02 20 20 00 3c
+          20: 00 08 ff 11 80 00 80 00 04 04 08 10 02 c0 40 00
+    live  00: 05 90 00 ad 40 00 d8 00 00 00 00 00 ff 00 ff 00
+          10: 00 00 00 00 00 00 00 00 b4 02 b7 02 a0 a0 44 b8
+          20: 00 08 ff 11 80 00 80 00 04 04 08 10 02 c0 40 00
+
+Everything from 0x20 to 0x60 is identical; **the whole of the streaming state
+is 0x06-0x07 and 0x18-0x1f**:
+
+    0x06/0x07   0x0259 -> 0x00d8
+    0x18/0x19   0x0000 -> 0x02b4     moves between reads (0x02b2..0x02b5)
+    0x1a/0x1b   0x0200 -> 0x02b7     moves between reads (0x02b3..0x02b7)
+    0x1c        0x20   -> 0xa0       static while streaming
+    0x1d        0x20   -> 0xa0       static
+    0x1e        0x00   -> 0x44       static
+    0x1f        0x3c   -> 0xb8       static
+
+`0x1c` and `0x1d` are exactly the registers the shipped scripts write with
+`0b 1c a0` / `0b 1d a0`, and the difference from idle is **bit 7**, so 0xa0 is
+plausibly "channel running" -- set on BOTH, which is notable given only one
+direction works.
+
+The two 16-bit pairs at 0x18 and 0x1a are the only things that move, and both
+do.  **They do not wrap**: sampled repeatedly they sit inside 0x02b2..0x02b7, a
+span of six, where a pointer cycling a buffer sampled at arbitrary instants
+would be spread across its whole range.  So they are not free-running DMA
+pointers over the ring; a small oscillation around a fixed value is more
+consistent with a level, a difference, or a pointer that is being held.
+
+**Not yet interpreted, and the obvious next move is blocked**: writing a
+control register would settle what 0x1c/0x1d and the 0x18/0x1a pair mean, and
+`0b` -- the opcode that looked like a register write -- is already recorded here
+as NOT one (`0b 1f a5` is accepted and leaves the register at 0x98).  So the
+file is readable and not writable by any known opcode, and finding a write
+channel is what this line of attack needs next.
+
 ### The "DMA record encoder" does not exist as described (2026-09-02)
 
 The entry below hypothesised that the engine fills the shared ring with

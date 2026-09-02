@@ -287,6 +287,7 @@ int main(int argc, char **argv)
 	size_t  n_post_patch = 0;
 	uint8_t raw[256];
 	size_t  n_raw = 0;
+	bool    raw_post = false;
 
 	for (int i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--load")) {
@@ -341,6 +342,11 @@ int main(int argc, char **argv)
 				if (*p == ',')
 					p++;
 			}
+		} else if (!strcmp(argv[i], "--raw-post")) {
+			/* Send --raw AFTER the session and stream open, so a register
+			 * read reflects a device that is actually streaming rather
+			 * than an idle one. */
+			raw_post = true;
 		} else if (!strcmp(argv[i], "--patch") && i + 1 < argc) {
 			for (char *p = argv[++i]; *p && n_patch < 8; ) {
 				patch[n_patch++] = (uint8_t)strtoul(p, NULL, 0);
@@ -644,7 +650,7 @@ int main(int argc, char **argv)
 	/* Bracket every script with GET_INFROMATION.  Gotcha 2 in hsf_fxo.c: a
 	 * cached descriptor read proves nothing, and a wedged EP0 makes the next
 	 * request lie about the one before it. */
-	if (n_raw) {
+	if (n_raw && !raw_post) {
 		int r = hsf_fxo_script_load(d, 0xFF01, raw, n_raw);
 		uint8_t after[5];
 		int live = hsf_fxo_get_information(d, after);
@@ -812,6 +818,12 @@ int main(int argc, char **argv)
 		       r == 0 ? "accepted" : "rejected",
 		       live < 0 ? "NOT RESPONDING" : "alive");
 		usleep(50 * 1000);
+	}
+
+	if (n_raw && raw_post) {
+		int r = hsf_fxo_script_load(d, 0xFF01, raw, n_raw);
+		printf("raw script (%zu bytes, after stream open): %s\n", n_raw,
+		       r == 0 ? "accepted" : "REJECTED");
 	}
 
 	if (stream_secs > 0) {
