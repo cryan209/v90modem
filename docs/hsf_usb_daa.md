@@ -375,11 +375,27 @@ prime is not known and should be swept rather than guessed:
     ./hsf_fxo_probe --start-codec --feed --dtmf 5 --stream 5 \
         --post-script 8,12 --post-patch 0x17,0x17
 
-**Untested against hardware.**  The prediction it makes is specific: if this is
-the gate, TX stops being a ~2.4 kB one-shot FIFO fill and starts completing
-continuously, at the same 128-byte granularity, for the whole run.  If TX still
-stops at 2432 bytes with every code in both variants' tables, the gate is not
-in the script layer and the next place to look is the firmware's own consumer.
+The prediction it makes is specific: if this is the gate, TX stops being a
+~2.4 kB one-shot FIFO fill and starts completing continuously, at the same
+128-byte granularity, for the whole run.
+
+**Live, code 0x17 sent after the session: REFUTED.**  `--post-script 8,12
+--post-patch 0x17,0x17` leaves TX at **2432 bytes**, the same figure bare PCM
+reaches, while RX delivers 218942 bytes in five seconds with no error.  Script
+12 is not being ignored -- it completes on the interrupt endpoint (`data=0c01`)
+exactly as 9 and 5 do -- so this is a negative result about the code and the
+ordering, not about whether the script runs.  `tools/hsf_tx_gate_sweep.sh`
+walks the rest of `hsfusbcd2261_`'s table (0x02, 0x01, 0x14, 0x13, 0x12, 0x17)
+in both orderings, with 0x17-after-session as its control; **a run that merely
+completes proves nothing here, because the refuted arm completes.**  If TX
+still stops at 2432 for every one, the gate is not in the script layer and the
+firmware's own consumer is next.
+
+One thing that run corrects in passing: the RX packet size is **not** a fixed
+property of the device.  These notes record continuous **64-byte** RX packets;
+the same probe on the same part now reports 855 packets of **256** bytes in
+five seconds, at 43788 B/s against the earlier 42073 B/s.  Same stream, same
+rate, different aggregation -- so read the byte rate, not the packet length.
 
 There is one more control path in the driver -- `hsfusbcd2188_` CRCs a host
 buffer with CRC-16-CCITT (poly 0x1021) and writes it in 64-byte blocks via
