@@ -272,6 +272,39 @@ the waveform generator, in the sample-register/DMA data element.  Feeding a
 tone into only the first or second apparent word position tests two wire-format
 hypotheses; it does not reproduce an engine channel selection.
 
+### THE DAA NEVER GOES OFF-HOOK -- and the off-hook script lies (2026-09-02)
+
+With a live line and dial tone confirmed present on it, off-hook produces no
+dial tone in the receive stream.  The reason is visible in the register file
+now that it can be read:
+
+    on-hook            01=90 02=00 03=ad 04=40
+    after script 3     01=90 02=00 03=ad 04=40     <-- IDENTICAL
+
+**`0x03` reads `0xad`, and 0xad is the low byte of `0x80AD` =
+`ONHOOK_PHONEOFFLINE_CALLID` in `hsf.cty`'s SMART_RELAYS table** (already
+decoded in `hsf_fxo.h`).  An ON-HOOK relay word.  The off-hook script is
+accepted, completes, reports its `03 01` on the interrupt endpoint -- and
+**changes nothing**.  The firmware map agrees that these are the relay
+registers: `MOV f5h,#adh` sites exist on registers 0x01, 0x02 and 0x03.
+
+So the DAA sits on-hook for every experiment in this document, which is why
+there is no dial tone, no audio in either direction, and -- very plausibly -- no
+transmit: **the entire "TX does not drain" investigation was conducted on a
+modem that never picked up the phone.**
+
+Writing the relay word directly is not sufficient either.  `0b 03 b6`
+(`OFFHOOK_PHONETOLINE`) is accepted and **sticks** (0x03 reads 0xb6 afterwards
+and holds across a session start), but the line is still not seized: no dial
+tone, RMS 1.7 against 2.5.  The high byte does not take -- `0b 02 80` leaves
+0x02 at 0x00 -- so either 0x03 is a shadow rather than the pin drive, or the
+relay needs something beyond these two registers.
+
+**This is where the work should resume**, and it is a far better-localised
+question than the transmit stall: what actually drives the DAA relay, given
+that the script the driver uses for off-hook demonstrably does not touch the
+register holding the relay word.
+
 ### THE RX STREAM IS NOT AUDIO, AND "RX WORKS" WAS NEVER TESTED (2026-09-02)
 
 Every health check in this investigation counts bytes.  None checked that the
