@@ -257,19 +257,30 @@ With `--reference` the result is a true two-port response, RX/TX: the transmit
 path's own µ-law quantisation and whatever level the generator chose are in the
 reference rather than in the answer.
 
-**The silence is specific to the 6001 leg, not to the ATA (2026-09-03).**
-Dialling an invalid extension (9999) from the same port, in the same session,
-delivers a loud continuous tone for the whole call -- AC-RMS 18600, clipping
-22% of samples, for 25 s.  Dialling 6001 delivers an AC-RMS of 3.  So the FXS
-audio path works after digit collection, and the ATA is not muting the port:
-what goes quiet is the call that connects to our own modem.  On that call the
-SIP side is healthy (CONFIRMED, media wired) and our end receives 95280 octets
-of DIGITAL SILENCE from the ATA -- not noise, which is what a codec mismatch
-would give -- so the ATA has a media path up and is putting nothing into it.
-That is a PBX/ATA question about the 6001 leg (a re-INVITE to direct media, or
-the port being held), and it is where to look next; the coupler's own register
-writes are byte-identical to the working session's, so it is not our
-configuration.
+**The ATA receives our audio and does not put it on the line (2026-09-03).**
+With `SIP_LOG_LEVEL=5` the SIP side is unremarkable and rules itself out: one
+INVITE and **no re-INVITE**, PCMU offered and answered, `a=sendrecv` both ways,
+peer media at 192.168.88.122:17950 and ours at 10.69.220.8:4000 over the
+tunnel.  The end-of-call statistics settle it -- **TX 600 packets, 96.0 KB, and
+the far end's own RTCP reports 0.7% loss on that stream**, which it can only do
+for a stream it is receiving.  So our audio arrives at the ATA, is the codec
+both ends agreed, and the line still carries an AC-RMS of 3.  The ATA does not
+even play local ringback into the line during the six seconds it holds our
+180 Ringing.
+
+Two inferences from the round before this one were wrong and are withdrawn.
+"Our end receives digital silence from the ATA, so the ATA is putting nothing
+into its media path" -- the coupler feeds *silence* into the line by design, so
+the ATA relaying silence is correct behaviour and not a symptom.  And "dialling
+9999 proves the FXS audio path works after digit collection" proves less than
+it looked: an invalid number is very likely rejected by the ATA itself, so its
+reorder tone is generated locally and never travels over RTP -- it shows tone
+INJECTION works, not that received RTP reaches the line, which is the thing in
+question.
+
+What remains is the ATA at 192.168.88.122: it accepts the call, receives our
+RTP, and bridges none of it to the FXS port.  That needs its own logs or
+configuration, and is outside what this end can see.
 
 **The rig's receive path is saturating (2026-09-03).**  Off-hook and not
 dialling, the HSF hears dial tone -- 400 Hz, steady for 35 s, so the line and
