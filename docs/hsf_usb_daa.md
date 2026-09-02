@@ -379,6 +379,30 @@ The prediction it makes is specific: if this is the gate, TX stops being a
 ~2.4 kB one-shot FIFO fill and starts completing continuously, at the same
 128-byte granularity, for the whole run.
 
+### 2432 is not a constant of the device: the FIFO is 2496-2527 bytes
+
+The transmit stall was described for a long time by the byte count at which it
+happens, which invited the wrong question.  Swept over the TX block size on a
+healthy part (three health runs in front of it, RX ~169500 in every arm), the
+**total** accepted holds while the block COUNT scales inversely -- 32 B x 78,
+64 x 39, 128 x 19, 192 x 13, 256 x 9, i.e. 2496, 2496, 2432, 2496 and 2304
+bytes.  That is a byte capacity, not a transfer or packet limit, and each arm
+bounds it: intersecting all five gives
+
+    2496 <= device OUT FIFO <= 2527 bytes
+
+which is 624-632 four-byte frames, or **58.5-59.2 ms** at the ~10.667 kHz
+device clock -- a sensible audio buffer depth -- and note that 2.5 KiB minus one
+64-byte USB packet is exactly 2496.  So **2432 is simply the largest multiple of
+a 128-byte block that fits in that FIFO**, and quoting it as the signature was
+quoting our own block size.  The FIFO fills once and never drains.
+
+Correction to an earlier claim in these notes: "on a healthy part TX is 2432
+exactly, every time" was overstated.  Mid-sequence runs at a 128-byte block are
+consistent, but the FIRST run after a firmware load is not -- 2816, 2688, 1408
+and 1408 have all been seen -- and that variation is unexplained.  Use
+mid-sequence runs when the number matters.
+
 ### The host side is now fully bounded, and the stall is device-side
 
 Following the driver's pump rather than sampling it settles how TX is meant to

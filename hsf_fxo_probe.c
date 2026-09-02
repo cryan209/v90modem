@@ -53,11 +53,12 @@ static int           g_tx_slot = -1;
 static unsigned      g_tx_prime_blocks;
 static unsigned      g_tx_blocks;
 static bool          g_tx_pace_rx = true;	/* credit TX from RX, as the driver does */
+static size_t        g_tx_block = 128;	/* hsfusbcd2167_ sets ctx+0x876 = 0x80 */
 static size_t        g_rx_credit;
 
-static void fill_tx(uint8_t buf[128])
+static void fill_tx(uint8_t *buf)
 {
-	memset(buf, 0, 128);
+	memset(buf, 0, g_tx_block);
 	g_tx_blocks++;
 	if (g_tx_blocks <= g_tx_prime_blocks)
 		return;
@@ -67,7 +68,7 @@ static void fill_tx(uint8_t buf[128])
 	 * both candidate 16-bit slots so either possible audio lane carries the
 	 * digit without putting two different time instants into one frame. */
 	int16_t *s = (int16_t *)buf;
-	for (size_t i = 0; i < 32; i++) {
+	for (size_t i = 0; i < g_tx_block / 4; i++) {
 		int16_t v = (int16_t)(3500.0 * (sin(g_dtmf_phase_lo) +
 						 sin(g_dtmf_phase_hi)));
 		if (g_tx_slot < 0 || g_tx_slot == 0)
@@ -98,12 +99,12 @@ static void fill_tx(uint8_t buf[128])
  */
 static void tx_pump(struct hsf_dev *d)
 {
-	while (g_rx_credit >= 128) {
-		uint8_t next[128];
+	while (g_rx_credit >= g_tx_block) {
+		uint8_t next[256];
 		fill_tx(next);
-		if (hsf_fxo_tx_submit(d, next, sizeof next) < 0)
+		if (hsf_fxo_tx_submit(d, next, g_tx_block) < 0)
 			break;
-		g_rx_credit -= 128;
+		g_rx_credit -= g_tx_block;
 	}
 }
 
@@ -119,9 +120,9 @@ static void on_tx_done(size_t len, void *user)
 		tx_pump(d);
 		return;
 	}
-	uint8_t next[128];
+	uint8_t next[256];
 	fill_tx(next);
-	(void)hsf_fxo_tx_submit(d, next, sizeof next);
+	(void)hsf_fxo_tx_submit(d, next, g_tx_block);
 }
 
 static void on_rx(const uint8_t *data, size_t len, void *user)
@@ -231,6 +232,7 @@ int main(int argc, char **argv)
 	unsigned reset_value = 0, reset_index = 0;
 	int  reset_rt = -1;		/* -1 sweeps all four framings */
 	bool end_session = true;
+	bool session_ended = false;
 	char dtmf = '\0';
 	uint8_t patch[8];
 	size_t  n_patch = 0;
@@ -302,6 +304,10 @@ int main(int argc, char **argv)
 				if (*p == ',')
 					p++;
 			}
+		} else if (!strcmp(argv[i], "--tx-block") && i + 1 < argc) {
+			g_tx_block = (size_t)strtoul(argv[++i], NULL, 0);
+			if (g_tx_block < 1 || g_tx_block > 256)
+				g_tx_block = 128;
 		} else if (!strcmp(argv[i], "--tx-free-run")) {
 			/* The old behaviour: refill from TX completions alone. */
 			g_tx_pace_rx = false;
@@ -563,10 +569,10 @@ int main(int argc, char **argv)
 	 * already queued.  A post-completion-only prime was tested live and
 	 * returned just 1598 RX bytes before the pipe stopped. */
 	if (do_feed && stream_secs > 0) {
-		uint8_t first[128];
+		uint8_t first[256];
 		for (int i = 0; i < 4; i++) {
 			fill_tx(first);
-			if (hsf_fxo_tx_submit(d, first, sizeof first) < 0)
+			if (hsf_fxo_tx_submit(d, first, g_tx_block) < 0)
 				break;
 		}
 	}
@@ -661,6 +667,11 @@ int main(int argc, char **argv)
 		 * posted and the script's own completion code can be seen; the
 		 * host-side teardown is ours and the device knows nothing about it.
 		 */
+		/* BEFORE the teardown, with the notification ring still posted.
+		 * Sending it after hsf_fxo_stop() was tried and the part degraded
+		 * on the very next run exactly as if it had never been sent, so
+		 * the ordering is load-bearing and not merely convenient for
+		 * observing the completion. */
 		if (end_session) {
 			unsigned before6 = script_count(HSF_SCRIPT_SESSION_END);
 			int r = hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_END, NULL, 0);
@@ -668,6 +679,7 @@ int main(int argc, char **argv)
 				r = wait_script(HSF_SCRIPT_SESSION_END, before6, 2000);
 			printf("session end (script 6): %s\n",
 			       r == 0 ? "completed" : "no completion within 2s");
+			session_ended = true;
 		}
 
 		hsf_fxo_stop(d);
@@ -723,6 +735,28 @@ int main(int argc, char **argv)
 		} else {
 			printf("no samples received\n");
 		}
+	}
+
+	/*
+	 * Script 6 is hsfusbcd2195_/hsfusbcd2201_'s session end, and a session
+	 * that is opened and abandoned leaves the part producing no audio at all
+	 * on every later run until it is replugged and reloaded -- while EP0,
+	 * the scripts and their notifications all still look healthy.
+	 *
+	 * It therefore runs for ANY run that started a session, not just a
+	 * streaming one.  It used to sit inside the streaming block, so
+	 * `--start-codec` without `--stream` -- which is how you take a hook off
+	 * or put it back -- silently killed the device it was tidying up.
+	 */
+	if (do_start && end_session && !session_ended) {
+		/* No completion wait: by here the notification ring is down (torn
+		 * down with the stream, or never started on a non-streaming run),
+		 * so there is nothing to observe it on.  That it completes was
+		 * confirmed once with the ring still posted; what matters per run
+		 * is that it is SENT. */
+		int r = hsf_fxo_script_run(d, HSF_SCRIPT_SESSION_END, NULL, 0);
+		printf("session end (script 6): %s\n",
+		       r == 0 ? "sent" : "rejected");
 	}
 
 	if (g_rx_file) {
