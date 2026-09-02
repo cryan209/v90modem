@@ -272,6 +272,44 @@ the waveform generator, in the sample-register/DMA data element.  Feeding a
 tone into only the first or second apparent word position tests two wire-format
 hypotheses; it does not reproduce an engine channel selection.
 
+### The sample rate is ~21240 Hz mono 16-bit, and TX still reaches nothing
+
+**Rate.**  The receive stream is a plain signed-16 LE stream at **~21240 Hz**,
+from the measured byte rate (42480 B/s).  That is exactly **twice** the
+"roughly 10.6667 kHz" in these notes, which had the clock right and the slot
+count wrong -- 10666.67 x 4-byte frames and 21333 x 2-byte samples give the same
+byte rate, so the error was invisible.  It is high for a modem codec, and it
+was checked rather than assumed: adjacent-sample correlation is **0.50**, so
+the stream is NOT duplicated samples or a doubled mono channel (either would
+read ~1.0), and 400 Hz lands on bin 311 of 16384 only at ~21.1 kHz.
+
+**A pacing error of ours, now fixed.**  `hsfusbcd2212_` hands the engine
+`64 * (rx_bytes / 128)`.  A 128-byte unit is **64 samples**, so that quantity
+is a SAMPLE count, not a byte count, and transmit owes the same number of
+samples -- i.e. the same number of BYTES.  An earlier entry here read it as
+bytes and fed transmit at half rate; it is 1:1.
+
+**With the rate and the pacing both right, transmit still reaches nothing.**
+Off-hook, feeding DTMF 5 generated at 21240 Hz: tx stops at 2432 as always, and
+in the receive capture the dial tone is **undisturbed at 0.081** with 697 Hz at
+0.005 and 1336 Hz at 0.009 -- the noise floor.  So sample rate and frame format
+were never the cause, which follows from the FIFO never draining: a consumer
+reading at the wrong rate would still consume.
+
+**One firmware lead ruled out.**  The codec-start routine at 0x03d5 ends by
+clearing bit 3 of register 0x21 (`ANL f5h,#f7h`) and setting both channels to
+0xa0 (`0x1d`, then `0x1c`).  Live, `0x21` reads **0x08** -- bit 3 SET -- in both
+idle and streaming dumps, and it also leaves `0x1e = 0x00`/`0x1f = 0xff` where
+live reads 0x44/0xb8.  That looked like a start path that never ran.  It is
+not: clearing bit 3 during a live stream **kills receive** (2046 bytes against
+169856), so bit 3 is required and 0x03d5 is not the live path.
+
+**Where TX stands.**  The remaining structure worth pulling is in that same
+routine: it calls mask-ROM primitives with a channel id in R7 -- `c701(3)`,
+`c6fb(2)`, `c70d(2)`, `c713(3)` -- so there are **two channels, 2 and 3**, with
+separate start calls.  Receive works and transmit does not, both channel
+registers read 0xa0, and the per-channel start sequence lives in the mask ROM.
+
 ### WITHDRAWN: both entries below are WRONG.  RX works, off-hook works.
 
 The two entries that follow -- "the RX stream is not audio" and "the DAA never

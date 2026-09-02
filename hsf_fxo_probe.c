@@ -98,8 +98,8 @@ static void fill_tx(uint8_t *buf)
 			if (g_tx_slot < 0 || g_tx_slot == 1)
 				s[2*i + 1] = v;
 		}
-		g_dtmf_phase_lo += 2.0 * M_PI * g_dtmf_freq_lo / 10666.666667;
-		g_dtmf_phase_hi += 2.0 * M_PI * g_dtmf_freq_hi / 10666.666667;
+		g_dtmf_phase_lo += 2.0 * M_PI * g_dtmf_freq_lo / 21240.0;
+		g_dtmf_phase_hi += 2.0 * M_PI * g_dtmf_freq_hi / 21240.0;
 		if (g_dtmf_phase_lo >= 2.0 * M_PI) g_dtmf_phase_lo -= 2.0 * M_PI;
 		if (g_dtmf_phase_hi >= 2.0 * M_PI) g_dtmf_phase_hi -= 2.0 * M_PI;
 	}
@@ -166,7 +166,12 @@ static void on_rx(const uint8_t *data, size_t len, void *user)
 		g_first_len += n;
 	}
 	if (g_feed_tx && g_tx_pace_rx) {
-		g_rx_credit += g_tx_mono ? len / 2 : len;
+		/* hsfusbcd2212_ hands the engine 64 * (rx_bytes / 128).  A 128-byte
+		 * unit is 64 samples, so that quantity is a SAMPLE count, not a
+		 * byte count -- and the transmit side owes the same number of
+		 * samples, i.e. the SAME number of bytes.  Reading it as bytes (an
+		 * earlier change here) fed transmit at half rate. */
+		g_rx_credit += len;
 		tx_pump(user);
 	}
 }
