@@ -2372,3 +2372,13 @@ and post-answer silence never arrive.
 
 `HSF_DIAL_TONE_MS` and `HSF_DIAL_GAP_MS` expose the two cadence values so this
 collector-margin check remains reproducible without another source edit.
+
+The same conservative cadence reaches the `9099` echo service.  After answer,
+50 ms bursts of 1000 Hz transmitted once per second return as an inverted copy
+at **510 samples / 31.875 ms**, with correlation `-0.980699`.  Least-squares
+gain over 14,000 active samples is `-1.138` (**+1.12 dB** magnitude); residual
+against that fixed-delay copy is 14.0 dB below the echo.  The returned echo
+peaks at 11158 with no clipping.  USB carried 1,281,792 bytes TX and 1,280,832
+bytes RX over 40 seconds with zero transfer errors or refused submissions.
+This is the first end-to-end proof through USB TX, the analogue line, the
+called service, and USB RX, rather than an inference from dial-tone removal.
