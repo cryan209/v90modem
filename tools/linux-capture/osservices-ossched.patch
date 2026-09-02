@@ -1,0 +1,62 @@
+--- modules/osservices.c.orig	2026-09-02 17:12:27
++++ modules/osservices.c	2026-09-02 17:12:27
+@@ -495,11 +495,33 @@
+     struct kwork_data *w = container_of(work, struct kwork_data, work);
+     w->func(w->data);
+ }
++
++/*
++ * OSSCHED is 8*sizeof(void*) = 64 bytes on x86_64 and the blob embeds it in its
++ * own structures, so it CANNOT be enlarged -- which is exactly what the
++ * sizeof() guard further down this file is protecting.  On 3.13 a
++ * struct kthread_work plus the two function-pointer fields is 72 bytes, so the
++ * >=3.8 path does not fit and the module refuses to load with
++ * "OSSCHED too small (64 < 72)".
++ *
++ * Store a POINTER to a separately allocated kwork_data instead.  The storage
++ * the blob owns then holds 8 bytes, well inside 64, and nothing about its
++ * layout changes.  There is no matching teardown hook in this API, so the
++ * allocation is not freed; that is acceptable for a driver instance that lives
++ * as long as the module.
++ */
++struct kwork_box { struct kwork_data *w; };
+ 
+ __shimcall__
+ void OsThreadScheduleInit(HOSSCHED hWorkStorage, __kernelcall__ void (*func)(void *), void * data)
+ {
+-	struct kwork_data *w = (struct kwork_data *)hWorkStorage;
++	struct kwork_box *b = (struct kwork_box *)hWorkStorage;
++	struct kwork_data *w = kzalloc(sizeof(*w), GFP_KERNEL);
++	b->w = w;
++	if(!w) {
++		printk(KERN_ERR "%s: kwork_data allocation failed\n", __FUNCTION__);
++		return;
++	}
+     init_kthread_work(&w->work, unwrap_kwork);
+     w->func = func;
+     w->data = data;
+@@ -509,8 +531,12 @@
+ int OsThreadSchedule(POSTHRD osthrd, HOSSCHED hWorkStorage)
+ {
+ 	bool ret;
+-	struct kwork_data *w = (struct kwork_data *)hWorkStorage;
++	struct kwork_box *b = (struct kwork_box *)hWorkStorage;
++	struct kwork_data *w = b->w;
+ 
++	if(!w) {
++		return 0;
++	}
+ 	if(!osthrd || !IS_ERR(osthrd->kworker_task)) {
+ 		printk(KERN_DEBUG "%s: no thread %p\n", __FUNCTION__, osthrd);
+ 		return 0;
+@@ -1421,8 +1447,8 @@
+ #endif
+ 
+ #if ( LINUX_VERSION_CODE >= KERNEL_VERSION(3,8,0) )
+-    if(sizeof(OSSCHED) <= sizeof(struct kwork_data)) {
+-        OsErrorPrintf("OSSCHED too small (%d < %d)\n", sizeof(OSSCHED), sizeof(struct kwork_data));
++    if(sizeof(OSSCHED) <= sizeof(struct kwork_box)) {
++        OsErrorPrintf("OSSCHED too small (%d < %d)\n", sizeof(OSSCHED), sizeof(struct kwork_box));
+ #else
+     if(sizeof(OSSCHED) <= sizeof(struct tq_struct)) {
+         OsErrorPrintf("OSSCHED too small (%d < %d)\n", sizeof(OSSCHED), sizeof(struct tq_struct));
