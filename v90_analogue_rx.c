@@ -8,6 +8,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include <spandsp.h>
 
@@ -124,15 +125,59 @@ struct v90_analogue_rx_s {
  * so match the level on those slots and the whole codeword everywhere else.
  * Same rule the offline scanner reached (vpcm_decode.c, v90_sd_slot_match).
  */
+/* §8.4.4's slots compared in LEVEL rather than by codeword; see
+ * zero_slot_fraction in the config.  Returns false when no tolerance is
+ * configured, so the caller keeps its exact comparison. */
+static bool level_tolerant(const v90_analogue_rx_t *s)
+{
+    return s->cfg.zero_slot_fraction > 0.0;
+}
+
+static double ucode_level(const v90_analogue_rx_t *s, int ucode)
+{
+    uint8_t c = v90_codeword_compose(s->cfg.law, ucode, 1);
+    int lin = (s->cfg.law == V90_LAW_ALAW) ? alaw_to_linear(c)
+                                           : ulaw_to_linear(c);
+    return fabs((double) lin);
+}
+
+static bool level_is_zero_slot(const v90_analogue_rx_t *s, int ucode, int w)
+{
+    if (w <= 0)
+        return ucode == 0;
+    return ucode_level(s, ucode)
+           <= s->cfg.zero_slot_fraction*ucode_level(s, w);
+}
+
+static bool level_is_w_slot(const v90_analogue_rx_t *s, int ucode, int w)
+{
+    double lw, lu, tol;
+
+    if (w <= 0)
+        return false;
+    lw = ucode_level(s, w);
+    lu = ucode_level(s, ucode);
+    tol = (s->cfg.w_slot_tolerance > 0.0) ? s->cfg.w_slot_tolerance : 0.35;
+    return fabs(lu - lw) <= tol*lw;
+}
+
 static bool slot_match(const v90_analogue_rx_t *s, uint8_t got, uint8_t want)
 {
     int got_ucode;
     int want_ucode;
+    int got_sign;
+    int want_sign;
 
-    v90_codeword_decompose(s->cfg.law, want, &want_ucode, NULL);
+    v90_codeword_decompose(s->cfg.law, want, &want_ucode, &want_sign);
+    v90_codeword_decompose(s->cfg.law, got, &got_ucode, &got_sign);
+    if (level_tolerant(s)) {
+        if (want_ucode == 0)
+            return level_is_zero_slot(s, got_ucode, s->w_ucode);
+        return got_sign == want_sign
+               &&  level_is_w_slot(s, got_ucode, want_ucode);
+    }
     if (want_ucode != 0)
         return got == want;
-    v90_codeword_decompose(s->cfg.law, got, &got_ucode, NULL);
     return got_ucode == 0;
 }
 
@@ -167,15 +212,22 @@ static bool sd_hunt_slot(v90_analogue_rx_t *s, int h, int slot, uint8_t c)
     ucode = codeword_ucode(s, c, &sign);
     /* Slots 1 and 4 are Ucode 0, which is one level at the far D/A whatever
      * the sign bit says -- the same rule slot_match() applies. */
-    if (slot == 1  ||  slot == 4)
+    if (slot == 1  ||  slot == 4) {
+        if (level_tolerant(s))
+            return level_is_zero_slot(s, ucode, s->sd_w[h]);
         return ucode == 0;
+    }
     if (s->sd_w[h] == 0) {
         if (ucode == 0)
             return false;
         s->sd_w[h] = ucode;
     }
-    if (ucode != s->sd_w[h])
+    if (level_tolerant(s)) {
+        if (!level_is_w_slot(s, ucode, s->sd_w[h]))
+            return false;
+    } else if (ucode != s->sd_w[h]) {
         return false;
+    }
     return sign == ((slot == 0  ||  slot == 2)  ?  1  :  0);
 }
 

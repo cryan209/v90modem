@@ -35,6 +35,15 @@ typedef struct {
     v90_dil_desc_t dil;         /* the descriptor to carry in Ja; n == 0 = none */
     bool      scr_during_dil;   /* §9.3.2.9: SCR rather than silence */
     double    dil_coverage;     /* §9.3.2.10 stopping rule; 0 = default */
+    /*
+     * Compare §8.4.4's slots in level rather than by codeword.  0 keeps the
+     * exact comparison, which is what the digital bearer wants; a two-wire
+     * analogue line needs a fraction, because re-slicing levels puts the zero
+     * slot several per cent above zero and Ucode 0 is the bottom of a
+     * logarithmic ladder.  See v90_analogue_rx.h.
+     */
+    double    zero_slot_fraction;
+    double    w_slot_tolerance;
     /* INFO0d bits 33:37, in dBm0, for §8.5.2/Table 15.  Zero means the
      * capability was unavailable (the offline-test/unbounded case). */
     double    digital_max_tx_dbm0;

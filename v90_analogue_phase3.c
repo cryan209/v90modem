@@ -91,6 +91,8 @@ v90_analogue_phase3_t *v90_analogue_phase3_init(const v90_analogue_phase3_config
     rxc.u_info = cfg->u_info;
     rxc.dil = cfg->dil;
     rxc.dil_coverage = cfg->dil_coverage;
+    rxc.zero_slot_fraction = cfg->zero_slot_fraction;
+    rxc.w_slot_tolerance = cfg->w_slot_tolerance;
 
     s->law = cfg->law;
     s->u_info = cfg->u_info;

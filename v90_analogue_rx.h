@@ -78,6 +78,22 @@ typedef struct {
      * measurement path is built for a partial pass.  0 uses the default.
      */
     double dil_coverage;
+    /*
+     * Fraction of W below which a codeword counts as §8.4.4's zero slot, and
+     * the fractional tolerance on the W slots themselves -- both in LEVEL, not
+     * in Ucode.  0 keeps the exact-codeword comparison, which is right on the
+     * digital bearer where the RTP payload IS the DS0 and every codeword is
+     * the one the far end sent.
+     *
+     * On a two-wire analogue line nothing hands us codewords, only the levels
+     * they produced, and re-slicing those gives a zero slot at a few per cent
+     * of W -- measured on artifacts/hsf-v90/call-062754Z, 9.6% of W with a
+     * perfect sign structure over 20 repetitions, which is Sd beyond doubt and
+     * which "ucode == 0" rejects every time, since Ucode 0 is the very bottom
+     * of a logarithmic ladder and 9.6% of W is Ucode 64.
+     */
+    double zero_slot_fraction;
+    double w_slot_tolerance;
 } v90_analogue_rx_config_t;
 
 v90_analogue_rx_t *v90_analogue_rx_init(const v90_analogue_rx_config_t *cfg);

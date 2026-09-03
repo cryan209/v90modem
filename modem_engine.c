@@ -1923,6 +1923,16 @@ static uint64_t g_v90a_data_adp_window = 0;
 static int      g_v90a_data_adp_window_bits = 0;
 static int      g_v90a_data_adp_count = 0;
 static int      g_v90a_u_info = 78;
+/*
+ * Set the moment a caller uses the 16 kHz path at all, as opposed to
+ * g_v90a_16k, which is set only once the Sd fit has succeeded.  The
+ * difference is the whole of Sd: until the fit, the 8 kHz slicer below was
+ * feeding the SAME receiver from the raw, unequalised stream with no ladder
+ * reference, so every codeword the Sd hunt saw came from there -- which is
+ * why three successive changes to the equalised path produced byte-identical
+ * output.  ME_V90A_8K_FEED=1 restores the old behaviour.
+ */
+static bool     g_v90a_16k_path = false;
 static v90_dil_desc_t g_v90a_dil;
 static bool     g_v90a_dil_valid = false;
 
@@ -6924,6 +6934,15 @@ void me_rx_audio(const int16_t *amp, int len)
      * digital bearer runs.  Skipped when these samples are me_rx_g711()'s own
      * linear copy, where the real codewords have already been fed.
      */
+    {
+        static int allow = -1;
+        if (allow < 0) {
+            const char *v = getenv("ME_V90A_8K_FEED");
+            allow = (v && *v && *v != '0') ? 1 : 0;
+        }
+        if (g_v90a_16k_path && !allow)
+            goto skip_8k_codewords;
+    }
     if (!g_rx_from_g711 && !g_v90a_16k && g_v90a_started && g_v90a && g_v90a_linear
         && (state == ME_TRAINING || state == ME_DATA)) {
         int offset = 0;
@@ -6957,6 +6976,7 @@ void me_rx_audio(const int16_t *amp, int len)
             offset += chunk;
         }
     }
+skip_8k_codewords:
 
     /* Check for phase timeouts */
     if (g_phase_start_ms > 0) {
@@ -8244,6 +8264,22 @@ static void prepare_v90_analogue_phase3_locked(void)
     if (g_v90a_dil_valid)
         cfg.dil = g_v90a_dil;
 
+    /*
+     * This role is fed by a two-wire analogue line, not by a DS0, so §8.4.4's
+     * slots have to be recognised by level.  Measured on the equalised stream
+     * of artifacts/hsf-v90/call-062754Z: the zero slots sit at 9.6% of W over
+     * 20 clean repetitions with a perfect sign structure, and their Ucode
+     * median is 64 -- so "ucode == 0" rejects a textbook Sd every time.  A
+     * quarter of W separates the two populations with a wide margin either
+     * side.  ME_V90A_SLOT_LEVELS=0 restores the exact comparison.
+     */
+    {
+        const char *v = getenv("ME_V90A_SLOT_LEVELS");
+        if (!(v && *v == '0')) {
+            cfg.zero_slot_fraction = 0.25;
+            cfg.w_slot_tolerance = 0.35;
+        }
+    }
     g_v90a = v90_analogue_phase3_init(&cfg);
     if (!g_v90a) {
         ME_LOG("[ME] V.90 analogue: Phase 3 failed to start; the call cannot continue\n");
@@ -9681,6 +9717,7 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
     if (amp == NULL  ||  len <= 0)
         return;
     pthread_mutex_lock(&g_state_mtx);
+    g_v90a_16k_path = true;
     if (!g_v90a_started  ||  g_v90a == NULL
         ||  (g_state != ME_TRAINING  &&  g_state != ME_DATA)) {
         pthread_mutex_unlock(&g_state_mtx);
@@ -9726,6 +9763,22 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
                                 h, &score, &level)) {
                 v90a_fse_set_taps(g_v90a_fse, h, taps, parity);
                 g_v90a_sd_fitted = true;
+                /*
+                 * The scale for the Sd era, in the fit's own units: fit_one()
+                 * fits to SD_REF, which normalises W to 1, so an FSE output
+                 * modulus of 1.0 IS Ucode W = 16 + U_INFO until CMA re-pins it
+                 * to TRN1d.  v90a_linear_set_reference() takes the magnitude
+                 * its input carries for that Ucode, and its input is
+                 * sym*V90A_FSE_SCALE.  Without this the requantiser has no
+                 * reference at all during Sd and the window lands on Ucodes
+                 * 0-5, where the ladder's steps are coarser than the noise.
+                 */
+                if (g_v90a_linear == NULL)
+                    g_v90a_linear = v90a_linear_init((g_law == ME_LAW_ALAW)
+                                                     ? V90_LAW_ALAW
+                                                     : V90_LAW_ULAW);
+                v90a_linear_set_reference(g_v90a_linear, 16 + g_v90a_u_info,
+                                          V90A_FSE_SCALE);
                 ME_LOG("[ME] V.90 analogue: Sd fit accepted (held-out score "
                        "%.3f, T/2 parity %d, level %.3f); equaliser acquired "
                        "on §8.4.4's own sequence\n", score, parity, level);
@@ -9766,7 +9819,20 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
     if (!g_v90a_ladder_set) {
         const v90_analogue_rx_t *rx = v90_analogue_phase3_rx_state(g_v90a);
         int trn1d = (rx != NULL) ? v90_analogue_rx_trn1d_ucode(rx) : 0;
+        /*
+         * Only once TRN1d has actually been REACHED.  sd_set_w() seeds
+         * trn1d_ucode from the U_INFO we announced at init -- 76 before a
+         * single sample arrives -- so this used to fire immediately and
+         * declare "modulus 1.0 is Ucode 76" while the signal on the line was
+         * still Sd, whose fit normalises W = 16 + U_INFO to 1.  One chord out,
+         * for the whole of the window the Sd hunt has to match in.  The real
+         * value is taken off the wire at V90A_RX_TRN1D (v90_analogue_rx.c),
+         * which is exactly when this is allowed to run.
+         */
+        int stage = v90_analogue_phase3_rx_stage(g_v90a);
 
+        if (stage < V90A_RX_TRN1D)
+            trn1d = 0;
         if (trn1d > 0) {
             uint8_t one = (uint8_t) trn1d;
 
