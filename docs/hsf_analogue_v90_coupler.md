@@ -814,3 +814,49 @@ at 3.7 s), so the measurement grades the knob's direction and not its worth.
 It needs a live A/B.  CI is in any case addressed to the network before the
 answer, and a caller that starts V.8 *because* it has already heard ANSam has
 nothing to announce with it.
+
+### ME_V8_NO_CI live A/B: no benefit, and my model of the delay was wrong
+
+`tools/soak/hsf_v8_noci_ab.sh`, three repeats a side, arms **alternated**, one
+binary, the server restarted per call so each gets its own G.711 taps
+(`artifacts/noci-ab-135307Z`).  Scored with `tools/noci_ab_summary.py`, which
+skips a run whose `coupler.log` has not reached its terminal summary -- a run's
+directory exists from the moment it starts, and reading it early reports a call
+that has not happened yet as a failure.
+
+| run | arm | V.8 | at | answerer CM-wait timeouts |
+|---|---|---|---|---|
+| noci-r1 | no CI | successful | 6316 ms | 0 |
+| noci-r2 | no CI | **failed** | 9970 ms | 1 |
+| noci-r3 | no CI | successful | 5408 ms | 0 |
+| ci-r1 | CI | *no call placed* | - | - |
+| ci-r2 | CI | successful | 5416 ms | 0 |
+| ci-r3 | CI | successful | 5432 ms | 0 |
+
+**no CI 2/3, CI 2/2.**  The knob does not help, and the arm without it did
+marginally better.  (`ci-r1`'s dial never reached the PBX -- the server logs no
+incoming call -- so it is a rig miss, not an arm result, and the tool says so
+rather than counting it as a failure.)
+
+**The control says the knob did what it claims**: counted on the answerer's own
+receive tap with the V.21 framer, the no-CI arm carries **0** bursts containing
+`00 C1` and the CI arm carries 1 and 3.
+
+**And that measurement refutes the model behind it.**  First CM on the wire:
+no-CI 4.263 / 6.574 / 4.222 s, CI 4.159 / 4.388 s.  **The CI phase costs
+nothing** -- SpanDSP evidently runs it while waiting for ANSam and reaches CM at
+the same instant either way, so "V8_WAIT_1S plus the CI phase is what puts our
+CM past the answerer's budget" is wrong.  What actually varies is ANSam
+detection: the one failing call had its CM at **6.574 s**, 2.3 s later than
+every other call in either arm, and that is what missed the ~5.2 s window.
+
+So the race is real and per-call, the determinant is when the CM arrives, and
+CI is not what delays it.  `ME_V8_NO_CI` stays default off with this table
+beside it.  The levers left are the ones that address the arrival time itself:
+the answerer's `200 + 5000 ms` CM-wait budget, `got_cm_jm`'s requirement for
+two *identical* repeats when the early ones carry bit errors, and the caller's
+own 10 s V.8 timeout, which in the failing call expired 1.4 s before the JM.
+
+Worth noting for the next thread: all four successful calls entered TRAINING as
+**mod=V34**, not V90, on a `v90` profile whose V.8 result carries
+`pcm=0x2` (V.90 available).
