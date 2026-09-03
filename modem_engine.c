@@ -9820,8 +9820,21 @@ static void me_v90a_equalised_locked(const int16_t *amp, int len)
                  * 1333 Hz harmonics and TRN1d is flat.
                  */
                 const char *m = getenv("ME_V90A_TRN1D_ADAPT");
+                const char *mu = getenv("ME_V90A_TRN1D_MU");
 
-                v90a_fse_set_mu(g_v90a_fse, V90A_FSE_MU_TRAIN);
+                /*
+                 * V90A_FSE_MU_TRAIN is documented as an NLMS step near unity
+                 * for DECISION-DIRECTED adaptation on TRN1d's two far-apart
+                 * points -- "a projection, not a gamble".  CMA is a different
+                 * algorithm: its error is y*(R2 - y*y), cubic in the output and
+                 * not normalised that way, so the same 0.5 is 50x the file's
+                 * own DEFAULT_MU.  ME_V90A_TRN1D_MU sweeps it.
+                 */
+                v90a_fse_set_mu(g_v90a_fse,
+                                mu ? atof(mu)
+                                   : ((m && !strcmp(m, "dd"))
+                                      ? V90A_FSE_MU_TRAIN
+                                      : V90A_FSE_MU_CMA));
                 if (m && !strcmp(m, "dd"))
                     v90a_fse_set_mode(g_v90a_fse, V90A_FSE_DD);
                 else if (m && !strcmp(m, "frozen"))

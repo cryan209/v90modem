@@ -99,6 +99,22 @@ void v90a_fse_set_mu(v90a_fse_t *s, double mu);
  */
 #define V90A_FSE_MU_TRAIN   0.5
 #define V90A_FSE_MU_TRACK   0.02
+/*
+ * MU_CMA is for the BLIND loop on TRN1d, and it is a third job again.  CMA's
+ * error is y*(R2 - y*y) -- cubic in the output, and not the normalised
+ * projection MU_TRAIN describes -- so the step that is right for a
+ * decision-directed loop on two far-apart points is wildly wrong here.  Swept
+ * against §8.4.5's own confirmation on artifacts/hsf-v90/call-085428Z, which
+ * reads 49.2% at MU_TRAIN:
+ *
+ *   0.5 (MU_TRAIN)  49.2%      0.01   70.7%
+ *   0.05           100.0%      0.002  62.9%
+ *
+ * At 0.05 both in-tree analogue recordings reach 100.0%, Table 13's CRC finds
+ * Jd unaided at TRN1d 20075T -- where the peer's 20004T of TRN1d ends -- and
+ * 74 and 75 Jd frames decode into the DIL.
+ */
+#define V90A_FSE_MU_CMA     0.05
 v90a_fse_mode_t v90a_fse_mode(const v90a_fse_t *s);
 
 /*
