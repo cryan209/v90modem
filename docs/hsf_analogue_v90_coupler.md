@@ -1206,3 +1206,39 @@ RTP payload *is* the DS0 and every codeword is exactly the one that was sent.
 Not yet reached: S̄d, TRN1d and Jd on a live analogue line, and therefore
 §9.3.2.6's S, which is what the digital side waits for (`no S after 24796 Jd
 symbols`) before it gives up and sends Tone B.
+
+### §9.3.2.4 confirmed live (2026-09-03)
+
+`call-081142Z`, on the shipping defaults plus `ME_V90_ANALOGUE_JA_SD_BAR_MS=6000`:
+
+```
+V.90 analogue RX: Sd      (Sd 36 reps)
+V.90 analogue RX: S-bar_d (S̄d 1 reps)
+V.90 analogue RX: TRN1d   (TRN1d 1T)
+ladder calibrated on TRN1d Ucode 66, equaliser decision-directed
+V.90 analogue RX: hunting Sd (TRN1d 256T)
+```
+
+So the transition fires on a fresh line, and the ladder is taken off the wire
+(Ucode 66 here, 67 on the recording, against the 76 we announce in INFO1a --
+which is the whole reason `sd_set_w()`'s seeded value must not be used to
+calibrate it).
+
+**S̄d reads 1 repetition live where the recording gives 8**, on identical code.
+§8.4.4 sends 8, so the live receiver is entering TRN1d on the first flipped
+repetition rather than counting them out.  It does not block anything yet --
+TRN1d is entered either way -- but it means the S̄d count is not evidence of
+anything on a live call, and if a later stage comes to depend on it, that is
+where to look first.
+
+Not reached: TRN1d runs 256 symbols and falls back to the hunt, on the
+recording and live alike, so §8.4.5's confirmation is the next stage.  The
+digital side's view is unchanged -- `analogue Ja detected`, `TRN1d complete
+(20004 symbols)`, `no S after 24796 Jd` -- because §9.3.2.6's S still needs
+Jd, which needs TRN1d.
+
+Caveat on the sequence of fixes behind this: four changes were stacked on one
+recording (`call-062754Z`) before any live call.  That is cheap and fast, and
+it is also how a receiver gets tuned to one capture -- the live run above is
+the control, and the S̄d discrepancy it exposed is exactly the kind of thing a
+replay cannot show.
