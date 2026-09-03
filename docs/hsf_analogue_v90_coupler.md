@@ -899,3 +899,50 @@ transmitter running, none of which happened before.
 never transmits Sd, and the analogue side takes its §9.3.2 deadline in Ja at
 +16222 ms and initiates the §9.5.2.1 retrain.  That is the coupled Phase 2 seam
 `vpcm_loopback_test` covers between our own two roles, now facing a real line.
+
+## It DOES send Sd.  The analogue side cannot hear it, and Ja then reads as a retrain
+
+The digital side's own log settles the premise:
+
+    [V90] Phase 3: analogue Ja detected, starting Sd
+    [V90] Phase 3: Sd complete (64 reps), starting S-bar-d
+    [V90] Phase 3: S-bar-d complete, starting TRN1d
+
+and it is on the wire at the analogue end: scanning `hsf-rx.raw` for **1333 Hz**
+-- 8000/6, the line Sd's six-symbol pattern puts in the band -- the window at
+25.80 s reads magnitude 1384 on an RMS of 3189, about 38% of the power, with
+2400 Hz at 6.  Sd reached the analogue modem's ADC.
+
+**What fails is the analogue receiver, and it is the documented open item:**
+`[ME] V.90 analogue RX: hunting Sd (Sd 0 reps, S-bar-d 0 reps, TRN1d 0T, Jd 0
+frames)` for the whole attempt.  `v90_analogue_rx.c` is a **codeword** state
+machine -- correct when the downstream is the DS0 stream, and there are no exact
+G.711 codewords left after a 2-wire analogue round trip.
+
+The rest follows mechanically, and all of it is correct behaviour given that:
+
+1. §9.3.2.3 has the analogue modem transmit Ja **until it detects Sd**, so with
+   Sd undetected it keeps Ja up.
+2. Ja rides the analogue modem's control channel at **2400 Hz** -- which is
+   exactly the tone the digital side's §9.5.1.2 retrain watch listens for (the
+   tone is chosen by role: 2400 Hz where `calling_party` and `v90_mode`
+   differ).  §9.3.2.4 makes the analogue modem silent through `PHASE3_WAIT_S`,
+   so sustained 2400 Hz there is read as a retrain request:
+   `Rx - Tone A detected in stage PHASE3_WAIT_S (80 ms); peer initiated a
+   retrain` -> `Peer retrained during tx_phase=5; dropping to WAIT_JA`.
+3. The analogue side then takes its own §9.3.2 deadline in Ja at +16222 ms and
+   initiates the §9.5.2.1 retrain.  Both ends restart.  Loop.
+
+Reproduces offline from the digital side's tap, which is where to work it:
+
+    ME_V34_SPAN_FLOW_LOG=1 ./v90_engine_replay <live-rx.g711> ulaw --fast --from 0
+
+**The primary fix is the analogue Sd detector** -- it needs the equaliser, not a
+slicer, which is exactly the ordering the symbol-timing section above already
+settled (an FSE first, then decisions).  **The secondary defect is real but
+would not rescue this call:** 80 ms of 2400 Hz cannot distinguish "the peer is
+still in Ja because it has not seen my Sd" from "the peer wants a retrain",
+because both are 2400 Hz and only the *modulation* differs -- Ja is a data
+signal and §9.5.2.1's Tone A is pure.  A purity test (energy in the carrier bin
+against the ±300 Hz control-channel skirts) separates them; nothing here
+measures it yet.
