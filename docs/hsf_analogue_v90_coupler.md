@@ -685,3 +685,44 @@ answers, together with that leg carrying no audio in either direction, is a
 property of that call and not of the ATA answering calls in general.  A plain
 2100 Hz from our side does not provoke it on 9099, so a naive
 fax/modem-tone detector in the ATA is not enough to explain it on its own.
+
+### CORRECTION: the 6001 leg carries audio both ways, and the 400 Hz is the HANGUP
+
+Both halves of "after answer this ATA passes neither direction" were mine.
+
+**The line-to-network silence was us feeding silence.**  All three runs the
+claim rested on say so in their own logs -- `streaming for 35s (feeding
+signed-linear silence out)` -- because they ran `hsf_fxo_probe`, not the
+coupler, so there was no modem and no audio on the analogue side at all.  The
+server's `RMS 4.8, peak 16` was a faithful recording of nothing being sent.
+
+Run the same call with a tone instead (`--dial 6001 --echo-tone 1000
+--echo-on-ms 60`, transmit amplitude 8000, server restarted with
+`VPCM_G711_TAP_DIR`, `artifacts/hsf-6001-audio-011539Z`):
+
+* **HSF to server**: our 1 kHz bursts arrive in `live-rx.g711` at **peak 5884-6140**,
+  `dom=1000.0Hz`, once per second, for the whole call.
+* **server to HSF**: the server's ANSam sits on the line at **2100 Hz,
+  magnitude 3500-4100, with zero clipped samples**, continuously from 12.60 s
+  to 23.50 s of the capture.
+
+So the leg is healthy in both directions, at a sane level, with headroom.
+
+**And the 400 Hz starts at the DISCONNECT, not at the answer.**  In the same
+capture the 2100 Hz stops and the 399 Hz starts in the *same* 100 ms window --
+`23.40  2100=3820  400=4.6  clip=0.00` then `23.60  2100=907  400=9199
+clip=0.21` -- and the ANSam ran 10.9 s against the media tap's 11.9 s call.
+Our own modem fails V.8 twice against a line with no modem on it, hangs up
+about twelve seconds in, and the ATA then does what an ATA does for an
+off-hook line with no call: **dial tone**.  Every earlier capture ran 35 s over
+a 12 s call, so the tone filled two thirds of the recording and looked like it
+began at the answer; the alignment that said so was a cross-clock guess of
+exactly the kind this file warns about elsewhere.
+
+`eb3ef515`'s "whatever this is arrives with the answer" is therefore wrong too,
+and with it the idea that something breaks when the call connects.  Nothing
+breaks.  What is left of the whole thread is the one measured fact: the HT802
+generates its call-progress tones about 15 dB hot, so **dial tone and ringback
+clip the ADC** -- which matters for a modem only in the windows where they are
+present, i.e. before dialling, during ringback, and after a hangup that leaves
+the line off-hook.
