@@ -990,7 +990,8 @@ bool v90_analogue_phase4_build_cp(const v90_dil_measurement_t *m,
                                   int shaping_redundancy,
                                   int shaping_lookahead,
                                   vpcm_cp_frame_t *cpt_out,
-                                  vpcm_cp_frame_t *cp_out)
+                                  vpcm_cp_frame_t *cp_out,
+                                  double *margin_out)
 {
     v90_dil_rate_plan_t plan;
     v90_dil_rate_plan_t training_plan;
@@ -1019,21 +1020,54 @@ bool v90_analogue_phase4_build_cp(const v90_dil_measurement_t *m,
      * digital modem announced in INFO0d bits 33:37.  Passing zero here used
      * to disable the cap on every live call, producing an all-65-point CP at
      * 56 kbit/s even when the peer had explicitly offered less power. */
-    if (!v90_dil_measure_plan_rate_sr(m, 0, 3.0, max_tx_dbm0, law,
-                                      shaping_redundancy, &plan))
-        return false;
-    /* CPt is the Phase-4 training constellation, not the data-mode power
-     * offer.  Keep the impairment/noise plan the peer already accepted in
-     * run 81 and apply Table 15 only to CP.  Reusing the power-thinned CP set
-     * for CPt changed the training constellation itself and the Eicon fell
-     * from 0x00b2 back to Phase 3 before ever sending Ri (run 86).  Since the
-     * bounded CP is a low-level subset of this set, §8.5.2's other condition
-     * (CP no more than 3 dB above CPt) remains satisfied in the safe direction. */
-    if (!v90_dil_measure_plan_rate_sr(m, 0, 3.0, 0.0, law,
-                                      shaping_redundancy, &training_plan))
-        return false;
-    if (plan.intervals_unprobed != 0  ||  training_plan.intervals_unprobed != 0)
-        return false;
+    /*
+     * A NOISE MARGIN WITH A FLOOR.
+     *
+     * 3 sigma is a policy, not a requirement: §8.5.2 makes the constellation
+     * the analogue modem's choice, and refusing to offer one guarantees the
+     * call fails, where offering the line's best lets the digital modem
+     * accept, refuse, or renegotiate later.  Measured live on call-103321Z and
+     * on every other call that reached Phase 4, the DIL designs
+     * Mi = 12 2 2 18 2 21, drn=1, 28000 bps with the noise ignored and NOTHING
+     * at 3 sigma -- so this returned false, Phase 4 was never armed, and the
+     * §9.4.2 deadline retrained the call while the digital modem sat in Ri
+     * waiting for the CPt that never came.
+     *
+     * Both plans must come from the SAME margin or CP stops being a subset of
+     * CPt (see the note below), so they back off together and the highest
+     * margin at which both are complete is taken.
+     *
+     * CPt keeps max_tx_dbm0 = 0: it is the Phase-4 training constellation, not
+     * the data-mode power offer.  Applying Table 15 to it changed the training
+     * constellation itself and the Eicon fell from 0x00b2 back to Phase 3
+     * before ever sending Ri (run 86).  The bounded CP is a low-level subset
+     * of this set, so §8.5.2's "CP no more than 3 dB above CPt" stays
+     * satisfied in the safe direction.
+     */
+    {
+        static const double ladder[] = { 3.0, 2.0, 1.5, 1.0, 0.5, 0.0 };
+        size_t li;
+        bool got = false;
+
+        for (li = 0; li < sizeof(ladder)/sizeof(ladder[0]); li++) {
+            if (v90_dil_measure_plan_rate_sr(m, 0, ladder[li], max_tx_dbm0, law,
+                                             shaping_redundancy, &plan)
+                &&
+                v90_dil_measure_plan_rate_sr(m, 0, ladder[li], 0.0, law,
+                                             shaping_redundancy, &training_plan)
+                &&  plan.intervals_unprobed == 0
+                &&  training_plan.intervals_unprobed == 0) {
+                got = true;
+                if (margin_out != NULL)
+                    *margin_out = ladder[li];
+                break;
+            }
+            /*endif*/
+        }
+        if (!got)
+            return false;
+        /*endif*/
+    }
 
     vpcm_cp_init(&cp);
     cp.v90_compatibility = true;        /* Table 14 bit 19: 1 = CP */

@@ -1624,8 +1624,10 @@ static void test_phase4_cp_from_measurement(void)
         int cpt_k;
         int cp_k;
 
+        double cp_margin = 0.0;
+
         if (!v90_analogue_phase4_build_cp(&m, V90_LAW_ULAW, 0.0,
-                                           sr, ld, &cpt, &cp)) {
+                                           sr, ld, &cpt, &cp, &cp_margin)) {
             printf("  FAIL: Sr=%d yielded no offerable constellation\n", sr);
             failures++;
             continue;

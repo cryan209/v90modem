@@ -178,7 +178,8 @@ bool v90_analogue_phase4_build_cp(const v90_dil_measurement_t *m,
                                   int shaping_redundancy,
                                   int shaping_lookahead,
                                   vpcm_cp_frame_t *cpt_out,
-                                  vpcm_cp_frame_t *cp_out);
+                                  vpcm_cp_frame_t *cp_out,
+                                  double *margin_out);
 
 /* §9.3.2.8 permits a zero-length DIL.  With no measurement to derive a
  * constellation from, offer a deliberately conservative low-level set that

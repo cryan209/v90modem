@@ -19,6 +19,7 @@ static const int baud_rates[6] = {2400, 2743, 2800, 3000, 3200, 3429};
 
 struct v90_analogue_phase3_s {
     v90_analogue_tx_t *tx;
+    double             cp_margin;   /* noise margin the CP was built at */
     v90_analogue_rx_t *rx;
     v34_state_t       *v34;
     bool               owns_v34;
@@ -249,7 +250,7 @@ static void start_phase4(v90_analogue_phase3_t *s)
     if (m != NULL) {
         if (!v90_analogue_phase4_build_cp(m, s->law, s->digital_max_tx_dbm0,
                                           s->shaping_redundancy, ld,
-                                          &s->cpt, &s->cp)) {
+                                          &s->cpt, &s->cp, &s->cp_margin)) {
             s->phase4_failed = true;
             return;
         }
