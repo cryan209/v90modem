@@ -1273,8 +1273,22 @@ lottery.  Parity handling itself traces correct: `v90a_fse_set_taps()` sets
 `half = parity` and `taps` is forced even, so the emitted instants match the
 fit's `2k + off + taps - 1` on both parities.
 
-**Untested lead, noticed while reading:** `v90a_fse_set_taps()` sets
+**The frozen DC: real, and measurably INERT.**  `v90a_fse_set_taps()` sets
 `agc_frozen`, and `dc` is adapted only `if (!agc_frozen)`, so the FSE's DC
-estimate stays 0 for the whole call -- on a stream whose own comment in
-`v90a_fse_put()` records a standing ~900-count offset.  The fit removes DC
-internally, so its taps assume a DC-free input the FSE never delivers.
+estimate stays 0 for the whole call -- while the offset is genuinely there, at
++894 to +908 counts against an RMS of 6575 in every recording measured.  By
+inspection the taps were fitted to DC-removed samples and are then fed
+DC-laden ones, so it looks like a defect.
+
+It was fixed (seed `dc` from the fit's own window, and track it independently
+of the AGC, which is a separate concern -- the taps contain the line's GAIN,
+which must not be re-adapted, but say nothing about its offset) and the fix is
+NOT in, because it changes nothing: `call-062754Z` still reaches Jd and its
+§8.4.5 confirmation went 96.5% -> 94.5%, marginally the wrong way, and
+`call-085428Z` still never leaves the hunt.
+
+The null result is the explanation.  §8.4.4's Sd is zero-mean -- `+W, 0, +W,
+-W, 0, -W` -- so a least-squares fit against it produces taps whose DC gain is
+near zero as a side effect: the filter nulls the offset itself, and handing it
+a DC-free input as well buys nothing.  Do not re-chase this from the source
+alone; it reads like a bug and is not one.
