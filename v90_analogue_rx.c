@@ -58,6 +58,17 @@ struct v90_analogue_rx_s {
     /* Sd acquisition: one run length per alignment hypothesis. */
     int      sd_run[6];
     int      sd_w[6];               /* W learned from the wire, 0 until seen */
+    /*
+     * The same W as a running mean LEVEL, for the level-tolerant comparison.
+     * sd_w[] is latched from the first non-zero codeword a hypothesis sees,
+     * which on an analogue line is one noisy sample: measured on
+     * artifacts/hsf-v90/call-062754Z it latched Ucode 96 (level 4158) where
+     * the true median W level is 3326 -- 25% high, which puts 5.3% of the W
+     * slots outside a 35% tolerance and kills a 24-codeword run more often
+     * than not.  A run of 4, 28 and then 6 repetitions is exactly that.
+     */
+    double   sd_w_lvl[6];
+    int      sd_miss_run;           /* consecutive unusable slots inside Sd */
     int      sd_phase;              /* index%6 that holds sd_pat[0] */
     int      sd_shift_run;          /* consecutive codewords matching S̄d */
 
@@ -141,6 +152,24 @@ static double ucode_level(const v90_analogue_rx_t *s, int ucode)
     return fabs((double) lin);
 }
 
+/* The Ucode whose level is closest to a measured one -- the inverse of
+ * ucode_level(), by search, so no ladder arithmetic is duplicated. */
+static int nearest_ucode(const v90_analogue_rx_t *s, double level)
+{
+    int best = 0, u;
+    double bestd = -1.0;
+
+    for (u = 0; u < 128; u++) {
+        double d = fabs(ucode_level(s, u) - level);
+
+        if (bestd < 0.0  ||  d < bestd) {
+            bestd = d;
+            best = u;
+        }
+    }
+    return best;
+}
+
 static bool level_is_zero_slot(const v90_analogue_rx_t *s, int ucode, int w)
 {
     if (w <= 0)
@@ -221,10 +250,21 @@ static bool sd_hunt_slot(v90_analogue_rx_t *s, int h, int slot, uint8_t c)
         if (ucode == 0)
             return false;
         s->sd_w[h] = ucode;
+        s->sd_w_lvl[h] = ucode_level(s, ucode);
     }
     if (level_tolerant(s)) {
-        if (!level_is_w_slot(s, ucode, s->sd_w[h]))
+        double lu = ucode_level(s, ucode);
+        double ref = (s->sd_w_lvl[h] > 0.0) ? s->sd_w_lvl[h]
+                                            : ucode_level(s, s->sd_w[h]);
+        double tol = (s->cfg.w_slot_tolerance > 0.0)
+                     ? s->cfg.w_slot_tolerance : 0.35;
+
+        if (fabs(lu - ref) > tol*ref)
             return false;
+        /* Walk the reference onto the population rather than trusting the
+         * sample that opened the run. */
+        s->sd_w_lvl[h] = ref + 0.25*(lu - ref);
+        s->sd_w[h] = nearest_ucode(s, s->sd_w_lvl[h]);
     } else if (ucode != s->sd_w[h]) {
         return false;
     }
@@ -493,6 +533,7 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
             } else {
                 s->sd_run[h] = 0;
                 s->sd_w[h] = 0;
+                s->sd_w_lvl[h] = 0.0;
             }
             /*endif*/
             if (s->sd_run[h] >= 24) {
@@ -532,11 +573,33 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
         if (slot == 1  ||  slot == 4) {
             if (slot_match(s, c, s->sd_pat[slot]))
                 break;
+            /*
+             * A zero slot says nothing about WHICH pattern is running -- it is
+             * the same in Sd and S̄d, which is why the matching branch above
+             * simply breaks.  So a zero slot that does not match says nothing
+             * either, and must not be read as "Sd is over".
+             *
+             * It is exactly what the §9.3.2.4 transition looks like on a real
+             * line: the reversal lands inside a repetition, and that straddle
+             * repetition's zero slots carry the discontinuity.  Measured on
+             * the equalised stream of artifacts/hsf-v90/call-062754Z, Sd runs
+             * 33 clean repetitions, repetition 33 reads zero/W = 1.120, and
+             * repetitions 34 on are cleanly reversed -- so the receiver was
+             * resetting to the hunt on the very repetition carrying the
+             * transition it was waiting for, every time.
+             *
+             * Only where the slots are compared by level: on the digital
+             * bearer a zero slot that is not Ucode 0 is a real break.
+             */
+            if (level_tolerant(s))
+                break;
         } else if (slot_match(s, c, s->sd_pat[slot])) {
             s->sd_shift_run = 0;
+            s->sd_miss_run = 0;
             s->sd_reps = (int) ((s->index - s->sd_start + 1)/6);
             break;
         } else if (slot_match(s, c, s->sd_pat[(slot + 3)%6])) {
+            s->sd_miss_run = 0;
             if (s->sd_shift_run++ == 0)
                 s->sd_bar_start = s->index - slot;
             /* Three flipped W slots is most of a repetition and cannot be a
@@ -550,12 +613,29 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
             break;
         }
         /*endif*/
+        /*
+         * Neither pattern.  On the digital bearer that means Sd is over
+         * without an S̄d we could see, and starting again is right.
+         *
+         * On an analogue line it is also what the §9.3.2.4 transition itself
+         * looks like: the reversal is a discontinuity and the equaliser rings
+         * through it, so the straddle repetition is unusable.  Measured on
+         * artifacts/hsf-v90/call-062754Z, repetition 33 carries W slots at
+         * 0.41, 0.96 and 0.49 of the running W while 32 clean repetitions
+         * precede it and repetition 34 is cleanly reversed -- so one bad
+         * repetition stood between the receiver and the transition, every
+         * time.  Ride out up to one repetition of unusable slots without
+         * losing the alignment or the flipped-slot evidence; a signal that has
+         * really stopped being Sd exhausts that within a repetition anyway.
+         */
+        if (level_tolerant(s)  &&  ++s->sd_miss_run <= 6)
+            break;
         s->sd_shift_run = 0;
-        /* Neither pattern: Sd is over without an S̄d we could see.  Start
-         * again rather than pretending Phase 3 advanced. */
+        s->sd_miss_run = 0;
         s->stage = V90A_RX_HUNT_SD;
         memset(s->sd_run, 0, sizeof(s->sd_run));
         memset(s->sd_w, 0, sizeof(s->sd_w));
+        memset(s->sd_w_lvl, 0, sizeof(s->sd_w_lvl));
         break;
     }
 
@@ -582,7 +662,16 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
          * §8.4.5 says are there, and a level that does not is abandoned.
          */
         ucode = codeword_ucode(s, c, &sign);
-        if (ucode != 0  &&  ucode != s->w_ucode) {
+        /*
+         * "A third magnitude" has to be judged the same way the slots are.
+         * With an exact comparison every symbol whose Ucode wanders off W by
+         * one reads as a third magnitude, so on an analogue line this fires
+         * almost immediately and carries a wrong TRN1d level with it.
+         */
+        if (level_tolerant(s)
+            ?  (!level_is_zero_slot(s, ucode, s->w_ucode)
+                &&  !level_is_w_slot(s, ucode, s->w_ucode))
+            :  (ucode != 0  &&  ucode != s->w_ucode)) {
             s->trn1d_ucode = ucode;
             s->trn1d_start = s->index;
             s->stage = V90A_RX_TRN1D;
