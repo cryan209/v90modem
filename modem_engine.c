@@ -1907,6 +1907,15 @@ static bool     g_v90a_dil_tracking = false;
 /* Set while me_rx_g711() is forwarding its own linear copy to me_rx_audio(),
  * so the codeword path is not run twice on one call's samples. */
 static bool     g_rx_from_g711 = false;
+/* The closest §8.4.2 frame the CRC probe has seen.  Distinguishes a boundary
+ * in the wrong place from a stream too noisy to carry a 72-bit frame. */
+static void me_v90a_jd_probe_report(void *user, int errors, int at)
+{
+    (void) user;
+    ME_LOG("[ME] V.90 analogue: §8.4.2 best Jd candidate %d bad bits "
+           "(structure + CRC) at TRN1d %dT\n", errors, at);
+}
+
 /* §8.4.5's confirmation reading, logged whether or not the level is kept --
  * "TRN1d ran 256 symbols and went back to hunting" does not say by how much
  * it missed, and the margin is the whole diagnosis. */
@@ -8300,6 +8309,7 @@ static void prepare_v90_analogue_phase3_locked(void)
         v90_analogue_rx_t *rx =
             (v90_analogue_rx_t *) v90_analogue_phase3_rx_state(g_v90a);
         v90_analogue_rx_set_trn1d_report(rx, me_v90a_trn1d_report, NULL);
+        v90_analogue_rx_set_jd_probe_report(rx, me_v90a_jd_probe_report, NULL);
     }
     if (!g_v90a) {
         ME_LOG("[ME] V.90 analogue: Phase 3 failed to start; the call cannot continue\n");

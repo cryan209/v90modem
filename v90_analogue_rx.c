@@ -77,6 +77,9 @@ struct v90_analogue_rx_s {
      */
     int      sign_flip;
     int      sign_flip_tried;
+    int      jd_best_errors;        /* best §8.4.2 frame seen while probing */
+    void   (*jd_probe_report)(void *user, int errors, int at);
+    void    *jd_probe_user;
     void   (*trn1d_report)(void *user, int ones, int of);
     void    *trn1d_report_user;
     int      sd_phase;              /* index%6 that holds sd_pat[0] */
@@ -711,6 +714,67 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
         }
         /*endif*/
         /*
+         * LET THE CRC FIND THE BOUNDARY.
+         *
+         * The §8.4.5 -> §8.4.2 transition below is taken on a single
+         * descrambled zero, which is right where the codewords are exact --
+         * §8.4.5's plaintext is all ones, so the first zero IS Jd.  Where the
+         * levels are sliced there is a residual sign-error rate (§8.4.5's own
+         * confirmation reads 95-100%, not 100%), so the first zero after the
+         * training interval is almost always a stray error tens of thousands
+         * of symbols early; the frame search then hunts a window that cannot
+         * contain Jd, fails back to TRN1d, and the next error repeats it.  A
+         * windowed zero-RATE was tried instead and is not enough either: error
+         * bursts reach 25% locally where the mean is 3.5%, so 8-in-32 fired at
+         * 2593T against the peer's 20004T.
+         *
+         * So do not guess where TRN1d ends.  Table 13's structure and CRC are
+         * ground truth -- 17 sync ones, nine fixed zeros and a 16-bit CRC, ~42
+         * bits of constraint, so a false frame is a 2^-42 event -- and TRN1d
+         * cannot counterfeit one, because its signs carry the scrambler output
+         * directly while try_jd_frame() applies §8.4.2's differential decode.
+         * Probe the newest complete frame on every symbol and leave only when
+         * one VALIDATES.  That owes nothing to a threshold, and it is what the
+         * code already says one stage on: "take the break as a hint and let
+         * the frame decide".
+         */
+        if (level_tolerant(s)  &&  s->trn1d_symbols > TRN1D_MIN_SYMBOLS
+            &&  s->sign_len >= JD_BITS) {
+            uint8_t bits[JD_BITS];
+            uint32_t reg;
+            int prev;
+            int from = s->sign_len - JD_BITS;
+
+            int errs = try_jd_frame(s, from, bits, &reg, &prev);
+
+            /*
+             * How CLOSE the best candidate comes, not merely whether one
+             * validated.  "Jd 0 frames" is the same report for a boundary in
+             * the wrong place and for a stream too noisy to carry a 72-bit
+             * frame, and those want opposite fixes.  jd_frame_errors() counts
+             * violated structure bits plus CRC bits, so a handful means
+             * marginal and tens means nowhere near.
+             */
+            if (errs >= 0  &&  (s->jd_best_errors < 0  ||  errs < s->jd_best_errors)) {
+                s->jd_best_errors = errs;
+                if (s->jd_probe_report)
+                    s->jd_probe_report(s->jd_probe_user, errs,
+                                       s->trn1d_symbols);
+            }
+            if (errs == 0) {
+                memcpy(s->jd_bits, bits, sizeof(bits));
+                s->descramble_reg = reg;
+                s->prev_sign = prev;
+                s->jd_bit_pos = from + JD_BITS;
+                s->jd_bit_count = JD_BITS;
+                s->trn1d_break = from;
+                s->stage = V90A_RX_JD;
+                s->jd_frames++;
+                events |= V90A_RX_EVENT_JD;
+                break;
+            }
+        }
+        /*
          * Scan whatever is buffered and not yet scanned.  Normally that is the
          * one sign just pushed, but after a Jd search that came to nothing it
          * is the whole window the search had to buffer, replayed from a
@@ -797,7 +861,18 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
              * two of the boundary -- close to it, but not exactly on it.  Take
              * the break as a hint and let the frame decide.
              */
-            if (!plain  &&  s->trn1d_symbols > TRN1D_MIN_SYMBOLS) {
+            /*
+             * The single-bit break is for the digital bearer only.  Where the
+             * levels are sliced the CRC probe above is the exit, and leaving
+             * this enabled beside it just burns the stage on stray errors:
+             * that is the TRN1d/Jd oscillation, thousands of transitions with
+             * no frame ever validating.  Staying in TRN1d until Table 13
+             * validates is also the honest report -- the receiver has not
+             * found Jd, and saying so beats claiming a boundary it cannot
+             * back up.
+             */
+            if (!level_tolerant(s)
+                &&  !plain  &&  s->trn1d_symbols > TRN1D_MIN_SYMBOLS) {
                 s->trn1d_break = s->trn1d_scan - 1;
                 s->stage = V90A_RX_JD;
                 s->jd_bit_pos = -1;
@@ -1096,4 +1171,16 @@ void v90_analogue_rx_set_trn1d_report(v90_analogue_rx_t *s,
         return;
     s->trn1d_report = fn;
     s->trn1d_report_user = user;
+}
+
+/* Report each new best §8.4.2 frame candidate found while probing TRN1d. */
+void v90_analogue_rx_set_jd_probe_report(v90_analogue_rx_t *s,
+                                         void (*fn)(void *, int, int),
+                                         void *user)
+{
+    if (s == NULL)
+        return;
+    s->jd_best_errors = -1;
+    s->jd_probe_report = fn;
+    s->jd_probe_user = user;
 }

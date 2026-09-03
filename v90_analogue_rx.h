@@ -97,6 +97,10 @@ typedef struct {
 } v90_analogue_rx_config_t;
 
 v90_analogue_rx_t *v90_analogue_rx_init(const v90_analogue_rx_config_t *cfg);
+/* Report each new best §8.4.2 frame candidate found while probing TRN1d. */
+void v90_analogue_rx_set_jd_probe_report(v90_analogue_rx_t *s,
+                                         void (*fn)(void *, int, int),
+                                         void *user);
 /* Report §8.4.5's ones count at the confirmation point, accepted or not. */
 void v90_analogue_rx_set_trn1d_report(v90_analogue_rx_t *s,
                                       void (*fn)(void *, int, int), void *user);
