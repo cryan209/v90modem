@@ -1871,12 +1871,26 @@ static bool     g_v90a_ladder_set = false;
  * written for.
  */
 /*
- * The fit window: 1024 DS0 intervals, 128 ms.  §8.4.4 sends Sd for at least 64
- * six-symbol repetitions and this project's own digital transmitter sends
- * exactly that, so a window has to be a good deal shorter than the signal and
- * the hunt has to be able to afford a few of them.
+ * The fit window, and it is bounded by how SHORT Sd is.
+ *
+ * §8.4.4's Sd is 64 six-symbol repetitions -- 384 DS0 intervals, **48 ms** --
+ * and it is followed immediately by S-bar-d and TRN1d.  A window longer than
+ * that can never contain only Sd, and the fit is then being asked to map a
+ * mixture onto the Sd reference, which it correctly refuses.  Measured live
+ * against a digital modem that transmitted Sd, S-bar-d and TRN1d exactly as it
+ * should: at 2048 samples (128 ms) the held-out score never rose above 0.014
+ * in eight consecutive windows.
+ *
+ * 512 samples is 256 DS0 intervals, 32 ms, two thirds of Sd -- short enough
+ * that a window fits inside it with room to land, long enough that the
+ * held-out half is still 20 six-symbol repetitions.
  */
-#define V90A_SD_FIT_SAMPLES 2048
+#define V90A_SD_FIT_SAMPLES 512
+/*
+ * And slide by a quarter of a window rather than a half, so that a window
+ * lands wholly inside 48 ms of Sd wherever the hunt happens to start.
+ */
+#define V90A_SD_FIT_SLIDE   (V90A_SD_FIT_SAMPLES/4)
 static int16_t  g_v90a_sd_buf[V90A_SD_FIT_SAMPLES];
 static int      g_v90a_sd_fill = 0;
 static bool     g_v90a_sd_fitted = false;
@@ -9673,13 +9687,14 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
                        "%.3f, T/2 parity %d, level %.3f); equaliser acquired "
                        "on §8.4.4's own sequence\n", score, parity, level);
             } else {
-                /* Slide by half a window so a fit that straddles the start of
-                 * Sd gets a clean one next time rather than repeating the
-                 * same straddle for ever. */
-                memmove(g_v90a_sd_buf, g_v90a_sd_buf + V90A_SD_FIT_SAMPLES/2,
-                        (V90A_SD_FIT_SAMPLES/2)*sizeof(g_v90a_sd_buf[0]));
-                g_v90a_sd_fill = V90A_SD_FIT_SAMPLES/2;
-                if (g_v90a_sd_score_logged < 8) {
+                /* Slide so a fit that straddles the start of Sd -- or its end,
+                 * where S-bar-d begins -- gets a clean one next time rather
+                 * than repeating the same straddle. */
+                memmove(g_v90a_sd_buf, g_v90a_sd_buf + V90A_SD_FIT_SLIDE,
+                        (size_t) (V90A_SD_FIT_SAMPLES - V90A_SD_FIT_SLIDE)
+                            *sizeof(g_v90a_sd_buf[0]));
+                g_v90a_sd_fill = V90A_SD_FIT_SAMPLES - V90A_SD_FIT_SLIDE;
+                if (g_v90a_sd_score_logged < 24) {
                     g_v90a_sd_score_logged++;
                     ME_LOG("[ME] V.90 analogue: no Sd in this window "
                            "(held-out score %.3f)\n", score);

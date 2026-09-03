@@ -123,7 +123,9 @@ static bool fit_one(const int16_t *amp, int n, int taps, int off, double dc,
 
     /* Symbols the window can produce, allowing for the filter's span. */
     syms = (n - taps - off)/2;
-    if (syms < 6*32)
+    /* §8.4.4's Sd is only 384 symbols long, so a window that demands much of
+     * that cannot be placed inside it. */
+    if (syms < 6*16)
         return false;
     syms -= syms%6;
     train = syms/2;

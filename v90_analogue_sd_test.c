@@ -235,6 +235,76 @@ static void test_fit_rejects(void)
                        &score, NULL), "fit rejects silence");
 }
 
+/*
+ * The case a live call found and an endless-Sd test cannot: §8.4.4's Sd is only
+ * 64 six-symbol repetitions -- 384 DS0 intervals, 48 ms -- and S-bar-d follows
+ * it immediately.  A fit window longer than that can never hold Sd alone, and
+ * the fit then correctly refuses a mixture.  Live, at a 128 ms window, eight
+ * consecutive windows scored below 0.014 on a call where the digital modem
+ * transmitted Sd exactly as it should.
+ *
+ * So this drives the sliding window the engine drives, over a stream that is
+ * TRN1d, then exactly 384 symbols of Sd, then TRN1d again.
+ */
+#define FIT_WIN   512
+#define FIT_SLIDE (FIT_WIN/4)
+
+static void test_finite_sd(double phase)
+{
+    static const double ch[5] = { 0.05, 0.18, 0.80, 0.18, 0.05 };
+    const int lead = 900, sd_len = 384;
+    int16_t win[FIT_WIN];
+    double h[V90A_SD_MAX_TAPS], score = 0.0, best = -1e30, level = 0.0;
+    int fill = 0, parity = 0, hits = 0;
+    char msg[128];
+    int i;
+
+    for (i = 0; i < 4000; i++) {
+        double acc = 0.0;
+        int k;
+
+        for (k = 0; k < 2; k++) {
+            int j;
+
+            acc = 0.0;
+            for (j = 0; j < 5; j++) {
+                int t = 2*i + k - j;
+                double u = (t - 2.0*phase)/2.0;
+                int si = (int) floor(u);
+                double frac = u - si;
+                double a, b;
+                int m;
+
+                /* TRN1d outside the Sd interval: one level, random signs. */
+                m = si;
+                a = (m < 0) ? 0.0
+                  : (m >= lead && m < lead + sd_len) ? sd_symbol(m - lead, 3000.0)
+                  : ((((unsigned) m*2654435761u) & 0x10000u) ? 1400.0 : -1400.0);
+                m = si + 1;
+                b = (m < 0) ? 0.0
+                  : (m >= lead && m < lead + sd_len) ? sd_symbol(m - lead, 3000.0)
+                  : ((((unsigned) m*2654435761u) & 0x10000u) ? 1400.0 : -1400.0);
+                acc += ch[j]*((1.0 - frac)*a + frac*b);
+            }
+            win[fill++] = (int16_t) ((acc > 32000.0) ? 32000.0
+                                     : (acc < -32000.0) ? -32000.0 : acc);
+            if (fill == FIT_WIN) {
+                if (v90a_sd_fit(win, FIT_WIN, 32, &parity, h, &score, &level))
+                    hits++;
+                if (score > best)
+                    best = score;
+                memmove(win, win + FIT_SLIDE,
+                        (size_t) (FIT_WIN - FIT_SLIDE)*sizeof(win[0]));
+                fill = FIT_WIN - FIT_SLIDE;
+            }
+        }
+    }
+    snprintf(msg, sizeof msg,
+             "384-symbol Sd inside TRN1d at phase %.2f: %d window(s) hit, "
+             "best score %.3f", phase, hits, best);
+    check(hits > 0, msg);
+}
+
 int main(void)
 {
     int slot;
@@ -254,6 +324,10 @@ int main(void)
     test_through_fse(0.50, 300.0, 0.0);
     test_through_fse(0.25, 3000.0, 25.0);
     test_through_fse(0.50, 3000.0, 18.0);
+    test_finite_sd(0.00);
+    test_finite_sd(0.25);
+    test_finite_sd(0.50);
+    test_finite_sd(0.75);
 
     if (failures) {
         printf("v90_analogue_sd_test: %d FAILURES\n", failures);

@@ -1010,3 +1010,32 @@ did not reach the PBX at all.  A stray coupler process from a timed-out run also
 held the USB interface for one of them -- `hsf_fxo: claim interface 0 failed:
 LIBUSB_ERROR_ACCESS` is that, not a wedged device, and killing the process
 cleared it.
+
+### The fit ran live, and the first call with Sd on it found the window wrong
+
+Three calls after the change reached Phase 3.  The fit ran on all of them and
+its logging is what made them readable.
+
+**Two had no Sd to find, and it said so correctly.**  On those the digital side
+never transmitted Sd -- it stayed in Phase 2 at `V90_WAIT_INFO1A`, never getting
+a CRC-valid INFO1a, while our analogue side had already moved to Phase 3 and was
+sending Ja.  Eight consecutive windows scored **0.006, 0.003, -0.003, -0.020,
+-0.002, 0.001, -0.000, 0.016** against a gate of 0.80 -- the same near-zero
+range the unit tests give for noise.  That is the negative case verified live.
+
+**The third had Sd and the fit missed it, because the window was too long.**
+The digital side's log reads `starting Sd`, `Sd complete (64 reps)`,
+`S-bar-d complete, starting TRN1d`; ours scored -0.489, -0.003, -0.003, -0.012,
+-0.000, 0.001, -0.003, 0.014.  **§8.4.4's Sd is 64 six-symbol repetitions --
+384 DS0 intervals, 48 ms -- and the window was 2048 samples, 128 ms.**  A window
+longer than the signal can never hold Sd alone, so every fit was being asked to
+map Sd + S-bar-d + TRN1d onto the Sd reference, and refusing it was right.
+
+An endless-Sd test cannot catch that, and did not: every case in
+`v90_analogue_sd_test` fed Sd for ever.  The window is now **512 samples
+(32 ms)** sliding by a quarter, and the test gained the case the call earned --
+a stream that is TRN1d, then exactly 384 symbols of Sd, then TRN1d, driven
+through the same sliding window the engine drives.  Four windows hit at every
+sampling phase, best score 1.000.
+
+Still owed: a live call that has Sd on the line AND the corrected window.
