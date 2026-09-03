@@ -810,13 +810,33 @@ int v90_analogue_tx_ja_bits(const v90_analogue_tx_t *s)
     return s ? s->ja_bit_len : 0;
 }
 
+/*
+ * §9.3.2.4's 1500 ms, overridable.  Live against the HSF analogue side the
+ * digital modem answers Ja with Sd, S-bar-d and then TRN1d, whose default
+ * length is 20004T (~2500 ms since docs/v90_phase3_s_and_rbs_false_positive.c
+ * §38 raised it) -- so a deadline measured from the START of Ja can expire
+ * while the far end is still in a stage it will not leave early, and the
+ * far end then reports "Peer retrained during tx_phase=5".  The spec value
+ * is the default; ME_V90_ANALOGUE_JA_SD_BAR_MS makes it an experiment.
+ */
+static int ja_sd_bar_deadline_ms(void)
+{
+    static int ms = -1;
+    if (ms < 0) {
+        const char *v = getenv("ME_V90_ANALOGUE_JA_SD_BAR_MS");
+        int n = v ? atoi(v) : 0;
+        ms = (n > 0) ? n : JA_SD_BAR_DEADLINE_MS;
+    }
+    return ms;
+}
+
 bool v90_analogue_tx_deadline_passed(const v90_analogue_tx_t *s)
 {
     if (s == NULL)
         return false;
     switch (s->stage) {
     case V90A_TX_JA:
-        return s->stage_symbols > ms_to_symbols(s, JA_SD_BAR_DEADLINE_MS);
+        return s->stage_symbols > ms_to_symbols(s, ja_sd_bar_deadline_ms());
     case V90A_TX_JA_SILENCE:
         return s->stage_symbols > ms_to_symbols(s, JD_DEADLINE_MS);
     default:
