@@ -457,8 +457,60 @@ struct hsf_dev *hsf_fxo_open(void)
 	}
 
 	/* Opens unprivileged on macOS even with AppleUSBCDCCompositeDevice
-	 * attached -- libusb seizes it.  No kext or root needed. */
-	d->h = libusb_open_device_with_vid_pid(d->ctx, HSF_VID, HSF_PID);
+	 * attached -- libusb seizes it.  No kext or root needed.
+	 *
+	 * Do NOT open by a hardcoded PID.  On macOS a departed device keeps
+	 * answering GET_DESCRIPTOR out of IOKit's cache long after it has left
+	 * the bus, so a stale 0572:1300 entry outlives the hardware and every
+	 * request to it stalls -- which reads exactly like a wedged bootloader
+	 * and cost a session three replugs.  Scan the vendor's devices instead
+	 * and take the first whose EP0 actually answers a request that has to
+	 * reach the wire (a string descriptor is the cheapest such request;
+	 * GET_DESCRIPTOR for device or config does NOT, being served from the
+	 * cache).  HSF_PID is preferred when several answer. */
+	{
+		libusb_device **list = NULL;
+		ssize_t n = libusb_get_device_list(d->ctx, &list);
+		libusb_device_handle *fallback = NULL;
+		for (ssize_t i = 0; i < n && !d->h; i++) {
+			struct libusb_device_descriptor dd;
+			if (libusb_get_device_descriptor(list[i], &dd) < 0 ||
+			    dd.idVendor != HSF_VID)
+				continue;
+			libusb_device_handle *h = NULL;
+			if (libusb_open(list[i], &h) < 0 || !h)
+				continue;
+			unsigned char s[64];
+			int alive = libusb_get_string_descriptor_ascii(
+					h, dd.iProduct ? dd.iProduct : 1,
+					s, sizeof(s)) >= 0;
+			if (!alive) {
+				fprintf(stderr, "hsf_fxo: %04x:%04x is on the bus "
+						"but its EP0 does not answer -- "
+						"a stale IOKit entry, skipping\n",
+					dd.idVendor, dd.idProduct);
+				libusb_close(h);
+				continue;
+			}
+			if (dd.idProduct == HSF_PID) {
+				d->h = h;
+			} else if (!fallback) {
+				fprintf(stderr, "hsf_fxo: using %04x:%04x "
+						"(not the expected %04x:%04x)\n",
+					dd.idVendor, dd.idProduct,
+					HSF_VID, HSF_PID);
+				fallback = h;
+			} else {
+				libusb_close(h);
+			}
+		}
+		if (!d->h)
+			d->h = fallback;
+		else if (fallback)
+			libusb_close(fallback);
+		if (list)
+			libusb_free_device_list(list, 1);
+	}
 	if (!d->h) {
 		libusb_exit(d->ctx);
 		free(d);
