@@ -1070,3 +1070,55 @@ Status of the Sd fit, stated exactly: its rejections are verified live on seven
 Phase-3 calls, its acceptance only in `v90_analogue_sd_test`.  The one live call
 that carried Sd met the 128 ms window and is what corrected it; no call since
 has carried Sd at all.
+
+## The Ja parse, offline: the parser is exonerated and the bits are noise
+
+Reproduces from the digital side's own tap with no rig:
+
+    V90_JA_BIT_DUMP=/tmp/ja.txt ./v90_engine_replay <live-rx.g711> ulaw --fast --from 0
+
+which prints `Starting Phase 3 TX`, then `Ja search input: ... rx_stage=10
+longest_hyp_len=572 ... 2236 ... 3772 ... 6972` and `p3_demod: J scan ... no J
+found (baud=4 tried all carriers)` nine times.  So bits ARE being accumulated --
+13884 per hypothesis, 24 hypotheses -- and the parser refuses all of them.
+
+**The bits are not a demodulation of Ja, and one content-independent test says
+so.**  Ja repeats its descriptor, so a correct hypothesis must be PERIODIC at
+the descriptor length, whatever Table 12 says about the content.  Over all 24:
+
+| | best lag | agreement |
+|---|---|---|
+| every hypothesis | 727 - 2574 | **0.523 - 0.533** |
+
+0.50 is a coin.  Nothing is periodic at any lag between 600 and 2600 bits.  Six
+hypotheses (2, 6, 8, 14, 17, 20) carry a single run of 511-512 ones, which is a
+stuck region rather than the descriptor's leading `0xffff` sync.  **The parser
+was handed noise; no parser could have succeeded**, which is the same verdict
+§35n reached for the SmartLink rig by a different route.
+
+**And it is not our transmitter.**  Scanning our own 16 kHz transmit tap for
+§10.1.3.7's three-bin S signature -- energy at fc and fc +/- baud/2, here
+1828.6 and 228.6/3428.6 Hz for the negotiated 3200 baud low carrier -- gives one
+window at **0.343** of the power and everything else at 0.02, which is exactly
+what a 128T (40 ms) S inside a 50 ms window looks like, followed by wideband
+PP/TRN/Ja.  Our analogue Phase 3 is well formed.
+
+**Nor is it the line.**  The same scan on what the DIGITAL side received puts S
+at t=10.800 with a three-bin fraction of **0.618** -- the strongest such window
+in the whole recording, the next real one being 0.130 and the rest 0.03.  S
+crossed the 2-wire hybrid, the ATA and the SIP leg intact.
+
+So the failure is the digital side's **V.34 Phase 3 acquisition**: it sits in
+`PHASE3_WAIT_S`, publishes no S, PP, TRN or J event for the whole window
+(`ME_V34_SPAN_FLOW_LOG=1` shows none), and the Ja bit accumulator runs anyway on
+an untrained receiver -- which is where the noise comes from.  `V34_PHASE3_S_SPECTRAL=1`
+does not rescue it either (9 `no J found` with it on and 9 with it off), the
+same result that knob gave on the analogue side.
+
+**This is the same defect on both sides of the call**, and it is the one this
+file already identified for the analogue receiver: a constellation-domain
+acquisition needs an open eye, and on a real 2-wire bearer it does not have one
+until something has equalised the channel.  The Sd fit is that argument carried
+out for §8.4.4's Sd.  §10.1.3.7's S has the same property -- it is a known
+sequence, so it can be fitted rather than sliced -- and the same treatment is
+what the V.34 Phase 3 acquisition needs at both ends.
