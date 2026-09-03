@@ -471,7 +471,7 @@ struct hsf_dev *hsf_fxo_open(void)
 	{
 		libusb_device **list = NULL;
 		ssize_t n = libusb_get_device_list(d->ctx, &list);
-		libusb_device_handle *fallback = NULL;
+		libusb_device_handle *other = NULL, *quiet = NULL;
 		for (ssize_t i = 0; i < n && !d->h; i++) {
 			struct libusb_device_descriptor dd;
 			if (libusb_get_device_descriptor(list[i], &dd) < 0 ||
@@ -484,30 +484,36 @@ struct hsf_dev *hsf_fxo_open(void)
 			int alive = libusb_get_string_descriptor_ascii(
 					h, dd.iProduct ? dd.iProduct : 1,
 					s, sizeof(s)) >= 0;
-			if (!alive) {
-				fprintf(stderr, "hsf_fxo: %04x:%04x is on the bus "
-						"but its EP0 does not answer -- "
-						"a stale IOKit entry, skipping\n",
-					dd.idVendor, dd.idProduct);
-				libusb_close(h);
-				continue;
-			}
 			if (dd.idProduct == HSF_PID) {
+				/* The expected part is taken whether or not it
+				 * answers: a CD2 whose bootloader window has
+				 * closed is silent on EP0 and is still the
+				 * device we want -- --wait exists for exactly
+				 * that state.  Liveness only reports. */
+				/* Not a liveness report: this part refuses the
+				 * string descriptor while answering vendor
+				 * requests perfectly well, so `alive` is only a
+				 * tie-break between several candidates. */
+				(void)alive;
 				d->h = h;
-			} else if (!fallback) {
+			} else if (alive && !other) {
 				fprintf(stderr, "hsf_fxo: using %04x:%04x "
 						"(not the expected %04x:%04x)\n",
 					dd.idVendor, dd.idProduct,
 					HSF_VID, HSF_PID);
-				fallback = h;
+				other = h;
+			} else if (!alive && !quiet) {
+				quiet = h;
 			} else {
 				libusb_close(h);
 			}
 		}
 		if (!d->h)
-			d->h = fallback;
-		else if (fallback)
-			libusb_close(fallback);
+			d->h = other ? other : quiet;
+		if (other && other != d->h)
+			libusb_close(other);
+		if (quiet && quiet != d->h)
+			libusb_close(quiet);
 		if (list)
 			libusb_free_device_list(list, 1);
 	}
