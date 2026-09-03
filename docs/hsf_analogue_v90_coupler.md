@@ -1039,3 +1039,34 @@ through the same sliding window the engine drives.  Four windows hit at every
 sampling phase, best score 1.000.
 
 Still owed: a live call that has Sd on the line AND the corrected window.
+
+### Six more calls with the corrected window: the blocker is now the Ja parse
+
+Six calls, five of which reached Phase 3.  **The fit ran on all five and
+rejected every window -- correctly, because none of those calls had Sd on the
+line.**  Scores -0.202, 0.000, -0.026, -0.188, -0.205 against a gate of 0.80.
+
+What stops Sd is one line up, and the digital side's log says it plainly:
+
+    [V90] Starting Phase 3 TX (U_INFO=76, law=u-law)
+    [ME] V.90 p3_demod: J scan at 320 ms, no J found (baud=4 tried all carriers)
+    [ME] V.90 p3_demod: J scan at 640 ms, no J found ...
+    [ME] V.90 bridge: phase3_started=1 v90=1 rx=PHASE3_WAIT_S(10) tx=FIRST_S(37)
+
+Phase 3 TX **is** started (`phase3_started=1`); it holds in `V90_TX_WAIT_JA`
+because §9.3.1.3 starts Sd only on a CRC-valid Ja descriptor, and the scan never
+finds one.  `tx=FIRST_S(37)` is the V.34 transmitter idling underneath, not a
+fallback.  This is the **Ja-parse lottery** already documented in
+`v90_phase3_s_and_rbs_false_positive.md` §34, whose corpus figure is that all
+108 captures reaching data mode parsed a Ja descriptor -- necessary, and on this
+rig now the binding constraint.
+
+So the ordering of the remaining work is settled, and it is not what it looked
+like an hour ago: **the analogue Sd receiver is no longer what blocks the call.
+The digital side's Ja parse is.**  Both G.711 taps are kept for all six, so it
+is workable offline in the same way the V.8 CM analysis above was.
+
+Status of the Sd fit, stated exactly: its rejections are verified live on seven
+Phase-3 calls, its acceptance only in `v90_analogue_sd_test`.  The one live call
+that carried Sd met the 128 ms window and is what corrected it; no call since
+has carried Sd at all.
