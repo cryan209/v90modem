@@ -1322,3 +1322,45 @@ is only sent once a Jd frame decodes.  That is the seam `CLAUDE.md` already
 records ("it oscillates and no Jd frame validates ... a single lost or
 substituted sample desynchronises the §5.3 descrambler") -- now reached
 reliably from a two-wire line rather than by luck.
+
+### The Jd seam: diagnosed, not fixed (2026-09-03)
+
+The oscillation has a definite cause.  The §8.4.5 -> §8.4.2 boundary is taken
+on a SINGLE descrambled zero:
+
+```c
+if (!plain && s->trn1d_symbols > TRN1D_MIN_SYMBOLS) {
+    s->trn1d_break = s->trn1d_scan - 1;
+    s->stage = V90A_RX_JD;
+```
+
+That is right on the digital bearer, where the codewords are exact and §8.4.5's
+plaintext is all ones, so the first zero after the training interval IS Jd.
+Where the levels are sliced there is a residual sign-error rate -- §8.4.5's own
+confirmation reads 95-100%, not 100% -- so the first zero after 2040T is almost
+always a stray error, tens of thousands of symbols early.  The frame search
+then hunts a window that does not contain Jd, fails, drops back to TRN1d, and
+the next stray error repeats it: TRN1d runs 44000-46000 symbols and no frame
+ever validates.
+
+**A windowed rate is the right shape and is NOT in, because it was not
+calibrated.**  Zeros-in-32 with a threshold of 8 broke at TRN1d 2593T on
+call-062754Z, which is certainly premature -- the digital side sends 20004T --
+so the error bursts reach 25% locally even though the average is 3.5%.  Raising
+the threshold without knowing the two distributions is guessing.
+
+**Do not calibrate it from a sym-dump reconstruction.**  Descrambling
+`sign(sym)` from `V90A_SYM_DUMP` gives 66.6% ones over a stretch the receiver
+itself reports as 96.5%, so that path does not reproduce the receiver's
+post-requantisation codeword sign, and every statistic taken from it is
+meaningless.  The receiver's own numbers are the only trustworthy ones here
+(the same trap as the offline descrambler earlier in this file, which was only
+caught because `artifacts/eicon-digital-downstream` was there to validate it).
+
+**The better shape, unimplemented: let the CRC find the boundary.**  Table 13's
+structure and CRC are ground truth and `try_jd_frame()` already exists.  Rather
+than guessing where TRN1d ends and searching a window around the guess, run the
+frame decode periodically while in TRN1d past the training interval and leave
+only when a frame VALIDATES.  That owes nothing to a threshold, and it is the
+principle the code already states one stage earlier -- "take the break as a
+hint and let the frame decide".
