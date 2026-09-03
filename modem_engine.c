@@ -30,6 +30,7 @@
 #include "v90_analogue_phase3.h"
 #include "v90_analogue_linear.h"
 #include "v90_analogue_fse.h"
+#include "v90_analogue_sd.h"
 #include "v90_sounder.h"
 #include "v90_dil_presets.h"
 #include "p3_demod.h"
@@ -1858,6 +1859,29 @@ static bool     g_v90a_16k = false;
 /* Whether the G.711 ladder has been calibrated against the TRN1d Ucode the
  * receiver learned; until it has, a level means nothing in absolute terms. */
 static bool     g_v90a_ladder_set = false;
+/*
+ * §8.4.4's Sd acquisition, before anything is calibrated.
+ *
+ * The blind equaliser cannot be used here: CMA drives every symbol to one
+ * modulus and Sd is four slots at W and two at zero, so it erases exactly the
+ * structure the hunt looks for (measured: real Sd through a dispersive channel
+ * comes out ±1 on all six slots).  So the taps are FITTED to §8.4.4's known
+ * sequence instead, over a window buffered here, and the blind loop is not
+ * started until §8.4.5's TRN1d, which is constant modulus and is what it was
+ * written for.
+ */
+/*
+ * The fit window: 1024 DS0 intervals, 128 ms.  §8.4.4 sends Sd for at least 64
+ * six-symbol repetitions and this project's own digital transmitter sends
+ * exactly that, so a window has to be a good deal shorter than the signal and
+ * the hunt has to be able to afford a few of them.
+ */
+#define V90A_SD_FIT_SAMPLES 2048
+static int16_t  g_v90a_sd_buf[V90A_SD_FIT_SAMPLES];
+static int      g_v90a_sd_fill = 0;
+static bool     g_v90a_sd_fitted = false;
+static int      g_v90a_sd_score_logged = 0;
+static v90a_sd_t *g_v90a_sd = NULL;
 static bool     g_v90a_dil_tracking = false;
 /*
  * The equaliser's unit modulus, in the slicer's input units.  Arbitrary -- it
@@ -3943,6 +3967,13 @@ static void cleanup_v34_v90_training_locked(void)
         g_v90a_fse = NULL;
         g_v90a_16k = false;
         g_v90a_ladder_set = false;
+        g_v90a_sd_fill = 0;
+        g_v90a_sd_fitted = false;
+        g_v90a_sd_score_logged = 0;
+        if (g_v90a_sd) {
+            v90a_sd_free(g_v90a_sd);
+            g_v90a_sd = NULL;
+        }
         g_v90a_dil_tracking = false;
         g_v90a = NULL;
     }
@@ -4211,6 +4242,13 @@ static bool restart_v90_analogue_phase2_locked(const char *reason)
         g_v90a_fse = NULL;
         g_v90a_16k = false;
         g_v90a_ladder_set = false;
+        g_v90a_sd_fill = 0;
+        g_v90a_sd_fitted = false;
+        g_v90a_sd_score_logged = 0;
+        if (g_v90a_sd) {
+            v90a_sd_free(g_v90a_sd);
+            g_v90a_sd = NULL;
+        }
         g_v90a_dil_tracking = false;
         g_v90a = NULL;
     }
@@ -9597,8 +9635,59 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
             pthread_mutex_unlock(&g_state_mtx);
             return;
         }
-        v90a_fse_set_mode(g_v90a_fse, V90A_FSE_CMA);
-        ME_LOG("[ME] V.90 analogue: T/2 equaliser on the 16 kHz stream\n");
+        /*
+         * FROZEN, not CMA.  The first thing on the line is §8.4.4's Sd, which
+         * is not constant modulus -- four slots at W and two at zero -- so the
+         * blind loop would drive the zero slots up to W and destroy the only
+         * structure the hunt has.  The taps are fitted to Sd below instead;
+         * CMA is right for §8.4.5's TRN1d and starts there.
+         */
+        v90a_fse_set_mode(g_v90a_fse, V90A_FSE_FROZEN);
+        g_v90a_sd = v90a_sd_init(0);
+        ME_LOG("[ME] V.90 analogue: T/2 equaliser on the 16 kHz stream, "
+               "awaiting the Sd fit\n");
+    }
+    /*
+     * Acquire the equaliser on Sd.  Buffer a window, fit §8.4.4's reference,
+     * install the taps -- and only then let anything downstream see a symbol,
+     * because before the fit the output is the raw channel at whatever
+     * sampling phase the caller happened to hand over, which is precisely what
+     * the codeword slicer cannot use.
+     */
+    if (!g_v90a_sd_fitted) {
+        int taps = v90a_fse_tap_count(g_v90a_fse);
+        int i;
+
+        for (i = 0; i < len  &&  g_v90a_sd_fill < V90A_SD_FIT_SAMPLES; i++)
+            g_v90a_sd_buf[g_v90a_sd_fill++] = amp[i];
+        if (g_v90a_sd_fill >= V90A_SD_FIT_SAMPLES) {
+            double h[V90A_SD_MAX_TAPS], score = 0.0, level = 0.0;
+            int parity = 0;
+
+            if (taps <= V90A_SD_MAX_TAPS
+                &&  v90a_sd_fit(g_v90a_sd_buf, g_v90a_sd_fill, taps, &parity,
+                                h, &score, &level)) {
+                v90a_fse_set_taps(g_v90a_fse, h, taps, parity);
+                g_v90a_sd_fitted = true;
+                ME_LOG("[ME] V.90 analogue: Sd fit accepted (held-out score "
+                       "%.3f, T/2 parity %d, level %.3f); equaliser acquired "
+                       "on §8.4.4's own sequence\n", score, parity, level);
+            } else {
+                /* Slide by half a window so a fit that straddles the start of
+                 * Sd gets a clean one next time rather than repeating the
+                 * same straddle for ever. */
+                memmove(g_v90a_sd_buf, g_v90a_sd_buf + V90A_SD_FIT_SAMPLES/2,
+                        (V90A_SD_FIT_SAMPLES/2)*sizeof(g_v90a_sd_buf[0]));
+                g_v90a_sd_fill = V90A_SD_FIT_SAMPLES/2;
+                if (g_v90a_sd_score_logged < 8) {
+                    g_v90a_sd_score_logged++;
+                    ME_LOG("[ME] V.90 analogue: no Sd in this window "
+                           "(held-out score %.3f)\n", score);
+                }
+            }
+        }
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
     }
     if (!g_v90a_16k) {
         g_v90a_16k = true;
@@ -9718,6 +9807,20 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
         else if (v < -32000.0)
             v = -32000.0;
         scaled = (int16_t) v;
+        /*
+         * A structural confirmation of the fit on the equalised stream, once.
+         * The fit's own score is held out and is the gate; this is the reading
+         * that says what the receiver is actually looking at -- the grid it
+         * settled on and W's level in the equaliser's units -- and it is what
+         * a live log needs when the fit passes and nothing downstream works.
+         */
+        if (g_v90a_sd != NULL  &&  !v90a_sd_acquired(g_v90a_sd)
+            &&  v90a_sd_put(g_v90a_sd, sym)) {
+            ME_LOG("[ME] V.90 analogue: Sd structure confirmed on the "
+                   "equalised stream (slot %d, level %.3f, score %.3f)\n",
+                   v90a_sd_next_slot(g_v90a_sd), v90a_sd_level(g_v90a_sd),
+                   v90a_sd_score(g_v90a_sd));
+        }
         if (v90a_linear_put(g_v90a_linear, &scaled, 1, &codeword, 1) == 1) {
             me_v90_analogue_rx_codewords_locked(&codeword, 1);
             if (v90a_fse_mode(g_v90a_fse) == V90A_FSE_DD)

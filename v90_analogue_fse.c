@@ -131,6 +131,37 @@ void v90a_fse_free(v90a_fse_t *s)
     }
 }
 
+int v90a_fse_tap_count(const v90a_fse_t *s)
+{
+    return (s != NULL) ? s->taps : 0;
+}
+
+int v90a_fse_set_taps(v90a_fse_t *s, const double *h, int taps, int parity)
+{
+    int i;
+
+    if (s == NULL  ||  h == NULL  ||  taps != s->taps)
+        return 0;
+    /* put() toggles `half` and emits when it lands on 0, so the sample that
+     * produces a symbol is the one AFTER the toggle takes half to 1.  Setting
+     * half = parity therefore makes the next input sample the one the fit
+     * treated as offset `parity` -- and getting this backwards is not a
+     * subtle failure: the output is then the other eye, six-periodic with the
+     * zero slots still in place but the sign grouping shuffled, which reads
+     * like a detector bug rather than an alignment one. */
+    s->half = (parity & 1);
+    for (i = 0; i < taps; i++)
+        s->h[i] = h[i];
+    /* The fit was made on the raw samples, so its taps already contain the
+     * line's gain.  Leaving the AGC free to keep adapting would multiply that
+     * in a second time and walk the output off the unit modulus the fit put it
+     * at, which is the scale everything downstream is calibrated against. */
+    s->agc = 1.0;
+    s->agc_primed = 0;
+    s->agc_frozen = true;
+    return taps;
+}
+
 void v90a_fse_set_mode(v90a_fse_t *s, v90a_fse_mode_t mode)
 {
     if (s == NULL)

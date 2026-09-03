@@ -946,3 +946,67 @@ because both are 2400 Hz and only the *modulation* differs -- Ja is a data
 signal and §9.5.2.1's Tone A is pure.  A purity test (energy in the carrier bin
 against the ±300 Hz control-channel skirts) separates them; nothing here
 measures it yet.
+
+## The equaliser for the Sd hunt: fitted to §8.4.4, not blind
+
+The blocker above -- Sd arrives, the analogue receiver never finds it -- is a
+chicken-and-egg, and naming it that way is what solves it.  The codeword slicer
+has to be told what level a Ucode is before it can produce codewords; the only
+thing on the line that says so is Sd; and the Sd hunt reads codewords.
+
+**The blind equaliser cannot break it, and this is measured rather than
+argued.**  CMA drives every output symbol to one modulus, and §8.4.4's Sd is
+four slots at W and *two at zero*.  Fed real Sd through a dispersive channel the
+existing FSE produces **±1 on all six slots** -- the sign pattern survives and
+every trace of the structure the hunt looks for is gone.  CMA is right for
+§8.4.5's TRN1d, which is scrambled ones on a single Ucode and genuinely constant
+modulus; it is simply the wrong algorithm for the signal that comes first.
+
+Sd needs no blind algorithm, because it is a **known sequence**: §8.4.4 makes it
++W, 0, +W, -W, 0, -W, repeating.  So `v90_analogue_sd.c` fits the T/2 taps to it
+directly, by least squares over a window, and what falls out is not just an
+acquisition but the equaliser itself.
+
+Four things the fit absorbs rather than searches, which is what keeps it to one
+solve instead of twelve: the **channel**, the **sampling phase**, the **slot
+phase** and the **whole-symbol delay** (a fractionally-spaced filter of this
+length can supply any delay, so every slot hypothesis fits equally well and
+differs only in which tap carries the energy), and the **sign** (fitting -r
+returns -h with an identical residual).  It therefore cannot tell Sd from
+§9.3.2.4's S-bar-d -- and does not need to, because what marks that boundary is
+the *change*, which is unambiguous.  One thing it cannot absorb and is told
+instead: the **T/2 parity**, the two eyes, since a filter fitted for even
+samples evaluated on odd ones is shifted by half a symbol.  Both are tried.
+
+**The score is held out** -- fitted on the first half of the window, residual
+measured on the second.  That is the whole of what stops it accepting anything:
+with 32 free taps an in-sample fit explains noise perfectly.  Measured:
+
+| input | held-out score |
+|---|---|
+| Sd through the channel, any sampling phase | **1.000** |
+| Sd at 25 dB SNR | 0.998 |
+| Sd at 18 dB SNR | 0.994 |
+| TRN1d-like (one level, random signs) | **-0.138** |
+| noise | **-0.034** |
+| silence | rejected (R not positive definite) |
+
+The gate is 0.80, in the empty middle.  `v90_analogue_sd_test` runs all of it
+plus the streaming structural scorer -- the ratio test on an already-equalised
+stream, which rejects TRN1d, silence, noise, and a six-periodic signal with the
+right zeros and the wrong signs (the control that says the sign term does work).
+End to end, fit then structure, it acquires at sampling phases 0.00/0.25/0.50/
+0.75, at a 10x gain change, and at 18 dB SNR.  In `make test`.
+
+Live wiring: `me_rx_v90a_16k()` now starts the equaliser **FROZEN**, buffers a
+128 ms window, fits, installs the taps and only then lets a symbol reach the
+slicer; CMA starts at TRN1d where it belongs.  A window that does not contain Sd
+slides by half and is logged with its score, so a live log says whether the
+detector saw nothing or scored something it did not believe.
+
+**Not verified live.**  Three call attempts after the change: two lost the
+intermittent V.8 CM/JM race documented above and never reached Phase 3, and one
+did not reach the PBX at all.  A stray coupler process from a timed-out run also
+held the USB interface for one of them -- `hsf_fxo: claim interface 0 failed:
+LIBUSB_ERROR_ACCESS` is that, not a wedged device, and killing the process
+cleared it.

@@ -68,6 +68,17 @@ int v90a_fse_put(v90a_fse_t *s, const int16_t *amp, int len,
                  double *out, int max);
 
 void v90a_fse_set_mode(v90a_fse_t *s, v90a_fse_mode_t mode);
+/*
+ * Install taps from outside — v90_analogue_sd.h's supervised fit to §8.4.4's
+ * Sd, which is the only thing on the line before TRN1d that a blind algorithm
+ * cannot use (Sd is not constant modulus, so CMA erases its zero slots).
+ * Returns how many taps were taken, 0 if the count does not match.  The input
+ * AGC is neutralised at the same time, because a fit already carries the line's
+ * gain in its taps and applying a second one would scale the output away from
+ * the unit modulus the fit produced.
+ */
+int v90a_fse_set_taps(v90a_fse_t *s, const double *h, int taps, int parity);
+int v90a_fse_tap_count(const v90a_fse_t *s);
 /* The NLMS step.  Acquisition and tracking want different ones: the step that
  * pulls the taps out of a saddle is far too large to sit at, since a gradient
  * loop's residual error is proportional to it. */
