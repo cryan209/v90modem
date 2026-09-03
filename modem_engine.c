@@ -9882,8 +9882,31 @@ static void me_v90a_equalised_locked(const int16_t *amp, int len)
         uint8_t codeword;
         double v;
 
-        if (v90a_fse_put(g_v90a_fse, amp + offset, 2, &sym, 1) != 1)
+        /*
+         * max = 2, NOT 1, and the pair of samples is the reason.
+         *
+         * v90a_fse_put()'s loop is `for (i = 0; i < len && n < max; i++)`, so
+         * it stops the moment it has produced max symbols -- INCLUDING any
+         * samples of this call it has not consumed yet.  A T/2 filter emits on
+         * one of the two samples in a pair and which one is the fit's parity:
+         * at parity 0 the emit lands on the second sample and both are eaten,
+         * but at parity 1 it lands on the FIRST, n reaches max, and the second
+         * sample is silently dropped.  Half the stream, every pair, for the
+         * whole call -- so the delay line is fed at half rate and nothing
+         * downstream can work.  Only one symbol can ever come out of two
+         * samples (half toggles twice), so raising the cap changes nothing
+         * except letting the call finish consuming what it was given.
+         *
+         * Measured: of the calls since Sd detection began working, parity 0
+         * detected Sd in 7 of 8 and parity 1 in 0 of 2 -- artifacts/hsf-v90/
+         * call-085428Z and call-091019Z, both of which fit cleanly at 0.995
+         * and 0.982 and then never leave the hunt.
+         */
+        double syms[2];
+
+        if (v90a_fse_put(g_v90a_fse, amp + offset, 2, syms, 2) < 1)
             continue;
+        sym = syms[0];
         /*
          * V90A_SYM_DUMP=<path>: the EQUALISED symbol, before requantisation,
          * with the receive stage beside it.  The codeword dump cannot answer
