@@ -97,6 +97,9 @@ typedef struct {
 } v90_analogue_rx_config_t;
 
 v90_analogue_rx_t *v90_analogue_rx_init(const v90_analogue_rx_config_t *cfg);
+/* Report §8.4.5's ones count at the confirmation point, accepted or not. */
+void v90_analogue_rx_set_trn1d_report(v90_analogue_rx_t *s,
+                                      void (*fn)(void *, int, int), void *user);
 void v90_analogue_rx_free(v90_analogue_rx_t *s);
 
 /*

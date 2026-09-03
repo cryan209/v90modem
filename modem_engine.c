@@ -1907,6 +1907,16 @@ static bool     g_v90a_dil_tracking = false;
 /* Set while me_rx_g711() is forwarding its own linear copy to me_rx_audio(),
  * so the codeword path is not run twice on one call's samples. */
 static bool     g_rx_from_g711 = false;
+/* §8.4.5's confirmation reading, logged whether or not the level is kept --
+ * "TRN1d ran 256 symbols and went back to hunting" does not say by how much
+ * it missed, and the margin is the whole diagnosis. */
+static void me_v90a_trn1d_report(void *user, int ones, int of)
+{
+    (void) user;
+    ME_LOG("[ME] V.90 analogue: §8.4.5 TRN1d confirmation %d/%d ones (%.1f%%), "
+           "needs 90%%\n", ones, of, of ? 100.0*ones/of : 0.0);
+}
+
 static void me_v90_analogue_rx_codewords_locked(const uint8_t *codewords, int count);
 static bool     g_v90a_complete_logged = false;
 static bool     g_v90a_failed_logged = false;
@@ -8281,6 +8291,11 @@ static void prepare_v90_analogue_phase3_locked(void)
         }
     }
     g_v90a = v90_analogue_phase3_init(&cfg);
+    if (g_v90a != NULL) {
+        v90_analogue_rx_t *rx =
+            (v90_analogue_rx_t *) v90_analogue_phase3_rx_state(g_v90a);
+        v90_analogue_rx_set_trn1d_report(rx, me_v90a_trn1d_report, NULL);
+    }
     if (!g_v90a) {
         ME_LOG("[ME] V.90 analogue: Phase 3 failed to start; the call cannot continue\n");
         trace_phase("V90 analogue Phase3 init failed");
@@ -9858,8 +9873,23 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
              * than the ladder's steps: on the test channel, exact codeword
              * recovery afterwards is 52% that way and 92% this way.
              */
-            v90a_fse_set_mu(g_v90a_fse, V90A_FSE_MU_TRAIN);
-            v90a_fse_set_mode(g_v90a_fse, V90A_FSE_DD);
+            /*
+             * The handover to decision-directed adaptation, against the
+             * single-point constellation set just above.  On a level-sliced
+             * analogue stream that is a loop deciding against one point whose
+             * level it has just derived, so ME_V90A_TRN1D_DD=0 keeps CMA and
+             * makes the handover an experiment: §8.4.5's confirmation reads
+             * ~35% ones where it needs 90%, which is ~22% of the signs wrong
+             * on a constant-level signal, and a mis-adapting DD loop is the
+             * candidate that fits.
+             */
+            {
+                const char *dd = getenv("ME_V90A_TRN1D_DD");
+                if (!(dd && *dd == '0')) {
+                    v90a_fse_set_mu(g_v90a_fse, V90A_FSE_MU_TRAIN);
+                    v90a_fse_set_mode(g_v90a_fse, V90A_FSE_DD);
+                }
+            }
             ME_LOG("[ME] V.90 analogue: ladder calibrated on TRN1d Ucode %d, "
                    "equaliser decision-directed (dispersion %.4f)\n",
                    trn1d, v90a_fse_dispersion(g_v90a_fse));

@@ -69,6 +69,8 @@ struct v90_analogue_rx_s {
      */
     double   sd_w_lvl[6];
     int      sd_miss_run;           /* consecutive unusable slots inside Sd */
+    void   (*trn1d_report)(void *user, int ones, int of);
+    void    *trn1d_report_user;
     int      sd_phase;              /* index%6 that holds sd_pat[0] */
     int      sd_shift_run;          /* consecutive codewords matching S̄d */
 
@@ -721,6 +723,9 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
              * that is what lets the S̄d→TRN1d boundary be matched on "some
              * third magnitude" rather than on a predicted one.
              */
+            if (s->trn1d_scan == TRN1D_CONFIRM_SYMBOLS  &&  s->trn1d_report)
+                s->trn1d_report(s->trn1d_report_user, s->trn1d_ones,
+                                TRN1D_CONFIRM_SYMBOLS - SCRAMBLER_HISTORY);
             if (s->trn1d_scan == TRN1D_CONFIRM_SYMBOLS
                 &&
                 s->trn1d_ones*10 < (TRN1D_CONFIRM_SYMBOLS - SCRAMBLER_HISTORY)*9) {
@@ -1025,4 +1030,15 @@ const uint8_t *v90_analogue_rx_jd_bits(const v90_analogue_rx_t *s)
 const v90_dil_measurement_t *v90_analogue_rx_measurement(const v90_analogue_rx_t *s)
 {
     return (s  &&  s->measurement_valid) ? &s->measurement : NULL;
+}
+
+/* §8.4.5's confirmation reading, for a caller that wants to see it whether or
+ * not the level is accepted.  The check itself is unchanged. */
+void v90_analogue_rx_set_trn1d_report(v90_analogue_rx_t *s,
+                                      void (*fn)(void *, int, int), void *user)
+{
+    if (s == NULL)
+        return;
+    s->trn1d_report = fn;
+    s->trn1d_report_user = user;
 }
