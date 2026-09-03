@@ -154,3 +154,6 @@ port_v34_fixed_test
 port_v34_fixed_lms_test
 port_v34_fixed_solve_test
 v34_hdx_test
+fax_class_test
+fax_class2_test
+hsf_v90_coupler
