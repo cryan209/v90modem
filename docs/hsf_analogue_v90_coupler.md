@@ -1122,3 +1122,48 @@ until something has equalised the channel.  The Sd fit is that argument carried
 out for §8.4.4's Sd.  §10.1.3.7's S has the same property -- it is a known
 sequence, so it can be fitted rather than sliced -- and the same treatment is
 what the V.34 Phase 3 acquisition needs at both ends.
+
+### PP arrives intact, and it — not S — is what can train the equaliser
+
+**Correction to the section above:** it ended by proposing to fit §10.1.3.7's S
+the way §8.4.4's Sd is fitted.  That is wrong, and the reason is worth keeping.
+**S is three spectral lines** — fc and fc ± baud/2, which is exactly why the
+three-bin detector works on it — so it carries **three complex constraints** and
+cannot determine a 32-tap equaliser however cleanly it is received.  Detecting S
+and training on it are different problems, and S can only do the first.
+
+**§10.1.3.6's PP can do the second**, and this recording shows it survives.  PP
+is six periods of a 48-symbol sequence — 90 ms at 3200 baud, wideband, and
+*periodic*, so its presence is measurable without knowing its content at all.
+48 symbols is 240 samples at our 16 kHz transmit tap and 120 at the digital
+side's 8 kHz receive tap:
+
+| | period | correlation at one period |
+|---|---|---|
+| our own transmit tap, t=19.074–19.119 s | 240 | **-0.902**, flat |
+| digital side's receive tap, t=10.842–10.869 s | 120 | **-0.890**, flat |
+
+**The channel costs 0.012.**  (The sign is negative because the carrier is not
+periodic at 48 symbols — 1828.571 Hz is 27.43 cycles in 15 ms — so the waveform
+repeats with a phase rotation; read the magnitude.  Reading the signed value and
+taking `best positive lag` is what made a first pass report "no PP anywhere",
+and it was wrong.)
+
+So the signal chain is now established end to end for both training signals:
+
+* **S**: three-bin fraction 0.343 transmitted (a 40 ms S inside a 50 ms window),
+  **0.618** received — the strongest such window in the whole recording.
+* **PP**: periodicity 0.902 transmitted, **0.890** received.
+
+Neither the transmitter, the 2-wire hybrid, the ATA nor the SIP leg is losing
+anything, and the digital side's V.34 receiver still publishes no S, PP, TRN or
+J event and hands the Ja parser noise.  **The defect is entirely in the Phase 3
+acquisition logic.**
+
+That makes the next step specific rather than architectural: **a supervised fit
+of the T/2 equaliser to PP**, exactly the discipline `v90_analogue_sd.c` uses for
+Sd — a known sequence, least squares, held-out scoring — with PP's 90 ms
+supplying far more training material than Sd's 48 ms, and its periodicity
+supplying the alignment for free.  `tools/v34_phase3_verify.py` already
+correlates a captured tap against §10.1.3.6's own definition and reads 0.97, so
+the reference is in the tree and validated.
