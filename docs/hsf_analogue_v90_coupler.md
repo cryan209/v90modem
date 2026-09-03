@@ -726,3 +726,34 @@ generates its call-progress tones about 15 dB hot, so **dial tone and ringback
 clip the ADC** -- which matters for a modem only in the windows where they are
 present, i.e. before dialling, during ringback, and after a hangup that leaves
 the line off-hook.
+
+### A real coupler call to 6001, with the level question settled
+
+`RUN=... SECS=90 SETTLE=20 tools/hsf_v34_call.sh`, server restarted with
+`VPCM_G711_TAP_DIR` so both taps are kept (`artifacts/hsf-v90/call-012705Z`).
+
+**The clipping is not in the call.**  Over the whole 90 s the only clipped
+samples are the ringback bursts at t=3 and t=6 (464 and 465 per 4000) and the
+startup transient.  From the answer on, the line runs at RMS 5000-5600 with
+peaks of 9500-10800 and **zero clipped samples** -- 10 dB of headroom, exactly
+as the echo-test calibration says it should be.  So the ATA's hot tone
+generator does not touch the modem's own window, and the level thread is closed
+for the purposes of this call.
+
+**What blocks it now is V.8, and the two ends are out of step.**  The analogue
+side detects ANSam, starts, and transmits CM throughout -- but reads the
+answerer's JM as `call function=V series modem data, modulations=none`, takes
+its 10 s timeout (`status=Call negotiation failed (4)` at `+10080ms`) and stops.
+The digital side reads our CM the same way twice (`modulations=none`), declares
+`V.8 failed before CM ... retrying answer tone with ANSam`, and on that retry
+decodes it **completely** -- `V.22/V.22bis duplex, V.34 duplex, V.90 duplex`,
+`protocol=LAPM`, `PCM=V.90/V.92 digital available` -- selects V.90 and enters
+`state=TRAINING mod=V90` about a second *after* the analogue side has given up.
+It then trains alone for 80 s against a modem that is no longer there.
+
+So both ends decode the other's V.8 frame with an **empty modulation list** for
+the first ten seconds and then, on the answerer's second ANSam, the digital
+side gets a perfect one.  That symmetry is the thing to chase: an empty list
+inside a frame whose call function decoded is a V.21 frame that framed and then
+lost its later octets, not a failure to hear the peer at all.  Both taps for
+the call are on disk, so it can be worked offline.
