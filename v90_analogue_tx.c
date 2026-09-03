@@ -73,6 +73,22 @@ static const float pp_symbols[PP_PERIOD_SYMBOLS][2] =
     { 0.5000000f, -0.8660254f}, {-0.0000000f, -1.0000000f}
 };
 
+/*
+ * Expose one PP symbol, so v34_pp_fit_test can check §10.1.3.6's equation
+ * against the table this transmitter actually sends.  Two independent
+ * expressions of one clause: if they ever disagree, a receiver fitted to the
+ * equation would be training on something nobody transmits.
+ */
+void v90_analogue_tx_pp_symbol(int i, float *re, float *im)
+{
+    int k = ((i%PP_PERIOD_SYMBOLS) + PP_PERIOD_SYMBOLS)%PP_PERIOD_SYMBOLS;
+
+    if (re)
+        *re = pp_symbols[k][0];
+    if (im)
+        *im = pp_symbols[k][1];
+}
+
 static const int baud_rates[6] = {2400, 2743, 2800, 3000, 3200, 3429};
 
 /* §9.3.2.1 and §9.3.2.10 durations, in symbols. */

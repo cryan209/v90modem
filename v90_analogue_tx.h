@@ -158,4 +158,7 @@ int v90_analogue_tx_ja_bits(const v90_analogue_tx_t *s);
  */
 bool v90_analogue_tx_deadline_passed(const v90_analogue_tx_t *s);
 
+/* One symbol of §10.1.3.6's PP table, for cross-checking the equation. */
+void v90_analogue_tx_pp_symbol(int i, float *re, float *im);
+
 #endif

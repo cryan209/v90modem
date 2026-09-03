@@ -37,6 +37,7 @@ v34_phase2_decode_test
 v90_analogue_tx_test
 v90_analogue_rx_test
 v90_analogue_sd_test
+v34_pp_fit_test
 v91_loopback_test
 v34_mp_test
 v34_data_test
