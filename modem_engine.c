@@ -9530,6 +9530,24 @@ static void me_v90_analogue_rx_codewords_locked(const uint8_t *codewords, int co
     /* Phase 3 and Phase 4/data are one byte-exact DS0 stream.  The Phase 4
      * receiver changes from CPt to CP at Ed and retains that mapper into
      * data, so it must continue to receive after ME_DATA is entered. */
+    /* V90A_RX_CODEWORD_DUMP=<path>: exactly what the codeword receiver is
+     * handed, so the requantised stream can be examined outside it -- which
+     * is how "the Jd decode fails" was shown to be "the receiver is being
+     * handed TRN1d and asked to hunt Sd". */
+    {
+        static FILE *dump = NULL;
+        static int tried = 0;
+        if (!tried) {
+            const char *p = getenv("V90A_RX_CODEWORD_DUMP");
+            tried = 1;
+            if (p && *p)
+                dump = fopen(p, "wb");
+        }
+        if (dump) {
+            fwrite(codewords, 1, (size_t) count, dump);
+            fflush(dump);
+        }
+    }
     events = v90_analogue_phase3_rx(g_v90a, codewords, count);
     g_v90a_rx_codewords += (uint64_t) count;
     /*
