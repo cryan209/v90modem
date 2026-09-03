@@ -592,3 +592,50 @@ Asterisk's `Milliwatt` is a 0 dBm test tone, so
 
 with the probe off-hook on ring gives dBFS per dBm0 for the whole path in one
 capture -- and the -2 dB port change should then show up as exactly 2 dB.
+
+### Could the DAA be compressing?  No -- swept today, and it expands slightly
+
+The natural objection to "the -2 dB did not move it" is that something between
+the line and the samples is levelling: an AGC or a compressing DAA would
+swallow a 2 dB change, and would equally explain a level that sits pinned at
+the rail whatever arrives.  It would also mean neither of the two amplitude
+estimates means what it says.
+
+`HSF_ECHO_AMP` now sets the echo tone's amplitude, so the linearity is a sweep
+rather than an argument.  Off-hook, dial `1` to silence the dial tone, then
+200 ms bursts of 1000 Hz every second into the ATA's digit-collect window, and
+measure the returning hybrid sidetone with a Goertzel over 100 ms windows
+(`artifacts/hsf-linearity-005746Z`):
+
+| TX amplitude | RX 1 kHz | step |
+|---|---|---|
+| 2000 | 47.6 | |
+| 4000 | 95.5 | x2.007 |
+| 8000 | 192.6 | x2.017 |
+| 16000 | 418.3 | x2.171 |
+| 24000 | 704.4 | x1.684 (x1.5 expected) |
+
+**21.6 dB of transmit produces 23.4 dB of receive.**  Linear to within a
+fraction of a dB up to 16000 and then bending very slightly *upward* -- the
+opposite of compression, and small enough to be the transmit side.  It agrees
+with the earlier sounding, where the returning level tracked ours across a
+**37 dB** range (3500 -> 3800, 702 -> 762, 50 -> 55, ratio 1.086/1.085/1.100).
+(At amplitude 1000 the echo is under the line's own noise: the "peak" windows
+land at 0.8-1.1 s, on the dialled digit, not on the 6-11 s bursts.  Excluded.)
+
+So all three ways the 2 dB could have hidden are now closed:
+
+* **not the estimator** -- the zero-crossing slope is read where the waveform
+  is nowhere near the rail, so it reports the true amplitude of a clipped sine;
+  a 2 dB change of the line would appear as 2 dB of slope;
+* **not the decode** -- the harmonic series is a hard-clipped sine's, to the
+  third decimal;
+* **not a compressing DAA or codec AGC** -- the path is linear over 21.6 dB
+  today and 37 dB in the sounding, and the gain word moves the level by up to
+  19.5 dB, so the chain plainly does respond to a real gain change.
+
+The remaining reading is the simple one: the HT802's port gain does not act on
+the tone its own call-progress generator produces.  Worth confirming the -2 dB
+was applied at all (it should show on the *voice* path), and the Milliwatt
+originate above is the measurement that would show it -- but note that even if
+it applies, 2 dB is not the 18 dB the headroom figure asks for.

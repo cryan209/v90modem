@@ -1082,6 +1082,12 @@ int main(int argc, char **argv)
 			return 2;
 		}
 	}
+	/* The echo tone's amplitude, so the receive path's LINEARITY can be
+	 * swept without a rebuild -- the check that separates a compressing
+	 * DAA from a line whose level simply did not change. */
+	const char *echo_amp = getenv("HSF_ECHO_AMP");
+	if (echo_amp)
+		g_echo_amp = atof(echo_amp);
 	const char *dial_delay_ms = getenv("HSF_DIAL_DELAY_MS");
 	if (dial_delay_ms)
 		g_dial_delay = (unsigned)strtoul(dial_delay_ms, NULL, 0) * 16;
