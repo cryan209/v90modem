@@ -9532,6 +9532,31 @@ static void me_v90_analogue_rx_codewords_locked(const uint8_t *codewords, int co
      * data, so it must continue to receive after ME_DATA is entered. */
     events = v90_analogue_phase3_rx(g_v90a, codewords, count);
     g_v90a_rx_codewords += (uint64_t) count;
+    /*
+     * The stage report beside this is edge-triggered, so a receiver that is
+     * fed correctly and never advances says NOTHING for the whole of Phase 3
+     * -- which is indistinguishable in a log from one that is being fed
+     * nothing at all.  V90A_RX_TRACE=1 reports the stage and its counters on
+     * a period whether or not anything changed.
+     */
+    {
+        static int trace = -1;
+        if (trace < 0) {
+            const char *v = getenv("V90A_RX_TRACE");
+            trace = (v && *v && *v != '0') ? 1 : 0;
+        }
+        if (trace && (g_v90a_rx_codewords % 8000) < (uint64_t) count) {
+            const void *rx = v90_analogue_phase3_rx_state(g_v90a);
+            ME_LOG("[ME] V.90 analogue RX trace: %s at %llu codewords "
+                   "(Sd %d reps, S-bar-d %d reps, TRN1d %dT, Jd %d frames)\n",
+                   v90_analogue_rx_stage_name(
+                       v90_analogue_phase3_rx_stage(g_v90a)),
+                   (unsigned long long) g_v90a_rx_codewords,
+                   v90_analogue_rx_sd_reps(rx), v90_analogue_rx_sd_bar_reps(rx),
+                   v90_analogue_rx_trn1d_symbols(rx),
+                   v90_analogue_rx_jd_frames(rx));
+        }
+    }
     if (events & V90A4_RX_EVENT_CLEARDOWN) {
         /* §9.7: MP drn=0 is a completed cleardown indication, not a
          * malformed MP and not a retrain request. */
