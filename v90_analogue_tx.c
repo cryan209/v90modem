@@ -616,7 +616,24 @@ void v90_analogue_tx_sd_bar_seen(v90_analogue_tx_t *s)
 
 void v90_analogue_tx_jd_seen(v90_analogue_tx_t *s)
 {
-    if (s  &&  s->stage == V90A_TX_JA_SILENCE)
+    /*
+     * From Ja as well as from the silence after it.
+     *
+     * Ja is ended by §9.3.2.4's S̄d, and that works when the far end's Sd
+     * arrives after our Ja.  This peer restarts Sd only ON detecting Ja
+     * ("analogue Ja detected, starting Sd"), so the S̄d the receiver locks is
+     * an EARLIER burst -- measured live, S̄d at 7.6 s against Ja starting at
+     * 8.35 s -- and the trigger is consumed while the transmitter is still in
+     * TRN.  Ja then never ends, so this arrives with the stage still V90A_TX_JA
+     * and was dropped: the receiver decoded 72 Jd frames and ran all the way to
+     * the DIL while the transmitter sat in Ja until §9.3.2's deadline retrained
+     * the call, and the far end reported "no S after 24796 Jd symbols".
+     *
+     * Jd cannot be received unless the digital modem has already received Ja
+     * (§9.3.1.3 gates Sd on it) and finished TRN1d, so Jd is itself the proof
+     * that Ja is done with -- which is what §9.3.2.7 keys S on.
+     */
+    if (s  &&  (s->stage == V90A_TX_JA_SILENCE  ||  s->stage == V90A_TX_JA))
         enter_stage(s, V90A_TX_S_AFTER_JD);
 }
 
