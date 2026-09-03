@@ -2392,13 +2392,27 @@ static bool me_v34_fax_probe(void)
     return cached != 0;
 }
 
+static bool me_v8_no_ci(void)
+{
+    const char *value = getenv("ME_V8_NO_CI");
+
+    return value && atoi(value) != 0;
+}
+
 static int me_start_or_restart_v8_locked(int answer_tone)
 {
     v8_parms_t v8_parms;
     memset(&v8_parms, 0, sizeof(v8_parms));
     v8_parms.modem_connect_tone = g_calling_party ? MODEM_CONNECT_TONES_NONE
                                                   : answer_tone;
-    v8_parms.send_ci            = g_calling_party;
+    /* CI announces a data call to the NETWORK, before the answer.  A caller
+     * that starts V.8 because it has ALREADY heard ANSam has nothing to
+     * announce, and SpanDSP's CI path costs it the 1000 ms V8_WAIT_1S plus
+     * however long its own ansam_rx takes to re-detect a tone we detected for
+     * it -- measured against the HT802 leg, 3.7 s from starting V.8 to the CM
+     * leaving, against an answerer whose CM-wait budget is 200 + 5000 ms.
+     * ME_V8_NO_CI=1 skips CI so V8_AWAIT_ANSAM is entered directly. */
+    v8_parms.send_ci            = g_calling_party && !me_v8_no_ci();
     /* V.92 Tables 5/14 QC/QCA: this endpoint is always the digital modem.
        The current Jp profile selects the mandatory 4-point TRN2u channel.
        v8.c gates the QCA response on a received QC per V.92 9.2.4.1/.2;

@@ -757,3 +757,60 @@ side gets a perfect one.  That symmetry is the thing to chase: an empty list
 inside a frame whose call function decoded is a V.21 frame that framed and then
 lost its later octets, not a failure to hear the peer at all.  Both taps for
 the call are on disk, so it can be worked offline.
+
+## The "empty modulation list" is the CI, and the real fault is a CM/JM race
+
+Worked entirely off the two G.711 taps of `artifacts/hsf-v90/call-012705Z`, with
+a 60-line V.21 demodulator and 10-bit framer that prints **every** octet
+sequence a receiver could have framed, so the wire is read independently of
+either modem's own state.
+
+**The empty list is correct reporting of a CI.**  In the answerer's receive tap:
+
+| tap time | octets |
+|---|---|
+| 2.633 - 4.463 s | `00 C1` repeated -- **CI**, sync octet `0x00`, call function only |
+| 5.375 s | first complete **CM**, `E0 C1 65 12 10 2A 47 8D`, then a corrupt repeat |
+| 6.435 / 7.037 s | CM then a corrupt second copy (`... 65 16 10`, `... D0 82`) |
+| 7.637 s | **five clean identical CM repeats** |
+
+A CI carries no modulation octets, so `call function=V series modem data,
+modulations=none` is exactly right for it -- and the engine's own log confirms
+the status: `V8 result: status=Call function (CI) received (5)`.  It is
+`me_log_v8_peer_summary()` printing an in-progress event, not a decode failure.
+`vpcm_decode --v8` reads the same CM out of **our own transmit tap** (`C1 65 12
+10`), so the CM we send is well formed and the CM the answerer receives is the
+same bytes.
+
+**What actually fails is a race, and it reproduces offline to the millisecond.**
+`v90_engine_replay <tap> ulaw --fast --from 0` prints SpanDSP's own
+`Timeout waiting for CM`; `--from 2.0` prints `CM recognised` and no timeout.
+(`v90_engine_replay` normally skips to `find_call_start()`, which is why an
+unqualified replay of this call succeeds where the call failed -- **pass
+`--from 0` to reproduce a live V.8 failure**.)  The budget is in `v8_restart()`:
+the answerer's CM-wait is `200 + 5000 ms` from media connect, and
+
+* our first complete CM lands at **5.375 s**, ~200 ms inside it,
+* but `got_cm_jm` wants two identical repeats and the early ones carry bit
+  errors, so the first clean pair is at **7.637 s**,
+* the answerer times out, retries ANSam, decodes the CM immediately, and sends
+  **JM at 11.453 s** (measured in its own transmit tap),
+* by which time the analogue side has taken its own 10 s V.8 timeout at
+  **+10080 ms** and hung up -- it misses the JM by about 1.4 s.
+
+**Why our CM is late: two ANSam detections in series.**  The coupler starts the
+engine only once it has itself detected ANSam (~0.3 s, and it exists because
+starting on a post-dial timer ran V.8 into ringback), and SpanDSP's V.8 caller
+then runs `V8_WAIT_1S` -> CI -> its own `ansam_rx` detection -> `Te` before it
+will send CM.  From `enter V8` to the CM on the wire is **3.7 s**, against an
+answerer waiting 5.2 s from a point 0.3 s earlier.
+
+`ME_V8_NO_CI=1` skips CI so the caller enters `V8_AWAIT_ANSAM` directly.  **It
+is default off and NOT yet demonstrated**: in `--rx-replay` the arms differ
+enormously in the right direction -- with CI the caller emits **no CM at all**
+in 10 s of V.8, without it the CM goes out and repeats -- but that replay does
+not reproduce the live caller timing either (live, with CI, the CM did go out
+at 3.7 s), so the measurement grades the knob's direction and not its worth.
+It needs a live A/B.  CI is in any case addressed to the network before the
+answer, and a caller that starts V.8 *because* it has already heard ANSam has
+nothing to announce with it.
