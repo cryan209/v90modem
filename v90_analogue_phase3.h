@@ -42,6 +42,7 @@ typedef struct {
      * slot several per cent above zero and Ucode 0 is the bottom of a
      * logarithmic ladder.  See v90_analogue_rx.h.
      */
+    bool      dil_require_plan; /* §9.3.2.10: stop only once a plan exists */
     double    zero_slot_fraction;
     double    w_slot_tolerance;
     /* INFO0d bits 33:37, in dBm0, for §8.5.2/Table 15.  Zero means the

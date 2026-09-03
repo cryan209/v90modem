@@ -79,6 +79,12 @@ typedef struct {
      */
     double dil_coverage;
     /*
+     * Also require a constellation to exist (noise ignored) before §9.3.2.10's
+     * early exit fires -- see dil_enough().  Off keeps the coverage fraction
+     * alone, which is what the digital bearer's fixtures expect.
+     */
+    bool   dil_require_plan;
+    /*
      * Fraction of W below which a codeword counts as §8.4.4's zero slot, and
      * the fractional tolerance on the W slots themselves -- both in LEVEL, not
      * in Ucode.  0 keeps the exact-codeword comparison, which is right on the

@@ -521,7 +521,35 @@ static bool dil_enough(v90_analogue_rx_t *s)
     s->measurement_valid = true;
     /* Every training Ucode the descriptor asked about has now been seen at
      * least once, which is what §9.3.2.9 sent it for. */
-    return m.ucodes_measured > 0  &&  m.coverage >= s->cfg.dil_coverage;
+    if (m.ucodes_measured <= 0  ||  m.coverage < s->cfg.dil_coverage)
+        return false;
+    /*
+     * ...and "enough" has to mean enough FOR THE THING IT FEEDS.
+     *
+     * §9.3.2.10 lets the analogue modem stop once it has enough, and a
+     * coverage fraction is a reasonable proxy -- every DIL segment measures
+     * one training Ucode independently, so half a pass really does measure
+     * half the ladder.  But the consumer is v90_analogue_phase4_build_cp(),
+     * which rejects any plan with intervals_unprobed set BEFORE it looks at
+     * the noise margin, and an interval is unprobed when fewer than two of its
+     * levels are distinguishable.  Half the ladder does not guarantee that for
+     * all six.
+     *
+     * Measured live: three calls stopped at 53% coverage with 65 of 121 Ucodes
+     * and then built no constellation at ANY margin -- "ignoring noise it
+     * would be still empty" -- while the digital modem sat in Phase 4 Ri
+     * waiting for the CPt.  So ask the builder's own question instead: keep
+     * measuring until a plan exists with the noise ignored.  The
+     * DIL_DEADLINE_SYMBOLS backstop above still bounds it, and a line that
+     * cannot produce one by then is not one a longer DIL will rescue.
+     */
+    if (s->cfg.dil_require_plan) {
+        v90_dil_rate_plan_t plan;
+
+        if (!v90_dil_measure_plan_rate(&m, 0, 0.0, 0.0, s->cfg.law, &plan))
+            return false;
+    }
+    return true;
 }
 
 static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)

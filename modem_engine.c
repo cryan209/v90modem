@@ -8301,6 +8301,7 @@ static void prepare_v90_analogue_phase3_locked(void)
         const char *v = getenv("ME_V90A_SLOT_LEVELS");
         if (!(v && *v == '0')) {
             cfg.zero_slot_fraction = 0.25;
+            cfg.dil_require_plan = true;
             cfg.w_slot_tolerance = 0.35;
         }
     }
