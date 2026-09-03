@@ -1242,3 +1242,39 @@ recording (`call-062754Z`) before any live call.  That is cheap and fast, and
 it is also how a receiver gets tuned to one capture -- the live run above is
 the control, and the S̄d discrepancy it exposed is exactly the kind of thing a
 replay cannot show.
+
+### The fit window fix, confirmed live (2026-09-03)
+
+Four calls, shipping defaults plus `ME_V90_ANALOGUE_JA_SD_BAR_MS=6000`:
+
+| call | fit | T/2 parity | Sd reps | §8.4.5 confirmation |
+|---|---|---|---|---|
+| `call-090734Z` | 0.994 | 0 | **63** | 10.9% |
+| `call-091019Z` | 0.982 | 1 | none | — |
+| `call-091305Z` | 0.997 | 0 | **63** | 84.0% |
+| `call-091550Z` | no fit attempt | — | none | — |
+
+**63 of §8.4.4's 64 repetitions**, against a previous live best of 36 and two
+live calls that reached zero.  Replaying the window the fit consumed removes
+the lottery on any call that fits at all.
+
+**§8.4.5's confirmation still fails live** -- 10.9% and 84.0%, i.e. ~5-8% of
+signs wrong, where the recording gives 96.5%.  Do not reach for the
+thresholds: 10.9% is just above the <=10% polarity-flip gate, and flipping it
+would give 89.1%, still under the 90% the check wants.  The equalisation is
+genuinely worse on a live line than on `call-062754Z`, and that is the gap.
+
+**Lead, not a finding: T/2 parity.**  Over the calls since Sd detection began
+working, parity 0 detected Sd in 7 of 8 and parity 1 in 0 of 2 (Fisher exact
+p ~ 0.06).  It may be a symptom rather than a cause -- parity 1 may be what
+`v90a_sd_fit()` picks when the sampling instant is marginal, which would make
+it a reading of the same underlying problem as `HSF_RX_DELAY`'s known phase
+lottery.  Parity handling itself traces correct: `v90a_fse_set_taps()` sets
+`half = parity` and `taps` is forced even, so the emitted instants match the
+fit's `2k + off + taps - 1` on both parities.
+
+**Untested lead, noticed while reading:** `v90a_fse_set_taps()` sets
+`agc_frozen`, and `dc` is adapted only `if (!agc_frozen)`, so the FSE's DC
+estimate stays 0 for the whole call -- on a stream whose own comment in
+`v90a_fse_put()` records a standing ~900-count offset.  The fit removes DC
+internally, so its taps assume a DC-free input the FSE never delivers.
