@@ -494,3 +494,56 @@ level are set by different things:
 Off-hook dial tone is the stimulus to sweep against: it is continuous, it is
 the ATA's own generator so it does not depend on a call being placed, and it
 measures 42345 +/- 200 across every capture that contains it.
+
+### The gain field, swept: it is real, and it is already near its floor
+
+Run against off-hook dial tone as planned (`--call-seq --feed --stream 8
+--rx-out`, no `--dial`; the ATA's own generator, so no call is needed).
+`artifacts/hsf-gainsweep-000922Z/`.  Amplitude is read from the **slope at the
+zero crossing** -- `A = median|v[i+1]-v[i]| / (2*pi*399/16000)` -- which is
+unaffected by clipping, where the duty-ratio estimate goes to pieces above 85%
+clipped.  The two agree at the baseline (42422 vs 42406) and the baseline
+repeats across the session (42406, 42097, and 42132-42288 on every run that
+changed nothing).
+
+The word logged as `0x6040` **is** the receive gain, and only that word is:
+
+| word | change | dBFS |
+|---|---|---|
+| `0x7050` / `0x7010` | +0x1000, +0x10 | **-1.3** |
+| `0x7000` | +0x1000, -0x40 | -0.9 |
+| `0x6050` | +0x10 | +0.7 |
+| `0x6040` | **default** | **+2.2** |
+| `0x6140` | +0x100 | +4.6 |
+| `0x7c50` | | +6.1 |
+| `0x6240` | d6 = 0x200 | +12.2 |
+| `0x6440` | d6 = 0x400 | +17.2 |
+| `0x6640` | d6 = 0x600 | +19.5 |
+
+Everything else is inert to within the baseline's own spread (+/-0.1 dB):
+`reg_dc` at 0 / 0x800 / 0x1800 (words `0x25b4`, `0x2db4`, `0x3db4`), `reg_e4`
+at 0 / 0x80 and `reg_da` at 0x1000 (`0xaa28`, `0xaaa8`, `0xbae8`), `d4 = 0`
+(`0xf000`), `d0 = 0` (`0x6000`), the trailing word's own e4 field (`0xaa08`),
+and the vendor's **first-form** set `2004 a208 f000 a228 6000 25b4` taken
+whole.  Bits `0x8/0x4/0x2/0x1/0x20/0x80/0x800` of the gain word do nothing.
+
+**So the sweep answers the question, and the answer is no.**  The reachable
+range is -1.3 to +19.5 dBFS and the default sits 3.5 dB above the floor.  The
+~18 dB has to come off somewhere else: the HT802's own output level, or a
+resistive pad in the line.  Every value of this field that is not the default
+makes it worse or barely better, so the default stays.
+
+Two things fell out of the sweep.
+
+**The trailing post-off-hook write is what connects the receive path.**  With
+`HSF_TRAIL_REG=0` (skip it) or `=0xaae8` (bit `0x20` set) the stream goes
+completely dead -- RMS 0.5 and 3.4, no dial tone, and the DC baseline collapses
+from **+900 counts to -0.4**.  The shipped `0xaac8` is `0xaae8` with `0x20`
+cleared, so that bit gates receive.  A baseline re-run immediately afterwards
+came back at +2.2 dBFS, which is the control that says the rig had not wedged.
+
+**The +900-count DC offset is a health marker, not a defect.**  It is present
+on every run whose receive path is connected and absent on both dead ones, so
+`dc ~= 900` is the cheapest check that the codec is actually listening -- worth
+knowing given the DC offset was previously treated only as something to remove
+before ANSam detection.
