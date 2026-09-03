@@ -1167,3 +1167,42 @@ supplying far more training material than Sd's 48 ms, and its periodicity
 supplying the alignment for free.  `tools/v34_phase3_verify.py` already
 correlates a captured tap against §10.1.3.6's own definition and reads 0.97, so
 the reference is in the tree and validated.
+
+## Phase 3 receive: Sd is detected on the analogue line (2026-09-03)
+
+Confirmed live, two consecutive calls, on the shipping defaults plus
+`ME_V90_ANALOGUE_JA_SD_BAR_MS=6000`:
+
+| call | Sd fit (held-out) | receiver stage | best run |
+|---|---|---|---|
+| `call-075258Z` | 0.991 | `V.90 analogue RX: Sd` | 14 reps |
+| `call-075544Z` | 0.995 | `V.90 analogue RX: Sd` | 31 reps |
+
+Against 0 reps before `072303ad`, on every call ever recorded on this path.
+§8.4.4 sends 64 repetitions, so the receiver holds up to half of them and then
+falls back to hunting rather than reaching S̄d — the §9.3.2.4 transition is the
+next thing, and it is a different stage rather than a repeat of the same fault.
+
+Everything below was found by replaying `artifacts/hsf-v90/call-062754Z`
+(`--rx-replay`, `--replay-from 18.2`), which reproduces a live call to three
+decimals and costs no rig time.  Four defects, each hiding the next; the
+commit message on `072303ad` carries the detail.  The two worth repeating:
+
+**A receiver can have more than one feed, and the one you are editing may not
+be the one it is using.**  The 8 kHz path sliced the raw, *unequalised* stream
+into the same codeword receiver until the Sd fit landed.  Three successive
+changes to the equalised path produced byte-identical codewords, which is the
+signature — if an A/B is bit-exact, the variable is not in the path.
+
+**"Match on level, not codeword" has a second half.**  This document already
+recorded it for Sd's zero slots against the Eicon fixture, and the code did
+compare them as levels — but by testing `ucode == 0`, which is exact.  On a
+two-wire line the zero slots measure **9.6% of W** (Ucode median 64, over 20
+repetitions with a perfect sign split): unmistakably Sd, and rejected every
+time, because Ucode 0 is the bottom of a logarithmic ladder.  The tolerance is
+off by default and only the analogue role sets it — on the digital bearer the
+RTP payload *is* the DS0 and every codeword is exactly the one that was sent.
+
+Not yet reached: S̄d, TRN1d and Jd on a live analogue line, and therefore
+§9.3.2.6's S, which is what the digital side waits for (`no S after 24796 Jd
+symbols`) before it gives up and sends Tone B.
