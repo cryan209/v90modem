@@ -1364,3 +1364,48 @@ frame decode periodically while in TRN1d past the training interval and leave
 only when a frame VALIDATES.  That owes nothing to a threshold, and it is the
 principle the code already states one stage earlier -- "take the break as a
 hint and let the frame decide".
+
+### Phase 3 closes on a live line, both directions (2026-09-03)
+
+Four calls, shipping defaults plus `ME_V90_ANALOGUE_JA_SD_BAR_MS=6000`:
+
+| call | parity | confirmation | Jd frames | reached |
+|---|---|---|---|---|
+| `call-102505Z` | 0 | 74.6% | — | TRN1d |
+| `call-102750Z` | 0 | 98.0% | 19 | done → Phase 4 |
+| `call-103036Z` | **1** | 92.6% | 16 | done → Phase 4 |
+| `call-103321Z` | 0 | **100.0%** | 20 | done → Phase 4 |
+
+**The digital side's own log is the confirmation**, and it is what to read
+rather than ours:
+
+```
+Phase 3: S detected, completed current Jd repetition after 1872 symbols,
+         starting J'd
+Phase 3: J'd complete, entering Phase 4
+Phase 4: Ri (192 symbols)
+```
+
+`Phase 3: S` appears 3 times and `Phase 4` twice, against `no S after 24796
+Jd` on 4 of 4 calls before tonight -- it now appears once.  So our S reaches
+the peer, it finishes Jd, sends J'd, enters Phase 4 and transmits Ri waiting
+for our CPt.
+
+**The blocker is now constellation selection, and it is a KNOWN open item.**
+Every call that reaches Phase 4 ends the same way:
+
+```
+DIL over 121 requested Ucodes; equaliser frozen, dispersion 0.3883
+constellation: none at a 3-sigma noise margin; ignoring noise it would be
+               offerable
+constellation (0 sigma): Mi = 12 2 2 18 2 21, drn=1, 28000 bps
+§9.4.2 B1d/constellation deadline; initiating §9.5.2.1 retrain
+```
+
+The measurement is good enough to design a 28000 bps constellation with the
+noise ignored and refuses to offer anything with a 3-sigma margin, so
+`v90_dil_measure_plan_rate()` returns false and Phase 4 dies on its deadline.
+That is exactly what `docs/v90_analogue_role.md` already records as open:
+"returning false rather than backing off to a floor is now the open item that
+cost that call".  The peer is sitting in Ri waiting, so a floor is all that is
+needed to find out what happens next.
