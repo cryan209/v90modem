@@ -410,3 +410,87 @@ transmits a constellation the line cannot carry for the rest of the call.
 the probe used to leave the coupler linked against the previous build --
 which cost this session one live call whose log showed code that was not in
 the binary.  `makefile` now names the dependency explicitly.
+
+## Why the receive clips against the HT802: a headroom figure, measured
+
+The receive path saturates on every tone the ATA generates, and the level at
+which it does so is now a number rather than an impression.  All of it comes
+off the recordings already in `artifacts/`; no rig time was needed.
+
+Estimating amplitude from the clipped duty ratio (for a sine limited at `C`,
+the clipped fraction is `(2/pi) arccos(C/A)`), on 300 ms windows:
+
+| signal | capture | clipped | amplitude | dBFS |
+|---|---|---|---|---|
+| ringback burst | `hsf-silence-234045Z` t=2.7 | 48.0% | 43596 | **+2.5** |
+| dial tone | `hsf-dialtone-225613Z` t=5.0 | 45.9% | 42345 | **+2.2** |
+| post-answer tone | `hsf-silence-234045Z` t=25 | 23.0% | 33986 | **+0.3** |
+| far-end V.34 probe | `hsf-v90/call-c1` t=12 | 0% | 8645 | -11.6 |
+
+So the ATA's call-progress tones land **2 dB past full scale** and the far
+end's modem signal lands 12 dB below it.  A Grandstream call-progress tone is
+nominally **-13 dBm**, which puts 0 dBFS on this receive path at about
+**-15 dBm** -- where a telephony front end should saturate near +3 dBm0.  The
+receive path is therefore carrying roughly **18 dB more gain than the line
+wants**, and that single figure accounts for everything observed: tones clip,
+modem audio does not, and a data call runs on ~12 dB of headroom.
+
+Three things this rules out.
+
+**It is not our transmit.**  Already measured in the sounding: a 37 dB change
+of transmit level left the saturating signal unchanged to the sample.
+
+**It is not a register we chose.**  The comment in `hsf_fxo_probe.c` that "one
+of these is 20-plus dB hot against the vendor's setting" is not supported.
+The call sequence writes `35b7 2004 a208 f200 aae8 6040 35b4 aac8`, byte for
+byte what the vendor driver writes on this hardware (`hsf_usb_daa.md`), and
+`call-c1` -- which does not clip -- wrote exactly the same eight words.  The
+register set cannot explain a difference it does not have.
+
+**It is not the frequency it was recorded as.**  The post-answer tone is
+**399 Hz**, not the 210 Hz that commit eb3ef515 read off its zero crossings; a
+Goertzel gives 399.0 with the 3rd harmonic at 1197 and, after t=28 s, sidebands
+at 389 and 409 -- a 10 Hz amplitude modulation, which hard clipping alone
+cannot manufacture.
+
+### What the tones are, and a second problem behind them
+
+The cadence identifies the generator.  The bursts before the call is answered
+run 0.4 s on / 0.2 off / 0.4 on / 2.0 off -- the NZ ringback cadence exactly --
+at the same 399 Hz as the off-hook dial tone.  These are the HT802's own tones,
+inserted toward the phone, which is why the far end never hears them.
+
+But the far end never hears anything else either.  Over the whole of a
+connected call the server's own receive tap reads **RMS 4.8, peak 16** in the
+silence run and **RMS 57** in the sounder run -- dither, not audio -- while the
+line at the HSF carries a continuous clipping 399 Hz from the answer instant
+on.  So after answer the ATA is neither passing our transmit to the network nor
+passing the network to us; it is playing a tone at the phone.  A hookswitch
+flash (the ATA holding the call and returning dial tone) fits, and so does a
+polarity reversal on answer that the DAA re-seizes through -- but the onset
+carries **no DC transient at all** (the samples go from the 900-count baseline
+straight into a full-level sine), which is not what a loop-current interruption
+looks like, so neither is established.
+
+### The experiment that splits the remaining two
+
+The 18 dB is either the ATA driving hot or the HSF hearing hot, and one run
+each way separates them, because the ATA's tone level and the far end's modem
+level are set by different things:
+
+* Lower the HT802's call-progress tone level by a known N dB and re-capture
+  off-hook dial tone.  If our amplitude falls by N and the far-end modem level
+  does not move, the tones are simply loud and the headroom figure above is
+  what it is.
+* Sweep the HSF's own gain field.  The register words are the vendor's, but
+  four of the fields inside them (`0x8d6`, `0x8da`, `0x8dc`, `0x8e4`) are
+  derived from a config struct this probe assumes is all-zero, and one is
+  already known to be wrong: the last word had to be hardcoded to `0x35b4` to
+  match the vendor, which means `(cfg[0] >> 5) & 7 == 2`, not 0.  `0x8d6` is
+  the untested 2-bit select next to it, and it lands in the word logged as
+  `0x6040`: the four values are `0x6040 / 0x6240 / 0x6440 / 0x6640`.
+  `--regs d6,da,dc,e4` and `HSF_CALL_REGS` sweep them without a rebuild.
+
+Off-hook dial tone is the stimulus to sweep against: it is continuous, it is
+the ATA's own generator so it does not depend on a call being placed, and it
+measures 42345 +/- 200 across every capture that contains it.
