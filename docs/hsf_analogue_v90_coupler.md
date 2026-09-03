@@ -1292,3 +1292,33 @@ The null result is the explanation.  §8.4.4's Sd is zero-mean -- `+W, 0, +W,
 near zero as a side effect: the filter nulls the offset itself, and handing it
 a DC-free input as well buys nothing.  Do not re-chase this from the source
 alone; it reads like a bug and is not one.
+
+### The parity fix, live: TRN1d now holds (2026-09-03)
+
+Four calls, shipping defaults plus `ME_V90_ANALOGUE_JA_SD_BAR_MS=6000`:
+
+| call | T/2 parity | Sd reps | TRN1d held | §8.4.5 confirmation |
+|---|---|---|---|---|
+| `call-092809Z` | **1** | 63 | 44879T | **98.8%** |
+| `call-093054Z` | 0 | 63 | 1T | 17.6% |
+| `call-093340Z` | **1** | 63 | 46728T | **100.0%** → Jd |
+| `call-093625Z` | 0 | 63 | 44651T | **95.3%** |
+
+**Parity 1 works, and works best.**  Every previous parity-1 call was dead at
+zero repetitions; both here pass §8.4.5 outright.  All four reach Sd 63 of 64,
+and three of four hold TRN1d for 44000-46000 symbols where the previous live
+best was 2040T with the check failing at 10.9% and 84.0%.
+
+**Parity 0 is still a lottery** -- 17.6% on one call and 95.3% on another, the
+same spread as before the fix, which is expected: the parity bug never touched
+parity 0, where the emit already landed on the second sample of the pair.  So
+whatever makes one line equalise worse than another is still there and is
+unrelated to it.
+
+**The blocker is now the Jd seam.**  `call-093340Z` reaches Jd, oscillates
+TRN1d/Jd with zero frames validating, and takes the §9.3.2 deadline; the
+digital side reports `no S after 24796 Jd` on all four, because §9.3.2.6's S
+is only sent once a Jd frame decodes.  That is the seam `CLAUDE.md` already
+records ("it oscillates and no Jd frame validates ... a single lost or
+substituted sample desynchronises the §5.3 descrambler") -- now reached
+reliably from a two-wire line rather than by luck.
