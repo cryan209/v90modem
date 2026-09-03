@@ -20,6 +20,7 @@ static const int baud_rates[6] = {2400, 2743, 2800, 3000, 3200, 3429};
 struct v90_analogue_phase3_s {
     v90_analogue_tx_t *tx;
     double             cp_margin;   /* noise margin the CP was built at */
+    double             level_tolerance;
     v90_analogue_rx_t *rx;
     v34_state_t       *v34;
     bool               owns_v34;
@@ -94,6 +95,7 @@ v90_analogue_phase3_t *v90_analogue_phase3_init(const v90_analogue_phase3_config
     rxc.dil_coverage = cfg->dil_coverage;
     rxc.zero_slot_fraction = cfg->zero_slot_fraction;
     rxc.dil_require_plan = cfg->dil_require_plan;
+    s->level_tolerance = cfg->w_slot_tolerance;
     rxc.w_slot_tolerance = cfg->w_slot_tolerance;
 
     s->law = cfg->law;
@@ -263,6 +265,7 @@ static void start_phase4(v90_analogue_phase3_t *s)
     memset(&p4c, 0, sizeof(p4c));
     p4c.law = s->law;
     p4c.u_info = s->u_info;
+    p4c.level_tolerance = s->level_tolerance;
     p4c.cpt = s->cpt;
     p4c.cp = s->cp;
     if ((s->p4 = v90_analogue_phase4_init(&p4c)) == NULL

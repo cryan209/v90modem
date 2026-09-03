@@ -96,6 +96,14 @@ typedef struct {
     vpcm_cp_frame_t cpt;
     /* §8.6.1 and data mode switch to CP and reset all mapper state after Ed. */
     vpcm_cp_frame_t cp;
+    /*
+     * Fractional tolerance for comparing §8.6.4's Ri level, in LEVEL rather
+     * than by Ucode.  0 keeps the exact comparison, which is right on the
+     * digital bearer where the RTP payload IS the DS0.  On a two-wire line the
+     * recovered Ucode wanders by one constantly, so requiring 12 identical
+     * Ucodes never holds and Ri is never acquired -- see the hunt.
+     */
+    double    level_tolerance;
 } v90_analogue_phase4_config_t;
 
 v90_analogue_phase4_t *v90_analogue_phase4_init(const v90_analogue_phase4_config_t *cfg);

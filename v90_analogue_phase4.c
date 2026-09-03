@@ -658,6 +658,32 @@ static unsigned demap_frame(v90_analogue_phase4_t *s)
  * Is the sign history a run of §8.6.4's + + + − − − at alignment `phase`?
  * `phase` is the offset within the history at which slot 0 sits.
  */
+/* §8.6.4's Ri is one level with a sign pattern on it, so compare the LEVEL.
+ * Returns false when no tolerance is configured, so the caller keeps its exact
+ * Ucode test -- correct on a DS0, where every codeword is the one sent. */
+static bool p4_level_tolerant(const v90_analogue_phase4_t *s)
+{
+    return s->cfg.level_tolerance > 0.0;
+}
+
+static double p4_ucode_level(const v90_analogue_phase4_t *s, int ucode)
+{
+    uint8_t cw = v90_codeword_compose(s->cfg.law, ucode, 1);
+    int lin = (s->cfg.law == V90_LAW_ALAW) ? alaw_to_linear(cw)
+                                           : ulaw_to_linear(cw);
+    return fabs((double) lin);
+}
+
+static bool p4_same_level(const v90_analogue_phase4_t *s, int a, int b)
+{
+    double la = p4_ucode_level(s, a);
+    double lb = p4_ucode_level(s, b);
+
+    if (lb <= 0.0)
+        return a == b;
+    return fabs(la - lb) <= s->cfg.level_tolerance*lb;
+}
+
 static bool r_pattern_at(const v90_analogue_phase4_t *s, int phase, int *polarity)
 {
     int first;
@@ -701,8 +727,19 @@ static unsigned put_one(v90_analogue_phase4_t *s, uint8_t c)
         if (s->hist_len == R_HISTORY  &&  s->hist_ucode[0] != 0) {
             bool level = true;
 
+            /*
+             * "One non-zero level" compared in LEVEL where the codewords are
+             * sliced rather than received.  Requiring twelve identical Ucodes
+             * is right on a DS0 and unmeetable on a two-wire line, where the
+             * recovered Ucode wanders by one: measured live on call-113805Z
+             * the far end had its CPt accepted and was transmitting Ri, and
+             * this reported "hunting Ri (Ri 0T)" for the whole call until the
+             * §9.4.2 deadline retrained it.  Same shape as §8.4.4's Sd hunt.
+             */
             for (int i = 1; i < R_HISTORY; i++) {
-                if (s->hist_ucode[i] != s->hist_ucode[0]) {
+                if (p4_level_tolerant(s)
+                    ? !p4_same_level(s, s->hist_ucode[i], s->hist_ucode[0])
+                    : s->hist_ucode[i] != s->hist_ucode[0]) {
                     level = false;
                     break;
                 }
@@ -736,7 +773,8 @@ static unsigned put_one(v90_analogue_phase4_t *s, uint8_t c)
             slot += R_PERIOD;
         want = (slot < 3) ? s->r_polarity : !s->r_polarity;
         s->r_symbols++;
-        if (ucode != s->r_ucode) {
+        if (p4_level_tolerant(s) ? !p4_same_level(s, ucode, s->r_ucode)
+                                 : ucode != s->r_ucode) {
             /* R is over without a reversal this side could see.  §9.4.2.2 has
              * nothing to act on, so start again rather than pretend. */
             s->stage = V90A4_RX_HUNT_R;
