@@ -5131,7 +5131,15 @@ static void start_v34_training(void)
     g_mod   = ME_MOD_V34;
     g_state = ME_TRAINING;
     g_phase_start_ms = trace_now_ms();
-    trace_phase("enter TRAINING: mod=V34 role=%s", g_calling_party ? "caller" : "answerer");
+    /* g_mod is overwritten to ME_MOD_V34 a line above because V.90's Phases
+     * 2-4 ARE V.34's, so an unqualified "mod=V34" here reads as a V.90 call
+     * falling back -- which cost one session a wrong conclusion from its own
+     * log.  This only covers the DIGITAL role, where g_mod is already V90 on
+     * entry; the analogue role sets it after this call and is disambiguated by
+     * the "V8 selected V90 analogue role" trace immediately above. */
+    trace_phase("enter TRAINING: mod=%s role=%s",
+                v90_upstream ? "V90 (via V.34 phases)" : "V34",
+                g_calling_party ? "caller" : "answerer");
     g_training_rx_energy = 0;
     g_training_rx_count  = 0;
     g_training_tx_samples = 0;

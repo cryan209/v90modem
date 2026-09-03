@@ -860,3 +860,42 @@ own 10 s V.8 timeout, which in the failing call expired 1.4 s before the JM.
 Worth noting for the next thread: all four successful calls entered TRAINING as
 **mod=V34**, not V90, on a `v90` profile whose V.8 result carries
 `pcm=0x2` (V.90 available).
+
+### "Training V.34 not V.90" was two different things, and one was a real bug
+
+**The trace label is a red herring.**  `start_v34_training()` sets
+`g_mod = ME_MOD_V34` and traces `enter TRAINING: mod=V34` unconditionally,
+because **V.90's Phases 2-4 ARE V.34's** -- the same log says
+`V8 selected V90` and `V.8 negotiated V.90 PCM downstream + V.34 upstream` two
+lines earlier, and the `[ME] V.90 bridge:` lines follow.  The call was on the
+V.90 path throughout.  The trace now reports `mod=V90 (via V.34 phases)` where
+the digital role is selected, so a log cannot say that again.
+
+**The real bug: the coupler was running the DIGITAL role on an analogue line.**
+`me_v90_analogue_role()` is gated on `ME_V90_ROLE=analogue`, and neither
+`hsf_v90_coupler` nor `tools/hsf_v34_call.sh` set it -- so the V.8 result took
+the digital-role branch and *both ends of the call believed they were the
+digital modem*.  The giveaway is in the log: `V.90 notch filter at 1200 Hz (our
+CC TX), RX CC at 2400 Hz`, which is §8.2.3.1's assignment for the **digital**
+side.  `--v90-couple` now defaults `ME_V90_ROLE=analogue` (`setenv(..., 0)`, so
+an explicit setting still wins); this binary is wired to a 2-wire line through
+a DAA and V.90 puts the analogue modem on the calling side, which is the side
+that dials, so there is no other correct value.
+
+Live, one call with no environment overrides at all:
+
+    [ME] V.90 role: ANALOGUE (opt-in; Phase 4 B1/B1d ... enabled)
+    [ME] V.90 analogue DIL: measurement-120x66 -- 120 segments, 990.0 ms
+    [ME] V.8 negotiated V.90 with this end as the ANALOGUE modem (U_INFO=78)
+    [ME] V.90 analogue: notch at 2400 Hz (our CC TX), RX CC at 1200 Hz
+    [ME] V.90 analogue Phase 3 started: symbol-rate code 4, high carrier,
+         U_INFO=76, Ja descriptor N=120 (1260 bits)
+
+-- the mirror-image notch, a real DIL descriptor, and the analogue Phase 3
+transmitter running, none of which happened before.
+
+**The blocker has moved to the digital side.**  It stays at
+`tx=V90_PHASE2_B_INFO0_SEEN(24)` with `rx=TONE_A(5)` and `phase3_started=0`,
+never transmits Sd, and the analogue side takes its §9.3.2 deadline in Ja at
++16222 ms and initiates the §9.5.2.1 retrain.  That is the coupled Phase 2 seam
+`vpcm_loopback_test` covers between our own two roles, now facing a real line.

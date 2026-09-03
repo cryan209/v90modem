@@ -932,6 +932,14 @@ int main(int argc, char **argv)
 #ifdef HSF_V90_COUPLER
 		} else if (!strcmp(argv[i], "--v90-couple")) {
 			g_v90_couple = true;
+			/* This binary IS the analogue modem -- it is wired to a
+			 * 2-wire line through a DAA, and V.90 puts the analogue
+			 * modem on the calling side, which is the side that
+			 * dials.  Without this the engine takes the DIGITAL-role
+			 * branch and both ends of the call believe they are the
+			 * digital modem.  setenv(..., 0) so an explicit
+			 * ME_V90_ROLE still wins. */
+			setenv("ME_V90_ROLE", "analogue", 0);
 			do_feed = true;
 #endif
 		} else if (!strcmp(argv[i], "--dial-amp") && i + 1 < argc) {
