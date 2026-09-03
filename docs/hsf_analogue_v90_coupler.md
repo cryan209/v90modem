@@ -1409,3 +1409,45 @@ That is exactly what `docs/v90_analogue_role.md` already records as open:
 "returning false rather than backing off to a floor is now the open item that
 cost that call".  The peer is sitting in Ri waiting, so a floor is all that is
 needed to find out what happens next.
+
+### The digital modem accepts our CPt (2026-09-03)
+
+`call-113805Z`, shipping defaults plus `ME_V90_ANALOGUE_JA_SD_BAR_MS=6000`.
+The DIL coverage rule (`105f61d0`) is what got here: coverage 53% -> **68%**,
+65 Ucodes -> **83**, 12-39 usable -> **62**, and a plan exists where before
+there was none at any margin.
+
+```
+[ME] constellation (0 sigma): Mi = 5 23 8 2 20 2, drn=2, 29333 bps
+[ME] Phase 4 started (§9.4.2.1): CPt drn=14 (22 bits/frame, K=16),
+     CP drn=2 (29333 bps), Sr=0, ld=0, u-law
+[ME] Phase 4 constellations: CPt Mi=5/21/8/2/20/2; CP Mi=5/23/8/2/20/2
+[ME] V.90 analogue TX: CPt
+```
+
+**And the far end took it** -- its log, which is the evidence that matters:
+
+```
+[V90] Phase 4: valid far-end CPt received
+[V90] Phase 4: completing 4 Ri symbols before barred Ri
+[V90] Phase 4: CPt accepted; TRN2d (3996 mapped symbols, D=22, K=16)
+[ME] V.90 strict batch recovered CPt: bits=972 drn=14 mask=0x0FFF crc=0
+     vote=0/100%
+[ME] V.90 recovered CPt constellation[0] tx-Ucodes={86,84,83,2,0} count=5
+```
+
+CRC clean, 100% vote, and its recovered `constellation[0]` count of 5 matches
+our `Mi=5` for interval 0.  It completed Ri, sent barred Ri and entered TRN2d.
+So §8.5.2's constellation offer, built from a DIL measured over a two-wire
+line, is accepted by a real digital modem.
+
+**The new blocker is one stage further on and is a RECEIVE problem:** our
+Phase 4 receiver reports `hunting Ri (Ri 0T)` throughout and never acquires
+the Ri the far end is plainly transmitting, so the §9.4.2 B1d/constellation
+deadline retrains the call.  Note the shape -- the far end is transmitting a
+4-point signal we are not detecting -- which is the same shape as the Sd hunt
+at the start of the evening, and the level-domain lesson from that is likely
+to apply again.
+
+Only 1 of 4 calls reached Phase 4 at all this batch, so the DIL still does not
+complete reliably; 68% coverage on the one that did is well short of a pass.
