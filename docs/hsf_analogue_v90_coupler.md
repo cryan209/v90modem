@@ -639,3 +639,49 @@ the tone its own call-progress generator produces.  Worth confirming the -2 dB
 was applied at all (it should show on the *voice* path), and the Milliwatt
 originate above is the measurement that would show it -- but note that even if
 it applies, 2 dB is not the 18 dB the headroom figure asks for.
+
+### CORRECTION: the receive path is correctly scaled.  9099 settles it
+
+Dialling out works and always did.  Extension **9099 is an echo test**, and
+one call to it answers the level question completely -- with a known transmit
+amplitude and a return path, no assumption about anybody's nominal level is
+needed.  `--dial 9099 --echo-tone 1000 --echo-on-ms 60 --tx-out`, transmit
+amplitude 8000 (`artifacts/hsf-echo9099-010721Z`).  Four bursts arrive per
+second and `--tx-out` pins which is which:
+
+| burst | delay after our own | peak |
+|---|---|---|
+| local hybrid sidetone | +40 ms | 610 |
+| network echo | +280 ms | **8088** |
+| echo round two | +540 ms | 594 |
+| echo round three | +800 ms | 55 |
+
+**We transmit 8000 and get 8088 back through the ATA, Asterisk and the echo
+application: the voice path is unity to within 1 dB, round trip.**  The whole
+25 s call peaks at 8258-8546 with **zero clipped samples**.  The trans-hybrid
+loss is ~25 dB (610/8000), which is healthy, and the round-trip delay is
+280 ms with each further lap 22 dB down.
+
+So **the earlier "0 dBFS is about -15 dBm, roughly 18 dB too much receive
+gain" is withdrawn.**  It rested on assuming the HT802's call-progress tones
+sit at their nominal -13 dBm; the echo test shows they do not.  With the voice
+path at unity, 0 dBFS is 0 dBm0, and a far end transmitting at -13 dBm0 lands
+at -13 dBFS -- which is exactly where `call-c1`'s V.34 probe landed (-11.6),
+and it is 13 dB of headroom, not 2.  Nothing is wrong with the receive gain,
+the DAA, the codec or the decode.
+
+**What is hot is the HT802's tone generator, by about 15 dB.**  Its dial tone
+and ringback arrive at +2.2 dBFS, i.e. it is generating them at roughly
++2 dBm0 where a call-progress tone should be near -13.  That is the tone-level
+field in the call-progress tone string, which is also why the port gain change
+from 0 to -2 dB moved them not at all: the port gain is on the voice path, and
+the voice path was never the problem.
+
+**And the 400 Hz at answer is confined to the 6001 leg.**  The 9099 call is
+silent between bursts (RMS 0.1-0.3 at 1 kHz) for its whole length -- no tone
+appears when it connects, at either 1000 Hz or 2100 Hz transmit.  So the
+continuous clipping 399 Hz that arrives the moment our own `sip_v90_modem`
+answers, together with that leg carrying no audio in either direction, is a
+property of that call and not of the ATA answering calls in general.  A plain
+2100 Hz from our side does not provoke it on 9099, so a naive
+fax/modem-tone detector in the ATA is not enough to explain it on its own.
