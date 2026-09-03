@@ -9955,6 +9955,30 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
 
         if (v90a_fse_put(g_v90a_fse, amp + offset, 2, &sym, 1) != 1)
             continue;
+        /*
+         * V90A_SYM_DUMP=<path>: the EQUALISED symbol, before requantisation,
+         * with the receive stage beside it.  The codeword dump cannot answer
+         * questions about this stream, because the ladder is recalibrated at
+         * TRN1d entry and the requantisation scale therefore changes mid-file.
+         * Records {float sym; uint8 stage;}, i.e. numpy dtype
+         * [('sym','<f4'),('stage','u1')].
+         */
+        {
+            static FILE *sd = NULL;
+            static int tried = 0;
+            if (!tried) {
+                const char *p = getenv("V90A_SYM_DUMP");
+                tried = 1;
+                if (p && *p)
+                    sd = fopen(p, "wb");
+            }
+            if (sd) {
+                float f = (float) sym;
+                uint8_t st = (uint8_t) v90_analogue_phase3_rx_stage(g_v90a);
+                fwrite(&f, sizeof(f), 1, sd);
+                fwrite(&st, 1, 1, sd);
+            }
+        }
         v = sym*V90A_FSE_SCALE;
         if (v > 32000.0)
             v = 32000.0;
