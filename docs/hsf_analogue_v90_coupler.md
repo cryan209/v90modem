@@ -547,3 +547,48 @@ on every run whose receive path is connected and absent on both dead ones, so
 `dc ~= 900` is the cheapest check that the codec is actually listening -- worth
 knowing given the DC offset was previously treated only as something to remove
 before ANSam detection.
+
+### The decode is not the problem, and the ATA's -2 dB does not reach the tones
+
+Two checks, both cheap, prompted by the reasonable suspicion that the clipping
+is an artefact of how we read the codec's stream.
+
+**The received waveform is a hard-clipped sine, harmonic for harmonic.**
+`--rx-out` writes the USB bulk payload verbatim -- no scaling, no clamping --
+and at a flat top the bytes read `ff7f ff7f ff7f`, so the rail is the device's.
+Against a synthetic 399 Hz sine of amplitude 42084 limited at the int16 rails:
+
+| | H1 | H3/H1 | H5/H1 | H7/H1 | H9/H1 |
+|---|---|---|---|---|---|
+| measured | 18442 | 0.0907 | 0.0318 | 0.0035 | 0.0088 |
+| clipped sine, A = 42084 | 18500 | 0.0929 | 0.0344 | 0.0040 | 0.0115 |
+| clipped sine, A = 38000 | 17859 | 0.0506 | 0.0298 | 0.0101 | 0.0022 |
+| clipped sine, A = 46000 | 18929 | 0.1270 | 0.0269 | 0.0176 | 0.0092 |
+
+The match is to the third decimal and the neighbouring amplitudes do not fit,
+so the amplitude is pinned to within about 1 dB by the harmonics alone -- a
+completely independent route to the same 42084 the zero-crossing slope gives.
+**A misread format cannot produce a textbook clipped-sine harmonic series**, so
+the int16-LE reading is right, the codec is linear right up to the rail, and
+the line signal really is ~2 dB over the codec's full scale.
+
+**The ATA's port gain does not apply to its own call-progress tones.**  With
+the HT802 changed from 0 dB to -2 dB, the same capture reads **42084 against
+the previous 42406 -- 0.07 dB, i.e. nothing**.  On this ATA the port gain is on
+the RTP-to-line voice path; the tones come from the call-progress tone
+generator and carry their own level in the tone string (`f1=400@-13`), which is
+what has to change to stop dial tone and ringback clipping.
+
+Which leaves the measurement that has not been made: **the voice path's
+absolute level**.  It is the one that matters -- the tones are a nuisance, the
+far end's modem signal is the signal -- and no capture here traverses it,
+because after answer this ATA passes neither direction (server receive tap RMS
+4.8, peak 16, for a whole connected call).  The way to get it without solving
+that first is to make the ATA the *called* party, so the HSF answers a ring
+instead of placing a call, and to put a known absolute level on the far end:
+Asterisk's `Milliwatt` is a 0 dBm test tone, so
+
+    channel originate PJSIP/6004 application Milliwatt
+
+with the probe off-hook on ring gives dBFS per dBm0 for the whole path in one
+capture -- and the -2 dB port change should then show up as exactly 2 dB.
