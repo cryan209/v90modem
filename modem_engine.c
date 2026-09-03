@@ -9884,11 +9884,32 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
              * candidate that fits.
              */
             {
-                const char *dd = getenv("ME_V90A_TRN1D_DD");
-                if (!(dd && *dd == '0')) {
-                    v90a_fse_set_mu(g_v90a_fse, V90A_FSE_MU_TRAIN);
+                /*
+                 * §9.3.2.5 makes the first 2040T of TRN1d the equaliser's
+                 * training interval, and §8.4.5's TRN1d is ONE level with a
+                 * sign on it -- constant modulus, which is what CMA is for.
+                 * v90_analogue_fse.h says so in as many words ("blind,
+                 * constant modulus (TRN1d)") and R2 = 1 is documented as
+                 * fixing the output scale to that level, which is the scale
+                 * the ladder calibration beside this assumes.  Handing over to
+                 * a decision-directed loop here instead left the modulus never
+                 * driven to TRN1d's level at all.
+                 *
+                 * Measured on artifacts/hsf-v90/call-062754Z at the old
+                 * 256-symbol confirmation point: DD 53.6% ones, frozen 61.2%,
+                 * against the 90% §8.4.5 wants -- neither converges, because
+                 * the Sd fit that precedes them is constrained only at Sd's
+                 * 1333 Hz harmonics and TRN1d is flat.
+                 */
+                const char *m = getenv("ME_V90A_TRN1D_ADAPT");
+
+                v90a_fse_set_mu(g_v90a_fse, V90A_FSE_MU_TRAIN);
+                if (m && !strcmp(m, "dd"))
                     v90a_fse_set_mode(g_v90a_fse, V90A_FSE_DD);
-                }
+                else if (m && !strcmp(m, "frozen"))
+                    v90a_fse_set_mode(g_v90a_fse, V90A_FSE_FROZEN);
+                else
+                    v90a_fse_set_mode(g_v90a_fse, V90A_FSE_CMA);
             }
             ME_LOG("[ME] V.90 analogue: ladder calibrated on TRN1d Ucode %d, "
                    "equaliser decision-directed (dispersion %.4f)\n",

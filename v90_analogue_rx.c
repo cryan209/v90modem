@@ -69,6 +69,14 @@ struct v90_analogue_rx_s {
      */
     double   sd_w_lvl[6];
     int      sd_miss_run;           /* consecutive unusable slots inside Sd */
+    /*
+     * CMA is blind to sign -- driving |y| to a modulus leaves y -> -y equally
+     * valid -- so a blindly equalised stream arrives at an arbitrary polarity
+     * that has to be resolved once.  §8.4.5's plaintext is all ones, so an
+     * inverted stream descrambles to all ZEROS, which is what resolves it.
+     */
+    int      sign_flip;
+    int      sign_flip_tried;
     void   (*trn1d_report)(void *user, int ones, int of);
     void    *trn1d_report_user;
     int      sd_phase;              /* index%6 that holds sd_pat[0] */
@@ -313,7 +321,7 @@ static int codeword_ucode(const v90_analogue_rx_t *s, uint8_t c, int *sign_out)
 
     v90_codeword_decompose(s->cfg.law, c, &ucode, &sign);
     if (sign_out)
-        *sign_out = sign;
+        *sign_out = s->sign_flip ? !sign : sign;
     return ucode;
 }
 
@@ -691,6 +699,8 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
     }
 
     case V90A_RX_TRN1D: {
+        int confirm_at;
+        int confirm_of;
         if (!push_sign(s, c)) {
             /* Nothing sane left to do with a stream this long: TRN1d cannot
              * legitimately outrun §9.3.1.5's budget by this much. */
@@ -723,16 +733,61 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
              * that is what lets the S̄d→TRN1d boundary be matched on "some
              * third magnitude" rather than on a predicted one.
              */
-            if (s->trn1d_scan == TRN1D_CONFIRM_SYMBOLS  &&  s->trn1d_report)
-                s->trn1d_report(s->trn1d_report_user, s->trn1d_ones,
-                                TRN1D_CONFIRM_SYMBOLS - SCRAMBLER_HISTORY);
-            if (s->trn1d_scan == TRN1D_CONFIRM_SYMBOLS
-                &&
-                s->trn1d_ones*10 < (TRN1D_CONFIRM_SYMBOLS - SCRAMBLER_HISTORY)*9) {
-                s->stage = V90A_RX_HUNT_SD;
-                memset(s->sd_run, 0, sizeof(s->sd_run));
-                memset(s->sd_w, 0, sizeof(s->sd_w));
-                break;
+            /*
+             * WHEN to confirm.  On the digital bearer the codewords are exact
+             * from the first symbol, so 256 is early and cheap.  Where levels
+             * are sliced the equaliser is still training -- §9.3.2.5 gives it
+             * the first 2040T for exactly that -- so judging §8.4.5 at symbol
+             * 256 measures an unconverged filter rather than the level.
+             * Confirm at the end of that interval, over its last
+             * CONFIRM_SYMBOLS, restarting the count so the unconverged part is
+             * not what is counted.
+             */
+            confirm_at = level_tolerant(s) ? TRN1D_MIN_SYMBOLS
+                                           : TRN1D_CONFIRM_SYMBOLS;
+            confirm_of = level_tolerant(s)
+                         ? TRN1D_CONFIRM_SYMBOLS
+                         : TRN1D_CONFIRM_SYMBOLS - SCRAMBLER_HISTORY;
+            if (level_tolerant(s)
+                &&  s->trn1d_scan == confirm_at - TRN1D_CONFIRM_SYMBOLS)
+                s->trn1d_ones = 0;
+            if (s->trn1d_scan == confirm_at) {
+                if (s->trn1d_report)
+                    s->trn1d_report(s->trn1d_report_user, s->trn1d_ones,
+                                    confirm_of);
+                /*
+                 * A stream that descrambles to all ZEROS is §8.4.5's all-ones
+                 * plaintext read at the opposite polarity: inverting every
+                 * sign inverts the recurrence's output, since
+                 * ~a ^ ~b ^ ~c = (a ^ b ^ c) ^ 1.  That is not an error, it is
+                 * CMA's sign ambiguity -- |y| is what it drives, so y and -y
+                 * are equally good solutions and the polarity of a blindly
+                 * equalised stream is arbitrary until something resolves it.
+                 * §8.4.5 is what resolves it, so resolve it here rather than
+                 * rejecting a level that is in fact correct: flip, re-read the
+                 * signs buffered since TRN1d began, and let the check run
+                 * again on the corrected stream.
+                 */
+                if (level_tolerant(s)  &&  !s->sign_flip_tried
+                    &&  s->trn1d_ones*10 <= confirm_of) {
+                    int i;
+
+                    s->sign_flip_tried = 1;
+                    s->sign_flip = !s->sign_flip;
+                    for (i = 0; i < s->sign_len; i++)
+                        s->signs[i] = (uint8_t) !s->signs[i];
+                    s->descramble_reg = 0;
+                    s->trn1d_scan = 0;
+                    s->trn1d_ones = 0;
+                    s->trn1d_symbols = 0;
+                    break;
+                }
+                if (s->trn1d_ones*10 < confirm_of*9) {
+                    s->stage = V90A_RX_HUNT_SD;
+                    memset(s->sd_run, 0, sizeof(s->sd_run));
+                    memset(s->sd_w, 0, sizeof(s->sd_w));
+                    break;
+                }
             }
             /*endif*/
             /*
