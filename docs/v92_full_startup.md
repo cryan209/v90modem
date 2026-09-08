@@ -191,3 +191,109 @@ baseline. The digital DS0 and its ADC sampling clock remain 8 kHz.
 headroom, both G.711 ladders and arbitrary TX callback checks.
 `./v92_startup_test --audio-case 16000` still fails at the analogue Phase-4
 DATA assertion. The sample-rate change does not resolve that receiver gap.
+
+## 2026-09-09: the Phase-4 stall was a repeated CPt resetting the transmitter
+
+The preceding audio-failure attribution is superseded by this investigation.
+The PCMU zero-DIL audio case receives two valid CPt sequences. The second
+arrives after TRN2d begins. `v90_set_phase4_cp()` unconditionally called
+`v90_configure_phase4_mapper()` for native V.92 CPt, resetting the scrambler,
+differential/shaping memories and partial mapping frame in the running stream.
+The V.90 branch already treated identical repeats idempotently.
+
+The relevant specification is V.92 (11/2000) 9.5.2.1.10-.11 (printed
+pages 48-49): the analogue modem finishes its current CPt after detecting
+barred Ri. A repeat in flight is therefore normal. V.92 8.8.6 inherits
+V.90 (09/1998) 8.6.5 (printed page 28), which initializes the mapper
+memories before TRN2d, not again on each received CPt. The local amendments
+and corrigendum do not replace these clauses.
+
+Before the fix, the downstream receiver recovered 541 consecutive TRN2d
+ones and then lost the sequence. Digital SUVd repeated with ack=0 forever.
+Comparing the transmitter's TXRAW stream with the receiver's EQRAW/P4CW
+stream, using their measured 3391-symbol index offset, found **zero sliced
+codeword differences from the first TRN2d symbol through the end of the
+20-second run**. Equalized levels were within three linear units. The low
+approximately +/-64 levels were the requested zero-DIL constellation, not
+equalizer collapse; the CMA dispersion metric near 1 is meaningless on
+that multilevel signal. Accurate symbol reception could not undo the
+transmitter's unannounced reset.
+
+Native V.92 now accepts an identical repeated CPt without reconfiguring the
+mapper and rejects changed or acknowledged CPt. All six core startup cases
+explicitly inject a repeat 271 symbols into TRN2d, within a mapping frame,
+and still validate both B1 directions and at least 1024 upstream payload
+bytes without errors. They also check rejection of changed/acknowledged CPt.
+The spec-only, audio reconstruction, full V.PCM loopback and V.92 procedure
+evaluation suites pass.
+
+The 16 kHz audio case now completes SUVd/CPd, both acknowledgements, Ed,
+and validated B1d; both transmitters reach DATA. It subsequently fails
+`sink.b1.locked`: digital upstream B1u acquisition remains unresolved,
+with zero payload bytes delivered. The new failure summary reports
+`analogue_p4=6 downstream_b1=1 digital_tx=21 cpt=2 cpu=1 upstream_b1=0 payload=0`.
+This fixes the original control-exchange failure, not complete audio startup
+or foreign-modem interoperability. Temporary symbol/callback diagnostics
+used for the comparison were removed; existing `V92_AUDIO_TRACE` TX tracing
+and EQRAW tracing can reproduce the waveform comparison.
+
+## 2026-09-09: upstream B1u acquisition uses the data-mode trellis
+
+The B1u failure exposed above is fixed. At the correct 576-symbol window,
+the PCMU audio case had correlation 0.999999628, gain 1.000006013 and offset
+0.013725371 against the generated B1u reference. Five network-ADC outputs
+differed from that reference by one G.711 level. The scalar acquisition
+branch used the hard-decision waveform decoder, which rejected frame 41
+after sample 496 arrived as -16 instead of -8. A high correlation does not
+guarantee that every nearest-point decision is correct.
+
+V.92 8.7.1 sends B1u with the data-mode constellation and convolutional
+encoder, initialized at its start. For the supported unfiltered 16-state
+profile, acquisition now uses the same Viterbi decoder as payload reception.
+The gain/correlation gates and the requirement to decode all 48 frames to
+source ones are unchanged. Filtered profiles retain their existing decoder.
+No bearer gain, G.711 conversion, symbol count or protocol timing changed.
+
+The focused loopback regression introduces one wrong nearest-point decision
+in B1u, then verifies 520 payload bytes and receiver state continuity. It
+fails with the old acquisition decoder (no lock, zero bytes) and passes
+with the correction. The existing fractional-channel equalizer case also
+passes. The full V.PCM loopback suite and six core startup cases pass.
+
+`./v92_startup_test --audio-zero-dil` separately exercises both laws, with
+and without first-CPd erasure, through B1u/B1d and at least 1024 correct
+upstream payload bytes. The full startup suite still encounters an earlier
+Phase-3 `V90_RX_EVENT_SU` assertion in the PCMU measured-DIL audio case;
+that case has not reached B1u and is a separate remaining startup failure.
+
+
+### Sd acquisition after the Su gate correction (2026-09-09)
+
+V.92 §9.5.1.1.4 arms Su detection when Jd begins. The live engine and
+startup harness now leave the Su detector unprimed during Sd/Sd-bar, when
+the analogue peer is still sending Ja. With that gate, the measured-DIL
+PCMU audio case exposed an Sd-bar timeout instead of the false Su event.
+
+The analogue acquisition accepted a 512-half-symbol window whose training
+half was mostly silence. Its held-out fit score was 0.831, above the 0.80
+threshold, but the steady output's nominal zero slots were 0.523 of the
+normalized Sd level. The core's 0.20 zero-slot tolerance could not acquire
+that pattern. This was a bad equalizer fit before the reversal, rather than
+a missing reversal on the transmitted stream.
+
+`v90a_sd_fit()` now requires the training half to meet the existing fit
+threshold as well as retaining the independent held-out check. The sliding
+hunt retries incomplete onset windows. The regression in
+`v90_analogue_sd_test` rejects silence followed by Sd and acquires the later
+window while the finite 384-symbol Sd preamble is still present. The rejection
+fails against the previous implementation and passes with this change.
+
+The measured-DIL PCMU audio case now detects Sd-bar, trains on TRN1d,
+receives Jd, completes Su and reaches the Phase-4 control exchange. It still
+fails downstream B1d validation; complete measured-DIL audio startup is not
+established. The standalone Sd suite, all six core startup cases and the
+four zero-DIL audio cases (both laws, with/without first-CPd erasure) pass.
+`make test` reaches the same measured-DIL B1d validation failure in
+`v92_startup_test`; the overall suite is therefore still failing. The
+spec-only and audio reconstruction checks also pass.
+No G.711 codewords, DSP constants or transmit timings changed in this fix.

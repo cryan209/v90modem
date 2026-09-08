@@ -230,6 +230,18 @@ static void test_fit_rejects(void)
                        &score, NULL), "fit rejects noise");
     printf("      noise fit score %.3f\n", score);
 
+    /* A silent training half followed by Sd must not install a filter that
+     * only explains the onset. This is the acquisition window seen before
+     * the V.92 §9.5.2.1.3 Sd-to-S-bar-d failure. */
+    for (i = 0; i < 512; i++)
+        buf[i] = i < 216 ? 0 : (int16_t)sd_symbol((i - 216)/2, 3000.0);
+    check(!v90a_sd_fit(buf, 512, 32, &parity, h, &score, NULL),
+          "fit rejects silence-to-Sd onset window");
+    for (i = 0; i < 512; i++)
+        buf[i] = (int16_t)sd_symbol((i + 40)/2, 3000.0);
+    check(v90a_sd_fit(buf, 512, 32, &parity, h, &score, NULL),
+          "sliding hunt acquires Sd after two window advances");
+
     memset(buf, 0, sizeof buf);
     check(!v90a_sd_fit(buf, (int) (sizeof buf/sizeof buf[0]), 32, &parity, h,
                        &score, NULL), "fit rejects silence");

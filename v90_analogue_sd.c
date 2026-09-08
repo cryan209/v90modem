@@ -170,13 +170,23 @@ static bool fit_one(const int16_t *amp, int n, int taps, int off, double dc,
         free(p);
         return false;
     }
-    /* Held out: the second half of the window, which the fit never saw. */
-    for (k = train; k < syms; k++) {
+    /* Both halves must carry §8.4.4's Sd. A window straddling silence
+     * and Sd can fit the onset with large taps and still pass the held-out
+     * threshold while filling Sd's zero slots. Reject that incomplete
+     * preamble fit; the sliding hunt will retry on the following window.
+     * Keep the independent held-out check: training fit alone admits noise. */
+    double train_res = 0.0, train_energy = 0.0;
+    for (k = 0; k < syms; k++) {
         double y = 0.0;
         double r = SD_REF[k%6];
 
         for (i = 0; i < taps; i++)
             y += p[i]*(amp[2*k + off + taps - 1 - i] - dc);
+        if (k < train) {
+            train_res += (y - r)*(y - r);
+            train_energy += r*r;
+            continue;
+        }
         res += (y - r)*(y - r);
         ref_energy += r*r;
         if (r != 0.0)
@@ -192,7 +202,7 @@ static bool fit_one(const int16_t *amp, int n, int taps, int off, double dc,
      * health reading, not a measurement of the line. */
     if (level_out)
         *level_out = (syms > train) ? level/((syms - train)*2/3) : 0.0;
-    return true;
+    return train_energy > 0.0 && 1.0 - train_res/train_energy >= FIT_SCORE_MIN;
 }
 
 #define DEFAULT_REPS    16

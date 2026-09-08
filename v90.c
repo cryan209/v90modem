@@ -4736,8 +4736,17 @@ bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp)
     if (s->v92_mode) {
         /* Native mode: a CPt (training parameters) configures the TRN2d
          * mapper used for the mapped SUVd/CPd/Ed transmit path. */
-        if (s->v92_native_cpu_rx && !cp->v90_compatibility)
-            return v90_configure_phase4_mapper(s, cp);
+        if (s->v92_native_cpu_rx && !cp->v90_compatibility) {
+            /* V.92 §9.5.2.1.10-.11 permits repeated CPt until Ri-bar
+             * reaches the analogue modem. A repeat may therefore arrive
+             * after our TRN2d has begun. §8.8.6 inherits V.90 §8.6.5:
+             * reset the mapper memories only at the start of TRN2d,
+             * never on a delayed duplicate of the accepted parameters. */
+            if (!s->phase4_mapper_ready)
+                return v90_configure_phase4_mapper(s, cp);
+            return !cp->acknowledge
+                && vpcm_cp_frames_equal(&s->cp_frame_rx, cp);
+        }
         s->cp_frame = *cp;
         return true;
     }

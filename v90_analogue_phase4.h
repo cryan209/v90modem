@@ -127,6 +127,12 @@ const char *v90_analogue_phase4_stage_name(v90_analogue_phase4_rx_stage_t stage)
 
 int v90_analogue_phase4_r_symbols(const v90_analogue_phase4_t *s);
 int v90_analogue_phase4_trn2d_symbols(const v90_analogue_phase4_t *s);
+/* Allowed receive Ucodes for the next mapped symbol; capacity must be 128.
+ * Zero means no mapped-symbol grid yet: use the unrestricted acquisition
+ * slicer. Follows CPt/CP, per-interval DFI and corresponding codec masks. */
+int v90_analogue_phase4_slicer_ucodes(const v90_analogue_phase4_t *s,
+                                      uint8_t *out, int capacity);
+
 int v90_analogue_phase4_mp_frames(const v90_analogue_phase4_t *s);
 /* The most recent MP that passed Table 16's structure and CRC, or NULL. */
 const v90_analogue_mp_t *v90_analogue_phase4_mp(const v90_analogue_phase4_t *s);

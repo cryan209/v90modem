@@ -222,7 +222,9 @@ void v92a4_rx(v92a4_t *s, const int16_t *samples, int count)
 {
     if (!s || !samples || count <= 0) return;
     for (int i = 0; i < count; i++) {
-        uint8_t cw;
+        uint8_t cw, ucodes[128];
+        int n = v90_analogue_phase4_slicer_ucodes(s->rx, ucodes, sizeof(ucodes));
+        v90a_linear_set_constellation(s->linear, ucodes, n);
         if (v90a_linear_put(s->linear, samples+i, 1, &cw, 1) != 1) continue;
         unsigned e = v90_analogue_phase4_put(s->rx, &cw, 1);
         if (e) fprintf(stderr, "P4RX event=%x\n", e);

@@ -125,6 +125,35 @@ struct v90_analogue_phase4_s {
     bool     mp_valid;
 };
 
+int v90_analogue_phase4_slicer_ucodes(const v90_analogue_phase4_t *s,
+                                      uint8_t *out, int capacity)
+{
+    if (!s || !out || capacity < 128) return 0;
+    const vpcm_cp_frame_t *cp;
+    switch (s->stage) {
+    case V90A4_RX_TRN2D:
+    case V90A4_RX_MP:
+        cp = s->renegotiation_training ? &s->cfg.cp : &s->cfg.cpt;
+        break;
+    case V90A4_RX_B1D:
+    case V90A4_RX_DATA:
+        cp = &s->cfg.cp;
+        break;
+    default:
+        return 0; /* Ri acquisition has not established the mapping grid. */
+    }
+    /* V.90 §§5.4.4, 8.6.1/8.6.5: slice against the constellation of the
+     * NEXT frame interval, switching CPt to CP at the Ed/B1d boundary. */
+    int c = cp->dfi[s->frame_fill];
+    if (c >= cp->constellation_count) return 0;
+    const uint8_t *mask = cp->codec_constellations_differ
+        ? cp->codec_masks[c] : cp->masks[c];
+    int n = 0;
+    for (int u = 0; u < 128; u++)
+        if (vpcm_cp_mask_get(mask, u)) out[n++] = (uint8_t)u;
+    return n;
+}
+
 static int codeword_sign(const v90_analogue_phase4_t *s, uint8_t c, int *ucode)
 {
     int sign;

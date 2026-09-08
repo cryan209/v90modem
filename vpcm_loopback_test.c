@@ -1279,6 +1279,50 @@ out:
  * average-power sum. Neither constraint alone says much; the rate is set by
  * what survives between them.
  */
+/* DIL must preserve noise below the G.711 decision spacing, and its
+ * constellation must retain distinguishable signs (§§8.4.1, 5.4.6). */
+static bool test_v90_dil_analogue_noise(v91_law_t law)
+{
+    v90_law_t v90_law = law == V91_LAW_ALAW ? V90_LAW_ALAW : V90_LAW_ULAW;
+    v90_dil_desc_t desc;
+    v90_dil_measurement_t sliced, analogue;
+    v90_dil_rate_plan_t clean, noisy;
+    if (!v90_dil_preset_load(V90_DIL_PRESET_MEASUREMENT, &desc)) return false;
+    int n = v90_dil_cycle_len(&desc);
+    uint8_t *cw = malloc((size_t)n);
+    int16_t *levels = malloc((size_t)n * sizeof(*levels));
+    bool ok = false;
+    if (!cw || !levels) goto done;
+    if (v90_dil_generate_codewords(v90_law, &desc, cw, n) != n) goto done;
+    uint32_t noise_state = 0x913bc7u;
+    for (int i = 0; i < n; i++) {
+        /* Independent of DIL's periodic signs and interval labels. Three
+         * units cannot change a nonzero Ucode at the nearest-level slicer. */
+        noise_state = noise_state * 1664525u + 1013904223u;
+        levels[i] = v91_codeword_to_linear(law, cw[i])
+                    + ((noise_state >> 31) ? 3 : -3);
+    }
+    if (!v90_dil_measure(cw, n, v90_law, &desc, 0, &sliced)
+        || !v90_dil_measure_levels(cw, levels, n, v90_law, &desc, 0, &analogue)
+        || sliced.u[13].rx_sigma != 0 || analogue.u[13].rx_sigma < 2
+        || !v90_dil_measure_plan_rate(&sliced, 0, 3, 0, v90_law, &clean)
+        || !v90_dil_measure_plan_rate(&analogue, 0, 3, 0, v90_law, &noisy)) goto done;
+    for (int slot = 0; slot < 6; slot++) {
+        if (noisy.mi[slot] > clean.mi[slot]
+            || (law == V91_LAW_ULAW && noisy.mi[slot] == clean.mi[slot])) goto done;
+        if (law == V91_LAW_ULAW
+            && (vpcm_cp_mask_get(clean.mask[slot], 0)
+                || vpcm_cp_mask_get(noisy.mask[slot], 0))) goto done;
+    }
+    ok = true;
+done:
+    free(cw);
+    free(levels);
+    if (!ok) fprintf(stderr, "DIL analogue noise/sign regression failed (%s)\n",
+                     law == V91_LAW_ALAW ? "alaw" : "ulaw");
+    return ok;
+}
+
 static bool test_v90_dil_constellation_tradeoff(v91_law_t law)
 {
     v90_law_t v90_law = (law == V91_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
@@ -3665,7 +3709,7 @@ static void v92_upstream_test_put_byte(void *user_data, uint8_t byte)
         capture->bytes[capture->count++] = byte;
 }
 
-static bool test_v92_upstream_b1u_receiver(void)
+static bool test_v92_upstream_b1u_receiver(bool channel)
 {
     v92_cpd_frame_t cpd;
     v92_upstream_wave_tx_t tx;
@@ -3717,7 +3761,7 @@ static bool test_v92_upstream_b1u_receiver(void)
     /* A 0.2-symbol fractional phase/channel echo makes the raw B1u
      * correlation insufficient for a scalar gain fit and exercises the
      * supervised seven-tap equalizer.  Three tail samples flush its delay. */
-    {
+    if (channel) {
         int16_t unfiltered[4096];
 
         memcpy(unfiltered, samples, (size_t)sample_count*sizeof(samples[0]));
@@ -3730,6 +3774,11 @@ static bool test_v92_upstream_b1u_receiver(void)
         }
         for (int i = 0; i < V92_UPSTREAM_EQ_TAPS/2; i++)
             samples[sample_count++] = 100;
+    } else {
+        /* A single wrong nearest-point decision in B1u must be corrected
+         * by its data-mode trellis (V.92 §8.7.1), just as for payload.
+         * Overall correlation remains above the scalar acquisition gate. */
+        samples[37 + 41*V92_UPSTREAM_INTERVALS] += 40;
     }
 
     if (!v92_upstream_b1_rx_init(&rx, &cpd, v92_upstream_test_put_byte,
@@ -3743,7 +3792,8 @@ static bool test_v92_upstream_b1u_receiver(void)
         (void)v92_upstream_b1_rx_feed(&rx, &samples[pos], chunk);
         pos += chunk;
     }
-    if (!rx.locked || !rx.equalizer_trained || rx.equalizer_delay == 0
+    if (!rx.locked || !rx.equalizer_trained
+        || (channel ? rx.equalizer_delay == 0 : rx.equalizer_delay != 0)
         || rx.correlation < 0.995
         || capture.count != expected_count
         || memcmp(capture.bytes, expected, (size_t)expected_count) != 0
@@ -10772,6 +10822,8 @@ static bool run_vpcm_primitive_suite(void)
         && test_v90_dil_rx_single_pass(V91_LAW_ALAW)
         && test_v90_dil_impairment_measurement(V91_LAW_ULAW)
         && test_v90_dil_impairment_measurement(V91_LAW_ALAW)
+        && test_v90_dil_analogue_noise(V91_LAW_ULAW)
+        && test_v90_dil_analogue_noise(V91_LAW_ALAW)
         && test_v90_dil_constellation_tradeoff(V91_LAW_ULAW)
         && test_v90_dil_constellation_tradeoff(V91_LAW_ALAW)
         && test_v90_dil_presets(V91_LAW_ULAW)
@@ -10800,7 +10852,8 @@ static bool run_vpcm_primitive_suite(void)
         && test_v92_cpd_full_codec()
         && test_v92_upstream_modulus_frames()
         && test_v92_upstream_waveform_frames()
-        && test_v92_upstream_b1u_receiver()
+        && test_v92_upstream_b1u_receiver(false)
+        && test_v92_upstream_b1u_receiver(true)
         && test_v92_trn2u_loopback()
         && test_v92_native_cpu_phase4(V91_LAW_ULAW)
         && test_v92_native_cpu_phase4(V91_LAW_ALAW)

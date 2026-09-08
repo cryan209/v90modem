@@ -216,15 +216,22 @@ static bool try_b1u_lock(v92_upstream_rx_t *rx)
         return false;
 
     if (correlation >= 0.999) {
-        /* Correlation alone is not enough: decode all 48 §8.7.1 frames and
-         * require the known source ones before committing state. */
+        /* V.92 §8.7.1 uses the data-mode convolutional code for B1u too.
+         * Use the payload trellis decoder where supported: even a nearly
+         * perfect correlation can contain a wrong nearest-point decision.
+         * Still decode all 48 frames and require every source bit to be one
+         * before committing state; correlation alone cannot establish B1u. */
         v92_upstream_wave_rx_init(&trial);
         for (int frame = 0; frame < V92_B1U_FRAMES; frame++) {
             for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++)
                 normalized[i] =
                     (observed[frame*V92_UPSTREAM_INTERVALS + i] - offset)/gain;
-            if (!v92_upstream_wave_decode_frame(&trial, &rx->cpd, normalized,
-                                                bits, (int)sizeof(bits)))
+            bool decoded = rx->cpd.coeffs_present
+                ? v92_upstream_wave_decode_frame(&trial, &rx->cpd, normalized,
+                                                 bits, (int)sizeof(bits))
+                : v92_upstream_wave_decode_viterbi_frame(
+                    &trial, &rx->cpd, normalized, bits, (int)sizeof(bits));
+            if (!decoded)
                 return false;
             for (int i = 0; i < k; i++) {
                 if (bits[i] != 1)

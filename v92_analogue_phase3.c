@@ -217,7 +217,7 @@ void v92a_rx(v92a_t *s, const int16_t *samples, int count)
             receive_ri(s, samples[i]);
         if (v90a_linear_put(s->linear, samples+i, 1, &cw, 1) != 1)
             continue;
-        unsigned e = v90_analogue_rx_put(s->rx, &cw, 1);
+        unsigned e = v90_analogue_rx_put_level(s->rx, cw, samples[i]);
         s->sd_bar |= (e & V90A_RX_EVENT_SD_BAR) != 0;
         s->jd |= (e & V90A_RX_EVENT_JD) != 0;
         if (e & V90A_RX_EVENT_JP) {

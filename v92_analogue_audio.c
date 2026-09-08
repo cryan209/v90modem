@@ -27,7 +27,7 @@ struct v92a_audio_s {
     v90a_fse_t *eq;
     int16_t acquisition[SD_WINDOW];
     int acquisition_count;
-    bool acquired, training, timing;
+    bool acquired, training, timing, trace;
     unsigned training_symbols, tracking_symbols;
     double sd_level, trn_level, input_trn;
     double centre_reference, centre_average, frequency, integral;
@@ -116,6 +116,7 @@ v92a_audio_t *v92a_audio_init_rate(const v92a_config_t *cfg, unsigned rate)
     s->eq = v90a_fse_init(32, V90A_FSE_MU_CMA);
     if (!s->core || !s->eq) { v92a_audio_free(s); return NULL; }
     s->rate = rate;
+    s->trace = getenv("V92_AUDIO_TRACE") != NULL;
     s->tx_next = -AUDIO_RADIUS;
     v90a_fse_set_mode(s->eq, V90A_FSE_FROZEN);
     uint8_t trn = v91_ucode_to_codeword((v91_law_t)cfg->law, cfg->u_info, true);
@@ -194,7 +195,7 @@ static void equalized(v92a_audio_t *s, int16_t input)
     }
     double scale = s->training ? s->trn_level : s->sd_level;
     int16_t sample = quantize(y*scale, &s->clipped);
-    fprintf(stderr, "EQRAW %llu %d %d %.8f\n", (unsigned long long)s->rx_symbols, mode, sample, y);
+    if (s->trace) fprintf(stderr, "EQRAW %llu %d %d %.8f\n", (unsigned long long)s->rx_symbols, mode, sample, y);
     v92a_rx(s->core, &sample, 1);
     s->rx_symbols++;
     if (v90a_fse_mode(s->eq) == V90A_FSE_DD) {

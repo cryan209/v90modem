@@ -254,6 +254,7 @@ static void test_md(bool alaw, int units)
 typedef struct {
     v90_state_t *digital;
     int cpt_count, e1u_count, cpu_count;
+    vpcm_cp_frame_t received_cpt;
     bool b1_armed;
     v92_upstream_rx_t b1;
     unsigned payload_bits, payload_bytes, payload_errors;
@@ -305,6 +306,7 @@ static void pair_cpt(void *user, v92_p4u_kind_t kind,
         vpcm_cp_frame_t mapped;
         assert(v92_cp_frame_to_vpcm(&cp->frame, &mapped));
         assert(v90_set_phase4_cp(sink->digital, &mapped));
+        sink->received_cpt = mapped;
         (void)v90_handle_rx_event(sink->digital, V90_RX_EVENT_CP_VALID);
         sink->cpt_count++;
     }
@@ -348,6 +350,8 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
     v92_su_init(&su_rx, alaw);
 
     bool dropped_cpd = false, dropping_cpd = false;
+    bool repeated_cpt = false;
+    unsigned trn2d_symbols = 0;
     bool trace_audio = getenv("V92_AUDIO_TRACE") != NULL;
     for (int i = 0; i < 160000; i++) {
         int16_t upstream[6], downstream;
@@ -355,6 +359,20 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
         if (audio) assert(v92a_audio_tx(frontend, upstream, audio_count) == audio_count);
         else assert(v92a_tx(analogue, upstream, 2) == 2);
         int before_tx = v90_get_tx_phase(digital);
+        /* V.92 §9.5.2.1.10-.11: the peer completes its current CPt
+         * after receiving Ri-bar. Exercise that delayed repeat inside a
+         * TRN2d mapping frame, including on the zero-delay core bearer. */
+        if (before_tx == V90_TX_TRN2D && ++trn2d_symbols == 271) {
+            const vpcm_cp_frame_t *cpt = &sink.received_cpt;
+            assert(sink.cpt_count && v90_set_phase4_cp(digital, cpt));
+            vpcm_cp_frame_t changed = *cpt;
+            changed.drn++;
+            assert(!v90_set_phase4_cp(digital, &changed));
+            changed = *cpt;
+            changed.acknowledge = true;
+            assert(!v90_set_phase4_cp(digital, &changed));
+            repeated_cpt = true;
+        }
         assert(v90_phase3_tx_codewords(digital, &d, 1) == 1);
         if (drop_cpd && before_tx == V90_TX_CP && !dropped_cpd) {
             dropping_cpd = true;
@@ -388,7 +406,10 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
                 assert(v90_handle_rx_event(digital, V90_RX_EVENT_J));
                 ja_seen = true;
             }
-        } else {
+        } else if (su_rx.stage != V92_SU_NONE
+                   || v90_get_tx_phase(digital) == V90_TX_JD) {
+            /* V.92 §9.5.1.1.4: condition for Su at Jd, not while
+             * the delayed analogue endpoint is still repeating Ja. */
             switch (v92_su_put(&su_rx, u)) {
             case V92_SU_ACQUIRED: assert(v90_handle_rx_event(digital, V90_RX_EVENT_SU)); break;
             case V92_SU_BAR: assert(v90_handle_rx_event(digital, V90_RX_EVENT_SU_BAR)); break;
@@ -432,7 +453,16 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
             break;
         }
     }
+    if (!sink.b1.locked || sink.payload_bytes < 1024) {
+        v92a4_t *p4 = v92a_phase4(analogue);
+        fprintf(stderr, "Startup incomplete: analogue_p4=%d downstream_b1=%d "
+                "digital_tx=%d cpt=%d cpu=%d upstream_b1=%d payload=%u\n",
+                p4 ? (int)v92a4_stage(p4) : -1,
+                p4 && v92a4_downstream_ready(p4), v90_get_tx_phase(digital),
+                sink.cpt_count, sink.cpu_count, sink.b1.locked, sink.payload_bytes);
+    }
     assert(ja_seen);
+    assert(repeated_cpt);
     assert(v92a_stage(analogue) == V92A_PHASE4);
     assert(sink.cpt_count > 0);
     assert(!drop_cpd || dropped_cpd);
@@ -746,6 +776,20 @@ int main(int argc, char **argv)
         test_phase3_pair(false, false, false, (unsigned)atoi(argv[2]));
         return 0;
     }
+    if (argc == 2 && !strcmp(argv[1], "--audio-zero-dil")) {
+        for (int law = 0; law < 2; law++) {
+            test_phase3_pair(law, false, false, V92_AUDIO_RATE);
+            test_phase3_pair(law, false, true, V92_AUDIO_RATE);
+        }
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--audio-measured-dil")) {
+        for (int law = 0; law < 2; law++) {
+            test_phase3_pair(law, true, false, V92_AUDIO_RATE);
+            test_phase3_pair(law, true, true, V92_AUDIO_RATE);
+        }
+        return 0;
+    }
     test_spec_crc();
     test_spec_scr(false);
     test_spec_scr(true);
@@ -758,6 +802,8 @@ int main(int argc, char **argv)
     test_phase3_pair(false, true, false, V92_AUDIO_RATE);
     test_phase3_pair(true, true, false, false);
     test_phase3_pair(true, true, false, V92_AUDIO_RATE);
+    test_phase3_pair(false, true, true, V92_AUDIO_RATE);
+    test_phase3_pair(true, true, true, V92_AUDIO_RATE);
     test_phase3_pair(false, false, true, false);
     test_phase3_pair(false, false, true, V92_AUDIO_RATE);
     test_phase3_pair(true, false, true, false);

@@ -126,6 +126,11 @@ unsigned v90_analogue_rx_put(v90_analogue_rx_t *s,
                              const uint8_t *codewords,
                              int count);
 
+/* One analogue observation with its unsliced calibrated level for DIL noise
+ * measurement (V.90 §8.4.1, inherited by V.92 §8.6). */
+unsigned v90_analogue_rx_put_level(v90_analogue_rx_t *s, uint8_t codeword,
+                                   int16_t level);
+
 /*
  * Enter the DIL stage directly, as if J'd had just ended.
  *

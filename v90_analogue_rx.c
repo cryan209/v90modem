@@ -130,8 +130,10 @@ struct v90_analogue_rx_s {
     bool     in_jd_frame;
     int      jd_exit_run;           /* consecutive codewords off the Jd level */
     uint8_t  jd_exit_hold[JD_EXIT_SYMBOLS];
+    int16_t  jd_exit_levels[JD_EXIT_SYMBOLS];
 
     uint8_t *dil_rx;
+    int16_t *dil_levels;
     int      dil_len;
     int      dil_cap;
     int      dil_cycle_len;
@@ -364,7 +366,10 @@ v90_analogue_rx_t *v90_analogue_rx_init(const v90_analogue_rx_config_t *cfg)
         s->dil_cap = s->dil_cycle_len*2;
         if (s->dil_cap > DIL_MAX_SYMBOLS)
             s->dil_cap = DIL_MAX_SYMBOLS;
-        if ((s->dil_rx = malloc((size_t) s->dil_cap)) == NULL) {
+        s->dil_levels = malloc((size_t)s->dil_cap * sizeof(*s->dil_levels));
+        if ((s->dil_rx = malloc((size_t) s->dil_cap)) == NULL || !s->dil_levels) {
+            free(s->dil_rx);
+            free(s->dil_levels);
             free(s);
             return NULL;
         }
@@ -376,6 +381,7 @@ void v90_analogue_rx_free(v90_analogue_rx_t *s)
 {
     if (s) {
         free(s->dil_rx);
+        free(s->dil_levels);
         free(s);
     }
 }
@@ -534,7 +540,7 @@ static bool dil_enough(v90_analogue_rx_t *s)
     /* The DIL starts where J'd ended, so its offset is known exactly and
      * nothing has to be searched for (contrast v90_dil_measure_align(), which
      * exists for captures where it is not). */
-    if (!v90_dil_measure(s->dil_rx, s->dil_len, s->cfg.law, &s->cfg.dil, 0, &m))
+    if (!v90_dil_measure_levels(s->dil_rx, s->dil_levels, s->dil_len, s->cfg.law, &s->cfg.dil, 0, &m))
         return false;
     s->measurement = m;
     s->measurement_valid = true;
@@ -571,7 +577,7 @@ static bool dil_enough(v90_analogue_rx_t *s)
     return true;
 }
 
-static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
+static unsigned put_one(v90_analogue_rx_t *s, uint8_t c, int16_t level)
 {
     unsigned events;
     int ucode;
@@ -742,7 +748,7 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
             s->trn1d_symbols = 0;
             s->trn1d_ones = 0;
             events |= V90A_RX_EVENT_TRN1D;
-            events |= put_one(s, c);
+            events |= put_one(s, c, level);
             return events;
         }
         break;
@@ -949,8 +955,10 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
          */
         ucode = codeword_ucode(s, c, &sign);
         if (!s->v92_mode && ucode != s->trn1d_ucode) {
-            if (s->jd_exit_run < (int) sizeof(s->jd_exit_hold))
+            if (s->jd_exit_run < (int) sizeof(s->jd_exit_hold)) {
                 s->jd_exit_hold[s->jd_exit_run] = c;
+                s->jd_exit_levels[s->jd_exit_run] = level;
+            }
             /*endif*/
             if (++s->jd_exit_run >= JD_EXIT_SYMBOLS) {
                 events |= V90A_RX_EVENT_JD_PRIME;
@@ -961,8 +969,10 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
                      * the run that proved it is DIL and belongs in the buffer. */
                     s->dil_start = s->index - s->jd_exit_run + 1;
                     s->dil_len = 0;
-                    for (i = 0; i < s->jd_exit_run  &&  s->dil_len < s->dil_cap; i++)
+                    for (i = 0; i < s->jd_exit_run  &&  s->dil_len < s->dil_cap; i++) {
+                        s->dil_levels[s->dil_len] = s->jd_exit_levels[i];
                         s->dil_rx[s->dil_len++] = s->jd_exit_hold[i];
+                    }
                     s->dil_next_measure = DIL_MEASURE_INTERVAL;
                     s->stage = V90A_RX_DIL;
                 } else {
@@ -1112,8 +1122,10 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
     }
 
     case V90A_RX_DIL:
-        if (s->dil_len < s->dil_cap)
+        if (s->dil_len < s->dil_cap) {
+            s->dil_levels[s->dil_len] = level;
             s->dil_rx[s->dil_len++] = c;
+        }
         if (s->dil_len >= s->dil_next_measure) {
             s->dil_next_measure = s->dil_len + DIL_MEASURE_INTERVAL;
             if (dil_enough(s)) {
@@ -1141,8 +1153,15 @@ unsigned v90_analogue_rx_put(v90_analogue_rx_t *s,
     if (s == NULL  ||  codewords == NULL)
         return 0;
     for (i = 0; i < count; i++)
-        events |= put_one(s, codewords[i]);
+        events |= put_one(s, codewords[i], s->cfg.law == V90_LAW_ALAW
+                           ? alaw_to_linear(codewords[i]) : ulaw_to_linear(codewords[i]));
     return events;
+}
+
+unsigned v90_analogue_rx_put_level(v90_analogue_rx_t *s, uint8_t codeword,
+                                   int16_t level)
+{
+    return s ? put_one(s, codeword, level) : 0;
 }
 
 void v90_analogue_rx_begin_dil(v90_analogue_rx_t *s)

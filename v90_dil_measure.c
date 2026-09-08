@@ -147,9 +147,10 @@ bool v90_dil_measure_align(const uint8_t *rx, int rx_len, v90_law_t law,
     return true;
 }
 
-bool v90_dil_measure(const uint8_t *rx, int rx_len, v90_law_t law,
-                     const v90_dil_desc_t *desc, int offset,
-                     v90_dil_measurement_t *out)
+bool v90_dil_measure_levels(const uint8_t *rx, const int16_t *levels,
+                            int rx_len, v90_law_t law,
+                            const v90_dil_desc_t *desc, int offset,
+                            v90_dil_measurement_t *out)
 {
     int cycle;
     int avail;
@@ -213,15 +214,17 @@ bool v90_dil_measure(const uint8_t *rx, int rx_len, v90_law_t law,
             continue;
         if (rx_u < 0 || rx_u >= V90_DIL_UCODES)
             continue;
+        int rx_level = levels ? abs((int)levels[offset + i])
+                              : dil_abs_level(law, rx[offset + i]);
         tally[tx_u][rx_u]++;
-        rx_sum[tx_u] += dil_abs_level(law, rx[offset + i]);
+        rx_sum[tx_u] += rx_level;
         rx_n[tx_u]++;
         out->u[tx_u].tx_count++;
         out->u[tx_u].tx_level = dil_abs_level(law, gen[i]);
         {
             int slot = (i + offset) % 6;
 
-            double lvl = dil_abs_level(law, rx[offset + i]);
+            double lvl = rx_level;
 
             slot_tally[tx_u][slot][rx_u]++;
             slot_sum[tx_u][slot] += (long) lvl;
@@ -539,7 +542,11 @@ bool v90_dil_measure_plan_rate_sr(const v90_dil_measurement_t *m,
             if (m->u[u].rx_ucode_slot[i] < 0)
                 continue;
             level = m->u[u].rx_level_slot[i];
-            sigma = m->u[u].rx_sigma_slot[i];
+            /* §8.4.1's zero observations measure the interval's background
+             * disturbance. A repetitive nonzero DIL segment can have zero
+             * spread even though mixed-level data will not: do not infer a
+             * noiseless decision region from that segment alone. */
+            sigma = fmax(m->u[u].rx_sigma_slot[i], m->u[0].rx_sigma_slot[i]);
 
             /*
              * How far apart two levels have to land before a receiver can
@@ -549,18 +556,29 @@ bool v90_dil_measure_plan_rate_sr(const v90_dil_measurement_t *m,
              * thins the constellation from below while §8.5.2 thins it from
              * above.
              *
-             * sqrt(s1^2 + s2^2) because it is the *difference* of two noisy
-             * observations that has to clear the threshold, not either one.
+             * The slicer compares one observation to fixed constellation
+             * levels. Each level is only half the spacing from the decision
+             * boundary, so both sides need the requested sigma margin.
+             * A standard deviation for the difference of two observations
+             * understates that distance and offers an unsafe fine ladder.
              */
             need = (level_margin > 1) ? level_margin : 1;
             if (noise_sigmas > 0.0) {
-                double combined = sqrt(prev_sigma * prev_sigma + sigma * sigma);
-                double want = noise_sigmas * combined;
+                double want = 2.0 * noise_sigmas * fmax(prev_sigma, sigma);
 
                 if (want > need)
                     need = want;
             }
             if (prev_level >= 0 && (double) (level - prev_level) < need) {
+                out->points_below_margin++;
+                continue;
+            }
+            /* §§5.4.4, 5.4.6 assign an independent sign to the magnitude.
+             * Both polarities must be distinguishable too. In particular,
+             * PCMU's two zero codewords become the same analogue voltage. */
+            double sign_need = noise_sigmas > 0.0 ? 2.0 * noise_sigmas * sigma : 0.0;
+            if (dil_abs_level(law, v90_codeword_compose(law, u, 1)) == 0
+                || 2.0 * level <= sign_need) {
                 out->points_below_margin++;
                 continue;
             }
@@ -678,4 +696,12 @@ bool v90_dil_measure_plan_rate_sr(const v90_dil_measurement_t *m,
     out->k = vpcm_cp_drn_to_k_sr(out->drn, shaping_redundancy);
     out->bps = vpcm_cp_drn_to_bps(out->drn);
     return true;
+}
+
+/* Digital DS0 callers retain their exact codeword observations. */
+bool v90_dil_measure(const uint8_t *rx, int rx_len, v90_law_t law,
+                     const v90_dil_desc_t *desc, int offset,
+                     v90_dil_measurement_t *out)
+{
+    return v90_dil_measure_levels(rx, NULL, rx_len, law, desc, offset, out);
 }

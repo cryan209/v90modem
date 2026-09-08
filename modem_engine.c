@@ -8068,6 +8068,12 @@ static void v92_su_rx_feed_locked(uint8_t codeword, uint64_t sample_index)
     (void)sample_index;
     if (!g_v92_su_rx_active || !g_v92_active || !g_v90)
         return;
+    /* V.92 §9.5.1.1.4 arms Su reception when Jd starts. Before then
+     * the peer may still repeat Ja; periodic portions are not Su. Keep
+     * feeding after acquisition for the two reversals and TRN1u. */
+    if (g_v92_su_rx.stage == V92_SU_NONE
+        && v90_get_tx_phase(g_v90) != V90_TX_JD)
+        return;
     switch (v92_su_put(&g_v92_su_rx, codeword)) {
     case V92_SU_ACQUIRED:
         (void)v90_handle_rx_event(g_v90, V90_RX_EVENT_SU);

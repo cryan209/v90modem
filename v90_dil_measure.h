@@ -101,6 +101,14 @@ bool v90_dil_measure(const uint8_t *rx, int rx_len, v90_law_t law,
                      const v90_dil_desc_t *desc, int offset,
                      v90_dil_measurement_t *out);
 
+/* Analogue observations before slicing, calibrated to G.711 linear units.
+ * Keep the sliced codewords for codec/impairment classification, but measure
+ * level and noise from levels so sub-codeword noise is not erased (§8.4.1). */
+bool v90_dil_measure_levels(const uint8_t *rx, const int16_t *levels,
+                            int rx_len, v90_law_t law,
+                            const v90_dil_desc_t *desc, int offset,
+                            v90_dil_measurement_t *out);
+
 /*
  * The measured Ucodes that a receiver can still tell apart, ascending.
  * Returns how many were written.
@@ -118,9 +126,9 @@ int v90_dil_measure_usable_ucodes(const v90_dil_measurement_t *m,
  *
  * `level_margin` is a floor on the separation between adjacent points, in
  * linear units.  `noise_sigmas` is the interesting one: two points count as
- * distinguishable only when their received levels differ by at least that
- * many standard deviations of the measured noise, so the constellation
- * thins out wherever the line is noisy relative to G.711's spacing.  Pass 0
+ * distinguishable only when each level is that many standard deviations
+ * from their midpoint decision boundary. The measured zero-level spread is
+ * a floor for each interval. Both signs must also be distinguishable. Pass 0
  * to ignore noise and get the optimistic bound.
  *
  * With both `noise_sigmas` and `max_tx_dbm0` set, the two constraints squeeze
