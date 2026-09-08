@@ -42,7 +42,7 @@ static double sinc(double x)
 
 bool v92_pcm_interpolator_init(v92_pcm_interpolator_t *s, int factor)
 {
-    if (!s || (factor != 3 && factor != 6)) return false;
+    if (!s || (factor < 1 || factor > 6)) return false;
     memset(s, 0, sizeof(*s));
     s->factor = factor;
     for (int p = 0; p < factor; p++) {
@@ -71,7 +71,7 @@ static int16_t quantize(double value, uint64_t *clipped)
 int v92_pcm_interpolator_put(v92_pcm_interpolator_t *s, int16_t input,
                              int16_t *output)
 {
-    if (!s || !output || (s->factor != 3 && s->factor != 6)) return 0;
+    if (!s || !output || (s->factor < 1 || s->factor > 6)) return 0;
     memmove(s->history+1, s->history, sizeof(s->history)-sizeof(s->history[0]));
     s->history[0] = input;
     for (int p = 0; p < s->factor; p++) {

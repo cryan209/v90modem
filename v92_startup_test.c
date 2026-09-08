@@ -123,7 +123,7 @@ static void test_linear(void)
 static void test_audio(void)
 {
     const double pi = 3.14159265358979323846;
-    for (int factor = 3; factor <= 6; factor += 3) {
+    for (int factor = 1; factor <= V92_AUDIO_PER_SYMBOL; factor++) {
         v92_pcm_interpolator_t fir;
         assert(v92_pcm_interpolator_init(&fir, factor));
         /* Bound ALL possible int16 input histories, including a full-scale
@@ -183,8 +183,8 @@ static void test_audio(void)
     assert(v92a_audio_clipped(whole) == 0 && v92a_audio_clipped(chunks) == 0);
     v92a_audio_free(whole);
     v92a_audio_free(chunks);
-    assert(!v92a_audio_init(&cfg, 6));
-    puts("PASS: 48 kHz reconstruction, full-scale headroom, both G.711 ladders and arbitrary TX chunks");
+    assert(!v92a_audio_init(&cfg, V92_AUDIO_PER_SYMBOL));
+    puts("PASS: 16 kHz reconstruction, full-scale headroom, both G.711 ladders and arbitrary TX chunks");
 }
 
 static void test_trn1u(void)
@@ -321,12 +321,14 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
     };
     cfg.u_info = test_phase2(alaw, true, false, true);
     if (dil) assert(v90_dil_preset_load(V90_DIL_PRESET_MEASUREMENT, &cfg.dil));
-    /* TX reconstruction adds four symbols; network DAC adds eight. */
-    if (audio) cfg.round_trip_symbols = 12;
+    /* TX lookahead is 16 half-symbol ticks; network DAC adds eight symbols. */
+    if (audio) cfg.round_trip_symbols = 16;
     v92a_audio_t *frontend = audio ? v92a_audio_init_rate(&cfg, audio_rate) : NULL;
     v92a_t *analogue = audio ? v92a_audio_core(frontend) : v92a_init(&cfg);
     v92_pcm_interpolator_t dac;
-    assert(v92_pcm_interpolator_init(&dac, 6));
+    int audio_count = audio ? (int)audio_rate/8000 : 0;
+    assert(!audio || (audio_count > 0 && audio_count <= 6 && audio_rate%8000 == 0));
+    if (audio) assert(v92_pcm_interpolator_init(&dac, audio_count));
     v90_state_t *digital = v90_init_data_pump(cfg.law);
     assert(analogue && digital);
     v90_enable_v92_phase3(digital);
@@ -347,8 +349,6 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
 
     bool dropped_cpd = false, dropping_cpd = false;
     bool trace_audio = getenv("V92_AUDIO_TRACE") != NULL;
-    int audio_count = audio ? (int)audio_rate/8000 : 0;
-    assert(!audio || (audio_count > 0 && audio_rate%8000 == 0));
     for (int i = 0; i < 160000; i++) {
         int16_t upstream[6], downstream;
         uint8_t d;
@@ -373,13 +373,11 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
         if (trace_audio) fprintf(stderr, "TXRAW %d %d\n", i, downstream);
         if (audio) {
             int16_t line[6];
-            assert(v92_pcm_interpolator_put(&dac, downstream, line) == 6);
-            int16_t local[6];
-            for (int j = 0; j < audio_count; j++) local[j] = line[j*6/audio_count];
+            assert(v92_pcm_interpolator_put(&dac, downstream, line) == audio_count);
             /* Callback boundaries are independent of receiver half symbols. */
             int first = 1 + i%audio_count;
-            v92a_audio_rx(frontend, local, first);
-            v92a_audio_rx(frontend, local+first, audio_count-first);
+            v92a_audio_rx(frontend, line, first);
+            v92a_audio_rx(frontend, line+first, audio_count-first);
         } else v92a_rx(analogue, &downstream, 1);
         if (!ja_seen) {
             v92_p3_rx_feed(&ja_rx, u, i);
@@ -454,6 +452,52 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
     printf("PASS: V.92 Phases 3–4 linear analogue / G.711 digital pair %s, %s DIL%s%s\n",
            alaw ? "PCMA" : "PCMU", dil ? "measured" : "zero",
            drop_cpd ? ", first CPd erased" : "", audio ? ", reconstructed audio" : "");
+}
+
+/* Independent Table 20 zero-DIL frame and delayed analogue training.
+ * V.92 9.5.2.1.2 permits TRN1u beyond 2040T; span multiple RX rolls. */
+static void test_long_ja(bool alaw)
+{
+    uint8_t bits[276] = {0};
+    for (int i = 0; i < 17; i++) bits[i] = 1;
+    /* Lsp=Ltp=1, N=0; H and rate masks zero are valid here. */
+    uint16_t crc = 0xffff;
+    for (int i = 18; i < 255; i++) {
+        if (i == 34 || (i >= 51 && (i-51)%17 == 0)) continue;
+        crc = (crc ^ bits[i]) & 1 ? (crc >> 1) ^ 0x8408 : crc >> 1;
+    }
+    for (int i = 0; i < 16; i++) bits[256+i] = (crc >> i) & 1;
+    v92_p3_rx_t rx;
+    v92_p3_rx_start(&rx, 10000);
+    int t = 10000;
+    for (int i = 0; i < 408; i++, t++) {
+        int sign = (i%6 < 3 ? 1 : -1) * (i < 384 ? 1 : -1);
+        v92_p3_rx_feed(&rx, network_adc(alaw, sign*6000), t);
+    }
+    v92_trn2u_tx_t tx;
+    v92_trn2u_tx_init(&tx, 2, 6000, alaw);
+    v92_trn2u_tx_start(&tx, 0);
+    for (int i = 0; i < 12000; i++, t++) {
+        int16_t sample;
+        v92_trn1u_tx_linear(&tx, &sample, 1);
+        v92_p3_rx_feed(&rx, network_adc(alaw, sample), t);
+        assert(!v92_p3_rx_ja_ok(&rx));
+        assert(rx.state != V92_P3_RX_FAILED);
+    }
+    int descriptor_start = t + 24;
+    for (int i = 0; i < 24 + 3*276 && !v92_p3_rx_ja_ok(&rx); i++, t++) {
+        uint8_t bit = i < 24 ? 1 : bits[(i-24)%276];
+        /* First descriptor has a bad CRC; only the next may publish Ja. */
+        if (i == 24 + 256) bit ^= 1;
+        int16_t sample;
+        v92_trn2u_tx_bits_linear(&tx, &bit, 1, &sample, 1);
+        v92_p3_rx_feed(&rx, network_adc(alaw, sample), t);
+    }
+    assert(v92_p3_rx_ja_ok(&rx));
+    assert(rx.ja_result.start_sample == descriptor_start + 276);
+    assert(rx.ja_result.start_sample < t);
+    assert(rx.ja_result.desc.n == 0);
+    printf("PASS: delayed Ja after 12000T TRN1u %s\n", alaw ? "PCMA" : "PCMU");
 }
 
 /* Independently scripted Su segments: sustained Su must not be called its
@@ -531,30 +575,200 @@ static void test_filter_baseline(void)
     puts("PASS: Table 18 baseline 192 total / 128 per-section filter capacity");
 }
 
+/* V.34 10.1.2.3.2 oracle: process the information words MSB-register-first
+ * using polynomial 0x1021, then reflect the remainder for the wire. This
+ * deliberately does not call SpanDSP's reflected CRC implementation. */
+static uint16_t spec_crc(const uint8_t *bits, int words)
+{
+    uint16_t r = 0xffff, wire = 0;
+    for (int w = 0; w < words; w++) {
+        for (int b = 0; b < 16; b++) {
+            int feedback = (r >> 15) ^ bits[18 + 17*w + b];
+            r <<= 1;
+            if (feedback) r ^= 0x1021;
+        }
+    }
+    for (int i = 0; i < 16; i++) wire |= ((r >> i)&1) << (15-i);
+    return wire;
+}
+static void assert_spec_crc(const uint8_t *bits, int words)
+{
+    int start = 18 + 17*words;
+    unsigned actual = 0;
+    for (int i = 0; i < 16; i++) actual |= bits[start+i] << i;
+    assert(actual == spec_crc(bits, words));
+}
+static void test_spec_crc(void)
+{
+    uint8_t bits[V92_CPD_MAX_BITS];
+    int n;
+    for (int ack = 0; ack < 2; ack++) {
+        v92_suvd_frame_t d = {true, ack};
+        assert(v92_suvd_encode(&d, bits, sizeof(bits)));
+        assert_spec_crc(bits, 1);
+        v92_suvu_frame_t u = {0};
+        u.acknowledge = ack;
+        u.wait_for_cpu = true;
+        u.prefilter_level_q2_2 = 13;
+        for (int points = 2; points <= 8; points *= 2) {
+            assert(v92_suvu_encode(&u, points, bits, sizeof(bits), &n));
+            assert_spec_crc(bits, 1);
+            v92_cpus_frame_t short_cp = {.drn = 17, .acknowledge = ack};
+            assert(v92_cpus_encode(&short_cp, points, bits, sizeof(bits), &n));
+            assert_spec_crc(bits, 1);
+        }
+    }
+    for (int type = 0; type <= 1; type++) {
+        for (int sets = 1; sets <= 6; sets++) {
+            v92_cp_frame_t cp = {0};
+            cp.type = type;
+            cp.drn = 9;
+            cp.constellation_count = sets;
+            cp.dfi[5] = sets-1;
+            cp.codec_constellations_differ = true;
+            cp.trn1d_gain_q3_13 = 0x2187;
+            for (int j = 0; j < sets; j++) {
+                vpcm_cp_enable_all_ucodes(cp.masks[j]);
+                vpcm_cp_enable_odd_ucodes(cp.codec_masks[j]);
+            }
+            assert(v92_cp_encode(&cp, 4, bits, sizeof(bits), &n));
+            assert_spec_crc(bits, 7 + 16*sets);
+        }
+    }
+    v92_cpd_base_frame_t base = {19, 2, true, true, 0x8000};
+    assert(v92_cpd_base_encode(&base, bits, sizeof(bits)));
+    assert_spec_crc(bits, 2);
+    for (int optional = 0; optional < 8; optional++) {
+        v92_cpd_frame_t cp = {0};
+        cp.selected_upstream_drn = 13;
+        cp.gain_q0_16 = 0x9876;
+        cp.modulus_present = optional & 1;
+        cp.coeffs_present = optional & 2;
+        cp.constellations_present = optional & 4;
+        for (int i = 0; i < 12; i++) cp.moduli[i] = 17+i;
+        cp.lp1 = 2;
+        cp.precoder_fb[0] = -256;
+        cp.precoder_fb[1] = 513;
+        cp.lz2 = 1;
+        cp.prefilter_ff[0] = 100;
+        cp.set_sizes[0] = 3;
+        for (int i = 0; i < 3; i++) cp.points[0][i] = 10+i;
+        assert(v92_cpd_encode(&cp, 17, bits, sizeof(bits), &n));
+        int words = 2 + ((optional&1) ? 6 : 0)
+                      + ((optional&2) ? 7 : 0) + ((optional&4) ? 8 : 0);
+        assert_spec_crc(bits, words);
+    }
+    /* Amd.1 Table 31: reserved bits are not interpreted by the analogue
+     * receiver. They remain CRC-protected; corruption still fails. */
+    v92_suvd_frame_t d = {false, true};
+    v92_suvd_diag_t diag;
+    assert(v92_suvd_encode(&d, bits, sizeof(bits)));
+    bits[19] = 1;
+    assert(!v92_suvd_decode(bits, V92_SUVD_BITS, NULL, &diag));
+    uint16_t crc = spec_crc(bits, 1);
+    for (int i = 0; i < 16; i++) bits[35+i] = (crc >> i)&1;
+    assert(v92_suvd_decode(bits, V92_SUVD_BITS, &d, &diag));
+    assert(!diag.reserved_ok && diag.crc_ok && d.acknowledge);
+    puts("PASS: independent V.92 control CRCs and amended SUVd reserved-bit handling");
+}
+
+static void test_spec_scr(bool alaw)
+{
+    v90_state_t *tx = v90_init_data_pump(alaw ? V90_LAW_ALAW : V90_LAW_ULAW);
+    assert(tx);
+    v90_enable_v92_phase3(tx);
+    v90_enable_v92_mode(tx);
+    v90_enable_v92_native_cpu_rx(tx);
+    v90_start_phase3(tx, 90);
+    assert(v90_handle_rx_event(tx, V90_RX_EVENT_J));
+    uint8_t cw = 0, history[23] = {0};
+    int previous = 0, count = 0;
+    bool su_sent = false, final_sent = false;
+    for (int i = 0; i < 60000 && v90_get_tx_phase(tx) != V90_TX_SCR; i++) {
+        v90_tx_phase_t stage = v90_get_tx_phase(tx);
+        if (stage == V90_TX_JD && !su_sent) {
+            su_sent = true;
+            assert(v90_handle_rx_event(tx, V90_RX_EVENT_SU));
+            assert(v90_handle_rx_event(tx, V90_RX_EVENT_SU_BAR));
+        }
+        if (stage == V90_TX_JP && !final_sent) {
+            final_sent = true;
+            assert(v90_handle_rx_event(tx, V90_RX_EVENT_SU_FINAL));
+        }
+        v90_phase3_tx_codewords(tx, &cw, 1);
+        int sign = cw >> 7;
+        history[count++ % 23] = sign ^ previous;
+        previous = sign;
+    }
+    assert(v90_get_tx_phase(tx) == V90_TX_SCR && count > 23);
+    /* Amd.1 8.6.6: continue GPC and differential memory from Jp-prime.
+     * Seed the oracle from the transmitted signs, not internal TX state. */
+    for (int i = 0; i < 96; i++) {
+        int scrambled = 1 ^ history[(count-18)%23] ^ history[(count-23)%23];
+        int expected = previous ^ scrambled;
+        uint8_t last = cw;
+        v90_phase3_tx_codewords(tx, &cw, 1);
+        assert((cw >> 7) == expected);
+        assert((cw & 0x7f) == (last & 0x7f));
+        history[count++ % 23] = scrambled;
+        previous = expected;
+    }
+    v90_free(tx);
+    printf("PASS: amended SCR GPC/differential continuity %s\n", alaw ? "PCMA" : "PCMU");
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 2 && !strcmp(argv[1], "--audio-checks")) {
+        test_audio();
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--spec-only")) {
+        test_spec_crc();
+        test_spec_scr(false);
+        test_spec_scr(true);
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--core-only")) {
+        for (int law = 0; law < 2; law++) {
+            test_phase3_pair(law, false, false, 0);
+            test_phase3_pair(law, true, false, 0);
+            test_phase3_pair(law, false, true, 0);
+        }
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--ja-only")) {
+        test_long_ja(false);
+        test_long_ja(true);
+        return 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "--audio-case")) {
         test_phase3_pair(false, false, false, (unsigned)atoi(argv[2]));
         return 0;
     }
+    test_spec_crc();
+    test_spec_scr(false);
+    test_spec_scr(true);
     test_audio();
     test_phase3_pair(false, false, false, false);
-    test_phase3_pair(false, false, false, 48000);
+    test_phase3_pair(false, false, false, V92_AUDIO_RATE);
     test_phase3_pair(true, false, false, false);
-    test_phase3_pair(true, false, false, 48000);
+    test_phase3_pair(true, false, false, V92_AUDIO_RATE);
     test_phase3_pair(false, true, false, false);
-    test_phase3_pair(false, true, false, 48000);
+    test_phase3_pair(false, true, false, V92_AUDIO_RATE);
     test_phase3_pair(true, true, false, false);
-    test_phase3_pair(true, true, false, 48000);
+    test_phase3_pair(true, true, false, V92_AUDIO_RATE);
     test_phase3_pair(false, false, true, false);
-    test_phase3_pair(false, false, true, 48000);
+    test_phase3_pair(false, false, true, V92_AUDIO_RATE);
     test_phase3_pair(true, false, true, false);
-    test_phase3_pair(true, false, true, 48000);
+    test_phase3_pair(true, false, true, V92_AUDIO_RATE);
     test_filter_baseline();
     test_su(false);
     test_su(true);
     test_linear();
     test_trn1u();
+    test_long_ja(false);
+    test_long_ja(true);
     for (int law = 0; law < 2; law++) {
         test_md(law, 1);
         test_md(law, 40);

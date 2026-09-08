@@ -825,23 +825,19 @@ static bool demod_ja_search(v92_p3_rx_t *rx, ja_dil_decode_t *out)
     return found;
 }
 
-static void ja_result_normalize_sample(const v92_p3_rx_t *rx, ja_dil_decode_t *res)
-{
-    if (!rx || !res || res->start_sample < 0)
-        return;
-    /*
-     * v92_ja_dil_search may report a start index relative to ja_buf[0].
-     * Promote such values to the absolute sample timeline.
-     */
-    if (res->start_sample < rx->ja_buf_fill)
-        res->start_sample += rx->ja_buf_base;
-}
-
 /* -------------------------------------------------------------------------
  * Ja codeword buffer
  * ------------------------------------------------------------------------- */
 static void ja_buf_push(v92_p3_rx_t *rx, uint8_t cw, int sample_index)
 {
+    /* V.92 9.5.2.1.2 permits more than minimum-length TRN1u.
+     * Retain 6000 symbols: enough for the largest Table 20 descriptor
+     * (N=255, Lsp=Ltp=128), its GPA history and a search cadence. */
+    if (rx->ja_buf_fill == V92_P3_RX_JA_BUF) {
+        memmove(rx->ja_buf, rx->ja_buf + 144, V92_P3_RX_JA_BUF - 144);
+        rx->ja_buf_fill -= 144;
+        rx->ja_buf_base += 144;
+    }
     if (rx->ja_buf_fill == 0)
         rx->ja_buf_base = sample_index;
     if (rx->ja_buf_fill < V92_P3_RX_JA_BUF)
@@ -945,62 +941,70 @@ static void ur1_advance(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
  * ------------------------------------------------------------------------- */
 static bool run_ja_search(v92_p3_rx_t *rx, bool force_hard_min)
 {
-    ja_dil_search_params_t params;
+    int search_start, search_end;
     int buf_trn_off;
     int trn_min_t;
-    int ja_lead_t;
 
-    memset(&params, 0, sizeof(params));
     trn_min_t = (force_hard_min
                  ? V92_P3_RX_TRN1U_MIN_T
                  : (rx->p6_soft_mode ? TRN1U_MIN_SOFT_T : V92_P3_RX_TRN1U_MIN_T));
-    ja_lead_t = (force_hard_min
-                 ? V92_P3_RX_JA_LEAD_T
-                 : (rx->p6_soft_mode ? JA_LEAD_SOFT_T : V92_P3_RX_JA_LEAD_T));
 
     /* Offset of trn1u_start within ja_buf. */
     buf_trn_off = rx->trn1u_start - rx->ja_buf_base;
-    if (buf_trn_off < 24)
-        buf_trn_off = 24;   /* need at least 23 seed samples before search */
+    /* 9.5.1.1.3 arms after 2040T; that is not a Ja onset deadline.
+     * Search the retained stream, including descriptors incomplete at the
+     * previous probe. The call owner must enforce 9.5.1.2.1's retrain timer. */
+    search_start = buf_trn_off + trn_min_t - 50;
+    search_end = rx->ja_buf_fill - 207;
+    if (search_start < 24)
+        search_start = 24;
 
-    /*
-     * Ja is expected to appear right after TRN1u minimum.
-     * Open a ±50 sample window around that point, plus JA lead slack.
-     */
-    params.search_start  = buf_trn_off + trn_min_t - 50;
-    params.search_end    = buf_trn_off + trn_min_t + ja_lead_t;
-    params.tx_ja_sample  = -1;
-    params.u_info        = 0;
-    params.calling_party = true;
-    params.require_v92 = true;
-
-    if (params.search_start < 24)
-        params.search_start = 24;
-
-    int max_end = rx->ja_buf_fill - 207;
-    if (params.search_end > max_end)
-        params.search_end = max_end;
-
-    if (params.search_end <= params.search_start) {
+    if (search_end <= search_start) {
         p3rx_set_reject(rx,
                         V92_P3_RX_REJECT_JA_SEARCH_FAIL,
                         rx->trn1u_start + rx->trn1u_count,
-                        params.search_start,
-                        params.search_end);
+                        search_start,
+                        search_end);
         return false;
     }
 
     memset(&rx->ja_result, 0, sizeof(rx->ja_result));
-    bool found = v92_ja_dil_search(rx->ja_buf, rx->ja_buf_fill,
-                                   &params, &rx->ja_result);
-    if (found)
-        ja_result_normalize_sample(rx, &rx->ja_result);
-    if (found && rx->ja_result.ok && rx->ja_result.parsed_v92)
+    /* 6.3 / 8.5.4: differential signs followed by GPA descrambling.
+     * Decode once per retained window; unlike the diagnostic search this
+     * live path needs only exact Table 20 frames, not soft-candidate scores.
+     * Differential decoding makes a constant polarity inversion harmless. */
+    uint8_t plain[V92_P3_RX_JA_BUF];
+    for (int i = 24; i < rx->ja_buf_fill; i++) {
+        unsigned cw = rx->ja_buf[i] ^ rx->ja_buf[i-1]
+                    ^ rx->ja_buf[i-5] ^ rx->ja_buf[i-6]
+                    ^ rx->ja_buf[i-23] ^ rx->ja_buf[i-24];
+        plain[i] = (cw >> 7) & 1;
+    }
+    for (int start = search_start; start <= search_end; start++) {
+        int sync = 0;
+        while (sync < 17 && plain[start+sync]) sync++;
+        if (sync != 17 || plain[start+17]) continue;
+        uint8_t packed[(V92_P3_RX_JA_BUF+7)/8] = {0};
+        int count = rx->ja_buf_fill-start;
+        for (int i = 0; i < count; i++)
+            packed[i/8] |= plain[start+i] << (i%8);
+        v92_ja_parse_meta_t meta;
+        v90_dil_desc_t desc;
+        if (!v92_parse_ja_descriptor_strict(&desc, packed, count, &meta)
+            || !meta.is_v92) continue;
+        rx->ja_result.ok = true;
+        rx->ja_result.parsed_v92 = true;
+        rx->ja_result.calling_party = true;
+        rx->ja_result.start_sample = rx->ja_buf_base + start;
+        rx->ja_result.descriptor_bits = meta.bit_len;
+        rx->ja_result.desc = desc;
+        v90_analyse_dil_descriptor(&desc, &rx->ja_result.analysis);
         return true;
+    }
 
-    /* Try to upgrade soft-lock to strict parse via symbol-domain demod path. */
-    if (demod_ja_search(rx, &rx->ja_result) && rx->ja_result.parsed_v92) {
-        ja_result_normalize_sample(rx, &rx->ja_result);
+    /* The equalizing fallback needs the original TRN1u training history. */
+    if (rx->ja_buf_base <= rx->trn1u_start
+        && demod_ja_search(rx, &rx->ja_result) && rx->ja_result.parsed_v92) {
         return true;
     }
 
@@ -1456,16 +1460,6 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
     {
         int ready_hard = 24 + V92_P3_RX_TRN1U_MIN_T + V92_P3_RX_JA_LEAD_T + 207;
         ja_buf_push(rx, codeword, sample_index);
-
-        if (rx->ja_buf_fill >= V92_P3_RX_JA_BUF) {
-            p3rx_set_reject(rx,
-                            V92_P3_RX_REJECT_JA_BUFFER_FULL,
-                            sample_index,
-                            rx->ja_buf_fill,
-                            V92_P3_RX_JA_BUF);
-            rx->state = V92_P3_RX_FAILED;
-            break;
-        }
 
         /* V.92 9.5.1.1.3 requires the received Table-20 descriptor.
          * A repaired CRC or a soft candidate is never a receive event.

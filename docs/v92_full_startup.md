@@ -15,7 +15,7 @@ the network ADC's codewords. The analogue modem is `v92a_t`, declared in
 `v92_analogue_phase3.h`; it owns `v92a4_t` for final training.
 
 Use `v92a_audio_t` (`v92_analogue_audio.h`) for the analogue audio interface:
-**48 kHz signed 16-bit linear PCM in both directions**, six samples per
+**16 kHz signed 16-bit linear PCM in both directions**, two samples per
 8,000-baud symbol. V.92 6.2 specifies the symbol clock, not an 8 kHz sound
 card interface. The PCM calibration is four core linear units per audio
 sample unit, providing about **12 dB of amplitude headroom** above the
@@ -24,24 +24,24 @@ interface; it is not gain applied to digital codewords.
 
 The internal `v92a_t` protocol core still accepts calibrated, symbol-clock
 8 kHz linear PCM and produces a 16 kHz timeline, which represents
-9.5.2.1.7's 24.5T interval exactly. The audio front end reconstructs that
-timeline at 48 kHz with a 16-tap windowed-sinc interpolator, preserving the
-timeline's samples at its input lattice. It adds eight 16 kHz ticks of
-transmit delay (four symbols). The filter is an implementation choice,
-not a pulse shape prescribed by V.92. It has finite stopband rejection;
-this is a waveform model, not a complete physical line model.
+9.5.2.1.7's 24.5T interval exactly. The default audio output uses that same
+16 kHz timeline, with calibrated amplitude and sixteen half-symbol ticks
+(eight symbols) of transmit lookahead. Its streaming windowed-sinc reader
+supports fractional clock adjustments; at a synchronous clock its positions
+fall on the original sample lattice. This filter is an implementation
+choice, not a pulse shape prescribed by V.92.
 
-The analogue receiver samples at a configured recovered-network-clock
-phase (0–5), restoring core linear calibration before symbol processing.
-Arbitrary callback lengths preserve both clock phases. This interface
-**requires a synchronous network clock**: it does not yet acquire timing,
-track oscillator drift, equalize the line, or cancel echo. Clipping is
-counted explicitly by `v92a_audio_clipped()`.
+The experimental analogue receiver acquires Sd and feeds a T/2 equalizer.
+Its adaptive clock/equalizer path is not yet validated through complete audio
+startup. The legacy `rx_phase` argument is accepted in 0–1 but acquisition
+determines the phase itself. Clipping is counted by `v92a_audio_clipped()`.
+`v92a_audio_init_rate()` retains explicit alternate-rate experiments; the
+default interface and startup matrix use 16 kHz.
 
 In the audio harness, the network DAC decodes each downstream G.711
-codeword once and reconstructs it at 48 kHz with eight symbols of delay.
+codeword once and reconstructs it directly at 16 kHz with eight symbols of delay.
 The network ADC samples upstream audio at 8 kHz and quantizes once to
-G.711. The combined twelve-symbol delay is supplied as the round-trip
+G.711. The combined sixteen-symbol delay is supplied as the round-trip
 delay. No G.711 codec operation occurs inside `v92a_audio_t`. The digital
 transmitter still emits original DS0 codewords directly.
 
@@ -65,7 +65,7 @@ can send application payload through `v92a4_set_data_source()` after B1u;
 `v92a4_get_data_bits()` retrieves downstream payload. The audio endpoint's
 `v92a_audio_core()` accessor exposes the controller for this configuration
 and status. Do not drive the core's audio calls separately when using the
-48 kHz front end.
+16 kHz front end.
 
 ## Startup behavior and fixes
 
@@ -112,7 +112,7 @@ and status. Do not drive the core's audio calls separately when using the
   zero DIL and a measured DIL constellation. Events come from received
   waveforms, never injected from the other endpoint's intended state.
 - Each startup/erasure case runs both at the original core seam and through
-  reconstructed 48 kHz analogue audio, and grades at least **1,024 varied
+  reconstructed 16 kHz analogue audio, and grades at least **1,024 varied
   upstream payload bytes** against the source, with zero rejected frames
   and zero byte errors. Startup is no longer the only success condition.
 - Audio checks bound reconstruction peaks for every possible int16 input
@@ -136,9 +136,13 @@ analogue front end now has finite windowed-sinc reconstruction, but still
 needs continuous timing recovery and equalization for a physical two-wire
 line. The tests use the known sampling instant; they do not establish
 operation at an unknown fractional phase or with independent audio clocks.
-The native initial
-Ja receiver also retains a bounded acquisition window around minimum-length
-TRN1u; longer peer training needs a rolling search.
+The native initial Ja receiver now retains a rolling 6,144-symbol window:
+9.5.1.1.3's 2040T arms acquisition rather than fixing the analogue peer's
+Ja onset. Exact Table 20 decoding continues after the original training
+history leaves the window; the equalizing fallback still requires that
+original history. The call owner must supply 9.5.1.2.1's deadline from the
+end of INFO1a plus measured round-trip delay; this receiver does not implement
+that retrain procedure.
 
 The live digital engine uses the receiver fixes. The new analogue controller
 is linked into the server but is not yet wired into the SIP analogue role;
@@ -149,3 +153,41 @@ rather than pretending to complete or silently falling back.
 
 Passing these tests establishes startup on the modeled bearer, not
 interoperability with an external V.92 modem.
+
+## 2026-09-08 acquisition regression checks
+
+`./v92_startup_test --ja-only` sends 12,000T of analogue TRN1u through the
+network ADC, followed by a CRC-damaged Table 20 descriptor and valid repeats.
+Both G.711 laws must reject training and the damaged frame, accept the next
+exact descriptor, and report its absolute sample index after multiple buffer
+rolls. `--core-only` runs the six coupled core startup cases (both laws,
+zero/measured DIL and first-CPd erasure), including payload grading.
+
+The full startup suite fails in the PCMU zero-DIL audio case at the
+analogue Phase-4 DATA assertion, both at the former 48 kHz rate and at the
+current 16 kHz baseline. The earlier 48 kHz failure also reproduced with
+the unchanged Ja receiver and after rebuilding the local objects. Therefore
+the earlier audio-suite pass claims above are historical, not validation of
+the current checkout. The current adaptive audio implementation needs further
+work before its startup or independent-clock behavior can be claimed.
+
+## Amendment audit
+
+See [the amendment audit](v92_spec_amendment_audit.md) for item-by-item
+coverage of both amendments and the corrigendum. The current fixes add
+Amd.1's differential SCR, correct control-message CRC coverage in both
+modem directions, and apply Table 31's reserved-bit receive rule. Run
+`./v92_startup_test --spec-only` for independent wire checks; ordinary
+encoder/decoder round trips did not expose these mismatches.
+
+## 16 kHz baseline
+
+`V92_AUDIO_RATE` is 16000 and `V92_AUDIO_PER_SYMBOL` is 2. The test network
+DAC generates two samples directly per DS0 codeword; it does not generate
+48 kHz audio and decimate it. All six default audio startup cases use this
+baseline. The digital DS0 and its ADC sampling clock remain 8 kHz.
+
+`./v92_startup_test --audio-checks` passes the 16 kHz reconstruction,
+headroom, both G.711 ladders and arbitrary TX callback checks.
+`./v92_startup_test --audio-case 16000` still fails at the analogue Phase-4
+DATA assertion. The sample-rate change does not resolve that receiver gap.

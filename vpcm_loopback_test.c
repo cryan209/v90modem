@@ -2842,9 +2842,11 @@ static int v92_test_analogue_ones(v92_trn2u_tx_t *tx, uint8_t *wire, int count)
 
 static bool test_v92_suvd_codec_and_phase4(void)
 {
+    /* V.34 10.1.2.3.2: the single information word is
+     * 1 | (silent << 14) | (ack << 15); sync/start bits are excluded. */
     static const uint16_t expected_crc[2][2] = {
-        {0x0FD7, 0x4DD3},
-        {0x2ED5, 0x6CD1}
+        {0xE960, 0x6D68},
+        {0xAB64, 0x2F6C}
     };
     uint8_t bits[V92_SUVD_BITS];
 
@@ -2881,7 +2883,7 @@ static bool test_v92_suvd_codec_and_phase4(void)
         bits[19] = 1;
         if (v92_suvd_decode(bits, V92_SUVD_BITS, NULL, &diag)
             || diag.reserved_ok) {
-            fprintf(stderr, "V.92 SUVd accepted a non-zero reserved bit\n");
+            fprintf(stderr, "V.92 SUVd accepted a corrupted reserved bit without an updated CRC\n");
             return false;
         }
         if (!v92_suvd_encode(&frame, bits, (int)sizeof(bits)))
@@ -2930,7 +2932,7 @@ static bool test_v92_suvd_codec_and_phase4(void)
                                     &output,
                                     &diag)
             || !diag.valid
-            || diag.crc_field != 0x9B98
+            || diag.crc_field != 0x3848
             || output.selected_upstream_drn != input.selected_upstream_drn
             || output.trellis_select != input.trellis_select
             || output.extend_e2u != input.extend_e2u

@@ -3838,13 +3838,15 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
         return v90_dil_codeword(s);
 
     case V90_TX_SCR:
-        /* V.92 §8.6.6: zero-DIL calls send the continuing scrambled-one
-         * source while the upstream receiver acquires CPt. */
+        /* V.92 Amd.1 (07/2001), replacement 8.6.6: continue the GPC
+         * scrambler AND differential encoder from Jp-prime. SCR's signs
+         * are not the absolute scrambler output used by TRN1d. */
         if (!s->phase4_hold_logged) {
             fprintf(stderr, "[V92] Phase 3: sending SCR while waiting for CPt\n");
             s->phase4_hold_logged = true;
         }
-        sign = v90_scramble_bit(&s->scrambler, 1);
+        s->diff_enc ^= v90_scramble_bit(&s->scrambler, 1);
+        sign = s->diff_enc;
         /* V.92 9.5.1.1.13: with zero DIL, Ri asks the analogue modem
          * to begin CPt. Waiting for CPt first deadlocks both modems. Use
          * the receiver's TRN1u lock, then finish this six-symbol SCR period

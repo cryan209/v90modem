@@ -15,8 +15,14 @@ static uint16_t v92_cp_crc_through(const uint8_t *bits, int last_bit)
 {
     uint16_t crc = 0xFFFF;
 
-    for (int i = 0; i <= last_bit; i++)
-        crc = crc_itu16_bits(bits[i] & 1U, 1, crc);
+    /* V.92 8.5.1 / 8.7 / 8.8 reference V.34 10.1.2.3.2:
+     * CRC covers information only. Skip the 17 sync bits and each start
+     * bit on the 17-bit word cadence, including the one before the CRC.
+     * Optional CPd sections preserve this cadence when omitted. */
+    for (int i = 18; i <= last_bit; i++) {
+        if (i % 17 != 0)
+            crc = crc_itu16_bits(bits[i] & 1U, 1, crc);
+    }
     return crc;
 }
 
