@@ -1,6 +1,7 @@
 #include "v92_su.h"
 #include <spandsp.h>
 #include <string.h>
+#include <math.h>
 void v92_su_init(v92_su_t *s, bool alaw)
 {
     memset(s, 0, sizeof(*s));
@@ -9,7 +10,6 @@ void v92_su_init(v92_su_t *s, bool alaw)
 }
 v92_su_event_t v92_su_put(v92_su_t *s, uint8_t cw)
 {
-    static const int p[6] = {1,0,1,-1,0,-1};
     int sample = s->alaw ? alaw_to_linear(cw) : ulaw_to_linear(cw);
     int obs = sample > 900 ? 1 : sample < -900 ? -1 : 0;
     v92_su_event_t event = V92_SU_NONE;
@@ -30,26 +30,48 @@ v92_su_event_t v92_su_put(v92_su_t *s, uint8_t cw)
         }
     } else if (s->stage == V92_SU_TRAINED) {
         /* The Phase-4 receiver owns the following CPt/TRN2u. */
-    } else if (s->lock < 0 || s->stage == V92_SU_BAR) {
-        for (int h = 0; h < 6; h++) {
-            if (s->lock >= 0 && h != s->lock && h != (s->lock+1)%6 && h != (s->lock+5)%6)
-                continue;
-            s->run[h] = obs == p[(s->phase+h)%6] ? s->run[h]+1 : 0;
-            if (s->run[h] >= 24) {
-                event = s->lock < 0 ? V92_SU_ACQUIRED : V92_SU_RETURNED;
-                s->stage = event;
-                s->lock = h;
-                s->transition_run = 0;
-                memset(s->run, 0, sizeof(s->run));
-                break;
+    } else {
+        /* §8.5.6's six-symbol Su has a 1333 1/3 Hz fundamental. A phone
+         * line attenuates the Nyquist component, so its zero slots need not
+         * survive. Measure the fundamental on an absolute six-slot clock:
+         * a reversal is then a phase CHANGE, not the three-slot alias.
+         * §9.5.2.1.7 permits a half-symbol shift only on returned Su. */
+        static const double c[6] = {1, .5, -.5, -1, -.5, .5};
+        static const double q[6] = {0, .8660254037844386, .8660254037844386,
+                                    0, -.8660254037844386, -.8660254037844386};
+        s->window[s->phase] = sample;
+        if (s->filled < 6) s->filled++;
+        if (s->filled == 6 && s->phase == 5) {
+            double re = 0, im = 0;
+            for (int j = 0; j < 6; j++) { re += c[j]*s->window[j]; im += q[j]*s->window[j]; }
+            double energy = re*re+im*im;
+            double previous = s->previous_i*s->previous_i+s->previous_q*s->previous_q;
+            double change = (re-s->previous_i)*(re-s->previous_i)
+                          + (im-s->previous_q)*(im-s->previous_q);
+            bool periodic = energy > 900.0*900*9 && previous > 0 && change < .03*energy;
+            s->stable = periodic ? s->stable+1 : 0;
+            double reference = s->reference_i*s->reference_i+s->reference_q*s->reference_q;
+            double dot = re*s->reference_i+im*s->reference_q;
+            if (s->lock < 0 && s->stable >= 3) {
+                event = V92_SU_ACQUIRED;
+            } else if (s->stage == V92_SU_BAR && s->stable >= 1
+                       && dot > .35*sqrt(reference*energy)) {
+                event = V92_SU_RETURNED;
+            } else if ((s->stage == V92_SU_ACQUIRED || s->stage == V92_SU_RETURNED)
+                       && s->stable >= 1 && dot < -.85*sqrt(reference*energy)) {
+                event = s->stage == V92_SU_ACQUIRED ? V92_SU_BAR : V92_SU_FINAL;
             }
-        }
-    } else if (s->stage != V92_SU_FINAL) {
-        s->transition_run = obs == -p[(s->phase+s->lock)%6] ? s->transition_run+1 : 0;
-        if (s->transition_run >= 24) {
-            event = s->stage == V92_SU_ACQUIRED ? V92_SU_BAR : V92_SU_FINAL;
-            s->stage = event;
-            s->transition_run = 0;
+            if (event) {
+                s->stage = event;
+                s->lock = 0;
+                s->stable = 0;
+                if (event == V92_SU_ACQUIRED || event == V92_SU_RETURNED) {
+                    s->reference_i = re;
+                    s->reference_q = im;
+                }
+            }
+            s->previous_i = re;
+            s->previous_q = im;
         }
     }
     s->phase = (s->phase+1)%6;

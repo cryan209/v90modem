@@ -7,6 +7,7 @@
 #include "v92_trn2u.h"
 #include "v92_p3_rx.h"
 #include "v92_analogue_phase3.h"
+#include "v92_analogue_audio.h"
 #include "v92_su.h"
 #include "v90_dil_presets.h"
 #include "v92_upstream_rx.h"
@@ -14,6 +15,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 static int marks(void *user) { (void)user; return 1; }
 static void discard(void *user, int bit) { (void)user; (void)bit; }
@@ -118,6 +120,73 @@ static void test_linear(void)
     puts("PASS: analogue linear PCM amplitudes, law independence and chunk continuity");
 }
 
+static void test_audio(void)
+{
+    const double pi = 3.14159265358979323846;
+    for (int factor = 3; factor <= 6; factor += 3) {
+        v92_pcm_interpolator_t fir;
+        assert(v92_pcm_interpolator_init(&fir, factor));
+        /* Bound ALL possible int16 input histories, including a full-scale
+         * alternating waveform. Headroom must survive reconstruction peaks. */
+        for (int p = 0; p < factor; p++) {
+            double bound = 0;
+            for (int j = 0; j < V92_AUDIO_INTERPOLATOR_TAPS; j++)
+                bound += fabs(fir.coefficients[p][j])*32768;
+            assert(bound < 32767);
+        }
+        double error = 0, energy = 0;
+        for (int n = 0; n < 1600; n++) {
+            int16_t out[6];
+            double input_rate = (double)V92_AUDIO_RATE/factor;
+            int16_t input = (int16_t)lround(20000*sin(2*pi*3000*n/input_rate));
+            assert(v92_pcm_interpolator_put(&fir, input, out) == factor);
+            if (n < 32) continue;
+            for (int p = 0; p < factor; p++) {
+                double expected = 5000*sin(2*pi*3000*(n-8+(double)p/factor)/input_rate);
+                error += (out[p]-expected)*(out[p]-expected);
+                energy += expected*expected;
+            }
+        }
+        assert(sqrt(error/energy) < 0.03);
+        assert(fir.clipped == 0);
+        /* The network DAC must preserve every G.711 level on the sampling
+         * lattice after its eight-input delay, without re-encoding bytes. */
+        for (int law = 0; law < 2; law++) {
+            assert(v92_pcm_interpolator_init(&fir, factor));
+            int16_t reference[256];
+            for (int n = 0; n < 264; n++) {
+                int16_t out[6];
+                if (n < 256) reference[n] = law ? alaw_to_linear(n) : ulaw_to_linear(n);
+                v92_pcm_interpolator_put(&fir, n < 256 ? reference[n] : 0, out);
+                if (n >= 8) assert(out[0]*V92_AUDIO_LINEAR_SCALE == reference[n-8]);
+            }
+            assert(fir.clipped == 0);
+        }
+    }
+    v92a_config_t cfg = {
+        .law = V90_LAW_ULAW, .u_info = 78, .lu = 6000,
+        .digital_max_tx_dbm0 = -13, .upstream_rate_mask = 1,
+        .dil = {.n = 0, .lsp = 1, .ltp = 1}
+    };
+    v92a_audio_t *whole = v92a_audio_init(&cfg, 0);
+    v92a_audio_t *chunks = v92a_audio_init(&cfg, 0);
+    assert(whole && chunks);
+    int16_t a[19001], b[19001];
+    assert(v92a_audio_tx(whole, a, 19001) == 19001);
+    for (int i = 0; i < 19001;) {
+        int count = 1 + i%127;
+        if (count > 19001-i) count = 19001-i;
+        assert(v92a_audio_tx(chunks, b+i, count) == count);
+        i += count;
+    }
+    assert(memcmp(a, b, sizeof(a)) == 0);
+    assert(v92a_audio_clipped(whole) == 0 && v92a_audio_clipped(chunks) == 0);
+    v92a_audio_free(whole);
+    v92a_audio_free(chunks);
+    assert(!v92a_audio_init(&cfg, 6));
+    puts("PASS: 48 kHz reconstruction, full-scale headroom, both G.711 ladders and arbitrary TX chunks");
+}
+
 static void test_trn1u(void)
 {
     enum { TRAIN = 2040, JA_PREAMBLE = 24 };
@@ -187,7 +256,26 @@ typedef struct {
     int cpt_count, e1u_count, cpu_count;
     bool b1_armed;
     v92_upstream_rx_t b1;
+    unsigned payload_bits, payload_bytes, payload_errors;
 } p3_pair_sink_t;
+
+static uint8_t payload_byte(unsigned n)
+{
+    return (uint8_t)((n*73) ^ (n>>3) ^ 0xa5);
+}
+
+static int pair_payload_bit(void *user)
+{
+    p3_pair_sink_t *sink = user;
+    unsigned n = sink->payload_bits++;
+    return (payload_byte(n/8) >> (n%8)) & 1;
+}
+
+static void pair_payload_byte(void *user, uint8_t byte)
+{
+    p3_pair_sink_t *sink = user;
+    sink->payload_errors += byte != payload_byte(sink->payload_bytes++);
+}
 
 static void pair_cpt(void *user, v92_p4u_kind_t kind,
                      const v92_cp_diag_t *cp, const v92_cpus_diag_t *cpus,
@@ -204,7 +292,7 @@ static void pair_cpt(void *user, v92_p4u_kind_t kind,
         if (!sink->b1_armed) {
             v92_cpd_frame_t profile;
             assert(v90_build_v92_cpd_frame(sink->digital, &profile));
-            assert(v92_upstream_b1_rx_init(&sink->b1, &profile, NULL, NULL));
+            assert(v92_upstream_b1_rx_init(&sink->b1, &profile, pair_payload_byte, sink));
             sink->b1_armed = true;
         }
         sink->cpu_count++;
@@ -222,8 +310,10 @@ static void pair_cpt(void *user, v92_p4u_kind_t kind,
     }
 }
 
-static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd)
+static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_rate)
+
 {
+    bool audio = audio_rate != 0;
     v92a_config_t cfg = {
         .law = alaw ? V90_LAW_ALAW : V90_LAW_ULAW, .u_info = 78,
         .lu = 6000, .digital_max_tx_dbm0 = -13, .upstream_rate_mask = 1,
@@ -231,7 +321,12 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd)
     };
     cfg.u_info = test_phase2(alaw, true, false, true);
     if (dil) assert(v90_dil_preset_load(V90_DIL_PRESET_MEASUREMENT, &cfg.dil));
-    v92a_t *analogue = v92a_init(&cfg);
+    /* TX reconstruction adds four symbols; network DAC adds eight. */
+    if (audio) cfg.round_trip_symbols = 12;
+    v92a_audio_t *frontend = audio ? v92a_audio_init_rate(&cfg, audio_rate) : NULL;
+    v92a_t *analogue = audio ? v92a_audio_core(frontend) : v92a_init(&cfg);
+    v92_pcm_interpolator_t dac;
+    assert(v92_pcm_interpolator_init(&dac, 6));
     v90_state_t *digital = v90_init_data_pump(cfg.law);
     assert(analogue && digital);
     v90_enable_v92_phase3(digital);
@@ -251,10 +346,14 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd)
     v92_su_init(&su_rx, alaw);
 
     bool dropped_cpd = false, dropping_cpd = false;
+    bool trace_audio = getenv("V92_AUDIO_TRACE") != NULL;
+    int audio_count = audio ? (int)audio_rate/8000 : 0;
+    assert(!audio || (audio_count > 0 && audio_rate%8000 == 0));
     for (int i = 0; i < 160000; i++) {
-        int16_t upstream[2], downstream;
+        int16_t upstream[6], downstream;
         uint8_t d;
-        assert(v92a_tx(analogue, upstream, 2) == 2);
+        if (audio) assert(v92a_audio_tx(frontend, upstream, audio_count) == audio_count);
+        else assert(v92a_tx(analogue, upstream, 2) == 2);
         int before_tx = v90_get_tx_phase(digital);
         assert(v90_phase3_tx_codewords(digital, &d, 1) == 1);
         if (drop_cpd && before_tx == V90_TX_CP && !dropped_cpd) {
@@ -265,9 +364,23 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd)
             dropping_cpd = false;
             dropped_cpd = true;
         }
-        uint8_t u = network_adc(alaw, upstream[0]);
+        /* Codec scaling is a calibration of the analogue volts, not gain
+         * on the digital DS0. Quantize only at the network ADC. */
+        int adc_sample = upstream[0] * (audio ? V92_AUDIO_LINEAR_SCALE : 1);
+        assert(adc_sample >= -32768 && adc_sample <= 32767);
+        uint8_t u = network_adc(alaw, (int16_t)adc_sample);
         downstream = alaw ? alaw_to_linear(d) : ulaw_to_linear(d);
-        v92a_rx(analogue, &downstream, 1);
+        if (trace_audio) fprintf(stderr, "TXRAW %d %d\n", i, downstream);
+        if (audio) {
+            int16_t line[6];
+            assert(v92_pcm_interpolator_put(&dac, downstream, line) == 6);
+            int16_t local[6];
+            for (int j = 0; j < audio_count; j++) local[j] = line[j*6/audio_count];
+            /* Callback boundaries are independent of receiver half symbols. */
+            int first = 1 + i%audio_count;
+            v92a_audio_rx(frontend, local, first);
+            v92a_audio_rx(frontend, local+first, audio_count-first);
+        } else v92a_rx(analogue, &downstream, 1);
         if (!ja_seen) {
             v92_p3_rx_feed(&ja_rx, u, i);
             if (v92_p3_rx_ja_ok(&ja_rx)) {
@@ -302,13 +415,20 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd)
             int16_t sample = alaw ? alaw_to_linear(u) : ulaw_to_linear(u);
             v92_upstream_b1_rx_feed(&sink.b1, &sample, 1);
         }
+        if (audio && trace_audio && i%8000 == 0)
+            fprintf(stderr, "AUDIO t=%d stage=%d rx=%d acquired=%d ppm=%.1f eq=%.4f clips=%llu\n", i/8000,
+                    v92a_stage(analogue), v92a_rx_training(analogue), v92a_audio_acquired(frontend),
+                    v92a_audio_clock_ppm(frontend), v92a_audio_eq_error(frontend),
+                    (unsigned long long)v92a_audio_clipped(frontend));
         v92a4_t *p4 = v92a_phase4(analogue);
+        if (p4) v92a4_set_data_source(p4, pair_payload_bit, &sink);
         if (p4 && v92a4_stage(p4) == V92A4_FAILED) {
             fprintf(stderr, "Phase 4 failed: %s\n", v92a4_failure(p4));
             break;
         }
         if (p4 && v92a4_stage(p4) == V92A4_DATA
-            && v92a4_downstream_ready(p4) && sink.b1.locked) break;
+            && v92a4_downstream_ready(p4) && sink.b1.locked
+            && sink.payload_bytes >= 1024) break;
         if (v92a_stage(analogue) == V92A_FAILED) {
             fprintf(stderr, "analogue failure: %s\n", v92a_failure(analogue));
             break;
@@ -322,13 +442,18 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd)
     assert(v92a4_stage(v92a_phase4(analogue)) == V92A4_DATA);
     assert(v92a4_downstream_ready(v92a_phase4(analogue)));
     assert(sink.b1.locked);
+    assert(sink.payload_bytes >= 1024 && sink.payload_errors == 0);
+    assert(sink.b1.rejected_frames == 0);
     assert(v90_get_tx_phase(digital) == V90_TX_DATA);
     assert(v92a_cpt(analogue));
-    v92a_free(analogue);
+    if (audio) {
+        assert(v92a_audio_clipped(frontend) == 0 && dac.clipped == 0);
+        v92a_audio_free(frontend);
+    } else v92a_free(analogue);
     v90_free(digital);
-    printf("PASS: V.92 Phases 3–4 linear analogue / G.711 digital pair %s, %s DIL%s\n",
+    printf("PASS: V.92 Phases 3–4 linear analogue / G.711 digital pair %s, %s DIL%s%s\n",
            alaw ? "PCMA" : "PCMU", dil ? "measured" : "zero",
-           drop_cpd ? ", first CPd erased" : "");
+           drop_cpd ? ", first CPd erased" : "", audio ? ", reconstructed audio" : "");
 }
 
 /* Independently scripted Su segments: sustained Su must not be called its
@@ -406,14 +531,25 @@ static void test_filter_baseline(void)
     puts("PASS: Table 18 baseline 192 total / 128 per-section filter capacity");
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
-    test_phase3_pair(false, false, false);
-    test_phase3_pair(true, false, false);
-    test_phase3_pair(false, true, false);
-    test_phase3_pair(true, true, false);
-    test_phase3_pair(false, false, true);
-    test_phase3_pair(true, false, true);
+    if (argc == 3 && !strcmp(argv[1], "--audio-case")) {
+        test_phase3_pair(false, false, false, (unsigned)atoi(argv[2]));
+        return 0;
+    }
+    test_audio();
+    test_phase3_pair(false, false, false, false);
+    test_phase3_pair(false, false, false, 48000);
+    test_phase3_pair(true, false, false, false);
+    test_phase3_pair(true, false, false, 48000);
+    test_phase3_pair(false, true, false, false);
+    test_phase3_pair(false, true, false, 48000);
+    test_phase3_pair(true, true, false, false);
+    test_phase3_pair(true, true, false, 48000);
+    test_phase3_pair(false, false, true, false);
+    test_phase3_pair(false, false, true, 48000);
+    test_phase3_pair(true, false, true, false);
+    test_phase3_pair(true, false, true, 48000);
     test_filter_baseline();
     test_su(false);
     test_su(true);

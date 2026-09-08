@@ -1235,3 +1235,5 @@ void v90_analogue_rx_set_jd_probe_report(v90_analogue_rx_t *s,
     s->jd_probe_report = fn;
     s->jd_probe_user = user;
 }
+
+bool v90_analogue_rx_inverted(const v90_analogue_rx_t *s) { return s && s->sign_flip; }

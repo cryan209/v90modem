@@ -4,6 +4,7 @@
 #include "v92_upstream_data.h"
 #include "v91.h"
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -224,6 +225,7 @@ void v92a4_rx(v92a4_t *s, const int16_t *samples, int count)
         uint8_t cw;
         if (v90a_linear_put(s->linear, samples+i, 1, &cw, 1) != 1) continue;
         unsigned e = v90_analogue_phase4_put(s->rx, &cw, 1);
+        if (e) fprintf(stderr, "P4RX event=%x\n", e);
         if (e & V90A4_RX_EVENT_DATA) {
             if (v90_analogue_phase4_b1d_bit_errors(s->rx)) fail(s, "B1d validation failed");
             else s->downstream = true;
@@ -234,6 +236,8 @@ v92a4_stage_t v92a4_stage(const v92a4_t *s) { return s ? s->stage : V92A4_FAILED
 bool v92a4_downstream_ready(const v92a4_t *s) { return s && s->downstream; }
 const v92_cpd_frame_t *v92a4_cpd(const v92a4_t *s) { return s && s->cpd_seen ? &s->cpd : NULL; }
 const char *v92a4_failure(const v92a4_t *s) { return s ? s->failure : "invalid configuration"; }
+double v92a4_rx_decision(const v92a4_t *s) { return s ? v90a_linear_last_decision(s->linear) : 0; }
+double v92a4_rx_tolerance(const v92a4_t *s) { return s ? v90a_linear_last_tolerance(s->linear) : 0; }
 
 void v92a4_set_data_source(v92a4_t *s, int (*get_bit)(void *), void *user)
 {

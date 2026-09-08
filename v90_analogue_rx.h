@@ -166,6 +166,8 @@ int v90_analogue_rx_w(const v90_analogue_rx_t *s);
  * (v90a_linear_set_reference()).  0 until TRN1d has been acquired.
  */
 int v90_analogue_rx_trn1d_ucode(const v90_analogue_rx_t *s);
+/* Polarity resolved by §8.4.5's known plaintext, for the Phase-4 seam. */
+bool v90_analogue_rx_inverted(const v90_analogue_rx_t *s);
 
 /* Table 13 bit 47: the constellation the digital modem will train with. */
 bool v90_analogue_rx_jd_trn16(const v90_analogue_rx_t *s);

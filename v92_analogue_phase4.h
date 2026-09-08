@@ -22,4 +22,6 @@ void v92a4_set_data_source(v92a4_t *s, int (*get_bit)(void *), void *user);
 int v92a4_get_data_bits(v92a4_t *s, uint8_t *bits, int capacity);
 int v92a4_downstream_rate(const v92a4_t *s);
 const char *v92a4_failure(const v92a4_t *s);
+double v92a4_rx_decision(const v92a4_t *s);
+double v92a4_rx_tolerance(const v92a4_t *s);
 #endif

@@ -14,11 +14,36 @@ the actual G.711 DS0 without a decode/re-encode step. Its receivers consume
 the network ADC's codewords. The analogue modem is `v92a_t`, declared in
 `v92_analogue_phase3.h`; it owns `v92a4_t` for final training.
 
-The analogue endpoint accepts calibrated, symbol-clock **8 kHz linear PCM**
-from the network DAC and produces **16 kHz linear PCM**. The doubled TX
-clock represents 9.5.2.1.7's 24.5T interval; it uses an ideal sample-and-hold
-waveform. The harness samples that waveform at the network's 8 kHz ADC.
-G.711 encoding belongs to that network boundary, not the analogue modem.
+Use `v92a_audio_t` (`v92_analogue_audio.h`) for the analogue audio interface:
+**48 kHz signed 16-bit linear PCM in both directions**, six samples per
+8,000-baud symbol. V.92 6.2 specifies the symbol clock, not an 8 kHz sound
+card interface. The PCM calibration is four core linear units per audio
+sample unit, providing about **12 dB of amplitude headroom** above the
+G.711 reconstruction levels. This calibration belongs to the analogue
+interface; it is not gain applied to digital codewords.
+
+The internal `v92a_t` protocol core still accepts calibrated, symbol-clock
+8 kHz linear PCM and produces a 16 kHz timeline, which represents
+9.5.2.1.7's 24.5T interval exactly. The audio front end reconstructs that
+timeline at 48 kHz with a 16-tap windowed-sinc interpolator, preserving the
+timeline's samples at its input lattice. It adds eight 16 kHz ticks of
+transmit delay (four symbols). The filter is an implementation choice,
+not a pulse shape prescribed by V.92. It has finite stopband rejection;
+this is a waveform model, not a complete physical line model.
+
+The analogue receiver samples at a configured recovered-network-clock
+phase (0–5), restoring core linear calibration before symbol processing.
+Arbitrary callback lengths preserve both clock phases. This interface
+**requires a synchronous network clock**: it does not yet acquire timing,
+track oscillator drift, equalize the line, or cancel echo. Clipping is
+counted explicitly by `v92a_audio_clipped()`.
+
+In the audio harness, the network DAC decodes each downstream G.711
+codeword once and reconstructs it at 48 kHz with eight symbols of delay.
+The network ADC samples upstream audio at 8 kHz and quantizes once to
+G.711. The combined twelve-symbol delay is supplied as the round-trip
+delay. No G.711 codec operation occurs inside `v92a_audio_t`. The digital
+transmitter still emits original DS0 codewords directly.
 
 Phase 2 uses two independent SpanDSP instances with opposite roles.
 `v34_set_v92_info0_capabilities()` selects the role-specific INFO0 bits;
@@ -36,8 +61,11 @@ measured round-trip delay, upstream amplitude and local DIL descriptor to
 and 4. `v92a_phase4()` exposes final-training state and the received CPd.
 `V92A4_DATA` means local B1u was sent; `v92a4_downstream_ready()` separately
 means all 48 received B1d frames passed validation. The current endpoint
-continues sending idle marks after B1u; a DTE payload interface is not yet
-attached to this controller.
+can send application payload through `v92a4_set_data_source()` after B1u;
+`v92a4_get_data_bits()` retrieves downstream payload. The audio endpoint's
+`v92a_audio_core()` accessor exposes the controller for this configuration
+and status. Do not drive the core's audio calls separately when using the
+48 kHz front end.
 
 ## Startup behavior and fixes
 
@@ -83,6 +111,14 @@ attached to this controller.
 - Coupled Phases 3–4 through **both B1 directions**, on PCMU and PCMA with
   zero DIL and a measured DIL constellation. Events come from received
   waveforms, never injected from the other endpoint's intended state.
+- Each startup/erasure case runs both at the original core seam and through
+  reconstructed 48 kHz analogue audio, and grades at least **1,024 varied
+  upstream payload bytes** against the source, with zero rejected frames
+  and zero byte errors. Startup is no longer the only success condition.
+- Audio checks bound reconstruction peaks for every possible int16 input
+  history, verify 3 kHz waveform reconstruction, recover all 256 codeword
+  levels for both G.711 laws at the DAC sampling lattice, and check arbitrary
+  TX/RX callback boundaries. The full audio pairs assert zero clipping.
 - Recovery when the network erases the first entire CPd, on both laws.
 - Su phase/polarity ambiguity and silence rejection, linear amplitude and
   chunk continuity, an independent GPA/sign oracle, MD gating, and the
@@ -96,8 +132,11 @@ The target is included in `make test`.
 
 This is an ideal, calibrated bearer implementation. Nonzero analogue MD
 waveforms and nonzero Jp fractional corrections fail explicitly. The
-analogue front end still needs bandlimited pulse shaping, continuous timing
-recovery and equalization for a physical two-wire line. The native initial
+analogue front end now has finite windowed-sinc reconstruction, but still
+needs continuous timing recovery and equalization for a physical two-wire
+line. The tests use the known sampling instant; they do not establish
+operation at an unknown fractional phase or with independent audio clocks.
+The native initial
 Ja receiver also retains a bounded acquisition window around minimum-length
 TRN1u; longer peer training needs a rolling search.
 

@@ -79,7 +79,7 @@ static bool build_ja(v92a_t *s)
     return true;
 }
 
-v92a_t *v92a_init(const v92a_config_t *cfg)
+static v92a_t *init(const v92a_config_t *cfg, bool line)
 {
     if (!cfg || cfg->law > V90_LAW_ALAW || cfg->law < V90_LAW_ULAW
         || cfg->u_info < 67 || cfg->u_info > 111 || cfg->md_units != 0
@@ -94,7 +94,11 @@ v92a_t *v92a_init(const v92a_config_t *cfg)
     s->ri_lock = -1;
     v90_analogue_rx_config_t rc = {
         .law = cfg->law, .u_info = cfg->u_info, .dil = cfg->dil,
-        .dil_coverage = 1.0
+        .dil_coverage = 1.0,
+        /* V.90 §8.4.4: equalization leaves residuals in the zero slots;
+         * acquisition tests their level, not an exact digital zero octet. */
+        .zero_slot_fraction = line ? 0.2 : 0,
+        .w_slot_tolerance = line ? 0.35 : 0
     };
     s->rx = v90_analogue_rx_init(&rc);
     s->linear = v90a_linear_init(cfg->law);
@@ -110,6 +114,26 @@ v92a_t *v92a_init(const v92a_config_t *cfg)
                               v91_codeword_to_linear((v91_law_t)cfg->law, cw));
     v92_trn2u_tx_init(&s->pam, 2, cfg->lu, cfg->law == V90_LAW_ALAW);
     return s;
+}
+
+v92a_t *v92a_init(const v92a_config_t *cfg) { return init(cfg, false); }
+v92a_t *v92a_init_line(const v92a_config_t *cfg) { return init(cfg, true); }
+
+int v92a_rx_training(const v92a_t *s)
+{
+    if (!s) return 0;
+    if (s->phase4 || v90_analogue_rx_stage(s->rx) >= V90A_RX_DIL) return 2;
+    return v90_analogue_rx_stage(s->rx) >= V90A_RX_TRN1D ? 1 : 0;
+}
+double v92a_rx_decision(const v92a_t *s)
+{
+    return !s ? 0 : s->phase4 ? v92a4_rx_decision(s->phase4)*(v90_analogue_rx_inverted(s->rx) ? -1 : 1)
+                             : v90a_linear_last_decision(s->linear);
+}
+double v92a_rx_tolerance(const v92a_t *s)
+{
+    return !s ? 0 : s->phase4 ? v92a4_rx_tolerance(s->phase4)
+                             : v90a_linear_last_tolerance(s->linear);
 }
 
 void v92a_free(v92a_t *s)
@@ -181,7 +205,14 @@ void v92a_rx(v92a_t *s, const int16_t *samples, int count)
     if (!s || !samples || count <= 0) return;
     for (int i = 0; i < count; i++, s->rx_samples++) {
         uint8_t cw;
-        if (s->phase4) v92a4_rx(s->phase4, samples+i, 1);
+        if (s->phase4) {
+            /* V.90 §8.4.5 resolves the blind equalizer's sign. Carry that
+             * result into V.92 §9.6 rather than restarting Phase 4 inverted. */
+            int16_t corrected = samples[i];
+            if (v90_analogue_rx_inverted(s->rx))
+                corrected = corrected == -32768 ? 32767 : -corrected;
+            v92a4_rx(s->phase4, &corrected, 1);
+        }
         if (s->jp_prime)
             receive_ri(s, samples[i]);
         if (v90a_linear_put(s->linear, samples+i, 1, &cw, 1) != 1)

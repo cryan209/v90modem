@@ -17,6 +17,8 @@ typedef struct {
     int lock;
     v92_su_event_t stage;
     bool alaw;
+    double window[6], previous_i, previous_q, reference_i, reference_q;
+    unsigned filled, stable;
 } v92_su_t;
 void v92_su_init(v92_su_t *s, bool alaw);
 v92_su_event_t v92_su_put(v92_su_t *s, uint8_t cw);

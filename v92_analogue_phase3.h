@@ -32,6 +32,13 @@ typedef struct {
 } v92a_config_t;
 
 v92a_t *v92a_init(const v92a_config_t *cfg);
+/* Same protocol with level tolerances for an equalized analogue line. */
+v92a_t *v92a_init_line(const v92a_config_t *cfg);
+/* Equalizer feedback: 0 = Sd acquisition, 1 = constant-level TRN1d/Jd/Jp,
+ * 2 = multilevel/DIL/final training. Decisions refer to the last RX symbol. */
+int v92a_rx_training(const v92a_t *s);
+double v92a_rx_decision(const v92a_t *s);
+double v92a_rx_tolerance(const v92a_t *s);
 void v92a_free(v92a_t *s);
 int v92a_tx(v92a_t *s, int16_t *samples, int count); /* 16000 Hz */
 void v92a_rx(v92a_t *s, const int16_t *samples, int count); /* 8000 Hz */
