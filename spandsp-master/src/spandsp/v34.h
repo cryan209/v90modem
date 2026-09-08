@@ -376,6 +376,9 @@ SPAN_DECLARE(int) v34_get_round_trip_delay_samples(v34_state_t *s);
     \return U_INFO (67..127), or 0 when not in the analogue V.90 role. */
 SPAN_DECLARE(int) v34_get_v90_tx_u_info(v34_state_t *s);
 
+/*! True only after a locally built Table 18 INFO1a selected PCM upstream. */
+SPAN_DECLARE(bool) v34_v92_pcm_upstream_selected(v34_state_t *s);
+
 /*! Get the current TX stage of the V.34 state machine.
     \param s The modem context.
     \return The current TX stage (v34_tx_stages_e value). */
@@ -761,20 +764,20 @@ SPAN_DECLARE(void) v34_put_mapping_frame_state(v34_state_t *s,
     \param pcm_law PCM coding: 0 = µ-law, 1 = A-law. */
 SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law);
 
-/*! Configure the V.92 capability bits carried in a V.90-format INFO0d.
-    V.92 Table 15 assigns bit 26 to short-Phase-2 request and bit 27 to
-    V.92 capability.  This only changes the transmitted INFO0d; callers must
-    still confirm the peer's INFO0a capability before selecting V.92. */
+/*! Configure V.92 INFO0 capability/request bits for either role.
+    Table 15 INFO0d assigns short request to bit 26 and capability to bit 27;
+    Table 16 INFO0a reverses those meanings. Peer capability must still be
+    confirmed before selecting V.92; short Phase 2 requires both requests. */
 SPAN_DECLARE(void) v34_set_v92_info0_capabilities(v34_state_t *s,
                                                    int v92_capable,
                                                    int short_phase2_requested);
 
-/*! Advertise PCM upstream support in V.92 Table 17 INFO1d bit 70.
-    PCM upstream is V.92's only data-pump feature over V.90, so an analogue
-    peer that sees a zero here selects V.90 even when both INFO0 capability
-    bits agree.  Defaults to off: the upstream data path is still V.34, so
-    setting this claims a data-mode receiver that does not exist.  Enable it
-    to drive a peer into the V.92 Phase 3/4 upstream procedures. */
+/*! Enable PCM upstream: digital role advertises Table 17 INFO1d bit 70;
+    analogue role selects Table 18 INFO1a only after receiving that offer.
+    The caller must install a V.92 PCM startup/data controller at the Phase-2
+    seam. Defaults to off.
+    A digital peer advertising no PCM upstream support requires V.90 fallback
+    even when both INFO0 capability bits agree. */
 SPAN_DECLARE(void) v34_set_v92_pcm_upstream_capability(v34_state_t *s,
                                                         int pcm_upstream_capable);
 

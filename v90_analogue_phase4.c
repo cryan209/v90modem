@@ -58,6 +58,7 @@ struct v90_analogue_phase4_s {
     v90_analogue_phase4_config_t cfg;
     vpcm_training_control_handler_t control_handler;
     void *control_user;
+    bool control_ed_armed;
     v90_analogue_phase4_rx_stage_t stage;
 
     int64_t  index;
@@ -626,14 +627,19 @@ static unsigned demap_frame(v90_analogue_phase4_t *s)
         if (!s->control_handler)
             events |= push_bit(s, out[i]);
     }
-    if (s->control_handler && s->control_handler(s->control_user, out, n)) {
+    bool control_complete = s->control_handler
+                         && s->control_handler(s->control_user, out, n);
+    if (control_complete) {
+        s->control_ed_armed = true;
+        s->ed_zero_frames = 0;
         s->mp_seen = true;
         s->stage = V90A4_RX_MP;
     }
     /* Ed starts on a mapping-frame boundary.  Detect its two complete zero
      * frames rather than a bit run: MP's mandatory fill zeroes can precede it
      * and made the old 48-bit heuristic switch constellations mid-frame. */
-    if (s->stage == V90A4_RX_MP && s->mp_seen) {
+    if (s->stage == V90A4_RX_MP && s->mp_seen && !control_complete
+        && (!s->control_handler || s->control_ed_armed)) {
         bool all_zero = true;
 
         for (int i = 0; i < n; i++) {
@@ -642,6 +648,10 @@ static unsigned demap_frame(v90_analogue_phase4_t *s)
                 break;
             }
         }
+        /* V.92 8.8.2: Ed follows a whole acknowledged control sequence.
+         * Once another nonzero frame begins, zero runs inside its body
+         * cannot be Ed. A new CRC-valid completion must re-arm the gate. */
+        if (s->control_handler && !all_zero) s->control_ed_armed = false;
         s->ed_zero_frames = all_zero ? s->ed_zero_frames + 1 : 0;
         if (s->ed_zero_frames >= ED_FRAMES) {
             events |= V90A4_RX_EVENT_ED;
@@ -1258,7 +1268,7 @@ bool v90_analogue_phase4_build_zero_dil_cp(v90_law_t law,
     }
 
     /* V.90 §9.3.2.8 explicitly permits N=0.  No line measurement then exists,
-     * so use eight lowest positive levels in every interval.  Their product
+     * so use eight lowest nonzero levels in every interval.  Their product
      * is 8^6 = 2^18: enough for CP drn=1 (K=15+Sr) at every Sr, while their
      * power is below even Table 15's -16 dBm0 limit in both G.711 laws. */
     vpcm_cp_init(&cp);
@@ -1272,7 +1282,9 @@ bool v90_analogue_phase4_build_zero_dil_cp(v90_law_t law,
     cp.constellation_count = 1;
     cp.dfi[0] = cp.dfi[1] = cp.dfi[2] = 0;
     cp.dfi[3] = cp.dfi[4] = cp.dfi[5] = 0;
-    for (int ucode = 0; ucode < 8; ucode++)
+    /* V.90 5.4.5 / V.92 5: every point carries a sign. The two mu-law
+     * zero codewords collapse at the D/A, so Ucode 0 cannot carry that bit. */
+    for (int ucode = 1; ucode <= 8; ucode++)
         vpcm_cp_mask_set(cp.masks[0], ucode, true);
 
     /* Keeping drn=4 makes D=12 and K=6+Sr, inside Table 17 for every Sr and

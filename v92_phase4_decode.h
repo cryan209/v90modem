@@ -113,7 +113,7 @@ bool v92_cpd_base_decode(const uint8_t *bits,
  * (d = drn + 8 for TRN2d-mapped training, 6 for the sign-modulated
  * compatibility path). */
 
-#define V92_CPD_MAX_TAPS 64
+#define V92_CPD_MAX_TAPS 128 /* Table 18 baseline per-filter capability */
 #define V92_CPD_MAX_SETS 6
 #define V92_CPD_MAX_POINTS 128
 #define V92_CPD_MAX_BITS 18432

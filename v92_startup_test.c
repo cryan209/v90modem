@@ -9,6 +9,7 @@
 #include "v92_analogue_phase3.h"
 #include "v92_su.h"
 #include "v90_dil_presets.h"
+#include "v92_upstream_rx.h"
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -17,7 +18,7 @@
 static int marks(void *user) { (void)user; return 1; }
 static void discard(void *user, int bit) { (void)user; (void)bit; }
 
-static void test_phase2(bool alaw, bool capable, bool request_short)
+static int test_phase2(bool alaw, bool capable, bool request_short, bool pcm)
 {
     v34_state_t *analogue = v34_init(NULL, 3200, 9600, true, true,
                                      marks, NULL, discard, NULL);
@@ -29,6 +30,7 @@ static void test_phase2(bool alaw, bool capable, bool request_short)
     v34_set_v92_info0_capabilities(analogue, capable, request_short);
     v34_set_v92_info0_capabilities(digital, 1, 0);
     v34_set_v92_pcm_upstream_capability(digital, 1);
+    v34_set_v92_pcm_upstream_capability(analogue, pcm);
     v34_tx_power(analogue, -12.0f);
     v34_tx_power(digital, -12.0f);
 
@@ -58,10 +60,15 @@ static void test_phase2(bool alaw, bool capable, bool request_short)
     assert(analogue->rx.info1c_received);
     v34_v90_info1a_t selection;
     assert(v34_get_v90_received_info1a(digital, &selection));
-    /* This analogue Phase-2 modem currently selects the permitted V.90
-     * upstream fallback. Capability negotiation is not PCM-upstream proof. */
+    /* Grade the received Table 18 selection, not a transmitter mode flag. */
     assert(selection.downstream_rate_code == 6);
-    assert(selection.upstream_symbol_rate_code >= 3 && selection.upstream_symbol_rate_code <= 5);
+    if (pcm && capable) {
+        assert(selection.upstream_symbol_rate_code == 6);
+        assert(digital->rx.info1a_raw_12_17 == 0);
+        assert(digital->rx.info1a_raw_40_49 == 0x3FF);
+    } else {
+        assert(selection.upstream_symbol_rate_code >= 3 && selection.upstream_symbol_rate_code <= 5);
+    }
     assert(digital->tx.v92_info1d_mode == capable);
     /* On the wire bit 70 occupies the old 3429 carrier-bit position.
      * Table 17 uses it for PCM-upstream support; a mode flag in the sender
@@ -71,6 +78,7 @@ static void test_phase2(bool alaw, bool capable, bool request_short)
     v34_free(digital);
     printf("PASS: full Phase 2 %s capability=%d peer-short=%d\n",
            alaw ? "PCMA" : "PCMU", capable, request_short);
+    return selection.u_info;
 }
 
 static void test_linear(void)
@@ -176,15 +184,31 @@ static void test_md(bool alaw, int units)
 
 typedef struct {
     v90_state_t *digital;
-    int cpt_count, e1u_count;
+    int cpt_count, e1u_count, cpu_count;
+    bool b1_armed;
+    v92_upstream_rx_t b1;
 } p3_pair_sink_t;
 
 static void pair_cpt(void *user, v92_p4u_kind_t kind,
                      const v92_cp_diag_t *cp, const v92_cpus_diag_t *cpus,
                      const v92_suvu_diag_t *suvu)
 {
-    (void)cpus; (void)suvu;
+    (void)cpus;
     p3_pair_sink_t *sink = user;
+    if (kind == V92_P4U_KIND_SUVU && suvu)
+        assert(v90_set_v92_suvu(sink->digital, suvu->frame.acknowledge));
+    if (kind == V92_P4U_KIND_CPU && cp) {
+        vpcm_cp_frame_t mapped;
+        assert(v92_cp_frame_to_vpcm(&cp->frame, &mapped));
+        assert(v90_set_v92_cpu(sink->digital, &mapped));
+        if (!sink->b1_armed) {
+            v92_cpd_frame_t profile;
+            assert(v90_build_v92_cpd_frame(sink->digital, &profile));
+            assert(v92_upstream_b1_rx_init(&sink->b1, &profile, NULL, NULL));
+            sink->b1_armed = true;
+        }
+        sink->cpu_count++;
+    }
     if (kind == V92_P4U_KIND_E1U) {
         (void)v90_handle_rx_event(sink->digital, V90_RX_EVENT_E);
         sink->e1u_count++;
@@ -198,13 +222,14 @@ static void pair_cpt(void *user, v92_p4u_kind_t kind,
     }
 }
 
-static void test_phase3_pair(bool alaw, bool dil)
+static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd)
 {
     v92a_config_t cfg = {
         .law = alaw ? V90_LAW_ALAW : V90_LAW_ULAW, .u_info = 78,
         .lu = 6000, .digital_max_tx_dbm0 = -13, .upstream_rate_mask = 1,
         .dil = {.n = 0, .lsp = 1, .ltp = 1}
     };
+    cfg.u_info = test_phase2(alaw, true, false, true);
     if (dil) assert(v90_dil_preset_load(V90_DIL_PRESET_MEASUREMENT, &cfg.dil));
     v92a_t *analogue = v92a_init(&cfg);
     v90_state_t *digital = v90_init_data_pump(cfg.law);
@@ -212,21 +237,34 @@ static void test_phase3_pair(bool alaw, bool dil)
     v90_enable_v92_phase3(digital);
     v90_enable_v92_mode(digital);
     v90_enable_v92_native_cpu_rx(digital);
+    assert(v90_set_v92_cpd_profile(digital, 1, 0, 0x8000));
     v90_start_phase3(digital, cfg.u_info);
     v92_p3_rx_t ja_rx;
     v92_su_t su_rx;
     v92_cp_rx_t cpt_rx;
-    v92_trn2u_demod_t cpt_demod;
+    v92_trn2u_demod_t cpt_demod, p4_demod;
+    v92_cp_rx_t p4_rx;
+    bool p4_started = false;
     p3_pair_sink_t sink = {.digital = digital};
     bool ja_seen = false, cpt_started = false;
     v92_p3_rx_start(&ja_rx, 0);
     v92_su_init(&su_rx, alaw);
 
-    for (int i = 0; i < 80000 && v92a_stage(analogue) != V92A_PHASE4; i++) {
+    bool dropped_cpd = false, dropping_cpd = false;
+    for (int i = 0; i < 160000; i++) {
         int16_t upstream[2], downstream;
         uint8_t d;
         assert(v92a_tx(analogue, upstream, 2) == 2);
+        int before_tx = v90_get_tx_phase(digital);
         assert(v90_phase3_tx_codewords(digital, &d, 1) == 1);
+        if (drop_cpd && before_tx == V90_TX_CP && !dropped_cpd) {
+            dropping_cpd = true;
+            d = v90_idle_codeword(cfg.law);
+        }
+        if (dropping_cpd && v90_get_tx_phase(digital) != V90_TX_CP) {
+            dropping_cpd = false;
+            dropped_cpd = true;
+        }
         uint8_t u = network_adc(alaw, upstream[0]);
         downstream = alaw ? alaw_to_linear(d) : ulaw_to_linear(d);
         v92a_rx(analogue, &downstream, 1);
@@ -253,8 +291,24 @@ static void test_phase3_pair(bool alaw, bool dil)
             v92_trn2u_demod_init(&cpt_demod, 2, cfg.lu, alaw, &cpt_rx);
             cpt_started = true;
         }
-        if (cpt_started)
-            v92_trn2u_demod_feed(&cpt_demod, &u, 1);
+        if (sink.e1u_count && !p4_started) {
+            v92_cp_rx_init(&p4_rx, 4, alaw, pair_cpt, &sink);
+            v92_trn2u_demod_init(&p4_demod, 4, cfg.lu, alaw, &p4_rx);
+            p4_started = true;
+        }
+        if (p4_started) v92_trn2u_demod_feed(&p4_demod, &u, 1);
+        else if (cpt_started) v92_trn2u_demod_feed(&cpt_demod, &u, 1);
+        if (sink.b1_armed) {
+            int16_t sample = alaw ? alaw_to_linear(u) : ulaw_to_linear(u);
+            v92_upstream_b1_rx_feed(&sink.b1, &sample, 1);
+        }
+        v92a4_t *p4 = v92a_phase4(analogue);
+        if (p4 && v92a4_stage(p4) == V92A4_FAILED) {
+            fprintf(stderr, "Phase 4 failed: %s\n", v92a4_failure(p4));
+            break;
+        }
+        if (p4 && v92a4_stage(p4) == V92A4_DATA
+            && v92a4_downstream_ready(p4) && sink.b1.locked) break;
         if (v92a_stage(analogue) == V92A_FAILED) {
             fprintf(stderr, "analogue failure: %s\n", v92a_failure(analogue));
             break;
@@ -263,13 +317,18 @@ static void test_phase3_pair(bool alaw, bool dil)
     assert(ja_seen);
     assert(v92a_stage(analogue) == V92A_PHASE4);
     assert(sink.cpt_count > 0);
+    assert(!drop_cpd || dropped_cpd);
     assert(sink.e1u_count == 1);
-    assert(v90_get_tx_phase(digital) == V90_TX_RI_ACK || v90_get_tx_phase(digital) == V90_TX_TRN2D);
+    assert(v92a4_stage(v92a_phase4(analogue)) == V92A4_DATA);
+    assert(v92a4_downstream_ready(v92a_phase4(analogue)));
+    assert(sink.b1.locked);
+    assert(v90_get_tx_phase(digital) == V90_TX_DATA);
     assert(v92a_cpt(analogue));
     v92a_free(analogue);
     v90_free(digital);
-    printf("PASS: V.92 Phase 3 linear analogue / G.711 digital pair %s, %s DIL\n",
-           alaw ? "PCMA" : "PCMU", dil ? "measured" : "zero");
+    printf("PASS: V.92 Phases 3–4 linear analogue / G.711 digital pair %s, %s DIL%s\n",
+           alaw ? "PCMA" : "PCMU", dil ? "measured" : "zero",
+           drop_cpd ? ", first CPd erased" : "");
 }
 
 /* Independently scripted Su segments: sustained Su must not be called its
@@ -290,7 +349,7 @@ static void test_su(bool alaw)
                     int level = p[ph]*6000*(segment%2 ? -1 : 1);
                     v92_su_event_t e = v92_su_put(&rx, network_adc(alaw, level));
                     if (e) {
-                        assert(e == segment + 1);
+                        assert((int)e == segment + 1);
                         events[e]++;
                     }
                 }
@@ -312,12 +371,50 @@ static void test_su(bool alaw)
     printf("PASS: Su transitions, phase ambiguity and silence rejection %s\n", alaw ? "PCMA" : "PCMU");
 }
 
+static void test_filter_baseline(void)
+{
+    v90_state_t *digital = v90_init_data_pump(V90_LAW_ULAW);
+    v90_enable_v92_mode(digital);
+    assert(v90_set_v92_cpd_profile(digital, 1, 0, 0x8000));
+    v92_cpd_frame_t cp, decoded;
+    v92_cpd_diag_t diag;
+    uint8_t packed[V92_CPD_MAX_BITS];
+    int length;
+    assert(v90_build_v92_cpd_frame(digital, &cp));
+    /* Table 18 baseline: p1/z2, 192 total taps, 128 in one section. */
+    cp.coeffs_present = true;
+    cp.lp1 = 128;
+    cp.lz2 = 64;
+    cp.prefilter_ff[0] = 32767;
+    assert(v92_cpd_encode(&cp, 12, packed, sizeof(packed), &length));
+    assert(v92_cpd_decode(packed, length, &decoded, &diag));
+    assert(decoded.lp1 == 128 && decoded.lz2 == 64);
+    assert(v92_upstream_wave_profile_validate(&decoded));
+    v92_upstream_wave_tx_t tx;
+    v92_upstream_wave_rx_t rx;
+    v92_upstream_wave_tx_init(&tx);
+    v92_upstream_wave_rx_init(&rx);
+    uint8_t bits[36], received[36];
+    for (int frame = 0; frame < 24; frame++) {
+        double wave[12];
+        for (int i = 0; i < 36; i++) bits[i] = (frame*7 + i + i/3)%2;
+        assert(v92_upstream_wave_encode_frame(&tx, &decoded, bits, 36, wave));
+        assert(v92_upstream_wave_decode_frame(&rx, &decoded, wave, received, 36));
+        assert(!memcmp(bits, received, 36));
+    }
+    v90_free(digital);
+    puts("PASS: Table 18 baseline 192 total / 128 per-section filter capacity");
+}
+
 int main(void)
 {
-    test_phase3_pair(false, false);
-    test_phase3_pair(true, false);
-    test_phase3_pair(false, true);
-    test_phase3_pair(true, true);
+    test_phase3_pair(false, false, false);
+    test_phase3_pair(true, false, false);
+    test_phase3_pair(false, true, false);
+    test_phase3_pair(true, true, false);
+    test_phase3_pair(false, false, true);
+    test_phase3_pair(true, false, true);
+    test_filter_baseline();
     test_su(false);
     test_su(true);
     test_linear();
@@ -329,6 +426,6 @@ int main(void)
     for (int law = 0; law < 2; law++)
         for (int capable = 0; capable < 2; capable++)
             for (int short_request = 0; short_request < 2; short_request++)
-                test_phase2(law, capable, short_request);
+                test_phase2(law, capable, short_request, false);
     return 0;
 }

@@ -745,6 +745,9 @@ struct v90_state_s {
     bool             v92_cpu_received;
     bool             v92_remote_ack_received;   /* CPu'/SUVu' ack, or E2u */
     bool             v92_cpd_sent;
+    bool             v92_cpd_retry;
+    uint64_t         v92_symbol_clock, v92_cpd_end;
+    unsigned         v92_round_trip_symbols;
     bool             v92_ack_sent;              /* sent >= 1 SUVd' (ack=1) */
 
     /* V.92 native mapped Phase 4 TX: SUVd/CPd bit queue transmitted through
@@ -1024,7 +1027,14 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
 
         if (linear <= 0)
             continue;
-        out->points[0][points++] = (uint16_t)linear;
+        /* V.92 6.4.2/Table 30: CPd points precede the gain G. Choose
+         * their inverse images so G*point lands on the desired network
+         * reconstruction level. Sending the G.711 levels themselves
+         * attenuated low points into the same ADC cell (often zero). */
+        if (!out->gain_q0_16) return false;
+        double point = (double)linear * (4.0*65536.0) / out->gain_q0_16;
+        if (point > 65535.0) break;
+        out->points[0][points++] = (uint16_t)lround(point);
     }
     out->set_sizes[0] = (uint8_t)points;
     /* V.92 §6.4.2: k=3 uses equivalence classes modulo 2*Mi across a
@@ -1065,6 +1075,7 @@ static bool v90_build_v92_cpd_native(v90_state_t *s)
                         &s->v92_tx_nbits))
         return false;
     s->v92_tx_pos = 0;
+    s->v92_cpd_retry = false;
     return true;
 }
 
@@ -4040,7 +4051,7 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                 if (s->v92_ack_sent && s->v92_remote_ack_received) {
                     s->tx_phase = V90_TX_ED;
                     s->sample_count = 0;
-                } else if (!s->v92_cpd_sent
+                } else if ((!s->v92_cpd_sent || s->v92_cpd_retry)
                            && (s->v92_suvu_received || s->v92_cpu_received)) {
                     /* §9.6.1.1.2: a single CPd per received SUVu/CPu. */
                     if (v90_build_v92_cpd_native(s)) {
@@ -4096,6 +4107,8 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                 /* §9.6.1.1.2: single CPd, then more SUVd sequences whose
                  * ack bit is gated on a real CPu having been received. */
                 s->v92_cpd_sent = true;
+                s->v92_cpd_end = s->v92_symbol_clock;
+                s->v92_cpd_retry = false;
                 s->phase4_hold_logged = false;
                 s->sample_count = 0;
                 (void)v90_build_v92_suvd_mapped(s, s->v92_cpu_received);
@@ -4386,6 +4399,8 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->v92_cpu_received = false;
     s->v92_remote_ack_received = false;
     s->v92_cpd_sent = false;
+    s->v92_cpd_retry = false;
+    s->v92_symbol_clock = s->v92_cpd_end = 0;
     s->v92_ack_sent = false;
     s->v92_tx_nbits = 0;
     s->v92_tx_pos = 0;
@@ -5419,10 +5434,25 @@ void v90_enable_v92_native_cpu_rx(v90_state_t *s)
         s->v92_native_cpu_rx = true;
 }
 
+void v90_set_v92_round_trip_symbols(v90_state_t *s, unsigned symbols)
+{
+    if (s) s->v92_round_trip_symbols = symbols;
+}
+
+static void v92_check_cpd_retry(v90_state_t *s, bool acknowledge)
+{
+    /* 9.6.1.1.3: decide on a complete received CPu/SUVu after the
+     * 100 ms + round-trip interval, then repeat CPd at a TX boundary. */
+    if (!acknowledge && !s->v92_remote_ack_received && s->v92_cpd_sent && s->tx_phase != V90_TX_CP
+        && s->v92_symbol_clock - s->v92_cpd_end >= 800ULL + s->v92_round_trip_symbols)
+        s->v92_cpd_retry = true;
+}
+
 bool v90_set_v92_suvu(v90_state_t *s, bool acknowledge)
 {
     if (!s || !s->v92_mode || !s->v92_native_cpu_rx)
         return false;
+    v92_check_cpd_retry(s, acknowledge);
     s->v92_suvu_received = true;
     if (acknowledge)
         s->v92_remote_ack_received = true;
@@ -5440,6 +5470,7 @@ bool v90_set_v92_cpu(v90_state_t *s, const vpcm_cp_frame_t *cpu)
     if (!cpu->v90_compatibility)
         return false;
 
+    v92_check_cpd_retry(s, cpu->acknowledge);
     if (!s->v92_cpu_received) {
         expected = *cpu;
         expected.acknowledge = false;
@@ -5605,6 +5636,7 @@ int v90_phase3_tx(v90_state_t *s, int16_t amp[], int len)
     for (int i = 0; i < len; i++) {
         uint8_t codeword = v90_phase3_codeword(s);
         amp[i] = v90_pcm_to_linear(s->law, codeword);
+        s->v92_symbol_clock++;
     }
     return len;
 }
@@ -5613,8 +5645,10 @@ int v90_phase3_tx_codewords(v90_state_t *s, uint8_t codewords[], int len)
 {
     if (!s || !codewords || len <= 0)
         return 0;
-    for (int i = 0; i < len; i++)
+    for (int i = 0; i < len; i++) {
         codewords[i] = v90_phase3_codeword(s);
+        s->v92_symbol_clock++;
+    }
     return len;
 }
 

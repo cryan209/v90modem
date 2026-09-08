@@ -28,6 +28,7 @@
 #include "v90_cp_live.h"
 #include "v90_cp_rx.h"
 #include "v90_analogue_phase3.h"
+#include "v92_analogue_phase3.h"
 #include "v90_analogue_linear.h"
 #include "v90_analogue_fse.h"
 #include "v90_analogue_sd.h"
@@ -1828,6 +1829,8 @@ static bool me_v90_analogue_role(void)
  * rather than a flag each of those sites would have to remember to check.
  */
 static v90_analogue_phase3_t *g_v90a = NULL;
+static v92a_t *g_v92a = NULL;
+static int g_v92a_last_stage = -1;
 static bool     g_v90a_started = false;
 /*
  * The slicer that lets the analogue role run over a real analogue line.
@@ -2819,6 +2822,8 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
                                       const char *source);
 static int v90_selected_upstream_baud_locked(void);
 static void v92_su_rx_reset_locked(void);
+static void me_v92a_progress_locked(void);
+static void me_v92a_tx_locked(int16_t *samples, int count);
 void me_hangup(void);
 
 /* Format constellation `c`'s transmitter Ucodes (descending, §5.4.4) into buf,
@@ -4001,6 +4006,9 @@ static void v92_live_p4u_frame(void *user_data,
 
 static void cleanup_v34_v90_training_locked(void)
 {
+    v92a_free(g_v92a);
+    g_v92a = NULL;
+    g_v92a_last_stage = -1;
     /* Before g_v34: the analogue Phase 3 borrows it as its modulator. */
     if (g_v90a) {
         v90_analogue_phase3_free(g_v90a);
@@ -4277,6 +4285,9 @@ static bool restart_v90_analogue_phase2_locked(const char *reason)
         return false;
     bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(3200);
 
+    v92a_free(g_v92a);
+    g_v92a = NULL;
+    g_v92a_last_stage = -1;
     if (g_v90a) {
         v90_analogue_phase3_free(g_v90a);
         v90a_linear_free(g_v90a_linear);
@@ -4313,6 +4324,9 @@ static bool restart_v90_analogue_phase2_locked(const char *reason)
     }
     v34_set_v90_mode(g_v34, (g_law == ME_LAW_ALAW) ? 1 : 0);
     v34_set_v90_u_info(g_v34, g_v90a_u_info);
+    v34_set_v92_info0_capabilities(g_v34, g_enable_v92, 0);
+    v34_set_v92_pcm_upstream_capability(g_v34,
+        g_enable_v92 && v92_pcm_upstream_advertised());
     v34_tx_power(g_v34, -10.0f);
     v34_v90_start_analogue_retrain(g_v34);
 
@@ -5525,6 +5539,9 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
             if (g_v34) {
                 v34_set_v90_mode(g_v34, (g_law == ME_LAW_ALAW) ? 1 : 0);
                 v34_set_v90_u_info(g_v34, g_v90a_u_info);
+                v34_set_v92_info0_capabilities(g_v34, g_enable_v92, 0);
+                v34_set_v92_pcm_upstream_capability(g_v34,
+                    g_enable_v92 && v92_pcm_upstream_advertised());
             }
             g_v90a_started = false;
             g_v90a_complete_logged = false;
@@ -6921,6 +6938,17 @@ void me_rx_audio(const int16_t *amp, int len)
     me_modulation_t mod = g_mod;
     pthread_mutex_unlock(&g_state_mtx);
 
+    /* The SIP codeword entry point supplies its network-DAC linear copy
+     * here exactly once. Physical 8 kHz linear input uses this same seam. */
+    pthread_mutex_lock(&g_state_mtx);
+    if (g_v92a && (g_state == ME_TRAINING || g_state == ME_DATA)) {
+        v92a_rx(g_v92a, amp, len);
+        me_v92a_progress_locked();
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    pthread_mutex_unlock(&g_state_mtx);
+
     /* Linear PCM is a debugging fallback for V.91.  Real carriage enters via
      * me_rx_g711(), but keeping this path functional makes failures explicit
      * instead of silently feeding V.91 codewords into the V.34 receiver. */
@@ -8152,6 +8180,68 @@ static void v92_apply_p3_ja_locked(void)
  * V.34 signal at all, and feeding it to a V.34 demodulator produces events
  * about signals that are not there.
  */
+static int v92a_data_bit(void *user)
+{
+    (void)user;
+    return g_state == ME_DATA ? ds_tx_get_bit(&g_data_stack) : 1;
+}
+
+static void me_v92a_progress_locked(void)
+{
+    if (!g_v92a) return;
+    v92a4_t *p4 = v92a_phase4(g_v92a);
+    int stage = p4 ? 100 + v92a4_stage(p4) : v92a_stage(g_v92a);
+    if (stage != g_v92a_last_stage) {
+        ME_LOG("[ME] V.92 analogue startup stage=%d\n", stage);
+        trace_phase("V92 analogue stage=%d", stage);
+        g_v92a_last_stage = stage;
+    }
+    if (v92a_stage(g_v92a) == V92A_FAILED
+        || (p4 && v92a4_stage(p4) == V92A4_FAILED)) {
+        const char *why = v92a_stage(g_v92a) == V92A_FAILED
+            ? v92a_failure(g_v92a) : v92a4_failure(p4);
+        ME_LOG("[ME] V.92 analogue failed: %s; restarting full Phase 2\n", why);
+        if (!restart_v90_analogue_phase2_locked(why)) g_state = ME_HANGUP;
+        return;
+    }
+    if (p4 && g_state == ME_TRAINING && v92a4_stage(p4) == V92A4_DATA
+        && v92a4_downstream_ready(p4)) {
+        const v92_cpd_frame_t *cpd = v92a4_cpd(p4);
+        int upstream = ((int)cpd->selected_upstream_drn + 17)*8000/6;
+        int downstream = v92a4_downstream_rate(p4);
+        data_stack_start_online(upstream, g_calling_party);
+        g_state = ME_DATA;
+        g_phase_start_ms = 0;
+        v92a4_set_data_source(p4, v92a_data_bit, NULL);
+        ME_LOG("[ME] V.92 analogue B1u/B1d complete: upstream=%d downstream=%d\n",
+               upstream, downstream);
+        trace_phase("V92 analogue DATA: upstream=%d downstream=%d", upstream, downstream);
+        if (g_data_framing != DS_FRAMING_V42) {
+            g_data_connect_reported = true;
+            di_on_connected(downstream);
+        }
+    }
+    if (p4 && g_state == ME_DATA) {
+        uint8_t bits[2048];
+        int n;
+        while ((n = v92a4_get_data_bits(p4, bits, sizeof(bits))) > 0)
+            for (int i = 0; i < n; i++) ds_rx_put_bit(&g_data_stack, bits[i]);
+    }
+}
+
+static void me_v92a_tx_locked(int16_t *samples, int count)
+{
+    /* Analogue waveform sampling at the network ADC. This does not touch
+     * the digital role's byte-exact DS0 path. The controller's half-T clock
+     * runs continuously across callbacks, including the 24.5T Su bar. */
+    for (int i = 0; i < count; i++) {
+        int16_t pair[2];
+        v92a_tx(g_v92a, pair, 2);
+        samples[i] = pair[0];
+    }
+    me_v92a_progress_locked();
+}
+
 static void prepare_v90_analogue_phase3_locked(void)
 {
     v90_analogue_phase3_config_t cfg;
@@ -8160,6 +8250,32 @@ static void prepare_v90_analogue_phase3_locked(void)
         return;
     if (v34_get_tx_stage(g_v34) < V34_TX_STAGE_FIRST_S)
         return;
+
+    if (v34_v92_pcm_upstream_selected(g_v34)) {
+        v34_v90_info0a_t info0d;
+        int delay = v34_get_round_trip_delay_samples(g_v34);
+        v92a_config_t pcm = {
+            .law = g_law == ME_LAW_ALAW ? V90_LAW_ALAW : V90_LAW_ULAW,
+            .u_info = v34_get_v90_tx_u_info(g_v34), .md_units = 0,
+            .round_trip_symbols = delay > 0 ? (unsigned)delay : 0,
+            .lu = 6000, .digital_max_tx_dbm0 = -16,
+            .dil = g_v90a_dil, .upstream_rate_mask = 0x7ffff
+        };
+        if (v34_get_v90_received_info0a(g_v34, &info0d)
+            && info0d.info0d_extensions_valid)
+            pcm.digital_max_tx_dbm0 = -0.5*(info0d.info0d_max_power_code + 1);
+        g_v92a = v92a_init(&pcm);
+        if (!g_v92a) {
+            ME_LOG("[ME] V.92 analogue could not initialize negotiated PCM startup\n");
+            g_state = ME_HANGUP;
+            return;
+        }
+        g_v90a_started = true; /* stop SpanDSP's V.34 primary receiver */
+        g_v92a_last_stage = -1;
+        ME_LOG("[ME] V.92 analogue Table 18 selected: linear PCM, U_INFO=%d RTD=%u\n",
+               pcm.u_info, pcm.round_trip_symbols);
+        return;
+    }
 
     memset(&cfg, 0, sizeof(cfg));
     cfg.law = (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
@@ -9317,7 +9433,9 @@ void me_tx_audio(int16_t *amp, int len)
             if (g_v34) {
                 /* Take the modulator over at the Phase 2/3 seam (§9.3.2.1). */
                 prepare_v90_analogue_phase3_locked();
-                if (g_v90a_started && g_v90a) {
+                if (g_v92a) {
+                    me_v92a_tx_locked(amp, len);
+                } else if (g_v90a_started && g_v90a) {
                     v90_analogue_phase3_tx(g_v90a, amp, len);
                     me_v90_analogue_progress_locked();
                 } else {
@@ -9464,7 +9582,9 @@ void me_tx_audio(int16_t *amp, int len)
                 /* The analogue role's data direction remains V.34 upstream;
                  * keep using the modulator whose mapper was seeded from MP. */
                 pthread_mutex_lock(&g_state_mtx);
-                if (g_v90a) {
+                if (g_v92a) {
+                    me_v92a_tx_locked(amp, len);
+                } else if (g_v90a) {
                     v90_analogue_phase3_tx(g_v90a, amp, len);
                     me_v90_analogue_progress_locked();
                 }

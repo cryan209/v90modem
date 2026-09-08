@@ -413,6 +413,8 @@ void v90_enable_v92_mode(v90_state_t *s);
 void v90_enable_v92_native_cpu_rx(v90_state_t *s);
 
 /* Apply a received V.92 SUVu/SUVu' frame (Table 27) to Phase 4. */
+/* V.92 9.6.1.1.3 retransmission timer; default zero for a local bearer. */
+void v90_set_v92_round_trip_symbols(v90_state_t *s, unsigned symbols);
 bool v90_set_v92_suvu(v90_state_t *s, bool acknowledge);
 
 /*

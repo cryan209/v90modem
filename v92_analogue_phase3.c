@@ -18,6 +18,8 @@ struct v92a_s {
     uint64_t su_epoch;
     v90_analogue_rx_t *rx;
     v90a_linear_t *linear;
+    v92a4_t *phase4;
+    int training_points;
     v92_trn2u_tx_t pam;
     uint8_t ja[4096], cpt_bits[V92_CP_RX_MAX_BITS];
     int ja_length, cpt_length, bit_pos;
@@ -115,6 +117,7 @@ void v92a_free(v92a_t *s)
     if (!s) return;
     v90_analogue_rx_free(s->rx);
     v90a_linear_free(s->linear);
+    v92a4_free(s->phase4);
     free(s);
 }
 
@@ -139,6 +142,15 @@ static bool prepare_cpt(v92a_t *s)
     memcpy(f.dfi, s->cpt.dfi, sizeof(f.dfi));
     memcpy(f.masks, s->cpt.masks, sizeof(f.masks));
     s->cpt_ready = v92_cp_encode(&f, 2, s->cpt_bits, sizeof(s->cpt_bits), &s->cpt_length);
+    if (s->cpt_ready) {
+        v90_analogue_phase4_config_t cfg = {
+            .law = s->cfg.law, .u_info = s->cfg.u_info,
+            .cpt = s->cpt, .cp = s->cp
+        };
+        s->phase4 = v92a4_init(&cfg, s->training_points, s->cfg.lu,
+                               s->cfg.upstream_rate_mask, s->cfg.round_trip_symbols);
+        s->cpt_ready = s->phase4 != NULL;
+    }
     return s->cpt_ready;
 }
 
@@ -169,6 +181,7 @@ void v92a_rx(v92a_t *s, const int16_t *samples, int count)
     if (!s || !samples || count <= 0) return;
     for (int i = 0; i < count; i++, s->rx_samples++) {
         uint8_t cw;
+        if (s->phase4) v92a4_rx(s->phase4, samples+i, 1);
         if (s->jp_prime)
             receive_ri(s, samples[i]);
         if (v90a_linear_put(s->linear, samples+i, 1, &cw, 1) != 1)
@@ -178,6 +191,7 @@ void v92a_rx(v92a_t *s, const int16_t *samples, int count)
         s->jd |= (e & V90A_RX_EVENT_JD) != 0;
         if (e & V90A_RX_EVENT_JP) {
             const uint8_t *bits = v90_analogue_rx_jd_bits(s->rx);
+            s->training_points = bits[48] ? 8 : 4;
             unsigned correction = 0;
             for (int b = 0; b < 16; b++) correction |= (unsigned)bits[18+b] << b;
             if (correction)
@@ -194,6 +208,13 @@ static int16_t tick(v92a_t *s)
 {
     static const int su[6] = {1,0,1,-1,0,-1};
     int16_t value = 0;
+    /* 9.6.2.2.1: no B1d by 20 s + 6 round-trip delays from INFO1a.
+     * The enclosing call owner receives failure and performs 9.7 retrain. */
+    if (s->tx_ticks >= 320000ULL + 12ULL*s->cfg.round_trip_symbols
+        && (!s->phase4 || !v92a4_downstream_ready(s->phase4))) {
+        fail(s, "B1d timeout (9.6.2.2.1)");
+        return 0;
+    }
     switch (s->stage) {
     case V92A_SILENCE:
         if (s->ticks == 1120) { stage(s, V92A_RU); return tick(s); }
@@ -258,7 +279,7 @@ static int16_t tick(v92a_t *s)
         value = s->held_sample;
         break;
     case V92A_CPT:
-        if (s->ticks >= 48 + 2*s->cpt_length && ((s->ticks-48)/2)%s->cpt_length == 0
+        if (s->ticks >= 48u + 2u*(unsigned)s->cpt_length && ((s->ticks-48)/2)%s->cpt_length == 0
             && s->ticks%2 == 0 && (s->cfg.dil.n ? s->ri : s->ri_bar)) {
             stage(s, V92A_E1U); return tick(s);
         }
@@ -269,7 +290,10 @@ static int16_t tick(v92a_t *s)
         value = s->held_sample;
         break;
     case V92A_E1U:
-        if (s->ticks == 24) { stage(s, V92A_PHASE4); return 0; }
+        if (s->ticks == 24) {
+            v92a4_start(s->phase4, s->pam.prev_sign);
+            stage(s, V92A_PHASE4); return tick(s);
+        }
         if (!(s->ticks%2)) {
             uint8_t zero = 0;
             v92_trn2u_tx_bits_linear(&s->pam, &zero, 1, &s->held_sample, 1);
@@ -277,6 +301,9 @@ static int16_t tick(v92a_t *s)
         value = s->held_sample;
         break;
     case V92A_PHASE4:
+        if (!(s->ticks%2)) v92a4_tx(s->phase4, &s->held_sample, 1);
+        value = s->held_sample;
+        break;
     case V92A_FAILED:
         return 0;
     }
@@ -295,3 +322,5 @@ v92a_stage_t v92a_stage(const v92a_t *s) { return s ? s->stage : V92A_FAILED; }
 const char *v92a_failure(const v92a_t *s) { return s ? s->failure : "invalid configuration"; }
 const vpcm_cp_frame_t *v92a_cpt(const v92a_t *s) { return s && s->cpt_ready ? &s->cpt : NULL; }
 int v92a_final_e1u_sign(const v92a_t *s) { return s ? s->pam.prev_sign : 0; }
+
+v92a4_t *v92a_phase4(v92a_t *s) { return s ? s->phase4 : NULL; }

@@ -1458,6 +1458,16 @@ static void prepare_v90_info1a(v34_state_t *s)
     s->tx.info1a.baud_rate_a_to_c = s->tx.baud_rate;
     /* Downstream: 8000 PCM sampling = code 6. */
     s->tx.info1a.baud_rate_c_to_a = 6;
+    /* V.92 9.3, Tables 15-18: select PCM upstream only when the caller
+       installed a PCM transmitter and the received digital offer permits it.
+       Keep the V.34 modulator's baud index in range for the Phase-2 seam. */
+    if (s->tx.v92_pcm_upstream_capable && s->tx.v92_info0_capable
+        && (s->rx.info0_raw_26_27 & 2) && s->rx.info1c_received
+        && s->rx.info1c.rate_data[5].use_high_carrier)
+    {
+        s->tx.info1a.baud_rate_a_to_c = 6;
+        s->tx.info1a.freq_offset = 0x3FF; /* Table 18: reserved ones */
+    }
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -1646,7 +1656,8 @@ static int v90_info1a_sequence_tx(v34_tx_state_t *s, info1a_t *info1a)
     /* 0:3      Fill bits: 1111. */
     /* 4:11     Frame sync: 01110010 */
     bitstream_put(&bs, &t, INFO_FILL_AND_SYNC_BITS, 12);
-    /* 12:17    Reserved for ITU (set to 0 by analog modem) */
+    /* 12:17: V.90 reserved zeros; V.92 Table 18's zeros advertise
+       p1/z2, 192 total coefficients, 128 per section (baseline capability). */
     bitstream_put(&bs, &t, 0, 6);
     /* 18:24    Length of MD to be transmitted by the analog modem during Phase 3. */
     bitstream_put(&bs, &t, info1a->md, 7);
@@ -9049,6 +9060,14 @@ SPAN_DECLARE(int) v34_get_round_trip_delay_samples(v34_state_t *s)
          ? s->rx.round_trip_delay_estimate : 0;
 }
 /*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(bool) v34_v92_pcm_upstream_selected(v34_state_t *s)
+{
+    return s && s->tx.v90_mode && s->tx.calling_party
+        && s->tx.v92_pcm_upstream_capable
+        && s->tx.info1a.baud_rate_a_to_c == 6
+        && s->tx.info1a.baud_rate_c_to_a == 6;
+}
 
 SPAN_DECLARE(int) v34_get_v90_tx_u_info(v34_state_t *s)
 {

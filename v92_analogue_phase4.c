@@ -17,13 +17,15 @@ struct v92a4_s {
     v92_cp_frame_t cpu;
     v92_cpd_frame_t cpd;
     uint32_t rate_mask;
-    bool suvd, cpd_seen, remote_ack, ack_sent, cpu_sent, downstream;
-    unsigned symbols, stage_symbols, cpu_end;
+    bool suvd, cpd_seen, remote_ack, ack_sent, cpu_sent, downstream, cpu_retry;
+    unsigned symbols, stage_symbols, cpu_end, round_trip_symbols;
     int alignment, window_len;
     uint8_t window[V92_CPD_MAX_BITS];
     uint8_t bits[V92_CP_RX_MAX_BITS];
     int bit_pos, bit_count;
     double frame[12];
+    int (*get_bit)(void *);
+    void *data_user;
 };
 
 static void fail(v92a4_t *s, const char *why)
@@ -75,6 +77,9 @@ static bool control(void *user, const uint8_t *bits, int n)
             s->cpd_seen = true;
             s->remote_ack |= f.acknowledge;
         }
+        if (!s->remote_ack && s->cpu_sent
+            && s->symbols-s->cpu_end >= 800ULL + s->round_trip_symbols)
+            s->cpu_retry = true;
         s->window_len = 0;
         return s->cpd_seen && s->remote_ack;
     }
@@ -82,7 +87,7 @@ static bool control(void *user, const uint8_t *bits, int n)
 }
 
 v92a4_t *v92a4_init(const v90_analogue_phase4_config_t *cfg,
-                    int points, double lu, uint32_t rate_mask)
+                    int points, double lu, uint32_t rate_mask, unsigned round_trip_symbols)
 {
     if (!cfg || (points != 4 && points != 8) || !rate_mask
         || !isfinite(lu) || lu <= 0 || lu > 12000) return NULL;
@@ -93,6 +98,7 @@ v92a4_t *v92a4_init(const v90_analogue_phase4_config_t *cfg,
     if (!s->rx || !s->linear) { v92a4_free(s); return NULL; }
     s->alignment = cfg->cpt.drn+8;
     s->rate_mask = rate_mask;
+    s->round_trip_symbols = round_trip_symbols;
     v90_analogue_phase4_set_control_receiver(s->rx, control, s);
     uint8_t cw = v91_ucode_to_codeword((v91_law_t)cfg->law, cfg->u_info, true);
     v90a_linear_set_reference(s->linear, cfg->u_info,
@@ -132,11 +138,12 @@ static bool message(v92a4_t *s, bool cpu)
     s->stage_symbols = 0;
     s->stage = cpu ? V92A4_CP : V92A4_SUV;
     if (cpu) {
+        s->cpu_retry = false;
         s->cpu.acknowledge = s->cpd_seen;
         return v92_cp_encode(&s->cpu, s->tx.constellation_points,
                              s->bits, sizeof(s->bits), &s->bit_count);
     }
-    v92_suvu_frame_t suv = {.acknowledge = s->cpd_seen};
+    v92_suvu_frame_t suv = {.acknowledge = s->cpd_seen, .prefilter_level_q2_2 = 16};
     return v92_suvu_encode(&suv, s->tx.constellation_points,
                             s->bits, sizeof(s->bits), &s->bit_count);
 }
@@ -160,7 +167,7 @@ static int16_t sample(v92a4_t *s)
                 s->stage = V92A4_E;
                 s->stage_symbols = 0;
             } else if (!message(s, s->suvd && (!s->cpu_sent
-                         || (!s->remote_ack && s->symbols-s->cpu_end >= 800)))) {
+                         || s->cpu_retry))) {
                 fail(s, "cannot encode Phase-4 control message");
             }
         }
@@ -185,6 +192,10 @@ static int16_t sample(v92a4_t *s)
         if (!pos) {
             uint8_t ones[V92_UPSTREAM_MAX_FRAME_BITS];
             memset(ones, 1, sizeof(ones));
+            if (s->stage == V92A4_DATA && s->get_bit) {
+                int count = v92_upstream_bits_per_frame(s->cpd.selected_upstream_drn);
+                for (int i = 0; i < count; i++) ones[i] = s->get_bit(s->data_user) & 1;
+            }
             if (!v92_upstream_wave_encode_frame(&s->data, &s->cpd, ones,
                      v92_upstream_bits_per_frame(s->cpd.selected_upstream_drn), s->frame)) {
                 fail(s, "cannot encode B1u"); return 0;
@@ -223,3 +234,18 @@ v92a4_stage_t v92a4_stage(const v92a4_t *s) { return s ? s->stage : V92A4_FAILED
 bool v92a4_downstream_ready(const v92a4_t *s) { return s && s->downstream; }
 const v92_cpd_frame_t *v92a4_cpd(const v92a4_t *s) { return s && s->cpd_seen ? &s->cpd : NULL; }
 const char *v92a4_failure(const v92a4_t *s) { return s ? s->failure : "invalid configuration"; }
+
+void v92a4_set_data_source(v92a4_t *s, int (*get_bit)(void *), void *user)
+{
+    if (!s) return;
+    s->get_bit = get_bit;
+    s->data_user = user;
+}
+int v92a4_get_data_bits(v92a4_t *s, uint8_t *bits, int capacity)
+{
+    return s ? v90_analogue_phase4_get_data_bits(s->rx, bits, capacity) : 0;
+}
+int v92a4_downstream_rate(const v92a4_t *s)
+{
+    return s ? (int)vpcm_cp_drn_to_bps(s->cpu.drn) : 0;
+}
