@@ -936,7 +936,18 @@ static int info0_sequence_tx(v34_tx_state_t *s)
     /* 25       Set to 1 indicates the ability to support up to 1664-point signal constellations. */
     bitstream_put(&bs, &t, (v34_capabilities.support_1664_point_constellation)  ?  1  :  0, 1);
     /* 26:27    Transmit clock source: 0 = internal; 1 = synchronized to receive timing; 2 = external; 3 = reserved for ITU-T. */
-    bitstream_put(&bs, &t, v34_capabilities.tx_clock_source, 2);
+    if (s->v90_mode && s->calling_party)
+    {
+        /* V.92 Table 16 reverses Table 15's capability/request bit order:
+           INFO0a bit 26 = capable, bit 27 = short Phase 2 requested.
+           Ordinary V.34 retains its clock-source interpretation. */
+        bitstream_put(&bs, &t, (s->v92_info0_capable ? 1 : 0)
+                            | (s->v92_short_phase2_requested ? 2 : 0), 2);
+    }
+    else
+    {
+        bitstream_put(&bs, &t, v34_capabilities.tx_clock_source, 2);
+    }
     /* 28       Set to 1 to acknowledge correct reception of an INFO0 frame during error recovery. */
     bitstream_put(&bs, &t, s->info0_acknowledgement, 1);
     bitstream_emit(&bs, &t);
@@ -1172,8 +1183,9 @@ static void prepare_info1c(v34_state_t *s)
        data path here is still V.34; see v34_set_v92_pcm_upstream_capability. */
     v92_info1d = s->tx.v90_mode
               && s->tx.v92_info0_capable
-              && (s->rx.info0_raw_26_27 & 0x01U) != 0
-              && (s->rx.info0_raw_26_27 & 0x02U) == 0;
+              && (s->rx.info0_raw_26_27 & 0x01U) != 0;
+    /* V.92 9.3/9.4: a unilateral short-Phase-2 request does not cancel
+       V.92 capability. Only bilateral requests select the short procedure. */
 
     for (i = 0;  i <= V34_BAUD_RATE_3429;  i++)
     {

@@ -74,7 +74,7 @@ static double v92_trn2u_level(int constellation_points, int label, double lu)
     return ((double)(2 * label + 1) / sqrt(21.0)) * lu;
 }
 
-static uint8_t v92_trn2u_encode_linear(bool alaw, double value)
+static int16_t v92_trn2u_linear_sample(double value)
 {
     int16_t sample;
 
@@ -83,7 +83,7 @@ static uint8_t v92_trn2u_encode_linear(bool alaw, double value)
     if (value < -32768.0)
         value = -32768.0;
     sample = (int16_t)lrint(value);
-    return alaw ? linear_to_alaw(sample) : linear_to_ulaw(sample);
+    return sample;
 }
 
 static int16_t v92_trn2u_decode_linear(bool alaw, uint8_t codeword)
@@ -112,7 +112,7 @@ void v92_trn2u_tx_start(v92_trn2u_tx_t *tx, int preceding_e1u_sign)
     tx->prev_sign = preceding_e1u_sign ? 1 : 0;
 }
 
-static uint8_t v92_trn2u_tx_symbol(v92_trn2u_tx_t *tx, const int *bits)
+static int16_t v92_trn2u_tx_symbol(v92_trn2u_tx_t *tx, const int *bits)
 {
     int bps = v92_trn2u_bits_per_symbol(tx->constellation_points);
     int msb;
@@ -127,44 +127,57 @@ static uint8_t v92_trn2u_tx_symbol(v92_trn2u_tx_t *tx, const int *bits)
     value = v92_trn2u_level(tx->constellation_points, label, tx->lu);
     if (msb)
         value = -value;
-    return v92_trn2u_encode_linear(tx->alaw, value);
+    return v92_trn2u_linear_sample(value);
 }
 
-int v92_trn2u_tx_bits(v92_trn2u_tx_t *tx,
+int v92_trn2u_tx_bits_linear(v92_trn2u_tx_t *tx,
                       const uint8_t *bits,
                       int nbits,
-                      uint8_t *codewords,
-                      int codewords_max)
+                      int16_t *samples,
+                      int samples_max)
 {
     int bps;
     int nsymbols;
     int scrambled[3];
 
-    if (!tx || !bits || !codewords)
+    if (!tx || !bits || !samples)
         return 0;
     bps = v92_trn2u_bits_per_symbol(tx->constellation_points);
     if (bps == 0 || nbits <= 0 || (nbits % bps) != 0)
         return 0;
     nsymbols = nbits / bps;
-    if (nsymbols > codewords_max)
+    if (nsymbols > samples_max)
         return 0;
     for (int s = 0; s < nsymbols; s++) {
         for (int i = 0; i < bps; i++)
             scrambled[i] = v92_gpa_scramble(&tx->scramble_reg,
                                             bits[s * bps + i] & 1);
-        codewords[s] = v92_trn2u_tx_symbol(tx, scrambled);
+        samples[s] = v92_trn2u_tx_symbol(tx, scrambled);
     }
     return nsymbols;
 }
 
-int v92_trn2u_tx_ones(v92_trn2u_tx_t *tx,
-                      uint8_t *codewords,
+int v92_trn1u_tx_linear(v92_trn2u_tx_t *tx, int16_t *samples, int nsymbols)
+{
+    if (!tx || !samples || nsymbols <= 0 || tx->constellation_points != 2)
+        return 0;
+    for (int i = 0; i < nsymbols; i++) {
+        /* V.92 8.5.7: zero is positive and one is negative. Differential
+         * encoding begins only at Ja/CPt, seeded by this last wire sign. */
+        tx->prev_sign = v92_gpa_scramble(&tx->scramble_reg, 1);
+        samples[i] = v92_trn2u_linear_sample(tx->prev_sign ? -tx->lu : tx->lu);
+    }
+    return nsymbols;
+}
+
+int v92_trn2u_tx_ones_linear(v92_trn2u_tx_t *tx,
+                      int16_t *samples,
                       int nsymbols)
 {
     int bps;
     int scrambled[3];
 
-    if (!tx || !codewords || nsymbols <= 0)
+    if (!tx || !samples || nsymbols <= 0)
         return 0;
     bps = v92_trn2u_bits_per_symbol(tx->constellation_points);
     if (bps == 0)
@@ -172,7 +185,39 @@ int v92_trn2u_tx_ones(v92_trn2u_tx_t *tx,
     for (int s = 0; s < nsymbols; s++) {
         for (int i = 0; i < bps; i++)
             scrambled[i] = v92_gpa_scramble(&tx->scramble_reg, 1);
-        codewords[s] = v92_trn2u_tx_symbol(tx, scrambled);
+        samples[s] = v92_trn2u_tx_symbol(tx, scrambled);
+    }
+    return nsymbols;
+}
+
+/* These compatibility entry points model the network A/D.  The analogue
+ * transmitter itself produces linear samples (V.92 3.1, 6.4 and 8.7.6);
+ * companding belongs only at the digital-network boundary. */
+int v92_trn2u_tx_bits(v92_trn2u_tx_t *tx, const uint8_t *bits, int nbits,
+                      uint8_t *codewords, int codewords_max)
+{
+    if (!tx || !bits || !codewords)
+        return 0;
+    int bps = v92_trn2u_bits_per_symbol(tx->constellation_points);
+    if (!bps || nbits <= 0 || nbits % bps || nbits / bps > codewords_max)
+        return 0;
+    for (int i = 0; i < nbits / bps; i++) {
+        int16_t sample;
+        v92_trn2u_tx_bits_linear(tx, bits + i*bps, bps, &sample, 1);
+        codewords[i] = tx->alaw ? linear_to_alaw(sample) : linear_to_ulaw(sample);
+    }
+    return nbits / bps;
+}
+
+int v92_trn2u_tx_ones(v92_trn2u_tx_t *tx, uint8_t *codewords, int nsymbols)
+{
+    if (!tx || !codewords || nsymbols <= 0
+        || !v92_trn2u_bits_per_symbol(tx->constellation_points))
+        return 0;
+    for (int i = 0; i < nsymbols; i++) {
+        int16_t sample;
+        v92_trn2u_tx_ones_linear(tx, &sample, 1);
+        codewords[i] = tx->alaw ? linear_to_alaw(sample) : linear_to_ulaw(sample);
     }
     return nsymbols;
 }

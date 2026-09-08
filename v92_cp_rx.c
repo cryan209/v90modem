@@ -512,6 +512,8 @@ void v92_cp_rx_reset(v92_cp_rx_t *rx)
     rx->target_bits = 0;
     rx->sync_ones = 0;
     rx->collecting = false;
+    rx->e1u_armed = false;
+    rx->e1u_zeros = 0;
 }
 
 static bool v92_cp_rx_dispatch(v92_cp_rx_t *rx)
@@ -569,6 +571,18 @@ bool v92_cp_rx_put_bit(v92_cp_rx_t *rx, int bit)
         return false;
     bit = bit ? 1 : 0;
     rx->input_bits++;
+    /* 8.5.3/9.5.1.1.12: E1u is twelve zeros immediately following a
+     * complete CRC-valid CPt, including fill. Never search arbitrary data. */
+    if (rx->e1u_armed) {
+        if (bit) {
+            rx->e1u_armed = false;
+        } else if (++rx->e1u_zeros == 12) {
+            rx->e1u_armed = false;
+            if (rx->handler)
+                rx->handler(rx->user_data, V92_P4U_KIND_E1U, NULL, NULL, NULL);
+        }
+    }
+
 
     if (!rx->collecting) {
         if (bit) {
@@ -639,7 +653,10 @@ bool v92_cp_rx_put_bit(v92_cp_rx_t *rx, int bit)
         accepted = v92_cp_rx_dispatch(rx);
         if (!accepted)
             rx->rejected_frames++;
+        bool cpt = accepted && rx->constellation_points == 2
+                && !rx->bits[18] && v92_cp_get_bits(rx->bits, 19, 2) == V92_CP_TYPE_CPT;
         v92_cp_rx_reset(rx);
+        rx->e1u_armed = cpt;
     }
     return accepted;
 }

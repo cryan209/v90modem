@@ -56,6 +56,8 @@
 
 struct v90_analogue_phase4_s {
     v90_analogue_phase4_config_t cfg;
+    vpcm_training_control_handler_t control_handler;
+    void *control_user;
     v90_analogue_phase4_rx_stage_t stage;
 
     int64_t  index;
@@ -621,7 +623,12 @@ static unsigned demap_frame(v90_analogue_phase4_t *s)
                 s->trn2d_broke = true;
         }
         /*endif*/
-        events |= push_bit(s, out[i]);
+        if (!s->control_handler)
+            events |= push_bit(s, out[i]);
+    }
+    if (s->control_handler && s->control_handler(s->control_user, out, n)) {
+        s->mp_seen = true;
+        s->stage = V90A4_RX_MP;
     }
     /* Ed starts on a mapping-frame boundary.  Detect its two complete zero
      * frames rather than a bit run: MP's mandatory fill zeroes can precede it
@@ -1283,4 +1290,12 @@ bool v90_analogue_phase4_build_zero_dil_cp(v90_law_t law,
     *cp_out = cp;
     *cpt_out = cpt;
     return true;
+}
+
+void v90_analogue_phase4_set_control_receiver(v90_analogue_phase4_t *s,
+        vpcm_training_control_handler_t handler, void *user)
+{
+    if (!s || s->stage != V90A4_RX_HUNT_R) return;
+    s->control_handler = handler;
+    s->control_user = user;
 }

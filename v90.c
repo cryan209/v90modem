@@ -652,6 +652,7 @@ struct v90_state_s {
     bool             jd_resync_wait;
     bool             dil_terminate_requested;
     bool             v92_phase3;
+    bool             v92_trn1u_trained;
     bool             v92_su_seen;
     bool             v92_su_bar_seen;
 
@@ -3833,6 +3834,15 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
             s->phase4_hold_logged = true;
         }
         sign = v90_scramble_bit(&s->scrambler, 1);
+        /* V.92 9.5.1.1.13: with zero DIL, Ri asks the analogue modem
+         * to begin CPt. Waiting for CPt first deadlocks both modems. Use
+         * the receiver's TRN1u lock, then finish this six-symbol SCR period
+         * (8.6.6). Silence must never advance startup by elapsed time alone. */
+        if (++s->sample_count % 6 == 0 && s->v92_trn1u_trained) {
+            s->tx_phase = V90_TX_RI;
+            s->sample_count = 0;
+            s->phase4_hold_logged = false;
+        }
         return v90_pcm_signed_codeword(s->law, s->u_info, sign);
 
     case V90_TX_RI:
@@ -4347,6 +4357,7 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->jd_terminated_by_su = false;
     s->jd_resync_wait = false;
     s->jp_terminate_requested = false;
+    s->v92_trn1u_trained = false;
     s->v92_su_seen = false;
     s->v92_su_bar_seen = false;
     s->training_complete = false;
@@ -4518,6 +4529,13 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
         }
         return false;
 
+    case V90_RX_EVENT_TRN_LOCK:
+        if (s->v92_phase3 && s->tx_phase == V90_TX_SCR) {
+            s->v92_trn1u_trained = true;
+            return true;
+        }
+        return false;
+
     case V90_RX_EVENT_SU:
         if (s->v92_phase3 && s->tx_phase == V90_TX_JD && !s->v92_su_seen) {
             s->v92_su_seen = true;
@@ -4562,7 +4580,8 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
             s->phase4_hold_logged = false;
             return true;
         }
-        if ((s->tx_phase == V90_TX_RI && s->sample_count >= v90_ri_length(s)
+        if ((s->tx_phase == V90_TX_RI && (!s->v92_phase3 || !s->dil_requested)
+             && s->sample_count >= v90_ri_length(s)
              && (s->v92_mode
                  ? (s->v92_native_cpu_rx ? s->phase4_mapper_ready
                                          : (s->cp_nbits > 0))
@@ -4594,6 +4613,16 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
         return false;
 
     case V90_RX_EVENT_E:
+        if (s->v92_phase3 && s->dil_requested && s->tx_phase == V90_TX_RI
+            && s->phase4_mapper_ready && !s->cp_ready) {
+            /* V.92 9.5.1.1.12: nonzero DIL waits for E1u, not a second CPt. */
+            s->cp_ready = true;
+            s->phase4_ri_align_remaining = (6 - s->sample_count % 6) % 6;
+            s->sample_count = 0;
+            s->tx_phase = V90_TX_RI_ACK;
+            s->phase4_hold_logged = false;
+            return true;
+        }
         if (s->v92_mode && s->v92_native_cpu_rx) {
             /* §9.6.1.1.4/V.92: E2u counts as remote acknowledgement. */
             if (s->tx_phase == V90_TX_SUVD || s->tx_phase == V90_TX_CP) {
@@ -4642,6 +4671,7 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
             s->jd_terminated_by_su = false;
     s->jd_resync_wait = false;
             s->jp_terminate_requested = false;
+            s->v92_trn1u_trained = false;
             s->v92_su_seen = false;
             s->v92_su_bar_seen = false;
             s->dil_terminate_requested = false;

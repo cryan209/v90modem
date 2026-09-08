@@ -114,6 +114,14 @@ unsigned v90_analogue_phase4_put(v90_analogue_phase4_t *s,
                                  const uint8_t *codewords,
                                  int count);
 
+/* Shared V.PCM training demapper seam. A control receiver consumes each
+ * decoded six-symbol frame and returns true on a CRC-valid acknowledged
+ * control message; this arms frame-aligned Ed/B1d reception. V.90 MP remains
+ * the default when no handler is installed. */
+typedef bool (*vpcm_training_control_handler_t)(void *user, const uint8_t *bits, int count);
+void v90_analogue_phase4_set_control_receiver(v90_analogue_phase4_t *s,
+        vpcm_training_control_handler_t handler, void *user);
+
 v90_analogue_phase4_rx_stage_t v90_analogue_phase4_stage(const v90_analogue_phase4_t *s);
 const char *v90_analogue_phase4_stage_name(v90_analogue_phase4_rx_stage_t stage);
 

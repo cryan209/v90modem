@@ -87,6 +87,25 @@ void v92_trn2u_tx_start(v92_trn2u_tx_t *tx, int preceding_e1u_sign);
 /* Bits per PAM symbol: 1 for Phase-3 2-point, 2 for 4-point, 3 for 8-point. */
 int v92_trn2u_bits_per_symbol(int constellation_points);
 
+/* Analogue-modem output, before the network G.711 encoder. One linear
+ * sample per 8000 Hz symbol; no companding, interpolation or clock changes.
+ * The configured transport law does not affect these samples. CPt uses
+ * 2 points; Phase-4 TRN2u/CPu use the 4/8-point Table 28/29 constellations.
+ * Neither function is a TRN1u generator: TRN1u is not differential (8.5.7).
+ * Returns samples written, or 0 without advancing state for invalid lengths. */
+int v92_trn2u_tx_bits_linear(v92_trn2u_tx_t *tx, const uint8_t *bits,
+                             int nbits, int16_t *samples, int samples_max);
+int v92_trn2u_tx_ones_linear(v92_trn2u_tx_t *tx, int16_t *samples,
+                             int nsymbols);
+
+/* Phase-3 TRN1u (8.5.7): GPA-scrambled ones on +/-LU, with NO
+ * differential encoding. Configure two points and call tx_start(tx, 0)
+ * at the start of each TRN1u segment. This preserves the final sign for
+ * subsequent Ja or CPt via tx_bits_linear, without resetting GPA (8.5.1/4).
+ * Calls may split a segment anywhere; the caller must end each complete
+ * TRN1u segment on a multiple of 12 symbols. */
+int v92_trn1u_tx_linear(v92_trn2u_tx_t *tx, int16_t *samples, int nsymbols);
+
 /*
  * Modulate nbits (a multiple of bits-per-symbol) into G.711 codewords.
  * Returns the number of codewords written, or 0 on error.

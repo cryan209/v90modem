@@ -342,28 +342,16 @@ static inline int gpa_descramble(uint32_t *reg, int in_bit)
 /* -------------------------------------------------------------------------
  * TRN1u single-sample processor
  *
- * V.92 §8.5.7: all-ones fed through GPA scrambler, differentially encoded,
- * mapped 0→+L_U, 1→−L_U.  Receiver inverts: +L_U(MSB=1)→0, −L_U(MSB=0)→1.
- * Then differential-decode, then GPA descramble → should yield all-ones.
- *
- * Returns the descrambled bit (0 or 1), or -1 on the first call
- * (diff_prev seeding only).
+ * V.92 8.5.7: GPA-scrambled ones directly select +/-LU. TRN1u is
+ * NOT differential; 8.5.4 introduces differential encoding at Ja. Keep
+ * the last sign for diagnostics but feed the absolute sign to GPA.
  * ------------------------------------------------------------------------- */
 static int trn1u_process(v92_p3_rx_t *rx, uint8_t cw)
 {
-    /* V.92 sign convention: positive(MSB=1)=0, negative(MSB=0)=1 */
-    int v92_bit = 1 - sign_bit(cw);
-
-    if (!rx->diff_valid) {
-        rx->diff_prev  = v92_bit;
-        rx->diff_valid = true;
-        return -1;
-    }
-
-    int diff = v92_bit ^ rx->diff_prev;
+    int v92_bit = 1 - sign_bit(cw); /* 0 positive, 1 negative */
     rx->diff_prev = v92_bit;
-
-    int out = gpa_descramble(&rx->gpa_reg, diff);
+    rx->diff_valid = true;
+    int out = gpa_descramble(&rx->gpa_reg, v92_bit);
     rx->trn1u_count++;
     if (out) rx->trn1u_ones++;
     return out;
@@ -736,6 +724,8 @@ static bool demod_ja_search(v92_p3_rx_t *rx, ja_dil_decode_t *out)
                                                             packed_bits,
                                                             &meta))
                             continue;
+                        if (!meta.is_v92)
+                            continue;
                         variant_hits++;
                         strict_hits++;
                         if (!v90_analyse_dil_descriptor(&desc, &analysis))
@@ -788,6 +778,8 @@ static bool demod_ja_search(v92_p3_rx_t *rx, ja_dil_decode_t *out)
                                                                 packed,
                                                                 packed_bits,
                                                                 &meta))
+                                continue;
+                            if (!meta.is_v92)
                                 continue;
                             variant_hits++;
                             strict_hits++;
@@ -980,6 +972,7 @@ static bool run_ja_search(v92_p3_rx_t *rx, bool force_hard_min)
     params.tx_ja_sample  = -1;
     params.u_info        = 0;
     params.calling_party = true;
+    params.require_v92 = true;
 
     if (params.search_start < 24)
         params.search_start = 24;
@@ -1002,23 +995,15 @@ static bool run_ja_search(v92_p3_rx_t *rx, bool force_hard_min)
                                    &params, &rx->ja_result);
     if (found)
         ja_result_normalize_sample(rx, &rx->ja_result);
-    if (found && rx->ja_result.ok)
+    if (found && rx->ja_result.ok && rx->ja_result.parsed_v92)
         return true;
 
     /* Try to upgrade soft-lock to strict parse via symbol-domain demod path. */
-    if (demod_ja_search(rx, &rx->ja_result)) {
+    if (demod_ja_search(rx, &rx->ja_result) && rx->ja_result.parsed_v92) {
         ja_result_normalize_sample(rx, &rx->ja_result);
         return true;
     }
 
-    if (found && rx->ja_result.soft_lock) {
-        p3rx_set_reject(rx,
-                        V92_P3_RX_REJECT_JA_SOFT_ONLY,
-                        rx->ja_result.start_sample,
-                        rx->ja_result.soft_score,
-                        rx->ja_result.descriptor_bits);
-        return true;
-    }
     p3rx_set_reject(rx,
                     V92_P3_RX_REJECT_JA_SEARCH_FAIL,
                     rx->trn1u_start + rx->trn1u_count,
@@ -1290,10 +1275,16 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_MD_WAIT: {
         int elapsed = sample_index - rx->ur1_end;
-        if (elapsed > V92_P3_RX_MD_MAX_T) {
+        /* V.92 9.5.1.1.1: wait for the duration signalled in INFO1a
+         * before acquiring the second Ru. MD can resemble a periodic
+         * training signal; it is not evidence of an early Ru. Table 18
+         * allows MD longer than the old fixed one-second timeout. */
+        if (elapsed <= rx->md_symbols)
+            break;
+        if (elapsed - rx->md_symbols > V92_P3_RX_MD_MAX_T) {
             p6_rehunt_from_current(rx, codeword, sample_index,
                                    V92_P3_RX_REJECT_MD_TIMEOUT,
-                                   elapsed, V92_P3_RX_MD_MAX_T);
+                                   elapsed - rx->md_symbols, V92_P3_RX_MD_MAX_T);
             break;
         }
 
@@ -1307,6 +1298,9 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
         {
             int run = rx->p6_hyp_soft_run[rx->ru_hyp];
             int min_run = rx->p6_soft_mode ? RU2_LOCK_MIN_SOFT : P6_LOCK_MIN_SOFT;
+            /* Do not backdate Ru2 into MD using a run accumulated there. */
+            if (run > elapsed - rx->md_symbols)
+                run = elapsed - rx->md_symbols;
             if (run >= min_run) {
                 rx->p6_run = run;
                 rx->ru2_start = sample_index - run + 1;
@@ -1319,6 +1313,8 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_RU2: {
         int run = (rx->ru_hyp >= 0) ? rx->p6_hyp_soft_run[rx->ru_hyp] : 0;
+        if (run > sample_index - rx->ru2_start + 1)
+            run = sample_index - rx->ru2_start + 1;
 
         if (run > 0) {
             rx->p6_run = run;
@@ -1391,7 +1387,7 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
 
         /*
          * TRN1u (V.92 §8.5.7) is an all-ones training source through the GPA
-         * scrambler/differential path. If descrambled bits are not strongly
+         * scrambler with absolute signs. If descrambled bits are not strongly
          * one-biased, this lock is likely wrong.
          */
         if (rx->trn1u_count == TRN1U_EARLY_CHECK_T
@@ -1458,9 +1454,6 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
     /* ------------------------------------------------------------------ */
     case V92_P3_RX_JA_SEARCH:
     {
-        int trn_soft_t = rx->p6_soft_mode ? TRN1U_MIN_SOFT_T : V92_P3_RX_TRN1U_MIN_T;
-        int ja_soft_t = rx->p6_soft_mode ? JA_LEAD_SOFT_T : V92_P3_RX_JA_LEAD_T;
-        int ready_soft = 24 + trn_soft_t + ja_soft_t + 207;
         int ready_hard = 24 + V92_P3_RX_TRN1U_MIN_T + V92_P3_RX_JA_LEAD_T + 207;
         ja_buf_push(rx, codeword, sample_index);
 
@@ -1474,43 +1467,15 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
             break;
         }
 
-        /*
-         * Soft mode: run one early probe and, if only soft-lock is found,
-         * run one hard-gated probe at TRN1u>=2040T before finalising.
-         */
-        if (rx->ja_buf_fill == ready_soft) {
-            bool force_hard = !rx->p6_soft_mode;
-            bool found = run_ja_search(rx, force_hard);
-
-            if (found && (rx->ja_result.ok || !rx->p6_soft_mode)) {
-                if (rx->ja_result.ok) {
-                    rx->last_reject = V92_P3_RX_REJECT_NONE;
-                    rx->last_reject_sample = -1;
-                    rx->last_reject_metric0 = 0;
-                    rx->last_reject_metric1 = 0;
-                }
+        /* V.92 9.5.1.1.3 requires the received Table-20 descriptor.
+         * A repaired CRC or a soft candidate is never a receive event.
+         * Keep collecting until a whole descriptor is available, including
+         * long descriptors; a single early failed probe is not a timeout. */
+        if (rx->ja_buf_fill >= ready_hard && (rx->ja_buf_fill-ready_hard)%144 == 0) {
+            if (run_ja_search(rx, true) && rx->ja_result.ok && rx->ja_result.parsed_v92) {
+                rx->last_reject = V92_P3_RX_REJECT_NONE;
                 rx->ja_found = true;
-                rx->state    = V92_P3_RX_DONE;
-            }
-        } else if (rx->p6_soft_mode && rx->ja_buf_fill == ready_hard) {
-            bool found = run_ja_search(rx, true);
-
-            if (found) {
-                if (rx->ja_result.ok) {
-                    rx->last_reject = V92_P3_RX_REJECT_NONE;
-                    rx->last_reject_sample = -1;
-                    rx->last_reject_metric0 = 0;
-                    rx->last_reject_metric1 = 0;
-                }
-                rx->ja_found = true;
-                rx->state    = V92_P3_RX_DONE;
-            } else {
-                p3rx_set_reject(rx,
-                                V92_P3_RX_REJECT_JA_SEARCH_FAIL,
-                                sample_index,
-                                rx->ja_buf_fill,
-                                0);
-                rx->state = V92_P3_RX_FAILED;
+                rx->state = V92_P3_RX_DONE;
             }
         }
         break;

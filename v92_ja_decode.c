@@ -1189,7 +1189,9 @@ bool v92_ja_dil_search(const uint8_t *codewords,
                 score -= dist / 8;
             }
 
-            if (score > best_score) {
+            /* A valid zero-DIL descriptor can rank below zero. CRC/structure
+             * determine validity; the score only orders valid candidates. */
+            if (best_start < 0 || score > best_score) {
                 best_score    = score;
                 best_invert   = (invert != 0);
                 best_start    = candidate;
@@ -1200,7 +1202,7 @@ bool v92_ja_dil_search(const uint8_t *codewords,
         }
     }
 
-    if (best_score < 0) {
+    if (best_start < 0) {
         int recovered_score = -1000000;
 
         if (debug) {
@@ -1210,7 +1212,9 @@ bool v92_ja_dil_search(const uint8_t *codewords,
                     best_soft_invert ? 1 : 0,
                     best_soft_score);
         }
-        if (best_soft_start >= 0
+        /* Repair is an offline hypothesis only: it rewrites CRC bits and
+         * must never publish a fabricated frame to the native V.92 modem. */
+        if (!params->require_v92 && best_soft_start >= 0
             && ja_try_strict_repair_near_soft(codewords,
                                               total_codewords,
                                               params,
@@ -1235,7 +1239,7 @@ bool v92_ja_dil_search(const uint8_t *codewords,
         }
     }
 
-    if (best_score < 0) {
+    if (best_start < 0) {
         if (debug) {
             fprintf(stderr,
                     "[JA] search=%d..%d considered=%d decode_ok=%d parse_ok=%d parse_v92_ok=%d analyse_ok=%d hard=none soft_start=%d soft_score=%d sync_hd=%d frame17=%d zviol=%d crc_hd=%d\n",

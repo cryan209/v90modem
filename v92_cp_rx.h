@@ -177,10 +177,11 @@ typedef enum {
     V92_P4U_KIND_CPT = 0,
     V92_P4U_KIND_CPU,
     V92_P4U_KIND_CPUS,
-    V92_P4U_KIND_SUVU
+    V92_P4U_KIND_SUVU,
+    V92_P4U_KIND_E1U
 } v92_p4u_kind_t;
 
-/* Exactly one of cp/cpus/suvu is non-NULL, matching kind. */
+/* Exactly one diagnostic is non-NULL for a frame; E1u has none. */
 typedef void (*v92_cp_rx_handler_t)(void *user_data,
                                     v92_p4u_kind_t kind,
                                     const v92_cp_diag_t *cp,
@@ -198,6 +199,8 @@ typedef struct {
     int target_bits;
     int sync_ones;
     bool collecting;
+    bool e1u_armed;
+    unsigned e1u_zeros;
 
     uint32_t input_bits;
     uint32_t valid_frames;

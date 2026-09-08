@@ -59,6 +59,8 @@ typedef enum {
 #define V90A_RX_EVENT_TRN1D       (1u << 2)  /* §9.3.2.5 TRN1d started */
 #define V90A_RX_EVENT_JD          (1u << 3)  /* §9.3.2.6 a valid Jd frame */
 #define V90A_RX_EVENT_JD_PRIME    (1u << 4)  /* §9.3.2.8 J'd */
+#define V90A_RX_EVENT_JP          (1u << 6)  /* V.92 Table 22, CRC-valid */
+#define V90A_RX_EVENT_JP_PRIME    (1u << 7)  /* V.92 8.6.4, after Jp */
 #define V90A_RX_EVENT_DIL_ENOUGH  (1u << 5)  /* §9.3.2.10 enough of the DIL */
 
 typedef struct v90_analogue_rx_s v90_analogue_rx_t;
@@ -103,6 +105,10 @@ typedef struct {
 } v90_analogue_rx_config_t;
 
 v90_analogue_rx_t *v90_analogue_rx_init(const v90_analogue_rx_config_t *cfg);
+/* Select V.92 Tables 21/22 and Jp-prime before feeding samples.
+ * The default remains V.90 Table 13/Jd-prime. */
+void v90_analogue_rx_enable_v92(v90_analogue_rx_t *s);
+
 /* Report each new best §8.4.2 frame candidate found while probing TRN1d. */
 void v90_analogue_rx_set_jd_probe_report(v90_analogue_rx_t *s,
                                          void (*fn)(void *, int, int),

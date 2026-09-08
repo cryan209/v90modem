@@ -48,6 +48,8 @@
 struct v90_analogue_rx_s {
     v90_analogue_rx_config_t cfg;
     v90_analogue_rx_stage_t  stage;
+    bool v92_mode;
+    bool jp_seen;
 
     int      w_ucode;               /* §8.4.4: Ucode(16 + U_INFO) */
     int      trn1d_ucode;           /* §8.4.5: Ucode(U_INFO) = w_ucode - 16 */
@@ -501,6 +503,23 @@ static int jd_frame_errors(const uint8_t bits[JD_BITS])
     return errors;
 }
 
+/* V.92 8.6.2/8.6.3 reuse the GPC/differential transport but bit 47
+ * identifies Jp rather than V.90's training constellation size. */
+static unsigned jd_event(v90_analogue_rx_t *s)
+{
+    if (s->v92_mode && s->jd_bits[47]) {
+        s->jp_seen = true;
+        return V90A_RX_EVENT_JP;
+    }
+    return V90A_RX_EVENT_JD;
+}
+
+void v90_analogue_rx_enable_v92(v90_analogue_rx_t *s)
+{
+    if (s && s->stage == V90A_RX_HUNT_SD)
+        s->v92_mode = true;
+}
+
 /* §9.3.2.10: has enough DIL arrived to stop asking for more? */
 static bool dil_enough(v90_analogue_rx_t *s)
 {
@@ -798,7 +817,7 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
                 s->trn1d_break = from;
                 s->stage = V90A_RX_JD;
                 s->jd_frames++;
-                events |= V90A_RX_EVENT_JD;
+                events |= jd_event(s);
                 break;
             }
         }
@@ -929,7 +948,7 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
          * textbook DIL for 23 s and this receiver sat in Jd through all of it.
          */
         ucode = codeword_ucode(s, c, &sign);
-        if (ucode != s->trn1d_ucode) {
+        if (!s->v92_mode && ucode != s->trn1d_ucode) {
             if (s->jd_exit_run < (int) sizeof(s->jd_exit_hold))
                 s->jd_exit_hold[s->jd_exit_run] = c;
             /*endif*/
@@ -996,11 +1015,11 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
                 s->jd_symbols = JD_BITS;
                 s->jd_frames = 1;
                 s->jd_valid = true;
-                s->jd_trn16 = bits[47] != 0;
+                s->jd_trn16 = !s->v92_mode && bits[47] != 0;
                 s->jd_bit_count = 0;
                 s->in_jd_frame = false;
                 s->jd_prime_zeros = 0;
-                events |= V90A_RX_EVENT_JD;
+                events |= jd_event(s);
                 break;
             }
             if (s->jd_bit_pos < 0) {
@@ -1043,8 +1062,8 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
                     if (jd_frame_errors(s->jd_bits) == 0) {
                         s->jd_frames++;
                         s->jd_valid = true;
-                        s->jd_trn16 = s->jd_bits[47] != 0;
-                        events |= V90A_RX_EVENT_JD;
+                        s->jd_trn16 = !s->v92_mode && s->jd_bits[47] != 0;
+                        events |= jd_event(s);
                     }
                     /*endif*/
                     s->jd_bit_count = 0;
@@ -1069,7 +1088,11 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c)
             }
             /*endif*/
             if (++s->jd_prime_zeros >= JD_PRIME_BITS) {
-                events |= V90A_RX_EVENT_JD_PRIME;
+                /* V.92 8.6.4 terminates Jp, not Jd. Never let a damaged
+                 * Jd stream skip the phase-adjustment exchange. */
+                if (s->v92_mode && !s->jp_seen)
+                    continue;
+                events |= s->v92_mode ? V90A_RX_EVENT_JP_PRIME : V90A_RX_EVENT_JD_PRIME;
                 if (s->dil_cycle_len > 0) {
                     s->dil_start = s->index + 1;
                     s->dil_next_measure = DIL_MEASURE_INTERVAL;

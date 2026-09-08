@@ -37,6 +37,7 @@
 #include "v92_cp_rx.h"
 #include "v92_p3_rx.h"
 #include "v92_trn2u.h"
+#include "v92_su.h"
 #include "v92_upstream_rx.h"
 
 #include <spandsp.h>
@@ -922,14 +923,7 @@ static v92_cp_rx_t    g_v92_p3_cpt_rx;
 static v92_trn2u_demod_t g_v92_p3_cpt_demod;
 static bool           g_v92_p3_cpt_active = false;
 
-/* Strict raw-codeword Su/S-bar-u recogniser (V.92 §8.5.6).  It is armed
- * only after a strict Ja decode; twelve hypotheses cover phase and polarity. */
-typedef struct {
-    int run[12];
-    int last_polarity;
-    int transitions;
-} v92_su_rx_t;
-static v92_su_rx_t    g_v92_su_rx;
+static v92_su_t       g_v92_su_rx;
 static bool           g_v92_su_rx_active = false;
 static bool           g_v92_su_final_pending = false;
 static bool           g_v92_trn2u_active = false;
@@ -3935,6 +3929,12 @@ static void v92_live_p4u_frame(void *user_data,
                                const v92_cpus_diag_t *cpus,
                                const v92_suvu_diag_t *suvu)
 {
+    if (kind == V92_P4U_KIND_E1U) {
+        if (g_v92_active && g_v90)
+            (void)v90_handle_rx_event(g_v90, V90_RX_EVENT_E);
+        return;
+    }
+
     bool accepted = false;
     const char *name = "unknown";
     int bits = 0;
@@ -7954,7 +7954,7 @@ static bool get_strict_v90_info1a_locked(v90_info1a_t *info, bool *v92_selected)
     info->downstream_rate_code = (uint8_t)received.downstream_rate_code;
     info->freq_offset = (int16_t)received.freq_offset;
 
-    /* V.92 Table 19, against a real one captured 2026-07-21 (raw bytes
+    /* V.92 Table 18, against a real one captured 2026-07-21 (raw bytes
      * 3f c0 89 fd 0f 09 44):
      *
      *   raw_12_17=63  md=0  U_INFO=78  raw_32_33=0  upstream=6  downstream=6
@@ -7997,8 +7997,9 @@ static bool get_strict_v90_info1a_locked(v90_info1a_t *info, bool *v92_selected)
 
 /* Read the CRC-validated INFO0a captured by SpanDSP.  Table 16 bit 26 is
  * the analogue V.92 capability and bit 27 requests short Phase 2.  We only
- * implement the long procedure, so a short-Phase-2 request is a deliberate
- * V.90 fallback rather than a partial V.92 start-up. */
+ * implement the full procedure and leave our short request clear. V.92 9.4
+ * requires BOTH requests to select short Phase 2; the peer's request alone
+ * must not revoke the mutual V.92 capability established by 9.3. */
 static void v92_refresh_info0_confirmation_locked(void)
 {
     v34_v90_info0a_t info0a;
@@ -8020,73 +8021,40 @@ static void v92_refresh_info0_confirmation_locked(void)
         }
     }
     g_v92_info0_mutual = g_v92_info0_local_advertised
-                      && g_v92_info0_peer_capable
-                      && !g_v92_info0_peer_short_phase2;
+                      && g_v92_info0_peer_capable;
     if (!old_mutual && g_v92_info0_mutual) {
         ME_LOG("[ME] V.92 INFO0 confirmed mutually (INFO0d bit27=1, INFO0a bit26=1); selecting long Phase 2/3\n");
         trace_phase("V92 INFO0 mutual confirmation: long Phase2 selected");
-    } else if (g_v92_info0_local_advertised
-               && g_v92_info0_peer_short_phase2) {
-        ME_LOG("[ME] V.92 INFO0a requested short Phase 2; not implemented, retaining V.90 long-startup path\n");
     }
 }
 
 static void v92_su_rx_reset_locked(void)
 {
-    memset(&g_v92_su_rx, 0, sizeof(g_v92_su_rx));
-    g_v92_su_rx.last_polarity = -1;
+    v92_su_init(&g_v92_su_rx, g_law == ME_LAW_ALAW);
     g_v92_su_rx_active = false;
     g_v92_su_final_pending = false;
 }
 
-/* Return the expected Su class for phase p: +1, 0, or -1.  The inverse
- * polarity is S-bar-u. */
-static int v92_su_expected_class(int phase, int polarity)
-{
-    static const int pattern[6] = {1, 0, 1, -1, 0, -1};
-    int value = pattern[phase % 6];
-
-    return polarity ? -value : value;
-}
-
 static void v92_su_rx_feed_locked(uint8_t codeword, uint64_t sample_index)
 {
-    int sample;
-    int observed;
-
+    (void)sample_index;
     if (!g_v92_su_rx_active || !g_v92_active || !g_v90)
         return;
-    sample = pcm_to_linear(codeword);
-    if (sample > -900 && sample < 900)
-        observed = 0;
-    else
-        observed = sample > 0 ? 1 : -1;
-
-    for (int h = 0; h < 12; h++) {
-        int polarity = h / 6;
-        int phase_offset = h % 6;
-        int phase = (int)((sample_index + (uint64_t)phase_offset) % 6U);
-        int expected = v92_su_expected_class(phase, polarity);
-
-        if (observed == expected)
-            g_v92_su_rx.run[h]++;
-        else
-            g_v92_su_rx.run[h] = 0;
-        if (g_v92_su_rx.run[h] < 24 || polarity == g_v92_su_rx.last_polarity)
-            continue;
-
-        g_v92_su_rx.last_polarity = polarity;
-        if (g_v92_su_rx.transitions == 0) {
-            if (v90_handle_rx_event(g_v90, V90_RX_EVENT_SU))
-                g_v92_su_rx.transitions++;
-        } else if (g_v92_su_rx.transitions == 1) {
-            if (v90_handle_rx_event(g_v90, V90_RX_EVENT_SU_BAR))
-                g_v92_su_rx.transitions++;
-        } else {
-            g_v92_su_final_pending = true;
-            (void)v90_handle_rx_event(g_v90, V90_RX_EVENT_SU_FINAL);
-            g_v92_su_rx.transitions++;
-        }
+    switch (v92_su_put(&g_v92_su_rx, codeword)) {
+    case V92_SU_ACQUIRED:
+        (void)v90_handle_rx_event(g_v90, V90_RX_EVENT_SU);
+        break;
+    case V92_SU_BAR:
+        (void)v90_handle_rx_event(g_v90, V90_RX_EVENT_SU_BAR);
+        break;
+    case V92_SU_TRAINED:
+        (void)v90_handle_rx_event(g_v90, V90_RX_EVENT_TRN_LOCK);
+        break;
+    case V92_SU_FINAL:
+        g_v92_su_final_pending = true;
+        (void)v90_handle_rx_event(g_v90, V90_RX_EVENT_SU_FINAL);
+        break;
+    default:
         break;
     }
 }
@@ -8768,13 +8736,10 @@ static void prepare_v90_phase3_locked(void)
             if (g_v92_active) {
                 v92_p3_rx_init(&g_v92_p3_rx);
                 v92_p3_rx_start(&g_v92_p3_rx, (int)g_g711_rx_octets);
-                /* INFO1a codes MD in units of 35 ms (v34rx.c prints md*35);
-                   at 8000 sym/s that is md*35*8 symbols.  MD = 0 is the
-                   common case and selects the V.92 9.5.1.1.1 short flow --
-                   without this the receiver always took the MD-bearing path
-                   and burned its 8000-sample MD timeout waiting for a second
-                   Ru/uR pair the peer never sends. */
-                v92_p3_rx_set_md_length(&g_v92_p3_rx, (int)info1a.md * 35 * 8);
+                /* V.92 Table 18: PCM-upstream MD units are 276 symbols
+                 * (34.5 ms), unlike V.90/Table 19's 35 ms. Zero skips
+                 * MD and the second Ru/Ru-bar pair (9.5.1.1.1). */
+                v92_p3_rx_set_md_length(&g_v92_p3_rx, (int)info1a.md * 276);
                 g_v92_p3_rx_active = true;
                 g_v92_p3_rx_result_applied = false;
                 g_v92_p3_rx_failure_logged = false;

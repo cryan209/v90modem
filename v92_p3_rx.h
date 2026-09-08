@@ -42,7 +42,7 @@ extern "C" {
 #define V92_P3_RX_RU_T          384   /* Ru burst length */
 #define V92_P3_RX_UR_T           24   /* uR burst length */
 #define V92_P3_RX_TRN1U_MIN_T  2040   /* TRN1u minimum before Ja */
-#define V92_P3_RX_MD_MAX_T     8000   /* max MD gap between uR1 and Ru2 (1 s) */
+#define V92_P3_RX_MD_MAX_T     8000   /* Ru2 acquisition allowance AFTER signalled MD */
 
 /* Extra codewords buffered before calling v92_ja_dil_search. */
 #define V92_P3_RX_JA_LEAD_T     200   /* give Ja 200 T to appear after TRN1u */

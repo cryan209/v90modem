@@ -2814,6 +2814,32 @@ done:
     return ok;
 }
 
+/* Physical roles for the V.92 startup tests: the analogue modem emits
+ * linear PCM; only this simulated network A/D compands it. The digital
+ * receiver consumes the resulting DS0 unchanged (V.92 3.1/3.2). */
+static int v92_test_analogue_bits(v92_trn2u_tx_t *tx, const uint8_t *bits,
+                                int nbits, uint8_t *wire, int capacity)
+{
+    int16_t samples[4096];
+    if (capacity > 4096)
+        capacity = 4096;
+    int count = v92_trn2u_tx_bits_linear(tx, bits, nbits, samples, capacity);
+    for (int i = 0; i < count; i++)
+        wire[i] = tx->alaw ? linear_to_alaw(samples[i]) : linear_to_ulaw(samples[i]);
+    return count;
+}
+
+static int v92_test_analogue_ones(v92_trn2u_tx_t *tx, uint8_t *wire, int count)
+{
+    for (int i = 0; i < count; i++) {
+        int16_t sample;
+        if (v92_trn2u_tx_ones_linear(tx, &sample, 1) != 1)
+            return 0;
+        wire[i] = tx->alaw ? linear_to_alaw(sample) : linear_to_ulaw(sample);
+    }
+    return count;
+}
+
 static bool test_v92_suvd_codec_and_phase4(void)
 {
     static const uint16_t expected_crc[2][2] = {
@@ -3146,13 +3172,13 @@ static bool test_v92_native_cpu_receiver(void)
         v92_trn2u_tx_init(&p3_tx, 2, 8000.0, false);
         v92_trn2u_tx_start(&p3_tx, 0);
         v92_trn2u_demod_init(&p3_demod, 2, 8000.0, false, &p3_rx);
-        nsymbols = v92_trn2u_tx_ones(&p3_tx, codewords, 96);
+        nsymbols = v92_test_analogue_ones(&p3_tx, codewords, 96);
         if (nsymbols != 96
             || v92_trn2u_demod_feed(&p3_demod, codewords, nsymbols) != 0) {
             fprintf(stderr, "V.92 two-point TRN1u seed failed\n");
             return false;
         }
-        nsymbols = v92_trn2u_tx_bits(&p3_tx, bits, nbits,
+        nsymbols = v92_test_analogue_bits(&p3_tx, bits, nbits,
                                       codewords, (int)sizeof(codewords));
         if (nsymbols != nbits
             || v92_trn2u_demod_feed(&p3_demod, codewords, nsymbols) != 1
@@ -3900,7 +3926,7 @@ static bool test_v92_trn2u_loopback(void)
             v92_trn2u_tx_start(&utx, 1);
             v92_trn2u_demod_init(&udemod, points, 8000.0, alaw != 0, &rx);
 
-            nsym = v92_trn2u_tx_ones(&utx, codewords, 48);
+            nsym = v92_test_analogue_ones(&utx, codewords, 48);
             v92_trn2u_demod_feed(&udemod, codewords, nsym);
             if (udemod.longest_descrambled_one_run < 48) {
                 fprintf(stderr,
@@ -3913,7 +3939,7 @@ static bool test_v92_trn2u_loopback(void)
             if (!v92_suvu_encode(&suvu, points, frame_bits,
                                  (int)sizeof(frame_bits), &nbits))
                 return false;
-            nsym = v92_trn2u_tx_bits(&utx, frame_bits, nbits,
+            nsym = v92_test_analogue_bits(&utx, frame_bits, nbits,
                                      codewords, (int)sizeof(codewords));
             if (nsym <= 0
                 || v92_trn2u_demod_feed(&udemod, codewords, nsym) != 1
@@ -3930,7 +3956,7 @@ static bool test_v92_trn2u_loopback(void)
             if (!v92_cp_encode(&cpu, points, frame_bits,
                                (int)sizeof(frame_bits), &nbits))
                 return false;
-            nsym = v92_trn2u_tx_bits(&utx, frame_bits, nbits,
+            nsym = v92_test_analogue_bits(&utx, frame_bits, nbits,
                                      codewords, (int)sizeof(codewords));
             if (nsym <= 0
                 || v92_trn2u_demod_feed(&udemod, codewords, nsym) != 1
@@ -3944,12 +3970,12 @@ static bool test_v92_trn2u_loopback(void)
                 return false;
             }
 
-            nsym = v92_trn2u_tx_ones(&utx, codewords, 24);
+            nsym = v92_test_analogue_ones(&utx, codewords, 24);
             v92_trn2u_demod_feed(&udemod, codewords, nsym);
             if (!v92_cpus_encode(&cpus, points, frame_bits,
                                  (int)sizeof(frame_bits), &nbits))
                 return false;
-            nsym = v92_trn2u_tx_bits(&utx, frame_bits, nbits,
+            nsym = v92_test_analogue_bits(&utx, frame_bits, nbits,
                                      codewords, (int)sizeof(codewords));
             if (nsym <= 0
                 || v92_trn2u_demod_feed(&udemod, codewords, nsym) != 1
@@ -4050,7 +4076,7 @@ static bool v92_test_upstream_send(v92_trn2u_tx_t *utx,
     static uint8_t codewords[4096];
     int nsym;
 
-    nsym = v92_trn2u_tx_bits(utx, bits, nbits,
+    nsym = v92_test_analogue_bits(utx, bits, nbits,
                              codewords, (int)sizeof(codewords));
     if (nsym <= 0)
         return false;
@@ -4093,7 +4119,7 @@ static bool test_v92_native_cpu_phase4(v91_law_t law)
     v92_trn2u_demod_init(&udemod, 4, 8000.0, alaw, &rx);
 
     /* TRN2u seeds the upstream differential decoder and descrambler. */
-    v92_trn2u_tx_ones(&utx, seed_cw, (int)sizeof(seed_cw));
+    v92_test_analogue_ones(&utx, seed_cw, (int)sizeof(seed_cw));
     v92_trn2u_demod_feed(&udemod, seed_cw, (int)sizeof(seed_cw));
 
     v90_start_phase3(tx, 66);
