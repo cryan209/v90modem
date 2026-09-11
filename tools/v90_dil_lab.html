@@ -1142,6 +1142,26 @@ function presetDefaultJa() {
   return d;
 }
 
+/* ITU-T V.91 Table 5: the default DIL is a full 125-level ladder.
+ * Its fields fit the V.90 Table 12 editor's generic DIL representation,
+ * although V.91 sends the DIL directly rather than inside a Ja frame. */
+function presetV91DefaultDil() {
+  var d = newDescriptor();
+  var pos = 0;
+  d.n = 125; d.lsp = 12; d.ltp = 12;
+  for (var i = 0; i < 12; i++) {
+    d.sp[i] = (0x0FC0 >> i) & 1;
+    d.tp[i] = (0x0FFF >> i) & 1;
+  }
+  for (i = 0; i < 8; i++) { d.h[i] = 1; d.ref[i] = 0; }
+  for (i = 0; i < 62; i++) {
+    d.train[pos++] = 124 - i;
+    d.train[pos++] = i;
+  }
+  d.train[pos] = 62;
+  return d;
+}
+
 function presetMeasurement() {
   var d = newDescriptor();
   d.n = 120;
@@ -1219,6 +1239,8 @@ function presetFromHex(hex, bitLen) {
 var PRESETS = [
   { id: 'default-ja', name: 'Default Ja — 125 segments × 12T', build: presetDefaultJa,
     note: 'The clean-line profile this tree has always sent. REFc = (chord<<4)|1, 8 offsets across all 8 chords.' },
+  { id: 'v91-default', name: 'V.91 default DIL — Table 5, 125 segments × 12T', build: presetV91DefaultDil,
+    note: 'ITU-T V.91 Table 5: SP 0x0FC0, TP 0x0FFF, H1…H8 = 1, REF1…REF8 = 0, and the 124, 0, 123, 1 … 62 ladder.' },
   { id: 'measurement', name: 'Measurement — 120 × 66T', build: presetMeasurement,
     note: 'Built for measuring: the whole ladder, REFc = 0, LTP 11 so training reaches every interval.' },
   { id: 'courier-real', name: 'Courier V.Everything — recovered from its Ja', build: function () { return presetFromHex(COURIER_JA_HEX, 2058); },
@@ -1589,9 +1611,10 @@ global.V90DIL = {
 'use strict';
 var V = window.V90DIL;
 var $ = function (id) { return document.getElementById(id); };
+var initialPresetIndex = V.PRESETS.findIndex(function (p) { return p.id === 'measurement'; });
 
 var state = {
-  desc: V.PRESETS[1].build(),
+  desc: V.PRESETS[initialPresetIndex].build(),
   law: 0, pad: 0, rbs: 0, noise: 0, cov: 100, seed: 1,
   sigmas: 3, margin: 0, dbm0: 0, sr: 0
 };
@@ -2555,8 +2578,8 @@ function init() {
     o.textContent = p.name;
     sel.appendChild(o);
   });
-  sel.value = '1';
-  $('presetNote').textContent = V.PRESETS[1].note;
+  sel.value = String(initialPresetIndex);
+  $('presetNote').textContent = V.PRESETS[initialPresetIndex].note;
 
   var slots = $('rbs');
   for (var i = 0; i < 6; i++) {
