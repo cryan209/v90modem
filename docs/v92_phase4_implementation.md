@@ -176,6 +176,20 @@ slips or a fractionally-spaced timing loop.  Longer Viterbi traceback and the
 
 ## Remaining native runtime work
 
+The live 2-point CPt and 4-point TRN2u/CPu receivers now use the same basic
+adaptive front end that was previously available only to the replay tool:
+fractional linear interpolation, a five-tap decision-directed equalizer, and
+a low-pass Mueller-and-Muller timing loop.  The low-pass is essential at one
+sample per symbol; applying the data-dependent instantaneous timing error
+directly walks even a synchronous loopback away from its eye.  The raw DS0
+decoder remains available for wire-format diagnostics, and 8-point Phase 4
+continues to use it until that adaptive profile has its own validation.
+
+This removes the server/replay mismatch but is not foreign-modem proof.  The
+next hardware call must establish that strict CPu CRCs are recovered and tune
+the loop from measured phase/error traces before the same timing state is
+carried into B1u.
+
 - add sample-clock-slip detection/fractionally-spaced timing recovery ahead
   of B1u, then validate adaptive-equalizer/PTY delivery against a foreign peer;
 - extend the initial frame-local 16-state Viterbi path to continuous traceback

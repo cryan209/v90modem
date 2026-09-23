@@ -4858,9 +4858,14 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
     ++s->tx.tone_duration;
     /* Same rule as the end-of-L2 gate above: while the peer is still holding
        Tone A (guard/carrier positive) it is not ready for INFO1d, so keep
-       waiting.  The timeout below is the backstop, so a peer that never moves
-       to the INFO configuration behaves exactly as before this check. */
-    if (s->rx.guard_carrier_valid
+       waiting.  Only use the ratio while carrier is actually present.  The
+       estimator retains its last completed block after signal-down; treating
+       that stale positive value as current Tone A made us wait the full 650 ms
+       after a CX93001 had gone silent to await INFO1d.  V.90 9.2.1.1.7 requires
+       INFO1d after Tone A has been detected and the local echo of L2 received;
+       post-Tone-A silence is therefore readiness, not continued Tone A. */
+    if (s->rx.signal_present
+        &&  s->rx.guard_carrier_valid
         &&  s->rx.guard_carrier_db > -2.5f
         &&  s->tx.tone_duration < timeout_bauds)
     {
@@ -4878,8 +4883,7 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
     /*endif*/
     if (s->rx.received_event == V34_EVENT_TONE_SEEN
         || s->rx.received_event == V34_EVENT_REVERSAL_1
-        || (s->rx.signal_present && s->tx.tone_duration >= 30)
-        || s->tx.tone_duration >= timeout_bauds)
+        || s->tx.tone_duration >= 30)
     {
         if (s->tx.tone_duration < 30
             && (s->rx.received_event == V34_EVENT_TONE_SEEN

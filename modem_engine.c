@@ -8107,6 +8107,7 @@ static void v92_start_phase3_cpt_rx_locked(void)
                          g_v92_trn2u_lu,
                          g_law == ME_LAW_ALAW,
                          &g_v92_p3_cpt_rx);
+    v92_trn2u_demod_enable_adaptive(&g_v92_p3_cpt_demod, 0.002, 0.01);
     g_v92_p3_cpt_active = true;
     ME_LOG("[ME] V.92 Phase 3: armed 2-point TRN1u/CPt receiver after Jp'\n");
     trace_phase("V92 Phase3 CPt receiver armed (2-point TRN1u)");
@@ -8844,6 +8845,9 @@ static void prepare_v90_phase3_locked(void)
                                      g_v92_trn2u_lu,
                                      g_law == ME_LAW_ALAW,
                                      &g_v92_cp_rx);
+                if (g_v92_trn2u_points == 4)
+                    v92_trn2u_demod_enable_adaptive(&g_v92_trn2u_demod,
+                                                     0.002, 0.01);
                 g_v92_trn2u_active = true;
                 ME_LOG("[ME] V.92 native Phase 4 RX enabled: %d-point TRN2u, L_U=%.0f\n",
                        g_v92_trn2u_points, g_v92_trn2u_lu);
@@ -10262,13 +10266,15 @@ void me_rx_g711(const uint8_t *codewords, int count)
             v92_su_rx_feed_locked(codewords[i], first_sample + (uint64_t)i);
     }
     if (g_v92_p3_cpt_active && g_v92_active && g_state == ME_TRAINING) {
-        (void)v92_trn2u_demod_feed(&g_v92_p3_cpt_demod, codewords, count);
+        (void)v92_trn2u_demod_feed_adaptive(&g_v92_p3_cpt_demod,
+                                             codewords, count);
     }
     if (g_v92_trn2u_active && g_v92_active && g_v90
         && g_state == ME_TRAINING
         && v90_get_tx_phase(g_v90) >= V90_TX_TRN2D
         && v90_get_tx_phase(g_v90) < V90_TX_DATA) {
-        (void)v92_trn2u_demod_feed(&g_v92_trn2u_demod, codewords, count);
+        (void)v92_trn2u_demod_feed_adaptive(&g_v92_trn2u_demod,
+                                             codewords, count);
     }
     if (g_v92_upstream_rx_active && g_v92_active
         && (g_state == ME_TRAINING || g_state == ME_DATA)) {

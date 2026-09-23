@@ -55,6 +55,22 @@ typedef struct {
     int bit_permutation[3];    /* diagnostic wire hypothesis; default 0,1,2 */
     int sign_mode;             /* v92_trn2u_sign_mode_t */
     int descrambler_mode;      /* v92_trn2u_descrambler_mode_t */
+    /* Optional live analogue front end.  The upstream PAM clock is recovered
+     * from the downstream clock (V.92 §6.2), but the network A/D may expose
+     * a fractional phase and slow residual drift. */
+    bool adaptive_enabled;
+    bool adaptive_have_previous;
+    double adaptive_previous;
+    double adaptive_phase;
+    double adaptive_timing_mu;
+    double adaptive_eq_mu;
+    double adaptive_eq_taps[5];
+    double adaptive_eq_history[5];
+    double adaptive_previous_value;
+    double adaptive_previous_decision;
+    double adaptive_timing_error;
+    bool adaptive_previous_valid;
+    uint32_t adaptive_symbols;
 } v92_trn2u_demod_t;
 
 typedef enum {
@@ -141,6 +157,16 @@ bool v92_trn2u_demod_set_hypothesis(
 int v92_trn2u_demod_feed(v92_trn2u_demod_t *demod,
                          const uint8_t *codewords,
                          int count);
+
+/* Enable the fractionally timed, decision-directed front end used for a
+ * foreign analogue modem.  Raw feed remains the default for a synchronous
+ * DS0 source and for wire-format diagnostics. */
+void v92_trn2u_demod_enable_adaptive(v92_trn2u_demod_t *demod,
+                                     double timing_mu,
+                                     double equalizer_mu);
+int v92_trn2u_demod_feed_adaptive(v92_trn2u_demod_t *demod,
+                                  const uint8_t *codewords,
+                                  int count);
 
 #ifdef __cplusplus
 }

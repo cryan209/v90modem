@@ -238,6 +238,9 @@ void v92_trn2u_demod_init(v92_trn2u_demod_t *demod,
     demod->bit_permutation[0] = 0;
     demod->bit_permutation[1] = 1;
     demod->bit_permutation[2] = 2;
+    demod->adaptive_timing_mu = 0.002;
+    demod->adaptive_eq_mu = 0.01;
+    demod->adaptive_eq_taps[0] = 1.0;
 }
 
 bool v92_trn2u_demod_set_hypothesis(
@@ -310,20 +313,18 @@ static int v92_trn2u_slice_label(const v92_trn2u_demod_t *demod,
     return label;
 }
 
-int v92_trn2u_demod_feed(v92_trn2u_demod_t *demod,
-                         const uint8_t *codewords,
-                         int count)
+static int v92_trn2u_demod_linear(v92_trn2u_demod_t *demod,
+                                  double linear)
 {
     int bps;
     int accepted = 0;
 
-    if (!demod || !codewords || count <= 0)
+    if (!demod)
         return 0;
     bps = v92_trn2u_bits_per_symbol(demod->constellation_points);
     if (bps == 0)
         return 0;
-    for (int s = 0; s < count; s++) {
-        int16_t linear = v92_trn2u_decode_linear(demod->alaw, codewords[s]);
+    {
         int sign = (linear < 0) ? 1 : 0;
         int label = v92_trn2u_slice_label(demod,
                                           linear < 0 ? -(double)linear
@@ -337,7 +338,7 @@ int v92_trn2u_demod_feed(v92_trn2u_demod_t *demod,
                 || demod->sign_mode == V92_TRN2U_SIGN_DIFFERENTIAL_INVERTED)) {
             demod->prev_sign = sign;
             demod->prev_sign_valid = true;
-            continue;
+            return 0;
         }
         if (demod->sign_mode == V92_TRN2U_SIGN_ABSOLUTE
             || demod->sign_mode == V92_TRN2U_SIGN_ABSOLUTE_INVERTED) {
@@ -357,6 +358,132 @@ int v92_trn2u_demod_feed(v92_trn2u_demod_t *demod,
         for (int i = 0; i < bps; i++)
             v92_trn2u_put_recovered_bit(
                 demod, recovered[demod->bit_permutation[i]], &accepted);
+    }
+    return accepted;
+}
+
+int v92_trn2u_demod_feed(v92_trn2u_demod_t *demod,
+                         const uint8_t *codewords,
+                         int count)
+{
+    int accepted = 0;
+
+    if (!demod || !codewords || count <= 0)
+        return 0;
+    for (int s = 0; s < count; s++)
+        accepted += v92_trn2u_demod_linear(
+            demod, v92_trn2u_decode_linear(demod->alaw, codewords[s]));
+    demod->frames_accepted += (uint32_t)accepted;
+    return accepted;
+}
+
+void v92_trn2u_demod_enable_adaptive(v92_trn2u_demod_t *demod,
+                                     double timing_mu,
+                                     double equalizer_mu)
+{
+    if (!demod)
+        return;
+    demod->adaptive_enabled = true;
+    if (timing_mu > 0.0 && timing_mu <= 0.25)
+        demod->adaptive_timing_mu = timing_mu;
+    if (equalizer_mu > 0.0 && equalizer_mu <= 0.25)
+        demod->adaptive_eq_mu = equalizer_mu;
+}
+
+static double v92_trn2u_decision(const v92_trn2u_demod_t *demod,
+                                 double value)
+{
+    int labels = demod->constellation_points/2;
+    double scale = demod->constellation_points == 2 ? 1.0
+                 : sqrt(demod->constellation_points == 4 ? 5.0 : 21.0);
+    double best = demod->lu/scale;
+    double best_error = HUGE_VAL;
+
+    for (int label = 0; label < labels; label++) {
+        double level = (double)(2*label + 1)*demod->lu/scale;
+        double error = fabs(fabs(value) - level);
+
+        if (error < best_error) {
+            best_error = error;
+            best = level;
+        }
+    }
+    return value < 0.0 ? -best : best;
+}
+
+int v92_trn2u_demod_feed_adaptive(v92_trn2u_demod_t *demod,
+                                  const uint8_t *codewords,
+                                  int count)
+{
+    int accepted = 0;
+
+    if (!demod || !codewords || count <= 0)
+        return 0;
+    if (!demod->adaptive_enabled)
+        return v92_trn2u_demod_feed(demod, codewords, count);
+    for (int n = 0; n < count; n++) {
+        double current = v92_trn2u_decode_linear(demod->alaw, codewords[n]);
+
+        if (!demod->adaptive_have_previous) {
+            demod->adaptive_previous = current;
+            demod->adaptive_have_previous = true;
+            continue;
+        }
+        while (demod->adaptive_phase < 1.0) {
+            double value = demod->adaptive_previous
+                         + demod->adaptive_phase
+                         *(current - demod->adaptive_previous);
+            double y = 0.0;
+            double energy = 1.0;
+            double decision;
+            double error;
+            double timing_adjust = 0.0;
+
+            memmove(&demod->adaptive_eq_history[1],
+                    &demod->adaptive_eq_history[0],
+                    4*sizeof(demod->adaptive_eq_history[0]));
+            demod->adaptive_eq_history[0] = value;
+            for (int k = 0; k < 5; k++) {
+                y += demod->adaptive_eq_taps[k]
+                   * demod->adaptive_eq_history[k];
+                energy += demod->adaptive_eq_history[k]
+                        * demod->adaptive_eq_history[k];
+            }
+            decision = v92_trn2u_decision(demod, y);
+            error = decision - y;
+            for (int k = 0; k < 5; k++)
+                demod->adaptive_eq_taps[k] += demod->adaptive_eq_mu*error
+                    *demod->adaptive_eq_history[k]/energy;
+
+            /* Decision-directed Mueller-and-Muller timing error.  V.92
+             * §6.2 makes one symbol per nominal DS0 sample; interpolation
+             * changes the observation instant, never the bearer accounting. */
+            if (demod->adaptive_previous_valid && demod->lu > 0.0) {
+                double timing_error =
+                    (demod->adaptive_previous_decision*y
+                     - decision*demod->adaptive_previous_value)
+                    /(demod->lu*demod->lu + 1.0);
+
+                if (timing_error > 1.0) timing_error = 1.0;
+                if (timing_error < -1.0) timing_error = -1.0;
+                /* At one sample/symbol the instantaneous M&M value has
+                 * substantial data-dependent jitter.  Only its slow mean is
+                 * clock error; applying every symbol directly walks an ideal
+                 * synchronous signal away from its eye. */
+                demod->adaptive_timing_error =
+                    0.99*demod->adaptive_timing_error + 0.01*timing_error;
+                timing_adjust = demod->adaptive_timing_mu
+                              * demod->adaptive_timing_error;
+            }
+            demod->adaptive_previous_value = y;
+            demod->adaptive_previous_decision = decision;
+            demod->adaptive_previous_valid = true;
+            accepted += v92_trn2u_demod_linear(demod, y);
+            demod->adaptive_symbols++;
+            demod->adaptive_phase += 1.0 + timing_adjust;
+        }
+        demod->adaptive_phase -= 1.0;
+        demod->adaptive_previous = current;
     }
     demod->frames_accepted += (uint32_t)accepted;
     return accepted;

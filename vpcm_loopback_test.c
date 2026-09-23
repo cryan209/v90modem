@@ -3977,10 +3977,16 @@ static bool test_v92_trn2u_loopback(void)
             /* TRN2u resets GPA but carries the final E1u differential sign. */
             v92_trn2u_tx_start(&utx, 1);
             v92_trn2u_demod_init(&udemod, points, 8000.0, alaw != 0, &rx);
+            if (points == 4)
+                v92_trn2u_demod_enable_adaptive(&udemod, 0.002, 0.01);
 
-            nsym = v92_test_analogue_ones(&utx, codewords, 48);
-            v92_trn2u_demod_feed(&udemod, codewords, nsym);
-            if (udemod.longest_descrambled_one_run < 48) {
+            /* The live adaptive path is armed for the long TRN2u interval,
+             * not immediately before its first control frame. */
+            nsym = v92_test_analogue_ones(&utx, codewords, 2048);
+            (void)(points == 4
+                ? v92_trn2u_demod_feed_adaptive(&udemod, codewords, nsym)
+                : v92_trn2u_demod_feed(&udemod, codewords, nsym));
+            if (udemod.longest_descrambled_one_run < 1024) {
                 fprintf(stderr,
                         "V.92 TRN2u failed to lock to scrambled ones (alaw=%d points=%d run=%u)\n",
                         alaw, points,
@@ -3994,7 +4000,7 @@ static bool test_v92_trn2u_loopback(void)
             nsym = v92_test_analogue_bits(&utx, frame_bits, nbits,
                                      codewords, (int)sizeof(codewords));
             if (nsym <= 0
-                || v92_trn2u_demod_feed(&udemod, codewords, nsym) != 1
+                || v92_trn2u_demod_feed_adaptive(&udemod, codewords, nsym) != 1
                 || capture.suvu_count != 1
                 || !capture.last_suvu.wait_for_cpu
                 || capture.last_suvu.prefilter_level_q2_2 != 7) {
@@ -4011,7 +4017,7 @@ static bool test_v92_trn2u_loopback(void)
             nsym = v92_test_analogue_bits(&utx, frame_bits, nbits,
                                      codewords, (int)sizeof(codewords));
             if (nsym <= 0
-                || v92_trn2u_demod_feed(&udemod, codewords, nsym) != 1
+                || v92_trn2u_demod_feed_adaptive(&udemod, codewords, nsym) != 1
                 || capture.cp_count != 1
                 || capture.last_kind != V92_P4U_KIND_CPU
                 || capture.last_cp.drn != cpu.drn
@@ -4023,14 +4029,14 @@ static bool test_v92_trn2u_loopback(void)
             }
 
             nsym = v92_test_analogue_ones(&utx, codewords, 24);
-            v92_trn2u_demod_feed(&udemod, codewords, nsym);
+            v92_trn2u_demod_feed_adaptive(&udemod, codewords, nsym);
             if (!v92_cpus_encode(&cpus, points, frame_bits,
                                  (int)sizeof(frame_bits), &nbits))
                 return false;
             nsym = v92_test_analogue_bits(&utx, frame_bits, nbits,
                                      codewords, (int)sizeof(codewords));
             if (nsym <= 0
-                || v92_trn2u_demod_feed(&udemod, codewords, nsym) != 1
+                || v92_trn2u_demod_feed_adaptive(&udemod, codewords, nsym) != 1
                 || capture.cpus_count != 1
                 || capture.last_cpus.drn != 3
                 || rx.rejected_frames != 0) {
