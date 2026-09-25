@@ -8716,6 +8716,25 @@ static complex_sig_t get_external_baud(v34_state_t *s)
     float re;
     float im;
 
+    if (s->tx.v90_data_armed
+        &&
+        s->tx.external_done_func
+        &&
+        s->tx.external_done_func(s->tx.external_symbol_user_data))
+    {
+        s->tx.v90_data_armed = false;
+        if (v34_v90_begin_tx_data(s,
+                                  s->tx.v90_data_n,
+                                  s->tx.v90_data_trellis,
+                                  s->tx.v90_data_nonlinear,
+                                  s->tx.v90_data_expanded,
+                                  s->tx.v90_data_precoder) == 0)
+        {
+            return get_data_baud(s);
+        }
+        /*endif*/
+    }
+    /*endif*/
     re = 0.0f;
     im = 0.0f;
     if (s->tx.external_symbol_func)
@@ -8724,6 +8743,32 @@ static complex_sig_t get_external_baud(v34_state_t *s)
     /* The caller works in constellation steps; nominal symbol RMS belongs to
        the modulator, exactly as it does for the built-in training signals. */
     return complex_sig_set(TRAINING_SCALE(re*TRAINING_AMP), TRAINING_SCALE(im*TRAINING_AMP));
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_v90_arm_tx_data(v34_state_t *s,
+                                      int bit_rate_n,
+                                      int trellis_size,
+                                      int use_non_linear_encoder,
+                                      int expanded_shaping,
+                                      const int16_t precoder_coeffs[6],
+                                      bool (*done_fn)(void *user_data))
+{
+    if (s == NULL  ||  done_fn == NULL  ||  s->tx.current_getbaud != get_external_baud)
+        return -1;
+    /*endif*/
+    s->tx.v90_data_n = bit_rate_n;
+    s->tx.v90_data_trellis = trellis_size;
+    s->tx.v90_data_nonlinear = use_non_linear_encoder;
+    s->tx.v90_data_expanded = expanded_shaping;
+    if (precoder_coeffs)
+        memcpy(s->tx.v90_data_precoder, precoder_coeffs, sizeof(s->tx.v90_data_precoder));
+    else
+        memset(s->tx.v90_data_precoder, 0, sizeof(s->tx.v90_data_precoder));
+    /*endif*/
+    s->tx.external_done_func = done_fn;
+    s->tx.v90_data_armed = true;
+    return 0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -8784,6 +8829,7 @@ SPAN_DECLARE(int) v34_v90_resume_external_symbols(v34_state_t *s,
     s->tx.current_getbaud = get_external_baud;
     s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.tx_data_mode = false;
+    s->tx.v90_data_armed = false;
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.90 rate renegotiation: preserving modulator phase for S/S-bar/CP\n");
     return 0;
@@ -8792,6 +8838,7 @@ SPAN_DECLARE(int) v34_v90_resume_external_symbols(v34_state_t *s,
 
 SPAN_DECLARE(void) v34_tx_stop_external_symbols(v34_state_t *s)
 {
+    s->tx.v90_data_armed = false;
     s->tx.external_symbol_func = NULL;
     s->tx.external_symbol_user_data = NULL;
     if (s->tx.current_getbaud == get_external_baud)

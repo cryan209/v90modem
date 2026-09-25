@@ -106,6 +106,9 @@ void v90_analogue_tx_sd_bar_seen(v90_analogue_tx_t *s);   /* §9.3.2.4 */
 void v90_analogue_tx_jd_seen(v90_analogue_tx_t *s);       /* §9.3.2.7 */
 void v90_analogue_tx_jd_prime_seen(v90_analogue_tx_t *s); /* §9.3.2.8 */
 void v90_analogue_tx_dil_enough(v90_analogue_tx_t *s);    /* §9.3.2.10 */
+/* E has gone out: the modulator should take B1 from the next symbol.  The
+ * done callback for v34_v90_arm_tx_data(); user_data is the transmitter. */
+bool v90_analogue_tx_data_due(void *user_data);
 /* Jd's Table 13 bits 47 and 48: 16-point CP, E and SCR in start-up, and in
  * rate renegotiation.  Latched from each valid Jd. */
 void v90_analogue_tx_set_jd_constellations(v90_analogue_tx_t *s,

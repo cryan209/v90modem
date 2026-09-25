@@ -915,6 +915,16 @@ typedef struct
     void (*external_symbol_func)(void *user_data, float *re, float *im);
     /*! \brief A user specified opaque pointer passed to external_symbol_func. */
     void *external_symbol_user_data;
+    /*! \brief V.90 upstream B1/data handover armed by v34_v90_arm_tx_data():
+               taken on the first symbol after external_done_func says the
+               external source has finished, so B1 follows E with no gap. */
+    bool (*external_done_func)(void *user_data);
+    bool v90_data_armed;
+    int v90_data_n;
+    int v90_data_trellis;
+    int v90_data_nonlinear;
+    int v90_data_expanded;
+    int16_t v90_data_precoder[6];
 
     /*! \brief Mapping frame parsed input */
     uint32_t r0;

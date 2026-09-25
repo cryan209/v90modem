@@ -637,6 +637,20 @@ SPAN_DECLARE(int) v34_v90_begin_tx_data(v34_state_t *s,
                                         int expanded_shaping,
                                         const int16_t precoder_coeffs[6]);
 
+/*! Arm v34_v90_begin_tx_data() to run on the symbol after the external
+    symbol source reports, through done_fn, that it has finished.  V.90
+    §9.4.2.5 puts B1 straight after E; a handover at the next v34_tx() call
+    instead filled the rest of that block with silence and shifted every data
+    frame the digital modem received.
+    \return 0 on success, or -1 if no external source is running. */
+SPAN_DECLARE(int) v34_v90_arm_tx_data(v34_state_t *s,
+                                      int bit_rate_n,
+                                      int trellis_size,
+                                      int use_non_linear_encoder,
+                                      int expanded_shaping,
+                                      const int16_t precoder_coeffs[6],
+                                      bool (*done_fn)(void *user_data));
+
 /*! Produce one complete V.34 mapping frame (eight Q9.7 complex symbols). */
 SPAN_DECLARE(int) v34_get_mapping_frame_state(v34_state_t *s,
                                               int16_t bits[16]);

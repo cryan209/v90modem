@@ -266,6 +266,14 @@ static void start_phase4(v90_analogue_phase3_t *s)
         s->phase4_failed = true;
         return;
     }
+    /* §9.4.2.4 has both modems take the highest rate enabled in both, so a
+     * local cap only holds if CP stops advertising the rates above it. */
+    if (s->upstream_max_n >= 2) {
+        uint32_t below = (1U << (s->upstream_max_n - 1)) - 1U;
+
+        s->cpt.upstream_rate_mask &= below;
+        s->cp.upstream_rate_mask &= below;
+    }
     memset(&p4c, 0, sizeof(p4c));
     p4c.law = s->law;
     p4c.u_info = s->u_info;
@@ -368,8 +376,15 @@ int v90_analogue_phase3_tx(v90_analogue_phase3_t *s, int16_t *amp, int max_len)
      * both CP and the digital modem's MP, then hand the existing modulator to
      * V.34's reset-state B1/data mapper.  Keeping this at the next v34_tx()
      * boundary lets the final E symbol finish in the external source first. */
+    /* §9.4.2.5 puts B1 directly after E, so arm the handover while CP' or E
+     * is still going out and let the modulator take it on the exact symbol.
+     * Waiting for this call to see B1_PENDING filled the rest of the block
+     * after E with silence: every data frame MICA received was shifted by
+     * those symbols and decoded as noise, at any rate. */
     if (!s->upstream_data_started
-        && v90_analogue_tx_stage(s->tx) == V90A_TX_B1_PENDING
+        && (v90_analogue_tx_stage(s->tx) == V90A_TX_CP_PRIME
+            || v90_analogue_tx_stage(s->tx) == V90A_TX_E
+            || v90_analogue_tx_stage(s->tx) == V90A_TX_B1_PENDING)
         && s->p4 != NULL) {
         const v90_analogue_mp_t *mp = v90_analogue_phase4_mp(s->p4);
         int n = 0;
@@ -388,10 +403,11 @@ int v90_analogue_phase3_tx(v90_analogue_phase3_t *s, int16_t *amp, int max_len)
                 }
             }
             if (n > 0
-                && v34_v90_begin_tx_data(s->v34, n, mp->trellis,
-                                         mp->nonlinear,
-                                         mp->expanded_shaping,
-                                         &mp->precoder[0][0]) == 0) {
+                && v34_v90_arm_tx_data(s->v34, n, mp->trellis,
+                                       mp->nonlinear,
+                                       mp->expanded_shaping,
+                                       &mp->precoder[0][0],
+                                       v90_analogue_tx_data_due) == 0) {
                 s->upstream_rate_n = n;
                 s->upstream_data_started = true;
             } else {

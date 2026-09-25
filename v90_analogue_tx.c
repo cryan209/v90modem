@@ -704,6 +704,13 @@ void v90_analogue_tx_jd_prime_seen(v90_analogue_tx_t *s)
     }
 }
 
+bool v90_analogue_tx_data_due(void *user_data)
+{
+    const v90_analogue_tx_t *s = user_data;
+
+    return s != NULL  &&  s->stage == V90A_TX_B1_PENDING;
+}
+
 void v90_analogue_tx_set_jd_constellations(v90_analogue_tx_t *s,
                                            bool trn16, bool rr16)
 {
