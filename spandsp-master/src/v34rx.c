@@ -5438,6 +5438,15 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - reversal 2 in tone A\n");
                 s->received_event = V34_EVENT_REVERSAL_2;
                 l1_l2_analysis_init(s);
+                if (s->v90_mode  &&  s->calling_party)
+                {
+                    /* 9.2.1.1.7: INFO1d follows the digital modem's L2 with no
+                       reversal, and L2 may be far shorter than this receiver's
+                       fixed L1/L2 analysis window.  info_rx() keeps framing
+                       during L1/L2, so frame at INFO1d's length from here. */
+                    s->target_bits = 109 - (4 + 8 + 4);
+                    s->bit_count = 0;
+                }
                 break;
             default:
                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - reversal 3 in tone A\n");
@@ -5603,6 +5612,17 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                                 || s->stage == V34_RX_STAGE_L1_L2
                                 || s->stage == V34_RX_STAGE_CC))
                            ||
+                           /* V.90 analogue modem: while the INFO0d we hold is
+                              unacknowledged, keep framing INFO0d in Tone A.
+                              9.2.2.2.1 turns on seeing it *repeated*, and the
+                              INFO0_OK the first one raised would otherwise
+                              switch the search off until the tone arrives. */
+                           (s->v90_mode
+                            && s->calling_party
+                            && s->info0_received
+                            && !s->info0_acknowledgement
+                            && s->stage == V34_RX_STAGE_TONE_A)
+                           ||
                            ((s->stage == V34_RX_STAGE_TONE_A
                              ||
                              s->stage == V34_RX_STAGE_TONE_B)
@@ -5705,7 +5725,21 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                                          || s->stage == V34_RX_STAGE_L1_L2
                                          || s->stage == V34_RX_STAGE_CC
                                          || s->stage == V34_RX_STAGE_INFO1A));
-                switch (s->stage)
+                if (s->v90_mode
+                    &&  s->calling_party
+                    &&  s->stage == V34_RX_STAGE_L1_L2
+                    &&  s->target_bits == (109 - (4 + 8 + 4)))
+                {
+                    /* 9.2.2.1.8: INFO1d, arriving before this receiver's L1/L2
+                       analysis window has closed. */
+                    process_rx_info1c(s, &s->info1c, s->info_buf);
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                             "Rx - V.90 caller: INFO1d received during L1/L2 analysis\n");
+                    s->stage = V34_RX_STAGE_INFO1C;
+                    s->phase2_reversal_count = 3;
+                    s->received_event = V34_EVENT_INFO1_OK;
+                }
+                else switch (s->stage)
                 {
                 case V34_RX_STAGE_TONE_A:
                 case V34_RX_STAGE_TONE_B:
@@ -5769,6 +5803,12 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                                      || s->stage == V34_RX_STAGE_TONE_B
                                      || s->stage == V34_RX_STAGE_INFO0))
                             s->v90_repeated_info0a_pending = true;
+                        else if (s->v90_mode
+                                 && s->calling_party
+                                 && !s->info0_acknowledgement
+                                 && (s->stage == V34_RX_STAGE_TONE_A
+                                     || s->stage == V34_RX_STAGE_INFO0))
+                            s->v90_repeated_info0d_pending = true;
                         s->info0_received = true;
                     }
                     break;
@@ -7313,9 +7353,46 @@ static int l1_l2_analysis(v34_rx_state_t *s, const int16_t amp[], int len)
             {
                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "L1/L2 analysis done\n");
                 s->phase2_l2_count++;
-                s->received_event = V34_EVENT_L2_SEEN;
                 s->current_demodulator = V34_MODULATION_TONES;
-                if (s->calling_party)
+                if (s->calling_party  &&  s->v90_mode
+                    &&  s->received_event == V34_EVENT_INFO1_OK)
+                {
+                    /* INFO1d already arrived inside the window; keep it. */
+                }
+                else
+                {
+                    s->received_event = V34_EVENT_L2_SEEN;
+                }
+                /*endif*/
+                if (s->calling_party  &&  s->v90_mode
+                    &&  s->stage == V34_RX_STAGE_INFO1C)
+                {
+                    /* Already receiving, or received, INFO1d. */
+                }
+                else if (s->calling_party  &&  s->v90_mode)
+                {
+                    /* V.90 9.2.2.1.8: having received L1 and L2 the analogue
+                       modem "shall then transmit Tone A and condition its
+                       receiver to receive INFO1d".  The digital modem sends
+                       INFO1d straight after its L2 (9.2.1.1.7) with no
+                       further Tone B reversal, so waiting for a third
+                       reversal as the V.34 call modem does misses it: against
+                       a Cisco MICA the receiver armed only when Tone B ended,
+                       6.7 s after INFO1d had gone by. */
+                    s->stage = V34_RX_STAGE_INFO1C;
+                    /* Framing started at reversal 2; a frame already in
+                       progress here is INFO1d's own, so keep it. */
+                    if (s->target_bits != 109 - (4 + 8 + 4))
+                    {
+                        s->target_bits = 109 - (4 + 8 + 4);
+                        s->bit_count = 0;
+                    }
+                    /*endif*/
+                    s->phase2_reversal_count = 3;
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                             "Rx - V.90 caller: L1/L2 received, expecting INFO1d (109 bits) (9.2.2.1.8)\n");
+                }
+                else if (s->calling_party)
                 {
                     s->stage = V34_RX_STAGE_TONE_A;
                     /* L2 has been seen, so Phase 2 is demonstrably past the

@@ -174,8 +174,10 @@ int v90_analogue_rx_trn1d_ucode(const v90_analogue_rx_t *s);
 /* Polarity resolved by §8.4.5's known plaintext, for the Phase-4 seam. */
 bool v90_analogue_rx_inverted(const v90_analogue_rx_t *s);
 
-/* Table 13 bit 47: the constellation the digital modem will train with. */
+/* Table 13 bits 47 and 48: whether this modem's CP, E and SCR use the
+ * 16-point constellation during start-up and during rate renegotiation. */
 bool v90_analogue_rx_jd_trn16(const v90_analogue_rx_t *s);
+bool v90_analogue_rx_jd_rr16(const v90_analogue_rx_t *s);
 /* The 72 bits of the last Jd frame that passed structure and CRC. */
 const uint8_t *v90_analogue_rx_jd_bits(const v90_analogue_rx_t *s);
 

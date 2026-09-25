@@ -126,6 +126,7 @@ struct v90_analogue_rx_s {
     int      jd_bit_count;
     bool     jd_valid;
     bool     jd_trn16;
+    bool     jd_rr16;
     int      jd_prime_zeros;
     bool     in_jd_frame;
     int      jd_exit_run;           /* consecutive codewords off the Jd level */
@@ -1026,6 +1027,7 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c, int16_t level)
                 s->jd_frames = 1;
                 s->jd_valid = true;
                 s->jd_trn16 = !s->v92_mode && bits[47] != 0;
+                s->jd_rr16 = !s->v92_mode && bits[48] != 0;
                 s->jd_bit_count = 0;
                 s->in_jd_frame = false;
                 s->jd_prime_zeros = 0;
@@ -1073,6 +1075,7 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c, int16_t level)
                         s->jd_frames++;
                         s->jd_valid = true;
                         s->jd_trn16 = !s->v92_mode && s->jd_bits[47] != 0;
+                        s->jd_rr16 = !s->v92_mode && s->jd_bits[48] != 0;
                         events |= jd_event(s);
                     }
                     /*endif*/
@@ -1220,6 +1223,11 @@ int v90_analogue_rx_trn1d_ucode(const v90_analogue_rx_t *s)
 bool v90_analogue_rx_jd_trn16(const v90_analogue_rx_t *s)
 {
     return s ? s->jd_trn16 : false;
+}
+
+bool v90_analogue_rx_jd_rr16(const v90_analogue_rx_t *s)
+{
+    return s ? s->jd_rr16 : false;
 }
 
 const uint8_t *v90_analogue_rx_jd_bits(const v90_analogue_rx_t *s)

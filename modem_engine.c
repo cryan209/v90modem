@@ -302,9 +302,23 @@ static int me_v90_upstream_cap(int rate)
     return rate;
 }
 
+/* Received G.711 samples since the process started, never reset.  With
+ * ME_MEDIA_CLOCK set, trace_now_ms() runs on this instead of the host's
+ * wall clock, so every phase timer measures elapsed audio: a harness that
+ * feeds the engine faster or slower than real time (an emulated far end,
+ * a replay) then sees exactly the same call however fast it runs.  Live,
+ * the two clocks agree; leave it unset there. */
+static uint64_t g_media_clock_samples = 0;
+
 static uint64_t trace_now_ms(void)
 {
+    static int media_clock = -1;
     struct timeval tv;
+
+    if (media_clock < 0)
+        media_clock = getenv("ME_MEDIA_CLOCK") != NULL;
+    if (media_clock)
+        return 1 + g_media_clock_samples / 8;   /* nonzero: 0 means unset */
     gettimeofday(&tv, NULL);
     return (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)(tv.tv_usec / 1000ULL);
 }
@@ -8725,6 +8739,12 @@ static void me_v90_analogue_phase4_progress_locked(void)
                    mp->type1 ? 1 : 0, mp->max_drn, mp->max_drn*2400,
                    mp->trellis, mp->rate_mask,
                    mp->acknowledge ? "MP' (acknowledged)" : "MP");
+            if (mp->type1)
+                ME_LOG("[ME] V.90 analogue MP precoder: h1 %d%+di, h2 %d%+di, "
+                       "h3 %d%+di (Q14)\n",
+                       mp->precoder[0][0], mp->precoder[0][1],
+                       mp->precoder[1][0], mp->precoder[1][1],
+                       mp->precoder[2][0], mp->precoder[2][1]);
         }
         /*endif*/
     }
@@ -10231,6 +10251,7 @@ void me_rx_g711(const uint8_t *codewords, int count)
     if (!codewords || count <= 0)
         return;
 
+    g_media_clock_samples += (uint64_t) count;
     me_g711_capture_rx(codewords, count);
 
     if (me_fax_rx_g711(codewords, count)) {

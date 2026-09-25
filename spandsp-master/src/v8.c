@@ -1369,7 +1369,13 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
             residual_samples = fsk_rx(&s->v21rx, amp, len);
             if (!s->fsk_tx_on)
             {
-#if 0
+                /* V.8 (11/2000) 8.2.2: "Following CJ, the call DCE shall
+                   transmit no signal for a period of 75 +- 5 ms, transmit
+                   sigC and proceed".  Reporting success the moment CJ ends
+                   put INFO0a about 20 ms after it, inside the answerer's own
+                   8.2.3 silence; a Cisco MICA digital modem is not yet
+                   listening then, never hears INFO0a, and repeats INFO0d
+                   until it gives up. */
                 s->negotiation_timer = milliseconds_to_samples(75);
                 s->state = V8_SIGC;
             }
@@ -1378,7 +1384,6 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
         case V8_SIGC:
             if ((s->negotiation_timer -= len) <= 0)
             {
-#endif
                 /* The V.8 negotiation has succeeded. */
                 span_log(&s->logging, SPAN_LOG_FLOW, "Negotiation succeeded\n");
                 s->state = V8_PARKED;

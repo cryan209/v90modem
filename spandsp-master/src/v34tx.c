@@ -105,6 +105,10 @@
 #define V34_DIAG_GETENV(name)       getenv(name)
 #endif
 
+/* V.90 9.2.2.2.1 gives the analogue modem no limit on repeating INFO0a
+   against repeated INFO0d; this bounds it at the digital side's own cap. */
+#define V90_ANALOGUE_INFO0_RETRY_CAP    16
+
 #include "v22bis_tx_rrc.h"
 
 #include "v34_tx_2400_rrc.h"
@@ -2861,6 +2865,31 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
             answer_resume_probe(s, "INFO0 acknowledgement sent");
         }
         else if (s->tx.stage == V34_TX_STAGE_INFO0_RETRY
+                 &&  s->tx.v90_mode
+                 &&  s->tx.calling_party
+                 &&  s->rx.info0_received)
+        {
+            /* V.90 9.2.2.2.1, analogue side: keep repeating INFO0a until an
+               INFO0d arrives with bit 28 set or the digital modem's tone is
+               heard, then complete this INFO0a and transmit Tone A. */
+            if (s->rx.info0_acknowledgement
+                ||  s->rx.received_event == V34_EVENT_TONE_SEEN
+                ||  ++s->tx.info0_retry_count >= V90_ANALOGUE_INFO0_RETRY_CAP)
+            {
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - INFO0_RETRY: INFO0d ack=%d event=%d retries=%d, switching to Tone A\n",
+                         s->rx.info0_acknowledgement, s->rx.received_event,
+                         s->tx.info0_retry_count);
+                s->rx.v90_repeated_info0d_pending = false;
+                initial_ab_not_ab_baud_init(s);
+            }
+            else
+            {
+                s->rx.v90_repeated_info0d_pending = false;
+                info0_baud_init(s);
+            }
+        }
+        else if (s->tx.stage == V34_TX_STAGE_INFO0_RETRY
                  && s->rx.received_event == V34_EVENT_INFO0_OK)
         {
             /* A valid INFO0c arrived while we were retrying — go straight to Tone A */
@@ -3141,6 +3170,24 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
             s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.tone_duration = 0;
             s->tx.stage = V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN;
+        }
+        else if (s->tx.v90_mode
+                 &&  s->tx.calling_party
+                 &&  s->rx.v90_repeated_info0d_pending)
+        {
+            /* V.90 9.2.2.2.1: "if it receives repeated INFO0d sequences, the
+               analogue modem shall repeatedly send INFO0a", with bit 28 set
+               because this INFO0d was received correctly.  Without this a
+               digital modem that missed the one INFO0a - a Cisco MICA arms its
+               receiver a few tens of ms after the 75 ms V.8 silence - repeats
+               INFO0d with bit 28 clear until it gives up, while we hold
+               Tone A waiting for a tone it will never send. */
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - FIRST_A: repeated INFO0d without acknowledgement, "
+                     "repeating INFO0a with bit 28 set (9.2.2.2.1)\n");
+            s->rx.v90_repeated_info0d_pending = false;
+            s->tx.info0_acknowledgement = true;
+            info0_baud_init(s);
         }
         else if (s->rx.received_event == V34_EVENT_INFO0_BAD
                  ||
@@ -4045,6 +4092,18 @@ static void initial_ab_not_ab_baud_init(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* How many 20 ms periods of L2 follow L1's eight.  V.90 §9.2.2.1.6 has the
+   analogue modem keep sending L2 until it has heard its echo "for a period of
+   time not to exceed 550 ms plus a round-trip delay", and a digital modem
+   analyses that much: MICA, given 400 ms, measured Tone A and silence as
+   probe and answered with a 7200 bit/s ceiling and a 1.9 Hz offset.  27
+   periods is 540 ms.  Other roles keep the 400 ms they have been tuned on. */
+static int l2_cycles(const v34_state_t *s)
+{
+    return (s->tx.v90_mode  &&  s->tx.calling_party)  ?  27  :  20;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
 {
     int sample;
@@ -4072,7 +4131,7 @@ static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                    stage -- see the note in l1_l2_signal_init(). */
                 s->tx.line_probe_scaling *= 0.5f;
             }
-            else if (s->tx.line_probe_cycles == (8 + 20))
+            else if (s->tx.line_probe_cycles == 8 + l2_cycles(s))
             {
                 /* End of line probe sequence */
                 if (s->tx.duplex)
@@ -4195,7 +4254,7 @@ static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                    in l1_l2_signal_init(). */
                 s->tx.line_probe_scaling *= 0.5f;
             }
-            else if (s->tx.line_probe_cycles == (8 + 20))
+            else if (s->tx.line_probe_cycles == 8 + l2_cycles(s))
             {
                 if (s->tx.duplex)
                 {

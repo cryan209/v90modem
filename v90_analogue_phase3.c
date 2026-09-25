@@ -169,8 +169,12 @@ static void apply_events(v90_analogue_phase3_t *s, unsigned events)
 {
     if (events & V90A_RX_EVENT_SD_BAR)
         v90_analogue_tx_sd_bar_seen(s->tx);        /* §9.3.2.4: end Ja */
-    if (events & V90A_RX_EVENT_JD)
+    if (events & V90A_RX_EVENT_JD) {
+        v90_analogue_tx_set_jd_constellations(s->tx,
+                                              v90_analogue_rx_jd_trn16(s->rx),
+                                              v90_analogue_rx_jd_rr16(s->rx));
         v90_analogue_tx_jd_seen(s->tx);            /* §9.3.2.7: start S */
+    }
     if (events & V90A_RX_EVENT_JD_PRIME)
         v90_analogue_tx_jd_prime_seen(s->tx);      /* §9.3.2.8: S̄ for 16T */
     if (events & V90A_RX_EVENT_DIL_ENOUGH)

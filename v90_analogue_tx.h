@@ -106,6 +106,10 @@ void v90_analogue_tx_sd_bar_seen(v90_analogue_tx_t *s);   /* §9.3.2.4 */
 void v90_analogue_tx_jd_seen(v90_analogue_tx_t *s);       /* §9.3.2.7 */
 void v90_analogue_tx_jd_prime_seen(v90_analogue_tx_t *s); /* §9.3.2.8 */
 void v90_analogue_tx_dil_enough(v90_analogue_tx_t *s);    /* §9.3.2.10 */
+/* Jd's Table 13 bits 47 and 48: 16-point CP, E and SCR in start-up, and in
+ * rate renegotiation.  Latched from each valid Jd. */
+void v90_analogue_tx_set_jd_constellations(v90_analogue_tx_t *s,
+                                           bool trn16, bool rr16);
 
 /*
  * Arm Phase 4 (§9.4.2.1) with the two CP sequences the measurement produced:

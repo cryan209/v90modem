@@ -1911,6 +1911,11 @@ typedef struct
     /*! \brief Sticky flag for V.90 answerer recovery when stale INFO0a is seen
                during the INFO1a wait window. */
     bool v90_repeated_info0a_pending;
+    /*! \brief The analogue-side mirror: a V.90 calling modem has decoded
+               INFO0d again, still with bit 28 clear, after its first one.
+               V.90 9.2.2.2.1 makes that the digital modem saying it never
+               received INFO0a. */
+    bool v90_repeated_info0d_pending;
     /*! \brief Set by TX after INFO1d has been sent; tells RX to prioritise
                INFO1a decoding over the INFO0a prefix check. */
     bool v90_info1d_sent;

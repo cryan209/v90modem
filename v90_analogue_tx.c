@@ -38,6 +38,25 @@ static const float training_constellation_4[4][2] =
 };
 
 /*
+ * §10.1.3.9/V.34's 16-point mapping, indexed [2*Q2 + Q1][Z]: Figure 5's points
+ * 0 to 3 -- (1,1), (-3,1), (1,-3), (-3,-3) -- rotated clockwise by Z*90°, with
+ * the same 180° offset as the 4-point table so that row 0 is that table.
+ * §10.1.3/V.34 sends every Phase 3 and 4 signal at the one power level, so the
+ * grid is scaled by 1/sqrt(10) to the 4-point constellation's unit power.
+ */
+#define P1  0.3162278f
+#define P3  0.9486833f
+static const float training_constellation_16[4][4][2] =
+{
+    {{-P1, -P1}, {-P1,  P1}, { P1,  P1}, { P1, -P1}},
+    {{ P3, -P1}, {-P1, -P3}, {-P3,  P1}, { P1,  P3}},
+    {{-P1,  P3}, { P3,  P1}, { P1, -P3}, {-P3, -P1}},
+    {{ P3,  P3}, { P3, -P3}, {-P3, -P3}, {-P3,  P3}}
+};
+#undef P1
+#undef P3
+
+/*
  * PP, §10.1.3.6/V.34 equation 10-1: six periods of this 48-symbol sequence.
  * Data, not hand-editable code — these are the same values SpanDSP generates
  * from the equation in make_v34_probe_signals.c.
@@ -119,8 +138,8 @@ static const int baud_rates[6] = {2400, 2743, 2800, 3000, 3200, 3429};
  * echo canceller to converge, but emits a short conditioning interval so the
  * requested silence transaction remains observable and interoperable. */
 #define RR_EC_SCR_MS            100
-/* §8.5.3 -> §10.1.3.2/V.34: E is 20 bits, and this mapping is 2 bits/symbol. */
-#define E_SYMBOLS               10
+/* §8.5.3 -> §10.1.3.2/V.34: E is 20 bits. */
+#define E_BITS                  20
 
 struct v90_analogue_tx_s {
     v90_analogue_tx_config_t cfg;
@@ -145,6 +164,12 @@ struct v90_analogue_tx_s {
     int      ja_bit_pos;
 
     bool     dil_zero_length;
+
+    /* Table 13 bits 47 and 48 of Jd: CP, E and SCR use the 16-point
+     * constellation during start-up, and during rate renegotiation. */
+    bool     trn16;
+    bool     rr16;
+    bool     rr_active;
 
     /*
      * §9.4.2.  One bit per byte here, unlike Ja's packed descriptor, because
@@ -204,6 +229,40 @@ static void diff_encoded_symbol(v90_analogue_tx_t *s, int b0, int b1,
     *im = training_constellation_4[s->diff][1];
 }
 
+/*
+ * One symbol of CP, E or SCR (§8.3.5, §8.5.2, §8.5.3): two bits through
+ * diff_encoded_symbol()'s 4-point mapping, or with Jd asking for 16 points,
+ * four -- I1 I2 Q1 Q2 in time -- through §10.1.3.9/V.34's.  Returns how many
+ * of the bits it took.
+ */
+static int training_symbol(v90_analogue_tx_t *s, const int bits[4],
+                           float *re, float *im)
+{
+    int in;
+    int q;
+
+    if (!(s->rr_active ? s->rr16 : s->trn16)) {
+        diff_encoded_symbol(s, bits[0], bits[1], re, im);
+        return 2;
+    }
+    in = scramble_bit(s, bits[0]);
+    in |= scramble_bit(s, bits[1]) << 1;
+    q = scramble_bit(s, bits[2]);
+    q |= scramble_bit(s, bits[3]) << 1;
+    s->diff = (s->diff + in) & 3;
+    *re = training_constellation_16[q][s->diff][0];
+    *im = training_constellation_16[q][s->diff][1];
+    return 4;
+}
+
+/* SCR, and E: binary ones. */
+static int ones_symbol(v90_analogue_tx_t *s, float *re, float *im)
+{
+    static const int ones[4] = {1, 1, 1, 1};
+
+    return training_symbol(s, ones, re, im);
+}
+
 /* The next Ja bit, wrapping to repeat the descriptor (§8.3.1). */
 static int ja_bit(v90_analogue_tx_t *s)
 {
@@ -249,19 +308,20 @@ static v90_analogue_tx_stage_t cp_symbol(v90_analogue_tx_t *s,
 {
     const uint8_t *bits;
     int len;
-    int b0;
-    int b1;
+    int in[4];
+    int taken;
+    int pos;
 
     bits = cp_stream(s, &len);
     if (bits == NULL  ||  len <= 0)
         return s->stage;
-    b0 = bits[s->cp_bit_pos++] & 1;
-    if (s->cp_bit_pos >= len)
-        s->cp_bit_pos = 0;
-    b1 = bits[s->cp_bit_pos++] & 1;
-    if (s->cp_bit_pos >= len)
-        s->cp_bit_pos = 0;
-    diff_encoded_symbol(s, b0, b1, re, im);
+    /* Table 14 makes every CP 292 bits plus a multiple of 136, so a symbol
+     * never straddles two sequences at either constellation size. */
+    pos = s->cp_bit_pos;
+    for (int i = 0; i < 4; i++)
+        in[i] = bits[(pos + i)%len] & 1;
+    taken = training_symbol(s, in, re, im);
+    s->cp_bit_pos = (pos + taken)%len;
     if (s->cp_bit_pos != 0)
         return s->stage;
     /*endif*/
@@ -503,7 +563,7 @@ void v90_analogue_tx_get_symbol(void *user_data, float *re, float *im)
         if (s->cfg.scr_during_dil) {
             /* §8.3.5: binary ones, and explicitly *without* reinitialising
              * the scrambler or the differential encoder. */
-            diff_encoded_symbol(s, 1, 1, re, im);
+            ones_symbol(s, re, im);
         }
         return;
 
@@ -550,17 +610,16 @@ void v90_analogue_tx_get_symbol(void *user_data, float *re, float *im)
     case V90A_TX_SCR4:
         /* §9.4.2.2: SCR for no more than 4000 ms.  §8.3.5 again — ones
          * through the same mapping, nothing reinitialised. */
-        diff_encoded_symbol(s, 1, 1, re, im);
+        ones_symbol(s, re, im);
         if (s->stage_symbols >= ms_to_symbols(s, SCR_PHASE4_MAX_MS))
             enter_stage(s, V90A_TX_CP);
         /*endif*/
         return;
 
     case V90A_TX_E:
-        /* §8.5.3 -> §10.1.3.2/V.34: twenty binary ones, through J's mapping.
-         * Two bits per symbol, so ten symbols. */
-        diff_encoded_symbol(s, 1, 1, re, im);
-        if (s->stage_symbols >= E_SYMBOLS)
+        /* §8.5.3 -> §10.1.3.2/V.34: twenty binary ones, through CP's
+         * mapping -- ten 4-point symbols, or five 16-point ones. */
+        if (s->stage_symbols*ones_symbol(s, re, im) >= E_BITS)
             enter_stage(s, V90A_TX_B1_PENDING);
         /*endif*/
         return;
@@ -599,7 +658,7 @@ void v90_analogue_tx_get_symbol(void *user_data, float *re, float *im)
 
     case V90A_TX_RR_EC_SCR:
         /* §9.6.2.1.6: recondition for no more than 1000 ms after Ed. */
-        diff_encoded_symbol(s, 1, 1, re, im);
+        ones_symbol(s, re, im);
         if (s->stage_symbols >= ms_to_symbols(s, RR_EC_SCR_MS)) {
             s->cp_bit_pos = 0;
             enter_stage(s, V90A_TX_RR_CP);
@@ -645,6 +704,15 @@ void v90_analogue_tx_jd_prime_seen(v90_analogue_tx_t *s)
     }
 }
 
+void v90_analogue_tx_set_jd_constellations(v90_analogue_tx_t *s,
+                                           bool trn16, bool rr16)
+{
+    if (s == NULL)
+        return;
+    s->trn16 = trn16;
+    s->rr16 = rr16;
+}
+
 void v90_analogue_tx_dil_enough(v90_analogue_tx_t *s)
 {
     if (s  &&  s->stage == V90A_TX_DIL_RX)
@@ -682,13 +750,15 @@ bool v90_analogue_tx_start_phase4(v90_analogue_tx_t *s,
         || !vpcm_cp_encode_bits(&silence_prime, s->cps_prime_bits,
                                 &s->cps_prime_len))
         return false;
-    /* Two bits go out per symbol, so an odd length would put the sequence
-     * boundary mid-symbol and "complete the current sequence" would have no
-     * meaning.  Table 14's fill bits make it even; check rather than assume. */
-    if ((s->cpt_len & 1)  ||  (s->cp_len & 1)  ||  (s->cp_prime_len & 1)
-        || (s->cps_len & 1) || (s->cps_prime_len & 1))
+    /* Two or four bits go out per symbol, so a length that is not a multiple
+     * of four could put a sequence boundary mid-symbol and "complete the
+     * current sequence" would have no meaning.  Table 14 makes it one; check
+     * rather than assume. */
+    if ((s->cpt_len & 3)  ||  (s->cp_len & 3)  ||  (s->cp_prime_len & 3)
+        || (s->cps_len & 3) || (s->cps_prime_len & 3))
         return false;
     s->scr_after_r = scr_after_r;
+    s->rr_active = false;
     s->phase4_armed = true;
     return true;
 }
@@ -714,9 +784,26 @@ void v90_analogue_tx_mp_seen(v90_analogue_tx_t *s)
 
 void v90_analogue_tx_mp_prime_seen(v90_analogue_tx_t *s)
 {
-    if (s  &&  (s->stage == V90A_TX_CP_PRIME
-                || s->stage == V90A_TX_RR_CPS_PRIME))
+    if (s == NULL)
+        return;
+    /*
+     * MP' or Ed can arrive while our CP' is still pending: a digital modem
+     * that moves on quickly sends one MP, then MP' and Ed inside a single
+     * receive block, and the old rule -- latch only once CP' has started --
+     * dropped the Ed, so E never went out and the far end sat waiting for B1.
+     * Ed and MP' both follow an MP, so they stand for it too.  The current CP
+     * and then one whole CP' still go out before E (§9.4.2.4).
+     */
+    if (s->stage == V90A_TX_SCR4)
+        enter_stage(s, V90A_TX_CP);
+    if (s->stage == V90A_TX_CP || s->stage == V90A_TX_RR_CP
+        || s->stage == V90A_TX_RR_CPS) {
+        s->pending_mp = true;
         s->pending_mp_prime = true;
+    } else if (s->stage == V90A_TX_CP_PRIME
+               || s->stage == V90A_TX_RR_CPS_PRIME) {
+        s->pending_mp_prime = true;
+    }
 }
 
 bool v90_analogue_tx_start_rate_renegotiation(v90_analogue_tx_t *s,
@@ -728,6 +815,7 @@ bool v90_analogue_tx_start_rate_renegotiation(v90_analogue_tx_t *s,
      * scrambler and differential state are retained: §8.5.2 initializes them
      * only before the first startup CPt, not on rate renegotiation. */
     s->s_index = 0;
+    s->rr_active = true;
     s->rr_silence_request = silence_request;
     s->cleardown = false;
     s->pending_mp = false;
@@ -752,10 +840,11 @@ bool v90_analogue_tx_start_cleardown(v90_analogue_tx_t *s)
     clear.acknowledge = false;
     clear.silence_request = false;
     if (!vpcm_cp_encode_bits(&clear, s->cp_bits, &s->cp_len)
-        || (s->cp_len & 1)) {
+        || (s->cp_len & 3)) {
         return false;
     }
     s->s_index = 0;
+    s->rr_active = true;
     s->rr_silence_request = false;
     s->cleardown = true;
     s->pending_mp = false;
