@@ -228,6 +228,7 @@ static const char *v34_tx_stage_to_str(int stage)
     case V34_TX_STAGE_SECOND_B: return "SECOND_B";
     case V34_TX_STAGE_SECOND_B_WAIT: return "SECOND_B_WAIT";
     case V34_TX_STAGE_SECOND_NOT_B: return "SECOND_NOT_B";
+    case V34_TX_STAGE_POST_L2_WAIT_TONE_A: return "POST_L2_WAIT_TONE_A";
     case V34_TX_STAGE_INFO0_RETRY: return "INFO0_RETRY";
     case V34_TX_STAGE_FIRST_S: return "FIRST_S";
     case V34_TX_STAGE_FIRST_NOT_S: return "FIRST_NOT_S";
@@ -693,6 +694,7 @@ static void l1_l2_signal_init(v34_state_t *s);
 static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len);
 static void second_a_baud_init(v34_state_t *s);
 static void post_l2_wait_tone_b_init(v34_state_t *s);
+static void post_l2_wait_tone_a_init(v34_state_t *s);
 static void answer_resume_probe(v34_state_t *s, const char *reason);
 static int post_info0_resume_bauds(void);
 static int answer_info0_retry_policy(void);
@@ -1197,6 +1199,52 @@ static int v34_configured_rate_n(const v34_state_t *s, int baud_idx)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Should INFO1c offer a symbol rate faster than the configured start profile?
+ 
+   10.1.2.3.4/Table 15 makes every INFO1c row a statement about THIS
+   receiver -- "the maximum data rate I can accept at this symbol rate, given
+   what your L1/L2 probe just measured" -- and 11.2.1.2.9 has the answer modem
+   pick the pair it will use out of those rows.  The startup profile is a
+   local preference about what to ask for, not a receive capability, so using
+   it to zero whole rows tells the far end those symbol rates are unusable.
+ 
+   With the default 2400-baud profile that zeroed five of the six rows, and
+   the RasFinder answers such an INFO1c with nothing at all: it holds Tone A
+   until the call dies (artifacts/rf-v34-a1, -b1, both 45 s of Tone A after a
+   CRC-clean INFO1c).  The same call with rows out to 3200 baud gets INFO1a
+   back and runs Phase 3 and Phase 4 (artifacts/rf-v34-c3).
+ 
+   The per-row rate cap in v34_configured_rate_n() is kept, so a configured
+   maximum bit rate still bounds every row.  Scoped to plain V.34: V.90's
+   INFO1d shares this builder and its single-row offer is what the live V.90
+   work is calibrated against.
+
+   DEFAULT OFF, on a measurement: offering every row lets the answer modem
+   select 3429 baud, which this tree does not train (it is the one row the
+   symbol-rate matrix has never carried), and the 2743/9600 u-law duplex row
+   stops training as a result.  The live problem it was written for is fixed
+   instead by the start profile itself -- g_v34_start_baud was 2400 for a
+   reason that no longer holds -- so the gate keeps the rows honest about what
+   we can actually receive.  ME_V34_INFO1C_ALL_RATES=1 enables it. */
+static bool v34_info1c_offer_all_rates(const v34_state_t *s)
+{
+    static int initialized = 0;
+    static int enabled = 0;
+
+    if (!initialized)
+    {
+        const char *env = getenv("ME_V34_INFO1C_ALL_RATES");
+
+        if (env  &&  env[0] != '\0')
+            enabled = (strtol(env, NULL, 10) != 0);
+        /*endif*/
+        initialized = 1;
+    }
+    /*endif*/
+    return enabled  &&  !s->tx.v90_mode  &&  s->tx.duplex;
+}
+/*- End of function --------------------------------------------------------*/
+
 static bool v34_local_tx_carrier_supported(int baud_idx, int high_carrier)
 {
     if (baud_idx == V34_BAUD_RATE_3429 && !v34_capabilities.rate_3429_allowed)
@@ -1239,7 +1287,20 @@ static void prepare_info1c(v34_state_t *s)
         /* V.34 10.1.2.3.4/Table 15: every enabled INFO1c row is the
            receiver's L1/L2 result, not a restatement of the startup profile.
            The same Table-15 fields are reused by V.90 INFO1d. */
-        configured_max = (s->tx.baud_rate >= i) ? v34_configured_rate_n(s, i) : 0;
+        configured_max = (s->tx.baud_rate >= i  ||  v34_info1c_offer_all_rates(s))
+                       ? v34_configured_rate_n(s, i)
+                       : 0;
+        if (configured_max > 0
+            &&
+            !v34_capabilities.support_baud_rate_low_carrier[i]
+            &&
+            !v34_capabilities.support_baud_rate_high_carrier[i])
+        {
+            /* A row this receiver cannot take at either carrier is not an
+               offer, whatever the rate table says. */
+            configured_max = 0;
+        }
+        /*endif*/
         measured_carrier = 0;
         measured_pre_emphasis = 0;
         if (i == V34_BAUD_RATE_3429
@@ -4202,7 +4263,24 @@ static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                         second_a_baud_init(s);
                     }
                     else if (s->tx.calling_party)
-                        info1_baud_init(s);
+                    {
+                        /* Plain V.34 call modem, 11.2.1.1.7: INFO1c goes out
+                           only "after the call modem detects Tone A".  That is
+                           not a formality -- 11.2.1.2.8 has the answer modem
+                           receive this L1/L2 first and raise Tone A only then,
+                           so at the end of our own L2 the peer is still
+                           working through the probe and is not conditioned to
+                           receive INFO1c at all.  Sending it here put INFO1c
+                           on the line ~440 ms before the RasFinder raised Tone
+                           A (artifacts/rf-v34-a1: our L2 ends 11.905 s, its
+                           Tone A starts 12.34 s), after which the peer held
+                           Tone A for the remaining 47 s of the call waiting
+                           for an INFO1c that had already gone by.
+                           Hold silence until Tone A appears.  On timeout this
+                           falls through to the old unconditional behaviour, so
+                           the change can only add the wait. */
+                        post_l2_wait_tone_a_init(s);
+                    }
                     else if (s->tx.v90_mode)
                     {
                         /* V.90 §9.2.1.1.7: Tone A normally arrives while the
@@ -4398,6 +4476,11 @@ static void l1_l2_signal_init(v34_state_t *s)
        any Tone B seen earlier in the call (the 11.2.1.1.1 burst that carried
        INFO0c) is stale by here. */
     s->rx.tone_b_present = false;
+    /* Symmetrically, 11.2.1.1.7's Tone A is the one the answer modem raises
+       *after* this probe (11.2.1.2.8), so any 2400 Hz measurement taken
+       earlier in the call -- the 11.2.1.2.6 Tone A that armed this very stage
+       -- is stale by here and must not satisfy the post-L2 wait. */
+    s->rx.tone_a_bin_frac_valid = 0;
     if (s->tx.duplex  &&  !s->tx.calling_party  &&  !s->tx.v90_mode)
         s->tx.phase2_probe_sent = true;
     /*endif*/
@@ -4873,6 +4956,108 @@ static void answer_resume_probe(v34_state_t *s, const char *reason)
     s->rx.received_event = V34_EVENT_NONE;
     s->rx.tone_b_present = false;
     s->rx.tone_b_ended = false;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* How long the call modem holds silence after L1/L2 waiting for the answer
+   modem's 11.2.1.1.7 Tone A.
+ 
+   11.2.2.1.5's own bound is 650 ms plus a round trip delay measured from the
+   BEGINNING of L2, which at our 160 ms L1 / 400 ms L2 leaves only ~250 ms
+   after the probe ends -- and the RasFinder measures 440 ms from the end of
+   our L2 to the start of its Tone A (artifacts/rf-v34-a1).  The recommended
+   response to that bound expiring is a retrain, which against a peer that is
+   about to raise Tone A anyway is strictly worse than waiting, so the default
+   is deliberately generous and the expiry falls through to the pre-existing
+   "send INFO1c regardless" path rather than to 11.5.1.1. */
+static int post_l2_tone_a_wait_bauds(v34_state_t *s)
+{
+    static int initialized = 0;
+    static long ms = 1500;
+    int rtd_bauds;
+
+    if (!initialized)
+    {
+        const char *env = getenv("ME_V34_POST_L2_TONE_A_WAIT_MS");
+
+        if (env  &&  env[0] != '\0')
+        {
+            char *end = NULL;
+            long parsed = strtol(env, &end, 10);
+
+            if (end != env  &&  end  &&  *end == '\0'  &&  parsed >= 0)
+                ms = parsed;
+            /*endif*/
+        }
+        /*endif*/
+        initialized = 1;
+    }
+    /*endif*/
+    rtd_bauds = (s->rx.round_trip_delay_estimate > 0)
+                ? (s->rx.round_trip_delay_estimate*600 + 4000)/8000
+                : 0;
+    /* This getbaud runs at the 600 baud control channel rate. */
+    return (int) ((600*ms + 500)/1000) + rtd_bauds;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Is the peer holding Tone A right now?
+ 
+   Not an event flag: v34tx.c clears rx.received_event in dozens of places, and
+   by this point in the call the receiver has already consumed the 11.2.1.2.6
+   Tone A and advanced to V34_RX_STAGE_INFO1A, so its stage machine is no
+   longer running the Tone A detector at all.  The 2400 Hz bin fraction is a
+   measurement rather than a state: it is computed unconditionally per 40 ms
+   block, it is only published when the block carries real energy (so silence
+   reads invalid rather than false), and l1_l2_signal_init() invalidates it so
+   a pre-probe reading cannot satisfy this wait.  Tone A is a 2400 Hz line
+   under a 1800 Hz guard tone, so its share of the block is large; our own L2
+   echo and ordinary line noise are broadband and are not. */
+static bool post_l2_tone_a_seen(v34_state_t *s)
+{
+    return s->rx.signal_present
+        &&  s->rx.tone_a_bin_frac_valid
+        &&  s->rx.tone_a_bin_frac >= 0.15f;
+}
+/*- End of function --------------------------------------------------------*/
+
+static complex_sig_t get_post_l2_wait_tone_a_baud(v34_state_t *s)
+{
+    if (s->tx.stage == V34_TX_STAGE_POST_L2_WAIT_TONE_A)
+    {
+        bool seen = post_l2_tone_a_seen(s);
+
+        if (seen  ||  ++s->tx.tone_duration >= post_l2_tone_a_wait_bauds(s))
+        {
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - Tone A %s after %d bauds of post-L2 silence "
+                     "(bin=%.2f valid=%d signal=%d); sending INFO1c (11.2.1.1.7)\n",
+                     seen ? "detected" : "timeout",
+                     s->tx.tone_duration,
+                     s->rx.tone_a_bin_frac,
+                     s->rx.tone_a_bin_frac_valid,
+                     s->rx.signal_present);
+            s->tx.tone_duration = 0;
+            info1_baud_init(s);
+            return s->tx.current_getbaud(s);
+        }
+        /*endif*/
+    }
+    /*endif*/
+    return zero;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void post_l2_wait_tone_a_init(v34_state_t *s)
+{
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - post_l2_wait_tone_a_init()\n");
+    s->tx.tone_duration = 0;
+    /* Silence, but through the control-channel modulator so the baud rate
+       (and so the timeout accounting) matches every other Phase 2 stage. */
+    s->tx.current_modulator = V34_MODULATION_CC;
+    s->tx.lastbit = complex_sig_set(TRAINING_SCALE(0.0f), TRAINING_SCALE(0.0f));
+    s->tx.stage = V34_TX_STAGE_POST_L2_WAIT_TONE_A;
+    s->tx.current_getbaud = get_post_l2_wait_tone_a_baud;
 }
 /*- End of function --------------------------------------------------------*/
 

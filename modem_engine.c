@@ -125,6 +125,7 @@ enum v34_tx_stages_e {
     V34_TX_STAGE_SECOND_B,
     V34_TX_STAGE_SECOND_B_WAIT,
     V34_TX_STAGE_SECOND_NOT_B,
+    V34_TX_STAGE_POST_L2_WAIT_TONE_A,
     V34_TX_STAGE_INFO0_RETRY,
     V34_TX_STAGE_FIRST_S,
     V34_TX_STAGE_FIRST_NOT_S,
@@ -498,6 +499,7 @@ static const char *v34_tx_stage_name(int stage)
     case V34_TX_STAGE_SECOND_B_WAIT:               return "SECOND_B_WAIT";
     case V34_TX_STAGE_SECOND_NOT_B:                return "SECOND_NOT_B";
     case V34_TX_STAGE_INFO0_RETRY:                 return "INFO0_RETRY";
+    case V34_TX_STAGE_POST_L2_WAIT_TONE_A:         return "POST_L2_WAIT_TONE_A";
     case V34_TX_STAGE_FIRST_S:                     return "FIRST_S";
     case V34_TX_STAGE_FIRST_NOT_S:                 return "FIRST_NOT_S";
     case V34_TX_STAGE_MD:                          return "MD";
@@ -2025,7 +2027,20 @@ static bool me_v90a_load_dil(v90_dil_desc_t *desc)
     }
     return true;
 }
-static int        g_v34_start_baud = 2400;   /* 3200 has 91 Hz separation (notch unusable); 2400 has 200 Hz */
+/* V.34 start symbol rate.  This was 2400 because the receive-band notch at
+   our own transmit carrier needed 150 Hz of carrier separation and 3200 gives
+   only 91 -- a constraint that stopped existing on 2026-08-22, when the notch
+   was measured to be the thing capping the live rate (17.2 dB with it,
+   34.8 without) and v34_update_echo_policy() learned to drop it whenever the
+   transmit carrier falls inside the receive band, which at 3200 baud it does.
+   The stale default was not merely slow: 10.1.2.3.4's INFO1c rows are gated
+   on it, so a 2400-baud profile declared 2743..3429 unusable, and the
+   RasFinder answers that offer with nothing at all -- it holds Tone A until
+   the call dies (artifacts/rf-v34-a1, -b1).  At 3200 the same peer returns
+   INFO1a and the call runs Phase 3 and Phase 4 (artifacts/rf-v34-c3).
+   3200 rather than 3429 because 3429 is the one row the symbol-rate matrix
+   has never trained.  ME_V34_BAUD overrides. */
+static int        g_v34_start_baud = 3200;
 static int        g_v34_start_bps  = 0;     /* 0 = auto (max for baud rate) */
 static int        g_training_tx_samples = 0; /* Sample counter for TX silencing echo test */
 

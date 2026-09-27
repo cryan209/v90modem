@@ -631,6 +631,12 @@ enum v34_tx_stages_e
     V34_TX_STAGE_SECOND_B,
     V34_TX_STAGE_SECOND_B_WAIT,
     V34_TX_STAGE_SECOND_NOT_B,
+    /*! Call modem, V.34 11.2.1.1.7: silence held after L1/L2 until the answer
+        modem's Tone A appears.  11.2.1.2.8 has the answer modem raise Tone A
+        only *after* it has received this probe, so INFO1c sent off the end of
+        our own L2 always lands before the peer is conditioned to receive it.
+        The mirror image of V34_TX_STAGE_POST_L2_WAIT_TONE_B above. */
+    V34_TX_STAGE_POST_L2_WAIT_TONE_A,
     /*! \brief INFO0 is being resent on a bad startup */
     V34_TX_STAGE_INFO0_RETRY,
 
