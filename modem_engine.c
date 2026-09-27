@@ -3171,6 +3171,9 @@ static int me_v90_reneg_enabled(void)
 #define ME_V90_LOSS_RETRAIN_DWELL_MS_DEFAULT 20000
 
 static unsigned g_loss_retrains = 0;
+/* How far this call has backed off the receive rate it asks for in MP.  See
+   v34_rx_rate_backoff_locked(). */
+static int      g_v34_rx_rate_backoff_n = 0;
 static int64_t  g_last_loss_retrain_ms = 0;
 
 static int me_v90_max_loss_retrains(void)
@@ -3206,6 +3209,64 @@ static int me_loss_retrain_dwell_ms(void)
 /* True when a retrain for a receiver that has stopped decoding is both
  * allowed and due -- V.90 §9.5.1.1 or plain V.34 §11.5.1.1/§11.5.2.1.
  * The caller passes its own cap because the two are different; see above. */
+/* Ask the far end for a slower transmission before trying to recover.
+ *
+ * v34_data_carrier_lost() fires when the receiver has stopped decoding, and
+ * both recoveries it leads to -- 11.6's rate renegotiation and 11.5's retrain
+ * -- rebuild Phase 4 from the same MP offer that produced the failure.  On a
+ * line that simply will not carry the rate, that can only reproduce it: live
+ * against the RasFinder (artifacts/rf-v34-d2) we asked for 31200 bit/s at
+ * 3200 baud, measured 0.619 from the grid (2/3 is white), renegotiated, were
+ * given 31200 again and went white again, twice, inside 4.5 s.
+ *
+ * 11.6 exists to change the rate, so change it: step our own receive
+ * direction down by one 2400 bit/s N each time, from whatever the last MP
+ * exchange actually settled rather than from the start profile.  The other
+ * direction is left exactly as negotiated -- nothing here has measured it,
+ * and the peer's own MP is a better judge of what it can receive.
+ *
+ * This is a fallback, not rate selection: choosing the first rate from a
+ * measured receive SNR is still the open item in docs/v34_data_mode_rates.md.
+ * The floor is 4800 bit/s (N=2) and retrain_on_loss_due()'s per-call cap
+ * bounds the number of steps, so a hopeless line ends up left alone rather
+ * than walked to the bottom of the ladder. */
+static void v34_rx_rate_backoff_locked(void)
+{
+    int a_to_c;
+    int c_to_a;
+    int *ours;
+    int want;
+
+    if (!g_v34  ||  parse_env_int("ME_V34_RX_RATE_BACKOFF", 1) == 0)
+        return;
+    if (v34_get_negotiated_mp_rates(g_v34, &a_to_c, &c_to_a) != 0)
+        return;
+    /* "A to C" is answerer-to-caller, so the field that describes what the
+       far end sends US is the one named for our own role. */
+    ours = g_calling_party ? &a_to_c : &c_to_a;
+    /* Two N per attempt, not one.  The lattice spacing is always 2, so at a
+       fixed line SNR the distance to the grid scales with the square root of
+       the constellation power, and one 2400 bit/s step at 3200 baud is only
+       0.75 of a bit per symbol -- about 4.5 dB of required SNR, against a
+       failure that is already at 0.619 where 0.667 is white.  Two steps is
+       1.5 bits per symbol, so four attempts walk 31200 -> 26400 -> 21600 ->
+       16800 -> 12000 and span the plausible range of a real line instead of
+       creeping down one rung per 20 s dwell. */
+    want = *ours - parse_env_int("ME_V34_RX_RATE_BACKOFF_STEP", 2);
+    if (want < 2)
+        want = 2;
+    if (want == *ours)
+        return;
+    ME_LOG("[ME] V.34 receive rate back-off %d: asking for %d bps instead of "
+           "%d bps (other direction left at %d bps)\n",
+           g_v34_rx_rate_backoff_n + 1, want*2400, *ours*2400,
+           (ours == &a_to_c ? c_to_a : a_to_c)*2400);
+    *ours = want;
+    g_v34_rx_rate_backoff_n++;
+    v34_set_mp_rate_policy(g_v34, a_to_c, c_to_a);
+}
+/*- End of function --------------------------------------------------------*/
+
 static bool retrain_on_loss_due(int cap)
 {
     int64_t now;
@@ -4172,6 +4233,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v90_phase2_restarts = 0;
     /* Per call, not per process: this server runs many calls in one. */
     g_loss_retrains = 0;
+    g_v34_rx_rate_backoff_n = 0;
     g_last_loss_retrain_ms = 0;
     g_retrain_from_data = false;
     g_v34_reneg_start_ms = 0;
@@ -7933,6 +7995,7 @@ skip_8k_codewords:
                         v34_clear_data_carrier_lost(g_v34);
                         g_loss_retrains++;
                         g_last_loss_retrain_ms = trace_now_ms();
+                        v34_rx_rate_backoff_locked();
                         if (me_v34_reneg_enabled()
                             && v34_start_rate_renegotiation(g_v34) == 0) {
                             ME_LOG("[ME] V.34 data mode has stopped decoding; "

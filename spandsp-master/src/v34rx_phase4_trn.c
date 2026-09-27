@@ -175,6 +175,65 @@ static void phase4_trn_recent_update(v34_rx_state_t *s, int raw_sym)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Is the Phase 4 TRN ones-score a lock, or an artefact of a constant rotation?
+ 
+   10.1.3.8's TRN is scrambled ones, so the dibits that carry it are
+   pseudo-random and all four must appear.  A receiver whose carrier loop has
+   not acquired sees the same dibit every symbol -- a constant phase advance --
+   and one of the 24 hypotheses turns that constant into a constant, i.e. into
+   a perfect "ones" score.  Measured against the RasFinder, the two outcomes
+   are separated by the histogram and NOT by the score: the call that reached
+   data mode read 57% ones over dibits 997/1217/1037/1212, and the call that
+   never validated an MP frame read 88% over 442/3440/437/144
+   (artifacts/rf-v34-d2 and -c3).  So the score alone is the wrong instrument,
+   and it gates PHASE4_TRN_READY_MIN_SCORE.
+ 
+   ME_V34_TRN_DIBIT_SPREAD=0 disables the check and keeps the log line. */
+static bool phase4_trn_dibits_are_spread(v34_rx_state_t *s)
+{
+    int total;
+    int most;
+    int i;
+
+    total = 0;
+    most = 0;
+    for (i = 0;  i < 4;  i++)
+    {
+        total += s->phase4_trn_dibit_hist[i];
+        if (s->phase4_trn_dibit_hist[i] > most)
+            most = s->phase4_trn_dibit_hist[i];
+        /*endif*/
+    }
+    /*endfor*/
+    /* Not enough of a window to say anything yet. */
+    if (total < 256)
+        return true;
+    /*endif*/
+    /* A quarter each is the expectation; half is already a long way out, and
+       the failing case sits at three quarters. */
+    return most*2 <= total;
+}
+/*- End of function --------------------------------------------------------*/
+
+static bool phase4_trn_dibit_spread_required(void)
+{
+    static int initialized = 0;
+    static int enabled = 1;
+
+    if (!initialized)
+    {
+        const char *env = getenv("ME_V34_TRN_DIBIT_SPREAD");
+
+        if (env  &&  env[0] != '\0')
+            enabled = (strtol(env, NULL, 10) != 0);
+        /*endif*/
+        initialized = 1;
+    }
+    /*endif*/
+    return enabled != 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int phase4_trn_tap_value(int tap_idx)
 {
     static const int taps[2] = {17, 4};
@@ -451,6 +510,12 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                          eq_e, eq_main,
                                          s->eq_put_step,
                                          s->total_baud_timing_correction);
+                if (s->phase4_trn_after_j <= PHASE4_TRN_SCORE_START_BAUD)
+                    memset(s->phase4_trn_dibit_hist, 0,
+                           sizeof(s->phase4_trn_dibit_hist));
+                else
+                    s->phase4_trn_dibit_hist[data_bits & 3]++;
+                /*endif*/
                 if (p4_bits_path == NULL)
                     p4_bits_path = getenv("V34_P4TRN_RX_DUMP")
                                  ?  getenv("V34_P4TRN_RX_DUMP")  :  "";
@@ -653,12 +718,14 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                         best_abs_score = s->phase4_trn_one_count_tap[1][dt][do2][dh];
                                 }
                         span_log(s->logging, SPAN_LOG_FLOW,
-                                 "Rx - Phase 4 TRN: best hyp=%d dom=%s tap=%d ord=%s ones=%d/%d (%d%%, recent=%d%%) [diff_best=%d%% abs_best=%d%%]\n",
+                                 "Rx - Phase 4 TRN: best hyp=%d dom=%s tap=%d ord=%s ones=%d/%d (%d%%, recent=%d%%) [diff_best=%d%% abs_best=%d%%] dibits=%d/%d/%d/%d\n",
                                  best_h, v34_rx_phase4_trn_domain_name(best_domain),
                                  phase4_trn_tap_value(best_tap), v34_rx_phase4_trn_order_name(best_order),
                                  best_score, bits_observed, score_pct, s->phase4_trn_recent_score,
                                  (100*best_diff_score + (bits_observed/2))/bits_observed,
-                                 (100*best_abs_score + (bits_observed/2))/bits_observed);
+                                 (100*best_abs_score + (bits_observed/2))/bits_observed,
+                                 s->phase4_trn_dibit_hist[0], s->phase4_trn_dibit_hist[1],
+                                 s->phase4_trn_dibit_hist[2], s->phase4_trn_dibit_hist[3]);
                     }
                     /*endif*/
                 }
@@ -674,7 +741,9 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
            before scanning for MP. */
         if (s->phase4_j_seen
             && s->phase4_trn_after_j >= PHASE4_TRN_READY_MIN_BAUD
-            && s->phase4_trn_lock_score >= PHASE4_TRN_READY_MIN_SCORE)
+            && s->phase4_trn_lock_score >= PHASE4_TRN_READY_MIN_SCORE
+            && (!phase4_trn_dibit_spread_required()
+                || phase4_trn_dibits_are_spread(s)))
         {
             int h;
             int domain_idx;

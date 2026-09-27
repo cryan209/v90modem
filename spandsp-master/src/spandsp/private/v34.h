@@ -2144,6 +2144,14 @@ typedef struct
     uint16_t phase4_trn_recent_window_ones;
     uint16_t phase4_trn_recent_window_fill;
     int phase4_trn_recent_score;
+    /*! \brief Histogram of the differential dibit over the Phase 4 TRN
+        scoring window.  TRN is scrambled ones, so the four dibits must all
+        appear; a histogram concentrated on ONE of them is a constant rotation
+        -- a carrier offset the loop has not removed -- and the descrambler's
+        ones-score is then an artefact of that constant, not a lock.  Measured
+        against the RasFinder: a call whose Phase 4 reported a 100% TRN lock
+        was 97% dibit 1, and no MP frame ever validated. */
+    int phase4_trn_dibit_hist[4];
     uint8_t phase4_trn_recent_symbol_ones[256];
     uint8_t phase4_trn_recent_active;
 

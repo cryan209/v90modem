@@ -561,6 +561,16 @@ SPAN_DECLARE(int) v34_get_tx_data_mode(v34_state_t *s);
     \param bit_rate_c_to_a Maximum caller-to-answerer signalling rate N. */
 SPAN_DECLARE(void) v34_set_mp_rate_policy(v34_state_t *s, int bit_rate_a_to_c, int bit_rate_c_to_a);
 
+/*! Read the signalling rates settled by the last Phase 4 MP exchange, in the
+    V.34 MP N coding (rate = N * 2400 bps).
+    \param s The modem context.
+    \param bit_rate_a_to_c Filled with the answerer-to-caller N.
+    \param bit_rate_c_to_a Filled with the caller-to-answerer N.
+    \return 0 if a negotiated pair is available, -1 otherwise. */
+SPAN_DECLARE(int) v34_get_negotiated_mp_rates(v34_state_t *s,
+                                              int *bit_rate_a_to_c,
+                                              int *bit_rate_c_to_a);
+
 /*! Clear any explicit MP signalling-rate override so Phase 4 falls back to the
     modem's locally-derived defaults.
     \param s The modem context. */

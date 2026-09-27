@@ -9496,6 +9496,23 @@ SPAN_DECLARE(void) v34_set_mp_rate_policy(v34_state_t *s, int bit_rate_a_to_c, i
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v34_get_negotiated_mp_rates(v34_state_t *s,
+                                              int *bit_rate_a_to_c,
+                                              int *bit_rate_c_to_a)
+{
+    if (!s  ||  !s->tx.negotiated_rates_valid)
+        return -1;
+    /*endif*/
+    if (bit_rate_a_to_c)
+        *bit_rate_a_to_c = s->tx.negotiated_rate_a_to_c;
+    /*endif*/
+    if (bit_rate_c_to_a)
+        *bit_rate_c_to_a = s->tx.negotiated_rate_c_to_a;
+    /*endif*/
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v34_clear_mp_rate_policy(v34_state_t *s)
 {
     if (!s)
