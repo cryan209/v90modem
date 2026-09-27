@@ -3542,15 +3542,25 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
    reached data mode differs only in that the flat timer happened to expire
    late enough (artifacts/rf-v34-d2).  One live call in five failed this way.
  
-   It is off because the correct timing lands this tree's own loopback on the
-   wrong side of a coin flip.  Swept as a pure timer over the 2800/21600 u-law
-   duplex row -- 100, 104, 108, 112, 116 all pass and 120, 130 fail with one
-   direction white -- and a conformant exchange leaves SECOND_B at 121, our
-   own answerer's 11.2.1.2.6 reversal arriving there because it waits for this
-   very Tone B plus 50 ms.  So the fragility is in Phase 3/4, most likely the
-   T/2 eye-phase ambiguity, and enabling this would trade a measured loopback
-   row for a live improvement that has not yet been A/B'd on the rig.  Do that
-   A/B before flipping the default.  ME_V34_SECOND_B_WAIT_REVERSAL=1. */
+   Alternated live against the RasFinder, one variable: off, three calls, none
+   received INFO1a (artifacts/rf-v34-h1, -j1, -j2); on, two calls, both
+   received INFO1a and ran Phase 3 into Phase 4 (artifacts/rf-v34-k1, -k2).
+   Small n, but the mechanism is measured on the wire rather than inferred.
+
+   What keeps it off is OUR OWN receiver, not the clause.  A conformant
+   exchange leaves SECOND_B at 121 bauds -- our own answerer's 11.2.1.2.6
+   reversal arrives there, because it waits for this very Tone B plus 50 ms --
+   and swept as a pure timer the 2800/21600 u-law duplex row passes at 100,
+   104, 108, 112 and 116 and fails at 120 and 130.  Turning the default on
+   breaks that row AND 3200/21600 A-law (45 bit errors), and the failure is
+   NOT in Phase 2: the two arms make the identical T/2 eye-phase decisions,
+   and what differs is one direction's data mode, 0.668 from the grid against
+   0.087.  That is a 21600 acquisition coin flip sensitive to a 30 ms shift in
+   when Phase 2 ends, i.e. a pre-existing fragility this exposes rather than
+   causes -- docs/v34_data_mode_rates.md already has 21600 as the densest case
+   here.  Fix that, then flip this default; pinning row after row to the old
+   timing would be editing the suite to pass.
+   ME_V34_SECOND_B_WAIT_REVERSAL=1. */
 static bool second_b_waits_for_reversal(void)
 {
     static int initialized = 0;

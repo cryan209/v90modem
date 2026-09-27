@@ -284,3 +284,127 @@ before the mapper.  `DS_RX_BIT_DUMP` and `ME_DATA_HOLD=1` cover the V.42 layer.
   died in the Phase 2 INFO0 recovery livelock already documented above.
 * 76 of 300 lines were delivered before the hold expired; throughput and
   sustained stability are unmeasured.
+
+## The RasFinder, dialling out as the V.34 call modem (2026-09-28)
+
+A second peer, and the first to exercise the call-modem Phase 2 path against
+something other than the SmartLink DSP.  `ATD8416` from a second server
+instance; `tools/soak/rasfinder_call.sh` places one call with taps and a log,
+so an A/B is the same command twice.  **Leave 60-90 s between calls** -- a
+close redial comes back `V8 result: status=Call negotiation failed`.
+
+**The peer answered nothing at all, for two reasons, and both were ours.**
+
+**1. 11.2.1.1.7's INFO1c was sent off the end of our own L2.**  The clause
+sends it "after the call modem detects Tone A and has received the local echo
+of L2", and that ordering is not a formality: 11.2.1.2.8 has the answer modem
+receive this L1/L2 *first* and raise Tone A only then.  Measured on the two
+taps, our L2 ended at 11.905 s and the RasFinder's Tone A began at 12.34 s, so
+INFO1c went out 435 ms before the peer was conditioned to receive it -- after
+which it held Tone A for the remaining 47 s of the call
+(`artifacts/rf-v34-a1`).  New `V34_TX_STAGE_POST_L2_WAIT_TONE_A` holds silence
+until Tone A appears, bounded by `ME_V34_POST_L2_TONE_A_WAIT_MS` and falling
+through to the old behaviour on expiry.  **The evidence has to be the 2400 Hz
+bin fraction, not an event flag**: by this point the receiver has consumed the
+11.2.1.2.6 Tone A and advanced to `V34_RX_STAGE_INFO1A`, so its Tone A
+detector is no longer running at all; `l1_l2_signal_init()` invalidates the
+measurement so a pre-probe reading cannot satisfy the wait.  This is the exact
+mirror of `V34_TX_STAGE_POST_L2_WAIT_TONE_B`, which the answer modem already
+needed for the same reason.
+
+**2. INFO1c declared every symbol rate but one unusable, and the default was
+a leftover.**  10.1.2.3.4's rows were gated on the configured start symbol
+rate, and `g_v34_start_baud` was 2400 because the receive-band notch at our
+own transmit carrier needed 150 Hz of carrier separation and 3200 gives 91 --
+a constraint that stopped existing on 2026-08-22 (see
+`docs/v34_data_mode_rates.md`), when the notch was measured to be the thing
+capping the live rate and `v34_update_echo_policy()` learned to drop it
+whenever the transmit carrier falls inside the receive band, which at 3200
+baud it does.  So a default call offered the answer modem one row and five
+zeros, and this peer answers that with nothing (`artifacts/rf-v34-b1`: a
+CRC-clean INFO1c, then 45 s of Tone A).  Default is now 3200 -- not 3429,
+which is the one row the symbol-rate matrix has never trained.  With it the
+same peer returns INFO1a and the call runs S, S-bar, PP, TRN, J, Phase 4 and
+**data mode at 31200 bit/s** (`artifacts/rf-v34-d2`).
+`ME_V34_INFO1C_ALL_RATES=1` offers every row independently of the profile,
+which is the more faithful reading of 10.1.2.3.4, and is default off because
+it lets the answerer select 3429 and costs the 2743/9600 u-law duplex row its
+training.
+
+**3. The Phase 4 TRN ones-lock can be an artefact, and it is anti-correlated
+with success.**  10.1.3.8's TRN is scrambled ones, so its dibits are
+pseudo-random and all four must appear.  A receiver whose carrier loop has not
+acquired sees the SAME dibit every symbol, and one of the 24 hypotheses turns
+that constant into a constant -- a near-perfect "ones" score on a signal that
+is not TRN at all.  The two outcomes are separated by the histogram and not by
+the score: the call that reached data mode read **57% ones over dibits
+997/1217/1037/1212**, and the call that never validated an MP frame read
+**88% over 442/3440/437/144** (`artifacts/rf-v34-d2` and `-c3`).  The failing
+one is 77% on one dibit, a residual carrier of 571 Hz -- which is 2400 minus
+the 3200-baud low carrier to three figures.  That score gates
+`PHASE4_TRN_READY_MIN_SCORE`, so a diverged receiver walked into the MP search.
+The histogram is now on the `Phase 4 TRN: best` line and the MP gate requires
+no single dibit above half the window (`ME_V34_TRN_DIBIT_SPREAD=0` restores
+the old gate and keeps the log).
+
+**4. A recovery that re-asks for the rate that just failed can only reproduce
+it.**  Live at 31200 the data mode measured 0.619 from the grid where 2/3 is
+white; the 11.6 renegotiation rebuilt Phase 4 from the same MP offer, was
+given 31200 again and went white again, inside 4.5 s -- while the peer's own
+MP asked for 21600 in its own direction on the same line.
+`v34_rx_rate_backoff_locked()` now steps our receive direction down two N per
+attempt, from what the last MP exchange settled rather than from the start
+profile, leaving the other direction as negotiated.  Two N because the lattice
+spacing is always 2, so at fixed SNR the distance to the grid scales with the
+square root of the constellation power and one 2400 bit/s step at 3200 baud is
+0.75 of a bit per symbol; four attempts therefore walk 31200 -> 26400 -> 21600
+-> 16800 -> 12000.  `ME_V34_RX_RATE_BACKOFF=0`,
+`ME_V34_RX_RATE_BACKOFF_STEP`.
+
+### The one clause-correct change that is NOT on by default
+
+**11.2.1.1.6's second Tone B reversal is conditional on the Tone A reversal**,
+and the code uses a flat 100 bauds of Tone B instead ("V.34: fixed timing"),
+167 ms that owes nothing to the far end.  Live that fires mid-probe: the
+RasFinder's post-L2 Tone A and reversal land at 10.15-10.25 s and we reversed
+at 10.148 s and put L1/L2 in front of a modem that had not reversed.
+**Alternated live, one variable: off 0 of 3 calls received INFO1a
+(`rf-v34-h1`, `-j1`, `-j2`); on 2 of 2 received it and reached Phase 4
+(`rf-v34-k1`, `-k2`).**
+
+It is off because of our own receiver.  A conformant exchange leaves SECOND_B
+at 121 bauds -- our own answerer's 11.2.1.2.6 reversal arrives there, since it
+waits for this very Tone B plus 50 ms -- and swept as a pure timer the
+2800/21600 u-law duplex row passes at 100, 104, 108, 112 and 116 bauds and
+fails at 120 and 130.  Turning it on breaks that row and 3200/21600 A-law.
+**The failure is not in Phase 2**: both arms make the identical T/2 eye-phase
+decisions, and what differs is one direction's data mode, 0.668 from the grid
+against 0.087.  That is a 21600 acquisition coin flip sensitive to a 30 ms
+shift in when Phase 2 ends -- a pre-existing fragility this exposes rather
+than causes.  Fix that and flip the default; pinning row after row to the old
+timing would be editing the suite to pass.
+`ME_V34_SECOND_B_WAIT_REVERSAL=1`.
+
+### Still open against this peer
+
+* **Phase 2 is intermittent** and the item above is the measured reason.
+* **Phase 4 MP is intermittent** even when Phase 2 completes: `rf-v34-d2`
+  decoded a CRC-valid MP1 and reached data mode; `-c3`, `-f2` and `-g1`
+  produced CRC failures with the sync and start bits right and the body wrong,
+  i.e. noisy bits rather than a wrong interpretation.
+* **31200 is white on this line** and the first rate we ask for is still the
+  start profile's maximum.  Choosing it from a measured receive SNR remains
+  the open item in `docs/v34_data_mode_rates.md`; the back-off above is a
+  fallback, not a selection.
+* **A retrain taken from Phase 4 deadlocks in `FIRST_B_SILENCE`.**  Seen on
+  `rf-v34-g1`, `-k1` and `-k2`: the restarted Phase 2 walks
+  V90_RETRAIN_SILENCE -> V90_PHASE2_B_INFO0_SEEN -> FIRST_NOT_B_WAIT ->
+  FIRST_NOT_B -> FIRST_B_SILENCE and stays there for the rest of the call
+  while the receiver goes on to reach INFO1A.  That stage waits on
+  `V34_EVENT_REVERSAL_1`, and after a retrain the reversal ordinal has already
+  moved past it -- `phase2_reversal_count` is the durable authority the V.90
+  branch beside it already uses.
+* **`ME_DATA_FRAMING=lapm` tears the call down** ~4.5 s into a white data
+  mode, because V.42 detection concludes "unsupported peer" over bits that are
+  not being decoded.  The default V.14 framing does not, which is why the
+  back-off experiments run without it.
