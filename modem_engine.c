@@ -3649,6 +3649,24 @@ static void v90_live_cp_bit(void *user_data, int bit)
      * framer's counters say whether a frame was found; this says what the
      * stream looked like, which is what separates "the peer sent SCR and
      * nothing else" from "CP was there and we demodulated it wrongly". */
+    /* V90_CP_BIT_DUMP: the same for the startup Phase 4 CP stream, from the
+     * first CPt onwards -- the framer's "all structural" verdict says only
+     * that no boundary was plausible. */
+    {
+        static FILE *cp_dump = NULL;
+        static int cp_dump_checked = 0;
+
+        if (!cp_dump_checked) {
+            const char *path = getenv("V90_CP_BIT_DUMP");
+            cp_dump_checked = 1;
+            if (path && path[0])
+                cp_dump = fopen(path, "w");
+        }
+        if (cp_dump) {
+            fputc(bit ? '1' : '0', cp_dump);
+            fflush(cp_dump);
+        }
+    }
     if (g_v90_reneg_cp_rx_marked) {
         static FILE *reneg_dump = NULL;
         static int reneg_dump_checked = 0;
@@ -4465,6 +4483,23 @@ static bool v90_dil_capture_try_parse_at(int start)
             desc.n, desc.lsp, desc.ltp);
     trace_phase("V90 parsed Ja DIL descriptor: N=%u LSP=%u LTP=%u",
                 desc.n, desc.lsp, desc.ltp);
+    /* V90_DIL_DESC_LOG: the whole descriptor, so the DIL on the transmit
+     * tap can be checked against what the peer asked for. */
+    if (getenv("V90_DIL_DESC_LOG")) {
+        ME_LOG("[ME] V.90 Ja DIL h/ref:");
+        for (int i = 0; i < 8; i++)
+            ME_LOG(" %u/%u", desc.h[i], desc.ref[i]);
+        ME_LOG("\n[ME] V.90 Ja DIL train_u:");
+        for (int i = 0; i < desc.n; i++)
+            ME_LOG(" %u", desc.train_u[i]);
+        ME_LOG("\n[ME] V.90 Ja DIL sp:");
+        for (int i = 0; i < desc.lsp; i++)
+            ME_LOG("%u", desc.sp[i]);
+        ME_LOG("\n[ME] V.90 Ja DIL tp:");
+        for (int i = 0; i < desc.ltp; i++)
+            ME_LOG("%u", desc.tp[i]);
+        ME_LOG("\n");
+    }
     g_v90_dil_parse_logged = true;
     v90_note_ja_confirmed_by_descriptor();
     return true;
