@@ -297,3 +297,20 @@ four zero-DIL audio cases (both laws, with/without first-CPd erasure) pass.
 `v92_startup_test`; the overall suite is therefore still failing. The
 spec-only and audio reconstruction checks also pass.
 No G.711 codewords, DSP constants or transmit timings changed in this fix.
+
+### Measured-DIL B1d failure was a stale build (2026-09-27)
+
+The failure above does not reproduce from a clean build of the same protocol
+sources.  All four measured-DIL audio rows (PCMU/PCMA, with and without the
+first CPd erased) complete the control exchange, receive Ed, validate all 48
+B1d frames and deliver at least 1024 upstream payload bytes without error.
+
+The source had been built with the makefile's header-dependency hole.  The
+result therefore was not evidence of a malformed B1d waveform: translation
+units could retain incompatible private-state layouts after a header edit.
+The makefile now emits and includes compiler dependency files (`-MMD -MP`),
+and `make clean` removes them.  `./v92_startup_test --audio-measured-b1d` is
+the focused PCMU regression for the complete measured-DIL path through the
+Ed-to-B1d handoff.  It follows V.92 8.8.1 and 9.6.1.1.5, which inherit V.90
+8.6.1's 48 reset-state data-mode frames.  No G.711 conversion, DSP constant,
+sample accounting or protocol timing changed.

@@ -790,6 +790,13 @@ int main(int argc, char **argv)
         }
         return 0;
     }
+    /* Focused regression for the historical post-control Ed/B1d failure.
+     * V.92 8.8.1 and 9.6.1.1.5 inherit V.90 8.6.1: exactly 48 data-mode
+     * frames of scrambled ones, with mapper memories reset at B1d. */
+    if (argc == 2 && !strcmp(argv[1], "--audio-measured-b1d")) {
+        test_phase3_pair(false, true, false, V92_AUDIO_RATE);
+        return 0;
+    }
     test_spec_crc();
     test_spec_scr(false);
     test_spec_scr(true);

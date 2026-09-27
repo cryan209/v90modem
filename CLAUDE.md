@@ -29,7 +29,7 @@ The automated tests only cover offline and loopback paths — passing them says 
 
 Adding a source file means updating `SRCS` **and** the relevant `*_OBJS` lists in `makefile`; the test binaries link overlapping subsets, so a new dependency often needs adding in several places.
 
-**The makefile has no header dependencies** (`%.o: %.c` at `makefile:243`, no `-MMD`). Editing a `.h` does not rebuild the `.c` files that include it, so a struct field added or reordered leaves stale objects linked against the old layout — the symptom is impossible values at runtime, not a link error. `rm` the affected `.o` files (or `make clean`) after touching any header.
+**The makefile emits header dependencies** (`-MMD -MP`) and includes the generated `.d` files. This was added after a header-only V.92 change left stale objects linked against an old private-state layout and produced a false B1d protocol failure. If runtime behaviour still contradicts the source after a header change, use `make clean` and verify what actually rebuilt before trusting the measurement.
 
 **SpanDSP had the same hole, worse.** `spandsp-master/src/Makefile` listed
 `v34rx_data.lo`, `v34rx_phase3.lo` and `v34rx_phase4_trn.lo` in the object list

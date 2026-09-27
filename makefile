@@ -133,6 +133,7 @@ endif
 TIFF_CFLAGS := $(shell pkg-config --cflags libtiff-4 2>/dev/null || echo "-I$(HOMEBREW_PREFIX)/include")
 
 CFLAGS = -Wall -Wextra -O2 -g \
+         -MMD -MP \
          -I. -I$(SPANDSP_DIR) -I$(SPANDSP_DIR)/.. -Iport \
          $(PJ_CFLAGS) $(TIFF_CFLAGS) \
          -DPJ_AUTOCONF=1 -DPJ_IS_BIG_ENDIAN=0 -DPJ_IS_LITTLE_ENDIAN=1
@@ -515,6 +516,12 @@ $(SPANDSP_LIB): FORCE
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# Keep object layouts synchronized with the headers that define them.  This is
+# especially important for the V.92 startup controllers, whose private state is
+# shared across several translation units and otherwise fails as an apparent
+# wire-protocol error after a header-only change.
+-include $(wildcard *.d tools/*.d)
+
 sip_modem.o:      sip_modem.c      modem_engine.h data_interface.h
 modem_engine.o:   modem_engine.c   modem_engine.h data_stack.h clock_recovery.h v90.h v90_cp_rx.h v91.h v92_p3_rx.h v92_cp_rx.h v92_trn2u.h v92_upstream_rx.h
 clock_recovery.o: clock_recovery.c clock_recovery.h
@@ -655,7 +662,7 @@ fixed-compare:
 	fi
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test
+	rm -f $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test *.d tools/*.d
 
 distclean: clean
 	rm -f "$(SPANDSP_HOST_STAMP)" "$(PJ_HOST_STAMP)" $(BUILD_MODE_STAMP)
