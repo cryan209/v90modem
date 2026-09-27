@@ -27,7 +27,10 @@
  * receive-driven replay follows the same trajectory as long as the engine is
  * deterministic given the same samples.
  *
- *   v90_engine_replay <tap.g711> [ulaw|alaw] [--fast] [--from SECONDS]
+ *   v90_engine_replay <tap.g711> [ulaw|alaw] [--fast] [--from SECONDS] [--dial]
+ *
+ * --dial replays a call this side ORIGINATED (V.8 caller), for recordings of
+ * outbound calls such as the RasFinder's.
  *
  * Timing is REAL TIME by default, one 20 ms frame at a time, and that is not
  * an oversight: the engine's phase timeouts are wall-clock (trace_now_ms()),
@@ -150,6 +153,7 @@ int main(int argc, char *argv[])
     const char *path;
     int alaw = 0;
     int fast = 0;
+    int dial = 0;
     double from = -1.0;
     /* Its own link, so a replay never fights a live server for /tmp/modem0. */
     const char *pty_link = "/tmp/modem-replay";
@@ -162,7 +166,7 @@ int main(int argc, char *argv[])
     if (argc < 2) {
         fprintf(stderr,
                 "usage: %s <tap.g711> [ulaw|alaw] [--fast] [--from SECONDS]"
-                " [--pty-link PATH]\n",
+                " [--pty-link PATH] [--dial]\n",
                 argv[0]);
         return 2;
     }
@@ -178,6 +182,8 @@ int main(int argc, char *argv[])
             from = atof(argv[++i]);
         else if (strcmp(argv[i], "--pty-link") == 0 && i + 1 < argc)
             pty_link = argv[++i];
+        else if (strcmp(argv[i], "--dial") == 0)
+            dial = 1;
         else
             fprintf(stderr, "ignoring unknown argument '%s'\n", argv[i]);
     }
@@ -210,6 +216,8 @@ int main(int argc, char *argv[])
     printf("engine replay: DTE on %s\n", pty_link);
     fflush(stdout);
     me_set_law(alaw ? ME_LAW_ALAW : ME_LAW_ULAW);
+    if (dial)
+        me_dial("replay");
     me_on_sip_connected();
 
     t0 = now_ns();

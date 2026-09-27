@@ -2210,6 +2210,32 @@ static bool           g_v90_t3_arm_logged = false;
  * somewhere other than the V.34 receiver". */
 static uint64_t       g_rx_audio_samples = 0;
 static bool           g_v90_dil_capture_start_logged = false;
+/*
+ * V.8-era receive history, for §9.2.1.1's INFO0a on a call we ORIGINATE.
+ *
+ * On an outbound call to an analogue modem we are the V.8 caller: V.8 8.x has
+ * us send CJ and then 75 ms of silence before Phase 2, while the answerer
+ * starts its own Phase 2 timetable from the moment it detects CJ.  The peer's
+ * INFO0a therefore begins BEFORE our V.34 receiver is created, and the
+ * receiver's first bits land two bits into its sync (measured on the
+ * RasFinder, artifacts/rasfinder-flow-192655Z: the engine's bit stream is the
+ * frame from `110010...`, i.e. missing its fill and the leading `01` of
+ * 01110010).  With INFO0a lost, far_capabilities stays zero and Phase 2 runs
+ * on the Tone A reversal fallback.
+ *
+ * So keep the last few hundred ms of what V.8 received and, when a
+ * digital-role receiver starts on an originated call, hand it the audio from
+ * the start of the most recent silence gap -- the §8/V.8 75 ms that separates
+ * the peer's JM from its Phase 2 -- before the first live frame.  Starting at
+ * the gap keeps the JM's FSK out of the V.34 receiver.  ME_V90_INFO0A_PREROLL=0
+ * disables it.
+ */
+#define V8_RX_HIST_SAMPLES  8000        /* 1 s */
+static int16_t        g_v8_rx_hist[V8_RX_HIST_SAMPLES];
+static int            g_v8_rx_hist_wr = 0;
+static int            g_v8_rx_hist_len = 0;
+static int16_t        g_v34_preroll[V8_RX_HIST_SAMPLES];
+static int            g_v34_preroll_len = 0;
 static uint64_t       g_rx_audio_started_at = 0;
 static uint64_t       g_v34_rx_started_at = 0;
 static bool           g_v34_rx_accounting_logged = false;
@@ -2577,6 +2603,9 @@ static int me_start_or_restart_v8_locked(int answer_tone)
     g_v8_rx_energy = 0;
     g_v8_rx_count  = 0;
     g_v8_tx_energy = 0;
+    g_v8_rx_hist_wr = 0;
+    g_v8_rx_hist_len = 0;
+    g_v34_preroll_len = 0;
     g_v8_tx_count  = 0;
     g_state = ME_V8;
     g_mod   = ME_MOD_NONE;
@@ -5227,6 +5256,69 @@ static void start_v34hdx_training(void)
     trace_phase("enter TRAINING: mod=V34HDX role=recipient");
 }
 
+
+static int me_v90_info0a_preroll_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *v = getenv("ME_V90_INFO0A_PREROLL");
+
+        cached = (v && v[0] == '0') ? 0 : 1;
+    }
+    return cached;
+}
+
+/* Choose the V.8 history to replay into a new digital-role receiver: from the
+ * start of the most recent quiet stretch of at least 20 ms (the post-JM gap)
+ * to now.  Nothing if there is no such gap -- then we cannot tell the peer's
+ * JM from its Phase 2, and replaying FSK into the V.34 receiver is worse than
+ * the late start. */
+static void me_v90_prepare_info0a_preroll(void)
+{
+    enum { BLK = 40, QUIET_BLKS = 4 };
+    int n = g_v8_rx_hist_len - g_v8_rx_hist_len % BLK;
+    int first = (g_v8_rx_hist_wr - n + V8_RX_HIST_SAMPLES) % V8_RX_HIST_SAMPLES;
+    int nblk = n / BLK;
+    int run = 0;
+    int gap_start = -1;
+    int best = -1;
+
+    g_v34_preroll_len = 0;
+    if (!me_v90_info0a_preroll_enabled() || nblk == 0)
+        return;
+    for (int b = 0; b < nblk; b++) {
+        int64_t e = 0;
+
+        for (int i = 0; i < BLK; i++) {
+            int16_t x = g_v8_rx_hist[(first + b*BLK + i) % V8_RX_HIST_SAMPLES];
+
+            e += (int64_t)x*x;
+        }
+        if (e < (int64_t)BLK*100*100) {
+            if (run++ == 0)
+                gap_start = b;
+            if (run >= QUIET_BLKS)
+                best = gap_start;
+        } else {
+            run = 0;
+        }
+    }
+    if (best < 0) {
+        ME_LOG("[ME] V.90 originate: no post-JM gap in the last %d ms of V.8 "
+               "audio (rx sample %llu); INFO0a pre-roll skipped\n",
+               n/8, (unsigned long long)g_rx_audio_samples);
+        return;
+    }
+    for (int i = best*BLK; i < n; i++)
+        g_v34_preroll[g_v34_preroll_len++] =
+            g_v8_rx_hist[(first + i) % V8_RX_HIST_SAMPLES];
+    ME_LOG("[ME] V.90 originate: replaying %d ms of post-JM audio (of %d ms "
+           "held, rx sample %llu) into the Phase 2 receiver so INFO0a is not "
+           "cut (ME_V90_INFO0A_PREROLL=0 disables)\n", g_v34_preroll_len/8,
+           n/8, (unsigned long long)g_rx_audio_samples);
+}
+
 static void start_v34_training(void)
 {
     /* Must be called with g_state_mtx held */
@@ -5322,6 +5414,9 @@ static void start_v34_training(void)
         start_v22bis_training();
         return;
     }
+    g_v34_preroll_len = 0;
+    if (v90_upstream && g_calling_party)
+        me_v90_prepare_info0a_preroll();
 
     /* Enable SpanDSP logging for V.34 training diagnostics */
     logging_state_t *log = v34_get_logging_state(g_v34);
@@ -7120,6 +7215,13 @@ skip_8k_codewords:
             g_v8_rx_energy = 0;
             g_v8_rx_count  = 0;
         }
+        for (int i = 0; i < len; i++) {
+            g_v8_rx_hist[g_v8_rx_hist_wr] = amp[i];
+            g_v8_rx_hist_wr = (g_v8_rx_hist_wr + 1) % V8_RX_HIST_SAMPLES;
+        }
+        g_v8_rx_hist_len += len;
+        if (g_v8_rx_hist_len > V8_RX_HIST_SAMPLES)
+            g_v8_rx_hist_len = V8_RX_HIST_SAMPLES;
         /* Feed received audio to V.8 receiver */
         if (g_v8)
             v8_rx(g_v8, amp, len);
@@ -7369,6 +7471,12 @@ skip_8k_codewords:
                             g_rx_audio_samples - (uint64_t)len;
                     }
                     /*endif*/
+                    if (g_v34_preroll_len > 0) {
+                        /* Deliberately outside g_v34_rx_samples: these
+                         * arrived during V.8 and were counted there. */
+                        v34_rx(g_v34, g_v34_preroll, g_v34_preroll_len);
+                        g_v34_preroll_len = 0;
+                    }
                     g_v34_rx_samples += (uint64_t)len;
                     v34_rx(g_v34, filtered, len);
                     me_rx_accounting_check();

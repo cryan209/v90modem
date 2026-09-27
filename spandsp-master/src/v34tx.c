@@ -4979,6 +4979,34 @@ static complex_sig_t get_v90_wait_tone_a_baud(v34_state_t *s)
         return zero;
     }
     /*endif*/
+    /* The "edge missed" shortcut below takes 30 bauds without a Tone A event
+       to mean the tone came and went.  That is only true of silence.  A
+       signal that is present but is not a 2400 Hz line is the analogue
+       modem's own L1/L2 (9.2.2.1.5), which it may still be sending after
+       ours has ended: measured on the RasFinder, its L2 ran 400 ms past our
+       L2, INFO1d went out underneath it, and the peer -- not yet listening --
+       went on to choose its Phase 3 carrier without it (high, against the
+       low our INFO1d asked for; artifacts/rasfinder-p4-201857Z), so our
+       receiver never acquired PP.  9.2.1.1.7 sends INFO1d after Tone A is
+       detected, so keep waiting, up to the same timeout. */
+    if (s->rx.received_event == V34_EVENT_NONE
+        &&  s->tx.tone_duration >= 30
+        &&  s->tx.tone_duration < timeout_bauds
+        &&  s->rx.signal_present
+        &&  s->rx.tone_a_bin_frac_valid
+        &&  s->rx.tone_a_bin_frac < 0.15f)
+    {
+        if ((s->tx.tone_duration % 60) == 0)
+        {
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.90: holding INFO1d, peer signal is not Tone A (2400 Hz share %.2f) at %d bauds\n",
+                     s->rx.tone_a_bin_frac,
+                     s->tx.tone_duration);
+        }
+        /*endif*/
+        return zero;
+    }
+    /*endif*/
     if (s->rx.received_event == V34_EVENT_TONE_SEEN
         || s->rx.received_event == V34_EVENT_REVERSAL_1
         || s->tx.tone_duration >= 30)

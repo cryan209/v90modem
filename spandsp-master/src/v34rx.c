@@ -5302,6 +5302,24 @@ static int tone_a_carrier_present(v34_rx_state_t *s)
     if (absolute > 0)
         return s->last_info_rx_power >= absolute;
     /*endif*/
+    /* V.90 digital modem hearing the analogue modem's Tone A.  On a call we
+       originate, V.8 completes on our side (JM received, CJ and 75 ms of
+       silence sent) while the peer is still sending JM, which it stops only
+       on detecting CJ -- measured on the RasFinder, the receiver starts
+       ~180 ms before JM ends.  JM's steady V.21 tone reads here as Tone A and
+       its FSK shifts as phase reversals, so the reversal fallback fired
+       before INFO0a had been sent, and the INFO0a search was off by the time
+       it arrived (artifacts/rasfinder-info0a-200334Z).  The level test below
+       cannot see that: JM is as loud as Tone A.  The spectrum can -- Tone A
+       is a 2400 Hz line. */
+    if (s->v90_mode
+        &&  !s->calling_party
+        &&  s->tone_a_bin_frac_valid
+        &&  s->tone_a_bin_frac < 0.15f)
+    {
+        return false;
+    }
+    /*endif*/
     reference = s->info_rx_carrier_ref;
     if (reference <= 0)
     {
@@ -5650,8 +5668,29 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
     }
     else if (s->bit_count == 0)
     {
-        /* Look for info message sync code */
-        if ((s->bitstream & 0x3FF) == 0x372)
+        /* Look for info message sync code.  10.1.2.3.1: four fill ones,
+           then 01110010.  In V.90 only the LAST fill one is required:
+           8.2.3.1 precedes every INFO sequence with a point at an arbitrary
+           carrier phase, so the first fill bits are decided across the
+           carrier onset, and on a real line they are not reliable -- the
+           RasFinder's INFO0a reads `0011 01110010` to an independent
+           block demodulator and `1101 01110010` to this one
+           (artifacts/rasfinder-flow-192655Z), so the two-ones match below
+           never fired and INFO0a was lost on every originated call.  The
+           CRC, not the fill, is what rejects a false sync.  The digital
+           modem still waiting for INFO0a takes the sync with no fill at all:
+           when INFO0a follows a silent gap, "Signal up" resets the phase
+           history and the last fill bit is the first decision after it
+           (artifacts/rasfinder-info0a-200334Z reads `0 01110010`).  In that
+           state the competing signal is Tone A, all zeros, which cannot
+           produce 01110010. */
+        if ((s->bitstream & 0x3FF) == 0x372
+            ||  (s->v90_mode  &&  (s->bitstream & 0x1FF) == 0x172)
+            ||  (s->v90_mode
+                 &&  !s->calling_party
+                 &&  !s->info0_received
+                 &&  (s->stage == V34_RX_STAGE_INFO0  ||  s->stage == V34_RX_STAGE_TONE_A)
+                 &&  (s->bitstream & 0xFF) == 0x72))
         {
             V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - info sync code detected\n");
             s->crc = 0xFFFF;
@@ -6039,6 +6078,21 @@ static int info_rx(v34_rx_state_t *s, const int16_t amp[], int len)
             c0 = x - 0.61803399f*s->carrier_g1 - s->carrier_g2;
             s->carrier_g2 = s->carrier_g1;
             s->carrier_g1 = c0;
+            s->guard_block_energy += x*x;
+            /* The same 2400 Hz bin, non-coherently over 80-sample (10 ms)
+               sub-blocks, so that a Tone A phase reversal part-way through
+               the 40 ms block cannot cancel it. */
+            c0 = x - 0.61803399f*s->tone_a_sub_g1 - s->tone_a_sub_g2;
+            s->tone_a_sub_g2 = s->tone_a_sub_g1;
+            s->tone_a_sub_g1 = c0;
+            if ((s->guard_block_len + 1)%80 == 0)
+            {
+                s->tone_a_sub_pow += s->tone_a_sub_g1*s->tone_a_sub_g1
+                                   + s->tone_a_sub_g2*s->tone_a_sub_g2
+                                   + 0.61803399f*s->tone_a_sub_g1*s->tone_a_sub_g2;
+                s->tone_a_sub_g1 = s->tone_a_sub_g2 = 0.0f;
+            }
+            /*endif*/
             if (++s->guard_block_len >= 320)
             {
                 float gp = s->guard_g1*s->guard_g1 + s->guard_g2*s->guard_g2
@@ -6056,6 +6110,22 @@ static int info_rx(v34_rx_state_t *s, const int16_t amp[], int len)
                     s->guard_carrier_valid = 0;
                 }
                 /*endif*/
+                /* A pure tone of amplitude A gives each 80-sample Goertzel
+                   a power of (40A)^2, four of them 6400A^2, against a block
+                   energy of 160A^2: dividing by energy*40 normalises the bin
+                   to its share of the block. */
+                if (s->guard_block_energy > 320.0f*100.0f*100.0f)
+                {
+                    s->tone_a_bin_frac = s->tone_a_sub_pow/(s->guard_block_energy*40.0f);
+                    s->tone_a_bin_frac_valid = 1;
+                }
+                else
+                {
+                    s->tone_a_bin_frac_valid = 0;
+                }
+                /*endif*/
+                s->guard_block_energy = 0.0f;
+                s->tone_a_sub_pow = 0.0f;
                 s->guard_g1 = s->guard_g2 = 0.0f;
                 s->carrier_g1 = s->carrier_g2 = 0.0f;
                 s->guard_block_len = 0;
@@ -13380,6 +13450,128 @@ static void v34_rx_watch_phase3_s(v34_rx_state_t *s,
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.90 digital modem: take the analogue modem's Phase 3 carrier from its S.
+
+   INFO1d carries a carrier choice for each symbol rate (V.34 10.1.2.3.4,
+   V.90 8.2.3.2) and the Phase 3 receiver is tuned to the one we sent.  The
+   RasFinder does not always use it: over seven originated calls with the
+   same INFO1d row for 3200 baud (low) and the same INFO1a back, its S came up
+   on the low carrier three times and on the high carrier four, and each time
+   it chose high our receiver never acquired PP, missed Ja, and the peer
+   retrained after 9.3.2.4's 1500 ms (artifacts/rasfinder-p4-201857Z,
+   rasfinder-i1d-202451Z).  S (10.1.3.7) announces the carrier unambiguously:
+   its power sits on three lines, fc and fc +/- baud/2, and over 20 ms blocks
+   those three hold 0.9-1.0 of the energy on the carrier in use against ~0.01
+   on the other.  So watch for S before PP and retune if it is on the other
+   carrier.  One decision per Phase 3 entry. */
+static void v34_rx_watch_phase3_carrier(v34_rx_state_t *s,
+                                        const int16_t amp[],
+                                        int len)
+{
+    enum { BLK = 160 };
+    float fc[2];
+    float half;
+    float coeff[6];
+    int i;
+    int k;
+
+    if (!s->v90_mode
+        ||  s->calling_party
+        ||  s->stage != V34_RX_STAGE_PHASE3_TRAINING
+        ||  s->phase3_pp_started)
+    {
+        if (s->stage != V34_RX_STAGE_PHASE3_TRAINING)
+            s->p3car_decided = false;
+        /*endif*/
+        memset(s->p3car_g1, 0, sizeof(s->p3car_g1));
+        memset(s->p3car_g2, 0, sizeof(s->p3car_g2));
+        s->p3car_energy = 0.0f;
+        s->p3car_samples = 0;
+        return;
+    }
+    /*endif*/
+    if (s->p3car_decided)
+        return;
+    /*endif*/
+    half = 0.5f*baud_rate_parameters[s->baud_rate].baud_rate;
+    fc[0] = carrier_frequency(s->baud_rate, 0);
+    fc[1] = carrier_frequency(s->baud_rate, 1);
+    for (k = 0;  k < 6;  k++)
+        coeff[k] = 2.0f*cosf(2.0f*3.14159265f*(fc[k/3] + (float) (k%3 - 1)*half)/SAMPLE_RATE);
+    /*endfor*/
+    for (i = 0;  i < len;  i++)
+    {
+        float x = (float) amp[i];
+
+        for (k = 0;  k < 6;  k++)
+        {
+            float g0 = x + coeff[k]*s->p3car_g1[k] - s->p3car_g2[k];
+
+            s->p3car_g2[k] = s->p3car_g1[k];
+            s->p3car_g1[k] = g0;
+        }
+        /*endfor*/
+        s->p3car_energy += x*x;
+        if (++s->p3car_samples < BLK)
+            continue;
+        /*endif*/
+        {
+            float line[2] = {0.0f, 0.0f};
+            float denom = s->p3car_energy*(float) BLK*0.5f;
+            bool busy = (s->p3car_energy > 10000.0f*(float) BLK);
+
+            for (k = 0;  k < 6;  k++)
+            {
+                line[k/3] += s->p3car_g1[k]*s->p3car_g1[k]
+                           + s->p3car_g2[k]*s->p3car_g2[k]
+                           - coeff[k]*s->p3car_g1[k]*s->p3car_g2[k];
+            }
+            /*endfor*/
+            memset(s->p3car_g1, 0, sizeof(s->p3car_g1));
+            memset(s->p3car_g2, 0, sizeof(s->p3car_g2));
+            s->p3car_energy = 0.0f;
+            s->p3car_samples = 0;
+            if (busy)
+            {
+                int on = -1;
+
+                if (line[0] > 0.6f*denom  &&  line[1] < 0.2f*denom)
+                    on = 0;
+                else if (line[1] > 0.6f*denom  &&  line[0] < 0.2f*denom)
+                    on = 1;
+                /*endif*/
+                if (on >= 0)
+                {
+                    s->p3car_decided = true;
+                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                             "Rx - V.90 Phase 3: analogue S is on the %s carrier (%.0f Hz; lines %.2f/%.2f)%s\n",
+                             on ? "high" : "low",
+                             fc[on],
+                             line[0]/denom,
+                             line[1]/denom,
+                             (on != (s->high_carrier ? 1 : 0))
+                             ? ", not the one INFO1d asked for; retuning" : "");
+                    if (on != (s->high_carrier ? 1 : 0))
+                    {
+                        s->high_carrier = (on != 0);
+                        s->v34_carrier_phase_rate = dds_phase_ratef(fc[on]);
+                        create_godard_coeffs(&s->pri_ted,
+                                             fc[on],
+                                             baud_rate_parameters[s->baud_rate].baud_rate,
+                                             0.99f);
+                    }
+                    /*endif*/
+                    return;
+                }
+                /*endif*/
+            }
+            /*endif*/
+        }
+    }
+    /*endfor*/
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
                                       const int16_t amp[],
                                       int len)
@@ -13444,6 +13636,11 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
             s->phase34_tone_a_g2 = s->phase34_tone_a_g1;
             s->phase34_tone_a_g1 = g0;
             s->phase34_tone_a_energy += x*x;
+            /* 2*cos(2*pi*1800/8000); 1800 Hz is bin 36 of the 160-sample
+               block. */
+            g0 = x + 0.3128689301f*s->phase34_guard_g1 - s->phase34_guard_g2;
+            s->phase34_guard_g2 = s->phase34_guard_g1;
+            s->phase34_guard_g1 = g0;
             if (++s->phase34_tone_a_samples >= tone_a_block)
             {
                 float g1 = s->phase34_tone_a_g1;
@@ -13456,9 +13653,31 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
 
                 /* Energy floor: mean square > 100^2 keeps line noise and the
                    Jd-wait silence from ever qualifying. */
+                /* V.90 8.2.3.1 has the analogue modem send Tone A with an
+                   1800 Hz guard tone, nominally 6 dB down but measured on the
+                   RasFinder at about the same level as the tone, so the
+                   2400 Hz bin alone holds only ~45% of the block and a
+                   retrain went unanswered for 16 s
+                   (artifacts/rasfinder-info0a2-201220Z).  Count the guard
+                   bin with it, and still demand a real 2400 Hz line: a
+                   primary-channel S or data signal on its ~1829 Hz carrier
+                   leaks into the 1800 Hz bin but has nothing at 2400. */
+                float guard_power = 0.0f;
+
+                if (listen_tone_a  &&  s->v90_mode)
+                {
+                    float h1 = s->phase34_guard_g1;
+                    float h2 = s->phase34_guard_g2;
+
+                    guard_power = h1*h1 + h2*h2 - 0.3128689301f*h1*h2;
+                }
+                /*endif*/
                 if (s->phase34_tone_a_energy > 10000.0f*(float) tone_a_block
                     &&  denom > 0.0f
-                    &&  tone_power > 0.70f*denom)
+                    &&  (tone_power > 0.70f*denom
+                         ||  (guard_power > 0.0f
+                              &&  tone_power > 0.25f*denom
+                              &&  tone_power + guard_power > 0.70f*denom)))
                 {
                     tonal = true;
                 }
@@ -13490,6 +13709,8 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
                 }
                 s->phase34_tone_a_g1 = 0.0f;
                 s->phase34_tone_a_g2 = 0.0f;
+                s->phase34_guard_g1 = 0.0f;
+                s->phase34_guard_g2 = 0.0f;
                 s->phase34_tone_a_energy = 0.0f;
                 s->phase34_tone_a_samples = 0;
                 /* 4 blocks = 80 ms, satisfying the "more than 50 ms" of
@@ -13516,6 +13737,8 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
     {
         s->phase34_tone_a_g1 = 0.0f;
         s->phase34_tone_a_g2 = 0.0f;
+        s->phase34_guard_g1 = 0.0f;
+        s->phase34_guard_g2 = 0.0f;
         s->phase34_tone_a_energy = 0.0f;
         s->phase34_tone_a_samples = 0;
         s->phase34_tone_a_blocks = 0;
@@ -13564,6 +13787,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     /* 9.5.1.2 has no phase qualifier, so watch for the peer's Tone A
      * in every stage this receiver runs in, DATA included. */
     v34_rx_watch_peer_retrain(s, amp, len);
+    v34_rx_watch_phase3_carrier(s, amp, len);
     /* 9.6 puts a rate renegotiation "at any time during data mode", and the
      * peer opens one with S.  Same reason for being here rather than below
      * the T/3 branch: that branch returns. */
@@ -15408,6 +15632,8 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.phase34_retrain_reported = false;
     s->rx.phase34_tone_a_g1 = 0.0f;
     s->rx.phase34_tone_a_g2 = 0.0f;
+    s->rx.phase34_guard_g1 = 0.0f;
+    s->rx.phase34_guard_g2 = 0.0f;
     s->rx.phase34_tone_a_energy = 0.0f;
     s->rx.phase34_tone_a_samples = 0;
     s->rx.phase34_tone_a_blocks = 0;

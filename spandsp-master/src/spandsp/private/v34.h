@@ -1886,6 +1886,17 @@ typedef struct
                the V.90 Phase 3/4 Tone A retrain detector (9.3.1/9.4.1/V.90). */
     float phase34_tone_a_g1;
     float phase34_tone_a_g2;
+    /* V.90 8.2.3.1's 1800 Hz guard tone, beside the analogue modem's Tone A:
+       the retrain watcher counts it as part of the tone. */
+    float phase34_guard_g1;
+    float phase34_guard_g2;
+    /* V.90 digital modem, Phase 3: which carrier the analogue modem's S is
+       actually on (see v34_rx_watch_phase3_carrier()). */
+    float p3car_g1[6];
+    float p3car_g2[6];
+    float p3car_energy;
+    int p3car_samples;
+    bool p3car_decided;
     float phase34_tone_a_energy;
     /*! \brief Sample index within the current Tone A Goertzel block. */
     int phase34_tone_a_samples;
@@ -1960,6 +1971,15 @@ typedef struct
     int guard_block_len;
     float guard_carrier_db;
     int guard_carrier_valid;
+    /* Energy of the same 320-sample block, and the share of it the 2400 Hz
+       bin holds (0..1): Tone A puts about half its power there even beside a
+       loud V.90 8.2.3.1 guard tone; V.8's JM (V.21 1650/1850 Hz) puts none. */
+    float guard_block_energy;
+    float tone_a_sub_g1;
+    float tone_a_sub_g2;
+    float tone_a_sub_pow;
+    float tone_a_bin_frac;
+    int tone_a_bin_frac_valid;
     int phase3_s_guard_samples;
     int phase3_s_hits;
     int phase3_s_event_count;
