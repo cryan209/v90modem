@@ -5236,6 +5236,7 @@ static void start_v34_training(void)
      * ceiling has to be established here rather than at MP.  See the cap
      * below. */
     bool v90_upstream = (g_mod == ME_MOD_V90);
+    bool phase2_calling_party;
 
     g_mod   = ME_MOD_V34;
     g_state = ME_TRAINING;
@@ -5262,10 +5263,23 @@ static void start_v34_training(void)
     }
 
     /*
-     * Init V.34 in caller/answerer role matching SIP call direction.
-     * Start with a conservative profile that is typically more robust over
-     * gateway+RTP paths, then iterate upward once baseline connectivity is proven.
+     * V.34 assigns its Phase-2 roles from the call direction.  V.90 does not:
+     * 9.1.1 first establishes the analogue/digital pair from V.8 access and
+     * availability, and only uses call/answer as the tie-break when BOTH ends
+     * are digitally connected and offer both roles.  Its Phase-2 procedures
+     * are then §9.2.1 for the digital modem and §9.2.2 for the analogue modem.
+     *
+     * SpanDSP historically encodes that V.90 role in calling_party
+     * (false=digital, true=analogue).  Keep the SIP/V.8 call direction in
+     * g_calling_party, but initialise the borrowed Phase-2 engine as the
+     * digital side for every native digital-role V.90 call.  This matters for
+     * an outbound call to an analogue RAS: it must send INFO0d/Tone B/INFO1d,
+     * not the caller-shaped INFO0a/Tone A/INFO1a sequence.
      */
+    phase2_calling_party = v90_upstream ? false : g_calling_party;
+
+    /* Start with a conservative profile that is typically more robust over
+     * gateway+RTP paths, then iterate upward once baseline connectivity is proven. */
     int bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(g_v34_start_baud);
 
     /* ME_V90_UPSTREAM_MAX_BPS has to bind HERE, not at MP.
@@ -5299,7 +5313,7 @@ static void start_v34_training(void)
     g_v34 = v34_init(NULL,
                      g_v34_start_baud,
                      bps,
-                     g_calling_party,
+                     phase2_calling_party,
                      true,          /* full duplex */
                      v34_get_bit_cb, NULL,
                      v34_put_bit_cb, NULL);
@@ -5437,8 +5451,10 @@ static void start_v34_training(void)
         }
     }
 
-    ME_LOG("[ME] V.34 training started (%s, %d baud, up to %d bps)\n",
-            g_calling_party ? "caller" : "answerer", g_v34_start_baud, bps);
+    ME_LOG("[ME] V.34 training started (%s%s, %d baud, up to %d bps)\n",
+            phase2_calling_party ? "caller" : "answerer",
+            (v90_upstream && g_calling_party) ? "/V.90 digital role" : "",
+            g_v34_start_baud, bps);
 }
 
 static void v8_result_handler(void *user_data, v8_parms_t *result)

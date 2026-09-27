@@ -716,8 +716,13 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e)
             g_ring_count   = 0;
         }
         if (call_id == g_call_id) {
+            /* A rejected or failed outgoing INVITE can disconnect before the
+             * media callback ever runs.  The engine is still in ME_DIALING in
+             * that case; leaving it there makes the main loop immediately
+             * place the same call again, eventually exhausting PJSUA's call
+             * slots.  Teardown is valid for both pre-media and active calls. */
+            me_on_sip_disconnected();
             if (g_media_connected) {
-                me_on_sip_disconnected();
                 g_media_connected = PJ_FALSE;
             }
             g_call_id = PJSUA_INVALID_ID;
