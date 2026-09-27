@@ -996,7 +996,12 @@ static int v34_l2_probe_result(v34_state_t *s,
     int i;
 
     if (s->rx.l1_l2_gain_count <= 0)
+    {
+        V34_TX_LOG(tx_log_state(&s->tx), SPAN_LOG_FLOW,
+                 "Tx INFO1d probe: baud=%d unusable, no L2 analysis blocks\n",
+                 baud_rate_parameters[baud_idx].baud_rate);
         return 0;
+    }
     /*endif*/
     baud = 2400.0f*baud_rate_parameters[baud_idx].a/baud_rate_parameters[baud_idx].c;
     noise = (s->rx.l1_l2_noise_count > 0)
@@ -1014,9 +1019,27 @@ static int v34_l2_probe_result(v34_state_t *s,
         float centre;
         bool supported;
 
-        supported = carrier
-                  ? s->rx.far_capabilities.support_baud_rate_high_carrier[baud_idx]
-                  : s->rx.far_capabilities.support_baud_rate_low_carrier[baud_idx];
+        if (s->rx.info0_received)
+        {
+            supported = carrier
+                      ? s->rx.far_capabilities.support_baud_rate_high_carrier[baud_idx]
+                      : s->rx.far_capabilities.support_baud_rate_low_carrier[baud_idx];
+        }
+        else
+        {
+            /* No INFO0 from the far end (V.90 continues on the Tone A
+               reversal when INFO0a is missed), so far_capabilities is still
+               zeroed and every row would be declared unusable -- leaving the
+               peer free to pick its own Phase 3 carrier while our receiver
+               listens on the one this INFO1 names.  Grade the probe against
+               what every V.34 transmitter supports: V.34 5.2 makes 2400,
+               3000 and 3200 mandatory and 5.3 lets either carrier be
+               selected at each rate. */
+            supported = baud_idx == V34_BAUD_RATE_2400
+                     || baud_idx == V34_BAUD_RATE_3000
+                     || baud_idx == V34_BAUD_RATE_3200;
+        }
+        /*endif*/
         if (!supported)
             continue;
         /*endif*/
@@ -1096,7 +1119,16 @@ static int v34_l2_probe_result(v34_state_t *s,
     }
     /*endfor*/
     if (best_score >= 1.0e29f  ||  best_min_gain <= 0.0f)
+    {
+        V34_TX_LOG(tx_log_state(&s->tx), SPAN_LOG_FLOW,
+                 "Tx INFO1d probe: baud=%d unusable, no carrier fit "
+                 "(far low=%d high=%d, blocks=%d)\n",
+                 baud_rate_parameters[baud_idx].baud_rate,
+                 s->rx.far_capabilities.support_baud_rate_low_carrier[baud_idx],
+                 s->rx.far_capabilities.support_baud_rate_high_carrier[baud_idx],
+                 s->rx.l1_l2_gain_count);
         return 0;
+    }
     /*endif*/
     *high_carrier = best_carrier;
     *pre_emphasis = best_filter;
@@ -1107,7 +1139,14 @@ static int v34_l2_probe_result(v34_state_t *s,
         snr_db = 20.0f*log10f(best_min_gain/noise);
         snr_max_n = (int) floorf((snr_db - 4.0f)/2.0f);
         if (snr_max_n < 1)
+        {
+            V34_TX_LOG(tx_log_state(&s->tx), SPAN_LOG_FLOW,
+                     "Tx INFO1d probe: baud=%d unusable, snr=%.1f dB "
+                     "(min gain %.1f, noise %.1f, carrier=%s)\n",
+                     baud_rate_parameters[baud_idx].baud_rate, snr_db,
+                     best_min_gain, noise, best_carrier ? "high" : "low");
             return 0;
+        }
         if (snr_max_n > 14)
             snr_max_n = 14;
         V34_TX_LOG(tx_log_state(&s->tx), SPAN_LOG_FLOW,

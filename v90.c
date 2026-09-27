@@ -251,7 +251,31 @@ static int v90_trn1d_len(void)
  * exceed the analogue modem's whole Phase 3 upstream (S/PP/TRN ~2.2 s +
  * ~0.6 s silent gap before Ja) so it cannot pre-empt the energy-gap Ja
  * detector, which fires right when the peer starts listening for Sd. */
-#define V90_WAIT_JA_FALLBACK_SAMPLES 48000
+#define V90_WAIT_JA_FALLBACK_SAMPLES_DEFAULT 48000
+
+/* ME_V90_WAIT_JA_FALLBACK_MS overrides the bound (1000..30000 ms).  §9.3.2.3
+ * only limits the analogue modem's MD+TRN to one round trip plus 4000 ms,
+ * and a peer that uses the allowance plus a long round trip can outlast the
+ * default -- in which case the fallback transmits Sd into its TRN. */
+static int v90_wait_ja_fallback_samples(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *value = getenv("ME_V90_WAIT_JA_FALLBACK_MS");
+
+        cached = V90_WAIT_JA_FALLBACK_SAMPLES_DEFAULT;
+        if (value && *value) {
+            char *end = NULL;
+            long parsed = strtol(value, &end, 10);
+
+            if (end != value && *end == '\0'
+                && parsed >= 1000 && parsed <= 30000)
+                cached = (int) parsed * 8;
+        }
+    }
+    return cached;
+}
 
 /* The explicit SmartLink Ja look-ahead starts the digital sequence before the
  * analogue modem has completed its fixed Phase 3 training study.  Suppress S
@@ -3559,7 +3583,7 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
     case V90_TX_WAIT_JA: {
         int wait_limit = s->jd_resync_wait
                        ? v90_wait_ja_resync_samples()
-                       : V90_WAIT_JA_FALLBACK_SAMPLES;
+                       : v90_wait_ja_fallback_samples();
 
         if (!s->v92_phase3 && ++s->sample_count >= wait_limit) {
             fprintf(stderr,
