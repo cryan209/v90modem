@@ -9275,6 +9275,13 @@ static void enter_v90_phase4_rx_locked(void)
          * at 31200 the symbols arrive with 3-4 units of error against a
          * constellation spacing of 2 -- too dense for this path to decode. */
         limit = me_v90_upstream_cap(limit);
+        /* Interop probe for peers that reject an MP capability mask narrowed
+         * below the mask they supplied in CPt.  V.90 Table 16 permits the
+         * digital modem to advertise any enabled subset, so this must remain
+         * opt-in; uncapping can make a peer select a rate above the receiver's
+         * trained ceiling (observed against SmartLink). */
+        if (parse_env_int("ME_V90_MP_UNCAPPED", 0) != 0)
+            limit = 0;
         v90_set_upstream_rate_limit(g_v90, limit);
         ME_LOG("[ME] V.90 upstream selection: %d baud, rate cap %d bps, %s carrier\n",
                baud == 3 ? 3000 : 3200, limit,
