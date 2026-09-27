@@ -3529,6 +3529,64 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Should the second Tone B wait for 11.2.1.1.6's Tone A phase reversal?
+ 
+   DEFAULT OFF, and the clause says it should be on.  11.2.1.1.6 puts the
+   Tone B phase reversal after "detecting Tone A AND THE SUBSEQUENT TONE A
+   PHASE REVERSAL", which is the third reversal of the exchange; the code
+   instead uses a flat 100 bauds of Tone B ("V.34: fixed timing"), 167 ms that
+   owes nothing to the far end.  Live that fires mid-probe: against the
+   RasFinder the post-L2 Tone A and its reversal land at 10.15-10.25 s and we
+   reversed at 10.148 s and put L1/L2 in front of a modem that had not
+   reversed, after which no INFO1a came (artifacts/rf-v34-h1); the call that
+   reached data mode differs only in that the flat timer happened to expire
+   late enough (artifacts/rf-v34-d2).  One live call in five failed this way.
+ 
+   It is off because the correct timing lands this tree's own loopback on the
+   wrong side of a coin flip.  Swept as a pure timer over the 2800/21600 u-law
+   duplex row -- 100, 104, 108, 112, 116 all pass and 120, 130 fail with one
+   direction white -- and a conformant exchange leaves SECOND_B at 121, our
+   own answerer's 11.2.1.2.6 reversal arriving there because it waits for this
+   very Tone B plus 50 ms.  So the fragility is in Phase 3/4, most likely the
+   T/2 eye-phase ambiguity, and enabling this would trade a measured loopback
+   row for a live improvement that has not yet been A/B'd on the rig.  Do that
+   A/B before flipping the default.  ME_V34_SECOND_B_WAIT_REVERSAL=1. */
+static bool second_b_waits_for_reversal(void)
+{
+    static int initialized = 0;
+    static int enabled = 0;
+
+    if (!initialized)
+    {
+        const char *env = getenv("ME_V34_SECOND_B_WAIT_REVERSAL");
+
+        if (env  &&  env[0] != '\0')
+            enabled = (strtol(env, NULL, 10) != 0);
+        /*endif*/
+        initialized = 1;
+    }
+    /*endif*/
+    return enabled != 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* 11.2.2.1.4's bound on the 11.2.1.1.6 Tone A reversal: 900 ms plus a round
+   trip delay, measured from the reversal detected in 11.2.1.1.4.  Counted here
+   from the start of the second Tone B, which is a little later, so this is on
+   the generous side -- and the expiry does exactly what 11.2.2.1.4 asks for,
+   which is also what the code did unconditionally before. */
+static int second_b_reversal_wait_bauds(v34_state_t *s)
+{
+    int rtd_bauds;
+
+    rtd_bauds = (s->rx.round_trip_delay_estimate > 0)
+                ? (s->rx.round_trip_delay_estimate*600 + 4000)/8000
+                : 0;
+    /* This getbaud runs at the 600 baud control channel rate. */
+    return (600*900 + 500)/1000 + rtd_bauds;
+}
+/*- End of function --------------------------------------------------------*/
+
 static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
 {
     /* Calling side */
@@ -3852,9 +3910,30 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                 s->tx.stage = V34_TX_STAGE_SECOND_B_WAIT;
             }
         }
-        else if (s->tx.tone_duration >= 100)
+        else if (s->tx.tone_duration >= 100
+                 &&
+                 (!second_b_waits_for_reversal()
+                  ||
+                  s->rx.phase2_reversal_count >= 3
+                  ||
+                  s->tx.tone_duration >= second_b_reversal_wait_bauds(s)))
         {
-            /* V.34: fixed timing */
+            /* 11.2.1.1.6: the Tone B phase reversal follows "detecting Tone A
+               AND THE SUBSEQUENT TONE A PHASE REVERSAL", which is the third
+               reversal of the exchange -- 11.2.1.2.6 has the answer modem
+               raise that Tone A only once it has detected this very Tone B
+               and finished the local echo of its own L2.  This used to be a
+               flat 100 bauds ("V.34: fixed timing"), which is 167 ms after we
+               start Tone B and owes nothing to the far end.  Measured against
+               the RasFinder, that fires mid-probe: its post-L2 Tone A and
+               reversal land at 10.15-10.25 s and we reversed at 10.148 s and
+               then put L1/L2 in front of a modem that had not yet reversed,
+               after which no INFO1a ever came (artifacts/rf-v34-h1).  The call
+               that did reach data mode differs only in that the timer happened
+               to expire late enough (artifacts/rf-v34-d2).
+               The timeout keeps the old behaviour, and is 11.2.2.1.4's own
+               recovery: "waits 40 ms, then transmits a Tone B phase reversal
+               ... then signal L1 followed by signal L2". */
             s->tx.tone_duration = 1;
             s->tx.stage = V34_TX_STAGE_SECOND_B_WAIT;
         }
