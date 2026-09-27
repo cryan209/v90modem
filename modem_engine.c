@@ -3531,6 +3531,38 @@ static int v90_upstream_baud_max_bps(int baud_code)
     return baud_code == 3 ? 28800 : 31200;
 }
 
+/* Write the exact accepted Table 14 frame, rather than the demodulator's
+ * surrounding bit stream.  This makes a live transmit tap independently
+ * gradeable with the analogue-side Phase 4 receiver: its TRN2d/MP demapper
+ * must be configured from the CPt the peer actually sent (§9.4.1.2).
+ * One canonical, CRC-bearing frame is written per line so retraining attempts
+ * remain separable.  Diagnostic only; disabled unless requested. */
+static void v90_dump_accepted_cp(const vpcm_cp_frame_t *cp)
+{
+    static FILE *dump;
+    static bool checked;
+    uint8_t bits[VPCM_CP_MAX_BITS];
+    int nbits;
+
+    if (!checked) {
+        const char *path = getenv("V90_CP_ACCEPT_DUMP");
+
+        checked = true;
+        if (path && path[0]) {
+            dump = fopen(path, "w");
+            if (!dump)
+                ME_LOG("[ME] V90_CP_ACCEPT_DUMP open %s: %s\n",
+                       path, strerror(errno));
+        }
+    }
+    if (!dump || !vpcm_cp_encode_bits(cp, bits, &nbits))
+        return;
+    for (int i = 0; i < nbits; i++)
+        fputc(bits[i] ? '1' : '0', dump);
+    fputc('\n', dump);
+    fflush(dump);
+}
+
 /* Runs with g_state_mtx held, either synchronously inside v34_rx() or from
  * the independent strict batch receiver after its worker reacquires state. */
 static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
@@ -3573,6 +3605,7 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
                 diag->frame.v90_compatibility ? "CP" : "CPt",
                 diag->nbits, (unsigned)diag->frame.drn, accepted ? 1 : 0);
     if (accepted) {
+        v90_dump_accepted_cp(frame);
         v90_cp_live_mark_accepted_locked(diag);
         /* §9.6.1.2.3's CP' is what releases Ed, and whether it was decoded
          * is what separates an attempt that completes from one that takes

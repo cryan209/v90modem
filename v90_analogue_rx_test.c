@@ -98,6 +98,174 @@ static uint8_t *read_file(const char *path, long *len_out)
     return buf;
 }
 
+static bool read_cp_dump(const char *path, vpcm_cp_frame_t *cp)
+{
+    FILE *f;
+    uint8_t *bits = NULL;
+    size_t cap = 0;
+    int n = 0;
+    int ch;
+    bool decoded = false;
+
+    if ((f = fopen(path, "r")) == NULL)
+        return false;
+    while ((ch = fgetc(f)) != EOF) {
+        if (ch == '0' || ch == '1') {
+            if ((size_t)n == cap) {
+                size_t next = cap ? cap * 2 : 4096;
+                uint8_t *grown = realloc(bits, next);
+
+                if (!grown) {
+                    free(bits);
+                    fclose(f);
+                    return false;
+                }
+                bits = grown;
+                cap = next;
+            }
+            bits[n++] = (uint8_t)(ch == '1');
+        }
+    }
+    fclose(f);
+    /* V90_CP_ACCEPT_DUMP is one exact frame per line.  Also accept the older
+     * V90_CP_BIT_DUMP's unframed demodulator stream by sliding every legal
+     * Table 14 length across it; CRC and all reserved/fill bits make a false
+     * hit vanishingly unlikely. */
+    if (n <= VPCM_CP_MAX_BITS && vpcm_cp_decode_bits(bits, n, cp))
+        decoded = true;
+    for (int off = 0; off + 292 <= n; off++) {
+        for (int blocks = 1; blocks <= VPCM_CP_MAX_MASK_BLOCKS; blocks++) {
+            int frame_bits = 156 + 136 * blocks;
+            vpcm_cp_frame_t candidate;
+
+            if (off + frame_bits > n)
+                break;
+            if (vpcm_cp_decode_bits(bits + off, frame_bits, &candidate)) {
+                if (getenv("V90_CP_SCAN_VERBOSE"))
+                    fprintf(stderr,
+                            "CP candidate bit=%d len=%d kind=%s drn=%u Sr=%u L=%u dfi=%u%u%u%u%u%u\n",
+                            off, frame_bits,
+                            candidate.v90_compatibility ? "CP" : "CPt",
+                            candidate.drn, candidate.shaping_redundancy,
+                            candidate.shaping_lookahead,
+                            candidate.dfi[0], candidate.dfi[1],
+                            candidate.dfi[2], candidate.dfi[3],
+                            candidate.dfi[4], candidate.dfi[5]);
+                if (!decoded) {
+                    *cp = candidate;
+                    decoded = true;
+                }
+            }
+        }
+    }
+    free(bits);
+    return decoded;
+}
+
+/* Grade the exact downstream DS0 emitted in a live call against the CPt the
+ * peer accepted.  Unlike the analogue front end, this consumes the transmit
+ * codewords before the line, so any failure here is our §5.4/§8.6 mapping and
+ * cannot be attributed to echo, receiver drift, or the RasFinder analogue
+ * channel. */
+static int trace_phase4_stream(const char *stream_path, const char *cp_path,
+                               long start)
+{
+    v90_analogue_phase4_config_t cfg;
+    v90_analogue_phase4_t *rx;
+    const v90_analogue_mp_t *mp;
+    uint8_t *data;
+    unsigned events = 0;
+    long len;
+
+    if ((data = read_file(stream_path, &len)) == NULL) {
+        fprintf(stderr, "cannot read %s\n", stream_path);
+        return 2;
+    }
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.law = V90_LAW_ULAW;
+    cfg.u_info = 48;
+    cfg.level_tolerance = 0.0;
+    if (!read_cp_dump(cp_path, &cfg.cpt)) {
+        fprintf(stderr, "cannot decode an accepted CP frame from %s\n", cp_path);
+        free(data);
+        return 2;
+    }
+    if (cfg.cpt.v90_compatibility) {
+        fprintf(stderr, "first valid frame in %s is CP, not CPt\n", cp_path);
+        free(data);
+        return 2;
+    }
+    /* The startup grader stops at MP.  Supply a structurally valid CP only
+     * because the shared receiver also supports the later B1d/data states. */
+    cfg.cp = cfg.cpt;
+    cfg.cp.v90_compatibility = true;
+    cfg.cp.drn = 1;
+    cfg.cp.constellation_count = 1;
+    cfg.cp.codec_constellations_differ = false;
+    memset(cfg.cp.masks, 0, sizeof(cfg.cp.masks));
+    memset(cfg.cp.codec_masks, 0, sizeof(cfg.cp.codec_masks));
+    vpcm_cp_enable_all_ucodes(cfg.cp.masks[0]);
+    for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++)
+        cfg.cp.dfi[i] = 0;
+    if (start < 0 || start >= len) {
+        fprintf(stderr, "start offset %ld is outside %s (%ld octets)\n",
+                start, stream_path, len);
+        free(data);
+        return 2;
+    }
+    if ((rx = v90_analogue_phase4_init(&cfg)) == NULL) {
+        fprintf(stderr, "CPt cannot configure the Phase 4 receiver\n");
+        free(data);
+        return 2;
+    }
+    for (long off = start; off < len; off += 160) {
+        int take = (int)((len - off < 160) ? len - off : 160);
+        unsigned before = events;
+
+        events |= v90_analogue_phase4_put(rx, data + off, take);
+        if (events != before) {
+            printf("  @%ld (%.3f s): events=0x%X stage=%s Ri=%dT TRN2d=%dT MP=%d\n",
+                   off + take, (double)(off + take)/8000.0, events,
+                   v90_analogue_phase4_stage_name(v90_analogue_phase4_stage(rx)),
+                   v90_analogue_phase4_r_symbols(rx),
+                   v90_analogue_phase4_trn2d_symbols(rx),
+                   v90_analogue_phase4_mp_frames(rx));
+        }
+        if (events & V90A4_RX_EVENT_MP)
+            break;
+    }
+    mp = v90_analogue_phase4_mp(rx);
+    printf("Phase 4 tap: CPt drn=%u D=%u K=%d Sr=%u, events=0x%X, "
+           "stage=%s, Ri=%dT, TRN2d=%dT/%d ones, MP=%d, "
+           "demap=%d (constellation=%d modulus=%d)\n",
+           cfg.cpt.drn, cfg.cpt.drn + 8,
+           v90_analogue_phase4_cp_k(&cfg.cpt), cfg.cpt.shaping_redundancy,
+           events, v90_analogue_phase4_stage_name(v90_analogue_phase4_stage(rx)),
+           v90_analogue_phase4_r_symbols(rx),
+           v90_analogue_phase4_trn2d_symbols(rx),
+           v90_analogue_phase4_trn2d_ones(rx),
+           v90_analogue_phase4_mp_frames(rx),
+           v90_analogue_phase4_demap_failures(rx),
+           v90_analogue_phase4_demap_out_of_constellation(rx),
+           v90_analogue_phase4_demap_modulus_overflow(rx));
+    printf("  CPt: L=%u a1=%d/64 a2=%d/64 b1=%d/64 b2=%d/64 dfi=%u%u%u%u%u%u Mi=",
+           cfg.cpt.shaping_lookahead, (int8_t)cfg.cpt.shaping_a1_q1_6,
+           (int8_t)cfg.cpt.shaping_a2_q1_6, (int8_t)cfg.cpt.shaping_b1_q1_6,
+           (int8_t)cfg.cpt.shaping_b2_q1_6,
+           cfg.cpt.dfi[0], cfg.cpt.dfi[1], cfg.cpt.dfi[2],
+           cfg.cpt.dfi[3], cfg.cpt.dfi[4], cfg.cpt.dfi[5]);
+    for (int i = 0; i < cfg.cpt.constellation_count; i++)
+        printf("%s%d", i ? "," : "", vpcm_cp_mask_population(cfg.cpt.masks[i]));
+    printf(" codec-differ=%u\n", cfg.cpt.codec_constellations_differ ? 1U : 0U);
+    if (mp)
+        printf("  MP: type=%u max_drn=%u trellis=%u rate_mask=0x%04X ack=%u\n",
+               mp->type1 ? 1U : 0U, mp->max_drn, mp->trellis, mp->rate_mask,
+               mp->acknowledge ? 1U : 0U);
+    v90_analogue_phase4_free(rx);
+    free(data);
+    return ((events & V90A4_RX_EVENT_MP) != 0) ? 0 : 1;
+}
+
 static void test_fixture(const fixture_t *fx)
 {
     v90_analogue_rx_config_t cfg;
@@ -2004,6 +2172,9 @@ int main(int argc, char *argv[])
 
     if (argc >= 3  &&  strcmp(argv[1], "--trace") == 0)
         return trace_stream(argv[2], (argc >= 4) ? atoi(argv[3]) : 48);
+    if (argc >= 4  &&  strcmp(argv[1], "--phase4-trace") == 0)
+        return trace_phase4_stream(argv[2], argv[3],
+                                   (argc >= 5) ? atol(argv[4]) : 0);
 
     for (i = 0; i < sizeof(fixtures)/sizeof(fixtures[0]); i++)
         test_fixture(&fixtures[i]);
