@@ -385,6 +385,21 @@ than causes.  Fix that and flip the default; pinning row after row to the old
 timing would be editing the suite to pass.
 `ME_V34_SECOND_B_WAIT_REVERSAL=1`.
 
+The first acquisition repair is now on that A/B arm: 10.1.3.1's known B1
+symbols supervise the equalizer instead of supplying only scalar phase/gain,
+and the B1 carrier phase is advanced from the correlation window's centre to
+the B1/DATA seam.  That makes 3200/21600 A-law clean (45 errors -> zero) and
+turns 2800/21600 u-law from white/no lock into decoded payload.  The latter is
+not yet clean: transmitter/receiver symbol dumps align exactly except for **one
+2D symbol at DATA symbol 5839**, whose imaginary coordinate lands about 16
+Q9.7 units over the decision boundary and expands through the mapper into one
+35-bit burst.  The six shell-index failures are in the opposite direction and
+are not its cause.  A 1.03 gain bias fixes that row but damages 3200 A-law and
+3429 u-law; B1 minimax gain selection, a two-tap decision-feedback experiment,
+and +/-12 pulse-shaper-phase nudges do not remove it.  Therefore the default
+remains off: the remaining work is genuine dense-constellation margin for one
+symbol, not another Phase-2 timing condition or a row-specific pin.
+
 ### Still open against this peer
 
 * **Phase 2 is intermittent** and the item above is the measured reason.

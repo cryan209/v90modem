@@ -128,6 +128,25 @@ static int v34_rx_data_lean(void)
 #endif
 /*- End of function --------------------------------------------------------*/
 
+/* The clause-correct second-Tone-B timing currently exposes the B1
+   acquisition weakness this experiment addresses.  Keep it on the same A/B
+   arm until the remaining 2800-baud transient is eliminated; applying the
+   incomplete conditioning generally costs the default 3000/21600 row. */
+static bool v34_rx_b1_supervised_eq_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+    {
+        const char *value = getenv("ME_V34_SECOND_B_WAIT_REVERSAL");
+
+        enabled = (value  &&  *value  &&  atoi(value) != 0);
+    }
+    /*endif*/
+    return enabled != 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
 {
         if (s->b1_acquisition_active)
@@ -136,6 +155,66 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
 
             if (n < s->v90_t3_b1_symbols)
                 s->b1_observed[n] = *sym;
+            /* V.34 11.4.1.1.5/11.4.1.2.5 conditions the receiver on the
+               complete known B1 frame before user data.  The old path used
+               B1 only for a scalar phase/gain calibration and left the
+               Phase-4 equalizer frozen.  On the dense 21600 constellations a
+               Phase-2 timing shift could then move the residual B1 fit from
+               about 99.8% to 99.3%; the first data decisions were wrong and
+               the decision-directed loops had no lock to acquire from.
+
+               Once a prefix supplies a reliable complex gain, use the rest
+               of the known frame as supervised equalizer training.  Keep the
+               target in the equalizer's existing phase and gain domain: B1
+               calibration below still owns the final grid transform. */
+            if (v34_rx_b1_supervised_eq_enabled()
+                &&  n >= 15  &&  n < s->v90_t3_b1_symbols)
+            {
+                complexf_t pc = complex_setf(0.0f, 0.0f);
+                complexf_t pcc = complex_setf(0.0f, 0.0f);
+                float pep = 0.0f;
+                float pcm;
+                float pccm;
+                bool pconj;
+                float pgain;
+                float pphase;
+                float cp;
+                float sp;
+                complexf_t target;
+
+                for (int i = 0;  i <= n;  i++)
+                {
+                    complexf_t o = s->b1_observed[i];
+                    complexf_t e = s->v90_t3_b1[i];
+
+                    pc.re += o.re*e.re + o.im*e.im;
+                    pc.im += o.im*e.re - o.re*e.im;
+                    pcc.re += o.re*e.re - o.im*e.im;
+                    pcc.im += o.im*e.re + o.re*e.im;
+                    pep += e.re*e.re + e.im*e.im;
+                }
+                /*endfor*/
+                pcm = pc.re*pc.re + pc.im*pc.im;
+                pccm = pcc.re*pcc.re + pcc.im*pcc.im;
+                pconj = pccm > pcm;
+                if (pconj)
+                    pc = pcc;
+                /*endif*/
+                pgain = (pep > 0.0f)
+                      ? sqrtf(pc.re*pc.re + pc.im*pc.im)/pep : 1.0f;
+                pphase = atan2f(pc.im, pc.re);
+                cp = cosf(pphase);
+                sp = sinf(pphase);
+                {
+                    complexf_t e = s->v90_t3_b1[n];
+                    float ei = pconj ? -e.im : e.im;
+
+                    target.re = pgain*(e.re*cp - ei*sp);
+                    target.im = pgain*(e.re*sp + ei*cp);
+                }
+                v34_rx_tune_equalizer(s, sym, &target);
+            }
+            /*endif*/
             if (s->b1_observed_symbols >= s->v90_t3_b1_symbols)
             {
                 complexf_t corr = complex_setf(0.0f, 0.0f);
@@ -169,8 +248,6 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 gain = sqrtf(corr.re*corr.re + corr.im*corr.im)
                      / expected_power;
                 phase = atan2f(corr.im, corr.re);
-                s->phase4_da_derot = (int32_t)
-                    (phase*2147483648.0f/3.14159265358979f);
                 /* B1 also gives the residual carrier FREQUENCY, which the
                    phase term cannot.  Training leaves about 0.7 Hz of it in
                    this receiver -- 0.105 degrees per symbol at 2400 baud,
@@ -219,6 +296,21 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         float d_im = c1.im*c0.re - c1.re*c0.im;
                         float dphi = atan2f(d_im, d_re)/(float) half;
 
+                        /* The whole-frame correlation above is the carrier
+                           phase at B1's centre.  Carry it to the final B1
+                           symbol; DATA advances the rate once before slicing
+                           the following symbol.  Without the epoch shift the
+                           supervised equalizer handed 2800/21600 DATA a clean
+                           constellation still rotated by 2.7 degrees, enough
+                           to corrupt 19 dense shell-mapper frames before the
+                           decision-directed loop pulled it to zero. */
+                        if (v34_rx_b1_supervised_eq_enabled())
+                        {
+                            phase += dphi
+                                   *(float) (s->v90_t3_b1_symbols - 1)/2.0f;
+                        }
+                        /*endif*/
+
                         /* Half a turn per symbol is not a carrier offset, it is
                            a wrapped measurement; refuse anything that large. */
                         if (fabsf(dphi) < 0.2f)
@@ -245,6 +337,8 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     }
                     /*endif*/
                 }
+                s->phase4_da_derot = (int32_t)
+                    (phase*2147483648.0f/3.14159265358979f);
                 s->data_decision_ema = 0.0f;
                 s->data_decision_baseline = 0.0f;
                 s->data_decision_count = 0;
@@ -358,6 +452,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 break;
             }
             /*endswitch*/
+
             s->mapping_frame_buf[s->mapping_frame_count++] =
                 (int16_t)(transformed_re * 128.0f * s->data_symbol_scale);
             s->mapping_frame_buf[s->mapping_frame_count++] =
