@@ -1525,6 +1525,7 @@ static bool v90_cp_power_within_limit(const v90_state_t *s,
     double limit;
     double margin;
     double allowed;
+    double measured;
 
     if (!s || !cp || !repaired || k <= 0)
         return true;
@@ -1544,8 +1545,29 @@ static bool v90_cp_power_within_limit(const v90_state_t *s,
                 "limit_rms=%.0f margin=%.1f dB codec_differ=%d\n",
                 what, k, sqrt(wire), sqrt(codec), sqrt(limit), margin,
                 cp->codec_constellations_differ ? 1 : 0);
-    if (wire <= allowed)
+    /* 8.5.2 measures at the point bit 38 of INFO0d names, and we announce
+     * the codec output (v34tx.c's INFO0d builder puts a 1 there), so the
+     * conformance test is the codec-side figure whenever the peer sent a
+     * separate codec set.  Comparing the WIRE figure, as this did until
+     * 2026-09-28, fails a conformant peer by exactly the pad it declared:
+     * the RasFinder's CPt reads wire 7551 / codec 3910 against a 3588
+     * limit, i.e. 6.5 dB over at the transmitter and 0.75 dB over at the
+     * measurement point -- inside the margin.  It also names the pad
+     * outright in Table 14 bits 52:67, trn1d_gain = 2.0024, a MEASURED
+     * ratio; that peer sits behind a real analogue loop, so the pad the
+     * older comment below calls phantom is real there. */
+    measured = (cp->codec_constellations_differ && codec > 0.0)
+             ? codec : wire;
+    if (measured <= allowed) {
+        if (wire > allowed && getenv("V90_CP_POWER_DEBUG"))
+            fprintf(stderr,
+                    "[V90] 8.5.2 %s is conformant at the bit-38 measurement "
+                    "point (codec %.0f <= %.0f), but we transmit it %.1f dB "
+                    "over our declared maximum (wire %.0f)\n",
+                    what, sqrt(codec), sqrt(allowed),
+                    10.0 * log10(wire / limit), sqrt(wire));
         return true;
+    }
     if (codec <= allowed && cp->codec_constellations_differ
         && v90_cp_pad_repair_enabled()) {
         fprintf(stderr,
