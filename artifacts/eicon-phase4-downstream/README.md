@@ -65,3 +65,60 @@ This capture predates that fix and is kept as the record of the K = 31 TRN2d the
 old inconsistent CPt provoked. Live re-verification against the card (which should
 now map TRN2d at K = 24 and let MP through) is the open confirmation — it needs the
 `../modem-dsp-emu` rig, not this decoder.
+
+
+## Correction (2026-09-28): the K ≈ 31 reading was an artefact
+
+The section above concludes that the card mapped TRN2d at K ≈ 31, from modulus
+values "reaching 2^31.6". **That metric measures the radix capacity of the
+mask, not the information content of the stream, and cannot distinguish
+anything.** Measured: `max(r)` reads 2^31.71 against a 2^31.712 capacity under
+all four label/digit conventions, and under all 720 digit-significance
+permutations. It is the same class of trap as "0.667 is white" and
+"22.5° is white" elsewhere in this project — quote the spread, or the count,
+not the extreme.
+
+The instrument that works here is **entropy**. The sum of the card's
+per-column magnitude entropies is **27.77 bits/frame**, which bounds the joint
+entropy and therefore K. Our own mapper at K = 31 measures 31.00. So the
+card's TRN2d cannot be carrying 31 bits per frame, and K ≤ 27.
+
+Entropy also says the card is not running a plain §5.4.3 modulus mapping over
+this mask at all. A mixed-radix mapper leaves every column either exactly full
+or exactly empty, with the truncation confined to one column — ours at K = 24
+reads 5.284 / 5.284 / 5.284 / 5.282 / 2.927 / 0.000, interval 5 pinned to a
+single Ucode in 100% of frames. The card's six columns are all *partially*
+filled:
+
+| interval | 0 | 1 | 2 | 3 | 4 | 5 |
+|---|---|---|---|---|---|---|
+| entropy, bits (max 5.285) | 4.746 | 3.588 | 5.205 | 4.966 | 4.983 | 4.278 |
+| share of U39 (uniform = 2.5%) | 7.7% | 50.5% | 4.6% | 18.2% | 6.3% | 36.4% |
+
+with the excess piled on the **largest** Ucode the mask allows.
+
+What the fixture does still establish, and it is worth keeping:
+
+* **Extraction and grid are validated against known content** — Ri reads
+  Ucode 22 for exactly 2544 symbols with `+++---`, and R̄i `---+++` for
+  exactly 24, so sample 6135 and the Ucode mapping are right.
+* **The card honours our CPt mask exactly.** Its TRN2d support is 39 Ucodes
+  per interval spanning 0..39 with 35 absent, and never a Ucode above 39 —
+  our mask and nothing else.
+
+The most consistent reading of the rest — a reading, not a measurement — is
+**clipping against a mask that was too small**. Run 79's CPt was built under
+the erroneous 11.77 dB pad and named only Ucodes 0..39, a **−32 dBm0**
+constellation (RMS 100 in magnitude units, ×4 = 400 against Table 15's 16017
+at 0 dBm0). A card whose target amplitudes exceed that mask pins them at the
+top, which is exactly the rising density observed: U0..30 ≈ 1.7% each,
+U32..38 ≈ 3.9%, U39 20.6%.
+
+**Consequence: this fixture grades acquisition, not mapping conventions.** It
+was run as an oracle for our TRN2d conventions — 8.6.5 initialises the
+scrambler, differential encoder and shaping memory to zero, so a matching
+implementation descrambles to ones from the first frame with no warm-up — and
+it returns 50.06%, which under a stream this distorted says nothing about our
+conventions either way. **Our TRN2d conventions remain unvalidated against any
+foreign transmitter.** The CPt-subset fix this capture was cited for stands on
+§8.6.5 and Table 17 by inspection; only its evidence narrative changes.
