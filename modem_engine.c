@@ -4789,22 +4789,8 @@ static bool v90_ja_heuristic_allowed(const char *source)
      * default rather than a rescue knob: §35k measured a healthy descriptor
      * arriving a median 0.3 s into Phase 3, so the bound is only reached when
      * the descriptor is late or never coming -- exactly the case where the
-     * old behaviour deadlocked.  0 restores the unbounded wait.
-     *
-     * 500 was too short for the RasFinder (2026-09-29,
-     * artifacts/rf-pp-carrier-20260929-r1): its descriptor parsed 832 ms
-     * after this anchor, the bound fired at 500, and Sd went out 330 ms
-     * before the parse.  The peer never detected it -- the RX tap shows it
-     * holding Ja for 5.4 s and then retraining -- whereas both RasFinder
-     * calls whose Sd followed the parse got their S.  The ceiling is
-     * 9.3.2.4's: the analogue modem must see the Sd-to-S-bar-d transition
-     * within 1500 ms of the START of Ja, and this anchor already lags Ja by
-     * the energy gate's confirmation (~0.1-0.2 s), Sd is 384T (48 ms) and the
-     * path adds a one-way delay; 1000 keeps a conformant peer inside that
-     * window.  A real-time replay of that call puts Sd 1 ms after the parse
-     * (914 ms after the anchor).  The bound is WALL-CLOCK, so
-     * v90_engine_replay --fast cannot test it; replay in real time. */
-    fallback_ms = parse_env_int("ME_V90_JA_HEURISTIC_FALLBACK_MS", 1000);
+     * old behaviour deadlocked.  0 restores the unbounded wait. */
+    fallback_ms = parse_env_int("ME_V90_JA_HEURISTIC_FALLBACK_MS", 500);
     if (g_v90_ja_first_suppressed_ms == 0)
         g_v90_ja_first_suppressed_ms = trace_now_ms();
     else if (fallback_ms > 0

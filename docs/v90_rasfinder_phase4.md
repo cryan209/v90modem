@@ -637,22 +637,40 @@ healthy TRN lock; do not turn either into a peer-specific setting.
 
 Live confirmation is `artifacts/rf-pp-carrier-20260929-r1`: with no stored DIL
 descriptor and no peer-specific Ja timer, the receiver parsed a CRC-valid
-RasFinder descriptor (`N=192, LSP=120, LTP=120`).
+RasFinder descriptor (`N=192, LSP=120, LTP=120`) and started Sd from that event.
+The peer later retrained while we were waiting for S during Jd, so this proves
+the generic PP/Ja receive path on hardware but not data mode.
 
-**Correction: Sd did NOT start from that event.** The `[TRACE]` lines put Sd
-at +16733 ms and the parse at +17063 ms: the 500 ms
-`ME_V90_JA_HEURISTIC_FALLBACK_MS` bound (anchored at the energy-gap
-suppression, +16231) fired first, 332 ms before the descriptor landed.  The
-RasFinder never saw that Sd: the RX tap shows it transmitting Ja
-continuously for 5.4 s (RMS ~4000, no post-Ja silence) and then retraining,
-while our Jd ran its full 24796T §9.3.1.5 budget.  It is lenient about
-§9.3.2.4's 1500 ms (it held Ja far past it) but evidently does not arm its Sd
-detector that early.  Both earlier RasFinder calls that got S (`rf-maxpow-c1`,
-`rf-padrep-a1`) started Sd *after* the parse.  The default is now **1000 ms**:
-it covers this call's 832 ms, and it is the most §9.3.2.4 allows once the
-anchor's lag behind Ja start, Sd's 48 ms and the one-way delay are counted.
-Verified by real-time replay (`v90_engine_replay --dial`, NOT `--fast`: the
-bound is wall-clock): at 500 the replay reproduces the live Sd at anchor+501
-ms; at 1000 Sd goes out 1 ms after the parse, anchor+914.  So the margin is
-~90 ms on n=1, and whether the peer then answers Jd with S still needs a
-live call.
+
+**RETRACTION and live result (2026-09-29, later).**  The correction above
+raised `ME_V90_JA_HEURISTIC_FALLBACK_MS` to 1000 ms on the claim that the
+peer "held Ja for 5.4 s", i.e. never detected our early Sd.  That was a
+mis-aligned read of the RX tap: the 5.4 s stretch is **ANSam** (2100 Hz, the
+same position in the working calls' taps).  Located properly, every call --
+working and failing, early Sd or late -- shows the peer's Phase 3 burst, then
+~3.7-4.2 s of silence after Ja: it DID detect Sd.  The change is reverted
+(500 ms again); it had no evidence left.  Live at 1000 ms, two calls reached
+Phase 3 (`artifacts/rf-jafb1000-20260929-r2`, `-r3`) with Sd after the parse
+and neither completed Phase 3, which agrees.
+
+What the five RasFinder Phase 3 calls actually separate on, read from the RX
+taps (S = 10.1.3.7's three lines, fraction of a 40 ms block):
+
+| call | peer's first S | RTP pkts >20 ms late | fill frames in signal | after the quiet |
+|---|---|---|---|---|
+| rf-maxpow-c1 (S, Phase 4) | low 0.91 | 0 | 2 | S low 0.98 |
+| rf-padrep-a1 (S, Phase 4) | low 0.93 | - | 2 | S low 0.98 |
+| rf-pp-carrier-20260929-r1 | high 0.89 | - | 26 | unclear |
+| rf-jafb1000-20260929-r2 | high 0.91 | 502 (max 269 ms) | 23 | **S high 0.98** |
+| rf-jafb1000-20260929-r3 | high 0.89 | - | 27 | Tone A + guard (retrain) |
+
+Two confounded differences: the peer ran Phase 3 on the high carrier, and
+today's bearer had heavy jitter, so the near-zero jitter buffer concealed
+~25 frames inside the signal (against 2).  **r2 is the sharp case: the peer
+sent S, on the high carrier, and live we missed it; `v90_engine_replay --dial`
+of the same tap detects it 14124 Jd symbols in and moves to J'd, robustly
+(start offsets +0.02..+0.20 s all detect it, with and without flow logging).**
+The receiver is fed directly by `me_rx_g711()` and the tap is written there,
+concealment fill included, so the input was identical; the divergence is
+live-only and not yet explained.  The replay interleaves RX and TX 1:1, which
+live under this jitter does not -- that is the first thing to instrument.
