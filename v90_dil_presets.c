@@ -99,6 +99,48 @@ static void dil_load_courier_style(v90_dil_desc_t *d)
     }
 }
 
+static void dil_load_rasfinder(v90_dil_desc_t *d)
+{
+    /* V.90 Table 12 descriptor decoded CRC-valid from the RasFinder's Ja in
+     * artifacts/rf-maxpow-c1/live-rx.g711.  V90_DIL_DESC_LOG on an offline
+     * replay provides the complete fields below.  This is peer-authored
+     * recovery data for an explicit interop profile, not a locally invented
+     * training sequence. */
+    static const uint8_t h[8] = { 59, 59, 39, 39, 39, 9, 9, 9 };
+    static const uint8_t train_u[192] = {
+        96,96,88,88,88,88,104,104,102,102,94,94,94,94,110,110,
+        100,100,92,92,92,92,108,108,98,98,90,90,90,90,106,106,
+        63,71,55,87,87,87,87,79,62,70,54,86,86,86,86,78,
+        61,69,53,85,85,85,85,77,60,68,52,84,84,84,84,76,
+        59,67,51,83,83,83,83,75,58,66,50,82,82,82,82,74,
+        57,65,49,81,81,81,81,73,56,64,48,80,80,80,80,72,
+        31,15,112,112,47,103,103,39,95,95,95,95,18,2,23,111,
+        111,7,30,14,113,113,29,13,114,114,20,4,45,101,101,37,
+        93,93,93,93,42,34,21,109,109,5,28,12,115,115,27,11,
+        116,116,43,99,99,35,16,46,91,91,91,91,22,6,19,107,
+        107,3,26,10,117,117,44,36,25,9,118,118,41,97,97,33,
+        89,89,89,89,40,32,17,105,105,1,24,8,119,119,38,0
+    };
+    static const char sp[] =
+        "000000000000100000000000000000010000000000000000001000000000"
+        "111000111000111000111000111000000111000111000111000111000111";
+    static const char tp[] =
+        "000000000000100000000100000000010000000010000000001000000001"
+        "111111111111111111111111111111111111111111111111111111111111";
+    int i;
+
+    memset(d, 0, sizeof(*d));
+    d->n = 192;
+    d->lsp = 120;
+    d->ltp = 120;
+    memcpy(d->h, h, sizeof(h));
+    memcpy(d->train_u, train_u, sizeof(train_u));
+    for (i = 0; i < 120; i++) {
+        d->sp[i] = (uint8_t)(sp[i] - '0');
+        d->tp[i] = (uint8_t)(tp[i] - '0');
+    }
+}
+
 bool v90_dil_preset_load(v90_dil_preset_t which, v90_dil_desc_t *out)
 {
     if (!out)
@@ -111,6 +153,9 @@ bool v90_dil_preset_load(v90_dil_preset_t which, v90_dil_desc_t *out)
         return v90_dil_load_smartlink_adi(out);
     case V90_DIL_PRESET_SMARTLINK_ADI_QC:
         return v90_dil_load_smartlink_adi_qc(out);
+    case V90_DIL_PRESET_RASFINDER:
+        dil_load_rasfinder(out);
+        return true;
     case V90_DIL_PRESET_MEASUREMENT:
         dil_load_measurement(out);
         return true;
@@ -128,6 +173,7 @@ const char *v90_dil_preset_name(v90_dil_preset_t which)
     case V90_DIL_PRESET_DEFAULT_JA:      return "default-ja-125x12";
     case V90_DIL_PRESET_SMARTLINK_ADI:   return "smartlink-adi";
     case V90_DIL_PRESET_SMARTLINK_ADI_QC:return "smartlink-adi-qc";
+    case V90_DIL_PRESET_RASFINDER:       return "rasfinder";
     case V90_DIL_PRESET_MEASUREMENT:     return "measurement-120x66";
     case V90_DIL_PRESET_COURIER_STYLE:   return "courier-style-60x66";
     default:                             return "?";

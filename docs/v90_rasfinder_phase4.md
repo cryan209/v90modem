@@ -33,6 +33,38 @@ is too spectrally clean to have crossed the analogue loop.
 arrives 2.12–2.83 s after the first Ja bits, 11 of 11, and it would break every
 working call.
 
+## Continued live work, 2026-09-29
+
+Four further calls are preserved under
+`artifacts/rf-continue-20260928T220810Z/`; none reached V.90 Phase 4 and none is
+a TRN2d-length datum.
+
+* With the ordinary live descriptor path, `trn12000-r2` decoded the RasFinder's
+  CRC-valid `N=192 LSP=120 LTP=120` descriptor but the peer returned Tone A
+  1002 ms into Jd.  This confirms the default 20004T TRN1d can leave less Jd
+  than the 1586 ms used by the known Phase-4 call.
+* Shortening TRN1d to 12000T bought time, but one call accumulated more than
+  16000 Ja bits without a CRC-valid descriptor and reached the 6000 ms
+  fallback just as the peer retrained.
+* A new default-off `ME_V90_DIL_PROFILE_JA_MS` arm can use sustained bits from
+  the V.34 Ja hypothesis bank as the §9.3.1.3 signal-arrival evidence when an
+  explicit DIL profile is preloaded.  The 500 ms arm started Sd before this
+  peer's measured descriptor era and did not elicit S; it is a negative result
+  for this RasFinder, not a candidate default.
+* The complete RasFinder descriptor was recovered from an offline replay of
+  `rf-maxpow-c1` with `V90_DIL_DESC_LOG=1` and is now the explicit
+  `ME_V90_DIL_PROFILE=rasfinder` preset.  It carries all 192 training Ucodes,
+  eight H/REF pairs and both 120-bit SP/TP sequences; it is not reconstructed
+  from the three header fields.  `ME_V90_DIL_PROFILE_JA_MS=2500` preserves the
+  peer's measured 2.12–2.83 s Ja interval before using it.  The first live run
+  of that exact arm failed in V.8 and the second received a reserved/invalid
+  INFO1a, so the arm has not yet exercised Phase 3.
+
+The useful next live call is therefore the same exact-profile/2500 ms arm with
+12000T TRN1d and 12000T TRN2d.  It still needs a call that passes V.8 and
+INFO1a before it can answer either the Phase-3 yield question or the Phase-4
+TRN2d question.
+
 
 V.90 data mode is not established. The RasFinder accepts our Phase 3, sends
 CPt, terminates that group after our barred Ri, then retrains while we repeat

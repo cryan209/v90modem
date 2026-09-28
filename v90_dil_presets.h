@@ -35,6 +35,10 @@ typedef enum {
     V90_DIL_PRESET_SMARTLINK_ADI,
     V90_DIL_PRESET_SMARTLINK_ADI_QC,
 
+    /* CRC-valid Table-12 descriptor recovered from the RasFinder's Ja in
+     * artifacts/rf-maxpow-c1 (2026-09-28). */
+    V90_DIL_PRESET_RASFINDER,
+
     /*
      * Built for measurement rather than inherited: 120 segments of 66T
      * sweeping the whole Ucode ladder, REFc = 0, and LTP 11 so that training
