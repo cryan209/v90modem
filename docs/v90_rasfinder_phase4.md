@@ -411,3 +411,40 @@ So **the TRN2d sweep is set up and unanswered**: the arms, the scorer
 at 3996T, window 2117–2120 ms, zero CP frames) are all in place, and it needs
 a session where the rig reaches Phase 4. One Phase-4 call per arm suffices,
 because the peer's verdict is deterministic to 3 ms.
+
+## The V.8 failure has a signature, and it is not a JM we failed to read
+
+`V.8 result: status=4 ... modulations=none` ended 8 of 21 calls on 2026-09-29.
+The first reading — that spandsp discards a single unrepeated JM — is wrong
+(no candidate is ever stored; see the commit history). The taps say what
+actually happens, and it is deterministic:
+
+| capture | 2250 Hz-dominant blocks | first | last |
+| --- | --- | --- | --- |
+| `rf-trn1d-ab-194155Z/trn8004-r1` (fail) | 19 | **10.9 s** | 12.7 s |
+| `rf-trn1d-ab-194155Z/control-r2` (fail) | 30 | **10.9 s** | 13.8 s |
+| `rf-v8fix-200101Z/control-r1` (fail) | 18 | **10.9 s** | 12.6 s |
+| `rf-v8fix-200101Z/trn12000-r2` (fail) | 23 | **10.9 s** | 13.1 s |
+| `rf-v8fix-200101Z/trn12000-r1` (ok) | **0** | — | — |
+| `rf-maxpow-c1` (ok) | **0** | — | — |
+
+On a failing call the peer's ANSam runs 5.4 → 10.8 s (2100 Hz fraction 0.98,
+RMS ~1000, alternating 950/1025 — the 15 Hz AM), and at **10.9 s it stops and
+transmits a tone instead of JM**: 92.8% of the band energy at **2250 Hz** with
+6.7% at 2850 Hz, and *nothing* at 980, 1180, 1650, 1850 or 2100 Hz. So there is
+no V.21 JM on the wire to decode. Our CM is going out throughout at RMS 808,
+and the peer plainly heard it — stopping ANSam is what V.8 has the answering
+modem do on detecting CM.
+
+Four for four at 10.9 s, zero on the calls that work, so it is a timer in the
+peer or the network rather than a channel effect. What emits 2250 Hz here is
+not identified: it is no V-series signal this path uses, and our taps end at
+12.6–13.8 s because our own V.8 gives up at ~12.9 s and the engine hangs up
+(`[ME] V.8 failed (status=4), hanging up`). **The cheap next experiment is to
+hold the call through that instead of hanging up**, and see whether the tone
+ends and the peer retries.
+
+An offline `vpcm_decode --v8` of these receive taps reports a weak "CM" with
+plausible-looking fields; that is not the peer. Its bytes overlap our own CM
+and two such reads of two calls gave contradictory contents. **A receive tap on
+a path with echo is not a record of what the peer sent** — read the tones.
