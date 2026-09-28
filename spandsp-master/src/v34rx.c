@@ -9437,6 +9437,52 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
 
                 if (chosen_hyp >= 0)
                 {
+                    /* V90_CP_LOCK_TRACE: one line per hypothesis lock.
+                       The startup CP emit is gated on mp_hypothesis >= 0, and
+                       a lock RE-SEEDS the descrambler, the bitstream and the
+                       frame position -- so a second lock taken part way
+                       through a CP frame rewrites the rest of it while
+                       leaving everything already emitted intact.  That is the
+                       one mechanism left that corrupts a TAIL under a front
+                       end measured to be completely static (AGC, carrier,
+                       equalizer tap and input power all constant across the
+                       decay).  The lock criterion is the 17-one/start-zero MP
+                       preamble allowing two errors, and a Table 14 CP body
+                       carries long runs of ones in its constellation masks,
+                       so a false preamble inside a frame is expected rather
+                       than exotic.  `sym` is s->duration: the CP bit stream
+                       runs at 2 bits per symbol from the FIRST lock, so a
+                       re-lock at symbol N after that one lands at CP bit 2N,
+                       which is what lines this up against V90_CP_BIT_DUMP. */
+                    {
+                        static int lock_trace_checked = 0;
+                        static FILE *lock_trace = NULL;
+
+                        if (!lock_trace_checked)
+                        {
+                            const char *path = V34_DIAG_GETENV("V90_CP_LOCK_TRACE");
+
+                            if (path  &&  *path)
+                                lock_trace = fopen(path, "w");
+                            /*endif*/
+                            lock_trace_checked = 1;
+                        }
+                        /*endif*/
+                        if (lock_trace)
+                        {
+                            fprintf(lock_trace,
+                                    "sym=%d relock=%d prev_hyp=%d hyp=%d score=%d type=%d "
+                                    "frame_pos=%d cp_rx=%d nolock=%d\n",
+                                    s->duration,
+                                    (s->mp_hypothesis >= 0) ? 1 : 0,
+                                    s->mp_hypothesis, chosen_hyp, chosen_score,
+                                    chosen_type_bit, s->mp_frame_pos,
+                                    v90_cp_rx ? 1 : 0,
+                                    s->mp_phase4_nolock_count);
+                            fflush(lock_trace);
+                        }
+                        /*endif*/
+                    }
                     s->mp_phase4_nolock_count = 0;
                     s->mp_hypothesis = chosen_hyp;
                     s->scramble_reg = chosen_reg;
@@ -14622,7 +14668,21 @@ SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
        moments ago and must not be walked.  Only the renegotiation path below
        turns training back on. */
     s->rx.reneg_cp_train = 0;
-    s->rx.v90_cp_stream = 0;
+    /* ME_V90_CP_STREAM_STARTUP belongs HERE, in the startup conditioning.
+       It was read in v34_begin_rx_data() instead -- the DATA receiver's
+       start, which runs long after the CP stage -- so it never reached this
+       path at all: the startup CP bits came out byte-identical with the knob
+       on and off, and V90_RENEG_SYM_DUMP, which sits inside the streamed
+       branch, produced no file.  The "MEASURED, AND THE ANSWER IS THAT IT IS
+       NEEDED" note beside that read is therefore about what the flag does to
+       the DATA stage and to 11.6, not about startup CP, which had never been
+       measured either way.  Default stays 0 so this is a plumbing fix and not
+       a behaviour change. */
+    {
+        const char *v = getenv("ME_V90_CP_STREAM_STARTUP");
+
+        s->rx.v90_cp_stream = (v  &&  atoi(v) != 0) ? 1 : 0;
+    }
     s->rx.v90_cp_stream_reg = 0;
     s->rx.scrambler_tap = 4;
     s->rx.mp_phase4_default_scrambler_tap = 4;
