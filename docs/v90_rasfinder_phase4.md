@@ -506,21 +506,31 @@ peer at all. `ME_V90_V8_FAIL_HOLD=1` is how to see what follows the tone.
 
 V.8 has the answering modem stop ANSam once it has detected CM, so the end of
 the 2100 Hz burst in the receive tap is when the peer heard us.
-`tools/rf_ansam_latency.py` reports it, and over nine calls it is perfectly
-bimodal:
+`tools/rf_ansam_latency.py` reports it. On the nine calls of one batch it looked
+perfectly bimodal (2.1–3.3 s and success, 5.3–5.5 s and failure); **scored over
+all 63 RasFinder calls in `artifacts/` that contain an ANSam burst, that is a
+small-sample artefact and the ranges overlap** — status=2 runs 2.1–4.9 s
+(median 2.2, n=47) and status=4 runs 2.2–5.5 s (median 5.4, n=16). What survives
+is one-way, and sharply:
 
-| v8 status | ANSam ends | duration | 2250 Hz tone |
-| --- | --- | --- | --- |
-| 2 (six calls) | 7.4–8.5 s | 2.1–3.3 s | absent |
-| 4 (three calls) | **10.7 s, all three** | 5.3–5.5 s | at 10.9 s |
+| indicator | catches | false alarms |
+| --- | --- | --- |
+| ANSam longer than 5.0 s | **11 of 16** failures | **0 of 47** successes |
+| the 2250 Hz tone present | **11 of 16** failures | **0 of 47** successes |
 
-Read the **end** as the primitive: ANSam starts at 5.3–5.5 s in every call, and
-on a working call the peer ends it at 7.4–8.5 s because it has our CM, while on
-a failing one it runs to a fixed 10.7 s and is then cut off. So the peer either
-locks our CM in about two seconds or never locks it, and the 2250 Hz tone is
-downstream of the long ANSam rather than its cause. Unlike a pass/fail count
-this yields a number from every call, which is what makes a small A/B readable
-on a rig where half the calls fail.
+They are the same eleven calls. So a long ANSam and the tone each imply failure
+with no false positive in 47 successes, but **five of the sixteen failures do
+neither** — they fail with a normal 2.2 s ANSam and no tone, which is a second
+failure mode this has not characterised. All four calls that reached Phase 4 had
+an ANSam of exactly 2.2 s.
+
+Read the **end** as the primitive: ANSam starts at 5.3–5.5 s, and on the eleven
+tone calls it runs to a fixed 10.7 s and is then cut off, where a working call
+ends it at 7.4–8.5 s because the peer has our CM. So on those eleven the peer
+did not lock our CM and the tone is downstream of the long ANSam rather than its
+cause. The metric still yields a number from every call, which is what makes a
+small A/B readable on a rig where half the calls fail — but it is a one-way
+indicator, not a classifier.
 
 The levels are asymmetric, and measured with one tool in one unit: **our CM
 leaves at −20.1 dBFS while the peer's ANSam ARRIVES at −18.1 to −18.7 dBFS** —
