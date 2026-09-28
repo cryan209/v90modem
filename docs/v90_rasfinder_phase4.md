@@ -634,3 +634,9 @@ This does not rescue the preserved bad capture (residual improves only to
 1.082 and TRN remains 55%), so another PP acquisition defect remains.  Sweeping
 all 48 PP target phases and the initial pulse-shaper phase does not produce a
 healthy TRN lock; do not turn either into a peer-specific setting.
+
+Live confirmation is `artifacts/rf-pp-carrier-20260929-r1`: with no stored DIL
+descriptor and no peer-specific Ja timer, the receiver parsed a CRC-valid
+RasFinder descriptor (`N=192, LSP=120, LTP=120`) and started Sd from that event.
+The peer later retrained while we were waiting for S during Jd, so this proves
+the generic PP/Ja receive path on hardware but not data mode.
