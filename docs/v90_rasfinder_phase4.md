@@ -178,6 +178,35 @@ the implementation and so cannot falsify a convention:
 So the MP reaches the wire, on time (500 ms into a 2000 ms budget), in a form
 an independent decode of our own transmission accepts.
 
+## The §5.4.5 spectral shaper is exonerated, by the other peer's own CPt
+
+The shaper is the one part of the Phase 4 transmit chain that cannot be audited
+by reading alone: §5.4.5.5 leaves the *choice* of sign inversion rule free
+("select the rule that minimizes the spectral metric"), so only the rule
+definitions and the trellis constraint are normative, and Figure 2's state
+transitions do not survive text extraction. Rules A/B/C/D and the per-state
+allowable sets do check out against the clause — `v90_shaper_rule_inverts()` is
+B=all, C=even, D=odd, and `v90_select_shaper_rule()` offers {A,B} from state 0
+and {C,D} from state 1, which is §5.4.5.5's own example — but the next-state
+mapping (A,C to 0; B,D to 1) is unverified against the figure.
+
+It does not need to be verified from the figure, because it has been verified
+against a foreign peer. The CPt this peer sends is `D=17, K=12`, so
+`S = D - K = 5` and `Sr = 6 - S = 1`: spectral shaping **enabled**, one sign bit
+of redundancy. **SmartLink's CPt is `D=23, K=18`, so S = 5 and Sr = 1 as well**
+— and that peer's analogue receiver decodes our shaped TRN2d and MP, completes
+the MP/CP exchange and reaches V.90 data mode at 52000 bps. Same role pairing,
+same shaping redundancy, same code.
+
+So the shaper, the §5.4.3 modulus mapper, the §5.4.4 label order, the K/S split
+and the Table 16 MP framing are all exercised by a foreign analogue modem that
+gets to data mode, and none of them can be what the RasFinder fails to
+recognise. What differs between the two peers' Phase 4 is the constellation
+size (K=12 and four Ucodes per interval here against K=18 and eight there) and
+that this one sits behind a real analogue loop with a measured ~-20 dB echo.
+That leaves TRN2d length — never moved on this peer — as the lever, which is
+where the unanswered sweep points.
+
 ## The post-CPt region is SCR, and there is no CP — now with a CRC anchor
 
 An earlier reading of this region was withdrawn because its alignment was
