@@ -1351,6 +1351,34 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
             /*endif*/
             if ((s->negotiation_timer -= len) <= 0)
             {
+                /* On packetized links it is common to clip a CM/JM burst, which
+                   is why V8_CM_WAIT below accepts a single complete candidate
+                   for the answering role rather than requiring the second
+                   identical repeat.  The same thing happens to the CALLING
+                   role's JM, and until now it failed the call outright: the
+                   status went to V8_STATUS_FAILED without cm_jm_decode() ever
+                   having run, so result.jm_cm.peer_modulations stayed 0 and the
+                   engine reported "modulations=none" -- which reads as the peer
+                   offering nothing and is in fact us never having decoded what
+                   it offered.  Measured dialling a RasFinder analogue RAS over
+                   SIP: roughly half the calls failed here while the peer's V.21
+                   JM burst is plainly present in the receive tap.  Accept the
+                   saved candidate as a last resort, exactly as the answering
+                   role does; a corrupt one is rejected later by INFO0/INFO1
+                   validation, where failing the whole call here cannot be. */
+                if (cm_jm_decode_saved(s))
+                {
+                    span_log(&s->logging, SPAN_LOG_FLOW,
+                             "JM recognised from single saved candidate\n");
+                    fsk_tx_restart(&s->v21tx, &preset_fsk_specs[FSK_V21CH1]);
+                    memset(buf, 0, 3);
+                    v8_put_bytes(s, buf, 3);
+                    span_log_buf(&s->logging, SPAN_LOG_FLOW, "<CJ: ", &buf[1], 2);
+                    s->state = V8_CJ_ON;
+                    s->fsk_tx_on = true;
+                    break;
+                }
+                /*endif*/
                 /* Timeout */
                 span_log(&s->logging, SPAN_LOG_FLOW, "Timeout waiting for JM\n");
                 s->state = V8_PARKED;

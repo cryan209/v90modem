@@ -1966,6 +1966,33 @@ static void me_v90a_trn1d_report(void *user, int ones, int of)
 
 static void me_v90_analogue_rx_codewords_locked(const uint8_t *codewords, int count);
 static int g_v90_phase4_traced_phase = -1;
+/* Phase 3 and Phase 4 transmit stages worth stamping.  Phase 3 is here as
+ * well as Phase 4 because §9.3.2.7 lets the analogue modem retrain if Jd does
+ * not arrive within 4500 ms of the end of Ja, and Jd is the last thing we
+ * send: how much of that budget Sd, S-bar-d and TRN1d have already spent is
+ * the quantity that decides whether the peer answers, and it used to have to
+ * be computed from untimestamped [V90] lines. */
+static const char *me_v90_tx_stage_name(int tx_phase)
+{
+    switch (tx_phase) {
+    case V90_TX_SD:       return "Sd";
+    case V90_TX_SD_BAR:   return "S-bar-d";
+    case V90_TX_TRN1D:    return "TRN1d";
+    case V90_TX_JD:       return "Jd";
+    case V90_TX_JD_PRIME: return "J'd";
+    case V90_TX_DIL:      return "DIL";
+    case V90_TX_RI:       return "Ri";
+    case V90_TX_RI_ACK:   return "R-bar-i";
+    case V90_TX_TRN2D:    return "TRN2d";
+    case V90_TX_MP:       return "MP";
+    case V90_TX_ED:       return "Ed";
+    case V90_TX_B1D:      return "B1d";
+    case V90_TX_DATA:     return "DATA";
+    default:              return NULL;
+    }
+}
+
+
 static bool     g_v90a_complete_logged = false;
 static bool     g_v90a_failed_logged = false;
 static bool     g_v90a_retrain_logged = false;
@@ -10640,12 +10667,10 @@ void me_rx_g711(const uint8_t *codewords, int count)
         int tx_phase = v90_get_tx_phase(g_v90);
 
         if (tx_phase != g_v90_phase4_traced_phase) {
-            if (tx_phase == V90_TX_TRN2D || tx_phase == V90_TX_MP
-                || tx_phase == V90_TX_ED || tx_phase == V90_TX_B1D)
-                trace_phase("V90 Phase 4 tx stage -> %s",
-                            tx_phase == V90_TX_TRN2D ? "TRN2d"
-                            : tx_phase == V90_TX_MP  ? "MP"
-                            : tx_phase == V90_TX_ED  ? "Ed" : "B1d");
+            const char *name = me_v90_tx_stage_name(tx_phase);
+
+            if (name)
+                trace_phase("V90 tx stage -> %s", name);
             g_v90_phase4_traced_phase = tx_phase;
         }
     } else if (!g_v90) {
