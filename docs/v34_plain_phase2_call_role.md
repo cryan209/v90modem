@@ -396,14 +396,23 @@ timing would be editing the suite to pass.
   start profile's maximum.  Choosing it from a measured receive SNR remains
   the open item in `docs/v34_data_mode_rates.md`; the back-off above is a
   fallback, not a selection.
-* **A retrain taken from Phase 4 deadlocks in `FIRST_B_SILENCE`.**  Seen on
-  `rf-v34-g1`, `-k1` and `-k2`: the restarted Phase 2 walks
-  V90_RETRAIN_SILENCE -> V90_PHASE2_B_INFO0_SEEN -> FIRST_NOT_B_WAIT ->
-  FIRST_NOT_B -> FIRST_B_SILENCE and stays there for the rest of the call
-  while the receiver goes on to reach INFO1A.  That stage waits on
-  `V34_EVENT_REVERSAL_1`, and after a retrain the reversal ordinal has already
-  moved past it -- `phase2_reversal_count` is the durable authority the V.90
-  branch beside it already uses.
+* ~~A retrain taken from Phase 4 deadlocks in `FIRST_B_SILENCE`.~~  **Fixed.**
+  `v34_start_retrain()` did not reset the Phase 2 reversal and L1/L2
+  transaction counters -- the V.90 retrain response has always called
+  `v90_phase2_reset_transactions()`, plain V.34's never did -- so
+  `phase2_reversal_count` was still 3 from the startup Phase 2, every further
+  reversal was published as `V34_EVENT_REVERSAL_3`, and `FIRST_B_SILENCE`,
+  which waits for 11.2.1.1.4's reversal as `V34_EVENT_REVERSAL_1`, could never
+  fire.  The restarted Phase 2 walked V90_RETRAIN_SILENCE ->
+  V90_PHASE2_B_INFO0_SEEN -> FIRST_NOT_B_WAIT -> FIRST_NOT_B ->
+  FIRST_B_SILENCE and stayed there for the remaining 40 s of the call while
+  the receiver went on to reach INFO1A on its own (`rf-v34-g1`, `-k1`, `-k2`,
+  `-q1`, `-q3`).  That made the rate back-off useless in practice: q1 and q3
+  both reached V.34 data mode at **19200 bit/s**, both correctly asked for
+  14400 on the way out of a white receiver, and neither came back.  11.5.2.1
+  sends both modems back to 11.2.1's tone ranging, so the ordinals start over;
+  `FIRST_B_SILENCE` now also reads the durable counter, as the V.90 branch
+  four lines above it has since 2026-07.
 * **`ME_DATA_FRAMING=lapm` tears the call down** ~4.5 s into a white data
   mode, because V.42 detection concludes "unsupported peer" over bits that are
   not being decoded.  The default V.14 framing does not, which is why the
