@@ -1013,9 +1013,24 @@ static void send_cm_jm(v8_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(void) v8_tx_power(v8_state_t *s, float power)
+{
+    s->v21_tx_power = power;
+    fsk_tx_power(&s->v21tx, power);
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v8_tx(v8_state_t *s, int16_t *amp, int max_len)
 {
     int len;
+
+    /* Every fsk_tx_restart()/fsk_tx_init() in the state machine re-reads the
+       preset's own tx_level, so a level set once would be lost at the next
+       state change.  Re-applying here is idempotent -- fsk_tx_power() only
+       assigns a scaling factor -- and covers all nine of those sites. */
+    if (s->v21_tx_power != 0.0f)
+        fsk_tx_power(&s->v21tx, s->v21_tx_power);
+    /*endif*/
 
     //span_log(&s->logging, SPAN_LOG_FLOW, "v8_tx state %d\n", s->state);
     len = 0;

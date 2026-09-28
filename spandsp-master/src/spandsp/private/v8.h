@@ -52,6 +52,12 @@ struct v8_state_s
     int ci_repetition_count;
     bool proceed;
     fsk_tx_state_t v21tx;
+    /* Transmit level for the V.21 CI/CM/JM/CJ signalling, dBm0.  Both
+       preset_fsk_specs V.21 channels declare -14; V.2 permits more, and this
+       tree already boosts V.34 Phase 2 from -14 to -10 because a peer was not
+       detecting it (modem_engine.c).  Settable so the same can be measured for
+       V.8, whose CM a marginal answering detector may simply not hear. */
+    float v21_tx_power;
     fsk_rx_state_t v21rx;
     queue_state_t *tx_queue;
     modem_connect_tones_tx_state_t ansam_tx;

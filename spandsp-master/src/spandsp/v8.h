@@ -205,6 +205,12 @@ SPAN_DECLARE(logging_state_t *) v8_get_logging_state(v8_state_t *s);
 */
 SPAN_DECLARE(int) v8_tx(v8_state_t *s, int16_t *amp, int max_len);
 
+/*! Set the transmit level used for the V.21 CI/CM/JM/CJ signalling.
+    \brief Set the V.8 V.21 signalling transmit level.
+    \param s The V.8 context.
+    \param power The level, in dBm0. */
+SPAN_DECLARE(void) v8_tx_power(v8_state_t *s, float power);
+
 /*! Decode a block of received V.8 audio samples. N.B. This is not the function to
     call to run the V.8 protocol on received audio. It is for analysing audio streams,
     to extract the V.8 messages, for monitoring or debug applications.

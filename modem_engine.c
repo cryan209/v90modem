@@ -2681,6 +2681,33 @@ static int me_start_or_restart_v8_locked(int answer_tone)
         }
     }
 
+    /* ME_V8_TX_POWER_DBM0 sets the level of the V.21 CI/CM/JM/CJ signalling.
+     * spandsp's V.21 presets declare -14 dBm0 and that is the default here, so
+     * this changes nothing unless it is set.  It is worth having because the
+     * RasFinder's commonest V.8 failure is its answering detector not hearing
+     * our CM: measured over four failing calls it holds ANSam for 5.3-5.5 s
+     * and never answers, against 2.1-3.2 s on the calls that work, and the
+     * levels are asymmetric -- our CM leaves at -20.1 dBFS while its ANSam
+     * ARRIVES at -18.1 to -18.7 dBFS, i.e. after the ~6 dB loop loss this peer
+     * itself reports in Table 14's trn1d_gain, so it transmits some 8 dB
+     * hotter than we do.  This tree already boosts V.34 Phase 2 from -14 to
+     * -10 for exactly that reason ("caller modem not detecting our Phase 2"),
+     * and V.8 was left at the preset.  Untested against this peer: -10 is the
+     * value to try, and it must be measured, not assumed. */
+    {
+        const char *lvl = getenv("ME_V8_TX_POWER_DBM0");
+
+        if (lvl && *lvl) {
+            float dbm0 = strtof(lvl, NULL);
+
+            if (dbm0 < 0.0f && dbm0 >= -30.0f) {
+                v8_tx_power(g_v8, dbm0);
+                ME_LOG("[ME] V.8 V.21 signalling level set to %.1f dBm0 "
+                       "(preset is -14)\n", dbm0);
+            }
+        }
+    }
+
     g_v8_active_answer_tone = g_calling_party ? MODEM_CONNECT_TONES_NONE : answer_tone;
     g_v8_rx_energy = 0;
     g_v8_rx_count  = 0;
