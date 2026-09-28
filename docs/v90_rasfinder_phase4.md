@@ -1,5 +1,39 @@
 # RasFinder Phase 4: CRC-anchored measurements, 2026-09-28
 
+## Where this stands (updated 2026-09-29)
+
+V.90 data mode against the RasFinder is **not** established. What is now settled,
+newest first; the sections below are in discovery order and carry the evidence.
+
+**The Phase 4 blocker is a timer, not a verdict.** From our TRN2d to the peer's
+Tone A is 2.042 s ± 28 ms across four calls that differ in what we transmit *and*
+how we receive; §9.4.1.3's 2000 ms MP deadline is the only comparable interval in
+Phase 4. So the peer never *recognises* our MP rather than grading and rejecting
+it — which retires "it is rejecting our TRN2d, so the fault is in TRN2d itself".
+
+**Our side is conformant, verified on the failing call's own transmit tap.**
+TRN2d descrambles to ones, MP is Type 0 CRC-valid with zero demap failures,
+Phase 3 gives 177 CRC-valid Jd frames; the K/S split, modulus algorithm, label
+order, Table 16 layout and Ri codeword are audited against the clauses, and the
+§5.4.5 shaper is exonerated by SmartLink's CPt carrying the same Sr = 1 while
+that peer reaches data mode.
+
+**The remaining lever is TRN2d length, and it has never been moved on this
+peer.** Both directions need sweeping. The arms, the scorer and the baseline are
+in place; it wants a session where the rig reaches Phase 4 at all.
+
+**Two things are ours and are the next blockers behind it:** our CP-window
+receive is echo-limited by our own transmit and improvable from 0.572 to 0.787
+SCR ones with two existing knobs, and `ME_V34_ECHO=canceller` is condemned on
+this path. **One thing is probably not ours at all:** 8 of 21 calls that day
+died in V.8, eleven of sixteen such failures carrying a pure 2250 Hz tone that
+is too spectrally clean to have crossed the analogue loop.
+
+**Do not** make §9.3.1.3's 500 ms Sd bound absolute — this peer's Ja descriptor
+arrives 2.12–2.83 s after the first Ja bits, 11 of 11, and it would break every
+working call.
+
+
 V.90 data mode is not established. The RasFinder accepts our Phase 3, sends
 CPt, terminates that group after our barred Ri, then retrains while we repeat
 MP. V.90 9.4.2.2 permits SCR after CPt; 9.4.2.3 then requires CP. We have not
