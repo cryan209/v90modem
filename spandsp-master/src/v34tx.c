@@ -3750,9 +3750,17 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
             s->tx.tone_duration = 1;
             s->tx.stage = V34_TX_STAGE_FIRST_B_POST_REVERSAL_SILENCE;
         }
-        else if (s->rx.received_event == V34_EVENT_REVERSAL_1)
+        else if (s->rx.received_event == V34_EVENT_REVERSAL_1
+                 ||
+                 s->rx.phase2_reversal_count >= 2)
         {
-            /* Second reversal seen. We now have the round trip timed */
+            /* Second reversal seen. We now have the round trip timed.
+               phase2_reversal_count is the durable authority -- v34tx.c
+               clears received_event in dozens of places, and 11.2.1.1.4's
+               reversal is followed immediately by the peer's L1/L2, which
+               overwrites it -- so read the counter as well as the event.  The
+               V.90 branch above has used the counter for exactly this reason
+               since 2026-07; this is the plain-V.34 half of it. */
             s->tx.tone_duration = 1;
             s->tx.stage = V34_TX_STAGE_FIRST_B_POST_REVERSAL_SILENCE;
         }
@@ -9871,6 +9879,18 @@ SPAN_DECLARE(void) v34_start_retrain(v34_state_t *s)
        generator was running, the count expired in 18 ms at 3000 baud and the
        transmitter fell straight through into INITIAL_PREAMBLE/INFO0 --
        measured live, artifacts/retrain-live-c1. */
+    /* 11.5.2.1 sends both modems back to the 11.2.1 tone ranging, so the
+       reversal and L1/L2 ordinals start over.  Without this reset the
+       receiver's phase2_reversal_count is still 3 from the startup Phase 2,
+       every further reversal is published as REVERSAL_3, and the B family's
+       FIRST_B_SILENCE -- which waits for the 11.2.1.1.4 reversal as
+       V34_EVENT_REVERSAL_1 -- can never fire.  Measured live against the
+       RasFinder (artifacts/rf-v34-q1, -q3, -g1, -k1, -k2): the retrain walked
+       V90_RETRAIN_SILENCE -> V90_PHASE2_B_INFO0_SEEN -> FIRST_NOT_B_WAIT ->
+       FIRST_NOT_B -> FIRST_B_SILENCE and stayed there for the rest of the
+       call while the receiver went on to reach INFO1A.  The V.90 retrain
+       response has always done this reset; plain V.34's did not. */
+    v90_phase2_reset_transactions(s);
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.current_getbaud = get_v90_wait_info1a_baud;
     s->tx.tone_duration = 0;
