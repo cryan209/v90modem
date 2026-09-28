@@ -9007,7 +9007,11 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    columns alone cannot say which one -- the same read that
                    V90_RENEG_SYM_DUMP gives the 9.6 window, which does not
                    run here because it sits inside the streamed branch. */
-                fprintf(mp_dump, "%d %d %d %.4f %.2f %.6f %.5f %.4f %ld %.5f\n",
+                /* Keep the original ten columns stable.  The sample clock,
+                   timing correction and half-symbol phase anchor a decision
+                   to its own input, rather than inferring time from duration
+                   (which is reset at each protocol stage). */
+                fprintf(mp_dump, "%d %d %d %.4f %.2f %.6f %.5f %.4f %ld %.5f %d %d %d\n",
                         s->duration, data_bits, abs_bits,
                         sqrtf(sym->re*sym->re + sym->im*sym->im),
                         (double) (180.0f/3.14159265f)*atan2f(sym->im, sym->re),
@@ -9019,7 +9023,10 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                             s->eq_coeff[V34_EQUALIZER_PRE_LEN].re
                                 *s->eq_coeff[V34_EQUALIZER_PRE_LEN].re
                           + s->eq_coeff[V34_EQUALIZER_PRE_LEN].im
-                                *s->eq_coeff[V34_EQUALIZER_PRE_LEN].im));
+                                *s->eq_coeff[V34_EQUALIZER_PRE_LEN].im),
+                        s->qam_sample_time,
+                        s->total_baud_timing_correction,
+                        s->baud_half);
                 fflush(mp_dump);
             }
             /*endif*/

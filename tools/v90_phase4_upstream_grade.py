@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """Grade the peer's upstream Phase 4 signal (CPt / SCR / CP) OUTSIDE our receiver.
 
-Our own Phase 4 receiver's dibits go white immediately after the far-end CPt,
-so anything read through it measures that defect rather than the peer.  This
-demodulates a recorded RX tap directly:
+Demodulates a recorded RX tap directly, independently of the live receiver.
+Locate the window with a CRC-valid CPt before attributing its result to Phase
+4; v90_phase4_capture_check.py provides that anchor. In rf-maxpow-c1, the
+previously quoted clean 28-30.4 s window is AFTER the Phase 4 retrain. The
+actual CPt starts at RX-file 23.0003 s and its second repetition degrades in
+this independent receiver too. A clean but misaligned window proves nothing
+about the failing receiver.
 
   analytic signal -> mix to baseband at V.34 5.1's fc = S*d/e -> exact
   band-limited resample to T/2 -> 41-tap fractionally-spaced equalizer adapted
@@ -122,4 +126,5 @@ def main():
     fc = float(sys.argv[5]) if len(sys.argv) > 5 else baud*8/14
     grade(x, t0, t1, baud, fc)
 
-main()
+if __name__ == "__main__":
+    main()

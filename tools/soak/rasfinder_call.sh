@@ -8,7 +8,7 @@
 # Environment starting with ME_/V34_/V90_/VPCM_ is passed through to the
 # server, so an A/B is "the same command twice with one variable moved".
 #
-# The RasFinder rejects an immediate redial: leave ~20 s between calls.
+# The RasFinder rejects close redials: leave 60-90 s between calls.
 set -u
 DIR=${1:?usage: rasfinder_call.sh <artifact-dir> [hold-seconds]}
 HOLD=${2:-45}

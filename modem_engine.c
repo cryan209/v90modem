@@ -2697,6 +2697,23 @@ static int v34_echo_policy_mode(void)
     return cached;
 }
 
+/* Diagnostic arm for V.90 9.4's CP/SCR receiver.  The RasFinder RX tap
+ * contains correlated downstream echo once TRN2d starts (rf-maxpow-c1,
+ * CRC-anchored RX 23.0 s).  Fit against the most recently transmitted
+ * samples, not the old queue cursor accumulated while cancellation was off.
+ * This changes only the internal demodulator input; DS0 octets are untouched.
+ * Default off until both acquisition and payload have hardware coverage. */
+static bool v90_cp_echo_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *value = getenv("ME_V90_CP_ECHO");
+        cached = value && atoi(value) != 0;
+    }
+    return cached != 0;
+}
+
 static void notch_filter_init(notch_filter_t *nf, float freq, float q, float fs)
 {
     float w0 = 2.0f * M_PI * freq / fs;
@@ -7545,40 +7562,55 @@ skip_8k_codewords:
                    of -- the same shape of defect as the Phase 2 notch, and
                    invisible for the same reason: it is applied after the RX
                    G.711 tap, so every recording exonerates the wire. */
+                bool cp_echo = g_mod == ME_MOD_V90
+                            && rx_stage == V34_RX_STAGE_V90_CP
+                            && g_v90
+                            && (v90_get_tx_phase(g_v90) == V90_TX_TRN2D
+                                || v90_get_tx_phase(g_v90) == V90_TX_MP)
+                            && v90_cp_echo_enabled();
+                static bool was_cp_echo;
+                bool cp_echo_begin = cp_echo && !was_cp_echo;
+                was_cp_echo = cp_echo;
                 if (g_echo_can && notch_active
-                    && v34_echo_policy_mode() != V34_ECHO_NONE
+                    && (cp_echo || (v34_echo_policy_mode() != V34_ECHO_NONE
                     && ((g_mod == ME_MOD_V90
                          && v34_echo_policy_mode() == V34_ECHO_CANCELLER)
-                        || g_v34_use_echo_can)) {
+                        || g_v34_use_echo_can)))) {
                     #define EC_TAPS     1024    /* 128ms — covers delay + full tail */
-                    static float ec_h[EC_TAPS];   /* adaptive FIR coefficients */
+                    #define EC_CP_TAPS  2048    /* allow RTP callback skew plus echo tail */
+                    static float ec_h[EC_CP_TAPS];   /* adaptive FIR coefficients */
                     static int ec_init_done = 0;
                     static int ec_samples = 0;    /* total samples processed */
                     #define EC_MU_FAST  0.15f    /* NLMS step size — fast convergence */
                     #define EC_MU_SLOW  0.03f    /* NLMS step size — steady state */
                     #define EC_FAST_SAMPLES 16000 /* fast phase: 2 seconds */
                     #define EC_DELTA    1000.0f  /* regularization */
+                    int active_taps = cp_echo ? EC_CP_TAPS : EC_TAPS;
 
-                    if (!ec_init_done) {
+                    if (!ec_init_done || cp_echo_begin) {
                         memset(ec_h, 0, sizeof(ec_h));
                         ec_init_done = 1;
                         ec_samples = 0;
+                        if (cp_echo_begin)
+                            ME_LOG("[ME] V.90 CP echo experiment: %d taps, latest TX reference\n",
+                                   active_taps);
                     }
 
                     /* Need at least EC_TAPS samples in TX buffer */
                     int tx_avail = (g_tx_buf_wr - g_tx_buf_rd) & TX_BUF_MASK;
-                    if (tx_avail >= EC_TAPS) {
+                    if (cp_echo || tx_avail >= EC_TAPS) {
                         for (int i = 0; i < len; i++) {
                             /* Current RX sample index in the TX timeline:
                                RX[i] was received at the same time as TX was being
                                sent. The echo of TX[t-d] appears in RX[t].
                                We reference TX from the read pointer forward. */
-                            int tx_base = (g_tx_buf_rd + i) & TX_BUF_MASK;
+                            int tx_base = ((cp_echo ? g_tx_buf_wr - len
+                                                   : g_tx_buf_rd) + i) & TX_BUF_MASK;
 
                             /* Compute echo estimate and input power */
                             float echo_est = 0.0f;
                             float x_pow = EC_DELTA;
-                            for (int j = 0; j < EC_TAPS; j++) {
+                            for (int j = 0; j < active_taps; j++) {
                                 int tx_idx = (tx_base - j + TX_BUF_SIZE) & TX_BUF_MASK;
                                 float xj = (float)g_tx_buf[tx_idx];
                                 echo_est += ec_h[j] * xj;
@@ -7592,7 +7624,7 @@ skip_8k_codewords:
                             /* NLMS tap update — fast mu during initial convergence */
                             float mu = (ec_samples < EC_FAST_SAMPLES) ? EC_MU_FAST : EC_MU_SLOW;
                             float mu_norm = mu / x_pow;
-                            for (int j = 0; j < EC_TAPS; j++) {
+                            for (int j = 0; j < active_taps; j++) {
                                 int tx_idx = (tx_base - j + TX_BUF_SIZE) & TX_BUF_MASK;
                                 ec_h[j] += mu_norm * error * (float)g_tx_buf[tx_idx];
                             }
@@ -7607,7 +7639,7 @@ skip_8k_codewords:
 
                     /* Advance TX buffer read pointer only when NLMS ran.
                        Otherwise let the buffer accumulate until we have EC_TAPS. */
-                    if (tx_avail >= EC_TAPS)
+                    if (!cp_echo && tx_avail >= EC_TAPS)
                         g_tx_buf_rd = (g_tx_buf_rd + len) & TX_BUF_MASK;
 
                     /* Log performance periodically */
