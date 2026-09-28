@@ -122,6 +122,30 @@ they can be read against the retrain on one clock. (`[V90]` is unbuffered
 stderr and `[ME]` is buffered; they interleave out of order in `server.log`,
 so only the `[TRACE]` stamps are safe to read a sequence from.)
 
+## The window measured on the wire, not from our own detector (2026-09-29)
+
+The 2117-2120 ms table is measured between two engine events, so it carries our
+Tone-A detector's confirmation latency. Measuring the peer's Tone A directly on
+the receive tap instead -- 10 ms blocks, 2400 Hz fraction over 0.30 with the
+block RMS over 500 -- and taking our TRN2d start from the CPt-accept stamp
+(`--phase4-trace` puts TRN2d at 134T by RX-file 23.300 s on `rf-maxpow-c1`, so
+it began 23.283 s, which is the stamp):
+
+| capture | our TRN2d | peer Tone A on the tap | delta |
+| --- | --- | --- | --- |
+| `rf-maxpow-c1` | 23.283 s | 25.320 s | **2.037 s** |
+| `rf-padrep-a1` | 24.555 s | 26.600 s | **2.045 s** |
+| `live-echo-late2` | 23.364 s | 25.420 s | **2.056 s** |
+| `live-codec` | 28.422 s | 30.450 s | **2.028 s** |
+
+Mean **2.042 s, spread 28 ms**. Both endpoints bracket one round trip -- we
+sent the TRN2d, the peer answered -- so the peer's own window is that minus the
+round trip: **1.92 s at a 120 ms round trip, 2.00 s at 40 ms**. The 936-sample
+TX-to-RX offset the echo fit reports is an upper bound on that delay and
+includes an unknown difference in tap origins, so the true figure sits inside
+that range and §9.4.1.3's 2000 ms is its top end. Nothing else in Phase 4 is
+within half a second of it.
+
 ## Our Phase 4 transmit is conformant on the failing call itself
 
 `v90_analogue_rx_test --phase4-trace artifacts/rf-maxpow-c1/live-tx.g711
