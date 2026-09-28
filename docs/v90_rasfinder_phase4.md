@@ -607,3 +607,30 @@ against tone-mode calls. It cannot be shown to carry the call all the way to
 V.8 success from these taps, because the live call was torn down at ~14.6 s and
 the replay runs out of audio while the state machine is in `V8_CJ_ON` — but the
 branch it replaces was an immediate failure, and it now sends CJ and proceeds.
+
+### Ja failures start in PP, not in the descriptor parser
+
+The RasFinder DIL must not be cached as a peer profile.  On the preserved call
+that decodes Ja, Phase 3 reports a PP mean residual of **0.338**, locks TRN at
+**507/512 descrambled ones (99%)**, and finds the CRC-valid Table 12 descriptor.
+On a call that fills all 24 Ja hypothesis rings but finds no descriptor, PP is
+already broken: residual **1.145**, TRN only **272/512 (53%)**.  Searching the
+failed rings for the known fixed Table 12 header leaves 9–13 wrong bits in the
+best 51-bit window.  This is corrupted symbol recovery, not a framing or CRC
+edge case.
+
+One generic conflict was real.  V.34 10.1.3.6 equation 10-1 gives PP points at
+multiples of 30 degrees, while the generic primary-training carrier loop snaps
+every symbol to the nearest four-point/QPSK target.  It was running at the same
+time as the supervised PP equalizer and fighting its known PP target.  In the
+V.90 receive path the four-point loop now stands down throughout PP acquisition
+and conditioning; once PP is aligned, carrier correction uses that exact PP
+target instead.  On the known-good RasFinder capture the PP residual improves
+from **0.338 to 0.274** and the Ja descriptor remains CRC-valid.  The change is
+V.90-only: applying it to ordinary V.34 regressed the 2800/21600 matrix row.
+The full test suite and that row pass with the scope corrected.
+
+This does not rescue the preserved bad capture (residual improves only to
+1.082 and TRN remains 55%), so another PP acquisition defect remains.  Sweeping
+all 48 PP target phases and the initial pulse-shaper phase does not produce a
+healthy TRN lock; do not turn either into a peer-specific setting.

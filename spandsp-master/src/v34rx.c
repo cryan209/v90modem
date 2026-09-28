@@ -8406,6 +8406,19 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     }
                 }
                 v34_rx_tune_equalizer(s, sym, &pp_target);
+                /* V.34 10.1.3.6 PP is not QPSK: equation 10-1 uses points at
+                   multiples of 30 degrees.  The generic primary-training
+                   carrier loop below snaps to the nearest four-point symbol,
+                   so letting it run over PP makes it fight this supervised
+                   target.  Track the carrier against the known PP point here
+                   and suppress the four-point loop for this interval. */
+                if (s->v90_mode)
+                {
+                    float error = sym->im*pp_target.re - sym->re*pp_target.im;
+
+                    s->v34_carrier_phase_rate += (int32_t) (s->carrier_track_i*error);
+                    s->carrier_phase += (int32_t) (s->carrier_track_p*error);
+                }
             }
 
             if (pp_baud == 1)
@@ -10742,7 +10755,11 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             /* Re-enabled carrier tracking — test 4 showed MP detection worked
                better with carrier tracking on.  CMA equalization now provides
                more stable magnitude for eq_target, improving tracking quality. */
-            if ((s->stage != V34_RX_STAGE_PHASE3_WAIT_S
+            if (!(s->v90_mode
+                  && s->stage == V34_RX_STAGE_PHASE3_TRAINING
+                  && (!s->phase3_pp_started
+                      || s->duration <= PHASE3_PP_TRAIN_BAUDS))
+                && (s->stage != V34_RX_STAGE_PHASE3_WAIT_S
                  || (s->phase3_tracking_armed && v34_rx_phase3_tracking_enabled()))
                 && !phase4_trn_should_freeze_tracking(s))
             {
