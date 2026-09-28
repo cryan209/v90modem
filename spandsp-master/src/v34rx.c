@@ -655,6 +655,53 @@ static bool v90_startup_cp_adapt(void)
     return cached != 0;
 }
 
+/* ME_V90_CP_ADAPT_MU: the CP stage's CMA step, as a multiple of the ordinary
+   one, while ME_V90_CP_ADAPT_STARTUP is on.  Adaptation at the default step
+   is measurably ON but ineffective: over the RasFinder's 10432-symbol CP
+   stage the main tap creeps 0.74367 -> 0.75576, 1.6%, while the channel
+   steps at symbol ~4000 and the differential margin goes 5.4 -> 21 deg and
+   stays there.  The same audio through a fresh 41-tap CMA, fully converged
+   on that region, reads 5.75 deg -- so a solution exists that this loop does
+   not reach at this rate.
+
+   RE-CONVERGING WAS TRIED AND IT DOES NOT WORK.  Swept on that recording,
+   as CPt #1 margin / post-step margin / post-step |z| sd/mean / CRC-valid
+   frames:
+
+     mu=1     5.90 / 22.29 / 0.323 / CPt#1 OK      <- default, and the best
+     mu=5     6.20 / 26.27 / 0.638 / CPt#1 OK
+     mu=20   26.07 / 25.84 / 0.642 / NONE
+     mu=50   26.22 / 26.12 / 0.704 / NONE
+     mu=100  26.35 / 25.90 / 1.750 / NONE
+     mu=300  25.67 / 25.99 / 0.768 / NONE
+
+   26 deg is white.  Above mu=1 CMA's phase-blind gradient walks the trained
+   solution off -- the main tap goes 0.74367 -> 0.39985 at mu=20 -- and
+   destroys the CPt #1 that the ordinary step decodes cleanly, which is the
+   failure this file's other CMA comments already describe.  Throwing the
+   Phase-3 solution away instead (ME_V90_CP_RESET_EQ=1, the renegotiation
+   path's choice) is also worse, not better: 9.61 / 22.28 / 0.317, so CPt #1
+   degrades from 5.90 and the post-step region does not move at all.
+
+   So the post-step degradation is immune to EVERY equalizer treatment tried
+   -- freeze, slow adapt, fast adapt, reset-and-adapt -- and is therefore not
+   an equalizer problem.  Default 1.0: the knob exists to keep that sweep
+   attached to the code, not because any value above 1 is useful. */
+static float v90_startup_cp_adapt_mu(void)
+{
+    static float cached = -1.0f;
+
+    if (cached < 0.0f)
+    {
+        const char *v = getenv("ME_V90_CP_ADAPT_MU");
+        float parsed = (v  &&  *v) ? strtof(v, NULL) : 0.0f;
+
+        cached = (parsed > 0.0f) ? parsed : 1.0f;
+    }
+    /*endif*/
+    return cached;
+}
+
 static bool v34_rx_stage_is_phase4_frame(int stage)
 {
     return stage == V34_RX_STAGE_PHASE4_MP
@@ -7084,6 +7131,17 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
     {
         cma_delta *= EQUALIZER_SLOW_ADAPT_RATIO;
     }
+    /* Startup CP, adapting: re-converge rather than creep.  See
+       v90_startup_cp_adapt_mu(). */
+    if (s->stage == V34_RX_STAGE_V90_CP
+        &&
+        !s->reneg_cp_train
+        &&
+        v90_startup_cp_adapt())
+    {
+        cma_delta *= v90_startup_cp_adapt_mu();
+    }
+    /*endif*/
     if (s->stage == V34_RX_STAGE_PHASE4_TRN)
     {
         static float mu_scale = -1.0f;
@@ -14745,8 +14803,18 @@ SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
        DA loop to establish absolute phase, but §9.4.2.2/V.90 assumes the
        channel is static through this seam: adapting the CMA equalizer to a
        hypothesis that has not yet passed CP CRC can destroy the multi-level
-       data slicer's only valid equalizer. */
-    equalizer_save(&s->rx);
+       data slicer's only valid equalizer.
+
+       ME_V90_CP_RESET_EQ=1 takes the renegotiation path's choice instead --
+       throw the Phase-3 solution away and let CMA converge from scratch on
+       the CP/SCR signal, which is constant modulus and therefore legitimate
+       training material.  Default off; see the sweep recorded against
+       v90_startup_cp_adapt_mu(). */
+    if (getenv("ME_V90_CP_RESET_EQ")  &&  atoi(getenv("ME_V90_CP_RESET_EQ")) != 0)
+        equalizer_reset(&s->rx);
+    else
+        equalizer_save(&s->rx);
+    /*endif*/
     s->rx.phase4_da_active = 0;
     s->rx.phase4_da_seeded = 0;
     s->rx.phase4_da_derot = 0;
