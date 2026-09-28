@@ -10,6 +10,11 @@ tone replace JM at 10.9 s.  Unlike a pass/fail count it yields a number from
 every call, which is what makes a small A/B on the transmit level readable.
 
 Usage: rf_ansam_latency.py <dir-of-call-dirs-or-a-call-dir> ...
+
+NumPy is required and the system python3 on this host does not have it, so run
+this from a venv.  A soak script that pipes this through a bare `python3` with
+stderr discarded prints nothing and looks like a metric that did not fire --
+the taps are still there, so score afterwards rather than re-running the calls.
 """
 import sys, pathlib, numpy as np
 
