@@ -289,3 +289,72 @@ configurations that can abort before writing their output, `rm -f` the output
 path each iteration. Reusing one filename made a run that produced nothing
 score as byte-identical to the previous arm, and "the echo knobs make no
 difference" was read off that stale file.
+
+## The §9.3.1.3 Sd bound must NOT be made absolute on this peer (2026-09-29)
+
+With the Phase 3 stages now stamped, today's commonest failure reads:
+
+```
+[TRACE +18848ms] V90 strict RX event=INFO1A_VALID u_info=78 -> Phase3
+[TRACE +24846ms] V90 tx stage -> Sd          <- 6000 ms later
+[TRACE +24907ms] V90 tx stage -> TRN1d
+[TRACE +25028ms] V90 peer retrain detected
+```
+
+Ja bits were being captured from t=19.13 s with `parsed=0` throughout, so we
+sat until v90.c's 6000 ms `ME_V90_WAIT_JA_FALLBACK_MS` and the peer retrained
+182 ms after our Sd finally appeared. §9.3.1.3 says "After receiving Ja, the
+digital modem may wait for up to 500 ms and shall then transmit signal Sd", and
+the condition is receiving the **signal**, so the obvious change is to make
+that 500 ms an absolute deadline from the first Ja bits rather than — as now —
+merely the point at which a heuristic stops being suppressed, a heuristic that
+still needs an energy gap and on these calls never fires at all.
+
+**Do not make that change.** Over every RasFinder call in `artifacts/` whose Ja
+descriptor parsed, the gap from the first captured Ja bits to the parse is:
+
+```
+2.25 2.15 2.25 2.29 2.23 2.25 2.29 2.51 2.31 2.83 2.12   (n=11, seconds)
+```
+
+— never under 2.1 s. This peer puts its DIL descriptor late in Ja, exactly as
+`v90_ja_heuristic_allowed()`'s comment describes for the SmartLink class, so a
+500 ms Sd deadline would stop the peer's Ja (§9.3.2.4) before the descriptor
+arrived **on every currently-working call**. The current behaviour — wait for
+the descriptor, bounded by the interop timer — is right for this peer, and the
+failures are calls where the descriptor never parses at all, which starting Sd
+earlier does not rescue either: without a descriptor there is no DIL plan.
+The escape that remains untried is a preloaded descriptor
+(`ME_V90_DIL_PROFILE`, §34's lead) combined with the clause's bound, and note
+the descriptor is identical on every call that parses it
+(`N=192 LSP=120 LTP=120`), which is what would make a preset for this peer
+credible. It needs a Ja-transition detector that works when no energy gap
+appears, which is the part that does not exist.
+
+## A latent bug found while reading that gate
+
+`v90_ja_heuristic_allowed()` measured its §9.3.1.3 escape from a
+**function-scope `static`**, i.e. process lifetime, and this server runs many
+calls per process. On every call after the first the origin still held call
+one's timestamp, the elapsed time was already far past the bound, and the
+heuristic was allowed immediately — so the descriptor protection the function
+exists to provide was silently absent from every call but the first, and with a
+2.2 s descriptor that is not a small window. Same shape as the
+`v90_retire_phase2_cc_notch()` latch. Now file-scope and reset in
+`v90_dil_capture_reset()`, whose four call sites are all per-call or
+per-retrain scope.
+
+## Rig yield, 2026-09-29
+
+**0 of 21 calls reached Phase 4**, against 4 on 2026-09-28 with the same
+defaults. Breakdown: 8 ended in V.8 with `status=4` / no JM received at all;
+the rest reached Phase 2 or Phase 3 and ended in `INFO1A_INVALID` or
+"no S after N Jd symbols". None of it is attributable to the TRN2d knob, which
+acts strictly after all of it, and the knob is verified to reach the
+transmitter at every swept value (2040 / 3996 / 12000 mapped symbols).
+
+So **the TRN2d sweep is set up and unanswered**: the arms, the scorer
+(`tools/rf_phase4_summary.py`), the stage stamps and the baseline (four calls
+at 3996T, window 2117–2120 ms, zero CP frames) are all in place, and it needs
+a session where the rig reaches Phase 4. One Phase-4 call per arm suffices,
+because the peer's verdict is deterministic to 3 ms.

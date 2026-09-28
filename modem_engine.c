@@ -1809,6 +1809,20 @@ static int            g_v90_dil_capture_search = 0;
 static int            g_v90_dil_hyp_last_bits = 0;
 static bool           g_v90_dil_hyp_dumped = false;
 static bool           g_v90_wait_ja_tone_a_logged = false;
+/* The §9.3.1.3 escape below is measured from the FIRST suppressed attempt, so
+ * its origin and its once-per-source logging are per-CALL state.  They were
+ * function-scope statics, i.e. process lifetime, and this server runs many
+ * calls per process: on every call after the first, the origin still held call
+ * one's timestamp, the elapsed time was already far past the bound, and the
+ * heuristic was allowed IMMEDIATELY -- so the descriptor protection this
+ * function exists to provide was silently absent from every call but the
+ * first.  That matters because it is not a small window: measured over eleven
+ * RasFinder calls whose Ja descriptor parsed, it parses 2.12-2.83 s after the
+ * first Ja bits, never sooner, and starting Sd early stops the peer's Ja
+ * (§9.3.2.4) before it arrives.  Same shape as the v90_retire_phase2_cc_notch()
+ * latch (§ docs/v90_upstream_data_path.md). */
+static uint64_t       g_v90_ja_first_suppressed_ms = 0;
+static bool           g_v90_ja_suppress_logged[4];
 
 /* Echo canceller for full-duplex V.34.
    The FXS hybrid in the AudioCodes gateway leaks our TX signal back into
@@ -3110,6 +3124,8 @@ static void v90_dil_capture_reset(void)
     g_v90_pending_dil_valid = false;
     g_v90_dil_parse_logged = false;
     g_v90_wait_ja_tone_a_logged = false;
+    g_v90_ja_first_suppressed_ms = 0;
+    memset(g_v90_ja_suppress_logged, 0, sizeof(g_v90_ja_suppress_logged));
     g_v90_phase3_s_events = 0;
     g_last_v90_bridge_rx_stage = -1;
     g_last_v90_bridge_tx_stage = -1;
@@ -4713,8 +4729,6 @@ static bool v90_dil_capture_try_parse_at(int start)
  * first suppressed attempt, as a bounded escape hatch.  Default 0: never. */
 static bool v90_ja_heuristic_allowed(const char *source)
 {
-    static uint64_t first_suppressed_ms = 0;
-    static bool     logged[4];
     v34_v90_info1a_t received;
     int  idx;
     long fallback_ms;
@@ -4750,18 +4764,19 @@ static bool v90_ja_heuristic_allowed(const char *source)
      * the descriptor is late or never coming -- exactly the case where the
      * old behaviour deadlocked.  0 restores the unbounded wait. */
     fallback_ms = parse_env_int("ME_V90_JA_HEURISTIC_FALLBACK_MS", 500);
-    if (first_suppressed_ms == 0)
-        first_suppressed_ms = trace_now_ms();
+    if (g_v90_ja_first_suppressed_ms == 0)
+        g_v90_ja_first_suppressed_ms = trace_now_ms();
     else if (fallback_ms > 0
-             && trace_now_ms() - first_suppressed_ms >= (uint64_t) fallback_ms) {
+             && trace_now_ms() - g_v90_ja_first_suppressed_ms
+                >= (uint64_t) fallback_ms) {
         ME_LOG("[ME] V.90 Ja: no descriptor after %ld ms; allowing %s heuristic "
                "(ME_V90_JA_HEURISTIC_FALLBACK_MS)\n", fallback_ms, source);
         return true;
     }
 
     idx = (source[0] == 'p') ? 0 : (source[0] == 'e') ? 1 : 2;
-    if (!logged[idx]) {
-        logged[idx] = true;
+    if (!g_v90_ja_suppress_logged[idx]) {
+        g_v90_ja_suppress_logged[idx] = true;
         ME_LOG("[ME] V.90 Ja: suppressing %s heuristic; §9.3.1.3/V.92 §9.5.1.1.3 "
                "start Sd only on a CRC-valid DIL descriptor, and starting early "
                "makes the peer stop Ja (§9.3.2.4) before the descriptor arrives\n",
