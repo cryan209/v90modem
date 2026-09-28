@@ -541,3 +541,28 @@ boosts V.34 Phase 2 from −14 to −10 with the comment "caller modem not
 detecting our Phase 2". New `v8_tx_power()` and `ME_V8_TX_POWER_DBM0` make it
 settable, unset by default. Whether −10 shortens the peer's latency is a live
 A/B, not an inference.
+
+### There are two V.8 failure modes, and the spandsp fix covers one of them
+
+Splitting the sixteen `status=4` calls by the two indicators above:
+
+* **Eleven** end ANSam at a fixed 10.7 s and carry the pure 2250 Hz tone from
+  10.9 s. Nothing V.21 follows ANSam, so **no JM exists to decode** — replaying
+  two of them, `cm_jm_decode_saved()` never fires because no candidate is ever
+  stored, and the flow log reads CI×16, `'ANSam/' recognised`, CM×11,
+  `Timeout waiting for JM`.
+* **Five** end ANSam at the normal 7.4–7.5 s — so the peer *did* hear our CM —
+  and are followed by weak, intermittent V.21 channel 2: at 50 ms resolution the
+  1650/1850 Hz fractions sit at 0.0–0.2 with two bursts reaching 0.53–0.57, where
+  a clean JM alternates near 0.5. Replaying one (`rf-trn1d-ab-194155Z/
+  trn8004-r2`) the flow log reads **`Decoding single CM/JM candidate after
+  timeout` → `JM recognised from single saved candidate`**: the calling-role
+  fallback added to `V8_CM_ON` fires and recovers the JM, where before it went
+  straight to `V8_STATUS_FAILED`.
+
+**So that fix is vindicated on the second mode and is irrelevant to the first.**
+An earlier note here said it had no demonstrated effect; that was measured only
+against tone-mode calls. It cannot be shown to carry the call all the way to
+V.8 success from these taps, because the live call was torn down at ~14.6 s and
+the replay runs out of audio while the state machine is in `V8_CJ_ON` — but the
+branch it replaces was an immediate failure, and it now sends CJ and proceeds.
