@@ -628,6 +628,33 @@ static const char *v34_rx_stage_to_str(int stage)
     }
 }
 
+/* ME_V90_CP_ADAPT_STARTUP: let the CP stage's taps adapt at STARTUP, the way
+   9.6's CP conditioning is allowed to while it finds the level.
+   v34_force_v90_phase4_cp_rx() freezes them on the stated assumption that
+   "9.4.2.2 assumes the channel is static through this seam", and against the
+   RasFinder that assumption is measurably false: with the taps frozen the
+   differential decision margin grows from 8.0 deg rms before the CPt pair to
+   10.0 through CPt #1, 11.8 and then 22.2 across CPt #2 and 23.1 in SCR (26
+   is white), with the mean at 0 and the magnitude pinned at 1.00 -- growing
+   phase NOISE while every loop is static -- where an offline demodulation of
+   the same tap with a freshly adapted CMA reads 5.75.  Default off: 9.6's own
+   adapt-vs-freeze A/B came out the other way over 28 windows
+   (ME_V90_RENEG_CP_ADAPT defaults to frozen), so this is measured here and
+   not assumed by analogy. */
+static bool v90_startup_cp_adapt(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *v = getenv("ME_V90_CP_ADAPT_STARTUP");
+
+        cached = (v  &&  atoi(v) != 0) ? 1 : 0;
+    }
+    /*endif*/
+    return cached != 0;
+}
+
 static bool v34_rx_stage_is_phase4_frame(int stage)
 {
     return stage == V34_RX_STAGE_PHASE4_MP
@@ -10592,11 +10619,17 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    TRN lock) can drive converged taps to infinity.  Bound Phase
                    4 refinement to its first 512T and freeze it for all framed
                    Phase-4 signalling. */
+                /* Startup CP, taps allowed to adapt -- the same exception
+                   reneg_cp_train carries, scoped to the startup seam. */
+                bool startup_cp_adapt = (s->stage == V34_RX_STAGE_V90_CP)
+                                     && !s->reneg_cp_train
+                                     && v90_startup_cp_adapt();
                 bool freeze_mp_cma = ((s->stage == V34_RX_STAGE_V90_CP)
                                       || v34_rx_stage_is_phase4_frame(s->stage)
                                       || (s->stage == V34_RX_STAGE_PHASE4_TRN
                                           && s->phase4_trn_after_j >= 512))
-                                  && !s->reneg_cp_train;
+                                  && !s->reneg_cp_train
+                                  && !startup_cp_adapt;
                 /* Once the decision-aided Phase 4 tracker owns the taps
                    (data-aided LMS above), CMA must stand down or the two
                    fight: CMA's phase-blind gradient re-randomizes the phase
@@ -10611,7 +10644,8 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    phase. */
                 bool da_owns_eq = v34_rx_stage_is_phase4_frame(s->stage)
                                && s->phase4_da_seeded
-                               && !s->reneg_cp_train;
+                               && !s->reneg_cp_train
+                               && !startup_cp_adapt;
                 /* V.34 11.4: Phase 4 starts from the tap solution 11.3 already
                    trained on PP and TRN.  What that solution needs is a level
                    correction, not more shaping -- Phase 3 leaves |z| ~ 1.47 in
