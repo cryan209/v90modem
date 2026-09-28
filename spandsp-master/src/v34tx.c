@@ -823,8 +823,7 @@ static logging_state_t *tx_log_state(v34_tx_state_t *s)
  * carrier, which UNDER-declares the maximum -- a byte-exact DS0 carries any
  * G.711 codeword, and this modem already transmits Phase 4 at whatever CPt
  * asks, -6.5 dBm0 against the RasFinder, i.e. 6.5 dB above its own
- * declaration.  The default stays at -13 dBm0 so that moving it is a
- * measurement rather than a side effect; ME_V90_MAX_TX_DBM0_CODE moves it,
+ * declaration.  ME_V90_MAX_TX_DBM0_CODE moves it,
  * and v90.c's 8.5.2 check reads the same variable, so the value we announce
  * and the value we enforce can no longer drift apart. */
 static int v90_info0d_max_power_code(void)
@@ -837,7 +836,7 @@ static int v90_info0d_max_power_code(void)
         long parsed;
         char *end;
 
-        cached = 25;    /* -13 dBm0; KEEP IN SYNC with V90_INFO0D_MAX_POWER_CODE */
+        cached = 11;    /* -6 dBm0; KEEP IN SYNC with V90_INFO0D_MAX_POWER_CODE */
         if (value  &&  *value)
         {
             parsed = strtol(value, &end, 10);
@@ -915,7 +914,27 @@ static int info0_sequence_tx(v34_tx_state_t *s)
         bitstream_put(&bs, &t, 7, 4);
         /* 33:37    Maximum digital modem transmit power.
                     Represented in -0.5 dBm0 steps: 0 = -0.5 dBm0, 31 = -16 dBm0.
-                    -13 dBm0 -> code = (13 - 0.5) / 0.5 = 25.
+                    -6 dBm0 -> code = (6 - 0.5) / 0.5 = 11.
+
+                    This is the ceiling on what the far end may ASK us to
+                    transmit, not the level of any signal we originate, so it
+                    has to describe what a byte-exact DS0 can actually carry
+                    rather than what Phase 2 happens to measure.  It sat at
+                    -13 dBm0, copied from bits 29:32's measurement of the L2
+                    and INFO carriers, and against a peer behind a real
+                    analogue loop that is self-contradictory: the RasFinder
+                    needs (its codec-output target) x (its measured pad) on
+                    the wire -- 7551 and 8127 RMS on two calls, its pad read
+                    2.0024 and 2.1405 -- so a -13 dBm0 declaration left its
+                    CPt 6.5 dB over a limit it had no way to meet, and it
+                    exceeded the declaration rather than quieten the
+                    constellation.  At -6 dBm0 the same CPt lands 0.1 dB over.
+                    It does NOT change what the peer asks for: its
+                    codec-output set was byte-identical across both calls, so
+                    the request is set by its own channel measurement and this
+                    field only stops us forcing a conformant peer to break
+                    8.5.2.
+
                     KEEP IN SYNC with V90_INFO0D_MAX_POWER_CODE in v90.h:
                     8.5.2/Table 15 makes this the ceiling the analogue modem
                     designs its constellation against, and v90.c rejects a

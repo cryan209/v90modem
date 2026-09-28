@@ -34,7 +34,7 @@ typedef struct v90_state_s v90_state_t;
  * and enforced values move together; that file is not on this header's
  * include path, so it carries its own copy of this default.
  */
-#define V90_INFO0D_MAX_POWER_CODE 25    /* -13 dBm0 */
+#define V90_INFO0D_MAX_POWER_CODE 11    /* -6 dBm0 */
 
 #define V90_DIL_MAX_PAT_BITS 128
 #define V90_DIL_MAX_SEGMENTS 255
