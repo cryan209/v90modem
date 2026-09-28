@@ -5842,7 +5842,29 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
             g_phase_start_ms = 0;
             return;
         }
-        ME_LOG("[ME] V.8 failed (status=%d), hanging up\n", result->status);
+        /* ME_V90_V8_FAIL_HOLD keeps the bearer up after a failed V.8 so the
+         * tap records what the far end does next.  Measured against the
+         * RasFinder analogue RAS on 2026-09-29, this failure is not a JM we
+         * dropped: on four failing calls the peer's ANSam runs 5.4-10.8 s and
+         * at 10.9 s -- to the decimal, and on none of the calls that work --
+         * it stops and transmits a tone in place of JM, 92.8% of the band
+         * energy at 2250 Hz with nothing at 980/1180/1650/1850/2100.  There is
+         * no V.21 JM on the wire at all.  What 2250 Hz is here is unidentified,
+         * and every tap ends mid-tone because V.8 gives up at ~12.9 s and we
+         * hang up immediately, so holding is the way to see whether the tone
+         * ends and the peer retries.  Default off: unchanged behaviour. */
+        bool hold = parse_env_int("ME_V90_V8_FAIL_HOLD", 0) != 0;
+
+        ME_LOG("[ME] V.8 failed (status=%d)%s\n", result->status,
+               hold ? ", holding the call (ME_V90_V8_FAIL_HOLD)"
+                    : ", hanging up");
+        if (hold) {
+            /* Leave the bearer up and keep recording; whatever ends the call
+               (the caller's own schedule) bounds this, so it needs no timer. */
+            trace_phase("V8 failed (status=%d); holding the call to record the "
+                        "far end", result->status);
+            return;
+        }
         me_hangup();
         return;
     }

@@ -448,3 +448,32 @@ An offline `vpcm_decode --v8` of these receive taps reports a weak "CM" with
 plausible-looking fields; that is not the peer. Its bytes overlap our own CM
 and two such reads of two calls gave contradictory contents. **A receive tap on
 a path with echo is not a record of what the peer sent** — read the tones.
+
+## The best-motivated yield experiment, and why it is not yet a result
+
+`ME_V90_JA_HEURISTIC_FALLBACK_MS` defaults to **500**, and what it does is allow
+the early-Sd heuristics once the descriptor has not arrived within that time.
+Its justification (§35k) is that "a healthy descriptor arrives a median 0.3 s
+into Phase 3" — **measured on SmartLink.** On this peer the descriptor arrives
+**2.12–2.83 s after the first Ja bits, in 11 of 11 calls**, so a 500 ms fallback
+allows Sd four to five times sooner than the descriptor can appear, and our Sd
+terminates the peer's Ja per §9.3.2.4. By construction that is a mechanism for
+losing both the descriptor and the peer's Jd answer at once.
+
+**It is a hypothesis, not a finding.** Over every RasFinder call in
+`artifacts/` that transmitted Phase 3: the fallback fired on 3 calls and none
+reached Phase 4; it did not fire on 15 and 4 reached Phase 4. With a 27% base
+rate that split is what chance produces (Fisher exact, two-sided, p ≈ 1.0), so
+the correlation carries nothing.
+
+The experiment it prices is cheap and low-risk:
+`ME_V90_JA_HEURISTIC_FALLBACK_MS=3000`, past this peer's 2.83 s worst case,
+alternated against the 500 ms default and scored on whether Phase 3 completes.
+It cannot disturb a healthy call, because `v90_ja_heuristic_allowed()` returns
+true immediately once `g_v90_dil_parse_logged` is set, so the only calls it
+changes are those whose descriptor is late or absent — which are already lost
+today — and its worst case is the 6000 ms `ME_V90_WAIT_JA_FALLBACK_MS` those
+calls already reach.
+
+`ME_V90_V8_FAIL_HOLD=1` keeps the bearer up after a failed V.8 instead of
+hanging up, so a tap records what follows the 2250 Hz tone. Default off.
