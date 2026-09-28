@@ -243,3 +243,49 @@ whether that peer's S is keyed on the same origin.
 On 2026-09-29 the rig reached Phase 4 in **0 of 4** calls at the default,
 failing variously in V.8 (`modulations=none`), and in Phase 3 with "no S after
 24796 Jd symbols".
+
+## Our CP-window receive, measured against SCR (2026-09-29)
+
+SCR is binary ones (§8.3.5, through §10.1.3.9/V.34's modulation with GPA), so
+the descrambled ones fraction over the SCR era is a known-content reference
+for our own receiver, needing no CP frame from the peer. Scored on the startup
+Phase 4 bit stream (`V90_CP_BIT_DUMP` under `v90_engine_replay --dial --fast`
+on `artifacts/rf-maxpow-c1/live-rx.g711`), SCR windows being those reading
+over 0.45 ones:
+
+| configuration | bits emitted | SCR ones (mean) | best window |
+| --- | --- | --- | --- |
+| default | 6040 | 0.572 | 0.700 |
+| `ME_V90_CP_STREAM_STARTUP=1` | 20864 | **0.760** | 0.915 |
+| that plus `ME_V90_CP_ECHO=1` | 20864 | **0.787** | **0.970** |
+| that plus `ME_V34_ECHO=canceller` | — | **never reaches the CP window** | — |
+
+The independent T/2 CMA frontend reads 0.77–0.89 on the same audio, so 0.787
+is close to what this recording supports, and the default's 0.572 is not a
+property of the wire. The gap is the hypothesis-lock gating: the emit is
+conditioned on `mp_hypothesis >= 0`, so by default the framer sees only the
+fragments a lock covers — 6040 bits of a window that is 20864 bits long.
+
+**Both knobs stay default off, for measured reasons.**
+`ME_V90_CP_STREAM_STARTUP=1` costs the §11.6 row `V34_DUPLEX_RENEG=4000
+./v34_duplex_test 2400 9600 ulaw` **24 post-renegotiation bit errors against 0,
+with caller resync restarts 7 → 12** — reproduced here, so that note is not
+stale. And none of this can be validated end to end on this peer, because it
+never sends a CP; SCR ones is a proxy, sound because SCR's content is known,
+but a proxy.
+
+**`ME_V34_ECHO=canceller` must not be enabled on this path.** Its own log is
+the verdict: over a whole call it **never once removes power**, reading
+`pre_rms=380 post_rms=28962 (-37.6 dB)` early and still `-5.1 dB` two hundred
+thousand samples later — a net injector throughout, converging only in the
+sense that it eventually adds less. With it on, the call does not reach the CP
+window at all (no `V90_CP_BIT_DUMP` is produced), which is the same outcome the
+previous session saw live and attributed to `ME_V90_CP_ECHO`. That knob is the
+short recent-TX-reference filter and, with the window unfragmented, it is
+mildly **helpful** rather than harmful.
+
+A method note, because it cost a wrong conclusion here first: when sweeping
+configurations that can abort before writing their output, `rm -f` the output
+path each iteration. Reusing one filename made a run that produced nothing
+score as byte-identical to the previous arm, and "the echo knobs make no
+difference" was read off that stale file.
