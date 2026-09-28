@@ -1965,6 +1965,7 @@ static void me_v90a_trn1d_report(void *user, int ones, int of)
 }
 
 static void me_v90_analogue_rx_codewords_locked(const uint8_t *codewords, int count);
+static int g_v90_phase4_traced_phase = -1;
 static bool     g_v90a_complete_logged = false;
 static bool     g_v90a_failed_logged = false;
 static bool     g_v90a_retrain_logged = false;
@@ -10627,6 +10628,32 @@ void me_rx_g711(const uint8_t *codewords, int count)
                 break;
         }
     }
+    /* §9.4.1.3 gives the digital modem 2000 ms from the start of TRN2d to
+     * begin sending MP.  Against the RasFinder the peer's Phase 4 retrain is
+     * deterministic at 2117-2120 ms after our barred-Ri acknowledgement over
+     * four calls whose only differences were elsewhere, which is that
+     * deadline and not a verdict -- so the two instants it is measured
+     * between have to be on the same clock as the retrain.  [V90] goes to
+     * stderr unbuffered while [ME] is buffered, and the two interleave out of
+     * order in server.log, so the stage changes are stamped here. */
+    if (g_v90 && g_mod == ME_MOD_V90 && g_state == ME_TRAINING) {
+        int tx_phase = v90_get_tx_phase(g_v90);
+
+        if (tx_phase != g_v90_phase4_traced_phase) {
+            if (tx_phase == V90_TX_TRN2D || tx_phase == V90_TX_MP
+                || tx_phase == V90_TX_ED || tx_phase == V90_TX_B1D)
+                trace_phase("V90 Phase 4 tx stage -> %s",
+                            tx_phase == V90_TX_TRN2D ? "TRN2d"
+                            : tx_phase == V90_TX_MP  ? "MP"
+                            : tx_phase == V90_TX_ED  ? "Ed" : "B1d");
+            g_v90_phase4_traced_phase = tx_phase;
+        }
+    } else if (!g_v90) {
+        /* The server runs many calls per process; a latch that outlives the
+         * V.90 session would suppress the next call's stage changes. */
+        g_v90_phase4_traced_phase = -1;
+    }
+
     if (g_v92_su_rx_active && g_v92_active && g_state == ME_TRAINING) {
         for (int i = 0; i < count; i++)
             v92_su_rx_feed_locked(codewords[i], first_sample + (uint64_t)i);
