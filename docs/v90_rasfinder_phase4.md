@@ -501,3 +501,33 @@ reframes the failure: these calls are most likely being pre-empted by the
 gateway, and the standing advice that "its V.8 intermittently yields
 `modulations=none`" attributes to the peer something that is probably not the
 peer at all. `ME_V90_V8_FAIL_HOLD=1` is how to see what follows the tone.
+
+### The peer's CM-detection latency, and the level asymmetry
+
+V.8 has the answering modem stop ANSam once it has detected CM, so the end of
+the 2100 Hz burst in the receive tap is when the peer heard us.
+`tools/rf_ansam_latency.py` reports it, and over nine calls it is perfectly
+bimodal:
+
+| v8 status | ANSam ends | duration | 2250 Hz tone |
+| --- | --- | --- | --- |
+| 2 (six calls) | 7.4–8.5 s | 2.1–3.3 s | absent |
+| 4 (three calls) | **10.7 s, all three** | 5.3–5.5 s | at 10.9 s |
+
+Read the **end** as the primitive: ANSam starts at 5.3–5.5 s in every call, and
+on a working call the peer ends it at 7.4–8.5 s because it has our CM, while on
+a failing one it runs to a fixed 10.7 s and is then cut off. So the peer either
+locks our CM in about two seconds or never locks it, and the 2250 Hz tone is
+downstream of the long ANSam rather than its cause. Unlike a pass/fail count
+this yields a number from every call, which is what makes a small A/B readable
+on a rig where half the calls fail.
+
+The levels are asymmetric, and measured with one tool in one unit: **our CM
+leaves at −20.1 dBFS while the peer's ANSam ARRIVES at −18.1 to −18.7 dBFS** —
+after the ~6 dB loop loss that peer reports itself in Table 14's `trn1d_gain` —
+so it transmits some 8 dB hotter than we do. spandsp's V.21 presets declare
+−14 dBm0 and nothing in the tree could change it, while this same tree already
+boosts V.34 Phase 2 from −14 to −10 with the comment "caller modem not
+detecting our Phase 2". New `v8_tx_power()` and `ME_V8_TX_POWER_DBM0` make it
+settable, unset by default. Whether −10 shortens the peer's latency is a live
+A/B, not an inference.
