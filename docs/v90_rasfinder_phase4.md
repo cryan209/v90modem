@@ -637,6 +637,22 @@ healthy TRN lock; do not turn either into a peer-specific setting.
 
 Live confirmation is `artifacts/rf-pp-carrier-20260929-r1`: with no stored DIL
 descriptor and no peer-specific Ja timer, the receiver parsed a CRC-valid
-RasFinder descriptor (`N=192, LSP=120, LTP=120`) and started Sd from that event.
-The peer later retrained while we were waiting for S during Jd, so this proves
-the generic PP/Ja receive path on hardware but not data mode.
+RasFinder descriptor (`N=192, LSP=120, LTP=120`).
+
+**Correction: Sd did NOT start from that event.** The `[TRACE]` lines put Sd
+at +16733 ms and the parse at +17063 ms: the 500 ms
+`ME_V90_JA_HEURISTIC_FALLBACK_MS` bound (anchored at the energy-gap
+suppression, +16231) fired first, 332 ms before the descriptor landed.  The
+RasFinder never saw that Sd: the RX tap shows it transmitting Ja
+continuously for 5.4 s (RMS ~4000, no post-Ja silence) and then retraining,
+while our Jd ran its full 24796T §9.3.1.5 budget.  It is lenient about
+§9.3.2.4's 1500 ms (it held Ja far past it) but evidently does not arm its Sd
+detector that early.  Both earlier RasFinder calls that got S (`rf-maxpow-c1`,
+`rf-padrep-a1`) started Sd *after* the parse.  The default is now **1000 ms**:
+it covers this call's 832 ms, and it is the most §9.3.2.4 allows once the
+anchor's lag behind Ja start, Sd's 48 ms and the one-way delay are counted.
+Verified by real-time replay (`v90_engine_replay --dial`, NOT `--fast`: the
+bound is wall-clock): at 500 the replay reproduces the live Sd at anchor+501
+ms; at 1000 Sd goes out 1 ms after the parse, anchor+914.  So the margin is
+~90 ms on n=1, and whether the peer then answers Jd with S still needs a
+live call.
