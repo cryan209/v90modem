@@ -29,9 +29,10 @@ typedef struct v90_state_s v90_state_t;
  * the number the transmitter announces and the number the Phase 4 mapper
  * enforces have to be the same one.
  *
- * KEEP IN SYNC with the literal in prepare_info0d()'s "33:37" bitstream_put
- * in spandsp-master/src/v34tx.c -- that file is not on this header's include
- * path, so the compiler cannot check it for you.
+ * This is the DEFAULT only.  Both this check and the INFO0d builder in
+ * spandsp-master/src/v34tx.c read ME_V90_MAX_TX_DBM0_CODE, so the announced
+ * and enforced values move together; that file is not on this header's
+ * include path, so it carries its own copy of this default.
  */
 #define V90_INFO0D_MAX_POWER_CODE 25    /* -13 dBm0 */
 

@@ -814,6 +814,44 @@ static logging_state_t *tx_log_state(v34_tx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.90 Table 7 bits 33:37, the maximum digital modem transmit power, in
+ * -0.5 dBm0 steps (0 = -0.5 dBm0, 31 = -16 dBm0).  This is the ceiling the
+ * analogue modem designs its CPt/CP constellation against under 8.5.2, so it
+ * is the only spec-legal lever the digital modem has over what it will be
+ * asked to transmit.  It is NOT the Phase 2 nominal power in bits 29:32: the
+ * two fields were filled from the same -13 dBm0 measurement of the L2/INFO
+ * carrier, which UNDER-declares the maximum -- a byte-exact DS0 carries any
+ * G.711 codeword, and this modem already transmits Phase 4 at whatever CPt
+ * asks, -6.5 dBm0 against the RasFinder, i.e. 6.5 dB above its own
+ * declaration.  The default stays at -13 dBm0 so that moving it is a
+ * measurement rather than a side effect; ME_V90_MAX_TX_DBM0_CODE moves it,
+ * and v90.c's 8.5.2 check reads the same variable, so the value we announce
+ * and the value we enforce can no longer drift apart. */
+static int v90_info0d_max_power_code(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *value = getenv("ME_V90_MAX_TX_DBM0_CODE");
+        long parsed;
+        char *end;
+
+        cached = 25;    /* -13 dBm0; KEEP IN SYNC with V90_INFO0D_MAX_POWER_CODE */
+        if (value  &&  *value)
+        {
+            parsed = strtol(value, &end, 10);
+            if (end != value  &&  *end == '\0'  &&  parsed >= 0  &&  parsed <= 31)
+                cached = (int) parsed;
+            /*endif*/
+        }
+        /*endif*/
+    }
+    /*endif*/
+    return cached;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int info0_sequence_tx(v34_tx_state_t *s)
 {
     uint8_t *t;
@@ -882,9 +920,11 @@ static int info0_sequence_tx(v34_tx_state_t *s)
                     8.5.2/Table 15 makes this the ceiling the analogue modem
                     designs its constellation against, and v90.c rejects a
                     CPt/CP whose average power exceeds it.  This file is not
-                    on that header's include path, so the two literals are
-                    checked by eye. */
-        bitstream_put(&bs, &t, 25, 5);
+                    on that header's include path, so it carries its own
+                    copy of the default; both sites read
+                    ME_V90_MAX_TX_DBM0_CODE through the helper above, so the
+                    announced and enforced values cannot drift apart. */
+        bitstream_put(&bs, &t, v90_info0d_max_power_code(), 5);
         /* 38       Power measurement at codec output (1) or modem terminals (0).
                     SIP/RTP = codec output */
         bitstream_put(&bs, &t, 1, 1);
@@ -904,8 +944,9 @@ static int info0_sequence_tx(v34_tx_state_t *s)
         bitstream_put(&bs, &t, 0, 8);
         bitstream_flush(&bs, &t);
         V34_TX_LOG(tx_log_state(s), SPAN_LOG_FLOW,
-                 "  PCM law: %s, nominal power: -13 dBm0, max power: -13 dBm0\n",
-                 s->v90_pcm_law ? "A-law" : "u-law");
+                 "  PCM law: %s, nominal power: -13 dBm0, max power: %.1f dBm0\n",
+                 s->v90_pcm_law ? "A-law" : "u-law",
+                 -0.5*(double) (v90_info0d_max_power_code() + 1));
         return 62;
     }
 
