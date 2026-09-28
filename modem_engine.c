@@ -261,6 +261,13 @@ static bool g_data_lapm_detect = true;
 static int g_data_connect_rate = 0;
 static bool g_data_connect_reported = false;
 static volatile bool g_data_link_failed = false;
+/* Set when a V.42 detection verdict was reached over a data channel that was
+   not decoding, so the next data-mode entry must run detection again rather
+   than resume a link that was never established.  See DS_LINK_UNSUPPORTED. */
+static volatile bool g_data_link_redetect = false;
+/* Set while a physical-layer recovery started by v34_data_carrier_lost() is in
+   flight, so a V.42 verdict reached over those bits is not treated as final. */
+static volatile bool g_data_loss_recovering = false;
 static void on_training_complete(me_modulation_t mod, int rate, const char *name);
 static void v8_result_handler(void *user_data, v8_parms_t *result);
 
@@ -654,6 +661,24 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
         }
         break;
     case DS_LINK_UNSUPPORTED:
+        /* V.42 6.1's detection phase is an exchange of ODP and ADP over the
+           data channel, so its verdict is only worth anything if the data
+           channel was carrying bits.  When the physical receiver has stopped
+           decoding, it was not: measured live against the RasFinder
+           (artifacts/rf-v34-d2) the V.34 data mode came up at 31200 bit/s at
+           0.619 from the grid, where 2/3 is white, and detection reported an
+           unsupported peer 4.5 s later and tore the call down -- in the middle
+           of the 11.6 rate renegotiation that exists to fix exactly that.
+           A recovery is in flight or still available, so let it run and
+           re-open detection when data mode resumes; the caller's own bound
+           (retrain_on_loss_due()) decides when to stop trying. */
+        if (g_data_loss_recovering) {
+            ME_LOG("[ME] V.42 detection reported unsupported peer while the "
+                   "physical receiver is recovering; holding the call and "
+                   "re-running detection when data mode resumes\n");
+            g_data_link_redetect = true;
+            break;
+        }
         ME_LOG("[ME] V.42 detection reported unsupported peer\n");
         g_data_link_failed = true;
         break;
@@ -4234,6 +4259,8 @@ static void cleanup_v34_v90_training_locked(void)
     /* Per call, not per process: this server runs many calls in one. */
     g_loss_retrains = 0;
     g_v34_rx_rate_backoff_n = 0;
+    g_data_link_redetect = false;
+    g_data_loss_recovering = false;
     g_last_loss_retrain_ms = 0;
     g_retrain_from_data = false;
     g_v34_reneg_start_ms = 0;
@@ -5257,12 +5284,20 @@ static void v34_put_bit_cb(void *user_data, int bit)
                        layer survives it, so a re-entry after a retrain keeps
                        the data stack rather than restarting LAPM against a
                        peer still in the middle of its own connection. */
-                    if (g_retrain_from_data) {
+                    if (g_retrain_from_data && !g_data_link_redetect) {
                         g_retrain_from_data = false;
                         g_data_connect_rate = rate;
                         ME_LOG("[ME] V.34 retrain complete; resuming the "
                                "existing data link (%d bps)\n", rate);
                     } else {
+                        if (g_data_link_redetect) {
+                            g_data_link_redetect = false;
+                            g_data_loss_recovering = false;
+                            g_retrain_from_data = false;
+                            ME_LOG("[ME] V.42 detection ran over a receiver "
+                                   "that was not decoding; re-running it on "
+                                   "the recovered link (%d bps)\n", rate);
+                        }
                         data_stack_start_online(rate, g_calling_party);
                     }
                     g_state = ME_DATA;
@@ -7996,6 +8031,7 @@ skip_8k_codewords:
                         g_loss_retrains++;
                         g_last_loss_retrain_ms = trace_now_ms();
                         v34_rx_rate_backoff_locked();
+                        g_data_loss_recovering = true;
                         if (me_v34_reneg_enabled()
                             && v34_start_rate_renegotiation(g_v34) == 0) {
                             ME_LOG("[ME] V.34 data mode has stopped decoding; "
