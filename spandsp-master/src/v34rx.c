@@ -8913,10 +8913,28 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    the constellation, which the magnitude alone cannot give
                    (a diverged equalizer can hold a steady modulus).
                    tools/v34_mp_offline.py indexes columns 1 and 2 only. */
-                fprintf(mp_dump, "%d %d %d %.4f %.2f\n",
+                /* Columns 6-10 are the front end, not the decision: the
+                   AGC scaling, the equalizer's level estimate, the carrier
+                   loop's frequency, the input power meter and the main
+                   equalizer tap's magnitude.  A startup CP frame that
+                   decodes and is then followed by one that degrades
+                   PROGRESSIVELY is a loop walking off, and the decision
+                   columns alone cannot say which one -- the same read that
+                   V90_RENEG_SYM_DUMP gives the 9.6 window, which does not
+                   run here because it sits inside the streamed branch. */
+                fprintf(mp_dump, "%d %d %d %.4f %.2f %.6f %.5f %.4f %ld %.5f\n",
                         s->duration, data_bits, abs_bits,
                         sqrtf(sym->re*sym->re + sym->im*sym->im),
-                        (double) (180.0f/3.14159265f)*atan2f(sym->im, sym->re));
+                        (double) (180.0f/3.14159265f)*atan2f(sym->im, sym->re),
+                        (double) s->agc_scaling,
+                        (double) s->eq_target_mag,
+                        (double) dds_frequencyf(s->v34_carrier_phase_rate),
+                        (long) power_meter_current(&s->power),
+                        (double) sqrtf(
+                            s->eq_coeff[V34_EQUALIZER_PRE_LEN].re
+                                *s->eq_coeff[V34_EQUALIZER_PRE_LEN].re
+                          + s->eq_coeff[V34_EQUALIZER_PRE_LEN].im
+                                *s->eq_coeff[V34_EQUALIZER_PRE_LEN].im));
                 fflush(mp_dump);
             }
             /*endif*/
