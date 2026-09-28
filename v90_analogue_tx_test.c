@@ -220,27 +220,6 @@ static void test_sequence(void)
     v90_analogue_tx_free(tx);
 }
 
-static void test_rasfinder_dil_preset(void)
-{
-    v90_dil_desc_check_t check;
-    v90_dil_desc_t d;
-
-    printf("RasFinder CRC-recovered Table-12 DIL preset\n");
-    memset(&d, 0, sizeof(d));
-    CHECK(v90_dil_preset_load(V90_DIL_PRESET_RASFINDER, &d),
-          "preset did not load");
-    CHECK(d.n == 192 && d.lsp == 120 && d.ltp == 120,
-          "header is N=%u LSP=%u LTP=%u, expected 192/120/120",
-          d.n, d.lsp, d.ltp);
-    CHECK(d.h[0] == 59 && d.h[2] == 39 && d.h[5] == 9,
-          "segment lengths do not match the recovered descriptor");
-    CHECK(d.train_u[0] == 96 && d.train_u[96] == 31
-          && d.train_u[191] == 0,
-          "training-Ucode anchors do not match the recovered descriptor");
-    CHECK(v90_dil_desc_validate(&d, &check) && check.ok,
-          "recovered descriptor does not probe every data-frame interval");
-}
-
 static void test_zero_length_dil(void)
 {
     v90_analogue_tx_config_t cfg;
@@ -640,7 +619,6 @@ int main(int argc, char *argv[])
     }
 
     test_sequence();
-    test_rasfinder_dil_preset();
     test_zero_length_dil();
     test_ja_carries_the_descriptor();
     test_rate_renegotiation_silence_cycle();

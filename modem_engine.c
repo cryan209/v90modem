@@ -1809,11 +1809,6 @@ static int            g_v90_dil_capture_search = 0;
 static int            g_v90_dil_hyp_last_bits = 0;
 static bool           g_v90_dil_hyp_dumped = false;
 static bool           g_v90_wait_ja_tone_a_logged = false;
-/* RX sample at which the V.34 hypothesis bank first emitted Ja bits.  A
- * preloaded DIL profile is recovery data, not proof of Ja, but the bitstream
- * itself is proof that the signal has arrived.  Keep the timestamp separate
- * so the explicit profile fallback below can obey §9.3.1.3's wait bound. */
-static uint64_t       g_v90_ja_first_bits_sample = 0;
 /* The §9.3.1.3 escape below is measured from the FIRST suppressed attempt, so
  * its origin and its once-per-source logging are per-CALL state.  They were
  * function-scope statics, i.e. process lifetime, and this server runs many
@@ -3156,7 +3151,6 @@ static void v90_dil_capture_reset(void)
     g_v90_pending_dil_valid = false;
     g_v90_dil_parse_logged = false;
     g_v90_wait_ja_tone_a_logged = false;
-    g_v90_ja_first_bits_sample = 0;
     g_v90_ja_first_suppressed_ms = 0;
     memset(g_v90_ja_suppress_logged, 0, sizeof(g_v90_ja_suppress_logged));
     g_v90_phase3_s_events = 0;
@@ -5110,43 +5104,8 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
      * first bit's arrival to the frame. */
     if (first_bits > 0 && !g_v90_dil_capture_start_logged) {
         g_v90_dil_capture_start_logged = true;
-        g_v90_ja_first_bits_sample = g_rx_audio_samples;
         ME_LOG("[ME] V.90 Ja capture: first bits at t=%.3fs (%d bits)\n",
                (double)g_rx_audio_samples / 8000.0, first_bits);
-    }
-    /* Interoperability fallback for a peer whose known DIL descriptor has
-     * been preloaded but whose live copy is too noisy to pass CRC.  V.90
-     * §9.3.1.3 keys Sd on RECEIVING Ja, not on decoding its descriptor, and
-     * permits at most 500 ms before Sd.  The V.34 hypothesis bank's sustained
-     * Ja bits provide that missing signal transition.  This remains opt-in:
-     * without an explicitly requested profile and delay, a fallback profile
-     * continues to be recovery data only and never asserts a receive event.
-     *
-     * ME_V90_DIL_PROFILE_JA_MS is measured from the first recovered Ja bits;
-     * 500 is the clause ceiling and 0 disables this path.  Larger values up
-     * to 5000 are accepted deliberately for peers such as the RasFinder,
-     * whose CRC-valid descriptor is measured 2.12-2.83 s into Ja; those are
-     * an explicit interop exception and remain default-off. */
-    if (g_v90_ja_first_bits_sample != 0
-        && g_v90_pending_dil_valid
-        && !g_v90_dil_parse_logged
-        && getenv("ME_V90_DIL_PROFILE")) {
-        int profile_ja_ms = parse_env_int("ME_V90_DIL_PROFILE_JA_MS", 0);
-
-        if (profile_ja_ms > 0 && profile_ja_ms <= 5000
-            && g_rx_audio_samples - g_v90_ja_first_bits_sample
-               >= (uint64_t)profile_ja_ms * 8
-            && g_v90 && v90_get_tx_phase(g_v90) == V90_TX_WAIT_JA) {
-            bool accepted = v90_handle_rx_event(g_v90, V90_RX_EVENT_J);
-
-            ME_LOG("[ME] V.90: Ja bitstream present for %d ms; starting Sd with "
-                   "preloaded DIL profile per §9.3.1.3 (accepted=%d)\n",
-                   profile_ja_ms, accepted ? 1 : 0);
-            trace_phase("V90 Ja confirmed by bitstream + DIL profile after %d ms "
-                        "(accepted=%d)", profile_ja_ms, accepted ? 1 : 0);
-            if (accepted)
-                v34_v90_arm_phase3_s_detector(g_v34);
-        }
     }
     if (first_bits < 206)
         return false;
@@ -9259,9 +9218,6 @@ static void prepare_v90_phase3_locked(void)
                 loaded = v90_dil_load_smartlink_adi_qc(&g_v90_pending_dil);
             else if (strcmp(dil_profile, "smartlink-adi") == 0)
                 loaded = v90_dil_load_smartlink_adi(&g_v90_pending_dil);
-            else if (strcmp(dil_profile, "rasfinder") == 0)
-                loaded = v90_dil_preset_load(V90_DIL_PRESET_RASFINDER,
-                                             &g_v90_pending_dil);
             if (loaded) {
                 g_v90_pending_dil_valid = true;
                 ME_LOG("[ME] V.90: installed %s DIL fallback "
@@ -9276,8 +9232,7 @@ static void prepare_v90_phase3_locked(void)
                             (unsigned)g_v90_pending_dil.lsp,
                             (unsigned)g_v90_pending_dil.ltp);
             } else if (strcmp(dil_profile, "smartlink-adi-qc") == 0
-                       || strcmp(dil_profile, "smartlink-adi") == 0
-                       || strcmp(dil_profile, "rasfinder") == 0) {
+                       || strcmp(dil_profile, "smartlink-adi") == 0) {
                 ME_LOG("[ME] V.90: %s DIL fallback failed validation\n", dil_profile);
             }
         }
