@@ -495,6 +495,25 @@ static int decode_baud(v17_rx_state_t *s, complexf_t *z)
     {
         /* 4800bps V.32bis mode, without trellis coding */
         constellation_state = constel_map_4800[re][im];
+        /* This branch used to return without tracking anything, which is
+           survivable over a fax burst and not over a V.32bis connection: with
+           the carrier loop and the equalizer both open, the duplex harness
+           collects about 1.5% bit errors in bursts once the data phase runs
+           for thousands of symbols.  4800 does not exist in V.17, so this is
+           the V.32bis path only. */
+        track_carrier(s, z, &s->constellation[constellation_state]);
+        if (s->v32bis_data_eq)
+            tune_equalizer(s, z, &s->constellation[constellation_state]);
+        /*endif*/
+        if (s->v32bis_eye_log  &&  s->training_stage == TRAINING_STAGE_NORMAL_OPERATION)
+        {
+            float dre = z->re - s->constellation[constellation_state].re;
+            float dim = z->im - s->constellation[constellation_state].im;
+
+            s->v32bis_eye_sum += dre*dre + dim*dim;
+            s->v32bis_eye_count++;
+        }
+        /*endif*/
         raw = v32bis_4800_differential_decoder[s->diff][constellation_state];
         s->diff = constellation_state;
         put_bit(s, raw);

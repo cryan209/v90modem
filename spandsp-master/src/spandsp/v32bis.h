@@ -197,6 +197,20 @@ SPAN_DECLARE(int) v32bis_prepare_startup_tx(v32bis_state_t *s, int remote_rates)
 
 /*! Number of startup symbols supplied to the TX pulse shaper or delivered by
     the RX carrier/timing/equalizer front end. */
+/*! \brief Run the ITU-T V.32bis clause 6 start-up as a reactive dialogue,
+           rather than queueing one self-contained burst.
+    \param s The modem context.
+    \return 0 on success, or -1. */
+SPAN_DECLARE(int) v32bis_start_startup(v32bis_state_t *s);
+
+/*! \brief Set the round-trip estimates NT and MT, in symbol intervals, that
+           6.1 and 6.2 derive from the clause 6 tone phases.
+    \param s The modem context.
+    \param nt The 6.1 S period for the call modem.
+    \param mt The 6.2 wait for the answer modem.
+    \return 0 on success, or -1. */
+SPAN_DECLARE(int) v32bis_set_round_trip_symbols(v32bis_state_t *s, int nt, int mt);
+
 SPAN_DECLARE(int) v32bis_startup_tx_symbols_sent(v32bis_state_t *s);
 SPAN_DECLARE(int) v32bis_startup_rx_symbols_seen(v32bis_state_t *s);
 SPAN_DECLARE(bool) v32bis_startup_complete(v32bis_state_t *s);

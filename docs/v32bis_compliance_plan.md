@@ -201,15 +201,69 @@ Diagnostics, all env-gated: `V32BIS_B1_SYMBOLS` (B1 length; longer does not
 help, 256 measured slightly worse), `V32BIS_TRN_FAST`, `V32BIS_EQ_SLOW`,
 `V32BIS_NLMS`.
 
-This is still not a live modem claim. `v32bis_prepare_startup_tx()` emits a
-self-contained test burst rather than the reactive caller/answerer 6
-sequence, the allocated echo canceller is not yet in the duplex sample path,
-and V.8/modem-engine/V.42/PTY integration has not landed.
+## Clause 6 start-up now runs as a dialogue, and two modems train each other
 
-This is still not a live modem claim. `v32bis_prepare_startup_tx()` emits a
-self-contained test burst rather than the reactive caller/answerer §6
-sequence, the allocated echo canceller is not yet in the duplex sample path,
-and V.8/modem-engine/V.42/PTY integration has not landed.
+`v32bis_prepare_startup_tx()` still queues one self-contained burst, which is
+what the offline harnesses grade.  Beside it, `v32bis_start_startup()` runs
+Figure 3 as the half-duplex dialogue clause 6 actually describes, with each
+segment generated only once the event that releases it has arrived:
+
+    call   SILENT -> (R1) S(NT) COND R2... -> (R3) E -> data
+    answer COND R1... -> (S) SILENT -> (R2) COND R3... -> (E) E -> data
+
+`v32bis_duplex_test` points a calling and an answering instance at each other
+through G.711 in both directions and tells neither what the other supports.
+**Eleven rows -- five rate pairings in both laws, plus one with NT and MT set
+-- negotiate the right rate and then carry the PRBS in both directions with
+zero bit errors**, 37806 to 113610 bits a side.  The rate rows are chosen so
+the negotiation has to do real work: 6.1's "R2 shall exclude rates not
+appearing in the previously received rate signal R1" is what stops the call
+modem's longer list winning, and 6.2's "the data rate selected by R3 shall be
+within those indicated by R2" is what picks the single rate.
+
+Three defects came out of it, and none of them is reachable from the
+single-burst harness.
+
+- **`v17_tx_restart()` must not be called mid-stream.**  It zeroes the pulse
+  shaper history and resets the carrier and baud phases, which is harmless
+  before a burst starts and a hole in the middle of one.  The burst path calls
+  it before transmitting anything; the dialogue reaches the same code at the E
+  handoff, where E sits between the rate signals and B1 with no gap.  The far
+  end lost carrier and stopped producing symbols at all.  `v32bis_tx_set_rate()`
+  now changes only the constellation.
+- **The one-tap channel estimate went stale across the rate signals.**
+  `startup_enter_data_rx()` hands it to the FSE at the E handoff, and it was
+  last updated during TRN.  In the dialogue a rate signal repeats for well over
+  a thousand symbols while the far end works through its own script, so the
+  answer modem entered data on an estimate measured about 1800 symbols
+  earlier -- **its whole data phase, 56486 and 47131 bit errors at 14400 and
+  12000 in u-law, with the other direction clean**.  It is now tracked through
+  the rate-signal stages as well.
+- **The 4800 bit/s decode tracked nothing at all.**  `decode_baud()`'s
+  uncoded branch sliced the symbol and returned without `track_carrier()` or
+  `tune_equalizer()`, so at 4800 the whole data phase ran open loop.  That
+  survives a fax burst -- and 4800 does not exist in V.17, so this is the
+  V.32bis path only -- but over thousands of symbols it collected about 1.5%
+  bit errors in bursts, in three of the four 4800 directions and in both laws.
+
+Two of those three present as "the receiver fails" and are transmit-side or
+handoff-side, so **read the direction that works as well as the one that does
+not**: at 14400 and 12000 the call modem was clean on the identical code path
+throughout, and the asymmetry is what pointed at the long wait between TRN
+and data rather than at the receiver.
+
+`V32BIS_TRACE=1` prints both scripts into one stream -- phase changes, the S
+event, each decoded 16-bit word and the two E words -- which is what makes the
+interleaving of the two roles readable.
+
+Still missing from clause 6: the tone phases (the call modem's repeated state
+A against the answer modem's alternating A/C, the two phase reversals, and the
+64 +/- 2 symbol transition delays) and the NT and MT round-trip estimates they
+produce.  `v32bis_set_round_trip_symbols()` exists and a non-zero pair is
+exercised, but nothing measures one yet, so both default to zero and the
+modems start where the call modem has ceased transmitting.  The allocated echo
+canceller is still not in the duplex sample path, and there is no
+V.8/modem-engine/V.42/PTY integration.
 
 `make v32bis-test` runs the native smoke test plus all Python reference,
 SpanDSP-comparison, waveform, and datapump tests.
@@ -331,7 +385,8 @@ Exit criteria:
 
 ### Phase 2: Scrambling, Framing, and Rate Sequences
 
-Status: native transmit and blind receive complete; reactive duplex ordering pending
+Status: complete, including the reactive clause 6 ordering; the tone phases
+that produce NT and MT are the remaining gap
 
 - Implement transmit and receive scramblers with caller/answerer directionality.
 - Implement startup rate-sequence exchange.
@@ -339,8 +394,9 @@ Status: native transmit and blind receive complete; reactive duplex ordering pen
 
 Exit criteria:
 
-- Both sides negotiate a common rate in an offline harness.
-- Bit-level traces match the intended startup flow.
+- Both sides negotiate a common rate in an offline harness. Met: eleven
+  duplex rows negotiate and then carry data without error.
+- Bit-level traces match the intended startup flow. Met, via `V32BIS_TRACE`.
 
 ### Phase 3: Passband Modulation and Receiver Front End
 
@@ -358,7 +414,8 @@ Exit criteria:
 
 ### Phase 4: Full-Duplex Echo-Cancelled Operation
 
-Status: pending
+Status: duplex start-up and data exchange complete over a clean bearer
+(`v32bis_duplex_test`); echo canceller and the clause 6 tone phases pending
 
 - Echo canceller
 - Duplex startup sequencing

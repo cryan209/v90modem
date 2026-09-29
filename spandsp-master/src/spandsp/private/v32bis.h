@@ -71,6 +71,24 @@ struct v32bis_state_s
     uint32_t startup_rx_b1_reg;
     int startup_rx_b1_diff;
     int startup_rx_b1_convolution;
+    /* ITU-T V.32bis 6.  The reactive start-up machine.  v32bis_prepare_startup_tx()
+       still queues one self-contained burst for the offline harnesses; when
+       v32bis_start_startup() is used instead, these drive the clause 6
+       call/answer exchange, and each transmit phase is generated only when the
+       events it waits on have arrived. */
+    bool reactive_startup;
+    int tx_phase;
+    int tx_step;
+    uint16_t tx_word;
+    uint32_t tx_trn_reg;
+    int tx_trn_diff;
+    int nt_symbols;
+    int mt_symbols;
+    int rx_hold_symbols;
+    uint16_t rx_repeat_word;
+    bool rx_s_event_sent;
+    bool tx_released;
+
     int startup_remote_rates;
     int startup_selected_rate;
     bool startup_complete;

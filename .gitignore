@@ -149,6 +149,7 @@ artifacts/courier-ja-3200low/README.md
 .build-mode
 .fixcmp-*.log
 v32bis_spandsp_test
+v32bis_duplex_test
 port_cp_stream_test
 port_data_rx_test
 port_v34_fixed_test
