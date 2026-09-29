@@ -6888,8 +6888,25 @@ static bool v90_p3_confirm_signal_locked(p3_signal_type_t want)
  * automatically (the sample counter resets when the phase changes).
  *
  * Disabled by ME_V90_P3_CONFIRM=0 (same kill switch as the S/J
- * confirmation gates). */
-enum { P3_JA_SCAN_THROTTLE = 640 };  /* 80 ms at 8 kHz */
+ * confirmation gates), or on its own by ME_V90_P3_JA_SCAN=0.
+ *
+ * COST, measured 2026-09-30: this runs on the media thread, and in its old
+ * form -- a PP-trained p3_demod over 800 ms, for BOTH V.90 upstream rates
+ * and BOTH carriers, every 80 ms -- it is ~40x real time of demodulation.
+ * On tower (x86) that is 2-3 s of CPU per second of Phase 3 audio, so the
+ * media thread fell behind real time and pjmedia dropped ~200 received
+ * frames (4 s) in the middle of Phase 3: the RasFinder's Ja reached the
+ * receiver in 80 ms pieces out of order and never CRC-validated, and the
+ * peer retrained on 9.3.2.4's 1500 ms.  With the scanner off the same call
+ * completes Phase 3 (artifacts/rf-tower-4 vs rf-tower-nop3-1).  On this Mac
+ * the old form still cost ~0.8x real time.  So the default now scans only
+ * the INFO1a-selected rate on the carrier the receiver is actually on
+ * (v34_rx_watch_phase3_carrier() has already retuned it to the peer's), every
+ * 160 ms: one eighth of the work.  ME_V90_P3_JA_SCAN=full restores the old
+ * four-pass, 80 ms scan.  Deliberately not a wall-clock budget: that would
+ * make v90_engine_replay non-deterministic. */
+enum { P3_JA_SCAN_THROTTLE_FULL = 640 };   /* 80 ms at 8 kHz, old form */
+enum { P3_JA_SCAN_THROTTLE = 1280 };       /* 160 ms at 8 kHz */
 enum { P3_JA_SCAN_WINDOW  = 6400 };  /* 800 ms: retain a full weak foreign-J run */
 enum { P3_JA_SCAN_LOG_INTERVAL = 2400 };  /* log every 300 ms */
 
@@ -6902,6 +6919,8 @@ static void v90_p3_scan_ja_locked(int len)
     int16_t window[P3_JA_SCAN_WINDOW];
     int baud_code;
     int n;
+    int throttle;
+    bool scan_full;
     p3_result_t *result;
 
     if (!g_v90 || g_v92_active || !g_v34)
@@ -6916,22 +6935,34 @@ static void v90_p3_scan_ja_locked(int len)
         g_v90_p3_ja_fired = false;
         return;
     }
+    /* 0 = off, 1 = one pass every 160 ms (default), 2 = the old full scan. */
+    {
+        static int mode = -1;
+
+        if (mode < 0) {
+            const char *v = getenv("ME_V90_P3_JA_SCAN");
+            const char *c = getenv("ME_V90_P3_CONFIRM");
+
+            mode = 1;
+            if (v && !strcmp(v, "0"))
+                mode = 0;
+            else if (v && !strcmp(v, "full"))
+                mode = 2;
+            /* Reuse the confirmation gate's env kill switch. */
+            if (c && !strcmp(c, "0"))
+                mode = 0;
+        }
+        if (mode == 0)
+            return;
+        scan_full = (mode == 2);
+    }
+    throttle = scan_full ? P3_JA_SCAN_THROTTLE_FULL : P3_JA_SCAN_THROTTLE;
+
     g_v90_p3_ja_scan_samples += len;
     g_v90_p3_ja_scan_total += len;
-    if (g_v90_p3_ja_scan_samples < P3_JA_SCAN_THROTTLE)
+    if (g_v90_p3_ja_scan_samples < throttle)
         return;
     g_v90_p3_ja_scan_samples = 0;
-
-    /* Reuse the confirmation gate's env kill switch. */
-    {
-        static int disabled = -1;
-
-        if (disabled < 0)
-            disabled = getenv("ME_V90_P3_CONFIRM") &&
-                       !strcmp(getenv("ME_V90_P3_CONFIRM"), "0") ? 1 : 0;
-        if (disabled)
-            return;
-    }
 
     baud_code = v90_selected_upstream_baud_locked();
     if (baud_code != P3_BAUD_3000 && baud_code != P3_BAUD_3200)
@@ -6954,16 +6985,22 @@ static void v90_p3_scan_ja_locked(int len)
     {
         int try_bauds[2];
         int n_try = 0;
+        int rx_carrier = v34_get_rx_high_carrier(g_v34)
+                       ? P3_CARRIER_HIGH : P3_CARRIER_LOW;
 
         try_bauds[n_try++] = baud_code;
-        try_bauds[n_try++] = baud_code == P3_BAUD_3000
-                           ? P3_BAUD_3200 : P3_BAUD_3000;
+        if (scan_full)
+            try_bauds[n_try++] = baud_code == P3_BAUD_3000
+                               ? P3_BAUD_3200 : P3_BAUD_3000;
 
         for (int bi = 0; bi < n_try; bi++) {
             int b = try_bauds[bi];
 
             for (int ci = 0; ci <= 1; ci++) {
                 int carrier = ci ? P3_CARRIER_LOW : P3_CARRIER_HIGH;
+
+                if (!scan_full && carrier != rx_carrier)
+                    continue;
 
                 result = p3_demod_run_pp_trained(window, n, 0, b, carrier, 8000);
                 if (!result)
@@ -6973,7 +7010,7 @@ static void v90_p3_scan_ja_locked(int len)
                     const p3_segment_t *seg = &result->segments[i];
 
                     if (seg->type == P3_SIGNAL_J
-                        && seg->end_sample >= n - P3_JA_SCAN_THROTTLE
+                        && seg->end_sample >= n - throttle
                         && p3_is_adaptive_ja_candidate(
                                seg, (int)(result->baud_rate_estimate + 0.5f))) {
                         bool accepted;
@@ -7030,11 +7067,13 @@ static void v90_p3_scan_ja_locked(int len)
 
     /* Diagnostic: log periodically so we can see p3_demod is running but
      * not finding J (useful for noisy-signal debugging). */
-    if ((g_v90_p3_ja_scan_total % P3_JA_SCAN_LOG_INTERVAL) < P3_JA_SCAN_THROTTLE) {
+    if ((g_v90_p3_ja_scan_total % P3_JA_SCAN_LOG_INTERVAL) < throttle) {
         fprintf(stderr,
                 "[ME] V.90 p3_demod: J scan at %d ms, no J found "
-                "(baud=%d tried all carriers)\n",
-                g_v90_p3_ja_scan_total * 1000 / 8000, baud_code);
+                "(baud=%d, %s)\n",
+                g_v90_p3_ja_scan_total * 1000 / 8000, baud_code,
+                scan_full ? "full scan: both rates, both carriers"
+                          : "receiver's rate and carrier only");
     }
 }
 
@@ -10785,6 +10824,11 @@ void me_rx_g711(const uint8_t *codewords, int count)
             if (name)
                 trace_phase("V90 tx stage -> %s", name);
             g_v90_phase4_traced_phase = tx_phase;
+            /* 9.3.1.4: while Jd goes out the receiver must detect S, and the
+             * RasFinder sends it on the other carrier -- see
+             * v34_rx_watch_v90_jd_s(). */
+            if (g_v34)
+                v34_v90_arm_jd_s_watch(g_v34, tx_phase == V90_TX_JD);
         }
     } else if (!g_v90) {
         /* The server runs many calls per process; a latch that outlives the

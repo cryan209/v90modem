@@ -2136,6 +2136,7 @@ static void phase3_pp_reset(v34_rx_state_t *s)
     s->phase3_pp_onset = -1;
     s->phase3_pp_skip = 0;
     s->phase3_pp_started = 0;
+    s->v90_p3_eye_released = false;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -8304,6 +8305,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
 
                 acquire_bauds = s->duration;
                 s->phase3_pp_started = 1;
+                s->v90_p3_eye_released = false;
                 {
                     float corr_mag;
 
@@ -11008,6 +11010,48 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     eye_check = (v34_rx_stage_is_primary_training(s->stage)
                  &&  s->eye_flips < v34_eye_max_flips()
                  &&  v34_eye_select_enabled());
+    /* V.90 digital modem: once PP conditioning has begun, leave the symbol
+       instant alone until Ja has been accepted.  PP trains the equalizer at the
+       instant it ran on, and a move afterwards lands on that equalizer --
+       the harm the plain-V.34 note below already measured.  Against the
+       RasFinder over a clean wired path (artifacts/rf-tower-scan1-1, -4:
+       low carrier, PP locked late) the chooser moved the instant just after
+       PP (off 351.8 vs on 332.4, a 6% call), the Ja that followed never
+       demodulated, Sd went out on the 6 s fallback and the peer retrained;
+       without the move both parse the Ja descriptor, and nine calls that
+       already parsed (tower and Wi-Fi era, both carriers) still do.  S no
+       longer depends on the eye either: v34_rx_watch_v90_jd_s() finds it on
+       the line.  After Ja the chooser runs again: on the calls where the
+       peer used the high carrier its flip lands during DIL and is what lets
+       Phase 4 decode the CPt -- freezing to the end of Phase 3 loses it
+       (rf-tower-scan1-6, rf-tower-nop3-1: 4 CPt -> 0), and so does disabling
+       the chooser outright.  ME_V90_P3_EYE_AFTER_PP=1 restores the old
+       behaviour. */
+    if (eye_check
+        &&  s->v90_mode
+        &&  !s->calling_party
+        &&  s->phase3_pp_started
+        &&  !s->v90_p3_eye_released
+        &&  (s->stage == V34_RX_STAGE_PHASE3_TRAINING
+             ||  s->stage == V34_RX_STAGE_PHASE3_WAIT_S))
+    {
+        static int allow = -1;
+
+        if (allow < 0)
+        {
+            const char *v = getenv("ME_V90_P3_EYE_AFTER_PP");
+
+            allow = (v  &&  strcmp(v, "0") != 0);
+        }
+        /*endif*/
+        if (!allow)
+        {
+            eye_check = false;
+            s->eye_flip_pending = false;
+        }
+        /*endif*/
+    }
+    /*endif*/
     /* Never move the symbol instant while 10.1.3.6's PP is being conditioned
        on.  That
                     stage is supervised against a known 232-baud sequence with
@@ -13741,6 +13785,134 @@ static void v34_rx_watch_phase3_s(v34_rx_state_t *s,
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.90 digital modem: the analogue modem's 9.3.2.7 S, found while we send Jd.
+
+   9.3.1.4/9.3.1.5 have the digital modem transmit Jd "and condition its
+   receiver to detect signal S", and 9.3.2.7 has the analogue modem send S
+   (and hold it until J'd) up to 5000 ms after it went silent.  Against the
+   RasFinder, from a clean wired path (artifacts/rf-tower-scan1-*), that S
+   starts ~1.9 s into our Jd -- in time -- but on the HIGH carrier (1920 Hz at
+   3200 baud: 0.98 of the band energy on the 320/1920/3520 Hz lines, held for
+   seconds) while the Phase 3 upstream before it was on the LOW carrier, which
+   is where v34_rx_watch_phase3_carrier() left the receiver.  91 Hz off, the
+   constellation-domain S detector missed it on three calls of four; Jd then
+   expired (9.3.1.5 + our rtd allowance, ~3.1 s), we went back to waiting for
+   Ja, and the peer retrained.  On the fourth it happened to fire.
+
+   So look for S on the line, on both carriers, like the carrier watch does:
+   S puts its power on fc and fc +/- baud/2, 20 ms blocks resolve the two
+   carriers' line sets, and two consecutive blocks holding >= 0.6 of the
+   energy on one set is S.  Armed only while we transmit Jd, when the peer's
+   Ja is over (it ends on our Sd->S-bar-d, 9.3.2.4) and 9.3.2.7 allows nothing
+   but silence or S -- so Ja, whose J pattern also puts energy on these
+   lines, cannot be mistaken for it.  ME_V90_JD_S_WATCH=0 disables. */
+static void v34_rx_watch_v90_jd_s(v34_rx_state_t *s,
+                                  const int16_t amp[],
+                                  int len)
+{
+    enum { BLK = 160 };
+    static int disabled = -1;
+    float fc[2];
+    float half;
+    float coeff[6];
+    int i;
+    int k;
+
+    if (disabled < 0)
+    {
+        const char *v = getenv("ME_V90_JD_S_WATCH");
+
+        disabled = (v  &&  strcmp(v, "0") == 0);
+    }
+    /*endif*/
+    if (disabled
+        ||  !s->v90jd_s_armed
+        ||  s->stage != V34_RX_STAGE_PHASE3_WAIT_S
+        ||  s->phase3_s_present
+        ||  s->baud_rate < 0  ||  s->baud_rate >= 6)
+    {
+        memset(s->v90jd_g1, 0, sizeof(s->v90jd_g1));
+        memset(s->v90jd_g2, 0, sizeof(s->v90jd_g2));
+        s->v90jd_energy = 0.0f;
+        s->v90jd_samples = 0;
+        s->v90jd_blocks = 0;
+        return;
+    }
+    /*endif*/
+    half = 0.5f*baud_rate_parameters[s->baud_rate].baud_rate;
+    fc[0] = carrier_frequency(s->baud_rate, 0);
+    fc[1] = carrier_frequency(s->baud_rate, 1);
+    for (k = 0;  k < 6;  k++)
+        coeff[k] = 2.0f*cosf(2.0f*3.14159265f*(fc[k/3] + (float) (k%3 - 1)*half)/SAMPLE_RATE);
+    /*endfor*/
+    for (i = 0;  i < len;  i++)
+    {
+        float x = (float) amp[i];
+
+        for (k = 0;  k < 6;  k++)
+        {
+            float g0 = x + coeff[k]*s->v90jd_g1[k] - s->v90jd_g2[k];
+
+            s->v90jd_g2[k] = s->v90jd_g1[k];
+            s->v90jd_g1[k] = g0;
+        }
+        /*endfor*/
+        s->v90jd_energy += x*x;
+        if (++s->v90jd_samples < BLK)
+            continue;
+        /*endif*/
+        {
+            float line[2] = {0.0f, 0.0f};
+            float denom = s->v90jd_energy*(float) BLK*0.5f;
+            bool busy = (s->v90jd_energy > 10000.0f*(float) BLK);
+            int on = -1;
+
+            for (k = 0;  k < 6;  k++)
+            {
+                line[k/3] += s->v90jd_g1[k]*s->v90jd_g1[k]
+                           + s->v90jd_g2[k]*s->v90jd_g2[k]
+                           - coeff[k]*s->v90jd_g1[k]*s->v90jd_g2[k];
+            }
+            /*endfor*/
+            memset(s->v90jd_g1, 0, sizeof(s->v90jd_g1));
+            memset(s->v90jd_g2, 0, sizeof(s->v90jd_g2));
+            s->v90jd_energy = 0.0f;
+            s->v90jd_samples = 0;
+            if (busy  &&  denom > 0.0f)
+            {
+                if (line[0] > 0.6f*denom  &&  line[1] < 0.2f*denom)
+                    on = 0;
+                else if (line[1] > 0.6f*denom  &&  line[0] < 0.2f*denom)
+                    on = 1;
+                /*endif*/
+            }
+            /*endif*/
+            s->v90jd_blocks = (on >= 0)  ?  s->v90jd_blocks + 1  :  0;
+            if (s->v90jd_blocks >= 2)
+            {
+                s->v90jd_blocks = 0;
+                s->v90jd_s_armed = false;
+                s->phase3_s_present = true;
+                s->phase3_s_event_count++;
+                s->phase3_s_fired_symbol = -1;
+                s->received_event = V34_EVENT_S;
+                span_log(s->logging, SPAN_LOG_WARNING,
+                         "Rx - V.90 Phase 3: analogue S during Jd found on the line, %s carrier "
+                         "(%.0f Hz; lines %.2f/%.2f; receiver on %s)\n",
+                         on ? "high" : "low",
+                         (double) fc[on],
+                         (double) (line[0]/denom),
+                         (double) (line[1]/denom),
+                         s->high_carrier ? "high" : "low");
+                return;
+            }
+            /*endif*/
+        }
+    }
+    /*endfor*/
+}
+/*- End of function --------------------------------------------------------*/
+
 /* V.90 digital modem: take the analogue modem's Phase 3 carrier from its S.
 
    INFO1d carries a carrier choice for each symbol rate (V.34 10.1.2.3.4,
@@ -14086,6 +14258,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
     /* 10.1.3.7's S, found on the line rather than on the constellation, for a
      * bearer whose symbol clock is not phase-locked to our sample grid. */
     v34_rx_watch_phase3_s(s, amp, len);
+    v34_rx_watch_v90_jd_s(s, amp, len);
 
     /* V90_RENEG_SYM_DUMP's last column: the RMS of the block of line samples
        this call was handed, kept here so the dump can say whether a collapse
@@ -15124,10 +15297,29 @@ SPAN_DECLARE(void) v34_v90_set_phase3_expect_silence(v34_state_t *s, int expect)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(void) v34_v90_arm_jd_s_watch(v34_state_t *s, int on)
+{
+    if (!s)
+        return;
+    /*endif*/
+    if (on  &&  !s->rx.v90jd_s_armed)
+    {
+        memset(s->rx.v90jd_g1, 0, sizeof(s->rx.v90jd_g1));
+        memset(s->rx.v90jd_g2, 0, sizeof(s->rx.v90jd_g2));
+        s->rx.v90jd_energy = 0.0f;
+        s->rx.v90jd_samples = 0;
+        s->rx.v90jd_blocks = 0;
+    }
+    /*endif*/
+    s->rx.v90jd_s_armed = (on != 0);
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v34_v90_arm_phase3_s_detector(v34_state_t *s)
 {
     if (!s)
         return;
+    s->rx.v90_p3_eye_released = true;
 
     /* Ja has already been delivered to the external V.90 digital-side state
        machine.  Clear the shared V.34 event before v34_tx() can interpret it

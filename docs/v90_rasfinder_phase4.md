@@ -719,3 +719,40 @@ Live confirmation still owed; record new calls with `ME_IO_SCHEDULE`.
 
 - **2026-09-29 late night: the rig-side knobs, and our V.8 transmit audited -- it is correct, and no ghosts (without the fast-detect experiment).** Asterisk (22.5.1) is clean for this path: all four endpoints `allow=ulaw` only, `direct_media=no` but no transcode, no jitter buffer, `fax_detect`/T.38 off, no DENOISE/AGC/VOLUME. Its 3999 hunt only advanced on BUSY and had a malformed `GotoiF` at 8409; now it advances on anything but ANSWER (8416 -> 8423 -> 8409 -> 9898, 20 s each; backup `extensions.conf.bak-20260929`). On the VG224 the three hunt ports differed (2/16 EC+NLP off, 2/23 EC+NLP+CN off, 2/9 all voice defaults), nothing set `incoming called-number` so the modem dial-peer 8999 may not match inbound calls, and `modem passthrough nse` needs a Cisco peer to complete. User applied: 2/9 matched to the others, CN off, `incoming called-number .`, `no dtmf-relay rtp-nte`, and later 2/9 output attenuation -6 -> 0. **None moved anything**: V.8 4/6 (before, `rf-cmr0`) -> 1/6 (3999, all answered on 8416, `rf-ata`) -> 2/6 (8409 at 0 dB, `rf-8409-att0`); every failure is the full ~5.3 s ANSam then 2250 Hz, and every call reaching Phase 3 ends `no S after 24796 Jd`. The rig then degraded (0/6 controls, answered-then-dropped calls, 1 s billed). Still unverified on the ATA: whether passthrough actually engages -- `show call active voice` during a failing call is the check.
   **Our V.8 transmit, demodulated independently of spandsp** (own V.21 discriminator): CI `c1`, CM `c1 65 12 10 2a 47 8d` -- call function first, modulation octet with b5 set plus two extensions, LAPM, PCM availability (V.90/92 digital), PSTN access digital; syncs per Table 1; 980/1180 Hz; ~-14 dBm0. The peer's JM (`c1 65 12 10 2a 0d 0d 27`) decodes cleanly when sent. **The TX tap is byte-identical on pass and fail calls from 0 to 7.6-7.8 s**, past the peer's decision, so nothing our V.8 reacts to separates them. Timing: spandsp's ANSam/ detector (`modem_connect_tones.c`) reports only after THREE >=425 ms reversal cycles, 1.38 s after onset, so we send one more CI burst into ANSam (plus four CI ahead of CM) and CM starts ~2.4 s into ANSam, Te then 1 s -- all within V.8 8.1.1. Two A/Bs, both refuted: `ME_V8_NO_CI=1` (clean CM, no CI overlap) 0/4 vs 0/4 (`rf-noci-ab-*`); detecting after ONE cycle (CM ~1.3 s sooner) 0/6 vs 0/6 on calls that detected properly (`rf-ansamfast-*`) -- **and it ghosted on 2 of 8, firing on the ringback's decay (440/480 Hz, no 2100 at all) and sending CM 3 s before the real ANSam: the three-cycle rule is what rejects that, so it is a guard, not just caution.** Not kept. Conclusion: our V.8 is conformant, stable and identical call to call; the per-call variation is past our transmitter (ATA passthrough state, loop, or the RasFinder). Next evidence: the ATA's `show call active voice`, or another modem on the port. Also noted: Phase 3 levels differ from the Eicon reference by ~12 dB -- we send TRN1d at the peer's requested U_INFO 78 (RMS 3772) where the Eicon ignores U_INFO and uses W=64/TRN1d 48 (RMS 924); Jd fields match the Eicon's except lookahead (1 vs 3). `v90_analogue_rx_test --trace` now prints the last valid Jd frame's 72 bits.
+
+## 2026-09-30: from a wired host, Phase 3 had three defects of ours
+
+Calls placed from tower (wired, see `docs/v8_conformance_audit.md`) pass V.8
+every time and expose Phase 3 without the Wi-Fi jitter that masked it.
+
+1. **The p3_demod Ja scanner starved the media thread.** It ran a PP-trained
+   p3_demod over 800 ms for both upstream rates and both carriers every
+   80 ms -- ~40x real time of demodulation.  On tower that is 2-3 s of CPU
+   per second of Phase 3; pjmedia dropped ~200 received frames (4 s) in the
+   middle of Phase 3.  Proven with a pcap: RTP arrived complete and in
+   order, the RX tap was 213 frames short, and the Ja descriptor reached the
+   receiver as 80 ms chunks out of order (each chunk matching a CRC-valid
+   descriptor from an older call 100%, at shifted offsets).  On this Mac the
+   same scanner cost ~0.8x real time.  Now one pass (INFO1a's rate, the
+   receiver's carrier) every 160 ms; `ME_V90_P3_JA_SCAN=full|0`.  Replay CPU
+   for 15 s of audio: 2.53 s -> 0.40 s (Mac); tower Phase 3 6.9 s -> 0.3 s
+   for 3 s of audio.  SmartLink recordings reach V.90 data mode either way.
+2. **The peer's 9.3.2.7 S comes on the other carrier.**  It starts ~1.9 s
+   into our Jd -- in time -- but on the high carrier (0.98 of the energy on
+   the 320/1920/3520 Hz lines) while our receiver can be on low.  The
+   constellation-domain S detector missed it on three calls of four, Jd
+   expired after 24796 symbols and the peer retrained.  New
+   `v34_rx_watch_v90_jd_s()` looks for S on the line on both carriers while
+   the engine is transmitting Jd (`v34_v90_arm_jd_s_watch()`);
+   `ME_V90_JD_S_WATCH=0` disables.
+3. **The T/2 eye chooser moved the symbol instant straight after PP** on
+   calls where PP locked late (low carrier; residual 0.65-0.68), landing on
+   the equalizer PP had just trained, and the Ja then never demodulated.  The
+   chooser is now held from PP start until Ja is accepted (V.90 digital RX
+   only); after Ja it runs again, because on high-carrier calls its flip
+   during DIL is what lets Phase 4 decode the CPt.  Ja parses on all 12 RasFinder
+   recordings tried (tower and Wi-Fi era, both carriers), was 10;
+   `ME_V90_P3_EYE_AFTER_PP=1` restores the old behaviour.
+
+Live from tower with 1 and 2: 3 of 3 calls reach Phase 4 CPt.  Open: Phase 4 --
+the peer sends CPt, we send TRN2d and MP, it retrains without sending CP.

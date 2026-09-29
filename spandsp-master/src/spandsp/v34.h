@@ -354,6 +354,12 @@ SPAN_DECLARE(int) v34_get_rx_baud_rate(v34_state_t *s);
     \return Non-zero for the high carrier, zero for low, or -1 on error. */
 SPAN_DECLARE(int) v34_get_rx_high_carrier(v34_state_t *s);
 
+/* V.90 digital modem: arm (on != 0) or disarm the sample-domain detector for
+   the analogue modem's 9.3.2.7 S while we transmit Jd.  It watches both
+   carriers, because the RasFinder sends that S on the other carrier from its
+   Phase 3 upstream. */
+SPAN_DECLARE(void) v34_v90_arm_jd_s_watch(v34_state_t *s, int on);
+
 /*! Get the current TX symbol-rate code (v34_baud_rate_e, 0=2400..5=3429).
     \param s The modem context.
     \return The TX baud-rate code, or -1 on error. */

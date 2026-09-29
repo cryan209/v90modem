@@ -1389,6 +1389,18 @@ typedef struct
     int p3s_samples;
     int p3s_blocks;
     bool p3s_reported;
+    /* V.90 digital modem, while we transmit Jd: 9.3.2.7's S watched on BOTH
+       carriers' three lines (see v34_rx_watch_v90_jd_s()).  Armed by the
+       engine only for the Jd stage. */
+    bool v90jd_s_armed;
+    /* V.90 digital: the Phase 3 eye freeze (see process_primary_half_baud())
+       ends once Ja has been accepted. */
+    bool v90_p3_eye_released;
+    float v90jd_g1[6];
+    float v90jd_g2[6];
+    float v90jd_energy;
+    int v90jd_samples;
+    int v90jd_blocks;
 
     float reneg_s_g1[3];
     float reneg_s_g2[3];
