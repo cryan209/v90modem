@@ -180,3 +180,54 @@ fed back in.
 - Closed loop: `tools/v8_loop_test.c` (the build line is in its header). It
   reads the environment, so `ME_V8_TE_MS` applies. spandsp's own
   `tests/v8_tests` needs libsndfile, which this machine does not have.
+
+## 2026-09-30: the failures track network jitter on this Mac's Wi-Fi, and Te does not help
+
+**Live Te A/B, arms alternated, 90 s between calls:** `ME_V8_TE_MS=1000` 0/6,
+control 0/6 (`artifacts/rf-te-ab-{te,ctl}-{1..6}`); a default probe call the
+same morning also failed (`rf-0930-probe-1`). Every failure is the known shape:
+the peer's ANSam runs its full ~5.4 s and 2250 Hz (V.22 USB1) follows, so the
+peer never recognised a CM.
+
+**What does separate the good and bad periods is RTP jitter.** Over every
+RasFinder call in `artifacts/` (first ~12 s, i.e. the V.8 window, from
+`rtp-rx.csv`, transit-time spread):
+
+| period | V.8 pass | RX transit spread p95 |
+|---|---|---|
+| 09-28 all day | 29/34 | 0.1-12 ms (one outlier 68) |
+| 09-29 from ~11:00 | falling to 0/22 by 22:00 | 60-155 ms on most calls |
+| 09-30 morning | 0/13 | still 60-120 ms |
+
+The ATA's own RTCP receiver reports (pjsua's second `jitter` line, i.e. what
+the far end measured on OUR stream) agree: 3.5 ms avg / 13.8 ms max on the
+healthy 09-28 `rf-v34-s3`, 14-16 ms avg on the 09-30 calls. Our send pacing
+is unchanged throughout (`rtp-tx.csv` wall deltas: sd 0.5-1.1 ms on every
+short call), so the jitter is added after our process.
+
+**It is the first Wi-Fi hop.** This machine reaches Asterisk over `en0`
+(Wi-Fi; the Ethernet adapters en3/en4 have no link) and AWDL is up. Pinging
+the LAN gateway 10.69.70.1 at 10 Hz: min 2.4-2.7 ms, avg 12-37 ms,
+**max 92-173 ms** -- periodic stalls of the kind AWDL channel hopping
+produces. A ~100 ms stall in our stream underruns the VG224's voice-mode
+playout buffer, which conceals it, and a 300 bit/s V.21 CM with 100 ms of
+concealment in it is lost; V.8 needs two identical consecutive CMs. That also
+explains why the peer's CM-detection latency grew on the calls that did pass
+on 09-29 (ANSam 3-5 s instead of the healthy 2.2 s): it was missing CMs
+intermittently.
+
+**Two things this rules in and out.**
+- Every V.8 knob tried since 09-29 (louder CM, no CI, one-cycle ANSam
+  detection, CM restart, Te, the ATA EC/NLP/CN/attenuation changes) was
+  measured on this impaired path, so those NEGATIVE results are not evidence
+  about V.8. Re-run the ones worth having on a clean path.
+- The ANSam-onset-vs-CI-phase correlation (failures skew to ANSam arriving
+  >= 0.77 s after a CI burst start) is confounded by date and is most likely
+  the 200 ms fixed RX jitter buffer landing (74563a6d); within 09-29 17-18h
+  the two phases pass alike (6/11 vs 9/17).
+
+**Next:** put this host on wired Ethernet (or `sudo ifconfig awdl0 down`,
+which is a user action -- it is a system network setting), confirm gateway
+ping max < ~15 ms and `rtp-rx.csv` p95 back under ~12 ms, then place calls.
+`/private/...scratchpad/rxjit.py`-style measurement: transit
+`(arrival_ms - t0) - (rtp_ts/8 - ts0)` over the first 600 packets of one SSRC.
