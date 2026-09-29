@@ -147,14 +147,60 @@ static bool v34_rx_b1_supervised_eq_enabled(void)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Symbols past the nominal B1 start over which B1 is searched.
+ *
+ * 10.1.3.1 makes B1 a completely known frame, and the receiver used to assume
+ * it began on the symbol after its E detector fired.  Against the RasFinder
+ * (an MT5634SMI) it never did: correlating the template against the
+ * equalized symbols at every offset puts it exactly 8 symbols later on all
+ * three calls that reached B1 over two days (rf-v34-d2 0.756, rf-tower-v34frz-1
+ * 0.750, rf-tower-v34cma-1 0.728 at +8; 0.07-0.10 where it was being read),
+ * while SmartLink's lines up at 0.  So this peer sends 16 more bits of ones
+ * than the 20 of 10.1.3.2's E before B1, and every plain V.34 data mode
+ * against it has been white from its first symbol because B1 calibrated gain,
+ * phase and conjugation on the wrong 128 symbols.  Search 0..24 and take the
+ * best; the symbols collected past B1 are then decoded as data.
+ * ME_V34_B1_SEARCH=0 restores the fixed position. */
+static int v34_rx_b1_search_symbols(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *value = getenv("ME_V34_B1_SEARCH");
+
+        cache = (value  &&  *value)  ?  atoi(value)  :  24;
+        if (cache < 0)
+            cache = 0;
+        /*endif*/
+    }
+    /*endif*/
+    return cache;
+}
+/*- End of function --------------------------------------------------------*/
+
 void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
 {
         if (s->b1_acquisition_active)
         {
             int n = s->b1_observed_symbols++;
+            int search = v34_rx_b1_search_symbols();
 
-            if (n < s->v90_t3_b1_symbols)
+            if (s->v90_t3_b1_symbols + search > V34_V90_T3_B1_MAX_SYMBOLS)
+                search = V34_V90_T3_B1_MAX_SYMBOLS - s->v90_t3_b1_symbols;
+            /*endif*/
+            if (n < s->v90_t3_b1_symbols + search)
                 s->b1_observed[n] = *sym;
+            /*endif*/
+            /* Search only a B1 that is not where E put it: one that already
+               correlates there, from the zero trellis state 10.1.3.1
+               specifies, takes the original path unchanged. */
+            if (s->b1_observed_symbols == s->v90_t3_b1_symbols)
+            {
+                s->b1_search_len = (search > 0
+                                    &&  v34_rx_b1_score_at(s, 0) < 0.9f)  ?  search  :  0;
+            }
+            /*endif*/
             /* V.34 11.4.1.1.5/11.4.1.2.5 conditions the receiver on the
                complete known B1 frame before user data.  The old path used
                B1 only for a scalar phase/gain calibration and left the
@@ -215,8 +261,12 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 v34_rx_tune_equalizer(s, sym, &target);
             }
             /*endif*/
-            if (s->b1_observed_symbols >= s->v90_t3_b1_symbols)
+            if (s->b1_observed_symbols >= s->v90_t3_b1_symbols
+                &&  s->b1_observed_symbols >= s->v90_t3_b1_symbols + s->b1_search_len)
             {
+                complexf_t leftover[V34_V90_T3_B1_MAX_SYMBOLS];
+                int leftovers = 0;
+                int b1_offset = 0;
                 complexf_t corr = complex_setf(0.0f, 0.0f);
                 complexf_t corr_conj = complex_setf(0.0f, 0.0f);
                 float expected_power = 0.0f;
@@ -227,6 +277,33 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 float phase;
                 float gain;
 
+                search = s->b1_search_len;
+                if (search > 0)
+                {
+                    float best = 0.0f;
+                    float at_zero = 0.0f;
+                    int b1_state;
+
+                    b1_state = v34_rx_b1_search(s, search, &b1_offset, &best, &at_zero);
+                    if (b1_offset > 0)
+                    {
+                        memmove(&s->b1_observed[0], &s->b1_observed[b1_offset],
+                                sizeof(s->b1_observed[0])*(size_t) (s->v90_t3_b1_symbols + search - b1_offset));
+                    }
+                    /*endif*/
+                    leftovers = search - b1_offset;
+                    for (int i = 0;  i < leftovers;  i++)
+                        leftover[i] = s->b1_observed[s->v90_t3_b1_symbols + i];
+                    /*endfor*/
+                    /* WARNING level: one line a data-mode entry, and the only
+                       way a live log (FLOW is never on for a live call) can
+                       say whether B1 was found. */
+                    V34_DATA_LOG(s->logging, SPAN_LOG_WARNING,
+                             "Rx - B1 found %d symbols after the E detection, far-end trellis "
+                             "state %d (normalized correlation %.3f there, %.3f at 0 from state 0)\n",
+                             b1_offset, b1_state, best, at_zero);
+                }
+                /*endif*/
                 for (int i = 0; i < s->v90_t3_b1_symbols; i++)
                 {
                     complexf_t o = s->b1_observed[i];
@@ -362,6 +439,9 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     V34_DATA_LOG(s->logging, SPAN_LOG_FLOW,
                              "Rx - DATA entry: equalizer tap energy %.4f\n", te);
                 }
+                s->b1_corr = sqrtf((conjugate ? corr_conj_mag2 : corr_mag2)
+                                   /(expected_power*observed_power));
+                s->b1_corr_valid = true;
                 V34_DATA_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - B1 acquired: symbols=%d phase=%.2f deg gain=%.4f "
                          "conjugate=%d normalized-correlation=%.3f\n",
@@ -391,6 +471,15 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     }
                 }
                 s->b1_acquisition_active = false;
+                s->duration++;
+                s->last_sample = *sym;
+                /* The symbols after B1 that the search held back are data. */
+                s->b1_replaying = true;
+                for (int i = 0;  i < leftovers;  i++)
+                    v34_rx_data_symbol(s, &leftover[i]);
+                /*endfor*/
+                s->b1_replaying = false;
+                return;
             }
             s->duration++;
             s->last_sample = *sym;
@@ -509,6 +598,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    Freezing on the way down leaves exactly that frozen-tap
                    behaviour as the worst case. */
                 if (healthy
+                    &&  !s->b1_replaying
                     &&  d2 < v34_rx_data_mode_decision_gate()
                     &&  s->data_symbol_scale > 0.0f)
                 {
@@ -682,7 +772,10 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         if (carries > 33600)
                             carries = 33600;
                         /*endif*/
-                        V34_DATA_LOG(s->logging, SPAN_LOG_FLOW,
+                        /* WARNING level, as B1 found above: one line per 4096
+                           symbols, and the live log's only measure of the
+                           data mode. */
+                        V34_DATA_LOG(s->logging, SPAN_LOG_WARNING,
                                  "Rx - DATA: distance to grid %.4f per symbol "
                                  "over %d symbols; receive SNR %.1f dB, this "
                                  "line will carry %d bit/s%s\n",

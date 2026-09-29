@@ -432,3 +432,80 @@ symbol, not another Phase-2 timing condition or a row-specific pin.
   mode, because V.42 detection concludes "unsupported peer" over bits that are
   not being decoded.  The default V.14 framing does not, which is why the
   back-off experiments run without it.
+
+## 2026-09-30: plain V.34 to the RasFinder connects from a wired host
+
+Calls placed from tower (`ME_MODE=v34 tools/soak/rasfinder_call.sh <dir> 60`).
+The first two calls of the day reached Phase 3 and died; the day ended with
+`CONNECT 19200`, a data mode 0.028 from the grid (~32.5 dB) for the whole
+call, and the RasFinder's own V.42 detection pattern (`EC` repeated, then HDLC
+flags) arriving on our PTY.  Six defects, all ours, each hiding the next.  The
+peer is an MT5634SMI; replays use `v90_engine_replay <tap> ulaw --fast --dial
+--from 0 --split`.
+
+1. **The answer modem's Phase 4 S was missed** (11.4.1.2.1).  It arrives
+   ~0.65 s after our J and decodes cleanly offline (dibits 1,3 alternating for
+   exactly 128T), but the T/2 eye chooser moved the symbol instant inside those
+   40 ms -- its 256-symbol window straddled our own echo and the S onset -- and
+   the constellation detector never saw it.  The peer gave up after ~0.35 s of
+   TRN and retrained, and the rotation-form detector read that Tone A as S.
+   Fixed: the three-bin line watch (fc and fc +/- baud/2) is armed by default
+   for the plain V.34 call modem once our J is on the air (never earlier, so
+   our own S cannot be read through the echo when the carriers match), with a
+   2400 Hz rejection for Tone A, and the rotation-form path is off in that
+   stage.  `ME_V34_P4_S_SPECTRAL=0` restores the constellation detector alone.
+2. **This peer's Tone A retrain went unanswered in plain V.34**: it sends the
+   1800 Hz guard tone at about the level of the tone (V.34 defines none), and
+   the retrain watcher counted the guard bin only in V.90 mode.
+3. **The receiver trained itself on our echo.**  11.3.1.2.4 has the answer
+   modem silent for ~1.1 s while we send our Phase 3; once the peer's Phase 3
+   TRN had locked, blind CMA kept adapting on what it heard -- our own
+   transmission at -21 dB -- and the peer's Phase 4 MP then never decoded.
+   CMA is now held while the equalized |z| sits in the echo band (0.02-0.5)
+   and has for 96 symbols; exact digital silence (loopback) is untouched.
+   Holding the eye chooser too cost `rf-v34-q3` its Phase 4, so only CMA is
+   held by default (`ME_V34_P3_ECHO_FREEZE`, bits 1/2/4/8).
+4. **B1 was never found: the peer sends it 8 symbols after our E detection and
+   from a non-zero trellis state.**  10.1.3.1 zeroes the trellis encoder before
+   B1; the MT5634 does not -- built from each of the 16 states, one correlates
+   at 0.991-0.999 and the rest at 0.71-0.78, and which one changes per call
+   (1, 13).  Every 31200 data mode against this peer since 09-28 was white from
+   its first symbol because B1 calibrated gain, phase and conjugation on the
+   wrong symbols against the wrong template.  The receiver now searches offset
+   (0..24) and initial trellis state when B1 does not correlate where E put it
+   (a B1 that does takes the original path unchanged -- it matters: a loopback
+   11.6 renegotiation row is a knife edge) and starts the Viterbi decoder in
+   the state found.  `ME_V34_B1_SEARCH=0` disables.
+5. **No echo cancellation in full duplex.**  Our transmission returns ~250 ms
+   later (1976-2136 samples; the V.90 work found the same delay) at -21 dB,
+   which caps Phase 4 and data mode at ~22 dB.  `v34_line_ec.c` fits a 96-tap
+   filter at a cross-correlation bulk delay over the same echo-only window and
+   holds it: 28 dB of ERLE live on every call, and the peer's Phase 4 signal
+   goes from 5.5 to 1.6 degrees from the grid offline.  Not put in force below
+   6 dB, so a path with no echo is untouched.  `ME_V34_LINE_EC=0` disables.
+6. **Nothing chose a rate the line carries.**  The MP ask is the Phase-2 probe
+   projection (31200), and the Phase-4 TRN estimator reads the start of TRN
+   where our equalizer has not converged (7-9 dB).  B1's own correlation is a
+   measurement at the data mode's equalizer: SNR = c^2/(1-c^2), mapped through
+   the data mode's calibration (bits/symbol ~ (SNR+13)/6).  When the rate we
+   asked for is above it the engine asks for that rate and retrains per 11.5
+   (`ME_V34_B1_RATE_CHECK=0` disables).  It reads 15-28 dB per call, so it is
+   conservative against the 32.5 dB the 19200 data mode measured.
+7. **11.2.2.1.3 was missing**: a call modem that does not see the second
+   Tone A reversal within 2000 ms goes back to Tone B once Tone A is present.
+   Without it a retrain we opened from data mode sat in `FIRST_B_SILENCE` for
+   32 s while the peer held Tone A waiting for Tone B (`rf-tower-v34b1rc-1`).
+
+Also: `tools/soak/rasfinder_call.sh` now keeps the PTY stream as `pty-rx.bin`
+(a data mode that decodes is proved by the bytes), and the B1 and data-mode
+grid lines are logged at WARNING so a live log (FLOW is never on for a live
+call) carries them.
+
+**Open.** (a) The peer intermittently misses our single MP' and E and keeps
+repeating MP' until it retrains (cma-1 attempt 1, rec-1 attempt 2); every
+retrain is another chance at it, and the peer hangs up after several.  We
+send one MP' when its MP' arrived first, which 11.4.1.1.3 allows.  (b) The
+first ask is still 31200 and costs a retrain every call; the Phase-4 TRN
+measurement should be taken after convergence.  (c) V.32bis fallback (V.8
+offers V.32 and it is the RasFinder's next step) does not exist in the engine:
+SpanDSP's `v32bis.c` has a burst-mode startup and loopback data path only.

@@ -48,11 +48,23 @@ if [ ! -e "$PTY" ]; then
 fi
 sleep 3
 
+# Whatever the RasFinder sends once connected (a login prompt or PPP frames)
+# arrives on the PTY; keep it, since a data mode that decodes is proved by the
+# bytes, not by our own receiver's opinion of itself.
+stty -F "$PTY" raw -echo 2>/dev/null
+cat "$PTY" > "$DIR/pty-rx.bin" &
+catpid=$!
 printf 'ATD%s\r' "$EXT" > "$PTY"
 sleep "$HOLD"
 
 kill "$pid" 2>/dev/null
 wait "$pid" 2>/dev/null
+kill "$catpid" 2>/dev/null
+wait "$catpid" 2>/dev/null
 
 echo "=== $DIR ==="
 grep -aE "V\.8 |negotiated|Phase 3|Phase 4|data mode|CONNECT|NO CARRIER|retrain|fall" "$LOG" | tail -40
+if [ -s "$DIR/pty-rx.bin" ]; then
+    echo "--- PTY: $(wc -c < "$DIR/pty-rx.bin") bytes; printable excerpt:"
+    tr -c '[:print:]\n' '.' < "$DIR/pty-rx.bin" | head -c 600; echo
+fi

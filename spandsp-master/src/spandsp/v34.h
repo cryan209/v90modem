@@ -242,6 +242,19 @@ SPAN_DECLARE(int) v34_restart(v34_state_t *s, int baud_rate, int bit_rate, bool 
     \return true if half-duplex operation is NOT in use (i.e. duplex). */
 SPAN_DECLARE(bool) v34_is_duplex(v34_state_t *s);
 
+/*! True while a plain V.34 call modem is sending its own Phase 3 and hears
+    nothing but that transmission coming back: V.34 11.3.1.2.4 has the answer
+    modem silent then.  The window a line echo canceller trains on.
+    \param s The modem context. */
+SPAN_DECLARE(bool) v34_rx_hearing_own_echo(v34_state_t *s);
+
+/*! The receive SNR implied by how well the last B1 matched its known
+    sequence (10.1.3.1), c^2/(1-c^2) for normalized correlation c.
+    \param s The modem context.
+    \param snr_db The SNR, in dB.
+    \return 0 once B1 has been acquired in the current data mode, else -1. */
+SPAN_DECLARE(int) v34_get_b1_snr_db(v34_state_t *s, float *snr_db);
+
 /*! Initialise a V.34 modem context. This must be called before the first
     use of the context, to initialise its contents.
     \brief Initialise a V.34 modem context.

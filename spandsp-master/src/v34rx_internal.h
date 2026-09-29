@@ -116,6 +116,10 @@ int      v34_rx_phase3_tracking_enabled(void);
 int      v34_rx_phase3_j_pattern_bit(int pat_type, int bit_idx);
 uint16_t v34_rx_j_ordered16(uint16_t rx_recent16, int total_bits, int phase);
 int      v34_rx_j_hint_enabled(void);
+bool     v34_rx_caller_awaiting_phase4_s(v34_rx_state_t *s);
+float    v34_rx_b1_score_at(const v34_rx_state_t *s, int k);
+int      v34_rx_b1_search(v34_rx_state_t *s, int search, int *offset_out,
+                          float *score_out, float *zero_score_out);
 
 /* V34_RX_STAGE_PHASE3_WAIT_S, lifted to v34rx_phase3.c.  Like the DATA stage
    it takes nothing from the enclosing switch. */

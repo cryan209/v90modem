@@ -948,11 +948,19 @@ void v34_rx_phase3_wait_s_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    same point rotated 90 degrees, so a real S shows up on the
                    ALTERNATION path (alt=32/32), which is how the half-duplex
                    loopback detects it. */
+                /* Nor for the plain V.34 call modem awaiting 11.4.1.2.1's S
+                   with our J on the air: there the next steady tone is the
+                   answer modem's Tone A retrain, which this path read as S on
+                   both RasFinder calls of 2026-09-30, and the conformant S is
+                   caught by the alternation path and by the three-bin line
+                   watch (v34_rx_caller_awaiting_phase4_s()). */
                 || ((s->duplex || s->phase3_hdx_tone_b_cleared)
+                    &&  !v34_rx_caller_awaiting_phase4_s(s)
                     &&  s->phase3_s_dom_windows >= PHASE3_S_DOMINANT_STABLE
                     &&  s->phase3_s_dom_windows <= PHASE3_S_DOMINANT_RUN_MAX)))
         {
             bool by_rotation = ((s->duplex || s->phase3_hdx_tone_b_cleared)
+                                &&  !v34_rx_caller_awaiting_phase4_s(s)
                                 &&  s->phase3_s_dom_windows >= PHASE3_S_DOMINANT_STABLE
                                 &&  s->phase3_s_dom_windows <= PHASE3_S_DOMINANT_RUN_MAX);
 

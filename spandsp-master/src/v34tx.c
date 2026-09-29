@@ -3920,9 +3920,31 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                 reason = "second Tone A reversal timeout";
             v90_wait_rx_l2_init(s, reason);
         }
-        else if (s->tx.tone_duration == (1200 - 30))
+        else if (!s->tx.v90_mode
+                 &&  ++s->tx.tone_duration >= 1200
+                 &&  s->rx.signal_present)
         {
-            /* Timeout, as we have not received a round trip time indication after 2s */
+            /* 11.2.2.1.3: "If, in 11.2.1.1.4, the call modem does not detect
+               a Tone A phase reversal within 2000 ms from the phase reversal
+               detected in 11.2.1.1.3, the call modem shall transmit silence
+               and condition its receiver to detect Tone A.  After detecting
+               Tone A, the call modem shall transmit Tone B ... and proceed in
+               accordance with 11.2.1.1.3."  1200 bauds of the 600 baud
+               control channel is the 2000 ms.  This stage used to wait here
+               for ever: against the RasFinder a retrain we opened from data
+               mode had its Tone B stage advanced by the peer's own data
+               signal, the peer then raised Tone A and held it for 32 s
+               waiting for a Tone B we never sent (rf-tower-v34b1rc-1). */
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - 11.2.2.1.3: no Tone A reversal within 2000 ms; Tone A is present, "
+                     "transmitting Tone B again (11.2.1.1.3)\n");
+            v90_phase2_reset_transactions(s);
+            s->rx.received_event = V34_EVENT_NONE;
+            s->rx.persistence1 = 0;
+            s->rx.persistence2 = 0;
+            s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
+            s->tx.tone_duration = 0;
+            s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
         }
         /*endif*/
         return zero;

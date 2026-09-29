@@ -191,6 +191,9 @@ static double v90_reneg_feed_rms = 0.0;
    phase3_j_lock_hyp, which the MP case falls back to when PHASE4_TRN has not
    produced a lock (see the hint_h line in the MP stage).  ME_V34_J_HINT=0
    withholds it. */
+static bool v34_rx_caller_hearing_own_phase3(v34_rx_state_t *s);
+static bool v34_rx_caller_hearing_own_phase3_m(v34_rx_state_t *s, int what);
+
 int v34_rx_j_hint_enabled(void)
 {
     static int cache = -1;
@@ -10744,7 +10747,8 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                  || v34_rx_stage_is_phase4_frame(s->stage)
                  || (s->stage == V34_RX_STAGE_PHASE3_WAIT_S
                      && s->phase3_tracking_armed
-                     && v34_rx_phase3_tracking_enabled()))
+                     && v34_rx_phase3_tracking_enabled()
+                     && !v34_rx_caller_hearing_own_phase3_m(s, 1)))
                 &&
                 !(s->stage == V34_RX_STAGE_PHASE3_WAIT_S && phase3_cma_disabled()))
             {
@@ -10819,7 +10823,8 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                   && (!s->phase3_pp_started
                       || s->duration <= PHASE3_PP_TRAIN_BAUDS))
                 && (s->stage != V34_RX_STAGE_PHASE3_WAIT_S
-                 || (s->phase3_tracking_armed && v34_rx_phase3_tracking_enabled()))
+                 || (s->phase3_tracking_armed && v34_rx_phase3_tracking_enabled()
+                     && !v34_rx_caller_hearing_own_phase3_m(s, 2)))
                 && !phase4_trn_should_freeze_tracking(s))
             {
                 error = sym->im*eq_target.re - sym->re*eq_target.im;
@@ -11038,10 +11043,22 @@ static bool v34_eye_pp_defer_enabled(void)
     {
         const char *value = getenv("ME_V34_EYE_PP_DEFER");
 
-        cache = (value  &&  strcmp(value, "0") == 0)  ?  0  :  1;
+        cache = (value  &&  strcmp(value, "0") == 0)  ?  0  :  (value  &&  strcmp(value, "all") == 0)  ?  2  :  1;
     }
     /*endif*/
     return cache != 0;
+}
+
+/* ME_V34_EYE_PP_DEFER=all also applies the PP-deferred flip outside the V.90
+   digital receiver (plain V.34, both roles).  Experiment. */
+static bool v34_eye_pp_defer_all(void)
+{
+    (void) v34_eye_pp_defer_enabled();
+    {
+        const char *value = getenv("ME_V34_EYE_PP_DEFER");
+
+        return value  &&  strcmp(value, "all") == 0;
+    }
 }
 
 static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sample)
@@ -11062,7 +11079,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
        before the far end's Phase 4 S arrives. */
     eye_check = (v34_rx_stage_is_primary_training(s->stage)
                  &&  s->eye_flips < v34_eye_max_flips()
-                 &&  v34_eye_select_enabled());
+                 &&  v34_eye_select_enabled()
+                 &&  !v34_rx_caller_hearing_own_phase3_m(s, 4));
     /* V.90 digital modem: once PP conditioning has begun, leave the symbol
        instant alone until Ja has been accepted.  PP trains the equalizer at the
        instant it ran on, and a move afterwards lands on that equalizer --
@@ -11174,8 +11192,17 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         return;
     }
     /*endif*/
-    pri_symbol_sync(s);
+    if (!v34_rx_caller_hearing_own_phase3_m(s, 8))
+        pri_symbol_sync(s);
+    /*endif*/
     eq_sample = equalizer_get(s);
+    s->p3_echo_mag_ema += 0.05f*(sqrtf(eq_sample.re*eq_sample.re + eq_sample.im*eq_sample.im)
+                                 - s->p3_echo_mag_ema);
+    if (s->p3_echo_mag_ema > 0.02f  &&  s->p3_echo_mag_ema < 0.5f)
+        s->p3_echo_run++;
+    else
+        s->p3_echo_run = 0;
+    /*endif*/
     if (eye_check)
     {
         s->eye_on_sum += sqrtf(eq_sample.re*eq_sample.re + eq_sample.im*eq_sample.im);
@@ -11237,9 +11264,9 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                    u-law its whole payload (0 bits against 16421), because
                    the move lands on an equalizer PP has just trained at the
                    old instant. */
-                s->eye_flip_pending = (s->v90_mode
-                                       &&  !s->calling_party
-                                       &&  v34_eye_pp_defer_enabled());
+                s->eye_flip_pending = ((s->v90_mode  &&  !s->calling_party)
+                                        ||  v34_eye_pp_defer_all())
+                                       &&  v34_eye_pp_defer_enabled();
                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - T/2 eye favours the other phase (off %.1f vs on %.1f) "
                          "but PP is being conditioned on; not moving the symbol instant\n",
@@ -12591,7 +12618,8 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
 
 static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
                                               int scrambler_tap,
-                                              int trellis_override);
+                                              int trellis_override,
+                                              int initial_state);
 static int v34_expected_b1_default_tap(v34_rx_state_t *rx);
 
 /* Put the data-frame decoder back into its 10.1.3.1 reset state, at a chosen
@@ -12841,7 +12869,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
             int trellis = s->v90_mode ? tr : -1;
 
             if (!v34_build_expected_b1_tap_trellis(s, candidate_tap[t],
-                                                   trellis))
+                                                   trellis, 0))
                 continue;
             /*endif*/
             match = v90_t3_acquire_pass(s, search_start, search_end, coeff,
@@ -12867,7 +12895,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     /* Leave the winning template loaded; the data decoder reuses its state. */
     if (best_tap)
     {
-        (void)v34_build_expected_b1_tap_trellis(s, best_tap, best_trellis);
+        (void)v34_build_expected_b1_tap_trellis(s, best_tap, best_trellis, 0);
         s->v90_far_tap_measured = best_tap;
         if (best_trellis >= 0)
             s->v90_t3_trellis_size = best_trellis;
@@ -13741,6 +13769,151 @@ static int v34_phase3_s_spectral_enabled(void)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Plain V.34 call modem, our J on the air: V.34 11.3.1.1.7 has it "send
+ * sequence J and condition its receiver to detect signal S", and the S that
+ * comes is the answer modem's Phase 4 S of 11.4.1.2.1 -- 128T, then S-bar and
+ * TRN.  Against the RasFinder (MT5634SMI) from a wired host both plain V.34
+ * calls of 2026-09-30 (rf-tower-v34-1-12840, -2-7702) lost the call here: the
+ * peer's S arrives ~0.65 s after our J, decodes cleanly offline on the taps
+ * trained on its own Phase 3 (alternating dibits 1,3 for exactly 128T), and
+ * the constellation-domain detector missed it both times, because the T/2 eye
+ * chooser moved the symbol instant in the middle of those 40 ms -- its
+ * 256-symbol window straddled our own echo and the S onset.  The peer then
+ * gave up after ~0.35 s of TRN and retrained, and the rotation-form detector
+ * read that Tone A as S.  The three-bin measurement needs no eye, and on both
+ * taps fires after exactly three 10 ms blocks of the real S (ratio 0.98-1.00)
+ * and nowhere else.  Arming it only once our J is on the air keeps our own
+ * S from being read through the echo when both directions share a carrier.
+ * ME_V34_P4_S_SPECTRAL=0 restores the constellation detector alone. */
+bool v34_rx_caller_awaiting_phase4_s(v34_rx_state_t *s)
+{
+    static int enabled = -1;
+    const v34_state_t *owner;
+
+    if (enabled < 0)
+    {
+        const char *v = getenv("ME_V34_P4_S_SPECTRAL");
+
+        enabled = !(v  &&  strcmp(v, "0") == 0);
+    }
+    /*endif*/
+    if (!enabled
+        ||  s->v90_mode
+        ||  !s->calling_party
+        ||  !s->duplex
+        ||  s->stage != V34_RX_STAGE_PHASE3_WAIT_S)
+        return false;
+    /*endif*/
+    owner = (const v34_state_t *) ((const char *) s - offsetof(v34_state_t, rx));
+    return owner->tx.stage == V34_TX_STAGE_J;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Plain V.34 call modem sending its own Phase 3 (S, S-bar, PP, TRN, J).  V.34
+ * 11.3.1.2.4 has the answer modem transmit silence from our S-to-S-bar
+ * transition until its Phase 4 S, so everything this receiver hears in that
+ * window is our own transmission coming back through the hybrid -- about
+ * 1.1 s of it against the RasFinder.  The receiver used to keep adapting
+ * through it: once the peer's Phase 3 TRN locked (100% on
+ * rf-tower-v34p4s-1), blind CMA, the carrier loop, the band-edge timing loop
+ * and the T/2 eye chooser all ran on that echo, a different transmitter with
+ * a different carrier and symbol phase, and the peer's Phase 4 TRN that
+ * followed read 55% ones -- chance -- on a signal that decodes to 8 degrees
+ * from the grid with the Phase 3 taps left alone, and its MP never decoded.
+ * Hold blind CMA there; 11.4.1.1.1 conditions the receiver on the peer's
+ * Phase 4 TRN, which is where adapting resumes.  (The 55% TRN score is not
+ * what changes -- the MP does: decoded and acknowledged instead of never.) */
+/* ME_V34_P3_ECHO_FREEZE: which loops v34_rx_caller_hearing_own_phase3() holds.
+   Bits 1 blind CMA, 2 carrier tracking, 4 T/2 eye chooser, 8 band-edge timing;
+   default 1, 0 disables.  CMA is the one that matters: replayed on
+   rf-tower-v34p4s-1 it alone takes the peer's MP from never decoding to
+   decoding and acknowledged, and the call on to B1.  Holding the eye chooser
+   as well (4) costs rf-v34-q3 -- a 09-28 call that reached data mode -- its
+   whole Phase 4, and holding everything costs rf-tower-v34p4s-1 its B1, so
+   those stay free.  Swept over d2, q1, q3 and both 2026-09-30 wired calls. */
+static int v34_p3_echo_freeze_mask(void)
+{
+    static int mask = -1;
+
+    if (mask < 0)
+    {
+        const char *v = getenv("ME_V34_P3_ECHO_FREEZE");
+
+        mask = v  ?  atoi(v)  :  1;
+    }
+    /*endif*/
+    return mask;
+}
+
+static bool v34_rx_caller_hearing_own_phase3_m(v34_rx_state_t *s, int what)
+{
+    return (v34_p3_echo_freeze_mask() & what)  &&  v34_rx_caller_hearing_own_phase3(s);
+}
+
+static bool v34_rx_caller_hearing_own_phase3(v34_rx_state_t *s)
+{
+    const v34_state_t *owner;
+
+    if (!v34_p3_echo_freeze_mask()
+        ||  s->v90_mode
+        ||  !s->calling_party
+        ||  !s->duplex
+        ||  s->stage != V34_RX_STAGE_PHASE3_WAIT_S)
+        return false;
+    /*endif*/
+    owner = (const v34_state_t *) ((const char *) s - offsetof(v34_state_t, rx));
+    /* And only while what we hear is our echo: weak but present, and held
+       there, not passing through on the way to silence.  The stage window
+       alone also covers the answer modem's own Phase 4 S, S-bar and TRN when
+       they arrive before we have detected S, and on a digital loopback the
+       answer modem's silence is exact zero, where nothing adapts anyway --
+       freezing through the fade of its J into that silence instead of after
+       it moved the taps enough to cost 3429/21600 u-law its training, the
+       row this matrix already calls a coin flip.  The peer at the
+       equalizer's output is |z| ~ 1; our echo from the RasFinder is 0.03-0.14
+       and steady. */
+    return owner->tx.stage >= V34_TX_STAGE_FIRST_NOT_S
+        &&  owner->tx.stage <= V34_TX_STAGE_J
+        &&  s->p3_echo_run >= 96;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_get_b1_snr_db(v34_state_t *s, float *snr_db)
+{
+    float c2;
+
+    if (!s  ||  !s->rx.b1_corr_valid)
+        return -1;
+    /*endif*/
+    c2 = s->rx.b1_corr*s->rx.b1_corr;
+    if (c2 >= 0.99999f)
+        c2 = 0.99999f;
+    /*endif*/
+    if (snr_db)
+        *snr_db = 10.0f*log10f(c2/(1.0f - c2));
+    /*endif*/
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(bool) v34_rx_hearing_own_echo(v34_state_t *s)
+{
+    const v34_rx_state_t *rx;
+
+    if (!s)
+        return false;
+    /*endif*/
+    rx = &s->rx;
+    return !rx->v90_mode
+        &&  rx->calling_party
+        &&  rx->duplex
+        &&  rx->stage == V34_RX_STAGE_PHASE3_WAIT_S
+        &&  s->tx.stage >= V34_TX_STAGE_FIRST_NOT_S
+        &&  s->tx.stage <= V34_TX_STAGE_J
+        &&  rx->p3_echo_run >= 96;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v34_rx_watch_phase3_s(v34_rx_state_t *s,
                                   const int16_t amp[],
                                   int len)
@@ -13749,12 +13922,12 @@ static void v34_rx_watch_phase3_s(v34_rx_state_t *s,
     const baud_rate_parameters_t *p;
     float baud;
     float fc;
-    float freq[3];
-    float coeff[3];
+    float freq[4];
+    float coeff[4];
     int i;
     int k;
 
-    if (!v34_phase3_s_spectral_enabled()
+    if (!(v34_phase3_s_spectral_enabled()  ||  v34_rx_caller_awaiting_phase4_s(s))
         ||
         s->stage != V34_RX_STAGE_PHASE3_WAIT_S
         ||
@@ -13792,7 +13965,13 @@ static void v34_rx_watch_phase3_s(v34_rx_state_t *s,
     freq[0] = fc - baud/2.0f;
     freq[1] = fc;
     freq[2] = fc + baud/2.0f;
-    for (k = 0;  k < 3;  k++)
+    /* A fourth line at 2400 Hz, which is never one of S's three, to reject
+       Tone A.  The answer modem's retrain tone is what follows a missed
+       Phase 4 S, and this peer sends it with an 1800 Hz guard tone at about
+       the same level -- which at 3000 baud low carrier (fc = 1800 Hz) is
+       exactly S's middle line, putting half the block in the sum. */
+    freq[3] = 2400.0f;
+    for (k = 0;  k < 4;  k++)
         coeff[k] = 2.0f*cosf(2.0f*3.14159265358979f*freq[k]/8000.0f);
     /*endfor*/
 
@@ -13800,7 +13979,7 @@ static void v34_rx_watch_phase3_s(v34_rx_state_t *s,
     {
         float x = (float) amp[i];
 
-        for (k = 0;  k < 3;  k++)
+        for (k = 0;  k < 4;  k++)
         {
             float g0 = x + coeff[k]*s->p3s_g1[k] - s->p3s_g2[k];
 
@@ -13813,6 +13992,7 @@ static void v34_rx_watch_phase3_s(v34_rx_state_t *s,
         {
             float denom = s->p3s_energy*(float) block*0.5f;
             float sum = 0.0f;
+            float tone_a;
 
             for (k = 0;  k < 3;  k++)
             {
@@ -13821,11 +14001,16 @@ static void v34_rx_watch_phase3_s(v34_rx_state_t *s,
                      - coeff[k]*s->p3s_g1[k]*s->p3s_g2[k];
             }
             /*endfor*/
+            tone_a = s->p3s_g1[3]*s->p3s_g1[3]
+                   + s->p3s_g2[3]*s->p3s_g2[3]
+                   - coeff[3]*s->p3s_g1[3]*s->p3s_g2[3];
             if (s->p3s_energy > 10000.0f*(float) block
                 &&
                 denom > 0.0f
                 &&
-                sum > 0.60f*denom)
+                sum > 0.60f*denom
+                &&
+                tone_a < 0.20f*denom)
             {
                 s->p3s_blocks++;
             }
@@ -14219,7 +14404,12 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
                    leaks into the 1800 Hz bin but has nothing at 2400. */
                 float guard_power = 0.0f;
 
-                if (listen_tone_a  &&  s->v90_mode)
+                /* Plain V.34 too: V.34 11.2.1.2 defines no guard tone, but
+                   the RasFinder's MT5634SMI sends one with its Tone A retrain
+                   in plain V.34 as well (centroid 2057 Hz, RMS bandwidth
+                   302 Hz on rf-tower-v34-1-12840), so the 2400 Hz bin alone
+                   never reached 70% and the retrain went unanswered. */
+                if (listen_tone_a)
                 {
                     float h1 = s->phase34_guard_g1;
                     float h2 = s->phase34_guard_g2;
@@ -15866,7 +16056,8 @@ static void v90_t3_b1_put_bit(void *user_data, int bit)
 
 static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
                                               int scrambler_tap,
-                                              int trellis_override)
+                                              int trellis_override,
+                                              int initial_state)
 {
     v34_state_t *tx;
     int16_t frame[16];
@@ -15908,6 +16099,9 @@ static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
         v34_free(tx);
         return false;
     }
+    /* 10.1.3.1 has the trellis encoder zeroed before B1; see
+       v34_rx_b1_search() for the peer that does not. */
+    tx->tx.state = initial_state;
     if (tx->tx.parms.j > 0)
     {
         tx->tx.super_frame = tx->tx.parms.j - 1;
@@ -15990,7 +16184,7 @@ static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
 
 static bool v34_build_expected_b1_tap(v34_rx_state_t *rx, int scrambler_tap)
 {
-    return v34_build_expected_b1_tap_trellis(rx, scrambler_tap, -1);
+    return v34_build_expected_b1_tap_trellis(rx, scrambler_tap, -1, 0);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -16009,6 +16203,102 @@ static bool v34_build_expected_b1(v34_rx_state_t *rx)
 {
     return v34_build_expected_b1_tap(rx, v34_expected_b1_default_tap(rx));
 }
+
+/* Normalized correlation of the loaded B1 template against the observed
+   symbols starting at offset k, either conjugation. */
+float v34_rx_b1_score_at(const v34_rx_state_t *s, int k)
+{
+    complexf_t c1 = complex_setf(0.0f, 0.0f);
+    complexf_t c2 = complex_setf(0.0f, 0.0f);
+    float ep = 0.0f;
+    float op = 0.0f;
+
+    for (int i = 0;  i < s->v90_t3_b1_symbols;  i++)
+    {
+        complexf_t o = s->b1_observed[k + i];
+        complexf_t e = s->v90_t3_b1[i];
+
+        c1.re += o.re*e.re + o.im*e.im;
+        c1.im += o.im*e.re - o.re*e.im;
+        c2.re += o.re*e.re - o.im*e.im;
+        c2.im += o.im*e.re + o.re*e.im;
+        ep += e.re*e.re + e.im*e.im;
+        op += o.re*o.re + o.im*o.im;
+    }
+    /*endfor*/
+    if (ep <= 0.0f  ||  op <= 0.0f)
+        return 0.0f;
+    /*endif*/
+    return sqrtf(fmaxf(c1.re*c1.re + c1.im*c1.im, c2.re*c2.re + c2.im*c2.im)/(ep*op));
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Find B1 among the buffered symbols: where it starts, and which state the
+ * far end's trellis encoder started it in.
+ *
+ * 10.1.3.1 initializes the trellis encoder to zero before B1, and a template
+ * built that way is what the receiver has always used.  The RasFinder's
+ * MT5634SMI does not: built from each of the 16 states in turn, one state
+ * correlates at 0.991-0.993 against the received B1 and every other at
+ * 0.71-0.78, and the state differs from call to call (1 on rf-v34-d2 and
+ * rf-tower-v34frz-1, 13 on rf-tower-v34cma-1) -- so the peer carries its
+ * encoder state into B1.  Every symbol whose 4D subset depends on it came out
+ * a quarter turn off in the second half of the 4D pair, which is what read as
+ * a white data mode on every plain V.34 call to that peer.  The Viterbi
+ * decoder is started in the same state, since its path metrics otherwise
+ * assume zero.  Leaves the winning template loaded; returns the state. */
+int v34_rx_b1_search(v34_rx_state_t *s, int search, int *offset_out,
+                     float *score_out, float *zero_score_out)
+{
+    int states = s->viterbi.state_count;
+    int best_state = 0;
+    int best_offset = 0;
+    float best = -1.0f;
+    int prior;
+
+    if (states <= 0  ||  states > 64)
+        states = 1;
+    /*endif*/
+    for (int st = 0;  st < states;  st++)
+    {
+        if (!v34_build_expected_b1_tap_trellis(s, v34_expected_b1_default_tap(s), -1, st))
+            break;
+        /*endif*/
+        for (int k = 0;  k <= search;  k++)
+        {
+            float score = v34_rx_b1_score_at(s, k);
+
+            if (st == 0  &&  k == 0  &&  zero_score_out)
+                *zero_score_out = score;
+            /*endif*/
+            if (score > best)
+            {
+                best = score;
+                best_state = st;
+                best_offset = k;
+            }
+            /*endif*/
+        }
+        /*endfor*/
+    }
+    /*endfor*/
+    (void) v34_build_expected_b1_tap_trellis(s, v34_expected_b1_default_tap(s), -1, best_state);
+    prior = (s->viterbi.ptr - 1) & 0xF;
+    for (int state = 0;  state < s->viterbi.state_count;  state++)
+    {
+        s->viterbi.vit[prior].cumulative_path_metric[state] =
+            (state == best_state)  ?  0U  :  0x3FFFFFFFU;
+    }
+    /*endfor*/
+    if (offset_out)
+        *offset_out = best_offset;
+    /*endif*/
+    if (score_out)
+        *score_out = best;
+    /*endif*/
+    return best_state;
+}
+/*- End of function --------------------------------------------------------*/
 
 /* V.90's upstream is an ordinary V.34 signal, so in principle the ordinary
    V.34 data receiver -- RRC front end, 127-tap T/2 equalizer, DD-LMS and the
@@ -16171,6 +16461,7 @@ SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
     s->rx.mp_seen = 2;
     s->rx.b1_acquisition_active = false;
     s->rx.b1_observed_symbols = 0;
+    s->rx.b1_corr_valid = false;
     if (s->rx.v90_t3_prepared)
     {
         if (s->rx.v90_t3_active)

@@ -23,6 +23,7 @@
 #include "data_interface.h"
 #include "data_stack.h"
 #include "clock_recovery.h"
+#include "v34_line_ec.h"
 #include "v90.h"
 #include "v91.h"
 #include "v90_cp_live.h"
@@ -2187,6 +2188,22 @@ static int  g_notch_tx_high = -1;
 static int  g_notch_rx_baud = -1;
 static int  g_notch_rx_high = -1;
 static bool g_v34_use_echo_can = false;
+/* Plain V.34 line echo canceller (v34_line_ec.c): fitted once on the call
+   modem's own Phase 3, when V.34 11.3.1.2.4 has the far end silent, and held
+   through Phase 4 and data mode.  ME_V34_LINE_EC=0 disables. */
+static v34_line_ec_t g_lec;
+static bool g_lec_armed = false;
+
+static bool me_line_ec_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *e = getenv("ME_V34_LINE_EC");
+        cached = !(e && strcmp(e, "0") == 0);
+    }
+    return cached != 0;
+}
 /* V.22bis guard tone (ITU-T V.22bis §2.1/2.2): an 1800 Hz (or, as a national
    option, 550 Hz) tone transmitted continuously alongside the "high
    channel" carrier, 6 dB (1800 Hz) or 3 dB (550 Hz) below the data signal
@@ -3377,6 +3394,66 @@ static void v34_rx_rate_backoff_locked(void)
     *ours = want;
     g_v34_rx_rate_backoff_n++;
     v34_set_mp_rate_policy(g_v34, a_to_c, c_to_a);
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Did B1 say the rate we asked the far end for is more than this line
+ * carries?  If so, ask for less and retrain now (11.5), rather than sit in a
+ * white data mode until either end gives up on it.
+ *
+ * 10.1.3.1's B1 is a known frame, so how well it matched its template is a
+ * measurement of this call's receive SNR at the data mode's own equalizer --
+ * the first one available, since the rate has to be chosen in MP before any
+ * data-mode symbol exists.  Against the RasFinder with the line echo
+ * canceller in force B1 matched at 0.997-0.998, ~23 dB: at 31200 bit/s the
+ * data mode was white every time, while 19200 ran a whole call at 0.028 from
+ * the grid.  The rate is read off the same calibration the data mode's own
+ * report uses (bits/symbol ~ (SNR + 13)/6, docs/v34_data_mode_rates.md), which
+ * a B1 measurement taken straight after E makes conservative.  Only our own
+ * receive direction is touched, the retrain counts against the same per-call
+ * cap as any other, and ME_V34_B1_RATE_CHECK=0 disables it. */
+static bool g_v34_b1_rate_checked = false;
+static bool retrain_on_loss_due(int cap);
+static void v34_reneg_clear_locked(void);
+static bool restart_v34_phase2_locked(const char *reason);
+
+static bool v34_b1_rate_check_locked(void)
+{
+    static const int baud_by_code[6] = {2400, 2743, 2800, 3000, 3200, 3429};
+    float snr;
+    int a_to_c;
+    int c_to_a;
+    int *ours;
+    int rx_code;
+    int supported;
+
+    if (g_v34_b1_rate_checked || !g_v34 || v34_get_b1_snr_db(g_v34, &snr) != 0)
+        return false;
+    g_v34_b1_rate_checked = true;
+    if (parse_env_int("ME_V34_B1_RATE_CHECK", 1) == 0)
+        return false;
+    if (v34_get_negotiated_mp_rates(g_v34, &a_to_c, &c_to_a) != 0)
+        return false;
+    rx_code = v34_get_rx_baud_rate(g_v34);
+    if (rx_code < 0 || rx_code >= 6)
+        return false;
+    ours = g_calling_party ? &a_to_c : &c_to_a;
+    supported = (int) floorf((snr + 13.0f)/6.0f*(float) baud_by_code[rx_code]/2400.0f);
+    if (supported < 2)
+        supported = 2;
+    ME_LOG("[ME] V.34 B1: receive SNR %.1f dB at %d baud carries about %d bps; "
+           "negotiated %d bps\n", snr, baud_by_code[rx_code], supported*2400, *ours*2400);
+    if (*ours <= supported || !retrain_on_loss_due(me_v34_max_loss_retrains()))
+        return false;
+    ME_LOG("[ME] V.34 B1: asking for %d bps instead of %d bps and retraining per 11.5\n",
+           supported*2400, *ours*2400);
+    *ours = supported;
+    v34_set_mp_rate_policy(g_v34, a_to_c, c_to_a);
+    g_loss_retrains++;
+    g_last_loss_retrain_ms = trace_now_ms();
+    v34_reneg_clear_locked();
+    (void) restart_v34_phase2_locked("B1 measured less SNR than the negotiated rate needs");
+    return true;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -5391,6 +5468,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
                     g_phase_start_ms = 0;
                     g_v34_data_entry_ms = trace_now_ms();
                     g_v34_data_entry_samples = g_rx_audio_samples;
+                    g_v34_b1_rate_checked = false;
                     ME_LOG("[ME] V.34 training complete (%d bps)\n", rate);
                     trace_phase("V34 enter DATA: rate=%d", rate);
                     /* §11.5 never takes CONNECT back; a retrain only clamps
@@ -5599,6 +5677,8 @@ static void start_v34_training(void)
 
     g_mod   = ME_MOD_V34;
     g_state = ME_TRAINING;
+    v34_line_ec_reset(&g_lec);
+    g_lec_armed = !v90_upstream;
     g_phase_start_ms = trace_now_ms();
     /* g_mod is overwritten to ME_MOD_V34 a line above because V.90's Phases
      * 2-4 ARE V.34's, so an unqualified "mod=V34" here reads as a V.90 call
@@ -7821,6 +7901,15 @@ skip_8k_codewords:
                         g_v34_preroll_len = 0;
                     }
                     g_v34_rx_samples += (uint64_t)len;
+                    if (g_lec_armed && g_mod == ME_MOD_V34 && me_line_ec_enabled()) {
+                        char lec_msg[256];
+
+                        if (v34_line_ec_rx(&g_lec, filtered, len,
+                                           v34_rx_hearing_own_echo(g_v34),
+                                           lec_msg, sizeof(lec_msg))
+                            && lec_msg[0])
+                            ME_LOG("[ME] V.34 %s\n", lec_msg);
+                    }
                     v34_rx(g_v34, filtered, len);
                     me_rx_accounting_check();
                     /* The T/3 interpolator is exact-rational 6/5 and begins
@@ -8163,6 +8252,8 @@ skip_8k_codewords:
                             (void) restart_v34_phase2_locked(
                                 "rate renegotiation timeout");
                         }
+                    } else if (g_mod == ME_MOD_V34 && v34_b1_rate_check_locked()) {
+                        /* Retrained at a rate B1 says this line carries. */
                     } else if (v34_retrain_probe_due_locked()) {
                         g_v34_retrain_probe_done = true;
                         ME_LOG("[ME] V.34: ME_V34_RETRAIN_AFTER_MS probe; "
@@ -9884,6 +9975,8 @@ static void buffer_tx_samples_for_echo(const int16_t *amp, int len)
         g_tx_buf[g_tx_buf_wr] = amp[i];
         g_tx_buf_wr = (g_tx_buf_wr + 1) & TX_BUF_MASK;
     }
+    if (g_lec_armed && g_mod == ME_MOD_V34)
+        v34_line_ec_tx(&g_lec, amp, len);
     pthread_mutex_unlock(&g_state_mtx);
 }
 

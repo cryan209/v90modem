@@ -1383,8 +1383,8 @@ typedef struct
        because the constellation-domain detector needs the eye and on a real
        analogue line the far end's symbol clock is not phase-locked to our
        sample grid. */
-    float p3s_g1[3];
-    float p3s_g2[3];
+    float p3s_g1[4];
+    float p3s_g2[4];
     float p3s_energy;
     int p3s_samples;
     int p3s_blocks;
@@ -1703,6 +1703,16 @@ typedef struct
 
     /*! Known-sequence B1 acquisition for ordinary V.34 (10.1.3.1). */
     bool b1_acquisition_active;
+    /* Set while symbols received during the B1 offset search are replayed
+       into DATA: the equalizer's input vector no longer belongs to them. */
+    bool b1_replaying;
+    /* Symbols the B1 search collects past the nominal B1, decided when the
+       nominal B1 is in: 0 if it already correlates where E put it. */
+    int b1_search_len;
+    /* Normalized correlation of the received B1 with its template; valid
+       from B1 acquisition until the next data-mode entry. */
+    float b1_corr;
+    bool b1_corr_valid;
     int b1_observed_symbols;
     complexf_t b1_observed[V34_V90_T3_B1_MAX_SYMBOLS];
 
@@ -1802,6 +1812,12 @@ typedef struct
     float eye_off_sum;
     /* V.90 CP stage: differential-angle quality of each T/2 phase. */
     complexf_t eye_prev_on;
+    /* Plain V.34 call modem: short EMA of equalized |z| while it sends its own
+       Phase 3, to tell the silent answer modem (our echo, ~0.1-0.3) from its
+       Phase 4 S (~1). */
+    float p3_echo_mag_ema;
+    /* Symbols the EMA has sat in the echo band (see v34rx.c). */
+    int p3_echo_run;
     complexf_t eye_prev_off;
     float eye_on_aerr;
     float eye_off_aerr;
