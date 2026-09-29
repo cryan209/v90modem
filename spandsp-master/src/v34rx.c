@@ -564,6 +564,11 @@ static int phase3_rx_dump_count = 0;
 #define PHASE3_PP_ACQUIRE_MIN_BAUDS     48
 #define PHASE3_PP_ACQUIRE_HOLD_BAUDS    12
 #define PHASE3_PP_ACQUIRE_SCORE_MIN     650
+#define PHASE3_PP_ONSET_SCORE           400
+#define PHASE3_PP_ONSET_NOMINAL         40
+#define PHASE3_PP_ONSET_MAX_SKIP        160
+
+static int v34_pp_onset_trim_enabled(void);
 #define PHASE3_PP_ACQUIRE_DECAY         0.98f
 #define V34_AGC_POWER_MIN               100000
 #define V34_AGC_SCALING_MIN             0.00001f
@@ -2128,6 +2133,8 @@ static void phase3_pp_reset(v34_rx_state_t *s)
     s->phase3_pp_phase = -1;
     s->phase3_pp_phase_score = -1;
     s->phase3_pp_acquire_hits = 0;
+    s->phase3_pp_onset = -1;
+    s->phase3_pp_skip = 0;
     s->phase3_pp_started = 0;
 }
 /*- End of function --------------------------------------------------------*/
@@ -8253,6 +8260,17 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             /*endif*/
             s->phase3_pp_phase = best_phase;
             s->phase3_pp_phase_score = (int) lrintf(1000.0f*best_score);
+            if (s->phase3_pp_phase_score >= PHASE3_PP_ONSET_SCORE)
+            {
+                if (s->phase3_pp_onset < 0)
+                    s->phase3_pp_onset = s->duration;
+                /*endif*/
+            }
+            else if (s->phase3_pp_phase_score < PHASE3_PP_ONSET_SCORE/2)
+            {
+                s->phase3_pp_onset = -1;
+            }
+            /*endif*/
 
             if (s->duration <= 4 || (s->duration % PHASE3_PP_ACQUIRE_LOG_INTERVAL) == 0)
             {
@@ -8309,7 +8327,35 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    acquisition baud (N+1), i.e. pp_symbols[(N+phase)%48].
                    With new_phase = (phase + acquire_bauds) % 48 and dur=1:
                    pp_symbols[(1-1+new_phase)%48] = pp_symbols[(acquire_bauds+phase)%48]. ✓ */
-                s->phase3_pp_phase = (s->phase3_pp_phase + acquire_bauds) % PP_PERIOD_SYMBOLS;
+                /* PP is 288T (10.1.3.6) and the conditioning takes 232 of them, which
+                   assumes PP start is declared a few dozen bauds after PP begins:
+                   from correlation onset to detection measures 27-43 bauds on every
+                   RasFinder call whose PP residual came out 0.2-0.4.  When the lock
+                   is late -- an eye flip during acquisition resets it, and the score
+                   then crosses its threshold only after the move -- the same 232
+                   bauds run off the end of PP into TRN and train the equalizer
+                   against the wrong reference: onset-to-detection 79-150 bauds on
+                   every call with residual 0.50-1.06, and on
+                   artifacts/rf-0929s-p10-3 no Ja hypothesis ever parsed on a line
+                   that measures 31.6 dB offline.  So start the conditioning count
+                   at the excess, keeping the PP index continuous; it then ends where
+                   a timely detection would have.  V.90 digital receiver only: plain V.34
+                   3200/21600 A-law, where every PP is timely, stops decoding its
+                   payload with it.  ME_V34_PP_ONSET_TRIM=0 disables. */
+                s->phase3_pp_skip = 0;
+                if (s->phase3_pp_onset >= 0
+                    &&  s->v90_mode
+                    &&  !s->calling_party
+                    &&  v34_pp_onset_trim_enabled())
+                {
+                    int late = acquire_bauds - s->phase3_pp_onset - PHASE3_PP_ONSET_NOMINAL;
+
+                    if (late > 0)
+                        s->phase3_pp_skip = (late > PHASE3_PP_ONSET_MAX_SKIP)  ?  PHASE3_PP_ONSET_MAX_SKIP  :  late;
+                    /*endif*/
+                }
+                /*endif*/
+                s->phase3_pp_phase = (s->phase3_pp_phase + acquire_bauds - s->phase3_pp_skip + 4*PP_PERIOD_SYMBOLS) % PP_PERIOD_SYMBOLS;
                 if (getenv("VPCM_V90_PP_PHASE"))
                 {
                     int forced_phase = atoi(getenv("VPCM_V90_PP_PHASE"));
@@ -8320,7 +8366,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     s->phase3_pp_phase = forced_phase;
                 }
                 /*endif*/
-                s->duration = 0;
+                s->duration = s->phase3_pp_skip;
                 memset(s->phase3_pp_lag8, 0, sizeof(s->phase3_pp_lag8));
                 s->phase3_pp_obs = 0;
                 s->phase3_pp_match = 0;
@@ -8329,8 +8375,8 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    fighting the LMS equalizer adaptation. */
                 s->agc_scaling_save = s->agc_scaling;
                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
-                         "Rx - Phase 3: PP start detected (phase=%d score=%d after %d bauds), starting supervised PP conditioning (agc frozen at %.6f)\n",
-                         s->phase3_pp_phase, s->phase3_pp_phase_score, acquire_bauds, s->agc_scaling);
+                         "Rx - Phase 3: PP start detected (phase=%d score=%d after %d bauds, locked %d, onset %d ago), starting supervised PP conditioning (agc frozen at %.6f)\n",
+                         s->phase3_pp_phase, s->phase3_pp_phase_score, acquire_bauds, s->phase3_pp_acquire_hits, (s->phase3_pp_onset >= 0) ? acquire_bauds - s->phase3_pp_onset : -1, s->agc_scaling);
             }
             /*endif*/
         }
@@ -8372,7 +8418,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     equalizer_reset(s);
                 }
                 /*endif*/
-                if (pp_baud <= 1)
+                if (pp_baud <= 1 + s->phase3_pp_skip)
                     s->eq_target_mag = sym_mag;
                 else
                     s->eq_target_mag = 0.95f*s->eq_target_mag + 0.05f*sym_mag;
@@ -10840,6 +10886,20 @@ static int v34_eye_pp_guard_enabled(void)
         cache = (value  &&  (value[0] == '0'  ||  value[0] == 'n'  ||  value[0] == 'N'))
               ?  0
               :  ((value  &&  value[0] == '2')  ?  2  :  1);
+    }
+    /*endif*/
+    return cache;
+}
+
+static int v34_pp_onset_trim_enabled(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *value = getenv("ME_V34_PP_ONSET_TRIM");
+
+        cache = (value  &&  value[0] == '0')  ?  0  :  1;
     }
     /*endif*/
     return cache;

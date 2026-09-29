@@ -2060,6 +2060,11 @@ typedef struct
        by the encoder convention rather than searched.  -1 = not pinned. */
     int v90_cp_diff_hypothesis;
     int phase3_pp_acquire_hits;
+    /* Acquisition baud at which the PP correlation first rose clear of noise,
+       or -1; independent of the phase lock, which an eye flip resets. */
+    int phase3_pp_onset;
+    /* Bauds of PP conditioning skipped because PP was detected late. */
+    int phase3_pp_skip;
     int phase3_pp_started;
     uint32_t phase3_j_scramble[24];
     uint32_t phase3_j_stream[24];
