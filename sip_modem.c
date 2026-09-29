@@ -699,6 +699,8 @@ static void on_stream_created2(pjsua_call_id call_id,
 /* PJSUA callbacks                                                     */
 /* ------------------------------------------------------------------ */
 
+static void on_call_media_state(pjsua_call_id call_id);
+
 static void on_call_state(pjsua_call_id call_id, pjsip_event *e)
 {
     (void)e;
@@ -707,6 +709,12 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e)
 
     PJ_LOG(3, ("sip_modem", "Call %d state: %.*s",
                call_id, (int)ci.state_text.slen, ci.state_text.ptr));
+
+    if (ci.state == PJSIP_INV_STATE_CONFIRMED && !g_media_connected) {
+        /* Outgoing call answered after early media: start the engine now if
+           the media is already active (see on_call_media_state). */
+        on_call_media_state(call_id);
+    }
 
     if (ci.state == PJSIP_INV_STATE_DISCONNECTED) {
         /* Cancel ringing if the caller hung up before we answered */
@@ -772,6 +780,20 @@ static void on_call_media_state(pjsua_call_id call_id)
                                conf_port, tx_st, rx_st));
                 else
                     PJ_LOG(3, ("sip_modem", "Media clock wired: conf %d <-> 0", conf_port));
+            }
+            /* An outgoing call gets early media (ringback) at 183, long before
+               anyone answers.  Starting V.8 there runs its timeout against
+               ringback: dialling the RasFinder hunt group (3999), which rings
+               its three ports in turn, V.8 gave up after 10 s of 440/480 Hz and
+               we hung up before any port answered.  Wait for 200 OK; the
+               on_call_state CONFIRMED branch starts the engine.
+               ME_V8_ON_EARLY_MEDIA=1 restores starting here. */
+            if (ci.role == PJSIP_ROLE_UAC
+                && ci.state != PJSIP_INV_STATE_CONFIRMED
+                && !(getenv("ME_V8_ON_EARLY_MEDIA")
+                     && atoi(getenv("ME_V8_ON_EARLY_MEDIA")) != 0)) {
+                PJ_LOG(3, ("sip_modem", "Early media on outgoing call; waiting for answer before V.8"));
+                break;
             }
             if (!g_media_connected) {
                 me_on_sip_connected();
