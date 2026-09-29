@@ -322,7 +322,14 @@ static __inline__ complexf_t getbaud(v17_tx_state_t *s)
         bits |= (scramble(s, bit) << i);
     }
     /*endfor*/
-    return s->constellation[diff_and_convolutional_encode(s, bits)];
+    {
+        int idx = diff_and_convolutional_encode(s, bits);
+
+        if (s->v32bis_sym_dump != NULL)
+            fprintf(s->v32bis_sym_dump, "%d\n", idx);
+        /*endif*/
+        return s->constellation[idx];
+    }
 }
 /*- End of function --------------------------------------------------------*/
 

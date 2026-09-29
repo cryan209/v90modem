@@ -535,8 +535,25 @@ static int decode_baud(v17_rx_state_t *s, complexf_t *z)
        less often, but using the output of the traceback would put more lag
        into the feedback path. */
     constellation_state = constel_maps[s->space_map][re][im][min_index];
-    track_carrier(s, z, &s->constellation[constellation_state]);
-    //tune_equalizer(s, z, &s->constellation[constellation_state]);
+    if (s->v32bis_eye_log  &&  s->training_stage == TRAINING_STAGE_NORMAL_OPERATION)
+    {
+        float dre = z->re - s->constellation[constellation_state].re;
+        float dim = z->im - s->constellation[constellation_state].im;
+
+        s->v32bis_eye_sum += dre*dre + dim*dim;
+        s->v32bis_eye_count++;
+    }
+    /*endif*/
+    if (!s->v32bis_carrier_hold)
+        track_carrier(s, z, &s->constellation[constellation_state]);
+    /*endif*/
+    /* V.17 fax leaves the equalizer frozen after training: its bursts are
+       short and its channel static.  V.32bis holds a dense constellation over
+       a whole connection, so the V.32bis path keeps a decision-directed LMS
+       running here. */
+    if (s->v32bis_data_eq)
+        tune_equalizer(s, z, &s->constellation[constellation_state]);
+    /*endif*/
 
     /* Now do the trellis decoding */
 
@@ -603,6 +620,10 @@ static int decode_baud(v17_rx_state_t *s, complexf_t *z)
     }
     /*endfor*/
     nearest = s->full_path_to_past_state_locations[j][k] >> 1;
+    if (s->v32bis_sym_dump != NULL  &&  s->training_stage == TRAINING_STAGE_NORMAL_OPERATION)
+        fprintf(s->v32bis_sym_dump, "%d %d %.5f %.5f %d\n",
+                nearest, s->v32bis_data_bits_suppress, z->re, z->im, constellation_state);
+    /*endif*/
 
     /* Differentially decode */
     raw = (nearest & 0x3C) | v17_differential_decoder[s->diff][nearest & 0x03];
@@ -663,6 +684,9 @@ static void process_half_baud(v17_rx_state_t *s, const complexf_t *sample)
 
     /* This routine processes every half a baud, as we put things into the equalizer at the T/2 rate. */
 
+    if (s->v32bis_t2_dump != NULL)
+        fprintf(s->v32bis_t2_dump, "%.6f %.6f %d\n", sample->re, sample->im, s->baud_half);
+    /*endif*/
     /* Add a sample to the equalizer's circular buffer, but don't calculate anything at this time. */
     s->eq_buf[s->eq_step] = *sample;
     if (++s->eq_step >= V17_EQUALIZER_LEN)
@@ -675,7 +699,14 @@ static void process_half_baud(v17_rx_state_t *s, const complexf_t *sample)
     /*endif*/
 
     /* Symbol timing synchronisation */
-    s->eq_put_step += godard_ted_per_baud(&s->godard);
+    {
+        int ted = godard_ted_per_baud(&s->godard);
+
+        if (s->v32bis_timing_hold)
+            ted = 0;
+        /*endif*/
+        s->eq_put_step += ted;
+    }
 
     z = equalizer_get(s);
 

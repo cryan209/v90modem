@@ -172,42 +172,96 @@ SPAN_DECLARE(void) v32bis_set_put_bit(v32bis_state_t *s, span_put_bit_func_t put
 #define V32BIS_SCRAMBLER_MASK    0x7FFFFF
 /*! The V.17 equalizer LMS step, fast and annealed. Kept in step with
     EQUALIZER_FAST_ADAPTION_DELTA in v17rx.c. */
-#define V32BIS_EQ_DELTA_FAST     (0.21f/33)
+#define V32BIS_EQ_DELTA_FAST_BASE (0.21f/33)
+#define V32BIS_EQ_DELTA_FAST     (v32bis_eq_delta_fast())
 #define V32BIS_EQ_DELTA_SLOW     (v32bis_eq_delta_slow())
 /*! TRN symbols spent at the fast step before annealing. */
 #define V32BIS_TRN_FAST_SYMBOLS  (v32bis_trn_fast_symbols())
 
-/*! Energy-normalized LMS. Default OFF: measured over the five rate rows in
-    both laws it is worse than the plain step at the step size the plain step
-    was tuned for (9433 bit errors against 5144), so it needs its own eq_delta
-    retune before it can be adopted. V32BIS_NLMS=1 enables it. */
+/*! Energy-normalized LMS. Default OFF, and its premise is now refuted. It was
+    written for a residual that looked like gradient noise; that residual was
+    the unlatched AGC below, and with the AGC latched the plain step recovers
+    every rate/law row without error while this costs 7952. Swept over
+    V32BIS_EQ_FAST it never bettered the plain step at any setting, and above
+    about 14x the equalizer diverges. V32BIS_NLMS=1 enables it. */
 static bool v32bis_use_nlms(void)
 {
-    const char *e = getenv("V32BIS_NLMS");
+    static int cached = -1;
+    const char *e;
 
-    return (e != NULL  &&  atoi(e) != 0);
+    if (cached < 0)
+    {
+        e = getenv("V32BIS_NLMS");
+        cached = (e != NULL  &&  atoi(e) != 0);
+    }
+    /*endif*/
+    return (bool) cached;
+}
+/*- End of function --------------------------------------------------------*/
+
+/*! Multiplier on the fast LMS step.  The plain step inherits V.17's tuning;
+    the energy-normalized one needs its own, because normalizing divides by the
+    equalizer buffer energy and so changes the effective step by that factor. */
+static float v32bis_eq_delta_fast(void)
+{
+    static float cached = -1.0f;
+    const char *e;
+
+    if (cached < 0.0f)
+    {
+        e = getenv("V32BIS_EQ_FAST");
+        cached = (e != NULL) ? (float) atof(e)*V32BIS_EQ_DELTA_FAST_BASE
+                             : V32BIS_EQ_DELTA_FAST_BASE;
+    }
+    /*endif*/
+    return cached;
+}
+/*- End of function --------------------------------------------------------*/
+
+/*! Decision-directed equalizer adaption through the data phase. */
+static bool v32bis_data_eq(void)
+{
+    const char *e = getenv("V32BIS_DATA_EQ");
+
+    return (e == NULL  ||  atoi(e) != 0);
 }
 /*- End of function --------------------------------------------------------*/
 
 static float v32bis_eq_delta_slow(void)
 {
-    const char *e = getenv("V32BIS_EQ_SLOW");
+    static float cached = -1.0f;
+    const char *e;
 
-    return (e != NULL) ? (float) atof(e)*V32BIS_EQ_DELTA_FAST
-                       : 0.1f*V32BIS_EQ_DELTA_FAST;
+    if (cached < 0.0f)
+    {
+        e = getenv("V32BIS_EQ_SLOW");
+        cached = (e != NULL) ? (float) atof(e)*V32BIS_EQ_DELTA_FAST
+                             : 0.1f*V32BIS_EQ_DELTA_FAST;
+    }
+    /*endif*/
+    return cached;
 }
 /*- End of function --------------------------------------------------------*/
 
 static int v32bis_trn_fast_symbols(void)
 {
-    const char *e = getenv("V32BIS_TRN_FAST");
+    static int cached = -1;
+    const char *e;
     int n;
 
+    if (cached >= 0)
+        return cached;
+    /*endif*/
+    e = getenv("V32BIS_TRN_FAST");
     if (e != NULL  &&  (n = atoi(e)) >= 0)
-        return n;
+        return (cached = n);
     /* Swept over both laws at all five rates: 160/320/640 give 4539/5144/5415
-       total bit errors at the 0.1 anneal. */
-    return 160;
+       total bit errors at the 0.1 anneal.  Since the AGC latch below, the
+       anneal is no longer load-bearing: every combination of TRN_FAST in
+       {0, 80, 160, 320, 640, 1280} and EQ_SLOW in {0.1, 0.3, 1.0} recovers all
+       ten rate/law rows without error.  It is kept because it still helps at
+       the smallest steps, where 0.05 costs up to 743 bit errors. */
+    return (cached = 160);
 }
 /*- End of function --------------------------------------------------------*/
 /*! ITU-T V.32bis 6.  B1 is the marks segment between E and data. */
@@ -963,7 +1017,20 @@ static int v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
            fast, then anneal. */
         /* v17_rx_restart() clears this, and it runs after init, so it has to be
            (re)asserted from inside the startup path rather than at init. */
+        /* V.17 latches the AGC as it leaves its own training stages.  The
+           V.32bis path takes over the symbol stream before those stages run,
+           so nothing ever latched it and the AGC kept re-deriving its scaling
+           from the instantaneous power meter on every T/2 sample -- a white,
+           amplitude-proportional gain error of about 10% for the whole call.
+           S has run for 256 symbols by here, so the level is settled. */
+        if (s->rx.agc_scaling_save == 0.0f)
+            s->rx.agc_scaling_save = s->rx.agc_scaling;
+        /*endif*/
         s->rx.eq_normalized_lms = v32bis_use_nlms();
+        s->rx.v32bis_eye_log = (getenv("V32BIS_DATA_EYE") != NULL);
+        s->rx.v32bis_data_eq = v32bis_data_eq();
+        s->rx.v32bis_timing_hold = (getenv("V32BIS_TIMING_HOLD") != NULL);
+        s->rx.v32bis_carrier_hold = (getenv("V32BIS_CARRIER_HOLD") != NULL);
         s->rx.eq_delta = (s->startup_rx_trn_pos < V32BIS_TRN_FAST_SYMBOLS)
                        ? V32BIS_EQ_DELTA_FAST
                        : V32BIS_EQ_DELTA_SLOW;
@@ -1240,6 +1307,30 @@ SPAN_DECLARE(v32bis_state_t *) v32bis_init(v32bis_state_t *s,
     v17_rx_init(&s->rx, bit_rate, put_bit, put_bit_user_data);
     s->ec = modem_echo_can_segment_init(256);
 
+    {
+        const char *d;
+
+        char path[512];
+
+        if (calling_party  &&  (d = getenv("V32BIS_SYM_DUMP_TX")) != NULL)
+        {
+            snprintf(path, sizeof(path), "%s-%d", d, bit_rate);
+            s->tx.v32bis_sym_dump = fopen(path, "w");
+        }
+        /*endif*/
+        if (!calling_party  &&  (d = getenv("V32BIS_SYM_DUMP_RX")) != NULL)
+        {
+            snprintf(path, sizeof(path), "%s-%d", d, bit_rate);
+            s->rx.v32bis_sym_dump = fopen(path, "w");
+        }
+        /*endif*/
+        if (!calling_party  &&  (d = getenv("V32BIS_T2_DUMP")) != NULL)
+        {
+            snprintf(path, sizeof(path), "%s-%d", d, bit_rate);
+            s->rx.v32bis_t2_dump = fopen(path, "w");
+        }
+        /*endif*/
+    }
     /* Initialise things which are not quite like V.17 */
     if (s->calling_party)
     {
@@ -1264,6 +1355,33 @@ SPAN_DECLARE(v32bis_state_t *) v32bis_init(v32bis_state_t *s,
 
 SPAN_DECLARE(int) v32bis_release(v32bis_state_t *s)
 {
+    if (s->tx.v32bis_sym_dump != NULL)
+    {
+        fclose(s->tx.v32bis_sym_dump);
+        s->tx.v32bis_sym_dump = NULL;
+    }
+    /*endif*/
+    if (s->rx.v32bis_sym_dump != NULL)
+    {
+        fclose(s->rx.v32bis_sym_dump);
+        s->rx.v32bis_sym_dump = NULL;
+    }
+    /*endif*/
+    if (s->rx.v32bis_t2_dump != NULL)
+    {
+        fclose(s->rx.v32bis_t2_dump);
+        s->rx.v32bis_t2_dump = NULL;
+    }
+    /*endif*/
+    if (s->rx.v32bis_eye_log  &&  s->rx.v32bis_eye_count > 0)
+    {
+        fprintf(stderr,
+                "V32BIS data eye: rate=%d symbols=%d rms=%.4f\n",
+                s->bit_rate,
+                s->rx.v32bis_eye_count,
+                sqrt(s->rx.v32bis_eye_sum/s->rx.v32bis_eye_count));
+    }
+    /*endif*/
     if (s->ec != NULL)
     {
         modem_echo_can_segment_free(s->ec);

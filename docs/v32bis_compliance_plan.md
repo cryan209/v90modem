@@ -115,32 +115,84 @@ Two defects sat at the handoff, both invisible at 4800 and fatal above it:
 With both fixed, **4800 and 7200 recover the PRBS with zero errors in both
 G.711 laws**, and those two rows are asserted in `make test`.
 
-## Why 9600 and above are still open
+## All five rates now recover the PRBS without error
 
-Not the handoff, and not B1.  Measured during supervised TRN, with known
-targets on a clean loopback:
+9600, 12000 and 14400 used to fail, and the explanation recorded here -- that
+the shared V.17 LMS step is unnormalized and its gradient noise (0.42 of a
+unit against a half-spacing of 1.0) is survivable by a 4 or 8 point decision
+and not by a dense one -- was **wrong**.  All five rates now recover the PRBS
+with zero bit errors in both G.711 laws, and all ten rows are asserted in
+`make test`.
 
-    carrier phase error   within 0.1 degree
-    gain ratio            1.00
-    equalized |error|     0.227 rising to 0.55 of a unit over 1280 symbols
+**The cause was the receive AGC, and it was never latched.**  `v17rx.c` only
+updates `agc_scaling` "until we have locked down the setting", the latch being
+`agc_scaling_save`, which V.17 sets as it leaves its own training stages.  The
+V.32bis path takes the symbol stream over through `symbol_sink` *before* those
+stages run, so nothing ever set it and the AGC re-derived its scaling from the
+instantaneous power meter on **every T/2 sample for the whole call**.  It is
+now latched from inside the V.32bis TRN handler, where S has already run for
+256 symbols and the level is settled.  Measured as the rms distance from the
+equalizer output to the **transmitter's own** symbol:
 
-Carrier and AGC are therefore exonerated; the residual is dispersive, and it
-**grows with training**.  That is gradient noise: the shared V.17 LMS step is
-unnormalized and fixed, so once converged it keeps injecting noise
-proportional to the input energy.  A frozen equalizer is not the answer either
--- it breaks even 4800, so the equalizer is doing real work.
+    rate     before   after
+    7200      0.731   0.326
+    9600      0.883   0.260
+    12000     1.030   0.812
+    14400     1.022   0.232
 
-The step is now annealed: fast for the first 160 TRN symbols, then a tenth of
-that.  It stops the growth (plateau 0.42 instead of 0.55) and takes 9600 from
-258 bit errors to 21.  Swept over both laws at all five rates, 160/320/640 fast
-symbols give 4539/5144/5415 total bit errors.
+**How it was found, because three metrics said the opposite first.**  The
+receiver's own eye -- distance to the point it *chose* -- read 0.60 at 14400
+and 0.73 at 7200, i.e. the failing rate looked better than the error-free one,
+because a wrong decision is self-consistent.  Dumping the transmitter's symbol
+index against the receiver's (`V32BIS_SYM_DUMP_TX` / `_RX`) showed 53% of
+14400's symbols simply wrong, so the decode was not marginal.  Measured against
+those true symbols the residual is ~10% of the symbol amplitude at **every**
+rate and in every phase, because the constellations are all normalized to the
+same mean power -- one impairment, not a constellation effect.
 
-The floor of 0.42 is what remains, against a constellation half-spacing of 1.0.
-A 4 or 8 point decision survives it; 32, 64 and 128 point ones do not.  The
-principled fix is an energy-normalized step, which is implemented behind
-`V32BIS_NLMS=1` and **is not the default**, because at the `eq_delta` the plain
-step was tuned for it is worse -- 9433 total bit errors against 5144.  It needs
-its own step retune before it can be adopted, and that retune is the open work.
+Three candidate mechanisms were then eliminated by measurement, and each is
+worth not re-testing: it is **not gradient noise** (annealing the step changes
+the floor by a few percent, and below `V32BIS_EQ_SLOW=0.03` the equalizer does
+not converge at all -- 8.0, i.e. no equalization -- so the loop was
+convergence-limited, not noise-limited); **not timing jitter** (freezing the
+Godard loop leaves 7200 at 0.732); and **not linear distortion** (a
+least-squares fit of the transmitted symbols to the equalizer output with
+taps from -40 to +40 still leaves 0.63, and the neighbouring taps are 0.01).
+
+What settled it was two bounds.  A least-squares fit of the best possible
+33/65/129-tap T/2 equalizer to the receiver's **own baseband stream**
+(`V32BIS_T2_DUMP`) reaches only 0.665 held out, against the 0.731 the receiver
+achieves -- so the equalizer was already near optimal and the damage was
+upstream of it.  The same fit against the **transmit audio**
+(`V32BIS_AUDIO_DUMP`, mixed to baseband at 1800 Hz, one tap set per
+3-symbol phase class) reaches **0.0007** -- so the waveform is clean and any
+linear receiver can recover it exactly.  The loss is entirely between the
+audio and the equalizer input, which is where the AGC sits.  Read those two
+numbers together: either alone says nothing.
+
+Consequences for the tuning recorded above.  The **energy-normalized LMS**
+(`V32BIS_NLMS=1`) existed for a residual that was the AGC; with the AGC
+latched it is clearly harmful (7952 bit errors against 0) and no
+`V32BIS_EQ_FAST` setting betters the plain step, so its "needs its own retune"
+status is withdrawn rather than outstanding.  The **anneal** is no longer
+load-bearing: every combination of `V32BIS_TRN_FAST` in {0, 80, 160, 320, 640,
+1280} with `V32BIS_EQ_SLOW` in {0.1, 0.3, 1.0} is clean on all ten rows.  It is
+kept at 160/0.1 because the smallest step (0.05) still costs up to 743 errors.
+
+**Decision-directed equalizer adaption now runs in the data phase.**  V.17
+leaves the equalizer frozen after training, which is right for a fax burst on a
+static channel and wrong for a V.32bis connection; `tune_equalizer()` was
+commented out at its data-mode call site.  It is enabled for the V.32bis path
+only (`V32BIS_DATA_EQ=0` disables) and is worth 192 bit errors and one clean
+row on its own after the AGC fix.
+
+Diagnostics, all env-gated and all caching their getenv: `V32BIS_B1_SYMBOLS`,
+`V32BIS_TRN_FAST`, `V32BIS_EQ_FAST`, `V32BIS_EQ_SLOW`, `V32BIS_NLMS`,
+`V32BIS_DATA_EQ`, `V32BIS_DATA_EYE` (the self-consistent eye -- read it only
+beside a true-symbol measurement), `V32BIS_SYM_DUMP_TX`/`_RX`,
+`V32BIS_T2_DUMP`, `V32BIS_AUDIO_DUMP`, `V32BIS_TIMING_HOLD`,
+`V32BIS_CARRIER_HOLD`, `V32BIS_LINEAR` (bypass G.711, to attribute a defect to
+the bearer or exonerate it) and `V32BIS_PEAK`.
 
 `v17rx.c` and `v17tx.c` are shared with the V.17 fax modems, so all of the
 above is scoped to the V.32bis path and the full suite is green.
@@ -292,7 +344,7 @@ Exit criteria:
 
 ### Phase 3: Passband Modulation and Receiver Front End
 
-Status: working through zero-BER 4800 data; dense-rate tracking pending
+Status: zero-BER at all five rates over the G.711 loopback
 
 - Pulse shaping
 - Carrier generation and recovery
@@ -301,7 +353,8 @@ Status: working through zero-BER 4800 data; dense-rate tracking pending
 
 Exit criteria:
 
-- Offline loopback passes at all supported rates over a simulated clean channel.
+- Offline loopback passes at all supported rates over a simulated clean
+  channel. Met for the clean G.711 loopback; no impaired-channel model yet.
 
 ### Phase 4: Full-Duplex Echo-Cancelled Operation
 

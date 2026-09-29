@@ -79,6 +79,14 @@ struct v17_rx_state_s
     bool symbol_sink_uses_data_constellation;
     /*! \brief Normalize the equalizer LMS step by the buffer energy (V.32bis). */
     bool eq_normalized_lms;
+    bool v32bis_data_eq;
+    bool v32bis_timing_hold;
+    bool v32bis_carrier_hold;
+    bool v32bis_eye_log;
+    FILE *v32bis_sym_dump;
+    FILE *v32bis_t2_dump;
+    double v32bis_eye_sum;
+    int v32bis_eye_count;
 
 #if defined(SPANDSP_USE_FIXED_POINTx)
     /*! \brief The scaling factor assessed by the AGC algorithm. */

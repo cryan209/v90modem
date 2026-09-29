@@ -188,6 +188,16 @@ static int test_symbol_domain_handoff(int alaw, int bit_rate, int rate_mask)
     int i;
     int block;
     int queued;
+    int peak = 0;
+    FILE *wav = NULL;
+    const char *wavdir = getenv("V32BIS_AUDIO_DUMP");
+    char wavpath[512];
+
+    if (wavdir != NULL)
+    {
+        snprintf(wavpath, sizeof(wavpath), "%s-%d", wavdir, bit_rate);
+        wav = fopen(wavpath, "w");
+    }
 
     tx = v32bis_init(NULL, bit_rate, true, pattern_bit, &transmitted, put_bit, NULL);
     rx = v32bis_init(NULL, bit_rate, false, pattern_bit, &transmitted, collect_bit, &received);
@@ -222,8 +232,15 @@ static int test_symbol_domain_handoff(int alaw, int bit_rate, int rate_mask)
         }
         for (i = 0;  i < 160;  i++)
         {
-            bearer[i] = alaw ? alaw_to_linear(linear_to_alaw(audio[i]))
-                              : ulaw_to_linear(linear_to_ulaw(audio[i]));
+            if (wav != NULL) fprintf(wav, "%d\n", audio[i]);
+            if (audio[i] > peak) peak = audio[i];
+            if (-audio[i] > peak) peak = -audio[i];
+            if (getenv("V32BIS_LINEAR") != NULL)
+                bearer[i] = audio[i];
+            else
+                bearer[i] = alaw ? alaw_to_linear(linear_to_alaw(audio[i]))
+                                  : ulaw_to_linear(linear_to_ulaw(audio[i]));
+            /*endif*/
         }
         v32bis_rx(rx, bearer, 160);
     }
@@ -250,6 +267,11 @@ static int test_symbol_domain_handoff(int alaw, int bit_rate, int rate_mask)
         v32bis_free(rx);
         return -1;
     }
+    if (wav != NULL)
+        fclose(wav);
+    if (getenv("V32BIS_PEAK") != NULL)
+        fprintf(stderr, "V32BIS peak sample %d at %d bit/s\n", peak, bit_rate);
+    /*endif*/
     v32bis_free(tx);
     v32bis_free(rx);
     return 0;
@@ -270,18 +292,17 @@ int main(void)
         int asserted;
     } handoff_rates[] =
     {
-        /* 4800 and 7200 recover the PRBS with zero errors in both laws.
-           9600 and above do not yet: the shared V.17 equalizer's LMS step is
-           unnormalized, and the gradient noise it leaves (0.42 of a unit
-           against a constellation half-spacing of 1.0) is survivable by a 4 or
-           8 point decision and not by a 32, 64 or 128 point one.  Those rows
-           are measured and reported rather than asserted or hidden.
-           See docs/v32bis_compliance_plan.md. */
+        /* All five rates recover the PRBS with zero errors in both G.711
+           laws.  9600 and above used to fail; the cause was the receive AGC
+           re-deriving its scaling from the instantaneous power meter on every
+           T/2 sample, because V.32bis takes the symbol stream over before the
+           V.17 training stages that latch it.  See
+           docs/v32bis_compliance_plan.md. */
         {4800, V32BIS_RATE_4800, 1},
         {7200, V32BIS_RATE_7200, 1},
-        {9600, V32BIS_RATE_9600, 0},
-        {12000, V32BIS_RATE_12000, 0},
-        {14400, V32BIS_RATE_14400, 0}
+        {9600, V32BIS_RATE_9600, 1},
+        {12000, V32BIS_RATE_12000, 1},
+        {14400, V32BIS_RATE_14400, 1}
     };
     size_t r;
 
