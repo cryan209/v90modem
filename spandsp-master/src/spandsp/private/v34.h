@@ -1800,6 +1800,11 @@ typedef struct
     /* T/2 eye selection; see process_primary_half_baud(). */
     float eye_on_sum;
     float eye_off_sum;
+    /* V.90 CP stage: differential-angle quality of each T/2 phase. */
+    complexf_t eye_prev_on;
+    complexf_t eye_prev_off;
+    float eye_on_aerr;
+    float eye_off_aerr;
     int eye_n;
     int eye_flips;
     /*! A flip the T/2 eye chooser measured while PP was being conditioned

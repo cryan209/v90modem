@@ -154,6 +154,7 @@ int main(int argc, char *argv[])
     int alaw = 0;
     int fast = 0;
     int dial = 0;
+    int split = 0;
     double from = -1.0;
     const char *schedule = NULL;
     /* Its own link, so a replay never fights a live server for /tmp/modem0. */
@@ -167,7 +168,7 @@ int main(int argc, char *argv[])
     if (argc < 2) {
         fprintf(stderr,
                 "usage: %s <tap.g711> [ulaw|alaw] [--fast] [--from SECONDS]"
-                " [--pty-link PATH] [--dial] [--schedule IO.bin]\n",
+                " [--pty-link PATH] [--dial] [--split] [--schedule IO.bin]\n",
                 argv[0]);
         return 2;
     }
@@ -185,6 +186,8 @@ int main(int argc, char *argv[])
             pty_link = argv[++i];
         else if (strcmp(argv[i], "--dial") == 0)
             dial = 1;
+        else if (strcmp(argv[i], "--split") == 0)
+            split = 1;
         else if (strcmp(argv[i], "--schedule") == 0 && i + 1 < argc)
             schedule = argv[++i];
         else
@@ -278,7 +281,14 @@ int main(int argc, char *argv[])
     for (pos = start; pos + FRAME_BYTES <= tap_len; pos += FRAME_BYTES) {
         uint8_t tx[FRAME_BYTES];
 
-        me_rx_g711(tap + pos, FRAME_BYTES);
+        /* --split: live pjmedia hands RX over as two 80-sample calls per
+           20 ms tick; approximate that without a recorded schedule. */
+        if (split) {
+            me_rx_g711(tap + pos, FRAME_BYTES/2);
+            me_rx_g711(tap + pos + FRAME_BYTES/2, FRAME_BYTES/2);
+        } else {
+            me_rx_g711(tap + pos, FRAME_BYTES);
+        }
         /* Pull the transmit side and throw it away.  The engine's phase
            machine advances on both directions, and the peer's answers are
            already in the recording. */

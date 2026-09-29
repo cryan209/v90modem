@@ -2094,6 +2094,7 @@ static int v90_select_shaper_rule(v90_state_t *s,
         0.0
     };
     double best_metric = HUGE_VAL;
+    double first_metrics[2] = {HUGE_VAL, HUGE_VAL};
     int first_rules[2];
     int best_rule = 0;
 
@@ -2125,13 +2126,65 @@ static int v90_select_shaper_rule(v90_state_t *s,
                                                lookahead,
                                                next_state,
                                                current);
+        first_metrics[first_idx] = metric;
         if (metric < best_metric) {
             best_metric = metric;
             best_rule = first_rule;
             *selected_filter = current;
         }
     }
+    {
+        /* V90_SHAPER_TIE_LOG=1: report shaping frames whose two allowed
+         * first rules score (nearly) equal.  §5.4.5.5 defines no tie-break,
+         * so a data-aided peer regenerating our signs may resolve these the
+         * other way, and the trellis memory carries the disagreement on. */
+        static int tie_log = -1;
+        static long frames, ties_exact, ties_near;
+
+        if (tie_log < 0) {
+            const char *v = getenv("V90_SHAPER_TIE_LOG");
+            tie_log = (v && *v && strcmp(v, "0") != 0) ? 1 : 0;
+        }
+        if (tie_log) {
+            double d = fabs(first_metrics[0] - first_metrics[1]);
+            double m = fabs(first_metrics[0]) + fabs(first_metrics[1]);
+
+            frames++;
+            if (d == 0.0)
+                ties_exact++;
+            else if (d <= 1e-6 * m)
+                ties_near++;
+            if ((frames % 2000) == 0 || d <= 1e-6 * m)
+                if ((ties_exact + ties_near) <= 20 || (frames % 2000) == 0)
+                    fprintf(stderr,
+                            "[V90] shaper tie: frame %ld state %d m=%.6g/%.6g "
+                            "exact=%ld near=%ld\n",
+                            frames, shaper->trellis_state,
+                            first_metrics[0], first_metrics[1],
+                            ties_exact, ties_near);
+        }
+    }
     return best_rule;
+}
+
+/* Test-only: ME_V90_SHAPER_LD=<0..3> forces the look-ahead depth the
+ * rule SELECTION uses, leaving the CPt's ld (and so the frame delay it
+ * implies) alone.  NOT conformant (§5.4.5.5 takes ld from CP); it exists to
+ * ask whether a data-aided peer regenerates our TRN2d signs with a different
+ * look-ahead than the one it requested. */
+static int v90_shaper_select_lookahead(const vpcm_cp_frame_t *cp)
+{
+    static int forced = -2;
+
+    if (forced == -2) {
+        const char *v = getenv("ME_V90_SHAPER_LD");
+
+        forced = (v && *v && atoi(v) >= 0 && atoi(v) <= 3) ? atoi(v) : -1;
+        if (forced >= 0)
+            fprintf(stderr, "[V90] TEST: shaper rule selection look-ahead forced to %d\n",
+                    forced);
+    }
+    return forced >= 0 ? forced : cp->shaping_lookahead;
 }
 
 static void v90_shape_data_signs(v90_state_t *s,
@@ -2156,7 +2209,7 @@ static void v90_shape_data_signs(v90_state_t *s,
                                       initial + offset,
                                       offset,
                                       frame_length,
-                                      cp->shaping_lookahead,
+                                      v90_shaper_select_lookahead(cp),
                                       &selected);
         for (int k = 0; k < frame_length; k++)
             signs[offset + k] = initial[offset + k]

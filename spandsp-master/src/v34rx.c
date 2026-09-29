@@ -642,10 +642,21 @@ static const char *v34_rx_stage_to_str(int stage)
    10.0 through CPt #1, 11.8 and then 22.2 across CPt #2 and 23.1 in SCR (26
    is white), with the mean at 0 and the magnitude pinned at 1.00 -- growing
    phase NOISE while every loop is static -- where an offline demodulation of
-   the same tap with a freshly adapted CMA reads 5.75.  Default off: 9.6's own
+   the same tap with a freshly adapted CMA reads 5.75.  9.6's own
    adapt-vs-freeze A/B came out the other way over 28 windows
    (ME_V90_RENEG_CP_ADAPT defaults to frozen), so this is measured here and
-   not assumed by analogy. */
+   not assumed by analogy.
+
+   DEFAULT ON since 2026-09-30.  Scored on six wired-rig RasFinder calls, each
+   replayed fed as whole 160-sample frames and as the two 80-sample halves a
+   live pjmedia call delivers (v90_engine_replay --split), with the CP-stage
+   eye criterion below: CPt accepted in 11 of 12 cells frozen, 12 of 12
+   adapting.  The one frozen miss is a call whose Phase 3 eye chooser flipped
+   on a half-silent window (sums 45.7 vs 43.5) and saved taps that leave
+   BOTH T/2 phases white (26 deg) at the CP stage -- no symbol instant can
+   rescue that, adapting on the constant-modulus CPt does.  That call missed
+   all 11 of the peer's CRC-valid CPt frames live and was retrained out of
+   Ri.  ME_V90_CP_ADAPT_STARTUP=0 restores the freeze. */
 static bool v90_startup_cp_adapt(void)
 {
     static int cached = -1;
@@ -654,7 +665,7 @@ static bool v90_startup_cp_adapt(void)
     {
         const char *v = getenv("ME_V90_CP_ADAPT_STARTUP");
 
-        cached = (v  &&  atoi(v) != 0) ? 1 : 0;
+        cached = (v  &&  *v)  ?  (atoi(v) != 0)  :  1;
     }
     /*endif*/
     return cached != 0;
@@ -10860,6 +10871,48 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
 #define V34_EYE_MIN_MAG                 0.10f
 #define V34_EYE_VOTES                   1
 
+/* V.90 digital modem, CP stage: judge the T/2 eye by the DIFFERENTIAL angle
+   of each phase rather than by its magnitude.  CPt is 4-point DPSK (V.90
+   8.5.2 via V.34 10.1.3.9), so at the eye centre consecutive symbols differ
+   by a multiple of 90 degrees; off it they do not.  The magnitude vote is
+   biased there: the equalizer is frozen from Phase 3 and was trained at the
+   CURRENT phase, so |z| favours staying put, and against the RasFinder the
+   one CP-stage decision it took was an 8% call (264.9 vs 244.6, replay of
+   rf-tower-shp-ld0-23988).  ME_V90_CP_EYE_ANGLE=0 restores the magnitude
+   vote. */
+static int v34_v90_cp_eye_angle_enabled(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *v = getenv("ME_V90_CP_EYE_ANGLE");
+
+        cache = (v  &&  strcmp(v, "0") == 0)  ?  0  :  1;
+    }
+    /*endif*/
+    return cache;
+}
+/*- End of function --------------------------------------------------------*/
+
+static float v34_eye_diff_angle_err2(complexf_t z, complexf_t *prev)
+{
+    float err;
+    float a;
+
+    if (prev->re == 0.0f  &&  prev->im == 0.0f)
+    {
+        *prev = z;
+        return -1.0f;
+    }
+    /*endif*/
+    a = atan2f(z.im*prev->re - z.re*prev->im, z.re*prev->re + z.im*prev->im);
+    err = a - (float) (M_PI/2.0)*rintf(a/(float) (M_PI/2.0));
+    *prev = z;
+    return err*err;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int v34_eye_select_enabled(void)
 {
     static int cache = -1;
@@ -11107,6 +11160,15 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             complexf_t off = equalizer_get(s);
 
             s->eye_off_sum += sqrtf(off.re*off.re + off.im*off.im);
+            if (s->stage == V34_RX_STAGE_V90_CP  &&  v34_v90_cp_eye_angle_enabled())
+            {
+                float e = v34_eye_diff_angle_err2(off, &s->eye_prev_off);
+
+                if (e >= 0.0f)
+                    s->eye_off_aerr += e;
+                /*endif*/
+            }
+            /*endif*/
         }
         /*endif*/
         return;
@@ -11117,8 +11179,24 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     if (eye_check)
     {
         s->eye_on_sum += sqrtf(eq_sample.re*eq_sample.re + eq_sample.im*eq_sample.im);
+        if (s->stage == V34_RX_STAGE_V90_CP  &&  v34_v90_cp_eye_angle_enabled())
+        {
+            float e = v34_eye_diff_angle_err2(eq_sample, &s->eye_prev_on);
+
+            if (e >= 0.0f)
+                s->eye_on_aerr += e;
+            /*endif*/
+        }
+        /*endif*/
         if (++s->eye_n >= v34_eye_window())
         {
+            bool cp_angle = (s->stage == V34_RX_STAGE_V90_CP
+                             &&  v34_v90_cp_eye_angle_enabled());
+            /* 26 degrees rms is a signal unrelated to the 90-degree grid; a
+               phase already under 15 is on the eye and is left alone, and the
+               other must be at least twice as good (in squared error) to win. */
+            float on_rms_deg = sqrtf(s->eye_on_aerr/(float) s->eye_n)*(float) (180.0/M_PI);
+
             /* Only decide on signal.  V.34 11.3.1.2.4 has the answer modem
                silent for the whole of the call modem's Phase 3, and two
                near-zero sums differ by whatever noise decides -- measured at
@@ -11130,10 +11208,20 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             if (s->eye_on_sum + s->eye_off_sum
                     > 2.0f*v34_eye_min_mag()*v34_eye_window()
                 &&
-                s->eye_off_sum > v34_eye_margin()*s->eye_on_sum)
+                (cp_angle
+                 ?  (on_rms_deg > 15.0f  &&  2.0f*s->eye_off_aerr < s->eye_on_aerr)
+                 :  (s->eye_off_sum > v34_eye_margin()*s->eye_on_sum)))
                 s->eye_votes++;
             else
                 s->eye_votes = 0;
+            /*endif*/
+            if (cp_angle)
+            {
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                         "Rx - V.90 CP T/2 eye: differential angle rms on %.1f deg, off %.1f deg\n",
+                         (double) on_rms_deg,
+                         (double) (sqrtf(s->eye_off_aerr/(float) s->eye_n)*(float) (180.0/M_PI)));
+            }
             /*endif*/
             /* Consecutive windows must agree.  At 3429 baud the two phases sit
                1.17 samples apart and a single window decided by ratios of 1.05
@@ -11167,10 +11255,14 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                          (double) s->eye_off_sum, (double) s->eye_on_sum,
                          s->eye_n, s->eye_flips);
                 s->baud_half ^= 1;
+                s->eye_prev_on = complex_setf(0.0f, 0.0f);
+                s->eye_prev_off = complex_setf(0.0f, 0.0f);
             }
             /*endif*/
             s->eye_on_sum = 0.0f;
             s->eye_off_sum = 0.0f;
+            s->eye_on_aerr = 0.0f;
+            s->eye_off_aerr = 0.0f;
             s->eye_n = 0;
         }
         /*endif*/
@@ -15049,6 +15141,27 @@ SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
     s->rx.stage = V34_RX_STAGE_V90_CP;
     s->rx.duration = 0;
     s->rx.received_event = V34_EVENT_NONE;
+    /* The T/2 eye chooser's per-call flip cap is usually spent by the end of
+       Phase 3 (PP deferral, the post-Ja release, DIL), which left the CP
+       stage no way to correct a wrong phase.  Against the RasFinder a live
+       call spent all four in Phase 3 -- one on a half-silent window, sums
+       45.7 vs 43.5 -- entered V90_CP on the wrong phase, read its 11
+       CRC-valid CPt frames as white (26 degrees) and was retrained out of
+       Ri (rf-tower-shp-codec-5136; reproduced with v90_engine_replay
+       --split, which feeds RX as the two 80-sample calls per tick pjmedia
+       makes live).  CPt is constant-modulus DPSK sent until we answer it,
+       so give the stage two flips of its own and a fresh window. */
+    if (v34_eye_max_flips() - s->rx.eye_flips < 2)
+        s->rx.eye_flips = v34_eye_max_flips() - 2;
+    /*endif*/
+    s->rx.eye_votes = 0;
+    s->rx.eye_on_sum = 0.0f;
+    s->rx.eye_off_sum = 0.0f;
+    s->rx.eye_on_aerr = 0.0f;
+    s->rx.eye_off_aerr = 0.0f;
+    s->rx.eye_n = 0;
+    s->rx.eye_prev_on = complex_setf(0.0f, 0.0f);
+    s->rx.eye_prev_off = complex_setf(0.0f, 0.0f);
     s->rx.bitstream = 0;
     s->rx.bit_count = 0;
     s->rx.mp_seen = 0;

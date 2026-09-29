@@ -756,3 +756,77 @@ every time and expose Phase 3 without the Wi-Fi jitter that masked it.
 
 Live from tower with 1 and 2: 3 of 3 calls reach Phase 4 CPt.  Open: Phase 4 --
 the peer sends CPt, we send TRN2d and MP, it retrains without sending CP.
+
+## 2026-09-30 (later): Phase 4 from tower -- the retrain is a fixed deadline, our TRN2d/MP is conformant, and one CPt defect of ours
+
+**The peer's retrain is pinned to TRN2d start.**  From tower, every call that
+reached TRN2d retrained at **TRN2d start + 2240 ms (+/-1 ms)**, whatever we
+varied:
+
+| varied | values | retrain after TRN2d start |
+|---|---|---|
+| TRN2d length (`ME_V90_TRN2D_SYMBOLS`) | 2040T, 12000T, 12000T (MP from +240 / +1500 ms) | 2241, 2241, 2240 ms |
+| MP upstream offer (`ME_V90_UPSTREAM_MAX_BPS`) | 31200, 19200, 19200, 9600 | 2240, 2240, 2241, 2240 ms |
+| shaper convention | `ME_V90_SHAPER_METRIC=codec`, `ME_V90_SHAPER_LD=0` (new, test-only) | 2241, 2241, 2241 ms |
+
+At K=12 an MP is ~4.5 ms, so the 2040T call sent ~390 MP frames before the
+deadline.  The peer never acted on one.  It does detect our R-bar-i: calls
+where we never sent it (CPt missed) retrain 4.92 s after Ri instead.
+Allowing for the 267 ms tap round trip (echo delay below), the peer's own
+interval is ~1.97 s -- 9.4.1.3's 2000 ms for MP.
+
+**Our TRN2d/MP is conformant, by a decoder that shares nothing with v90.c.**
+`tools/v90_trn2d_spec_decode.py` is a V.90 5.4 receiver written from the
+Recommendation text (descending labels, modulus decode, Sr=1 sign recovery
+through Tables 3/4 and the Figure 2 trellis without knowing the shaper's
+rule, GPC descrambler, Table 16 framing, the reflected CRC that validates the
+peer's own CPt).  On the live transmit tap of `rf-tower-t2-2040-10715`:
+TRN2d **100.00% ones over 5780 bits**, **444 of 444 MP frames CRC-valid**
+(Type 0, drn 13, mask 0x0fff).  Negative control: starting one sample late
+reads 62.7% ones and no MP.  So SmartLink reaching data mode was not a
+lenient peer forgiving a wrong convention -- the encoding is right against the
+text.  The two CPt frames compared field by field differ only where
+expected: RasFinder drn 9, six identical 4-point constellations
+{61,84,96,102}, codec-output set {47,69,81,87} (bit 128, a real ~6 dB loop
+loss); SmartLink drn 15, one 8-point constellation, no pad.  Both Sr=1, ld=1,
+a1=1.0, a2=b1=b2=0.  No shaper ties either (`V90_SHAPER_TIE_LOG=1`: none in
+~2000 frames; the two first-rule metrics typically differ ~4x).
+
+**The ATA carries it intact.**  The VG224's hybrid echo in our RX tap is a view
+of the downstream as played onto the line.  A 48-tap fit over Phase 3 Jd
+(peer silent) explains 99.7% of the received power at a delay of 2136
+samples; projected through that same filter, the TRN2d/MP-era echo has gain
+**1.00 +/- 0.07** at the **same 2136-sample delay**.  Linear, no playout
+slip between Phase 3 and Phase 4.
+
+So the peer receives a conformant, unslipped TRN2d/MP and still does not find
+MP.  What remains is on its side of the loop or a convention outside the
+text; nothing we have varied moves it.
+
+**Fixed: CPt missed on a third of calls.**  On 3 of 9 tower calls the peer sent
+CPt -- `rf-tower-shp-codec-5136` carries **11 CRC-valid CPt frames** by the
+independent checker -- and our receiver accepted none, so the peer never saw
+R-bar-i and retrained out of Ri.  Offline it only reproduced with
+`v90_engine_replay --split` (new), which feeds RX as the two 80-sample calls
+per tick a live pjmedia call makes; fed whole 160-sample frames the same
+audio is accepted.  Two defects:
+
+1. The T/2 eye chooser's per-call cap of four flips was spent by the end of
+   Phase 3, one of them on a half-silent window (sums 45.7 vs 43.5), so the
+   CP stage could not correct its phase.  And its magnitude vote is biased
+   there: the equalizer is frozen from Phase 3 at the current phase.  In
+   `V34_RX_STAGE_V90_CP` the chooser now judges each phase by the
+   *differential* angle to the 90-degree grid (CPt is 4-point DPSK), leaves a
+   phase under 15 deg rms alone, and gets two flips of its own on entry
+   (`ME_V90_CP_EYE_ANGLE=0` restores the magnitude vote).
+2. On the call where that half-silent flip landed during Phase 3 training,
+   the saved taps leave BOTH phases white (26 deg) at the CP stage.  No
+   symbol instant rescues it; letting the CP-stage taps adapt on the
+   constant-modulus CPt does.  `ME_V90_CP_ADAPT_STARTUP` is now default ON
+   (`=0` restores the freeze).
+
+Six calls x {whole, split} feeds, CPt accepted per cell (deterministic, 3/3
+or 0/3 in triplicate): old defaults 8/12, angle only 11/12, angle + adapt
+**12/12**.  Resetting the equalizer instead of adapting fails.  Live on the
+new defaults the first call accepted CPt 1.28 s into Ri -- and then retrained
+at TRN2d + 2241 ms like every other.
