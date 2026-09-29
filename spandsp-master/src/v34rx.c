@@ -10915,6 +10915,20 @@ static float v34_eye_min_mag(void)
     return cache;
 }
 
+static bool v34_eye_pp_defer_enabled(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *value = getenv("ME_V34_EYE_PP_DEFER");
+
+        cache = (value  &&  strcmp(value, "0") == 0)  ?  0  :  1;
+    }
+    /*endif*/
+    return cache != 0;
+}
+
 static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sample)
 {
     complexf_t eq_sample;
@@ -10954,6 +10968,34 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 &&  s->phase3_pp_started
                 &&  (v34_eye_pp_guard_enabled() > 1
                      ||  s->duration <= PHASE3_PP_TRAIN_BAUDS));
+    /* Act on a flip the PP guard deferred, at the first half-baud after PP.
+       The guard's own rationale is "measure during PP, act after it", but
+       the decision used to be discarded, so the move waited for a fresh vote
+       -- and on a peer whose Ja and post-Ja silence give no clear vote, the
+       next one comes from the analogue modem's 9.3.2.7 S itself.  S is 128T,
+       half a 256-symbol eye window, so whether that late flip lands in time
+       to see S depended on where the window boundaries fell.  Measured on
+       artifacts/rf-jafb1000-20260929-r2 (RasFinder, 3200 baud high
+       carrier): replayed in 160-sample blocks the flip landed one window
+       before S and S was detected; in the two 80-sample blocks per 20 ms a
+       live pjmedia call delivers (ME_IO_SCHEDULE) it landed after, the
+       detector read S at the eye crossing as 180-degree steps (dom=2 25/32
+       against alt 30/32), and the call was lost -- which is what happened
+       live.  ME_V34_EYE_PP_DEFER=0 restores discarding it. */
+    if (s->eye_flip_pending  &&  !eye_hold  &&  eye_check)
+    {
+        s->eye_flip_pending = false;
+        s->eye_flips++;
+        s->eye_votes = 0;
+        s->eye_on_sum = 0.0f;
+        s->eye_off_sum = 0.0f;
+        s->eye_n = 0;
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                 "Rx - T/2 eye: PP over, applying the flip measured during it (flip %d)\n",
+                 s->eye_flips);
+        s->baud_half ^= 1;
+    }
+    /*endif*/
     if ((s->baud_half ^= 1))
     {
         if (eye_check)
@@ -10995,8 +11037,17 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                finished wherever the cap left it. */
             if (s->eye_votes >= v34_eye_votes_needed()  &&  eye_hold)
             {
-                /* Measured, and deliberately not acted on.  See above. */
+                /* Measured, and not acted on until PP is over.  See above. */
                 s->eye_votes = 0;
+                /* Scoped to the V.90 digital modem's receiver, where the
+                   failure was measured.  Plain V.34 is measured the other
+                   way: applying the deferred flip after PP costs 2800/21600
+                   u-law its whole payload (0 bits against 16421), because
+                   the move lands on an equalizer PP has just trained at the
+                   old instant. */
+                s->eye_flip_pending = (s->v90_mode
+                                       &&  !s->calling_party
+                                       &&  v34_eye_pp_defer_enabled());
                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                          "Rx - T/2 eye favours the other phase (off %.1f vs on %.1f) "
                          "but PP is being conditioned on; not moving the symbol instant\n",

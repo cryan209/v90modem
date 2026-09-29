@@ -1263,6 +1263,8 @@ int main(int argc, char *argv[])
             log_modem_diag_snapshot(g_media_connected ? "media-up" : "media-down");
             if (!g_media_connected)
                 me_flush_g711_taps();   /* off the media clock; see header */
+            if (!g_media_connected)
+                me_flush_io_schedule();
         }
 
         /* ── Ring timer: send RING and auto-answer after N rings ── */

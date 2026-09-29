@@ -10679,6 +10679,54 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
     pthread_mutex_unlock(&g_state_mtx);
 }
 
+/* ME_IO_SCHEDULE=<path>: record the order and timing of every me_rx_g711()
+ * and me_tx_g711() call, so v90_engine_replay --schedule can feed a recorded
+ * tap back in the SAME RX/TX interleaving the live call had.  The replay
+ * otherwise alternates one RX frame with one TX frame, and a live call whose
+ * RTP arrives with 100+ ms of jitter need not (rf-jafb1000-20260929-r2: the
+ * peer's S is detected by that replay and was missed live on identical RX
+ * input).  16-byte records -- kind 'R'/'T', count, CLOCK_MONOTONIC ns --
+ * through a buffered FILE, so it costs a memcpy per 20 ms frame and is safe
+ * on a live call, unlike the SpanDSP flow log.  One file per process. */
+static FILE *io_schedule_file(void)
+{
+    static FILE *f;
+    static int state;   /* 0 unchecked, 1 open, -1 off */
+
+    if (state == 0) {
+        const char *path = getenv("ME_IO_SCHEDULE");
+
+        state = -1;
+        if (path && *path && (f = fopen(path, "wb")) != NULL)
+            state = 1;
+    }
+    return state == 1 ? f : NULL;
+}
+
+static void io_schedule_note(char kind, int count)
+{
+    FILE *f = io_schedule_file();
+    struct timespec ts;
+    struct { uint8_t kind, pad[3]; int32_t count; uint64_t ns; } rec;
+
+    if (!f)
+        return;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    memset(&rec, 0, sizeof(rec));
+    rec.kind = (uint8_t) kind;
+    rec.count = count;
+    rec.ns = (uint64_t) ts.tv_sec*1000000000ULL + (uint64_t) ts.tv_nsec;
+    fwrite(&rec, sizeof(rec), 1, f);
+}
+
+void me_flush_io_schedule(void)
+{
+    FILE *f = io_schedule_file();
+
+    if (f)
+        fflush(f);
+}
+
 void me_rx_g711(const uint8_t *codewords, int count)
 {
     int offset;
@@ -10688,6 +10736,7 @@ void me_rx_g711(const uint8_t *codewords, int count)
     if (!codewords || count <= 0)
         return;
 
+    io_schedule_note('R', count);
     g_media_clock_samples += (uint64_t) count;
     me_g711_capture_rx(codewords, count);
 
@@ -10835,6 +10884,8 @@ int me_tx_g711(uint8_t *codewords, int count)
 
     if (!codewords || count <= 0)
         return 0;
+
+    io_schedule_note('T', count);
 
     /* Which transmit path a call actually takes, once a second.  A Canon
        TR7560 was sent EXACTLY zero for twenty seconds while the V.34 state

@@ -674,3 +674,39 @@ The receiver is fed directly by `me_rx_g711()` and the tap is written there,
 concealment fill included, so the input was identical; the divergence is
 live-only and not yet explained.  The replay interleaves RX and TX 1:1, which
 live under this jitter does not -- that is the first thing to instrument.
+
+## Why r2 missed a real S: the T/2 eye flip deferred by PP was thrown away (2026-09-29)
+
+**Instrument.** `ME_IO_SCHEDULE=<path>` records every `me_rx_g711()`/
+`me_tx_g711()` call (kind, count, CLOCK_MONOTONIC ns; 16 bytes through a
+buffered FILE, safe on a live call), and `v90_engine_replay --schedule <path>`
+feeds a tap back in that exact interleaving, paced on the recorded clock.
+Replayed with its own schedule, `artifacts/rf-iosched-20260929-r3` reproduces
+the live call to within a few ms (Sd +18604 vs +18611).  What it showed: live
+pjmedia hands RX over as **two 80-sample calls per 20 ms tick** and TX as one
+160-sample call; the plain replay feeds 160/160.
+
+**Reproduction.** On r2's tap with a synthetic 80+80/160 schedule the replay
+misses S exactly as the live call did; with 160/160 it catches it.  Not the
+TRN hypothesis (it does tie -- hyp 3 vs 8 both 100%, chunking picks which --
+but pinning hyp 8 from the CRC-valid descriptor changes nothing).  The S
+detector's own counters show the cause: at the peer's S the 80-sample run
+reads 180-degree steps (dom=2 25/32, rev 26/32), the 160-sample run S's
++/-90 alternation (alt 30/32).  That is sampling at the eye crossing.  In
+both runs the T/2 eye chooser measured "other phase" during PP and, under the
+PP guard, logged it and **discarded** it; the next clear vote comes only from
+the analogue modem's S itself (128T, half a 256-symbol window), so whether the
+flip landed before S depended on window alignment.
+
+**Fix.** The deferred flip is kept pending and applied at the first half-baud
+after PP -- *only* in the V.90 digital modem's receiver
+(`v90_mode && !calling_party`).  Plain V.34 measured the other way: applied
+there it costs 2800/21600 u-law its whole payload (0 bits vs 16421), because
+the move lands on an equalizer PP has just trained at the old instant.
+`ME_V34_EYE_PP_DEFER=0` restores discarding.  A/B on the r2 80/80/160
+schedule: fix -> S after 14124 Jd symbols, DIL, Ri; off -> "no S after 24796"
+as live.  `make test` passes.  `rf-maxpow-c1` replays unchanged (S, DIL, Ri);
+`rf-padrep-a1`'s smooth replay misses S with and without the fix (the flip is
+never deferred there) -- a pre-existing replay gap in the other direction,
+and without a schedule recording it cannot be replayed in its live order.
+Live confirmation still owed; record new calls with `ME_IO_SCHEDULE`.

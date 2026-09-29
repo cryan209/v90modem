@@ -139,6 +139,8 @@ int  me_tx_g711(uint8_t *codewords, int count);
  * memory-buffered so no disk write() lands on the media clock; call this at
  * call boundaries (media-down) so a later kill cannot lose the capture. */
 void me_flush_g711_taps(void);
+/* Flush the ME_IO_SCHEDULE record (see modem_engine.c). */
+void me_flush_io_schedule(void);
 
 /* Notify the engine that a SIP call has been connected (audio active). */
 void me_on_sip_connected(void);

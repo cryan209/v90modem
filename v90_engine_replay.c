@@ -155,6 +155,7 @@ int main(int argc, char *argv[])
     int fast = 0;
     int dial = 0;
     double from = -1.0;
+    const char *schedule = NULL;
     /* Its own link, so a replay never fights a live server for /tmp/modem0. */
     const char *pty_link = "/tmp/modem-replay";
     long start;
@@ -166,7 +167,7 @@ int main(int argc, char *argv[])
     if (argc < 2) {
         fprintf(stderr,
                 "usage: %s <tap.g711> [ulaw|alaw] [--fast] [--from SECONDS]"
-                " [--pty-link PATH] [--dial]\n",
+                " [--pty-link PATH] [--dial] [--schedule IO.bin]\n",
                 argv[0]);
         return 2;
     }
@@ -184,6 +185,8 @@ int main(int argc, char *argv[])
             pty_link = argv[++i];
         else if (strcmp(argv[i], "--dial") == 0)
             dial = 1;
+        else if (strcmp(argv[i], "--schedule") == 0 && i + 1 < argc)
+            schedule = argv[++i];
         else
             fprintf(stderr, "ignoring unknown argument '%s'\n", argv[i]);
     }
@@ -220,6 +223,57 @@ int main(int argc, char *argv[])
         me_dial("replay");
     me_on_sip_connected();
 
+    if (schedule) {
+        /* Replay the live call's own RX/TX interleaving, recorded with
+           ME_IO_SCHEDULE.  The tap is written inside me_rx_g711(), so the
+           first 'R' record is tap byte 0: --from and the call-start search
+           do not apply.  Paced on the recorded clock unless --fast. */
+        FILE *sf = fopen(schedule, "rb");
+        struct { uint8_t kind, pad[3]; int32_t count; uint64_t ns; } rec;
+        uint64_t first_ns = 0;
+        long rx_recs = 0, tx_recs = 0;
+
+        if (!sf) {
+            fprintf(stderr, "cannot open schedule %s\n", schedule);
+            return 1;
+        }
+        pos = 0;
+        t0 = now_ns();
+        while (fread(&rec, sizeof(rec), 1, sf) == 1) {
+            uint8_t buf[4096];
+
+            if (rec.count <= 0 || rec.count > (int32_t) sizeof(buf))
+                continue;
+            if (first_ns == 0)
+                first_ns = rec.ns;
+            if (!fast) {
+                int64_t wait = t0 + (int64_t)(rec.ns - first_ns) - now_ns();
+
+                if (wait > 0) {
+                    struct timespec ts;
+
+                    ts.tv_sec = (time_t)(wait/1000000000LL);
+                    ts.tv_nsec = (long)(wait%1000000000LL);
+                    nanosleep(&ts, NULL);
+                }
+            }
+            if (rec.kind == 'R') {
+                if (pos + rec.count > tap_len)
+                    break;
+                me_rx_g711(tap + pos, rec.count);
+                pos += rec.count;
+                rx_recs++;
+            } else if (rec.kind == 'T') {
+                (void)me_tx_g711(buf, rec.count);
+                tx_recs++;
+            }
+            me_flush_g711_taps();
+        }
+        fclose(sf);
+        printf("engine replay: schedule %s: %ld RX and %ld TX calls, %.1f s of tap\n",
+               schedule, rx_recs, tx_recs, pos/8000.0);
+        start = 0;
+    } else {
     t0 = now_ns();
     for (pos = start; pos + FRAME_BYTES <= tap_len; pos += FRAME_BYTES) {
         uint8_t tx[FRAME_BYTES];
@@ -244,6 +298,8 @@ int main(int argc, char *argv[])
                 nanosleep(&ts, NULL);
             }
         }
+    }
+
     }
 
     me_get_diag_snapshot(&snap);

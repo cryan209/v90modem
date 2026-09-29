@@ -1790,6 +1790,9 @@ typedef struct
     float eye_off_sum;
     int eye_n;
     int eye_flips;
+    /*! A flip the T/2 eye chooser measured while PP was being conditioned
+        on, to be applied once PP is over. */
+    bool eye_flip_pending;
     int eye_votes;
     int shaper_t2_num;
     int shaper_t2_den;
