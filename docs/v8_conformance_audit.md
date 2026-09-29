@@ -229,5 +229,10 @@ intermittently.
 **Next:** put this host on wired Ethernet (or `sudo ifconfig awdl0 down`,
 which is a user action -- it is a system network setting), confirm gateway
 ping max < ~15 ms and `rtp-rx.csv` p95 back under ~12 ms, then place calls.
-`/private/...scratchpad/rxjit.py`-style measurement: transit
-`(arrival_ms - t0) - (rtp_ts/8 - ts0)` over the first 600 packets of one SSRC.
+Measurement: transit `(arrival_ms - t0) - (rtp_ts/8 - ts0)` over the first
+600 packets of the MOST COMMON SSRC in `rtp-rx.csv`, less its 5th
+percentile. **Not the first SSRC** -- that is ~8 packets of early media before
+the answered stream starts a new one, and a first pass at this measured
+those. Shape on a 09-30 call: flat, then a 60-150 ms jump draining in 40 ms
+steps (`137 97 57 17`) several times a second -- packets held and released in
+a burst, i.e. a stalling link; the 09-28 calls sit flat at 1-12 ms.
