@@ -782,16 +782,16 @@ static void on_call_media_state(pjsua_call_id call_id)
                     PJ_LOG(3, ("sip_modem", "Media clock wired: conf %d <-> 0", conf_port));
             }
             /* An outgoing call gets early media (ringback) at 183, long before
-               anyone answers.  Starting V.8 there runs its timeout against
-               ringback: dialling the RasFinder hunt group (3999), which rings
-               its three ports in turn, V.8 gave up after 10 s of 440/480 Hz and
-               we hung up before any port answered.  Wait for 200 OK; the
-               on_call_state CONFIRMED branch starts the engine.
-               ME_V8_ON_EARLY_MEDIA=1 restores starting here. */
+               anyone answers.  A real modem starts V.8 there and sends CI
+               through the ringing, so that is the default; what had to change
+               was V.8's ten-repetition CI cap (spandsp v8.c), which gave up
+               after 10 s of ringback on the RasFinder hunt group 3999.
+               ME_V8_ON_EARLY_MEDIA=0 waits for 200 OK instead, and the
+               on_call_state CONFIRMED branch then starts the engine. */
             if (ci.role == PJSIP_ROLE_UAC
                 && ci.state != PJSIP_INV_STATE_CONFIRMED
-                && !(getenv("ME_V8_ON_EARLY_MEDIA")
-                     && atoi(getenv("ME_V8_ON_EARLY_MEDIA")) != 0)) {
+                && getenv("ME_V8_ON_EARLY_MEDIA")
+                && atoi(getenv("ME_V8_ON_EARLY_MEDIA")) == 0) {
                 PJ_LOG(3, ("sip_modem", "Early media on outgoing call; waiting for answer before V.8"));
                 break;
             }

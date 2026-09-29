@@ -50,6 +50,10 @@ struct v8_state_s
     span_sample_timer_t negotiation_timer;
     span_sample_timer_t ci_timer;
     int ci_repetition_count;
+    /* Calling role: samples since CM (re)started, and the silent gap before
+       a CM restart (see V8_CM_ON). */
+    int cm_on_samples;
+    int cm_gap_samples;
     bool proceed;
     fsk_tx_state_t v21tx;
     /* Transmit level for the V.21 CI/CM/JM/CJ signalling, dBm0.  Both

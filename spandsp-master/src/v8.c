@@ -1306,9 +1306,21 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
             /*endif*/
             if ((s->ci_timer -= len) <= 0)
             {
-                if (++s->ci_repetition_count >= 10)
+                /* V.8 has the calling DCE repeat CI until it detects ANSam;
+                   the overall limit belongs to the modem's carrier-wait
+                   timer (S7, typically 50-60 s), not to ten repetitions.  A
+                   real modem sends CI through ringback, so a ten-second cap
+                   gave up on any call that rang more than a few times --
+                   measured dialling the RasFinder hunt group 3999, which
+                   rings its ports in turn.  ME_V8_CI_REPEATS sets it
+                   (default 60, roughly one repetition a second). */
+                int ci_max = 60;
+
+                if (getenv("ME_V8_CI_REPEATS")  &&  atoi(getenv("ME_V8_CI_REPEATS")) > 0)
+                    ci_max = atoi(getenv("ME_V8_CI_REPEATS"));
+                /*endif*/
+                if (++s->ci_repetition_count >= ci_max)
                 {
-                    /* The spec says we should give up now. */
                     span_log(&s->logging, SPAN_LOG_FLOW, "Timeout waiting for modem connect tone\n");
                     s->state = V8_PARKED;
                     s->result.status = V8_STATUS_FAILED;
@@ -1345,6 +1357,8 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
                 send_cm_jm(s);
                 s->fsk_tx_on = true;
                 s->state = V8_CM_ON;
+                s->cm_on_samples = 0;
+                s->cm_gap_samples = 0;
             }
             /*endif*/
             /* Fall through */
@@ -1401,6 +1415,54 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
                 report_event(s);
             }
             /*endif*/
+            /* Restart CM when the answerer has not replied.  Over the
+               RasFinder corpus a peer that hears CM at all hears it within
+               about a second of it starting; when it does not, it holds ANSam
+               its full 5.4 s and falls back to V.22, however long we stream
+               CM continuously.  A real calling modem keeps retrying, so break
+               CM with a short silence and start it afresh -- a new carrier
+               onset and preamble for a detector that missed the first.
+               ME_V8_CM_RESTART_MS sets the interval.  DEFAULT OFF: live on the
+               RasFinder hunt group (rf-cmr*), 1500 ms passed V.8 on 1 of 6
+               calls against 4 of 6 without it -- the break evidently lands
+               while the peer is acquiring. */
+            {
+                static int restart_ms = -1;
+
+                if (restart_ms < 0)
+                {
+                    const char *v = getenv("ME_V8_CM_RESTART_MS");
+
+                    restart_ms = (v  &&  *v)  ?  atoi(v)  :  0;
+                }
+                /*endif*/
+                if (s->cm_gap_samples > 0)
+                {
+                    if ((s->cm_gap_samples -= len) <= 0)
+                    {
+                        s->cm_gap_samples = 0;
+                        s->cm_on_samples = 0;
+                        fsk_tx_restart(&s->v21tx, &preset_fsk_specs[FSK_V21CH1]);
+                        send_cm_jm(s);
+                        s->fsk_tx_on = true;
+                        span_log(&s->logging, SPAN_LOG_FLOW, "CM restarted\n");
+                    }
+                    /*endif*/
+                    break;
+                }
+                /*endif*/
+                s->cm_on_samples += len;
+                if (restart_ms > 0
+                    &&  s->cm_on_samples >= milliseconds_to_samples(restart_ms)
+                    &&  s->rx_data_ptr == 0)
+                {
+                    queue_flush(s->tx_queue);
+                    s->fsk_tx_on = false;
+                    s->cm_gap_samples = milliseconds_to_samples(100);
+                    break;
+                }
+                /*endif*/
+            }
             if (queue_contents(s->tx_queue) < 10)
             {
                 /* Send CM again */
