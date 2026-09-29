@@ -1348,6 +1348,48 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
         case V8_HEARD_ANSAM:
             /* We have heard the ANSam or ANSam/ signal, but we still need to wait for the
                end of the Te timeout period to comply with the spec. */
+            /* ...except that it never did.  Until the timer expires this case
+               falls through into V8_CM_ON, whose "queue_contents < 10 -> send
+               CM" refills the queue while the CI burst in progress is still
+               draining, so CM followed CI with NO silence at all -- measured
+               on every RasFinder TX tap, passing and failing alike (CI ends,
+               CM's 90-bit period starts in the same 100 ms block).  V.8 8.1.1:
+               "the DCE shall transmit no signal for a period Te prior to
+               transmitting signal CM.  The silent period Te begins after the
+               termination of the call signal"; >= 0.5 s, >= 1 s to allow
+               V.25 echo-canceller disabling -- Figure 1 names Te "the silent
+               period allowed for disabling of network echo-control
+               equipment".  ME_V8_TE_MS=<ms> enforces it, timed from the end
+               of CI.  DEFAULT OFF (legacy zero-Te) until a live A/B: the
+               conformant timing has never been run against the RasFinder,
+               and every call that has passed V.8 there passed without it. */
+            {
+                static int te_ms = -1;
+
+                if (te_ms < 0)
+                {
+                    const char *v = getenv("ME_V8_TE_MS");
+
+                    te_ms = (v  &&  *v)  ?  atoi(v)  :  0;
+                }
+                /*endif*/
+                if (te_ms > 0)
+                {
+                    residual_samples = fsk_rx(&s->v21rx, amp, len);
+                    if (s->fsk_tx_on)
+                    {
+                        /* CI still draining: Te has not begun. */
+                        s->ci_timer = milliseconds_to_samples(te_ms);
+                        break;
+                    }
+                    /*endif*/
+                    if ((s->ci_timer -= len) > 0)
+                        break;
+                    /*endif*/
+                    s->ci_timer = 0;
+                }
+                /*endif*/
+            }
             if ((s->ci_timer -= len) <= 0)
             {
                 v8_decode_init(s);
