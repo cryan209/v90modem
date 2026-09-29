@@ -1955,6 +1955,16 @@ static int trace_stream(const char *path, int u_info)
            v90_analogue_rx_trn1d_symbols(rx), v90_analogue_rx_jd_frames(rx),
            v90_analogue_rx_dil_symbols(rx));
     {
+        const uint8_t *jb = v90_analogue_rx_jd_bits(rx);
+
+        if (jb != NULL) {
+            printf("  Jd bits 0..71:");
+            for (int b = 0; b < 72; b++)
+                printf("%s%d", (b % 8 == 0) ? " " : "", jb[b]);
+            printf("\n");
+        }
+    }
+    {
         const v90_dil_measurement_t *m = v90_analogue_rx_measurement(rx);
 
         if (m != NULL) {
