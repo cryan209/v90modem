@@ -236,3 +236,32 @@ the answered stream starts a new one, and a first pass at this measured
 those. Shape on a 09-30 call: flat, then a 60-150 ms jump draining in 40 ms
 steps (`137 97 57 17`) several times a second -- packets held and released in
 a burst, i.e. a stalling link; the 09-28 calls sit flat at 1-12 ms.
+
+## 2026-09-30 (later): confirmed -- off Wi-Fi, V.8 passes 6/6
+
+The same commit, unchanged defaults, run from **tower** (wired, 0.08-0.25 ms to
+Asterisk, which it hosts) instead of this Mac's Wi-Fi: **V.8 status=2 on 6 of
+6 valid calls** (`artifacts/rf-tower-{1,3,4,5,6,7}`), against 0/13 from the Mac
+that morning. RX transit p95 0.1 ms. The peer ends ANSam **2.1-2.2 s** after
+it starts on every call -- the healthy signature of catching our first CMs --
+and every call negotiates V.90 (peer offers V.22bis, V.34, V.90, LAPM).
+(`rf-tower-2` is not a V.8 attempt: it dialled seconds after call 1 and was
+rejected outright, the known close-redial behaviour.) Past V.8 the calls meet
+the separately tracked V.90 Phase 3/4 retrain and fall back to V.34; that is
+not V.8.
+
+So no V.8 code change was needed; the fix is the path. **Run RasFinder calls
+from a wired host.** Recipe on tower (Unraid, no compiler on the host):
+
+    docker run -d --name v90modem-sip --network host debian:bookworm sleep infinity
+    docker exec v90modem-sip bash -c 'apt-get update && apt-get install -y build-essential autoconf automake libtool pkg-config libtiff-dev libjpeg-dev libssl-dev libasound2-dev libavformat-dev libavcodec-dev libswscale-dev libavutil-dev libv4l-dev libopus-dev uuid-dev procps python3'
+    git archive --prefix=v90modem/ HEAD | ssh tower.net.cryan.nz 'docker exec -i v90modem-sip tar -x -C /root'
+    # the tiff-fx Makefile.in stub is untracked -- copy it too
+    tar -c spandsp-master/test-data/itu/tiff-fx/Makefile.in | ssh tower.net.cryan.nz 'docker exec -i v90modem-sip tar -x -C /root/v90modem'
+    # build the vendored libraries SERIALLY first (spandsp.h is generated), then the server;
+    # the Linux local-pjproject link needs -luuid, which the makefile does not add:
+    make spandsp && make pjproject && make -j16 sip_v90_modem   # link fails on uuid_*
+    eval "$(make -n sip_v90_modem | grep -E '^(gcc|cc) .* -o sip_v90_modem') -luuid"
+    tools/soak/rasfinder_call.sh artifacts/rf-tower-N 60      # inside the container
+
+Leave 90 s between calls, including before the first call of a batch.
