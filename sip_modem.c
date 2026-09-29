@@ -1113,10 +1113,42 @@ int main(int argc, char *argv[])
     media_cfg.no_vad          = PJ_TRUE; /* No voice activity detection */
     /* For modem pass-through, adaptive jitter buffering can destroy
        phase continuity needed by V.34 training. Keep playout fixed. */
-    media_cfg.jb_init         = 0;
-    media_cfg.jb_min_pre      = 0;
-    media_cfg.jb_max_pre      = 0;
-    media_cfg.jb_max          = 0;
+    /* That intent was never what the settings did.  Zero means "default"
+       to pjmedia's stream.c, which gave an ADAPTIVE buffer (prefetch 0,
+       min 1 frame, max 400 ms) with the default discard algorithm: every
+       network arrival spike longer than one frame ran it dry, and the
+       frames of fill inserted then were followed by the late audio itself
+       -- an insertion, not a loss.  Measured on the RasFinder path
+       (2026-09-29): 149 ms arrival gaps with zero packet loss, 160-1440
+       samples of inserted silence in most calls that day and in none of
+       the 09-28 calls, and V.8 failing with the peer's JM plainly present
+       because 20 ms inserted into its V.21 sync broke the framing
+       (artifacts/rf-0929s-trim-3).  An inserted frame is a permanent
+       timing step for every later phase too.  So make playout genuinely
+       FIXED: a constant prefetch deep enough to ride out the spikes, and no
+       discard, so nothing is ever inserted or deleted while packets keep
+       arriving.  ME_JB_MS=0 restores the old configuration. */
+    {
+        int jb_ms = 200;
+        const char *v = getenv("ME_JB_MS");
+
+        if (v && *v)
+            jb_ms = atoi(v);
+        if (jb_ms > 0) {
+            media_cfg.jb_init         = jb_ms;
+            media_cfg.jb_min_pre      = jb_ms;
+            media_cfg.jb_max_pre      = jb_ms;
+            media_cfg.jb_max          = jb_ms + 800;
+            media_cfg.jb_discard_algo = PJMEDIA_JB_DISCARD_NONE;
+        } else {
+            media_cfg.jb_init         = 0;
+            media_cfg.jb_min_pre      = 0;
+            media_cfg.jb_max_pre      = 0;
+            media_cfg.jb_max          = 0;
+        }
+        PJ_LOG(3, ("sip_modem", "RX jitter buffer: %s %d ms",
+                   jb_ms > 0 ? "fixed" : "legacy adaptive", jb_ms));
+    }
 
     status = pjsua_init(&ua_cfg, &log_cfg, &media_cfg);
     if (status != PJ_SUCCESS) {
