@@ -731,3 +731,76 @@ reference to time against.
 dial tone arrives at -2.5 dBFS with 13% of samples at full scale. Signals at
 the levels above are nowhere near it, but nothing in this tree sets a receive
 gain and the headroom against the exchange's own tones is about 2 dB.
+
+## PBX test extensions, and what they settle (2026-10-01)
+
+`9099` echo, `9333` DTMF read-back, `9222` voice read-back, `9666`/`9667`/`9668`
+test tones. `tools/apple_modem_line_check.sh <bus:addr> <uid>` is the one that
+came out of this and is worth running before anything else.
+
+**Delay: 269 ms of network, and a raw reading would have been 122 ms wrong.**
+The audio tool transmits and captures through one HAL unit on one device, so a
+capture is sample-aligned with the transmit script and a delay IS measurable
+against 9099. The capture of a 300 ms burst contains **two** returns:
+
+    tone leaves at              200.0 ms  (the script's own 200 ms lead)
+    near-end hybrid returns at  322.6 ms  at -55.0 dBFS
+    the echo test returns at    591.8 ms  at -20.2 dBFS
+
+The first is our own 2-wire hybrid and cannot have travelled anywhere, so the
+122.6 ms in front of it is **this host's own loop latency** -- CoreAudio's
+output buffering, the USB isochronous path, and the capture side again. The
+network round trip is therefore 591.8 - 322.6 = **269 ms**, not the 392 ms the
+burst's arrival says. Repeatable to +/-2 ms over three bursts. Read both
+returns or the number is the host's buffering plus the network.
+
+**Different PBX applications do not pass level alike.** Echo() returns the
+burst 3.7 dB down for the whole round trip; ConfBridge costs 4.6 dB in ONE
+direction. So a level measured through one application says nothing about the
+other.
+
+**9666 is a stepped tone reference and 9667 a slow sweep**, both at constant
+source level, so they measure the receive path on their own -- no reliance on
+our own transmitter. 9666 steps 400, 500, 700, 1000, 1500, 2000, 2500, 3000,
+3400, 3800 Hz, 3 s each (a 300 Hz step precedes them), then the call ends.
+Modem A's receive path against it, relative to 1000 Hz:
+
+    400   +0.01     1500  +0.02     3000  -0.03
+    500   +0.06     2000  -0.07     3400  -0.39
+    700   +0.03     2500  -0.12     3800  -7.96
+
+-- flat to **0.12 dB from 400 to 3000 Hz**, with 3800 Hz outside the band as
+expected. 9667 rises about 20 Hz/s (70 -> 150 Hz over four seconds), so
+reaching the voiceband takes minutes; its apparent level rise is the line's
+own low-frequency roll-off, not the source. 9668 never connected here.
+
+**Echo return loss in a call, single talk, held 30 s**: A 39.7 dB and B
+30.8 dB, both steady to 0.5 dB with **no convergence trend**, so nothing
+visibly adapts on this signal over that span. B's in-call noise floor is
+-41 to -44 dBFS against A's -59, i.e. **15-18 dB worse**.
+
+### B's port collapses about a second after it goes off-hook
+
+This is what made B's dialling intermittent all session, and it is invisible to
+every other instrument here. Transmitting a 1000 Hz tone at -9.1 dBFS into the
+dial tone and measuring what comes straight back, against the delay between
+the off-hook and the tone:
+
+    tone at +0s after seizure   ERL 26.6 dB      (healthy)
+    +1s, +2s, +5s, +10s         ERL 2.0-2.1 dB   (collapsed)
+
+and on repeated seizures B reads 1.7-2.1 dB six times running where A reads
+**24.0, 24.0, 24.1 dB**. So B returns essentially all of its own transmit a
+second after seizure. The exchange then does not detect its DTMF -- our dial
+script sends the first digit well over a second after the hook command -- which
+is exactly the symptom: B joined 2 of 12 attempted calls and A missed none.
+
+**It is not an open pair**: the dial tone is still there at the same level in
+the collapsed state, and `--read 1d` still reports "pair present". Register 5
+and the line sense are **identical** before and after the collapse on both
+modems, so nothing in the DAA's register file sees it -- the hybrid balance
+goes while the loop stays up. Suspect B's cable, jack or DAA termination.
+
+This also reframes the double-talk figures in the section above (own-tone echo
+44 dB down on A and 18 dB on B): that is the same fault, not a fixed property
+of the two hybrids.
