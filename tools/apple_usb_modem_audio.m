@@ -28,17 +28,22 @@
  *  - Initialise min/max from the first sample.  Starting max at 0 on
  *    all-negative data reports max = 0 and invents a zero sample.
  *
- * As of 2026-09-30 the input is a CONSTANT at negative full scale, and the
- * constant varies with sample rate (-30069 at 7200, -31703 at 8000, -32768 at
- * 9600 and above).  A fill pattern would not vary with rate; a DC-saturated
- * front end read through a per-rate decimation chain does, so a real ADC and
- * filter chain are running with their input at a rail.
+ * THE ANALOGUE PATH HAS A POWER SWITCH, AND IT IS NOT THE CONFIGURATION.  With
+ * it off the input is a CONSTANT at negative full scale, varying with sample
+ * rate (-30069 at 7200, -31703 at 8000, -32768 at 9600 and above): a fill
+ * pattern would not vary with rate, so a real ADC and filter chain are running
+ * with their input at a rail.  Turn it on first:
  *
- * BUT those captures had NOTHING PLUGGED INTO THE TEL JACK.  With no line there
- * is no loop current, so a railed line-sense output is simply what a
- * disconnected DAA looks like -- it is NOT evidence that a bring-up command is
- * needed, and no noise floor is meaningful without a line.  Connect one before
- * reading anything into a capture.
+ *     ./apple_usb_modem_probe --hook on
+ *
+ * which sets bit 3 of the device's register 5.  The same capture then reads
+ * -63.8 dBFS of noise on +657 counts of DC, repeatably, with nothing in the tel
+ * jack at all.  So a railed capture means the switch is off, NOT that the line
+ * is missing -- an earlier note here said the two could not be separated
+ * without a line and that was wrong.
+ *
+ * -63.8 dBFS is the codec's own floor on an open line.  It is not a measurement
+ * of a bearer, and a line in the jack will be worse.
  *
  * Build: make apple_usb_modem_audio
  */

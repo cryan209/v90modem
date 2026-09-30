@@ -15,10 +15,24 @@
  *   wIndex 1 (interface 1), bRequest 0x01  GET_ENCAPSULATED_RESPONSE, 2 B
  *   wIndex 0 (interface 0), bRequest 0x11/0x13/0x14, argument in wValue, no data
  *
- * Opcode (payload byte 0) values the driver emits: 0x00 0x02 0x80 0x90 0xd0.
- * What they MEAN is not established -- see docs/apple_usb_modem_sm56.md.
+ * The device is a REGISTER FILE reached through the 3-byte encapsulated
+ * commands, and that is the whole of the line interface:
  *
- * TRAPS, both of which cost a session:
+ *   write:  00 <index> <value>          (silent)
+ *   read:   80 <index> 00               then GET_ENCAPSULATED_RESPONSE, 1 byte
+ *
+ * Register 5 bit 3 (0x08) is the hook: with it CLEAR the codec's input is
+ * railed at -32768 at every sample rate, and with it SET the codec delivers a
+ * real signal (measured -63.8 dBFS of noise on +657 counts of DC, with no line
+ * in the jack).  The A/B is deterministic and repeatable, which is what makes
+ * this the analogue path's power switch rather than a coincidence.  Registers
+ * 0x10, 0x1a, 0x1f, 0x1e carry the per-country DAA configuration that
+ * usm56.reg's 4-byte HardwareInitBB supplies.
+ *
+ * Other opcodes the driver emits and this tool does not model: 0x02 (a 9-byte
+ * windowed form), 0x10|n, 0x90, 0xd0.  See docs/apple_usb_modem_sm56.md.
+ *
+ * TRAPS, each of which cost a session:
  *
  *  - The device sits at bConfigurationValue 0 until something sets it, and an
  *    unconfigured device stalls EVERY request including standard
@@ -28,6 +42,13 @@
  *    IOKit cache, so those keep succeeding after the device has stopped
  *    answering anything.  Liveness here is a STRING descriptor, which has to
  *    reach the wire.  (Same trap as docs/hsf_usb_daa.md.)
+ *  - A queued response does NOT survive closing the handle.  Sending the read
+ *    from one process and the GET from the next reports "nothing queued" for
+ *    every register, which reads exactly like a device that does not answer.
+ *    Command and response must be one session -- hence --read/--regs rather
+ *    than --send followed by --get.
+ *  - A 2-byte command is STALLED.  Only 3- and 9-byte bodies are accepted, so
+ *    the read is "80 <index> 00" and not "<index> 00".
  *
  * Build: make apple_usb_modem_probe
  */
@@ -35,6 +56,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <libusb.h>
 
 #define VID 0x05ac
@@ -277,11 +299,115 @@ static int notify_listen(double secs)
     return 0;
 }
 
+/* One register read, command and response in a single session.  Returns the
+ * value 0-255, or -1.  Index 0 answers nothing on this device; every other
+ * index tried answers, repeatably and in order. */
+static int reg_read(unsigned char idx)
+{
+    unsigned char cmd[3] = { 0x80, 0, 0x00 }, in[8], notify[16];
+    int xfer = 0, rc;
+
+    cmd[1] = idx;
+    if (libusb_control_transfer(h, 0x21, SEND_ENCAPSULATED_COMMAND, 0,
+                               IF_COMMAND, cmd, 3, 1000) != 3)
+        return -1;
+    /* RESPONSE_AVAILABLE, if the ACM interface is ours; not required. */
+    libusb_interrupt_transfer(h, 0x81, notify, sizeof notify, &xfer, 300);
+    for (int try = 0; try < 4; try++) {
+        rc = libusb_control_transfer(h, 0xA1, GET_ENCAPSULATED_RESPONSE, 0,
+                                     IF_COMMAND, in, sizeof in, 1000);
+        if (rc > 0) return in[0];
+        if (rc < 0) return -1;
+        usleep(20000);
+    }
+    return -1;
+}
+
+static int reg_write(unsigned char idx, unsigned char val)
+{
+    unsigned char cmd[3] = { 0x00, idx, val };
+    return libusb_control_transfer(h, 0x21, SEND_ENCAPSULATED_COMMAND, 0,
+                                   IF_COMMAND, cmd, 3, 1000) == 3 ? 0 : -1;
+}
+
+static int claim_command_path(void)
+{
+    libusb_claim_interface(h, IF_ACM_CONTROL);   /* optional: notifications */
+    return libusb_claim_interface(h, IF_COMMAND);
+}
+
+static int cmd_regs(int argc, char **argv)
+{
+    static const unsigned char dflt[] = {
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x0a, 0x0f, 0x10, 0x11, 0x1a, 0x1e, 0x1f
+    };
+    if (claim_command_path() < 0) { fprintf(stderr, "claim failed\n"); return 1; }
+    if (argc > 2) {
+        for (int i = 2; i < argc; i++) {
+            unsigned long idx = strtoul(argv[i], NULL, 16);
+            printf("reg 0x%02lx = ", idx);
+            int v = reg_read((unsigned char)idx);
+            if (v < 0) printf("no response\n"); else printf("0x%02x\n", v);
+        }
+    } else {
+        for (unsigned i = 0; i < sizeof dflt; i++) {
+            int v = reg_read(dflt[i]);
+            printf("reg 0x%02x = ", dflt[i]);
+            if (v < 0) printf("no response\n"); else printf("0x%02x\n", v);
+        }
+    }
+    return 0;
+}
+
+/* Writes to the line interface of a telephony device.  Harmless with nothing
+ * in the tel jack; with a line connected, bit 3 of register 5 seizes it. */
+static int cmd_write(const char *sidx, const char *sval)
+{
+    unsigned long idx = strtoul(sidx, NULL, 16), val = strtoul(sval, NULL, 16);
+    int before, after;
+
+    if (idx > 0xff || val > 0xff) { fprintf(stderr, "index/value out of range\n"); return 1; }
+    if (claim_command_path() < 0) { fprintf(stderr, "claim failed\n"); return 1; }
+    before = reg_read((unsigned char)idx);
+    if (reg_write((unsigned char)idx, (unsigned char)val) < 0) {
+        fprintf(stderr, "write rejected\n");
+        return 1;
+    }
+    usleep(50000);
+    after = reg_read((unsigned char)idx);
+    printf("reg 0x%02lx: 0x%02x -> wrote 0x%02lx -> reads 0x%02x%s\n",
+           idx, before & 0xff, val, after & 0xff,
+           after == (int)val ? "" : "   (DID NOT TAKE)");
+    printf("alive: %s\n", alive() ? "yes" : "NO");
+    return 0;
+}
+
+static int cmd_hook(const char *what)
+{
+    int on = !strcmp(what, "on"), v;
+
+    if (strcmp(what, "on") && strcmp(what, "off")) {
+        fprintf(stderr, "--hook takes on or off\n");
+        return 1;
+    }
+    if (claim_command_path() < 0) { fprintf(stderr, "claim failed\n"); return 1; }
+    v = reg_read(5);
+    if (v < 0) { fprintf(stderr, "cannot read register 5\n"); return 1; }
+    v = on ? (v | 0x08) : (v & ~0x08);
+    if (reg_write(5, (unsigned char)v) < 0) { fprintf(stderr, "write rejected\n"); return 1; }
+    usleep(50000);
+    printf("hook %s: register 5 = 0x%02x\n", what, reg_read(5) & 0xff);
+    printf("now capture: ./apple_usb_modem_audio capture 9600 2\n");
+    return 0;
+}
+
 static void usage(const char *argv0)
 {
     fprintf(stderr,
         "usage: %s [--descriptors | --configure | --sweep | --get |\n"
-        "           --send \"<hex bytes>\" | --notify [seconds]]\n"
+        "           --send \"<hex bytes>\" | --notify [seconds] |\n"
+        "           --regs [idx ...] | --read <idx> | --write <idx> <val> |\n"
+        "           --hook on|off]\n"
         "\n"
         "  --descriptors  (default) dump the configuration, interfaces, endpoints\n"
         "                 and the audio rate list; does not claim anything\n"
@@ -291,7 +417,14 @@ static void usage(const char *argv0)
         "  --get          one GET_ENCAPSULATED_RESPONSE\n"
         "  --send         one SEND_ENCAPSULATED_COMMAND; WRITES to the device,\n"
         "                 and the opcodes are not understood -- see the header\n"
-        "  --notify       listen on the interface 0 interrupt endpoint\n", argv0);
+        "  --notify       listen on the interface 0 interrupt endpoint\n"
+        "  --regs         read the registers that are known to answer (or those given)\n"
+        "  --read         read one register, hex index\n"
+        "  --write        write one register and read it back; WRITES to the\n"
+        "                 line interface\n"
+        "  --hook         set or clear register 5 bit 3, the analogue path's\n"
+        "                 power switch; with it off the codec reads -32768\n",
+        argv0);
 }
 
 int main(int argc, char **argv)
@@ -346,6 +479,13 @@ int main(int argc, char **argv)
         else if (!strcmp(mode, "--send"))   rc = (argc > 2) ? send_command(argv[2])
                                                            : (usage(argv[0]), 1);
         else if (!strcmp(mode, "--notify")) rc = notify_listen((argc > 2) ? atof(argv[2]) : 6.0);
+        else if (!strcmp(mode, "--regs"))   rc = cmd_regs(argc, argv);
+        else if (!strcmp(mode, "--read"))   rc = (argc > 2) ? cmd_regs(argc, argv)
+                                                           : (usage(argv[0]), 1);
+        else if (!strcmp(mode, "--write"))  rc = (argc > 3) ? cmd_write(argv[2], argv[3])
+                                                           : (usage(argv[0]), 1);
+        else if (!strcmp(mode, "--hook"))   rc = (argc > 2) ? cmd_hook(argv[2])
+                                                           : (usage(argv[0]), 1);
         else { usage(argv[0]); rc = 1; }
     }
 

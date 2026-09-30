@@ -91,15 +91,28 @@ differs per rate produces a slightly different clipped constant at each rate,
 railing outright at the higher ones.  So there is a real ADC running, with a
 real filter chain, and its input stuck at a rail.
 
-**These captures were taken with NOTHING PLUGGED INTO THE TEL JACK, and that
-bounds what they can say.**  With no line there is no loop current, so a DAA
-line-sense output sitting at a rail is just what a disconnected DAA looks like.
-The rail is therefore NOT evidence that a bring-up command is needed: "the
-analogue path is unpowered until told otherwise" and "there is no line" predict
-the same thing, and this setup cannot separate them.  Nor is a noise floor a
-meaningful thing to ask for here - with no line the best it could describe is
-the codec's own floor, and only once the path is powered at all.  Repeat these
-measurements with a line connected before drawing anything from them.
+**The rail was the unpowered analogue path, and one register bit clears it.**
+The previous reading of these captures said the rail was equally explained by
+there being no line in the jack, and that the two could not be separated
+without one.  That is now settled without a line, because the separation is a
+command rather than a connection: with **register 5 bit 3 set** the same
+capture at the same rate stops railing and delivers a real signal.  Measured
+back to back on one device with nothing in the tel jack, the bit as the only
+variable:
+
+```
+reg 5 = 0x00   min/max -32768 / -32768   ONE distinct value
+reg 5 = 0x08   min/max    570 /    738   DC +657 counts (2.01% FS)
+                                         RMS excl. DC 21.2 = -63.8 dBFS
+                                         about 4.4 effective bits of noise
+```
+
+Repeatable in both directions (set, clear, set), so it is the analogue path's
+power switch and not an artefact of when the capture ran.  **-63.8 dBFS is the
+codec's own floor on an open line** - it is not a measurement of a bearer, and
+a line in the jack will be worse.  What it does establish is that the front
+end, its filter chain and the isochronous transport all work, which is the
+whole of what the analogue side needs from this part.
 
 ## Driver provenance
 
@@ -207,10 +220,81 @@ at `wValue` 0, 0xFF01, 0xFF02, 0x0100, 0x0001 produced exactly one non-stall
 reply — that `GET_ENCAPSULATED_RESPONSE` — which matches the driver using
 class requests and nothing else.  The device stayed alive throughout.
 
-**Not established: what any opcode means.**  Naming them requires tracing the
-IOCTL call sites in `USmSerial.sys`; all eight constants above appear there,
-once each, so the callers are findable.  The `wIndex = 0` requests (0x11,
-0x13, 0x14) have never been sent live — the sweep only tried `wIndex = 1`.
+## The device is a register file, and that is the line interface
+
+Tracing those IOCTLs back into `USmSerial.sys` identifies two of them as a
+register read/write pair, and **that pair is how the driver does everything to
+the line**.  The callers are thin wrappers:
+
+| helper | IOCTL | what it puts on the wire |
+|---|---|---|
+| `ReadReg(idx)` @`0x9ca6b` | `0x22008c` | `80 <idx> 00`, then `GET_ENCAPSULATED_RESPONSE` |
+| `WriteReg(idx,val)` @`0x9ca88` | `0x220088` | `00 <idx> <val>`, silent |
+
+Both are `SEND_ENCAPSULATED_COMMAND`, `wValue = 0`, `wIndex = 1`, 3 bytes.  The
+table above listed those two bodies as `00 <lo> <hi>` and `80 <arg> 00` with
+the fields unnamed; they are index and value, and the `0x80` form is a read.
+
+**Verified against the device.**  Every index tried but 0 answers, repeatably
+and in order:
+
+```
+reg 0x01 = 0x01   reg 0x05 = 0x00   reg 0x11 = 0x0c
+reg 0x02 = 0x83   reg 0x0a = 0x00   reg 0x1f = 0x20
+0x03 0x04 0x0f 0x10 0x1a 0x1e = 0x00      0x00 answers nothing
+```
+
+Writes take and read back (`reg 5: 0x00 -> 0x08 -> 0x00`), and the device stays
+alive throughout.  `apple_usb_modem_probe --regs`, `--read`, `--write`.
+
+### Hook control
+
+There is a pair of functions at `0x9dabe` / `0x9db43`, each branching on the
+product ID - which is why one driver covers this part and the `190D:*` ones in
+the same INF:
+
+```
+9dace: cmp dword [esi+0x3b3], 0x1401    <- this device
+9dadc: push 5 ; call ReadReg
+9dae3: or   eax, 0x8
+9dae7: push 5 ; call WriteReg           <- set bit 3
+9db31: push 2 ; call SendCmd(0x22009c)  <- the other PIDs, a different scheme
+```
+
+and the mirror at `0x9db43` with `and eax, 0xfffffff7`.  So on `05ac:1401` the
+line is seized by a **read-modify-write of bit 3 of register 5**, not by a DAA
+relay word and not by the `wIndex = 0` requests.  Neither function has a direct
+caller; they are reached through a 10-byte-stride pointer table at file offset
+`0x8d673`, the driver's hardware abstraction layer.
+
+**Which direction is which is a reading, not a proof.**  The setting side also
+frees the pending buffers and arms a ~10 ms timer with callback `0x9d1e3`, and
+off-hook is the transition that needs a settle delay; the clearing side does
+nothing but the write.  The codec A/B above agrees - setting the bit is what
+brings the analogue front end to life - but with no line connected neither loop
+current nor a dial tone has been observed, so "bit 3 set = off-hook" rests on
+the settle timer and the codec, not on a seized line.
+
+### The country blobs reach it the same way
+
+`usm56.reg`'s 4-byte `HardwareInitBB` is no longer a mystery.  At `0x9dd96`
+there is a table at `0xde218` of 8-byte entries - `{u32 country_id, u8 r10,
+u8 r1a, u8 r1f, u8 r1e}`, `-1` terminated, default `00 C0 00` - walked for the
+current country and then written as four `WriteReg` calls to registers
+**0x10, 0x1a, 0x1f, 0x1e**.  Four bytes, four registers.
+
+That also disposes of the objection that none of the blobs is 3 or 9 bytes long
+and so cannot be carried by these commands: the channel does arbitrary
+single-register writes, and a blob is delivered as a run of them.  The three
+larger blobs (32, 500, 229 bytes) are still unplaced.
+
+**Other opcodes remain unnamed.**  `0x2200c4`'s first sub-form emits
+`10 00 <n&0x0f>` and is what `USmSerial.sys` calls with 0 and 8 around session
+setup and teardown; `0x2200b4` emits the one 9-byte body,
+`02 05 FE 20 <lo> <hi> 01 05 01`, with `bRequest 0x00` and a mode flag of 2,
+which looks like a windowed write; `0x90` and `0xd0` appear once each.  The
+`wIndex = 0` requests (`bRequest` 0x11/0x13/0x14) have still never been sent
+live.
 
 ## usm56.reg: the per-country DAA data
 
@@ -225,10 +309,10 @@ LimitInitBB     229 bytes    HardwareInitBB 4 bytes
 ```
 
 These are the ring thresholds, pulse-dial timing and off-hook current limits —
-the regulatory configuration the command channel presumably exists to deliver.
-**None of them is 3 or 9 bytes**, so they are not carried by the commands
-tabulated above; the 9-byte form acting as a windowed write is a guess, not a
-finding.
+the regulatory configuration the command channel exists to deliver.
+`HardwareInitBB`'s four bytes are the four DAA registers written at country
+selection; the other three blobs are not placed, and the 9-byte form acting as
+a windowed write is still a guess.
 
 The seven sample rates appear **nowhere** in the INF or the `.reg`.  The
 `9600`/`8400`/`7200` hits in the INF are `CONNECT 9600` response strings, i.e.
@@ -260,15 +344,33 @@ DTE rates.  Rate selection is in the binary.
    device in the first place.
 7. **Do not assume an unnamed callee is a helper.**  `0x14eca`, which appeared
    to compute command bytes, is `memcpy`.
+8. **A queued response does not survive closing the handle.**  Sending the read
+   from one process and the `GET` from the next reports "nothing queued" for
+   every register, which reads exactly like a device that does not answer.  The
+   register file looked dead for one round because of this.
+9. **A 2-byte command is stalled.**  Only 3- and 9-byte bodies are accepted, so
+   the read is `80 <idx> 00`; the earlier note that observed lengths were
+   "2, 3, 9" counted `GET_ENCAPSULATED_RESPONSE`'s 2-byte IN as a command.
+10. **An IOCTL number does not name a request.**  `utlamot.sys` carries the
+   IOCTL through a work queue into `FUN_0001316a`, which is where `bRequest`,
+   `wValue`, `wIndex` and the length are chosen, and one IOCTL can have two
+   sub-forms keyed on the body's first byte (`0x2200c4` does).  Reading the
+   caller's payload and assuming it reaches the wire unchanged is what left the
+   first table's fields unnamed.
 
 ## Open
 
-- What the opcodes do.  Trace the eight IOCTLs into `USmSerial.sys`.
-- How the country blobs reach the device.
+- **A line in the jack.**  Everything below the codec is now reachable, and
+  nothing further can be settled without loop current: whether bit 3 really
+  seizes the line, what registers 1, 2, 0x11 and 0x1f mean (they are the only
+  ones with non-zero contents, so ring and loop sense are likely among them),
+  and what the codec's floor is on a real bearer.
+- What the remaining opcodes do: `0x10|n`, the 9-byte `0x02` form, `0x90`,
+  `0xd0`.
+- How the 32, 500 and 229-byte country blobs reach the device.  Runs of
+  register writes is the obvious guess, and the register file is now readable,
+  so a diff of it across a country change would show it.
 - Whether the DFU interface expects a firmware push.
-- Whether anything must be sent before the codec stops railing.  UNTESTABLE as
-  measured: the captures above had no line connected, so the rail has a trivial
-  explanation and the question needs a line in the jack first.
 - The `wIndex = 0` requests (`bRequest` 0x11/0x13/0x14), untested live.
 - Whether `0x220070` (tested by the dispatcher but reaching no request block
   above) does something else.
