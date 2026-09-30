@@ -493,22 +493,49 @@ apple_usb_modem_coupler --rx-replay tap.s16 [--pty-link ...]
 apple_usb_modem_coupler --hook on|off
 ```
 
-**This bearer is structurally better than the HSF one, for one reason: 8000 Hz
-is in the device's rate list.**  The engine is fed at its own DS0 rate, so there
-is no resampling and **no receive sampling phase to choose** -- and that choice
-is what cost the HSF path a session, where a swept fractional delay reached
-Phase 4 on only 1/10, 2/10 and 9/10 of phases across three recorded calls and
-0.0, the obvious value, failed on all three (`docs/hsf_analogue_v90_coupler.md`).
-There is no `HSF_RX_DELAY` equivalent here because there is no equivalent
-decision.
+### The rate is 9600, not 8000
 
-**The limitation that comes with it, and it bounds what this part can ever
-do:** `me_rx_v90a_16k()` wants two samples per DS0 interval and the device's
-rate ceiling is 10286 Hz, so the **V.90 analogue Phase 3 downstream cannot be
-fed at 8000** -- it is recoverable only from T/2 samples.  It is reachable,
-because 9600 is in the list and 9600 x 5/3 = 16000 exactly, so an exact rational
-resampler would supply it; that is not written.  Until it is, expect V.34 and
-below to work here and the V.90 analogue role's Phase 3 not to.
+The rate list is 8000 plus every V.34 symbol rate times three, because the
+SM56's host datapump ran its receiver on a T/3 grid.  The engine wants two
+grids -- 8000 for `me_rx_audio()` and 16000 (T/2) for `me_rx_v90a_16k()` -- and
+of the seven offered rates **only two reach both by a small exact ratio**:
+
+| device rate | to 8000 | to 16000 |
+|---|---|---|
+| 7200 | 10/9 | 20/9 |
+| **8000** | **1/1** | **2/1** |
+| 8229 | 8000/8229 | 16000/8229 |
+| 8400 | 20/21 | 40/21 |
+| 9000 | 8/9 | 16/9 |
+| **9600** | **5/6** | **5/3** |
+| 10286 | 4000/5143 | 8000/5143 |
+
+**The difference between the two is the whole argument.**  `8000 -> 16000` is
+x2, i.e. **upsampling**: it invents the T/2 samples by interpolation instead of
+measuring them, from a stream that is already critically sampled -- V.34 at 3429
+baud occupies up to 3673 Hz, leaving 8000 just **327 Hz** of Nyquist margin.
+9600 leaves **1127 Hz**, and `9600 -> 16000` carries genuine information to
+4800 Hz, covering the whole DS0 band.  So **8000 is a dead end for the V.90
+analogue role**, whose downstream is recoverable only from T/2 samples, while
+9600 reaches both grids *and* is T/3 at 3200 baud exactly.  Default 9600.
+
+**And exact rational resampling is also what keeps the HSF path's defect out of
+here.**  That coupler decimates 16 kHz by two, so it must CHOOSE which of two
+sample sets to keep, and swept as a fractional delay only 1/10, 2/10 and 9/10 of
+phases reached Phase 4 across three recorded calls, with 0.0 -- the obvious
+value -- failing on all three (`docs/hsf_analogue_v90_coupler.md`).  A 5/6
+polyphase discards nothing and has no free parameter; the constant group delay
+it adds is not a choice.  There is no `HSF_RX_DELAY` equivalent because there is
+no equivalent decision.
+
+`--rate 8000` still works and skips the receive resampler, which is one filter
+fewer if all you want is V.34; it cannot feed the T/2 path.
+
+**The resamplers are measured, not asserted** (`--selftest`, no device or line
+needed): a tone through each path, fitted for amplitude and phase, with the
+residual reported as SNDR.  All three are flat to **0.3%** with **52.7-84 dB**
+SNDR over 300-3673 Hz, i.e. across the whole V.34 band including its worst
+symbol rate.
 
 **The DC blocker is not optional.**  This device sits at about +650 counts
 on-hook, and on the HSF part a standing 908-count offset made SpanDSP's
@@ -524,6 +551,10 @@ far end answered.  Ringback is 400/440/480 Hz and ANS/ANSam is 2100 Hz.
 The line was disconnected when this was written, so **no call has been placed
 through the engine by this program.**  What is verified:
 
+- **Both rates run the same code path** -- `--rx-replay` on the live 8416
+  recording at its native 9600 through both resamplers, and on the 8000
+  resampling of it with the receive resampler bypassed: answer detected and the
+  engine started in both.
 - **It refuses to dial with no pair connected.**  `line_hook()` reads register
   0x1d after seizing and bails on 0x00, so a disconnected pair is reported
   rather than producing a session's worth of uninformative measurements -- which
@@ -575,18 +606,32 @@ in answer detection.
 9. **A 2-byte command is stalled.**  Only 3- and 9-byte bodies are accepted, so
    the read is `80 <idx> 00`; the earlier note that observed lengths were
    "2, 3, 9" counted `GET_ENCAPSULATED_RESPONSE`'s 2-byte IN as a command.
-10. **Read register 0x1d before believing any line measurement.**  A whole
+10. **A 16-tap-per-phase polyphase prototype is too short here, and it fails
+   quietly.**  `--selftest` read gain **0.82** at 3600 Hz on the 5/6 receive path
+   and **16.2 dB** SNDR on the 6/5 transmit path, where the `8000 -> 9600` image
+   at 4400 Hz sits only 400 Hz into the stopband.  48 taps fixes both.  Either
+   would have presented inside the modem as a level or a noise problem, nowhere
+   near its cause -- which is the argument for the resampler having a
+   measurement of its own rather than being assumed correct.
+11. **A replay that duplicates a shortened version of the live path can pass for
+   the WRONG REASON.**  The first `--rx-replay` did its own DC blocking and
+   answer detection and fed the file straight to `me_rx_audio()`, so at a device
+   rate of 9600 it handed 9600 Hz samples to an 8000 Hz entry point -- and it
+   "detected the answer tone at 6.66 s against the live call's 6.60 s" only
+   because the detector was mis-tuned by the same 6/5, looking for 1750 Hz.  Two
+   errors cancelling.  Replay now goes through `engine_feed()`, the one path.
+12. **Read register 0x1d before believing any line measurement.**  A whole
    session was spent on a pair that was not connected, concluding that bit 3
    was not the hook and that the hook was unidentified -- both wrong, from
    measurements that were internally consistent.  0x1d reads 0x00 when there is
    no pair, which is the device saying so.
-11. **zsh does not word-split an unquoted `$var`** (it does split `$(...)`).
+13. **zsh does not word-split an unquoted `$var`** (it does split `$(...)`).
    `--read $R` with 59 indices in `R` therefore read ONE register whose index
    parsed out of `strtoul("01 02 03 ...")`, printed one line and exited 0 --
    which read as "the device stops answering after the first read" and briefly
    became a finding about the hardware.  Use `${=R}` or inline the command
    substitution.
-12. **An IOCTL number does not name a request.**  `utlamot.sys` carries the
+14. **An IOCTL number does not name a request.**  `utlamot.sys` carries the
    IOCTL through a work queue into `FUN_0001316a`, which is where `bRequest`,
    `wValue`, `wIndex` and the length are chosen, and one IOCTL can have two
    sub-forms keyed on the body's first byte (`0x2200c4` does).  Reading the

@@ -17,24 +17,36 @@
  *   80 <idx> 00        read a register (then GET_ENCAPSULATED_RESPONSE)
  *   00 <idx> <val>     write one
  *
- * WHY THIS IS A BETTER BEARER THAN THE HSF PART, and it is the reason to prefer
- * it: the device's isochronous rate list contains 8000 Hz exactly, so the
- * engine is fed at its own DS0 rate with NO RESAMPLING AND NO SAMPLING-PHASE
- * CHOICE.  The HSF coupler streams 16 kHz and must decide where the 8 kHz grid
- * falls, and that decision is what cost that path a session -- swept as a pure
- * fractional delay, only 1/10, 2/10 and 9/10 of phases reached Phase 4 on three
- * recorded calls, and 0.0 (the obvious value) failed on all three.  There is no
- * equivalent knob here because there is no equivalent choice.
+ * THE RATE IS 9600, NOT 8000, and the arithmetic is the reason.  The device's
+ * rate list is 8000 plus every V.34 symbol rate times three, because the SM56's
+ * host datapump ran its receiver on a T/3 grid -- the same grid this tree's own
+ * T/3 upstream receiver uses.  The engine wants two grids: 8000 for
+ * me_rx_audio() and 16000 (T/2) for me_rx_v90a_16k(), and of the seven offered
+ * rates only two reach both by a small exact ratio:
  *
- * THE LIMITATION THAT COMES WITH IT, stated because it bounds what this bearer
- * can ever do: me_rx_v90a_16k() wants two samples per DS0 interval, and this
- * device's rate ceiling is 10286 Hz, so the V.90 analogue Phase 3 downstream --
- * which can only be recovered from T/2 samples -- CANNOT be fed at 8000.  It is
- * reachable: 9600 Hz is in the rate list and 9600 * 5/3 = 16000 exactly, so an
- * exact rational resampler would supply it.  That is not implemented here, and
- * until it is, expect V.34 and below to work and the V.90 analogue role's
- * Phase 3 not to.  --rate says which rate to run at so the experiment is
- * available; only 8000 feeds the engine today.
+ *     8000  -> 8000 = 1/1    -> 16000 = 2/1
+ *     9600  -> 8000 = 5/6    -> 16000 = 5/3
+ *
+ * and the difference between them is the whole argument.  8000 -> 16000 is
+ * UPSAMPLING: it invents the T/2 samples by interpolation instead of measuring
+ * them, from a stream that is already critically sampled -- V.34 at 3429 baud
+ * occupies up to 3673 Hz, so 8000 leaves 326 Hz of Nyquist margin.  9600 leaves
+ * 1126 Hz, and 9600 -> 16000 carries genuine information to 4800 Hz, which
+ * covers the whole DS0 band.  So sampling at 8000 is a dead end for the V.90
+ * analogue role, which can only recover its downstream from T/2 samples, while
+ * 9600 reaches both grids and is additionally T/3 at 3200 baud exactly.
+ *
+ * Both resamplers are therefore exact rational polyphase, not fractional
+ * delays, and that is also what keeps the HSF path's defect out of here: that
+ * coupler decimates 16 kHz by two and so must CHOOSE which of two sample sets
+ * to keep, and swept as a fractional delay only 1/10, 2/10 and 9/10 of phases
+ * reached Phase 4 on three recorded calls, with 0.0 -- the obvious value --
+ * failing on all three.  A 5/6 polyphase discards nothing and has no free
+ * parameter; the constant group delay it adds is not a choice.
+ *
+ * --rate still accepts 8000, which skips the receive resampler entirely and is
+ * one filter fewer if all you want is V.34; it cannot feed the T/2 path.
+ * --selftest measures the resamplers, since they are load-bearing.
  *
  * The DC offset is removed unconditionally.  This device sits at about +650
  * counts, and on the HSF part a standing 908-count offset made SpanDSP's
@@ -174,7 +186,7 @@ static int    tx_nseg, tx_seg;
 static long   tx_pos;
 static double tx_ph1, tx_ph2;
 static double tx_amp = 0.15;   /* per tone; a pair lands near -16.5 dBFS */
-static double g_rate = 8000.0;
+static double g_rate = 9600.0;   /* see the header: not 8000 */
 static double g_tx_gain = 1.0;
 static volatile int tx_dtmf_done;
 
@@ -217,6 +229,99 @@ static int build_dial_script(const char *digits, double on_ms, double off_ms)
 }
 
 /* ------------------------------------------------------------------ */
+/* Exact rational resampling                                          */
+/* ------------------------------------------------------------------ */
+
+/* Polyphase L/M.  The prototype is a windowed sinc at the L-times-upsampled
+ * rate, cut at 1/(2*max(L,M)) so it serves as both the interpolation and the
+ * anti-alias filter, and the polyphase decomposition means only every Lth tap
+ * is touched per output -- there is no free phase to pick, which is the point
+ * (see the header on the HSF coupler's fractional delay). */
+/* 48 taps per phase.  16 was measured too short and it was NOT a subtle
+ * failure: --selftest read 0.82 gain at 3600 Hz on the 5/6 path and 16.2 dB
+ * SNDR on the 6/5 transmit path, where the 8000 -> 9600 image at 4400 Hz sits
+ * only 400 Hz into the stopband.  Both would have presented inside the modem as
+ * a level or noise problem, miles from the cause. */
+#define RS_TAPS 48
+#define RS_L_MAX 6
+#define RS_HIST (RS_TAPS + 2)
+
+struct resamp {
+    int L, M;
+    double h[RS_TAPS * RS_L_MAX + RS_L_MAX];   /* h[j*L + p] */
+    double hist[RS_HIST];
+    int hn;                             /* input samples consumed */
+    long k;                             /* output index */
+};
+
+static void rs_init(struct resamp *r, int L, int M)
+{
+    int n = RS_TAPS * L;
+    double fc = 0.5 / (L > M ? L : M);   /* normalised to the L*fs_in rate */
+    double sum = 0;
+
+    memset(r, 0, sizeof *r);
+    r->L = L;
+    r->M = M;
+    (void)sum;
+    for (int i = 0; i < n; i++) {
+        double t = i - (n - 1) / 2.0;
+        double x = 2.0 * M_PI * fc * t;
+        double sinc = (fabs(x) < 1e-9) ? 1.0 : sin(x) / x;
+        /* Hamming, so the stopband is about -53 dB -- ample against the 1126 Hz
+         * of Nyquist margin 9600 leaves at the worst V.34 symbol rate. */
+        double w = 0.54 - 0.46 * cos(2.0 * M_PI * i / (n - 1));
+        r->h[i] = sinc * w;
+    }
+    /* Normalise EACH PHASE to unit DC gain.  One output touches one phase, so
+     * normalising the whole prototype would leave every output a factor of L
+     * out -- and a gain error here presents as a level problem in the modem,
+     * miles from its cause. */
+    for (int p = 0; p < L; p++) {
+        double ps = 0;
+        for (int j = 0; j < RS_TAPS; j++) ps += r->h[j * L + p];
+        if (fabs(ps) < 1e-12) ps = 1.0;
+        for (int j = 0; j < RS_TAPS; j++) r->h[j * L + p] /= ps;
+    }
+}
+
+/* Feed one input sample, emit however many outputs fall due (0, 1 or more). */
+static int rs_put(struct resamp *r, double x, double *out, int max_out)
+{
+    int got = 0;
+
+    for (int i = RS_HIST - 1; i > 0; i--) r->hist[i] = r->hist[i - 1];
+    r->hist[0] = x;
+    r->hn++;
+    /* Output k sits at input position k*M/L; emit while that is the sample just
+     * pushed.  One input can owe several outputs when L > M. */
+    for (;;) {
+        long m = (r->k * r->M) / r->L;
+        int  p = (int)((r->k * r->M) % r->L);
+        double acc = 0;
+
+        if (m > r->hn - 1) break;
+        if (got >= max_out) break;
+        /* hist[0] is input n = hn-1, so input (m - j) is hist[hn-1-m+j]. */
+        for (int j = 0; j < RS_TAPS; j++) {
+            int hi = (int)(r->hn - 1 - m) + j;
+            if (hi < 0 || hi >= RS_HIST) continue;
+            acc += r->h[j * r->L + p] * r->hist[hi];
+        }
+        out[got++] = acc;
+        r->k++;
+    }
+    return got;
+}
+
+static int16_t clip16(double v)
+{
+    if (v >  32767.0) return  32767;
+    if (v < -32768.0) return -32768;
+    return (int16_t)lrint(v);
+}
+
+/* ------------------------------------------------------------------ */
 /* Engine plumbing                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -249,6 +354,9 @@ static void dc_block(int16_t *s, long n)
 /* 2100 Hz answer detection over 20 ms blocks, as a ratio so it is not a level
  * test.  ANSam's phase reversals do not disturb this: the block is 20 ms and
  * the reversals are 450 ms apart, so at most one block in 22 straddles one. */
+#define ANS_RATE   8000.0          /* it runs on the RESAMPLED stream, not the
+                                    * device's -- using g_rate here had it
+                                    * looking for 2100*8000/9600 = 1750 Hz */
 #define ANS_BLOCK  160u            /* 20 ms at 8 kHz */
 #define ANS_NEEDED  10u            /* 200 ms of 2100 Hz */
 static int16_t ans_buf[ANS_BLOCK];
@@ -256,7 +364,7 @@ static unsigned ans_fill;
 
 static void answer_block(const int16_t *s)
 {
-    double w = 2.0 * M_PI * 2100.0 / g_rate;
+    double w = 2.0 * M_PI * 2100.0 / ANS_RATE;
     double coeff = 2.0 * cos(w), q1 = 0, q2 = 0, energy = 0;
 
     for (unsigned i = 0; i < ANS_BLOCK; i++) {
@@ -288,14 +396,21 @@ static void answer_block(const int16_t *s)
 static int16_t ring[RING_N];
 static volatile unsigned ring_w, ring_r;
 
-static void engine_feed(int16_t *s, long n)
+/* Receive chain: device rate -> 8000 for me_rx_audio, and (from 9600 only)
+ * -> 16000 for me_rx_v90a_16k.  The T/2 stream is offered FIRST, as the engine
+ * header requires: it is the stream the V.90 analogue Phase 3 receiver reads,
+ * and it must see the samples before the 8 kHz decimation. */
+static struct resamp rs_8k, rs_16k, rs_tx;
+static int16_t fb8[1024];
+static long    fb8_n;
+
+static void engine_block_8k(const int16_t *s, long n)
 {
     long off = 0;
 
-    dc_block(s, n);
     while (off < n) {
         long k = n - off;
-        if (k > 80) k = 80;
+        if (k > 80) k = 80;                 /* the shape live pjmedia delivers */
         if (!g_answered) {
             for (long i = 0; i < k; i++) {
                 ans_buf[ans_fill++] = s[off + i];
@@ -305,23 +420,56 @@ static void engine_feed(int16_t *s, long n)
         if (g_answered && !g_engine_running) {
             g_engine_running = 1;
             me_on_sip_connected();
-            fprintf(stderr, "[APPLE] starting analogue engine at %.0f Hz\n", g_rate);
+            fprintf(stderr, "[APPLE] starting analogue engine (device %.0f Hz)\n", g_rate);
         }
         if (g_engine_running) {
             int16_t out[80];
+            double up[8];
             me_rx_audio(s + off, (int)k);
             me_tx_audio(out, (int)k);
+            /* 8000 -> device rate on the way out, so the engine keeps its own
+             * grid on both sides and the resamplers are the only place that
+             * knows about 9600. */
             for (long i = 0; i < k; i++) {
-                unsigned nw = (ring_w + 1) % RING_N;
-                if (nw == ring_r) break;          /* consumer behind; drop */
-                double v = out[i] * g_tx_gain;
-                if (v >  32767.0) v =  32767.0;
-                if (v < -32768.0) v = -32768.0;
-                ring[ring_w] = (int16_t)lrint(v);
-                ring_w = nw;
+                int got = (g_rate == 8000.0)
+                          ? (up[0] = out[i], 1)
+                          : rs_put(&rs_tx, out[i], up, 8);
+                for (int j = 0; j < got; j++) {
+                    unsigned nw = (ring_w + 1) % RING_N;
+                    if (nw == ring_r) break;      /* consumer behind; drop */
+                    ring[ring_w] = clip16(up[j] * g_tx_gain);
+                    ring_w = nw;
+                }
             }
         }
         off += k;
+    }
+}
+
+static void engine_feed(int16_t *s, long n)
+{
+    dc_block(s, n);
+
+    if (g_rate == 8000.0) {                      /* no receive resampler at all */
+        engine_block_8k(s, n);
+        return;
+    }
+    for (long i = 0; i < n; i++) {
+        double o[8];
+        int got;
+
+        /* T/2 first, per me_rx_v90a_16k()'s contract. */
+        got = rs_put(&rs_16k, s[i], o, 8);
+        if (got > 0 && g_engine_running) {
+            int16_t w[8];
+            for (int j = 0; j < got; j++) w[j] = clip16(o[j]);
+            me_rx_v90a_16k(w, got);
+        }
+        got = rs_put(&rs_8k, s[i], o, 8);
+        for (int j = 0; j < got; j++) {
+            fb8[fb8_n++] = clip16(o[j]);
+            if (fb8_n == 80) { engine_block_8k(fb8, 80); fb8_n = 0; }
+        }
     }
 }
 
@@ -490,42 +638,107 @@ static int audio_start(void)
 static int replay(const char *path)
 {
     FILE *fp = fopen(path, "rb");
-    int16_t buf[80], out[80];
+    int16_t buf[80];
     long total = 0;
 
     if (!fp) { perror(path); return 1; }
-    /* A recorded tap is the line as it arrived, so the answer detector runs on
-     * it exactly as live -- a replay that skips straight to the engine cannot
-     * reproduce a call that failed in answer detection. */
+    /* Goes through engine_feed() exactly as the live path does -- the DC
+     * blocker, both resamplers, the answer detector and the 80-sample blocking.
+     * An earlier version duplicated a shortened version of that here and fed
+     * the file straight to me_rx_audio(): at a device rate of 9600 that handed
+     * 9600 Hz samples to an 8000 Hz entry point, and it "passed" only because
+     * the answer detector was mis-tuned by the same ratio.  Two wrongs.  The tap
+     * must be at --rate, since that is what the device produced. */
     for (;;) {
         size_t n = fread(buf, 2, 80, fp);
         if (n == 0) break;
-        dc_block(buf, (long)n);
-        if (!g_answered) {
-            for (size_t i = 0; i < n; i++) {
-                ans_buf[ans_fill++] = buf[i];
-                if (ans_fill == ANS_BLOCK) { answer_block(ans_buf); ans_fill = 0; }
-            }
-        }
-        if (g_answered && !g_engine_running) {
-            g_engine_running = 1;
-            me_on_sip_connected();
-            fprintf(stderr, "[APPLE] replay: engine started at sample %ld (%.2f s)\n",
-                    total, total / g_rate);
-        }
-        if (g_engine_running) {
-            me_rx_audio(buf, (int)n);
-            me_tx_audio(out, (int)n);
-        }
+        engine_feed(buf, (long)n);
+        ring_r = ring_w;                 /* no line to transmit into */
         total += (long)n;
     }
     fclose(fp);
-    fprintf(stderr, "[APPLE] replay: %ld samples (%.2f s), engine %s\n",
-            total, total / g_rate, g_engine_running ? "ran" : "NEVER STARTED");
+    fprintf(stderr, "[APPLE] replay: %ld samples at %.0f Hz (%.2f s), engine %s\n",
+            total, g_rate, total / g_rate, g_engine_running ? "ran" : "NEVER STARTED");
     return g_engine_running ? 0 : 1;
 }
 
 /* ------------------------------------------------------------------ */
+
+/* 9600 -> 8000 is 5/6, 9600 -> 16000 is 5/3, 8000 -> 9600 is 6/5.  All exact. */
+static void rs_setup(void)
+{
+    if (g_rate == 8000.0) return;
+    if (g_rate != 9600.0) {
+        fprintf(stderr, "[APPLE] %.0f Hz has no small exact ratio to 8000 or "
+                        "16000; use 9600 (or 8000 for V.34 only)\n", g_rate);
+        exit(2);
+    }
+    rs_init(&rs_8k,  5, 6);
+    rs_init(&rs_16k, 5, 3);
+    rs_init(&rs_tx,  6, 5);
+}
+
+/* The resamplers are load-bearing, so they are measurable without a device:
+ * a tone at the device rate through each path, reporting the recovered
+ * frequency, the level and the residual after the ideal tone is subtracted. */
+static int selftest(void)
+{
+    struct { const char *name; int L, M; double out_rate; } c[] = {
+        { "9600 -> 8000  (me_rx_audio)",     5, 6, 8000.0  },
+        { "9600 -> 16000 (me_rx_v90a_16k)",  5, 3, 16000.0 },
+        { "8000 -> 9600  (transmit)",        6, 5, 9600.0  },
+    };
+    const double in_rate[3] = { 9600.0, 9600.0, 8000.0 };
+    int bad = 0;
+
+    for (int t = 0; t < 3; t++) {
+        /* 3673 Hz is V.34's worst case: 3429 baud at fc 1959 reaches it, and it
+         * is 327 Hz from the 8 kHz grid's Nyquist, so it is the frequency that
+         * decides whether this bearer can carry the top symbol rate. */
+        static const double freqs[] = { 300, 1000, 2000, 3000, 3520, 3673 };
+        for (unsigned fi = 0; fi < sizeof freqs / sizeof freqs[0]; fi++) {
+            double f = freqs[fi];
+            struct resamp r;
+            double *y = malloc(sizeof(double) * 200000);
+            long ny = 0;
+            long nin = (long)(in_rate[t] * 0.5);
+
+            rs_init(&r, c[t].L, c[t].M);
+            for (long i = 0; i < nin; i++) {
+                double o[8];
+                int got = rs_put(&r, 10000.0 * sin(2 * M_PI * f * i / in_rate[t]), o, 8);
+                for (int j = 0; j < got; j++) y[ny++] = o[j];
+            }
+            /* Skip the filter's transient, then fit amplitude and phase at f and
+             * report what is left: a resampler wrong in gain, in phase slope or
+             * in aliasing all show up in the residual. */
+            long s0 = 4 * RS_TAPS * c[t].M / c[t].L + 64, n = ny - s0 - 64;
+            double sc = 0, ss = 0, e = 0, pw = 0;
+            for (long i = 0; i < n; i++) {
+                double ph = 2 * M_PI * f * i / c[t].out_rate;
+                sc += y[s0 + i] * cos(ph);
+                ss += y[s0 + i] * sin(ph);
+                pw += y[s0 + i] * y[s0 + i];
+            }
+            sc *= 2.0 / n; ss *= 2.0 / n;
+            double amp = sqrt(sc * sc + ss * ss);
+            for (long i = 0; i < n; i++) {
+                double ph = 2 * M_PI * f * i / c[t].out_rate;
+                double fit = sc * cos(ph) + ss * sin(ph);
+                e += (y[s0 + i] - fit) * (y[s0 + i] - fit);
+            }
+            double sndr = 10 * log10((pw / n) / fmax(1e-12, e / n));
+            int bad_row = fabs(amp / 10000.0 - 1.0) > 0.03 || sndr < 40.0;
+            printf("  %-34s %4.0f Hz: gain %6.4f  SNDR %5.1f dB%s\n",
+                   fi == 0 ? c[t].name : "", f, amp / 10000.0, sndr,
+                   bad_row ? "   <- BAD" : "");
+            bad += bad_row;
+            free(y);
+        }
+    }
+    printf("%s\n", bad ? "SELFTEST FAILED" : "selftest ok");
+    return bad ? 1 : 0;
+}
 
 static void on_signal(int sig) { (void)sig; g_stop = 1; }
 
@@ -535,19 +748,22 @@ static void usage(const char *a0)
         "usage: %s --dial NUMBER [--pty-link PATH] [--rate HZ] [--hold SECS]\n"
         "       %s --rx-replay TAP.s16 [--pty-link PATH]\n"
         "       %s --hook on|off\n"
+        "       %s --selftest\n"
         "\n"
         "  --dial       seize the line, DTMF the number, wait for 2100 Hz, run\n"
         "               the engine.  Goes back on-hook on exit or SIGINT\n"
         "  --rx-replay  run the analogue side offline against a recorded tap;\n"
         "               needs no line and no device\n"
         "  --hook       line control only, then exit\n"
-        "  --rate       8000 (default) is the only rate that feeds the engine;\n"
-        "               see this file's header on 9600 and the missing T/2 path\n"
+        "  --rate       9600 (default) reaches both engine grids exactly, 5/6 to\n"
+        "               8000 and 5/3 to 16000; 8000 skips the receive resampler\n"
+        "               but cannot feed the T/2 path at all.  See the header\n"
+        "  --selftest   measure the resamplers; needs no device and no line\n"
         "\n"
         "APPLE_MODEM_TX_AMP per-tone DTMF amplitude (default 0.15)\n"
         "APPLE_MODEM_DTMF_MS on/off times in ms (default 100/120)\n"
         "APPLE_MODEM_TX_GAIN engine transmit gain into the DAA (default 1.0)\n",
-        a0, a0, a0);
+        a0, a0, a0, a0);
 }
 
 int main(int argc, char **argv)
@@ -563,6 +779,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--hook") && i + 1 < argc)        hook_arg = argv[++i];
         else if (!strcmp(argv[i], "--rate") && i + 1 < argc)        g_rate = atof(argv[++i]);
         else if (!strcmp(argv[i], "--hold") && i + 1 < argc)        hold = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--selftest"))                    return selftest();
         else { usage(argv[0]); return 2; }
     }
     if (getenv("APPLE_MODEM_TX_AMP"))  tx_amp = atof(getenv("APPLE_MODEM_TX_AMP"));
@@ -582,6 +799,7 @@ int main(int argc, char **argv)
     }
 
     if (g_replay_path) {
+        rs_setup();
         me_set_verbose(1);
         me_init();
         me_set_law(ME_LAW_ULAW);
@@ -596,9 +814,10 @@ int main(int argc, char **argv)
     }
 
     if (!g_dial) { usage(argv[0]); return 2; }
-    if (g_rate != 8000.0)
-        fprintf(stderr, "[APPLE] WARNING: only 8000 Hz feeds the engine; "
-                        "%.0f will run the audio and not the modem\n", g_rate);
+    rs_setup();
+    if (g_rate == 8000.0)
+        fprintf(stderr, "[APPLE] 8000 Hz: no receive resampler, and NO T/2 path "
+                        "-- the V.90 analogue role cannot run\n");
 
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
