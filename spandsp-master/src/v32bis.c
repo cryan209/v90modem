@@ -123,7 +123,7 @@ SPAN_DECLARE(float) v32bis_rx_signal_power(v32bis_state_t *s)
     it.  Default on -- but read v32bis_echo_can_adapting() before moving it,
     because a canceller with nothing to cancel is a known way to make a clean
     bearer worse rather than better. */
-/*! -log2 of the echo canceller's NLMS step.
+/*! -log2 of the echo canceller's step while the far end is transmitting.
 
     1/65536, which sounds absurdly slow and is not.  A V.32bis modem is in
     double talk for the whole call -- that is what full duplex on one pair
@@ -147,6 +147,65 @@ SPAN_DECLARE(float) v32bis_rx_signal_power(v32bis_state_t *s)
     A peak rather than a plateau, which is what says the adaption is doing
     the work and the 31 dB result is not an acquisition coin flip. */
 #define V32BIS_ECHO_MU_SHIFT 16
+
+/*! -log2 of the step while clause 6 Note 3's training sequence is on the
+    line.  The far end is silent there by construction, so the error term is
+    the echo and nothing else and the loop can run as fast as stability
+    allows -- which is the whole reason the Recommendation offers the
+    sequence. */
+#define V32BIS_ECHO_MU_FAST_SHIFT 3
+
+/*! The received-to-reference power ratio above which the far end is taken
+    to be transmitting, whatever the script believes.  -6 dB: no 2-wire
+    hybrid returns more than that, so anything louder is not our echo. */
+#define V32BIS_ECHO_DT_RATIO 0.25
+
+/*! ITU-T V.32bis 6, Note 3: "The duration of this signal must not exceed
+    8192 symbol intervals." */
+#define V32BIS_EC_TRAIN_MAX_SYMBOLS 8192
+
+/*! How much of that to use.  Note 4 warns that a G.165 network echo
+    canceller needs 650 ms of training, which at 2400 baud is 1560 symbol
+    intervals, so the default clears that with room to spare. */
+#define V32BIS_EC_TRAIN_SYMBOLS 2048
+
+/*! How many symbols of it to build at a time.  The sequence can be four
+    times as long as the whole of the 5.2 conditioning signal, so it is
+    generated a buffer at a time rather than sized for. */
+#define V32BIS_EC_TRAIN_CHUNK 256
+
+static int v32bis_echo_mu_slow(void)
+{
+    const char *e = getenv("V32BIS_ECHO_MU");
+
+    return (e != NULL) ? atoi(e) : V32BIS_ECHO_MU_SHIFT;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int v32bis_echo_mu_fast(void)
+{
+    const char *e = getenv("V32BIS_ECHO_MU_FAST");
+
+    return (e != NULL) ? atoi(e) : V32BIS_ECHO_MU_FAST_SHIFT;
+}
+/*- End of function --------------------------------------------------------*/
+
+/*! How many symbol intervals of Note 3's training sequence to transmit, 0
+    for none.  It is optional, so 0 is a conformant modem. */
+static int v32bis_ec_train_symbols(void)
+{
+    const char *e = getenv("V32BIS_EC_TRAIN");
+    int n = (e != NULL) ? atoi(e) : V32BIS_EC_TRAIN_SYMBOLS;
+
+    if (n < 0)
+        n = 0;
+    /*endif*/
+    if (n > V32BIS_EC_TRAIN_MAX_SYMBOLS)
+        n = V32BIS_EC_TRAIN_MAX_SYMBOLS;
+    /*endif*/
+    return n;
+}
+/*- End of function --------------------------------------------------------*/
 
 static bool v32bis_echo_can(void)
 {
@@ -185,6 +244,7 @@ static void v32bis_echo_ref_put(v32bis_state_t *s, const int16_t amp[], int len)
     for (i = 0;  i < len;  i++)
     {
         s->echo_ref[s->echo_ref_in] = amp[i];
+        s->echo_ref_quiet[s->echo_ref_in] = s->tx_far_end_quiet;
         s->echo_ref_in = (s->echo_ref_in + 1) & (V32BIS_ECHO_REF_LEN - 1);
         if (s->echo_ref_count < V32BIS_ECHO_REF_LEN)
             s->echo_ref_count++;
@@ -196,14 +256,18 @@ static void v32bis_echo_ref_put(v32bis_state_t *s, const int16_t amp[], int len)
 }
 /*- End of function --------------------------------------------------------*/
 
-static int16_t v32bis_echo_ref_get(v32bis_state_t *s)
+static int16_t v32bis_echo_ref_get(v32bis_state_t *s, bool *quiet)
 {
     int16_t amp;
 
     if (s->echo_ref_count <= 0)
+    {
+        *quiet = false;
         return 0;
+    }
     /*endif*/
     amp = s->echo_ref[s->echo_ref_out];
+    *quiet = (s->echo_ref_quiet[s->echo_ref_out] != 0);
     s->echo_ref_out = (s->echo_ref_out + 1) & (V32BIS_ECHO_REF_LEN - 1);
     s->echo_ref_count--;
     return amp;
@@ -217,12 +281,14 @@ static void v32bis_echo_cancel(v32bis_state_t *s, int16_t amp[], int len)
     int16_t tx;
     int16_t clean;
 
+    bool quiet;
+
     if (s->ec == NULL  ||  !s->echo_can_enabled)
     {
         /* Keep the two streams in step even when we are not cancelling, so
            turning the canceller on mid-call cannot start it misaligned. */
         for (i = 0;  i < len;  i++)
-            v32bis_echo_ref_get(s);
+            v32bis_echo_ref_get(s, &quiet);
         /*endfor*/
         return;
     }
@@ -230,7 +296,32 @@ static void v32bis_echo_cancel(v32bis_state_t *s, int16_t amp[], int len)
     modem_echo_can_adaption_mode(s->ec, v32bis_echo_can_adapting(s));
     for (i = 0;  i < len;  i++)
     {
-        tx = v32bis_echo_ref_get(s);
+        tx = v32bis_echo_ref_get(s, &quiet);
+        /* The step follows the reference sample, not the wall clock: what
+           matters is whether the far end was silent when the sample that is
+           echoing now went out, and the tag travels with it down the FIFO,
+           so the whole of the echo's delay spread is covered without
+           guessing at the round trip.
+
+           The tag alone is not enough, and taking it at face value is what
+           makes this dangerous: it says "we believe clause 6 has the far
+           end silent here", and if that belief is wrong the fast step is
+           being applied to an error term that is mostly far end signal,
+           which diverges rather than converges.  So it is confirmed against
+           the line.  A hybrid cannot return more than a few dB below what
+           was sent, so received power well above the reference power means
+           the far end is transmitting whatever the script says. */
+        s->echo_ref_pow += ((double) tx*tx - s->echo_ref_pow)*(1.0/256.0);
+        s->echo_rx_pow += ((double) amp[i]*amp[i] - s->echo_rx_pow)*(1.0/256.0);
+        quiet = quiet  &&  (s->echo_rx_pow < V32BIS_ECHO_DT_RATIO*s->echo_ref_pow);
+        if (quiet != s->echo_fast_adapt)
+        {
+            s->echo_fast_adapt = quiet;
+            modem_echo_can_step_size(s->ec,
+                                     quiet ? v32bis_echo_mu_fast()
+                                           : v32bis_echo_mu_slow());
+        }
+        /*endif*/
         clean = modem_echo_can_update(s->ec, tx, amp[i]);
         s->echo_in_power += (double) amp[i]*amp[i];
         s->echo_out_power += (double) (amp[i] - clean)*(amp[i] - clean);
@@ -285,7 +376,6 @@ static int v32bis_rx_clean(v32bis_state_t *s, const int16_t amp[], int len);
 
 SPAN_DECLARE(int) v32bis_rx(v32bis_state_t *s, const int16_t amp_in[], int len)
 {
-    int used;
     int this_len;
     int16_t amp[V32BIS_ECHO_BLOCK];
     int off;
@@ -657,6 +747,58 @@ SPAN_DECLARE(int) v32bis_build_conditioning(bool calling_party,
 }
 /*- End of function --------------------------------------------------------*/
 
+/*! ITU-T V.32bis 6, Note 3: the optional echo canceller training sequence.
+    The Recommendation deliberately does not define it -- it is "a sequence
+    which can be used specially for training the echo canceller, but which
+    need not be defined in detail" -- but it does constrain it three ways,
+    and all three are met here.
+
+    It must keep energy on the line, to hold network echo control devices
+    disabled; this is a continuously transmitted signal at the modem's normal
+    power.
+
+    It must not be confusable with Segments 1 or 2 of the 5.2 receiver
+    conditioning signal, and the Recommendation says exactly what that means:
+    the power in the three 200 Hz bands centred at 600, 1800 and 3000 Hz,
+    summed, must be at least 1 dB below the power in the rest of the
+    bandwidth, averaged over any 6 ms interval.  Those three frequencies are
+    the lines S and S-bar put on the line (1800 +/- 1200 Hz) and the carrier
+    itself, so what is being asked for is a signal with no spectral lines.
+    Scrambled data on the 4 point training constellation has none: it is the
+    same construction as the TRN segment, which Note 3's own first sentence
+    says is suitable for the job.
+
+    It must not exceed 8192 symbol intervals, which the caller enforces.
+
+    The scrambler runs on independently of TRN's, so this sequence cannot
+    disturb the state 5.2 hands to the rate signals. */
+static int v32bis_build_ec_training(bool calling_party,
+                                    int symbols,
+                                    uint8_t states[],
+                                    uint32_t *scrambler_register)
+{
+    uint32_t reg;
+    int tap;
+    int i;
+    int b0;
+    int b1;
+
+    if (states == NULL  ||  scrambler_register == NULL  ||  symbols < 0)
+        return -1;
+    reg = *scrambler_register;
+    tap = calling_party ? 17 : 4;
+    for (i = 0;  i < symbols;  i++)
+    {
+        b0 = startup_scramble_bit(&reg, tap, 1);
+        b1 = startup_scramble_bit(&reg, tap, 1);
+        states[i] = (uint8_t) (b0 | (b1 << 1));
+    }
+    /*endfor*/
+    *scrambler_register = reg;
+    return symbols;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v32bis_encode_startup_word(bool calling_party,
                                              uint16_t word,
                                              uint32_t *scrambler_register,
@@ -780,6 +922,10 @@ enum
     /*! 6.1: "the modem shall transmit an S sequence for a period NT already
         estimated by the counter/timer". */
     V32BIS_TX_PHASE_S_NT,
+    /*! 6, Note 3: the optional echo canceller training sequence, sent
+        immediately before a receiver conditioning signal at the two points
+        in clause 6 where the far end is known to be silent. */
+    V32BIS_TX_PHASE_EC_TRAIN,
     /*! The 5.2 receiver conditioning signal: S, S-bar, TRN. */
     V32BIS_TX_PHASE_COND,
     /*! A Table 5 rate signal, repeated until the far end answers. */
@@ -1859,6 +2005,33 @@ static int v32bis_tx_enter_data(v32bis_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/*! Build the next chunk of clause 6 Note 3's training sequence.  It may run
+    to 8192 symbol intervals, four times the whole 5.2 conditioning signal,
+    so it is generated a buffer at a time rather than sized for. */
+static bool v32bis_tx_fill_ec_training(v32bis_state_t *s)
+{
+    int count;
+
+    count = s->ec_train_remaining;
+    if (count > V32BIS_EC_TRAIN_CHUNK)
+        count = V32BIS_EC_TRAIN_CHUNK;
+    /*endif*/
+    if (count <= 0)
+        return false;
+    /*endif*/
+    if (v32bis_build_ec_training(s->calling_party,
+                                 count,
+                                 s->startup_tx_symbols,
+                                 &s->ec_train_reg) != count)
+        return false;
+    /*endif*/
+    s->ec_train_remaining -= count;
+    s->startup_tx_symbol_pos = 0;
+    s->startup_tx_symbol_count = count;
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
 /*! Emit one symbol of whichever tone phase is running, after honouring any
     transition scheduled for this symbol.  6.2 requires the alternating
     segments to be an even number of symbol intervals long, and requires the
@@ -1949,7 +2122,24 @@ static void v32bis_tx_enter_phase(v32bis_state_t *s, int phase)
         /*endfor*/
         s->startup_tx_symbol_count = count;
         break;
+    case V32BIS_TX_PHASE_EC_TRAIN:
+        /* The far end is silent for the whole of this phase, by
+           construction: 6.1's site follows the NT S sequence, which is what
+           made the answer modem cease transmitting, and 6.2's follows the
+           16 symbol intervals of silence, during which the call modem has
+           been silent since its second phase reversal. */
+        s->tx_far_end_quiet = true;
+        s->ec_train_remaining = s->ec_train_symbols;
+        if (!v32bis_tx_fill_ec_training(s))
+        {
+            s->tx_far_end_quiet = false;
+            v32bis_tx_enter_phase(s, V32BIS_TX_PHASE_COND);
+            return;
+        }
+        /*endif*/
+        break;
     case V32BIS_TX_PHASE_COND:
+        s->tx_far_end_quiet = false;
         count = v32bis_build_conditioning(s->calling_party,
                                           1280,
                                           s->startup_tx_symbols,
@@ -2004,7 +2194,10 @@ static bool v32bis_tx_refill(v32bis_state_t *s)
                modem's tone phases occupy step 0, exactly as its opening
                conditioning signal does when the tones are skipped. */
             s->tx_transition_at = -1;
-            v32bis_tx_enter_phase(s, V32BIS_TX_PHASE_COND);
+            /* 6.2: "cease transmitting for a period of 16 symbol intervals
+               and then (see Note 3 below) transmit the receiver
+               conditioning signal". */
+            v32bis_tx_enter_phase(s, V32BIS_TX_PHASE_EC_TRAIN);
             return true;
         }
         /*endif*/
@@ -2018,6 +2211,15 @@ static bool v32bis_tx_refill(v32bis_state_t *s)
         return true;
     case V32BIS_TX_PHASE_S_NT:
         s->tx_step++;
+        /* 6.1: "After this period has expired (see Note 3 below), the modem
+           shall transmit the receiver conditioning signal". */
+        v32bis_tx_enter_phase(s, V32BIS_TX_PHASE_EC_TRAIN);
+        return true;
+    case V32BIS_TX_PHASE_EC_TRAIN:
+        if (v32bis_tx_fill_ec_training(s))
+            return true;
+        /*endif*/
+        s->tx_far_end_quiet = false;
         v32bis_tx_enter_phase(s, V32BIS_TX_PHASE_COND);
         return true;
     case V32BIS_TX_PHASE_COND:
@@ -2106,9 +2308,37 @@ static void v32bis_tone_rx(v32bis_state_t *s, const int16_t amp[], int len)
             if (s->tone_which < 0)
             {
                 /* 6.1: "conditioned to detect ... one of two incoming tones at
-                   frequencies 600 +/- 7 Hz and 3000 +/- 7 Hz". */
+                   frequencies 600 +/- 7 Hz and 3000 +/- 7 Hz", and only
+                   "subsequently to detect a phase reversal in that tone" --
+                   so the tone has to be established before the reversal
+                   detector is armed, exactly as 6.2 spells out for the
+                   answer modem's 1800 Hz tone.  Without the dwell this
+                   modem's own state A leaks enough into the 600 and 3000 Hz
+                   detectors, over a hybrid, to be taken for the far end's
+                   tone and then for a reversal in it, before the far end's
+                   tone has even arrived.  The answer modem sends at least
+                   128 symbol intervals of alternating A and C before its
+                   first reversal, so 64 of dwell cannot miss a real one. */
                 if (s->tone[0].peak > 100.0f  ||  s->tone[1].peak > 100.0f)
-                    s->tone_which = (s->tone[0].peak >= s->tone[1].peak) ? 0 : 1;
+                {
+                    int which = (s->tone[0].peak >= s->tone[1].peak) ? 0 : 1;
+
+                    if (s->tone[which].mag > 0.4f*s->tone[which].peak)
+                        s->tone_present_run++;
+                    else
+                        s->tone_present_run = 0;
+                    /*endif*/
+                    if (s->tone_present_run
+                            >= (int) (V32BIS_TONE_PRESENT_SYMBOLS*V32BIS_SAMPLES_PER_SYMBOL))
+                    {
+                        s->tone_which = which;
+                    }
+                    /*endif*/
+                }
+                else
+                {
+                    s->tone_present_run = 0;
+                }
                 /*endif*/
                 continue;
             }
@@ -2450,6 +2680,27 @@ SPAN_DECLARE(int) v32bis_restart(v32bis_state_t *s, int bit_rate)
 }
 /*- End of function --------------------------------------------------------*/
 
+/*! Is the modem transmitting clause 6 Note 3's echo canceller training
+    sequence right now?  Note 3 constrains that signal's spectrum, so a test
+    has to be able to window the transmit audio to exactly it. */
+/*! Set how many symbol intervals of clause 6 Note 3's echo canceller
+    training sequence to transmit.  Note 3 makes the sequence optional, so 0
+    is a conformant modem, and the far end has to cope either way. */
+SPAN_DECLARE(int) v32bis_set_ec_training_symbols(v32bis_state_t *s, int symbols)
+{
+    if (symbols < 0  ||  symbols > V32BIS_EC_TRAIN_MAX_SYMBOLS)
+        return -1;
+    s->ec_train_symbols = symbols;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(bool) v32bis_tx_in_ec_training(v32bis_state_t *s)
+{
+    return (s->tx_phase == V32BIS_TX_PHASE_EC_TRAIN);
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(v32bis_state_t *) v32bis_init(v32bis_state_t *s,
                                            int bit_rate,
                                            bool calling_party,
@@ -2478,10 +2729,12 @@ SPAN_DECLARE(v32bis_state_t *) v32bis_init(v32bis_state_t *s,
        room to spare; the far end's echo is the far end's problem. */
     s->ec = modem_echo_can_segment_init(256);
     s->echo_can_enabled = v32bis_echo_can();
+    s->ec_train_symbols = v32bis_ec_train_symbols();
     {
         const char *e = getenv("V32BIS_ECHO_MU");
 
-        modem_echo_can_step_size(s->ec, (e != NULL) ? atoi(e) : V32BIS_ECHO_MU_SHIFT);
+        (void) e;
+        modem_echo_can_step_size(s->ec, v32bis_echo_mu_slow());
     }
 
     {

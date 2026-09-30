@@ -70,6 +70,73 @@ static void bearer(const int16_t in[], int16_t out[], int len, int alaw)
     }
 }
 
+/*! ITU-T V.32bis 6, Note 3 constrains the optional echo canceller training
+    sequence's spectrum, and the constraint is numeric, so it is checked
+    rather than asserted in a comment: "the echo cancellation sequence shall
+    produce a transmitted signal such that the sum of its power in the three
+    200 Hz bands centred at 600 Hz, 1800 Hz and 3000 Hz is at least 1 dB
+    less than its power in the remaining bandwidth.  This applies for the
+    relative power averaged over any 6 ms time interval."
+
+    Those three frequencies are the carrier and the two lines S and S-bar
+    put on the line at 1800 +/- 1200 Hz, so what is being required is a
+    signal with no spectral lines -- something the far end cannot mistake
+    for Segment 1 or 2 of the 5.2 receiver conditioning signal.
+
+    6 ms at 8000 samples/s is 48 samples.  A 48 point Goertzel's main lobe is
+    wider than 200 Hz, so this over-counts the in-band power and the test is
+    the conservative side of the Recommendation. */
+#define NOTE3_WINDOW    48
+
+static int note3_spectrum_ok(const int16_t amp[], int len, double *worst_db)
+{
+    static const double centre[3] = {600.0, 1800.0, 3000.0};
+    int off;
+    int i;
+    size_t b;
+    double total;
+    double bands;
+    double s1;
+    double s2;
+    double t;
+    double coeff;
+    double ratio_db;
+    int windows = 0;
+
+    *worst_db = 1000.0;
+    for (off = 0;  off + NOTE3_WINDOW <= len;  off += NOTE3_WINDOW)
+    {
+        total = 0.0;
+        for (i = 0;  i < NOTE3_WINDOW;  i++)
+            total += (double) amp[off + i]*amp[off + i];
+        if (total < 1.0)
+            continue;
+        bands = 0.0;
+        for (b = 0;  b < 3;  b++)
+        {
+            coeff = 2.0*cos(2.0*M_PI*centre[b]/8000.0);
+            s1 = 0.0;
+            s2 = 0.0;
+            for (i = 0;  i < NOTE3_WINDOW;  i++)
+            {
+                t = amp[off + i] + coeff*s1 - s2;
+                s2 = s1;
+                s1 = t;
+            }
+            bands += (s1*s1 + s2*s2 - coeff*s1*s2)/NOTE3_WINDOW;
+        }
+        if (bands >= total)
+            return 0;
+        ratio_db = 10.0*log10((total - bands)/bands);
+        if (ratio_db < *worst_db)
+            *worst_db = ratio_db;
+        windows++;
+    }
+    if (windows == 0)
+        return 0;
+    return (*worst_db >= 1.0);
+}
+
 /*! A near end 2-wire hybrid.  V.32bis is full duplex on one pair, so each
     modem's own transmit comes back into its own receiver a short time later
     through the hybrid's imperfect balance.  Three taps rather than one, so a
@@ -125,7 +192,9 @@ static int run_duplex(int alaw,
                       int tones,
                       int delay,
                       int hybrid,
-                      int echo_can)
+                      int echo_can,
+                      int call_ec_train,
+                      int answer_ec_train)
 {
     int16_t call_audio[160];
     int16_t answer_audio[160];
@@ -147,6 +216,10 @@ static int run_duplex(int alaw,
     int i;
     hybrid_t call_hybrid;
     hybrid_t answer_hybrid;
+    static int16_t ec_audio[8192*4];
+    int ec_len = 0;
+    int ec_before = 0;
+    double worst_db = 0.0;
 
     memset(&call_hybrid, 0, sizeof(call_hybrid));
     memset(&answer_hybrid, 0, sizeof(answer_hybrid));
@@ -164,6 +237,8 @@ static int run_duplex(int alaw,
         || v32bis_set_supported_bit_rates(answer, answer_rates) != 0
         || (!tones  &&  (v32bis_set_round_trip_symbols(call, nt, mt) != 0
                          || v32bis_set_round_trip_symbols(answer, nt, mt) != 0))
+        || v32bis_set_ec_training_symbols(call, call_ec_train) != 0
+        || v32bis_set_ec_training_symbols(answer, answer_ec_train) != 0
         || v32bis_set_echo_canceller(call, echo_can) != 0
         || v32bis_set_echo_canceller(answer, echo_can) != 0
         || (tones ? v32bis_start_tones(call) : v32bis_start_startup(call)) != 0
@@ -179,8 +254,22 @@ static int run_duplex(int alaw,
        not finish has stalled rather than run short. */
     for (block = 0;  block < 500;  block++)
     {
+        ec_before = v32bis_tx_in_ec_training(call);
         v32bis_tx(call, call_audio, 160);
         v32bis_tx(answer, answer_audio, 160);
+        /* The phase can change part way through a block, and the block it
+           changes in carries either silence or the conditioning signal's S,
+           whose whole content is lines at exactly the three frequencies
+           Note 3 is talking about.  Measuring it would be measuring the
+           wrong signal, so only blocks that both began and ended inside the
+           sequence are kept. */
+        if (ec_before  &&  v32bis_tx_in_ec_training(call))
+        {
+            for (i = 0;  i < 160  &&  ec_len < (int) (sizeof(ec_audio)/sizeof(ec_audio[0]));  i++)
+                ec_audio[ec_len++] = call_audio[i];
+            /*endfor*/
+        }
+        /*endif*/
         bearer(call_audio, to_answer, 160, alaw);
         bearer(answer_audio, to_call, 160, alaw);
         if (delay > 0)
@@ -214,6 +303,33 @@ static int run_duplex(int alaw,
 
     if (!v32bis_startup_complete(call)  ||  !v32bis_startup_complete(answer))
         failed = 1;
+    if (ec_len > 0)
+    {
+        /* 6, Note 3's spectral constraint, and its 8192 symbol interval
+           ceiling, on the signal that actually went out. */
+        if (!note3_spectrum_ok(ec_audio, ec_len, &worst_db))
+        {
+            fprintf(stderr,
+                    "  Note 3 echo training spectrum: worst 6 ms window is only "
+                    "%.2f dB, needs 1 dB\n",
+                    worst_db);
+            failed = 1;
+        }
+        /*endif*/
+        if (ec_len > (int) (8192*10.0/3.0))
+        {
+            fprintf(stderr,
+                    "  Note 3 echo training ran %d samples, over the 8192 symbol "
+                    "interval ceiling\n",
+                    ec_len);
+            failed = 1;
+        }
+        /*endif*/
+        printf("    Note 3 echo training: %d samples on the line, worst 6 ms "
+               "out-of-band margin %.1f dB\n",
+               ec_len, worst_db);
+    }
+    /*endif*/
     if (v32bis_current_bit_rate(call) != expected_rate
         || v32bis_current_bit_rate(answer) != expected_rate)
         failed = 1;
@@ -316,24 +432,33 @@ static int hybrid_sweep(int scale, int delay)
     on = run_duplex(0,
                     V32BIS_RATE_14400 | V32BIS_RATE_12000,
                     V32BIS_RATE_14400 | V32BIS_RATE_12000,
-                    14400, 0, 0, 0, delay, scale, 1);
+                    14400, 0, 0, 1, delay, scale, 1, 2048, 2048);
     off = run_duplex(0,
                      V32BIS_RATE_14400 | V32BIS_RATE_12000,
                      V32BIS_RATE_14400 | V32BIS_RATE_12000,
-                     14400, 0, 0, 0, delay, scale, 0);
+                     14400, 0, 0, 1, delay, scale, 0, 2048, 2048);
     printf("  hybrid sweep: return loss %.1f dB, delay %d -> canceller on %s, off %s\n",
            -20.0*log10(scale/100.0) + 12.6,
            delay,
            (on == 0) ? "pass" : "FAIL",
            (off == 0) ? "pass" : "FAIL");
-    /* Only the canceller's own arm is graded, and only where it has been
-       measured to work.  Below about 30 dB of return loss neither arm
-       carries the call: clause 6 Note 3's echo canceller training period,
-       where the far end is quiet and the near end can see its own echo
-       alone, does not exist in this tree, so the canceller has to converge
-       in continuous double talk against an echo above the far end signal,
-       and it does not. */
-    return (scale <= 12  &&  on != 0) ? 1 : 0;
+    /* The canceller's arm has to carry the call at every return loss in the
+       sweep.  Below about 30 dB the bare receiver cannot, and that failure
+       is the control: without it a canceller that did nothing at all would
+       pass every row here. */
+    if (on != 0)
+        return 1;
+    /*endif*/
+    if (scale >= 50  &&  off == 0)
+    {
+        fprintf(stderr,
+                "  the hybrid at %.1f dB return loss is not disturbing the call, "
+                "so the canceller rows prove nothing\n",
+                -20.0*log10(scale/100.0) + 12.6);
+        return 1;
+    }
+    /*endif*/
+    return 0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -375,9 +500,9 @@ int main(int argc, char *argv[])
     {
         if (one >= 0  &&  (int) i != one)
             continue;
-        if (run_duplex(0, cases[i].call_rates, cases[i].answer_rates, cases[i].expected, 0, 0, 0, 0, 0, 1) != 0)
+        if (run_duplex(0, cases[i].call_rates, cases[i].answer_rates, cases[i].expected, 0, 0, 0, 0, 0, 1, 2048, 2048) != 0)
             bad++;
-        if (run_duplex(1, cases[i].call_rates, cases[i].answer_rates, cases[i].expected, 0, 0, 0, 0, 0, 1) != 0)
+        if (run_duplex(1, cases[i].call_rates, cases[i].answer_rates, cases[i].expected, 0, 0, 0, 0, 0, 1, 2048, 2048) != 0)
             bad++;
     }
     /* A preset NT/MT pair must not break the dialogue when the tone phases
@@ -393,31 +518,46 @@ int main(int argc, char *argv[])
                        0,
                        0,
                        0,
-                       1) != 0)
+                       1,
+                       2048,
+                       2048) != 0)
             bad++;
         /* And the whole of clause 6, tone phases included, in both laws:
            NT and MT are measured here, not supplied. */
         if (run_duplex(0,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600,
-                       14400, 0, 0, 1, 0, 0, 1) != 0)
+                       14400, 0, 0, 1, 0, 0, 1, 2048, 2048) != 0)
             bad++;
         if (run_duplex(1,
                        V32BIS_RATE_9600 | V32BIS_RATE_7200,
                        V32BIS_RATE_14400 | V32BIS_RATE_9600,
-                       9600, 0, 0, 1, 0, 0, 1) != 0)
+                       9600, 0, 0, 1, 0, 0, 1, 2048, 2048) != 0)
             bad++;
         /* And with a real one-way delay, which is the whole point of NT and
            MT: both must grow by the round trip. */
         if (run_duplex(0,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000,
-                       14400, 0, 0, 1, 80, 0, 1) != 0)
+                       14400, 0, 0, 1, 80, 0, 1, 2048, 2048) != 0)
             bad++;
         if (run_duplex(0,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000,
-                       14400, 0, 0, 1, 240, 0, 1) != 0)
+                       14400, 0, 0, 1, 240, 0, 1, 2048, 2048) != 0)
+            bad++;
+        /* Note 3 makes the sequence optional, so a conformant far end may
+           send none, or a different amount, and each side has to cope with
+           whatever the other does.  One row each way. */
+        if (run_duplex(0,
+                       V32BIS_RATE_14400 | V32BIS_RATE_12000,
+                       V32BIS_RATE_14400 | V32BIS_RATE_12000,
+                       14400, 0, 0, 1, 80, 0, 1, 0, 2048) != 0)
+            bad++;
+        if (run_duplex(1,
+                       V32BIS_RATE_14400 | V32BIS_RATE_12000,
+                       V32BIS_RATE_14400 | V32BIS_RATE_12000,
+                       14400, 0, 0, 1, 80, 0, 1, 8192, 0) != 0)
             bad++;
         /* And over a 2-wire hybrid, which is what V.32bis actually runs
            on: each side's own transmit returns into its own receiver, and

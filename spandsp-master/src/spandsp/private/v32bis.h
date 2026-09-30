@@ -86,6 +86,10 @@ struct v32bis_state_s
        are queued here as they go out and consumed one per received sample. */
     bool echo_can_enabled;
     int16_t echo_ref[V32BIS_ECHO_REF_LEN];
+    /* One bit per reference sample: was the far end known to be silent when
+       this sample went out?  Clause 6 Note 3's training sequence is the only
+       place that is true, and it is what lets the canceller adapt quickly. */
+    uint8_t echo_ref_quiet[V32BIS_ECHO_REF_LEN];
     int32_t echo_ref_in;
     int32_t echo_ref_out;
     int32_t echo_ref_count;
@@ -146,6 +150,18 @@ struct v32bis_state_s
     uint16_t tx_word;
     uint32_t tx_trn_reg;
     int tx_trn_diff;
+    /* ITU-T V.32bis 6, Note 3.  The optional echo canceller training
+       sequence, sent immediately before a receiver conditioning signal at
+       the two points in clause 6 where the far end is known to be silent. */
+    int ec_train_symbols;
+    int ec_train_remaining;
+    uint32_t ec_train_reg;
+    bool tx_far_end_quiet;
+    bool echo_fast_adapt;
+    /* Short term power of the transmit reference and of the received signal,
+       for the double talk test that gates the fast step. */
+    double echo_ref_pow;
+    double echo_rx_pow;
     int nt_symbols;
     int mt_symbols;
     int rx_hold_symbols;

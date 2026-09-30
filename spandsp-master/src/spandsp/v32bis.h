@@ -212,6 +212,19 @@ SPAN_DECLARE(int) v32bis_start_startup(v32bis_state_t *s);
     \return 0 on success, or -1. */
 SPAN_DECLARE(int) v32bis_start_tones(v32bis_state_t *s);
 
+/*! Set how many symbol intervals of ITU-T V.32bis clause 6 Note 3's optional
+    echo canceller training sequence to transmit, 0 for none.
+    \param s The modem context.
+    \param symbols Symbol intervals, at most 8192 as Note 3 requires.
+    \return 0 for OK. */
+SPAN_DECLARE(int) v32bis_set_ec_training_symbols(v32bis_state_t *s, int symbols);
+
+/*! Is the modem transmitting ITU-T V.32bis clause 6 Note 3's optional echo
+    canceller training sequence right now?
+    \param s The modem context.
+    \return True while that sequence is on the line. */
+SPAN_DECLARE(bool) v32bis_tx_in_ec_training(v32bis_state_t *s);
+
 /*! Enable or disable the near end echo canceller in the sample path.
     \param s The modem context.
     \param enabled True to cancel.

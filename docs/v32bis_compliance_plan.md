@@ -323,8 +323,7 @@ is explicit that LMS adaption "can go seriously wrong" on a highly
 correlative transmit signal, and clause 6's tones are the worst case there
 is: state A repeated is a pure 1800 Hz tone and alternating A and C is a pair
 of pure tones.  The estimate is still subtracted throughout; only the
-adaption stands down, which is the same point clause 6 Note 3 places its
-optional echo canceller training sequence.
+adaption stands down.
 
 **The vendored canceller's adaption step was broken, and that is worth more
 than the wiring.**  `modem_echo_can_update()` computed a transmit power
@@ -369,13 +368,103 @@ A peak rather than a plateau, which is what says the adaption is doing the
 work rather than the 31 dB result being an acquisition coin flip.  The 31 dB
 rows are asserted; the ones below are printed and not graded.
 
-**Open, and now well posed: below about 30 dB of return loss neither arm
-carries the call.**  The canceller has to converge in continuous double talk
-against an echo that is above the far end signal, and it does not.  The
-missing piece is Note 3's training period -- an interval in which the far end
-is quiet and the near end can see its own echo alone -- which nothing in this
-tree generates.  A `V32BIS_ECHO_CAN=0` control belongs beside any attempt at
-it, because an echo canceller that is not converging is worse than none.
+## Clause 6 Note 3: the echo canceller training sequence
+
+Note 3 is what makes the canceller converge, and without it the canceller was
+useless below about 30 dB of hybrid return loss.  The reason is structural: a
+V.32bis modem is in double talk for essentially the whole call, so the
+adaption's error term is dominated by the far end signal, which is
+uncorrelated with the reference and is typically above the echo.  There is
+no step size that fixes that.  What fixes it is an interval in which the far
+end is silent, and clause 6 provides exactly two.
+
+**Read where the Recommendation puts its three "(see Note 3 below)"
+references, because they are the whole design.**  6.1: "After this period
+[NT] has expired (see Note 3 below), the modem shall transmit the receiver
+conditioning signal" -- and the answer modem ceased transmitting when it
+detected that NT-long S, so it is silent.  6.2: "cease transmitting for a
+period of 16 symbol intervals and then (see Note 3 below) transmit the
+receiver conditioning signal" -- and the call modem has been silent since its
+own second phase reversal.  6.2 again, on the receive side: "if an incoming S
+sequence persists, or when an S sequence reappears (see Note 3 below)", which
+is the answer modem being told to tolerate the call modem's optional sequence
+arriving before its S.  So both training windows are points at which the far
+end is quiet **because of what the tone phases and the rate signals already
+made it do**, and the third reference is the interop obligation.
+
+`V32BIS_TX_PHASE_EC_TRAIN` sits at those two points.  `V32BIS_EC_TRAIN` sets
+its length in symbol intervals, 0 for none -- Note 3 makes the sequence
+optional, so 0 is a conformant modem and the far end must cope either way,
+which `v32bis_duplex_test` covers with an asymmetric row each way (one end
+sending none against the other sending 2048, and one sending the full 8192
+against the other sending none).  The default is 2048, which at 2400 baud is
+853 ms: Note 4 warns that a G.165 network echo canceller needs 650 ms.
+
+**The signal.**  Note 3 says it "need not be defined in detail", then
+constrains it three ways, and all three are met and checked rather than
+asserted.  It must keep energy on the line, to hold network echo control
+devices disabled.  It must not exceed 8192 symbol intervals.  And its power
+in the three 200 Hz bands centred at 600, 1800 and 3000 Hz, summed, must be
+at least 1 dB below the power in the rest of the bandwidth, averaged over any
+6 ms interval.  Those three frequencies are the carrier and the two lines S
+and S-bar put on the line at 1800 +/- 1200 Hz, so what is being asked for is
+a signal with no spectral lines -- one the far end cannot mistake for Segment
+1 or 2 of the 5.2 conditioning signal.  Scrambled data on the 4 point
+training constellation has none; it is the same construction as TRN, which
+Note 3's own first sentence says is suitable.  Measured on the transmit
+audio with a 48 sample (6 ms) Goertzel at each of the three frequencies, the
+worst window has **4.8 dB** of margin against the 1 dB required, and the
+Goertzel's main lobe is wider than 200 Hz so that reading is conservative.
+
+**Windowing that measurement is the trap.**  The transmit phase changes part
+way through a block, and the block it changes in carries either silence or
+the conditioning signal's S -- whose entire content is lines at exactly the
+three frequencies in question.  Measuring a boundary block reported 0.0 dB on
+a sequence that is actually 4.8 dB clear, which reads as a conformance
+failure and is an instrument failure.  Only blocks that both began and ended
+inside the sequence are kept.
+
+**The step is switched by a tag that travels with the reference sample, not
+by the wall clock.**  What matters is whether the far end was silent when the
+sample that is echoing *now* went out, so each entry in the transmit
+reference FIFO carries a bit saying so, and the whole of the echo's delay
+spread is covered without guessing at the round trip.  The step is 1/8 while
+that bit is set and 1/65536 otherwise.
+
+**The tag is confirmed against the line, and taking it at face value is what
+made this dangerous.**  It says "we believe clause 6 has the far end silent
+here"; if the belief is wrong the fast step is applied to an error term that
+is mostly far end signal, which diverges.  It was wrong immediately: with the
+tone phases skipped, NT is zero, so 6.1's S is zero symbols long, the answer
+modem never ceases, and the call modem transmits its training sequence into a
+full strength R1.  Every hybrid row then failed with the canceller in and
+passed with it out.  A hybrid cannot return more than a few dB below what was
+sent, so received power more than 6 dB above the reference power now vetoes
+the fast step whatever the script believes.
+
+**Result.**  The canceller's estimate now tracks the injected hybrid to a
+tenth of a dB -- -13.0 dB at 12.6 dB return loss, -18.8 at 18.6, -24.8 at
+24.6, -31.2 at 31.0 -- and over the sweep of return loss against channel
+delay the canceller carries the call in **15 of 15** rows against **6 of 15**
+without it, with the 12.6 to 24.6 dB rows failing 9 of 9 with the canceller
+out.  Those are the rows the sweep asserts.
+
+**One defect fell out of the hybrid rows and it is not the canceller's.**
+6.1 has the call modem "conditioned to detect ... one of two incoming tones
+at frequencies 600 +/- 7 Hz and 3000 +/- 7 Hz", and only "subsequently to
+detect a phase reversal in that tone".  The dwell that phrasing implies was
+not there -- 6.2 spells one out for the answer modem's 1800 Hz tone and the
+call side had none -- so over a hybrid this modem's own state A leaked enough
+into the 600 and 3000 Hz detectors to be taken for the far end's tone, and
+then for a reversal in it, **before the far end's tone had arrived**: NT came
+out at 151 and MT at -38.  It failed with the canceller out as well as in,
+which is what said it was not the canceller's.  The call side now requires
+the same 64 symbol periods of presence, which cannot miss a real reversal
+because 6.2 has the answer modem send at least 128 symbol intervals of
+alternating A and C before its first one.  The side effect is that NT is now
+one symbol high rather than exact, as MT already was; the differences between
+delays stay exact, so it is the origin that moved, and both remain inside
+6.1/6.2's +/- 2.
 
 `make v32bis-test` runs the native smoke test plus all Python reference,
 SpanDSP-comparison, waveform, and datapump tests.
@@ -527,12 +616,12 @@ Exit criteria:
 ### Phase 4: Full-Duplex Echo-Cancelled Operation
 
 Status: the whole of clause 6, tone phases included, completes and exchanges
-data over a clean bearer with a real channel delay (`v32bis_duplex_test`);
-the echo canceller is in the sample path and carries the call at 31 dB of
-hybrid return loss, where without it the call fails; below ~30 dB neither
-arm works, and Note 3's training period is what is missing
+data over a clean bearer with a real channel delay (`v32bis_duplex_test`),
+and over a 2-wire hybrid down to 12.6 dB return loss with the echo canceller
+and clause 6 Note 3's training sequence, where without the canceller the call
+fails from about 30 dB down
 
-- Echo canceller
+- Echo canceller. Done, with Note 3's training sequence.
 - Duplex startup sequencing
 - Robustness under realistic line models
 
@@ -540,7 +629,7 @@ Exit criteria:
 
 - Back-to-back duplex simulation completes training and exchanges data. Met
   for a clean bearer with a real one-way channel delay, and for a 2-wire
-  hybrid at 31 dB or better return loss; not met for a poorer hybrid.
+  hybrid down to 12.6 dB return loss, which is the worst modelled.
 
 ### Phase 5: Rate Renegotiation and V.32 Interop Boundaries
 
