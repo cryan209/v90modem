@@ -21,22 +21,37 @@
  *   write:  00 <index> <value>          (silent)
  *   read:   80 <index> 00               then GET_ENCAPSULATED_RESPONSE, 1 byte
  *
- * Register 5 bit 3 (0x08) powers the analogue RECEIVE path: with it clear the
- * codec's input is railed at -32768 at every sample rate, and with it set the
- * codec delivers a real signal.  Deterministic and repeatable in both
- * directions, with and without a line.
+ * Register 5 is the hook and the receive path, two separate bits:
  *
- * IT IS NOT THE HOOK.  Against a VG224 FXS port -- a port that supplies loop
- * current and dial tone -- setting it produces mains hum and no dial tone, and
- * no register in 0x01-0x3b changes when it flips.  The hook relay is not
- * identified; do not read --hook as seizing the line.  Two other bits found on
- * the way: register 5 bit 0 re-rails the codec even with bit 3 set (a reset or
- * override), and register 0x0a = 1 gives exact digital SILENCE rather than the
- * rail (a mute -- the two are distinguishable).
+ *   bit 0 (0x01)  OFF-HOOK.  Closes the loop.  Verified against a VG224 FXS
+ *                 port by the dial tone it draws: 350.0 + 440.0 Hz at equal
+ *                 level, 64% of the capture's power, -15.9 dBFS, with the mains
+ *                 hum that dominates on-hook pushed 53 dB down because loop
+ *                 current drops the line impedance.
+ *   bit 3 (0x08)  Receive path / on-hook monitor.  On-hook with a line it gives
+ *                 hum at -38 dBFS and NO dial tone; with no line at all it
+ *                 gives the codec's own -63.8 dBFS floor.  Not the hook.
+ *
+ * With NO line connected, bit 0 rails the input at -32768 -- there is nothing
+ * to draw current from -- which is why it first looked like a reset.  Read
+ * register 0x1d before concluding anything (below).
+ *
+ * Register 0x1d is an analogue LINE SENSE, not a bit field: 0x00 with no pair
+ * connected, ~217 (0xd8-0xda, +/-1 of measurement jitter) on-hook with a pair,
+ * ~250 off-hook.  It is a far better instrument than a capture -- one control
+ * request, no CoreAudio -- and 0x00 is the device telling you the pair is not
+ * connected.  Check it first.
+ *
+ * bRequest 0x11 to interface 0 with wValue 0/1/2 and no data (the "wIndex = 0"
+ * family) is simply another route to WRITE REGISTER 5: wValue 1 leaves reg 5 at
+ * 0x01.  wValue 2 reads back as 0x00 (bit 1 is not implemented) and anything
+ * >= 3 stalls, which is also what the driver's other-PID hook path uses.
  *
  * Registers 0x10, 0x1a, 0x1f, 0x1e carry the per-country DAA configuration.
  * usm56.reg's HardwareInitBB is the one-byte profile KEY into the driver's own
- * table (NZ 0x3e -> a0/c0/00/00), not the four values themselves.
+ * table (NZ 0x3e -> a0/c0/00/00), not the four values themselves.  Registers
+ * 0x0f (a 3-bit field) and 0x11 move nothing on the line; 0x0a = 1 is a mute,
+ * giving exact digital silence rather than the rail.
  *
  * Other opcodes the driver emits and this tool does not model: 0x02 (a 9-byte
  * windowed form), 0x10|n, 0x90, 0xd0.  See docs/apple_usb_modem_sm56.md.
@@ -392,22 +407,29 @@ static int cmd_write(const char *sidx, const char *sval)
     return 0;
 }
 
-static int cmd_hook(const char *what)
+/* bit is 0x01 for --hook (loop closure) or 0x08 for --monitor (receive path). */
+static int cmd_hook_bit(const char *what, unsigned char bit, const char *name)
 {
-    int on = !strcmp(what, "on"), v;
+    int on = !strcmp(what, "on"), v, sense;
 
     if (strcmp(what, "on") && strcmp(what, "off")) {
-        fprintf(stderr, "--hook takes on or off\n");
+        fprintf(stderr, "%s takes on or off\n", name);
         return 1;
     }
     if (claim_command_path() < 0) { fprintf(stderr, "claim failed\n"); return 1; }
     v = reg_read(5);
     if (v < 0) { fprintf(stderr, "cannot read register 5\n"); return 1; }
-    v = on ? (v | 0x08) : (v & ~0x08);
+    v = on ? (v | bit) : (v & ~bit);
     if (reg_write(5, (unsigned char)v) < 0) { fprintf(stderr, "write rejected\n"); return 1; }
-    usleep(50000);
-    printf("hook %s: register 5 = 0x%02x\n", what, reg_read(5) & 0xff);
-    printf("now capture: ./apple_usb_modem_audio capture 9600 2\n");
+    usleep(500000);
+    sense = reg_read(0x1d);
+    printf("%s %s: register 5 = 0x%02x, line sense 0x1d = 0x%02x  (%s)\n",
+           name, what, reg_read(5) & 0xff, sense & 0xff,
+           sense < 0       ? "unreadable" :
+           sense == 0x00   ? "NO PAIR CONNECTED" :
+           sense >= 0xf0   ? "off-hook" :
+           sense >= 0xc0   ? "on-hook, pair present" : "unexpected");
+    printf("now capture: ./apple_usb_modem_audio capture 9600 3\n");
     return 0;
 }
 
@@ -417,7 +439,7 @@ static void usage(const char *argv0)
         "usage: %s [--descriptors | --configure | --sweep | --get |\n"
         "           --send \"<hex bytes>\" | --notify [seconds] |\n"
         "           --regs [idx ...] | --read <idx> | --write <idx> <val> |\n"
-        "           --hook on|off]\n"
+        "           --hook on|off | --monitor on|off]\n"
         "\n"
         "  --descriptors  (default) dump the configuration, interfaces, endpoints\n"
         "                 and the audio rate list; does not claim anything\n"
@@ -432,9 +454,10 @@ static void usage(const char *argv0)
         "  --read         read one register, hex index\n"
         "  --write        write one register and read it back; WRITES to the\n"
         "                 line interface\n"
-        "  --hook         set or clear register 5 bit 3, which powers the analogue\n"
-        "                 RECEIVE path; with it off the codec reads -32768.  This\n"
-        "                 is NOT the hook -- it does not seize the line\n",
+        "  --hook         go off-hook or on-hook: register 5 bit 0, the loop\n"
+        "                 closure.  Off-hook on a live line draws dial tone\n"
+        "  --monitor      register 5 bit 3, the receive path / on-hook monitor.\n"
+        "                 Not the hook; it does not seize the line\n",
         argv0);
 }
 
@@ -495,7 +518,9 @@ int main(int argc, char **argv)
                                                            : (usage(argv[0]), 1);
         else if (!strcmp(mode, "--write"))  rc = (argc > 3) ? cmd_write(argv[2], argv[3])
                                                            : (usage(argv[0]), 1);
-        else if (!strcmp(mode, "--hook"))   rc = (argc > 2) ? cmd_hook(argv[2])
+        else if (!strcmp(mode, "--hook"))   rc = (argc > 2) ? cmd_hook_bit(argv[2], 0x01, "hook")
+                                                           : (usage(argv[0]), 1);
+        else if (!strcmp(mode, "--monitor")) rc = (argc > 2) ? cmd_hook_bit(argv[2], 0x08, "monitor")
                                                            : (usage(argv[0]), 1);
         else { usage(argv[0]); rc = 1; }
     }

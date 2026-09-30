@@ -28,26 +28,28 @@
  *  - Initialise min/max from the first sample.  Starting max at 0 on
  *    all-negative data reports max = 0 and invents a zero sample.
  *
- * THE ANALOGUE PATH HAS A POWER SWITCH, AND IT IS NOT THE CONFIGURATION.  With
- * it off the input is a CONSTANT at negative full scale, varying with sample
- * rate (-30069 at 7200, -31703 at 8000, -32768 at 9600 and above): a fill
- * pattern would not vary with rate, so a real ADC and filter chain are running
- * with their input at a rail.  Turn it on first:
+ * THE ANALOGUE PATH MUST BE TURNED ON FIRST, and setting the configuration is
+ * not enough.  With register 5 at 0 the input is a CONSTANT at negative full
+ * scale, varying with sample rate (-30069 at 7200, -31703 at 8000, -32768 at
+ * 9600 and above) -- a fill pattern would not vary with rate, so a real ADC and
+ * filter chain are running with their input at a rail.  Two bits matter:
  *
- *     ./apple_usb_modem_probe --hook on
+ *     ./apple_usb_modem_probe --monitor on    (reg 5 bit 3: on-hook monitor)
+ *     ./apple_usb_modem_probe --hook on       (reg 5 bit 0: OFF-HOOK)
  *
- * which sets bit 3 of the device's register 5.  The same capture then reads
- * -63.8 dBFS of noise on +657 counts of DC, repeatably, with nothing in the tel
- * jack at all.  So a railed capture means the switch is off, NOT that the line
- * is missing -- an earlier note here said the two could not be separated
- * without a line and that was wrong.
+ * Measured at 9600 Hz against a VG224 FXS port: monitor only gives -38 dBFS of
+ * which 90% is mains hum below 300 Hz and no dial tone; off-hook gives
+ * -15.9 dBFS with 350.0 + 440.0 Hz at equal level carrying 64% of the power
+ * (North American dial tone) and the hum 53 dB down, because loop current drops
+ * the line impedance.
  *
- * That bit is NOT the hook, though: on a VG224 FXS port it yields -56.4 dBFS
- * that is 90% mains hum below 300 Hz and no dial tone.  So a capture through
- * this tool is of the pair, not of a seized line.
+ * So a railed capture means register 5 is 0, not that the line is missing --
+ * and with no line at all, bit 0 rails it too, because there is nothing to draw
+ * current from.  Read the probe's line sense (register 0x1d: 0x00 = no pair,
+ * ~217 = on-hook, ~250 = off-hook) before reading anything into a capture.
  *
- * -63.8 dBFS is the codec's own floor on an open line.  It is not a measurement
- * of a bearer.
+ * -63.8 dBFS, the monitor's reading with no line, is the codec's own floor.  It
+ * is not a measurement of a bearer.
  *
  * Build: make apple_usb_modem_audio
  */

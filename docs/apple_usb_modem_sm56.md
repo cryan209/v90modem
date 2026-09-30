@@ -261,9 +261,10 @@ the same INF:
 9db31: push 2 ; call SendCmd(0x22009c)  <- the other PIDs, a different scheme
 ```
 
-and the mirror at `0x9db43` with `and eax, 0xfffffff7`.  The setting side also
-frees the pending buffers and arms a ~10 ms timer with callback `0x9d1e3`,
-which is what a hook transition needs and the clearing side does not have.
+and the mirror at `0x9db43` with `and eax, 0xfffffff7`.  **That pair is the
+receive path, NOT the hook** -- see the live results below; bit 3 is the on-hook
+monitor and bit **0** is the loop closure.  The `190D:*` branch's
+`SendCmd(0x22009c)` reaches register 5 too, by the other route described below.
 
 **How they are reached, because two obvious searches both come up empty.**
 Neither function has a direct caller and neither has a relocation pointing at
@@ -312,58 +313,83 @@ and so cannot be carried by these commands: the channel does arbitrary
 single-register writes, and a blob is delivered as a run of them.  The three
 larger blobs (32, 500, 229 bytes) are still unplaced.
 
-## With a line connected: the receive path is on the pair, the hook is not found
+## With a line connected: off-hook, and the dial tone proves it
 
-The jack was connected to a **Cisco VG224 FXS port**, i.e. a port that supplies
-loop current and dial tone, and the whole register space was read in both hook
-states.  Three results.
+**The first attempt at this was worthless because the pair was not actually
+connected**, and everything below supersedes it.  With a real pair into a Cisco
+VG224 FXS port:
 
-**The codec really is on the pair.**  Off-hook, 3 s at 9600 Hz:
-
-```
-no line:    RMS excl. DC 21.2 = -63.8 dBFS   span 168 counts
-with line:  RMS excl. DC 49.5 = -56.4 dBFS   span 357 counts
-```
-
-and the 7.4 dB is **mains hum, not signal**: peaks at 49.9 / 100.1 / 150.0 /
-200.2 / 250.1 Hz, 90% of the power below 300 Hz, 1.3% in 2000-3400 Hz.  So the
-receive path reaches tip and ring.
-
-**But nothing seizes the line.**  No dial tone at any point, and the full scan
-of 0x01-0x3b differs between the two hook states in **register 5 alone** -- no
-line-sense, ring-detect or loop-current bit moves anywhere in the space.  A
-seized FXS port would give dial tone, shift the DC operating point as loop
-current started, and drop the hum as the line impedance fell.  None of that
-happens.  Tried and refuted, each with the audio as the instrument:
-
-- the NZ DAA profile written first, in the driver's own order (no change);
-- the driver's own `10 00 00` and `10 00 08` session commands, both accepted
-  with a notification (no change);
-- every other bit of register 5 one at a time (no change), **except bit 0
-  (0x01), which re-rails the codec even with bit 3 set** -- a reset or override;
-- register 0x0a = 1, the other 1/0 pair in the driver (`0x9db82` / `0x9dba2`),
-  which produces **exact digital silence rather than the -32768 rail** -- so it
-  is a mute, and the two failure modes are distinguishable.
-
-So **"bit 3 set = off-hook" is withdrawn.**  What the codec A/B proves is that
-bit 3 powers the analogue receive path; the hook relay is elsewhere and is not
-identified.  The earlier hedge ("a reading, not a proof") was the right one and
-it has gone the other way.
-
-**The register map, on-hook, everything non-zero** (0x00 and 0x3c upward do not
-answer, so the space is 0x01-0x3b):
+**Register 5 bit 0 (0x01) is the hook.**  Setting it seizes the line, and the
+ground truth is the tone the exchange returns, resolved over a 4 s capture at
+9600 Hz:
 
 ```
-01=01  02=83  08=02  09=0f  0b=14  0c=40  0d=18  0e=02
-11=0c  13=02  16=96  17=2d  18=19  19=0a  1b=07  1f=20
+350.0 Hz   33.2% of power    0.0 dB
+440.0 Hz   30.9% of power   -0.3 dB      RMS -15.9 dBFS
+ 50.0 Hz    0.0%          -53.5 dB
 ```
 
-**Next step, and it is the method this project already has working for the
-Conexant part:** stop guessing at bits and run the real driver, capturing the
-bus (`docs/hsf_usb_daa.md`, and the Debian guest on tower that hosts the
-vendor stack).  One off-hook under the vendor driver names the command
-outright, where a blind sweep of a DAA's register file on a live line is both
-slow and the wrong shape of experiment.
+350 + 440 Hz at equal level is North American dial tone (this VG224 is on US
+tones), and **the mains hum that dominates the on-hook capture is now 53 dB
+down** -- loop current closes the loop and drops the line impedance, which is
+exactly the corroboration a real seizure should come with.  Clearing bit 0
+releases it.
+
+**Register 5 bit 3 (0x08) is the receive path / on-hook monitor.**  The codec
+A/B that first found it still holds, but it does not seize anything: on-hook
+with a line it gives hum at -38 dBFS and no dial tone, and with no line the
+codec's own -63.8 dBFS floor.  Mapped against dial tone, register 5 reads:
+
+| reg 5 | line sense 0x1d | capture |
+|---|---|---|
+| 0x00 | 217 | railed at -32768 |
+| 0x01 | 250 | **-16.0 dBFS, 99.8% in 300-600 Hz, dial tone** |
+| 0x08 | 217 | -38.1 dBFS, 90% below 300 Hz, hum only |
+| 0x09 | 250 | dial tone, as 0x01 |
+
+**With no line, bit 0 rails the input** -- there is nothing to draw current from
+-- which is exactly why the no-line session read it as a reset or override.  The
+two earlier readings were each self-consistent and both incomplete.
+
+### Register 0x1d is an analogue line sense, and it is the instrument to use
+
+Not a bit field: **0x00 with no pair connected, ~217 (0xd8-0xda, +/-1 of
+measurement jitter) on-hook with a pair, ~250 off-hook.**  One control request
+against a whole CoreAudio capture, so use it in preference to listening.  It is
+also the check that would have saved the first session: **0x00 is the device
+telling you the pair is not connected.**
+
+It is NOT a hook mirror.  It was first seen to differ between an on-hook and an
+off-hook scan and that was coincidence -- polled undisturbed it wanders
+0xd8/0xd9/0xda, and the two scans caught different samples of the same jitter.
+One observation of a difference is not a measurement of a correlation.
+
+### The `wIndex = 0` family is another route to register 5
+
+`bRequest 0x11` to interface 0, parameter in `wValue`, no data -- the family this
+project had never sent live -- **writes register 5**: `wValue 1` leaves it at
+0x01, `wValue 2` reads back 0x00 because bit 1 is not implemented, and anything
+from 3 up stalls.  That is also what the driver's `190D:*` hook path sends
+(`SendCmd(2)` / `SendCmd(0)` through IOCTL `0x22009c`), so the two branches reach
+the same register by different transports rather than being different schemes.
+It does reset the rest of register 5, so it and a read-modify-write of the
+register do not compose -- pick one.
+
+### What does nothing, so it need not be re-tried
+
+The driver only ever writes **eight** registers -- 5, 0x0a, 0x0f, 0x10, 0x11,
+0x1a, 0x1e, 0x1f -- and with the line sense as the instrument, all but register
+5 leave the line untouched: 0x0f swept 0-7 (a 3-bit field, so the likeliest
+shape for a relay code), 0x11 across every writable bit (0, 1 and 4 are read
+only), the 0x10/0x1a/0x1f/0x1e country profile, and `0x0a = 1`, which mutes to
+exact digital silence rather than the rail -- so a mute and an unpowered path
+are distinguishable.  The driver's `10 00 00` and `10 00 08` session commands
+are accepted and change nothing on the line.
+
+**And the 9-byte `0x2200b4` form is dead code**: the constant appears in
+`utlamot.sys` and in nothing else -- not `USmSerial.sys`, not `sm56.dll`, not
+`usm56hlpr.exe` -- so nothing in the shipped stack ever sends it, and it is not
+how this part's DAA is programmed.
 
 **Other opcodes remain unnamed.**  `0x2200c4`'s first sub-form emits
 `10 00 <n&0x0f>` and is what `USmSerial.sys` calls with 0 and 8 around session
@@ -428,13 +454,18 @@ DTE rates.  Rate selection is in the binary.
 9. **A 2-byte command is stalled.**  Only 3- and 9-byte bodies are accepted, so
    the read is `80 <idx> 00`; the earlier note that observed lengths were
    "2, 3, 9" counted `GET_ENCAPSULATED_RESPONSE`'s 2-byte IN as a command.
-10. **zsh does not word-split an unquoted `$var`** (it does split `$(...)`).
+10. **Read register 0x1d before believing any line measurement.**  A whole
+   session was spent on a pair that was not connected, concluding that bit 3
+   was not the hook and that the hook was unidentified -- both wrong, from
+   measurements that were internally consistent.  0x1d reads 0x00 when there is
+   no pair, which is the device saying so.
+11. **zsh does not word-split an unquoted `$var`** (it does split `$(...)`).
    `--read $R` with 59 indices in `R` therefore read ONE register whose index
    parsed out of `strtoul("01 02 03 ...")`, printed one line and exited 0 --
    which read as "the device stops answering after the first read" and briefly
    became a finding about the hardware.  Use `${=R}` or inline the command
    substitution.
-11. **An IOCTL number does not name a request.**  `utlamot.sys` carries the
+12. **An IOCTL number does not name a request.**  `utlamot.sys` carries the
    IOCTL through a work queue into `FUN_0001316a`, which is where `bRequest`,
    `wValue`, `wIndex` and the length are chosen, and one IOCTL can have two
    sub-forms keyed on the body's first byte (`0x2200c4` does).  Reading the
@@ -443,12 +474,15 @@ DTE rates.  Rate selection is in the binary.
 
 ## Open
 
-- **The hook.**  Bit 3 of register 5 powers the analogue receive path and does
-  NOT seize the line (measured against a VG224 FXS port).  Nothing else tried
-  does either.  Settle it by capturing the bus under the vendor driver rather
-  than by sweeping registers on a live line.
-- **What the non-zero registers mean.**  None of them moves when bit 3 does, so
-  ring and loop sense are either elsewhere or gated on a real seizure.
+- **Dialling.**  Off-hook and dial tone work; nothing has yet sent a digit.
+  The codec's output stream is an ordinary CoreAudio device, so DTMF is a
+  playback problem rather than a USB one, and pulse dialling is bit 0 toggled to the
+  country profile's timing.  That is the next step, and it needs a transmit path
+  in `apple_usb_modem_audio`, which today only captures.
+- **Ring detection**, which needs an inbound call rather than a seizure.
+- **What the other non-zero registers mean.**  0x01, 0x02, 0x08, 0x09, 0x0b,
+  0x0c, 0x0d, 0x0e, 0x11, 0x13, 0x16-0x19 and 0x1b all read non-zero and none
+  of them moves with the hook.
 - What the remaining opcodes do: `0x10|n`, the 9-byte `0x02` form, `0x90`,
   `0xd0`.
 - How the 32, 500 and 229-byte country blobs reach the device.  Runs of
