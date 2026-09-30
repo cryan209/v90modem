@@ -861,3 +861,60 @@ poor to dial one.
 because that echo is an application deliberately returning audio. The echo a
 canceller would remove is removed, so a direct call gives no delay reading at
 all by this method.
+
+## The engine on both modems: a modem call over two real analogue lines (2026-10-01)
+
+`apple_usb_modem_coupler` now selects its device and can answer, so both
+modems can run the engine at once and call each other:
+
+    ME_MODE=v34 APPLE_MODEM_ADDR=1:7 APPLE_MODEM_AUDIO_UID=000000 \
+        ./apple_usb_modem_coupler --answer --ring-wait 45 --hold 60 &
+    sleep 3
+    ME_MODE=v34 APPLE_MODEM_TX_AMP=0.35 APPLE_MODEM_ADDR=1:6 \
+        APPLE_MODEM_AUDIO_UID=1143000 ./apple_usb_modem_coupler --dial 6005 --hold 60
+
+**`--answer` waits for CDC RING_DETECT and goes off-hook**, then calls
+`me_answer()` and starts the engine on the first block -- there is no answer
+tone to wait for, because this is the end that sends one. Answering needs no
+DTMF, which is what lets the bad line take a call it cannot place.
+
+**`ME_MODE=v34`, not the default.** V.90 needs a digital modem on a DS0 and
+both ends here are analogue, so there is no V.90 call to be had between them;
+the engine says so itself (`ME_V90_ROLE=analogue ignored in v34 mode`).
+
+**Two engines on one host were writing one pair of PCM dumps.**
+`/tmp/v34_tx.raw` and `/tmp/v34_rx.raw` are opened once per process from a
+fixed path, so a two-instance run left two taps that are of neither end.
+`ME_DUMP_DIR` now scopes them; set it per process or every tap from this rig
+is worthless.
+
+**The coupler's default DTMF is too quiet for this exchange.** At the built-in
+0.15 the digits were not detected, the far line never rang, and the log shows
+only "engine never started" -- which reads like a coupler fault and is the
+exchange rejecting the dial. `APPLE_MODEM_TX_AMP=0.35` is what works here.
+
+### How far it gets
+
+Five attempts, same binaries and settings:
+
+- **V.8 completes and selects V.34 on both ends in every run where the call
+  connected** -- `V.8 call negotiation successful`, roles right (caller and
+  answerer), both entering TRAINING.
+- **Best case both ends reach the Phase 4 MP exchange** (`rx=PHASE4_MP tx=MP`
+  on both), then each reports the other's retrain tone, restarts Phase 2 and
+  falls back to V.22bis.
+- The others stalled earlier -- one in Phase 3, two in Phase 2 around
+  INFO1/INFOMARKSa, one never rang.
+
+So the whole startup runs over a real analogue path: V.8, Phase 2's tone
+choreography and INFO0/INFO1 exchange, Phase 3's S, S-bar, TRN and J, and
+Phase 4's S, TRN and MP. **No data mode yet.**
+
+**Read all of that against a bearer known to be faulty**: 6005's echo return
+loss collapses to about 2 dB a second after it goes off-hook (previous
+section), so its hybrid returns nearly everything it receives. That is a
+plausible reason for an intermittent full-duplex startup and it is NOT
+established here -- an attempt to measure the echo in the training taps read
+a correlation of 0.92 at every lag tried, which is the low-entropy-reference
+trap this document records elsewhere, so it says nothing. Fix the line, then
+re-run before concluding anything about the stack.

@@ -8498,9 +8498,17 @@ skip_8k_codewords:
                 {
                     static FILE *rx_dump = NULL;
                     if (!rx_dump) {
-                        rx_dump = fopen("/tmp/v34_rx.raw", "wb");
+                        /* Two engines on one host -- the two ends of a call
+                         * between two analogue modems -- would otherwise both
+                         * write this one path and neither tap would be of
+                         * anything.  ME_DUMP_DIR scopes it per process. */
+                        const char *dir = getenv("ME_DUMP_DIR");
+                        char path[512];
+                        snprintf(path, sizeof path, "%s/v34_rx.raw",
+                                 (dir && *dir) ? dir : "/tmp");
+                        rx_dump = fopen(path, "wb");
                         if (rx_dump)
-                            ME_LOG("[ME] RX PCM dump: /tmp/v34_rx.raw (s16le 8000Hz mono)\n");
+                            ME_LOG("[ME] RX PCM dump: %s (s16le 8000Hz mono)\n", path);
                     }
                     if (rx_dump) {
                         /* Mark the dump against engine state every 100 ms.
@@ -10141,9 +10149,13 @@ void me_tx_audio(int16_t *amp, int len)
                 static int64_t tx_energy = 0;
                 static int tx_count = 0;
                 if (!tx_dump) {
-                    tx_dump = fopen("/tmp/v34_tx.raw", "wb");
+                    const char *dir = getenv("ME_DUMP_DIR");   /* see the RX dump */
+                    char path[512];
+                    snprintf(path, sizeof path, "%s/v34_tx.raw",
+                             (dir && *dir) ? dir : "/tmp");
+                    tx_dump = fopen(path, "wb");
                     if (tx_dump)
-                        ME_LOG("[ME] TX PCM dump: /tmp/v34_tx.raw (s16le 8000Hz mono)\n");
+                        ME_LOG("[ME] TX PCM dump: %s (s16le 8000Hz mono)\n", path);
                 }
                 if (tx_dump) {
                     /* The TX dump is written from the transmit callback and

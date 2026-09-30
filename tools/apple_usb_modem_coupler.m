@@ -136,8 +136,33 @@ static int usb_open_line(void)
     int cfg = -1;
 
     if (libusb_init(NULL) < 0) { fprintf(stderr, "libusb_init failed\n"); return -1; }
-    usb = libusb_open_device_with_vid_pid(NULL, VID, PID);
-    if (!usb) { fprintf(stderr, "no %04x:%04x on the bus\n", VID, PID); return -1; }
+    {   /* Two of these on one host is the ordinary case -- one dials, the
+         * other answers -- so the device is selectable by USB address.  The
+         * CoreAudio UID is a SEPARATE selection (APPLE_MODEM_AUDIO_UID) and
+         * the two lists cannot be zipped; see docs/apple_usb_modem_sm56.md. */
+        const char *want = getenv("APPLE_MODEM_ADDR");
+        libusb_device **list;
+        ssize_t n = libusb_get_device_list(NULL, &list);
+        libusb_device *pick = NULL;
+        for (ssize_t i = 0; i < n && n > 0; i++) {
+            struct libusb_device_descriptor dd;
+            char addr[32];
+            if (libusb_get_device_descriptor(list[i], &dd) != 0 ||
+                dd.idVendor != VID || dd.idProduct != PID) continue;
+            snprintf(addr, sizeof addr, "%u:%u", libusb_get_bus_number(list[i]),
+                     libusb_get_device_address(list[i]));
+            if (want) { if (!strcmp(want, addr)) pick = list[i]; }
+            else if (!pick) pick = list[i];
+        }
+        if (pick && libusb_open(pick, &usb) < 0) usb = NULL;
+        if (n > 0) libusb_free_device_list(list, 1);
+    }
+    if (!usb) {
+        fprintf(stderr, "no %04x:%04x on the bus%s%s\n", VID, PID,
+                getenv("APPLE_MODEM_ADDR") ? " at APPLE_MODEM_ADDR=" : "",
+                getenv("APPLE_MODEM_ADDR") ? getenv("APPLE_MODEM_ADDR") : "");
+        return -1;
+    }
     libusb_get_configuration(usb, &cfg);
     /* An unconfigured device stalls EVERY request, including standard ones, and
      * ioreg shows it with no interface children -- it reads as dead hardware.
@@ -332,6 +357,7 @@ static const char *g_pty_link;
 static const char *g_dial;
 static const char *g_replay_path;
 static volatile int g_answered, g_engine_running, g_stop;
+static int g_answer_mode;
 static unsigned g_ans_good, g_ans_bad;
 
 /* DC blocker, one pole at 40 Hz.  See the header: this is not optional. */
@@ -552,7 +578,23 @@ static AudioObjectID find_device(void)
         char b[256] = { 0 };
         CFStringGetCString(s, b, sizeof b, kCFStringEncodingUTF8);
         CFRelease(s);
-        if (strstr(b, "Modem")) { found = d[i]; break; }
+        if (strstr(b, "Modem")) {
+            const char *want = getenv("APPLE_MODEM_AUDIO_UID");
+            if (want && *want) {              /* substring of the CoreAudio UID */
+                CFStringRef u = NULL;
+                char ub[256] = { 0 };
+                UInt32 uz = sizeof u;
+                AudioObjectPropertyAddress ua = { kAudioDevicePropertyDeviceUID,
+                    kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+                if (AudioObjectGetPropertyData(d[i], &ua, 0, NULL, &uz, &u) == noErr && u) {
+                    CFStringGetCString(u, ub, sizeof ub, kCFStringEncodingUTF8);
+                    CFRelease(u);
+                }
+                if (!strstr(ub, want)) continue;
+            }
+            found = d[i];
+            break;
+        }
     }
     free(d);
     return found;
@@ -740,18 +782,51 @@ static int selftest(void)
     return bad ? 1 : 0;
 }
 
+/* Wait for an incoming call.  The ring is NOT in the audio path at all -- an
+ * on-hook capture is just the codec's noise floor -- but interface 0's
+ * interrupt endpoint delivers CDC RING_DETECT (0xa1 0x09) throughout it, and
+ * nothing whatever when no call is arriving, so this is the only way to know.
+ * Returns 0 once ringing, -1 on timeout.  Answering itself is just off-hook;
+ * no DTMF is involved, which is why a line too poor to dial can still take a
+ * call. */
+static int wait_for_ring(double secs)
+{
+    unsigned char b[16];
+    int n, rings = 0;
+
+    libusb_claim_interface(usb, 0);
+    fprintf(stderr, "[APPLE] waiting up to %.0f s for a ring\n", secs);
+    for (int t = 0; t < (int)(secs / 0.5 + 0.5) && !g_stop; t++) {
+        if (libusb_interrupt_transfer(usb, 0x81, b, sizeof b, &n, 500) != 0)
+            continue;
+        if (n >= 2 && b[0] == 0xa1 && b[1] == 0x09) {
+            if (++rings == 1) fprintf(stderr, "[APPLE] RING\n");
+            libusb_release_interface(usb, 0);
+            return 0;
+        }
+    }
+    libusb_release_interface(usb, 0);
+    fprintf(stderr, "[APPLE] no ring within %.0f s\n", secs);
+    return -1;
+}
+
 static void on_signal(int sig) { (void)sig; g_stop = 1; }
 
 static void usage(const char *a0)
 {
     fprintf(stderr,
         "usage: %s --dial NUMBER [--pty-link PATH] [--rate HZ] [--hold SECS]\n"
+        "       %s --answer [--ring-wait SECS] [--pty-link PATH] [--hold SECS]\n"
         "       %s --rx-replay TAP.s16 [--pty-link PATH]\n"
         "       %s --hook on|off\n"
         "       %s --selftest\n"
         "\n"
         "  --dial       seize the line, DTMF the number, wait for 2100 Hz, run\n"
         "               the engine.  Goes back on-hook on exit or SIGINT\n"
+        "  --answer     wait for CDC RING_DETECT on the interrupt endpoint, go\n"
+        "               off-hook and run the engine as the answering modem.\n"
+        "               Answering needs no DTMF, so it works on a line too poor\n"
+        "               to dial out on\n"
         "  --rx-replay  run the analogue side offline against a recorded tap;\n"
         "               needs no line and no device\n"
         "  --hook       line control only, then exit\n"
@@ -762,18 +837,22 @@ static void usage(const char *a0)
         "\n"
         "APPLE_MODEM_TX_AMP per-tone DTMF amplitude (default 0.15)\n"
         "APPLE_MODEM_DTMF_MS on/off times in ms (default 100/120)\n"
-        "APPLE_MODEM_TX_GAIN engine transmit gain into the DAA (default 1.0)\n",
-        a0, a0, a0, a0);
+        "APPLE_MODEM_TX_GAIN engine transmit gain into the DAA (default 1.0)\n"
+        "APPLE_MODEM_ADDR       USB bus:addr, when two modems are present\n"
+        "APPLE_MODEM_AUDIO_UID  substring of that modem's CoreAudio UID\n",
+        a0, a0, a0, a0, a0);
 }
 
 int main(int argc, char **argv)
 {
     const char *hook_arg = NULL;
-    double hold = 60.0, on_ms = 100.0, off_ms = 120.0;
+    double hold = 60.0, on_ms = 100.0, off_ms = 120.0, ring_wait = 60.0;
     int rc = 1;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--dial") && i + 1 < argc)            g_dial = argv[++i];
+        if (!strcmp(argv[i], "--answer"))                          g_answer_mode = 1;
+        else if (!strcmp(argv[i], "--ring-wait") && i + 1 < argc)   ring_wait = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--dial") && i + 1 < argc)        g_dial = argv[++i];
         else if (!strcmp(argv[i], "--pty-link") && i + 1 < argc)   g_pty_link = argv[++i];
         else if (!strcmp(argv[i], "--rx-replay") && i + 1 < argc)   g_replay_path = argv[++i];
         else if (!strcmp(argv[i], "--hook") && i + 1 < argc)        hook_arg = argv[++i];
@@ -814,7 +893,11 @@ int main(int argc, char **argv)
         return rc;
     }
 
-    if (!g_dial) { usage(argv[0]); return 2; }
+    if (!g_dial && !g_answer_mode) { usage(argv[0]); return 2; }
+    if (g_dial && g_answer_mode) {
+        fprintf(stderr, "--dial and --answer are exclusive\n");
+        return 2;
+    }
     /* This binary IS the analogue modem -- it is wired to a 2-wire line through
      * a DAA, and V.90 puts the analogue modem on the calling side, the side that
      * dials.  Without this the engine takes the DIGITAL-role branch and both
@@ -831,7 +914,12 @@ int main(int argc, char **argv)
     signal(SIGTERM, on_signal);
 
     if (usb_open_line() < 0) return 1;
-    if (build_dial_script(g_dial, on_ms, off_ms) < 0) return 2;
+    if (g_dial && build_dial_script(g_dial, on_ms, off_ms) < 0) return 2;
+    if (g_answer_mode && wait_for_ring(ring_wait) < 0) {
+        libusb_close(usb);
+        libusb_exit(NULL);
+        return 1;
+    }
 
     me_set_verbose(1);
     me_init();
@@ -841,7 +929,14 @@ int main(int argc, char **argv)
         me_destroy();
         return 1;
     }
-    me_dial(g_dial);
+    if (g_answer_mode) {
+        me_answer();
+        /* There is no answer tone to wait for -- WE are the modem that sends
+         * one -- so the engine starts with the first block of audio. */
+        g_answered = 1;
+    } else {
+        me_dial(g_dial);
+    }
 
     if (line_hook(1) < 0) {                  /* off-hook; refuses with no pair */
         me_destroy();
@@ -856,8 +951,11 @@ int main(int argc, char **argv)
         libusb_exit(NULL);
         return 1;
     }
-    fprintf(stderr, "[APPLE] dialling %s, %d DTMF segments at %.0f/%.0f ms\n",
-            g_dial, tx_nseg, on_ms, off_ms);
+    if (g_answer_mode)
+        fprintf(stderr, "[APPLE] answered; engine runs from the first block\n");
+    else
+        fprintf(stderr, "[APPLE] dialling %s, %d DTMF segments at %.0f/%.0f ms\n",
+                g_dial, tx_nseg, on_ms, off_ms);
 
     for (double t = 0; t < hold && !g_stop; t += 0.25)
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, false);
