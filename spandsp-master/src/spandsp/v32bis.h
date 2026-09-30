@@ -212,6 +212,20 @@ SPAN_DECLARE(int) v32bis_start_startup(v32bis_state_t *s);
     \return 0 on success, or -1. */
 SPAN_DECLARE(int) v32bis_start_tones(v32bis_state_t *s);
 
+/*! Initiate an ITU-T V.32bis clause 8 rate renegotiation.  Clause 8.1 allows
+    this at any time during data transmission, and it changes the data
+    signalling rate without retraining.
+    \param s The modem context.
+    \param bit_rate The desired rate.  R4 will offer it and every lower rate
+           this modem is enabled for.
+    \return 0 for OK. */
+SPAN_DECLARE(int) v32bis_start_rate_renegotiation(v32bis_state_t *s, int bit_rate);
+
+/*! How many clause 8 rate renegotiations have completed on this connection.
+    \param s The modem context.
+    \return The count. */
+SPAN_DECLARE(int) v32bis_rate_renegotiation_count(v32bis_state_t *s);
+
 /*! Set how many symbol intervals of ITU-T V.32bis clause 6 Note 3's optional
     echo canceller training sequence to transmit, 0 for none.
     \param s The modem context.

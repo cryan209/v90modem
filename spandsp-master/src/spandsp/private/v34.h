@@ -1069,6 +1069,9 @@ typedef struct
         renegotiation rather than a startup, which matters at the TRN-to-MP
         seam: 11.4 waits for the far end's J', and 11.6 has no J at all. */
     bool reneg_active;
+    /* Let the Phase-4 TRN SNR cap the receive rate this modem asks for in
+       MP (v34_set_trn_rate_selection()). */
+    bool trn_rate_select;
     /*! \brief This Phase 2 was entered by a V.34 11.5 / V.90 9.5 retrain, in
         which the INFO0 exchange is omitted.  FIRST_A's plain-V.34 condition
         is otherwise "INFO0c received", which on a retrain never happens --
@@ -2319,6 +2322,10 @@ typedef struct
         decisions the disturbance has already made wrong. */
     float data_decision_ema;
     float data_decision_baseline;
+    /* Data-mode equalizer tap-energy centroid at B1, and a symbol counter for
+       steering the sampling instant back to it (v34rx_data.c). */
+    float data_tap_centroid_ref;
+    int data_centroid_count;
     int data_decision_count;
     int last_logged_mp_diag_state;
 

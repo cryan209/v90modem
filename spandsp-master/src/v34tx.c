@@ -7840,7 +7840,7 @@ static int v34_rx_current_trellis_code(const v34_rx_state_t *s)
    mode goes from 0.0018 to 0.0285 distance-to-grid.  It is reading this
    receiver's own Phase-4 convergence, not the line.  The number is still
    logged, because that constancy is the measurement worth having. */
-static bool v34_trn_rate_selection_enabled(void)
+static bool v34_trn_rate_selection_enabled(const v34_state_t *s)
 {
     static int cached = -1;
 
@@ -7848,10 +7848,25 @@ static bool v34_trn_rate_selection_enabled(void)
     {
         const char *e = getenv("ME_V34_TRN_RATE");
 
-        cached = (e  &&  (e[0] == '1'  ||  e[0] == 'y'  ||  e[0] == 'Y'))  ?  1  :  0;
+        cached = (e  &&  *e)  ?  ((e[0] == '1'  ||  e[0] == 'y'  ||  e[0] == 'Y')  ?  1  :  0)  :  -2;
     }
     /*endif*/
-    return cached != 0;
+    if (cached >= 0)
+        return cached != 0;
+    /*endif*/
+    return s->tx.trn_rate_select;
+}
+
+/* Since Phase-4 TRN is trained decision-directed (v34rx.c) the measurement
+   follows the line, and the engine turns it on for real calls.  It stays
+   off by default for the loopback harnesses, whose ceiling is G.711 itself
+   (a clean loopback reads ~29 dB, where the live-channel calibration would
+   cap the asserted 21600 rows); ME_V34_TRN_RATE=1/0 forces it either way. */
+SPAN_DECLARE(void) v34_set_trn_rate_selection(v34_state_t *s, bool enable)
+{
+    if (s)
+        s->tx.trn_rate_select = enable;
+    /*endif*/
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -7923,8 +7938,8 @@ static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_r
                      "Tx MP receive-rate: Phase-4 TRN SNR %.1f dB would give "
                      "%d bps; asking %d bps (measurement %s)\n",
                      snr_db, measured*2400, (*mine)*2400,
-                     v34_trn_rate_selection_enabled() ? "applied" : "diagnostic only");
-            if (v34_trn_rate_selection_enabled()  &&  measured < *mine)
+                     v34_trn_rate_selection_enabled(s) ? "applied" : "diagnostic only");
+            if (v34_trn_rate_selection_enabled(s)  &&  measured < *mine)
                 *mine = measured;
             /*endif*/
         }

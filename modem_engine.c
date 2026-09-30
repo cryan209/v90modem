@@ -5764,6 +5764,12 @@ static void start_v34_training(void)
     g_v34_preroll_len = 0;
     if (v90_upstream && g_calling_party)
         me_v90_prepare_info0a_preroll();
+    /* Plain V.34 over a real line: ask in MP for the receive rate the
+       Phase-4 TRN measures, not the Phase-2 probe's projection.  Against the
+       RasFinder the probe asked 31200 every call and every first data mode
+       was white; a retrain costs ~10 s of a peer that hangs up ~45 s in. */
+    if (!v90_upstream)
+        v34_set_trn_rate_selection(g_v34, true);
 
     /* Enable SpanDSP logging for V.34 training diagnostics */
     logging_state_t *log = v34_get_logging_state(g_v34);

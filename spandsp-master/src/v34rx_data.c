@@ -179,6 +179,40 @@ static int v34_rx_b1_search_symbols(void)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Energy centroid of the equalizer taps, in taps. */
+static float v34_rx_tap_centroid(const v34_rx_state_t *s)
+{
+    float e = 0.0f;
+    float m = 0.0f;
+
+    for (int i = 0;  i < V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN;  i++)
+    {
+        float p = s->eq_coeff[i].re*s->eq_coeff[i].re + s->eq_coeff[i].im*s->eq_coeff[i].im;
+
+        e += p;
+        m += p*(float) i;
+    }
+    /*endfor*/
+    return (e > 0.0f)  ?  m/e  :  0.0f;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* TMP centroid steering sign */
+static int v34_rx_centroid_steer(void)
+{
+    static int cached = -99;
+
+    if (cached == -99)
+    {
+        const char *e = getenv("ME_V34_DATA_CENTROID_STEER");
+
+        cached = (e  &&  *e)  ?  atoi(e)  :  0;
+    }
+    /*endif*/
+    return cached;
+}
+/*- End of function --------------------------------------------------------*/
+
 void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
 {
         if (s->b1_acquisition_active)
@@ -419,6 +453,8 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 s->data_decision_ema = 0.0f;
                 s->data_decision_baseline = 0.0f;
                 s->data_decision_count = 0;
+                s->data_tap_centroid_ref = v34_rx_tap_centroid(s);
+                s->data_centroid_count = 0;
                 s->data_symbol_conjugate = conjugate;
                 s->data_symbol_rotation = 0;
                 s->data_symbol_scale = (gain > 0.0001f) ? 1.0f/gain : 1.0f;
@@ -499,6 +535,23 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
             float transformed_re;
             float transformed_im;
 
+            if (v34_rx_centroid_steer() != 0
+                &&  !s->b1_replaying
+                &&  ++s->data_centroid_count >= 256)
+            {
+                float d = v34_rx_tap_centroid(s) - s->data_tap_centroid_ref;
+                int st;
+
+                s->data_centroid_count = 0;
+                if (fabsf(d) > 0.05f)
+                {
+                    st = ((d > 0.0f)  ?  1  :  -1)*v34_rx_centroid_steer();
+                    s->eq_put_step += st;
+                    s->total_baud_timing_correction += st;
+                }
+                /*endif*/
+            }
+            /*endif*/
             /* Take out the decision-aided derotator acquired over the CP/MP
                stretch: this is what makes the symbols coherent.  CMA (the
                wander source) is frozen in DATA, so from here only genuine

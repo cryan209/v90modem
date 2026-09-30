@@ -169,6 +169,34 @@ struct v32bis_state_s
     bool rx_s_event_sent;
     bool tx_released;
 
+    /* ITU-T V.32bis 8.  Rate renegotiation, which changes the data
+       signalling rate without retraining, so none of the receiver's trained
+       state is disturbed by it. */
+    bool reneg_active;
+    bool reneg_initiator;
+    int reneg_local_rates;
+    int reneg_remote_rates;
+    int reneg_selected_rate;
+    int reneg_count;
+    uint16_t reneg_tx_word;
+    int32_t reneg_r_start_symbol;
+    bool reneg_r_seen;
+    bool reneg_far_preamble;
+    int reneg_preamble_run;
+    float reneg_watch_pow;
+    /* Framing the rate signal after a preamble.  There is no S here to pin
+       the word boundary to; what pins it is the 180 degree reversal 8
+       symbol intervals before the preamble ends. */
+    uint32_t reneg_rx_reg;
+    int reneg_rx_diff;
+    bool reneg_pre_done;
+    bool reneg_pre_have;
+    int reneg_pre_last;
+    int reneg_pre_tail;
+    uint8_t reneg_word_states[8];
+    int reneg_word_pos;
+    int rx_b1_target;
+
     int startup_remote_rates;
     int startup_selected_rate;
     bool startup_complete;

@@ -31,6 +31,18 @@ typedef struct
     int total;
     int errors;
     int first_err;
+    /* ITU-T V.32bis 8.2 clamps circuit 104 "when a preamble is detected",
+       and detection necessarily lags the start of the preamble, so a few
+       tens of bits of the preamble reach the DTE decoded as data before the
+       clamp.  That is what the Recommendation asks for and what a real
+       error control layer discards on its frame check; here it displaces
+       the pattern, so the checker re-anchors itself once and then requires
+       the rest to be exact.  The re-anchor SEARCHES for the displacement
+       rather than assuming it: a checker that could not fail to re-anchor
+       would pass a modem that had lost the stream entirely. */
+    int resync;
+    int resync_len;
+    uint8_t resync_buf[128];
 } bit_stats_t;
 
 static int pattern_bit(void *user_data)
@@ -42,13 +54,57 @@ static int pattern_bit(void *user_data)
     return bit;
 }
 
+#define RESYNC_SKIP_MAX 96
+#define RESYNC_MATCH    32
+
 static void collect_bit(void *user_data, int bit)
 {
     bit_stats_t *stats = (bit_stats_t *) user_data;
     int expected;
+    int skip;
+    int i;
+    uint32_t trial;
+    int ok;
 
     if (bit < 0)
         return;
+    if (stats->resync)
+    {
+        stats->resync_buf[stats->resync_len++] = (uint8_t) bit;
+        if (stats->resync_len < RESYNC_SKIP_MAX + RESYNC_MATCH)
+            return;
+        for (skip = 0;  skip <= RESYNC_SKIP_MAX;  skip++)
+        {
+            trial = stats->state;
+            ok = 1;
+            for (i = 0;  i < RESYNC_MATCH;  i++)
+            {
+                if (stats->resync_buf[skip + i] != pattern_bit(&trial))
+                {
+                    ok = 0;
+                    break;
+                }
+            }
+            if (ok)
+                break;
+        }
+        stats->resync = 0;
+        stats->resync_len = 0;
+        if (skip > RESYNC_SKIP_MAX)
+        {
+            /* Nothing in the window matches, so the stream really is lost.
+               Say so by counting the whole window as bad. */
+            stats->errors += RESYNC_MATCH;
+            stats->total += RESYNC_MATCH;
+            return;
+        }
+        for (i = 0;  i < RESYNC_MATCH;  i++)
+        {
+            pattern_bit(&stats->state);
+            stats->total++;
+        }
+        return;
+    }
     expected = pattern_bit(&stats->state);
     stats->total++;
     if (bit != expected)
@@ -194,7 +250,9 @@ static int run_duplex(int alaw,
                       int hybrid,
                       int echo_can,
                       int call_ec_train,
-                      int answer_ec_train)
+                      int answer_ec_train,
+                      int reneg_by_call,
+                      int reneg_rate)
 {
     int16_t call_audio[160];
     int16_t answer_audio[160];
@@ -219,6 +277,16 @@ static int run_duplex(int alaw,
     static int16_t ec_audio[8192*4];
     int ec_len = 0;
     int ec_before = 0;
+    int reneg_opened = 0;
+    int reneg_done = 0;
+    int reneg_block = 0;
+    int call_before = 0;
+    int answer_before = 0;
+    int call_after_base = 0;
+    int answer_after_base = 0;
+    int call_err_base = 0;
+    int rate_at_reneg = 0;
+    int answer_err_base = 0;
     double worst_db = 0.0;
 
     memset(&call_hybrid, 0, sizeof(call_hybrid));
@@ -299,6 +367,49 @@ static int run_duplex(int alaw,
         /*endif*/
         v32bis_rx(answer, to_answer, 160);
         v32bis_rx(call, to_call, 160);
+        /* ITU-T V.32bis 8.1: "Rate renegotiation may be initiated at any
+           time during data transmission."  Open one once both directions
+           are demonstrably carrying data, so the renegotiation is graded
+           against a link that was working before it. */
+        if (reneg_rate != 0  &&  !reneg_opened
+            &&  call_rx.total > 4000  &&  answer_rx.total > 4000)
+        {
+            if (v32bis_start_rate_renegotiation(reneg_by_call ? call : answer,
+                                                reneg_rate) != 0)
+            {
+                fprintf(stderr, "  could not open a rate renegotiation\n");
+                failed = 1;
+            }
+            /*endif*/
+            reneg_opened = 1;
+            reneg_block = block;
+            call_before = call_rx.errors;
+            answer_before = answer_rx.errors;
+            rate_at_reneg = v32bis_current_bit_rate(call);
+        }
+        /*endif*/
+        if (reneg_opened  &&  !reneg_done
+            &&  v32bis_rate_renegotiation_count(call) == 1
+            &&  v32bis_rate_renegotiation_count(answer) == 1)
+        {
+            /* Both ends are back in data mode.  8.2 clamps circuit 104
+               "when a preamble is detected", and detection lags the start of
+               the preamble, so a few tens of bits of preamble reached the
+               DTE decoded as data -- which is what the Recommendation asks
+               for, and what a real error control layer throws away on its
+               frame check.  Here it displaces the pattern, so the checker
+               re-anchors once and everything after that has to be exact. */
+            reneg_done = 1;
+            call_rx.resync = 1;
+            call_rx.resync_len = 0;
+            answer_rx.resync = 1;
+            answer_rx.resync_len = 0;
+            call_after_base = call_rx.total;
+            answer_after_base = answer_rx.total;
+            call_err_base = call_rx.errors;
+            answer_err_base = answer_rx.errors;
+        }
+        /*endif*/
     }
 
     if (!v32bis_startup_complete(call)  ||  !v32bis_startup_complete(answer))
@@ -330,12 +441,91 @@ static int run_duplex(int alaw,
                ec_len, worst_db);
     }
     /*endif*/
-    if (v32bis_current_bit_rate(call) != expected_rate
-        || v32bis_current_bit_rate(answer) != expected_rate)
+    if (reneg_rate != 0)
+    {
+        /* The start-up rate is what expected_rate names; the renegotiation
+           has moved on from it by the time this runs. */
+        if (rate_at_reneg != expected_rate)
+            failed = 1;
+        /*endif*/
+    }
+    else if (v32bis_current_bit_rate(call) != expected_rate
+             || v32bis_current_bit_rate(answer) != expected_rate)
+    {
         failed = 1;
+    }
+    /*endif*/
     if (call_rx.total < 2000  ||  answer_rx.total < 2000)
         failed = 1;
-    if (call_rx.errors != 0  ||  answer_rx.errors != 0)
+    if (reneg_rate == 0
+        &&  (v32bis_rate_renegotiation_count(call) != 0
+             || v32bis_rate_renegotiation_count(answer) != 0))
+    {
+        /* Nothing asked for a renegotiation here, so the clause 8 preamble
+           watcher has fired on data or on an echo.  That would be invisible
+           in the bit counts of a row that recovered afterwards, so it is
+           checked directly. */
+        fprintf(stderr,
+                "  a clause 8 renegotiation fired with none requested: "
+                "call %d, answer %d\n",
+                v32bis_rate_renegotiation_count(call),
+                v32bis_rate_renegotiation_count(answer));
+        failed = 1;
+    }
+    /*endif*/
+    if (reneg_rate != 0)
+    {
+        int after_call = call_rx.total - call_after_base;
+        int after_answer = answer_rx.total - answer_after_base;
+
+        printf("    clause 8: %s asked for %d bit/s at block %d -> call %d, "
+               "answer %d bit/s, %d/%d renegotiations, %d/%d bits after it\n",
+               reneg_by_call ? "call" : "answer",
+               reneg_rate,
+               reneg_block,
+               v32bis_current_bit_rate(call),
+               v32bis_current_bit_rate(answer),
+               v32bis_rate_renegotiation_count(call),
+               v32bis_rate_renegotiation_count(answer),
+               after_call,
+               after_answer);
+        /* The stretch before the renegotiation and the stretch after it must
+           both be error free; the clamp lag between them is not graded, and
+           the whole-run counters below would otherwise condemn it. */
+        if (getenv("V32BIS_T8DBG"))
+            fprintf(stderr, "  dbg done=%d before=%d/%d errs=%d/%d base=%d/%d\n",
+                    reneg_done, call_before, answer_before,
+                    call_rx.errors, answer_rx.errors, call_err_base, answer_err_base);
+        if (!reneg_done
+            || call_before != 0  ||  answer_before != 0
+            || call_rx.errors != call_err_base
+            || answer_rx.errors != answer_err_base)
+            failed = 1;
+        /*endif*/
+        call_rx.errors = 0;
+        answer_rx.errors = 0;
+        /* Both ends must have completed exactly one renegotiation, both must
+           have landed on the requested rate, and -- the point of clause 8 --
+           the data must still be flowing afterwards with the PRBS unbroken,
+           which the error counters above already require over the whole run. */
+        if (v32bis_rate_renegotiation_count(call) != 1
+            || v32bis_rate_renegotiation_count(answer) != 1)
+            failed = 1;
+        /*endif*/
+        if (v32bis_current_bit_rate(call) != reneg_rate
+            || v32bis_current_bit_rate(answer) != reneg_rate)
+            failed = 1;
+        /*endif*/
+        if (after_call < 2000  ||  after_answer < 2000)
+            failed = 1;
+        /*endif*/
+    }
+    /*endif*/
+    /* With a renegotiation in the run the whole-run error count is not the
+       measure: the clamp lag across the procedure displaces the pattern by
+       design, and the clause 8 block below grades the stretch before it and
+       the stretch after it separately. */
+    if (reneg_rate == 0  &&  (call_rx.errors != 0  ||  answer_rx.errors != 0))
         failed = 1;
     if (tones)
     {
@@ -432,11 +622,11 @@ static int hybrid_sweep(int scale, int delay)
     on = run_duplex(0,
                     V32BIS_RATE_14400 | V32BIS_RATE_12000,
                     V32BIS_RATE_14400 | V32BIS_RATE_12000,
-                    14400, 0, 0, 1, delay, scale, 1, 2048, 2048);
+                    14400, 0, 0, 1, delay, scale, 1, 2048, 2048, 0, 0);
     off = run_duplex(0,
                      V32BIS_RATE_14400 | V32BIS_RATE_12000,
                      V32BIS_RATE_14400 | V32BIS_RATE_12000,
-                     14400, 0, 0, 1, delay, scale, 0, 2048, 2048);
+                     14400, 0, 0, 1, delay, scale, 0, 2048, 2048, 0, 0);
     printf("  hybrid sweep: return loss %.1f dB, delay %d -> canceller on %s, off %s\n",
            -20.0*log10(scale/100.0) + 12.6,
            delay,
@@ -500,9 +690,9 @@ int main(int argc, char *argv[])
     {
         if (one >= 0  &&  (int) i != one)
             continue;
-        if (run_duplex(0, cases[i].call_rates, cases[i].answer_rates, cases[i].expected, 0, 0, 0, 0, 0, 1, 2048, 2048) != 0)
+        if (run_duplex(0, cases[i].call_rates, cases[i].answer_rates, cases[i].expected, 0, 0, 0, 0, 0, 1, 2048, 2048, 0, 0) != 0)
             bad++;
-        if (run_duplex(1, cases[i].call_rates, cases[i].answer_rates, cases[i].expected, 0, 0, 0, 0, 0, 1, 2048, 2048) != 0)
+        if (run_duplex(1, cases[i].call_rates, cases[i].answer_rates, cases[i].expected, 0, 0, 0, 0, 0, 1, 2048, 2048, 0, 0) != 0)
             bad++;
     }
     /* A preset NT/MT pair must not break the dialogue when the tone phases
@@ -520,31 +710,33 @@ int main(int argc, char *argv[])
                        0,
                        1,
                        2048,
-                       2048) != 0)
+                       2048,
+                       0,
+                       0) != 0)
             bad++;
         /* And the whole of clause 6, tone phases included, in both laws:
            NT and MT are measured here, not supplied. */
         if (run_duplex(0,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600,
-                       14400, 0, 0, 1, 0, 0, 1, 2048, 2048) != 0)
+                       14400, 0, 0, 1, 0, 0, 1, 2048, 2048, 0, 0) != 0)
             bad++;
         if (run_duplex(1,
                        V32BIS_RATE_9600 | V32BIS_RATE_7200,
                        V32BIS_RATE_14400 | V32BIS_RATE_9600,
-                       9600, 0, 0, 1, 0, 0, 1, 2048, 2048) != 0)
+                       9600, 0, 0, 1, 0, 0, 1, 2048, 2048, 0, 0) != 0)
             bad++;
         /* And with a real one-way delay, which is the whole point of NT and
            MT: both must grow by the round trip. */
         if (run_duplex(0,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000,
-                       14400, 0, 0, 1, 80, 0, 1, 2048, 2048) != 0)
+                       14400, 0, 0, 1, 80, 0, 1, 2048, 2048, 0, 0) != 0)
             bad++;
         if (run_duplex(0,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000,
-                       14400, 0, 0, 1, 240, 0, 1, 2048, 2048) != 0)
+                       14400, 0, 0, 1, 240, 0, 1, 2048, 2048, 0, 0) != 0)
             bad++;
         /* Note 3 makes the sequence optional, so a conformant far end may
            send none, or a different amount, and each side has to cope with
@@ -552,12 +744,44 @@ int main(int argc, char *argv[])
         if (run_duplex(0,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000,
-                       14400, 0, 0, 1, 80, 0, 1, 0, 2048) != 0)
+                       14400, 0, 0, 1, 80, 0, 1, 0, 2048, 0, 0) != 0)
             bad++;
         if (run_duplex(1,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000,
-                       14400, 0, 0, 1, 80, 0, 1, 8192, 0) != 0)
+                       14400, 0, 0, 1, 80, 0, 1, 8192, 0, 0, 0) != 0)
+            bad++;
+        /* ITU-T V.32bis 8: rate renegotiation, in both directions and both
+           ways up the ladder, on a link that was already carrying data.
+           The PRBS counters span the renegotiation, so a stream that broke
+           across it fails whatever the rates end up as. */
+        if (run_duplex(0,
+                       V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600
+                       | V32BIS_RATE_7200 | V32BIS_RATE_4800,
+                       V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600
+                       | V32BIS_RATE_7200 | V32BIS_RATE_4800,
+                       14400, 0, 0, 1, 80, 0, 1, 2048, 2048, 1, (getenv("V32BIS_T8")?atoi(getenv("V32BIS_T8")):9600)) != 0)
+            bad++;
+        if (run_duplex(1,
+                       V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600
+                       | V32BIS_RATE_7200 | V32BIS_RATE_4800,
+                       V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600
+                       | V32BIS_RATE_7200 | V32BIS_RATE_4800,
+                       14400, 0, 0, 1, 80, 0, 1, 2048, 2048, 0, 7200) != 0)
+            bad++;
+        /* Down to the uncoded rate, which is a different decoder. */
+        if (run_duplex(0,
+                       V32BIS_RATE_14400 | V32BIS_RATE_9600 | V32BIS_RATE_4800,
+                       V32BIS_RATE_14400 | V32BIS_RATE_9600 | V32BIS_RATE_4800,
+                       14400, 0, 0, 1, 80, 0, 1, 2048, 2048, 0, 4800) != 0)
+            bad++;
+        /* And from a lower start-up rate upwards, so the procedure is not
+           only ever tested shedding rate. */
+        if (run_duplex(0,
+                       V32BIS_RATE_7200 | V32BIS_RATE_4800,
+                       V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600
+                       | V32BIS_RATE_7200 | V32BIS_RATE_4800,
+                       7200, 0, 0, 1, 80, 0, 1, 2048, 2048, 1, 4800) != 0)
             bad++;
         /* And over a 2-wire hybrid, which is what V.32bis actually runs
            on: each side's own transmit returns into its own receiver, and

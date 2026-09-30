@@ -192,6 +192,20 @@ static double v90_reneg_feed_rms = 0.0;
    produced a lock (see the hint_h line in the MP stage).  ME_V34_J_HINT=0
    withholds it. */
 static bool v34_rx_caller_hearing_own_phase3(v34_rx_state_t *s);
+
+static int v34_p4_trn_dd_start(void)
+{
+    static int cached = -2;
+
+    if (cached == -2)
+    {
+        const char *e = getenv("ME_V34_P4_TRN_DD");
+
+        cached = (e  &&  *e)  ?  atoi(e)  :  256;
+    }
+    /*endif*/
+    return cached;
+}
 static bool v34_rx_caller_hearing_own_phase3_m(v34_rx_state_t *s, int what);
 
 int v34_rx_j_hint_enabled(void)
@@ -3332,10 +3346,14 @@ int v34_phase4_trn_measured_rate_n(v34_state_t *st, float *snr_db)
     if (snr_db)
         *snr_db = (float) snr;
     /*endif*/
-    /* Table 16 rate index.  Offset and slope are calibrated in
-       docs/v34_data_mode_rates.md against v34_duplex_test with
-       V34_DUPLEX_NOISE_DB. */
-    rate_n = (int) floor((snr - V34_TRN_SNR_RATE_OFFSET_DB)/V34_TRN_SNR_RATE_STEP_DB);
+    /* Table 16 rate index, through the same calibration the data mode's own
+       report uses (bits/symbol ~ (SNR + 13)/6, measured on the live channel,
+       docs/v34_data_mode_rates.md).  The old offset/slope pair was fitted
+       while this measurement read the receiver's own Phase-4 convergence
+       (a flat 8-11 dB whatever the line); with decision-directed TRN it
+       tracks injected noise (19.9/23.3/27.3/28.6 dB at 20/24/30/40 dB). */
+    rate_n = (int) floor((snr + 13.0)/6.0
+                         *baud_rate_parameters[s->baud_rate].baud_rate/2400.0);
     if (rate_n < 1)
         rate_n = 1;
     /*endif*/
@@ -10796,7 +10814,29 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    level is right, and above 2400 baud it walks it off: the
                    Phase 4 TRN hypothesis search then reads a flat 50% ones for
                    the rest of the call.  Let it converge, then stop it. */
-                if (!t_cma->tx.tx_data_mode && !freeze_mp_cma && !da_owns_eq)
+                if (s->stage == V34_RX_STAGE_PHASE4_TRN
+                    &&  !s->v90_mode
+                    &&  v34_p4_trn_dd_start() > 0
+                    &&  s->phase4_trn_after_j >= v34_p4_trn_dd_start())
+                {
+                    /* V.34 11.4.1.1.2/11.4.1.2.2: TRN is sent "until the
+                       receiver is trained adequately", and it is the
+                       receiver's last known-constellation training before
+                       MP and data.  Blind CMA stops after it has found the
+                       level (above) and nothing else adapted here, so the
+                       Phase 3 tap solution was carried unchanged across the
+                       seam and the far end's echo-free Phase 3 channel no
+                       longer matched a duplex Phase 4: against the RasFinder
+                       its TRN sat 19 degrees from the grid with |z| spread
+                       0.235, and B1 then matched at 0.997 (~23 dB).  Decision-
+                       directed LMS on TRN's own 4-point decisions for the rest
+                       of the segment takes the same recording to 1.1 degrees,
+                       |z| spread 0.015 and B1 at 1.000 (32 dB)
+                       (rf-tower-v34b-1).  ME_V34_P4_TRN_DD=0 disables; the
+                       value is the TRN symbol it starts at. */
+                    v34_rx_tune_equalizer(s, sym, &eq_target);
+                }
+                else if (!t_cma->tx.tx_data_mode && !freeze_mp_cma && !da_owns_eq)
                 {
                     if (s->reneg_cp_train)
                     {

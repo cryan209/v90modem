@@ -255,6 +255,11 @@ SPAN_DECLARE(bool) v34_rx_hearing_own_echo(v34_state_t *s);
     \return 0 once B1 has been acquired in the current data mode, else -1. */
 SPAN_DECLARE(int) v34_get_b1_snr_db(v34_state_t *s, float *snr_db);
 
+/*! Let the Phase-4 TRN SNR cap the receive rate this modem asks for in MP.
+    \param s The modem context.
+    \param enable True to apply it. */
+SPAN_DECLARE(void) v34_set_trn_rate_selection(v34_state_t *s, bool enable);
+
 /*! Initialise a V.34 modem context. This must be called before the first
     use of the context, to initialise its contents.
     \brief Initialise a V.34 modem context.
