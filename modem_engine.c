@@ -1499,8 +1499,32 @@ static bool v91_live_rx_collect(uint8_t cw, int need)
     return g_v91_rx_accum_len >= need;
 }
 
+static const char *v91_live_rx_stage_name(v91_live_rx_stage_t s)
+{
+    switch (s) {
+    case V91_LIVE_RX_HUNT_EZ:  return "HUNT_EZ";
+    case V91_LIVE_RX_INFO:     return "INFO";
+    case V91_LIVE_RX_INFO_ACK: return "INFO_ACK";
+    case V91_LIVE_RX_EU:       return "EU";
+    case V91_LIVE_RX_DIL:      return "DIL";
+    case V91_LIVE_RX_SCR_CP:   return "SCR_CP";
+    case V91_LIVE_RX_ES:       return "ES";
+    case V91_LIVE_RX_B1:       return "B1";
+    case V91_LIVE_RX_DONE:     return "DONE";
+    }
+    return "?";
+}
+
 static void v91_live_rx_enter_stage(v91_live_rx_stage_t stage)
 {
+    /* The V.91 receiver had no stage trace at all, so a startup that never
+     * locked reported only "SCR fill exhausted waiting for peer DIL" and
+     * there was no way to tell how far the peer's sequence had been
+     * recognised.  V.34 traces its stages for exactly this reason. */
+    if (stage != g_v91_rx_stage)
+        trace_phase("V91 rx stage: %s -> %s",
+                    v91_live_rx_stage_name(g_v91_rx_stage),
+                    v91_live_rx_stage_name(stage));
     g_v91_rx_stage = stage;
     g_v91_rx_accum_len = 0;
 }

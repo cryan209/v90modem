@@ -918,3 +918,51 @@ established here -- an attempt to measure the echo in the training taps read
 a correlation of 0.92 at every lag tried, which is the low-entropy-reference
 trap this document records elsewhere, so it says nothing. Fix the line, then
 re-run before concluding anything about the stack.
+
+## V.91 between the two modems: it negotiates, and it cannot train (2026-10-01)
+
+Asked for directly, ignoring that both ends are analogue. Both sides with
+`ME_V8_ADVERTISE_V91=1`:
+
+**`ME_V8_ADVERTISE_V91` is ignored on the analogue-role branch.**
+`prepare_v8_parms()` sets `pcm_modem_availability` in three branches and only
+the two non-analogue ones consult that variable, so the coupler's own
+`setenv("ME_V90_ROLE", "analogue", 0)` silently suppresses the offer.
+`ME_V90_ROLE=digital` is needed on both ends to reach it.
+
+With that, **V.8 negotiates V.91 on both ends** -- `pcm=0x6`, "V.91 and
+V.90/V.92 digital available", `V8 selected V91` -- and both enter
+`TRAINING: mod=V91` with a 2260-symbol startup at ceiling drn 28. That is the
+first time the live V.91 path has run against any real bearer.
+
+**It then fails at the first step, in both directions.** A new receive stage
+trace (`V91 rx stage: ...`, added here because the V.91 receiver had none at
+all and reported only "SCR fill exhausted waiting for peer DIL") shows **no
+transition whatever: the receiver never leaves `HUNT_EZ`.** Not one codeword
+of the peer's startup is recognised, so nothing about DIL, CP or rate
+selection is being reached or tested.
+
+That is structural, not a defect, and two measurements say so.
+
+**There is no common clock, and V.91 has no timing recovery.** On a DS0 both
+ends take the network's 8 kHz; here each modem's codec free-runs. Measured on
+a 30 s 1000 Hz tone across a direct 6004 -> 6005 call, fitting the phase over
+2 s blocks:
+
+    control, A hearing its OWN tone through its own hybrid   +1.2 ppm, 15 deg residual
+    B hearing A's tone, two independent codecs              +30.1 ppm, 102 deg residual
+
+The control is what makes the second number mean anything -- one clock reads
+essentially zero, as it must. And the 102 degree residual says the two are not
+even related by a constant offset; a single frequency does not describe it.
+At 30 ppm the codeword alignment slips about every four seconds, and V.91
+carries nothing to track it with.
+
+**And the path is not codeword-transparent anyway**: ~4.6 dB of loss each way
+(measured above) and two D/A-A/D conversions between the two codecs, so a
+transmitted codeword does not arrive as itself even when the sample lines up.
+
+**What it would take.** V.91 needs a bit-transparent 64 kbit/s path with a
+shared clock -- what the SIP/G.711 bearer in `sip_v90_modem` already is. These
+two modems can exercise V.8's V.91 negotiation and the transmit side's startup
+construction, and nothing past that; the receiver has no bearer to lock to.
