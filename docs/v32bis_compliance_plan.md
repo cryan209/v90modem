@@ -256,14 +256,59 @@ and data rather than at the receiver.
 event, each decoded 16-bit word and the two E words -- which is what makes the
 interleaving of the two roles readable.
 
-Still missing from clause 6: the tone phases (the call modem's repeated state
-A against the answer modem's alternating A/C, the two phase reversals, and the
-64 +/- 2 symbol transition delays) and the NT and MT round-trip estimates they
-produce.  `v32bis_set_round_trip_symbols()` exists and a non-zero pair is
-exercised, but nothing measures one yet, so both default to zero and the
-modems start where the call modem has ceased transmitting.  The allocated echo
-canceller is still not in the duplex sample path, and there is no
-V.8/modem-engine/V.42/PTY integration.
+## The tone phases, and NT and MT measured rather than assumed
+
+`v32bis_start_tones()` runs clause 6 from its beginning, so the round-trip
+estimates are produced rather than supplied.  Figure 2-5's carrier states are
+four points 90 degrees apart, which is what makes the whole choreography work:
+a modem repeating state A puts a pure 1800 Hz tone on the line, one
+alternating A and C puts a suppressed-carrier pair at 1800 -/+ 1200 Hz -- the
+600 Hz and 3000 Hz 6.1 tells the call modem to look for -- and state C is
+state A turned through 180 degrees, so **every transition clause 6 calls a
+"phase reversal" is a sign change of the whole waveform**: AA to CC, AC to CA,
+and CA back to AC alike.
+
+Each side runs one coherent sliding-window detector per tone it has to watch.
+Two disjoint 20-sample windows of the mixed signal are compared, so a reversal
+shows as their dot product going negative -- and, because the leading window's
+magnitude dips to a minimum exactly when the reversal sits in the middle of
+it, **the instant of the reversal is recovered, not just its occurrence**.
+That matters: 6.1 and 6.2 do not ask for a reaction, they ask for one 64 +/- 2
+symbol intervals later, measured at the line terminals.
+
+`v32bis_duplex_test` grades that directly.  Both ends' pulse shaper delays are
+equal, so the gap between their two scheduled transitions, read off their
+transmit symbol indices, is the delay the Recommendation measures.  Over three
+one-way channel delays:
+
+    one-way   NT           MT           scheduled reversal delay
+    0T        128 (128)    65 (64)      64 (64)
+    24T       176 (176)    113 (112)    88 (88)
+    72T       272 (272)    209 (208)    136 (136)
+
+with the geometry's own expectations in brackets: NT spans two 64T hops plus
+the round trip, MT one hop plus the round trip, and the scheduled delay is
+64T plus the one way.  **NT and the reversal delay are exact at all three
+delays; MT is consistently one symbol high.**  All three tone rows then go on
+to negotiate a rate and carry the PRBS in both directions without error.
+
+**The transmit pulse shaper's group delay had to be measured, not derived.**
+It is what converts "at the line terminals" into a transmit symbol index, and
+it does not cancel in the figures above.  The 9 symbol-spaced taps suggest 4
+symbols; the interpolating structure, which indexes the coefficient sets as
+`TX_PULSESHAPER_COEFF_SETS - 1 - baud_phase`, makes it 3.  At 4 every row
+above is one symbol low and at 5 two symbols low -- inside the +/- 2 the
+Recommendation allows, and wrong.  A test that only asserted the tolerance
+would have accepted all three.
+
+The V.17 receiver is not fed while the tones are running: there is no
+conditioning signal to train on, and 6.1 and 6.2 both have the modem condition
+its receiver only once the tones are done.
+
+Still missing: 6.2's V.25 answer sequence (the engine's job, not the modem's),
+the echo canceller -- still allocated and still not in the duplex sample
+path -- and V.8/modem-engine/V.42/PTY integration.  The optional special echo
+canceller training sequence of Note 3 is not implemented either.
 
 `make v32bis-test` runs the native smoke test plus all Python reference,
 SpanDSP-comparison, waveform, and datapump tests.
@@ -385,8 +430,8 @@ Exit criteria:
 
 ### Phase 2: Scrambling, Framing, and Rate Sequences
 
-Status: complete, including the reactive clause 6 ordering; the tone phases
-that produce NT and MT are the remaining gap
+Status: complete, including the reactive clause 6 ordering and the tone
+phases that produce NT and MT
 
 - Implement transmit and receive scramblers with caller/answerer directionality.
 - Implement startup rate-sequence exchange.
@@ -414,8 +459,9 @@ Exit criteria:
 
 ### Phase 4: Full-Duplex Echo-Cancelled Operation
 
-Status: duplex start-up and data exchange complete over a clean bearer
-(`v32bis_duplex_test`); echo canceller and the clause 6 tone phases pending
+Status: the whole of clause 6, tone phases included, completes and exchanges
+data over a clean bearer with a real channel delay (`v32bis_duplex_test`);
+the echo canceller is still not in the sample path
 
 - Echo canceller
 - Duplex startup sequencing
@@ -423,7 +469,9 @@ Status: duplex start-up and data exchange complete over a clean bearer
 
 Exit criteria:
 
-- Back-to-back duplex simulation completes training and exchanges data.
+- Back-to-back duplex simulation completes training and exchanges data. Met
+  for a clean bearer with a real one-way channel delay; not met for a line
+  model with echo.
 
 ### Phase 5: Rate Renegotiation and V.32 Interop Boundaries
 

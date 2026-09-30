@@ -203,6 +203,30 @@ SPAN_DECLARE(int) v32bis_prepare_startup_tx(v32bis_state_t *s, int remote_rates)
     \return 0 on success, or -1. */
 SPAN_DECLARE(int) v32bis_start_startup(v32bis_state_t *s);
 
+/*! \brief Run the whole of ITU-T V.32bis clause 6, starting with the tone
+           phases that estimate the round-trip delay: 6.1's repeated carrier
+           state A against 6.2's alternating states A and C, the two phase
+           reversals, and the 64 symbol interval transition delays.  NT and MT
+           are measured rather than supplied.
+    \param s The modem context.
+    \return 0 on success, or -1. */
+SPAN_DECLARE(int) v32bis_start_tones(v32bis_state_t *s);
+
+/*! \brief Report the round-trip estimates the tone phases produced.
+    \param s The modem context.
+    \param nt Where to put 6.1's NT, in symbol intervals, or NULL.
+    \param mt Where to put 6.2's MT, in symbol intervals, or NULL.
+    \return 0 on success, or -1. */
+SPAN_DECLARE(int) v32bis_round_trip_symbols(v32bis_state_t *s, int *nt, int *mt);
+
+/*! \brief The transmit symbol index at which this modem made its scheduled
+           64 symbol interval tone transition, or -1.  Both modems' pulse
+           shaper delays are equal, so the difference between the two ends'
+           values is the delay 6.1 and 6.2 measure at the line terminals.
+    \param s The modem context.
+    \return The symbol index, or -1. */
+SPAN_DECLARE(int) v32bis_tone_transition_symbol(v32bis_state_t *s);
+
 /*! \brief Set the round-trip estimates NT and MT, in symbol intervals, that
            6.1 and 6.2 derive from the clause 6 tone phases.
     \param s The modem context.

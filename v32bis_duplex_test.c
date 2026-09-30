@@ -74,7 +74,9 @@ static int run_duplex(int alaw,
                       int answer_rates,
                       int expected_rate,
                       int nt,
-                      int mt)
+                      int mt,
+                      int tones,
+                      int delay)
 {
     int16_t call_audio[160];
     int16_t answer_audio[160];
@@ -88,7 +90,15 @@ static int run_duplex(int alaw,
     v32bis_state_t *answer;
     int block;
     int failed = 0;
+    /* A one-way delay line, so the round-trip estimates the tone phases
+       produce have something real to estimate. */
+    int16_t delay_to_answer[1024];
+    int16_t delay_to_call[1024];
+    int delay_pos = 0;
+    int i;
 
+    memset(delay_to_answer, 0, sizeof(delay_to_answer));
+    memset(delay_to_call, 0, sizeof(delay_to_call));
     call = v32bis_init(NULL, 14400, true, pattern_bit, &call_tx_pattern, collect_bit, &call_rx);
     answer = v32bis_init(NULL, 14400, false, pattern_bit, &answer_tx_pattern, collect_bit, &answer_rx);
     if (call == NULL  ||  answer == NULL)
@@ -98,10 +108,10 @@ static int run_duplex(int alaw,
     }
     if (v32bis_set_supported_bit_rates(call, call_rates) != 0
         || v32bis_set_supported_bit_rates(answer, answer_rates) != 0
-        || v32bis_set_round_trip_symbols(call, nt, mt) != 0
-        || v32bis_set_round_trip_symbols(answer, nt, mt) != 0
-        || v32bis_start_startup(call) != 0
-        || v32bis_start_startup(answer) != 0)
+        || (!tones  &&  (v32bis_set_round_trip_symbols(call, nt, mt) != 0
+                         || v32bis_set_round_trip_symbols(answer, nt, mt) != 0))
+        || (tones ? v32bis_start_tones(call) : v32bis_start_startup(call)) != 0
+        || (tones ? v32bis_start_tones(answer) : v32bis_start_startup(answer)) != 0)
     {
         fprintf(stderr, "V.32bis duplex start-up setup failed\n");
         v32bis_free(call);
@@ -117,6 +127,24 @@ static int run_duplex(int alaw,
         v32bis_tx(answer, answer_audio, 160);
         bearer(call_audio, to_answer, 160, alaw);
         bearer(answer_audio, to_call, 160, alaw);
+        if (delay > 0)
+        {
+            for (i = 0;  i < 160;  i++)
+            {
+                int16_t a = to_answer[i];
+                int16_t c = to_call[i];
+
+                to_answer[i] = delay_to_answer[delay_pos];
+                to_call[i] = delay_to_call[delay_pos];
+                delay_to_answer[delay_pos] = a;
+                delay_to_call[delay_pos] = c;
+                if (++delay_pos >= delay)
+                    delay_pos = 0;
+                /*endif*/
+            }
+            /*endfor*/
+        }
+        /*endif*/
         v32bis_rx(answer, to_answer, 160);
         v32bis_rx(call, to_call, 160);
     }
@@ -130,6 +158,50 @@ static int run_duplex(int alaw,
         failed = 1;
     if (call_rx.errors != 0  ||  answer_rx.errors != 0)
         failed = 1;
+    if (tones)
+    {
+        int call_nt = 0;
+        int call_mt = 0;
+        int answer_nt = 0;
+        int answer_mt = 0;
+        int call_at;
+        int answer_at;
+        int delay_symbols;
+        int one_way = (int) ((delay + 1.6667)/3.3333);
+        int round_trip = 2*one_way;
+
+        v32bis_round_trip_symbols(call, &call_nt, &call_mt);
+        v32bis_round_trip_symbols(answer, &answer_nt, &answer_mt);
+        call_at = v32bis_tone_transition_symbol(call);
+        answer_at = v32bis_tone_transition_symbol(answer);
+        /* Both modems' pulse shaper delays are equal, so the gap between the
+           two scheduled transitions, in transmit symbols, is the delay 6.1
+           and 6.2 measure at the line terminals.  The call modem's AA to CC
+           transition answers the answer modem's AC to CA one, which is not
+           itself the scheduled transition, so what is compared here is the
+           answer modem's scheduled CA to AC against the call modem's CC. */
+        delay_symbols = answer_at - call_at;
+        printf("    tones: one-way %d samples; call NT=%d, answer MT=%d, "
+               "call CC at symbol %d, answer AC at symbol %d, reversal delay %d\n",
+               delay, call_nt, answer_mt, call_at, answer_at, delay_symbols);
+        /* NT is 128 symbol intervals plus the round trip, MT is 64 plus the
+           round trip: each side inserts one 64 symbol interval hop, and the
+           call modem's counter spans two of them. */
+        if (abs(call_nt - (128 + round_trip)) > 2
+            || abs(answer_mt - (64 + round_trip)) > 2)
+            failed = 1;
+        /*endif*/
+        if (call_nt <= 0  ||  answer_mt <= 0)
+            failed = 1;
+        /*endif*/
+        /* 6.1/6.2: "shall be 64 +/- 2 symbol periods", measured at the line
+           terminals, so the one-way delay between the two ends' transmit
+           symbol indices has to be allowed for. */
+        if (delay_symbols < 64 + one_way - 2  ||  delay_symbols > 64 + one_way + 2)
+            failed = 1;
+        /*endif*/
+    }
+    /*endif*/
     printf("V.32bis duplex %s call=%03x answer=%03x -> %d bit/s%s: "
            "rate call=%d answer=%d, call rx %d bits %d errors, "
            "answer rx %d bits %d errors%s\n",
@@ -197,13 +269,13 @@ int main(int argc, char *argv[])
     {
         if (one >= 0  &&  (int) i != one)
             continue;
-        if (run_duplex(0, cases[i].call_rates, cases[i].answer_rates, cases[i].expected, 0, 0) != 0)
+        if (run_duplex(0, cases[i].call_rates, cases[i].answer_rates, cases[i].expected, 0, 0, 0, 0) != 0)
             bad++;
-        if (run_duplex(1, cases[i].call_rates, cases[i].answer_rates, cases[i].expected, 0, 0) != 0)
+        if (run_duplex(1, cases[i].call_rates, cases[i].answer_rates, cases[i].expected, 0, 0, 0, 0) != 0)
             bad++;
     }
-    /* The NT/MT paths are exercised once the tone phases can supply real
-       estimates; a non-zero pair must not break the dialogue in the meantime. */
+    /* A preset NT/MT pair must not break the dialogue when the tone phases
+       are skipped. */
     if (one < 0)
     {
         if (run_duplex(0,
@@ -211,7 +283,33 @@ int main(int argc, char *argv[])
                        V32BIS_RATE_14400 | V32BIS_RATE_9600,
                        14400,
                        64,
-                       64) != 0)
+                       64,
+                       0,
+                       0) != 0)
+            bad++;
+        /* And the whole of clause 6, tone phases included, in both laws:
+           NT and MT are measured here, not supplied. */
+        if (run_duplex(0,
+                       V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600,
+                       V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600,
+                       14400, 0, 0, 1, 0) != 0)
+            bad++;
+        if (run_duplex(1,
+                       V32BIS_RATE_9600 | V32BIS_RATE_7200,
+                       V32BIS_RATE_14400 | V32BIS_RATE_9600,
+                       9600, 0, 0, 1, 0) != 0)
+            bad++;
+        /* And with a real one-way delay, which is the whole point of NT and
+           MT: both must grow by the round trip. */
+        if (run_duplex(0,
+                       V32BIS_RATE_14400 | V32BIS_RATE_12000,
+                       V32BIS_RATE_14400 | V32BIS_RATE_12000,
+                       14400, 0, 0, 1, 80) != 0)
+            bad++;
+        if (run_duplex(0,
+                       V32BIS_RATE_14400 | V32BIS_RATE_12000,
+                       V32BIS_RATE_14400 | V32BIS_RATE_12000,
+                       14400, 0, 0, 1, 240) != 0)
             bad++;
     }
     if (bad != 0)

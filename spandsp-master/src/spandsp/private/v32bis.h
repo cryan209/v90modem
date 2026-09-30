@@ -30,10 +30,37 @@
 
 extern const complexf_t v32bis_constellation[16];
 
+/*! The tone detector window, in samples.  20 samples is 6 symbol intervals at
+    2400 baud and 8000 samples/s, which is short enough to time a reversal to
+    within a symbol or two and long enough to be coherent. */
+#define V32BIS_TONE_WINDOW  20
+
 /*!
     V.32bis modem descriptor. This defines the working state for a single instance
     of a V.32bis modem.
 */
+/*!
+    One coherent sliding-window tone detector.  Two disjoint windows of the
+    mixed signal are compared, so a 180 degree phase reversal shows as their
+    dot product going negative, and the instant of the reversal is recovered
+    from where the leading window's magnitude dipped.
+*/
+typedef struct
+{
+    float dphase;
+    float phase;
+    complexf_t ring[2*V32BIS_TONE_WINDOW];
+    float mag_hist[2*V32BIS_TONE_WINDOW];
+    int32_t pos;
+    complexf_t s1;
+    complexf_t s2;
+    float mag;
+    float peak;
+    int32_t hold_until;
+    bool reversal;
+    int32_t reversal_sample;
+} v32bis_tone_det_t;
+
 struct v32bis_state_s
 {
     /*! \brief The bit rate of the modem. Valid values are 1200 and 2400. */
@@ -76,6 +103,22 @@ struct v32bis_state_s
        v32bis_start_startup() is used instead, these drive the clause 6
        call/answer exchange, and each transmit phase is generated only when the
        events it waits on have arrived. */
+    /* ITU-T V.32bis 6.1/6.2 tone phases.  One sliding-window coherent
+       detector per tone the role has to watch: 600 and 3000 Hz for the call
+       modem, 1800 Hz for the answer modem. */
+    v32bis_tone_det_t tone[3];
+    bool tone_phase_active;
+    int tone_which;
+    int tone_present_run;
+    int tone_drop_run;
+    int reversals_seen;
+    int32_t tx_symbol_index;
+    int32_t tx_transition_at;
+    int32_t tx_phase_start_symbol;
+    int32_t tone_counter_start;
+    int32_t tone_transition_symbol;
+    int32_t rx_sample_count;
+
     bool reactive_startup;
     int tx_phase;
     int tx_step;

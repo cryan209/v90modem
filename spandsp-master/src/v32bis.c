@@ -123,8 +123,31 @@ SPAN_DECLARE(int) v32bis_tx(v32bis_state_t *s, int16_t amp[], int len)
 }
 /*- End of function --------------------------------------------------------*/
 
+static void v32bis_tone_rx(v32bis_state_t *s, const int16_t amp[], int len);
+
 SPAN_DECLARE(int) v32bis_rx(v32bis_state_t *s, const int16_t amp[], int len)
 {
+    int used;
+
+    if (s->tone_phase_active)
+    {
+        /* The clause 6 tone phases are read straight off the line, and the
+           V.17 receiver is held off until there is a conditioning signal for
+           it to train on.  The tone machine may end the phase part way
+           through a block, so the rest of the block goes on to V.17. */
+        used = 0;
+        while (used < len  &&  s->tone_phase_active)
+        {
+            v32bis_tone_rx(s, &amp[used], 1);
+            used++;
+        }
+        /*endwhile*/
+        if (used >= len)
+            return 0;
+        /*endif*/
+        return v17_rx(&s->rx, &amp[used], len - used);
+    }
+    /*endif*/
     return v17_rx(&s->rx, amp, len);
 }
 /*- End of function --------------------------------------------------------*/
@@ -555,6 +578,18 @@ SPAN_DECLARE(int) v32bis_decode_startup_word(bool calling_party,
 enum
 {
     V32BIS_TX_PHASE_IDLE = 0,
+    /*! 6.1: the call modem "shall repetively transmit carrier state A" -- a
+        pure 1800 Hz tone. */
+    V32BIS_TX_PHASE_TONE_A,
+    /*! 6.1: state C, 64 symbol intervals after the first reversal arrives. */
+    V32BIS_TX_PHASE_TONE_C,
+    /*! 6.2: "alternate carrier states A and C". */
+    V32BIS_TX_PHASE_TONE_AC,
+    /*! 6.2: "alternate carrier states C and A". */
+    V32BIS_TX_PHASE_TONE_CA,
+    /*! 6.2: the second run of alternate A and C, after the scheduled CA to AC
+        transition. */
+    V32BIS_TX_PHASE_TONE_AC2,
     /*! Transmitting nothing.  The call modem does this from the second phase
         reversal until it detects R1; the answer modem from detecting the
         incoming S until it detects R2. */
@@ -597,6 +632,7 @@ static int v32bis_startup_symbol_source(void *user_data, complexf_t *symbol)
     int state;
 
     s = (v32bis_state_t *) user_data;
+    s->tx_symbol_index++;
     if (s->startup_tx_symbol_count <= 0
         || s->startup_tx_symbol_pos >= s->startup_tx_symbol_count)
     {
@@ -1365,6 +1401,136 @@ SPAN_DECLARE(int) v32bis_prepare_startup_tx(v32bis_state_t *s, int remote_rates)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* ITU-T V.32bis 6.1/6.2 tone phases.
+
+   Figure 2-5's carrier states are four points 90 degrees apart, so a modem
+   repeating state A puts a pure 1800 Hz tone on the line, and one alternating
+   A and C puts a suppressed-carrier pair at 1800 -/+ 1200 Hz, which is the
+   600 Hz and 3000 Hz the call modem is told to look for.  State C is state A
+   turned through 180 degrees, so every transition clause 6 calls a "phase
+   reversal" -- AA to CC, AC to CA and CA back to AC -- is a sign change of
+   the whole waveform, and shows in whichever tone is being tracked.
+
+   Timing matters here: 6.1 and 6.2 both require the scheduled transition to
+   appear at the line terminals 64 +/- 2 symbol intervals after the reversal
+   that caused it arrives there, and the difference between the two modems'
+   counters is the round-trip delay they then use as NT and MT.  So the
+   detector has to place the reversal in time, not merely notice it. */
+
+/*! The transmit pulse shaper's group delay, in symbol intervals.  A symbol
+    handed to v17_tx() appears at the line this much later, so it is what
+    converts 6.1's and 6.2's "at the line terminals" into a transmit symbol
+    index.  It is MEASURED, not derived: the 9 symbol-spaced taps suggest 4,
+    and the interpolating structure -- which indexes the coefficient sets as
+    TX_PULSESHAPER_COEFF_SETS - 1 - baud_phase -- makes it 3.  The duplex
+    harness reads the delay off the two ends' transmit symbol indices, where
+    the shaper delay does not cancel, and 3 is the value that puts it exactly
+    on 64 + the one-way delay at 0, 80 and 240 samples, and NT exactly on
+    128 + the round trip.  4 puts every row one symbol low, 5 two. */
+#define V32BIS_TX_SHAPER_DELAY_SYMBOLS  3
+/*! 10/3 samples per symbol at 2400 baud and 8000 samples/s. */
+#define V32BIS_SAMPLES_PER_SYMBOL       (10.0f/3.0f)
+/*! 6.1/6.2: the scheduled transition delay. */
+#define V32BIS_REVERSAL_DELAY_SYMBOLS   64
+/*! 6.2: "an incoming tone has been detected at 1800 +/- 7 Hz for 64 symbol
+    periods". */
+#define V32BIS_TONE_PRESENT_SYMBOLS     64
+/*! 6.2: the answer modem acts on an amplitude drop in the incoming tone. */
+#define V32BIS_TONE_DROP_SYMBOLS        16
+
+static void v32bis_tone_det_init(v32bis_tone_det_t *d, float freq)
+{
+    memset(d, 0, sizeof(*d));
+    d->dphase = 2.0f*3.1415926535f*freq/8000.0f;
+    d->hold_until = -1;
+}
+/*- End of function --------------------------------------------------------*/
+
+/*! Returns true on the sample at which a reversal is declared.  The instant
+    of the reversal itself is left in d->reversal_sample: the leading window's
+    magnitude dips to a minimum when the reversal sits in the middle of it, so
+    that minimum, half a window back, is an unbiased estimate of it. */
+static bool v32bis_tone_det_rx(v32bis_tone_det_t *d, float x, int32_t now)
+{
+    complexf_t m;
+    complexf_t leaving;
+    complexf_t oldest;
+    float dot;
+    float mag2;
+    float best;
+    int best_i;
+    int i;
+    int idx;
+
+    m.re = x*cosf(d->phase);
+    m.im = -x*sinf(d->phase);
+    d->phase += d->dphase;
+    if (d->phase > 2.0f*3.1415926535f)
+        d->phase -= 2.0f*3.1415926535f;
+    /*endif*/
+    idx = (int) (d->pos%(2*V32BIS_TONE_WINDOW));
+    leaving = d->ring[(idx + 2*V32BIS_TONE_WINDOW - V32BIS_TONE_WINDOW)%(2*V32BIS_TONE_WINDOW)];
+    oldest = d->ring[idx];
+    d->ring[idx] = m;
+    d->s1.re += m.re - leaving.re;
+    d->s1.im += m.im - leaving.im;
+    d->s2.re += leaving.re - oldest.re;
+    d->s2.im += leaving.im - oldest.im;
+    d->mag = sqrtf(d->s1.re*d->s1.re + d->s1.im*d->s1.im);
+    d->mag_hist[idx] = d->mag;
+    if (d->mag > d->peak)
+        d->peak = d->mag;
+    else
+        d->peak *= 0.99995f;
+    /*endif*/
+    d->pos++;
+    d->reversal = false;
+    if (d->pos < 2*V32BIS_TONE_WINDOW  ||  now < d->hold_until)
+        return false;
+    /*endif*/
+    mag2 = sqrtf(d->s2.re*d->s2.re + d->s2.im*d->s2.im);
+    if (d->mag < 0.4f*d->peak  ||  mag2 < 0.4f*d->peak  ||  d->peak < 100.0f)
+        return false;
+    /*endif*/
+    dot = d->s1.re*d->s2.re + d->s1.im*d->s2.im;
+    if (dot > -0.5f*d->mag*mag2)
+        return false;
+    /*endif*/
+    /* Where did the leading window dip? */
+    best = -1.0f;
+    best_i = 0;
+    for (i = 0;  i < 2*V32BIS_TONE_WINDOW;  i++)
+    {
+        int j = (int) ((d->pos - 1 - i)%(2*V32BIS_TONE_WINDOW));
+
+        if (best < 0.0f  ||  d->mag_hist[j] < best)
+        {
+            best = d->mag_hist[j];
+            best_i = i;
+        }
+        /*endif*/
+    }
+    /*endfor*/
+    d->reversal = true;
+    d->reversal_sample = now - best_i - V32BIS_TONE_WINDOW/2;
+    d->hold_until = now + 2*V32BIS_TONE_WINDOW;
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
+/*! Convert an instant at the line terminals into the transmit symbol index
+    whose own arrival at the line is 64 symbol intervals after it. */
+static int32_t v32bis_schedule_reversal(int32_t line_sample)
+{
+    float target;
+
+    target = (float) line_sample
+           + V32BIS_REVERSAL_DELAY_SYMBOLS*V32BIS_SAMPLES_PER_SYMBOL;
+    return (int32_t) lrintf(target/V32BIS_SAMPLES_PER_SYMBOL)
+         - V32BIS_TX_SHAPER_DELAY_SYMBOLS;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* ITU-T V.32bis 6.  The reactive start-up machine.
 
    Figure 3 is a dialogue, and the two roles read as one script each:
@@ -1378,6 +1544,7 @@ SPAN_DECLARE(int) v32bis_prepare_startup_tx(v32bis_state_t *s, int remote_rates)
    current 16-bit rate sequence"). */
 
 static void v32bis_tx_enter_phase(v32bis_state_t *s, int phase);
+static void v32bis_tx_tone_symbol(v32bis_state_t *s);
 
 /*! Build the R word this side should be sending at this point in the script.
     6.1: R2 "shall exclude rates not appearing in the previously received rate
@@ -1509,6 +1676,57 @@ static int v32bis_tx_enter_data(v32bis_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/*! Emit one symbol of whichever tone phase is running, after honouring any
+    transition scheduled for this symbol.  6.2 requires the alternating
+    segments to be an even number of symbol intervals long, and requires the
+    CA segment to end on a state A, which the parity of the switch instant is
+    what enforces. */
+static void v32bis_tx_tone_symbol(v32bis_state_t *s)
+{
+    int32_t offset;
+    int state;
+
+    if (s->tx_transition_at >= 0  &&  s->tx_symbol_index >= s->tx_transition_at)
+    {
+        s->tx_transition_at = -1;
+        s->tone_transition_symbol = s->tx_symbol_index;
+        switch (s->tx_phase)
+        {
+        case V32BIS_TX_PHASE_TONE_A:
+            v32bis_tx_enter_phase(s, V32BIS_TX_PHASE_TONE_C);
+            return;
+        case V32BIS_TX_PHASE_TONE_CA:
+            v32bis_tx_enter_phase(s, V32BIS_TX_PHASE_TONE_AC2);
+            return;
+        default:
+            break;
+        }
+        /*endswitch*/
+    }
+    /*endif*/
+    offset = s->tx_symbol_index - s->tx_phase_start_symbol;
+    switch (s->tx_phase)
+    {
+    case V32BIS_TX_PHASE_TONE_A:
+        state = V32BIS_STARTUP_A;
+        break;
+    case V32BIS_TX_PHASE_TONE_C:
+        state = V32BIS_STARTUP_C;
+        break;
+    case V32BIS_TX_PHASE_TONE_CA:
+        state = (offset & 1) ? V32BIS_STARTUP_A : V32BIS_STARTUP_C;
+        break;
+    default:
+        state = (offset & 1) ? V32BIS_STARTUP_C : V32BIS_STARTUP_A;
+        break;
+    }
+    /*endswitch*/
+    s->startup_tx_symbols[0] = (uint8_t) state;
+    s->startup_tx_symbol_count = 1;
+    s->startup_tx_symbol_pos = 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v32bis_tx_enter_phase(v32bis_state_t *s, int phase)
 {
     int count;
@@ -1522,10 +1740,18 @@ static void v32bis_tx_enter_phase(v32bis_state_t *s, int phase)
     /*endif*/
     s->tx_phase = phase;
     s->tx_released = false;
+    s->tx_phase_start_symbol = s->tx_symbol_index;
     s->startup_tx_symbol_pos = 0;
     s->startup_tx_symbol_count = 0;
     switch (phase)
     {
+    case V32BIS_TX_PHASE_TONE_A:
+    case V32BIS_TX_PHASE_TONE_C:
+    case V32BIS_TX_PHASE_TONE_AC:
+    case V32BIS_TX_PHASE_TONE_CA:
+    case V32BIS_TX_PHASE_TONE_AC2:
+        v32bis_tx_tone_symbol(s);
+        break;
     case V32BIS_TX_PHASE_SILENT:
         break;
     case V32BIS_TX_PHASE_S_NT:
@@ -1575,7 +1801,30 @@ static bool v32bis_tx_refill(v32bis_state_t *s)
 {
     switch (s->tx_phase)
     {
+    case V32BIS_TX_PHASE_TONE_A:
+    case V32BIS_TX_PHASE_TONE_C:
+    case V32BIS_TX_PHASE_TONE_AC:
+    case V32BIS_TX_PHASE_TONE_CA:
+    case V32BIS_TX_PHASE_TONE_AC2:
+        v32bis_tx_tone_symbol(s);
+        return true;
     case V32BIS_TX_PHASE_SILENT:
+        if (s->tx_transition_at >= 0)
+        {
+            /* 6.2's 16 symbol intervals of silence before the conditioning
+               signal. */
+            if (s->tx_symbol_index < s->tx_transition_at)
+                return true;
+            /*endif*/
+            /* This is 6.2's 16 symbol intervals before the FIRST conditioning
+               signal, so the script has not advanced a step: the answer
+               modem's tone phases occupy step 0, exactly as its opening
+               conditioning signal does when the tones are skipped. */
+            s->tx_transition_at = -1;
+            v32bis_tx_enter_phase(s, V32BIS_TX_PHASE_COND);
+            return true;
+        }
+        /*endif*/
         if (!s->tx_released)
             return true;
         /*endif*/
@@ -1629,6 +1878,238 @@ static bool v32bis_tx_refill(v32bis_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/*! Round a transmit symbol index up to the next one at which the alternating
+    segment has run for an even number of symbol intervals, which is what 6.2
+    requires of both the AC and the CA segments, and what makes the CA segment
+    end on a state A. */
+static int32_t v32bis_even_boundary(v32bis_state_t *s, int32_t at)
+{
+    if (at < s->tx_symbol_index + 1)
+        at = s->tx_symbol_index + 1;
+    /*endif*/
+    if (((at - s->tx_phase_start_symbol) & 1) != 0)
+        at++;
+    /*endif*/
+    return at;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int v32bis_symbols_between(int32_t a, int32_t b)
+{
+    return (int) lrintf((float) (b - a)/V32BIS_SAMPLES_PER_SYMBOL);
+}
+/*- End of function --------------------------------------------------------*/
+
+/*! The clause 6 tone dialogue, run on the raw received samples.  The V.17
+    receiver is not fed while this is going on: there is no conditioning
+    signal to train on yet, and 6.1 and 6.2 both have the modem condition its
+    receiver only once the tones are done. */
+static void v32bis_tone_rx(v32bis_state_t *s, const int16_t amp[], int len)
+{
+    int i;
+    int32_t now;
+    int32_t at;
+
+    for (i = 0;  i < len;  i++)
+    {
+        now = s->rx_sample_count++;
+        if (s->calling_party)
+        {
+            bool rev0;
+            bool rev1;
+
+            rev0 = v32bis_tone_det_rx(&s->tone[0], (float) amp[i], now);
+            rev1 = v32bis_tone_det_rx(&s->tone[1], (float) amp[i], now);
+            if (s->tone_which < 0)
+            {
+                /* 6.1: "conditioned to detect ... one of two incoming tones at
+                   frequencies 600 +/- 7 Hz and 3000 +/- 7 Hz". */
+                if (s->tone[0].peak > 100.0f  ||  s->tone[1].peak > 100.0f)
+                    s->tone_which = (s->tone[0].peak >= s->tone[1].peak) ? 0 : 1;
+                /*endif*/
+                continue;
+            }
+            /*endif*/
+            if (!(s->tone_which == 0 ? rev0 : rev1))
+                continue;
+            /*endif*/
+            at = s->tone[s->tone_which].reversal_sample;
+            if (s->reversals_seen == 0)
+            {
+                /* 6.1: start the counter and, 64 symbol intervals after this
+                   reversal reaches the line, change from AA to CC. */
+                s->reversals_seen = 1;
+                s->tone_counter_start = at;
+                s->tx_transition_at = v32bis_schedule_reversal(at);
+                if (v32bis_trace())
+                {
+                    fprintf(stderr,
+                            "[V32BIS call  ] reversal 1 in the %d Hz tone at sample %d,"
+                            " CC scheduled for tx symbol %d\n",
+                            (s->tone_which == 0) ? 600 : 3000,
+                            at,
+                            s->tx_transition_at);
+                }
+                /*endif*/
+            }
+            else if (s->reversals_seen == 1)
+            {
+                /* 6.1: stop the counter and cease transmitting. */
+                s->reversals_seen = 2;
+                s->nt_symbols = v32bis_symbols_between(s->tone_counter_start, at);
+                s->tone_phase_active = false;
+                s->tx_transition_at = -1;
+                v32bis_tx_enter_phase(s, V32BIS_TX_PHASE_SILENT);
+                if (v32bis_trace())
+                {
+                    fprintf(stderr,
+                            "[V32BIS call  ] reversal 2 at sample %d, NT = %d symbols\n",
+                            at, s->nt_symbols);
+                }
+                /*endif*/
+            }
+            /*endif*/
+            continue;
+        }
+        /*endif*/
+        /* Answer mode. */
+        if (v32bis_tone_det_rx(&s->tone[2], (float) amp[i], now)
+            &&  s->reversals_seen == 1)
+        {
+            /* 6.2: stop the counter and, 64 symbol intervals after this
+               reversal reaches the line, revert from CA to AC. */
+            at = s->tone[2].reversal_sample;
+            s->reversals_seen = 2;
+            s->mt_symbols = v32bis_symbols_between(s->tone_counter_start, at);
+            s->tx_transition_at = v32bis_even_boundary(s, v32bis_schedule_reversal(at));
+            if (v32bis_trace())
+            {
+                fprintf(stderr,
+                        "[V32BIS answer] reversal at sample %d, MT = %d symbols,"
+                        " AC scheduled for tx symbol %d\n",
+                        at, s->mt_symbols, s->tx_transition_at);
+            }
+            /*endif*/
+            continue;
+        }
+        /*endif*/
+        if (s->reversals_seen == 0)
+        {
+            /* 6.2: alternate A and C for an even number of symbol intervals
+               of at least 128, and detect the incoming 1800 Hz tone for 64
+               symbol periods, before starting the counter and switching to
+               alternate C and A. */
+            if (s->tone[2].mag > 0.4f*s->tone[2].peak  &&  s->tone[2].peak > 100.0f)
+                s->tone_present_run++;
+            else
+                s->tone_present_run = 0;
+            /*endif*/
+            if (s->tone_present_run
+                    >= (int) (V32BIS_TONE_PRESENT_SYMBOLS*V32BIS_SAMPLES_PER_SYMBOL)
+                &&
+                s->tx_symbol_index - s->tx_phase_start_symbol >= 128)
+            {
+                s->reversals_seen = 1;
+                /* 6.2 measures the reversal delay at the line terminals, so
+                   the counter starts when this modem's own AC to CA
+                   transition reaches the line, not when the decision was
+                   taken: the transmitter has already generated the current
+                   block, so the two differ by up to a block. */
+                s->tone_counter_start =
+                    (int32_t) lrintf((s->tx_symbol_index + 1
+                                      + V32BIS_TX_SHAPER_DELAY_SYMBOLS)
+                                     *V32BIS_SAMPLES_PER_SYMBOL);
+                s->tx_transition_at = -1;
+                v32bis_tx_enter_phase(s, V32BIS_TX_PHASE_TONE_CA);
+                if (v32bis_trace())
+                {
+                    fprintf(stderr,
+                            "[V32BIS answer] 1800 Hz held for 64T; counter started at"
+                            " sample %d, CA from tx symbol %d\n",
+                            now, s->tx_symbol_index);
+                }
+                /*endif*/
+            }
+            /*endif*/
+            continue;
+        }
+        /*endif*/
+        if (s->reversals_seen == 2  &&  s->tx_transition_at < 0)
+        {
+            /* 6.2: "When an amplitude drop is detected in the incoming tone,
+               the modem shall cease transmitting for a period of 16 symbol
+               intervals and then transmit the receiver conditioning signal." */
+            if (s->tone[2].mag < 0.25f*s->tone[2].peak)
+                s->tone_drop_run++;
+            else
+                s->tone_drop_run = 0;
+            /*endif*/
+            if (s->tone_drop_run
+                    >= (int) (V32BIS_TONE_DROP_SYMBOLS*V32BIS_SAMPLES_PER_SYMBOL))
+            {
+                s->tone_phase_active = false;
+                v32bis_tx_enter_phase(s, V32BIS_TX_PHASE_SILENT);
+                s->tx_transition_at = s->tx_symbol_index + V32BIS_TONE_DROP_SYMBOLS;
+                if (v32bis_trace())
+                {
+                    fprintf(stderr,
+                            "[V32BIS answer] amplitude drop at sample %d; conditioning"
+                            " from tx symbol %d\n",
+                            now, s->tx_transition_at);
+                }
+                /*endif*/
+            }
+            /*endif*/
+        }
+        /*endif*/
+    }
+    /*endfor*/
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_start_tones(v32bis_state_t *s)
+{
+    if (s == NULL  ||  v32bis_start_startup(s) != 0)
+        return -1;
+    /*endif*/
+    v32bis_tone_det_init(&s->tone[0], 600.0f);
+    v32bis_tone_det_init(&s->tone[1], 3000.0f);
+    v32bis_tone_det_init(&s->tone[2], 1800.0f);
+    s->tone_phase_active = true;
+    s->tone_which = -1;
+    s->tone_present_run = 0;
+    s->tone_drop_run = 0;
+    s->reversals_seen = 0;
+    s->tone_transition_symbol = -1;
+    s->nt_symbols = 0;
+    s->mt_symbols = 0;
+    v32bis_tx_enter_phase(s,
+                          s->calling_party ? V32BIS_TX_PHASE_TONE_A
+                                           : V32BIS_TX_PHASE_TONE_AC);
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_round_trip_symbols(v32bis_state_t *s, int *nt, int *mt)
+{
+    if (s == NULL)
+        return -1;
+    if (nt != NULL)
+        *nt = s->nt_symbols;
+    /*endif*/
+    if (mt != NULL)
+        *mt = s->mt_symbols;
+    /*endif*/
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_tone_transition_symbol(v32bis_state_t *s)
+{
+    return (s != NULL) ? s->tone_transition_symbol : -1;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v32bis_start_startup(v32bis_state_t *s)
 {
     if (s == NULL)
@@ -1641,6 +2122,11 @@ SPAN_DECLARE(int) v32bis_start_startup(v32bis_state_t *s)
     s->rx_hold_symbols = 0;
     s->rx_repeat_word = 0;
     s->startup_selected_rate = 0;
+    s->tone_phase_active = false;
+    s->tx_transition_at = -1;
+    s->tx_symbol_index = 0;
+    s->tx_phase_start_symbol = 0;
+    s->rx_sample_count = 0;
     s->tx.symbol_source = v32bis_startup_symbol_source;
     s->tx.symbol_source_user_data = s;
     s->rx.symbol_sink = v32bis_startup_symbol_sink;
