@@ -168,6 +168,7 @@ FAX_CLASS_TEST_OBJS = fax_class_test.o data_interface.o fax_class2.o
 FAX_CLASS2_TEST_OBJS = fax_class2_test.o fax_class2.o
 V90_UPSTREAM_REPLAY_OBJS = v90_upstream_replay.o
 HSF_FXO_PROBE_OBJS = hsf_fxo_probe.o hsf_fxo.o
+APPLE_USB_MODEM_PROBE_OBJS = tools/apple_usb_modem_probe.o
 HSF_V90_COUPLER_OBJS = hsf_v90_coupler.o hsf_fxo.o $(filter-out sip_modem.o,$(OBJS))
 # ESP32 port, layer 2: the streamed V.90 CP decode standing alone, with the
 # Table 14 framer it feeds.  No V.34 receiver.
@@ -301,6 +302,7 @@ test: $(TEST_TARGETS)
 	./v34_hdx_test 3200 21600 ulaw 20 9600
 	./v34_hdx_test 3429 14400 alaw 20 19200
 	./v34_hdx_test 3429 28800 alaw 20 4800
+	$(MAKE) v34-hdx-primary-test
 	./v32bis_spandsp_test
 	./v32bis_duplex_test
 	./v92_startup_test
@@ -376,6 +378,22 @@ hsf_fxo.o hsf_fxo_probe.o hsf_v90_coupler.o: CFLAGS += $(LIBUSB_CFLAGS)
 # the probe silently leaves the coupler linked against the previous build.
 hsf_v90_coupler.o: hsf_fxo_probe.c hsf_fxo.h modem_engine.h data_interface.h
 
+# The Apple USB Modem (A1082, USB 05ac:1401), a Motorola SM56 softmodem: a
+# candidate analogue side over a real 2-wire line.  Both need the device
+# attached, so neither is in TEST_TARGETS nor runs under `make test`.
+# See docs/apple_usb_modem_sm56.md.
+apple_usb_modem_probe: $(APPLE_USB_MODEM_PROBE_OBJS)
+	$(CC) $(APPLE_USB_MODEM_PROBE_OBJS) -o $@ $(LIBUSB_LIBS)
+
+tools/apple_usb_modem_probe.o: CFLAGS += $(LIBUSB_CFLAGS)
+
+# CoreAudio/AVFoundation, not libusb: once the configuration is set, usbaudiod
+# owns the codec and it is reached as an ordinary audio device.
+apple_usb_modem_audio: tools/apple_usb_modem_audio.m
+	$(CC) $(CFLAGS) -fobjc-arc $< -o $@ \
+	    -framework AVFoundation -framework AudioToolbox \
+	    -framework CoreAudio -framework CoreFoundation -framework Foundation
+
 vpcm_loopback_test: $(TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(TEST_OBJS) -o $@ $(LDFLAGS)
 
@@ -446,6 +464,55 @@ v34-duplex-test: v34_duplex_test
 
 v34_duplex_test: $(V34_DUPLEX_TEST_OBJS) spandsp
 	$(CC) $(V34_DUPLEX_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+
+.PHONY: v34-hdx-primary-test
+# 12.5 resynchronization followed by at least 8000 error-free primary bits.
+# All symbol rates and laws; unequal ceilings also check the MPh-to-mapper seam.
+v34-hdx-primary-test: v34_hdx_test
+	@set -e; for baud in 2400 2743 2800 3000 3200 3429; do \
+	  for law in ulaw alaw; do \
+	    V34_HDX_PRIMARY=1 ./v34_hdx_test $$baud 9600 $$law 8; \
+	  done; \
+	done
+	V34_HDX_PRIMARY=1 ./v34_hdx_test 3200 21600 ulaw 8
+	V34_HDX_PRIMARY=1 ./v34_hdx_test 3200 21600 alaw 8
+	V34_HDX_PRIMARY=1 V34_HDX_RESTART=1 ./v34_hdx_test 3200 21600 ulaw 12
+	V34_HDX_PRIMARY=1 V34_HDX_RESTART=1 ./v34_hdx_test 3200 21600 alaw 12
+	@set -e; for baud in 3200 3429; do \
+	  for law in ulaw alaw; do \
+	    V34_HDX_PRIMARY=1 ./v34_hdx_test $$baud 24000 $$law 8; \
+	  done; \
+	done
+	V34_HDX_PRIMARY=1 V34_HDX_RESTART=1 ./v34_hdx_test 3200 24000 ulaw 12
+	V34_HDX_PRIMARY=1 V34_HDX_RESTART=1 ./v34_hdx_test 3429 24000 alaw 12
+	@set -e; for baud in 3200 3429; do \
+	  for rate in 26400 28800; do \
+	    for law in ulaw alaw; do \
+	      V34_HDX_PRIMARY=1 ./v34_hdx_test $$baud $$rate $$law 8; \
+	    done; \
+	  done; \
+	done
+	V34_HDX_PRIMARY=1 V34_HDX_RESTART=1 ./v34_hdx_test 3200 28800 ulaw 12
+	V34_HDX_PRIMARY=1 V34_HDX_RESTART=1 ./v34_hdx_test 3429 28800 alaw 12
+	V34_HDX_PRIMARY=1 ./v34_hdx_test 3200 9600 ulaw 8 21600
+	V34_HDX_PRIMARY=1 ./v34_hdx_test 3200 21600 alaw 8 9600
+	V34_HDX_PRIMARY=1 ./v34_hdx_test 3429 28800 alaw 8 4800
+	V34_HDX_PRIMARY=1 V34_HDX_RESTART=1 ./v34_hdx_test 2400 9600 ulaw 12
+	V34_HDX_PRIMARY=1 V34_HDX_RESTART=1 ./v34_hdx_test 3200 9600 alaw 12
+	V34_HDX_PRIMARY=1 V34_HDX_RESTART=1 ./v34_hdx_test 3429 9600 ulaw 12
+
+# Diagnostic gate for the dense profiles still under development. Every
+# failure remains a failure; run the whole matrix before returning status.
+.PHONY: v34-hdx-high-rate-test
+v34-hdx-high-rate-test: v34_hdx_test
+	@failed=0; for baud in 3200 3429; do \
+	  for rate in 26400 28800 31200 33600; do \
+	    if test $$baud = 3200 && test $$rate = 33600; then continue; fi; \
+	    for law in ulaw alaw; do \
+	      V34_HDX_PRIMARY=1 ./v34_hdx_test $$baud $$rate $$law 8 || failed=1; \
+	    done; \
+	  done; \
+	done; exit $$failed
 
 v34_hdx_test: $(V34_HDX_TEST_OBJS) spandsp
 	$(CC) $(V34_HDX_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
@@ -673,7 +740,7 @@ fixed-compare:
 	fi
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test *.d tools/*.d
+	rm -f $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test *.d tools/*.d $(APPLE_USB_MODEM_PROBE_OBJS) apple_usb_modem_probe apple_usb_modem_audio
 
 distclean: clean
 	rm -f "$(SPANDSP_HOST_STAMP)" "$(PJ_HOST_STAMP)" $(BUILD_MODE_STAMP)
