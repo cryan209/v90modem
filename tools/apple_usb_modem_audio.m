@@ -31,8 +31,14 @@
  * As of 2026-09-30 the input is a CONSTANT at negative full scale, and the
  * constant varies with sample rate (-30069 at 7200, -31703 at 8000, -32768 at
  * 9600 and above).  A fill pattern would not vary with rate; a DC-saturated
- * front end read through a per-rate decimation chain does.  So the analogue
- * path is unpowered and no noise floor is measurable until line control works.
+ * front end read through a per-rate decimation chain does, so a real ADC and
+ * filter chain are running with their input at a rail.
+ *
+ * BUT those captures had NOTHING PLUGGED INTO THE TEL JACK.  With no line there
+ * is no loop current, so a railed line-sense output is simply what a
+ * disconnected DAA looks like -- it is NOT evidence that a bring-up command is
+ * needed, and no noise floor is meaningful without a line.  Connect one before
+ * reading anything into a capture.
  *
  * Build: make apple_usb_modem_audio
  */

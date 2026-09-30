@@ -88,9 +88,18 @@ constant at negative full scale.
 driver fill pattern or a substituted buffer would be rate-independent.  A
 DC-saturated analogue front end read through a decimation chain whose DC gain
 differs per rate produces a slightly different clipped constant at each rate,
-railing outright at the higher ones.  So there is a real ADC running with its
-input stuck — consistent with the line side being unpowered on-hook, and with
-nothing having started a session.
+railing outright at the higher ones.  So there is a real ADC running, with a
+real filter chain, and its input stuck at a rail.
+
+**These captures were taken with NOTHING PLUGGED INTO THE TEL JACK, and that
+bounds what they can say.**  With no line there is no loop current, so a DAA
+line-sense output sitting at a rail is just what a disconnected DAA looks like.
+The rail is therefore NOT evidence that a bring-up command is needed: "the
+analogue path is unpowered until told otherwise" and "there is no line" predict
+the same thing, and this setup cannot separate them.  Nor is a noise floor a
+meaningful thing to ask for here - with no line the best it could describe is
+the codec's own floor, and only once the path is powered at all.  Repeat these
+measurements with a line connected before drawing anything from them.
 
 ## Driver provenance
 
@@ -256,9 +265,10 @@ DTE rates.  Rate selection is in the binary.
 
 - What the opcodes do.  Trace the eight IOCTLs into `USmSerial.sys`.
 - How the country blobs reach the device.
-- Whether the DFU interface expects a firmware push, and whether anything must
-  be sent before the codec stops railing — i.e. whether a noise floor is even
-  measurable without line control.
+- Whether the DFU interface expects a firmware push.
+- Whether anything must be sent before the codec stops railing.  UNTESTABLE as
+  measured: the captures above had no line connected, so the rail has a trivial
+  explanation and the question needs a line in the jack first.
 - The `wIndex = 0` requests (`bRequest` 0x11/0x13/0x14), untested live.
 - Whether `0x220070` (tested by the dispatcher but reaching no request block
   above) does something else.
