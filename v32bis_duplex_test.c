@@ -23,6 +23,7 @@
 #include <string.h>
 #include <math.h>
 
+#define SPANDSP_EXPOSE_INTERNAL_STRUCTURES
 #include <spandsp.h>
 
 typedef struct
@@ -42,6 +43,7 @@ typedef struct
        would pass a modem that had lost the stream entirely. */
     int resync;
     int resync_len;
+    uint32_t resync_state;
     uint8_t resync_buf[128];
 } bit_stats_t;
 
@@ -54,14 +56,16 @@ static int pattern_bit(void *user_data)
     return bit;
 }
 
-#define RESYNC_SKIP_MAX 96
-#define RESYNC_MATCH    32
+#define RESYNC_SKIP_MAX 64
+#define RESYNC_MATCH    64
 
 static void collect_bit(void *user_data, int bit)
 {
     bit_stats_t *stats = (bit_stats_t *) user_data;
     int expected;
     int skip;
+    int advance;
+    uint32_t anchor;
     int i;
     uint32_t trial;
     int ok;
@@ -73,24 +77,34 @@ static void collect_bit(void *user_data, int bit)
         stats->resync_buf[stats->resync_len++] = (uint8_t) bit;
         if (stats->resync_len < RESYNC_SKIP_MAX + RESYNC_MATCH)
             return;
-        for (skip = 0;  skip <= RESYNC_SKIP_MAX;  skip++)
+        /* The detector's clamp lag advances the receive checker over
+           non-data, while the transmit generator pauses during clause 8.
+           Search from the last verified pre-procedure state, rather than
+           treating those non-data bits as PRBS progress.  Bound both the
+           expected displacement and the received prefix; every later bit
+           must match the transmitter's original PRBS. */
+        anchor = stats->resync_state;
+        ok = 0;
+        for (advance = 0; advance <= 4096 && !ok; advance++)
         {
-            trial = stats->state;
-            ok = 1;
-            for (i = 0;  i < RESYNC_MATCH;  i++)
+            for (skip = 0; skip <= RESYNC_SKIP_MAX; skip++)
             {
-                if (stats->resync_buf[skip + i] != pattern_bit(&trial))
+                trial = anchor;
+                for (i = 0; i < RESYNC_MATCH; i++)
+                    if (stats->resync_buf[skip + i] != pattern_bit(&trial))
+                        break;
+                if (i == RESYNC_MATCH)
                 {
-                    ok = 0;
+                    ok = 1;
                     break;
                 }
             }
-            if (ok)
-                break;
+            if (!ok)
+                pattern_bit(&anchor);
         }
         stats->resync = 0;
         stats->resync_len = 0;
-        if (skip > RESYNC_SKIP_MAX)
+        if (!ok)
         {
             /* Nothing in the window matches, so the stream really is lost.
                Say so by counting the whole window as bad. */
@@ -98,9 +112,12 @@ static void collect_bit(void *user_data, int bit)
             stats->total += RESYNC_MATCH;
             return;
         }
-        for (i = 0;  i < RESYNC_MATCH;  i++)
+        stats->state = trial;
+        stats->total += RESYNC_MATCH;
+        for (i = skip + RESYNC_MATCH; i < RESYNC_SKIP_MAX + RESYNC_MATCH; i++)
         {
-            pattern_bit(&stats->state);
+            if (stats->resync_buf[i] != pattern_bit(&stats->state))
+                stats->errors++;
             stats->total++;
         }
         return;
@@ -260,8 +277,8 @@ static int run_duplex(int alaw,
     int16_t to_call[160];
     uint32_t call_tx_pattern = 0x13579BDFU;
     uint32_t answer_tx_pattern = 0x2468ACE1U;
-    bit_stats_t call_rx = {0x2468ACE1U, 0, 0, 0};
-    bit_stats_t answer_rx = {0x13579BDFU, 0, 0, 0};
+    bit_stats_t call_rx = {.state = 0x2468ACE1U};
+    bit_stats_t answer_rx = {.state = 0x13579BDFU};
     v32bis_state_t *call;
     v32bis_state_t *answer;
     int block;
@@ -279,6 +296,10 @@ static int run_duplex(int alaw,
     int ec_before = 0;
     int reneg_opened = 0;
     int reneg_done = 0;
+    int reneg_goal = 1;
+    int clear = (reneg_by_call >= 4);
+    int repeat = (reneg_by_call == 3);
+    int simultaneous = (reneg_by_call == 2);
     int reneg_block = 0;
     int call_before = 0;
     int answer_before = 0;
@@ -309,6 +330,8 @@ static int run_duplex(int alaw,
         || v32bis_set_ec_training_symbols(answer, answer_ec_train) != 0
         || v32bis_set_echo_canceller(call, echo_can) != 0
         || v32bis_set_echo_canceller(answer, echo_can) != 0
+        || v32bis_start_rate_renegotiation(call, 9600) != -1
+        || v32bis_start_rate_renegotiation(NULL, 9600) != -1
         || (tones ? v32bis_start_tones(call) : v32bis_start_startup(call)) != 0
         || (tones ? v32bis_start_tones(answer) : v32bis_start_startup(answer)) != 0)
     {
@@ -365,8 +388,21 @@ static int run_duplex(int alaw,
             hybrid_add(&answer_hybrid, answer_audio, to_answer, 160, hybrid/100.0f);
         }
         /*endif*/
-        v32bis_rx(answer, to_answer, 160);
-        v32bis_rx(call, to_call, 160);
+        if (repeat)
+        {
+            /* Odd callback boundaries must not move the clamp or duplicate
+               or discard samples around the E/B1 transition. */
+            v32bis_rx(answer, to_answer, 13);
+            v32bis_rx(answer, to_answer + 13, 67);
+            v32bis_rx(answer, to_answer + 80, 80);
+            v32bis_rx(call, to_call, 80);
+            v32bis_rx(call, to_call + 80, 80);
+        }
+        else
+        {
+            v32bis_rx(answer, to_answer, 160);
+            v32bis_rx(call, to_call, 160);
+        }
         /* ITU-T V.32bis 8.1: "Rate renegotiation may be initiated at any
            time during data transmission."  Open one once both directions
            are demonstrably carrying data, so the renegotiation is graded
@@ -374,23 +410,56 @@ static int run_duplex(int alaw,
         if (reneg_rate != 0  &&  !reneg_opened
             &&  call_rx.total > 4000  &&  answer_rx.total > 4000)
         {
-            if (v32bis_start_rate_renegotiation(reneg_by_call ? call : answer,
+            if (!(call_rates & V32BIS_RATE_7200)
+                && v32bis_start_rate_renegotiation(call, 7200) != -1)
+                failed = 1;
+            /* Enable higher rates only after start-up, so the upgrade rows
+               cannot accidentally start at the requested final rate. */
+            if (simultaneous && reneg_rate > expected_rate)
+            {
+                int all = V32BIS_RATE_14400 | V32BIS_RATE_12000
+                        | V32BIS_RATE_9600 | V32BIS_RATE_7200 | V32BIS_RATE_4800;
+                if (v32bis_set_supported_bit_rates(call, all) != 0
+                    || v32bis_set_supported_bit_rates(answer, all) != 0)
+                    failed = 1;
+            }
+            if (v32bis_start_rate_renegotiation((reneg_by_call && reneg_goal == 1) ? call : answer,
                                                 reneg_rate) != 0)
             {
                 fprintf(stderr, "  could not open a rate renegotiation\n");
                 failed = 1;
             }
             /*endif*/
+            if (reneg_by_call == 5)
+            {
+                /* Foreign-peer fixture: Table 5 Note 3's cleardown R4,
+                   including B4=0.  Use the normal on-wire encoder and
+                   preamble; only the advertised word is overridden. */
+                call->reneg_local_rates = 0;
+                call->reneg_tx_word = 0x0180;
+            }
+            if (simultaneous
+                && v32bis_start_rate_renegotiation(answer, reneg_rate) != 0)
+                failed = 1;
+            /* Invalid and overlapping requests must leave the exchange intact. */
+            if (v32bis_start_rate_renegotiation(call, 12345) != -1
+                || v32bis_start_rate_renegotiation(
+                    (reneg_by_call && reneg_goal == 1) ? call : answer,
+                    reneg_rate) != -1)
+                failed = 1;
+            call_rx.resync_state = call_rx.state;
+            answer_rx.resync_state = answer_rx.state;
             reneg_opened = 1;
             reneg_block = block;
             call_before = call_rx.errors;
             answer_before = answer_rx.errors;
-            rate_at_reneg = v32bis_current_bit_rate(call);
+            if (reneg_goal == 1)
+                rate_at_reneg = v32bis_current_bit_rate(call);
         }
         /*endif*/
         if (reneg_opened  &&  !reneg_done
-            &&  v32bis_rate_renegotiation_count(call) == 1
-            &&  v32bis_rate_renegotiation_count(answer) == 1)
+            &&  v32bis_rate_renegotiation_count(call) == reneg_goal
+            &&  v32bis_rate_renegotiation_count(answer) == reneg_goal)
         {
             /* Both ends are back in data mode.  8.2 clamps circuit 104
                "when a preamble is detected", and detection lags the start of
@@ -410,8 +479,39 @@ static int run_duplex(int alaw,
             answer_err_base = answer_rx.errors;
         }
         /*endif*/
+        if (repeat && reneg_goal == 1 && reneg_done
+            && call_rx.total - call_after_base > 2000
+            && answer_rx.total - answer_after_base > 2000)
+        {
+            if (call_before || answer_before
+                || call_rx.errors != call_err_base
+                || answer_rx.errors != answer_err_base)
+                failed = 1;
+            call_rx.errors = answer_rx.errors = 0;
+            reneg_goal = 2;
+            reneg_opened = reneg_done = 0;
+        }
     }
 
+    if (clear)
+    {
+        /* Clause 8 Note 2: neither end may resume payload when R4/R5
+           have no common rate.  Cleardown reports rate zero and TX stops. */
+        int ok = reneg_opened && call_before == 0 && answer_before == 0
+              && v32bis_current_bit_rate(call) == 0
+              && v32bis_current_bit_rate(answer) == 0
+              && !v32bis_startup_complete(call) && !v32bis_startup_complete(answer)
+              && call->tx_symbol_index - call->reneg_clear_start_symbol >= 64
+              && answer->tx_symbol_index - answer->reneg_clear_start_symbol >= 64
+              && v32bis_rate_renegotiation_count(call) == 0
+              && v32bis_rate_renegotiation_count(answer) == 0
+              && v32bis_tx(call, call_audio, 160) == 0
+              && v32bis_tx(answer, answer_audio, 160) == 0;
+        printf("V.32bis clause 8 no-common-rate cleardown: %s\n", ok ? "passed" : "FAILED");
+        v32bis_free(call);
+        v32bis_free(answer);
+        return !ok || failed;
+    }
     if (!v32bis_startup_complete(call)  ||  !v32bis_startup_complete(answer))
         failed = 1;
     if (ec_len > 0)
@@ -480,7 +580,7 @@ static int run_duplex(int alaw,
 
         printf("    clause 8: %s asked for %d bit/s at block %d -> call %d, "
                "answer %d bit/s, %d/%d renegotiations, %d/%d bits after it\n",
-               reneg_by_call ? "call" : "answer",
+               (repeat ? "call then answer" : simultaneous ? "both" : reneg_by_call ? "call" : "answer"),
                reneg_rate,
                reneg_block,
                v32bis_current_bit_rate(call),
@@ -492,10 +592,6 @@ static int run_duplex(int alaw,
         /* The stretch before the renegotiation and the stretch after it must
            both be error free; the clamp lag between them is not graded, and
            the whole-run counters below would otherwise condemn it. */
-        if (getenv("V32BIS_T8DBG"))
-            fprintf(stderr, "  dbg done=%d before=%d/%d errs=%d/%d base=%d/%d\n",
-                    reneg_done, call_before, answer_before,
-                    call_rx.errors, answer_rx.errors, call_err_base, answer_err_base);
         if (!reneg_done
             || call_before != 0  ||  answer_before != 0
             || call_rx.errors != call_err_base
@@ -504,12 +600,12 @@ static int run_duplex(int alaw,
         /*endif*/
         call_rx.errors = 0;
         answer_rx.errors = 0;
-        /* Both ends must have completed exactly one renegotiation, both must
+        /* Both ends must have completed the requested exchanges, both must
            have landed on the requested rate, and -- the point of clause 8 --
            the data must still be flowing afterwards with the PRBS unbroken,
            which the error counters above already require over the whole run. */
-        if (v32bis_rate_renegotiation_count(call) != 1
-            || v32bis_rate_renegotiation_count(answer) != 1)
+        if (v32bis_rate_renegotiation_count(call) != reneg_goal
+            || v32bis_rate_renegotiation_count(answer) != reneg_goal)
             failed = 1;
         /*endif*/
         if (v32bis_current_bit_rate(call) != reneg_rate
@@ -652,8 +748,53 @@ static int hybrid_sweep(int scale, int delay)
 }
 /*- End of function --------------------------------------------------------*/
 
+static int rate_renegotiation_tests(void)
+{
+    int bad = 0;
+        /* Clause 8: every rate, both initiating roles, both G.711 laws.
+           Include unchanged-rate requests: they still require the full
+           preamble/R/E/24T exchange and must resume clean payload. */
+        {
+            static const int rates[] = {4800, 7200, 9600, 12000, 14400};
+            const int all_rates = V32BIS_RATE_14400 | V32BIS_RATE_12000
+                                | V32BIS_RATE_9600 | V32BIS_RATE_7200
+                                | V32BIS_RATE_4800;
+            int law;
+            int role;
+            size_t rate;
+            for (law = 0; law < 2; law++)
+                for (role = 0; role < 4; role++)
+                    for (rate = 0; rate < sizeof(rates)/sizeof(rates[0]); rate++)
+                        bad += run_duplex(law, all_rates, all_rates, 14400,
+                                          0, 0, 1, 80, 0, 1, 2048, 2048,
+                                          role, rates[rate]);
+        }
+    /* 8.1 explicitly permits both ends initiating together.  Enable rates
+       after a 7200 start-up and request 14400 at both ends: an actual upgrade. */
+    for (int law = 0; law < 2; law++)
+        bad += run_duplex(law, V32BIS_RATE_7200 | V32BIS_RATE_4800,
+                          V32BIS_RATE_7200 | V32BIS_RATE_4800, 7200,
+                          0, 0, 1, 80, 0, 1, 2048, 2048, 2, 14400);
+    for (int law = 0; law < 2; law++)
+        bad += run_duplex(law, V32BIS_RATE_14400 | V32BIS_RATE_9600,
+                          V32BIS_RATE_14400 | V32BIS_RATE_7200, 14400,
+                          0, 0, 1, 80, 0, 1, 2048, 2048, 4, 9600);
+    for (int law = 0; law < 2; law++)
+        bad += run_duplex(law, V32BIS_RATE_14400 | V32BIS_RATE_9600,
+                          V32BIS_RATE_14400 | V32BIS_RATE_9600, 14400,
+                          0, 0, 0, 0, 0, 1, 2048, 2048, 1, 9600);
+    for (int law = 0; law < 2; law++)
+        bad += run_duplex(law, V32BIS_RATE_14400 | V32BIS_RATE_9600,
+                          V32BIS_RATE_14400 | V32BIS_RATE_9600, 14400,
+                          0, 0, 1, 80, 0, 1, 2048, 2048, 5, 9600);
+    return bad;
+}
+
 int main(int argc, char *argv[])
 {
+    if (argc > 1 && strcmp(argv[1], "--reneg-only") == 0)
+        return rate_renegotiation_tests() != 0;
+
     static const struct
     {
         int call_rates;
@@ -751,38 +892,7 @@ int main(int argc, char *argv[])
                        V32BIS_RATE_14400 | V32BIS_RATE_12000,
                        14400, 0, 0, 1, 80, 0, 1, 8192, 0, 0, 0) != 0)
             bad++;
-        /* ITU-T V.32bis 8: rate renegotiation, in both directions and both
-           ways up the ladder, on a link that was already carrying data.
-           The PRBS counters span the renegotiation, so a stream that broke
-           across it fails whatever the rates end up as. */
-        if (run_duplex(0,
-                       V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600
-                       | V32BIS_RATE_7200 | V32BIS_RATE_4800,
-                       V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600
-                       | V32BIS_RATE_7200 | V32BIS_RATE_4800,
-                       14400, 0, 0, 1, 80, 0, 1, 2048, 2048, 1, (getenv("V32BIS_T8")?atoi(getenv("V32BIS_T8")):9600)) != 0)
-            bad++;
-        if (run_duplex(1,
-                       V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600
-                       | V32BIS_RATE_7200 | V32BIS_RATE_4800,
-                       V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600
-                       | V32BIS_RATE_7200 | V32BIS_RATE_4800,
-                       14400, 0, 0, 1, 80, 0, 1, 2048, 2048, 0, 7200) != 0)
-            bad++;
-        /* Down to the uncoded rate, which is a different decoder. */
-        if (run_duplex(0,
-                       V32BIS_RATE_14400 | V32BIS_RATE_9600 | V32BIS_RATE_4800,
-                       V32BIS_RATE_14400 | V32BIS_RATE_9600 | V32BIS_RATE_4800,
-                       14400, 0, 0, 1, 80, 0, 1, 2048, 2048, 0, 4800) != 0)
-            bad++;
-        /* And from a lower start-up rate upwards, so the procedure is not
-           only ever tested shedding rate. */
-        if (run_duplex(0,
-                       V32BIS_RATE_7200 | V32BIS_RATE_4800,
-                       V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600
-                       | V32BIS_RATE_7200 | V32BIS_RATE_4800,
-                       7200, 0, 0, 1, 80, 0, 1, 2048, 2048, 1, 4800) != 0)
-            bad++;
+        bad += rate_renegotiation_tests();
         /* And over a 2-wire hybrid, which is what V.32bis actually runs
            on: each side's own transmit returns into its own receiver, and
            the canceller in the sample path is what has to remove it.  Swept
@@ -806,6 +916,6 @@ int main(int argc, char *argv[])
         fprintf(stderr, "V.32bis duplex start-up: %d case(s) failed\n", bad);
         return 1;
     }
-    printf("V.32bis clause 6 duplex start-up passed\n");
+    printf("V.32bis clauses 6/8 duplex tests passed\n");
     return 0;
 }

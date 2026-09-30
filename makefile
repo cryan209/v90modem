@@ -351,6 +351,10 @@ v32bis-ref-test:
 v32bis-datapump-test:
 	python3 -m unittest discover -s tools/v32bis_datapump -t .
 
+.PHONY: v32bis-reneg-test
+v32bis-reneg-test: v32bis_duplex_test
+	./v32bis_duplex_test --reneg-only
+
 v32bis-test: v32bis_spandsp_test v32bis_duplex_test v32bis-ref-test v32bis-datapump-test
 	./v32bis_spandsp_test
 	./v32bis_duplex_test

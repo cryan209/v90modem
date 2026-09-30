@@ -218,7 +218,8 @@ SPAN_DECLARE(int) v32bis_start_tones(v32bis_state_t *s);
     \param s The modem context.
     \param bit_rate The desired rate.  R4 will offer it and every lower rate
            this modem is enabled for.
-    \return 0 for OK. */
+    \return 0 on success, -1 before reactive data mode, during an exchange,
+            or for an invalid or disabled desired rate. */
 SPAN_DECLARE(int) v32bis_start_rate_renegotiation(v32bis_state_t *s, int bit_rate);
 
 /*! How many clause 8 rate renegotiations have completed on this connection.

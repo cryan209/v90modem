@@ -5,6 +5,65 @@ teaching modem or a "V.32bis-like" approximation. The local normative source is:
 
 - [T-REC-V.32bis-199102-I!!PDF-E.pdf](/Users/scottcryan/v90modem/ITU%20Docs/T-REC-V.32bis-199102-I!!PDF-E.pdf)
 
+## Clause 8 implementation and regression status (2026-09-30)
+
+The reactive SpanDSP dialogue now supports in-band rate renegotiation under
+V.32bis 8.1/8.2 and Figure 5. `v32bis_start_rate_renegotiation()` requests an
+enabled desired rate; R4 offers that rate and enabled lower rates. R5 offers
+the responder's current desired rate and enabled lower rates independently of
+R4. Both sides select the highest common rate, transmit whole R words for at
+least 64T, send E, and transmit 24T of B1 with zeroed convolutional state.
+The scrambler/differential handoff follows 5.3 and 5.3.2. No receiver restart,
+pulse-shaper restart, G.711 path change, coefficient change or sample-rate
+conversion is involved.
+
+The existing implementation had missed the constellation handoff from E to
+B1: the known B1 targets were interpreted as four-point rate-signal targets,
+corrupting carrier/equalizer tracking at 12000 and 14400. The receiver now
+uses the selected data constellation from the first through the last B1
+symbol, while retaining the trained loops. Preamble detection splits a receive
+callback at the clamp instant instead of applying the new sink to preceding
+samples. Incoming E must name the highest common R4/R5 rate. Completion clears
+the initiating role so the next exchange can reverse roles; restart clears the
+connection's renegotiation state and count. Tone watchers are initialized even
+when a harness starts directly at the conditioning dialogue.
+
+Clause 8 Note 2's no-common-rate case repeats E for at least 64T before
+clearing. The cleared modem reports a current rate of zero, incomplete start-up,
+and no more transmit samples. Table 5 Note 3's incoming GSTN-cleardown R word
+is also recognized in the renegotiation path and exercised with an explicit
+on-wire cleardown-word fixture. Foreign implementation interop is untested.
+
+`make v32bis-reneg-test` runs 48 focused duplex rows: all five target rates,
+both laws, either initiating role, simultaneous requests, a second exchange
+with the role reversed, two simultaneous 7200-to-14400 upgrades, two
+no-common-rate cleardowns, two explicit remote-cleardown fixtures, and two
+exchanges with clause 6 tones skipped.
+Repeated exchanges split RX into 13/67/80 and 80/80-sample callbacks. Invalid,
+disabled, pre-data, null-context and overlapping requests are rejected. The
+cleardown rows also assert at least 64 transmitted symbol intervals of E.
+
+The PRBS check requires clean data before the procedure and thousands of clean
+bits after it. Detection lag lets preamble symbols reach circuit 104 as data;
+the checker therefore searches a bounded displacement from its last verified
+pre-procedure PRBS state. It requires 64 consecutive matching bits within a
+128-bit receive window and then grades every remaining bit. This does not
+claim an error-free payload across the clamp interval. All successful focused
+rows carry zero errors before and after that bounded resynchronization.
+
+Validation: the focused rows, full C duplex suite, and C infrastructure smoke
+test pass. The Python reference's 106 tests and datapump's 17 tests pass. The broader `v32bis-test`
+target encounters three existing scrambler-source-parser errors, reproduced
+against HEAD: its regex selects an earlier `if (s->calling_party)` block rather
+than the initialization assignments. The repository-wide `make test` stops at
+plain V.34's 3000/9600/u-law duplex row (no training within 60 seconds).
+These failures are outside the changed V.32bis paths.
+
+This is offline coverage, not hardware interoperability. V.8/modem-engine,
+V.42 and PTY integration, full retrain recovery, and foreign-modem V.32
+compatibility remain separate work. Historical milestone lists below describe
+the original plan rather than overriding this measured status.
+
 ## Scope
 
 The implementation target is a duplex modem for GSTN and leased 2-wire circuits

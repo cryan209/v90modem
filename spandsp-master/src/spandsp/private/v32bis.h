@@ -172,6 +172,8 @@ struct v32bis_state_s
     /* ITU-T V.32bis 8.  Rate renegotiation, which changes the data
        signalling rate without retraining, so none of the receiver's trained
        state is disturbed by it. */
+    bool reneg_cleared;
+    int32_t reneg_clear_start_symbol;
     bool reneg_active;
     bool reneg_initiator;
     int reneg_local_rates;
