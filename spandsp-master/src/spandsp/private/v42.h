@@ -54,6 +54,8 @@ typedef struct
     uint8_t comp;
     int comp_dict_size;
     int comp_max_string;
+    bool v44_enabled;
+    v42_v44_parameters_t v44;
 } v42_config_parameters_t;
 
 typedef struct frame_s

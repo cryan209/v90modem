@@ -28,6 +28,9 @@
 
 typedef struct v42_state_s v42_state_t;
 typedef struct v42bis_state_s v42bis_state_t;
+typedef struct v44_encoder_s v44_encoder_t;
+typedef struct v44_decoder_s v44_decoder_t;
+typedef struct v42_v44_parameters_s v42_v44_parameters_t;
 
 typedef enum {
     DS_FRAMING_RAW = 0,
@@ -65,6 +68,8 @@ typedef struct {
     /* V.42 mode (opaque SpanDSP state). */
     v42_state_t *v42;
     v42bis_state_t *v42bis;
+    v44_encoder_t *v44_encoder;
+    v44_decoder_t *v44_decoder;
     bool calling_party;
     bool compression_failed;
     uint8_t compressed_tx[1024];
@@ -123,6 +128,14 @@ int ds_init_v42_ex(data_stack_t *s, bool calling_party, bool detect,
                    ds_pull_byte_fn pull, void *pull_ctx,
                    ds_push_byte_fn push, void *push_ctx,
                    ds_link_event_fn link_event, void *link_event_ctx);
+
+/* V.44 modem stream mode, with local directional Annex A proposals. Passing
+ * NULL uses 512 codewords, 32-byte strings and 1024-byte history each way. */
+int ds_init_v44(data_stack_t *s, bool calling_party, bool detect, int line_bit_rate,
+                const v42_v44_parameters_t *parameters,
+                ds_pull_byte_fn pull, void *pull_ctx,
+                ds_push_byte_fn push, void *push_ctx,
+                ds_link_event_fn link_event, void *link_event_ctx);
 
 /* Release protocol resources. Safe after any successful ds_init call. */
 void ds_release(data_stack_t *s);

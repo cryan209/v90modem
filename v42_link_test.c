@@ -435,6 +435,85 @@ static bool run_outgoing_xid(void)
     return valid;
 }
 
+
+typedef struct { uint8_t bytes[128]; int len; } xid_wire_t;
+static void capture_v44_xid(void *ctx, const uint8_t *p, int n, int ok)
+{
+    xid_wire_t *wire = ctx;
+    if (ok && n >= 3 && p[2] == 0x82 && n <= (int)sizeof(wire->bytes)) {
+        memcpy(wire->bytes,p,(size_t)n);
+        wire->len = n;
+    }
+}
+static bool v44_xid_offer(void)
+{
+    static const uint8_t tail[] = {
+        0xff,0x40,3,'V','4','4',0x41,1,0,0x42,1,1,
+        0x43,2,4,0,0x44,2,3,0,0x45,1,64,0x46,1,48,
+        0x47,2,12,0,0x48,2,8,0
+    };
+    v42_v44_parameters_t p = {0,1,1024,768,64,48,3072,2048};
+    endpoint_t ep = {0}; xid_wire_t wire = {0};
+    v42_state_t *caller = v42_init(NULL,true,false,get_payload,put_payload,&ep);
+    hdlc_rx_state_t *rx = hdlc_rx_init(NULL,false,false,1,capture_v44_xid,&wire);
+    bool ok = false;
+    if (caller && rx && v42_set_v44(caller,&p) == 0) {
+        v42_restart(caller);
+        for (int i = 0; i < 2048; i++) hdlc_rx_put_bit(rx,v42_tx_bit(caller));
+        /* Header=3, parameter group=23, V.44 user data=34. No private group. */
+        ok = wire.len == 60 && wire.bytes[3] == 0x80 && wire.bytes[5] == 20
+             && memcmp(wire.bytes+26,tail,sizeof(tail)) == 0;
+    }
+    if (rx) hdlc_rx_free(rx);
+    if (caller) v42_free(caller);
+    return ok;
+}
+static bool v44_peer_xid(int direction, bool malformed, bool defaults, bool support)
+{
+    /* Foreign CX93001 XID; C0=3 supports post-link negotiation. Our C0=0
+       chooses XID parameters under V.44 Cor.1/2002, 7.4.1. */
+    static const uint8_t captured[] = {
+        3,0xaf,0x82,0x80,0,0x13,3,3,0x8a,0x89,0,5,2,4,0,6,2,4,0,7,1,15,8,1,15,
+        0xff,0x40,3,'V','4','4',0x41,1,3,0x42,1,3,
+        0x43,2,2,0,0x44,2,2,0,0x45,1,32,0x46,1,32,
+        0x47,2,4,0,0x48,2,4,0
+    };
+    uint8_t frame[sizeof(captured)]; memcpy(frame,captured,sizeof(frame));
+    int n = sizeof(frame);
+    frame[36] = (uint8_t)direction;
+    if (malformed) { frame[39] = 0; frame[40] = 1; } /* P1T=1 */
+    if (defaults) n = 34; /* Through C0: default P0..P3 apply. */
+    endpoint_t ep = {0};
+    v42_v44_parameters_t local = {0,3,2048,2048,255,255,12288,12288};
+    v42_negotiated_parameters_t agreed = {0};
+    v42_state_t *caller = v42_init(NULL,true,false,get_payload,put_payload,&ep);
+    hdlc_tx_state_t *tx = hdlc_tx_init(NULL,false,1,false,NULL,NULL);
+    bool ok = false;
+    if (caller && tx && (!support || v42_set_v44(caller,&local) == 0)) {
+        v42_set_status_callback(caller,status_changed,&ep);
+        v42_restart(caller);
+        hdlc_tx_flags(tx,16); hdlc_tx_frame(tx,frame,n);
+        for (int i = 0; i < 2048; i++) {
+            (void)v42_tx_bit(caller);
+            v42_rx_bit(caller,hdlc_tx_get_bit(tx));
+        }
+        int status = v42_get_negotiated_parameters(caller,&agreed);
+        if (malformed) ok = !ep.xid_negotiated && status == -1;
+        else if (!support) ok = ep.xid_negotiated && status == 0
+                                && !agreed.v44_valid && agreed.compression_p0 == 0;
+        else ok = ep.xid_negotiated && status == 0 && agreed.v44_valid
+                  && agreed.compression_p0 == 0 && agreed.v44.capability == 0
+                  && agreed.v44.directions == (defaults ? 3 : ((direction&1)<<1)|((direction&2)>>1))
+                  && agreed.v44.tx_codewords == (defaults ? 1024 : 512)
+                  && agreed.v44.rx_codewords == (defaults ? 1024 : 512)
+                  && agreed.v44.tx_max_string == (defaults ? 255 : 32)
+                  && agreed.v44.tx_history == (defaults ? 3072 : 1024);
+    }
+    if (tx) hdlc_tx_free(tx);
+    if (caller) v42_free(caller);
+    return ok;
+}
+
 int main(void)
 {
     static const int rates[] = { 2400, 9600, 28800, 33600 };
@@ -460,6 +539,12 @@ int main(void)
           "V.42 transmits well-formed XID groups and explicit compression refusal");
     CHECK(run_peer_compression_request(),
           "V.42 declines a peer compression request without a V.42bis codec");
+    CHECK(v44_xid_offer(), "V.44 Annex A outgoing XID user data has exact wire format");
+    CHECK(v44_peer_xid(3,false,false,true), "V.44 accepts the captured CX93001 XID");
+    CHECK(v44_peer_xid(1,false,false,true), "V.44 peer TX-only offer becomes local RX-only");
+    CHECK(v44_peer_xid(3,true,false,true), "V.44 invalid dictionary limits reject the XID");
+    CHECK(v44_peer_xid(3,false,true,true), "V.44 omitted parameters use corrected Table 10 defaults");
+    CHECK(v44_peer_xid(3,false,false,false), "unsupported V.44 user data does not break plain LAPM negotiation");
     CHECK(v42_set_bit_rate(NULL, 9600) == -1,
           "V.42 rejects a missing timer context");
 

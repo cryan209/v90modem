@@ -5,6 +5,7 @@
 
 #include <stdio.h>
 #include "data_stack.h"
+#include "v44.h"
 
 #include <spandsp.h>
 
@@ -15,6 +16,10 @@ static void ds_compression_release(data_stack_t *s)
     if (s->v42bis)
         v42bis_free(s->v42bis);
     s->v42bis = NULL;
+    v44_encoder_free(s->v44_encoder);
+    v44_decoder_free(s->v44_decoder);
+    s->v44_encoder = NULL;
+    s->v44_decoder = NULL;
     s->compressed_tx_len = s->compressed_tx_pos = 0;
 }
 
@@ -62,7 +67,7 @@ static int ds_v42_get_frame(void *user_data, uint8_t *msg, int max_len)
     int len = 0;
     if (s->compression_failed || max_len <= 0)
         return 0;
-    if (s->v42bis)
+    if (s->v42bis || s->v44_encoder)
     {
         /* Compress each byte once. LAPM retains the resulting I-frame for
            retransmission; it must never re-enter the dictionary on retry. */
@@ -79,8 +84,20 @@ static int ds_v42_get_frame(void *user_data, uint8_t *msg, int max_len)
             if (len)
             {
                 s->tx_chars += len;
-                if (v42bis_compress(s->v42bis, input, len) != 0
-                    || v42bis_compress_flush(s->v42bis) != 0)
+                int rc;
+                if (s->v44_encoder)
+                {
+                    rc = v44_encoder_feed(s->v44_encoder, input, (size_t)len);
+                    if (rc == 0)
+                        rc = v44_encoder_flush(s->v44_encoder);
+                }
+                else
+                {
+                    rc = v42bis_compress(s->v42bis, input, len);
+                    if (rc == 0)
+                        rc = v42bis_compress_flush(s->v42bis);
+                }
+                if (rc != 0)
                     ds_compression_error(s);
             }
         }
@@ -113,7 +130,12 @@ static void ds_v42_put_frame(void *user_data, const uint8_t *msg, int len)
     if (!msg || len <= 0 || s->compression_failed)
         return;
     s->v42_rx_wire_bytes += len;
-    if (s->v42bis)
+    if (s->v44_decoder)
+    {
+        if (v44_decoder_feed(s->v44_decoder, msg, (size_t)len) != 0)
+            ds_compression_error(s);
+    }
+    else if (s->v42bis)
     {
         if (v42bis_decompress(s->v42bis, msg, len) != 0)
             ds_compression_error(s);
@@ -147,7 +169,22 @@ static void ds_v42_status(void *user_data, int status)
             ds_compression_error(s);
             return;
         }
-        if (p.compression_p0)
+        if (p.v44_valid && p.v44.directions)
+        {
+            if (p.v44.directions & 1)
+                s->v44_encoder = v44_encoder_init(p.v44.tx_codewords, p.v44.tx_max_string,
+                                                  p.v44.tx_history, ds_compressed_output, s);
+            if (p.v44.directions & 2)
+                s->v44_decoder = v44_decoder_init(p.v44.rx_codewords, p.v44.rx_max_string,
+                                                  p.v44.rx_history, ds_decoded_output, s);
+            if (((p.v44.directions & 1) && !s->v44_encoder)
+                || ((p.v44.directions & 2) && !s->v44_decoder))
+            {
+                ds_compression_error(s);
+                return;
+            }
+        }
+        else if (p.compression_p0)
         {
             /* Annex A P0 bit 0 means initiator->responder. SpanDSP's codec
                API uses bit 1 for local encoding and bit 0 for decoding. */
@@ -250,6 +287,33 @@ int ds_init_v42(data_stack_t *s, bool calling_party, bool detect,
 {
     return ds_init_v42_ex(s, calling_party, detect, line_bit_rate, 3, 1024, 32,
                           pull, pull_ctx, push, push_ctx, link_event, link_event_ctx);
+}
+
+int ds_init_v44(data_stack_t *s, bool calling_party, bool detect, int line_bit_rate,
+                const v42_v44_parameters_t *parameters,
+                ds_pull_byte_fn pull, void *pull_ctx,
+                ds_push_byte_fn push, void *push_ctx,
+                ds_link_event_fn link_event, void *link_event_ctx)
+{
+    static const v42_v44_parameters_t defaults = {0, 3, 512, 512, 32, 32, 1024, 1024};
+    /* Configure before restarting: no stale V.42bis XID may be queued. */
+    ds_init(s, DS_FRAMING_V42, pull, pull_ctx, push, push_ctx);
+    s->calling_party = calling_party;
+    s->link_event = link_event;
+    s->link_event_ctx = link_event_ctx;
+    s->v42 = v42_init(NULL, calling_party, detect, ds_v42_get_frame, ds_v42_put_frame, s);
+    if (!s->v42)
+        return -1;
+    v42_set_status_callback(s->v42, ds_v42_status, s);
+    if (v42_set_v44(s->v42, parameters ? parameters : &defaults) != 0
+        || v42_set_bit_rate(s->v42, line_bit_rate) != 0)
+    {
+        ds_release(s);
+        return -1;
+    }
+    s->line_bit_rate = line_bit_rate;
+    v42_restart(s->v42);
+    return 0;
 }
 
 void ds_release(data_stack_t *s)

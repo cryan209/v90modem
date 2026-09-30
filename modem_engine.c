@@ -655,8 +655,15 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
     {
         v42_negotiated_parameters_t p;
         if (v42_get_negotiated_parameters(g_data_stack.v42, &p) == 0)
-            ME_LOG("[ME] V.42 XID negotiated: V.42bis P0=%d P1=%d P2=%d\n",
-                   p.compression_p0, p.compression_p1, p.compression_p2);
+        {
+            if (p.v44_valid)
+                ME_LOG("[ME] V.42 XID negotiated: V.44 P0=%d TX=%d/%d/%d RX=%d/%d/%d\n",
+                       p.v44.directions, p.v44.tx_codewords, p.v44.tx_max_string, p.v44.tx_history,
+                       p.v44.rx_codewords, p.v44.rx_max_string, p.v44.rx_history);
+            else
+                ME_LOG("[ME] V.42 XID negotiated: V.42bis P0=%d P1=%d P2=%d\n",
+                       p.compression_p0, p.compression_p1, p.compression_p2);
+        }
         break;
     }
     case DS_LINK_CONNECTED:
@@ -723,13 +730,19 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
     g_data_connect_reported = false;
     g_data_link_failed = false;
     if (g_data_framing == DS_FRAMING_V42) {
-        result = ds_init_v42(&g_data_stack,
-                             calling_party,
-                             g_data_lapm_detect,
-                             bit_rate,
-                             data_stack_pull_dte_byte, NULL,
-                             data_stack_push_dte_byte, NULL,
-                             data_stack_link_event, NULL);
+        const char *compression = getenv("ME_DATA_COMPRESSION");
+        if (compression && strcmp(compression, "v44") == 0)
+            result = ds_init_v44(&g_data_stack, calling_party, g_data_lapm_detect, bit_rate,
+                                 NULL, data_stack_pull_dte_byte, NULL,
+                                 data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
+        else if (compression && strcmp(compression, "none") == 0)
+            result = ds_init_v42_ex(&g_data_stack, calling_party, g_data_lapm_detect, bit_rate,
+                                    0, 512, 6, data_stack_pull_dte_byte, NULL,
+                                    data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
+        else
+            result = ds_init_v42(&g_data_stack, calling_party, g_data_lapm_detect, bit_rate,
+                                 data_stack_pull_dte_byte, NULL,
+                                 data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
         if (result != 0)
             g_data_link_failed = true;
     } else {

@@ -294,6 +294,65 @@ static __inline__ int set_param(int param, int value, int def)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.44 Annex A uses GI=FF user data: no group length, runs to the FCS.
+ * Cor.1/2002 7.4.1 supplies Table 10 defaults for absent parameters. */
+static int parse_v44_xid(const uint8_t *p, int n, v42_v44_parameters_t *v, bool *present)
+{
+    *present = false;
+    if (n < 5 || p[0] != 0x40 || p[1] != 3 || memcmp(p + 2, "V44", 3) != 0)
+        return 0;  /* User data belonging to another parameter set. */
+    *v = (v42_v44_parameters_t){0, 3, 1024, 1024, 255, 255, 3072, 3072};
+    bool tx_history = false, rx_history = false;
+    p += 5;
+    n -= 5;
+    while (n > 0)
+    {
+        if (n < 2 || p[1] > n - 2)
+            return -1;
+        int id = p[0], len = p[1];
+        const uint8_t *value = p + 2;
+        int *field = NULL;
+        int width = 0;
+        switch (id)
+        {
+        case 0x41: field = &v->capability; width = 1; break;
+        case 0x42: field = &v->directions; width = 1; break;
+        case 0x43: field = &v->tx_codewords; width = 2; break;
+        case 0x44: field = &v->rx_codewords; width = 2; break;
+        case 0x45: field = &v->tx_max_string; width = 1; break;
+        case 0x46: field = &v->rx_max_string; width = 1; break;
+        case 0x47: field = &v->tx_history; width = 2; tx_history = true; break;
+        case 0x48: field = &v->rx_history; width = 2; rx_history = true; break;
+        }
+        if (field)
+        {
+            if (len != width)
+                return -1;
+            *field = (int)pack_value(value, len);
+        }
+        p += len + 2;
+        n -= len + 2;
+    }
+    if (!tx_history) v->tx_history = 3 * v->tx_codewords;
+    if (!rx_history) v->rx_history = 3 * v->rx_codewords;
+    *present = true;
+    return 0;
+}
+
+static bool valid_v44(const v42_v44_parameters_t *v)
+{
+    return v && v->capability >= 0 && v->capability <= 255
+           && v->directions >= 0 && v->directions <= 3
+           && v->tx_codewords >= 256 && v->tx_codewords <= 65535
+           && v->rx_codewords >= 256 && v->rx_codewords <= 65535
+           && v->tx_max_string >= 32 && v->tx_max_string <= 255
+           && v->rx_max_string >= 32 && v->rx_max_string <= 255
+           && v->tx_history >= 512 && v->tx_history <= 65535
+           && v->rx_history >= 512 && v->rx_history <= 65535;
+}
+
+static int smaller_v44(int a, int b) { return a < b ? a : b; }
+
 static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
 {
     lapm_state_t *s;
@@ -305,9 +364,11 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
     uint8_t param_id;
     uint8_t param_len;
     bool v42bis_group;
+    bool v44_present = false;
+    v42_v44_parameters_t peer_v44 = {0};
 
     s = &ss->lapm;
-    if (frame[2] != FI_GENERAL)
+    if (len < 3 || frame[2] != FI_GENERAL)
         return -1;
     config = ss->config;
     /* V.42bis 5.1: absent P0 means no compression. A peer request may
@@ -321,6 +382,13 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
     len -= 3;
     while (len > 0)
     {
+        if (frame[0] == 0xFF)
+        {
+            if (parse_v44_xid(frame + 1, len - 1, &peer_v44, &v44_present) != 0
+                || (v44_present && !valid_v44(&peer_v44)))
+                return -1;
+            break;
+        }
         if (len < 3)
             return -1;
         group_id = frame[0];
@@ -435,6 +503,25 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
         config.comp_dict_size = ss->config.comp_dict_size;
     if (config.comp_max_string > ss->config.comp_max_string)
         config.comp_max_string = ss->config.comp_max_string;
+    ss->negotiated.v44_valid = v44_present && ss->config.v44_enabled;
+    memset(&ss->negotiated.v44, 0, sizeof(ss->negotiated.v44));
+    if (ss->negotiated.v44_valid)
+    {
+        /* 7.4: peer TX maps to local RX, peer RX to local TX. Cor.1/2002:
+           C0.N=0 elects XID negotiation even when the peer supports EPM. */
+        const v42_v44_parameters_t *local = &ss->config.v44;
+        v42_v44_parameters_t *agreed = &ss->negotiated.v44;
+        agreed->capability = 0;
+        agreed->directions = local->directions
+            & (((peer_v44.directions & 1) << 1) | ((peer_v44.directions & 2) >> 1));
+        agreed->tx_codewords = smaller_v44(local->tx_codewords, peer_v44.rx_codewords);
+        agreed->rx_codewords = smaller_v44(local->rx_codewords, peer_v44.tx_codewords);
+        agreed->tx_max_string = smaller_v44(local->tx_max_string, peer_v44.rx_max_string);
+        agreed->rx_max_string = smaller_v44(local->rx_max_string, peer_v44.tx_max_string);
+        agreed->tx_history = smaller_v44(local->tx_history, peer_v44.rx_history);
+        agreed->rx_history = smaller_v44(local->rx_history, peer_v44.tx_history);
+        config.comp = 0;  /* At most one compression algorithm per response. */
+    }
     ss->negotiated.valid = true;
     ss->negotiated.tx_n401 = s->tx_n401;
     ss->negotiated.rx_n401 = s->rx_n401;
@@ -513,6 +600,28 @@ static void transmit_xid(v42_state_t *ss, uint8_t addr)
 
     len += group_len;
 
+    if ((addr == s->cmd_addr && ss->config.v44_enabled)
+        || (addr == s->rsp_addr && ss->negotiated.valid && ss->negotiated.v44_valid))
+    {
+        const v42_v44_parameters_t *v = addr == s->cmd_addr
+                                       ? &ss->config.v44 : &ss->negotiated.v44;
+        int values[] = {v->capability, v->directions, v->tx_codewords, v->rx_codewords,
+                        v->tx_max_string, v->rx_max_string, v->tx_history, v->rx_history};
+        static const int widths[] = {1, 1, 2, 2, 1, 1, 2, 2};
+        *buf++ = 0xFF;  /* Annex A user-data subfield has no length octets. */
+        *buf++ = 0x40; *buf++ = 3;
+        *buf++ = 'V'; *buf++ = '4'; *buf++ = '4';
+        for (int i = 0; i < 8; i++)
+        {
+            *buf++ = 0x41 + i;
+            *buf++ = widths[i];
+            if (widths[i] == 2)
+                *buf++ = (uint8_t)(values[i] >> 8);
+            *buf++ = (uint8_t)values[i];
+        }
+        len += 34;
+    }
+    else
     {
         /* V.42bis 5.1/Annex A: state P0 explicitly, including zero, so a
            peer's compression proposal receives an unambiguous refusal. */
@@ -1525,9 +1634,20 @@ SPAN_DECLARE(int) v42_set_compression(v42_state_t *s, int p0, int p1, int p2)
 {
     if (!s || p0 < 0 || p0 > 3 || p1 < 512 || p1 > 65535 || p2 < 6 || p2 > 250)
         return -1;
+    s->config.v44_enabled = false;
     s->config.comp = p0;
     s->config.comp_dict_size = p1;
     s->config.comp_max_string = p2;
+    return 0;
+}
+
+SPAN_DECLARE(int) v42_set_v44(v42_state_t *s, const v42_v44_parameters_t *p)
+{
+    if (!s || !valid_v44(p) || p->capability != 0)
+        return -1;
+    s->config.comp = 0;
+    s->config.v44_enabled = true;
+    s->config.v44 = *p;
     return 0;
 }
 

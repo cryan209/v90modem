@@ -451,6 +451,91 @@ static void test_compression_error(void)
         v42_free(peer);
 }
 
+static void test_v44_stack(int caller_direction, int answerer_direction,
+                            bool detect, bool corrupt, bool plain_peer, const char *label)
+{
+    data_stack_t caller = {0}, answerer = {0};
+    lapm_endpoint_t ce = {0}, ae = {0};
+    v42_v44_parameters_t cp = {0, caller_direction, 1024, 768, 64, 48, 3072, 2048};
+    v42_v44_parameters_t ap = {0, answerer_direction, 512, 2048, 32, 64, 1024, 4096};
+    ce.tx_len = ae.tx_len = 1024;
+    for (int i = 0; i < 1024; i++) {
+        ce.tx[i] = (uint8_t)"ABCDEFGH"[i % 8];
+        ae.tx[i] = (uint8_t)"01234567"[i % 8];
+    }
+    bool ci = ds_init_v44(&caller, true, detect, 9600, &cp,
+                           lapm_pull,&ce,lapm_push,&ce,lapm_event,&ce) == 0;
+    bool ai = plain_peer
+        ? ds_init_v42_ex(&answerer,false,detect,9600,0,512,6,
+                          lapm_pull,&ae,lapm_push,&ae,lapm_event,&ae) == 0
+        : ds_init_v44(&answerer,false,detect,9600,&ap,
+                      lapm_pull,&ae,lapm_push,&ae,lapm_event,&ae) == 0;
+    if (ci && ai) {
+        for (int tick = 0; tick < 9600 * 10; tick++) {
+            int bit = ds_tx_get_bit(&caller);
+            if (corrupt && caller.link_ready && tick % 1703 == 0) bit ^= 1;
+            ds_rx_put_bit(&answerer,bit);
+            ds_rx_put_bit(&caller,ds_tx_get_bit(&answerer));
+            if (ce.rx_len == 1024 && ae.rx_len == 1024) break;
+        }
+    }
+    CHECK(ci && ai && !ce.failed && !ae.failed && ce.connected && ae.connected
+          && ce.rx_len == 1024 && ae.rx_len == 1024
+          && memcmp(ce.rx,ae.tx,1024) == 0 && memcmp(ae.rx,ce.tx,1024) == 0, label);
+    if (ci && ai) {
+        v42_negotiated_parameters_t cn = {0}, an = {0};
+        bool got = v42_get_negotiated_parameters(caller.v42,&cn) == 0
+                   && v42_get_negotiated_parameters(answerer.v42,&an) == 0;
+        int cd = plain_peer ? 0 : caller_direction
+            & (((answerer_direction & 1) << 1) | ((answerer_direction & 2) >> 1));
+        int ad = ((cd & 1) << 1) | ((cd & 2) >> 1);
+        CHECK(got && cn.compression_p0 == 0 && an.compression_p0 == 0
+              && (plain_peer ? !cn.v44_valid && !an.v44_valid
+                  : cn.v44_valid && an.v44_valid && cn.v44.directions == cd
+                    && an.v44.directions == ad && cn.v44.tx_codewords == 1024
+                    && cn.v44.rx_codewords == 512 && cn.v44.tx_max_string == 64
+                    && cn.v44.rx_max_string == 32 && cn.v44.tx_history == 3072
+                    && cn.v44.rx_history == 1024
+                    && cn.v44.tx_codewords == an.v44.rx_codewords
+                    && cn.v44.rx_codewords == an.v44.tx_codewords
+                    && cn.v44.tx_history == an.v44.rx_history
+                    && cn.v44.rx_history == an.v44.tx_history),
+              "V.44 negotiates complementary directions and asymmetric limits");
+        CHECK(!(cd & 1) || caller.v42_tx_wire_bytes < 512,
+              "V.44 caller compression reduces wire bytes");
+        CHECK(!(ad & 1) || answerer.v42_tx_wire_bytes < 512,
+              "V.44 answerer compression reduces wire bytes");
+        /* Idle gaps and physical rate changes preserve the existing dictionaries. */
+        for (int tick = 0; tick < 4096; tick++) {
+            ds_rx_put_bit(&answerer,ds_tx_get_bit(&caller));
+            ds_rx_put_bit(&caller,ds_tx_get_bit(&answerer));
+        }
+        v42_set_bit_rate(caller.v42,19200);
+        v42_set_bit_rate(answerer.v42,19200);
+        ce.tx_pos = ae.tx_pos = ce.rx_len = ae.rx_len = 0;
+        for (int tick = 0; tick < 19200 * 5; tick++) {
+            ds_rx_put_bit(&answerer,ds_tx_get_bit(&caller));
+            ds_rx_put_bit(&caller,ds_tx_get_bit(&answerer));
+            if (ce.rx_len == 1024 && ae.rx_len == 1024) break;
+        }
+        CHECK(ce.rx_len == 1024 && ae.rx_len == 1024
+              && memcmp(ce.rx,ae.tx,1024) == 0 && memcmp(ae.rx,ce.tx,1024) == 0,
+              "V.44 preserves dictionary context across idle and line-rate changes");
+        ce.tx_pos = ae.tx_pos = ce.rx_len = ae.rx_len = 0;
+        ds_reset(&caller); ds_reset(&answerer);
+        for (int tick = 0; tick < 19200 * 10; tick++) {
+            ds_rx_put_bit(&answerer,ds_tx_get_bit(&caller));
+            ds_rx_put_bit(&caller,ds_tx_get_bit(&answerer));
+            if (ce.rx_len == 1024 && ae.rx_len == 1024) break;
+        }
+        CHECK(ce.rx_len == 1024 && ae.rx_len == 1024
+              && memcmp(ce.rx,ae.tx,1024) == 0 && memcmp(ae.rx,ce.tx,1024) == 0,
+              "V.44 C-INIT restarts dictionaries with a new LAPM session");
+    }
+    if (ci) ds_release(&caller);
+    if (ai) ds_release(&answerer);
+}
+
 /* Random payloads through the bit interface with idle gaps between bursts. */
 static void test_v14_bursty_random(void)
 {
@@ -511,6 +596,12 @@ int main(void)
     test_lapm_data_stack_case(false, 3, 0, true, false,
           "V.42bis refusal falls back to plain LAPM in both directions");
     test_compression_error();
+    test_v44_stack(3,3,true,false,false,"V.44 detection and duplex compressed transfer");
+    test_v44_stack(3,3,false,true,false,"V.44 retransmission preserves dictionary synchronization");
+    test_v44_stack(1,3,false,false,false,"V.44 caller-only compression");
+    test_v44_stack(2,3,false,false,false,"V.44 answerer-only compression");
+    test_v44_stack(3,0,false,false,false,"V.44 direction refusal uses plain LAPM");
+    test_v44_stack(3,3,false,false,true,"V.44 unsupported peer falls back to plain LAPM");
     test_v14_bursty_random();
 
     if (failures) {

@@ -48,6 +48,17 @@ typedef enum
     V42_STATUS_XID_NEGOTIATED = 3
 } v42_status_t;
 
+/* V.44 Annex A: parameters are relative to the sending/local endpoint,
+ * unlike V.42bis P0, which is relative to the XID initiator. */
+typedef struct v42_v44_parameters_s
+{
+    int capability;
+    int directions;
+    int tx_codewords, rx_codewords;
+    int tx_max_string, rx_max_string;
+    int tx_history, rx_history;
+} v42_v44_parameters_t;
+
 typedef struct
 {
     bool valid;
@@ -58,6 +69,8 @@ typedef struct
     int compression_p0;
     int compression_p1;
     int compression_p2;
+    bool v44_valid;
+    v42_v44_parameters_t v44;
 } v42_negotiated_parameters_t;
 
 #if defined(__cplusplus)
@@ -99,11 +112,15 @@ SPAN_DECLARE(int) v42_tx_bit(void *user_data);
     \return 0 on success, or -1 for an invalid rate. */
 SPAN_DECLARE(int) v42_set_bit_rate(v42_state_t *s, int bit_rate);
 
-/*! Return the transmit bit rate currently used by the V.42 timers. */
 /*! Configure the V.42bis offer before v42_restart. P0 is relative to the
     XID initiator; zero disables compression. The application must attach
     codecs when enabling it. Limits follow V.42bis 5.1/Annex A. */
 SPAN_DECLARE(int) v42_set_compression(v42_state_t *s, int p0, int p1, int p2);
+
+/*! Select V.44 stream compression, replacing the V.42bis offer. Call before
+ * restart. C0 must be zero: only stream method with XID negotiation is offered.
+ * Values are local TX/RX proposals (V.44 7.4, Annex A, Cor.1/2002). */
+SPAN_DECLARE(int) v42_set_v44(v42_state_t *s, const v42_v44_parameters_t *parameters);
 
 /*! Return the transmit bit rate currently used by the V.42 timers. */
 SPAN_DECLARE(int) v42_get_bit_rate(const v42_state_t *s);
