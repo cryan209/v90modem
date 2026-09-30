@@ -261,32 +261,109 @@ the same INF:
 9db31: push 2 ; call SendCmd(0x22009c)  <- the other PIDs, a different scheme
 ```
 
-and the mirror at `0x9db43` with `and eax, 0xfffffff7`.  So on `05ac:1401` the
-line is seized by a **read-modify-write of bit 3 of register 5**, not by a DAA
-relay word and not by the `wIndex = 0` requests.  Neither function has a direct
-caller; they are reached through a 10-byte-stride pointer table at file offset
-`0x8d673`, the driver's hardware abstraction layer.
+and the mirror at `0x9db43` with `and eax, 0xfffffff7`.  The setting side also
+frees the pending buffers and arms a ~10 ms timer with callback `0x9d1e3`,
+which is what a hook transition needs and the clearing side does not have.
 
-**Which direction is which is a reading, not a proof.**  The setting side also
-frees the pending buffers and arms a ~10 ms timer with callback `0x9d1e3`, and
-off-hook is the transition that needs a settle delay; the clearing side does
-nothing but the write.  The codec A/B above agrees - setting the bit is what
-brings the analogue front end to life - but with no line connected neither loop
-current nor a dial tone has been observed, so "bit 3 set = off-hook" rests on
-the settle timer and the codec, not on a seized line.
+**How they are reached, because two obvious searches both come up empty.**
+Neither function has a direct caller and neither has a relocation pointing at
+it.  The pointers are installed at RUN TIME:
+
+```
+9d66d: mov dword ptr [0xe675c], 0x9dabe
+9d677: mov dword ptr [0xe6760], 0x9db43
+```
+
+two adjacent slots in a ~20-entry ops table at `0xe6750`-`0xe67b0`, filled by an
+init routine, and called through a pair of idempotent wrappers at `0x3539b` /
+`0x353c3` that guard on a state byte at `ctx+0x5305`.  **A pointer written by
+`mov imm32` has no relocation and no call site, so both a caller search and a
+`.reloc` scan report nothing** -- grep the disassembly for the GLOBAL's address
+instead.  An earlier version of this file claimed a 10-byte-stride pointer
+table at file offset `0x8d673`; that is **WRONG and withdrawn** -- those four
+dword matches are x87 instruction bytes in the datapump (`fst`, `fadd`,
+`fsub`), which is what a byte search for a code address will find in a 900 KB
+binary.  Search for a stored pointer by its relocation or not at all.
+
+**And with a line connected, bit 3 is NOT the hook.**  See below; the codec A/B
+still holds, so it is the analogue receive path's power switch, but it does not
+seize the line.
 
 ### The country blobs reach it the same way
 
-`usm56.reg`'s 4-byte `HardwareInitBB` is no longer a mystery.  At `0x9dd96`
-there is a table at `0xde218` of 8-byte entries - `{u32 country_id, u8 r10,
-u8 r1a, u8 r1f, u8 r1e}`, `-1` terminated, default `00 C0 00` - walked for the
-current country and then written as four `WriteReg` calls to registers
-**0x10, 0x1a, 0x1f, 0x1e**.  Four bytes, four registers.
+At `0x9dd96` there is a table at RVA `0xce218` of 8-byte entries -
+`{u32 profile, u8 r10, u8 r1a, u8 r1f, u8 r1e}`, `-1` terminated, default
+`00 C0 00 00` - walked for the current profile and written as four `WriteReg`
+calls to registers **0x10, 0x1a, 0x1f, 0x1e**.
+
+**`HardwareInitBB` is the KEY into that table, not its contents.**  An earlier
+version of this file said its four bytes were the four register values; they
+are a single byte plus padding - **NZ 0x3e, AU 0x04, UK 0x5e, US 0x60** - and
+NZ's row is `r10=0xa0 r1a=0xc0 r1f=0x00 r1e=0x00`.  Written to the device and
+read back verbatim (`r1f` reads 0x20 out of reset and accepts 0x00).  The four
+registers were right; where the values come from was not.
+
+Note the address trap: objdump prints `.text` addresses as RVAs but an absolute
+data operand as a VA, and this image's base is `0x10000` - so the code's
+`[0xde218]` is RVA `0xce218`, and `0xde218` is in no section at all.
 
 That also disposes of the objection that none of the blobs is 3 or 9 bytes long
 and so cannot be carried by these commands: the channel does arbitrary
 single-register writes, and a blob is delivered as a run of them.  The three
 larger blobs (32, 500, 229 bytes) are still unplaced.
+
+## With a line connected: the receive path is on the pair, the hook is not found
+
+The jack was connected to a **Cisco VG224 FXS port**, i.e. a port that supplies
+loop current and dial tone, and the whole register space was read in both hook
+states.  Three results.
+
+**The codec really is on the pair.**  Off-hook, 3 s at 9600 Hz:
+
+```
+no line:    RMS excl. DC 21.2 = -63.8 dBFS   span 168 counts
+with line:  RMS excl. DC 49.5 = -56.4 dBFS   span 357 counts
+```
+
+and the 7.4 dB is **mains hum, not signal**: peaks at 49.9 / 100.1 / 150.0 /
+200.2 / 250.1 Hz, 90% of the power below 300 Hz, 1.3% in 2000-3400 Hz.  So the
+receive path reaches tip and ring.
+
+**But nothing seizes the line.**  No dial tone at any point, and the full scan
+of 0x01-0x3b differs between the two hook states in **register 5 alone** -- no
+line-sense, ring-detect or loop-current bit moves anywhere in the space.  A
+seized FXS port would give dial tone, shift the DC operating point as loop
+current started, and drop the hum as the line impedance fell.  None of that
+happens.  Tried and refuted, each with the audio as the instrument:
+
+- the NZ DAA profile written first, in the driver's own order (no change);
+- the driver's own `10 00 00` and `10 00 08` session commands, both accepted
+  with a notification (no change);
+- every other bit of register 5 one at a time (no change), **except bit 0
+  (0x01), which re-rails the codec even with bit 3 set** -- a reset or override;
+- register 0x0a = 1, the other 1/0 pair in the driver (`0x9db82` / `0x9dba2`),
+  which produces **exact digital silence rather than the -32768 rail** -- so it
+  is a mute, and the two failure modes are distinguishable.
+
+So **"bit 3 set = off-hook" is withdrawn.**  What the codec A/B proves is that
+bit 3 powers the analogue receive path; the hook relay is elsewhere and is not
+identified.  The earlier hedge ("a reading, not a proof") was the right one and
+it has gone the other way.
+
+**The register map, on-hook, everything non-zero** (0x00 and 0x3c upward do not
+answer, so the space is 0x01-0x3b):
+
+```
+01=01  02=83  08=02  09=0f  0b=14  0c=40  0d=18  0e=02
+11=0c  13=02  16=96  17=2d  18=19  19=0a  1b=07  1f=20
+```
+
+**Next step, and it is the method this project already has working for the
+Conexant part:** stop guessing at bits and run the real driver, capturing the
+bus (`docs/hsf_usb_daa.md`, and the Debian guest on tower that hosts the
+vendor stack).  One off-hook under the vendor driver names the command
+outright, where a blind sweep of a DAA's register file on a live line is both
+slow and the wrong shape of experiment.
 
 **Other opcodes remain unnamed.**  `0x2200c4`'s first sub-form emits
 `10 00 <n&0x0f>` and is what `USmSerial.sys` calls with 0 and 8 around session
@@ -351,7 +428,13 @@ DTE rates.  Rate selection is in the binary.
 9. **A 2-byte command is stalled.**  Only 3- and 9-byte bodies are accepted, so
    the read is `80 <idx> 00`; the earlier note that observed lengths were
    "2, 3, 9" counted `GET_ENCAPSULATED_RESPONSE`'s 2-byte IN as a command.
-10. **An IOCTL number does not name a request.**  `utlamot.sys` carries the
+10. **zsh does not word-split an unquoted `$var`** (it does split `$(...)`).
+   `--read $R` with 59 indices in `R` therefore read ONE register whose index
+   parsed out of `strtoul("01 02 03 ...")`, printed one line and exited 0 --
+   which read as "the device stops answering after the first read" and briefly
+   became a finding about the hardware.  Use `${=R}` or inline the command
+   substitution.
+11. **An IOCTL number does not name a request.**  `utlamot.sys` carries the
    IOCTL through a work queue into `FUN_0001316a`, which is where `bRequest`,
    `wValue`, `wIndex` and the length are chosen, and one IOCTL can have two
    sub-forms keyed on the body's first byte (`0x2200c4` does).  Reading the
@@ -360,11 +443,12 @@ DTE rates.  Rate selection is in the binary.
 
 ## Open
 
-- **A line in the jack.**  Everything below the codec is now reachable, and
-  nothing further can be settled without loop current: whether bit 3 really
-  seizes the line, what registers 1, 2, 0x11 and 0x1f mean (they are the only
-  ones with non-zero contents, so ring and loop sense are likely among them),
-  and what the codec's floor is on a real bearer.
+- **The hook.**  Bit 3 of register 5 powers the analogue receive path and does
+  NOT seize the line (measured against a VG224 FXS port).  Nothing else tried
+  does either.  Settle it by capturing the bus under the vendor driver rather
+  than by sweeping registers on a live line.
+- **What the non-zero registers mean.**  None of them moves when bit 3 does, so
+  ring and loop sense are either elsewhere or gated on a real seizure.
 - What the remaining opcodes do: `0x10|n`, the 9-byte `0x02` form, `0x90`,
   `0xd0`.
 - How the 32, 500 and 229-byte country blobs reach the device.  Runs of

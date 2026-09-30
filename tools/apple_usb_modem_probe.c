@@ -21,13 +21,22 @@
  *   write:  00 <index> <value>          (silent)
  *   read:   80 <index> 00               then GET_ENCAPSULATED_RESPONSE, 1 byte
  *
- * Register 5 bit 3 (0x08) is the hook: with it CLEAR the codec's input is
- * railed at -32768 at every sample rate, and with it SET the codec delivers a
- * real signal (measured -63.8 dBFS of noise on +657 counts of DC, with no line
- * in the jack).  The A/B is deterministic and repeatable, which is what makes
- * this the analogue path's power switch rather than a coincidence.  Registers
- * 0x10, 0x1a, 0x1f, 0x1e carry the per-country DAA configuration that
- * usm56.reg's 4-byte HardwareInitBB supplies.
+ * Register 5 bit 3 (0x08) powers the analogue RECEIVE path: with it clear the
+ * codec's input is railed at -32768 at every sample rate, and with it set the
+ * codec delivers a real signal.  Deterministic and repeatable in both
+ * directions, with and without a line.
+ *
+ * IT IS NOT THE HOOK.  Against a VG224 FXS port -- a port that supplies loop
+ * current and dial tone -- setting it produces mains hum and no dial tone, and
+ * no register in 0x01-0x3b changes when it flips.  The hook relay is not
+ * identified; do not read --hook as seizing the line.  Two other bits found on
+ * the way: register 5 bit 0 re-rails the codec even with bit 3 set (a reset or
+ * override), and register 0x0a = 1 gives exact digital SILENCE rather than the
+ * rail (a mute -- the two are distinguishable).
+ *
+ * Registers 0x10, 0x1a, 0x1f, 0x1e carry the per-country DAA configuration.
+ * usm56.reg's HardwareInitBB is the one-byte profile KEY into the driver's own
+ * table (NZ 0x3e -> a0/c0/00/00), not the four values themselves.
  *
  * Other opcodes the driver emits and this tool does not model: 0x02 (a 9-byte
  * windowed form), 0x10|n, 0x90, 0xd0.  See docs/apple_usb_modem_sm56.md.
@@ -359,8 +368,9 @@ static int cmd_regs(int argc, char **argv)
     return 0;
 }
 
-/* Writes to the line interface of a telephony device.  Harmless with nothing
- * in the tel jack; with a line connected, bit 3 of register 5 seizes it. */
+/* Writes to the line interface of a telephony device.  No write found so far
+ * seizes the line, but this is a DAA's register file: read the header before
+ * sweeping one on a line you care about. */
 static int cmd_write(const char *sidx, const char *sval)
 {
     unsigned long idx = strtoul(sidx, NULL, 16), val = strtoul(sval, NULL, 16);
@@ -422,8 +432,9 @@ static void usage(const char *argv0)
         "  --read         read one register, hex index\n"
         "  --write        write one register and read it back; WRITES to the\n"
         "                 line interface\n"
-        "  --hook         set or clear register 5 bit 3, the analogue path's\n"
-        "                 power switch; with it off the codec reads -32768\n",
+        "  --hook         set or clear register 5 bit 3, which powers the analogue\n"
+        "                 RECEIVE path; with it off the codec reads -32768.  This\n"
+        "                 is NOT the hook -- it does not seize the line\n",
         argv0);
 }
 

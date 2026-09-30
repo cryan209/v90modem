@@ -42,8 +42,12 @@
  * is missing -- an earlier note here said the two could not be separated
  * without a line and that was wrong.
  *
+ * That bit is NOT the hook, though: on a VG224 FXS port it yields -56.4 dBFS
+ * that is 90% mains hum below 300 Hz and no dial tone.  So a capture through
+ * this tool is of the pair, not of a seized line.
+ *
  * -63.8 dBFS is the codec's own floor on an open line.  It is not a measurement
- * of a bearer, and a line in the jack will be worse.
+ * of a bearer.
  *
  * Build: make apple_usb_modem_audio
  */
