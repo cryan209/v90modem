@@ -50,6 +50,7 @@ hsf_fxo_probe
 hsf_rom_image.bin
 apple_usb_modem_probe
 apple_usb_modem_audio
+apple_usb_modem_coupler
 *.dSYM/
 
 # Common maps/logs
