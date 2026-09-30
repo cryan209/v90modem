@@ -10,29 +10,118 @@
 
 #include <string.h>
 
+static void ds_compression_release(data_stack_t *s)
+{
+    if (s->v42bis)
+        v42bis_free(s->v42bis);
+    s->v42bis = NULL;
+    s->compressed_tx_len = s->compressed_tx_pos = 0;
+}
+
+static void ds_compression_error(data_stack_t *s)
+{
+    if (s->compression_failed)
+        return;
+    s->compression_failed = true;
+    s->link_ready = false;
+    if (s->link_event)
+        s->link_event(s->link_event_ctx, DS_LINK_ERROR);
+    if (s->v42)
+        v42_stop(s->v42);
+}
+
+static void ds_compressed_output(void *user_data, const uint8_t *msg, int len)
+{
+    data_stack_t *s = user_data;
+    if (len > (int)sizeof(s->compressed_tx) - s->compressed_tx_len)
+    {
+        ds_compression_error(s);
+        return;
+    }
+    memcpy(s->compressed_tx + s->compressed_tx_len, msg, (size_t)len);
+    s->compressed_tx_len += len;
+}
+
+static void ds_decoded_output(void *user_data, const uint8_t *msg, int len)
+{
+    data_stack_t *s = user_data;
+    if (s->compression_failed)
+        return;
+    for (int i = 0; i < len; i++)
+    {
+        if (s->push)
+            s->push(s->push_ctx, msg[i]);
+        s->rx_chars++;
+    }
+}
+
 static int ds_v42_get_frame(void *user_data, uint8_t *msg, int max_len)
 {
-    data_stack_t *s = (data_stack_t *)user_data;
+    data_stack_t *s = user_data;
+    uint8_t input[128];
     int len = 0;
-
-    while (len < max_len && s->pull) {
-        int byte = s->pull(s->pull_ctx);
-
-        if (byte < 0)
-            break;
-        msg[len++] = (uint8_t)byte;
+    if (s->compression_failed || max_len <= 0)
+        return 0;
+    if (s->v42bis)
+    {
+        /* Compress each byte once. LAPM retains the resulting I-frame for
+           retransmission; it must never re-enter the dictionary on retry. */
+        if (s->compressed_tx_pos == s->compressed_tx_len)
+        {
+            s->compressed_tx_len = s->compressed_tx_pos = 0;
+            while (len < (int)sizeof(input) && s->pull)
+            {
+                int byte = s->pull(s->pull_ctx);
+                if (byte < 0)
+                    break;
+                input[len++] = (uint8_t)byte;
+            }
+            if (len)
+            {
+                s->tx_chars += len;
+                if (v42bis_compress(s->v42bis, input, len) != 0
+                    || v42bis_compress_flush(s->v42bis) != 0)
+                    ds_compression_error(s);
+            }
+        }
+        if (s->compression_failed)
+            return 0;
+        len = s->compressed_tx_len - s->compressed_tx_pos;
+        if (len > max_len)
+            len = max_len;
+        memcpy(msg, s->compressed_tx + s->compressed_tx_pos, (size_t)len);
+        s->compressed_tx_pos += len;
     }
+    else
+    {
+        while (len < max_len && s->pull)
+        {
+            int byte = s->pull(s->pull_ctx);
+            if (byte < 0)
+                break;
+            msg[len++] = (uint8_t)byte;
+        }
+        s->tx_chars += len;
+    }
+    s->v42_tx_wire_bytes += len;
     return len;
 }
 
 static void ds_v42_put_frame(void *user_data, const uint8_t *msg, int len)
 {
-    data_stack_t *s = (data_stack_t *)user_data;
-
-    if (!msg || len <= 0 || !s->push)
+    data_stack_t *s = user_data;
+    if (!msg || len <= 0 || s->compression_failed)
         return;
-    for (int i = 0; i < len; i++)
-        s->push(s->push_ctx, msg[i]);
+    s->v42_rx_wire_bytes += len;
+    if (s->v42bis)
+    {
+        if (v42bis_decompress(s->v42bis, msg, len) != 0)
+            ds_compression_error(s);
+        else
+            v42bis_decompress_flush(s->v42bis);
+    }
+    else
+        ds_decoded_output(s, msg, len);
 }
 
 static void ds_v42_status(void *user_data, int status)
@@ -49,17 +138,46 @@ static void ds_v42_status(void *user_data, int status)
         event = DS_LINK_DETECTED;
         break;
     case V42_STATUS_XID_NEGOTIATED:
+    {
+        v42_negotiated_parameters_t p;
+        ds_compression_release(s);
+        s->compression_failed = false;
+        if (v42_get_negotiated_parameters(s->v42, &p) != 0)
+        {
+            ds_compression_error(s);
+            return;
+        }
+        if (p.compression_p0)
+        {
+            /* Annex A P0 bit 0 means initiator->responder. SpanDSP's codec
+               API uses bit 1 for local encoding and bit 0 for decoding. */
+            int local_p0 = s->calling_party
+                           ? ((p.compression_p0 & 1) << 1) | ((p.compression_p0 & 2) >> 1)
+                           : p.compression_p0;
+            s->v42bis = v42bis_init(NULL, local_p0, p.compression_p1, p.compression_p2,
+                                   ds_compressed_output, s, 256,
+                                   ds_decoded_output, s, 256);
+            if (!s->v42bis)
+            {
+                ds_compression_error(s);
+                return;
+            }
+        }
         event = DS_LINK_XID_NEGOTIATED;
         break;
+    }
     case V42_STATUS_DETECTION_UNSUPPORTED:
         s->link_ready = false;
         event = DS_LINK_UNSUPPORTED;
         break;
     case SIG_STATUS_LINK_CONNECTED:
+        if (s->compression_failed)
+            return;
         s->link_ready = true;
         event = DS_LINK_CONNECTED;
         break;
     case SIG_STATUS_LINK_DISCONNECTED:
+        ds_compression_release(s);
         s->link_ready = false;
         event = DS_LINK_DISCONNECTED;
         break;
@@ -91,15 +209,18 @@ void ds_init(data_stack_t *s,
     s->line_bit_rate = 1;
 }
 
-int ds_init_v42(data_stack_t *s,
+int ds_init_v42_ex(data_stack_t *s,
                 bool calling_party,
                 bool detect,
-                int line_bit_rate,
+                int line_bit_rate, int p0, int p1, int p2,
                 ds_pull_byte_fn pull, void *pull_ctx,
                 ds_push_byte_fn push, void *push_ctx,
                 ds_link_event_fn link_event, void *link_event_ctx)
 {
+    if (p1 > V42BIS_MAX_CODEWORDS)
+        return -1;
     ds_init(s, DS_FRAMING_V42, pull, pull_ctx, push, push_ctx);
+    s->calling_party = calling_party;
     s->link_event = link_event;
     s->link_event_ctx = link_event_ctx;
     s->v42 = v42_init(NULL,
@@ -111,7 +232,8 @@ int ds_init_v42(data_stack_t *s,
     if (!s->v42)
         return -1;
     v42_set_status_callback(s->v42, ds_v42_status, s);
-    if (v42_set_bit_rate(s->v42, line_bit_rate) != 0) {
+    if (v42_set_compression(s->v42, p0, p1, p2) != 0
+        || v42_set_bit_rate(s->v42, line_bit_rate) != 0) {
         v42_free(s->v42);
         s->v42 = NULL;
         return -1;
@@ -121,8 +243,19 @@ int ds_init_v42(data_stack_t *s,
     return 0;
 }
 
+int ds_init_v42(data_stack_t *s, bool calling_party, bool detect,
+                int line_bit_rate, ds_pull_byte_fn pull, void *pull_ctx,
+                ds_push_byte_fn push, void *push_ctx,
+                ds_link_event_fn link_event, void *link_event_ctx)
+{
+    return ds_init_v42_ex(s, calling_party, detect, line_bit_rate, 3, 1024, 32,
+                          pull, pull_ctx, push, push_ctx, link_event, link_event_ctx);
+}
+
 void ds_release(data_stack_t *s)
 {
+    if (s)
+        ds_compression_release(s);
     if (s && s->v42) {
         v42_free(s->v42);
         s->v42 = NULL;
@@ -152,6 +285,8 @@ void ds_reset(data_stack_t *s)
     s->rx_shift = 0;
     s->rx_bits = 0;
     s->link_ready = false;
+    ds_compression_release(s);
+    s->compression_failed = false;
     if (s->v42)
         v42_restart(s->v42);
 }

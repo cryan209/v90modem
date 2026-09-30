@@ -212,7 +212,8 @@ static bool run_link_case(int bit_rate,
       && answerer_xid.tx_n401 == 128 && answerer_xid.rx_n401 == 128
       && caller_xid.tx_window_size_k == 15
       && answerer_xid.tx_window_size_k == 15
-      && caller_xid.compression_p0 == 1
+      && caller_xid.compression_p0 == 0
+      && answerer_xid.compression_p0 == 0
       && answerer_xid.compression_p1 == 512
       && answerer_xid.compression_p2 == 6
       && (exercise_release
@@ -344,6 +345,96 @@ done:
     return ok;
 }
 
+static bool run_peer_compression_request(void)
+{
+    /* CRC-valid RasFinder XID response requests P0=3. The byte-shuttle
+       endpoint has no V.42bis codec and must negotiate P0=0 (5.1/Annex A). */
+    static const uint8_t xid[] = {
+        0x03, 0xaf, 0x82, 0x80, 0x00, 0x13, 0x03, 0x03, 0x8e, 0x89, 0x00, 0x05, 0x02, 0x04, 0x00, 0x06, 0x02, 0x04, 0x00, 0x07, 0x01, 0x0f, 0x08, 0x01, 0x0f, 0xf0, 0x00, 0x0f, 0x00, 0x03, 0x56, 0x34, 0x32, 0x01, 0x01, 0x03, 0x02, 0x02, 0x04, 0x00, 0x03, 0x01, 0x20
+    };
+    endpoint_t ep = {0};
+    v42_negotiated_parameters_t parameters;
+    v42_state_t *caller = v42_init(NULL, true, false,
+                                  get_payload, put_payload, &ep);
+    hdlc_tx_state_t *peer = hdlc_tx_init(NULL, false, 1, false, NULL, NULL);
+    bool ok = false;
+
+    if (!caller || !peer)
+        goto done;
+    v42_set_status_callback(caller, status_changed, &ep);
+    v42_restart(caller);
+    hdlc_tx_flags(peer, 16);
+    hdlc_tx_frame(peer, xid, sizeof(xid));
+    for (int i = 0; i < 2048; i++)
+    {
+        (void)v42_tx_bit(caller);
+        v42_rx_bit(caller, hdlc_tx_get_bit(peer));
+    }
+    ok = ep.xid_negotiated
+      && v42_get_negotiated_parameters(caller, &parameters) == 0
+      && parameters.compression_p0 == 0;
+done:
+    if (peer)
+        hdlc_tx_free(peer);
+    if (caller)
+        v42_free(caller);
+    return ok;
+}
+
+
+/* Decode our transmitted bits independently of the LAPM XID parser. */
+static void check_xid_frame(void *user_data, const uint8_t *frame, int len, int ok)
+{
+    bool *valid = user_data;
+    bool options = false, refusal = false;
+    if (!ok || len < 3 || frame[2] != 0x82)
+        return;
+    for (int i = 3; i < len; )
+    {
+        if (len - i < 3)
+            return;
+        int group = frame[i];
+        int end = i + 3 + (frame[i + 1] << 8) + frame[i + 2];
+        i += 3;
+        if (end > len)
+            return;
+        while (i < end)
+        {
+            if (end - i < 2)
+                return;
+            int id = frame[i++];
+            int n = frame[i++];
+            if (n > end - i)
+                return;
+            if (group == 0x80 && id == 3)
+                options = n == 4 && memcmp(frame + i, "\x8a\x89\x00\x00", 4) == 0;
+            if (group == 0xf0 && id == 1)
+                refusal = n == 1 && frame[i] == 0;
+            i += n;
+        }
+    }
+    *valid = options && refusal;
+}
+
+static bool run_outgoing_xid(void)
+{
+    endpoint_t ep = {0};
+    bool valid = false;
+    v42_state_t *caller = v42_init(NULL, true, false, get_payload, put_payload, &ep);
+    hdlc_rx_state_t *wire = hdlc_rx_init(NULL, false, false, 1, check_xid_frame, &valid);
+    if (caller && wire)
+    {
+        v42_restart(caller);
+        for (int i = 0; i < 2048; i++)
+            hdlc_rx_put_bit(wire, v42_tx_bit(caller));
+    }
+    if (wire)
+        hdlc_rx_free(wire);
+    if (caller)
+        v42_free(caller);
+    return valid;
+}
+
 int main(void)
 {
     static const int rates[] = { 2400, 9600, 28800, 33600 };
@@ -365,6 +456,10 @@ int main(void)
           "V.42 DISC/UA release disconnects both endpoints cleanly");
     CHECK(run_sustained_outage_case(2400),
           "V.42 sustained outage reaches explicit retry-exhaustion disconnect");
+    CHECK(run_outgoing_xid(),
+          "V.42 transmits well-formed XID groups and explicit compression refusal");
+    CHECK(run_peer_compression_request(),
+          "V.42 declines a peer compression request without a V.42bis codec");
     CHECK(v42_set_bit_rate(NULL, 9600) == -1,
           "V.42 rejects a missing timer context");
 

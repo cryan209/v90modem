@@ -218,6 +218,8 @@ static const char *v34_tx_stage_to_str(int stage)
     case V34_TX_STAGE_V90_RETRAIN_SILENCE: return "V90_RETRAIN_SILENCE";
     case V34_TX_STAGE_V34_FALLBACK_WAIT_J: return "V34_FALLBACK_WAIT_J";
     case V34_TX_STAGE_HDX_CC_SILENCE: return "HDX_CC_SILENCE";
+    case V34_TX_STAGE_HDX_CC_DATA: return "HDX_CC_DATA";
+    case V34_TX_STAGE_HDX_PRIMARY_DATA: return "HDX_PRIMARY_DATA";
     case V34_TX_STAGE_INFO1: return "INFO1";
     case V34_TX_STAGE_FIRST_B: return "FIRST_B";
     case V34_TX_STAGE_FIRST_B_INFO_SEEN: return "FIRST_B_INFO_SEEN";
@@ -6366,9 +6368,11 @@ static complex_sig_t get_s_not_s_baud(v34_state_t *s)
     int md_bauds;
 
     /* V.34 11.3.1.2.1 (answer modem): 70 +/- 5 ms silence after INFO1a
-       before first S(128T)+S-bar(16T). Caller path keeps legacy timing. */
+       before first S(128T)+S-bar(16T). 12.5.1 requires the same silence
+       for either half-duplex source role. Duplex callers retain their timing. */
     silence_bauds = 0;
-    if (!s->tx.calling_party)
+    if (!s->tx.calling_party
+        || (!s->tx.duplex && s->tx.half_duplex_state == V34_HALF_DUPLEX_PRIMARY_CHANNEL))
         silence_bauds = (baud_rate_parameters[s->tx.baud_rate].baud_rate*70 + 500)/1000;
     /*endif*/
     if (silence_bauds < 0)
@@ -6921,9 +6925,19 @@ static complex_sig_t get_pp_baud(v34_state_t *s)
     if (s->tx.tone_duration == PP_TOTAL_SYMBOLS)
     {
         V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
-                 "Tx - Phase 3: PP transmission complete (%d symbols), starting TRN\n",
-                 s->tx.tone_duration);
-        trn_baud_init(s);
+                 "Tx - PP transmission complete (%d symbols), starting %s\n",
+                 s->tx.tone_duration,
+                 (!s->tx.duplex && s->tx.half_duplex_state == V34_HALF_DUPLEX_PRIMARY_CHANNEL)
+                 ? "B1 (12.5.1)" : "TRN");
+        if (!s->tx.duplex && s->tx.half_duplex_state == V34_HALF_DUPLEX_PRIMARY_CHANNEL)
+        {
+            /* 12.5.1: PP is followed directly by B1 and data, not TRN/J/MP. */
+            data_baud_init(s);
+        }
+        else
+        {
+            trn_baud_init(s);
+        }
     }
     /*endif*/
     x = pp_symbols[i];
@@ -7780,14 +7794,19 @@ static void phase4_rx_conditioning_init(v34_state_t *s, int initial_stage, const
         s->rx.carrier_phase = 0;
         memset(s->rx.rrc_filter, 0, sizeof(s->rx.rrc_filter));
         s->rx.rrc_filter_step = 0;
-        s->rx.pri_ted.baud_phase = 0.0f;
-        s->rx.pri_ted.symbol_sync_low[0] = 0.0f;
-        s->rx.pri_ted.symbol_sync_low[1] = 0.0f;
-        s->rx.pri_ted.symbol_sync_high[0] = 0.0f;
-        s->rx.pri_ted.symbol_sync_high[1] = 0.0f;
-        s->rx.pri_ted.symbol_sync_dc_filter[0] = 0.0f;
-        s->rx.pri_ted.symbol_sync_dc_filter[1] = 0.0f;
-        s->rx.total_baud_timing_correction = 0;
+        /* 12.5 is resynchronization after a control interval, not a fresh
+           primary-channel training: its TED is independent of the CC TED. */
+        if (!s->rx.hdx_primary_resync)
+        {
+            s->rx.pri_ted.baud_phase = 0.0f;
+            s->rx.pri_ted.symbol_sync_low[0] = 0.0f;
+            s->rx.pri_ted.symbol_sync_low[1] = 0.0f;
+            s->rx.pri_ted.symbol_sync_high[0] = 0.0f;
+            s->rx.pri_ted.symbol_sync_high[1] = 0.0f;
+            s->rx.pri_ted.symbol_sync_dc_filter[0] = 0.0f;
+            s->rx.pri_ted.symbol_sync_dc_filter[1] = 0.0f;
+            s->rx.total_baud_timing_correction = 0;
+        }
     }
 
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
@@ -8579,7 +8598,9 @@ static void data_baud_init(v34_state_t *s)
                  "Tx - 11.6 rate renegotiation complete; B1 then data\n");
     }
     /*endif*/
-    /* Update TX parms from the MP-negotiated rate for our transmit direction */
+    /* Duplex uses MP; half-duplex parameters were already selected by
+       MPh in 12.4.1.3. Re-reading an unexchanged MP here loses that rate. */
+    if (s->tx.duplex)
     {
         int tx_rate_n;
         const mp_t *remote_mp;
@@ -8702,6 +8723,8 @@ static void data_baud_init(v34_state_t *s)
     }
     s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.tx_data_mode = true;
+    if (!s->tx.duplex)
+        s->tx.stage = V34_TX_STAGE_HDX_PRIMARY_DATA;
     s->tx.current_getbaud = get_data_baud;
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - switching to DATA mode\n");
 }
@@ -9642,6 +9665,7 @@ SPAN_DECLARE(bool) v34_get_hdx_control_channel_ready(v34_state_t *s)
     return s != NULL
            && !s->duplex
            && s->rx.stage == V34_RX_STAGE_CC
+           && s->rx.mp_seen >= 2
            && s->tx.stage == V34_TX_STAGE_HDX_CC_DATA;
 }
 /*- End of function --------------------------------------------------------*/
@@ -10186,6 +10210,13 @@ SPAN_DECLARE(void) v34_set_v92_pcm_upstream_capability(v34_state_t *s,
 
 SPAN_DECLARE(int) v34_half_duplex_change_mode(v34_state_t *s, int mode)
 {
+    if (!s || s->duplex)
+        return -1;
+    /*endif*/
+    if (mode == V34_HALF_DUPLEX_PRIMARY_CHANNEL
+        && (!v34_get_hdx_control_channel_ready(s) || s->tx.hdx_negotiated_rate_n < 1))
+        return -1;
+    /*endif*/
     switch (mode)
     {
     case V34_HALF_DUPLEX_SOURCE:
@@ -10203,13 +10234,49 @@ SPAN_DECLARE(int) v34_half_duplex_change_mode(v34_state_t *s, int mode)
         s->rx.half_duplex_state =
         s->tx.half_duplex_state =
         s->half_duplex_state = mode;
-        if (s->half_duplex_source == V34_HALF_DUPLEX_RECIPIENT)
+        if (s->half_duplex_source == V34_HALF_DUPLEX_SOURCE)
+        {
+            /* 12.5.1: reuse the duplex S/S-bar and PP waveform generators,
+               then the shared reset-state B1/data mapper (10.1.3.1). */
+            s->primary_channel_active = true;
+            s->tx.current_modulator = V34_MODULATION_V34;
+            s->tx.current_getbaud = get_s_not_s_baud;
+            s->tx.stage = V34_TX_STAGE_FIRST_S;
+            s->tx.tone_duration = 0;
+            s->tx.baud_phase = 0;
+            s->tx.rrc_filter_step = 0;
+            memset(s->tx.rrc_filter_re, 0, sizeof(s->tx.rrc_filter_re));
+            memset(s->tx.rrc_filter_im, 0, sizeof(s->tx.rrc_filter_im));
+            s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
+            s->rx.current_demodulator = V34_MODULATION_SILENCE;
+        }
+        else if (s->half_duplex_source == V34_HALF_DUPLEX_RECIPIENT)
         {
             /* V.34 12.6.3.2 and 12.5.2: the recipient becomes silent and
                conditions its receiver for S/S-bar, PP and B1. */
             s->tx.current_modulator = V34_MODULATION_SILENCE;
             s->tx.current_getbaud = get_silence_baud;
             s->rx.hdx_primary_resync = true;
+            /* The CC AGC uses the same live scaling register. Restore the
+               primary gain frozen during Phase 3 before using its trained
+               equalizer again for 12.5.2; the CC gain is a different domain. */
+            if (s->rx.agc_scaling_save > 0.0f)
+                s->rx.agc_scaling = s->rx.agc_scaling_save;
+            s->rx.eq_put_step = 0;
+            s->rx.shaper_t2_acc = 0;
+            /* The old PP flag holds the eye chooser until duration >232T.
+               This exchange starts with only 128T of S: release that guard
+               and discard the previous primary interval's eye statistics. */
+            s->rx.phase3_pp_started = 0;
+            s->rx.eye_flip_pending = false;
+            s->rx.eye_flips = 0;
+            s->rx.eye_votes = 0;
+            s->rx.eye_n = 0;
+            s->rx.eye_on_sum = s->rx.eye_off_sum = 0.0f;
+            s->rx.eye_on_aerr = s->rx.eye_off_aerr = 0.0f;
+            memset(&s->rx.eye_prev_on, 0, sizeof(s->rx.eye_prev_on));
+            memset(&s->rx.eye_prev_off, 0, sizeof(s->rx.eye_prev_off));
+            memset(&s->rx.last_sample, 0, sizeof(s->rx.last_sample));
             phase4_rx_conditioning_init(s, V34_RX_STAGE_PHASE4_S,
                                         "12.5.2 S/S-bar, PP, then B1");
             V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
@@ -10222,6 +10289,8 @@ SPAN_DECLARE(int) v34_half_duplex_change_mode(v34_state_t *s, int mode)
         s->tx.half_duplex_state =
         s->half_duplex_state = mode;
         break;
+    default:
+        return -1;
     }
     /*endswitch*/
 
@@ -10392,6 +10461,18 @@ SPAN_DECLARE(int) v34_restart(v34_state_t *s, int baud_rate, int bit_rate, bool 
     /* v34_start_retrain() sets this again if this restart is a retrain.  It
        must not survive into an ordinary startup, where INFO0 does arrive. */
     s->tx.retrain_omit_info0 = false;
+
+    /* A fresh 12.2/12.3 exchange must not inherit the previous 12.5 mode:
+       otherwise its PP would go directly to B1, bypassing TRN and MPh. */
+    s->half_duplex_state =
+    s->tx.half_duplex_state =
+    s->rx.half_duplex_state = V34_HALF_DUPLEX_SILENCE;
+    s->rx.hdx_primary_resync = false;
+    s->tx.hdx_negotiated_rate_n = 0;
+    s->tx.hdx_pph_after_silence = false;
+    if (!duplex)
+        s->tx.tx_data_mode = false;
+    /*endif*/
 
     /* Select the default half-duplex configuration */
     s->rx.half_duplex_source =

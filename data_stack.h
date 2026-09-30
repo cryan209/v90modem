@@ -27,6 +27,7 @@
 #include <stdint.h>
 
 typedef struct v42_state_s v42_state_t;
+typedef struct v42bis_state_s v42bis_state_t;
 
 typedef enum {
     DS_FRAMING_RAW = 0,
@@ -63,6 +64,14 @@ typedef struct {
 
     /* V.42 mode (opaque SpanDSP state). */
     v42_state_t *v42;
+    v42bis_state_t *v42bis;
+    bool calling_party;
+    bool compression_failed;
+    uint8_t compressed_tx[1024];
+    int compressed_tx_len;
+    int compressed_tx_pos;
+    uint64_t v42_tx_wire_bytes;
+    uint64_t v42_rx_wire_bytes;
     ds_link_event_fn link_event;
     void *link_event_ctx;
     bool link_ready;
@@ -106,6 +115,14 @@ int ds_init_v42(data_stack_t *s,
                 ds_pull_byte_fn pull, void *pull_ctx,
                 ds_push_byte_fn push, void *push_ctx,
                 ds_link_event_fn link_event, void *link_event_ctx);
+
+/* Explicit Annex A compression offer; P0=0 selects plain LAPM. The default
+ * ds_init_v42 offers both directions, 1024 codewords, 32-byte strings. */
+int ds_init_v42_ex(data_stack_t *s, bool calling_party, bool detect,
+                   int line_bit_rate, int p0, int p1, int p2,
+                   ds_pull_byte_fn pull, void *pull_ctx,
+                   ds_push_byte_fn push, void *push_ctx,
+                   ds_link_event_fn link_event, void *link_event_ctx);
 
 /* Release protocol resources. Safe after any successful ds_init call. */
 void ds_release(data_stack_t *s);

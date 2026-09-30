@@ -6,8 +6,10 @@
  * place of INFO1a/INFO1c per 10.2.2), Phase 3 (12.3, S/S-bar/PP/TRN) and
  * control channel start-up (12.4, PPh/ALT/MPh/E).
  *
- * This is an instrument, not an assertion of conformance. It prints the stage
- * each side reached so a change can be scored against a previous run.
+ * Grades independent payload generators on the bidirectional control channel.
+ * V34_HDX_PRIMARY=1 then requests 12.5 S/S-bar/PP/B1 and grades the source's
+ * primary payload, requiring no skipped payload bits and a silent recipient.
+ * V34_HDX_RX_DUMP=<path> saves recovered primary bits (one byte per bit).
  */
 
 #include <stdio.h>
@@ -51,63 +53,42 @@ static uint32_t lfsr_next(uint32_t *lfsr)
     alignment is searched, requiring a long exact run before it is believed.
     Returns the number of bit errors after the alignment, or -1 if no
     alignment was found. */
-static int grade_rx(const endpoint_t *e, uint32_t far_seed, int *graded, int *offset)
+static int grade_rx_skip(const endpoint_t *e, uint32_t far_seed,
+                         int max_skip, int *graded, int *offset, int *skipped)
 {
-    uint32_t ref;
-    int off;
-    int i;
-    int errors;
+    uint8_t reference[RX_CAPTURE_BITS + 4096];
+    uint32_t state = far_seed;
+    int skip, off, i, errors;
 
     *graded = 0;
     *offset = -1;
+    *skipped = 0;
     if (e->rx_len < 256)
         return -1;
-    /*endif*/
-    for (off = 0;  off + 256 <= e->rx_len;  off++)
+    for (i = 0; i < (int) sizeof(reference); i++)
+        reference[i] = (uint8_t) lfsr_next(&state);
+    for (skip = 0; skip <= max_skip && skip + 256 <= e->rx_len; skip++)
     {
-        uint32_t probe = far_seed;
-        int match = 1;
-
-        /* The reference is regenerated from the seed each time rather than
-           advanced, because the LFSR is the far end's and this side has no
-           access to its state. */
-        for (i = 0;  i < off;  i++)
-            lfsr_next(&probe);
-        /*endfor*/
-        ref = probe;
-        for (i = 0;  i < 128;  i++)
+        for (off = 0; off < 4096; off++)
         {
-            if ((int) lfsr_next(&ref) != e->rx_bits[i])
-            {
-                match = 0;
-                break;
-            }
-            /*endif*/
+            if (memcmp(reference + off, e->rx_bits + skip, 128))
+                continue;
+            errors = 0;
+            for (i = skip; i < e->rx_len; i++)
+                errors += reference[off + i - skip] != e->rx_bits[i];
+            *graded = e->rx_len - skip;
+            *offset = off;
+            *skipped = skip;
+            return errors;
         }
-        /*endfor*/
-        if (!match)
-            continue;
-        /*endif*/
-        ref = probe;
-        errors = 0;
-        for (i = 0;  i < e->rx_len;  i++)
-        {
-            if ((int) lfsr_next(&ref) != e->rx_bits[i])
-            {
-                if (errors < 8  &&  getenv("V34_HDX_ERRPOS"))
-                    fprintf(stderr, "%s: bit error at rx index %d of %d\n", e->name, i, e->rx_len);
-                /*endif*/
-                errors++;
-            }
-            /*endif*/
-        }
-        /*endfor*/
-        *graded = e->rx_len;
-        *offset = off;
-        return errors;
     }
-    /*endfor*/
     return -1;
+}
+
+static int grade_rx(const endpoint_t *e, uint32_t far_seed, int *graded, int *offset)
+{
+    int skipped;
+    return grade_rx_skip(e, far_seed, 0, graded, offset, &skipped);
 }
 
 static int get_bit(void *user_data)
@@ -166,6 +147,11 @@ int main(int argc, char *argv[])
     int answ_graded;
     int call_offset;
     int answ_offset;
+    int primary = getenv("V34_HDX_PRIMARY") != NULL;
+    int primary_started = 0;
+    int control_ok = 0;
+    int restart = getenv("V34_HDX_RESTART") != NULL;
+    int restarted = 0;
     v34_state_t *call_modem;
     v34_state_t *answ_modem;
     int failed = 0;
@@ -199,6 +185,16 @@ int main(int argc, char *argv[])
     }
     v34_tx_power(call_modem, -12.0f);
     v34_tx_power(answ_modem, -12.0f);
+    /* Unknown modes and a primary request before MPh/E must be refused. */
+    if (v34_half_duplex_change_mode(NULL, V34_HALF_DUPLEX_PRIMARY_CHANNEL) != -1
+        || v34_half_duplex_change_mode(call_modem, -1) != -1
+        || v34_half_duplex_change_mode(call_modem, V34_HALF_DUPLEX_PRIMARY_CHANNEL) != -1)
+    {
+        fprintf(stderr, "invalid/early HDX mode request accepted\n");
+        v34_free(call_modem);
+        v34_free(answ_modem);
+        return 1;
+    }
     /* 12.2.1: call modem as source modem. */
     v34_half_duplex_change_mode(call_modem, V34_HALF_DUPLEX_SOURCE);
     v34_half_duplex_change_mode(answ_modem, V34_HALF_DUPLEX_RECIPIENT);
@@ -217,6 +213,52 @@ int main(int argc, char *argv[])
 
     for (block = 0;  block < blocks;  block++)
     {
+        if (primary && restart && primary_started && !restarted
+            && answ_e.rx_len >= 10000)
+        {
+            int skip;
+            if (grade_rx_skip(&answ_e, call_seed, 2048, &answ_graded,
+                              &answ_offset, &skip) != 0 || answ_offset != 0
+                || answ_graded < 8000
+                || v34_restart(call_modem, baud, bps, false)
+                || v34_restart(answ_modem, baud, answ_bps, false))
+            {
+                fprintf(stderr, "primary payload/restart failed\n");
+                failed = 1;
+                break;
+            }
+            call_e.lfsr = call_seed;
+            answ_e.lfsr = answ_seed;
+            call_e.bits_out = call_e.bits_in = call_e.rx_len = 0;
+            answ_e.bits_out = answ_e.bits_in = answ_e.rx_len = 0;
+            primary_started = control_ok = 0;
+            restarted = 1;
+            printf("  restarted after verified primary payload at %.3fs\n",
+                   block*BLOCK_SAMPLES/8000.0);
+        }
+        if (primary && !primary_started
+            && v34_get_hdx_control_channel_ready(call_modem)
+            && v34_get_hdx_control_channel_ready(answ_modem)
+            && call_e.rx_len >= 512 && answ_e.rx_len >= 512)
+        {
+            control_ok = grade_rx(&call_e, answ_seed, &call_graded, &call_offset) == 0
+                      && grade_rx(&answ_e, call_seed, &answ_graded, &answ_offset) == 0;
+            if (!control_ok
+                || v34_half_duplex_change_mode(answ_modem, V34_HALF_DUPLEX_PRIMARY_CHANNEL)
+                || v34_half_duplex_change_mode(call_modem, V34_HALF_DUPLEX_PRIMARY_CHANNEL))
+            {
+                fprintf(stderr, "primary transition failed\n");
+                failed = 1;
+                break;
+            }
+            call_e.lfsr = call_seed;
+            answ_e.lfsr = answ_seed;
+            call_e.bits_out = call_e.bits_in = call_e.rx_len = 0;
+            answ_e.bits_out = answ_e.bits_in = answ_e.rx_len = 0;
+            primary_started = 1;
+            printf("  primary channel requested at %.3fs after verified control data\n",
+                   block*BLOCK_SAMPLES/8000.0);
+        }
         memset(call_tx, 0, sizeof(call_tx));
         memset(answ_tx, 0, sizeof(answ_tx));
         v34_tx(call_modem, call_tx, BLOCK_SAMPLES);
@@ -284,22 +326,53 @@ int main(int argc, char *argv[])
            call_rate, answ_rate, expect_bps);
     printf("  payload bits: call out %d in %d, answer out %d in %d\n",
            call_e.bits_out, call_e.bits_in, answ_e.bits_out, answ_e.bits_in);
-    call_errors = grade_rx(&call_e, answ_seed, &call_graded, &call_offset);
-    answ_errors = grade_rx(&answ_e, call_seed, &answ_graded, &answ_offset);
-    if (call_errors < 0)
-        printf("  control channel data call<-answer: NO ALIGNMENT in %d bits\n", call_e.rx_len);
+    if (!primary)
+    {
+        call_errors = grade_rx(&call_e, answ_seed, &call_graded, &call_offset);
+        answ_errors = grade_rx(&answ_e, call_seed, &answ_graded, &answ_offset);
+        if (call_errors < 0)
+            printf("  control channel data call<-answer: NO ALIGNMENT in %d bits\n", call_e.rx_len);
+        else
+            printf("  control channel data call<-answer: %d errors in %d bits (offset %d)\n",
+                   call_errors, call_graded, call_offset);
+        /*endif*/
+        if (answ_errors < 0)
+            printf("  control channel data answer<-call: NO ALIGNMENT in %d bits\n", answ_e.rx_len);
+        else
+            printf("  control channel data answer<-call: %d errors in %d bits (offset %d)\n",
+                   answ_errors, answ_graded, answ_offset);
+        /*endif*/
+    }
+    if (primary)
+    {
+        const char *dump = getenv("V34_HDX_RX_DUMP");
+        if (dump)
+        {
+            FILE *fp = fopen(dump, "wb");
+            if (!fp || fwrite(answ_e.rx_bits, 1, answ_e.rx_len, fp) != (size_t) answ_e.rx_len)
+                failed = 1;
+            if (fp)
+                fclose(fp);
+        }
+        /* B1 is not payload. Find a 128-bit exact prefix of the independent
+           source generator after the reset-state B1 interval, then grade all
+           remaining bits. Require source offset zero: acquisition may skip
+           B1, but it must not hide a corrupt payload prefix. */
+        int skip;
+        answ_errors = grade_rx_skip(&answ_e, call_seed, 2048,
+                                    &answ_graded, &answ_offset, &skip);
+        printf("  primary recipient: %d errors in %d bits (B1 skipped %d, source offset %d)\n",
+               answ_errors, answ_graded, skip, answ_offset);
+        failed |= !primary_started || !control_ok || (restart && !restarted)
+               || answ_errors != 0
+               || answ_graded < 8000 || answ_offset != 0
+               || answ_e.bits_out != 0 || call_e.bits_in != 0;
+    }
     else
-        printf("  control channel data call<-answer: %d errors in %d bits (offset %d)\n",
-               call_errors, call_graded, call_offset);
-    /*endif*/
-    if (answ_errors < 0)
-        printf("  control channel data answer<-call: NO ALIGNMENT in %d bits\n", answ_e.rx_len);
-    else
-        printf("  control channel data answer<-call: %d errors in %d bits (offset %d)\n",
-               answ_errors, answ_graded, answ_offset);
-    /*endif*/
-    failed = (call_errors != 0  ||  answ_errors != 0
-              ||  call_rate != expect_bps  ||  answ_rate != expect_bps);
+    {
+        failed |= call_errors != 0 || answ_errors != 0;
+    }
+    failed |= call_rate != expect_bps || answ_rate != expect_bps;
     v34_free(call_modem);
     v34_free(answ_modem);
     return failed;

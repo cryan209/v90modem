@@ -4249,12 +4249,24 @@ static void viterbi_update_path_metrics(viterbi_t *s,
                 int next_state = s->encode_table[state][input];
                 int branch = 4*k0 + k1;
 
+                /* Table 11 steps 4-6 and 9.6.3: with h=0, C0=0 and
+                   U0=Y0 XOR V0. The quarter-superconstellation has zero
+                   quadrant label, so the parity of the two subset labels'
+                   quadrant difference is U0. Nonzero precoders need C0
+                   carried with each survivor and retain the existing path. */
+                if (s->zero_precoder
+                    && ((subset1 - subset0) & 1) != ((state & 1) ^ (invert != 0)))
+                    continue;
+                if (s->vit[prev_ptr].cumulative_path_metric[state] == UINT32_MAX)
+                    continue;
+
                 /* V.34 9.6.3: Table 13 supplies Y4321 and the authoritative
                    encoder table constrains its state transition. U0 cannot be
                    inferred from state&1 alone: 9.6.3.3 adds C0 and Table 12
                    adds V0. A constrained decoder must carry the precoder and
                    modulo history per survivor; rejecting candidates here
-                   without that state corrupts even exact symbols. */
+                   without that state corrupts even exact precoded symbols.
+                   The zero-precoder case above needs no survivor C0 history. */
                 metric = s->vit[prev_ptr].cumulative_path_metric[state]
                        + s->vit[s->ptr].branch_error_x[branch];
                 if (metric < s->vit[s->ptr].cumulative_path_metric[next_state])
@@ -4285,7 +4297,8 @@ static void viterbi_update_path_metrics(viterbi_t *s,
 //printf("JJJ %p ", s);
     for (state = 0; state < s->state_count; state++)
     {
-        s->vit[s->ptr].cumulative_path_metric[state] -= curr_min_metric;
+        if (s->vit[s->ptr].cumulative_path_metric[state] != UINT32_MAX)
+            s->vit[s->ptr].cumulative_path_metric[state] -= curr_min_metric;
 //printf("%4d ", s->cumulative_path_metric[s->ptr][i]);
     }
     /*endfor*/
@@ -4363,6 +4376,7 @@ static int viterbi_set_trellis(viterbi_t *s,
     }
     /*endfor*/
     s->state_count = state_count;
+    s->zero_precoder = false;
     s->encode_table = encode_table;
     memset(s->vit, 0, sizeof(s->vit));
     s->ptr = 0;
@@ -8490,9 +8504,12 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    multiples of 30 degrees.  The generic primary-training
                    carrier loop below snaps to the nearest four-point symbol,
                    so letting it run over PP makes it fight this supervised
-                   target.  Track the carrier against the known PP point here
+                   target.  The 12.5.2 HDX primary resynchronization must
+                   use this same PP detector: it has no later TRN interval
+                   to repair a carrier/equalizer solution damaged by QPSK
+                   decisions during PP.  Track against the known point here
                    and suppress the four-point loop for this interval. */
-                if (s->v90_mode)
+                if (s->v90_mode || s->hdx_primary_resync)
                 {
                     float error = sym->im*pp_target.re - sym->re*pp_target.im;
 
@@ -8841,6 +8858,15 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             int old_was_2 = (s->duration > 32) ? ((s->s_window >> idx) & 1) : 0;
             int new_is_2 = (data_bits == 1  ||  data_bits == 3) ? 1 : 0;
 
+            /* 12.5.1 starts with 70 ms of silence. Numerical phase steps
+               from an empty filter are not evidence of S; both symbols in
+               the differential decision must contain a signal. */
+            if (s->hdx_primary_resync
+                && (sym->re*sym->re + sym->im*sym->im < 0.01f
+                    || s->last_sample.re*s->last_sample.re
+                       + s->last_sample.im*s->last_sample.im < 0.01f))
+                new_is_2 = 0;
+            /*endif*/
             if (new_is_2)
                 s->s_window |= (1u << idx);
             else
@@ -8906,7 +8932,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             s->s_detect_count = 32;
         }
         /*endif*/
-        if ((s->duration >= 128 && s->s_detect_count >= 24)
+        if ((!s->hdx_primary_resync && s->duration >= 128 && s->s_detect_count >= 24)
             ||
             s->phase4_s_bar_left == 0)
         {
@@ -10858,7 +10884,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             /* Re-enabled carrier tracking — test 4 showed MP detection worked
                better with carrier tracking on.  CMA equalization now provides
                more stable magnitude for eq_target, improving tracking quality. */
-            if (!(s->v90_mode
+            if (!((s->v90_mode || s->hdx_primary_resync)
                   && s->stage == V34_RX_STAGE_PHASE3_TRAINING
                   && (!s->phase3_pp_started
                       || s->duration <= PHASE3_PP_TRAIN_BAUDS))
@@ -11110,6 +11136,13 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     /* Ordinary V.34 uses the historical T/2 front end.  The V.90 DATA-only
        T/3 branch calls process_primary_symbol() directly after its supervised
        B1 equalizer, so both paths share the mapper and protocol state. */
+    /* HDX owns this history while the V.90 T/3 receiver is inactive.
+       Retain both T/2 phases for 12.5.2 B1 conditioning and replay. */
+    if (!s->duplex && s->half_duplex_state == V34_HALF_DUPLEX_PRIMARY_CHANNEL)
+    {
+        s->v90_t3_raw[s->v90_t3_raw_count & V34_V90_T3_RAW_MASK] = *sample;
+        s->v90_t3_raw_count++;
+    }
     s->eq_buf[s->eq_step] = *sample;
     s->eq_step = (s->eq_step + 1) & V34_EQUALIZER_MASK;
     /* Only while there is something on the line.  V.34 11.3.1.2.4 has the
@@ -11255,7 +11288,10 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
             /*endif*/
         }
         /*endif*/
-        if (++s->eye_n >= v34_eye_window())
+        /* 12.5.1 gives only 128T of S before S-bar/PP. Reacquire the T/2
+           eye within that signal, rather than after a 256-symbol window. */
+        if (++s->eye_n >= ((s->hdx_primary_resync && s->stage == V34_RX_STAGE_PHASE4_S)
+                          ? 64 : v34_eye_window()))
         {
             bool cp_angle = (s->stage == V34_RX_STAGE_V90_CP
                              &&  v34_v90_cp_eye_angle_enabled());
@@ -11398,6 +11434,76 @@ static bool v90_t3_solve(double *a, double *b, double *x, int n)
     for (i = 0;  i < n;  i++)
         x[i] = b[i];
     return true;
+}
+
+/* 12.5.2: use B1's known data constellation to remove residual ISI left
+   by the periodic PP reference. Fit a symbol-spaced correction to the
+   existing FSE, using the same acquisition aperture as the T/3 receiver. The detected
+   B1 offset also moves the raw anchor. The FSE group delay supplies the
+   samples beyond B1 needed by the centred fit before payload is replayed. */
+void v34_rx_condition_b1_equalizer(v34_rx_state_t *s, float gain, float phase)
+{
+    enum { T = V34_V90_T3_FSE_TAPS, N = 2*T,
+           E = V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN };
+    double matrix[N*N] = {0}, rhs[N] = {0}, solution[N];
+    complexf_t coeff[E];
+    int pre = T/2, length = s->v90_t3_b1_symbols;
+    double trace = 0.0;
+    double rate = s->phase4_da_derot_rate*(M_PI/2147483648.0);
+    if (s->duplex || s->data_symbol_conjugate || length <= 2*T
+        || s->v90_t3_e_anchor < 0
+        || s->v90_t3_e_anchor < s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE
+        || s->v90_t3_e_anchor + 2*(length - pre - 1) + pre >= s->v90_t3_raw_count)
+        return;
+    for (int n = pre; n < length - pre; n++)
+    {
+        double fr[N], fi[N];
+        double a = phase - rate*(length - 1 - n);
+        complexf_t e = s->v90_t3_b1[n];
+        double yr = gain*(e.re*cos(a) - e.im*sin(a));
+        double yi = gain*(e.re*sin(a) + e.im*cos(a));
+        for (int k = 0; k < T; k++)
+        {
+            complexf_t o = s->v90_t3_raw[(s->v90_t3_e_anchor + 2*n + pre - k)
+                                         & V34_V90_T3_RAW_MASK];
+            fr[2*k] = o.re;
+            fr[2*k + 1] = -o.im;
+            fi[2*k] = o.im;
+            fi[2*k + 1] = o.re;
+        }
+        for (int r = 0; r < N; r++)
+        {
+            rhs[r] += fr[r]*yr + fi[r]*yi;
+            for (int c = 0; c < N; c++)
+                matrix[r*N + c] += fr[r]*fr[c] + fi[r]*fi[c];
+        }
+    }
+    for (int k = 0; k < N; k++) trace += matrix[k*N + k];
+    for (int k = 0; k < N; k++) matrix[k*N + k] += trace*1e-6;
+    if (!v90_t3_solve(matrix, rhs, solution, N))
+        return;
+    for (int k = 0; k < N; k++)
+        if (!isfinite(solution[k]))
+            return;
+    memset(coeff, 0, sizeof(coeff));
+    for (int k = 0; k < T; k++)
+        coeff[V34_EQUALIZER_PRE_LEN + k - pre] =
+            complex_setf(solution[2*k], solution[2*k + 1]);
+    memcpy(s->eq_coeff, coeff, sizeof(coeff));
+}
+
+complexf_t v34_rx_b1_equalized_symbol(const v34_rx_state_t *s, int symbol)
+{
+    complexf_t y = {0.0f, 0.0f};
+    for (int j = 0; j < V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN; j++)
+    {
+        int64_t idx = s->v90_t3_e_anchor + 2*symbol + V34_EQUALIZER_PRE_LEN - j;
+        complexf_t o = s->v90_t3_raw[idx & V34_V90_T3_RAW_MASK];
+        complexf_t v = complex_mulf(&s->eq_coeff[j], &o);
+        y.re += v.re;
+        y.im += v.im;
+    }
+    return y;
 }
 
 static complexf_t v90_t3_raw_get(const v34_rx_state_t *s, int64_t index)
@@ -14971,6 +15077,76 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Figure 10/9.6.3.2: eliminate the unknown 16-state encoder contents.
+   Y0[n] XOR Y0[n-3] XOR Y0[n-4] equals
+   Y2[n-3] XOR Y2[n-2] XOR Y1[n-1]. With C0=0, substituting U0
+   leaves the same three-term parity check of Table 12's V0 sequence.
+   Use a complete superframe and accept only a unique zero-syndrome phase;
+   noise or ambiguous evidence leaves the existing decoder in force. */
+static int v34_v0_at(const v34_rx_state_t *s, int pair)
+{
+    int span = 4*s->parms.p*s->parms.j;
+    pair = ((pair % span) + span) % span;
+    return pair % (2*s->parms.p) == 0
+         ? (0x5FEE >> (pair/(2*s->parms.p))) & 1 : 0;
+}
+
+static void v34_rx_acquire_v0(v34_rx_state_t *s)
+{
+    int nearest[2] = {0, 0};
+    int span = 4*s->parms.p*s->parms.j;
+    int n = s->v0_pairs;
+    int label[2];
+    int syndrome;
+    int winner = -1;
+    int winners = 0;
+
+    if (!s->v0_acquiring || span <= 0 || span > 512)
+        return;
+    for (int i = 0; i < 2; i++)
+    {
+        for (int k = 1; k < 4; k++)
+            if (s->viterbi.error[i][k] < s->viterbi.error[i][nearest[i]])
+                nearest[i] = k;
+        label[i] = get_binary_subset_label_q9_7(&s->xy[i][nearest[i]]) & 7;
+    }
+    s->v0_u[n%5] = (label[1] - label[0]) & 1;
+    s->v0_input[n%5] = conv_encode_input[label[0]][label[1]];
+    if (n >= 4)
+    {
+        syndrome = s->v0_u[n%5] ^ s->v0_u[(n-3)%5] ^ s->v0_u[(n-4)%5]
+                 ^ ((s->v0_input[(n-3)%5] >> 1) & 1)
+                 ^ ((s->v0_input[(n-2)%5] >> 1) & 1)
+                 ^ (s->v0_input[(n-1)%5] & 1);
+        for (int delta = 0; delta < span; delta++)
+        {
+            int expected = v34_v0_at(s, s->input_4d + delta)
+                         ^ v34_v0_at(s, s->input_4d + delta - 3)
+                         ^ v34_v0_at(s, s->input_4d + delta - 4);
+            s->v0_score[delta] += syndrome != expected;
+            if (s->v0_score[delta] == 0)
+            {
+                winner = delta;
+                winners++;
+            }
+        }
+    }
+    if (++s->v0_pairs >= span && winners == 1)
+    {
+        s->input_4d = (s->input_4d + winner) % span;
+        s->viterbi.zero_precoder = true;
+        s->v0_acquiring = false;
+        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                   "Rx - V0 phase acquired: advance %d 4D pairs, %d observed pairs, "
+                   "unique zero syndrome (9.6.3/Table 12)\n", winner, s->v0_pairs);
+    }
+    else if (s->v0_pairs >= 2*span)
+    {
+        s->v0_pairs = 0;
+        memset(s->v0_score, 0, sizeof(s->v0_score));
+    }
+}
+
 /* Keep this global until the modem is VERY well tested */
 SPAN_DECLARE(void) v34_put_mapping_frame(v34_rx_state_t *s, int16_t bits[16])
 {
@@ -15011,6 +15187,7 @@ SPAN_DECLARE(void) v34_put_mapping_frame(v34_rx_state_t *s, int16_t bits[16])
 #endif
         if ((i & 1))
         {
+            v34_rx_acquire_v0(s);
             /* Deal with super-frame sync inversion at the time the 4D pair
                enters the Viterbi decoder.  step_2d is the delayed output
                position and remains zero during windup, so using it here
@@ -15264,6 +15441,11 @@ SPAN_DECLARE(int) v34_rx(v34_state_t *s, const int16_t amp[], int len)
     {
         switch (s->rx.current_demodulator)
         {
+        case V34_MODULATION_SILENCE:
+            /* 12.5.1: the source receives no bearer data while the recipient
+               is silent. Consume samples without regressing sample_time. */
+            lenx = len - leny;
+            break;
         case V34_MODULATION_V34:
             lenx = primary_channel_rx(&s->rx, &amp[leny], len - leny);
             break;
@@ -16323,6 +16505,19 @@ int v34_rx_b1_search(v34_rx_state_t *s, int search, int *offset_out,
     }
     /*endfor*/
     (void) v34_build_expected_b1_tap_trellis(s, v34_expected_b1_default_tap(s), -1, best_state);
+    /* 10.1.3.1 requires a zero-state B1 at the final data-frame epoch.
+       A nonzero-state template match recovers the constellation, but does
+       not establish that epoch. A captured peer needs its V0 input phase
+       one mapping frame ahead of this reset. Until phase acquisition proves
+       V0, do not reject otherwise valid symbols using an assumed inversion
+       schedule. Keep the constraint for the specified reset-state B1. */
+    if (best_state != 0 && s->viterbi.zero_precoder)
+    {
+        s->viterbi.zero_precoder = false;
+        s->v0_acquiring = s->viterbi.state_count == 16 && !s->v90_mode;
+        s->v0_pairs = 0;
+        memset(s->v0_score, 0, sizeof(s->v0_score));
+    }
     prior = (s->viterbi.ptr - 1) & 0xF;
     for (int state = 0;  state < s->viterbi.state_count;  state++)
     {
@@ -16472,6 +16667,14 @@ SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
     s->rx.scramble_reg = 0;
     s->rx.viterbi.ptr = 0;
     s->rx.viterbi.windup = 15;
+    s->rx.v0_acquiring = false;
+    /* The V.90 T/3 path independently re-pins B1/frame phase and does not
+       yet preserve the input inversion epoch required by this constraint.
+       Keep its existing decoder until that acquisition path is corrected. */
+    s->rx.viterbi.zero_precoder = !s->rx.v90_mode;
+    for (int i = 0; i < 3; i++)
+        if (s->rx.h[i].re != 0 || s->rx.h[i].im != 0)
+            s->rx.viterbi.zero_precoder = false;
     /* 10.1.3.1/V.34: B1 is a reset-state data frame that carries the
        superframe synchronization inversions of the FINAL data frame in a
        superframe, and the convolutional encoder is reset to state zero.

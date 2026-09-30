@@ -796,6 +796,138 @@ route the image through the negotiated 21600 bit/s primary channel.
 Evidence: `artifacts/v90-hardware/20260901T050547Z-canon-hdx-phase2` and
 `-051717Z-canon-hdx-r2`.
 
+## Primary-channel resynchronization and payload — 30 September 2026
+
+`v34_half_duplex_change_mode(..., V34_HALF_DUPLEX_PRIMARY_CHANNEL)` now
+implements the source half of V.34 (10/96) **12.5.1**. Previously only the
+recipient changed its receiver; the source continued sending control data.
+The source now sends the 70 ms silence, S/S-bar and PP, followed directly by
+B1 and payload. It reuses the full-duplex waveform generators and reset-state
+B1/data mapper from 10.1.3.1, with the rate and encoding parameters already
+selected by the MPh exchange in 12.4.1.3. No TRN/J/MP exchange is inserted.
+Requests before completion of the bidirectional MPh/E exchange are rejected.
+
+Three receiver seams mattered to **12.5.2**:
+
+- The control-channel AGC changes the live gain register, while the primary
+  equalizer retains its Phase-3 coefficients. Restore the saved primary gain
+  before resynchronizing; retaining the CC gain broke 2800-baud payload.
+- The previous PP acquisition flag held the eye chooser through the new S.
+  Release that guard, reset the previous interval's eye statistics, and judge
+  the eye in a 64-symbol window inside the new 128T S interval.
+- The S detector counted numerical phase changes in the required silence.
+  Require signal in both differential symbols and the actual S/S-bar junction;
+  the generic duration/window fallback can advance halfway through S because
+  its duration also includes the preceding silence.
+
+The source's receive path is clamped while the recipient is silent, consuming
+samples normally rather than moving its sample counter backwards. The new
+`HDX_PRIMARY_DATA` diagnostic stage distinguishes B1/data from S-bar.
+
+Run the regression target:
+
+```sh
+make v34-hdx-primary-test
+# Or one row:
+V34_HDX_PRIMARY=1 ./v34_hdx_test 3200 9600 ulaw 8
+```
+
+The test first grades at least 512 control bits in both directions, then
+requests the primary channel. It grades at least 8000 primary bits, requires
+source offset zero (so a corrupt payload prefix cannot be skipped), and checks
+that the recipient transmits no user bits and the source receives none.
+The bounded alignment search replaces the old quadratic reference regeneration.
+`V34_HDX_RX_DUMP=<path>` saves the recipient's recovered bits as one byte per
+bit for independent analysis.
+
+**All 12 symbol-rate/law rows pass at 9600 bit/s**, with 37,632–38,841 primary
+payload bits checked per row and zero errors. Three unequal-ceiling rows also
+pass: 3200/9600 versus 21600 in u-law, 3200/21600 versus 9600 in A-law, and
+3429/28800 versus 4800 in A-law. The last row carries 20,808 verified bits at
+the negotiated 4800 bit/s. Three further rows (2400/u-law, 3200/A-law,
+3429/u-law) restart after verified primary payload and prove a second complete
+control-to-primary cycle. The original **18 rows pass**; the four dense-rate startup/restart rows
+below bring the target to **22 passing rows**, all included in `make test`.
+Restart clears the old primary mode, pending resynchronization, MPh rate and
+control-start silence flag; otherwise the next Phase-3 PP could skip TRN/MPh.
+Use `V34_HDX_RESTART=1` with `V34_HDX_PRIMARY=1` to exercise that lifecycle.
+
+**Higher-rate primary startup is fixed for the 3200/21600 loopback.**
+The HDX PP interval used the generic QPSK carrier detector in parallel with
+supervised equalizer conditioning, although 10.1.3.6 PP uses 30-degree points.
+Primary resynchronization now tracks against the known PP reference and
+suppresses the competing QPSK detector, as the V.90 PP path already does.
+The B1 carrier phase is also advanced from the frame centre to its final
+symbol before DATA begins (12.5.2). No DSP loop gains or training durations
+were changed, and B1 is decoded from received symbols.
+
+Both u-law and A-law now receive **64,672 payload bits with zero errors**,
+starting at source bit zero after the 864-bit B1 interval. These dense-rate
+rows and restart cases are included in `v34-hdx-primary-test`. Full-duplex
+controls still pass. No new hardware call or fax page transfer has been
+performed; this is an offline primary startup regression.
+
+**24 kbit/s startup is also verified.** B1 search corrects a 9-symbol
+PP-to-B1 offset in these profiles; the raw-sample training anchor must move
+with that detected offset. The recipient now fits its T/2 equalizer against
+known B1 using the existing supervised acquisition solver, then re-equalizes
+received B1 and buffered payload through those coefficients. B1 decoder replay
+uses each symbol's carrier phase. No ideal training symbols replace received
+samples, and no payload prefix is discarded.
+
+3200/24000 and 3429/24000 pass in both laws (64,576 and 64,696 verified payload
+bits respectively). Two 24 kbit/s restart rows also pass. Together with the
+previous cases, `v34-hdx-primary-test` has **28 passing rows**.
+
+**26.4 and 28.8 kbit/s are now verified in both laws at 3200 and 3429 baud.**
+The shared decoder previously admitted every subset pair regardless of the
+encoder output Y0, eliminating trellis coding gain. Table 11 steps 4–6 and
+9.6.3 require U0 = Y0 XOR C0 XOR V0. For a zero precoder C0 is identically
+zero, and U0 is the parity of the candidate pair's quadrant difference. The
+Viterbi decoder now enforces that constraint; nonzero precoders retain the
+existing path because they need C0 history carried per survivor. Unreachable
+path metrics remain unreachable during update and normalization. The constraint
+is scoped to ordinary V.34: the separate V.90 T/3 B1/frame-acquisition path
+re-pins its input inversion epoch and still needs correction before enabling
+this constraint. With that scope, `vpcm_loopback_test --all-tests` passes,
+including the V.90 T/3 payload checks.
+
+This change applies to **full duplex as well as HDX**. The 3200/24000 and
+3200/26400 full-duplex controls now pass in both laws. Full-duplex 28800 and
+31200 still have errors. Six noisy mapper regressions cross a hard-slicer
+boundary while staying inside the correct trellis subset's decision region;
+all six pass across the three trellis codes and both shaping modes. Together
+with exact-symbol tests, `v34_data_test` passes **396 cases**. A separate build
+with the constraint disabled fails the first noisy regression with 218 errors,
+confirming that these tests exercise coding gain rather than only round trips.
+
+The eight 26400/28800 rate/baud/law rows and two 28800 restart rows expand
+`v34-hdx-primary-test` to **38 passing rows**, all graded from source bit zero.
+`v34-hdx-high-rate-test` continues to report remaining failures explicitly.
+
+**31.2 and 33.6 kbit/s remain open.** After the constraint alone, 3200/31200
+has 2995 errors in u-law and 1624 in A-law; 3429/31200 has 21579/20684.
+3429/33600 aligns at source bit zero but has about 29,000 errors. These are
+not supported payload regressions yet. Delayed trellis-directed equalizer
+tracking improved one 31200 row but worsened others and was removed; a matched
+receive-filter experiment also failed to resolve these rates and was removed.
+No hardware interoperability has been established by these offline checks.
+
+`make test` stops at the existing full-duplex 3000/9600/u-law startup failure
+(both ends remain in Phase 4 after 60 simulated seconds). Linking the unchanged
+HEAD versions of `v34rx.c` and `v34tx.c` into a separate baseline executable
+reproduces the same stages and failure. A continued `make -i test` completes
+all remaining checks and reports five further failures, all in the existing
+11.6 full-duplex renegotiation rows: 2743/A-law, 2800/u-law, 3000/u-law,
+3000/A-law and 3200/A-law, each at 9600 bit/s. Each of those failures also
+reproduces in the unchanged-code baseline executable. Other checks completed
+successfully; the ordinary `make test` is still not green. The final HDX
+regression target passes all 18 rows after restart cleanup.
+
+This implements control-to-primary entry, not the return to control, primary
+turn-off, the Annex F 40-one handshakes, or a complete fax session. Those remain
+part of the work below.
+
 ## Order of work from here
 
 1. ~~A control-channel receiver.~~  Done -- see the section above.
@@ -812,9 +944,10 @@ Evidence: `artifacts/v90-hardware/20260901T050547Z-canon-hdx-phase2` and
 2a. The 12.4.3 and 12.4.4 recovery procedures.  A missed PPh, MPh or E is a
    **control channel retrain (12.8.1)** after three seconds, not a
    retransmission, and none of it exists.  Today a missed PPh is a dead call.
-3. `half_duplex_state` actually read: 12.5's primary channel turn-off and
-   12.6's control channel turn-off are the source/recipient turnarounds, and
-   nothing consumes the mode today.
+3. 12.5 control-to-primary entry now carries verified 9600-bit/s payload
+   (see the September 30 update). Finish higher-rate startup, 12.5.3 primary
+   turn-off and 12.6 control resynchronization; the complete source/recipient
+   turnarounds and Annex F handshake are still incomplete.
 4. Control channel data at 1200/2400 bit/s (10.2.4) as a byte interface, then
    HDLC over it -- F.3.1.4 wants flags and frames, which is what T.30 needs.
 5. T.30 Annex F itself: DIS bit 6 and the V.8 route into fax, T.30's frames on
@@ -827,3 +960,192 @@ Evidence: `artifacts/v90-hardware/20260901T050547Z-canon-hdx-phase2` and
 
 Steps 1 and 2 are the whole of the modem layer.  Steps 5 to 7 are the fax
 layer and are mostly plumbing once 1 to 4 exist.
+
+
+## 2026-09-30: RasFinder trellis decoding and inversion epoch
+
+Hardware calls with the shared constraint reached 24000 and 19200 bit/s,
+strong B1 correlation and steady constellations, but recovered only fragments
+of the peer's V.42 detection bursts. A previous-build hardware control also
+had payload errors, so the separate calls alone did not isolate the regression.
+
+A replay of the **same** 19200 receive tap and recorded RX/TX schedule did:
+with the constraint enabled, the five detection bursts were fragmented; with
+it disabled, each burst contained ten complete `EC` pairs. Both runs had
+identical constellation-distance measurements. The actual receive parameters
+were h=0, 16 states, P=16, J=7, expanded shaping, no nonlinear encoder. B1
+search selected state 13 and offset 8 symbols.
+
+V.34 9.6.3 equation (9-32) and Table 11 require U0=Y0 XOR C0 XOR V0;
+9.6.3.2 requires the previous state's Y0. Table 12's seven-frame inversion
+pattern was checked against the rendered PDF and is already correct. The
+failure is the assumed **input epoch**: advancing only input_4d by four 4D
+pairs (one mapping frame/eight 2D symbols) recovers all five complete bursts
+in this same capture. That diagnostic offset is not a production fix.
+
+10.1.3.1 specifies a reset-state B1 with the final data-frame inversion epoch.
+Our compatibility search accepted a nonzero-state B1 but then enabled strict
+parity under that standard epoch without acquiring the peer's actual V0 phase.
+That rejects valid received pairs at the wrong half-frame boundaries. The
+handoff now retains the existing unconstrained path for a nonzero-state B1
+match until its inversion phase is established. On the same captured input,
+the production guarded decoder again recovers five complete ten-pair bursts.
+The 396 mapper cases and 38 HDX rows still pass.
+
+This removes the newly introduced strict-decoder regression; it does not
+establish reliable RasFinder payload transfer. Automatic V0-phase acquisition
+for a peer that fails the specified B1 reset, and remaining payload/framing
+errors, are still open. Captures and diagnostic comparisons are preserved at
+`/tmp/v34hdx-work/rasfinder/` and `/tmp/v34hdx-work/` locally. No fixed hardware
+profile, DSP gain, filter, or G.711 bearer change was added.
+
+
+## Automatic V0 acquisition and live LAPM verification (2026-09-30)
+
+The compatibility path now acquires the inversion epoch for a zero-precoder,
+16-state peer instead of keeping trellis parity disabled indefinitely. Figure
+10's encoder gives
+
+`Y0[n] XOR Y0[n-3] XOR Y0[n-4] = Y2[n-3] XOR Y2[n-2] XOR Y1[n-1]`.
+
+Substituting equation (9-32), with C0=0, eliminates the unknown initial encoder
+state and leaves a parity check of Table 12's V0 sequence. Nearest received
+subset pairs supply the input terms. The receiver scores every epoch in one
+superframe and accepts only a unique zero-syndrome phase after a complete
+superframe observation. A damaged or ambiguous window leaves the existing
+unconstrained decoder in force and retries after two superframes. No
+hardware-specific offset or DSP constants are used. The standard reset-state
+B1 path retains the existing constrained decoder; nonzero precoders and
+32/64-state compatibility acquisition remain outside this new path.
+
+Six new tests cover advanced/delayed mapping-frame epochs and noisy initial
+acquisition at both 3200 (J=7) and 3429 (J=8). They verify the recovered input
+epoch and subsequent payload after the encoder-memory/traceback interval.
+`v34_data_test` now passes **402 cases**; all **38 HDX rows**, the data-stack
+checks, and `vpcm_loopback_test --all-tests` also pass.
+
+On the recorded RasFinder 19200 call, automatic acquisition selects advance
+four 4D pairs after 448 observed pairs. Raw bits contain five long consecutive
+HDLC flag runs (roughly 2400 flags each). Those synchronous flag bits appear
+as opaque bytes after asynchronous V.14 framing, so the earlier PTY-based
+claim that all of that data was physically corrupted was too broad.
+
+A fresh live call with `ME_DATA_FRAMING=lapm` reaches V.42 detection, XID, and
+**LAPM connected** at 19200 bit/s. Independent unstuffing and CRC checking of
+its raw receive bits finds **nine CRC-valid HDLC frames and no invalid complete
+frames**: XID, UA, two information frames, and supervisory acknowledgements.
+The information frames deliver 30 application bytes. This is actual foreign
+hardware error-control interoperability, rather than only CONNECT or a grid
+measurement. No known application test payload was exchanged.
+
+The XID also exposed an unrelated negotiation defect: the LAPM library
+requested V.42bis P0=1 by default although the byte-shuttle data stack has no
+attached compression codec, then recorded the peer's P0=3 proposal unchanged.
+V.42bis 5.1 and Annex A define P0=0 as the no-compression default and allow
+compression only in agreed directions. The library now defaults to zero,
+states P0 explicitly in XID, initializes absent P0 to zero, and intersects a
+peer request with local support. A public-API test injects the captured peer
+XID and proves unsupported compression is declined; the existing byte-exact,
+corruption/retransmission, flow-control and release tests all pass.
+
+Two further live no-compression trials also reach LAPM connection and deliver
+binary application bytes. The peer returns P0=3. These initial P0=0 trials used a malformed outgoing
+XID frame, diagnosed below, so they do not prove that the peer received a
+valid compression refusal. The explicit-zero capture initially has CRC-valid information
+and acknowledgement frames; later receive errors accompany recovery/retrain.
+Do not claim readable application data, a sustained bulk transfer, or higher
+hardware rates from these calls. Captures are preserved in
+`/tmp/v34hdx-work/rasfinder/artifacts/rf-auto-v0-*` locally. The test host uses
+an isolated build and the long-lived service was not replaced.
+
+
+## RasFinder application bytes and malformed XID (2026-09-30)
+
+The three preserved application streams have a strong V.42bis compressed-data
+signature under 7.5/7.9: unpacking successive nine-bit codewords least-significant
+bit first ends in FLUSH (code 1) followed exclusively by zero alignment bits in
+all three calls. The 20-byte stream is:
+
+```
+c0 5b 0f 87 6d 7c 76 72 db cb 9b eb 0e 09 1d 82 74 95 01 00
+```
+
+Its codewords are `448,429,451,432,454,435,457,438,459,461,442,289,464,16,466,298,1`.
+This is consistent with compressed application data; it is not a recovered
+readable banner. The two preceding streams start with dictionary codes 291 and
+427 and likewise end in FLUSH. Under V.42bis 6.2/7.2/8 a fresh dictionary has
+literal codes 3..258 and starts in transparent mode with escape zero. None of
+these streams contains its initial ECM sequence, and each starts by referencing
+an unavailable dictionary entry. A fresh standards decoder therefore cannot
+recover the original application bytes from these fragments. Retained dictionary
+state or an omitted earlier compression stream remains a hypothesis; neither a
+specific banner nor PPP has been established. Analysis is saved in
+`/tmp/v34hdx-work/rasfinder-payload-analysis.json`.
+
+A concrete local bug was found while auditing this negotiation. In
+`transmit_xid()`, the four-byte HDLC optional-functions value was written without
+advancing `buf`. The next TLV overwrote it, the private group started four bytes
+early, and the advertised frame length included four bytes beyond the populated
+fields. The builder now advances the pointer, preserving the Figure 11/Table 11a
+V.42 group lengths and compression refusal. An independent HDLC receiver test
+validates the transmitted TLV boundaries, options value and P0=0; it fails before
+the fix and passes after it. V.42 link tests, data-stack tests and all PCM
+loopbacks pass.
+
+A further isolated live call with the corrected builder reaches CONNECT 19200
+and supplies another 25-byte binary stream with the same nine-bit/FLUSH
+signature. Thus the pointer repair alone does not produce readable application
+data or settle the compression-state problem. Its taps, schedule and PTY bytes
+are preserved in `rf-xid-pointer-20260930`. The diagnostic replay did not
+reproduce this call's initial training, so no independent CRC claim is made for
+that new stream; the earlier three initial information frames remain CRC-verified.
+
+
+## Integrated V.42bis data path (2026-09-30)
+
+The independent streaming codec and tests in `modem-dsp-emu/tools/v42bis.py`
+and `tests/test_v42bis.py` were used to validate the vendored C codec in both
+wire directions. `tools/v42bis_interop.py --reference ../modem-dsp-emu` now
+cross-checks 67 cases: transparent and compressed streams, cycling escapes,
+one-octet fragments, flushes between transfers, STEPUP, non-power-of-two
+negotiated dictionaries, dictionary leaf recovery, mode transitions, RESET,
+and invalid commands/dictionary references. The Python reference's 13 existing
+tests also pass. Production does not depend on Python or the sibling checkout.
+
+`ds_init_v42()` now offers P0=3/P1=1024/P2=32 and installs codecs from the
+agreed XID parameters before information delivery. `ds_init_v42_ex()` permits
+explicit direction/limit selection or P0=0 for plain LAPM. The public bare V.42
+library still defaults to P0=0; byte callbacks must opt in via
+`v42_set_compression()` only when a codec is attached. Negotiation uses the
+supported directions and smaller P1/P2 limits (V.42bis 5.1/Annex A), validates
+private-group identity and TLV widths, and sends the agreed values in replies.
+The codec's local direction bits are mapped to the XID initiator's role.
+
+Compression output is buffered once, then supplied to LAPM; retransmissions
+reuse the original encoded I-frame and do not update the dictionary twice.
+Receive decoding runs only on accepted information bytes. Flushing delivers
+short messages without discarding dictionary context (7.9); fresh LAPM sessions
+initialize fresh dictionaries, while a physical V.34 retrain preserving LAPM
+also preserves compression state. Decoder errors report DS_LINK_ERROR and
+stop the link without inventing dictionary contents or falling back to raw
+compressed bytes. Added data-stack tests verify both directions, one direction
+at a time, refusal/fallback, smaller agreed limits, real wire-size reduction,
+corrupted-frame retransmission, session reset and malformed compressed payloads.
+
+The codec previously accepted P1 up to 65535 despite allocating only 4096
+entries. Initialization now rejects unsupported sizes, and the data-stack offer
+is bounded to its codec capacity. The decoder also rejects STEPUP beyond the
+negotiated width, absent dictionary entries and oversized decoded strings
+(6.2/7.4/8). Integration, V.42 link, independent interop and all PCM loopback
+tests pass; the full modem binary builds.
+
+Live isolated RasFinder test `rf-compression-20260930` negotiates
+**P0=3/P1=1024/P2=32**, establishes LAPM at 19200 bit/s and delivers 23 binary
+application bytes. Independent Python decoding of those bytes remains in
+transparent mode; forcing a fresh compressed context instead fails immediately
+on absent codeword 484. This supports the earlier suspicion of unavailable
+compression state, but does not establish whether that state is retained by the
+peer or setup was missed. A readable banner and hardware application roundtrip
+remain unverified. Capture taps, schedule and PTY bytes are preserved locally
+under `/tmp/v34hdx-work/rasfinder/artifacts/rf-compression-20260930`; the
+long-lived service was not changed.

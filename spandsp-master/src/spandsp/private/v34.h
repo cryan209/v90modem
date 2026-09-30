@@ -705,7 +705,10 @@ enum v34_tx_stages_e
     V34_TX_STAGE_HDX_CC_SILENCE,
     /*! \brief V.34 12.4.1.4/12.4.2.5: user data on the half-duplex control
         channel, after the MPh exchange and E. */
-    V34_TX_STAGE_HDX_CC_DATA
+    V34_TX_STAGE_HDX_CC_DATA,
+    /*! \brief V.34 12.5.1: B1 and user primary-channel data. Appended to
+        preserve the numeric values mirrored by application diagnostics. */
+    V34_TX_STAGE_HDX_PRIMARY_DATA
 };
 
 enum v34_events_e
@@ -1257,6 +1260,8 @@ typedef struct
 
     /*! Number of states in the negotiated trellis (16, 32, or 64). */
     int state_count;
+    /*! 9.6.3: C0 is identically zero when the negotiated precoder is zero. */
+    bool zero_precoder;
     /*! Predecessor state and branch for each state/input-bit pair.  These are
         kept separately because a packed byte cannot represent a 64-state
         predecessor plus the three-bit branch label. */
@@ -1647,6 +1652,12 @@ typedef struct
         separate from step_2d, which advances only when delayed Viterbi
         decisions emerge. */
     int input_4d;
+    /*! Zero-precoder 16-state V0 acquisition, independent of initial state. */
+    bool v0_acquiring;
+    int v0_pairs;
+    uint8_t v0_u[5];
+    uint8_t v0_input[5];
+    uint16_t v0_score[512];
 
     /*! \brief Buffer to accumulate 8 equalized 2D symbols (as Q9.7 re,im pairs)
                before calling v34_put_mapping_frame() */

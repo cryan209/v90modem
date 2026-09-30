@@ -652,8 +652,13 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
         ME_LOG("[ME] V.42 detection succeeded; entering LAPM establishment\n");
         break;
     case DS_LINK_XID_NEGOTIATED:
-        ME_LOG("[ME] V.42 XID negotiated\n");
+    {
+        v42_negotiated_parameters_t p;
+        if (v42_get_negotiated_parameters(g_data_stack.v42, &p) == 0)
+            ME_LOG("[ME] V.42 XID negotiated: V.42bis P0=%d P1=%d P2=%d\n",
+                   p.compression_p0, p.compression_p1, p.compression_p2);
         break;
+    }
     case DS_LINK_CONNECTED:
         ME_LOG("[ME] V.42 LAPM connected\n");
         if (!g_data_connect_reported) {

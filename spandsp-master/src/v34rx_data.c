@@ -220,6 +220,9 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
             int n = s->b1_observed_symbols++;
             int search = v34_rx_b1_search_symbols();
 
+            if (!s->duplex && n == 0)
+                s->v90_t3_e_anchor = s->v90_t3_raw_count - 2 - V34_EQUALIZER_PRE_LEN;
+
             if (s->v90_t3_b1_symbols + search > V34_V90_T3_B1_MAX_SYMBOLS)
                 search = V34_V90_T3_B1_MAX_SYMBOLS - s->v90_t3_b1_symbols;
             /*endif*/
@@ -321,6 +324,8 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     b1_state = v34_rx_b1_search(s, search, &b1_offset, &best, &at_zero);
                     if (b1_offset > 0)
                     {
+                        if (!s->duplex)
+                            s->v90_t3_e_anchor += 2*b1_offset;
                         memmove(&s->b1_observed[0], &s->b1_observed[b1_offset],
                                 sizeof(s->b1_observed[0])*(size_t) (s->v90_t3_b1_symbols + search - b1_offset));
                     }
@@ -415,7 +420,9 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                            constellation still rotated by 2.7 degrees, enough
                            to corrupt 19 dense shell-mapper frames before the
                            decision-directed loop pulled it to zero. */
-                        if (v34_rx_b1_supervised_eq_enabled())
+                        /* 12.5.2: HDX B1 also conditions the carrier for DATA;
+                           its phase must refer to the end of B1. */
+                        if (!s->duplex || v34_rx_b1_supervised_eq_enabled())
                         {
                             phase += dphi
                                    *(float) (s->v90_t3_b1_symbols - 1)/2.0f;
@@ -485,12 +492,27 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                          gain, conjugate,
                          sqrtf((conjugate ? corr_conj_mag2 : corr_mag2)
                                /(expected_power*observed_power)));
+                v34_rx_condition_b1_equalizer(s, gain, phase);
+                if (!s->duplex)
+                {
+                    for (int i = 0; i < leftovers; i++)
+                    {
+                        leftover[i] = v34_rx_b1_equalized_symbol(s,
+                                            s->v90_t3_b1_symbols + i);
+                    }
+                }
                 s->mapping_frame_count = 0;
                 for (int i = 0; i < s->v90_t3_b1_symbols; i++)
                 {
-                    complexf_t o = s->b1_observed[i];
-                    float c = cosf(phase);
-                    float sn = sinf(phase);
+                    complexf_t o = s->duplex ? s->b1_observed[i]
+                                           : v34_rx_b1_equalized_symbol(s, i);
+                    float replay_phase = phase;
+                    if (!s->duplex)
+                        replay_phase -= s->phase4_da_derot_rate
+                                      *(3.14159265358979f/2147483648.0f)
+                                      *(s->v90_t3_b1_symbols - 1 - i);
+                    float c = cosf(replay_phase);
+                    float sn = sinf(replay_phase);
                     float re = (o.re*c + o.im*sn)*s->data_symbol_scale;
                     float im = (o.im*c - o.re*sn)*s->data_symbol_scale;
 

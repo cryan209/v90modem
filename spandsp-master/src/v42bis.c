@@ -250,14 +250,18 @@ static void send_string(v42bis_comp_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
-static void expand_codeword_to_string(v42bis_comp_state_t *s, uint16_t code)
+static int expand_codeword_to_string(v42bis_comp_state_t *s, uint16_t code)
 {
     int i;
     uint16_t p;
 
     /* Work out the length */
-    for (i = 0, p = code;  p;  i++)
+    for (i = 0, p = code; p; i++)
+    {
+        if (p >= s->v42bis_parm_n2 || i >= s->v42bis_parm_n7 - s->string_length)
+            return -1;
         p = s->dict[p].parent;
+    }
     s->string_length += i;
     /* Now expand the known length of string */
     i = s->string_length - 1;
@@ -266,6 +270,7 @@ static void expand_codeword_to_string(v42bis_comp_state_t *s, uint16_t code)
         s->string[i--] = s->dict[p].node_octet;
         p = s->dict[p].parent;
     }
+    return 0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -650,18 +655,23 @@ SPAN_DECLARE(int) v42bis_decompress(v42bis_state_t *ss, const uint8_t buf[], int
                 case V42BIS_STEPUP:
                     /* Increase code word size */
                     span_log(&ss->logging, SPAN_LOG_FLOW, "Hit V42BIS_STEPUP\n");
+                    /* 7.4: STEPUP may not exceed the negotiated dictionary. */
+                    if ((1U << s->v42bis_parm_c2) >= (unsigned)s->v42bis_parm_n2)
+                        return -1;
                     s->v42bis_parm_c2++;
                     s->v42bis_parm_c3 <<= 1;
-                    if (s->v42bis_parm_c2 > (s->v42bis_parm_n2 >> 3))
-                        return -1;
                     break;
                 }
                 continue;
             }
             /* Regular codeword */
-            if (code == s->v42bis_parm_c1)
+            /* 6.2/8: an unallocated string is a synchronization error, not
+               a literal zero. Never fabricate output from a missing dictionary. */
+            if (code >= s->v42bis_parm_n2 || code == s->v42bis_parm_c1
+                || (code >= V42BIS_N5 && !s->dict[code].parent))
                 return -1;
-            expand_codeword_to_string(s, code);
+            if (expand_codeword_to_string(s, code) != 0)
+                return -1;
             if (s->update_at)
             {
                 ch = s->string[0];
@@ -729,7 +739,10 @@ SPAN_DECLARE(v42bis_state_t *) v42bis_init(v42bis_state_t *s,
 {
     int ret;
 
-    if (negotiated_p1 < V42BIS_MIN_DICTIONARY_SIZE  ||  negotiated_p1 > 65535)
+    if (negotiated_p0 < 0 || negotiated_p0 > 3 || !encode_handler || !decode_handler
+        || max_encode_len <= 0 || max_decode_len <= 0)
+        return NULL;
+    if (negotiated_p1 < V42BIS_MIN_DICTIONARY_SIZE  ||  negotiated_p1 > V42BIS_MAX_CODEWORDS)
         return NULL;
     if (negotiated_p2 < V42BIS_MIN_STRING_SIZE  ||  negotiated_p2 > V42BIS_MAX_STRING_SIZE)
         return NULL;

@@ -3,6 +3,7 @@
  */
 
 #include "data_stack.h"
+#include <spandsp.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -310,7 +311,8 @@ static void lapm_event(void *ctx, ds_link_event_t event)
         ep->failed = true;
 }
 
-static void test_lapm_data_stack_roundtrip_mode(bool detect, const char *label)
+static void test_lapm_data_stack_case(bool detect, int offer, int peer_offer,
+                                      bool repeated, bool corrupt, const char *label)
 {
     data_stack_t caller;
     data_stack_t answerer;
@@ -326,21 +328,24 @@ static void test_lapm_data_stack_roundtrip_mode(bool detect, const char *label)
     caller_ep.tx_len = 1024;
     answerer_ep.tx_len = 1024;
     for (int i = 0; i < 1024; i++) {
-        caller_ep.tx[i] = (uint8_t)(i * 29 + 3);
-        answerer_ep.tx[i] = (uint8_t)(i * 47 + 11);
+        caller_ep.tx[i] = (uint8_t)(repeated ? "ABCD"[i % 4] : (i * 29 + 3));
+        answerer_ep.tx[i] = (uint8_t)(repeated ? "xyz0"[i % 4] : (i * 47 + 11));
     }
 
-    caller_initialized = ds_init_v42(&caller, true, detect, 9600,
+    caller_initialized = ds_init_v42_ex(&caller, true, detect, 9600, offer, 2048, 64,
                                      lapm_pull, &caller_ep,
                                      lapm_push, &caller_ep,
                                      lapm_event, &caller_ep) == 0;
-    answerer_initialized = ds_init_v42(&answerer, false, detect, 9600,
+    answerer_initialized = ds_init_v42_ex(&answerer, false, detect, 9600, peer_offer, 512, 32,
                                        lapm_pull, &answerer_ep,
                                        lapm_push, &answerer_ep,
                                        lapm_event, &answerer_ep) == 0;
     if (caller_initialized && answerer_initialized) {
         for (int tick = 0; tick < 9600 * 10; tick++) {
-            ds_rx_put_bit(&answerer, ds_tx_get_bit(&caller));
+            int bit = ds_tx_get_bit(&caller);
+            if (corrupt && caller.link_ready && tick % 1703 == 0)
+                bit ^= 1;
+            ds_rx_put_bit(&answerer, bit);
             ds_rx_put_bit(&caller, ds_tx_get_bit(&answerer));
             if (caller_ep.rx_len == answerer_ep.tx_len
                 && answerer_ep.rx_len == caller_ep.tx_len) {
@@ -361,10 +366,89 @@ static void test_lapm_data_stack_roundtrip_mode(bool detect, const char *label)
           && memcmp(answerer_ep.rx, caller_ep.tx,
                     (size_t)caller_ep.tx_len) == 0,
           label);
+    if (caller_initialized && answerer_initialized)
+    {
+        v42_negotiated_parameters_t cp, ap;
+        CHECK(v42_get_negotiated_parameters(caller.v42, &cp) == 0
+              && v42_get_negotiated_parameters(answerer.v42, &ap) == 0
+              && cp.compression_p0 == (offer & peer_offer)
+              && ap.compression_p0 == cp.compression_p0
+              && cp.compression_p1 == 512 && ap.compression_p1 == 512
+              && cp.compression_p2 == 32 && ap.compression_p2 == 32,
+              "V.42bis directions and smaller dictionary/string limits agree");
+        if (repeated && (offer & peer_offer))
+        {
+            CHECK(!(offer & peer_offer & 1) || caller.v42_tx_wire_bytes < 512,
+                  "initiator compression reduces application bytes on the wire");
+            CHECK(!(offer & peer_offer & 2) || answerer.v42_tx_wire_bytes < 512,
+                  "responder compression reduces application bytes on the wire");
+        }
+        /* New LAPM establishment must initialize a fresh codec/dictionary. */
+        caller_ep.tx_pos = answerer_ep.tx_pos = 0;
+        caller_ep.rx_len = answerer_ep.rx_len = 0;
+        ds_reset(&caller);
+        ds_reset(&answerer);
+        for (int tick = 0; tick < 9600 * 10; tick++)
+        {
+            ds_rx_put_bit(&answerer, ds_tx_get_bit(&caller));
+            ds_rx_put_bit(&caller, ds_tx_get_bit(&answerer));
+            if (caller_ep.rx_len == 1024 && answerer_ep.rx_len == 1024)
+                break;
+        }
+        CHECK(caller_ep.rx_len == 1024 && answerer_ep.rx_len == 1024
+              && memcmp(caller_ep.rx, answerer_ep.tx, 1024) == 0
+              && memcmp(answerer_ep.rx, caller_ep.tx, 1024) == 0,
+              "V.42bis dictionaries restart with a new LAPM session");
+    }
     if (caller_initialized)
         ds_release(&caller);
     if (answerer_initialized)
         ds_release(&answerer);
+}
+
+static int malformed_peer_frame(void *ctx, uint8_t *msg, int max_len)
+{
+    int n = 0;
+    while (n < max_len)
+    {
+        int byte = lapm_pull(ctx);
+        if (byte < 0)
+            break;
+        msg[n++] = (uint8_t)byte;
+    }
+    return n;
+}
+
+/* A CRC-valid LAPM I-frame can still contain invalid compression data. */
+static void test_compression_error(void)
+{
+    data_stack_t caller;
+    lapm_endpoint_t caller_ep = {0}, peer_ep = {0};
+    /* ECM, then nine-bit code 291, absent from the fresh dictionary. */
+    static const uint8_t invalid[] = {0, 0, 0x23, 0x01};
+    memcpy(peer_ep.tx, invalid, sizeof(invalid));
+    peer_ep.tx_len = sizeof(invalid);
+    v42_state_t *peer = v42_init(NULL, false, false, malformed_peer_frame, NULL, &peer_ep);
+    bool initialized = ds_init_v42(&caller, true, false, 9600,
+                                   lapm_pull, &caller_ep, lapm_push, &caller_ep,
+                                   lapm_event, &caller_ep) == 0;
+    if (peer && initialized)
+    {
+        v42_set_compression(peer, 3, 512, 32);
+        v42_restart(peer);
+        for (int tick = 0; tick < 9600 * 5 && !caller_ep.failed; tick++)
+        {
+            v42_rx_bit(peer, ds_tx_get_bit(&caller));
+            ds_rx_put_bit(&caller, v42_tx_bit(peer));
+        }
+    }
+    CHECK(peer && initialized && caller_ep.failed && caller.compression_failed
+          && !ds_link_is_ready(&caller) && caller_ep.rx_len == 0,
+          "invalid compressed data reports link error without fabricated output");
+    if (initialized)
+        ds_release(&caller);
+    if (peer)
+        v42_free(peer);
 }
 
 /* Random payloads through the bit interface with idle gaps between bursts. */
@@ -414,10 +498,19 @@ int main(void)
     test_raw_roundtrip();
     test_packed_byte_helpers();
     test_v14_v90_style_reservoir();
-    test_lapm_data_stack_roundtrip_mode(true,
+    test_lapm_data_stack_case(true, 3, 3, false, false,
           "data stack LAPM detection negotiates and transfers byte-exact payloads");
-    test_lapm_data_stack_roundtrip_mode(false,
+    test_lapm_data_stack_case(false, 3, 3, false, false,
           "data stack LAPM bypass negotiates and transfers byte-exact payloads");
+    test_lapm_data_stack_case(false, 3, 3, true, true,
+          "compressed LAPM retries preserve dictionaries and exact payloads");
+    test_lapm_data_stack_case(false, 1, 3, true, false,
+          "V.42bis initiator-only compression transfers both directions");
+    test_lapm_data_stack_case(false, 2, 3, true, false,
+          "V.42bis responder-only compression transfers both directions");
+    test_lapm_data_stack_case(false, 3, 0, true, false,
+          "V.42bis refusal falls back to plain LAPM in both directions");
+    test_compression_error();
     test_v14_bursty_random();
 
     if (failures) {

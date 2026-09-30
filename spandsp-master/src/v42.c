@@ -304,23 +304,32 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
     uint32_t param_val;
     uint8_t param_id;
     uint8_t param_len;
+    bool v42bis_group;
 
     s = &ss->lapm;
     if (frame[2] != FI_GENERAL)
         return -1;
     config = ss->config;
+    /* V.42bis 5.1: absent P0 means no compression. A peer request may
+       select only directions supported locally; LAPM itself supplies no
+       V.42bis compressor or decompressor. */
+    config.comp = 0;
+    config.comp_dict_size = 512;
+    config.comp_max_string = 6;
     /* Skip the header octets */
     frame += 3;
     len -= 3;
     while (len > 0)
     {
+        if (len < 3)
+            return -1;
         group_id = frame[0];
         group_len = frame[1];
         group_len = (group_len << 8) | frame[2];
         frame += 3;
         len -= (3 + group_len);
         if (len < 0)
-            break;
+            return -1;
         buf = frame;
         frame += group_len;
         switch (group_id)
@@ -328,11 +337,13 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
         case GI_PARAM_NEGOTIATION:
             while (group_len > 0)
             {
+                if (group_len < 2)
+                    return -1;
                 param_id = buf[0];
                 param_len = buf[1];
                 buf += 2;
                 if (group_len < (2 + param_len))
-                    break;
+                    return -1;
                 group_len -= (2 + param_len);
                 switch (param_id)
                 {
@@ -369,26 +380,41 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
             }
             break;
         case GI_PRIVATE_NEGOTIATION:
+            v42bis_group = false;
             while (group_len > 0)
             {
+                if (group_len < 2)
+                    return -1;
                 param_id = buf[0];
                 param_len = buf[1];
                 buf += 2;
                 if (group_len < 2 + param_len)
-                    break;
+                    return -1;
                 group_len -= (2 + param_len);
                 switch (param_id)
                 {
                 case PI_PARAMETER_SET_ID:
-                    /* This might be worth monitoring, but it doesn't serve mnuch other purpose */
+                    v42bis_group = param_len == 3 && memcmp(buf, "V42", 3) == 0;
                     break;
                 case PI_V42BIS_COMPRESSION_REQUEST:
-                    config.comp = pack_value(buf, param_len);
+                    if (!v42bis_group)
+                        break;
+                    if (param_len != 1 || buf[0] > 3)
+                        return -1;
+                    config.comp = pack_value(buf, param_len) & ss->config.comp & 3;
                     break;
                 case PI_V42BIS_NUM_CODEWORDS:
+                    if (!v42bis_group)
+                        break;
+                    if (param_len != 2)
+                        return -1;
                     config.comp_dict_size = pack_value(buf, param_len);
                     break;
                 case PI_V42BIS_MAX_STRING_LENGTH:
+                    if (!v42bis_group)
+                        break;
+                    if (param_len != 1)
+                        return -1;
                     config.comp_max_string = pack_value(buf, param_len);
                     break;
                 default:
@@ -401,6 +427,14 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
             break;
         }
     }
+    /* V.42bis 5.1: agree only supported directions and the smaller limits. */
+    if (config.comp_dict_size < 512 || config.comp_dict_size > 65535
+        || config.comp_max_string < 6 || config.comp_max_string > 250)
+        return -1;
+    if (config.comp_dict_size > ss->config.comp_dict_size)
+        config.comp_dict_size = ss->config.comp_dict_size;
+    if (config.comp_max_string > ss->config.comp_max_string)
+        config.comp_max_string = ss->config.comp_max_string;
     ss->negotiated.valid = true;
     ss->negotiated.tx_n401 = s->tx_n401;
     ss->negotiated.rx_n401 = s->rx_n401;
@@ -455,6 +489,7 @@ static void transmit_xid(v42_state_t *ss, uint8_t addr)
     *buf++ = PI_HDLC_OPTIONAL_FUNCTIONS;
     *buf++ = 4;
     put_net_unaligned_uint32(buf, 0x8A890000);  /* Bits 2, 4, 8 , 9, 12, and 16 set */
+    buf += 4;  /* Table 11a/V.42: keep subsequent TLVs after this value. */
 
     /* Send the maximum as a number of bits, rather than octets */
     *buf++ = PI_TX_INFO_MAXSIZE;
@@ -478,8 +513,9 @@ static void transmit_xid(v42_state_t *ss, uint8_t addr)
 
     len += group_len;
 
-    if (ss->config.comp)
     {
+        /* V.42bis 5.1/Annex A: state P0 explicitly, including zero, so a
+           peer's compression proposal receives an unambiguous refusal. */
         /* Private parameter negotiation group */
         group_len = 15;
         *buf++ = GI_PRIVATE_NEGOTIATION;
@@ -502,18 +538,21 @@ static void transmit_xid(v42_state_t *ss, uint8_t addr)
            11 Both directions. */
         *buf++ = PI_V42BIS_COMPRESSION_REQUEST;
         *buf++ = 1;
-        *buf++ = ss->config.comp;
+        *buf++ = (addr == s->rsp_addr && ss->negotiated.valid)
+                     ? ss->negotiated.compression_p0 : ss->config.comp;
 
         /* V.42bis P1 */
         *buf++ = PI_V42BIS_NUM_CODEWORDS;
         *buf++ = 2;
-        put_net_unaligned_uint16(buf, ss->config.comp_dict_size);
+        put_net_unaligned_uint16(buf, (addr == s->rsp_addr && ss->negotiated.valid)
+                                     ? ss->negotiated.compression_p1 : ss->config.comp_dict_size);
         buf += 2;
 
         /* V.42bis P2 */
         *buf++ = PI_V42BIS_MAX_STRING_LENGTH;
         *buf++ = 1;
-        *buf++ = ss->config.comp_max_string;
+        *buf++ = (addr == s->rsp_addr && ss->negotiated.valid)
+                     ? ss->negotiated.compression_p2 : ss->config.comp_max_string;
 
         len += group_len;
     }
@@ -937,8 +976,8 @@ static int rx_unnumbered_cmd_frame(v42_state_t *ss, const uint8_t *frame, int le
         break;
     case LAPM_U_XID:
         /* Exchange general ID info */
-        receive_xid(ss, frame, len);
-        transmit_xid(ss, s->rsp_addr);
+        if (receive_xid(ss, frame, len) == 0)
+            transmit_xid(ss, s->rsp_addr);
         break;
     case LAPM_U_TEST:
         /* TODO: */
@@ -1024,7 +1063,8 @@ static int rx_unnumbered_rsp_frame(v42_state_t *ss, const uint8_t *frame, int le
     case LAPM_U_XID:
         if (s->configuring)
         {
-            receive_xid(ss, frame, len);
+            if (receive_xid(ss, frame, len) != 0)
+                break;
             s->configuring = false;
             t401_stop(ss);
             switch (s->state)
@@ -1481,6 +1521,16 @@ SPAN_DECLARE(int) v42_get_bit_rate(const v42_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v42_set_compression(v42_state_t *s, int p0, int p1, int p2)
+{
+    if (!s || p0 < 0 || p0 > 3 || p1 < 512 || p1 > 65535 || p2 < 6 || p2 > 250)
+        return -1;
+    s->config.comp = p0;
+    s->config.comp_dict_size = p1;
+    s->config.comp_max_string = p2;
+    return 0;
+}
+
 SPAN_DECLARE(int) v42_get_negotiated_parameters(const v42_state_t *s,
                                                 v42_negotiated_parameters_t *out)
 {
@@ -1592,8 +1642,10 @@ SPAN_DECLARE(v42_state_t *) v42_init(v42_state_t *ss,
     ss->config.v42_tx_n401 = V42_DEFAULT_N_401;
     ss->config.v42_rx_n401 = V42_DEFAULT_N_401;
 
-    /* TODO: This should be part of the V.42bis startup */
-    ss->config.comp = 1;
+    /* V.42bis 5.1/Annex A: compression is optional and defaults to P0=0.
+       This LAPM API carries uncompressed application bytes and has no
+       attached V.42bis codec, so do not request compressed traffic. */
+    ss->config.comp = 0;
     ss->config.comp_dict_size = 512;
     ss->config.comp_max_string = 6;
 

@@ -799,6 +799,7 @@ int main(int argc, char **argv)
     }
 
     if (g_replay_path) {
+        setenv("ME_V90_ROLE", "analogue", 0);
         rs_setup();
         me_set_verbose(1);
         me_init();
@@ -814,6 +815,13 @@ int main(int argc, char **argv)
     }
 
     if (!g_dial) { usage(argv[0]); return 2; }
+    /* This binary IS the analogue modem -- it is wired to a 2-wire line through
+     * a DAA, and V.90 puts the analogue modem on the calling side, the side that
+     * dials.  Without this the engine takes the DIGITAL-role branch and both
+     * ends of the call believe they are the digital modem.  setenv(..., 0) so an
+     * explicit ME_V90_ROLE still wins -- which is what a replay of a recording
+     * made from the digital side needs. */
+    setenv("ME_V90_ROLE", "analogue", 0);
     rs_setup();
     if (g_rate == 8000.0)
         fprintf(stderr, "[APPLE] 8000 Hz: no receive resampler, and NO T/2 path "

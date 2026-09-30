@@ -129,4 +129,8 @@ void     v34_rx_phase3_wait_s_symbol(v34_rx_state_t *s, const complexf_t *sym);
    enclosing switch: the stage was already self-contained in (s, sym). */
 void  v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym);
 
+/* 12.5.2 HDX B1 conditioning and replay from received T/2 samples. */
+void v34_rx_condition_b1_equalizer(v34_rx_state_t *s, float gain, float phase);
+complexf_t v34_rx_b1_equalized_symbol(const v34_rx_state_t *s, int symbol);
+
 #endif

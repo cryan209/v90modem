@@ -100,6 +100,12 @@ SPAN_DECLARE(int) v42_tx_bit(void *user_data);
 SPAN_DECLARE(int) v42_set_bit_rate(v42_state_t *s, int bit_rate);
 
 /*! Return the transmit bit rate currently used by the V.42 timers. */
+/*! Configure the V.42bis offer before v42_restart. P0 is relative to the
+    XID initiator; zero disables compression. The application must attach
+    codecs when enabling it. Limits follow V.42bis 5.1/Annex A. */
+SPAN_DECLARE(int) v42_set_compression(v42_state_t *s, int p0, int p1, int p2);
+
+/*! Return the transmit bit rate currently used by the V.42 timers. */
 SPAN_DECLARE(int) v42_get_bit_rate(const v42_state_t *s);
 
 /*! Copy the parameters most recently agreed through XID.
