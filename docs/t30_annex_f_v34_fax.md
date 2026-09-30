@@ -1149,3 +1149,7 @@ peer or setup was missed. A readable banner and hardware application roundtrip
 remain unverified. Capture taps, schedule and PTY bytes are preserved locally
 under `/tmp/v34hdx-work/rasfinder/artifacts/rf-compression-20260930`; the
 long-lived service was not changed.
+
+The subsequent codec completion removes that temporary 4096-entry limit,
+implements C-INIT and encoder RESET, and corrects repeated/aligned flushes.
+See `v42bis.md` for the supported range, lifecycle and current validation.

@@ -208,8 +208,19 @@ static void ds_v42_status(void *user_data, int status)
         event = DS_LINK_UNSUPPORTED;
         break;
     case SIG_STATUS_LINK_CONNECTED:
-        if (s->compression_failed)
+        if (s->compression_failed && !s->v42bis)
             return;
+        s->compression_failed = false;
+        /* V.42bis 5.6: every L-ESTABLISH indication/confirmation is
+           C-INIT, including SABME re-establishment without a fresh XID. */
+        s->compressed_tx_len = s->compressed_tx_pos = 0;
+        if (s->v42bis && v42bis_restart(s->v42bis) != 0)
+        {
+            ds_compression_error(s);
+            return;
+        }
+        if (s->v44_encoder) v44_encoder_reset(s->v44_encoder);
+        if (s->v44_decoder) v44_decoder_reset(s->v44_decoder);
         s->link_ready = true;
         event = DS_LINK_CONNECTED;
         break;

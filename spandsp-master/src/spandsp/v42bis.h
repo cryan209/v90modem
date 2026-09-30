@@ -37,8 +37,8 @@ conjunction with the error correction scheme defined in V.42.
 #define V42BIS_MIN_STRING_SIZE      6
 #define V42BIS_MAX_STRING_SIZE      250
 #define V42BIS_MIN_DICTIONARY_SIZE  512
-#define V42BIS_MAX_BITS             12
-#define V42BIS_MAX_CODEWORDS        4096    /* 2^V42BIS_MAX_BITS */
+#define V42BIS_MAX_BITS             16
+#define V42BIS_MAX_CODEWORDS        65535   /* Annex A: two-octet P1 */
 #define V42BIS_MAX_OUTPUT_LENGTH    1024
 
 enum
@@ -91,6 +91,16 @@ SPAN_DECLARE(int) v42bis_decompress(v42bis_state_t *s, const uint8_t buf[], int 
     \return 0 */
 SPAN_DECLARE(int) v42bis_decompress_flush(v42bis_state_t *s);
 
+/*! C-INIT: discard both dictionaries and pending data without sending RESET.
+    Call only after link establishment/re-establishment, with no data in transit
+    (V.42bis 5.6). Parameters, callbacks and compression policy are retained. */
+SPAN_DECLARE(int) v42bis_restart(v42bis_state_t *s);
+
+/*! Reset the encoder dictionary on the wire (V.42bis 7.8.3).
+    Pending data is sent, followed by ETM if needed and RESET using the old escape.
+    The decoder dictionary is unaffected. */
+SPAN_DECLARE(int) v42bis_compress_reset(v42bis_state_t *s);
+
 /*! Set the compression mode.
     \param s The V.42bis context.
     \param mode One of the V.42bis compression modes -
@@ -107,7 +117,9 @@ SPAN_DECLARE(logging_state_t *) v42bis_get_logging_state(v42bis_state_t *s);
 
 /*! Initialise a V.42bis context.
     \param s The V.42bis context.
-    \param negotiated_p0 The negotiated P0 parameter, from the V.42bis spec.
+    \param negotiated_p0 Local codec direction mask: bit 1 enables encoding,
+        bit 0 enables decoding. For the link initiator, swap the XID P0 bits;
+        for the responder, use XID P0 directly (V.42bis 5.1/Annex A).
     \param negotiated_p1 The negotiated P1 parameter, from the V.42bis spec.
     \param negotiated_p2 The negotiated P2 parameter, from the V.42bis spec.
     \param encode_handler Encode callback handler.

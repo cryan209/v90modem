@@ -312,7 +312,7 @@ static void lapm_event(void *ctx, ds_link_event_t event)
 }
 
 static void test_lapm_data_stack_case(bool detect, int offer, int peer_offer,
-                                      bool repeated, bool corrupt, const char *label)
+                                      bool repeated, bool corrupt, int dictionary, const char *label)
 {
     data_stack_t caller;
     data_stack_t answerer;
@@ -332,11 +332,11 @@ static void test_lapm_data_stack_case(bool detect, int offer, int peer_offer,
         answerer_ep.tx[i] = (uint8_t)(repeated ? "xyz0"[i % 4] : (i * 47 + 11));
     }
 
-    caller_initialized = ds_init_v42_ex(&caller, true, detect, 9600, offer, 2048, 64,
+    caller_initialized = ds_init_v42_ex(&caller, true, detect, 9600, offer, dictionary > 2048 ? dictionary : 2048, 64,
                                      lapm_pull, &caller_ep,
                                      lapm_push, &caller_ep,
                                      lapm_event, &caller_ep) == 0;
-    answerer_initialized = ds_init_v42_ex(&answerer, false, detect, 9600, peer_offer, 512, 32,
+    answerer_initialized = ds_init_v42_ex(&answerer, false, detect, 9600, peer_offer, dictionary, 32,
                                        lapm_pull, &answerer_ep,
                                        lapm_push, &answerer_ep,
                                        lapm_event, &answerer_ep) == 0;
@@ -373,7 +373,7 @@ static void test_lapm_data_stack_case(bool detect, int offer, int peer_offer,
               && v42_get_negotiated_parameters(answerer.v42, &ap) == 0
               && cp.compression_p0 == (offer & peer_offer)
               && ap.compression_p0 == cp.compression_p0
-              && cp.compression_p1 == 512 && ap.compression_p1 == 512
+              && cp.compression_p1 == dictionary && ap.compression_p1 == dictionary
               && cp.compression_p2 == 32 && ap.compression_p2 == 32,
               "V.42bis directions and smaller dictionary/string limits agree");
         if (repeated && (offer & peer_offer))
@@ -383,6 +383,19 @@ static void test_lapm_data_stack_case(bool detect, int offer, int peer_offer,
             CHECK(!(offer & peer_offer & 2) || answerer.v42_tx_wire_bytes < 512,
                   "responder compression reduces application bytes on the wire");
         }
+        /* A peer may re-establish without XID. Feed its fresh transparent
+           compression stream through accepted I-frames, independently of our
+           old peer endpoint (which still has the previous sequence state). */
+        const uint8_t sabme[] = {1, 0x7f};
+        lapm_receive(caller.v42, sabme, sizeof(sabme), 1);
+        caller_ep.rx_len = 0;
+        const uint8_t fresh[] = "fresh-session-after-SABME";
+        uint8_t iframe[3 + sizeof(fresh) - 1] = {1, 0, 0};
+        memcpy(iframe + 3, fresh, sizeof(fresh) - 1);
+        lapm_receive(caller.v42, iframe, sizeof(iframe), 1);
+        CHECK(caller_ep.rx_len == sizeof(fresh) - 1
+              && memcmp(caller_ep.rx, fresh, sizeof(fresh) - 1) == 0,
+              "V.42bis C-INIT on SABME without a new XID");
         /* New LAPM establishment must initialize a fresh codec/dictionary. */
         caller_ep.tx_pos = answerer_ep.tx_pos = 0;
         caller_ep.rx_len = answerer_ep.rx_len = 0;
@@ -445,6 +458,16 @@ static void test_compression_error(void)
     CHECK(peer && initialized && caller_ep.failed && caller.compression_failed
           && !ds_link_is_ready(&caller) && caller_ep.rx_len == 0,
           "invalid compressed data reports link error without fabricated output");
+    if (initialized && caller.v42bis)
+    {
+        const uint8_t sabme[] = {1, 0x7f};
+        const uint8_t fresh[] = {1, 0, 0, 'O', 'K'};
+        lapm_receive(caller.v42, sabme, sizeof(sabme), 1);
+        lapm_receive(caller.v42, fresh, sizeof(fresh), 1);
+        CHECK(!caller.compression_failed && ds_link_is_ready(&caller)
+              && caller_ep.rx_len == 2 && !memcmp(caller_ep.rx, "OK", 2),
+              "V.42bis C-ERROR recovers only through fresh link C-INIT");
+    }
     if (initialized)
         ds_release(&caller);
     if (peer)
@@ -583,18 +606,20 @@ int main(void)
     test_raw_roundtrip();
     test_packed_byte_helpers();
     test_v14_v90_style_reservoir();
-    test_lapm_data_stack_case(true, 3, 3, false, false,
+    test_lapm_data_stack_case(true, 3, 3, false, false, 512,
           "data stack LAPM detection negotiates and transfers byte-exact payloads");
-    test_lapm_data_stack_case(false, 3, 3, false, false,
+    test_lapm_data_stack_case(false, 3, 3, false, false, 512,
           "data stack LAPM bypass negotiates and transfers byte-exact payloads");
-    test_lapm_data_stack_case(false, 3, 3, true, true,
+    test_lapm_data_stack_case(false, 3, 3, true, true, 512,
           "compressed LAPM retries preserve dictionaries and exact payloads");
-    test_lapm_data_stack_case(false, 1, 3, true, false,
+    test_lapm_data_stack_case(false, 1, 3, true, false, 512,
           "V.42bis initiator-only compression transfers both directions");
-    test_lapm_data_stack_case(false, 2, 3, true, false,
+    test_lapm_data_stack_case(false, 2, 3, true, false, 512,
           "V.42bis responder-only compression transfers both directions");
-    test_lapm_data_stack_case(false, 3, 0, true, false,
+    test_lapm_data_stack_case(false, 3, 0, true, false, 512,
           "V.42bis refusal falls back to plain LAPM in both directions");
+    test_lapm_data_stack_case(false, 3, 3, true, false, 65535,
+          "V.42bis full two-octet P1 negotiation and transfer");
     test_compression_error();
     test_v44_stack(3,3,true,false,false,"V.44 detection and duplex compressed transfer");
     test_v44_stack(3,3,false,true,false,"V.44 retransmission preserves dictionary synchronization");

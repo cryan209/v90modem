@@ -162,7 +162,8 @@ static void dictionary_init(v42bis_comp_state_t *s)
 {
     int i;
 
-    memset(s->dict, 0, sizeof(s->dict));
+    memset(s->dict, 0, s->v42bis_parm_n2*sizeof(*s->dict));
+    s->failed = false;
     for (i = 0;  i < V42BIS_N4;  i++)
         s->dict[i + V42BIS_N6].node_octet = i;
     s->v42bis_parm_c1 = V42BIS_N5;
@@ -392,7 +393,8 @@ static void monitor_for_mode_change(v42bis_state_t *ss)
                 go_transparent(ss);
             }
         }
-        /* 7.8.3 Reset function - TODO */
+        /* 7.8.3: reset policy is implementation-defined; the control
+           function can request it through v42bis_compress_reset(). */
         break;
     case V42BIS_COMPRESSION_MODE_ALWAYS:
         if (s->transparent)
@@ -420,6 +422,10 @@ static int v42bis_comp_init(v42bis_comp_state_t *s,
     s->user_data = user_data;
     s->max_output_len = (max_output_len < V42BIS_MAX_OUTPUT_LENGTH)  ?  max_output_len  :  V42BIS_MAX_OUTPUT_LENGTH;
     s->output_octet_count = 0;
+    /* Annex A P1: allocate precisely the negotiated dictionary. */
+    s->dict = span_alloc(p1*sizeof(*s->dict));
+    if (!s->dict)
+        return -1;
     dictionary_init(s);
     return 0;
 }
@@ -427,6 +433,8 @@ static int v42bis_comp_init(v42bis_comp_state_t *s,
 
 static int comp_exit(v42bis_comp_state_t *s)
 {
+    span_free(s->dict);
+    s->dict = NULL;
     s->v42bis_parm_n2 = 0;
     return 0;
 }
@@ -439,6 +447,8 @@ SPAN_DECLARE(int) v42bis_compress(v42bis_state_t *ss, const uint8_t buf[], int l
     uint16_t code;
 
     s = &ss->compress;
+    if (len < 0 || (len && !buf) || !s->dict)
+        return -1;
     if (!s->v42bis_parm_p0)
     {
         /* Compression is off - just push the incoming data out */
@@ -498,21 +508,30 @@ SPAN_DECLARE(int) v42bis_compress_flush(v42bis_state_t *ss)
     int len;
 
     s = &ss->compress;
+    if (!s->dict)
+        return -1;
     if (s->update_at)
+    {
+        flush_octets(s);
         return 0;
+    }
     if (s->last_matched)
     {
-        len = s->string_length;
+        len = s->string_length + s->flushed_length;
         send_encoded_data(s, s->last_matched);
-        s->flushed_length += len;
+        s->flushed_length = len;
     }
     if (!s->transparent)
     {
         s->update_at = s->last_matched;
         s->last_matched = 0;
         s->flushed_length = 0;
-        push_compressed_code(s, V42BIS_FLUSH);
-        push_octet_alignment(s);
+        /* 7.9(c): FLUSH is needed only when there are residual bits. */
+        if (s->bit_count)
+        {
+            push_compressed_code(s, V42BIS_FLUSH);
+            push_octet_alignment(s);
+        }
     }
     flush_octets(s);
     return 0;
@@ -531,6 +550,8 @@ SPAN_DECLARE(int) v42bis_decompress(v42bis_state_t *ss, const uint8_t buf[], int
     uint8_t in;
 
     s = &ss->decompress;
+    if (s->failed || !s->dict || len < 0 || (len && !buf))
+        goto error;
     if (!s->v42bis_parm_p0)
     {
         /* Compression is off - just push the incoming data out */
@@ -566,14 +587,14 @@ SPAN_DECLARE(int) v42bis_decompress(v42bis_state_t *ss, const uint8_t buf[], int
                 case V42BIS_RESET:
                     /* Reset dictionary */
                     span_log(&ss->logging, SPAN_LOG_FLOW, "Hit V42BIS_RESET\n");
-                    /* TODO: */
+                    /* 8: transfer pending transparent data before 6.2 reset. */
                     send_string(s);
                     dictionary_init(s);
                     i++;
                     continue;
                 default:
                     span_log(&ss->logging, SPAN_LOG_FLOW, "Hit V42BIS_???? - %" PRIu32 "\n", in);
-                    return -1;
+                    goto error;
                 }
             }
             else if (in == s->escape_code)
@@ -657,7 +678,7 @@ SPAN_DECLARE(int) v42bis_decompress(v42bis_state_t *ss, const uint8_t buf[], int
                     span_log(&ss->logging, SPAN_LOG_FLOW, "Hit V42BIS_STEPUP\n");
                     /* 7.4: STEPUP may not exceed the negotiated dictionary. */
                     if ((1U << s->v42bis_parm_c2) >= (unsigned)s->v42bis_parm_n2)
-                        return -1;
+                        goto error;
                     s->v42bis_parm_c2++;
                     s->v42bis_parm_c3 <<= 1;
                     break;
@@ -669,9 +690,9 @@ SPAN_DECLARE(int) v42bis_decompress(v42bis_state_t *ss, const uint8_t buf[], int
                a literal zero. Never fabricate output from a missing dictionary. */
             if (code >= s->v42bis_parm_n2 || code == s->v42bis_parm_c1
                 || (code >= V42BIS_N5 && !s->dict[code].parent))
-                return -1;
+                goto error;
             if (expand_codeword_to_string(s, code) != 0)
-                return -1;
+                goto error;
             if (s->update_at)
             {
                 ch = s->string[0];
@@ -679,7 +700,7 @@ SPAN_DECLARE(int) v42bis_decompress(v42bis_state_t *ss, const uint8_t buf[], int
                 {
                     s->last_added = add_octet_to_dictionary(s, s->update_at, ch);
                     if (code == s->v42bis_parm_c1)
-                        return -1;
+                        goto error;
                 }
                 else if (p == s->last_added)
                 {
@@ -697,6 +718,11 @@ SPAN_DECLARE(int) v42bis_decompress(v42bis_state_t *ss, const uint8_t buf[], int
         }
     }
     return 0;
+error:
+    /* 5.8: no continued decoding in a desynchronized dictionary. */
+    s->failed = true;
+    s->output_octet_count = 0;
+    return -1;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -706,13 +732,43 @@ SPAN_DECLARE(int) v42bis_decompress_flush(v42bis_state_t *ss)
     int len;
 
     s = &ss->decompress;
-    len = s->string_length;
+    if (s->failed || !s->dict)
+        return -1;
+    len = s->string_length + s->flushed_length;
     send_string(s);
-    s->flushed_length += len;
+    s->flushed_length = len;
     flush_octets(s);
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
+
+/* C-INIT differs from the peer RESET command: 5.6/7.8.3. */
+SPAN_DECLARE(int) v42bis_restart(v42bis_state_t *s)
+{
+    if (!s->compress.dict || !s->decompress.dict)
+        return -1;
+    s->compress.output_octet_count = s->decompress.output_octet_count = 0;
+    dictionary_init(&s->compress);
+    dictionary_init(&s->decompress);
+    return 0;
+}
+
+SPAN_DECLARE(int) v42bis_compress_reset(v42bis_state_t *ss)
+{
+    v42bis_comp_state_t *s = &ss->compress;
+    if (!s->dict)
+        return -1;
+    if (!s->v42bis_parm_p0)
+        return v42bis_compress_flush(ss);
+    /* 7.8.2/7.8.3: RESET is legal only in transparent mode. */
+    go_transparent(ss);
+    v42bis_compress_flush(ss);
+    push_octet(s, s->escape_code);
+    push_octet(s, V42BIS_RESET);
+    flush_octets(s);
+    dictionary_init(s);
+    return 0;
+}
 
 SPAN_DECLARE(void) v42bis_compression_control(v42bis_state_t *s, int mode)
 {
@@ -738,6 +794,7 @@ SPAN_DECLARE(v42bis_state_t *) v42bis_init(v42bis_state_t *s,
                                            int max_decode_len)
 {
     int ret;
+    bool allocated = (s == NULL);
 
     if (negotiated_p0 < 0 || negotiated_p0 > 3 || !encode_handler || !decode_handler
         || max_encode_len <= 0 || max_decode_len <= 0)
@@ -756,10 +813,16 @@ SPAN_DECLARE(v42bis_state_t *) v42bis_init(v42bis_state_t *s,
     span_log_set_protocol(&s->logging, "V.42bis");
 
     if ((ret = v42bis_comp_init(&s->compress, negotiated_p1, negotiated_p2, encode_handler, encode_user_data, max_encode_len)))
+    {
+        if (allocated)
+            span_free(s);
         return NULL;
+    }
     if ((ret = v42bis_comp_init(&s->decompress, negotiated_p1, negotiated_p2, decode_handler, decode_user_data, max_decode_len)))
     {
         comp_exit(&s->compress);
+        if (allocated)
+            span_free(s);
         return NULL;
     }
     s->compress.v42bis_parm_p0 = negotiated_p0 & 2;
@@ -771,6 +834,8 @@ SPAN_DECLARE(v42bis_state_t *) v42bis_init(v42bis_state_t *s,
 
 SPAN_DECLARE(int) v42bis_release(v42bis_state_t *s)
 {
+    comp_exit(&s->compress);
+    comp_exit(&s->decompress);
     return 0;
 }
 /*- End of function --------------------------------------------------------*/

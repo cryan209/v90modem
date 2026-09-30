@@ -67,7 +67,7 @@ typedef struct
     /*! \brief Current codeword size */
     uint16_t v42bis_parm_c2;
     /*! \brief Threshold for codeword size change */
-    uint16_t v42bis_parm_c3;
+    uint32_t v42bis_parm_c3;
     /*! \brief The current update point in the dictionary */
     uint16_t update_at;
     /*! \brief The last entry matched in the dictionary */
@@ -79,7 +79,9 @@ typedef struct
     /*! \brief Maximum permitted string length */
     int v42bis_parm_n7;
     /*! \brief The dictionary */
-    v42bis_dict_node_t dict[V42BIS_MAX_CODEWORDS];
+    v42bis_dict_node_t *dict;
+    /*! C-ERROR remains latched until C-INIT (5.8). */
+    bool failed;
 
     /*! \brief The octet string in progress */
     uint8_t string[V42BIS_MAX_STRING_SIZE];
