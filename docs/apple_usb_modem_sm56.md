@@ -661,3 +661,73 @@ in answer detection.
 - The `wIndex = 0` requests (`bRequest` 0x11/0x13/0x14), untested live.
 - Whether `0x220070` (tested by the dispatcher but reaching no request block
   above) does something else.
+
+## Two modems at once: a conference bridge as an analogue bearer (2026-10-01)
+
+Two of these parts on two FXS ports, both dialled into conference bridge 2280,
+give a real analogue path between two hosts-under-our-control with no modem
+protocol in it at all -- so anything measured is the bearer.
+`tools/apple_modem_pair_test.sh <out-dir>` runs it and
+`tools/apple_modem_tone_report.py <out-dir>` reports.
+
+**Two device selections, and they are not the same handle.** The hook is a USB
+control request and the codec is a CoreAudio device, so the probe now takes
+`APPLE_MODEM_ADDR=bus:addr` (it prints every candidate) and the audio tool
+`APPLE_MODEM_AUDIO_UID=<substring of the UID>`; `--descriptors` and `list`
+enumerate them. **The two lists cannot be zipped together** -- the UIDs here
+are `...:000000:3,4` and `...:1143000:3,4` and only the second carries the USB
+location, so the mapping is established empirically: go off-hook on one USB
+address and capture on each UID, and the modem still on-hook returns a stream
+railed at -32768 (documented above) while the other returns dial tone. Here
+USB `1:6` is UID `1143000` and `1:7` is `000000`.
+
+**`find_device()` used to stop at the first match and `list` therefore showed
+one modem while `system_profiler` showed two**; it now lists all and still
+takes the first.
+
+**A dial that is not accepted looks exactly like a dial that is.** The tool
+reports "transmitted 10560 of 10560 scripted samples" either way. The only
+evidence a leg joined is the **dial tone being gone**, so `join()` captures a
+second afterwards and measures the 400 Hz line. It matters: **one of these two
+FXS ports rejects DTMF at the 0.15 default and needs 0.35** (the other takes
+0.15 every time), which cost this session four runs that reported success and
+sat on dial tone. `join()` retries 0.15 / 0.25 / 0.35.
+
+### What the path measures
+
+Levels are dBFS at the codec; transmit amplitude 0.15 per tone is -16.5 dBFS.
+
+- **Frequency response is flat**: A->B -21.4 / -21.0 / -20.9 / -20.9 dBFS at
+  300 / 1000 / 2000 / 3000 Hz, B->A -23.3 / -23.0 / -22.8 / -22.8. So 0.5 dB
+  of ripple over 300-3000 Hz, with a fixed 1.9 dB asymmetry between the
+  directions. End-to-end loss is ~4.6 dB one way.
+- **Frequency is exact**: 300.0, 1000.2, 1999.8, 3000.0 Hz recovered.
+- **No AGC and no compression**: transmit -34, -26, -16.5 and -9.1 dBFS come
+  back at a constant 4.6-5.2 dB loss, i.e. the path is linear over a 25 dB
+  range. A 50 ms window shows the tone reaching full level in one window with
+  no ramp, so nothing is adapting.
+- **Distortion 0.12-0.21% THD** at three of the four levels. One capture read
+  9.9% -- and it is not a level effect, because the *louder* row either side of
+  it is clean; its spurs are a comb at exact multiples of 400 Hz, so something
+  400 Hz-related was on the bridge at the time. Retest before quoting a
+  distortion figure from a single capture.
+- **The bridge does not mix a talker's own audio back**, and it does not send
+  comfort noise: with both legs silent the receive floor is -71 / -73 dBFS.
+- **Under double talk the path stays linear**: with A on 1000 Hz and B on
+  1400 Hz simultaneously, the intermodulation products (400, 600, 2400 Hz) are
+  all at -80 dBFS or below, 58 dB under the wanted tone. An earlier run showed
+  400 Hz and 2400 Hz at 6-7% of the total power and **that was the same 400 Hz
+  contamination, not the bridge** -- a repeat with the same two tones is clean.
+- **The two hybrids differ a lot and repeatably**: each modem hears its own
+  tone during double talk at 44 dB below the far tone on A and **18 dB on B**.
+  B's 2-wire hybrid returns far more, which is what a modem's echo canceller
+  would have to deal with on that port.
+
+Delay is NOT measured: the transmit and capture processes have no common
+clock and the bridge does not return a talker's own audio, so there is no
+reference to time against.
+
+**The receive path clips on dial tone.** Off-hook with no call, the 400 Hz
+dial tone arrives at -2.5 dBFS with 13% of samples at full scale. Signals at
+the levels above are nowhere near it, but nothing in this tree sets a receive
+gain and the headroom against the exchange's own tones is about 2 dB.

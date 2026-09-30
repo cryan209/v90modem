@@ -189,8 +189,21 @@ static AudioObjectID find_device(int verbose)
 
     for (int i = 0; i < n; i++) {
         char *name = copy_name(d[i], kAudioObjectPropertyName);
+        char *uid;
         if (!name || !strstr(name, "Modem")) { free(name); continue; }
-        found = d[i];
+        /* Two modems is the ordinary case for a loopback test, so the device
+         * is selectable: APPLE_MODEM_AUDIO_UID is matched as a substring of
+         * the CoreAudio UID (which carries the USB location, so it is stable
+         * while the cable stays put). */
+        uid = copy_name(d[i], kAudioDevicePropertyDeviceUID);
+        {
+            const char *want = getenv("APPLE_MODEM_AUDIO_UID");
+            if (want && *want) {
+                if (!uid || !strstr(uid, want)) { free(uid); free(name); continue; }
+            }
+        }
+        free(uid);
+        if (found == kAudioObjectUnknown) found = d[i];
         if (verbose) {
             char *uid = copy_name(d[i], kAudioDevicePropertyDeviceUID);
             Float64 sr = 0;
@@ -228,7 +241,7 @@ static AudioObjectID find_device(int verbose)
             }
         }
         free(name);
-        break;
+        if (!verbose) break;   /* verbose lists every modem; the caller takes the first */
     }
     free(d);
     return found;

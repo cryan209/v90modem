@@ -476,10 +476,31 @@ int main(int argc, char **argv)
     if (libusb_init(NULL) < 0) { fprintf(stderr, "libusb_init failed\n"); return 1; }
 
     n = libusb_get_device_list(NULL, &list);
-    for (ssize_t i = 0; i < n; i++) {
-        struct libusb_device_descriptor dd;
-        if (libusb_get_device_descriptor(list[i], &dd) == 0 &&
-            dd.idVendor == VID && dd.idProduct == PID) { dev = list[i]; break; }
+    {   /* Two modems on one host is the ordinary case for a loopback test, so
+         * the device is selectable.  APPLE_MODEM_ADDR is "bus:addr" (stable
+         * across runs while the cable stays put); APPLE_MODEM_INDEX is the
+         * ordinal among matches, which is NOT stable across replugs. */
+        const char *want_addr = getenv("APPLE_MODEM_ADDR");
+        const char *want_idx  = getenv("APPLE_MODEM_INDEX");
+        long idx = want_idx ? strtol(want_idx, NULL, 10) : -1;
+        long seen = 0;
+        for (ssize_t i = 0; i < n; i++) {
+            struct libusb_device_descriptor dd;
+            char addr[32];
+            if (libusb_get_device_descriptor(list[i], &dd) != 0 ||
+                dd.idVendor != VID || dd.idProduct != PID) continue;
+            snprintf(addr, sizeof addr, "%u:%u",
+                     libusb_get_bus_number(list[i]),
+                     libusb_get_device_address(list[i]));
+            fprintf(stderr, "candidate %ld: %04x:%04x at %s\n", seen, VID, PID, addr);
+            if (want_addr) { if (!strcmp(want_addr, addr)) dev = list[i]; }
+            else if (idx >= 0) { if (seen == idx) dev = list[i]; }
+            else if (!dev) dev = list[i];
+            seen++;
+        }
+        if (seen > 1 && !want_addr && idx < 0)
+            fprintf(stderr, "note: %ld modems present; using the first. "
+                            "Set APPLE_MODEM_ADDR=bus:addr to choose.\n", seen);
     }
     if (!dev) {
         fprintf(stderr, "no %04x:%04x on the bus\n", VID, PID);
