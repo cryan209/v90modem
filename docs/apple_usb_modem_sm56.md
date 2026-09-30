@@ -353,11 +353,16 @@ two earlier readings were each self-consistent and both incomplete.
 
 ### Register 0x1d is an analogue line sense, and it is the instrument to use
 
-Not a bit field: **0x00 with no pair connected, ~217 (0xd8-0xda, +/-1 of
-measurement jitter) on-hook with a pair, ~250 off-hook.**  One control request
-against a whole CoreAudio capture, so use it in preference to listening.  It is
-also the check that would have saved the first session: **0x00 is the device
-telling you the pair is not connected.**
+Not a bit field: **0x00 with no pair connected, 0xd8-0xda on-hook with a pair.**
+One control request against a whole CoreAudio capture, so use it in preference
+to listening, and **0x00 is the device telling you the pair is not connected** --
+the check that would have saved the first session.
+
+**Do not read more than that into it.**  Off-hook it has been seen at 0x06,
+0x13, 0xfa and 0xfb depending on what the line was doing, so it is an analogue
+reading (level or loop voltage), not a state code; the tool interprets only the
+zero.  An earlier three-band classifier here was fitted to two observations and
+called an established call "unexpected".
 
 It is NOT a hook mirror.  It was first seen to differ between an on-hook and an
 off-hook scan and that was coincidence -- polled undisturbed it wanders
@@ -421,6 +426,59 @@ The seven sample rates appear **nowhere** in the INF or the `.reg`.  The
 `9600`/`8400`/`7200` hits in the INF are `CONNECT 9600` response strings, i.e.
 DTE rates.  Rate selection is in the binary.
 
+## Transmit, and a call placed over the line
+
+The output stream is the other half of the same CoreAudio device, so the
+transmit path is a render callback on **element 0** of the same HAL unit that
+element 1 captures with -- `apple_usb_modem_audio tone` and `dial` run both at
+once, which is the point: what proves a digit reached the line is the far end's
+reaction, and that arrives on the receive side while transmission is still
+going.  (Watch the scopes: the capture format is set on `kAudioUnitScope_Output`
+of element 1 and the transmit format on `kAudioUnitScope_Input` of element 0 --
+opposite scopes on different elements.)
+
+**On-hook, a transmitted tone shows up nowhere, and that proves nothing.**  The
+loop is open, so there is no circuit; this test cannot distinguish a dead
+transmit path from an open line.  Do it off-hook, where the dial tone is a
+built-in reference:
+
+```
+1000 Hz transmitted at amplitude 0.15, off-hook, 9600 Hz:
+  350 Hz  30.10% of power      dial tone
+  440 Hz  32.36% of power      dial tone
+ 1000 Hz   0.89% of power      -15.6 dB rel -- OUR OWN TRANSMIT
+```
+
+so the transmit reaches the line and returns through the 2-wire hybrid about
+15.6 dB down, which is the ordinary trans-hybrid loss.
+
+**DTMF works: the exchange mutes the dial tone on the first digit.**  Q.23
+pairs, 100 ms on / 100 ms off, per 50 ms window:
+
+```
+ time      rms   dial tone   DTMF '1'
+ 0.20     3433      210.6       90.8
+ 0.30     4871       73.4       76.3
+ 0.40     4976       88.9      698.6     <- our digit
+ 0.50      615       25.1      374.0
+ 0.60       13        1.4        0.3     <- dial tone gone, still off-hook
+```
+
+and it never returns, while the hook stays off for the remaining six seconds.
+That is the exchange accepting the digit, and it is the ground truth for the
+transmit path in the same way the dial tone was for the hook.
+
+**A full call completes.**  Dialling `8416`, the RasFinder's extension, at
+100/120 ms: dial tone, digits out from 0.6 to 1.5 s, PBX audio, then at
+**6.60 s onward 2100 Hz at amplitude 6595 with the peak bin exactly 2100 Hz** --
+the answering modem's ANS/ANSam.  So this part can seize a line, dial through
+the PBX and reach a far-end modem, which is everything the analogue side needs
+below the datapump.
+
+`APPLE_MODEM_TX_AMP` sets the per-tone amplitude (default 0.15, a pair landing
+near -16.5 dBFS, comparable to the dial tone arriving at -15.9);
+`APPLE_MODEM_DTMF_MS` the on/off times.
+
 ## Traps, each of which cost time here
 
 1. **A device at configuration 0 answers nothing.**  Set the configuration
@@ -474,12 +532,15 @@ DTE rates.  Rate selection is in the binary.
 
 ## Open
 
-- **Dialling.**  Off-hook and dial tone work; nothing has yet sent a digit.
-  The codec's output stream is an ordinary CoreAudio device, so DTMF is a
-  playback problem rather than a USB one, and pulse dialling is bit 0 toggled to the
-  country profile's timing.  That is the next step, and it needs a transmit path
-  in `apple_usb_modem_audio`, which today only captures.
+- **A datapump on it.**  Seizing, dialling and reaching a far-end modem all
+  work, so what is left is pointing the engine at this device the way
+  `hsf_v90_coupler` does at the Conexant part -- receive sampling phase and the
+  DC offset being the two things that cost that path a session
+  (`docs/hsf_analogue_v90_coupler.md`).
+- **Transmit level calibration.**  0.15 per tone was chosen to sit near the
+  arriving dial tone and is not referred to dBm0.
 - **Ring detection**, which needs an inbound call rather than a seizure.
+- **Pulse dialling**, bit 0 toggled to the country profile's timing, untried.
 - **What the other non-zero registers mean.**  0x01, 0x02, 0x08, 0x09, 0x0b,
   0x0c, 0x0d, 0x0e, 0x11, 0x13, 0x16-0x19 and 0x1b all read non-zero and none
   of them moves with the hook.

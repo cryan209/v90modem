@@ -58,6 +58,7 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <CoreAudio/CoreAudio.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <math.h>
 
 static AudioUnit au;
@@ -65,6 +66,75 @@ static int16_t *acc;
 static long acc_n, acc_cap;
 static AudioBufferList *abl;
 static int render_errors;
+
+/* ---- transmit ----------------------------------------------------------
+ * The output stream is the other half of the same CoreAudio device, so a
+ * transmit path is a render callback on element 0 of the same HAL unit that
+ * element 1 captures with.  Running both at once is the point: what proves a
+ * digit reached the line is the far end's reaction to it, and that arrives on
+ * the receive side while we are still transmitting.
+ *
+ * The script is a flat list of (f1, f2, samples); either frequency may be 0 for
+ * silence, and phase is carried per segment so a tone starts at zero. */
+#define TX_MAX_SEG 256
+struct tx_seg { double f1, f2; long n; };
+static struct tx_seg tx_script[TX_MAX_SEG];
+static int tx_nseg, tx_seg;
+static long tx_pos;              /* samples emitted inside the current segment */
+static double tx_ph1, tx_ph2;    /* radians, reset at each segment boundary */
+static double tx_amp = 0.15;     /* per tone, so a pair is about -16.5 dBFS */
+static double tx_rate = 9600.0;
+static long tx_done;             /* total samples emitted */
+static int tx_underruns;
+
+static OSStatus output_cb(void *ref, AudioUnitRenderActionFlags *flags,
+                          const AudioTimeStamp *ts, UInt32 bus, UInt32 nframes,
+                          AudioBufferList *io)
+{
+    int16_t *out = io->mBuffers[0].mData;
+
+    (void)ref; (void)flags; (void)ts; (void)bus;
+    for (UInt32 i = 0; i < nframes; i++) {
+        double v = 0;
+        while (tx_seg < tx_nseg && tx_pos >= tx_script[tx_seg].n) {
+            tx_seg++; tx_pos = 0; tx_ph1 = tx_ph2 = 0;
+        }
+        if (tx_seg < tx_nseg) {
+            struct tx_seg *g = &tx_script[tx_seg];
+            if (g->f1 > 0) { v += tx_amp * sin(tx_ph1); tx_ph1 += 2 * M_PI * g->f1 / tx_rate; }
+            if (g->f2 > 0) { v += tx_amp * sin(tx_ph2); tx_ph2 += 2 * M_PI * g->f2 / tx_rate; }
+            tx_pos++;
+            tx_done++;
+        } else {
+            tx_underruns++;   /* script exhausted; emit silence, not garbage */
+        }
+        if (v >  0.999) v =  0.999;
+        if (v < -0.999) v = -0.999;
+        out[i] = (int16_t)lrint(v * 32767.0);
+    }
+    return noErr;
+}
+
+/* Q.23 DTMF.  Low group selects the row, high group the column. */
+static int dtmf_pair(char c, double *lo, double *hi)
+{
+    static const char *rows[4] = { "123A", "456B", "789C", "*0#D" };
+    static const double lf[4] = { 697, 770, 852, 941 };
+    static const double hf[4] = { 1209, 1336, 1477, 1633 };
+    for (int r = 0; r < 4; r++)
+        for (int k = 0; k < 4; k++)
+            if (rows[r][k] == c) { *lo = lf[r]; *hi = hf[k]; return 0; }
+    return -1;
+}
+
+static void tx_add(double f1, double f2, double ms)
+{
+    if (tx_nseg >= TX_MAX_SEG) return;
+    tx_script[tx_nseg].f1 = f1;
+    tx_script[tx_nseg].f2 = f2;
+    tx_script[tx_nseg].n = (long)(tx_rate * ms / 1000.0);
+    tx_nseg++;
+}
 
 static OSStatus input_cb(void *ref, AudioUnitRenderActionFlags *flags,
                          const AudioTimeStamp *ts, UInt32 bus, UInt32 nframes,
@@ -296,17 +366,187 @@ static int capture(double rate, double secs, const char *outpath)
     return 0;
 }
 
+/* Shared setup: both directions on one HAL unit at one rate. */
+static int run_duplex(double rate, double secs, const char *outpath, int transmit)
+{
+    AudioObjectID dev;
+    AudioObjectPropertyAddress sra = { kAudioDevicePropertyNominalSampleRate,
+        kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
+    Float64 want = rate, got = 0;
+    UInt32 z, one = 1, zero = 0, slice = 4096;
+    AudioComponentDescription cd = { kAudioUnitType_Output, kAudioUnitSubType_HALOutput,
+                                     kAudioUnitManufacturer_Apple, 0, 0 };
+    AudioComponent comp;
+    AudioStreamBasicDescription f;
+    AURenderCallbackStruct icb = { input_cb, NULL }, ocb = { output_cb, NULL };
+    OSStatus rc;
+
+    check_permission();
+    dev = find_device(0);
+    if (dev == kAudioObjectUnknown) { fprintf(stderr, "modem audio device not found\n"); return 1; }
+
+    AudioObjectSetPropertyData(dev, &sra, 0, NULL, sizeof want, &want);
+    for (int i = 0; i < 50; i++) {
+        z = sizeof got;
+        AudioObjectGetPropertyData(dev, &sra, 0, NULL, &z, &got);
+        if (fabs(got - want) < 1.0) break;
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, true);
+    }
+    if (fabs(got - want) >= 1.0) {
+        fprintf(stderr, "nominal rate did not take (asked %.0f, is %.0f)\n", want, got);
+        return 1;
+    }
+    tx_rate = got;
+
+    comp = AudioComponentFindNext(NULL, &cd);
+    if (!comp || AudioComponentInstanceNew(comp, &au) != noErr) {
+        fprintf(stderr, "could not create HAL audio unit\n"); return 1;
+    }
+    AudioUnitSetProperty(au, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input,  1, &one, sizeof one);
+    AudioUnitSetProperty(au, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0,
+                         transmit ? &one : &zero, sizeof one);
+    AudioUnitSetProperty(au, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &dev, sizeof dev);
+
+    memset(&f, 0, sizeof f);
+    f.mSampleRate = got;
+    f.mFormatID = kAudioFormatLinearPCM;
+    f.mFormatFlags = kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked;
+    f.mBitsPerChannel = 16;
+    f.mChannelsPerFrame = 1;
+    f.mFramesPerPacket = 1;
+    f.mBytesPerFrame = 2;
+    f.mBytesPerPacket = 2;
+    /* Capture format is what element 1 GIVES us; transmit format is what we
+     * GIVE element 0 -- opposite scopes on different elements, and mixing them
+     * up yields a -10868 that reads like an unsupported rate. */
+    if (AudioUnitSetProperty(au, kAudioUnitProperty_StreamFormat,
+                             kAudioUnitScope_Output, 1, &f, sizeof f) != noErr) {
+        fprintf(stderr, "could not set capture format 16-bit mono @ %.0f\n", got); return 1;
+    }
+    if (transmit &&
+        AudioUnitSetProperty(au, kAudioUnitProperty_StreamFormat,
+                             kAudioUnitScope_Input, 0, &f, sizeof f) != noErr) {
+        fprintf(stderr, "could not set transmit format 16-bit mono @ %.0f\n", got); return 1;
+    }
+    AudioUnitSetProperty(au, kAudioUnitProperty_MaximumFramesPerSlice,
+                         kAudioUnitScope_Global, 0, &slice, sizeof slice);
+    AudioUnitSetProperty(au, kAudioOutputUnitProperty_SetInputCallback,
+                         kAudioUnitScope_Global, 0, &icb, sizeof icb);
+    if (transmit)
+        AudioUnitSetProperty(au, kAudioUnitProperty_SetRenderCallback,
+                             kAudioUnitScope_Input, 0, &ocb, sizeof ocb);
+
+    acc_cap = (long)(got * secs * 1.5) + 8192;
+    acc = calloc(acc_cap, 2);
+    abl = calloc(1, sizeof(AudioBufferList) + sizeof(AudioBuffer));
+    abl->mBuffers[0].mData = calloc(slice * 2 + 64, 1);
+
+    if ((rc = AudioUnitInitialize(au)) != noErr) {
+        fprintf(stderr, "AudioUnitInitialize: %d\n", (int)rc); return 1;
+    }
+    if ((rc = AudioOutputUnitStart(au)) != noErr) {
+        fprintf(stderr, "AudioOutputUnitStart: %d\n", (int)rc); return 1;
+    }
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, secs, false);
+    AudioOutputUnitStop(au);
+    AudioUnitUninitialize(au);
+
+    printf("captured %ld frames (%.2f s at %.0f Hz), render errors %d\n",
+           acc_n, acc_n / got, got, render_errors);
+    if (transmit) {
+        long want_n = 0;
+        for (int i = 0; i < tx_nseg; i++) want_n += tx_script[i].n;
+        printf("transmitted %ld of %ld scripted samples (%.2f s)%s\n",
+               tx_done, want_n, tx_done / got,
+               tx_done < want_n ? "   <- CUT SHORT, raise the duration" : "");
+    }
+    if (outpath && acc_n) {
+        FILE *fp = fopen(outpath, "wb");
+        if (fp) { fwrite(acc, 2, acc_n, fp); fclose(fp);
+                  printf("raw signed 16-bit LE written: %s\n", outpath); }
+        else perror(outpath);
+    }
+    return acc_n ? 0 : 1;
+}
+
+/* dial <rate> <digits> [out.s16] -- DTMF out, line audio in, at once. */
+static int dial(double rate, const char *digits, const char *outpath,
+                double on_ms, double off_ms)
+{
+    double lo, hi, total = 300.0;    /* 300 ms of leading silence */
+
+    tx_rate = rate;
+    tx_add(0, 0, 300.0);
+    for (const char *p = digits; *p; p++) {
+        char c = *p;
+        if (c == ',' || c == ' ') { tx_add(0, 0, 500.0); total += 500.0; continue; }
+        if (c >= 'a' && c <= 'd') c -= 32;
+        if (dtmf_pair(c, &lo, &hi) < 0) {
+            fprintf(stderr, "not a DTMF digit: '%c'\n", *p); return 1;
+        }
+        tx_add(lo, hi, on_ms);
+        tx_add(0, 0, off_ms);
+        total += on_ms + off_ms;
+    }
+    printf("dialling \"%s\": %d segments, %.0f ms of DTMF at %.0f Hz, "
+           "%.0f/%.0f ms on/off, amplitude %.3f per tone\n",
+           digits, tx_nseg, total, rate, on_ms, off_ms, tx_amp);
+    /* Keep listening well past the last digit: the far end's answer (dial tone
+     * stopping, ringback, a modem's ANSam) is what says the digits landed. */
+    return run_duplex(rate, total / 1000.0 + 6.0, outpath, 1);
+}
+
+/* tone <rate> <hz> <secs> -- a single tone out, capturing the whole time.  With
+ * the line on-hook this still shows up in the receive stream through the
+ * hybrid, so it tests the transmit path without involving the exchange. */
+static int tone(double rate, double hz, double secs, const char *outpath)
+{
+    tx_rate = rate;
+    tx_add(0, 0, 200.0);
+    tx_add(hz, 0, secs * 1000.0);
+    printf("transmitting %.1f Hz for %.2f s at amplitude %.3f\n", hz, secs, tx_amp);
+    return run_duplex(rate, secs + 1.0, outpath, 1);
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help"))) {
         fprintf(stderr,
             "usage: %s list\n"
             "       %s capture <rate> <seconds> [out.s16]\n"
+            "       %s tone    <rate> <hz> <seconds> [out.s16]\n"
+            "       %s dial    <rate> <digits> [out.s16]\n"
             "\n"
             "rate must be one the device offers: 7200 8000 8229 8400 9000 9600 10286\n"
             "Run tools/apple_usb_modem_probe --configure first if the device is new\n"
-            "to this boot, or CoreAudio will not see it at all.\n", argv[0], argv[0]);
+            "to this boot, or CoreAudio will not see it at all; go off-hook with\n"
+            "--hook on before dialling, and check its line-sense report.\n"
+            "\n"
+            "digits: 0-9 A-D * #, a comma or space for a 500 ms pause.\n"
+            "APPLE_MODEM_TX_AMP sets the per-tone amplitude (default 0.15),\n"
+            "APPLE_MODEM_DTMF_MS the on/off times (default 100/100).\n",
+            argv[0], argv[0], argv[0], argv[0]);
         return 0;
+    }
+    {   /* transmit knobs, read once */
+        const char *a = getenv("APPLE_MODEM_TX_AMP");
+        if (a) tx_amp = atof(a);
+        if (tx_amp <= 0 || tx_amp > 0.5) {
+            fprintf(stderr, "APPLE_MODEM_TX_AMP out of range (0, 0.5]\n");
+            return 1;
+        }
+    }
+    if (argc > 1 && !strcmp(argv[1], "tone")) {
+        if (argc < 5) { fprintf(stderr, "tone <rate> <hz> <seconds> [out.s16]\n"); return 1; }
+        return tone(atof(argv[2]), atof(argv[3]), atof(argv[4]),
+                    (argc > 5) ? argv[5] : NULL);
+    }
+    if (argc > 1 && !strcmp(argv[1], "dial")) {
+        double on = 100.0, off = 100.0;
+        const char *m = getenv("APPLE_MODEM_DTMF_MS");
+        if (m) { on = atof(m); const char *sl = strchr(m, '/'); if (sl) off = atof(sl + 1); }
+        if (argc < 4) { fprintf(stderr, "dial <rate> <digits> [out.s16]\n"); return 1; }
+        return dial(atof(argv[2]), argv[3], (argc > 4) ? argv[4] : NULL, on, off);
     }
     if (argc > 1 && !strcmp(argv[1], "capture")) {
         double rate = (argc > 2) ? atof(argv[2]) : 9600.0;
