@@ -804,3 +804,60 @@ goes while the loop stays up. Suspect B's cable, jack or DAA termination.
 This also reframes the double-talk figures in the section above (own-tone echo
 44 dB down on A and 18 dB on B): that is the same fault, not a fixed property
 of the two hybrids.
+
+## Which line is which, and a direct call between them (2026-10-01)
+
+The two modems are extensions **6004** and **6005**, and `9333` answers with
+the calling line's own number in DTMF -- the one read-back that needs no
+speech understanding, so it identifies a line objectively.
+`tools/apple_modem_dtmf_decode.py <capture.s16>` decodes it. Modem **A**
+(USB `1:6`, UID `1143000`) reads back **6004**; modem **B** (USB `1:7`, UID
+`000000`) is **6005**, established by A dialling 6005 and B ringing.
+
+**Capture the read-back with no gap after the dial.** 9333 answers, reads the
+number and hangs up inside about ten seconds, so a capture started after the
+usual settle lands on dial tone and reports nothing -- the first attempt here
+did exactly that. `dial` captures 7.09 s of its own; start the next capture
+immediately and the digits straddle the two files ("6" at the end of one,
+"004" at the start of the next).
+
+Its digits arrive at **-12 dBFS per tone, 290-300 ms, twist +0.1 dB**, which
+is the reference for what this exchange considers a well-formed digit. Ours
+go out at -16.5 dBFS for 100 ms by default.
+
+### A direct call, and what differs from the bridge
+
+A dials 6005, B rings, B answers by going off-hook. Nothing else is needed --
+**answering requires no DTMF**, which is why B can take a call on a line too
+poor to dial one.
+
+- **The ring is NOT in the audio path.** With B on-hook and `--monitor on`,
+  its capture is -62 dBFS noise for the whole ring; there is nothing to detect.
+- **It IS on the interrupt endpoint, as CDC RING_DETECT.** Interface 0's
+  endpoint 0x81 delivers `a1 09 00 00 00 00 00 00` throughout the ring and
+  **nothing at all with no call** (a 16 s control run returns zero
+  notifications), with gaps at the cadence's silent periods. That is the
+  missing piece for an answer role: watch endpoint 0x81 for `0xa1 0x09`, then
+  set register 5 bit 0.
+- **Level is the same as the bridge**: A->B -21.8 dBFS direct against -21.0
+  through 2280, B->A -23.7 against -23.0. So ConfBridge costs about 0.7 dB,
+  not the 0.9 dB the Echo() comparison suggested, and **the 1.9 dB direction
+  asymmetry is in the two lines, not in the bridge** -- it is the same on both
+  paths.
+- **Flat**: A->B reads -22.0 / -21.8 / -21.7 / -21.6 / -22.3 dBFS at 300 /
+  1000 / 2000 / 3000 / 3400 Hz, i.e. 0.7 dB across the band including 3400.
+- **The far end's echo is cancelled and ours is not.** A 300 ms burst from A
+  returns ONCE, at 322.6 ms -- our own hybrid, at the same host latency as
+  every other measurement here. B's hybrid was returning nearly all of its
+  receive at the time (2-10 dB return loss), so its reflection of A's tone
+  should have reached A at about -30 dBFS, well above A's own -39.3 dBFS
+  echo, and there is **no step at all** where it is due (~592 ms). So at least
+  12-20 dB of far-end echo suppression is active in the gateway. It does not
+  touch our own near-end echo, which is the expected asymmetry: a gateway
+  canceller removes our line's reflection before sending it onward, and never
+  sees our own transmit reflected into our own receive.
+
+**Consequence for the echo test:** 9099's 269 ms round trip is measurable only
+because that echo is an application deliberately returning audio. The echo a
+canceller would remove is removed, so a direct call gives no delay reading at
+all by this method.
