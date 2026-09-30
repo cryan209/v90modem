@@ -479,6 +479,69 @@ below the datapump.
 near -16.5 dBFS, comparable to the dial tone arriving at -15.9);
 `APPLE_MODEM_DTMF_MS` the on/off times.
 
+## Coupling it to the engine
+
+`apple_usb_modem_coupler` is the role `hsf_v90_coupler` plays for the Conexant
+part: seize the line, DTMF an extension, wait for the far end's answer tone, run
+the engine over the result, DTE on a PTY.  Line control is USB (the register
+file above), the bearer is CoreAudio, and it links the whole engine minus
+`sip_modem.o` -- the same object set the HSF coupler does.
+
+```
+apple_usb_modem_coupler --dial 8416 [--pty-link /tmp/applemodem]
+apple_usb_modem_coupler --rx-replay tap.s16 [--pty-link ...]
+apple_usb_modem_coupler --hook on|off
+```
+
+**This bearer is structurally better than the HSF one, for one reason: 8000 Hz
+is in the device's rate list.**  The engine is fed at its own DS0 rate, so there
+is no resampling and **no receive sampling phase to choose** -- and that choice
+is what cost the HSF path a session, where a swept fractional delay reached
+Phase 4 on only 1/10, 2/10 and 9/10 of phases across three recorded calls and
+0.0, the obvious value, failed on all three (`docs/hsf_analogue_v90_coupler.md`).
+There is no `HSF_RX_DELAY` equivalent here because there is no equivalent
+decision.
+
+**The limitation that comes with it, and it bounds what this part can ever
+do:** `me_rx_v90a_16k()` wants two samples per DS0 interval and the device's
+rate ceiling is 10286 Hz, so the **V.90 analogue Phase 3 downstream cannot be
+fed at 8000** -- it is recoverable only from T/2 samples.  It is reachable,
+because 9600 is in the list and 9600 x 5/3 = 16000 exactly, so an exact rational
+resampler would supply it; that is not written.  Until it is, expect V.34 and
+below to work here and the V.90 analogue role's Phase 3 not to.
+
+**The DC blocker is not optional.**  This device sits at about +650 counts
+on-hook, and on the HSF part a standing 908-count offset made SpanDSP's
+ANS/ANSam detector reject a 5000-count tone outright.  One pole at 40 Hz
+(-0.08 dB at 300 Hz) runs on every sample entering the modem.
+
+**Answer detection is a 2100 Hz Goertzel, not a post-dial timer**, because a
+timer ran V.8 into ringback on the HSF path and its 10 s timeout expired as the
+far end answered.  Ringback is 400/440/480 Hz and ANS/ANSam is 2100 Hz.
+
+### What is verified, and what is not
+
+The line was disconnected when this was written, so **no call has been placed
+through the engine by this program.**  What is verified:
+
+- **It refuses to dial with no pair connected.**  `line_hook()` reads register
+  0x1d after seizing and bails on 0x00, so a disconnected pair is reported
+  rather than producing a session's worth of uninformative measurements -- which
+  is exactly what happened before that check existed.
+- **The offline path runs end to end.**  The live 8416 call was recorded at
+  9600 Hz and resampled to 8000 (exactly 5/6), and `--rx-replay` on it fires the
+  answer detector at **6.69 s** against the **6.60 s** the live call showed,
+  starts the engine, and SpanDSP reports **`V.8 answer tone: ANSam/`** -- so the
+  tone survives the DC blocker and is recognised, which is the specific thing
+  the HSF offset broke.  The recording ends 0.46 s later, so V.8 cannot
+  complete; that is the fixture's length, not a failure.
+- The DC blocker leaves **-0.14 counts** of the fixture's -288, with the 2100 Hz
+  amplitude unchanged (1731 -> 1758).
+
+A recorded tap is the line as it arrived, so the replay runs the answer detector
+too -- a replay that skipped to the engine could not reproduce a call that failed
+in answer detection.
+
 ## Traps, each of which cost time here
 
 1. **A device at configuration 0 answers nothing.**  Set the configuration

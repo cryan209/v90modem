@@ -394,6 +394,22 @@ apple_usb_modem_audio: tools/apple_usb_modem_audio.m
 	    -framework AVFoundation -framework AudioToolbox \
 	    -framework CoreAudio -framework CoreFoundation -framework Foundation
 
+# The coupler runs the engine over the Apple part's line: libusb for the hook
+# and the register file, CoreAudio for the bearer, and the whole engine minus
+# sip_modem.o -- the same object set hsf_v90_coupler links.
+APPLE_USB_MODEM_COUPLER_OBJS = tools/apple_usb_modem_coupler.o \
+    $(filter-out sip_modem.o,$(OBJS))
+
+apple_usb_modem_coupler: $(APPLE_USB_MODEM_COUPLER_OBJS) spandsp $(PJ_BUILD_PREREQ)
+	$(CC) $(APPLE_USB_MODEM_COUPLER_OBJS) -o $@ $(LDFLAGS) $(LIBUSB_LIBS) \
+	    -framework AVFoundation -framework AudioToolbox \
+	    -framework CoreAudio -framework CoreFoundation -framework Foundation
+
+tools/apple_usb_modem_coupler.o: CFLAGS += $(LIBUSB_CFLAGS)
+tools/apple_usb_modem_coupler.o: tools/apple_usb_modem_coupler.m \
+    modem_engine.h data_interface.h
+	$(CC) $(CFLAGS) $(LIBUSB_CFLAGS) -c $< -o $@
+
 vpcm_loopback_test: $(TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(TEST_OBJS) -o $@ $(LDFLAGS)
 
@@ -740,7 +756,8 @@ fixed-compare:
 	fi
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test *.d tools/*.d $(APPLE_USB_MODEM_PROBE_OBJS) apple_usb_modem_probe apple_usb_modem_audio
+	rm -f $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test *.d tools/*.d $(APPLE_USB_MODEM_PROBE_OBJS) apple_usb_modem_probe apple_usb_modem_audio \
+	    tools/apple_usb_modem_coupler.o apple_usb_modem_coupler
 
 distclean: clean
 	rm -f "$(SPANDSP_HOST_STAMP)" "$(PJ_HOST_STAMP)" $(BUILD_MODE_STAMP)
