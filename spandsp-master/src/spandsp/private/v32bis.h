@@ -35,6 +35,16 @@ extern const complexf_t v32bis_constellation[16];
     within a symbol or two and long enough to be coherent. */
 #define V32BIS_TONE_WINDOW  20
 
+/*! The transmit reference FIFO the echo canceller subtracts from the receive
+    stream, in samples.  A power of two, and long enough that a caller which
+    runs the transmit and receive sides a block or two out of step still
+    hands the canceller the sample that produced the echo. */
+#define V32BIS_ECHO_REF_LEN 2048
+
+/*! The chunk the receive path copies at a time, so a const input block can be
+    echo cancelled in place. */
+#define V32BIS_ECHO_BLOCK   256
+
 /*!
     V.32bis modem descriptor. This defines the working state for a single instance
     of a V.32bis modem.
@@ -71,6 +81,17 @@ struct v32bis_state_s
     v17_rx_state_t rx;
     v17_tx_state_t tx;
     modem_echo_can_segment_state_t *ec;
+    /* ITU-T V.32bis is full duplex on a 2-wire line, so the near end hybrid
+       returns our own transmit into our own receiver.  The transmit samples
+       are queued here as they go out and consumed one per received sample. */
+    bool echo_can_enabled;
+    int16_t echo_ref[V32BIS_ECHO_REF_LEN];
+    int32_t echo_ref_in;
+    int32_t echo_ref_out;
+    int32_t echo_ref_count;
+    double echo_in_power;
+    double echo_out_power;
+    int32_t echo_samples;
 
     uint16_t permitted_rates_signal;
 

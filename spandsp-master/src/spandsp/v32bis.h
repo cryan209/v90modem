@@ -212,6 +212,19 @@ SPAN_DECLARE(int) v32bis_start_startup(v32bis_state_t *s);
     \return 0 on success, or -1. */
 SPAN_DECLARE(int) v32bis_start_tones(v32bis_state_t *s);
 
+/*! Enable or disable the near end echo canceller in the sample path.
+    \param s The modem context.
+    \param enabled True to cancel.
+    \return 0 for OK. */
+SPAN_DECLARE(int) v32bis_set_echo_canceller(v32bis_state_t *s, bool enabled);
+
+/*! Get the size of the echo estimate the canceller is subtracting, in dB
+    relative to the received signal.  This is not an ERLE -- see the note on
+    the implementation.
+    \param s The modem context.
+    \return The level in dB, or 0 if the canceller has not run. */
+SPAN_DECLARE(float) v32bis_echo_estimate_level(v32bis_state_t *s);
+
 /*! \brief Report the round-trip estimates the tone phases produced.
     \param s The modem context.
     \param nt Where to put 6.1's NT, in symbol intervals, or NULL.

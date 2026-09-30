@@ -117,15 +117,198 @@ SPAN_DECLARE(float) v32bis_rx_signal_power(v32bis_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/*! Is the echo canceller in the sample path?  V.32bis is full duplex on a
+    2-wire line, so the near end hybrid returns our own transmit into our own
+    receiver; the canceller is what the Recommendation assumes is dealing with
+    it.  Default on -- but read v32bis_echo_can_adapting() before moving it,
+    because a canceller with nothing to cancel is a known way to make a clean
+    bearer worse rather than better. */
+/*! -log2 of the echo canceller's NLMS step.
+
+    1/65536, which sounds absurdly slow and is not.  A V.32bis modem is in
+    double talk for the whole call -- that is what full duplex on one pair
+    means -- so the adaption's error term is dominated by the far end signal,
+    which is uncorrelated with the reference and is typically well ABOVE the
+    echo.  An LMS loop injects misadjustment noise of roughly mu/2 of that
+    interference, so the step sets a noise floor the receiver has to live
+    with: at mu = 1/16 the canceller measurably removed 11.6 dB of the
+    received power on a bearer whose echo was 37 dB down, i.e. it was adding
+    far more than it took away, and every hybrid row failed with it in and
+    passed with it out.
+
+    Measured over return loss x channel delay in v32bis_duplex_test, as rows
+    passing with the canceller in against out:
+
+        mu_shift  31 dB return loss   37 dB
+        12        0/3 vs 1/3          0/3 vs 3/3
+        16        3/3 vs 1/3          3/3 vs 3/3
+        20        2/3 vs 1/3          3/3 vs 3/3
+
+    A peak rather than a plateau, which is what says the adaption is doing
+    the work and the 31 dB result is not an acquisition coin flip. */
+#define V32BIS_ECHO_MU_SHIFT 16
+
+static bool v32bis_echo_can(void)
+{
+    const char *e = getenv("V32BIS_ECHO_CAN");
+
+    return (e == NULL  ||  atoi(e) != 0);
+}
+/*- End of function --------------------------------------------------------*/
+
+/*! May the canceller adapt on what we are transmitting right now?
+
+    modem_echo.c's own documentation is explicit that LMS adaption "can go
+    seriously wrong" on a highly correlative transmit signal, because a
+    repetitive signal has many tap sets that cancel it and nothing chooses
+    between them.  Clause 6's tone phases are the worst case there is: state
+    A repeated is a pure 1800 Hz tone, and alternating A and C is a pair of
+    pure tones.  So the canceller runs in the sample path throughout -- its
+    estimate still has to be subtracted -- but it only adapts once there is a
+    conditioning signal or data on the line, which is the same point clause 6
+    Note 3 places its optional echo canceller training sequence. */
+static bool v32bis_echo_can_adapting(v32bis_state_t *s)
+{
+    return !s->tone_phase_active;
+}
+/*- End of function --------------------------------------------------------*/
+
+/*! Record what we just put on the line, so the receive side can subtract its
+    echo from what comes back.  The two streams are consumed in lock step,
+    one transmit sample per received sample; if the caller has not produced a
+    transmit block yet the reference is silence, which is what the line
+    carries at that point anyway. */
+static void v32bis_echo_ref_put(v32bis_state_t *s, const int16_t amp[], int len)
+{
+    int i;
+
+    for (i = 0;  i < len;  i++)
+    {
+        s->echo_ref[s->echo_ref_in] = amp[i];
+        s->echo_ref_in = (s->echo_ref_in + 1) & (V32BIS_ECHO_REF_LEN - 1);
+        if (s->echo_ref_count < V32BIS_ECHO_REF_LEN)
+            s->echo_ref_count++;
+        else
+            s->echo_ref_out = s->echo_ref_in;
+        /*endif*/
+    }
+    /*endfor*/
+}
+/*- End of function --------------------------------------------------------*/
+
+static int16_t v32bis_echo_ref_get(v32bis_state_t *s)
+{
+    int16_t amp;
+
+    if (s->echo_ref_count <= 0)
+        return 0;
+    /*endif*/
+    amp = s->echo_ref[s->echo_ref_out];
+    s->echo_ref_out = (s->echo_ref_out + 1) & (V32BIS_ECHO_REF_LEN - 1);
+    s->echo_ref_count--;
+    return amp;
+}
+/*- End of function --------------------------------------------------------*/
+
+/*! Run one received block through the canceller in place. */
+static void v32bis_echo_cancel(v32bis_state_t *s, int16_t amp[], int len)
+{
+    int i;
+    int16_t tx;
+    int16_t clean;
+
+    if (s->ec == NULL  ||  !s->echo_can_enabled)
+    {
+        /* Keep the two streams in step even when we are not cancelling, so
+           turning the canceller on mid-call cannot start it misaligned. */
+        for (i = 0;  i < len;  i++)
+            v32bis_echo_ref_get(s);
+        /*endfor*/
+        return;
+    }
+    /*endif*/
+    modem_echo_can_adaption_mode(s->ec, v32bis_echo_can_adapting(s));
+    for (i = 0;  i < len;  i++)
+    {
+        tx = v32bis_echo_ref_get(s);
+        clean = modem_echo_can_update(s->ec, tx, amp[i]);
+        s->echo_in_power += (double) amp[i]*amp[i];
+        s->echo_out_power += (double) (amp[i] - clean)*(amp[i] - clean);
+        s->echo_samples++;
+        amp[i] = clean;
+    }
+    /*endfor*/
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v32bis_tx(v32bis_state_t *s, int16_t amp[], int len)
 {
-    return v17_tx(&s->tx, amp, len);
+    int ret;
+
+    ret = v17_tx(&s->tx, amp, len);
+    /* v17_tx() pads the tail of a short block with silence, and that silence
+       is what the line carries, so the whole block is the reference. */
+    v32bis_echo_ref_put(s, amp, len);
+    return ret;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_set_echo_canceller(v32bis_state_t *s, bool enabled)
+{
+    s->echo_can_enabled = enabled;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+/*! How much of the received signal the canceller is removing, in dB relative
+    to the received signal.
+
+    This is deliberately NOT an echo return loss enhancement.  ERLE is the
+    received power before cancellation over the power after it, and on a full
+    duplex modem that number is nearly meaningless: the received signal is
+    dominated by the far end, so removing a 12 dB echo completely moves the
+    total received power by about a quarter of a dB.  Measured that way this
+    canceller read 0.0 dB while working perfectly.  What can honestly be
+    measured from inside the receiver is the size of the estimate being
+    subtracted, and whether the call then carries data is the real grade. */
+SPAN_DECLARE(float) v32bis_echo_estimate_level(v32bis_state_t *s)
+{
+    if (s->echo_samples <= 0  ||  s->echo_in_power <= 0.0  ||  s->echo_out_power <= 0.0)
+        return 0.0f;
+    /*endif*/
+    return (float) (10.0*log10(s->echo_out_power/s->echo_in_power));
 }
 /*- End of function --------------------------------------------------------*/
 
 static void v32bis_tone_rx(v32bis_state_t *s, const int16_t amp[], int len);
+static int v32bis_rx_clean(v32bis_state_t *s, const int16_t amp[], int len);
 
-SPAN_DECLARE(int) v32bis_rx(v32bis_state_t *s, const int16_t amp[], int len)
+SPAN_DECLARE(int) v32bis_rx(v32bis_state_t *s, const int16_t amp_in[], int len)
+{
+    int used;
+    int this_len;
+    int16_t amp[V32BIS_ECHO_BLOCK];
+    int off;
+
+    /* Cancel the near end echo of our own transmit before anything else sees
+       the block -- the tone detectors and the V.17 receiver alike.  The input
+       is const, so this is done a chunk at a time into a local buffer. */
+    for (off = 0;  off < len;  off += this_len)
+    {
+        this_len = len - off;
+        if (this_len > V32BIS_ECHO_BLOCK)
+            this_len = V32BIS_ECHO_BLOCK;
+        /*endif*/
+        memcpy(amp, &amp_in[off], this_len*sizeof(amp[0]));
+        v32bis_echo_cancel(s, amp, this_len);
+        v32bis_rx_clean(s, amp, this_len);
+    }
+    /*endfor*/
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int v32bis_rx_clean(v32bis_state_t *s, const int16_t amp[], int len)
 {
     int used;
 
@@ -2291,7 +2474,15 @@ SPAN_DECLARE(v32bis_state_t *) v32bis_init(v32bis_state_t *s,
     /* V.32bis never uses TEP */
     v17_tx_init(&s->tx, bit_rate, false, get_bit, get_bit_user_data);
     v17_rx_init(&s->rx, bit_rate, put_bit, put_bit_user_data);
+    /* 256 samples is 32 ms, which covers a near end hybrid's echo path with
+       room to spare; the far end's echo is the far end's problem. */
     s->ec = modem_echo_can_segment_init(256);
+    s->echo_can_enabled = v32bis_echo_can();
+    {
+        const char *e = getenv("V32BIS_ECHO_MU");
+
+        modem_echo_can_step_size(s->ec, (e != NULL) ? atoi(e) : V32BIS_ECHO_MU_SHIFT);
+    }
 
     {
         const char *d;

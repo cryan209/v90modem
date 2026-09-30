@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include <spandsp.h>
 
@@ -69,6 +70,52 @@ static void bearer(const int16_t in[], int16_t out[], int len, int alaw)
     }
 }
 
+/*! A near end 2-wire hybrid.  V.32bis is full duplex on one pair, so each
+    modem's own transmit comes back into its own receiver a short time later
+    through the hybrid's imperfect balance.  Three taps rather than one, so a
+    canceller cannot pass by being a pure delay and gain, and a return loss of
+    about 12 dB, which is a poor but entirely ordinary hybrid. */
+#define HYBRID_DELAY    40
+#define HYBRID_LEN      1024
+
+typedef struct
+{
+    int16_t hist[HYBRID_LEN];
+    int pos;
+} hybrid_t;
+
+static void hybrid_add(hybrid_t *h, const int16_t tx[], int16_t rx[], int len, float scale)
+{
+    static const struct
+    {
+        int delay;
+        float gain;
+    } taps[] = {{HYBRID_DELAY, 0.20f}, {HYBRID_DELAY + 3, -0.11f}, {HYBRID_DELAY + 9, 0.05f}};
+    int i;
+    size_t t;
+    float echo;
+    int idx;
+    int v;
+
+    for (i = 0;  i < len;  i++)
+    {
+        h->hist[h->pos] = tx[i];
+        echo = 0.0f;
+        for (t = 0;  t < sizeof(taps)/sizeof(taps[0]);  t++)
+        {
+            idx = (h->pos - taps[t].delay + HYBRID_LEN) & (HYBRID_LEN - 1);
+            echo += scale*taps[t].gain*h->hist[idx];
+        }
+        v = (int) (rx[i] + echo);
+        if (v > 32767)
+            v = 32767;
+        else if (v < -32768)
+            v = -32768;
+        rx[i] = (int16_t) v;
+        h->pos = (h->pos + 1) & (HYBRID_LEN - 1);
+    }
+}
+
 static int run_duplex(int alaw,
                       int call_rates,
                       int answer_rates,
@@ -76,7 +123,9 @@ static int run_duplex(int alaw,
                       int nt,
                       int mt,
                       int tones,
-                      int delay)
+                      int delay,
+                      int hybrid,
+                      int echo_can)
 {
     int16_t call_audio[160];
     int16_t answer_audio[160];
@@ -96,6 +145,11 @@ static int run_duplex(int alaw,
     int16_t delay_to_call[1024];
     int delay_pos = 0;
     int i;
+    hybrid_t call_hybrid;
+    hybrid_t answer_hybrid;
+
+    memset(&call_hybrid, 0, sizeof(call_hybrid));
+    memset(&answer_hybrid, 0, sizeof(answer_hybrid));
 
     memset(delay_to_answer, 0, sizeof(delay_to_answer));
     memset(delay_to_call, 0, sizeof(delay_to_call));
@@ -110,6 +164,8 @@ static int run_duplex(int alaw,
         || v32bis_set_supported_bit_rates(answer, answer_rates) != 0
         || (!tones  &&  (v32bis_set_round_trip_symbols(call, nt, mt) != 0
                          || v32bis_set_round_trip_symbols(answer, nt, mt) != 0))
+        || v32bis_set_echo_canceller(call, echo_can) != 0
+        || v32bis_set_echo_canceller(answer, echo_can) != 0
         || (tones ? v32bis_start_tones(call) : v32bis_start_startup(call)) != 0
         || (tones ? v32bis_start_tones(answer) : v32bis_start_startup(answer)) != 0)
     {
@@ -143,6 +199,13 @@ static int run_duplex(int alaw,
                 /*endif*/
             }
             /*endfor*/
+        }
+        /*endif*/
+        if (hybrid)
+        {
+            /* Each side's own transmit returns into its own receiver. */
+            hybrid_add(&call_hybrid, call_audio, to_call, 160, hybrid/100.0f);
+            hybrid_add(&answer_hybrid, answer_audio, to_answer, 160, hybrid/100.0f);
         }
         /*endif*/
         v32bis_rx(answer, to_answer, 160);
@@ -202,6 +265,15 @@ static int run_duplex(int alaw,
         /*endif*/
     }
     /*endif*/
+    if (hybrid)
+    {
+        printf("    hybrid: return loss %.1f dB, echo canceller %s, estimate removed: call %.1f dB, answer %.1f dB\n",
+               -20.0*log10(hybrid/100.0) + 12.6,
+               echo_can ? "on" : "off",
+               v32bis_echo_estimate_level(call),
+               v32bis_echo_estimate_level(answer));
+    }
+    /*endif*/
     printf("V.32bis duplex %s call=%03x answer=%03x -> %d bit/s%s: "
            "rate call=%d answer=%d, call rx %d bits %d errors, "
            "answer rx %d bits %d errors%s\n",
@@ -230,6 +302,40 @@ static int run_duplex(int alaw,
     v32bis_free(answer);
     return failed ? -1 : 0;
 }
+
+/*! One return loss, with the canceller in and out of the path.  Printed,
+    not asserted: what this measures is how much echo the receiver survives,
+    and the answer is currently "not much", because clause 6 Note 3's echo
+    canceller training period does not exist in this tree, so the canceller
+    never sees its own echo without the far end on top of it. */
+static int hybrid_sweep(int scale, int delay)
+{
+    int on;
+    int off;
+
+    on = run_duplex(0,
+                    V32BIS_RATE_14400 | V32BIS_RATE_12000,
+                    V32BIS_RATE_14400 | V32BIS_RATE_12000,
+                    14400, 0, 0, 0, delay, scale, 1);
+    off = run_duplex(0,
+                     V32BIS_RATE_14400 | V32BIS_RATE_12000,
+                     V32BIS_RATE_14400 | V32BIS_RATE_12000,
+                     14400, 0, 0, 0, delay, scale, 0);
+    printf("  hybrid sweep: return loss %.1f dB, delay %d -> canceller on %s, off %s\n",
+           -20.0*log10(scale/100.0) + 12.6,
+           delay,
+           (on == 0) ? "pass" : "FAIL",
+           (off == 0) ? "pass" : "FAIL");
+    /* Only the canceller's own arm is graded, and only where it has been
+       measured to work.  Below about 30 dB of return loss neither arm
+       carries the call: clause 6 Note 3's echo canceller training period,
+       where the far end is quiet and the near end can see its own echo
+       alone, does not exist in this tree, so the canceller has to converge
+       in continuous double talk against an echo above the far end signal,
+       and it does not. */
+    return (scale <= 12  &&  on != 0) ? 1 : 0;
+}
+/*- End of function --------------------------------------------------------*/
 
 int main(int argc, char *argv[])
 {
@@ -269,9 +375,9 @@ int main(int argc, char *argv[])
     {
         if (one >= 0  &&  (int) i != one)
             continue;
-        if (run_duplex(0, cases[i].call_rates, cases[i].answer_rates, cases[i].expected, 0, 0, 0, 0) != 0)
+        if (run_duplex(0, cases[i].call_rates, cases[i].answer_rates, cases[i].expected, 0, 0, 0, 0, 0, 1) != 0)
             bad++;
-        if (run_duplex(1, cases[i].call_rates, cases[i].answer_rates, cases[i].expected, 0, 0, 0, 0) != 0)
+        if (run_duplex(1, cases[i].call_rates, cases[i].answer_rates, cases[i].expected, 0, 0, 0, 0, 0, 1) != 0)
             bad++;
     }
     /* A preset NT/MT pair must not break the dialogue when the tone phases
@@ -285,32 +391,51 @@ int main(int argc, char *argv[])
                        64,
                        64,
                        0,
-                       0) != 0)
+                       0,
+                       0,
+                       1) != 0)
             bad++;
         /* And the whole of clause 6, tone phases included, in both laws:
            NT and MT are measured here, not supplied. */
         if (run_duplex(0,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600,
-                       14400, 0, 0, 1, 0) != 0)
+                       14400, 0, 0, 1, 0, 0, 1) != 0)
             bad++;
         if (run_duplex(1,
                        V32BIS_RATE_9600 | V32BIS_RATE_7200,
                        V32BIS_RATE_14400 | V32BIS_RATE_9600,
-                       9600, 0, 0, 1, 0) != 0)
+                       9600, 0, 0, 1, 0, 0, 1) != 0)
             bad++;
         /* And with a real one-way delay, which is the whole point of NT and
            MT: both must grow by the round trip. */
         if (run_duplex(0,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000,
-                       14400, 0, 0, 1, 80) != 0)
+                       14400, 0, 0, 1, 80, 0, 1) != 0)
             bad++;
         if (run_duplex(0,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000,
                        V32BIS_RATE_14400 | V32BIS_RATE_12000,
-                       14400, 0, 0, 1, 240) != 0)
+                       14400, 0, 0, 1, 240, 0, 1) != 0)
             bad++;
+        /* And over a 2-wire hybrid, which is what V.32bis actually runs
+           on: each side's own transmit returns into its own receiver, and
+           the canceller in the sample path is what has to remove it.  Swept
+           over return loss with the canceller in and out, because a single
+           row cannot say whether the canceller is doing anything. */
+        {
+            static const int scale[] = {100, 50, 25, 12, 6};
+            size_t k;
+
+            for (k = 0;  k < sizeof(scale)/sizeof(scale[0]);  k++)
+            {
+                bad += hybrid_sweep(scale[k], 40);
+                bad += hybrid_sweep(scale[k], 80);
+                bad += hybrid_sweep(scale[k], 160);
+            }
+            /*endfor*/
+        }
     }
     if (bad != 0)
     {

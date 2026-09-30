@@ -79,6 +79,12 @@ SPAN_DECLARE(void) modem_echo_can_adaption_mode(modem_echo_can_segment_state_t *
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(void) modem_echo_can_step_size(modem_echo_can_segment_state_t *ec, int mu_shift)
+{
+    ec->mu_shift = mu_shift;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int16_t) modem_echo_can_update(modem_echo_can_segment_state_t *ec, int16_t tx, int16_t rx)
 {
     int32_t echo_value;
@@ -112,7 +118,32 @@ SPAN_DECLARE(int16_t) modem_echo_can_update(modem_echo_can_segment_state_t *ec, 
                  makes the numbers grow a lot! */
         ec->tx_power += ((tx*tx - ec->tx_power) >> 5);
 
-        shift = 1;
+        /* Normalise the step by the transmit power.  The LMS step has to be
+           inversely proportional to the energy in the filter's input, or the
+           loop gain scales with the signal and the adaption diverges instead
+           of converging -- which is what a hardcoded shift of 1 does here on
+           any signal at modem levels, while the tx_power this code has always
+           maintained went unused.  Writing the update for tap i as
+
+               taps32[i] += (x[i]*e) >> shift
+
+           and remembering that the applied tap is taps32[i] >> 15 and is
+           itself Q15, one sample moves tap i by x[i]*e/2^(shift + 30) in tap
+           units.  The total correction that then appears at the filter output
+           is e*N*P/2^(shift + 30) for N taps at mean square power P, so making
+           that the classic NLMS mu*e means
+
+               shift = log2(N) + log2(P) - 30 - log2(mu).
+
+           The two >>15 steps are easy to count once and both must be counted;
+           dropping one puts the step 32768x out. */
+        shift = top_bit(ec->taps) + top_bit(ec->tx_power) - 30 + ec->mu_shift;
+        if (shift < 1)
+            shift = 1;
+        /*endif*/
+        if (shift > 30)
+            shift = 30;
+        /*endif*/
         /* Update the FIR taps */
         offset2 = ec->curr_pos;
         offset1 = ec->taps - offset2;
@@ -162,6 +193,9 @@ SPAN_DECLARE(modem_echo_can_segment_state_t *) modem_echo_can_segment_init(int l
     memset(ec, 0, sizeof(*ec));
     ec->taps = len;
     ec->curr_pos = ec->taps - 1;
+    /* mu = 1/16.  Slow enough to hold a solution while the far end is
+       talking, which for a full duplex modem is all of the time. */
+    ec->mu_shift = 4;
     if ((ec->fir_taps32 = (int32_t *) span_alloc(ec->taps*sizeof(int32_t))) == NULL)
     {
         span_free(ec);

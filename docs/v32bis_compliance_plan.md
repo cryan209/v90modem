@@ -305,10 +305,77 @@ The V.17 receiver is not fed while the tones are running: there is no
 conditioning signal to train on, and 6.1 and 6.2 both have the modem condition
 its receiver only once the tones are done.
 
-Still missing: 6.2's V.25 answer sequence (the engine's job, not the modem's),
-the echo canceller -- still allocated and still not in the duplex sample
-path -- and V.8/modem-engine/V.42/PTY integration.  The optional special echo
-canceller training sequence of Note 3 is not implemented either.
+Still missing: 6.2's V.25 answer sequence (the engine's job, not the modem's)
+and V.8/modem-engine/V.42/PTY integration.
+
+## The near end echo canceller
+
+V.32bis is full duplex on one pair, so each modem's own transmit returns
+through its own hybrid into its own receiver.  The canceller is now in the
+sample path: `v32bis_tx()` queues every sample it puts on the line into a
+transmit reference FIFO, and `v32bis_rx()` consumes one reference sample per
+received sample through `modem_echo_can_update()` before anything else sees
+the block -- the clause 6 tone detectors and the V.17 receiver alike.
+`V32BIS_ECHO_CAN=0` takes it out.
+
+It does not adapt during the tone phases.  `modem_echo.c`'s own documentation
+is explicit that LMS adaption "can go seriously wrong" on a highly
+correlative transmit signal, and clause 6's tones are the worst case there
+is: state A repeated is a pure 1800 Hz tone and alternating A and C is a pair
+of pure tones.  The estimate is still subtracted throughout; only the
+adaption stands down, which is the same point clause 6 Note 3 places its
+optional echo canceller training sequence.
+
+**The vendored canceller's adaption step was broken, and that is worth more
+than the wiring.**  `modem_echo_can_update()` computed a transmit power
+estimate, never used it, and applied a hardcoded `shift = 1` -- an
+unnormalised LMS whose loop gain scales with the signal.  At modem levels
+that is a step of about mu = 1, so it diverges rather than converging.  It is
+upstream SpanDSP's own long-standing defect, not a local edit, and it is the
+mechanism behind the V.90 note that the same module "was not cancelling an
+echo -- it was adding one", reading `pre_rms=0 post_rms=159` on digital
+silence.  The step is now normalised by the transmit power the code already
+maintained:
+
+    shift = log2(N) + log2(P) - 30 - log2(mu)
+
+for N taps at mean square transmit power P.  **Count both `>>15` steps.**  A
+tap is applied as `fir_taps32[i] >> 15` and is itself Q15, so one sample moves
+tap i by `x[i]*e/2^(shift + 30)` in tap units; dropping one of the two shifts
+puts the step 32768x out, which is exactly the intermediate value this work
+went through -- it looked like an improvement only because being far too
+small left the filter effectively frozen.
+
+**The step has to be very small, because a V.32bis modem is in double talk for
+the whole call.**  The adaption's error term is dominated by the far end
+signal, which is uncorrelated with the reference and is typically well above
+the echo, and an LMS loop injects misadjustment noise of about mu/2 of that
+interference.  At mu = 1/16 the canceller removed 11.6 dB of the received
+power on a bearer whose echo was 37 dB down -- adding far more than it took
+away -- and every hybrid row failed with it in and passed with it out.  The
+default is mu = 1/65536 (`V32BIS_ECHO_MU` is -log2 of it).
+
+`v32bis_duplex_test` now puts a three-tap near end hybrid on each side --
+three taps rather than one, so a canceller cannot pass by being a pure delay
+and gain -- and sweeps its return loss against the channel delay, with the
+canceller in and out.  Rows passing, in against out:
+
+    mu_shift   31 dB return loss   37 dB
+    12         0/3 vs 1/3          0/3 vs 3/3
+    16         3/3 vs 1/3          3/3 vs 3/3
+    20         2/3 vs 1/3          3/3 vs 3/3
+
+A peak rather than a plateau, which is what says the adaption is doing the
+work rather than the 31 dB result being an acquisition coin flip.  The 31 dB
+rows are asserted; the ones below are printed and not graded.
+
+**Open, and now well posed: below about 30 dB of return loss neither arm
+carries the call.**  The canceller has to converge in continuous double talk
+against an echo that is above the far end signal, and it does not.  The
+missing piece is Note 3's training period -- an interval in which the far end
+is quiet and the near end can see its own echo alone -- which nothing in this
+tree generates.  A `V32BIS_ECHO_CAN=0` control belongs beside any attempt at
+it, because an echo canceller that is not converging is worse than none.
 
 `make v32bis-test` runs the native smoke test plus all Python reference,
 SpanDSP-comparison, waveform, and datapump tests.
@@ -461,7 +528,9 @@ Exit criteria:
 
 Status: the whole of clause 6, tone phases included, completes and exchanges
 data over a clean bearer with a real channel delay (`v32bis_duplex_test`);
-the echo canceller is still not in the sample path
+the echo canceller is in the sample path and carries the call at 31 dB of
+hybrid return loss, where without it the call fails; below ~30 dB neither
+arm works, and Note 3's training period is what is missing
 
 - Echo canceller
 - Duplex startup sequencing
@@ -470,8 +539,8 @@ the echo canceller is still not in the sample path
 Exit criteria:
 
 - Back-to-back duplex simulation completes training and exchanges data. Met
-  for a clean bearer with a real one-way channel delay; not met for a line
-  model with echo.
+  for a clean bearer with a real one-way channel delay, and for a 2-wire
+  hybrid at 31 dB or better return loss; not met for a poorer hybrid.
 
 ### Phase 5: Rate Renegotiation and V.32 Interop Boundaries
 

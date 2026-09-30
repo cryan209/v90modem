@@ -41,6 +41,8 @@
 struct modem_echo_can_segment_state_s
 {
     int adapt;
+    /*! \brief -log2 of the NLMS step size. */
+    int mu_shift;
     int taps;
 
     int ec_len;

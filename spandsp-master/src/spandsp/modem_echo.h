@@ -119,6 +119,12 @@ SPAN_DECLARE(void) modem_echo_can_adaption_mode(modem_echo_can_segment_state_t *
     \param rx The received audio sample.
     eturn The clean (echo cancelled) received sample.
 */
+/*! Set the adaption step size of a modem echo canceller context.
+    \param ec The echo canceller context.
+    \param mu_shift -log2 of the NLMS step size, so 4 is a step of 1/16.
+*/
+SPAN_DECLARE(void) modem_echo_can_step_size(modem_echo_can_segment_state_t *ec, int mu_shift);
+
 SPAN_DECLARE(int16_t) modem_echo_can_update(modem_echo_can_segment_state_t *ec, int16_t tx, int16_t rx);
 
 #if defined(__cplusplus)
