@@ -48,6 +48,9 @@ v90_upstream_replay
 v90_engine_replay
 hsf_fxo_probe
 hsf_rom_image.bin
+apple_usb_modem_probe
+apple_usb_modem_audio
+*.dSYM/
 
 # Common maps/logs
 *.map
