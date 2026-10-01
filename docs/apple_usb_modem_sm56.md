@@ -966,3 +966,104 @@ transmitted codeword does not arrive as itself even when the sample lines up.
 shared clock -- what the SIP/G.711 bearer in `sip_v90_modem` already is. These
 two modems can exercise V.8's V.91 negotiation and the transmit side's startup
 construction, and nothing past that; the receiver has no bearer to lock to.
+
+## V.92 between the two Apple modems (2026-10-01)
+
+Run with the roles the Recommendation requires rather than the symmetric
+pairing V.91 used, because V.90/V.92 9.2 puts the **analogue** modem on the
+**calling** side: 6004 (the good hybrid, 16.4 dB echo return loss) dials as
+the analogue modem, and 6005 answers as the digital modem. 6005 is the right
+end to answer on even though its hybrid collapses to ~2 dB a second after
+seizure, because answering needs no DTMF.
+
+    APPLE_MODEM_ADDR=1:7 APPLE_MODEM_AUDIO_UID=000000 \
+    ME_MODE=v92 ME_V90_ROLE=digital ME_DUMP_DIR=<d>/ans \
+      ./apple_usb_modem_coupler --answer --ring-wait 60 --hold 70 &
+    sleep 3
+    APPLE_MODEM_ADDR=1:6 APPLE_MODEM_AUDIO_UID=1143000 APPLE_MODEM_TX_AMP=0.35 \
+    ME_MODE=v92 ME_V90_ROLE=analogue ME_DUMP_DIR=<d>/call \
+      ./apple_usb_modem_coupler --dial 6005 --hold 70
+
+`ME_V90_ROLE=digital` is needed on the answering end because the coupler
+`setenv`s `analogue` with overwrite 0 -- it *is* the analogue modem, wired to a
+2-wire line -- and an explicit value still wins. `ME_DUMP_DIR` must be set per
+process or the two engines write one pair of PCM dumps.
+
+**V.8 and the roles are right, and the V.92 INFO0 exchange completes
+mutually.** The caller takes the analogue role (`U_INFO=78`) and reads the
+peer as `PCM=V.90/V.92 digital available`; the answerer reads us as
+`PCM=V.90/V.92 analogue available` and logs
+
+    V.92 INFO0a flags: raw26_27=0x1, capability(bit26)=1, short-phase2(bit27)=0
+    V.92 INFO0 confirmed mutually (INFO0d bit27=1, INFO0a bit26=1); selecting long Phase 2/3
+
+First time the two roles in this tree have confirmed V.92 to each other, and
+the first time over a real analogue bearer rather than G.711.
+
+**`ME_V92_PCM_UPSTREAM` is what separates "V.92 negotiated" from "V.92
+selected", and without it we demote ourselves.** With the default off, the
+mutual INFO0 above is immediately followed by
+
+    V.92 INFO0 was mutual but the peer answered a V.90 INFO1a
+    (upstream_code=4, not 6/8000); demoting to V.90
+
+and the peer answering a V.90-form INFO1a is **us**: `prepare_info1a()` in
+`v34tx.c` selects Table 18's PCM upstream only when
+`v92_pcm_upstream_capable` is set, which `v92_pcm_upstream_advertised()` gates
+on that environment variable. The engine's note recording this behaviour of
+d-modem applies to our own analogue role as well; it is a documented opt-in,
+not a defect. With `ME_V92_PCM_UPSTREAM=1` on both ends the contract is
+complete in both directions:
+
+    (digital)  V.92 strict RX event: valid INFO1a U_INFO=78 MD=0 upstream_code=6 downstream_code=6
+    (digital)  V.92 native Phase 4 RX enabled: 4-point TRN2u, L_U=8000
+    (analogue) V.92 analogue Table 18 selected: linear PCM, U_INFO=78 RTD=0
+
+`v92_analogue_phase3.c` then runs its first five stages live for the first
+time -- `V92A_SILENCE`, `V92A_RU`, `V92A_RU_BAR`, `V92A_TRN1U`, `V92A_JA` --
+and fails at the next one, `Sd-bar timeout (9.5.2.2.1)`, taking the 9.5.2
+retrain and then sitting in Phase 2 at `rx=TONE_B` for the rest of the call.
+
+**It cannot get past there, for the same reason V.91 cannot run here, and the
+V.90 run is what proves it inside one log.** Do not read the sequence across
+the two processes' logs: their `[TRACE +Nms]` origins are their own starts,
+three seconds apart, so the ordering of one end's timeout against the other's
+transmission is not established by them. What is established is in the
+`ME_MODE=v92` run that demoted to V.90, where the answerer's own log says it
+transmitted the whole downstream --
+
+    V90 Phase 3: Sd complete (64 reps), starting S-bar-d
+    V90 Phase 3: S-bar-d complete, starting TRN1d
+
+-- while the caller's own log scores **every one of its 24 Sd acquisition
+windows at exactly 0.000**, `no Sd in this window (held-out score 0.000)`, and
+never reports a fit. Zero, not a marginal score: the held-out fit finds
+nothing of the structure at all. 9.3.2's deadline then passes in Ja, the
+analogue side takes its 9.5.2.1 retrain, and 60 s later training times out and
+falls back to V.22bis.
+
+That is the HSF statement over again on a second analogue bearer -- the V.90
+and V.92 Phase 3 downstream is a stream of exact PCM codewords, and there are
+none on an analogue line: two D/A-A/D conversions, ~4.6 dB of loss each way,
+and the 30 ppm of uncorrected clock offset measured in the V.91 section above.
+**So V.92, like V.91, is structurally dead between these two modems, and for a
+broader reason: with PCM upstream selected BOTH directions are codewords.**
+What these two can exercise is V.8, Phase 2, the V.92 INFO0/INFO1a capability
+contract and the analogue startup's transmit construction -- which is what the
+runs above did -- and nothing that has to receive a codeword.
+
+Artifacts: `artifacts/apple-v92-r2` (V.92 negotiated, demoted to V.90) and
+`artifacts/apple-v92-r3` (V.92 selected both directions), each with its
+`run.sh`.
+
+**Two method notes from this session, both of which read as findings first.**
+`apple_usb_modem_audio` does **not** seize the line -- `apple_usb_modem_probe
+--hook on` is a separate step -- so a `dial` capture taken without it shows a
+flat DC offset and no dial tone, which reads exactly like a dead line; off-hook
+the same dial shows 400 Hz dial tone, muting on the first digit, and 400/450 Hz
+ringback. And `--notify` is **not** a control for ring detection unless you
+know nothing is ringing: an unanswered call leaves the PBX ringing the far
+extension for a long time, so a "no call in progress" run taken fifteen seconds
+after a dial test reported RING_DETECT and briefly looked like the endpoint
+reporting rings spuriously. A minimal libusb A/B then showed the device quiet,
+which is what withdrew it.
