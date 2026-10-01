@@ -50,7 +50,9 @@ extern "C" {
 /* Codeword buffer for the Ja search (seed + TRN1u + Ja descriptor). */
 #define V92_P3_RX_JA_BUF       6144   /* ≥ 23 + TRN1u_MIN + DIL + slack */
 /* Rolling prehistory so TRN1u/Ja decoding gets true pre-seed symbols. */
-#define V92_P3_RX_PRE_HIST       64
+/* 128: the TRN1u start alignment looks up to 64 symbols behind the nominal
+ * start, and the Ja search's decode reaches 24 behind that. */
+#define V92_P3_RX_PRE_HIST      128
 
 /* -------------------------------------------------------------------------
  * Receiver state
@@ -133,12 +135,21 @@ typedef struct {
     int      ru2_end;
     int      ur2_start;
     int      ur2_end;
-    int      trn1u_start;
+    int      trn1u_start;    /* aligned to the reference once known */
     int      arm_sample_min; /* ignore Phase-3 lock before this sample */
+
+    /* ------- TRN1u start alignment (8.5.7 reference correlation) ------- */
+    int      trn1u_nominal_start;     /* where the uR->TRN1u transition was declared */
+    bool     trn1u_align_done;
+    int      trn1u_align_offset;      /* trn1u_start - trn1u_nominal_start */
+    int      trn1u_align_score_x1000; /* |normalised sign correlation| at the peak */
+    bool     trn1u_inverted;          /* line polarity reversed */ /* ignore Phase-3 lock before this sample */
 
     /* ------- TRN1u accumulator ------- */
     int      trn1u_count;    /* symbols accumulated */
     int      trn1u_ones;     /* GPA-descrambled bits that were 1 */
+    int      trn1u_ones_early; /* ones within the first 256 symbols */
+    bool     early_check_due;
     uint32_t gpa_reg;        /* GPA shift register (x^23+x^18+1) */
     int      diff_prev;      /* previous sign bit for differential decode */
     bool     diff_valid;     /* true once diff_prev is initialised */
@@ -161,6 +172,7 @@ typedef struct {
     uint8_t  ja_buf[V92_P3_RX_JA_BUF];
     int      ja_buf_base;    /* sample index corresponding to ja_buf[0] */
     int      ja_buf_fill;    /* number of valid codewords in ja_buf */
+    int      ja_buf_lead;    /* prehistory held beyond the 23-symbol seed */
 
     /* ------- result ------- */
     bool           ja_found;

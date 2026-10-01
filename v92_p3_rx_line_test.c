@@ -47,6 +47,11 @@
 #define RU1_EXPECTED      5008
 #define UR1_EXPECTED      5272
 #define POSITION_SLACK    16
+/* TRN1u's first symbol (plan step 3), from tools/v92_trn1u_bound.py's 1-tap
+ * fit: offset -31 from where today's receiver declared it (5323).  The
+ * receiver's own reference correlation must land within START_SLACK. */
+#define TRN1U_EXPECTED    5292
+#define START_SLACK       2
 
 static int first_entry[V92_P3_RX_FAILED + 1];
 
@@ -63,6 +68,8 @@ static int fixture_row(const char *path, bool expect_failure)
     int m1 = 0;
     bool acquired;
     bool decoded = false;
+    int trn1u_start = -1;
+    bool aligned;
 
     printf("fixture %s\n", path);
     f = fopen(path, "rb");
@@ -98,6 +105,8 @@ static int fixture_row(const char *path, bool expect_failure)
         int state;
 
         (void)v92_p3_rx_feed(&rx, cw[i], i);
+        if (trn1u_start < 0 && rx.trn1u_align_done)
+            trn1u_start = rx.trn1u_start;
         state = (int)v92_p3_rx_get_state(&rx);
         if (state != last_state) {
             printf("  sample %6d (%6.3f s) %s\n", i, i/8000.0,
@@ -116,6 +125,15 @@ static int fixture_row(const char *path, bool expect_failure)
            v92_p3_rx_state_name(v92_p3_rx_get_state(&rx)),
            rx.reject_count, v92_p3_rx_reject_name(reason),
            reject_sample, m0, m1);
+
+    aligned = trn1u_start >= 0
+           && abs(trn1u_start - TRN1U_EXPECTED) <= START_SLACK;
+    printf("  TRN1u start %d by reference correlation (expected %d +/-%d)%s\n",
+           trn1u_start, TRN1U_EXPECTED, START_SLACK, aligned ? "" : "  WRONG");
+    if (!aligned) {
+        printf("FAIL: TRN1u start not found where it is\n");
+        return 1;
+    }
 
     if (v92_p3_rx_ja_ok(&rx)) {
         const ja_dil_decode_t *ja = v92_p3_rx_get_ja(&rx);
@@ -171,6 +189,11 @@ static int fixture_row(const char *path, bool expect_failure)
 
 #define SYN_SYMBOLS       16000   /* Ru..TRN1u is ~2.5k; Ja repeats to 12000T */
 #define SYN_LU            6000.0
+/* Where TRN1u's first symbol reaches the receiver, from
+ * tools/v92_trn1u_bound.py's 1-tap fit on each dumped row (--dump-row): 976
+ * with no loop, 979-981 through the r4 loop's delay. */
+#define SYN_TRN1U_START   976
+#define SYN_R4_DELAY      4
 
 typedef struct {
     const char *name;
@@ -247,7 +270,7 @@ static int dump_tx(const char *path)
 }
 
 static bool syn_run(const syn_row_t *row, int *ja_sample, int *rejects,
-                    v92_p3_rx_reject_t *last, FILE *dump)
+                    v92_p3_rx_reject_t *last, int *trn1u_start, FILE *dump)
 {
     v92a_config_t cfg = syn_config(row->alaw);
     v92a_audio_t *fe = v92a_audio_init_rate(&cfg, V92_AUDIO_RATE);
@@ -269,6 +292,7 @@ static bool syn_run(const syn_row_t *row, int *ja_sample, int *rejects,
     v92_p3_rx_start(&rx, 0);
     v92_p3_rx_set_md_length(&rx, 0);
     *ja_sample = -1;
+    *trn1u_start = -1;
     /* A dumped row runs to the end so the whole of Ja is recorded. */
     for (int i = 0; i < SYN_SYMBOLS && (!ok || dump); i++) {
         int16_t up[V92_AUDIO_PER_SYMBOL];
@@ -291,6 +315,8 @@ static bool syn_run(const syn_row_t *row, int *ja_sample, int *rejects,
             if (dump)
                 fputc(cw, dump);
             v92_p3_rx_feed(&rx, cw, idx++);
+            if (*trn1u_start < 0 && rx.trn1u_align_done)
+                *trn1u_start = rx.trn1u_start;
         }
         if (v92_p3_rx_ja_ok(&rx)) {
             const ja_dil_decode_t *ja = v92_p3_rx_get_ja(&rx);
@@ -318,17 +344,22 @@ static int synthetic_rows(bool expect_failure)
         const syn_row_t *row = &syn_rows[r];
         int ja_sample;
         int rejects;
+        int start;
+        int want_start = SYN_TRN1U_START + (row->isi ? SYN_R4_DELAY : 0);
         v92_p3_rx_reject_t last;
-        bool ok = syn_run(row, &ja_sample, &rejects, &last, NULL);
+        bool ok = syn_run(row, &ja_sample, &rejects, &last, &start, NULL);
         bool wanted = expect_failure ? row->expect_pass_today : true;
-        const char *verdict = ok == wanted ? "ok"
+        bool aligned = start >= 0 && abs(start - want_start) <= START_SLACK;
+        const char *verdict = !aligned ? "FAIL (TRN1u start)"
+                            : ok == wanted ? "ok"
                             : ok ? "UNEXPECTED PASS" : "FAIL";
 
-        printf("  %-30s %s  Ja %s (sample %d, %d rejects, last %s)  %s\n",
-               row->name, row->alaw ? "A" : "u",
+        printf("  %-30s %s  TRN1u %4d/%4d  Ja %s (sample %d, %d rejects, "
+               "last %s)  %s\n",
+               row->name, row->alaw ? "A" : "u", start, want_start,
                ok ? "decoded" : "missing", ja_sample, rejects,
                v92_p3_rx_reject_name(last), verdict);
-        if (ok != wanted)
+        if (ok != wanted || !aligned)
             failures++;
     }
     if (failures && expect_failure)
@@ -353,14 +384,14 @@ int main(int argc, char **argv)
              * offline analysis (tools/v92_trn1u_bound.py). */
             int r = atoi(argv[++i]);
             FILE *f = fopen(argv[++i], "wb");
-            int ja_sample, rejects;
+            int ja_sample, rejects, start;
             v92_p3_rx_reject_t last;
 
             if (!f || r < 0
                 || r >= (int)(sizeof(syn_rows)/sizeof(syn_rows[0])))
                 return 2;
             printf("%s: Ja %s\n", syn_rows[r].name,
-                   syn_run(&syn_rows[r], &ja_sample, &rejects, &last, f)
+                   syn_run(&syn_rows[r], &ja_sample, &rejects, &last, &start, f)
                    ? "decoded" : "missing");
             fclose(f);
             return 0;

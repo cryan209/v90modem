@@ -6,7 +6,7 @@ modem is on a real 2-wire loop behind a single codec (VG224 -> SIP -> us),
 so that 9.5.1.1.3 releases Sd. On the byte-exact SIP loopback it must behave
 exactly as it does today.
 
-Status: steps 1-2 done, 2026-10-01. Each step lists what it changes, how it is
+Status: steps 1-3 done, 2026-10-01. Each step lists what it changes, how it is
 measured, and the result that completes it. Do the steps in order: each one
 produces the instrument the next one is graded by.
 
@@ -162,7 +162,7 @@ of this showed up.
   receiver's detection latency, not something the loop does. Step 3 removes
   it.
 
-### 3. Find TRN1u's first symbol from its known sequence
+### 3. Find TRN1u's first symbol from its known sequence -- DONE 2026-10-01
 
 Replace "uR ended, so TRN1u starts here" with a correlation:
 
@@ -177,6 +177,49 @@ Replace "uR ended, so TRN1u starts here" with a correlation:
 
 Done when the fixture's start lands within ±2 symbols of the bound tool's
 1-tap offset, and on every synthetic row.
+
+**Result.**
+
+- `trn1u_align()` in `v92_p3_rx.c` runs once the nominal start + 64 + 256
+  symbols have arrived.
+  - It correlates received **signs** against the 8.5.7 reference. Signs
+    only, because the receiver is not told the G.711 law and the MSB is the
+    sign in both.
+  - It moves `trn1u_start` and records `trn1u_nominal_start`,
+    `trn1u_align_offset`, `trn1u_align_score_x1000` and `trn1u_inverted`
+    (line polarity, which `trn1u_process()` now honours).
+  - It replays the descrambler from the aligned start with a zero register,
+    which is the transmitter's own initial state there.
+  - A peak under 0.300 keeps the nominal start.
+- Positions, all exactly the bound tool's 1-tap figure, asserted to ±2 by
+  `make v92-loop-rx-test`:
+  - fixture 5292 (nominal 5323, score 0.734);
+  - ideal rows 976 (nominal 1007, 1.000; 0.914 at +200 ppm);
+  - r4 loop rows 979-980 (scores 0.57-0.74).
+- **The scores already separate real TRN1u from false locks.** The
+  fixture's false Ru lock inside Ja (18222) and the loop rows' rehunts score
+  0.14-0.195, against 0.57-1.0 for real TRN1u. That is what step 5 can gate
+  on.
+- **Two things had to change with it, and neither moves any outcome:**
+  - **The "eq" fallback in the TRN1u ones checks was removed.** It ran
+    `p3_demod`, a V.34 passband demodulator, over 24 hypotheses on baseband
+    PCM. It had never run, because it needed one more codeword of history
+    than `enter_trn1u()` buffered, so it returned -1 every time. The deeper
+    alignment history woke it up, and it "passed" the fixture's false lock
+    at 73%.
+  - **The Ja search cadence is now counted from the old 23-symbol seed**
+    (`ja_buf_lead`). The extra 65 symbols of prehistory had moved every
+    144-symbol search probe, and with it the instant Ja is declared and Sd
+    starts, 65 symbols earlier. That alone broke `v92_startup_test`'s
+    u-law, measured-DIL, reconstructed-audio case with an analogue `Sd-bar
+    timeout`. The analogue side's Sd acquisition still fits at score 1.000
+    there, and the core then never sees Sd-bar. So **the analogue receiver's
+    Sd-to-Sd-bar handling depends on where Sd falls relative to its 64-symbol
+    acquisition grid.** That is a separate defect in
+    `v92_analogue_audio.c`, not addressed here.
+- Unchanged: `v92_startup_test` 51/51, `vpcm_loopback_test --all-tests`,
+  `v92_proc_eval_test`, and every synthetic row's outcome. TRN1u still fails
+  on the loop, as it should until steps 4-5.
 
 ### 4. Train an equaliser on the known sequence and track timing
 

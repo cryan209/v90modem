@@ -56,8 +56,21 @@
 #define RU2_LOCK_MIN_SOFT  96
 /* TRN1u sanity: descrambled stream should be heavily biased to ones. */
 #define TRN1U_ONES_MIN_PCT 75
-#define TRN1U_ONES_MIN_PCT_SOFT 60
 #define TRN1U_EARLY_CHECK_T 256
+/* TRN1u start alignment (docs/v92_p3_rx_line_plan.md step 3).  The uR->TRN1u
+ * transition is declared from the period-6 run trackers, which need a run of
+ * off-pattern symbols before they let go, so the receiver enters TRN1u ~31
+ * symbols after TRN1u actually began -- on a byte-exact channel as well as
+ * off the loop.  TRN1u's signs are known from its first symbol (8.5.7), so
+ * the start is found instead by correlating ALIGN_LEN received signs against
+ * the reference at every offset within +/-ALIGN_SPAN of the nominal start.
+ * Signs only: the receiver is not told the G.711 law, and the MSB is the
+ * sign in both.  ALIGN_MIN is the normalised peak below which the nominal
+ * start is kept: a reference against itself scores 1.0, its own sidelobes
+ * over 256 symbols reach ~0.2, and the r4 loop's peaks measure 0.57-0.74. */
+#define TRN1U_ALIGN_SPAN 64
+#define TRN1U_ALIGN_LEN  256
+#define TRN1U_ALIGN_MIN_X1000 300
 /* V.92 9.5.1.1.3: the digital modem conditions its receiver for Ja only
  * "after receiving the first 2040T of signal TRNlu", and Figure 10 gives
  * TRN1u as >2040T -- so 2040 is guaranteed by the peer, not a target to
@@ -349,16 +362,96 @@ static inline int gpa_descramble(uint32_t *reg, int in_bit)
 static int trn1u_process(v92_p3_rx_t *rx, uint8_t cw)
 {
     int v92_bit = 1 - sign_bit(cw); /* 0 positive, 1 negative */
+    if (rx->trn1u_inverted)
+        v92_bit ^= 1;
     rx->diff_prev = v92_bit;
     rx->diff_valid = true;
     int out = gpa_descramble(&rx->gpa_reg, v92_bit);
     rx->trn1u_count++;
     if (out) rx->trn1u_ones++;
+    if (rx->trn1u_count == TRN1U_EARLY_CHECK_T)
+        rx->trn1u_ones_early = rx->trn1u_ones;
     return out;
+}
+
+/* The TRN1u sign reference, V.92 8.5.7: the GPA scrambler (6.3, delay taps 5
+ * and 23) initialised to zero and fed binary ones, output 0 -> +L_U.  Element
+ * k is +1 or -1 for TRN1u symbol k. */
+static void trn1u_reference(int8_t *ref, int n)
+{
+    uint32_t reg = 0;
+
+    for (int k = 0; k < n; k++) {
+        int b = 1 ^ (int)((reg >> 4) & 1) ^ (int)((reg >> 22) & 1);
+        reg = (reg << 1) | (uint32_t)b;
+        ref[k] = b ? -1 : 1;
+    }
+}
+
+/*
+ * Locate TRN1u's first symbol in ja_buf by correlation against the known
+ * reference (see TRN1U_ALIGN_*).  Moves trn1u_start, records the score and
+ * the line polarity, and replays the descrambler from the new start so the
+ * TRN1u counters describe TRN1u and not uR.  The aligned start is also
+ * 9.5.1.1.10's modulo-12 frame origin for the second TRN1u.
+ */
+static void trn1u_align(v92_p3_rx_t *rx)
+{
+    int8_t ref[TRN1U_ALIGN_LEN];
+    int nominal = rx->trn1u_nominal_start;
+    int best_d = 0;
+    int best_c = 0;
+    int start;
+
+    trn1u_reference(ref, TRN1U_ALIGN_LEN);
+    for (int d = -TRN1U_ALIGN_SPAN; d <= TRN1U_ALIGN_SPAN; d++) {
+        int off = nominal + d - rx->ja_buf_base;
+        int c = 0;
+
+        if (off < 0 || off + TRN1U_ALIGN_LEN > rx->ja_buf_fill)
+            continue;
+        for (int k = 0; k < TRN1U_ALIGN_LEN; k++)
+            c += (sign_bit(rx->ja_buf[off + k]) ? 1 : -1)*ref[k];
+        if (abs(c) > abs(best_c)) {
+            best_c = c;
+            best_d = d;
+        }
+    }
+    rx->trn1u_align_done = true;
+    rx->trn1u_align_score_x1000 = abs(best_c)*1000/TRN1U_ALIGN_LEN;
+    if (rx->trn1u_align_score_x1000 < TRN1U_ALIGN_MIN_X1000) {
+        rx->trn1u_align_offset = 0;
+        rx->trn1u_inverted = false;
+    } else {
+        rx->trn1u_align_offset = best_d;
+        rx->trn1u_inverted = best_c < 0;
+    }
+    rx->trn1u_start = nominal + rx->trn1u_align_offset;
+
+    /* Replay from the aligned start.  At the true start the zero register is
+     * the transmitter's own initial state, so a clean TRN1u descrambles to
+     * ones from its first symbol. */
+    rx->gpa_reg = 0;
+    rx->trn1u_count = 0;
+    rx->trn1u_ones = 0;
+    start = rx->trn1u_start - rx->ja_buf_base;
+    for (int i = start; i < rx->ja_buf_fill; i++)
+        (void) trn1u_process(rx, rx->ja_buf[i]);
+
+    if (p3rx_debug_enabled()) {
+        fprintf(stderr,
+                "[P3RX] trn1u aligned start=%d nominal=%d offset=%+d score=%d.%03d%s\n",
+                rx->trn1u_start, nominal, rx->trn1u_align_offset,
+                rx->trn1u_align_score_x1000/1000,
+                rx->trn1u_align_score_x1000%1000,
+                rx->trn1u_inverted ? " inverted" : "");
+    }
 }
 
 static bool trn1u_ones_ok_at_count(const v92_p3_rx_t *rx, int count)
 {
+    if (rx && count == TRN1U_EARLY_CHECK_T && rx->trn1u_align_done)
+        return rx->trn1u_ones_early*100 >= count*TRN1U_ONES_MIN_PCT;
     if (!rx || count <= 0 || rx->trn1u_count < count)
         return false;
     return (rx->trn1u_ones * 100 >= count * TRN1U_ONES_MIN_PCT);
@@ -371,130 +464,6 @@ static inline int gpa_descramble_t4_bit(uint32_t *reg, int in_bit)
     int out = (in_bit ^ (int) (*reg >> 22) ^ (int) (*reg >> 4)) & 1;
     *reg = ((*reg << 1) | (uint32_t) (in_bit & 1)) & 0x7FFFFFU;
     return out;
-}
-
-static int trn1u_ones_pct_from_result(const p3_result_t *r,
-                                      int trn_start_sample,
-                                      int payload_symbols)
-{
-    int start_sym = -1;
-    int best_pct = -1;
-
-    if (!r || !r->symbols || r->symbol_count <= 0 || payload_symbols <= 0)
-        return -1;
-
-    for (int i = 0; i < r->symbol_count; i++) {
-        if (r->symbols[i].sample_index >= trn_start_sample) {
-            start_sym = i;
-            break;
-        }
-    }
-    if (start_sym < 0)
-        return -1;
-
-    {
-        int available = r->symbol_count - start_sym;
-        int history = 23;
-        if (available <= history)
-            return -1;
-        if (payload_symbols > available - history)
-            payload_symbols = available - history;
-    }
-
-    /*
-     * Evaluate both differential-bit mappings from dibit and both polarity
-     * inversions. Pick the strongest one-rate.
-     */
-    for (int map = 0; map < 2; map++) {
-        for (int inv = 0; inv < 2; inv++) {
-            uint32_t reg = 0;
-            int ones = 0;
-            int total = payload_symbols;
-
-            for (int i = 0; i < 23; i++) {
-                int d = r->symbols[start_sym + i].dibit & 3;
-                int raw = (map == 0) ? ((d >> 1) & 1) : (d & 1);
-                raw ^= inv;
-                (void) gpa_descramble_t4_bit(&reg, raw);
-            }
-            for (int i = 0; i < payload_symbols; i++) {
-                int d = r->symbols[start_sym + 23 + i].dibit & 3;
-                int raw = (map == 0) ? ((d >> 1) & 1) : (d & 1);
-                raw ^= inv;
-                ones += gpa_descramble_t4_bit(&reg, raw);
-            }
-
-            {
-                int pct = (ones * 100 + total / 2) / total;
-                if (pct > best_pct)
-                    best_pct = pct;
-            }
-        }
-    }
-
-    return best_pct;
-}
-
-static int trn1u_demod_best_ones_pct(const v92_p3_rx_t *rx, int trn_symbols)
-{
-    int eval_total;
-    int best_pct = -1;
-    p3_hypothesis_t hyps[TRN1U_DEMOD_MAX_HYP];
-
-    if (!rx || trn_symbols <= 64)
-        return -1;
-    if (rx->ja_buf_fill < 24 + trn_symbols)
-        return -1;
-
-    eval_total = 23 + trn_symbols;
-
-    for (int law = 0; law < 2; law++) {
-        int16_t *lin = (int16_t *) malloc((size_t) eval_total * sizeof(int16_t));
-        int count;
-
-        if (!lin)
-            return best_pct;
-
-        for (int i = 0; i < eval_total; i++) {
-            uint8_t cw = rx->ja_buf[i];
-            lin[i] = (int16_t) (law ? alaw_to_linear(cw) : ulaw_to_linear(cw));
-        }
-
-        count = p3_scan_all_hypotheses(lin,
-                                       eval_total,
-                                       rx->ja_buf_base,
-                                       8000,
-                                       hyps,
-                                       TRN1U_DEMOD_MAX_HYP);
-        if (p3rx_debug_enabled()) {
-            fprintf(stderr,
-                    "[P3RX] demod_ja_search law=%s eval_total=%d hyps=%d base=%d trn_start=%d\n",
-                    law ? "alaw" : "ulaw",
-                    eval_total,
-                    count,
-                    rx->ja_buf_base,
-                    rx->trn1u_start);
-        }
-        for (int hi = 0; hi < count; hi++) {
-            p3_result_t *r = p3_demod_run(lin,
-                                          eval_total,
-                                          rx->ja_buf_base,
-                                          hyps[hi].baud_code,
-                                          hyps[hi].carrier_sel,
-                                          8000);
-            int pct;
-            if (!r)
-                continue;
-            pct = trn1u_ones_pct_from_result(r, rx->trn1u_start, trn_symbols);
-            if (pct > best_pct)
-                best_pct = pct;
-            p3_result_free(r);
-        }
-
-        free(lin);
-    }
-
-    return best_pct;
 }
 
 static int unpacked_ones_pct(const uint8_t *bits, int count)
@@ -905,9 +874,20 @@ static void enter_trn1u(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
     bool soft_path = rx->p6_soft_mode;
 
     rx->trn1u_start = sample_index;
-    copied = prehist_copy_tail(rx, 23, rx->ja_buf, &base_sample);
+    rx->trn1u_nominal_start = sample_index;
+    rx->trn1u_align_done = false;
+    rx->trn1u_align_offset = 0;
+    rx->trn1u_align_score_x1000 = 0;
+    rx->trn1u_inverted = false;
+    rx->trn1u_ones_early = 0;
+    rx->early_check_due = false;
+    /* Enough history for the alignment to look TRN1U_ALIGN_SPAN symbols back,
+     * plus the 24 the Ja search's differential/GPA decode reaches behind. */
+    copied = prehist_copy_tail(rx, TRN1U_ALIGN_SPAN + 24, rx->ja_buf,
+                               &base_sample);
     rx->ja_buf_base = (copied > 0) ? base_sample : rx->trn1u_start;
     rx->ja_buf_fill = copied;
+    rx->ja_buf_lead = copied > 23 ? copied - 23 : 0;
     rx->gpa_reg      = 0;
     rx->diff_valid   = false;
     rx->trn1u_count  = 0;
@@ -1381,7 +1361,6 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
     case V92_P3_RX_TRN1U:
     {
         int trn_min_t = rx->p6_soft_mode ? TRN1U_MIN_SOFT_T : V92_P3_RX_TRN1U_MIN_T;
-        int trn_ones_min_pct = rx->p6_soft_mode ? TRN1U_ONES_MIN_PCT_SOFT : TRN1U_ONES_MIN_PCT;
         int ja_lead_t = rx->p6_soft_mode ? JA_LEAD_SOFT_T : V92_P3_RX_JA_LEAD_T;
         /* Buffer every codeword from trn1u_start − 23 onwards. */
         if (sample_index >= rx->ja_buf_base)
@@ -1389,52 +1368,52 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
 
         trn1u_process(rx, codeword);
 
+        /* Find the true start once the whole correlation window has
+         * arrived, before anything judges TRN1u. */
+        if (!rx->trn1u_align_done
+            && sample_index >= rx->trn1u_nominal_start + TRN1U_ALIGN_SPAN
+                               + TRN1U_ALIGN_LEN - 1) {
+            trn1u_align(rx);
+            if (rx->trn1u_count >= TRN1U_EARLY_CHECK_T)
+                rx->early_check_due = true;
+        }
+
         /*
          * TRN1u (V.92 §8.5.7) is an all-ones training source through the GPA
          * scrambler with absolute signs. If descrambled bits are not strongly
-         * one-biased, this lock is likely wrong.
+         * one-biased, this lock is likely wrong.  m0 is the ones percentage,
+         * m1 the start alignment's correlation score in per mille.
+         *
+         * There used to be an "equalised" fallback here: p3_demod, a V.34
+         * passband demodulator, run over 24 hypotheses.  It cannot apply to
+         * baseband PCM, and it never ran -- it needed one more codeword of
+         * history than enter_trn1u() ever buffered, so it returned -1 on
+         * every call.  The deeper alignment history would have woken it up,
+         * and it then "passed" 73% on the fixture's false lock at 18222.
+         * Removed; plan step 5 replaces this metric.
          */
-        if (rx->trn1u_count == TRN1U_EARLY_CHECK_T
-            && !trn1u_ones_ok_at_count(rx, TRN1U_EARLY_CHECK_T)) {
-            int eq_pct = trn1u_demod_best_ones_pct(rx, TRN1U_EARLY_CHECK_T);
-            if (p3rx_debug_enabled()) {
-                int raw_pct = (rx->trn1u_count > 0)
-                    ? ((rx->trn1u_ones * 100 + rx->trn1u_count / 2) / rx->trn1u_count)
-                    : 0;
-                fprintf(stderr,
-                        "[P3RX] sample=%d trn1u early check raw=%d%% eq=%d%% min=%d%% soft=%d\n",
-                        sample_index, raw_pct, eq_pct, trn_ones_min_pct, rx->p6_soft_mode ? 1 : 0);
-            }
-            if (eq_pct < trn_ones_min_pct) {
-                int raw_pct = (rx->trn1u_count > 0)
-                    ? ((rx->trn1u_ones * 100 + rx->trn1u_count / 2) / rx->trn1u_count)
-                    : 0;
+        if (rx->early_check_due) {
+            rx->early_check_due = false;
+            if (!trn1u_ones_ok_at_count(rx, TRN1U_EARLY_CHECK_T)) {
+                /* Ones over the first 256 symbols from the aligned start. */
+                int raw_pct = (rx->trn1u_ones_early*100 + TRN1U_EARLY_CHECK_T/2)
+                            / TRN1U_EARLY_CHECK_T;
+
                 p6_rehunt_from_current(rx, codeword, sample_index,
                                        V92_P3_RX_REJECT_TRN1U_ONES_LOW,
-                                       raw_pct, eq_pct);
+                                       raw_pct, rx->trn1u_align_score_x1000);
                 break;
             }
         }
         if (rx->trn1u_count == trn_min_t
             && !trn1u_ones_ok_at_count(rx, trn_min_t)) {
-            int eq_pct = trn1u_demod_best_ones_pct(rx, trn_min_t);
-            if (p3rx_debug_enabled()) {
-                int raw_pct = (rx->trn1u_count > 0)
-                    ? ((rx->trn1u_ones * 100 + rx->trn1u_count / 2) / rx->trn1u_count)
-                    : 0;
-                fprintf(stderr,
-                        "[P3RX] sample=%d trn1u min check raw=%d%% eq=%d%% min=%d%% soft=%d\n",
-                        sample_index, raw_pct, eq_pct, trn_ones_min_pct, rx->p6_soft_mode ? 1 : 0);
-            }
-            if (eq_pct < trn_ones_min_pct) {
-                int raw_pct = (rx->trn1u_count > 0)
-                    ? ((rx->trn1u_ones * 100 + rx->trn1u_count / 2) / rx->trn1u_count)
-                    : 0;
-                p6_rehunt_from_current(rx, codeword, sample_index,
-                                       V92_P3_RX_REJECT_TRN1U_ONES_LOW,
-                                       raw_pct, eq_pct);
-                break;
-            }
+            int raw_pct = (rx->trn1u_ones*100 + rx->trn1u_count/2)
+                        / rx->trn1u_count;
+
+            p6_rehunt_from_current(rx, codeword, sample_index,
+                                   V92_P3_RX_REJECT_TRN1U_ONES_LOW,
+                                   raw_pct, rx->trn1u_align_score_x1000);
+            break;
         }
 
         if (rx->ja_buf_fill >= V92_P3_RX_JA_BUF) {
@@ -1459,13 +1438,19 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
     case V92_P3_RX_JA_SEARCH:
     {
         int ready_hard = 24 + V92_P3_RX_TRN1U_MIN_T + V92_P3_RX_JA_LEAD_T + 207;
+        int fill;
+
         ja_buf_push(rx, codeword, sample_index);
+        /* Count from the 23-symbol seed the buffer used to start with, so the
+         * deeper history the TRN1u alignment needs does not move the search
+         * cadence -- and with it the instant Ja is declared and Sd starts. */
+        fill = rx->ja_buf_fill - rx->ja_buf_lead;
 
         /* V.92 9.5.1.1.3 requires the received Table-20 descriptor.
          * A repaired CRC or a soft candidate is never a receive event.
          * Keep collecting until a whole descriptor is available, including
          * long descriptors; a single early failed probe is not a timeout. */
-        if (rx->ja_buf_fill >= ready_hard && (rx->ja_buf_fill-ready_hard)%144 == 0) {
+        if (fill >= ready_hard && (fill-ready_hard)%144 == 0) {
             if (run_ja_search(rx, true) && rx->ja_result.ok && rx->ja_result.parsed_v92) {
                 rx->last_reject = V92_P3_RX_REJECT_NONE;
                 rx->ja_found = true;
