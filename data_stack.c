@@ -456,7 +456,21 @@ int ds_tx_get_bit(data_stack_t *s)
     int bit;
 
     if (s->framing == DS_FRAMING_V42)
-        return s->v42 ? v42_tx_bit(s->v42) : 1;
+    {
+        /* Opt-in wire diagnostic, paired with DS_RX_BIT_DUMP. It includes
+           credentials; use only test accounts. One bit per ASCII byte. */
+        static FILE *dump;
+        static bool tried;
+        if (!tried)
+        {
+            const char *path = getenv("DS_TX_BIT_DUMP");
+            tried = true;
+            if (path && *path) dump = fopen(path, "w");
+        }
+        bit = s->v42 ? v42_tx_bit(s->v42) : 1;
+        if (dump) fputc(bit ? '1' : '0', dump);
+        return bit;
+    }
     if (s->framing == DS_FRAMING_V14 && s->tx_bits == 0
         && s->tx_mark_bits > 0) {
         s->tx_mark_bits--;

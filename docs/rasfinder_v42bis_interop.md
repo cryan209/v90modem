@@ -156,3 +156,46 @@ old workspace sources, so its purported fixed live test did not run these
 changes and must not count as validation. Subsequent archives were created
 inside the normal workspace context, transferred separately, and all three
 source SHA-256 hashes matched on Tower before compiling and running tests.
+
+### Both-direction wire capture and line termination
+
+`DS_TX_BIT_DUMP` now provides opt-in ASCII transmit bits alongside the
+existing RX tap, allowing independent HDLC/FCS verification beyond the
+DTE/compressor boundary. Like the payload diagnostic, it includes test
+credentials and is disabled unless a path is provided.
+
+The paced CRLF call under `xid-validation/paced` contains 21 valid frames
+in each direction, with zero bad FCS and zero malformed frames. Outgoing
+I-frame payloads spell `bbs\r\n` twice, with consecutive sequence numbers.
+The peer acknowledges them and sends `Invalid Password!!!`. Outgoing
+ordinary I-frame acknowledgements have F=0; the acknowledgement to the
+peer's P=1 poll has F=1. This verifies the corrected P/F behavior on an
+actual call, beyond the offline regression.
+
+A separate LF-only username was echoed without advancing the prompt.
+Completing it with CR produced `Invalid User Name!!!`; LF is therefore not
+an interchangeable delimiter in this terminal session. CRLF introduces
+an additional input byte, so its password rejection is not a clean
+CR-only authentication result. The next control is paced CR only.
+
+A fresh independent SmartLink-to-RasFinder call with a 12000 bit/s V.34
+cap, DM_TX_GAIN=4 and the previously documented resampler/headroom passed
+initial negotiation but retrained and returned NO CARRIER before data.
+It provides no independent authentication outcome.
+
+The paced CR-only capture is `xid-validation/paced-cr`. Its transmitted
+wire has 30 CRC-valid frames and no bad FCS or malformed frames; independent
+extraction spells `bbs\r`, `bbs\r`, then an extra `\r` after 30 seconds.
+The peer acknowledges all nine per-byte I frames and returns a CRC-valid
+`Invalid Password!!!` after the extra CR. It still does not respond
+immediately to the first password CR. RX has 28 valid frames, one bad-FCS
+candidate and 43 malformed candidates over the full capture, including its
+later disconnect; do not describe this entire receive stream as error free.
+No LF was present in this test, so the CRLF result is not the sole reason
+for the rejection. The user confirms the RasFinder account also uses bbs/bbs.
+
+An attempted read-only opening of Remote User Database was rejected before
+execution by automatic approval review because administrative access had not
+been authorized. No management authentication or settings changes occurred.
+Further account/terminal-server inspection requires explicit administrative
+authorization and any configured management credentials.
