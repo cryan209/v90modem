@@ -15,6 +15,8 @@
 
 #include <spandsp.h>
 
+#include "v34_line_ec.h"
+
 #define BLOCK_SAMPLES 160
 #define MAX_BLOCKS 3000       /* 60 seconds at 8 kHz */
 #define PAYLOAD_BITS 16000
@@ -195,6 +197,99 @@ static int16_t add_noise(int16_t sample)
     return (int16_t) v;
 }
 
+/* V34_DUPLEX_DELAY=<samples> puts the same one-way bulk delay in both
+   directions.  Acquisition here is sensitive to where symbol boundaries fall
+   against the 8 kHz grid, so a single run of a marginal row is one draw of a
+   coin; sweeping the delay turns a row into a pass rate. */
+#define CHANNEL_DELAY_MAX 4096
+static int16_t channel_delay(int dir, int16_t sample)
+{
+    static int delay = -1;
+    static int16_t line[2][CHANNEL_DELAY_MAX];
+    static int pos[2];
+    int16_t out;
+
+    if (delay < 0) {
+        const char *value = getenv("V34_DUPLEX_DELAY");
+        delay = (value && *value) ? atoi(value) : 0;
+        if (delay < 0) delay = 0;
+        if (delay >= CHANNEL_DELAY_MAX) delay = CHANNEL_DELAY_MAX - 1;
+    }
+    if (delay == 0)
+        return sample;
+    out = line[dir][pos[dir]];
+    line[dir][pos[dir]] = sample;
+    if (++pos[dir] >= delay)
+        pos[dir] = 0;
+    return out;
+}
+
+/* Near-end hybrid echo.  V34_DUPLEX_ECHO_DB=<return loss> returns each
+   side's own transmission to its own receiver through a three-tap hybrid
+   (three taps, so a canceller cannot pass by being a pure delay and gain)
+   after V34_DUPLEX_ECHO_DELAY samples of bulk delay (default 2136, the
+   267 ms measured on the VG224 path to the RasFinder).  It is added before
+   the codec, as the far ATA's hybrid does.  V34_DUPLEX_ECHO_SIDE=caller or
+   answer restricts it to one side.  The engine's line echo canceller
+   (v34_line_ec.c) runs in front of each receiver exactly as modem_engine.c
+   runs it; V34_DUPLEX_LEC=0 removes it. */
+#define ECHO_RING 8192
+typedef struct {
+    float gain;
+    int delay;
+    bool on;
+    int16_t ring[ECHO_RING];
+    uint32_t pos;
+} echo_path_t;
+static const float hybrid_taps[3] = {0.80f, -0.45f, 0.25f};
+static echo_path_t echo_path[2];   /* [0] answer side, [1] caller side */
+
+static void echo_init(void)
+{
+    const char *db = getenv("V34_DUPLEX_ECHO_DB");
+    const char *dl = getenv("V34_DUPLEX_ECHO_DELAY");
+    const char *side = getenv("V34_DUPLEX_ECHO_SIDE");
+    float p = 0.0f;
+
+    for (int i = 0; i < 3; i++)
+        p += hybrid_taps[i]*hybrid_taps[i];
+    for (int d = 0; d < 2; d++) {
+        memset(&echo_path[d], 0, sizeof(echo_path[d]));
+        if (!db || !*db)
+            continue;
+        if (side && strcmp(side, d ? "caller" : "answer") != 0
+            && strcmp(side, "both") != 0)
+            continue;
+        echo_path[d].on = true;
+        echo_path[d].gain = powf(10.0f, -strtof(db, NULL)/20.0f)/sqrtf(p);
+        echo_path[d].delay = (dl && *dl) ? atoi(dl) : 2136;
+        if (echo_path[d].delay < 3) echo_path[d].delay = 3;
+        if (echo_path[d].delay > ECHO_RING - 4) echo_path[d].delay = ECHO_RING - 4;
+    }
+}
+
+/* Feed one of this side's transmitted samples; return the echo arriving now. */
+static float echo_step(int d, int16_t tx)
+{
+    echo_path_t *e = &echo_path[d];
+    float v = 0.0f;
+
+    if (!e->on)
+        return 0.0f;
+    e->ring[e->pos & (ECHO_RING - 1)] = tx;
+    for (int k = 0; k < 3; k++)
+        v += hybrid_taps[k]*e->ring[(e->pos - (uint32_t) e->delay - (uint32_t) k) & (ECHO_RING - 1)];
+    e->pos++;
+    return v*e->gain;
+}
+
+static int16_t sat16(float v)
+{
+    if (v > 32767.0f) return 32767;
+    if (v < -32768.0f) return -32768;
+    return (int16_t) lrintf(v);
+}
+
 static int16_t g711_roundtrip(int16_t sample, bool alaw)
 {
     sample = add_noise(sample);
@@ -241,6 +336,10 @@ static int run_case(int baud, int bps, bool alaw)
     int completed_block = -1;
     int max_blocks = getenv("V34_DUPLEX_BLOCKS")
                    ? atoi(getenv("V34_DUPLEX_BLOCKS")) : MAX_BLOCKS;
+    /* V34_DUPLEX_PAYLOAD lengthens the run: the data mode's own SNR report
+       needs 4096 symbols, more than PAYLOAD_BITS reaches at high rates. */
+    int payload_bits = getenv("V34_DUPLEX_PAYLOAD")
+                     ? atoi(getenv("V34_DUPLEX_PAYLOAD")) : PAYLOAD_BITS;
     /* V.34 11.6 exercise.  V34_DUPLEX_RENEG=<bits> runs normally until both
        directions have carried that many payload bits, then has the CALLER
        initiate a rate renegotiation (11.6.1.1) and leaves the answerer to
@@ -259,6 +358,12 @@ static int run_case(int baud, int bps, bool alaw)
     bool caller_resynced = false;
     bool answer_resynced = false;
 
+    static v34_line_ec_t lec[2];
+    bool use_lec = !(getenv("V34_DUPLEX_LEC") && strcmp(getenv("V34_DUPLEX_LEC"), "0") == 0);
+
+    echo_init();
+    v34_line_ec_reset(&lec[0]);
+    v34_line_ec_reset(&lec[1]);
     if (reneg_at > 0) {
         /* The responder's S detector is opt-in, for the reasons in
            docs/retrain_and_resync.md.  This harness is what exercises it. */
@@ -329,6 +434,26 @@ static int run_case(int baud, int bps, bool alaw)
             memset(answer_tx + answer_n, 0,
                    (size_t)(BLOCK_SAMPLES - answer_n)*sizeof(answer_tx[0]));
         }
+        {
+            /* V34_DUPLEX_TX_WAV=<path>: raw 8 kHz int16 of what each side put
+               on the line, <path>.caller / <path>.answer, so the transmitter
+               can be graded offline without the receiver in the loop. */
+            static FILE *wav[2];
+            static int wav_init;
+            if (!wav_init) {
+                const char *p = getenv("V34_DUPLEX_TX_WAV");
+                char q[1024];
+                wav_init = 1;
+                if (p && *p) {
+                    snprintf(q, sizeof(q), "%s.caller", p);
+                    wav[1] = fopen(q, "wb");
+                    snprintf(q, sizeof(q), "%s.answer", p);
+                    wav[0] = fopen(q, "wb");
+                }
+            }
+            if (wav[1]) fwrite(call_tx, sizeof(int16_t), BLOCK_SAMPLES, wav[1]);
+            if (wav[0]) fwrite(answer_tx, sizeof(int16_t), BLOCK_SAMPLES, wav[0]);
+        }
         for (int i = 0; i < BLOCK_SAMPLES; i++) {
             int call_abs = abs(call_tx[i]);
             int answer_abs = abs(answer_tx[i]);
@@ -336,8 +461,10 @@ static int run_case(int baud, int bps, bool alaw)
             if (answer_abs > answer.peak_sample) answer.peak_sample = (int16_t)answer_abs;
             if (call_abs >= 32760) caller.clipped_samples++;
             if (answer_abs >= 32760) answer.clipped_samples++;
-            answer_rx[i] = g711_roundtrip(call_tx[i], alaw);
-            call_rx[i] = g711_roundtrip(answer_tx[i], alaw);
+            answer_rx[i] = g711_roundtrip(sat16(channel_delay(0, call_tx[i])
+                                                + echo_step(0, answer_tx[i])), alaw);
+            call_rx[i] = g711_roundtrip(sat16(channel_delay(1, answer_tx[i])
+                                              + echo_step(1, call_tx[i])), alaw);
         }
         if (getenv("V34_DUPLEX_TXRMS")) {
             double ca = 0.0, aa = 0.0;
@@ -351,6 +478,47 @@ static int run_case(int baud, int bps, bool alaw)
             fprintf(stderr, "[TXRMS] t=%.3f caller_rms=%.0f peak=%d answer_rms=%.0f peak=%d\n",
                     block*0.020, sqrt(ca/BLOCK_SAMPLES), ci,
                     sqrt(aa/BLOCK_SAMPLES), ai);
+        }
+        if (getenv("V34_DUPLEX_RXTX_DUMP")) {
+            static FILE *f[4];
+            if (!f[0]) {
+                char q[1024];
+                const char *names[4] = {"answer.rx", "answer.tx", "caller.rx", "caller.tx"};
+                for (int k = 0; k < 4; k++) {
+                    snprintf(q, sizeof(q), "%s.%s", getenv("V34_DUPLEX_RXTX_DUMP"), names[k]);
+                    f[k] = fopen(q, "wb");
+                }
+            }
+            fwrite(answer_rx, 2, BLOCK_SAMPLES, f[0]);
+            fwrite(answer_tx, 2, BLOCK_SAMPLES, f[1]);
+            fwrite(call_rx, 2, BLOCK_SAMPLES, f[2]);
+            fwrite(call_tx, 2, BLOCK_SAMPLES, f[3]);
+        }
+        if (use_lec) {
+            char msg[256];
+            static int prev_echo[2] = {-1, -1};
+            int now_echo[2] = {v34_rx_line_ec_window(answer_modem),
+                               v34_rx_line_ec_window(call_modem)};
+
+            for (int d = 0; d < 2; d++) {
+                if (getenv("V34_DUPLEX_LEC_TRACE") && now_echo[d] != prev_echo[d])
+                    fprintf(stderr, "[LEC %s] t=%.2f echo_only=%d rx_stage=%d tx_stage=%d\n",
+                            d ? "caller" : "answer", block*0.020, now_echo[d],
+                            v34_get_rx_stage(d ? call_modem : answer_modem),
+                            v34_get_tx_stage(d ? call_modem : answer_modem));
+                prev_echo[d] = now_echo[d];
+            }
+
+            v34_line_ec_tx(&lec[0], answer_tx, BLOCK_SAMPLES);
+            v34_line_ec_tx(&lec[1], call_tx, BLOCK_SAMPLES);
+            if (v34_line_ec_rx(&lec[0], answer_rx, BLOCK_SAMPLES,
+                               v34_rx_line_ec_window(answer_modem),
+                               msg, sizeof(msg)) && msg[0])
+                fprintf(stderr, "[LEC answer] t=%.2f %s\n", block*0.020, msg);
+            if (v34_line_ec_rx(&lec[1], call_rx, BLOCK_SAMPLES,
+                               v34_rx_line_ec_window(call_modem),
+                               msg, sizeof(msg)) && msg[0])
+                fprintf(stderr, "[LEC caller] t=%.2f %s\n", block*0.020, msg);
         }
         (void)v34_rx(answer_modem, answer_rx, BLOCK_SAMPLES);
         (void)v34_rx(call_modem, call_rx, BLOCK_SAMPLES);
@@ -427,8 +595,8 @@ static int run_case(int baud, int bps, bool alaw)
         }
 
         if (caller.trained && answer.trained
-            && caller.rx_bits >= PAYLOAD_BITS
-            && answer.rx_bits >= PAYLOAD_BITS) {
+            && caller.rx_bits >= payload_bits
+            && answer.rx_bits >= payload_bits) {
             completed_block = block;
             break;
         }

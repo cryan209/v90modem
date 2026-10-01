@@ -33,7 +33,9 @@
 
 /*! The number of taps in the info data transmit pulse shaping filter */
 #define V34_INFO_TX_FILTER_STEPS            9
-#define V34_TX_FILTER_STEPS                 9
+#define V34_TX_FILTER_STEPS                 21
+/* The primary and control channel modulators share one RRC ring. */
+#define V34_TX_RRC_RING_STEPS               ((V34_TX_FILTER_STEPS > V34_INFO_TX_FILTER_STEPS)  ?  V34_TX_FILTER_STEPS  :  V34_INFO_TX_FILTER_STEPS)
 
 #define V34_RX_FILTER_STEPS                 27
 #define V34_RX_PULSESHAPER_COEFF_SETS       192
@@ -974,13 +976,13 @@ typedef struct
 
 #if defined(SPANDSP_USE_FIXED_POINT)
     /*! \brief The root raised cosine (RRC) pulse shaping filter buffer. */
-    int16_t rrc_filter_re[V34_INFO_TX_FILTER_STEPS];
-    int16_t rrc_filter_im[V34_INFO_TX_FILTER_STEPS];
+    int16_t rrc_filter_re[V34_TX_RRC_RING_STEPS];
+    int16_t rrc_filter_im[V34_TX_RRC_RING_STEPS];
     complexi16_t lastbit;
 #else
     /*! \brief The root raised cosine (RRC) pulse shaping filter buffer. */
-    float rrc_filter_re[V34_INFO_TX_FILTER_STEPS];
-    float rrc_filter_im[V34_INFO_TX_FILTER_STEPS];
+    float rrc_filter_re[V34_TX_RRC_RING_STEPS];
+    float rrc_filter_im[V34_TX_RRC_RING_STEPS];
     complexf_t lastbit;
 #endif
     /*! \brief Current offset into the RRC pulse shaping filter buffer. */

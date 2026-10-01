@@ -8098,7 +8098,7 @@ skip_8k_codewords:
                         char lec_msg[256];
 
                         if (v34_line_ec_rx(&g_lec, filtered, len,
-                                           v34_rx_hearing_own_echo(g_v34),
+                                           v34_rx_line_ec_window(g_v34),
                                            lec_msg, sizeof(lec_msg))
                             && lec_msg[0])
                             ME_LOG("[ME] V.34 %s\n", lec_msg);

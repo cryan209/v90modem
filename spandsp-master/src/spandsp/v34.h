@@ -248,6 +248,17 @@ SPAN_DECLARE(bool) v34_is_duplex(v34_state_t *s);
     \param s The modem context. */
 SPAN_DECLARE(bool) v34_rx_hearing_own_echo(v34_state_t *s);
 
+/*! True while this plain V.34 modem, in EITHER role, is sending its own
+    Phase 3 S-bar, PP and TRN, which V.34 has the far end receive in silence:
+    the answer modem's Phase 3 goes out while the call modem waits for its J,
+    and 11.3.1.2.4 has the answer modem silent through the call modem's.  The
+    window a line echo canceller trains on.  Unlike v34_rx_hearing_own_echo()
+    it does not require the echo to be weak, so a poor hybrid is still
+    trained on; the canceller's own ERLE gate rejects a window the far end
+    was not silent for.  ME_V34_LINE_EC_ANSWER=0 limits it to the call modem.
+    \param s The modem context. */
+SPAN_DECLARE(bool) v34_rx_line_ec_window(v34_state_t *s);
+
 /*! The receive SNR implied by how well the last B1 matched its known
     sequence (10.1.3.1), c^2/(1-c^2) for normalized correlation c.
     \param s The modem context.

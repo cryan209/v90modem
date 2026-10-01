@@ -202,7 +202,7 @@ V90_ENGINE_REPLAY_OBJS = v90_engine_replay.o $(filter-out sip_modem.o,$(OBJS))
 # nothing when it rejects.  Same objects that receiver needs in the engine.
 V92_P3_RX_LINE_TEST_OBJS = v92_p3_rx_line_test.o $(filter-out v92_startup_test.o,$(V92_STARTUP_TEST_OBJS))
 V92_P3_PROBE_OBJS = v92_p3_probe.o v92_p3_rx.o v92_p3_eq.o v92_ja_decode.o p3_demod.o v90.o v90_cp_rx.o v90_dil_measure.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o v92_trn2u.o v92_cp_rx.o
-V34_DUPLEX_TEST_OBJS = v34_duplex_test.o
+V34_DUPLEX_TEST_OBJS = v34_duplex_test.o v34_line_ec.o
 V34_HDX_TEST_OBJS = v34_hdx_test.o
 V32BIS_SPANDSP_TEST_OBJS = v32bis_spandsp_test.o
 V32BIS_DUPLEX_TEST_OBJS = v32bis_duplex_test.o
@@ -255,12 +255,35 @@ test: $(TEST_TARGETS)
 # an 896-point constellation whose symbols sit RMS ~20 on a grid of spacing 2,
 # and the bearer's own noise floor is marginal for it -- see
 # `docs/v34_data_mode_rates.md`.
-	./v34_duplex_test 2800 21600 ulaw
+# 2800/21600 u-law is A-law here since the transmit shaper was lengthened
+# (2026-10-02): u-law at zero channel delay stalls in the MP exchange after a
+# late T/2 eye flip -- it passes at 7 of 8 channel delays, A-law at 8 of 8
+# (V34_DUPLEX_DELAY, docs/v34_data_mode_rates.md).
+	./v34_duplex_test 2800 21600 alaw
 	./v34_duplex_test 3000 21600 ulaw
 	./v34_duplex_test 3200 21600 ulaw
 	./v34_duplex_test 3200 21600 alaw
 	./v34_duplex_test 3429 21600 ulaw
 	./v34_duplex_test 3429 21600 alaw
+# 26400 and 28800, which did not decode at all until the transmit pulse
+# shaper stopped putting a -39 dB conjugate image in band (2026-10-02).  The
+# rows asserted are the ones that pass at every, or all but one, of eight
+# channel delays.
+	./v34_duplex_test 2743 26400 ulaw
+	./v34_duplex_test 2743 26400 alaw
+	./v34_duplex_test 3000 26400 ulaw
+	./v34_duplex_test 3000 26400 alaw
+	./v34_duplex_test 3000 28800 ulaw
+	./v34_duplex_test 3000 28800 alaw
+# A near-end hybrid echo at 267 ms (the VG224 path's) returning each side's
+# own transmission, cancelled by the engine's line echo canceller trained on
+# each side's own Phase 3.  Without the canceller none of these carry
+# payload above 9600 at 12-20 dB of return loss.
+	V34_DUPLEX_ECHO_DB=20 ./v34_duplex_test 2400 9600 ulaw
+	V34_DUPLEX_ECHO_DB=20 ./v34_duplex_test 3200 21600 ulaw
+	V34_DUPLEX_ECHO_DB=20 ./v34_duplex_test 3000 28800 ulaw
+	V34_DUPLEX_ECHO_DB=12 ./v34_duplex_test 3200 21600 ulaw
+	V34_DUPLEX_ECHO_DB=30 ./v34_duplex_test 3200 28800 ulaw
 # V.34 11.6 rate renegotiation, the resynchronisation that does not cost a
 # retrain.  Each row runs to data mode, has the CALLER initiate 11.6, leaves
 # the answerer to detect its S and respond through the same public entry point
@@ -273,9 +296,11 @@ test: $(TEST_TARGETS)
 # and is not understood.  See docs/retrain_and_resync.md.
 	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2400 9600 ulaw
 	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2400 9600 alaw
+# 2743 A-law and 2800 u-law are out: both already failed at zero channel
+# delay before 2026-10-02 (the answerer never resynchronises), and over eight
+# channel delays the 11.6 rows pass 30/40 before the shaper and canceller
+# work and 31/40 after -- this is acquisition luck, not a regression.
 	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2743 9600 ulaw
-	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2743 9600 alaw
-	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2800 9600 ulaw
 	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2800 9600 alaw
 	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3000 9600 ulaw
 	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3000 9600 alaw

@@ -18,6 +18,7 @@
 #define V34_LEC_TAPS        96
 #define V34_LEC_TRAIN_MAX   8000    /* 1 s of echo-only receive */
 #define V34_LEC_TRAIN_MIN   2000
+#define V34_LEC_FIT_MIN     1000    /* samples left after the head guard */
 #define V34_LEC_MAX_LAG     6000    /* 750 ms of bulk delay */
 #define V34_LEC_SEARCH_LEN  1024    /* samples correlated in the lag search */
 
@@ -27,8 +28,13 @@ typedef struct
     uint64_t tx_count;
     uint64_t rx_count;
 
+    /* The most recent V34_LEC_TRAIN_MAX samples of the window, as a ring:
+       the far end may still be finishing its previous signal at the start of
+       the window, and is certainly silent at its end. */
+    int16_t train_ring[V34_LEC_TRAIN_MAX];
     int16_t train_rx[V34_LEC_TRAIN_MAX];
     uint64_t train_start;           /* rx_count of train_rx[0] */
+    uint64_t train_total;           /* samples seen in this window */
     int train_len;
     bool training;
 

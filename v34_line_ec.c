@@ -106,7 +106,9 @@ static void fit(v34_line_ec_t *ec, char *log, size_t log_len)
     static double r[V34_LEC_TAPS*V34_LEC_TAPS];
     double p[V34_LEC_TAPS];
     double x[V34_LEC_TAPS];
-    double ac[V34_LEC_TAPS];
+    double xv[V34_LEC_TAPS];
+    double trace;
+    int first;
     const int n_train = ec->train_len;
     const int half = V34_LEC_TAPS/2;
     const int s0 = n_train - V34_LEC_SEARCH_LEN;
@@ -138,35 +140,75 @@ static void fit(v34_line_ec_t *ec, char *log, size_t log_len)
     }
     if (lag < 0)
         return;
-    /* Least squares over the whole window.  Toeplitz normal equations from
-       the transmit autocorrelation: the window is 20-80 times the filter
-       length, where the end effects this ignores are negligible. */
+    /* Least squares over the whole window, on the exact covariance matrix.
+       The Toeplitz shortcut this replaces -- one lag product summed over the
+       window, standing in for every (j, k) pair at that lag -- is not
+       guaranteed positive definite, and on Phase 3's S and PP, which are
+       line spectra, it was not: the fit at the right bulk delay failed as
+       singular and the call ran with no canceller.  The covariance of real
+       data is positive semi-definite by construction, and the diagonal
+       loading makes it definite whatever the transmit spectrum. */
+    /* What arrives in the first round trip of the window can still carry the
+       far end: it stops only once it has heard our S, and its last sample
+       then takes a one-way trip to reach us.  The echo's bulk delay IS that
+       round trip when the hybrid is at the far end, so fit only on what
+       arrived at least one bulk delay (plus 30 ms for its S detector) after
+       the window opened.  Measured in v34_duplex_test: the call modem's
+       window opened on 10 ms of the answer modem's J at full level, and
+       including it held the fit to 2.5 dB where the rest of the window
+       supports 35. */
+    first = lag + 240;
+    if (first > n_train - V34_LEC_FIT_MIN)
+        first = n_train - V34_LEC_FIT_MIN;
+    if (first < 0)
+        first = 0;
     base = (int64_t) ec->train_start - lag + half;
-    for (int k = 0;  k < V34_LEC_TAPS;  k++)
+    memset(r, 0, sizeof(r));
+    memset(p, 0, sizeof(p));
+    /* First row and the cross-correlation directly, O(N*L)... */
+    for (int n = first;  n < n_train;  n++)
     {
-        double a = 0.0;
-        double q = 0.0;
+        const double y = ec->train_rx[n];
+        const double x0 = tx_at(ec, base + n);
 
-        for (int n = 0;  n < n_train;  n++)
+        for (int k = 0;  k < V34_LEC_TAPS;  k++)
         {
-            double t0 = tx_at(ec, base + n);
-
-            a += t0*tx_at(ec, base + n - k);
-            q += (double) ec->train_rx[n]*tx_at(ec, base + n - k);
+            xv[k] = tx_at(ec, base + n - k);
+            p[k] += y*xv[k];
+            r[k] += x0*xv[k];
         }
-        ac[k] = a;
-        p[k] = q;
+    }
+    /* ...and the rest by the exact shift recursion, O(L^2):
+       R[j+1][k+1] = R[j][k] + x(first-1-j)x(first-1-k) - x(N-1-j)x(N-1-k),
+       with x(m-j) = tx(base + m - j).  This runs once per Phase 3 inside the
+       media callback, where the direct O(N*L^2) sum (37M products) would be
+       a stall of several frames. */
+    for (int j = 0;  j < V34_LEC_TAPS - 1;  j++)
+    {
+        const double a = tx_at(ec, base + first - 1 - j);
+        const double b = tx_at(ec, base + n_train - 1 - j);
+
+        for (int k = j;  k < V34_LEC_TAPS - 1;  k++)
+            r[(j + 1)*V34_LEC_TAPS + k + 1] = r[j*V34_LEC_TAPS + k]
+                                            + a*tx_at(ec, base + first - 1 - k)
+                                            - b*tx_at(ec, base + n_train - 1 - k);
+    }
+    trace = 0.0;
+    for (int j = 0;  j < V34_LEC_TAPS;  j++)
+    {
+        for (int k = 0;  k < j;  k++)
+            r[j*V34_LEC_TAPS + k] = r[k*V34_LEC_TAPS + j];
+        trace += r[j*V34_LEC_TAPS + j];
     }
     for (int j = 0;  j < V34_LEC_TAPS;  j++)
-        for (int k = 0;  k < V34_LEC_TAPS;  k++)
-            r[j*V34_LEC_TAPS + k] = ac[abs(j - k)] + ((j == k)  ?  1e-6*ac[0] + 1.0  :  0.0);
+        r[j*V34_LEC_TAPS + j] += 1e-6*trace/V34_LEC_TAPS + 1.0;
     if (!chol_solve(r, p, x, V34_LEC_TAPS))
     {
         if (log)
             snprintf(log, log_len, "line echo canceller: fit failed (singular) at lag %d", lag);
         return;
     }
-    for (int n = 0;  n < n_train;  n++)
+    for (int n = first;  n < n_train;  n++)
     {
         double e = ec->train_rx[n];
 
@@ -189,8 +231,8 @@ static void fit(v34_line_ec_t *ec, char *log, size_t log_len)
         snprintf(log, log_len,
                  "line echo canceller: fit %d over %d echo-only samples, bulk delay %d samples "
                  "(%.1f ms), echo rms %.0f -> %.0f (%.1f dB)%s",
-                 ec->fits, n_train, lag, lag/8.0,
-                 sqrt(rx_pow/n_train), sqrt(res_pow/n_train), ec->erle_db,
+                 ec->fits, n_train - first, lag, lag/8.0,
+                 sqrt(rx_pow/(n_train - first)), sqrt(res_pow/(n_train - first)), ec->erle_db,
                  (ec->erle_db >= 6.0f)  ?  ", in force"  :  ", too little echo to cancel; not applied");
     }
 }
@@ -207,15 +249,24 @@ bool v34_line_ec_rx(v34_line_ec_t *ec, int16_t *amp, int len, bool echo_only,
         if (!ec->training)
         {
             ec->training = true;
-            ec->train_len = 0;
-            ec->train_start = ec->rx_count;
+            ec->train_total = 0;
         }
-        for (int i = 0;  i < len  &&  ec->train_len < V34_LEC_TRAIN_MAX;  i++)
-            ec->train_rx[ec->train_len++] = amp[i];
+        /* Recorded before any cancellation below, so a retrain's refit sees
+           the raw echo rather than what an older fit left of it. */
+        for (int i = 0;  i < len;  i++)
+            ec->train_ring[(ec->train_total++) % V34_LEC_TRAIN_MAX] = amp[i];
     }
     else if (ec->training)
     {
         ec->training = false;
+        ec->train_len = (ec->train_total < V34_LEC_TRAIN_MAX)
+                      ?  (int) ec->train_total  :  V34_LEC_TRAIN_MAX;
+        /* rx_count has not yet advanced past this block, so it is the index
+           of the first sample after the window. */
+        ec->train_start = ec->rx_count - (uint64_t) ec->train_len;
+        for (int i = 0;  i < ec->train_len;  i++)
+            ec->train_rx[i] = ec->train_ring[(ec->train_total - (uint64_t) ec->train_len + (uint64_t) i)
+                                             % V34_LEC_TRAIN_MAX];
         if (ec->train_len >= V34_LEC_TRAIN_MIN)
         {
             fit(ec, log, log_len);

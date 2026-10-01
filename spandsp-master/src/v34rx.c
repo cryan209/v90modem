@@ -192,6 +192,7 @@ static double v90_reneg_feed_rms = 0.0;
    produced a lock (see the hint_h line in the MP stage).  ME_V34_J_HINT=0
    withholds it. */
 static bool v34_rx_caller_hearing_own_phase3(v34_rx_state_t *s);
+static bool v34_rx_answerer_sending_own_phase3(v34_rx_state_t *s);
 
 static int v34_p4_trn_dd_start(void)
 {
@@ -6506,6 +6507,20 @@ static __inline__ void cc_symbol_sync(v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* ME_V34_DATA_TIMING_DIAG_FREEZE=1 holds the Godard symbol timing loop for
+   the whole of data mode.  Diagnostic only: it is how the 2026-10-02 work
+   showed the 32 dB data-mode floor at 31200 was not timing jitter. */
+static int v34_data_timing_diag_freeze(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+        cache = (getenv("ME_V34_DATA_TIMING_DIAG_FREEZE") != NULL);
+    /*endif*/
+    return cache;
+}
+/*- End of function --------------------------------------------------------*/
+
 static __inline__ void pri_symbol_sync(v34_rx_state_t *s)
 {
     int i;
@@ -8347,6 +8362,13 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 {
                     goto phase3_training_done;
                 }
+                /*endif*/
+                /* Nor while a duplex answer modem is still sending its own
+                   S-bar, PP and TRN: that PP can only be our own, coming
+                   back through the line echo.  See
+                   v34_rx_answerer_sending_own_phase3(). */
+                if (v34_rx_answerer_sending_own_phase3(s))
+                    goto phase3_training_done;
                 /*endif*/
 
                 acquire_bauds = s->duration;
@@ -11265,7 +11287,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         return;
     }
     /*endif*/
-    if (!v34_rx_caller_hearing_own_phase3_m(s, 8))
+    if (!v34_rx_caller_hearing_own_phase3_m(s, 8)
+        &&  !(s->stage == V34_RX_STAGE_DATA  &&  v34_data_timing_diag_freeze()))
         pri_symbol_sync(s);
     /*endif*/
     eq_sample = equalizer_get(s);
@@ -13955,6 +13978,43 @@ bool v34_rx_caller_awaiting_phase4_s(v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* The answer modem's half of the same thing.  Its J goes out at the end of
+ * its own Phase 3, it "conditions its receiver to detect S", and the S that
+ * comes is the call modem's 11.3.1.1 Phase 3 S -- the same 128T, met by the
+ * same constellation-domain detector and the same 256-symbol eye chooser.
+ * Measured in v34_duplex_test at 3200/21600 against a -30 dB hybrid echo:
+ * the chooser's window straddled the S onset, moved the symbol instant 80 ms
+ * after it began, the alternation count never completed, and the answer
+ * modem went on sending J into the call modem's whole Phase 3 -- which also
+ * wrecked the call modem's echo canceller window.  At -20 dB the window
+ * boundary happened to fall before S and the call trained.  The three-bin
+ * watch fires on it either way.  Armed only while our own J is on the air,
+ * as for the call modem, so our own S cannot be read back through the echo.
+ * ME_V34_P3_S_SPECTRAL_ANSWER=0 restores the constellation detector alone. */
+static bool v34_rx_answerer_awaiting_phase3_s(v34_rx_state_t *s)
+{
+    static int enabled = -1;
+    const v34_state_t *owner;
+
+    if (enabled < 0)
+    {
+        const char *v = getenv("ME_V34_P3_S_SPECTRAL_ANSWER");
+
+        enabled = !(v  &&  strcmp(v, "0") == 0);
+    }
+    /*endif*/
+    if (!enabled
+        ||  s->v90_mode
+        ||  s->calling_party
+        ||  !s->duplex
+        ||  s->stage != V34_RX_STAGE_PHASE3_WAIT_S)
+        return false;
+    /*endif*/
+    owner = (const v34_state_t *) ((const char *) s - offsetof(v34_state_t, rx));
+    return owner->tx.stage == V34_TX_STAGE_J;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* Plain V.34 call modem sending its own Phase 3 (S, S-bar, PP, TRN, J).  V.34
  * 11.3.1.2.4 has the answer modem transmit silence from our S-to-S-bar
  * transition until its Phase 4 S, so everything this receiver hears in that
@@ -13989,6 +14049,45 @@ static int v34_p3_echo_freeze_mask(void)
     }
     /*endif*/
     return mask;
+}
+
+/* The plain V.34 answer modem's own Phase 3.  It goes out first, while the
+   call modem waits in silence for its J (measured in v34_duplex_test: the
+   call modem's transmit is exact zero from the end of INFO1a to the answer
+   modem's J), so whatever the answer modem's receiver hears from its own S
+   to the end of its own TRN is its own echo -- there is nothing else on the
+   line.  On a clean bearer that is silence and the receiver idles; over a
+   hybrid it is a perfectly formed PP, and the receiver acquired it: measured
+   at 2400/9600 against a -30 dB echo, PP "detected" 0.3 s into the answer
+   modem's own transmission, the AGC frozen at the echo's level, and when the
+   call modem's real PP arrived 30 dB louder the conditioning clipped
+   (|z| 25.6), reset the equalizer on every symbol and the call never trained.
+   J is NOT included: the call modem's S may legitimately arrive while the
+   answer modem is still sending J.  Only the PP acquisition is withheld; the
+   other loops are left running, because freezing them too measurably cost
+   2400/21600 its S detection on a clean bearer (15/16 delays -> 7/16).
+   ME_V34_ANSWER_P3_ECHO_GUARD=0 disables. */
+static bool v34_rx_answerer_sending_own_phase3(v34_rx_state_t *s)
+{
+    static int enabled = -1;
+    const v34_state_t *owner;
+
+    if (enabled < 0)
+    {
+        const char *v = getenv("ME_V34_ANSWER_P3_ECHO_GUARD");
+
+        enabled = !(v  &&  strcmp(v, "0") == 0);
+    }
+    /*endif*/
+    if (!enabled  ||  s->v90_mode  ||  s->calling_party  ||  !s->duplex)
+        return false;
+    /*endif*/
+    if (s->stage != V34_RX_STAGE_PHASE3_TRAINING)
+        return false;
+    /*endif*/
+    owner = (const v34_state_t *) ((const char *) s - offsetof(v34_state_t, rx));
+    return owner->tx.stage >= V34_TX_STAGE_FIRST_S
+        &&  owner->tx.stage <= V34_TX_STAGE_TRN;
 }
 
 static bool v34_rx_caller_hearing_own_phase3_m(v34_rx_state_t *s, int what)
@@ -14060,6 +14159,43 @@ SPAN_DECLARE(bool) v34_rx_hearing_own_echo(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(bool) v34_rx_line_ec_window(v34_state_t *s)
+{
+    static int answer_role = -1;
+    const v34_rx_state_t *rx;
+
+    if (!s)
+        return false;
+    /*endif*/
+    if (answer_role < 0)
+    {
+        const char *v = getenv("ME_V34_LINE_EC_ANSWER");
+
+        answer_role = !(v  &&  strcmp(v, "0") == 0);
+    }
+    /*endif*/
+    rx = &s->rx;
+    if (rx->v90_mode  ||  !rx->duplex)
+        return false;
+    /*endif*/
+    if (!rx->calling_party  &&  !answer_role)
+        return false;
+    /*endif*/
+    /* From our S-bar to the end of our TRN.  J is excluded: the far end
+       starts its next signal only once it has received J, so everything
+       before J is guaranteed silent at the far end, while during J the far
+       end's answer may already be arriving.  The call modem additionally
+       must not yet have the answer modem's Phase 4 S. */
+    if (s->tx.stage < V34_TX_STAGE_FIRST_NOT_S  ||  s->tx.stage > V34_TX_STAGE_TRN)
+        return false;
+    /*endif*/
+    if (rx->calling_party  &&  rx->stage != V34_RX_STAGE_PHASE3_WAIT_S)
+        return false;
+    /*endif*/
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v34_rx_watch_phase3_s(v34_rx_state_t *s,
                                   const int16_t amp[],
                                   int len)
@@ -14073,7 +14209,9 @@ static void v34_rx_watch_phase3_s(v34_rx_state_t *s,
     int i;
     int k;
 
-    if (!(v34_phase3_s_spectral_enabled()  ||  v34_rx_caller_awaiting_phase4_s(s))
+    if (!(v34_phase3_s_spectral_enabled()
+          ||  v34_rx_caller_awaiting_phase4_s(s)
+          ||  v34_rx_answerer_awaiting_phase3_s(s))
         ||
         s->stage != V34_RX_STAGE_PHASE3_WAIT_S
         ||

@@ -8956,6 +8956,11 @@ static int tx_v34_modulation(v34_state_t *s, int16_t amp[], int max_len)
     num = s->tx.parms.samples_per_symbol_numerator;
     den = s->tx.parms.samples_per_symbol_denominator;
     shaper = v34_tx_shapers[s->tx.baud_rate];
+    /* The ring is shared with the control channel modulator, whose filter is
+       shorter; an index left over from it is in range, the reverse is not. */
+    if (s->tx.rrc_filter_step >= V34_TX_FILTER_STEPS)
+        s->tx.rrc_filter_step = 0;
+    /*endif*/
     for (sample = 0;  sample < max_len;  sample++)
     {
         if ((s->tx.baud_phase += den) >= num)
@@ -9068,6 +9073,11 @@ static int tx_cc_modulation(v34_state_t *s, int16_t amp[], int max_len)
 
     /* The V.22bis like split band modulator for configuration data and the
        half-duplex control channel. */
+    /* A retrain can arrive here from the primary modulator with a ring index
+       beyond this filter's length. */
+    if (s->tx.rrc_filter_step >= V34_INFO_TX_FILTER_STEPS)
+        s->tx.rrc_filter_step = 0;
+    /*endif*/
     for (sample = 0;  sample < max_len;  sample++)
     {
         if ((s->tx.baud_phase += 3) >= 40)

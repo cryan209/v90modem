@@ -404,3 +404,124 @@ literal `off`.
 
 With that and the echo fix, 3429/16800 runs live at 0.008 from the lattice and
 34.5 dB.
+
+## 26400-33600: the transmitter was the ceiling, then the echo (2026-10-02)
+
+On the bit-exact loopback, with no codec, no noise and no echo
+(`V34_DUPLEX_LINEAR=1`), 3200/31200 carried thousands of bit errors and 3429
+did not decode at 28800 or above.  The data mode measured **32.4 dB** on a
+channel that adds nothing, against the ~37 dB 31200 needs.  The receiver's own
+loops were ruled out one at a time, against the transmitter's symbols
+(`V34_DATA_TX_DUMP` / `V34_DATA_FRAME_DUMP`):
+
+* **not linear ISI** -- a +/-8 or +/-10 symbol least-squares fit of the true
+  symbols to the receiver's output gains 0.2 dB, and lags 10-64 explain ~1% of
+  the residual;
+* **not phase jitter or AGC** -- the residual is isotropic (radial and
+  tangential equal, 35.5 vs 35.2 dB) and its power does not grow with |symbol|;
+* **not timing jitter** -- independent of the local slope, and
+  `ME_V34_DATA_TIMING_DIAG_FREEZE=1` (Godard frozen in data mode) leaves it
+  at 32.4 dB;
+* **not data-mode DD-LMS** -- `ME_V34_DATA_EQ=0` leaves the floor where it
+  is, although it does remove a separate late collapse at 31200 (the ratchet
+  again; with it on, the receiver walks off after ~4 s);
+* **not the receive filter's image** -- a widely-linear fit per period 7
+  (the low carrier's 2fc/baud) gains nothing.
+
+What explained it was a widely-linear fit **per period 5/10 symbols**: 32.1 ->
+37.0 dB.  At 3200 baud both directions were on the 1920 Hz high carrier, where
+2fc - baud = 640 Hz is a fifth of the symbol rate.  That is the signature of a
+**conjugate image in band on the transmit side**: the modulator shapes at
+baseband with one real interpolating filter and takes Re{x e^jwt}, so any
+symbol-rate image the shaper fails to suppress comes back in band mirrored.
+Graded on the transmitted waveform alone (`V34_DUPLEX_TX_WAV`, mixed down,
+81-tap fractionally spaced least squares to the true symbols): **linear 39.4
+dB, widely-linear 59.8 dB**.  The shaper (`make_modem_filter`, V.34 TX) was a
+root raised cosine at 12% excess bandwidth truncated to **9 symbols with no
+window**: -24 dB worst / -38 dB mean stopband beside the band edge.  It is now
+**21 symbols with a Kaiser(4) window**: -63 / -76 dB, ~6 symbols more delay.
+The window's linear ISI is the far end's equalizer's to remove.
+
+Same loopback afterwards: data mode **32.4 -> 41.4 dB**, 3200/31200 error free.
+Over the G.711 bearer, across all six symbol rates x {9600, 21600, 26400,
+28800, 31200, 33600} x both laws x eight channel delays (352 runs,
+`V34_DUPLEX_DELAY`), passes go **207 -> 251** from the shaper alone and
+**-> 272** with the answer-modem S watch below; per row with everything,
+3000/28800 0/16 -> 15/16, 3200/28800 1/16 -> 12/16, 2743/26400 6/16 -> 16/16.  31200/33600 stay mostly
+out of reach over G.711; what is left there includes the receive filter
+(27 taps, signal-weighted image -40 to -48 dB, a residual conjugate term a
+periodic widely-linear fit still finds at 46 dB).
+
+**Read the harness as pass rates over `V34_DUPLEX_DELAY`, not single runs.**
+The harness is deterministic, and acquisition here (the T/2 eye chooser, PP
+onset, carrier choice) depends on where symbol boundaries fall against the
+8 kHz grid, so one run of a marginal row is one draw.  A change that moves the
+pulse shape reshuffles which rows land on which side; 2800/21600 u-law "broke"
+at zero delay and passes at 7 of 8 delays.  `make test` was already failing on
+the unmodified tree, at two 11.6 renegotiation rows that fail at zero delay
+(they pass 30/40 over delays before this work, 31/40 after).
+
+### The line echo canceller, both roles
+
+`v34_duplex_test` had no echo path, so nothing offline exercised the engine's
+`v34_line_ec.c`.  `V34_DUPLEX_ECHO_DB=<return loss>` now returns each side's
+own transmission through a three-tap hybrid after `V34_DUPLEX_ECHO_DELAY`
+samples (default 2136, the VG224 path's 267 ms), before the codec, and runs
+the canceller in front of each receiver as the engine does.  At 20 dB return
+loss nothing above 9600 carried payload, canceller on or off.  Four defects:
+
+1. **Only the call modem was ever cancelled.**  `v34_rx_hearing_own_echo()`
+   required `calling_party`, but the answer modem has the mirror window: its
+   own Phase 3 goes out first while the call modem waits in exact silence for
+   its J (measured: call-modem transmit RMS 0 from INFO1a to the answer
+   modem's J).  So when we ANSWER an analogue modem through the ATA there was
+   no line echo cancellation at all.  New `v34_rx_line_ec_window()`: either
+   role, from our S-bar to the end of our TRN (J excluded -- the far end's next
+   signal may start while we send J), defined by protocol stage rather than by
+   the echo being weak, so a poor hybrid is still trained on.
+   `ME_V34_LINE_EC_ANSWER=0` restores call-modem only.
+2. **The fit failed as singular at the right delay.**  The Toeplitz shortcut
+   (one lag product per diagonal) is not guaranteed positive definite, and on
+   S and PP, which are line spectra, it was not.  Now the exact covariance
+   (positive semi-definite by construction) with diagonal loading, built by
+   the O(N L + L^2) shift recursion so it is no stall in the media callback.
+3. **The window opens on the far end's tail.**  The answer modem keeps
+   sending J until it has heard our S, so the call modem's window began with
+   10 ms of it at full level, and that held the fit to 2.5 dB where the rest
+   supports 35.  The fit now starts one bulk delay (+30 ms) into the window,
+   since that delay is the round trip in which the tail can arrive.
+4. **The answer modem acquired its OWN PP through the echo.**  During its own
+   Phase 3 its receiver sits in PHASE3_TRAINING; on a clean line that hears
+   silence, over a hybrid it hears a perfect PP.  It locked onto it 0.3 s in,
+   froze the AGC at the echo's level, and when the call modem's real PP came
+   30 dB louder the conditioning clipped (|z| 25.6) and reset the equalizer on
+   every symbol.  PP acquisition is withheld while a duplex answer modem is
+   sending its own S-bar..TRN (`ME_V34_ANSWER_P3_ECHO_GUARD=0` disables).
+   Only the acquisition: freezing the other loops as well cost 2400/21600 its
+   S detection on a CLEAN line (15/16 delays -> 7/16).
+
+A fifth defect is not about echo, but echo exposed it.  The answer modem missed
+the call modem's 128T S when the T/2 eye chooser's 256-symbol window straddled
+its onset. That is the same failure the call modem had live against the
+RasFinder, fixed there by the three-bin spectral S watch.  The watch is now armed for the
+answer modem too while its own J is on the air
+(`ME_V34_P3_S_SPECTRAL_ANSWER=0` disables).  On the clean matrix this alone
+takes 251 -> 272 of 352.
+
+Results, 6 rate rows x 3 channel delays, u-law, echo at 267 ms:
+
+| return loss | canceller off | canceller on | fit ERLE (median) |
+|---|---|---|---|
+| 6 dB  | 0/18 | 3/18  | 36.8 dB |
+| 12 dB | 1/18 | 14/18 | 36.2 dB |
+| 20 dB | 6/18 | 18/18 | 34.4 dB |
+| 30 dB | 9/18 | 18/18 | 30.1 dB |
+
+The same rows with no echo at all pass 15/18 (all three failures at one
+channel delay, an acquisition miss independent of echo).  So from 12 dB of
+return loss up, echo no longer costs anything measurable, including 28800.
+**Open:** 6 dB.  Only the answer modem's window gets fitted there, so the
+call modem's Phase 3/4 is lost to its own echo before any fit is in force.
+**Not verified live.**  The answer-role canceller matters when an analogue
+modem dials US through the VG224 (Apple USB modems, CX93001).  The RasFinder
+work has us originating, where the call-modem canceller already existed.

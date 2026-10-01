@@ -49,11 +49,43 @@
 #define MAX_COEFFS_PER_FILTER   128
 #define MAX_COEFF_SETS          384
 
+/* V.34 primary channel transmit pulse shaper: span in symbols and Kaiser
+   window.  Must match V34_TX_FILTER_STEPS in spandsp/private/v34.h.
+   Measured, as the prototype's stopband beyond the band edge: 9 symbols
+   unwindowed -24 dB worst / -38 dB mean; 21 symbols with Kaiser 4,
+   -64 dB / -77 dB. */
+#define V34_TX_SPAN             21
+#define V34_TX_KAISER_BETA      4.0
+
+/* Zeroth order modified Bessel function of the first kind, for the Kaiser
+   window. */
+static double bessel_i0(double x)
+{
+    double sum;
+    double term;
+    int k;
+
+    sum = 1.0;
+    term = 1.0;
+    for (k = 1;  k < 50;  k++)
+    {
+        term *= (x/(2.0*k))*(x/(2.0*k));
+        sum += term;
+        if (term < 1.0e-12*sum)
+            break;
+        /*endif*/
+    }
+    /*endfor*/
+    return sum;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void make_tx_filter(int coeff_sets,
                            int coeffs_per_filter,
                            double carrier,
                            double baud_rate,
                            double excess_bandwidth,
+                           double kaiser_beta,
                            const char *tag)
 {
     int i;
@@ -73,6 +105,26 @@ static void make_tx_filter(int coeff_sets,
     beta = excess_bandwidth;
 
     compute_raised_cosine_filter(coeffs, total_coeffs, true, false, alpha, beta);
+    /* A truncated root raised cosine has the sidelobes of a rectangular
+       window: at V.34's 12% excess bandwidth and a 9-symbol span the stopband
+       is only -24 dB beside the band edge.  Those sidelobes come back IN BAND
+       on the line -- the interpolator's symbol-rate images, mirrored by taking
+       the real part of the modulated signal, land on the wanted band as a
+       conjugate component no receiver equalizer can remove -- and they capped
+       the transmitted waveform at 39 dB, below what 28800-33600 bit/s needs.
+       A Kaiser window trades a little linear ISI, which the far end's
+       equalizer removes, for the stopband. */
+    if (kaiser_beta > 0.0)
+    {
+        for (i = 0;  i < total_coeffs;  i++)
+        {
+            double r = 2.0*i/(double) (total_coeffs - 1) - 1.0;
+
+            coeffs[i] *= bessel_i0(kaiser_beta*sqrt(1.0 - r*r))/bessel_i0(kaiser_beta);
+        }
+        /*endfor*/
+    }
+    /*endif*/
 
     /* Find the DC gain of the filter, and adjust the filter to unity gain. */
     floating_gain = 0.0;
@@ -289,12 +341,14 @@ int main(int argc, char **argv)
     double baud_rate;
     double rx_excess_bandwidth;
     double tx_excess_bandwidth;
+    double tx_kaiser_beta;
     const char *rx_tag;
     const char *tx_tag;
     const char *modem;
 
     transmit_modem = false;
     modem = "";
+    tx_kaiser_beta = 0.0;
     while ((opt = getopt(argc, argv, "m:rt")) != -1)
     {
         switch (opt)
@@ -417,7 +471,8 @@ int main(int argc, char **argv)
         rx_coeffs_per_filter = 27;
         rx_excess_bandwidth = 0.25;
         tx_coeff_sets = 10;
-        tx_coeffs_per_filter = 9;
+        tx_coeffs_per_filter = V34_TX_SPAN;
+        tx_kaiser_beta = V34_TX_KAISER_BETA;
         tx_excess_bandwidth = 0.12;
         carrier = 1600.0;
         baud_rate = 2400.0;
@@ -430,7 +485,8 @@ int main(int argc, char **argv)
         rx_coeffs_per_filter = 27;
         rx_excess_bandwidth = 0.25;
         tx_coeff_sets = 10;
-        tx_coeffs_per_filter = 9;
+        tx_coeffs_per_filter = V34_TX_SPAN;
+        tx_kaiser_beta = V34_TX_KAISER_BETA;
         tx_excess_bandwidth = 0.12;
         carrier = 1800.0;
         baud_rate = 2400.0;
@@ -443,7 +499,8 @@ int main(int argc, char **argv)
         rx_coeffs_per_filter = 27;
         rx_excess_bandwidth = 0.25;
         tx_coeff_sets = 35;
-        tx_coeffs_per_filter = 9;
+        tx_coeffs_per_filter = V34_TX_SPAN;
+        tx_kaiser_beta = V34_TX_KAISER_BETA;
         tx_excess_bandwidth = 0.12;
         carrier = 1646.0;
         baud_rate = 2400.0*8.0/7.0;
@@ -456,7 +513,8 @@ int main(int argc, char **argv)
         rx_coeffs_per_filter = 27;
         rx_excess_bandwidth = 0.25;
         tx_coeff_sets = 35;
-        tx_coeffs_per_filter = 9;
+        tx_coeffs_per_filter = V34_TX_SPAN;
+        tx_kaiser_beta = V34_TX_KAISER_BETA;
         tx_excess_bandwidth = 0.12;
         carrier = 1829.0;
         baud_rate = 2400.0*8.0/7.0;
@@ -469,7 +527,8 @@ int main(int argc, char **argv)
         rx_coeffs_per_filter = 27;
         rx_excess_bandwidth = 0.25;
         tx_coeff_sets = 20;
-        tx_coeffs_per_filter = 9;
+        tx_coeffs_per_filter = V34_TX_SPAN;
+        tx_kaiser_beta = V34_TX_KAISER_BETA;
         tx_excess_bandwidth = 0.12;
         carrier = 1680.0;
         baud_rate = 2400.0*7.0/6.0;
@@ -482,7 +541,8 @@ int main(int argc, char **argv)
         rx_coeffs_per_filter = 27;
         rx_excess_bandwidth = 0.25;
         tx_coeff_sets = 20;
-        tx_coeffs_per_filter = 9;
+        tx_coeffs_per_filter = V34_TX_SPAN;
+        tx_kaiser_beta = V34_TX_KAISER_BETA;
         tx_excess_bandwidth = 0.12;
         carrier = 1867.0;
         baud_rate = 2400.0*7.0/6.0;
@@ -495,7 +555,8 @@ int main(int argc, char **argv)
         rx_coeffs_per_filter = 27;
         rx_excess_bandwidth = 0.25;
         tx_coeff_sets = 8;
-        tx_coeffs_per_filter = 9;
+        tx_coeffs_per_filter = V34_TX_SPAN;
+        tx_kaiser_beta = V34_TX_KAISER_BETA;
         tx_excess_bandwidth = 0.12;
         carrier = 1800.0;
         baud_rate = 2400.0*5.0/4.0;
@@ -508,7 +569,8 @@ int main(int argc, char **argv)
         rx_coeffs_per_filter = 27;
         rx_excess_bandwidth = 0.25;
         tx_coeff_sets = 8;
-        tx_coeffs_per_filter = 9;
+        tx_coeffs_per_filter = V34_TX_SPAN;
+        tx_kaiser_beta = V34_TX_KAISER_BETA;
         tx_excess_bandwidth = 0.12;
         carrier = 2000.0;
         baud_rate = 2400.0*5.0/4.0;
@@ -521,7 +583,8 @@ int main(int argc, char **argv)
         rx_coeffs_per_filter = 27;
         rx_excess_bandwidth = 0.25;
         tx_coeff_sets = 5;
-        tx_coeffs_per_filter = 9;
+        tx_coeffs_per_filter = V34_TX_SPAN;
+        tx_kaiser_beta = V34_TX_KAISER_BETA;
         tx_excess_bandwidth = 0.12;
         carrier = 1829.0;
         baud_rate = 2400.0*4.0/3.0;
@@ -534,7 +597,8 @@ int main(int argc, char **argv)
         rx_coeffs_per_filter = 27;
         rx_excess_bandwidth = 0.25;
         tx_coeff_sets = 5;
-        tx_coeffs_per_filter = 9;
+        tx_coeffs_per_filter = V34_TX_SPAN;
+        tx_kaiser_beta = V34_TX_KAISER_BETA;
         tx_excess_bandwidth = 0.12;
         carrier = 1920.0;
         baud_rate = 2400.0*4.0/3.0;
@@ -548,7 +612,8 @@ int main(int argc, char **argv)
         rx_coeffs_per_filter = 27;
         rx_excess_bandwidth = 0.25;
         tx_coeff_sets = 7;
-        tx_coeffs_per_filter = 9;
+        tx_coeffs_per_filter = V34_TX_SPAN;
+        tx_kaiser_beta = V34_TX_KAISER_BETA;
         tx_excess_bandwidth = 0.12;
         //carrier = 1959.0;
         carrier = 1959.0;
@@ -569,6 +634,7 @@ int main(int argc, char **argv)
                        carrier,
                        baud_rate,
                        tx_excess_bandwidth,
+                       tx_kaiser_beta,
                        tx_tag);
     }
     else
