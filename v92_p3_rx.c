@@ -458,7 +458,8 @@ static void trn1u_align(v92_p3_rx_t *rx)
         (void) trn1u_process(rx, rx->ja_buf[i]);
 
     /* The equaliser(s), fed everything buffered so far.  Their sample index
-     * is the buffer's. */
+     * is the buffer's, as it stands now. */
+    rx->eq_base_sample = rx->ja_buf_base;
     for (int law = 0; law < 2; law++) {
         rx->eq_running[law] = false;
         if (rx->law >= 0 && law != rx->law)
@@ -658,6 +659,9 @@ static void enter_trn1u(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
     rx->dec_fill[0] = rx->dec_fill[1] = 0;
     rx->dec_base[0] = rx->dec_base[1] = 0;
     rx->ja_from_eq = false;
+    rx->follow_started = false;
+    rx->trn1u2_state = 0;
+    rx->trn1u2_start = -1;
     /* Enough history for the alignment to look TRN1U_ALIGN_SPAN symbols back,
      * plus the 24 the Ja search's differential/GPA decode reaches behind. */
     copied = prehist_copy_tail(rx, TRN1U_ALIGN_SPAN + 24, rx->ja_buf,
@@ -768,6 +772,9 @@ static bool run_ja_search(v92_p3_rx_t *rx, bool force_hard_min)
                             rx->trn1u_start - rx->ja_buf_base + trn_min_t - 50);
     if (found >= 0) {
         rx->ja_from_eq = false;
+    rx->follow_started = false;
+    rx->trn1u2_state = 0;
+    rx->trn1u2_start = -1;
         rx->ja_result.start_sample = rx->ja_buf_base + found;
         return true;
     }
@@ -1286,6 +1293,133 @@ trn1u_wait:
     }
     prehist_push(rx, codeword, sample_index);
     return (rx->state != prev);
+}
+
+/* -------------------------------------------------------------------------
+ * After Ja: the equaliser handed on (docs/v92_p3_rx_line_plan.md step 7)
+ * ------------------------------------------------------------------------- */
+
+/* The second TRN1u: located like the first (TRN1U_ALIGN_LEN raw signs
+ * against the reference, step 3; start score at least step 5's
+ * TRN1U_START_SCORE_MIN_X1000), within TRN1U2_SPAN of the expected start,
+ * which comes from the Su detector's six-symbol blocks.  The bar the Su
+ * receiver reports lasts 24T (8.5.6, 9.5.2.1.9) and it fires a block or two
+ * into it. */
+#define TRN1U2_SPAN        64
+#define TRN1U2_AFTER_FINAL 18
+
+static void trn1u2_search(v92_p3_rx_t *rx)
+{
+    v92_p3_eq_t *eq = &rx->eq[rx->eq_law];
+    int8_t ref[TRN1U_ALIGN_LEN];
+    int best_c = 0;
+    int best_s = -1;
+
+    if (rx->trn1u2_state != 1
+        || rx->follow_sample < rx->trn1u2_expect + TRN1U2_SPAN + TRN1U_ALIGN_LEN)
+        return;
+    v92_p3_eq_reference(ref, TRN1U_ALIGN_LEN);
+    for (int s0 = rx->trn1u2_expect - TRN1U2_SPAN;
+         s0 <= rx->trn1u2_expect + TRN1U2_SPAN; s0++) {
+        int c = 0;
+
+        if (rx->follow_sample - s0 >= 1024 - TRN1U_ALIGN_LEN)
+            continue;
+        for (int k = 0; k < TRN1U_ALIGN_LEN; k++)
+            c += (rx->follow_sign[(s0 + k) & 1023] ? 1 : -1)*ref[k];
+        if (abs(c) > abs(best_c)) {
+            best_c = c;
+            best_s = s0;
+        }
+    }
+    rx->trn1u2_score_x1000 = abs(best_c)*1000/TRN1U_ALIGN_LEN;
+    rx->trn1u2_start = best_s;
+    if (best_s < 0 || rx->trn1u2_score_x1000 < TRN1U_START_SCORE_MIN_X1000) {
+        rx->trn1u2_state = -1;
+    } else {
+        /* Symbol k of the equaliser is DS0 sample start + k + tau.  Data-
+         * aided for the guaranteed 2040T, decision-directed after it (TRN1u
+         * runs on through the DIL, then CPt keeps its two levels). */
+        int64_t k0 = best_s - (rx->eq_base_sample + eq->start)
+                   - (int64_t)lround(eq->tau);
+
+        v92_p3_eq_train_from(eq, k0, V92_P3_RX_TRN1U_MIN_T);
+        rx->trn1u2_state = 3;
+    }
+    if (p3rx_debug_enabled()) {
+        fprintf(stderr, "[P3RX] trn1u2 expect=%d start=%d score=%d tau=%.3f ppm=%.1f %s\n",
+                rx->trn1u2_expect, rx->trn1u2_start, rx->trn1u2_score_x1000,
+                eq->tau, eq->freq*1e6,
+                rx->trn1u2_state == 3 ? "retraining" : "refused");
+    }
+}
+
+/* Step 5's agreement gate, on the 256 symbols after retraining began. */
+static void trn1u2_gate(v92_p3_rx_t *rx)
+{
+    v92_p3_eq_t *eq = &rx->eq[rx->eq_law];
+
+    if (rx->trn1u2_state != 3)
+        return;
+    if (p3rx_debug_enabled() && eq->agree_fill == V92_P3_EQ_AGREE_WINDOW
+        && (eq->k - eq->ref_from) % 256 == 0)
+        fprintf(stderr, "[P3RX] trn1u2 k=%lld agree=%d tau=%.3f ppm=%.1f\n",
+                (long long)(eq->k - eq->ref_from), v92_p3_eq_agree_x10(eq),
+                eq->tau, eq->freq*1e6);
+    /* Judged at the end of the guaranteed 2040T, over its last 256
+     * symbols: the equaliser was held since Ja while the analogue modem's
+     * upstream clock locked to the downstream it recovered from Sd (6.2),
+     * and the existing raw-path lock comes no earlier either. */
+    if (eq->k < eq->ref_until)
+        return;
+    rx->trn1u2_agree_x10 = v92_p3_eq_agree_x10(eq);
+    rx->trn1u2_state = rx->trn1u2_agree_x10 >= TRN1U_AGREE_MIN_X10 ? 2 : -1;
+    if (p3rx_debug_enabled())
+        fprintf(stderr, "[P3RX] trn1u2 agree=%d.%d%% %s\n",
+                rx->trn1u2_agree_x10/10, rx->trn1u2_agree_x10%10,
+                rx->trn1u2_state == 2 ? "trained" : "refused");
+}
+
+int v92_p3_rx_follow(v92_p3_rx_t *rx, uint8_t codeword, int sample_index,
+                     double *out, int max)
+{
+    int law;
+    int produced = 0;
+    v92_p3_eq_t *eq;
+
+    if (!rx || !rx->ja_found || rx->eq_law < 0)
+        return 0;
+    law = rx->eq_law;
+    eq = &rx->eq[law];
+    if (!rx->follow_started) {
+        v92_p3_eq_hold(eq, true);
+        rx->follow_started = true;
+    }
+    rx->follow_sample = sample_index;
+    rx->follow_sign[sample_index & 1023] = (codeword >> 7) & 1;
+    v92_p3_eq_push(eq, law ? alaw_to_linear(codeword) : ulaw_to_linear(codeword));
+    while (v92_p3_eq_step(eq)) {
+        dec_push(rx, law, eq->decision > 0);
+        if (out && produced < max)
+            out[produced] = eq->y;
+        produced++;
+    }
+    trn1u2_search(rx);
+    trn1u2_gate(rx);
+    return produced < max ? produced : max;
+}
+
+void v92_p3_rx_expect_trn1u2(v92_p3_rx_t *rx, int sample_index)
+{
+    if (!rx || rx->eq_law < 0 || rx->trn1u2_state != 0)
+        return;
+    rx->trn1u2_expect = sample_index + TRN1U2_AFTER_FINAL;
+    rx->trn1u2_state = 1;
+}
+
+int v92_p3_rx_trn1u2_state(const v92_p3_rx_t *rx)
+{
+    return rx ? (rx->trn1u2_state == 2 ? 1 : rx->trn1u2_state == -1 ? -1 : 0) : 0;
 }
 
 void v92_p3_rx_feed_block(v92_p3_rx_t *rx,

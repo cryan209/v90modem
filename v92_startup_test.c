@@ -6,6 +6,7 @@
 #include <spandsp.h>
 #include "v92_trn2u.h"
 #include "v92_p3_rx.h"
+#include "v92_line_channel.h"
 #include "v92_analogue_phase3.h"
 #include "v92_analogue_audio.h"
 #include "v92_su.h"
@@ -312,6 +313,13 @@ static void pair_cpt(void *user, v92_p4u_kind_t kind,
     }
 }
 
+/* docs/v92_p3_rx_line_plan.md step 7: when set, the upstream crosses a
+ * modelled 2-wire loop (v92_line_channel) before the network A/D, and the
+ * digital side uses the equaliser the Phase 3 receiver trained on TRN1u for
+ * the second TRN1u and CPt.  The pair must then reach CPt on the digital
+ * side; Phase 4's TRN2u/CPu receiver is still raw and is not graded here. */
+static const v92_line_channel_config_t *pair_line;
+
 static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_rate)
 
 {
@@ -348,6 +356,15 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
     bool ja_seen = false, cpt_started = false;
     v92_p3_rx_start(&ja_rx, 0);
     v92_su_init(&su_rx, alaw);
+    v92_line_channel_t line;
+    double line_fifo[8];
+    int line_fill = 0;
+    bool trn_locked = false;
+    if (pair_line) {
+        assert(audio && audio_count == 2);
+        assert(v92_line_channel_init(&line, pair_line));
+        v92_p3_rx_set_law(&ja_rx, alaw);
+    }
 
     bool dropped_cpd = false, dropping_cpd = false;
     bool repeated_cpt = false;
@@ -385,8 +402,31 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
         /* Codec scaling is a calibration of the analogue volts, not gain
          * on the digital DS0. Quantize only at the network ADC. */
         int adc_sample = upstream[0] * (audio ? V92_AUDIO_LINEAR_SCALE : 1);
+        if (pair_line) {
+            /* The loop between the analogue modem and the A/D: its delay
+             * and filter latency arrive as leading silence. */
+            double in[2] = {upstream[0]*V92_AUDIO_LINEAR_SCALE,
+                            upstream[1]*V92_AUDIO_LINEAR_SCALE};
+            double out[4];
+            int n = v92_line_channel_put(&line, in, 2, out, 4);
+            for (int k = 0; k < n && line_fill < 8; k++)
+                line_fifo[line_fill++] = out[k];
+            double v = 0.0;
+            if (line_fill > 0) {
+                v = floor(line_fifo[0] + 0.5);
+                memmove(line_fifo, line_fifo + 1, (size_t)(--line_fill)*sizeof(double));
+            }
+            adc_sample = (int)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+        }
         assert(adc_sample >= -32768 && adc_sample <= 32767);
         uint8_t u = network_adc(alaw, (int16_t)adc_sample);
+        if (pair_line && getenv("V92_PAIR_UP_DUMP")) {
+            static FILE *up_dump;
+            if (!up_dump) up_dump = fopen(getenv("V92_PAIR_UP_DUMP"), "wb");
+            if (up_dump) { fputc(u, up_dump); fflush(up_dump); }
+        }
+        double eqv[4];
+        int neq = pair_line && ja_seen ? v92_p3_rx_follow(&ja_rx, u, i, eqv, 4) : 0;
         downstream = alaw ? alaw_to_linear(d) : ulaw_to_linear(d);
         if (trace_audio) fprintf(stderr, "TXRAW %d %d\n", i, downstream);
         if (audio) {
@@ -413,11 +453,23 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
             switch (v92_su_put(&su_rx, u)) {
             case V92_SU_ACQUIRED: assert(v90_handle_rx_event(digital, V90_RX_EVENT_SU)); break;
             case V92_SU_BAR: assert(v90_handle_rx_event(digital, V90_RX_EVENT_SU_BAR)); break;
-            case V92_SU_TRAINED: (void)v90_handle_rx_event(digital, V90_RX_EVENT_TRN_LOCK); break;
-            case V92_SU_FINAL: assert(v90_handle_rx_event(digital, V90_RX_EVENT_SU_FINAL)); break;
+            case V92_SU_TRAINED:
+                if (!pair_line) (void)v90_handle_rx_event(digital, V90_RX_EVENT_TRN_LOCK);
+                break;
+            case V92_SU_FINAL:
+                assert(v90_handle_rx_event(digital, V90_RX_EVENT_SU_FINAL));
+                if (pair_line) v92_p3_rx_expect_trn1u2(&ja_rx, i);
+                break;
             default: break;
             }
         }
+        /* 9.5.1.1.13 on a loop: the second TRN1u is judged by the trained
+         * equaliser against its reference, not by raw descrambled ones. */
+        if (pair_line && !trn_locked && v92_p3_rx_trn1u2_state(&ja_rx) == 1) {
+            (void)v90_handle_rx_event(digital, V90_RX_EVENT_TRN_LOCK);
+            trn_locked = true;
+        }
+        assert(!pair_line || v92_p3_rx_trn1u2_state(&ja_rx) >= 0);
         if (!cpt_started && (v90_get_tx_phase(digital) == V90_TX_SCR || v90_get_tx_phase(digital) == V90_TX_DIL)) {
             v92_cp_rx_init(&cpt_rx, 2, alaw, pair_cpt, &sink);
             v92_trn2u_demod_init(&cpt_demod, 2, cfg.lu, alaw, &cpt_rx);
@@ -428,7 +480,12 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
             v92_trn2u_demod_init(&p4_demod, 4, cfg.lu, alaw, &p4_rx);
             p4_started = true;
         }
-        if (p4_started) v92_trn2u_demod_feed(&p4_demod, &u, 1);
+        if (pair_line) {
+            for (int k = 0; k < neq; k++) eqv[k] *= cfg.lu;
+            if (cpt_started && !p4_started)
+                v92_trn2u_demod_feed_values(&cpt_demod, eqv, neq);
+            if (sink.cpt_count) break;
+        } else if (p4_started) v92_trn2u_demod_feed(&p4_demod, &u, 1);
         else if (cpt_started) v92_trn2u_demod_feed(&cpt_demod, &u, 1);
         if (sink.b1_armed) {
             int16_t sample = alaw ? alaw_to_linear(u) : ulaw_to_linear(u);
@@ -452,6 +509,21 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
             fprintf(stderr, "analogue failure: %s\n", v92a_failure(analogue));
             break;
         }
+    }
+    if (pair_line) {
+        fprintf(stderr, "line pair: ja=%d trn1u2=%d (start %lld score %d) cpt=%d at %d\n",
+                ja_seen, v92_p3_rx_trn1u2_state(&ja_rx),
+                (long long)ja_rx.trn1u2_start, ja_rx.trn1u2_score_x1000,
+                sink.cpt_count, v90_get_tx_phase(digital));
+        assert(ja_seen);
+        assert(trn_locked);
+        assert(sink.cpt_count > 0);
+        v92a_audio_free(frontend);
+        v90_free(digital);
+        printf("PASS: V.92 Phase 3 over a modelled loop %s, %s DIL: CPt "
+               "received through the TRN1u equaliser\n",
+               alaw ? "PCMA" : "PCMU", dil ? "measured" : "zero");
+        return;
     }
     if (!sink.b1.locked || sink.payload_bytes < 1024) {
         v92a4_t *p4 = v92a_phase4(analogue);
@@ -482,6 +554,24 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
     printf("PASS: V.92 Phases 3–4 linear analogue / G.711 digital pair %s, %s DIL%s%s\n",
            alaw ? "PCMA" : "PCMU", dil ? "measured" : "zero",
            drop_cpd ? ", first CPd erased" : "", audio ? ", reconstructed audio" : "");
+}
+
+/* Plan step 7's rows: the upstream through the r4 loop fitted off the real
+ * call (v92_line_channel_r4.h), alone and with a fractional A/D phase and
+ * noise.  The clock offset rows of v92_p3_rx_line_test are not here: this
+ * harness clocks both ends from one symbol counter, so an A/D clock offset
+ * would need the downstream bearer modelled as well. */
+static void test_phase3_line(bool alaw, bool dil, double phase, double snr_db)
+{
+    v92_line_channel_config_t cc = {
+        .taps = v92_line_channel_r4_taps, .ntaps = v92_line_channel_r4_ntaps,
+        .phase = phase,
+        .noise_rms = snr_db > 0.0 ? 6000.0/pow(10.0, snr_db/20.0) : 0.0,
+        .seed = 4242,
+    };
+    pair_line = &cc;
+    test_phase3_pair(alaw, dil, false, V92_AUDIO_RATE);
+    pair_line = NULL;
 }
 
 /* Independent Table 20 zero-DIL frame and delayed analogue training.
@@ -767,6 +857,25 @@ int main(int argc, char **argv)
         }
         return 0;
     }
+    /* Rows 1 and 3 (measured DIL) reach Ja and then fail in the ANALOGUE
+     * receiver ("Sd-bar timeout"): Ja is declared at a slightly different
+     * instant through the loop, and the analogue side's Sd acquisition is
+     * known to depend on where Sd falls on its acquisition grid
+     * (docs/v92_p3_rx_line_plan.md steps 3 and 7).  Kept runnable here. */
+    if (argc == 3 && !strcmp(argv[1], "--line-row")) {
+        if (atoi(argv[2]) == 0) test_phase3_line(false, false, 0.0, 0.0);
+        if (atoi(argv[2]) == 1) test_phase3_line(true, true, 0.5, 25.0);
+        if (atoi(argv[2]) == 5) test_phase3_line(true, false, 0.5, 25.0);
+        if (atoi(argv[2]) == 2) test_phase3_line(true, false, 0.0, 0.0);
+        if (atoi(argv[2]) == 3) test_phase3_line(false, true, 0.0, 0.0);
+        if (atoi(argv[2]) == 4) test_phase3_line(false, false, 0.5, 25.0);
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--line")) {
+        test_phase3_line(false, false, 0.0, 0.0);
+        test_phase3_line(true, false, 0.5, 25.0);
+        return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "--ja-only")) {
         test_long_ja(false);
         test_long_ja(true);
@@ -815,6 +924,9 @@ int main(int argc, char **argv)
     test_phase3_pair(false, false, true, V92_AUDIO_RATE);
     test_phase3_pair(true, false, true, false);
     test_phase3_pair(true, false, true, V92_AUDIO_RATE);
+    /* docs/v92_p3_rx_line_plan.md step 7: through the r4 loop to CPt. */
+    test_phase3_line(false, false, 0.0, 0.0);
+    test_phase3_line(true, false, 0.5, 25.0);
     test_filter_baseline();
     test_su(false);
     test_su(true);

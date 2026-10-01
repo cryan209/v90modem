@@ -169,7 +169,19 @@ typedef struct {
     uint8_t  dec_buf[2][V92_P3_RX_JA_BUF];
     int      dec_fill[2];
     int      dec_base[2];
-    bool     ja_from_eq;     /* the decoded Ja came from equalised decisions */ /* ignore Phase-3 lock before this sample */
+    bool     ja_from_eq;     /* the decoded Ja came from equalised decisions */
+
+    /* ------- after Ja: the equaliser handed on (plan step 7) ------- */
+    bool     follow_started;
+    int      eq_base_sample; /* DS0 sample of the equalisers' input index 0 */
+    int      trn1u2_expect;  /* DS0 sample where the second TRN1u should start */
+    int      trn1u2_start;   /* where it does (DS0 sample), or -1 */
+    int      trn1u2_score_x1000; /* raw-sign correlation at that start */
+    int      trn1u2_agree_x10;   /* equalised agreement after retraining */
+    int      trn1u2_state;   /* 0 not expected, 1 searching, 3 retraining,
+                                2 trained, -1 refused */
+    int      follow_sample;  /* DS0 sample of the newest codeword followed */
+    uint8_t  follow_sign[1024]; /* raw codeword signs, by sample & 1023 */ /* ignore Phase-3 lock before this sample */
 
     /* ------- TRN1u accumulator ------- */
     int      trn1u_count;    /* symbols accumulated */
@@ -255,6 +267,32 @@ void v92_p3_rx_feed_block(v92_p3_rx_t *rx,
                           const uint8_t *codewords,
                           int            count,
                           int            first_sample_index);
+
+/*
+ * After Ja (plan step 7).  Once v92_p3_rx_ja_ok(), keep feeding every
+ * upstream codeword here instead of v92_p3_rx_feed.  The trained equaliser
+ * keeps running, held -- the upstream's silences and three-level Su
+ * (8.5.6) are nothing it may train on -- and writes each symbol it
+ * produces to out[] (up to max) as a value where +/-1 is +/-L_U.  Returns
+ * how many it wrote (0-2 per codeword: the timing loop moves the instant).
+ */
+int v92_p3_rx_follow(v92_p3_rx_t *rx, uint8_t codeword, int sample_index,
+                     double *out, int max);
+
+/* The Su receiver reported the final Su-bar (9.5.1.1.9) at upstream sample
+ * `sample_index`: the second TRN1u (9.5.1.1.10), zero-initialised like the
+ * first, follows the bar's 24T.  The receiver finds it as it found the
+ * first, by correlating raw signs against the 8.5.7 reference -- not its
+ * held equaliser's decisions, which decision feedback fed through Su can
+ * leave propagating its own errors -- then retrains on it data-aided and
+ * runs decision-directed after it. */
+void v92_p3_rx_expect_trn1u2(v92_p3_rx_t *rx, int sample_index);
+
+/* 1 once the second TRN1u is found (score >= 0.50 at its start) and the
+ * retrained equaliser agrees with its reference over 256 symbols (>= 95%):
+ * step 5's gate, applied to the second TRN1u.  -1 if refused, 0 while
+ * undecided. */
+int v92_p3_rx_trn1u2_state(const v92_p3_rx_t *rx);
 
 /*
  * Query current state.

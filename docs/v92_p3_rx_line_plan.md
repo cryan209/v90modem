@@ -6,7 +6,7 @@ modem is on a real 2-wire loop behind a single codec (VG224 -> SIP -> us),
 so that 9.5.1.1.3 releases Sd. On the byte-exact SIP loopback it must behave
 exactly as it does today.
 
-Status: steps 1-6 done, 2026-10-01. The fixture decodes Ja; `v92_p3_rx_line_test` is in `make test`. Each step lists what it changes, how it is
+Status: steps 1-7 done, 2026-10-01 (step 7 for zero-DIL rows; measured DIL is blocked on the analogue side). The fixture decodes Ja; `v92_p3_rx_line_test` is in `make test`. Each step lists what it changes, how it is
 measured, and the result that completes it. Do the steps in order: each one
 produces the instrument the next one is graded by.
 
@@ -433,7 +433,7 @@ Every synthetic row decodes it too. **`v92_p3_rx_line_test` is now in
   `v92_proc_eval_test`. `v92_p3_probe` on the recording now ends
   `state=done ja_ok=1`.
 
-### 7. Hand the trained equaliser on
+### 7. Hand the trained equaliser on -- DONE 2026-10-01 (zero DIL)
 
 The rest of Phase 3's upstream arrives on the same channel:
 
@@ -452,6 +452,69 @@ training interval.
   that far.
 - **Done when:** the impaired rows of `v92_startup_test` reach Phase 4 CPt
   on the digital side.
+
+**Result.** `v92_startup_test` gained two rows that put the upstream
+through the r4 loop (`v92_line_channel`) before the network A/D:
+- PCMU through the loop alone;
+- PCMA with A/D phase 0.5 and 25 dB noise.
+
+Both reach Phase 4 CPt on the digital side, with the CPt decoded from the
+handed-on equaliser.
+
+- **The interface, in `v92_p3_rx`.**
+  - Once Ja is decoded, the caller feeds every codeword to
+    `v92_p3_rx_follow()`. That keeps the trained equaliser running and
+    returns its symbols, ±1 = ±L_U.
+  - `v92_p3_rx_expect_trn1u2()` is called on the Su receiver's final
+    Su-bar.
+  - `v92_p3_rx_trn1u2_state()` replaces `V92_SU_TRAINED` as the
+    9.5.1.1.13 lock.
+  - `v92_trn2u_demod_feed_values()` is the CPt demodulator's new entry for
+    equalised values.
+  - `v92_su.c` is unchanged. It detects Su on its 1333 Hz fundamental,
+    which survives the loop just as Ru does.
+- **Held from the moment Ja decodes** (`v92_p3_eq_hold`). Upstream silence
+  and three-level Su are nothing a ±1 loop may train on. Held, the
+  interpolator keeps advancing at the learned frequency.
+- **The second TRN1u is located from raw signs, not from the held
+  equaliser.**
+  - Its decisions there scored only 0.335 against the reference, while raw
+    signs scored 0.625 at the same, correct start (24331, matching an
+    offline correlation of the whole A/D stream).
+  - The decision feedback, fed wrong ±1 decisions through Su and the
+    silences, stays locked in its own errors.
+  - So the search reuses step 3's raw-sign correlation (start score
+    >= 0.50 within ±64 of the final bar + 18). Retraining then feeds the
+    reference back in place of decisions (`v92_p3_eq_train_from`).
+- **Gated at the end of the guaranteed 2040T, not after its first 256
+  symbols.**
+  - Agreement over the first 256 retrained symbols was only 84%. The
+    analogue modem's upstream clock locks to the downstream it recovered
+    from Sd (6.2) while the equaliser was held, so retraining opens with a
+    timing step: tau moves about 0.4 samples, and the frequency integrator
+    briefly reads it as -341 ppm before decaying.
+  - From symbol 512 agreement is 100%.
+  - Gating over the last 256 of the 2040T matches when the raw path's
+    2040-ones check locked anyway.
+  - A ±1-symbol mapping error was ruled out: offsets -2..+2 give 46/84/84/37/66%.
+- **Not done: measured DIL.** With the descriptor-carrying DIL preset, Ja
+  decodes through the loop (at 4473). The **analogue side** then fails
+  `Sd-bar timeout (9.5.2.2.1)`. That is consistent with the analogue Sd
+  acquisition fragility found in step 3: an unimpaired run passes with Ja
+  at 4462 and fails at 4397, and its fix is a separate task. Those rows are
+  kept runnable as `v92_startup_test --line-row 1|3`, and are not asserted.
+- **Not graded: Phase 4.** TRN2u/CPu still go through the raw
+  `v92_trn2u_demod_feed`. The loop rows stop at the first CPt.
+- **Not in these rows: clock offset.** This harness clocks both ends from
+  one symbol counter, so an A/D clock offset would need the downstream
+  modelled as well.
+- Unchanged: the other 51 `v92_startup_test` lines,
+  `v92_p3_rx_line_test`, `vpcm_loopback_test --all-tests`,
+  `v92_proc_eval_test`. The engine does not use this interface yet; that
+  is step 8.
+- Diagnostics: `V92_P3_RX_DEBUG=1` prints the second-TRN1u search and its
+  convergence every 256 symbols. `V92_PAIR_UP_DUMP=<path>` writes the
+  pair's A/D codewords.
 
 ### 8. Engine integration and diagnostics
 

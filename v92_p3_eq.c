@@ -64,6 +64,8 @@ bool v92_p3_eq_start(v92_p3_eq_t *eq, int64_t start)
         return false;
     eq->started = true;
     eq->start = start;
+    eq->ref_from = 0;
+    eq->ref_until = eq->cfg.trn_symbols;
     return true;
 }
 
@@ -292,13 +294,14 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
         y += eq->taps[j]*u[j];
     for (int j = 0; j < eq->cfg.nfb; j++)
         y += eq->fb[j]*eq->dhist[j];
-    ref = reference_next(&eq->gpa);
-    if (eq->k >= eq->cfg.trn_symbols)
-        ref = 0;
+    ref = eq->k >= eq->ref_from && eq->k < eq->ref_until
+        ? reference_next(&eq->gpa) : 0;
     d = ref ? ref : (y >= 0.0 ? 1 : -1);
     record(eq, y, d, ref);
 
-    if (eq->k >= eq->cfg.seed_symbols) {
+    if (eq->k >= eq->cfg.seed_symbols && eq->hold)
+        eq->tau += eq->freq;
+    else if (eq->k >= eq->cfg.seed_symbols) {
         double energy = 1e-9;
         double e = d - y;
         double mu = ref ? eq->cfg.mu : eq->cfg.mu_dd;
@@ -351,6 +354,8 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
         }
         else
             eq->tau += eq->freq;   /* an open loop holds the set frequency */
+    }
+    if (eq->k >= eq->cfg.seed_symbols) {
         memmove(eq->z, eq->z + 1, (size_t)(n - 1)*sizeof(double));
         memmove(eq->dz, eq->dz + 1, (size_t)(n - 1)*sizeof(double));
     }
@@ -364,6 +369,32 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
     eq->have_prev = true;
     eq->k++;
     return true;
+}
+
+void v92_p3_eq_hold(v92_p3_eq_t *eq, bool hold)
+{
+    eq->hold = hold;
+}
+
+void v92_p3_eq_train_from(v92_p3_eq_t *eq, int64_t k0, int n)
+{
+    eq->gpa = 0;
+    eq->ref_from = k0;
+    eq->ref_until = k0 + n;
+    for (int64_t k = k0; k < eq->k && k < k0 + n; k++)
+        (void)reference_next(&eq->gpa);
+    if (eq->ref_from < eq->k)
+        eq->ref_from = eq->k;
+    eq->agree_fill = eq->agree_pos = eq->agree_sum = 0;
+    eq->hold = false;
+}
+
+void v92_p3_eq_reference(int8_t *ref, int n)
+{
+    uint32_t reg = 0;
+
+    for (int k = 0; k < n; k++)
+        ref[k] = (int8_t)reference_next(&reg);
 }
 
 int v92_p3_eq_agree_x10(const v92_p3_eq_t *eq)

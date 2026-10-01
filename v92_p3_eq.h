@@ -116,6 +116,10 @@ typedef struct {
                                       the size of the feed-forward ones */
     int64_t k;                     /* next symbol to produce */
     uint32_t gpa;                  /* reference generator */
+    int64_t ref_from;              /* symbols [ref_from, ref_until) are */
+    int64_t ref_until;             /* trained on the 8.5.7 reference */
+    bool hold;                     /* no adaptation: taps and timing frozen,
+                                      the learned frequency still applied */
 
     double y_prev;
     double d_prev;
@@ -154,6 +158,21 @@ bool v92_p3_eq_start(v92_p3_eq_t *eq, int64_t start);
  * fills eq->y / decision / reference when it did.  The first call that can
  * see seed_symbols of TRN1u solves the seed and produces symbol 0. */
 bool v92_p3_eq_step(v92_p3_eq_t *eq);
+
+/* Freeze (true) or release the taps and the timing loop.  Held, the
+ * interpolator keeps advancing at the learned frequency, so a long interval
+ * of something the equaliser must not train on (V.92 Phase 3's silences
+ * and three-level Su) costs only the frequency error times its length. */
+void v92_p3_eq_hold(v92_p3_eq_t *eq, bool hold);
+
+/* Train data-aided again, on a TRN1u whose first symbol is eq symbol k0
+ * (9.5.1.1.10's second TRN1u is zero-initialised like the first), for n
+ * symbols; releases the hold.  k0 may already be past -- the reference is
+ * advanced to the symbol produced next.  Agreement statistics restart. */
+void v92_p3_eq_train_from(v92_p3_eq_t *eq, int64_t k0, int n);
+
+/* The 8.5.7 TRN1u reference, +1/-1, for n symbols from its first. */
+void v92_p3_eq_reference(int8_t *ref, int n);
 
 /* Percentage (x10) of sign agreement over the last 256 data-aided symbols. */
 int v92_p3_eq_agree_x10(const v92_p3_eq_t *eq);

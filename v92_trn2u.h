@@ -158,6 +158,12 @@ int v92_trn2u_demod_feed(v92_trn2u_demod_t *demod,
                          const uint8_t *codewords,
                          int count);
 
+/* Feed symbols already equalised and timed by someone else (the Phase 3
+ * TRN1u equaliser, v92_p3_eq, handed on per docs/v92_p3_rx_line_plan.md
+ * step 7), in linear units where +/-lu are the outer points. */
+int v92_trn2u_demod_feed_values(v92_trn2u_demod_t *demod,
+                                const double *values,
+                                int count);
 /* Enable the fractionally timed, decision-directed front end used for a
  * foreign analogue modem.  Raw feed remains the default for a synchronous
  * DS0 source and for wire-format diagnostics. */

@@ -377,6 +377,20 @@ int v92_trn2u_demod_feed(v92_trn2u_demod_t *demod,
     return accepted;
 }
 
+int v92_trn2u_demod_feed_values(v92_trn2u_demod_t *demod,
+                                const double *values,
+                                int count)
+{
+    int accepted = 0;
+
+    if (!demod || !values || count <= 0)
+        return 0;
+    for (int s = 0; s < count; s++)
+        accepted += v92_trn2u_demod_linear(demod, values[s]);
+    demod->frames_accepted += (uint32_t)accepted;
+    return accepted;
+}
+
 void v92_trn2u_demod_enable_adaptive(v92_trn2u_demod_t *demod,
                                      double timing_mu,
                                      double equalizer_mu)
