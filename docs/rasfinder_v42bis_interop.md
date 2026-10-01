@@ -226,3 +226,26 @@ The visible destination and permissions match the intended setup. A masked
 password cannot prove that the saved credential matches the supplied bbs;
 re-saving that one value is a separate configuration action, not part of
 this read-only inspection.
+
+### Authorized password re-save attempt
+
+The user authorized re-saving only the bbs password as bbs and retesting.
+Selecting the existing account's password field and entering bbs returned
+`User name can't be modified`, followed by `ESC to PREV menu`. The next
+record-exit save prompt was confirmed with y; that session displayed BBS,
+but a fresh session again displayed bbs. Returning through the management
+menus did not offer another save confirmation. Do not claim the password
+update succeeded: the explicit error and masked value prevent verification.
+
+A read-only comparison shows DOWNLOAD's concurrent-login limit is 5,
+whereas bbs displays 36826. Thus the unusual value is specific to that
+record, not universally displayed by the menu. This and the rejected edit
+suggest an account/editor problem, without proving its cause or whether
+that value is related to password rejection. Other accounts were not edited
+or used for authentication.
+
+The retest reached CONNECT 7200 (12000 cap), readable banner, username echo
+and password prompt. The same paced bbs/CR password had no immediate
+response, and an extra CR after 30 seconds elicited Invalid Password.
+No successful password reset or RasFinder-to-BBS login is established.
+The captured edit and modem session are in `xid-validation/password-save`.
