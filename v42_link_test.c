@@ -24,6 +24,7 @@ typedef struct {
     bool detection_succeeded;
     bool detection_unsupported;
     bool xid_negotiated;
+    int xid_events;
     bool connected;
     bool disconnected;
     bool link_error;
@@ -88,6 +89,7 @@ static void status_changed(void *user_data, int status)
         break;
     case V42_STATUS_XID_NEGOTIATED:
         ep->xid_negotiated = true;
+        ep->xid_events++;
         break;
     case SIG_STATUS_LINK_CONNECTED:
         ep->connected = true;
@@ -362,6 +364,8 @@ static bool run_peer_compression_request(void)
     if (!caller || !peer)
         goto done;
     v42_set_status_callback(caller, status_changed, &ep);
+    /* This fixture tests parameter intersection, not the retry dialogue. */
+    v42_set_xid_optional_functions_octets(caller, 4);
     v42_restart(caller);
     hdlc_tx_flags(peer, 16);
     hdlc_tx_frame(peer, xid, sizeof(xid));
@@ -450,6 +454,99 @@ static void capture_v44_xid(void *ctx, const uint8_t *p, int n, int ok)
         wire->len = n;
     }
 }
+typedef struct {
+    endpoint_t *ep;
+    hdlc_tx_state_t *peer;
+    int requests, sabme, widths[4], peer_octets;
+    bool early_commit;
+} xid_dialogue_t;
+
+static void xid_dialogue_frame(void *user_data, const uint8_t *p, int n, int ok)
+{
+    xid_dialogue_t *d = user_data;
+    if (!ok || n < 2) return;
+    if (p[1] == 0xaf && n >= 12) {
+        if (d->requests >= 4) { d->early_commit = true; return; }
+        d->widths[d->requests++] = p[7];
+        if (d->peer_octets == -3 && d->requests > 1) return;
+        if (d->ep->xid_negotiated || d->ep->connected) d->early_commit = true;
+        /* Return the recorded RasFinder private group, including its P0=3.
+           Change only the options length to exercise a modern/invalid peer. */
+        uint8_t reply[] = {
+            3,0xaf,0x82,0x80,0,0x13,3,3,0x8e,0x89,0,5,2,4,0,
+            6,2,4,0,7,1,15,8,1,15,0xf0,0,15,0,3,'V','4','2',
+            1,1,3,2,2,4,0,3,1,32
+        };
+        uint8_t frame[64];
+        memcpy(frame, reply, 11);
+        int length = sizeof(reply);
+        int options = d->peer_octets == -3 ? 3 : d->peer_octets;
+        int shift = options - 3;
+        if (shift == 1) frame[11] = 0;
+        memcpy(frame + 11 + shift, reply + 11, sizeof(reply) - 11);
+        frame[5] += shift; frame[7] = options; length += shift;
+        hdlc_tx_frame(d->peer, frame, length);
+    } else if (p[1] == 0x7f) {
+        d->sabme++;
+        const uint8_t ua[] = {3,0x73};
+        hdlc_tx_frame(d->peer, ua, sizeof(ua));
+    }
+}
+
+static bool run_xid_dialogue(int forced, int peer_octets)
+{
+    endpoint_t ep = {0};
+    xid_dialogue_t d = {.ep=&ep, .peer_octets=peer_octets};
+    v42_state_t *caller = v42_init(NULL,true,false,get_payload,put_payload,&ep);
+    d.peer = hdlc_tx_init(NULL,false,1,false,NULL,NULL);
+    hdlc_rx_state_t *wire = hdlc_rx_init(NULL,false,false,1,xid_dialogue_frame,&d);
+    bool ok = false;
+    if (!caller || !d.peer || !wire) goto done;
+    v42_set_status_callback(caller,status_changed,&ep);
+    v42_set_compression(caller,3,1024,32);
+    if (peer_octets == -3) v42_set_bit_rate(caller,2400);
+    if (forced) v42_set_xid_optional_functions_octets(caller,forced);
+    v42_restart(caller);
+    hdlc_tx_flags(d.peer,16);
+    bool data_sent = false;
+    for (int i=0; i<(peer_octets == -3 ? 100000 : 4096); i++) {
+        hdlc_rx_put_bit(wire,v42_tx_bit(caller));
+        v42_rx_bit(caller,hdlc_tx_get_bit(d.peer));
+        if (ep.connected && !data_sent) {
+            const uint8_t data[] = {1,0,0,'R','F'};
+            data_sent = hdlc_tx_frame(d.peer,data,sizeof(data)) == 0;
+        }
+    }
+    int expected = !forced && peer_octets == 3 ? 2 : 1;
+    if (peer_octets == -3)
+        ok = ep.link_error && !ep.xid_negotiated && !ep.connected && d.sabme == 0;
+    else if (peer_octets == 2)
+        ok = !ep.xid_negotiated && !ep.connected && d.sabme == 0;
+    else
+        ok = !d.early_commit && d.requests == expected && d.sabme == 1
+          && d.widths[0] == (forced ? forced : 4)
+          && (expected == 1 || d.widths[1] == 3)
+          && ep.xid_events == 1 && ep.connected
+          && ep.rx_len == 2 && memcmp(ep.rx,"RF",2) == 0;
+    /* A new link must start with the configured format, not retain fallback. */
+    if (ok && !forced && peer_octets == 3) {
+        ep.xid_negotiated = ep.connected = false;
+        d.requests = d.sabme = 0; d.early_commit = false;
+        v42_restart(caller);
+        for (int i=0; i<1000 && d.requests == 0; i++) {
+            hdlc_rx_put_bit(wire,v42_tx_bit(caller));
+            v42_rx_bit(caller,hdlc_tx_get_bit(d.peer));
+        }
+        ok = d.requests > 0 && d.widths[0] == 4;
+    }
+done:
+    if (!ok) fprintf(stderr,"xid dialogue force=%d peer=%d requests=%d widths=%d/%d SABME=%d early=%d events=%d connected=%d rx=%d\n",forced,peer_octets,d.requests,d.widths[0],d.widths[1],d.sabme,d.early_commit,ep.xid_events,ep.connected,ep.rx_len);
+    if (wire) hdlc_rx_free(wire);
+    if (d.peer) hdlc_tx_free(d.peer);
+    if (caller) v42_free(caller);
+    return ok;
+}
+
 static bool v44_xid_offer(void)
 {
     static const uint8_t tail[] = {
@@ -496,6 +593,8 @@ static bool v44_peer_xid(int direction, bool malformed, bool defaults, bool supp
     bool ok = false;
     if (caller && tx && (!support || v42_set_v44(caller,&local) == 0)) {
         v42_set_status_callback(caller,status_changed,&ep);
+        /* Keep this single-frame fixture focused on V.44 parameter parsing. */
+        v42_set_xid_optional_functions_octets(caller,4);
         v42_restart(caller);
         hdlc_tx_flags(tx,16); hdlc_tx_frame(tx,frame,n);
         for (int i = 0; i < 2048; i++) {
@@ -546,6 +645,12 @@ int main(void)
           "V.42 legacy XID encoding preserves private-group boundaries and refusal");
     CHECK(v42_set_xid_optional_functions_octets(NULL, 3) == -1,
           "V.42 XID length rejects a missing context");
+    CHECK(run_xid_dialogue(0,3), "V.42 automatically retries legacy XID before SABME and resets on a new link");
+    CHECK(run_xid_dialogue(0,4), "V.42 modern XID establishes without a compatibility retry");
+    CHECK(run_xid_dialogue(4,3), "V.42 forced four-octet XID bypasses automatic adaptation");
+    CHECK(run_xid_dialogue(3,3), "V.42 forced three-octet XID needs no extra exchange");
+    CHECK(run_xid_dialogue(0,2), "V.42 malformed option lengths cannot establish a link");
+    CHECK(run_xid_dialogue(0,-3), "V.42 failed compatibility exchange reports retry exhaustion without establishment");
     CHECK(run_peer_compression_request(),
           "V.42 declines a peer compression request without a V.42bis codec");
     CHECK(v44_xid_offer(), "V.44 Annex A outgoing XID user data has exact wire format");

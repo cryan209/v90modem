@@ -95,6 +95,7 @@ typedef struct
     uint8_t vr;
     int state;
     int configuring;
+    uint8_t xid_optional_functions_octets;
     bool local_busy;
     bool far_busy;
     bool rejected;

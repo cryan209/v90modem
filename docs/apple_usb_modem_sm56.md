@@ -1094,3 +1094,76 @@ extension for a long time, so a "no call in progress" run taken fifteen seconds
 after a dial test reported RING_DETECT and briefly looked like the endpoint
 reporting rings spuriously. A minimal libusb A/B then showed the device quiet,
 which is what withdrew it.
+
+### V.92 against our own digital side over SIP -- the real topology (2026-10-01)
+
+The section above could only refute modem-to-modem V.92.  This is the
+arrangement the Recommendation is written for: the Apple modem is the ANALOGUE
+modem on its 2-wire loop and dials `sip_v90_modem`, which answers on SIP as the
+DIGITAL modem over G.711.  Exactly one codec sits in the path -- the VG224's
+D/A toward the loop -- which is where a central-office codec sits in a real
+V.92 call.  `artifacts/apple-v92-sip-r4` (V.92) and `apple-v90-sip-r6` (V.90),
+each with its `run.sh`.
+
+**The digital end must be on tower, not this Mac.**  Register as **6000/6000**:
+6001 now answers 403 Forbidden from both hosts and over IPv4 as well as the
+IPv6 the name resolves to first, although the dialplan still routes it (dialling
+6001 from an FXS port returns ringback).  This Mac's default route is a VPN
+tunnel (`utun10`), so it cannot register at all and would carry the bearer over
+the tunnel if it could; the 2026-09-30 finding already has this host's network
+path breaking V.8 outright.  The modem has to stay on the Mac, so the digital
+end goes in tower's `v90modem-sip` container and the audio path between them is
+PBX-internal.  **Leave ~45 s between calls**: dial sooner and the exchange does
+not ring, the coupler reports `engine never started`, and the previous call's
+tap is all silence -- which reads exactly like a transmit failure.
+
+**What happens: V.8, Phase 2 and the whole V.92 contract complete, and then
+NEITHER side transmits Phase 3.**  V.92 is selected in both directions
+(`valid INFO1a U_INFO=78 MD=0 upstream_code=6 downstream_code=6`, the digital
+side arming `4-point TRN2u, L_U=8000` and the analogue side selecting
+`Table 18 ... linear PCM`), the analogue startup runs SILENCE/Ru/R-bar-u/TRN1u/Ja,
+and it then fails `Sd-bar timeout (9.5.2.2.1)` at +10.6 s, retrains per 9.5.2
+and sits in Phase 2 at `rx=TONE_B` until the 60 s training timeout drops it to
+V.22bis.  Reproducible to 50 ms across runs (+10560, +10613 ms).
+
+**The analogue receiver is NOT at fault, and its own transmit tap is what says
+so -- the fifth time in this project.**  `raw_v90_tx=453920` moves on the
+digital side, which reads as a transmitted downstream and is not one:
+µ-law-expanded, its own `live-tx.g711` is **exactly zero from t=11 s to t=67 s**,
+56 seconds of digital silence (0xFF) spanning the whole of Phase 3.  Under
+`ME_MODE=v90` the same path transmits continuously instead -- RMS ~1280 for the
+rest of the call -- but at **1200 Hz with 0.0% at 1333 Hz**, i.e. the Phase 2 CC
+carrier, not Sd.  So **in both modes the digital side never puts Sd on the
+wire**, and the analogue side's `no Sd in this window (held-out score 0.000)` on
+every window is correct behaviour rather than a detector failure.
+
+**The cause is one step further up: Ja is never accepted, so 9.3.1.3's Sd never
+starts.**  9.3.1.3 has the digital modem transmit Sd only after receiving Ja.
+In the V.90 run the digital side logs `V.90 Ja capture: first bits at t=11.180s
+(52 bits)` and then no `Ja detected, starting Sd` and no `Sd complete`; in the
+V.92 run it logs **no Ja activity at all**.  (Between the two Apple modems the
+500 ms energy-gap fallback did fire and that side did send `Sd complete (64
+reps)`, so the Ja path works when the gap appears -- over this bearer it does
+not.)  **That is the blocker, and it is upstream of the codeword question
+entirely**: nothing yet tests whether our codeword receiver can lock a
+downstream off a line, because no downstream has been transmitted.
+
+**Device-level taps now exist, and the decisive reading needed them.**
+`--rx-replay` could consume a recording and nothing could make one.  The
+engine's own `v34_rx.raw` cannot answer this: it is written only while the V.34
+receiver is fed, so on a V.90/V.92 call it has a **hole exactly over Phase 3**
+-- its `RX dump mark` stage marks jump from Phase 2 straight to the
+post-retrain Phase 2 -- and it is post-filter besides.  Reading it as a
+continuous record of the line produced a confident, wrong story about a 54 s
+pure 2400 Hz tone; **those marks are in the file's own log for this reason, so
+map position to stage with them before interpreting it.**
+`APPLE_MODEM_RX_TAP` and `APPLE_MODEM_TX_TAP` record the raw device streams at
+`--rate`, the receive one being exactly what `--rx-replay` expects.  With them
+the analogue side's line reads: ANSam at 2100 Hz RMS ~5050, the digital side's
+Phase 2 CC at **1200 Hz RMS ~6000** arriving loud, then from t=19 s **RMS ~450
+with no spectral content** while our own transmit continues at ~5950.
+
+**One trap in the Sd measurement itself: DTMF's 1336 Hz column tone sits on top
+of Sd's 1333 Hz line** (8000/6).  Both taps peak at 1336 Hz during dialling and
+the receive tap reads 73.5% there, which is our own digits, not Sd.  Only the
+post-dial region counts.

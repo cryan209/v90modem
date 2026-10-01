@@ -499,6 +499,39 @@ static void engine_feed(int16_t *s, long n)
     }
 }
 
+/* Device-level taps.  --rx-replay could consume a recording and nothing could
+ * MAKE one, which left the question that matters here unobservable: the
+ * engine's own v34_rx.raw is written only while the V.34 receiver is fed, so on
+ * a V.90/V.92 call it has a HOLE exactly over Phase 3 -- its stage marks jump
+ * from Phase 2 straight to the post-retrain Phase 2 -- and it is post-filter
+ * besides.  These two are the raw device streams at --rate, so rx-tap.s16 is
+ * exactly what --rx-replay expects (before dc_block, which engine_feed applies
+ * itself; recording inside engine_feed would make a replay re-record its own
+ * input, so the receive tap lives in the live-only callback).  The transmit tap
+ * is what actually went on the line, which is the only way to tell our own
+ * echo from the far end -- a distinction this project has got wrong often
+ * enough to be worth the two fopen()s. */
+static FILE *rx_tap, *tx_tap;
+
+static void taps_open(void)
+{
+    const char *r = getenv("APPLE_MODEM_RX_TAP"), *t = getenv("APPLE_MODEM_TX_TAP");
+
+    if (r && *r && !(rx_tap = fopen(r, "wb")))
+        fprintf(stderr, "[APPLE] cannot write RX tap %s\n", r);
+    if (t && *t && !(tx_tap = fopen(t, "wb")))
+        fprintf(stderr, "[APPLE] cannot write TX tap %s\n", t);
+    if (rx_tap || tx_tap)
+        fprintf(stderr, "[APPLE] device taps: s16le mono at %.0f Hz%s%s\n", g_rate,
+                rx_tap ? " rx" : "", tx_tap ? " tx" : "");
+}
+
+static void taps_close(void)
+{
+    if (rx_tap) { fclose(rx_tap); rx_tap = NULL; }
+    if (tx_tap) { fclose(tx_tap); tx_tap = NULL; }
+}
+
 static OSStatus input_cb(void *ref, AudioUnitRenderActionFlags *flags,
                          const AudioTimeStamp *ts, UInt32 bus, UInt32 nframes,
                          AudioBufferList *unused)
@@ -515,6 +548,8 @@ static OSStatus input_cb(void *ref, AudioUnitRenderActionFlags *flags,
             fprintf(stderr, "  AudioUnitRender: %d\n", (int)rc);
         return rc;
     }
+    if (rx_tap)
+        fwrite(in_abl->mBuffers[0].mData, 2, nframes, rx_tap);
     engine_feed(in_abl->mBuffers[0].mData, nframes);
     return noErr;
 }
@@ -548,6 +583,8 @@ static OSStatus output_cb(void *ref, AudioUnitRenderActionFlags *flags,
         if (ring_r != ring_w) { out[i] = ring[ring_r]; ring_r = (ring_r + 1) % RING_N; }
         else                    out[i] = 0;
     }
+    if (tx_tap)
+        fwrite(out, 2, nframes, tx_tap);
     return noErr;
 }
 
@@ -602,7 +639,10 @@ static AudioObjectID find_device(void)
 
 static int audio_start(void)
 {
-    AudioObjectID dev = find_device();
+    AudioObjectID dev;
+
+    taps_open();
+    dev = find_device();
     AudioObjectPropertyAddress sra = { kAudioDevicePropertyNominalSampleRate,
         kAudioObjectPropertyScopeGlobal, kAudioObjectPropertyElementMain };
     Float64 want = g_rate, got = 0;
@@ -838,6 +878,10 @@ static void usage(const char *a0)
         "APPLE_MODEM_TX_AMP per-tone DTMF amplitude (default 0.15)\n"
         "APPLE_MODEM_DTMF_MS on/off times in ms (default 100/120)\n"
         "APPLE_MODEM_TX_GAIN engine transmit gain into the DAA (default 1.0)\n"
+        "APPLE_MODEM_RX_TAP    record the raw device receive stream at --rate;\n"
+        "                      this is exactly what --rx-replay consumes\n"
+        "APPLE_MODEM_TX_TAP    record what went on the line, for telling our own\n"
+        "                      echo from the far end\n"
         "APPLE_MODEM_ADDR       USB bus:addr, when two modems are present\n"
         "APPLE_MODEM_AUDIO_UID  substring of that modem's CoreAudio UID\n",
         a0, a0, a0, a0, a0);
@@ -964,6 +1008,7 @@ int main(int argc, char **argv)
     AudioUnitUninitialize(au);
     if (g_engine_running) me_on_sip_disconnected();
     me_destroy();
+    taps_close();
     fprintf(stderr, "[APPLE] render errors %d, engine %s, DTMF %s\n",
             render_errors, g_engine_running ? "ran" : "never started",
             tx_dtmf_done ? "completed" : "CUT SHORT");

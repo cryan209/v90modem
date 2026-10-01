@@ -66,6 +66,7 @@ typedef struct
     int rx_n401;
     int tx_window_size_k;
     int rx_window_size_k;
+    int xid_optional_functions_octets;
     int compression_p0;
     int compression_p1;
     int compression_p2;
@@ -112,8 +113,9 @@ SPAN_DECLARE(int) v42_tx_bit(void *user_data);
     \return 0 on success, or -1 for an invalid rate. */
 SPAN_DECLARE(int) v42_set_bit_rate(v42_state_t *s, int bit_rate);
 
-/*! Select the XID optional-functions encoding length. Default 4 follows
-    V.42 (03/2002) Table 11a; 3 is a compatibility option for older peers.
+/*! Select the XID optional-functions encoding length. Default 0 starts with
+    V.42 (03/2002) Table 11a's four octets and renegotiates before establishment
+    when a peer advertises the older three-octet format. Values 3 or 4 force it.
     Call before v42_restart(). Returns -1 for invalid arguments. */
 SPAN_DECLARE(int) v42_set_xid_optional_functions_octets(v42_state_t *s, int octets);
 

@@ -365,6 +365,8 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
     uint8_t param_len;
     bool v42bis_group;
     bool v44_present = false;
+    int peer_options_octets = 0;
+    bool response = len > 0 && frame[0] == ss->lapm.cmd_addr;
     v42_v44_parameters_t peer_v44 = {0};
 
     s = &ss->lapm;
@@ -416,6 +418,9 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
                 switch (param_id)
                 {
                 case PI_HDLC_OPTIONAL_FUNCTIONS:
+                    if (param_len != 3 && param_len != 4)
+                        return -1;
+                    peer_options_octets = param_len;
                     /* TODO: param_val is never used right now. */
                     //param_val = pack_value(buf, param_len);
                     break;
@@ -503,6 +508,19 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
         config.comp_dict_size = ss->config.comp_dict_size;
     if (config.comp_max_string > ss->config.comp_max_string)
         config.comp_max_string = ss->config.comp_max_string;
+    /* V.42 8.10.1/8.10.2: finish parameter negotiation before establishment.
+       Table 11a requires four option octets; some older peers advertise three
+       and misparse our private group at four. Retry once using their encoding,
+       without publishing interim parameters or initializing a compressor.
+       This is wire-format compatibility, not a dictionary inference. */
+    if (ss->config.xid_optional_functions_octets == 0
+        && s->state == LAPM_IDLE && peer_options_octets == 3
+        && s->xid_optional_functions_octets == 4)
+    {
+        s->xid_optional_functions_octets = 3;
+        if (response && s->configuring)
+            return 1;
+    }
     ss->negotiated.v44_valid = v44_present && ss->config.v44_enabled;
     memset(&ss->negotiated.v44, 0, sizeof(ss->negotiated.v44));
     if (ss->negotiated.v44_valid)
@@ -527,6 +545,7 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
     ss->negotiated.rx_n401 = s->rx_n401;
     ss->negotiated.tx_window_size_k = s->tx_window_size_k;
     ss->negotiated.rx_window_size_k = s->rx_window_size_k;
+    ss->negotiated.xid_optional_functions_octets = s->xid_optional_functions_octets;
     ss->negotiated.compression_p0 = config.comp;
     ss->negotiated.compression_p1 = config.comp_dict_size;
     ss->negotiated.compression_p2 = config.comp_max_string;
@@ -558,7 +577,7 @@ static void transmit_xid(v42_state_t *ss, uint8_t addr)
     len += 3;
 
     /* Parameter negotiation group */
-    group_len = 16 + ss->config.xid_optional_functions_octets;
+    group_len = 16 + s->xid_optional_functions_octets;
     *buf++ = GI_PARAM_NEGOTIATION;
     put_net_unaligned_uint16(buf, group_len);
     buf += 2;
@@ -577,11 +596,11 @@ static void transmit_xid(v42_state_t *ss, uint8_t addr)
     /* V.42 (03/2002) Table 11a Note 1 requires four octets. The older
        RasFinder 4.12 negotiated the private compression group correctly with
        three in live tests; make that compatibility deviation explicit, not default. */
-    *buf++ = ss->config.xid_optional_functions_octets;
+    *buf++ = s->xid_optional_functions_octets;
     *buf++ = 0x8A;
     *buf++ = 0x89;
     *buf++ = 0x00;
-    if (ss->config.xid_optional_functions_octets == 4)
+    if (s->xid_optional_functions_octets == 4)
         *buf++ = 0x00;
 
     /* Send the maximum as a number of bits, rather than octets */
@@ -713,6 +732,15 @@ static void t401_expired(v42_state_t *ss)
     if (s->retry_count > V42_DEFAULT_N_400)
     {
         s->retry_count = 0;
+        if (s->configuring)
+        {
+            /* V.42 8.10.3 and Annex III.3: failed XID must be reported;
+               do not establish with a possibly different peer configuration. */
+            s->configuring = false;
+            s->state = LAPM_IDLE;
+            report_rx_status_change(ss, SIG_STATUS_LINK_ERROR);
+            return;
+        }
         switch (s->state)
         {
         case LAPM_ESTABLISH:
@@ -1178,8 +1206,19 @@ static int rx_unnumbered_rsp_frame(v42_state_t *ss, const uint8_t *frame, int le
     case LAPM_U_XID:
         if (s->configuring)
         {
-            if (receive_xid(ss, frame, len) != 0)
+            int result = receive_xid(ss, frame, len);
+            if (result < 0)
                 break;
+            if (result > 0)
+            {
+                span_log(&ss->logging, SPAN_LOG_FLOW,
+                         "XID: peer uses three option octets; renegotiating before SABME\n");
+                t401_stop(ss);
+                s->retry_count = 0;
+                transmit_xid(ss, s->cmd_addr);
+                t401_start(ss);
+                break;
+            }
             s->configuring = false;
             t401_stop(ss);
             switch (s->state)
@@ -1632,7 +1671,7 @@ SPAN_DECLARE(int) v42_set_bit_rate(v42_state_t *s, int bit_rate)
 
 SPAN_DECLARE(int) v42_set_xid_optional_functions_octets(v42_state_t *s, int octets)
 {
-    if (!s || (octets != 3 && octets != 4))
+    if (!s || (octets != 0 && octets != 3 && octets != 4))
         return -1;
     s->config.xid_optional_functions_octets = octets;
     return 0;
@@ -1706,6 +1745,8 @@ SPAN_DECLARE(void) v42_set_status_callback(v42_state_t *s, span_modem_status_fun
 
 SPAN_DECLARE(void) v42_restart(v42_state_t *s)
 {
+    s->lapm.xid_optional_functions_octets = s->config.xid_optional_functions_octets
+                                           ? s->config.xid_optional_functions_octets : 4;
     memset(&s->negotiated, 0, sizeof(s->negotiated));
     hdlc_tx_init(&s->lapm.hdlc_tx, false, 1, true, lapm_hdlc_underflow, s);
     hdlc_rx_init(&s->lapm.hdlc_rx, false, false, 1, lapm_receive, s);
@@ -1775,7 +1816,7 @@ SPAN_DECLARE(v42_state_t *) v42_init(v42_state_t *ss,
     ss->config.v42_rx_window_size_k = V42_DEFAULT_WINDOW_SIZE_K;
     ss->config.v42_tx_n401 = V42_DEFAULT_N_401;
     ss->config.v42_rx_n401 = V42_DEFAULT_N_401;
-    ss->config.xid_optional_functions_octets = 4;
+    ss->config.xid_optional_functions_octets = 0;
 
     /* V.42bis 5.1/Annex A: compression is optional and defaults to P0=0.
        This LAPM API carries uncompressed application bytes and has no

@@ -30,9 +30,8 @@ if pgrep -x sip_v90_modem >/dev/null; then
     fi
 fi
 
-# RasFinder 4.12 needs its legacy XID encoding for a readable login stream;
-# ME_LAPM_XID_OPTION_OCTETS=4 selects the V.42 (03/2002) Table 11a default.
-ME_LAPM_XID_OPTION_OCTETS=${ME_LAPM_XID_OPTION_OCTETS:-3} \
+# XID compatibility is detected from the peer; 3/4 remain diagnostic overrides.
+ME_LAPM_XID_OPTION_OCTETS=${ME_LAPM_XID_OPTION_OCTETS:-auto} \
     VPCM_G711_TAP_DIR="$DIR" SIP_FORCE_PCMU=${SIP_FORCE_PCMU:-1} \
     ./sip_v90_modem --sip-server asterisk.net.cryan.nz \
         --username 6001 --password 6001 \
