@@ -6,7 +6,7 @@ modem is on a real 2-wire loop behind a single codec (VG224 -> SIP -> us),
 so that 9.5.1.1.3 releases Sd. On the byte-exact SIP loopback it must behave
 exactly as it does today.
 
-Status: step 1 done, 2026-10-01. Each step lists what it changes, how it is
+Status: steps 1-2 done, 2026-10-01. Each step lists what it changes, how it is
 measured, and the result that completes it. Do the steps in order: each one
 produces the instrument the next one is graded by.
 
@@ -100,29 +100,67 @@ u-law). The receiver is armed at G.711 sample 81440.
   - The receiver also takes a false Ru -> Ru-bar -> TRN1u lock at 18214,
     inside the repeated Ja.
 
-### 2. A synthetic loop channel the loopback cannot provide
+### 2. A synthetic loop channel the loopback cannot provide -- DONE 2026-10-01
 
 Every existing V.92 receive test is fed a byte-exact DS0, which is why none
 of this showed up.
 
-- Add an impairment stage to the audio harness (`v92_analogue_audio.c`'s
-  network-ADC path), applied before G.711 quantisation:
-  - an FIR channel. Fit it from r4's own pair: `call/tx-tap.s16` is the
-    analogue side's transmit at 9600 Hz and `server/live-rx.g711` is what
-    arrived. Fit it once and store the taps as a generated table.
-  - a fractional sampling phase.
-  - a ppm clock offset.
-  - additive noise.
-- Test rows:
-  - ideal (must be identical to today)
-  - channel only
-  - channel + phase 0.0/0.25/0.5/0.75
-  - channel + ±200 ppm
-  - channel + noise at 25 dB
-- Rows that do not pass yet are reported, not hidden, as the V.34 matrix
-  does.
-- **Done when:** the ideal row passes and the impaired rows fail the same
-  way the fixture does.
+- **`v92_line_channel.c`** (test-only, not in `SRCS`) sits between the
+  analogue modem's 16 kHz audio and the network ADC. It applies, in order:
+  1. an FIR at 16 kHz,
+  2. a fractional A/D sampling phase,
+  3. a ppm clock offset (Blackman-windowed sinc interpolation),
+  4. additive Gaussian noise.
+
+  G.711 quantisation stays with the caller, once. With an ideal
+  configuration it passes every other input sample exactly, as the harness's
+  network ADC always has.
+- **The channel is the real r4 loop.** `tools/v92_fit_line_channel.py`
+  fits our own 16 kHz upstream (`v92_p3_rx_line_test --dump-tx`) to the
+  fixture.
+  - TRN1u anchors the fit, since its scrambler is zero-initialised and ours
+    and the call's are the same symbols.
+  - The script searches alignment and clock offset and solves the taps by
+    least squares, scored held out.
+  - Taps vs held-out R²: 32 taps 0.988 (19 dB), 64 taps 0.997 (25 dB),
+    96 taps 0.9985 (28 dB), 128 and 160 taps 0.9989 (~29.5 dB). The plateau
+    sits at about the line's own noise floor.
+  - The clock offset is only loosely determined in these windows, landing
+    anywhere between +100 and +200 ppm, but its sign and size agree with the
+    163 ppm measured off the Phase 2 carrier.
+  - Shipped: 96 taps over 1800 symbols, written to the generated table
+    `v92_line_channel_r4.h`, normalised to unit gain at 1333 Hz.
+  - |H| is fairly flat in magnitude (0.85 at 300 Hz, 1.30 at 3400 Hz).
+    What defeats the slicer is its phase response.
+- **The model is as hard as the real line, not harder.** Graded with
+  `tools/v92_trn1u_bound.py` on `--dump-row` output:
+
+  | stream | raw sign err | 21 taps | 41 taps |
+  |---|---|---|---|
+  | real fixture | 13.4% | 8.2 dB | 9.3 dB |
+  | synthetic r4 loop | 13.8% | 10.5 dB | 12.6 dB |
+  | synthetic loop + phase .5 + 163 ppm + 25 dB, A-law | 14.6% | 8.6 dB | 10.4 dB |
+
+  The equalised held-out sign error is 0-0.4% everywhere.
+- **Fourteen rows in `v92_p3_rx_line_test`** (`make v92-loop-rx-test`): the
+  fixture plus thirteen synthetic.
+  - Ideal u-law/A-law, phase 0.5 alone, +200 ppm alone and 25 dB noise alone
+    all decode Ja today. Without ISI the raw slicer survives each of these.
+  - Every row with the loop's ISI fails `trn1u_ones_low`, exactly as the
+    recording does:
+    - the loop alone
+    - phase 0.25/0.5/0.75
+    - +/-200 ppm
+    - 25 dB noise
+    - an A-law row with phase 0.5, +163 ppm and 25 dB noise together
+  - Each row carries its expected outcome today, `expect_pass_today`.
+    `--expect-failure` checks each row against it, so a row that starts
+    passing is flagged rather than missed. Without the flag, every row must
+    pass.
+- **Also seen:** even on the ideal row the receiver enters TRN1u ~30 symbols
+  late (1007 against ~977). So the late TRN1u start on the fixture is the
+  receiver's detection latency, not something the loop does. Step 3 removes
+  it.
 
 ### 3. Find TRN1u's first symbol from its known sequence
 

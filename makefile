@@ -200,7 +200,7 @@ V90_ENGINE_REPLAY_OBJS = v90_engine_replay.o $(filter-out sip_modem.o,$(OBJS))
 # Not a test: replays a recorded digital-side G.711 receive tap through the
 # V.92 strict Phase-3 receiver, which live only ever rehunts and so reports
 # nothing when it rejects.  Same objects that receiver needs in the engine.
-V92_P3_RX_LINE_TEST_OBJS = v92_p3_rx_line_test.o v92_p3_rx.o v92_ja_decode.o p3_demod.o v90.o v90_cp_rx.o v90_dil_measure.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o v92_trn2u.o v92_cp_rx.o
+V92_P3_RX_LINE_TEST_OBJS = v92_p3_rx_line_test.o v92_line_channel.o $(filter-out v92_startup_test.o,$(V92_STARTUP_TEST_OBJS))
 V92_P3_PROBE_OBJS = v92_p3_probe.o v92_p3_rx.o v92_ja_decode.o p3_demod.o v90.o v90_cp_rx.o v90_dil_measure.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o v92_trn2u.o v92_cp_rx.o
 V34_DUPLEX_TEST_OBJS = v34_duplex_test.o
 V34_HDX_TEST_OBJS = v34_hdx_test.o
@@ -581,8 +581,8 @@ v90_upstream_replay: $(V90_UPSTREAM_REPLAY_OBJS) spandsp
 v90_engine_replay: $(V90_ENGINE_REPLAY_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(V90_ENGINE_REPLAY_OBJS) -o $@ $(LDFLAGS)
 
-v92_p3_rx_line_test: $(V92_P3_RX_LINE_TEST_OBJS) spandsp
-	$(CC) $(V92_P3_RX_LINE_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+v92_p3_rx_line_test: $(V92_P3_RX_LINE_TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
+	$(CC) $(V92_P3_RX_LINE_TEST_OBJS) -o $@ $(LDFLAGS)
 
 v92_p3_probe: $(V92_P3_PROBE_OBJS) spandsp
 	$(CC) $(V92_P3_PROBE_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
@@ -786,7 +786,7 @@ fixed-compare:
 	fi
 
 clean:
-	rm -f v42bis_test.o $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V44_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test *.d tools/*.d $(APPLE_USB_MODEM_PROBE_OBJS) apple_usb_modem_probe apple_usb_modem_audio \
+	rm -f v42bis_test.o $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(V92_P3_RX_LINE_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V44_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test *.d tools/*.d $(APPLE_USB_MODEM_PROBE_OBJS) apple_usb_modem_probe apple_usb_modem_audio \
 	    tools/apple_usb_modem_coupler.o apple_usb_modem_coupler
 
 distclean: clean
