@@ -13,6 +13,7 @@ void v92_p3_eq_default_config(v92_p3_eq_config_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
     cfg->ntaps = 31;
+    cfg->nfb = 8;
     cfg->seed_symbols = 256;
     cfg->trn_symbols = 2040;
     cfg->mu = 0.01;
@@ -37,7 +38,8 @@ bool v92_p3_eq_init(v92_p3_eq_t *eq, const v92_p3_eq_config_t *cfg)
     else
         v92_p3_eq_default_config(&c);
     if (c.ntaps < 1 || c.ntaps > V92_P3_EQ_MAX_TAPS || !(c.ntaps & 1)
-        || c.seed_symbols < c.ntaps || c.seed_symbols > V92_P3_EQ_MAX_SEED
+        || c.nfb < 0 || c.nfb > V92_P3_EQ_MAX_FB
+        || c.seed_symbols < c.ntaps + c.nfb || c.seed_symbols > V92_P3_EQ_MAX_SEED
         || c.trn_symbols < c.seed_symbols || c.max_ppm < 0.0)
         return false;
     memset(eq, 0, sizeof(*eq));
@@ -108,60 +110,67 @@ static int reference_next(uint32_t *reg)
     return b ? -1 : 1;
 }
 
-/* Solve (A'A + lambda I) w = A'r by Gaussian elimination, A's rows being
- * consecutive ntaps-long windows of z. */
+#define LS_MAX (V92_P3_EQ_MAX_TAPS + V92_P3_EQ_MAX_FB)
+
+/* Solve (A'A + lambda I) w = A'r by Gaussian elimination.  Row k of A is
+ * the ntaps-long window of z starting at k followed by the nfb reference
+ * symbols before k (zero before TRN1u: not known, and not TRN1u). */
 static bool least_squares(const double *z, const int8_t *ref, int rows,
-                          int n, double *w)
+                          int n, int nfb, double fb_scale, double *w)
 {
-    double m[V92_P3_EQ_MAX_TAPS][V92_P3_EQ_MAX_TAPS + 1];
+    static double m[LS_MAX][LS_MAX + 1];
+    const int dim = n + nfb;
+    double a[LS_MAX];
     double trace = 0.0;
 
     memset(m, 0, sizeof(m));
     for (int k = 0; k < rows; k++) {
-        const double *a = z + k;
-
-        for (int i = 0; i < n; i++) {
-            m[i][n] += a[i]*ref[k];
-            for (int j = i; j < n; j++)
+        for (int i = 0; i < n; i++)
+            a[i] = z[k + i];
+        for (int j = 0; j < nfb; j++)
+            a[n + j] = k - 1 - j >= 0 ? ref[k - 1 - j]*fb_scale : 0.0;
+        for (int i = 0; i < dim; i++) {
+            m[i][dim] += a[i]*ref[k];
+            for (int j = i; j < dim; j++)
                 m[i][j] += a[i]*a[j];
         }
     }
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < dim; i++) {
         for (int j = 0; j < i; j++)
             m[i][j] = m[j][i];
         trace += m[i][i];
     }
     /* A whisker of ridge: the loop's band edge leaves near-null
      * directions the solve would otherwise fill with noise gain. */
-    for (int i = 0; i < n; i++)
-        m[i][i] += 1e-6*trace/n;
-    for (int c = 0; c < n; c++) {
+    for (int i = 0; i < dim; i++)
+        m[i][i] += 1e-6*trace/dim;
+    for (int c = 0; c < dim; c++) {
         int p = c;
 
-        for (int r = c + 1; r < n; r++)
+        for (int r = c + 1; r < dim; r++)
             if (fabs(m[r][c]) > fabs(m[p][c]))
                 p = r;
         if (fabs(m[p][c]) < 1e-12)
             return false;
         if (p != c)
-            for (int j = 0; j <= n; j++) {
+            for (int j = 0; j <= dim; j++) {
                 double t = m[c][j];
 
                 m[c][j] = m[p][j];
                 m[p][j] = t;
             }
-        for (int r = 0; r < n; r++) {
+        for (int r = 0; r < dim; r++) {
             double f;
 
             if (r == c)
                 continue;
             f = m[r][c]/m[c][c];
-            for (int j = c; j <= n; j++)
+            for (int j = c; j <= dim; j++)
                 m[r][j] -= f*m[c][j];
         }
     }
-    for (int i = 0; i < n; i++)
-        w[i] = m[i][n]/m[i][i];
+    for (int i = 0; i < dim; i++)
+        w[i] = m[i][dim]/m[i][i];
     return true;
 }
 
@@ -197,8 +206,19 @@ static bool seed(v92_p3_eq_t *eq)
     }
     for (int k = 0; k < rows; k++)
         ref[k] = (int8_t)reference_next(&reg);
-    if (!least_squares(eq->zseed, ref, rows, n, eq->taps))
-        return false;
+    {
+        double w[LS_MAX];
+
+        double power = 0.0;
+
+        for (int m = 0; m < rows + n - 1; m++)
+            power += eq->zseed[m]*eq->zseed[m];
+        eq->fb_scale = sqrt(power/(rows + n - 1)) + 1e-9;
+        if (!least_squares(eq->zseed, ref, rows, n, eq->cfg.nfb, eq->fb_scale, w))
+            return false;
+        memcpy(eq->taps, w, (size_t)n*sizeof(double));
+        memcpy(eq->fb, w + n, (size_t)eq->cfg.nfb*sizeof(double));
+    }
     eq->zcount = rows + n - 1;
     eq->centroid_ref = centroid(eq);
     eq->main_tap = 0;
@@ -270,6 +290,8 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
 
     for (int j = 0; j < n; j++)
         y += eq->taps[j]*u[j];
+    for (int j = 0; j < eq->cfg.nfb; j++)
+        y += eq->fb[j]*eq->dhist[j];
     ref = reference_next(&eq->gpa);
     if (eq->k >= eq->cfg.trn_symbols)
         ref = 0;
@@ -283,8 +305,12 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
 
         for (int j = 0; j < n; j++)
             energy += u[j]*u[j];
+        for (int j = 0; j < eq->cfg.nfb; j++)
+            energy += eq->dhist[j]*eq->dhist[j];
         for (int j = 0; j < n; j++)
             eq->taps[j] += mu*e*u[j]/energy;
+        for (int j = 0; j < eq->cfg.nfb; j++)
+            eq->fb[j] += mu*e*eq->dhist[j]/energy;
 
         /* Second-order timing loop on a slow average of the detector (for
          * M&M only the slow mean is clock error; see v92_trn2u.c). */
@@ -327,6 +353,11 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
             eq->tau += eq->freq;   /* an open loop holds the set frequency */
         memmove(eq->z, eq->z + 1, (size_t)(n - 1)*sizeof(double));
         memmove(eq->dz, eq->dz + 1, (size_t)(n - 1)*sizeof(double));
+    }
+    /* The symbol just decided becomes the newest feedback input. */
+    if (eq->cfg.nfb > 0) {
+        memmove(eq->dhist + 1, eq->dhist, (size_t)(eq->cfg.nfb - 1)*sizeof(double));
+        eq->dhist[0] = d*eq->fb_scale;
     }
     eq->y_prev = y;
     eq->d_prev = d;

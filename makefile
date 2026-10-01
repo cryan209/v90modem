@@ -314,6 +314,7 @@ test: $(TEST_TARGETS)
 	./v32bis_spandsp_test
 	./v32bis_duplex_test
 	./v92_startup_test
+	./v92_p3_rx_line_test
 	./v92_proc_eval_test
 	./v90_analogue_tx_test
 	./v90_analogue_rx_test
@@ -340,14 +341,10 @@ eicon-rx-test: vpcm_decode
 	python3 tools/eicon_rx_conformance.py --binary ./vpcm_decode --expect-failure
 
 # The V.92 Phase 3 upstream receiver against an analogue modem on a real 2-wire
-# loop (artifacts/v92-loop-upstream/).  Encodes a known-open defect -- the
-# receiver has no equaliser or timing recovery, so TRN1u never trains and Ja
-# never decodes -- and is therefore NOT part of `test` yet, for the reason
-# given for eicon-rx-test above.  --expect-failure is green while the defect
-# stands and loud on a regression or a fix; docs/v92_p3_rx_line_plan.md moves
-# it into `test` without the flag once Ja decodes.
+# loop (artifacts/v92-loop-upstream/) and a modelled one.  Part of `test` since
+# docs/v92_p3_rx_line_plan.md step 6 made Ja decode; kept as its own target too.
 v92-loop-rx-test: v92_p3_rx_line_test
-	./v92_p3_rx_line_test --expect-failure
+	./v92_p3_rx_line_test
 
 # Measures whether the SIP path delivers G.711 byte-exactly, which CLAUDE.md's
 # first constraint requires and which no offline test can check: the RTP payload

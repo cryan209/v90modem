@@ -16,14 +16,14 @@
  * TRN1u, and a CRC-valid Ja carrying that descriptor.  The fixture is required:
  * a missing file is a failure, not a skip.
  *
- * --expect-failure is for while docs/v92_p3_rx_line_plan.md is in progress:
- * it requires the part that works today (Ru and Ru-bar acquired at the
- * recorded positions, TRN1u entered) and the known failure (no Ja), so it is
- * green while the defect stands and loud both when acquisition regresses and
- * when the defect is fixed -- at which point this moves into `make test`
- * without the flag.
+ * Every step of docs/v92_p3_rx_line_plan.md through 6 is asserted: Ru and
+ * Ru-bar where they were acquired, the TRN1u start by reference correlation,
+ * the TRN1u equaliser's agreement and SNR, the TRN1u gate (and its refusal
+ * of a start three symbols out), and Ja within its first three repetitions.
+ * The synthetic rows put our own analogue transmitter through a modelled
+ * loop.  It ran with --expect-failure until step 6; it is in `make test`.
  *
- *   v92_p3_rx_line_test [--expect-failure] [fixture]
+ *   v92_p3_rx_line_test [fixture]
  */
 #include "v92_p3_rx.h"
 #include "v92_p3_eq.h"
@@ -53,6 +53,11 @@
  * receiver's own reference correlation must land within START_SLACK. */
 #define TRN1U_EXPECTED    5292
 #define START_SLACK       2
+/* Ja must decode within its first three repetitions: 2040T of TRN1u plus
+ * three 1296-symbol frames of this descriptor (N=120, LSP=12, LTP=11).  The
+ * analogue side repeats it for 12000T, so this is margin, not a deadline;
+ * it is here so that a receiver which only gets lucky late is caught. */
+#define JA_WITHIN         (2040 + 3*1296)
 
 static int first_entry[V92_P3_RX_FAILED + 1];
 
@@ -103,12 +108,16 @@ static eq_result_t eq_run(const uint8_t *cw, int count, bool alaw, int start)
     eq.freq = env_or("V92_P3_EQ_FIXPPM", 0)*1e-6;
     /* Past TRN1u the equaliser runs decision-directed on Ja. */
     int run_to = (int)env_or("V92_P3_EQ_RUN_TO", cfg.trn_symbols);
+    FILE *dec_dump = getenv("V92_P3_EQ_DEC_DUMP")
+                   ? fopen(getenv("V92_P3_EQ_DEC_DUMP"), "wb") : NULL;
     r.worst_x10 = 1000;
     for (int i = 0; i < count; i++) {
         v92_p3_eq_push(&eq, alaw ? alaw_to_linear(cw[i]) : ulaw_to_linear(cw[i]));
         if (i == start + 64 && !v92_p3_eq_start(&eq, start))
             return r;
         while (eq.started && eq.k < run_to && v92_p3_eq_step(&eq)) {
+            if (dec_dump)
+                fputc(eq.decision > 0, dec_dump);
             if (getenv("V92_P3_EQ_TRACE") && eq.k % 128 == 0)
                 fprintf(stderr, "EQTRACE k=%lld tau=%.4f ppm=%.1f det=%.5f agree=%.1f\n",
                         (long long)eq.k, eq.tau, eq.freq*1e6, eq.mm_avg,
@@ -120,6 +129,8 @@ static eq_result_t eq_run(const uint8_t *cw, int count, bool alaw, int start)
         if (eq.k >= run_to)
             break;
     }
+    if (dec_dump)
+        fclose(dec_dump);
     if (eq.k < cfg.trn_symbols)
         return r;
     r.ran = true;
@@ -180,7 +191,7 @@ static int fixture_wrong_start(const char *path)
     return 0;
 }
 
-static int fixture_row(const char *path, bool expect_failure)
+static int fixture_row(const char *path)
 {
     unsigned char *cw;
     long len;
@@ -198,6 +209,7 @@ static int fixture_row(const char *path, bool expect_failure)
     eq_result_t eqr;
     bool trained;
     int gate = -1;       /* first TRN1u: 1 passed the gate, 0 rejected */
+    int ja_sample = -1;
 
     printf("fixture %s\n", path);
     f = fopen(path, "rb");
@@ -294,6 +306,7 @@ static int fixture_row(const char *path, bool expect_failure)
                (unsigned)ja->desc.ltp);
         decoded = ja->desc.n == 120 && ja->desc.lsp == 12
                && ja->desc.ltp == 11;
+        ja_sample = ja->start_sample;
         if (!decoded)
             printf("  Ja decoded but is not the descriptor the analogue "
                    "side sent (N=120 LSP=12 LTP=11)\n");
@@ -305,28 +318,23 @@ static int fixture_row(const char *path, bool expect_failure)
             && abs(first_entry[V92_P3_RX_UR1] - UR1_EXPECTED) <= POSITION_SLACK
             && first_entry[V92_P3_RX_TRN1U] >= 0;
 
-    if (!expect_failure) {
-        if (decoded) {
-            printf("PASS: V.92 Phase 3 upstream decoded off a real loop\n");
-            return 0;
-        }
+    if (!acquired) {
+        printf("FAIL: Ru/Ru-bar no longer acquired at %d/%d (+/-%d), or "
+               "TRN1u never entered\n", RU1_EXPECTED, UR1_EXPECTED,
+               POSITION_SLACK);
+        return 1;
+    }
+    if (!decoded) {
         printf("FAIL: no CRC-valid Ja with the expected DIL descriptor\n");
         return 1;
     }
-    if (decoded) {
-        printf("FAIL (expected failure did not occur): Ja now decodes -- "
-               "move this test into `make test` without --expect-failure\n");
+    if (ja_sample - TRN1U_EXPECTED > JA_WITHIN) {
+        printf("FAIL: Ja decoded %d symbols after TRN1u began, later than "
+               "its first three repetitions (%d)\n",
+               ja_sample - TRN1U_EXPECTED, JA_WITHIN);
         return 1;
     }
-    if (!acquired) {
-        printf("FAIL: regression -- Ru/Ru-bar no longer acquired at "
-               "%d/%d (+/-%d), or TRN1u never entered\n",
-               RU1_EXPECTED, UR1_EXPECTED, POSITION_SLACK);
-        return 1;
-    }
-    printf("PASS (expected failure): Ru/Ru-bar acquired, TRN1u trained and "
-           "through the gate, no Ja from raw signs -- "
-           "docs/v92_p3_rx_line_plan.md step 6\n");
+    printf("PASS: V.92 Phase 3 upstream decoded off a real loop\n");
     return 0;
 }
 
@@ -356,35 +364,30 @@ typedef struct {
     double ppm;
     double snr_db;                /* re L_U; 0 = no noise */
     bool antialias;               /* the A/D's own filter (no r4 taps) */
-    bool expect_pass_today;       /* outcome before plan steps 3-6 */
 } syn_row_t;
 
 static const syn_row_t syn_rows[] = {
-    /* The raw sign slicer survives noise on its own; with the r4 loop's ISI
-     * its raw-sign Ja search fails, as on the real recording.  Rows
-     * that move the sampling instant without the r4 taps (which hold the
-     * real codec's filter) get the A/D's anti-alias filter (see
-     * v92_line_channel.h) -- without it they modelled an A/D that folds
-     * the analogue modem's images above 4 kHz back in, and "passed" only
-     * because that fold is a fixed map while the sampling is synchronous.
-     * With it a fractional phase alone defeats the raw slicer's Ja search
-     * too.  The +200 ppm one decodes Ja from raw signs; it used to be
-     * stopped only by the descrambled-ones TRN1u check (65%), which plan
-     * step 5 replaced. */
-    /* name                          law    isi    phase  ppm    snr  aa today */
-    {"ideal u-law",                  false, false, 0.00,    0.0,  0.0, false, true},
-    {"ideal A-law",                  true,  false, 0.00,    0.0,  0.0, false, true},
-    {"phase 0.5 only, A/D filter",   false, false, 0.50,    0.0,  0.0, true,  false},
-    {"+200 ppm only, A/D filter",    false, false, 0.00,  200.0,  0.0, true,  true},
-    {"noise 25 dB only",             false, false, 0.00,    0.0, 25.0, false, true},
-    {"r4 loop",                      false, true,  0.00,    0.0,  0.0, false, false},
-    {"r4 loop, phase 0.25",          false, true,  0.25,    0.0,  0.0, false, false},
-    {"r4 loop, phase 0.50",          false, true,  0.50,    0.0,  0.0, false, false},
-    {"r4 loop, phase 0.75",          false, true,  0.75,    0.0,  0.0, false, false},
-    {"r4 loop, +200 ppm",            false, true,  0.00,  200.0,  0.0, false, false},
-    {"r4 loop, -200 ppm",            false, true,  0.00, -200.0,  0.0, false, false},
-    {"r4 loop, noise 25 dB",         false, true,  0.00,    0.0, 25.0, false, false},
-    {"r4 loop, A-law, ph .5, 163ppm",true,  true,  0.50,  163.0, 25.0, false, false},
+    /* Rows that move the sampling instant without the r4 taps (which hold
+     * the real codec's filter) get the A/D's anti-alias filter (see
+     * v92_line_channel.h); without it they modelled an A/D folding the
+     * analogue modem's images above 4 kHz back in, which no receiver can
+     * undo once the clock is offset.  Before plan steps 3-6 the receiver
+     * decoded Ja only on the rows without ISI, a fractional phase or a clock
+     * offset; now every row must. */
+    /* name                          law    isi    phase  ppm    snr  aa */
+    {"ideal u-law",                  false, false, 0.00,    0.0,  0.0, false},
+    {"ideal A-law",                  true,  false, 0.00,    0.0,  0.0, false},
+    {"phase 0.5 only, A/D filter",   false, false, 0.50,    0.0,  0.0, true},
+    {"+200 ppm only, A/D filter",    false, false, 0.00,  200.0,  0.0, true},
+    {"noise 25 dB only",             false, false, 0.00,    0.0, 25.0, false},
+    {"r4 loop",                      false, true,  0.00,    0.0,  0.0, false},
+    {"r4 loop, phase 0.25",          false, true,  0.25,    0.0,  0.0, false},
+    {"r4 loop, phase 0.50",          false, true,  0.50,    0.0,  0.0, false},
+    {"r4 loop, phase 0.75",          false, true,  0.75,    0.0,  0.0, false},
+    {"r4 loop, +200 ppm",            false, true,  0.00,  200.0,  0.0, false},
+    {"r4 loop, -200 ppm",            false, true,  0.00, -200.0,  0.0, false},
+    {"r4 loop, noise 25 dB",         false, true,  0.00,    0.0, 25.0, false},
+    {"r4 loop, A-law, ph .5, 163ppm",true,  true,  0.50,  163.0, 25.0, false},
 };
 
 static v92a_config_t syn_config(bool alaw)
@@ -500,11 +503,22 @@ static bool syn_run(const syn_row_t *row, int *ja_sample, int *rejects,
     }
     *rejects = rx.reject_count;
     *last = v92_p3_rx_last_reject(&rx, NULL, NULL, NULL);
+    if (getenv("V92_P3_DEC_DUMP") && rx.eq_law >= 0) {
+        /* The equalised decisions, from TRN1u symbol dec_base, for offline
+         * comparison against the ideal row's raw signs. */
+        FILE *df = fopen(getenv("V92_P3_DEC_DUMP"), "wb");
+
+        if (df) {
+            fprintf(df, "%d\n", rx.dec_base[rx.eq_law]);
+            fwrite(rx.dec_buf[rx.eq_law], 1, (size_t)rx.dec_fill[rx.eq_law], df);
+            fclose(df);
+        }
+    }
     v92a_audio_free(fe);
     return ok;
 }
 
-static int synthetic_rows(bool expect_failure)
+static int synthetic_rows(void)
 {
     int failures = 0;
 
@@ -528,12 +542,12 @@ static int synthetic_rows(bool expect_failure)
                           capture, &captured);
         eq_result_t eqr = eq_run(capture, captured, row->alaw, start);
         bool trained = eqr.ran && eqr.agree >= EQ_AGREE_MIN;
-        bool wanted = expect_failure ? row->expect_pass_today : true;
+        bool prompt = ja_sample >= 0 && ja_sample - want_start <= JA_WITHIN;
         bool aligned = start >= 0 && abs(start - want_start) <= START_SLACK;
         const char *verdict = !aligned ? "FAIL (TRN1u start)"
                             : !trained ? "FAIL (equaliser)"
-                            : ok == wanted ? "ok"
-                            : ok ? "UNEXPECTED PASS" : "FAIL";
+                            : !ok ? "FAIL (Ja)"
+                            : !prompt ? "FAIL (Ja late)" : "ok";
 
         printf("  %-30s %s  TRN1u %4d/%4d  Ja %s (sample %d, %d rejects, "
                "last %s)  %s\n",
@@ -543,25 +557,19 @@ static int synthetic_rows(bool expect_failure)
         printf("  %-30s    ", "");
         eq_print(&eqr);
         printf("\n");
-        if (ok != wanted || !aligned || !trained)
+        if (!ok || !prompt || !aligned || !trained)
             failures++;
     }
-    if (failures && expect_failure)
-        printf("  %d row(s) differ from today's expected outcome; if a row "
-               "now passes, update expect_pass_today\n", failures);
     return failures ? 1 : 0;
 }
 
 int main(int argc, char **argv)
 {
-    bool expect_failure = false;
     const char *path = FIXTURE_DEFAULT;
     int rc;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--expect-failure") == 0)
-            expect_failure = true;
-        else if (strcmp(argv[i], "--dump-tx") == 0 && i + 1 < argc)
+        if (strcmp(argv[i], "--dump-tx") == 0 && i + 1 < argc)
             return dump_tx(argv[++i]);
         else if (strcmp(argv[i], "--dump-row") == 0 && i + 2 < argc) {
             /* The G.711 stream one synthetic row feeds the receiver, for
@@ -584,8 +592,8 @@ int main(int argc, char **argv)
         else
             path = argv[i];
     }
-    rc = fixture_row(path, expect_failure);
+    rc = fixture_row(path);
     rc |= fixture_wrong_start(path);
-    rc |= synthetic_rows(expect_failure);
+    rc |= synthetic_rows();
     return rc;
 }

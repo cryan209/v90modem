@@ -14,6 +14,12 @@
  * zero-initialised and fed ones, 0 -> +L_U -- so the equaliser is trained
  * data-aided, never on its own decisions:
  *
+ * Feed-forward taps on the received samples plus decision-feedback taps on
+ * the past symbols.  The loop's ISI is what limits a linear equaliser here
+ * (fixture, 600-symbol least-squares bound: 31 taps 11.4 dB, 31 + 8
+ * feedback 17.6 dB), and TRN1u lets the feedback train on the true past
+ * symbols before it ever has to trust its own.
+ *
  *   1. a block least-squares solve over the first `seed_symbols` of TRN1u
  *      against the reference (the computation tools/v92_trn1u_bound.py
  *      does), so none of 2040T goes on LMS convergence;
@@ -48,6 +54,7 @@
 #include <stdint.h>
 
 #define V92_P3_EQ_MAX_TAPS     63
+#define V92_P3_EQ_MAX_FB       32     /* decision-feedback taps */
 #define V92_P3_EQ_MAX_SEED     512
 #define V92_P3_EQ_HISTORY      2048   /* input samples kept (power of two) */
 #define V92_P3_EQ_INTERP_HALF  8      /* windowed-sinc half length */
@@ -62,7 +69,8 @@
 #define V92_P3_EQ_DET_GRADIENT 2
 
 typedef struct {
-    int ntaps;           /* odd; default 31 */
+    int ntaps;           /* feed-forward taps, odd; default 31 */
+    int nfb;             /* decision-feedback taps; default 8, 0 = linear */
     int seed_symbols;    /* block LS length; default 256 */
     int trn_symbols;     /* data-aided length; default 2040 (9.5.1.1.3) */
     double mu;           /* NLMS step while data-aided */
@@ -100,6 +108,12 @@ typedef struct {
 
     bool seeded;
     double taps[V92_P3_EQ_MAX_TAPS];
+    double fb[V92_P3_EQ_MAX_FB];   /* on past symbols, newest first */
+    double dhist[V92_P3_EQ_MAX_FB];/* past symbols, the reference while
+                                      data-aided and decisions after, as
+                                      +/-fb_scale */
+    double fb_scale;               /* input RMS: keeps the feedback columns
+                                      the size of the feed-forward ones */
     int64_t k;                     /* next symbol to produce */
     uint32_t gpa;                  /* reference generator */
 

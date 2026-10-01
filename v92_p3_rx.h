@@ -161,7 +161,15 @@ typedef struct {
     bool     eq_running[2];
     bool     eq_gate_done;
     int      eq_law;         /* law the gate chose, or -1 */
-    int      eq_agree_x10;   /* agreement the gate judged */ /* ignore Phase-3 lock before this sample */
+    int      eq_agree_x10;   /* agreement the gate judged */
+    /* The equaliser's sign decisions (1 = positive, as a codeword MSB), one
+     * per TRN1u/Ja symbol, rolled like ja_buf; plan step 6 searches these
+     * for Ja when the raw signs do not yield it.  dec_base is the symbol
+     * index (0 = TRN1u's first) of dec_buf[law][0]. */
+    uint8_t  dec_buf[2][V92_P3_RX_JA_BUF];
+    int      dec_fill[2];
+    int      dec_base[2];
+    bool     ja_from_eq;     /* the decoded Ja came from equalised decisions */ /* ignore Phase-3 lock before this sample */
 
     /* ------- TRN1u accumulator ------- */
     int      trn1u_count;    /* symbols accumulated */

@@ -6,7 +6,7 @@ modem is on a real 2-wire loop behind a single codec (VG224 -> SIP -> us),
 so that 9.5.1.1.3 releases Sd. On the byte-exact SIP loopback it must behave
 exactly as it does today.
 
-Status: steps 1-5 done, 2026-10-01. Each step lists what it changes, how it is
+Status: steps 1-6 done, 2026-10-01. The fixture decodes Ja; `v92_p3_rx_line_test` is in `make test`. Each step lists what it changes, how it is
 measured, and the result that completes it. Do the steps in order: each one
 produces the instrument the next one is graded by.
 
@@ -361,7 +361,7 @@ the gate has two parts.
 - Unchanged: `v92_startup_test` 51/51, `vpcm_loopback_test --all-tests`,
   `v92_proc_eval_test`. The server links.
 
-### 6. Decode Ja from equalised decisions
+### 6. Decode Ja from equalised decisions -- DONE 2026-10-01
 
 Ja (8.5.4) is scrambled and differentially encoded, seeded with the final
 TRN1u symbol, still ±L_U. `v92_ja_dil_search()` currently reads signs from
@@ -377,6 +377,61 @@ raw codewords (`ja_sign_from_sample()`).
 - **Done when:** the fixture decodes a CRC-valid Table 20 descriptor (or,
   per the step-1 caveat, the synthetic rows do), and the ideal rows decode
   the same descriptor as today, bit for bit.
+
+**Result.** The fixture decodes Ja: **N=120, LSP=12, LTP=11 at 7357**,
+the descriptor the analogue side sent. That is 2065 symbols after TRN1u
+began, on the first repetition, where the step-1 control took 79 rejects.
+Every synthetic row decodes it too. **`v92_p3_rx_line_test` is now in
+`make test`**, and its `--expect-failure` mode and per-row
+`expect_pass_today` are gone.
+
+- **Where it searches.** The live receiver never used
+  `v92_ja_dil_search()`. It has its own exact-frame search in
+  `run_ja_search()`, which is now `ja_search_signs()` over a sign buffer.
+  Nothing fakes a codeword.
+  - It runs on the **raw codeword signs first**, exactly as before. That
+    keeps a byte-exact DS0's Ja bit for bit and at the same instant: the
+    ideal rows still decode at 3040. This matters because the equalised
+    stream lags by the equaliser's half length plus the interpolator's, so
+    searching it alone finds Ja a 144-symbol probe later and moves Sd. Step
+    3 showed `v92_startup_test` is sensitive to exactly that.
+  - It then runs on **the equaliser's decisions** (`dec_buf`), kept rolling
+    like `ja_buf`. Those decisions are data-aided through the guaranteed
+    2040T and decision-directed after it.
+- **It needed decision feedback.** With the linear 31-tap equaliser the
+  fixture decoded Ja, but on luck:
+  - Comparing descrambled bits one 1296-symbol frame apart through the
+    fixture's 12000T of Ja gave 22-42 mismatches a pair, about 0.18% sign
+    errors.
+  - At 9.5 dB that is what Q(3) predicts. Each sign error becomes six plain
+    errors, so most frames failed their CRC.
+  - A least-squares bound over 600 symbols puts the loop's limit at ISI,
+    not noise: 31 linear taps 11.4 dB, plus 4 feedback taps 17.1, plus 8
+    feedback taps 17.6.
+  - So `v92_p3_eq` gained **8 feedback taps** (`nfb`), seeded jointly in the
+    block solve on the true past TRN1u symbols, adapted by the same NLMS,
+    and fed by decisions once decision-directed.
+  - **They must be scaled to the input's RMS** (`fb_scale`). As raw ±1
+    beside linear PCM in the thousands, the trace-sized ridge crushed them
+    and NLMS starved them, and they bought 0.2 dB.
+  - Scaled, **the fixture goes 9.5 → 22.0 dB and the r4 loop rows
+    9.4-11 → 14.6-27.8 dB**. On the fixture, every frame after the first
+    comparison now matches the next exactly, through the whole 12000T.
+  - Feed-forward length does not substitute: 47 and 63 linear taps left
+    11-17 decision errors on the hard rows, and at 63 the fixture decoded
+    later.
+- **Margin still open.** "r4 loop, -200 ppm" and the A-law
+  163 ppm/25 dB/phase 0.5 row decode on Ja's second repetition (4339), not
+  its first. Their equalised decisions carry a short burst of
+  every-other-symbol errors early in Ja (row -200 ppm: 22 errors across
+  4761 symbols, row 163 ppm: 4), while the frequency loop is still well
+  short of the true offset at the end of TRN1u. Timing gains between
+  0.005/1e-5 and 0.02/1e-4 changed nothing. The test now requires Ja within
+  its first three repetitions (`JA_WITHIN`), which leaves room for this and
+  catches a receiver that only gets lucky late.
+- Unchanged: `v92_startup_test` 51/51, `vpcm_loopback_test --all-tests`,
+  `v92_proc_eval_test`. `v92_p3_probe` on the recording now ends
+  `state=done ja_ok=1`.
 
 ### 7. Hand the trained equaliser on
 

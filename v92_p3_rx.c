@@ -468,6 +468,8 @@ static void trn1u_align(v92_p3_rx_t *rx)
         for (int i = 0; i < rx->ja_buf_fill; i++)
             v92_p3_eq_push(&rx->eq[law], law ? alaw_to_linear(rx->ja_buf[i])
                                              : ulaw_to_linear(rx->ja_buf[i]));
+        rx->dec_fill[law] = 0;
+        rx->dec_base[law] = 0;
         if (v92_p3_eq_start(&rx->eq[law], start))
             rx->eq_running[law] = true;
     }
@@ -485,6 +487,19 @@ static void trn1u_align(v92_p3_rx_t *rx)
 }
 
 /* Feed one codeword to the running equaliser(s) and step them. */
+static void dec_push(v92_p3_rx_t *rx, int law, int bit)
+{
+    if (rx->dec_fill[law] == V92_P3_RX_JA_BUF) {
+        memmove(rx->dec_buf[law], rx->dec_buf[law] + 144, V92_P3_RX_JA_BUF - 144);
+        rx->dec_fill[law] -= 144;
+        rx->dec_base[law] += 144;
+    }
+    rx->dec_buf[law][rx->dec_fill[law]++] = (uint8_t)bit;
+}
+
+/* Feed one codeword to the running equaliser(s), step them, and keep their
+ * sign decisions -- data-aided through the guaranteed 2040T of TRN1u and
+ * decision-directed after it, there being no reference for Ja. */
 static void trn1u_eq_feed(v92_p3_rx_t *rx, uint8_t cw)
 {
     for (int law = 0; law < 2; law++) {
@@ -492,7 +507,7 @@ static void trn1u_eq_feed(v92_p3_rx_t *rx, uint8_t cw)
             continue;
         v92_p3_eq_push(&rx->eq[law], law ? alaw_to_linear(cw) : ulaw_to_linear(cw));
         while (v92_p3_eq_step(&rx->eq[law]))
-            ;
+            dec_push(rx, law, rx->eq[law].decision > 0);
     }
 }
 
@@ -640,6 +655,9 @@ static void enter_trn1u(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
     rx->eq_gate_done = false;
     rx->eq_law = -1;
     rx->eq_agree_x10 = 0;
+    rx->dec_fill[0] = rx->dec_fill[1] = 0;
+    rx->dec_base[0] = rx->dec_base[1] = 0;
+    rx->ja_from_eq = false;
     /* Enough history for the alignment to look TRN1U_ALIGN_SPAN symbols back,
      * plus the 24 the Ja search's differential/GPA decode reaches behind. */
     copied = prehist_copy_tail(rx, TRN1U_ALIGN_SPAN + 24, rx->ja_buf,
@@ -678,82 +696,104 @@ static void ur1_advance(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
 /* -------------------------------------------------------------------------
  * Ja search — called once the buffer has enough data
  * ------------------------------------------------------------------------- */
+/*
+ * Search a stream of signs (1 = positive, one per symbol) for a CRC-valid
+ * Table 20 descriptor.  6.3 / 8.5.4: Ja is differentially encoded and then
+ * GPA-scrambled, so each plain bit is the XOR of six signs; differential
+ * decoding makes a constant polarity inversion harmless.  Only exact Table
+ * 20 frames count -- no soft candidates.  Returns the index of the frame's
+ * first bit in signs[], or -1.
+ */
+static int ja_search_signs(v92_p3_rx_t *rx, const uint8_t *signs, int fill,
+                           int search_start)
+{
+    uint8_t plain[V92_P3_RX_JA_BUF];
+    int search_end = fill - 207;
+
+    if (search_start < 24)
+        search_start = 24;
+    if (search_end <= search_start)
+        return -1;
+    for (int i = 24; i < fill; i++)
+        plain[i] = (signs[i] ^ signs[i-1] ^ signs[i-5] ^ signs[i-6]
+                    ^ signs[i-23] ^ signs[i-24]) & 1;
+    for (int start = search_start; start <= search_end; start++) {
+        int sync = 0;
+        uint8_t packed[(V92_P3_RX_JA_BUF+7)/8] = {0};
+        int count = fill - start;
+        v92_ja_parse_meta_t meta;
+        v90_dil_desc_t desc;
+
+        while (sync < 17 && plain[start+sync]) sync++;
+        if (sync != 17 || plain[start+17]) continue;
+        for (int i = 0; i < count; i++)
+            packed[i/8] |= plain[start+i] << (i%8);
+        if (!v92_parse_ja_descriptor_strict(&desc, packed, count, &meta)
+            || !meta.is_v92) continue;
+        memset(&rx->ja_result, 0, sizeof(rx->ja_result));
+        rx->ja_result.ok = true;
+        rx->ja_result.parsed_v92 = true;
+        rx->ja_result.calling_party = true;
+        rx->ja_result.descriptor_bits = meta.bit_len;
+        rx->ja_result.desc = desc;
+        v90_analyse_dil_descriptor(&desc, &rx->ja_result.analysis);
+        return start;
+    }
+    return -1;
+}
+
 static bool run_ja_search(v92_p3_rx_t *rx, bool force_hard_min)
 {
-    int search_start, search_end;
-    int buf_trn_off;
     int trn_min_t;
+    int found;
+    uint8_t signs[V92_P3_RX_JA_BUF];
+    int law = rx->eq_law;
 
     trn_min_t = (force_hard_min
                  ? V92_P3_RX_TRN1U_MIN_T
                  : (rx->p6_soft_mode ? TRN1U_MIN_SOFT_T : V92_P3_RX_TRN1U_MIN_T));
 
-    /* Offset of trn1u_start within ja_buf. */
-    buf_trn_off = rx->trn1u_start - rx->ja_buf_base;
     /* 9.5.1.1.3 arms after 2040T; that is not a Ja onset deadline.
      * Search the retained stream, including descriptors incomplete at the
-     * previous probe. The call owner must enforce 9.5.1.2.1's retrain timer. */
-    search_start = buf_trn_off + trn_min_t - 50;
-    search_end = rx->ja_buf_fill - 207;
-    if (search_start < 24)
-        search_start = 24;
-
-    if (search_end <= search_start) {
-        p3rx_set_reject(rx,
-                        V92_P3_RX_REJECT_JA_SEARCH_FAIL,
-                        rx->trn1u_start + rx->trn1u_count,
-                        search_start,
-                        search_end);
-        return false;
-    }
-
-    memset(&rx->ja_result, 0, sizeof(rx->ja_result));
-    /* 6.3 / 8.5.4: differential signs followed by GPA descrambling.
-     * Decode once per retained window; unlike the diagnostic search this
-     * live path needs only exact Table 20 frames, not soft-candidate scores.
-     * Differential decoding makes a constant polarity inversion harmless. */
-    uint8_t plain[V92_P3_RX_JA_BUF];
-    for (int i = 24; i < rx->ja_buf_fill; i++) {
-        unsigned cw = rx->ja_buf[i] ^ rx->ja_buf[i-1]
-                    ^ rx->ja_buf[i-5] ^ rx->ja_buf[i-6]
-                    ^ rx->ja_buf[i-23] ^ rx->ja_buf[i-24];
-        plain[i] = (cw >> 7) & 1;
-    }
-    for (int start = search_start; start <= search_end; start++) {
-        int sync = 0;
-        while (sync < 17 && plain[start+sync]) sync++;
-        if (sync != 17 || plain[start+17]) continue;
-        uint8_t packed[(V92_P3_RX_JA_BUF+7)/8] = {0};
-        int count = rx->ja_buf_fill-start;
-        for (int i = 0; i < count; i++)
-            packed[i/8] |= plain[start+i] << (i%8);
-        v92_ja_parse_meta_t meta;
-        v90_dil_desc_t desc;
-        if (!v92_parse_ja_descriptor_strict(&desc, packed, count, &meta)
-            || !meta.is_v92) continue;
-        rx->ja_result.ok = true;
-        rx->ja_result.parsed_v92 = true;
-        rx->ja_result.calling_party = true;
-        rx->ja_result.start_sample = rx->ja_buf_base + start;
-        rx->ja_result.descriptor_bits = meta.bit_len;
-        rx->ja_result.desc = desc;
-        v90_analyse_dil_descriptor(&desc, &rx->ja_result.analysis);
+     * previous probe. The call owner must enforce 9.5.1.2.1's retrain timer.
+     *
+     * Raw codeword signs first: on a byte-exact DS0 they are the symbols,
+     * and they are complete up to the newest codeword, where the equaliser
+     * lags by its half length plus the interpolator's -- searching them
+     * first keeps Ja's decode, and the instant Sd starts, exactly as they
+     * were before the equaliser existed. */
+    for (int i = 0; i < rx->ja_buf_fill; i++)
+        signs[i] = (rx->ja_buf[i] >> 7) & 1;
+    found = ja_search_signs(rx, signs, rx->ja_buf_fill,
+                            rx->trn1u_start - rx->ja_buf_base + trn_min_t - 50);
+    if (found >= 0) {
+        rx->ja_from_eq = false;
+        rx->ja_result.start_sample = rx->ja_buf_base + found;
         return true;
     }
 
-    /* There used to be an "equalizing" fallback here, demod_ja_search():
-     * p3_demod, a V.34 passband demodulator, over 12 hypotheses x 2 laws on
-     * this baseband PCM, every 144 symbols.  It never decoded anything --
-     * 94 calls and no success across v92_startup_test -- and once the TRN1u
-     * gate (plan step 5) lets a real loop through to here, it costs ~33 s of
-     * CPU per 1.5 s of audio, the same shape as the p3_demod Ja scanner
-     * that made pjmedia drop frames live.  Ja from equalised decisions is
-     * plan step 6. */
+    /* Then the equalised decisions (plan step 6): what a real loop needs.
+     * Symbol k is DS0 sample trn1u_start + k plus the timing loop's offset. */
+    if (law >= 0 && rx->eq_gate_done) {
+        found = ja_search_signs(rx, rx->dec_buf[law], rx->dec_fill[law],
+                                trn_min_t - 50 - rx->dec_base[law]);
+        if (p3rx_debug_enabled())
+            fprintf(stderr, "[P3RX] eq Ja search base=%d fill=%d from=%d found=%d\n",
+                    rx->dec_base[law], rx->dec_fill[law],
+                    trn_min_t - 50 - rx->dec_base[law], found);
+        if (found >= 0) {
+            rx->ja_from_eq = true;
+            rx->ja_result.start_sample = rx->trn1u_start + rx->dec_base[law]
+                                       + found + (int)lround(rx->eq[law].tau);
+            return true;
+        }
+    }
+
     p3rx_set_reject(rx,
                     V92_P3_RX_REJECT_JA_SEARCH_FAIL,
                     rx->trn1u_start + rx->trn1u_count,
                     rx->ja_buf_fill,
-                    0);
+                    law >= 0 ? rx->dec_fill[law] : 0);
     return false;
 }
 
@@ -1203,6 +1243,7 @@ trn1u_wait:
         int fill;
 
         ja_buf_push(rx, codeword, sample_index);
+        trn1u_eq_feed(rx, codeword);
         /* Count from the 23-symbol seed the buffer used to start with, so the
          * deeper history the TRN1u alignment needs does not move the search
          * cadence -- and with it the instant Ja is declared and Sd starts. */
