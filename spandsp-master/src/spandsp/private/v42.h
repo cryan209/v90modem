@@ -49,6 +49,7 @@ typedef struct
     uint8_t v42_rx_window_size_k;
     uint16_t v42_tx_n401;
     uint16_t v42_rx_n401;
+    uint8_t xid_optional_functions_octets;
 
     /* V.42bis compressor parameters */
     uint8_t comp;

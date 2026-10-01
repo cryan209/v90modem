@@ -1024,33 +1024,60 @@ time -- `V92A_SILENCE`, `V92A_RU`, `V92A_RU_BAR`, `V92A_TRN1U`, `V92A_JA` --
 and fails at the next one, `Sd-bar timeout (9.5.2.2.1)`, taking the 9.5.2
 retrain and then sitting in Phase 2 at `rx=TONE_B` for the rest of the call.
 
-**It cannot get past there, for the same reason V.91 cannot run here, and the
-V.90 run is what proves it inside one log.** Do not read the sequence across
-the two processes' logs: their `[TRACE +Nms]` origins are their own starts,
-three seconds apart, so the ordering of one end's timeout against the other's
-transmission is not established by them. What is established is in the
-`ME_MODE=v92` run that demoted to V.90, where the answerer's own log says it
-transmitted the whole downstream --
+**It cannot get past there, and the reason is the absence of a DIGITAL side --
+not the analogue line.**  Say that carefully, because the first version of this
+section got it wrong.  V.90/V.92's design case *is* an analogue local loop: the
+digital modem sits on a DS0 and places codewords into timeslots on the
+network's 8 kHz clock, exactly one codec D/As them toward the subscriber, and
+the analogue modem recovers both the codewords and that clock from the line --
+which is what 9.3's Sd and TRN1d are *for*.  Codewords surviving one D/A onto a
+2-wire pair is the premise of the Recommendation, not an obstacle to it.
+
+What this rig has instead is an analogue modem at **both** ends.  The end
+running `ME_V90_ROLE=digital` has no DS0: its codewords are D/A'd by its own
+free-running codec, cross the loop (and the PBX), and are A/D'd again at the
+far modem.  So there is an extra conversion pair that a real V.92 call does not
+have, and -- the harder half -- no network clock anywhere in the path for the
+analogue end's timing recovery to lock to.  The V.91 section above measures
+that directly: +30.1 ppm between the two codecs with a 102 degree residual,
+against +1.2 ppm for the one-clock control.  **So what is refuted here is
+modem-to-modem V.92, and `ME_V90_ROLE=digital` on a modem is a fiction the
+engine will accept and the protocol will not.**
+
+The run still reaches the codeword wall rather than stopping earlier, and the
+V.90 run shows it inside one log: the answerer's own log says it transmitted
+the whole downstream --
 
     V90 Phase 3: Sd complete (64 reps), starting S-bar-d
     V90 Phase 3: S-bar-d complete, starting TRN1d
 
 -- while the caller's own log scores **every one of its 24 Sd acquisition
 windows at exactly 0.000**, `no Sd in this window (held-out score 0.000)`, and
-never reports a fit. Zero, not a marginal score: the held-out fit finds
-nothing of the structure at all. 9.3.2's deadline then passes in Ja, the
-analogue side takes its 9.5.2.1 retrain, and 60 s later training times out and
-falls back to V.22bis.
+never reports a fit.  Zero, not a marginal score.  9.3.2's deadline then passes
+in Ja, the analogue side takes its 9.5.2.1 retrain, and 60 s later training
+times out and falls back to V.22bis.  That bounds the rig; it says nothing
+about whether the receiver could lock a downstream that came from a real
+digital modem.
 
-That is the HSF statement over again on a second analogue bearer -- the V.90
-and V.92 Phase 3 downstream is a stream of exact PCM codewords, and there are
-none on an analogue line: two D/A-A/D conversions, ~4.6 dB of loss each way,
-and the 30 ppm of uncorrected clock offset measured in the V.91 section above.
-**So V.92, like V.91, is structurally dead between these two modems, and for a
-broader reason: with PCM upstream selected BOTH directions are codewords.**
-What these two can exercise is V.8, Phase 2, the V.92 INFO0/INFO1a capability
-contract and the analogue startup's transmit construction -- which is what the
-runs above did -- and nothing that has to receive a codeword.
+**The rig that DOES test the analogue role is the SIP one, and it already
+exists**: the coupler as the analogue modem on its loop, dialling
+`sip_v90_modem` which answers on SIP as the digital modem over G.711.  There
+the VG224's D/A toward the loop is the central-office codec and there is
+exactly one of them, which is the real topology --
+`docs/hsf_analogue_v90_coupler.md` is the same arrangement with the HSF part.
+The open item there is our own codeword receiver, which is validated only
+against `artifacts/eicon-digital-downstream/`, a byte-exact G.711 capture, and
+so does not normalise the gain, sampling phase and band-limiting a line
+imposes before it slices.  That is a receiver gap and the thing to fix; it is
+not a property of analogue lines.
+
+**Not run from this Mac.**  Its default route is a VPN tunnel (`utun10`), so
+`sip_v90_modem` here cannot register (403) and the bearer would cross the
+tunnel even if it could -- and the 2026-09-30 finding already established that
+this host's network path breaks V.8 outright, with the fix being to run the SIP
+end on tower.  The analogue end has to stay on the Mac because the modem is
+plugged into it, so the digital end belongs on tower, where Asterisk is, and
+the audio path between them is then PBX-internal.
 
 Artifacts: `artifacts/apple-v92-r2` (V.92 negotiated, demoted to V.90) and
 `artifacts/apple-v92-r3` (V.92 selected both directions), each with its

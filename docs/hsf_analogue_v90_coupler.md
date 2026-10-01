@@ -36,9 +36,16 @@ ringing, which reads exactly like a rig that has stopped working.
   moves, and the recording carries the 6-symbol Sd signature -- 45-50% of the
   band energy at 1333 Hz, which is 8000/6).  The analogue-role receiver never
   finds it.  That receiver is a *codeword* state machine validated only
-  against `artifacts/eicon-digital-downstream/`, a byte-exact G.711 capture;
-  over a line with unknown gain, band-limiting and delay there are no exact
-  codewords to slice.
+  against `artifacts/eicon-digital-downstream/`, a byte-exact G.711 capture, so
+  it slices codewords it expects to arrive as themselves and never normalises
+  the gain, sampling phase and band-limiting a line imposes.  **That is the
+  gap, and it is ours.**  An earlier wording here -- "over a line with unknown
+  gain, band-limiting and delay there are no exact codewords to slice" -- reads
+  as though the medium forbids it, and it does not: this IS the topology V.90
+  was written for, with one codec (here the VG224's) D/Aing the DS0 toward the
+  subscriber, and recovering those codewords plus the network clock through
+  that D/A is precisely what §9.3's Sd and TRN1d exist to let the analogue
+  modem do.  A real V.90 analogue modem does it over a worse line than this.
 * **Plain V.34**: Phase 2 completes, and Phase 3/Phase 4 reach as far as
   PHASE4_MP on the best live call, but usually the receiver sits in
   PHASE3_WAIT_S for the whole call.  See the sampling-phase finding below.
@@ -916,8 +923,15 @@ and it is on the wire at the analogue end: scanning `hsf-rx.raw` for **1333 Hz**
 **What fails is the analogue receiver, and it is the documented open item:**
 `[ME] V.90 analogue RX: hunting Sd (Sd 0 reps, S-bar-d 0 reps, TRN1d 0T, Jd 0
 frames)` for the whole attempt.  `v90_analogue_rx.c` is a **codeword** state
-machine -- correct when the downstream is the DS0 stream, and there are no exact
-G.711 codewords left after a 2-wire analogue round trip.
+machine -- correct when the downstream is the DS0 stream, and it is fed here
+with a signal that has been through the VG224's D/A, so the codewords arrive
+scaled, band-limited and at an unrecovered sampling phase rather than as
+themselves.  **It needs to normalise those three before it slices, which is
+what a real analogue modem's Sd/TRN1d acquisition is doing; it is not that an
+analogue line cannot carry the downstream.**  (An earlier wording -- "there are
+no exact G.711 codewords left after a 2-wire analogue round trip" -- overstates
+it in a way that would retire the whole analogue role, and this is the one
+topology V.90 is actually specified for.)
 
 The rest follows mechanically, and all of it is correct behaviour given that:
 

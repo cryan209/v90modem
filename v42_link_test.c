@@ -382,10 +382,12 @@ done:
 }
 
 
+typedef struct { bool valid; int octets; } xid_options_check_t;
+
 /* Decode our transmitted bits independently of the LAPM XID parser. */
 static void check_xid_frame(void *user_data, const uint8_t *frame, int len, int ok)
 {
-    bool *valid = user_data;
+    xid_options_check_t *check = user_data;
     bool options = false, refusal = false;
     if (!ok || len < 3 || frame[2] != 0x82)
         return;
@@ -407,23 +409,26 @@ static void check_xid_frame(void *user_data, const uint8_t *frame, int len, int 
             if (n > end - i)
                 return;
             if (group == 0x80 && id == 3)
-                options = n == 4 && memcmp(frame + i, "\x8a\x89\x00\x00", 4) == 0;
+                options = n == check->octets
+                          && memcmp(frame + i, "\x8a\x89\x00\x00", n) == 0;
             if (group == 0xf0 && id == 1)
                 refusal = n == 1 && frame[i] == 0;
             i += n;
         }
     }
-    *valid = options && refusal;
+    check->valid = options && refusal;
 }
 
-static bool run_outgoing_xid(void)
+static bool run_outgoing_xid(int octets)
 {
     endpoint_t ep = {0};
-    bool valid = false;
+    xid_options_check_t check = {false, octets};
     v42_state_t *caller = v42_init(NULL, true, false, get_payload, put_payload, &ep);
-    hdlc_rx_state_t *wire = hdlc_rx_init(NULL, false, false, 1, check_xid_frame, &valid);
+    hdlc_rx_state_t *wire = hdlc_rx_init(NULL, false, false, 1, check_xid_frame, &check);
     if (caller && wire)
     {
+        if (octets == 3)
+            v42_set_xid_optional_functions_octets(caller, octets);
         v42_restart(caller);
         for (int i = 0; i < 2048; i++)
             hdlc_rx_put_bit(wire, v42_tx_bit(caller));
@@ -432,7 +437,7 @@ static bool run_outgoing_xid(void)
         hdlc_rx_free(wire);
     if (caller)
         v42_free(caller);
-    return valid;
+    return check.valid;
 }
 
 
@@ -535,8 +540,12 @@ int main(void)
           "V.42 DISC/UA release disconnects both endpoints cleanly");
     CHECK(run_sustained_outage_case(2400),
           "V.42 sustained outage reaches explicit retry-exhaustion disconnect");
-    CHECK(run_outgoing_xid(),
+    CHECK(run_outgoing_xid(4),
           "V.42 transmits well-formed XID groups and explicit compression refusal");
+    CHECK(run_outgoing_xid(3),
+          "V.42 legacy XID encoding preserves private-group boundaries and refusal");
+    CHECK(v42_set_xid_optional_functions_octets(NULL, 3) == -1,
+          "V.42 XID length rejects a missing context");
     CHECK(run_peer_compression_request(),
           "V.42 declines a peer compression request without a V.42bis codec");
     CHECK(v44_xid_offer(), "V.44 Annex A outgoing XID user data has exact wire format");

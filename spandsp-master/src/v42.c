@@ -558,7 +558,7 @@ static void transmit_xid(v42_state_t *ss, uint8_t addr)
     len += 3;
 
     /* Parameter negotiation group */
-    group_len = 20;
+    group_len = 16 + ss->config.xid_optional_functions_octets;
     *buf++ = GI_PARAM_NEGOTIATION;
     put_net_unaligned_uint16(buf, group_len);
     buf += 2;
@@ -574,9 +574,15 @@ static void transmit_xid(v42_state_t *ss, uint8_t addr)
         24 Selective retransmission procedure (SREJ frame) multiple I frame request with span list
            capability. */
     *buf++ = PI_HDLC_OPTIONAL_FUNCTIONS;
-    *buf++ = 4;
-    put_net_unaligned_uint32(buf, 0x8A890000);  /* Bits 2, 4, 8 , 9, 12, and 16 set */
-    buf += 4;  /* Table 11a/V.42: keep subsequent TLVs after this value. */
+    /* V.42 (03/2002) Table 11a Note 1 requires four octets. The older
+       RasFinder 4.12 negotiated the private compression group correctly with
+       three in live tests; make that compatibility deviation explicit, not default. */
+    *buf++ = ss->config.xid_optional_functions_octets;
+    *buf++ = 0x8A;
+    *buf++ = 0x89;
+    *buf++ = 0x00;
+    if (ss->config.xid_optional_functions_octets == 4)
+        *buf++ = 0x00;
 
     /* Send the maximum as a number of bits, rather than octets */
     *buf++ = PI_TX_INFO_MAXSIZE;
@@ -1624,6 +1630,14 @@ SPAN_DECLARE(int) v42_set_bit_rate(v42_state_t *s, int bit_rate)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v42_set_xid_optional_functions_octets(v42_state_t *s, int octets)
+{
+    if (!s || (octets != 3 && octets != 4))
+        return -1;
+    s->config.xid_optional_functions_octets = octets;
+    return 0;
+}
+
 SPAN_DECLARE(int) v42_get_bit_rate(const v42_state_t *s)
 {
     return (s != NULL)  ?  s->tx_bit_rate  :  0;
@@ -1761,6 +1775,7 @@ SPAN_DECLARE(v42_state_t *) v42_init(v42_state_t *ss,
     ss->config.v42_rx_window_size_k = V42_DEFAULT_WINDOW_SIZE_K;
     ss->config.v42_tx_n401 = V42_DEFAULT_N_401;
     ss->config.v42_rx_n401 = V42_DEFAULT_N_401;
+    ss->config.xid_optional_functions_octets = 4;
 
     /* V.42bis 5.1/Annex A: compression is optional and defaults to P0=0.
        This LAPM API carries uncompressed application bytes and has no

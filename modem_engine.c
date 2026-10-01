@@ -743,6 +743,19 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
             result = ds_init_v42(&g_data_stack, calling_party, g_data_lapm_detect, bit_rate,
                                  data_stack_pull_dte_byte, NULL,
                                  data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
+        const char *xid_octets = getenv("ME_LAPM_XID_OPTION_OCTETS");
+        if (result == 0 && xid_octets) {
+            if ((strcmp(xid_octets, "3") != 0 && strcmp(xid_octets, "4") != 0)
+                || v42_set_xid_optional_functions_octets(g_data_stack.v42,
+                                                        atoi(xid_octets)) != 0)
+                result = -1;
+            else {
+                /* ds_init has queued XID already when detection is disabled. */
+                if (!g_data_lapm_detect)
+                    v42_restart(g_data_stack.v42);
+                fprintf(stderr, "[ME] LAPM XID optional-functions length: %s octets\n", xid_octets);
+            }
+        }
         if (result != 0)
             g_data_link_failed = true;
     } else {
