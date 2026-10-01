@@ -6,7 +6,7 @@ modem is on a real 2-wire loop behind a single codec (VG224 -> SIP -> us),
 so that 9.5.1.1.3 releases Sd. On the byte-exact SIP loopback it must behave
 exactly as it does today.
 
-Status: steps 1-3 done, 2026-10-01. Each step lists what it changes, how it is
+Status: steps 1-4 done, 2026-10-01. Each step lists what it changes, how it is
 measured, and the result that completes it. Do the steps in order: each one
 produces the instrument the next one is graded by.
 
@@ -221,7 +221,7 @@ Done when the fixture's start lands within ±2 symbols of the bound tool's
   `v92_proc_eval_test`, and every synthetic row's outcome. TRN1u still fails
   on the loop, as it should until steps 4-5.
 
-### 4. Train an equaliser on the known sequence and track timing
+### 4. Train an equaliser on the known sequence and track timing -- DONE 2026-10-01
 
 New front end, `v92_p3_eq.c`, linked wherever `v92_p3_rx.o` is (`SRCS`
 plus each `*_OBJS` that needs it).
@@ -244,6 +244,63 @@ plus each `*_OBJS` that needs it).
   of TRN1u to its end. Equalised SNR must be within 2 dB of the bound
   tool's 41-tap figure for the same window (more is fine, since the bound
   tool has no timing tracking).
+
+**Result.** `v92_p3_eq.c` is in `SRCS` and every object list that carries
+`v92_p3_rx.o`. Nothing in a live call calls it yet; that is steps 5-8.
+
+- **Fixture**, from the receiver's own aligned start (5292), graded on
+  symbols 256-2039:
+  - **99.94% sign agreement**, worst 256-symbol window 99.6%;
+  - **9.5 dB**, against the bound tool's 7.6 dB for a fixed 41-tap filter
+    over the same TRN1u. The ~2 dB gained is the timing tracking.
+  - Both asserted by `make v92-loop-rx-test`, at >= 99.5% and >= 5.6 dB.
+- **Every synthetic row trains** to 99.89-100%: r4 loop rows 9.4-10.9 dB,
+  ideal rows 38.3 dB.
+- **Frequency.**
+  - Over TRN1u alone the loop has not quite settled: +145 ppm on the fixture,
+    +162/-132 on the ±200 ppm loop rows.
+  - Run on through the fixture's 12000T of Ja, decision-directed
+    (`V92_P3_EQ_RUN_TO`), it reaches **163.5 ppm by symbol 4096**. That is
+    the 163 ppm measured independently from the Phase 2 carrier.
+  - It then holds 150-177 ppm and carries tau through 1.8 samples of drift
+    without a slip. That is what step 7 needs.
+- **The timing detector is NOT Mueller and Muller, and that is measured.**
+  The plan named the `v92_trn2u_demod_feed_adaptive()` pattern. With an
+  adapting T-spaced equaliser in front, M&M reads the h(±T) that the
+  equaliser itself drives to zero, so the two fight over one degree of
+  freedom:
+  - the +200 ppm row ran to -464 ppm;
+  - the ±200 ppm loop rows both read about -95 ppm.
+
+  The tap-centroid servo from `v92_analogue_audio.c` was tried next. It is
+  too slow, because the centroid moves only as fast as NLMS adapts the
+  taps, and it overshot in either sign.
+
+  What works is the **data-aided MSE gradient** e·dy/dτ, where dy/dτ is the
+  equaliser applied to the interpolated input's slope. It is **normalised by
+  the running slope power**: unnormalised, its gain differs several-fold
+  between a channel with little ISI and the low-passed loop, and the
+  low-ISI rows oscillated. Both alternatives remain selectable
+  (`V92_P3_EQ_DET_*`).
+- **The channel model was wrong, and step 2's two phase-only and ppm-only
+  rows were non-physical.** The analogue modem's 16 kHz output keeps ~18%
+  of TRN1u's energy above 4 kHz, the images of its reconstruction. The
+  model sampled that with no anti-alias filter:
+  - while sampling is synchronous the fold is a fixed linear map, which the
+    raw slicer and the equaliser both absorb;
+  - with a clock offset it can be undone by nothing: pinned to the true
+    +200 ppm, the equaliser reached only 71%.
+
+  The r4 taps already hold the real codec's filter. So `v92_line_channel`
+  gained an `antialias` option: a G.712-style 129-tap low-pass at 3.7 kHz
+  with exactly 32 symbols of delay. Those two rows now use it and are
+  renamed "..., A/D filter". The equaliser trains on both, at 100%,
+  14.5 dB and 12.6 dB, and the +200 ppm row estimates +175 ppm.
+  **Today's raw receiver now fails both rows**, so their
+  `expect_pass_today` is false: a fractional phase through a real A/D
+  filter already defeats raw sign slicing.
+- Experiment knobs, test harness only: `V92_P3_EQ_TAPS/MU/KP/KI/AVG/DET/
+  TIMING/FIXPPM/RUN_TO/TRACE`, plus `V92_P3_LINE_ROW=<n>` for one row.
 
 ### 5. Replace the TRN1u lock metric
 

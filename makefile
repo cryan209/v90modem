@@ -149,14 +149,14 @@ LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 LIBUSB_CFLAGS := $(shell pkg-config --cflags libusb-1.0 2>/dev/null || echo "-I$(HOMEBREW_PREFIX)/include/libusb-1.0")
 LIBUSB_LIBS   := $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo "-L$(HOMEBREW_PREFIX)/lib -lusb-1.0")
 
-SRCS   = v34_line_ec.c v92_analogue_audio.c v92_analogue_phase4.c v92_analogue_phase3.c v92_su.c sip_modem.c modem_engine.c v90_analogue_linear.c v90_analogue_fse.c v90_analogue_sd.c v34_pp_fit.c v90_sounder.c clock_recovery.c data_interface.c fax_class2.c data_stack.c v44.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c
+SRCS   = v34_line_ec.c v92_analogue_audio.c v92_analogue_phase4.c v92_analogue_phase3.c v92_su.c sip_modem.c modem_engine.c v90_analogue_linear.c v90_analogue_fse.c v90_analogue_sd.c v34_pp_fit.c v90_sounder.c clock_recovery.c data_interface.c fax_class2.c data_stack.c v44.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_p3_eq.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
 TEST_TARGETS = v42bis_test v44_test v92_startup_test port_cp_stream_test port_data_rx_test port_v34_fixed_test port_v34_fixed_lms_test port_v34_fixed_solve_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test fax_class_test fax_class2_test v90_upstream_replay v90_engine_replay v34_duplex_test v32bis_spandsp_test v32bis_duplex_test v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test v90_analogue_sd_test v34_pp_fit_test v34_hdx_test v92_p3_rx_line_test
-TEST_OBJS = v92_su.o vpcm_loopback_test.o v90.o v90_cp_rx.o v90_dil_rx.o v90_dil_measure.o v90_dil_presets.o v90_analogue_tx.o v90_analogue_rx.o v90_analogue_phase3.o v90_analogue_phase4.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_cp_rx.o v92_trn2u.o v92_upstream_data.o v92_upstream_rx.o p3_demod.o
-DECODE_OBJS = vpcm_decode.o v90_dil_measure.o v90_dil_presets.o v34_phase2_decode.o v34_info_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_anspcm_decode.o p3_demod.o v90.o v90_cp_rx.o v91.o vpcm_cp.o v21_fsk_demod.o phase12_decode.o call_init_tone_probe.o v90_dil_rx.o
+TEST_OBJS = v92_su.o vpcm_loopback_test.o v90.o v90_cp_rx.o v90_dil_rx.o v90_dil_measure.o v90_dil_presets.o v90_analogue_tx.o v90_analogue_rx.o v90_analogue_phase3.o v90_analogue_phase4.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_p3_eq.o v92_cp_rx.o v92_trn2u.o v92_upstream_data.o v92_upstream_rx.o p3_demod.o
+DECODE_OBJS = vpcm_decode.o v90_dil_measure.o v90_dil_presets.o v34_phase2_decode.o v34_info_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_p3_eq.o v92_anspcm_decode.o p3_demod.o v90.o v90_cp_rx.o v91.o vpcm_cp.o v21_fsk_demod.o phase12_decode.o call_init_tone_probe.o v90_dil_rx.o
 ENCODE_OBJS = vpcm_encode.o v90.o v91.o vpcm_cp.o v92_phase4_decode.o v90_dil_measure.o v90_dil_presets.o
-V92_STARTUP_TEST_OBJS = v90_analogue_fse.o v90_analogue_sd.o v92_analogue_audio.o v92_analogue_phase4.o v92_upstream_data.o v92_upstream_rx.o v92_analogue_phase3.o v92_su.o v90_analogue_rx.o v90_analogue_linear.o v90_analogue_phase4.o p3_demod.o v92_startup_test.o v92_trn2u.o v92_cp_rx.o v92_p3_rx.o v92_ja_decode.o v90.o v90_cp_rx.o v90_dil_measure.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o
+V92_STARTUP_TEST_OBJS = v90_analogue_fse.o v90_analogue_sd.o v92_analogue_audio.o v92_analogue_phase4.o v92_upstream_data.o v92_upstream_rx.o v92_analogue_phase3.o v92_su.o v90_analogue_rx.o v90_analogue_linear.o v90_analogue_phase4.o p3_demod.o v92_startup_test.o v92_trn2u.o v92_cp_rx.o v92_p3_rx.o v92_p3_eq.o v92_ja_decode.o v90.o v90_cp_rx.o v90_dil_measure.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o
 V92_REPLAY_OBJS = tools/v92_trn2u_replay.o v92_trn2u.o v92_cp_rx.o vpcm_cp.o
 DATA_STACK_TEST_OBJS = data_stack_test.o data_stack.o v44.o
 V44_TEST_OBJS = v44_test.o v44.o
@@ -201,7 +201,7 @@ V90_ENGINE_REPLAY_OBJS = v90_engine_replay.o $(filter-out sip_modem.o,$(OBJS))
 # V.92 strict Phase-3 receiver, which live only ever rehunts and so reports
 # nothing when it rejects.  Same objects that receiver needs in the engine.
 V92_P3_RX_LINE_TEST_OBJS = v92_p3_rx_line_test.o v92_line_channel.o $(filter-out v92_startup_test.o,$(V92_STARTUP_TEST_OBJS))
-V92_P3_PROBE_OBJS = v92_p3_probe.o v92_p3_rx.o v92_ja_decode.o p3_demod.o v90.o v90_cp_rx.o v90_dil_measure.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o v92_trn2u.o v92_cp_rx.o
+V92_P3_PROBE_OBJS = v92_p3_probe.o v92_p3_rx.o v92_p3_eq.o v92_ja_decode.o p3_demod.o v90.o v90_cp_rx.o v90_dil_measure.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o v92_trn2u.o v92_cp_rx.o
 V34_DUPLEX_TEST_OBJS = v34_duplex_test.o
 V34_HDX_TEST_OBJS = v34_hdx_test.o
 V32BIS_SPANDSP_TEST_OBJS = v32bis_spandsp_test.o
@@ -679,6 +679,7 @@ v92_upstream_rx.o: v92_upstream_rx.c v92_upstream_rx.h v92_upstream_data.h
 tools/v92_trn2u_replay.o: tools/v92_trn2u_replay.c v92_trn2u.h v92_cp_rx.h
 v92_ja_decode.o:  v92_ja_decode.c  v92_ja_decode.h v90.h
 v92_p3_rx.o:      v92_p3_rx.c      v92_p3_rx.h v92_ja_decode.h v90.h p3_demod.h
+v92_p3_eq.o:      v92_p3_eq.c      v92_p3_eq.h
 p3_demod.o:       p3_demod.c       p3_demod.h
 v34_phase2_decode.o: v34_phase2_decode.c v34_phase2_decode.h v90.h v91.h
 v34_phase2_decode_test.o: v34_phase2_decode_test.c v34_phase2_decode.h

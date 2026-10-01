@@ -26,6 +26,7 @@
  *   v92_p3_rx_line_test [--expect-failure] [fixture]
  */
 #include "v92_p3_rx.h"
+#include "v92_p3_eq.h"
 #include "v92_analogue_audio.h"
 #include "v92_line_channel.h"
 #include "v90_dil_presets.h"
@@ -55,6 +56,88 @@
 
 static int first_entry[V92_P3_RX_FAILED + 1];
 
+/* ------------------------------------------------------------------------
+ * Plan step 4: the TRN1u equaliser (v92_p3_eq) run from the receiver's own
+ * aligned TRN1u start.  Graded data-aided from symbol 256 (the end of the
+ * block least-squares seed) to the end of the 2040T the analogue side sends.
+ * ------------------------------------------------------------------------ */
+#define EQ_AGREE_MIN      0.995
+/* tools/v92_trn1u_bound.py --len 2040 --taps 41 at 5292: 7.6 dB with a
+ * fixed filter and no timing tracking.  The plan asks for within 2 dB. */
+#define EQ_FIXTURE_BOUND_DB 7.6
+
+typedef struct {
+    bool ran;
+    double agree;      /* sign agreement, symbols 256..2039 */
+    double snr_db;
+    double ppm;
+    int worst_x10;     /* lowest 256-symbol agreement seen after the seed */
+} eq_result_t;
+
+static double env_or(const char *name, double fallback)
+{
+    const char *v = getenv(name);
+
+    return v && *v ? atof(v) : fallback;
+}
+
+static eq_result_t eq_run(const uint8_t *cw, int count, bool alaw, int start)
+{
+    v92_p3_eq_config_t cfg;
+    v92_p3_eq_t eq;
+    eq_result_t r = {0};
+
+    v92_p3_eq_default_config(&cfg);
+    /* Experiment knobs; the defaults are what is graded. */
+    cfg.ntaps = (int)env_or("V92_P3_EQ_TAPS", cfg.ntaps);
+    cfg.mu = env_or("V92_P3_EQ_MU", cfg.mu);
+    cfg.timing_kp = env_or("V92_P3_EQ_KP", cfg.timing_kp);
+    cfg.timing_ki = env_or("V92_P3_EQ_KI", cfg.timing_ki);
+    cfg.timing = env_or("V92_P3_EQ_TIMING", 1) != 0;
+    cfg.detector = (int)env_or("V92_P3_EQ_DET", cfg.detector);
+    cfg.timing_avg = env_or("V92_P3_EQ_AVG", cfg.timing_avg);
+    cfg.mu = env_or("V92_P3_EQ_MU", cfg.mu);
+    if (start < 0 || !v92_p3_eq_init(&eq, &cfg))
+        return r;
+    eq.freq = env_or("V92_P3_EQ_FIXPPM", 0)*1e-6;
+    /* Past TRN1u the equaliser runs decision-directed on Ja. */
+    int run_to = (int)env_or("V92_P3_EQ_RUN_TO", cfg.trn_symbols);
+    r.worst_x10 = 1000;
+    for (int i = 0; i < count; i++) {
+        v92_p3_eq_push(&eq, alaw ? alaw_to_linear(cw[i]) : ulaw_to_linear(cw[i]));
+        if (i == start + 64 && !v92_p3_eq_start(&eq, start))
+            return r;
+        while (eq.started && eq.k < run_to && v92_p3_eq_step(&eq)) {
+            if (getenv("V92_P3_EQ_TRACE") && eq.k % 128 == 0)
+                fprintf(stderr, "EQTRACE k=%lld tau=%.4f ppm=%.1f det=%.5f agree=%.1f\n",
+                        (long long)eq.k, eq.tau, eq.freq*1e6, eq.mm_avg,
+                        v92_p3_eq_agree_x10(&eq)/10.0);
+            if (eq.k > cfg.seed_symbols + V92_P3_EQ_AGREE_WINDOW
+                && v92_p3_eq_agree_x10(&eq) < r.worst_x10)
+                r.worst_x10 = v92_p3_eq_agree_x10(&eq);
+        }
+        if (eq.k >= run_to)
+            break;
+    }
+    if (eq.k < cfg.trn_symbols)
+        return r;
+    r.ran = true;
+    r.agree = v92_p3_eq_post_seed_agreement(&eq);
+    r.snr_db = v92_p3_eq_snr_db(&eq);
+    r.ppm = v92_p3_eq_ppm(&eq);
+    return r;
+}
+
+static void eq_print(const eq_result_t *r)
+{
+    if (!r->ran) {
+        printf("eq did not run");
+        return;
+    }
+    printf("eq %6.2f%% (worst 256: %5.1f%%) %5.1f dB %+6.0f ppm",
+           100.0*r->agree, r->worst_x10/10.0, r->snr_db, r->ppm);
+}
+
 static int fixture_row(const char *path, bool expect_failure)
 {
     unsigned char *cw;
@@ -70,6 +153,8 @@ static int fixture_row(const char *path, bool expect_failure)
     bool decoded = false;
     int trn1u_start = -1;
     bool aligned;
+    eq_result_t eqr;
+    bool trained;
 
     printf("fixture %s\n", path);
     f = fopen(path, "rb");
@@ -118,6 +203,7 @@ static int fixture_row(const char *path, bool expect_failure)
         if (state == V92_P3_RX_DONE || state == V92_P3_RX_FAILED)
             break;
     }
+    eqr = eq_run(cw, (int)len, false, trn1u_start);
     free(cw);
 
     reason = v92_p3_rx_last_reject(&rx, &reject_sample, &m0, &m1);
@@ -132,6 +218,16 @@ static int fixture_row(const char *path, bool expect_failure)
            trn1u_start, TRN1U_EXPECTED, START_SLACK, aligned ? "" : "  WRONG");
     if (!aligned) {
         printf("FAIL: TRN1u start not found where it is\n");
+        return 1;
+    }
+    trained = eqr.ran && eqr.agree >= EQ_AGREE_MIN
+           && eqr.snr_db >= EQ_FIXTURE_BOUND_DB - 2.0;
+    printf("  TRN1u equaliser: ");
+    eq_print(&eqr);
+    printf(" (need >= %.1f%%, >= %.1f dB)%s\n", 100.0*EQ_AGREE_MIN,
+           EQ_FIXTURE_BOUND_DB - 2.0, trained ? "" : "  FAIL");
+    if (!trained) {
+        printf("FAIL: the TRN1u equaliser does not train on the fixture\n");
         return 1;
     }
 
@@ -194,6 +290,7 @@ static int fixture_row(const char *path, bool expect_failure)
  * with no loop, 979-981 through the r4 loop's delay. */
 #define SYN_TRN1U_START   976
 #define SYN_R4_DELAY      4
+#define SYN_CAPTURE       4000    /* covers TRN1u (976..3016) and margin */
 
 typedef struct {
     const char *name;
@@ -202,27 +299,33 @@ typedef struct {
     double phase;
     double ppm;
     double snr_db;                /* re L_U; 0 = no noise */
+    bool antialias;               /* the A/D's own filter (no r4 taps) */
     bool expect_pass_today;       /* outcome before plan steps 3-6 */
 } syn_row_t;
 
 static const syn_row_t syn_rows[] = {
-    /* Without ISI the raw sign slicer survives a fractional phase, a clock
-     * offset or noise on its own; with the r4 loop's ISI it fails exactly as
-     * the real recording does (trn1u_ones_low). */
-    /* name                          law    isi    phase  ppm    snr  today */
-    {"ideal u-law",                  false, false, 0.00,    0.0,  0.0, true},
-    {"ideal A-law",                  true,  false, 0.00,    0.0,  0.0, true},
-    {"phase 0.5 only",               false, false, 0.50,    0.0,  0.0, true},
-    {"+200 ppm only",                false, false, 0.00,  200.0,  0.0, true},
-    {"noise 25 dB only",             false, false, 0.00,    0.0, 25.0, true},
-    {"r4 loop",                      false, true,  0.00,    0.0,  0.0, false},
-    {"r4 loop, phase 0.25",          false, true,  0.25,    0.0,  0.0, false},
-    {"r4 loop, phase 0.50",          false, true,  0.50,    0.0,  0.0, false},
-    {"r4 loop, phase 0.75",          false, true,  0.75,    0.0,  0.0, false},
-    {"r4 loop, +200 ppm",            false, true,  0.00,  200.0,  0.0, false},
-    {"r4 loop, -200 ppm",            false, true,  0.00, -200.0,  0.0, false},
-    {"r4 loop, noise 25 dB",         false, true,  0.00,    0.0, 25.0, false},
-    {"r4 loop, A-law, ph .5, 163ppm",true,  true,  0.50,  163.0, 25.0, false},
+    /* The raw sign slicer survives noise on its own; with the r4 loop's ISI
+     * it fails exactly as the real recording does (trn1u_ones_low).  Rows
+     * that move the sampling instant without the r4 taps (which hold the
+     * real codec's filter) get the A/D's anti-alias filter (see
+     * v92_line_channel.h) -- without it they modelled an A/D that folds
+     * the analogue modem's images above 4 kHz back in, and "passed" only
+     * because that fold is a fixed map while the sampling is synchronous.
+     * With it a fractional phase alone defeats the raw slicer too. */
+    /* name                          law    isi    phase  ppm    snr  aa today */
+    {"ideal u-law",                  false, false, 0.00,    0.0,  0.0, false, true},
+    {"ideal A-law",                  true,  false, 0.00,    0.0,  0.0, false, true},
+    {"phase 0.5 only, A/D filter",   false, false, 0.50,    0.0,  0.0, true,  false},
+    {"+200 ppm only, A/D filter",    false, false, 0.00,  200.0,  0.0, true,  false},
+    {"noise 25 dB only",             false, false, 0.00,    0.0, 25.0, false, true},
+    {"r4 loop",                      false, true,  0.00,    0.0,  0.0, false, false},
+    {"r4 loop, phase 0.25",          false, true,  0.25,    0.0,  0.0, false, false},
+    {"r4 loop, phase 0.50",          false, true,  0.50,    0.0,  0.0, false, false},
+    {"r4 loop, phase 0.75",          false, true,  0.75,    0.0,  0.0, false, false},
+    {"r4 loop, +200 ppm",            false, true,  0.00,  200.0,  0.0, false, false},
+    {"r4 loop, -200 ppm",            false, true,  0.00, -200.0,  0.0, false, false},
+    {"r4 loop, noise 25 dB",         false, true,  0.00,    0.0, 25.0, false, false},
+    {"r4 loop, A-law, ph .5, 163ppm",true,  true,  0.50,  163.0, 25.0, false, false},
 };
 
 static v92a_config_t syn_config(bool alaw)
@@ -270,7 +373,8 @@ static int dump_tx(const char *path)
 }
 
 static bool syn_run(const syn_row_t *row, int *ja_sample, int *rejects,
-                    v92_p3_rx_reject_t *last, int *trn1u_start, FILE *dump)
+                    v92_p3_rx_reject_t *last, int *trn1u_start, FILE *dump,
+                    uint8_t *capture, int *captured)
 {
     v92a_config_t cfg = syn_config(row->alaw);
     v92a_audio_t *fe = v92a_audio_init_rate(&cfg, V92_AUDIO_RATE);
@@ -280,6 +384,7 @@ static bool syn_run(const syn_row_t *row, int *ja_sample, int *rejects,
         .phase = row->phase, .ppm = row->ppm,
         .noise_rms = row->snr_db > 0.0 ? SYN_LU/pow(10.0, row->snr_db/20.0) : 0.0,
         .seed = 12345,
+        .antialias = row->antialias,
     };
     v92_line_channel_t ch;
     v92_p3_rx_t rx;
@@ -294,7 +399,10 @@ static bool syn_run(const syn_row_t *row, int *ja_sample, int *rejects,
     *ja_sample = -1;
     *trn1u_start = -1;
     /* A dumped row runs to the end so the whole of Ja is recorded. */
-    for (int i = 0; i < SYN_SYMBOLS && (!ok || dump); i++) {
+    if (captured)
+        *captured = 0;
+    /* A captured row runs until the equaliser has all of TRN1u. */
+    for (int i = 0; i < SYN_SYMBOLS && (!ok || dump || (capture && i < SYN_CAPTURE)); i++) {
         int16_t up[V92_AUDIO_PER_SYMBOL];
         int16_t silence[V92_AUDIO_PER_SYMBOL] = {0};
         double in[V92_AUDIO_PER_SYMBOL];
@@ -314,6 +422,8 @@ static bool syn_run(const syn_row_t *row, int *ja_sample, int *rejects,
 
             if (dump)
                 fputc(cw, dump);
+            if (capture && *captured < SYN_CAPTURE)
+                capture[(*captured)++] = cw;
             v92_p3_rx_feed(&rx, cw, idx++);
             if (*trn1u_start < 0 && rx.trn1u_align_done)
                 *trn1u_start = rx.trn1u_start;
@@ -324,7 +434,7 @@ static bool syn_run(const syn_row_t *row, int *ja_sample, int *rejects,
             ok = ja->desc.n == cfg.dil.n && ja->desc.lsp == cfg.dil.lsp
               && ja->desc.ltp == cfg.dil.ltp;
             *ja_sample = ja->start_sample;
-            if (!dump)
+            if (!dump && !(capture && i < SYN_CAPTURE))
                 break;
         }
     }
@@ -342,15 +452,26 @@ static int synthetic_rows(bool expect_failure)
            v92_line_channel_r4_ntaps);
     for (size_t r = 0; r < sizeof(syn_rows)/sizeof(syn_rows[0]); r++) {
         const syn_row_t *row = &syn_rows[r];
+        const char *only = getenv("V92_P3_LINE_ROW");
+
+        if (only && *only && atoi(only) != (int)r)
+            continue;
         int ja_sample;
         int rejects;
         int start;
-        int want_start = SYN_TRN1U_START + (row->isi ? SYN_R4_DELAY : 0);
+        int want_start = SYN_TRN1U_START + (row->isi ? SYN_R4_DELAY : 0)
+                       + (row->antialias ? V92_LINE_CHANNEL_AA_DELAY_SYMBOLS : 0);
         v92_p3_rx_reject_t last;
-        bool ok = syn_run(row, &ja_sample, &rejects, &last, &start, NULL);
+        static uint8_t capture[SYN_CAPTURE];
+        int captured;
+        bool ok = syn_run(row, &ja_sample, &rejects, &last, &start, NULL,
+                          capture, &captured);
+        eq_result_t eqr = eq_run(capture, captured, row->alaw, start);
+        bool trained = eqr.ran && eqr.agree >= EQ_AGREE_MIN;
         bool wanted = expect_failure ? row->expect_pass_today : true;
         bool aligned = start >= 0 && abs(start - want_start) <= START_SLACK;
         const char *verdict = !aligned ? "FAIL (TRN1u start)"
+                            : !trained ? "FAIL (equaliser)"
                             : ok == wanted ? "ok"
                             : ok ? "UNEXPECTED PASS" : "FAIL";
 
@@ -359,7 +480,10 @@ static int synthetic_rows(bool expect_failure)
                row->name, row->alaw ? "A" : "u", start, want_start,
                ok ? "decoded" : "missing", ja_sample, rejects,
                v92_p3_rx_reject_name(last), verdict);
-        if (ok != wanted || !aligned)
+        printf("  %-30s    ", "");
+        eq_print(&eqr);
+        printf("\n");
+        if (ok != wanted || !aligned || !trained)
             failures++;
     }
     if (failures && expect_failure)
@@ -391,7 +515,8 @@ int main(int argc, char **argv)
                 || r >= (int)(sizeof(syn_rows)/sizeof(syn_rows[0])))
                 return 2;
             printf("%s: Ja %s\n", syn_rows[r].name,
-                   syn_run(&syn_rows[r], &ja_sample, &rejects, &last, &start, f)
+                   syn_run(&syn_rows[r], &ja_sample, &rejects, &last, &start, f,
+                           NULL, NULL)
                    ? "decoded" : "missing");
             fclose(f);
             return 0;

@@ -51,7 +51,24 @@ bool v92_line_channel_init(v92_line_channel_t *c,
     memset(c, 0, sizeof(*c));
     c->cfg = *cfg;
     c->ideal = (cfg->ntaps == 0 || (cfg->ntaps == 1 && cfg->taps[0] == 1.0))
-            && cfg->phase == 0.0 && cfg->ppm == 0.0;
+            && cfg->phase == 0.0 && cfg->ppm == 0.0 && !cfg->antialias;
+    if (cfg->antialias) {
+        const int n = V92_LINE_CHANNEL_AA_TAPS;
+        const double fc = 3700.0/16000.0;
+        double sum = 0.0;
+
+        for (int k = 0; k < n; k++) {
+            double m = k - (n - 1)/2.0;
+            double s = m == 0.0 ? 2.0*fc : sin(2.0*M_PI*fc*m)/(M_PI*m);
+            double w = 0.42 - 0.5*cos(2.0*M_PI*k/(n - 1))
+                     + 0.08*cos(4.0*M_PI*k/(n - 1));
+
+            c->aa_taps[k] = s*w;
+            sum += s*w;
+        }
+        for (int k = 0; k < n; k++)
+            c->aa_taps[k] /= sum;
+    }
     /* One 8 kHz A/D sample is two 16 kHz samples; a fast A/D (ppm > 0)
      * takes its samples closer together in the modem's time. */
     c->step = 2.0/(1.0 + cfg->ppm*1.0e-6);
@@ -61,6 +78,19 @@ bool v92_line_channel_init(v92_line_channel_t *c,
                      + 0.08*cos(4.0*M_PI*(k + 0.5)/(2*h));
     c->rng = cfg->seed ? cfg->seed : 0x9e3779b9u;
     return true;
+}
+
+static double antialias(v92_line_channel_t *c, double x)
+{
+    double y = 0.0;
+
+    if (!c->cfg.antialias)
+        return x;
+    c->aa_pos = (c->aa_pos + 255) & 255;
+    c->aa_hist[c->aa_pos] = x;
+    for (int k = 0; k < V92_LINE_CHANNEL_AA_TAPS; k++)
+        y += c->aa_taps[k]*c->aa_hist[(c->aa_pos + k) & 255];
+    return y;
 }
 
 static double fir(v92_line_channel_t *c, double x)
@@ -106,7 +136,7 @@ int v92_line_channel_put(v92_line_channel_t *c, const double *in, int n,
     int produced = 0;
 
     for (int i = 0; i < n; i++) {
-        c->ring[c->written % V92_LINE_CHANNEL_HISTORY] = fir(c, in[i]);
+        c->ring[c->written % V92_LINE_CHANNEL_HISTORY] = antialias(c, fir(c, in[i]));
         c->written++;
         /* Emit every A/D instant whose interpolation window is complete.
          * The integer instants of an ideal channel need no lookahead. */

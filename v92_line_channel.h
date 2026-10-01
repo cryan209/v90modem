@@ -42,13 +42,29 @@ typedef struct {
      * Zero adds none. */
     double noise_rms;
     uint32_t seed;
+    /* The network A/D's anti-alias filter (G.712 passband to 3.4 kHz):
+     * a 129-tap windowed-sinc low-pass at 16 kHz, cut-off 3.7 kHz, delay
+     * exactly 64 samples = 32 symbols.  The analogue modem's 16 kHz output
+     * keeps ~18% of TRN1u's energy above 4 kHz (its reconstruction images),
+     * which a synchronous A/D folds into a FIXED linear map an equaliser
+     * absorbs, but which a fractional phase or a clock offset folds into
+     * something no receiver can undo.  The r4 taps already contain the real
+     * codec's filter; rows that move the sampling instant without them need
+     * this, or they model an A/D that does not exist. */
+    bool antialias;
 } v92_line_channel_config_t;
+
+#define V92_LINE_CHANNEL_AA_TAPS 129
+#define V92_LINE_CHANNEL_AA_DELAY_SYMBOLS 32
 
 typedef struct {
     v92_line_channel_config_t cfg;
     bool ideal;               /* bit-exact pass-through of the even samples */
     double fir_hist[256];
     int fir_pos;
+    double aa_taps[V92_LINE_CHANNEL_AA_TAPS];
+    double aa_hist[256];
+    int aa_pos;
     double ring[V92_LINE_CHANNEL_HISTORY];
     uint64_t written;         /* filtered 16 kHz samples produced so far */
     double t;                 /* next A/D instant, 16 kHz sample units */
