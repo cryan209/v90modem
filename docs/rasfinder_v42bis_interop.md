@@ -110,3 +110,49 @@ Ignored artifacts are under `artifacts/tower-interop-20261001/`:
 `rf-readable-analysis.json`, `rf-readable-decoded.bin`,
 `actual-banner-reconstruction.json`, `rf-xid-three-analysis.json`, and the
 corresponding raw bit streams, G.711 taps, callback schedules and PTY captures.
+
+## 2026-10-01: stale agreements and unsolicited final acknowledgements
+
+The opaque captures repeat optional-functions `8e 89 00`, whereas readable
+captures finish with `8a 89 00`. The former advertises single-frame SREJ,
+which our offer does not request and our implementation does not support.
+Previously the receiver checked the field length but ignored its values.
+V.42 clause 10 and Table 11a Note 1 require initiator request and responder
+agreement for an optional procedure. Responses agreeing to unrequested
+s-SREJ, TEST, extended FCS or m-SREJ now leave T401 running rather than
+publishing parameters or sending SABME (8.10.2–8.10.3). A delayed reply to the
+previous compatibility probe is a plausible explanation for the repeated
+response, not a proven statement about the firmware.
+
+Separately, `tx_information_rr_rnr_response()` always sent F=1, including
+when answering an I frame with P=0 and no pending outgoing data. This
+violated 8.4.2.2; 8.4.2.1 requires F=1 only for P=1. It now echoes P as F.
+Public-API HDLC dialogue tests observe ordinary and polled I-frame
+acknowledgements and their N(R), as well as stale XID retries and bounded
+failure for each unsupported optional procedure. Both link and data-stack
+regressions pass on macOS and Tower Linux.
+
+The verified corrected live call is
+`xid-validation/pf-fixed/rf-pf-live-20261001/12000`. Its independent RX decoder
+finds **19 CRC-valid frames, zero bad FCS and zero malformed frames**. The
+peer sends `8e` twice, then `8a`, then UA and a readable MULTITECH banner.
+Thus a real repeated non-agreement no longer commits the link prematurely.
+This single call does not establish a reliability percentage or prove that
+all opaque streams have the same cause. The acknowledgement fix has offline
+wire validation; this capture does not contain our transmitted HDLC bits.
+
+Opt-in `DS_TX_FRAME_DUMP` records DTE input and the payload handed to LAPM;
+it contains plaintext, so use only test credentials. In this call the two
+credential writes are exactly `6262730d` (`bbs` plus CR) at both boundaries.
+The peer independently acknowledges N(R)=1 and N(R)=2, then N(R)=3 for the
+extra CR sent eight seconds later. It responds `You are logged off` and
+never reaches ENiGMA. The prior verified XID-only call similarly acknowledged
+both writes but returned `Invalid Password!!!`. This narrows local byte
+corruption without proving the far-end application's password handling.
+RasFinder-to-BBS authentication is still unresolved.
+
+Transfer verification matters: an earlier elevated archive operation read
+old workspace sources, so its purported fixed live test did not run these
+changes and must not count as validation. Subsequent archives were created
+inside the normal workspace context, transferred separately, and all three
+source SHA-256 hashes matched on Tower before compiling and running tests.

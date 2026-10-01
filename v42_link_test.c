@@ -354,10 +354,11 @@ done:
 
 static bool run_peer_compression_request(void)
 {
-    /* CRC-valid RasFinder XID response requests P0=3. The byte-shuttle
+    /* RasFinder-derived XID response requests P0=3, with its unrequested
+       s-SREJ bit cleared to make this a valid agreement. The byte-shuttle
        endpoint has no V.42bis codec and must negotiate P0=0 (5.1/Annex A). */
     static const uint8_t xid[] = {
-        0x03, 0xaf, 0x82, 0x80, 0x00, 0x13, 0x03, 0x03, 0x8e, 0x89, 0x00, 0x05, 0x02, 0x04, 0x00, 0x06, 0x02, 0x04, 0x00, 0x07, 0x01, 0x0f, 0x08, 0x01, 0x0f, 0xf0, 0x00, 0x0f, 0x00, 0x03, 0x56, 0x34, 0x32, 0x01, 0x01, 0x03, 0x02, 0x02, 0x04, 0x00, 0x03, 0x01, 0x20
+        0x03, 0xaf, 0x82, 0x80, 0x00, 0x13, 0x03, 0x03, 0x8a, 0x89, 0x00, 0x05, 0x02, 0x04, 0x00, 0x06, 0x02, 0x04, 0x00, 0x07, 0x01, 0x0f, 0x08, 0x01, 0x0f, 0xf0, 0x00, 0x0f, 0x00, 0x03, 0x56, 0x34, 0x32, 0x01, 0x01, 0x03, 0x02, 0x02, 0x04, 0x00, 0x03, 0x01, 0x20
     };
     endpoint_t ep = {0};
     v42_negotiated_parameters_t parameters;
@@ -462,8 +463,10 @@ static void capture_v44_xid(void *ctx, const uint8_t *p, int n, int ok)
 typedef struct {
     endpoint_t *ep;
     hdlc_tx_state_t *peer;
-    int requests, total_requests, sabme, widths[4], peer_octets;
+    int requests, total_requests, sabme, widths[4], peer_octets, forced;
     bool early_commit;
+    int acknowledgement_checks;
+    bool bad_acknowledgement;
 } xid_dialogue_t;
 
 static void xid_dialogue_frame(void *user_data, const uint8_t *p, int n, int ok)
@@ -486,12 +489,30 @@ static void xid_dialogue_frame(void *user_data, const uint8_t *p, int n, int ok)
         uint8_t frame[64];
         memcpy(frame, reply, 11);
         int length = sizeof(reply);
-        int options = d->peer_octets == -3 ? 3 : d->peer_octets;
+        int options = d->peer_octets < 0 ? 3 : d->peer_octets;
         int shift = options - 3;
         if (shift == 1) frame[11] = 0;
         memcpy(frame + 11 + shift, reply + 11, sizeof(reply) - 11);
         frame[5] += shift; frame[7] = options; length += shift;
+        /* The first legacy reply advertises s-SREJ despite our offer.
+           A stale repeat must not finish the subsequent exchange. */
+        frame[8] = (!d->forced && options == 3 && p[7] == 4)
+                    || (d->peer_octets == -4 && d->requests == 2)
+                   ? 0x8e : 0x8a;
+        if (d->peer_octets == -5) frame[8] |= 0x04; /* s-SREJ */
+        if (d->peer_octets == -6) frame[9] |= 0x20; /* TEST */
+        if (d->peer_octets == -7) frame[10] |= 0x01; /* 32-bit FCS */
+        if (d->peer_octets == -8) frame[10] |= 0x80; /* m-SREJ */
         hdlc_tx_frame(d->peer, frame, length);
+    } else if (n == 3 && p[1] == 1 && d->ep->rx_len >= 2) {
+        /* Independent HDLC observer: ordinary I(P=0) needs RR(F=0),
+           followed by I(P=1) requiring RR(F=1), V.42 8.4.2. */
+        int expected = d->acknowledgement_checks == 0 ? 2 : 5;
+        if (p[2] != expected) d->bad_acknowledgement = true;
+        if (d->acknowledgement_checks++ == 0) {
+            const uint8_t polled[] = {1,2,1,'P','F'};
+            hdlc_tx_frame(d->peer, polled, sizeof(polled));
+        }
     } else if (p[1] == 0x7f) {
         d->sabme++;
         const uint8_t ua[] = {3,0x73};
@@ -502,7 +523,7 @@ static void xid_dialogue_frame(void *user_data, const uint8_t *p, int n, int ok)
 static bool run_xid_dialogue(int forced, int peer_octets)
 {
     endpoint_t ep = {0};
-    xid_dialogue_t d = {.ep=&ep, .peer_octets=peer_octets};
+    xid_dialogue_t d = {.ep=&ep, .peer_octets=peer_octets, .forced=forced};
     v42_state_t *caller = v42_init(NULL,true,false,get_payload,put_payload,&ep);
     d.peer = hdlc_tx_init(NULL,false,1,false,NULL,NULL);
     hdlc_rx_state_t *wire = hdlc_rx_init(NULL,false,false,1,xid_dialogue_frame,&d);
@@ -510,21 +531,22 @@ static bool run_xid_dialogue(int forced, int peer_octets)
     if (!caller || !d.peer || !wire) goto done;
     v42_set_status_callback(caller,status_changed,&ep);
     v42_set_compression(caller,3,1024,32);
-    if (peer_octets == -3) v42_set_bit_rate(caller,2400);
+    if (peer_octets < 0) v42_set_bit_rate(caller,2400);
     if (forced) v42_set_xid_optional_functions_octets(caller,forced);
     v42_restart(caller);
     hdlc_tx_flags(d.peer,16);
     bool data_sent = false;
-    for (int i=0; i<(peer_octets == -3 ? 100000 : 4096); i++) {
+    for (int i=0; i<(peer_octets < 0 ? 100000 : 4096); i++) {
         hdlc_rx_put_bit(wire,v42_tx_bit(caller));
         v42_rx_bit(caller,hdlc_tx_get_bit(d.peer));
         if (ep.connected && !data_sent) {
             const uint8_t data[] = {1,0,0,'R','F'};
             data_sent = hdlc_tx_frame(d.peer,data,sizeof(data)) == 0;
         }
+        if (ep.connected && ep.rx_len >= 4 && d.acknowledgement_checks >= 2) break;
     }
-    int expected = !forced && peer_octets == 3 ? 2 : 1;
-    if (peer_octets == -3)
+    int expected = peer_octets == -4 ? 3 : !forced && peer_octets == 3 ? 2 : 1;
+    if (peer_octets == -3 || peer_octets <= -5)
         /* Initial offer, compatibility offer, then the configured N400=5. */
         ok = ep.link_error && !ep.xid_negotiated && !ep.connected
           && d.sabme == 0 && d.total_requests == 7;
@@ -535,7 +557,8 @@ static bool run_xid_dialogue(int forced, int peer_octets)
           && d.widths[0] == (forced ? forced : 4)
           && (expected == 1 || d.widths[1] == 3)
           && ep.xid_events == 1 && ep.connected
-          && ep.rx_len == 2 && memcmp(ep.rx,"RF",2) == 0;
+          && ep.rx_len == 4 && memcmp(ep.rx,"RFPF",4) == 0
+          && d.acknowledgement_checks == 2 && !d.bad_acknowledgement;
     /* A new link must start with the configured format, not retain fallback. */
     if (ok && !forced && peer_octets == 3) {
         ep.xid_negotiated = ep.connected = false;
@@ -661,6 +684,9 @@ int main(void)
     CHECK(run_xid_dialogue(3,3), "V.42 forced three-octet XID needs no extra exchange");
     CHECK(run_xid_dialogue(0,2), "V.42 malformed option lengths cannot establish a link");
     CHECK(run_xid_dialogue(0,-3), "V.42 failed compatibility exchange reports retry exhaustion without establishment");
+    CHECK(run_xid_dialogue(0,-4), "V.42 stale XID response cannot agree to an unrequested procedure or start SABME");
+    for (int option = -5; option >= -8; option--)
+        CHECK(run_xid_dialogue(0,option), "V.42 unrequested optional procedures exhaust negotiation without establishment");
     CHECK(run_peer_compression_request(),
           "V.42 declines a peer compression request without a V.42bis codec");
     CHECK(v44_xid_offer(), "V.44 Annex A outgoing XID user data has exact wire format");

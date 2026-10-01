@@ -366,6 +366,7 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
     bool v42bis_group;
     bool v44_present = false;
     int peer_options_octets = 0;
+    bool unrequested_options = false;
     bool response = len > 0 && frame[0] == ss->lapm.cmd_addr;
     v42_v44_parameters_t peer_v44 = {0};
 
@@ -421,8 +422,13 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
                     if (param_len != 3 && param_len != 4)
                         return -1;
                     peer_options_octets = param_len;
-                    /* TODO: param_val is never used right now. */
-                    //param_val = pack_value(buf, param_len);
+                    /* Table 11a numbers bits in transmission order. We
+                       request none of its optional procedures: s-SREJ (3),
+                       TEST (14), extended FCS (17), or m-SREJ (24).
+                       Mandatory encoding bits are ignored per Note 1. */
+                    unrequested_options = (buf[0] & 0x04)
+                                          || (buf[1] & 0x20)
+                                          || (buf[2] & 0x81);
                     break;
                 case PI_TX_INFO_MAXSIZE:
                     param_val = pack_value(buf, param_len);
@@ -520,6 +526,16 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
         s->xid_optional_functions_octets = 3;
         if (response && s->configuring)
             return 1;
+    }
+    if (response && unrequested_options)
+    {
+        /* V.42 clause 10 and 8.10.2: a response cannot agree to an
+           optional procedure we did not request. In particular, a delayed
+           reply to the earlier compatibility probe must not complete the
+           new exchange. Leave T401 running for the current offer (8.10.3). */
+        span_log(&ss->logging, SPAN_LOG_WARNING,
+                 "XID: response agrees to unrequested optional procedures; waiting for a valid agreement\n");
+        return -1;
     }
     ss->negotiated.v44_valid = v44_present && ss->config.v44_enabled;
     memset(&ss->negotiated.v44, 0, sizeof(ss->negotiated.v44));
@@ -871,7 +887,11 @@ static void tx_information_rr_rnr_response(v42_state_t *ss, const uint8_t *frame
     /* Respond with information frame, RR, or RNR, as appropriate */
     /* p = 1 may be used for status checking */
     if ((frame[2] & 0x1)  ||  !tx_information_frame(ss))
-        tx_supervisory_frame(s, frame[0], (s->local_busy)  ?  LAPM_S_RNR  :  LAPM_S_RR, 1);
+    {
+        /* V.42 8.4.2.1/8.4.2.2: an I-frame response echoes P as F.
+           An unsolicited F=1 response can be discarded by the peer. */
+        tx_supervisory_frame(s, frame[0], (s->local_busy)  ?  LAPM_S_RNR  :  LAPM_S_RR, frame[2] & 0x1);
+    }
 }
 /*- End of function --------------------------------------------------------*/
 

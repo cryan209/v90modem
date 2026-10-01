@@ -10,6 +10,26 @@
 #include <spandsp.h>
 
 #include <string.h>
+#include <stdlib.h>
+
+/* Optional byte-level diagnostic at the DTE/compressor/LAPM boundary.
+   Capture only with test credentials: this includes outgoing plaintext. */
+static void ds_dump_tx_bytes(const char *stage, const uint8_t *msg, int len)
+{
+    static FILE *dump;
+    static bool tried;
+    if (!tried)
+    {
+        const char *path = getenv("DS_TX_FRAME_DUMP");
+        tried = true;
+        if (path && *path) dump = fopen(path, "w");
+    }
+    if (!dump || len <= 0) return;
+    fprintf(dump, "%s ", stage);
+    for (int i = 0; i < len; i++) fprintf(dump, "%02x", msg[i]);
+    fputc('\n', dump);
+    fflush(dump);
+}
 
 static void ds_compression_release(data_stack_t *s)
 {
@@ -83,6 +103,7 @@ static int ds_v42_get_frame(void *user_data, uint8_t *msg, int max_len)
             }
             if (len)
             {
+                ds_dump_tx_bytes("DTE", input, len);
                 s->tx_chars += len;
                 int rc;
                 if (s->v44_encoder)
@@ -119,7 +140,9 @@ static int ds_v42_get_frame(void *user_data, uint8_t *msg, int max_len)
             msg[len++] = (uint8_t)byte;
         }
         s->tx_chars += len;
+        ds_dump_tx_bytes("DTE", msg, len);
     }
+    ds_dump_tx_bytes("LAPM", msg, len);
     s->v42_tx_wire_bytes += len;
     return len;
 }
