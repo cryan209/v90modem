@@ -6,7 +6,7 @@ modem is on a real 2-wire loop behind a single codec (VG224 -> SIP -> us),
 so that 9.5.1.1.3 releases Sd. On the byte-exact SIP loopback it must behave
 exactly as it does today.
 
-Status: plan, 2026-10-01. Each step lists what it changes, how it is
+Status: step 1 done, 2026-10-01. Each step lists what it changes, how it is
 measured, and the result that completes it. Do the steps in order: each one
 produces the instrument the next one is graded by.
 
@@ -68,24 +68,37 @@ u-law). The receiver is armed at G.711 sample 81440.
 
 ## Steps
 
-### 1. A tracked fixture and a failing test
+### 1. A tracked fixture and a failing test -- DONE 2026-10-01
 
-- Cut a ~3 s excerpt of `apple-v92-sip-r4/server/live-rx.g711` (Ru through
-  Ja and beyond, about 24 KB). Write it to
-  `artifacts/v92-loop-upstream/live-rx.g711` with a README giving its
-  provenance, the arm sample (rebased) and the expected events.
-- Track it with `git add -f`. It is the only foreign V.92 upstream in the
-  tree.
-- Add `v92_p3_rx_line_test` to `make test`. It feeds the fixture through
-  `v92_p3_rx` and asserts state `DONE` with a CRC-valid Ja. Like
-  `v90_analogue_rx_test`, a missing fixture is a failure, not a skip.
-- **Done when:** the test exists and fails with `trn1u_ones_low`.
+- **Fixture.** `artifacts/v92-loop-upstream/live-rx.g711` is r4 bytes
+  80000..99999 (2.5 s), tracked with `git add -f`. Its README gives the
+  provenance, the rebased positions (arm 1440, Ru 5008, Ru-bar 5272) and the
+  descriptor the analogue side sent (`measurement-120x66`: N=120, LSP=12,
+  LTP=11).
+- **The step-1 caveat is resolved.** The analogue side sends exactly 2040T
+  of TRN1u, then repeats Ja for 12000T, so the fixture contains Ja several
+  times over.
+- **Test.** `v92_p3_rx_line_test` requires a CRC-valid Ja carrying exactly
+  that descriptor. A missing fixture fails; it does not skip.
+- **Deviation from the plan: the test is NOT in `make test` yet.** Following
+  `eicon-rx-test`'s precedent (a red-by-default suite stops being read), it
+  runs as `make v92-loop-rx-test` with `--expect-failure`. In that mode it
+  passes only while:
+  - Ru and Ru-bar are still acquired at 5008/5272 (+/-16),
+  - TRN1u is entered,
+  - and Ja does not decode.
 
-Caveat: r4's analogue side gave up at `Sd-bar timeout`, so check the
-excerpt actually contains a complete Ja after TRN1u. 9.5.2.1.3 has the
-analogue modem repeat Ja until it sees Sd, so it should. If it does not,
-the step-1 assertion is "TRN1u trained, sign agreement >= 99%", and Ja
-moves to the step-6 synthetic test.
+  So it goes red on an acquisition regression *and* on the fix. Move it into
+  `make test`, without the flag, at step 6.
+- **Control: the receiver's back end works.** The equalised-sign control
+  (an LS-seeded 41-tap equaliser whose decisions are written back as
+  codewords) makes the *unchanged* receiver pass TRN1u and decode the right
+  descriptor at 17733. The test, run on that control file, reports `PASS`
+  without the flag and "expected failure did not occur" with it. Two things
+  are left for later steps:
+  - It needed 79 Ja rejects first. That is step 6's to explain.
+  - The receiver also takes a false Ru -> Ru-bar -> TRN1u lock at 18214,
+    inside the repeated Ja.
 
 ### 2. A synthetic loop channel the loopback cannot provide
 

@@ -152,7 +152,7 @@ LIBUSB_LIBS   := $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo "-L$(H
 SRCS   = v34_line_ec.c v92_analogue_audio.c v92_analogue_phase4.c v92_analogue_phase3.c v92_su.c sip_modem.c modem_engine.c v90_analogue_linear.c v90_analogue_fse.c v90_analogue_sd.c v34_pp_fit.c v90_sounder.c clock_recovery.c data_interface.c fax_class2.c data_stack.c v44.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
-TEST_TARGETS = v42bis_test v44_test v92_startup_test port_cp_stream_test port_data_rx_test port_v34_fixed_test port_v34_fixed_lms_test port_v34_fixed_solve_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test fax_class_test fax_class2_test v90_upstream_replay v90_engine_replay v34_duplex_test v32bis_spandsp_test v32bis_duplex_test v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test v90_analogue_sd_test v34_pp_fit_test v34_hdx_test
+TEST_TARGETS = v42bis_test v44_test v92_startup_test port_cp_stream_test port_data_rx_test port_v34_fixed_test port_v34_fixed_lms_test port_v34_fixed_solve_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test fax_class_test fax_class2_test v90_upstream_replay v90_engine_replay v34_duplex_test v32bis_spandsp_test v32bis_duplex_test v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test v90_analogue_sd_test v34_pp_fit_test v34_hdx_test v92_p3_rx_line_test
 TEST_OBJS = v92_su.o vpcm_loopback_test.o v90.o v90_cp_rx.o v90_dil_rx.o v90_dil_measure.o v90_dil_presets.o v90_analogue_tx.o v90_analogue_rx.o v90_analogue_phase3.o v90_analogue_phase4.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_cp_rx.o v92_trn2u.o v92_upstream_data.o v92_upstream_rx.o p3_demod.o
 DECODE_OBJS = vpcm_decode.o v90_dil_measure.o v90_dil_presets.o v34_phase2_decode.o v34_info_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_anspcm_decode.o p3_demod.o v90.o v90_cp_rx.o v91.o vpcm_cp.o v21_fsk_demod.o phase12_decode.o call_init_tone_probe.o v90_dil_rx.o
 ENCODE_OBJS = vpcm_encode.o v90.o v91.o vpcm_cp.o v92_phase4_decode.o v90_dil_measure.o v90_dil_presets.o
@@ -200,6 +200,7 @@ V90_ENGINE_REPLAY_OBJS = v90_engine_replay.o $(filter-out sip_modem.o,$(OBJS))
 # Not a test: replays a recorded digital-side G.711 receive tap through the
 # V.92 strict Phase-3 receiver, which live only ever rehunts and so reports
 # nothing when it rejects.  Same objects that receiver needs in the engine.
+V92_P3_RX_LINE_TEST_OBJS = v92_p3_rx_line_test.o v92_p3_rx.o v92_ja_decode.o p3_demod.o v90.o v90_cp_rx.o v90_dil_measure.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o v92_trn2u.o v92_cp_rx.o
 V92_P3_PROBE_OBJS = v92_p3_probe.o v92_p3_rx.o v92_ja_decode.o p3_demod.o v90.o v90_cp_rx.o v90_dil_measure.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o v92_trn2u.o v92_cp_rx.o
 V34_DUPLEX_TEST_OBJS = v34_duplex_test.o
 V34_HDX_TEST_OBJS = v34_hdx_test.o
@@ -219,7 +220,7 @@ SRCS += v34_stubs.c
 TEST_OBJS += v34_stubs.o
 endif
 
-.PHONY: all test clean distclean fixed float fixed-compare spandsp pjproject v34-tone-matrix v34-duplex-test v34-matrix-test v32bis-ref-test v32bis-datapump-test v32bis-test v91-serial-pair-test eicon-rx-test g711-path-test FORCE
+.PHONY: all test clean distclean fixed float fixed-compare spandsp pjproject v34-tone-matrix v92-loop-rx-test v34-duplex-test v34-matrix-test v32bis-ref-test v32bis-datapump-test v32bis-test v91-serial-pair-test eicon-rx-test g711-path-test FORCE
 
 all: $(TARGET) $(TEST_TARGETS)
 
@@ -337,6 +338,16 @@ v91-serial-pair-test: $(TARGET)
 # chain regresses or the defect is fixed.
 eicon-rx-test: vpcm_decode
 	python3 tools/eicon_rx_conformance.py --binary ./vpcm_decode --expect-failure
+
+# The V.92 Phase 3 upstream receiver against an analogue modem on a real 2-wire
+# loop (artifacts/v92-loop-upstream/).  Encodes a known-open defect -- the
+# receiver has no equaliser or timing recovery, so TRN1u never trains and Ja
+# never decodes -- and is therefore NOT part of `test` yet, for the reason
+# given for eicon-rx-test above.  --expect-failure is green while the defect
+# stands and loud on a regression or a fix; docs/v92_p3_rx_line_plan.md moves
+# it into `test` without the flag once Ja decodes.
+v92-loop-rx-test: v92_p3_rx_line_test
+	./v92_p3_rx_line_test --expect-failure
 
 # Measures whether the SIP path delivers G.711 byte-exactly, which CLAUDE.md's
 # first constraint requires and which no offline test can check: the RTP payload
@@ -569,6 +580,9 @@ v90_upstream_replay: $(V90_UPSTREAM_REPLAY_OBJS) spandsp
 
 v90_engine_replay: $(V90_ENGINE_REPLAY_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(V90_ENGINE_REPLAY_OBJS) -o $@ $(LDFLAGS)
+
+v92_p3_rx_line_test: $(V92_P3_RX_LINE_TEST_OBJS) spandsp
+	$(CC) $(V92_P3_RX_LINE_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
 v92_p3_probe: $(V92_P3_PROBE_OBJS) spandsp
 	$(CC) $(V92_P3_PROBE_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
