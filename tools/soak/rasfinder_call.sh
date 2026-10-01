@@ -1,5 +1,5 @@
 #!/bin/bash
-# One outbound call to the RasFinder analogue RAS at extension 8416, placed by
+# One outbound call to the RasFinder analogue RAS hunt group 3999, placed by
 # a dedicated server instance so the long-lived 6001 server on the default
 # port is left alone.
 #
@@ -12,7 +12,7 @@
 set -u
 DIR=${1:?usage: rasfinder_call.sh <artifact-dir> [hold-seconds]}
 HOLD=${2:-45}
-EXT=${RF_EXT:-8416}
+EXT=${RF_EXT:-3999}
 PTY=${RF_PTY:-/tmp/v90rf}
 PORT=${RF_PORT:-5072}
 RTP=${RF_RTP:-14000}
@@ -30,7 +30,10 @@ if pgrep -x sip_v90_modem >/dev/null; then
     fi
 fi
 
-VPCM_G711_TAP_DIR="$DIR" SIP_FORCE_PCMU=${SIP_FORCE_PCMU:-1} \
+# RasFinder 4.12 needs its legacy XID encoding for a readable login stream;
+# ME_LAPM_XID_OPTION_OCTETS=4 selects the V.42 (03/2002) Table 11a default.
+ME_LAPM_XID_OPTION_OCTETS=${ME_LAPM_XID_OPTION_OCTETS:-3} \
+    VPCM_G711_TAP_DIR="$DIR" SIP_FORCE_PCMU=${SIP_FORCE_PCMU:-1} \
     ./sip_v90_modem --sip-server asterisk.net.cryan.nz \
         --username 6001 --password 6001 \
         --local-port "$PORT" --rtp-port "$RTP" \

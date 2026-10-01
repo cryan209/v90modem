@@ -43,12 +43,18 @@ A diagnostic caller using the peer's three-octet format changed the result:
 - One intervening P0=3 call failed V.34 training before XID; it is not a
   compression outcome.
 
+A second successful call, `rf-compat-regular`, uses the regular server in an
+isolated Tower build. It reproduces the initial banner and login prompt; an
+independent HDLC extraction and fresh Python decoder again match PTY exactly.
+
 The regular engine exposes `ME_LAPM_XID_OPTION_OCTETS=3` for this compatibility
 encoding; the default remains four. The public library setter accepts only
 three or four and should be used before `v42_restart()`. The engine also
 restarts the freshly created link when detection is disabled so that an XID
 queued during initialization uses the requested encoding. No DSP or G.711
-processing changes are involved.
+processing changes are involved. `tools/soak/rasfinder_call.sh` defaults to
+this compatibility setting and hunt group 3999; its environment overrides
+permit the four-octet comparison.
 
 V.42bis (01/1990), 5.2, 5.6 and 6.2 require C-INIT and the initial root-only
 dictionary at establishment; 7.2 requires initial transparent mode. A new
