@@ -1401,3 +1401,23 @@ the 0.9 s in which the digital side is silent before Sd, our own transmit runs
 at RMS 3132 and the receive tap reads 226 -- **-22.9 dB** -- and a 96-tap fit
 from our transmit tap to our receive tap over the TRN1d era explains nothing
 (held-out R² = -0.010).
+
+**And it holds for the whole downstream, not just the first window.**  The same
+fit stepped across the digital side's Phase 3 in 3000-symbol windows, 161 T/2
+taps, each window fitted and scored on its own halves:
+
+```
+  tx+   432  TRN1d   R2 0.848   0.93%      tx+ 12432  TRN1d   R2 0.813   2.80%
+  tx+  3432  TRN1d   R2 0.814   2.33%      tx+ 15432  TRN1d   R2 0.814   2.07%
+  tx+  6432  TRN1d   R2 0.819   1.93%      tx+ 21432  Jd      R2 0.881   0.00%
+  tx+  9432  TRN1d   R2 0.817   1.87%      tx+ 24432  Jd      R2 0.846   0.00%
+```
+
+TRN1d holds **0.9-2.8% sign error over 2.3 s**, and at 2% a ~70-bit Table 13
+frame is clean about a quarter of the time, which is ample given how many Jd
+frames the digital side sends.  **Do not quote the two 0.00% Jd windows as a
+result**: Jd repeats the same frame, so it is a low-entropy reference and an
+alignment score against it can be met at a wrong lag -- which is exactly what
+their lags of -217 and -258 say, against TRN1d's consistent +48 to +101.  The
+scrambled TRN1d windows are the trustworthy ones for the same reason they are
+the ones that cannot be faked.
