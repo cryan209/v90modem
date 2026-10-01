@@ -199,3 +199,30 @@ execution by automatic approval review because administrative access had not
 been authorized. No management authentication or settings changes occurred.
 Further account/terminal-server inspection requires explicit administrative
 authorization and any configured management credentials.
+
+### Authorized read-only Telnet management inspection
+
+The user subsequently authorized Telnet inspection at 10.69.70.32. The
+management interface required no password to read these menus. The bbs
+record is entry 1, with a masked three-character password; its actual bytes
+cannot be established from this display. Auto Protocol is Telnet and Host
+IP is 192.168.88.56. Inbound and Telnet permissions are enabled; callback,
+callback security, outbound, framed protocol and Rlogin permissions are
+disabled. All 24 hours of all seven days are marked allowed. Daily and
+monthly limits display 24:00 and 744 hours. Connection limit displays 00:00;
+its semantics have not been verified. Concurrent logins displays 36826,
+which is unusual but not proof of corruption or a cause of rejection.
+
+RADIUS and accounting are disabled, with no configured server address.
+All three WAN ports are enabled, Async, Modem Connect, Answering and
+Terminal Server enabled, with scripts disabled. Each WAN's global Telnet
+address and the terminal-server global address are 0.0.0.0; the user-specific
+Telnet address is configured separately as above. No port-specific service
+configuration difference was observed in these screens. No password, field
+value or configuration was changed or saved. Raw menu captures are under
+`xid-validation/management`.
+
+The visible destination and permissions match the intended setup. A masked
+password cannot prove that the saved credential matches the supplied bbs;
+re-saving that one value is a separate configuration action, not part of
+this read-only inspection.
