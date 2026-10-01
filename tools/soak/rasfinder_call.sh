@@ -1,6 +1,6 @@
 #!/bin/bash
-# One outbound call to the RasFinder (hunt group 3999, port 8416, or the
-# law-specific test lines 2900-2909 via RF_EXT), placed by
+# One outbound call to the RasFinder (RF_EXT, default port 8416) from one of
+# our accounts 2900-2909 (RF_USER, default 2900), placed by
 # a dedicated server instance so the long-lived 6001 server on the default
 # port is left alone.
 #
@@ -13,7 +13,9 @@
 set -u
 DIR=${1:?usage: rasfinder_call.sh <artifact-dir> [hold-seconds]}
 HOLD=${2:-45}
-EXT=${RF_EXT:-3999}
+EXT=${RF_EXT:-8416}
+USER_EXT=${RF_USER:-2900}        # our account: 2900-2904 u-law, 2905-2909 A-law
+PASS=${RF_PASS:-$USER_EXT}
 PTY=${RF_PTY:-/tmp/v90rf}
 PORT=${RF_PORT:-5072}
 RTP=${RF_RTP:-14000}
@@ -21,12 +23,12 @@ RTP=${RF_RTP:-14000}
 mkdir -p "$DIR"
 LOG="$DIR/server.log"
 
-# The 29xx RasFinder test lines are law-specific: 2900-2904 u-law, 2905-2909
-# A-law.  Offer only that law, or Asterisk bridges a PCMU leg to a PCMA one by
+# Our 29xx accounts are law-specific: 2900-2904 u-law, 2905-2909 A-law.
+# Offer only that law, or Asterisk bridges a PCMU leg to a PCMA one by
 # TRANSCODING, which no PCM modem survives.  An explicit SIP_FORCE_PCMU or
 # SIP_FORCE_PCMA in the environment still wins.
 if [ -z "${SIP_FORCE_PCMU:-}" ] && [ -z "${SIP_FORCE_PCMA:-}" ]; then
-    case "$EXT" in
+    case "$USER_EXT" in
         290[5-9]) export SIP_FORCE_PCMA=1 ;;
         *)        export SIP_FORCE_PCMU=1 ;;
     esac
@@ -46,7 +48,7 @@ fi
 ME_LAPM_XID_OPTION_OCTETS=${ME_LAPM_XID_OPTION_OCTETS:-auto} \
     VPCM_G711_TAP_DIR="$DIR" \
     ./sip_v90_modem --sip-server asterisk.net.cryan.nz \
-        --username 6001 --password 6001 \
+        --username "$USER_EXT" --password "$PASS" \
         --local-port "$PORT" --rtp-port "$RTP" \
         --pty-link "$PTY" --verbose >"$LOG" 2>&1 &
 pid=$!
