@@ -1,0 +1,250 @@
+# Plan: V.92 Phase 3 upstream receiver over a real analogue loop
+
+Goal: the digital side's V.92 Phase 3 receiver (`v92_p3_rx.c`) acquires
+Ru/uR, trains on TRN1u and decodes Ja's DIL descriptor when the analogue
+modem is on a real 2-wire loop behind a single codec (VG224 -> SIP -> us),
+so that 9.5.1.1.3 releases Sd. On the byte-exact SIP loopback it must behave
+exactly as it does today.
+
+Status: plan, 2026-10-01. Each step lists what it changes, how it is
+measured, and the result that completes it. Do the steps in order: each one
+produces the instrument the next one is graded by.
+
+## What is known (measured, not assumed)
+
+Fixture: `artifacts/apple-v92-sip-r4` (Apple USB modem as the V.92 analogue
+modem dialling our digital side, `ME_V92_PCM_UPSTREAM=1`, MD=0, U_INFO=78,
+u-law). The receiver is armed at G.711 sample 81440.
+
+- `tools/v92_p3_probe` replays `server/live-rx.g711` through `v92_p3_rx.c`
+  and reproduces the live failure exactly. Ru is acquired at 85008, uR at
+  85272, TRN1u is entered at 85323, then `trn1u_ones_low` (48% against a
+  75% gate). The receiver rehunts and never fails, so the live log is silent.
+- **TRN1u is a known sequence.** V.92 8.5.7: the signs are the GPA
+  scrambler (6.3) fed ones, "initialized to zero prior to the transmission
+  of TRN1u", with 0 -> +L_U. No decisions are needed to know what was sent.
+- `tools/v92_trn1u_bound.py` fits a least-squares T-spaced equaliser to that
+  known sequence. Held-out results on r4:
+
+  | taps | best start offset | held-out sign error | SNR |
+  |---|---|---|---|
+  | 1 (raw sign) | -31 | 14.2% | 0.8 dB |
+  | 21 | -24 | 0.67% | 7.4 dB |
+  | 41 | -20 | 0.17% | 8.4 dB |
+  | 21, 600-symbol window | -24 | 0.00% | 10.6 dB |
+
+  Four conclusions:
+  1. **The receiver's 48% is mostly ours.** At the true start the raw sign
+     is right 86% of the time. Two things turn that into 48%:
+     - TRN1u is declared ~25-31 symbols late.
+     - The lock test runs signs through the self-synchronising descrambler,
+       which turns each sign error into about three bit errors.
+  2. **The channel is linearly equalisable.** 21-41 taps give a usable
+     2-level eye.
+  3. **Clock drift matters.** Shorter windows fit better, consistent with
+     the 163 ppm offset measured between the Apple codec and the VG224
+     (`docs/apple_usb_modem_sm56.md`). A fixed filter is not enough; the
+     receiver has to track timing.
+  4. **Level and bearer are not the problem.** Ru arrives as a clean
+     1333 Hz line, TRN1u's energy is flat to Nyquist, and its DC offset is
+     0.8 counts.
+
+- The answer for Sd is different. 8.4.4's Sd puts two thirds of its energy at
+  4000 Hz and the loop removes it. That is the analogue side's problem
+  (`v90a_sd_line()` handles it in the V.90 analogue role). It is in scope
+  only as the next blocker (step 9).
+
+## Constraints
+
+- No change to G.711 handling, transmit timing or sample accounting
+  (CLAUDE.md constraints 1 and 3). The equaliser and interpolator change
+  *where* a symbol is observed, never how many codewords are consumed.
+- Ideal bearer behaviour unchanged. On a byte-exact DS0 the equaliser must
+  converge to a unit centre tap. The existing `v92_startup_test` and
+  `vpcm_loopback_test --all-tests` rows must produce identical decisions.
+- Knob `ME_V92_P3_EQ` (default on once step 8 passes; `0` restores the raw
+  sign path) so a regression can be isolated with one variable.
+- Cite 8.5.x / 9.5.1.1.x in comments and commit messages.
+
+## Steps
+
+### 1. A tracked fixture and a failing test
+
+- Cut a ~3 s excerpt of `apple-v92-sip-r4/server/live-rx.g711` (Ru through
+  Ja and beyond, about 24 KB). Write it to
+  `artifacts/v92-loop-upstream/live-rx.g711` with a README giving its
+  provenance, the arm sample (rebased) and the expected events.
+- Track it with `git add -f`. It is the only foreign V.92 upstream in the
+  tree.
+- Add `v92_p3_rx_line_test` to `make test`. It feeds the fixture through
+  `v92_p3_rx` and asserts state `DONE` with a CRC-valid Ja. Like
+  `v90_analogue_rx_test`, a missing fixture is a failure, not a skip.
+- **Done when:** the test exists and fails with `trn1u_ones_low`.
+
+Caveat: r4's analogue side gave up at `Sd-bar timeout`, so check the
+excerpt actually contains a complete Ja after TRN1u. 9.5.2.1.3 has the
+analogue modem repeat Ja until it sees Sd, so it should. If it does not,
+the step-1 assertion is "TRN1u trained, sign agreement >= 99%", and Ja
+moves to the step-6 synthetic test.
+
+### 2. A synthetic loop channel the loopback cannot provide
+
+Every existing V.92 receive test is fed a byte-exact DS0, which is why none
+of this showed up.
+
+- Add an impairment stage to the audio harness (`v92_analogue_audio.c`'s
+  network-ADC path), applied before G.711 quantisation:
+  - an FIR channel. Fit it from r4's own pair: `call/tx-tap.s16` is the
+    analogue side's transmit at 9600 Hz and `server/live-rx.g711` is what
+    arrived. Fit it once and store the taps as a generated table.
+  - a fractional sampling phase.
+  - a ppm clock offset.
+  - additive noise.
+- Test rows:
+  - ideal (must be identical to today)
+  - channel only
+  - channel + phase 0.0/0.25/0.5/0.75
+  - channel + ±200 ppm
+  - channel + noise at 25 dB
+- Rows that do not pass yet are reported, not hidden, as the V.34 matrix
+  does.
+- **Done when:** the ideal row passes and the impaired rows fail the same
+  way the fixture does.
+
+### 3. Find TRN1u's first symbol from its known sequence
+
+Replace "uR ended, so TRN1u starts here" with a correlation:
+
+- After uR is detected, correlate the raw received signal against the
+  known TRN1u reference over a window around the nominal start (±64
+  symbols, 256 symbols long).
+- Take the peak. A 2-level known sequence with 23-bit GPA structure has a
+  sharp autocorrelation, so the peak is unambiguous even at 14% raw sign
+  error.
+- Record the start. It is also 9.5.1.1.10's modulo-12 frame anchor for the
+  second TRN1u.
+
+Done when the fixture's start lands within ±2 symbols of the bound tool's
+1-tap offset, and on every synthetic row.
+
+### 4. Train an equaliser on the known sequence and track timing
+
+New front end, `v92_p3_eq.c`, linked wherever `v92_p3_rx.o` is (`SRCS`
+plus each `*_OBJS` that needs it).
+
+- **Equaliser:** symbol-spaced, 31 taps by default.
+- **Initial taps:** a block least-squares solve over the first 256 TRN1u
+  symbols against the known reference, the computation the bound tool
+  already does. This avoids spending most of 2040T on LMS convergence.
+- **Then:** data-aided normalised LMS against the reference for the rest of
+  TRN1u.
+- **Timing:** a fractional interpolator in front of the equaliser, driven by
+  a slow-averaged Mueller and Muller error. Reuse the pattern in
+  `v92_trn2u_demod_feed_adaptive()`, including its note that the
+  instantaneous M&M value at one sample per symbol is too jittery to apply
+  directly. Its bound: ±500 ppm. Its gain: enough to follow 163 ppm, i.e.
+  one sample every ~0.77 s.
+- **Output:** per-symbol soft value and sign decision, sign agreement with
+  the reference over the last 256 symbols, and equalised SNR.
+- **Done when:** on the fixture, sign agreement is >= 99.5% from symbol 256
+  of TRN1u to its end. Equalised SNR must be within 2 dB of the bound
+  tool's 41-tap figure for the same window (more is fine, since the bound
+  tool has no timing tracking).
+
+### 5. Replace the TRN1u lock metric
+
+`trn1u_ones_low` runs descrambled ones, a metric that roughly triples the
+error rate.
+
+- Gate instead on sign agreement with the known reference: >= 95% over 256
+  symbols, after the step-4 block solve.
+- Keep the descrambled-ones figure as a logged diagnostic only.
+- Report the reject with both numbers so the probe says which one failed.
+- **Done when:** the fixture passes the gate, the ideal rows still pass,
+  and a deliberately wrong start (start + 3) fails it.
+
+### 6. Decode Ja from equalised decisions
+
+Ja (8.5.4) is scrambled and differentially encoded, seeded with the final
+TRN1u symbol, still ±L_U. `v92_ja_dil_search()` currently reads signs from
+raw codewords (`ja_sign_from_sample()`).
+
+- Give it a variant that takes a sign/decision buffer. Do not fake codewords
+  with a forced MSB.
+- Keep the equaliser running decision-directed through Ja; there is no
+  reference past TRN1u.
+- 9.5.1.1.3 only requires "after receiving the first 2040T ... condition its
+  receiver to receive Ja". So keep the rolling Ja window (6144 symbols) and
+  search the equalised stream the same way the raw one is searched now.
+- **Done when:** the fixture decodes a CRC-valid Table 20 descriptor (or,
+  per the step-1 caveat, the synthetic rows do), and the ideal rows decode
+  the same descriptor as today, bit for bit.
+
+### 7. Hand the trained equaliser on
+
+The rest of Phase 3's upstream arrives on the same channel:
+
+- Su/Su-bar (8.5.6, levels ±√(3/2)·L_U and 0)
+- the second TRN1u (9.5.1.1.10)
+- CPt (8.5.3)
+
+The second TRN1u is also scrambler-zero-initialised, so it is a second known
+training interval.
+
+- Today `v92_su.c` reads raw codewords and the CPt demod
+  (`v92_trn2u_demod`) has its own 5-tap adaptive filter.
+- Route both through the step-4 equaliser state: freeze through Su, retrain
+  on the second TRN1u.
+- Grade on the synthetic rows. There is no live fixture yet: r4 never got
+  that far.
+- **Done when:** the impaired rows of `v92_startup_test` reach Phase 4 CPt
+  on the digital side.
+
+### 8. Engine integration and diagnostics
+
+- Use the new front end in `modem_engine.c`'s V.92 Phase 3 path, behind
+  `ME_V92_P3_EQ`.
+- Extend `v92_p3_rx_report_progress_locked()` to log once per stage:
+  - the TRN1u start found
+  - sign agreement and equalised SNR
+  - timing drift in ppm
+  - the Ja search outcome
+- A live call must never again say only "armed" and then nothing.
+- `tools/v92_p3_probe` gains `--eq` / `--no-eq` for one-variable A/B on any
+  recording.
+- **Done when:** `make test` is green with the knob at both settings, and
+  the fixture test passes only with it on.
+
+### 9. Live verification, and the next blocker
+
+- Re-run `artifacts/apple-v92-sip-r4/run.sh` into a new directory, with the
+  server on tower as before.
+- **Success:** the server log shows the Ja descriptor parsed and `Sd`
+  started within 9.5.1.1.3's 500 ms, with Sd present in the server's own
+  `live-tx.g711` (check the tap, not the log).
+- Expect it to stop next on the analogue side's Sd detection. V.92's
+  analogue controller (`v92a_t`) has not had the `v90a_sd_line()` treatment
+  the V.90 analogue role got, and the loop removes two thirds of Sd. That is
+  the next plan, not this one.
+
+### 10. Separate, parallel: lock the analogue modem's clock
+
+V.92 6.2 makes the upstream symbol rate 8000 symbol/s "derived from the
+digital network". Our Apple analogue side free-runs at 163 ppm off the
+VG224. Step 4's timing loop has to cope anyway: during the first TRN1u
+the analogue modem has only Phase 2 to estimate the clock from. Even so,
+a conformant analogue modem slaves its transmit clock to the downstream.
+
+- Drive the existing fractional clock adjustment in `v92a_audio_t` from a
+  downstream clock estimate. The Phase 2 CC carrier gives ±1 ppm (measured,
+  `docs/apple_usb_modem_sm56.md`).
+- This is analogue-side work. It does not block steps 1-9 and should not be
+  mixed into the same commits.
+
+## Out of scope
+
+- Quick Connect.
+- §9.7 retrain discrimination.
+- Upstream rate selection.
+- The analogue side's downstream receiver: Sd at Nyquist, TRN1d CMA (step 9
+  names it as the next blocker).
