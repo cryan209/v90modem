@@ -197,6 +197,10 @@ PORT_V34_FIXED_SOLVE_TEST_OBJS = port/v34_fixed_solve_test.o
 # thread runs it.  Everything $(TARGET) links except sip_modem.o, which is
 # the part being replaced.
 V90_ENGINE_REPLAY_OBJS = v90_engine_replay.o $(filter-out sip_modem.o,$(OBJS))
+# Not a test: replays a recorded digital-side G.711 receive tap through the
+# V.92 strict Phase-3 receiver, which live only ever rehunts and so reports
+# nothing when it rejects.  Same objects that receiver needs in the engine.
+V92_P3_PROBE_OBJS = v92_p3_probe.o v92_p3_rx.o v92_ja_decode.o p3_demod.o v90.o v90_cp_rx.o v90_dil_measure.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o v92_trn2u.o v92_cp_rx.o
 V34_DUPLEX_TEST_OBJS = v34_duplex_test.o
 V34_HDX_TEST_OBJS = v34_hdx_test.o
 V32BIS_SPANDSP_TEST_OBJS = v32bis_spandsp_test.o
@@ -565,6 +569,12 @@ v90_upstream_replay: $(V90_UPSTREAM_REPLAY_OBJS) spandsp
 
 v90_engine_replay: $(V90_ENGINE_REPLAY_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(V90_ENGINE_REPLAY_OBJS) -o $@ $(LDFLAGS)
+
+v92_p3_probe: $(V92_P3_PROBE_OBJS) spandsp
+	$(CC) $(V92_P3_PROBE_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+
+v92_p3_probe.o: tools/v92_p3_probe.c v92_p3_rx.h v92_ja_decode.h v90.h
+	$(CC) $(CFLAGS) -c tools/v92_p3_probe.c -o $@
 
 v34_pp_fit_test: $(V34_PP_FIT_TEST_OBJS) spandsp
 	$(CC) $(V34_PP_FIT_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)

@@ -1167,3 +1167,106 @@ with no spectral content** while our own transmit continues at ~5950.
 of Sd's 1333 Hz line** (8000/6).  Both taps peak at 1336 Hz during dialling and
 the receive tap reads 73.5% there, which is our own digits, not Sd.  Only the
 post-dial region counts.
+
+### The two Phase 3 blockers, separated -- and the V.90 one is half gone (2026-10-01)
+
+The section above left "Ja is never accepted" as one blocker common to both
+modes.  It is two different faults that happen to present the same way, and
+the V.90 half is no longer true as written.
+
+**V.92: the Ja machinery is called and the strict Phase-3 receiver never gets
+that far.**  "No Ja activity at all" was a reading of the V.34 Ja search, which
+on a V.92 call is the wrong instrument by design: V.92's Phase 3 upstream is
+linear PCM (`v92_analogue_phase3.c` transmits Ru/uR/TRN1u/Ja as 16 kHz linear,
+not V.34 symbols), so `phase3_ja_capture_hyp[]` is legitimately empty and the
+`Ja search input ... longest_hyp_len=0` line in the server log is correct.  The
+receiver that matters is `v92_p3_rx.c`, armed in the same breath
+(`V.92 Phase 3 raw receiver armed at G.711 sample 81440`) -- **and it then logs
+nothing whatever for the rest of the call, because every failure path inside it
+is a rehunt rather than a failure.**  A call that acquires Ru and rejects TRN1u
+is, in the server log, indistinguishable from one on which no upstream arrived.
+
+New `tools/v92_p3_probe.c` (`make v92_p3_probe`) replays a recorded
+`live-rx.g711` through that same receiver and prints every state change.  On
+`artifacts/apple-v92-sip-r4/server/live-rx.g711` armed at the sample the engine
+named, it reproduces the live outcome exactly:
+
+```
+sample   85008 (  10.626s) state=ru1
+sample   85272 (  10.659s) state=ur1
+sample   85323 (  10.665s) state=trn1u
+sample   85578 (  10.697s) state=ru1_hunt
+final state=ru1_hunt rejects=2 last=trn1u_ones_low m0=48 m1=-1 ja_ok=0
+```
+
+So **Ru and uR are acquired off a real analogue loop** -- the bearer carries
+them, and the received Ru is textbook: at t=10.62 the digital side's codewords
+expand to `-1087 -623 +439 +1087 +623 -439` repeating, a clean period-6 line at
+8000/6 = 1333 Hz with a stable phase.  **TRN1u is where it dies, and the reason
+is arithmetic rather than a threshold.**  TRN1u (8.5.7) is GPA-scrambled ones
+selecting ±L_U at the *full* 8 kHz symbol rate; the receiver recovers it by
+slicing the sign of each received codeword, which gives **48% ones** against a
+75% gate.  Swept offline over the received tap -- fractional sampling phase in
+tenths of a sample crossed with ±3000 ppm of symbol-rate offset, 1500 symbols
+per point -- **the best any sign slicer can reach on this signal is 67.4%**
+(at +250 ppm, phase 0.8), still under the gate.  It is not DC either: the mean
+over the TRN1u era is 0.8 counts.  **The signal is also not band-limited away**
+-- measured over a 256-sample window at t=10.70, the energy is 19% below 1 kHz,
+31% 1-2 kHz, 37% 2-3 kHz, 6% 3-3.4 kHz and 7% above 3.4 kHz, i.e. essentially
+flat to Nyquist -- so what defeats the slicer is ISI, not a missing band.
+
+That is the mirror image of the V.90 analogue-role gap already recorded here:
+**the digital side's V.92 Phase 3 receiver has no equalizer and no timing
+recovery, and it needs both.**  Ru survives only because a 1333 Hz line's sign
+pattern is robust to both; nothing at the full symbol rate is.  Note what this
+does NOT say: it is not a statement about the bearer, which carries Ru cleanly
+and TRN1u broadband, and it is not a level problem, which is why no gain change
+is worth trying.
+
+**V.90: Sd IS now transmitted, and the previous section's "silent in both
+directions" is superseded.**  `artifacts/apple-v90-sip-r7` repeats r6 with
+`V90_JA_BIT_DUMP` set and the digital side's own receive tap collected.  Same
+binary, same peer, opposite outcome: the 9.3.1.3 500 ms heuristic fallback
+fired at 11.1 s, `[V90] Phase 3: analogue Ja detected, starting Sd` and
+`Sd complete (64 reps)` both appear, and **the digital side's own transmit tap
+carries it** -- from sample 89120 (11.140 s) the µ-law stream expands to
+`+1919 0 +1919 -1919 0 -1919` repeating, 8.4.4's four slots at level W with
+signs ++-- and two zero slots, for exactly 384 symbols, then S-bar-d, then
+TRN1d at RMS 943 for the 2.5 s the current default asks for.  Measure Sd with
+the 1333 Hz bin and the *first non-zero sample*, not with a fixed time: the
+bin reads 0.333 over the first 384 symbols and 0.005 over TRN1d, which is how
+the two are told apart.
+
+**What decided r6 from r7 is where the 9.3.1.3 allowance is measured from, and
+the default anchor is not an instant in the protocol.**  The clock starts at
+the first *suppressed* heuristic attempt, and the three heuristic sources only
+consult that gate once they already have a Ja candidate -- so on a call where
+none of them produces one, the clock never starts and the bound never applies.
+In r6 nothing consulted it until the far end's own retrain silence at 13.34 s,
+200 ms after the analogue side had already given up.  New
+`ME_V90_JA_FALLBACK_ANCHOR=ja` measures it from the first captured Ja bit
+instead, which is what the clause says ("after RECEIVING Ja ... may wait for up
+to 500 ms").  **It is deliberately not the default**: over the eleven RasFinder
+calls in `artifacts/` whose descriptor parsed, the gap from the first Ja bits
+to the parse is 2.12-2.83 s and never under 2.1 s, so a 500 ms release there
+would start Sd -- and so stop the peer's Ja per 9.3.2.4 -- before the descriptor
+arrived, on every call that currently works.  The right anchor is a property of
+how long the peer holds Ja, not of the clause.
+
+**The remaining V.90 blocker is the analogue side not seeing Sd**, which is the
+gap this file and `docs/hsf_analogue_v90_coupler.md` already name: the analogue
+Phase 3 receiver slices codewords it expects to arrive as themselves and
+normalises neither gain, sampling phase nor band-limiting.  It reports
+`no Sd in this window (held-out score 0.000)` on every window of r7 while the
+pattern above is provably on the wire from the other end.
+
+**Also checked and NOT the problem, so do not re-derive:** the Ja gate's
+suppression latches (`g_v90_ja_first_suppressed_ms`,
+`g_v90_ja_suppress_logged[]`) are file-scope and are reset in
+`v90_dil_capture_reset()`, whose call sites are per-call or per-retrain, so the
+process-lifetime `static` bug that bit `v90_retire_phase2_cc_notch()` is not
+present here.  And the analogue side's 1500 ms Ja deadline (9.3.2.4,
+`ME_V90_ANALOGUE_JA_SD_BAR_MS`) is the clause value; it is shorter than the
+2.1-2.8 s our own descriptor parse takes, so the two halves of this project
+deadlock against each other by construction when the fallback does not fire --
+which is the argument for fixing the parse rather than lengthening the deadline.

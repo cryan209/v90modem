@@ -997,6 +997,20 @@ static v92_p3_rx_t    g_v92_p3_rx;
 static bool           g_v92_p3_rx_active = false;
 static bool           g_v92_p3_rx_result_applied = false;
 static bool           g_v92_p3_rx_failure_logged = false;
+/* Last reported strict-receiver state and reject count.
+ *
+ * Between "raw receiver armed" and a Ja this receiver used to log NOTHING at
+ * all: every failure path inside it is a p6_rehunt_from_current(), which
+ * resets to ru1_hunt and tries again, so a call that acquires Ru, enters
+ * TRN1u and rejects it looks in the server log exactly like a call on which
+ * no upstream signal ever arrived.  Those are completely different findings
+ * -- the first says the bearer carries the upstream and our demodulation of
+ * it is wrong, the second says it does not -- and telling them apart cost a
+ * session building an offline probe (tools/v92_p3_probe.c) to replay the tap
+ * this receiver had already consumed live.  Report every state change and
+ * every rehunt instead. */
+static int            g_v92_p3_rx_last_state = -1;
+static int            g_v92_p3_rx_last_rejects = -1;
 static v92_cp_rx_t    g_v92_p3_cpt_rx;
 static v92_trn2u_demod_t g_v92_p3_cpt_demod;
 static bool           g_v92_p3_cpt_active = false;
@@ -1882,6 +1896,12 @@ static bool           g_v90_wait_ja_tone_a_logged = false;
  * (§9.3.2.4) before it arrives.  Same shape as the v90_retire_phase2_cc_notch()
  * latch (§ docs/v90_upstream_data_path.md). */
 static uint64_t       g_v90_ja_first_suppressed_ms = 0;
+/* When the first Ja bit of this Phase 3 reached the descriptor capture.
+ * §9.3.1.3's allowance runs from RECEIVING Ja, which is this instant, not
+ * from the first time one of the three heuristic sources happened to have a
+ * candidate to offer -- and the two are far apart.  See the anchor comment
+ * in v90_ja_heuristic_allowed(). */
+static uint64_t       g_v90_ja_first_bits_ms = 0;
 static bool           g_v90_ja_suppress_logged[4];
 
 /* Echo canceller for full-duplex V.34.
@@ -3228,6 +3248,7 @@ static void v90_dil_capture_reset(void)
     g_v90_dil_parse_logged = false;
     g_v90_wait_ja_tone_a_logged = false;
     g_v90_ja_first_suppressed_ms = 0;
+    g_v90_ja_first_bits_ms = 0;
     memset(g_v90_ja_suppress_logged, 0, sizeof(g_v90_ja_suppress_logged));
     g_v90_phase3_s_events = 0;
     g_last_v90_bridge_rx_stage = -1;
@@ -4508,6 +4529,8 @@ static void cleanup_v34_v90_training_locked(void)
     g_v92_p3_rx_active = false;
     g_v92_p3_rx_result_applied = false;
     g_v92_p3_rx_failure_logged = false;
+    g_v92_p3_rx_last_state = -1;
+    g_v92_p3_rx_last_rejects = -1;
     g_v92_p3_cpt_active = false;
     v92_su_rx_reset_locked();
     g_v92_trn2u_active = false;
@@ -4640,6 +4663,8 @@ static bool restart_v90_phase2_locked(const char *reason)
     g_v92_p3_rx_active = false;
     g_v92_p3_rx_result_applied = false;
     g_v92_p3_rx_failure_logged = false;
+    g_v92_p3_rx_last_state = -1;
+    g_v92_p3_rx_last_rejects = -1;
     g_v92_p3_cpt_active = false;
     v92_su_rx_reset_locked();
     v90_cp_rx_reset(&g_v90_cp_rx);
@@ -4926,15 +4951,52 @@ static bool v90_ja_heuristic_allowed(const char *source)
      * arriving a median 0.3 s into Phase 3, so the bound is only reached when
      * the descriptor is late or never coming -- exactly the case where the
      * old behaviour deadlocked.  0 restores the unbounded wait. */
+    /* WHERE THE ALLOWANCE IS MEASURED FROM, and it is not a detail.
+     *
+     * The default anchor is the first SUPPRESSED heuristic attempt, which is
+     * not an instant in the protocol at all: the three sources only consult
+     * this gate once they already have a Ja candidate to offer, so on a call
+     * where none of them produces one the clock never starts and the bound
+     * never applies.  Measured on two consecutive calls of the same binary
+     * against the Apple USB modem's analogue role (artifacts/apple-v90-sip-r6
+     * and -r7): in r7 the clock started early enough that the fallback fired
+     * at 11.1 s and the digital side transmitted Sd, S-bar-d and TRN1d -- the
+     * +1919/0/+1919/-1919/0/-1919 of §8.4.4 is on its own transmit tap from
+     * 11.140 s for exactly 384 symbols -- while in r6 nothing consulted the
+     * gate until the far end's own retrain silence at 13.34 s, 200 ms after
+     * it had already given up, so Phase 3 was silent in both directions for
+     * the whole call.  Same code, same peer, opposite outcomes.
+     *
+     * ME_V90_JA_FALLBACK_ANCHOR=ja measures it from the first captured Ja bit
+     * instead, which is what §9.3.1.3 says ("after RECEIVING Ja ... may wait
+     * for up to 500 ms").  It is NOT the default, and the reason is measured:
+     * over the eleven RasFinder calls in artifacts/ whose descriptor parsed,
+     * the gap from the first Ja bits to the parse is 2.12-2.83 s and never
+     * under 2.1 s, so releasing the heuristic 500 ms after the first Ja bit
+     * would start Sd -- and so stop the peer's Ja per §9.3.2.4 -- before the
+     * descriptor had arrived, on every call that currently works there.  The
+     * right anchor is a property of how long the peer's Ja runs, not of the
+     * clause, so it is a knob with both measurements beside it. */
     fallback_ms = parse_env_int("ME_V90_JA_HEURISTIC_FALLBACK_MS", 500);
-    if (g_v90_ja_first_suppressed_ms == 0)
-        g_v90_ja_first_suppressed_ms = trace_now_ms();
-    else if (fallback_ms > 0
-             && trace_now_ms() - g_v90_ja_first_suppressed_ms
-                >= (uint64_t) fallback_ms) {
-        ME_LOG("[ME] V.90 Ja: no descriptor after %ld ms; allowing %s heuristic "
-               "(ME_V90_JA_HEURISTIC_FALLBACK_MS)\n", fallback_ms, source);
-        return true;
+    {
+        const char *anchor = getenv("ME_V90_JA_FALLBACK_ANCHOR");
+        bool anchor_on_ja = (anchor && anchor[0] == 'j');
+        uint64_t start = anchor_on_ja ? g_v90_ja_first_bits_ms
+                                      : g_v90_ja_first_suppressed_ms;
+
+        if (g_v90_ja_first_suppressed_ms == 0)
+            g_v90_ja_first_suppressed_ms = trace_now_ms();
+        if (start != 0
+            && fallback_ms > 0
+            && trace_now_ms() - start >= (uint64_t) fallback_ms) {
+            ME_LOG("[ME] V.90 Ja: no descriptor %ld ms after %s; allowing %s "
+                   "heuristic (ME_V90_JA_HEURISTIC_FALLBACK_MS)\n",
+                   fallback_ms,
+                   anchor_on_ja ? "the first Ja bit (9.3.1.3)"
+                                : "the first suppressed attempt",
+                   source);
+            return true;
+        }
     }
 
     idx = (source[0] == 'p') ? 0 : (source[0] == 'e') ? 1 : 2;
@@ -5240,6 +5302,7 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
      * first bit's arrival to the frame. */
     if (first_bits > 0 && !g_v90_dil_capture_start_logged) {
         g_v90_dil_capture_start_logged = true;
+        g_v90_ja_first_bits_ms = trace_now_ms();
         ME_LOG("[ME] V.90 Ja capture: first bits at t=%.3fs (%d bits)\n",
                (double)g_rx_audio_samples / 8000.0, first_bits);
     }
@@ -6452,6 +6515,8 @@ void me_on_sip_connected(void)
     g_v92_p3_rx_active = false;
     g_v92_p3_rx_result_applied = false;
     g_v92_p3_rx_failure_logged = false;
+    g_v92_p3_rx_last_state = -1;
+    g_v92_p3_rx_last_rejects = -1;
     g_v92_p3_cpt_active = false;
     v92_su_rx_reset_locked();
     g_v92_trn2u_active = false;
@@ -8760,6 +8825,45 @@ static void v92_start_phase3_cpt_rx_locked(void)
     trace_phase("V92 Phase3 CPt receiver armed (2-point TRN1u)");
 }
 
+/*
+ * Say what the V.92 strict Phase-3 receiver is doing.  Its internal recovery
+ * is a rehunt rather than a failure, so without this the only two outcomes
+ * that ever reach the log are "armed" and (if it reaches V92_P3_RX_FAILED at
+ * all) a single reject line -- and a receiver that acquires Ru, walks uR into
+ * TRN1u and rejects the ones metric never reaches FAILED, so it logs nothing
+ * for the rest of the call.  The reject counter is what separates "nothing
+ * arrived" from "we rejected it N times".
+ */
+static void v92_p3_rx_report_progress_locked(int sample_index)
+{
+    int state;
+    int rejects;
+
+    if (!g_v92_p3_rx_active)
+        return;
+    state = (int)v92_p3_rx_get_state(&g_v92_p3_rx);
+    rejects = g_v92_p3_rx.reject_count;
+    if (state == g_v92_p3_rx_last_state && rejects == g_v92_p3_rx_last_rejects)
+        return;
+    if (rejects != g_v92_p3_rx_last_rejects && g_v92_p3_rx_last_rejects >= 0) {
+        int reject_sample = -1;
+        int metric0 = 0;
+        int metric1 = 0;
+        v92_p3_rx_reject_t reason =
+            v92_p3_rx_last_reject(&g_v92_p3_rx, &reject_sample, &metric0, &metric1);
+
+        ME_LOG("[ME] V.92 Phase 3 receiver: rehunt #%d reason=%s sample=%d m0=%d m1=%d "
+               "-> %s\n",
+               rejects, v92_p3_rx_reject_name(reason), reject_sample,
+               metric0, metric1, v92_p3_rx_state_name((v92_p3_rx_state_t)state));
+    } else {
+        ME_LOG("[ME] V.92 Phase 3 receiver: %s at sample %d\n",
+               v92_p3_rx_state_name((v92_p3_rx_state_t)state), sample_index);
+    }
+    g_v92_p3_rx_last_state = state;
+    g_v92_p3_rx_last_rejects = rejects;
+}
+
 static void v92_apply_p3_ja_locked(void)
 {
     const ja_dil_decode_t *ja;
@@ -9522,6 +9626,8 @@ static void prepare_v90_phase3_locked(void)
                 g_v92_p3_rx_active = true;
                 g_v92_p3_rx_result_applied = false;
                 g_v92_p3_rx_failure_logged = false;
+    g_v92_p3_rx_last_state = -1;
+    g_v92_p3_rx_last_rejects = -1;
                 g_v92_p3_cpt_active = false;
                 memset(&g_v92_p3_cpt_demod, 0, sizeof(g_v92_p3_cpt_demod));
                 v92_cp_rx_reset(&g_v92_p3_cpt_rx);
@@ -10972,6 +11078,7 @@ void me_rx_g711(const uint8_t *codewords, int count)
             (void)v92_p3_rx_feed(&g_v92_p3_rx,
                                  codewords[i],
                                  (int)(first_sample + (uint64_t)i));
+            v92_p3_rx_report_progress_locked((int)(first_sample + (uint64_t)i));
             v92_apply_p3_ja_locked();
             if (!g_v92_p3_rx_active)
                 break;
