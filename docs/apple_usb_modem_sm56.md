@@ -1476,3 +1476,82 @@ reached DIL.
 signals error-free -- and both the additive floor (25 dB) and the level
 headroom (11.6 dB) say the real figure is higher than that.**  What stops the
 call is not the bearer's cleanliness; it is §8.4.4's Sd, two entries above.
+
+### The clock offset measured exactly, and what it hid (2026-10-01)
+
+The entry above treated "residual timing" as part of an unresolved floor.  It
+is not unresolved -- the offset can be measured to about 1 ppm, and once it is
+pinned the remaining residual turns out to be something else entirely.
+
+**Measure it on a tone whose frequency is exactly known.**  The digital side's
+Phase 2 CC carrier is 1200 Hz generated from the DS0 clock, and it sits on the
+Apple modem's receive tap as a pure tone.  Mix it down, block-average, fit the
+unwrapped phase slope:
+
+```
+  digital Phase 2 CC   15.50-16.15 s   1200.1961 Hz = +163.4 ppm  (phase residual 0.000 rad)
+  digital Phase 2 CC   16.62-17.00 s   1200.1936 Hz = +161.3 ppm  (phase residual 0.002 rad)
+  ANSam                 9.50-13.70 s   2099.2313 Hz = -366.1 ppm  (phase residual 0.884 rad)
+```
+
+A phase residual of 0.000-0.002 rad over 0.65 s is a frequency good to about
+**0.4 ppm**, and the two stretches agree to 2.1 ppm.  **The equaliser fit,
+which knows nothing about any of this, independently lands on -161 ppm against
+the tones' -163** (the sign flips because one is the received tone running
+fast and the other is the resampling step that corrects it).  So the offset is
+real, it is the hardware, and it is **163 ppm** -- five times the +26 ppm the
+HSF codec measured and the +30 ppm between the two Apple modems.  The ANSam
+row is the control for the method and fails exactly as this file already
+warns: 15 Hz AM and 450 ms phase reversals, phase residual 0.884 rad, answer
+off by 500 ppm.  **Use a plain carrier, never ANSam, and quote the phase
+residual beside the frequency or the number means nothing.**
+
+**WHAT THE TIMING ERROR WAS HIDING: with it pinned, decision feedback is worth
+11 dB, not the 1 dB measured before.**
+
+```
+  161 T/2 taps, linear                    SNR 15.50 dB   sigma 158
+  161 T/2 taps + 8 ideal feedback taps    SNR 26.36 dB   sigma  45
+  161 T/2 taps + 32 ideal feedback taps   SNR 27.01 dB   sigma  42
+  321 T/2 taps + 8 ideal feedback taps    SNR 26.38 dB   sigma  45
+```
+
+The earlier "ideal DFE buys 1 dB" was taken at the untracked-timing operating
+point, where the timing error swamped the ISI it was trying to measure.  **Fix
+the first-order error before testing for a second one** -- that reading was
+wrong and is withdrawn.
+
+So the linear residual is **ISI, not noise**: a linear equaliser cannot invert
+the band-edge roll-off and decision feedback can, which is precisely why V.90
+precodes.  And at sigma 45 the path has arrived at its own additive floor --
+the assumption-free quiet-line measurement is **25.0 dB, sigma 53** -- so two
+independent methods agree that **this bearer is noise-limited at about 26 dB
+once ISI is handled.**  Translated:
+
+| | sigma | levels at 6 sigma | bits/symbol | downstream |
+|---|---|---|---|---|
+| linear equaliser | 158 | 68 | 6.1 | 48.7 kbit/s |
+| **+ precoding / ideal DFE** | **45** | **238** | **7.9** | **63.2 kbit/s** |
+| quiet-line additive floor | 53 | 202 | 7.7 | 61.3 kbit/s |
+
+**i.e. the path carries full-rate V.90 downstream with margin -- 7.9
+bits/symbol against the Recommendation's own 56 kbit/s ceiling -- and still
+with the 11.6 dB of transmit headroom unspent, since all of this is measured
+on TRN1d at -24.6 dBm0.**
+
+**The control that says the DFE gain is real** and not the feedback filter
+predicting TRN1d from its own past: TRN1d's signs satisfy `s[n] = s[n-18] ^
+s[n-23]` through GPC, so a predictor would need taps at lag 18 and 23 -- and
+8 feedback taps, which cannot reach them, already give the whole 11 dB, while
+32 taps, which can, add only 0.6 dB.  The gain is ISI cancellation.
+
+**AND THE ACTIONABLE CONSEQUENCE, which is a receiver gap not a measurement
+one: 163 ppm walks the sampling instant by one 8 kHz sample every 6135
+symbols, i.e. every 0.77 s** -- 3.3 symbols across the 20004T TRN1d this
+project now sends by default.  The V.90 analogue-role receiver fits its
+equaliser on Sd and then runs CMA; there is no symbol-timing tracking loop on
+that path at all, so nothing follows that walk.  That is why the offline fit
+degraded with window length (11.1 dB at 800 symbols, 7.5 at 3000) and it is
+the same thing a live receiver would suffer.  **So the answer to "can we be
+more exact about timing" is: offline, to about 1 ppm, and it is now pinned;
+live, not at all yet, because the analogue path has no loop to be exact with.**
