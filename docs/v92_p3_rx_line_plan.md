@@ -217,6 +217,35 @@ Done when the fixture's start lands within ±2 symbols of the bound tool's
     Sd-to-Sd-bar handling depends on where Sd falls relative to its 64-symbol
     acquisition grid.** That is a separate defect in
     `v92_analogue_audio.c`, not addressed here.
+  - **Resolved 2026-10-01, and the grid was not the mechanism.** The
+    front end receives Sd through the `v90a_sd_fit()` taps. That fit is
+    minimum-norm and is constrained only at Sd's two harmonics (1333 and
+    4000 Hz, V.90 8.4.4). Off those harmonics it is arbitrary across all
+    32 T/2 taps. The 9.3.2.4 sign reversal is the one off-harmonic event
+    in Sd, so the core sees perfect +/-W/0 slots and then ~20 symbols of
+    ringing, with clean S-bar_d after it. The core's `V90A_RX_SD` stage
+    rode out only one repetition (6 symbols) of unusable slots before
+    rehunting. Whether three flipped W slots happened to land in the
+    ringing first was decided by where Sd fell, which is why a 65-symbol
+    move in Ja decided it. The replay start phase and the 24-symbol rep
+    requirement are not involved: the core acquires Sd 23 symbols into the
+    replay at every onset. New `v90_analogue_rx_config_t.sd_straddle_symbols`
+    is set by `v92a_init_line()` to `V92A_SD_STRADDLE_SYMBOLS` (24: the
+    16-symbol equaliser span plus the 8-symbol interpolator radius). V.90
+    keeps its measured one repetition. `v92_startup_test --sd-onset-sweep`
+    holds the digital side's J event 0-71 symbols in both laws, so every
+    Sd slot phase is covered 12 times and the span exceeds one 64-symbol
+    acquisition slide. It sees S-bar_d and TRN1d at all 144 onsets, and
+    it is in the default run. With the old tolerance it misses 12 of 72
+    in u-law (+2, 5, 8, 11, 12 and 51-69). With `ja_buf_lead` removed,
+    the measured-B1d case now passes.
+  - **A second onset dependence remains, in Phase 4, not Sd.** In the
+    full measured-DIL startup, onsets +5, 8, 20, 26, 32, 38, 44, 50, 69
+    and 72 end in `B1d validation failed`. The same onsets fail the same
+    way before this change, wherever Sd-bar was seen. There DIL settles
+    on a 37-bit-per-frame downstream instead of 42, and B1d takes isolated
+    decision errors (9 and 3 zeros in two of the 48 frames). That is
+    downstream constellation margin chosen from DIL, and it is open.
 - Unchanged: `v92_startup_test` 51/51, `vpcm_loopback_test --all-tests`,
   `v92_proc_eval_test`, and every synthetic row's outcome. TRN1u still fails
   on the loop, as it should until steps 4-5.

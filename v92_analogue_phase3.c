@@ -98,7 +98,15 @@ static v92a_t *init(const v92a_config_t *cfg, bool line)
         /* V.90 §8.4.4: equalization leaves residuals in the zero slots;
          * acquisition tests their level, not an exact digital zero octet. */
         .zero_slot_fraction = line ? 0.2 : 0,
-        .w_slot_tolerance = line ? 0.35 : 0
+        .w_slot_tolerance = line ? 0.35 : 0,
+        /* The line front end (v92_analogue_audio.c) receives Sd through the
+         * v90a_sd_fit() taps, a minimum-norm fit constrained only at Sd's
+         * harmonics (1333 Hz and 4000 Hz, V.90 §8.4.4).  Off those it is
+         * arbitrary across all 32 T/2 taps, so the §9.3.2.4 sign reversal --
+         * the one off-harmonic event in Sd -- rings for the full 16-symbol
+         * span plus the 8-symbol interpolator radius: ~20 symbols measured,
+         * against the one repetition the V.90 default rides out. */
+        .sd_straddle_symbols = line ? V92A_SD_STRADDLE_SYMBOLS : 0
     };
     s->rx = v90_analogue_rx_init(&rc);
     s->linear = v90a_linear_init(cfg->law);

@@ -31,6 +31,11 @@ typedef struct {
     uint32_t upstream_rate_mask; /* Table 20, 19 bits for 24000..48000 */
 } v92a_config_t;
 
+/* Symbols of unusable Sd that v92a_init_line() reads as the 9.3.2.4
+ * transition being rung through: the line front end's 32 T/2 equaliser taps
+ * (16 symbols) plus its 16 half-sample interpolator radius (8 symbols). */
+#define V92A_SD_STRADDLE_SYMBOLS 24
+
 v92a_t *v92a_init(const v92a_config_t *cfg);
 /* Same protocol with level tolerances for an equalized analogue line. */
 v92a_t *v92a_init_line(const v92a_config_t *cfg);

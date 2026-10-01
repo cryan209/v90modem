@@ -320,8 +320,13 @@ static void pair_cpt(void *user, v92_p4u_kind_t kind,
  * side; Phase 4's TRN2u/CPu receiver is still raw and is not graded here. */
 static const v92_line_channel_config_t *pair_line;
 
-static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_rate)
-
+/* sd_delay holds the J event from the digital modem for that many DS0
+ * symbols, moving its Sd onset (V.90 §9.3.1.3) against everything the
+ * analogue front end has seen.  phase3_only stops once the analogue core
+ * has seen §9.3.2.4's Sd -> S-bar_d transition and acquired TRN1d, and
+ * returns whether it did, instead of running and asserting the startup. */
+static bool phase3_pair_at(bool alaw, bool dil, bool drop_cpd, unsigned audio_rate,
+                           int sd_delay, bool phase3_only)
 {
     bool audio = audio_rate != 0;
     v92a_config_t cfg = {
@@ -329,7 +334,13 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
         .lu = 6000, .digital_max_tx_dbm0 = -13, .upstream_rate_mask = 1,
         .dil = {.n = 0, .lsp = 1, .ltp = 1}
     };
-    cfg.u_info = test_phase2(alaw, true, false, true);
+    /* Phase 2 is deterministic; a sweep need not repeat it per point. */
+    static int sweep_u_info[2];
+    if (!phase3_only) cfg.u_info = test_phase2(alaw, true, false, true);
+    else {
+        if (!sweep_u_info[alaw]) sweep_u_info[alaw] = test_phase2(alaw, true, false, true);
+        cfg.u_info = sweep_u_info[alaw];
+    }
     if (dil) assert(v90_dil_preset_load(V90_DIL_PRESET_MEASUREMENT, &cfg.dil));
     /* TX lookahead is 16 half-symbol ticks; network DAC adds eight symbols. */
     if (audio) cfg.round_trip_symbols = 16;
@@ -354,6 +365,7 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
     bool p4_started = false;
     p3_pair_sink_t sink = {.digital = digital};
     bool ja_seen = false, cpt_started = false;
+    int ja_hold = -1;
     v92_p3_rx_start(&ja_rx, 0);
     v92_su_init(&su_rx, alaw);
     v92_line_channel_t line;
@@ -438,11 +450,28 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
             v92a_audio_rx(frontend, line+first, audio_count-first);
         } else v92a_rx(analogue, &downstream, 1);
         if (!ja_seen) {
-            v92_p3_rx_feed(&ja_rx, u, i);
-            if (v92_p3_rx_ja_ok(&ja_rx)) {
-                const ja_dil_decode_t *ja = v92_p3_rx_get_ja(&ja_rx);
-                assert(ja && ja->parsed_v92 && ja->desc.n == cfg.dil.n);
-                v90_set_dil_descriptor(digital, &ja->desc);
+            /* Everything up to Ja is identical at every sweep point, so the
+             * (slow) Ja search runs once per law and is replayed after. */
+            static struct { bool valid; int at; v90_dil_desc_t desc; } ja_memo[2];
+            /* Not on a modelled loop: v92_p3_rx_follow() needs the search. */
+            bool memo = phase3_only && !pair_line && ja_memo[alaw].valid;
+            if (ja_hold < 0) {
+                if (memo) {
+                    if (i == ja_memo[alaw].at) ja_hold = sd_delay;
+                } else {
+                    v92_p3_rx_feed(&ja_rx, u, i);
+                    if (v92_p3_rx_ja_ok(&ja_rx)) ja_hold = sd_delay;
+                }
+            }
+            if (ja_hold >= 0 && ja_hold-- == 0) {
+                const ja_dil_decode_t *ja = memo ? NULL : v92_p3_rx_get_ja(&ja_rx);
+                assert(memo || (ja && ja->parsed_v92 && ja->desc.n == cfg.dil.n));
+                if (phase3_only && !pair_line && !memo) {
+                    ja_memo[alaw].valid = true;
+                    ja_memo[alaw].at = i - sd_delay;
+                    ja_memo[alaw].desc = ja->desc;
+                }
+                v90_set_dil_descriptor(digital, memo ? &ja_memo[alaw].desc : &ja->desc);
                 assert(v90_handle_rx_event(digital, V90_RX_EVENT_J));
                 ja_seen = true;
             }
@@ -509,6 +538,19 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
             fprintf(stderr, "analogue failure: %s\n", v92a_failure(analogue));
             break;
         }
+        /* V92A_JA leaves only on a seen S-bar_d (V.92 §9.5.2.2.1). */
+        if (phase3_only && v92a_stage(analogue) > V92A_JA
+            && v92a_rx_training(analogue) >= 1) break;
+    }
+    if (phase3_only) {
+        bool ok = v92a_stage(analogue) > V92A_JA && v92a_stage(analogue) != V92A_FAILED
+                  && v92a_rx_training(analogue) >= 1;
+        if (audio) {
+            ok = ok && v92a_audio_clipped(frontend) == 0 && dac.clipped == 0;
+            v92a_audio_free(frontend);
+        } else v92a_free(analogue);
+        v90_free(digital);
+        return ok;
     }
     if (pair_line) {
         fprintf(stderr, "line pair: ja=%d trn1u2=%d (start %lld score %d) cpt=%d at %d\n",
@@ -523,7 +565,7 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
         printf("PASS: V.92 Phase 3 over a modelled loop %s, %s DIL: CPt "
                "received through the TRN1u equaliser\n",
                alaw ? "PCMA" : "PCMU", dil ? "measured" : "zero");
-        return;
+        return true;
     }
     if (!sink.b1.locked || sink.payload_bytes < 1024) {
         v92a4_t *p4 = v92a_phase4(analogue);
@@ -554,6 +596,33 @@ static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_
     printf("PASS: V.92 Phases 3–4 linear analogue / G.711 digital pair %s, %s DIL%s%s\n",
            alaw ? "PCMA" : "PCMU", dil ? "measured" : "zero",
            drop_cpd ? ", first CPd erased" : "", audio ? ", reconstructed audio" : "");
+    return true;
+}
+
+static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_rate)
+{
+    (void)phase3_pair_at(alaw, dil, drop_cpd, audio_rate, 0, false);
+}
+
+/* The Sd -> S-bar_d transition must be seen wherever Sd lands.  The line
+ * front end acquires Sd on a sliding window and receives it through a fit
+ * that rings across its whole span at the 9.3.2.4 reversal; with only one
+ * repetition of that ringing tolerated, whether S-bar_d was seen depended
+ * on the onset (a 65-symbol move in when Ja was declared broke the measured
+ * B1d case).  72 onsets cover every Sd slot phase twelve times and more
+ * than one acquisition-window slide (64 symbols). */
+static void test_sd_onset_sweep(bool alaw)
+{
+    int missed = 0;
+    for (int delay = 0; delay < 72; delay++) {
+        if (!phase3_pair_at(alaw, true, false, V92_AUDIO_RATE, delay, true)) {
+            fprintf(stderr, "Sd onset +%d symbols: S-bar_d/TRN1d not seen\n", delay);
+            missed++;
+        }
+    }
+    assert(missed == 0);
+    printf("PASS: V.92 analogue S-bar_d seen at 72 Sd onsets %s, reconstructed audio\n",
+           alaw ? "PCMA" : "PCMU");
 }
 
 /* Plan step 7's rows: the upstream through the r4 loop fitted off the real
@@ -906,6 +975,11 @@ int main(int argc, char **argv)
         test_phase3_pair(false, true, false, V92_AUDIO_RATE);
         return 0;
     }
+    if (argc == 2 && !strcmp(argv[1], "--sd-onset-sweep")) {
+        test_sd_onset_sweep(false);
+        test_sd_onset_sweep(true);
+        return 0;
+    }
     test_spec_crc();
     test_spec_scr(false);
     test_spec_scr(true);
@@ -927,6 +1001,8 @@ int main(int argc, char **argv)
     /* docs/v92_p3_rx_line_plan.md step 7: through the r4 loop to CPt. */
     test_phase3_line(false, false, 0.0, 0.0);
     test_phase3_line(true, false, 0.5, 25.0);
+    test_sd_onset_sweep(false);
+    test_sd_onset_sweep(true);
     test_filter_baseline();
     test_su(false);
     test_su(true);

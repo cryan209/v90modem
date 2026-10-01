@@ -102,6 +102,17 @@ typedef struct {
      */
     double zero_slot_fraction;
     double w_slot_tolerance;
+    /*
+     * Longest run of consecutive unusable symbols inside Sd that is still
+     * read as the §9.3.2.4 Sd -> S-bar_d transition being rung through by
+     * the receive equaliser, rather than as Sd having stopped.  Only used
+     * with zero_slot_fraction > 0.  0 keeps one repetition (6), which is what
+     * artifacts/hsf-v90/call-062754Z measured.  A front end whose equaliser
+     * spans more than a repetition must set its span here: a discontinuity
+     * corrupts every output whose window straddles it, so anything shorter
+     * makes seeing S-bar_d depend on where Sd fell relative to the taps.
+     */
+    int sd_straddle_symbols;
 } v90_analogue_rx_config_t;
 
 v90_analogue_rx_t *v90_analogue_rx_init(const v90_analogue_rx_config_t *cfg);

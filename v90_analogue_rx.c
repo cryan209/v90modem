@@ -691,11 +691,15 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c, int16_t level)
          * 0.41, 0.96 and 0.49 of the running W while 32 clean repetitions
          * precede it and repetition 34 is cleanly reversed -- so one bad
          * repetition stood between the receiver and the transition, every
-         * time.  Ride out up to one repetition of unusable slots without
-         * losing the alignment or the flipped-slot evidence; a signal that has
-         * really stopped being Sd exhausts that within a repetition anyway.
+         * time.  Ride out the straddle -- one repetition by default, the
+         * equaliser's whole span where the front end says it rings longer
+         * (sd_straddle_symbols) -- without losing the alignment or the
+         * flipped-slot evidence; a signal that has really stopped being Sd
+         * exhausts that within the span anyway.
          */
-        if (level_tolerant(s)  &&  ++s->sd_miss_run <= 6)
+        if (level_tolerant(s)
+            &&  ++s->sd_miss_run <= ((s->cfg.sd_straddle_symbols > 0)
+                                     ?  s->cfg.sd_straddle_symbols  :  6))
             break;
         s->sd_shift_run = 0;
         s->sd_miss_run = 0;
