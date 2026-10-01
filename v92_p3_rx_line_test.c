@@ -191,6 +191,44 @@ static int fixture_wrong_start(const char *path)
     return 0;
 }
 
+/* Plan step 8's control: the same fixture through the receiver with the
+ * equaliser switched off (the raw-sign receiver steps 4-6 replaced) must
+ * NOT decode Ja -- the fixture passes only because of the equaliser. */
+static int fixture_no_equaliser(const char *path)
+{
+    unsigned char cw[FIXTURE_BYTES];
+    FILE *f = fopen(path, "rb");
+    v92_p3_rx_t rx;
+    int sample = -1;
+    int m0 = 0;
+    int m1 = 0;
+    v92_p3_rx_reject_t reason;
+
+    if (!f || fread(cw, 1, sizeof(cw), f) != sizeof(cw)) {
+        if (f)
+            fclose(f);
+        return 1;
+    }
+    fclose(f);
+    v92_p3_rx_init(&rx);
+    v92_p3_rx_start(&rx, ARM_SAMPLE);
+    v92_p3_rx_set_md_length(&rx, 0);
+    v92_p3_rx_set_law(&rx, 0);
+    v92_p3_rx_set_equaliser(&rx, false);
+    for (int i = ARM_SAMPLE; i < FIXTURE_BYTES && !v92_p3_rx_ja_ok(&rx); i++)
+        (void)v92_p3_rx_feed(&rx, cw[i], i);
+    reason = v92_p3_rx_last_reject(&rx, &sample, &m0, &m1);
+    printf("  equaliser off: Ja %s, %d rejects, last %s (m0=%d m1=%d)\n",
+           v92_p3_rx_ja_ok(&rx) ? "DECODED" : "missing", rx.reject_count,
+           v92_p3_rx_reject_name(reason), m0, m1);
+    if (v92_p3_rx_ja_ok(&rx)) {
+        printf("FAIL: the fixture decodes without the equaliser, so this "
+               "test no longer measures it\n");
+        return 1;
+    }
+    return 0;
+}
+
 static int fixture_row(const char *path)
 {
     unsigned char *cw;
@@ -594,6 +632,7 @@ int main(int argc, char **argv)
     }
     rc = fixture_row(path);
     rc |= fixture_wrong_start(path);
+    rc |= fixture_no_equaliser(path);
     rc |= synthetic_rows();
     return rc;
 }

@@ -754,9 +754,10 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
                                                         ? 0 : atoi(xid_octets)) != 0)
                 result = -1;
             else {
-                /* ds_init has queued XID already when detection is disabled. */
-                if (!g_data_lapm_detect)
-                    v42_restart(g_data_stack.v42);
+                /* The setter configures the next restart, including the
+                   active XID width used after detection (V.42 8.10.1).
+                   ds_init already restarted with the default profile. */
+                v42_restart(g_data_stack.v42);
                 fprintf(stderr, "[ME] LAPM XID optional-functions encoding: %s\n", xid_octets);
             }
         }
@@ -1014,6 +1015,13 @@ static int            g_v92_p3_rx_last_rejects = -1;
 static v92_cp_rx_t    g_v92_p3_cpt_rx;
 static v92_trn2u_demod_t g_v92_p3_cpt_demod;
 static bool           g_v92_p3_cpt_active = false;
+/* docs/v92_p3_rx_line_plan.md step 8: the TRN1u equaliser in the live V.92
+ * Phase 3 path, and its hand-on after Ja (step 7).  Per call. */
+static bool           g_v92_p3_follow_active = false;
+static bool           g_v92_p3_trn1u2_locked = false;
+static bool           g_v92_p3_trn1u2_reported = false;
+static bool           g_v92_p3_logged_align = false;
+static bool           g_v92_p3_logged_gate = false;
 
 static v92_su_t       g_v92_su_rx;
 static bool           g_v92_su_rx_active = false;
@@ -1021,6 +1029,20 @@ static bool           g_v92_su_final_pending = false;
 static bool           g_v92_trn2u_active = false;
 static int            g_v92_trn2u_points = 4;
 static double         g_v92_trn2u_lu = 8000.0;
+
+/* ME_V92_P3_EQ=0 switches the V.92 Phase 3 receiver's TRN1u equaliser off
+ * (v92_p3_rx_set_equaliser): the raw-sign receiver it replaced, which a real
+ * 2-wire loop's ISI defeats (docs/v92_p3_rx_line_plan.md).  Default on. */
+static bool v92_p3_eq_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *v = getenv("ME_V92_P3_EQ");
+        cached = (v && *v == '0') ? 0 : 1;
+    }
+    return cached != 0;
+}
 static v92_cp_rx_t    g_v92_cp_rx;
 static v92_trn2u_demod_t g_v92_trn2u_demod;
 static v92_upstream_rx_t g_v92_upstream_rx;
@@ -4550,6 +4572,11 @@ static void cleanup_v34_v90_training_locked(void)
     g_v92_p3_rx_last_state = -1;
     g_v92_p3_rx_last_rejects = -1;
     g_v92_p3_cpt_active = false;
+    g_v92_p3_follow_active = false;
+    g_v92_p3_trn1u2_locked = false;
+    g_v92_p3_trn1u2_reported = false;
+    g_v92_p3_logged_align = false;
+    g_v92_p3_logged_gate = false;
     v92_su_rx_reset_locked();
     g_v92_trn2u_active = false;
     g_v92_upstream_rx_active = false;
@@ -4684,6 +4711,11 @@ static bool restart_v90_phase2_locked(const char *reason)
     g_v92_p3_rx_last_state = -1;
     g_v92_p3_rx_last_rejects = -1;
     g_v92_p3_cpt_active = false;
+    g_v92_p3_follow_active = false;
+    g_v92_p3_trn1u2_locked = false;
+    g_v92_p3_trn1u2_reported = false;
+    g_v92_p3_logged_align = false;
+    g_v92_p3_logged_gate = false;
     v92_su_rx_reset_locked();
     v90_cp_rx_reset(&g_v90_cp_rx);
     v90_cp_rx_clear_votes(&g_v90_cp_rx);
@@ -6536,6 +6568,11 @@ void me_on_sip_connected(void)
     g_v92_p3_rx_last_state = -1;
     g_v92_p3_rx_last_rejects = -1;
     g_v92_p3_cpt_active = false;
+    g_v92_p3_follow_active = false;
+    g_v92_p3_trn1u2_locked = false;
+    g_v92_p3_trn1u2_reported = false;
+    g_v92_p3_logged_align = false;
+    g_v92_p3_logged_gate = false;
     v92_su_rx_reset_locked();
     g_v92_trn2u_active = false;
     g_v92_upstream_rx_active = false;
@@ -8795,7 +8832,6 @@ static void v92_su_rx_reset_locked(void)
 
 static void v92_su_rx_feed_locked(uint8_t codeword, uint64_t sample_index)
 {
-    (void)sample_index;
     if (!g_v92_su_rx_active || !g_v92_active || !g_v90)
         return;
     /* V.92 §9.5.1.1.4 arms Su reception when Jd starts. Before then
@@ -8812,11 +8848,16 @@ static void v92_su_rx_feed_locked(uint8_t codeword, uint64_t sample_index)
         (void)v90_handle_rx_event(g_v90, V90_RX_EVENT_SU_BAR);
         break;
     case V92_SU_TRAINED:
-        (void)v90_handle_rx_event(g_v90, V90_RX_EVENT_TRN_LOCK);
+        /* The raw-sign 2040-ones lock.  With the equaliser handed on, the
+         * second TRN1u's lock is its gate instead (see me_v92_p3_follow). */
+        if (!g_v92_p3_follow_active)
+            (void)v90_handle_rx_event(g_v90, V90_RX_EVENT_TRN_LOCK);
         break;
     case V92_SU_FINAL:
         g_v92_su_final_pending = true;
         (void)v90_handle_rx_event(g_v90, V90_RX_EVENT_SU_FINAL);
+        if (g_v92_p3_follow_active)
+            v92_p3_rx_expect_trn1u2(&g_v92_p3_rx, (int)sample_index);
         break;
     default:
         break;
@@ -8859,6 +8900,40 @@ static void v92_p3_rx_report_progress_locked(int sample_index)
 
     if (!g_v92_p3_rx_active)
         return;
+    /* Once per TRN1u: where it starts (by reference correlation), then the
+     * gate's verdict -- the numbers that say whether a loop is the problem. */
+    if (g_v92_p3_rx.trn1u_align_done && !g_v92_p3_logged_align) {
+        g_v92_p3_logged_align = true;
+        ME_LOG("[ME] V.92 Phase 3 receiver: TRN1u start %d (declared %d, offset %+d) "
+               "score %d.%03d%s, equaliser %s\n",
+               g_v92_p3_rx.trn1u_start, g_v92_p3_rx.trn1u_nominal_start,
+               g_v92_p3_rx.trn1u_start - g_v92_p3_rx.trn1u_nominal_start,
+               g_v92_p3_rx.trn1u_start_score_x1000/1000,
+               g_v92_p3_rx.trn1u_start_score_x1000%1000,
+               g_v92_p3_rx.trn1u_inverted ? " inverted" : "",
+               g_v92_p3_rx.no_equaliser ? "off" : "on");
+    }
+    if (!g_v92_p3_rx.trn1u_align_done)
+        g_v92_p3_logged_align = false;
+    if (g_v92_p3_rx.eq_gate_done && !g_v92_p3_logged_gate) {
+        g_v92_p3_logged_gate = true;
+        if (g_v92_p3_rx.eq_law >= 0) {
+            const v92_p3_eq_t *eq = &g_v92_p3_rx.eq[g_v92_p3_rx.eq_law];
+
+            ME_LOG("[ME] V.92 Phase 3 receiver: TRN1u gate passed, agreement %d.%d%% "
+                   "%.1f dB %+.0f ppm main tap %d\n",
+                   g_v92_p3_rx.eq_agree_x10/10, g_v92_p3_rx.eq_agree_x10%10,
+                   v92_p3_eq_snr_db(eq), v92_p3_eq_ppm(eq), v92_p3_eq_main_tap(eq));
+            trace_phase("V92 Phase3 TRN1u gate: agree=%d.%d%% snr=%.1f ppm=%+.0f",
+                        g_v92_p3_rx.eq_agree_x10/10, g_v92_p3_rx.eq_agree_x10%10,
+                        v92_p3_eq_snr_db(eq), v92_p3_eq_ppm(eq));
+        } else {
+            ME_LOG("[ME] V.92 Phase 3 receiver: TRN1u gate passed on raw descrambled ones "
+                   "(equaliser off)\n");
+        }
+    }
+    if (!g_v92_p3_rx.eq_gate_done)
+        g_v92_p3_logged_gate = false;
     state = (int)v92_p3_rx_get_state(&g_v92_p3_rx);
     rejects = g_v92_p3_rx.reject_count;
     if (state == g_v92_p3_rx_last_state && rejects == g_v92_p3_rx_last_rejects)
@@ -8880,6 +8955,50 @@ static void v92_p3_rx_report_progress_locked(int sample_index)
     }
     g_v92_p3_rx_last_state = state;
     g_v92_p3_rx_last_rejects = rejects;
+}
+
+/*
+ * After Ja (plan step 7): the trained equaliser runs on, held through Su,
+ * retrains on the second TRN1u and decodes CPt.  If it refuses the second
+ * TRN1u the raw paths it replaced take over again (the Su receiver's
+ * 2040-ones lock and the adaptive CPt demodulator).
+ */
+static void me_v92_p3_follow_locked(const uint8_t *codewords, int count,
+                                    uint64_t first_sample)
+{
+    double values[4];
+    int state;
+
+    for (int i = 0; i < count && g_v92_p3_follow_active; i++) {
+        int n = v92_p3_rx_follow(&g_v92_p3_rx, codewords[i],
+                                 (int)(first_sample + (uint64_t)i), values, 4);
+
+        if (g_v92_p3_cpt_active && n > 0) {
+            for (int k = 0; k < n; k++)
+                values[k] *= g_v92_trn2u_lu;
+            (void)v92_trn2u_demod_feed_values(&g_v92_p3_cpt_demod, values, n);
+        }
+        state = v92_p3_rx_trn1u2_state(&g_v92_p3_rx);
+        if (state != 0 && !g_v92_p3_trn1u2_reported) {
+            const v92_p3_eq_t *eq = &g_v92_p3_rx.eq[g_v92_p3_rx.eq_law];
+
+            g_v92_p3_trn1u2_reported = true;
+            ME_LOG("[ME] V.92 Phase 3 receiver: second TRN1u %s at %d (score %d.%03d), "
+                   "agreement %d.%d%% %+.0f ppm\n",
+                   state > 0 ? "trained" : "refused", g_v92_p3_rx.trn1u2_start,
+                   g_v92_p3_rx.trn1u2_score_x1000/1000,
+                   g_v92_p3_rx.trn1u2_score_x1000%1000,
+                   g_v92_p3_rx.trn1u2_agree_x10/10, g_v92_p3_rx.trn1u2_agree_x10%10,
+                   v92_p3_eq_ppm(eq));
+            trace_phase("V92 Phase3 second TRN1u %s", state > 0 ? "trained" : "refused");
+            if (state > 0 && !g_v92_p3_trn1u2_locked && g_v90) {
+                g_v92_p3_trn1u2_locked = true;
+                (void)v90_handle_rx_event(g_v90, V90_RX_EVENT_TRN_LOCK);
+            } else if (state < 0) {
+                g_v92_p3_follow_active = false;
+            }
+        }
+    }
 }
 
 static void v92_apply_p3_ja_locked(void)
@@ -8933,7 +9052,10 @@ static void v92_apply_p3_ja_locked(void)
     g_v92_p3_rx_active = false;
     v92_su_rx_reset_locked();
     g_v92_su_rx_active = true;
-    ME_LOG("[ME] V.92 Phase 3 strict Ja accepted: sample=%d bits=%d N=%u LSP=%u LTP=%u; starting Sd\n",
+    /* Step 7: keep the trained equaliser for the second TRN1u and CPt. */
+    g_v92_p3_follow_active = g_v92_p3_rx.eq_law >= 0;
+    ME_LOG("[ME] V.92 Phase 3 strict Ja accepted from %s: sample=%d bits=%d N=%u LSP=%u LTP=%u; starting Sd\n",
+           g_v92_p3_rx.ja_from_eq ? "equalised decisions" : "raw signs",
            ja->start_sample, ja->descriptor_bits,
            (unsigned)ja->desc.n, (unsigned)ja->desc.lsp, (unsigned)ja->desc.ltp);
     trace_phase("V92 Phase3 Ja valid -> project-owned TX: N=%u LSP=%u LTP=%u",
@@ -9641,12 +9763,19 @@ static void prepare_v90_phase3_locked(void)
                  * (34.5 ms), unlike V.90/Table 19's 35 ms. Zero skips
                  * MD and the second Ru/Ru-bar pair (9.5.1.1.1). */
                 v92_p3_rx_set_md_length(&g_v92_p3_rx, (int)info1a.md * 276);
+                v92_p3_rx_set_law(&g_v92_p3_rx, g_law == ME_LAW_ALAW);
+                v92_p3_rx_set_equaliser(&g_v92_p3_rx, v92_p3_eq_enabled());
                 g_v92_p3_rx_active = true;
                 g_v92_p3_rx_result_applied = false;
                 g_v92_p3_rx_failure_logged = false;
     g_v92_p3_rx_last_state = -1;
     g_v92_p3_rx_last_rejects = -1;
                 g_v92_p3_cpt_active = false;
+    g_v92_p3_follow_active = false;
+    g_v92_p3_trn1u2_locked = false;
+    g_v92_p3_trn1u2_reported = false;
+    g_v92_p3_logged_align = false;
+    g_v92_p3_logged_gate = false;
                 memset(&g_v92_p3_cpt_demod, 0, sizeof(g_v92_p3_cpt_demod));
                 v92_cp_rx_reset(&g_v92_p3_cpt_rx);
                 v92_su_rx_reset_locked();
@@ -11193,7 +11322,11 @@ void me_rx_g711(const uint8_t *codewords, int count)
         for (int i = 0; i < count; i++)
             v92_su_rx_feed_locked(codewords[i], first_sample + (uint64_t)i);
     }
-    if (g_v92_p3_cpt_active && g_v92_active && g_state == ME_TRAINING) {
+    if (g_v92_p3_follow_active && g_v92_active && g_state == ME_TRAINING
+        && !g_v92_trn2u_active)
+        me_v92_p3_follow_locked(codewords, count, first_sample);
+    if (g_v92_p3_cpt_active && g_v92_active && g_state == ME_TRAINING
+        && !g_v92_p3_follow_active) {
         (void)v92_trn2u_demod_feed_adaptive(&g_v92_p3_cpt_demod,
                                              codewords, count);
     }

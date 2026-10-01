@@ -6,7 +6,7 @@ modem is on a real 2-wire loop behind a single codec (VG224 -> SIP -> us),
 so that 9.5.1.1.3 releases Sd. On the byte-exact SIP loopback it must behave
 exactly as it does today.
 
-Status: steps 1-7 done, 2026-10-01 (step 7 for zero-DIL rows; measured DIL is blocked on the analogue side). The fixture decodes Ja; `v92_p3_rx_line_test` is in `make test`. Each step lists what it changes, how it is
+Status: steps 1-8 done, 2026-10-01 (step 7 for zero-DIL rows; measured DIL is blocked on the analogue side). Next: step 9, a live call. The fixture decodes Ja; `v92_p3_rx_line_test` is in `make test`. Each step lists what it changes, how it is
 measured, and the result that completes it. Do the steps in order: each one
 produces the instrument the next one is graded by.
 
@@ -545,7 +545,7 @@ handed-on equaliser.
   convergence every 256 symbols. `V92_PAIR_UP_DUMP=<path>` writes the
   pair's A/D codewords.
 
-### 8. Engine integration and diagnostics
+### 8. Engine integration and diagnostics -- DONE 2026-10-01
 
 - Use the new front end in `modem_engine.c`'s V.92 Phase 3 path, behind
   `ME_V92_P3_EQ`.
@@ -559,6 +559,53 @@ handed-on equaliser.
   recording.
 - **Done when:** `make test` is green with the knob at both settings, and
   the fixture test passes only with it on.
+
+**Result.**
+
+- **`ME_V92_P3_EQ` (default on) switches the receiver itself**, through the
+  new `v92_p3_rx_set_equaliser()`. Off, it is the raw-sign receiver steps
+  4-7 replaced:
+  - TRN1u judged by descrambled ones (>= 75% over 256 symbols, reject
+    `trn1u_ones_low`);
+  - Ja searched in raw signs only;
+  - `v92_p3_rx_follow()` idle, so the engine keeps its raw Su lock and
+    adaptive CPt demodulator.
+
+  Steps 3 and 5's start alignment and start score apply in both arms.
+- **`modem_engine.c`, on:**
+  - The engine tells the receiver the call's G.711 law.
+  - Once strict Ja is accepted it feeds every codeword to
+    `v92_p3_rx_follow()` (`me_v92_p3_follow_locked`).
+  - The Su receiver's final Su-bar arms the second-TRN1u search.
+  - The 9.5.1.1.13 `TRN_LOCK` comes from that gate, and the raw 2040-ones
+    `V92_SU_TRAINED` is ignored while following.
+  - CPt takes the equalised values, and the raw adaptive CPt feed stands
+    down.
+  - If the equaliser refuses the second TRN1u, the follow stops and the raw
+    paths take over again.
+  - Phase 4 is untouched: following stops when the TRN2u receiver starts.
+- **Logs, once per stage, so a live call can no longer say only "armed":**
+  - `TRN1u start S (declared N, offset ±d) score x, equaliser on|off`;
+  - `TRN1u gate passed, agreement a% x dB ±p ppm main tap t`, also as a
+    `[TRACE]` line, or "on raw descrambled ones" with the equaliser off;
+  - every rehunt with its reason and both metrics, as before;
+  - `strict Ja accepted from equalised decisions|raw signs`;
+  - `second TRN1u trained|refused at S (score x), agreement a% ±p ppm`.
+- **`v92_p3_probe [--eq|--no-eq] [--ulaw|--alaw]`.** On the fixture:
+  - `--eq` decodes Ja from equalised decisions (start 5292, gate 100%,
+    22.0 dB, +155 ppm);
+  - `--no-eq` ends in `ru1_hunt` with no Ja.
+- **The fixture passes only with the equaliser on, and the test says so.**
+  `v92_p3_rx_line_test` runs the same fixture with it off and requires no
+  Ja (`fixture_no_equaliser`).
+- **Not exercised offline, and why.** `v90_engine_replay` cannot drive the
+  engine through this call's Phase 2. Replaying
+  `artifacts/apple-v92-sip-r4`, live or `--fast`, never decodes the peer's
+  INFO0a, so the V.92 contract (`v92_contract=0`) is never formed and
+  INFO1a is rejected before Phase 3. The live call decoded it ("INFO0a
+  flags ... capability(bit26)=1"). That is the known INFO0a-at-the-V.8-seam
+  problem, and it is unrelated to this receiver. So the engine wiring is
+  reviewed and built, and step 9's live call is its first real run.
 
 ### 9. Live verification, and the next blocker
 

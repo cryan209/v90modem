@@ -83,6 +83,9 @@
  * which are out of sample. */
 #define TRN1U_START_SCORE_MIN_X1000 500
 #define TRN1U_AGREE_MIN_X10 950
+/* With the equaliser switched off (v92_p3_rx_set_equaliser), the old
+ * metric: descrambled ones over the first 256 symbols. */
+#define TRN1U_NO_EQ_ONES_MIN_PCT 75
 /* V.92 9.5.1.1.3: the digital modem conditions its receiver for Ja only
  * "after receiving the first 2040T of signal TRNlu", and Figure 10 gives
  * TRN1u as >2040T -- so 2040 is guaranteed by the peer, not a target to
@@ -462,7 +465,7 @@ static void trn1u_align(v92_p3_rx_t *rx)
     rx->eq_base_sample = rx->ja_buf_base;
     for (int law = 0; law < 2; law++) {
         rx->eq_running[law] = false;
-        if (rx->law >= 0 && law != rx->law)
+        if (rx->no_equaliser || (rx->law >= 0 && law != rx->law))
             continue;
         if (!v92_p3_eq_init(&rx->eq[law], NULL))
             continue;
@@ -524,6 +527,22 @@ static int trn1u_gate(v92_p3_rx_t *rx, v92_p3_rx_reject_t *reason, int *m0)
         *reason = V92_P3_RX_REJECT_TRN1U_START;
         *m0 = rx->trn1u_start_score_x1000;
         return -1;
+    }
+    if (rx->no_equaliser) {
+        /* The receiver before plan steps 4-6, for A/B: TRN1u judged by
+         * raw-sign descrambled ones over its first 256 symbols. */
+        int ones_pct = (rx->trn1u_ones_early*100 + TRN1U_EARLY_CHECK_T/2)
+                     / TRN1U_EARLY_CHECK_T;
+
+        if (rx->trn1u_count < TRN1U_EARLY_CHECK_T)
+            return 0;
+        if (ones_pct < TRN1U_NO_EQ_ONES_MIN_PCT) {
+            *reason = V92_P3_RX_REJECT_TRN1U_ONES_LOW;
+            *m0 = ones_pct;
+            return -1;
+        }
+        rx->eq_gate_done = true;
+        return 1;
     }
     for (int law = 0; law < 2; law++) {
         if (!rx->eq_running[law])
@@ -838,6 +857,12 @@ void v92_p3_rx_init(v92_p3_rx_t *rx)
     rx->last_reject_metric0 = 0;
     rx->last_reject_metric1 = 0;
     p6_reset(rx);
+}
+
+void v92_p3_rx_set_equaliser(v92_p3_rx_t *rx, bool on)
+{
+    if (rx)
+        rx->no_equaliser = !on;
 }
 
 void v92_p3_rx_set_law(v92_p3_rx_t *rx, int law)

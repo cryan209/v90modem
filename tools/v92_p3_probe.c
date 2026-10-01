@@ -11,13 +11,19 @@
  * offline at the same sample and with the same reject as it did live) and
  * makes a hypothesis a one-command experiment instead of a call.
  *
- *   v92_p3_probe <live-rx.g711> <arm-sample> [end-sample]
+ *   v92_p3_probe [--eq|--no-eq] [--ulaw|--alaw] <live-rx.g711> <arm-sample>
+ *                [end-sample]
+ *
+ * --no-eq switches the TRN1u equaliser off (docs/v92_p3_rx_line_plan.md
+ * steps 4-7), for a one-variable A/B on any recording; --eq (the default)
+ * leaves it on.  Without a law the receiver tries both.
  *
  * The arm sample is the one the engine printed as "V.92 Phase 3 raw receiver
  * armed at G.711 sample N".  V92_P3_RX_DEBUG=1 adds the receiver's own
  * per-decision trace.
  */
 #include "v92_p3_rx.h"
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,14 +43,32 @@ int main(int argc, char **argv)
     int metric0 = 0;
     int metric1 = 0;
 
-    if (argc < 3) {
+    bool equaliser = true;
+    int law = -1;
+    const char *pos[3] = {NULL, NULL, NULL};
+    int npos = 0;
+
+    for (int a = 1; a < argc; a++) {
+        if (!strcmp(argv[a], "--eq"))
+            equaliser = true;
+        else if (!strcmp(argv[a], "--no-eq"))
+            equaliser = false;
+        else if (!strcmp(argv[a], "--ulaw"))
+            law = 0;
+        else if (!strcmp(argv[a], "--alaw"))
+            law = 1;
+        else if (npos < 3)
+            pos[npos++] = argv[a];
+    }
+    if (npos < 2) {
         fprintf(stderr,
-                "usage: %s <live-rx.g711> <arm-sample> [end-sample]\n",
+                "usage: %s [--eq|--no-eq] [--ulaw|--alaw] <live-rx.g711> "
+                "<arm-sample> [end-sample]\n",
                 argv[0]);
         return 2;
     }
-    path = argv[1];
-    arm = atoi(argv[2]);
+    path = pos[0];
+    arm = atoi(pos[1]);
     f = fopen(path, "rb");
     if (!f) {
         perror(path);
@@ -60,7 +84,7 @@ int main(int argc, char **argv)
         return 1;
     }
     fclose(f);
-    end = (argc > 3) ? atoi(argv[3]) : (int)file_len;
+    end = pos[2] ? atoi(pos[2]) : (int)file_len;
     if (end > (int)file_len)
         end = (int)file_len;
     if (arm < 0 || arm >= end) {
@@ -70,6 +94,11 @@ int main(int argc, char **argv)
 
     v92_p3_rx_init(&rx);
     v92_p3_rx_start(&rx, arm);
+    v92_p3_rx_set_equaliser(&rx, equaliser);
+    if (law >= 0)
+        v92_p3_rx_set_law(&rx, law);
+    printf("equaliser %s, law %s\n", equaliser ? "on" : "off",
+           law < 0 ? "unknown (both tried)" : law ? "A" : "u");
     for (int i = arm; i < end; i++) {
         int state;
 
@@ -99,9 +128,23 @@ int main(int argc, char **argv)
            rx.hunt_best_mean_x10 / 10.0,
            rx.hunt_best_range,
            rx.hunt_best_std_x10 / 10.0);
+    if (rx.trn1u_align_done)
+        printf("TRN1u: nominal %d start %d score %d.%03d%s\n",
+               rx.trn1u_nominal_start, rx.trn1u_start,
+               rx.trn1u_start_score_x1000/1000, rx.trn1u_start_score_x1000%1000,
+               rx.trn1u_inverted ? " inverted" : "");
+    if (rx.eq_law >= 0) {
+        const v92_p3_eq_t *eq = &rx.eq[rx.eq_law];
+
+        printf("equaliser: law %s, gate agreement %d.%d%%, %.1f dB, %+.0f ppm, "
+               "main tap %d\n", rx.eq_law ? "A" : "u",
+               rx.eq_agree_x10/10, rx.eq_agree_x10%10,
+               v92_p3_eq_snr_db(eq), v92_p3_eq_ppm(eq), v92_p3_eq_main_tap(eq));
+    }
     if (v92_p3_rx_ja_ok(&rx)) {
         const ja_dil_decode_t *ja = v92_p3_rx_get_ja(&rx);
 
+        printf("Ja from %s\n", rx.ja_from_eq ? "equalised decisions" : "raw signs");
         if (ja)
             printf("Ja: ok=%d parsed_v92=%d start_sample=%d bits=%d "
                    "N=%u LSP=%u LTP=%u\n",

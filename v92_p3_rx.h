@@ -78,7 +78,7 @@ typedef enum {
     V92_P3_RX_REJECT_RU_MISMATCH,
     V92_P3_RX_REJECT_UR_MISMATCH,
     V92_P3_RX_REJECT_MD_TIMEOUT,
-    V92_P3_RX_REJECT_TRN1U_ONES_LOW,  /* no longer produced (plan step 5) */
+    V92_P3_RX_REJECT_TRN1U_ONES_LOW,  /* equaliser off only: m0 ones % */
     V92_P3_RX_REJECT_JA_BUFFER_FULL,
     V92_P3_RX_REJECT_JA_SEARCH_FAIL,
     V92_P3_RX_REJECT_JA_SOFT_ONLY,
@@ -157,6 +157,7 @@ typedef struct {
 
     /* ------- TRN1u equaliser and gate (v92_p3_eq) ------- */
     int      law;            /* 0 u-law, 1 A-law, -1 not told: try both */
+    bool     no_equaliser;   /* v92_p3_rx_set_equaliser(rx, false) */
     v92_p3_eq_t eq[2];       /* indexed by law */
     bool     eq_running[2];
     bool     eq_gate_done;
@@ -248,6 +249,14 @@ void v92_p3_rx_set_md_length(v92_p3_rx_t *rx, int md_symbols);
  * one equaliser per law and keeps whichever fits better.  Call after
  * v92_p3_rx_start. */
 void v92_p3_rx_set_law(v92_p3_rx_t *rx, int law);
+
+/* The TRN1u equaliser (docs/v92_p3_rx_line_plan.md steps 4-7) is on by
+ * default.  Off, the receiver is the raw-sign one it replaced: TRN1u judged
+ * by descrambled ones (>= 75% over 256 symbols), Ja searched in raw signs
+ * only, and v92_p3_rx_follow() idle -- the caller keeps its raw Su lock and
+ * CPt paths.  For one-variable A/B (ME_V92_P3_EQ, v92_p3_probe --no-eq).
+ * Call after v92_p3_rx_start. */
+void v92_p3_rx_set_equaliser(v92_p3_rx_t *rx, bool on);
 
 /*
  * Feed one raw G.711 codeword (µ-law or A-law; sign bit is MSB in both).
