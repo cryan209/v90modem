@@ -1398,9 +1398,13 @@ good bound or a bad one.**
 
 Echo was ruled out before any of this and is not a factor on this port: over
 the 0.9 s in which the digital side is silent before Sd, our own transmit runs
-at RMS 3132 and the receive tap reads 226 -- **-22.9 dB** -- and a 96-tap fit
-from our transmit tap to our receive tap over the TRN1d era explains nothing
-(held-out R² = -0.010).
+at RMS 3132 and the receive tap reads 226, and a 96-tap fit from our transmit
+tap to our receive tap over the TRN1d era explains nothing (held-out
+R² = -0.010).  **That 226 is the line's noise floor, NOT the echo** -- see the
+V.91 entry below, where a wide enough delay sweep finds the hybrid return at
+121 ms and puts the true return loss at 27.2 dB.  Reading the ratio of the two
+RMS figures as an echo measurement, as an earlier version of this paragraph
+did, measures whichever of the two is larger.
 
 **And it holds for the whole downstream, not just the first window.**  The same
 fit stepped across the digital side's Phase 3 in 3000-symbol windows, 161 T/2
@@ -1555,3 +1559,66 @@ degraded with window length (11.1 dB at 800 symbols, 7.5 at 3000) and it is
 the same thing a live receiver would suffer.  **So the answer to "can we be
 more exact about timing" is: offline, to about 1 ppm, and it is now pinned;
 live, not at all yet, because the analogue path has no loop to be exact with.**
+
+### V.91 over this bearer, and what duplex actually costs (2026-10-01)
+
+Two separate questions, and the measurements put the weight in a different
+place from where intuition puts it.
+
+**V.91 ONE WAY: no, and not by a margin.**  V.91 is bit-transparent 64 kbit/s
+-- it must recover *every* G.711 codeword exactly -- and the µ-law ladder's
+steps are 2 linear units at the bottom of chord 0, rising to 256 at the top of
+chord 7.  Against the measured sigma of **45** (precoded) a 6-sigma decision
+needs 270 units between adjacent codes, so **not one adjacent pair is
+separable anywhere on the ladder, not even in chord 7.**  Resolving chord 0
+needs sigma below 0.33 units, which against a ~4000-RMS PCM stream is about
+**82 dB** of SNR; this path gives 26.  It is **~56 dB short**, in either
+direction, and no amount of transmit headroom, echo cancellation or
+one-way-ness closes that.
+
+That is not a property of this rig, it is what V.91 is: bit transparency
+requires a *digital* path, and a single D/A plus A/D converts that requirement
+into an analogue SNR demand no loop can meet.  This is the same conclusion the
+two-Apple-modem V.91 attempt reached from the clock side, now from the
+amplitude side.
+
+**What IS available one way is reduced-rate PCM, i.e. V.90's downstream** --
+7.9 bits/symbol precoded, measured two entries above.  If "V.91 at a reduced
+DRN" is what is meant then yes, that works and it is the same constellation
+problem V.90 already solves; what does not survive the reduction is the thing
+that makes V.91 V.91.
+
+**DUPLEX: real, but small here -- about 1.7 dB -- and the earlier echo figure
+in this file was wrong.**  Over the 0.85 s in which the digital side is
+provably silent and we are transmitting Ja, our TX runs at RMS 3142 and the
+receive tap reads 243.  Quoting the ratio of those as "-22.2 dB of echo" is
+what an earlier entry did and it is wrong: it measures whichever of echo and
+noise is larger.  Separate them with a wide delay sweep and an ideal canceller:
+
+```
+  |corr| peaks at lag 1160 samples = 120.8 ms   (and weakly at 379 ms)
+  ideal canceller: ERLE 1.6 dB, residual rms 201
+  received 243  =  echo 137  +  floor 201
+  TRUE hybrid return loss = 27.2 dB
+```
+
+**120.8 ms is this host's own CoreAudio and USB buffering**, the 122.6 ms this
+file already measured between transmitting and hearing yourself -- so that
+peak is the hybrid, delayed by the host, and a sweep that stops short of it
+(mine first stopped at 900 samples) finds nothing and reports the noise floor
+as the answer.  The weak 379 ms peak is consistent with the 269 ms network
+round trip plus the same host latency.
+
+Against a downstream arriving at RMS 4365, the uncancelled echo sits **30.1 dB
+down** and the noise floor **26.7 dB** down, so adding the echo to the floor
+costs **1.7 dB**, about 0.3 bits/symbol.  **Two things scale that, and they
+matter more than the duplex question itself:** the echo is proportional to
+transmit level, and this was measured at `APPLE_MODEM_TX_AMP=0.35`, so at full
+level it would be ~9 dB hotter and the penalty ~6.7 dB; and **this is modem A.
+Modem B's hybrid collapses to ~2 dB return loss a second after it goes
+off-hook**, where the echo would be far above the far-end signal and duplex
+would not work at all without a canceller that converges.
+
+**So the ordering is: duplex costs ~2 dB on this port and ~7 dB at full
+transmit level, which is a constellation step or two; V.91's bit transparency
+is 56 dB away and is not a margin question at all.**
