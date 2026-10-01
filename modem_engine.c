@@ -2325,6 +2325,47 @@ static bool me_line_ec_enabled(void)
     }
     return cached != 0;
 }
+
+/* The same canceller on a V.90 call (this modem the DIGITAL side).  V.90
+ * 9.3.2.4 ends the analogue modem's Ja on our Sd -> S-bar-d transition, and
+ * 9.3.2.7 has it answer our Jd with S, so from TRN1d until that S it is
+ * silent and what we receive is our own downstream coming back.  Against the
+ * RasFinder over the VG224 that echo is ~20 dB down at 257-267 ms; fitted
+ * over this window and held, it is removed by ~29 dB, and in Phase 4 it takes
+ * the peer's SCR from 79-89% ones (22 deg differential error, while our
+ * twice-as-loud TRN2d is echoing) to 91-98% (9-14 deg) on all five calls of
+ * 2026-09-30 that reached Phase 4 (rf-tower-jds-1..3, nop3-1, scan1-6).
+ * Without it a 700-bit CP frame would essentially never pass its CRC.
+ * The fit is put in force only if it removes 6 dB, so a path with no echo
+ * (the SIP-only SmartLink rig) is untouched.  ME_V90_LINE_EC=0 disables. */
+static bool me_v90_line_ec_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *e = getenv("ME_V90_LINE_EC");
+        cached = !(e && strcmp(e, "0") == 0);
+    }
+    return cached != 0;
+}
+
+/* The window closes when the TX moves on from Jd, which follows our
+ * DETECTION of the peer's S; S (128T) and the detector's own 64 symbols are
+ * already on the line by then, so the last 200 ms are discarded. */
+#define V90_LEC_TAIL_TRIM 1600
+
+static bool v90_line_ec_window_locked(void)
+{
+    if (g_mod != ME_MOD_V90 || !g_v90)
+        return false;
+    switch (v90_get_tx_phase(g_v90)) {
+    case V90_TX_TRN1D:
+    case V90_TX_JD:
+        return true;
+    default:
+        return false;
+    }
+}
 /* V.22bis guard tone (ITU-T V.22bis §2.1/2.2): an 1800 Hz (or, as a national
    option, 550 Hz) tone transmitted continuously alongside the "high
    channel" carrier, 6 dB (1800 Hz) or 3 dB (550 Hz) below the data signal
@@ -5858,7 +5899,9 @@ static void start_v34_training(void)
     g_mod   = ME_MOD_V34;
     g_state = ME_TRAINING;
     v34_line_ec_reset(&g_lec);
-    g_lec_armed = !v90_upstream;
+    g_lec_armed = v90_upstream ? me_v90_line_ec_enabled() : me_line_ec_enabled();
+    if (v90_upstream)
+        g_lec.tail_trim = V90_LEC_TAIL_TRIM;
     g_phase_start_ms = trace_now_ms();
     /* g_mod is overwritten to ME_MOD_V34 a line above because V.90's Phases
      * 2-4 ARE V.34's, so an unqualified "mod=V34" here reads as a V.90 call
@@ -8094,7 +8137,7 @@ skip_8k_codewords:
                         g_v34_preroll_len = 0;
                     }
                     g_v34_rx_samples += (uint64_t)len;
-                    if (g_lec_armed && g_mod == ME_MOD_V34 && me_line_ec_enabled()) {
+                    if (g_lec_armed && g_mod == ME_MOD_V34) {
                         char lec_msg[256];
 
                         if (v34_line_ec_rx(&g_lec, filtered, len,
@@ -8102,6 +8145,25 @@ skip_8k_codewords:
                                            lec_msg, sizeof(lec_msg))
                             && lec_msg[0])
                             ME_LOG("[ME] V.34 %s\n", lec_msg);
+                    } else if (g_lec_armed && g_mod == ME_MOD_V90) {
+                        char lec_msg[256];
+                        bool window = v90_line_ec_window_locked();
+
+                        /* Only a window that ended in DIL -- i.e. on the
+                           peer's S -- is known to have held nothing but our
+                           echo.  One that ended in a retrain ends on the
+                           peer's Tone A; drop it, and keep any earlier fit. */
+                        if (!window && g_lec.training
+                            && v90_get_tx_phase(g_v90) != V90_TX_DIL) {
+                            v34_line_ec_abort_window(&g_lec);
+                            ME_LOG("[ME] V.90 line echo canceller: window "
+                                   "ended without the peer's S (tx_phase=%d); "
+                                   "not fitted\n", (int)v90_get_tx_phase(g_v90));
+                        }
+                        if (v34_line_ec_rx(&g_lec, filtered, len, window,
+                                           lec_msg, sizeof(lec_msg))
+                            && lec_msg[0])
+                            ME_LOG("[ME] V.90 %s\n", lec_msg);
                     }
                     v34_rx(g_v34, filtered, len);
                     me_rx_accounting_check();
@@ -10309,7 +10371,7 @@ static void buffer_tx_samples_for_echo(const int16_t *amp, int len)
         g_tx_buf[g_tx_buf_wr] = amp[i];
         g_tx_buf_wr = (g_tx_buf_wr + 1) & TX_BUF_MASK;
     }
-    if (g_lec_armed && g_mod == ME_MOD_V34)
+    if (g_lec_armed && (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90))
         v34_line_ec_tx(&g_lec, amp, len);
     pthread_mutex_unlock(&g_state_mtx);
 }

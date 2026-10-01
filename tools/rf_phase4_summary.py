@@ -36,13 +36,13 @@ def scan(log):
             t, msg = int(m.group(1)), m.group(2)
             if "CP_VALID" in msg and "kind=CPt" in msg and "accepted=1" in msg:
                 ev.setdefault("cpt", t)
-            elif "Phase 4 tx stage -> TRN2d" in msg:
+            elif ("Phase 4 tx stage -> TRN2d" in msg or "V90 tx stage -> TRN2d" in msg):
                 ev.setdefault("trn2d", t)
-            elif "Phase 4 tx stage -> MP" in msg:
+            elif ("Phase 4 tx stage -> MP" in msg or "V90 tx stage -> MP" in msg):
                 ev.setdefault("mp", t)
-            elif "Phase 4 tx stage -> Ed" in msg:
+            elif ("Phase 4 tx stage -> Ed" in msg or "V90 tx stage -> Ed" in msg):
                 ev.setdefault("ed", t)
-            elif "Phase 4 tx stage -> B1d" in msg:
+            elif ("Phase 4 tx stage -> B1d" in msg or "V90 tx stage -> B1d" in msg):
                 ev.setdefault("b1d", t)
             elif "peer retrain detected" in msg:
                 ev.setdefault("retrain", t)

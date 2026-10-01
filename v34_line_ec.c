@@ -34,10 +34,17 @@
 #include "v34_line_ec.h"
 
 #define RING_MASK (V34_LEC_RING - 1)
+#define TRAIN_RING (V34_LEC_TRAIN_MAX + V34_LEC_TAIL_MAX)
 
 void v34_line_ec_reset(v34_line_ec_t *ec)
 {
     memset(ec, 0, sizeof(*ec));
+}
+
+void v34_line_ec_abort_window(v34_line_ec_t *ec)
+{
+    ec->training = false;
+    ec->train_total = 0;
 }
 
 void v34_line_ec_tx(v34_line_ec_t *ec, const int16_t *amp, int len)
@@ -254,19 +261,26 @@ bool v34_line_ec_rx(v34_line_ec_t *ec, int16_t *amp, int len, bool echo_only,
         /* Recorded before any cancellation below, so a retrain's refit sees
            the raw echo rather than what an older fit left of it. */
         for (int i = 0;  i < len;  i++)
-            ec->train_ring[(ec->train_total++) % V34_LEC_TRAIN_MAX] = amp[i];
+            ec->train_ring[(ec->train_total++) % TRAIN_RING] = amp[i];
     }
     else if (ec->training)
     {
+        uint64_t trim = (ec->tail_trim > 0)  ?  (uint64_t) ec->tail_trim  :  0;
+        uint64_t usable;
+
+        if (trim > V34_LEC_TAIL_MAX)
+            trim = V34_LEC_TAIL_MAX;
+        usable = (ec->train_total > trim)  ?  ec->train_total - trim  :  0;
         ec->training = false;
-        ec->train_len = (ec->train_total < V34_LEC_TRAIN_MAX)
-                      ?  (int) ec->train_total  :  V34_LEC_TRAIN_MAX;
+        ec->train_len = (usable < V34_LEC_TRAIN_MAX)
+                      ?  (int) usable  :  V34_LEC_TRAIN_MAX;
         /* rx_count has not yet advanced past this block, so it is the index
-           of the first sample after the window. */
-        ec->train_start = ec->rx_count - (uint64_t) ec->train_len;
+           of the first sample after the window; the kept samples end `trim`
+           before that. */
+        ec->train_start = ec->rx_count - trim - (uint64_t) ec->train_len;
         for (int i = 0;  i < ec->train_len;  i++)
-            ec->train_rx[i] = ec->train_ring[(ec->train_total - (uint64_t) ec->train_len + (uint64_t) i)
-                                             % V34_LEC_TRAIN_MAX];
+            ec->train_rx[i] = ec->train_ring[(usable - (uint64_t) ec->train_len + (uint64_t) i)
+                                             % TRAIN_RING];
         if (ec->train_len >= V34_LEC_TRAIN_MIN)
         {
             fit(ec, log, log_len);

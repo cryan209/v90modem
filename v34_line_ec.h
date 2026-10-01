@@ -21,6 +21,7 @@
 #define V34_LEC_FIT_MIN     1000    /* samples left after the head guard */
 #define V34_LEC_MAX_LAG     6000    /* 750 ms of bulk delay */
 #define V34_LEC_SEARCH_LEN  1024    /* samples correlated in the lag search */
+#define V34_LEC_TAIL_MAX    2400    /* most samples a window may discard at its end */
 
 typedef struct
 {
@@ -31,12 +32,18 @@ typedef struct
     /* The most recent V34_LEC_TRAIN_MAX samples of the window, as a ring:
        the far end may still be finishing its previous signal at the start of
        the window, and is certainly silent at its end. */
-    int16_t train_ring[V34_LEC_TRAIN_MAX];
+    int16_t train_ring[V34_LEC_TRAIN_MAX + V34_LEC_TAIL_MAX];
     int16_t train_rx[V34_LEC_TRAIN_MAX];
     uint64_t train_start;           /* rx_count of train_rx[0] */
     uint64_t train_total;           /* samples seen in this window */
     int train_len;
     bool training;
+    /* Samples dropped from the END of a window before fitting.  Zero for
+       plain V.34, whose window closes on our own transmit stage before the
+       far end can answer.  A V.90 digital modem's window closes when it has
+       DETECTED the analogue modem's S, which is already on the line by then,
+       so the tail carries far-end signal and has to go. */
+    int tail_trim;
 
     bool fitted;
     int lag;                        /* rx[n] ~ sum h[k] tx[n - lag - k + TAPS/2] */
@@ -54,6 +61,12 @@ void v34_line_ec_tx(v34_line_ec_t *ec, const int16_t *amp, int len);
    the receiver's statement that the far end is silent and what it hears is
    our own transmission; the fit is taken when that window closes.  Returns
    true when a fit was attempted during this call, with a line in log. */
+/* Discard an open training window without fitting: it ended in something
+   other than the far end's expected answer (a retrain, say), so its tail
+   may carry the far end and cannot be trusted.  Any fit already in force is
+   kept. */
+void v34_line_ec_abort_window(v34_line_ec_t *ec);
+
 bool v34_line_ec_rx(v34_line_ec_t *ec, int16_t *amp, int len, bool echo_only,
                     char *log, size_t log_len);
 
