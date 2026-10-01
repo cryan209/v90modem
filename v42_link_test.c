@@ -120,7 +120,8 @@ static bool run_link_case(int bit_rate,
                           int payload_len,
                           int flip_period,
                           bool exercise_busy,
-                          bool exercise_release)
+                          bool exercise_release,
+                          int caller_options)
 {
     endpoint_t caller_ep;
     endpoint_t answerer_ep;
@@ -152,6 +153,8 @@ static bool run_link_case(int bit_rate,
         || v42_get_bit_rate(answerer) != bit_rate) {
         goto done;
     }
+    if (caller_options)
+        v42_set_xid_optional_functions_octets(caller, caller_options);
     v42_restart(caller);
     v42_restart(answerer);
 
@@ -210,6 +213,8 @@ static bool run_link_case(int bit_rate,
       && v42_get_negotiated_parameters(caller, &caller_xid) == 0
       && v42_get_negotiated_parameters(answerer, &answerer_xid) == 0
       && caller_xid.valid && answerer_xid.valid
+      && caller_xid.xid_optional_functions_octets == (caller_options ? caller_options : 4)
+      && answerer_xid.xid_optional_functions_octets == caller_xid.xid_optional_functions_octets
       && caller_xid.tx_n401 == 128 && caller_xid.rx_n401 == 128
       && answerer_xid.tx_n401 == 128 && answerer_xid.rx_n401 == 128
       && caller_xid.tx_window_size_k == 15
@@ -457,7 +462,7 @@ static void capture_v44_xid(void *ctx, const uint8_t *p, int n, int ok)
 typedef struct {
     endpoint_t *ep;
     hdlc_tx_state_t *peer;
-    int requests, sabme, widths[4], peer_octets;
+    int requests, total_requests, sabme, widths[4], peer_octets;
     bool early_commit;
 } xid_dialogue_t;
 
@@ -466,6 +471,7 @@ static void xid_dialogue_frame(void *user_data, const uint8_t *p, int n, int ok)
     xid_dialogue_t *d = user_data;
     if (!ok || n < 2) return;
     if (p[1] == 0xaf && n >= 12) {
+        d->total_requests++;
         if (d->requests >= 4) { d->early_commit = true; return; }
         d->widths[d->requests++] = p[7];
         if (d->peer_octets == -3 && d->requests > 1) return;
@@ -519,7 +525,9 @@ static bool run_xid_dialogue(int forced, int peer_octets)
     }
     int expected = !forced && peer_octets == 3 ? 2 : 1;
     if (peer_octets == -3)
-        ok = ep.link_error && !ep.xid_negotiated && !ep.connected && d.sabme == 0;
+        /* Initial offer, compatibility offer, then the configured N400=5. */
+        ok = ep.link_error && !ep.xid_negotiated && !ep.connected
+          && d.sabme == 0 && d.total_requests == 7;
     else if (peer_octets == 2)
         ok = !ep.xid_negotiated && !ep.connected && d.sabme == 0;
     else
@@ -626,19 +634,21 @@ int main(void)
     for (size_t i = 0; i < sizeof(rates)/sizeof(rates[0]); i++) {
         snprintf(label, sizeof(label),
                  "V.42 detects, connects, and transfers at %d bit/s", rates[i]);
-        CHECK(run_link_case(rates[i], 1024, 0, false, false), label);
+        CHECK(run_link_case(rates[i], 1024, 0, false, false, 0), label);
         snprintf(label, sizeof(label),
                  "V.42 T400 is clocked at the configured %d bit/s", rates[i]);
         CHECK(run_detection_timeout_case(rates[i]), label);
     }
-    CHECK(run_link_case(9600, 2048, 5000, false, false),
+    CHECK(run_link_case(9600, 2048, 5000, false, false, 0),
           "V.42 retransmits corrupted frames without payload corruption");
-    CHECK(run_link_case(9600, 2048, 0, true, false),
+    CHECK(run_link_case(9600, 2048, 0, true, false, 0),
           "V.42 RNR/RR backpressure pauses and resumes byte-exact transfer");
-    CHECK(run_link_case(9600, 1024, 0, false, true),
+    CHECK(run_link_case(9600, 1024, 0, false, true, 0),
           "V.42 DISC/UA release disconnects both endpoints cleanly");
     CHECK(run_sustained_outage_case(2400),
           "V.42 sustained outage reaches explicit retry-exhaustion disconnect");
+    CHECK(run_link_case(9600, 2048, 0, false, false, 3),
+          "V.42 answerer detects a legacy command and carries exact data both ways");
     CHECK(run_outgoing_xid(4),
           "V.42 transmits well-formed XID groups and explicit compression refusal");
     CHECK(run_outgoing_xid(3),

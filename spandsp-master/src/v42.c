@@ -729,7 +729,8 @@ static void t401_expired(v42_state_t *ss)
 
     span_log(&ss->logging, SPAN_LOG_FLOW, "T.401 expired\n");
     s = &ss->lapm;
-    if (s->retry_count > V42_DEFAULT_N_400)
+    if ((s->configuring && s->retry_count >= V42_DEFAULT_N_400)
+        || s->retry_count > V42_DEFAULT_N_400)
     {
         s->retry_count = 0;
         if (s->configuring)
