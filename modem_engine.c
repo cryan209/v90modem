@@ -2017,6 +2017,24 @@ static bool     g_v90a_ladder_set = false;
  * that a window fits inside it with room to land, long enough that the
  * held-out half is still 20 six-symbol repetitions.
  */
+/* The 1333 Hz line fraction a window must reach before Sd is acquired from
+ * the line alone.  Measured over the Phase 3 era of
+ * artifacts/apple-v90-sip-r7: the Sd burst reads 0.994-1.000 and the other
+ * 335 windows read at most 0.0377, so 0.50 sits in an empty gap with 13x of
+ * margin on the false-positive side.  ME_V90_ANALOGUE_SD_LINE_MIN moves it. */
+static double v90a_sd_line_min(void)
+{
+    static double v = -1.0;
+
+    if (v < 0.0) {
+        const char *e = getenv("ME_V90_ANALOGUE_SD_LINE_MIN");
+        double n = e ? atof(e) : 0.0;
+
+        v = (n > 0.0 && n <= 1.0) ? n : 0.50;
+    }
+    return v;
+}
+
 #define V90A_SD_FIT_SAMPLES 512
 /*
  * And slide by a quarter of a window rather than a half, so that a window
@@ -10926,9 +10944,50 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
             double h[V90A_SD_MAX_TAPS], score = 0.0, level = 0.0;
             int parity = 0;
 
-            if (taps <= V90A_SD_MAX_TAPS
-                &&  v90a_sd_fit(g_v90a_sd_buf, g_v90a_sd_fill, taps, &parity,
-                                h, &score, &level)) {
+            double line_frac = 0.0, line_amp = 0.0;
+            bool fitted;
+            bool from_line = false;
+
+            fitted = (taps <= V90A_SD_MAX_TAPS)
+                     &&  v90a_sd_fit(g_v90a_sd_buf, g_v90a_sd_fill, taps,
+                                     &parity, h, &score, &level);
+            /*
+             * THE WAVEFORM FIT IS UNAVAILABLE ON A BAND-LIMITED BEARER, and
+             * that is arithmetic rather than tuning: §8.4.4's Sd puts two
+             * thirds of its energy at exactly 4000 Hz -- Nyquist -- and one
+             * third on the 1333 Hz line, so a 2-wire loop deletes most of the
+             * reference before the fit ever sees it.  Synthetic control, one
+             * variable: the same Sd byte-exact scores 1.000, low-passed at
+             * 3.4 kHz scores 0.456, and the real thing off the Apple modem's
+             * loop scores 0.396 against FIT_SCORE_MIN's 0.80.  See
+             * v90_analogue_sd.h.
+             *
+             * So fall back on the part that survives.  The line fraction
+             * separates Sd from everything else in Phase 3 by 26:1 on that
+             * recording -- 0.994-1.000 over the Sd burst against at most
+             * 0.0377 over the other 335 windows of TRN1d, Jd and silence --
+             * and it is only consulted when the fit has already declined, so
+             * a byte-exact DS0 reaches this code at all.  What it installs is
+             * a gain and a T/2 parity, not an equaliser: the line cannot give
+             * the slot alignment (its phase carries the channel's unknown
+             * phase shift) and cannot equalise anything, so CMA on §8.4.5's
+             * TRN1d does the rest, which is what CMA is for.
+             *
+             * ME_V90_ANALOGUE_SD_LINE=0 disables it and restores fit-only
+             * acquisition.
+             */
+            if (!fitted  &&  taps <= V90A_SD_MAX_TAPS
+                &&  parse_env_int("ME_V90_ANALOGUE_SD_LINE", 1) != 0
+                &&  v90a_sd_line(g_v90a_sd_buf, g_v90a_sd_fill, &line_frac,
+                                 &line_amp, NULL)
+                &&  line_frac >= v90a_sd_line_min()
+                &&  v90a_sd_line_taps(g_v90a_sd_buf, g_v90a_sd_fill, taps,
+                                      line_amp, &parity, h)) {
+                fitted = true;
+                from_line = true;
+                level = 1.0;
+            }
+            if (fitted) {
                 v90a_fse_set_taps(g_v90a_fse, h, taps, parity);
                 g_v90a_sd_fitted = true;
                 /*
@@ -10969,9 +11028,17 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
                  */
                 me_v90a_equalised_locked(g_v90a_sd_buf, g_v90a_sd_fill);
                 me_v90a_equalised_locked(amp + i, len - i);
-                ME_LOG("[ME] V.90 analogue: Sd fit accepted (held-out score "
-                       "%.3f, T/2 parity %d, level %.3f); equaliser acquired "
-                       "on §8.4.4's own sequence\n", score, parity, level);
+                if (from_line)
+                    ME_LOG("[ME] V.90 analogue: Sd acquired on its 1333 Hz line "
+                           "(line fraction %.3f, amplitude %.0f, T/2 parity %d); "
+                           "the §8.4.4 waveform fit scored %.3f, which a "
+                           "band-limited bearer caps near 0.46 -- gain and "
+                           "parity only, CMA trains on TRN1d\n",
+                           line_frac, line_amp, parity, score);
+                else
+                    ME_LOG("[ME] V.90 analogue: Sd fit accepted (held-out score "
+                           "%.3f, T/2 parity %d, level %.3f); equaliser acquired "
+                           "on §8.4.4's own sequence\n", score, parity, level);
             } else {
                 /* Slide so a fit that straddles the start of Sd -- or its end,
                  * where S-bar-d begins -- gets a clean one next time rather
@@ -10982,8 +11049,17 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
                 g_v90a_sd_fill = V90A_SD_FIT_SAMPLES - V90A_SD_FIT_SLIDE;
                 if (g_v90a_sd_score_logged < 24) {
                     g_v90a_sd_score_logged++;
+                    /* Both numbers, because they fail for different reasons
+                     * and the pair is what says which bearer this is: on a
+                     * byte-exact DS0 a missed window scores low on both, and
+                     * on a loop the fit is capped near 0.46 while the line is
+                     * the thing to read.  The cap on this log is itself a
+                     * trap -- it stops at 24 lines while the hunt runs for
+                     * the rest of the call, so silence here is not the hunt
+                     * having stopped. */
                     ME_LOG("[ME] V.90 analogue: no Sd in this window "
-                           "(held-out score %.3f)\n", score);
+                           "(held-out score %.3f, 1333 Hz line fraction "
+                           "%.3f)\n", score, line_frac);
                 }
             }
         }

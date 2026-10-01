@@ -68,11 +68,93 @@ static bool solve_spd(double *R, double *p, int n)
 static bool fit_one(const int16_t *amp, int n, int taps, int off, double dc,
                     double *h_out, double *score_out, double *level_out);
 
+/*
+ * §8.4.4's 1333.33 Hz line.  See the header for why this and not the fit is
+ * the detector on any bearer that is not a byte-exact DS0.
+ *
+ * On the 16 kHz T/2 grid 1333.33 Hz is exactly one cycle per 12 samples, so
+ * this is a plain period-12 bin: no window, no interpolation, and no leakage
+ * to correct for as long as the block is a whole number of periods, which is
+ * why n is rounded down to a multiple of 12.
+ */
+#define SD_LINE_PERIOD 12
+
+bool v90a_sd_line(const int16_t *amp, int n, double *frac_out,
+                  double *amp_out, double *phase_out)
+{
+    double re = 0.0, im = 0.0, energy = 0.0, dc = 0.0;
+    double power;
+    int i;
+
+    if (amp == NULL  ||  n < 4*SD_LINE_PERIOD)
+        return false;
+    n -= n%SD_LINE_PERIOD;
+    for (i = 0; i < n; i++)
+        dc += amp[i];
+    dc /= n;
+    for (i = 0; i < n; i++) {
+        double x = amp[i] - dc;
+        double th = 2.0*M_PI*(double) (i%SD_LINE_PERIOD)/SD_LINE_PERIOD;
+
+        re += x*cos(th);
+        im -= x*sin(th);
+        energy += x*x;
+    }
+    if (energy <= 0.0)
+        return false;
+    /* x2 for the conjugate bin; /n twice turns the DFT magnitude into power. */
+    power = 2.0*(re*re + im*im)/((double) n*n);
+    if (frac_out)
+        *frac_out = power*n/energy;
+    if (amp_out)
+        *amp_out = 2.0*sqrt(re*re + im*im)/n;
+    if (phase_out)
+        *phase_out = atan2(im, re);
+    return true;
+}
+
+bool v90a_sd_line_taps(const int16_t *amp, int n, int taps, double line_amp,
+                       int *parity_out, double *h_out)
+{
+    double energy[2] = { 0.0, 0.0 };
+    double dc = 0.0;
+    double gain;
+    int parity;
+    int i;
+
+    if (amp == NULL  ||  h_out == NULL  ||  taps <= 0  ||  (taps & 1)
+        ||  taps > V90A_SD_MAX_TAPS  ||  line_amp <= 0.0  ||  n < 2*taps)
+        return false;
+    for (i = 0; i < n; i++)
+        dc += amp[i];
+    dc /= n;
+    for (i = 0; i < n; i++) {
+        double x = amp[i] - dc;
+
+        energy[i & 1] += x*x;
+    }
+    parity = (energy[1] > energy[0]) ? 1 : 0;
+    /* SD_REF's own fundamental: reconstructing +1 0 +1 -1 0 -1 from its k=1
+     * bin alone gives a peak amplitude of |X1|/3 = 2/3.  Matching the received
+     * line to that is the same normalisation the fit applies (W -> 1), and the
+     * only part of it a band-limited channel leaves reachable. */
+    gain = (2.0/3.0)/line_amp;
+    for (i = 0; i < taps; i++)
+        h_out[i] = 0.0;
+    /* Tap 0 is the most recent sample (v90a_fse_put()'s convention); put the
+     * unit tap in the middle so CMA has span either side of it to grow into. */
+    h_out[taps/2] = gain;
+    if (parity_out)
+        *parity_out = parity;
+    return true;
+}
+
 bool v90a_sd_fit(const int16_t *amp, int n, int taps, int *parity_out,
                  double *h_out, double *score_out, double *level_out)
 {
     double best_h[V90A_SD_MAX_TAPS];
     double best_score = -1e30, best_level = 0.0, dc = 0.0;
+    double reported_score = 0.0;
     int best_off = -1, off, i;
 
     if (amp == NULL  ||  h_out == NULL  ||  taps <= 0  ||  (taps & 1)
@@ -91,8 +173,30 @@ bool v90a_sd_fit(const int16_t *amp, int n, int taps, int *parity_out,
      */
     for (off = 0; off < 2; off++) {
         double h[V90A_SD_MAX_TAPS], score = 0.0, level = 0.0;
+        bool train_ok;
 
-        if (!fit_one(amp, n, taps, off, dc, h, &score, &level))
+        train_ok = fit_one(amp, n, taps, off, dc, h, &score, &level);
+        /* REPORT THE SCORE EVEN WHEN THE TRAINING-HALF CHECK REJECTS IT, and
+         * keep that strictly separate from the choice of taps.
+         *
+         * This used to `continue` on a failed fit_one(), discarding the score
+         * it had just computed -- so every rejected window reported the
+         * caller's initialiser, 0.000, whatever it had actually measured.
+         * "held-out score 0.000" on a live log therefore meant "no fit was
+         * accepted", not "the fit explained none of the reference", and the
+         * two are the whole difference between a window that is nearly right
+         * and one looking at the wrong signal.  Thousands of those lines
+         * across every analogue-role capture in artifacts/ say nothing, and
+         * believing them would conclude no Sd had arrived when it was on the
+         * wire at 99.3% of the block energy (artifacts/apple-v90-sip-r7, tap
+         * t = 19.625 s).
+         *
+         * reported_score is for the log only.  best_score/best_off are the
+         * accept path and still move only on a fit that passed fit_one(), so
+         * the decision is byte-for-byte what it was. */
+        if (score > reported_score)
+            reported_score = score;
+        if (!train_ok)
             continue;
         if (score > best_score) {
             best_score = score;
@@ -101,8 +205,11 @@ bool v90a_sd_fit(const int16_t *amp, int n, int taps, int *parity_out,
             memcpy(best_h, h, (size_t) taps*sizeof(double));
         }
     }
-    if (best_off < 0)
+    if (best_off < 0) {
+        if (score_out)
+            *score_out = reported_score;
         return false;
+    }
     memcpy(h_out, best_h, (size_t) taps*sizeof(double));
     if (parity_out)
         *parity_out = best_off;

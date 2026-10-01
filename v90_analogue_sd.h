@@ -81,6 +81,63 @@ bool v90a_sd_fit(const int16_t *amp, int n, int taps, int *parity_out,
                  double *h_out, double *score_out, double *level_out);
 
 /*
+ * THE FIT ABOVE CANNOT WORK OVER AN ANALOGUE LOOP, AND THE ARITHMETIC SAYS SO
+ * BEFORE ANY MEASUREMENT DOES.
+ *
+ * §8.4.4's Sd is +W 0 +W -W 0 -W, period six at the 8 kHz symbol rate.  Its
+ * DFT over one period has |X| = 2 at k = 1 (1333.33 Hz) and |X| = 4 at k = 3,
+ * which is 4000 Hz -- NYQUIST.  By Parseval that puts **two thirds of Sd's
+ * energy at exactly half the sampling rate** and one third on the 1333 Hz
+ * line, and nothing else anywhere.  A 2-wire loop has a null at 4 kHz, no
+ * linear equaliser can restore what the channel removed, and so the best any
+ * least-squares fit to the reference can reach is the surviving third.
+ *
+ * Measured, with a synthetic control that isolates the channel: the identical
+ * Sd sequence fitted byte-exact (what the SIP G.711 bearer delivers, where the
+ * DS0 passes through untouched) scores 1.000 and is accepted; low-passed at
+ * 3.4 kHz and nothing else changed, the same sequence scores 0.456; and the
+ * real thing off the Apple modem's loop (artifacts/apple-v90-sip-r7, tap
+ * t = 19.625 s) scores 0.396.  FIT_SCORE_MIN is 0.80.  So on an analogue
+ * bearer this detector cannot fire, for a reason that is in §8.4.4 rather than
+ * in the line, the level or the tuning -- and every window of every such call
+ * reports "no Sd" while Sd is plainly on the wire.
+ *
+ * What survives is the 1333 Hz line, and it is a far better detector than the
+ * fit ever was, because the component that survives is also the distinctive
+ * one.  Over the Phase 3 era of that same recording, in 32 ms windows on the
+ * 16 kHz T/2 grid: the Sd burst reads **0.994 to 1.000** of the block energy
+ * on that line and the other 335 windows -- TRN1d, Jd, silence -- read at most
+ * **0.0377**.
+ *
+ * This measures it.  1333.33 Hz on a 16 kHz grid is exactly one cycle per 12
+ * samples, so the measurement is a plain period-12 DFT bin and needs no
+ * windowing or interpolation.  `frac_out` is the share of block energy in that
+ * line (its conjugate pair included), in [0, 1]; `amp_out` is the line's peak
+ * amplitude in the input's own units; `phase_out` is its phase in radians.
+ *
+ * NOTE WHAT IT CANNOT GIVE YOU.  The line's phase is the transmitter's phase
+ * plus the channel's phase shift at 1333 Hz, which is unknown, so it does NOT
+ * recover the slot alignment -- only §9.3.2.4's transition, which is a 180
+ * degree reversal of the same line and so is independent of that offset.  Slot
+ * and frame alignment have to come from Jd, and the equaliser has to be
+ * trained on §8.4.5's TRN1d by CMA, which is what CMA is there for.
+ */
+bool v90a_sd_line(const int16_t *amp, int n, double *frac_out,
+                  double *amp_out, double *phase_out);
+
+/*
+ * The neutral tap set to start from when Sd was detected on its line but the
+ * waveform fit could not be made -- i.e. on any band-limited bearer.  A unit
+ * main tap on the stronger T/2 parity, scaled so that a received line of
+ * amplitude `line_amp` comes out at the amplitude §8.4.4's own fundamental has
+ * when W is 1 (two thirds), which is the scale the fit would have produced and
+ * the only part of it the channel leaves available.  Nothing is equalised:
+ * this is a gain and a parity, handed to CMA to improve on.
+ */
+bool v90a_sd_line_taps(const int16_t *amp, int n, int taps, double line_amp,
+                       int *parity_out, double *h_out);
+
+/*
  * reps is how many six-symbol repetitions each decision is taken over.  §8.4.4
  * sends Sd for at least 64 reps and this project's own transmitter sends
  * exactly that, so the window has to be a good deal shorter than the signal:

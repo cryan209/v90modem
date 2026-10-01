@@ -1270,3 +1270,82 @@ present here.  And the analogue side's 1500 ms Ja deadline (9.3.2.4,
 2.1-2.8 s our own descriptor parse takes, so the two halves of this project
 deadlock against each other by construction when the fallback does not fire --
 which is the argument for fixing the parse rather than lengthening the deadline.
+
+### Why the analogue side cannot see Sd: two thirds of it is at Nyquist (2026-10-01)
+
+The entry above left "the analogue side reports `held-out score 0.000` on every
+window while Sd is provably on the wire" as the remaining V.90 blocker.  It has
+an exact cause, and the cause is in §8.4.4 rather than in the line, the level
+or any threshold.
+
+**First, that 0.000 was never a measurement.**  `v90a_sd_fit()` evaluated both
+T/2 parities through `fit_one()` and `continue`d whenever the training-half
+check failed -- discarding the score it had just computed, so a rejected window
+reported the caller's initialiser.  Every one of the thousands of
+`held-out score 0.000` lines in every analogue-role capture in `artifacts/`
+means "no fit was accepted" and nothing more.  Fixed; the accept decision is
+unchanged, and the log now also carries the 1333 Hz line fraction beside it.
+With real numbers the same recording reads **0.396 at the Sd burst** and about
+0.333 everywhere else, which is a very different picture from a flat zero.
+
+**The arithmetic.**  Sd is `+W 0 +W -W 0 -W`, period six at the 8 kHz symbol
+rate.  Its DFT over one period is |X| = 2 at k = 1 (**1333.33 Hz**) and |X| = 4
+at k = 3, which is **4000 Hz -- Nyquist** -- and zero everywhere else.  By
+Parseval that is **one third of Sd's energy on the 1333 Hz line and two thirds
+at exactly half the sampling rate.**  A 2-wire loop has a null there, no linear
+equaliser can restore what the channel removed, and so the best a
+least-squares fit to the reference can possibly explain is the surviving third
+-- which is the 0.333 plateau, measured.
+
+**The synthetic control isolates the channel, one variable.**  The same Sd
+sequence, byte-exact as the SIP G.711 bearer delivers it: **1.000, accepted**.
+Low-passed at 3.4 kHz and nothing else changed: **0.456, rejected**.  The real
+thing off the Apple modem's loop: **0.396**.  `FIT_SCORE_MIN` is 0.80.  So this
+detector cannot fire on any analogue bearer, and the figure in its own comment
+("Sd through a dispersive channel at any sampling phase reaches 0.97+") was
+measured on a byte-exact DS0, where there is no channel.
+
+**What survives is a better detector than the fit ever was**, because the
+component that survives is also the distinctive one.  Over the Phase 3 era of
+`artifacts/apple-v90-sip-r7`, in 32 ms windows on the 16 kHz T/2 grid: the Sd
+burst reads **0.994-1.000** of the block energy on the 1333 Hz line, and the
+other **335** windows -- TRN1d, Jd, silence -- read at most **0.0377**.  1333.33
+Hz on a 16 kHz grid is exactly one cycle per 12 samples, so it is a plain
+period-12 DFT bin with no window and no leakage to correct.  `v90a_sd_line()`
+measures it and `v90a_sd_line_taps()` builds what it can justify: a unit main
+tap on the stronger T/2 parity, scaled so the received line comes out at the
+amplitude §8.4.4's own fundamental has when W is 1 (two thirds).  It is
+consulted only after the waveform fit has declined, so a byte-exact DS0 never
+reaches it.  `ME_V90_ANALOGUE_SD_LINE=0` disables it,
+`ME_V90_ANALOGUE_SD_LINE_MIN` moves the 0.50 gate.
+
+Replayed through the engine, one variable (`apple_usb_modem_coupler
+--rx-replay` on r7's own receive tap): **with it, `Sd acquired on its 1333 Hz
+line (line fraction 0.539, amplitude 3627, T/2 parity 1)` at the exact Sd
+onset; with `ME_V90_ANALOGUE_SD_LINE=0`, no acquisition of any kind for the
+whole call.**  `v90_analogue_rx_test` and `vpcm_loopback_test --all-tests`
+both still pass, which is the byte-exact path saying it is unaffected.
+
+**THE NEXT STEP IS NOW EXACT, AND IT IS NOT A TUNING PROBLEM EITHER.**  Over a
+band-limited channel Sd's slot structure is not merely attenuated -- **it is
+inverted**.  Reconstructing `+1 0 +1 -1 0 -1` from its 1333 Hz bin alone gives
+`0.333  0.667  0.333  -0.333  -0.667  -0.333`: **the slots that should be ZERO
+carry the MOST energy.**  Measured on r7's own Sd burst, mean per slot at the
+best phase: **1874  4647  2376  -2205  -4961  -2767** -- the analytic
+prediction, to the ratio.  `v90a_sd_put()` scores `(w - z)/w` times the sign
+agreement, so on this bearer its first factor is structurally negative and it
+can never acquire the slot phase, at any threshold.  Which means:
+
+1. §9.3.2.4's Sd-to-S-bar-d transition has to be taken from the **180 degree
+   reversal of the 1333 Hz line**, which is independent of the channel's
+   unknown phase shift at that frequency (the line's absolute phase is not,
+   which is why it cannot give slot alignment).
+2. The equaliser has to be trained on §8.4.5's **TRN1d by CMA** -- TRN1d is
+   scrambled ones on one level, i.e. constant modulus, which is what CMA is
+   for.  The neutral taps above exist to give it a starting gain and parity,
+   not to equalise anything.
+3. **Slot and frame alignment have to come from Jd**, since neither Sd nor
+   TRN1d can supply it through this channel.
+
+None of that is a threshold change, and none of it is reachable from the
+byte-exact loopback, which is why the SIP bearer has never needed it.
