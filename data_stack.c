@@ -223,6 +223,10 @@ static void ds_v42_status(void *user_data, int status)
                 return;
             }
         }
+        /* Diagnostic A/B for V.42bis 7.8.1/7.9: compressed transfer
+           makes the line-ending delivery independent of transparent buffering. */
+        if (s->v42bis && getenv("DS_V42BIS_FORCE_COMPRESSED"))
+            v42bis_compression_control(s->v42bis, V42BIS_COMPRESSION_MODE_ALWAYS);
         event = DS_LINK_XID_NEGOTIATED;
         break;
     }

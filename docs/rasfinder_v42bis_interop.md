@@ -249,3 +249,35 @@ and password prompt. The same paced bbs/CR password had no immediate
 response, and an extra CR after 30 seconds elicited Invalid Password.
 No successful password reset or RasFinder-to-BBS login is established.
 The captured edit and modem session are in `xid-validation/password-save`.
+
+### Encoder mode and delivery control
+
+After the user confirmed explicitly changing the RasFinder password to
+bbsbbs, `DS_V42BIS_FORCE_COMPRESSED` was added as an opt-in diagnostic.
+It selects the existing codec's ALWAYS policy; V.42bis 7.8.1's ECM and
+7.9's C-FLUSH behavior remain codec-generated. Default policy is unchanged.
+Data-stack regressions pass in default and forced-compressed modes locally,
+and the default suite passes on the verified Tower build. Source hashes
+were matched before its build.
+
+The live compressed control reached 12000 bit/s, a readable banner and the
+password prompt. TX contains 39 CRC-valid HDLC frames with no bad FCS or
+malformed frames. An independent fresh Python V.42bis decoder reads the
+I-frame sequence as `bbs\r`, `bbsbbs\r`, and the extra CR after 30 seconds.
+The password CR is an actual compressed literal followed by FLUSH, rather
+than an assumed transparent-mode completion. The call subsequently returned
+NO CARRIER without a password rejection or BBS banner. This does not prove
+that the RasFinder decoder consumed the stream; it verifies the encoder's
+actual output and fails to produce a successful delivery/authentication
+control. Artifacts: `xid-validation/compressed`.
+
+A plain-LAPM control explicitly disabled compression and selected three XID
+option octets. It trained V.34 at 12000 and passed V.42 detection, but failed
+LAPM establishment and tore down before application input. It is not an
+uncompressed password test. Artifacts: `xid-validation/plain`.
+
+The distinction remains important: the credential payload and our own
+independent decode are verified, but HDLC acknowledgements alone do not
+verify the peer's decompressor-to-terminal or terminal-password-parser
+handoff. The first-password-CR delay is unresolved, not grounds to assume
+the user supplied a different password.
