@@ -281,3 +281,42 @@ independent decode are verified, but HDLC acknowledgements alone do not
 verify the peer's decompressor-to-terminal or terminal-password-parser
 handoff. The first-password-CR delay is unresolved, not grounds to assume
 the user supplied a different password.
+
+### Correct the engine's XID override initialization
+
+The prior supposedly forced-three plain-LAPM capture actually transmitted
+four optional-function octets on every offer. The engine applied the setter
+after `ds_init_v42_ex()` had already called `v42_restart()`, but restarted
+again only when detection was disabled. The setter configures the next
+restart, so with detection enabled the active width stayed four while auto
+adaptation was disabled by the now-forced config. The logged override was
+therefore not the wire encoding. This invalidates the previous claim that
+that failure tested three-octet plain-LAPM compatibility.
+
+The engine now restarts after applying the override in either detection
+mode, activating the configured profile before any bits are consumed.
+This is initialization, not a change to V.42 8.10.1 protocol negotiation.
+Tower's matching source build passes v42_link_test and data_stack_test.
+The first corrected call did not finish V.42 detection and sent no XID;
+no negotiation outcome can be drawn from it.
+
+The second corrected call (`xid-validation/plain-fixed-r2`) **does** send
+three octets and P0=0. Its CRC-valid peer XID response has no V.42bis private
+group; it establishes plain LAPM and carries a readable banner. The engine
+reports P0=0/P1=512/P2=6. The peer's username CR echo is a single raw NUL,
+where compressed captures use escape-NUL/EID, additional evidence that the
+peer is sending plain data. Our exact I-frame data is `bbs\r`, `bbsbbs\r`,
+then an extra CR after 30 seconds. The latter elicits Invalid Password.
+Compression is not required to get this terminal login, and the delay and
+rejection also occur with it disabled. Full-capture TX has 34 valid frames
+and no errors; RX has 35 valid frames, eight bad-FCS candidates and 114
+malformed candidates including the later retraining/disconnect.
+
+The password-only CRLF control kept username `bbs\r` and sent
+`bbsbbs\r\n` on plain LAPM. It ultimately returned `You are logged off`
+after the delayed extra CR, without an ENiGMA banner. A separate NUL-padding
+control sent `bbsbbs\0\0\r`, but disconnected without an explicit
+application authentication response. Neither establishes a successful
+password parse. These controls are under `xid-validation/plain-delimiters`.
+A bridge-bound AF_PACKET observer did not see a known local BBS connection,
+so its absence of RasFinder packets is not valid negative evidence.
