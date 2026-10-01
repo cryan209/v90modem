@@ -1349,3 +1349,55 @@ can never acquire the slot phase, at any threshold.  Which means:
 
 None of that is a threshold change, and none of it is reachable from the
 byte-exact loopback, which is why the SIP bearer has never needed it.
+
+### The loop carries the V.90 downstream perfectly well -- Sd is the only casualty (2026-10-01)
+
+The entry above could be read as "an analogue loop cannot carry a V.90
+downstream".  It does not say that, and the measurement says the opposite.
+Bound every linear receiver the way `tools/v34_channel_bound.py` does, but
+with real ground truth for once: the digital side's own `live-tx.g711` is the
+exact DS0 it sent, so a least-squares fit from the analogue side's received
+tap to those transmitted symbols, scored on held-out data, is an upper bound
+on what any linear receiver could recover.  Anchored on the Sd onset, which
+both taps carry (TX sample 89120, RX tap 19.600 s), T/2 spaced, lag swept
++/-260 samples in half-sample steps:
+
+| signal | 41 taps | 81 | 161 | 321 |
+|---|---|---|---|---|
+| **Sd** (R²) | 0.371 | 0.360 | 0.367 | 0.392 |
+| **TRN1d** (R²) | 0.823 | 0.829 | 0.848 | **0.860** |
+| **TRN1d sign error** | 1.60% | 1.93% | 0.93% | **0.80%** |
+
+**Sd is capped near one third however long the equaliser, which is the
+Nyquist arithmetic again and arrives here from a completely independent
+direction -- and §8.4.5's TRN1d, the very next signal, fits at 0.86 with 0.8%
+sign errors.**  Sign-sliced with no equaliser at all, the same TRN1d
+descrambles (GPC, taps 18 and 23) to only **58.5%** ones over a sweep of
+sampling phase and +/-3000 ppm; equalised it is 99.2% correct.  So the ~40
+points between those two figures are exactly what an equaliser is worth here,
+and the loop is not the problem: **§8.4.4's Sd is the one signal in V.90
+Phase 3 whose energy is mostly at Nyquist, and it is the only one this bearer
+destroys.**
+
+That also settles the design question the previous entry left open.  Training
+the equaliser on TRN1d by CMA is not a hope, it is a thing the channel
+measurably supports; and not trying to equalise on Sd is not a compromise,
+because there is nothing there to equalise on.
+
+**Two method traps, both of which gave the wrong answer first and both already
+on record for `v34_channel_bound.py`.**  A lag sweep that is too narrow reads
+as a dead channel: at +/-30 samples TRN1d fitted at **R² = 0.002 and 47.3%
+sign error, i.e. chance**, and the same data at +/-260 gives 0.86 -- and the
+tell was that every reported optimum sat on the edge of the sweep.  And a
+window that is too long reads as a dead channel for a different reason: at
+12000 symbols (1.5 s) the two free-running codecs drift apart within the
+window and the fit degrades to 0.32 and below, swinging with tap count, where
+3000 symbols is stable across 41 to 321 taps.  **Check that the winning lag is
+interior and that the answer is stable in tap count before believing either a
+good bound or a bad one.**
+
+Echo was ruled out before any of this and is not a factor on this port: over
+the 0.9 s in which the digital side is silent before Sd, our own transmit runs
+at RMS 3132 and the receive tap reads 226 -- **-22.9 dB** -- and a 96-tap fit
+from our transmit tap to our receive tap over the TRN1d era explains nothing
+(held-out R² = -0.010).
