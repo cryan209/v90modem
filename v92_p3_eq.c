@@ -201,6 +201,10 @@ static bool seed(v92_p3_eq_t *eq)
         return false;
     eq->zcount = rows + n - 1;
     eq->centroid_ref = centroid(eq);
+    eq->main_tap = 0;
+    for (int j = 1; j < n; j++)
+        if (fabs(eq->taps[j]) > fabs(eq->taps[eq->main_tap]))
+            eq->main_tap = j;
     eq->seeded = true;
     return true;
 }
@@ -347,6 +351,11 @@ double v92_p3_eq_post_seed_agreement(const v92_p3_eq_t *eq)
 {
     return eq->post_seed_symbols
          ? (double)eq->post_seed_agree/(double)eq->post_seed_symbols : 0.0;
+}
+
+int v92_p3_eq_main_tap(const v92_p3_eq_t *eq)
+{
+    return eq->main_tap;
 }
 
 double v92_p3_eq_ppm(const v92_p3_eq_t *eq)

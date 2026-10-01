@@ -30,6 +30,7 @@
 #include <stdint.h>
 
 #include "v92_ja_decode.h"   /* ja_dil_decode_t */
+#include "v92_p3_eq.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -77,10 +78,15 @@ typedef enum {
     V92_P3_RX_REJECT_RU_MISMATCH,
     V92_P3_RX_REJECT_UR_MISMATCH,
     V92_P3_RX_REJECT_MD_TIMEOUT,
-    V92_P3_RX_REJECT_TRN1U_ONES_LOW,
+    V92_P3_RX_REJECT_TRN1U_ONES_LOW,  /* no longer produced (plan step 5) */
     V92_P3_RX_REJECT_JA_BUFFER_FULL,
     V92_P3_RX_REJECT_JA_SEARCH_FAIL,
     V92_P3_RX_REJECT_JA_SOFT_ONLY,
+    /* TRN1u gate (docs/v92_p3_rx_line_plan.md step 5).  m0 is the metric
+     * that failed, m1 the descrambled-ones percentage over the first 256
+     * symbols, kept as a diagnostic. */
+    V92_P3_RX_REJECT_TRN1U_START,     /* m0: correlation score, per mille */
+    V92_P3_RX_REJECT_TRN1U_UNTRAINED, /* m0: equalised sign agreement, x10 */
 } v92_p3_rx_reject_t;
 
 /* -------------------------------------------------------------------------
@@ -143,13 +149,24 @@ typedef struct {
     bool     trn1u_align_done;
     int      trn1u_align_offset;      /* trn1u_start - trn1u_nominal_start */
     int      trn1u_align_score_x1000; /* |normalised sign correlation| at the peak */
-    bool     trn1u_inverted;          /* line polarity reversed */ /* ignore Phase-3 lock before this sample */
+    bool     trn1u_inverted;          /* line polarity reversed */
+    int      trn1u_start_score_x1000; /* score at the start actually used */
+    /* Test hook: added to the aligned start, so a test can show the gate
+     * refusing a start that is wrong.  Zero in every real call. */
+    int      test_start_offset;
+
+    /* ------- TRN1u equaliser and gate (v92_p3_eq) ------- */
+    int      law;            /* 0 u-law, 1 A-law, -1 not told: try both */
+    v92_p3_eq_t eq[2];       /* indexed by law */
+    bool     eq_running[2];
+    bool     eq_gate_done;
+    int      eq_law;         /* law the gate chose, or -1 */
+    int      eq_agree_x10;   /* agreement the gate judged */ /* ignore Phase-3 lock before this sample */
 
     /* ------- TRN1u accumulator ------- */
     int      trn1u_count;    /* symbols accumulated */
     int      trn1u_ones;     /* GPA-descrambled bits that were 1 */
     int      trn1u_ones_early; /* ones within the first 256 symbols */
-    bool     early_check_due;
     uint32_t gpa_reg;        /* GPA shift register (x^23+x^18+1) */
     int      diff_prev;      /* previous sign bit for differential decode */
     bool     diff_valid;     /* true once diff_prev is initialised */
@@ -205,6 +222,12 @@ void v92_p3_rx_start(v92_p3_rx_t *rx, int first_sample_index);
    NOT a default-to-max: V.92 9.5.1.1.1 makes it skip the MD wait
    entirely and train on TRN1u after the first Ru-to-Ru-bar. */
 void v92_p3_rx_set_md_length(v92_p3_rx_t *rx, int md_symbols);
+
+/* The G.711 law of the codewords: 0 u-law, 1 A-law.  The TRN1u equaliser
+ * needs linear values; told nothing (-1, the default) the receiver trains
+ * one equaliser per law and keeps whichever fits better.  Call after
+ * v92_p3_rx_start. */
+void v92_p3_rx_set_law(v92_p3_rx_t *rx, int law);
 
 /*
  * Feed one raw G.711 codeword (µ-law or A-law; sign bit is MSB in both).

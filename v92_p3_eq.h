@@ -48,8 +48,8 @@
 #include <stdint.h>
 
 #define V92_P3_EQ_MAX_TAPS     63
-#define V92_P3_EQ_MAX_SEED     1024
-#define V92_P3_EQ_HISTORY      8192   /* input samples kept (power of two) */
+#define V92_P3_EQ_MAX_SEED     512
+#define V92_P3_EQ_HISTORY      2048   /* input samples kept (power of two) */
 #define V92_P3_EQ_INTERP_HALF  8      /* windowed-sinc half length */
 #define V92_P3_EQ_AGREE_WINDOW 256
 
@@ -95,6 +95,7 @@ typedef struct {
     double freq;                   /* samples per symbol; ppm*1e-6 */
     double mm_avg;                 /* averaged detector output */
     double centroid_ref;           /* centroid of the seeded taps */
+    int main_tap;                  /* largest seeded tap */
     double dy2_avg;                /* mean (dy/dtau)^2, normalises GRADIENT */
 
     bool seeded;
@@ -146,6 +147,10 @@ int v92_p3_eq_agree_x10(const v92_p3_eq_t *eq);
 double v92_p3_eq_snr_db(const v92_p3_eq_t *eq);
 /* Sign agreement fraction over data-aided symbols from seed_symbols on. */
 double v92_p3_eq_post_seed_agreement(const v92_p3_eq_t *eq);
+/* Index of the largest seeded tap, 0..ntaps-1; ntaps/2 is the centre.  A
+ * least-squares fit absorbs a start that is a few symbols out by moving
+ * this, so it is what says whether the reference is aligned. */
+int v92_p3_eq_main_tap(const v92_p3_eq_t *eq);
 /* Frequency estimate in ppm (positive: the input runs fast). */
 double v92_p3_eq_ppm(const v92_p3_eq_t *eq);
 

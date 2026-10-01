@@ -5,7 +5,6 @@
  */
 
 #include "v92_p3_rx.h"
-#include "p3_demod.h"
 
 #include <math.h>
 #include <string.h>
@@ -54,8 +53,7 @@
 /* Relaxed Ru bounds/lock for the second Ru in soft mode. */
 #define RU_ACCEPT_MIN_SOFT 96
 #define RU2_LOCK_MIN_SOFT  96
-/* TRN1u sanity: descrambled stream should be heavily biased to ones. */
-#define TRN1U_ONES_MIN_PCT 75
+/* Descrambled ones over the first 256 TRN1u symbols: a diagnostic only. */
 #define TRN1U_EARLY_CHECK_T 256
 /* TRN1u start alignment (docs/v92_p3_rx_line_plan.md step 3).  The uR->TRN1u
  * transition is declared from the period-6 run trackers, which need a run of
@@ -71,6 +69,20 @@
 #define TRN1U_ALIGN_SPAN 64
 #define TRN1U_ALIGN_LEN  256
 #define TRN1U_ALIGN_MIN_X1000 300
+/* The TRN1u gate (plan step 5).  It replaces the descrambled-ones check,
+ * which roughly triples each sign error and so read 48% on a loop the
+ * equaliser recovers at 99.9%; that figure is still computed and reported.
+ *
+ * Two parts, because the equaliser cannot police its own start: a 31-tap
+ * least-squares fit absorbs a start a few symbols out by moving its main
+ * tap, and agrees with the reference just as well.  So the start is judged
+ * by the 1-tap correlation score AT THE START IN USE -- peaks measure
+ * 0.57-1.0 on the fixture and every synthetic row, the neighbouring
+ * offsets at most 0.41, and three symbols off at most 0.14 -- and training
+ * by the equaliser's sign agreement over the 256 symbols after its seed,
+ * which are out of sample. */
+#define TRN1U_START_SCORE_MIN_X1000 500
+#define TRN1U_AGREE_MIN_X10 950
 /* V.92 9.5.1.1.3: the digital modem conditions its receiver for Ja only
  * "after receiving the first 2040T of signal TRNlu", and Figure 10 gives
  * TRN1u as >2040T -- so 2040 is guaranteed by the peer, not a target to
@@ -80,8 +92,6 @@
  * Soft mode still relaxes the *lock* thresholds; it must not shorten this. */
 #define TRN1U_MIN_SOFT_T V92_P3_RX_TRN1U_MIN_T
 #define JA_LEAD_SOFT_T 24
-#define TRN1U_DEMOD_MAX_HYP 12
-#define JA_DEMOD_MAX_BITS   4096
 
 /* -------------------------------------------------------------------------
  * Sign bit helpers
@@ -426,7 +436,16 @@ static void trn1u_align(v92_p3_rx_t *rx)
         rx->trn1u_align_offset = best_d;
         rx->trn1u_inverted = best_c < 0;
     }
-    rx->trn1u_start = nominal + rx->trn1u_align_offset;
+    rx->trn1u_start = nominal + rx->trn1u_align_offset + rx->test_start_offset;
+    {
+        int off = rx->trn1u_start - rx->ja_buf_base;
+        int c = 0;
+
+        if (off >= 0 && off + TRN1U_ALIGN_LEN <= rx->ja_buf_fill)
+            for (int k = 0; k < TRN1U_ALIGN_LEN; k++)
+                c += (sign_bit(rx->ja_buf[off + k]) ? 1 : -1)*ref[k];
+        rx->trn1u_start_score_x1000 = abs(c)*1000/TRN1U_ALIGN_LEN;
+    }
 
     /* Replay from the aligned start.  At the true start the zero register is
      * the transmitter's own initial state, so a clean TRN1u descrambles to
@@ -438,361 +457,97 @@ static void trn1u_align(v92_p3_rx_t *rx)
     for (int i = start; i < rx->ja_buf_fill; i++)
         (void) trn1u_process(rx, rx->ja_buf[i]);
 
+    /* The equaliser(s), fed everything buffered so far.  Their sample index
+     * is the buffer's. */
+    for (int law = 0; law < 2; law++) {
+        rx->eq_running[law] = false;
+        if (rx->law >= 0 && law != rx->law)
+            continue;
+        if (!v92_p3_eq_init(&rx->eq[law], NULL))
+            continue;
+        for (int i = 0; i < rx->ja_buf_fill; i++)
+            v92_p3_eq_push(&rx->eq[law], law ? alaw_to_linear(rx->ja_buf[i])
+                                             : ulaw_to_linear(rx->ja_buf[i]));
+        if (v92_p3_eq_start(&rx->eq[law], start))
+            rx->eq_running[law] = true;
+    }
+
     if (p3rx_debug_enabled()) {
         fprintf(stderr,
-                "[P3RX] trn1u aligned start=%d nominal=%d offset=%+d score=%d.%03d%s\n",
+                "[P3RX] trn1u aligned start=%d nominal=%d offset=%+d score=%d.%03d used=%d.%03d%s\n",
                 rx->trn1u_start, nominal, rx->trn1u_align_offset,
                 rx->trn1u_align_score_x1000/1000,
                 rx->trn1u_align_score_x1000%1000,
+                rx->trn1u_start_score_x1000/1000,
+                rx->trn1u_start_score_x1000%1000,
                 rx->trn1u_inverted ? " inverted" : "");
     }
 }
 
-static bool trn1u_ones_ok_at_count(const v92_p3_rx_t *rx, int count)
+/* Feed one codeword to the running equaliser(s) and step them. */
+static void trn1u_eq_feed(v92_p3_rx_t *rx, uint8_t cw)
 {
-    if (rx && count == TRN1U_EARLY_CHECK_T && rx->trn1u_align_done)
-        return rx->trn1u_ones_early*100 >= count*TRN1U_ONES_MIN_PCT;
-    if (!rx || count <= 0 || rx->trn1u_count < count)
-        return false;
-    return (rx->trn1u_ones * 100 >= count * TRN1U_ONES_MIN_PCT);
-}
-
-/* Local-register GPA variant (same taps-5/23 fix as gpa_descramble; the
- * old name _t17_ recorded the wrong tap). */
-static inline int gpa_descramble_t4_bit(uint32_t *reg, int in_bit)
-{
-    int out = (in_bit ^ (int) (*reg >> 22) ^ (int) (*reg >> 4)) & 1;
-    *reg = ((*reg << 1) | (uint32_t) (in_bit & 1)) & 0x7FFFFFU;
-    return out;
-}
-
-static int unpacked_ones_pct(const uint8_t *bits, int count)
-{
-    int ones = 0;
-    if (!bits || count <= 0)
-        return 0;
-    for (int i = 0; i < count; i++)
-        ones += bits[i] ? 1 : 0;
-    return (ones * 100 + count / 2) / count;
-}
-
-static int demod_build_gpa_bits(const p3_result_t *r,
-                                int trn_start_sample,
-                                int map,
-                                int inv,
-                                uint8_t *out_bits,
-                                int out_cap,
-                                int *first_sample_out)
-{
-    int start_sym = -1;
-    int available;
-    int out_n;
-    uint32_t reg = 0;
-
-    if (!r || !r->symbols || r->symbol_count <= 0 || !out_bits || out_cap <= 0)
-        return 0;
-
-    for (int i = 0; i < r->symbol_count; i++) {
-        if (r->symbols[i].sample_index >= trn_start_sample) {
-            start_sym = i;
-            break;
-        }
-    }
-    if (start_sym < 0)
-        return 0;
-
-    available = r->symbol_count - start_sym;
-    if (available <= 23)
-        return 0;
-
-    out_n = available - 23;
-    if (out_n > out_cap)
-        out_n = out_cap;
-
-    for (int i = 0; i < 23; i++) {
-        int d = r->symbols[start_sym + i].dibit & 3;
-        int raw = (map == 0) ? ((d >> 1) & 1) : (d & 1);
-        raw ^= inv;
-        (void) gpa_descramble_t4_bit(&reg, raw);
-    }
-
-    for (int i = 0; i < out_n; i++) {
-        int d = r->symbols[start_sym + 23 + i].dibit & 3;
-        int raw = (map == 0) ? ((d >> 1) & 1) : (d & 1);
-        raw ^= inv;
-        out_bits[i] = (uint8_t) gpa_descramble_t4_bit(&reg, raw);
-    }
-
-    if (first_sample_out)
-        *first_sample_out = r->symbols[start_sym + 23].sample_index;
-    return out_n;
-}
-
-static int unpacked_slice_pack(const uint8_t *src_bits,
-                               int src_count,
-                               int off,
-                               uint8_t *packed_out,
-                               int packed_cap_bytes)
-{
-    int nbits;
-    int nbytes;
-
-    if (!src_bits || !packed_out || packed_cap_bytes <= 0 || off < 0 || off >= src_count)
-        return 0;
-    nbits = src_count - off;
-    nbytes = (nbits + 7) / 8;
-    if (nbytes > packed_cap_bytes)
-        nbytes = packed_cap_bytes;
-    memset(packed_out, 0, (size_t) nbytes);
-
-    for (int i = 0; i < nbytes * 8 && (off + i) < src_count; i++) {
-        if (src_bits[off + i])
-            packed_out[i / 8] |= (uint8_t) (1U << (i % 8));
-    }
-    return nbytes * 8;
-}
-
-static bool demod_ja_search(v92_p3_rx_t *rx, ja_dil_decode_t *out)
-{
-    int eval_total;
-    p3_hypothesis_t hyps[TRN1U_DEMOD_MAX_HYP];
-    bool found = false;
-    ja_dil_decode_t best;
-    int best_score = -1000000;
-    int considered = 0;
-    int strict_hits = 0;
-
-    if (!rx || !out)
-        return false;
-    if (rx->ja_buf_fill < 24 + V92_P3_RX_TRN1U_MIN_T + 206)
-        return false;
-
-    memset(&best, 0, sizeof(best));
-    eval_total = rx->ja_buf_fill;
-
     for (int law = 0; law < 2; law++) {
-        int16_t *lin = (int16_t *) malloc((size_t) eval_total * sizeof(int16_t));
-        int count;
-
-        if (!lin)
-            break;
-        for (int i = 0; i < eval_total; i++) {
-            uint8_t cw = rx->ja_buf[i];
-            lin[i] = (int16_t) (law ? alaw_to_linear(cw) : ulaw_to_linear(cw));
-        }
-
-        count = p3_scan_all_hypotheses(lin,
-                                       eval_total,
-                                       rx->ja_buf_base,
-                                       8000,
-                                       hyps,
-                                       TRN1U_DEMOD_MAX_HYP);
-
-        for (int hi = 0; hi < count; hi++) {
-            p3_result_t *r = p3_demod_run(lin,
-                                          eval_total,
-                                          rx->ja_buf_base,
-                                          hyps[hi].baud_code,
-                                          hyps[hi].carrier_sel,
-                                          8000);
-            if (!r)
-                continue;
-
-            for (int map = 0; map < 2; map++) {
-                for (int inv = 0; inv < 2; inv++) {
-                    uint8_t bits[JA_DEMOD_MAX_BITS];
-                    uint8_t packed[512];
-                    int bit_count;
-                    int bit_base_sample = -1;
-                    int trn_eval_bits;
-                    int trn_pct;
-                    int anchor_start;
-                    int anchor_end;
-                    int variant_hits = 0;
-                    double sym_ratio;
-                    int expected_trn_bits;
-                    int lead_bits;
-
-                    bit_count = demod_build_gpa_bits(r,
-                                                     rx->trn1u_start,
-                                                     map,
-                                                     inv,
-                                                     bits,
-                                                     JA_DEMOD_MAX_BITS,
-                                                     &bit_base_sample);
-                    sym_ratio = (eval_total > 0)
-                        ? ((double) r->symbol_count / (double) eval_total)
-                        : 0.40;
-                    if (sym_ratio < 0.20)
-                        sym_ratio = 0.20;
-                    if (sym_ratio > 0.60)
-                        sym_ratio = 0.60;
-                    expected_trn_bits = (int) lround((double) (V92_P3_RX_TRN1U_MIN_T - 23) * sym_ratio);
-                    lead_bits = (int) lround((double) V92_P3_RX_JA_LEAD_T * sym_ratio);
-                    if (expected_trn_bits > bit_count - (24 + 206))
-                        expected_trn_bits = bit_count - (24 + 206);
-                    if (expected_trn_bits < 128)
-                        expected_trn_bits = 128;
-
-                    if (p3rx_debug_enabled() && hi == 0 && map == 0 && inv == 0) {
-                        int s0 = (r->symbol_count > 0) ? r->symbols[0].sample_index : -1;
-                        int s1 = (r->symbol_count > 0) ? r->symbols[r->symbol_count - 1].sample_index : -1;
-                        fprintf(stderr,
-                                "[P3RX] demod_ja hyp0 sym_count=%d span=%d..%d bit_count=%d exp_trn=%d lead=%d base_bit_sample=%d\n",
-                                r->symbol_count, s0, s1, bit_count,
-                                expected_trn_bits, lead_bits, bit_base_sample);
-                    }
-
-                    if (bit_count < (128 + 24 + 206))
-                        continue;
-                    considered++;
-
-                    trn_eval_bits = expected_trn_bits;
-                    if (trn_eval_bits > bit_count)
-                        trn_eval_bits = bit_count;
-                    trn_pct = unpacked_ones_pct(bits, trn_eval_bits);
-                    if (trn_pct < TRN1U_ONES_MIN_PCT)
-                        continue;
-
-                    anchor_start = expected_trn_bits - 64;
-                    if (anchor_start < 0)
-                        anchor_start = 0;
-                    anchor_end = expected_trn_bits + lead_bits + 128;
-                    if (anchor_end > bit_count - 24 - 206)
-                        anchor_end = bit_count - 24 - 206;
-
-                    for (int anchor = anchor_start; anchor <= anchor_end; anchor++) {
-                        v90_dil_desc_t desc;
-                        v90_dil_analysis_t analysis;
-                        v92_ja_parse_meta_t meta;
-                        int desc_off = anchor + 24;
-                        int packed_bits;
-                        int score = 0;
-                        bool preamble_ok = true;
-
-                        for (int i = 0; i < 24; i++) {
-                            if (!bits[anchor + i]) {
-                                preamble_ok = false;
-                                break;
-                            }
-                        }
-                        if (!preamble_ok)
-                            continue;
-
-                        packed_bits = unpacked_slice_pack(bits,
-                                                          bit_count,
-                                                          desc_off,
-                                                          packed,
-                                                          (int) sizeof(packed));
-                        if (packed_bits < 206)
-                            continue;
-
-                        memset(&meta, 0, sizeof(meta));
-                        if (!v92_parse_ja_descriptor_strict(&desc,
-                                                            packed,
-                                                            packed_bits,
-                                                            &meta))
-                            continue;
-                        if (!meta.is_v92)
-                            continue;
-                        variant_hits++;
-                        strict_hits++;
-                        if (!v90_analyse_dil_descriptor(&desc, &analysis))
-                            continue;
-
-                        score = (meta.is_v92 ? 2000 : 1000)
-                                + (int) analysis.unique_train_u * 100
-                                + (int) analysis.used_uchords * 20
-                                - (int) analysis.impairment_score * 5;
-                        if (score > best_score) {
-                            memset(&best, 0, sizeof(best));
-                            best.ok = true;
-                            best.soft_lock = false;
-                            best.calling_party = true;
-                            best.u_info = 0;
-                            best.start_sample = bit_base_sample + desc_off;
-                            best.invert_sign = inv ? true : false;
-                            best.parsed_v92 = meta.is_v92;
-                            best.descriptor_bits = meta.bit_len;
-                            best.desc = desc;
-                            best.analysis = analysis;
-                            best_score = score;
-                            found = true;
-                        }
-                    }
-
-                    if (variant_hits == 0) {
-                        int desc_start = expected_trn_bits - 64;
-                        int desc_end = expected_trn_bits + lead_bits + 128;
-                        if (desc_start < 0)
-                            desc_start = 0;
-                        if (desc_end > bit_count - 206)
-                            desc_end = bit_count - 206;
-                        for (int desc_off = desc_start; desc_off <= desc_end; desc_off++) {
-                            v90_dil_desc_t desc;
-                            v90_dil_analysis_t analysis;
-                            v92_ja_parse_meta_t meta;
-                            int packed_bits;
-                            int score;
-
-                            packed_bits = unpacked_slice_pack(bits,
-                                                              bit_count,
-                                                              desc_off,
-                                                              packed,
-                                                              (int) sizeof(packed));
-                            if (packed_bits < 206)
-                                continue;
-                            memset(&meta, 0, sizeof(meta));
-                            if (!v92_parse_ja_descriptor_strict(&desc,
-                                                                packed,
-                                                                packed_bits,
-                                                                &meta))
-                                continue;
-                            if (!meta.is_v92)
-                                continue;
-                            variant_hits++;
-                            strict_hits++;
-                            if (!v90_analyse_dil_descriptor(&desc, &analysis))
-                                continue;
-                            score = (meta.is_v92 ? 2000 : 1000)
-                                    + (int) analysis.unique_train_u * 100
-                                    + (int) analysis.used_uchords * 20
-                                    - (int) analysis.impairment_score * 5;
-                            if (score > best_score) {
-                                memset(&best, 0, sizeof(best));
-                                best.ok = true;
-                                best.soft_lock = false;
-                                best.calling_party = true;
-                                best.u_info = 0;
-                                best.start_sample = bit_base_sample + desc_off;
-                                best.invert_sign = inv ? true : false;
-                                best.parsed_v92 = meta.is_v92;
-                                best.descriptor_bits = meta.bit_len;
-                                best.desc = desc;
-                                best.analysis = analysis;
-                                best_score = score;
-                                found = true;
-                            }
-                        }
-                    }
-                }
-            }
-
-            p3_result_free(r);
-        }
-        free(lin);
+        if (!rx->eq_running[law])
+            continue;
+        v92_p3_eq_push(&rx->eq[law], law ? alaw_to_linear(cw) : ulaw_to_linear(cw));
+        while (v92_p3_eq_step(&rx->eq[law]))
+            ;
     }
+}
 
+/* Plan step 5's gate.  Returns 0 while undecided, 1 passed, -1 rejected
+ * (with the reject recorded through *reason, *m0). */
+static int trn1u_gate(v92_p3_rx_t *rx, v92_p3_rx_reject_t *reason, int *m0)
+{
+    int best = -1;
+
+    if (rx->eq_gate_done)
+        return 1;
+    if (rx->trn1u_start_score_x1000 < TRN1U_START_SCORE_MIN_X1000) {
+        *reason = V92_P3_RX_REJECT_TRN1U_START;
+        *m0 = rx->trn1u_start_score_x1000;
+        return -1;
+    }
+    for (int law = 0; law < 2; law++) {
+        if (!rx->eq_running[law])
+            continue;
+        if (rx->eq[law].k < rx->eq[law].cfg.seed_symbols + V92_P3_EQ_AGREE_WINDOW)
+            return 0;
+        /* Unknown law: the better fit is the right expansion. */
+        if (best < 0 || v92_p3_eq_snr_db(&rx->eq[law]) > v92_p3_eq_snr_db(&rx->eq[best]))
+            best = law;
+    }
+    if (best < 0) {
+        *reason = V92_P3_RX_REJECT_TRN1U_UNTRAINED;
+        *m0 = 0;
+        return -1;
+    }
+    rx->eq_agree_x10 = v92_p3_eq_agree_x10(&rx->eq[best]);
     if (p3rx_debug_enabled()) {
         fprintf(stderr,
-                "[P3RX] demod_ja_search considered=%d strict_hits=%d found=%d best_score=%d\n",
-                considered, strict_hits, found ? 1 : 0, best_score);
+                "[P3RX] trn1u gate law=%s agree=%d.%d%% snr=%.1fdB main_tap=%d "
+                "start_score=%d ones256=%d%%\n",
+                best ? "alaw" : "ulaw", rx->eq_agree_x10/10, rx->eq_agree_x10%10,
+                v92_p3_eq_snr_db(&rx->eq[best]), v92_p3_eq_main_tap(&rx->eq[best]),
+                rx->trn1u_start_score_x1000,
+                (rx->trn1u_ones_early*100 + TRN1U_EARLY_CHECK_T/2)/TRN1U_EARLY_CHECK_T);
     }
-
-    if (found)
-        *out = best;
-    return found;
+    if (rx->eq_agree_x10 < TRN1U_AGREE_MIN_X10) {
+        *reason = V92_P3_RX_REJECT_TRN1U_UNTRAINED;
+        *m0 = rx->eq_agree_x10;
+        return -1;
+    }
+    rx->eq_running[!best] = false;
+    rx->eq_law = best;
+    rx->eq_gate_done = true;
+    return 1;
 }
+
+
+
+
+
 
 /* -------------------------------------------------------------------------
  * Ja codeword buffer
@@ -880,7 +635,11 @@ static void enter_trn1u(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
     rx->trn1u_align_score_x1000 = 0;
     rx->trn1u_inverted = false;
     rx->trn1u_ones_early = 0;
-    rx->early_check_due = false;
+    rx->trn1u_start_score_x1000 = 0;
+    rx->eq_running[0] = rx->eq_running[1] = false;
+    rx->eq_gate_done = false;
+    rx->eq_law = -1;
+    rx->eq_agree_x10 = 0;
     /* Enough history for the alignment to look TRN1U_ALIGN_SPAN symbols back,
      * plus the 24 the Ja search's differential/GPA decode reaches behind. */
     copied = prehist_copy_tail(rx, TRN1U_ALIGN_SPAN + 24, rx->ja_buf,
@@ -982,12 +741,14 @@ static bool run_ja_search(v92_p3_rx_t *rx, bool force_hard_min)
         return true;
     }
 
-    /* The equalizing fallback needs the original TRN1u training history. */
-    if (rx->ja_buf_base <= rx->trn1u_start
-        && demod_ja_search(rx, &rx->ja_result) && rx->ja_result.parsed_v92) {
-        return true;
-    }
-
+    /* There used to be an "equalizing" fallback here, demod_ja_search():
+     * p3_demod, a V.34 passband demodulator, over 12 hypotheses x 2 laws on
+     * this baseband PCM, every 144 symbols.  It never decoded anything --
+     * 94 calls and no success across v92_startup_test -- and once the TRN1u
+     * gate (plan step 5) lets a real loop through to here, it costs ~33 s of
+     * CPU per 1.5 s of audio, the same shape as the p3_demod Ja scanner
+     * that made pjmedia drop frames live.  Ja from equalised decisions is
+     * plan step 6. */
     p3rx_set_reject(rx,
                     V92_P3_RX_REJECT_JA_SEARCH_FAIL,
                     rx->trn1u_start + rx->trn1u_count,
@@ -1023,11 +784,19 @@ void v92_p3_rx_init(v92_p3_rx_t *rx)
     rx->ur2_start   = -1;  rx->ur2_end   = -1;
     rx->trn1u_start = -1;
     rx->arm_sample_min = 0;
+    rx->law = -1;
+    rx->eq_law = -1;
     rx->last_reject = V92_P3_RX_REJECT_NONE;
     rx->last_reject_sample = -1;
     rx->last_reject_metric0 = 0;
     rx->last_reject_metric1 = 0;
     p6_reset(rx);
+}
+
+void v92_p3_rx_set_law(v92_p3_rx_t *rx, int law)
+{
+    if (rx)
+        rx->law = (law == 0 || law == 1) ? law : -1;
 }
 
 void v92_p3_rx_set_md_length(v92_p3_rx_t *rx, int md_symbols)
@@ -1372,49 +1141,42 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
          * arrived, before anything judges TRN1u. */
         if (!rx->trn1u_align_done
             && sample_index >= rx->trn1u_nominal_start + TRN1U_ALIGN_SPAN
-                               + TRN1U_ALIGN_LEN - 1) {
+                               + TRN1U_ALIGN_LEN - 1)
             trn1u_align(rx);
-            if (rx->trn1u_count >= TRN1U_EARLY_CHECK_T)
-                rx->early_check_due = true;
-        }
+        else if (rx->trn1u_align_done)
+            trn1u_eq_feed(rx, codeword);
 
         /*
-         * TRN1u (V.92 §8.5.7) is an all-ones training source through the GPA
-         * scrambler with absolute signs. If descrambled bits are not strongly
-         * one-biased, this lock is likely wrong.  m0 is the ones percentage,
-         * m1 the start alignment's correlation score in per mille.
+         * The TRN1u gate (plan step 5): the start by its correlation score,
+         * training by equalised sign agreement with the 8.5.7 reference.
          *
-         * There used to be an "equalised" fallback here: p3_demod, a V.34
-         * passband demodulator, run over 24 hypotheses.  It cannot apply to
-         * baseband PCM, and it never ran -- it needed one more codeword of
-         * history than enter_trn1u() ever buffered, so it returned -1 on
-         * every call.  The deeper alignment history would have woken it up,
-         * and it then "passed" 73% on the fixture's false lock at 18222.
-         * Removed; plan step 5 replaces this metric.
+         * It replaces a check on GPA-descrambled ones, which a self-
+         * synchronising descrambler makes roughly three times worse than
+         * the sign error itself: the r4 loop read 48% there against a 75%
+         * gate while the equaliser recovers 99.9% of its signs.  The ones
+         * figure is still computed and goes out as m1 of a reject.
+         *
+         * There used to be an "equalised" fallback here as well: p3_demod,
+         * a V.34 passband demodulator, run over 24 hypotheses on baseband
+         * PCM.  It never ran -- one codeword short of history every call --
+         * and woken up it "passed" the fixture's false lock at 73%.
          */
-        if (rx->early_check_due) {
-            rx->early_check_due = false;
-            if (!trn1u_ones_ok_at_count(rx, TRN1U_EARLY_CHECK_T)) {
-                /* Ones over the first 256 symbols from the aligned start. */
-                int raw_pct = (rx->trn1u_ones_early*100 + TRN1U_EARLY_CHECK_T/2)
-                            / TRN1U_EARLY_CHECK_T;
+        if (rx->trn1u_align_done && !rx->eq_gate_done) {
+            v92_p3_rx_reject_t reason = V92_P3_RX_REJECT_NONE;
+            int m0 = 0;
+
+            if (trn1u_gate(rx, &reason, &m0) < 0) {
+                int ones_pct = (rx->trn1u_ones_early*100 + TRN1U_EARLY_CHECK_T/2)
+                             / TRN1U_EARLY_CHECK_T;
 
                 p6_rehunt_from_current(rx, codeword, sample_index,
-                                       V92_P3_RX_REJECT_TRN1U_ONES_LOW,
-                                       raw_pct, rx->trn1u_align_score_x1000);
+                                       reason, m0, ones_pct);
                 break;
             }
         }
-        if (rx->trn1u_count == trn_min_t
-            && !trn1u_ones_ok_at_count(rx, trn_min_t)) {
-            int raw_pct = (rx->trn1u_ones*100 + rx->trn1u_count/2)
-                        / rx->trn1u_count;
-
-            p6_rehunt_from_current(rx, codeword, sample_index,
-                                   V92_P3_RX_REJECT_TRN1U_ONES_LOW,
-                                   raw_pct, rx->trn1u_align_score_x1000);
-            break;
-        }
+        /* Ja may not be searched for until the gate has passed. */
+        if (!rx->eq_gate_done)
+            goto trn1u_wait;
 
         if (rx->ja_buf_fill >= V92_P3_RX_JA_BUF) {
             p3rx_set_reject(rx,
@@ -1430,7 +1192,7 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
          * trn1u_start, we should have enough for the Ja search. */
         if (rx->trn1u_count >= trn_min_t + ja_lead_t)
             rx->state = V92_P3_RX_JA_SEARCH;
-
+trn1u_wait:
         break;
     }
 
@@ -1536,6 +1298,8 @@ const char *v92_p3_rx_reject_name(v92_p3_rx_reject_t r)
     case V92_P3_RX_REJECT_UR_MISMATCH:   return "ur_mismatch";
     case V92_P3_RX_REJECT_MD_TIMEOUT:    return "md_timeout";
     case V92_P3_RX_REJECT_TRN1U_ONES_LOW:return "trn1u_ones_low";
+    case V92_P3_RX_REJECT_TRN1U_START:   return "trn1u_start";
+    case V92_P3_RX_REJECT_TRN1U_UNTRAINED:return "trn1u_untrained";
     case V92_P3_RX_REJECT_JA_BUFFER_FULL:return "ja_buffer_full";
     case V92_P3_RX_REJECT_JA_SEARCH_FAIL:return "ja_search_fail";
     case V92_P3_RX_REJECT_JA_SOFT_ONLY:  return "ja_soft_only";

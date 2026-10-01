@@ -678,7 +678,7 @@ v92_upstream_data.o: v92_upstream_data.c v92_upstream_data.h
 v92_upstream_rx.o: v92_upstream_rx.c v92_upstream_rx.h v92_upstream_data.h
 tools/v92_trn2u_replay.o: tools/v92_trn2u_replay.c v92_trn2u.h v92_cp_rx.h
 v92_ja_decode.o:  v92_ja_decode.c  v92_ja_decode.h v90.h
-v92_p3_rx.o:      v92_p3_rx.c      v92_p3_rx.h v92_ja_decode.h v90.h p3_demod.h
+v92_p3_rx.o:      v92_p3_rx.c      v92_p3_rx.h v92_p3_eq.h v92_ja_decode.h v90.h
 v92_p3_eq.o:      v92_p3_eq.c      v92_p3_eq.h
 p3_demod.o:       p3_demod.c       p3_demod.h
 v34_phase2_decode.o: v34_phase2_decode.c v34_phase2_decode.h v90.h v91.h

@@ -72,6 +72,7 @@ typedef struct {
     double snr_db;
     double ppm;
     int worst_x10;     /* lowest 256-symbol agreement seen after the seed */
+    int main_tap;
 } eq_result_t;
 
 static double env_or(const char *name, double fallback)
@@ -125,6 +126,7 @@ static eq_result_t eq_run(const uint8_t *cw, int count, bool alaw, int start)
     r.agree = v92_p3_eq_post_seed_agreement(&eq);
     r.snr_db = v92_p3_eq_snr_db(&eq);
     r.ppm = v92_p3_eq_ppm(&eq);
+    r.main_tap = v92_p3_eq_main_tap(&eq);
     return r;
 }
 
@@ -134,8 +136,48 @@ static void eq_print(const eq_result_t *r)
         printf("eq did not run");
         return;
     }
-    printf("eq %6.2f%% (worst 256: %5.1f%%) %5.1f dB %+6.0f ppm",
-           100.0*r->agree, r->worst_x10/10.0, r->snr_db, r->ppm);
+    printf("eq %6.2f%% (worst 256: %5.1f%%) %5.1f dB %+6.0f ppm main tap %d",
+           100.0*r->agree, r->worst_x10/10.0, r->snr_db, r->ppm, r->main_tap);
+}
+
+/* Plan step 5's control: the same fixture with the TRN1u start forced three
+ * symbols late must be refused by the gate's start check.  The equaliser
+ * alone would not refuse it -- a 31-tap fit absorbs the shift. */
+static int fixture_wrong_start(const char *path)
+{
+    unsigned char cw[FIXTURE_BYTES];
+    FILE *f = fopen(path, "rb");
+    v92_p3_rx_t rx;
+    v92_p3_rx_reject_t reason = V92_P3_RX_REJECT_NONE;
+    int m0 = 0;
+    int m1 = 0;
+
+    if (!f || fread(cw, 1, sizeof(cw), f) != sizeof(cw)) {
+        if (f)
+            fclose(f);
+        return 1;
+    }
+    fclose(f);
+    v92_p3_rx_init(&rx);
+    v92_p3_rx_start(&rx, ARM_SAMPLE);
+    v92_p3_rx_set_md_length(&rx, 0);
+    v92_p3_rx_set_law(&rx, 0);
+    rx.test_start_offset = 3;
+    for (int i = ARM_SAMPLE; i < FIXTURE_BYTES; i++) {
+        (void)v92_p3_rx_feed(&rx, cw[i], i);
+        if (rx.trn1u_align_done && rx.state != V92_P3_RX_TRN1U) {
+            reason = v92_p3_rx_last_reject(&rx, NULL, &m0, &m1);
+            break;
+        }
+    }
+    printf("  start + 3: %s (m0=%d m1=%d), gate %s\n",
+           v92_p3_rx_reject_name(reason), m0, m1,
+           rx.eq_gate_done ? "PASSED -- WRONG" : "refused");
+    if (rx.eq_gate_done || reason != V92_P3_RX_REJECT_TRN1U_START) {
+        printf("FAIL: the gate accepted a TRN1u start three symbols out\n");
+        return 1;
+    }
+    return 0;
 }
 
 static int fixture_row(const char *path, bool expect_failure)
@@ -155,6 +197,7 @@ static int fixture_row(const char *path, bool expect_failure)
     bool aligned;
     eq_result_t eqr;
     bool trained;
+    int gate = -1;       /* first TRN1u: 1 passed the gate, 0 rejected */
 
     printf("fixture %s\n", path);
     f = fopen(path, "rb");
@@ -186,12 +229,19 @@ static int fixture_row(const char *path, bool expect_failure)
     v92_p3_rx_init(&rx);
     v92_p3_rx_start(&rx, ARM_SAMPLE);
     v92_p3_rx_set_md_length(&rx, 0);   /* INFO1a reported MD=0 */
+    v92_p3_rx_set_law(&rx, 0);         /* the call was PCMU */
     for (int i = ARM_SAMPLE; i < (int)len; i++) {
         int state;
 
         (void)v92_p3_rx_feed(&rx, cw[i], i);
         if (trn1u_start < 0 && rx.trn1u_align_done)
             trn1u_start = rx.trn1u_start;
+        if (gate < 0 && rx.trn1u_align_done) {
+            if (rx.eq_gate_done)
+                gate = 1;
+            else if (rx.state != V92_P3_RX_TRN1U)
+                gate = 0;
+        }
         state = (int)v92_p3_rx_get_state(&rx);
         if (state != last_state) {
             printf("  sample %6d (%6.3f s) %s\n", i, i/8000.0,
@@ -228,6 +278,11 @@ static int fixture_row(const char *path, bool expect_failure)
            EQ_FIXTURE_BOUND_DB - 2.0, trained ? "" : "  FAIL");
     if (!trained) {
         printf("FAIL: the TRN1u equaliser does not train on the fixture\n");
+        return 1;
+    }
+    printf("  TRN1u gate (plan step 5): %s\n", gate == 1 ? "passed" : "REJECTED");
+    if (gate != 1) {
+        printf("FAIL: the fixture's TRN1u does not pass the gate\n");
         return 1;
     }
 
@@ -269,8 +324,9 @@ static int fixture_row(const char *path, bool expect_failure)
                RU1_EXPECTED, UR1_EXPECTED, POSITION_SLACK);
         return 1;
     }
-    printf("PASS (expected failure): Ru/Ru-bar acquired, TRN1u not "
-           "trained, no Ja -- docs/v92_p3_rx_line_plan.md\n");
+    printf("PASS (expected failure): Ru/Ru-bar acquired, TRN1u trained and "
+           "through the gate, no Ja from raw signs -- "
+           "docs/v92_p3_rx_line_plan.md step 6\n");
     return 0;
 }
 
@@ -305,18 +361,21 @@ typedef struct {
 
 static const syn_row_t syn_rows[] = {
     /* The raw sign slicer survives noise on its own; with the r4 loop's ISI
-     * it fails exactly as the real recording does (trn1u_ones_low).  Rows
+     * its raw-sign Ja search fails, as on the real recording.  Rows
      * that move the sampling instant without the r4 taps (which hold the
      * real codec's filter) get the A/D's anti-alias filter (see
      * v92_line_channel.h) -- without it they modelled an A/D that folds
      * the analogue modem's images above 4 kHz back in, and "passed" only
      * because that fold is a fixed map while the sampling is synchronous.
-     * With it a fractional phase alone defeats the raw slicer too. */
+     * With it a fractional phase alone defeats the raw slicer's Ja search
+     * too.  The +200 ppm one decodes Ja from raw signs; it used to be
+     * stopped only by the descrambled-ones TRN1u check (65%), which plan
+     * step 5 replaced. */
     /* name                          law    isi    phase  ppm    snr  aa today */
     {"ideal u-law",                  false, false, 0.00,    0.0,  0.0, false, true},
     {"ideal A-law",                  true,  false, 0.00,    0.0,  0.0, false, true},
     {"phase 0.5 only, A/D filter",   false, false, 0.50,    0.0,  0.0, true,  false},
-    {"+200 ppm only, A/D filter",    false, false, 0.00,  200.0,  0.0, true,  false},
+    {"+200 ppm only, A/D filter",    false, false, 0.00,  200.0,  0.0, true,  true},
     {"noise 25 dB only",             false, false, 0.00,    0.0, 25.0, false, true},
     {"r4 loop",                      false, true,  0.00,    0.0,  0.0, false, false},
     {"r4 loop, phase 0.25",          false, true,  0.25,    0.0,  0.0, false, false},
@@ -396,6 +455,7 @@ static bool syn_run(const syn_row_t *row, int *ja_sample, int *rejects,
     v92_p3_rx_init(&rx);
     v92_p3_rx_start(&rx, 0);
     v92_p3_rx_set_md_length(&rx, 0);
+    v92_p3_rx_set_law(&rx, row->alaw);
     *ja_sample = -1;
     *trn1u_start = -1;
     /* A dumped row runs to the end so the whole of Ja is recorded. */
@@ -525,6 +585,7 @@ int main(int argc, char **argv)
             path = argv[i];
     }
     rc = fixture_row(path, expect_failure);
+    rc |= fixture_wrong_start(path);
     rc |= synthetic_rows(expect_failure);
     return rc;
 }

@@ -6,7 +6,7 @@ modem is on a real 2-wire loop behind a single codec (VG224 -> SIP -> us),
 so that 9.5.1.1.3 releases Sd. On the byte-exact SIP loopback it must behave
 exactly as it does today.
 
-Status: steps 1-4 done, 2026-10-01. Each step lists what it changes, how it is
+Status: steps 1-5 done, 2026-10-01. Each step lists what it changes, how it is
 measured, and the result that completes it. Do the steps in order: each one
 produces the instrument the next one is graded by.
 
@@ -302,7 +302,7 @@ plus each `*_OBJS` that needs it).
 - Experiment knobs, test harness only: `V92_P3_EQ_TAPS/MU/KP/KI/AVG/DET/
   TIMING/FIXPPM/RUN_TO/TRACE`, plus `V92_P3_LINE_ROW=<n>` for one row.
 
-### 5. Replace the TRN1u lock metric
+### 5. Replace the TRN1u lock metric -- DONE 2026-10-01
 
 `trn1u_ones_low` runs descrambled ones, a metric that roughly triples the
 error rate.
@@ -313,6 +313,53 @@ error rate.
 - Report the reject with both numbers so the probe says which one failed.
 - **Done when:** the fixture passes the gate, the ideal rows still pass,
   and a deliberately wrong start (start + 3) fails it.
+
+**Result.** The receiver now runs `v92_p3_eq` from the aligned start, and
+the gate has two parts.
+
+- **The start: the 1-tap correlation score at the start actually in use
+  must be >= 0.50** (`trn1u_start`, m0 = the score in per mille).
+  - **The equaliser cannot police its own start.** A 31-tap least-squares
+    fit absorbs a start three symbols out by moving its main tap, and agrees
+    with the reference just as well. So "start + 3 fails" cannot come from
+    agreement.
+  - Nor can the main tap's position carry it: on the fixture's correct
+    start it sits at 13, not 15, because the real loop's inverse puts its
+    largest tap two symbols early.
+  - What separates the cases is the correlation itself. Peaks measure
+    0.57-1.0 on the fixture and every row, neighbours at most 0.41, and
+    three symbols off at most 0.14.
+- **Training: sign agreement >= 95% over the 256 symbols after the seed**,
+  which are out of sample (`trn1u_untrained`, m0 = agreement x10).
+- **Both rejects carry the descrambled-ones percentage as m1, which is now
+  a diagnostic only.**
+- New `v92_p3_rx_set_law()`. Told nothing, the receiver trains one
+  equaliser per law and keeps the better fit. On two-level TRN1u the two
+  laws fit about equally, so callers that know the law (the engine) should
+  set it.
+- **Results:**
+  - The fixture passes: 100% agreement after the seed, start score 0.734,
+    ones 69%.
+  - **Start + 3 is refused, `trn1u_start` at 0.140**, by a test hook
+    (`test_start_offset`, zero in every real call). The test asserts both.
+  - Ideal rows still decode Ja.
+  - Every r4 loop row now passes TRN1u (ones 65-70%, all of which the old
+    75% check rejected) and stops at the raw-sign Ja search. That is step 6.
+  - "+200 ppm only, A/D filter" now **decodes Ja**: its raw signs always
+    sufficed for Ja, and only the ones check stopped it.
+- **Removed: `demod_ja_search()`, the "equalizing" Ja fallback**, plus the
+  four helpers only it used and `v92_p3_rx.c`'s include of `p3_demod.h`.
+  - It ran p3_demod, a V.34 passband demodulator, over 12 hypotheses and
+    both laws on baseband PCM, every 144 symbols.
+  - Across `v92_startup_test` it ran 94 times and **never decoded anything**.
+    Nothing in `docs/` credits it with a decode.
+  - Once the gate let a real loop reach the Ja search, it cost **33 s of CPU
+    for the fixture's 1.5 s of audio**. That is the shape of the p3_demod Ja
+    scanner that made pjmedia drop received frames live
+    (`docs/v90_rasfinder_phase4.md`).
+  - With it gone the whole line test runs in 0.5 s.
+- Unchanged: `v92_startup_test` 51/51, `vpcm_loopback_test --all-tests`,
+  `v92_proc_eval_test`. The server links.
 
 ### 6. Decode Ja from equalised decisions
 

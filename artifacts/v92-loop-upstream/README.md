@@ -57,9 +57,12 @@ Measured positions (fixture sample index):
 
 Results:
 
-- **Today's receiver**
+- **The receiver as recorded** (before `docs/v92_p3_rx_line_plan.md` steps
+  3-5)
   - Rejects TRN1u with `trn1u_ones_low` (48% against a 75% gate), then
     rehunts.
+  - Since step 5 it finds TRN1u at 5292, passes the equalised gate and stops
+    at the raw-sign Ja search instead.
   - Against the known reference the raw sign is wrong 14% of the time.
   - A 41-tap least-squares equaliser takes that to 0.17%, held out.
 - **Equalised-sign control.**
