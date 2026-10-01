@@ -46,6 +46,7 @@
 #include "v90_analogue_rx.h"
 #include "v90_analogue_linear.h"
 #include "v90_analogue_fse.h"
+#include "v90_analogue_sd.h"
 #include "v90_sounder.h"
 #include "v90_dil_presets.h"
 
@@ -2176,10 +2177,188 @@ static void test_phase4_foreign_downstream(void)
     free(stream);
 }
 
+/* Independently exercise the Jd grid handoff using foreign DS0 signs.
+ * Destroy the first frame, invert the whole channel, and demand a later
+ * CRC-valid frame at its own boundary, with its real Table 13 fields. */
+static void test_line_jd_alignment(void)
+{
+    long len;
+    uint8_t *wire = read_file(fixtures[0].path, &len);
+    v90_analogue_rx_config_t cfg = {0};
+    cfg.law = V90_LAW_ULAW; cfg.u_info = 48;
+    if (!wire) { CHECK(false, "missing foreign Jd fixture"); return; }
+    v90_analogue_rx_t *exact = v90_analogue_rx_init(&cfg);
+    for (long i = 0; i < len && v90_analogue_rx_jd_frames(exact) == 0; i++)
+        v90_analogue_rx_put(exact, wire + i, 1);
+    long trn = v90_analogue_rx_trn1d_start(exact);
+    long jd = v90_analogue_rx_jd_start(exact);
+    uint8_t expected[72];
+    memcpy(expected, v90_analogue_rx_jd_bits(exact), 72);
+    CHECK(trn >= 0 && jd > trn, "foreign fixture has TRN1d and Jd");
+    cfg.zero_slot_fraction = 0.25; cfg.w_slot_tolerance = 0.35;
+    for (int invert = 0; invert < 2; invert++) {
+        v90_analogue_rx_t *rx = v90_analogue_rx_init(&cfg);
+        CHECK(v90_analogue_rx_line_stage(rx, 2) == 0,
+              "TRN1d cannot bypass measured Sd reversal");
+        CHECK(v90_analogue_rx_line_stage(rx, 0) == V90A_RX_EVENT_SD,
+              "line acquires Sd without claiming slot alignment");
+        CHECK(v90_analogue_rx_line_stage(rx, 1) == V90A_RX_EVENT_SD_BAR,
+              "line reversal releases Ja");
+        CHECK(v90_analogue_rx_line_stage(rx, 2) == V90A_RX_EVENT_TRN1D,
+              "line enters CMA training");
+        for (long i = trn; i < jd + 6*72 && i < len; i++) {
+            uint8_t c = wire[i] ^ (invert ? 0x80 : 0);
+            if (i == jd || i == jd + 30 || i == jd + 50) c ^= 0x80;
+            v90_analogue_rx_put(rx, &c, 1);
+        }
+        long at = v90_analogue_rx_jd_start(rx);
+        CHECK(v90_analogue_rx_jd_frames(rx) >= 2,
+              "later repeated Jd frames survive a damaged first frame (invert=%d)", invert);
+        CHECK(at >= jd - trn + 72 && (at - (jd - trn)) % 72 == 0,
+              "CRC supplies Jd frame grid (invert=%d, at=%ld)", invert, at);
+        CHECK(memcmp(v90_analogue_rx_jd_bits(rx), expected, 72) == 0,
+              "accepted Jd bits match foreign transmitter");
+        CHECK(v90_analogue_rx_jd_trn16(rx) == (expected[47] != 0)
+              && v90_analogue_rx_jd_rr16(rx) == (expected[48] != 0),
+              "CRC handoff publishes Table 13 constellation fields");
+        v90_analogue_rx_free(rx);
+    }
+    /* Exercise non-default Table 13 fields at the FIRST CRC handoff.
+     * The foreign fixture uses four points; a default false field would
+     * otherwise pass the fixture checks even if never published. */
+    expected[47] = expected[48] = 1;
+    uint16_t crc = 0xffff;
+    for (int b = 18; b <= 33; b++) crc = crc_itu16_bits(expected[b], 1, crc);
+    for (int b = 35; b <= 50; b++) crc = crc_itu16_bits(expected[b], 1, crc);
+    for (int b = 0; b < 16; b++) expected[52 + b] = (crc >> b) & 1;
+    v90_analogue_rx_t *fields = v90_analogue_rx_init(&cfg);
+    for (int stage = 0; stage <= 2; stage++) v90_analogue_rx_line_stage(fields, stage);
+    v90_analogue_rx_put(fields, wire + trn, (int)(jd - trn));
+    uint32_t reg = 0;
+    for (long i = jd - 23; i < jd; i++) reg = ((reg << 1) | (wire[i] >> 7)) & 0x7fffff;
+    int previous = wire[jd - 1] >> 7;
+    for (int b = 0; b < 72; b++) {
+        int scrambled = (expected[b] ^ (reg >> 17) ^ (reg >> 22)) & 1;
+        reg = ((reg << 1) | scrambled) & 0x7fffff;
+        previous ^= scrambled;
+        uint8_t c = v90_codeword_compose(cfg.law, cfg.u_info, previous);
+        v90_analogue_rx_put(fields, &c, 1);
+    }
+    CHECK(v90_analogue_rx_jd_frames(fields) == 1
+          && v90_analogue_rx_jd_trn16(fields) && v90_analogue_rx_jd_rr16(fields),
+          "first CRC-valid Jd publishes non-default constellation fields");
+    v90_analogue_rx_free(fields);
+    cfg.zero_slot_fraction = 0;
+    v90_analogue_rx_t *guard = v90_analogue_rx_init(&cfg);
+    CHECK(v90_analogue_rx_line_stage(guard, 0) == 0,
+          "line recovery cannot alter exact-codeword receiver");
+    v90_analogue_rx_free(guard); v90_analogue_rx_free(exact); free(wire);
+}
+
+/* Independent line-front-end replay. Input is s16le at 16 kHz, NOT DS0.
+ * Dump records {uint64_t input_sample; float symbol; uint8_t stage}, packed
+ * by separate writes. This permits grading CMA against the digital TX tap,
+ * without granting the equaliser that tap as a training reference. */
+static int trace_line(const char *path, int u_info, const char *dump_path)
+{
+    long bytes;
+    int16_t *amp = (int16_t *)read_file(path, &bytes);
+    FILE *dump = dump_path ? fopen(dump_path, "wb") : NULL;
+    v90_analogue_rx_config_t cfg = {0};
+    cfg.law = V90_LAW_ULAW;
+    cfg.u_info = u_info;
+    cfg.zero_slot_fraction = 0.25;
+    cfg.w_slot_tolerance = 0.35;
+    v90_analogue_rx_t *rx = v90_analogue_rx_init(&cfg);
+    v90a_fse_t *fse = v90a_fse_init(0, V90A_FSE_MU_CMA);
+    v90a_sd_line_rx_t *line = NULL;
+    int16_t window[512];
+    int fill = 0, stage = 0, acquired = 0;
+    int64_t anchor = 0;
+    if (!amp || bytes % 2 || !rx || !fse || (dump_path && !dump)) {
+        fprintf(stderr, "Cannot replay line input %s\n", path);
+        free(amp); v90_analogue_rx_free(rx); v90a_fse_free(fse);
+        if (dump) fclose(dump);
+        return 1;
+    }
+    v90a_fse_set_mode(fse, V90A_FSE_FROZEN);
+    for (int64_t i = 0; i < bytes/2; i++) {
+        int64_t first = i;
+        if (!acquired) {
+            window[fill++] = amp[i];
+            if (fill < 512) continue;
+            double fraction, amplitude, h[V90A_SD_MAX_TAPS];
+            int parity;
+            if (!v90a_sd_line(window, fill, &fraction, &amplitude, NULL)
+                || fraction < 0.5
+                || !v90a_sd_line_taps(window, fill, v90a_fse_tap_count(fse),
+                                       amplitude, &parity, h)) {
+                memmove(window, window + 128, 384*sizeof(*window));
+                fill = 384;
+                continue;
+            }
+            line = v90a_sd_line_rx_init(window, fill);
+            if (!line) break;
+            v90a_fse_set_taps(fse, h, v90a_fse_tap_count(fse), parity);
+            v90_analogue_rx_line_stage(rx, 0);
+            acquired = 1;
+            first = anchor = i - 511;
+            printf("line Sd at sample %lld, fraction %.4f, parity %d\n",
+                   (long long)anchor, fraction, parity);
+        }
+        for (int64_t j = first; j <= i; j++) {
+            int next = v90a_sd_line_rx_put(line, amp[j]);
+            if (next > stage) {
+                stage = next;
+                v90_analogue_rx_line_stage(rx, stage);
+                if (stage == 2) v90a_fse_set_mode(fse, V90A_FSE_CMA);
+                printf("line %s at sample %lld, measured reversal %lld\n",
+                       stage == 1 ? "S-bar-d" : "TRN1d CMA", (long long)j,
+                       (long long)(anchor + v90a_sd_line_rx_reversal(line)));
+            }
+            double out[2];
+            if (!v90a_fse_put(fse, amp + j, 1, out, 2)) continue;
+            uint8_t st = v90_analogue_rx_stage(rx);
+            if (dump) {
+                uint64_t at = j;
+                float y = out[0];
+                fwrite(&at, sizeof(at), 1, dump);
+                fwrite(&y, sizeof(y), 1, dump);
+                fwrite(&st, sizeof(st), 1, dump);
+            }
+            /* Only the signs are relevant to §8.4.5 and Table 13. Do not
+             * turn a TRN1d modulus into a claimed absolute DIL calibration. */
+            uint8_t c = v90_codeword_compose(cfg.law, u_info, out[0] >= 0);
+            unsigned events = v90_analogue_rx_put(rx, &c, 1);
+            if (events & V90A_RX_EVENT_JD) {
+                printf("CRC-valid Jd at input sample %lld, trn16=%d rr16=%d\n",
+                       (long long)j, v90_analogue_rx_jd_trn16(rx),
+                       v90_analogue_rx_jd_rr16(rx));
+                const uint8_t *bits = v90_analogue_rx_jd_bits(rx);
+                printf("Jd bits: ");
+                for (int b = 0; b < 72; b++) printf("%d", bits[b]);
+                printf("\n");
+            }
+            if (events & V90A_RX_EVENT_JD_PRIME)
+                v90a_fse_set_mode(fse, V90A_FSE_FROZEN);
+        }
+    }
+    int result = !(stage == 2 && v90_analogue_rx_jd_frames(rx) > 0);
+    printf("line result: %s, %d CRC-valid Jd frames, dispersion %.4f\n",
+           result ? "FAIL" : "PASS", v90_analogue_rx_jd_frames(rx),
+           v90a_fse_dispersion(fse));
+    if (dump) fclose(dump);
+    v90a_sd_line_rx_free(line); v90a_fse_free(fse);
+    v90_analogue_rx_free(rx); free(amp);
+    return result;
+}
+
 int main(int argc, char *argv[])
 {
     size_t i;
 
+    if (argc >= 4 && strcmp(argv[1], "--line-trace") == 0)
+        return trace_line(argv[2], atoi(argv[3]), argc >= 5 ? argv[4] : NULL);
     if (argc >= 3  &&  strcmp(argv[1], "--trace") == 0)
         return trace_stream(argv[2], (argc >= 4) ? atoi(argv[3]) : 48);
     if (argc >= 4  &&  strcmp(argv[1], "--phase4-trace") == 0)
@@ -2192,6 +2371,7 @@ int main(int argc, char *argv[])
         test_linear_bearer(&fixtures[i]);
     for (i = 0; i < sizeof(fixtures)/sizeof(fixtures[0]); i++)
         test_driven_by_fixture(&fixtures[i]);
+    test_line_jd_alignment();
     test_sounder();
     test_fse();
     test_fse_multilevel();

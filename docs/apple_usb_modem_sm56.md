@@ -1622,3 +1622,94 @@ would not work at all without a canceller that converges.
 **So the ordering is: duplex costs ~2 dB on this port and ~7 dB at full
 transmit level, which is a constellation step or two; V.91's bit transparency
 is 56 dB away and is not a margin question at all.**
+
+
+### Sd line recovery implemented and independently graded (2026-10-01)
+
+The V.90 analogue **16 kHz frontend** now implements the three steps above.
+It first tries the existing supervised Sd fit. Only if that fails and the
+1333 Hz line passes `ME_V90_ANALOGUE_SD_LINE_MIN` does it select measured-line
+recovery. `ME_V90_ANALOGUE_SD_LINE=0` disables the fallback; exact codewords,
+the successful waveform-fit path, plain V.34 and V.92 do not select it.
+`ME_V90A_SLOT_LEVELS=0` also keeps it out of the exact-codeword receiver.
+
+* **Transition:** a coherent two-cycle sliding DFT tracks the 1333 Hz line.
+  A sustained opposite phase, with line energy still present, proves the
+  180-degree reversal (V.90 §8.4.4, §9.3.2.4). Its magnitude minimum dates
+  the reversal in the receive stream. This event ends Ja. A level drop or
+  silence cannot substitute for a reversal. After the specified 48T of
+  S-bar-d, measured from that reversal, the frontend enters TRN1d.
+* **Equalizer:** neutral line-derived gain/parity taps remain frozen during
+  Sd/S-bar-d; §8.4.5's TRN1d starts CMA at `V90A_FSE_MU_CMA`. The line path
+  does not use the experimental DD mode. It keeps CMA through Jd, whose
+  transport also uses the same two levels, and freezes it before DIL. The
+  2040T confirmation is reported, but a marginal early count does not discard
+  this acquisition while CMA is still converging. Table 13's structure and
+  CRC decide whether Jd was recovered.
+* **Alignment:** Jd is probed at every symbol. Its first frame may inherit raw
+  TRN1d scrambler history; later frames inherit *differential* Jd history
+  (§5.3, §8.4.2). Both histories are tried on the line path, including raw
+  polarity ambiguity. This matters when noise spoils the first frame.
+  A validated 72T boundary establishes the bit/frame and six-slot grid and
+  publishes Table 13's constellation fields before upstream S starts.
+
+A separate sample-accounting defect prevented this path from running:
+`apple_usb_modem_coupler`'s 9600-to-16000 resampler calls the engine with one
+or two samples. The equalized frontend processed only complete pairs and
+**discarded the one-sample calls**, i.e. one sample in five on that schedule.
+It now feeds every sample and lets the FSE retain T/2 parity across calls.
+The acquisition window also consumes every caller sample, including any tail
+when a window is rejected. No resampler, buffer or codeword conversion was
+added to the DS0 bearer.
+
+The preserved `artifacts/apple-v90-sip-r7` RX and TX taps were graded by
+`tools/apple_v90_sd_recovery_verify.py`, which needs NumPy. This is a local
+capture target; missing captures cause an error rather than a skip:
+
+```sh
+make v90-apple-line-test V90_LINE_PYTHON=.venv/bin/python
+ME_MODE=v90 ME_V90_ROLE=analogue VPCM_ME_VERBOSE=1 \
+  ./apple_usb_modem_coupler --rx-replay \
+  artifacts/apple-v90-sip-r7/call/rx-tap.s16 --pty-link /tmp/v90-line-replay
+```
+
+The independent frontend replay crops RX to 19.4–23.8 s, after Phase 2:
+**dialling tones can also have a 1333 Hz line**, so hunting the entire audio
+file without the engine's Phase 3 gate is invalid. The causal DC blocker and
+5/3 interpolation reproduce the coupler's frontend; the digital TX tap is
+used only by the grader, never as equalizer training input.
+
+1. **Reversal:** the tracker dates it at crop sample **4205**; an independent
+   single-cycle coherent projection crosses at **4207**, 0.125 ms apart.
+   Both are receive-tap positions, not transmitter timestamps.
+2. **CMA:** sixteen independent 1000-symbol TRN1d windows, starting at 2500T,
+   recover **16000 actual TX signs with mean 0.78% error, worst 1.80%**.
+   Unequalized signs on those same windows average **26.21%**. The lag sweep
+   is ±260 symbols and every trained optimum is interior, at -9; each short
+   window is graded independently to avoid treating free-running clocks as
+   synchronized. Polarity is allowed to be arbitrary for this channel grade.
+3. **Jd:** **eight CRC-valid frames**, every one bit-identical to the first
+   TX Jd independently differential/GPC-decoded in Python. Their receive
+   endpoints agree on the 72T/six-slot grid. This comparison validates fields
+   and framing; repeated Jd is not used as an equalizer quality measurement.
+
+The complete engine replay also reaches those eight Jd frames, starts
+upstream S, recognizes J'd and enters DIL. With the fallback disabled, r7
+never acquires Sd. The preserved r6 replay, which never completed the
+requisite exchange, publishes no line-recovery transitions.
+
+Default offline regressions cover all twelve fundamental phases, reversal
+instant and 48T duration, attenuation/silence rejection, and later foreign
+Jd frames after deliberately corrupting the first one, in both polarities.
+`v90_analogue_sd_test`, `v90_analogue_rx_test`, `v92_startup_test` and
+`vpcm_loopback_test --all-tests` pass. `make test` stops at the unrelated
+plain V.34 **3000/9600 µ-law** row (`trained=0/0`): that binary links only
+`v34_duplex_test.o` and SpanDSP, none of the modified analogue receiver files.
+
+This is a Phase 3 recovery result, **not a new live CONNECT claim**. Absolute
+DIL scaling is still conditional on the peer honoring requested U_INFO: CMA
+fixes its output modulus but cannot identify the transmitted absolute Ucode.
+The instrument labels that reference as requested rather than measured.
+Long-run clock tracking, late TRN1d margin, DIL and Phase 4 through this loop
+remain separate work; the good 16000-symbol channel grade does not claim that
+every symbol of the entire recording was recovered.

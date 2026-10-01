@@ -327,6 +327,13 @@ test: $(TEST_TARGETS)
 	# --experimental-v90-info.
 	./vpcm_loopback_test --session-only --experimental-v90-info
 
+# Local preserved analogue capture, deliberately outside make test: artifacts/
+# are gitignored. Missing evidence is a hard error in the verifier.
+V90_LINE_PYTHON ?= python3
+.PHONY: v90-apple-line-test
+v90-apple-line-test: v90_analogue_rx_test
+	$(V90_LINE_PYTHON) tools/apple_v90_sd_recovery_verify.py
+
 v91-serial-pair-test: $(TARGET)
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET)
 	python3 tools/v91_serial_pair_test.py --binary ./$(TARGET) --robbed-phase 2

@@ -149,6 +149,11 @@ unsigned v90_analogue_rx_put_level(v90_analogue_rx_t *s, uint8_t codeword,
  * lets it.  This is for exercising §9.3.2.9/§9.3.2.10 on their own, and for a
  * receiver that joined the stream after J'd had already gone past.
  */
+/* Only for a front end which has positively acquired the band-limited Sd
+ * line. Ordered stages 0/1/2 mean Sd, measured reversal, then TRN1d.
+ * No slot phase is supplied: Table 13's CRC establishes the later bit grid. */
+unsigned v90_analogue_rx_line_stage(v90_analogue_rx_t *s, int stage);
+
 void v90_analogue_rx_begin_dil(v90_analogue_rx_t *s);
 
 v90_analogue_rx_stage_t v90_analogue_rx_stage(const v90_analogue_rx_t *s);
@@ -173,13 +178,11 @@ int v90_analogue_rx_dil_symbols(const v90_analogue_rx_t *s);
 int v90_analogue_rx_w(const v90_analogue_rx_t *s);
 
 /*
- * §8.4.5's TRN1d Ucode, as taken off the wire.
- *
- * Not U_INFO: a digital modem need not honour the value we asked for (an Eicon
- * card told 78 transmits Sd at W = 64 and TRN1d at 48), and this is what it
- * actually sent.  It is the one absolute level in Phase 3 that both ends agree
- * on, which is what calibrates an analogue receiver's ladder
- * (v90a_linear_set_reference()).  0 until TRN1d has been acquired.
+ * §8.4.5's TRN1d reference Ucode. On the waveform-fit path it is learned
+ * from the wire: a digital modem need not honor U_INFO (an Eicon card told
+ * 78 transmits Sd at W=64 and TRN1d at 48). Measured-line recovery instead
+ * uses requested U_INFO for sign slicing; blind CMA cannot identify an
+ * absolute transmitted Ucode. That path must not claim a measured DIL gain.
  */
 int v90_analogue_rx_trn1d_ucode(const v90_analogue_rx_t *s);
 /* Polarity resolved by §8.4.5's known plaintext, for the Phase-4 seam. */

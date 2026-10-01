@@ -2066,6 +2066,8 @@ static double v90a_sd_line_min(void)
 static int16_t  g_v90a_sd_buf[V90A_SD_FIT_SAMPLES];
 static int      g_v90a_sd_fill = 0;
 static bool     g_v90a_sd_fitted = false;
+static v90a_sd_line_rx_t *g_v90a_sd_line_rx = NULL;
+static int g_v90a_sd_line_stage = 0;
 static int      g_v90a_sd_score_logged = 0;
 static v90a_sd_t *g_v90a_sd = NULL;
 static bool     g_v90a_dil_tracking = false;
@@ -4500,6 +4502,9 @@ static void cleanup_v34_v90_training_locked(void)
         g_v90a_ladder_set = false;
         g_v90a_sd_fill = 0;
         g_v90a_sd_fitted = false;
+        v90a_sd_line_rx_free(g_v90a_sd_line_rx);
+        g_v90a_sd_line_rx = NULL;
+        g_v90a_sd_line_stage = 0;
         g_v90a_sd_score_logged = 0;
         if (g_v90a_sd) {
             v90a_sd_free(g_v90a_sd);
@@ -4795,6 +4800,9 @@ static bool restart_v90_analogue_phase2_locked(const char *reason)
         g_v90a_ladder_set = false;
         g_v90a_sd_fill = 0;
         g_v90a_sd_fitted = false;
+        v90a_sd_line_rx_free(g_v90a_sd_line_rx);
+        g_v90a_sd_line_rx = NULL;
+        g_v90a_sd_line_stage = 0;
         g_v90a_sd_score_logged = 0;
         if (g_v90a_sd) {
             v90a_sd_free(g_v90a_sd);
@@ -10748,25 +10756,21 @@ static void me_v90_analogue_rx_codewords_locked(const uint8_t *codewords, int co
 }
 
 /*
- * The equalised stage of the analogue 16 kHz path, split out so the window the
- * Sd fit consumed can be pushed through it once the taps are installed.
+ * Update the analogue slicer/adaptation at an observed stage transition.
  * Called with g_state_mtx held.
  */
-static void me_v90a_equalised_locked(const int16_t *amp, int len)
+static void me_v90a_calibrate_locked(void)
 {
-    if (!g_v90a_16k) {
-        g_v90a_16k = true;
-        if (g_v90a_linear == NULL)
-            g_v90a_linear = v90a_linear_init((g_law == ME_LAW_ALAW)
-                                             ? V90_LAW_ALAW : V90_LAW_ULAW);
-    }
     /*
      * Calibrate the ladder as soon as TRN1d has been acquired.
      *
      * CMA pins the equaliser's output modulus to §8.4.5's TRN1d level, and the
      * receiver has just learned which Ucode that is off the wire -- so the
      * absolute scale of the whole ladder follows, without measuring a peak and
-     * without trusting the U_INFO we asked for.  That is what §8.4.1's DIL and
+     * without trusting the U_INFO we asked for on the waveform-fit path.
+     * The line-recovery path instead uses requested U_INFO for sign slicing;
+     * it cannot establish an absolute DIL level from blind CMA alone.
+     * That is what §8.4.1's DIL and
      * §8.6's Phase 4 need: the training signals are one level with a sign on
      * them and survive an arbitrary scale, and nothing after them does.
      */
@@ -10840,7 +10844,7 @@ static void me_v90a_equalised_locked(const int16_t *amp, int len)
                  * the Sd fit that precedes them is constrained only at Sd's
                  * 1333 Hz harmonics and TRN1d is flat.
                  */
-                const char *m = getenv("ME_V90A_TRN1D_ADAPT");
+                const char *m = g_v90a_sd_line_rx ? NULL : getenv("ME_V90A_TRN1D_ADAPT");
                 const char *mu = getenv("ME_V90A_TRN1D_MU");
 
                 /*
@@ -10863,9 +10867,10 @@ static void me_v90a_equalised_locked(const int16_t *amp, int len)
                 else
                     v90a_fse_set_mode(g_v90a_fse, V90A_FSE_CMA);
             }
-            ME_LOG("[ME] V.90 analogue: ladder calibrated on TRN1d Ucode %d, "
-                   "equaliser decision-directed (dispersion %.4f)\n",
-                   trn1d, v90a_fse_dispersion(g_v90a_fse));
+            ME_LOG("[ME] V.90 analogue: TRN1d reference Ucode %d (%s), "
+                   "equaliser mode %d (dispersion %.4f)\n",
+                   trn1d, g_v90a_sd_line_rx ? "requested, sign slicing" : "measured",
+                   (int)v90a_fse_mode(g_v90a_fse), v90a_fse_dispersion(g_v90a_fse));
         }
     }
     /*
@@ -10911,6 +10916,17 @@ static void me_v90a_equalised_locked(const int16_t *amp, int len)
                v90a_fse_dd_used(g_v90a_fse),
                v90a_fse_dd_rejected(g_v90a_fse));
     }
+}
+
+static void me_v90a_equalised_locked(const int16_t *amp, int len)
+{
+    if (!g_v90a_16k) {
+        g_v90a_16k = true;
+        if (g_v90a_linear == NULL)
+            g_v90a_linear = v90a_linear_init((g_law == ME_LAW_ALAW)
+                                             ? V90_LAW_ALAW : V90_LAW_ULAW);
+    }
+    me_v90a_calibrate_locked();
     /*
      * One symbol at a time, deliberately.
      *
@@ -10920,35 +10936,34 @@ static void me_v90a_equalised_locked(const int16_t *amp, int len)
      * second the call overhead is nothing and the alternative is silently
      * adapting every symbol of a block on the last one's decision.
      */
-    for (int offset = 0; offset + 1 < len; offset += 2) {
+    for (int offset = 0; offset < len; offset++) {
         double sym;
         int16_t scaled;
         uint8_t codeword;
         double v;
 
-        /*
-         * max = 2, NOT 1, and the pair of samples is the reason.
-         *
-         * v90a_fse_put()'s loop is `for (i = 0; i < len && n < max; i++)`, so
-         * it stops the moment it has produced max symbols -- INCLUDING any
-         * samples of this call it has not consumed yet.  A T/2 filter emits on
-         * one of the two samples in a pair and which one is the fit's parity:
-         * at parity 0 the emit lands on the second sample and both are eaten,
-         * but at parity 1 it lands on the FIRST, n reaches max, and the second
-         * sample is silently dropped.  Half the stream, every pair, for the
-         * whole call -- so the delay line is fed at half rate and nothing
-         * downstream can work.  Only one symbol can ever come out of two
-         * samples (half toggles twice), so raising the cap changes nothing
-         * except letting the call finish consuming what it was given.
-         *
-         * Measured: of the calls since Sd detection began working, parity 0
-         * detected Sd in 7 of 8 and parity 1 in 0 of 2 -- artifacts/hsf-v90/
-         * call-085428Z and call-091019Z, both of which fit cleanly at 0.995
-         * and 0.982 and then never leave the hunt.
-         */
+        /* Consume EVERY T/2 sample. The Apple 5/3 resampler calls this
+         * with one or two samples, so processing only complete pairs drops
+         * one in every five input samples and changes the symbol clock.
+         * FSE owns the half-symbol parity across calls. */
         double syms[2];
 
-        if (v90a_fse_put(g_v90a_fse, amp + offset, 2, syms, 2) < 1)
+        if (g_v90a_sd_line_rx) {
+            int stage = v90a_sd_line_rx_put(g_v90a_sd_line_rx, amp[offset]);
+            if (stage > g_v90a_sd_line_stage) {
+                /* Process ordered events even if a caller supplies a large
+                 * block. The core never manufactures Sd slot codewords. */
+                while (g_v90a_sd_line_stage < stage) {
+                    g_v90a_sd_line_stage++;
+                    v90_analogue_phase3_line_stage(g_v90a, g_v90a_sd_line_stage);
+                    ME_LOG("[ME] V.90 analogue line: %s, reversal at T/2 sample %lld\n",
+                           g_v90a_sd_line_stage == 1 ? "S-bar-d" : "TRN1d CMA",
+                           (long long)v90a_sd_line_rx_reversal(g_v90a_sd_line_rx));
+                }
+                me_v90a_calibrate_locked();
+            }
+        }
+        if (v90a_fse_put(g_v90a_fse, amp + offset, 1, syms, 2) < 1)
             continue;
         sym = syms[0];
         /*
@@ -11067,9 +11082,10 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
         int taps = v90a_fse_tap_count(g_v90a_fse);
         int i;
 
-        for (i = 0; i < len  &&  g_v90a_sd_fill < V90A_SD_FIT_SAMPLES; i++)
-            g_v90a_sd_buf[g_v90a_sd_fill++] = amp[i];
-        if (g_v90a_sd_fill >= V90A_SD_FIT_SAMPLES) {
+        for (i = 0; i < len; ) {
+            g_v90a_sd_buf[g_v90a_sd_fill++] = amp[i++];
+            if (g_v90a_sd_fill < V90A_SD_FIT_SAMPLES)
+                continue;
             double h[V90A_SD_MAX_TAPS], score = 0.0, level = 0.0;
             int parity = 0;
 
@@ -11096,7 +11112,7 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
              * recording -- 0.994-1.000 over the Sd burst against at most
              * 0.0377 over the other 335 windows of TRN1d, Jd and silence --
              * and it is only consulted when the fit has already declined, so
-             * a byte-exact DS0 reaches this code at all.  What it installs is
+             * a byte-exact DS0 never needs this fallback.  What it installs is
              * a gain and a T/2 parity, not an equaliser: the line cannot give
              * the slot alignment (its phase carries the channel's unknown
              * phase shift) and cannot equalise anything, so CMA on §8.4.5's
@@ -11107,6 +11123,7 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
              */
             if (!fitted  &&  taps <= V90A_SD_MAX_TAPS
                 &&  parse_env_int("ME_V90_ANALOGUE_SD_LINE", 1) != 0
+                &&  parse_env_int("ME_V90A_SLOT_LEVELS", 1) != 0
                 &&  v90a_sd_line(g_v90a_sd_buf, g_v90a_sd_fill, &line_frac,
                                  &line_amp, NULL)
                 &&  line_frac >= v90a_sd_line_min()
@@ -11155,6 +11172,12 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
                  * the filter's own transient, which costs a fraction of a
                  * repetition out of the 21 the window holds.
                  */
+                if (from_line) {
+                    g_v90a_sd_line_rx = v90a_sd_line_rx_init(g_v90a_sd_buf,
+                                                            g_v90a_sd_fill);
+                    if (g_v90a_sd_line_rx)
+                        v90_analogue_phase3_line_stage(g_v90a, 0);
+                }
                 me_v90a_equalised_locked(g_v90a_sd_buf, g_v90a_sd_fill);
                 me_v90a_equalised_locked(amp + i, len - i);
                 if (from_line)
@@ -11168,6 +11191,7 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
                     ME_LOG("[ME] V.90 analogue: Sd fit accepted (held-out score "
                            "%.3f, T/2 parity %d, level %.3f); equaliser acquired "
                            "on §8.4.4's own sequence\n", score, parity, level);
+                break;
             } else {
                 /* Slide so a fit that straddles the start of Sd -- or its end,
                  * where S-bar-d begins -- gets a clean one next time rather

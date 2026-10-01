@@ -88,6 +88,9 @@ unsigned v90_analogue_phase3_rx(v90_analogue_phase3_t *s,
                                 const uint8_t *codewords,
                                 int count);
 
+/* Measured band-limited Sd front-end events, applied to both directions. */
+unsigned v90_analogue_phase3_line_stage(v90_analogue_phase3_t *s, int stage);
+
 /* Produce the upstream, as linear samples.  Returns samples written. */
 int v90_analogue_phase3_tx(v90_analogue_phase3_t *s, int16_t *amp, int max_len);
 

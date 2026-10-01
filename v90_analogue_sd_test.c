@@ -317,6 +317,43 @@ static void test_finite_sd(double phase)
     check(hits > 0, msg);
 }
 
+/* The fundamental's absolute phase is arbitrary on a loop. Only its
+ * reversal is usable (§8.4.4 / §9.3.2.4); silence is not a reversal. */
+static void test_line_reversal(void)
+{
+    for (int phase = 0; phase < 12; phase++) {
+        int16_t initial[512];
+        for (int i = 0; i < 512; i++)
+            initial[i] = (int16_t)(4000*cos(2*M_PI*(i + phase)/12.0));
+        for (int kind = 0; kind < 3; kind++) {
+            v90a_sd_line_rx_t *line = v90a_sd_line_rx_init(initial, 512);
+            int first_bar = -1, first_trn = -1;
+            for (int i = 0; i < 1100; i++) {
+                double y = 4000*cos(2*M_PI*(i + phase)/12.0);
+                if (i >= 768) {
+                    if (kind == 0) y = -y;
+                    if (kind == 1) y = 0;
+                    if (kind == 2) y *= 0.25;
+                }
+                int st = v90a_sd_line_rx_put(line, (int16_t)y);
+                if (st >= 1 && first_bar < 0) first_bar = i;
+                if (st == 2 && first_trn < 0) first_trn = i;
+            }
+            if (kind == 0) {
+                char msg[120];
+                snprintf(msg, sizeof msg, "line phase %d: reversal timing and 48T S-bar-d", phase);
+                check(first_bar > 768 && first_bar < 820
+                      && llabs(v90a_sd_line_rx_reversal(line) - 768) <= 3
+                      && first_trn == v90a_sd_line_rx_reversal(line) + 95, msg);
+            } else {
+                check(first_bar == -1 && first_trn == -1,
+                      "line disappearance/attenuation cannot terminate Ja");
+            }
+            v90a_sd_line_rx_free(line);
+        }
+    }
+}
+
 int main(void)
 {
     int slot;
@@ -325,6 +362,7 @@ int main(void)
         test_clean(1.0, slot);
     test_clean(4000.0, 0);
     test_clean(0.01, 0);
+    test_line_reversal();
     test_rejects();
     test_fit_rejects();
     test_noisy(20.0);

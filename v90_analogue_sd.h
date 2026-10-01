@@ -165,4 +165,15 @@ double v90a_sd_level(const v90a_sd_t *s);
 /* The score the acquisition was taken on, in [0, 1]; see the .c for the form. */
 double v90a_sd_score(const v90a_sd_t *s);
 
+/* Band-limited §8.4.4 / §9.3.2.4 recovery. Feed every 16 kHz sample,
+ * including the acquisition window, once. The phase reference is coherent
+ * with that window; it carries no assertion about six-slot alignment.
+ * Stage 1 requires a measured line reversal; stage 2 follows 48T of S-bar-d
+ * (§8.4.4). reversal_sample is the measured midpoint, in this input stream. */
+typedef struct v90a_sd_line_rx_s v90a_sd_line_rx_t;
+v90a_sd_line_rx_t *v90a_sd_line_rx_init(const int16_t *amp, int n);
+void v90a_sd_line_rx_free(v90a_sd_line_rx_t *s);
+int v90a_sd_line_rx_put(v90a_sd_line_rx_t *s, int16_t sample);
+int64_t v90a_sd_line_rx_reversal(const v90a_sd_line_rx_t *s);
+
 #endif

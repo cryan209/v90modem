@@ -538,3 +538,87 @@ double v90a_sd_score(const v90a_sd_t *s)
 {
     return (s != NULL) ? s->score : 0.0;
 }
+
+/* V.90 §8.4.4: the surviving line has period 12 on the T/2 grid.
+ * A two-cycle sliding DFT separates its phase reversal from a level drop.
+ * Absolute line phase includes the channel, and is deliberately never used
+ * as a slot index. Keep the reference frozen through the transition. */
+struct v90a_sd_line_rx_s {
+    double re[24], im[24], energy[24];
+    double sum_re, sum_im, sum_energy, ref_re, ref_im, ref_power;
+    int64_t samples, reversal, minimum_at, positive_at;
+    double minimum;
+    int stage, opposite;
+};
+
+v90a_sd_line_rx_t *v90a_sd_line_rx_init(const int16_t *amp, int n)
+{
+    v90a_sd_line_rx_t *s;
+    if (!amp || n < 48 || !(s = calloc(1, sizeof(*s))))
+        return NULL;
+    for (int i = n - 48; i < n; i++) {
+        double phase = 2.0*M_PI*(i % 12)/12.0;
+        s->ref_re += amp[i]*cos(phase)/48.0;
+        s->ref_im -= amp[i]*sin(phase)/48.0;
+    }
+    s->ref_power = s->ref_re*s->ref_re + s->ref_im*s->ref_im;
+    if (s->ref_power < 1.0) {
+        free(s);
+        return NULL;
+    }
+    s->minimum = 1e100;
+    s->reversal = -1;
+    return s;
+}
+
+void v90a_sd_line_rx_free(v90a_sd_line_rx_t *s) { free(s); }
+int64_t v90a_sd_line_rx_reversal(const v90a_sd_line_rx_t *s)
+{
+    return s ? s->reversal : -1;
+}
+
+int v90a_sd_line_rx_put(v90a_sd_line_rx_t *s, int16_t sample)
+{
+    if (!s || s->stage == 2)
+        return s ? s->stage : 0;
+    int slot = (int)(s->samples % 24);
+    double phase = 2.0*M_PI*(s->samples % 12)/12.0;
+    double re = sample*cos(phase), im = -sample*sin(phase);
+    s->sum_re += re - s->re[slot]; s->re[slot] = re;
+    s->sum_im += im - s->im[slot]; s->im[slot] = im;
+    s->sum_energy += (double)sample*sample - s->energy[slot];
+    s->energy[slot] = (double)sample*sample;
+    s->samples++;
+    if (s->samples < 24)
+        return 0;
+    double power = s->sum_re*s->sum_re + s->sum_im*s->sum_im;
+    double dot = (s->sum_re*s->ref_re + s->sum_im*s->ref_im)
+                 /(24.0*s->ref_power);
+    double fraction = s->sum_energy > 0 ? 2*power/(24*s->sum_energy) : 0;
+    if (s->stage == 0) {
+        /* Begin timing only after a coherent positive reference was seen.
+         * A disappearance of Sd without opposite phase never publishes it. */
+        if (dot > 0.7 && fraction > 0.65) {
+            s->minimum = 1e100;
+            s->minimum_at = s->samples;
+            s->positive_at = s->samples;
+        } else if (power < s->minimum) {
+            s->minimum = power;
+            s->minimum_at = s->samples;
+        }
+        if (dot < -0.7 && fraction > 0.65)
+            s->opposite++;
+        else
+            s->opposite = 0;
+        if (s->opposite >= 6 && s->positive_at > 0
+            && s->samples - s->positive_at <= 96) {
+            s->reversal = s->minimum_at - 12;
+            s->stage = 1;
+        }
+    }
+    /* §8.4.4: eight repetitions of S-bar-d, not a guessed slot pattern.
+     * This is relative to the measured reversal, never to call/TX time. */
+    if (s->stage == 1 && s->samples >= s->reversal + 96)
+        s->stage = 2;
+    return s->stage;
+}

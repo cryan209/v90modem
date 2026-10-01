@@ -181,6 +181,14 @@ static void apply_events(v90_analogue_phase3_t *s, unsigned events)
         v90_analogue_tx_dil_enough(s->tx);         /* §9.3.2.10: S, then S̄ */
 }
 
+unsigned v90_analogue_phase3_line_stage(v90_analogue_phase3_t *s, int stage)
+{
+    if (!s || s->p4) return 0;
+    unsigned events = v90_analogue_rx_line_stage(s->rx, stage);
+    apply_events(s, events);
+    return events;
+}
+
 /*
  * §9.4.2's conditional moments.  Same rule as apply_events(): each entry point
  * is a no-op outside the stage it ends, so the digital modem repeating MP

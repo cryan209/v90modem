@@ -84,6 +84,7 @@ struct v90_analogue_rx_s {
     void    *jd_probe_user;
     void   (*trn1d_report)(void *user, int ones, int of);
     void    *trn1d_report_user;
+    bool     line_recovery;
     int      sd_phase;              /* index%6 that holds sd_pat[0] */
     int      sd_shift_run;          /* consecutive codewords matching S̄d */
 
@@ -445,6 +446,41 @@ static void trn1d_resume(v90_analogue_rx_t *s, int from)
     s->trn1d_scan = from;
 }
 
+/* V.90 §9.3.2.4/.5: explicit measured-line handoff. Codeword input never
+ * calls this. In particular, Sd's line phase is not a six-slot phase. */
+unsigned v90_analogue_rx_line_stage(v90_analogue_rx_t *s, int stage)
+{
+    if (!s || !level_tolerant(s) || s->v92_mode)
+        return 0;
+    if (stage == 0 && s->stage == V90A_RX_HUNT_SD) {
+        s->line_recovery = true;
+        s->sd_start = s->index;
+        s->stage = V90A_RX_SD;
+        return V90A_RX_EVENT_SD;
+    }
+    if (!s->line_recovery)
+        return 0;
+    if (stage == 1 && s->stage == V90A_RX_SD) {
+        s->sd_bar_start = s->index;
+        s->stage = V90A_RX_SD_BAR;
+        return V90A_RX_EVENT_SD_BAR;
+    }
+    if (stage == 2 && s->stage == V90A_RX_SD_BAR) {
+        s->trn1d_start = s->index;
+        /* Only the requested §8.4.5 Ucode is known on this path. CMA
+         * removes receive gain, so it cannot independently measure which
+         * absolute Ucode the peer actually chose. This reference is for
+         * sign slicing; do not report it as an on-wire DIL calibration. */
+        s->trn1d_ucode = s->cfg.u_info;
+        s->stage = V90A_RX_TRN1D;
+        s->descramble_reg = 0;
+        s->sign_len = s->trn1d_scan = s->trn1d_symbols = s->trn1d_ones = 0;
+        s->trn1d_break = -1;
+        return V90A_RX_EVENT_TRN1D;
+    }
+    return 0;
+}
+
 /*
  * Try to read a Jd frame (§8.4.2) starting at signs[from]: differential
  * decode, then GPC, with the register seeded from the raw signs before it --
@@ -460,22 +496,34 @@ static int try_jd_frame(v90_analogue_rx_t *s, int from,
 
     if (from < SCRAMBLER_HISTORY + 1  ||  from + JD_BITS > s->sign_len)
         return -1;
-    reg = 0;
-    for (i = from - SCRAMBLER_HISTORY; i < from; i++)
-        (void) descramble(&reg, s->signs[i]);
-    prev = s->signs[from - 1];
-    for (i = 0; i < JD_BITS; i++) {
-        int sign = s->signs[from + i];
-        int scrambled = sign ^ prev;
-
-        prev = sign;
-        bits[i] = (uint8_t) descramble(&reg, scrambled);
+    int best = 1000;
+    /* The first Jd frame inherits raw TRN1d scrambler history. Later frames
+     * inherit differential history (§8.4.2). Probe both on the line path,
+     * since noise can destroy the first frame; do not guess a boundary. */
+    for (int mode = 0; mode < (s->line_recovery ? 3 : 1); mode++) {
+        uint8_t candidate[JD_BITS];
+        reg = 0;
+        for (i = from - SCRAMBLER_HISTORY; i < from; i++) {
+            int b = mode == 2 ? (s->signs[i] ^ s->signs[i - 1])
+                             : (s->signs[i] ^ mode);
+            (void) descramble(&reg, b);
+        }
+        prev = s->signs[from - 1];
+        for (i = 0; i < JD_BITS; i++) {
+            int sign = s->signs[from + i];
+            int scrambled = sign ^ prev;
+            prev = sign;
+            candidate[i] = (uint8_t) descramble(&reg, scrambled);
+        }
+        int errors = jd_frame_errors(candidate);
+        if (errors < best) {
+            best = errors;
+            memcpy(bits, candidate, JD_BITS);
+            if (reg_out) *reg_out = reg;
+            if (prev_out) *prev_out = prev;
+        }
     }
-    if (reg_out)
-        *reg_out = reg;
-    if (prev_out)
-        *prev_out = prev;
-    return jd_frame_errors(bits);
+    return best;
 }
 
 /*
@@ -621,6 +669,7 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c, int16_t level)
         break;
 
     case V90A_RX_SD: {
+        if (s->line_recovery) break;
         int slot = (int) ((s->index - s->sd_phase)%6);
 
         if (slot < 0)
@@ -711,6 +760,7 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c, int16_t level)
     }
 
     case V90A_RX_SD_BAR: {
+        if (s->line_recovery) break;
         int slot = (int) ((s->index - s->sd_phase)%6);
 
         if (slot < 0)
@@ -824,7 +874,18 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c, int16_t level)
                 s->descramble_reg = reg;
                 s->prev_sign = prev;
                 s->jd_bit_pos = from + JD_BITS;
-                s->jd_bit_count = JD_BITS;
+                s->jd_start = s->trn1d_start + from;
+                /* §8.4.2 Table 13 is 72T, a multiple of six: its CRC-valid
+                 * boundary supplies the grid the Sd line could not supply. */
+                if (s->line_recovery)
+                    s->sd_phase = (int)(s->jd_start % 6);
+                s->jd_symbols = JD_BITS;
+                s->jd_valid = true;
+                s->jd_trn16 = !s->v92_mode && bits[47] != 0;
+                s->jd_rr16 = !s->v92_mode && bits[48] != 0;
+                s->jd_bit_count = 0;
+                s->in_jd_frame = false;
+                s->jd_prime_zeros = 0;
                 s->trn1d_break = from;
                 s->stage = V90A_RX_JD;
                 s->jd_frames++;
@@ -904,7 +965,7 @@ static unsigned put_one(v90_analogue_rx_t *s, uint8_t c, int16_t level)
                     s->trn1d_symbols = 0;
                     break;
                 }
-                if (s->trn1d_ones*10 < confirm_of*9) {
+                if (!s->line_recovery && s->trn1d_ones*10 < confirm_of*9) {
                     s->stage = V90A_RX_HUNT_SD;
                     memset(s->sd_run, 0, sizeof(s->sd_run));
                     memset(s->sd_w, 0, sizeof(s->sd_w));
