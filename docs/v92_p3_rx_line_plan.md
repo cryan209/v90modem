@@ -6,7 +6,7 @@ modem is on a real 2-wire loop behind a single codec (VG224 -> SIP -> us),
 so that 9.5.1.1.3 releases Sd. On the byte-exact SIP loopback it must behave
 exactly as it does today.
 
-Status: steps 1-8 done, 2026-10-01 (step 7 for zero-DIL rows; measured DIL is blocked on the analogue side). Next: step 9, a live call. The fixture decodes Ja; `v92_p3_rx_line_test` is in `make test`. Each step lists what it changes, how it is
+Status: steps 1-8 done, 2026-10-01. Next: step 9, a live call. The fixture decodes Ja; `v92_p3_rx_line_test` is in `make test`. Each step lists what it changes, how it is
 measured, and the result that completes it. Do the steps in order: each one
 produces the instrument the next one is graded by.
 
@@ -462,7 +462,7 @@ Every synthetic row decodes it too. **`v92_p3_rx_line_test` is now in
   `v92_proc_eval_test`. `v92_p3_probe` on the recording now ends
   `state=done ja_ok=1`.
 
-### 7. Hand the trained equaliser on -- DONE 2026-10-01 (zero DIL)
+### 7. Hand the trained equaliser on -- DONE 2026-10-01
 
 The rest of Phase 3's upstream arrives on the same channel:
 
@@ -526,12 +526,15 @@ handed-on equaliser.
   - Gating over the last 256 of the 2040T matches when the raw path's
     2040-ones check locked anyway.
   - A ±1-symbol mapping error was ruled out: offsets -2..+2 give 46/84/84/37/66%.
-- **Not done: measured DIL.** With the descriptor-carrying DIL preset, Ja
-  decodes through the loop (at 4473). The **analogue side** then fails
-  `Sd-bar timeout (9.5.2.2.1)`. That is consistent with the analogue Sd
-  acquisition fragility found in step 3: an unimpaired run passes with Ja
-  at 4462 and fails at 4397, and its fix is a separate task. Those rows are
-  kept runnable as `v92_startup_test --line-row 1|3`, and are not asserted.
+- **Measured DIL: done since `8b2f2f85`.**
+  - At first the descriptor-carrying rows decoded Ja through the loop (at
+    4473) and then failed in the **analogue** receiver with
+    `Sd-bar timeout (9.5.2.2.1)`.
+  - That was its Sd acquisition depending on where Sd fell on its
+    acquisition grid, found in step 3.
+  - `8b2f2f85` ("V.92 analogue: see S-bar_d wherever Sd lands") fixed it.
+    Both measured-DIL rows (PCMU loop alone; PCMA phase 0.5 + 25 dB) now
+    reach CPt and are asserted, making four loop rows in all.
 - **Not graded: Phase 4.** TRN2u/CPu still go through the raw
   `v92_trn2u_demod_feed`. The loop rows stop at the first CPt.
 - **Not in these rows: clock offset.** This harness clocks both ends from

@@ -926,11 +926,9 @@ int main(int argc, char **argv)
         }
         return 0;
     }
-    /* Rows 1 and 3 (measured DIL) reach Ja and then fail in the ANALOGUE
-     * receiver ("Sd-bar timeout"): Ja is declared at a slightly different
-     * instant through the loop, and the analogue side's Sd acquisition is
-     * known to depend on where Sd falls on its acquisition grid
-     * (docs/v92_p3_rx_line_plan.md steps 3 and 7).  Kept runnable here. */
+    /* One loop row at a time, for debugging.  Rows 1 and 3 (measured DIL)
+     * failed in the analogue receiver until 8b2f2f85 made its S-bar_d
+     * detection independent of where Sd lands. */
     if (argc == 3 && !strcmp(argv[1], "--line-row")) {
         if (atoi(argv[2]) == 0) test_phase3_line(false, false, 0.0, 0.0);
         if (atoi(argv[2]) == 1) test_phase3_line(true, true, 0.5, 25.0);
@@ -943,6 +941,8 @@ int main(int argc, char **argv)
     if (argc == 2 && !strcmp(argv[1], "--line")) {
         test_phase3_line(false, false, 0.0, 0.0);
         test_phase3_line(true, false, 0.5, 25.0);
+        test_phase3_line(false, true, 0.0, 0.0);
+        test_phase3_line(true, true, 0.5, 25.0);
         return 0;
     }
     if (argc == 2 && !strcmp(argv[1], "--ja-only")) {
@@ -1001,6 +1001,8 @@ int main(int argc, char **argv)
     /* docs/v92_p3_rx_line_plan.md step 7: through the r4 loop to CPt. */
     test_phase3_line(false, false, 0.0, 0.0);
     test_phase3_line(true, false, 0.5, 25.0);
+    test_phase3_line(false, true, 0.0, 0.0);
+    test_phase3_line(true, true, 0.5, 25.0);
     test_sd_onset_sweep(false);
     test_sd_onset_sweep(true);
     test_filter_baseline();
