@@ -1421,3 +1421,58 @@ alignment score against it can be met at a wrong lag -- which is exactly what
 their lags of -217 and -258 say, against TRN1d's consistent +48 to +101.  The
 scrambled TRN1d windows are the trustworthy ones for the same reason they are
 the ones that cannot be faked.
+
+### How cleanly PCM survives v90modem -> SIP -> VG224 -> loop -> Apple modem (2026-10-01)
+
+The bound above was a yes/no on recoverability.  This is the quantity a V.90
+constellation is actually chosen from: **how finely can the analogue end
+resolve a G.711 level after the whole path?**  Same method and the same
+ground truth -- the digital side's `live-tx.g711` against the Apple modem's
+device receive tap, held out, on `artifacts/apple-v90-sip-r7` -- scored as
+residual sigma in G.711 linear units rather than as R².
+
+**THE CLOCK OFFSET IS THE FIRST THING TO TAKE OUT, AND IT IS WORTH 7 dB.**  The
+two ends free-run: the DS0 clock arrives through SIP and the VG224, the Apple
+codec has its own crystal, and the offset measures **-160 ppm**.  A fixed
+filter cannot absorb a drifting sampling instant, so the fit degrades with
+window length -- 11.1 dB over 800 symbols, 9.7 over 1600, 7.5 over 3000 --
+which reads exactly like a noisy line and is not one.  Let the fit track rate
+as well as lag and the same 3000-symbol window goes **8.3 -> 15.4 dB**.  Sweep
+rate, or keep the window under ~100 ms, or the number is your own.
+
+With rate tracked, 161 T/2 taps:
+
+| | sigma (G.711 units) | SNR | levels at 6 sigma | bits/symbol | downstream |
+|---|---|---|---|---|---|
+| measured, 81 taps | 188 | 14.0 dB | 57 | 5.8 | ~46.6 kbit/s |
+| measured, 161 taps | **159** | **15.4 dB** | **67** | **6.1** | **~48.6 kbit/s** |
+| quiet-line additive floor | 53 | 25.0 dB | 203 | 7.7 | ~61 kbit/s |
+
+and the binary training signals come through outright: **0 sign errors in 1500
+held-out TRN1d symbols, a 5.9 sigma margin.**
+
+**Read the two rows against each other, because they say different things.**
+The additive floor is assumption-free -- the 0.9 s in which the digital side
+transmits digital silence before Sd measures RMS 245 against the TRN1d era's
+4365, i.e. **25 dB** -- and on its own it would carry more than V.90's 56 kbit/s
+ceiling.  So **the line's noise is not what limits this path.**  What limits
+the 15.4 dB is distortion, residual timing, and the measurement chain itself:
+a fixed filter with no timing loop, fed through a Python resampler at an
+assumed 9600 Hz.  The 7 dB that appeared the moment rate was tracked is the
+measure of how much of that is mine, so **15.4 dB is a floor on the path, not
+a ceiling.**
+
+**One caveat that cuts the other way, and it is large.**  All of this is
+measured on TRN1d, which the digital modem sends at RMS 943 = **-24.6 dBm0**,
+while a real V.90 downstream constellation runs up to Table 15's -13 dBm0 --
+**11.6 dB hotter.**  If the residual is additive the constellation gains all
+of that; if it is proportional distortion it gains none.  Nothing here
+separates those, and separating them needs a downstream carrying more than
+one magnitude, which this capture does not contain because the call never
+reached DIL.
+
+**So, as a single answer: the path demonstrably resolves ~67 G.711 levels,
+6.1 bits/symbol, about 48 kbit/s of downstream, with the binary training
+signals error-free -- and both the additive floor (25 dB) and the level
+headroom (11.6 dB) say the real figure is higher than that.**  What stops the
+call is not the bearer's cleanliness; it is §8.4.4's Sd, two entries above.
