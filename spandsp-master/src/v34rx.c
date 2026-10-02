@@ -16458,8 +16458,17 @@ static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
     int16_t frame[16];
     int16_t precoder[6];
     int rate = (rx->bit_rate/2 + 1)*2400;
+    /* The V.90 upstream (T/3 receiver) takes its B1 parameters from V.90.  A
+       V.90 call whose INFO1a selected V.34 is a plain V.34 call from Phase 3
+       on (9.2.1.1.8): its B1 uses what the two MPs negotiated.  Treating it
+       as V.90 here built the template with minimum shaping, no nonlinear
+       encoder and the V.90 trellis while the peer transmitted the expanded
+       shaping our MP asked for, so above 4800 bit/s -- where the two shapings
+       differ -- B1 never correlated (0.25-0.29) and every data mode was white
+       (rf-tower-fb-9). */
+    bool v90_upstream = rx->v90_mode  &&  !rx->v90_v34_fallback;
     int trellis = (trellis_override >= 0) ? trellis_override
-                : rx->v90_mode ? rx->v90_t3_trellis_size
+                : v90_upstream ? rx->v90_t3_trellis_size
                                : (rx->viterbi.state_count == 64
                                   ? V34_TRELLIS_64
                                   : (rx->viterbi.state_count == 32
@@ -16472,7 +16481,11 @@ static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
     }
     tx = v34_init(NULL,
                   baud_rate_parameters[rx->baud_rate].baud_rate,
-                  rate, !rx->calling_party, true,
+                  rate,
+                  /* the far end's role: the answer modem when we are the
+                     V.34 call modem of a fallback */
+                  rx->v90_v34_fallback  ?  false  :  !rx->calling_party,
+                  true,
                   v90_t3_b1_get_bit, NULL,
                   v90_t3_b1_put_bit, NULL);
     if (!tx)
@@ -16487,9 +16500,9 @@ static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
     tx->tx.scrambler_tap = scrambler_tap;
     tx->tx.baud_rate = rx->baud_rate;
     if (v34_seed_tx_data(tx, rate/2400, trellis,
-                         rx->v90_mode ? 0 : rx->use_non_linear_encoder,
-                         rx->v90_mode ? 0 : rx->parms.expanded_shaping,
-                         rx->v90_mode ? NULL : precoder) != 0)
+                         v90_upstream ? 0 : rx->use_non_linear_encoder,
+                         v90_upstream ? 0 : rx->parms.expanded_shaping,
+                         v90_upstream ? NULL : precoder) != 0)
     {
         v34_free(tx);
         return false;
