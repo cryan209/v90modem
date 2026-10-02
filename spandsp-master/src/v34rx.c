@@ -4794,6 +4794,17 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
         log_info1a(s->logging, false, info1a);
     }
     /*endif*/
+    /* One line per INFO1a.  Table 16 is the answer modem's verdict on OUR
+       transmit direction (bits 12:17 power, 25 carrier, 26:29 pre-emphasis,
+       30:33 projected rate, 37:39 symbol rate) and it was visible nowhere on
+       a live call. */
+    fprintf(stderr, "[V34] INFO1a: c2a (our TX) baud=%d high_carrier=%d pre_emphasis=%d "
+            "projected_N=%d power_reduction=%d+%d; a2c baud=%d "
+            "(baud 0..5 = 2400/2743/2800/3000/3200/3429, 6 = V.90 PCM)\n",
+            s->info1a.baud_rate_c_to_a, s->info1a.use_high_carrier ? 1 : 0,
+            s->info1a.preemphasis_filter, s->info1a.max_data_rate,
+            s->info1a.power_reduction, s->info1a.additional_power_reduction,
+            s->info1a.baud_rate_a_to_c);
     s->info1a_received = true;
 
 #if defined(SPANDSP_USE_FIXED_POINT)
@@ -4824,13 +4835,6 @@ static void v90_enter_phase3_from_info1a(v34_rx_state_t *s)
        lock.  Enter Phase 3 synchronously so the first primary-channel sample is
        processed with the same clean frontend used by offline replay. */
     owner = (v34_state_t *) ((char *) s - offsetof(v34_state_t, rx));
-
-    /* One line per INFO1a: which symbol rates the far end picked for each
-       direction is otherwise visible nowhere on a live call. */
-    fprintf(stderr, "[V34] INFO1a: baud c2a=%d a2c=%d max_rate_a2c=%d high_carrier=%d "
-            "pre_emphasis=%d (baud codes 0..5 = 2400/2743/2800/3000/3200/3429, 6 = V.90 PCM)\n",
-            s->info1a.baud_rate_c_to_a, s->info1a.baud_rate_a_to_c, s->info1a.max_data_rate,
-            s->info1a.use_high_carrier ? 1 : 0, s->info1a.preemphasis_filter);
 
     /* Table 10 bits 37:39 confirm which protocol the analogue modem actually
        committed to: the integer 6 means genuine V.90 PCM downstream; 0-5
