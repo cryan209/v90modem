@@ -4721,6 +4721,10 @@ static bool restart_v90_phase2_locked(const char *reason)
         return false;
     }
 
+    /* The measured MP receive rate is enabled only for a V.34 fallback; a
+       retrain re-runs V.90 Phase 2. */
+    v34_set_trn_rate_selection(g_v34, false);
+
     /* The old PCM-side state belongs to the failed Phase-3 attempt.  The
        restarted V.34 receiver will create a new state only after a new,
        CRC-valid INFO1a. */
@@ -10542,6 +10546,11 @@ void me_tx_audio(int16_t *amp, int len)
                            prepare_v90_phase3_locked(), which no-ops from the next
                            call on. */
                         g_mod = ME_MOD_V34;
+                        /* And from here it is a plain V.34 call, so ask in MP
+                           for the receive rate Phase-4 TRN measures, as a call
+                           that started as V.34 does (start_v34_training()).
+                           restart_v90_phase2_locked() turns it off again. */
+                        v34_set_trn_rate_selection(g_v34, true);
 
                         /* The 1200 Hz notch belongs to V.90's Phase 2 CC echo
                            removal.  For plain V.34 at 3200 baud it sits at

@@ -7923,11 +7923,23 @@ static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_r
 
     /* V.34 10.1.2.3.4/.5 and 10.1.3.9: carry the directional Phase-2
        projections into MP.  Do not recreate them from the selected baud's
-       theoretical maximum; the line probe may have selected a lower rate. */
-    if (s->calling_party)
+       theoretical maximum; the line probe may have selected a lower rate.
+       A V.90 call that fell back to V.34 has this modem as the CALL modem
+       (V.90 9.2.1.1.8) although, as the digital modem, calling_party is
+       clear -- deciding on calling_party alone built its MP from an INFO1c
+       it never received and an INFO1a it never sent. */
+    if (s->calling_party  ||  s->tx.v90_v34_fallback)
     {
         a_to_c = s->tx.info1c.rate_data[s->rx.baud_rate].max_bit_rate;
         c_to_a = s->rx.info1a.max_data_rate;
+        /* The RasFinder's fallback INFO1a projects 0 for our transmit
+           direction, which is not a rate (Table 11 bits 30:33 give 1-14).
+           Treat it as no projection and offer our configured ceiling; the
+           peer's own MP still caps the result.  Mapping it to the minimum
+           would pin the upstream at 2400 bit/s for no measured reason. */
+        if (s->tx.v90_v34_fallback  &&  !mp_rate_n_is_valid(c_to_a))
+            c_to_a = (s->tx.parms.max_bit_rate_code >> 1) + 1;
+        /*endif*/
     }
     else
     {
@@ -7952,16 +7964,19 @@ static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_r
 
         if (measured > 0)
         {
-            int *mine = s->calling_party ? &a_to_c : &c_to_a;
+            /* Our receive direction: answer-to-call for the call modem. */
+            int *mine = (s->calling_party  ||  s->tx.v90_v34_fallback)
+                      ? &a_to_c : &c_to_a;
+            int before = *mine;
 
-            V34_TX_LOG(tx_log_state(&s->tx), SPAN_LOG_FLOW,
-                     "Tx MP receive-rate: Phase-4 TRN SNR %.1f dB would give "
-                     "%d bps; asking %d bps (measurement %s)\n",
-                     snr_db, measured*2400, (*mine)*2400,
-                     v34_trn_rate_selection_enabled(s) ? "applied" : "diagnostic only");
             if (v34_trn_rate_selection_enabled(s)  &&  measured < *mine)
                 *mine = measured;
             /*endif*/
+            V34_TX_LOG(tx_log_state(&s->tx), SPAN_LOG_FLOW,
+                     "Tx MP receive-rate: Phase-4 TRN SNR %.1f dB would give "
+                     "%d bps; probe/ceiling %d bps, asking %d bps (measurement %s)\n",
+                     snr_db, measured*2400, before*2400, (*mine)*2400,
+                     v34_trn_rate_selection_enabled(s) ? "applied" : "diagnostic only");
         }
         /*endif*/
     }
@@ -8606,14 +8621,16 @@ static void data_baud_init(v34_state_t *s)
         int tx_rate_n;
         const mp_t *remote_mp;
 
-        tx_rate_n = s->calling_party
+        /* The call modem transmits call-to-answer -- including a V.90 call
+           that fell back to V.34 (9.2.1.1.8), whose calling_party is clear. */
+        tx_rate_n = (s->calling_party  ||  s->tx.v90_v34_fallback)
                   ? s->tx.negotiated_rate_c_to_a
                   : s->tx.negotiated_rate_a_to_c;
         if (!s->tx.negotiated_rates_valid || !mp_rate_n_is_valid(tx_rate_n))
         {
             /* Defensive only: §11.4 does not permit E until a mutually valid
                MP/MP-prime exchange has selected both rates. */
-            tx_rate_n = s->calling_party
+            tx_rate_n = (s->calling_party  ||  s->tx.v90_v34_fallback)
                       ? s->tx.mp.bit_rate_c_to_a
                       : s->tx.mp.bit_rate_a_to_c;
         }

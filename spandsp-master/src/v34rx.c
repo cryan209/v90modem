@@ -192,6 +192,7 @@ static double v90_reneg_feed_rms = 0.0;
    produced a lock (see the hint_h line in the MP stage).  ME_V34_J_HINT=0
    withholds it. */
 static bool v34_rx_caller_hearing_own_phase3(v34_rx_state_t *s);
+static bool v34_rx_is_v34_call_modem(const v34_rx_state_t *s);
 static bool v34_rx_answerer_sending_own_phase3(v34_rx_state_t *s);
 
 static int v34_p4_trn_dd_start(void)
@@ -3448,7 +3449,9 @@ static bool mp_apply_parameters(v34_state_t *s, const mp_t *remote)
     if (!mp_negotiate_rates(s, remote))
         return false;
 
-    rx_rate_n = s->rx.calling_party
+    /* The call modem receives answer-to-call; a V.90 call that fell back to
+       V.34 is the call modem with calling_party clear (V.90 9.2.1.1.8). */
+    rx_rate_n = (s->rx.calling_party  ||  s->rx.v90_v34_fallback)
               ? s->tx.negotiated_rate_a_to_c
               : s->tx.negotiated_rate_c_to_a;
     s->rx.bit_rate = (rx_rate_n - 1)*2;
@@ -8416,6 +8419,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 if (s->phase3_pp_onset >= 0
                     &&  s->v90_mode
                     &&  !s->calling_party
+                    &&  !s->v90_v34_fallback  /* a V.34 call from Phase 3 on */
                     &&  v34_pp_onset_trim_enabled())
                 {
                     int late = acquire_bauds - s->phase3_pp_onset - PHASE3_PP_ONSET_NOMINAL;
@@ -8986,7 +8990,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             s->scramble_reg = 0;
             phase4_j_detector_reset(s);
             v34_rx_phase4_trn_hyp_reset(s);
-            if (s->calling_party)
+            if (v34_rx_is_v34_call_modem(s))
             {
                 /* Caller-side Phase 4 does not wait for a far-end J':
                    after detecting the answerer's S/S-bar handoff, the far end
@@ -9035,7 +9039,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             }
             phase4_j_detector_reset(s);
             v34_rx_phase4_trn_hyp_reset(s);
-            if (s->calling_party)
+            if (v34_rx_is_v34_call_modem(s))
             {
                 s->phase4_j_seen = 1;
                 s->phase4_trn_after_j = 0;
@@ -9066,7 +9070,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             s->scramble_reg = 0;
             phase4_j_detector_reset(s);
             v34_rx_phase4_trn_hyp_reset(s);
-            if (s->calling_party)
+            if (v34_rx_is_v34_call_modem(s))
             {
                 s->phase4_j_seen = 1;
                 s->phase4_trn_after_j = 0;
@@ -11196,6 +11200,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     if (eye_check
         &&  s->v90_mode
         &&  !s->calling_party
+        &&  !s->v90_v34_fallback  /* no Ja to release it in a V.34 fallback */
         &&  s->phase3_pp_started
         &&  !s->v90_p3_eye_released
         &&  (s->stage == V34_RX_STAGE_PHASE3_TRAINING
@@ -11363,7 +11368,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                    u-law its whole payload (0 bits against 16421), because
                    the move lands on an equalizer PP has just trained at the
                    old instant. */
-                s->eye_flip_pending = ((s->v90_mode  &&  !s->calling_party)
+                s->eye_flip_pending = ((s->v90_mode  &&  !s->calling_party
+                                         &&  !s->v90_v34_fallback)
                                         ||  v34_eye_pp_defer_all())
                                        &&  v34_eye_pp_defer_enabled();
                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
@@ -14189,10 +14195,13 @@ SPAN_DECLARE(bool) v34_rx_line_ec_window(v34_state_t *s)
     }
     /*endif*/
     rx = &s->rx;
-    if (rx->v90_mode  ||  !rx->duplex)
+    /* A V.90 call that fell back to V.34 is a V.34 call from Phase 3 on, with
+       this modem the call modem (V.90 9.2.1.1.8): its S-bar..TRN goes out
+       while the analogue modem is silent (11.3.1.2.4) exactly as here. */
+    if ((rx->v90_mode  &&  !rx->v90_v34_fallback)  ||  !rx->duplex)
         return false;
     /*endif*/
-    if (!rx->calling_party  &&  !answer_role)
+    if (!v34_rx_is_v34_call_modem(rx)  &&  !answer_role)
         return false;
     /*endif*/
     /* From our S-bar to the end of our TRN.  J is excluded: the far end
@@ -14203,7 +14212,7 @@ SPAN_DECLARE(bool) v34_rx_line_ec_window(v34_state_t *s)
     if (s->tx.stage < V34_TX_STAGE_FIRST_NOT_S  ||  s->tx.stage > V34_TX_STAGE_TRN)
         return false;
     /*endif*/
-    if (rx->calling_party  &&  rx->stage != V34_RX_STAGE_PHASE3_WAIT_S)
+    if (v34_rx_is_v34_call_modem(rx)  &&  rx->stage != V34_RX_STAGE_PHASE3_WAIT_S)
         return false;
     /*endif*/
     return true;

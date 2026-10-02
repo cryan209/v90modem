@@ -453,7 +453,10 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     v34_rx_phase4_trn_hyp_reset(s);
                     s->phase4_j_lock_hyp = best_h;
                     /* Use role-based tap, not TRN auto-detected tap (see §7) */
-                    s->scrambler_tap = s->calling_party ? 4 : 17;
+                    /* The call modem descrambles the answer modem's GPA, and
+                       a V.90 call that fell back to V.34 is the call modem
+                       with calling_party clear (V.90 9.2.1.1.8). */
+                    s->scrambler_tap = (s->calling_party  ||  s->v90_v34_fallback) ? 4 : 17;
                     s->received_event = V34_EVENT_J_DASHED;
                     span_log(s->logging, SPAN_LOG_FLOW,
                              "Rx - Phase 4: explicit J' detected (hyp=%d phase=%d score=%d/32 bits=%d dom=%s tap=%d ord=%s)\n",
