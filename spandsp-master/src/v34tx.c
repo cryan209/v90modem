@@ -1386,6 +1386,13 @@ static void prepare_info1c(v34_state_t *s)
             s->tx.info1c.rate_data[i].use_high_carrier;
     }
     s->tx.info1c.freq_offset = v34_probe_frequency_offset(s);
+    /* One line per INFO1c/INFO1d: the per-symbol-rate maxima the far end
+       chooses its symbol rates from (10.1.2.3.4), as N (rate = 2400*N). */
+    fprintf(stderr, "[V34] INFO1%s sent: max N by baud 2400=%d 2743=%d 2800=%d 3000=%d 3200=%d 3429=%d\n",
+            s->tx.v90_mode ? "d" : "c",
+            s->tx.info1c.rate_data[0].max_bit_rate, s->tx.info1c.rate_data[1].max_bit_rate,
+            s->tx.info1c.rate_data[2].max_bit_rate, s->tx.info1c.rate_data[3].max_bit_rate,
+            s->tx.info1c.rate_data[4].max_bit_rate, s->tx.info1c.rate_data[5].max_bit_rate);
     if (v92_info1d)
     {
         /* The 3429-HI carrier selector that occupied bit 70 in V.34/V.90

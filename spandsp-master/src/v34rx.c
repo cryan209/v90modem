@@ -4825,6 +4825,13 @@ static void v90_enter_phase3_from_info1a(v34_rx_state_t *s)
        processed with the same clean frontend used by offline replay. */
     owner = (v34_state_t *) ((char *) s - offsetof(v34_state_t, rx));
 
+    /* One line per INFO1a: which symbol rates the far end picked for each
+       direction is otherwise visible nowhere on a live call. */
+    fprintf(stderr, "[V34] INFO1a: baud c2a=%d a2c=%d max_rate_a2c=%d high_carrier=%d "
+            "pre_emphasis=%d (baud codes 0..5 = 2400/2743/2800/3000/3200/3429, 6 = V.90 PCM)\n",
+            s->info1a.baud_rate_c_to_a, s->info1a.baud_rate_a_to_c, s->info1a.max_data_rate,
+            s->info1a.use_high_carrier ? 1 : 0, s->info1a.preemphasis_filter);
+
     /* Table 10 bits 37:39 confirm which protocol the analogue modem actually
        committed to: the integer 6 means genuine V.90 PCM downstream; 0-5
        means it declined V.90 and is falling back to plain V.34 at that
