@@ -10077,6 +10077,21 @@ SPAN_DECLARE(void) v34_force_phase3_rx(v34_state_t *s)
     s->rx.stage = V34_RX_STAGE_PHASE3_TRAINING;
     s->rx.duration = 0;
     s->rx.received_event = V34_EVENT_NONE;
+    if (s->tx.v90_v34_fallback)
+    {
+        /* V.90 9.2.1.1.8: an INFO1a selecting V.34 makes us the V.34 CALL
+           modem, which per 11.3.1.1.1-11.3.1.1.3 is silent until it has
+           received the answer modem's S, S-bar, PP, TRN and J, and only then
+           sends S.  s_not_s_baud_init() above has configured the transmitter
+           from INFO1a but also started S at once -- i.e. as a second answer
+           modem, on top of the analogue modem's own Phase 3 (9.2.2.1.9), so
+           our S-to-S-bar was long gone by the time it listened for one
+           (11.3.1.2.4) and the call sat in J for the rest of its life
+           (rf-tower-u2900-1, 2026-10-02).  Hold the transmitter in the
+           call-modem wait; it answers the peer's J with S. */
+        v90_v34_fallback_wait_init(s);
+    }
+    /*endif*/
 }
 /*- End of function --------------------------------------------------------*/
 

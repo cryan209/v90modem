@@ -142,9 +142,10 @@ enum v34_tx_stages_e {
     V34_TX_STAGE_PHASE4_TRN,
     V34_TX_STAGE_MP,
     /* V.90 §9.2.1.1.8 V.34 fallback silent wait (call-modem role).  In
-       spandsp's enum this sits after the 18 uncopied HDX_* stages, so the
-       value is pinned explicitly here: MP(47) + 18 HDX + 1 = 66. */
-    V34_TX_STAGE_V34_FALLBACK_WAIT_J = 66,
+       spandsp's enum this sits after the 18 uncopied HDX_* stages: MP + 18
+       HDX + 1.  It was pinned at 66 on the belief that MP was 47; MP is 50,
+       so the stage read as UNKNOWN(69) in every trace. */
+    V34_TX_STAGE_V34_FALLBACK_WAIT_J = V34_TX_STAGE_MP + 19,
 };
 
 /* MUST stay in sync, value for value, with enum v34_events_e in
@@ -1946,6 +1947,8 @@ static modem_echo_can_segment_state_t *g_echo_can = NULL;
 /* When the plain-V.34 receiver entered V34_RX_STAGE_PHASE3_WAIT_S, for
  * ME_V34_PHASE3_S_TIMEOUT_MS. */
 static uint64_t g_v34_phase3_wait_s_ms;
+/* Start of our J in a V.90->V.34 fallback, for ME_V90_FALLBACK_S_TIMEOUT_MS. */
+static uint64_t g_v90_fallback_j_ms;
 static bool g_advertise_v90 = true;
 /* ME_MODE=v22 offers V.22bis alone in CM/JM.  It exists for a bearer whose far
  * end is a real analogue line rather than a digital G.711 path: V.22bis has
@@ -8449,6 +8452,50 @@ skip_8k_codewords:
                      * next attempt a fresh draw.  Default 0 (off) -- on a
                      * digital bearer this never fires and the wait is bounded
                      * by the training timeout as before. */
+                    /* V.90 9.2.1.1.8 V.34 fallback: we are the V.34 call
+                     * modem, so after our TRN we send J and wait for the
+                     * analogue modem's S (11.3.1.1.7).  11.4.2.1.1 bounds
+                     * that wait at 600 ms plus a round trip from the start of
+                     * J, and 11.4.2.1 lets the call modem retrain at any time;
+                     * 9.2.1.1.8 says any retrain uses V.90's Phase 2.  Nothing
+                     * bounded it, so a peer that had given up left us sending
+                     * J until the 60 s training timeout (rf-tower-u2900-1:
+                     * J from 30.8 s to the end of the call, the peer silent
+                     * from 33 s).  ME_V90_FALLBACK_S_TIMEOUT_MS, measured from
+                     * the start of our J; default 2000 ms leaves 1.4 s for the
+                     * round trip, 0 restores the unbounded wait. */
+                    /* Keyed on our J, not on the receiver: SpanDSP's own
+                     * 11.3.2.1.1 recovery moves the receiver to TONE_A /
+                     * INFO1A while the transmitter carries on with J, and a
+                     * receiver-stage test then never fires. */
+                    if (g_v90_fallback_v34_logged
+                        && tx_stage == V34_TX_STAGE_J
+                        && rx_stage != V34_RX_STAGE_PHASE4_S
+                        && rx_stage != V34_RX_STAGE_PHASE4_S_BAR
+                        && rx_stage != V34_RX_STAGE_PHASE4_TRN
+                        && rx_stage != V34_RX_STAGE_PHASE4_MP
+                        && rx_stage != V34_RX_STAGE_DATA) {
+                        int limit = parse_env_int("ME_V90_FALLBACK_S_TIMEOUT_MS", 2000);
+
+                        if (g_v90_fallback_j_ms == 0)
+                            g_v90_fallback_j_ms = trace_now_ms();
+                        else if (limit > 0
+                                 && trace_now_ms() - g_v90_fallback_j_ms
+                                    > (uint64_t) limit) {
+                            g_v90_fallback_j_ms = 0;
+                            ME_LOG("[ME] V.90->V.34 fallback: no S from the "
+                                   "analogue modem %d ms after our J "
+                                   "(V.34 11.4.2.1.1); retraining via V.90 "
+                                   "Phase 2 (9.2.1.1.8)\n", limit);
+                            g_mod = ME_MOD_V90;
+                            (void) restart_v90_phase2_locked(
+                                "V.34 fallback: no S after J");
+                            pthread_mutex_unlock(&g_state_mtx);
+                            return;
+                        }
+                    } else {
+                        g_v90_fallback_j_ms = 0;
+                    }
                     if (rx_stage == V34_RX_STAGE_PHASE3_WAIT_S) {
                         int limit = parse_env_int("ME_V34_PHASE3_S_TIMEOUT_MS", 0);
 
