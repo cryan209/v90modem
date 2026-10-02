@@ -13938,6 +13938,22 @@ static int v34_phase3_s_spectral_enabled(void)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Are we the V.34 CALL modem?  In plain V.34 that is the calling party.  On
+ * a V.90 call it is true exactly when the analogue modem's INFO1a selected
+ * V.34 (V.90 9.2.1.1.8: the digital modem then proceeds per 11.3.1.1/V.34
+ * "assuming the role of a call modem"), whichever side placed the call.  The
+ * plain-V.34 call-modem fixes used to test !v90_mode && calling_party, which
+ * left that fallback without them: against the RasFinder it missed the
+ * peer's Phase 4 S at 34.4 s on every attempt (rf-tower-fb-2). */
+static bool v34_rx_is_v34_call_modem(const v34_rx_state_t *s)
+{
+    if (s->v90_mode)
+        return s->v90_v34_fallback;
+    /*endif*/
+    return s->calling_party;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* Plain V.34 call modem, our J on the air: V.34 11.3.1.1.7 has it "send
  * sequence J and condition its receiver to detect signal S", and the S that
  * comes is the answer modem's Phase 4 S of 11.4.1.2.1 -- 128T, then S-bar and
@@ -13967,8 +13983,7 @@ bool v34_rx_caller_awaiting_phase4_s(v34_rx_state_t *s)
     }
     /*endif*/
     if (!enabled
-        ||  s->v90_mode
-        ||  !s->calling_party
+        ||  !v34_rx_is_v34_call_modem(s)
         ||  !s->duplex
         ||  s->stage != V34_RX_STAGE_PHASE3_WAIT_S)
         return false;
@@ -14100,8 +14115,7 @@ static bool v34_rx_caller_hearing_own_phase3(v34_rx_state_t *s)
     const v34_state_t *owner;
 
     if (!v34_p3_echo_freeze_mask()
-        ||  s->v90_mode
-        ||  !s->calling_party
+        ||  !v34_rx_is_v34_call_modem(s)
         ||  !s->duplex
         ||  s->stage != V34_RX_STAGE_PHASE3_WAIT_S)
         return false;
@@ -14232,10 +14246,14 @@ static void v34_rx_watch_phase3_s(v34_rx_state_t *s,
             /*endif*/
             if (dbg  &&  s->stage == V34_RX_STAGE_PHASE3_WAIT_S)
             {
+                const v34_state_t *o = (const v34_state_t *) ((const char *) s - offsetof(v34_state_t, rx));
+
                 V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
-                         "Rx - Phase 3 S watch idle: enabled=%d present=%d baud_rate=%d\n",
+                         "Rx - Phase 3 S watch idle: enabled=%d present=%d baud_rate=%d "
+                         "v90=%d fallback=%d calling=%d duplex=%d tx_stage=%d\n",
                          v34_phase3_s_spectral_enabled(), s->phase3_s_present,
-                         s->baud_rate);
+                         s->baud_rate, s->v90_mode, s->v90_v34_fallback,
+                         s->calling_party, s->duplex, o->tx.stage);
             }
             /*endif*/
         }

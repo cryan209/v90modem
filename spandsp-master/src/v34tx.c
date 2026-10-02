@@ -707,6 +707,7 @@ static void v34_condition_rx_for_infoh(v34_state_t *s);
 static void v90_wait_tone_a_init(v34_state_t *s, bool preserve_tone_a_event);
 static void v90_wait_info1a_init(v34_state_t *s);
 static void v90_v34_fallback_wait_init(v34_state_t *s);
+static complex_sig_t get_v34_call_phase3_wait_baud(v34_state_t *s);
 static complex_sig_t get_phase4_baud(v34_state_t *s);
 static void info1_baud_init(v34_state_t *s);
 static int info1a_repeats(v34_state_t *s);
@@ -10087,9 +10088,21 @@ SPAN_DECLARE(void) v34_force_phase3_rx(v34_state_t *s)
            modem, on top of the analogue modem's own Phase 3 (9.2.2.1.9), so
            our S-to-S-bar was long gone by the time it listened for one
            (11.3.1.2.4) and the call sat in J for the rest of its life
-           (rf-tower-u2900-1, 2026-10-02).  Hold the transmitter in the
-           call-modem wait; it answers the peer's J with S. */
-        v90_v34_fallback_wait_init(s);
+           (rf-tower-u2900-1, 2026-10-02).  Hold the transmitter silent until
+           the peer's J, exactly as the plain V.34 call modem does
+           (get_v34_call_info1a_wait_baud): the S/S-bar init has run once,
+           here, and the J only switches the getbaud.  The separate
+           V34_FALLBACK_WAIT_J stage was tried first and is wrong for this:
+           it re-runs s_not_s_baud_init() on J, which on a V.90 call resets
+           the receiver to TONE_B (PHASE3_WAIT_S sorts below
+           PHASE3_TRAINING, and this INFO1a's projected rate is 0) and wipes
+           its Phase 3 state, so the peer's Phase 4 S went unheard
+           (rf-tower-fb-2). */
+        s->tx.phase3_call_wait_j = true;
+        s->tx.current_getbaud = get_v34_call_phase3_wait_baud;
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - V.90 declined -> V.34 fallback (9.2.1.1.8): call-modem role; "
+                 "silent until the far end's Phase 3 J\n");
     }
     /*endif*/
 }
