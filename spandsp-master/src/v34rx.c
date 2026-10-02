@@ -16460,6 +16460,14 @@ static void v90_t3_b1_put_bit(void *user_data, int bit)
     (void) bit;
 }
 
+/* Set while v34_rx_b1_search() tries the trellis states: only the winner's
+   template is kept, so measuring the CMA dispersion constant over
+   V34_V90_T3_CMA_MEASURE_SYMBOLS (32000) symbols past B1 for every candidate
+   is wasted -- 16 x ~5 ms in the media thread, which held our transmit up
+   for 80-130 ms at every V.34 data-mode entry (rtp-tx.csv,
+   rf-tower-v34-2) and put a hole in the signal the far end receives. */
+static bool b1_template_skip_cma = false;
+
 static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
                                               int scrambler_tap,
                                               int trellis_override,
@@ -16554,6 +16562,7 @@ static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
        recover it could never arm.  Keep generating past B1 for the sample --
        the symbols are still drawn from the same mapper -- and throw them
        away. */
+    if (!b1_template_skip_cma)
     {
         double p2_sum = 0.0;
         double p4_sum = 0.0;
@@ -16678,6 +16687,7 @@ int v34_rx_b1_search(v34_rx_state_t *s, int search, int *offset_out,
     if (states <= 0  ||  states > 64)
         states = 1;
     /*endif*/
+    b1_template_skip_cma = true;
     for (int st = 0;  st < states;  st++)
     {
         if (!v34_build_expected_b1_tap_trellis(s, v34_expected_b1_default_tap(s), -1, st))
@@ -16701,6 +16711,7 @@ int v34_rx_b1_search(v34_rx_state_t *s, int search, int *offset_out,
         /*endfor*/
     }
     /*endfor*/
+    b1_template_skip_cma = false;
     (void) v34_build_expected_b1_tap_trellis(s, v34_expected_b1_default_tap(s), -1, best_state);
     /* 10.1.3.1 requires a zero-state B1 at the final data-frame epoch.
        A nonzero-state template match recovers the constellation, but does

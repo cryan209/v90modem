@@ -11619,7 +11619,7 @@ void me_flush_io_schedule(void)
         fflush(f);
 }
 
-void me_rx_g711(const uint8_t *codewords, int count)
+static void me_rx_g711_impl(const uint8_t *codewords, int count)
 {
     int offset;
     bool raw_v91;
@@ -11778,7 +11778,7 @@ static bool me_sounder_active(void)
     return cached != 0;
 }
 
-int me_tx_g711(uint8_t *codewords, int count)
+static int me_tx_g711_impl(uint8_t *codewords, int count)
 {
     int offset;
     uint64_t raw_octets = 0;
@@ -12029,4 +12029,41 @@ me_law_t me_get_law(void)
 const char *me_get_dial_uri(void)
 {
     return g_dial_uri;
+}
+
+/* A media callback that runs long holds up our transmit: pjmedia sends the
+   next RTP packet only when the callback returns, so a 130 ms callback is a
+   130 ms hole in the stream the far end's gateway plays out.  Measured live
+   against the RasFinder, rtp-tx.csv showed 82-132 ms send stalls at every
+   V.34 data-mode entry and retrain while the receive side was paced to
+   0.2 ms.  Log any callback over 20 ms (one packet) with where the engine was,
+   so the slow step can be named.  Cheap: two clock reads per callback. */
+static void me_media_timing_note(const char *dir, uint64_t ns)
+{
+    if (ns > 20000000ULL)
+        ME_LOG("[ME] slow media callback: %s took %.1f ms (state=%d mod=%d v34_rx=%d v34_tx=%d)\n",
+               dir, (double) ns/1e6, (int) g_state, (int) g_mod,
+               g_v34 ? v34_get_rx_stage(g_v34) : -1, g_v34 ? v34_get_tx_stage(g_v34) : -1);
+}
+
+static uint64_t me_mono_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t) ts.tv_sec*1000000000ULL + (uint64_t) ts.tv_nsec;
+}
+
+void me_rx_g711(const uint8_t *codewords, int count)
+{
+    uint64_t t0 = me_mono_ns();
+    me_rx_g711_impl(codewords, count);
+    me_media_timing_note("rx", me_mono_ns() - t0);
+}
+
+int me_tx_g711(uint8_t *codewords, int count)
+{
+    uint64_t t0 = me_mono_ns();
+    int n = me_tx_g711_impl(codewords, count);
+    me_media_timing_note("tx", me_mono_ns() - t0);
+    return n;
 }
