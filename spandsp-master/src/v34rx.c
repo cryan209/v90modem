@@ -10873,7 +10873,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    Phase 4 TRN hypothesis search then reads a flat 50% ones for
                    the rest of the call.  Let it converge, then stop it. */
                 if (s->stage == V34_RX_STAGE_PHASE4_TRN
-                    &&  !s->v90_mode
+                    &&  (!s->v90_mode  ||  s->v90_v34_fallback)
                     &&  v34_p4_trn_dd_start() > 0
                     &&  s->phase4_trn_after_j >= v34_p4_trn_dd_start())
                 {
