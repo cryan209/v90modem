@@ -4435,10 +4435,30 @@ static void initial_ab_not_ab_baud_init(v34_state_t *s)
    time not to exceed 550 ms plus a round-trip delay", and a digital modem
    analyses that much: MICA, given 400 ms, measured Tone A and silence as
    probe and answered with a 7200 bit/s ceiling and a 1.9 Hz offset.  27
-   periods is 540 ms.  Other roles keep the 400 ms they have been tuned on. */
+   periods is 540 ms.
+
+   The plain V.34 call modem has the same rule (10.1.2.4: L2 "for no longer
+   than 550 ms plus a round trip delay"; 11.2.1.1.7: INFO1c only after Tone A
+   AND that much L2 echo) and had the same defect: the RasFinder received 400
+   ms of L2, then our POST_L2_WAIT_TONE_A silence, raised Tone A ~270 ms after
+   our L2 stopped reaching it, and projected N=4 (9600 bit/s) for our
+   direction at every transmit level and on both 3200-baud carriers, while
+   accepting 16800-21600 from us whenever its MP did not follow that
+   projection.  540 ms needs no round-trip estimate to stay inside the bound.
+   ME_V34_L2_CYCLES overrides (diagnostic).  The answer modem keeps 400 ms. */
 static int l2_cycles(const v34_state_t *s)
 {
-    return (s->tx.v90_mode  &&  s->tx.calling_party)  ?  27  :  20;
+    static int forced = -2;
+
+    if (forced == -2)
+    {
+        const char *e = getenv("ME_V34_L2_CYCLES");
+
+        forced = (e  &&  atoi(e) >= 1  &&  atoi(e) <= 27)  ?  atoi(e)  :  -1;
+    }
+    if (s->tx.calling_party  &&  (s->tx.duplex  ||  s->tx.v90_mode))
+        return (forced > 0)  ?  forced  :  27;
+    return 20;
 }
 /*- End of function --------------------------------------------------------*/
 
