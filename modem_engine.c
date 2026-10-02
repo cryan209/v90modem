@@ -3677,7 +3677,12 @@ static bool v34_b1_rate_check_locked(void)
        The MP the renegotiation sends reads the rate policy just set.  If 11.6
        is disabled or will not start, retrain as before; if it starts and no
        E arrives, the existing 11.6.2 timeout retrains. */
-    if (me_v34_reneg_enabled()) {
+    /* Default: retrain.  The §11.6 path below is kept behind
+       ME_V34_B1_RENEG=1 for peers that answer it; the RasFinder ignored a
+       correct renegotiation opened both 0.16 s (rf-tower-fb-11) and 2.0 s
+       (rf-tower-fb-13) into data mode -- our S on the wire, none back -- so
+       against it each attempt only added ~6 s before the same retrain. */
+    if (parse_env_int("ME_V34_B1_RENEG", 0) != 0 && me_v34_reneg_enabled()) {
         if (me_v34_b1_reneg_delay_ms() > 0) {
             g_v34_b1_reneg_pending = true;
             g_v34_b1_reneg_bps = supported*2400;
