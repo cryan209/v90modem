@@ -3583,6 +3583,8 @@ static bool retrain_on_loss_due(int cap);
 static void v34_reneg_clear_locked(void);
 static bool restart_v34_phase2_locked(const char *reason);
 static bool restart_v90_phase2_locked(const char *reason);
+static int me_v34_reneg_enabled(void);
+static void v34_reneg_begin_locked(void);
 
 static bool v34_b1_rate_check_locked(void)
 {
@@ -3623,13 +3625,29 @@ static bool v34_b1_rate_check_locked(void)
            "negotiated %d bps\n", snr, baud_by_code[rx_code], supported*2400, *ours*2400);
     if (*ours <= supported || !retrain_on_loss_due(me_v34_max_loss_retrains()))
         return false;
-    ME_LOG("[ME] V.34 B1: asking for %d bps instead of %d bps and retraining per 11.5\n",
-           supported*2400, *ours*2400);
     *ours = supported;
     v34_set_mp_rate_policy(g_v34, a_to_c, c_to_a);
     g_loss_retrains++;
     g_last_loss_retrain_ms = trace_now_ms();
     v34_reneg_clear_locked();
+    /* 11.6 exists to change the rate: S, S-bar, TRN, MP, E and B1 at the
+       new rate, about 2 s, with the call and its error-control link kept.  A
+       11.5 retrain re-runs Phase 2 and 3 for ~10 s, which against the
+       RasFinder decided whether a call connected at all -- it hangs up about
+       a minute after answering, and a fallback call that measured 25.7 dB on
+       B1 at 21600 spent that minute retraining to 14400 (rf-tower-fb-10).
+       The MP the renegotiation sends reads the rate policy just set.  If 11.6
+       is disabled or will not start, retrain as before; if it starts and no
+       E arrives, the existing 11.6.2 timeout retrains. */
+    if (me_v34_reneg_enabled() && v34_start_rate_renegotiation(g_v34) == 0) {
+        ME_LOG("[ME] V.34 B1: asking for %d bps by a §11.6 rate "
+               "renegotiation\n", supported*2400);
+        trace_phase("V34 B1 rate -> §11.6 renegotiation to %d", supported*2400);
+        v34_reneg_begin_locked();
+        return true;
+    }
+    ME_LOG("[ME] V.34 B1: asking for %d bps and retraining per 11.5\n",
+           supported*2400);
     if (g_v90_fallback_v34_logged) {
         /* V.90 9.2.1.1.8: a retrain of a call that fell back to V.34 uses
            V.90's Phase 2.  The rate policy just set survives the restart
@@ -8582,8 +8600,15 @@ skip_8k_codewords:
                             ME_LOG("[ME] V.34 §11.6 rate renegotiation "
                                    "produced no E; falling back to a §11.5 "
                                    "retrain\n");
-                            (void) restart_v34_phase2_locked(
-                                "rate renegotiation timeout");
+                            if (g_v90_fallback_v34_logged) {
+                                /* V.90 9.2.1.1.8: retrains use V.90 Phase 2. */
+                                g_mod = ME_MOD_V90;
+                                (void) restart_v90_phase2_locked(
+                                    "rate renegotiation timeout");
+                            } else {
+                                (void) restart_v34_phase2_locked(
+                                    "rate renegotiation timeout");
+                            }
                         }
                     } else if (g_mod == ME_MOD_V34 && v34_b1_rate_check_locked()) {
                         /* Retrained at a rate B1 says this line carries. */
