@@ -187,6 +187,20 @@
    (Table 16 bits 30:33): over the VG224 the RasFinder projects only 9600
    for what we send at 3200 baud, against 24000 the other way, on a noisier
    D/A-to-loop path where only our level can buy SNR. */
+static bool v34_tx_no_3200_high(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *e = getenv("ME_V34_TX_NO_3200_HIGH");
+
+        cached = (e  &&  atoi(e) != 0)  ?  1  :  0;
+    }
+    return cached != 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 static float v34_nominal_tx_dbm0(void)
 {
     static float cached = 1.0f;
@@ -1021,8 +1035,12 @@ static int info0_sequence_tx(v34_tx_state_t *s)
     bitstream_put(&bs, &t, (v34_capabilities.support_baud_rate_high_carrier[V34_BAUD_RATE_3000])  ?  1  :  0, 1);
     /* 17       Set to 1 indicates the ability to transmit at the low carrier frequency with a symbol rate of 3200. */
     bitstream_put(&bs, &t, (v34_capabilities.support_baud_rate_low_carrier[V34_BAUD_RATE_3200])  ?  1  :  0, 1);
-    /* 18       Set to 1 indicates the ability to transmit at the high carrier frequency with a symbol rate of 3200. */
-    bitstream_put(&bs, &t, (v34_capabilities.support_baud_rate_high_carrier[V34_BAUD_RATE_3200])  ?  1  :  0, 1);
+    /* 18       Set to 1 indicates the ability to transmit at the high carrier frequency with a symbol rate of 3200.
+                ME_V34_TX_NO_3200_HIGH=1 clears it (diagnostic, default off): bits 15:18 describe
+                OUR TRANSMITTER (V.34 Table 12), so this makes the answer modem put our direction
+                on the 3200 low carrier or another symbol rate, to tell a carrier-specific transmit
+                impairment from a general one. */
+    bitstream_put(&bs, &t, (v34_capabilities.support_baud_rate_high_carrier[V34_BAUD_RATE_3200] && !v34_tx_no_3200_high())  ?  1  :  0, 1);
     /* 19       Set to 0 indicates that transmission with a symbol rate of 3429 is disallowed. */
     bitstream_put(&bs, &t, (v34_capabilities.rate_3429_allowed)  ?  1  :  0, 1);
     /* 20       Set to 1 indicates the ability to reduce transmit power to a value lower than the nominal setting. */
