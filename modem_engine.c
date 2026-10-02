@@ -5683,6 +5683,24 @@ static int v34_get_bit_cb(void *user_data)
     (void)user_data;
     if (g_v34hdx_fax_control_started && di_fax_active())
         return di_fax_v34hdx_get_bit();
+    /* Idle at mark until B1 has said this data mode is the one we keep.
+       The B1 rate check can retrain the line straight out of a data mode it
+       judges too fast (~10 s against the RasFinder), and V.42's detection
+       pattern sent in that data mode starts the far end's V.42 there: the
+       RasFinder answered within 0.1 s, then waited out the retrain in LAPM,
+       sometimes still answering our XID afterwards (rf-tower-fb-19) and
+       sometimes having gone back to idle marks for good (fb-18,
+       txcap-3), with V.42 never coming up on a clean data mode.  Mark is
+       what V.42 8.1's ODP is sent over anyway, and LAPM's timers run on
+       transmitted bits, so nothing of V.42 starts here.  Bounded by
+       ME_V34_B1_TX_HOLD_MS (500) in case B1 never yields an SNR; 0 disables. */
+    if (g_state == ME_DATA && g_mod == ME_MOD_V34 && !g_v34_b1_rate_checked) {
+        static int hold_ms = -1;
+        if (hold_ms < 0)
+            hold_ms = parse_env_int("ME_V34_B1_TX_HOLD_MS", 500);
+        if (hold_ms > 0 && data_mode_elapsed_ms() < hold_ms)
+            return 1;
+    }
     bit = ds_tx_get_bit(&g_data_stack);
     return (bit == DS_TX_NO_DATA) ? SIG_STATUS_END_OF_DATA : bit;
 }
