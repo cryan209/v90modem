@@ -72,6 +72,13 @@ static int ring_write(ring_t *r, const uint8_t *data, int len) {
     return written;
 }
 
+static int ring_space(ring_t *r) {
+    pthread_mutex_lock(&r->mtx);
+    int used = (r->head - r->tail + RING_SIZE) % RING_SIZE;
+    pthread_mutex_unlock(&r->mtx);
+    return RING_SIZE - 1 - used;
+}
+
 static int ring_read(ring_t *r, uint8_t *buf, int max) {
     pthread_mutex_lock(&r->mtx);
     int n = 0;
@@ -387,9 +394,17 @@ static void *pty_reader_thread(void *arg)
         fd_set fds;
         int maxfd = ctrl_pty.master_fd;
 
+        /* Flow control toward the DTE: while online, read payload only when
+         * there is room for it.  Unread bytes stay in the pty, which fills
+         * and blocks the DTE's writes -- the alternative, reading and then
+         * truncating in ring_write(), lost whole runs of a bulk transfer
+         * (artifacts/slm-v90-pay1: 521 gaps downstream at 54666 bit/s). */
+        bool payload_room = ring_space(&upstream_ring) >= (int) sizeof(buf);
+
         FD_ZERO(&fds);
-        FD_SET(ctrl_pty.master_fd, &fds);
-        if (split_mode && data_pty.master_fd >= 0) {
+        if (split_mode || di_mode != 1 || payload_room)
+            FD_SET(ctrl_pty.master_fd, &fds);
+        if (split_mode && data_pty.master_fd >= 0 && payload_room) {
             FD_SET(data_pty.master_fd, &fds);
             if (data_pty.master_fd > maxfd)
                 maxfd = data_pty.master_fd;

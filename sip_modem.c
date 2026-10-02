@@ -1297,7 +1297,18 @@ int main(int argc, char *argv[])
         /* Move online serial payload into the modem engine.  The PTY reader
          * owns AT/escape handling; only bytes exposed by di_read_data() are
          * connection payload. */
-        while ((dte_len = di_read_data(dte_buf, (int) sizeof(dte_buf))) > 0) {
+        /* Take no more than the engine can accept: a byte read here and then
+         * refused is lost, while one left in the interface ring holds the
+         * DTE back through the pty. */
+        while (1) {
+            int room = me_put_space();
+
+            if (room <= 0)
+                break;
+            dte_len = di_read_data(dte_buf, room < (int) sizeof(dte_buf)
+                                            ? room : (int) sizeof(dte_buf));
+            if (dte_len <= 0)
+                break;
             int accepted = me_put_data(dte_buf, dte_len);
 
             if (accepted != dte_len) {

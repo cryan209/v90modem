@@ -11961,6 +11961,14 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
 /* Data I/O                                                            */
 /* ------------------------------------------------------------------ */
 
+int me_put_space(void)
+{
+    pthread_mutex_lock(&downstream_ring.mtx);
+    int used = (downstream_ring.head - downstream_ring.tail + DATA_RING_SIZE) % DATA_RING_SIZE;
+    pthread_mutex_unlock(&downstream_ring.mtx);
+    return DATA_RING_SIZE - 1 - used;
+}
+
 int me_put_data(const uint8_t *buf, int len)
 {
     /* Upstream data: application → modem → SIP (for V.22bis TX or V.90 stub) */

@@ -227,6 +227,8 @@ void me_on_sip_disconnected(void);
  * Push bytes from the application (upstream: PTY → modem → SIP).
  * Returns number of bytes accepted (may be less than len if buffer full).
  */
+/* Bytes me_put_data() will accept right now. */
+int me_put_space(void);
 int me_put_data(const uint8_t *buf, int len);
 
 /*
