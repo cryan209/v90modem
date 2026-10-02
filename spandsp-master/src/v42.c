@@ -1261,6 +1261,57 @@ static int rx_unnumbered_rsp_frame(v42_state_t *ss, const uint8_t *frame, int le
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V42_FRAME_LOG=1: one stderr line per received or transmitted U/S frame
+   (I frames are not logged).  These are a handful per call, so unlike the
+   SPAN_LOG_FLOW stream it is safe on a live call -- and it is the only way to
+   tell which of the several LAPM paths reported a disconnect. */
+static void lapm_frame_log(const v42_state_t *ss, const char *dir, const uint8_t *frame, int len)
+{
+    static int enabled = -1;
+    const char *kind;
+    const char *name;
+
+    if (enabled < 0)
+        enabled = (getenv("V42_FRAME_LOG") != NULL  &&  getenv("V42_FRAME_LOG")[0] != '0');
+    if (!enabled  ||  len < 2)
+        return;
+    if ((frame[1] & 0x01) == 0)
+        return;
+    if ((frame[1] & 0x03) == LAPM_FRAMETYPE_S)
+    {
+        kind = "S";
+        switch (frame[1] & 0x0C)
+        {
+        case 0x00: name = "RR"; break;
+        case 0x04: name = "RNR"; break;
+        case 0x08: name = "REJ"; break;
+        default: name = "SREJ"; break;
+        }
+    }
+    else
+    {
+        kind = "U";
+        switch (frame[1] & 0xEC)
+        {
+        case LAPM_U_SABME: name = "SABME"; break;
+        case LAPM_U_DM: name = "DM"; break;
+        case LAPM_U_UI: name = "UI"; break;
+        case LAPM_U_DISC: name = "DISC"; break;
+        case LAPM_U_UA: name = "UA"; break;
+        case LAPM_U_FRMR: name = "FRMR"; break;
+        case LAPM_U_XID: name = "XID"; break;
+        case LAPM_U_TEST: name = "TEST"; break;
+        default: name = "?"; break;
+        }
+    }
+    fprintf(stderr, "[V42] %s %s %-5s addr=%02x %s ctrl=%02x ctrl2=%02x len=%d state=%d vs=%d vr=%d va=%d\n",
+            dir, kind, name, frame[0],
+            (frame[0] == ss->lapm.cmd_addr) ? "(our cmd/their rsp)" : "(their cmd/our rsp)",
+            frame[1], (len > 2) ? frame[2] : 0, len,
+            ss->lapm.state, ss->lapm.vs, ss->lapm.vr, ss->lapm.va);
+}
+/*- End of function --------------------------------------------------------*/
+
 static void lapm_hdlc_underflow(void *user_data)
 {
     lapm_state_t *s;
@@ -1275,6 +1326,7 @@ static void lapm_hdlc_underflow(void *user_data)
         f = &s->ctrl_buf[s->ctrl_get];
         if (++s->ctrl_get >= V42_CTRL_FRAMES)
             s->ctrl_get = 0;
+        lapm_frame_log(ss, "tx", f->buf, f->len);
     }
     else
     {
@@ -1318,6 +1370,7 @@ SPAN_DECLARE(void) lapm_receive(void *user_data, const uint8_t *frame, int len, 
     }
     if (!ok)
         return;
+    lapm_frame_log(ss, "rx", frame, len);
 
     switch ((frame[1] & LAPM_FRAMETYPE_MASK))
     {
