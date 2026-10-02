@@ -1052,6 +1052,25 @@ static bool           g_v92_upstream_lock_logged = false;
 static uint8_t        g_v90_data_frame[V90_DATA_FRAME_LEN];
 static int            g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
 static bool           g_v34_fallback_to_v22bis_pending = false;
+/* A V.34/V.90 training failure answered by a retrain rather than a drop to
+ * V.22bis.  Once V.8 has agreed V.34 (or V.90) the peer is in that start-up,
+ * not V.22bis's: against the RasFinder a Phase 4 TRN that never locked fell
+ * to V.22bis and the line sat dead for 29 s until it hung up
+ * (rf-tower-fb-12).  V.34 11.5 has the modem retrain instead, and on a call
+ * that began as V.90, 9.2.1.1.8 has that retrain use V.90's Phase 2.  Up to
+ * ME_V34_TRAINING_FAIL_RETRAINS per call (default 3, 0 = old behaviour);
+ * after that, V.22bis as before. */
+static bool           g_training_fail_retrain_pending = false;
+static unsigned       g_training_fail_retrains = 0;
+
+static unsigned me_v34_training_fail_retrains(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = parse_env_int("ME_V34_TRAINING_FAIL_RETRAINS", 3);
+    return cached < 0 ? 0 : (unsigned) cached;
+}
 
 /* INFO1d Table 17 bit 70.  PCM upstream is V.92's only data-pump gain over
  * V.90, so a zero here makes an analogue peer select V.90 even with both
@@ -5781,6 +5800,20 @@ static void v34_put_bit_cb(void *user_data, int bit)
             }
         }
         if (bit == SIG_STATUS_TRAINING_FAILED || bit == SIG_STATUS_CARRIER_DOWN) {
+            if (g_state == ME_TRAINING && (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90)
+                && g_training_fail_retrains < me_v34_training_fail_retrains()) {
+                g_training_fail_retrains++;
+                ME_LOG("[ME] V.34 training failed (%s); retraining instead of "
+                       "falling back to V.22bis (%u of %u)\n",
+                       signal_status_to_str(bit), g_training_fail_retrains,
+                       me_v34_training_fail_retrains());
+                trace_phase("V34 training failed (%s) -> retrain %u",
+                            signal_status_to_str(bit), g_training_fail_retrains);
+                /* Inside v34_rx(): defer the restart, as the V.22bis handoff
+                   below does. */
+                g_training_fail_retrain_pending = true;
+                return;
+            }
             if (g_state == ME_TRAINING && (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90)) {
                 ME_LOG("[ME] V.34 training failed (%s), falling back to V.22bis\n",
                         signal_status_to_str(bit));
@@ -5977,6 +6010,8 @@ static void start_v34_training(void)
     g_state = ME_TRAINING;
     v34_line_ec_reset(&g_lec);
     g_v34_b1_reneg_pending = false;
+    g_training_fail_retrain_pending = false;
+    g_training_fail_retrains = 0;
     g_lec_armed = v90_upstream ? me_v90_line_ec_enabled() : me_line_ec_enabled();
     if (v90_upstream)
         g_lec.tail_trim = V90_LEC_TAIL_TRIM;
@@ -8291,6 +8326,24 @@ skip_8k_codewords:
                    raw companion ring filled beside g_rx_ref_buf, not from
                    v34_rx's internal state, so ordering is safe. */
                 v90_p3_scan_ja_locked(len);
+                if (g_training_fail_retrain_pending) {
+                    g_training_fail_retrain_pending = false;
+                    v34_reneg_clear_locked();
+                    if (g_mod == ME_MOD_V90 || g_v90_fallback_v34_logged) {
+                        g_mod = ME_MOD_V90;
+                        (void) restart_v90_phase2_locked(
+                            "training failed; retraining per 9.2.1.1.8");
+                    } else {
+                        (void) restart_v34_phase2_locked(
+                            "training failed; retraining per 11.5");
+                    }
+                    /* A retrain is a fresh start-up of the same call; give it
+                       the training timeout afresh rather than letting the
+                       failed attempt's elapsed time end it. */
+                    g_phase_start_ms = trace_now_ms();
+                    pthread_mutex_unlock(&g_state_mtx);
+                    return;
+                }
                 if (g_v34_fallback_to_v22bis_pending) {
                     int status = g_v34_fallback_status;
                     fprintf(stderr,
