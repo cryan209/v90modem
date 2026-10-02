@@ -3539,7 +3539,7 @@ static void v34_rx_rate_backoff_locked(void)
         return;
     /* "A to C" is answerer-to-caller, so the field that describes what the
        far end sends US is the one named for our own role. */
-    ours = g_calling_party ? &a_to_c : &c_to_a;
+    ours = (g_calling_party || g_v90_fallback_v34_logged) ? &a_to_c : &c_to_a;
     /* Two N per attempt, not one.  The lattice spacing is always 2, so at a
        fixed line SNR the distance to the grid scales with the square root of
        the constellation power, and one 2400 bit/s step at 3200 baud is only
@@ -3609,6 +3609,14 @@ static bool v34_b1_rate_check_locked(void)
        fell back to V.34 (V.90 9.2.1.1.8), whichever end placed it. */
     ours = (g_calling_party || g_v90_fallback_v34_logged) ? &a_to_c : &c_to_a;
     supported = (int) floorf((snr + 13.0f)/6.0f*(float) baud_by_code[rx_code]/2400.0f);
+    /* B1 only measures the line when it decodes.  At a rate the line cannot
+       carry it does not correlate at all and reads far below any real
+       channel -- -11.3 dB at 21600 on rf-tower-fb-7, where the same line
+       then measured 22.5 dB at 4800 -- and taking that at face value sends
+       the call straight to the 4800 floor.  Below 6 dB, read it as "too
+       high" and step down two N, as v34_rx_rate_backoff_locked() does. */
+    if (snr < 6.0f)
+        supported = *ours - parse_env_int("ME_V34_RX_RATE_BACKOFF_STEP", 2);
     if (supported < 2)
         supported = 2;
     ME_LOG("[ME] V.34 B1: receive SNR %.1f dB at %d baud carries about %d bps; "
