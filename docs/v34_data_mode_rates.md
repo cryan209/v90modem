@@ -525,3 +525,55 @@ call modem's Phase 3/4 is lost to its own echo before any fit is in force.
 **Not verified live.**  The answer-role canceller matters when an analogue
 modem dials US through the VG224 (Apple USB modems, CX93001).  The RasFinder
 work has us originating, where the call-modem canceller already existed.
+
+## RasFinder data mode: clock drift, and the peer's periodic §11.6 (2026-10-03)
+
+Plain V.34 calls to the RasFinder hunt group (ext **3999**; 3099 is not it --
+whatever answers there sends T.30 CNG) reach V.42 LAPM with V.42bis at
+21600/24000 bit/s, ~32 dB, and then lose the data mode ~21 s in, every time.
+Recordings `artifacts/rf-bbs-2`, `-4`, `-5` (local to the machine that made
+them); `v90_engine_replay <rx> ulaw --fast --dial --split` with `ME_MODE=v34`
+reproduces each call window for window.  Two separate causes.
+
+**1. Symbol timing was not tracked in data mode (fixed).**  The far
+transmitter's symbol clock measures **16.5 ppm** slow against the bearer, off
+the recording itself (phase of the symbol-rate line in the squared envelope;
+smooth, 1.8 degree residual, no whole-sample slips).  The Godard loop
+(`pri_symbol_sync()`) made **one** correction in 24 s -- its integrator
+wanders +/-60 against a trigger of 100, and freezing it
+(`ME_V34_DATA_TIMING_DIAG_FREEZE=1`) changes nothing -- while the DD-LMS
+equalizer followed the drift itself: its tap-energy centroid walked 63.1 ->
+66.1 T/2 taps (the measured 3.4 samples) and the distance to grid crept 0.075
+-> 0.095.  The existing centroid steer (`ME_V34_DATA_CENTROID_STEER`, was off)
+is now on by default in a proportional form (one 1/192-sample step per 0.05 tap
+of centroid error every 256 symbols, capped at 8 = 65 ppm at 3200 baud): the
+centroid holds and the eye *improves* (replay 0.080 -> 0.064, live 0.040 ->
+0.033).  Its reference is latched 2048 symbols after B1, not at B1 -- the
+DD-LMS can re-settle 0.49 tap with no timing error at all (`v34_hdx_test` 3200
+28800 u-law), and steering against that turned 0 bit errors into 29505.  A
+positive N keeps the old fixed-size step; 0 disables.  `V34_DATA_TIMING_LOG=1`
+prints timing, centroid, carrier rate and AGC per 4096-symbol report, plus the
+line canceller's TX/RX counter difference.
+
+**Ruled out on the way**, each by measurement: the echo path (constant 267.0 ms,
+~-23 dB over the whole call), the line echo canceller's alignment (TX and RX
+counters in lockstep), a 2^16 counter wrap (the duplex loopback carries 600000
+bits each way at 3200/21600 past 21 windows with zero errors), and the carrier
+loop and AGC (steady through the collapse).
+
+**2. The RasFinder opens a §11.6 rate renegotiation ~20 s into every data mode
+(open).**  At the collapse the line carries 40 ms with >= 0.98 of its energy on
+229/1829/3429 Hz -- 10.1.3.7's S at the low carrier.  The responder that answers
+it (`ME_V90_RENEG_RESPOND`) was **default off** for want of a peer that starts
+one; this is that peer.  Replayed with it on, it fires exactly there ("30 ms at
+229/1829/3429 Hz") and nowhere in 20 s of clean data mode.  Live with it on
+(`rf-bbs-5`) it fires on every one of the peer's S and we answer -- but the
+renegotiation does not complete: the spectral detector needs 30 of S's 40 ms,
+so the receiver arms for the S-to-S-bar transition after it has passed, waits
+out its 2048-baud S timeout, starts the TRN/MP search late, and the peer's MP
+then fails CRC with scattered bit errors (sync and starts right, body wrong --
+under-trained, not misread).  B1 correlates 0.19 afterwards.  The responder
+stays default off until that completes; `rf-bbs-5` reproduces it offline with
+`ME_V90_RENEG_RESPOND=1`.  Fix direction: take the S-to-S-bar instant from the
+spectral watch (the block where the three lines stop) instead of waiting for
+the constellation-domain detector.

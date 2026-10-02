@@ -8371,6 +8371,15 @@ skip_8k_codewords:
                                            lec_msg, sizeof(lec_msg))
                             && lec_msg[0])
                             ME_LOG("[ME] V.34 %s\n", lec_msg);
+                        /* V34_DATA_TIMING_LOG: the canceller finds our echo by
+                           counter arithmetic, so its TX and RX sample counts
+                           must advance together; print their difference. */
+                        if (getenv("V34_DATA_TIMING_LOG")
+                            && (g_lec.rx_count / 8000) != ((g_lec.rx_count - (uint64_t)len) / 8000))
+                            fprintf(stderr, "[LEC] rx %llu tx %llu tx-rx %lld\n",
+                                    (unsigned long long) g_lec.rx_count,
+                                    (unsigned long long) g_lec.tx_count,
+                                    (long long) g_lec.tx_count - (long long) g_lec.rx_count);
                     } else if (g_lec_armed && g_mod == ME_MOD_V90) {
                         char lec_msg[256];
                         bool window = v90_line_ec_window_locked();

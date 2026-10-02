@@ -197,7 +197,28 @@ static float v34_rx_tap_centroid(const v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
-/* TMP centroid steering sign */
+/* Data-mode symbol timing by the equalizer's tap-energy centroid.
+
+   The Godard band-edge loop (pri_symbol_sync()) is the timing recovery the
+   training stages use, and in data mode it does not follow a real clock
+   offset: against the RasFinder (artifacts/rf-bbs-2, 3200 baud), whose
+   transmitter measures 16.5 ppm slow against the bearer straight off the
+   recording, its integrator wandered +/-60 against a trigger of 100 and it
+   made ONE correction in 24 s, while the DD-LMS equalizer followed the drift
+   on its own -- its tap-energy centroid walked 63.1 -> 66.1 T/2 taps, the
+   measured 3.4 samples -- until the main tap ran out of span and the call
+   collapsed (0.08 -> 0.38 from the grid; freezing Godard changes nothing).
+   So the centroid is the timing error: hold it where the settled data mode
+   put it by moving the sampling instant (eq_put_step, 1/192 sample per
+   unit).  The reference is latched 2048 symbols after B1 (see there).
+
+   Default -1: proportional, one unit per 0.05 tap of centroid error every
+   256 symbols, capped at 8 (65 ppm at 3200 baud).  Measured on that
+   recording over the 16 windows before the peer's own retrain: centroid
+   held at 63.15, distance to grid 0.080 -> 0.063 (about 2 dB better than
+   the drifting baseline at the same point).  A positive integer N is the
+   old fixed-size step of N (N x 8.1 ppm of tracking at 3200 baud; 2 is as
+   good as proportional here, 1 too slow, 8 jitters); 0 disables. */
 static int v34_rx_centroid_steer(void)
 {
     static int cached = -99;
@@ -206,7 +227,7 @@ static int v34_rx_centroid_steer(void)
     {
         const char *e = getenv("ME_V34_DATA_CENTROID_STEER");
 
-        cached = (e  &&  *e)  ?  atoi(e)  :  0;
+        cached = (e  &&  *e)  ?  atoi(e)  :  -1;
     }
     /*endif*/
     return cached;
@@ -460,8 +481,14 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 s->data_decision_ema = 0.0f;
                 s->data_decision_baseline = 0.0f;
                 s->data_decision_count = 0;
-                s->data_tap_centroid_ref = v34_rx_tap_centroid(s);
-                s->data_centroid_count = 0;
+                /* The centroid steer's reference is latched once the data
+                   mode has run 2048 symbols, not here: straight after B1 the
+                   DD-LMS can re-settle the taps to a different centroid with
+                   no timing error at all (0.49 tap in v34_hdx_test at
+                   3200/28800 u-law), and steering against that offset walked
+                   the sampling instant off the eye.  < 0 means not latched. */
+                s->data_tap_centroid_ref = -1.0f;
+                s->data_centroid_count = 256 - 2048;
                 s->data_symbol_conjugate = conjugate;
                 s->data_symbol_rotation = 0;
                 s->data_symbol_scale = (gain > 0.0001f) ? 1.0f/gain : 1.0f;
@@ -565,7 +592,22 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 int st;
 
                 s->data_centroid_count = 0;
-                if (fabsf(d) > 0.05f)
+                if (s->data_tap_centroid_ref < 0.0f)
+                {
+                    s->data_tap_centroid_ref = v34_rx_tap_centroid(s);
+                }
+                else if (v34_rx_centroid_steer() < 0)
+                {
+                    st = (int) (d/0.05f);
+                    if (st > 8)
+                        st = 8;
+                    else if (st < -8)
+                        st = -8;
+                    /*endif*/
+                    s->eq_put_step += st;
+                    s->total_baud_timing_correction += st;
+                }
+                else if (fabsf(d) > 0.05f)
                 {
                     st = ((d > 0.0f)  ?  1  :  -1)*v34_rx_centroid_steer();
                     s->eq_put_step += st;
@@ -865,6 +907,25 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         V34_DATA_LOG(s->logging, SPAN_LOG_FLOW,
                                  "Rx - DATA: distance to grid %.4f per symbol over %d symbols\n",
                                  dist, err_count[who]);
+                    }
+                    /*endif*/
+                    /* V34_DATA_TIMING_LOG=1: where symbol timing stands at
+                       each report -- the Godard loop's integrator and its
+                       accumulated correction, and the equalizer's tap-energy
+                       centroid, which is where a timing drift the loop does
+                       not follow ends up. */
+                    if (getenv("V34_DATA_TIMING_LOG"))
+                    {
+                        fprintf(stderr,
+                                "[V34T] dist %.4f timing_corr %d baud_phase %.1f "
+                                "tap_centroid %.3f (ref %.3f) carrier %+.5f deg/sym "
+                                "agc %.5f\n",
+                                dist, s->total_baud_timing_correction,
+                                (double) s->pri_ted.baud_phase,
+                                (double) v34_rx_tap_centroid(s),
+                                (double) s->data_tap_centroid_ref,
+                                (double) s->phase4_da_derot_rate*180.0/2147483648.0,
+                                (double) s->agc_scaling);
                     }
                     /*endif*/
                     err_sum[who] = 0.0;
