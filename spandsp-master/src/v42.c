@@ -1273,8 +1273,36 @@ static void lapm_frame_log(const v42_state_t *ss, const char *dir, const uint8_t
 
     if (enabled < 0)
         enabled = (getenv("V42_FRAME_LOG") != NULL  &&  getenv("V42_FRAME_LOG")[0] != '0');
-    if (!enabled  ||  len < 2)
+    if (!enabled)
         return;
+    if (frame == NULL  ||  len < 2)
+    {
+        /* An HDLC status change, or a fragment too short to classify.  A
+           bad-FCS frame is logged whatever its type: when nothing valid
+           arrives, these say whether the far end is sending at all. */
+        static int shown = 0;
+        static int last = 0;
+        static int repeats = 0;
+        if (len == last)
+        {
+            repeats++;
+            return;
+        }
+        if (shown++ < 40)
+            fprintf(stderr, "[V42] %s len=%d state=%d (previous status repeated %d times)\n",
+                    dir, len, ss->lapm.state, repeats);
+        last = len;
+        repeats = 0;
+        return;
+    }
+    if (strcmp(dir, "rx-BAD-FCS") == 0)
+    {
+        static int bad = 0;
+        if (bad++ < 40)
+            fprintf(stderr, "[V42] rx-BAD-FCS len=%d %02x %02x %02x state=%d\n",
+                    len, frame[0], frame[1], (len > 2) ? frame[2] : 0, ss->lapm.state);
+        return;
+    }
     if ((frame[1] & 0x01) == 0)
         return;
     if ((frame[1] & 0x03) == LAPM_FRAMETYPE_S)
@@ -1366,10 +1394,14 @@ SPAN_DECLARE(void) lapm_receive(void *user_data, const uint8_t *frame, int len, 
     if (len < 0)
     {
         span_log(&ss->logging, SPAN_LOG_DEBUG, "V.42 rx status is %s (%d)\n", signal_status_to_str(len), len);
+        lapm_frame_log(ss, signal_status_to_str(len), NULL, len);
         return;
     }
     if (!ok)
+    {
+        lapm_frame_log(ss, "rx-BAD-FCS", frame, len);
         return;
+    }
     lapm_frame_log(ss, "rx", frame, len);
 
     switch ((frame[1] & LAPM_FRAMETYPE_MASK))
