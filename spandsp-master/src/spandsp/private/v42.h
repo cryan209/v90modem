@@ -53,6 +53,8 @@ typedef struct
     /*! V.42 9.2.2 N400: maximum retransmissions of a procedure that needs a
         response.  "No default value is specified ... minimum value of 1." */
     uint16_t n400;
+    /*! T400 in ms (V.42 9.1.1); 0 means the 750 ms default. */
+    int t400_ms;
 
     /* V.42bis compressor parameters */
     uint8_t comp;

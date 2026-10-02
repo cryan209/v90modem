@@ -728,7 +728,7 @@ static void t400_expired(v42_state_t *ss)
 
 static __inline__ void t400_start(v42_state_t *s)
 {
-    s->bit_timer = ms_to_bits(s, T_400);
+    s->bit_timer = ms_to_bits(s, (s->config.t400_ms > 0)  ?  s->config.t400_ms  :  T_400);
     s->bit_timer_func = t400_expired;
 }
 /*- End of function --------------------------------------------------------*/
@@ -1773,6 +1773,11 @@ SPAN_DECLARE(int) v42_set_bit_rate(v42_state_t *s, int bit_rate)
     s->tx_bit_rate = bit_rate;
     return 0;
 }
+/*- End of function --------------------------------------------------------*/
+
+/* V.42 9.1.1: T400 defaults to 750 ms and "implementations may provide a
+   mechanism for the user to set a value different from the default". */
+SPAN_DECLARE(int) v42_set_t400(v42_state_t *s, int t400_ms){ if(!s||t400_ms<1||t400_ms>60000) return -1; s->config.t400_ms=t400_ms; return 0; }
 /*- End of function --------------------------------------------------------*/
 
 SPAN_DECLARE(int) v42_set_n400(v42_state_t *s, int n400)

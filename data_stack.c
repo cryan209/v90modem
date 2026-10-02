@@ -327,6 +327,8 @@ int ds_init_v42_ex(data_stack_t *s,
         return -1;
     v42_set_status_callback(s->v42, ds_v42_status, s);
     v42_set_n400(s->v42, ds_v42_n400());
+    if (getenv("ME_V42_T400_MS"))
+        v42_set_t400(s->v42, atoi(getenv("ME_V42_T400_MS")));
     if (v42_set_compression(s->v42, p0, p1, p2) != 0
         || v42_set_bit_rate(s->v42, line_bit_rate) != 0) {
         v42_free(s->v42);
@@ -364,6 +366,8 @@ int ds_init_v44(data_stack_t *s, bool calling_party, bool detect, int line_bit_r
         return -1;
     v42_set_status_callback(s->v42, ds_v42_status, s);
     v42_set_n400(s->v42, ds_v42_n400());
+    if (getenv("ME_V42_T400_MS"))
+        v42_set_t400(s->v42, atoi(getenv("ME_V42_T400_MS")));
     if (v42_set_v44(s->v42, parameters ? parameters : &defaults) != 0
         || v42_set_bit_rate(s->v42, line_bit_rate) != 0)
     {

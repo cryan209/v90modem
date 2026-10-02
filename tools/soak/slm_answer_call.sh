@@ -26,7 +26,9 @@ docker exec -d $envs -e $LAW -e ME_LAPM_XID_OPTION_OCTETS=auto -e VPCM_G711_TAP_
         --local-port 5074 --rtp-port 14100 --pty-link /tmp/v90slm --verbose \
         > $DIR/server.log 2>&1"
 sleep 6
-docker exec v90modem-sip sh -c "(cat /tmp/v90slm > $DIR/pty-rx.bin &) ; true"
+# raw and -echo first: in echo mode the tty hands every byte we receive back
+# to us as DTE input, which we then transmit to the peer.
+docker exec v90modem-sip sh -c "stty -F /tmp/v90slm raw -echo; (cat /tmp/v90slm > $DIR/pty-rx.bin &) ; true"
 
 docker restart d-modem >/dev/null 2>&1
 sleep 8
