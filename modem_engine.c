@@ -3679,6 +3679,23 @@ static bool v34_b1_rate_check_locked(void)
     if (*ours <= supported || !retrain_on_loss_due(me_v34_max_loss_retrains()))
         return false;
     *ours = supported;
+    /* Cap our TRANSMIT direction at the same rate.  Both directions cross
+       the same 2-wire line, and the far end's own MP is no guide: against the
+       RasFinder it kept offering 21600 for what we send it while we measured
+       the line at ~16800, so lowering only our receive left us transmitting
+       the densest 2400-baud constellation.  The peer then left our XIDs
+       unanswered for 30 s and retrained twice (rf-tower-n400-2) -- V.42 never
+       came up on a data mode we were decoding at 33 dB.  The final rate is
+       the minimum of both MPs (V.34 11.4.2.1.1), so this only ever lowers it.
+       ME_V34_TX_FOLLOWS_RX=0 leaves the transmit direction alone. */
+    if (parse_env_int("ME_V34_TX_FOLLOWS_RX", 1)) {
+        int *theirs = (ours == &a_to_c) ? &c_to_a : &a_to_c;
+        if (*theirs > supported) {
+            ME_LOG("[ME] V.34 B1: capping our transmit rate at %d bps too (was %d bps)\n",
+                   supported*2400, *theirs*2400);
+            *theirs = supported;
+        }
+    }
     v34_set_mp_rate_policy(g_v34, a_to_c, c_to_a);
     g_loss_retrains++;
     g_last_loss_retrain_ms = trace_now_ms();
@@ -5807,7 +5824,14 @@ static void v34_put_bit_cb(void *user_data, int bit)
                     g_v34_data_entry_samples = g_rx_audio_samples;
                     g_v34_b1_rate_checked = false;
                     ME_LOG("[ME] V.34 training complete (%d bps)\n", rate);
-                    trace_phase("V34 enter DATA: rate=%d", rate);
+                    {
+                        int a2c = 0, c2a = 0;
+                        if (v34_get_negotiated_mp_rates(g_v34, &a2c, &c2a) == 0)
+                            trace_phase("V34 enter DATA: rate=%d (MP a2c=%d c2a=%d)",
+                                        rate, a2c*2400, c2a*2400);
+                        else
+                            trace_phase("V34 enter DATA: rate=%d", rate);
+                    }
                     /* §11.5 never takes CONNECT back; a retrain only clamps
                        104 while it runs, so do not re-report it. */
                     if (g_data_framing != DS_FRAMING_V42

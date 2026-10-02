@@ -64,7 +64,11 @@ def frames(bits):
                 got = 0
                 for k, b in enumerate(crc):
                     got |= (b & 1) << (15 - k)
-                out.append((i, t, crc16(body) == got, bits[i + 33]))
+                # Table 20: bits 20:23 max call-to-answer rate, 24:27
+                # answer-to-call, each N with rate = 2400*N, LSB first.
+                c2a = sum(bits[i + 20 + k] << k for k in range(4))
+                a2c = sum(bits[i + 24 + k] << k for k in range(4))
+                out.append((i, t, crc16(body) == got, bits[i + 33], c2a, a2c))
                 if crc16(body) == got:
                     i += total
                     continue
@@ -103,11 +107,12 @@ def main():
           f'{"negated" if neg else "direct"} dibit, order {"I1,I2" if order == 0 else "I2,I1"}: '
           f'{good} CRC-valid MP frames')
     covered = set()
-    for i, t, ok, ack in fr:
+    for i, t, ok, ack, c2a, a2c in fr:
         if not ok:
             continue
         ts = origin + i / 2 / baud
-        print(f'  {ts:8.3f} s  MP{"1" if t else "0"}{chr(39) if ack else " "}  (ack={ack})')
+        print(f'  {ts:8.3f} s  MP{"1" if t else "0"}{chr(39) if ack else " "}  (ack={ack})'
+              f'  max c2a {2400 * c2a} a2c {2400 * a2c} bit/s')
         covered.update(range(i, i + (188 if t else 88)))
     # candidate E: >= 20 ones not inside a valid MP frame
     run = 0
