@@ -1465,6 +1465,27 @@ static bool v90_cp_pad_repair_enabled(void)
     return cached != 0;
 }
 
+/* EXPERIMENT, default off: send TRN2d and MP on CPt's CODEC-OUTPUT set
+ * instead of its transmit set.  On the RasFinder that puts TRN2d at RMS 977
+ * against TRN1d's 943 -- TRN1d's level, the only level the peer has
+ * measured -- where the transmit set it asks for is 6 dB hotter (1888).  It
+ * departs from 8.6.5 (TRN2d is mapped on "the constellation set passed in
+ * CPt", i.e. the transmit set), so the peer's regenerated waveform no longer
+ * matches; the point is only to see whether the level moves its 2.24 s abort.
+ * ME_V90_CP_PAD_REPAIR does the same substitution but only behind the 8.5.2
+ * power check, which no longer fires at our declared maximum. */
+static bool v90_trn2d_codec_level(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *env = getenv("ME_V90_TRN2D_CODEC_LEVEL");
+
+        cached = (env && *env) ? (atoi(env) != 0) : 0;
+    }
+    return cached != 0;
+}
+
 static double v90_cp_power_margin_db(void)
 {
     static int cached = 0;
@@ -1702,6 +1723,13 @@ static bool v90_configure_phase4_mapper(v90_state_t *s,
     s->cp_frame = *cp;
     if (!v90_cp_power_within_limit(s, cp, s->phase4_k, "CPt", &s->cp_frame))
         return false;
+    if (v90_trn2d_codec_level() && cp->codec_constellations_differ) {
+        for (int i = 0; i < VPCM_CP_MAX_CONSTELLATIONS; i++)
+            memcpy(s->cp_frame.masks[i], cp->codec_masks[i],
+                   VPCM_CP_MASK_BYTES);
+        fprintf(stderr, "[V90] Phase 4: EXPERIMENT ME_V90_TRN2D_CODEC_LEVEL -- "
+                        "TRN2d/MP mapped on CPt's codec-output set\n");
+    }
     v90_scrambler_init(&s->phase4_scrambler);
     s->phase4_prev_sign = 0;
     memset(&s->phase4_shaper, 0, sizeof(s->phase4_shaper));
