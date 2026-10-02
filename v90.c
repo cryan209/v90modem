@@ -4463,7 +4463,9 @@ v34_state_t *v90_get_v34(v90_state_t *s)
 
 v90_tx_phase_t v90_get_tx_phase(v90_state_t *s)
 {
-    return s->tx_phase;
+    /* NULL-safe: a Phase 2 restart frees the state while receive-path code
+       may still be asking which phase the transmitter was in. */
+    return s ? s->tx_phase : V90_TX_PHASE2;
 }
 
 bool v90_phase3_active(v90_state_t *s)

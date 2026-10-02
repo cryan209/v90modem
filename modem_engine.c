@@ -8156,12 +8156,18 @@ skip_8k_codewords:
                            peer's S -- is known to have held nothing but our
                            echo.  One that ended in a retrain ends on the
                            peer's Tone A; drop it, and keep any earlier fit. */
+                        /* g_v90 is freed by a Phase 2 restart, which is
+                           exactly how a window ends in a retrain -- so a null
+                           g_v90 is the abort case, never one to dereference
+                           (a peer retrain during TRN1d segfaulted here,
+                           rf-tower-fb-1). */
                         if (!window && g_lec.training
-                            && v90_get_tx_phase(g_v90) != V90_TX_DIL) {
+                            && (!g_v90 || v90_get_tx_phase(g_v90) != V90_TX_DIL)) {
                             v34_line_ec_abort_window(&g_lec);
                             ME_LOG("[ME] V.90 line echo canceller: window "
                                    "ended without the peer's S (tx_phase=%d); "
-                                   "not fitted\n", (int)v90_get_tx_phase(g_v90));
+                                   "not fitted\n",
+                                   g_v90 ? (int)v90_get_tx_phase(g_v90) : -1);
                         }
                         if (v34_line_ec_rx(&g_lec, filtered, len, window,
                                            lec_msg, sizeof(lec_msg))
