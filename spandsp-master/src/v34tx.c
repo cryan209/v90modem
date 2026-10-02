@@ -7728,6 +7728,7 @@ static void phase4_rx_conditioning_init(v34_state_t *s, int initial_stage, const
     s->rx.bitstream = 0;
     s->rx.mp_seen = 0;
     s->rx.mp_remote_ack_seen = 0;
+    s->rx.mp_remote_ack_count = 0;
     s->rx.mp_count = -1;
     s->rx.mp_early_rejects = 0;
     s->rx.mp_hypothesis = -1;
@@ -8122,6 +8123,51 @@ static void phase4_wait_init(v34_state_t *s)
    from our own TX.  Set to 0 to disable (normal V.34 operation). */
 #define MP_TX_SILENCE_BAUDS 0
 
+/* V.34 11.4.1.1.3 / 11.4.1.2.4: send MP' "until it receives MP' or E from
+   the far end", then complete the current MP' and send E.  Read literally
+   against a far-end MP' that was already being received before our MP'
+   began, that is ONE MP' frame (18 ms at 2400 baud) and then E -- which is
+   what a fallback call sends whenever it decodes the peer's MP late, and on
+   rf-tower-fb-8 the RasFinder held MP' for 3.1 s afterwards and retrained,
+   having taken neither.  So count only an MP' (or E) received after ours
+   began: that gives the far end two or three MP' frames.  Bounded at
+   ME_V34_MP_PRIME_MAX frames (default 4) in case the far end has stopped
+   sending MP'; ME_V34_MP_FRESH_ACK=0 restores the single-MP' behaviour. */
+static bool mp_prime_may_end(v34_state_t *s)
+{
+    static int fresh = -1;
+    static int max_frames = -1;
+
+    if (fresh < 0)
+    {
+        const char *v = getenv("ME_V34_MP_FRESH_ACK");
+        const char *m = getenv("ME_V34_MP_PRIME_MAX");
+
+        fresh = !(v  &&  strcmp(v, "0") == 0);
+        max_frames = (m  &&  atoi(m) > 0)  ?  atoi(m)  :  4;
+    }
+    /*endif*/
+    if (!fresh)
+        return true;
+    /*endif*/
+    if (s->rx.mp_remote_ack_count > s->tx.mp_prime_ack_base)
+        return true;
+    /*endif*/
+    if (s->rx.received_event == V34_EVENT_E  ||  s->rx.stage == V34_RX_STAGE_DATA)
+        return true;
+    /*endif*/
+    if (s->tx.mp_prime_frames + 1 >= max_frames)
+    {
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                 "Tx - MP': no fresh far-end MP' after %d frames; sending E\n",
+                 s->tx.mp_prime_frames + 1);
+        return true;
+    }
+    /*endif*/
+    return false;
+}
+/*- End of function --------------------------------------------------------*/
+
 static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
 {
     int bit;
@@ -8160,6 +8206,8 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
                 s->tx.mp.mp_acknowledged = 1;
                 s->tx.txbits = mp_sequence_tx(&s->tx, &s->tx.mp);
                 s->tx.txptr = 0;
+                s->tx.mp_prime_ack_base = s->rx.mp_remote_ack_count;
+                s->tx.mp_prime_frames = 0;
                 V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - far-end MP received, switching to MP'\n");
                 /* V.34 11.4.1.1.3/11.4.1.2.4 requires a complete MP'
@@ -8167,11 +8215,17 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
                    remote acknowledgement in this same end-of-MP iteration
                    and skip transmission of our newly built MP' entirely. */
             }
-            else if (s->tx.mp.mp_acknowledged  &&  s->rx.mp_remote_ack_seen)
+            else if (s->tx.mp.mp_acknowledged  &&  s->rx.mp_remote_ack_seen
+                     &&  mp_prime_may_end(s))
             {
                 /* A complete local MP' has now been sent and remote MP' was
                    received, so the next sequence is E. */
                 e_baud_init(s);
+            }
+            else if (s->tx.mp.mp_acknowledged)
+            {
+                s->tx.mp_prime_frames++;
+                s->tx.txptr = 0;
             }
             else
             {

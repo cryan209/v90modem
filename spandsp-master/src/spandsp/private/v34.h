@@ -1133,6 +1133,10 @@ typedef struct
         mp_t mp;
         mph_t mph;
     };
+    /* rx.mp_remote_ack_count when this modem's first MP' went out, and how
+       many MP' frames it has sent since (11.4.1.1.3). */
+    int mp_prime_ack_base;
+    int mp_prime_frames;
     /*! \brief Optional explicit MP direction-rate policy. When false, MP rate
                advertisement falls back to locally-derived defaults. */
     bool mp_rate_policy_valid;
@@ -2264,6 +2268,10 @@ typedef struct
         signal drops back below threshold. */
     int mp_signal_settle_bauds;
     int mp_remote_ack_seen;
+    /* CRC-valid far-end MP' frames accepted this Phase 4 (bit 33 set).  The
+       transmitter compares it with the count when its own MP' began, so it
+       sends E only after an MP' received while sending MP' (11.4.1.1.3). */
+    int mp_remote_ack_count;
     int mp_hypothesis;
     uint32_t mp_hyp_scramble[24];
     uint32_t mp_hyp_bitstream[24];

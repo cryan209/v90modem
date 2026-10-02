@@ -10433,6 +10433,12 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                                              type, s->mp_frame_target);
                                 }
                                 s->mp_seen = 1;
+                                /* Bit 33, acknowledge (Table 20/21): every
+                                   CRC-valid far-end MP' counts, whether or not
+                                   it was re-parsed above. */
+                                if (s->mp_frame_bits[33])
+                                    s->mp_remote_ack_count++;
+                                /*endif*/
                                 if (s->mp_accepted_baud == 0)
                                     s->mp_accepted_baud = s->duration;
                                 s->mp_early_rejects = 0;
@@ -15575,6 +15581,7 @@ void v34_condition_rx_for_pph(v34_state_t *s, const char *why)
     s->rx.mp_seen = 0;
     s->rx.mp_count = -1;
     s->rx.mp_remote_ack_seen = 0;
+    s->rx.mp_remote_ack_count = 0;
     s->rx.bitstream = 0;
     s->rx.bit_count = 0;
     s->rx.crc = 0xFFFF;
@@ -15743,6 +15750,7 @@ SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
     s->rx.bit_count = 0;
     s->rx.mp_seen = 0;
     s->rx.mp_remote_ack_seen = 0;
+    s->rx.mp_remote_ack_count = 0;
     s->rx.mp_count = -1;
     s->rx.mp_frame_pos = 0;
     s->rx.mp_frame_target = 0;
@@ -17122,6 +17130,7 @@ int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier
     s->rx.mp_len = 0;
     s->rx.mp_seen = -1;
     s->rx.mp_remote_ack_seen = 0;
+    s->rx.mp_remote_ack_count = 0;
     s->rx.mp_frame_pos = 0;
     s->rx.mp_frame_target = 0;
     s->rx.mp_early_rejects = 0;

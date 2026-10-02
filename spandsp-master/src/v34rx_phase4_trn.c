@@ -902,6 +902,7 @@ void v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym)
                will overwrite with TRAINING_FAILED if MP decoding fails. */
             s->eq_target_mag = 0.0f;  /* Reset so CMA re-seeds with minimum clamp (1.0) */
             s->mp_remote_ack_seen = 0;
+            s->mp_remote_ack_count = 0;
             s->mp_signal_settle_bauds = 0;
             s->mp_count = -1;
             s->mp_frame_pos = 0;
