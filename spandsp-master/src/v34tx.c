@@ -4462,6 +4462,42 @@ static int l2_cycles(const v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static bool post_l2_tone_a_seen(v34_state_t *s);
+
+/* Plain V.34 call modem: should L2 run one more 20 ms period?  11.2.1.1.7
+   sends INFO1c once the call modem "detects Tone A and has received the local
+   echo of L2 for a period of time not to exceed 550 ms plus a round trip
+   delay", and 10.1.2.4 bounds L2 the same way -- so L2 is meant to stay on
+   the line until Tone A arrives, not stop at a fixed length and fall silent.
+   The RasFinder measured 400 ms of L2 plus our silence as N=4 (9600) for our
+   direction, and 540 ms as N=6 (14400); it raises Tone A ~250 ms (its round
+   trip) after the probe it wanted has reached it.  Counted in whole
+   periods from the end of L1; ME_V34_L2_HOLD=0 restores the fixed length. */
+static bool l2_extend_for_tone_a(v34_state_t *s)
+{
+    static int enabled = -1;
+    int rtd_ms;
+    int l2_ms;
+
+    if (enabled < 0)
+    {
+        const char *e = getenv("ME_V34_L2_HOLD");
+
+        enabled = (e  &&  e[0] == '0')  ?  0  :  1;
+    }
+    if (!enabled  ||  s->tx.v90_mode  ||  !s->tx.duplex)
+        return false;
+    if (post_l2_tone_a_seen(s))
+        return false;
+    rtd_ms = (s->rx.round_trip_delay_estimate > 0)  ?  s->rx.round_trip_delay_estimate/8  :  0;
+    l2_ms = (l2_cycles(s) + s->tx.l2_extra_cycles + 1)*20;
+    if (l2_ms > 550 + rtd_ms)
+        return false;
+    s->tx.l2_extra_cycles++;
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
 {
     int sample;
@@ -4519,6 +4555,12 @@ static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                         V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                                  "Tx - V.90 analogue modem: L2 done, Tone A + reversal + silence (9.2.2.1.6)\n");
                         second_a_baud_init(s);
+                    }
+                    else if (s->tx.calling_party  &&  l2_extend_for_tone_a(s))
+                    {
+                        /* 11.2.1.1.7: keep L2 on the line until Tone A, up to
+                           550 ms plus a round trip -- see l2_extend_for_tone_a(). */
+                        s->tx.line_probe_cycles--;
                     }
                     else if (s->tx.calling_party)
                     {
@@ -4728,6 +4770,7 @@ static void l1_l2_signal_init(v34_state_t *s)
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - l2_l2_signal_init()\n");
     s->tx.line_probe_step = 0;
     s->tx.line_probe_cycles = 0;
+    s->tx.l2_extra_cycles = 0;
     s->tx.line_probe_scaling = 0.0008f*V34_LINE_PROBE_LEVEL_TRIM*s->tx.gain;
     s->tx.current_modulator = (s->tx.v90_mode && !s->tx.calling_party) ? V34_MODULATION_PCM_L1_L2 : V34_MODULATION_L1_L2;
     /* 11.2.1.2.5 conditions the receiver to detect Tone B as L1 begins, so
@@ -10553,6 +10596,7 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
 
     s->tx.line_probe_step = 0;
     s->tx.line_probe_cycles = 0;
+    s->tx.l2_extra_cycles = 0;
     s->tx.line_probe_scaling = 0.0008f*V34_LINE_PROBE_LEVEL_TRIM*s->tx.gain;
 
     s->tx.training_stage = 0x100;

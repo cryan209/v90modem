@@ -1011,6 +1011,8 @@ typedef struct
     int diff;
 
     int line_probe_cycles;
+    /*! \brief L2 periods sent beyond l2_cycles() while waiting for Tone A (11.2.1.1.7). */
+    int l2_extra_cycles;
     int line_probe_step;
     float line_probe_scaling;
     int tone_duration;
