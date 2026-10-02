@@ -3585,6 +3585,25 @@ static bool restart_v34_phase2_locked(const char *reason);
 static bool restart_v90_phase2_locked(const char *reason);
 static int me_v34_reneg_enabled(void);
 static void v34_reneg_begin_locked(void);
+static int64_t data_mode_elapsed_ms(void);
+/* A §11.6 rate change B1 asked for, held until data mode has run for
+   ME_V34_B1_RENEG_DELAY_MS (default 2000; 0 opens it at once).  V.34 11.6 lets
+   it be opened "at any time during data mode", but the RasFinder ignored one
+   opened 0.16 s after B1 (rf-tower-fb-11: our S on the wire at 55.705 s, no S
+   back in the next 4.6 s, then its own retrain), while the one renegotiation
+   it has answered was opened 20 s into a settled data mode (reneg-live-r1).
+   A workaround for that peer, not a spec requirement. */
+static bool g_v34_b1_reneg_pending = false;
+static int g_v34_b1_reneg_bps = 0;
+
+static int me_v34_b1_reneg_delay_ms(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = parse_env_int("ME_V34_B1_RENEG_DELAY_MS", 2000);
+    return cached;
+}
 
 static bool v34_b1_rate_check_locked(void)
 {
@@ -3639,12 +3658,22 @@ static bool v34_b1_rate_check_locked(void)
        The MP the renegotiation sends reads the rate policy just set.  If 11.6
        is disabled or will not start, retrain as before; if it starts and no
        E arrives, the existing 11.6.2 timeout retrains. */
-    if (me_v34_reneg_enabled() && v34_start_rate_renegotiation(g_v34) == 0) {
-        ME_LOG("[ME] V.34 B1: asking for %d bps by a §11.6 rate "
-               "renegotiation\n", supported*2400);
-        trace_phase("V34 B1 rate -> §11.6 renegotiation to %d", supported*2400);
-        v34_reneg_begin_locked();
-        return true;
+    if (me_v34_reneg_enabled()) {
+        if (me_v34_b1_reneg_delay_ms() > 0) {
+            g_v34_b1_reneg_pending = true;
+            g_v34_b1_reneg_bps = supported*2400;
+            ME_LOG("[ME] V.34 B1: will ask for %d bps by a §11.6 rate "
+                   "renegotiation %d ms into data mode\n",
+                   supported*2400, me_v34_b1_reneg_delay_ms());
+            return true;
+        }
+        if (v34_start_rate_renegotiation(g_v34) == 0) {
+            ME_LOG("[ME] V.34 B1: asking for %d bps by a §11.6 rate "
+                   "renegotiation\n", supported*2400);
+            trace_phase("V34 B1 rate -> §11.6 renegotiation to %d", supported*2400);
+            v34_reneg_begin_locked();
+            return true;
+        }
     }
     ME_LOG("[ME] V.34 B1: asking for %d bps and retraining per 11.5\n",
            supported*2400);
@@ -4706,6 +4735,7 @@ static void cleanup_v34_v90_training_locked(void)
  * physical layer survives a retrain, so the data stack is not touched. */
 static bool restart_v34_phase2_locked(const char *reason)
 {
+    g_v34_b1_reneg_pending = false;
     int baud;
     int bps;
 
@@ -4748,6 +4778,7 @@ static bool restart_v34_phase2_locked(const char *reason)
 
 static bool restart_v90_phase2_locked(const char *reason)
 {
+    g_v34_b1_reneg_pending = false;
     int bps;
 
     if (g_mod != ME_MOD_V90 || !g_v34)
@@ -5945,6 +5976,7 @@ static void start_v34_training(void)
     g_mod   = ME_MOD_V34;
     g_state = ME_TRAINING;
     v34_line_ec_reset(&g_lec);
+    g_v34_b1_reneg_pending = false;
     g_lec_armed = v90_upstream ? me_v90_line_ec_enabled() : me_line_ec_enabled();
     if (v90_upstream)
         g_lec.tail_trim = V90_LEC_TAIL_TRIM;
@@ -8610,6 +8642,23 @@ skip_8k_codewords:
                                     "rate renegotiation timeout");
                             }
                         }
+                    } else if (g_v34_b1_reneg_pending
+                               && data_mode_elapsed_ms() >= me_v34_b1_reneg_delay_ms()) {
+                        g_v34_b1_reneg_pending = false;
+                        if (v34_start_rate_renegotiation(g_v34) == 0) {
+                            ME_LOG("[ME] V.34 B1: asking for %d bps by a §11.6 "
+                                   "rate renegotiation (%lld ms into data mode)\n",
+                                   g_v34_b1_reneg_bps,
+                                   (long long) data_mode_elapsed_ms());
+                            trace_phase("V34 B1 rate -> §11.6 renegotiation to %d",
+                                        g_v34_b1_reneg_bps);
+                            v34_reneg_begin_locked();
+                        } else {
+                            /* Left data mode meanwhile: whatever took it out
+                               (a retrain, the loss path) owns the recovery. */
+                            ME_LOG("[ME] V.34 B1: scheduled §11.6 renegotiation "
+                                   "dropped -- no longer in data mode\n");
+                        }
                     } else if (g_mod == ME_MOD_V34 && v34_b1_rate_check_locked()) {
                         /* Retrained at a rate B1 says this line carries. */
                     } else if (v34_retrain_probe_due_locked()) {
@@ -8640,6 +8689,7 @@ skip_8k_codewords:
                          * that is simply too poor is left alone rather than
                          * recovered in a loop. */
                         v34_clear_data_carrier_lost(g_v34);
+                        g_v34_b1_reneg_pending = false;
                         g_loss_retrains++;
                         g_last_loss_retrain_ms = trace_now_ms();
                         v34_rx_rate_backoff_locked();
