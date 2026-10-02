@@ -2762,10 +2762,21 @@ static void me_log_v8_peer_summary(const v8_parms_t *result)
     }
     if (g_data_framing_auto) {
         bool lapm = (result->jm_cm.protocols == V8_PROTOCOL_LAPM_V42);
+        /* V.92 Table 2: QC bit 23 "set to 1 calls for LAPM protocol according
+           to ITU-T V.42".  slmodemd's V.90 CM omits the V.8 protocol octet
+           while its QC sets this bit (its V.34-only CM carries the octet), so
+           the octet alone sent a LAPM-configured peer down V.14.  Detection
+           stays on: 9.2.5's ODP/ADP bypass needs both modems to have signalled
+           LAPM in the V.92 exchange, and this peer sends ODP regardless. */
+        bool qc_lapm = (result->v92 >= 0 && (result->v92 & 0x04) != 0);
 
+        if (!lapm && qc_lapm)
+            lapm = true;
         g_data_framing = lapm ? DS_FRAMING_V42 : DS_FRAMING_V14;
         g_data_lapm_detect = lapm;
-        ME_LOG("[ME] DTE framing (auto from V.8 protocol): %s\n",
+        ME_LOG("[ME] DTE framing (auto from V.8 protocol%s): %s\n",
+               (qc_lapm && result->jm_cm.protocols != V8_PROTOCOL_LAPM_V42)
+                   ? ", V.92 QC LAPM bit" : "",
                lapm ? "V.42 LAPM" : "V.14 8N1");
     }
     fprintf(stderr,
