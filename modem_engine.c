@@ -731,10 +731,25 @@ static void data_stack_prepare(int bit_rate)
 }
 
 /* Start the selected link protocol once the datapump data clock is stable. */
+/* V.42 7.2.1.3 counts the answerer's T400 from establishment of the physical
+   connection.  On V.90 our transmitter enters data mode well before the
+   upstream receiver has found B1 and delivers a bit, and against slmodemd the
+   default 750 ms ran out before its ODP -- which starts 0.19 s after our first
+   upstream data bit -- had been decoded at all (artifacts/slm-v90-lapm3).  So
+   T400 restarts on that first bit. */
+static v90_state_t *g_v90;   /* defined below; the digital role's V.90 state */
+static bool g_data_rx_first_bit_seen;
+static bool g_data_t400_deferred;
+/* Bound on the deferral: an upstream that never delivers a bit must still let
+   detection conclude. */
+#define ME_V42_T400_DEFER_MS 10000
+
 static int data_stack_start_online(int bit_rate, bool calling_party)
 {
     int result = 0;
 
+    g_data_rx_first_bit_seen = false;
+    g_data_t400_deferred = false;
     ds_release(&g_data_stack);
     g_data_connect_rate = bit_rate;
     g_data_connect_reported = false;
@@ -777,6 +792,14 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
                 data_stack_pull_dte_byte, NULL,
                 data_stack_push_dte_byte, NULL);
         ds_set_v14_rates(&g_data_stack, bit_rate, bit_rate);
+    }
+    /* V.90 digital: our downstream enters data mode ~0.9 s before the upstream
+       receiver has found B1 and can deliver a bit, so V.42 7.2.1.3's T400 is
+       held until that first bit (bounded) rather than run off our transmit. */
+    if (result == 0 && g_data_framing == DS_FRAMING_V42
+        && g_mod == ME_MOD_V90 && g_v90 != NULL) {
+        ds_v42_restart_t400(&g_data_stack, ME_V42_T400_DEFER_MS);
+        g_data_t400_deferred = true;
     }
     return result;
 }
@@ -5892,6 +5915,14 @@ static void v34_put_bit_cb(void *user_data, int bit)
         }
         ME_LOG("[ME] V.34 status: %s (%d)\n", signal_status_to_str(bit), bit);
         return;
+    }
+    if (!g_data_rx_first_bit_seen) {
+        g_data_rx_first_bit_seen = true;
+        if (g_data_t400_deferred) {
+            /* 0 = the configured/default T400, counted from here. */
+            ds_v42_restart_t400(&g_data_stack, ds_v42_t400_ms());
+            trace_phase("data RX first bit; V.42 T400 started");
+        }
     }
     ds_rx_put_bit(&g_data_stack, bit);
 }

@@ -1496,6 +1496,8 @@ typedef struct
     /*! \brief Capturing into the T/3 ring alongside the normal receiver,
         before the DATA handover. */
     bool v90_t3_capture_only;
+    /*! True only while the T/3 emitter is handing a symbol to process_primary_symbol(). */
+    bool v90_t3_in_emit;
     /*! \brief Raw descrambled upstream bit dump (ME_V90_UPSTREAM_BIT_DUMP). */
     FILE *v90_t3_bit_dump;
     bool v90_t3_bit_dump_tried;

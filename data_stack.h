@@ -139,6 +139,10 @@ int ds_init_v44(data_stack_t *s, bool calling_party, bool detect, int line_bit_r
 
 /* Release protocol resources. Safe after any successful ds_init call. */
 void ds_release(data_stack_t *s);
+/* V.42 7.2.1.3: set T400 (ms) and restart it if detection is still running. */
+void ds_v42_restart_t400(data_stack_t *s, int t400_ms);
+/* ME_V42_T400_MS, or 0 for V.42's 750 ms default. */
+int ds_v42_t400_ms(void);
 
 bool ds_link_is_ready(const data_stack_t *s);
 void ds_stop_link(data_stack_t *s);

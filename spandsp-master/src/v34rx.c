@@ -335,6 +335,23 @@ static int v90_t3_sweep_needs_evidence(void)
     return cache;
 }
 
+/* ME_V90_PHASE_SWEEP=0 never sweeps the upstream frame phase (diagnostic):
+   with ME_V90_PHASE_FORCE_OFFSET it holds the decoder at one candidate for
+   the whole call, so each candidate can be graded on what it decodes. */
+static int v90_t3_phase_sweep_enabled(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *v = getenv("ME_V90_PHASE_SWEEP");
+
+        cache = (v  &&  atoi(v) == 0)  ?  0  :  1;
+    }
+    /*endif*/
+    return cache;
+}
+
 static int v90_t3_phase_no_marks(void)
 {
     static int cache = -1;
@@ -1328,7 +1345,9 @@ static int v90_t3_probe_descramble(v34_rx_state_t *s, int in_bit)
                     }
                     /*endif*/
                 }
-                else if (v90_t3_phase_evidence_ok(s)
+                else if (v90_t3_phase_sweep_enabled()
+                         &&
+                         v90_t3_phase_evidence_ok(s)
                          &&
                          /* Sweeping is the dangerous act, so it needs
                             positive cause.  B1 pins the phase correctly on
@@ -10776,6 +10795,20 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
         break;
 
     case V34_RX_STAGE_DATA:
+        /* When the T/3 receiver owns the V.90 upstream, only its symbols are
+           data.  E is found in the CP bit stream, part way through a sample
+           block, and v34_begin_rx_data() moves the stage there and then -- so
+           the rest of that block's T/2 symbols used to land here first.
+           Against slmodemd that was 19 symbols ahead of B1: every mapping
+           frame after them grouped three symbols late (19 mod 8), a clean eye
+           decoding to white bits, and no V.42 ODP ever seen
+           (artifacts/slm-v90-lapm3).  No data-frame phase can fix that,
+           which is why the frame-phase sweep never found one.
+           ME_V90_T3_ADMIT_T2=1 restores the old behaviour. */
+        if (!v34_rx_t2_data_path(s)  &&  !s->v90_t3_in_emit
+            &&  !getenv("ME_V90_T3_ADMIT_T2"))
+            break;
+        /*endif*/
         v34_rx_data_symbol(s, sym);
         break;
 
@@ -12371,7 +12404,9 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             /*endif*/
         }
         /*endif*/
+        s->v90_t3_in_emit = true;
         process_primary_symbol(s, &y);
+        s->v90_t3_in_emit = false;
         /* Decision-directed NLMS on the same taps.  The least-squares fit
            over B1's 128 symbols leaves about 1.4% residual energy -- roughly
            1.7 sigma of the decision half-distance -- which is several percent
@@ -15516,6 +15551,11 @@ SPAN_DECLARE(void) v34_put_mapping_frame(v34_rx_state_t *s, int16_t bits[16])
                                      + span) % span;
                             }
                             /*endif*/
+                            V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                                     "Rx - V.90 upstream frame phase shift %+d applied "
+                                     "(now offset %d, super_frame %d data_frame %d)\n",
+                                     s->v90_t3_phase_delta, s->v90_t3_phase_pos,
+                                     s->super_frame, s->data_frame);
                             s->v90_t3_phase_delta = 0;
                             s->v90_t3_phase_pending = false;
                             /* Start the measurement where the candidate

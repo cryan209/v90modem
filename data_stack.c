@@ -291,6 +291,14 @@ void ds_init(data_stack_t *s,
    (rf-tower-fb-19) and not inside 6 s at all on two other calls (fb-17,
    fb-18), each of which then tore down a clean 16800 data mode.  20 gives
    ~20 s.  ME_V42_N400 overrides. */
+/* ME_V42_T400_MS overrides V.42 9.1.1's 750 ms T400; 0 = default. */
+int ds_v42_t400_ms(void)
+{
+    const char *v = getenv("ME_V42_T400_MS");
+
+    return (v  &&  atoi(v) > 0  &&  atoi(v) <= 60000)  ?  atoi(v)  :  0;
+}
+
 static int ds_v42_n400(void)
 {
     static int n = -1;
@@ -327,8 +335,7 @@ int ds_init_v42_ex(data_stack_t *s,
         return -1;
     v42_set_status_callback(s->v42, ds_v42_status, s);
     v42_set_n400(s->v42, ds_v42_n400());
-    if (getenv("ME_V42_T400_MS"))
-        v42_set_t400(s->v42, atoi(getenv("ME_V42_T400_MS")));
+    v42_set_t400(s->v42, ds_v42_t400_ms());
     if (v42_set_compression(s->v42, p0, p1, p2) != 0
         || v42_set_bit_rate(s->v42, line_bit_rate) != 0) {
         v42_free(s->v42);
@@ -366,8 +373,7 @@ int ds_init_v44(data_stack_t *s, bool calling_party, bool detect, int line_bit_r
         return -1;
     v42_set_status_callback(s->v42, ds_v42_status, s);
     v42_set_n400(s->v42, ds_v42_n400());
-    if (getenv("ME_V42_T400_MS"))
-        v42_set_t400(s->v42, atoi(getenv("ME_V42_T400_MS")));
+    v42_set_t400(s->v42, ds_v42_t400_ms());
     if (v42_set_v44(s->v42, parameters ? parameters : &defaults) != 0
         || v42_set_bit_rate(s->v42, line_bit_rate) != 0)
     {
@@ -377,6 +383,14 @@ int ds_init_v44(data_stack_t *s, bool calling_party, bool detect, int line_bit_r
     s->line_bit_rate = line_bit_rate;
     v42_restart(s->v42);
     return 0;
+}
+
+void ds_v42_restart_t400(data_stack_t *s, int t400_ms)
+{
+    if (s  &&  s->v42) {
+        v42_set_t400(s->v42, t400_ms);
+        v42_restart_t400(s->v42);
+    }
 }
 
 void ds_release(data_stack_t *s)

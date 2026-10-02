@@ -713,7 +713,8 @@ static void transmit_xid(v42_state_t *ss, uint8_t addr)
 
 static int ms_to_bits(v42_state_t *s, int time)
 {
-    return ((time*s->tx_bit_rate)/1000);
+    /* 64-bit: at V.90's 56000 bit/s a 32-bit product overflows above ~38 s. */
+    return (int) (((int64_t) time*s->tx_bit_rate)/1000);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -1777,7 +1778,19 @@ SPAN_DECLARE(int) v42_set_bit_rate(v42_state_t *s, int bit_rate)
 
 /* V.42 9.1.1: T400 defaults to 750 ms and "implementations may provide a
    mechanism for the user to set a value different from the default". */
-SPAN_DECLARE(int) v42_set_t400(v42_state_t *s, int t400_ms){ if(!s||t400_ms<1||t400_ms>60000) return -1; s->config.t400_ms=t400_ms; return 0; }
+/* V.42 7.2.1.3: the answerer's T400 runs "after establishment of the
+   physical connection".  A V.90 digital modem starts transmitting data some
+   time before its upstream receiver delivers the first data bit, so the
+   application restarts T400 when that bit arrives.  No effect outside the
+   detection phase. */
+SPAN_DECLARE(void) v42_restart_t400(v42_state_t *s)
+{
+    if (s  &&  s->lapm.state == LAPM_DETECT  &&  s->bit_timer_func == t400_expired)
+        t400_start(s);
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v42_set_t400(v42_state_t *s, int t400_ms){ if(!s||t400_ms<0||t400_ms>60000) return -1; s->config.t400_ms=t400_ms; return 0; }
 /*- End of function --------------------------------------------------------*/
 
 SPAN_DECLARE(int) v42_set_n400(v42_state_t *s, int n400)
