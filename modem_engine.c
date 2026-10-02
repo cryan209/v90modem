@@ -259,6 +259,13 @@ static data_ring_t downstream_ring; /* data → modem → SIP (downstream TX) */
 static data_ring_t upstream_ring;   /* SIP → modem → data (upstream RX) */
 static data_stack_t g_data_stack;
 static ds_framing_t g_data_framing = DS_FRAMING_V14;
+/* ME_DATA_FRAMING unset or "auto": run V.42 LAPM (with V.42 detection)
+   whenever V.8 agreed it -- our CM offers V8_PROTOCOL_LAPM_V42 and the peer's
+   CM/JM protocol octet says whether it accepts -- and V.14 otherwise.  The
+   RasFinder's V.8 says LAPM; with plain V.14 we left its V.42 detection
+   (ADP, then HDLC flags) unanswered for 14 s of clean 16800 data mode until
+   it retrained (rf-tower-fb-15). */
+static bool g_data_framing_auto = true;
 static bool g_data_lapm_detect = true;
 static int g_data_connect_rate = 0;
 static bool g_data_connect_reported = false;
@@ -2729,6 +2736,14 @@ static void me_log_v8_peer_summary(const v8_parms_t *result)
         fprintf(stderr, "[ME] V.8 peer offer: call function=%s, modulations=%s\n",
                 v8_call_function_to_str(result->jm_cm.call_function),
                 (mods[0] != '\0') ? mods : "none");
+    }
+    if (g_data_framing_auto) {
+        bool lapm = (result->jm_cm.protocols == V8_PROTOCOL_LAPM_V42);
+
+        g_data_framing = lapm ? DS_FRAMING_V42 : DS_FRAMING_V14;
+        g_data_lapm_detect = lapm;
+        ME_LOG("[ME] DTE framing (auto from V.8 protocol): %s\n",
+               lapm ? "V.42 LAPM" : "V.14 8N1");
     }
     fprintf(stderr,
             "[ME] V.8 peer summary: protocol=%s, PSTN=%s, PCM=%s, NSF=%s, T.66=%d\n",
@@ -6576,9 +6591,16 @@ void me_init(void)
         } else if (framing && strcmp(framing, "lapm-bypass") == 0) {
             g_data_framing = DS_FRAMING_V42;
             g_data_lapm_detect = false;
-        } else {
+        } else if (framing && strcmp(framing, "v14") == 0) {
             g_data_framing = DS_FRAMING_V14;
+            g_data_framing_auto = false;
+        } else {
+            /* auto: settled per call from the V.8 protocol octet. */
+            g_data_framing = DS_FRAMING_V14;
+            g_data_framing_auto = true;
         }
+        if (framing && strcmp(framing, "auto") != 0 && strcmp(framing, "v14") != 0)
+            g_data_framing_auto = false;
         ME_LOG("[ME] DTE framing: %s%s\n",
                g_data_framing == DS_FRAMING_V14 ? "V.14 8N1" :
                g_data_framing == DS_FRAMING_RAW ? "RAW" :
@@ -6781,6 +6803,8 @@ void me_on_sip_connected(void)
         return;
     }
     pthread_mutex_unlock(&g_state_mtx);
+    if (g_data_framing_auto)
+        g_data_framing = DS_FRAMING_V14;   /* until this call's V.8 says LAPM */
     trace_phase("enter V8: mode=%s advertised mods=%s", g_mode_name,
                 g_advertise_v90 ? "V90|V34|V22" : "V34|V22");
 
