@@ -745,8 +745,8 @@ static void t401_expired(v42_state_t *ss)
 
     span_log(&ss->logging, SPAN_LOG_FLOW, "T.401 expired\n");
     s = &ss->lapm;
-    if ((s->configuring && s->retry_count >= V42_DEFAULT_N_400)
-        || s->retry_count > V42_DEFAULT_N_400)
+    if ((s->configuring && s->retry_count >= ss->config.n400)
+        || s->retry_count > ss->config.n400)
     {
         s->retry_count = 0;
         if (s->configuring)
@@ -1775,6 +1775,14 @@ SPAN_DECLARE(int) v42_set_bit_rate(v42_state_t *s, int bit_rate)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v42_set_n400(v42_state_t *s, int n400)
+{
+    if (!s || n400 < 1 || n400 > 1000)
+        return -1;
+    s->config.n400 = (uint16_t) n400;
+    return 0;
+}
+
 SPAN_DECLARE(int) v42_set_xid_optional_functions_octets(v42_state_t *s, int octets)
 {
     if (!s || (octets != 0 && octets != 3 && octets != 4))
@@ -1923,6 +1931,7 @@ SPAN_DECLARE(v42_state_t *) v42_init(v42_state_t *ss,
     ss->config.v42_tx_n401 = V42_DEFAULT_N_401;
     ss->config.v42_rx_n401 = V42_DEFAULT_N_401;
     ss->config.xid_optional_functions_octets = 0;
+    ss->config.n400 = V42_DEFAULT_N_400;
 
     /* V.42bis 5.1/Annex A: compression is optional and defaults to P0=0.
        This LAPM API carries uncompressed application bytes and has no

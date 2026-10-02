@@ -284,6 +284,25 @@ void ds_init(data_stack_t *s,
     s->line_bit_rate = 1;
 }
 
+/* V.42 9.2.2: "While no default value is specified for N400, it shall have
+   a minimum value of 1."  SpanDSP's own 5 with T401 = 1 s gives up on link
+   establishment after ~6 s, and the RasFinder (MT5634) has been measured
+   answering our first XID 4.7 s into a data mode that follows a retrain
+   (rf-tower-fb-19) and not inside 6 s at all on two other calls (fb-17,
+   fb-18), each of which then tore down a clean 16800 data mode.  20 gives
+   ~20 s.  ME_V42_N400 overrides. */
+static int ds_v42_n400(void)
+{
+    static int n = -1;
+    if (n < 0) {
+        const char *e = getenv("ME_V42_N400");
+        n = (e && *e) ? atoi(e) : 20;
+        if (n < 1)
+            n = 1;
+    }
+    return n;
+}
+
 int ds_init_v42_ex(data_stack_t *s,
                 bool calling_party,
                 bool detect,
@@ -307,6 +326,7 @@ int ds_init_v42_ex(data_stack_t *s,
     if (!s->v42)
         return -1;
     v42_set_status_callback(s->v42, ds_v42_status, s);
+    v42_set_n400(s->v42, ds_v42_n400());
     if (v42_set_compression(s->v42, p0, p1, p2) != 0
         || v42_set_bit_rate(s->v42, line_bit_rate) != 0) {
         v42_free(s->v42);
@@ -343,6 +363,7 @@ int ds_init_v44(data_stack_t *s, bool calling_party, bool detect, int line_bit_r
     if (!s->v42)
         return -1;
     v42_set_status_callback(s->v42, ds_v42_status, s);
+    v42_set_n400(s->v42, ds_v42_n400());
     if (v42_set_v44(s->v42, parameters ? parameters : &defaults) != 0
         || v42_set_bit_rate(s->v42, line_bit_rate) != 0)
     {

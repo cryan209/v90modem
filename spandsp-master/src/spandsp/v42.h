@@ -119,6 +119,10 @@ SPAN_DECLARE(int) v42_set_bit_rate(v42_state_t *s, int bit_rate);
     Call before v42_restart(). Returns -1 for invalid arguments. */
 SPAN_DECLARE(int) v42_set_xid_optional_functions_octets(v42_state_t *s, int octets);
 
+/*! Set N400, the maximum number of retransmissions (V.42 9.2.2, minimum 1).
+    \return 0 on success, -1 for an out-of-range value. */
+SPAN_DECLARE(int) v42_set_n400(v42_state_t *s, int n400);
+
 /*! Configure the V.42bis offer before v42_restart. P0 is relative to the
     XID initiator; zero disables compression. The application must attach
     codecs when enabling it. Limits follow V.42bis 5.1/Annex A. */

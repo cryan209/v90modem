@@ -50,6 +50,9 @@ typedef struct
     uint16_t v42_tx_n401;
     uint16_t v42_rx_n401;
     uint8_t xid_optional_functions_octets;
+    /*! V.42 9.2.2 N400: maximum retransmissions of a procedure that needs a
+        response.  "No default value is specified ... minimum value of 1." */
+    uint16_t n400;
 
     /* V.42bis compressor parameters */
     uint8_t comp;
