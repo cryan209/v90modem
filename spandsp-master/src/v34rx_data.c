@@ -197,6 +197,28 @@ static float v34_rx_tap_centroid(const v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* ME_V34_B1_FALLBACK: normalized B1 correlation below which a B1 is taken to
+   match no template and the blind calibration is used (needs an earlier good
+   B1 in the call).  Default 0.5; 0 disables.  Live against the RasFinder
+   (artifacts/rf-bbs-6) every B1 after its 11.6 renegotiations read 0.20-0.31
+   and this calibration resumed data mode at 0.002-0.06 from the grid, ten
+   times in one call.  (No offline test of it is valid: a replay cannot judge
+   anything after its first divergent transmission, and our MP' is one.) */
+static float v34_rx_b1_fallback_threshold(void)
+{
+    static float cached = -1.0f;
+
+    if (cached < 0.0f)
+    {
+        const char *e = getenv("ME_V34_B1_FALLBACK");
+
+        cached = (e  &&  *e)  ?  (float) atof(e)  :  0.5f;
+    }
+    /*endif*/
+    return cached;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* Data-mode symbol timing by the equalizer's tap-energy centroid.
 
    The Godard band-edge loop (pri_symbol_sync()) is the timing recovery the
@@ -334,6 +356,8 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 bool conjugate;
                 float phase;
                 float gain;
+                bool b1_fallback = false;
+                int32_t prev_derot_rate = s->phase4_da_derot_rate;
 
                 search = s->b1_search_len;
                 if (search > 0)
@@ -343,6 +367,35 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     int b1_state;
 
                     b1_state = v34_rx_b1_search(s, search, &b1_offset, &best, &at_zero);
+                    /* A B1 that matches no template.  The RasFinder sends one
+                       after every 11.6 rate renegotiation it opens: its startup
+                       B1 correlates 0.990 and the renegotiation's 0.19-0.25 at
+                       every offset and trellis state, with identical
+                       negotiated parameters -- so its transmitter is not in
+                       10.1.3.1's reset state there (it already does not zero
+                       its trellis encoder at startup).  B1 is not needed to
+                       DECODE -- the scrambler is self-synchronising and the
+                       quadrant is differentially coded -- only to calibrate,
+                       and calibrating to a sequence that is not on the wire
+                       is what turned each renegotiation into a white data
+                       mode (-0.21 degrees/symbol of "residual carrier").  So
+                       when this call has already had a good B1, keep its
+                       frame offset and conjugation and calibrate blind
+                       below. */
+                    if (best < v34_rx_b1_fallback_threshold()  &&  s->b1_good_valid)
+                    {
+                        b1_fallback = true;
+                        b1_offset = s->b1_good_offset;
+                        if (b1_offset > search)
+                            b1_offset = search;
+                        /*endif*/
+                    }
+                    else if (best >= 0.9f)
+                    {
+                        s->b1_good_valid = true;
+                        s->b1_good_offset = b1_offset;
+                    }
+                    /*endif*/
                     if (b1_offset > 0)
                     {
                         if (!s->duplex)
@@ -380,6 +433,11 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 corr_conj_mag2 = corr_conj.re*corr_conj.re
                                + corr_conj.im*corr_conj.im;
                 conjugate = corr_conj_mag2 > corr_mag2;
+                if (b1_fallback)
+                    conjugate = s->b1_good_conjugate;
+                else if (s->b1_good_valid  &&  s->b1_good_offset == b1_offset)
+                    s->b1_good_conjugate = conjugate;
+                /*endif*/
                 if (conjugate)
                     corr = corr_conj;
                 gain = sqrtf(corr.re*corr.re + corr.im*corr.im)
@@ -492,6 +550,69 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 s->data_symbol_conjugate = conjugate;
                 s->data_symbol_rotation = 0;
                 s->data_symbol_scale = (gain > 0.0001f) ? 1.0f/gain : 1.0f;
+                if (b1_fallback)
+                {
+                    /* Blind calibration on B1's own symbols, which lie on the
+                       data lattice whatever sequence they carry.  Gain from
+                       power (the template's power is the constellation's,
+                       whichever points it happens to hold); phase by the
+                       rotation that puts them nearest the odd-integer grid,
+                       searched over a quarter turn since the quadrant is
+                       differentially coded; residual carrier as the data mode
+                       the renegotiation interrupted had it. */
+                    float best_err = -1.0f;
+                    float best_phi = 0.0f;
+
+                    gain = (expected_power > 0.0f)
+                         ?  sqrtf(observed_power/expected_power)  :  1.0f;
+                    s->data_symbol_scale = (gain > 0.0001f) ? 1.0f/gain : 1.0f;
+                    for (int step = 0;  step < 180;  step++)
+                    {
+                        float phi = (float) step*(3.14159265f/2.0f)/180.0f;
+                        float c = cosf(phi);
+                        float sn = sinf(phi);
+                        float err = 0.0f;
+
+                        for (int i = 0;  i < s->v90_t3_b1_symbols;  i++)
+                        {
+                            complexf_t o = s->b1_observed[i];
+                            float yr = (o.re*c + o.im*sn)*s->data_symbol_scale;
+                            float yi = (o.im*c - o.re*sn)*s->data_symbol_scale;
+                            float dr;
+                            float di;
+
+                            if (conjugate)
+                                yi = -yi;
+                            /*endif*/
+                            dr = yr - (2.0f*floorf(yr/2.0f) + 1.0f);
+                            di = yi - (2.0f*floorf(yi/2.0f) + 1.0f);
+                            err += dr*dr + di*di;
+                        }
+                        /*endfor*/
+                        if (best_err < 0.0f  ||  err < best_err)
+                        {
+                            best_err = err;
+                            best_phi = phi;
+                        }
+                        /*endif*/
+                    }
+                    /*endfor*/
+                    phase = best_phi;
+                    s->phase4_da_derot = (int32_t)
+                        (phase*2147483648.0f/3.14159265358979f);
+                    s->phase4_da_derot_rate = prev_derot_rate;
+                    V34_DATA_LOG(s->logging, SPAN_LOG_WARNING,
+                             "Rx - B1 matches no template (%.3f); keeping the last good "
+                             "B1's offset %d and conjugation %d, blind phase %.1f deg, "
+                             "gain %.4f, mean distance %.3f\n",
+                             (double) sqrtf((conjugate ? corr_conj_mag2 : corr_mag2)
+                                            /(expected_power*observed_power)),
+                             b1_offset, conjugate, (double) (phase*180.0f/3.14159265f),
+                             (double) gain,
+                             (double) sqrtf(best_err/(float) (s->v90_t3_b1_symbols > 0
+                                                               ? s->v90_t3_b1_symbols : 1)));
+                }
+                /*endif*/
                 {
                     /* Tap energy is the equalizer's noise gain.  A converged
                        FSE that is merely matched sits near 1; one that is
@@ -519,7 +640,9 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                          gain, conjugate,
                          sqrtf((conjugate ? corr_conj_mag2 : corr_mag2)
                                /(expected_power*observed_power)));
-                v34_rx_condition_b1_equalizer(s, gain, phase);
+                if (!b1_fallback)
+                    v34_rx_condition_b1_equalizer(s, gain, phase);
+                /*endif*/
                 if (!s->duplex)
                 {
                     for (int i = 0; i < leftovers; i++)

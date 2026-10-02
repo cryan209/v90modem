@@ -7781,7 +7781,17 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static void phase4_rx_conditioning_init_ex(v34_state_t *s, int initial_stage, const char *reason,
+                                           bool retain_frontend);
+
 static void phase4_rx_conditioning_init(v34_state_t *s, int initial_stage, const char *reason)
+{
+    phase4_rx_conditioning_init_ex(s, initial_stage, reason, false);
+}
+/*- End of function --------------------------------------------------------*/
+
+static void phase4_rx_conditioning_init_ex(v34_state_t *s, int initial_stage, const char *reason,
+                                           bool retain_frontend)
 {
     /* The S-to-S-bar junction detector starts unarmed; a zeroed struct would
        otherwise read as "junction already reached". */
@@ -7791,9 +7801,10 @@ static void phase4_rx_conditioning_init(v34_state_t *s, int initial_stage, const
     bool retain_phase3_frontend;
 
     retain_env = getenv("ME_V34_RETAIN_PHASE3_FRONTEND");
-    retain_phase3_frontend = s->rx.v90_mode
-                          && retain_env
-                          && atoi(retain_env) != 0;
+    retain_phase3_frontend = retain_frontend
+                          || (s->rx.v90_mode
+                              && retain_env
+                              && atoi(retain_env) != 0);
 
     s->primary_channel_active = true;
     s->rx.current_demodulator = V34_MODULATION_V34;
@@ -10043,7 +10054,54 @@ SPAN_DECLARE(void) v34_v90_start_analogue_retrain(v34_state_t *s)
  * renegotiation is asked for precisely when the receiver needs
  * resynchronising, and S/S-bar/TRN is a known signal to re-converge on.
  */
+static int start_rate_renegotiation(v34_state_t *s, int rx_stage, bool retain_frontend,
+                                    const char *reason);
+
 SPAN_DECLARE(int) v34_start_rate_renegotiation(v34_state_t *s)
+{
+    return start_rate_renegotiation(s, V34_RX_STAGE_PHASE4_S, false,
+                                    "11.6 rate renegotiation: S, S-bar, TRN, MP");
+}
+/*- End of function --------------------------------------------------------*/
+
+/* ME_V34_RENEG_ANSWER: how the responder conditions its receiver.  Experiment
+   switch: s-reset (the initiator's conditioning), s-retain, trn-reset,
+   trn-retain. */
+static int reneg_answer_mode(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *e = getenv("ME_V34_RENEG_ANSWER");
+
+        cached = 3;
+        if (e  &&  strcmp(e, "s-reset") == 0)
+            cached = 0;
+        else if (e  &&  strcmp(e, "s-retain") == 0)
+            cached = 1;
+        else if (e  &&  strcmp(e, "trn-reset") == 0)
+            cached = 2;
+        /*endif*/
+    }
+    /*endif*/
+    return cached;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_answer_rate_renegotiation(v34_state_t *s)
+{
+    int mode = reneg_answer_mode();
+
+    return start_rate_renegotiation(s,
+                                    (mode >= 2)  ?  V34_RX_STAGE_PHASE4_TRN  :  V34_RX_STAGE_PHASE4_S,
+                                    (mode & 1) != 0,
+                                    "11.6.1.2 answering the peer's rate renegotiation");
+}
+/*- End of function --------------------------------------------------------*/
+
+static int start_rate_renegotiation(v34_state_t *s, int rx_stage, bool retain_frontend,
+                                    const char *reason)
 {
     if (!s)
         return -1;
@@ -10085,8 +10143,7 @@ SPAN_DECLARE(int) v34_start_rate_renegotiation(v34_state_t *s)
     s->tx.mp.mp_acknowledged = false;
     s->tx.negotiated_rates_valid = false;
 
-    phase4_rx_conditioning_init(s, V34_RX_STAGE_PHASE4_S,
-                                "11.6 rate renegotiation: S, S-bar, TRN, MP");
+    phase4_rx_conditioning_init_ex(s, rx_stage, reason, retain_frontend);
     return 0;
 }
 /*- End of function --------------------------------------------------------*/

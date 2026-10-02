@@ -8791,7 +8791,7 @@ skip_8k_codewords:
                          * asks for before §11.6.1.2.2 starts ours. */
                         v34_clear_peer_reneg_s_event(g_v34);
                         if (!v34_rate_renegotiation_active(g_v34)
-                            && v34_start_rate_renegotiation(g_v34) == 0) {
+                            && v34_answer_rate_renegotiation(g_v34) == 0) {
                             ME_LOG("[ME] V.34: peer opened a §11.6 rate "
                                    "renegotiation; answering with S/S-bar/TRN/MP\n");
                             trace_phase("V34 answering peer rate renegotiation");

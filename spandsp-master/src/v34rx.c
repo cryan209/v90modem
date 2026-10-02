@@ -13767,8 +13767,9 @@ static int v90_t3_primary_rx(v34_rx_state_t *s, const int16_t amp[], int len)
  *
  * Covers both stacks -- V.90 9.6.2 and plain V.34 11.6 send the same S.
  *
- * DEFAULT OFF, and the reason is that it has never been exercised against a
- * peer that starts one.  Nothing in the recorded corpus renegotiates -- every
+ * Default ON for plain V.34 and OFF for V.90 9.6 (see the function).  It was
+ * off for both because it had never been exercised against a peer that starts
+ * one.  Before the RasFinder, nothing in the recorded corpus renegotiated -- every
  * capture is of a call that either held data mode or died -- so the only
  * measurement available is the negative one: over the twelve recorded
  * rate-matrix calls, more than twenty minutes of live data-mode audio, this
@@ -13776,18 +13777,28 @@ static int v90_t3_primary_rx(v34_rx_state_t *s, const int16_t amp[], int len)
  * nothing at all about the true-positive rate.  A false detection would take
  * down a working call, so it stays behind the knob until a peer proves it.
  */
-static int v34_reneg_respond_enabled(void)
+static int v34_reneg_respond_enabled(const v34_rx_state_t *s)
 {
-    static int cached = -1;
+    static int cached = -2;
 
-    if (cached < 0)
+    if (cached == -2)
     {
         const char *e = getenv("ME_V90_RENEG_RESPOND");
 
-        cached = (e  &&  atoi(e) != 0)  ?  1  :  0;
+        cached = (e  &&  *e)  ?  (atoi(e) != 0)  :  -1;
     }
     /*endif*/
-    return cached;
+    if (cached >= 0)
+        return cached;
+    /*endif*/
+    /* Unset: on for plain V.34 (including a V.90 call that fell back to it),
+       off for V.90's 9.6.  The plain V.34 half has now met a peer that starts
+       one: the RasFinder opens an 11.6 renegotiation ~20 s into every data
+       mode, and answered (with v34_answer_rate_renegotiation()'s conditioning
+       and the B1 fallback in v34rx_data.c) a 300 s call held throughout where
+       every call before died at the first one -- 10 of 11 completed, the
+       other recovering through 11.5 (artifacts/rf-bbs-6).  V.90 9.6 has not. */
+    return (!s->v90_mode  ||  s->v90_v34_fallback)  ?  1  :  0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -13843,7 +13854,7 @@ static void v34_rx_watch_peer_reneg_s(v34_rx_state_t *s,
        scope. */
     if ((s->stage != V34_RX_STAGE_DATA  &&  !s->reneg_s_watch)
         ||
-        (!v34_reneg_respond_enabled()  &&  !s->reneg_s_watch)
+        (!v34_reneg_respond_enabled(s)  &&  !s->reneg_s_watch)
         ||
         s->baud_rate < 0  ||  s->baud_rate >= 6)
     {

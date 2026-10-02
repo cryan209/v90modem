@@ -518,6 +518,10 @@ SPAN_DECLARE(void) v34_clear_peer_reneg_s_event(v34_state_t *s);
     \return 0 on success, -1 if the context is not in data mode. */
 SPAN_DECLARE(int) v34_start_rate_renegotiation(v34_state_t *s);
 
+/*! V.34 11.6.1.2: answer a rate renegotiation the peer has opened (its S
+    already detected).  Same transmit sequence as the initiator's. */
+SPAN_DECLARE(int) v34_answer_rate_renegotiation(v34_state_t *s);
+
 /*! \brief Is a V.34 11.6 rate renegotiation in progress?
     \param s The V.34 context.
     \return non-zero while one is running. */

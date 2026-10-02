@@ -562,18 +562,50 @@ bits each way at 3200/21600 past 21 windows with zero errors), and the carrier
 loop and AGC (steady through the collapse).
 
 **2. The RasFinder opens a §11.6 rate renegotiation ~20 s into every data mode
-(open).**  At the collapse the line carries 40 ms with >= 0.98 of its energy on
-229/1829/3429 Hz -- 10.1.3.7's S at the low carrier.  The responder that answers
-it (`ME_V90_RENEG_RESPOND`) was **default off** for want of a peer that starts
-one; this is that peer.  Replayed with it on, it fires exactly there ("30 ms at
-229/1829/3429 Hz") and nowhere in 20 s of clean data mode.  Live with it on
-(`rf-bbs-5`) it fires on every one of the peer's S and we answer -- but the
-renegotiation does not complete: the spectral detector needs 30 of S's 40 ms,
-so the receiver arms for the S-to-S-bar transition after it has passed, waits
-out its 2048-baud S timeout, starts the TRN/MP search late, and the peer's MP
-then fails CRC with scattered bit errors (sync and starts right, body wrong --
-under-trained, not misread).  B1 correlates 0.19 afterwards.  The responder
-stays default off until that completes; `rf-bbs-5` reproduces it offline with
-`ME_V90_RENEG_RESPOND=1`.  Fix direction: take the S-to-S-bar instant from the
-spectral watch (the block where the three lines stop) instead of waiting for
-the constellation-domain detector.
+(fixed, 2026-10-03).**  At the collapse the line carries 40 ms with >= 0.98 of
+its energy on 229/1829/3429 Hz -- 10.1.3.7's S at the low carrier.  Three
+defects, each behind the last:
+
+* **The responder was off** (`ME_V90_RENEG_RESPOND`, for want of a peer that
+  starts one).  Now default ON for plain V.34 (and a V.90 call that fell back
+  to it), still off for V.90 9.6, which this does not prove.  The spectral
+  watch fires on the peer's S ("30 ms at 229/1829/3429 Hz") and nowhere in
+  minutes of clean data mode.
+* **The responder used the initiator's conditioning**: re-seed the front end
+  and wait for the S-to-S-bar edge.  But a peer-opened renegotiation arrives
+  on a HEALTHY receiver, and the watch needs 30 of S's 40 ms, so the edge has
+  passed when it fires; the receiver timed out 2048 bauds later and the peer's
+  MP failed CRC.  New `v34_answer_rate_renegotiation()`: keep the data-mode
+  front end and condition straight for TRN.  On `rf-bbs-5` (valid offline: the
+  recorded peer's MP does not depend on what we did after it) the MP then
+  passes CRC.  `ME_V34_RENEG_ANSWER=s-reset|s-retain|trn-reset|trn-retain`
+  (default trn-retain); the three new modes all decode it, s-reset does not.
+* **The peer's B1 after a renegotiation matches no template**: 0.19-0.31
+  against 0.990-1.000 for its startup B1, with identical negotiated
+  parameters, so its transmitter is not in 10.1.3.1's reset state there (it
+  already does not zero its trellis encoder at startup).  B1 is not needed to
+  decode -- the scrambler self-synchronises and the quadrant is differentially
+  coded -- only to calibrate, and calibrating to a sequence that is not on the
+  wire gave a white data mode and "-0.21 degrees/symbol" of carrier.  Below
+  `ME_V34_B1_FALLBACK` (default 0.5) the receiver now keeps the last good B1's
+  frame offset and conjugation, takes gain from power and phase from a blind
+  lattice fit over B1's own symbols, carries the interrupted data mode's
+  residual carrier, and skips the supervised B1 equalizer step.  **This has no
+  valid offline test**: a replay cannot judge anything after our first
+  divergent transmission, which here is our MP'; its first offline run read
+  "white" because the recorded peer, never having heard our MP', was still
+  sending MP.
+
+**Live (tower, ext 3999, 300 s session cap):** `rf-bbs-6` (responder and
+fallback by switch) and `rf-bbs-7` (defaults, no switches) both **held the
+whole 300 s**, where every call before died at ~21 s.  11 renegotiations each:
+10 and 9 completed in ~2 s with data resuming at 0.002-0.06 from the grid
+(rf-bbs-7: 178 report windows, none above 0.3); the rest got no E and
+recovered through 11.5.  LAPM stayed connected throughout.
+
+**Still open:** the first renegotiation of a call is the one that fails (both
+calls).  Offline on `rf-bbs-7` (valid: before any divergence) the peer's MP
+there arrives with scattered bit errors under all four conditioning modes, and
+the TRN ones-lock fades 81% -> 53% where `rf-bbs-5`'s first holds 68%.  Not
+understood.  Why the RasFinder renegotiates every ~22 s at all is also not
+known (its choice; it continues after successful ones).
