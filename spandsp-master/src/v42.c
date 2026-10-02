@@ -718,6 +718,85 @@ static int ms_to_bits(v42_state_t *s, int time)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Opt-in throughput accounting, V42_STATS=<report period in seconds>.  It
+   answers one question: when this end is not sending I-frames, why not --
+   window closed, far end busy, or nothing to send -- and how long an I-frame
+   waits for its acknowledgement.  Time is counted in transmitted bits, i.e.
+   the line clock, so it means the same thing live and offline. */
+static double stats_ms(v42_state_t *ss, uint64_t bits)
+{
+    return (ss->tx_bit_rate > 0)  ?  1000.0*(double) bits/(double) ss->tx_bit_rate  :  0.0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void stats_report(v42_state_t *ss)
+{
+    v42_stats_t *st;
+    uint64_t period;
+    double secs;
+
+    st = &ss->stats;
+    period = st->tx_bits - st->last_report;
+    if (period == 0  ||  ss->tx_bit_rate <= 0)
+        return;
+    secs = (double) period/(double) ss->tx_bit_rate;
+    fprintf(stderr,
+            "[V42STAT] %s rate=%d k=%d/%d n401=%d/%d | tx I=%d (%d retx) %.0f oct/s rx I=%d %.0f oct/s RR=%d"
+            " | line: I %.0f%% ctrl %.0f%% idle-window %.0f%% idle-busy %.0f%% idle-nodata %.0f%% idle-other %.0f%%"
+            " | ack rtt ms n=%d avg %.0f min %.0f max %.0f outstanding<=%d\n",
+            ss->calling_party  ?  "caller"  :  "answerer",
+            ss->tx_bit_rate,
+            ss->lapm.tx_window_size_k, ss->lapm.rx_window_size_k,
+            ss->lapm.tx_n401, ss->lapm.rx_n401,
+            st->iframes_tx, st->retransmit, st->octets_tx/secs,
+            st->iframes_rx, st->octets_rx/secs, st->rr_tx,
+            100.0*st->bits_iframe/period, 100.0*st->bits_ctrl/period,
+            100.0*st->bits_idle_window/period, 100.0*st->bits_idle_busy/period,
+            100.0*st->bits_idle_nodata/period, 100.0*st->bits_idle_other/period,
+            st->rtt_n,
+            (st->rtt_n)  ?  stats_ms(ss, st->rtt_sum/st->rtt_n)  :  0.0,
+            (st->rtt_n)  ?  stats_ms(ss, st->rtt_min)  :  0.0,
+            stats_ms(ss, st->rtt_max),
+            st->outstanding_max);
+    st->last_report = st->tx_bits;
+    st->bits_iframe = 0;
+    st->bits_ctrl = 0;
+    st->bits_idle_window = 0;
+    st->bits_idle_busy = 0;
+    st->bits_idle_nodata = 0;
+    st->bits_idle_other = 0;
+    st->iframes_tx = 0;
+    st->retransmit = 0;
+    st->octets_tx = 0;
+    st->iframes_rx = 0;
+    st->octets_rx = 0;
+    st->rr_tx = 0;
+    st->rtt_n = 0;
+    st->rtt_sum = 0;
+    st->rtt_min = 0;
+    st->rtt_max = 0;
+    st->outstanding_max = 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* V.42 9.2.1: T401 must exceed the time to send a frame and receive its
+   acknowledgement, and the Recommendation leaves its value to the system.  A
+   fixed 1000 ms does not: at 2400 bit/s one 128-octet I-frame takes 0.44 s,
+   and its acknowledgement, piggybacked on the far end's next I-frame, comes
+   ~1.3 s after it started -- so T401 fired on frames that were never lost.
+   Allow three maximum-length frames at the line rate on top of the 1000 ms
+   (≈ +57 ms at 56000 bit/s, +1.5 s at 2400). */
+static int t401_bits(v42_state_t *s)
+{
+    int n401 = (s->lapm.tx_n401 > s->lapm.rx_n401)  ?  s->lapm.tx_n401  :  s->lapm.rx_n401;
+
+    if (n401 <= 0)
+        n401 = V42_DEFAULT_N_401;
+    /* Address, control x2, FCS x2, flag; ~1/8 for bit stuffing */
+    return ms_to_bits(s, T_401) + 3*(n401 + 6)*9;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void t400_expired(v42_state_t *ss)
 {
     /* Give up trying to detect a V.42 capable peer. */
@@ -767,6 +846,8 @@ static void t401_expired(v42_state_t *ss)
             report_rx_status_change(ss, SIG_STATUS_LINK_DISCONNECTED);
             break;
         case LAPM_DATA:
+            fprintf(stderr, "[V42] disconnect: T401 retries exhausted (N400 %d) vs=%d va=%d vr=%d far_busy=%d\n",
+                    ss->config.n400, s->vs, s->va, s->vr, s->far_busy);
             lapm_disconnect(ss);
             break;
         }
@@ -792,14 +873,14 @@ static void t401_expired(v42_state_t *ss)
             break;
         }
     }
-    ss->bit_timer = ms_to_bits(ss, T_401);
+    ss->bit_timer = t401_bits(ss);
     ss->bit_timer_func = t401_expired;
 }
 /*- End of function --------------------------------------------------------*/
 
 static __inline__ void t401_start(v42_state_t *s)
 {
-    s->bit_timer = ms_to_bits(s, T_401);
+    s->bit_timer = t401_bits(s);
     s->bit_timer_func = t401_expired;
     s->lapm.retry_count = 0;
 }
@@ -921,12 +1002,25 @@ static int ack_info(v42_state_t *ss, uint8_t nr)
          &&
          ((s->vs - s->va) & 0x7F) <= s->tx_window_size_k))
     {
+        fprintf(stderr, "[V42] disconnect: invalid N(R)=%d with V(A)=%d V(S)=%d k=%d\n",
+                nr, s->va, s->vs, s->tx_window_size_k);
         lapm_disconnect(ss);
         return -1;
     }
     n = 0;
     while (s->va != nr  &&  s->info_acked != s->info_get)
     {
+        if (ss->stats.enabled_bits)
+        {
+            uint64_t rtt = ss->stats.tx_bits - ss->stats.sent_at[s->va];
+
+            ss->stats.rtt_sum += rtt;
+            if (ss->stats.rtt_n == 0  ||  rtt < ss->stats.rtt_min)
+                ss->stats.rtt_min = rtt;
+            if (rtt > ss->stats.rtt_max)
+                ss->stats.rtt_max = rtt;
+            ss->stats.rtt_n++;
+        }
         if (++s->info_acked >= V42_INFO_FRAMES)
             s->info_acked = 0;
         s->va = (s->va + 1) & 0x7F;
@@ -1006,6 +1100,8 @@ static void receive_information_frame(v42_state_t *ss, const uint8_t *frame, int
     s->rejected = false;
 
     s->iframe_put(s->iframe_put_user_data, frame + 3, len - 3);
+    ss->stats.iframes_rx++;
+    ss->stats.octets_rx += len - 3;
     /* Increment vr */
     s->vr = (s->vr + 1) & 0x7F;
     tx_information_rr_rnr_response(ss, frame, len);
@@ -1029,6 +1125,13 @@ static void rx_supervisory_cmd_frame(v42_state_t *ss, const uint8_t *frame, int 
     case LAPM_S_RNR:
         s->far_busy = true;
         ack_info(ss, frame[2] >> 1);
+        /* V.42 8.4.6: on an RNR, "restart timer T401", and on its expiry
+           poll the busy peer.  Without this an RNR that acknowledged
+           everything outstanding left only T403 running, so a peer that
+           cleared its busy condition without telling us (or whose RR was
+           lost) was not asked again for 10 s. */
+        if (s->retry_count == 0)
+            t401_start(ss);
         /* If p = 1 may be used for status checking? */
         if ((frame[2] & 0x1))
             tx_supervisory_frame(s, s->rsp_addr, (s->local_busy)  ?  LAPM_S_RNR  :  LAPM_S_RR, 1);
@@ -1346,9 +1449,11 @@ static void lapm_hdlc_underflow(void *user_data)
     lapm_state_t *s;
     v42_state_t *ss;
     v42_frame_t *f;
+    v42_stats_t *st;
 
     ss = (v42_state_t *) user_data;
     s = &ss->lapm;
+    st = &ss->stats;
     if (s->ctrl_get != s->ctrl_put)
     {
         /* Send control frame */
@@ -1356,16 +1461,33 @@ static void lapm_hdlc_underflow(void *user_data)
         if (++s->ctrl_get >= V42_CTRL_FRAMES)
             s->ctrl_get = 0;
         lapm_frame_log(ss, "tx", f->buf, f->len);
+        /* Opening flag + frame + FCS, ignoring bit stuffing */
+        st->bits_ctrl += 8*(f->len + 3);
+        if (f->len == 3  &&  (f->buf[1] & 0x0F) == (LAPM_FRAMETYPE_S | LAPM_S_RR))
+            st->rr_tx++;
     }
     else
     {
-        if (s->far_busy  ||  s->configuring  ||  s->state != LAPM_DATA)
+        /* V.42 8.4.8/8.5.3: no new I-frames in the timer-recovery condition
+           (retry_count > 0, a poll outstanding).  The F=1 response sets V(S)
+           to its N(R), so an I-frame sent after the poll would be rewound
+           over -- and when the peer then acknowledged it, ack_info() saw an
+           N(R) beyond V(S) and disconnected the link. */
+        if (s->far_busy  ||  s->configuring  ||  s->state != LAPM_DATA  ||  s->retry_count > 0)
         {
+            if (s->far_busy  &&  s->state == LAPM_DATA)
+                st->bits_idle_busy += 80;
+            else
+                st->bits_idle_other += 80;
             hdlc_tx_flags(&s->hdlc_tx, 10);
             return;
         }
         if (s->info_get == s->info_put  &&  !tx_information_frame(ss))
         {
+            if (((s->vs - s->va) & 0x7F) >= s->tx_window_size_k)
+                st->bits_idle_window += 80;
+            else
+                st->bits_idle_nodata += 80;
             hdlc_tx_flags(&s->hdlc_tx, 10);
             return;
         }
@@ -1377,8 +1499,24 @@ static void lapm_hdlc_underflow(void *user_data)
         f->buf[0] = s->cmd_addr;
         f->buf[1] = s->vs << 1;
         f->buf[2] = s->vr << 1;
+        st->sent_at[s->vs] = st->tx_bits;
+        st->iframes_tx++;
+        st->octets_tx += f->len - 3;
+        st->bits_iframe += 8*(f->len + 3);
+        if (((st->next_new - s->vs) & 0x7F) != 0  &&  ((st->next_new - s->vs) & 0x7F) < 64)
+            st->retransmit++;
+        else
+            st->next_new = (s->vs + 1) & 0x7F;
         s->vs = (s->vs + 1) & 0x7F;
-        if (ss->bit_timer == 0)
+        if (((s->vs - s->va) & 0x7F) > st->outstanding_max)
+            st->outstanding_max = (s->vs - s->va) & 0x7F;
+        /* V.42 8.4.1: transmitting an I-frame starts T401 if it is not
+           already running -- and T403, the idle timer, is not T401.  This
+           tested only for no timer at all, so an I-frame sent while T403 ran
+           (any frame after an idle spell) went out with no T401 behind it,
+           and if it was lost nothing recovered it until T403 expired 10 s
+           later.  A following frame's N(S) gap (REJ) usually hid that. */
+        if (ss->bit_timer == 0  ||  ss->bit_timer_func != t401_expired)
             t401_start(ss);
     }
     hdlc_tx_frame(&s->hdlc_tx, f->buf, f->len);
@@ -1753,6 +1891,15 @@ SPAN_DECLARE(int) v42_tx_bit(void *user_data)
     int bit;
 
     s = (v42_state_t *) user_data;
+    s->stats.tx_bits++;
+    if (s->stats.enabled_bits
+        &&
+        s->tx_bit_rate > 0
+        &&
+        s->stats.tx_bits - s->stats.last_report >= (uint64_t) s->stats.enabled_bits*(uint64_t) s->tx_bit_rate)
+    {
+        stats_report(s);
+    }
     if (s->bit_timer  &&  (--s->bit_timer) <= 0)
     {
         s->bit_timer = 0;
@@ -1923,6 +2070,12 @@ SPAN_DECLARE(v42_state_t *) v42_init(v42_state_t *ss,
             return NULL;
     }
     memset(ss, 0, sizeof(*ss));
+    {
+        const char *v = getenv("V42_STATS");
+
+        if (v  &&  *v)
+            ss->stats.enabled_bits = (atoi(v) > 0)  ?  atoi(v)  :  5;
+    }
 
     s = &ss->lapm;
     ss->calling_party = calling_party;

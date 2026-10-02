@@ -354,6 +354,11 @@ static void test_lapm_data_stack_case(bool detect, int offer, int peer_offer,
         }
     }
 
+    if (getenv("DS_TEST_DEBUG"))
+        printf("debug %s: conn %d %d xid %d %d failed %d %d rx %d/%d %d/%d\n", label,
+               caller_ep.connected, answerer_ep.connected, caller_ep.xid, answerer_ep.xid,
+               caller_ep.failed, answerer_ep.failed, caller_ep.rx_len, answerer_ep.tx_len,
+               answerer_ep.rx_len, caller_ep.tx_len);
     CHECK(caller_initialized && answerer_initialized
           && caller_ep.connected && answerer_ep.connected
           && caller_ep.xid && answerer_ep.xid
@@ -595,6 +600,124 @@ static void test_v14_bursty_random(void)
           "V.14 bursty random payload is byte exact");
 }
 
+/* Numbered lines, as the live soak sends: compress well, like most DTE text. */
+typedef struct {
+    uint32_t tx_line;
+    int tx_pos;
+    char tx_buf[16];
+    uint32_t rx_line;
+    int rx_pos;
+    char rx_buf[16];
+    uint64_t rx_bytes;
+    bool rx_bad;
+    bool connected;
+} lines_endpoint_t;
+
+static int lines_pull(void *ctx)
+{
+    lines_endpoint_t *ep = (lines_endpoint_t *)ctx;
+
+    if (ep->tx_pos == 0)
+        snprintf(ep->tx_buf, sizeof(ep->tx_buf), "D%07u\r\n", (unsigned)ep->tx_line);
+    {
+        int c = (uint8_t)ep->tx_buf[ep->tx_pos++];
+
+        if (ep->tx_pos == 10) {
+            ep->tx_pos = 0;
+            ep->tx_line++;
+        }
+        return c;
+    }
+}
+
+static void lines_push(void *ctx, uint8_t byte)
+{
+    lines_endpoint_t *ep = (lines_endpoint_t *)ctx;
+
+    if (ep->rx_pos == 0)
+        snprintf(ep->rx_buf, sizeof(ep->rx_buf), "D%07u\r\n", (unsigned)ep->rx_line);
+    if ((char)byte != ep->rx_buf[ep->rx_pos])
+        ep->rx_bad = true;
+    if (++ep->rx_pos == 10) {
+        ep->rx_pos = 0;
+        ep->rx_line++;
+    }
+    ep->rx_bytes++;
+}
+
+static void lines_event(void *ctx, ds_link_event_t event)
+{
+    lines_endpoint_t *ep = (lines_endpoint_t *)ctx;
+
+    if (event == DS_LINK_CONNECTED)
+        ep->connected = true;
+}
+
+/* V.42bis must fill I-frames.  LAPM's window is k FRAMES, and with a round
+   trip longer than k frame times the window, not the line, sets the rate.
+   A frame carrying the compressed form of only 128 DTE octets then caps the
+   DTE rate at k*128 octets per round trip -- compression buys nothing --
+   which is the ~20 kbit/s both ways a live 54666/31200 V.90 call delivered.
+   Run both directions saturated through a 400 ms delay line each way. */
+static void test_v42bis_fills_frames_on_long_round_trip(void)
+{
+    enum { RATE = 56000, ONE_WAY_BITS = RATE*400/1000, SECONDS = 20 };
+    static uint8_t down_line[ONE_WAY_BITS], up_line[ONE_WAY_BITS];
+    data_stack_t caller, answerer;
+    lines_endpoint_t cep, aep;
+    int pos = 0;
+    uint64_t start_c = 0, start_a = 0;
+    bool measuring = false;
+    double rtt_s, window_bound, caller_rate, answerer_rate;
+
+    memset(&caller, 0, sizeof(caller));
+    memset(&answerer, 0, sizeof(answerer));
+    memset(&cep, 0, sizeof(cep));
+    memset(&aep, 0, sizeof(aep));
+    memset(down_line, 1, sizeof(down_line));
+    memset(up_line, 1, sizeof(up_line));
+    if (ds_init_v42_ex(&caller, true, false, RATE, 3, 2048, 32,
+                       lines_pull, &cep, lines_push, &cep, lines_event, &cep) != 0
+        || ds_init_v42_ex(&answerer, false, false, RATE, 3, 2048, 32,
+                          lines_pull, &aep, lines_push, &aep, lines_event, &aep) != 0) {
+        CHECK(false, "V.42bis long round trip: init");
+        return;
+    }
+    for (long tick = 0; tick < (long)RATE*(SECONDS + 5); tick++) {
+        int cb = ds_tx_get_bit(&caller);
+        int ab = ds_tx_get_bit(&answerer);
+
+        ds_rx_put_bit(&answerer, up_line[pos]);
+        ds_rx_put_bit(&caller, down_line[pos]);
+        up_line[pos] = (uint8_t)cb;
+        down_line[pos] = (uint8_t)ab;
+        if (++pos == ONE_WAY_BITS)
+            pos = 0;
+        if (!measuring && cep.connected && aep.connected && tick >= RATE*3) {
+            measuring = true;
+            start_c = cep.rx_bytes;
+            start_a = aep.rx_bytes;
+            tick = 0;   /* measure exactly SECONDS from here */
+            continue;
+        }
+        if (measuring && tick == (long)RATE*SECONDS)
+            break;
+    }
+    caller_rate = (double)(cep.rx_bytes - start_c)/SECONDS;
+    answerer_rate = (double)(aep.rx_bytes - start_a)/SECONDS;
+    /* What 15 frames of 128 DTE octets per round trip would allow. */
+    rtt_s = 0.8 + 131.0*8/RATE;
+    window_bound = 15.0*128/rtt_s;
+    printf("V.42bis 400 ms each way: %.0f and %.0f DTE octets/s "
+           "(uncompressed-window bound %.0f, line %d)\n",
+           caller_rate, answerer_rate, window_bound, RATE/8);
+    CHECK(measuring && !cep.rx_bad && !aep.rx_bad
+          && caller_rate > 2.0*window_bound && answerer_rate > 2.0*window_bound,
+          "V.42bis fills I-frames: compression multiplies window-limited throughput");
+    ds_release(&caller);
+    ds_release(&answerer);
+}
+
 int main(void)
 {
     test_v14_roundtrip();
@@ -628,6 +751,7 @@ int main(void)
     test_v44_stack(3,0,false,false,false,"V.44 direction refusal uses plain LAPM");
     test_v44_stack(3,3,false,false,true,"V.44 unsupported peer falls back to plain LAPM");
     test_v14_bursty_random();
+    test_v42bis_fills_frames_on_long_round_trip();
 
     if (failures) {
         printf("data_stack_test: %d FAILURES\n", failures);

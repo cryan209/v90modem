@@ -41,6 +41,7 @@ static void ds_compression_release(data_stack_t *s)
     s->v44_encoder = NULL;
     s->v44_decoder = NULL;
     s->compressed_tx_len = s->compressed_tx_pos = 0;
+    s->compressed_tx_unflushed = false;
 }
 
 static void ds_compression_error(data_stack_t *s)
@@ -90,10 +91,37 @@ static int ds_v42_get_frame(void *user_data, uint8_t *msg, int max_len)
     if (s->v42bis || s->v44_encoder)
     {
         /* Compress each byte once. LAPM retains the resulting I-frame for
-           retransmission; it must never re-enter the dictionary on retry. */
-        if (s->compressed_tx_pos == s->compressed_tx_len)
+           retransmission; it must never re-enter the dictionary on retry.
+
+           Fill the frame.  LAPM's window is k FRAMES (V.42 8.4), so on a
+           link whose round trip exceeds k frame times every frame that goes
+           out short is window wasted.  This used to compress at most 128 DTE
+           octets per frame and flush, so a 128-octet I-frame carried the
+           compressed form of 128 octets -- ~29 octets of digits -- and
+           V.42bis bought nothing at all once the window closed: 15 frames x
+           128 DTE octets per round trip whatever the compression ratio, the
+           same ~20 kbit/s both ways on a 54666/31200 call.  Now input is
+           compressed until a whole frame of output is pending, and the
+           encoder is flushed (V.42bis 7.9, an octet-aligned FLUSH) only when
+           the DTE has nothing more to give, so nothing is held back while
+           the link waits for data. */
+        if (s->compressed_tx_pos > 0)
         {
-            s->compressed_tx_len = s->compressed_tx_pos = 0;
+            int pending = s->compressed_tx_len - s->compressed_tx_pos;
+
+            memmove(s->compressed_tx, s->compressed_tx + s->compressed_tx_pos, (size_t)pending);
+            s->compressed_tx_len = pending;
+            s->compressed_tx_pos = 0;
+        }
+        /* Headroom for one chunk's worst-case expansion plus an encoder
+           output burst (v42bis_init() below emits in 256-octet blocks). */
+        while (s->compressed_tx_len < max_len
+               && (int)sizeof(s->compressed_tx) - s->compressed_tx_len >= 512
+               && !s->compression_failed)
+        {
+            int rc;
+
+            len = 0;
             while (len < (int)sizeof(input) && s->pull)
             {
                 int byte = s->pull(s->pull_ctx);
@@ -101,26 +129,25 @@ static int ds_v42_get_frame(void *user_data, uint8_t *msg, int max_len)
                     break;
                 input[len++] = (uint8_t)byte;
             }
-            if (len)
+            if (len == 0)
             {
-                ds_dump_tx_bytes("DTE", input, len);
-                s->tx_chars += len;
-                int rc;
-                if (s->v44_encoder)
+                if (s->compressed_tx_unflushed)
                 {
-                    rc = v44_encoder_feed(s->v44_encoder, input, (size_t)len);
-                    if (rc == 0)
-                        rc = v44_encoder_flush(s->v44_encoder);
+                    rc = s->v44_encoder ? v44_encoder_flush(s->v44_encoder)
+                                        : v42bis_compress_flush(s->v42bis);
+                    s->compressed_tx_unflushed = false;
+                    if (rc != 0)
+                        ds_compression_error(s);
                 }
-                else
-                {
-                    rc = v42bis_compress(s->v42bis, input, len);
-                    if (rc == 0)
-                        rc = v42bis_compress_flush(s->v42bis);
-                }
-                if (rc != 0)
-                    ds_compression_error(s);
+                break;
             }
+            ds_dump_tx_bytes("DTE", input, len);
+            s->tx_chars += len;
+            rc = s->v44_encoder ? v44_encoder_feed(s->v44_encoder, input, (size_t)len)
+                                : v42bis_compress(s->v42bis, input, len);
+            s->compressed_tx_unflushed = true;
+            if (rc != 0)
+                ds_compression_error(s);
         }
         if (s->compression_failed)
             return 0;
@@ -241,6 +268,7 @@ static void ds_v42_status(void *user_data, int status)
         /* V.42bis 5.6: every L-ESTABLISH indication/confirmation is
            C-INIT, including SABME re-establishment without a fresh XID. */
         s->compressed_tx_len = s->compressed_tx_pos = 0;
+    s->compressed_tx_unflushed = false;
         if (s->v42bis && v42bis_restart(s->v42bis) != 0)
         {
             ds_compression_error(s);

@@ -120,6 +120,35 @@ typedef struct
     void (*packer_process)(v42_state_t *m, int bits);
 } lapm_state_t;
 
+/*! Opt-in throughput accounting (V42_STATS=<seconds>).  Time is counted in
+    transmitted bits, so it is the line clock both live and offline. */
+typedef struct
+{
+    int enabled_bits;           /*!< report period in seconds, 0 = off */
+    uint8_t next_new;           /*!< N(S) after the highest ever sent */
+    uint64_t tx_bits;           /*!< every bit v42_tx_bit() has produced */
+    uint64_t last_report;
+    uint64_t sent_at[128];      /*!< tx_bits when I-frame N(S)=n started */
+    /* Per period */
+    uint64_t bits_iframe;       /*!< flag/idle bits spent on nothing are below */
+    uint64_t bits_ctrl;
+    uint64_t bits_idle_window;  /*!< (V(S)-V(A)) == k: window closed */
+    uint64_t bits_idle_busy;    /*!< far end RNR */
+    uint64_t bits_idle_nodata;  /*!< nothing from the DTE/compressor */
+    uint64_t bits_idle_other;   /*!< configuring, not in data state */
+    int iframes_tx;
+    int iframes_rx;
+    int retransmit;
+    int octets_tx;
+    int octets_rx;
+    int rr_tx;
+    int rtt_n;
+    uint64_t rtt_sum;
+    uint64_t rtt_min;
+    uint64_t rtt_max;
+    int outstanding_max;
+} v42_stats_t;
+
 /*! V.42 support negotiation parameters */
 typedef struct
 {
@@ -156,6 +185,8 @@ struct v42_state_s
 
     int bit_timer;
     void (*bit_timer_func)(v42_state_t *m);
+
+    v42_stats_t stats;
 
     /*! \brief Error and flow logging control */
     logging_state_t logging;

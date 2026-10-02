@@ -75,6 +75,7 @@ typedef struct {
     uint8_t compressed_tx[1024];
     int compressed_tx_len;
     int compressed_tx_pos;
+    bool compressed_tx_unflushed;  /* encoder holds input not yet flushed */
     uint64_t v42_tx_wire_bytes;
     uint64_t v42_rx_wire_bytes;
     ds_link_event_fn link_event;

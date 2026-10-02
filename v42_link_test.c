@@ -182,8 +182,10 @@ static bool run_link_case(int bit_rate,
             && !busy_started && answerer_ep.rx_len >= 128) {
             v42_set_local_busy_status(answerer, true);
             busy_started = true;
-            /* Hold through T401 so the peer polls and observes RNR. */
-            busy_release_tick = tick + ((uint64_t)bit_rate*3U)/2U;
+            /* Hold through T401 so the peer polls and observes RNR.  T401
+               is 1000 ms plus three maximum frames at the line rate (1.38 s
+               at 9600), so hold for 2.5 s. */
+            busy_release_tick = tick + ((uint64_t)bit_rate*5U)/2U;
         }
         if (busy_started && v42_get_far_busy_status(caller))
             far_busy_seen = true;
@@ -287,8 +289,9 @@ static bool run_sustained_outage_case(int bit_rate)
     v42_state_t *caller = NULL;
     v42_state_t *answerer = NULL;
     /* An idle link may wait T403 (10 s), exhaust T401 retries, enter DISC,
-     * and exhaust release retries, so allow the complete bounded sequence. */
-    uint64_t max_ticks = (uint64_t)bit_rate*35U;
+     * and exhaust release retries, so allow the complete bounded sequence:
+     * 10 s + 2 x (N400 + 1) x T401, and T401 is 2.5 s at 2400 bit/s. */
+    uint64_t max_ticks = (uint64_t)bit_rate*50U;
     bool outage = false;
     bool ok = false;
 

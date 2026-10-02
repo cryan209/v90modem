@@ -20,7 +20,7 @@ PAY_DELAY=${PAY_DELAY:-50}       # seconds from ATD to the first payload line
 DIR=/root/v90modem/artifacts/$NAME
 case "$ACCT" in 290[5-9]) LAW=SIP_FORCE_PCMA=1 ;; *) LAW=SIP_FORCE_PCMU=1 ;; esac
 
-envs=$(env | grep -E '^(ME|V34|V90|VPCM)_' | sed 's/^/-e /' | tr '\n' ' ')
+envs=$(env | grep -E '^(ME|V34|V90|VPCM|V42|DS)_' | sed 's/^/-e /' | tr '\n' ' ')
 docker exec v90modem-sip sh -c "mkdir -p $DIR"
 docker exec -d $envs -e $LAW -e ME_LAPM_XID_OPTION_OCTETS=auto -e VPCM_G711_TAP_DIR=$DIR \
     v90modem-sip sh -c "cd /root/v90modem && timeout $((HOLD + 60)) ./sip_v90_modem \
