@@ -516,8 +516,12 @@ void ds_rx_put_bit(data_stack_t *s, int bit)
     FILE *dump = ds_rx_bit_dump();
 
     if (dump) {
+        static unsigned n;
         fputc((bit == 1) ? '1' : ((bit == 0) ? '0' : 'x'), dump);
-        fflush(dump);
+        /* Not per bit: 16800 flushes a second in the media thread is the
+           same kind of stall the SPAN_LOG_FLOW warning is about. */
+        if ((++n & 8191) == 0)
+            fflush(dump);
     }
     if (bit != 0 && bit != 1) {
         s->rx_invalid_bits++;
