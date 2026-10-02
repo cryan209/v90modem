@@ -180,6 +180,37 @@
    than going through TRAINING_AMP, so it keeps its own trim. */
 #define V34_LINE_PROBE_LEVEL_TRIM       0.478f
 
+/* The nominal transmit level, in dBm0, before any INFO1 power reduction.
+   V.34 does not fix it (national limits do, typically -9 dBm on the line);
+   -14 is this tree's historical value.  ME_V34_TX_DBM0 overrides it so the
+   level can be measured against a far end's own verdict on our transmit
+   (Table 16 bits 30:33): over the VG224 the RasFinder projects only 9600
+   for what we send at 3200 baud, against 24000 the other way, on a noisier
+   D/A-to-loop path where only our level can buy SNR. */
+static float v34_nominal_tx_dbm0(void)
+{
+    static float cached = 1.0f;
+
+    if (cached > 0.0f)
+    {
+        const char *e = getenv("ME_V34_TX_DBM0");
+
+        cached = -14.0f;
+        if (e  &&  *e)
+        {
+            float v = (float) atof(e);
+
+            if (v <= -6.0f  &&  v >= -30.0f)
+                cached = v;
+            /*endif*/
+        }
+        /*endif*/
+    }
+    /*endif*/
+    return cached;
+}
+/*- End of function --------------------------------------------------------*/
+
 enum
 {
     TRAINING_TX_STAGE_NORMAL_OPERATION_V34 = 0,
@@ -6730,10 +6761,10 @@ static void s_not_s_baud_init(v34_state_t *s)
         }
         /*endif*/
     }
-    v34_tx_power(s, -14.0f - (float)power_reduction);
+    v34_tx_power(s, v34_nominal_tx_dbm0() - (float)power_reduction);
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - Phase 3: applying %d dB power reduction (%.1f dBm0) [from %s]\n",
-             power_reduction, -14.0f - (float)power_reduction,
+             power_reduction, v34_nominal_tx_dbm0() - (float)power_reduction,
              (info1_source)  ?  info1_source  :  "default, no INFO1 received");
 
     /* Pre-emphasis filter (V.34/5.4). Index 0 = no pre-emphasis, 1-10 = filter. */
@@ -10670,7 +10701,7 @@ SPAN_DECLARE(v34_state_t *) v34_init(v34_state_t *s,
 
     s->tx.get_bit = get_bit;
     s->tx.get_bit_user_data = get_bit_user_data;
-    v34_tx_power(s, -14.0f);
+    v34_tx_power(s, v34_nominal_tx_dbm0());
     v34_restart(s, baud_rate, bit_rate, duplex);
 
     s->rx.put_bit = put_bit;
