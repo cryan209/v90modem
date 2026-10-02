@@ -3582,6 +3582,7 @@ static bool g_v34_b1_rate_checked = false;
 static bool retrain_on_loss_due(int cap);
 static void v34_reneg_clear_locked(void);
 static bool restart_v34_phase2_locked(const char *reason);
+static bool restart_v90_phase2_locked(const char *reason);
 
 static bool v34_b1_rate_check_locked(void)
 {
@@ -3603,7 +3604,10 @@ static bool v34_b1_rate_check_locked(void)
     rx_code = v34_get_rx_baud_rate(g_v34);
     if (rx_code < 0 || rx_code >= 6)
         return false;
-    ours = g_calling_party ? &a_to_c : &c_to_a;
+    /* Our receive direction is answer-to-call when we are the V.34 call
+       modem: the caller on a plain V.34 call, and always on a V.90 call that
+       fell back to V.34 (V.90 9.2.1.1.8), whichever end placed it. */
+    ours = (g_calling_party || g_v90_fallback_v34_logged) ? &a_to_c : &c_to_a;
     supported = (int) floorf((snr + 13.0f)/6.0f*(float) baud_by_code[rx_code]/2400.0f);
     if (supported < 2)
         supported = 2;
@@ -3618,7 +3622,16 @@ static bool v34_b1_rate_check_locked(void)
     g_loss_retrains++;
     g_last_loss_retrain_ms = trace_now_ms();
     v34_reneg_clear_locked();
-    (void) restart_v34_phase2_locked("B1 measured less SNR than the negotiated rate needs");
+    if (g_v90_fallback_v34_logged) {
+        /* V.90 9.2.1.1.8: a retrain of a call that fell back to V.34 uses
+           V.90's Phase 2.  The rate policy just set survives the restart
+           (v34_restart() does not clear it), so the next MP asks for B1's
+           rate whichever mode the analogue modem then picks. */
+        g_mod = ME_MOD_V90;
+        (void) restart_v90_phase2_locked("B1 measured less SNR than the negotiated rate needs");
+    } else {
+        (void) restart_v34_phase2_locked("B1 measured less SNR than the negotiated rate needs");
+    }
     return true;
 }
 /*- End of function --------------------------------------------------------*/
@@ -10546,11 +10559,15 @@ void me_tx_audio(int16_t *amp, int len)
                            prepare_v90_phase3_locked(), which no-ops from the next
                            call on. */
                         g_mod = ME_MOD_V34;
-                        /* And from here it is a plain V.34 call, so ask in MP
-                           for the receive rate Phase-4 TRN measures, as a call
-                           that started as V.34 does (start_v34_training()).
-                           restart_v90_phase2_locked() turns it off again. */
-                        v34_set_trn_rate_selection(g_v34, true);
+                        /* Our receive rate is chosen by B1, not by the
+                           Phase-4 TRN measurement: on the first fallback to
+                           connect (rf-tower-fb-6) TRN capped MP at 4800 while
+                           B1 then measured 27.8 dB (~14400) and the data mode
+                           sat 33 dB from the grid.  So MP asks the probe
+                           projection / ceiling and v34_b1_rate_check_locked()
+                           retrains down to what B1 measured if that was too
+                           high. */
+                        v34_set_trn_rate_selection(g_v34, false);
 
                         /* The 1200 Hz notch belongs to V.90's Phase 2 CC echo
                            removal.  For plain V.34 at 3200 baud it sits at
