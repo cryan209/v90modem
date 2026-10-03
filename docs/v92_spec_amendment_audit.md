@@ -65,7 +65,7 @@ a separate review of their reserved-field acceptance rules.
 | Amd.1 item 3, 8.7.6 | TRN2u resets scrambler except second TRN2u of a silent renegotiation; context-specific differential seed | `v92_trn2u_tx_start()` covers initial/retrain entry from E1u. There is no implemented complete silent-renegotiation controller. Its second TRN2u must preserve scrambler state and seed the differential encoder from E2u; calling the existing reset helper there would be wrong. |
 | Amd.1 item 4, Table 31 | Silent-period request at bit 32, CPu acknowledgement at 33, reserved receive behavior | Codec supports both fields; reserved acceptance fixed here. Digital initial startup requests no silence. Analogue controller explicitly rejects a silence request; renegotiation remains absent. |
 | Amd.1 item 5, 8.6.6 | Differential SCR with Jp-prime continuity | Fixed and independently waveform-tested here. |
-| Amd.1 item 6, 9.11 | drn=0 cleardown in CPt/CPu/CPus/CPd, acknowledgement and role-dependent waits, no silence request | Codecs can represent zero, but the analogue Phase-4 controller rejects zero as an unsupported profile. No complete protocol cleardown path with the specified waits is implemented. |
+| Amd.1 item 6, 9.11 | drn=0 cleardown in CPt/CPu/CPus/CPd, acknowledgement and role-dependent waits, no silence request | `v92_rn.c`: cleardown through 9.8 or 9.9 from either role, silence refused to its initiator, initiator on-hook on the acknowledged CP or 100 ms + RTD, responder 100 ms + RTD/2 after its acknowledged CP -- graded in `v92_rn_test` (1122 T against 1120 minimum; 1266 T against 1440 maximum). Procedure level; the analogue Phase-4 controller still rejects drn=0 in its own profile check, and nothing is wired to the engine. |
 | Amd.1 item 7, Table 32 | MH sequence fields, denial reasons and reserved codes | `v92_mh.c` codec + framer, graded by an independent CRC oracle in `v92_mh_test` (every signal x info, every single-bit error, undefined signal ignored, reserved info flagged not rejected). Not yet wired to the INFO-modulation line signals. |
 | Amd.1 items 8/9, 9.10.1/Figure 20 | MH transition timing | Superseded by Cor.1; do not implement the earlier unconditional optional-Tone-RT rule. |
 | Amd.2, new 9.10.3 | Suspend and resume error correction; preserve original V.42 C/R roles; no new XID or link establishment | `v42_suspend()`/`v42_resume()` in vendored SpanDSP, `ds_suspend_link()`/`ds_resume_link()` in `data_stack.h`. Timer frozen in ms (rescaled to the new rate), cut-off frame discarded both ends, immediate RR/RNR P=1 checkpoint if I-frames are outstanding. `v42_link_test`: 30 s clocked hold with noise, resume 9600->4800 and 4800->28800, byte-exact, one XID, worst 296 ms to data; the same test with suspend removed disconnects. Not yet called by the engine. |
@@ -137,3 +137,24 @@ re-armed past it and the MH layer answers it per V.34 11.2.1.1.3 (Tone B
 reversal 40 ms later) before V.34 takes over at the 11.2.1.1.4 silence --
 `v92_mh_retrain_test`, 6/6, ~400 ms faster than the old hand-over.  Short Phase 1
 (QC) after a hold is not used; reconnection runs full V.8.
+
+## Follow-up: 9.8 / 9.9 / 9.11 procedure controller (2026-10-03)
+
+`v92_rn.c` runs rate renegotiation, fast parameter exchange and cleardown
+for both roles at the level of units on the line (R signals, TRN, SUV, CP,
+E, FB1, B1) and received events, with the 9.6 Phase 4 exchange as the
+shared core.  `v92_rn_test` (in `make test`) runs a digital and an analogue
+controller against each other over a delayed line and grades each modem's
+actual sequence: Figures 15-19 (including both silent-period variants and
+Figure 18's analogue-requested silence), FPE from each side, cleardown via
+each procedure with Amd.1's waits, 9.6.1.1.3's CP repetition when a CPd is
+lost, and 9.9.1.1.2's FPE initiator following a peer's Ru.  Two defects the
+figures caught on the first run: a CP sent with no SUV before it (9.8.1.1.2
+requires TRN2d "followed by SUVd sequences"), and E sent without ever having
+transmitted an acknowledged frame (9.6.x.1.4).
+
+Not done: signal generation and detection for Rd/Ru/Rf/RM/Rt, frame
+encoding through the existing codecs, data-frame-boundary alignment, the
+Amd.1 item 3 TRN2u differential-encoder seed for the second TRN2u of a
+silent renegotiation, and any engine integration -- V.92 data mode itself is
+not reached live.
