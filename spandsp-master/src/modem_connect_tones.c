@@ -81,6 +81,28 @@
 
 #define HDLC_FRAMING_OK_THRESHOLD       5
 
+/* ANS/ANSam notch ratio.  The detector wants the energy outside a 2100 Hz notch to be
+   less than 1/6 of the channel energy, and calls the tone broken when it passes 1/5.
+   That is clean-line arithmetic: the I-modem's ANSam arrives with band noise 8 dB
+   below the tone (notch ratio ~3.5), which never meets it, so a caller on such a
+   line sat sending CI for the whole call.  ME_ANS_NOTCH_RATIO=<n> (2..6) lowers the
+   acceptance ratio to n and the break ratio to n-1 (floor 1).  Default is unchanged. */
+static int ans_notch_ratio(int broken)
+{
+    static int accept = 0;
+
+    if (accept == 0)
+    {
+        const char *v = getenv("ME_ANS_NOTCH_RATIO");
+        int n = (v  &&  *v)  ?  atoi(v)  :  6;
+
+        accept = (n >= 2  &&  n <= 6)  ?  n  :  6;
+    }
+    /*endif*/
+    return (broken)  ?  accept - 1  :  accept;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(const char *) modem_connect_tone_to_str(int tone)
 {
     switch (tone)
@@ -632,7 +654,7 @@ SPAN_DECLARE(int) modem_connect_tones_rx(modem_connect_tones_rx_state_t *s,
             /*endif*/
             /* There is adequate energy in the channel. Is it mostly at 2100Hz? */
             s->tone_cycle_duration++;
-            if (s->notch_level*6 < s->channel_level)
+            if (s->notch_level*ans_notch_ratio(0) < s->channel_level)
             {
                 /* The notch test says yes, so we have the tone. */
                 /* We should get a kick from the notch filter every 450+-25ms, as the phase reverses, for an
@@ -676,7 +698,7 @@ SPAN_DECLARE(int) modem_connect_tones_rx(modem_connect_tones_rx_state_t *s,
                 /*endif*/
                 s->tone_on = true;
             }
-            else if (s->notch_level*5 > s->channel_level)
+            else if (s->notch_level*ans_notch_ratio(1) > s->channel_level)
             {
                 if (s->tone_present == MODEM_CONNECT_TONES_ANS)
                 {
