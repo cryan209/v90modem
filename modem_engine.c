@@ -43,6 +43,7 @@
 #include "v92_upstream_rx.h"
 #include "v92_mh.h"
 #include "v92_mh_line.h"
+#include "v92_tone_a.h"
 
 #include <spandsp.h>
 
@@ -1035,6 +1036,9 @@ static bool           g_v92_active = false;
  * it is unverified against any peer.  Armed at V.90/V.92 data-mode entry on
  * the digital side; "engaged" once the controller leaves IDLE, after which
  * it owns the transmitter and the data-mode receivers are not fed. */
+/* V.92 9.7.1.2 (Cor.1 item 1): Tone A on the PCM upstream of a V.92 call.
+ * The V.34 receiver's retrain watcher is not looking at that upstream. */
+static v92_tone_a_t   g_v92_tone_a;
 static bool           g_mh_armed = false;
 static bool           g_mh_engaged = false;
 static v92_mh_ctrl_t  g_mh;
@@ -6905,6 +6909,7 @@ void me_on_sip_connected(void)
     g_v8_answer_tone_retry_done = false;
     v92_call_state_reset_locked();
     mh_disarm_locked();
+    v92_tone_a_init(&g_v92_tone_a);
     g_mh_initiated = false;
     g_mh_call_capable = false;
     g_mh_retrain_reply = false;
@@ -11971,6 +11976,51 @@ static int mh_tx_locked(uint8_t *codewords, int count)
     return count;
 }
 
+/* V.92 9.7.1.2 (Cor.1): "After detecting Tone A for more than 50 ms, the
+ * digital modem shall turn OFF circuit 106, clamp circuit 104 to binary one
+ * and transmit silence for 70 +/- 5 ms. The digital modem shall then
+ * transmit Tone B, condition its receiver to detect a Tone A phase reversal,
+ * and proceed in accordance with the full Phase 2 start-up procedure." --
+ * which is restart_v90_phase2_locked()'s response.  A retrain omits INFO0,
+ * so this call's INFO0 results are carried across it; the restart clears
+ * them, and without them the call would come back as V.90. */
+static void v92_retrain_watch_locked(const uint8_t *codewords, int count)
+{
+    int16_t linear[320];
+    bool local, capable, short2, mutual;
+
+    if (!g_v92_active || !g_v90 || g_mod != ME_MOD_V90
+        || (g_state != ME_TRAINING && g_state != ME_DATA))
+        return;
+    for (int off = 0; off < count; ) {
+        int n = count - off;
+        bool fired;
+
+        if (n > 320) n = 320;
+        for (int i = 0; i < n; i++)
+            linear[i] = pcm_to_linear(codewords[off + i]);
+        fired = v92_tone_a_put(&g_v92_tone_a, linear, n);
+        off += n;
+        if (!fired)
+            continue;
+        local = g_v92_info0_local_advertised;
+        capable = g_v92_info0_peer_capable;
+        short2 = g_v92_info0_peer_short_phase2;
+        mutual = g_v92_info0_mutual;
+        ME_LOG("[ME] V.92 9.7.1.2: Tone A on the PCM upstream for >50 ms; "
+               "responding to the analogue modem's retrain\n");
+        trace_phase("V92 Tone A retrain detected");
+        if (restart_v90_phase2_locked("V.92 9.7.1.2: peer retrain (Tone A)")) {
+            g_v92_info0_local_advertised = local;
+            g_v92_info0_peer_capable = capable;
+            g_v92_info0_peer_short_phase2 = short2;
+            g_v92_info0_mutual = mutual;
+        }
+        v92_tone_a_init(&g_v92_tone_a);
+        return;
+    }
+}
+
 static void me_rx_g711_impl(const uint8_t *codewords, int count)
 {
     int offset;
@@ -12001,6 +12051,7 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
             (void)fwrite(codewords, 1, (size_t)count, g_g711_rx_tap);
         return;
     }
+    v92_retrain_watch_locked(codewords, count);
     raw_v91 = (g_mod == ME_MOD_V91
                && (g_state == ME_TRAINING || g_state == ME_DATA));
     if (raw_v91)
