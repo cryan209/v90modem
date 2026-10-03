@@ -473,6 +473,22 @@ SPAN_DECLARE(void) v34_v90_clear_peer_retrain_event(v34_state_t *s);
     \param s The modem context. */
 SPAN_DECLARE(void) v34_v90_start_retrain_response(v34_state_t *s);
 
+/*! V.90 digital modem, a retrain told apart from V.92 modem-on-hold (V.92
+    9.10.1.1, Cor.1 9.7.1.2 NOTE).  The application has been sending Tone B
+    itself and has already seen the peer's first Tone A reversal, so the
+    ordinary response -- silence, Tone B, wait for that reversal -- would wait
+    for one that has gone by.  This arms Phase 2 with the reversal counted:
+    the receiver detects Tone A for the second reversal, and the transmitter
+    is parked while the application completes 11.2.1.1.3 (Tone B for 40 ms
+    after the reversal, then 10 ms reversed) on its own carrier, so there is
+    no phase step at the hand-over.  Call v34_v90_retrain_first_b_silence()
+    the moment that reversed tone ends. */
+SPAN_DECLARE(void) v34_v90_retrain_after_reversal(v34_state_t *s);
+
+/*! See v34_v90_retrain_after_reversal(): enter 11.2.1.1.4's silence, from
+    which the round trip is timed to the peer's second reversal. */
+SPAN_DECLARE(void) v34_v90_retrain_first_b_silence(v34_state_t *s);
+
 /*! \brief Start a V.34 11.5 retrain: 70 ms of silence, then this role's tone
            (Tone A for the answer modem, Tone B for the call modem), with the
            INFO0 exchange omitted.  Use INSTEAD of restarting into Phase 2 at

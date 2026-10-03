@@ -155,6 +155,7 @@ typedef struct {
     int n_actions;
     bool null_cm;                     /* 9.10.2.1: answer the null CM with a null JM, then disconnect after CJ */
     bool initiator;
+    bool retrain_by_reversal;         /* the RETRAIN action came from a Tone B reversal */
     bool no_outgoing_requests;        /* MHnack 0101 received */
 
     v92_mh_frame_t tx_frame;

@@ -131,7 +131,9 @@ while engaged.  Actions: `SUSPEND_LINK` -> `ds_suspend_link()`;
 same SIP call, with `data_stack_start_online()` resuming the suspended link;
 `RETRAIN` -> `restart_v90_phase2_locked()`; `DISCONNECT` -> hangup.
 
-Not established: any of it against a real V.92 modem.  Known weakness: a
-Tone RT that is a retrain is recognised only after the peer's reversal, so
-the Phase 2 restart that follows may miss that reversal.  Short Phase 1
+Not established: any of it against a real V.92 modem.  A Tone RT that is a
+retrain is recognised by the peer's first Tone A reversal; Phase 2 is then
+re-armed past it and the MH layer answers it per V.34 11.2.1.1.3 (Tone B
+reversal 40 ms later) before V.34 takes over at the 11.2.1.1.4 silence --
+`v92_mh_retrain_test`, 6/6 against 3/6 for the old hand-over.  Short Phase 1
 (QC) after a hold is not used; reconnection runs full V.8.

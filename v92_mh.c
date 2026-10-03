@@ -493,6 +493,7 @@ void v92_mh_ctrl_tick(v92_mh_ctrl_t *c, int ms, const v92_mh_detect_t *l)
 
     case V92_MH_ST_RESP_RT:
         if (l->reversal && c->peer_initiated == V92_MH_NONE) {
+            c->retrain_by_reversal = true;
             enter(c, V92_MH_ST_DONE, V92_MH_TX_RT);
             push_action(c, V92_MH_ACT_RETRAIN);
         } else if (c->peer_initiated != V92_MH_NONE && rt_long_enough(c)) {

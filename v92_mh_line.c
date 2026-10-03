@@ -16,7 +16,7 @@
 #define DBM0_RMS 16017.0              /* G.711 0 dBm0 sine (mu-law) */
 
 #define RT_ZEROS 24                   /* 40 ms of unmodulated carrier */
-#define REV_GUARD 16
+#define REV_GUARD 10
 #define PEER_TONE_FRAC 0.55
 #define ANSAM_FRAC 0.5
 #define SILENCE_RMS 90.0              /* about -45 dBm0 */
@@ -39,8 +39,51 @@ static int16_t clip16(double v)
     return (int16_t)lrint(v);
 }
 
+void v92_mh_line_retrain_reply(v92_mh_line_t *l, int since_reversal)
+{
+    l->retrain_reply = true;
+    l->reply_tone = 320 - since_reversal;        /* 40 ms after the reversal */
+    if (l->reply_tone < 0)
+        l->reply_tone = 0;
+    l->reply_reversed = 80;                      /* 10 ms */
+    l->reply_done = false;
+}
+
+bool v92_mh_line_retrain_reply_done(const v92_mh_line_t *l)
+{
+    return l->retrain_reply && l->reply_done;
+}
+
+int v92_mh_line_retrain_reply_fill(v92_mh_line_t *l, int16_t *out, int n)
+{
+    int i;
+
+    for (i = 0; i < n; i++) {
+        if (l->reply_tone > 0) {
+            l->reply_tone--;
+        } else if (l->reply_reversed > 0) {
+            if (l->reply_reversed == 80)
+                l->tx_sign = -l->tx_sign;       /* 11.2.1.1.3's reversal */
+            l->reply_reversed--;
+        } else {
+            l->reply_done = true;
+            break;
+        }
+        out[i] = clip16(l->tx_amplitude * l->tx_sign * cos(2.0 * M_PI * l->tx_phase));
+        l->tx_phase += l->own_hz / FS;
+        if (l->tx_phase >= 1.0) l->tx_phase -= 1.0;
+    }
+    return i;
+}
+
 bool v92_mh_line_tx(v92_mh_line_t *l, v92_mh_ctrl_t *c, int16_t *out, int n)
 {
+    if (l->retrain_reply) {
+        int k = v92_mh_line_retrain_reply_fill(l, out, n);
+
+        memset(out + k, 0, (size_t)(n - k) * sizeof(out[0]));
+        return true;
+    }
     if (c->tx == V92_MH_TX_DATA) {
         l->last_tx = V92_MH_TX_DATA;
         return false;
@@ -136,6 +179,8 @@ static void on_bit(v92_mh_line_t *l, v92_mh_ctrl_t *c, int bit)
          * second one before the guard has passed makes it MH, not a
          * reversal. */
         l->pending_reversal = (l->zero_run >= REV_GUARD && l->pending_reversal == 0) ? 1 : 0;
+        if (l->pending_reversal)
+            l->rev_sample = l->rx_samples;
         l->zero_run = 0;
     }
     l->rt = l->peer_dominant && l->zero_run >= RT_ZEROS;
@@ -180,10 +225,14 @@ void v92_mh_line_rx(v92_mh_line_t *l, v92_mh_ctrl_t *c, const int16_t *in, int n
 
     for (int i = 0; i < n; i++) {
         double x = in[i];
-        double re = x * cos(2.0 * M_PI * l->rx_phase);
-        double im = -x * sin(2.0 * M_PI * l->rx_phase);
+        double re;
+        double im;
         double dre, dim, d;
         int k0, k1, bin;
+
+        l->rx_samples++;
+        re = x * cos(2.0 * M_PI * l->rx_phase);
+        im = -x * sin(2.0 * M_PI * l->rx_phase);
 
         l->rx_phase += l->peer_hz / FS;
         if (l->rx_phase >= 1.0) l->rx_phase -= 1.0;

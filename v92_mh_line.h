@@ -13,8 +13,10 @@
  *                  that carrier dominating the band.  No MH stream has more
  *                  than 8 zeros in a row (fill ones bound it), so a running
  *                  MH sequence never reads as RT;
- *   - reversal   : a single one with >= 16 zeros either side (Cor.1 9.7.1.2
- *                  NOTE: MH must not be mistaken for a retrain reversal);
+ *   - reversal   : a single one with >= 10 zeros either side (Cor.1 9.7.1.2
+ *                  NOTE: MH must not be mistaken for a retrain reversal; 10
+ *                  clears MH's 8 and keeps the confirmation to ~17 ms, which
+ *                  matters because 11.2.1.1.3 answers it 40 ms later);
  *   - ANSam      : 2100 Hz dominating;
  *   - silence    : band power under about -45 dBm0.
  *
@@ -64,8 +66,15 @@ typedef struct {
     int ones_since_tone;
     bool rt;
     int pending_reversal;             /* zeros seen after a lone one */
-    int zeros_before_one;
     bool reversal;
+    uint64_t rx_samples;              /* received samples so far */
+    uint64_t rev_sample;              /* rx_samples when the last reversal's one was decided */
+
+    /* transmit: the 11.2.1.1.3 reply to a retrain's first Tone A reversal */
+    bool retrain_reply;
+    int reply_tone;                   /* samples of Tone B still to send */
+    int reply_reversed;               /* samples of reversed Tone B still to send */
+    bool reply_done;
 
     /* receive: block detectors */
     int blk_n;
@@ -79,6 +88,21 @@ void v92_mh_line_init(v92_mh_line_t *l, bool own_is_tone_a, double tx_dbm0);
 /* Fill `out` from the controller's transmit state.  Returns false when the
  * controller is in V92_MH_TX_DATA (the caller produces data mode itself). */
 bool v92_mh_line_tx(v92_mh_line_t *l, v92_mh_ctrl_t *c, int16_t *out, int n);
+
+/* The controller decided the far end is retraining (a lone Tone A reversal,
+ * V92_MH_ACT_RETRAIN with c->retrain_by_reversal).  Answer that reversal per
+ * V.34 11.2.1.1.3 from this layer, on the carrier already on the line: Tone
+ * B until 40 ms after the reversal (`since_reversal` samples have passed),
+ * then 10 ms of it reversed, then silence and v92_mh_line_retrain_reply_done()
+ * -- the moment to hand the transmitter to V.34 Phase 2.  While the reply runs
+ * v92_mh_line_tx() ignores the controller. */
+void v92_mh_line_retrain_reply(v92_mh_line_t *l, int since_reversal);
+bool v92_mh_line_retrain_reply_done(const v92_mh_line_t *l);
+/* As v92_mh_line_tx() during the reply, but stops at the sample where the
+ * reversed tone ends and returns how many it wrote (n while still running):
+ * the hand-over to V.34 belongs on that sample, because 11.2.1.1.4 times the
+ * round trip from it. */
+int v92_mh_line_retrain_reply_fill(v92_mh_line_t *l, int16_t *out, int n);
 
 /* Demodulate `n` received samples: MH bits go to the controller, and it is
  * ticked once per 10 ms with the detectors' state. */

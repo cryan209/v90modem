@@ -1040,6 +1040,12 @@ static bool           g_mh_engaged = false;
 static v92_mh_ctrl_t  g_mh;
 static v92_mh_line_t  g_mh_line;
 static bool           g_mh_initiated = false;
+/* This call's INFO0s were mutually V.92.  Latched, because a retrain omits
+ * INFO0 and clears g_v92_info0_mutual, and MH must re-arm after one. */
+static bool           g_mh_call_capable = false;
+/* Answering a retrain's first Tone A reversal from the MH layer (V.34
+ * 11.2.1.1.3) before V.34 Phase 2 takes the transmitter back. */
+static bool           g_mh_retrain_reply = false;
 /* Set across the Phase 1-4 that follows an on-hold or fast reconnect:
  * data_stack_start_online() then resumes the suspended link (Amd.2 9.10.3)
  * rather than creating a new one. */
@@ -6900,6 +6906,8 @@ void me_on_sip_connected(void)
     v92_call_state_reset_locked();
     mh_disarm_locked();
     g_mh_initiated = false;
+    g_mh_call_capable = false;
+    g_mh_retrain_reply = false;
     g_mh_resume_pending = false;
     g_mh_hold_until_ms = 0;
     g_data_link_failed = false;
@@ -6962,6 +6970,7 @@ void me_on_sip_disconnected(void)
     if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
     ds_release(&g_data_stack);
     mh_disarm_locked();
+    g_mh_retrain_reply = false;
     g_mh_resume_pending = false;
     g_mh_hold_until_ms = 0;
     g_v8_active_answer_tone = g_v8_answer_tone;
@@ -11756,8 +11765,10 @@ static bool me_v92_mh_enabled(void)
  * end the digital modem -- whose retrain tone is Tone B (8.9.1). */
 static void mh_arm_locked(void)
 {
+    if (g_v92_info0_mutual)
+        g_mh_call_capable = true;
     if (!me_v92_mh_enabled() || g_mh_armed || me_v90_analogue_role()
-        || g_mod != ME_MOD_V90 || !g_v92_info0_mutual)
+        || g_mod != ME_MOD_V90 || !g_mh_call_capable)
         return;
     v92_mh_ctrl_init(&g_mh, 200);
     g_mh.t1_code = (uint8_t)(parse_env_int("ME_V92_MH_T1", 0x3) & 0xF);
@@ -11822,11 +11833,29 @@ static void mh_handle_actions_locked(void)
             return;
         case V92_MH_ACT_RETRAIN:
             /* 9.10.1.1: Tone RT with a reversal and no MH is a retrain. */
-            ME_LOG("[ME] V.92 9.10.1.1: Tone RT was a retrain, not modem-on-hold\n");
-            mh_disarm_locked();
             ds_resume_link(&g_data_stack, 0);
-            if (g_state == ME_DATA)
-                (void) restart_v90_phase2_locked("V.92 9.10.1.1: retrain, not MH");
+            if (g_mh.retrain_by_reversal && g_state == ME_DATA
+                && restart_v90_phase2_locked("V.92 9.10.1.1: retrain, not MH")) {
+                /* The reversal that told it apart from MH IS the peer's first
+                   Phase 2 reversal (Cor.1 9.7.1.2), already gone by: arm
+                   Phase 2 past it and answer it from this layer, on the
+                   carrier already on the line -- Tone B to 40 ms after it,
+                   10 ms reversed -- then hand V.34 the 11.2.1.1.4 silence. */
+                int since = (int)(g_mh_line.rx_samples - g_mh_line.rev_sample);
+
+                v34_v90_retrain_after_reversal(g_v34);
+                v92_mh_line_retrain_reply(&g_mh_line, since);
+                g_mh_retrain_reply = true;
+                g_mh_armed = false;
+                ME_LOG("[ME] V.92 9.10.1.1: retrain, not modem-on-hold; answering its "
+                       "Tone A reversal (seen %d ms ago) before V.34 Phase 2\n", since / 8);
+                trace_phase("V92 MH retrain by reversal, reply %d ms after it", since / 8);
+            } else {
+                ME_LOG("[ME] V.92 9.10.1.1: Tone RT was a retrain, not modem-on-hold\n");
+                mh_disarm_locked();
+                if (g_state == ME_DATA)
+                    (void) restart_v90_phase2_locked("V.92 9.10.1.1: retrain, not MH");
+            }
             return;
         case V92_MH_ACT_DISCONNECT:
             ME_LOG("[ME] V.92 9.10.2: cleardown, disconnecting\n");
@@ -11868,7 +11897,7 @@ static bool mh_rx_locked(const uint8_t *codewords, int count)
     int16_t linear[320];
 
     if (!g_mh_armed)
-        return false;
+        return false;               /* includes the retrain reply: V.34 receives */
     if (g_mh.state == V92_MH_ST_IDLE && mh_initiate_due_locked()) {
         const char *what = getenv("ME_V92_MH_INITIATE");
         v92_mh_signal_t sig = strcmp(what, "req") == 0 ? V92_MH_REQ
@@ -11899,13 +11928,36 @@ static bool mh_rx_locked(const uint8_t *codewords, int count)
     return g_mh_armed && g_mh_engaged;
 }
 
-/* Transmit side: true when MH supplied the codewords. */
-static bool mh_tx_locked(uint8_t *codewords, int count)
+/* Transmit side: how many of `count` codewords MH supplied (0 = none). */
+static int mh_tx_locked(uint8_t *codewords, int count)
 {
     int16_t linear[320];
 
+    if (g_mh_retrain_reply) {
+        int done = 0;
+
+        while (done < count) {
+            int n = count - done, k;
+
+            if (n > 320) n = 320;
+            k = v92_mh_line_retrain_reply_fill(&g_mh_line, linear, n);
+            for (int i = 0; i < k; i++)
+                codewords[done + i] = linear_to_pcm(linear[i]);
+            done += k;
+            if (k < n) {
+                /* The reversed tone ends on this sample: 11.2.1.1.4 times
+                   the round trip from here, so V.34 starts here. */
+                v34_v90_retrain_first_b_silence(g_v34);
+                g_mh_retrain_reply = false;
+                g_mh_engaged = false;
+                ME_LOG("[ME] V.92 9.10.1.1: Tone B reversal sent; V.34 Phase 2 resumes\n");
+                break;
+            }
+        }
+        return done;
+    }
     if (!g_mh_armed || !g_mh_engaged)
-        return false;
+        return 0;
     for (int off = 0; off < count; ) {
         int n = count - off;
 
@@ -11916,7 +11968,7 @@ static bool mh_tx_locked(uint8_t *codewords, int count)
             codewords[off + i] = linear_to_pcm(linear[i]);
         off += n;
     }
-    return true;
+    return count;
 }
 
 static void me_rx_g711_impl(const uint8_t *codewords, int count)
@@ -12169,7 +12221,8 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
     }
 
     pthread_mutex_lock(&g_state_mtx);
-    if (mh_tx_locked(codewords, count)) {
+    offset = mh_tx_locked(codewords, count);
+    if (offset == count) {
         g_g711_tx_octets += (uint64_t)count;
         pthread_mutex_unlock(&g_state_mtx);
         if (g_g711_tx_tap)
@@ -12178,7 +12231,7 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
     }
     pthread_mutex_unlock(&g_state_mtx);
 
-    for (offset = 0; offset < count; ) {
+    for (; offset < count; ) {
         int16_t linear[320];
         int chunk = count - offset;
         bool raw_pcm;

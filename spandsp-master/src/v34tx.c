@@ -5540,7 +5540,16 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
                 s->rx.persistence2 = 0;
                 s->rx.info0_received = true; /* §9.5 omits INFO0. */
                 s->rx.current_demodulator = V34_MODULATION_TONES;
-                s->rx.stage = V34_RX_STAGE_TONE_B;
+                /* The stage the startup puts this receiver in once INFO0 is
+                   done (v34rx.c, process INFO0: calling_party ? TONE_A :
+                   TONE_B).  This was TONE_B unconditionally -- right for the
+                   plain V.34 answer modem, which is not the calling party, and
+                   wrong for the V.90 analogue modem, which is: its receiver
+                   then never moved to L1_L2 on the digital modem's second Tone
+                   B reversal, so a V.90 analogue retrain never received INFO1d
+                   and ended in INFOMARKSa (v92_mh_retrain_test, baseline arm,
+                   2026-10-03). */
+                s->rx.stage = (s->calling_party)  ?  V34_RX_STAGE_TONE_A  :  V34_RX_STAGE_TONE_B;
                 initial_ab_not_ab_baud_init(s);
                 return zero;
             }
@@ -10266,6 +10275,63 @@ SPAN_DECLARE(void) v34_v90_start_retrain_response(v34_state_t *s)
     s->rx.received_event = V34_EVENT_NONE;
     s->rx.persistence1 = 0;
     s->rx.persistence2 = 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_v90_retrain_after_reversal(v34_state_t *s)
+{
+    if (!s  ||  !s->tx.v90_mode  ||  s->calling_party)
+        return;
+    /*endif*/
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+             "Tx - V.90: retrain after a Tone A reversal the application saw; "
+             "receiver armed for the second reversal\n");
+    v90_phase2_reset_transactions(s);
+    /* The first reversal transaction is complete: received and answered. */
+    s->rx.phase2_reversal_count = 1;
+    s->tx.v90_phase2_reversals_consumed = 1;
+    /* 9.2.1.1.8: retrains use V.90 Phase 2 whatever came before. */
+    if (s->tx.v90_v34_fallback  ||  s->rx.v90_v34_fallback)
+    {
+        s->tx.v90_v34_fallback = false;
+        s->rx.v90_v34_fallback = false;
+        s->tx.scrambler_tap = 4;
+        s->rx.scrambler_tap = 17;
+    }
+    /*endif*/
+    s->tx.current_modulator = V34_MODULATION_CC;
+    s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
+    s->tx.current_getbaud = get_initial_fdx_b_not_b_baud;
+    /* Parked: FIRST_NOT_B_WAIT reverses when tone_duration reaches 24, which
+       this never does.  The application owns the line until it calls
+       v34_v90_retrain_first_b_silence(). */
+    s->tx.stage = V34_TX_STAGE_FIRST_NOT_B_WAIT;
+    s->tx.tone_duration = -1000000;
+    s->rx.received_event = V34_EVENT_NONE;
+    s->rx.v90_repeated_info0a_pending = false;
+    s->rx.persistence1 = 0;
+    s->rx.persistence2 = 0;
+    s->rx.current_demodulator = V34_MODULATION_TONES;
+    s->rx.stage = V34_RX_STAGE_TONE_A;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_v90_retrain_first_b_silence(v34_state_t *s)
+{
+    if (!s  ||  !s->tx.v90_mode  ||  s->calling_party)
+        return;
+    /*endif*/
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+             "Tx - V.90: application's Tone B reversal done; entering FIRST_B_SILENCE\n");
+    s->tx.current_modulator = V34_MODULATION_CC;
+    s->tx.current_getbaud = get_initial_fdx_b_not_b_baud;
+    s->tx.tone_duration = 0;
+    s->tx.stage = V34_TX_STAGE_FIRST_B_SILENCE;
+    /* As FIRST_NOT_B's exit does: only the counter carries reversals now. */
+    s->rx.v90_repeated_info0a_pending = false;
+    if (!v90_phase2_reversal_pending(s))
+        s->rx.received_event = V34_EVENT_NONE;
+    /*endif*/
 }
 /*- End of function --------------------------------------------------------*/
 
