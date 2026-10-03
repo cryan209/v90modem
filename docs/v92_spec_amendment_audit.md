@@ -66,13 +66,13 @@ a separate review of their reserved-field acceptance rules.
 | Amd.1 item 4, Table 31 | Silent-period request at bit 32, CPu acknowledgement at 33, reserved receive behavior | Codec supports both fields; reserved acceptance fixed here. Digital initial startup requests no silence. Analogue controller explicitly rejects a silence request; renegotiation remains absent. |
 | Amd.1 item 5, 8.6.6 | Differential SCR with Jp-prime continuity | Fixed and independently waveform-tested here. |
 | Amd.1 item 6, 9.11 | drn=0 cleardown in CPt/CPu/CPus/CPd, acknowledgement and role-dependent waits, no silence request | Codecs can represent zero, but the analogue Phase-4 controller rejects zero as an unsupported profile. No complete protocol cleardown path with the specified waits is implemented. |
-| Amd.1 item 7, Table 32 | MH sequence fields, denial reasons and reserved codes | No live MH codec/controller found. SpanDSP AT-command names are not evidence of modem-on-hold signaling. |
+| Amd.1 item 7, Table 32 | MH sequence fields, denial reasons and reserved codes | `v92_mh.c` codec + framer, graded by an independent CRC oracle in `v92_mh_test` (every signal x info, every single-bit error, undefined signal ignored, reserved info flagged not rejected). Not yet wired to the INFO-modulation line signals. |
 | Amd.1 items 8/9, 9.10.1/Figure 20 | MH transition timing | Superseded by Cor.1; do not implement the earlier unconditional optional-Tone-RT rule. |
 | Amd.2, new 9.10.3 | Suspend and resume error correction; preserve original V.42 C/R roles; no new XID or link establishment | No live on-hold integration or dedicated suspension interface in `data_stack.h`. Reusing call reset or restarting LAPM would violate this requirement. |
 | Cor.1 item 1, 9.7.1.2 | Digital retrain response: qualified Tone A, silence, Tone B; distinguish MH signals from a reversal | Complete V.92 retrain/MH discrimination is not established. Existing V.34 recovery does not prove this V.92 procedure. |
-| Cor.1 item 2, 9.10.1 | Initiator sends silence then Tone RT; skip RT only if peer RT was detected during silence; finish each MH sequence | Open with the MH controller. Keep this condition explicit in future transitions. |
+| Cor.1 item 2, 9.10.1 | Initiator sends silence then Tone RT; skip RT only if peer RT was detected during silence; finish each MH sequence | `v92_mh_ctrl_t`: 70 ms silence, RT >= 50 ms (20 after an MH), skip only on peer RT during the silence, every transition deferred to a sequence boundary. Tested: Cor.1 skip, and every MH run in every scenario is a multiple of 40 bits. |
 | Cor.1 item 3, 9.10.2.1 | Physical-role reversal preserves negotiated link-layer state | Open with Amd.2's V.42 suspension/resumption work. |
-| Cor.1 item 4, Figure 20 | Corrected MH request/acknowledgement timing | Open with the MH waveform and procedure tests. |
+| Cor.1 item 4, Figure 20 | Corrected MH request/acknowledgement timing | Procedure-level: Figures 20-24, 9.10.1.1's 2 s + round-trip timeout, responder retrain discrimination, T1, and on-hold exit to Phase 1 run two controllers against each other over a delayed 600 bit/s line in `v92_mh_test` (in `make test`). Waveform level and engine integration still open. |
 
 ## Verification for this change
 
@@ -100,3 +100,22 @@ The analogue default and audio startup matrix now use 16 kHz, with direct
 the PCMU zero-DIL audio startup still fails at the analogue Phase-4 DATA
 assertion. The historical 48 kHz result above is retained as the audit's
 baseline evidence, not the current configured audio rate.
+
+## Follow-up: modem-on-hold controller (2026-10-03)
+
+`v92_mh.c` implements 8.9.2 (Table 32 per Amd.1, Tables 33/34) and the
+9.10.1/9.10.2 transactions per Cor.1, as a controller with no audio: it takes
+detector states (peer RT, silence, ANSam, Tone B reversal, QC/CM) and MH
+bits, and reports what to transmit and an action FIFO (`SUSPEND_LINK`,
+`ON_HOLD`, `PHASE1_ANSWER`, `PHASE1_CALL`, `RETRAIN`, `DISCONNECT`).
+
+One interpretation is fixed in one place: Table 32/33's 4-bit entries are
+read as numbers with the lower-numbered bit least significant, the reading
+under which Table 33 is monotonic and every signal code is odd.  No foreign
+MH capture exists to confirm it.
+
+Still open: modulating/demodulating MH on the INFO channel and RT in the
+engine, the Amd.2 9.10.3 link-layer suspend/resume interface in
+`data_stack.h` (the controller emits `SUSPEND_LINK`; nothing consumes it),
+the null-CM/JM cleardown from on-hold (flagged as `null_cm`), and 9.11's
+drn=0 cleardown.
