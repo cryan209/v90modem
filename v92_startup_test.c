@@ -325,6 +325,10 @@ static const v92_line_channel_config_t *pair_line;
  * analogue front end has seen.  phase3_only stops once the analogue core
  * has seen §9.3.2.4's Sd -> S-bar_d transition and acquired TRN1d, and
  * returns whether it did, instead of running and asserting the startup. */
+/* 9.11 cleardown variant of the pair: 0 none, 1 digital initiates, 2 analogue. */
+static int g_pair_cleardown;
+static long g_pair_cleardown_digital_at, g_pair_cleardown_analogue_at;
+
 static bool phase3_pair_at(bool alaw, bool dil, bool drop_cpd, unsigned audio_rate,
                            int sd_delay, bool phase3_only)
 {
@@ -332,7 +336,8 @@ static bool phase3_pair_at(bool alaw, bool dil, bool drop_cpd, unsigned audio_ra
     v92a_config_t cfg = {
         .law = alaw ? V90_LAW_ALAW : V90_LAW_ULAW, .u_info = 78,
         .lu = 6000, .digital_max_tx_dbm0 = -13, .upstream_rate_mask = 1,
-        .dil = {.n = 0, .lsp = 1, .ltp = 1}
+        .dil = {.n = 0, .lsp = 1, .ltp = 1},
+        .cleardown = g_pair_cleardown == 2
     };
     /* Phase 2 is deterministic; a sweep need not repeat it per point. */
     static int sweep_u_info[2];
@@ -527,6 +532,20 @@ static bool phase3_pair_at(bool alaw, bool dil, bool drop_cpd, unsigned audio_ra
                     (unsigned long long)v92a_audio_clipped(frontend));
         v92a4_t *p4 = v92a_phase4(analogue);
         if (p4) v92a4_set_data_source(p4, pair_payload_bit, &sink);
+        if (g_pair_cleardown) {
+            static bool requested;
+            if (i == 0) requested = false;
+            if (g_pair_cleardown == 1 && !requested
+                && v90_get_tx_phase(digital) == V90_TX_TRN2D) {
+                assert(v90_v92_request_cleardown(digital));
+                requested = true;
+            }
+            if (v90_v92_cleardown_complete(digital) && !g_pair_cleardown_digital_at)
+                g_pair_cleardown_digital_at = i;
+            if (p4 && v92a4_cleardown(p4) && !g_pair_cleardown_analogue_at)
+                g_pair_cleardown_analogue_at = i;
+            if (g_pair_cleardown_digital_at && g_pair_cleardown_analogue_at) break;
+        }
         if (p4 && v92a4_stage(p4) == V92A4_FAILED) {
             fprintf(stderr, "Phase 4 failed: %s\n", v92a4_failure(p4));
             break;
@@ -541,6 +560,15 @@ static bool phase3_pair_at(bool alaw, bool dil, bool drop_cpd, unsigned audio_ra
         /* V92A_JA leaves only on a seen S-bar_d (V.92 §9.5.2.2.1). */
         if (phase3_only && v92a_stage(analogue) > V92A_JA
             && v92a_rx_training(analogue) >= 1) break;
+    }
+    if (g_pair_cleardown) {
+        bool ok = g_pair_cleardown_digital_at && g_pair_cleardown_analogue_at
+                  && v90_get_tx_phase(digital) != V90_TX_ED
+                  && v90_get_tx_phase(digital) != V90_TX_DATA
+                  && !sink.b1.locked;
+        v92a_free(analogue);
+        v90_free(digital);
+        return ok;
     }
     if (phase3_only) {
         bool ok = v92a_stage(analogue) > V92A_JA && v92a_stage(analogue) != V92A_FAILED
@@ -597,6 +625,25 @@ static bool phase3_pair_at(bool alaw, bool dil, bool drop_cpd, unsigned audio_ra
            alaw ? "PCMA" : "PCMU", dil ? "measured" : "zero",
            drop_cpd ? ", first CPd erased" : "", audio ? ", reconstructed audio" : "");
     return true;
+}
+
+/* 9.11 (Amd.1 item 6) through the real Phase 4 of both sides: drn = 0 in
+ * the initiator's CP, an acknowledged CP back, no E and no B1, and both go
+ * on-hook. */
+static void test_cleardown_pair(bool alaw, int who)
+{
+    g_pair_cleardown = who;
+    g_pair_cleardown_digital_at = g_pair_cleardown_analogue_at = 0;
+    bool ok = phase3_pair_at(alaw, false, false, 0, 0, false);
+    long d = g_pair_cleardown_digital_at, a = g_pair_cleardown_analogue_at;
+    g_pair_cleardown = 0;
+    if (!ok)
+        fprintf(stderr, "cleardown %s by %s: digital on-hook at %ld, analogue at %ld\n",
+                alaw ? "PCMA" : "PCMU", who == 1 ? "digital" : "analogue", d, a);
+    assert(ok);
+    printf("PASS: V.92 9.11 cleardown initiated by the %s modem, %s: drn=0 CP, "
+           "acknowledged, no Ed/E2u or B1; both on-hook (digital %ld, analogue %ld symbols)\n",
+           who == 1 ? "digital" : "analogue", alaw ? "PCMA" : "PCMU", d, a);
 }
 
 static void test_phase3_pair(bool alaw, bool dil, bool drop_cpd, unsigned audio_rate)
@@ -861,6 +908,68 @@ static void test_spec_crc(void)
     puts("PASS: independent V.92 control CRCs and amended SUVd reserved-bit handling");
 }
 
+/* Amd.1 item 3 (8.7.6): TRN2u's scrambler and differential encoder by
+ * context, graded on the transmitted signs against an independent GPA
+ * (1 + x^-5 + x^-23) and differential-encoder model.  The second TRN2u of a
+ * silent renegotiation must CONTINUE the scrambler through E2u and seed the
+ * encoder from E2u's last sign; resetting it there -- the obvious thing, and
+ * what v92_trn2u_tx_start() does -- is the error the amendment rules out. */
+static void test_spec_trn2u_contexts(void)
+{
+    v92_trn2u_tx_t tx;
+    int16_t out[600];
+    uint8_t ebits[48];
+    int hist[4096], n = 0, prev;
+
+    v92_trn2u_tx_init(&tx, 4, 2000.0, false);
+    /* Oracle scrambler over every bit that enters the transmitter. */
+#define ORACLE_BIT(in) ({ int o_ = ((in) ^ (n >= 5 ? hist[n-5] : 0) ^ (n >= 23 ? hist[n-23] : 0)) & 1; hist[n++] = o_; o_; })
+    /* First TRN2u of a renegotiation: reset, seed 0. */
+    v92_trn2u_tx_start_context(&tx, V92_TRN2U_RENEG_FIRST, 1);
+    prev = 0;
+    assert(v92_trn2u_tx_ones_linear(&tx, out, 240) == 240);
+    for (int s = 0; s < 240; s++) {
+        int msb = ORACLE_BIT(1) ^ prev;
+        (void)ORACLE_BIT(1);
+        prev = msb;
+        assert((out[s] < 0) == (msb == 1));
+    }
+    /* E2u: arbitrary content through the same scrambler. */
+    for (int i = 0; i < 48; i++)
+        ebits[i] = (uint8_t)((i * 7 + 3) % 5 == 0);
+    assert(v92_trn2u_tx_bits_linear(&tx, ebits, 48, out, 600) == 24);
+    for (int s = 0; s < 24; s++) {
+        int msb = ORACLE_BIT(ebits[2*s]) ^ prev;
+        (void)ORACLE_BIT(ebits[2*s+1]);
+        prev = msb;
+        assert((out[s] < 0) == (msb == 1));
+    }
+    /* Second TRN2u: scrambler continues, seed = E2u's last sign. */
+    v92_trn2u_tx_start_context(&tx, V92_TRN2U_RENEG_SECOND, prev);
+    assert(v92_trn2u_tx_ones_linear(&tx, out, 240) == 240);
+    for (int s = 0; s < 240; s++) {
+        int msb = ORACLE_BIT(1) ^ prev;
+        (void)ORACLE_BIT(1);
+        prev = msb;
+        assert((out[s] < 0) == (msb == 1));
+    }
+    /* Control: the initial-train reset at the same point disagrees. */
+    {
+        v92_trn2u_tx_t reset = tx;
+        int16_t a[240], b[240], diff = 0;
+
+        v92_trn2u_tx_start_context(&reset, V92_TRN2U_INITIAL, prev);
+        v92_trn2u_tx_start_context(&tx, V92_TRN2U_RENEG_SECOND, prev);
+        v92_trn2u_tx_ones_linear(&reset, a, 240);
+        v92_trn2u_tx_ones_linear(&tx, b, 240);
+        for (int s = 0; s < 240; s++)
+            diff += (a[s] < 0) != (b[s] < 0);
+        assert(diff > 60);
+    }
+#undef ORACLE_BIT
+    puts("PASS: Amd.1 8.7.6 TRN2u scrambler/encoder by context (renegotiation first, second after E2u)");
+}
+
 static void test_spec_scr(bool alaw)
 {
     v90_state_t *tx = v90_init_data_pump(alaw ? V90_LAW_ALAW : V90_LAW_ULAW);
@@ -916,6 +1025,13 @@ int main(int argc, char **argv)
         test_spec_crc();
         test_spec_scr(false);
         test_spec_scr(true);
+        test_spec_trn2u_contexts();
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "--cleardown")) {
+        for (int law = 0; law < 2; law++)
+            for (int who = 1; who <= 2; who++)
+                test_cleardown_pair(law, who);
         return 0;
     }
     if (argc == 2 && !strcmp(argv[1], "--core-only")) {
@@ -983,6 +1099,10 @@ int main(int argc, char **argv)
     test_spec_crc();
     test_spec_scr(false);
     test_spec_scr(true);
+    test_spec_trn2u_contexts();
+    for (int law = 0; law < 2; law++)
+        for (int who = 1; who <= 2; who++)
+            test_cleardown_pair(law, who);
     test_audio();
     test_phase3_pair(false, false, false, false);
     test_phase3_pair(false, false, false, V92_AUDIO_RATE);

@@ -100,6 +100,23 @@ void v92_trn2u_tx_init(v92_trn2u_tx_t *tx,
 /* §8.7.6: reset GPA at TRN2u entry while carrying the final E1u sign. */
 void v92_trn2u_tx_start(v92_trn2u_tx_t *tx, int preceding_e1u_sign);
 
+/* 8.7.6 as replaced by Amd.1 item 3: where TRN2u starts decides both its
+ * scrambler and its differential encoder.
+ *   INITIAL       initial train or retrain: scrambler reset, encoder seeded
+ *                 with the last sign of the preceding E1u
+ *   RENEG_FIRST   first TRN2u of a rate renegotiation: scrambler reset,
+ *                 encoder seeded with zero (preceding_sign is ignored)
+ *   RENEG_SECOND  second TRN2u of a rate renegotiation with silence (after
+ *                 E2u): scrambler NOT reset -- it continues through E2u --
+ *                 and the encoder seeded with E2u's last sign */
+typedef enum {
+    V92_TRN2U_INITIAL,
+    V92_TRN2U_RENEG_FIRST,
+    V92_TRN2U_RENEG_SECOND
+} v92_trn2u_context_t;
+void v92_trn2u_tx_start_context(v92_trn2u_tx_t *tx, v92_trn2u_context_t ctx,
+                                int preceding_sign);
+
 /* Bits per PAM symbol: 1 for Phase-3 2-point, 2 for 4-point, 3 for 8-point. */
 int v92_trn2u_bits_per_symbol(int constellation_points);
 

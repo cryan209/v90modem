@@ -7,7 +7,8 @@
 #include "v92_phase4_decode.h"
 typedef struct v92a4_s v92a4_t;
 typedef enum { V92A4_WAIT, V92A4_TRN, V92A4_SUV, V92A4_CP,
-               V92A4_E, V92A4_B1, V92A4_DATA, V92A4_FAILED } v92a4_stage_t;
+               V92A4_E, V92A4_B1, V92A4_DATA, V92A4_FAILED,
+               V92A4_CLEARDOWN /* 9.11: go on-hook */ } v92a4_stage_t;
 v92a4_t *v92a4_init(const v90_analogue_phase4_config_t *cfg,
                      int points, double lu, uint32_t rate_mask, unsigned round_trip_symbols);
 void v92a4_free(v92a4_t *s);
@@ -22,6 +23,11 @@ void v92a4_set_data_source(v92a4_t *s, int (*get_bit)(void *), void *user);
 int v92a4_get_data_bits(v92a4_t *s, uint8_t *bits, int capacity);
 int v92a4_downstream_rate(const v92a4_t *s);
 const char *v92a4_failure(const v92a4_t *s);
+/* 9.11 (Amd.1 item 6): a CPd with drn = 0 is the digital modem clearing
+ * down -- answered with an acknowledged CPu, then V92A4_CLEARDOWN 100 ms +
+ * RTD/2 later.  Configuring cfg->cp.drn = 0 makes this side the initiator:
+ * V92A4_CLEARDOWN on an acknowledged CPd or 100 ms + RTD after its CPu. */
+bool v92a4_cleardown(const v92a4_t *s);
 double v92a4_rx_decision(const v92a4_t *s);
 double v92a4_rx_tolerance(const v92a4_t *s);
 #endif

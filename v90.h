@@ -426,6 +426,14 @@ bool v90_set_v92_suvu(v90_state_t *s, bool acknowledge);
  */
 bool v90_set_v92_cpu(v90_state_t *s, const vpcm_cp_frame_t *cpu);
 
+/* V.92 9.11 (Amd.1 item 6): put drn = 0 in this side's CPd and, instead of
+ * Ed, go on-hook on an acknowledged CPu or 100 ms + RTD after the CPd.  A
+ * CPu carrying drn = 0 is the analogue modem's cleardown and is answered
+ * automatically (acknowledged CPd, then 100 ms + RTD/2).  Poll
+ * v90_v92_cleardown_complete() to know when to disconnect. */
+bool v90_v92_request_cleardown(v90_state_t *s);
+bool v90_v92_cleardown_complete(const v90_state_t *s);
+
 /* Copy the CPu-derived data-mode CP for native CPd construction. */
 bool v90_get_v92_cpu(const v90_state_t *s, vpcm_cp_frame_t *out);
 

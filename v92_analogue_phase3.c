@@ -165,6 +165,10 @@ static bool prepare_cpt(v92a_t *s)
                                                   &s->cpt, &s->cp);
     }
     if (!ok) return false;
+    /* 9.11 (Amd.1 item 6): cleardown is drn = 0 in CPu; CPt keeps its rate
+     * so TRN2d can still be designed against it. */
+    if (s->cfg.cleardown)
+        s->cp.drn = 0;
     v92_cp_frame_t f = {
         .type = V92_CP_TYPE_CPT, .drn = s->cpt.drn,
         .codec_alaw = s->cfg.law == V90_LAW_ALAW,

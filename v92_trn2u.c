@@ -112,6 +112,25 @@ void v92_trn2u_tx_start(v92_trn2u_tx_t *tx, int preceding_e1u_sign)
     tx->prev_sign = preceding_e1u_sign ? 1 : 0;
 }
 
+void v92_trn2u_tx_start_context(v92_trn2u_tx_t *tx, v92_trn2u_context_t ctx,
+                                int preceding_sign)
+{
+    if (!tx)
+        return;
+    switch (ctx) {
+    case V92_TRN2U_RENEG_FIRST:
+        tx->scramble_reg = 0;
+        tx->prev_sign = 0;
+        break;
+    case V92_TRN2U_RENEG_SECOND:
+        tx->prev_sign = preceding_sign ? 1 : 0;   /* scrambler carries on */
+        break;
+    default:
+        v92_trn2u_tx_start(tx, preceding_sign);
+        break;
+    }
+}
+
 static int16_t v92_trn2u_tx_symbol(v92_trn2u_tx_t *tx, const int *bits)
 {
     int bps = v92_trn2u_bits_per_symbol(tx->constellation_points);

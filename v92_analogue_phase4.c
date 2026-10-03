@@ -20,6 +20,8 @@ struct v92a4_s {
     uint32_t rate_mask;
     bool suvd, cpd_seen, remote_ack, ack_sent, cpu_sent, downstream, cpu_retry;
     unsigned symbols, stage_symbols, cpu_end, round_trip_symbols;
+    bool peer_cleardown, cpd_ack_seen;
+    unsigned cleardown_at;            /* 0 = not scheduled */
     int alignment, window_len;
     uint8_t window[V92_CPD_MAX_BITS];
     uint8_t bits[V92_CP_RX_MAX_BITS];
@@ -68,7 +70,20 @@ static bool control(void *user, const uint8_t *bits, int n)
             v92_cpd_frame_t f;
             v92_cpd_diag_t d;
             if (!v92_cpd_decode(b, have, &f, &d)) continue;
-            if (!f.selected_upstream_drn || f.selected_upstream_drn > 19
+            if (f.acknowledge)
+                s->cpd_ack_seen = true;
+            if (!f.selected_upstream_drn) {
+                /* 9.11: the digital modem is clearing down. */
+                s->peer_cleardown = true;
+                if (!s->cpd_seen && s->cpu_sent)
+                    s->cpu_retry = true;      /* our CPu so far lacked the ack */
+                s->cpd = f;
+                s->cpd_seen = true;
+                s->remote_ack |= f.acknowledge;
+                s->window_len = 0;
+                return false;
+            }
+            if (f.selected_upstream_drn > 19
                 || !(s->rate_mask & (1u << (f.selected_upstream_drn-1)))
                 || !v92_upstream_wave_profile_validate(&f)) {
                 fail(s, "CPd selects an unsupported upstream profile");
@@ -151,6 +166,11 @@ static bool message(v92a4_t *s, bool cpu)
 static int16_t sample(v92a4_t *s)
 {
     int16_t out = 0;
+    if (s->stage == V92A4_CLEARDOWN) return 0;
+    if (s->cleardown_at && s->symbols >= s->cleardown_at) {
+        s->stage = V92A4_CLEARDOWN;
+        return 0;
+    }
     int bps = v92_trn2u_bits_per_symbol(s->tx.constellation_points);
     if (s->stage == V92A4_TRN && s->stage_symbols%12 == 0
         && (s->stage_symbols >= 12000 || s->suvd)) {
@@ -163,8 +183,19 @@ static int16_t sample(v92a4_t *s)
             if (s->stage == V92A4_CP) {
                 s->cpu_sent = true;
                 s->cpu_end = s->symbols;
+                /* 9.11 (Amd.1) waits; see v92a4_cleardown(). */
+                if (s->cpu.drn == 0 && !s->cleardown_at)
+                    s->cleardown_at = s->symbols + 800u + s->round_trip_symbols;
+                if (s->peer_cleardown && s->bits[33])
+                    s->cleardown_at = s->symbols + 800u + s->round_trip_symbols / 2;
             }
-            if (s->ack_sent && s->remote_ack && s->cpd_seen) {
+            if ((s->cpu.drn == 0 && s->cpu_sent && s->cpd_ack_seen)
+                || (s->cleardown_at && s->symbols >= s->cleardown_at)) {
+                s->stage = V92A4_CLEARDOWN;
+                return 0;
+            }
+            if (s->ack_sent && s->remote_ack && s->cpd_seen
+                && s->cpu.drn != 0 && !s->peer_cleardown) {
                 s->stage = V92A4_E;
                 s->stage_symbols = 0;
             } else if (!message(s, s->suvd && (!s->cpu_sent
@@ -237,6 +268,7 @@ void v92a4_rx(v92a4_t *s, const int16_t *samples, int count)
 v92a4_stage_t v92a4_stage(const v92a4_t *s) { return s ? s->stage : V92A4_FAILED; }
 bool v92a4_downstream_ready(const v92a4_t *s) { return s && s->downstream; }
 const v92_cpd_frame_t *v92a4_cpd(const v92a4_t *s) { return s && s->cpd_seen ? &s->cpd : NULL; }
+bool v92a4_cleardown(const v92a4_t *s) { return s && s->stage == V92A4_CLEARDOWN; }
 const char *v92a4_failure(const v92a4_t *s) { return s ? s->failure : "invalid configuration"; }
 double v92a4_rx_decision(const v92a4_t *s) { return s ? v90a_linear_last_decision(s->linear) : 0; }
 double v92a4_rx_tolerance(const v92a4_t *s) { return s ? v90a_linear_last_tolerance(s->linear) : 0; }

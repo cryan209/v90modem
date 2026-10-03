@@ -771,6 +771,14 @@ struct v90_state_s {
     bool             v92_cpd_sent;
     bool             v92_cpd_retry;
     uint64_t         v92_symbol_clock, v92_cpd_end;
+    /* V.92 9.11 (Amd.1 item 6) cleardown: drn = 0 in our CPd, or the
+     * analogue modem's CPu.  No Ed follows; instead the call goes on-hook
+     * at v92_cleardown_at (0 = not yet scheduled). */
+    bool             v92_cleardown;           /* we initiated */
+    bool             v92_peer_cleardown;      /* CPu/CPus carried drn = 0 */
+    bool             v92_cpu_ack_received;    /* a CPu' -- the initiator's release */
+    bool             v92_cleardown_done;
+    uint64_t         v92_cleardown_at;
     unsigned         v92_round_trip_symbols;
     bool             v92_ack_sent;              /* sent >= 1 SUVd' (ack=1) */
 
@@ -1093,6 +1101,9 @@ static bool v90_build_v92_cpd_native(v90_state_t *s)
 
     if (!s || s->phase4_d < 1 || !v90_build_v92_cpd_frame(s, &cpd))
         return false;
+    /* 9.11: cleardown is drn = 0 in CPd. */
+    if (s->v92_cleardown)
+        cpd.selected_upstream_drn = 0;
     if (!v92_cpd_encode(&cpd, s->phase4_d,
                         s->v92_tx_bits,
                         (int)sizeof(s->v92_tx_bits),
@@ -4177,7 +4188,8 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                 s->phase4_hold_logged = false;
                 /* §9.6.1.1.4: after sending an acknowledged sequence and
                  * receiving CPu'/SUVu' (or E2u), move to Ed. */
-                if (s->v92_ack_sent && s->v92_remote_ack_received) {
+                if (s->v92_ack_sent && s->v92_remote_ack_received
+                    && !s->v92_cleardown && !s->v92_peer_cleardown) {
                     s->tx_phase = V90_TX_ED;
                     s->sample_count = 0;
                 } else if ((!s->v92_cpd_sent || s->v92_cpd_retry)
@@ -4238,6 +4250,13 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                 s->v92_cpd_sent = true;
                 s->v92_cpd_end = s->v92_symbol_clock;
                 s->v92_cpd_retry = false;
+                /* 9.11 (Amd.1): the initiator goes on-hook on an
+                 * acknowledged CP or 100 ms + RTD after its CP; the responder
+                 * 100 ms + RTD/2 after its acknowledged CP. */
+                if (s->v92_cleardown && !s->v92_cleardown_at)
+                    s->v92_cleardown_at = s->v92_cpd_end + 800u + s->v92_round_trip_symbols;
+                if (s->v92_peer_cleardown && s->v92_cpu_received)
+                    s->v92_cleardown_at = s->v92_cpd_end + 800u + s->v92_round_trip_symbols / 2;
                 s->phase4_hold_logged = false;
                 s->sample_count = 0;
                 (void)v90_build_v92_suvd_mapped(s, s->v92_cpu_received);
@@ -5611,6 +5630,21 @@ bool v90_set_v92_cpu(v90_state_t *s, const vpcm_cp_frame_t *cpu)
         return false;
 
     v92_check_cpd_retry(s, cpu->acknowledge);
+    if (cpu->acknowledge)
+        s->v92_cpu_ack_received = true;
+    if (cpu->drn == 0) {
+        /* 9.11: the analogue modem is clearing down.  No data mapper to
+         * configure; answer with an acknowledged CPd and go on-hook. */
+        if (!s->v92_peer_cleardown)
+            fprintf(stderr, "[V90] V.92 9.11: CPu with drn=0, cleardown requested\n");
+        s->v92_peer_cleardown = true;
+        if (!s->v92_cpu_received && s->v92_cpd_sent)
+            s->v92_cpd_retry = true;     /* our CPd so far lacked the ack */
+        s->v92_cpu_received = true;
+        if (cpu->acknowledge)
+            s->v92_remote_ack_received = true;
+        return true;
+    }
     if (!s->v92_cpu_received) {
         expected = *cpu;
         expected.acknowledge = false;
@@ -5771,12 +5805,42 @@ void v90_reset_data_mode(v90_state_t *s)
         v90_reset_data_pump_state(s);
 }
 
+static void v92_cleardown_check(v90_state_t *s)
+{
+    if (s->v92_cleardown_done || !(s->v92_cleardown || s->v92_peer_cleardown))
+        return;
+    if ((s->v92_cleardown && s->v92_cpd_sent && s->v92_cpu_ack_received)
+        || (s->v92_cleardown_at && s->v92_symbol_clock >= s->v92_cleardown_at)) {
+        s->v92_cleardown_done = true;
+        fprintf(stderr, "[V90] V.92 9.11: cleardown complete (%s); disconnect\n",
+                s->v92_cleardown ? "initiated" : "responded");
+    }
+}
+
+bool v90_v92_request_cleardown(v90_state_t *s)
+{
+    if (!s || !s->v92_mode || !s->v92_native_cpu_rx)
+        return false;
+    s->v92_cleardown = true;
+    /* A CPd already sent carried a real rate: send another (9.11, "at any
+     * time that a modem sends a rate sequence"). */
+    if (s->v92_cpd_sent)
+        s->v92_cpd_retry = true;
+    return true;
+}
+
+bool v90_v92_cleardown_complete(const v90_state_t *s)
+{
+    return s && s->v92_cleardown_done;
+}
+
 int v90_phase3_tx(v90_state_t *s, int16_t amp[], int len)
 {
     for (int i = 0; i < len; i++) {
         uint8_t codeword = v90_phase3_codeword(s);
         amp[i] = v90_pcm_to_linear(s->law, codeword);
         s->v92_symbol_clock++;
+        v92_cleardown_check(s);
     }
     return len;
 }
@@ -5788,6 +5852,7 @@ int v90_phase3_tx_codewords(v90_state_t *s, uint8_t codewords[], int len)
     for (int i = 0; i < len; i++) {
         codewords[i] = v90_phase3_codeword(s);
         s->v92_symbol_clock++;
+        v92_cleardown_check(s);
     }
     return len;
 }

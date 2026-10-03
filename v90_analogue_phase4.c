@@ -201,8 +201,11 @@ v90_analogue_phase4_t *v90_analogue_phase4_init(const v90_analogue_phase4_config
      */
     if (cfg->cpt.shaping_redundancy > 3  ||  cfg->cp.shaping_redundancy > 3)
         return NULL;
+    /* A CP with drn = 0 is a cleardown (V.92 9.11, Amd.1 item 6): it
+     * carries no rate, so its K has nothing to agree with, and this
+     * receiver never reaches the data mode that would use it. */
     if (v90_analogue_phase4_cp_k(&cfg->cpt) < 0
-        || v90_analogue_phase4_cp_k(&cfg->cp) < 0
+        || (cfg->cp.drn != 0 && v90_analogue_phase4_cp_k(&cfg->cp) < 0)
         || !cfg->cp.v90_compatibility)
         return NULL;
     if ((s = calloc(1, sizeof(*s))) == NULL)

@@ -29,6 +29,7 @@ typedef struct {
     double digital_max_tx_dbm0;
     v90_dil_desc_t dil;
     uint32_t upstream_rate_mask; /* Table 20, 19 bits for 24000..48000 */
+    bool cleardown;              /* 9.11: send drn = 0 in this side's CPu */
 } v92a_config_t;
 
 /* Symbols of unusable Sd that v92a_init_line() reads as the 9.3.2.4
