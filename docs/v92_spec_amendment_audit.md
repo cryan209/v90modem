@@ -158,3 +158,24 @@ encoding through the existing codecs, data-frame-boundary alignment, the
 Amd.1 item 3 TRN2u differential-encoder seed for the second TRN2u of a
 silent renegotiation, and any engine integration -- V.92 data mode itself is
 not reached live.
+
+## Follow-up: the R signals (2026-10-03)
+
+- **RM / RM' (8.7.4, Tables 25/26)**: `v92_upstream_rm_ki()` builds the Ki
+  patterns from the data-mode moduli; `v92_upstream_wave_encode_ki()` /
+  `_decode_ki()` are the waveform path from the modulus encoder on (split
+  out of the data-frame functions, which now call them).  Table 25's last
+  row prints "u11 = 0" and is read as K11 = 0.  `test_v92_upstream_rm()`:
+  data, 32 RM, 2 RM', data, through the trellis and precoder/prefilter --
+  every frame classified as itself, data either side bit-exact.
+- **Rf / R-bar-f (8.8.4)**: `v92_rf_ucodes()` takes each data frame
+  interval's highest Ucode from the CPu, `v92_rf_codewords()` signs them
+  + + - - (bar - - + +).
+- **Detection**: `v92_rsig_rx` locks a period-6 (Rd/Rt/Ru) or period-4 (Rf)
+  sign pattern and reports the bar as a sustained half-period shift -- the
+  events `v92_rn` consumes.  `v92_rsig_test`: both laws, the bar to the exact
+  symbol at 24 start offsets, nothing from 200000 random symbols, no false
+  bar from data after a lock.  RM is recognised in the Ki domain instead.
+
+Still not connected: these generators and detectors to `v92_rn`'s units and
+events, or any of it to the engine.

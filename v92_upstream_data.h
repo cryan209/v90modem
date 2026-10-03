@@ -99,6 +99,28 @@ bool v92_upstream_wave_decode_frame(v92_upstream_wave_rx_t *state,
                                     uint8_t *bits_out,
                                     int bits_max);
 
+/* The waveform path from the modulus encoder's outputs Ki (K0..K11) on, and
+ * its inverse: what the data frames above use after §6.4.1, and what RM and
+ * RM' (8.7.4) use directly. */
+bool v92_upstream_wave_encode_ki(v92_upstream_wave_tx_t *state,
+                                 const v92_cpd_frame_t *cpd,
+                                 const uint8_t ki[V92_UPSTREAM_INTERVALS],
+                                 double samples[V92_UPSTREAM_INTERVALS]);
+bool v92_upstream_wave_decode_ki(v92_upstream_wave_rx_t *state,
+                                 const v92_cpd_frame_t *cpd,
+                                 const double samples[V92_UPSTREAM_INTERVALS],
+                                 uint8_t ki[V92_UPSTREAM_INTERVALS]);
+
+/* 8.7.4: RM and RM' are fixed 12-symbol Ki patterns over the data-mode
+ * moduli (Tables 25 and 26), sent through the data-mode precoder, prefilter
+ * and trellis.  The analogue modem opens a fast parameter exchange with
+ * 384T of RM and 24T of RM'; the classifier names a recovered frame. */
+typedef enum { V92_RM_NONE, V92_RM, V92_RM_PRIME } v92_rm_class_t;
+bool v92_upstream_rm_ki(const v92_cpd_frame_t *cpd, bool primed,
+                        uint8_t ki[V92_UPSTREAM_INTERVALS]);
+v92_rm_class_t v92_upstream_rm_classify(const v92_cpd_frame_t *cpd,
+                                        const uint8_t ki[V92_UPSTREAM_INTERVALS]);
+
 /* Three-transition, 16-state Viterbi decoder for the initial unfiltered CPd
  * profile.  It keeps the two nearest points per symbol and uses §6.4.4's Y0
  * parity/trellis constraint to correct hard-slicer errors. */

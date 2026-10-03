@@ -3591,6 +3591,72 @@ static void v92_test_build_upstream_cpd(v92_cpd_frame_t *cpd, int drn,
     }
 }
 
+/* V.92 8.7.4: RM and RM' are Ki patterns (Tables 25/26) through the
+ * data-mode precoder, prefilter and trellis.  Data before and after them must
+ * still decode bit-exact through the same state, and each kind of frame
+ * must be named as itself and nothing else. */
+static bool test_v92_upstream_rm(void)
+{
+    uint32_t prng = 0x8C74A1U;
+    static const int drns[] = { 1, 9, 19 };
+
+    vpcm_log("Test: V.92 8.7.4 RM/RM' through the upstream data waveform path");
+    for (int filtered = 0; filtered <= 1; filtered++) {
+        for (size_t d = 0; d < sizeof(drns)/sizeof(drns[0]); d++) {
+            int drn = filtered ? 9 : drns[d];
+            int k = v92_upstream_bits_per_frame((uint8_t)drn);
+            v92_cpd_frame_t cpd;
+            v92_upstream_wave_tx_t tx;
+            v92_upstream_wave_rx_t rx;
+
+            if (filtered && d > 0)
+                break;
+            v92_test_build_upstream_cpd(&cpd, drn, filtered != 0);
+            v92_upstream_wave_tx_init(&tx);
+            v92_upstream_wave_rx_init(&rx);
+            for (int frame = 0; frame < 8 + 32 + 2 + 8; frame++) {
+                double wave[V92_UPSTREAM_INTERVALS];
+                uint8_t ki[V92_UPSTREAM_INTERVALS];
+                v92_rm_class_t want = frame < 8 ? V92_RM_NONE
+                                    : frame < 40 ? V92_RM
+                                    : frame < 42 ? V92_RM_PRIME : V92_RM_NONE;
+
+                if (want == V92_RM_NONE) {
+                    uint8_t in[V92_UPSTREAM_MAX_FRAME_BITS], out[V92_UPSTREAM_MAX_FRAME_BITS];
+                    v92_upstream_wave_rx_t probe;
+
+                    for (int i = 0; i < k; i++) {
+                        prng = prng*1664525U + 1013904223U;
+                        in[i] = (uint8_t)(prng >> 31);
+                    }
+                    if (!v92_upstream_wave_encode_frame(&tx, &cpd, in, k, wave))
+                        return false;
+                    probe = rx;
+                    if (!v92_upstream_wave_decode_ki(&probe, &cpd, wave, ki)
+                        || v92_upstream_rm_classify(&cpd, ki) != V92_RM_NONE
+                        || !v92_upstream_wave_decode_frame(&rx, &cpd, wave, out, k)
+                        || memcmp(in, out, (size_t)k) != 0) {
+                        fprintf(stderr, "V.92 RM test: data frame %d drn=%d filtered=%d wrong\n",
+                                frame, drn, filtered);
+                        return false;
+                    }
+                } else {
+                    if (!v92_upstream_rm_ki(&cpd, want == V92_RM_PRIME, ki)
+                        || !v92_upstream_wave_encode_ki(&tx, &cpd, ki, wave)
+                        || !v92_upstream_wave_decode_ki(&rx, &cpd, wave, ki)
+                        || v92_upstream_rm_classify(&cpd, ki) != want) {
+                        fprintf(stderr, "V.92 RM test: %s frame %d drn=%d filtered=%d not recovered\n",
+                                want == V92_RM ? "RM" : "RM'", frame, drn, filtered);
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    vpcm_log("PASS: V.92 RM/RM' Ki patterns round-trip through the trellis/precoder path; data either side bit-exact");
+    return true;
+}
+
 static bool test_v92_upstream_waveform_frames(void)
 {
     uint32_t prng = 0x6404B1U;
@@ -10858,6 +10924,7 @@ static bool run_vpcm_primitive_suite(void)
         && test_v92_cpd_full_codec()
         && test_v92_upstream_modulus_frames()
         && test_v92_upstream_waveform_frames()
+        && test_v92_upstream_rm()
         && test_v92_upstream_b1u_receiver(false)
         && test_v92_upstream_b1u_receiver(true)
         && test_v92_trn2u_loopback()

@@ -421,25 +421,28 @@ static bool select_equivalence_point(const v92_cpd_frame_t *cpd,
     return true;
 }
 
-bool v92_upstream_wave_encode_frame(v92_upstream_wave_tx_t *state,
-                                    const v92_cpd_frame_t *cpd,
-                                    const uint8_t *bits,
-                                    int bit_count,
-                                    double samples[V92_UPSTREAM_INTERVALS])
+/* §6.4.2-.4 from the modulus encoder's outputs onward: equivalence-class
+ * point selection, precoder, prefilter and the 16-state trellis.  The data
+ * path reaches it through §6.4.1; RM and RM' (8.7.4, Tables 25/26) are
+ * defined directly as Ki, so they enter here. */
+bool v92_upstream_wave_encode_ki(v92_upstream_wave_tx_t *state,
+                                 const v92_cpd_frame_t *cpd,
+                                 const uint8_t ki[V92_UPSTREAM_INTERVALS],
+                                 double samples[V92_UPSTREAM_INTERVALS])
 {
     v92_upstream_wave_tx_t trial;
     v92_upstream_profile_t profile;
-    uint8_t ki[V92_UPSTREAM_INTERVALS];
     int eta_frame[4] = {0};
     double gain;
 
-    if (!state || !bits || !samples
+    if (!state || !ki || !samples
         || !v92_upstream_wave_profile_validate(cpd)
         || !wave_data_profile(cpd, &profile))
         return false;
+    for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++)
+        if (ki[i] >= profile.moduli[i])
+            return false;
     trial = *state;
-    if (!v92_upstream_encode_frame(&trial.data, &profile, bits, bit_count, ki))
-        return false;
     gain = cpd_gain(cpd);
     for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++) {
         double u;
@@ -473,6 +476,46 @@ bool v92_upstream_wave_encode_frame(v92_upstream_wave_tx_t *state,
         }
     }
     *state = trial;
+    return true;
+}
+
+bool v92_upstream_wave_encode_frame(v92_upstream_wave_tx_t *state,
+                                    const v92_cpd_frame_t *cpd,
+                                    const uint8_t *bits,
+                                    int bit_count,
+                                    double samples[V92_UPSTREAM_INTERVALS])
+{
+    v92_upstream_tx_state_t data;
+    v92_upstream_profile_t profile;
+    uint8_t ki[V92_UPSTREAM_INTERVALS];
+
+    if (!state || !bits || !samples
+        || !v92_upstream_wave_profile_validate(cpd)
+        || !wave_data_profile(cpd, &profile))
+        return false;
+    data = state->data;
+    if (!v92_upstream_encode_frame(&data, &profile, bits, bit_count, ki)
+        || !v92_upstream_wave_encode_ki(state, cpd, ki, samples))
+        return false;
+    state->data = data;
+    return true;
+}
+
+bool v92_upstream_rm_ki(const v92_cpd_frame_t *cpd, bool primed,
+                        uint8_t ki[V92_UPSTREAM_INTERVALS])
+{
+    v92_upstream_profile_t profile;
+
+    if (!ki || !wave_data_profile(cpd, &profile))
+        return false;
+    /* Table 25 (RM): intervals 0,1,4,5,8,9 at Mi - 1, the rest 0.  Table 26
+     * (RM') is its complement.  Table 25's last row reads "u11 = 0", read
+     * as K11 = 0 like every other row. */
+    for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++) {
+        bool high = ((i/2) % 2 == 0) != primed;
+
+        ki[i] = high ? (uint8_t)(profile.moduli[i] - 1) : 0;
+    }
     return true;
 }
 
@@ -529,18 +572,16 @@ static bool recover_symbol(const v92_cpd_frame_t *cpd,
     return true;
 }
 
-bool v92_upstream_wave_decode_frame(v92_upstream_wave_rx_t *state,
-                                    const v92_cpd_frame_t *cpd,
-                                    const double samples[V92_UPSTREAM_INTERVALS],
-                                    uint8_t *bits_out,
-                                    int bits_max)
+bool v92_upstream_wave_decode_ki(v92_upstream_wave_rx_t *state,
+                                 const v92_cpd_frame_t *cpd,
+                                 const double samples[V92_UPSTREAM_INTERVALS],
+                                 uint8_t ki[V92_UPSTREAM_INTERVALS])
 {
     v92_upstream_wave_rx_t trial;
     v92_upstream_profile_t profile;
-    uint8_t ki[V92_UPSTREAM_INTERVALS];
     int eta_frame[4] = {0};
 
-    if (!state || !samples || !bits_out
+    if (!state || !samples || !ki
         || !v92_upstream_wave_profile_validate(cpd)
         || !wave_data_profile(cpd, &profile))
         return false;
@@ -582,11 +623,45 @@ bool v92_upstream_wave_decode_frame(v92_upstream_wave_rx_t *state,
                 v92_conv16[trial.convolutional_state][input];
         }
     }
-    if (!v92_upstream_decode_frame(&trial.data, &profile, ki,
-                                   bits_out, bits_max))
+    *state = trial;
+    return true;
+}
+
+bool v92_upstream_wave_decode_frame(v92_upstream_wave_rx_t *state,
+                                    const v92_cpd_frame_t *cpd,
+                                    const double samples[V92_UPSTREAM_INTERVALS],
+                                    uint8_t *bits_out,
+                                    int bits_max)
+{
+    v92_upstream_wave_rx_t trial;
+    v92_upstream_profile_t profile;
+    uint8_t ki[V92_UPSTREAM_INTERVALS];
+
+    if (!state || !samples || !bits_out
+        || !v92_upstream_wave_profile_validate(cpd)
+        || !wave_data_profile(cpd, &profile))
+        return false;
+    trial = *state;
+    if (!v92_upstream_wave_decode_ki(&trial, cpd, samples, ki)
+        || !v92_upstream_decode_frame(&trial.data, &profile, ki,
+                                      bits_out, bits_max))
         return false;
     *state = trial;
     return true;
+}
+
+v92_rm_class_t v92_upstream_rm_classify(const v92_cpd_frame_t *cpd,
+                                        const uint8_t ki[V92_UPSTREAM_INTERVALS])
+{
+    uint8_t rm[V92_UPSTREAM_INTERVALS], rmp[V92_UPSTREAM_INTERVALS];
+
+    if (!ki || !v92_upstream_rm_ki(cpd, false, rm) || !v92_upstream_rm_ki(cpd, true, rmp))
+        return V92_RM_NONE;
+    if (!memcmp(ki, rm, sizeof(rm)))
+        return V92_RM;
+    if (!memcmp(ki, rmp, sizeof(rmp)))
+        return V92_RM_PRIME;
+    return V92_RM_NONE;
 }
 
 typedef struct {
