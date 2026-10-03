@@ -499,8 +499,17 @@ static int try_jd_frame(v90_analogue_rx_t *s, int from,
     int best = 1000;
     /* The first Jd frame inherits raw TRN1d scrambler history. Later frames
      * inherit differential history (§8.4.2). Probe both on the line path,
-     * since noise can destroy the first frame; do not guess a boundary. */
-    for (int mode = 0; mode < (s->line_recovery ? 3 : 1); mode++) {
+     * since noise can destroy the first frame; do not guess a boundary.
+     *
+     * This is not specific to the line path: the level-sliced codeword path
+     * probes the newest frame on every symbol too, and with mode 0 alone a
+     * digital peer whose FIRST frame is rejected can never be found from its
+     * second, whose history is Jd's own differential stream.  The I-modem is
+     * such a peer (its first sync bit decodes 0, and a sync-bit error is an
+     * error here), and with mode 0 alone this receiver never validated any of
+     * its 586 well-formed Jd frames.  Table 13's structure plus its CRC keep
+     * a false frame at 2^-42. */
+    for (int mode = 0; mode < 3; mode++) {
         uint8_t candidate[JD_BITS];
         reg = 0;
         for (i = from - SCRAMBLER_HISTORY; i < from; i++) {
