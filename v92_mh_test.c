@@ -151,7 +151,7 @@ static void side_init(side_t *s, int rtt)
 
 static void step(side_t *s, const side_t *o)
 {
-    v92_mh_line_t l = {0};
+    v92_mh_detect_t l = {0};
     v92_mh_tx_t far = now >= DELAY_MS ? o->hist_tx[(now - DELAY_MS) % HIST] : V92_MH_TX_DATA;
     v92_mh_action_t a;
 

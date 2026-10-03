@@ -419,9 +419,9 @@ void v92_mh_ctrl_rx_bit(v92_mh_ctrl_t *c, int bit)
         handle_frame(c, &f);
 }
 
-void v92_mh_ctrl_tick(v92_mh_ctrl_t *c, int ms, const v92_mh_line_t *l)
+void v92_mh_ctrl_tick(v92_mh_ctrl_t *c, int ms, const v92_mh_detect_t *l)
 {
-    static const v92_mh_line_t quiet = {0};
+    static const v92_mh_detect_t quiet = {0};
     int timeout = 2000 + c->round_trip_ms;   /* 9.10.1.1 */
 
     if (!l)

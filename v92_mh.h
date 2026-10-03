@@ -138,7 +138,7 @@ typedef struct {
     bool phase1;                      /* QC or CM detected */
     bool qc_cleardown;                /* QC with UQTS 1111 */
     bool cm_null;                     /* CM: no PCM category, all modulation modes zero */
-} v92_mh_line_t;
+} v92_mh_detect_t;
 
 typedef struct {
     /* configuration */
@@ -189,7 +189,7 @@ void v92_mh_ctrl_rx_bit(v92_mh_ctrl_t *c, int bit);
 /* Inject a decoded frame directly (tests, or a receiver that frames itself). */
 void v92_mh_ctrl_rx_frame(v92_mh_ctrl_t *c, const v92_mh_frame_t *f);
 /* Advance by `ms` with the given detector states. */
-void v92_mh_ctrl_tick(v92_mh_ctrl_t *c, int ms, const v92_mh_line_t *line);
+void v92_mh_ctrl_tick(v92_mh_ctrl_t *c, int ms, const v92_mh_detect_t *line);
 /* Next bit to transmit while tx == V92_MH_TX_MH. */
 int v92_mh_ctrl_tx_bit(v92_mh_ctrl_t *c);
 v92_mh_action_t v92_mh_ctrl_take_action(v92_mh_ctrl_t *c);
