@@ -186,6 +186,13 @@ struct v42_state_s
     int bit_timer;
     void (*bit_timer_func)(v42_state_t *m);
 
+    /*! V.92 9.10.3 (Amd.2): the link is frozen while the modems are on hold.
+        The running timer is kept in milliseconds, not bits, because the
+        line rate after the reconnect need not be the one before it. */
+    bool suspended;
+    bool suspended_timer_active;
+    int suspended_timer_ms;
+
     v42_stats_t stats;
 
     /*! \brief Error and flow logging control */

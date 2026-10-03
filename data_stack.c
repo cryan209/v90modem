@@ -444,6 +444,36 @@ void ds_stop_link(data_stack_t *s)
         v42_stop(s->v42);
 }
 
+void ds_suspend_link(data_stack_t *s)
+{
+    if (!s)
+        return;
+    if (s->v42)
+        v42_suspend(s->v42);
+    s->suspended = true;
+}
+
+void ds_resume_link(data_stack_t *s, int line_bit_rate)
+{
+    if (!s || !s->suspended)
+        return;
+    s->suspended = false;
+    if (s->v42) {
+        v42_resume(s->v42, line_bit_rate);
+    } else {
+        /* V.14: a character cut off by the hold is lost; resynchronise on
+           the next start bit. */
+        ds_reset(s);
+        if (line_bit_rate > 0)
+            s->line_bit_rate = line_bit_rate;
+    }
+}
+
+bool ds_link_is_suspended(const data_stack_t *s)
+{
+    return s && s->suspended;
+}
+
 void ds_reset(data_stack_t *s)
 {
     s->tx_shift = 0;

@@ -174,6 +174,20 @@ SPAN_DECLARE(v42_state_t *) v42_init(v42_state_t *s,
 */
 SPAN_DECLARE(void) v42_restart(v42_state_t *s);
 
+/*! V.92 9.10.3 (Amd.2): suspend error correction for modem-on-hold.  The
+    running acknowledgement timer is frozen; while suspended v42_tx_bit()
+    returns marks without clocking anything and v42_rx_bit() discards. */
+SPAN_DECLARE(void) v42_suspend(v42_state_t *s);
+
+/*! Resume after modem-on-hold at the new line rate (0 keeps the old one).
+    No XID, no SABME, and the C/R addresses of the original connection are
+    kept whatever the new physical roles (9.10.3).  A frame cut off by the
+    suspension is discarded at both ends; if I-frames are outstanding an
+    enquiry (RR/RNR with P=1) goes out at once rather than after T401. */
+SPAN_DECLARE(void) v42_resume(v42_state_t *s, int bit_rate);
+
+SPAN_DECLARE(bool) v42_is_suspended(const v42_state_t *s);
+
 /*! Release a V.42 context.
     \param s The V.42 context.
     \return 0 if OK */

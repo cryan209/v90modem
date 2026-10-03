@@ -81,6 +81,7 @@ typedef struct {
     ds_link_event_fn link_event;
     void *link_event_ctx;
     bool link_ready;
+    bool suspended;                /* V.92 9.10.3 modem-on-hold */
 
     /* TX shift register: bit 0 is the next bit on the line.  V.14 keeps
      * start+data here and emits the rate-adapted stop/idle marks separately. */
@@ -147,6 +148,16 @@ int ds_v42_t400_ms(void);
 
 bool ds_link_is_ready(const data_stack_t *s);
 void ds_stop_link(data_stack_t *s);
+
+/* V.92 9.10.3 (Amd.2): suspend error correction for modem-on-hold and
+ * resume it afterwards at the new line rate (0 keeps the old one).  Resume
+ * is NOT a new connection: no detection, no XID, no SABME, V.42bis/V.44
+ * dictionaries kept, and the C/R roles stay those of the original call
+ * even though Phase 1 after the hold may put this modem in the other role
+ * (Cor.1 9.10.2.1).  So never ds_release()/ds_init_*() across a hold. */
+void ds_suspend_link(data_stack_t *s);
+void ds_resume_link(data_stack_t *s, int line_bit_rate);
+bool ds_link_is_suspended(const data_stack_t *s);
 
 /* Reset framing state (e.g. on retrain) without dropping callbacks. */
 void ds_reset(data_stack_t *s);

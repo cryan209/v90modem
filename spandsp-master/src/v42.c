@@ -1877,6 +1877,8 @@ SPAN_DECLARE(void) v42_rx_bit(void *user_data, int bit)
     v42_state_t *s;
 
     s = (v42_state_t *) user_data;
+    if (s->suspended)
+        return;
     if (s->lapm.state == LAPM_DETECT)
         negotiation_rx_bit(s, bit);
     else
@@ -1891,6 +1893,8 @@ SPAN_DECLARE(int) v42_tx_bit(void *user_data)
     int bit;
 
     s = (v42_state_t *) user_data;
+    if (s->suspended)
+        return 1;
     s->stats.tx_bits++;
     if (s->stats.enabled_bits
         &&
@@ -1911,6 +1915,61 @@ SPAN_DECLARE(int) v42_tx_bit(void *user_data)
         bit = hdlc_tx_get_bit(&s->lapm.hdlc_tx);
     /*endif*/
     return bit;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v42_suspend(v42_state_t *s)
+{
+    if (s == NULL  ||  s->suspended)
+        return;
+    s->suspended = true;
+    s->suspended_timer_active = (s->bit_timer > 0);
+    s->suspended_timer_ms = (s->bit_timer > 0  &&  s->tx_bit_rate > 0)
+                          ?  (int) (((int64_t) s->bit_timer*1000)/s->tx_bit_rate)
+                          :  0;
+    span_log(&s->logging, SPAN_LOG_FLOW, "Suspended (V.92 9.10.3), timer %d ms left\n", s->suspended_timer_ms);
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v42_resume(v42_state_t *s, int bit_rate)
+{
+    lapm_state_t *l;
+
+    if (s == NULL  ||  !s->suspended)
+        return;
+    s->suspended = false;
+    if (bit_rate > 0)
+        s->tx_bit_rate = bit_rate;
+    l = &s->lapm;
+    if (l->state != LAPM_DETECT)
+    {
+        /* Whatever frame was on the line when it went on hold is gone. */
+        hdlc_rx_restart(&l->hdlc_rx);
+        hdlc_tx_restart(&l->hdlc_tx);
+        hdlc_tx_flags(&l->hdlc_tx, 10);
+    }
+    if (s->suspended_timer_active)
+    {
+        s->bit_timer = ms_to_bits(s, s->suspended_timer_ms);
+        if (s->bit_timer < 1)
+            s->bit_timer = 1;
+    }
+    if (l->state == LAPM_DATA  &&  !l->configuring  &&  l->retry_count == 0  &&  l->vs != l->va)
+    {
+        /* An I-frame, or its acknowledgement, may have been the frame cut
+           off.  Checkpoint now, exactly as T403 expiry does (V.42 8.4.8). */
+        tx_supervisory_frame(l, l->cmd_addr, (l->local_busy)  ?  LAPM_S_RNR  :  LAPM_S_RR, 1);
+        s->bit_timer = t401_bits(s);
+        s->bit_timer_func = t401_expired;
+        l->retry_count = 1;
+    }
+    span_log(&s->logging, SPAN_LOG_FLOW, "Resumed (V.92 9.10.3) at %d bit/s\n", s->tx_bit_rate);
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(bool) v42_is_suspended(const v42_state_t *s)
+{
+    return s != NULL  &&  s->suspended;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -2027,6 +2086,8 @@ SPAN_DECLARE(void) v42_restart(v42_state_t *s)
     s->lapm.xid_optional_functions_octets = s->config.xid_optional_functions_octets
                                            ? s->config.xid_optional_functions_octets : 4;
     memset(&s->negotiated, 0, sizeof(s->negotiated));
+    s->suspended = false;
+    s->suspended_timer_active = false;
     hdlc_tx_init(&s->lapm.hdlc_tx, false, 1, true, lapm_hdlc_underflow, s);
     hdlc_rx_init(&s->lapm.hdlc_rx, false, false, 1, lapm_receive, s);
 

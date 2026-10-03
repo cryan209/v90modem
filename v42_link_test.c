@@ -652,6 +652,85 @@ static bool v44_peer_xid(int direction, bool malformed, bool defaults, bool supp
     return ok;
 }
 
+/* V.92 9.10.3 (Amd.2): suspend both ends mid-transfer, carry line noise
+ * through the hold, resume at a different rate.  The link must come back
+ * without a second XID, without re-establishment, byte-exact, and promptly:
+ * the frame cut off by the hold is recovered by the resume checkpoint, not
+ * by waiting out T401.  `cut` moves the suspension across frame phases. */
+static bool run_hold_case(int rate_before, int rate_after, int cut, int *resume_ms)
+{
+    endpoint_t c_ep, a_ep;
+    v42_state_t *c, *a;
+    const int len = 2048;
+    uint64_t t, hold_at = 0, resumed_at = 0, back_at = 0;
+    int c_rx_at_hold = 0, a_rx_at_hold = 0;
+    uint32_t noise = 0x12345678U + (uint32_t)cut;
+    bool ok;
+
+    init_payload(&c_ep, len, 0x0BADF00DU);
+    init_payload(&a_ep, len, 0x5EED1234U);
+    c = v42_init(NULL, true, true, get_payload, put_payload, &c_ep);
+    a = v42_init(NULL, false, true, get_payload, put_payload, &a_ep);
+    v42_set_status_callback(c, status_changed, &c_ep);
+    v42_set_status_callback(a, status_changed, &a_ep);
+    v42_set_bit_rate(c, rate_before);
+    v42_set_bit_rate(a, rate_before);
+    v42_restart(c);
+    v42_restart(a);
+
+    for (t = 1; t < (uint64_t)rate_before * 60U; t++) {
+        int cb, ab;
+
+        if (!hold_at && c_ep.connected && a_ep.connected
+            && c_ep.rx_len >= 512 + cut && a_ep.rx_len >= 512) {
+            hold_at = t;
+            c_rx_at_hold = c_ep.rx_len;
+            a_rx_at_hold = a_ep.rx_len;
+            v42_suspend(c);
+            v42_suspend(a);
+            /* The hold, then Phase 1-4 at the new rate: the line carries
+             * ANSam/training, i.e. not LAPM.  Clock 30 s of it as noise --
+             * longer than N400 x T401, so a stack whose acknowledgement
+             * timers kept running would give up and disconnect. */
+            for (int i = 0; i < rate_before * 30; i++) {
+                noise = noise * 1103515245U + 12345U;
+                v42_rx_bit(c, (noise >> 16) & 1);
+                v42_rx_bit(a, (noise >> 17) & 1);
+                if (v42_tx_bit(c) != 1 || v42_tx_bit(a) != 1)
+                    return false;
+            }
+            if (!v42_is_suspended(c) || c_ep.disconnected || a_ep.disconnected)
+                return false;
+            v42_resume(c, rate_after);
+            v42_resume(a, rate_after);
+            resumed_at = t;
+        }
+        cb = v42_tx_bit(c);
+        v42_rx_bit(a, cb);
+        ab = v42_tx_bit(a);
+        v42_rx_bit(c, ab);
+        if (resumed_at && !back_at
+            && c_ep.rx_len > c_rx_at_hold && a_ep.rx_len > a_rx_at_hold)
+            back_at = t;
+        if (c_ep.rx_len == len && a_ep.rx_len == len)
+            break;
+    }
+    if (resume_ms)
+        *resume_ms = back_at ? (int)((back_at - resumed_at) * 1000U / (uint64_t)rate_after) : -1;
+    ok = hold_at && back_at
+      && c_ep.xid_events == 1 && a_ep.xid_events == 1
+      && c_ep.connected && a_ep.connected
+      && !c_ep.disconnected && !a_ep.disconnected
+      && !c_ep.link_error && !a_ep.link_error
+      && v42_get_bit_rate(c) == rate_after
+      && c_ep.rx_len == len && a_ep.rx_len == len
+      && memcmp(c_ep.rx, a_ep.tx, len) == 0
+      && memcmp(a_ep.rx, c_ep.tx, len) == 0;
+    v42_free(c);
+    v42_free(a);
+    return ok;
+}
+
 int main(void)
 {
     static const int rates[] = { 2400, 9600, 28800, 33600 };
@@ -698,6 +777,19 @@ int main(void)
     CHECK(v44_peer_xid(3,true,false,true), "V.44 invalid dictionary limits reject the XID");
     CHECK(v44_peer_xid(3,false,true,true), "V.44 omitted parameters use corrected Table 10 defaults");
     CHECK(v44_peer_xid(3,false,false,false), "unsupported V.44 user data does not break plain LAPM negotiation");
+    {
+        int worst = 0, ms;
+        bool all = true;
+        for (int cut = 0; cut < 160; cut += 13) {
+            all = all && run_hold_case(9600, 4800, cut, &ms);
+            if (ms > worst) worst = ms;
+        }
+        CHECK(all, "V.92 9.10.3 hold: suspend mid-frame, noise, resume 9600->4800, no re-XID, byte-exact");
+        CHECK(all && worst < 600, "V.92 9.10.3 hold: data flows again well inside T401 after resume");
+        printf("      worst resume-to-data %d ms over 13 cut points\n", worst);
+        CHECK(run_hold_case(4800, 28800, 40, NULL),
+              "V.92 9.10.3 hold: resume at a faster rate");
+    }
     CHECK(v42_set_bit_rate(NULL, 9600) == -1,
           "V.42 rejects a missing timer context");
 
