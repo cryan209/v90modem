@@ -32,6 +32,7 @@
 #include <math.h>
 
 #define CHUNK 160
+static int EXTRA_SAMPLES = 0;           /* sweep: extra delay toward the analogue side */
 static int DELAY_CHUNKS = 2;           /* one way, in 20 ms chunks */
 #define RING 8
 
@@ -119,6 +120,12 @@ static bool run(bool alaw, bool fixed, int *reply_gap_ms, int *complete_ms)
     v34_set_v90_mode(caller, alaw);
     v34_set_v90_mode(answerer, alaw);
     v34_set_v90_u_info(caller, 1);
+    if (getenv("V92_MH_RETRAIN_LOG")) {
+        span_log_set_level(v34_get_logging_state(caller),
+                           SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL | SPAN_LOG_FLOW);
+        span_log_set_level(v34_get_logging_state(answerer),
+                           SPAN_LOG_SHOW_SEVERITY | SPAN_LOG_SHOW_PROTOCOL | SPAN_LOG_FLOW);
+    }
     memset(&p, 0, sizeof(p));
     if (reply_gap_ms)
         *reply_gap_ms = -1;
@@ -149,9 +156,34 @@ static bool run(bool alaw, bool fixed, int *reply_gap_ms, int *complete_ms)
             }
         }
         line(ctx, CHUNK, alaw);
-        line(atx, CHUNK, alaw);
+        if (getenv("V92_MH_SNR") && mode == STARTUP && chunk >= 60 && chunk < 120) {
+            int16_t q[CHUNK];
+            double e = 0, n = 0, pk = 0;
+
+            memcpy(q, atx, sizeof(q));
+            line(q, CHUNK, alaw);
+            for (int i = 0; i < CHUNK; i++) {
+                e += (double)atx[i] * atx[i];
+                n += (double)(q[i] - atx[i]) * (q[i] - atx[i]);
+                if (abs(atx[i]) > pk) pk = abs(atx[i]);
+            }
+            fprintf(stderr, "snr %s t=%.2f answerer tx=%d rms=%.0f peak=%.0f snr=%.1f dB\n", alaw ? "A" : "u",
+                    chunk / 50.0, v34_get_tx_stage(answerer), sqrt(e / CHUNK), pk,
+                    n > 0 ? 10 * log10(e / n) : 99.0);
+        }
+        if (!getenv("V92_MH_NO_LAW_A2C"))
+            line(atx, CHUNK, alaw);
         delay_io(&c2a, ctx, arx);
         delay_io(&a2c, atx, crx);
+        if (EXTRA_SAMPLES) {
+            static int16_t hold[CHUNK + 64];
+            int16_t tmp[CHUNK];
+
+            memcpy(tmp, crx, sizeof(tmp));
+            memcpy(crx, hold, (size_t)EXTRA_SAMPLES * sizeof(int16_t));
+            memcpy(crx + EXTRA_SAMPLES, tmp, (size_t)(CHUNK - EXTRA_SAMPLES) * sizeof(int16_t));
+            memcpy(hold, tmp + CHUNK - EXTRA_SAMPLES, (size_t)EXTRA_SAMPLES * sizeof(int16_t));
+        }
         v34_rx(caller, crx, CHUNK);
 
         if (mode == MH) {
@@ -191,6 +223,10 @@ static bool run(bool alaw, bool fixed, int *reply_gap_ms, int *complete_ms)
                     rms(crx), rms(arx));
         if (mode == STARTUP) {
             note(&p, caller, answerer);
+            if (done(&p) && getenv("V92_MH_STARTUP_ONLY")) {
+                printf("startup %s extra=%d: %d ms\n", alaw ? "A" : "u", EXTRA_SAMPLES, chunk * 20);
+                break;
+            }
             if (done(&p)) {
                 /* The analogue modem retrains (V.90 9.5.2); the digital
                  * side is now the V.92 modem-on-hold layer. */
@@ -236,6 +272,13 @@ static bool run(bool alaw, bool fixed, int *reply_gap_ms, int *complete_ms)
 int main(void)
 {
     int fails = 0;
+
+    if (getenv("V92_MH_STARTUP_ONLY")) {
+        for (int alaw = 0; alaw < 2; alaw++)
+            for (EXTRA_SAMPLES = 0; EXTRA_SAMPLES < 14; EXTRA_SAMPLES++)
+                run(alaw, true, NULL, NULL);
+        return 0;
+    }
 
     for (DELAY_CHUNKS = 1; DELAY_CHUNKS <= 3; DELAY_CHUNKS++)
     for (int alaw = 0; alaw < 2; alaw++) {

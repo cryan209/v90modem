@@ -6202,6 +6202,18 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* blip_duration advances 3 per sample, 40 per 600-baud bit.  Two genuine
+   reversals are a whole bit apart, so a second one inside half a bit is the
+   same reversal seen twice -- the phase is ill-defined as the envelope goes
+   through zero, and a coarse quantiser (A-law's low-level steps are four
+   times mu-law's) can make it jump by more than 90 degrees twice.  The old
+   gate was 3 (two samples), which let that through as an extra one bit and
+   slipped the rest of the frame: on our own V.90 Phase 2 over A-law the
+   first INFO1d arrived with the right information and its CRC shifted by
+   one bit, every repetition, costing ~1.5 s until the resend
+   (v92_mh_retrain_test, 2026-10-03). */
+#define V34_INFO_REVERSAL_REFRACTORY 20
+
 static int info_rx(v34_rx_state_t *s, const int16_t amp[], int len)
 {
     int i;
@@ -6410,7 +6422,7 @@ V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Signal up\n");
         if ((phase_delta > (int32_t) DDS_PHASE(90.0f)
              || phase_delta < -(int32_t) DDS_PHASE(90.0f))
             &&
-            s->blip_duration > 3)
+            s->blip_duration > V34_INFO_REVERSAL_REFRACTORY)
         {
             /* Reversal event logging removed (was verbose) */
             put_info_bit(s, 1, i);
