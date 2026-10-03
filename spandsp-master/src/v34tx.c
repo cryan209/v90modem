@@ -8752,6 +8752,78 @@ static complex_sig_t get_data_baud(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.34 10.1.3: the modulation factors must be compensated so that PP/TRN power is
+   maintained in B1 and DATA.  Measure a reset-state superframe through the
+   negotiated mapper and set data_symbol_scale to bring it to the nominal symbol
+   RMS.  Both the native V.34 entry (data_baud_init) and the V.90 analogue handover
+   (v34_v90_begin_tx_data) need this: the latter used to skip it, leaving the scale
+   at 1.0, so the upstream B1 went out 8 to 16 dB hot depending on the rate and
+   clipped at N=13. */
+static void v34_normalise_data_symbol_scale(v34_state_t *s)
+{
+    s->tx.data_symbol_scale = 1.0f;
+    {
+        int trellis = (s->tx.conv_encode_table == v34_conv64_encode_table)
+                    ? V34_TRELLIS_64
+                    : ((s->tx.conv_encode_table == v34_conv32_encode_table)
+                       ? V34_TRELLIS_32 : V34_TRELLIS_16);
+        int16_t precoder[6];
+        v34_state_t *probe;
+
+        for (int i = 0; i < 3; i++)
+        {
+            precoder[2*i] = s->tx.precoder_coeffs[i].re;
+            precoder[2*i + 1] = s->tx.precoder_coeffs[i].im;
+        }
+        probe = v34_init(NULL,
+                         baud_rate_parameters[s->tx.baud_rate].baud_rate,
+                         (s->tx.bit_rate/2 + 1)*2400,
+                         s->tx.calling_party, true,
+                         fake_get_bit, NULL, NULL, NULL);
+        if (probe
+            && v34_seed_tx_data(probe, s->tx.bit_rate/2 + 1, trellis,
+                                s->tx.use_non_linear_encoder,
+                                s->tx.parms.expanded_shaping, precoder) == 0)
+        {
+            double energy = 0.0;
+            int symbols = 0;
+            int16_t frame[16];
+            int frames = probe->tx.parms.p*probe->tx.parms.j;
+
+            probe->tx.scrambler_tap = s->tx.scrambler_tap;
+            probe->tx.super_frame = probe->tx.parms.j - 1;
+            probe->tx.v0_pattern = (uint16_t)(2*(probe->tx.parms.j - 1));
+            /* The note in 10.1.3 requires compensation for modulation
+               factors so PP/TRN power is maintained in B1 and DATA.  Measure
+               a reset-state superframe through the negotiated mapper. */
+            for (int m = 0; m < frames; m++)
+            {
+                if (v34_get_mapping_frame(&probe->tx, frame) != 16)
+                    break;
+                for (int i = 0; i < 16; i++)
+                {
+                    double x = frame[i]/128.0;
+                    energy += x*x;
+                }
+                symbols += 8;
+            }
+            if (symbols > 0 && energy > 0.0)
+            {
+                float rms = (float) sqrt(energy/symbols);
+                s->tx.data_symbol_scale = V34_NOMINAL_SYMBOL_RMS/rms;
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - data modulation normalization: mapper_rms=%.4f "
+                         "target=%.4f scale=%.5f (V.34 10.1.3)\n",
+                         rms, V34_NOMINAL_SYMBOL_RMS,
+                         s->tx.data_symbol_scale);
+            }
+        }
+        if (probe)
+            v34_free(probe);
+    }
+}
+/*- End of function --------------------------------------------------------*/
+
 static void data_baud_init(v34_state_t *s)
 {
     if (s->tx.reneg_active)
@@ -8829,66 +8901,7 @@ static void data_baud_init(v34_state_t *s)
              s->tx.state, s->tx.y0);
     s->tx.y0 = 0;
     s->tx.state = 0;
-    s->tx.data_symbol_scale = 1.0f;
-    {
-        int trellis = (s->tx.conv_encode_table == v34_conv64_encode_table)
-                    ? V34_TRELLIS_64
-                    : ((s->tx.conv_encode_table == v34_conv32_encode_table)
-                       ? V34_TRELLIS_32 : V34_TRELLIS_16);
-        int16_t precoder[6];
-        v34_state_t *probe;
-
-        for (int i = 0; i < 3; i++)
-        {
-            precoder[2*i] = s->tx.precoder_coeffs[i].re;
-            precoder[2*i + 1] = s->tx.precoder_coeffs[i].im;
-        }
-        probe = v34_init(NULL,
-                         baud_rate_parameters[s->tx.baud_rate].baud_rate,
-                         (s->tx.bit_rate/2 + 1)*2400,
-                         s->tx.calling_party, true,
-                         fake_get_bit, NULL, NULL, NULL);
-        if (probe
-            && v34_seed_tx_data(probe, s->tx.bit_rate/2 + 1, trellis,
-                                s->tx.use_non_linear_encoder,
-                                s->tx.parms.expanded_shaping, precoder) == 0)
-        {
-            double energy = 0.0;
-            int symbols = 0;
-            int16_t frame[16];
-            int frames = probe->tx.parms.p*probe->tx.parms.j;
-
-            probe->tx.scrambler_tap = s->tx.scrambler_tap;
-            probe->tx.super_frame = probe->tx.parms.j - 1;
-            probe->tx.v0_pattern = (uint16_t)(2*(probe->tx.parms.j - 1));
-            /* The note in 10.1.3 requires compensation for modulation
-               factors so PP/TRN power is maintained in B1 and DATA.  Measure
-               a reset-state superframe through the negotiated mapper. */
-            for (int m = 0; m < frames; m++)
-            {
-                if (v34_get_mapping_frame(&probe->tx, frame) != 16)
-                    break;
-                for (int i = 0; i < 16; i++)
-                {
-                    double x = frame[i]/128.0;
-                    energy += x*x;
-                }
-                symbols += 8;
-            }
-            if (symbols > 0 && energy > 0.0)
-            {
-                float rms = (float) sqrt(energy/symbols);
-                s->tx.data_symbol_scale = V34_NOMINAL_SYMBOL_RMS/rms;
-                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
-                         "Tx - data modulation normalization: mapper_rms=%.4f "
-                         "target=%.4f scale=%.5f (V.34 10.1.3)\n",
-                         rms, V34_NOMINAL_SYMBOL_RMS,
-                         s->tx.data_symbol_scale);
-            }
-        }
-        if (probe)
-            v34_free(probe);
-    }
+    v34_normalise_data_symbol_scale(s);
     s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.tx_data_mode = true;
     if (!s->tx.duplex)
@@ -9722,6 +9735,9 @@ SPAN_DECLARE(int) v34_v90_begin_tx_data(v34_state_t *s,
                          use_non_linear_encoder, expanded_shaping,
                          precoder_coeffs) != 0)
         return -1;
+    /* V.34 10.1.3: keep B1 and data at the PP/TRN power.  data_baud_init() does
+       this for a native V.34 call; this entry used to leave the scale at 1.0. */
+    v34_normalise_data_symbol_scale(s);
     /* V.90 §8.5.1/§9.4.2.5 uses V.34's B1: the first data frame is scrambled
        ones with every data-mode state reset.  get_data_baud() already does
        exactly that before returning to the normal get-bit callback.  Preserve
