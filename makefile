@@ -149,7 +149,7 @@ LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 LIBUSB_CFLAGS := $(shell pkg-config --cflags libusb-1.0 2>/dev/null || echo "-I$(HOMEBREW_PREFIX)/include/libusb-1.0")
 LIBUSB_LIBS   := $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo "-L$(HOMEBREW_PREFIX)/lib -lusb-1.0")
 
-SRCS   = v34_line_ec.c v92_analogue_audio.c v92_analogue_phase4.c v92_analogue_phase3.c v92_su.c sip_modem.c modem_engine.c v90_analogue_linear.c v90_analogue_fse.c v90_analogue_sd.c v34_pp_fit.c v90_sounder.c clock_recovery.c data_interface.c fax_class2.c data_stack.c v44.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_p3_eq.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c
+SRCS   = v34_line_ec.c v92_mh.c v92_mh_line.c v92_analogue_audio.c v92_analogue_phase4.c v92_analogue_phase3.c v92_su.c sip_modem.c modem_engine.c v90_analogue_linear.c v90_analogue_fse.c v90_analogue_sd.c v34_pp_fit.c v90_sounder.c clock_recovery.c data_interface.c fax_class2.c data_stack.c v44.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_p3_eq.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
 TEST_TARGETS = v42bis_test v44_test v92_startup_test port_cp_stream_test port_data_rx_test port_v34_fixed_test port_v34_fixed_lms_test port_v34_fixed_solve_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v42_throughput_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test fax_class_test fax_class2_test v90_upstream_replay v90_engine_replay v34_duplex_test v32bis_spandsp_test v32bis_duplex_test v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test v90_analogue_sd_test v34_pp_fit_test v34_hdx_test v92_p3_rx_line_test v92_mh_test v92_mh_line_test
@@ -698,7 +698,7 @@ $(SPANDSP_LIB): FORCE
 -include $(wildcard *.d tools/*.d)
 
 sip_modem.o:      sip_modem.c      modem_engine.h data_interface.h
-modem_engine.o:   modem_engine.c   modem_engine.h data_stack.h clock_recovery.h v90.h v90_cp_rx.h v91.h v92_p3_rx.h v92_cp_rx.h v92_trn2u.h v92_upstream_rx.h
+modem_engine.o:   modem_engine.c   modem_engine.h v92_mh.h v92_mh_line.h data_stack.h clock_recovery.h v90.h v90_cp_rx.h v91.h v92_p3_rx.h v92_cp_rx.h v92_trn2u.h v92_upstream_rx.h
 clock_recovery.o: clock_recovery.c clock_recovery.h
 data_interface.o: data_interface.c data_interface.h modem_engine.h
 data_stack.o:     data_stack.c     data_stack.h $(SPANDSP_DIR)/spandsp/v42.h

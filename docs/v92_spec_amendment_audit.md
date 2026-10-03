@@ -119,3 +119,19 @@ engine, connecting the controller's `SUSPEND_LINK` to `ds_suspend_link()` and
 Phase 1-4 completion after a hold to `ds_resume_link()`,
 the null-CM/JM cleardown from on-hold (flagged as `null_cm`), and 9.11's
 drn=0 cleardown.
+
+## Follow-up: engine integration (2026-10-03)
+
+`modem_engine.c` drives the controller through `v92_mh_line` when
+`ME_V92_MH=1`, on the digital side of a call whose INFO0s were mutually
+V.92.  Receive: every codeword goes to the MH demodulator first; once a
+transaction starts, MH owns the line.  Transmit: MH supplies the codewords
+while engaged.  Actions: `SUSPEND_LINK` -> `ds_suspend_link()`;
+`PHASE1_ANSWER`/`PHASE1_CALL` and the on-hold state -> V.8 restarted in the
+same SIP call, with `data_stack_start_online()` resuming the suspended link;
+`RETRAIN` -> `restart_v90_phase2_locked()`; `DISCONNECT` -> hangup.
+
+Not established: any of it against a real V.92 modem.  Known weakness: a
+Tone RT that is a retrain is recognised only after the peer's reversal, so
+the Phase 2 restart that follows may miss that reversal.  Short Phase 1
+(QC) after a hold is not used; reconnection runs full V.8.

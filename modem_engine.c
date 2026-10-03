@@ -41,6 +41,8 @@
 #include "v92_trn2u.h"
 #include "v92_su.h"
 #include "v92_upstream_rx.h"
+#include "v92_mh.h"
+#include "v92_mh_line.h"
 
 #include <spandsp.h>
 
@@ -744,9 +746,28 @@ static bool g_data_t400_deferred;
    detection conclude. */
 #define ME_V42_T400_DEFER_MS 10000
 
+/* V.92 9.10 state, defined with the rest of the V.92 globals below. */
+static bool g_mh_resume_pending;
+static uint64_t g_mh_hold_until_ms;
+
 static int data_stack_start_online(int bit_rate, bool calling_party)
 {
     int result = 0;
+
+    /* V.92 9.10.3 (Amd.2): back from modem-on-hold.  Not a new call -- no
+       detection, no XID, and the C/R roles of the original connection even
+       if Phase 1 has just put this modem in the other role. */
+    if (g_mh_resume_pending) {
+        g_mh_resume_pending = false;
+        g_mh_hold_until_ms = 0;
+        if (ds_link_is_suspended(&g_data_stack)) {
+            ds_resume_link(&g_data_stack, bit_rate);
+            g_data_connect_rate = bit_rate;
+            ME_LOG("[ME] V.92 9.10.3: V.42 resumed at %d bit/s after modem-on-hold\n",
+                   bit_rate);
+            return 0;
+        }
+    }
 
     g_data_rx_first_bit_seen = false;
     g_data_t400_deferred = false;
@@ -1008,6 +1029,24 @@ static bool           g_v92_info0_peer_short_phase2 = false;
 static bool           g_v92_info0_mutual = false;
 static bool           g_v92_info0_peer_logged = false;
 static bool           g_v92_active = false;
+
+/* V.92 9.10 modem-on-hold (v92_mh.h, v92_mh_line.h).  Opt-in with
+ * ME_V92_MH=1 and only on a call where both INFO0 frames advertised V.92:
+ * it is unverified against any peer.  Armed at V.90/V.92 data-mode entry on
+ * the digital side; "engaged" once the controller leaves IDLE, after which
+ * it owns the transmitter and the data-mode receivers are not fed. */
+static bool           g_mh_armed = false;
+static bool           g_mh_engaged = false;
+static v92_mh_ctrl_t  g_mh;
+static v92_mh_line_t  g_mh_line;
+static bool           g_mh_initiated = false;
+/* Set across the Phase 1-4 that follows an on-hold or fast reconnect:
+ * data_stack_start_online() then resumes the suspended link (Amd.2 9.10.3)
+ * rather than creating a new one. */
+static bool           g_mh_resume_pending = false;
+static uint64_t       g_mh_hold_until_ms = 0;   /* T1 bound on re-running V.8 */
+static void mh_arm_locked(void);
+static void mh_disarm_locked(void);
 
 /* Stop asking for V.90 and let the restarted Phase 2 be plain V.34.
  * §9.5.1.2 is answered by the caller either way -- the peer may be holding
@@ -6815,19 +6854,10 @@ void me_hangup(void)
     /* sip_modem.c will detect ME_HANGUP and hang up the SIP call */
 }
 
-/* Called by sip_modem.c when the SIP call media becomes active */
-void me_on_sip_connected(void)
+/* Per-call V.92 startup state: a new SIP call, or a new Phase 1 inside one
+ * (V.92 9.10 on-hold / fast reconnect). */
+static void v92_call_state_reset_locked(void)
 {
-    pthread_mutex_lock(&g_state_mtx);
-
-    cr_reset(&g_cr);
-    g_trace_start_ms = trace_now_ms();
-    g_v8_rx_energy     = 0;
-    g_v8_rx_count      = 0;
-    g_v8_tx_energy     = 0;
-    g_v8_tx_count      = 0;
-    g_v8_active_answer_tone = g_v8_answer_tone;
-    g_v8_answer_tone_retry_done = false;
     g_v92_active = false;
     g_v92_v8_offered = false;
     g_v92_info0_local_advertised = false;
@@ -6852,6 +6882,26 @@ void me_on_sip_connected(void)
     g_v92_trn2u_active = false;
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
+}
+
+/* Called by sip_modem.c when the SIP call media becomes active */
+void me_on_sip_connected(void)
+{
+    pthread_mutex_lock(&g_state_mtx);
+
+    cr_reset(&g_cr);
+    g_trace_start_ms = trace_now_ms();
+    g_v8_rx_energy     = 0;
+    g_v8_rx_count      = 0;
+    g_v8_tx_energy     = 0;
+    g_v8_tx_count      = 0;
+    g_v8_active_answer_tone = g_v8_answer_tone;
+    g_v8_answer_tone_retry_done = false;
+    v92_call_state_reset_locked();
+    mh_disarm_locked();
+    g_mh_initiated = false;
+    g_mh_resume_pending = false;
+    g_mh_hold_until_ms = 0;
     g_data_link_failed = false;
     g_data_connect_reported = false;
 
@@ -6911,6 +6961,9 @@ void me_on_sip_disconnected(void)
     v91_live_reset();
     if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
     ds_release(&g_data_stack);
+    mh_disarm_locked();
+    g_mh_resume_pending = false;
+    g_mh_hold_until_ms = 0;
     g_v8_active_answer_tone = g_v8_answer_tone;
     g_v8_answer_tone_retry_done = false;
 
@@ -8028,6 +8081,20 @@ skip_8k_codewords:
                     (unsigned long long)elapsed);
             trace_phase("V8 timeout after %llums", (unsigned long long)elapsed);
             pthread_mutex_lock(&g_state_mtx);
+            /* V.92 9.10.2.1: on hold, ANSam runs for T1, not for V.8's own
+               timeout -- keep answering until T1 expires. */
+            if (g_mh_hold_until_ms != 0 && trace_now_ms() < g_mh_hold_until_ms
+                && !g_calling_party) {
+                if (g_v8) {
+                    v8_free(g_v8);
+                    g_v8 = NULL;
+                }
+                if (me_start_or_restart_v8_locked(g_v8_answer_tone) == 0) {
+                    pthread_mutex_unlock(&g_state_mtx);
+                    ME_LOG("[ME] V.92 9.10.2.1: still on hold; ANSam continues within T1\n");
+                    return;
+                }
+            }
             if (me_retry_v8_with_alternate_tone_locked("timeout", V8_STATUS_FAILED)) {
                 pthread_mutex_unlock(&g_state_mtx);
                 ME_LOG("[ME] V.8 answer tone in use: %s\n",
@@ -10326,6 +10393,7 @@ static void enter_v90_data_locked(void)
     g_v34_data_entry_ms = trace_now_ms();
     g_v34_data_entry_samples = g_rx_audio_samples;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
+    mh_arm_locked();
     ME_LOG("[ME] %s startup complete (upstream %s %d bps, downstream PCM %d bps)\n",
            g_v92_active ? "V.92" : "V.90",
            g_v92_active ? "PCM" : "V.34",
@@ -11670,6 +11738,187 @@ void me_flush_io_schedule(void)
         fflush(f);
 }
 
+/* ------------------------------------------------------------------ */
+/* V.92 9.10 modem-on-hold                                             */
+/* ------------------------------------------------------------------ */
+
+static bool me_v92_mh_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = parse_env_int("ME_V92_MH", 0) != 0;
+    return cached != 0;
+}
+
+/* Data-mode entry: arm only where 9.10 can apply.  Both modems V.92 (the
+ * INFO0 bits, latched here because a later retrain clears them), and this
+ * end the digital modem -- whose retrain tone is Tone B (8.9.1). */
+static void mh_arm_locked(void)
+{
+    if (!me_v92_mh_enabled() || g_mh_armed || me_v90_analogue_role()
+        || g_mod != ME_MOD_V90 || !g_v92_info0_mutual)
+        return;
+    v92_mh_ctrl_init(&g_mh, 200);
+    g_mh.t1_code = (uint8_t)(parse_env_int("ME_V92_MH_T1", 0x3) & 0xF);
+    g_mh.grant = parse_env_int("ME_V92_MH_GRANT", 1) != 0;
+    v92_mh_line_init(&g_mh_line, false, -12.0);
+    g_mh_armed = true;
+    g_mh_engaged = false;
+    ME_LOG("[ME] V.92 9.10 modem-on-hold armed (Tone B; T1 code %u; %s on-hold)\n",
+           (unsigned)g_mh.t1_code, g_mh.grant ? "grants" : "denies");
+}
+
+static void mh_disarm_locked(void)
+{
+    g_mh_armed = false;
+    g_mh_engaged = false;
+}
+
+/* New Phase 1 inside the same SIP call (9.10.2.1 and 9.10.2.3: "proceed
+ * with Phase 1 of the start-up procedure ... disregarding information
+ * received in previous phase 1 signals").  The data stack is NOT touched:
+ * it is suspended and data_stack_start_online() resumes it. */
+static void mh_restart_phase1_locked(bool as_caller, const char *why)
+{
+    cleanup_v34_v90_training_locked();
+    v91_live_reset();
+    v92_call_state_reset_locked();
+    if (g_v8) {
+        v8_free(g_v8);
+        g_v8 = NULL;
+    }
+    g_calling_party = as_caller;
+    g_mh_resume_pending = true;
+    mh_disarm_locked();
+    ME_LOG("[ME] V.92 9.10: %s; Phase 1 as %s, link suspended for resume\n",
+           why, as_caller ? "caller" : "answerer");
+    trace_phase("V92 MH -> Phase 1 (%s): %s", as_caller ? "call" : "answer", why);
+    if (me_start_or_restart_v8_locked(g_v8_answer_tone) != 0) {
+        ME_LOG("[ME] V.92 9.10: V.8 restart failed; hanging up\n");
+        g_state = ME_HANGUP;
+    }
+}
+
+static void mh_handle_actions_locked(void)
+{
+    v92_mh_action_t a;
+
+    while ((a = v92_mh_ctrl_take_action(&g_mh)) != V92_MH_ACT_NONE) {
+        switch (a) {
+        case V92_MH_ACT_SUSPEND_LINK:
+            ds_suspend_link(&g_data_stack);
+            ME_LOG("[ME] V.92 9.10: leaving data mode, V.42 suspended (Amd.2 9.10.3)\n");
+            break;
+        case V92_MH_ACT_ON_HOLD:
+            ME_LOG("[ME] V.92 9.10.2.1: on hold (T1 %d s)\n",
+                   v92_mh_t1_seconds(g_mh.t1_code));
+            break;
+        case V92_MH_ACT_PHASE1_ANSWER:
+            mh_restart_phase1_locked(false, "fast reconnect requested");
+            return;
+        case V92_MH_ACT_PHASE1_CALL:
+            mh_restart_phase1_locked(true, "fast reconnect answered with ANSam");
+            return;
+        case V92_MH_ACT_RETRAIN:
+            /* 9.10.1.1: Tone RT with a reversal and no MH is a retrain. */
+            ME_LOG("[ME] V.92 9.10.1.1: Tone RT was a retrain, not modem-on-hold\n");
+            mh_disarm_locked();
+            ds_resume_link(&g_data_stack, 0);
+            if (g_state == ME_DATA)
+                (void) restart_v90_phase2_locked("V.92 9.10.1.1: retrain, not MH");
+            return;
+        case V92_MH_ACT_DISCONNECT:
+            ME_LOG("[ME] V.92 9.10.2: cleardown, disconnecting\n");
+            trace_phase("V92 MH cleardown");
+            mh_disarm_locked();
+            g_state = ME_HANGUP;
+            return;
+        default:
+            break;
+        }
+    }
+    /* 9.10.2.1: once MHack has been released by RT/silence the modem sends
+     * ANSam for T1 and listens for Phase 1.  V.8's answerer does exactly
+     * that, so hand over to it, bounded by T1 rather than V.8's timeout. */
+    if (g_mh_armed && g_mh.state == V92_MH_ST_ON_HOLD) {
+        int t1 = v92_mh_t1_seconds(g_mh.t1_code);
+
+        g_mh_hold_until_ms = trace_now_ms()
+                           + (uint64_t)(t1 > 0 ? t1 : 3600) * 1000u;
+        mh_restart_phase1_locked(false, "on hold, waiting for the peer's Phase 1");
+    }
+}
+
+static bool mh_initiate_due_locked(void)
+{
+    static int after_ms = -2;
+
+    if (after_ms == -2)
+        after_ms = parse_env_int("ME_V92_MH_AFTER_MS", 20000);
+    return !g_mh_initiated && g_state == ME_DATA
+        && getenv("ME_V92_MH_INITIATE") != NULL
+        && g_rx_audio_samples - g_v34_data_entry_samples >= (uint64_t)after_ms * 8u;
+}
+
+/* Received codewords, before anything else sees them.  Returns true when
+ * modem-on-hold owns the line and the data receivers must not be fed. */
+static bool mh_rx_locked(const uint8_t *codewords, int count)
+{
+    int16_t linear[320];
+
+    if (!g_mh_armed)
+        return false;
+    if (g_mh.state == V92_MH_ST_IDLE && mh_initiate_due_locked()) {
+        const char *what = getenv("ME_V92_MH_INITIATE");
+        v92_mh_signal_t sig = strcmp(what, "req") == 0 ? V92_MH_REQ
+                            : strcmp(what, "frr") == 0 ? V92_MH_FRR : V92_MH_CLRD;
+
+        g_mh_initiated = true;
+        ME_LOG("[ME] V.92 9.10: initiating %s (ME_V92_MH_INITIATE)\n",
+               v92_mh_signal_name(sig));
+        (void) v92_mh_ctrl_initiate(&g_mh, sig, V92_MH_CLRD_OTHER);
+    }
+    for (int off = 0; off < count; ) {
+        int n = count - off;
+
+        if (n > 320) n = 320;
+        for (int i = 0; i < n; i++)
+            linear[i] = pcm_to_linear(codewords[off + i]);
+        v92_mh_line_rx(&g_mh_line, &g_mh, linear, n);
+        off += n;
+    }
+    if (!g_mh_engaged && g_mh.state != V92_MH_ST_IDLE) {
+        g_mh_engaged = true;
+        ME_LOG("[ME] V.92 9.10: modem-on-hold transaction (%s, %s)\n",
+               g_mh.initiator ? "initiating" : "responding",
+               v92_mh_state_name(g_mh.state));
+        trace_phase("V92 MH engaged: %s", v92_mh_state_name(g_mh.state));
+    }
+    mh_handle_actions_locked();
+    return g_mh_armed && g_mh_engaged;
+}
+
+/* Transmit side: true when MH supplied the codewords. */
+static bool mh_tx_locked(uint8_t *codewords, int count)
+{
+    int16_t linear[320];
+
+    if (!g_mh_armed || !g_mh_engaged)
+        return false;
+    for (int off = 0; off < count; ) {
+        int n = count - off;
+
+        if (n > 320) n = 320;
+        if (!v92_mh_line_tx(&g_mh_line, &g_mh, linear, n))
+            memset(linear, 0, (size_t)n * sizeof(linear[0]));
+        for (int i = 0; i < n; i++)
+            codewords[off + i] = linear_to_pcm(linear[i]);
+        off += n;
+    }
+    return true;
+}
+
 static void me_rx_g711_impl(const uint8_t *codewords, int count)
 {
     int offset;
@@ -11693,6 +11942,13 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
     pthread_mutex_lock(&g_state_mtx);
     first_sample = g_g711_rx_octets;
     g_g711_rx_octets += (uint64_t)count;
+    if (mh_rx_locked(codewords, count)) {
+        g_rx_audio_samples += (uint64_t)count;
+        pthread_mutex_unlock(&g_state_mtx);
+        if (g_g711_rx_tap)
+            (void)fwrite(codewords, 1, (size_t)count, g_g711_rx_tap);
+        return;
+    }
     raw_v91 = (g_mod == ME_MOD_V91
                && (g_state == ME_TRAINING || g_state == ME_DATA));
     if (raw_v91)
@@ -11911,6 +12167,16 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
             (void)fwrite(codewords, 1, (size_t)count, g_g711_tx_tap);
         return count;
     }
+
+    pthread_mutex_lock(&g_state_mtx);
+    if (mh_tx_locked(codewords, count)) {
+        g_g711_tx_octets += (uint64_t)count;
+        pthread_mutex_unlock(&g_state_mtx);
+        if (g_g711_tx_tap)
+            (void)fwrite(codewords, 1, (size_t)count, g_g711_tx_tap);
+        return count;
+    }
+    pthread_mutex_unlock(&g_state_mtx);
 
     for (offset = 0; offset < count; ) {
         int16_t linear[320];
