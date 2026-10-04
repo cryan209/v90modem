@@ -210,6 +210,8 @@ SPAN_DECLARE(int) v8_tx(v8_state_t *s, int16_t *amp, int max_len);
     \param s The V.8 context.
     \param power The level, in dBm0. */
 SPAN_DECLARE(void) v8_tx_power(v8_state_t *s, float power);
+/* Proprietary Courier x2 CM/JM carrier-phase signature; default off. */
+SPAN_DECLARE(void) v8_x2_phase_reversal(v8_state_t *s, bool enable);
 
 /*! Decode a block of received V.8 audio samples. N.B. This is not the function to
     call to run the V.8 protocol on received audio. It is for analysing audio streams,

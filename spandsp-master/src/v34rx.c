@@ -13034,6 +13034,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     bool best_conjugate = false;
     int best_tap = 0;
     int best_trellis = -1;
+    bool best_expanded = s->parms.expanded_shaping;
     /* 6.5/V.90 puts GPA on the analogue modem's upstream, but slmodemd
        measurably uses GPC, and a template built with the wrong polynomial
        does not correlate at all (about 5%, versus the 95% this needs).  The
@@ -13098,42 +13099,53 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     {
         int trellis_count = s->v90_mode ? 3 : 1;
 
-        for (int tr = 0;  tr < trellis_count  &&  best_match < 0.95f;  tr++)
+        /* Courier B1A1 -> A71B retains the MP expanded-shaping bit;
+           unlike V.90 section 8.5.1, x2 does not force minimum shaping.
+           Search both choices until the x2 MP field is decoded. */
+        for (int sh = 0; sh < (s->x2_mode ? 2 : 1) && best_match < 0.95f; sh++)
         {
-            complexf_t coeff[V34_V90_T3_FSE_TAPS];
-            int64_t first = 0;
-            bool conjugate = false;
-            float coarse = 0.0f;
-            float match;
-            int trellis = s->v90_mode ? tr : -1;
-
-            if (!v34_build_expected_b1_tap_trellis(s, candidate_tap[t],
-                                                   trellis, 0))
-                continue;
-            /*endif*/
-            match = v90_t3_acquire_pass(s, search_start, search_end, coeff,
-                                        &first, &conjugate, &coarse);
-            V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
-                     "Rx - V.90 T/3 B1 template tap=%d trellis=%d: "
-                     "coarse=%.1f%% fit=%.1f%% conjugate=%d\n",
-                     candidate_tap[t], trellis,
-                     100.0f*coarse, 100.0f*match, conjugate ? 1 : 0);
-            if (match > best_match)
+            if (s->x2_mode)
+                v34_set_working_parameters(&s->parms, s->baud_rate, s->bit_rate, sh != 0);
+            for (int tr = 0;  tr < trellis_count  &&  best_match < 0.95f;  tr++)
             {
-                best_match = match;
-                best_coarse = coarse;
-                best_first = first;
-                best_conjugate = conjugate;
-                best_tap = candidate_tap[t];
-                best_trellis = trellis;
-                memcpy(best_coeff, coeff, sizeof(best_coeff));
+                complexf_t coeff[V34_V90_T3_FSE_TAPS];
+                int64_t first = 0;
+                bool conjugate = false;
+                float coarse = 0.0f;
+                float match;
+                int trellis = s->v90_mode ? tr : -1;
+
+                if (!v34_build_expected_b1_tap_trellis(s, candidate_tap[t],
+                                                       trellis, 0))
+                    continue;
+                /*endif*/
+                match = v90_t3_acquire_pass(s, search_start, search_end, coeff,
+                                            &first, &conjugate, &coarse);
+                V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                         "Rx - V.90 T/3 B1 template tap=%d trellis=%d expanded=%d: "
+                         "coarse=%.1f%% fit=%.1f%% conjugate=%d\n",
+                         candidate_tap[t], trellis, s->parms.expanded_shaping ? 1 : 0,
+                         100.0f*coarse, 100.0f*match, conjugate ? 1 : 0);
+                if (match > best_match)
+                {
+                    best_match = match;
+                    best_coarse = coarse;
+                    best_first = first;
+                    best_conjugate = conjugate;
+                    best_tap = candidate_tap[t];
+                    best_trellis = trellis;
+                    best_expanded = s->parms.expanded_shaping;
+                    memcpy(best_coeff, coeff, sizeof(best_coeff));
+                }
+                /*endif*/
             }
-            /*endif*/
         }
     }
     /* Leave the winning template loaded; the data decoder reuses its state. */
     if (best_tap)
     {
+        if (s->x2_mode)
+            v34_set_working_parameters(&s->parms, s->baud_rate, s->bit_rate, best_expanded);
         (void)v34_build_expected_b1_tap_trellis(s, best_tap, best_trellis, 0);
         s->v90_far_tap_measured = best_tap;
         if (best_trellis >= 0)
@@ -13318,6 +13330,17 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
             /*endif*/
         }
         /*endif*/
+    }
+    if (s->x2_mode && best_trellis >= 0)
+    {
+        const uint8_t (*table)[16];
+        int states;
+
+        /* The accepted B1 selects the remote transmitter's convolutional
+           code (Courier B1C2). Use it for DATA as well as the template. */
+        if (trellis_parameters(best_trellis, &table, &states)
+            || viterbi_set_trellis(&s->viterbi, table, states))
+            return;
     }
     memcpy(s->v90_t3_fse, best_coeff, sizeof(best_coeff));
     v90_t3_fse_taps_replaced(s);
@@ -16583,7 +16606,7 @@ static bool v34_build_expected_b1_tap_trellis(v34_rx_state_t *rx,
     tx->tx.baud_rate = rx->baud_rate;
     if (v34_seed_tx_data(tx, rate/2400, trellis,
                          v90_upstream ? 0 : rx->use_non_linear_encoder,
-                         v90_upstream ? 0 : rx->parms.expanded_shaping,
+                         (v90_upstream && !rx->x2_mode) ? 0 : rx->parms.expanded_shaping,
                          v90_upstream ? NULL : precoder) != 0)
     {
         v34_free(tx);
@@ -17294,3 +17317,25 @@ SPAN_DECLARE(void) v34_set_qam_report_handler(v34_state_t *s, qam_report_handler
 }
 /*- End of function --------------------------------------------------------*/
 /*- End of file ------------------------------------------------------------*/
+
+/* x2 Draft 0.33 3.4 and QF marker parser 97b5..97dd: retune the
+ * upstream receiver from the directional marker instead of INFO1a.
+ * Only the V.34 receive front end is borrowed; x2 owns all transmitted PCM.
+ */
+SPAN_DECLARE(int) v34_x2_prepare_upstream(v34_state_t *s, int baud_index, int high_carrier)
+{
+    if (!s || baud_index != V34_BAUD_RATE_3200 || high_carrier != 1)
+        return -1;
+    /* Receive the peer's S/PP/TRN/J without local V.34 S/PP echo gating.
+     * The primary front end already supports the asymmetric upstream role. */
+    s->rx.v90_mode = true;
+    s->rx.x2_mode = true;
+    s->tx.v90_mode = true;
+    v34_rx_restart(s, baud_index, (31200/2400 - 1)*2, high_carrier);
+    s->primary_channel_active = true;
+    s->rx.scrambler_tap = 4; /* GPA, tap 5, as executed on Courier originator */
+    s->rx.current_demodulator = V34_MODULATION_V34;
+    s->rx.stage = V34_RX_STAGE_PHASE3_TRAINING;
+    s->rx.phase3_s_guard_samples = 0;
+    return 0;
+}

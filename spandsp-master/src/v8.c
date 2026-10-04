@@ -866,7 +866,11 @@ static int get_bit(void *user_data)
     if (queue_read(s->tx_queue, &bit, 1) <= 0)
         return SIG_STATUS_END_OF_DATA;
     /*endif*/
-    return bit;
+    /* x2 CM/JM signature: Courier dd62/dd74 reverses the
+       carrier amplitude between messages. Preserve the FSK symbol value. */
+    if (bit & 0x80)
+        s->v21tx.phase_acc += UINT32_C(0x80000000);
+    return bit & 1;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -916,7 +920,13 @@ static void send_cm_jm(v8_state_t *s)
     int ptr;
 
     /* Send a CM, or a JM as appropriate */
-    v8_put_preamble(s);
+    if (s->x2_phase_reversal)
+    {
+        const uint8_t preamble[10] = {0x81,1,1,1,1,1,1,1,1,1};
+        queue_write(s->tx_queue, preamble, 10);
+    }
+    else
+        v8_put_preamble(s);
     ptr = 0;
     buf[ptr++] = V8_CM_JM_SYNC_OCTET;
     /* Data call */
@@ -1012,6 +1022,14 @@ static void send_cm_jm(v8_state_t *s)
     v8_put_bytes(s, buf, ptr);
 }
 /*- End of function --------------------------------------------------------*/
+
+/* Courier Ie030002 DD62/DD74 negates the V.21 carrier between CM/JM
+   messages. DE14/DE15 detects this proprietary x2 capability signature.
+   It is separate from the standard V.8 PSTN-access category (8D). */
+SPAN_DECLARE(void) v8_x2_phase_reversal(v8_state_t *s, bool enable)
+{
+    s->x2_phase_reversal = enable;
+}
 
 SPAN_DECLARE(void) v8_tx_power(v8_state_t *s, float power)
 {

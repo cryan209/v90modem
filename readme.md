@@ -250,3 +250,15 @@ exchange remain under development; see `docs/v92_phase4_implementation.md`.
 ## License
 
 GPL-2.0 (due to spandsp LGPL and linmodem GPL heritage)
+
+## Experimental x2
+
+`--mode x2` selects the initial PCMU digital-answerer implementation. Capability
+exchange and A/B/J/C/D/E training are wired into the engine, including the
+Courier's received J and S-bar gates. The payload mapper is verified against
+original DSP vectors. The supported short MP is decoded from the line and selects original-firmware
+data banks; mapped startup then activates downstream payload transmission.
+Upstream E/B1 data handoff and bidirectional verification remain; this mode
+does not yet complete an x2 connection.
+Run `make x2-test x2-session-test`. See `docs/x2_implementation.md` for
+supported profiles, capture verification and firmware-vector reproduction.

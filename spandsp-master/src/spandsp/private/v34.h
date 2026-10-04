@@ -1900,6 +1900,8 @@ typedef struct
     /*! \brief V.90 mode: when true, INFO0 RX expects V.90 INFO0a format (49 bits)
         instead of standard V.34 INFO0.  Set by external v90 module. */
     bool v90_mode;
+    /*! \brief x2 upstream retains the Courier MP shaping choice. */
+    bool x2_mode;
     /*! \brief V.90 §9.2.1.1.8: the received INFO1a selected V.34 (Table 11
         layout, bits 37:39 in 0..5).  The frame was re-parsed with the V.34
         INFO1a field layout and the receiver expects the analogue modem to

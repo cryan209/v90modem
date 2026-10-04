@@ -20,6 +20,7 @@
  */
 
 #include "modem_engine.h"
+#include "x2_session.h"
 #include "data_interface.h"
 #include "data_stack.h"
 #include "clock_recovery.h"
@@ -346,6 +347,7 @@ static uint64_t trace_now_ms(void)
 static const char *me_mod_to_str(me_modulation_t mod)
 {
     switch (mod) {
+    case ME_MOD_X2:     return "X2";
     case ME_MOD_NONE:   return "NONE";
     case ME_MOD_V91:    return "V91";
     case ME_MOD_V90:    return "V90";
@@ -2055,6 +2057,12 @@ static bool g_advertise_v90 = true;
 static bool g_advertise_v34 = true;
 static bool g_enable_v92 = false;
 static const char *g_mode_name = "v90";
+static bool g_enable_x2 = false;
+static x2_session_t g_x2;
+static x2_session_stage_t g_x2_last_stage;
+static bool g_x2_receiver_started;
+static bool g_x2_upstream_prepared, g_x2_upstream_started;
+static bool g_x2_data_stack_started;
 
 /*
  * Which side of a V.90 call this endpoint offers to be.
@@ -2957,6 +2965,13 @@ static int me_start_or_restart_v8_locked(int answer_tone)
            interop-safe subset unless ME_V8_ADVERTISE_V91 is set. */
         if (getenv("ME_V8_ADVERTISE_V91"))
             v8_parms.jm_cm.pcm_modem_availability |= V8_PSTN_PCM_MODEM_V91;
+    } else if (g_enable_x2) {
+        /* V.8 PSTN access category: the x2 server is on the digital
+         * network too. Courier/I-modem JM ends in 8D; omitting that
+         * category differs from the captured native JM. The separate
+         * Courier waveform classifier must also accept the signal. */
+        v8_parms.jm_cm.pstn_access            = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
+        v8_parms.jm_cm.pcm_modem_availability = 0;
     } else {
         v8_parms.jm_cm.pstn_access            = 0;
         v8_parms.jm_cm.pcm_modem_availability = 0;
@@ -2978,6 +2993,12 @@ static int me_start_or_restart_v8_locked(int answer_tone)
             if (log)
                 span_log_set_level(log, me_span_flow_level());
         }
+    }
+
+    {
+        const char *x2_phase = getenv("ME_V8_X2_PHASE_REVERSAL");
+        v8_x2_phase_reversal(g_v8, x2_phase ? strcmp(x2_phase, "0") != 0
+                                         : (g_enable_x2 && !g_advertise_v90));
     }
 
     /* ME_V8_TX_POWER_DBM0 sets the level of the V.21 CI/CM/JM/CJ signalling.
@@ -5847,6 +5868,12 @@ static int me_span_flow_level(void)
 static void v34_put_bit_cb(void *user_data, int bit)
 {
     (void)user_data;
+    if (g_mod == ME_MOD_X2) {
+        /* x2 MP/E is sequenced externally. The experimental B1 template
+         * has not acquired the captured Courier data; keep user data and
+         * CONNECT gated until the upstream mapper is verified. */
+        return;
+    }
     if (g_v34hdx_fax_control_started && di_fax_active()) {
         di_fax_v34hdx_put_bit(bit);
         return;
@@ -6394,6 +6421,123 @@ static void start_v34_training(void)
             g_v34_start_baud, bps);
 }
 
+/* x2 Draft 0.33 clauses 3..6: engine owns control/PCM transmission;
+ * SpanDSP supplies the V.34 upstream front end only. */
+static int me_x2_payload_bit(void *unused)
+{
+    (void)unused;
+    int bit=ds_tx_get_bit(&g_data_stack);
+    return bit==0 || bit==1 ? bit : 1;
+}
+static void me_x2_progress_locked(void)
+{
+    if (g_x2.stage != g_x2_last_stage) {
+        trace_phase("X2 stage=%s tx_sample=%llu rx_sample=%llu",
+                    x2_session_stage_name(g_x2.stage),
+                    (unsigned long long)g_x2.tx_samples,
+                    (unsigned long long)g_x2.rx_samples);
+        g_x2_last_stage = g_x2.stage;
+    }
+    if (g_x2.stage == X2_FAILED) g_state = ME_HANGUP;
+}
+static bool me_x2_tx_locked(uint8_t *codewords, int count)
+{
+    if (g_mod != ME_MOD_X2 || g_state != ME_TRAINING) return false;
+    x2_session_tx(&g_x2, codewords, (size_t)count);
+    me_x2_progress_locked();
+    return true;
+}
+static void me_x2_start_locked(void)
+{
+    if (g_calling_party || g_law != ME_LAW_ULAW) {
+        ME_LOG("[ME] x2 currently requires an answering PCMU digital endpoint\n");
+        g_state = ME_HANGUP;
+        return;
+    }
+    if (g_v34) { v34_free(g_v34); g_v34 = NULL; }
+    x2_session_init(&g_x2);
+    x2_session_set_payload_source(&g_x2,me_x2_payload_bit,NULL);
+    g_x2_data_stack_started=false;
+    g_x2_upstream_prepared=g_x2_upstream_started=false;
+    g_x2_last_stage = X2_FAILED;
+    g_x2_receiver_started = false;
+    g_mod = ME_MOD_X2;
+    g_state = ME_TRAINING;
+    g_phase_start_ms = trace_now_ms();
+    /* The peer's INFO0 can overlap SpanDSP's V.8 completion wait. Preserve
+     * that real waveform, just as the V.90 INFO0a seam already does. */
+    {
+        int count = g_v8_rx_hist_len;
+        int start = (g_v8_rx_hist_wr-count+V8_RX_HIST_SAMPLES)%V8_RX_HIST_SAMPLES;
+        int16_t history[320];
+        for(int offset=0;offset<count;) {
+            int n=count-offset;if(n>320)n=320;
+            for(int i=0;i<n;++i)history[i]=g_v8_rx_hist[(start+offset+i)%V8_RX_HIST_SAMPLES];
+            x2_session_rx(&g_x2,history,(size_t)n);offset+=n;
+        }
+    }
+    ME_LOG("[ME] x2 digital startup: INFO0=3dff; waiting for CRC-valid peer marker (RX sample %llu)\n",
+           (unsigned long long)g_rx_audio_samples);
+    me_x2_progress_locked();
+}
+static void me_x2_rx_locked(const int16_t *samples, int count)
+{
+    x2_session_rx(&g_x2, samples, (size_t)count);
+    if(g_x2.mp_valid && !g_x2_data_stack_started && g_x2.stage!=X2_FAILED) {
+        unsigned bits=x2_pcm_frame_bits(&g_x2.data_config);
+        if(data_stack_start_online((int)(bits*8000/6),false))g_x2.stage=X2_FAILED;
+        else {
+            g_x2_data_stack_started=true;
+            trace_phase("X2 MP=%04x/%04x/%04x/%04x selected index=%u B=%u MD=%u upstream=%u",
+                g_x2.peer_mp.words[0],g_x2.peer_mp.words[1],g_x2.peer_mp.words[2],g_x2.peer_mp.words[3],
+                g_x2.selected_index,g_x2.data_config.amplitude_bits,g_x2.data_config.independent_signs,
+                g_x2.upstream_rate_n*2400);
+        }
+    }
+    if (g_x2.marker_valid && !g_x2_receiver_started) {
+        g_v34 = v34_init(NULL,3200,31200,false,true,
+                        v34_get_bit_cb,NULL,v34_put_bit_cb,NULL);
+        if (!g_v34 || v34_x2_prepare_upstream(g_v34,4,1)) {
+            g_x2.stage = X2_FAILED;
+        } else {
+            g_x2_receiver_started = true;
+            logging_state_t *log = v34_get_logging_state(g_v34);
+            if (log) span_log_set_level(log,me_span_flow_level());
+            trace_phase("X2 accepted marker=%02x: upstream 3200 high carrier",g_x2.marker);
+        }
+    }
+    if (g_x2_receiver_started && g_v34) {
+        /* Courier F87D/W2 and Ie030002 AB24 select the V.34 upstream
+         * independently from PCM N1. Prepare capture while MP is present,
+         * so the 20-one E gate cannot arrive after B1 has left the ring.
+         * Seed linear/minimum shaping and 16 states; accepted B1 selects
+         * the Courier transmitter's shaping and trellis independently. */
+        const char *acquire=getenv("ME_X2_UPSTREAM_ACQUIRE");
+        if((!acquire || atoi(acquire)!=0) && g_x2.mp_valid && !g_x2_upstream_prepared) {
+            if(v34_v90_prepare_upstream_data(g_v34,4,1,
+                                             (int)g_x2.upstream_rate_n*2400,0))
+                g_x2.stage=X2_FAILED;
+            else {g_x2_upstream_prepared=true;trace_phase("X2 upstream prepared: %u bps",g_x2.upstream_rate_n*2400);}
+        }
+        v34_rx(g_v34,samples,count);
+        if(g_x2.mp_rx.e_detected && !g_x2_upstream_started) {
+            g_x2_upstream_started=true;
+            trace_phase("X2 upstream E detected (MP RX sample %llu)",
+                        (unsigned long long)g_x2.mp_rx.e_sample);
+            if(g_x2_upstream_prepared) {
+                if(v34_begin_rx_data(g_v34))g_x2.stage=X2_FAILED;
+                else trace_phase("X2 upstream E -> B1 acquisition");
+            }
+        }
+        if (g_x2.stage == X2_UPSTREAM_WAIT
+            && v34_get_phase3_j_trn16(g_v34) >= 0) {
+            x2_session_upstream_j(&g_x2);
+        }
+
+    }
+    me_x2_progress_locked();
+}
+
 static void v8_result_handler(void *user_data, v8_parms_t *result)
 {
     (void)user_data;
@@ -6474,7 +6618,9 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
     /* V8_STATUS_V8_CALL — negotiation complete, inspect agreed modulation */
     pthread_mutex_lock(&g_state_mtx);
 
-    if ((result->jm_cm.pcm_modem_availability & V8_PSTN_PCM_MODEM_V91) != 0) {
+    if (g_enable_x2 && (result->jm_cm.modulations & V8_MOD_V34)) {
+        me_x2_start_locked();
+    } else if ((result->jm_cm.pcm_modem_availability & V8_PSTN_PCM_MODEM_V91) != 0) {
         ME_LOG("[ME] V.8 negotiated V.91 symmetric PCM mode\n");
         trace_phase("V8 selected V91");
         if (!v91_live_start_locked()) {
@@ -6676,6 +6822,11 @@ void me_init(void)
             g_advertise_v90 = true;
             g_enable_v92 = parse_env_int("ME_V92_ENABLE", 0) != 0;
             g_mode_name = g_enable_v92 ? "v92" : "v90";
+        } else if (strcmp(mode, "x2") == 0) {
+            g_enable_x2 = true;
+            g_advertise_v90 = false;
+            g_enable_v92 = false;
+            g_mode_name = "x2";
         } else if (strcmp(mode, "v34") == 0) {
             g_advertise_v90 = false;
             g_enable_v92 = false;
@@ -7999,6 +8150,14 @@ void me_rx_audio(const int16_t *amp, int len)
     me_state_t state = g_state;
     me_modulation_t mod = g_mod;
     pthread_mutex_unlock(&g_state_mtx);
+
+    if (mod == ME_MOD_X2 && state == ME_TRAINING) {
+        pthread_mutex_lock(&g_state_mtx);
+        if (g_mod == ME_MOD_X2 && g_state == ME_TRAINING)
+            me_x2_rx_locked(amp,len);
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
 
     /* The SIP codeword entry point supplies its network-DAC linear copy
      * here exactly once. Physical 8 kHz linear input uses this same seam. */
@@ -10788,6 +10947,21 @@ static void buffer_tx_samples_for_echo(const int16_t *amp, int len)
 
 void me_tx_audio(int16_t *amp, int len)
 {
+    pthread_mutex_lock(&g_state_mtx);
+    if (g_mod == ME_MOD_X2 && g_state == ME_TRAINING) {
+        uint8_t raw[320];
+        for (int offset=0; offset<len;) {
+            int count=len-offset;
+            if (count>320) count=320;
+            x2_session_tx(&g_x2,raw,(size_t)count);
+            for(int i=0;i<count;++i)amp[offset+i]=pcm_to_linear(raw[i]);
+            offset+=count;
+        }
+        me_x2_progress_locked();
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    pthread_mutex_unlock(&g_state_mtx);
     if (di_fax_active() && !me_v34_fax_probe()) {
         di_fax_tx(amp, len);
         return;
@@ -12291,7 +12465,8 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
             chunk = (int)(sizeof(linear) / sizeof(linear[0]));
 
         pthread_mutex_lock(&g_state_mtx);
-        raw_pcm = v91_live_generate_codewords_locked(codewords + offset, chunk)
+        raw_pcm = me_x2_tx_locked(codewords + offset, chunk)
+               || v91_live_generate_codewords_locked(codewords + offset, chunk)
                || generate_v90_raw_codewords_locked(codewords + offset, chunk);
         pthread_mutex_unlock(&g_state_mtx);
 

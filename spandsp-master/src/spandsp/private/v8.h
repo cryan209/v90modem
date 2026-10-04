@@ -62,6 +62,7 @@ struct v8_state_s
        detecting it (modem_engine.c).  Settable so the same can be measured for
        V.8, whose CM a marginal answering detector may simply not hear. */
     float v21_tx_power;
+    bool x2_phase_reversal;
     fsk_rx_state_t v21rx;
     queue_state_t *tx_queue;
     modem_connect_tones_tx_state_t ansam_tx;

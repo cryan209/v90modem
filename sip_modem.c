@@ -1059,16 +1059,17 @@ int main(int argc, char *argv[])
             fprintf(stderr,
                 "Usage: %s [--sip-server host] [--username u] [--password p]\n"
                 "          [--pty-link path] [--local-port port] [--rtp-port port]\n"
-                "          [--bind-addr ip] [--mode v34|v90|v92] [--verbose]\n", argv[0]);
+                "          [--bind-addr ip] [--mode x2|v34|v90|v92] [--verbose]\n", argv[0]);
             return 0;
         }
     }
 
     if (modem_mode
+        && strcmp(modem_mode, "x2") != 0
         && strcmp(modem_mode, "v34") != 0
         && strcmp(modem_mode, "v90") != 0
         && strcmp(modem_mode, "v92") != 0) {
-        fprintf(stderr, "Invalid --mode '%s' (expected v34, v90, or v92)\n",
+        fprintf(stderr, "Invalid --mode '%s' (expected x2, v34, v90, or v92)\n",
                 modem_mode);
         return 2;
     }

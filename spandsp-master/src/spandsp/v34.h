@@ -664,6 +664,9 @@ SPAN_DECLARE(void) v34_v90_force_reneg_cp_rx(v34_state_t *s);
 /*! Force the primary-channel receiver into Phase 3 PP/TRN conditioning.
     Intended for offline V.90 replay after INFO1 has already been decoded;
     the trained equalizer is preserved by a later v34_force_phase4(). */
+/* x2 Draft 0.33 3.4: marker-selected V.34 upstream without INFO1.
+ * Returns -1 for unsupported indices; does not transmit a V.90 handshake. */
+SPAN_DECLARE(int) v34_x2_prepare_upstream(v34_state_t *s, int baud_index, int high_carrier);
 SPAN_DECLARE(void) v34_force_phase3_rx(v34_state_t *s);
 
 /*! Seed the receive-side Phase 4 MP parameters when an external/offline
