@@ -98,12 +98,13 @@ static int ring_read(ring_t *r, uint8_t *buf, int max) {
 
 typedef struct {
     int  master_fd;
+    int  slave_hold_fd;     /* kept open so the raw termios survives */
     char slave_name[256];
     char symlink_path[256];
 } di_pty_t;
 
-static di_pty_t     ctrl_pty  = { .master_fd = -1 };
-static di_pty_t     data_pty  = { .master_fd = -1 };
+static di_pty_t     ctrl_pty  = { .master_fd = -1, .slave_hold_fd = -1 };
+static di_pty_t     data_pty  = { .master_fd = -1, .slave_hold_fd = -1 };
 static int          split_mode = 0;
 
 /*
@@ -572,7 +573,16 @@ static int di_pty_open(di_pty_t *p, const char *link_path, const char *label)
      * opens the port without configuring it (cat, a test, a script) has the
      * line discipline reflect every response straight back as input: once
      * ATE1 is on, the modem's echo of a command is echoed back to the modem,
-     * which echoes it again.  A DTE that sets its own termios is unaffected. */
+     * which echoes it again.  A DTE that sets its own termios is unaffected.
+     *
+     * The slave stays open here for the life of the port.  BSD ptys (macOS)
+     * reinitialise the slave's termios to TTYDEF_* on its first open, so a
+     * raw setting made and then closed is gone by the time the DTE opens the
+     * port: ICRNL turned every CR into LF and ECHO looped the modem's output
+     * back in as DTE data (each engine_pair_test V.22bis/V.32bis row read
+     * "CONNECT" five times in 64 KB of LFs and failed).  Linux keeps it, which
+     * is why the rows passed there.  Holding a reference also stops the
+     * master reading EOF/EIO whenever no DTE is attached. */
     {
         struct termios tio;
 
@@ -581,9 +591,8 @@ static int di_pty_open(di_pty_t *p, const char *link_path, const char *label)
             tcsetattr(slave_fd, TCSANOW, &tio);
         }
     }
-
-    /* Close the slave — applications open it by name */
-    close(slave_fd);
+    fcntl(slave_fd, F_SETFD, FD_CLOEXEC);
+    p->slave_hold_fd = slave_fd;
 
     /* Make the master non-blocking so the reader thread doesn't hang */
     fcntl(p->master_fd, F_SETFL, O_NONBLOCK);
@@ -602,6 +611,10 @@ static int di_pty_open(di_pty_t *p, const char *link_path, const char *label)
 
 static void di_pty_close(di_pty_t *p)
 {
+    if (p->slave_hold_fd >= 0) {
+        close(p->slave_hold_fd);
+        p->slave_hold_fd = -1;
+    }
     if (p->master_fd >= 0) {
         close(p->master_fd);
         p->master_fd = -1;
