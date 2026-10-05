@@ -114,6 +114,8 @@ struct at_state_s
 
     char line[256];
     int line_ptr;
+    /*! The last command line executed, for V.250 5.2.4's "A/". */
+    char last_line[256];
 
     at_modem_control_handler_t modem_control_handler;
     void *modem_control_user_data;

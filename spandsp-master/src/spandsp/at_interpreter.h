@@ -118,7 +118,9 @@ enum at_modem_control_operation_e
     /*! V.250 6.1.3 ATI<n>.  num is the decimal value.  Return a positive value
         when the application has answered it with at_put_response(), zero to
         let the interpreter answer (I0 model, I3 manufacturer), or a negative
-        value for ERROR. */
+        value for ERROR.  Also asked with num "GCAP" for V.250 6.1.9's list
+        (zero: the interpreter answers "+GCAP: +FCLASS"), and with "4" for
+        &V. */
     AT_MODEM_CONTROL_INFO,
     /*! Manufacturer diagnostic tables ATY<n>, after the USRobotics Courier (no
         V.250 command uses Y).  num is the decimal value.  A positive return

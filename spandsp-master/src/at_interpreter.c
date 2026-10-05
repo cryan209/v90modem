@@ -89,7 +89,7 @@ static at_profile_t profiles[3] =
         /*.pulse_dial =*/ false,
         /*.double_escape =*/ false,
         /*.adaptive_receive =*/ false,
-        /*.s_regs[100] =*/ {0, 0, 0, '\r', '\n', '\b', 1, 60, 5, 0, 0}
+        /*.s_regs[100] =*/ {0, 0, '+', '\r', '\n', '\b', 1, 60, 5, 0, 0, 0, 50}
 #else
         .echo = true,
         .verbose = true,
@@ -98,13 +98,15 @@ static at_profile_t profiles[3] =
         .double_escape = false,
         .adaptive_receive = false,
         .s_regs[0] = 0,
+        .s_regs[2] = '+',
         .s_regs[3] = '\r',
         .s_regs[4] = '\n',
         .s_regs[5] = '\b',
         .s_regs[6] = 1,
         .s_regs[7] = 60,
         .s_regs[8] = 5,
-        .s_regs[10] = 0
+        .s_regs[10] = 0,
+        .s_regs[12] = 50
 #endif
     }
 };
@@ -198,6 +200,12 @@ SPAN_DECLARE(const char *) at_modem_control_to_str(int state)
         return "Parameter";
     case AT_MODEM_CONTROL_DIAGNOSTIC:
         return "Diagnostic";
+    case AT_MODEM_CONTROL_HELP:
+        return "Help";
+    case AT_MODEM_CONTROL_INFO:
+        return "Info";
+    case AT_MODEM_CONTROL_DIAG_TABLE:
+        return "Diagnostic table";
     }
     /*endswitch*/
     return "???";
@@ -296,7 +304,9 @@ SPAN_DECLARE(void) at_call_event(at_state_t *s, int event)
             at_display_call_info(s);
         /*endif*/
         at_put_response_code(s, AT_RESPONSE_CODE_RING);
-        if ((++s->rings_indicated) >= s->p.s_regs[0]  &&  s->p.s_regs[0])
+        ++s->rings_indicated;
+        s->p.s_regs[1] = (uint8_t) ((s->rings_indicated > 255)  ?  255  :  s->rings_indicated);
+        if (s->rings_indicated >= s->p.s_regs[0]  &&  s->p.s_regs[0])
         {
             /* The modem is set to auto-answer now */
             answer_call(s);
@@ -416,6 +426,7 @@ SPAN_DECLARE(void) at_reset_call_info(at_state_t *s)
     /*endfor*/
     s->call_id = NULL;
     s->rings_indicated = 0;
+    s->p.s_regs[1] = 0;
     s->call_info_displayed = false;
 }
 /*- End of function --------------------------------------------------------*/
@@ -1320,6 +1331,30 @@ static const char *at_cmd_S0(at_state_t *s, const char *t)
 }
 /*- End of function --------------------------------------------------------*/
 
+static const char *at_cmd_S1(at_state_t *s, const char *t)
+{
+    /* Hayes - Ring count: rings of the current incoming call */
+    t += 2;
+    return s_reg_handler(s, t, 1);
+}
+/*- End of function --------------------------------------------------------*/
+
+static const char *at_cmd_S2(at_state_t *s, const char *t)
+{
+    /* Hayes - Escape character (>127 disables the escape) */
+    t += 2;
+    return s_reg_handler(s, t, 2);
+}
+/*- End of function --------------------------------------------------------*/
+
+static const char *at_cmd_S12(at_state_t *s, const char *t)
+{
+    /* Hayes - Escape guard time, in fiftieths of a second */
+    t += 3;
+    return s_reg_handler(s, t, 12);
+}
+/*- End of function --------------------------------------------------------*/
+
 static const char *at_cmd_S10(at_state_t *s, const char *t)
 {
     /* V.250 6.3.12 - Automatic disconnect delay */
@@ -1487,6 +1522,23 @@ static const char *at_cmd_amp_F(at_state_t *s, const char *t)
     at_set_at_rx_mode(s, AT_MODE_ONHOOK_COMMAND);
     s->p = profiles[0];
     at_modem_control(s, AT_MODEM_CONTROL_MODULATION, NULL);
+    return t;
+}
+/*- End of function --------------------------------------------------------*/
+
+static const char *at_cmd_amp_V(at_state_t *s, const char *t)
+{
+    int val;
+
+    /* Hayes - View active configuration.  The application's settings page
+       (ATI4) is the configuration, so it answers this too. */
+    t += 2;
+    if ((val = parse_num(&t, 0)) < 0)
+        return NULL;
+    /*endif*/
+    if (at_modem_control(s, AT_MODEM_CONTROL_INFO, "4") <= 0)
+        return NULL;
+    /*endif*/
     return t;
 }
 /*- End of function --------------------------------------------------------*/
@@ -4232,12 +4284,22 @@ static const char *at_cmd_plus_GCAP(at_state_t *s, const char *t)
        +MV18S      +M (modulation control) commands +MV18S and +MV18R
        +ES         +E (error control) commands +ES, +EB, +ER, +EFCS, and +ETBM
        +DS         +D (data compression) commands +DS and +DR */
-    /* TODO: make this adapt to the configuration we really have. */
     /* V.250 6.1.9 defines +GCAP as an action command, so the bare form is the
        one a DTE normally sends; fax software probes with it to find out
        whether the +F command set is there at all.  Answering only the "?"
-       form leaves that probe with a bare OK, which reads as "no fax". */
-    at_put_response(s, "+GCAP:+FCLASS");
+       form leaves that probe with a bare OK, which reads as "no fax".  The
+       application knows which of the other families it implements; one that
+       does not answer gets the fax-only list this interpreter can vouch for. */
+    {
+        int r = at_modem_control(s, AT_MODEM_CONTROL_INFO, "GCAP");
+
+        if (r < 0)
+            return NULL;
+        /*endif*/
+        if (r == 0)
+            at_put_response(s, "+GCAP: +FCLASS");
+        /*endif*/
+    }
     if (t[0] == '?')
         t += 1;
     /*endif*/
@@ -5693,13 +5755,110 @@ SPAN_DECLARE(int) at_modem_control(at_state_t *s, int op, const char *num)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Run the command line in s->line (it starts with "AT"), then remember it for
+   V.250 5.2.4's "A/". */
+static void execute_command_line(at_state_t *s)
+{
+    int entry;
+    int matched;
+    const char *t;
+
+    /* End of command line. Do line validation */
+    s->line[s->line_ptr] = '\0';
+    if (s->line_ptr > 2)
+    {
+        /* The spec says the commands within a command line are executed in order, until
+           an error is found, or the end of the command line is reached. */
+        t = s->line + 2;
+        while (t  &&  *t)
+        {
+            /* Manufacturer "$" help, Courier style: AT$, ATD$, AT&$,
+               AT+$, ATI$, ATS$.  None of these is a command name
+               V.250 uses, and +MS$ (which is) has its own handler. */
+            if (t[0] == '$'
+                ||
+                (t[1] == '$'  &&  strchr("D&+IS", t[0])))
+            {
+                char topic[2];
+
+                topic[0] = (t[0] == '$')  ?  '\0'  :  t[0];
+                topic[1] = '\0';
+                if (at_modem_control(s, AT_MODEM_CONTROL_HELP, topic) <= 0)
+                {
+                    t = NULL;
+                    break;
+                }
+                /*endif*/
+                t += (t[0] == '$')  ?  1  :  2;
+                continue;
+            }
+            /*endif*/
+            /* ATY<n>: manufacturer diagnostic tables (Courier style). */
+            if (t[0] == 'Y')
+            {
+                char num[8];
+                int len;
+
+                for (len = 0;  isdigit((int) t[1 + len])  &&  len < (int) sizeof(num) - 1;  len++)
+                    num[len] = t[1 + len];
+                /*endfor*/
+                num[len] = '\0';
+                if (len == 0  ||  at_modem_control(s, AT_MODEM_CONTROL_DIAG_TABLE, num) <= 0)
+                {
+                    t = NULL;
+                    break;
+                }
+                /*endif*/
+                t += 1 + len;
+                continue;
+            }
+            /*endif*/
+            if ((entry = command_search(t, &matched)) <= 0)
+            {
+                /* V.250 5.6: a character not recognised as a valid
+                   command terminates the line with ERROR, not OK
+                   (5.3.2, 5.4.3.1 and 5.4.4.2 say the same of S-parameters and + names). */
+                t = NULL;
+                break;
+            }
+            /*endif*/
+            /* The following test shouldn't be needed, but let's keep it here for completeness. */
+            if (entry > sizeof(at_commands)/sizeof(at_commands[0]))
+                break;
+            /*endif*/
+            if ((t = at_commands[entry - 1](s, t)) == NULL)
+                break;
+            /*endif*/
+            if (t == (const char *) -1)
+                break;
+            /*endif*/
+        }
+        /*endwhile*/
+        if (t != (const char *) -1)
+        {
+            if (t == NULL)
+                at_put_response_code(s, AT_RESPONSE_CODE_ERROR);
+            else
+                at_put_response_code(s, AT_RESPONSE_CODE_OK);
+            /*endif*/
+        }
+        /*endif*/
+    }
+    else if (s->line_ptr == 2)
+    {
+        /* It's just an empty "AT" command, return OK. */
+        at_put_response_code(s, AT_RESPONSE_CODE_OK);
+    }
+    /*endif*/
+    memcpy(s->last_line, s->line, sizeof(s->last_line));
+    s->last_line[sizeof(s->last_line) - 1] = '\0';
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) at_interpreter(at_state_t *s, const char *cmd, int len)
 {
     int i;
     int c;
-    int entry;
-    int matched;
-    const char *t;
 
     if (s->p.echo)
         s->at_tx_handler(s->at_tx_user_data, (uint8_t *) cmd, len);
@@ -5730,9 +5889,20 @@ SPAN_DECLARE(void) at_interpreter(at_state_t *s, const char *cmd, int len)
                 }
                 else if (c == '/')
                 {
-                    /* We have an "A/" command */
-                    /* TODO: implement "A/" command repeat */
-                    s->line[s->line_ptr++] = (char) c;
+                    /* V.250 5.2.4: "A/" runs the preceding command line again,
+                       at once, with no terminator.  Before any line has run it
+                       is an empty line, answered OK. */
+                    if (s->p.echo)
+                        s->at_tx_handler(s->at_tx_user_data, (const uint8_t *) "\r", 1);
+                    /*endif*/
+                    if (s->last_line[0])
+                        memcpy(s->line, s->last_line, sizeof(s->line));
+                    else
+                        strcpy(s->line, "AT");
+                    /*endif*/
+                    s->line_ptr = (int) strlen(s->line);
+                    execute_command_line(s);
+                    s->line_ptr = 0;
                 }
                 else
                 {
@@ -5754,93 +5924,7 @@ SPAN_DECLARE(void) at_interpreter(at_state_t *s, const char *cmd, int len)
             }
             else if (c == s->p.s_regs[3])
             {
-                /* End of command line. Do line validation */
-                s->line[s->line_ptr] = '\0';
-                if (s->line_ptr > 2)
-                {
-                    /* The spec says the commands within a command line are executed in order, until
-                       an error is found, or the end of the command line is reached. */
-                    t = s->line + 2;
-                    while (t  &&  *t)
-                    {
-                        /* Manufacturer "$" help, Courier style: AT$, ATD$, AT&$,
-                           AT+$, ATI$, ATS$.  None of these is a command name
-                           V.250 uses, and +MS$ (which is) has its own handler. */
-                        if (t[0] == '$'
-                            ||
-                            (t[1] == '$'  &&  strchr("D&+IS", t[0])))
-                        {
-                            char topic[2];
-
-                            topic[0] = (t[0] == '$')  ?  '\0'  :  t[0];
-                            topic[1] = '\0';
-                            if (at_modem_control(s, AT_MODEM_CONTROL_HELP, topic) <= 0)
-                            {
-                                t = NULL;
-                                break;
-                            }
-                            /*endif*/
-                            t += (t[0] == '$')  ?  1  :  2;
-                            continue;
-                        }
-                        /*endif*/
-                        /* ATY<n>: manufacturer diagnostic tables (Courier style). */
-                        if (t[0] == 'Y')
-                        {
-                            char num[8];
-                            int len;
-
-                            for (len = 0;  isdigit((int) t[1 + len])  &&  len < (int) sizeof(num) - 1;  len++)
-                                num[len] = t[1 + len];
-                            /*endfor*/
-                            num[len] = '\0';
-                            if (len == 0  ||  at_modem_control(s, AT_MODEM_CONTROL_DIAG_TABLE, num) <= 0)
-                            {
-                                t = NULL;
-                                break;
-                            }
-                            /*endif*/
-                            t += 1 + len;
-                            continue;
-                        }
-                        /*endif*/
-                        if ((entry = command_search(t, &matched)) <= 0)
-                        {
-                            /* V.250 5.6: a character not recognised as a valid
-                               command terminates the line with ERROR, not OK
-                               (5.3.2, 5.4.3.1 and 5.4.4.2 say the same of S-parameters and + names). */
-                            t = NULL;
-                            break;
-                        }
-                        /*endif*/
-                        /* The following test shouldn't be needed, but let's keep it here for completeness. */
-                        if (entry > sizeof(at_commands)/sizeof(at_commands[0]))
-                            break;
-                        /*endif*/
-                        if ((t = at_commands[entry - 1](s, t)) == NULL)
-                            break;
-                        /*endif*/
-                        if (t == (const char *) -1)
-                            break;
-                        /*endif*/
-                    }
-                    /*endwhile*/
-                    if (t != (const char *) -1)
-                    {
-                        if (t == NULL)
-                            at_put_response_code(s, AT_RESPONSE_CODE_ERROR);
-                        else
-                            at_put_response_code(s, AT_RESPONSE_CODE_OK);
-                        /*endif*/
-                    }
-                    /*endif*/
-                }
-                else if (s->line_ptr == 2)
-                {
-                    /* It's just an empty "AT" command, return OK. */
-                    at_put_response_code(s, AT_RESPONSE_CODE_OK);
-                }
-                /*endif*/
+                execute_command_line(s);
                 s->line_ptr = 0;
             }
             else if (c == s->p.s_regs[5])

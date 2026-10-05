@@ -42,7 +42,8 @@ static const at_help_entry_t basic_rows[] = {
     { "V0/V1",   "Numeric/verbose result codes",                      "V1" },
     { "X0-4",    "Result code set (accepted; stored only)",           NULL },
     { "Z",       "Reset to the power-on profile",                     NULL },
-    { "+++",     "Escape to online command (1 s guard; combined port)", NULL },
+    { "+++",     "Escape to online command (S2 char, S12 guard)",      NULL },
+    { "A/",      "Repeat the last command line (no Enter needed)",   NULL },
 };
 
 /* D$: what the dial parser takes, and what reaches the SIP INVITE. */
@@ -66,13 +67,14 @@ static const at_help_entry_t amp_rows[] = {
     { "&C0/&C1", "DCD behaviour (stored; a pty has no DCD line)",     "&C1" },
     { "&D0-2",   "DTR behaviour (stored; a pty has no DTR line)",     "&D2" },
     { "&F",      "Factory defaults, incl. +MS/+ES/+DS and diagnostics", NULL },
+    { "&V",      "View the active configuration (as ATI4)",            "&V" },
 };
 
 /* +$: only commands that do what V.250/T.31/T.32 says.  Accepted-but-ignored
    ones are named together at the end, as the audit lists them. */
 static const at_help_entry_t plus_rows[] = {
     { "+GMI +GMM +GMR", "Manufacturer, model, revision",              "+GMI" },
-    { "+GCAP",     "Capabilities (lists +FCLASS only, so far)",       "+GCAP" },
+    { "+GCAP",     "Capabilities: +FCLASS, +MS, +ES, +DS",            "+GCAP" },
     { "+MS",       "Modulation for the next call (see +MS$)",         "+MS?" },
     { "+MR=0/1",   "Report +MCR/+MRR before CONNECT",                 "+MR?" },
     { "+ES=o,f,a", "Error control: request, fallback, answer mode",   "+ES?" },
@@ -116,6 +118,8 @@ typedef struct {
 
 static const s_row_t s_rows[] = {
     { 0,  "Rings before auto-answer (0 = never)" },
+    { 1,  "Rings counted on this call" },
+    { 2,  "Escape character (43 = '+'; above 127 disables)" },
     { 3,  "Command line terminator (13 = CR)" },
     { 4,  "Response formatting character (10 = LF)" },
     { 5,  "Command line editing character (8 = BS)" },
@@ -123,11 +127,14 @@ static const s_row_t s_rows[] = {
     { 7,  "Connection completion timeout, s (stored only)" },
     { 8,  "Comma pause, s (stored; SIP has no pause)" },
     { 10, "Carrier loss disconnect delay, 1/10 s (stored only)" },
+    { 12, "Escape guard time, 1/50 s (50 = 1 s; 0 = none)" },
 };
 
 /* S$ rows as table rows, for the drift test. */
 static const at_help_entry_t s_entries[] = {
     { "S0",  NULL, "S0?" },
+    { "S1",  NULL, "S1?" },
+    { "S2",  NULL, "S2?" },
     { "S3",  NULL, "S3?" },
     { "S4",  NULL, "S4?" },
     { "S5",  NULL, "S5?" },
@@ -135,6 +142,7 @@ static const at_help_entry_t s_entries[] = {
     { "S7",  NULL, "S7?" },
     { "S8",  NULL, "S8?" },
     { "S10", NULL, "S10?" },
+    { "S12", NULL, "S12?" },
 };
 
 const at_help_entry_t *at_help_table(const char *topic, size_t *n)

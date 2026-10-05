@@ -155,7 +155,7 @@ int main(void)
 
     printf("T.31 capability reporting:\n");
     expect("ATE0",         "OK",        300);
-    expect("AT+GCAP",      "+GCAP:+FCLASS", 300);
+    expect("AT+GCAP",      "+GCAP: +FCLASS", 300);
     expect("AT+FCLASS=?",  "0,1,1.0,2.0", 300);
 
     /*

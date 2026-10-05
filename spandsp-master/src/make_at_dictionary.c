@@ -37,6 +37,7 @@ const char *wordlist[] =
     "&C",       /* V.250 6.2.8 - Circuit 109 (received line signal detector), behaviour */
     "&D",       /* V.250 6.2.9 - Circuit 108 (data terminal ready) behaviour */
     "&F",       /* V.250 6.1.2 - Set to factory-defined configuration */
+    "&V",       /* Hayes - View active configuration */
     "+A8A",     /* V.251 6.3 - V.8 calling tone indication */
     "+A8C",     /* V.251 6.2 - V.8 answer signal indication */
     "+A8E",     /* V.251 5.1 - V.8 and V.8bis operation controls */
@@ -424,7 +425,10 @@ const char *wordlist[] =
     "P",        /* V.250 6.3.3 - Select pulse dialling (command) */
     "Q",        /* V.250 6.2.5 - Result code suppression */
     "S0",       /* V.250 6.3.8 - Automatic answer */
+    "S1",       /* Hayes - Ring count */
     "S10",      /* V.250 6.3.12 - Automatic disconnect delay */
+    "S12",      /* Hayes - Escape guard time, 1/50 s */
+    "S2",       /* Hayes - Escape character */
     "S3",       /* V.250 6.2.1 - Command line termination character */
     "S4",       /* V.250 6.2.2 - Response formatting character */
     "S5",       /* V.250 6.2.3 - Command line editing character */

@@ -643,7 +643,7 @@ static const char *console_desc(char *buf, size_t len)
 static void info_settings(page_t *pg)
 {
     static const char *const fclass[] = { "0", "1", "1.0", "2.0" };
-    static const int sregs[] = { 0, 3, 4, 5, 6, 7, 8, 10 };
+    static const int sregs[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12 };
     static const char *const v250_reads[] = { "MR?", "ER?", "DR?", "ES?", "DS?" };
     char line[160];
     v250_ctl_t cfg;
@@ -799,6 +799,13 @@ static int handle_info(const char *num)
     if (!num || !at)
         return 0;
     buf[0] = '\0';
+    if (!strcmp(num, "GCAP")) {
+        /* V.250 6.1.9 Table 2: one entry per DCE control standard implemented.
+         * +ES/+ER and +DS/+DR are (v250_ctl.c); +MS/+MR are; fax classes 1 and
+         * 2.0 are. */
+        at_put_response(at, "+GCAP: +FCLASS, +MS, +ES, +DS");
+        return 1;
+    }
     switch (atoi(num)) {
     case 0:
         page_put(&pg, "v90modem SIP V.90/V.92 data and fax modem");
@@ -944,12 +951,27 @@ static void fc2_hangup(void *user_data)
 /* Mode A escape ("+++") and command/data byte handling               */
 /* ------------------------------------------------------------------ */
 
+/* Hayes S2 and S12: the escape character (above 127 disables the escape) and
+ * the guard time in fiftieths of a second (0: no guard).  The interpreter owns
+ * the registers; this thread is the one that runs it, so they are read
+ * directly. */
+static int escape_char(void)
+{
+    return at ? at->p.s_regs[2] : '+';
+}
+
+static int64_t escape_guard_ms(void)
+{
+    return at ? (int64_t) at->p.s_regs[12] * 20 : ESCAPE_GUARD_MS;
+}
+
 static void flush_pending_escape_bytes(void)
 {
-    static const uint8_t pluses[3] = { '+', '+', '+' };
+    uint8_t chars[3];
 
     if (esc_count > 0) {
-        dte_payload(pluses,esc_count);
+        memset(chars, escape_char(), sizeof(chars));
+        dte_payload(chars,esc_count);
         esc_count = 0;
     }
 }
@@ -971,9 +993,9 @@ static void handle_online_data_bytes(const uint8_t *buf, int n)
     for (int i = 0; i < n; i++) {
         uint8_t byte = buf[i];
 
-        if (byte == '+'
+        if (escape_char() <= 127 && byte == escape_char()
             && esc_count < 3
-            && (esc_count > 0 || now - last_data_byte_ms >= ESCAPE_GUARD_MS)) {
+            && (esc_count > 0 || now - last_data_byte_ms >= escape_guard_ms())) {
             /* Withhold candidate escape characters until resolved. */
             esc_count++;
         } else {
@@ -1100,7 +1122,7 @@ static void *pty_reader_thread(void *arg)
 
         /* Escape timer: three withheld '+' followed by a silent guard time */
         if (!split_mode && di_mode == 1 && esc_count == 3
-            && now_ms() - last_data_byte_ms >= ESCAPE_GUARD_MS) {
+            && now_ms() - last_data_byte_ms >= escape_guard_ms()) {
             perform_escape();
         }
 

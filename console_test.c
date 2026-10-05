@@ -600,6 +600,24 @@ static void test_help(void)
         printf("       got \"%s\"\n", buf);
     lm_reset();
 
+    /* Hayes registers and commands that used to be missing. */
+    expect(dte, "ATS2?", "043");
+    expect(dte, "ATS12?", "050");
+    expect(dte, "ATS1?", "000");
+    di_on_ring();
+    di_on_ring();
+    collect(dte, buf, sizeof(buf), 150);
+    expect(dte, "ATS1?", "002");                    /* rings counted, S0=0: not answered */
+    expect(dte, "ATH", "OK");
+    expect(dte, "ATS1?", "000");
+    expect(dte, "ATS7?", "060");
+    send_str(dte, "A/");                            /* V.250 5.2.4: no terminator */
+    collect(dte, buf, sizeof(buf), 250);
+    check(strstr(buf, "060") && final_ok(buf), "A/ repeats the last command line at once");
+    expect(dte, "AT&V", "Current Settings");
+    expect(dte, "AT&V1", "ERROR");
+    expect(dte, "AT+GCAP", "+GCAP: +FCLASS, +MS, +ES, +DS");
+
     /* ATI pages. */
     expect(dte, "ATI0", "v90modem");
     expect(dte, "ATI3", "v90modem ");
@@ -617,14 +635,18 @@ static void test_help(void)
     di_set_link_detail_cb(fake_link_detail);
     fake_originate = true;
     fake_report = (v250_connect_report_t) { "V90", 52000, 31200, "LAPM", 1, true, true };
+    expect(dte, "ATS2=42S12=10", "OK");              /* escape on "***" after 0.2 s */
     expect(dte, "ATD1", "");
     di_on_connected(52000);
     collect(dte, buf, sizeof(buf), 150);
     send_str(dte, "hello");
+    usleep(300000);
+    send_str(dte, "+++");                           /* no longer the escape: payload */
     {
         char got[16];
 
-        engine_reads(got, 5, 500);
+        check(engine_reads(got, 8, 600) == 8 && !memcmp(got, "hello+++", 8),
+              "with S2=42, \"+++\" is payload");
     }
     di_write_data((const uint8_t *) "worlds", 6);
     collect(dte, buf, sizeof(buf), 100);
@@ -634,9 +656,10 @@ static void test_help(void)
 
         di_update_link(&now, "Mode               v90 (offer V90)\r\nData-mode retrains 1", "retraining");
     }
-    usleep(1100000);                                /* TIES guard, then escape to ask */
-    send_str(dte, "+++");
-    collect(dte, buf, sizeof(buf), 1300);
+    usleep(300000);                                 /* S12 guard, then escape to ask */
+    send_str(dte, "***");
+    collect(dte, buf, sizeof(buf), 500);
+    check(strstr(buf, "OK") != NULL, "\"***\" escapes with S2=42 and a 0.2 s S12 guard");
     exchange(dte, "ATI6", buf, sizeof(buf));
     check(strstr(buf, "Originate, retraining") && strstr(buf, "TX 48000  RX 26400"),
           "ATI6 mid-call shows the engine's latest push: retraining, renegotiated rates");
@@ -649,7 +672,7 @@ static void test_help(void)
     exchange(dte, "ATI6", buf, sizeof(buf));
     check(strstr(buf, "Originate, ended") && strstr(buf, "Modulation         V90")
           && strstr(buf, "TX 48000  RX 26400") && strstr(buf, "V.42 LAPM")
-          && strstr(buf, "V.42bis TX RX") && strstr(buf, "Octets to line     5\r")
+          && strstr(buf, "V.42bis TX RX") && strstr(buf, "Octets to line     8\r")
           && strstr(buf, "Octets to DTE      6\r") && strstr(buf, "Remote (call cleared)"),
           "ATI6 after the call: direction, carrier, rates, protocols, octets, cause");
     if (!strstr(buf, "Remote (call cleared)"))
