@@ -236,11 +236,14 @@ struct v76_s {
 
     txreq_t *q_head, *q_tail;
     int rr;                     /* round-robin cursor */
+    uint8_t *rel_resp_ud;       /* user data for the UA that answers a DISC */
+    int rel_resp_len;
 
     /* transmit bit generator */
     uint64_t bq;
     int bq_n;
     int tx_ones;
+    int tx_preamble;            /* flags still owed before the first frame (7) */
     txframe_t cur, nrt;
     bool tx_suspended;
     int clk_acc;
@@ -853,6 +856,20 @@ static void send_disc(v76_t *mf, dlc_t *d)
     d->t_proc = mf->cfg.t401_ms;
 }
 
+void v76_release_response_data(v76_t *mf, const uint8_t *ud, int len)
+{
+    free(mf->rel_resp_ud);
+    mf->rel_resp_ud = NULL;
+    mf->rel_resp_len = 0;
+    if (ud && len > 0) {
+        mf->rel_resp_ud = malloc((size_t)len);
+        if (mf->rel_resp_ud) {
+            memcpy(mf->rel_resp_ud, ud, (size_t)len);
+            mf->rel_resp_len = len;
+        }
+    }
+}
+
 void v76_set_busy(v76_t *mf, int dlci, bool busy)
 {
     dlc_t *d = dlc_find(mf, dlci);
@@ -1111,10 +1128,23 @@ static void rx_sabme(v76_t *mf, const rxframe_t *f)
 static void rx_u_connected(v76_t *mf, dlc_t *d, const rxframe_t *f)
 {
     switch (f->type) {
-    case FT_DISC:
-        txq_push_dlc(mf, d, FT_UA, false, f->pf, NULL, 0);
+    case FT_DISC: {
+        int addr = d->addr_octets, fcs = d->fcs_len, dlci = d->dlci;
+        bool pf = f->pf;
+
+        free(mf->rel_resp_ud);
+        mf->rel_resp_ud = NULL;
+        mf->rel_resp_len = 0;
+        /* Tell the SU first so it can attach user data to the UA (6.4.10),
+         * then answer.  The DLC is already gone by then; the UA carries its
+         * own address and FCS length. */
         dlc_terminate(mf, d, V76_REL_DISC_RECEIVED, f->info, f->info_len);
+        txq_push(mf, FT_UA, dlci, false, pf, addr, fcs, mf->rel_resp_ud, mf->rel_resp_len);
+        free(mf->rel_resp_ud);
+        mf->rel_resp_ud = NULL;
+        mf->rel_resp_len = 0;
         return;
+    }
     case FT_DM:
         if (f->pf && d->tmr_rec) {
             dlc_terminate(mf, d, V76_REL_DM_RECEIVED, f->info, f->info_len);
@@ -1612,27 +1642,18 @@ static void rt_check_full(v76_t *mf)
     mf->rt_tail = mf->rbits - mf->rt_total_bits;
     if (mf->rt_tail_flaglike)
         return;
-    if (mf->rt_tail == 8) {
-        uint8_t t = 0;
-        int i;
 
-        for (i = 0; i < 8; i++) {
-            int bi = mf->rt_total_bits + i;
-
-            if (mf->rbuf[bi >> 3] & (1u << (bi & 7)))
-                t |= (uint8_t)(1u << i);
-        }
-        if (t == 0xFE) {                /* 0 then seven ones: a flag begins */
-            mf->rt_tail_flaglike = true;
-            return;
-        }
-    } else if (mf->rt_tail < 8) {
-        /* A prospective flag starts with 0 then ones: if the tail already
-         * deviates there is no need to wait the full octet. */
+    /* A suspend or resume flag is a 0 followed by seven or more RAW 1s.  The
+     * pushed bits alone cannot tell that from data: a stuffed 0 is dropped,
+     * so "0 1 1 1 1 1 [0] 1 1" in the data looks like "0 1^7" once pushed.
+     * The raw run of ones (rx_ones) can. */
+    {
         int i;
         bool could = true;
+        int tail = mf->rt_tail;
+        int chk = tail < 8 ? tail : 8;
 
-        for (i = 0; i < mf->rt_tail; i++) {
+        for (i = 0; i < chk; i++) {
             int bi = mf->rt_total_bits + i;
             int bit = (mf->rbuf[bi >> 3] >> (bi & 7)) & 1;
 
@@ -1641,10 +1662,14 @@ static void rt_check_full(v76_t *mf)
                 break;
             }
         }
-        if (could)
+        if (could && mf->rx_ones != tail - 1 && tail - 1 <= 7)
+            could = false;              /* a stuffed 0 sits in that "run" */
+        if (could && tail >= 8) {
+            mf->rt_tail_flaglike = true;
             return;
-    } else {
-        return;
+        }
+        if (could)
+            return;                     /* too early to say */
     }
 
     /* The RT frame was of maximum length and no flag followed: it is
@@ -1654,7 +1679,7 @@ static void rt_check_full(v76_t *mf)
         uint8_t tail[2] = {0, 0};
         int i;
 
-        for (i = 0; i < tail_bits; i++) {
+        for (i = 0; i < tail_bits && i < 16; i++) {
             int bi = mf->rt_total_bits + i;
 
             if (mf->rbuf[bi >> 3] & (1u << (bi & 7)))
@@ -1665,7 +1690,7 @@ static void rt_check_full(v76_t *mf)
         mf->st.sr_resumes++;
         rbuf_reset(mf);
         nrt_restore(mf, true);
-        for (i = 0; i < tail_bits; i++)
+        for (i = 0; i < tail_bits && i < 16; i++)
             rbuf_push(mf, (tail[i >> 3] >> (i & 7)) & 1);
     }
 }
@@ -2078,6 +2103,11 @@ static void tx_refill(v76_t *mf)
 {
     txframe_t *c = &mf->cur;
 
+    if (mf->tx_preamble > 0) {
+        mf->tx_preamble--;
+        tx_flag(mf);
+        return;
+    }
     if (!c->active) {
         if (mf->tx_suspended && mf->nrt.active) {
             /* Cannot happen: a suspended frame is resumed when its RT frame
@@ -2206,7 +2236,7 @@ int v76_tx_get_bit(v76_t *mf)
 {
     int bit;
 
-    if (mf->bq_n == 0)
+    while (mf->bq_n == 0)       /* a refill may queue nothing (A.3 b-ii: no RF) */
         tx_refill(mf);
     bit = (int)(mf->bq & 1);
     mf->bq >>= 1;
@@ -2259,6 +2289,7 @@ v76_t *v76_create(const v76_config_t *cfg, const v76_su_t *su)
         mf->cfg.addr_octets = 1;
     if (su)
         mf->su = *su;
+    mf->tx_preamble = 16;       /* clause 7: at least 16 flags first */
     mf->rx_hunting = true;      /* wait for the first flag */
     mf->nrt_valid = true;
     return mf;
@@ -2280,6 +2311,7 @@ void v76_destroy(v76_t *mf)
         free(r->ud);
         free(r);
     }
+    free(mf->rel_resp_ud);
     free(mf);
 }
 
@@ -2359,4 +2391,11 @@ bool v76_tx_busy(const v76_t *mf)
             return true;
     }
     return false;
+}
+
+/* Receiver framing state for diagnostics: 0 normal, 1 suspend, 2 abort,
+ * +16 while hunting for a flag. */
+int v76_rx_sr_state(const v76_t *mf)
+{
+    return mf->rx_sr + (mf->rx_hunting ? 16 : 0);
 }

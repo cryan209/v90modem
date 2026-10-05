@@ -174,6 +174,11 @@ int v76_setparm_rsp(v76_t *mf, int dlci, const uint8_t *ud, int len);
 /* L-TEST request (7.7). */
 int v76_test_req(v76_t *mf, int dlci, const uint8_t *data, int len);
 
+/* From inside release_ind for a peer's DISC: attach user data to the UA that
+ * answers it (6.4.10 permits an information field; V.75 6.3.4 uses it for
+ * CloseLogicalChannelAck). */
+void v76_release_response_data(v76_t *mf, const uint8_t *ud, int len);
+
 /* Own-receiver busy (8.1.7): while set, I frames are discarded and RNR sent. */
 void v76_set_busy(v76_t *mf, int dlci, bool busy);
 
@@ -184,6 +189,8 @@ bool v76_dlc_params(const v76_t *mf, int dlci, v76_dlc_params_t *out);
 int v76_data_backlog(const v76_t *mf, int dlci);
 int v76_unacked_frames(const v76_t *mf, int dlci);
 int v76_unitdata_backlog(const v76_t *mf, int dlci);
+/* Receiver framing state (diagnostics): 0 normal, 1 suspend, 2 abort, +16 hunting. */
+int v76_rx_sr_state(const v76_t *mf);
 /* True if some frame is being sent or queued (the line is not idle). */
 bool v76_tx_busy(const v76_t *mf);
 

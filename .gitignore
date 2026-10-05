@@ -48,6 +48,10 @@ v34_mp_test
 v34_data_test
 v34_gardner_test
 v34_duplex_test
+v76_test
+v75_test
+v70_test
+v70_v34_test
 v90_upstream_replay
 v90_engine_replay
 hsf_fxo_probe

@@ -204,6 +204,10 @@ typedef struct {
     int last_est_ud_len;
     uint8_t last_conf_ud[64];
     int last_conf_len;
+    uint8_t rel_resp[16];       /* user data to attach to the UA answering a DISC */
+    int rel_resp_len;
+    uint8_t last_rel_ud[16];
+    int last_rel_ud_len;
     int ui_count;
     int ui_hdr_only;
     uint8_t last_ui[256];
@@ -228,6 +232,8 @@ static stream_t *get_stream(end_t *e, int dlci)
     if (e->nst == MAXS)
         return NULL;
     e->st[e->nst].dlci = dlci;
+    e->st[e->nst].cap = 1024;
+    e->st[e->nst].buf = malloc(1024);
     return &e->st[e->nst++];
 }
 
@@ -259,11 +265,14 @@ static void cb_rel_ind(void *c, int dlci, const uint8_t *ud, int len, v76_releas
 {
     end_t *e = c;
 
-    (void)ud;
-    (void)len;
     e->rel_ind++;
     e->last_rel_dlci = dlci;
     e->last_rel_why = why;
+    e->last_rel_ud_len = len > 16 ? 16 : len;
+    if (len > 0)
+        memcpy(e->last_rel_ud, ud, (size_t)e->last_rel_ud_len);
+    if (why == V76_REL_DISC_RECEIVED && e->rel_resp_len > 0)
+        v76_release_response_data(e->mf, e->rel_resp, e->rel_resp_len);
 }
 
 static void cb_data(void *c, int dlci, const uint8_t *d, int len)
@@ -297,8 +306,8 @@ static void cb_unit(void *c, int dlci, const uint8_t *d, int len, bool resp, boo
                        (uint32_t)d[3] << 24;
         long lat = *e->clock - e->enq_bits[seq];
 
-        if ((int)seq != e->voice_next)
-            e->voice_bad++;
+        if ((int)seq < e->voice_next)
+            e->voice_bad++;                     /* reordered or repeated */
         e->voice_next = (int)seq + 1;
         if (lat > e->lat_max)
             e->lat_max = lat;
@@ -390,6 +399,9 @@ typedef struct {
     uint32_t ber_ab, ber_ba;            /* bit-error threshold, /2^32 */
     long black_from, black_to;          /* both directions silent (all ones) */
     uint64_t flips;
+    int delay;                          /* one-way propagation delay, bits (<= 4096) */
+    uint8_t dab[4096], dba[4096];
+    int dpos;
 } pair_t;
 
 static void pair_run(pair_t *p, long bits)
@@ -406,6 +418,16 @@ static void pair_run(pair_t *p, long bits)
             ba = 1;
             bb = 1;
         }
+        if (p->delay > 0) {
+            int slot = p->dpos % p->delay;
+            int da = p->dab[slot], db = p->dba[slot];
+
+            p->dab[slot] = (uint8_t)ba;
+            p->dba[slot] = (uint8_t)bb;
+            p->dpos++;
+            ba = da;
+            bb = db;
+        }
         v76_rx_put_bit(p->b.mf, ba);
         v76_rx_put_bit(p->a.mf, bb);
         p->clock++;
@@ -415,6 +437,8 @@ static void pair_run(pair_t *p, long bits)
 static void pair_init(pair_t *p, const v76_config_t *ca, const v76_config_t *cb)
 {
     memset(p, 0, sizeof(*p));
+    memset(p->dab, 1, sizeof(p->dab));
+    memset(p->dba, 1, sizeof(p->dba));
     end_init(&p->a, true, ca, &p->clock);
     end_init(&p->b, false, cb, &p->clock);
 }
@@ -515,8 +539,8 @@ static void test_handbuilt(void)
         for (i = 0; i < 400; i++)
             cap.bits[cap.n++] = (uint8_t)v76_tx_get_bit(p.b.mf);
         got = decode_first_frame(&cap, out, sizeof(out));
-        CHECK(got >= 5, "responder sent a frame back (%d octets)", got);
-        if (got >= 5) {
+        CHECK(got == 4, "responder sent a 4-octet UA (addr, ctl, 2 FCS): %d", got);
+        if (got == 4) {
             CHECK(out[0] == 0x03, "UA address octet 0x03: %02x", out[0]);
             CHECK(out[1] == 0x73, "UA control octet with F=1 is 0x73: %02x", out[1]);
         }
@@ -704,9 +728,17 @@ static void test_establish_and_bulk(void)
     CHECK(v76_stats(p.a.mf)->t401_expiries == 0, "no T401 expiry on a clean line");
     free(sa); free(sb);
 
-    /* Orderly release (7.3), and the freed DLCI is reused first (Cor.1). */
-    CHECK(v76_release_req(p.a.mf, da, NULL, 0) == 0, "release request");
+    /* Orderly release (7.3), and the freed DLCI is reused first (Cor.1).  The
+     * DISC carries user data, and the UA that answers it carries the answerer's
+     * (6.4.4, 6.4.10 permit an information field in both). */
+    memcpy(p.b.rel_resp, "ACK-CLOSE", 9);
+    p.b.rel_resp_len = 9;
+    CHECK(v76_release_req(p.a.mf, da, (const uint8_t *)"CLOSE", 5) == 0, "release request");
     pair_run(&p, 30000);
+    CHECK(p.b.last_rel_ud_len == 5 && memcmp(p.b.last_rel_ud, "CLOSE", 5) == 0,
+          "DISC user data reaches the peer");
+    CHECK(p.a.last_rel_ud_len == 9 && memcmp(p.a.last_rel_ud, "ACK-CLOSE", 9) == 0,
+          "the UA carries the answerer's user data back");
     CHECK(v76_dlc_state(p.a.mf, da) == V76_DLC_DISCONNECTED &&
           v76_dlc_state(p.b.mf, da) == V76_DLC_DISCONNECTED, "both ends disconnected");
     CHECK(p.b.rel_ind == 1 && p.b.last_rel_why == V76_REL_DISC_RECEIVED, "peer saw DISC");
@@ -870,6 +902,7 @@ static void test_window(void)
     uint8_t d[100];
 
     pair_init(&p, NULL, NULL);
+    p.delay = 3000;                     /* ~100 ms one way: acks lag the window */
     v76_dlc_params_default(&dp);
     dp.k = 3;
     p.b.accept = dp;
@@ -1203,11 +1236,30 @@ static sr_result_t run_voice_and_data(bool sr, bool with_addr, int n401_rt, long
     {
         stream_t *s = get_stream(&p.b, dd_id);
 
-        r.data_ok = s && s->len <= sent_len && memcmp(s->buf, sent, s->len) == 0 &&
-                    s->len > 20000;
+        r.data_ok = s && s->len == sent_len && sent_len >= 5000 &&
+                    memcmp(s->buf, sent, s->len) == 0;
         if (s)
             printf("  S/R %s addr=%d: data delivered %zu of %zu octets\n", sr ? "on " : "off",
                    with_addr, s->len, sent_len);
+    }
+    if (getenv("V76_DEBUG")) {
+        const v76_stats_t *sa = v76_stats(p.a.mf), *sb = v76_stats(p.b.mf);
+
+        printf("  dbg A: txf=%llu rxf=%llu inv=%llu fcs=%llu abort=%llu susp=%llu res=%llu viol=%llu\n",
+               (unsigned long long)sa->tx_frames, (unsigned long long)sa->rx_frames,
+               (unsigned long long)sa->rx_invalid, (unsigned long long)sa->rx_fcs_errors,
+               (unsigned long long)sa->rx_aborts, (unsigned long long)sa->sr_suspends,
+               (unsigned long long)sa->sr_resumes, (unsigned long long)sa->sr_violations);
+        printf("  dbg A: dd unacked=%d backlog=%d ui_backlog=%d busy=%d t401exp=%llu clock=%ld\n",
+               v76_unacked_frames(p.a.mf, dd_id), v76_data_backlog(p.a.mf, dd_id),
+               v76_unitdata_backlog(p.a.mf, dv_id), (int)v76_tx_busy(p.a.mf),
+               (unsigned long long)sa->t401_expiries, p.clock);
+        printf("  dbg B rx state=%d nrt_valid? \n", v76_rx_sr_state(p.b.mf));
+        printf("  dbg B: txf=%llu rxf=%llu inv=%llu fcs=%llu abort=%llu susp=%llu res=%llu viol=%llu\n",
+               (unsigned long long)sb->tx_frames, (unsigned long long)sb->rx_frames,
+               (unsigned long long)sb->rx_invalid, (unsigned long long)sb->rx_fcs_errors,
+               (unsigned long long)sb->rx_aborts, (unsigned long long)sb->sr_suspends,
+               (unsigned long long)sb->sr_resumes, (unsigned long long)sb->sr_violations);
     }
     r.suspends = v76_stats(p.a.mf)->sr_suspends;
     r.resumes = v76_stats(p.b.mf)->sr_resumes;
@@ -1222,15 +1274,15 @@ static void test_suspend_resume(void)
     sr_result_t off, on, on_addr, on_max, on_err;
 
     rng_state = 4242;
-    off = run_voice_and_data(false, false, 12, 0);
+    off = run_voice_and_data(false, false, 20, 0);
     rng_state = 4242;
-    on = run_voice_and_data(true, false, 12, 0);
+    on = run_voice_and_data(true, false, 20, 0);
     rng_state = 4242;
-    on_addr = run_voice_and_data(true, true, 12, 0);
+    on_addr = run_voice_and_data(true, true, 20, 0);
     rng_state = 4242;
     on_max = run_voice_and_data(true, false, 12, 0);    /* RT frames of exactly N401RT */
     rng_state = 4242;
-    on_err = run_voice_and_data(true, true, 12, 20000);
+    on_err = run_voice_and_data(true, true, 20, 15000);
 
     printf("  worst voice-frame latency: S/R off %ld bits (%.1f ms), on %ld bits (%.1f ms), "
            "on+addr %ld bits\n", off.lat_max_bits, off.lat_max_bits / 28.8,
@@ -1253,7 +1305,8 @@ static void test_suspend_resume(void)
     CHECK(on.lat_max_bits < off.lat_max_bits / 4 && on.lat_max_bits < 1500,
           "S/R cuts the worst voice latency from %ld to %ld bits", off.lat_max_bits, on.lat_max_bits);
     CHECK(on_max.voice_got == on_max.voice_sent && on_max.voice_bad == 0 && on_max.data_ok,
-          "max-length RT frames (no resume flag) still correct");
+          "max-length RT frames (no resume flag) still correct (voice %d of %d, bad %d, data %d)",
+          on_max.voice_got, on_max.voice_sent, on_max.voice_bad, (int)on_max.data_ok);
     CHECK(on_err.voice_bad == 0 && on_err.data_ok && on_err.voice_got > on_err.voice_sent / 2,
           "S/R with bit errors: data intact, voice partly lost but never reordered "
           "(%d of %d, bad=%d)", on_err.voice_got, on_err.voice_sent, on_err.voice_bad);
