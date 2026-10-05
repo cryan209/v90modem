@@ -27,6 +27,25 @@ static const struct {
     int max_rate;
     const char *offer;      /* what the next call offers, for +MS$ */
 } carriers[] = {
+    /* Recognised, with no datapump in this engine.  Both modes NULL, so
+     * always ERROR; +MS=? leaves them out and +MS$ lists them apart, so a
+     * DTE that sends them learns why rather than meeting a bare ERROR.
+     * Bell 103 is 300 bit/s with nothing below it to fall back to, and
+     * 212A answers with 2225 Hz rather than V.8.  Clear channel and the
+     * ISDN rate adaptions would need no datapump at all -- the bearer is
+     * already a byte-exact 64 kbit/s DS0 -- only the framing. */
+    { "B103",  { NULL },                      NULL,  NULL,     300,
+      "Bell 103" },
+    { "B212",  { "B212A", NULL },             NULL,  NULL,    1200,
+      "Bell 212A" },
+    { "CLEAR", { "CLEARMODE", "64K", NULL },  NULL,  NULL,   64000,
+      "clear channel (RFC 4040)" },
+    { "V110",  { NULL },                      NULL,  NULL,   64000,
+      "ISDN V.110 rate adaption" },
+    { "V120",  { NULL },                      NULL,  NULL,   64000,
+      "ISDN V.120 rate adaption" },
+    { "X75",   { NULL },                      NULL,  NULL,   64000,
+      "ISDN X.75" },
     { "V22",  { NULL },                       "v22", "v22",  1200,
       "V.22/V.22bis" },
     { "V22B", { "V22BIS", NULL },             "v22", "v22",  2400,
@@ -35,7 +54,16 @@ static const struct {
       "V.22bis (no V.32 here)" },
     { "V32B", { "V32BIS", NULL },             NULL,  "v22", 14400,
       "V.22bis (no V.32bis here)" },
-    { "V34",  { NULL },                       "v34", "v34", 33600,
+    /* The Courier's pre-V.34 proprietary set (docs/courier_firmware_
+     * analysis.md: HST, Terbo, V.FC).  Same treatment as V.32bis. */
+    { "HST",  { NULL },                       NULL,  "v22", 16800,
+      "V.22bis (no HST here)" },
+    { "V32TERBO", { "TERBO", "V32T", NULL },  NULL,  "v22", 19200,
+      "V.22bis (no V.32terbo here)" },
+    { "VFC",  { "V.FC", "VFAST", NULL },      NULL,  "v22", 28800,
+      "V.22bis (no V.FC here)" },
+    /* V34+/V34B: 33600, which V.34 (1996) already is. */
+    { "V34",  { "V34+", "V34B", "V34BIS" },   "v34", "v34", 33600,
       "V.34, V.22bis; ,0: V.34" },
     /* 60000: the shipped MICA K56flex tables run past 56k -- rate indices
      * 32 and 33 (58000, 60000) exist for both laws, base pad group only
@@ -91,6 +119,18 @@ const char *at_ms_mode_to_carrier(const char *mode)
         if (carriers[i].mode_auto && !strcmp(mode, carriers[i].mode_auto))
             return carriers[i].carrier;
     return NULL;
+}
+
+static bool available(size_t i)
+{
+    return carriers[i].mode_exact || carriers[i].mode_auto;
+}
+
+bool at_ms_carrier_available(const char *carrier)
+{
+    int i = find_carrier(carrier);
+
+    return i >= 0 && available((size_t) i);
 }
 
 int at_ms_carrier_max_rate(const char *carrier)
@@ -228,18 +268,40 @@ void at_ms_format_test(char *buf, size_t len)
 {
     size_t used;
 
+    bool first = true;
+
     used = (size_t) snprintf(buf, len, "+MS: (");
-    for (size_t i = 0; i < N_CARRIERS && used < len; i++)
+    for (size_t i = 0; i < N_CARRIERS && used < len; i++) {
+        if (!available(i))
+            continue;
         used += (size_t) snprintf(buf + used, len - used, "%s%s",
-                                  i ? "," : "", carriers[i].carrier);
+                                  first ? "" : ",", carriers[i].carrier);
+        first = false;
+    }
     if (used < len)
         snprintf(buf + used, len - used,
                  "),(0,1),(0-%d),(0-%d),(0-%d),(0-%d)", AT_MS_MAX_RATE,
                  AT_MS_MAX_RATE, AT_MS_MAX_RATE, AT_MS_MAX_RATE);
 }
 
+/* One +MS$ table row. */
+static size_t help_row(size_t i, char *buf, size_t len)
+{
+    char aliases[32] = "";
+    size_t a_used = 0;
+    const char *autos = !available(i) ? "-" : carriers[i].mode_exact ? "0,1" : "1";
+
+    for (size_t a = 0; a < 3 && carriers[i].alias[a]; a++)
+        a_used += (size_t) snprintf(aliases + a_used, sizeof(aliases) - a_used,
+                                    "%s%s", a ? "," : "", carriers[i].alias[a]);
+    return (size_t) snprintf(buf, len, "  %-8s %-16s %-5s %9d  %s\r\n",
+                             carriers[i].carrier, aliases, autos,
+                             carriers[i].max_rate, carriers[i].offer);
+}
+
 /* Courier-style help: syntax, then one row per carrier with its aliases,
- * the automodes it accepts, its maximum rate and what the next call offers.
+ * the automodes it accepts, its maximum rate and what the next call offers,
+ * then the names recognised but not available, then the current setting.
  * Built from the table above, so it cannot disagree with the parser. */
 void at_ms_format_help(const at_ms_settings_t *cur, char *buf, size_t len)
 {
@@ -262,17 +324,13 @@ void at_ms_format_help(const at_ms_settings_t *cur, char *buf, size_t len)
     HELP_PUT("  Takes effect on the next call. ATZ, AT&F restore the default.\r\n");
     HELP_PUT("\r\n");
     HELP_PUT("  Carrier  Also             Auto  Max bit/s  Next call offers\r\n");
-    for (size_t i = 0; i < N_CARRIERS; i++) {
-        char aliases[32] = "";
-        size_t a_used = 0;
-
-        for (size_t a = 0; a < 3 && carriers[i].alias[a]; a++)
-            a_used += (size_t) snprintf(aliases + a_used, sizeof(aliases) - a_used,
-                                        "%s%s", a ? "," : "", carriers[i].alias[a]);
-        HELP_PUT("  %-8s %-16s %-5s %9d  %s\r\n", carriers[i].carrier, aliases,
-                 carriers[i].mode_exact ? "0,1" : "1", carriers[i].max_rate,
-                 carriers[i].offer);
-    }
+    for (size_t i = 0; i < N_CARRIERS; i++)
+        if (available(i) && used < len)
+            used += help_row(i, buf + used, len - used);
+    HELP_PUT("\r\n  Recognised, no datapump here (always ERROR):\r\n");
+    for (size_t i = 0; i < N_CARRIERS; i++)
+        if (!available(i) && used < len)
+            used += help_row(i, buf + used, len - used);
     if (cur) {
         at_ms_format_read(cur, cur_text, sizeof(cur_text));
         HELP_PUT("\r\n  Current: %s", cur_text + 5);   /* past "+MS: " */

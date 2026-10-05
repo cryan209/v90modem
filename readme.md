@@ -115,12 +115,14 @@ touched, and `ATZ`/`AT&F` restore the default:
 |------------|----------------------------------------------------------|-------------------|
 | `V22`, `V22B` | V.22/V.22bis                                          | same              |
 | `V32`, `V32B` | V.22bis (no V.32bis in the engine; V.250 fallback)    | ERROR             |
-| `V34`      | V.34 + V.22bis                                           | V.34 alone        |
+| `HST`, `V32TERBO` (`TERBO`), `VFC` (`V.FC`) | V.22bis (no datapump for these; V.250 fallback) | ERROR |
+| `V34` (`V34+`, `V34B`, `V34BIS`) | V.34 + V.22bis                     | V.34 alone        |
 | `K56` (`56`, `56K`, `K56FLEX`) | K56flex V.8bis, then V.8 offering V.90/V.34/V.22 (no K56flex data mode) | ERROR |
 | `V90`      | V.90 + V.34 + V.22bis                                    | V.90 + V.34       |
 | `V92`      | as V90, with V.92                                        | V.92 + V.34       |
 | `V91`      | as V90, with V.91 in V.8's PCM availability             | V.91 + V.34       |
 | `X2`       | x2, asymmetric (V.34 upstream; symmetric not implemented) | same             |
+| `B103`, `B212`, `CLEAR`, `V110`, `V120`, `X75` | recognised, no datapump here | ERROR (both) |
 
 `AT+MS?` reads back e.g. `+MS: V34,1,0,0,0,0`; `AT+MS=?` lists the carriers;
 `AT+MS$` prints Courier-style help -- the syntax, every carrier with its

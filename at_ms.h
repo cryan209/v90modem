@@ -20,11 +20,12 @@
  * take their defaults (automode 1, rates 0) rather than the previous value,
  * so AT+MS=V34 means the same thing whatever was set before it.
  *
- * Carriers: V22, V22B, V32, V32B, V34, K56 (also "56", "56K", "K56FLEX"),
- * V90, V92, V91, X2.  V32/V32B and K56 need automode 1: the engine has no
- * V.32bis or K56flex data mode, so they fall back (V.32bis to the V.22bis
- * offer; K56flex's V.8bis then V.8 to V.90/V.34) and naming one alone is
- * ERROR.
+ * Carriers: V22, V22B, V32, V32B, HST, V32TERBO, VFC, V34 (also V34+,
+ * V34B), K56 (also "56", "56K", "K56FLEX"), V90, V92, V91, X2.  V32, V32B,
+ * HST, V32TERBO, VFC and K56 need automode 1: the engine has no datapump
+ * for them, so they fall back (to the V.22bis offer; K56flex's V.8bis then
+ * V.8 to V.90/V.34) and naming one alone is ERROR.  B103, B212, CLEAR,
+ * V110, V120 and X75 are recognised and always ERROR; +MS$ lists them.
  *
  * A rate of 0 means "no limit"; a rate above the carrier's maximum is ERROR.
  * Rates are otherwise stored and reported but NOT enforced: the engine
@@ -39,7 +40,7 @@
 #define AT_MS_MAX_RATE 64000   /* V.91 */
 
 typedef struct {
-    char carrier[8];   /* canonical upper-case name, e.g. "V34" */
+    char carrier[12];  /* canonical upper-case name, e.g. "V34" */
     int  automode;     /* 1: may fall back to lower modulations via V.8 */
     int  min_tx_rate, max_tx_rate;
     int  min_rx_rate, max_rx_rate;
@@ -70,6 +71,8 @@ void at_ms_format_help(const at_ms_settings_t *cur, char *buf, size_t len);
 const char *at_ms_carrier_to_mode(const char *carrier, bool automode);
 const char *at_ms_mode_to_carrier(const char *mode);
 /* Highest rate the carrier carries, 0 if unknown. */
+/* Whether the engine can use it at all (false for B103, CLEAR, ...). */
+bool at_ms_carrier_available(const char *carrier);
 int at_ms_carrier_max_rate(const char *carrier);
 
 #endif
