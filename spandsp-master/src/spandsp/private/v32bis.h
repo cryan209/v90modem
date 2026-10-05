@@ -230,7 +230,6 @@ struct v32bis_state_s
        7.2: 1800 Hz) has been continuously present in data mode. */
     int retrain_tone_run;
     int retrain_count;
-    bool retrain_pending;
 
     /*! \brief Error and flow logging control */
     logging_state_t logging;

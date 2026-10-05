@@ -1162,6 +1162,13 @@ enum
     margin for echo and noise. */
 #define V32BIS_RENEG_TONE_FRACTION  0.7f
 
+/*! 7.1/7.2: a retrain tone is one held "for more than 128 symbol
+    intervals".  The run is counted from when the 2 x 20 sample detection
+    window first holds the tone, about 12T after it starts, so a run of this
+    length is a tone some 140T old -- more than twice the 56T head of a
+    clause 8 preamble, the only other place the same tone appears. */
+#define V32BIS_RETRAIN_TONE_SYMBOLS 128
+
 /*! 8.1: R4 "shall indicate the desired rate in the initiating modem and all
     lower data signalling rates at which the initiating modem is enabled to
     operate".  8.2 says the same of R5 in the responding modem, "irrespective
@@ -3387,6 +3394,78 @@ SPAN_DECLARE(int) v32bis_start_tones(v32bis_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/*! ITU-T V.32bis clause 7.  Both roles re-enter clause 6 at its third
+    paragraph -- 7.1 "repetively transmit carrier state A ... then proceed in
+    accordance with 6.1 beginning with the third paragraph", 7.2 "transmit
+    alternate carrier states A and C for an even number of symbol intervals
+    not less than 128 ... then proceed in accordance with 6.2 beginning with
+    the third paragraph" -- which is exactly where v32bis_start_tones() starts
+    each of them, the V.25 answer sequence being the engine's.  The receiver
+    is retrained from scratch: a retrain exists because reception became
+    unsatisfactory, so nothing it had learned is kept.  The transmitter is NOT
+    restarted (v17_tx_restart() would put a hole in the line signal); its
+    symbol source simply takes the baud stream back from the data encoder,
+    which also stops it drawing bits from circuit 103 -- circuit 106 OFF.
+
+    The tone phases schedule transmit symbols off received sample instants
+    (6.1/6.2's 64 +/- 2 symbol reversal delay, and NT and MT), so both clocks
+    are re-based here on the samples that have actually crossed the line in
+    each direction.  The transmit symbol clock advances exactly 3 symbols per
+    10 samples from v32bis_restart(), so rebasing on a multiple of 10 samples
+    keeps it exact. */
+static void v32bis_begin_retrain(v32bis_state_t *s, int64_t rx_line_sample, bool local)
+{
+    int64_t base;
+    int64_t tx_line;
+
+    tx_line = s->tx_line_samples;
+    base = (rx_line_sample < tx_line)  ?  rx_line_sample  :  tx_line;
+    base -= base%10;
+    if (v32bis_trace())
+    {
+        fprintf(stderr,
+                "[V32BIS %s] 7: retrain %s at rx sample %lld (tx sample %lld)\n",
+                s->calling_party ? "call  " : "answer",
+                local ? "initiated" : "detected (far end tone > 128T)",
+                (long long) rx_line_sample,
+                (long long) tx_line);
+    }
+    /*endif*/
+    span_log(&s->logging, SPAN_LOG_FLOW, "V.32bis retrain %s\n",
+             local ? "initiated" : "requested by the far end");
+    v17_rx_restart(&s->rx, s->bit_rate, false);
+    s->retrain_tone_run = 0;
+    s->retrain_count++;
+    v32bis_start_tones(s);
+    s->rx_sample_count = (int32_t) (rx_line_sample - base);
+    s->tx_symbol_index = (int32_t) (((tx_line - base)*3)/10);
+    s->tx_phase_start_symbol = s->tx_symbol_index;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_start_retrain(v32bis_state_t *s)
+{
+    if (s == NULL  ||  !s->reactive_startup)
+        return -1;
+    /*endif*/
+    /* "A retrain may be initiated during data transmission": once start-up
+       has handed over to data, including while a clause 8 exchange is in
+       progress, since a renegotiation that cannot be completed is one of the
+       ways reception turns out to be unsatisfactory. */
+    if (!s->startup_complete  &&  !s->reneg_active)
+        return -1;
+    /*endif*/
+    v32bis_begin_retrain(s, s->rx_line_samples, true);
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_retrain_count(v32bis_state_t *s)
+{
+    return (s != NULL)  ?  s->retrain_count  :  0;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v32bis_round_trip_symbols(v32bis_state_t *s, int *nt, int *mt)
 {
     if (s == NULL)
@@ -3566,6 +3645,10 @@ SPAN_DECLARE(int) v32bis_restart(v32bis_state_t *s, int bit_rate)
         return -1;
     s->startup_tx_symbol_count = 0;
     s->startup_tx_symbol_pos = 0;
+    s->tx_line_samples = 0;
+    s->rx_line_samples = 0;
+    s->retrain_tone_run = 0;
+    s->retrain_count = 0;
     startup_rx_reset(s);
     s->tx.symbol_source = NULL;
     s->tx.symbol_source_user_data = NULL;

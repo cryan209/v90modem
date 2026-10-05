@@ -274,6 +274,23 @@ static int run_side(bool caller, bool alaw, int sock, const char *pty_link, int 
     return 0;
 }
 
+/* PAIR_RETRAIN=call|answer has that side alone initiate a V.32bis clause 7
+ * retrain PAIR_RETRAIN_MS (default 2000) ms into data mode, through the
+ * engine's ME_V32BIS_RETRAIN_AFTER_MS hook; the other side must detect it
+ * from the line.  The responder's circuit 104 is clamped only once the far
+ * end's tone is detected (7.1/7.2), so the bits before that reach the data
+ * stack: run it with ME_DATA_FRAMING=lapm, whose FCS discards them, and the
+ * lines still have to arrive intact with nothing stray. */
+static void set_retrain_side(bool caller)
+{
+    const char *side = getenv("PAIR_RETRAIN");
+    const char *ms = getenv("PAIR_RETRAIN_MS");
+
+    if (side == NULL || strcmp(side, caller ? "call" : "answer") != 0)
+        return;
+    setenv("ME_V32BIS_RETRAIN_AFTER_MS", ms ? ms : "2000", 1);
+}
+
 int main(int argc, char *argv[])
 {
     bool alaw;
@@ -318,6 +335,7 @@ int main(int argc, char *argv[])
             setenv("ME_MODE", "v32bis", 1);
         else
             setenv("ME_V8", "0", 1);
+        set_retrain_side(false);
         _exit(run_side(false, alaw, sv[1], answer_link, expected));
     }
     close(sv[1]);
@@ -325,6 +343,7 @@ int main(int argc, char *argv[])
         setenv("ME_MODE", "v32bis", 1);
     else if (strcmp(mode, "aa") == 0)
         setenv("ME_V8", "0", 1);
+    set_retrain_side(true);
     rc = run_side(true, alaw, sv[0], call_link, expected);
     if (waitpid(child, &status, 0) < 0)
         return 2;

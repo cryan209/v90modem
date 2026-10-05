@@ -6540,6 +6540,28 @@ static int  g_v32bis_rate;
  * on the block where it reaches zero. */
 static int  g_v32bis_hold_samples;
 static bool g_v32bis_running;
+/* V.32bis clause 7: retrains the datapump has begun (by either end) that the
+ * engine has seen, whether one is in progress, and received samples since
+ * data mode for the ME_V32BIS_RETRAIN_AFTER_MS test hook. */
+static int  g_v32bis_retrains_seen;
+static bool g_v32bis_in_retrain;
+static int64_t g_v32bis_data_samples;
+static bool g_v32bis_retrain_probe_done;
+
+/* ME_V32BIS_RETRAIN_AFTER_MS=<n> initiates a V.32bis clause 7 retrain n ms of
+ * received audio into data mode, once per call.  A TEST HOOK, like
+ * ME_V34_RETRAIN_AFTER_MS: clause 7 lets a modem retrain on "unsatisfactory
+ * signal reception", which a healthy call never produces, so this is how the
+ * initiating path is exercised end to end.  The far end's retrain is followed
+ * without it. */
+static int me_v32bis_retrain_after_ms(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = parse_env_int("ME_V32BIS_RETRAIN_AFTER_MS", 0);
+    return cached;
+}
 
 static bool g_v25am_armed;
 /* V.32bis A.2.2 on a V.8-less answer: our own V.25 ANS, then 75 ms silence. */
@@ -6668,6 +6690,10 @@ static void start_v32bis_training(const char *why, int hold_samples)
     g_v32bis_rate = 0;
     g_v32bis_hold_samples = hold_samples;
     g_v32bis_running = false;
+    g_v32bis_retrains_seen = 0;
+    g_v32bis_in_retrain = false;
+    g_v32bis_data_samples = 0;
+    g_v32bis_retrain_probe_done = false;
     g_phase_start_ms = trace_now_ms();
     trace_phase("enter TRAINING: mod=V32BIS role=%s via %s rates=0x%03x",
                 g_calling_party ? "caller" : "answerer", why, rates);
@@ -7004,12 +7030,31 @@ static void v32bis_engine_rx(const int16_t *amp, int len)
         return;
     }
     v32bis_rx(g_v32bis, amp, len);
+    if (g_v32bis_trained && v32bis_retrain_count(g_v32bis) != g_v32bis_retrains_seen) {
+        /* Clause 7, by either end.  7.3 keeps circuits 107 and 109 ON
+           throughout, so the data stack and the DTE's CONNECT stand; the
+           datapump clamps circuit 104 and stops drawing from 103 itself. */
+        g_v32bis_retrains_seen = v32bis_retrain_count(g_v32bis);
+        g_v32bis_in_retrain = true;
+        ME_LOG("[ME] V.32bis clause 7 retrain %d begun\n", g_v32bis_retrains_seen);
+        trace_phase("V32BIS retrain %d begun", g_v32bis_retrains_seen);
+    }
     if (v32bis_startup_complete(g_v32bis)) {
         rate = v32bis_current_bit_rate(g_v32bis);
+        if (g_v32bis_trained)
+            g_v32bis_data_samples += len;
         if (!g_v32bis_trained) {
             g_v32bis_trained = true;
             completed = true;
             v32bis_round_trip_symbols(g_v32bis, &nt, &mt);
+        } else if (g_v32bis_in_retrain) {
+            g_v32bis_in_retrain = false;
+            v32bis_round_trip_symbols(g_v32bis, &nt, &mt);
+            ME_LOG("[ME] V.32bis retrain complete at %d bit/s (NT=%d MT=%d symbols)\n",
+                   rate, nt, mt);
+            trace_phase("V32BIS retrain complete %d", rate);
+            if (rate > 0 && rate != g_v32bis_rate)
+                ds_set_v14_rates(&g_data_stack, rate, rate);
         } else if (rate != g_v32bis_rate && rate > 0) {
             /* V.32bis clause 8 rate renegotiation, by either end. */
             ME_LOG("[ME] V.32bis rate renegotiated: %d -> %d bit/s\n", g_v32bis_rate, rate);
@@ -7018,6 +7063,12 @@ static void v32bis_engine_rx(const int16_t *amp, int len)
         }
         if (rate > 0)
             g_v32bis_rate = rate;
+        if (!g_v32bis_retrain_probe_done && me_v32bis_retrain_after_ms() > 0
+            && g_v32bis_data_samples >= (int64_t)me_v32bis_retrain_after_ms()*8) {
+            g_v32bis_retrain_probe_done = true;
+            if (v32bis_start_retrain(g_v32bis) == 0)
+                ME_LOG("[ME] V.32bis: ME_V32BIS_RETRAIN_AFTER_MS probe; initiating a clause 7 retrain\n");
+        }
     }
     pthread_mutex_unlock(&g_state_mtx);
     if (completed) {
@@ -7055,6 +7106,7 @@ static void v32bis_release_locked(void)
     g_v32bis_usb1_watch = false;
     g_v32bis_trained = false;
     g_v32bis_running = false;
+    g_v32bis_in_retrain = false;
 }
 
 /* Start V.34 training — used when V.8 negotiates V.34 */

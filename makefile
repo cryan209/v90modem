@@ -377,6 +377,12 @@ test: $(TEST_TARGETS)
 	ME_V8_ADVERTISE_V32=0 ./v32bis_engine_pair_test alaw automode
 	./v32bis_engine_pair_test ulaw aa
 	./v32bis_engine_pair_test alaw aa
+# V.32bis clause 7: one engine initiates a retrain in data mode, the other
+# must detect it from the far end's tone (7.1/7.2), and both re-run 6.1/6.2
+# from the tone phases.  LAPM, because the responder's circuit 104 is clamped
+# only on detection and V.42's FCS is what discards the bits before it.
+	PAIR_RETRAIN=call ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test ulaw v8
+	PAIR_RETRAIN=answer ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test alaw v8
 	./engine_pair_test --expect V32BIS --expect-connect 14400 --both-env ME_MODE=v32bis
 	./engine_pair_test --expect V32BIS --expect-connect 9600 --both-at "AT+MS=V32"
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22

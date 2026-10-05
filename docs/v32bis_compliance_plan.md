@@ -5,6 +5,71 @@ teaching modem or a "V.32bis-like" approximation. The local normative source is:
 
 - [T-REC-V.32bis-199102-I!!PDF-E.pdf](/Users/scottcryan/v90modem/ITU%20Docs/T-REC-V.32bis-199102-I!!PDF-E.pdf)
 
+## Clause 7 retrain (2026-10-05)
+
+Clause 7 did not exist: nothing in data mode listened for a retrain, so a far
+end that retrained would have been decoded as data until it gave up.  It is
+now implemented in both directions.
+
+- **Responding (7.1/7.2 "shall").**  The call modem retrains on the answer
+  modem's 600/3000 Hz AC held "for more than 128 symbol intervals", the answer
+  modem on the call modem's 1800 Hz AA.  Those are the same tones clause 8's
+  preamble opens with, so the two are told apart by duration only: a preamble's
+  tone breaks at 56T (its 180 degree reversal dips the coherent measurement)
+  and gives way to R4/R5, so it never reaches 128T.  The clause 8 watch fires
+  at 40T and clamps circuit 104 as before; while that preamble has not yet
+  shown its reversal, `v32bis_retrain_watch()` follows the same detectors
+  (`v32bis_far_tone_present()`, shared so no sample runs through them twice)
+  and declares a retrain at 128T of continuous tone.
+- **Initiating (7 "may").**  `v32bis_start_retrain()`.  The engine calls it
+  only from the `ME_V32BIS_RETRAIN_AFTER_MS` test hook; there is no
+  "unsatisfactory signal reception" detector yet.
+- **What a retrain does.**  Both roles re-enter clause 6 at its third
+  paragraph, which is exactly where `v32bis_start_tones()` starts them (7.1:
+  repeated state A; 7.2: alternating A and C, even and >= 128T).  The receiver
+  is restarted from scratch.  The transmitter is NOT (`v17_tx_restart()` would
+  put a hole in the line signal); the startup symbol source takes the baud
+  stream back from the data encoder, which also stops it drawing from circuit
+  103.  The echo canceller keeps its estimate and stands down its adaption
+  through the tones as at start-up.
+- **The sample clocks.**  The tone phases schedule transmit symbols off
+  received sample instants (the 64 +/- 2T reversal delay, NT, MT), and neither
+  `tx_symbol_index` nor `rx_sample_count` runs continuously through data mode.
+  Both directions now count every sample that crosses `v32bis_tx()`/
+  `v32bis_rx()` since `v32bis_restart()`, and a retrain re-bases both on that
+  -- exactly, since the transmit symbol clock advances 3 symbols per 10
+  samples and the base is taken on a multiple of 10.  The proof is that NT and
+  MT measured a second time agree with the first: 128 -> 128, 65 -> 65 u-law;
+  272/273 -> 272/273 at a 240-sample one-way delay; never more than 2 apart.
+- **Engine.**  7.3 keeps circuits 107 and 109 ON, so the data stack and the
+  DTE's CONNECT stand across a retrain; the engine logs `V.32bis clause 7
+  retrain N begun` / `retrain complete at R bit/s (NT, MT)` and updates the
+  V.14 rate if it moved.
+
+Coverage: `v32bis_duplex_test --retrain-only` (12 rows: either initiator, both
+laws, 0/80/240-sample one-way delay, a 2-wire hybrid with the canceller in,
+9600 and 4800).  Nothing tells the responder; it must find the tone itself
+80-120 ms after the request.  Every row requires error-free PRBS before and
+after (6000+ bits each way), exactly one retrain per side, and the second NT/MT
+within 2 of the first.  **Every other duplex row now also asserts that no
+retrain fired**, which is the false-positive guard -- including all 48 clause 8
+rows, whose preambles are the same tones -- and none does.  End to end through
+two whole engines: `PAIR_RETRAIN=call|answer ME_DATA_FRAMING=lapm
+./v32bis_engine_pair_test <law> v8` (two rows in `make test`): one engine
+initiates 2 s into data, the other detects it, both re-measure NT/MT, and 150
+numbered lines each way arrive intact with nothing stray.  LAPM because the
+responder's circuit 104 is clamped only on detection, as 7.1/7.2 say, so ~40T
+of the far end's tone reaches the data stack as data and V.42's FCS is what
+discards it; with V.14 those bits would reach the DTE.  **Run that test with
+`PAIR_VERBOSE=1` to see the retrain** -- it forces engine logging off, and a
+first check here read a PASS with no retrain in the log as success.
+
+Open: no quality-triggered initiation (clause 7's "means of detecting
+unsatisfactory signal reception" needs a data-mode decision-distance measure
+first); 7.3's optional 109 OFF after 45 s of AA/AC; no foreign-modem
+verification of clause 7 in either direction (slmodemd via
+`tools/slm_local_pair.py` is the obvious rig).
+
 ## Clause 8 implementation and regression status (2026-09-30)
 
 The reactive SpanDSP dialogue now supports in-band rate renegotiation under
@@ -479,8 +544,8 @@ V.32 bit, and `aa` failed about one run in eight under concurrent load.
 (`rf-tower-fb-6`), old binary against new, differ only in the V.32 bit of our
 CM/JM and the log line naming it.
 
-**Not done:** V.32bis clause 7 retrains from the engine; and any hardware
-interop.  Clause 8 renegotiations by the far end are followed (the V.14 rate
+**Not done (superseded in part -- see "Clause 7 retrain" above):** any
+hardware interop.  Clause 8 renegotiations by the far end are followed (the V.14 rate
 is updated) but the engine never initiates one.
 
 ## USB1 on the calling side, and a real pre-V.8 V.22bis modem (2026-10-05)
@@ -985,9 +1050,11 @@ Exit criteria:
   for a clean bearer with a real one-way channel delay, and for a 2-wire
   hybrid down to 12.6 dB return loss, which is the worst modelled.
 
-### Phase 5: Rate Renegotiation and V.32 Interop Boundaries
+### Phase 5: Rate Renegotiation, Retrain and V.32 Interop Boundaries
 
-Status: pending
+Status: clause 8 and clause 7 implemented and regression-covered offline and
+through two engines; engine-initiated clause 8 and quality-triggered clause 7
+are not
 
 - In-band rate changes without retrain
 - V.32-compatible operation at 4800 and 9600

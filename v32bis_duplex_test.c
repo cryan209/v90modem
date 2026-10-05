@@ -618,6 +618,17 @@ static int run_duplex(int alaw,
         /*endif*/
     }
     /*endif*/
+    if (v32bis_retrain_count(call) != 0  ||  v32bis_retrain_count(answer) != 0)
+    {
+        /* Nothing asked for a clause 7 retrain, so the retrain watch fired on
+           data, on an echo, or on a clause 8 preamble's 56T head. */
+        fprintf(stderr,
+                "  a clause 7 retrain fired with none requested: call %d, answer %d\n",
+                v32bis_retrain_count(call),
+                v32bis_retrain_count(answer));
+        failed = 1;
+    }
+    /*endif*/
     /* With a renegotiation in the run the whole-run error count is not the
        measure: the clamp lag across the procedure displaces the pattern by
        design, and the clause 8 block below grades the stretch before it and
@@ -749,6 +760,217 @@ static int hybrid_sweep(int scale, int delay)
 }
 /*- End of function --------------------------------------------------------*/
 
+/*! ITU-T V.32bis clause 7.  Bring two modems to data through the whole of
+    clause 6, have ONE of them initiate a retrain, and leave the other to find
+    it the way 7.1/7.2 say it must: by the far end's tone outlasting 128
+    symbol intervals in the middle of data.  Nothing tells the responder.
+    Both then have to run 6.1/6.2 again from the third paragraph -- the tone
+    phases, so NT and MT are measured a second time and must agree with the
+    first -- re-enter data, and carry the PRBS clean in both directions.
+
+    The bits between the request and the end of the second start-up are not
+    graded: the responder's circuit 104 is clamped only once the tone is
+    detected (that is what 7.1/7.2 ask), so the far end's tone reaches it
+    as data until then, exactly as in clause 8. */
+static int run_retrain(int alaw, int by_call, int delay, int hybrid, int rates, int expected_rate)
+{
+    int16_t call_audio[160];
+    int16_t answer_audio[160];
+    int16_t to_answer[160];
+    int16_t to_call[160];
+    int16_t delay_to_answer[1024];
+    int16_t delay_to_call[1024];
+    uint32_t call_tx_pattern = 0x13579BDFU;
+    uint32_t answer_tx_pattern = 0x2468ACE1U;
+    bit_stats_t call_rx = {.state = 0x2468ACE1U};
+    bit_stats_t answer_rx = {.state = 0x13579BDFU};
+    hybrid_t call_hybrid;
+    hybrid_t answer_hybrid;
+    v32bis_state_t *call;
+    v32bis_state_t *answer;
+    int delay_pos = 0;
+    int block;
+    int i;
+    int failed = 0;
+    int asked = 0;
+    int asked_block = -1;
+    int detected_block = -1;
+    int done = 0;
+    int done_block = -1;
+    int call_before = 0;
+    int answer_before = 0;
+    int call_base = 0;
+    int answer_base = 0;
+    int call_err_base = 0;
+    int answer_err_base = 0;
+    int nt1 = 0;
+    int mt1 = 0;
+    int nt2 = 0;
+    int mt2 = 0;
+    int dummy;
+
+    memset(delay_to_answer, 0, sizeof(delay_to_answer));
+    memset(delay_to_call, 0, sizeof(delay_to_call));
+    memset(&call_hybrid, 0, sizeof(call_hybrid));
+    memset(&answer_hybrid, 0, sizeof(answer_hybrid));
+    call = v32bis_init(NULL, 14400, true, pattern_bit, &call_tx_pattern, collect_bit, &call_rx);
+    answer = v32bis_init(NULL, 14400, false, pattern_bit, &answer_tx_pattern, collect_bit, &answer_rx);
+    if (call == NULL  ||  answer == NULL
+        || v32bis_set_supported_bit_rates(call, rates) != 0
+        || v32bis_set_supported_bit_rates(answer, rates) != 0
+        /* 7: "A retrain may be initiated during data transmission" -- and
+           not before. */
+        || v32bis_start_retrain(call) != -1
+        || v32bis_start_retrain(NULL) != -1
+        || v32bis_start_tones(call) != 0
+        || v32bis_start_tones(answer) != 0
+        || v32bis_start_retrain(answer) != -1)
+    {
+        fprintf(stderr, "V.32bis retrain setup failed\n");
+        return -1;
+    }
+    for (block = 0;  block < 1500;  block++)
+    {
+        v32bis_tx(call, call_audio, 160);
+        v32bis_tx(answer, answer_audio, 160);
+        bearer(call_audio, to_answer, 160, alaw);
+        bearer(answer_audio, to_call, 160, alaw);
+        for (i = 0;  i < 160  &&  delay > 0;  i++)
+        {
+            int16_t a = to_answer[i];
+            int16_t c = to_call[i];
+
+            to_answer[i] = delay_to_answer[delay_pos];
+            to_call[i] = delay_to_call[delay_pos];
+            delay_to_answer[delay_pos] = a;
+            delay_to_call[delay_pos] = c;
+            if (++delay_pos >= delay)
+                delay_pos = 0;
+        }
+        if (hybrid)
+        {
+            hybrid_add(&call_hybrid, call_audio, to_call, 160, hybrid/100.0f);
+            hybrid_add(&answer_hybrid, answer_audio, to_answer, 160, hybrid/100.0f);
+        }
+        /* Odd callback lengths, so a detection instant part way through a
+           block is exercised. */
+        v32bis_rx(answer, to_answer, 37);
+        v32bis_rx(answer, to_answer + 37, 123);
+        v32bis_rx(call, to_call, 160);
+        if (!asked  &&  call_rx.total > 4000  &&  answer_rx.total > 4000)
+        {
+            v32bis_round_trip_symbols(call, &nt1, &dummy);
+            v32bis_round_trip_symbols(answer, &dummy, &mt1);
+            call_before = call_rx.errors;
+            answer_before = answer_rx.errors;
+            /* The last verified PRBS position, which the checker searches
+               forward from once data resumes. */
+            call_rx.resync_state = call_rx.state;
+            answer_rx.resync_state = answer_rx.state;
+            if (v32bis_start_retrain(by_call ? call : answer) != 0)
+            {
+                fprintf(stderr, "  could not initiate a retrain\n");
+                failed = 1;
+                break;
+            }
+            asked = 1;
+            asked_block = block;
+        }
+        if (asked  &&  detected_block < 0
+            &&  v32bis_retrain_count(by_call ? answer : call) == 1)
+            detected_block = block;
+        if (asked  &&  !done
+            &&  v32bis_startup_complete(call)  &&  v32bis_startup_complete(answer)
+            &&  v32bis_retrain_count(call) == 1  &&  v32bis_retrain_count(answer) == 1)
+        {
+            done = 1;
+            done_block = block;
+            v32bis_round_trip_symbols(call, &nt2, &dummy);
+            v32bis_round_trip_symbols(answer, &dummy, &mt2);
+            call_rx.resync = 1;
+            call_rx.resync_len = 0;
+            answer_rx.resync = 1;
+            answer_rx.resync_len = 0;
+            call_base = call_rx.total;
+            answer_base = answer_rx.total;
+            call_err_base = call_rx.errors;
+            answer_err_base = answer_rx.errors;
+        }
+        if (done  &&  call_rx.total - call_base > 6000  &&  answer_rx.total - answer_base > 6000)
+            break;
+    }
+    printf("V.32bis clause 7 retrain by %s, %s, one-way %d, hybrid %d: asked at block %d, "
+           "far end detected at block %d, data again at block %d at %d/%d bit/s; "
+           "NT %d -> %d, MT %d -> %d; after: call %d bits %d errors, answer %d bits %d errors",
+           by_call ? "call" : "answer",
+           alaw ? "A-law" : "u-law",
+           delay,
+           hybrid,
+           asked_block,
+           detected_block,
+           done_block,
+           v32bis_current_bit_rate(call),
+           v32bis_current_bit_rate(answer),
+           nt1, nt2, mt1, mt2,
+           call_rx.total - call_base,
+           call_rx.errors - call_err_base,
+           answer_rx.total - answer_base,
+           answer_rx.errors - answer_err_base);
+    if (!asked  ||  !done  ||  detected_block < 0)
+        failed = 1;
+    /* The data before the retrain and the data after it must both be exact. */
+    if (call_before != 0  ||  answer_before != 0
+        || call_rx.errors != call_err_base
+        || answer_rx.errors != answer_err_base)
+        failed = 1;
+    if (call_rx.total - call_base < 6000  ||  answer_rx.total - answer_base < 6000)
+        failed = 1;
+    if (v32bis_current_bit_rate(call) != expected_rate
+        || v32bis_current_bit_rate(answer) != expected_rate)
+        failed = 1;
+    /* Exactly one retrain each: neither the responder's own tones nor the
+       initiator's echo may set off a second. */
+    if (v32bis_retrain_count(call) != 1  ||  v32bis_retrain_count(answer) != 1)
+        failed = 1;
+    /* The channel has not changed, so the second round-trip measurement has
+       to agree with the first within 6.1/6.2's own +/- 2.  This is what
+       says both sample clocks were carried correctly through data mode. */
+    if (nt1 <= 0  ||  mt1 <= 0  ||  abs(nt2 - nt1) > 2  ||  abs(mt2 - mt1) > 2)
+        failed = 1;
+    printf("%s\n", failed ? "   FAILED" : "");
+    v32bis_free(call);
+    v32bis_free(answer);
+    return failed;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int retrain_tests(void)
+{
+    const int all = V32BIS_RATE_14400 | V32BIS_RATE_12000 | V32BIS_RATE_9600
+                  | V32BIS_RATE_7200 | V32BIS_RATE_4800;
+    int bad = 0;
+    int law;
+    int by_call;
+
+    for (law = 0;  law < 2;  law++)
+    {
+        for (by_call = 0;  by_call < 2;  by_call++)
+        {
+            bad += run_retrain(law, by_call, 0, 0, all, 14400);
+            bad += run_retrain(law, by_call, 240, 0, all, 14400);
+        }
+    }
+    /* Over a 2-wire hybrid with the canceller in: the canceller keeps its
+       estimate across the retrain, and the responder's tone watch must not
+       be set off by its own echo. */
+    bad += run_retrain(0, 1, 80, 25, all, 14400);
+    bad += run_retrain(1, 0, 80, 25, all, 14400);
+    bad += run_retrain(0, 1, 80, 0, V32BIS_RATE_9600 | V32BIS_RATE_4800, 9600);
+    bad += run_retrain(1, 0, 80, 0, V32BIS_RATE_4800, 4800);
+    return bad;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int rate_renegotiation_tests(void)
 {
     int bad = 0;
@@ -795,6 +1017,8 @@ int main(int argc, char *argv[])
 {
     if (argc > 1 && strcmp(argv[1], "--reneg-only") == 0)
         return rate_renegotiation_tests() != 0;
+    if (argc > 1 && strcmp(argv[1], "--retrain-only") == 0)
+        return retrain_tests() != 0;
 
     static const struct
     {
@@ -894,6 +1118,7 @@ int main(int argc, char *argv[])
                        14400, 0, 0, 1, 80, 0, 1, 8192, 0, 0, 0) != 0)
             bad++;
         bad += rate_renegotiation_tests();
+        bad += retrain_tests();
         /* And over a 2-wire hybrid, which is what V.32bis actually runs
            on: each side's own transmit returns into its own receiver, and
            the canceller in the sample path is what has to remove it.  Swept
@@ -917,6 +1142,6 @@ int main(int argc, char *argv[])
         fprintf(stderr, "V.32bis duplex start-up: %d case(s) failed\n", bad);
         return 1;
     }
-    printf("V.32bis clauses 6/8 duplex tests passed\n");
+    printf("V.32bis clauses 6/7/8 duplex tests passed\n");
     return 0;
 }
