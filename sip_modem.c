@@ -1436,7 +1436,17 @@ int main(int argc, char *argv[])
                  * number against --sip-server while still accepting a full
                  * URI from non-AT callers of me_dial(). */
                 if (strncmp(uri, "sip:", 4) != 0 && sip_server && sip_server[0]) {
-                    snprintf(dial_uri, sizeof(dial_uri), "sip:%s@%s", uri, sip_server);
+                    char digits[256];
+                    size_t nd = 0;
+
+                    /* V.250 6.3.1.2's comma is a pause in a dial string, which a
+                     * SIP call has no use for; left in, it reached the INVITE as
+                     * part of the user name. */
+                    for (const char *c = uri; *c && nd + 1 < sizeof(digits); c++)
+                        if (*c != ',')
+                            digits[nd++] = *c;
+                    digits[nd] = '\0';
+                    snprintf(dial_uri, sizeof(dial_uri), "sip:%s@%s", digits, sip_server);
                     resolved_uri = dial_uri;
                 }
                 pj_str_t dst = pj_str((char *)resolved_uri);

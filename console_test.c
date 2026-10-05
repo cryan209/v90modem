@@ -18,6 +18,7 @@
  */
 
 #include "data_interface.h"
+#include "at_help.h"
 
 #include <spandsp.h>
 
@@ -448,11 +449,199 @@ static void test_v250_parameters(void)
     di_close();
 }
 
+/* A stand-in for the engine's +MS offer, so +MS?/+MS$ have something to read. */
+static char fake_mode[16] = "v90";
+static bool fake_automode = true;
+
+static int fake_ms_set(const char *mode, bool automode)
+{
+    snprintf(fake_mode, sizeof(fake_mode), "%s", mode);
+    fake_automode = automode;
+    return 0;
+}
+
+static void fake_ms_get(char *mode, size_t len, bool *automode)
+{
+    snprintf(mode, len, "%s", fake_mode);
+    *automode = fake_automode;
+}
+
+static void fake_ms_reset(void)
+{
+    snprintf(fake_mode, sizeof(fake_mode), "v90");
+    fake_automode = true;
+}
+
+/* What the engine would say for ATI11. */
+static bool fake_originate;
+
+static void fake_link_detail(char *out, size_t len, bool *originate)
+{
+    *originate = fake_originate;
+    snprintf(out, len, "Mode               v90 (offer V90)\r\nV.92               no");
+}
+
+/* The final result code is OK (a help page may mention ERROR in its text). */
+static int final_ok(const char *buf)
+{
+    size_t n = strlen(buf);
+
+    return n >= 6 && strcmp(buf + n - 6, "\r\nOK\r\n") == 0;
+}
+
+/* Courier-style "$" help and the ATI pages, through the real interpreter. */
+static void test_help(void)
+{
+    static const char *const topics[] = { "", "D", "&", "+", "I", "S" };
+    static const char *const cmds[] = { "AT$", "ATD$", "AT&$", "AT+$", "ATI$", "ATS$" };
+    static const char *const titles[] = {
+        "Command Quick Reference", "Dial Commands", "Ampersand Commands",
+        "Extended Commands", "Identification and Diagnostics", "S-Registers"
+    };
+    const char *link = "/tmp/console_test_help";
+    char buf[8192];
+    char what[256];
+    int dte;
+
+    printf("$ help and ATI pages:\n");
+    if (di_open(link) < 0) {
+        failures++;
+        return;
+    }
+    di_set_callbacks(cb_dial, cb_answer, cb_hangup, NULL);
+    di_set_modulation_ops(fake_ms_set, fake_ms_get, fake_ms_reset);
+    dte = open_dte(link);
+    if (dte < 0) {
+        failures++;
+        di_close();
+        return;
+    }
+    expect(dte, "ATE0", "OK");
+
+    /* Each page arrives whole, every row of its table in it, then OK. */
+    for (size_t i = 0; i < sizeof(topics) / sizeof(topics[0]); i++) {
+        const at_help_entry_t *rows;
+        size_t n;
+        int all = 1;
+
+        exchange(dte, cmds[i], buf, sizeof(buf));
+        rows = at_help_table(topics[i], &n);
+        for (size_t r = 0; rows && r < n; r++)
+            if (rows[r].cmd[0] && !strstr(buf, rows[r].cmd)) {
+                printf("       %s lacks \"%s\"\n", cmds[i], rows[r].cmd);
+                all = 0;
+            }
+        snprintf(what, sizeof(what), "%s: \"%s\", every row, then OK", cmds[i], titles[i]);
+        check(rows && all && strstr(buf, titles[i]) && final_ok(buf), what);
+    }
+
+    /* The help never names a command the interpreter does not take: every row
+       with a probe answers OK to it. */
+    for (size_t i = 0; i < sizeof(topics) / sizeof(topics[0]); i++) {
+        const at_help_entry_t *rows;
+        size_t n;
+
+        rows = at_help_table(topics[i], &n);
+        for (size_t r = 0; rows && r < n; r++) {
+            char line[64];
+
+            if (!rows[r].probe)
+                continue;
+            snprintf(line, sizeof(line), "AT%s", rows[r].probe);
+            exchange(dte, line, buf, sizeof(buf));
+            snprintf(what, sizeof(what), "%s$ lists %s: %s is accepted", topics[i], rows[r].cmd, line);
+            if (!final_ok(buf))
+                printf("       got \"%s\"\n", buf);
+            check(final_ok(buf), what);
+        }
+    }
+
+    /* S$ shows the live value, and help composes with other commands. */
+    expect(dte, "ATS0=2S$", "S0   002");
+    expect(dte, "ATS0=0", "OK");
+    expect(dte, "ATS$", "S0   000");
+    expect(dte, "ATE0$", "Command Quick Reference");
+    expect(dte, "AT+MS$", "+MS");                   /* at_ms.c's page, untouched */
+    expect(dte, "ATQ0$", "Command Quick Reference"); /* Q0, then AT$ */
+    expect(dte, "AT$Z", "OK");                      /* help then the next command */
+    expect(dte, "ATE0", "OK");                      /* Z restored echo */
+
+    /* ATI pages. */
+    expect(dte, "ATI0", "v90modem");
+    expect(dte, "ATI3", "v90modem ");
+    expect(dte, "ATI4", "+ES: 3,0,2");
+    expect(dte, "AT+ES=1,0,1", "OK");
+    expect(dte, "ATI4", "+ES: 1,0,1");
+    expect(dte, "ATI4", "E0 Q0 V1");
+    expect(dte, "ATI4", "+MS: V90,1");
+    expect(dte, "ATI7", "Modulations");
+    expect(dte, "ATI6", "No call since power-on");
+    expect(dte, "ATI11", "No call since power-on");
+    expect(dte, "ATI5", "ERROR");
+
+    di_set_connect_info_cb(fake_connect_info);
+    di_set_link_detail_cb(fake_link_detail);
+    fake_originate = true;
+    fake_report = (v250_connect_report_t) { "V90", 52000, 31200, "LAPM", 1, true, true };
+    expect(dte, "ATD1", "");
+    di_on_connected(52000);
+    collect(dte, buf, sizeof(buf), 150);
+    send_str(dte, "hello");
+    {
+        char got[16];
+
+        engine_reads(got, 5, 500);
+    }
+    di_write_data((const uint8_t *) "worlds", 6);
+    collect(dte, buf, sizeof(buf), 100);
+    di_on_disconnected_cause("Remote (call cleared)", 1);
+    collect(dte, buf, sizeof(buf), 150);
+    exchange(dte, "ATI6", buf, sizeof(buf));
+    check(strstr(buf, "Originate, ended") && strstr(buf, "Modulation         V90")
+          && strstr(buf, "TX 52000  RX 31200") && strstr(buf, "V.42 LAPM")
+          && strstr(buf, "V.42bis TX RX") && strstr(buf, "Octets to line     5\r")
+          && strstr(buf, "Octets to DTE      6\r") && strstr(buf, "Remote (call cleared)"),
+          "ATI6 after the call: direction, carrier, rates, protocols, octets, cause");
+    if (!strstr(buf, "Remote (call cleared)"))
+        printf("       got \"%s\"\n", buf);
+    expect(dte, "ATI11", "V.92               no");
+
+    /* An answered call that the DTE ended itself. */
+    fake_report = (v250_connect_report_t) { "V34", 28800, 0, "NONE", 0, false, false };
+    fake_originate = false;
+    di_on_ring();
+    collect(dte, buf, sizeof(buf), 100);
+    di_on_connected(28800);
+    collect(dte, buf, sizeof(buf), 150);
+    exchange(dte, "ATI6", buf, sizeof(buf));        /* on the combined port this is data */
+    di_on_disconnected();
+    collect(dte, buf, sizeof(buf), 150);
+    exchange(dte, "ATI6", buf, sizeof(buf));
+    check(strstr(buf, "Answer, ended") && strstr(buf, "Rate               28800")
+          && strstr(buf, "None (V.14)") && strstr(buf, "Compression        None"),
+          "ATI6 for an answered, unprotected call");
+
+    /* A call the modem gave up on before CONNECT replaces the older record. */
+    di_on_disconnected_cause("Modem (protocol or training failure)", 1);
+    collect(dte, buf, sizeof(buf), 150);
+    exchange(dte, "ATI6", buf, sizeof(buf));
+    check(strstr(buf, "Originate, failed before data mode")
+          && strstr(buf, "Modem (protocol or training failure)") && !strstr(buf, "28800"),
+          "ATI6 after a call that failed before data mode");
+    expect(dte, "ATI11", "failed before data mode");
+
+    di_set_connect_info_cb(NULL);
+    di_set_link_detail_cb(NULL);
+    close(dte);
+    di_close();
+}
+
 int main(void)
 {
     test_classic();
     test_split();
     test_v250_parameters();
+    test_help();
     printf("%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures, failures == 1 ? "" : "s");
     return failures != 0;
 }

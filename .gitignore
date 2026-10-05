@@ -208,3 +208,5 @@ v92_tone_a_test
 
 /console_test
 /v250_ctl_test
+
+/build_version.h

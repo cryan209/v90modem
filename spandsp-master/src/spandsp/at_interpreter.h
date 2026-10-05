@@ -109,7 +109,17 @@ enum at_modem_control_operation_e
         the command text after the '+' ("ES=3,0,2", "ES?" or "ES=?").  The handler
         stores or rejects the setting and may answer a read or test with
         at_put_response(); a negative return makes the command line ERROR. */
-    AT_MODEM_CONTROL_PARAMETER
+    AT_MODEM_CONTROL_PARAMETER,
+    /*! Manufacturer "$" help (Courier style).  num is the topic: "" for AT$,
+        or "D", "&", "+", "I" or "S" for AT D$, &$, +$, I$ and S$.  The handler
+        writes the page with at_put_response() and returns a positive value;
+        zero or negative answers ERROR (no such page). */
+    AT_MODEM_CONTROL_HELP,
+    /*! V.250 6.1.3 ATI<n>.  num is the decimal value.  Return a positive value
+        when the application has answered it with at_put_response(), zero to
+        let the interpreter answer (I0 model, I3 manufacturer), or a negative
+        value for ERROR. */
+    AT_MODEM_CONTROL_INFO
 };
 
 enum

@@ -1182,7 +1182,24 @@ static const char *at_cmd_I(at_state_t *s, const char *t)
        variable. It was widely used in different ways before the AT command
        set was standardised by the ITU. */
     t += 1;
-    switch (val = parse_num(&t, 255))
+    if ((val = parse_num(&t, 255)) < 0)
+        return NULL;
+    /*endif*/
+    {
+        char num[4];
+        int r;
+
+        /* The application gets the first word: ATI pages beyond the two below
+           are its business (product, settings, link diagnostics). */
+        snprintf(num, sizeof(num), "%d", val);
+        if ((r = at_modem_control(s, AT_MODEM_CONTROL_INFO, num)) < 0)
+            return NULL;
+        /*endif*/
+        if (r > 0)
+            return t;
+        /*endif*/
+    }
+    switch (val)
     {
     case 0:
         at_put_response(s, model);
@@ -5746,6 +5763,27 @@ SPAN_DECLARE(void) at_interpreter(at_state_t *s, const char *cmd, int len)
                     t = s->line + 2;
                     while (t  &&  *t)
                     {
+                        /* Manufacturer "$" help, Courier style: AT$, ATD$, AT&$,
+                           AT+$, ATI$, ATS$.  None of these is a command name
+                           V.250 uses, and +MS$ (which is) has its own handler. */
+                        if (t[0] == '$'
+                            ||
+                            (t[1] == '$'  &&  strchr("D&+IS", t[0])))
+                        {
+                            char topic[2];
+
+                            topic[0] = (t[0] == '$')  ?  '\0'  :  t[0];
+                            topic[1] = '\0';
+                            if (at_modem_control(s, AT_MODEM_CONTROL_HELP, topic) <= 0)
+                            {
+                                t = NULL;
+                                break;
+                            }
+                            /*endif*/
+                            t += (t[0] == '$')  ?  1  :  2;
+                            continue;
+                        }
+                        /*endif*/
                         if ((entry = command_search(t, &matched)) <= 0)
                             break;
                         /*endif*/

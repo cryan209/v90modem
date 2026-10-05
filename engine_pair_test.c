@@ -15,6 +15,7 @@
  *                    [--both-env K=V] [--call-env K=V] [--answer-env K=V]
  *                    [--both-at CMD] [--call-at CMD] [--answer-at CMD]
  *                    [--both-expect SEQ] [--call-expect SEQ] [--answer-expect SEQ]
+ *                    [--both-after CMD] [--call-after CMD] [--answer-after CMD]
  *                    [--expect-hangup]
  *
  * SEQ is "A|B|C": those strings must appear in that side's DTE stream, in that
@@ -25,7 +26,10 @@
  * --X-absent CONNECT; the far end of a one-sided refusal can still connect).
  *
  * The AT commands are sent to that side's PTY before the call starts, each
- * required to answer OK -- the way a DTE configures a modem (AT+MS).
+ * required to answer OK -- the way a DTE configures a modem (AT+MS).  The
+ * --X-after commands are sent once the call phase is over (ATI6, say): a side
+ * still in online data is first escaped with a guarded "+++", and the replies
+ * join that side's DTE stream, so --X-expect can grade them.
  *
  * MOD is the engine's modulation name (V32BIS, V22BIS, V34, ...).
  */
@@ -57,6 +61,8 @@ typedef struct {
     int n_env;
     const char *at[MAX_ENV];
     int n_at;
+    const char *after[MAX_ENV];
+    int n_after;
     const char *seq[MAX_ENV];
     int n_seq;
     const char *absent[MAX_ENV];
@@ -227,6 +233,16 @@ int main(int argc, char **argv)
                 if ((both || k == which) && side[k].n_at < MAX_ENV)
                     side[k].at[side[k].n_at++] = cmd;
             }
+        } else if ((!strcmp(argv[i], "--call-after") || !strcmp(argv[i], "--answer-after")
+                    || !strcmp(argv[i], "--both-after")) && i + 1 < argc) {
+            int both = argv[i][2] == 'b';
+            int which = argv[i][2] == 'c' ? 0 : 1;
+            const char *cmd = argv[++i];
+
+            for (int k = 0; k < 2; k++) {
+                if ((both || k == which) && side[k].n_after < MAX_ENV)
+                    side[k].after[side[k].n_after++] = cmd;
+            }
         } else if (!strcmp(argv[i], "--expect-hangup")) {
             expect_hangup = 1;
         } else if ((!strcmp(argv[i], "--call-expect") || !strcmp(argv[i], "--answer-expect")
@@ -262,7 +278,8 @@ int main(int argc, char **argv)
         } else {
             fprintf(stderr, "usage: %s [--alaw] [--seconds N] [--expect MOD] [--expect-connect RATE] "
                     "[--both-env K=V] [--call-env K=V] [--answer-env K=V]\n"
-                    "       [--both-at CMD] [--call-at CMD] [--answer-at CMD]\n", argv[0]);
+                    "       [--both-at CMD] [--call-at CMD] [--answer-at CMD]\n"
+                    "       [--both-after CMD] [--call-after CMD] [--answer-after CMD]\n", argv[0]);
             return 2;
         }
     }
@@ -359,6 +376,40 @@ int main(int argc, char **argv)
             usleep(1000);
     }
 
+    /* Questions for the DTE to ask after the call phase (ATI6...).  The peers
+       are still running; the AT interpreter is on their PTY reader thread, so
+       it answers without the frame loop. */
+    for (int k = 0; k < 2; k++) {
+        side_t *s = &side[k];
+
+        if (s->n_after == 0)
+            continue;
+        poll_dte(s, frames);
+        if (s->connect_frame >= 0 && !strstr(s->dte, "NO CARRIER")) {
+            size_t mark = s->dte_len;
+
+            /* V.250 TIES: a second of silence, "+++", a second of silence. */
+            usleep(1100000);
+            write_full(s->pty_fd, "+++", 3);
+            for (int w = 0; w < 300 && !strstr(s->dte + mark, "OK"); w++) {
+                usleep(10000);
+                poll_dte(s, frames);
+            }
+        }
+        for (int i = 0; i < s->n_after; i++) {
+            char line[128];
+            int n = snprintf(line, sizeof(line), "%s\r", s->after[i]);
+            size_t mark = s->dte_len;
+
+            write_full(s->pty_fd, line, (size_t) n);
+            for (int w = 0; w < 200 && !strstr(s->dte + mark, "OK\r")
+                 && !strstr(s->dte + mark, "ERROR"); w++) {
+                usleep(10000);
+                poll_dte(s, frames);
+            }
+        }
+    }
+
     for (int k = 0; k < 2; k++) {
         close(side[k].to_fd);
         waitpid(side[k].pid, NULL, 0);
@@ -441,6 +492,12 @@ int main(int argc, char **argv)
         for (int k = 0; k < 2; k++) {
             printf("  %s DTE received %zu bytes:\n", side[k].name, side[k].dte_len);
             fwrite(side[k].dte, 1, side[k].dte_len > 600 ? 600 : side[k].dte_len, stdout);
+            if (side[k].dte_len > 600) {
+                size_t tail = side[k].dte_len - 600 > 1200 ? 1200 : side[k].dte_len - 600;
+
+                printf("\n  ... last %zu bytes:\n", tail);
+                fwrite(side[k].dte + side[k].dte_len - tail, 1, tail, stdout);
+            }
             printf("\n");
         }
         printf("  logs: %s %s\n", side[0].log_path, side[1].log_path);

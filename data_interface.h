@@ -90,9 +90,24 @@ void di_on_connected(int rate);
 
 /*
  * Called by the modem engine when the call ends.
- * Sends NO CARRIER and returns to command/idle state.
+ * Sends NO CARRIER and returns to command/idle state.  The _cause form names
+ * why, for ATI6 ("Remote", "Modem: ..."), and which end placed the call
+ * (1/0, or -1 if unknown); a hang-up the DTE asked for (ATH) is recorded as
+ * such whatever the engine says.  A call that ends before CONNECT is recorded
+ * too, as a failed attempt.
  */
 void di_on_disconnected(void);
+void di_on_disconnected_cause(const char *cause, int originate);
+
+/*
+ * ATI11: engine detail for the call, latched at CONNECT (the engine's own
+ * state is gone by the time the DTE asks, after NO CARRIER).  Called from
+ * di_on_connected(), i.e. in the engine's context, like the connect-info
+ * callback; it writes plain lines separated by CR LF, and says which end
+ * placed the call (the engine knows; an ATD is not the only way to dial).
+ */
+typedef void (*di_link_detail_cb_t)(char *out, size_t len, bool *originate);
+void di_set_link_detail_cb(di_link_detail_cb_t cb);
 
 /*
  * Called by the modem engine when an incoming call rings.

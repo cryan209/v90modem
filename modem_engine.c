@@ -8037,6 +8037,37 @@ static void me_connect_info(int rate, v250_connect_report_t *r)
     r->dc_rx = crx;
 }
 
+/* ATI11: engine detail for the call, latched by data_interface.c at CONNECT
+   (same context as me_connect_info() above).  Plain facts the engine holds;
+   nothing here is measured for the purpose. */
+static void me_link_detail(char *out, size_t len, bool *originate)
+{
+    size_t used = 0;
+    int n;
+
+    *originate = g_calling_party;
+#define DETAIL(...) do { \
+        if (used < len && (n = snprintf(out + used, len - used, __VA_ARGS__)) > 0) \
+            used += (size_t) n < len - used ? (size_t) n : len - used - 1; \
+    } while (0)
+    out[0] = '\0';
+    DETAIL("Mode               %s (offer %s)\r\n", g_mode_name, me_offer_str());
+    DETAIL("Role               %s, %s\r\n", g_calling_party ? "caller" : "answerer",
+           g_mod == ME_MOD_V90 ? (g_v90_analogue_role ? "V.90 analogue" : "PCM digital")
+                               : "analogue modulation");
+    DETAIL("V.92               %s\r\n", g_v92_active ? "active" : "no");
+    DETAIL("G.711 law          %s\r\n", g_law == ME_LAW_ALAW ? "A-law (PCMA)" : "u-law (PCMU)");
+    if (g_report_tx_rate > 0)
+        DETAIL("Rate               TX %d  RX %d\r\n", g_report_tx_rate, g_report_rx_rate);
+    DETAIL("Framing            %s\r\n",
+           g_data_framing == DS_FRAMING_V42
+               ? (g_data_lapm_detect ? "V.42 LAPM, detection phase" : "V.42 LAPM, no detection")
+               : "V.14 buffered");
+    DETAIL("EC fallback        %s\r\n", g_ec_fallback_ok ? "allowed (buffered)" : "disconnect");
+    DETAIL("Training retrains  %u", g_training_fail_retrains);
+#undef DETAIL
+}
+
 void me_init(void)
 {
     pthread_mutex_init(&g_state_mtx, NULL);
@@ -8061,6 +8092,7 @@ void me_init(void)
         di_set_modulation_ops(me_set_modulation_offer, me_get_modulation_offer,
                               me_reset_modulation_offer);
         di_set_connect_info_cb(me_connect_info);
+        di_set_link_detail_cb(me_link_detail);
 
         ME_LOG("[ME] Modem mode: %s (V.8 offer %s)\n", g_mode_name,
                me_offer_str());
@@ -8491,6 +8523,7 @@ void me_on_sip_disconnected(void)
     g_v8_answer_tone_retry_done = false;
 
     me_state_t prev = g_state;
+    bool was_caller = g_calling_party;
     g_state = ME_IDLE;
     g_mod   = ME_MOD_NONE;
     g_calling_party = false;
@@ -8502,7 +8535,9 @@ void me_on_sip_disconnected(void)
        for it as much as for the far end dropping.  A hang-up the DTE asked for
        is already accounted for by data_interface.c. */
     if (prev == ME_DATA || prev == ME_TRAINING || prev == ME_V8 || prev == ME_HANGUP)
-        di_on_disconnected();
+        di_on_disconnected_cause(prev == ME_HANGUP
+                                 ? "Modem (protocol or training failure)"
+                                 : "Remote (call cleared)", was_caller);
 }
 
 /* ------------------------------------------------------------------ */

@@ -143,6 +143,33 @@ and X2, whose digital symmetric mode carries 64000 both ways; only the
 asymmetric x2 session exists here); they are stored and reported, not enforced -- rates come from training (`V32`'s 9600 cap is the one exception, since V.32 has no higher rate).
 `ME_K56FLEX` and `ME_V8_ADVERTISE_V91`, when set, override `AT+MS`.
 
+### On-line help and ATI pages
+
+Courier-style `$` help lists what this modem actually does with each command,
+including the ones it accepts and ignores (a pty has no DCD or DTR line, a SIP
+call has no speaker or dial pause):
+
+| Command | Page |
+|---|---|
+| `AT$`  | basic commands, and how to reach every other page |
+| `ATD$` | dial modifiers (commas are dropped: a SIP call has no pause) |
+| `AT&$` | ampersand commands |
+| `AT+$` | extended commands, with the ones not yet applied named |
+| `AT+MS$` | modulations (above) |
+| `ATI$` | the ATI pages |
+| `ATS$` | S-registers with their current values |
+
+| ATI | Shows |
+|---|---|
+| `ATI0` / `ATI3` | product / build version (`git describe`) |
+| `ATI4` | current settings: E/Q/V/X/&C/&D, S-registers, +FCLASS, +MS, +MR/+ER/+DR/+ES/+DS, console |
+| `ATI6` | link diagnostics for the current or last call: direction, carrier, rates, error control, compression, octets each way, duration, disconnect reason (also for a call that failed before data mode) |
+| `ATI7` | product configuration: line, modulations, protocols, fax classes, diagnostics |
+| `ATI11` | engine detail for the last call: mode and offer, role, V.92, G.711 law, framing, fallback, training retrains |
+
+ATI6 and ATI11 can be read after NO CARRIER; on the combined port, use a
+guarded `+++` to read them mid-call.
+
 CLEAR and V120 need the bearer byte-exact end to end and both ends set alike
 -- there is no negotiation, as on ISDN. Two instances of this server reach
 data with them over SIP; see `docs/clear_channel_v120.md`.

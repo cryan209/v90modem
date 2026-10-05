@@ -23,11 +23,14 @@
 #include "at_ms.h"
 #include "v250_ctl.h"
 #include "at_test.h"
+#include "at_help.h"
+#include "build_version.h"
 
 #include <spandsp.h>
 #include <spandsp/private/logging.h>
 #include <spandsp/private/at_interpreter.h>
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -185,6 +188,34 @@ static bool             ms_cur_valid;
 static v250_ctl_t        v250;
 static pthread_mutex_t   v250_mtx = PTHREAD_MUTEX_INITIALIZER;
 static di_connect_info_cb_t connect_info_cb;
+
+/* ATI6/ATI11: the current or last call, as a DTE asks about it after NO
+ * CARRIER.  Under test_mtx -- a leaf the AT path already takes, and the lock
+ * di_read_data()/di_write_data() hold when they count the octets. */
+typedef struct {
+    bool valid;             /* a call has connected or failed since power-on */
+    bool active;
+    bool failed;            /* it ended before CONNECT */
+    bool originate;
+    bool fax;
+    int64_t start_ms;
+    int64_t end_ms;
+    int rate;               /* the CONNECT rate */
+    char carrier[16];
+    char ec[8];
+    int tx_rate;
+    int rx_rate;
+    int dc_scheme;
+    bool dc_tx;
+    bool dc_rx;
+    uint64_t to_line;       /* DTE octets handed to the engine */
+    uint64_t to_dte;        /* line octets delivered to the DTE */
+    char cause[64];
+    char detail[1024];      /* the engine's ATI11 text */
+} di_link_t;
+static di_link_t link_now;
+static bool link_next_originate;
+static di_link_detail_cb_t link_detail_cb;
 /* at_interpreter.c's private NO_RESULT_CODES (ATQ1). */
 #define DI_NO_RESULT_CODES 3
 
@@ -468,6 +499,273 @@ static int handle_diagnostic(const char *command)
     return result;
 }
 
+/* ------------------------------------------------------------------ */
+/* "$" help and ATI pages                                              */
+/* ------------------------------------------------------------------ */
+
+/* Power-on: ATI6/ATI11 have no call to report until one connects. */
+static void link_reset(void)
+{
+    pthread_mutex_lock(&test_mtx);
+    memset(&link_now, 0, sizeof(link_now));
+    link_next_originate = false;
+    pthread_mutex_unlock(&test_mtx);
+}
+
+void di_set_link_detail_cb(di_link_detail_cb_t cb)
+{
+    link_detail_cb = cb;
+}
+
+/* At CONNECT, in the engine's context (so the detail callback may read the
+ * engine's state).  The detail text is taken before test_mtx: the callback is
+ * the engine's, and nothing of the engine's is called under this leaf. */
+static void link_latch(int rate, const v250_connect_report_t *rep, bool fax)
+{
+    char detail[sizeof(link_now.detail)];
+    bool originate = false;
+    bool engine_knows = false;
+
+    detail[0] = '\0';
+    if (link_detail_cb && !fax) {
+        link_detail_cb(detail, sizeof(detail), &originate);
+        engine_knows = true;
+    }
+    pthread_mutex_lock(&test_mtx);
+    link_now.valid = true;
+    link_now.active = true;
+    link_now.originate = engine_knows ? originate : link_next_originate;
+    link_now.fax = fax;
+    link_now.start_ms = now_ms();
+    link_now.end_ms = 0;
+    link_now.rate = rate;
+    snprintf(link_now.carrier, sizeof(link_now.carrier), "%s",
+             fax ? "FAX" : (rep->carrier ? rep->carrier : "-"));
+    snprintf(link_now.ec, sizeof(link_now.ec), "%s", rep->ec ? rep->ec : "NONE");
+    link_now.tx_rate = rep->tx_rate > 0 ? rep->tx_rate : rate;
+    link_now.rx_rate = rep->rx_rate;
+    link_now.dc_scheme = rep->dc_scheme;
+    link_now.dc_tx = rep->dc_tx;
+    link_now.dc_rx = rep->dc_rx;
+    link_now.to_line = 0;
+    link_now.to_dte = 0;
+    link_now.cause[0] = '\0';
+    snprintf(link_now.detail, sizeof(link_now.detail), "%s", detail);
+    pthread_mutex_unlock(&test_mtx);
+}
+
+/* at_put_response() frames the text with its own line ends. */
+static void put_page(char *text)
+{
+    size_t n = strlen(text);
+
+    while (n > 0 && (text[n - 1] == '\r' || text[n - 1] == '\n'))
+        text[--n] = '\0';
+    at_put_response(at, text);
+}
+
+static int handle_help(const char *topic)
+{
+    char buf[4096];
+
+    if (!topic || at_help_format(topic, at ? at->p.s_regs : NULL, buf, sizeof(buf)) < 0)
+        return -1;
+    put_page(buf);
+    return 1;
+}
+
+typedef struct {
+    char *p;
+    size_t left;
+} page_t;
+
+static void page_put(page_t *pg, const char *fmt, ...)
+{
+    va_list ap;
+    int n;
+
+    if (pg->left == 0)
+        return;
+    va_start(ap, fmt);
+    n = vsnprintf(pg->p, pg->left, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+        return;
+    if ((size_t) n >= pg->left)
+        n = (int) pg->left - 1;
+    pg->p += n;
+    pg->left -= (size_t) n;
+}
+
+static const char *console_desc(char *buf, size_t len)
+{
+    if (split_mode)
+        snprintf(buf, len, "control %s, data %s",
+                 ctrl_pty.symlink_path[0] ? ctrl_pty.symlink_path : ctrl_pty.slave_name,
+                 data_pty.symlink_path[0] ? data_pty.symlink_path : data_pty.slave_name);
+    else
+        snprintf(buf, len, "combined %s",
+                 ctrl_pty.symlink_path[0] ? ctrl_pty.symlink_path : ctrl_pty.slave_name);
+    return buf;
+}
+
+/* ATI4: the settings the next call will use, in the commands that set them. */
+static void info_settings(page_t *pg)
+{
+    static const char *const fclass[] = { "0", "1", "1.0", "2.0" };
+    static const int sregs[] = { 0, 3, 4, 5, 6, 7, 8, 10 };
+    static const char *const v250_reads[] = { "MR?", "ER?", "DR?", "ES?", "DS?" };
+    char line[160];
+    v250_ctl_t cfg;
+
+    page_put(pg, "Current Settings...\r\n");
+    page_put(pg, "E%d Q%d V%d X%d &C%d &D%d %s\r\n",
+             at->p.echo ? 1 : 0, at->p.result_code_format == DI_NO_RESULT_CODES ? 1 : 0,
+             at->p.verbose ? 1 : 0, at->result_code_mode, at->rlsd_behaviour,
+             at->dtr_behaviour, at->p.pulse_dial ? "P" : "T");
+    for (size_t i = 0; i < sizeof(sregs) / sizeof(sregs[0]); i++)
+        page_put(pg, "S%02d=%03d%s", sregs[i], at->p.s_regs[sregs[i]],
+                 i + 1 < sizeof(sregs) / sizeof(sregs[0]) ? " " : "\r\n");
+    page_put(pg, "+FCLASS=%s\r\n",
+             at->fclass_mode >= 0 && at->fclass_mode < 4 ? fclass[at->fclass_mode] : "?");
+    if (ms_get_cb) {
+        at_ms_settings_t ms;
+
+        plus_ms_current(&ms);
+        at_ms_format_read(&ms, line, sizeof(line));
+        page_put(pg, "%s\r\n", line);
+    }
+    di_get_v250_settings(&cfg);
+    for (size_t i = 0; i < sizeof(v250_reads) / sizeof(v250_reads[0]); i++) {
+        v250_ctl_t copy = cfg;
+
+        if (v250_ctl_command(&copy, v250_reads[i], line, sizeof(line)) == V250_CTL_OK)
+            page_put(pg, "%s%s", line, i + 1 < sizeof(v250_reads) / sizeof(v250_reads[0]) ? "  " : "\r\n");
+    }
+    page_put(pg, "Console: %s\r\n", console_desc(line, sizeof(line)));
+}
+
+static void fmt_duration(char *buf, size_t len, int64_t ms)
+{
+    int64_t s = ms / 1000;
+
+    snprintf(buf, len, "%02lld:%02lld:%02lld",
+             (long long) (s / 3600), (long long) ((s / 60) % 60), (long long) (s % 60));
+}
+
+/* ATI6: the current or last call, after the Courier's link diagnostics. */
+static void info_link(page_t *pg)
+{
+    di_link_t l;
+    char dur[32];
+
+    pthread_mutex_lock(&test_mtx);
+    l = link_now;
+    pthread_mutex_unlock(&test_mtx);
+    page_put(pg, "Link Diagnostics...\r\n");
+    if (!l.valid) {
+        page_put(pg, "No call since power-on.\r\n");
+        return;
+    }
+    fmt_duration(dur, sizeof(dur), (l.active ? now_ms() : l.end_ms) - l.start_ms);
+    page_put(pg, "Call               %s, %s\r\n", l.originate ? "Originate" : "Answer",
+             l.active ? "in progress" : l.failed ? "failed before data mode" : "ended");
+    if (l.failed) {
+        page_put(pg, "Disconnect reason  %s\r\n", l.cause);
+        return;
+    }
+    page_put(pg, "Modulation         %s\r\n", l.carrier);
+    if (l.rx_rate > 0 && l.rx_rate != l.tx_rate)
+        page_put(pg, "Rate               TX %d  RX %d\r\n", l.tx_rate, l.rx_rate);
+    else
+        page_put(pg, "Rate               %d\r\n", l.tx_rate);
+    page_put(pg, "CONNECT rate       %d\r\n", l.rate);
+    if (!l.fax) {
+        page_put(pg, "Error control      %s\r\n", strcmp(l.ec, "LAPM") ? "None (V.14)" : "V.42 LAPM");
+        if (l.dc_scheme == 0 || (!l.dc_tx && !l.dc_rx))
+            page_put(pg, "Compression        None\r\n");
+        else
+            page_put(pg, "Compression        %s%s%s\r\n", l.dc_scheme == 2 ? "V.44" : "V.42bis",
+                     l.dc_tx ? " TX" : "", l.dc_rx ? " RX" : "");
+        page_put(pg, "Octets to line     %llu\r\n", (unsigned long long) l.to_line);
+        page_put(pg, "Octets to DTE      %llu\r\n", (unsigned long long) l.to_dte);
+    }
+    page_put(pg, "Duration           %s\r\n", dur);
+    page_put(pg, "Disconnect reason  %s\r\n", l.active ? "-" : l.cause);
+}
+
+/* ATI7: what this build can do. */
+static void info_config(page_t *pg)
+{
+    char line[512];
+
+    page_put(pg, "Product Configuration...\r\n");
+    page_put(pg, "Product            v90modem %s\r\n", V90MODEM_VERSION);
+    page_put(pg, "Line               SIP, G.711 PCMU/PCMA, byte-exact passthrough\r\n");
+    at_ms_format_test(line, sizeof(line));
+    page_put(pg, "Modulations        %s\r\n", line);
+    page_put(pg, "Error control      V.42 LAPM, buffered (V.14)\r\n");
+    page_put(pg, "Compression        V.42bis (+DS); V.44 by ME_DATA_COMPRESSION=v44\r\n");
+    page_put(pg, "Fax                Class 1, 1.0 (T.31), 2.0 (T.32)\r\n");
+    page_put(pg, "Diagnostics        +TLDL loop, +TTER/+TNUM error test, +TSELF\r\n");
+    page_put(pg, "Console            %s\r\n", console_desc(line, sizeof(line)));
+}
+
+/* ATI11: the engine's own detail, latched at CONNECT. */
+static void info_link_detail(page_t *pg)
+{
+    di_link_t l;
+
+    pthread_mutex_lock(&test_mtx);
+    l = link_now;
+    pthread_mutex_unlock(&test_mtx);
+    page_put(pg, "Extended Link Diagnostics...\r\n");
+    if (!l.valid)
+        page_put(pg, "No call since power-on.\r\n");
+    else if (l.failed)
+        page_put(pg, "The last call failed before data mode (see ATI6).\r\n");
+    else if (l.fax)
+        page_put(pg, "Fax call: see the +F session reports.\r\n");
+    else if (!l.detail[0])
+        page_put(pg, "The engine reported no detail for this call.\r\n");
+    else
+        page_put(pg, "%s\r\n", l.detail);
+}
+
+static int handle_info(const char *num)
+{
+    char buf[4096];
+    page_t pg = { buf, sizeof(buf) };
+
+    if (!num || !at)
+        return 0;
+    buf[0] = '\0';
+    switch (atoi(num)) {
+    case 0:
+        page_put(&pg, "v90modem SIP V.90/V.92 data and fax modem");
+        break;
+    case 3:
+        page_put(&pg, "v90modem %s", V90MODEM_VERSION);
+        break;
+    case 4:
+        info_settings(&pg);
+        break;
+    case 6:
+        info_link(&pg);
+        break;
+    case 7:
+        info_config(&pg);
+        break;
+    case 11:
+        info_link_detail(&pg);
+        break;
+    default:
+        return 0;           /* the interpreter's: ERROR */
+    }
+    put_page(buf);
+    return 1;
+}
+
 static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
                                     int op, const char *num)
 {
@@ -476,11 +774,17 @@ static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
 
     switch (op) {
     case AT_MODEM_CONTROL_CALL:
+        pthread_mutex_lock(&test_mtx);
+        link_next_originate = true;
+        pthread_mutex_unlock(&test_mtx);
         if (dial_cb && num && num[0])
             dial_cb(num, cb_user_data);
         break;
 
     case AT_MODEM_CONTROL_ANSWER:
+        pthread_mutex_lock(&test_mtx);
+        link_next_originate = false;
+        pthread_mutex_unlock(&test_mtx);
         if (answer_cb)
             answer_cb(cb_user_data);
         break;
@@ -514,6 +818,12 @@ static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
 
     case AT_MODEM_CONTROL_PARAMETER:
         return handle_v250_parameter(num);
+
+    case AT_MODEM_CONTROL_HELP:
+        return handle_help(num);
+
+    case AT_MODEM_CONTROL_INFO:
+        return handle_info(num);
 
     case AT_MODEM_CONTROL_RESUME:
         /* V.250 6.3.7.  With a separate data port there is no online data
@@ -889,6 +1199,7 @@ static int di_start(void)
 
 int di_open(const char *link_path)
 {
+    link_reset();
     split_mode = 0;
     if (di_pty_open(&ctrl_pty, link_path, "modem") < 0)
         return -1;
@@ -901,6 +1212,7 @@ int di_open(const char *link_path)
 
 int di_open_split(const char *control_link_path, const char *data_link_path)
 {
+    link_reset();
     split_mode = 1;
     if (di_pty_open(&ctrl_pty, control_link_path, "control") < 0)
         return -1;
@@ -948,6 +1260,17 @@ void di_set_callbacks(di_dial_cb_t   dial,
 void di_on_connected(int rate)
 {
     char msg[64];
+    v250_connect_report_t rep;
+    bool fax = fc2_active() || di_fax_active();
+
+    /* What the call settled on, asked once: it feeds the +MCR/+ER/+DR reports
+     * below and ATI6, which the DTE may read after the call (or with ATQ1). */
+    memset(&rep, 0, sizeof(rep));
+    rep.tx_rate = rate;
+    rep.ec = "NONE";
+    if (connect_info_cb && !fax)
+        connect_info_cb(rate, &rep);
+    link_latch(rate, &rep, fax);
 
     diagnostic_reset(false);
     pthread_mutex_lock(&test_mtx);
@@ -987,15 +1310,10 @@ void di_on_connected(int rate)
      * reports go out at the point the DCE has settled them, in that order, and
      * before CONNECT.  They are result codes, so ATQ1 silences them. */
     if (connect_info_cb && at && at->p.result_code_format != DI_NO_RESULT_CODES) {
-        v250_connect_report_t rep;
         v250_ctl_t cfg;
         char text[256];
         size_t n;
 
-        memset(&rep, 0, sizeof(rep));
-        rep.tx_rate = rate;
-        rep.ec = "NONE";
-        connect_info_cb(rate, &rep);
         di_get_v250_settings(&cfg);
         n = v250_ctl_format_report(&cfg, &rep, text, sizeof(text));
         if (n)
@@ -1009,8 +1327,29 @@ void di_on_connected(int rate)
 
 void di_on_disconnected(void)
 {
+    di_on_disconnected_cause(NULL, -1);
+}
+
+void di_on_disconnected_cause(const char *cause, int originate)
+{
     int local = local_hangup;
 
+    pthread_mutex_lock(&test_mtx);
+    if (!link_now.active) {
+        /* Ended before CONNECT: ATI6 reports the attempt, not an older call. */
+        memset(&link_now, 0, sizeof(link_now));
+        link_now.valid = true;
+        link_now.failed = true;
+        link_now.originate = originate >= 0 ? originate != 0 : link_next_originate;
+        link_now.start_ms = now_ms();
+        snprintf(link_now.carrier, sizeof(link_now.carrier), "-");
+        snprintf(link_now.ec, sizeof(link_now.ec), "NONE");
+    }
+    link_now.active = false;
+    link_now.end_ms = now_ms();
+    snprintf(link_now.cause, sizeof(link_now.cause), "%s",
+             local ? "Local (ATH)" : (cause ? cause : "Remote or line"));
+    pthread_mutex_unlock(&test_mtx);
     local_hangup = 0;
     connected = 0;
     diagnostic_reset(false);
@@ -1037,6 +1376,9 @@ void di_on_disconnected(void)
 
 void di_on_ring(void)
 {
+    pthread_mutex_lock(&test_mtx);
+    link_next_originate = false;
+    pthread_mutex_unlock(&test_mtx);
     if (di_fax_active()) {
         pthread_mutex_lock(&t31_mtx);
         t31_call_event(t31, AT_CALL_EVENT_ALERTING);
@@ -1051,6 +1393,7 @@ int di_read_data(uint8_t *buf, int max_len)
         return 0;
     pthread_mutex_lock(&test_mtx);
     int n=diagnostics.local_loop?0:ring_read(&upstream_ring,buf,max_len);
+    if(n>0)link_now.to_line+=(uint64_t)n;
     pthread_mutex_unlock(&test_mtx);
     return n;
 }
@@ -1065,7 +1408,10 @@ int di_write_data(const uint8_t *buf, int len)
     int fd=data_master_fd();
     if(diagnostics.local_loop)n=len;
     else if(fd<0 || !data_port_active())n=0;
-    else n=(int)write(fd,buf,(size_t)len);
+    else {
+        n=(int)write(fd,buf,(size_t)len);
+        if(n>0)link_now.to_dte+=(uint64_t)n;
+    }
     pthread_mutex_unlock(&test_mtx);
     return n;
 }

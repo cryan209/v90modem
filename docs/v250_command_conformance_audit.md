@@ -55,6 +55,25 @@ because the previous state was ME_HANGUP, so the DTE was never told
 ATH, which is answered by OK. `ATO` also now follows 6.3.7 (NO CARRIER with no
 call, ERROR for a value other than 0).
 
+## Help and identification (2026-10-06)
+
+Manufacturer extensions, not V.250 clauses: Courier-style `AT$`, `ATD$`, `AT&$`,
+`AT+$`, `ATI$` and `ATS$` (`at_help.c`; `+MS$` stays in `at_ms.c`). The
+interpreter routes them through a new `AT_MODEM_CONTROL_HELP` op before its
+command search; none is a name V.250 reserves. `ATI<n>` now asks the
+application first (`AT_MODEM_CONTROL_INFO`, 6.1.3 leaves the content to the
+manufacturer): I0 product, I3 build version, I4 settings, I6 link diagnostics,
+I7 configuration, I11 engine detail. Every help row carries a probe command and
+`console_test` requires each one to answer OK, so the help cannot list a
+command the interpreter does not take; two `engine_pair_test` rows read
+ATI6/ATI11 back from two whole engines, including a call that failed before
+data mode. Also fixed: `ATD` commas reached the SIP INVITE's user part; they
+are now dropped.
+
+Found, not fixed here: the interpreter answers OK to any command it does not
+recognise (`ATS9?`, `ATK`, `AT+ZZZ`) where V.250 requires ERROR. That changes
+what existing DTE init strings get back, so it is a separate change.
+
 ## Method and confidence
 
 Trace: PTY -> SpanDSP AT interpreter -> `data_interface.c` -> modem engine /
