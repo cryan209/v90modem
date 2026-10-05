@@ -6495,7 +6495,16 @@ static void start_v22bis_training(void)
         g_v22bis = NULL;
     }
 
-    g_v22bis = v22bis_init(NULL, bps, V22BIS_GUARD_TONE_NONE, g_calling_party,
+    /* V.22 2.1 / V.22bis 2.1: an answer modem may be required by the
+       administration to send a guard tone, 1800 Hz 6 dB below the data or
+       550 Hz 3 dB below.  ME_V22_GUARD=1800|550 selects one; default none.
+       SpanDSP adds it on the answer side only and takes the aggregate power
+       to the configured level. */
+    int guard_hz = parse_env_int("ME_V22_GUARD", 0);
+    int guard = guard_hz == 1800 ? V22BIS_GUARD_TONE_1800HZ
+              : guard_hz == 550 ? V22BIS_GUARD_TONE_550HZ : V22BIS_GUARD_TONE_NONE;
+
+    g_v22bis = v22bis_init(NULL, bps, guard, g_calling_party,
                            v22bis_get_bit_cb, NULL,
                            v22bis_put_bit_cb, NULL);
     if (!g_v22bis)
