@@ -1088,10 +1088,23 @@ enum
 #define V32BIS_RENEG_DETECT_SYMBOLS 40
 
 /*! How far the coherent tone measurement has to stand above the received
-    signal's own rms before it is a tone rather than data.  A 20 sample
-    coherent sum of a pure tone is about 10 times its amplitude; of a
-    broadband signal, about 3 times its rms.  6 sits between them. */
-#define V32BIS_RENEG_TONE_RATIO     6.0f
+    signal's own rms before it is a tone rather than data, as a fraction of
+    what an ideal preamble gives.  A W sample coherent sum of a tone of
+    amplitude A is W*A/2, and N such tones have an rms of A*sqrt(N/2), so the
+    summed measurement of a clean preamble stands at W*sqrt(N/2) times the
+    rms: 14.1 for the call modem's AA (one line at 1800 Hz), 20 for the
+    answer modem's AC (two, at 600 and 3000 Hz).  Data is not 3 times the rms
+    per line as once assumed: the mean of a Rayleigh magnitude is
+    sqrt(pi*W/4) = 4.0 times it.  The ratio used to be a flat 6, which the
+    call modem's two-line sum of data exceeds on average (7.3, above 6 for 62%
+    of samples, measured on the engine pair's data), so it found 8.2's
+    preamble inside ordinary data on one engine pair call in five to eight,
+    depending on the bits, and started a renegotiation the far end had not
+    asked for.  At 0.7 of the ideal the longest run on data seen over 56 s of
+    it was 40 samples on either side against the 133 that
+    V32BIS_RENEG_DETECT_SYMBOLS needs, while a real preamble keeps 3 dB of
+    margin for echo and noise. */
+#define V32BIS_RENEG_TONE_FRACTION  0.7f
 
 /*! 8.1: R4 "shall indicate the desired rate in the initiating modem and all
     lower data signalling rates at which the initiating modem is enabled to
@@ -2596,6 +2609,10 @@ static int v32bis_reneg_watch(v32bis_state_t *s, const int16_t amp[], int len)
 {
     float mag;
     float rms;
+    /* The call modem watches for AC's two lines, the answer modem for AA's
+       one. */
+    const float threshold = V32BIS_RENEG_TONE_FRACTION*V32BIS_TONE_WINDOW
+                          *sqrtf((s->calling_party  ?  2.0f  :  1.0f)/2.0f);
     int i;
 
     for (i = 0;  i < len;  i++)
@@ -2618,8 +2635,15 @@ static int v32bis_reneg_watch(v32bis_state_t *s, const int16_t amp[], int len)
         /*endif*/
         s->rx_sample_count++;
         rms = sqrtf(s->reneg_watch_pow);
-        if (rms > 1.0f  &&  mag > V32BIS_RENEG_TONE_RATIO*rms)
-            s->reneg_preamble_run++;
+        if (rms > 1.0f  &&  mag > threshold*rms)
+        {
+            /* The block is scanned here before v17_rx() sees any of it, so
+               this is the frequency from before the data decoder was fed the
+               first sample of the run. */
+            if (s->reneg_preamble_run++ == 0)
+                s->reneg_rate_snap = s->rx.carrier_phase_rate;
+            /*endif*/
+        }
         else
             s->reneg_preamble_run = 0;
         /*endif*/
@@ -2631,6 +2655,20 @@ static int v32bis_reneg_watch(v32bis_state_t *s, const int16_t amp[], int len)
            decoder, even when a callback straddles the detection instant. */
         if (i > 0)
             v17_rx(&s->rx, amp, i);
+        /*endif*/
+        /* By now the data decoder has run on V32BIS_RENEG_DETECT_SYMBOLS
+           (plus the window) of preamble, and AA or AC is not data: its
+           decisions are wrong, and track_carrier()'s integrator has walked
+           the carrier frequency on them.  Nothing after this retrains it --
+           8 promises no retraining, and the rate signal and E are decided
+           against the one tap estimate below -- so the frequency comes back
+           to what it was before the run began.  Measured on
+           v32bis_duplex_test --reneg-only: with detection taken honestly ~46T
+           into the preamble, the call modem responding to the answer modem's
+           second renegotiation (call then answer, 12000 bit/s, both laws)
+           came back white without this; restoring the equalizer instead
+           changed nothing. */
+        s->rx.carrier_phase_rate = s->reneg_rate_snap;
         s->rx_sample_count += len - i - 1;
         s->reneg_preamble_run = 0;
         s->reneg_far_preamble = true;

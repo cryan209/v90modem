@@ -23,6 +23,12 @@
  *   aa        Neither modem runs V.8.  The call modem answers 1 s of plain
  *             ANS with AA (A.2.1.3) and the answer modem takes AA during its
  *             answer tone straight to AC (A.2.2).
+ *
+ * Every byte a DTE receives after CONNECT must belong to an intact line: junk
+ * ahead of the lines (bits demodulated before the modem trained) fails the
+ * run even when all 150 lines follow it.  PAIR_TAP_DIR=<dir> writes each
+ * side's transmit G.711 and everything its DTE received; PAIR_DUMP_DTE prints
+ * the head and tail of the latter.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -93,6 +99,7 @@ static int run_side(bool caller, bool alaw, int sock, const char *pty_link, int 
     int next_expected = 1;
     int intact = 0;
     int bad = 0;
+    int stray = 0;
     char peer = caller ? 'A' : 'C';
     char self = caller ? 'C' : 'A';
     int dte;
@@ -190,16 +197,21 @@ static int run_side(bool caller, bool alaw, int sock, const char *pty_link, int 
                 sent++;
         }
         if (connect_rate > 0) {
-            /* Count the peer's lines that have arrived complete and in order. */
+            /* Count the peer's lines that have arrived complete and in order.
+               The DTE stream is binary -- a receiver delivering anything else
+               would put NULs in it -- so this is bounded by rxlen and never
+               by the string functions, which would stop at the first NUL and
+               count nothing after it. */
             const char *p = rxtext + connect_at;
+            const char *end = rxtext + rxlen;
 
             next_expected = 1;
             intact = 0;
             bad = 0;
-            while ((p = strchr(p, peer)) != NULL) {
+            while ((p = memchr(p, peer, (size_t) (end - p))) != NULL) {
                 int num;
 
-                if (strlen(p) < LINE_LEN)
+                if (end - p < LINE_LEN)
                     break;
                 if (sscanf(p + 1, "%7d", &num) == 1 && p[8] == '\r' && p[9] == '\n') {
                     if (num == next_expected) {
@@ -211,6 +223,10 @@ static int run_side(bool caller, bool alaw, int sock, const char *pty_link, int 
                 }
                 p++;
             }
+            /* Everything the DTE received after CONNECT has to be the peer's
+               lines: nothing the modem demodulated before it trained may
+               reach the DTE (V.32bis 6.1/6.2, V.22bis 6.3.1.1.2 e)). */
+            stray = (rxlen - connect_at) - intact*LINE_LEN;
             if (sent == LINES && intact == LINES && done_ticks < 0)
                 done_ticks = tick;
         }
@@ -219,16 +235,33 @@ static int run_side(bool caller, bool alaw, int sock, const char *pty_link, int 
         if (done_ticks >= 0 && tick - done_ticks > 150)
             break;
     }
+    if (getenv("PAIR_TAP_DIR")) {
+        char path[512];
+        FILE *f;
+
+        snprintf(path, sizeof(path), "%s/%s-dte.bin", getenv("PAIR_TAP_DIR"),
+                 caller ? "call" : "answer");
+        if ((f = fopen(path, "wb")) != NULL) {
+            fwrite(rxtext, 1, (size_t) rxlen, f);
+            fclose(f);
+        }
+    }
     if (getenv("PAIR_DUMP_DTE")) {
         fprintf(stderr, "%s DTE received %d bytes:\n", caller ? "call" : "answer", rxlen);
         fwrite(rxtext, 1, (size_t) (rxlen > 400 ? 400 : rxlen), stderr);
+        if (rxlen > 400) {
+            int from = (rxlen - 120 > 400) ? rxlen - 120 : 400;
+
+            fprintf(stderr, "\n... last %d bytes:\n", rxlen - from);
+            fwrite(rxtext + from, 1, (size_t) (rxlen - from), stderr);
+        }
         fprintf(stderr, "\n");
     }
     me_get_diag_snapshot(&snap);
     fprintf(stderr, "%s: state=%s mod=%s CONNECT %d, sent %d lines, received %d of %d "
-            "intact and in order (%d out of sequence)\n",
+            "intact and in order (%d out of sequence, %d stray bytes)\n",
             caller ? "call  " : "answer", me_state_to_str(snap.state),
-            me_modulation_to_str(snap.modulation), connect_rate, sent, intact, LINES, bad);
+            me_modulation_to_str(snap.modulation), connect_rate, sent, intact, LINES, bad, stray);
     if (tap)
         fclose(tap);
     close(dte);
@@ -236,7 +269,7 @@ static int run_side(bool caller, bool alaw, int sock, const char *pty_link, int 
     shutdown(sock, SHUT_RDWR);
     close(sock);
     if (connect_rate != expected_bps || snap.modulation != ME_MOD_V32BIS
-        || sent != LINES || intact != LINES)
+        || sent != LINES || intact != LINES || stray != 0)
         return 1;
     return 0;
 }

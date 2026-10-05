@@ -431,12 +431,47 @@ arrive intact and in order at the other.  `v8`: both in `ME_MODE=v32bis`, V.8
 selects V.32bis, LAPM, CONNECT at 10.6 s.  `automode`: an ordinary V.8 caller
 against a `ME_V8=0` answerer -- ANS, USB1 for Ta (with the caller's CM ignored
 as above), AC, then V.32bis, CONNECT at 10.4 s.  `aa`: neither side runs V.8;
-AA during ANS, CONNECT at 5.7 s.  All six rows are in `make test`.  NT/MT come
+AA during ANS, CONNECT at 5.7 s.  All six rows, and `automode` again with the
+caller's V.32 bit withdrawn, are in `make test`.  NT/MT come
 out 128/65 on this one-frame loop, the same as `v32bis_duplex_test` at zero
 delay, which is the check that the engine starts the datapump's transmit and
 receive sample clocks on the same tick (they must: clause 6 schedules transmit
 symbols off received sample instants, so the engine discards receive and holds
 transmit silent until both can start on one block).
+
+**Two defects the engine pair found, neither of them in acquisition
+(2026-10-05).**  `automode` used to pass only while the caller's CM carried the
+V.32 bit, and `aa` failed about one run in eight under concurrent load.
+
+- *Ta leaked into the DTE.*  During A.2.2's Ta the answerer runs the V.22bis
+  answerer, whose receiver demodulates a V.8 caller's CI/CM as low-band data;
+  `v22bis_put_bit_cb()` fed those bits to the data stack, which parked the
+  bytes in the DTE receive ring until DATA flushed them after CONNECT -- on
+  every automode call.  V.22bis 6.3.1.1.2 e) makes the modem "ready to receive
+  data" only once trained, so bits now reach circuit 104 only after
+  `SIG_STATUS_TRAINING_SUCCEEDED`.  The V.32bis receiver had decoded the
+  caller's data correctly all along: with the bit withdrawn the caller's
+  transmit audio is byte-identical to the passing run from 6.4 s to 14 s, and
+  so is the answerer's data-mode bit stream.  What the bit changed was whether
+  the leaked junk contained a 0x00, and the harness counted lines with
+  `strchr`/`strlen`.  The harness now parses bounded by the byte count and
+  fails on any byte after CONNECT that is not an intact line;
+  `ME_V8_ADVERTISE_V32=0` rows for both laws are in `make test`.
+- *Clause 8 found its preamble in data.*  8.2's watch compared a 20-sample
+  coherent tone sum against a flat 6x the received rms, on the belief that
+  data gives 3x per line.  A Rayleigh magnitude averages sqrt(pi*20/4) = 4x,
+  and the call modem sums AC's two lines, so data averaged 7.3 and could hold
+  above 6 for the 133 samples detection needs.  Whether it did depended on
+  the bits, and so on PTY timing.  The threshold is now 0.7 of a clean
+  preamble's 20*sqrt(N/2) (14 with two lines, 9.9 with one); over 56 s of the
+  engine pair's data the longest run above it is 40 samples.  Detection
+  timing then became honest -- ~46T into the 56T head instead of early on a
+  run that data had started -- and that exposed the data decoder's carrier
+  frequency walking on the preamble's wrong decisions: the call modem
+  responding to a second, answer-initiated renegotiation at 12000 came back
+  white.  The watch restores `carrier_phase_rate` to its value at the start
+  of the run; restoring the equalizer instead did not help.  160 concurrent
+  engine-pair runs, 0 failures (9 of 48 before).
 
 **Checked unchanged:** engine replays of a V.90 answer call
 (`goal-matrix-115515Z/rate24000-r1`), a plain V.34 answer call

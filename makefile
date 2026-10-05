@@ -369,6 +369,11 @@ test: $(TEST_TARGETS)
 	./v32bis_engine_pair_test alaw v8
 	./v32bis_engine_pair_test ulaw automode
 	./v32bis_engine_pair_test alaw automode
+# The V.8 caller's CM without the V.32 bit: a different V.21 pattern for the
+# answerer's V.22bis receiver to demodulate during Ta (V.32bis A.2.2), which
+# must not reach the DTE (V.22bis 6.3.1.1.2 e).
+	ME_V8_ADVERTISE_V32=0 ./v32bis_engine_pair_test ulaw automode
+	ME_V8_ADVERTISE_V32=0 ./v32bis_engine_pair_test alaw automode
 	./v32bis_engine_pair_test ulaw aa
 	./v32bis_engine_pair_test alaw aa
 	./engine_pair_test --expect V32BIS --expect-connect 14400 --both-env ME_MODE=v32bis

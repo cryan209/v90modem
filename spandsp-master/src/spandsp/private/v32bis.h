@@ -186,6 +186,9 @@ struct v32bis_state_s
     bool reneg_far_preamble;
     int reneg_preamble_run;
     float reneg_watch_pow;
+    /* The data receiver's carrier frequency as it stood when the current
+       candidate preamble run began (see v32bis_reneg_watch()). */
+    int32_t reneg_rate_snap;
     /* Framing the rate signal after a preamble.  There is no S here to pin
        the word boundary to; what pins it is the 180 degree reversal 8
        symbol intervals before the preamble ends. */

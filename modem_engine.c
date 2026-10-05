@@ -914,6 +914,15 @@ static void v22bis_put_bit_cb(void *user_data, int bit)
         return;
     }
 
+    /* V.22bis 6.3.1.1.2 e) (and 6.3.1.1.1 f) for the call modem): the modem
+     * is "ready to receive data" only once it has trained.  SpanDSP's
+     * receiver delivers whatever it demodulates before then, and during
+     * V.32bis A.2.2's Ta that is a V.8 caller's CI/CM taken for low-band
+     * data: it went into the DTE receive ring and was flushed to the DTE
+     * after CONNECT of whatever modulation the call then settled on --
+     * V.32bis, after Ta expired -- as a burst of binary garbage. */
+    if (!g_v22bis_trained)
+        return;
     ds_rx_put_bit(&g_data_stack, bit);
 }
 
