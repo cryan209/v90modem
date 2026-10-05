@@ -47,6 +47,7 @@
 #include "v92_mh.h"
 #include "v92_mh_line.h"
 #include "v92_tone_a.h"
+#include "v25_automode.h"
 
 #include <spandsp.h>
 
@@ -355,6 +356,7 @@ static const char *me_mod_to_str(me_modulation_t mod)
     case ME_MOD_V90:    return "V90";
     case ME_MOD_V34:    return "V34";
     case ME_MOD_V22BIS: return "V22BIS";
+    case ME_MOD_V32BIS: return "V32BIS";
     default:            return "UNKNOWN";
     }
 }
@@ -842,10 +844,38 @@ static int v22bis_get_bit_cb(void *user_data)
 /* Set once V.22bis has actually trained, so a later carrier drop is read as a
  * lost connection rather than as part of the handshake. */
 static bool g_v22bis_trained;
+/* V.32bis A.2.2: the V.22bis answer modem heard the caller's S1/SB1 in Ta. */
+static bool g_v22bis_carrier_seen;
+/* V.32bis A.2.2's Ta: how long USB1 runs before giving up on a V.22bis caller
+ * and proceeding at 6.2.  Negative when not running. */
+static int  g_v25_ta_samples = -1;
+/* Automode receive detectors, armed while V.8 (or V.25) runs and during Ta. */
+static v25_automode_rx_t g_v25am;
+
+/* A.2.2 listens during Ta for the caller's S1 or SB1 in the low band.  A V.8
+ * call modem that heard our answer tone sends CI and CM there instead -- V.21
+ * channel 1, 980/1180 Hz -- and SpanDSP's V.22bis answerer takes that FSK for
+ * a low-band carrier and even reports training succeeded on it, which would
+ * connect a V.8 modem at 2400 bit/s V.22bis.  Measured in
+ * v32bis_engine_pair_test's automode case.  While V.21 channel 1 is on the
+ * line, nothing the V.22bis receiver reports is S1/SB1. */
+static bool v22bis_status_is_v8_fsk(int bit)
+{
+    if (g_v25_ta_samples < 0
+        || (bit != SIG_STATUS_CARRIER_UP && bit != SIG_STATUS_TRAINING_SUCCEEDED))
+        return false;
+    if (!v25am_v21_low_recent(&g_v25am, 300))
+        return false;
+    ME_LOG("[ME] Annex A/V.32bis: V.22bis %s ignored: the low band is V.21 "
+           "channel 1 (a V.8 CI/CM), not S1/SB1\n", signal_status_to_str(bit));
+    return true;
+}
 
 static void v22bis_put_bit_cb(void *user_data, int bit)
 {
     (void)user_data;
+    if (bit < 0 && v22bis_status_is_v8_fsk(bit))
+        return;
     if (bit < 0) {
         /* CARRIER_UP is not a connection.  V.22bis brings the carrier up at
          * the start of its own training sequence, and taking that as the
@@ -855,6 +885,7 @@ static void v22bis_put_bit_cb(void *user_data, int bit)
          * the CARRIER_DOWN that follows the V.8 tail.  Only
          * TRAINING_SUCCEEDED means trained. */
         if (bit == SIG_STATUS_CARRIER_UP) {
+            g_v22bis_carrier_seen = true;
             ME_LOG("[ME] V.22bis carrier up\n");
         } else if (bit == SIG_STATUS_TRAINING_SUCCEEDED) {
             g_v22bis_trained = true;
@@ -895,6 +926,7 @@ static bool            g_v8_answer_tone_retry_done = false;
 /* SpanDSP modem contexts */
 static v8_state_t     *g_v8      = NULL;
 static v22bis_state_t *g_v22bis  = NULL;
+static v32bis_state_t *g_v32bis  = NULL;
 static v34_state_t    *g_v34     = NULL;
 
 /* V.90 state (Phase 3/4 TX and data mode) */
@@ -2057,6 +2089,11 @@ static bool g_advertise_v90 = true;
  * its own timing recovery and does not assume the peer's symbol clock is
  * phase-locked to our sample grid, which the V.34 Phase 3 acquisition does. */
 static bool g_advertise_v34 = true;
+/* V.8 Table 4 "V.32/V.32bis duplex" in CM/JM (V8_MOD_V32).  V.8 8.2.3 has the
+ * answer modem's JM name what both support, so with V.34 or V.90 on both
+ * sides the V.32 bit is never the one chosen; it is what a V.32bis-only peer
+ * meets us on.  ME_V8_ADVERTISE_V32=0 withdraws it. */
+static bool g_advertise_v32 = true;
 static bool g_enable_v92 = false;
 static const char *g_mode_name = "v90";
 static bool g_enable_x2 = false;
@@ -3053,6 +3090,8 @@ static int me_start_or_restart_v8_locked(int answer_tone)
         v8_parms.v92            = -1;
     v8_parms.jm_cm.call_function      = V8_CALL_V_SERIES;
     v8_parms.jm_cm.modulations        = V8_MOD_V22;
+    if (g_advertise_v32)
+        v8_parms.jm_cm.modulations   |= V8_MOD_V32;
     if (g_advertise_v34)
         v8_parms.jm_cm.modulations   |= V8_MOD_V34;
     if (g_advertise_v90)
@@ -6171,6 +6210,408 @@ static void start_v22bis_training(void)
         ME_LOG("[ME] v22bis_init failed\n");
 }
 
+/* ------------------------------------------------------------------ */
+/* V.32bis / V.32, and the V.25 + V.32bis Annex A automode             */
+/* ------------------------------------------------------------------ */
+
+/* Set once the V.32bis receiver has passed B1 (V.32bis 6.1/6.2: "condition
+ * itself to receive data at the rate indicated by the incoming E sequence"). */
+static bool g_v32bis_trained;
+static int  g_v32bis_rate;
+/* Samples of receive to discard, and transmit to hold silent, before the
+ * datapump runs: V.8 8.1.2/8.2.2's 75 ms after CJ, and V.25's 75 ms after the
+ * answer tone.  The datapump's transmit and receive sample counters must start
+ * on the same tick -- its clause 6 tone logic schedules transmit symbols off
+ * received sample instants -- so the RX path counts this down and both start
+ * on the block where it reaches zero. */
+static int  g_v32bis_hold_samples;
+static bool g_v32bis_running;
+
+static bool g_v25am_armed;
+/* V.32bis A.2.2 on a V.8-less answer: our own V.25 ANS, then 75 ms silence. */
+static modem_connect_tones_tx_state_t *g_v25_ans_tx;
+static int  g_v25_ans_samples;
+static int  g_v25_silence_samples;
+/* The answer modem received a CM, so this call is V.8 and not automode. */
+static bool g_v8_cm_seen;
+/* The call modem's V.8 failed, but V.8 8.1.1 still has it act on a sigA, so
+ * it stays silent and listens for AC until the V.8 phase timeout. */
+static bool g_v25_listen_only;
+
+static bool me_v32bis_enabled(void)
+{
+    return parse_env_int("ME_V32BIS", 1) != 0;
+}
+
+/* ME_V8=0: no V.8 at all.  The answer modem sends V.25's unmodulated ANS and
+ * runs Annex A/V.32bis; the call modem answers a plain ANS with AA. */
+static bool me_v8_disabled(void)
+{
+    return parse_env_int("ME_V8", 1) == 0;
+}
+
+/* V.8 8.1.1: "If ANS (rather than ANSam) is detected, the DCE shall proceed in
+ * accordance with Annex A/V.32 bis".  With V.8 enabled this stays OFF by
+ * default, because SpanDSP's V.8 deliberately accepts ANS as ANSam (some
+ * packet networks strip the 15 Hz AM and leave the 2100 Hz tone), and turning
+ * a stripped ANSam into AA would move those calls from V.34/V.90 to V.32bis.
+ * A V.32 answer modem is still reached with it off: Annex A's AC watch below
+ * picks up its AC whenever it comes.  ME_V25_ANS_AA=1 enables it. */
+static bool me_v25_ans_aa(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = me_v8_disabled() || parse_env_int("ME_V25_ANS_AA", 0) != 0;
+    return cached != 0;
+}
+
+static int me_v32bis_rate_mask(void)
+{
+    static const struct { int bps; int mask; } table[] = {
+        {14400, V32BIS_RATE_14400}, {12000, V32BIS_RATE_12000},
+        {9600, V32BIS_RATE_9600}, {7200, V32BIS_RATE_7200}, {4800, V32BIS_RATE_4800},
+    };
+    int max = parse_env_int("ME_V32BIS_MAX_BPS", 14400);
+    int mask = 0;
+
+    for (size_t i = 0; i < sizeof(table)/sizeof(table[0]); i++)
+        if (table[i].bps <= max)
+            mask |= table[i].mask;
+    return mask ? mask : V32BIS_RATE_4800;
+}
+
+static int v32bis_get_bit_cb(void *user_data)
+{
+    int bit;
+
+    (void)user_data;
+    bit = ds_tx_get_bit(&g_data_stack);
+    /* Not SIG_STATUS_END_OF_DATA: V.17's transmitter (which V.32bis drives)
+       takes that as the end of the call's data and shuts down.  An idle
+       duplex modem sends marks. */
+    return (bit == DS_TX_NO_DATA) ? 1 : bit;
+}
+
+static void v32bis_put_bit_cb(void *user_data, int bit)
+{
+    (void)user_data;
+    /* V.17's receiver reports carrier/training status through put_bit.  The
+       V.32bis start-up is its own state machine and reports completion
+       through v32bis_startup_complete(), which the RX path polls; these
+       statuses are noise around its silences and are not acted on. */
+    if (bit < 0)
+        return;
+    /* V.32bis 6.1/6.2 keep circuit 104 clamped until the start-up is done. */
+    if (!g_v32bis || !v32bis_startup_complete(g_v32bis))
+        return;
+    ds_rx_put_bit(&g_data_stack, bit);
+}
+
+/* Start V.32bis at V.32bis 6.1 (call modem: repeated state A, AA) or 6.2's
+ * second paragraph (answer modem: alternate states A and C, AC).  Must be
+ * called with g_state_mtx held. */
+static void start_v32bis_training(const char *why, int hold_samples)
+{
+    int rates = me_v32bis_rate_mask();
+
+    if (g_v22bis) {
+        v22bis_free(g_v22bis);
+        g_v22bis = NULL;
+    }
+    if (g_v32bis) {
+        v32bis_free(g_v32bis);
+        g_v32bis = NULL;
+    }
+    g_v25am_armed = false;
+    g_v25_ta_samples = -1;
+    g_mod   = ME_MOD_V32BIS;
+    g_state = ME_TRAINING;
+    g_v32bis_trained = false;
+    g_v32bis_rate = 0;
+    g_v32bis_hold_samples = hold_samples;
+    g_v32bis_running = false;
+    g_phase_start_ms = trace_now_ms();
+    trace_phase("enter TRAINING: mod=V32BIS role=%s via %s rates=0x%03x",
+                g_calling_party ? "caller" : "answerer", why, rates);
+    ME_LOG("[ME] V.32bis start-up (%s) as %s modem, rates 0x%03x\n",
+           why, g_calling_party ? "call" : "answer", rates);
+    data_stack_prepare(14400);
+    g_v32bis = v32bis_init(NULL, 14400, g_calling_party,
+                           v32bis_get_bit_cb, NULL, v32bis_put_bit_cb, NULL);
+    if (!g_v32bis) {
+        ME_LOG("[ME] v32bis_init failed\n");
+        return;
+    }
+    v32bis_set_supported_bit_rates(g_v32bis, rates);
+    /* The whole of clause 6, tone phases included, so NT and MT are measured
+       on this call's line rather than assumed. */
+    if (v32bis_start_tones(g_v32bis) != 0)
+        ME_LOG("[ME] v32bis_start_tones failed\n");
+}
+
+/* V.32bis A.2.2: "If signal AA is not detected during the transmission of the
+ * V.25 answer sequence, the modem shall begin transmitting signal USB1,
+ * condition its receiver to detect in the low band either of the two signals
+ * S1, SB1 and start a timer."  USB1 is the V.22bis answer modem's own opening,
+ * so this is the V.22bis answerer with a Ta deadline.  Called locked. */
+static void start_v25_usb1_locked(const char *why)
+{
+    ME_LOG("[ME] Annex A/V.32bis: %s; sending USB1 (V.22bis) for Ta = 3000 ms\n", why);
+    trace_phase("automode: %s -> USB1 with Ta", why);
+    g_v25am_armed = false;
+    g_v22bis_carrier_seen = false;
+    /* g_v25am keeps running from the answer tone into Ta, so a CM that was
+       already on the line is known about from the first USB1 block. */
+    start_v22bis_training();
+    /* A.2.2: Ta = 3000 +/- 50 ms. */
+    g_v25_ta_samples = 3000*8;
+}
+
+/* A call modem whose V.8 failed -- typically "Timeout waiting for JM" after a
+ * CM sent into a V.32 answer modem that ignores it -- may still be about to
+ * hear that modem's AC: a V.32bis A.2.2 automode answer modem sends USB1 for
+ * Ta = 3 s after its answer tone before AC, which lands after V.8's own 5 s JM
+ * timeout.  Keep listening, silently, until the engine's V.8 phase timeout.
+ * Called locked; true if taken. */
+static bool me_v25_listen_after_v8_failure_locked(void)
+{
+    if (!g_calling_party || !g_v25am_armed || g_state != ME_V8)
+        return false;
+    g_v25_listen_only = true;
+    ME_LOG("[ME] V.8 failed; call modem still listening for AC (Annex A/V.32bis)\n");
+    trace_phase("V8 failed -> caller listening for AC");
+    return true;
+}
+
+/* An answer modem whose V.8 ended without ever receiving a CM has, as far as
+ * the caller is concerned, sent a V.25 answer tone and heard no AA during it
+ * (the AA watch would have taken the call), which is exactly A.2.2's case for
+ * USB1.  Before this, such a call hung up.  Called locked; true if taken. */
+static bool me_v25_usb1_fallback_locked(const char *why)
+{
+    if (g_calling_party || g_v8_cm_seen || !me_v32bis_enabled()
+        || g_state != ME_V8 || g_mh_hold_until_ms != 0)
+        return false;
+    start_v25_usb1_locked(why);
+    return true;
+}
+
+/* A.2.2: "If either of the two signals S1, SB1 are detected in the low band,
+ * the modem shall continue as defined in Recommendation V.22 bis ...
+ * Otherwise, when the elapsed time exceeds Ta ... the modem shall proceed as
+ * defined in 6.2 of this Recommendation beginning at the second paragraph."
+ * Called from the V.22bis receive path, unlocked. */
+static void v25_ta_tick(int len)
+{
+    pthread_mutex_lock(&g_state_mtx);
+    if (g_v25_ta_samples >= 0 && g_mod == ME_MOD_V22BIS && g_state == ME_TRAINING) {
+        if (g_v22bis_carrier_seen) {
+            ME_LOG("[ME] Annex A/V.32bis: low-band signal from the caller inside Ta; "
+                   "staying with V.22bis\n");
+            g_v25_ta_samples = -1;
+        } else if ((g_v25_ta_samples -= len) <= 0) {
+            start_v32bis_training("Ta expired without S1/SB1", 0);
+        }
+    }
+    pthread_mutex_unlock(&g_state_mtx);
+}
+
+/* During Ta, keep classifying what the caller sends, so the V.22bis receive
+ * path can tell S1/SB1 from a V.8 CM.  Unlocked; before v22bis_rx(). */
+static void v25_ta_rx(const int16_t *amp, int len)
+{
+    pthread_mutex_lock(&g_state_mtx);
+    if (g_v25_ta_samples >= 0 && g_mod == ME_MOD_V22BIS)
+        v25am_rx(&g_v25am, amp, len);
+    pthread_mutex_unlock(&g_state_mtx);
+}
+
+/* Arm the automode watch at the start of V.8.  Called locked. */
+static void v25_automode_arm_locked(void)
+{
+    g_v25am_armed = me_v32bis_enabled();
+    g_v8_cm_seen = false;
+    g_v25_listen_only = false;
+    g_v25_ta_samples = -1;
+    if (g_v25am_armed)
+        v25am_rx_init(&g_v25am, g_calling_party);
+}
+
+/* The V.8-less answer modem: V.25 ANS instead of V.8's ANSam.  Called locked
+ * after V.8 has been set up, so the call state and timers are V.8's. */
+static void v25_start_answer_tone_locked(void)
+{
+    if (g_v8) {
+        v8_free(g_v8);
+        g_v8 = NULL;
+    }
+    if (g_v25_ans_tx)
+        modem_connect_tones_tx_free(g_v25_ans_tx);
+    /* V.25: 2100 Hz with phase reversals every 450 ms (echo canceller
+       disabling), 3.3 +/- 0.7 s, then 75 +/- 20 ms of silence. */
+    g_v25_ans_tx = modem_connect_tones_tx_init(NULL, MODEM_CONNECT_TONES_ANS_PR);
+    g_v25_ans_samples = 3300*8;
+    g_v25_silence_samples = 75*8;
+    ME_LOG("[ME] V.8 disabled (ME_V8=0): sending V.25 ANS and running "
+           "Annex A/V.32bis automode\n");
+    trace_phase("automode: V.25 ANS (no V.8)");
+}
+
+/* ME_V8 transmit while our own V.25 ANS is up.  Returns false when there is
+ * no V.25 answer tone running.  Unlocked. */
+static bool v25_answer_tone_tx(int16_t *amp, int len)
+{
+    bool ran = false;
+
+    pthread_mutex_lock(&g_state_mtx);
+    if (g_v25_ans_tx && g_state == ME_V8) {
+        int n = (len < g_v25_ans_samples) ? len : g_v25_ans_samples;
+
+        ran = true;
+        memset(amp, 0, sizeof(int16_t)*(size_t)len);
+        if (n > 0) {
+            modem_connect_tones_tx(g_v25_ans_tx, amp, n);
+            g_v25_ans_samples -= n;
+        }
+        if (g_v25_ans_samples <= 0) {
+            g_v25_silence_samples -= len - n;
+            if (g_v25_silence_samples <= 0) {
+                modem_connect_tones_tx_free(g_v25_ans_tx);
+                g_v25_ans_tx = NULL;
+                start_v25_usb1_locked("V.25 ANS ended without AA");
+            }
+        }
+    }
+    pthread_mutex_unlock(&g_state_mtx);
+    return ran;
+}
+
+/* While V.8 runs, AA has to be told apart from things a V.8 call modem can
+ * put on the line.  A calling modem that sends CI or CM is a V.8 modem, so
+ * once V.21 channel 1 has been heard on the call, 1800 Hz is not its AA.  And
+ * some call modems send a continuous 1800 Hz guard tone (the NZ-market USR
+ * this project tests against does), which is pure 1800 Hz through V.8 8.1.1's
+ * silent Te of up to about 1 s before its CM.  A V.32bis call modem holds AA
+ * from 1 s into the answer tone until it hears AC (A.2.1.3, 6.1), so asking
+ * for a second of it costs a real one nothing.  Called locked. */
+static bool v25am_aa_watch_v8_ok(void)
+{
+    return !v25am_v21_low_ever(&g_v25am) && v25am_aa_ms(&g_v25am) >= 1000;
+}
+
+/* The automode receive watch, run on everything received while V.8 (or our
+ * V.25 ANS) is in progress.  Unlocked. */
+static void v25_automode_rx(const int16_t *amp, int len)
+{
+    pthread_mutex_lock(&g_state_mtx);
+    if (!g_v25am_armed || g_state != ME_V8) {
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    v25am_rx(&g_v25am, amp, len);
+    if (!g_calling_party) {
+        /* A.2.2: "If signal AA is detected at any time during the
+           transmission of the V.25 answer sequence, the modem shall continue
+           as defined in 6.2 ... at the second paragraph", and V.8 8.2.2: "If
+           a suitable sigC is detected during ANSam transmission, the DCE
+           shall transmit no signal for 75 +/- 5 ms, transmit the appropriate
+           sigA".  Not once a CM has arrived -- that call is V.8 -- and not
+           while V.92 9.10 holds the line with ANSam. */
+        if (!g_v8_cm_seen && g_mh_hold_until_ms == 0 && v25am_aa_detected(&g_v25am)
+            && (g_v8 == NULL || v25am_aa_watch_v8_ok())) {
+            if (g_v25_ans_tx) {
+                modem_connect_tones_tx_free(g_v25_ans_tx);
+                g_v25_ans_tx = NULL;
+            }
+            start_v32bis_training("AA detected during the answer tone", 75*8);
+        }
+    } else if (v25am_ac_detected(&g_v25am)) {
+        /* A.2.1.1 / V.8 8.1.1's sigA: "If signal AC is detected, the modem
+           shall begin transmission of signal AA and continue as defined in
+           6.1". */
+        start_v32bis_training("AC detected", 0);
+    } else if (me_v25_ans_aa() && v25am_plain_ans_ms(&g_v25am) >= 1000) {
+        /* A.2.1.3: "If signal ANS is detected for a period of at least
+           1 second, the modem shall begin transmission of signal AA". */
+        start_v32bis_training("plain V.25 ANS for 1 s", 0);
+    }
+    pthread_mutex_unlock(&g_state_mtx);
+}
+
+/* Receive for a running V.32bis call.  Unlocked. */
+static void v32bis_engine_rx(const int16_t *amp, int len)
+{
+    bool completed = false;
+    int rate = 0;
+    int nt = 0;
+    int mt = 0;
+
+    pthread_mutex_lock(&g_state_mtx);
+    if (g_mod != ME_MOD_V32BIS || !g_v32bis) {
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    if (!g_v32bis_running) {
+        /* Discard this whole block and start both directions on the next. */
+        g_v32bis_hold_samples -= len;
+        if (g_v32bis_hold_samples <= 0)
+            g_v32bis_running = true;
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    v32bis_rx(g_v32bis, amp, len);
+    if (v32bis_startup_complete(g_v32bis)) {
+        rate = v32bis_current_bit_rate(g_v32bis);
+        if (!g_v32bis_trained) {
+            g_v32bis_trained = true;
+            completed = true;
+            v32bis_round_trip_symbols(g_v32bis, &nt, &mt);
+        } else if (rate != g_v32bis_rate && rate > 0) {
+            /* V.32bis clause 8 rate renegotiation, by either end. */
+            ME_LOG("[ME] V.32bis rate renegotiated: %d -> %d bit/s\n", g_v32bis_rate, rate);
+            trace_phase("V32BIS rate renegotiated %d -> %d", g_v32bis_rate, rate);
+            ds_set_v14_rates(&g_data_stack, rate, rate);
+        }
+        if (rate > 0)
+            g_v32bis_rate = rate;
+    }
+    pthread_mutex_unlock(&g_state_mtx);
+    if (completed) {
+        ME_LOG("[ME] V.32bis start-up complete at %d bit/s (NT=%d MT=%d symbols)\n",
+               rate, nt, mt);
+        on_training_complete(ME_MOD_V32BIS, rate, "V.32bis");
+    }
+}
+
+/* Transmit for a running V.32bis call.  Unlocked. */
+static void v32bis_engine_tx(int16_t *amp, int len)
+{
+    pthread_mutex_lock(&g_state_mtx);
+    if (g_mod == ME_MOD_V32BIS && g_v32bis && g_v32bis_running)
+        v32bis_tx(g_v32bis, amp, len);
+    else
+        memset(amp, 0, sizeof(int16_t)*(size_t)len);
+    pthread_mutex_unlock(&g_state_mtx);
+}
+
+static void v32bis_release_locked(void)
+{
+    if (g_v32bis) {
+        v32bis_free(g_v32bis);
+        g_v32bis = NULL;
+    }
+    if (g_v25_ans_tx) {
+        modem_connect_tones_tx_free(g_v25_ans_tx);
+        g_v25_ans_tx = NULL;
+    }
+    v25am_rx_release(&g_v25am);
+    g_v25am_armed = false;
+    g_v25_ta_samples = -1;
+    g_v32bis_trained = false;
+    g_v32bis_running = false;
+}
+
 /* Start V.34 training — used when V.8 negotiates V.34 */
 /* V.34 12.2/12.3/12.4 as the RECIPIENT, for the fax probe.  Deliberately a
    separate function rather than a flag through start_v34_training(): that one
@@ -6691,6 +7132,8 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
     me_log_v8_peer_summary(result);
 
     /* V8_STATUS_V8_OFFERED just means the other end offered V.8 — still in progress */
+    if (result->status == V8_STATUS_V8_OFFERED && !g_calling_party)
+        g_v8_cm_seen = true;
     if (result->status == V8_STATUS_IN_PROGRESS
         || result->status == V8_STATUS_V8_OFFERED
         || result->status == V8_STATUS_CALL_FUNCTION_RECEIVED
@@ -6719,6 +7162,10 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
                     modem_connect_tone_to_str(g_v8_active_answer_tone));
             return;
         }
+        if (me_v25_usb1_fallback_locked("V.8 ended without a CM")) {
+            pthread_mutex_unlock(&g_state_mtx);
+            return;
+        }
         pthread_mutex_unlock(&g_state_mtx);
         if (voice_capture_hold_enabled()) {
             ME_LOG("[ME] V.8 failed (status=%d), ME_VOICE_CAPTURE_HOLD set: holding call open\n",
@@ -6741,7 +7188,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
 
         ME_LOG("[ME] V.8 failed (status=%d)%s\n", result->status,
                hold ? ", holding the call (ME_V90_V8_FAIL_HOLD)"
-                    : ", hanging up");
+                    : "");
         if (hold) {
             /* Leave the bearer up and keep recording; whatever ends the call
                (the caller's own schedule) bounds this, so it needs no timer. */
@@ -6749,6 +7196,12 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
                         "far end", result->status);
             return;
         }
+        pthread_mutex_lock(&g_state_mtx);
+        if (me_v25_listen_after_v8_failure_locked()) {
+            pthread_mutex_unlock(&g_state_mtx);
+            return;
+        }
+        pthread_mutex_unlock(&g_state_mtx);
         me_hangup();
         return;
     }
@@ -6920,6 +7373,14 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
         trace_phase("V8 selected V34");
         start_v34_training();
 
+    } else if ((result->jm_cm.modulations & V8_MOD_V32) && me_v32bis_enabled()) {
+        /* V.8 8.1.2 / 8.2.3: after CJ both modems are silent 75 ms and then
+           send sigC/sigA -- for V.32bis, AA and AC, i.e. clause 6 from its
+           tone phases. */
+        ME_LOG("[ME] V.8 negotiated V.32bis\n");
+        trace_phase("V8 selected V32BIS");
+        start_v32bis_training("V.8", 75*8);
+
     } else if (result->jm_cm.modulations & V8_MOD_V22) {
         ME_LOG("[ME] V.8 negotiated V.22bis fallback\n");
         trace_phase("V8 selected V22BIS");
@@ -6972,8 +7433,14 @@ void me_init(void)
         } else if (strcmp(mode, "v22") == 0) {
             g_advertise_v90 = false;
             g_advertise_v34 = false;
+            g_advertise_v32 = false;
             g_enable_v92 = false;
             g_mode_name = "v22";
+        } else if (strcmp(mode, "v32bis") == 0 || strcmp(mode, "v32") == 0) {
+            g_advertise_v90 = false;
+            g_advertise_v34 = false;
+            g_enable_v92 = false;
+            g_mode_name = "v32bis";
         } else if (strcmp(mode, "v90") == 0) {
             g_advertise_v90 = true;
             g_enable_v92 = false;
@@ -6991,9 +7458,11 @@ void me_init(void)
 
         g_v90_analogue_role = g_advertise_v90
                            && role && strcmp(role, "analogue") == 0;
-        ME_LOG("[ME] Modem mode: %s (V.8 offer %s)\n", g_mode_name,
-               g_advertise_v90 ? "V90|V34|V22"
-                               : (g_advertise_v34 ? "V34|V22" : "V22"));
+        if (parse_env_int("ME_V8_ADVERTISE_V32", 1) == 0)
+            g_advertise_v32 = false;
+        ME_LOG("[ME] Modem mode: %s (V.8 offer %s%s%s%sV22)\n", g_mode_name,
+               g_advertise_v90 ? "V90|" : "", g_advertise_v34 ? "V34|" : "",
+               g_advertise_v32 ? "V32|" : "", "");
         if (!g_advertise_v90 && role && strcmp(role, "analogue") == 0)
             ME_LOG("[ME] ME_V90_ROLE=analogue ignored in v34 mode\n");
         if (g_v90_analogue_role)
@@ -7105,6 +7574,7 @@ void me_destroy(void)
     if (g_k56)      { k56flex_v8bis_free(g_k56);                 g_k56      = NULL; }
     if (g_k56_train){ free(g_k56_train);                         g_k56_train = NULL; }
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
+    v32bis_release_locked();
     cleanup_v34_v90_training_locked();
     v91_live_reset();
     if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
@@ -7246,6 +7716,24 @@ void me_on_sip_connected(void)
         pthread_mutex_unlock(&g_state_mtx);
         return;
     }
+    /* V.32bis Annex A runs beside V.8: the answer modem watches for AA
+       during its answer tone and the call modem for AC (V.8 8.1.1/8.2.2's
+       sigA and sigC). */
+    v25_automode_arm_locked();
+    if (me_v8_disabled() && me_v32bis_enabled()) {
+        if (g_calling_party) {
+            /* A.2.1: "the calling modem shall initially remain silent and
+               shall condition its receiver to detect any of three signals:
+               AC, USB1, ANS".  (USB1 is not acted on here.) */
+            if (g_v8) {
+                v8_free(g_v8);
+                g_v8 = NULL;
+            }
+            ME_LOG("[ME] V.8 disabled (ME_V8=0): call modem waiting for ANS or AC\n");
+        } else {
+            v25_start_answer_tone_locked();
+        }
+    }
     pthread_mutex_unlock(&g_state_mtx);
     if (g_data_framing_auto)
         g_data_framing = DS_FRAMING_V14;   /* until this call's V.8 says LAPM */
@@ -7267,6 +7755,7 @@ void me_on_sip_disconnected(void)
 
     if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
+    v32bis_release_locked();
     cleanup_v34_v90_training_locked();
     v91_live_reset();
     if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
@@ -8428,6 +8917,10 @@ skip_8k_codewords:
                         modem_connect_tone_to_str(g_v8_active_answer_tone));
                 return;
             }
+            if (me_v25_usb1_fallback_locked("V.8 timed out without a CM")) {
+                pthread_mutex_unlock(&g_state_mtx);
+                return;
+            }
             pthread_mutex_unlock(&g_state_mtx);
             g_phase_start_ms = 0;
             if (voice_capture_hold_enabled()) {
@@ -8487,8 +8980,9 @@ skip_8k_codewords:
         if (g_v8_rx_hist_len > V8_RX_HIST_SAMPLES)
             g_v8_rx_hist_len = V8_RX_HIST_SAMPLES;
         /* Feed received audio to V.8 receiver */
-        if (g_v8)
+        if (g_v8 && !g_v25_listen_only)
             v8_rx(g_v8, amp, len);
+        v25_automode_rx(amp, len);
         break;
 
     case ME_TRAINING:
@@ -9508,8 +10002,13 @@ skip_8k_codewords:
                 }
             }
             pthread_mutex_unlock(&g_state_mtx);
-        } else if (g_v22bis)
+        } else if (g_mod == ME_MOD_V32BIS) {
+            v32bis_engine_rx(amp, len);
+        } else if (g_v22bis) {
+            v25_ta_rx(amp, len);
             v22bis_rx(g_v22bis, amp, len);
+            v25_ta_tick(len);
+        }
 
         /* In DATA mode, flush received bytes to the PTY */
         if (state == ME_DATA) {
@@ -11140,7 +11639,9 @@ void me_tx_audio(int16_t *amp, int len)
 
     switch (state) {
     case ME_V8:
-        /* Generate V.8 negotiation audio */
+        /* Generate V.8 negotiation audio, or V.25's ANS on a V.8-less answer */
+        if (v25_answer_tone_tx(amp, len) || g_v25_listen_only)
+            break;
         if (g_v8)
             v8_tx(g_v8, amp, len);
         mix_v8_guard_tone(amp, len);
@@ -11314,6 +11815,8 @@ void me_tx_audio(int16_t *amp, int len)
                     tx_count = 0;
                 }
             }
+        } else if (g_mod == ME_MOD_V32BIS) {
+            v32bis_engine_tx(amp, len);
         } else if (g_v22bis)
             v22bis_tx(g_v22bis, amp, len);
         break;
@@ -11358,6 +11861,8 @@ void me_tx_audio(int16_t *amp, int len)
                         amp[i] = pcm_to_linear(pcm_out[i]);
                 }
             }
+        } else if (g_mod == ME_MOD_V32BIS) {
+            v32bis_engine_tx(amp, len);
         } else {
             /* V.22bis duplex downstream TX */
             if (g_v22bis)

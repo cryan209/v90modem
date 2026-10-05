@@ -60,8 +60,8 @@ plain V.34's 3000/9600/u-law duplex row (no training within 60 seconds).
 These failures are outside the changed V.32bis paths.
 
 This is offline coverage, not hardware interoperability. V.8/modem-engine,
-V.42 and PTY integration, full retrain recovery, and foreign-modem V.32
-compatibility remain separate work. Historical milestone lists below describe
+V.42 and PTY integration now exist (see "Engine integration" below); full
+retrain recovery and foreign-modem V.32 compatibility remain separate work. Historical milestone lists below describe
 the original plan rather than overriding this measured status.
 
 ## Scope
@@ -365,7 +365,89 @@ conditioning signal to train on, and 6.1 and 6.2 both have the modem condition
 its receiver only once the tones are done.
 
 Still missing: 6.2's V.25 answer sequence (the engine's job, not the modem's)
-and V.8/modem-engine/V.42/PTY integration.
+and V.8/modem-engine/V.42/PTY integration.  Both now exist; see the next
+section.
+
+## Engine integration: V.8, V.25 and Annex A automode (2026-10-05)
+
+`modem_engine.c` has `ME_MOD_V32BIS`.  `start_v32bis_training()` creates the
+datapump, offers every rate up to `ME_V32BIS_MAX_BPS` (default 14400), and runs
+clause 6 from its tone phases with `v32bis_start_tones()`, so NT and MT are
+measured on the call.  Completion is polled (`v32bis_startup_complete()`, set
+when B1 has been received), and then `on_training_complete()` starts the data
+stack exactly as for V.22bis and V.34: V.14, or V.42 LAPM when V.8 negotiated
+it, with CONNECT at the negotiated rate.  Circuit 104 stays clamped while the
+start-up or a clause 8 renegotiation is running.  `ME_V32BIS=0` removes all of
+it.
+
+Three ways in:
+
+- **V.8.**  CM/JM now carry V8_MOD_V32 (Table 4's "V.32/V.32bis duplex", the
+  same octet as V.22, so the frame does not change shape; `ME_V8_ADVERTISE_V32=0`
+  withdraws it).  `v8_result_handler()` takes V.32 after V.90 and V.34, so
+  where those are common nothing changes; `ME_MODE=v32bis` offers only V.32
+  and V.22.  Per V.8 8.1.2/8.2.3 both sides are silent 75 ms after CJ and then
+  send sigC/sigA, i.e. AA and AC.
+- **Answer automode (A.2.2, V.8 8.2.2).**  While V.8 runs, the answer modem
+  watches for AA and, on it, stops its answer tone and starts 6.2 at the second
+  paragraph.  When V.8 ends without a CM (after the alternate-answer-tone
+  retry, so V.8 callers are not affected) it sends USB1 as a V.22bis answer
+  modem for Ta = 3000 ms; S1/SB1 inside Ta keeps V.22bis, otherwise it goes to
+  6.2's AC.  `ME_V8=0` replaces V.8 with V.25's ANS (2100 Hz, 450 ms
+  reversals, 3.3 s, then 75 ms silence) and runs the same automode.
+- **Call automode (A.2.1, V.8 8.1.1).**  The call modem watches for AC
+  (600 and 3000 Hz) throughout V.8 and takes it as sigA.  If its V.8 fails it
+  stays silent and keeps listening until the V.8 phase timeout, because a
+  V.32bis automode answer modem only sends AC after Ta.  Answering 1 s of
+  plain ANS with AA (A.2.1.3) is ON with `ME_V8=0` and opt-in otherwise
+  (`ME_V25_ANS_AA=1`): SpanDSP's V.8 deliberately accepts ANS as ANSam,
+  because some networks strip the 15 Hz AM, and turning those calls into AA
+  would move them from V.34/V.90 to V.32bis.
+
+The detectors are `v25_automode.c`: 10 ms Goertzel blocks with 600, 1800,
+2100 and 3000 Hz on exact 100 Hz bins (so our own ANSam, the loudest thing in
+the receive path, cannot leak into the AA bin, and is excluded from the
+denominator), V.21 channel 1 at 980/1180 Hz, and SpanDSP's connect-tone
+detector for ANS against ANSam.
+
+**Two hazards found by the engine-level test, both fixed.**  (a) A V.8 call
+modem that hears our answer tone keeps sending CI and CM, and SpanDSP's V.22bis
+answer modem takes that V.21 channel 1 FSK for a low-band carrier -- it
+reported CARRIER_UP and then TRAINING_SUCCEEDED, and the call CONNECTed at 2400
+bit/s V.22bis to a modem that was trying to do V.8.  During Ta, a V.22bis
+status while V.21 channel 1 is on the line is now not S1/SB1.  (b) AA is a pure
+1800 Hz line, and some call modems send a continuous 1800 Hz guard tone (the
+NZ-market USR this project tests against), which is pure 1800 Hz through V.8's
+silent Te before CM.  While V.8 runs, AA must therefore hold for 1 s and the
+call must not have shown any V.21 channel 1; a V.32bis caller holds AA from 1 s
+into the answer tone until it hears AC (A.2.1.3, 6.1), so a real one loses
+nothing.
+
+**Test.**  `v32bis_engine_pair_test <ulaw|alaw> <v8|automode|aa>` runs two whole
+engines in two processes (the engine is a process singleton), clocked in
+lockstep over a socketpair carrying G.711, each with its own DTE PTY.  It
+requires CONNECT 14400 on both PTYs and 150 numbered lines typed at each DTE to
+arrive intact and in order at the other.  `v8`: both in `ME_MODE=v32bis`, V.8
+selects V.32bis, LAPM, CONNECT at 10.6 s.  `automode`: an ordinary V.8 caller
+against a `ME_V8=0` answerer -- ANS, USB1 for Ta (with the caller's CM ignored
+as above), AC, then V.32bis, CONNECT at 10.4 s.  `aa`: neither side runs V.8;
+AA during ANS, CONNECT at 5.7 s.  All six rows are in `make test`.  NT/MT come
+out 128/65 on this one-frame loop, the same as `v32bis_duplex_test` at zero
+delay, which is the check that the engine starts the datapump's transmit and
+receive sample clocks on the same tick (they must: clause 6 schedules transmit
+symbols off received sample instants, so the engine discards receive and holds
+transmit silent until both can start on one block).
+
+**Checked unchanged:** engine replays of a V.90 answer call
+(`goal-matrix-115515Z/rate24000-r1`), a plain V.34 answer call
+(`v34-21600-20260822T-c65`) and a V.90-to-V.34 fallback dial
+(`rf-tower-fb-6`), old binary against new, differ only in the V.32 bit of our
+CM/JM and the log line naming it.
+
+**Not done:** USB1 heard by a call modem (A.2.1.2, the V.22bis branch on the
+calling side); V.32bis clause 7 retrains from the engine; and any hardware
+interop.  Clause 8 renegotiations by the far end are followed (the V.14 rate
+is updated) but the engine never initiates one.
 
 ## The near end echo canceller
 
