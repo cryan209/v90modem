@@ -19,6 +19,9 @@
 
 #include "data_interface.h"
 #include "at_help.h"
+#include "line_monitor.h"
+
+#include <math.h>
 
 #include <spandsp.h>
 
@@ -577,6 +580,26 @@ static void test_help(void)
     expect(dte, "AT$Z", "OK");                      /* help then the next command */
     expect(dte, "ATE0", "OK");                      /* Z restored echo */
 
+    /* ATY11: the line spectrum, from whatever audio the engine has fed. */
+    expect(dte, "ATY11", "No line audio yet");
+    expect(dte, "ATY", "ERROR");
+    expect(dte, "ATY5", "ERROR");
+    {
+        int16_t x[160];
+
+        for (int blk = 0; blk < 50; blk++) {
+            for (int i = 0; i < 160; i++)          /* 5000 peak: -13.2 dBm0 at 1800 Hz */
+                x[i] = (int16_t) lrint(5000.0 * sin(2.0 * M_PI * 1800.0 * (blk * 160 + i) / 8000.0));
+            lm_feed(LM_RX, x, 160);
+        }
+    }
+    exchange(dte, "ATY11", buf, sizeof(buf));
+    check(strstr(buf, "Line Spectrum") && strstr(buf, "  1800 -13.2") && strstr(buf, "Total  Rx -13.2")
+          && final_ok(buf), "ATY11 puts a -13.2 dBm0 1800 Hz tone in its band and the total");
+    if (!strstr(buf, "  1800 -13.2"))
+        printf("       got \"%s\"\n", buf);
+    lm_reset();
+
     /* ATI pages. */
     expect(dte, "ATI0", "v90modem");
     expect(dte, "ATI3", "v90modem ");
@@ -605,17 +628,33 @@ static void test_help(void)
     }
     di_write_data((const uint8_t *) "worlds", 6);
     collect(dte, buf, sizeof(buf), 100);
+    /* Live: the engine pushes a renegotiated rate and a retrain in progress. */
+    {
+        v250_connect_report_t now = { "V90", 48000, 26400, "LAPM", 1, true, true };
+
+        di_update_link(&now, "Mode               v90 (offer V90)\r\nData-mode retrains 1", "retraining");
+    }
+    usleep(1100000);                                /* TIES guard, then escape to ask */
+    send_str(dte, "+++");
+    collect(dte, buf, sizeof(buf), 1300);
+    exchange(dte, "ATI6", buf, sizeof(buf));
+    check(strstr(buf, "Originate, retraining") && strstr(buf, "TX 48000  RX 26400"),
+          "ATI6 mid-call shows the engine's latest push: retraining, renegotiated rates");
+    if (!strstr(buf, "retraining"))
+        printf("       got \"%s\"\n", buf);
+    exchange(dte, "ATI11", buf, sizeof(buf));
+    check(strstr(buf, "(live)") && strstr(buf, "Data-mode retrains 1"), "ATI11 mid-call is live");
     di_on_disconnected_cause("Remote (call cleared)", 1);
     collect(dte, buf, sizeof(buf), 150);
     exchange(dte, "ATI6", buf, sizeof(buf));
     check(strstr(buf, "Originate, ended") && strstr(buf, "Modulation         V90")
-          && strstr(buf, "TX 52000  RX 31200") && strstr(buf, "V.42 LAPM")
+          && strstr(buf, "TX 48000  RX 26400") && strstr(buf, "V.42 LAPM")
           && strstr(buf, "V.42bis TX RX") && strstr(buf, "Octets to line     5\r")
           && strstr(buf, "Octets to DTE      6\r") && strstr(buf, "Remote (call cleared)"),
           "ATI6 after the call: direction, carrier, rates, protocols, octets, cause");
     if (!strstr(buf, "Remote (call cleared)"))
         printf("       got \"%s\"\n", buf);
-    expect(dte, "ATI11", "V.92               no");
+    expect(dte, "ATI11", "(at end of call)");
 
     /* An answered call that the DTE ended itself. */
     fake_report = (v250_connect_report_t) { "V34", 28800, 0, "NONE", 0, false, false };

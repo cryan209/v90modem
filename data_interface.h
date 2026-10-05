@@ -110,6 +110,15 @@ typedef void (*di_link_detail_cb_t)(char *out, size_t len, bool *originate);
 void di_set_link_detail_cb(di_link_detail_cb_t cb);
 
 /*
+ * The live half of ATI6/ATI11: while a call is up the engine pushes what it is
+ * doing now (rates after a renegotiation, a retrain in progress, the V.34
+ * figures) a few times a second.  state is a short word ("data",
+ * "retraining").  Takes only a leaf lock, so the engine may call it holding
+ * nothing or anything; ignored when no call has reported CONNECT.
+ */
+void di_update_link(const v250_connect_report_t *rep, const char *detail, const char *state);
+
+/*
  * Called by the modem engine when an incoming call rings.
  * Sends RING to the control port.
  */

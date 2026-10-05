@@ -5784,6 +5784,26 @@ SPAN_DECLARE(void) at_interpreter(at_state_t *s, const char *cmd, int len)
                             continue;
                         }
                         /*endif*/
+                        /* ATY<n>: manufacturer diagnostic tables (Courier style). */
+                        if (t[0] == 'Y')
+                        {
+                            char num[8];
+                            int len;
+
+                            for (len = 0;  isdigit((int) t[1 + len])  &&  len < (int) sizeof(num) - 1;  len++)
+                                num[len] = t[1 + len];
+                            /*endfor*/
+                            num[len] = '\0';
+                            if (len == 0  ||  at_modem_control(s, AT_MODEM_CONTROL_DIAG_TABLE, num) <= 0)
+                            {
+                                t = NULL;
+                                break;
+                            }
+                            /*endif*/
+                            t += 1 + len;
+                            continue;
+                        }
+                        /*endif*/
                         if ((entry = command_search(t, &matched)) <= 0)
                         {
                             /* V.250 5.6: a character not recognised as a valid

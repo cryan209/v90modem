@@ -163,12 +163,15 @@ call has no speaker or dial pause):
 |---|---|
 | `ATI0` / `ATI3` | product / build version (`git describe`) |
 | `ATI4` | current settings: E/Q/V/X/&C/&D, S-registers, +FCLASS, +MS, +MR/+ER/+DR/+ES/+DS, console |
-| `ATI6` | link diagnostics for the current or last call: direction, carrier, rates, error control, compression, octets each way, duration, disconnect reason (also for a call that failed before data mode) |
+| `ATI6` | link diagnostics, live during a call (the engine pushes twice a second) and kept after it: direction, state (data / retraining), carrier, rates, error control, compression, octets each way, duration, line level each way, disconnect reason (also for a call that failed before data mode) |
 | `ATI7` | product configuration: line, modulations, protocols, fax classes, diagnostics |
-| `ATI11` | engine detail for the last call: mode and offer, role, V.92, G.711 law, framing, fallback, training retrains |
+| `ATI11` | engine detail, live: mode and offer, role, V.92, G.711 law, framing, fallback, retrains, and for V.34/V.90 symbol rates, carriers, bit rate, round-trip delay, B1 SNR |
+| `ATY11` | line spectrum after the Courier's frequency/level table: RX and TX level in dBm0 per 150 Hz band, 150-3900 Hz, over the last second, with a bar graph and the totals |
 
-ATI6 and ATI11 can be read after NO CARRIER; on the combined port, use a
-guarded `+++` to read them mid-call.
+ATI6, ATI11 and ATY11 can be read after NO CARRIER (they keep the call's last
+state and last second of audio); mid-call, use the control port, or a guarded
+`+++` on the combined port. A command the modem does not recognise answers
+ERROR (V.250 5.6).
 
 CLEAR and V120 need the bearer byte-exact end to end and both ends set alike
 -- there is no negotiation, as on ISDN. Two instances of this server reach

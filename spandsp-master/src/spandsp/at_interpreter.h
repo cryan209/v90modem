@@ -119,7 +119,11 @@ enum at_modem_control_operation_e
         when the application has answered it with at_put_response(), zero to
         let the interpreter answer (I0 model, I3 manufacturer), or a negative
         value for ERROR. */
-    AT_MODEM_CONTROL_INFO
+    AT_MODEM_CONTROL_INFO,
+    /*! Manufacturer diagnostic tables ATY<n>, after the USRobotics Courier (no
+        V.250 command uses Y).  num is the decimal value.  A positive return
+        means answered with at_put_response(); anything else is ERROR. */
+    AT_MODEM_CONTROL_DIAG_TABLE
 };
 
 enum

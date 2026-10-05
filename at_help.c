@@ -30,6 +30,7 @@ static const at_help_entry_t basic_rows[] = {
     { "H0",      "Hang up",                                           NULL },
     { "H1",      "Off-hook command state (no effect on the SIP line)", NULL },
     { "In",      "Identification/diagnostics (see I$)",               "I0" },
+    { "Y11",     "Line spectrum: level per 150 Hz band (see I$)",     "Y11" },
     { "L0-3",    "Speaker volume (accepted; there is no speaker)",    NULL },
     { "M0-3",    "Speaker mode (accepted; there is no speaker)",      NULL },
     { "O0",      "Return to online data (NO CARRIER if no call)",     NULL },
@@ -101,9 +102,10 @@ static const at_help_entry_t info_rows[] = {
     { "I0", "Product identification",                                 "I0" },
     { "I3", "Software version",                                       "I3" },
     { "I4", "Current settings",                                       "I4" },
-    { "I6", "Link diagnostics of the current or last call",           "I6" },
+    { "I6", "Link diagnostics, live during a call, else the last one", "I6" },
     { "I7", "Product configuration (what this build supports)",       "I7" },
-    { "I11", "Extended link diagnostics (engine detail, last call)",  "I11" },
+    { "I11", "Extended link diagnostics (live during a call)",        "I11" },
+    { "Y11", "Line level per 150 Hz band, 150-3900 Hz, RX and TX",    "Y11" },
 };
 
 /* S$: exactly the registers the interpreter has.  The rest are ERROR. */

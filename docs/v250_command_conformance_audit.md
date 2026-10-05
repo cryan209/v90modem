@@ -70,6 +70,16 @@ ATI6/ATI11 back from two whole engines, including a call that failed before
 data mode. Also fixed: `ATD` commas reached the SIP INVITE's user part; they
 are now dropped.
 
+ATI6 and ATI11 are live: the engine pushes its current state twice a second
+(`di_update_link()`, a leaf lock -- the AT path cannot call the engine, it
+holds `t31_mtx`), so a renegotiated rate or a retrain shows mid-call. `ATY11`
+(`line_monitor.c`, routed by `AT_MODEM_CONTROL_DIAG_TABLE`) is the Courier's
+frequency/level table done from the signal itself: the last second of the
+wire's codewords each way, Welch-averaged 256-point Hann periodograms summed
+into 150 Hz bands, in dBm0 on SpanDSP's scale (`line_monitor_test` pins a
+known tone to 0.01 dB linear, 0.16 dB through A-law). On a V.22bis pair the
+caller reads TX centred on 1200 Hz and RX on 2400 Hz at -11 dBm0 each.
+
 Unrecognised commands now answer ERROR (V.250 5.6; 5.3.2 and 5.4.3.1/5.4.4.2
 for S-parameters and + names). SpanDSP's dispatch loop used to `break` with the
 line still "good" when its command trie found nothing, so `ATS9?`, `ATK`,

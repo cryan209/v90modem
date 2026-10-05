@@ -22,6 +22,7 @@
 #include "modem_engine.h"
 #include "x2_session.h"
 #include "data_interface.h"
+#include "line_monitor.h"
 #include "at_ms.h"
 #include "data_stack.h"
 #include "clear_channel.h"
@@ -8064,8 +8065,59 @@ static void me_link_detail(char *out, size_t len, bool *originate)
                ? (g_data_lapm_detect ? "V.42 LAPM, detection phase" : "V.42 LAPM, no detection")
                : "V.14 buffered");
     DETAIL("EC fallback        %s\r\n", g_ec_fallback_ok ? "allowed (buffered)" : "disconnect");
-    DETAIL("Training retrains  %u", g_training_fail_retrains);
+    DETAIL("Training retrains  %u\r\n", g_training_fail_retrains);
+    DETAIL("Data-mode retrains %u\r\n", g_loss_retrains);
+    if (g_v34 && (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90)) {
+        float snr;
+        int rtd = v34_get_round_trip_delay_samples(g_v34);
+
+        DETAIL("Symbol rate        TX %d  RX %d\r\n",
+               v34_get_tx_baud_rate(g_v34), v34_get_rx_baud_rate(g_v34));
+        DETAIL("Carrier            TX %s  RX %s\r\n",
+               v34_get_tx_high_carrier(g_v34) ? "high" : "low",
+               v34_get_rx_high_carrier(g_v34) ? "high" : "low");
+        if (v34_get_current_bit_rate(g_v34) > 0)
+            DETAIL("V.34 bit rate      %d\r\n", v34_get_current_bit_rate(g_v34));
+        if (rtd > 0)
+            DETAIL("Round trip delay   %d ms\r\n", rtd / 8);
+        if (v34_get_b1_snr_db(g_v34, &snr) == 0)
+            DETAIL("B1 receive SNR     %.1f dB\r\n", snr);
+    }
+    if (used >= 2 && out[used - 2] == '\r')
+        out[used - 2] = '\0';      /* no trailing line end */
 #undef DETAIL
+}
+
+/* ATI6/ATI11 are live: twice a second of received audio, while a call is up,
+   hand data_interface.c what the call is doing now.  The AT path cannot ask
+   the engine itself -- it holds t31_mtx, which the engine takes under
+   g_state_mtx -- so the engine pushes, and only into a leaf lock. */
+static void me_link_publish_tick(int samples)
+{
+    static int acc;
+    v250_connect_report_t rep;
+    char detail[1024];
+    bool originate;
+    bool live;
+    const char *state;
+
+    acc += samples;
+    if (acc < 4000)
+        return;
+    acc = 0;
+    pthread_mutex_lock(&g_state_mtx);
+    live = g_state == ME_DATA || g_state == ME_TRAINING;
+    if (live) {
+        memset(&rep, 0, sizeof(rep));
+        rep.tx_rate = g_data_connect_rate;
+        rep.ec = "NONE";
+        me_connect_info(g_data_connect_rate, &rep);
+        me_link_detail(detail, sizeof(detail), &originate);
+        state = g_state == ME_DATA ? "data" : "retraining";
+    }
+    pthread_mutex_unlock(&g_state_mtx);
+    if (live)
+        di_update_link(&rep, detail, state);
 }
 
 void me_init(void)
@@ -8372,6 +8424,7 @@ void me_on_sip_answered(void)
 
 void me_on_sip_connected(void)
 {
+    lm_reset();
     pthread_mutex_lock(&g_state_mtx);
     g_awaiting_answer = false;
 
@@ -9537,6 +9590,13 @@ static bool me_fax_tx_g711(uint8_t *codewords, int count)
 void me_rx_audio(const int16_t *amp, int len)
 {
     g_rx_audio_samples += (uint64_t)len;
+    /* The G.711 entry feeds the line monitor itself, with the wire's own
+       codewords; only a caller that starts here (linear bearers, the USB
+       modems) is measured at this point. */
+    if (!g_rx_from_g711) {
+        lm_feed(LM_RX, amp, len);
+        me_link_publish_tick(len);
+    }
 
     if (di_fax_active() && !me_v34_fax_probe()) {
         di_fax_rx(amp, len);
@@ -12373,7 +12433,17 @@ static void buffer_tx_samples_for_echo(const int16_t *amp, int len)
     pthread_mutex_unlock(&g_state_mtx);
 }
 
+static void me_tx_audio_impl(int16_t *amp, int len);
+static bool g_tx_from_g711 = false;
+
 void me_tx_audio(int16_t *amp, int len)
+{
+    me_tx_audio_impl(amp, len);
+    if (!g_tx_from_g711)
+        lm_feed(LM_TX, amp, len);
+}
+
+static void me_tx_audio_impl(int16_t *amp, int len)
 {
     pthread_mutex_lock(&g_state_mtx);
     if (g_mod == ME_MOD_X2 && g_state == ME_TRAINING) {
@@ -14161,14 +14231,24 @@ static uint64_t me_mono_ns(void)
 void me_rx_g711(const uint8_t *codewords, int count)
 {
     uint64_t t0 = me_mono_ns();
+    if (codewords && count > 0)
+        lm_feed_g711(LM_RX, codewords, count, g_law == ME_LAW_ALAW);
     me_rx_g711_impl(codewords, count);
     me_media_timing_note("rx", me_mono_ns() - t0);
+    if (count > 0)
+        me_link_publish_tick(count);
 }
 
 int me_tx_g711(uint8_t *codewords, int count)
 {
     uint64_t t0 = me_mono_ns();
-    int n = me_tx_g711_impl(codewords, count);
+    int n;
+
+    g_tx_from_g711 = true;
+    n = me_tx_g711_impl(codewords, count);
+    g_tx_from_g711 = false;
+    if (codewords && n > 0)
+        lm_feed_g711(LM_TX, codewords, n, g_law == ME_LAW_ALAW);
     me_media_timing_note("tx", me_mono_ns() - t0);
     return n;
 }

@@ -24,6 +24,7 @@
 #include "v250_ctl.h"
 #include "at_test.h"
 #include "at_help.h"
+#include "line_monitor.h"
 #include "build_version.h"
 
 #include <spandsp.h>
@@ -211,6 +212,8 @@ typedef struct {
     uint64_t to_line;       /* DTE octets handed to the engine */
     uint64_t to_dte;        /* line octets delivered to the DTE */
     char cause[64];
+    char state[16];         /* live: "data", "retraining" */
+    int64_t updated_ms;     /* last engine push */
     char detail[1024];      /* the engine's ATI11 text */
 } di_link_t;
 static di_link_t link_now;
@@ -503,6 +506,31 @@ static int handle_diagnostic(const char *command)
 /* "$" help and ATI pages                                              */
 /* ------------------------------------------------------------------ */
 
+void di_update_link(const v250_connect_report_t *rep, const char *detail, const char *state)
+{
+    pthread_mutex_lock(&test_mtx);
+    if (link_now.active && !link_now.fax) {
+        if (rep) {
+            if (rep->carrier)
+                snprintf(link_now.carrier, sizeof(link_now.carrier), "%s", rep->carrier);
+            snprintf(link_now.ec, sizeof(link_now.ec), "%s", rep->ec ? rep->ec : "NONE");
+            if (rep->tx_rate > 0) {
+                link_now.tx_rate = rep->tx_rate;
+                link_now.rx_rate = rep->rx_rate;
+            }
+            link_now.dc_scheme = rep->dc_scheme;
+            link_now.dc_tx = rep->dc_tx;
+            link_now.dc_rx = rep->dc_rx;
+        }
+        if (detail)
+            snprintf(link_now.detail, sizeof(link_now.detail), "%s", detail);
+        if (state)
+            snprintf(link_now.state, sizeof(link_now.state), "%s", state);
+        link_now.updated_ms = now_ms();
+    }
+    pthread_mutex_unlock(&test_mtx);
+}
+
 /* Power-on: ATI6/ATI11 have no call to report until one connects. */
 static void link_reset(void)
 {
@@ -550,6 +578,8 @@ static void link_latch(int rate, const v250_connect_report_t *rep, bool fax)
     link_now.to_line = 0;
     link_now.to_dte = 0;
     link_now.cause[0] = '\0';
+    snprintf(link_now.state, sizeof(link_now.state), "data");
+    link_now.updated_ms = link_now.start_ms;
     snprintf(link_now.detail, sizeof(link_now.detail), "%s", detail);
     pthread_mutex_unlock(&test_mtx);
 }
@@ -669,7 +699,8 @@ static void info_link(page_t *pg)
     }
     fmt_duration(dur, sizeof(dur), (l.active ? now_ms() : l.end_ms) - l.start_ms);
     page_put(pg, "Call               %s, %s\r\n", l.originate ? "Originate" : "Answer",
-             l.active ? "in progress" : l.failed ? "failed before data mode" : "ended");
+             l.active ? (strcmp(l.state, "data") ? l.state : "in progress")
+                      : l.failed ? "failed before data mode" : "ended");
     if (l.failed) {
         page_put(pg, "Disconnect reason  %s\r\n", l.cause);
         return;
@@ -691,6 +722,20 @@ static void info_link(page_t *pg)
         page_put(pg, "Octets to DTE      %llu\r\n", (unsigned long long) l.to_dte);
     }
     page_put(pg, "Duration           %s\r\n", dur);
+    {
+        float rx, tx;
+        bool have_rx = lm_level_dbm0(LM_RX, &rx);
+        bool have_tx = lm_level_dbm0(LM_TX, &tx);
+
+        if (have_rx || have_tx) {
+            page_put(pg, "%s", l.active ? "Line level now     " : "Line level at end  ");
+            if (have_rx)
+                page_put(pg, "RX %.1f dBm0  ", rx);
+            if (have_tx)
+                page_put(pg, "TX %.1f dBm0", tx);
+            page_put(pg, "\r\n");
+        }
+    }
     page_put(pg, "Disconnect reason  %s\r\n", l.active ? "-" : l.cause);
 }
 
@@ -719,7 +764,8 @@ static void info_link_detail(page_t *pg)
     pthread_mutex_lock(&test_mtx);
     l = link_now;
     pthread_mutex_unlock(&test_mtx);
-    page_put(pg, "Extended Link Diagnostics...\r\n");
+    page_put(pg, "Extended Link Diagnostics (%s)...\r\n",
+             !l.valid || l.failed ? "no call" : l.active ? "live" : "at end of call");
     if (!l.valid)
         page_put(pg, "No call since power-on.\r\n");
     else if (l.failed)
@@ -730,6 +776,19 @@ static void info_link_detail(page_t *pg)
         page_put(pg, "The engine reported no detail for this call.\r\n");
     else
         page_put(pg, "%s\r\n", l.detail);
+}
+
+/* ATY<n>.  Only the Courier's frequency/level table so far. */
+static int handle_diag_table(const char *num)
+{
+    char buf[4096];
+
+    if (!num || atoi(num) != 11)
+        return -1;
+    if (lm_format_bands(buf, sizeof(buf)) < 0)
+        return -1;
+    put_page(buf);
+    return 1;
 }
 
 static int handle_info(const char *num)
@@ -824,6 +883,9 @@ static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
 
     case AT_MODEM_CONTROL_INFO:
         return handle_info(num);
+
+    case AT_MODEM_CONTROL_DIAG_TABLE:
+        return handle_diag_table(num);
 
     case AT_MODEM_CONTROL_RESUME:
         /* V.250 6.3.7.  With a separate data port there is no online data
