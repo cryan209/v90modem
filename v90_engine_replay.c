@@ -113,19 +113,12 @@ static int load_tap(const char *path)
 }
 /*- End of function --------------------------------------------------------*/
 
-/* Where the call starts.
- *
- * A tap begins when the server process does, not when the call arrives, so it
- * can open with a long stretch of nothing.  The engine's V.8 timers start at
- * me_on_sip_connected(), so handing it that silence first is not a neutral
- * act -- it times the call out before the audio arrives.  Find the first
- * frame carrying real energy and back off a little. */
-static long find_call_start(int alaw)
+/* Byte offset of the first frame carrying real energy, or -1 if none does. */
+static long first_energy(const uint8_t *buf, long len, int alaw)
 {
-    const long margin = 8000/2;     /* half a second */
     long i;
 
-    for (i = 0; i + FRAME_BYTES <= tap_len; i += FRAME_BYTES) {
+    for (i = 0; i + FRAME_BYTES <= len; i += FRAME_BYTES) {
         double sum = 0.0;
         int k;
 
@@ -133,18 +126,90 @@ static long find_call_start(int alaw)
             /* Both laws encode silence as a small set of codewords around the
                sign bit; a magnitude estimate off the exponent is enough to
                find the start of a call and needs no decode table. */
-            uint8_t c = alaw ? (uint8_t)(tap[i + k] ^ 0x55)
-                             : (uint8_t)(~tap[i + k]);
+            uint8_t c = alaw ? (uint8_t)(buf[i + k] ^ 0x55)
+                             : (uint8_t)(~buf[i + k]);
             int exponent = (c >> 4) & 0x07;
 
             sum += exponent;
         }
         if (sum/FRAME_BYTES >= 2.0)
-            break;
+            return i;
     }
-    if (i + FRAME_BYTES > tap_len)
+    return -1;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Our own transmit tap beside the receive one, if it is there. */
+static long tx_tap_first_energy(const char *rx_path, int alaw)
+{
+    char tx_path[1024];
+    const char *base = strrchr(rx_path, '/');
+    uint8_t *buf;
+    long len;
+    long first;
+    FILE *f;
+
+    base = base ? base + 1 : rx_path;
+    if (strcmp(base, "live-rx.g711") != 0
+        || (size_t)(base - rx_path) + sizeof("live-tx.g711") > sizeof(tx_path))
+        return -1;
+    memcpy(tx_path, rx_path, (size_t)(base - rx_path));
+    strcpy(tx_path + (base - rx_path), "live-tx.g711");
+    if (!(f = fopen(tx_path, "rb")))
+        return -1;
+    fseek(f, 0, SEEK_END);
+    len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    buf = malloc((size_t)len > 0 ? (size_t)len : 1);
+    if (!buf || fread(buf, 1, (size_t)len, f) != (size_t)len) {
+        free(buf);
+        fclose(f);
+        return -1;
+    }
+    fclose(f);
+    first = first_energy(buf, len, alaw);
+    free(buf);
+    return first;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Where the call starts.
+ *
+ * The engine's V.8 timers start at me_on_sip_connected(), so the replay has
+ * to start at the instant the live call's media connected.  Both live taps
+ * are opened at engine init and written only while media flows, so for the
+ * first call in a tap that instant is byte 0.
+ *
+ * On an ANSWERED call our side speaks first: live-tx.g711 carries our answer
+ * tone from 0.96 s, while the caller's first energy lands seconds later
+ * (2.8 s on apple-v92-sip-r4, ~3.4 s on every SmartLink call).  The old rule
+ * -- back off half a second from the receive tap's first energy -- therefore
+ * started every answerer replay 2.3-2.9 s late, with our ANSam and V.8 timers
+ * shifted that far against the recorded peer.  Most calls survived it; r4 did
+ * not: its replay entered Phase 2 after the peer's INFO0a had gone by, never
+ * formed the V.92 contract, and so never reached the Phase 3 receiver at all.
+ * From byte 0 it decodes INFO0a, passes the TRN1u gate and starts Sd, as the
+ * live receiver would have.  (goal-matrix rate28800-r1, a SmartLink answerer
+ * call, replays to the same data-mode outcome either way.)
+ *
+ * So: when our own transmit tap shows us speaking before the peer, start at
+ * 0.  Otherwise -- an originated call, or no transmit tap -- find the first
+ * frame carrying real energy and back off a little, as before. */
+static long find_call_start(const char *path, int alaw, int dial, const char **why)
+{
+    const long margin = 8000/2;     /* half a second */
+    long rx_first = first_energy(tap, tap_len, alaw);
+    long tx_first;
+
+    if (!dial && (tx_first = tx_tap_first_energy(path, alaw)) >= 0
+        && (rx_first < 0 || tx_first < rx_first)) {
+        *why = "our transmit tap leads, so media connect is byte 0";
         return 0;
-    return (i > margin) ? i - margin : 0;
+    }
+    *why = "first receive energy less 0.5 s";
+    if (rx_first < 0)
+        return 0;
+    return (rx_first > margin) ? rx_first - margin : 0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -196,7 +261,10 @@ int main(int argc, char *argv[])
     if (load_tap(path) != 0)
         return 1;
 
-    start = (from >= 0.0) ? (long)(from*8000.0) : find_call_start(alaw);
+    const char *why = "--from";
+
+    start = (from >= 0.0) ? (long)(from*8000.0)
+                          : find_call_start(path, alaw, dial, &why);
     start -= start % FRAME_BYTES;
     if (start < 0)
         start = 0;
@@ -205,8 +273,8 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    printf("engine replay: %s, %s, %.1f s, call starts at %.2f s%s\n",
-           path, alaw ? "A-law" : "u-law", tap_len/8000.0, start/8000.0,
+    printf("engine replay: %s, %s, %.1f s, call starts at %.2f s (%s)%s\n",
+           path, alaw ? "A-law" : "u-law", tap_len/8000.0, start/8000.0, why,
            fast ? " [--fast: wall-clock timers will NOT match a live call]"
                 : "");
     fflush(stdout);

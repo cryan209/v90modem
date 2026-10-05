@@ -6,7 +6,7 @@ modem is on a real 2-wire loop behind a single codec (VG224 -> SIP -> us),
 so that 9.5.1.1.3 releases Sd. On the byte-exact SIP loopback it must behave
 exactly as it does today.
 
-Status: steps 1-8 done, 2026-10-01. Next: step 9, a live call. The fixture decodes Ja; `v92_p3_rx_line_test` is in `make test`. Each step lists what it changes, how it is
+Status: steps 1-8 done, 2026-10-01; the engine path reproduces to Sd offline from `v90_engine_replay` on r4 (2026-10-05). Next: step 9, a live call. The fixture decodes Ja; `v92_p3_rx_line_test` is in `make test`. Each step lists what it changes, how it is
 measured, and the result that completes it. Do the steps in order: each one
 produces the instrument the next one is graded by.
 
@@ -601,14 +601,28 @@ handed-on equaliser.
 - **The fixture passes only with the equaliser on, and the test says so.**
   `v92_p3_rx_line_test` runs the same fixture with it off and requires no
   Ja (`fixture_no_equaliser`).
-- **Not exercised offline, and why.** `v90_engine_replay` cannot drive the
-  engine through this call's Phase 2. Replaying
-  `artifacts/apple-v92-sip-r4`, live or `--fast`, never decodes the peer's
-  INFO0a, so the V.92 contract (`v92_contract=0`) is never formed and
-  INFO1a is rejected before Phase 3. The live call decoded it ("INFO0a
-  flags ... capability(bit26)=1"). That is the known INFO0a-at-the-V.8-seam
-  problem, and it is unrelated to this receiver. So the engine wiring is
-  reviewed and built, and step 9's live call is its first real run.
+- **Exercised offline after all (2026-10-05).** This note used to say
+  `v90_engine_replay` could not drive the engine through r4's Phase 2,
+  because the replay never decoded the peer's INFO0a (`v92_contract=0`,
+  INFO1a rejected), and blamed the INFO0a-at-the-V.8-seam problem. **The
+  cause was the replay's start point, not INFO0a.** The harness started
+  half a second before the receive tap's first energy, 2.30 s, but both live
+  taps begin at media connect, and on an answered call our ANSam leads the
+  caller's first energy by ~1.8 s. Our V.8 timeline was therefore shifted
+  2.3 s against the recorded peer, and Phase 2 opened on silence
+  (`guard_db=-60.4` where live read 37.1) after INFO0a had gone by. The
+  harness now starts at byte 0 whenever our transmit tap leads. Replayed so:
+  - INFO0a decodes and the V.92 contract forms;
+  - `TRN1u start 85292 (declared 85323, offset -31) score 0.734`;
+  - `TRN1u gate passed, agreement 100.0% 21.8 dB +46 ppm main tap 13`;
+  - `strict Ja accepted from equalised decisions ... N=120 LSP=12 LTP=11;
+    starting Sd`.
+
+  So the step 8 wiring runs end to end on the live recording. After Sd the
+  recorded peer retrains, as it did live, because the live server never
+  sent Sd; a recording cannot show what the analogue side does with ours.
+  That is step 9. The same start rule leaves the SmartLink answerer replay
+  `goal-matrix-115515Z/rate28800-r1` at the same data-mode outcome.
 
 ### 9. Live verification, and the next blocker
 
