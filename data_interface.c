@@ -20,6 +20,7 @@
 #include "data_interface.h"
 #include "modem_engine.h"
 #include "fax_class2.h"
+#include "at_ms.h"
 
 #include <spandsp.h>
 #include <spandsp/private/logging.h>
@@ -129,6 +130,12 @@ static volatile int running    = 0;
 static pthread_t    reader_tid;
 static ring_t       upstream_ring;
 
+/* AT+MS: the engine owns the modulation offer, the rates live here. */
+static di_ms_set_cb_t   ms_set_cb;
+static di_ms_get_cb_t   ms_get_cb;
+static di_ms_reset_cb_t ms_reset_cb;
+static at_ms_settings_t ms_rates;   /* only the rate fields are used */
+
 /*
  * Class 2.0 (T.32) line assembly.  T.31 does its own line buffering, but in
  * class 2.0 the +F commands are ours, so a line has to be complete before it
@@ -189,6 +196,56 @@ static int at_tx_handler(void *user_data,
  * op  — one of the AT_MODEM_CONTROL_* enum values
  * num — dial string (for CALL), or NULL
  */
+/* V.250 6.4.1 +MS.  args is the text after "+MS", or NULL for ATZ/AT&F.
+ * Runs inside the AT interpreter, so at_put_response() lands before the
+ * final OK.  Returns <0 for ERROR. */
+static int handle_plus_ms(const char *args)
+{
+    at_ms_settings_t ms;
+    char buf[128];
+    char mode[16];
+    bool automode;
+    const char *carrier;
+
+    if (!ms_set_cb || !ms_get_cb || !ms_reset_cb)
+        return -1;
+    if (!args) {
+        ms_reset_cb();
+        memset(&ms_rates, 0, sizeof(ms_rates));
+        return 0;
+    }
+    switch (at_ms_parse(args, &ms)) {
+    case AT_MS_SET:
+        if (ms_set_cb(at_ms_carrier_to_mode(ms.carrier), ms.automode != 0) < 0)
+            return -1;
+        ms_rates = ms;
+        return 0;
+    case AT_MS_READ:
+        ms_get_cb(mode, sizeof(mode), &automode);
+        carrier = at_ms_mode_to_carrier(mode);
+        ms = ms_rates;
+        snprintf(ms.carrier, sizeof(ms.carrier), "%s", carrier ? carrier : "V90");
+        ms.automode = automode ? 1 : 0;
+        at_ms_format_read(&ms, buf, sizeof(buf));
+        at_put_response(at, buf);
+        return 0;
+    case AT_MS_TEST:
+        at_ms_format_test(buf, sizeof(buf));
+        at_put_response(at, buf);
+        return 0;
+    default:
+        return -1;
+    }
+}
+
+void di_set_modulation_ops(di_ms_set_cb_t set, di_ms_get_cb_t get,
+                           di_ms_reset_cb_t reset)
+{
+    ms_set_cb = set;
+    ms_get_cb = get;
+    ms_reset_cb = reset;
+}
+
 static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
                                     int op, const char *num)
 {
@@ -224,6 +281,9 @@ static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
     case AT_MODEM_CONTROL_RNG:
     case AT_MODEM_CONTROL_DSR:
         break;
+
+    case AT_MODEM_CONTROL_MODULATION:
+        return handle_plus_ms(num);
 
     default:
         break;

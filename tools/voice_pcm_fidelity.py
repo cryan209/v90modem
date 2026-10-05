@@ -103,7 +103,7 @@ def start_modem(env_extra: dict, log_path: Path) -> subprocess.Popen:
          "--sip-server", "asterisk.net.cryan.nz",
          "--username", "6001",
          "--password", "6001",
-         "--pty", "/tmp/v90modem"],
+         "--pty-link", "/tmp/v90modem"],
         cwd=ROOT, env=env, stdout=log_f, stderr=subprocess.STDOUT,
     )
     proc._log_f = log_f  # keep reference alive

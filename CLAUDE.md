@@ -23,7 +23,9 @@ The RTP payload **is** the DS0 PCM stream the far-end D/A converter sees. Most o
 ./sip_v90_modem --sip-server asterisk.net.cryan.nz --username 6001 --password 6001 --pty-link /tmp/v90modem
 ```
 
-The PTY flag is `--pty-link`, not `--pty`; passing `--pty` is silently ignored and you get the default `/tmp/modem0`.
+The PTY flag is `--pty-link`, not `--pty`. Unknown arguments are now an error (usage, exit 2); they used to be silently ignored, which is how `--pty` fell back to `/tmp/modem0`.
+
+`--mode`/`ME_MODE` set the power-on V.8 offer; `AT+MS` (V.250 6.4.1) on the PTY changes it for the NEXT call (applied in `me_on_sip_connected()`), and `ATZ`/`AT&F` restore it. SpanDSP's `+MS` was a TODO that answered OK and did nothing; it now forwards its text as `AT_MODEM_CONTROL_MODULATION` to `data_interface.c`, which parses it with `at_ms.c` and calls `me_set_modulation_offer()`. The engine side uses its own leaf mutex because the AT path holds `t31_mtx`, which the engine takes under `g_state_mtx`. `at_ms_test` covers it.
 
 The automated tests only cover offline and loopback paths — passing them says nothing about hardware interop, which is verified manually against a real analog modem (`docs/v90_hardware_interop.md`).
 

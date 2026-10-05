@@ -13,6 +13,10 @@
  *   ./sip_v90_modem [--sip-server <host>] [--username <user>]
  *                   [--password <pass>]  [--pty-link <path>]
  *                   [--local-port <port>] [--rtp-port <port>]
+ *                   [--bind-addr <ip>] [--mode x2|v22|v34|v90|v92]
+ *                   [--verbose]
+ *
+ * Unknown arguments are an error (usage, exit status 2).
  *
  * If --sip-server is omitted the UA starts in peer-to-peer mode and
  * waits for incoming calls on the specified local SIP port (default 5060).
@@ -1014,6 +1018,17 @@ static int detect_local_ip_for_host(const char *host, char *buf, size_t buflen)
     return rc;
 }
 
+static void print_usage(FILE *f, const char *argv0)
+{
+    fprintf(f,
+        "Usage: %s [--sip-server host] [--username u] [--password p]\n"
+        "          [--pty-link path] [--local-port port] [--rtp-port port]\n"
+        "          [--bind-addr ip] [--mode x2|v22|v34|v90|v92] [--verbose]\n"
+        "\n"
+        "--mode sets the power-on V.8 offer (same as ME_MODE); AT+MS on the\n"
+        "PTY changes it for later calls and ATZ/AT&F restore it.\n", argv0);
+}
+
 int main(int argc, char *argv[])
 {
     /* stdout is fully block-buffered (not line-buffered) whenever it's
@@ -1035,41 +1050,58 @@ int main(int argc, char *argv[])
     int         rtp_port    = 0;
     pj_bool_t   aud_subsys_inited = PJ_FALSE;
 
-    /* Parse command-line arguments */
+    /* Parse command-line arguments.  An unknown flag, or one missing its
+       value, is an error: silently ignoring them is how --pty (for
+       --pty-link) used to fall back to /tmp/modem0 without a word. */
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--sip-server") && i+1 < argc)
-            sip_server = argv[++i];
-        else if (!strcmp(argv[i], "--username") && i+1 < argc)
-            username = argv[++i];
-        else if (!strcmp(argv[i], "--password") && i+1 < argc)
-            password = argv[++i];
-        else if (!strcmp(argv[i], "--pty-link") && i+1 < argc)
-            pty_link = argv[++i];
-        else if (!strcmp(argv[i], "--local-port") && i+1 < argc)
-            local_port = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--rtp-port") && i+1 < argc)
-            rtp_port = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--bind-addr") && i+1 < argc)
-            bind_addr = argv[++i];
-        else if (!strcmp(argv[i], "--mode") && i+1 < argc)
-            modem_mode = argv[++i];
-        else if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "-v"))
+        const char *a = argv[i];
+        bool has_val = i + 1 < argc;
+
+        if (!strcmp(a, "--verbose") || !strcmp(a, "-v")) {
             me_set_verbose(1);
-        else if (!strcmp(argv[i], "--help")) {
-            fprintf(stderr,
-                "Usage: %s [--sip-server host] [--username u] [--password p]\n"
-                "          [--pty-link path] [--local-port port] [--rtp-port port]\n"
-                "          [--bind-addr ip] [--mode x2|v34|v90|v92] [--verbose]\n", argv[0]);
+        } else if (!strcmp(a, "--help") || !strcmp(a, "-h")) {
+            print_usage(stdout, argv[0]);
             return 0;
+        } else if (!strcmp(a, "--sip-server") && has_val) {
+            sip_server = argv[++i];
+        } else if (!strcmp(a, "--username") && has_val) {
+            username = argv[++i];
+        } else if (!strcmp(a, "--password") && has_val) {
+            password = argv[++i];
+        } else if (!strcmp(a, "--pty-link") && has_val) {
+            pty_link = argv[++i];
+        } else if (!strcmp(a, "--local-port") && has_val) {
+            local_port = atoi(argv[++i]);
+        } else if (!strcmp(a, "--rtp-port") && has_val) {
+            rtp_port = atoi(argv[++i]);
+        } else if (!strcmp(a, "--bind-addr") && has_val) {
+            bind_addr = argv[++i];
+        } else if (!strcmp(a, "--mode") && has_val) {
+            modem_mode = argv[++i];
+        } else {
+            static const char *const takes_value[] = {
+                "--sip-server", "--username", "--password", "--pty-link",
+                "--local-port", "--rtp-port", "--bind-addr", "--mode"
+            };
+            bool missing = false;
+
+            for (size_t k = 0; k < sizeof(takes_value) / sizeof(takes_value[0]); k++)
+                if (!strcmp(a, takes_value[k]))
+                    missing = true;
+            fprintf(stderr, missing ? "%s: %s needs a value\n"
+                                    : "%s: unknown argument '%s'\n", argv[0], a);
+            print_usage(stderr, argv[0]);
+            return 2;
         }
     }
 
     if (modem_mode
         && strcmp(modem_mode, "x2") != 0
+        && strcmp(modem_mode, "v22") != 0
         && strcmp(modem_mode, "v34") != 0
         && strcmp(modem_mode, "v90") != 0
         && strcmp(modem_mode, "v92") != 0) {
-        fprintf(stderr, "Invalid --mode '%s' (expected x2, v34, v90, or v92)\n",
+        fprintf(stderr, "Invalid --mode '%s' (expected x2, v22, v34, v90, or v92)\n",
                 modem_mode);
         return 2;
     }

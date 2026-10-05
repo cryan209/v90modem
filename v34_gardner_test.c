@@ -27,6 +27,7 @@
  *      the failure mode of the detector this replaced.
  */
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

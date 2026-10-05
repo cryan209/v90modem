@@ -2043,9 +2043,10 @@ static modem_echo_can_segment_state_t *g_echo_can = NULL;
    well-separated, and the LMS diverges if active.  We track RX frame count since
    ME_TRAINING started and only activate after a delay (Phase 2 takes 2-5s). */
 /* EC disabled — notch filter used instead (see g_notch) */
-/* Selected once in me_init() from ME_MODE.  Keeping this at the V.8 offer
+/* Defaulted in me_init() from ME_MODE.  Keeping this at the V.8 offer
  * boundary lets plain V.34 exercise SpanDSP without entering any V.90/V.92
- * branches.  Values: v34, v90 (default), v92. */
+ * branches.  Values: v22, v34, v90 (default), v92, x2.  AT+MS changes it
+ * per call; see me_set_modulation_offer(). */
 /* When the plain-V.34 receiver entered V34_RX_STAGE_PHASE3_WAIT_S, for
  * ME_V34_PHASE3_S_TIMEOUT_MS. */
 static uint64_t g_v34_phase3_wait_s_ms;
@@ -2057,9 +2058,23 @@ static bool g_advertise_v90 = true;
  * its own timing recovery and does not assume the peer's symbol clock is
  * phase-locked to our sample grid, which the V.34 Phase 3 acquisition does. */
 static bool g_advertise_v34 = true;
+/* V.8's V.22/V.22bis bit.  Cleared only by AT+MS=<carrier>,0 (V.250 6.4.1
+ * automode off) for a carrier above V.22bis. */
+static bool g_advertise_v22 = true;
 static bool g_enable_v92 = false;
 static const char *g_mode_name = "v90";
 static bool g_enable_x2 = false;
+/* The offer the NEXT call takes (AT+MS), and the power-on default ME_MODE
+ * set, which ATZ/AT&F restore.  Applied in me_on_sip_connected() so a change
+ * never reaches a call in progress. */
+/* g_cfg_mtx is a leaf lock: AT+MS reaches here from inside the AT
+ * interpreter with data_interface.c's t31_mtx held, and the engine takes
+ * t31_mtx (di_fax_active()) under g_state_mtx, so g_state_mtx here would
+ * be a lock-order inversion. */
+static pthread_mutex_t g_cfg_mtx = PTHREAD_MUTEX_INITIALIZER;
+static char g_cfg_mode[8] = "v90";
+static bool g_cfg_automode = true;
+static char g_default_mode[8] = "v90";
 static x2_session_t g_x2;
 static x2_session_stage_t g_x2_last_stage;
 static bool g_x2_receiver_started;
@@ -2085,6 +2100,130 @@ static bool g_v90_analogue_role = false;
 static bool me_v90_analogue_role(void)
 {
     return g_v90_analogue_role;
+}
+
+/* ------------------------------------------------------------------ */
+/* Modulation offer (ME_MODE, --mode, AT+MS)                           */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    bool x2, v90, v34, v22, v92;
+    const char *name;
+} me_offer_t;
+
+/* V8_MOD_* bits for an offer: what CM/JM carries. */
+static int me_offer_bits(bool v22, bool v34, bool v90)
+{
+    return (v22 ? V8_MOD_V22 : 0) | (v34 ? V8_MOD_V34 : 0)
+         | (v90 ? V8_MOD_V90 : 0);
+}
+
+static const char *me_offer_str(void)
+{
+    static const char *const names[8] = {
+        "none", "V22", "V34", "V34|V22", "V90", "V90|V22", "V90|V34",
+        "V90|V34|V22"
+    };
+
+    return names[(g_advertise_v22 ? 1 : 0) | (g_advertise_v34 ? 2 : 0)
+                 | (g_advertise_v90 ? 4 : 0)];
+}
+
+/* Mode name -> offer.  NULL, "" and "auto" are the default: v90, or v92
+ * under the ME_V92_ENABLE compatibility alias.  False for an unknown name. */
+static bool me_offer_from_mode(const char *mode, bool automode, me_offer_t *o)
+{
+    memset(o, 0, sizeof(*o));
+    o->v90 = true;
+    o->v34 = true;
+    if (!mode || !*mode || strcmp(mode, "auto") == 0) {
+        o->v92 = parse_env_int("ME_V92_ENABLE", 0) != 0;
+        o->name = o->v92 ? "v92" : "v90";
+    } else if (strcmp(mode, "x2") == 0) {
+        o->x2 = true;
+        o->v90 = false;
+        o->name = "x2";
+    } else if (strcmp(mode, "v34") == 0) {
+        o->v90 = false;
+        o->name = "v34";
+    } else if (strcmp(mode, "v22") == 0) {
+        o->v90 = false;
+        o->v34 = false;
+        o->name = "v22";
+    } else if (strcmp(mode, "v90") == 0) {
+        o->name = "v90";
+    } else if (strcmp(mode, "v92") == 0) {
+        o->v92 = true;
+        o->name = "v92";
+    } else {
+        return false;
+    }
+    /* V.250 6.4.1 automode off: the named family only, so no V.22 fallback
+     * bit.  V.22 itself keeps it, since an offer must name something. */
+    o->v22 = automode || (!o->v34 && !o->v90);
+    return true;
+}
+
+static bool me_resolve_offer(const char *mode, bool automode)
+{
+    const char *role = getenv("ME_V90_ROLE");
+    me_offer_t o;
+
+    if (!me_offer_from_mode(mode, automode, &o))
+        return false;
+    g_enable_x2 = o.x2;
+    g_advertise_v90 = o.v90;
+    g_advertise_v34 = o.v34;
+    g_advertise_v22 = o.v22;
+    g_enable_v92 = o.v92;
+    g_mode_name = o.name;
+    g_v90_analogue_role = o.v90 && role && strcmp(role, "analogue") == 0;
+    return true;
+}
+
+int me_set_modulation_offer(const char *mode, bool automode)
+{
+    me_offer_t o;
+
+    if (!me_offer_from_mode(mode, automode, &o))
+        return -1;
+    pthread_mutex_lock(&g_cfg_mtx);
+    snprintf(g_cfg_mode, sizeof(g_cfg_mode), "%s", o.name);
+    g_cfg_automode = automode;
+    pthread_mutex_unlock(&g_cfg_mtx);
+    ME_LOG("[ME] AT+MS: next call is mode %s, automode %d\n", o.name,
+           automode ? 1 : 0);
+    return 0;
+}
+
+void me_get_modulation_offer(char *mode, size_t len, bool *automode)
+{
+    pthread_mutex_lock(&g_cfg_mtx);
+    if (mode && len)
+        snprintf(mode, len, "%s", g_cfg_mode);
+    if (automode)
+        *automode = g_cfg_automode;
+    pthread_mutex_unlock(&g_cfg_mtx);
+}
+
+void me_reset_modulation_offer(void)
+{
+    pthread_mutex_lock(&g_cfg_mtx);
+    snprintf(g_cfg_mode, sizeof(g_cfg_mode), "%s", g_default_mode);
+    g_cfg_automode = true;
+    pthread_mutex_unlock(&g_cfg_mtx);
+}
+
+int me_modulation_offer_bits(void)
+{
+    me_offer_t o;
+    char mode[sizeof(g_cfg_mode)];
+    bool automode;
+
+    me_get_modulation_offer(mode, sizeof(mode), &automode);
+    if (!me_offer_from_mode(mode, automode, &o))
+        return 0;
+    return me_offer_bits(o.v22, o.v34, o.v90);
 }
 
 /*
@@ -3052,11 +3191,9 @@ static int me_start_or_restart_v8_locked(int answer_tone)
     else
         v8_parms.v92            = -1;
     v8_parms.jm_cm.call_function      = V8_CALL_V_SERIES;
-    v8_parms.jm_cm.modulations        = V8_MOD_V22;
-    if (g_advertise_v34)
-        v8_parms.jm_cm.modulations   |= V8_MOD_V34;
-    if (g_advertise_v90)
-        v8_parms.jm_cm.modulations   |= V8_MOD_V90;
+    v8_parms.jm_cm.modulations        = me_offer_bits(g_advertise_v22,
+                                                      g_advertise_v34,
+                                                      g_advertise_v90);
     if (me_v34_fax_probe() && !g_calling_party) {
         /* Answerer only.  A calling fax is the SOURCE in V.34 12.2.1 ("call
            modem as source modem"), which makes this end the RECIPIENT, and
@@ -6955,45 +7092,18 @@ void me_init(void)
         const char *mode = getenv("ME_MODE");
         const char *role = getenv("ME_V90_ROLE");
 
-        /* ME_V92_ENABLE remains a compatibility alias when ME_MODE is absent. */
-        if (!mode || !*mode || strcmp(mode, "auto") == 0) {
-            g_advertise_v90 = true;
-            g_enable_v92 = parse_env_int("ME_V92_ENABLE", 0) != 0;
-            g_mode_name = g_enable_v92 ? "v92" : "v90";
-        } else if (strcmp(mode, "x2") == 0) {
-            g_enable_x2 = true;
-            g_advertise_v90 = false;
-            g_enable_v92 = false;
-            g_mode_name = "x2";
-        } else if (strcmp(mode, "v34") == 0) {
-            g_advertise_v90 = false;
-            g_enable_v92 = false;
-            g_mode_name = "v34";
-        } else if (strcmp(mode, "v22") == 0) {
-            g_advertise_v90 = false;
-            g_advertise_v34 = false;
-            g_enable_v92 = false;
-            g_mode_name = "v22";
-        } else if (strcmp(mode, "v90") == 0) {
-            g_advertise_v90 = true;
-            g_enable_v92 = false;
-            g_mode_name = "v90";
-        } else if (strcmp(mode, "v92") == 0) {
-            g_advertise_v90 = true;
-            g_enable_v92 = true;
-            g_mode_name = "v92";
-        } else {
+        if (!me_resolve_offer(mode, true)) {
             ME_LOG("[ME] Unknown ME_MODE '%s'; using v90\n", mode);
-            g_advertise_v90 = true;
-            g_enable_v92 = false;
-            g_mode_name = "v90";
+            me_resolve_offer("v90", true);
         }
+        snprintf(g_default_mode, sizeof(g_default_mode), "%s", g_mode_name);
+        snprintf(g_cfg_mode, sizeof(g_cfg_mode), "%s", g_mode_name);
+        g_cfg_automode = true;
+        di_set_modulation_ops(me_set_modulation_offer, me_get_modulation_offer,
+                              me_reset_modulation_offer);
 
-        g_v90_analogue_role = g_advertise_v90
-                           && role && strcmp(role, "analogue") == 0;
         ME_LOG("[ME] Modem mode: %s (V.8 offer %s)\n", g_mode_name,
-               g_advertise_v90 ? "V90|V34|V22"
-                               : (g_advertise_v34 ? "V34|V22" : "V22"));
+               me_offer_str());
         if (!g_advertise_v90 && role && strcmp(role, "analogue") == 0)
             ME_LOG("[ME] ME_V90_ROLE=analogue ignored in v34 mode\n");
         if (g_v90_analogue_role)
@@ -7190,6 +7300,21 @@ void me_on_sip_connected(void)
 {
     pthread_mutex_lock(&g_state_mtx);
 
+    /* AT+MS since the last call takes effect here, at the call boundary. */
+    {
+        const char *was = g_mode_name;
+        bool was_v22 = g_advertise_v22;
+
+        char mode[sizeof(g_cfg_mode)];
+        bool automode;
+
+        me_get_modulation_offer(mode, sizeof(mode), &automode);
+        me_resolve_offer(mode, automode);
+        if (was != g_mode_name || was_v22 != g_advertise_v22)
+            ME_LOG("[ME] Modem mode for this call: %s (V.8 offer %s, AT+MS)\n",
+                   g_mode_name, me_offer_str());
+    }
+
     cr_reset(&g_cr);
     g_trace_start_ms = trace_now_ms();
     g_v8_rx_energy     = 0;
@@ -7250,7 +7375,7 @@ void me_on_sip_connected(void)
     if (g_data_framing_auto)
         g_data_framing = DS_FRAMING_V14;   /* until this call's V.8 says LAPM */
     trace_phase("enter V8: mode=%s advertised mods=%s", g_mode_name,
-                g_advertise_v90 ? "V90|V34|V22" : "V34|V22");
+                me_offer_str());
 
     ME_LOG("[ME] SIP connected as %s, starting V.8 handshake\n",
             g_calling_party ? "caller" : "answerer");

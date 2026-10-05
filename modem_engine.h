@@ -18,6 +18,7 @@
 #define MODEM_ENGINE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* Modem state machine states */
@@ -102,6 +103,24 @@ void me_answer(void);
 
 /* Hang up the current call. */
 void me_hangup(void);
+
+/*
+ * V.8 modulation offer for subsequent calls -- what AT+MS (V.250 6.4.1)
+ * drives, through data_interface.c.  mode is one of "v22", "v34", "v90",
+ * "v92", "x2", or "auto" (= the v90 default); the same names ME_MODE takes.
+ * automode false restricts CM/JM to the named family (no V.22 fallback bit;
+ * V.90/V.92 still carry V.34, which their upstream needs).  The change takes
+ * effect at the next call's V.8 and never alters a call in progress.
+ * Returns 0, or -1 for an unknown mode.
+ *
+ * ME_MODE / --mode set the power-on default, which
+ * me_reset_modulation_offer() (ATZ, AT&F) restores.
+ */
+int  me_set_modulation_offer(const char *mode, bool automode);
+void me_get_modulation_offer(char *mode, size_t len, bool *automode);
+void me_reset_modulation_offer(void);
+/* The CM/JM modulations the next call will offer, as V8_MOD_* bits. */
+int  me_modulation_offer_bits(void);
 
 /* ------------------------------------------------------------------ */
 /* Audio I/O — called from sip_modem.c media port (PJSIP thread)      */

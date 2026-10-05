@@ -92,7 +92,8 @@ make
                 --pty-link /tmp/v90modem
 ```
 
-Select the highest modem family offered in V.8 with `--mode v34|v90|v92`.
+Select the highest modem family offered in V.8 with `--mode v22|v34|v90|v92`
+(or `x2`).
 The default is `v90`; lower fallback modes remain advertised. For a plain V.34
 interoperability run, configure the peer for V.34 and start this endpoint with:
 
@@ -102,8 +103,25 @@ interoperability run, configure the peer for V.34 and start this endpoint with:
                 --pty-link /tmp/v90modem
 ```
 
-`ME_MODE=v34|v90|v92` is the equivalent environment setting. The older
-`ME_V92_ENABLE=1` remains supported when `ME_MODE` is unset.
+`ME_MODE=v22|v34|v90|v92|x2` is the equivalent environment setting. The older
+`ME_V92_ENABLE=1` remains supported when `ME_MODE` is unset. Unknown
+command-line arguments are an error (usage, exit status 2).
+
+Either of those sets the power-on default. A DTE can change the offer for
+later calls with V.250's `AT+MS` on the PTY; the call in progress is never
+touched, and `ATZ`/`AT&F` restore the default:
+
+```
+AT+MS=V34        V.8 offers V.34 (and the V.22bis fallback; automode 1)
+AT+MS=V34,0      V.34 alone (automode off)
+AT+MS=V90 / V92 / V22B
+AT+MS?           +MS: V34,1,0,0,0,0
+AT+MS=?          +MS: (V22,V22B,V34,V90,V92,X2),(0,1),(0-56000),...
+```
+
+The rate subparameters (`<carrier>,<automode>,<min>,<max>` or V.250's
+`...,<min_tx>,<max_tx>,<min_rx>,<max_rx>`) are range-checked, stored and
+reported by `AT+MS?`, but not enforced: rates come from training.
 
 ### macOS notes
 
@@ -233,7 +251,7 @@ modem log, raw RX/TX G.711 taps, hashes, build revision, and parsed timeline:
   --sip-server asterisk.example \
   --username 6001 \
   --password 'secret' \
-  --pty /tmp/v90modem
+  --pty-link /tmp/v90modem
 ```
 
 Each run is stored under `artifacts/v90-hardware/` with `manifest.json` and
