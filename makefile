@@ -155,7 +155,7 @@ LIBUSB_LIBS   := $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo "-L$(H
 SRCS   = legacy_pcm_decode.c k56flex_client.c k56flex_rxfe.c at_ms.c clear_channel.c v25_automode.c k56flex_train.c k56flex_probe.c k56flex_v8bis.c k56flex.c x2.c v34_line_ec.c v92_mh.c v92_mh_line.c v92_rn.c v92_rsig.c v92_tone_a.c v92_analogue_audio.c v92_analogue_phase4.c v92_analogue_phase3.c v92_su.c sip_modem.c modem_engine.c v90_analogue_linear.c v90_analogue_fse.c v90_analogue_sd.c v34_pp_fit.c v90_sounder.c clock_recovery.c data_interface.c fax_class2.c data_stack.c v44.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_p3_eq.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c x2_session.c x2_mp_rx.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
-TEST_TARGETS = legacy_pcm_decode_test at_ms_test clear_channel_test k56flex_client_test k56flex_train_test k56flex_probe_test k56flex_v8bis_test k56flex_test x2_test v42bis_test v44_test v92_startup_test port_cp_stream_test port_data_rx_test port_v34_fixed_test port_v34_fixed_lms_test port_v34_fixed_solve_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v42_throughput_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test fax_class_test fax_class2_test v90_upstream_replay v90_engine_replay v34_duplex_test v32bis_spandsp_test v32bis_duplex_test v32bis_engine_pair_test engine_pair_test v90_engine_peer v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test v90_analogue_sd_test v34_pp_fit_test v34_hdx_test v92_p3_rx_line_test v92_mh_test v92_mh_line_test v92_mh_retrain_test v92_rn_test v92_rsig_test v92_tone_a_test x2_session_test x2_b1_test
+TEST_TARGETS = v56_loopback_test legacy_pcm_decode_test at_ms_test clear_channel_test k56flex_client_test k56flex_train_test k56flex_probe_test k56flex_v8bis_test k56flex_test x2_test v42bis_test v44_test v92_startup_test port_cp_stream_test port_data_rx_test port_v34_fixed_test port_v34_fixed_lms_test port_v34_fixed_solve_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v42_throughput_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test fax_class_test fax_class2_test v90_upstream_replay v90_engine_replay v34_duplex_test v32bis_spandsp_test v32bis_duplex_test v32bis_engine_pair_test engine_pair_test v90_engine_peer v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test v90_analogue_sd_test v34_pp_fit_test v34_hdx_test v92_p3_rx_line_test v92_mh_test v92_mh_line_test v92_mh_retrain_test v92_rn_test v92_rsig_test v92_tone_a_test x2_session_test x2_b1_test
 TEST_OBJS = v92_su.o vpcm_loopback_test.o v90.o v90_cp_rx.o v90_dil_rx.o v90_dil_measure.o v90_dil_presets.o v90_analogue_tx.o v90_analogue_rx.o v90_analogue_phase3.o v90_analogue_phase4.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_p3_eq.o v92_cp_rx.o v92_trn2u.o v92_upstream_data.o v92_upstream_rx.o p3_demod.o
 DECODE_OBJS = legacy_pcm_decode.o x2_session.o x2_mp_rx.o x2.o k56flex_client.o k56flex_rxfe.o k56flex_train.o k56flex_probe.o k56flex.o vpcm_decode.o v90_dil_measure.o v90_dil_presets.o v34_phase2_decode.o v34_info_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_p3_eq.o v92_anspcm_decode.o p3_demod.o v90.o v90_cp_rx.o v91.o vpcm_cp.o v21_fsk_demod.o phase12_decode.o call_init_tone_probe.o v90_dil_rx.o
 ENCODE_OBJS = vpcm_encode.o v90.o v91.o vpcm_cp.o v92_phase4_decode.o v90_dil_measure.o v90_dil_presets.o
@@ -212,6 +212,7 @@ V90_ENGINE_REPLAY_OBJS = v90_engine_replay.o $(filter-out sip_modem.o,$(OBJS))
 V92_P3_RX_LINE_TEST_OBJS = v92_p3_rx_line_test.o $(filter-out v92_startup_test.o,$(V92_STARTUP_TEST_OBJS))
 V92_P3_PROBE_OBJS = v92_p3_probe.o v92_p3_rx.o v92_p3_eq.o v92_ja_decode.o p3_demod.o v90.o v90_cp_rx.o v90_dil_measure.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o v92_trn2u.o v92_cp_rx.o
 V34_DUPLEX_TEST_OBJS = v34_duplex_test.o v34_line_ec.o
+V56_LOOPBACK_TEST_OBJS = v56_loopback_test.o v34_line_ec.o
 V34_HDX_TEST_OBJS = v34_hdx_test.o
 V32BIS_SPANDSP_TEST_OBJS = v32bis_spandsp_test.o
 V32BIS_DUPLEX_TEST_OBJS = v32bis_duplex_test.o
@@ -233,7 +234,7 @@ endif
 
 all: $(TARGET) $(TEST_TARGETS)
 
-test: $(TEST_TARGETS)
+test: $(TEST_TARGETS) v56-test
 	./legacy_pcm_decode_test
 	./x2_session_test
 	./k56flex_test
@@ -614,6 +615,32 @@ v34-duplex-test: v34_duplex_test
 v34_duplex_test: $(V34_DUPLEX_TEST_OBJS) spandsp
 	$(CC) $(V34_DUPLEX_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
+.PHONY: v56-test v56-sweep v56bis-filter-test v56bis-sweep
+v56_loopback_test: $(V56_LOOPBACK_TEST_OBJS) spandsp
+	$(CC) $(V56_LOOPBACK_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+
+# Fast regression; the long, one-million-bit sweep is explicitly requested.
+v56-test: v56_loopback_test v56bis-filter-test
+	./v56_loopback_test --self-test
+	./v56_loopback_test --bits 16000 --law ulaw
+	./v56_loopback_test --bits 16000 --law alaw
+	./v56_loopback_test --bits 16000 --snr-db 40 --loss-db 3 --delay 80
+	./v56_loopback_test --bits 16000 --echo-db 20
+	./v56_loopback_test --baud 3200 --rate 21600 --bits 16000 --law ulaw
+	./v56_loopback_test --baud 3200 --rate 21600 --bits 16000 --law alaw
+	./v56_loopback_test --ad 5 --edd 3 --bits 16000 --law ulaw
+	./v56_loopback_test --ad 5 --edd 3 --bits 16000 --law alaw
+
+v56-sweep: v56_loopback_test
+	python3 tools/v56_sweep.py
+
+v56bis-filter-test:
+	python3 tools/v56bis_filters.py --check
+
+# Diagnostic channel matrix; failure rows are retained, not regression gates.
+v56bis-sweep: v56_loopback_test v56bis-filter-test
+	python3 tools/v56_sweep.py --cases 2400:9600 --snr off --delays 0 --bits 16000 --seconds 30 --channels 1:1,1:2,1:3,5:1,5:2,5:3,6:1,6:2,6:3,7:1,7:2,7:3,8:1,8:2,8:3,9:1,9:2,9:3
+
 .PHONY: v34-hdx-primary-test
 # 12.5 resynchronization followed by at least 8000 error-free primary bits.
 # All symbol rates and laws; unequal ceilings also check the MPh-to-mapper seam.
@@ -933,7 +960,7 @@ fixed-compare:
 	fi
 
 clean:
-	rm -f audio_sock_modem audio_sock_modem.o slm_bridge v90_engine_peer v90_engine_peer.o engine_pair_test engine_pair_test.o k56flex_client_test.o k56flex_train_test.o k56flex_probe_test.o k56flex_v8bis_test.o k56flex_test.o x2_test.o v42bis_test.o $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(LEGACY_PCM_DECODE_TEST_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(V92_P3_RX_LINE_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V44_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(V42_THROUGHPUT_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(V92_MH_TEST_OBJS) $(V92_MH_LINE_TEST_OBJS) $(V92_MH_RETRAIN_TEST_OBJS) $(V92_RN_TEST_OBJS) $(V92_RSIG_TEST_OBJS) $(V92_TONE_A_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test *.d tools/*.d $(APPLE_USB_MODEM_PROBE_OBJS) apple_usb_modem_probe apple_usb_modem_audio \
+	rm -f audio_sock_modem audio_sock_modem.o slm_bridge v90_engine_peer v90_engine_peer.o engine_pair_test engine_pair_test.o k56flex_client_test.o k56flex_train_test.o k56flex_probe_test.o k56flex_v8bis_test.o k56flex_test.o x2_test.o v42bis_test.o $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(LEGACY_PCM_DECODE_TEST_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(V92_P3_RX_LINE_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V44_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(V42_THROUGHPUT_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V56_LOOPBACK_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(V92_MH_TEST_OBJS) $(V92_MH_LINE_TEST_OBJS) $(V92_MH_RETRAIN_TEST_OBJS) $(V92_RN_TEST_OBJS) $(V92_RSIG_TEST_OBJS) $(V92_TONE_A_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test *.d tools/*.d $(APPLE_USB_MODEM_PROBE_OBJS) apple_usb_modem_probe apple_usb_modem_audio \
 	    tools/apple_usb_modem_coupler.o apple_usb_modem_coupler
 
 distclean: clean

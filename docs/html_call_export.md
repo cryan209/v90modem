@@ -54,6 +54,33 @@ Coverage includes the existing V.8/V.8bis, V.34, and V.90/V.91/V.92 offline
 decoders, plus the proprietary receive evidence below. V.32bis session
 decoding is not implemented here.
 
+V.92 coverage currently stops at startup and Phase 3 evidence: Quick Connect
+messages, QTS/ANSpcm, Phase 2 fields, and the existing Ru/Ja/Jp analyses.
+The export does not run the dedicated TRN2u/CPu receiver or decode downstream
+SUVd/CPd. Linking `v92_phase4_decode.o` does not supply an audio scan. There
+is no separate `--v92` switch; these startup paths run with the default
+selection or `--all`. A V.92 capability or Quick Connect event alone does not
+establish PCM upstream, a negotiated rate, or recovered user bytes. Procedure
+outcomes such as `v8-fallback` are per-channel model results and can reflect
+unobserved steps rather than the peer's actual outcome.
+
+For dedicated PCM-upstream experiments, use `v92_trn2u_replay --analog-wav`.
+The old spectrogram-only windows in `docs/v92_test_call_windows.md` are now
+retracted. The
+2026-10-05 audit exported all seven bundled V.92 recordings successfully;
+48 upstream hypotheses across the three Quick Connect recordings recovered
+no CRC-valid CPt/CPu/CPus/SUVu frames on that PAM hypothesis. This does not
+establish that PCM upstream was selected. Results and commands are in
+`artifacts/gough-v92-recovery-20261005/`.
+
+A separate CP-constrained recovery tool subsequently decoded V.34 upstream
+control records and all 48 downstream B1d frames on the Motorola and USR QC
+recordings. USR yields 946 V.42 detection octets (`EC` repeated), independently
+confirmed by the native detector; no application bytes are recovered. These
+results are not yet incorporated into HTML events. See
+[offline PCM payload recovery](offline_pcm_payload_recovery.md) and
+`artifacts/gough-v92-payload-acquisition-20261005/`.
+
 ## x2 and K56flex receive evidence
 
 ```sh

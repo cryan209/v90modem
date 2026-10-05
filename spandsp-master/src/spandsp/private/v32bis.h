@@ -230,6 +230,11 @@ struct v32bis_state_s
        7.2: 1800 Hz) has been continuously present in data mode. */
     int retrain_tone_run;
     int retrain_count;
+    /* The first conditioning signal's TRN is extended by trn_ec_symbols and
+       trains the echo canceller; tx_cond_count counts conditionings sent. */
+    int trn_ec_symbols;
+    int tx_cond_count;
+    bool tx_cond_quiet;
 
     /*! \brief Error and flow logging control */
     logging_state_t logging;

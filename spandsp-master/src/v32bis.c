@@ -164,10 +164,24 @@ SPAN_DECLARE(float) v32bis_rx_signal_power(v32bis_state_t *s)
     8192 symbol intervals." */
 #define V32BIS_EC_TRAIN_MAX_SYMBOLS 8192
 
-/*! How much of that to use.  Note 4 warns that a G.165 network echo
-    canceller needs 650 ms of training, which at 2400 baud is 1560 symbol
-    intervals, so the default clears that with room to spare. */
-#define V32BIS_EC_TRAIN_SYMBOLS 2048
+/*! How much of Note 3's optional sequence to send by default: none.  It is
+    optional, and slmodemd as answer modem does not survive it -- with it,
+    7200 bit/s failed 1 s into data on 5 of 8 calls; without it, 0 of 8
+    (2026-10-05).  The echo canceller is trained instead on the extended TRN
+    below, which Note 3's first sentence names as "suitable for training the
+    echo canceller in the transmitting modem", and which is what slmodemd
+    itself does (it sends TRN of up to 8192 symbols). */
+#define V32BIS_EC_TRAIN_SYMBOLS 0
+
+/*! How far to extend the TRN of the first receiver conditioning signal each
+    modem sends, the one with the far end silent (6.1: the answer modem ceased
+    on our S; 6.2: the call modem has been silent since its second phase
+    reversal and waits for R1).  5.2.3 allows TRN up to 8192 and 6.1/6.2 say it
+    "may be extended in order to ensure a satisfactory level of echo
+    cancellation".  Note 4 warns that a G.165 network echo canceller needs
+    650 ms, 1560 symbol intervals; 2048 clears that, and is the airtime the
+    Note 3 sequence used to have. */
+#define V32BIS_TRN_EC_SYMBOLS   2048
 
 /*! How many symbols of it to build at a time.  The sequence can be four
     times as long as the whole of the 5.2 conditioning signal, so it is
@@ -202,6 +216,22 @@ static int v32bis_ec_train_symbols(void)
     /*endif*/
     if (n > V32BIS_EC_TRAIN_MAX_SYMBOLS)
         n = V32BIS_EC_TRAIN_MAX_SYMBOLS;
+    /*endif*/
+    return n;
+}
+/*- End of function --------------------------------------------------------*/
+
+/*! The TRN extension for echo canceller training, 0 for none. */
+static int v32bis_trn_ec_symbols(void)
+{
+    const char *e = getenv("V32BIS_TRN_EC");
+    int n = (e != NULL) ? atoi(e) : V32BIS_TRN_EC_SYMBOLS;
+
+    if (n < 0)
+        n = 0;
+    /*endif*/
+    if (n > 8192 - 1280)
+        n = 8192 - 1280;
     /*endif*/
     return n;
 }
@@ -316,6 +346,11 @@ static void v32bis_echo_cancel(v32bis_state_t *s, int16_t amp[], int len)
         quiet = quiet  &&  (s->echo_rx_pow < V32BIS_ECHO_DT_RATIO*s->echo_ref_pow);
         if (quiet != s->echo_fast_adapt)
         {
+            if (getenv("V32BIS_EC_DEBUG"))
+                fprintf(stderr, "[V32BIS %s] EC fast=%d at rx sample %lld (tx phase %d, ref_pow %.0f rx_pow %.0f)\n",
+                        s->calling_party ? "call  " : "answer", quiet,
+                        (long long) (s->rx_line_samples + i), s->tx_phase,
+                        s->echo_ref_pow, s->echo_rx_pow);
             s->echo_fast_adapt = quiet;
             modem_echo_can_step_size(s->ec,
                                      quiet ? v32bis_echo_mu_fast()
@@ -1074,6 +1109,15 @@ static int v32bis_startup_symbol_source(void *user_data, complexf_t *symbol)
     }
     /*endif*/
     state = s->startup_tx_symbols[s->startup_tx_symbol_pos++];
+    if (s->tx_phase == V32BIS_TX_PHASE_COND)
+    {
+        /* Only TRN: S and S-bar are lines, on which LMS adaption "can go
+           seriously wrong" (see v32bis_echo_can_adapting()). */
+        s->tx_far_end_quiet = s->tx_cond_quiet
+                           &&  s->startup_tx_symbol_pos
+                               > V32BIS_S_SYMBOLS + V32BIS_S_BAR_SYMBOLS;
+    }
+    /*endif*/
 #if defined(SPANDSP_USE_FIXED_POINT)
     /* v17_v32bis_tx_constellation_maps.h is generated under
        SPANDSP_USE_FIXED_POINTx, so its tables are float whatever the library is
@@ -1908,9 +1952,9 @@ static void startup_finish_word(v32bis_state_t *s)
         }
         if (v32bis_trace())
         {
-            fprintf(stderr, "[V32BIS %s] E word %d bit/s at rx symbol %d\n",
+            fprintf(stderr, "[V32BIS %s] E word 0x%04x, %d bit/s at rx symbol %d\n",
                     s->calling_party ? "call  " : "answer",
-                    rate, s->startup_rx_symbol_count);
+                    word, rate, s->startup_rx_symbol_count);
         }
         /*endif*/
         s->startup_selected_rate = rate;
@@ -2712,16 +2756,23 @@ static void v32bis_tx_tone_symbol(v32bis_state_t *s)
 static void v32bis_tx_enter_phase(v32bis_state_t *s, int phase)
 {
     int count;
+    int trn;
 
     if (v32bis_trace())
     {
-        fprintf(stderr, "[V32BIS %s] tx phase %d step %d at rx symbol %d\n",
+        fprintf(stderr, "[V32BIS %s] tx phase %d step %d at rx symbol %d (tx symbol %d, line sample %lld)\n",
                 s->calling_party ? "call  " : "answer",
-                phase, s->tx_step, s->startup_rx_symbol_count);
+                phase, s->tx_step, s->startup_rx_symbol_count,
+                s->tx_symbol_index, (long long) s->tx_line_samples);
     }
     /*endif*/
     s->tx_phase = phase;
     s->tx_released = false;
+    /* Only Note 3's sequence and the quiet TRN carry the fast-adaption tag,
+       and those two phases set it themselves. */
+    if (phase != V32BIS_TX_PHASE_EC_TRAIN)
+        s->tx_far_end_quiet = false;
+    /*endif*/
     s->tx_phase_start_symbol = s->tx_symbol_index;
     s->startup_tx_symbol_pos = 0;
     s->startup_tx_symbol_count = 0;
@@ -2766,8 +2817,21 @@ static void v32bis_tx_enter_phase(v32bis_state_t *s, int phase)
         break;
     case V32BIS_TX_PHASE_COND:
         s->tx_far_end_quiet = false;
+        /* The first conditioning signal this modem sends has the far end
+           silent throughout its TRN, so that TRN trains the echo canceller
+           (see V32BIS_TRN_EC_SYMBOLS); the startup symbol source tags it. */
+        s->tx_cond_quiet = (s->tx_cond_count++ == 0)  &&  s->trn_ec_symbols > 0;
+        trn = v32bis_trn_symbols();
+        if (s->tx_cond_quiet)
+        {
+            trn += s->trn_ec_symbols;
+            if (trn > 8192)
+                trn = 8192;
+            /*endif*/
+        }
+        /*endif*/
         count = v32bis_build_conditioning(s->calling_party,
-                                          v32bis_trn_symbols(),
+                                          trn,
                                           s->startup_tx_symbols,
                                           &s->tx_trn_reg,
                                           &s->tx_trn_diff);
@@ -3262,7 +3326,27 @@ static void v32bis_tone_rx(v32bis_state_t *s, const int16_t amp[], int len)
             {
                 /* 6.1: stop the counter and cease transmitting. */
                 s->reversals_seen = 2;
+                /* NT is the round trip "including 64T +/- 2T modem turn round
+                   delay" -- ONE turnaround, the far end's (Figure 3's legend,
+                   the same words for MT and NT).  6.1's counter starts on
+                   RECEIVING the first reversal, which spans this modem's own
+                   64T as well, so that 64T comes off.  It matters because 6.2
+                   has the answer modem wait MT after it detects our S and then
+                   train "if an incoming S sequence persists, or when an S
+                   sequence reappears": with NT equal to MT our NT-long S has
+                   just ended when MT expires, which is what makes Note 3's
+                   optional sequence sit cleanly between it and the
+                   conditioning S.  Counted with both turnarounds, 64T of our
+                   S were still on the line at that instant: slmodemd as
+                   answer modem began training on them, then met the Note 3
+                   sequence and never sent R3, and without the sequence its
+                   receiver collapsed 1 s into data at 9600 and 14400 on every
+                   call (7200 and 12000 survived).  slmodemd's own call-mode S
+                   is NT = 64 + round trip. */
                 s->nt_symbols = v32bis_symbols_between(s->tone_counter_start, at);
+                if (s->nt_symbols > V32BIS_REVERSAL_DELAY_SYMBOLS)
+                    s->nt_symbols -= V32BIS_REVERSAL_DELAY_SYMBOLS;
+                /*endif*/
                 s->tone_phase_active = false;
                 s->tx_transition_at = -1;
                 v32bis_tx_enter_phase(s, V32BIS_TX_PHASE_SILENT);
@@ -3379,6 +3463,10 @@ SPAN_DECLARE(int) v32bis_start_tones(v32bis_state_t *s)
         return -1;
     /*endif*/
     s->tone_phase_active = true;
+    /* v32bis_start_startup() opened the answer modem's script on its first
+       conditioning signal, which the tone phases now precede: that one was
+       never transmitted, so it does not count. */
+    s->tx_cond_count = 0;
     s->tone_which = -1;
     s->tone_present_run = 0;
     s->tone_watch_pow = 0.0f;
@@ -3503,6 +3591,9 @@ SPAN_DECLARE(int) v32bis_start_startup(v32bis_state_t *s)
     v32bis_tone_det_init(&s->tone[1], 3000.0f);
     v32bis_tone_det_init(&s->tone[2], 1800.0f);
     s->tone_phase_active = false;
+    s->tx_cond_count = 0;
+    s->tx_cond_quiet = false;
+    s->tx_far_end_quiet = false;
     s->tx_transition_at = -1;
     s->tx_symbol_index = 0;
     s->tx_phase_start_symbol = 0;
@@ -3675,6 +3766,15 @@ SPAN_DECLARE(int) v32bis_set_ec_training_symbols(v32bis_state_t *s, int symbols)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v32bis_set_trn_ec_symbols(v32bis_state_t *s, int symbols)
+{
+    if (s == NULL  ||  symbols < 0  ||  symbols > 8192 - 1280)
+        return -1;
+    s->trn_ec_symbols = symbols;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(bool) v32bis_tx_in_ec_training(v32bis_state_t *s)
 {
     return (s->tx_phase == V32BIS_TX_PHASE_EC_TRAIN);
@@ -3758,6 +3858,7 @@ SPAN_DECLARE(v32bis_state_t *) v32bis_init(v32bis_state_t *s,
     s->ec = modem_echo_can_segment_init(256);
     s->echo_can_enabled = v32bis_echo_can();
     s->ec_train_symbols = v32bis_ec_train_symbols();
+    s->trn_ec_symbols = v32bis_trn_ec_symbols();
     {
         const char *e = getenv("V32BIS_ECHO_MU");
 

@@ -114,18 +114,21 @@ compares the GPA/GPC polynomials in both register directions. The compliant
 default is `--perm 01 --sign diff --descrambler gpa-left` for 4-point TRN2u
 (`012` for 8-point).
 
-Across the Agere, Motorola, and USR QC captures, the complete hypothesis sweep
+In the initial Agere, Motorola, and USR QC capture investigation, the hypothesis sweep
 raises the longest descrambled-one run only to 39 bits. A locked TRN2u interval
 should produce thousands of consecutive descrambled ones. No tested bit-order,
 polarity, differential, or polynomial alternative therefore explains the
-recordings; the dominant remaining issue is symbol recovery/channel filtering
-in the critically sampled recordings. The corrected upstream windows and
-channel assignments are recorded in `docs/v92_test_call_windows.md`.
+recordings. That result did not establish that these intervals contain PCM
+upstream. The later 2026-10-05 investigation recovered V.34 QAM training and
+repeated Table-14 CP records instead; the old spectrogram-only PCM window
+assignments are retracted in `docs/v92_test_call_windows.md`.
 On the checked-in Agere, Motorola, and USR V.92 calls, fractional timing and
 equalization now expose occasional 17-one frame candidates, but none yet pass
-the strict CRC.  This narrows the remaining offline problem to adaptive timing
-tracking/equalizer training or a TRN2u wire-format assumption; amplitude alone
-is not the cause.
+the strict CRC. This is a failed PCM hypothesis, not evidence of a broken PCM
+receiver on a known PCM-upstream fixture. CP-constrained downstream recovery
+now validates B1d on Motorola and USR and recovers V.42 detection bytes on USR;
+see `docs/offline_pcm_payload_recovery.md`. PCM-upstream payload recovery from
+these recordings remains unestablished.
 
 ## PCM-upstream data-pump foundation
 

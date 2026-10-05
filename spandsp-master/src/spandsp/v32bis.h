@@ -247,6 +247,15 @@ SPAN_DECLARE(int) v32bis_rate_renegotiation_count(v32bis_state_t *s);
     \return 0 on success, -1 before the reactive start-up has reached data. */
 SPAN_DECLARE(int) v32bis_start_retrain(v32bis_state_t *s);
 
+/*! Set how far to extend the TRN of the first receiver conditioning signal
+    this modem sends -- the one the far end is silent for -- to train the echo
+    canceller on it (V.32bis 6.1/6.2 "may be extended in order to ensure a
+    satisfactory level of echo cancellation"; Note 3).  0 for a plain TRN.
+    \param s The modem context.
+    \param symbols Extra symbol intervals, keeping TRN within 8192.
+    \return 0 on success, -1 if out of range. */
+SPAN_DECLARE(int) v32bis_set_trn_ec_symbols(v32bis_state_t *s, int symbols);
+
 /*! How many clause 7 retrains, by either end, this connection has begun.
     \param s The modem context.
     \return The count. */

@@ -41,9 +41,13 @@ hooks at the top of `me_tx_g711_impl()`/`me_rx_g711_impl()` and
 
 ## V.120: what is and is not implemented
 
-V.120 is not in `ITU Docs/`, and itu.int is unreachable from the environment
-it was written in, so the frame layout is the Recommendation as commonly
-implemented (ISDN TAs, Linux isdn4linux), **not checked clause by clause**:
+The initial implementation was written without the Recommendation available.
+V.120 (10/1996) and Corrigendum 1 are now in `ITU Docs/`; the
+[2026-10-05 conformance audit](v120_conformance_audit.md) found a wrong
+answerer C/R convention, invalid CS-header acceptance, and no LLI filtering,
+as well as missing control-state and break handling. The table below describes
+the current implementation, including those defects, rather than a conforming
+wire profile:
 
 | Field | Sent | Accepted |
 |---|---|---|
@@ -59,8 +63,10 @@ implemented (ISDN TAs, Linux isdn4linux), **not checked clause by clause**:
   control-state octet, segmentation (B/F bits) on receive beyond accepting
   any combination, multiple LLIs.
 
-Check it against V.120 (10/96) before claiming interoperability with ISDN
-equipment.
+Address the confirmed defects and validate against an independent peer before
+claiming interoperability with ISDN equipment. UI-only service and omission
+of optional XID verification can be valid for a profile agreed beforehand;
+synchronous segmentation is outside this asynchronous-byte implementation.
 
 ## Measured
 

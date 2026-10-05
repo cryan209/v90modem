@@ -661,10 +661,12 @@ static int run_duplex(int alaw,
         printf("    tones: one-way %d samples; call NT=%d, answer MT=%d, "
                "call CC at symbol %d, answer AC at symbol %d, reversal delay %d\n",
                delay, call_nt, answer_mt, call_at, answer_at, delay_symbols);
-        /* NT is 128 symbol intervals plus the round trip, MT is 64 plus the
-           round trip: each side inserts one 64 symbol interval hop, and the
-           call modem's counter spans two of them. */
-        if (abs(call_nt - (128 + round_trip)) > 2
+        /* NT and MT are both the round trip plus ONE 64 symbol interval
+           turnaround, the far end's: Figure 3's legend, "including 64T +/- 2T
+           modem turn round delay".  The call modem's counter physically spans
+           its own 64T as well, and that is taken off (see
+           v32bis_tone_rx()). */
+        if (abs(call_nt - (64 + round_trip)) > 2
             || abs(answer_mt - (64 + round_trip)) > 2)
             failed = 1;
         /*endif*/
@@ -717,15 +719,16 @@ static int run_duplex(int alaw,
     return failed ? -1 : 0;
 }
 
-/*! One return loss, with the canceller in and out of the path.  Printed,
-    not asserted: what this measures is how much echo the receiver survives,
-    and the answer is currently "not much", because clause 6 Note 3's echo
-    canceller training period does not exist in this tree, so the canceller
-    never sees its own echo without the far end on top of it. */
+/*! One return loss, three arms: the canceller trained on clause 6 Note 3's
+    optional sequence, the canceller trained on the extended TRN of the first
+    conditioning signal (the default, Note 3 sequence off), and no canceller.
+    Both canceller arms must carry the call; the bare arm failing below about
+    30 dB is the control that says the canceller rows prove something. */
 static int hybrid_sweep(int scale, int delay)
 {
     int on;
     int off;
+    int trn;
 
     on = run_duplex(0,
                     V32BIS_RATE_14400 | V32BIS_RATE_12000,
@@ -735,16 +738,22 @@ static int hybrid_sweep(int scale, int delay)
                      V32BIS_RATE_14400 | V32BIS_RATE_12000,
                      V32BIS_RATE_14400 | V32BIS_RATE_12000,
                      14400, 0, 0, 1, delay, scale, 0, 2048, 2048, 0, 0);
-    printf("  hybrid sweep: return loss %.1f dB, delay %d -> canceller on %s, off %s\n",
+    trn = run_duplex(0,
+                     V32BIS_RATE_14400 | V32BIS_RATE_12000,
+                     V32BIS_RATE_14400 | V32BIS_RATE_12000,
+                     14400, 0, 0, 1, delay, scale, 1, 0, 0, 0, 0);
+    printf("  hybrid sweep: return loss %.1f dB, delay %d -> canceller on %s, off %s, "
+           "on with no Note 3 sequence (TRN-trained) %s\n",
            -20.0*log10(scale/100.0) + 12.6,
            delay,
            (on == 0) ? "pass" : "FAIL",
-           (off == 0) ? "pass" : "FAIL");
+           (off == 0) ? "pass" : "FAIL",
+           (trn == 0) ? "pass" : "FAIL");
     /* The canceller's arm has to carry the call at every return loss in the
        sweep.  Below about 30 dB the bare receiver cannot, and that failure
        is the control: without it a canceller that did nothing at all would
        pass every row here. */
-    if (on != 0)
+    if (on != 0  ||  trn != 0)
         return 1;
     /*endif*/
     if (scale >= 50  &&  off == 0)
@@ -1019,6 +1028,17 @@ int main(int argc, char *argv[])
         return rate_renegotiation_tests() != 0;
     if (argc > 1 && strcmp(argv[1], "--retrain-only") == 0)
         return retrain_tests() != 0;
+    if (argc > 3 && strcmp(argv[1], "--hybrid-one") == 0)
+    {
+        /* One hybrid row: --hybrid-one <scale> <delay> [note3 symbols]. */
+        int note3 = (argc > 4) ? atoi(argv[4]) : 0;
+
+        return run_duplex(0,
+                          V32BIS_RATE_14400 | V32BIS_RATE_12000,
+                          V32BIS_RATE_14400 | V32BIS_RATE_12000,
+                          14400, 0, 0, 1, atoi(argv[3]), atoi(argv[2]), 1,
+                          note3, note3, 0, 0) != 0;
+    }
 
     static const struct
     {

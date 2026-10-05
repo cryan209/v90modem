@@ -179,6 +179,17 @@ make v34-tone-matrix
   and falls back to `gough-lui-v90-v92-modem-sounds/`. You can still pass a directory
   explicitly.
 
+## V.56 Impaired-Line Loopback
+
+`make v56-test` runs strict offline V.34 modem-pair regressions using the
+V.56ter 511-bit pattern, both G.711 laws, and synthetic noise, attenuation,
+delay and echo. `make v56bis-filter-test` validates 18 V.56bis AD/EDD
+filters; `make v56bis-sweep` measures modem startup and BER through them.
+`make v56-sweep` measures a million bits per direction across
+noise/delay profiles, retaining JSON results and logs for failed cases too.
+These are synthetic line measurements, not full V.56bis network coverage.
+See [the harness guide](docs/v56_loopback.md) for custom sweeps and limitations.
+
 ## Python Analysis Tools
 
 - The offline demod / Ja-analysis scripts under `tools/` use a small Python stack.
