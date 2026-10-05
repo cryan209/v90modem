@@ -1014,6 +1014,16 @@ static int detect_local_ip_for_host(const char *host, char *buf, size_t buflen)
     return rc;
 }
 
+static void usage(const char *prog)
+{
+    fprintf(stderr,
+        "Usage: %s [--sip-server host] [--username u] [--password p]\n"
+        "          [--pty-link path] [--local-port port] [--rtp-port port]\n"
+        "          [--bind-addr ip] [--mode x2|v22|v34|v90|v92] [--verbose]\n"
+        "The modulation can also be chosen per call from the DTE with AT+MS.\n",
+        prog);
+}
+
 int main(int argc, char *argv[])
 {
     /* stdout is fully block-buffered (not line-buffered) whenever it's
@@ -1056,20 +1066,25 @@ int main(int argc, char *argv[])
         else if (!strcmp(argv[i], "--verbose") || !strcmp(argv[i], "-v"))
             me_set_verbose(1);
         else if (!strcmp(argv[i], "--help")) {
-            fprintf(stderr,
-                "Usage: %s [--sip-server host] [--username u] [--password p]\n"
-                "          [--pty-link path] [--local-port port] [--rtp-port port]\n"
-                "          [--bind-addr ip] [--mode x2|v34|v90|v92] [--verbose]\n", argv[0]);
+            usage(argv[0]);
             return 0;
+        } else {
+            /* An unrecognised flag used to be skipped, so a typo such as
+               --pty for --pty-link ran with the default instead of failing. */
+            fprintf(stderr, "%s: unrecognised or incomplete argument '%s'\n",
+                    argv[0], argv[i]);
+            usage(argv[0]);
+            return 2;
         }
     }
 
     if (modem_mode
         && strcmp(modem_mode, "x2") != 0
+        && strcmp(modem_mode, "v22") != 0
         && strcmp(modem_mode, "v34") != 0
         && strcmp(modem_mode, "v90") != 0
         && strcmp(modem_mode, "v92") != 0) {
-        fprintf(stderr, "Invalid --mode '%s' (expected x2, v34, v90, or v92)\n",
+        fprintf(stderr, "Invalid --mode '%s' (expected x2, v22, v34, v90, or v92)\n",
                 modem_mode);
         return 2;
     }
@@ -1231,6 +1246,7 @@ int main(int argc, char *argv[])
 
     /* ── Initialise PTY/AT interface after PJSUA media init ─────── */
     di_set_callbacks(on_dial, on_answer, on_hangup, NULL);
+    di_set_modulation_handler(me_at_modulation, NULL);
     if (di_open(pty_link) < 0) {
         fprintf(stderr, "Failed to open PTY\n");
         if (aud_subsys_inited)

@@ -121,6 +121,8 @@ struct at_state_s
     void *at_tx_user_data;
     at_class1_handler_t class1_handler;
     void *class1_user_data;
+    at_modulation_handler_t modulation_handler;
+    void *modulation_user_data;
 
     /*! \brief Error and flow logging control */
     logging_state_t logging;

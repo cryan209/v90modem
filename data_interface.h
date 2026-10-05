@@ -20,6 +20,10 @@
 #include <stdint.h>
 #include <stddef.h>
 
+struct at_modulation_s;
+typedef int (*di_modulation_handler_t)(void *user_data, int op,
+                                       struct at_modulation_s *m);
+
 /* Opaque callbacks set by the modem engine */
 typedef void (*di_dial_cb_t)(const char *sip_uri, void *user_data);
 typedef void (*di_answer_cb_t)(void *user_data);
@@ -47,6 +51,14 @@ void di_set_callbacks(di_dial_cb_t  dial_cb,
                       di_answer_cb_t answer_cb,
                       di_hangup_cb_t hangup_cb,
                       void *user_data);
+
+/*
+ * Register the owner of V.250 +MS modulation selection (AT+MS=, AT+MS?,
+ * AT+MS=?, and the reset done by ATZ/AT&F).  op is one of SpanDSP's
+ * AT_MODULATION_* values.  Without a handler AT+MS answers ERROR.  A
+ * connection reported below the minimum rate is cleared, not CONNECTed.
+ */
+void di_set_modulation_handler(di_modulation_handler_t handler, void *user_data);
 
 /*
  * Called by the modem engine when a connection is established.

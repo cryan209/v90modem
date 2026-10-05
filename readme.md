@@ -233,7 +233,7 @@ modem log, raw RX/TX G.711 taps, hashes, build revision, and parsed timeline:
   --sip-server asterisk.example \
   --username 6001 \
   --password 'secret' \
-  --pty /tmp/v90modem
+  --pty-link /tmp/v90modem
 ```
 
 Each run is stored under `artifacts/v90-hardware/` with `manifest.json` and

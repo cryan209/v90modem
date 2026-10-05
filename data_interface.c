@@ -34,6 +34,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <sys/ioctl.h>
+#include <termios.h>
 #if defined(__APPLE__)
 #include <util.h>   /* openpty() on macOS */
 #elif defined(__linux__)
@@ -148,6 +149,15 @@ static int64_t  last_data_byte_ms = 0;
 static di_dial_cb_t   dial_cb   = NULL;
 static di_answer_cb_t answer_cb = NULL;
 static di_hangup_cb_t hangup_cb = NULL;
+
+/* V.250 6.4.1 +MS: parsed by SpanDSP, owned by whoever registered the
+ * handler (the modem engine).  The minimum rate is enforced here, at the one
+ * place every connection is reported, because a connection below it is not
+ * to be reported at all: V.250 has the DCE clear the call instead. */
+static at_modulation_handler_t modulation_cb = NULL;
+static void          *modulation_cb_user = NULL;
+static volatile int   ms_min_rate = 0;
+static volatile int   min_rate_hangup = 0;
 static void          *cb_user_data = NULL;
 
 static int64_t now_ms(void)
@@ -424,6 +434,15 @@ static void *pty_reader_thread(void *arg)
             perform_escape();
         }
 
+        /* A connection below the +MS minimum: clear it from this thread,
+         * which holds no engine lock (di_on_connected() may be called with
+         * one held, and the hangup callback takes it). */
+        if (min_rate_hangup) {
+            min_rate_hangup = 0;
+            if (hangup_cb)
+                hangup_cb(cb_user_data);
+        }
+
         if (r <= 0)
             continue;
 
@@ -480,6 +499,21 @@ static int di_pty_open(di_pty_t *p, const char *link_path, const char *label)
         return -1;
     }
 
+    /* A modem port does its own echo (ATE) and line handling, so the slave
+     * starts raw.  Left in the default cooked mode with ECHO on, a DTE that
+     * opens the port without configuring it (cat, a test, a script) has the
+     * line discipline reflect every response straight back as input: once
+     * ATE1 is on, the modem's echo of a command is echoed back to the modem,
+     * which echoes it again.  A DTE that sets its own termios is unaffected. */
+    {
+        struct termios tio;
+
+        if (tcgetattr(slave_fd, &tio) == 0) {
+            cfmakeraw(&tio);
+            tcsetattr(slave_fd, TCSANOW, &tio);
+        }
+    }
+
     /* Close the slave — applications open it by name */
     close(slave_fd);
 
@@ -510,6 +544,37 @@ static void di_pty_close(di_pty_t *p)
     }
 }
 
+static void refresh_min_rate(void)
+{
+    at_modulation_t cur;
+
+    memset(&cur, 0, sizeof(cur));
+    if (modulation_cb && modulation_cb(modulation_cb_user, AT_MODULATION_QUERY, &cur) == 0)
+        ms_min_rate = cur.min_rx_rate ? cur.min_rx_rate : cur.min_tx_rate;
+    else
+        ms_min_rate = 0;
+}
+
+static int di_modulation_handler(void *user_data, int op, at_modulation_t *m)
+{
+    int rc;
+
+    (void)user_data;
+    if (!modulation_cb)
+        return -1;
+    rc = modulation_cb(modulation_cb_user, op, m);
+    if (rc == 0 && (op == AT_MODULATION_SET || op == AT_MODULATION_RESET))
+        refresh_min_rate();
+    return rc;
+}
+
+void di_set_modulation_handler(at_modulation_handler_t handler, void *user_data)
+{
+    modulation_cb      = handler;
+    modulation_cb_user = user_data;
+    refresh_min_rate();
+}
+
 static int di_start(void)
 {
     ring_init(&upstream_ring);
@@ -525,6 +590,7 @@ static int di_start(void)
     t31_set_mode(t31, false);
     t31_set_transmit_on_idle(t31, true);
     at_set_at_rx_mode(at, AT_MODE_ONHOOK_COMMAND);
+    at_set_modulation_handler(at, di_modulation_handler, NULL);
 
     fc2_init(fc2_write, fc2_dial, fc2_answer, fc2_hangup, NULL);
 
@@ -621,6 +687,13 @@ void di_on_connected(int rate)
         pthread_mutex_lock(&t31_mtx);
         t31_call_event(t31, AT_CALL_EVENT_CONNECTED);
         pthread_mutex_unlock(&t31_mtx);
+        return;
+    }
+
+    if (ms_min_rate > 0 && rate > 0 && rate < ms_min_rate) {
+        fprintf(stderr, "[DI] connection at %d bit/s is below the +MS minimum "
+                "%d; clearing the call\n", rate, ms_min_rate);
+        min_rate_hangup = 1;
         return;
     }
 

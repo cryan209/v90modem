@@ -100,6 +100,16 @@ void me_dial(const char *sip_uri);
 /* Answer an incoming call (received via SIP). */
 void me_answer(void);
 
+/*
+ * V.250 6.4.1 +MS modulation selection, registered with
+ * di_set_modulation_handler().  op is SpanDSP's AT_MODULATION_*; returns 0,
+ * or -1 for an unsupported carrier or inconsistent rates.  A setting takes
+ * effect at the start of the next call.  ATZ / AT&F return to the startup
+ * setting chosen by --mode / ME_MODE.
+ */
+struct at_modulation_s;
+int me_at_modulation(void *user_data, int op, struct at_modulation_s *m);
+
 /* Hang up the current call. */
 void me_hangup(void);
 

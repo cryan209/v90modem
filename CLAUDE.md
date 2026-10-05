@@ -23,7 +23,7 @@ The RTP payload **is** the DS0 PCM stream the far-end D/A converter sees. Most o
 ./sip_v90_modem --sip-server asterisk.net.cryan.nz --username 6001 --password 6001 --pty-link /tmp/v90modem
 ```
 
-The PTY flag is `--pty-link`, not `--pty`; passing `--pty` is silently ignored and you get the default `/tmp/modem0`.
+The PTY flag is `--pty-link`, not `--pty`. Unknown or incomplete flags are now a hard error (they used to be skipped silently, so `--pty` ran with the default `/tmp/modem0`). `--mode` accepts `x2|v22|v34|v90|v92`, and the DTE can change the modulation for the next call with V.250 `AT+MS` (`AT+MS=?` lists the carriers).
 
 The automated tests only cover offline and loopback paths — passing them says nothing about hardware interop, which is verified manually against a real analog modem (`docs/v90_hardware_interop.md`).
 

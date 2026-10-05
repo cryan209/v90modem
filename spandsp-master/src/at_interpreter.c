@@ -1398,6 +1398,9 @@ static const char *at_cmd_Z(at_state_t *s, const char *t)
     at_modem_control(s, AT_MODEM_CONTROL_HANGUP, NULL);
     at_set_at_rx_mode(s, AT_MODE_ONHOOK_COMMAND);
     s->p = profiles[val];
+    if (s->modulation_handler)
+        s->modulation_handler(s->modulation_user_data, AT_MODULATION_RESET, NULL);
+    /*endif*/
     at_reset_call_info(s);
     return t;
 }
@@ -1443,6 +1446,9 @@ static const char *at_cmd_amp_F(at_state_t *s, const char *t)
     at_modem_control(s, AT_MODEM_CONTROL_HANGUP, NULL);
     at_set_at_rx_mode(s, AT_MODE_ONHOOK_COMMAND);
     s->p = profiles[0];
+    if (s->modulation_handler)
+        s->modulation_handler(s->modulation_user_data, AT_MODULATION_RESET, NULL);
+    /*endif*/
     return t;
 }
 /*- End of function --------------------------------------------------------*/
@@ -4532,12 +4538,124 @@ static const char *at_cmd_plus_MR(at_state_t *s, const char *t)
 }
 /*- End of function --------------------------------------------------------*/
 
+static int ms_parse_rate(const char **t, int *target)
+{
+    int val;
+
+    /* An omitted subparameter keeps its previous value (V.250 5.3.2). */
+    if (**t == ','  ||  **t == ';'  ||  **t == '\0')
+        return true;
+    /*endif*/
+    if (!isdigit((int) **t))
+        return false;
+    /*endif*/
+    if ((val = parse_num(t, 999999)) < 0)
+        return false;
+    /*endif*/
+    *target = val;
+    return true;
+}
+/*- End of function --------------------------------------------------------*/
+
 static const char *at_cmd_plus_MS(at_state_t *s, const char *t)
 {
-    /* V.250 6.4.1 - Modulation selection */
-    /* TODO: */
+    /* V.250 6.4.1 - Modulation selection
+       +MS=[<carrier>[,<automode>[,<min_tx_rate>[,<max_tx_rate>[,<min_rx_rate>[,<max_rx_rate>]]]]]]
+       The interpreter only parses; the modulation handler owns the setting. */
+    at_modulation_t m;
+    char buf[160];
+    int *rates[4];
+    int len;
+    int i;
+
     t += 3;
-    return t;
+    if (s->modulation_handler == NULL)
+    {
+        /* Nobody to apply it: absorb the parameters, as before. */
+        while (*t  &&  *t != ';')
+            t++;
+        /*endwhile*/
+        return t;
+    }
+    /*endif*/
+    memset(&m, 0, sizeof(m));
+    switch (*t++)
+    {
+    case '=':
+        if (*t == '?')
+        {
+            t++;
+            if (s->modulation_handler(s->modulation_user_data, AT_MODULATION_LIST, &m))
+                return NULL;
+            /*endif*/
+            snprintf(buf, sizeof(buf), "+MS: (%s),(0,1),(0-999999),(0-999999),(0-999999),(0-999999)", m.supported);
+            at_put_response(s, buf);
+            return t;
+        }
+        /*endif*/
+        if (s->modulation_handler(s->modulation_user_data, AT_MODULATION_QUERY, &m))
+            return NULL;
+        /*endif*/
+        if (*t != ','  &&  *t != ';'  &&  *t != '\0')
+        {
+            for (len = 0;  isalnum((int) *t);  t++)
+            {
+                if (len >= (int) sizeof(m.carrier) - 1)
+                    return NULL;
+                /*endif*/
+                m.carrier[len++] = *t;
+            }
+            /*endfor*/
+            m.carrier[len] = '\0';
+            if (len == 0)
+                return NULL;
+            /*endif*/
+        }
+        /*endif*/
+        if (*t == ',')
+        {
+            t++;
+            if (*t != ','  &&  *t != ';'  &&  *t != '\0')
+            {
+                if (*t != '0'  &&  *t != '1')
+                    return NULL;
+                /*endif*/
+                m.automode = *t++ - '0';
+            }
+            /*endif*/
+            rates[0] = &m.min_tx_rate;
+            rates[1] = &m.max_tx_rate;
+            rates[2] = &m.min_rx_rate;
+            rates[3] = &m.max_rx_rate;
+            for (i = 0;  i < 4  &&  *t == ',';  i++)
+            {
+                t++;
+                if (!ms_parse_rate(&t, rates[i]))
+                    return NULL;
+                /*endif*/
+            }
+            /*endfor*/
+        }
+        /*endif*/
+        if (*t != ';'  &&  *t != '\0')
+            return NULL;
+        /*endif*/
+        if (s->modulation_handler(s->modulation_user_data, AT_MODULATION_SET, &m))
+            return NULL;
+        /*endif*/
+        return t;
+    case '?':
+        if (s->modulation_handler(s->modulation_user_data, AT_MODULATION_QUERY, &m))
+            return NULL;
+        /*endif*/
+        snprintf(buf, sizeof(buf), "+MS: %s,%d,%d,%d,%d,%d", m.carrier, m.automode,
+                 m.min_tx_rate, m.max_tx_rate, m.min_rx_rate, m.max_rx_rate);
+        at_put_response(s, buf);
+        return t;
+    default:
+        return NULL;
+    }
+    /*endswitch*/
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -5916,6 +6034,13 @@ SPAN_DECLARE(void) at_interpreter(at_state_t *s, const char *cmd, int len)
         /*endif*/
     }
     /*endfor*/
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) at_set_modulation_handler(at_state_t *s, at_modulation_handler_t handler, void *user_data)
+{
+    s->modulation_handler = handler;
+    s->modulation_user_data = user_data;
 }
 /*- End of function --------------------------------------------------------*/
 

@@ -2057,6 +2057,10 @@ static bool g_advertise_v90 = true;
  * its own timing recovery and does not assume the peer's symbol clock is
  * phase-locked to our sample grid, which the V.34 Phase 3 acquisition does. */
 static bool g_advertise_v34 = true;
+/* +MS automode: offer and fall back to lower modulations (V.22/V.22bis). */
+static bool g_ms_automode = true;
+/* V.22bis start rate: 1200 forces V.22 (+MS=V22, or a ceiling below 2400). */
+static int  g_v22_bit_rate = 2400;
 static bool g_enable_v92 = false;
 static const char *g_mode_name = "v90";
 static bool g_enable_x2 = false;
@@ -2343,6 +2347,7 @@ static bool me_v90a_load_dil(v90_dil_desc_t *desc)
    has never trained.  ME_V34_BAUD overrides. */
 static int        g_v34_start_baud = 3200;
 static int        g_v34_start_bps  = 0;     /* 0 = auto (max for baud rate) */
+static int        g_v34_env_bps    = 0;     /* ME_V34_BPS, before any +MS ceiling */
 static int        g_training_tx_samples = 0; /* Sample counter for TX silencing echo test */
 
 /* Handshake timeouts (in milliseconds) */
@@ -3052,7 +3057,10 @@ static int me_start_or_restart_v8_locked(int answer_tone)
     else
         v8_parms.v92            = -1;
     v8_parms.jm_cm.call_function      = V8_CALL_V_SERIES;
-    v8_parms.jm_cm.modulations        = V8_MOD_V22;
+    /* +MS automode off means "this carrier only": V.22 is then offered only
+       when it is the selected carrier. */
+    v8_parms.jm_cm.modulations        = (!g_advertise_v34 || g_ms_automode)
+                                        ? V8_MOD_V22 : 0;
     if (g_advertise_v34)
         v8_parms.jm_cm.modulations   |= V8_MOD_V34;
     if (g_advertise_v90)
@@ -6153,18 +6161,27 @@ static void v34_put_bit_cb(void *user_data, int bit)
 static void start_v22bis_training(void)
 {
     /* Must be called with g_state_mtx held */
+    if (g_advertise_v34 && !g_ms_automode) {
+        /* +MS automode 0: V.22bis is a fallback this call may not take. */
+        ME_LOG("[ME] V.22bis fallback refused (+MS automode=0 on %s); hanging up\n",
+               g_mode_name);
+        trace_phase("V22BIS fallback refused by +MS automode=0 -> hangup");
+        g_mod   = ME_MOD_NONE;
+        g_state = ME_HANGUP;
+        return;
+    }
     g_mod   = ME_MOD_V22BIS;
     g_state = ME_TRAINING;
     g_v22bis_trained = false;
     g_phase_start_ms = trace_now_ms();
     trace_phase("enter TRAINING: mod=V22BIS role=%s", g_calling_party ? "caller" : "answerer");
-    data_stack_prepare(2400);
+    data_stack_prepare(g_v22_bit_rate);
     if (g_v22bis) {
         v22bis_free(g_v22bis);
         g_v22bis = NULL;
     }
 
-    g_v22bis = v22bis_init(NULL, 2400, V22BIS_GUARD_TONE_NONE, g_calling_party,
+    g_v22bis = v22bis_init(NULL, g_v22_bit_rate, V22BIS_GUARD_TONE_NONE, g_calling_party,
                            v22bis_get_bit_cb, NULL,
                            v22bis_put_bit_cb, NULL);
     if (!g_v22bis)
@@ -6941,6 +6958,178 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
 /* Lifecycle                                                           */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* V.250 6.4.1 +MS modulation selection                                */
+/* ------------------------------------------------------------------ */
+
+/*
+ * One setting drives the V.8 offer, the fallback ladder and the rate caps,
+ * whether it came from --mode / ME_MODE at startup or from AT+MS on the DTE.
+ * AT+MS changes the CURRENT setting; it is applied at the start of the next
+ * call (me_on_sip_connected()), never to a call in progress, whose state
+ * machines read these flags throughout.
+ *
+ * g_ms_mtx guards only g_ms/g_ms_default and is a leaf: the +MS handler runs
+ * on the PTY thread under data_interface.c's T.31 lock, and the engine takes
+ * g_state_mtx before that lock elsewhere, so the handler must never take
+ * g_state_mtx.
+ */
+typedef struct {
+    char carrier[8];
+    int  automode;
+    int  min_tx, max_tx, min_rx, max_rx;
+} me_ms_t;
+
+static pthread_mutex_t g_ms_mtx = PTHREAD_MUTEX_INITIALIZER;
+static me_ms_t g_ms;
+static me_ms_t g_ms_default;
+
+/* V.250 6.4.1 carrier names, highest first.  "X2" is not a V.250 carrier; it
+ * is accepted so the experimental mode stays selectable the same way. */
+static const struct {
+    const char *carrier;
+    const char *mode;
+} k_ms_carriers[] = {
+    { "V92",  "v92" },
+    { "V90",  "v90" },
+    { "V34",  "v34" },
+    { "V22B", "v22" },
+    { "V22",  "v22" },
+    { "X2",   "x2"  },
+};
+
+static bool me_mode_to_ms(const char *mode, me_ms_t *ms)
+{
+    memset(ms, 0, sizeof(*ms));
+    ms->automode = 1;
+    for (size_t i = 0; i < sizeof(k_ms_carriers) / sizeof(k_ms_carriers[0]); i++) {
+        if (strcmp(mode, k_ms_carriers[i].mode) == 0) {
+            snprintf(ms->carrier, sizeof(ms->carrier), "%s", k_ms_carriers[i].carrier);
+            return true;
+        }
+    }
+    return false;
+}
+
+static const char *me_ms_mode(const char *carrier)
+{
+    for (size_t i = 0; i < sizeof(k_ms_carriers) / sizeof(k_ms_carriers[0]); i++)
+        if (strcmp(carrier, k_ms_carriers[i].carrier) == 0)
+            return k_ms_carriers[i].mode;
+    return NULL;
+}
+
+/* The tighter of two limits, where 0 means none. */
+static int me_ms_cap(int a, int b)
+{
+    if (a <= 0)
+        return b > 0 ? b : 0;
+    if (b <= 0)
+        return a;
+    return a < b ? a : b;
+}
+
+/* Turn the current +MS setting into the flags the call reads.  Caller holds
+ * g_state_mtx (or is me_init(), before any call can exist). */
+static void me_apply_ms_locked(void)
+{
+    me_ms_t ms;
+    const char *role = getenv("ME_V90_ROLE");
+    const char *mode;
+    int cap;
+
+    pthread_mutex_lock(&g_ms_mtx);
+    ms = g_ms;
+    pthread_mutex_unlock(&g_ms_mtx);
+    mode = me_ms_mode(ms.carrier);
+    if (!mode)
+        mode = "v90";
+
+    g_enable_x2     = strcmp(mode, "x2") == 0;
+    g_advertise_v90 = strcmp(mode, "v90") == 0 || strcmp(mode, "v92") == 0;
+    g_enable_v92    = strcmp(mode, "v92") == 0;
+    /* V.90 Phase 2 is V.34's, so V.34 is offered whenever V.90 is. */
+    g_advertise_v34 = g_advertise_v90 || strcmp(mode, "v34") == 0 || g_enable_x2;
+    g_mode_name     = mode;
+    g_ms_automode   = ms.automode != 0;
+
+    /* Rate limits.  V.34 and V.22/V.22bis take a ceiling; the PCM modes
+       choose their rates from the line and do not yet take one. */
+    cap = me_ms_cap(ms.max_tx, ms.max_rx);
+    g_v34_start_bps = g_v34_env_bps;
+    if (cap >= 2400 && cap < 33600) {
+        int bps = cap - cap % 2400;
+
+        g_v34_start_bps = g_v34_env_bps ? me_ms_cap(g_v34_env_bps, bps) : bps;
+    }
+    g_v22_bit_rate = (strcmp(ms.carrier, "V22") == 0 || (cap > 0 && cap < 2400))
+                   ? 1200 : 2400;
+
+    g_v90_analogue_role = g_advertise_v90 && role && strcmp(role, "analogue") == 0;
+    ME_LOG("[ME] Modem mode: %s (+MS=%s,%d,%d,%d,%d,%d; V.8 offer %s%s)\n",
+           g_mode_name, ms.carrier, ms.automode, ms.min_tx, ms.max_tx,
+           ms.min_rx, ms.max_rx,
+           g_advertise_v90 ? "V90|V34" : (g_advertise_v34 ? "V34" : "V22"),
+           (g_advertise_v34 && g_ms_automode) ? "|V22" : "");
+    if (!g_advertise_v90 && role && strcmp(role, "analogue") == 0)
+        ME_LOG("[ME] ME_V90_ROLE=analogue ignored in %s mode\n", g_mode_name);
+    if (g_v90_analogue_role)
+        ME_LOG("[ME] V.90 role: ANALOGUE (opt-in; Phase 4 B1/B1d and "
+               "bidirectional data mappers enabled)\n");
+}
+
+/* The +MS handler data_interface.c calls (SpanDSP AT_MODULATION_*). */
+int me_at_modulation(void *user_data, int op, struct at_modulation_s *m)
+{
+    (void)user_data;
+    switch (op) {
+    case AT_MODULATION_LIST:
+        m->supported[0] = '\0';
+        for (size_t i = 0; i < sizeof(k_ms_carriers) / sizeof(k_ms_carriers[0]); i++) {
+            size_t n = strlen(m->supported);
+
+            snprintf(m->supported + n, sizeof(m->supported) - n, "%s%s",
+                     n ? "," : "", k_ms_carriers[i].carrier);
+        }
+        return 0;
+    case AT_MODULATION_QUERY:
+        pthread_mutex_lock(&g_ms_mtx);
+        snprintf(m->carrier, sizeof(m->carrier), "%s", g_ms.carrier);
+        m->automode    = g_ms.automode;
+        m->min_tx_rate = g_ms.min_tx;
+        m->max_tx_rate = g_ms.max_tx;
+        m->min_rx_rate = g_ms.min_rx;
+        m->max_rx_rate = g_ms.max_rx;
+        pthread_mutex_unlock(&g_ms_mtx);
+        return 0;
+    case AT_MODULATION_SET:
+        if (!me_ms_mode(m->carrier))
+            return -1;
+        if ((m->max_tx_rate && m->min_tx_rate > m->max_tx_rate)
+            || (m->max_rx_rate && m->min_rx_rate > m->max_rx_rate))
+            return -1;
+        pthread_mutex_lock(&g_ms_mtx);
+        snprintf(g_ms.carrier, sizeof(g_ms.carrier), "%s", m->carrier);
+        g_ms.automode = m->automode;
+        g_ms.min_tx   = m->min_tx_rate;
+        g_ms.max_tx   = m->max_tx_rate;
+        g_ms.min_rx   = m->min_rx_rate;
+        g_ms.max_rx   = m->max_rx_rate;
+        pthread_mutex_unlock(&g_ms_mtx);
+        ME_LOG("[ME] AT+MS=%s,%d,%d,%d,%d,%d (applies from the next call)\n",
+               m->carrier, m->automode, m->min_tx_rate, m->max_tx_rate,
+               m->min_rx_rate, m->max_rx_rate);
+        return 0;
+    case AT_MODULATION_RESET:
+        pthread_mutex_lock(&g_ms_mtx);
+        g_ms = g_ms_default;
+        pthread_mutex_unlock(&g_ms_mtx);
+        return 0;
+    default:
+        return -1;
+    }
+}
+
 void me_init(void)
 {
     pthread_mutex_init(&g_state_mtx, NULL);
@@ -6953,52 +7142,20 @@ void me_init(void)
     v90_cp_live_worker_start();
     {
         const char *mode = getenv("ME_MODE");
-        const char *role = getenv("ME_V90_ROLE");
+        me_ms_t ms;
 
         /* ME_V92_ENABLE remains a compatibility alias when ME_MODE is absent. */
-        if (!mode || !*mode || strcmp(mode, "auto") == 0) {
-            g_advertise_v90 = true;
-            g_enable_v92 = parse_env_int("ME_V92_ENABLE", 0) != 0;
-            g_mode_name = g_enable_v92 ? "v92" : "v90";
-        } else if (strcmp(mode, "x2") == 0) {
-            g_enable_x2 = true;
-            g_advertise_v90 = false;
-            g_enable_v92 = false;
-            g_mode_name = "x2";
-        } else if (strcmp(mode, "v34") == 0) {
-            g_advertise_v90 = false;
-            g_enable_v92 = false;
-            g_mode_name = "v34";
-        } else if (strcmp(mode, "v22") == 0) {
-            g_advertise_v90 = false;
-            g_advertise_v34 = false;
-            g_enable_v92 = false;
-            g_mode_name = "v22";
-        } else if (strcmp(mode, "v90") == 0) {
-            g_advertise_v90 = true;
-            g_enable_v92 = false;
-            g_mode_name = "v90";
-        } else if (strcmp(mode, "v92") == 0) {
-            g_advertise_v90 = true;
-            g_enable_v92 = true;
-            g_mode_name = "v92";
-        } else {
+        if (!mode || !*mode || strcmp(mode, "auto") == 0)
+            mode = parse_env_int("ME_V92_ENABLE", 0) != 0 ? "v92" : "v90";
+        if (!me_mode_to_ms(mode, &ms)) {
             ME_LOG("[ME] Unknown ME_MODE '%s'; using v90\n", mode);
-            g_advertise_v90 = true;
-            g_enable_v92 = false;
-            g_mode_name = "v90";
+            me_mode_to_ms("v90", &ms);
         }
-
-        g_v90_analogue_role = g_advertise_v90
-                           && role && strcmp(role, "analogue") == 0;
-        ME_LOG("[ME] Modem mode: %s (V.8 offer %s)\n", g_mode_name,
-               g_advertise_v90 ? "V90|V34|V22"
-                               : (g_advertise_v34 ? "V34|V22" : "V22"));
-        if (!g_advertise_v90 && role && strcmp(role, "analogue") == 0)
-            ME_LOG("[ME] ME_V90_ROLE=analogue ignored in v34 mode\n");
-        if (g_v90_analogue_role)
-            ME_LOG("[ME] V.90 role: ANALOGUE (opt-in; Phase 4 B1/B1d and "
-                   "bidirectional data mappers enabled)\n");
+        /* This is the startup setting, and the one ATZ / AT&F return to. */
+        pthread_mutex_lock(&g_ms_mtx);
+        g_ms = ms;
+        g_ms_default = ms;
+        pthread_mutex_unlock(&g_ms_mtx);
     }
     dring_init(&downstream_ring);
     dring_init(&upstream_ring);
@@ -7065,7 +7222,8 @@ void me_init(void)
         if (valid_v34_baud(env_baud))
             g_v34_start_baud = env_baud;
         if (env_bps > 0 && valid_v34_bps(env_bps))
-            g_v34_start_bps = env_bps;
+            g_v34_env_bps = env_bps;
+        me_apply_ms_locked();
         int effective_bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(g_v34_start_baud);
         ME_LOG("[ME] V.34 start profile: %d baud / %d bps\n",
                 g_v34_start_baud, effective_bps);
@@ -7189,6 +7347,8 @@ static void v92_call_state_reset_locked(void)
 void me_on_sip_connected(void)
 {
     pthread_mutex_lock(&g_state_mtx);
+    /* AT+MS since the last call takes effect here, before anything reads it. */
+    me_apply_ms_locked();
 
     cr_reset(&g_cr);
     g_trace_start_ms = trace_now_ms();
@@ -7249,8 +7409,9 @@ void me_on_sip_connected(void)
     pthread_mutex_unlock(&g_state_mtx);
     if (g_data_framing_auto)
         g_data_framing = DS_FRAMING_V14;   /* until this call's V.8 says LAPM */
-    trace_phase("enter V8: mode=%s advertised mods=%s", g_mode_name,
-                g_advertise_v90 ? "V90|V34|V22" : "V34|V22");
+    trace_phase("enter V8: mode=%s advertised mods=%s%s", g_mode_name,
+                g_advertise_v90 ? "V90|V34" : (g_advertise_v34 ? "V34" : "V22"),
+                (g_advertise_v34 && g_ms_automode) ? "|V22" : "");
 
     ME_LOG("[ME] SIP connected as %s, starting V.8 handshake\n",
             g_calling_party ? "caller" : "answerer");

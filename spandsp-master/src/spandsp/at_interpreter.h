@@ -42,6 +42,37 @@ typedef int (*at_modem_control_handler_t)(void *user_data, int op, const char *n
 typedef int (*at_tx_handler_t)(void *user_data, const uint8_t *buf, size_t len);
 typedef int (*at_class1_handler_t)(void *user_data, int direction, int operation, int val);
 
+/*! V.250 6.4.1 +MS modulation selection.  The interpreter parses the command;
+    the owner of the datapump decides what is supported and applies it.  Rates
+    are in bit/s, and 0 means no restriction. */
+typedef struct at_modulation_s
+{
+    /*! The <carrier> subparameter, e.g. "V34", "V90". */
+    char carrier[8];
+    /*! 1 if automode (fall back to other modulations) is enabled. */
+    int automode;
+    int min_tx_rate;
+    int max_tx_rate;
+    int min_rx_rate;
+    int max_rx_rate;
+    /*! Filled by the handler on AT_MODULATION_LIST: comma-separated carriers. */
+    char supported[96];
+} at_modulation_t;
+
+enum
+{
+    /*! Report the current setting into the structure. */
+    AT_MODULATION_QUERY = 0,
+    /*! Apply the setting in the structure; return non-zero to reject it. */
+    AT_MODULATION_SET = 1,
+    /*! Restore the default setting (ATZ, AT&F). */
+    AT_MODULATION_RESET = 2,
+    /*! Fill supported[] with the carriers this modem accepts. */
+    AT_MODULATION_LIST = 3
+};
+
+typedef int (*at_modulation_handler_t)(void *user_data, int op, at_modulation_t *m);
+
 enum at_rx_mode_e
 {
     AT_MODE_ONHOOK_COMMAND,
@@ -172,6 +203,8 @@ SPAN_DECLARE(void) at_interpreter(at_state_t *s, const char *cmd, int len);
 SPAN_DECLARE(logging_state_t *) at_get_logging_state(at_state_t *s);
 
 SPAN_DECLARE(void) at_set_class1_handler(at_state_t *s, at_class1_handler_t handler, void *user_data);
+
+SPAN_DECLARE(void) at_set_modulation_handler(at_state_t *s, at_modulation_handler_t handler, void *user_data);
 
 SPAN_DECLARE(void) at_set_modem_control_handler(at_state_t *s,
                                                 at_modem_control_handler_t modem_control_handler,
