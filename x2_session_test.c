@@ -264,29 +264,75 @@ static void upstream_e_test(const char *path)
         }
     }
 }
+static void session_output(x2_session_t *s,uint8_t *out,unsigned count,unsigned block)
+{
+    uint8_t scratch[160];
+    for(unsigned n=0;n<count;) {
+        unsigned k=count-n;if(k>block)k=block;
+        assert(x2_session_tx(s,out?out+n:scratch,k)==k);n+=k;
+    }
+}
 static void source_activation_test(void)
 {
-    x2_session_t s;x2_mp_t mp={{0x344,0x3fe,0,0x500},0};uint8_t octets[160];
-    x2_session_init(&s);s.stage=X2_TRAIN_E;s.marker_valid=1;
-    /* Reach E through its real initializer, avoiding seeded mapper internals. */
-    s.stage=X2_TRAIN_D;s.stage_samples=1151;x2_session_tx(&s,octets,1);
-    x2_session_set_payload_source(&s,source_bit,NULL);source_calls=0;
-    x2_session_receive_mp(&s,&mp);
-    assert(s.mp_valid && s.selected_index==1 && s.upstream_rate_n==10);
-    assert(s.data_config.banks[0][1]==0xa8a8); /* Data alphabet, not E's A7. */
-    for(unsigned n=0;n<10002;) {unsigned k=10002-n;if(k>160)k=160;x2_session_tx(&s,octets,k);n+=k;}
-    assert(s.stage==X2_RECORD_WAIT && !source_calls);
-    x2_session_tx(&s,octets,6);assert(s.stage==X2_DATA_STARTUP && !source_calls);
-    for(unsigned n=0;n<4080;) {unsigned k=4080-n;if(k>160)k=160;x2_session_tx(&s,octets,k);n+=k;}
-    assert(s.stage==X2_PAYLOAD && !source_calls);
-    uint32_t history=s.training_mapper.scrambler.history;
-    x2_session_tx(&s,octets,6);assert(source_calls==24);
-    assert(history!=s.training_mapper.scrambler.history);
-    /* E completion without a received record cannot activate user data. */
-    x2_session_init(&s);s.stage=X2_RECORD_WAIT;
-    x2_session_tx(&s,octets,160);assert(s.stage==X2_RECORD_WAIT);
-    x2_session_receive_mp(&s,&mp);assert(s.mp_valid);
-    mp.words[2]=1;x2_session_receive_mp(&s,&mp);assert(s.stage==X2_FAILED);
+    const unsigned blocks[]={1,17,160};
+    /* Native CBB8/B54C framing: D284/03FE/0000, CRC C2CC, 11 pad
+     * zeros. The downstream record is three words, not upstream MP's four. */
+    static const uint8_t record[]={0xff,0xff,0x11,0x4a,0xf3,0x1f,0,0,0x80,0x59,0x18,0};
+    for(unsigned b=0;b<3;++b) {
+        x2_session_t s;x2_mp_t mp={{0x344,0x3fe,0,0x500},0};uint8_t octets[160],records[72];
+        x2_session_init(&s);s.marker_valid=1;
+        /* Reach E through its real initializer, avoiding seeded mapper internals. */
+        s.stage=X2_TRAIN_D;s.stage_samples=1151;x2_session_tx(&s,octets,1);
+        x2_session_set_payload_source(&s,source_bit,NULL);source_calls=0;
+        session_output(&s,NULL,10002,blocks[b]);
+        assert(s.stage==X2_RECORD_WAIT && !source_calls);
+        session_output(&s,octets,120,blocks[b]);
+        assert(s.stage==X2_RECORD_WAIT && !source_calls);
+        /* Waiting for MP must continue training, without inserting silence. */
+        for(unsigned i=0;i<120;++i)assert(octets[i]!=0x7f);
+        x2_session_receive_mp(&s,&mp);
+        assert(s.mp_valid && s.selected_index==1 && s.upstream_rate_n==10);
+        assert(s.data_config.banks[0][1]==0xa8a8); /* Data alphabet, not E's A7. */
+        session_output(&s,octets,54,blocks[b]);
+        assert(s.stage==X2_RECORD_TX && !source_calls);
+        for(unsigned i=0;i<54;++i)
+            assert(octets[i]==(uint8_t)(0xa5^((i%6>=3?0x80:0)^(i>=48?0x80:0))));
+        session_output(&s,records,sizeof(records),blocks[b]);
+        assert(s.stage==X2_RECORD_TX && !source_calls); /* MP alone cannot release it. */
+        x2_pcm_state_t mapper={0};x2_scrambler_t scrambler;
+        x2_scrambler_init(&scrambler,18,0);
+        for(unsigned r=0;r<3;++r) {
+            uint8_t decoded[12]={0};
+            for(unsigned frame=0;frame<4;++frame) {
+                uint64_t bits;
+                assert(!x2_pcm_decode(&s.training_mapper.config,&mapper,
+                                      records+r*24+frame*6,&bits));
+                for(unsigned i=0;i<24;++i) {
+                    unsigned p=frame*24+i;
+                    decoded[p/8]|=(uint8_t)(x2_descramble_bit(&scrambler,(bits>>i)&1)<<(p%8));
+                }
+            }
+            assert(!memcmp(decoded,record,sizeof(record)));
+        }
+        /* E is qualified by the same timing hypothesis and CRC-valid MP;
+         * release at a complete record even when E arrives mid-frame. */
+        x2_mp_rx_init(&s.mp_rx,NULL,NULL);uint8_t bits[104];x2_mp_encode(&mp,bits);
+        for(unsigned r=0;r<3;++r)for(unsigned i=0;i<104;++i)x2_mp_rx_bit(&s.mp_rx,0,0,bits[i]);
+        session_output(&s,NULL,7,blocks[b]);
+        for(unsigned i=0;i<19;++i)x2_mp_rx_bit(&s.mp_rx,0,0,1);
+        assert(!s.mp_rx.e_detected && s.stage==X2_RECORD_TX);
+        x2_mp_rx_bit(&s.mp_rx,0,0,1);assert(s.mp_rx.e_detected);
+        session_output(&s,NULL,16,blocks[b]);assert(s.stage==X2_RECORD_TX);
+        session_output(&s,NULL,1,blocks[b]);assert(s.stage==X2_FINAL_TRAINING);
+        session_output(&s,NULL,6,blocks[b]);assert(s.stage==X2_DATA_STARTUP && !source_calls);
+        session_output(&s,NULL,4080,blocks[b]);assert(s.stage==X2_PAYLOAD && !source_calls);
+        uint32_t history=s.training_mapper.scrambler.history;
+        session_output(&s,NULL,6,blocks[b]);assert(source_calls==24);
+        assert(history!=s.training_mapper.scrambler.history);
+        /* Malformed MP cannot overwrite accepted parameters. */
+        s.stage=X2_RECORD_WAIT;mp.words[2]=1;
+        x2_session_receive_mp(&s,&mp);assert(s.stage==X2_FAILED);
+    }
 }
 static void capture_test(const char *path)
 {

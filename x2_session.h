@@ -7,6 +7,7 @@ typedef enum {
     X2_INFO0, X2_TONE_A, X2_PROBE, X2_MARKER_WAIT, X2_UPSTREAM_WAIT,
     X2_ZERO, X2_PATTERN_A, X2_TRAIN_B, X2_J, X2_J_ACK,
     X2_TRAIN_C, X2_TRAIN_D, X2_TRAIN_E, X2_RECORD_WAIT,
+    X2_RECORD_ALIGN, X2_RECORD_TX,
     X2_FINAL_TRAINING, X2_DATA_STARTUP, X2_PAYLOAD, X2_FAILED
 } x2_session_stage_t;
 typedef struct {
@@ -40,6 +41,8 @@ typedef struct {
     x2_mp_t peer_mp;
     x2_pcm_config_t data_config;
     unsigned mp_valid, selected_index, upstream_rate_n;
+    unsigned record_position;
+    uint8_t record_bits[96];
     x2_get_bit_func_t payload_source;
     void *payload_context;
 } x2_session_t;

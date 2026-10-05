@@ -99,7 +99,7 @@ void x2_session_set_payload_source(x2_session_t *s,x2_get_bit_func_t get_bit,voi
 void x2_session_receive_mp(x2_session_t *s,const x2_mp_t *mp)
 {
     x2_pcm_config_t c;unsigned eligible,n=0;
-    if(!s||!mp||s->stage<X2_TRAIN_C||s->stage>X2_RECORD_WAIT)return;
+    if(!s||!mp||s->stage<X2_TRAIN_C||s->stage>X2_RECORD_TX)return;
     int index=x2_short_record_config(mp,0x7fff,&c);
     if(index<0){s->stage=X2_FAILED;return;}
     /* W2 is the V.34 upstream capability mask, independent of PCM N1.
@@ -109,6 +109,13 @@ void x2_session_receive_mp(x2_session_t *s,const x2_mp_t *mp)
     if(!n || n>14){s->stage=X2_FAILED;return;}
     s->peer_mp=*mp;s->data_config=c;s->selected_index=(unsigned)index;
     s->upstream_rate_n=n;s->mp_valid=1;
+}
+static int record_bit(void *context)
+{
+    x2_session_t *s=context;
+    unsigned bit=s->record_bits[s->record_position++];
+    if(s->record_position==sizeof(s->record_bits))s->record_position=0;
+    return (int)bit;
 }
 static int payload_bit(void *context)
 {
@@ -135,6 +142,36 @@ static void stage(x2_session_t *s, x2_session_stage_t next)
     if(next==X2_TRAIN_E) {
         x2_pcm_config_t c;training_config(&c);
         if(x2_pcm_tx_init(&s->training_mapper,&c,18,ones,NULL))s->stage=X2_FAILED;
+    }
+    if(next==X2_RECORD_TX) {
+        /* x2 Draft 0.33 sections 6, 20 and 21; Ie030002 CBB8/B54C
+         * transmit a THREE-word record in the retained training banks,
+         * unlike the Courier's four-word upstream MP. CBB5's data-bank
+         * rebuild is not executed in the successful native startup.
+         * C9F8 resets source/parity before the 54-sample alignment word.
+         * The 85 protected/framing bits occupy four 24-bit mapper frames;
+         * B58B supplies zero fill until the next record starts. Retain the
+         * native ACK/expanded/64-state flags; N2 is the upstream rate,
+         * independently from the PCM index. Courier B06E tests bit 13 for
+         * nonlinear encoding: keep it clear because the upstream receiver
+         * uses a linear constellation (V.34 9.7). */
+        uint16_t words[3]={(uint16_t)(0xd000|(s->selected_index<<2)|(s->upstream_rate_n<<6)),
+                           s->peer_mp.words[1],0};
+        uint16_t crc=0xffff;unsigned p=0;
+        memset(s->record_bits,0,sizeof(s->record_bits));
+        for(unsigned i=0;i<17;++i)s->record_bits[p++]=1;
+        ++p;
+        for(unsigned j=0;j<3;++j) {
+            for(unsigned i=0;i<16;++i) {
+                unsigned bit=(words[j]>>i)&1;
+                s->record_bits[p++]=(uint8_t)bit;crc=crc_step(crc,bit);
+            }
+            ++p;
+        }
+        for(unsigned i=0;i<16;++i)s->record_bits[p++]=(uint8_t)((crc>>i)&1);
+        s->record_position=0;
+        x2_pcm_config_t c;training_config(&c);
+        if(x2_pcm_tx_init(&s->training_mapper,&c,18,record_bit,s))s->stage=X2_FAILED;
     }
 }
 static void info_bit(x2_session_t *s,x2_info_hypothesis_t *h,unsigned bit)
@@ -380,11 +417,25 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
             break;
         case X2_RECORD_WAIT:
             if(s->mp_valid) {
+                stage(s,X2_RECORD_ALIGN);
+                code=0xa5;s->stage_samples=1;
+            } else x2_pcm_tx_g711(&s->training_mapper,&code,1);
+            break;
+        case X2_RECORD_ALIGN:
+            /* C936/C939/C9F8: eight +++--- groups, then one inverted
+             * group. All six current training banks start with A5. */
+            code=(uint8_t)(0xa5^((n%6>=3 ? 1u:0u)<<7));
+            if(n>=48)code^=0x80;
+            if(n==53)stage(s,X2_RECORD_TX);
+            break;
+        case X2_RECORD_TX:
+            x2_pcm_tx_g711(&s->training_mapper,&code,1);
+            /* Ie030002 A891/A8F1: received E releases the final training
+             * and data-bank handoff. Finish the protected record first. */
+            if(s->mp_rx.e_detected && s->record_position==0
+               && s->training_mapper.output_position==6) {
+                s->training_mapper.get_bit=ones;s->training_mapper.user_data=NULL;
                 stage(s,X2_FINAL_TRAINING);
-                /* Start at this sample: the script wait has no invented
-                 * padding sample between its release and CB60. */
-                x2_pcm_tx_g711(&s->training_mapper,&code,1);
-                s->stage_samples=1;
             }
             break;
         case X2_FINAL_TRAINING:
@@ -406,6 +457,6 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
 }
 const char *x2_session_stage_name(x2_session_stage_t s)
 {
-    static const char *names[]={"INFO0","TONE_A","PROBE","MARKER_WAIT","UPSTREAM_WAIT","ZERO","PATTERN_A","TRAIN_B","J","J_ACK","TRAIN_C","TRAIN_D","TRAIN_E","RECORD_WAIT","FINAL_TRAINING","DATA_STARTUP","PAYLOAD","FAILED"};
+    static const char *names[]={"INFO0","TONE_A","PROBE","MARKER_WAIT","UPSTREAM_WAIT","ZERO","PATTERN_A","TRAIN_B","J","J_ACK","TRAIN_C","TRAIN_D","TRAIN_E","RECORD_WAIT","RECORD_ALIGN","RECORD_TX","FINAL_TRAINING","DATA_STARTUP","PAYLOAD","FAILED"};
     return (unsigned)s<sizeof(names)/sizeof(names[0])?names[s]:"INVALID";
 }

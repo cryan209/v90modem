@@ -7,9 +7,11 @@ training to the modem engine's raw-G.711 path. Select `--mode x2` (or
 answering digital endpoint using PCMU, a 3200-baud high-carrier upstream and
 the recovered low-level training alphabet.
 
-The supported short-record path now receives MP, selects downstream data banks
-and activates the payload source. It does not yet complete a bidirectional x2
-connection: the upstream E/B1-to-data receiver handoff remains unimplemented.
+The supported short-record path receives MP, transmits its three-word response,
+waits for upstream E and activates the downstream payload source. Fresh original
+Courier 403 feedback reaches native CONNECT and upstream B1 acquisition. An
+error-free bidirectional user-data connection is still unverified; CONNECT and
+user-bit delivery from our engine remain gated.
 
 ## Implemented
 
@@ -273,6 +275,57 @@ Production builds, recorded session/MP/E checks, B1 acquisition at 99.9%
 (17/160 samples and silence rejection), and all 402 V.34 data tests pass.
 Evidence: `../courier-emu/artifacts/x2-phase2-20261005/README.md`.
 The live harness's `--require-marker` asserts acceptance of 4D, not CONNECT.
+
+## Native record/E handoff, 6 October 2026
+
+Fresh feedback against Courier 403 now reaches native `CONNECT 53333/x2/NONE`
+and acquires its 24000-bit/s upstream B1. This supersedes the MP-to-E blocker
+above, but does **not** establish error-free user data.
+
+The missing transmit stage was a three-word downstream record. Successful
+native-to-native execution enters Ie030002 CBB8/B54C with the **training**
+alphabet retained; it does not execute CBB5's data-bank rebuild. Emit the
+48+6-sample C9F8 alignment sequence, then repeat seventeen sync ones, a zero,
+three little-endian 16-bit words with zero separators, reflected-8408 CRC,
+and zero padding to four six-sample/24-bit mapper frames. In this profile the
+words are D284/03FE/0000 and CRC C2CC. This is distinct from the Courier's
+four-word upstream MP (Draft 0.33 sections 6, 20 and 21).
+
+The record sets ACK, expanded shaping and 64-state trellis, and selects the
+upstream N independently of the downstream PCM index. Copying N1 into N2
+made native B1B4 choose N=0 instead of N=10. Copying native F37C's nonlinear
+flag was also wrong for our linear receive path: Courier B06E tests bit 13
+(V.34 section 9.7). With it set, the fresh B1 fit was 93.4%; clearing it gives
+100.0%, with the separate 256-symbol check at lattice distance 0.027 and
+power 150.9 against template power 147.7. The 95% acquisition threshold and
+held-out check are unchanged.
+
+Received, qualified upstream E now releases the final six training samples
+and data-bank handoff after the currently transmitted record finishes. MP
+alone cannot release it. Waiting for MP continues mapped training rather
+than inserting silence. Source history/parity continue across the final
+training and 4080-sample data startup; user-source callbacks begin afterward.
+Tests cover record decoding and repetition, padding/CRC, alignment, missing
+MP/E, mid-record E, malformed MP and callback timing at blocks 1/17/160.
+
+Payload remains open. A known-text native Courier call does not yield the
+complete message through our waveform receiver. Direct decoding of the
+Courier's exact mapper symbols recovers the first four source characters,
+`x2-n`; the equalized waveform has localized large deviations from those
+symbols despite a small distance to its own chosen lattice. Do not treat
+that self-distance as proof of correct symbols. A four-character native
+Courier-to-I-modem control delivers `AX2A` upstream but not `DX2D` downstream.
+Longer native controls reach CONNECT but fail both complete-message checks.
+Thus native downstream payload also needs qualification; neither native
+CONNECT nor our B1 lock proves a bidirectional connection. Our engine's
+CONNECT/user-bit gates remain in place. A proposed V0/B1 parking change was
+not retained because it did not recover the known waveform payload.
+
+`x2_test`, recorded session/MP/E, recorded B1 (99.9%), fresh B1 (100.0%)
+at blocks 17/160 with silence rejection, all 402 exact-symbol V.34 data cases,
+and production builds pass. `x2_b1_test <tap> <start> <E>` accepts explicit
+bearer-clock anchors for fresh captures. Evidence, commands and source-clock
+qualifications are in `artifacts/x2-handoff-20261006/README.md`.
 
 ## Offline call evidence
 

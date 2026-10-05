@@ -10,15 +10,15 @@
 #include "spandsp/private/v34.h"
 static int ones(void *p) { (void)p; return 1; }
 static void sink(void *p, int bit) { (void)p; (void)bit; }
-static void check(const unsigned char *capture, size_t len, int chunk, int silence)
+static void check(const unsigned char *capture, size_t len, size_t start,
+                  size_t e, int chunk, int silence)
 {
     v34_state_t *s = v34_init(NULL, 3200, 24000, false, true, ones, NULL, sink, NULL);
     assert(s);
     assert(v34_x2_prepare_upstream(s, 4, 1) == 0);
     assert(v34_v90_prepare_upstream_data(s, 4, 1, 24000, 0) == 0);
     /* Start before MP/E and preserve the exact PCMU sample clock. */
-    size_t at = 93000;
-    const size_t e = 100074;
+    size_t at = start;
     int begun = 0;
     while (at < len)
     {
@@ -55,16 +55,22 @@ static void check(const unsigned char *capture, size_t len, int chunk, int silen
 }
 int main(int argc, char **argv)
 {
-    assert(argc == 2);
+    /* Optional anchors qualify a fresh closed-loop tap as well as the
+     * preserved original-firmware recording. They are bearer sample counts,
+     * not the engine MP receiver's relative clock. */
+    assert(argc == 2 || argc == 4);
+    size_t start = argc == 4 ? strtoul(argv[2],NULL,0) : 93000;
+    size_t e = argc == 4 ? strtoul(argv[3],NULL,0) : 100074;
     FILE *f = fopen(argv[1], "rb"); assert(f);
     assert(fseek(f, 0, SEEK_END) == 0);
-    long len = ftell(f); assert(len == 278249);
+    long len = ftell(f); assert(len > 0 && start < e && e + 6000 < (size_t)len);
+    if(argc == 2)assert(len == 278249);
     rewind(f);
     unsigned char *capture = malloc((size_t)len); assert(capture);
     assert(fread(capture, 1, (size_t)len, f) == (size_t)len); fclose(f);
-    check(capture, (size_t)len, 17, 0);
-    check(capture, (size_t)len, 160, 0);
-    check(capture, 110000, 160, 1);
+    check(capture, (size_t)len, start, e, 17, 0);
+    check(capture, (size_t)len, start, e, 160, 0);
+    check(capture, e + 6000, start, e, 160, 1);
     free(capture);
     puts("x2 B1: recorded acquisition and silence rejection passed");
     return 0;
