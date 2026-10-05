@@ -37,7 +37,10 @@ static const struct {
       "V.22bis (no V.32bis here)" },
     { "V34",  { NULL },                       "v34", "v34", 33600,
       "V.34, V.22bis; ,0: V.34" },
-    { "K56",  { "56", "56K", "K56FLEX" },     NULL,  "k56", 56000,
+    /* 60000: the shipped MICA K56flex tables run past 56k -- rate indices
+     * 32 and 33 (58000, 60000) exist for both laws, base pad group only
+     * (k56flex_tables.h; k56flex_tx_init() accepts them). */
+    { "K56",  { "56", "56K", "K56FLEX" },     NULL,  "k56", 60000,
       "K56flex V.8bis, then V.90" },
     { "V90",  { NULL },                       "v90", "v90", 56000,
       "V.90, V.34, V.22bis" },
@@ -45,8 +48,11 @@ static const struct {
       "V.92/V.90, V.34, V.22bis" },
     { "V91",  { NULL },                       "v91", "v91", 64000,
       "V.91+V.90, V.34; ,0: V.91+V.34" },
-    { "X2",   { NULL },                       "x2",  "x2",  56000,
-      "x2 (V.34 upstream)" },
+    /* 64000: x2's digital symmetric mode (x2 up and down) runs PCM both
+     * ways at up to 64000.  Only the asymmetric session (PCM down, V.34
+     * up) exists here; docs/x2_implementation.md. */
+    { "X2",   { NULL },                       "x2",  "x2",  64000,
+      "x2 asym (symmetric 64k not here)" },
 };
 
 #define N_CARRIERS (sizeof(carriers) / sizeof(carriers[0]))

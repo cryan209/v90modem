@@ -90,6 +90,9 @@ static void test_parser(void)
     parse_bad("=V34,1,0,56000");/* above what V.34 carries */
     parse_bad("=V22,1,0,2400");
     parse_bad("=V90,1,0,64000");
+    parse_ok("=K56,1,0,60000", "K56", 1, 0, 60000, 0, 60000);
+    parse_bad("=K56,1,0,62000");
+    parse_ok("=X2,1,0,64000", "X2", 1, 0, 64000, 0, 64000);
     parse_bad("=V91,1,0,64001");
     parse_bad("=V21");
     parse_bad("=V17");          /* a carrier this DCE cannot offer */
@@ -115,6 +118,8 @@ static void test_parser(void)
           && at_ms_carrier_to_mode("V17", true) == NULL, "carrier <-> mode names");
     check(at_ms_carrier_max_rate("V32B") == 14400
           && at_ms_carrier_max_rate("V91") == 64000
+          && at_ms_carrier_max_rate("K56") == 60000
+          && at_ms_carrier_max_rate("X2") == 64000
           && at_ms_carrier_max_rate("V17") == 0, "carrier maximum rates");
 
     parse_ok("=V90,0,0,0,4800,33600", "V90", 0, 0, 0, 4800, 33600);
@@ -127,7 +132,7 @@ static void test_parser(void)
 
         at_ms_parse("=V91,0", &s);
         at_ms_format_help(&s, help, sizeof(help));
-        check(strstr(help, "K56      56,56K,K56FLEX   1         56000") != NULL
+        check(strstr(help, "K56      56,56K,K56FLEX   1         60000") != NULL
               && strstr(help, "V34                       0,1       33600") != NULL
               && strstr(help, "V32B     V32BIS           1         14400") != NULL
               && strstr(help, "V91                       0,1       64000") != NULL
@@ -240,7 +245,7 @@ static int test_engine(void)
     expect("AT+MS?", "+MS: V90,1,0,0,0,0");
     expect("AT+MS=?", "+MS: (V22,V22B,V32,V32B,V34,K56,V90,V92,V91,X2),(0,1)");
     expect_describe("V90|V34|V22");
-    expect("AT+MS$", "K56      56,56K,K56FLEX   1         56000  K56flex V.8bis, then V.90");
+    expect("AT+MS$", "K56      56,56K,K56FLEX   1         60000  K56flex V.8bis, then V.90");
     expect("AT+MS$", "Current: V90,1,0,0,0,0");
 
     expect("AT+MS=V34", "OK");

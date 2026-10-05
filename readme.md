@@ -120,7 +120,7 @@ touched, and `ATZ`/`AT&F` restore the default:
 | `V90`      | V.90 + V.34 + V.22bis                                    | V.90 + V.34       |
 | `V92`      | as V90, with V.92                                        | V.92 + V.34       |
 | `V91`      | as V90, with V.91 in V.8's PCM availability             | V.91 + V.34       |
-| `X2`       | x2 (V.34 upstream)                                       | same              |
+| `X2`       | x2, asymmetric (V.34 upstream; symmetric not implemented) | same             |
 
 `AT+MS?` reads back e.g. `+MS: V34,1,0,0,0,0`; `AT+MS=?` lists the carriers;
 `AT+MS$` prints Courier-style help -- the syntax, every carrier with its
@@ -128,8 +128,10 @@ aliases, accepted automodes, maximum rate and what the next call will offer,
 and the current setting.
 The rate subparameters (`<carrier>,<automode>,<min>,<max>` or V.250's
 `...,<min_tx>,<max_tx>,<min_rx>,<max_rx>`) may not exceed the carrier's
-maximum (14400 for V32B, 33600 for V34, 56000 for K56/V90/V92, 64000 for
-V91); they are stored and reported, not enforced -- rates come from training.
+maximum (14400 for V32B, 33600 for V34, 56000 for V90/V92, 60000 for K56 --
+the shipped K56flex firmware tables run to 58000/60000 -- and 64000 for V91
+and X2, whose digital symmetric mode carries 64000 both ways; only the
+asymmetric x2 session exists here); they are stored and reported, not enforced -- rates come from training.
 `ME_K56FLEX` and `ME_V8_ADVERTISE_V91`, when set, override `AT+MS`.
 
 ### macOS notes
