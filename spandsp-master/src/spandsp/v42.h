@@ -119,6 +119,14 @@ SPAN_DECLARE(int) v42_set_bit_rate(v42_state_t *s, int bit_rate);
     Call before v42_restart(). Returns -1 for invalid arguments. */
 SPAN_DECLARE(int) v42_set_xid_optional_functions_octets(v42_state_t *s, int octets);
 
+/*! Set the LAP.M window sizes (k) and maximum information field lengths
+    (N401, octets) this end offers in XID, per direction (V.250 +EWIND,
+    +EFRAM).  Takes effect when the link is next established.
+    eturn 0, or -1 if a value is outside 1..V42_MAX_WINDOW_SIZE_K or
+            1..V42_MAX_N_401 (15 and 128 here). */
+SPAN_DECLARE(int) v42_set_link_parameters(v42_state_t *s, int tx_k, int rx_k,
+                                          int tx_n401, int rx_n401);
+
 /*! Set N400, the maximum number of retransmissions (V.42 9.2.2, minimum 1).
     \return 0 on success, -1 for an out-of-range value. */
 SPAN_DECLARE(void) v42_restart_t400(v42_state_t *s);

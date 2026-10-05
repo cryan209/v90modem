@@ -1005,6 +1005,8 @@ static int process_class1_cmd(at_state_t *s, const char **t)
 }
 /*- End of function --------------------------------------------------------*/
 
+static const char *at_forward_parameter(at_state_t *s, const char *t);
+
 static const char *at_cmd_dummy(at_state_t *s, const char *t)
 {
     /* Dummy routine to absorb delimiting characters from a command string */
@@ -3872,36 +3874,21 @@ static const char *at_cmd_plus_DS44(at_state_t *s, const char *t)
 static const char *at_cmd_plus_EB(at_state_t *s, const char *t)
 {
     /* V.250 6.5.2 - Break handling in error control operation */
-    /* TODO: */
-    t += 3;
-    if (!parse_out(s, &t, NULL, 1, "+EB:", ""))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_EFCS(at_state_t *s, const char *t)
 {
     /* V.250 6.5.4 - 32-bit frame check sequence */
-    /* TODO: */
-    t += 5;
-    if (!parse_out(s, &t, NULL, 2, "+EFCS:", "(0-2)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_EFRAM(at_state_t *s, const char *t)
 {
     /* V.250 6.5.8 - Frame length */
-    /* TODO: */
-    t += 6;
-    if (!parse_2_out(s, &t, NULL, 65535, NULL, 65535, "+EFRAM:", "(1-65535),(1-65535)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -3953,24 +3940,14 @@ static const char *at_cmd_plus_ESR(at_state_t *s, const char *t)
 static const char *at_cmd_plus_ETBM(at_state_t *s, const char *t)
 {
     /* V.250 6.5.6 - Call termination buffer management */
-    /* TODO: */
-    t += 5;
-    if (!parse_2_out(s, &t, NULL, 2, NULL, 2, "+ETBM:", "(0-2),(0-2),(0-30)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_EWIND(at_state_t *s, const char *t)
 {
     /* V.250 6.5.7 - Window size */
-    /* TODO: */
-    t += 6;
-    if (!parse_2_out(s, &t, &s->rx_window, 127, &s->tx_window, 127, "+EWIND:", "(1-127),(1-127)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 

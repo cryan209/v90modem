@@ -850,6 +850,14 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
                                  data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
         if (result == 0)
             ds_set_fallback_buffered(&g_data_stack, g_ec_fallback_ok);
+        if (result == 0 && g_data_stack.v42) {
+            /* V.250 +EWIND / +EFRAM: what this end offers in XID. */
+            int tx_k, rx_k, tx_n401, rx_n401;
+
+            v250_ctl_link_params(&cfg, &tx_k, &rx_k, &tx_n401, &rx_n401);
+            if (v42_set_link_parameters(g_data_stack.v42, tx_k, rx_k, tx_n401, rx_n401) != 0)
+                result = -1;
+        }
         const char *xid_octets = getenv("ME_LAPM_XID_OPTION_OCTETS");
         if (result == 0 && xid_octets) {
             if ((strcmp(xid_octets, "auto") != 0
@@ -8065,6 +8073,14 @@ static void me_link_detail(char *out, size_t len, bool *originate)
                ? (g_data_lapm_detect ? "V.42 LAPM, detection phase" : "V.42 LAPM, no detection")
                : "V.14 buffered");
     DETAIL("EC fallback        %s\r\n", g_ec_fallback_ok ? "allowed (buffered)" : "disconnect");
+    if (g_data_framing == DS_FRAMING_V42 && g_data_stack.v42) {
+        v42_negotiated_parameters_t np;
+
+        if (v42_get_negotiated_parameters(g_data_stack.v42, &np) == 0 && np.valid) {
+            DETAIL("LAPM window        TX %d  RX %d\r\n", np.tx_window_size_k, np.rx_window_size_k);
+            DETAIL("LAPM frame size    TX %d  RX %d\r\n", np.tx_n401, np.rx_n401);
+        }
+    }
     DETAIL("Training retrains  %u\r\n", g_training_fail_retrains);
     DETAIL("Data-mode retrains %u\r\n", g_loss_retrains);
     if (g_v34 && (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90)) {

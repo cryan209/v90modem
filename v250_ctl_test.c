@@ -53,7 +53,49 @@ static void test_defaults_and_reads(void)
     cmd(&c, "es?", V250_CTL_OK, "+ES: 3,0,2");
     cmd(&c, "ES44?", V250_CTL_UNKNOWN, NULL);   /* a longer name is not +ES */
     cmd(&c, "DS44=1", V250_CTL_UNKNOWN, NULL);
-    cmd(&c, "EWIND=1", V250_CTL_UNKNOWN, NULL);
+    cmd(&c, "EWINDX=1", V250_CTL_UNKNOWN, NULL);
+}
+
+/* 6.5.2, 6.5.4, 6.5.6-6.5.8: only what this DCE honours is accepted. */
+static void test_error_control_parameters(void)
+{
+    v250_ctl_t c;
+    int tk, rk, tn, rn;
+
+    printf("+EB, +EFCS, +ETBM, +EWIND, +EFRAM:\n");
+    v250_ctl_reset(&c);
+    cmd(&c, "EB?", V250_CTL_OK, "+EB: 0,0,0");
+    cmd(&c, "EB=?", V250_CTL_OK, "+EB: (0),(0),(0)");      /* a pty carries no break */
+    cmd(&c, "EB=1", V250_CTL_ERROR, NULL);
+    cmd(&c, "EB=0,0,0", V250_CTL_OK, NULL);
+    cmd(&c, "EFCS?", V250_CTL_OK, "+EFCS: 0");
+    cmd(&c, "EFCS=?", V250_CTL_OK, "+EFCS: (0)");          /* XID never offers 32-bit FCS */
+    cmd(&c, "EFCS=1", V250_CTL_ERROR, NULL);
+    cmd(&c, "ETBM?", V250_CTL_OK, "+ETBM: 0,1,20");
+    cmd(&c, "ETBM=?", V250_CTL_OK, "+ETBM: (0),(1-2),(0-30)");
+    cmd(&c, "ETBM=0,2,30", V250_CTL_OK, NULL);
+    cmd(&c, "ETBM?", V250_CTL_OK, "+ETBM: 0,2,30");
+    cmd(&c, "ETBM=1", V250_CTL_ERROR, NULL);               /* TD delivery not done */
+    cmd(&c, "ETBM=,,31", V250_CTL_ERROR, NULL);
+    cmd(&c, "ETBM?", V250_CTL_OK, "+ETBM: 0,2,30");        /* untouched by the ERRORs */
+    cmd(&c, "EWIND?", V250_CTL_OK, "+EWIND: 15,0");
+    cmd(&c, "EWIND=?", V250_CTL_OK, "+EWIND: (1-15),(0-15)");
+    cmd(&c, "EWIND=4,7", V250_CTL_OK, NULL);
+    cmd(&c, "EWIND?", V250_CTL_OK, "+EWIND: 4,7");
+    cmd(&c, "EWIND=5", V250_CTL_OK, NULL);                 /* value2 omitted: as value1 */
+    cmd(&c, "EWIND?", V250_CTL_OK, "+EWIND: 5,0");
+    cmd(&c, "EWIND=0", V250_CTL_ERROR, NULL);
+    cmd(&c, "EWIND=16", V250_CTL_ERROR, NULL);
+    cmd(&c, "EWIND=,3", V250_CTL_ERROR, NULL);             /* value1 is not optional */
+    cmd(&c, "EFRAM?", V250_CTL_OK, "+EFRAM: 128,0");
+    cmd(&c, "EFRAM=?", V250_CTL_OK, "+EFRAM: (1-128),(0-128)");
+    cmd(&c, "EFRAM=64,32", V250_CTL_OK, NULL);
+    cmd(&c, "EFRAM=129", V250_CTL_ERROR, NULL);
+    v250_ctl_link_params(&c, &tk, &rk, &tn, &rn);
+    check(tk == 5 && rk == 5 && tn == 64 && rn == 32, "LAP.M parameters: value2 0 means value1");
+    v250_ctl_reset(&c);
+    v250_ctl_link_params(&c, &tk, &rk, &tn, &rn);
+    check(tk == 15 && rk == 15 && tn == 128 && rn == 128, "reset restores the V.42 defaults");
 }
 
 static void test_set_and_store(void)
@@ -284,6 +326,7 @@ static void test_reports(void)
 
 int main(void)
 {
+    test_error_control_parameters();
     test_defaults_and_reads();
     test_set_and_store();
     test_rejection();

@@ -86,6 +86,11 @@ static const at_help_entry_t plus_rows[] = {
     { "+MR=0/1",   "Report +MCR/+MRR before CONNECT",                 "+MR?" },
     { "+ES=o,f,a", "Error control: request, fallback, answer mode",   "+ES?" },
     { "+ER=0/1",   "Report +ER (LAPM/NONE) before CONNECT",           "+ER?" },
+    { "+EWIND=t,r", "V.42 window k offered per direction (1-15)",     "+EWIND?" },
+    { "+EFRAM=t,r", "V.42 frame size N401 offered (1-128 octets)",    "+EFRAM?" },
+    { "+ETBM=0,r,t", "Call end buffers: TX discarded, RX delivered",  "+ETBM?" },
+    { "+EFCS=0",   "16-bit FCS (32-bit is not offered)",              "+EFCS?" },
+    { "+EB=0,0,0", "Break handling: none (a pty carries no break)",   "+EB?" },
     { "+DS=d,n,s,l", "V.42bis: direction, required, dict, string",    "+DS?" },
     { "+DR=0/1",   "Report +DR before CONNECT",                       "+DR?" },
     { "+TLDL=0/1", "Local digital loop of the DTE data (in a call)",  "+TLDL?" },
@@ -102,8 +107,8 @@ static const at_help_entry_t plus_rows[] = {
     { "+FLI +FPI", "Class 2.0: local and polling IDs",                NULL },
     { "+FNR +FBU", "Class 2.0: negotiation and HDLC reports",         NULL },
     { "+FCT +FIE", "Class 2.0: phase C timeout, procedure interrupts", NULL },
-    { "",          "Accepted, not yet applied: +IPR +ICF +IFC +ETBM +EWIND", NULL },
-    { "",          "  +EFRAM +EFCS +MSC +MA +DS44 and the V.92 +P commands.", NULL },
+    { "",          "Accepted, not yet applied: +IPR +ICF +IFC +MSC +MA +DS44", NULL },
+    { "",          "  and the V.92 +P commands.", NULL },
 };
 
 /* I$: the ATIn pages data_interface.c answers. */

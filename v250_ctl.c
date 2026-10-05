@@ -21,6 +21,8 @@
 #define DS_STRING_MIN 6
 #define DS_STRING_MAX 250
 
+static int parse_compound(const char *s, int max, long *vals, bool *present);
+
 void v250_ctl_reset(v250_ctl_t *c)
 {
     memset(c, 0, sizeof(*c));
@@ -31,6 +33,93 @@ void v250_ctl_reset(v250_ctl_t *c)
     c->ds[1] = 0;
     c->ds[2] = 1024;
     c->ds[3] = 32;
+    /* +EB, +EFCS: the only values supported.  +ETBM: 6.5.6 recommends 1,1,20;
+     * a DTE-requested hang-up discards pending transmit data here, so TD is 0,
+     * and received data is already in the DTE's port, so RD 1 is what
+     * happens.  +EWIND/+EFRAM: what this LAP.M has always offered. */
+    c->etbm[1] = 1;
+    c->etbm[2] = 20;
+    c->ewind[0] = 15;
+    c->efram[0] = 128;
+}
+
+/* A compound parameter of up to three numeric fields, each with its own
+ * supported range, stored as given (omitted fields keep their value). */
+typedef struct {
+    const char *name;
+    int fields;
+    int min[3];
+    int max[3];
+    bool first_required;    /* <value1> is not optional (+EWIND, +EFRAM) */
+} range_param_t;
+
+static const range_param_t range_params[] = {
+    { "EB",    3, { 0, 0, 0 },  { 0, 0, 0 },     false },
+    { "EFCS",  1, { 0 },        { 0 },           false },
+    { "ETBM",  3, { 0, 1, 0 },  { 0, 2, 30 },    false },
+    { "EWIND", 2, { 1, 0 },     { 15, 15 },      true },
+    { "EFRAM", 2, { 1, 0 },     { 128, 128 },    true },
+};
+
+static int *range_store(v250_ctl_t *c, const char *name)
+{
+    if (!strcmp(name, "EB"))    return c->eb;
+    if (!strcmp(name, "EFCS"))  return &c->efcs;
+    if (!strcmp(name, "ETBM"))  return c->etbm;
+    if (!strcmp(name, "EWIND")) return c->ewind;
+    return c->efram;
+}
+
+static v250_ctl_result_t range_command(v250_ctl_t *c, const range_param_t *p,
+                                       const char *arg, char *info, size_t len)
+{
+    int *store = range_store(c, p->name);
+    long vals[3] = { 0 };
+    bool present[3] = { false };
+    size_t used;
+    int n;
+
+    if (arg[0] == '?' && arg[1] == '\0') {
+        used = (size_t) snprintf(info, len, "+%s: ", p->name);
+        for (int i = 0; i < p->fields && used < len; i++)
+            used += (size_t) snprintf(info + used, len - used, "%s%d", i ? "," : "", store[i]);
+        return V250_CTL_OK;
+    }
+    if (!strcmp(arg, "=?")) {
+        used = (size_t) snprintf(info, len, "+%s: ", p->name);
+        for (int i = 0; i < p->fields && used < len; i++) {
+            if (p->min[i] == p->max[i])
+                used += (size_t) snprintf(info + used, len - used, "%s(%d)", i ? "," : "", p->min[i]);
+            else
+                used += (size_t) snprintf(info + used, len - used, "%s(%d-%d)", i ? "," : "",
+                                          p->min[i], p->max[i]);
+        }
+        return V250_CTL_OK;
+    }
+    if (arg[0] != '=')
+        return V250_CTL_ERROR;
+    n = parse_compound(arg + 1, p->fields, vals, present);
+    if (n < 0 || (p->first_required && !present[0]))
+        return V250_CTL_ERROR;
+    for (int i = 0; i < n; i++)
+        if (present[i] && (vals[i] < p->min[i] || vals[i] > p->max[i]))
+            return V250_CTL_ERROR;
+    for (int i = 0; i < n; i++)
+        if (present[i])
+            store[i] = (int) vals[i];
+    /* 6.5.7/6.5.8: value2 not included means value1 for both directions. */
+    if (p->first_required && n == 1)
+        store[1] = 0;
+    return V250_CTL_OK;
+}
+
+void v250_ctl_link_params(const v250_ctl_t *c, int *tx_k, int *rx_k,
+                          int *tx_n401, int *rx_n401)
+{
+    *tx_k = c->ewind[0];
+    *rx_k = c->ewind[1] ? c->ewind[1] : c->ewind[0];
+    *tx_n401 = c->efram[0];
+    *rx_n401 = c->efram[1] ? c->efram[1] : c->efram[0];
 }
 
 /* One decimal field, strictly: digits only, no sign, no spaces.  An empty field
@@ -205,6 +294,9 @@ v250_ctl_result_t v250_ctl_command(v250_ctl_t *c, const char *text,
         return es_command(c, text + n, info, info_len);
     if (!strcmp(name, "DS"))
         return ds_command(c, text + n, info, info_len);
+    for (size_t i = 0; i < sizeof(range_params) / sizeof(range_params[0]); i++)
+        if (!strcmp(name, range_params[i].name))
+            return range_command(c, &range_params[i], text + n, info, info_len);
     return V250_CTL_UNKNOWN;
 }
 

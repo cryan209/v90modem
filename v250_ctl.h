@@ -50,6 +50,13 @@ typedef struct {
     int ds[4];              /* +DS: direction, negotiation, max_dict, max_string */
     bool es_set;            /* the DTE has issued +ES since the last reset */
     bool ds_set;            /* the DTE has issued +DS since the last reset */
+    /* 6.5.2-6.5.8.  Only the values this DCE can honour are accepted; see the
+     * test responses in v250_ctl.c. */
+    int eb[3];              /* +EB: break selection, timed, default length */
+    int efcs;               /* +EFCS: 16-bit FCS only */
+    int etbm[3];            /* +ETBM: pending TD, pending RD, timer */
+    int ewind[2];           /* +EWIND: transmit, receive (0 = as transmit) */
+    int efram[2];           /* +EFRAM: transmit, receive (0 = as transmit) */
 } v250_ctl_t;
 
 typedef enum {
@@ -62,6 +69,11 @@ typedef enum {
  * 0) and +DS 3,0,1024,32 -- the 1024 codewords and 32-octet strings this stack
  * has always offered, which 6.6.1 leaves to the manufacturer. */
 void v250_ctl_reset(v250_ctl_t *c);
+
+/* LAP.M window (k) and N401 per direction from +EWIND/+EFRAM, a value2 of 0
+ * meaning "as value1" (6.5.7, 6.5.8). */
+void v250_ctl_link_params(const v250_ctl_t *c, int *tx_k, int *rx_k,
+                          int *tx_n401, int *rx_n401);
 
 /* text is the command without the leading '+'.  Info text (no CR/LF, no OK) is
  * written to info for reads and tests. */

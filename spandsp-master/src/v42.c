@@ -284,13 +284,31 @@ static int tx_supervisory_frame(lapm_state_t *s, uint8_t addr, uint8_t ctrl, uin
 }
 /*- End of function --------------------------------------------------------*/
 
-static __inline__ int set_param(int param, int value, int def)
+/* V.42 9.2.3/9.2.4: the responder's value "shall be between the value chosen
+   by the initiator and the default value, inclusive" -- the protocol default
+   (128 octets, k = 15), which every entity must be able to use.  Within that,
+   take the value nearest what this end was configured for. */
+static int negotiate_xid_value(int ours, int offered, int def)
 {
-    if ((value < def  &&  param >= def)  ||  (value >= def  &&  param < def))
-        return def;
-    if ((value < def  &&  param < value)  ||  (value >= def  &&  param > value))
-        return value;
-    return param;
+    int lo = (offered < def)  ?  offered  :  def;
+    int hi = (offered < def)  ?  def  :  offered;
+
+    if (ours < lo)
+        return lo;
+    /*endif*/
+    if (ours > hi)
+        return hi;
+    /*endif*/
+    return ours;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int clamp_xid_value(int v, int max)
+{
+    if (v < 1)
+        return 1;
+    /*endif*/
+    return (v > max)  ?  max  :  v;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -374,6 +392,11 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
     if (len < 3 || frame[2] != FI_GENERAL)
         return -1;
     config = ss->config;
+    /* 9.2.3/9.2.4: an absent N401 or k means the default. */
+    s->tx_n401 = V42_DEFAULT_N_401;
+    s->rx_n401 = V42_DEFAULT_N_401;
+    s->tx_window_size_k = V42_DEFAULT_WINDOW_SIZE_K;
+    s->rx_window_size_k = V42_DEFAULT_WINDOW_SIZE_K;
     /* V.42bis 5.1: absent P0 means no compression. A peer request may
        select only directions supported locally; LAPM itself supplies no
        V.42bis compressor or decompressor. */
@@ -430,27 +453,43 @@ static int receive_xid(v42_state_t *ss, const uint8_t *frame, int len)
                                           || (buf[1] & 0x20)
                                           || (buf[2] & 0x81);
                     break;
+                /* Table 11 Note 2: "transmit" and "receive" are each from the
+                   point of view of the entity sending this XID (PI 7 from the
+                   initiator, PI 8 in the response, both name the
+                   initiator-to-responder direction).  So the peer's transmit
+                   values govern the direction we RECEIVE, and its receive
+                   values the direction we transmit.  They were applied the
+                   other way round, which symmetric defaults hid: an end
+                   offering 64 to send and 32 to receive was sent 64-octet
+                   frames it could not take. */
+                /* The initiator then uses what the responder answered as is. */
                 case PI_TX_INFO_MAXSIZE:
-                    param_val = pack_value(buf, param_len);
-                    param_val >>= 3;
-                    config.v42_tx_n401 =
-                    s->tx_n401 = set_param(s->tx_n401, param_val, ss->config.v42_tx_n401);
+                    param_val = pack_value(buf, param_len) >> 3;
+                    s->rx_n401 = clamp_xid_value(response
+                                                 ?  (int) param_val
+                                                 :  negotiate_xid_value(ss->config.v42_rx_n401, (int) param_val, V42_DEFAULT_N_401),
+                                                 V42_MAX_N_401);
                     break;
                 case PI_RX_INFO_MAXSIZE:
-                    param_val = pack_value(buf, param_len);
-                    param_val >>= 3;
-                    config.v42_rx_n401 =
-                    s->rx_n401 = set_param(s->rx_n401, param_val, ss->config.v42_rx_n401);
+                    param_val = pack_value(buf, param_len) >> 3;
+                    s->tx_n401 = clamp_xid_value(response
+                                                 ?  (int) param_val
+                                                 :  negotiate_xid_value(ss->config.v42_tx_n401, (int) param_val, V42_DEFAULT_N_401),
+                                                 V42_MAX_N_401);
                     break;
                 case PI_TX_WINDOW_SIZE:
                     param_val = pack_value(buf, param_len);
-                    config.v42_tx_window_size_k =
-                    s->tx_window_size_k = set_param(s->tx_window_size_k, param_val, ss->config.v42_tx_window_size_k);
+                    s->rx_window_size_k = clamp_xid_value(response
+                                                          ?  (int) param_val
+                                                          :  negotiate_xid_value(ss->config.v42_rx_window_size_k, (int) param_val, V42_DEFAULT_WINDOW_SIZE_K),
+                                                          V42_MAX_WINDOW_SIZE_K);
                     break;
                 case PI_RX_WINDOW_SIZE:
                     param_val = pack_value(buf, param_len);
-                    config.v42_rx_window_size_k =
-                    s->rx_window_size_k = set_param(s->rx_window_size_k, param_val, ss->config.v42_rx_window_size_k);
+                    s->tx_window_size_k = clamp_xid_value(response
+                                                          ?  (int) param_val
+                                                          :  negotiate_xid_value(ss->config.v42_tx_window_size_k, (int) param_val, V42_DEFAULT_WINDOW_SIZE_K),
+                                                          V42_MAX_WINDOW_SIZE_K);
                     break;
                 default:
                     break;
@@ -619,25 +658,36 @@ static void transmit_xid(v42_state_t *ss, uint8_t addr)
     if (s->xid_optional_functions_octets == 4)
         *buf++ = 0x00;
 
-    /* Send the maximum as a number of bits, rather than octets */
-    *buf++ = PI_TX_INFO_MAXSIZE;
-    *buf++ = 2;
-    put_net_unaligned_uint16(buf, ss->config.v42_tx_n401 << 3);
-    buf += 2;
+    /* A command offers what this end is configured for; a response states
+       what receive_xid() settled, from this end's point of view (Table 11
+       Note 2) -- the initiator uses exactly those values. */
+    {
+        bool rsp = (addr == s->rsp_addr);
+        int tx_n401 = rsp  ?  s->tx_n401  :  ss->config.v42_tx_n401;
+        int rx_n401 = rsp  ?  s->rx_n401  :  ss->config.v42_rx_n401;
+        int tx_k = rsp  ?  s->tx_window_size_k  :  ss->config.v42_tx_window_size_k;
+        int rx_k = rsp  ?  s->rx_window_size_k  :  ss->config.v42_rx_window_size_k;
 
-    /* Send the maximum as a number of bits, rather than octets */
-    *buf++ = PI_RX_INFO_MAXSIZE;
-    *buf++ = 2;
-    put_net_unaligned_uint16(buf, ss->config.v42_rx_n401 << 3);
-    buf += 2;
+        /* Send the maximum as a number of bits, rather than octets */
+        *buf++ = PI_TX_INFO_MAXSIZE;
+        *buf++ = 2;
+        put_net_unaligned_uint16(buf, tx_n401 << 3);
+        buf += 2;
 
-    *buf++ = PI_TX_WINDOW_SIZE;
-    *buf++ = 1;
-    *buf++ = ss->config.v42_tx_window_size_k;
+        /* Send the maximum as a number of bits, rather than octets */
+        *buf++ = PI_RX_INFO_MAXSIZE;
+        *buf++ = 2;
+        put_net_unaligned_uint16(buf, rx_n401 << 3);
+        buf += 2;
 
-    *buf++ = PI_RX_WINDOW_SIZE;
-    *buf++ = 1;
-    *buf++ = ss->config.v42_rx_window_size_k;
+        *buf++ = PI_TX_WINDOW_SIZE;
+        *buf++ = 1;
+        *buf++ = (uint8_t) tx_k;
+
+        *buf++ = PI_RX_WINDOW_SIZE;
+        *buf++ = 1;
+        *buf++ = (uint8_t) rx_k;
+    }
 
     len += group_len;
 
@@ -1652,10 +1702,26 @@ static void reset_lapm(v42_state_t *ss)
     s->ctrl_put = 0;
     s->ctrl_get = 0;
 
-    s->tx_window_size_k = ss->config.v42_tx_window_size_k;
-    s->rx_window_size_k = ss->config.v42_rx_window_size_k;
-    s->tx_n401 = ss->config.v42_tx_n401;
-    s->rx_n401 = ss->config.v42_rx_n401;
+    /* 9.2.3/9.2.4: once XID has agreed them, the negotiated N401 and k are
+       "the value used during the operation of the error-corrected
+       connection".  This runs at SABME/UA, i.e. after the XID exchange, and
+       used to put the configured values back over the agreed ones -- so the
+       negotiation never reached the running link. */
+    if (ss->negotiated.valid)
+    {
+        s->tx_window_size_k = (uint8_t) ss->negotiated.tx_window_size_k;
+        s->rx_window_size_k = (uint8_t) ss->negotiated.rx_window_size_k;
+        s->tx_n401 = (uint16_t) ss->negotiated.tx_n401;
+        s->rx_n401 = (uint16_t) ss->negotiated.rx_n401;
+    }
+    else
+    {
+        s->tx_window_size_k = ss->config.v42_tx_window_size_k;
+        s->rx_window_size_k = ss->config.v42_rx_window_size_k;
+        s->tx_n401 = ss->config.v42_tx_n401;
+        s->rx_n401 = ss->config.v42_rx_n401;
+    }
+    /*endif*/
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -2030,6 +2096,32 @@ SPAN_DECLARE(int) v42_set_xid_optional_functions_octets(v42_state_t *s, int octe
     s->config.xid_optional_functions_octets = octets;
     return 0;
 }
+
+SPAN_DECLARE(int) v42_set_link_parameters(v42_state_t *s, int tx_k, int rx_k,
+                                          int tx_n401, int rx_n401)
+{
+    if (!s
+        ||
+        tx_k < 1  ||  tx_k > V42_MAX_WINDOW_SIZE_K  ||  rx_k < 1  ||  rx_k > V42_MAX_WINDOW_SIZE_K
+        ||
+        tx_n401 < 1  ||  tx_n401 > V42_MAX_N_401  ||  rx_n401 < 1  ||  rx_n401 > V42_MAX_N_401)
+    {
+        return -1;
+    }
+    /*endif*/
+    s->config.v42_tx_window_size_k = (uint8_t) tx_k;
+    s->config.v42_rx_window_size_k = (uint8_t) rx_k;
+    s->config.v42_tx_n401 = (uint16_t) tx_n401;
+    s->config.v42_rx_n401 = (uint16_t) rx_n401;
+    /* reset_lapm() copied the old configuration when the context was set up;
+       until XID agrees on something, the link runs on what is offered. */
+    s->lapm.tx_window_size_k = (uint8_t) tx_k;
+    s->lapm.rx_window_size_k = (uint8_t) rx_k;
+    s->lapm.tx_n401 = (uint16_t) tx_n401;
+    s->lapm.rx_n401 = (uint16_t) rx_n401;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
 
 SPAN_DECLARE(int) v42_get_bit_rate(const v42_state_t *s)
 {

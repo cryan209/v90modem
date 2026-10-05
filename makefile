@@ -459,6 +459,12 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 # the end that gave up on a call
 # whose required error control was not met.
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-after ATI6 --both-after ATI11 --both-after ATY11 --call-expect "CONNECT 2400|Originate, in progress|Modulation         V22B|Rate               2400|V.42 LAPM|Line level now     RX|Extended Link Diagnostics (live)|Mode               v22 (offer V22)|Role               caller|Line Spectrum|  1200|  2400|Total  Rx" --answer-expect "CONNECT 2400|Answer, in progress|V.42bis TX RX|Role               answerer"
+# +EWIND/+EFRAM reach XID, and V.42 9.2.3/9.2.4's negotiation holds: each end
+# takes the far end's "transmit" as its own receive (Table 11 Note 2), the
+# responder chooses between the initiator's value and the default, and the
+# link then runs on the agreed values (it used to fall back to its own).
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+EWIND=4" --both-at "AT+EFRAM=64,32" --both-after ATI11 --both-expect "LAPM window        TX 4  RX 4|LAPM frame size    TX 64  RX 64"
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --call-at "AT+EWIND=8" --answer-at "AT+EWIND=4" --both-after ATI11 --both-expect "LAPM window        TX 8  RX 8"
 	./engine_pair_test --expect-hangup --both-env ME_MODE=v22 --seconds 60 --answer-env ME_DATA_FRAMING=v14 --call-at "AT+ES=3,2" --call-absent CONNECT --call-after ATI6 --call-expect "NO CARRIER|Originate, failed before data mode|Modem (protocol or training failure)"
 	./v92_startup_test
 	./v92_p3_rx_line_test
