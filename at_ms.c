@@ -27,25 +27,6 @@ static const struct {
     int max_rate;
     const char *offer;      /* what the next call offers, for +MS$ */
 } carriers[] = {
-    /* Recognised, with no datapump in this engine.  Both modes NULL, so
-     * always ERROR; +MS=? leaves them out and +MS$ lists them apart, so a
-     * DTE that sends them learns why rather than meeting a bare ERROR.
-     * Bell 103 is 300 bit/s with nothing below it to fall back to, and
-     * 212A answers with 2225 Hz rather than V.8.  Clear channel and the
-     * ISDN rate adaptions would need no datapump at all -- the bearer is
-     * already a byte-exact 64 kbit/s DS0 -- only the framing. */
-    { "B103",  { NULL },                      NULL,  NULL,     300,
-      "Bell 103" },
-    { "B212",  { "B212A", NULL },             NULL,  NULL,    1200,
-      "Bell 212A" },
-    { "CLEAR", { "CLEARMODE", "64K", NULL },  NULL,  NULL,   64000,
-      "clear channel (RFC 4040)" },
-    { "V110",  { NULL },                      NULL,  NULL,   64000,
-      "ISDN V.110 rate adaption" },
-    { "V120",  { NULL },                      NULL,  NULL,   64000,
-      "ISDN V.120 rate adaption" },
-    { "X75",   { NULL },                      NULL,  NULL,   64000,
-      "ISDN X.75" },
     { "V22",  { NULL },                       "v22", "v22",  1200,
       "V.22/V.22bis" },
     { "V22B", { "V22BIS", NULL },             "v22", "v22",  2400,
@@ -81,6 +62,28 @@ static const struct {
      * up) exists here; docs/x2_implementation.md. */
     { "X2",   { NULL },                       "x2",  "x2",  64000,
       "x2 asym (symmetric 64k not here)" },
+    /* Recognised, with no datapump in this engine.  Both modes NULL, so
+     * always ERROR; +MS=? leaves them out and +MS$ lists them apart, so a
+     * DTE that sends them learns why rather than meeting a bare ERROR.
+     * Bell 103 is 300 bit/s with nothing below it to fall back to, and
+     * 212A answers with 2225 Hz rather than V.8.  V.110 and X.75 would need
+     * no datapump either (see CLEAR/V120 below), only their framing. */
+    { "B103",  { NULL },                      NULL,  NULL,     300,
+      "Bell 103" },
+    { "B212",  { "B212A", NULL },             NULL,  NULL,    1200,
+      "Bell 212A" },
+    { "V110",  { NULL },                      NULL,  NULL,   64000,
+      "ISDN V.110 rate adaption" },
+    { "X75",   { NULL },                      NULL,  NULL,   64000,
+      "ISDN X.75" },
+    /* The bearer is a byte-exact 64 kbit/s DS0 (clear_channel.h), so these
+     * need no datapump: no V.8, both ends set alike, as on ISDN.  A maximum
+     * rate of 56000 or less selects restricted 56k (at_ms_settings_to_mode).
+     * Automode means nothing without a negotiation, so either is accepted. */
+    { "CLEAR", { "CLEARMODE", "64K", NULL },  "clear", "clear", 64000,
+      "DS0 bits, V.14/LAPM; <=56000: 56k" },
+    { "V120",  { NULL },                      "v120", "v120",   64000,
+      "V.120 UI frames; <=56000: 56k" },
 };
 
 #define N_CARRIERS (sizeof(carriers) / sizeof(carriers[0]))
@@ -112,6 +115,10 @@ const char *at_ms_mode_to_carrier(const char *mode)
      * engine's V.22 path is SpanDSP's V.22bis modem. */
     if (!strcmp(mode, "v22"))
         return "V22B";
+    if (!strcmp(mode, "clear56"))
+        return "CLEAR";
+    if (!strcmp(mode, "v120-56"))
+        return "V120";
     for (size_t i = 0; i < N_CARRIERS; i++)
         if (carriers[i].mode_exact && !strcmp(mode, carriers[i].mode_exact))
             return carriers[i].carrier;
@@ -131,6 +138,22 @@ bool at_ms_carrier_available(const char *carrier)
     int i = find_carrier(carrier);
 
     return i >= 0 && available((size_t) i);
+}
+
+const char *at_ms_settings_to_mode(const at_ms_settings_t *s)
+{
+    const char *mode = at_ms_carrier_to_mode(s->carrier, s->automode != 0);
+    int max = s->max_tx_rate;
+
+    if (s->max_rx_rate && (!max || s->max_rx_rate < max))
+        max = s->max_rx_rate;
+    if (mode && max && max <= 56000) {
+        if (!strcmp(mode, "clear"))
+            return "clear56";
+        if (!strcmp(mode, "v120"))
+            return "v120-56";
+    }
+    return mode;
 }
 
 int at_ms_carrier_max_rate(const char *carrier)
@@ -327,6 +350,8 @@ void at_ms_format_help(const at_ms_settings_t *cur, char *buf, size_t len)
     for (size_t i = 0; i < N_CARRIERS; i++)
         if (available(i) && used < len)
             used += help_row(i, buf + used, len - used);
+    HELP_PUT("  CLEAR, V120: no V.8 or negotiation -- set both ends alike, as on\r\n");
+    HELP_PUT("  ISDN; the bearer must be byte-exact end to end (no transcoding).\r\n");
     HELP_PUT("\r\n  Recognised, no datapump here (always ERROR):\r\n");
     for (size_t i = 0; i < N_CARRIERS; i++)
         if (!available(i) && used < len)

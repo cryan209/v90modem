@@ -38,7 +38,8 @@ typedef enum {
     ME_MOD_V90,      /* V.90 downstream PCM + V.34 upstream (future) */
     ME_MOD_V34,      /* Full V.34 duplex (up to 33.6 kbps) */
     ME_MOD_V22BIS,   /* Full V.22bis duplex (fallback) */
-    ME_MOD_X2       /* Experimental asymmetric PCM x2 digital endpoint */
+    ME_MOD_X2,      /* Experimental asymmetric PCM x2 digital endpoint */
+    ME_MOD_CLEAR    /* 64/56 kbit/s clear channel or V.120 on the DS0, no V.8 */
 } me_modulation_t;
 
 /* G.711 encoding law for the RTP stream */
@@ -107,8 +108,11 @@ void me_hangup(void);
 /*
  * V.8 modulation offer for subsequent calls -- what AT+MS (V.250 6.4.1)
  * drives, through data_interface.c.  mode is one of "v22", "v34", "v90",
- * "v92", "v91", "k56", "x2", or "auto" (= the v90 default); the same names
- * ME_MODE takes.  "k56" needs automode (K56flex V.8bis, then V.8 to V.90).
+ * "v92", "v91", "k56", "x2", "clear", "clear56", "v120", "v120-56", or
+ * "auto" (= the v90 default); the same names ME_MODE takes.  "k56" needs
+ * automode (K56flex V.8bis, then V.8 to V.90).  The clear and v120 modes
+ * skip V.8 altogether and use the DS0 as a bit pipe (clear_channel.h); both
+ * ends must be set alike, as with an ISDN bearer.
  * automode false restricts CM/JM to the named family (no V.22 fallback bit;
  * V.90/V.92 still carry V.34, which their upstream needs).  The change takes
  * effect at the next call's V.8 and never alters a call in progress.

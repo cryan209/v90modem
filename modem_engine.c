@@ -23,6 +23,7 @@
 #include "x2_session.h"
 #include "data_interface.h"
 #include "data_stack.h"
+#include "clear_channel.h"
 #include "clock_recovery.h"
 #include "v34_line_ec.h"
 #include "v90.h"
@@ -2065,6 +2066,12 @@ static bool g_advertise_v22 = true;
  * when set, override them; see me_k56flex_mode() and me_advertise_v91(). */
 static bool g_offer_k56 = false;
 static bool g_offer_v91 = false;
+/* AT+MS=CLEAR / V120: no V.8, the DS0 itself is the bit pump. */
+static bool g_offer_clear = false;
+static bool g_offer_v120 = false;
+static bool g_offer_r56 = false;
+static clear_channel_t g_cc;
+static bool g_cc_active = false;
 static bool g_enable_v92 = false;
 static const char *g_mode_name = "v90";
 static bool g_enable_x2 = false;
@@ -2112,6 +2119,7 @@ static bool me_v90_analogue_role(void)
 
 typedef struct {
     bool x2, v90, v34, v22, v92, k56, v91;
+    bool clear, v120, r56;   /* no V.8: clear channel or V.120 on the DS0 */
     const char *name;
 } me_offer_t;
 
@@ -2127,6 +2135,11 @@ static int me_offer_bits(bool v22, bool v34, bool v90)
 static void me_offer_describe(const me_offer_t *o, bool k56, bool v91,
                               char *buf, size_t len)
 {
+    if (o->clear || o->v120) {
+        snprintf(buf, len, "%s %s, no V.8", o->v120 ? "V120" : "CLEAR",
+                 o->r56 ? "56k" : "64k");
+        return;
+    }
     snprintf(buf, len, "%s%s%s%s%s%s",
              o->v90 ? "V90|" : "", o->v34 ? "V34|" : "", o->v22 ? "V22|" : "",
              v91 ? "+V91|" : "", k56 ? "+K56|" : "",
@@ -2148,6 +2161,9 @@ static const char *me_offer_str(void)
     o.v90 = g_advertise_v90;
     o.v34 = g_advertise_v34;
     o.v22 = g_advertise_v22;
+    o.clear = g_offer_clear;
+    o.v120 = g_offer_v120;
+    o.r56 = g_offer_r56;
     me_offer_describe(&o, me_k56flex_mode() != 0, me_advertise_v91(),
                       buf, sizeof(buf));
     return buf;
@@ -2179,6 +2195,18 @@ static bool me_offer_from_mode(const char *mode, bool automode, me_offer_t *o)
     } else if (strcmp(mode, "v92") == 0) {
         o->v92 = true;
         o->name = "v92";
+    } else if (strcmp(mode, "clear") == 0 || strcmp(mode, "clear56") == 0
+               || strcmp(mode, "v120") == 0 || strcmp(mode, "v120-56") == 0) {
+        /* No V.8 and no fallback: the bearer is agreed out of band, so
+         * automode means nothing here and is accepted either way. */
+        o->v90 = o->v34 = false;
+        o->v120 = strncmp(mode, "v120", 4) == 0;
+        o->clear = !o->v120;
+        o->r56 = strchr(mode, '5') != NULL;
+        o->name = o->v120 ? (o->r56 ? "v120-56" : "v120")
+                          : (o->r56 ? "clear56" : "clear");
+        o->v22 = false;
+        return true;
     } else if (strcmp(mode, "k56") == 0) {
         /* K56flex V.8bis identification, then ordinary V.8 offering V.90:
          * the engine has no K56flex data mode, so this cannot stand alone. */
@@ -2216,6 +2244,9 @@ static bool me_resolve_offer(const char *mode, bool automode)
     g_enable_v92 = o.v92;
     g_offer_k56 = o.k56;
     g_offer_v91 = o.v91;
+    g_offer_clear = o.clear;
+    g_offer_v120 = o.v120;
+    g_offer_r56 = o.r56;
     g_mode_name = o.name;
     g_v90_analogue_role = o.v90 && role && strcmp(role, "analogue") == 0;
     return true;
@@ -7367,6 +7398,57 @@ static void v92_call_state_reset_locked(void)
 }
 
 /* Called by sip_modem.c when the SIP call media becomes active */
+static int clear_get_bit(void *ctx)
+{
+    (void) ctx;
+    return ds_tx_get_bit(&g_data_stack);
+}
+
+static void clear_put_bit(void *ctx, int bit)
+{
+    (void) ctx;
+    ds_rx_put_bit(&g_data_stack, bit);
+}
+
+/* AT+MS=CLEAR or V120: straight to data on the DS0, no V.8 (as an ISDN
+ * terminal adaptor starts once the bearer is up).  Returns the line rate, or
+ * 0 on failure.  Called with g_state_mtx held. */
+static int me_clear_start_locked(void)
+{
+    int rate = g_offer_r56 ? 56000 : 64000;
+
+    if (g_cc_active) {
+        cc_release(&g_cc);
+        g_cc_active = false;
+    }
+    if (g_offer_v120) {
+        if (cc_init_v120(&g_cc, g_offer_r56, g_calling_party,
+                         data_stack_pull_dte_byte, data_stack_push_dte_byte,
+                         NULL) != 0)
+            return 0;
+    } else {
+        /* The DS0 is the datapump; the data stack frames DTE characters on
+         * it exactly as it would for a modem: V.14 unless LAPM was forced
+         * (there is no V.8 protocol octet to settle "auto" with). */
+        if (g_data_framing_auto)
+            g_data_framing = DS_FRAMING_V14;
+        if (data_stack_start_online(rate, g_calling_party) != 0)
+            return 0;
+        cc_init_clear(&g_cc, g_offer_r56, clear_get_bit, clear_put_bit, NULL);
+    }
+    g_cc_active = true;
+    g_mod = ME_MOD_CLEAR;
+    g_state = ME_DATA;
+    g_phase_start_ms = 0;
+    g_data_connect_reported = true;
+    trace_phase("%s enter DATA: %d bit/s on the DS0, no V.8",
+                g_offer_v120 ? "V.120" : "clear channel", rate);
+    ME_LOG("[ME] %s: %d bit/s on the DS0 (%s), no V.8\n",
+           g_offer_v120 ? "V.120 UI frames" : "clear channel", rate,
+           g_offer_r56 ? "restricted, bit 8 = 1" : "unrestricted");
+    return rate;
+}
+
 void me_on_sip_connected(void)
 {
     pthread_mutex_lock(&g_state_mtx);
@@ -7427,6 +7509,18 @@ void me_on_sip_connected(void)
         return;
     }
 
+    if (g_offer_clear || g_offer_v120) {
+        int rate = me_clear_start_locked();
+
+        pthread_mutex_unlock(&g_state_mtx);
+        if (rate <= 0) {
+            me_hangup();
+            return;
+        }
+        di_on_connected(rate);
+        return;
+    }
+
     if (g_v8) {
         v8_free(g_v8);
         g_v8 = NULL;
@@ -7467,6 +7561,17 @@ void me_on_sip_disconnected(void)
     v91_live_reset();
     if (g_echo_can) { modem_echo_can_segment_free(g_echo_can);   g_echo_can = NULL; }
     ds_release(&g_data_stack);
+    if (g_cc_active) {
+        ME_LOG("[ME] %s: tx %llu frames/%llu bytes, rx %llu frames/%llu bytes, "
+               "%llu bad, %llu unsupported\n",
+               g_cc.mode == CC_V120 ? "V.120" : "clear channel",
+               (unsigned long long) g_cc.tx_frames, (unsigned long long) g_cc.tx_data_bytes,
+               (unsigned long long) g_cc.rx_frames, (unsigned long long) g_cc.rx_data_bytes,
+               (unsigned long long) g_cc.rx_bad_frames,
+               (unsigned long long) g_cc.rx_unsupported);
+        cc_release(&g_cc);
+        g_cc_active = false;
+    }
     mh_disarm_locked();
     g_mh_retrain_reply = false;
     g_mh_resume_pending = false;
@@ -12579,6 +12684,18 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
     pthread_mutex_lock(&g_state_mtx);
     first_sample = g_g711_rx_octets;
     g_g711_rx_octets += (uint64_t)count;
+    if (g_cc_active && g_mod == ME_MOD_CLEAR && g_state == ME_DATA) {
+        uint8_t buf[256];
+        int n;
+
+        cc_rx(&g_cc, codewords, count);
+        pthread_mutex_unlock(&g_state_mtx);
+        if (g_g711_rx_tap)
+            (void)fwrite(codewords, 1, (size_t)count, g_g711_rx_tap);
+        while ((n = dring_read(&upstream_ring, buf, sizeof(buf))) > 0)
+            di_write_data(buf, n);
+        return;
+    }
     if (mh_rx_locked(codewords, count)) {
         g_rx_audio_samples += (uint64_t)count;
         pthread_mutex_unlock(&g_state_mtx);
@@ -12807,6 +12924,14 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
     }
 
     pthread_mutex_lock(&g_state_mtx);
+    if (g_cc_active && g_mod == ME_MOD_CLEAR && g_state == ME_DATA) {
+        cc_tx(&g_cc, codewords, count);
+        g_g711_tx_octets += (uint64_t)count;
+        pthread_mutex_unlock(&g_state_mtx);
+        if (g_g711_tx_tap)
+            (void)fwrite(codewords, 1, (size_t)count, g_g711_tx_tap);
+        return count;
+    }
     if (g_k56_train) {
         me_k56_train_fill_locked(codewords, count);
         g_g711_tx_octets += (uint64_t)count;

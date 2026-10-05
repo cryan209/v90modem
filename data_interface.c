@@ -213,9 +213,7 @@ static void plus_ms_current(at_ms_settings_t *ms)
     const char *want;
 
     ms_get_cb(mode, sizeof(mode), &automode);
-    want = ms_cur_valid ? at_ms_carrier_to_mode(ms_cur.carrier,
-                                                 ms_cur.automode != 0)
-                        : NULL;
+    want = ms_cur_valid ? at_ms_settings_to_mode(&ms_cur) : NULL;
     if (want && !strcmp(want, mode) && (ms_cur.automode != 0) == automode) {
         *ms = ms_cur;
         return;
@@ -229,7 +227,7 @@ static void plus_ms_current(at_ms_settings_t *ms)
 static int handle_plus_ms(const char *args)
 {
     at_ms_settings_t ms;
-    char buf[2048];
+    char buf[4096];
     const char *want;
 
     if (!ms_set_cb || !ms_get_cb || !ms_reset_cb)
@@ -241,7 +239,7 @@ static int handle_plus_ms(const char *args)
     }
     switch (at_ms_parse(args, &ms)) {
     case AT_MS_SET:
-        want = at_ms_carrier_to_mode(ms.carrier, ms.automode != 0);
+        want = at_ms_settings_to_mode(&ms);
         if (!want || ms_set_cb(want, ms.automode != 0) < 0)
             return -1;
         ms_cur = ms;

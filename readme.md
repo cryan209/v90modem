@@ -93,7 +93,7 @@ make
 ```
 
 Select the highest modem family offered in V.8 with
-`--mode v22|v34|v90|v92|v91|k56|x2`. The default is `v90`; lower fallback
+`--mode v22|v34|v90|v92|v91|k56|x2|clear|clear56|v120|v120-56`. The default is `v90`; lower fallback
 modes remain advertised. For a plain V.34 interoperability run, configure the
 peer for V.34 and start this endpoint with:
 
@@ -122,7 +122,9 @@ touched, and `ATZ`/`AT&F` restore the default:
 | `V92`      | as V90, with V.92                                        | V.92 + V.34       |
 | `V91`      | as V90, with V.91 in V.8's PCM availability             | V.91 + V.34       |
 | `X2`       | x2, asymmetric (V.34 upstream; symmetric not implemented) | same             |
-| `B103`, `B212`, `CLEAR`, `V110`, `V120`, `X75` | recognised, no datapump here | ERROR (both) |
+| `CLEAR` (`CLEARMODE`, `64K`) | no V.8: the DS0 is the bit pipe, V.14 (or LAPM) on it; max rate <=56000 selects restricted 56k | same |
+| `V120`     | no V.8: V.120 UI frames on the DS0; max rate <=56000 selects 56k | same |
+| `B103`, `B212`, `V110`, `X75` | recognised, no datapump here | ERROR (both) |
 
 `AT+MS?` reads back e.g. `+MS: V34,1,0,0,0,0`; `AT+MS=?` lists the carriers;
 `AT+MS$` prints Courier-style help -- the syntax, every carrier with its
@@ -135,6 +137,10 @@ the shipped K56flex firmware tables run to 58000/60000 -- and 64000 for V91
 and X2, whose digital symmetric mode carries 64000 both ways; only the
 asymmetric x2 session exists here); they are stored and reported, not enforced -- rates come from training.
 `ME_K56FLEX` and `ME_V8_ADVERTISE_V91`, when set, override `AT+MS`.
+
+CLEAR and V120 need the bearer byte-exact end to end and both ends set alike
+-- there is no negotiation, as on ISDN. Two instances of this server reach
+data with them over SIP; see `docs/clear_channel_v120.md`.
 
 ### macOS notes
 

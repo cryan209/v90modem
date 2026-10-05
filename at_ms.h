@@ -24,8 +24,10 @@
  * V34B), K56 (also "56", "56K", "K56FLEX"), V90, V92, V91, X2.  V32, V32B,
  * HST, V32TERBO, VFC and K56 need automode 1: the engine has no datapump
  * for them, so they fall back (to the V.22bis offer; K56flex's V.8bis then
- * V.8 to V.90/V.34) and naming one alone is ERROR.  B103, B212, CLEAR,
- * V110, V120 and X75 are recognised and always ERROR; +MS$ lists them.
+ * V.8 to V.90/V.34) and naming one alone is ERROR.  CLEAR (CLEARMODE, 64K)
+ * and V120 skip V.8 and use the DS0 itself (clear_channel.h); a maximum
+ * rate of 56000 or less selects restricted 56k.  B103, B212, V110 and X75
+ * are recognised and always ERROR; +MS$ lists them.
  *
  * A rate of 0 means "no limit"; a rate above the carrier's maximum is ERROR.
  * Rates are otherwise stored and reported but NOT enforced: the engine
@@ -62,7 +64,7 @@ at_ms_op_t at_ms_parse(const char *args, at_ms_settings_t *out);
 void at_ms_format_read(const at_ms_settings_t *s, char *buf, size_t len);
 void at_ms_format_test(char *buf, size_t len);
 /* +MS$ help, lines separated by CR LF, ending with the current setting when
- * cur is not NULL.  Sized for 2048 bytes. */
+ * cur is not NULL.  Sized for 4096 bytes. */
 void at_ms_format_help(const at_ms_settings_t *cur, char *buf, size_t len);
 
 /* Carrier (or alias) -> engine mode name for that automode ("V34" -> "v34"),
@@ -70,6 +72,10 @@ void at_ms_format_help(const at_ms_settings_t *cur, char *buf, size_t len);
  * carrier, NULL if unknown. */
 const char *at_ms_carrier_to_mode(const char *carrier, bool automode);
 const char *at_ms_mode_to_carrier(const char *mode);
+/* The engine mode a whole setting selects: the carrier's mode, except that
+ * CLEAR and V120 with a maximum rate of 56000 or less select restricted 56k
+ * ("clear56", "v120-56").  NULL if the carrier is unusable. */
+const char *at_ms_settings_to_mode(const at_ms_settings_t *s);
 /* Highest rate the carrier carries, 0 if unknown. */
 /* Whether the engine can use it at all (false for B103, CLEAR, ...). */
 bool at_ms_carrier_available(const char *carrier);

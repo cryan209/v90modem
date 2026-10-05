@@ -13,7 +13,8 @@
  *   ./sip_v90_modem [--sip-server <host>] [--username <user>]
  *                   [--password <pass>]  [--pty-link <path>]
  *                   [--local-port <port>] [--rtp-port <port>]
- *                   [--bind-addr <ip>] [--mode x2|k56|v22|v34|v90|v91|v92]
+ *                   [--bind-addr <ip>] [--mode x2|k56|v22|v34|v90|v91|v92|\n"
+        "          clear|clear56|v120|v120-56]
  *                   [--verbose]
  *
  * Unknown arguments are an error (usage, exit status 2).
@@ -1102,9 +1103,13 @@ int main(int argc, char *argv[])
         && strcmp(modem_mode, "v90") != 0
         && strcmp(modem_mode, "v92") != 0
         && strcmp(modem_mode, "v91") != 0
-        && strcmp(modem_mode, "k56") != 0) {
+        && strcmp(modem_mode, "k56") != 0
+        && strcmp(modem_mode, "clear") != 0
+        && strcmp(modem_mode, "clear56") != 0
+        && strcmp(modem_mode, "v120") != 0
+        && strcmp(modem_mode, "v120-56") != 0) {
         fprintf(stderr, "Invalid --mode '%s' (expected x2, k56, v22, v34, v90, "
-                        "v91, or v92)\n",
+                        "v91, v92, clear, clear56, v120 or v120-56)\n",
                 modem_mode);
         return 2;
     }
