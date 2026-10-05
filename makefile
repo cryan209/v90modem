@@ -152,10 +152,10 @@ LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 LIBUSB_CFLAGS := $(shell pkg-config --cflags libusb-1.0 2>/dev/null || echo "-I$(HOMEBREW_PREFIX)/include/libusb-1.0")
 LIBUSB_LIBS   := $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo "-L$(HOMEBREW_PREFIX)/lib -lusb-1.0")
 
-SRCS   = legacy_pcm_decode.c k56flex_client.c k56flex_rxfe.c at_ms.c clear_channel.c v25_automode.c k56flex_train.c k56flex_probe.c k56flex_v8bis.c k56flex.c x2.c v34_line_ec.c v92_mh.c v92_mh_line.c v92_rn.c v92_rsig.c v92_tone_a.c v92_analogue_audio.c v92_analogue_phase4.c v92_analogue_phase3.c v92_su.c sip_modem.c modem_engine.c v90_analogue_linear.c v90_analogue_fse.c v90_analogue_sd.c v34_pp_fit.c v90_sounder.c clock_recovery.c data_interface.c fax_class2.c data_stack.c v44.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_p3_eq.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c x2_session.c x2_mp_rx.c
+SRCS   = v250_ctl.c at_test.c legacy_pcm_decode.c k56flex_client.c k56flex_rxfe.c at_ms.c clear_channel.c v25_automode.c k56flex_train.c k56flex_probe.c k56flex_v8bis.c k56flex.c x2.c v34_line_ec.c v92_mh.c v92_mh_line.c v92_rn.c v92_rsig.c v92_tone_a.c v92_analogue_audio.c v92_analogue_phase4.c v92_analogue_phase3.c v92_su.c sip_modem.c modem_engine.c v90_analogue_linear.c v90_analogue_fse.c v90_analogue_sd.c v34_pp_fit.c v90_sounder.c clock_recovery.c data_interface.c fax_class2.c data_stack.c v44.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_p3_eq.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c x2_session.c x2_mp_rx.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
-TEST_TARGETS = pcm_ber_test v56_loopback_test legacy_pcm_decode_test at_ms_test clear_channel_test k56flex_client_test k56flex_train_test k56flex_probe_test k56flex_v8bis_test k56flex_test x2_test v42bis_test v44_test v92_startup_test port_cp_stream_test port_data_rx_test port_v34_fixed_test port_v34_fixed_lms_test port_v34_fixed_solve_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v42_throughput_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test fax_class_test fax_class2_test v90_upstream_replay v90_engine_replay v34_duplex_test v32bis_spandsp_test v32bis_duplex_test v32bis_engine_pair_test engine_pair_test v90_engine_peer v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test v90_analogue_sd_test v34_pp_fit_test v34_hdx_test v92_p3_rx_line_test v92_mh_test v92_mh_line_test v92_mh_retrain_test v92_rn_test v92_rsig_test v92_tone_a_test x2_session_test x2_b1_test v76_test v75_test v70_test v70_v34_test
+TEST_TARGETS = v250_ctl_test at_test_test pcm_ber_test v56_loopback_test legacy_pcm_decode_test at_ms_test console_test clear_channel_test k56flex_client_test k56flex_train_test k56flex_probe_test k56flex_v8bis_test k56flex_test x2_test v42bis_test v44_test v92_startup_test port_cp_stream_test port_data_rx_test port_v34_fixed_test port_v34_fixed_lms_test port_v34_fixed_solve_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v42_throughput_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test fax_class_test fax_class2_test v90_upstream_replay v90_engine_replay v34_duplex_test v32bis_spandsp_test v32bis_duplex_test v32bis_engine_pair_test engine_pair_test v90_engine_peer v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test v90_analogue_sd_test v34_pp_fit_test v34_hdx_test v92_p3_rx_line_test v92_mh_test v92_mh_line_test v92_mh_retrain_test v92_rn_test v92_rsig_test v92_tone_a_test x2_session_test x2_b1_test v76_test v75_test v70_test v70_v34_test
 TEST_OBJS = v92_su.o vpcm_loopback_test.o v90.o v90_cp_rx.o v90_dil_rx.o v90_dil_measure.o v90_dil_presets.o v90_analogue_tx.o v90_analogue_rx.o v90_analogue_phase3.o v90_analogue_phase4.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_p3_eq.o v92_cp_rx.o v92_trn2u.o v92_upstream_data.o v92_upstream_rx.o p3_demod.o
 DECODE_OBJS = legacy_pcm_decode.o x2_session.o x2_mp_rx.o x2.o k56flex_client.o k56flex_rxfe.o k56flex_train.o k56flex_probe.o k56flex.o vpcm_decode.o v90_dil_measure.o v90_dil_presets.o v34_phase2_decode.o v34_info_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_p3_eq.o v92_anspcm_decode.o p3_demod.o v90.o v90_cp_rx.o v91.o vpcm_cp.o v21_fsk_demod.o phase12_decode.o call_init_tone_probe.o v90_dil_rx.o
 ENCODE_OBJS = vpcm_encode.o v90.o v91.o vpcm_cp.o v92_phase4_decode.o v90_dil_measure.o v90_dil_presets.o
@@ -176,8 +176,12 @@ V34_PHASE2_DECODE_TEST_OBJS = v34_phase2_decode_test.o v34_phase2_decode.o
 V34_MP_TEST_OBJS = v34_mp_test.o
 V34_DATA_TEST_OBJS = v34_data_test.o
 V34_GARDNER_TEST_OBJS = v34_gardner_test.o
-FAX_CLASS_TEST_OBJS = fax_class_test.o data_interface.o fax_class2.o at_ms.o
+FAX_CLASS_TEST_OBJS = fax_class_test.o data_interface.o fax_class2.o at_ms.o at_test.o v250_ctl.o
+V250_CTL_TEST_OBJS = v250_ctl_test.o v250_ctl.o
+# The two DTE console arrangements (classic combined, control + data).
+CONSOLE_TEST_OBJS = console_test.o data_interface.o fax_class2.o at_ms.o at_test.o v250_ctl.o
 # AT+MS through the real engine and PTY, plus at_ms.c on its own.
+AT_TEST_TEST_OBJS = at_test_test.o data_interface.o fax_class2.o at_ms.o at_test.o v250_ctl.o
 AT_MS_TEST_OBJS = at_ms_test.o $(filter-out sip_modem.o,$(OBJS))
 # Clear channel / V.120: the module back to back, and the engine looped on
 # itself through the PTY.
@@ -219,6 +223,7 @@ V90_ENGINE_REPLAY_OBJS = v90_engine_replay.o $(filter-out sip_modem.o,$(OBJS))
 V92_P3_RX_LINE_TEST_OBJS = v92_p3_rx_line_test.o $(filter-out v92_startup_test.o,$(V92_STARTUP_TEST_OBJS))
 V92_P3_PROBE_OBJS = v92_p3_probe.o v92_p3_rx.o v92_p3_eq.o v92_ja_decode.o p3_demod.o v90.o v90_cp_rx.o v90_dil_measure.o v90_dil_presets.o v91.o vpcm_cp.o v92_phase4_decode.o v92_trn2u.o v92_cp_rx.o
 V34_DUPLEX_TEST_OBJS = v34_duplex_test.o v34_line_ec.o
+PCM_BER_TEST_OBJS = pcm_ber_test.o $(filter-out vpcm_loopback_test.o,$(TEST_OBJS))
 V56_LOOPBACK_TEST_OBJS = v56_loopback_test.o v34_line_ec.o
 V34_HDX_TEST_OBJS = v34_hdx_test.o
 V32BIS_SPANDSP_TEST_OBJS = v32bis_spandsp_test.o
@@ -241,7 +246,7 @@ endif
 
 all: $(TARGET) $(TEST_TARGETS)
 
-test: $(TEST_TARGETS) v56-test
+test: $(TEST_TARGETS) v56-test pcm-data-test
 	./legacy_pcm_decode_test
 	./x2_session_test
 	./k56flex_test
@@ -266,6 +271,9 @@ test: $(TEST_TARGETS) v56-test
 	./fax_class_test
 	./fax_class2_test
 	./at_ms_test
+	./v250_ctl_test
+	./at_test_test
+	./console_test
 	./clear_channel_test
 # The rows that recover payload without a single bit error.  Every rate that
 # trains at all now does, in both laws; only 3429 does not train, so the two
@@ -424,6 +432,26 @@ test: $(TEST_TARGETS) v56-test
 	./engine_pair_test --expect V22BIS --expect-connect 1200 --call-at "AT+MS=V22" --answer-env ME_MODE=v22
 	./engine_pair_test --alaw --expect V22BIS --expect-connect 1200 --call-env ME_MODE=v22 --answer-at "AT+MS=V22B,1,0,1200"
 	./engine_pair_test --expect V22BIS --expect-connect 1200 --call-env ME_V8=0 --call-env ME_MODE=v22-1200
+# V.250 +MR/+ES/+ER/+DS/+DR against what two whole engines actually negotiate:
+# the reports are in order (+MCR, +MRR, +ER, +DR, then CONNECT) and read the
+# settled outcome, and the settings change the wire -- compression direction and
+# off, error control off, the fallback when no V.42 peer answers detection, and
+# "required" ending the call with NO CARRIER.
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --both-expect "+MCR: V22B|+MRR: 2400|+ER: LAPM|+DR: V42B|CONNECT 2400"
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --alaw --both-expect "+MCR: V22B|+MRR: 2400|+ER: LAPM|+DR: V42B|CONNECT 2400"
+	./engine_pair_test --expect V22BIS --expect-connect 1200 --both-at "AT+MS=V22" --both-at "AT+MR=1" --both-expect "+MCR: V22|+MRR: 1200|CONNECT 1200"
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --both-at "AT+DS=0" --both-expect "+ER: LAPM|+DR: NONE|CONNECT"
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --call-at "AT+DS=1" --call-expect "+DR: V42B TD|CONNECT" --answer-expect "+DR: V42B RD|CONNECT"
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --call-at "AT+DS=2" --call-expect "+DR: V42B RD|CONNECT" --answer-expect "+DR: V42B TD|CONNECT"
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --both-at "AT+ES=1,0,1" --both-expect "+ER: NONE|+DR: NONE|CONNECT"
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --answer-at "AT+ES=,,1" --both-expect "+ER: NONE|+DR: NONE|CONNECT"
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --answer-at "AT+DS=0" --call-at "AT+DS=3,0" --both-expect "+ER: LAPM|+DR: NONE|CONNECT"
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --answer-env ME_DATA_FRAMING=v14 --seconds 60 --both-expect "+ER: NONE|+DR: NONE|CONNECT"
+	./engine_pair_test --expect-hangup --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --seconds 60 --answer-env ME_DATA_FRAMING=v14 --call-at "AT+ES=3,2" --call-absent CONNECT --call-expect "NO CARRIER"
+	./engine_pair_test --expect-hangup --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --seconds 60 --answer-env ME_DATA_FRAMING=v14 --call-at "AT+ES=3,3" --call-absent CONNECT --call-expect "NO CARRIER"
+	./engine_pair_test --expect-hangup --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --seconds 60 --call-env ME_DATA_FRAMING=v14 --answer-at "AT+ES=,,4" --answer-absent CONNECT --answer-expect "NO CARRIER"
+	./engine_pair_test --expect-hangup --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --seconds 60 --call-at "AT+ES=1,0,2" --answer-at "AT+ES=,,5" --answer-absent CONNECT --answer-expect "NO CARRIER"
+	./engine_pair_test --expect-hangup --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --seconds 60 --answer-at "AT+DS=0" --call-at "AT+DS=3,1" --call-absent CONNECT --call-expect "NO CARRIER"
 	./v92_startup_test
 	./v92_p3_rx_line_test
 	./v92_proc_eval_test
@@ -588,6 +616,12 @@ data_stack_test: $(DATA_STACK_TEST_OBJS) spandsp
 fax_class_test: $(FAX_CLASS_TEST_OBJS) spandsp
 	$(CC) $(FAX_CLASS_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
+v250_ctl_test: $(V250_CTL_TEST_OBJS)
+	$(CC) $(V250_CTL_TEST_OBJS) -o $@
+
+console_test: $(CONSOLE_TEST_OBJS) spandsp
+	$(CC) $(CONSOLE_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+
 fax_class2_test: $(FAX_CLASS2_TEST_OBJS) spandsp
 	$(CC) $(FAX_CLASS2_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
@@ -675,6 +709,30 @@ v34_duplex_test: $(V34_DUPLEX_TEST_OBJS) spandsp
 	$(CC) $(V34_DUPLEX_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
 .PHONY: v56-test v56-sweep v56bis-filter-test v56bis-sweep
+.PHONY: pcm-loopback-test pcm-data-test pcm-matrix pcm-procedure-test
+pcm-loopback-test: pcm-data-test pcm-procedure-test
+
+pcm-data-test: pcm_ber_test
+	python3 tools/pcm_sweep.py --v92-drns 1,9,13 --seeds 1,7 --chunks 37,160 --require-clean
+	python3 tools/pcm_ber_regression.py
+
+# Diagnostic: retains high-rate V.92 failures rather than declaring them clean.
+pcm-matrix: pcm_ber_test
+	python3 tools/pcm_sweep.py --all-rates
+
+pcm-procedure-test: vpcm_loopback_test v92_proc_eval_test v92_mh_test v92_mh_line_test v92_mh_retrain_test v92_rn_test v92_rsig_test v92_tone_a_test
+	./vpcm_loopback_test --pcm-procedure-tests
+	./v92_proc_eval_test
+	./v92_mh_test
+	./v92_mh_line_test
+	./v92_mh_retrain_test
+	./v92_rn_test
+	./v92_rsig_test
+	./v92_tone_a_test
+
+pcm_ber_test: $(PCM_BER_TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
+	$(CC) $(PCM_BER_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(PJ_LIBS) $(SYSTEM_LIBS)
+
 v56_loopback_test: $(V56_LOOPBACK_TEST_OBJS) spandsp
 	$(CC) $(V56_LOOPBACK_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
@@ -689,6 +747,12 @@ v56-test: v56_loopback_test v56bis-filter-test
 	./v56_loopback_test --baud 3200 --rate 21600 --bits 16000 --law alaw
 	./v56_loopback_test --ad 5 --edd 3 --bits 16000 --law ulaw
 	./v56_loopback_test --ad 5 --edd 3 --bits 16000 --law alaw
+
+# Same calibrated offline line and strict 511-bit checker across modulation families.
+.PHONY: modulation-loopback-test
+modulation-loopback-test: v56_loopback_test
+	python3 tools/v56_sweep.py --modulation v32bis --snr off,40 --delays 0 --bits 16000 --seconds 30 --require-clean
+	python3 tools/v56_sweep.py --modulation v22bis --snr off,40 --delays 0 --bits 16000 --seconds 30 --require-clean
 
 v56-sweep: v56_loopback_test
 	python3 tools/v56_sweep.py
@@ -785,6 +849,9 @@ v32bis_engine_pair_test: $(V32BIS_ENGINE_PAIR_TEST_OBJS) spandsp $(PJ_BUILD_PRER
 v90_engine_replay: $(V90_ENGINE_REPLAY_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(V90_ENGINE_REPLAY_OBJS) -o $@ $(LDFLAGS)
 
+at_test_test: $(AT_TEST_TEST_OBJS) spandsp
+	$(CC) $(AT_TEST_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+
 at_ms_test: $(AT_MS_TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(AT_MS_TEST_OBJS) -o $@ $(LDFLAGS)
 
@@ -878,7 +945,7 @@ $(SPANDSP_LIB): FORCE
 sip_modem.o:      sip_modem.c      modem_engine.h data_interface.h
 modem_engine.o:   modem_engine.c   modem_engine.h v25_automode.h v92_mh.h v92_mh_line.h data_stack.h clock_recovery.h v90.h v90_cp_rx.h v91.h v92_p3_rx.h v92_cp_rx.h v92_trn2u.h v92_upstream_rx.h
 clock_recovery.o: clock_recovery.c clock_recovery.h
-data_interface.o: data_interface.c data_interface.h modem_engine.h at_ms.h
+data_interface.o: data_interface.c data_interface.h modem_engine.h at_ms.h v250_ctl.h
 at_ms.o:          at_ms.c          at_ms.h
 clear_channel.o:  clear_channel.c  clear_channel.h
 data_stack.o:     data_stack.c     data_stack.h $(SPANDSP_DIR)/spandsp/v42.h
@@ -1019,7 +1086,7 @@ fixed-compare:
 	fi
 
 clean:
-	rm -f audio_sock_modem audio_sock_modem.o slm_bridge v90_engine_peer v90_engine_peer.o engine_pair_test engine_pair_test.o k56flex_client_test.o k56flex_train_test.o k56flex_probe_test.o k56flex_v8bis_test.o k56flex_test.o x2_test.o v42bis_test.o $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(LEGACY_PCM_DECODE_TEST_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(V92_P3_RX_LINE_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V44_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(V42_THROUGHPUT_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V56_LOOPBACK_TEST_OBJS) $(PCM_BER_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(V92_MH_TEST_OBJS) $(V92_MH_LINE_TEST_OBJS) $(V92_MH_RETRAIN_TEST_OBJS) $(V92_RN_TEST_OBJS) $(V92_RSIG_TEST_OBJS) $(V92_TONE_A_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test *.d tools/*.d $(APPLE_USB_MODEM_PROBE_OBJS) apple_usb_modem_probe apple_usb_modem_audio \
+	rm -f audio_sock_modem audio_sock_modem.o slm_bridge v90_engine_peer v90_engine_peer.o engine_pair_test engine_pair_test.o k56flex_client_test.o k56flex_train_test.o k56flex_probe_test.o k56flex_v8bis_test.o k56flex_test.o x2_test.o v42bis_test.o $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(LEGACY_PCM_DECODE_TEST_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(V92_P3_RX_LINE_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V44_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(V42_THROUGHPUT_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V56_LOOPBACK_TEST_OBJS) $(AT_TEST_TEST_OBJS) $(PCM_BER_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(V92_MH_TEST_OBJS) $(V92_MH_LINE_TEST_OBJS) $(V92_MH_RETRAIN_TEST_OBJS) $(V92_RN_TEST_OBJS) $(V92_RSIG_TEST_OBJS) $(V92_TONE_A_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test *.d tools/*.d $(APPLE_USB_MODEM_PROBE_OBJS) apple_usb_modem_probe apple_usb_modem_audio \
 	    tools/apple_usb_modem_coupler.o apple_usb_modem_coupler
 	rm -f $(V70_STACK_OBJS) per.o h245_schema.o v76_test.o v75_test.o v70_test.o v70_v34_test.o
 

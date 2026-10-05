@@ -11,7 +11,7 @@
  *
  * Usage:
  *   ./sip_v90_modem [--sip-server <host>] [--username <user>]
- *                   [--password <pass>]  [--pty-link <path>]
+ *                   [--password <pass>]  [--pty-link <path> | --control-link <p> --data-link <p>]
  *                   [--local-port <port>] [--rtp-port <port>]
  *                   [--bind-addr <ip>] [--mode x2|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92|\n"
         "          clear|clear56|v120|v120-56]
@@ -1028,11 +1028,17 @@ static void print_usage(FILE *f, const char *argv0)
 {
     fprintf(f,
         "Usage: %s [--sip-server host] [--username u] [--password p]\n"
-        "          [--pty-link path] [--local-port port] [--rtp-port port]\n"
+        "          [--pty-link path | --control-link path --data-link path]\n"
+        "          [--local-port port] [--rtp-port port]\n"
         "          [--bind-addr ip] [--mode x2|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92] [--verbose]\n"
         "\n"
         "--mode sets the power-on V.8 offer (same as ME_MODE); AT+MS on the\n"
-        "PTY changes it for later calls and ATZ/AT&F restore it.\n", argv0);
+        "PTY changes it for later calls and ATZ/AT&F restore it.\n"
+        "\n"
+        "Console: --pty-link is the classic combined console (commands and data on\n"
+        "one port, +++ / ATO). --control-link and --data-link together give a\n"
+        "control console (always AT; RING/CONNECT/NO CARRIER and mid-call commands)\n"
+        "plus a data console carrying only payload. ATO there prints the data PTY.\n", argv0);
 }
 
 int main(int argc, char *argv[])
@@ -1049,6 +1055,9 @@ int main(int argc, char *argv[])
     const char *username    = NULL;
     const char *password    = NULL;
     const char *pty_link    = "/tmp/modem0";
+    const char *control_link = NULL;
+    const char *data_link    = NULL;
+    bool        pty_link_given = false;
     const char *bind_addr   = NULL;
     const char *modem_mode  = NULL;
     char        bind_addr_buf[64];
@@ -1076,6 +1085,11 @@ int main(int argc, char *argv[])
             password = argv[++i];
         } else if (!strcmp(a, "--pty-link") && has_val) {
             pty_link = argv[++i];
+            pty_link_given = true;
+        } else if (!strcmp(a, "--control-link") && has_val) {
+            control_link = argv[++i];
+        } else if (!strcmp(a, "--data-link") && has_val) {
+            data_link = argv[++i];
         } else if (!strcmp(a, "--local-port") && has_val) {
             local_port = atoi(argv[++i]);
         } else if (!strcmp(a, "--rtp-port") && has_val) {
@@ -1087,6 +1101,7 @@ int main(int argc, char *argv[])
         } else {
             static const char *const takes_value[] = {
                 "--sip-server", "--username", "--password", "--pty-link",
+                "--control-link", "--data-link",
                 "--local-port", "--rtp-port", "--bind-addr", "--mode"
             };
             bool missing = false;
@@ -1099,6 +1114,16 @@ int main(int argc, char *argv[])
             print_usage(stderr, argv[0]);
             return 2;
         }
+    }
+
+    if ((control_link != NULL) != (data_link != NULL)) {
+        fprintf(stderr, "%s: --control-link and --data-link go together\n", argv[0]);
+        return 2;
+    }
+    if (control_link && pty_link_given) {
+        fprintf(stderr, "%s: --pty-link (combined console) cannot be used with "
+                        "--control-link/--data-link (split console)\n", argv[0]);
+        return 2;
     }
 
     if (modem_mode
@@ -1279,7 +1304,8 @@ int main(int argc, char *argv[])
 
     /* ── Initialise PTY/AT interface after PJSUA media init ─────── */
     di_set_callbacks(on_dial, on_answer, on_hangup, NULL);
-    if (di_open(pty_link) < 0) {
+    if ((control_link ? di_open_split(control_link, data_link)
+                      : di_open(pty_link)) < 0) {
         fprintf(stderr, "Failed to open PTY\n");
         if (aud_subsys_inited)
             pjmedia_aud_subsys_shutdown();
@@ -1331,7 +1357,11 @@ int main(int argc, char *argv[])
         pjsua_acc_add(&acc_cfg, PJ_TRUE, &g_acc_id);
     }
 
-    PJ_LOG(3, ("sip_modem", "SIP V.90 modem ready. PTY link: %s", pty_link));
+    if (control_link)
+        PJ_LOG(3, ("sip_modem", "SIP V.90 modem ready. Control link: %s, data link: %s",
+                   control_link, data_link));
+    else
+        PJ_LOG(3, ("sip_modem", "SIP V.90 modem ready. PTY link: %s", pty_link));
     log_modem_diag_snapshot("startup");
 
     /* ── Main event loop ─────────────────────────────────────────── */

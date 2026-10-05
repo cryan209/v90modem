@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run reproducible synthetic-line V.34 BER measurements; retain every failure."""
+"""Run reproducible synthetic-line modem BER measurements; retain every failure."""
 from __future__ import annotations
 
 import argparse
@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--cases", default="2400:9600,3200:21600", help="baud:rate pairs")
+    p.add_argument("--modulation", choices=("v34", "v32bis", "v22bis"), default="v34")
+    p.add_argument("--cases", help="baud:rate pairs; defaults cover selected modulation")
     p.add_argument("--laws", default="ulaw,alaw")
     p.add_argument("--snr", default="off,40,30,24", help="comma-separated dB values or off")
     p.add_argument("--delays", default="0,80", help="one-way samples at 8 kHz")
@@ -31,6 +32,9 @@ def main() -> int:
     p.add_argument("--output", type=Path)
     p.add_argument("--require-clean", action="store_true", help="exit 1 if any line test fails")
     args = p.parse_args()
+    args.cases = args.cases or {"v34":"2400:9600,3200:21600",
+                               "v32bis":"2400:4800,2400:7200,2400:9600,2400:12000,2400:14400",
+                               "v22bis":"600:1200,600:2400"}[args.modulation]
     try:
         cases = [tuple(map(int, c.split(":"))) for c in args.cases.split(",")]
         if not all(len(c) == 2 for c in cases):
@@ -42,7 +46,9 @@ def main() -> int:
         seeds = [int(s) for s in args.seeds.split(",")]
         import math
         valid = [all(l in ("ulaw", "alaw") for l in laws),
-                 all(c[0] in (2400,2743,2800,3000,3200,3429) and 2400 <= c[1] <= 33600 and c[1] % 2400 == 0 for c in cases),
+                 all((args.modulation == "v34" and c[0] in (2400,2743,2800,3000,3200,3429) and 2400 <= c[1] <= 33600 and c[1] % 2400 == 0)
+                     or (args.modulation == "v32bis" and c[0] == 2400 and c[1] in (4800,7200,9600,12000,14400))
+                     or (args.modulation == "v22bis" and c[0] == 600 and c[1] in (1200,2400)) for c in cases),
                  all(s is None or math.isfinite(s) and 0 <= s <= 100 for s in snrs),
                  all(0 <= d < 8192 for d in delays),
                  all(len(c)==2 and (c==(0,0) or c[0] in (1,5,6,7,8,9) and c[1] in (1,2,3)) for c in channels),
@@ -63,12 +69,12 @@ def main() -> int:
     out.mkdir(parents=True, exist_ok=False)
     # The DSP has diagnostic ME_/V34_ switches. A sweep must not unknowingly
     # inherit a previous experiment and call it the declared line profile.
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("ME_", "V34_"))}
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("ME_", "V34_", "V32BIS_", "V22BIS_"))}
     counts: Counter[str] = Counter()
     infrastructure_failed = False
     with (out / "results.jsonl").open("w") as results:
         for (baud, rate), law, snr, delay, seed, (ad, edd) in product(cases,laws,snrs,delays,seeds,channels):
-            cmd = [str(binary), "--json", "--baud", str(baud), "--rate", str(rate),
+            cmd = [str(binary), "--json", "--modulation", args.modulation, "--baud", str(baud), "--rate", str(rate),
                    "--law", law, "--bits", str(args.bits), "--seconds", str(args.seconds),
                    "--loss-db", str(args.loss_db), "--delay", str(delay), "--seed", str(seed)]
             if ad:

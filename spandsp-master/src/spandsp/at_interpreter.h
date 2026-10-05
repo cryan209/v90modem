@@ -97,7 +97,19 @@ enum at_modem_control_operation_e
         after "+MS" ("=V34,1", "?" or "=?"), or NULL when Z or &F restores the
         default configuration.  The handler may answer +MS? and +MS=? with
         at_put_response(); a negative return makes the command line ERROR. */
-    AT_MODEM_CONTROL_MODULATION
+    AT_MODEM_CONTROL_MODULATION,
+    /*! V.250 6.7.2 diagnostic command text, including the +T name. */
+    AT_MODEM_CONTROL_DIAGNOSTIC,
+    /*! V.250 6.3.7 ATO.  Return 0 if the connection is resumed (the interpreter
+        answers CONNECT and goes to online data state), 1 if the data path is
+        already live and the command port stays in command state (answers OK),
+        or a negative value if there is no connection to resume (NO CARRIER). */
+    AT_MODEM_CONTROL_RESUME,
+    /*! V.250 parameters the application owns (+MR, +ES, +ER, +DS, +DR).  num is
+        the command text after the '+' ("ES=3,0,2", "ES?" or "ES=?").  The handler
+        stores or rejects the setting and may answer a read or test with
+        at_put_response(); a negative return makes the command line ERROR. */
+    AT_MODEM_CONTROL_PARAMETER
 };
 
 enum

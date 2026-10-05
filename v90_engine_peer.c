@@ -30,7 +30,7 @@ int main(int argc,char **argv) {
  di_set_callbacks(dial,control,control,NULL);
  if(di_open(pty)<0)return 2;
  me_set_law(law);
- uint8_t header[2],rx[4096],tx[4096]; unsigned long count=0;
+ uint8_t header[2],rx[4096],tx[4096]; unsigned long count=0; int hung=0;
  while(fread(header,1,2,stdin)==2) {
   /* The call starts with the first frame, so a driver can configure the
      modem over its PTY (AT+MS, ...) beforehand, as a DTE would. */
@@ -43,6 +43,10 @@ int main(int argc,char **argv) {
   me_rx_g711(rx,n); (void)me_tx_g711(tx,n); me_flush_g711_taps();
   if(fwrite(tx,1,n,output)!=(size_t)n || fflush(output))return 3;
   count+=n;
+  /* sip_modem.c turns an engine hang-up request (a V.42 failure, +ES/+DS
+     "required" not met) into a SIP BYE and so into me_on_sip_disconnected();
+     there is no SIP here, so do the local half of that once. */
+  if(!hung && me_get_state()==ME_HANGUP){ hung=1; me_on_sip_disconnected(); }
  }
  me_diag_snapshot_t s; me_get_diag_snapshot(&s);
  fprintf(stderr,"closed loop: samples=%lu state=%s modulation=%s rx=%llu tx=%llu\n",count,me_state_to_str(s.state),me_modulation_to_str(s.modulation),(unsigned long long)s.g711_rx_octets,(unsigned long long)s.g711_tx_octets);

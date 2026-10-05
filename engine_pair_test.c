@@ -14,6 +14,15 @@
  *   engine_pair_test [--alaw] [--seconds N] [--expect MOD] [--expect-connect RATE]
  *                    [--both-env K=V] [--call-env K=V] [--answer-env K=V]
  *                    [--both-at CMD] [--call-at CMD] [--answer-at CMD]
+ *                    [--both-expect SEQ] [--call-expect SEQ] [--answer-expect SEQ]
+ *                    [--expect-hangup]
+ *
+ * SEQ is "A|B|C": those strings must appear in that side's DTE stream, in that
+ * order (V.250 intermediate result codes before CONNECT, say).  --X-absent STR
+ * requires STR to appear nowhere in that side's stream.  --expect-hangup is for
+ * a call that must NOT stand: it ends when a side reports NO CARRIER, and no
+ * payload may have been exchanged (say which side must not CONNECT with
+ * --X-absent CONNECT; the far end of a one-sided refusal can still connect).
  *
  * The AT commands are sent to that side's PTY before the call starts, each
  * required to answer OK -- the way a DTE configures a modem (AT+MS).
@@ -48,6 +57,10 @@ typedef struct {
     int n_env;
     const char *at[MAX_ENV];
     int n_at;
+    const char *seq[MAX_ENV];
+    int n_seq;
+    const char *absent[MAX_ENV];
+    int n_absent;
     char dte[65536];    /* everything read from the DTE side */
     size_t dte_len;
     char payload[2048];
@@ -189,6 +202,7 @@ int main(int argc, char **argv)
     int frames;
     int failed = 0;
     int done_frame = -1;
+    int expect_hangup = 0;
 
     memset(side, 0, sizeof(side));
     side[0].name = "call";
@@ -212,6 +226,28 @@ int main(int argc, char **argv)
             for (int k = 0; k < 2; k++) {
                 if ((both || k == which) && side[k].n_at < MAX_ENV)
                     side[k].at[side[k].n_at++] = cmd;
+            }
+        } else if (!strcmp(argv[i], "--expect-hangup")) {
+            expect_hangup = 1;
+        } else if ((!strcmp(argv[i], "--call-expect") || !strcmp(argv[i], "--answer-expect")
+                    || !strcmp(argv[i], "--both-expect")) && i + 1 < argc) {
+            int both = argv[i][2] == 'b';
+            int which = argv[i][2] == 'c' ? 0 : 1;
+            const char *seq = argv[++i];
+
+            for (int k = 0; k < 2; k++) {
+                if ((both || k == which) && side[k].n_seq < MAX_ENV)
+                    side[k].seq[side[k].n_seq++] = seq;
+            }
+        } else if ((!strcmp(argv[i], "--call-absent") || !strcmp(argv[i], "--answer-absent")
+                    || !strcmp(argv[i], "--both-absent")) && i + 1 < argc) {
+            int both = argv[i][2] == 'b';
+            int which = argv[i][2] == 'c' ? 0 : 1;
+            const char *str = argv[++i];
+
+            for (int k = 0; k < 2; k++) {
+                if ((both || k == which) && side[k].n_absent < MAX_ENV)
+                    side[k].absent[side[k].n_absent++] = str;
             }
         } else if ((!strcmp(argv[i], "--both-env") || !strcmp(argv[i], "--call-env")
                     || !strcmp(argv[i], "--answer-env")) && i + 1 < argc) {
@@ -304,6 +340,10 @@ int main(int argc, char **argv)
                 s->sent = 1;
             }
         }
+        if (expect_hangup && (strstr(side[0].dte, "NO CARRIER") || strstr(side[1].dte, "NO CARRIER"))) {
+            done_frame = f;
+            break;
+        }
         if (side[0].sent && side[1].sent
             && strstr(side[0].dte, side[1].payload) && strstr(side[1].dte, side[0].payload)) {
             done_frame = f;
@@ -328,7 +368,10 @@ int main(int argc, char **argv)
     printf("engine pair (%s):", alaw ? "A-law" : "u-law");
     for (int i = 1; i < argc; i++)
         printf(" %s", argv[i]);
-    printf("\n  %s\n", done_frame >= 0 ? "payload exchanged" : "payload NOT exchanged");
+    printf("\n  %s\n", expect_hangup ? (done_frame >= 0 ? "call ended without payload" : "call did NOT end")
+                                    : (done_frame >= 0 ? "payload exchanged" : "payload NOT exchanged"));
+    if (expect_hangup && done_frame < 0)
+        failed = 1;
     for (int k = 0; k < 2; k++) {
         side_t *s = &side[k];
         char fin[512];
@@ -341,9 +384,36 @@ int main(int argc, char **argv)
         printf("  %-6s %s at %.2f s; %s", s->name, conn,
                s->connect_frame >= 0 ? s->connect_frame * FRAME / 8000.0 : -1.0,
                fin[0] ? fin : "no summary\n");
-        if (s->connect_frame < 0)
+        if (!expect_hangup && s->connect_frame < 0)
             failed = 1;
-        if (expect) {
+        for (int q = 0; q < s->n_absent; q++) {
+            if (strstr(s->dte, s->absent[q])) {
+                printf("  %-6s FAIL: DTE stream contains \"%s\"\n", s->name, s->absent[q]);
+                failed = 1;
+            }
+        }
+        for (int q = 0; q < s->n_seq; q++) {
+            char seq[256];
+            char *tok, *save = NULL;
+            const char *at = s->dte;
+            int ok = 1;
+
+            snprintf(seq, sizeof(seq), "%s", s->seq[q]);
+            for (tok = strtok_r(seq, "|", &save); tok; tok = strtok_r(NULL, "|", &save)) {
+                const char *hit = strstr(at, tok);
+
+                if (!hit) {
+                    ok = 0;
+                    break;
+                }
+                at = hit + strlen(tok);
+            }
+            if (!ok) {
+                printf("  %-6s FAIL: DTE stream lacks \"%s\" (in order)\n", s->name, s->seq[q]);
+                failed = 1;
+            }
+        }
+        if (expect && !expect_hangup) {
             char want[64];
 
             snprintf(want, sizeof(want), "modulation=%s ", expect);
@@ -352,7 +422,7 @@ int main(int argc, char **argv)
                 failed = 1;
             }
         }
-        if (expect_connect) {
+        if (expect_connect && !expect_hangup) {
             char want[64];
 
             snprintf(want, sizeof(want), "CONNECT %s\r", expect_connect);
@@ -361,7 +431,7 @@ int main(int argc, char **argv)
                 failed = 1;
             }
         }
-        if (!strstr(side[1 - k].dte, s->payload)) {
+        if (!expect_hangup && !strstr(side[1 - k].dte, s->payload)) {
             printf("  %-6s FAIL: its DTE text did not arrive intact at the %s side\n",
                    s->name, side[1 - k].name);
             failed = 1;

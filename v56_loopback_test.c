@@ -1,5 +1,5 @@
 /* Offline V.56ter (08/96) 6.3.1-inspired synchronous BER exercise.
- * Two independent V.34 modems exchange the 511-bit pattern through a
+ * Two independent modems exchange the 511-bit pattern through a
  * sample-preserving synthetic line. This is not the complete V.56bis
  * network model or a V.56ter certification test. See docs/v56_loopback.md.
  * Impairments apply to simulated analog samples, never live RTP codewords.
@@ -23,6 +23,7 @@ typedef struct {
     int baud, rate, bits, seconds, delay, echo_delay, seed, ad, edd;
     double snr, loss, echo_db;
     int json, cancel_echo;
+    int modulation; /* 0 V.34, 1 V.32bis, 2 V.22bis */
 } options_t;
 
 typedef struct {
@@ -70,7 +71,9 @@ static void put_bit(void *ctx, int bit)
 {
     endpoint_t *e = ctx;
     if (bit < 0) {
-        if (bit == SIG_STATUS_TRAINING_FAILED || bit == SIG_STATUS_CARRIER_DOWN)
+        /* Startup tone transitions can intentionally drop carrier. A missing
+         * acquisition is still bounded by the simulated deadline. */
+        if (bit == SIG_STATUS_TRAINING_FAILED || (bit == SIG_STATUS_CARRIER_DOWN && e->synced))
             e->failed = 1;
         return;
     }
@@ -157,26 +160,55 @@ static int run(const options_t *o, int alaw)
     if (!line || !ec) { free(line); free(ec); return 2; }
     line_init(&line[0], o, 0);
     line_init(&line[1], o, 1);
-    v34_state_t *ma = v34_init(NULL, o->baud, o->rate, true, true, get_bit, &a, put_bit, &a);
-    v34_state_t *mb = v34_init(NULL, o->baud, o->rate, false, true, get_bit, &b, put_bit, &b);
-    if (!ma || !mb) {
-        fprintf(stderr, "v34_init rejected baud/rate\n");
-        if (ma) v34_free(ma);
-        if (mb) v34_free(mb);
+    v34_state_t *ma = NULL, *mb = NULL;
+    v32bis_state_t *xa = NULL, *xb = NULL;
+    v22bis_state_t *ya = NULL, *yb = NULL;
+    int initialized = 0;
+    if (o->modulation == 0) {
+        ma = v34_init(NULL, o->baud, o->rate, true, true, get_bit, &a, put_bit, &a);
+        mb = v34_init(NULL, o->baud, o->rate, false, true, get_bit, &b, put_bit, &b);
+        if (ma && mb) {
+            v34_tx_power(ma, TX_DBM0); v34_tx_power(mb, TX_DBM0);
+            /* V.56ter 6.3.1.3: request and verify a fixed line rate. */
+            v34_set_mp_rate_policy(ma, o->rate/2400, o->rate/2400);
+            v34_set_mp_rate_policy(mb, o->rate/2400, o->rate/2400);
+            initialized = 1;
+        }
+    } else if (o->modulation == 1) {
+        int mask = o->rate == 4800 ? V32BIS_RATE_4800 : o->rate == 7200 ? V32BIS_RATE_7200
+                 : o->rate == 9600 ? V32BIS_RATE_9600 : o->rate == 12000 ? V32BIS_RATE_12000 : V32BIS_RATE_14400;
+        xa = v32bis_init(NULL, o->rate, true, get_bit, &a, put_bit, &a);
+        xb = v32bis_init(NULL, o->rate, false, get_bit, &b, put_bit, &b);
+        if (xa && xb) {
+            v32bis_tx_power(xa, TX_DBM0); v32bis_tx_power(xb, TX_DBM0);
+            /* V.32bis clause 6: reactive tone/startup dialogue, one offered rate. */
+            initialized = !v32bis_set_supported_bit_rates(xa, mask)
+                       && !v32bis_set_supported_bit_rates(xb, mask)
+                       && !v32bis_set_echo_canceller(xa, o->cancel_echo)
+                       && !v32bis_set_echo_canceller(xb, o->cancel_echo)
+                       && !v32bis_start_tones(xa) && !v32bis_start_tones(xb);
+        }
+    } else {
+        ya = v22bis_init(NULL, o->rate, 0, true, get_bit, &a, put_bit, &a);
+        yb = v22bis_init(NULL, o->rate, 0, false, get_bit, &b, put_bit, &b);
+        if (ya && yb) {
+            v22bis_tx_power(ya, TX_DBM0); v22bis_tx_power(yb, TX_DBM0);
+            initialized = 1;
+        }
+    }
+    if (!initialized) {
+        fprintf(stderr, "modem initialization failed\n");
+        if (ma) v34_free(ma); if (mb) v34_free(mb);
+        if (xa) v32bis_free(xa); if (xb) v32bis_free(xb);
+        if (ya) v22bis_free(ya); if (yb) v22bis_free(yb);
         for (int d=0; d<2; d++) if (line[d].noise) awgn_free(line[d].noise);
         free(line); free(ec); return 2;
     }
-    v34_tx_power(ma, TX_DBM0);
-    v34_tx_power(mb, TX_DBM0);
-    /* V.56ter 6.3.1.3 uses a fixed line rate. Advertise it in both MP
-     * directions and verify the settled pair below, rather than inferring
-     * a rate from the v34_init() argument or the generic bit_rate field. */
-    v34_set_mp_rate_policy(ma, o->rate/2400, o->rate/2400);
-    v34_set_mp_rate_policy(mb, o->rate/2400, o->rate/2400);
     int16_t ta[BLOCK], tb[BLOCK], ra[BLOCK], rb[BLOCK];
     int blocks = 0;
     for (; blocks < o->seconds*50; ) {
-        int na = v34_tx(ma, ta, BLOCK), nb = v34_tx(mb, tb, BLOCK);
+        int na = ma ? v34_tx(ma, ta, BLOCK) : xa ? v32bis_tx(xa, ta, BLOCK) : v22bis_tx(ya, ta, BLOCK);
+        int nb = mb ? v34_tx(mb, tb, BLOCK) : xb ? v32bis_tx(xb, tb, BLOCK) : v22bis_tx(yb, tb, BLOCK);
         if (na < 0 || na > BLOCK || nb < 0 || nb > BLOCK) { a.failed = 1; break; }
         memset(ta+na, 0, (BLOCK-na)*sizeof(*ta));
         memset(tb+nb, 0, (BLOCK-nb)*sizeof(*tb));
@@ -184,7 +216,7 @@ static int run(const options_t *o, int alaw)
             rb[i] = line_sample(&line[0], o, ta[i], tb[i], alaw);
             ra[i] = line_sample(&line[1], o, tb[i], ta[i], alaw);
         }
-        if (o->echo_db >= 0 && o->cancel_echo) {
+        if (ma && o->echo_db >= 0 && o->cancel_echo) {
             char msg[256];
             v34_line_ec_tx(&ec[0], tb, BLOCK);
             v34_line_ec_tx(&ec[1], ta, BLOCK);
@@ -195,37 +227,48 @@ static int run(const options_t *o, int alaw)
         }
         blocks++;
         a.samples = b.samples = (uint64_t)blocks*BLOCK;
-        v34_rx(mb, rb, BLOCK);
-        v34_rx(ma, ra, BLOCK);
+        if (ma) { v34_rx(mb, rb, BLOCK); v34_rx(ma, ra, BLOCK); }
+        else if (xa) { v32bis_rx(xb, rb, BLOCK); v32bis_rx(xa, ra, BLOCK); }
+        else { v22bis_rx(yb, rb, BLOCK); v22bis_rx(ya, ra, BLOCK); }
         if (a.failed || b.failed || (a.bits >= (uint64_t)o->bits && b.bits >= (uint64_t)o->bits)) break;
     }
     int complete = a.bits == (uint64_t)o->bits && b.bits == (uint64_t)o->bits;
     int a_ba=0, a_ab=0, b_ba=0, b_ab=0;
-    int rates_available = v34_get_negotiated_mp_rates(ma,&a_ba,&a_ab)==0
+    int rates_available;
+    if (ma) {
+        rates_available = v34_get_negotiated_mp_rates(ma,&a_ba,&a_ab)==0
                        && v34_get_negotiated_mp_rates(mb,&b_ba,&b_ab)==0;
+        a_ba *= 2400; a_ab *= 2400; b_ba *= 2400; b_ab *= 2400;
+    } else {
+        a_ba = a_ab = xa ? v32bis_current_bit_rate(xa) : v22bis_get_current_bit_rate(ya);
+        b_ba = b_ab = xb ? v32bis_current_bit_rate(xb) : v22bis_get_current_bit_rate(yb);
+        rates_available = a.synced && b.synced;
+    }
     int rates_ok = rates_available && a_ab==b_ab && a_ba==b_ba
-                 && a_ab*2400==o->rate && a_ba*2400==o->rate;
+                 && a_ab==o->rate && a_ba==o->rate;
     const char *status = (a.failed || b.failed) ? "carrier_lost" : !complete ? "timeout"
                        : (a.errors || b.errors) ? "errors" : !rates_ok ? "rate_mismatch" : "pass";
     /* A receives B->A; B receives A->B. Report this explicitly. */
     if (o->json) {
-        printf("{\"status\":\"%s\",\"baud\":%d,\"requested_bps\":%d,\"law\":\"%s\","
+        printf("{\"modulation\":\"%s\",", o->modulation==0?"v34":o->modulation==1?"v32bis":"v22bis");
+        printf("\"status\":\"%s\",\"baud\":%d,\"requested_bps\":%d,\"law\":\"%s\","
                "\"seed\":%d,\"snr_db\":", status,o->baud,o->rate,alaw?"alaw":"ulaw",o->seed);
         if (isfinite(o->snr)) printf("%.6g", o->snr); else printf("null");
         printf(",\"loss_db\":%.6g,\"delay_samples\":%d,\"ad\":%d,\"edd\":%d,\"filter_nominal_delay_samples\":%d,\"echo_db\":",
                o->loss,o->delay,o->ad,o->edd,o->ad?(V56BIS_FILTER_TAPS-1)/2:0);
         if (o->echo_db >= 0) printf("%.6g",o->echo_db); else printf("null");
+        printf(",\"a_ab_bps\":%d,\"a_ba_bps\":%d,\"b_ab_bps\":%d,\"b_ba_bps\":%d", a_ab,a_ba,b_ab,b_ba);
         printf(",\"echo_delay_samples\":%d,\"echo_cancel\":%s,\"target_bits\":%d,\"elapsed_s\":%.2f,"
                "\"ab_bits\":%llu,\"ab_errors\":%llu,\"ba_bits\":%llu,\"ba_errors\":%llu,"
                "\"ab_synced\":%s,\"ba_synced\":%s,\"ab_sync_s\":%.2f,\"ba_sync_s\":%.2f,\"ab_clips\":%llu,\"ba_clips\":%llu,"
                "\"rates_available\":%s,\"a_mp_ab_bps\":%d,\"a_mp_ba_bps\":%d,\"b_mp_ab_bps\":%d,\"b_mp_ba_bps\":%d}\n",
-               o->echo_delay,o->cancel_echo?"true":"false",o->bits,blocks*.02,
+               o->echo_delay,(o->modulation!=2 && o->cancel_echo)?"true":"false",o->bits,blocks*.02,
                (unsigned long long)b.bits,(unsigned long long)b.errors,
                (unsigned long long)a.bits,(unsigned long long)a.errors,
                b.synced?"true":"false",a.synced?"true":"false",
                b.sync_sample/8000.0,a.sync_sample/8000.0,
                (unsigned long long)line[0].clips,(unsigned long long)line[1].clips,
-               rates_available?"true":"false",a_ab*2400,a_ba*2400,b_ab*2400,b_ba*2400);
+               rates_available?"true":"false",a_ab,a_ba,b_ab,b_ba);
     } else {
         printf("V.56 loopback %s: %d/%d/%s, %.2fs; A->B %llu bits/%llu errors, B->A %llu bits/%llu errors\n",
                status,o->baud,o->rate,alaw?"alaw":"ulaw",blocks*.02,
@@ -233,12 +276,14 @@ static int run(const options_t *o, int alaw)
                (unsigned long long)a.bits,(unsigned long long)a.errors);
         printf("  pattern=511; sync A->B %.2fs B->A %.2fs; seed=%d; snr=%.1f dB; loss=%.1f dB; delay=%d samples; echo=%.1f dB\n",
                b.sync_sample/8000.0,a.sync_sample/8000.0,o->seed,o->snr,o->loss,o->delay,o->echo_db);
-        printf("  settled MP rates: A sees A->B %d B->A %d; B sees A->B %d B->A %d\n",
-               a_ab*2400,a_ba*2400,b_ab*2400,b_ba*2400);
+        printf("  settled rates: A sees A->B %d B->A %d; B sees A->B %d B->A %d\n",
+               a_ab,a_ba,b_ab,b_ba);
         if (o->ad) printf("  V.56bis AD-%d / EDD-%d FIR; nominal reference delay %d samples per direction\n",
                           o->ad,o->edd,(V56BIS_FILTER_TAPS-1)/2);
     }
-    v34_free(ma); v34_free(mb);
+    if (ma) v34_free(ma); if (mb) v34_free(mb);
+    if (xa) v32bis_free(xa); if (xb) v32bis_free(xb);
+    if (ya) v22bis_free(ya); if (yb) v22bis_free(yb);
     for (int d=0; d<2; d++) if (line[d].noise) awgn_free(line[d].noise);
     free(line); free(ec);
     return strcmp(status,"pass") ? 1 : 0;
@@ -247,6 +292,7 @@ static int run(const options_t *o, int alaw)
 static void usage(void)
 {
     puts("Usage: v56_loopback_test [--baud 2400] [--rate 9600] [--law ulaw|alaw]\n"
+         "  --modulation v34|v32bis|v22bis (default v34)\n"
          "  --bits N          checked bits per direction (default 1000000)\n"
          "  --seconds N       simulated call deadline (default 240)\n"
          "  --snr-db DB       AWGN relative to nominal received -12 dBm0 TX (default off)\n"
@@ -287,8 +333,12 @@ static int self_test(void)
     bert_free(b);
     bad |= ones!=256;
     for (int i=0;i<PERIOD;i++) for (int j=i+1;j<PERIOD;j++) bad |= e.signatures[i]==e.signatures[j];
+    put_bit(&e, SIG_STATUS_CARRIER_DOWN);
+    bad |= e.failed;
     for (int i=0;i<64+1024;i++) put_bit(&e,e.pattern[i%PERIOD] ^ (i==100 || i==700));
     bad |= !e.synced || e.bits!=1024 || e.errors!=2;
+    put_bit(&e, SIG_STATUS_CARRIER_DOWN);
+    bad |= !e.failed;
     pattern_init(&e,0,1024);
     for (int i=0;i<2048;i++) put_bit(&e,0);
     bad |= e.synced || e.bits!=0;
@@ -352,6 +402,13 @@ int main(int argc, char **argv)
         if (!strcmp(k,"--json")) { o.json=1; continue; }
         if (!strcmp(k,"--no-echo-cancel")) { o.cancel_echo=0; continue; }
         if (++i==argc) { fprintf(stderr,"Missing value for %s\n",k); return 2; }
+        if (!strcmp(k,"--modulation")) {
+            if (!strcmp(argv[i],"v34")) o.modulation=0;
+            else if (!strcmp(argv[i],"v32bis")) o.modulation=1;
+            else if (!strcmp(argv[i],"v22bis")) o.modulation=2;
+            else return 2;
+            continue;
+        }
         if (!strcmp(k,"--law")) {
             if (strcmp(argv[i],"ulaw") && strcmp(argv[i],"alaw")) return 2;
             alaw=!strcmp(argv[i],"alaw"); continue;
@@ -361,8 +418,8 @@ int main(int argc, char **argv)
         else if (!strcmp(k,"--loss-db") && v<=60) o.loss=v;
         else if (!strcmp(k,"--echo-db") && v<=120) o.echo_db=v;
         else if (v!=floor(v)) return 2;
-        else if (!strcmp(k,"--baud") && (v==2400 || v==2743 || v==2800 || v==3000 || v==3200 || v==3429)) o.baud=(int)v;
-        else if (!strcmp(k,"--rate") && v>=2400 && v<=33600 && (int)v%2400==0) o.rate=(int)v;
+        else if (!strcmp(k,"--baud") && (v==600 || v==2400 || v==2743 || v==2800 || v==3000 || v==3200 || v==3429)) o.baud=(int)v;
+        else if (!strcmp(k,"--rate") && v>=1200 && v<=33600 && (int)v%1200==0) o.rate=(int)v;
         else if (!strcmp(k,"--bits") && v>=1 && v<=100000000) o.bits=(int)v;
         else if (!strcmp(k,"--seconds") && v>=1 && v<=86400) o.seconds=(int)v;
         else if (!strcmp(k,"--delay") && v<RING) o.delay=(int)v;
@@ -372,6 +429,12 @@ int main(int argc, char **argv)
         else if (!strcmp(k,"--seed") && v>=1 && v<=1000000) o.seed=(int)v;
         else { fprintf(stderr,"Unknown option or invalid value: %s %s\n",k,argv[i]); return 2; }
     }
+    if ((o.modulation==0 && (o.rate%2400 || o.baud==600))
+        || (o.modulation==1 && (o.baud!=2400 || o.rate<4800 || o.rate>14400 || o.rate%2400))
+        || (o.modulation==2 && (o.rate!=1200 && o.rate!=2400))) {
+        fprintf(stderr,"Unsupported modulation/baud/rate combination\n"); return 2;
+    }
+    if (o.modulation==2) o.baud=600;
     if ((!o.ad)!=(!o.edd)) { fprintf(stderr,"--ad and --edd must be used together\n"); return 2; }
     if (o.ad && o.delay>RING-V56BIS_FILTER_TAPS) {
         fprintf(stderr,"Filtered delay must be <= %d samples\n",RING-V56BIS_FILTER_TAPS); return 2;

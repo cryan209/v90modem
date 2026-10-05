@@ -7,6 +7,54 @@ local-port controls, and V.92 controls. This is not a complete certification of
 all V.250 clauses, basic Hayes commands, V.58 tests, or fax/voice extensions.
 No runtime implementation was changed by this audit.
 
+## Status (2026-10-05, later)
+
+AT-2, AT-3 and AT-5 are implemented, and AT-4 for V.42bis (`+DS`, `+DR`; V.44's
+`+DS44` is still a skip-only stub). Code: `v250_ctl.[ch]` (parameters, parsing,
+policy, report text), `data_interface.c` (storage behind a leaf mutex, the new
+`AT_MODEM_CONTROL_PARAMETER` op, reports before CONNECT), `modem_engine.c`
+(`me_decide_data_framing()`, compression setup, `me_connect_info()`),
+`data_stack.c` (fallback to buffered mode). Tests: `v250_ctl_test` (parser and
+policy), `console_test` (through the real interpreter and PTY), and 16 rows of
+`engine_pair_test` in `make test` that grade what two whole engines negotiate.
+
+What now holds, per the clauses:
+
+* Set stores, read reports, and a rejected set leaves every value untouched
+  (5.4.4.2). Test responses list only supported values: `+ES: (1-3),(0,2-3),(1-2,4-5)`
+  (no direct mode, no alternative protocol, no DTE-rate change), `+DS:
+  (0-3),(0,1),(512-65535),(6-250)`. Omitted subparameters keep their value.
+* `+MR/+ER/+DR=1` emit `+MCR`, `+MRR`, `+ER`, `+DR` in that order and before
+  CONNECT, from the SETTLED call (`+ER: LAPM` only once the link is ready;
+  `+DR` direction from the negotiated Annex A P0, role-corrected). V.90/V.92
+  report distinct transmit/receive rates. ATQ1 silences them.
+* `+ES`: originator request 1/2/3 (buffered / V.42 without detection / with),
+  fallback optional or required, answerer 1/2/4/5. Required ends the call with
+  NO CARRIER when detection fails; optional falls back to buffered V.14 on the
+  same line rate (`DS_LINK_FALLBACK`). The V.8 protocol octet follows `+ES`.
+  A DTE-issued `+ES` overrides `ME_DATA_FRAMING`; `+DS` overrides
+  `ME_DATA_COMPRESSION`. ATZ / AT&F restore the defaults.
+* `+DS`: direction (0-3, role-mapped to P0), dictionary and string size feed the
+  V.42bis offer; `<negotiation>=1` disconnects if compression was not
+  negotiated in the direction asked (direction 3 = "accept any direction" is
+  satisfied by either).
+
+Deviations, deliberate: the default `+ES` is the recommended 3,0,2, which means
+a V.8-agreed LAPM that then fails detection now FALLS BACK instead of tearing
+the call down (it used to hang up; `ME_DATA_FRAMING=lapm` still hangs up). The
+`+DS` default is 3,0,1024,32 (6.6.1 leaves the dictionary to the manufacturer;
+this is what the stack always offered). Not done: `+ES` with ME_V8=0 (no V.8
+octet; framing stays V.14), `+ER: ALT`, `+DS44`, +ETBM, +EWIND, +EFRAM, +EFCS,
++MSC, +MA, the +P* controls, AT-1's rate enforcement, AT-10, and `+GCAP` still
+reports only +FCLASS.
+
+Found while testing: when the ENGINE ended a call (a V.42 failure, any
+`g_state = ME_HANGUP`), `me_on_sip_disconnected()` skipped `di_on_disconnected()`
+because the previous state was ME_HANGUP, so the DTE was never told
+(no NO CARRIER, `connected` left set). It now reports, except after the DTE's own
+ATH, which is answered by OK. `ATO` also now follows 6.3.7 (NO CARRIER with no
+call, ERROR for a value other than 0).
+
 ## Method and confidence
 
 Trace: PTY -> SpanDSP AT interpreter -> `data_interface.c` -> modem engine /

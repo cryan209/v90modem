@@ -192,6 +192,12 @@ SPAN_DECLARE(const char *) at_modem_control_to_str(int state)
         return "DTE timeout";
     case AT_MODEM_CONTROL_MODULATION:
         return "Modulation";
+    case AT_MODEM_CONTROL_RESUME:
+        return "Resume";
+    case AT_MODEM_CONTROL_PARAMETER:
+        return "Parameter";
+    case AT_MODEM_CONTROL_DIAGNOSTIC:
+        return "Diagnostic";
     }
     /*endswitch*/
     return "???";
@@ -1231,13 +1237,29 @@ static const char *at_cmd_O(at_state_t *s, const char *t)
     if ((val = parse_num(&t, 1)) < 0)
         return NULL;
     /*endif*/
-    if (val == 0)
+    /* Table 10: the only defined value is 0, and anything else is ERROR. */
+    if (val != 0)
+        return NULL;
+    /*endif*/
+    /* There has to be a connection to return to, and the application is the
+       one that knows: a return of 0 resumes it (CONNECT and online data), a
+       positive return says the data path is already live and this port stays
+       in command state (a separate data port, so just OK), and a negative one
+       says there is nothing to resume -- NO CARRIER, never CONNECT on an idle
+       line.  An application that does not know keeps the old behaviour. */
+    switch (at_modem_control(s, AT_MODEM_CONTROL_RESUME, NULL))
     {
+    case 0:
         at_set_at_rx_mode(s, AT_MODE_CONNECTED);
         at_put_response_code(s, AT_RESPONSE_CODE_CONNECT);
+        return (const char *) -1;
+    case 1:
+        return t;
+    default:
+        at_put_response_code(s, AT_RESPONSE_CODE_NO_CARRIER);
+        return (const char *) -1;
     }
-    /*endif*/
-    return t;
+    /*endswitch*/
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -3512,27 +3534,42 @@ static const char *at_cmd_plus_CXT(at_state_t *s, const char *t)
 }
 /*- End of function --------------------------------------------------------*/
 
-static const char *at_cmd_plus_DR(at_state_t *s, const char *t)
+/* V.250 parameter commands whose values configure the application's data
+   protocol stack (+MR, +ES, +ER, +DS, +DR) are the application's business, as
+   +MS is: the text after the '+' ("ES=3,0,2", "ES?", "ES=?") goes to the modem
+   control handler, which stores or rejects it and writes any information text
+   with at_put_response().  A negative return is ERROR.  The text runs to the
+   next ';' (5.4.1's extended command separator) or the end of the line. */
+static const char *at_forward_parameter(at_state_t *s, const char *t)
 {
-    /* V.250 6.6.2 - Data compression reporting */
-    /* TODO: */
-    t += 3;
-    if (!parse_out(s, &t, NULL, 1, "+DR:", ""))
+    char buf[100];
+    size_t len;
+
+    t += 1;
+    len = strcspn(t, ";");
+    if (len == 0  ||  len >= sizeof(buf))
         return NULL;
     /*endif*/
-    return t;
+    memcpy(buf, t, len);
+    buf[len] = '\0';
+    if (at_modem_control(s, AT_MODEM_CONTROL_PARAMETER, buf) < 0)
+        return NULL;
+    /*endif*/
+    return t + len;
+}
+/*- End of function --------------------------------------------------------*/
+
+static const char *at_cmd_plus_DR(at_state_t *s, const char *t)
+{
+    /* V.250 6.6.3 - Data compression reporting */
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_DS(at_state_t *s, const char *t)
 {
-    /* V.250 6.6.1 - Data compression */
-    /* TODO: */
-    t += 3;
-    if (!parse_out(s, &t, NULL, 1, "+DS:", ""))
-        return NULL;
-    /*endif*/
-    return t;
+    /* V.250 6.6.1 - V.42bis data compression */
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -3584,71 +3621,14 @@ static const char *at_cmd_plus_EFRAM(at_state_t *s, const char *t)
 static const char *at_cmd_plus_ER(at_state_t *s, const char *t)
 {
     /* V.250 6.5.5 - Error control reporting */
-    /*  0   Error control reporting disabled (no +ER intermediate result code transmitted)
-        1   Error control reporting enabled (+ER intermediate result code transmitted) */
-    /* TODO: */
-    t += 3;
-    if (!parse_out(s, &t, NULL, 1, "+ER:", "(0,1)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_ES(at_state_t *s, const char *t)
 {
-    static const int maxes[3] =
-    {
-        7, 4, 9
-    };
-    int *locations[3];
-
     /* V.250 6.5.1 - Error control selection */
-
-    /* orig_rqst
-        0:  Direct mode
-        1:  Initiate call with Buffered mode only
-        2:  Initiate V.42 without Detection Phase. If Rec. V.8 is in use, this is a request to disable V.42 Detection Phase
-        3:  Initiate V.42 with Detection Phase
-        4:  Initiate Altemative Protocol
-        5:  Initiate Synchronous Mode when connection is completed, immediately after the entire CONNECT result code
-            is delivered. V.24 circuits 113 and 115 are activated when Data State is entered
-        6:  Initiate Synchronous Access Mode when connection is completed, and Data State is entered
-        7:  Initiate Frame Tunnelling Mode when connection is completed, and Data State is entered
-
-       orig_fbk
-        0:  Error control optional (either LAPM or Alternative acceptable); if error control not established, maintain
-            DTE-DCE data rate and use V.14 buffered mode with flow control during non-error-control operation
-        1:  Error control optional (either LAPM or Alternative acceptable); if error control not established, change
-            DTE-DCE data rate to match line rate and use Direct mode
-        2:  Error control required (either LAPM or Alternative acceptable); if error control not established, disconnect
-        3:  Error control required (only LAPM acceptable); if error control not established, disconnect
-        4:  Error control required (only Altemative protocol acceptable); if error control not established, disconnect
-
-       ans_fbk
-        0:  Direct mode
-        1:  Error control disabled, use Buffered mode
-        2:  Error control optional (either LAPM or Alternative acceptable); if error control not established, maintain
-            DTE-DCE data rate and use local buffering and flow control during non-error-control operation
-        3:  Error control optional (either LAPM or Alternative acceptable); if error control not established, change
-            DTE-DCE data rate to match line rate and use Direct mode
-        4:  Error control required (either LAPM or Alternative acceptable); if error control not established, disconnect
-        5:  Error control required (only LAPM acceptable); if error control not established, disconnect
-        6:  Error control required (only Alternative protocol acceptable); if error control not established, disconnect
-        7:  Initiate Synchronous Mode when connection is completed, immediately after the entire CONNECT result code
-            is delivered. V.24 cicuits 113 and 115 are activated when Data State is entered
-        8:  Initiate Synchronous Access Mode when connection is completed, and Data State is entered
-        9:  Initiate Frame Tunnelling Mode when connection is completed, and Data State is entered */
-
-    /* TODO: */
-    t += 3;
-    locations[0] = NULL;
-    locations[1] = NULL;
-    locations[2] = NULL;
-    if (!parse_n_out(s, &t, locations, maxes, 3, "+ES:", "(0-7),(0-4),(0-9)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -4526,14 +4506,7 @@ static const char *at_cmd_plus_MA(at_state_t *s, const char *t)
 static const char *at_cmd_plus_MR(at_state_t *s, const char *t)
 {
     /* V.250 6.4.3 - Modulation reporting control */
-    /*  0:  Disables reporting of modulation connection (+MCR: and +MRR: are not transmitted)
-        1:  Enables reporting of modulation connection (+MCR: and +MRR: are transmitted) */
-    /* TODO: */
-    t += 3;
-    if (!parse_out(s, &t, NULL, 1, "+MR:", "(0,1)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -4879,147 +4852,78 @@ static const char *at_cmd_plus_SVT(at_state_t *s, const char *t)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Forward complete V.250 6.7.2 commands to the host. The old handlers
+ * reported OK without performing a loop or a test. Host rejection is ERROR.
+ * Leave the following +command/semicolon for the normal AT chain parser. */
+static const char *at_diagnostic_command(at_state_t *s, const char *t)
+{
+    const char *end=t+1;
+    char command[160];
+    while (*end && *end!='+' && *end!=';')end++;
+    size_t length=(size_t)(end-t);
+    if (length>=sizeof(command))return NULL;
+    memcpy(command,t,length);command[length]='\0';
+    if (at_modem_control(s,AT_MODEM_CONTROL_DIAGNOSTIC,command)<0)return NULL;
+    return end;
+}
+
 static const char *at_cmd_plus_TADR(at_state_t *s, const char *t)
 {
-    /* V.250 6.7.2.9 - Local V.54 address */
-    /* TODO: */
-    t += 5;
-    return t;
+    return at_diagnostic_command(s,t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_TAL(at_state_t *s, const char *t)
 {
-    /* V.250 6.7.2.15 - Local analogue loop */
-    /* Action
-        0   Disable analogue loop
-        1   Enable analogue loop
-       Band
-        0   Low frequency band
-        1   High frequency band */
-    /* TODO: */
-    t += 4;
-    if (!parse_2_out(s, &t, NULL, 1, NULL, 1, "+TAL:", "(0,1),(0,1)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_diagnostic_command(s,t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_TALS(at_state_t *s, const char *t)
 {
-    /* V.250 6.7.2.6 - Analogue loop status */
-    /*  0   Inactive
-        1   V.24 circuit 141 invoked
-        2   Front panel invoked
-        3   Network management system invoked */
-    /* TODO: */
-    t += 5;
-    if (!parse_out(s, &t, NULL, 3, "+TALS:", "(0-3)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_diagnostic_command(s,t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_TDLS(at_state_t *s, const char *t)
 {
-    /* V.250 6.7.2.7 - Local digital loop status */
-    /*  0   Disabled
-        1   Enabled, inactive
-        2   Front panel invoked
-        3   Network management system invoked
-        4   Remote invoked */
-    /* TODO: */
-    t += 5;
-    if (!parse_out(s, &t, NULL, 3, "+TDLS:", "(0-4)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_diagnostic_command(s,t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_TE140(at_state_t *s, const char *t)
 {
-    /* V.250 6.7.2.1 - Enable ckt 140 */
-    /*  0   Disabled
-        1   Enabled */
-    /* TODO: */
-    t += 6;
-    if (!parse_out(s, &t, NULL, 1, "+TE140:", "(0,1)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_diagnostic_command(s,t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_TE141(at_state_t *s, const char *t)
 {
-    /* V.250 6.7.2.2 - Enable ckt 141 */
-    /*  0   Response is disabled
-        1   Response is enabled */
-    /* TODO: */
-    t += 6;
-    if (!parse_out(s, &t, NULL, 1, "+TE141:", "(0,1)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_diagnostic_command(s,t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_TEPAL(at_state_t *s, const char *t)
 {
-    /* V.250 6.7.2.5 - Enable front panel analogue loop */
-    /*  0   Disabled
-        1   Enabled */
-    /* TODO: */
-    t += 6;
-    if (!parse_out(s, &t, NULL, 1, "+TEPAL:", "(0,1)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_diagnostic_command(s,t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_TEPDL(at_state_t *s, const char *t)
 {
-    /* V.250 6.7.2.4 - Enable front panel RDL */
-    /*  0   Disabled
-        1   Enabled */
-    /* TODO: */
-    t += 6;
-    if (!parse_out(s, &t, NULL, 1, "+TEPDL:", "(0,1)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_diagnostic_command(s,t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_TERDL(at_state_t *s, const char *t)
 {
-    /* V.250 6.7.2.3 - Enable RDL from remote */
-    /*  0   Local DCE will ignore command from remote
-        1   Local DCE will obey command from remote */
-    /* TODO: */
-    t += 6;
-    if (!parse_out(s, &t, NULL, 1, "+TERDL:", "(0,1)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_diagnostic_command(s,t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_TLDL(at_state_t *s, const char *t)
 {
-    /* V.250 6.7.2.13 - Local digital loop */
-    /*  0   Stop test
-        1   Start test */
-    /* TODO: */
-    t += 5;
-    if (!parse_out(s, &t, NULL, 1, "+TLDL:", "(0,1)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_diagnostic_command(s,t);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -5034,86 +4938,43 @@ static const char *at_cmd_plus_TMO(at_state_t *s, const char *t)
 
 static const char *at_cmd_plus_TMODE(at_state_t *s, const char *t)
 {
-    /* V.250 6.7.2.10 - Set V.54 mode */
-    /* TODO: */
-    t += 6;
-    if (!parse_out(s, &t, NULL, 1, "+TMODE:", "(0,1)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_diagnostic_command(s,t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_TNUM(at_state_t *s, const char *t)
 {
-    /* V.250 6.7.2.12 - Errored bit and block counts */
-    /* TODO: */
-    t += 5;
-    return t;
+    return at_diagnostic_command(s,t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_TRDL(at_state_t *s, const char *t)
 {
-    /* V.250 6.7.2.14 - Request remote digital loop */
-    /*  0   Stop RDL
-        1   Start RDL */
-    /* TODO: */
-    t += 5;
-    if (!parse_out(s, &t, NULL, 1, "+TRDL:", "(0,1)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_diagnostic_command(s,t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_TRDLS(at_state_t *s, const char *t)
 {
-    /* V.250 6.7.2.8 - Remote digital loop status */
-    /* TODO: */
-    t += 6;
-    return t;
+    return at_diagnostic_command(s,t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_TRES(at_state_t *s, const char *t)
 {
-    /* V.250 6.7.2.17 - Self test result */
-    /*  0   No test
-        1   Pass
-        2   Fail */
-    /* TODO: */
-    t += 5;
-    if (!parse_out(s, &t, NULL, 1, "+TRES:", "(0-2)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_diagnostic_command(s,t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_TSELF(at_state_t *s, const char *t)
 {
-    /* V.250 6.7.2.16 - Self test */
-    /*  0   Intrusive full test
-        1   Safe partial test */
-    /* TODO: */
-    t += 6;
-    if (!parse_out(s, &t, NULL, 1, "+TSELF:", "(0,1)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_diagnostic_command(s,t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_TTER(at_state_t *s, const char *t)
 {
-    /* V.250 6.7.2.11 - Test error rate */
-    /* TODO: */
-    t += 5;
-    if (!parse_2_out(s, &t, NULL, 65535, NULL, 65535, "+TTER:", "(0-65535),(0-65535)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_diagnostic_command(s,t);
 }
 /*- End of function --------------------------------------------------------*/
 

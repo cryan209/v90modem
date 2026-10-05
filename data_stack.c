@@ -259,6 +259,12 @@ static void ds_v42_status(void *user_data, int status)
     }
     case V42_STATUS_DETECTION_UNSUPPORTED:
         s->link_ready = false;
+        if (s->fallback_buffered) {
+            /* V.42 is still running underneath this callback, so it cannot be
+             * torn down here; the next line-side call does it. */
+            s->demote_pending = true;
+            return;
+        }
         event = DS_LINK_UNSUPPORTED;
         break;
     case SIG_STATUS_LINK_CONNECTED:
@@ -433,6 +439,55 @@ void ds_release(data_stack_t *s)
         s->link_ready = false;
 }
 
+void ds_set_fallback_buffered(data_stack_t *s, bool enable)
+{
+    s->fallback_buffered = enable;
+}
+
+void ds_compression_state(const data_stack_t *s, int *scheme, bool *tx, bool *rx)
+{
+    *scheme = 0;
+    *tx = *rx = false;
+    if (s->v44_encoder || s->v44_decoder) {
+        *scheme = 2;
+        *tx = s->v44_encoder != NULL;
+        *rx = s->v44_decoder != NULL;
+    } else if (s->v42bis && s->v42) {
+        v42_negotiated_parameters_t p;
+
+        if (v42_get_negotiated_parameters(s->v42, &p) == 0 && p.compression_p0) {
+            /* Annex A P0 bit 0 is initiator -> responder. */
+            bool fwd = (p.compression_p0 & 1) != 0;
+            bool rev = (p.compression_p0 & 2) != 0;
+
+            *scheme = 1;
+            *tx = s->calling_party ? fwd : rev;
+            *rx = s->calling_party ? rev : fwd;
+        }
+    }
+}
+
+/* Detection found no V.42 peer and +ES said that is acceptable: continue as a
+ * plain async modem.  Same line rate, same callbacks, no error control. */
+static void ds_demote(data_stack_t *s)
+{
+    int rate = s->line_bit_rate;
+
+    s->demote_pending = false;
+    ds_release(s);
+    s->framing = DS_FRAMING_V14;
+    s->tx_shift = 0;
+    s->tx_bits = 0;
+    s->tx_mark_bits = 0;
+    s->rx_hunting = 1;
+    s->rx_shift = 0;
+    s->rx_bits = 0;
+    s->fallback_buffered = false;
+    ds_set_v14_rates(s, rate, rate);
+    if (s->link_event)
+        s->link_event(s->link_event_ctx, DS_LINK_FALLBACK);
+}
+
 bool ds_link_is_ready(const data_stack_t *s)
 {
     return s && (s->framing != DS_FRAMING_V42 || s->link_ready);
@@ -556,6 +611,9 @@ int ds_tx_get_bit(data_stack_t *s)
 {
     int bit;
 
+    if (s->demote_pending)
+        ds_demote(s);
+
     if (s->framing == DS_FRAMING_V42)
     {
         /* Opt-in wire diagnostic, paired with DS_RX_BIT_DUMP. It includes
@@ -611,6 +669,9 @@ static FILE *ds_rx_bit_dump(void)
 void ds_rx_put_bit(data_stack_t *s, int bit)
 {
     FILE *dump = ds_rx_bit_dump();
+
+    if (s->demote_pending)
+        ds_demote(s);
 
     if (dump) {
         static unsigned n;

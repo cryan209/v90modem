@@ -201,3 +201,10 @@ v92_tone_a_test
 
 /legacy_pcm_decode_test
 /v56_loopback_test
+
+/pcm_ber_test
+
+/at_test_test
+
+/console_test
+/v250_ctl_test

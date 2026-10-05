@@ -1,6 +1,6 @@
 # V.56 loopback and impaired-line measurements
 
-`v56_loopback_test` runs two independent V.34 modems through an offline,
+`v56_loopback_test` runs two independent modems (V.34 by default) through an offline,
 sample-preserving synthetic line. Both directions transmit a repeating
 511-bit sequence and are graded separately after 64 consecutive bits match
 a phase of the sequence. Once acquired, the checker never re-locks: bit
@@ -219,3 +219,47 @@ Report and calibration evidence:
 zero checked bits do not establish a BER. A filter-free 256-sample one-way
 delay control passed with zero errors. The failing AD/EDD rows are retained
 for receiver/startup investigation; their cause has not been isolated.
+
+## Other modulation families (2026-10-05)
+
+The same synthetic line and fixed-phase 511-bit checker now support V.32bis
+at 4800, 7200, 9600, 12000 and 14400 bit/s, and the V.22bis datapump at
+1200 and 2400 bit/s. V.32bis starts with its reactive clause 6 tone exchange,
+with exactly one rate offered by each end. V.22bis uses its native startup;
+1200 is its capped operating mode. These tests bypass V.8 and the engine.
+
+```sh
+make modulation-loopback-test
+./v56_loopback_test --modulation v32bis --rate 14400 --bits 16000 --json
+./v56_loopback_test --modulation v22bis --baud 600 --rate 2400 --bits 16000 --json
+python3 tools/v56_sweep.py --modulation v32bis --snr off,30,24 --delays 0,80
+python3 tools/v56_sweep.py --modulation v22bis --snr off --channels off,5:3
+```
+
+Sweep defaults select every supported rate for these families; `--cases`
+overrides them. V.32bis uses 2400 baud and V.22bis uses 600 baud. Noise,
+loss, delay, echo and AD/EDD options retain the definitions above. V.32bis
+uses its own sample-path echo canceller; V.22bis has no echo canceller here.
+`--no-echo-cancel` disables either V.34 or V.32bis cancellation. Results
+record `modulation` and generic `a_ab_bps`, `a_ba_bps`, `b_ab_bps`,
+`b_ba_bps`; the older `*_mp_*_bps` fields remain compatibility aliases.
+Only V.34 obtains those values from MP: the other families report current
+operating rates, accepted only after both pattern checkers synchronize.
+
+A carrier drop before pattern acquisition can be an intentional startup tone
+transition. It does not end the measurement; lack of acquisition still times
+out. Training failure, or carrier loss after synchronization, fails the row.
+No post-acquisition re-lock is allowed. Sweeps also remove inherited
+`V32BIS_` and `V22BIS_` diagnostic switches.
+
+Verification: all 28 rows (five V.32bis rates and two V.22bis rates, both G.711
+laws, no noise and 40 dB SNR) passed with 16,000 checked bits and zero errors
+in each direction, seed 1, no added delay. Evidence is retained in
+`artifacts/v56/20261005T095005502684Z/results.jsonl` (V.32bis) and
+`artifacts/v56/20261005T095008027486Z/results.jsonl` (V.22bis). The existing
+V.34 `make v56-test` passed as well. These are finite offline measurements,
+not V.56 certification or hardware interoperability results.
+
+For native PCM datapump matrices and separate V.90/V.92 startup/procedure
+coverage, see [PCM loopback testing](pcm_loopback_testing.md). The V.56
+analogue line model is not applied to downstream DS0 bytes.

@@ -22,6 +22,7 @@
 #include "modem_engine.h"
 #include "x2_session.h"
 #include "data_interface.h"
+#include "at_ms.h"
 #include "data_stack.h"
 #include "clear_channel.h"
 #include "clock_recovery.h"
@@ -285,6 +286,13 @@ static volatile bool g_data_link_redetect = false;
 /* Set while a physical-layer recovery started by v34_data_carrier_lost() is in
    flight, so a V.42 verdict reached over those bits is not treated as final. */
 static volatile bool g_data_loss_recovering = false;
+/* V.250 +ES "optional": no V.42 peer is not a failure, the call carries on as
+   buffered V.14 (set per call by me_decide_data_framing()). */
+static bool g_ec_fallback_ok = false;
+/* The directional rates for +MRR, where the CONNECT rate alone does not say
+   them (V.90/V.92).  0 = report the CONNECT rate. */
+static int g_report_tx_rate = 0;
+static int g_report_rx_rate = 0;
 static void on_training_complete(me_modulation_t mod, int rate, const char *name);
 static void v8_result_handler(void *user_data, v8_parms_t *result);
 
@@ -672,6 +680,22 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
     case DS_LINK_XID_NEGOTIATED:
     {
         v42_negotiated_parameters_t p;
+        /* V.250 6.6.1 +DS <negotiation>=1: compression the DTE insisted on is
+           not in use, so the call does not stand. */
+        {
+            v250_ctl_t cfg;
+            int scheme;
+            bool ctx, crx;
+
+            di_get_v250_settings(&cfg);
+            ds_compression_state(&g_data_stack, &scheme, &ctx, &crx);
+            if (cfg.ds_set && cfg.ds[0] != 0 && cfg.ds[1] == 1
+                && !v250_ctl_compression_satisfied(&cfg, ctx, crx)) {
+                ME_LOG("[ME] +DS requires V.42bis (direction %d) and the peer "
+                       "did not negotiate it; disconnecting\n", cfg.ds[0]);
+                g_data_link_failed = true;
+            }
+        }
         if (v42_get_negotiated_parameters(g_data_stack.v42, &p) == 0)
         {
             ME_LOG("[ME] V.42 XID encoding: options=%d octets\n",
@@ -686,9 +710,19 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
         }
         break;
     }
+    case DS_LINK_FALLBACK:
+        /* +ES says error control is optional: carry on without it. */
+        ME_LOG("[ME] V.42 detection found no error-control peer; continuing in "
+               "buffered V.14 mode (+ES fallback)\n");
+        g_data_framing = DS_FRAMING_V14;
+        if (!g_data_connect_reported) {
+            g_data_connect_reported = true;
+            di_on_connected(g_data_connect_rate);
+        }
+        break;
     case DS_LINK_CONNECTED:
         ME_LOG("[ME] V.42 LAPM connected\n");
-        if (!g_data_connect_reported) {
+        if (!g_data_connect_reported && !g_data_link_failed) {
             g_data_connect_reported = true;
             di_on_connected(g_data_connect_rate);
         }
@@ -783,9 +817,25 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
     g_data_connect_rate = bit_rate;
     g_data_connect_reported = false;
     g_data_link_failed = false;
+    g_report_tx_rate = g_report_rx_rate = 0;
     if (g_data_framing == DS_FRAMING_V42) {
+        /* Compression: a +DS the DTE has issued governs; otherwise the
+           environment (ME_DATA_COMPRESSION), otherwise the shipped default
+           (both directions, 1024 codewords, 32-octet strings -- which is also
+           what +DS? reports before the DTE touches it). */
         const char *compression = getenv("ME_DATA_COMPRESSION");
-        if (compression && strcmp(compression, "v44") == 0)
+        v250_ctl_t cfg;
+        v250_compression_t dc;
+
+        di_get_v250_settings(&cfg);
+        v250_ctl_compression(&cfg, calling_party, &dc);
+        if (cfg.ds_set)
+            result = ds_init_v42_ex(&g_data_stack, calling_party, g_data_lapm_detect, bit_rate,
+                                    dc.enabled ? dc.p0 : 0,
+                                    dc.enabled ? dc.p1 : 512, dc.enabled ? dc.p2 : 6,
+                                    data_stack_pull_dte_byte, NULL,
+                                    data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
+        else if (compression && strcmp(compression, "v44") == 0)
             result = ds_init_v44(&g_data_stack, calling_party, g_data_lapm_detect, bit_rate,
                                  NULL, data_stack_pull_dte_byte, NULL,
                                  data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
@@ -797,6 +847,8 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
             result = ds_init_v42(&g_data_stack, calling_party, g_data_lapm_detect, bit_rate,
                                  data_stack_pull_dte_byte, NULL,
                                  data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
+        if (result == 0)
+            ds_set_fallback_buffered(&g_data_stack, g_ec_fallback_ok);
         const char *xid_octets = getenv("ME_LAPM_XID_OPTION_OCTETS");
         if (result == 0 && xid_octets) {
             if ((strcmp(xid_octets, "auto") != 0
@@ -3116,6 +3168,47 @@ static const char *me_v92_anspcm_level_to_str(int level)
     }
 }
 
+/* Settle the DTE-side framing for this call.  v8_lapm is what the peer's V.8
+   protocol octet (or V.92 QC bit) said about V.42 LAPM.
+
+   V.250 +ES governs when the DTE has issued it; the environment's fixed
+   framings (ME_DATA_FRAMING=lapm, v14, ...) then yield to it, and a DTE that has
+   not touched +ES gets the recommended 3,0,2 ("V.42 with detection, optional")
+   on top of the V.8 auto decision.  Required error control ignores what V.8
+   said about the peer -- the detection phase is the real test -- and
+   disconnects when it fails; optional falls back to buffered V.14. */
+static void me_decide_data_framing(bool v8_lapm)
+{
+    v250_ctl_t cfg;
+    v250_ec_policy_t pol;
+
+    di_get_v250_settings(&cfg);
+    v250_ctl_ec_policy(&cfg, g_calling_party, &pol);
+    g_ec_fallback_ok = false;
+    if (cfg.es_set) {
+        if (!pol.attempt) {
+            g_data_framing = DS_FRAMING_V14;
+        } else if (pol.required || v8_lapm) {
+            g_data_framing = DS_FRAMING_V42;
+            g_data_lapm_detect = pol.detect;
+            g_ec_fallback_ok = !pol.required;
+        } else {
+            g_data_framing = DS_FRAMING_V14;
+        }
+        ME_LOG("[ME] DTE framing (+ES %d,%d,%d, %s): %s\n", cfg.es[0], cfg.es[1], cfg.es[2],
+               g_calling_party ? "originator" : "answerer",
+               g_data_framing == DS_FRAMING_V42
+                   ? (pol.required ? "V.42 LAPM, required" : "V.42 LAPM, optional")
+                   : "buffered V.14");
+        return;
+    }
+    if (g_data_framing_auto) {
+        g_data_framing = v8_lapm ? DS_FRAMING_V42 : DS_FRAMING_V14;
+        g_data_lapm_detect = v8_lapm;
+        g_ec_fallback_ok = v8_lapm;
+    }
+}
+
 static void me_log_v8_peer_summary(const v8_parms_t *result)
 {
     /* The call function and the modulations the peer offered are the two
@@ -3144,7 +3237,7 @@ static void me_log_v8_peer_summary(const v8_parms_t *result)
                 v8_call_function_to_str(result->jm_cm.call_function),
                 (mods[0] != '\0') ? mods : "none");
     }
-    if (g_data_framing_auto) {
+    {
         bool lapm = (result->jm_cm.protocols == V8_PROTOCOL_LAPM_V42);
         /* V.92 Table 2: QC bit 23 "set to 1 calls for LAPM protocol according
            to ITU-T V.42".  slmodemd's V.90 CM omits the V.8 protocol octet
@@ -3156,12 +3249,11 @@ static void me_log_v8_peer_summary(const v8_parms_t *result)
 
         if (!lapm && qc_lapm)
             lapm = true;
-        g_data_framing = lapm ? DS_FRAMING_V42 : DS_FRAMING_V14;
-        g_data_lapm_detect = lapm;
-        ME_LOG("[ME] DTE framing (auto from V.8 protocol%s): %s\n",
+        me_decide_data_framing(lapm);
+        ME_LOG("[ME] DTE framing from V.8 protocol%s: %s\n",
                (qc_lapm && result->jm_cm.protocols != V8_PROTOCOL_LAPM_V42)
-                   ? ", V.92 QC LAPM bit" : "",
-               lapm ? "V.42 LAPM" : "V.14 8N1");
+                   ? " (V.92 QC LAPM bit)" : "",
+               g_data_framing == DS_FRAMING_V42 ? "V.42 LAPM" : "V.14 8N1");
     }
     fprintf(stderr,
             "[ME] V.8 peer summary: protocol=%s, PSTN=%s, PCM=%s, NSF=%s, T.66=%d\n",
@@ -3399,6 +3491,18 @@ static int me_start_or_restart_v8_locked(int answer_tone)
                "(ME_V34_FAX_PROBE)\n");
     }
     v8_parms.jm_cm.protocols          = V8_PROTOCOL_LAPM_V42;
+    {
+        /* V.250 +ES: a DTE that has turned error control off for this role
+           (originator +ES=1, or answerer ans_fbk 1) must not be advertised as
+           offering LAPM. */
+        v250_ctl_t cfg;
+        v250_ec_policy_t pol;
+
+        di_get_v250_settings(&cfg);
+        v250_ctl_ec_policy(&cfg, g_calling_party, &pol);
+        if (cfg.es_set && !pol.attempt)
+            v8_parms.jm_cm.protocols = V8_PROTOCOL_NONE;
+    }
     if (g_advertise_v90 && me_v90_analogue_role()) {
         /*
          * The two fields answer different questions, and only the second one
@@ -6382,6 +6486,8 @@ static void v34_put_bit_cb(void *user_data, int bit)
                         trace_phase("V90 enter DATA: upstream=%d downstream=%d", rate, downstream_rate);
                         v90_reset_data_mode(g_v90);
                         g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
+                        g_report_tx_rate = downstream_rate;
+                        g_report_rx_rate = rate;
                         if (g_data_framing != DS_FRAMING_V42
                             && !g_data_connect_reported) {
                             g_data_connect_reported = true;
@@ -7899,6 +8005,38 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
 /* Lifecycle                                                           */
 /* ------------------------------------------------------------------ */
 
+/* V.250 6.4.3 / 6.5.5 / 6.6.3: what this call settled on, for +MCR/+MRR, +ER and
+   +DR.  Called by data_interface.c at CONNECT, so it reads negotiated state,
+   never the DTE's request. */
+static void me_connect_info(int rate, v250_connect_report_t *r)
+{
+    int scheme = 0;
+    bool ctx = false, crx = false;
+
+    (void) rate;
+    switch (g_mod) {
+    case ME_MOD_V91:    r->carrier = "V91"; break;
+    case ME_MOD_V90:    r->carrier = g_v92_active ? "V92" : "V90"; break;
+    case ME_MOD_V34:    r->carrier = "V34"; break;
+    case ME_MOD_V22BIS: r->carrier = strcmp(g_mode_name, "v22-1200") == 0 ? "V22" : "V22B"; break;
+    case ME_MOD_V32BIS: r->carrier = strcmp(g_mode_name, "v32") == 0 ? "V32" : "V32B"; break;
+    case ME_MOD_X2:     r->carrier = "X2"; break;
+    case ME_MOD_CLEAR:  r->carrier = g_offer_v120 ? "V120" : "CLEAR"; break;
+    default:            r->carrier = at_ms_mode_to_carrier(g_mode_name); break;
+    }
+    if (g_report_tx_rate > 0) {
+        r->tx_rate = g_report_tx_rate;
+        r->rx_rate = g_report_rx_rate;
+    }
+    if (g_data_framing == DS_FRAMING_V42 && ds_link_is_ready(&g_data_stack)) {
+        r->ec = "LAPM";
+        ds_compression_state(&g_data_stack, &scheme, &ctx, &crx);
+    }
+    r->dc_scheme = scheme;
+    r->dc_tx = ctx;
+    r->dc_rx = crx;
+}
+
 void me_init(void)
 {
     pthread_mutex_init(&g_state_mtx, NULL);
@@ -7922,6 +8060,7 @@ void me_init(void)
         g_cfg_automode = true;
         di_set_modulation_ops(me_set_modulation_offer, me_get_modulation_offer,
                               me_reset_modulation_offer);
+        di_set_connect_info_cb(me_connect_info);
 
         ME_LOG("[ME] Modem mode: %s (V.8 offer %s)\n", g_mode_name,
                me_offer_str());
@@ -8152,6 +8291,7 @@ static int me_clear_start_locked(void)
          * (there is no V.8 protocol octet to settle "auto" with). */
         if (g_data_framing_auto)
             g_data_framing = DS_FRAMING_V14;
+        g_ec_fallback_ok = false;
         if (data_stack_start_online(rate, g_calling_party) != 0)
             return 0;
         cc_init_clear(&g_cc, g_offer_r56, clear_get_bit, clear_put_bit, NULL);
@@ -8308,6 +8448,7 @@ void me_on_sip_connected(void)
     pthread_mutex_unlock(&g_state_mtx);
     if (g_data_framing_auto)
         g_data_framing = DS_FRAMING_V14;   /* until this call's V.8 says LAPM */
+    g_ec_fallback_ok = false;
     trace_phase("enter V8: mode=%s advertised mods=%s", g_mode_name,
                 me_offer_str());
 
@@ -8356,7 +8497,11 @@ void me_on_sip_disconnected(void)
     pthread_mutex_unlock(&g_state_mtx);
     trace_phase("SIP disconnected: prev_state=%d -> IDLE", prev);
 
-    if (prev == ME_DATA || prev == ME_TRAINING || prev == ME_V8)
+    /* ME_HANGUP too: it is the engine's own teardown (a V.42 failure, +ES/+DS
+       "required" not met, a training failure) and the DTE is owed NO CARRIER
+       for it as much as for the far end dropping.  A hang-up the DTE asked for
+       is already accounted for by data_interface.c. */
+    if (prev == ME_DATA || prev == ME_TRAINING || prev == ME_V8 || prev == ME_HANGUP)
         di_on_disconnected();
 }
 
@@ -10342,6 +10487,10 @@ skip_8k_codewords:
                         g_last_loss_retrain_ms = trace_now_ms();
                         v34_rx_rate_backoff_locked();
                         g_data_loss_recovering = true;
+                        /* A V.42 verdict over bits that are not being decoded
+                           is worthless -- including "no peer": +ES fallback
+                           must not read it as one. */
+                        ds_set_fallback_buffered(&g_data_stack, false);
                         if (me_v34_reneg_enabled()
                             && v34_start_rate_renegotiation(g_v34) == 0) {
                             ME_LOG("[ME] V.34 data mode has stopped decoding; "
@@ -10984,6 +11133,8 @@ static void me_v92a_progress_locked(void)
         int upstream = ((int)cpd->selected_upstream_drn + 17)*8000/6;
         int downstream = v92a4_downstream_rate(p4);
         data_stack_start_online(upstream, g_calling_party);
+        g_report_tx_rate = upstream;
+        g_report_rx_rate = downstream;
         g_state = ME_DATA;
         g_phase_start_ms = 0;
         v92a4_set_data_source(p4, v92a_data_bit, NULL);
@@ -11798,6 +11949,8 @@ static void enter_v90_data_locked(void)
     } else {
         data_stack_start_online(downstream_rate, g_calling_party);
     }
+    g_report_tx_rate = downstream_rate;
+    g_report_rx_rate = upstream_rate;
     g_state = ME_DATA;
     g_phase_start_ms = 0;
     /* Shared DATA-entry epoch for the §9.5/§11.5 disruption probe.  Plain
@@ -12610,6 +12763,8 @@ static void me_v90_analogue_rx_codewords_locked(const uint8_t *codewords, int co
         data_stack_start_online(upstream_rate > 0 ? upstream_rate
                                                   : downstream_rate,
                                 g_calling_party);
+        g_report_tx_rate = upstream_rate;
+        g_report_rx_rate = downstream_rate;
         g_state = ME_DATA;
         g_phase_start_ms = 0;
         ME_LOG("[ME] V.90 analogue startup complete after B1d "

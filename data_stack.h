@@ -45,7 +45,12 @@ typedef enum {
     DS_LINK_CONNECTED,
     DS_LINK_UNSUPPORTED,
     DS_LINK_DISCONNECTED,
-    DS_LINK_ERROR
+    DS_LINK_ERROR,
+    /* V.42 detection found no error-control peer and the stack was told that is
+     * acceptable (V.250 +ES fallback "optional"): it has dropped to V.14
+     * buffered mode on the same line rate.  Reported from the next line-side
+     * call, never from inside V.42's own callback. */
+    DS_LINK_FALLBACK
 } ds_link_event_t;
 
 /* Pull one DTE byte to transmit; return -1 when none is pending. */
@@ -82,6 +87,8 @@ typedef struct {
     void *link_event_ctx;
     bool link_ready;
     bool suspended;                /* V.92 9.10.3 modem-on-hold */
+    bool fallback_buffered;        /* unsupported peer => V.14 instead of failing */
+    bool demote_pending;
 
     /* TX shift register: bit 0 is the next bit on the line.  V.14 keeps
      * start+data here and emits the rate-adapted stop/idle marks separately. */
@@ -145,6 +152,15 @@ void ds_release(data_stack_t *s);
 void ds_v42_restart_t400(data_stack_t *s, int t400_ms);
 /* ME_V42_T400_MS, or 0 for V.42's 750 ms default. */
 int ds_v42_t400_ms(void);
+
+/* V.250 +ES: when detection reports a peer without V.42, fall back to buffered
+ * mode (V.14 framing, no error control) rather than reporting the call failed.
+ * Call after ds_init_v42*() -- ds_init() clears it. */
+void ds_set_fallback_buffered(data_stack_t *s, bool enable);
+
+/* What compression the negotiated link is using, from this side's point of
+ * view: scheme 0 none, 1 V.42bis, 2 V.44.  False/false when none. */
+void ds_compression_state(const data_stack_t *s, int *scheme, bool *tx, bool *rx);
 
 bool ds_link_is_ready(const data_stack_t *s);
 void ds_stop_link(data_stack_t *s);

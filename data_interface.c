@@ -21,6 +21,8 @@
 #include "modem_engine.h"
 #include "fax_class2.h"
 #include "at_ms.h"
+#include "v250_ctl.h"
+#include "at_test.h"
 
 #include <spandsp.h>
 #include <spandsp/private/logging.h>
@@ -93,6 +95,28 @@ static int ring_read(ring_t *r, uint8_t *buf, int max) {
     return n;
 }
 
+/* Peek/consume keeps local-loop output queued across a short PTY write. */
+static int ring_peek(ring_t *r, uint8_t *buf, int max)
+{
+    pthread_mutex_lock(&r->mtx);
+    int pos=r->tail,n=0;
+    while(n<max && pos!=r->head) {buf[n++]=r->buf[pos];pos=(pos+1)%RING_SIZE;}
+    pthread_mutex_unlock(&r->mtx);
+    return n;
+}
+static void ring_consume(ring_t *r, int n)
+{
+    pthread_mutex_lock(&r->mtx);
+    r->tail=(r->tail+n)%RING_SIZE;
+    pthread_mutex_unlock(&r->mtx);
+}
+static void ring_clear(ring_t *r)
+{
+    pthread_mutex_lock(&r->mtx);
+    r->head=r->tail=0;
+    pthread_mutex_unlock(&r->mtx);
+}
+
 /* ------------------------------------------------------------------ */
 /* Module state                                                        */
 /* ------------------------------------------------------------------ */
@@ -129,9 +153,21 @@ static at_state_t  *at         = NULL;
 static pthread_mutex_t t31_mtx = PTHREAD_MUTEX_INITIALIZER;
 static int          di_mode    = 0; /* Mode A: 0=command, 1=online data */
 static volatile int connected  = 0; /* carrier is up */
+/* The DTE ended this call itself (ATH): its teardown is answered by OK, so the
+ * engine's later report that the call is gone must not add a NO CARRIER. */
+static volatile int local_hangup = 0;
 static volatile int running    = 0;
 static pthread_t    reader_tid;
 static ring_t       upstream_ring;
+static ring_t       local_loop_ring;
+static at_test_t    diagnostics;
+/* Leaf lock: t31_mtx or g_state_mtx may be above it. Never call the engine,
+ * T.31 or a blocking PTY writer while holding it. Ring locks are below it. */
+static pthread_mutex_t test_mtx=PTHREAD_MUTEX_INITIALIZER;
+static int test_rate=9600;
+static int64_t test_last_ms;
+static uint64_t test_bit_fraction;
+
 
 /* AT+MS: the engine owns the modulation offer, the rates live here. */
 static di_ms_set_cb_t   ms_set_cb;
@@ -142,6 +178,15 @@ static di_ms_reset_cb_t ms_reset_cb;
  * while the engine still holds the mode it mapped to. */
 static at_ms_settings_t ms_cur;
 static bool             ms_cur_valid;
+
+/* V.250 +MR/+ES/+ER/+DS/+DR.  Written by the AT interpreter (under t31_mtx),
+ * read by the engine thread when it sets up a call, so it has a leaf lock of
+ * its own: nothing is called while holding it. */
+static v250_ctl_t        v250;
+static pthread_mutex_t   v250_mtx = PTHREAD_MUTEX_INITIALIZER;
+static di_connect_info_cb_t connect_info_cb;
+/* at_interpreter.c's private NO_RESULT_CODES (ATQ1). */
+#define DI_NO_RESULT_CODES 3
 
 /*
  * Class 2.0 (T.32) line assembly.  T.31 does its own line buffering, but in
@@ -182,6 +227,65 @@ static int data_port_active(void)
 static int data_master_fd(void)
 {
     return split_mode ? data_pty.master_fd : ctrl_pty.master_fd;
+}
+
+static void diagnostic_reset(bool power_on)
+{
+    pthread_mutex_lock(&test_mtx);
+    if(power_on)at_test_reset(&diagnostics);
+    else at_test_disconnect(&diagnostics);
+    ring_clear(&local_loop_ring);
+    test_bit_fraction=0;
+    test_last_ms=now_ms();
+    pthread_mutex_unlock(&test_mtx);
+}
+
+/* Common payload seam, after escape handling in Mode A. +TLDL is V.250
+ * 6.7.2.13's DTE->DTE loop; it must never send these bytes to the peer. */
+static void dte_payload(const uint8_t *buf,int n)
+{
+    pthread_mutex_lock(&test_mtx);
+    if(connected) {
+        if(diagnostics.local_loop) {
+            if(!diagnostics.type)ring_write(&local_loop_ring,buf,n);
+        } else ring_write(&upstream_ring,buf,n);
+    }
+    pthread_mutex_unlock(&test_mtx);
+}
+
+static bool payload_has_room(int n)
+{
+    pthread_mutex_lock(&test_mtx);
+    bool room=diagnostics.local_loop
+        ? diagnostics.type || ring_space(&local_loop_ring)>=n
+        : ring_space(&upstream_ring)>=n;
+    pthread_mutex_unlock(&test_mtx);
+    return room;
+}
+
+static void diagnostic_poll(void)
+{
+    uint8_t buf[256];
+    int64_t now=now_ms();
+    pthread_mutex_lock(&test_mtx);
+    int64_t elapsed=now-test_last_ms;
+    test_last_ms=now;
+    /* This is a software interface-loop clock. No PCM stream accounting is
+     * changed. Don't invent hours of checked bits after machine suspension. */
+    if(elapsed>1000)elapsed=1000;
+    if(elapsed>0 && diagnostics.type) {
+        test_bit_fraction+=(uint64_t)elapsed*(unsigned)test_rate;
+        at_test_clock_local(&diagnostics,test_bit_fraction/1000);
+        test_bit_fraction%=1000;
+    }
+    if(diagnostics.local_loop && !diagnostics.type && data_port_active()) {
+        int n=ring_peek(&local_loop_ring,buf,sizeof(buf));
+        if(n>0) {
+            int written=(int)write(data_master_fd(),buf,(size_t)n);
+            if(written>0)ring_consume(&local_loop_ring,written);
+        }
+    }
+    pthread_mutex_unlock(&test_mtx);
 }
 
 /* ------------------------------------------------------------------ */
@@ -265,13 +369,19 @@ static int handle_plus_ms(const char *args)
     char buf[4096];
     const char *want;
 
-    if (!ms_set_cb || !ms_get_cb || !ms_reset_cb)
-        return -1;
     if (!args) {
-        ms_reset_cb();
+        /* ATZ / AT&F: the whole V.250 profile this module owns goes back to its
+         * defaults, whether or not an engine has registered +MS. */
+        pthread_mutex_lock(&v250_mtx);
+        v250_ctl_reset(&v250);
+        pthread_mutex_unlock(&v250_mtx);
+        if (ms_reset_cb)
+            ms_reset_cb();
         ms_cur_valid = false;
         return 0;
     }
+    if (!ms_set_cb || !ms_get_cb || !ms_reset_cb)
+        return -1;
     switch (at_ms_parse(args, &ms)) {
     case AT_MS_SET:
         want = at_ms_settings_to_mode(&ms);
@@ -299,12 +409,63 @@ static int handle_plus_ms(const char *args)
     }
 }
 
+/* V.250 6.4.3, 6.5.1, 6.5.5, 6.6.1, 6.6.3: see v250_ctl.c. */
+static int handle_v250_parameter(const char *text)
+{
+    char info[160];
+    v250_ctl_result_t r;
+
+    pthread_mutex_lock(&v250_mtx);
+    r = v250_ctl_command(&v250, text, info, sizeof(info));
+    pthread_mutex_unlock(&v250_mtx);
+    if (r != V250_CTL_OK)
+        return -1;
+    if (info[0])
+        at_put_response(at, info);
+    return 0;
+}
+
+void di_get_v250_settings(v250_ctl_t *out)
+{
+    pthread_mutex_lock(&v250_mtx);
+    *out = v250;
+    pthread_mutex_unlock(&v250_mtx);
+}
+
+void di_set_connect_info_cb(di_connect_info_cb_t cb)
+{
+    connect_info_cb = cb;
+}
+
 void di_set_modulation_ops(di_ms_set_cb_t set, di_ms_get_cb_t get,
                            di_ms_reset_cb_t reset)
 {
     ms_set_cb = set;
     ms_get_cb = get;
     ms_reset_cb = reset;
+}
+
+static int handle_diagnostic(const char *command)
+{
+    char response[256];
+    bool online=connected && at && at->fclass_mode==0 && !fc2_active()
+        && at->at_rx_mode==AT_MODE_OFFHOOK_COMMAND;
+    if(!command)return -1;
+    pthread_mutex_lock(&test_mtx);
+    bool was_loop=diagnostics.local_loop;
+    int result=at_test_command(&diagnostics,command,online,response,sizeof(response));
+    if(result==0) {
+        /* Entering/stopping a loop cannot leak test bytes into later calls.
+         * Starting a BERT discards pending local echo, per 6.7.2.13. */
+        bool bert_action=!strncmp(command,"+TTER=",6) && command[6]!='?';
+        if(was_loop!=diagnostics.local_loop || bert_action) {
+            ring_clear(&local_loop_ring);
+            test_last_ms=now_ms();test_bit_fraction=0;
+        }
+    }
+    pthread_mutex_unlock(&test_mtx);
+    if(result==0 && response[0])at_put_response(at,response);
+    return result;
 }
 
 static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
@@ -330,8 +491,10 @@ static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
          * flush its datapumps.  Do not feed that notification back into the
          * engine as a new local ATH: di_on_disconnected() has already cleared
          * connected, and the engine has just returned to ME_IDLE. */
-        if (hangup_cb && connected)
+        if (hangup_cb && connected) {
+            local_hangup = 1;
             hangup_cb(cb_user_data);
+        }
         break;
 
     /* Signal line controls — not connected to real hardware */
@@ -344,7 +507,29 @@ static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
         break;
 
     case AT_MODEM_CONTROL_MODULATION:
+        if(!num)diagnostic_reset(true); /* ATZ/AT&F, V.250 6.7.2.17 */
         return handle_plus_ms(num);
+    case AT_MODEM_CONTROL_DIAGNOSTIC:
+        return handle_diagnostic(num);
+
+    case AT_MODEM_CONTROL_PARAMETER:
+        return handle_v250_parameter(num);
+
+    case AT_MODEM_CONTROL_RESUME:
+        /* V.250 6.3.7.  With a separate data port there is no online data
+         * state on this port to return to: the payload path is the other PTY.
+         * ATO therefore just names it (slave device path) and answers OK,
+         * call up or not.  On the combined console it resumes the data
+         * connection, or answers NO CARRIER if there is none.  A fax class
+         * owns its own session and keeps the interpreter's behaviour. */
+        if (split_mode) {
+            at_put_response(at, data_pty.slave_name);
+            return 1;
+        }
+        if (!connected)
+            return -1;
+        /* t31_mtx is already held on this path; di_fax_active() would take it. */
+        return 0;
 
     default:
         break;
@@ -392,7 +577,7 @@ static void flush_pending_escape_bytes(void)
     static const uint8_t pluses[3] = { '+', '+', '+' };
 
     if (esc_count > 0) {
-        ring_write(&upstream_ring, pluses, esc_count);
+        dte_payload(pluses,esc_count);
         esc_count = 0;
     }
 }
@@ -421,7 +606,7 @@ static void handle_online_data_bytes(const uint8_t *buf, int n)
             esc_count++;
         } else {
             flush_pending_escape_bytes();
-            ring_write(&upstream_ring, &byte, 1);
+            dte_payload(&byte,1);
         }
         last_data_byte_ms = now;
     }
@@ -434,6 +619,7 @@ static void handle_online_data_bytes(const uint8_t *buf, int n)
 static void sync_fax_class(void)
 {
     int want = (at && at->fclass_mode == 3);
+    if(at && at->fclass_mode!=0)diagnostic_reset(false);
 
     if (want != fc2_active()) {
         fc2_select(want);
@@ -519,7 +705,7 @@ static void *pty_reader_thread(void *arg)
          * and blocks the DTE's writes -- the alternative, reading and then
          * truncating in ring_write(), lost whole runs of a bulk transfer
          * (artifacts/slm-v90-pay1: 521 gaps downstream at 54666 bit/s). */
-        bool payload_room = ring_space(&upstream_ring) >= (int) sizeof(buf);
+        bool payload_room = payload_has_room(sizeof(buf));
 
         FD_ZERO(&fds);
         if (split_mode || di_mode != 1 || payload_room)
@@ -532,6 +718,8 @@ static void *pty_reader_thread(void *arg)
         struct timeval tv = { .tv_sec = 0, .tv_usec = 50000 }; /* 50 ms */
 
         int r = select(maxfd + 1, &fds, NULL, NULL, &tv);
+
+        diagnostic_poll();
 
         /* Class 2.0 reports raised by the media thread are emitted here, and
          * so is the page a +FDR has been waiting for. */
@@ -576,7 +764,7 @@ static void *pty_reader_thread(void *arg)
 
             /* Payload only flows while the carrier is up. */
             if (n > 0 && connected)
-                ring_write(&upstream_ring, buf, n);
+                dte_payload(buf,n);
             else if (n == 0 || (n < 0 && errno == EIO))
                 idle_eof = true;
         }
@@ -660,9 +848,16 @@ static void di_pty_close(di_pty_t *p)
 static int di_start(void)
 {
     ring_init(&upstream_ring);
+    pthread_mutex_lock(&v250_mtx);
+    v250_ctl_reset(&v250);
+    pthread_mutex_unlock(&v250_mtx);
+    ring_init(&local_loop_ring);
+    diagnostic_reset(true);
     t31 = t31_init(NULL, at_tx_handler, NULL,
                    at_modem_control_handler, NULL, NULL, NULL);
     if (!t31) {
+        pthread_mutex_destroy(&upstream_ring.mtx);
+        pthread_mutex_destroy(&local_loop_ring.mtx);
         fprintf(stderr, "di_open: t31_init failed\n");
         return -1;
     }
@@ -681,6 +876,8 @@ static int di_start(void)
         t31_free(t31);
         t31 = NULL;
         at = NULL;
+        pthread_mutex_destroy(&upstream_ring.mtx);
+        pthread_mutex_destroy(&local_loop_ring.mtx);
         return -1;
     }
     return 0;
@@ -724,6 +921,9 @@ void di_close(void)
     running = 0;
     pthread_join(reader_tid, NULL);
 
+    diagnostic_reset(true);
+    pthread_mutex_destroy(&upstream_ring.mtx);
+    pthread_mutex_destroy(&local_loop_ring.mtx);
     fc2_release();
     if (t31) { t31_free(t31); t31 = NULL; at = NULL; }
     di_pty_close(&data_pty);
@@ -749,6 +949,10 @@ void di_on_connected(int rate)
 {
     char msg[64];
 
+    diagnostic_reset(false);
+    pthread_mutex_lock(&test_mtx);
+    test_rate=rate>0?rate:9600;
+    pthread_mutex_unlock(&test_mtx);
     connected = 1;
     esc_count = 0;
     last_data_byte_ms = now_ms();
@@ -779,6 +983,25 @@ void di_on_connected(int rate)
         at_set_at_rx_mode(at, AT_MODE_CONNECTED);
     }
 
+    /* 6.4.3, 6.5.5, 6.6.3: the modulation, error control and compression
+     * reports go out at the point the DCE has settled them, in that order, and
+     * before CONNECT.  They are result codes, so ATQ1 silences them. */
+    if (connect_info_cb && at && at->p.result_code_format != DI_NO_RESULT_CODES) {
+        v250_connect_report_t rep;
+        v250_ctl_t cfg;
+        char text[256];
+        size_t n;
+
+        memset(&rep, 0, sizeof(rep));
+        rep.tx_rate = rate;
+        rep.ec = "NONE";
+        connect_info_cb(rate, &rep);
+        di_get_v250_settings(&cfg);
+        n = v250_ctl_format_report(&cfg, &rep, text, sizeof(text));
+        if (n)
+            ctrl_write(text, n);
+    }
+
     snprintf(msg, sizeof(msg), "\r\nCONNECT %d\r\n", rate);
     if (ctrl_pty.master_fd >= 0)
         write(ctrl_pty.master_fd, msg, strlen(msg));
@@ -786,7 +1009,11 @@ void di_on_connected(int rate)
 
 void di_on_disconnected(void)
 {
+    int local = local_hangup;
+
+    local_hangup = 0;
     connected = 0;
+    diagnostic_reset(false);
     di_mode = 0;
     esc_count = 0;
     at_set_at_rx_mode(at, AT_MODE_ONHOOK_COMMAND);
@@ -804,7 +1031,8 @@ void di_on_disconnected(void)
         return;
     }
     at_call_event(at, AT_CALL_EVENT_HANGUP);
-    at_put_response_code(at, AT_RESPONSE_CODE_NO_CARRIER);
+    if (!local)
+        at_put_response_code(at, AT_RESPONSE_CODE_NO_CARRIER);
 }
 
 void di_on_ring(void)
@@ -821,16 +1049,25 @@ int di_read_data(uint8_t *buf, int max_len)
 {
     if (!data_port_active())
         return 0;
-    return ring_read(&upstream_ring, buf, max_len);
+    pthread_mutex_lock(&test_mtx);
+    int n=diagnostics.local_loop?0:ring_read(&upstream_ring,buf,max_len);
+    pthread_mutex_unlock(&test_mtx);
+    return n;
 }
 
 int di_write_data(const uint8_t *buf, int len)
 {
-    int fd = data_master_fd();
-
-    if (fd < 0 || !data_port_active())
-        return 0;
-    return (int)write(fd, buf, (size_t)len);
+    /* Serialize route selection with +TLDL activation. A non-blocking write
+     * is bounded; checking the flag then unlocking would let remote bytes
+     * arrive at the DTE after the loop-start command had already answered OK. */
+    pthread_mutex_lock(&test_mtx);
+    int n;
+    int fd=data_master_fd();
+    if(diagnostics.local_loop)n=len;
+    else if(fd<0 || !data_port_active())n=0;
+    else n=(int)write(fd,buf,(size_t)len);
+    pthread_mutex_unlock(&test_mtx);
+    return n;
 }
 
 /* ------------------------------------------------------------------ */

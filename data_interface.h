@@ -11,6 +11,10 @@
  *   other unsolicited codes appear here, commands work mid-call) and a
  *   separate data PTY that carries only the connection payload.
  *
+ * ATO (V.250 6.3.7): on the combined console it resumes the data connection
+ * (CONNECT) or answers NO CARRIER with no call up; on the control port of a
+ * split console it prints the data PTY's device path and answers OK.
+ *
  * Uses SpanDSP's at_state_t for AT command parsing (ATD, ATA, ATH, ATZ, ...).
  */
 
@@ -20,6 +24,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
+#include "v250_ctl.h"
 
 /* Opaque callbacks set by the modem engine */
 typedef void (*di_dial_cb_t)(const char *sip_uri, void *user_data);
@@ -64,6 +69,18 @@ void di_set_modulation_ops(di_ms_set_cb_t set, di_ms_get_cb_t get,
                            di_ms_reset_cb_t reset);
 
 /*
+ * V.250 +MR/+ES/+ER/+DS/+DR (v250_ctl.h).  di_get_v250_settings() copies what
+ * the DTE has configured for the next call.  The engine registers a callback
+ * that di_on_connected() uses to learn what the call actually settled on --
+ * carrier, directional rates, error control, compression -- so +MCR/+MRR/+ER/
+ * +DR report the negotiated outcome, never the requested one.  On entry the
+ * report holds the CONNECT rate as tx_rate and "NONE" error control.
+ */
+typedef void (*di_connect_info_cb_t)(int connect_rate, v250_connect_report_t *report);
+void di_get_v250_settings(v250_ctl_t *out);
+void di_set_connect_info_cb(di_connect_info_cb_t cb);
+
+/*
  * Called by the modem engine when a connection is established.
  * rate: negotiated data rate in bit/s (e.g. 2400, 56000).
  * Sends CONNECT <rate> to the control port; in Mode A also switches the
@@ -85,12 +102,14 @@ void di_on_ring(void);
 
 /*
  * Read DTE payload bytes (application → modem). Non-blocking; returns the
- * number of bytes copied (0 when idle or not in data transfer).
+ * number of bytes copied (0 when idle, not in data transfer, or while the
+ * V.250 +TLDL local DTE loop owns the payload route).
  */
 int di_read_data(uint8_t *buf, int max_len);
 
 /*
  * Write received payload bytes (modem → application). Non-blocking.
+ * During +TLDL these bytes are consumed and clamped from the DTE.
  */
 int di_write_data(const uint8_t *buf, int len);
 

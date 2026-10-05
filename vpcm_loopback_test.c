@@ -12451,6 +12451,7 @@ int main(int argc, char **argv)
     bool run_primitives;
     bool run_v91_e2e_call;
     bool run_v92_e2e_call;
+    bool pcm_procedures = false;
     int v91_e2e_seconds;
     int v92_e2e_seconds;
     v91_law_t v91_e2e_law;
@@ -12470,7 +12471,10 @@ int main(int argc, char **argv)
     g_vpcm_stop_requested = 0;
 
     for (i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--all-tests") == 0) {
+        if (strcmp(argv[i], "--pcm-procedure-tests") == 0) {
+            pcm_procedures = true;
+            run_sessions = run_primitives = false;
+        } else if (strcmp(argv[i], "--all-tests") == 0) {
             run_sessions = true;
             run_primitives = true;
         } else if (strcmp(argv[i], "--primitive-tests") == 0) {
@@ -12569,6 +12573,7 @@ int main(int argc, char **argv)
             printf("Usage: %s [--session-only] [--primitive-tests] [--all-tests] [--session-diag] [--experimental-v90-info]\n", argv[0]);
             printf("  default           Run call-oriented end-to-end session tests only.\n");
             printf("  --primitive-tests Add focused primitive/component tests.\n");
+            printf("  --pcm-procedure-tests  Focused V.90/V.92 V.8, Phase 2/4 and PCM receiver checks.\n");
             printf("  --all-tests       Run both session and primitive suites.\n");
             printf("  --session-diag    Emit INFO/CP diagnostic tables during session tests.\n");
             printf("  --experimental-v90-info  Run the real SpanDSP V.90 INFO startup harness.\n");
@@ -12610,6 +12615,25 @@ int main(int argc, char **argv)
              (g_vpcm_transport_backend == VPCM_TRANSPORT_LOOPBACK) ? "loopback" : "pj-sip",
              run_v91_e2e_call ? "on" : "off",
              run_v92_e2e_call ? "on" : "off");
+
+    if (pcm_procedures) {
+        /* Keep directed datapump BER separate from startup/procedure coverage.
+         * Native V.92 Phase 4 is exercised by its TRN2u peer, not the V.90
+         * session's compatibility payload path. */
+        return !(test_v8_v90_startup_over_analog_g711(V91_LAW_ULAW)
+            && test_v8_v90_startup_over_analog_g711(V91_LAW_ALAW)
+            && test_spandsp_v90_info_startup_over_analog_g711(V91_LAW_ULAW)
+            && test_spandsp_v90_info_startup_over_analog_g711(V91_LAW_ALAW)
+            && test_v8_v92_qc_exchange_over_analog_g711(V91_LAW_ULAW)
+            && test_v8_v92_qc_exchange_over_analog_g711(V91_LAW_ALAW)
+            && test_v92_phase3_transitions()
+            && test_v92_native_cpu_receiver()
+            && test_v92_trn2u_loopback()
+            && test_v92_native_cpu_phase4(V91_LAW_ULAW)
+            && test_v92_native_cpu_phase4(V91_LAW_ALAW)
+            && test_v90_v92_startup_contract_path(V91_LAW_ULAW)
+            && test_v90_v92_startup_contract_path(V91_LAW_ALAW));
+    }
 
     if (run_v91_e2e_call) {
         return run_v91_e2e_mode(v91_e2e_law, v91_e2e_seconds);

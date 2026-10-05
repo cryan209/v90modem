@@ -190,6 +190,25 @@ noise/delay profiles, retaining JSON results and logs for failed cases too.
 These are synthetic line measurements, not full V.56bis network coverage.
 See [the harness guide](docs/v56_loopback.md) for custom sweeps and limitations.
 
+## AT Diagnostic Loops
+
+`AT+TLDL` enables a local DTE digital loop during an established data call.
+`AT+TTER` runs finite pattern tests on that software loop; `AT+TNUM?` reports
+retained bit/block errors. `make at_test_test` verifies both PTY modes.
+`AT+TSELF=1` performs a limited safe host-memory/controller check.
+Remote/analogue loop actions and full self-tests return ERROR until their
+actual procedures are implemented. See [AT diagnostics](docs/v54_diagnostics.md).
+
+## V.90/V.92 PCM Loopback
+
+`make pcm-loopback-test` runs a strict directed PCM datapump matrix plus
+startup and recovery procedure checks. `make pcm-matrix` retains diagnostic
+results across all V.90 downstream and V.92 PCM-upstream profiles, including
+high-rate failures. The downstream DS0 remains byte-exact; optional upstream
+noise is applied before the simulated network A/D. See
+[PCM testing procedures](docs/pcm_loopback_testing.md) for coverage, measured
+limitations and reproducible sweeps.
+
 ## Python Analysis Tools
 
 - The offline demod / Ja-analysis scripts under `tools/` use a small Python stack.
@@ -257,7 +276,8 @@ Local/no-register launcher:
 
 Useful flags:
 
-- `--pty-link /tmp/v90modem` (serial endpoint symlink)
+- `--pty-link /tmp/v90modem` (classic combined console: commands and data on one port, `+++` / `ATO`)
+- `--control-link /tmp/v90ctl --data-link /tmp/v90data` (control console that always speaks AT, plus a payload-only data port; `ATO` on the control port prints the data PTY's path; not combinable with `--pty-link`)
 - `--local-port 5060` (local SIP UDP port)
 - `--log-file /tmp/v90modem.log` (capture runtime logs)
 - `--no-build` (skip rebuild)
