@@ -170,9 +170,16 @@ static void test_classic(void)
     expect(dte, "ATD5551234", "");
     usleep(100000);
     check(dial_calls == 1 && !strcmp(last_number, "5551234"), "ATD reaches the dial callback");
+    usleep(150000);
     send_str(dte, "should be dropped, no call\r");
-    usleep(100000);
+    collect(dte, buf, sizeof(buf), 200);
     check(engine_reads(got, sizeof(got), 100) == 0, "bytes sent before CONNECT are not payload");
+    /* V.250 5.6.1: they abort the dial, which answers OK. */
+    check(hangup_calls == 1 && strstr(buf, "OK"), "...they abort the dial in progress (OK)");
+    hangup_calls = 0;
+    di_on_disconnected();
+    collect(dte, buf, sizeof(buf), 150);
+    expect(dte, "ATD5551234", "");
 
     di_on_connected(33600);
     collect(dte, buf, sizeof(buf), 150);
@@ -709,12 +716,126 @@ static void test_help(void)
     di_close();
 }
 
+/* Call progress: V.250 6.2.5-6.2.7, 6.3.1 (Table 8), 6.3.10 and 5.6.1. */
+static void test_call_progress(void)
+{
+    const char *link = "/tmp/console_test_progress";
+    char buf[4096];
+    int dte;
+    int h;
+
+    printf("Call progress, X/V/Q, abort and S7:\n");
+    if (di_open(link) < 0) {
+        failures++;
+        return;
+    }
+    di_set_callbacks(cb_dial, cb_answer, cb_hangup, NULL);
+    dte = open_dte(link);
+    if (dte < 0) {
+        failures++;
+        di_close();
+        return;
+    }
+    expect(dte, "ATE0", "OK");
+    expect(dte, "ATZ1", "ERROR");                   /* only profile 0 exists */
+    expect(dte, "ATI4", " X4 ");                    /* the default */
+
+    /* CONNECT as X, V and Q say. */
+    expect(dte, "ATD1", "");
+    di_on_connected(31200);
+    collect(dte, buf, sizeof(buf), 150);
+    check(strstr(buf, "\r\nCONNECT 31200\r\n") != NULL, "X4: CONNECT 31200");
+    di_on_disconnected();
+    collect(dte, buf, sizeof(buf), 150);
+    expect(dte, "ATX0", "OK");
+    expect(dte, "ATD1", "");
+    di_on_connected(31200);
+    collect(dte, buf, sizeof(buf), 150);
+    check(strstr(buf, "\r\nCONNECT\r\n") && !strstr(buf, "31200"), "X0: CONNECT without text");
+    di_on_disconnected();
+    collect(dte, buf, sizeof(buf), 150);
+    expect(dte, "ATX4V0", "0\r");
+    expect(dte, "ATD1", "");
+    di_on_connected(31200);
+    collect(dte, buf, sizeof(buf), 150);
+    check(!strcmp(buf, "1\r"), "V0: numeric 1 for CONNECT");
+    di_on_disconnected();
+    collect(dte, buf, sizeof(buf), 150);
+    check(strstr(buf, "3\r") != NULL, "V0: numeric 3 for NO CARRIER");
+    expect(dte, "ATV1Q1", "");
+    expect(dte, "ATD1", "");
+    di_on_connected(31200);
+    collect(dte, buf, sizeof(buf), 150);
+    check(buf[0] == '\0', "Q1: no CONNECT at all");
+    di_on_disconnected();
+    collect(dte, buf, sizeof(buf), 150);
+    expect(dte, "ATQ0", "OK");
+
+    /* A dialled call that never answers: the result code follows X. */
+    expect(dte, "ATD1", "");
+    di_on_call_failed(486);
+    collect(dte, buf, sizeof(buf), 150);
+    check(strstr(buf, "BUSY") != NULL, "X4: SIP 486 is BUSY");
+    expect(dte, "ATI6", "Busy (SIP 486)");
+    expect(dte, "ATX0D1", "");
+    di_on_call_failed(486);
+    collect(dte, buf, sizeof(buf), 150);
+    check(strstr(buf, "NO CARRIER") && !strstr(buf, "BUSY"), "X0: busy detection off, NO CARRIER");
+    expect(dte, "ATX4D1", "");
+    di_on_call_failed(503);
+    collect(dte, buf, sizeof(buf), 150);
+    check(strstr(buf, "NO DIALTONE") != NULL, "X4: SIP 503 is NO DIALTONE");
+    expect(dte, "ATX3D1", "");
+    di_on_call_failed(0);
+    collect(dte, buf, sizeof(buf), 150);
+    check(strstr(buf, "NO CARRIER") && !strstr(buf, "DIALTONE"), "X3: dial tone detection off, NO CARRIER");
+    expect(dte, "ATX4D1", "");
+    di_on_call_failed(480);
+    collect(dte, buf, sizeof(buf), 150);
+    check(strstr(buf, "NO CARRIER") != NULL, "SIP 480 without @ is NO CARRIER");
+    expect(dte, "ATD@1", "");
+    di_on_call_failed(480);
+    collect(dte, buf, sizeof(buf), 150);
+    check(strstr(buf, "NO ANSWER") != NULL, "SIP 480 with @ is NO ANSWER");
+
+    /* Any character aborts a dial in progress (after 125 ms): OK, hung up. */
+    h = hangup_calls;
+    expect(dte, "ATD1", "");
+    usleep(200000);
+    send_str(dte, "x");
+    collect(dte, buf, sizeof(buf), 250);
+    check(strstr(buf, "OK") && hangup_calls == h + 1, "a character aborts the dial: OK, call ended");
+    di_on_disconnected();                           /* the engine's teardown follows */
+    collect(dte, buf, sizeof(buf), 150);
+    check(!strstr(buf, "NO CARRIER"), "...and the teardown adds no NO CARRIER");
+    expect(dte, "ATI6", "Aborted by the DTE");
+
+    /* ATH ends a dial that has not connected. */
+    h = hangup_calls;
+    expect(dte, "ATD1", "");
+    usleep(150000);
+    expect(dte, "ATH", "OK");
+    check(hangup_calls == h + 1, "ATH ends a dial still in progress");
+
+    /* S7: no connection in time is NO CARRIER and a hang-up. */
+    h = hangup_calls;
+    expect(dte, "ATS7=1D1", "");
+    collect(dte, buf, sizeof(buf), 1500);
+    check(strstr(buf, "NO CARRIER") && hangup_calls == h + 1, "S7=1: NO CARRIER after a second");
+    expect(dte, "ATI6", "Timeout (S7)");
+    expect(dte, "ATS7=60", "OK");
+
+    close(dte);
+    di_close();
+}
+
 int main(void)
 {
     test_classic();
     test_split();
     test_v250_parameters();
     test_help();
+    test_call_progress();
     printf("%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures, failures == 1 ? "" : "s");
     return failures != 0;
 }

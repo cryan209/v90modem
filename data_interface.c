@@ -160,6 +160,10 @@ static volatile int connected  = 0; /* carrier is up */
 /* The DTE ended this call itself (ATH): its teardown is answered by OK, so the
  * engine's later report that the call is gone must not add a NO CARRIER. */
 static volatile int local_hangup = 0;
+/* ATD/ATA issued, not yet CONNECTed or ended: V.250 5.6.1 lets the DTE abort
+ * it with any character, S7 (6.3.10) bounds it, and ATH ends it. */
+static volatile int call_pending = 0;
+static int64_t      call_pending_ms;
 static volatile int running    = 0;
 static pthread_t    reader_tid;
 static ring_t       upstream_ring;
@@ -531,6 +535,107 @@ void di_update_link(const v250_connect_report_t *rep, const char *detail, const 
     pthread_mutex_unlock(&test_mtx);
 }
 
+/* The engine's capture modes hold a call that will never CONNECT on purpose
+ * (a sounder, a voice capture, a Phase 3 or V.8 failure kept up for the
+ * taps); S7 would end them at 60 s, so it stands down while one is set. */
+static bool measurement_hold(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        static const char *const vars[] = {
+            "ME_SOUNDER", "ME_VOICE_CAPTURE_HOLD", "ME_V90_ANALOGUE_HOLD",
+            "ME_V90_V8_FAIL_HOLD", "ME_DATA_HOLD"
+        };
+
+        cached = 0;
+        for (size_t i = 0; i < sizeof(vars) / sizeof(vars[0]); i++) {
+            const char *v = getenv(vars[i]);
+
+            if (v && v[0] && strcmp(v, "0") != 0)
+                cached = 1;
+        }
+    }
+    return cached == 1;
+}
+
+/* A call that ended before CONNECT, for ATI6. */
+static void link_record_failure(const char *cause, int originate)
+{
+    pthread_mutex_lock(&test_mtx);
+    memset(&link_now, 0, sizeof(link_now));
+    link_now.valid = true;
+    link_now.failed = true;
+    link_now.originate = originate >= 0 ? originate != 0 : link_next_originate;
+    link_now.start_ms = link_now.end_ms = now_ms();
+    snprintf(link_now.carrier, sizeof(link_now.carrier), "-");
+    snprintf(link_now.ec, sizeof(link_now.ec), "NONE");
+    snprintf(link_now.cause, sizeof(link_now.cause), "%s", cause);
+    pthread_mutex_unlock(&test_mtx);
+}
+
+/* End a dial or answer that has not CONNECTed (5.6.1 abort, S7 timeout) and
+ * give the DTE its final result code. */
+static void abort_pending_call(int code, const char *cause)
+{
+    if (!call_pending)
+        return;
+    call_pending = 0;
+    link_record_failure(cause, -1);
+    local_hangup = 1;
+    if (hangup_cb)
+        hangup_cb(cb_user_data);
+    pthread_mutex_lock(&t31_mtx);
+    at_set_at_rx_mode(at, AT_MODE_ONHOOK_COMMAND);
+    at_put_response_code(at, code);
+    pthread_mutex_unlock(&t31_mtx);
+}
+
+void di_on_call_failed(int sip_status)
+{
+    int x = at ? at->result_code_mode : 4;
+    int code = AT_RESPONSE_CODE_NO_CARRIER;
+    char cause[64];
+
+    call_pending = 0;
+    if (local_hangup) {
+        /* The DTE ended it (ATH, abort, S7); its result code is given. */
+        local_hangup = 0;
+        return;
+    }
+    connected = 0;
+    if (sip_status == 486 || sip_status == 600) {
+        snprintf(cause, sizeof(cause), "Busy (SIP %d)", sip_status);
+        if (x >= 3)
+            code = AT_RESPONSE_CODE_BUSY;
+    } else if (sip_status == 0 || sip_status == 500 || sip_status == 502
+               || sip_status == 503 || sip_status == 504) {
+        /* The network would not take the call: the nearest thing a SIP
+         * line has to no dial tone. */
+        snprintf(cause, sizeof(cause), "Network unavailable (SIP %d)", sip_status);
+        if (x == 2 || x == 4)
+            code = AT_RESPONSE_CODE_NO_DIALTONE;
+    } else if (sip_status == 408 || sip_status == 480 || sip_status == 487) {
+        snprintf(cause, sizeof(cause), "No answer (SIP %d)", sip_status);
+        /* Table 8: NO ANSWER belongs to the @ modifier. */
+        if (at && at->silent_dial)
+            code = AT_RESPONSE_CODE_NO_ANSWER;
+    } else if (sip_status > 0) {
+        snprintf(cause, sizeof(cause), "Call rejected (SIP %d)", sip_status);
+    } else {
+        snprintf(cause, sizeof(cause), "Call not completed");
+    }
+    link_record_failure(cause, 1);
+    if (fc2_active()) {
+        fc2_on_disconnected();
+        return;
+    }
+    pthread_mutex_lock(&t31_mtx);
+    at_set_at_rx_mode(at, AT_MODE_ONHOOK_COMMAND);
+    at_put_response_code(at, code);
+    pthread_mutex_unlock(&t31_mtx);
+}
+
 /* Power-on: ATI6/ATI11 have no call to report until one connects. */
 static void link_reset(void)
 {
@@ -843,6 +948,8 @@ static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
         pthread_mutex_lock(&test_mtx);
         link_next_originate = true;
         pthread_mutex_unlock(&test_mtx);
+        call_pending = 1;
+        call_pending_ms = now_ms();
         if (dial_cb && num && num[0])
             dial_cb(num, cb_user_data);
         break;
@@ -851,6 +958,8 @@ static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
         pthread_mutex_lock(&test_mtx);
         link_next_originate = false;
         pthread_mutex_unlock(&test_mtx);
+        call_pending = 1;
+        call_pending_ms = now_ms();
         if (answer_cb)
             answer_cb(cb_user_data);
         break;
@@ -861,8 +970,13 @@ static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
          * flush its datapumps.  Do not feed that notification back into the
          * engine as a new local ATH: di_on_disconnected() has already cleared
          * connected, and the engine has just returned to ME_IDLE. */
-        if (hangup_cb && connected) {
+        if (hangup_cb && (connected || call_pending)) {
+            /* A dial or answer still in progress ends too: ATH used to be
+             * ignored until the call had CONNECTed. */
+            if (!connected)
+                link_record_failure("Local (ATH)", 1);
             local_hangup = 1;
+            call_pending = 0;
             hangup_cb(cb_user_data);
         }
         break;
@@ -1068,6 +1182,15 @@ static void handle_command_bytes(const uint8_t *buf, int n)
         return;
     }
 
+    /* V.250 5.6.1 / 6.3.1: any character aborts a dial (or answer) still in
+     * progress, once 125 ms have passed since the command line ended; Table 8
+     * gives OK.  Data class only: a fax DTE goes on issuing commands. */
+    if (call_pending && !connected && at && at->fclass_mode == 0) {
+        if (now_ms() - call_pending_ms >= 125)
+            abort_pending_call(AT_RESPONSE_CODE_OK, "Aborted by the DTE");
+        return;
+    }
+
     pthread_mutex_lock(&t31_mtx);
     t31_at_rx(t31, (const char *)buf, n);
     sync_fax_class();
@@ -1119,6 +1242,12 @@ static void *pty_reader_thread(void *arg)
          * so is the page a +FDR has been waiting for. */
         if (fc2_active())
             fc2_poll();
+
+        /* S7, V.250 6.3.10: a dial or answer that has not connected in time
+         * is ended with NO CARRIER (Table 8). */
+        if (call_pending && !connected && at && at->fclass_mode == 0 && !measurement_hold()
+            && now_ms() - call_pending_ms > (int64_t) at->p.s_regs[7] * 1000)
+            abort_pending_call(AT_RESPONSE_CODE_NO_CARRIER, "Timeout (S7)");
 
         /* Escape timer: three withheld '+' followed by a silent guard time */
         if (!split_mode && di_mode == 1 && esc_count == 3
@@ -1347,6 +1476,8 @@ void di_on_connected(int rate)
     v250_connect_report_t rep;
     bool fax = fc2_active() || di_fax_active();
 
+    call_pending = 0;
+
     /* What the call settled on, asked once: it feeds the +MCR/+ER/+DR reports
      * below and ATI6, which the DTE may read after the call (or with ATQ1). */
     memset(&rep, 0, sizeof(rep));
@@ -1404,9 +1535,17 @@ void di_on_connected(int rate)
             ctrl_write(text, n);
     }
 
-    snprintf(msg, sizeof(msg), "\r\nCONNECT %d\r\n", rate);
-    if (ctrl_pty.master_fd >= 0)
-        write(ctrl_pty.master_fd, msg, strlen(msg));
+    /* V.250 6.2.5-6.2.7: no result code under Q1, the numeric code under
+     * V0, and CONNECT without text under X0. */
+    if (at && at->p.result_code_format == DI_NO_RESULT_CODES)
+        return;
+    if (at && !at->p.verbose)
+        snprintf(msg, sizeof(msg), "1%c", at->p.s_regs[3]);
+    else if (at && at->result_code_mode == 0)
+        snprintf(msg, sizeof(msg), "\r\nCONNECT\r\n");
+    else
+        snprintf(msg, sizeof(msg), "\r\nCONNECT %d\r\n", rate);
+    ctrl_write(msg, strlen(msg));
 }
 
 void di_on_disconnected(void)
@@ -1418,7 +1557,13 @@ void di_on_disconnected_cause(const char *cause, int originate)
 {
     int local = local_hangup;
 
+    call_pending = 0;
     pthread_mutex_lock(&test_mtx);
+    if (local && !link_now.active) {
+        /* ATH or an abort before CONNECT already recorded why. */
+        pthread_mutex_unlock(&test_mtx);
+        goto recorded;
+    }
     if (!link_now.active) {
         /* Ended before CONNECT: ATI6 reports the attempt, not an older call. */
         memset(&link_now, 0, sizeof(link_now));
@@ -1434,6 +1579,7 @@ void di_on_disconnected_cause(const char *cause, int originate)
     snprintf(link_now.cause, sizeof(link_now.cause), "%s",
              local ? "Local (ATH)" : (cause ? cause : "Remote or line"));
     pthread_mutex_unlock(&test_mtx);
+recorded:
     local_hangup = 0;
     connected = 0;
     diagnostic_reset(false);

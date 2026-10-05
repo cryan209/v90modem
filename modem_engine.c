@@ -8548,6 +8548,11 @@ void me_on_sip_connected(void)
 /* Called by sip_modem.c when the SIP call is torn down */
 void me_on_sip_disconnected(void)
 {
+    me_on_sip_disconnected_status(-1);
+}
+
+void me_on_sip_disconnected_status(int sip_status)
+{
     pthread_mutex_lock(&g_state_mtx);
 
     if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
@@ -8587,7 +8592,11 @@ void me_on_sip_disconnected(void)
        "required" not met, a training failure) and the DTE is owed NO CARRIER
        for it as much as for the far end dropping.  A hang-up the DTE asked for
        is already accounted for by data_interface.c. */
-    if (prev == ME_DATA || prev == ME_TRAINING || prev == ME_V8 || prev == ME_HANGUP)
+    /* A dialled call that never answered: until now the DTE heard nothing at
+       all (a busy number left ATD hanging). */
+    if (prev == ME_DIALING)
+        di_on_call_failed(sip_status);
+    else if (prev == ME_DATA || prev == ME_TRAINING || prev == ME_V8 || prev == ME_HANGUP)
         di_on_disconnected_cause(prev == ME_HANGUP
                                  ? "Modem (protocol or training failure)"
                                  : "Remote (call cleared)", was_caller);

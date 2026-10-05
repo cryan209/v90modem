@@ -79,6 +79,11 @@ enum
     NO_RESULT_CODES
 };
 
+/* V.250 6.2.7's X has no recommended default.  4 is the Hayes one: CONNECT
+   with text, and dial tone/busy detection on (here: what the SIP network
+   reports).  X0 gives CONNECT without text. */
+#define AT_DEFAULT_RESULT_CODE_MODE 4
+
 static at_profile_t profiles[3] =
 {
     {
@@ -1467,13 +1472,16 @@ static const char *at_cmd_Z(at_state_t *s, const char *t)
 
     /* V.250 6.1.1 - Reset to default configuration */
     t += 1;
-    if ((val = parse_num(&t, sizeof(profiles)/sizeof(profiles[0]) - 1)) < 0)
+    /* Only profile 0 is defined: the others are all-zero, and restoring one
+       would set S3 to 0 and leave the DTE no way to end a command line. */
+    if ((val = parse_num(&t, 0)) < 0)
         return NULL;
     /*endif*/
     /* Just make sure we are on hook */
     at_modem_control(s, AT_MODEM_CONTROL_HANGUP, NULL);
     at_set_at_rx_mode(s, AT_MODE_ONHOOK_COMMAND);
     s->p = profiles[val];
+    s->result_code_mode = AT_DEFAULT_RESULT_CODE_MODE;
     at_reset_call_info(s);
     /* +MS is part of the configuration Z restores; NULL means "defaults" */
     at_modem_control(s, AT_MODEM_CONTROL_MODULATION, NULL);
@@ -1521,6 +1529,7 @@ static const char *at_cmd_amp_F(at_state_t *s, const char *t)
     at_modem_control(s, AT_MODEM_CONTROL_HANGUP, NULL);
     at_set_at_rx_mode(s, AT_MODE_ONHOOK_COMMAND);
     s->p = profiles[0];
+    s->result_code_mode = AT_DEFAULT_RESULT_CODE_MODE;
     at_modem_control(s, AT_MODEM_CONTROL_MODULATION, NULL);
     return t;
 }
@@ -6008,6 +6017,7 @@ SPAN_DECLARE(at_state_t *) at_init(at_state_t *s,
     s->dce_dte_flow_control = 2;
     at_set_at_rx_mode(s, AT_MODE_ONHOOK_COMMAND);
     s->p = profiles[0];
+    s->result_code_mode = AT_DEFAULT_RESULT_CODE_MODE;
     return s;
 }
 /*- End of function --------------------------------------------------------*/

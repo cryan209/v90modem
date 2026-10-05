@@ -737,7 +737,7 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e)
              * that case; leaving it there makes the main loop immediately
              * place the same call again, eventually exhausting PJSUA's call
              * slots.  Teardown is valid for both pre-media and active calls. */
-            me_on_sip_disconnected();
+            me_on_sip_disconnected_status(ci.last_status);
             if (g_media_connected) {
                 g_media_connected = PJ_FALSE;
             }
@@ -1456,7 +1456,11 @@ int main(int argc, char *argv[])
                                               NULL, NULL, &g_call_id);
                 if (status != PJ_SUCCESS) {
                     PJ_LOG(2, ("sip_modem", "Call to %s failed", resolved_uri));
-                    me_hangup();
+                    /* No INVITE left: report it now (NO DIALTONE / NO CARRIER).
+                     * me_hangup() here left the engine in ME_HANGUP with no call
+                     * to clear, which the loop below never left, so every later
+                     * ATD was ignored. */
+                    me_on_sip_disconnected_status(0);
                 } else {
                     PJ_LOG(3, ("sip_modem", "Outgoing call to %s", resolved_uri));
                 }
@@ -1494,6 +1498,11 @@ int main(int argc, char *argv[])
         if (state_now == ME_HANGUP && g_call_id != PJSUA_INVALID_ID) {
             pjsua_call_hangup(g_call_id, 0, NULL, NULL);
             /* on_call_state DISCONNECTED will clean up */
+        } else if (state_now == ME_HANGUP) {
+            /* A hang-up with no SIP call to clear (ATH or an abort while the
+             * dial was still queued): nothing will call back, so return the
+             * engine to idle here. */
+            me_on_sip_disconnected();
         }
     }
 

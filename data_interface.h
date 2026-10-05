@@ -100,6 +100,15 @@ void di_on_disconnected(void);
 void di_on_disconnected_cause(const char *cause, int originate);
 
 /*
+ * A call this DCE dialled ended before it was answered.  sip_status is the
+ * SIP final response (486 busy, 503 unavailable, ...), 0 if no INVITE could be
+ * sent, -1 if unknown.  Reports V.250 Table 8's result code under the X
+ * setting: BUSY (X3, X4), NO DIALTONE for an unreachable network (X2, X4),
+ * otherwise NO CARRIER -- or nothing, if the DTE itself aborted the dial.
+ */
+void di_on_call_failed(int sip_status);
+
+/*
  * ATI11: engine detail for the call, latched at CONNECT (the engine's own
  * state is gone by the time the DTE asks, after NO CARRIER).  Called from
  * di_on_connected(), i.e. in the engine's context, like the connect-info

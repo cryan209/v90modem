@@ -255,6 +255,11 @@ void me_set_verbose(int v);  /* 0 = quiet, non-zero = verbose */
 
 /* Notify the engine that a SIP call has been disconnected. */
 void me_on_sip_disconnected(void);
+/* The same, with the SIP final status of the call (486 busy, 503 network
+ * unavailable, ...; 0 when no INVITE could be sent at all, -1 unknown), so a
+ * call that never got as far as answering reports BUSY / NO DIALTONE / NO
+ * CARRIER as V.250 6.2.7 and Table 8 have it. */
+void me_on_sip_disconnected_status(int sip_status);
 
 /* ------------------------------------------------------------------ */
 /* Data I/O — called from data_interface (PTY thread)                 */
