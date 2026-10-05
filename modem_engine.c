@@ -2099,7 +2099,8 @@ static modem_echo_can_segment_state_t *g_echo_can = NULL;
 /* EC disabled — notch filter used instead (see g_notch) */
 /* Defaulted in me_init() from ME_MODE.  Keeping this at the V.8 offer
  * boundary lets plain V.34 exercise SpanDSP without entering any V.90/V.92
- * branches.  Values: v22, v34, v90 (default), v92, x2.  AT+MS changes it
+ * branches.  Values: v22 (V.22bis), v22-1200 (V.22), v32, v32bis, v34, v90
+ * (default), v92, x2, k56, v91, clear/clear56, v120/v120-56.  AT+MS changes it
  * per call; see me_set_modulation_offer(). */
 /* When the plain-V.34 receiver entered V34_RX_STAGE_PHASE3_WAIT_S, for
  * ME_V34_PHASE3_S_TIMEOUT_MS. */
@@ -2107,7 +2108,7 @@ static uint64_t g_v34_phase3_wait_s_ms;
 /* Start of our J in a V.90->V.34 fallback, for ME_V90_FALLBACK_S_TIMEOUT_MS. */
 static uint64_t g_v90_fallback_j_ms;
 static bool g_advertise_v90 = true;
-/* ME_MODE=v22 offers V.22bis alone in CM/JM.  It exists for a bearer whose far
+/* ME_MODE=v22 offers V.22bis alone in CM/JM (v22-1200: V.22, held at 1200).  It exists for a bearer whose far
  * end is a real analogue line rather than a digital G.711 path: V.22bis has
  * its own timing recovery and does not assume the peer's symbol clock is
  * phase-locked to our sample grid, which the V.34 Phase 3 acquisition does. */
@@ -2144,9 +2145,9 @@ static bool g_enable_x2 = false;
  * t31_mtx (di_fax_active()) under g_state_mtx, so g_state_mtx here would
  * be a lock-order inversion. */
 static pthread_mutex_t g_cfg_mtx = PTHREAD_MUTEX_INITIALIZER;
-static char g_cfg_mode[8] = "v90";
+static char g_cfg_mode[16] = "v90";
 static bool g_cfg_automode = true;
-static char g_default_mode[8] = "v90";
+static char g_default_mode[16] = "v90";
 static x2_session_t g_x2;
 static x2_session_stage_t g_x2_last_stage;
 static bool g_x2_receiver_started;
@@ -2249,10 +2250,12 @@ static bool me_offer_from_mode(const char *mode, bool automode, me_offer_t *o)
     } else if (strcmp(mode, "v34") == 0) {
         o->v90 = false;
         o->name = "v34";
-    } else if (strcmp(mode, "v22") == 0) {
+    } else if (strcmp(mode, "v22") == 0 || strcmp(mode, "v22-1200") == 0) {
+        /* v22-1200 (AT+MS=V22, or V22B with a 1200 maximum) is V.22: the
+           same V.8 bit, the datapump held at 1200 bit/s. */
         o->v90 = false;
         o->v34 = false;
-        o->name = "v22";
+        o->name = strcmp(mode, "v22") == 0 ? "v22" : "v22-1200";
     } else if (strcmp(mode, "v32bis") == 0 || strcmp(mode, "v32") == 0) {
         /* V.32bis through V.8's V.32 bit or V.32bis Annex A automode.  V.32
          * is its 9600/4800 subset on the same datapump (V.32bis 6: R1/R2/R3
@@ -2305,7 +2308,7 @@ static bool me_offer_from_mode(const char *mode, bool automode, me_offer_t *o)
      * V.34 on both sides it is never the one chosen -- and is the whole
      * offer in v32/v32bis mode.  V.22 mode and automode 0 on another carrier
      * exclude it.  ME_V8_ADVERTISE_V32=0 withdraws the V.8 bit alone. */
-    o->v32bis_ok = strcmp(o->name, "v22") != 0 && (automode || v32_mode);
+    o->v32bis_ok = strncmp(o->name, "v22", 3) != 0 && (automode || v32_mode);
     o->v32 = o->v32bis_ok && parse_env_int("ME_V8_ADVERTISE_V32", 1) != 0;
     return true;
 }
@@ -6479,14 +6482,20 @@ static void start_v22bis_training(void)
     g_state = ME_TRAINING;
     g_v22bis_trained = false;
     g_phase_start_ms = trace_now_ms();
-    trace_phase("enter TRAINING: mod=V22BIS role=%s", g_calling_party ? "caller" : "answerer");
-    data_stack_prepare(2400);
+    /* V.22 mode: SpanDSP's V.22bis at 1200 sends no S1 and does not look
+       for one, which is exactly a V.22 modem (V.22bis 6.3.1.1.1 c), 6.3.1.2.1
+       d)); a V.22bis peer then settles at 1200 too. */
+    int bps = strcmp(g_mode_name, "v22-1200") == 0 ? 1200 : 2400;
+
+    trace_phase("enter TRAINING: mod=V22BIS role=%s max=%d",
+                g_calling_party ? "caller" : "answerer", bps);
+    data_stack_prepare(bps);
     if (g_v22bis) {
         v22bis_free(g_v22bis);
         g_v22bis = NULL;
     }
 
-    g_v22bis = v22bis_init(NULL, 2400, V22BIS_GUARD_TONE_NONE, g_calling_party,
+    g_v22bis = v22bis_init(NULL, bps, V22BIS_GUARD_TONE_NONE, g_calling_party,
                            v22bis_get_bit_cb, NULL,
                            v22bis_put_bit_cb, NULL);
     if (!g_v22bis)

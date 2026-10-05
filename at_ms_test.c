@@ -126,6 +126,12 @@ static void test_parser(void)
         check(!strcmp(at_ms_settings_to_mode(&m), "v120-56"), "V120 rx max 56000 -> v120-56");
         at_ms_parse("=V120,1,0,64000", &m);
         check(!strcmp(at_ms_settings_to_mode(&m), "v120"), "V120 max 64000 -> v120");
+        at_ms_parse("=V22", &m);
+        check(!strcmp(at_ms_settings_to_mode(&m), "v22-1200"), "V22 -> v22-1200");
+        at_ms_parse("=V22B,1,0,1200", &m);
+        check(!strcmp(at_ms_settings_to_mode(&m), "v22-1200"), "V22B max 1200 -> v22-1200");
+        at_ms_parse("=V22B,1,0,2400", &m);
+        check(!strcmp(at_ms_settings_to_mode(&m), "v22"), "V22B max 2400 -> v22");
         at_ms_parse("=V34,1,0,28800", &m);
         check(!strcmp(at_ms_settings_to_mode(&m), "v34"), "56k rule only for CLEAR/V120");
         check(!strcmp(at_ms_mode_to_carrier("clear56"), "CLEAR")
@@ -140,7 +146,9 @@ static void test_parser(void)
     parse_bad("=V34X");
     parse_bad("V34");
 
-    check(!strcmp(at_ms_carrier_to_mode("V22", false), "v22")
+    check(!strcmp(at_ms_carrier_to_mode("V22", false), "v22-1200")
+          && !strcmp(at_ms_carrier_to_mode("V22", true), "v22-1200")
+          && !strcmp(at_ms_mode_to_carrier("v22-1200"), "V22")
           && !strcmp(at_ms_carrier_to_mode("V22B", true), "v22")
           && !strcmp(at_ms_carrier_to_mode("V32B", true), "v32bis")
           && !strcmp(at_ms_carrier_to_mode("V32B", false), "v32bis")
@@ -312,6 +320,11 @@ static int test_engine(void)
     expect("AT+MS=V22B,0", "OK");
     expect_offer(V8_MOD_V22, "V.22bis alone");
     expect("AT+MS?", "+MS: V22B,0,0,0,0,0");
+
+    expect("AT+MS=V22", "OK");
+    expect_offer(V8_MOD_V22, "V.22 alone (V.8's V.22/V.22bis bit)");
+    expect("AT+MS?", "+MS: V22,1,0,0,0,0");
+    expect_describe("V22");
 
     /* K56flex: V.8bis first, then the ordinary V.90 offer; never alone. */
     expect("AT+MS=K56", "OK");

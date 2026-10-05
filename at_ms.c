@@ -27,8 +27,12 @@ static const struct {
     int max_rate;
     const char *offer;      /* what the next call offers, for +MS$ */
 } carriers[] = {
-    { "V22",  { NULL },                       "v22", "v22",  1200,
-      "V.22/V.22bis" },
+    /* V.22 proper: the V.22bis datapump held at 1200 bit/s, which never
+     * sends S1 and so trains as a V.22 modem against either (V.22bis
+     * 6.3.1.1.1/6.3.1.2.1).  V.22 is the bottom of the ladder, so automode
+     * changes nothing. */
+    { "V22",  { NULL },                       "v22-1200", "v22-1200", 1200,
+      "V.22 (1200)" },
     { "V22B", { "V22BIS", NULL },             "v22", "v22",  2400,
       "V.22/V.22bis" },
     /* V.32 is V.32bis's 9600/4800 subset and runs on the same datapump. */
@@ -113,8 +117,8 @@ const char *at_ms_carrier_to_mode(const char *carrier, bool automode)
 
 const char *at_ms_mode_to_carrier(const char *mode)
 {
-    /* v22 reads back as V22B: V.8 offers V.22 and V.22bis together and the
-     * engine's V.22 path is SpanDSP's V.22bis modem. */
+    /* v22 is V.22bis (V.8's one bit names V.22 and V.22bis together);
+     * v22-1200 is V.22 and is found in the table. */
     if (!strcmp(mode, "v22"))
         return "V22B";
     if (!strcmp(mode, "v32bis"))
@@ -151,6 +155,9 @@ const char *at_ms_settings_to_mode(const at_ms_settings_t *s)
 
     if (s->max_rx_rate && (!max || s->max_rx_rate < max))
         max = s->max_rx_rate;
+    /* V.22bis limited to 1200 bit/s is V.22. */
+    if (mode && max && max <= 1200 && !strcmp(mode, "v22"))
+        return "v22-1200";
     if (mode && max && max <= 56000) {
         if (!strcmp(mode, "clear"))
             return "clear56";

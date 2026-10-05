@@ -35,6 +35,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <sys/ioctl.h>
+#include <poll.h>
 #if defined(__APPLE__)
 #include <util.h>   /* openpty() on macOS */
 #elif defined(__linux__)
@@ -187,13 +188,45 @@ static int data_master_fd(void)
 /* SpanDSP AT callbacks                                               */
 /* ------------------------------------------------------------------ */
 
+/* Command-state text to the DTE.  The master is non-blocking and a pty holds
+ * about 1 KB, so a plain write() of a long response kept the first kilobyte
+ * and dropped the rest: AT+MS$'s help (1.6 KB) arrived cut off mid-table and
+ * at_ms_test failed on it.  Wait for the DTE to read, bounded so a DTE that
+ * never reads cannot stall the reader thread for long. */
+static void ctrl_write(const void *buf, size_t len)
+{
+    const uint8_t *p = buf;
+    int waited_ms = 0;
+
+    while (len > 0 && ctrl_pty.master_fd >= 0) {
+        ssize_t n = write(ctrl_pty.master_fd, p, len);
+
+        if (n > 0) {
+            p += n;
+            len -= (size_t) n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
+            return;
+        if (waited_ms >= 500)
+            return;
+        {
+            struct pollfd pfd = { .fd = ctrl_pty.master_fd, .events = POLLOUT };
+
+            poll(&pfd, 1, 20);
+        }
+        waited_ms += 20;
+    }
+}
+
 /* Called by SpanDSP to write response text back to the terminal */
 static int at_tx_handler(void *user_data,
                          const uint8_t *buf, size_t len)
 {
     (void)user_data;
-    if (ctrl_pty.master_fd >= 0)
-        write(ctrl_pty.master_fd, buf, len);
+    ctrl_write(buf, len);
     return 0;
 }
 
@@ -326,8 +359,7 @@ static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
 static void fc2_write(const uint8_t *buf, int len, void *user_data)
 {
     (void)user_data;
-    if (ctrl_pty.master_fd >= 0)
-        write(ctrl_pty.master_fd, buf, (size_t)len);
+    ctrl_write(buf, (size_t)len);
 }
 
 static void fc2_dial(const char *number, void *user_data)
@@ -443,7 +475,7 @@ static void handle_class2_bytes(const uint8_t *buf, int n)
             fc2_dispatch_line();
         } else if (fc2_line_len < FC2_LINE_MAX - 1) {
             if (at && at->p.echo && !fc2_echo_suppressed())
-                write(ctrl_pty.master_fd, &buf[i], 1);
+                ctrl_write(&buf[i], 1);
             fc2_line[fc2_line_len++] = (char) buf[i];
         }
     }

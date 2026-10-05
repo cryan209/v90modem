@@ -13,7 +13,7 @@
  *   ./sip_v90_modem [--sip-server <host>] [--username <user>]
  *                   [--password <pass>]  [--pty-link <path>]
  *                   [--local-port <port>] [--rtp-port <port>]
- *                   [--bind-addr <ip>] [--mode x2|k56|v22|v34|v90|v91|v92|\n"
+ *                   [--bind-addr <ip>] [--mode x2|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92|\n"
         "          clear|clear56|v120|v120-56]
  *                   [--verbose]
  *
@@ -1024,7 +1024,7 @@ static void print_usage(FILE *f, const char *argv0)
     fprintf(f,
         "Usage: %s [--sip-server host] [--username u] [--password p]\n"
         "          [--pty-link path] [--local-port port] [--rtp-port port]\n"
-        "          [--bind-addr ip] [--mode x2|k56|v22|v34|v90|v91|v92] [--verbose]\n"
+        "          [--bind-addr ip] [--mode x2|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92] [--verbose]\n"
         "\n"
         "--mode sets the power-on V.8 offer (same as ME_MODE); AT+MS on the\n"
         "PTY changes it for later calls and ATZ/AT&F restore it.\n", argv0);
@@ -1099,6 +1099,9 @@ int main(int argc, char *argv[])
     if (modem_mode
         && strcmp(modem_mode, "x2") != 0
         && strcmp(modem_mode, "v22") != 0
+        && strcmp(modem_mode, "v22-1200") != 0
+        && strcmp(modem_mode, "v32") != 0
+        && strcmp(modem_mode, "v32bis") != 0
         && strcmp(modem_mode, "v34") != 0
         && strcmp(modem_mode, "v90") != 0
         && strcmp(modem_mode, "v92") != 0

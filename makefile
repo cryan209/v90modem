@@ -390,6 +390,13 @@ test: $(TEST_TARGETS)
 	./engine_pair_test --alaw --expect V22BIS --expect-connect 2400 --answer-env ME_V8=0 --answer-env ME_MODE=v22
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --call-env ME_V8=0 --call-env ME_MODE=v22
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_V8=0 --both-env ME_MODE=v22
+# V.22 (AT+MS=V22, or V22B with a 1200 maximum: the datapump held at 1200, no
+# S1) against V.22 and against a V.22bis peer in each role, which must settle
+# at 1200 (V.22bis 6.3.1.1.1/6.3.1.2.1).
+	./engine_pair_test --expect V22BIS --expect-connect 1200 --both-at "AT+MS=V22"
+	./engine_pair_test --expect V22BIS --expect-connect 1200 --call-at "AT+MS=V22" --answer-env ME_MODE=v22
+	./engine_pair_test --alaw --expect V22BIS --expect-connect 1200 --call-env ME_MODE=v22 --answer-at "AT+MS=V22B,1,0,1200"
+	./engine_pair_test --expect V22BIS --expect-connect 1200 --call-env ME_V8=0 --call-env ME_MODE=v22-1200
 	./v92_startup_test
 	./v92_p3_rx_line_test
 	./v92_proc_eval_test

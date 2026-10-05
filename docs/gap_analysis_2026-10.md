@@ -50,7 +50,7 @@ suite run on this date. Interop claims come from the dated entries in
 | V.34 duplex | yes | 2400-3429 baud, up to 28800, echo, 11.6 | SmartLink: data mode, LAPM. RasFinder: `CONNECT 19200`, held 300 s calls. Intermittent MP'/E; first ask too high. |
 | V.34 half-duplex (fax) | probe only (`ME_V34_FAX_PROBE`) | control channel end to end | Canon reaches control-channel data. **T.30 Annex F absent.** |
 | V.32bis / V.32 | **yes** (2026-10-05): V.8 when it is the carrier, V.32bis Annex A automode otherwise, `AT+MS=V32B`/`V32` | clause 6/8 dialogue; `engine_pair_test` engine against engine, both laws | none |
-| V.22bis / V.22 | yes (V.8, Annex A automode, `AT+MS=V22B`/`V22`) | SpanDSP; `engine_pair_test` | HSF loop: V.22bis carried traffic |
+| V.22bis / V.22 | yes (V.8, Annex A automode, pre-V.8 USB1 both roles; `AT+MS=V22B`, `AT+MS=V22` = V.22 at 1200) | SpanDSP; `engine_pair_test` incl. V.22 vs V.22bis and V.8-less peers | HSF loop: V.22bis carried traffic |
 | V.21, V.23, Bell 103, Bell 212A | **not wired** (FSK presets exist in SpanDSP) | none | none |
 | Fax class 1 / 2.0 (V.17/V.29/V.27ter/V.21) | yes, via T.31 / T.32 | `fax_class_test`, `fax_class2_test` | **none** |
 | x2, K56flex | experimental | receive replay | neither completes a call |
