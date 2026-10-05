@@ -1022,10 +1022,109 @@ static const char *at_cmd_A(at_state_t *s, const char *t)
 }
 /*- End of function --------------------------------------------------------*/
 
+#define AT_STORED_DIALS        10
+#define AT_STORED_DIAL_LEN     40
+
+/* V.250 6.3.15: the characters a stored dial string keeps; others are
+   dropped.  Returns -1 if what is left does not fit (nothing is changed). */
+static int store_dial_string(at_state_t *s, int loc, const char *text, size_t len)
+{
+    static const char storable[] = "0123456789ABCD#*+,\"TPW@!;";
+    char out[AT_STORED_DIAL_LEN + 1];
+    size_t n = 0;
+
+    for (size_t i = 0;  i < len;  i++)
+    {
+        char c = (char) toupper((int) text[i]);
+
+        if (c == '\0'  ||  strchr(storable, c) == NULL)
+            continue;
+        /*endif*/
+        if (n >= AT_STORED_DIAL_LEN)
+            return -1;
+        /*endif*/
+        out[n++] = c;
+    }
+    /*endfor*/
+    out[n] = '\0';
+    strcpy(s->stored_dial[loc], out);
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* The dial string after "D", with V.250 6.3.1.8's S=<location> replaced by
+   what is stored there (the rest of the line after <location> is ignored), or
+   Hayes "L" by the last dial string.  Returns -1 for ERROR, 1 if the command
+   was "DL?" (answered, nothing to dial). */
+static int expand_dial_string(at_state_t *s, const char *t, char *out, size_t len)
+{
+    size_t n = 0;
+
+    if (*t == 'L')
+    {
+        if (t[1] == '?')
+        {
+            at_put_response(s, s->last_dial);
+            return 1;
+        }
+        /*endif*/
+        if (s->last_dial[0] == '\0'  ||  t[1] != '\0')
+            return -1;
+        /*endif*/
+        snprintf(out, len, "%s", s->last_dial);
+        return 0;
+    }
+    /*endif*/
+    for (  ;  *t;  t++)
+    {
+        if (*t == 'S')
+        {
+            int loc = 0;
+
+            /* S=<location> (V.250); a digit straight after S is the Courier's
+               DSn, taken as the location too; anything else dials 0. */
+            if (t[1] == '='  &&  isdigit((int) t[2]))
+                t += 2;
+            else if (isdigit((int) t[1]))
+                t += 1;
+            else
+                t = "0";
+            /*endif*/
+            loc = 0;
+            while (isdigit((int) *t))
+            {
+                loc = loc*10 + (*t - '0');
+                if (loc >= AT_STORED_DIALS)
+                    return -1;
+                /*endif*/
+                t++;
+            }
+            /*endwhile*/
+            if (n + strlen(s->stored_dial[loc]) >= len)
+                return -1;
+            /*endif*/
+            strcpy(out + n, s->stored_dial[loc]);
+            n += strlen(s->stored_dial[loc]);
+            break;
+        }
+        /*endif*/
+        if (n + 1 >= len)
+            return -1;
+        /*endif*/
+        out[n++] = *t;
+    }
+    /*endfor*/
+    out[n] = '\0';
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 static const char *at_cmd_D(at_state_t *s, const char *t)
 {
     char *u;
     char num[100 + 1];
+    char dial[100 + 1];
+    const char *p;
     char ch;
 
     /* V.250 6.3.1 - Dial (abortable) */
@@ -1034,10 +1133,20 @@ static const char *at_cmd_D(at_state_t *s, const char *t)
     s->silent_dial = false;
     s->command_dial = false;
     t += 1;
+    switch (expand_dial_string(s, t, dial, sizeof(dial)))
+    {
+    case 0:
+        break;
+    case 1:
+        return t + strlen(t);
+    default:
+        return NULL;
+    }
+    /*endswitch*/
     /* There are a numbers of options in a dial command string.
        Many are completely irrelevant in this application. */
     u = num;
-    for (  ;  (ch = *t);  t++)
+    for (p = dial;  (ch = *p);  p++)
     {
         if (isdigit((int) ch))
         {
@@ -1095,11 +1204,6 @@ static const char *at_cmd_D(at_state_t *s, const char *t)
                 /* V.250 6.3.1.7 Wait for quiet answer */
                 s->silent_dial = true;
                 break;
-            case 'S':
-                /* V.250 6.3.1.8 Invoke stored string */
-                /* S=<location> */
-                /* TODO: */
-                break;
             case 'G':
             case 'g':
                 /* GSM07.07 6.2 - Control the CUG supplementary service for this call */
@@ -1130,6 +1234,12 @@ static const char *at_cmd_D(at_state_t *s, const char *t)
     }
     /*endfor*/
     *u = '\0';
+    /* Nothing to dial (an empty stored string, or a bare D): a SIP call needs
+       a number, so there is no "go off hook and wait" form here. */
+    if (num[0] == '\0')
+        return NULL;
+    /*endif*/
+    snprintf(s->last_dial, sizeof(s->last_dial), "%s", dial);
     if (at_modem_control(s, AT_MODEM_CONTROL_CALL, num) < 0)
         return NULL;
     /*endif*/
@@ -1535,6 +1645,34 @@ static const char *at_cmd_amp_F(at_state_t *s, const char *t)
 }
 /*- End of function --------------------------------------------------------*/
 
+static const char *at_cmd_amp_Z(at_state_t *s, const char *t)
+{
+    int loc;
+
+    /* Hayes/Courier &Z<n>=<number> and &Z<n>? -- the same slots as +ASTO.  The
+       number runs to the end of the command line, as a dial string does. */
+    t += 2;
+    loc = 0;
+    if (isdigit((int) t[0])  &&  (loc = parse_num(&t, AT_STORED_DIALS - 1)) < 0)
+        return NULL;
+    /*endif*/
+    if (t[0] == '?')
+    {
+        at_put_response(s, s->stored_dial[loc]);
+        return t + 1;
+    }
+    /*endif*/
+    if (t[0] != '=')
+        return NULL;
+    /*endif*/
+    t++;
+    if (store_dial_string(s, loc, t, strlen(t)) < 0)
+        return NULL;
+    /*endif*/
+    return t + strlen(t);
+}
+/*- End of function --------------------------------------------------------*/
+
 static const char *at_cmd_amp_V(at_state_t *s, const char *t)
 {
     int val;
@@ -1708,13 +1846,84 @@ static const char *at_cmd_plus_A8T(at_state_t *s, const char *t)
 
 static const char *at_cmd_plus_ASTO(at_state_t *s, const char *t)
 {
+    char buf[80];
+    int loc;
+    size_t len;
+
     /* V.250 6.3.15 - Store telephone number */
-    /* TODO: */
     t += 5;
-    if (!parse_out(s, &t, NULL, 1, "+ASTO:", ""))
+    if (t[0] == '?')
+    {
+        for (loc = 0;  loc < AT_STORED_DIALS;  loc++)
+        {
+            if (s->stored_dial[loc][0])
+            {
+                snprintf(buf, sizeof(buf), "+ASTO: %d,%s", loc, s->stored_dial[loc]);
+                at_put_response(s, buf);
+            }
+            /*endif*/
+        }
+        /*endfor*/
+        return t + 1;
+    }
+    /*endif*/
+    if (t[0] != '=')
         return NULL;
     /*endif*/
-    return t;
+    t++;
+    if (t[0] == '?')
+    {
+        snprintf(buf, sizeof(buf), "+ASTO: (0-%d),(%d)", AT_STORED_DIALS - 1, AT_STORED_DIAL_LEN);
+        at_put_response(s, buf);
+        return t + 1;
+    }
+    /*endif*/
+    if (!isdigit((int) t[0])  ||  (loc = parse_num(&t, AT_STORED_DIALS - 1)) < 0)
+        return NULL;
+    /*endif*/
+    if (t[0] != ',')
+        return NULL;
+    /*endif*/
+    t++;
+    /* An optional string constant: "..." (a double quote inside is \22). */
+    if (t[0] == '"')
+    {
+        char raw[AT_STORED_DIAL_LEN*4 + 1];
+        size_t n = 0;
+
+        for (t++;  *t  &&  *t != '"';  t++)
+        {
+            if (t[0] == '\\'  &&  isxdigit((int) t[1])  &&  isxdigit((int) t[2]))
+            {
+                char hex[3] = { t[1], t[2], '\0' };
+
+                if (n < sizeof(raw) - 1)
+                    raw[n++] = (char) strtol(hex, NULL, 16);
+                /*endif*/
+                t += 2;
+                continue;
+            }
+            /*endif*/
+            if (n < sizeof(raw) - 1)
+                raw[n++] = *t;
+            /*endif*/
+        }
+        /*endfor*/
+        if (*t != '"')
+            return NULL;
+        /*endif*/
+        t++;
+        if (store_dial_string(s, loc, raw, n) < 0)
+            return NULL;
+        /*endif*/
+        return t;
+    }
+    /*endif*/
+    len = strcspn(t, ";");
+    if (store_dial_string(s, loc, t, len) < 0)
+        return NULL;
+    /*endif*/
+    return t + len;
 }
 /*- End of function --------------------------------------------------------*/
 

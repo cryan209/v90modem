@@ -825,6 +825,37 @@ static void test_call_progress(void)
     expect(dte, "ATI6", "Timeout (S7)");
     expect(dte, "ATS7=60", "OK");
 
+    /* Stored numbers: V.250 6.3.15 +ASTO and D S=<n> (6.3.1.8), the Courier's
+       &Zn and DSn on the same slots, and Hayes DL. */
+    expect(dte, "AT+ASTO=?", "+ASTO: (0-9),(40)");
+    expect(dte, "AT+ASTO=3,555-1234", "OK");
+    expect(dte, "AT+ASTO?", "+ASTO: 3,5551234");    /* '-' is not storable */
+    expect(dte, "AT+ASTO=3,\"64 9 555\"", "OK");
+    expect(dte, "AT+ASTO?", "+ASTO: 3,649555");
+    expect(dte, "AT+ASTO=10,1", "ERROR");
+    expect(dte, "AT+ASTO=1,12345678901234567890123456789012345678901", "ERROR");
+    expect(dte, "ATDS=3", "");
+    check(!strcmp(last_number, "649555"), "D S=3 dials what +ASTO stored");
+    usleep(150000);
+    expect(dte, "ATH", "OK");
+    expect(dte, "AT&Z1=6001", "OK");
+    expect(dte, "AT&Z1?", "6001");
+    expect(dte, "ATD9S1", "");                      /* dial chars may precede S */
+    check(!strcmp(last_number, "96001"), "DSn dials &Zn's number after the preceding digits");
+    usleep(150000);
+    expect(dte, "ATH", "OK");
+    expect(dte, "ATDL?", "96001");
+    snprintf(last_number, sizeof(last_number), "-");
+    expect(dte, "ATDL", "");
+    check(!strcmp(last_number, "96001"), "DL redials the last number");
+    usleep(150000);
+    expect(dte, "ATH", "OK");
+    expect(dte, "ATDS=5", "ERROR");                 /* nothing stored there */
+    expect(dte, "ATDS=10", "ERROR");
+    expect(dte, "ATD", "ERROR");                    /* no number: nothing a SIP call can do */
+    expect(dte, "ATZ", "OK");
+    expect(dte, "AT&Z1?", "6001");                  /* stored numbers survive ATZ */
+
     close(dte);
     di_close();
 }

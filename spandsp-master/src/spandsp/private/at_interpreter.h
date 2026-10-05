@@ -116,6 +116,10 @@ struct at_state_s
     int line_ptr;
     /*! The last command line executed, for V.250 5.2.4's "A/". */
     char last_line[256];
+    /*! V.250 6.3.15 +ASTO / Hayes &Z stored dial strings, for D S=<n>. */
+    char stored_dial[10][41];
+    /*! The last dial string, for Hayes DL. */
+    char last_dial[101];
 
     at_modem_control_handler_t modem_control_handler;
     void *modem_control_user_data;

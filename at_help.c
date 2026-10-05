@@ -58,10 +58,13 @@ static const at_help_entry_t dial_rows[] = {
     { "DW !",      "Accepted and ignored",                            NULL },
     { "D@",        "NO ANSWER if the far end does not answer; class 1 fax: no CNG", NULL },
     { "D;",        "Class 1 fax: stay in command state; otherwise ignored", NULL },
+    { "DS=n DSn",  "Dial stored number n (+ASTO / &Zn); rest of line ignored", NULL },
+    { "DL",        "Redial the last number; DL? shows it",            "DL?" },
     { "",          "The number goes to the --sip-server as sip:n@server.", NULL },
     { "",          "Any key aborts a dial in progress (OK); S7 bounds it (NO CARRIER).", NULL },
     { "",          "Busy: BUSY (X3/X4). Network refused: NO DIALTONE (X2/X4).", NULL },
     { "",          "Mode: +MS (see +MS$) and +FCLASS choose what the call runs.", NULL },
+    { "",          "Stored numbers are kept until the modem restarts (no NVRAM).", NULL },
 };
 
 /* &$ */
@@ -70,6 +73,7 @@ static const at_help_entry_t amp_rows[] = {
     { "&D0-2",   "DTR behaviour (stored; a pty has no DTR line)",     "&D2" },
     { "&F",      "Factory defaults, incl. +MS/+ES/+DS and diagnostics", NULL },
     { "&V",      "View the active configuration (as ATI4)",            "&V" },
+    { "&Zn=s",   "Store number s in slot n (0-9); &Zn? shows it",     "&Z0?" },
 };
 
 /* +$: only commands that do what V.250/T.31/T.32 says.  Accepted-but-ignored
@@ -77,6 +81,7 @@ static const at_help_entry_t amp_rows[] = {
 static const at_help_entry_t plus_rows[] = {
     { "+GMI +GMM +GMR", "Manufacturer, model, revision",              "+GMI" },
     { "+GCAP",     "Capabilities: +FCLASS, +MS, +ES, +DS",            "+GCAP" },
+    { "+ASTO=n,s", "Store dial string s in slot n (0-9); D S=n dials it", "+ASTO?" },
     { "+MS",       "Modulation for the next call (see +MS$)",         "+MS?" },
     { "+MR=0/1",   "Report +MCR/+MRR before CONNECT",                 "+MR?" },
     { "+ES=o,f,a", "Error control: request, fallback, answer mode",   "+ES?" },
