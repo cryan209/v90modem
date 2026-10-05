@@ -18,6 +18,7 @@
 #define MODEM_ENGINE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* Modem state machine states */
@@ -38,7 +39,8 @@ typedef enum {
     ME_MOD_V34,      /* Full V.34 duplex (up to 33.6 kbps) */
     ME_MOD_V22BIS,   /* Full V.22bis duplex (fallback) */
     ME_MOD_X2,      /* Experimental asymmetric PCM x2 digital endpoint */
-    ME_MOD_V32BIS   /* V.32bis/V.32 duplex, 4800-14400 bit/s */
+    ME_MOD_V32BIS,  /* V.32bis/V.32 duplex, 4800-14400 bit/s */
+    ME_MOD_CLEAR    /* 64/56 kbit/s clear channel or V.120 on the DS0, no V.8 */
 } me_modulation_t;
 
 /* G.711 encoding law for the RTP stream */
@@ -103,6 +105,32 @@ void me_answer(void);
 
 /* Hang up the current call. */
 void me_hangup(void);
+
+/*
+ * V.8 modulation offer for subsequent calls -- what AT+MS (V.250 6.4.1)
+ * drives, through data_interface.c.  mode is one of "v22", "v34", "v90",
+ * "v92", "v91", "k56", "x2", "clear", "clear56", "v120", "v120-56", or
+ * "auto" (= the v90 default); the same names ME_MODE takes.  "k56" needs
+ * automode (K56flex V.8bis, then V.8 to V.90).  The clear and v120 modes
+ * skip V.8 altogether and use the DS0 as a bit pipe (clear_channel.h); both
+ * ends must be set alike, as with an ISDN bearer.
+ * automode false restricts CM/JM to the named family (no V.22 fallback bit;
+ * V.90/V.92 still carry V.34, which their upstream needs).  The change takes
+ * effect at the next call's V.8 and never alters a call in progress.
+ * Returns 0, or -1 for an unknown mode.
+ *
+ * ME_MODE / --mode set the power-on default, which
+ * me_reset_modulation_offer() (ATZ, AT&F) restores.
+ */
+int  me_set_modulation_offer(const char *mode, bool automode);
+void me_get_modulation_offer(char *mode, size_t len, bool *automode);
+void me_reset_modulation_offer(void);
+/* The CM/JM modulations the next call will offer, as V8_MOD_* bits. */
+int  me_modulation_offer_bits(void);
+/* The whole next-call offer as text: "V90|V34|V22", with "+V91" when V.91 is
+ * in V.8's PCM availability and "+K56" when K56flex V.8bis runs first.
+ * Env overrides (ME_K56FLEX, ME_V8_ADVERTISE_V91) are included. */
+void me_modulation_offer_describe(char *buf, size_t len);
 
 /* ------------------------------------------------------------------ */
 /* Audio I/O — called from sip_modem.c media port (PJSIP thread)      */

@@ -18,7 +18,7 @@
   --sip-server asterisk.example \
   --username 6001 \
   --password 'secret' \
-  --pty /tmp/v90modem
+  --pty-link /tmp/v90modem
 ```
 
 During the run, place one call from the analogue modem. After connection, send

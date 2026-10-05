@@ -190,6 +190,8 @@ SPAN_DECLARE(const char *) at_modem_control_to_str(int state)
         return "Restart";
     case AT_MODEM_CONTROL_DTE_TIMEOUT:
         return "DTE timeout";
+    case AT_MODEM_CONTROL_MODULATION:
+        return "Modulation";
     }
     /*endswitch*/
     return "???";
@@ -1399,6 +1401,8 @@ static const char *at_cmd_Z(at_state_t *s, const char *t)
     at_set_at_rx_mode(s, AT_MODE_ONHOOK_COMMAND);
     s->p = profiles[val];
     at_reset_call_info(s);
+    /* +MS is part of the configuration Z restores; NULL means "defaults" */
+    at_modem_control(s, AT_MODEM_CONTROL_MODULATION, NULL);
     return t;
 }
 /*- End of function --------------------------------------------------------*/
@@ -1443,6 +1447,7 @@ static const char *at_cmd_amp_F(at_state_t *s, const char *t)
     at_modem_control(s, AT_MODEM_CONTROL_HANGUP, NULL);
     at_set_at_rx_mode(s, AT_MODE_ONHOOK_COMMAND);
     s->p = profiles[0];
+    at_modem_control(s, AT_MODEM_CONTROL_MODULATION, NULL);
     return t;
 }
 /*- End of function --------------------------------------------------------*/
@@ -4534,10 +4539,27 @@ static const char *at_cmd_plus_MR(at_state_t *s, const char *t)
 
 static const char *at_cmd_plus_MS(at_state_t *s, const char *t)
 {
+    char buf[100];
+    size_t len;
+
     /* V.250 6.4.1 - Modulation selection */
-    /* TODO: */
+    /* Which modulations a DCE can offer is the application's business, not the
+       interpreter's, so the whole subparameter text -- "=V34,1", "?", "=?" --
+       goes to the modem control handler, which may write an information
+       response with at_put_response().  A negative return is ERROR.  The text
+       runs to the next ';' (V.250 5.4.1's extended command separator) or the
+       end of the line. */
     t += 3;
-    return t;
+    len = strcspn(t, ";");
+    if (len == 0  ||  len >= sizeof(buf))
+        return NULL;
+    /*endif*/
+    memcpy(buf, t, len);
+    buf[len] = '\0';
+    if (at_modem_control(s, AT_MODEM_CONTROL_MODULATION, buf) < 0)
+        return NULL;
+    /*endif*/
+    return t + len;
 }
 /*- End of function --------------------------------------------------------*/
 

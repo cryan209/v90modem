@@ -92,7 +92,12 @@ enum at_modem_control_operation_e
     /* The remainder of the control functions should not get past the modem, to the
        application. */
     AT_MODEM_CONTROL_RESTART,
-    AT_MODEM_CONTROL_DTE_TIMEOUT
+    AT_MODEM_CONTROL_DTE_TIMEOUT,
+    /*! V.250 6.4.1 +MS modulation selection.  num is the subparameter text
+        after "+MS" ("=V34,1", "?" or "=?"), or NULL when Z or &F restores the
+        default configuration.  The handler may answer +MS? and +MS=? with
+        at_put_response(); a negative return makes the command line ERROR. */
+    AT_MODEM_CONTROL_MODULATION
 };
 
 enum

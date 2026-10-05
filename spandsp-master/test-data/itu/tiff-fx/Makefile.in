@@ -1,0 +1,10 @@
+srcdir = @srcdir@
+all:
+install:
+uninstall:
+clean:
+distclean:
+	rm -f Makefile
+check:
+distdir:
+.PHONY: all install uninstall clean distclean check distdir

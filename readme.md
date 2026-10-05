@@ -92,9 +92,14 @@ make
                 --pty-link /tmp/v90modem
 ```
 
-Select the highest modem family offered in V.8 with `--mode v34|v90|v92`.
-The default is `v90`; lower fallback modes remain advertised. For a plain V.34
-interoperability run, configure the peer for V.34 and start this endpoint with:
+Select the highest modem family offered in V.8 with
+`--mode v22|v32|v32bis|v34|v90|v92|v91|k56|x2|clear|clear56|v120|v120-56`. The default is `v90`; lower fallback
+modes remain advertised (V.32bis and V.22bis; `ME_V8_ADVERTISE_V32=0` drops the
+V.32 bit). `v32bis` offers V.32bis + V.22bis, `v32` the same capped at
+V.32's 9600/4800. A pre-V.8 modem is met through V.32bis Annex A automode
+(AA/AC/USB1, see `docs/v32bis_compliance_plan.md`); `ME_V8=0` makes this end
+one. For a plain V.34 interoperability run, configure the
+peer for V.34 and start this endpoint with:
 
 ```bash
 ./sip_v90_modem --mode v34 --sip-server your-provider.com \
@@ -102,8 +107,45 @@ interoperability run, configure the peer for V.34 and start this endpoint with:
                 --pty-link /tmp/v90modem
 ```
 
-`ME_MODE=v34|v90|v92` is the equivalent environment setting. The older
-`ME_V92_ENABLE=1` remains supported when `ME_MODE` is unset.
+`ME_MODE` takes the same names. The older `ME_V92_ENABLE=1` remains supported
+when `ME_MODE` is unset. Unknown command-line arguments are an error (usage,
+exit status 2).
+
+Either of those sets the power-on default. A DTE can change the offer for
+later calls with V.250's `AT+MS` on the PTY; the call in progress is never
+touched, and `ATZ`/`AT&F` restore the default:
+
+| `AT+MS=`   | next call offers                                         | automode 0 (`,0`) |
+|------------|----------------------------------------------------------|-------------------|
+| `V22`, `V22B` | V.22/V.22bis                                          | same              |
+| `V32B` (`V32BIS`) | V.32bis + V.22bis                                 | V.32bis alone     |
+| `V32`      | as V32B, rates capped at 9600/4800                      | V.32 alone        |
+| `HST`, `V32TERBO` (`TERBO`), `VFC` (`V.FC`) | V.32bis + V.22bis (no datapump for these; V.250 fallback) | ERROR |
+| `V34` (`V34+`, `V34B`, `V34BIS`) | V.34 + V.22bis                     | V.34 alone        |
+| `K56` (`56`, `56K`, `K56FLEX`) | K56flex V.8bis, then V.8 offering V.90/V.34/V.22 (no K56flex data mode) | ERROR |
+| `V90`      | V.90 + V.34 + V.22bis                                    | V.90 + V.34       |
+| `V92`      | as V90, with V.92                                        | V.92 + V.34       |
+| `V91`      | as V90, with V.91 in V.8's PCM availability             | V.91 + V.34       |
+| `X2`       | x2, asymmetric (V.34 upstream; symmetric not implemented) | same             |
+| `CLEAR` (`CLEARMODE`, `64K`) | no V.8: the DS0 is the bit pipe, V.14 (or LAPM) on it; max rate <=56000 selects restricted 56k | same |
+| `V120`     | no V.8: V.120 UI frames on the DS0; max rate <=56000 selects 56k | same |
+| `B103`, `B212`, `V110`, `X75` | recognised, no datapump here | ERROR (both) |
+
+`AT+MS?` reads back e.g. `+MS: V34,1,0,0,0,0`; `AT+MS=?` lists the carriers;
+`AT+MS$` prints Courier-style help -- the syntax, every carrier with its
+aliases, accepted automodes, maximum rate and what the next call will offer,
+and the current setting.
+The rate subparameters (`<carrier>,<automode>,<min>,<max>` or V.250's
+`...,<min_tx>,<max_tx>,<min_rx>,<max_rx>`) may not exceed the carrier's
+maximum (14400 for V32B, 33600 for V34, 56000 for V90/V92, 60000 for K56 --
+the shipped K56flex firmware tables run to 58000/60000 -- and 64000 for V91
+and X2, whose digital symmetric mode carries 64000 both ways; only the
+asymmetric x2 session exists here); they are stored and reported, not enforced -- rates come from training (`V32`'s 9600 cap is the one exception, since V.32 has no higher rate).
+`ME_K56FLEX` and `ME_V8_ADVERTISE_V91`, when set, override `AT+MS`.
+
+CLEAR and V120 need the bearer byte-exact end to end and both ends set alike
+-- there is no negotiation, as on ISDN. Two instances of this server reach
+data with them over SIP; see `docs/clear_channel_v120.md`.
 
 ### macOS notes
 
@@ -233,7 +275,7 @@ modem log, raw RX/TX G.711 taps, hashes, build revision, and parsed timeline:
   --sip-server asterisk.example \
   --username 6001 \
   --password 'secret' \
-  --pty /tmp/v90modem
+  --pty-link /tmp/v90modem
 ```
 
 Each run is stored under `artifacts/v90-hardware/` with `manifest.json` and

@@ -20,6 +20,7 @@
 #include "data_interface.h"
 #include "modem_engine.h"
 #include "fax_class2.h"
+#include "at_ms.h"
 
 #include <spandsp.h>
 #include <spandsp/private/logging.h>
@@ -39,6 +40,7 @@
 #elif defined(__linux__)
 #include <pty.h>    /* openpty() on Linux */
 #endif
+#include <termios.h>
 
 /* ------------------------------------------------------------------ */
 /* Ring buffer for upstream data (PTY → modem engine)                 */
@@ -129,6 +131,16 @@ static volatile int running    = 0;
 static pthread_t    reader_tid;
 static ring_t       upstream_ring;
 
+/* AT+MS: the engine owns the modulation offer, the rates live here. */
+static di_ms_set_cb_t   ms_set_cb;
+static di_ms_get_cb_t   ms_get_cb;
+static di_ms_reset_cb_t ms_reset_cb;
+/* What the last accepted AT+MS said, so +MS? can report the carrier name and
+ * rates as given (V32B, not the V.22bis offer it maps to).  Reported only
+ * while the engine still holds the mode it mapped to. */
+static at_ms_settings_t ms_cur;
+static bool             ms_cur_valid;
+
 /*
  * Class 2.0 (T.32) line assembly.  T.31 does its own line buffering, but in
  * class 2.0 the +F commands are ours, so a line has to be complete before it
@@ -189,6 +201,78 @@ static int at_tx_handler(void *user_data,
  * op  — one of the AT_MODEM_CONTROL_* enum values
  * num — dial string (for CALL), or NULL
  */
+/* V.250 6.4.1 +MS.  args is the text after "+MS", or NULL for ATZ/AT&F.
+ * Runs inside the AT interpreter, so at_put_response() lands before the
+ * final OK.  Returns <0 for ERROR. */
+/* What +MS? reports: the last AT+MS as given while the engine still holds
+ * the mode it mapped to, otherwise the engine's mode with no rate limits. */
+static void plus_ms_current(at_ms_settings_t *ms)
+{
+    char mode[16];
+    bool automode;
+    const char *carrier;
+    const char *want;
+
+    ms_get_cb(mode, sizeof(mode), &automode);
+    want = ms_cur_valid ? at_ms_settings_to_mode(&ms_cur) : NULL;
+    if (want && !strcmp(want, mode) && (ms_cur.automode != 0) == automode) {
+        *ms = ms_cur;
+        return;
+    }
+    memset(ms, 0, sizeof(*ms));
+    carrier = at_ms_mode_to_carrier(mode);
+    snprintf(ms->carrier, sizeof(ms->carrier), "%s", carrier ? carrier : "V90");
+    ms->automode = automode ? 1 : 0;
+}
+
+static int handle_plus_ms(const char *args)
+{
+    at_ms_settings_t ms;
+    char buf[4096];
+    const char *want;
+
+    if (!ms_set_cb || !ms_get_cb || !ms_reset_cb)
+        return -1;
+    if (!args) {
+        ms_reset_cb();
+        ms_cur_valid = false;
+        return 0;
+    }
+    switch (at_ms_parse(args, &ms)) {
+    case AT_MS_SET:
+        want = at_ms_settings_to_mode(&ms);
+        if (!want || ms_set_cb(want, ms.automode != 0) < 0)
+            return -1;
+        ms_cur = ms;
+        ms_cur_valid = true;
+        return 0;
+    case AT_MS_READ:
+        plus_ms_current(&ms);
+        at_ms_format_read(&ms, buf, sizeof(buf));
+        at_put_response(at, buf);
+        return 0;
+    case AT_MS_TEST:
+        at_ms_format_test(buf, sizeof(buf));
+        at_put_response(at, buf);
+        return 0;
+    case AT_MS_HELP:
+        plus_ms_current(&ms);
+        at_ms_format_help(&ms, buf, sizeof(buf));
+        at_put_response(at, buf);
+        return 0;
+    default:
+        return -1;
+    }
+}
+
+void di_set_modulation_ops(di_ms_set_cb_t set, di_ms_get_cb_t get,
+                           di_ms_reset_cb_t reset)
+{
+    ms_set_cb = set;
+    ms_get_cb = get;
+    ms_reset_cb = reset;
+}
+
 static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
                                     int op, const char *num)
 {
@@ -224,6 +308,9 @@ static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
     case AT_MODEM_CONTROL_RNG:
     case AT_MODEM_CONTROL_DSR:
         break;
+
+    case AT_MODEM_CONTROL_MODULATION:
+        return handle_plus_ms(num);
 
     default:
         break;
@@ -478,6 +565,21 @@ static int di_pty_open(di_pty_t *p, const char *link_path, const char *label)
     if (openpty(&p->master_fd, &slave_fd, p->slave_name, NULL, NULL) < 0) {
         perror("openpty");
         return -1;
+    }
+
+    /* A modem port does its own echo (ATE) and line handling, so the slave
+     * starts raw.  Left in the default cooked mode with ECHO on, a DTE that
+     * opens the port without configuring it (cat, a test, a script) has the
+     * line discipline reflect every response straight back as input: once
+     * ATE1 is on, the modem's echo of a command is echoed back to the modem,
+     * which echoes it again.  A DTE that sets its own termios is unaffected. */
+    {
+        struct termios tio;
+
+        if (tcgetattr(slave_fd, &tio) == 0) {
+            cfmakeraw(&tio);
+            tcsetattr(slave_fd, TCSANOW, &tio);
+        }
     }
 
     /* Close the slave — applications open it by name */

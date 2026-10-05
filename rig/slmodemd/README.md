@@ -162,7 +162,7 @@ ME_TRAINING_TIMEOUT_MS=300000 \
 ME_V90_J_LOOKAHEAD_BITS=3000 ME_V90_JD_RESYNC_SYMBOLS=48000 ME_V90_SD_DELAY_MS=750 \
 VPCM_G711_TAP_DIR=artifacts/v90-hardware/$(date -u +%Y%m%dT%H%M%SZ)-trn2d_ref \
 ./sip_v90_modem --sip-server asterisk.net.cryan.nz --username 6001 --password 6001 \
-  --pty /tmp/v90modem
+  --pty-link /tmp/v90modem
 ```
 
 `ME_TRAINING_TIMEOUT_MS=300000` stops our own 60 s fallback from capping

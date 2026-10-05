@@ -19,6 +19,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 /* Opaque callbacks set by the modem engine */
 typedef void (*di_dial_cb_t)(const char *sip_uri, void *user_data);
@@ -47,6 +48,20 @@ void di_set_callbacks(di_dial_cb_t  dial_cb,
                       di_answer_cb_t answer_cb,
                       di_hangup_cb_t hangup_cb,
                       void *user_data);
+
+/*
+ * AT+MS (V.250 6.4.1) modulation selection.  The engine registers these in
+ * me_init(); with none registered, +MS answers ERROR.  set takes an engine
+ * mode name ("v34", "v90", ...) and returns <0 to reject it; get reads the
+ * offer the next call will make; reset restores the power-on default (ATZ,
+ * AT&F).  Rate subparameters are kept here, reported by +MS?, and not
+ * enforced -- see at_ms.h.
+ */
+typedef int  (*di_ms_set_cb_t)(const char *mode, bool automode);
+typedef void (*di_ms_get_cb_t)(char *mode, size_t len, bool *automode);
+typedef void (*di_ms_reset_cb_t)(void);
+void di_set_modulation_ops(di_ms_set_cb_t set, di_ms_get_cb_t get,
+                           di_ms_reset_cb_t reset);
 
 /*
  * Called by the modem engine when a connection is established.
