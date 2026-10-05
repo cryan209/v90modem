@@ -198,7 +198,7 @@ int at_help_format(const char *topic, const uint8_t *s_regs, char *out, size_t l
         for (size_t i = 0; i < N(s_rows); i++)
             put(&s, "S%-3d %03d    %s\r\n", s_rows[i].reg,
                 s_regs ? s_regs[s_rows[i].reg] : 0, s_rows[i].desc);
-        put(&s, "Sr=n sets, Sr? reads; only these registers exist.\r\n");
+        put(&s, "Sr=n sets, Sr? reads; other registers answer ERROR.\r\n");
         return (int) s.used;
     }
     for (size_t i = 0; i < n; i++) {

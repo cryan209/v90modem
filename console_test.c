@@ -562,6 +562,17 @@ static void test_help(void)
     expect(dte, "ATS$", "S0   000");
     expect(dte, "ATE0$", "Command Quick Reference");
     expect(dte, "AT+MS$", "+MS");                   /* at_ms.c's page, untouched */
+    /* V.250 5.6: an unrecognised command ends the line with ERROR -- the
+       interpreter used to skip it and answer OK. */
+    expect(dte, "ATS9?", "ERROR");
+    expect(dte, "ATS9=3", "ERROR");
+    expect(dte, "ATK", "ERROR");
+    expect(dte, "AT+ZZZ", "ERROR");
+    expect(dte, "AT&Q5", "ERROR");
+    /* 5.6: commands before the bad one have run; the rest of the line is not. */
+    expect(dte, "ATS0=1KS0=2", "ERROR");
+    expect(dte, "ATS0?", "001");
+    expect(dte, "ATS0=0", "OK");
     expect(dte, "ATQ0$", "Command Quick Reference"); /* Q0, then AT$ */
     expect(dte, "AT$Z", "OK");                      /* help then the next command */
     expect(dte, "ATE0", "OK");                      /* Z restored echo */

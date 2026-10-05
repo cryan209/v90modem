@@ -5785,7 +5785,13 @@ SPAN_DECLARE(void) at_interpreter(at_state_t *s, const char *cmd, int len)
                         }
                         /*endif*/
                         if ((entry = command_search(t, &matched)) <= 0)
+                        {
+                            /* V.250 5.6: a character not recognised as a valid
+                               command terminates the line with ERROR, not OK
+                               (5.3.2, 5.4.3.1 and 5.4.4.2 say the same of S-parameters and + names). */
+                            t = NULL;
                             break;
+                        }
                         /*endif*/
                         /* The following test shouldn't be needed, but let's keep it here for completeness. */
                         if (entry > sizeof(at_commands)/sizeof(at_commands[0]))

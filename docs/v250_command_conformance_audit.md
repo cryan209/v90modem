@@ -70,9 +70,14 @@ ATI6/ATI11 back from two whole engines, including a call that failed before
 data mode. Also fixed: `ATD` commas reached the SIP INVITE's user part; they
 are now dropped.
 
-Found, not fixed here: the interpreter answers OK to any command it does not
-recognise (`ATS9?`, `ATK`, `AT+ZZZ`) where V.250 requires ERROR. That changes
-what existing DTE init strings get back, so it is a separate change.
+Unrecognised commands now answer ERROR (V.250 5.6; 5.3.2 and 5.4.3.1/5.4.4.2
+for S-parameters and + names). SpanDSP's dispatch loop used to `break` with the
+line still "good" when its command trie found nothing, so `ATS9?`, `ATK`,
+`AT+ZZZ`, `AT&Q5` all answered OK. Commands before the bad one still run
+(`ATS0=1KS0=2` leaves S0 at 1). Checked against every AT string in the tree that
+reaches our own PTY (tests, `tools/*.py`, `tools/soak/*.sh`); the `AT\N0`,
+`AT\N3` and `ATX3` init strings in the soak scripts go to slmodemd, not to us.
+All 40 `engine_pair_test` rows and the AT/fax suites pass.
 
 ## Method and confidence
 
