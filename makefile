@@ -30,7 +30,10 @@ JPEG_LDFLAGS := $(shell pkg-config --libs libjpeg 2>/dev/null || echo "-L$(HOMEB
 # and a bare -lssl fails to link ("ld: library 'ssl' not found").  Ask
 # pkg-config, then fall back to the keg.
 OPENSSL_LDFLAGS := $(shell pkg-config --libs openssl 2>/dev/null || echo "-L$(HOMEBREW_PREFIX)/opt/openssl@3/lib -lssl -lcrypto")
-SYSTEM_LIBS ?= $(TIFF_LDFLAGS) $(JPEG_LDFLAGS) $(OPENSSL_LDFLAGS) -lm -lpthread
+# Linux's libuuid is separate from libc (macOS has it in libSystem, where
+# pkg-config finds nothing and this stays empty); pjlib needs it.
+UUID_LDFLAGS := $(shell pkg-config --libs uuid 2>/dev/null)
+SYSTEM_LIBS ?= $(TIFF_LDFLAGS) $(JPEG_LDFLAGS) $(OPENSSL_LDFLAGS) $(UUID_LDFLAGS) -lm -lpthread
 PJ_BUILD_PREREQ ?=
 
 ifneq ($(and $(filter 1,$(USE_LOCAL_PJPROJECT)),$(wildcard $(PJ_LOCAL_MAKEFILE))),)
