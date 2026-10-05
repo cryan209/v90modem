@@ -539,6 +539,8 @@ Kept as `artifacts/rf-v22-*` on tower and here.
   ANSam waiting for a CM, gave up and sent USB1 about 8 s after answering;
   our call modem took it and connected V.22bis 2400, same banner.  This is
   the 2250 Hz tone the RasFinder notes recorded as the peer abandoning V.8.
+- **V.22 proper** (`ME_MODE=v22-1200`, i.e. `AT+MS=V22`, rf-v22-1200-1): the
+  V.22bis peer settles at 1200 with us, `CONNECT 1200`, same banner.
 
 Two defects came out of it, neither visible in loopback.
 
