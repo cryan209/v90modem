@@ -13,7 +13,7 @@
  *   ./sip_v90_modem [--sip-server <host>] [--username <user>]
  *                   [--password <pass>]  [--pty-link <path>]
  *                   [--local-port <port>] [--rtp-port <port>]
- *                   [--bind-addr <ip>] [--mode x2|v22|v34|v90|v92]
+ *                   [--bind-addr <ip>] [--mode x2|k56|v22|v34|v90|v91|v92]
  *                   [--verbose]
  *
  * Unknown arguments are an error (usage, exit status 2).
@@ -1023,7 +1023,7 @@ static void print_usage(FILE *f, const char *argv0)
     fprintf(f,
         "Usage: %s [--sip-server host] [--username u] [--password p]\n"
         "          [--pty-link path] [--local-port port] [--rtp-port port]\n"
-        "          [--bind-addr ip] [--mode x2|v22|v34|v90|v92] [--verbose]\n"
+        "          [--bind-addr ip] [--mode x2|k56|v22|v34|v90|v91|v92] [--verbose]\n"
         "\n"
         "--mode sets the power-on V.8 offer (same as ME_MODE); AT+MS on the\n"
         "PTY changes it for later calls and ATZ/AT&F restore it.\n", argv0);
@@ -1100,8 +1100,11 @@ int main(int argc, char *argv[])
         && strcmp(modem_mode, "v22") != 0
         && strcmp(modem_mode, "v34") != 0
         && strcmp(modem_mode, "v90") != 0
-        && strcmp(modem_mode, "v92") != 0) {
-        fprintf(stderr, "Invalid --mode '%s' (expected x2, v22, v34, v90, or v92)\n",
+        && strcmp(modem_mode, "v92") != 0
+        && strcmp(modem_mode, "v91") != 0
+        && strcmp(modem_mode, "k56") != 0) {
+        fprintf(stderr, "Invalid --mode '%s' (expected x2, k56, v22, v34, v90, "
+                        "v91, or v92)\n",
                 modem_mode);
         return 2;
     }

@@ -11,7 +11,7 @@
  *   +MS=<carrier>[,<automode>[,<min_tx_rate>[,<max_tx_rate>
  *                              [,<min_rx_rate>[,<max_rx_rate>]]]]]
  *   +MS?    read:  +MS: <carrier>,<automode>,<min_tx>,<max_tx>,<min_rx>,<max_rx>
- *   +MS=?   test:  +MS: (<carriers>),(0,1),(0-56000),(0-56000),(0-56000),(0-56000)
+ *   +MS=?   test:  +MS: (<carriers>),(0,1),(0-64000),(0-64000),(0-64000),(0-64000)
  *
  * The four-subparameter form is the common single-rate-pair variant: its
  * min/max apply to both directions.  V.250's own form is the six-subparameter
@@ -19,8 +19,15 @@
  * take their defaults (automode 1, rates 0) rather than the previous value,
  * so AT+MS=V34 means the same thing whatever was set before it.
  *
- * A rate of 0 means "no limit".  Rates are range-checked, stored and reported
- * but NOT enforced: the engine chooses rates from its own training.
+ * Carriers: V22, V22B, V32, V32B, V34, K56 (also "56", "56K", "K56FLEX"),
+ * V90, V92, V91, X2.  V32/V32B and K56 need automode 1: the engine has no
+ * V.32bis or K56flex data mode, so they fall back (V.32bis to the V.22bis
+ * offer; K56flex's V.8bis then V.8 to V.90/V.34) and naming one alone is
+ * ERROR.
+ *
+ * A rate of 0 means "no limit"; a rate above the carrier's maximum is ERROR.
+ * Rates are otherwise stored and reported but NOT enforced: the engine
+ * chooses rates from its own training.
  */
 #ifndef AT_MS_H
 #define AT_MS_H
@@ -28,7 +35,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#define AT_MS_MAX_RATE 56000
+#define AT_MS_MAX_RATE 64000   /* V.91 */
 
 typedef struct {
     char carrier[8];   /* canonical upper-case name, e.g. "V34" */
@@ -52,8 +59,12 @@ at_ms_op_t at_ms_parse(const char *args, at_ms_settings_t *out);
 void at_ms_format_read(const at_ms_settings_t *s, char *buf, size_t len);
 void at_ms_format_test(char *buf, size_t len);
 
-/* Carrier <-> engine mode name ("V34" <-> "v34").  NULL if unknown. */
-const char *at_ms_carrier_to_mode(const char *carrier);
+/* Carrier (or alias) -> engine mode name for that automode ("V34" -> "v34"),
+ * NULL if unknown or not available with that automode.  mode -> canonical
+ * carrier, NULL if unknown. */
+const char *at_ms_carrier_to_mode(const char *carrier, bool automode);
 const char *at_ms_mode_to_carrier(const char *mode);
+/* Highest rate the carrier carries, 0 if unknown. */
+int at_ms_carrier_max_rate(const char *carrier);
 
 #endif

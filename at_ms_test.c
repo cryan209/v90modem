@@ -75,6 +75,23 @@ static void test_parser(void)
     parse_ok("=V90,1,300,33600,300,56000", "V90", 1, 300, 33600, 300, 56000);
     parse_ok("=V34,,,14400", "V34", 1, 0, 14400, 0, 14400);
     parse_ok("=V22B", "V22B", 1, 0, 0, 0, 0);
+    parse_ok("=V22BIS", "V22B", 1, 0, 0, 0, 0);
+    parse_ok("=K56", "K56", 1, 0, 0, 0, 0);
+    parse_ok("=56", "K56", 1, 0, 0, 0, 0);
+    parse_ok("=56K,1", "K56", 1, 0, 0, 0, 0);
+    parse_ok("=\"K56FLEX\",1,0,56000", "K56", 1, 0, 56000, 0, 56000);
+    parse_ok("=V91,0,0,64000,0,64000", "V91", 0, 0, 64000, 0, 64000);
+    parse_ok("=V32B", "V32B", 1, 0, 0, 0, 0);
+    parse_ok("=V32,1,4800,9600", "V32", 1, 4800, 9600, 4800, 9600);
+    parse_ok("=X2", "X2", 1, 0, 0, 0, 0);
+    parse_bad("=K56,0");        /* no K56flex data mode to stand alone on */
+    parse_bad("=56,0");
+    parse_bad("=V32B,0");       /* no V.32bis in the engine; only fallback */
+    parse_bad("=V34,1,0,56000");/* above what V.34 carries */
+    parse_bad("=V22,1,0,2400");
+    parse_bad("=V90,1,0,64000");
+    parse_bad("=V91,1,0,64001");
+    parse_bad("=V21");
     parse_bad("=V17");          /* a carrier this DCE cannot offer */
     parse_bad("=");
     parse_bad("=V34,2");        /* automode is 0 or 1 */
@@ -84,19 +101,29 @@ static void test_parser(void)
     parse_bad("=V34X");
     parse_bad("V34");
 
-    check(!strcmp(at_ms_carrier_to_mode("V22"), "v22")
-          && !strcmp(at_ms_carrier_to_mode("V22B"), "v22")
+    check(!strcmp(at_ms_carrier_to_mode("V22", false), "v22")
+          && !strcmp(at_ms_carrier_to_mode("V22B", true), "v22")
+          && !strcmp(at_ms_carrier_to_mode("V32B", true), "v22")
+          && at_ms_carrier_to_mode("V32B", false) == NULL
+          && !strcmp(at_ms_carrier_to_mode("56", true), "k56")
+          && at_ms_carrier_to_mode("K56", false) == NULL
+          && !strcmp(at_ms_carrier_to_mode("V91", false), "v91")
           && !strcmp(at_ms_mode_to_carrier("v22"), "V22B")
           && !strcmp(at_ms_mode_to_carrier("v92"), "V92")
-          && at_ms_carrier_to_mode("V32B") == NULL, "carrier <-> mode names");
+          && !strcmp(at_ms_mode_to_carrier("k56"), "K56")
+          && !strcmp(at_ms_mode_to_carrier("v91"), "V91")
+          && at_ms_carrier_to_mode("V17", true) == NULL, "carrier <-> mode names");
+    check(at_ms_carrier_max_rate("V32B") == 14400
+          && at_ms_carrier_max_rate("V91") == 64000
+          && at_ms_carrier_max_rate("V17") == 0, "carrier maximum rates");
 
     parse_ok("=V90,0,0,0,4800,33600", "V90", 0, 0, 0, 4800, 33600);
     at_ms_parse("=V90,0,0,0,4800,33600", &s);
     at_ms_format_read(&s, buf, sizeof(buf));
     check(!strcmp(buf, "+MS: V90,0,0,0,4800,33600"), buf);
     at_ms_format_test(buf, sizeof(buf));
-    check(!strcmp(buf, "+MS: (V22,V22B,V34,V90,V92,X2),(0,1),(0-56000),"
-                       "(0-56000),(0-56000),(0-56000)"), buf);
+    check(!strcmp(buf, "+MS: (V22,V22B,V32,V32B,V34,K56,V90,V92,V91,X2),(0,1),"
+                       "(0-64000),(0-64000),(0-64000),(0-64000)"), buf);
 }
 
 /* ---------------------------------------------------------------- */
@@ -151,6 +178,17 @@ static void expect_offer(int want, const char *what)
     check(got == want, buf);
 }
 
+/* The whole next-call offer, V.91 and K56flex included. */
+static void expect_describe(const char *want)
+{
+    char got[64];
+    char buf[160];
+
+    me_modulation_offer_describe(got, sizeof(got));
+    snprintf(buf, sizeof(buf), "next call offers \"%s\" (want \"%s\")", got, want);
+    check(!strcmp(got, want), buf);
+}
+
 static int test_engine(void)
 {
     const char *link = "/tmp/at_ms_test_pty";
@@ -161,6 +199,8 @@ static int test_engine(void)
     unsetenv("ME_MODE");
     unsetenv("ME_V92_ENABLE");
     unsetenv("ME_V90_ROLE");
+    unsetenv("ME_K56FLEX");
+    unsetenv("ME_V8_ADVERTISE_V91");
     me_init();
     if (di_open(link) < 0) {
         fprintf(stderr, "di_open failed\n");
@@ -185,7 +225,8 @@ static int test_engine(void)
     expect("ATE0", "OK");
     expect_offer(V8_MOD_V90 | V8_MOD_V34 | V8_MOD_V22, "V.90|V.34|V.22 by default");
     expect("AT+MS?", "+MS: V90,1,0,0,0,0");
-    expect("AT+MS=?", "+MS: (V22,V22B,V34,V90,V92,X2),(0,1)");
+    expect("AT+MS=?", "+MS: (V22,V22B,V32,V32B,V34,K56,V90,V92,V91,X2),(0,1)");
+    expect_describe("V90|V34|V22");
 
     expect("AT+MS=V34", "OK");
     expect_offer(V8_MOD_V34 | V8_MOD_V22, "V.34 (automode: V.22 fallback kept)");
@@ -205,6 +246,31 @@ static int test_engine(void)
     expect("AT+MS=V22B,0", "OK");
     expect_offer(V8_MOD_V22, "V.22bis alone");
     expect("AT+MS?", "+MS: V22B,0,0,0,0,0");
+
+    /* K56flex: V.8bis first, then the ordinary V.90 offer; never alone. */
+    expect("AT+MS=K56", "OK");
+    expect_describe("V90|V34|V22|+K56");
+    expect("AT+MS?", "+MS: K56,1,0,0,0,0");
+    expect("AT+MS=56", "OK");
+    expect("AT+MS?", "+MS: K56,1,0,0,0,0");
+    expect("AT+MS=K56,0", "ERROR");
+    expect_describe("V90|V34|V22|+K56");
+
+    /* V.91: on top of V.90 with automode, with only V.34 beside it without. */
+    expect("AT+MS=V91", "OK");
+    expect_describe("V90|V34|V22|+V91");
+    expect("AT+MS=V91,0,0,64000,0,64000", "OK");
+    expect_describe("V34|+V91");
+    expect("AT+MS?", "+MS: V91,0,0,64000,0,64000");
+
+    /* V.32bis has no engine path: with automode it falls back to V.22bis
+     * and reads back as what was asked for; alone it is refused. */
+    expect("AT+MS=V32B,1,0,14400", "OK");
+    expect_describe("V22");
+    expect("AT+MS?", "+MS: V32B,1,0,14400,0,14400");
+    expect("AT+MS=V32B,0", "ERROR");
+    expect("AT+MS=V34,1,0,56000", "ERROR");
+    expect("AT+MS=V22B,0", "OK");
 
     /* A rejected command must leave the offer alone. */
     expect("AT+MS=V17", "ERROR");
@@ -229,8 +295,19 @@ static int test_engine(void)
     expect_offer(V8_MOD_V34, "V.34 alone via the API");
     check(me_set_modulation_offer("v17", true) < 0, "unknown mode rejected");
     expect_offer(V8_MOD_V34, "unchanged after a rejected mode");
+    check(me_set_modulation_offer("k56", false) < 0, "k56 without automode rejected");
     check(me_set_modulation_offer("auto", true) == 0, "auto accepted");
     expect_offer(V8_MOD_V90 | V8_MOD_V34 | V8_MOD_V22, "auto is the v90 default");
+
+    /* The env overrides still win when set. */
+    setenv("ME_V8_ADVERTISE_V91", "1", 1);
+    setenv("ME_K56FLEX", "1", 1);
+    expect_describe("V90|V34|V22|+V91|+K56");
+    setenv("ME_K56FLEX", "0", 1);
+    check(me_set_modulation_offer("k56", true) == 0, "k56 accepted");
+    expect_describe("V90|V34|V22|+V91");
+    unsetenv("ME_K56FLEX");
+    unsetenv("ME_V8_ADVERTISE_V91");
 
     close(dte_fd);
     di_close();

@@ -2061,6 +2061,10 @@ static bool g_advertise_v34 = true;
 /* V.8's V.22/V.22bis bit.  Cleared only by AT+MS=<carrier>,0 (V.250 6.4.1
  * automode off) for a carrier above V.22bis. */
 static bool g_advertise_v22 = true;
+/* AT+MS=K56 / AT+MS=V91 for this call.  ME_K56FLEX and ME_V8_ADVERTISE_V91,
+ * when set, override them; see me_k56flex_mode() and me_advertise_v91(). */
+static bool g_offer_k56 = false;
+static bool g_offer_v91 = false;
 static bool g_enable_v92 = false;
 static const char *g_mode_name = "v90";
 static bool g_enable_x2 = false;
@@ -2107,7 +2111,7 @@ static bool me_v90_analogue_role(void)
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    bool x2, v90, v34, v22, v92;
+    bool x2, v90, v34, v22, v92, k56, v91;
     const char *name;
 } me_offer_t;
 
@@ -2118,15 +2122,35 @@ static int me_offer_bits(bool v22, bool v34, bool v90)
          | (v90 ? V8_MOD_V90 : 0);
 }
 
+/* "V90|V34|V22", plus "+V91" (V.8 PCM availability) and "+K56" (K56flex
+ * V.8bis before V.8) when those are on. */
+static void me_offer_describe(const me_offer_t *o, bool k56, bool v91,
+                              char *buf, size_t len)
+{
+    snprintf(buf, len, "%s%s%s%s%s%s",
+             o->v90 ? "V90|" : "", o->v34 ? "V34|" : "", o->v22 ? "V22|" : "",
+             v91 ? "+V91|" : "", k56 ? "+K56|" : "",
+             (o->v90 || o->v34 || o->v22 || v91 || k56) ? "" : "none");
+    len = strlen(buf);
+    if (len && buf[len - 1] == '|')
+        buf[len - 1] = '\0';
+}
+
+static bool me_advertise_v91(void);
+static int me_k56flex_mode(void);
+
 static const char *me_offer_str(void)
 {
-    static const char *const names[8] = {
-        "none", "V22", "V34", "V34|V22", "V90", "V90|V22", "V90|V34",
-        "V90|V34|V22"
-    };
+    static char buf[48];
+    me_offer_t o;
 
-    return names[(g_advertise_v22 ? 1 : 0) | (g_advertise_v34 ? 2 : 0)
-                 | (g_advertise_v90 ? 4 : 0)];
+    memset(&o, 0, sizeof(o));
+    o.v90 = g_advertise_v90;
+    o.v34 = g_advertise_v34;
+    o.v22 = g_advertise_v22;
+    me_offer_describe(&o, me_k56flex_mode() != 0, me_advertise_v91(),
+                      buf, sizeof(buf));
+    return buf;
 }
 
 /* Mode name -> offer.  NULL, "" and "auto" are the default: v90, or v92
@@ -2155,6 +2179,20 @@ static bool me_offer_from_mode(const char *mode, bool automode, me_offer_t *o)
     } else if (strcmp(mode, "v92") == 0) {
         o->v92 = true;
         o->name = "v92";
+    } else if (strcmp(mode, "k56") == 0) {
+        /* K56flex V.8bis identification, then ordinary V.8 offering V.90:
+         * the engine has no K56flex data mode, so this cannot stand alone. */
+        o->k56 = true;
+        o->name = "k56";
+        if (!automode)
+            return false;
+    } else if (strcmp(mode, "v91") == 0) {
+        /* V.91 rides in V.8's PCM availability; with automode it sits on
+         * top of the ordinary V.90 offer, without it V.34 stays as the
+         * modulation V.8 requires (V.91 has no CM/JM modulation bit). */
+        o->v91 = true;
+        o->v90 = automode;
+        o->name = "v91";
     } else {
         return false;
     }
@@ -2176,6 +2214,8 @@ static bool me_resolve_offer(const char *mode, bool automode)
     g_advertise_v34 = o.v34;
     g_advertise_v22 = o.v22;
     g_enable_v92 = o.v92;
+    g_offer_k56 = o.k56;
+    g_offer_v91 = o.v91;
     g_mode_name = o.name;
     g_v90_analogue_role = o.v90 && role && strcmp(role, "analogue") == 0;
     return true;
@@ -2212,6 +2252,23 @@ void me_reset_modulation_offer(void)
     snprintf(g_cfg_mode, sizeof(g_cfg_mode), "%s", g_default_mode);
     g_cfg_automode = true;
     pthread_mutex_unlock(&g_cfg_mtx);
+}
+
+void me_modulation_offer_describe(char *buf, size_t len)
+{
+    me_offer_t o;
+    char mode[sizeof(g_cfg_mode)];
+    bool automode;
+    const char *k = getenv("ME_K56FLEX"), *v = getenv("ME_V8_ADVERTISE_V91");
+
+    me_get_modulation_offer(mode, sizeof(mode), &automode);
+    if (!me_offer_from_mode(mode, automode, &o)) {
+        snprintf(buf, len, "none");
+        return;
+    }
+    me_offer_describe(&o, (k && *k) ? (*k != '0') : o.k56,
+                      v ? true : o.v91,
+                      buf, len);
 }
 
 int me_modulation_offer_bits(void)
@@ -3052,12 +3109,22 @@ static bool me_v8_no_ci(void)
 static k56flex_v8bis_t *g_k56 = NULL;
 static k56flex_train_t *g_k56_train = NULL;
 
+/* ME_K56FLEX, when set, wins (0 forces it off, probe adds the training
+ * stream); otherwise AT+MS=K56 turns the V.8bis exchange on for the call. */
 static int me_k56flex_mode(void)
 {
     const char *v = getenv("ME_K56FLEX");
-    if (!v || !*v || *v == '0')
+    if (!v || !*v)
+        return g_offer_k56 ? 1 : 0;
+    if (*v == '0')
         return 0;
     return strcmp(v, "probe") == 0 ? 2 : 1;
+}
+
+/* ME_V8_ADVERTISE_V91 (any value) always adds V.91; otherwise AT+MS=V91. */
+static bool me_advertise_v91(void)
+{
+    return getenv("ME_V8_ADVERTISE_V91") != NULL || g_offer_v91;
 }
 
 static bool me_k56flex_enabled(void)
@@ -3231,7 +3298,7 @@ static int me_start_or_restart_v8_locked(int answer_tone)
         /* Advertising V8_PSTN_PCM_MODEM_V91 here makes 2003-era SmartLink
            V.8 parsers (slmodemd dsplibs) discard the whole JM; keep the
            interop-safe subset unless ME_V8_ADVERTISE_V91 is set. */
-        if (getenv("ME_V8_ADVERTISE_V91"))
+        if (me_advertise_v91())
             v8_parms.jm_cm.pcm_modem_availability |= V8_PSTN_PCM_MODEM_V91;
     } else if (g_enable_x2) {
         /* V.8 PSTN access category: the x2 server is on the digital
@@ -3243,8 +3310,12 @@ static int me_start_or_restart_v8_locked(int answer_tone)
     } else {
         v8_parms.jm_cm.pstn_access            = 0;
         v8_parms.jm_cm.pcm_modem_availability = 0;
-        if (getenv("ME_V8_ADVERTISE_V91"))
+        if (me_advertise_v91())
             v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V91;
+        /* V.91 alone (AT+MS=V91,0): V.91 needs both ends on digital
+         * connections, and ours is, so say so. */
+        if (g_offer_v91)
+            v8_parms.jm_cm.pstn_access        = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
     }
     v8_parms.jm_cm.nsf                = -1;
     v8_parms.jm_cm.t66                = -1;

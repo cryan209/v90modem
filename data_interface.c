@@ -134,7 +134,11 @@ static ring_t       upstream_ring;
 static di_ms_set_cb_t   ms_set_cb;
 static di_ms_get_cb_t   ms_get_cb;
 static di_ms_reset_cb_t ms_reset_cb;
-static at_ms_settings_t ms_rates;   /* only the rate fields are used */
+/* What the last accepted AT+MS said, so +MS? can report the carrier name and
+ * rates as given (V32B, not the V.22bis offer it maps to).  Reported only
+ * while the engine still holds the mode it mapped to. */
+static at_ms_settings_t ms_cur;
+static bool             ms_cur_valid;
 
 /*
  * Class 2.0 (T.32) line assembly.  T.31 does its own line buffering, but in
@@ -202,30 +206,40 @@ static int at_tx_handler(void *user_data,
 static int handle_plus_ms(const char *args)
 {
     at_ms_settings_t ms;
-    char buf[128];
+    char buf[160];
     char mode[16];
     bool automode;
     const char *carrier;
+    const char *want;
 
     if (!ms_set_cb || !ms_get_cb || !ms_reset_cb)
         return -1;
     if (!args) {
         ms_reset_cb();
-        memset(&ms_rates, 0, sizeof(ms_rates));
+        ms_cur_valid = false;
         return 0;
     }
     switch (at_ms_parse(args, &ms)) {
     case AT_MS_SET:
-        if (ms_set_cb(at_ms_carrier_to_mode(ms.carrier), ms.automode != 0) < 0)
+        want = at_ms_carrier_to_mode(ms.carrier, ms.automode != 0);
+        if (!want || ms_set_cb(want, ms.automode != 0) < 0)
             return -1;
-        ms_rates = ms;
+        ms_cur = ms;
+        ms_cur_valid = true;
         return 0;
     case AT_MS_READ:
         ms_get_cb(mode, sizeof(mode), &automode);
-        carrier = at_ms_mode_to_carrier(mode);
-        ms = ms_rates;
-        snprintf(ms.carrier, sizeof(ms.carrier), "%s", carrier ? carrier : "V90");
-        ms.automode = automode ? 1 : 0;
+        want = ms_cur_valid ? at_ms_carrier_to_mode(ms_cur.carrier,
+                                                     ms_cur.automode != 0)
+                            : NULL;
+        if (want && !strcmp(want, mode) && (ms_cur.automode != 0) == automode) {
+            ms = ms_cur;
+        } else {
+            memset(&ms, 0, sizeof(ms));
+            carrier = at_ms_mode_to_carrier(mode);
+            snprintf(ms.carrier, sizeof(ms.carrier), "%s", carrier ? carrier : "V90");
+            ms.automode = automode ? 1 : 0;
+        }
         at_ms_format_read(&ms, buf, sizeof(buf));
         at_put_response(at, buf);
         return 0;

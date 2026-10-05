@@ -92,10 +92,10 @@ make
                 --pty-link /tmp/v90modem
 ```
 
-Select the highest modem family offered in V.8 with `--mode v22|v34|v90|v92`
-(or `x2`).
-The default is `v90`; lower fallback modes remain advertised. For a plain V.34
-interoperability run, configure the peer for V.34 and start this endpoint with:
+Select the highest modem family offered in V.8 with
+`--mode v22|v34|v90|v92|v91|k56|x2`. The default is `v90`; lower fallback
+modes remain advertised. For a plain V.34 interoperability run, configure the
+peer for V.34 and start this endpoint with:
 
 ```bash
 ./sip_v90_modem --mode v34 --sip-server your-provider.com \
@@ -103,25 +103,31 @@ interoperability run, configure the peer for V.34 and start this endpoint with:
                 --pty-link /tmp/v90modem
 ```
 
-`ME_MODE=v22|v34|v90|v92|x2` is the equivalent environment setting. The older
-`ME_V92_ENABLE=1` remains supported when `ME_MODE` is unset. Unknown
-command-line arguments are an error (usage, exit status 2).
+`ME_MODE` takes the same names. The older `ME_V92_ENABLE=1` remains supported
+when `ME_MODE` is unset. Unknown command-line arguments are an error (usage,
+exit status 2).
 
 Either of those sets the power-on default. A DTE can change the offer for
 later calls with V.250's `AT+MS` on the PTY; the call in progress is never
 touched, and `ATZ`/`AT&F` restore the default:
 
-```
-AT+MS=V34        V.8 offers V.34 (and the V.22bis fallback; automode 1)
-AT+MS=V34,0      V.34 alone (automode off)
-AT+MS=V90 / V92 / V22B
-AT+MS?           +MS: V34,1,0,0,0,0
-AT+MS=?          +MS: (V22,V22B,V34,V90,V92,X2),(0,1),(0-56000),...
-```
+| `AT+MS=`   | next call offers                                         | automode 0 (`,0`) |
+|------------|----------------------------------------------------------|-------------------|
+| `V22`, `V22B` | V.22/V.22bis                                          | same              |
+| `V32`, `V32B` | V.22bis (no V.32bis in the engine; V.250 fallback)    | ERROR             |
+| `V34`      | V.34 + V.22bis                                           | V.34 alone        |
+| `K56` (`56`, `56K`, `K56FLEX`) | K56flex V.8bis, then V.8 offering V.90/V.34/V.22 (no K56flex data mode) | ERROR |
+| `V90`      | V.90 + V.34 + V.22bis                                    | V.90 + V.34       |
+| `V92`      | as V90, with V.92                                        | V.92 + V.34       |
+| `V91`      | as V90, with V.91 in V.8's PCM availability             | V.91 + V.34       |
+| `X2`       | x2 (V.34 upstream)                                       | same              |
 
+`AT+MS?` reads back e.g. `+MS: V34,1,0,0,0,0`; `AT+MS=?` lists the carriers.
 The rate subparameters (`<carrier>,<automode>,<min>,<max>` or V.250's
-`...,<min_tx>,<max_tx>,<min_rx>,<max_rx>`) are range-checked, stored and
-reported by `AT+MS?`, but not enforced: rates come from training.
+`...,<min_tx>,<max_tx>,<min_rx>,<max_rx>`) may not exceed the carrier's
+maximum (14400 for V32B, 33600 for V34, 56000 for K56/V90/V92, 64000 for
+V91); they are stored and reported, not enforced -- rates come from training.
+`ME_K56FLEX` and `ME_V8_ADVERTISE_V91`, when set, override `AT+MS`.
 
 ### macOS notes
 
