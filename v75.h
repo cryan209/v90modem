@@ -19,15 +19,14 @@
  *   11       segmentation / reassembly of data protocol frames over UNERM,
  *            with the H octet in front (position per Cor.1 item 6)
  *
- * What is NOT here, and why:
- *   The H.245 messages are ASN.1 PER encoded, and Recommendation H.245 is not
- *   in `ITU Docs/`; V.75's Annex A gives only the DSVD additions to it.  A
- *   byte-exact PER encoder written without the base syntax would be a guess
- *   that interoperates with nothing.  So the messages are a typed model here
- *   (v75_msg_t, which covers every parameter V.75 Tables 3, 5 and 6 list) and
- *   the encoding is behind v75_h245_codec_t.  v75_native_codec is a private,
- *   NON-H.245 tagged encoding that lets two instances of this software talk;
- *   it must be replaced by a PER codec to meet a real DSVD terminal.
+ * The H.245 messages are a typed model (v75_msg_t, every parameter V.75 Tables
+ * 3, 5 and 6 list) behind v75_h245_codec_t.  The default codec is real H.245
+ * ASN.1 aligned PER (v75_h245.c over per.c).  Where H.245 (03/2022) differs
+ * from V.75's 1996 Annex A the current H.245 wins: V75Parameters.
+ * audioHeaderPresent is a BOOLEAN there (V.75 says NULL), and V76ModeParameters
+ * is a choice of suspend/resume with or without address, carried in a
+ * RequestMode mode element.  Not mapped: the t84 and nlpid data applications
+ * (X.263 over network layer) -- they need T84Profile / unconstrained octets.
  *
  *   V.75 8.1 puts the user data "within an FI field encoded as 133 D".  Read
  *   with V.42 12.2.1.3 (the user data subfield "does not contain a GL" and
@@ -190,16 +189,35 @@ typedef struct {
     int cause;
 } v75_tcs_reject_t;
 
+/* RequestMode with one ModeDescription of one ModeElement (what DSVD needs):
+ * the mode asked for, and optionally V76ModeParameters (Cor.1 item 2). */
 typedef struct {
-    int forward_channel;        /* V76ModeParameters (RequestMode, Cor.1 item 2) */
-    v75_v76_params_t mux;
+    int sequence_number;
+    v75_media_t media;          /* ModeElementType: audioMode / dataMode */
+    v75_audio_cap_t audio;      /* audioMode */
+    int audio_frames;           /* for the codecs whose mode carries a count */
+    v75_data_t data;            /* dataMode: application + protocol */
+    int data_bit_rate;
+    v75_sr_t v76_mode;          /* v76ModeParameters; V75_SR_NONE = absent */
+    int logical_channel;        /* ModeElement.logicalChannelNumber, 0 = absent */
 } v75_request_mode_t;
+
+/* EndSessionCommand choices a DSVD terminal uses (V.70 6.3). */
+typedef enum {
+    V75_END_DISCONNECT = 0,
+    V75_END_GSTN_TELEPHONY,     /* return to analogue telephony */
+    V75_END_GSTN_V8BIS,         /* go on to another V.8 bis mode */
+    V75_END_GSTN_V34_DSVD,
+    V75_END_GSTN_V34_DUPLEX_FAX,
+    V75_END_GSTN_V34_H324
+} v75_end_kind_t;
 
 typedef enum {
     V75_MSG_OLC = 1, V75_MSG_OLC_ACK, V75_MSG_OLC_REJECT,
     V75_MSG_CLC, V75_MSG_CLC_ACK,
     V75_MSG_TCS, V75_MSG_TCS_ACK, V75_MSG_TCS_REJECT,
-    V75_MSG_END_SESSION, V75_MSG_REQUEST_MODE
+    V75_MSG_END_SESSION, V75_MSG_REQUEST_MODE,
+    V75_MSG_REQUEST_MODE_ACK, V75_MSG_REQUEST_MODE_REJECT
 } v75_msg_type_t;
 
 typedef struct {
@@ -214,6 +232,9 @@ typedef struct {
         int tcs_ack_sequence;
         v75_tcs_reject_t tcs_reject;
         v75_request_mode_t request_mode;
+        v75_end_kind_t end_session;
+        struct { int sequence_number; int response; } request_mode_ack;   /* alternative index */
+        struct { int sequence_number; int cause; } request_mode_reject;   /* alternative index */
     } u;
 } v75_msg_t;
 
@@ -223,8 +244,11 @@ typedef struct {
     int (*decode)(const uint8_t *in, int len, v75_msg_t *m);    /* 0 ok, -1 bad */
 } v75_h245_codec_t;
 
-/* NOT H.245: a private tagged encoding for two instances of this software. */
-extern const v75_h245_codec_t v75_native_codec;
+/* H.245 (03/2022) ASN.1 aligned PER, through per.c and the generated
+ * h245_schema.c.  Covers the DSVD subset (tools/h245/prune.py); a message
+ * outside it fails to encode or decode.  Verified byte-for-byte against an
+ * independent X.691 implementation (tools/h245/per_oracle.py). */
+extern const v75_h245_codec_t v75_h245_codec;
 
 /* V.75 8.1: user data inside an FI field encoded 133 D. */
 int v75_wrap(const uint8_t *msg, int len, uint8_t *out, int max);
@@ -281,7 +305,7 @@ typedef struct {
     void (*fcs_error_ind)(void *ctx, int channel);
 } v75_user_t;
 
-v75_t *v75_create(v76_t *mf, const v75_h245_codec_t *codec);   /* NULL = native */
+v75_t *v75_create(v76_t *mf, const v75_h245_codec_t *codec);   /* NULL = H.245 PER */
 void v75_destroy(v75_t *ce);
 void v75_set_user(v75_t *ce, const v75_user_t *u);
 
@@ -300,7 +324,8 @@ int v75_release_req(v75_t *ce, int channel);
  * have been opened with data.app = V75_APP_DSVD_CONTROL. */
 int v75_setparm_req(v75_t *ce, int channel, const v75_tcs_t *caps);
 int v75_setparm_rsp(v75_t *ce, int channel, bool ack, int reason);
-int v75_end_session_req(v75_t *ce);
+int v75_end_session_req(v75_t *ce);                 /* EndSessionCommand disconnect */
+int v75_end_session_ex(v75_t *ce, v75_end_kind_t kind);
 int v75_request_mode_req(v75_t *ce, const v75_request_mode_t *rm);
 
 /* CE-DATA request (6.5).  hdr may be NULL; for a channel opened with the

@@ -55,113 +55,172 @@ static void fill_dir(v75_olc_dir_t *d, int channel, bool audio)
     d->mux.recovery = V76_REC_REJ;
 }
 
+#include "v75_h245_golden.h"
+
+static void mux(v75_v76_params_t *m, int crc, int n401, v75_sr_t sr, v76_mode_t mode, bool ah)
+{
+    memset(m, 0, sizeof(*m));
+    m->crc_len = crc;
+    m->n401 = n401;
+    m->suspend_resume = sr;
+    m->mode = mode;
+    if (mode == V76_ERM) {
+        m->window = 15;
+        m->recovery = V76_REC_REJ;
+    }
+    m->audio_header = ah;
+}
+
+/* The typed form of each golden vector (mirrors tools/h245/golden.py). */
+static int golden_msg(const char *n, v75_msg_t *m)
+{
+    memset(m, 0, sizeof(*m));
+    if (!strcmp(n, "tcs")) {
+        v75_tcs_t *t = &m->u.tcs;
+
+        m->type = V75_MSG_TCS;
+        t->has_mux = true;
+        t->mux.sr_without_address = true;
+        t->mux.rej = t->mux.srej = true;
+        t->mux.crc8 = t->mux.crc16 = true;
+        t->mux.num_dlcs = 4; t->mux.n401 = 128; t->mux.max_window = 15;
+        t->mux.audio_header = true;
+        t->n_caps = 2;
+        t->caps[0].number = 1; t->caps[0].is_audio = true;
+        t->caps[0].audio.cap = V75_AUDIO_G729_ANNEX_A; t->caps[0].audio.frames = 1;
+        t->caps[1].number = 2;
+        t->caps[1].data.protocol = V75_DP_V42_LAPM;
+        t->n_desc = 1;
+        t->desc[0].n_sets = 2;
+        t->desc[0].set[0].n_alts = 1; t->desc[0].set[0].alt[0] = 1;
+        t->desc[0].set[1].n_alts = 1; t->desc[0].set[1].alt[0] = 2;
+    } else if (!strcmp(n, "olc_audio")) {
+        v75_olc_t *o = &m->u.olc;
+
+        m->type = V75_MSG_OLC;
+        o->fwd.channel = 3; o->fwd.has_port = true;
+        o->fwd.media = V75_MEDIA_AUDIO;
+        o->fwd.audio.cap = V75_AUDIO_G729_ANNEX_A; o->fwd.audio.frames = 1;
+        mux(&o->fwd.mux, 1, 12, V75_SR_WITHOUT_ADDRESS, V76_UNERM, true);
+        o->has_rev = true;
+        o->rev = o->fwd;
+        o->rev.has_port = false;
+    } else if (!strcmp(n, "olc_data")) {
+        v75_olc_t *o = &m->u.olc;
+
+        m->type = V75_MSG_OLC;
+        o->fwd.channel = 4;
+        o->fwd.media = V75_MEDIA_DATA;
+        o->fwd.data.protocol = V75_DP_V42_LAPM;
+        mux(&o->fwd.mux, 2, 128, V75_SR_NONE, V76_ERM, false);
+        o->has_rev = true;
+        o->rev = o->fwd;
+    } else if (!strcmp(n, "olc_ack")) {
+        m->type = V75_MSG_OLC_ACK;
+        m->u.olc_ack.forward_channel = 3; m->u.olc_ack.reverse_channel = 3;
+        m->u.olc_ack.has_port = true;
+    } else if (!strcmp(n, "olc_reject")) {
+        m->type = V75_MSG_OLC_REJECT;
+        m->u.olc_reject.forward_channel = 9; m->u.olc_reject.cause = 2;
+    } else if (!strcmp(n, "clc")) {
+        m->type = V75_MSG_CLC; m->u.clc.forward_channel = 4;
+    } else if (!strcmp(n, "clc_ack")) {
+        m->type = V75_MSG_CLC_ACK; m->u.clc_ack_channel = 4;
+    } else if (!strcmp(n, "end_disconnect")) {
+        m->type = V75_MSG_END_SESSION; m->u.end_session = V75_END_DISCONNECT;
+    } else if (!strcmp(n, "end_v34dsvd")) {
+        m->type = V75_MSG_END_SESSION; m->u.end_session = V75_END_GSTN_V34_DSVD;
+    } else if (!strcmp(n, "tcs_ack")) {
+        m->type = V75_MSG_TCS_ACK;
+    } else if (!strcmp(n, "tcs_reject")) {
+        m->type = V75_MSG_TCS_REJECT; m->u.tcs_reject.cause = 1;
+    } else if (!strcmp(n, "request_mode")) {
+        v75_request_mode_t *r = &m->u.request_mode;
+
+        m->type = V75_MSG_REQUEST_MODE;
+        r->sequence_number = 5; r->media = V75_MEDIA_AUDIO;
+        r->audio = V75_AUDIO_G729_ANNEX_A; r->v76_mode = V75_SR_WITHOUT_ADDRESS;
+    } else if (!strcmp(n, "request_mode_ack")) {
+        m->type = V75_MSG_REQUEST_MODE_ACK; m->u.request_mode_ack.sequence_number = 5;
+    } else {
+        return -1;
+    }
+    return 0;
+}
+
 static void test_codec(void)
 {
-    v75_msg_t m, back;
-    uint8_t a[V75_MAX_MSG], b[V75_MAX_MSG], w[V75_MAX_MSG];
-    int na, nb, t;
+    uint8_t a[V75_MAX_MSG], w[V75_MAX_MSG], b[V75_MAX_MSG];
     const uint8_t *body;
+    v75_msg_t m, back;
+    int i, na, nb;
 
-    for (t = 0; t < 10; t++) {
-        memset(&m, 0, sizeof(m));
-        m.type = (v75_msg_type_t)(t + 1);
-        switch (m.type) {
-        case V75_MSG_OLC:
-            fill_dir(&m.u.olc.fwd, 5, true);
-            m.u.olc.fwd.mux.audio_header = true;
-            m.u.olc.fwd.mux.suspend_resume = V75_SR_WITH_ADDRESS;
-            m.u.olc.fwd.mux.uih = true;
-            m.u.olc.has_rev = true;
-            fill_dir(&m.u.olc.rev, 5, true);
-            m.u.olc.rev.audio.frames = 3;
-            break;
-        case V75_MSG_OLC_ACK:
-            m.u.olc_ack.forward_channel = 5;
-            m.u.olc_ack.reverse_channel = 9;
-            m.u.olc_ack.has_port = true;
-            m.u.olc_ack.port = 77;
-            break;
-        case V75_MSG_OLC_REJECT:
-            m.u.olc_reject.forward_channel = 5;
-            m.u.olc_reject.cause = 3;
-            break;
-        case V75_MSG_CLC:
-            m.u.clc.forward_channel = 5;
-            m.u.clc.source_lcse = true;
-            break;
-        case V75_MSG_CLC_ACK:
-            m.u.clc_ack_channel = 5;
-            break;
-        case V75_MSG_TCS: {
-            v75_tcs_t *c = &m.u.tcs;
+    /* The typed encoder must produce the bytes an independent X.691
+     * implementation produced for the same H.245 value, and read them back. */
+    for (i = 0; i < (int)(sizeof(h245_golden) / sizeof(h245_golden[0])); i++) {
+        const char *n = h245_golden[i].name;
 
-            c->has_mux = true;
-            c->mux.crc16 = c->mux.crc8 = true;
-            c->mux.rej = c->mux.srej = true;
-            c->mux.sr_with_address = true;
-            c->mux.audio_header = true;
-            c->mux.num_dlcs = 8;
-            c->mux.n401 = 4095;
-            c->mux.max_window = 127;
-            c->n_caps = 3;
-            c->caps[0].number = 1; c->caps[0].is_audio = true;
-            c->caps[0].audio.cap = V75_AUDIO_G729_ANNEX_A; c->caps[0].audio.frames = 2;
-            c->caps[1].number = 2; c->caps[1].is_audio = true;
-            c->caps[1].audio.cap = V75_AUDIO_G723; c->caps[1].audio.silence_suppression = true;
-            c->caps[2].number = 3;
-            c->caps[2].data.app = V75_APP_T434; c->caps[2].data.protocol = V75_DP_V76_W_COMPRESSION;
-            c->caps[2].data.compression = 3; c->caps[2].data.v42bis_codewords = 65536;
-            c->caps[2].data.v42bis_string = 250;
-            c->n_desc = 2;
-            c->desc[0].number = 1;
-            c->desc[0].n_sets = 2;
-            c->desc[0].set[0].n_alts = 2; c->desc[0].set[0].alt[0] = 1; c->desc[0].set[0].alt[1] = 2;
-            c->desc[0].set[1].n_alts = 1; c->desc[0].set[1].alt[0] = 3;
-            c->desc[1].number = 2;
-            c->desc[1].n_sets = 1;
-            c->desc[1].set[0].n_alts = 1; c->desc[1].set[0].alt[0] = 1;
-            break;
-        }
-        case V75_MSG_TCS_ACK:
-            m.u.tcs_ack_sequence = 0;
-            break;
-        case V75_MSG_TCS_REJECT:
-            m.u.tcs_reject.cause = 4;
-            break;
-        case V75_MSG_END_SESSION:
-            break;
-        case V75_MSG_REQUEST_MODE:
-            m.u.request_mode.forward_channel = 6;
-            m.u.request_mode.mux.crc_len = 4;
-            m.u.request_mode.mux.n401 = 1000;
-            break;
-        }
-        na = v75_native_codec.encode(&m, a, sizeof(a));
-        CHECK(na > 0, "message type %d encodes", t + 1);
-        CHECK(v75_native_codec.decode(a, na, &back) == 0 && back.type == m.type,
-              "message type %d decodes", t + 1);
-        nb = v75_native_codec.encode(&back, b, sizeof(b));
-        CHECK(na == nb && memcmp(a, b, (size_t)na) == 0, "message type %d round trips exactly", t + 1);
-        CHECK(v75_native_codec.decode(a, na - (na > 1 ? 1 : 0), &back) != 0 || na == 1,
-              "truncated type %d is refused", t + 1);
+        CHECK(golden_msg(n, &m) == 0, "%s: typed form known", n);
+        na = v75_h245_codec.encode(&m, a, sizeof(a));
+        CHECK(na == h245_golden[i].len && memcmp(a, h245_golden[i].b, (size_t)na) == 0,
+              "%s: C encoder == independent PER encoder (%d vs %d octets)", n, na, h245_golden[i].len);
+        CHECK(v75_h245_codec.decode(h245_golden[i].b, h245_golden[i].len, &back) == 0 &&
+              back.type == m.type, "%s: decodes the independent encoder's bytes", n);
+        nb = v75_h245_codec.encode(&back, b, sizeof(b));
+        CHECK(nb == na && memcmp(a, b, (size_t)na) == 0, "%s: decode then encode is the identity", n);
+        CHECK(v75_h245_codec.decode(h245_golden[i].b, h245_golden[i].len - 1, &back) != 0,
+              "%s: a truncated message is refused", n);
 
         /* V.75 8.1: wrapped in an FI octet of 133. */
         nb = v75_wrap(a, na, w, sizeof(w));
         CHECK(nb == na + 1 && w[0] == 0x85 && w[0] == 133, "FI field is 133 D (0x85)");
         CHECK(v75_unwrap(w, nb, &body) == na && memcmp(body, a, (size_t)na) == 0, "unwrap");
     }
-    {
-        v75_msg_t big;
-
+    {   /* field-level check on the richest message */
+        golden_msg("tcs", &m);
+        v75_h245_codec.decode(h245_golden[0].b, h245_golden[0].len, &back);
+        CHECK(back.u.tcs.n_caps == 2 && back.u.tcs.caps[0].audio.cap == V75_AUDIO_G729_ANNEX_A &&
+              back.u.tcs.caps[1].data.protocol == V75_DP_V42_LAPM && back.u.tcs.mux.n401 == 128 &&
+              back.u.tcs.mux.audio_header && back.u.tcs.desc[0].n_sets == 2 &&
+              back.u.tcs.desc[0].set[1].alt[0] == 2, "TerminalCapabilitySet fields survive");
+        golden_msg("olc_audio", &m);
+        v75_h245_codec.decode(h245_golden[1].b, h245_golden[1].len, &back);
+        CHECK(back.u.olc.fwd.channel == 3 && back.u.olc.fwd.mux.crc_len == 1 &&
+              back.u.olc.fwd.mux.suspend_resume == V75_SR_WITHOUT_ADDRESS &&
+              back.u.olc.fwd.mux.audio_header && back.u.olc.has_rev &&
+              back.u.olc.rev.mux.n401 == 12, "OpenLogicalChannel fields survive");
+    }
+    {   /* values the subset cannot represent are refused, not mangled */
         memset(&m, 0, sizeof(m));
-        m.type = V75_MSG_TCS;
-        m.u.tcs.n_caps = 1;
-        na = v75_native_codec.encode(&m, a, sizeof(a));
-        memcpy(&big, &m, sizeof(m));
-        a[0] = 99;
-        CHECK(v75_native_codec.decode(a, na, &back) != 0, "unknown message type is refused");
+        m.type = V75_MSG_OLC;
+        m.u.olc.fwd.channel = 1;
+        m.u.olc.fwd.media = V75_MEDIA_DATA;
+        m.u.olc.fwd.data.app = V75_APP_T84;                    /* needs T84Profile: not mapped */
+        mux(&m.u.olc.fwd.mux, 2, 128, V75_SR_NONE, V76_ERM, false);
+        CHECK(v75_h245_codec.encode(&m, a, sizeof(a)) < 0, "an unmapped data application is refused");
+        golden_msg("olc_data", &m);
+        m.u.olc.fwd.mux.n401 = 5000;                           /* N401 is (1..4095) */
+        CHECK(v75_h245_codec.encode(&m, a, sizeof(a)) < 0, "a value outside its ASN.1 range is refused");
+        m.u.olc.fwd.mux.n401 = 128;
+        m.u.olc.fwd.channel = 0;                               /* LogicalChannelNumber is 1..65535 */
+        CHECK(v75_h245_codec.encode(&m, a, sizeof(a)) < 0, "channel number 0 is refused");
     }
     CHECK(v75_unwrap((const uint8_t *)"\x84xyz", 4, &body) < 0, "wrong FI is refused");
+    {   /* garbage never crashes the decoder */
+        uint32_t x = 12345;
+        int k;
+
+        for (k = 0; k < 2000; k++) {
+            int n = 1 + (int)(x % 40), j;
+
+            for (j = 0; j < n; j++) {
+                x = x * 1664525u + 1013904223u;
+                a[j] = (uint8_t)(x >> 24);
+            }
+            (void)v75_h245_codec.decode(a, n, &back);
+        }
+        CHECK(1, "2000 random messages decoded or refused without incident");
+    }
 }
 
 static void test_headers(void)
@@ -618,13 +677,16 @@ static void test_control_channel(void)
           "capabilities arrived intact, sequence number 0");
     CHECK(r.u[0].setparm_conf == 1 && r.u[0].last_setparm_ack, "TerminalCapabilitySetAck came back");
 
-    rm.forward_channel = 5;
-    memset(&rm.mux, 0, sizeof(rm.mux));
-    rm.mux.crc_len = 2; rm.mux.n401 = 64;
+    memset(&rm, 0, sizeof(rm));
+    rm.sequence_number = 5;
+    rm.media = V75_MEDIA_AUDIO;
+    rm.audio = V75_AUDIO_G729_ANNEX_A;
+    rm.v76_mode = V75_SR_WITHOUT_ADDRESS;
     CHECK(v75_request_mode_req(r.ce[0], &rm) == 0, "RequestMode");
     CHECK(v75_end_session_req(r.ce[0]) == 0, "EndSessionCommand");
     rig_run(&r, 40000);
-    CHECK(r.u[1].rm_ind == 1 && r.u[1].last_rm.mux.n401 == 64, "RequestMode with V76ModeParameters");
+    CHECK(r.u[1].rm_ind == 1 && r.u[1].last_rm.v76_mode == V75_SR_WITHOUT_ADDRESS &&
+          r.u[1].last_rm.audio == V75_AUDIO_G729_ANNEX_A, "RequestMode carries V76ModeParameters");
     CHECK(r.u[1].session_end == 1, "EndSessionCommand reaches the SCF (6.3)");
     rig_free(&r);
 }
@@ -645,6 +707,7 @@ static void test_inband_setparm(void)
     memset(&tcs, 0, sizeof(tcs));
     tcs.n_caps = 1;
     tcs.caps[0].number = 1; tcs.caps[0].data.app = V75_APP_T434;
+    tcs.caps[0].data.protocol = V75_DP_V42_LAPM;
     tcs.n_desc = 1;
     tcs.desc[0].number = 1;
     tcs.desc[0].n_sets = 1;

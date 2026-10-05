@@ -17,294 +17,6 @@
 #define BRKACK_TYPE   0x60
 
 /* ------------------------------------------------------------------------ *
- * Native (private, NOT H.245) codec
- * ------------------------------------------------------------------------ */
-
-typedef struct { uint8_t *p; int n, max; bool err; } wr_t;
-typedef struct { const uint8_t *p; int n, pos; bool err; } rd_t;
-
-static void w8(wr_t *w, int v)
-{
-    if (w->n >= w->max) { w->err = true; return; }
-    w->p[w->n++] = (uint8_t)v;
-}
-static void w16(wr_t *w, int v) { w8(w, v >> 8); w8(w, v); }
-static void w32(wr_t *w, int v) { w16(w, v >> 16); w16(w, v); }
-
-static int r8(rd_t *r)
-{
-    if (r->pos >= r->n) { r->err = true; return 0; }
-    return r->p[r->pos++];
-}
-static int r16(rd_t *r) { int h = r8(r); return (h << 8) | r8(r); }
-static int r32(rd_t *r) { int h = r16(r); return (h << 16) | r16(r); }
-
-static void w_audio(wr_t *w, const v75_audio_t *a)
-{
-    w8(w, a->cap);
-    w16(w, a->frames);
-    w8(w, a->silence_suppression);
-}
-static void r_audio(rd_t *r, v75_audio_t *a)
-{
-    a->cap = (v75_audio_cap_t)r8(r);
-    a->frames = r16(r);
-    a->silence_suppression = r8(r) != 0;
-}
-
-static void w_data(wr_t *w, const v75_data_t *d)
-{
-    w8(w, d->app);
-    w8(w, d->protocol);
-    w8(w, d->compression);
-    w32(w, d->v42bis_codewords);
-    w16(w, d->v42bis_string);
-    w16(w, d->max_bit_rate);
-}
-static void r_data(rd_t *r, v75_data_t *d)
-{
-    d->app = (v75_app_t)r8(r);
-    d->protocol = (v75_dataproto_t)r8(r);
-    d->compression = r8(r);
-    d->v42bis_codewords = r32(r);
-    d->v42bis_string = r16(r);
-    d->max_bit_rate = r16(r);
-}
-
-static void w_mux(wr_t *w, const v75_v76_params_t *m)
-{
-    w8(w, m->crc_len);
-    w16(w, m->n401);
-    w8(w, m->loopback_test);
-    w8(w, m->suspend_resume);
-    w8(w, m->uih);
-    w8(w, m->mode);
-    w8(w, m->window);
-    w8(w, m->recovery);
-    w8(w, m->audio_header);
-}
-static void r_mux(rd_t *r, v75_v76_params_t *m)
-{
-    m->crc_len = r8(r);
-    m->n401 = r16(r);
-    m->loopback_test = r8(r) != 0;
-    m->suspend_resume = (v75_sr_t)r8(r);
-    m->uih = r8(r) != 0;
-    m->mode = (v76_mode_t)r8(r);
-    m->window = r8(r);
-    m->recovery = (v76_recovery_t)r8(r);
-    m->audio_header = r8(r) != 0;
-}
-
-static void w_dir(wr_t *w, const v75_olc_dir_t *d)
-{
-    w16(w, d->channel);
-    w8(w, d->has_port);
-    w16(w, d->port);
-    w8(w, d->media);
-    w_audio(w, &d->audio);
-    w_data(w, &d->data);
-    w_mux(w, &d->mux);
-}
-static void r_dir(rd_t *r, v75_olc_dir_t *d)
-{
-    d->channel = r16(r);
-    d->has_port = r8(r) != 0;
-    d->port = r16(r);
-    d->media = (v75_media_t)r8(r);
-    r_audio(r, &d->audio);
-    r_data(r, &d->data);
-    r_mux(r, &d->mux);
-}
-
-static int native_encode(const v75_msg_t *m, uint8_t *out, int max)
-{
-    wr_t w = { out, 0, max, false };
-    int i, j, k;
-
-    w8(&w, m->type);
-    switch (m->type) {
-    case V75_MSG_OLC:
-        w_dir(&w, &m->u.olc.fwd);
-        w8(&w, m->u.olc.has_rev);
-        if (m->u.olc.has_rev)
-            w_dir(&w, &m->u.olc.rev);
-        break;
-    case V75_MSG_OLC_ACK:
-        w16(&w, m->u.olc_ack.forward_channel);
-        w16(&w, m->u.olc_ack.reverse_channel);
-        w8(&w, m->u.olc_ack.has_port);
-        w16(&w, m->u.olc_ack.port);
-        break;
-    case V75_MSG_OLC_REJECT:
-        w16(&w, m->u.olc_reject.forward_channel);
-        w16(&w, m->u.olc_reject.cause);
-        break;
-    case V75_MSG_CLC:
-        w16(&w, m->u.clc.forward_channel);
-        w8(&w, m->u.clc.source_lcse);
-        break;
-    case V75_MSG_CLC_ACK:
-        w16(&w, m->u.clc_ack_channel);
-        break;
-    case V75_MSG_TCS: {
-        const v75_tcs_t *t = &m->u.tcs;
-        int flags = (t->mux.sr_with_address << 0) | (t->mux.sr_without_address << 1) |
-                    (t->mux.rej << 2) | (t->mux.srej << 3) | (t->mux.msrej << 4) |
-                    (t->mux.crc8 << 5) | (t->mux.crc16 << 6) | (t->mux.crc32 << 7) |
-                    (t->mux.uih << 8) | (t->mux.two_octet_address << 9) |
-                    (t->mux.loopback_test << 10) | (t->mux.audio_header << 11);
-
-        w16(&w, t->sequence_number);
-        w8(&w, t->has_mux);
-        if (t->has_mux) {
-            w16(&w, flags);
-            w16(&w, t->mux.num_dlcs);
-            w16(&w, t->mux.n401);
-            w8(&w, t->mux.max_window);
-        }
-        w8(&w, t->n_caps);
-        for (i = 0; i < t->n_caps && i < V75_MAX_CAPS; i++) {
-            w16(&w, t->caps[i].number);
-            w8(&w, t->caps[i].is_audio);
-            w_audio(&w, &t->caps[i].audio);
-            w_data(&w, &t->caps[i].data);
-        }
-        w8(&w, t->n_desc);
-        for (i = 0; i < t->n_desc && i < V75_MAX_DESCRIPTORS; i++) {
-            w16(&w, t->desc[i].number);
-            w8(&w, t->desc[i].n_sets);
-            for (j = 0; j < t->desc[i].n_sets && j < V75_MAX_SIMUL; j++) {
-                w8(&w, t->desc[i].set[j].n_alts);
-                for (k = 0; k < t->desc[i].set[j].n_alts && k < V75_MAX_ALTS; k++)
-                    w16(&w, t->desc[i].set[j].alt[k]);
-            }
-        }
-        break;
-    }
-    case V75_MSG_TCS_ACK:
-        w16(&w, m->u.tcs_ack_sequence);
-        break;
-    case V75_MSG_TCS_REJECT:
-        w16(&w, m->u.tcs_reject.sequence_number);
-        w16(&w, m->u.tcs_reject.cause);
-        break;
-    case V75_MSG_END_SESSION:
-        break;
-    case V75_MSG_REQUEST_MODE:
-        w16(&w, m->u.request_mode.forward_channel);
-        w_mux(&w, &m->u.request_mode.mux);
-        break;
-    default:
-        return -1;
-    }
-    return w.err ? -1 : w.n;
-}
-
-static int native_decode(const uint8_t *in, int len, v75_msg_t *m)
-{
-    rd_t r = { in, len, 0, false };
-    int i, j, k;
-
-    memset(m, 0, sizeof(*m));
-    m->type = (v75_msg_type_t)r8(&r);
-    switch (m->type) {
-    case V75_MSG_OLC:
-        r_dir(&r, &m->u.olc.fwd);
-        m->u.olc.has_rev = r8(&r) != 0;
-        if (m->u.olc.has_rev)
-            r_dir(&r, &m->u.olc.rev);
-        break;
-    case V75_MSG_OLC_ACK:
-        m->u.olc_ack.forward_channel = r16(&r);
-        m->u.olc_ack.reverse_channel = r16(&r);
-        m->u.olc_ack.has_port = r8(&r) != 0;
-        m->u.olc_ack.port = r16(&r);
-        break;
-    case V75_MSG_OLC_REJECT:
-        m->u.olc_reject.forward_channel = r16(&r);
-        m->u.olc_reject.cause = r16(&r);
-        break;
-    case V75_MSG_CLC:
-        m->u.clc.forward_channel = r16(&r);
-        m->u.clc.source_lcse = r8(&r) != 0;
-        break;
-    case V75_MSG_CLC_ACK:
-        m->u.clc_ack_channel = r16(&r);
-        break;
-    case V75_MSG_TCS: {
-        v75_tcs_t *t = &m->u.tcs;
-
-        t->sequence_number = r16(&r);
-        t->has_mux = r8(&r) != 0;
-        if (t->has_mux) {
-            int f = r16(&r);
-
-            t->mux.sr_with_address = f & 1;
-            t->mux.sr_without_address = (f >> 1) & 1;
-            t->mux.rej = (f >> 2) & 1;
-            t->mux.srej = (f >> 3) & 1;
-            t->mux.msrej = (f >> 4) & 1;
-            t->mux.crc8 = (f >> 5) & 1;
-            t->mux.crc16 = (f >> 6) & 1;
-            t->mux.crc32 = (f >> 7) & 1;
-            t->mux.uih = (f >> 8) & 1;
-            t->mux.two_octet_address = (f >> 9) & 1;
-            t->mux.loopback_test = (f >> 10) & 1;
-            t->mux.audio_header = (f >> 11) & 1;
-            t->mux.num_dlcs = r16(&r);
-            t->mux.n401 = r16(&r);
-            t->mux.max_window = r8(&r);
-        }
-        t->n_caps = r8(&r);
-        if (t->n_caps > V75_MAX_CAPS)
-            return -1;
-        for (i = 0; i < t->n_caps; i++) {
-            t->caps[i].number = r16(&r);
-            t->caps[i].is_audio = r8(&r) != 0;
-            r_audio(&r, &t->caps[i].audio);
-            r_data(&r, &t->caps[i].data);
-        }
-        t->n_desc = r8(&r);
-        if (t->n_desc > V75_MAX_DESCRIPTORS)
-            return -1;
-        for (i = 0; i < t->n_desc; i++) {
-            t->desc[i].number = r16(&r);
-            t->desc[i].n_sets = r8(&r);
-            if (t->desc[i].n_sets > V75_MAX_SIMUL)
-                return -1;
-            for (j = 0; j < t->desc[i].n_sets; j++) {
-                t->desc[i].set[j].n_alts = r8(&r);
-                if (t->desc[i].set[j].n_alts > V75_MAX_ALTS)
-                    return -1;
-                for (k = 0; k < t->desc[i].set[j].n_alts; k++)
-                    t->desc[i].set[j].alt[k] = r16(&r);
-            }
-        }
-        break;
-    }
-    case V75_MSG_TCS_ACK:
-        m->u.tcs_ack_sequence = r16(&r);
-        break;
-    case V75_MSG_TCS_REJECT:
-        m->u.tcs_reject.sequence_number = r16(&r);
-        m->u.tcs_reject.cause = r16(&r);
-        break;
-    case V75_MSG_END_SESSION:
-        break;
-    case V75_MSG_REQUEST_MODE:
-        m->u.request_mode.forward_channel = r16(&r);
-        r_mux(&r, &m->u.request_mode.mux);
-        break;
-    default:
-        return -1;
-    }
-    return r.err ? -1 : 0;
-}
-
-const v75_h245_codec_t v75_native_codec = { native_encode, native_decode };
-
-/* ------------------------------------------------------------------------ *
  * FI wrapper, audio header, segmentation header
  * ------------------------------------------------------------------------ */
 
@@ -820,7 +532,7 @@ v75_t *v75_create(v76_t *mf, const v75_h245_codec_t *codec)
     if (!ce)
         return NULL;
     ce->mf = mf;
-    ce->codec = codec ? codec : &v75_native_codec;
+    ce->codec = codec ? codec : &v75_h245_codec;
     return ce;
 }
 
@@ -1015,13 +727,19 @@ int v75_setparm_rsp(v75_t *ce, int channel, bool ack, int reason)
     }
 }
 
-int v75_end_session_req(v75_t *ce)
+int v75_end_session_ex(v75_t *ce, v75_end_kind_t kind)
 {
     v75_msg_t m;
 
     memset(&m, 0, sizeof(m));
     m.type = V75_MSG_END_SESSION;
+    m.u.end_session = kind;
     return send_control(ce, &m);
+}
+
+int v75_end_session_req(v75_t *ce)
+{
+    return v75_end_session_ex(ce, V75_END_DISCONNECT);
 }
 
 int v75_request_mode_req(v75_t *ce, const v75_request_mode_t *rm)

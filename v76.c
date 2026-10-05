@@ -1355,6 +1355,39 @@ static void rx_process_bytes(v76_t *mf, const uint8_t *b, int nbits)
         return;
     }
     n = nbits / 8;
+    {
+        /* 5.1.6 has the receiver check every supported FCS length, but 7.1.2.1
+         * fixes a DLC's length at its SABME.  Trying all of them on an
+         * established DLC is not just redundant: with 8- and 16-bit FCS both
+         * supported, about one 8-bit-FCS frame in 65536 also passes as a
+         * 16-bit-FCS frame one octet shorter, and would be delivered truncated
+         * (found on real G.729A speech through V.70).  So: once the DLCI says
+         * which DLC this is, use its length alone. */
+        int dlci = -1;
+        dlc_t *d;
+
+        if (n >= 1) {
+            if (b[0] & 1)
+                dlci = (b[0] >> 2) & 0x3F;
+            else if (n >= 2)
+                dlci = (((b[0] >> 2) & 0x3F) << 7) | (b[1] >> 1);
+        }
+        d = dlci >= 0 ? dlc_find(mf, dlci) : NULL;
+        if (d && d->st != V76_DLC_DISCONNECTED && d->fcs_len) {
+            if (parse_with_fcs(mf, b, n, d->fcs_len, &f) &&
+                f.type != FT_BAD &&
+                !((f.type == FT_RR || f.type == FT_RNR || f.type == FT_REJ ||
+                   f.type == FT_SREJ) && f.info_len != 0)) {
+                rx_dispatch(mf, &f);
+                return;
+            }
+            mf->st.rx_fcs_errors++;
+            mf->st.rx_invalid++;
+            if (mf->su.fcs_error)
+                mf->su.fcs_error(mf->su.ctx, dlci);
+            return;
+        }
+    }
     for (i = 0; i < 3; i++) {
         unsigned bit = try_order[i] == V76_FCS_8 ? V76_FCS_MASK_8 :
                        try_order[i] == V76_FCS_16 ? V76_FCS_MASK_16 : V76_FCS_MASK_32;

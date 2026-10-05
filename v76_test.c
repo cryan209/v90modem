@@ -1033,6 +1033,58 @@ static void test_fcs_variants_and_addr(void)
     }
 }
 
+/* An 8-bit-FCS frame whose last two octets also form a valid 16-bit FCS over
+ * the frame one octet shorter.  With both lengths supported, trying 16 first
+ * delivers it truncated.  Roughly 1 frame in 65536; here one is constructed. */
+static void test_fcs_ambiguity(void)
+{
+    pair_t p;
+    v76_config_t ca, cb;
+    v76_dlc_params_t dp;
+    bitbuf_t bb;
+    uint8_t f[40], ctl = 0x03, info[10];
+    int da, n, tries, shortened = 0;
+
+    v76_config_default(&ca, true);
+    v76_config_default(&cb, false);
+    ca.fcs_support = cb.fcs_support = V76_FCS_MASK_8 | V76_FCS_MASK_16;
+    pair_init(&p, &ca, &cb);
+    v76_dlc_params_default(&dp);
+    dp.mode = V76_UNERM;
+    dp.fcs_len = V76_FCS_8;
+    p.b.accept = dp;
+    da = v76_establish_req(p.a.mf, &dp, NULL, 0);
+    pair_run(&p, 30000);
+    CHECK(p.a.est_conf == 1, "FCS-8 UNERM DLC up");
+    for (tries = 0; tries < 2000000 && !shortened; tries++) {
+        uint8_t shortf[40];
+        int i;
+
+        for (i = 0; i < 10; i++)
+            info[i] = (uint8_t)rnd();
+        n = v76_build_frame(f, 1, da, true, &ctl, 1, info, 10, V76_FCS_8, 0);
+        /* the frame minus its last octet, as a 16-bit-FCS frame would see it */
+        memcpy(shortf, f, (size_t)n - 2);
+        if (v76_fcs(2, f, n - 2) == ((uint32_t)f[n - 2] | (uint32_t)f[n - 1] << 8))
+            shortened = 1;
+        (void)shortf;
+    }
+    CHECK(shortened, "found a colliding frame after %d tries", tries);
+    if (shortened) {
+        int before = p.b.ui_count;
+
+        memset(&bb, 0, sizeof(bb));
+        bb_flag(&bb);
+        bb_frame(&bb, f, n);
+        bb_flag(&bb);
+        feed(p.b.mf, &bb);
+        CHECK(p.b.ui_count == before + 1 && p.b.last_ui_len == 10 && memcmp(p.b.last_ui, info, 10) == 0,
+              "the colliding frame is delivered whole (%d octets), not one octet short (%d)",
+              p.b.last_ui_len, 9);
+    }
+    pair_free(&p);
+}
+
 static void test_unerm_and_uih(void)
 {
     pair_t p;
@@ -1326,6 +1378,7 @@ int main(void)
     test_window();
     test_busy();
     test_fcs_variants_and_addr();
+    test_fcs_ambiguity();
     test_unerm_and_uih();
     test_xid_test();
     test_suspend_resume();
