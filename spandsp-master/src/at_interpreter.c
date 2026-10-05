@@ -211,6 +211,8 @@ SPAN_DECLARE(const char *) at_modem_control_to_str(int state)
         return "Info";
     case AT_MODEM_CONTROL_DIAG_TABLE:
         return "Diagnostic table";
+    case AT_MODEM_CONTROL_PROFILE:
+        return "Profile";
     }
     /*endswitch*/
     return "???";
@@ -1608,9 +1610,14 @@ static const char *at_cmd_Z(at_state_t *s, const char *t)
     at_set_at_rx_mode(s, AT_MODE_ONHOOK_COMMAND);
     s->p = profiles[val];
     s->result_code_mode = AT_DEFAULT_RESULT_CODE_MODE;
+    s->rlsd_behaviour = 1;     /* V.250 6.2.8 recommended &C1 */
+    s->dtr_behaviour = 2;      /* &D2: the Hayes default (6.2.9 names none) */
+    s->display_call_info = 0;
     at_reset_call_info(s);
     /* +MS is part of the configuration Z restores; NULL means "defaults" */
     at_modem_control(s, AT_MODEM_CONTROL_MODULATION, NULL);
+    /* ...and then whatever &W stored over the top of the defaults. */
+    at_modem_control(s, AT_MODEM_CONTROL_PROFILE, "Z");
     return t;
 }
 /*- End of function --------------------------------------------------------*/
@@ -1656,6 +1663,9 @@ static const char *at_cmd_amp_F(at_state_t *s, const char *t)
     at_set_at_rx_mode(s, AT_MODE_ONHOOK_COMMAND);
     s->p = profiles[0];
     s->result_code_mode = AT_DEFAULT_RESULT_CODE_MODE;
+    s->rlsd_behaviour = 1;     /* V.250 6.2.8 recommended &C1 */
+    s->dtr_behaviour = 2;      /* &D2: the Hayes default (6.2.9 names none) */
+    s->display_call_info = 0;
     at_modem_control(s, AT_MODEM_CONTROL_MODULATION, NULL);
     return t;
 }
@@ -1689,6 +1699,36 @@ static const char *at_cmd_amp_Z(at_state_t *s, const char *t)
 }
 /*- End of function --------------------------------------------------------*/
 
+static const char *at_cmd_amp_W(at_state_t *s, const char *t)
+{
+    int val;
+
+    /* Hayes - Store the active configuration as profile 0, the one Z (and
+       power-on) restores. */
+    t += 2;
+    if ((val = parse_num(&t, 0)) < 0)
+        return NULL;
+    /*endif*/
+    if (at_modem_control(s, AT_MODEM_CONTROL_PROFILE, "W") < 0)
+        return NULL;
+    /*endif*/
+    return t;
+}
+/*- End of function --------------------------------------------------------*/
+
+static const char *at_cmd_amp_Y(at_state_t *s, const char *t)
+{
+    int val;
+
+    /* Hayes - Select the stored profile for power-on: there is one, 0. */
+    t += 2;
+    if ((val = parse_num(&t, 0)) < 0)
+        return NULL;
+    /*endif*/
+    return t;
+}
+/*- End of function --------------------------------------------------------*/
+
 static const char *at_cmd_amp_V(at_state_t *s, const char *t)
 {
     int val;
@@ -1699,7 +1739,7 @@ static const char *at_cmd_amp_V(at_state_t *s, const char *t)
     if ((val = parse_num(&t, 0)) < 0)
         return NULL;
     /*endif*/
-    if (at_modem_control(s, AT_MODEM_CONTROL_INFO, "4") <= 0)
+    if (at_modem_control(s, AT_MODEM_CONTROL_INFO, "&V") <= 0)
         return NULL;
     /*endif*/
     return t;
@@ -6174,6 +6214,8 @@ SPAN_DECLARE(at_state_t *) at_init(at_state_t *s,
     at_set_at_rx_mode(s, AT_MODE_ONHOOK_COMMAND);
     s->p = profiles[0];
     s->result_code_mode = AT_DEFAULT_RESULT_CODE_MODE;
+    s->rlsd_behaviour = 1;     /* V.250 6.2.8 recommended &C1 */
+    s->dtr_behaviour = 2;      /* &D2: the Hayes default (6.2.9 names none) */
     return s;
 }
 /*- End of function --------------------------------------------------------*/

@@ -1084,10 +1084,12 @@ static void print_usage(FILE *f, const char *argv0)
         "          [--pty-link path | --control-link path --data-link path]\n"
         "          [--local-port port] [--rtp-port port]\n"
         "          [--bind-addr ip] [--mode x2|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92] [--verbose]\n"
-        "          [--auto-answer rings] [--connect-timeout seconds]\n"
+        "          [--auto-answer rings] [--connect-timeout seconds] [--profile file]\n"
         "\n"
         "--auto-answer sets S0's power-on and factory value (default 2; 0 answers\n"
         "only on ATA). AT+VCID=1 reports the SIP caller after the first RING.\n"
+        "--profile keeps the AT&W stored profile in file (AT command lines),\n"
+        "replayed at start-up and by ATZ; without it AT&W lasts until exit.\n"
         "--connect-timeout sets S7 likewise (default 120 s, 1-255): a dial or\n"
         "answer that has not reached CONNECT by then ends with NO CARRIER.\n"
         "\n"
@@ -1123,6 +1125,7 @@ int main(int argc, char *argv[])
     /* S7: V.90 against the rigs can take several 15 s retrain cycles before
      * CONNECT, so 60 s would cut calls that complete. */
     int connect_timeout = 120;
+    const char *profile = NULL;
     char        bind_addr_buf[64];
     int         local_port  = 5060;
     int         rtp_port    = 0;
@@ -1165,6 +1168,8 @@ int main(int argc, char *argv[])
                 fprintf(stderr, "--auto-answer takes 0 to 255 rings\n");
                 return 2;
             }
+        } else if (!strcmp(a, "--profile") && has_val) {
+            profile = argv[++i];
         } else if (!strcmp(a, "--connect-timeout") && has_val) {
             connect_timeout = atoi(argv[++i]);
             if (connect_timeout < 1 || connect_timeout > 255) {
@@ -1390,6 +1395,7 @@ int main(int argc, char *argv[])
     }
     di_set_auto_answer(auto_answer);
     di_set_connect_timeout(connect_timeout);
+    di_load_profile(profile);
 
     /* ── Optional SIP account registration ──────────────────────── */
     if (sip_server && username) {

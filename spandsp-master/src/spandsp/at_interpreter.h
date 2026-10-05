@@ -125,7 +125,12 @@ enum at_modem_control_operation_e
     /*! Manufacturer diagnostic tables ATY<n>, after the USRobotics Courier (no
         V.250 command uses Y).  num is the decimal value.  A positive return
         means answered with at_put_response(); anything else is ERROR. */
-    AT_MODEM_CONTROL_DIAG_TABLE
+    AT_MODEM_CONTROL_DIAG_TABLE,
+    /*! Stored profile (Hayes &W, V.250 6.1.1's Z).  num "W": store the
+        active configuration (a negative return is ERROR).  num "Z": Z has
+        just restored the factory values; the application puts back what &W
+        stored, if anything. */
+    AT_MODEM_CONTROL_PROFILE
 };
 
 enum

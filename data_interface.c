@@ -364,10 +364,16 @@ static void ctrl_write(const void *buf, size_t len)
 }
 
 /* Called by SpanDSP to write response text back to the terminal */
+/* Set while a stored profile is replayed into the interpreter at power-on:
+ * its OKs are not the DTE's business. */
+static int profile_quiet = 0;
+
 static int at_tx_handler(void *user_data,
                          const uint8_t *buf, size_t len)
 {
     (void)user_data;
+    if (profile_quiet)
+        return 0;
     ctrl_write(buf, len);
     return 0;
 }
@@ -637,12 +643,224 @@ void di_on_call_failed(int sip_status)
 }
 
 /* Power-on: ATI6/ATI11 have no call to report until one connects. */
+static void profile_forget(void);
+
 static void link_reset(void)
 {
+    profile_forget();
     pthread_mutex_lock(&test_mtx);
     memset(&link_now, 0, sizeof(link_now));
     link_next_originate = false;
     pthread_mutex_unlock(&test_mtx);
+}
+
+/* ------------------------------------------------------------------ */
+/* Stored profile: &W, Z, --profile                                    */
+/* ------------------------------------------------------------------ */
+
+/* What &W keeps and Z puts back.  +MS, the V.250 parameters and the stored
+ * dial strings are part of it, as they are of the configuration Z resets. */
+typedef struct {
+    bool valid;
+    at_profile_t p;
+    int result_code_mode;
+    int rlsd;
+    int dtr;
+    int vcid;
+    v250_ctl_t v250;
+    bool ms_valid;
+    at_ms_settings_t ms;
+    char dial[10][41];
+} di_profile_t;
+
+static di_profile_t stored_profile;
+static char profile_path[512];
+
+/* Power-on (di_open): no stored profile until one is loaded or written. */
+static void profile_forget(void)
+{
+    memset(&stored_profile, 0, sizeof(stored_profile));
+    profile_path[0] = '\0';
+}
+
+/* Under t31_mtx (inside the interpreter, or the power-on load). */
+static void profile_snapshot(di_profile_t *sp)
+{
+    memset(sp, 0, sizeof(*sp));
+    sp->valid = true;
+    sp->p = at->p;
+    sp->result_code_mode = at->result_code_mode;
+    sp->rlsd = at->rlsd_behaviour;
+    sp->dtr = at->dtr_behaviour;
+    sp->vcid = at->display_call_info;
+    di_get_v250_settings(&sp->v250);
+    if (ms_get_cb) {
+        plus_ms_current(&sp->ms);
+        sp->ms_valid = true;
+    }
+    memcpy(sp->dial, at->stored_dial, sizeof(sp->dial));
+}
+
+static void profile_apply(const di_profile_t *sp)
+{
+    if (!sp->valid)
+        return;
+    at->p = sp->p;
+    at->result_code_mode = sp->result_code_mode;
+    at->rlsd_behaviour = sp->rlsd;
+    at->dtr_behaviour = sp->dtr;
+    at->display_call_info = sp->vcid;
+    pthread_mutex_lock(&v250_mtx);
+    v250 = sp->v250;
+    pthread_mutex_unlock(&v250_mtx);
+    if (sp->ms_valid && ms_set_cb) {
+        const char *mode = at_ms_settings_to_mode(&sp->ms);
+
+        if (mode && ms_set_cb(mode, sp->ms.automode != 0) == 0) {
+            ms_cur = sp->ms;
+            ms_cur_valid = true;
+        }
+    }
+    memcpy(at->stored_dial, sp->dial, sizeof(sp->dial));
+}
+
+/* The profile as the AT command lines that recreate it -- the file format,
+ * and what &V shows.  S3/S4/S5 go last so the lines before them still end
+ * the way the reader expects.  Returns the number of lines. */
+static int profile_lines(const di_profile_t *sp, char lines[][200], int max)
+{
+    static const char *const params[] = {
+        "MR", "ER", "DR", "ES", "DS", "DS44", "EB", "EFCS", "ETBM", "EWIND", "EFRAM",
+        "IPR", "ICF", "IFC", "ILRR", "MSC"
+    };
+    int n = 0;
+    char info[160];
+    size_t used;
+
+    if (!sp->valid)
+        return 0;
+    snprintf(lines[n++], 200, "ATE%dQ%dV%dX%d&C%d&D%d%s",
+             sp->p.echo ? 1 : 0, sp->p.result_code_format == DI_NO_RESULT_CODES ? 1 : 0,
+             sp->p.verbose ? 1 : 0, sp->result_code_mode, sp->rlsd, sp->dtr,
+             sp->p.pulse_dial ? "P" : "T");
+    snprintf(lines[n++], 200, "ATS0=%dS2=%dS6=%dS7=%dS8=%dS10=%dS12=%d+VCID=%d",
+             sp->p.s_regs[0], sp->p.s_regs[2], sp->p.s_regs[6], sp->p.s_regs[7],
+             sp->p.s_regs[8], sp->p.s_regs[10], sp->p.s_regs[12], sp->vcid);
+    if (sp->ms_valid) {
+        at_ms_format_read(&sp->ms, info, sizeof(info));
+        if (!strncmp(info, "+MS: ", 5))
+            snprintf(lines[n++], 200, "AT+MS=%s", info + 5);
+    }
+    used = 0;
+    for (size_t i = 0; i < sizeof(params) / sizeof(params[0]) && n < max - 2; i++) {
+        v250_ctl_t copy = sp->v250;
+        char cmd[16];
+        const char *colon;
+
+        snprintf(cmd, sizeof(cmd), "%s?", params[i]);
+        if (v250_ctl_command(&copy, cmd, info, sizeof(info)) != V250_CTL_OK
+            || !(colon = strstr(info, ": ")))
+            continue;
+        if (used == 0)
+            used = (size_t) snprintf(lines[n], 200, "AT");
+        used += (size_t) snprintf(lines[n] + used, 200 - used, "%s+%s=%s",
+                                  used > 2 ? ";" : "", params[i], colon + 2);
+        if (used > 150) {
+            n++;
+            used = 0;
+        }
+    }
+    if (used)
+        n++;
+    for (int i = 0; i < 10 && n < max - 1; i++) {
+        char q[100];
+        size_t k = 0;
+
+        if (!sp->dial[i][0])
+            continue;
+        for (const char *c = sp->dial[i]; *c && k < sizeof(q) - 4; c++) {
+            if (*c == '"') {
+                memcpy(q + k, "\\22", 3);
+                k += 3;
+            } else {
+                q[k++] = *c;
+            }
+        }
+        q[k] = '\0';
+        snprintf(lines[n++], 200, "AT+ASTO=%d,\"%s\"", i, q);
+    }
+    snprintf(lines[n++], 200, "ATS3=%dS4=%dS5=%d",
+             sp->p.s_regs[3], sp->p.s_regs[4], sp->p.s_regs[5]);
+    return n;
+}
+
+static int profile_write_file(const di_profile_t *sp)
+{
+    char lines[32][200];
+    char tmp[600];
+    int n;
+    FILE *f;
+
+    if (!profile_path[0])
+        return 0;
+    n = profile_lines(sp, lines, 32);
+    snprintf(tmp, sizeof(tmp), "%s.tmp", profile_path);
+    if (!(f = fopen(tmp, "w")))
+        return -1;
+    fprintf(f, "# v90modem stored profile (AT&W); replayed at power-on and by ATZ\n");
+    for (int i = 0; i < n; i++)
+        fprintf(f, "%s\n", lines[i]);
+    if (fclose(f) != 0 || rename(tmp, profile_path) != 0)
+        return -1;
+    return 0;
+}
+
+/* AT_MODEM_CONTROL_PROFILE.  Inside the interpreter, under t31_mtx. */
+static int handle_profile(const char *op)
+{
+    if (!op || !at)
+        return -1;
+    if (!strcmp(op, "W")) {
+        di_profile_t snap;
+
+        profile_snapshot(&snap);
+        /* Written first: an &W that could not be kept is ERROR, and the
+         * profile in memory stays what the file says. */
+        if (profile_write_file(&snap) < 0)
+            return -1;
+        stored_profile = snap;
+        return 0;
+    }
+    if (!strcmp(op, "Z")) {
+        profile_apply(&stored_profile);
+        return 0;
+    }
+    return -1;
+}
+
+void di_load_profile(const char *path)
+{
+    FILE *f;
+    char line[256];
+
+    snprintf(profile_path, sizeof(profile_path), "%s", path ? path : "");
+    if (!path || !path[0] || !at || !(f = fopen(path, "r")))
+        return;
+    pthread_mutex_lock(&t31_mtx);
+    profile_quiet = 1;
+    while (fgets(line, sizeof(line), f)) {
+        size_t n = strcspn(line, "\r\n");
+
+        if (n < 2 || line[0] == '#')
+            continue;
+        line[n] = (char) at->p.s_regs[3];
+        t31_at_rx(t31, line, (int) n + 1);
+    }
+    profile_quiet = 0;
+    profile_snapshot(&stored_profile);
+    pthread_mutex_unlock(&t31_mtx);
+    fclose(f);
+    fprintf(stderr, "[DI] stored profile loaded from %s\n", path);
 }
 
 void di_set_link_detail_cb(di_link_detail_cb_t cb)
@@ -937,6 +1155,21 @@ static int handle_info(const char *num)
     if (!num || !at)
         return 0;
     buf[0] = '\0';
+    if (!strcmp(num, "&V")) {
+        /* Hayes &V: the active configuration, then the stored one. */
+        char lines[32][200];
+        int n;
+
+        info_settings(&pg);
+        page_put(&pg, "\r\nStored Profile 0%s\r\n",
+                 stored_profile.valid ? (profile_path[0] ? " (also in the --profile file):" : ":")
+                                      : ": none (ATZ restores the factory settings)");
+        n = profile_lines(&stored_profile, lines, 32);
+        for (int i = 0; i < n; i++)
+            page_put(&pg, "%s\r\n", lines[i]);
+        put_page(buf);
+        return 1;
+    }
     if (!strcmp(num, "GCAP")) {
         /* V.250 6.1.9 Table 2: one entry per DCE control standard implemented.
          * +ES/+ER and +DS/+DR are (v250_ctl.c); +MS/+MR are; fax classes 1 and
@@ -1040,6 +1273,9 @@ static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
 
     case AT_MODEM_CONTROL_DIAG_TABLE:
         return handle_diag_table(num);
+
+    case AT_MODEM_CONTROL_PROFILE:
+        return handle_profile(num);
 
     case AT_MODEM_CONTROL_RESUME:
         /* V.250 6.3.7.  With a separate data port there is no online data

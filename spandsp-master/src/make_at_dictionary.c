@@ -38,6 +38,8 @@ const char *wordlist[] =
     "&D",       /* V.250 6.2.9 - Circuit 108 (data terminal ready) behaviour */
     "&F",       /* V.250 6.1.2 - Set to factory-defined configuration */
     "&V",       /* Hayes - View active configuration */
+    "&W",       /* Hayes - Store the active configuration */
+    "&Y",       /* Hayes - Select the stored profile used at power-on */
     "&Z",       /* Hayes - Store telephone number */
     "+A8A",     /* V.251 6.3 - V.8 calling tone indication */
     "+A8C",     /* V.251 6.2 - V.8 answer signal indication */

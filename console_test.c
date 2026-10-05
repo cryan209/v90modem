@@ -949,6 +949,90 @@ static void test_call_progress(void)
     di_close();
 }
 
+/* Stored profile: &W, Z, &F, &V and --profile (di_load_profile). */
+static void test_profile(void)
+{
+    const char *link = "/tmp/console_test_profile";
+    const char *file = "/tmp/console_test_profile.at";
+    char buf[8192];
+    int dte;
+
+    printf("Stored profile (&W, Z, &F, &V, --profile):\n");
+    unlink(file);
+    if (di_open(link) < 0) {
+        failures++;
+        return;
+    }
+    di_set_callbacks(cb_dial, cb_answer, cb_hangup, NULL);
+    di_set_modulation_ops(fake_ms_set, fake_ms_get, fake_ms_reset);
+    di_load_profile(file);                          /* no file yet: nothing stored */
+    dte = open_dte(link);
+    if (dte < 0) {
+        failures++;
+        di_close();
+        return;
+    }
+    expect(dte, "ATE0", "OK");
+    expect(dte, "AT&V", "Stored Profile 0: none");
+    expect(dte, "ATS0=3X2+ES=1,0,1;+VCID=1;+EWIND=6;+MS=V34;+ASTO=2,555", "OK");
+    expect(dte, "AT&W", "OK");
+    check(access(file, R_OK) == 0, "&W writes the --profile file");
+    expect(dte, "ATS0=0X4+ES=3,0,2;+VCID=0;+EWIND=15;+MS=V90;+ASTO=2,1", "OK");
+    expect(dte, "ATZ", "OK");
+    expect(dte, "ATS0?", "003");
+    expect(dte, "ATI4", " X2 ");
+    expect(dte, "AT+ES?", "+ES: 1,0,1");
+    expect(dte, "AT+VCID?", "+VCID: 1");
+    expect(dte, "AT+EWIND?", "+EWIND: 6,0");
+    expect(dte, "AT+MS?", "+MS: V34");
+    expect(dte, "AT+ASTO?", "+ASTO: 2,555");
+    expect(dte, "AT&F", "OK");                      /* factory, not the stored profile */
+    expect(dte, "ATS0?", "000");
+    expect(dte, "AT+ES?", "+ES: 3,0,2");
+    expect(dte, "AT+MS?", "+MS: V90");
+    expect(dte, "ATE0Z", "OK");                     /* ...and Z brings it back */
+    expect(dte, "ATS0?", "003");
+    expect(dte, "AT&V", "ATE0Q0V1X2&C1&D2T");
+    expect(dte, "AT&V", "AT+ASTO=2,\"555\"");
+    expect(dte, "AT&Y0", "OK");
+    expect(dte, "AT&Y1", "ERROR");
+    expect(dte, "AT&W1", "ERROR");
+    close(dte);
+    di_close();
+
+    /* A restart: the file is replayed at power-on, before any ATZ. */
+    if (di_open(link) < 0) {
+        failures++;
+        return;
+    }
+    di_set_callbacks(cb_dial, cb_answer, cb_hangup, NULL);
+    di_set_modulation_ops(fake_ms_set, fake_ms_get, fake_ms_reset);
+    fake_ms_reset();
+    di_load_profile(file);
+    dte = open_dte(link);
+    expect(dte, "ATS0?", "003");                    /* E0 is stored too: no echo */
+    expect(dte, "AT+ES?;+EWIND?", "+EWIND: 6,0");
+    expect(dte, "AT+MS?", "+MS: V34");
+    expect(dte, "AT+ASTO?", "+ASTO: 2,555");
+    collect(dte, buf, sizeof(buf), 50);
+    close(dte);
+    di_close();
+
+    /* An &W that cannot be kept is ERROR. */
+    if (di_open(link) < 0) {
+        failures++;
+        return;
+    }
+    di_load_profile("/nonexistent-dir/profile.at");
+    dte = open_dte(link);
+    expect(dte, "ATE0", "OK");
+    expect(dte, "AT&W", "ERROR");
+    expect(dte, "AT&V", "Stored Profile 0: none");
+    close(dte);
+    di_close();
+    unlink(file);
+}
+
 int main(void)
 {
     test_classic();
@@ -956,6 +1040,7 @@ int main(void)
     test_v250_parameters();
     test_help();
     test_call_progress();
+    test_profile();
     printf("%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures, failures == 1 ? "" : "s");
     return failures != 0;
 }

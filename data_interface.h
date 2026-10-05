@@ -146,6 +146,14 @@ void di_set_caller_id(const char *number, const char *name);
  */
 void di_set_auto_answer(int rings);
 
+/*
+ * The stored profile (AT&W) lives in this file as the AT command lines that
+ * recreate it.  If it exists it is replayed now (silently) and becomes what
+ * ATZ restores; AT&W rewrites it.  With no file, AT&W keeps the profile in
+ * memory only.  Call after di_open() and once the engine has registered +MS.
+ */
+void di_load_profile(const char *path);
+
 /* S7's factory value (V.250 6.3.10, seconds from ATD/ATA to CONNECT). */
 void di_set_connect_timeout(int seconds);
 
