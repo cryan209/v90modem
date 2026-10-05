@@ -381,8 +381,15 @@ test: $(TEST_TARGETS)
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-at "AT+MS=V22B"
 	./engine_pair_test --expect V32BIS --both-env ME_V8=0
-	./engine_pair_test --expect V22BIS --answer-env ME_V8=0 --answer-env ME_MODE=v22
-	./engine_pair_test --expect V22BIS --call-env ME_V8=0 --call-env ME_MODE=v22
+# A V.22bis modem that does not do V.8 (ME_V8=0 with V.22 alone: V.25 ANS then
+# USB1, V.22bis 6.3.1).  Before 2026-10-05 ME_V8=0 was honoured only with
+# V.32bis on, so these rows ran V.8 at both ends.  Our V.8 caller takes USB1
+# after V.32bis A.2.1.2's Tc (default mode) or at once (V.22 alone).
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --answer-env ME_V8=0 --answer-env ME_MODE=v22
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --answer-env ME_V8=0
+	./engine_pair_test --alaw --expect V22BIS --expect-connect 2400 --answer-env ME_V8=0 --answer-env ME_MODE=v22
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --call-env ME_V8=0 --call-env ME_MODE=v22
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_V8=0 --both-env ME_MODE=v22
 	./v92_startup_test
 	./v92_p3_rx_line_test
 	./v92_proc_eval_test

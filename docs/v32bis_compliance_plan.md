@@ -479,10 +479,37 @@ V.32 bit, and `aa` failed about one run in eight under concurrent load.
 (`rf-tower-fb-6`), old binary against new, differ only in the V.32 bit of our
 CM/JM and the log line naming it.
 
-**Not done:** USB1 heard by a call modem (A.2.1.2, the V.22bis branch on the
-calling side); V.32bis clause 7 retrains from the engine; and any hardware
+**Not done:** USB1 heard by a call modem AFTER it has started AA (A.2.1.3's
+V.22bis branch, with its >800 ms ANS rule) -- A.2.1.2 itself is done, see
+below; V.32bis clause 7 retrains from the engine; and any hardware
 interop.  Clause 8 renegotiations by the far end are followed (the V.14 rate
 is updated) but the engine never initiates one.
+
+## USB1 on the calling side, and a real pre-V.8 V.22bis modem (2026-10-05)
+
+A.2.1.2 is implemented.  `v25_automode.c` gained a USB1 detector: USB1 is
+unscrambled binary 1 at 1200 bit/s in V.22's high channel, dibit 11 is a 270
+degree step per 600 baud symbol (V.22 Table 2), so it is a pure line at
+2400 - 150 = **2250 Hz** -- the same "exactly 2250 Hz tone" the RasFinder notes
+record when that peer abandons V.8.  100 ms of it holding 70% of the band,
+with the 1800/550 Hz guard tones left out of the denominator.  The call
+modem, in V.8 or listening after V.8 failed, then: with V.32bis on, goes
+silent (V.8's CM is in the low band the V.22bis answerer watches for S1/SB1)
+and waits A.2.1.2's Tc (3200 ms, > 3100) for AC, since an A.2.2 automode
+answerer sends USB1 for Ta = 3000 ms before AC; with V.32bis off, starts the
+V.22bis call modem at once, whose own 155 ms detection and 456 ms wait
+(V.22bis 6.3.1.1.1) follow.  `ME_V22_LEGACY=0` withdraws both directions.
+
+**`ME_V8=0` did nothing in V.22 mode.**  The answer side's V.25 ANS was
+started only when V.32bis was enabled, so `ME_MODE=v22 ME_V8=0` ran V.8, and
+the two `make test` rows billed as "legacy V.22bis" negotiated V.22bis
+through V.8 at both ends.  With V.22 alone the answerer now sends V.25 ANS,
+75 ms of silence and USB1 with no Ta (V.22bis 6.3.1.2.1); the V.32bis AA/AC
+watches are gated on V.32bis being enabled.  Rows: our V.8 caller (default
+and V.22-only) against that answerer, both laws; the legacy caller against
+our default V.8 answerer (which reaches USB1 only after retrying V.8 with its
+second answer tone, ~12 s -- inside any real caller's S7, but slow); legacy
+against legacy.
 
 ## Against slmodemd: the first foreign V.32bis peer (2026-10-05)
 

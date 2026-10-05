@@ -8,6 +8,11 @@
  *   AC   V.32bis 6.2: the answer modem alternating states A and C, i.e. a
  *        suppressed-carrier pair at 1800 -/+ 1200 Hz = 600 and 3000 Hz
  *        (V.8 8.1.1's sigA for V.32/V.32bis).
+ *   USB1 V.22bis 6.3.1.2.1: the V.22bis answer modem's unscrambled binary
+ *        1 at 1200 bit/s in the high channel.  Dibit 11 is a 270 degree
+ *        step every 600 baud symbol (V.22 Table 2), i.e. a pure line at
+ *        2400 - 150 = 2250 Hz.  A V.22bis answerer may add its 1800 Hz (or
+ *        550 Hz) guard tone, which the test leaves out of the denominator.
  *   ANS  V.25's 2100 Hz answer tone, classified as plain ANS or ANSam by
  *        SpanDSP's own connect-tone detector, because V.8 8.1.1 sends a call
  *        modem that hears ANS rather than ANSam to Annex A/V.32bis.
@@ -26,7 +31,7 @@
 
 #include <spandsp.h>
 
-#define V25AM_BINS 6    /* 600, 1800, 2100, 3000, 980, 1180 Hz */
+#define V25AM_BINS 8    /* 600, 1800, 2100, 3000, 980, 1180, 2250, 550 Hz */
 
 typedef struct {
     /* Goertzel block state. */
@@ -40,6 +45,8 @@ typedef struct {
     int ac_run;
     bool aa;
     bool ac;
+    int usb1_run;
+    bool usb1;
     int v21l_run;
     bool v21l_ever;
     long v21l_last_sample;    /* last block V.21 channel 1 was present */
@@ -63,6 +70,14 @@ void v25am_rx_release(v25_automode_rx_t *s);
 bool v25am_aa_detected(const v25_automode_rx_t *s);
 /* How long AA has been continuously present, in ms (0 if it is not). */
 int v25am_aa_ms(const v25_automode_rx_t *s);
+/* V.22bis 6.3.1.1.1: USB1 from a V.22bis (or V.22) answer modem, present for
+   at least 100 ms.  The call modem's own 155 ms detection then runs in the
+   V.22bis datapump, so this only has to say which datapump to start. */
+bool v25am_usb1_detected(const v25_automode_rx_t *s);
+/* USB1 is on the line now (the last 100 ms), as opposed to ever. */
+bool v25am_usb1_present(const v25_automode_rx_t *s);
+/* Samples received since init. */
+long v25am_samples(const v25_automode_rx_t *s);
 /* Has V.21 channel 1 been seen at all since init? */
 bool v25am_v21_low_ever(const v25_automode_rx_t *s);
 /* V.32bis A.2.1.1: AC from the answering modem. */

@@ -850,6 +850,13 @@ static bool g_v22bis_carrier_seen;
 /* V.32bis A.2.2's Ta: how long USB1 runs before giving up on a V.22bis caller
  * and proceeding at 6.2.  Negative when not running. */
 static int  g_v25_ta_samples = -1;
+/* The answer modem is sending USB1 for a caller that did not do V.8: with
+ * V.32bis on, A.2.2's Ta; with V.22 alone, V.22bis 6.3.1.2.1 with no Ta. */
+static bool g_v25_usb1_phase;
+/* V.32bis A.2.1.2's Tc (> 3100 ms), and where in the automode watch's sample
+ * count the call modem first heard USB1 (-1: not yet). */
+#define V25_TC_MS 3200
+static long g_v25_usb1_first_sample = -1;
 /* Automode receive detectors, armed while V.8 (or V.25) runs and during Ta. */
 static v25_automode_rx_t g_v25am;
 
@@ -864,7 +871,7 @@ static v22bis_state_t *g_v22bis  = NULL;
 
 static bool v22bis_status_is_v8_fsk(int bit)
 {
-    if (g_v25_ta_samples < 0
+    if (!g_v25_usb1_phase
         || (bit != SIG_STATUS_CARRIER_UP && bit != SIG_STATUS_TRAINING_SUCCEEDED))
         return false;
     if (!v25am_v21_low_recent(&g_v25am, 300))
@@ -6519,6 +6526,20 @@ static bool me_v32bis_enabled(void)
     return g_allow_v32bis && parse_env_int("ME_V32BIS", 1) != 0;
 }
 
+/* A V.22bis modem that does not do V.8 (V.22bis 6.3.1, V.25 answer tone then
+ * USB1) is reachable in both roles whenever V.22 is in the offer.
+ * ME_V22_LEGACY=0 withdraws it. */
+static bool me_v22_legacy_enabled(void)
+{
+    return g_advertise_v22 && parse_env_int("ME_V22_LEGACY", 1) != 0;
+}
+
+/* Anything to listen for besides V.8: the V.32bis Annex A signals, USB1. */
+static bool me_automode_enabled(void)
+{
+    return me_v32bis_enabled() || me_v22_legacy_enabled();
+}
+
 /* ME_V8=0: no V.8 at all.  The answer modem sends V.25's unmodulated ANS and
  * runs Annex A/V.32bis; the call modem answers a plain ANS with AA. */
 static bool me_v8_disabled(void)
@@ -6608,6 +6629,7 @@ static void start_v32bis_training(const char *why, int hold_samples)
     }
     g_v25am_armed = false;
     g_v25_ta_samples = -1;
+    g_v25_usb1_phase = false;
     g_mod   = ME_MOD_V32BIS;
     g_state = ME_TRAINING;
     g_v32bis_trained = false;
@@ -6640,15 +6662,26 @@ static void start_v32bis_training(const char *why, int hold_samples)
  * so this is the V.22bis answerer with a Ta deadline.  Called locked. */
 static void start_v25_usb1_locked(const char *why)
 {
-    ME_LOG("[ME] Annex A/V.32bis: %s; sending USB1 (V.22bis) for Ta = 3000 ms\n", why);
-    trace_phase("automode: %s -> USB1 with Ta", why);
+    bool ta = me_v32bis_enabled();
+
+    if (ta) {
+        ME_LOG("[ME] Annex A/V.32bis: %s; sending USB1 (V.22bis) for Ta = 3000 ms\n", why);
+        trace_phase("automode: %s -> USB1 with Ta", why);
+    } else {
+        /* V.22bis 6.3.1.2.1: after the V.25 answer sequence the answer
+           modem sends USB1 and waits for S1 or SB1, with nothing to fall
+           on to. */
+        ME_LOG("[ME] V.22bis 6.3.1.2.1: %s; sending USB1\n", why);
+        trace_phase("automode: %s -> USB1 (V.22bis)", why);
+    }
     g_v25am_armed = false;
     g_v22bis_carrier_seen = false;
-    /* g_v25am keeps running from the answer tone into Ta, so a CM that was
+    /* g_v25am keeps running from the answer tone into USB1, so a CM that was
        already on the line is known about from the first USB1 block. */
     start_v22bis_training();
+    g_v25_usb1_phase = true;
     /* A.2.2: Ta = 3000 +/- 50 ms. */
-    g_v25_ta_samples = 3000*8;
+    g_v25_ta_samples = ta ? 3000*8 : -1;
 }
 
 /* A call modem whose V.8 failed -- typically "Timeout waiting for JM" after a
@@ -6673,7 +6706,7 @@ static bool me_v25_listen_after_v8_failure_locked(void)
  * USB1.  Before this, such a call hung up.  Called locked; true if taken. */
 static bool me_v25_usb1_fallback_locked(const char *why)
 {
-    if (g_calling_party || g_v8_cm_seen || !me_v32bis_enabled()
+    if (g_calling_party || g_v8_cm_seen || !me_automode_enabled()
         || g_state != ME_V8 || g_mh_hold_until_ms != 0)
         return false;
     start_v25_usb1_locked(why);
@@ -6705,7 +6738,7 @@ static void v25_ta_tick(int len)
 static void v25_ta_rx(const int16_t *amp, int len)
 {
     pthread_mutex_lock(&g_state_mtx);
-    if (g_v25_ta_samples >= 0 && g_mod == ME_MOD_V22BIS)
+    if (g_v25_usb1_phase && g_mod == ME_MOD_V22BIS && !g_v22bis_trained)
         v25am_rx(&g_v25am, amp, len);
     pthread_mutex_unlock(&g_state_mtx);
 }
@@ -6713,10 +6746,12 @@ static void v25_ta_rx(const int16_t *amp, int len)
 /* Arm the automode watch at the start of V.8.  Called locked. */
 static void v25_automode_arm_locked(void)
 {
-    g_v25am_armed = me_v32bis_enabled();
+    g_v25am_armed = me_automode_enabled();
     g_v8_cm_seen = false;
     g_v25_listen_only = false;
     g_v25_ta_samples = -1;
+    g_v25_usb1_phase = false;
+    g_v25_usb1_first_sample = -1;
     if (g_v25am_armed)
         v25am_rx_init(&g_v25am, g_calling_party);
 }
@@ -6736,8 +6771,8 @@ static void v25_start_answer_tone_locked(void)
     g_v25_ans_tx = modem_connect_tones_tx_init(NULL, MODEM_CONNECT_TONES_ANS_PR);
     g_v25_ans_samples = 3300*8;
     g_v25_silence_samples = 75*8;
-    ME_LOG("[ME] V.8 disabled (ME_V8=0): sending V.25 ANS and running "
-           "Annex A/V.32bis automode\n");
+    ME_LOG("[ME] V.8 disabled (ME_V8=0): sending V.25 ANS, then %s\n",
+           me_v32bis_enabled() ? "Annex A/V.32bis automode" : "V.22bis USB1");
     trace_phase("automode: V.25 ANS (no V.8)");
 }
 
@@ -6801,7 +6836,8 @@ static void v25_automode_rx(const int16_t *amp, int len)
            shall transmit no signal for 75 +/- 5 ms, transmit the appropriate
            sigA".  Not once a CM has arrived -- that call is V.8 -- and not
            while V.92 9.10 holds the line with ANSam. */
-        if (!g_v8_cm_seen && g_mh_hold_until_ms == 0 && v25am_aa_detected(&g_v25am)
+        if (me_v32bis_enabled()
+            && !g_v8_cm_seen && g_mh_hold_until_ms == 0 && v25am_aa_detected(&g_v25am)
             && (g_v8 == NULL || v25am_aa_watch_v8_ok())) {
             if (g_v25_ans_tx) {
                 modem_connect_tones_tx_free(g_v25_ans_tx);
@@ -6809,12 +6845,42 @@ static void v25_automode_rx(const int16_t *amp, int len)
             }
             start_v32bis_training("AA detected during the answer tone", 75*8);
         }
-    } else if (v25am_ac_detected(&g_v25am)) {
+    } else if (me_v32bis_enabled() && v25am_ac_detected(&g_v25am)) {
         /* A.2.1.1 / V.8 8.1.1's sigA: "If signal AC is detected, the modem
            shall begin transmission of signal AA and continue as defined in
            6.1". */
         start_v32bis_training("AC detected", 0);
-    } else if (me_v25_ans_aa() && v25am_plain_ans_ms(&g_v25am) >= 1000) {
+    } else if (me_v22_legacy_enabled() && v25am_usb1_present(&g_v25am)
+               && me_v32bis_enabled() && g_v25_usb1_first_sample < 0) {
+        /* A.2.1.2: "If signal USB1 is detected, the modem shall start a
+           timer.  When the elapsed time exceeds Tc, where Tc > 3100 ms, if
+           signal USB1 is again detected" it goes to V.22bis; "if at any time
+           signal AC is detected", V.32bis.  An automode answer modem sends
+           USB1 for its Ta of 3000 ms before AC (A.2.2), and Tc outlasts it. */
+        g_v25_usb1_first_sample = v25am_samples(&g_v25am);
+        /* And silently: V.8's CM is V.21 channel 1, the low band the
+           V.22bis answer modem is watching for S1/SB1 (6.3.1.2.1), and A.2.1
+           has the calling modem silent until it knows which it is. */
+        g_v25_listen_only = true;
+        ME_LOG("[ME] Annex A/V.32bis A.2.1.2: USB1 heard; silent for Tc, watching for AC\n");
+        trace_phase("automode: USB1 -> Tc");
+    } else if (me_v22_legacy_enabled() && v25am_usb1_present(&g_v25am)
+               && (!me_v32bis_enabled()
+                   || v25am_samples(&g_v25am) - g_v25_usb1_first_sample
+                      >= (long) V25_TC_MS*8)) {
+        /* A.2.1.2: "If signal USB1 is detected, the modem shall continue as
+           defined in Recommendation V.22 bis", which is also V.8 8.1.1's
+           "proceed in accordance with the appropriate Recommendation" for a
+           sigA other than JM.  A V.22bis answer modem that does not do V.8
+           sends USB1 once its V.25 answer tone ends, and keeps sending it
+           until it hears S1 or SB1, so our V.8 -- still sending CM, or
+           listening after its JM timeout -- stops here, and the V.22bis call
+           modem's own 155 ms USB1 detection (6.3.1.1.1) takes over. */
+        ME_LOG("[ME] USB1 from the answer modem: continuing as a V.22bis call modem\n");
+        g_v25_listen_only = false;
+        g_v25am_armed = false;
+        start_v22bis_training();
+    } else if (me_v32bis_enabled() && me_v25_ans_aa() && v25am_plain_ans_ms(&g_v25am) >= 1000) {
         /* A.2.1.3: "If signal ANS is detected for a period of at least
            1 second, the modem shall begin transmission of signal AA". */
         start_v32bis_training("plain V.25 ANS for 1 s", 0);
@@ -6891,6 +6957,7 @@ static void v32bis_release_locked(void)
     v25am_rx_release(&g_v25am);
     g_v25am_armed = false;
     g_v25_ta_samples = -1;
+    g_v25_usb1_phase = false;
     g_v32bis_trained = false;
     g_v32bis_running = false;
 }
@@ -8046,16 +8113,17 @@ void me_on_sip_connected(void)
        during its answer tone and the call modem for AC (V.8 8.1.1/8.2.2's
        sigA and sigC). */
     v25_automode_arm_locked();
-    if (me_v8_disabled() && me_v32bis_enabled()) {
+    if (me_v8_disabled() && me_automode_enabled()) {
         if (g_calling_party) {
             /* A.2.1: "the calling modem shall initially remain silent and
                shall condition its receiver to detect any of three signals:
-               AC, USB1, ANS".  (USB1 is not acted on here.) */
+               AC, USB1, ANS", which with V.32bis off is V.22bis 6.3.1.1.1
+               waiting for USB1 alone. */
             if (g_v8) {
                 v8_free(g_v8);
                 g_v8 = NULL;
             }
-            ME_LOG("[ME] V.8 disabled (ME_V8=0): call modem waiting for ANS or AC\n");
+            ME_LOG("[ME] V.8 disabled (ME_V8=0): call modem waiting for ANS, AC or USB1\n");
         } else {
             v25_start_answer_tone_locked();
         }

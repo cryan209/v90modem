@@ -8,14 +8,18 @@
 
 #define V25AM_BLOCK     80          /* 10 ms at 8 kHz; 100 Hz bin spacing */
 
-enum { BIN_600 = 0, BIN_1800, BIN_2100, BIN_3000, BIN_980, BIN_1180, BINS };
+enum { BIN_600 = 0, BIN_1800, BIN_2100, BIN_3000, BIN_980, BIN_1180, BIN_2250, BIN_550, BINS };
 _Static_assert(BINS == V25AM_BINS, "v25_automode.h bin count");
 
 /* 980 and 1180 Hz are V.21 channel 1, where V.8's CI and CM travel.  They are
    not on 100 Hz bins, which costs nothing: a Goertzel evaluates the spectrum
    at exactly its own frequency, and on-bin orthogonality only matters for the
-   lines whose leakage the other tests must not see. */
-static const float bin_hz[BINS] = {600.0f, 1800.0f, 2100.0f, 3000.0f, 980.0f, 1180.0f};
+   lines whose leakage the other tests must not see.  The same goes for USB1's
+   2250 Hz and the 550 Hz guard tone: ANS at 2100 Hz is 1.5 bins from 2250 and
+   leaks about 4% of its power into it, and ANS is excluded from the
+   denominator anyway. */
+static const float bin_hz[BINS] = {600.0f, 1800.0f, 2100.0f, 3000.0f, 980.0f, 1180.0f,
+                                   2250.0f, 550.0f};
 static float bin_coeff[BINS];
 
 static void coeffs_init(void)
@@ -35,6 +39,10 @@ static void coeffs_init(void)
 /* AC needs no stated dwell; 50 ms keeps a phase-reversal transient or a
    burst of anything else from being taken for it. */
 #define V25AM_AC_BLOCKS 5
+/* USB1: 100 ms.  The V.22bis call modem itself wants 155 ms of it before it
+   answers (6.3.1.1.1), and the answer modem sends it until it hears S1 or
+   SB1, so taking 100 ms here costs the handshake nothing. */
+#define V25AM_USB1_BLOCKS 10
 
 void v25am_rx_init(v25_automode_rx_t *s, bool want_ans)
 {
@@ -95,6 +103,19 @@ static void block_done(v25_automode_rx_t *s)
             s->ac_run = 0;
         }
     }
+    {
+        /* V.22bis 6.3.1.2.1 lets the answer modem send a guard tone with
+           USB1 (1800 Hz, 6 dB down, or 550 Hz, 3 dB down), so neither counts
+           against it. */
+        double data = rest - p[BIN_1800] - p[BIN_550];
+
+        if (data > V25AM_FLOOR_MS && p[BIN_2250] >= V25AM_LINE_FRAC*data) {
+            if (++s->usb1_run >= V25AM_USB1_BLOCKS)
+                s->usb1 = true;
+        } else {
+            s->usb1_run = 0;
+        }
+    }
     if (rest > V25AM_FLOOR_MS && p[BIN_980] + p[BIN_1180] >= 0.5*rest) {
         if (++s->v21l_run >= 3) {
             s->v21l_last_sample = s->samples;
@@ -148,6 +169,21 @@ bool v25am_aa_detected(const v25_automode_rx_t *s)
 int v25am_aa_ms(const v25_automode_rx_t *s)
 {
     return s->aa_run*10;
+}
+
+bool v25am_usb1_detected(const v25_automode_rx_t *s)
+{
+    return s->usb1;
+}
+
+bool v25am_usb1_present(const v25_automode_rx_t *s)
+{
+    return s->usb1_run >= V25AM_USB1_BLOCKS;
+}
+
+long v25am_samples(const v25_automode_rx_t *s)
+{
+    return s->samples;
 }
 
 bool v25am_v21_low_ever(const v25_automode_rx_t *s)
