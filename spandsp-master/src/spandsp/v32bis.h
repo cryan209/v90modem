@@ -42,23 +42,31 @@
 #define V32BIS_CONSTELLATION_SCALING_FACTOR     1.0
 #endif
 
+/* Rate masks, which are also the rate signal's own bits: bit n is B(n) of
+   V.32bis Table 5 (B0 first in time), so B5 = 4800, B6 = 9600, B9 = 7200,
+   B10 = 12000 and B12 = 14400.  9600 and 7200 used to be the other way round
+   (B9 and B6), which two copies of this modem agree on and a V.32bis peer
+   reads as the opposite rate. */
 enum
 {
     V32BIS_RATE_14400 = 0x1000,
     V32BIS_RATE_12000 = 0x0400,
-    V32BIS_RATE_9600 = 0x0200,
-    V32BIS_RATE_7200 = 0x0040,
+    V32BIS_RATE_9600 = 0x0040,
+    V32BIS_RATE_7200 = 0x0200,
     V32BIS_RATE_4800 = 0x0020
 };
 
 /* State labels used by the V.32bis section 5.2 conditioning signal.  Their
-   numeric values are also the Table 1 differential states used for startup
-   words. */
+   numeric values are also the Table 2 differential states used for startup
+   words: Y1 + 2*Y2, which indexes the 4800 bit/s constellation, so by Figure
+   2-5 A = 00 (-6,-2), D = 10 (-2,6), B = 01 (2,-6), C = 11 (6,2).  B and D
+   used to carry each other's values, so S went out as A/D and S-bar as C/B --
+   the same tones, which is why nothing listening for S alone noticed. */
 enum
 {
     V32BIS_STARTUP_A = 0,
-    V32BIS_STARTUP_B = 1,
-    V32BIS_STARTUP_D = 2,
+    V32BIS_STARTUP_D = 1,
+    V32BIS_STARTUP_B = 2,
     V32BIS_STARTUP_C = 3
 };
 

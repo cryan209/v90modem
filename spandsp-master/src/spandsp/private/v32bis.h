@@ -102,7 +102,8 @@ struct v32bis_state_s
     /* One §5.2 conditioning sequence, two identical Table 5 words and one
        Table 6 word.  Later reactive phases refill this buffer rather than
        duplicating the V.17 pulse shaper. */
-    uint8_t startup_tx_symbols[256 + 16 + 1280 + 16 + 8];
+    /* S, S-bar, the longest TRN 5.2.3 allows, two R words and E. */
+    uint8_t startup_tx_symbols[256 + 16 + 8192 + 16 + 8];
     int startup_tx_symbol_count;
     int startup_tx_symbol_pos;
     int startup_rx_symbol_count;
@@ -123,6 +124,12 @@ struct v32bis_state_s
     uint32_t startup_rx_b1_reg;
     int startup_rx_b1_diff;
     int startup_rx_b1_convolution;
+    /* The other reading of where B1's differential encoder starts (see
+       startup_b1_symbol()), and the vote between the two. */
+    int startup_rx_b1_diff_alt;
+    int startup_rx_b1_convolution_alt;
+    int startup_rx_b1_votes;
+    int startup_rx_b1_voted;
     /* ITU-T V.32bis 6.  The reactive start-up machine.  v32bis_prepare_startup_tx()
        still queues one self-contained burst for the offline harnesses; when
        v32bis_start_startup() is used instead, these drive the clause 6
@@ -135,6 +142,13 @@ struct v32bis_state_s
     bool tone_phase_active;
     int tone_which;
     int tone_present_run;
+    /* 5.3's rate signal, framed by sliding along a continuous decode once
+       the minimum TRN has passed (see v32bis_startup_symbol_sink()). */
+    uint32_t startup_rx_slide_bits;
+    int startup_rx_slide_count;
+    /* Received power during the clause 6 tone phases, so tone presence is
+       measured against the signal it sits in. */
+    float tone_watch_pow;
     int tone_drop_run;
     int reversals_seen;
     int32_t tx_symbol_index;

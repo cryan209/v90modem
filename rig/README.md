@@ -4,6 +4,38 @@ Files here support the live V.90 interop test against a real SmartLink
 softmodem DSP, used to validate the digital-modem server against an actual
 analogue-modem peer without physical hardware.
 
+## Local, without SIP: `slm_bridge/slm_bridge.c` + `audio_sock_modem`
+
+The same SmartLink DSP can be run on this machine against the engine with no
+SIP, PBX or container.  `audio_sock_modem` (repo root) is the engine on a Unix
+socket carrying G.711 codewords at 8 kHz, lockstep (n in, n out -- the byte
+stream an RTP payload would carry).  `slm_bridge` is slmodemd's `-e` program:
+it takes slmodemd's 9600 Hz linear socket, resamples both ways with a 65-tap
+windowed sinc (55 dB SNR measured on a tone), codes G.711 and paces in real
+time.  `tools/slm_local_pair.py` runs both, drives both DTEs and grades
+numbered lines.
+
+```sh
+git clone https://github.com/AonCyberLabs/d-modem          # slmodemd + dsplibs.o
+# fix slmodemd's -e parsing (MANDATORY,STRING), as on the rig, then:
+make -C d-modem/slmodemd slmodemd                          # needs gcc -m32
+make audio_sock_modem slm_bridge
+sudo tools/slm_local_pair.py --slmodemd d-modem/slmodemd/slmodemd \
+     --slm-ms 132,0,4800,9600 --slm-init 'ATX3;AT\N0' --ours-env ME_V8=0
+```
+
+Root is needed for slmodemd's `/dev/ttySL0`.  slmodemd drops privileges before
+it runs the bridge, so the socket and the tap directory are made world-writable.
+`--originate slm|ours` picks who dials (slmodemd answers with ATA, which runs the
+bridge with an empty dial string).  `--slm-rx-gain-db` defaults to -6: with no
+loss at all slmodemd overloads on this engine's -11 dBm0 and retrains at 12000
+and 14400.  Taps: `slm-tx.s16`/`slm-rx.s16` (9600 Hz) and
+`line-tx.g711`/`line-rx.g711` (8000 Hz, the bridge's side of the line).
+slmodemd aborts with `bit out of range 0 - FD_SETSIZE` when a call ends (its
+socket path FD_SETs a closed descriptor); the driver starts a fresh one per
+call.  What this found in V.32bis is in `docs/v32bis_compliance_plan.md`,
+"Against slmodemd".
+
 ## `d-modem/d-modem.c`
 
 Patched copy of the AonCyberLabs **D-Modem** bridge (`d-modem.c`) that runs in the `d-modem` container. Key changes over upstream:

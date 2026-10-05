@@ -434,9 +434,10 @@ static int run_duplex(int alaw,
             {
                 /* Foreign-peer fixture: Table 5 Note 3's cleardown R4,
                    including B4=0.  Use the normal on-wire encoder and
-                   preamble; only the advertised word is overridden. */
+                   preamble; only the advertised word is overridden.
+                   B7, B8, B11 and B15 set, every rate bit clear. */
                 call->reneg_local_rates = 0;
-                call->reneg_tx_word = 0x0180;
+                call->reneg_tx_word = 0x8980;
             }
             if (simultaneous
                 && v32bis_start_rate_renegotiation(answer, reneg_rate) != 0)

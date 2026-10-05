@@ -484,6 +484,97 @@ calling side); V.32bis clause 7 retrains from the engine; and any hardware
 interop.  Clause 8 renegotiations by the far end are followed (the V.14 rate
 is updated) but the engine never initiates one.
 
+## Against slmodemd: the first foreign V.32bis peer (2026-10-05)
+
+Everything above was measured between two copies of this modem, so a
+convention both ends got wrong the same way could not show.  The SmartLink
+soft modem (`slmodemd` with its `dsplibs.o` DSP, as packaged in AonCyberLabs'
+D-Modem) was put on a line to this engine with no SIP:
+`audio_sock_modem` runs the engine on a raw G.711 socket, and
+`rig/slm_bridge/slm_bridge.c` is the `slmodemd -e` program that converts
+slmodemd's 9600 Hz linear socket to it (windowed-sinc 6/5 in both directions,
+real time, taps).  `tools/slm_local_pair.py` places one call and grades numbered
+lines both ways.  Every finding below was settled by demodulating the line
+taps independently of this receiver (`v32bis` TRN, R, E and B1 decoded from the
+spec's own definitions; slmodemd's TRN matches 5.2.3's GPA and GPC vectors in
+1200 of 1200 symbols, which is what calibrates the demodulator).
+
+Seven defects, all ours and all invisible to the self-tests:
+
+- **Table 5's sync bits.**  B7, B11 and B15 are all 1 and 5.3.1 detects on
+  B0-B3, B7, B11, B15; the code sent and required B11 = B15 = 0.  slmodemd's
+  R1 is 0x9ff0 and ours was 0x17f0.  `V32BIS_RATE_FIXED_BITS` 0x8990,
+  `V32BIS_RATE_SYNC_VALUE` 0x8880 (the K56flex firmware's report header check in
+  `k56flex.c` already used the same 0x888f/0x8880).
+- **9600 and 7200 swapped.**  B6 = 9600 and B9 = 7200; the rate masks double as
+  the word's bits and had them the other way round, so a V.32bis peer read our
+  9600 as 7200.  `V32BIS_RATE_9600` is now 0x0040, `V32BIS_RATE_7200` 0x0200.
+- **E's sync test included B4, B8, B13 and B14.**  At 4800 slmodemd sends
+  B8 = 0 (Note 1's V.32 interworking, E = 0x88bf) and Note 2 says B13/B14 are
+  ignored on reception.  E now matches B0-B3 = 1 and B7, B11, B15 = 1 only.
+- **The rate signal was reseeded every word.**  5.3 scrambles and
+  differentially encodes it as one stream (the "ITU-oriented policy" of
+  reseeding from the end of TRN, so repeated words came out as identical
+  symbols, was an inference).  slmodemd's R1 descrambled continuously reads as
+  1573 identical valid words; a continuous descrambler fed ours reads a stable
+  non-Table-5 pattern, and slmodemd never answered it.  The transmitter, the
+  burst path and the receiver all carry the state through every word and E.
+- **TRN was assumed to be exactly 1280.**  5.2.3 allows 1280 to 8192 and
+  slmodemd sends 5500-8200.  The receiver framed the 8 symbols after its own
+  1280 as a rate word and went back to hunting for S.  After 1280 it now decodes
+  continuously and slides until two identical valid sequences end on a symbol.
+  It must NOT train the equalizer decision-directed through that stretch:
+  measured, that left 9600 data at 0.68 from the constellation (white) against
+  0.13 and every line intact without it.
+- **B and D were swapped.**  Figure 2-5 puts D = 10 at (-2,6) and B = 01 at
+  (2,-6); the enum had them the other way, so S went out as A/D and S-bar as
+  C/B -- the same tones, so nothing listening for S alone noticed.  S
+  acquisition fitted the A/D model too, and against slmodemd's (correct) ABAB it
+  locked 90 degrees off and spent the first ~128 TRN symbols walking the one-tap
+  gain back.  slmodemd itself sends ABAB / CDCD / CCCCCCCCCAAACCC.
+- **The call modem's 600/3000 Hz detectors took V.25 ANS for AC.**  The 20
+  sample windows leak 2100 Hz at ~1.4 x rms, the presence test was only relative
+  to its own peak, and ANS's phase reversals read as reversals in "the tone"
+  (NT = 12 symbols).  A line of AC must now stand at half its ideal W/2 x rms.
+
+And one convention the Recommendation leaves open: where the trellis rates'
+differential encoder starts at B1.  Only the convolutional encoder's delay
+elements are zeroed (6.1, 6.2; V.32 Figure 2 draws the two encoders apart).
+This modem continues from E's final symbol; slmodemd starts from 00 (its B1
+matches that 128/128 and ours 0/128).  Our receiver trains on B1 as known data,
+so it now generates both readings, votes over the first 16 symbols and keeps the
+winner.  slmodemd's receiver does not care which we send (measured both ways),
+so the transmitter is unchanged.
+
+**Results** (`tools/slm_local_pair.py`, V.42 off in slmodemd with `AT\N0`, our
+`ME_V8=0`, 150 numbered lines each way, 6 dB of loss into slmodemd -- see below):
+
+- slmodemd calling, we answer: 4800 / 7200 / 9600 / 12000 / 14400 all CONNECT
+  at the requested rate; slmodemd -> our DTE carries 150/150 at every rate in
+  u-law (A-law 7200 failed once, both ways); our DTE -> slmodemd is 150/150 at
+  4800 and 9600 and intermittent at 12000 and 14400, where slmodemd's receiver
+  reports "SNR drop" a second or two into data and retrains.
+- We call, slmodemd answers: **fails at every rate with the defaults**, for two
+  reasons, both open.  Our clause 6 Note 3 echo canceller training sequence
+  (after S for NT) is not tolerated by slmodemd as answer modem at any length
+  (256 to 2048 symbols); with `V32BIS_EC_TRAIN=0`, 4800 passes 150/150 both
+  ways but 7200 and above still fail in data with slmodemd's SNR monitor at
+  6-8 dB.  That second failure needs BOTH our S and S-bar to be correct: with
+  either one mirrored back (A/D S, or C/B S-bar) 9600 passes 150/150.
+  slmodemd answer-mode receiver behaviour we cannot see into; TRN length (to
+  8000), a near-end echo of -20/-30 dB and the B1 convention were all tried and
+  change nothing.
+- slmodemd overloads at 0 dB of loss: at our -11 dBm0 (inside V.2's -9 dBm0) its
+  receiver reports SNR 14-16 dB and retrains at 12000 and 14400; 6 dB of loss
+  fixes it, so the rig defaults to that (`--slm-rx-gain-db`).
+
+Also from this session's offline harness: one informational row of the
+`v32bis_duplex_test` hybrid sweep (31.0 dB, 80 samples, canceller OFF) went from
+pass to fail; every canceller-on row still passes and the suite still exits 0.
+The Python reference (`tools/v32bis_ref`) still carries the old B11/B15 and B/D
+conventions; correcting it breaks 27 of its golden vectors and is left for
+separately.
+
 ## The near end echo canceller
 
 V.32bis is full duplex on one pair, so each modem's own transmit returns
@@ -680,8 +771,9 @@ Current ITU-oriented reference policy:
 
 - Normal startup carries scrambler continuity forward from the end of `TRN`
   into the `R`/`E`/`B1` path.
-- Repeated startup `R` words are emitted as identical 16-bit words so the
-  logical receiver can detect the required repeated-rate pattern.
+- Repeated startup `R` words are one continuously scrambled, differentially
+  encoded stream (5.3), not reseeded per word -- the earlier reseeding policy
+  did not interoperate with slmodemd (see "Against slmodemd" above).
 - `E` is emitted as a standalone startup word with the same ITU-oriented seed
   model, and `B1` begins with the carried scrambler/differential state plus
   zero convolution state.

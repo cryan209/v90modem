@@ -67,9 +67,12 @@ static void collect_bit(void *user_data, int bit)
 static int test_startup_logic(void)
 {
     static const int rates[] = {4800, 7200, 9600, 12000, 14400};
-    static const uint8_t caller_r_states[8] = {0, 0, 0, 0, 1, 0, 3, 3};
+    /* Encodings of 0x9ff0 (Table 5, every rate) from the end of each side's
+       TRN; checked against an encoder written separately from Table 2 and
+       the 4 scrambler. */
+    static const uint8_t caller_r_states[8] = {0, 0, 0, 0, 1, 1, 2, 3};
     static const uint8_t caller_e_states[8] = {3, 0, 2, 0, 3, 2, 1, 0};
-    static const uint8_t answer_r_states[8] = {0, 2, 1, 0, 1, 1, 1, 1};
+    static const uint8_t answer_r_states[8] = {0, 2, 1, 0, 1, 0, 0, 2};
     static const uint8_t answer_e_states[8] = {3, 2, 1, 1, 0, 3, 0, 1};
     uint8_t conditioning[256 + 16 + 1280];
     uint8_t states[8];
@@ -81,7 +84,9 @@ static int test_startup_logic(void)
     int decoded;
     size_t i;
 
-    if (v32bis_build_rate_signal(0x1660, &r_word) != 0  ||  r_word != 0x17F0
+    /* Table 5 with every rate: B4, B5, B6, B7, B8, B9, B10, B11, B12, B15 --
+       the word slmodemd sends, 0x9ff0. */
+    if (v32bis_build_rate_signal(0x1660, &r_word) != 0  ||  r_word != 0x9FF0
         ||  v32bis_decode_rate_signal(r_word, &decoded) != 0  ||  decoded != 0x1660
         ||  v32bis_decode_rate_signal((uint16_t) (r_word | 1), &decoded) == 0)
     {
@@ -120,7 +125,7 @@ static int test_startup_logic(void)
     }
     if (v32bis_encode_startup_word(true, r_word, &reg, &diff, states) != 8
         || memcmp(states, caller_r_states, sizeof(states)) != 0
-        || reg != 0x3055C9  ||  diff != 3)
+        || reg != 0x3055D8  ||  diff != 3)
     {
         fprintf(stderr, "V.32bis caller R word encoding failed\n");
         return -1;
@@ -129,7 +134,7 @@ static int test_startup_logic(void)
     diff = V32BIS_STARTUP_A;
     decoded_word = 0;
     if (v32bis_decode_startup_word(true, states, &reg, &diff, &decoded_word) != 8
-        || decoded_word != r_word  ||  reg != 0x3055C9  ||  diff != 3)
+        || decoded_word != r_word  ||  reg != 0x3055D8  ||  diff != 3)
     {
         fprintf(stderr, "V.32bis caller R word decoding failed\n");
         return -1;
@@ -145,28 +150,28 @@ static int test_startup_logic(void)
     }
 
     if (v32bis_build_conditioning(false, 1280, conditioning, &reg, &diff) != 1552
-        || reg != 0x3BBD8E  ||  diff != V32BIS_STARTUP_B)
+        || reg != 0x3BBD8E  ||  diff != V32BIS_STARTUP_D)
     {
         fprintf(stderr, "V.32bis answerer conditioning sequence failed\n");
         return -1;
     }
     if (v32bis_encode_startup_word(false, r_word, &reg, &diff, states) != 8
         || memcmp(states, answer_r_states, sizeof(states)) != 0
-        || reg != 0x0E08D5  ||  diff != 1)
+        || reg != 0x0E08C4  ||  diff != 2)
     {
         fprintf(stderr, "V.32bis answerer R word encoding failed\n");
         return -1;
     }
     reg = 0x3BBD8E;
-    diff = V32BIS_STARTUP_B;
+    diff = V32BIS_STARTUP_D;
     if (v32bis_decode_startup_word(false, states, &reg, &diff, &decoded_word) != 8
-        || decoded_word != r_word  ||  reg != 0x0E08D5  ||  diff != 1)
+        || decoded_word != r_word  ||  reg != 0x0E08C4  ||  diff != 2)
     {
         fprintf(stderr, "V.32bis answerer R word decoding failed\n");
         return -1;
     }
     reg = 0x3BBD8E;
-    diff = V32BIS_STARTUP_B;
+    diff = V32BIS_STARTUP_D;
     if (v32bis_encode_startup_word(false, e_word, &reg, &diff, states) != 8
         || memcmp(states, answer_e_states, sizeof(states)) != 0
         || reg != 0x0EF92B  ||  diff != 1)

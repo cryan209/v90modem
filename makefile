@@ -904,7 +904,7 @@ fixed-compare:
 	fi
 
 clean:
-	rm -f v90_engine_peer v90_engine_peer.o engine_pair_test engine_pair_test.o k56flex_client_test.o k56flex_train_test.o k56flex_probe_test.o k56flex_v8bis_test.o k56flex_test.o x2_test.o v42bis_test.o $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(V92_P3_RX_LINE_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V44_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(V42_THROUGHPUT_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(V92_MH_TEST_OBJS) $(V92_MH_LINE_TEST_OBJS) $(V92_MH_RETRAIN_TEST_OBJS) $(V92_RN_TEST_OBJS) $(V92_RSIG_TEST_OBJS) $(V92_TONE_A_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test *.d tools/*.d $(APPLE_USB_MODEM_PROBE_OBJS) apple_usb_modem_probe apple_usb_modem_audio \
+	rm -f audio_sock_modem audio_sock_modem.o slm_bridge v90_engine_peer v90_engine_peer.o engine_pair_test engine_pair_test.o k56flex_client_test.o k56flex_train_test.o k56flex_probe_test.o k56flex_v8bis_test.o k56flex_test.o x2_test.o v42bis_test.o $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(V92_P3_RX_LINE_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V44_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(V42_THROUGHPUT_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(V92_MH_TEST_OBJS) $(V92_MH_LINE_TEST_OBJS) $(V92_MH_RETRAIN_TEST_OBJS) $(V92_RN_TEST_OBJS) $(V92_RSIG_TEST_OBJS) $(V92_TONE_A_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test *.d tools/*.d $(APPLE_USB_MODEM_PROBE_OBJS) apple_usb_modem_probe apple_usb_modem_audio \
 	    tools/apple_usb_modem_coupler.o apple_usb_modem_coupler
 
 distclean: clean
@@ -984,6 +984,14 @@ x2-b1-test: x2_b1_test
 # 20 ms frame at a time (engine_pair_test.c).
 engine_pair_test: engine_pair_test.o v90_engine_peer
 	$(CC) engine_pair_test.o -o $@
+
+# The engine on a raw G.711 audio socket instead of SIP (audio_sock_modem.c),
+# and the slmodemd -e program that puts the SmartLink soft modem on that
+# socket (rig/slm_bridge/slm_bridge.c; tools/slm_local_pair.sh drives both).
+audio_sock_modem: audio_sock_modem.o $(filter-out sip_modem.o,$(OBJS)) spandsp $(PJ_BUILD_PREREQ)
+	$(CC) audio_sock_modem.o $(filter-out sip_modem.o,$(OBJS)) -o $@ $(LDFLAGS)
+slm_bridge: rig/slm_bridge/slm_bridge.c spandsp
+	$(CC) $(CFLAGS) rig/slm_bridge/slm_bridge.c -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
 v90_engine_peer: v90_engine_peer.o $(filter-out sip_modem.o,$(OBJS)) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) v90_engine_peer.o $(filter-out sip_modem.o,$(OBJS)) -o $@ $(LDFLAGS)

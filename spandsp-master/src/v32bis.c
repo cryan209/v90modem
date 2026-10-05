@@ -404,6 +404,7 @@ SPAN_DECLARE(int) v32bis_rx(v32bis_state_t *s, const int16_t amp_in[], int len)
 /*- End of function --------------------------------------------------------*/
 
 static int v32bis_reneg_watch(v32bis_state_t *s, const int16_t amp[], int len);
+static void startup_b1_reset_vote(v32bis_state_t *s);
 static bool v32bis_rx_carrying_data(v32bis_state_t *s);
 
 static int v32bis_rx_clean(v32bis_state_t *s, const int16_t amp[], int len)
@@ -479,11 +480,22 @@ SPAN_DECLARE(void) v32bis_set_put_bit(v32bis_state_t *s, span_put_bit_func_t put
 #define V32BIS_VALID_RATE_MASK   (V32BIS_RATE_14400 | V32BIS_RATE_12000 \
                                 | V32BIS_RATE_9600 | V32BIS_RATE_7200 \
                                 | V32BIS_RATE_4800)
-#define V32BIS_RATE_FIXED_BITS   0x0190
+/* Table 5: B0-B3 = 0, B4 = B8 = 1 (V.32bis rather than V.32), and B7, B11 and
+   B15 = 1.  5.3.1 detects a rate signal on B0-B3, B7, B11 and B15.  B11 and
+   B15 used to be sent and expected as 0, so a conformant peer's rate signal
+   (slmodemd's 0x9ff0) failed our sync test and ours should fail its. */
+#define V32BIS_RATE_FIXED_BITS   0x8990
 #define V32BIS_RATE_SYNC_MASK    0x888F
-#define V32BIS_RATE_SYNC_VALUE   0x0080
+#define V32BIS_RATE_SYNC_VALUE   0x8880
 #define V32BIS_E_FIXED_BITS      0x899F
-#define V32BIS_E_SYNC_MASK       0xE99F
+/* Table 6 detects E on B0-B3 = 1 and B7, B11, B15 = 1, the same positions
+   5.3.1 uses for the rate signal.  B4 and B8 are Table 5's V.32bis flags --
+   slmodemd's 4800 bit/s E is 0x88bf, B8 = 0, Note 1's V.32 interworking --
+   and B13/B14 "shall be ... ignored during the reception" (Note 2), so none
+   of them may be part of the match.  They used to be, and the 4800 bit/s E
+   was rejected. */
+#define V32BIS_E_SYNC_MASK       0x888F
+#define V32BIS_E_SYNC_VALUE      0x888F
 #define V32BIS_S_SYMBOLS         256
 #define V32BIS_S_BAR_SYMBOLS     16
 #define V32BIS_SCRAMBLER_MASK    0x7FFFFF
@@ -584,6 +596,27 @@ static int v32bis_trn_fast_symbols(void)
 /*! ITU-T V.32bis 6.  B1 is the marks segment between E and data. */
 #define V32BIS_B1_SYMBOLS        (v32bis_b1_symbols())
 
+/*! 5.2.3: TRN is "at least 1280 and not exceed 8192 symbol intervals".  This
+    modem sends the minimum; V32BIS_TRN_SYMBOLS sends more, so that a receiver
+    can be tested against a far end that does (slmodemd's runs to ~8000). */
+static int v32bis_trn_symbols(void)
+{
+    static int cached = -1;
+    const char *e;
+
+    if (cached < 0)
+    {
+        cached = 1280;
+        if ((e = getenv("V32BIS_TRN_SYMBOLS")) != NULL
+            &&  atoi(e) >= 1280  &&  atoi(e) <= 8192)
+            cached = atoi(e);
+        /*endif*/
+    }
+    /*endif*/
+    return cached;
+}
+/*- End of function --------------------------------------------------------*/
+
 static int v32bis_b1_symbols(void)
 {
     const char *e = getenv("V32BIS_B1_SYMBOLS");
@@ -665,7 +698,7 @@ SPAN_DECLARE(int) v32bis_decode_e_signal(uint16_t word, int *bit_rate)
 {
     int rates;
 
-    if (bit_rate == NULL  ||  (word & V32BIS_E_SYNC_MASK) != V32BIS_E_FIXED_BITS)
+    if (bit_rate == NULL  ||  (word & V32BIS_E_SYNC_MASK) != V32BIS_E_SYNC_VALUE)
         return -1;
     rates = word & V32BIS_VALID_RATE_MASK;
     switch (rates)
@@ -869,21 +902,22 @@ static int startup_descramble_bit(uint32_t *reg, int tap, int input)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Table 2's 4800 bit/s differential transform is self-inverse when each row is
+   indexed by the received state. */
+static const uint8_t startup_differential_decoder[4][4] =
+{
+    {2, 3, 0, 1},
+    {0, 2, 1, 3},
+    {3, 1, 2, 0},
+    {1, 0, 3, 2}
+};
+
 SPAN_DECLARE(int) v32bis_decode_startup_word(bool calling_party,
                                              const uint8_t states[8],
                                              uint32_t *descrambler_register,
                                              int *diff_state,
                                              uint16_t *word)
 {
-    /* Table 1's 4800 bit/s differential transform is self-inverse when each
-       row is indexed by the received state. */
-    static const uint8_t differential_decoder[4][4] =
-    {
-        {2, 3, 0, 1},
-        {0, 2, 1, 3},
-        {3, 1, 2, 0},
-        {1, 0, 3, 2}
-    };
     uint32_t reg;
     uint16_t decoded;
     int tap;
@@ -904,7 +938,7 @@ SPAN_DECLARE(int) v32bis_decode_startup_word(bool calling_party,
     {
         if (states[i] > 3)
             return -1;
-        dibit = differential_decoder[previous][states[i]];
+        dibit = startup_differential_decoder[previous][states[i]];
         previous = states[i];
         b0 = startup_descramble_bit(&reg, tap, dibit & 1);
         b1 = startup_descramble_bit(&reg, tap, (dibit >> 1) & 1);
@@ -1317,6 +1351,7 @@ static void v32bis_reneg_rx_symbol(v32bis_state_t *s, int state)
     s->startup_rx_b1_reg = s->reneg_rx_reg;
     s->startup_rx_b1_diff = s->reneg_rx_diff;
     s->startup_rx_b1_convolution = 0;
+    startup_b1_reset_vote(s);
     s->rx_b1_target = V32BIS_RENEG_B1_SYMBOLS;
     s->startup_rx_stage = V32BIS_RX_B1;
     s->rx.symbol_sink_uses_data_constellation = true;
@@ -1375,7 +1410,9 @@ static bool startup_try_acquire_s(v32bis_state_t *s)
         reference_power = 0.0f;
         for (i = 0;  i < 64;  i++)
         {
-            p = &v17_v32bis_4800_constellation[(i + parity) & 1];
+            /* 5.2.1: S alternates states A and B. */
+            p = &v17_v32bis_4800_constellation[((i + parity) & 1)
+                                               ? V32BIS_STARTUP_B : V32BIS_STARTUP_A];
             gains[parity].re += s->startup_rx_acq[i].re*p->re
                               + s->startup_rx_acq[i].im*p->im;
             gains[parity].im += s->startup_rx_acq[i].im*p->re
@@ -1388,7 +1425,8 @@ static bool startup_try_acquire_s(v32bis_state_t *s)
         input_power = 0.0f;
         for (i = 0;  i < 64;  i++)
         {
-            p = &v17_v32bis_4800_constellation[(i + parity) & 1];
+            p = &v17_v32bis_4800_constellation[((i + parity) & 1)
+                                               ? V32BIS_STARTUP_B : V32BIS_STARTUP_A];
             predicted.re = gains[parity].re*p->re - gains[parity].im*p->im;
             predicted.im = gains[parity].re*p->im + gains[parity].im*p->re;
             error.re = s->startup_rx_acq[i].re - predicted.re;
@@ -1472,7 +1510,31 @@ static void startup_track_gain(v32bis_state_t *s, const complexf_t *z, int state
 }
 /*- End of function --------------------------------------------------------*/
 
-static int startup_b1_symbol(v32bis_state_t *s)
+/*! B1 is "binary ones scrambled and encoded as for the subsequent transmission
+    of data" (6.1, 6.2), and the receiver trains on it as a known sequence.  The
+    scrambler runs on from E and the convolutional encoder's delay elements
+    "shall be set to zero"; the Recommendation does not say where the trellis
+    path's differential encoder starts -- V.32's own Figure 2 draws it as a
+    block separate from the convolutional encoder, and only the latter is
+    zeroed.  This modem continues it from E's final symbol.  slmodemd starts
+    it from Y1Y2 = 00: its B1, demodulated off the line, matches that reading
+    in 128 of 128 symbols and this modem's in none, and a receiver that
+    trained 128 symbols of equalizer on the wrong reading entered data mode
+    white and never recovered.  Both readings are generated, the first
+    V32BIS_B1_VOTE_SYMBOLS are decided on whichever lies nearer, and the
+    reading that was nearer more often is kept. */
+#define V32BIS_B1_VOTE_SYMBOLS  16
+
+static void startup_b1_reset_vote(v32bis_state_t *s)
+{
+    s->startup_rx_b1_diff_alt = 0;
+    s->startup_rx_b1_convolution_alt = 0;
+    s->startup_rx_b1_votes = 0;
+    s->startup_rx_b1_voted = 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int startup_b1_symbol(v32bis_state_t *s, const complexf_t *z)
 {
     static const uint8_t differential_4800[4][4] =
     {
@@ -1491,6 +1553,9 @@ static int startup_b1_symbol(v32bis_state_t *s)
     int bit;
     int i;
     int tap;
+    int primary;
+    int alt;
+    bool alt_nearer;
 
     tap = (!s->calling_party) ? 17 : 4;
     bits = 0;
@@ -1507,9 +1572,44 @@ static int startup_b1_symbol(v32bis_state_t *s)
     s->startup_rx_b1_diff = differential_coded[s->startup_rx_b1_diff][bits & 3];
     s->startup_rx_b1_convolution =
         convolutional[s->startup_rx_b1_convolution][s->startup_rx_b1_diff];
-    return ((bits << 1) & 0x78)
-         | (s->startup_rx_b1_diff << 1)
-         | ((s->startup_rx_b1_convolution >> 2) & 1);
+    primary = ((bits << 1) & 0x78)
+            | (s->startup_rx_b1_diff << 1)
+            | ((s->startup_rx_b1_convolution >> 2) & 1);
+    if (s->startup_rx_b1_voted >= V32BIS_B1_VOTE_SYMBOLS)
+        return primary;
+    /*endif*/
+    s->startup_rx_b1_diff_alt = differential_coded[s->startup_rx_b1_diff_alt][bits & 3];
+    s->startup_rx_b1_convolution_alt =
+        convolutional[s->startup_rx_b1_convolution_alt][s->startup_rx_b1_diff_alt];
+    alt = ((bits << 1) & 0x78)
+        | (s->startup_rx_b1_diff_alt << 1)
+        | ((s->startup_rx_b1_convolution_alt >> 2) & 1);
+    {
+        float pr = z->re - s->rx.constellation[primary].re;
+        float pi = z->im - s->rx.constellation[primary].im;
+        float ar = z->re - s->rx.constellation[alt].re;
+        float ai = z->im - s->rx.constellation[alt].im;
+
+        alt_nearer = (ar*ar + ai*ai < pr*pr + pi*pi);
+    }
+    s->startup_rx_b1_votes += alt_nearer  ?  -1  :  1;
+    if (++s->startup_rx_b1_voted >= V32BIS_B1_VOTE_SYMBOLS
+        &&  s->startup_rx_b1_votes < 0)
+    {
+        /* The other reading won: carry on from its state. */
+        s->startup_rx_b1_diff = s->startup_rx_b1_diff_alt;
+        s->startup_rx_b1_convolution = s->startup_rx_b1_convolution_alt;
+        if (v32bis_trace())
+        {
+            fprintf(stderr,
+                    "[V32BIS %s] B1's trellis differential state starts at 00 (%d votes)\n",
+                    s->calling_party ? "call  " : "answer",
+                    s->startup_rx_b1_votes);
+        }
+        /*endif*/
+    }
+    /*endif*/
+    return alt_nearer  ?  alt  :  primary;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -1698,6 +1798,11 @@ static void startup_finish_word(v32bis_state_t *s)
         s->startup_rx_stage = V32BIS_RX_SEARCH_S;
         return;
     }
+    /* 5.3: one scrambled, differentially encoded stream from the end of TRN
+       through every repeated sequence and E to B1, so the descrambler and the
+       differential decoder carry on from word to word. */
+    s->startup_rx_trn_reg = reg;
+    s->startup_rx_trn_diff = diff;
     if (v32bis_trace())
     {
         fprintf(stderr, "[V32BIS %s] rx word 0x%04x in stage %d at rx symbol %d\n",
@@ -1780,6 +1885,7 @@ static void startup_finish_word(v32bis_state_t *s)
         s->startup_rx_b1_reg = reg;
         s->startup_rx_b1_diff = diff;
         s->startup_rx_b1_convolution = 0;
+        startup_b1_reset_vote(s);
         s->rx_b1_target = V32BIS_B1_SYMBOLS;
         s->startup_rx_stage = V32BIS_RX_B1;
         s->rx.symbol_sink = v32bis_startup_symbol_sink;
@@ -1906,11 +2012,93 @@ static int v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
                        : V32BIS_EQ_DELTA_SLOW;
         if (++s->startup_rx_trn_pos >= 1280)
         {
+            /* 5.2.3: TRN is "at least 1280 and not exceed 8192 symbol
+               intervals", so this is only where the rate signal MAY begin.
+               It used to be taken as where it does begin -- our own
+               transmitter's length -- and the 8 symbols after it framed as a
+               word; against slmodemd, whose TRN ran 5500 to 8200 symbols,
+               that "word" was TRN, failed Table 5's sync test, and the
+               receiver went back to hunting for S for the rest of the call. */
             s->startup_rx_stage = V32BIS_RX_R_FIRST;
             s->startup_rx_word_pos = 0;
+            s->startup_rx_slide_bits = 0;
+            s->startup_rx_slide_count = 0;
         }
         return expected;
     case V32BIS_RX_R_FIRST:
+        if (startup_power(&z) < 10.0f)
+        {
+            s->startup_rx_stage = V32BIS_RX_SEARCH_S;
+            s->startup_rx_acq_count = 0;
+            s->startup_rx_word_pos = 0;
+            return -1;
+        }
+        /*endif*/
+        state = startup_nearest_state(s, &z);
+        startup_track_gain(s, &z, state);
+        /* Decode every symbol as rate signal -- differentially, then through
+           the self-synchronising descrambler -- whether or not TRN has ended,
+           and look for 6.1/6.2's "two consecutive identical" Table 5
+           sequences ending on this symbol.  While TRN is still running this
+           decodes noise into the descrambler; 23 bits of rate signal flush
+           it, so a TRN longer than the minimum costs one extra sequence and
+           nothing else.  The alignment found here frames every word after it. */
+        {
+            int dibit = startup_differential_decoder[s->startup_rx_trn_diff][state];
+            int remote = (!s->calling_party) ? 17 : 4;
+            uint32_t b0;
+            uint32_t b1;
+            uint16_t older;
+            uint16_t newer;
+
+            s->startup_rx_trn_diff = state;
+            b0 = (uint32_t) startup_descramble_bit(&s->startup_rx_trn_reg, remote, dibit & 1);
+            b1 = (uint32_t) startup_descramble_bit(&s->startup_rx_trn_reg, remote, (dibit >> 1) & 1);
+            s->startup_rx_slide_bits = (s->startup_rx_slide_bits >> 2) | (b0 << 30) | (b1 << 31);
+            if (++s->startup_rx_slide_count >= 16)
+            {
+                older = (uint16_t) (s->startup_rx_slide_bits & 0xFFFF);
+                newer = (uint16_t) (s->startup_rx_slide_bits >> 16);
+                if (older == newer
+                    &&  v32bis_decode_rate_signal(newer, &expected) == 0)
+                {
+                    if (v32bis_trace())
+                    {
+                        fprintf(stderr,
+                                "[V32BIS %s] rate signal framed after %d symbols of TRN\n",
+                                s->calling_party ? "call  " : "answer",
+                                1280 + s->startup_rx_slide_count - 16);
+                    }
+                    /*endif*/
+                    s->startup_rx_first_r = newer;
+                    s->startup_remote_rates = expected;
+                    s->rx_repeat_word = newer;
+                    v32bis_rx_event_rate(s, expected);
+                    s->startup_rx_stage = V32BIS_RX_E;
+                    s->startup_rx_word_pos = 0;
+                    return -1;
+                }
+                /*endif*/
+            }
+            /*endif*/
+            /* Past the longest TRN 5.2.3 allows, with room for a far end
+               whose count runs a little over (slmodemd's has been seen at
+               8208 by this receiver's reckoning). */
+            if (s->startup_rx_slide_count > 8192 - 1280 + 512)
+            {
+                s->startup_rx_stage = V32BIS_RX_SEARCH_S;
+                s->startup_rx_acq_count = 0;
+                return -1;
+            }
+            /*endif*/
+        }
+        /* Nothing is handed back for the loops to train on: the equalizer
+           leaves TRN trained and is not adapted again until B1.  Training it
+           decision-directed on the 4 point decisions here instead was tried
+           against slmodemd's ~6900 extra symbols of TRN and measured: the
+           data mode after it read 0.68 from the 9600 constellation and went
+           white, against 0.13 and every line intact without it. */
+        return -1;
     case V32BIS_RX_R_SECOND:
     case V32BIS_RX_E:
         if (startup_power(&z) < 10.0f)
@@ -1956,7 +2144,7 @@ static int v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
            own to make the data mode on the far side of it white. */
         return state;
     case V32BIS_RX_B1:
-        state = startup_b1_symbol(s);
+        state = startup_b1_symbol(s, &z);
         if (++s->startup_rx_b1_pos >= s->rx_b1_target)
         {
             s->rx.scramble_reg = s->startup_rx_b1_reg;
@@ -2028,6 +2216,7 @@ SPAN_DECLARE(int) v32bis_prepare_startup_tx(v32bis_state_t *s, int remote_rates)
     int offered_rates;
     int selected_rate;
     int count;
+    int i;
 
     if (s == NULL
         || v32bis_decode_rate_signal(s->permitted_rates_signal, &local_rates) != 0
@@ -2050,24 +2239,27 @@ SPAN_DECLARE(int) v32bis_prepare_startup_tx(v32bis_state_t *s, int remote_rates)
                                       &trn_diff);
     if (count < 0  ||  v32bis_build_rate_signal(offered_rates, &word) != 0)
         return -1;
+    /* Section 6 requires at least two identical consecutive R words.  5.3
+       scrambles and differentially encodes the rate signal as one stream, so
+       the second is encoded on from the first, and E on from that (see
+       v32bis_tx_fill_word()). */
     word_reg = trn_reg;
     word_diff = trn_diff;
-    if (v32bis_encode_startup_word(s->calling_party,
-                                   word,
-                                   &word_reg,
-                                   &word_diff,
-                                   word_states) != 8)
-        return -1;
-    /* Section 6 requires at least two identical consecutive R words. */
-    memcpy(&s->startup_tx_symbols[count], word_states, sizeof(word_states));
-    count += (int) sizeof(word_states);
-    memcpy(&s->startup_tx_symbols[count], word_states, sizeof(word_states));
-    count += (int) sizeof(word_states);
+    for (i = 0;  i < 2;  i++)
+    {
+        if (v32bis_encode_startup_word(s->calling_party,
+                                       word,
+                                       &word_reg,
+                                       &word_diff,
+                                       word_states) != 8)
+            return -1;
+        memcpy(&s->startup_tx_symbols[count], word_states, sizeof(word_states));
+        count += (int) sizeof(word_states);
+    }
+    /*endfor*/
 
     if (v32bis_build_e_signal(selected_rate, &word) != 0)
         return -1;
-    word_reg = trn_reg;
-    word_diff = trn_diff;
     if (v32bis_encode_startup_word(s->calling_party,
                                    word,
                                    &word_reg,
@@ -2280,10 +2472,21 @@ static int v32bis_tx_fill_word(v32bis_state_t *s, uint16_t word)
     uint32_t reg;
     int diff;
 
-    /* Every start-up word is encoded from the state at the end of this side's
-       own TRN, which is the project's ITU-oriented policy recorded in
-       docs/v32bis_compliance_plan.md, and is what makes repeated R words
-       decode identically at the far end. */
+    /* 5.3: "The rate signal consists of a whole number of repeated 16-bit
+       binary sequences ... scrambled and transmitted at 4800 bit/s with
+       dibits differentially encoded", the differential encoder initialised
+       ONCE, from the final TRN symbol (start-up, retrain) or the final
+       preamble symbol with the scrambler zeroed (clause 8).  So the scrambler
+       and the differential encoder run on through the repeated sequences and
+       into E, and B1 takes over from there.  tx_trn_reg/tx_trn_diff are that
+       running state; v32bis_build_conditioning() and the clause 8 RENEG_R
+       phase seed it.  The start-up path used to reseed every word from the
+       end of TRN, as an inferred policy, so that repeated words came out as
+       identical symbols.  Against a foreign modem that is not conformant and
+       does not interoperate: slmodemd's R1, decoded with one continuous
+       descrambler, reads as 1573 identical valid Table 5 words, and a
+       continuous descrambler fed our reseeded words recovers a stable pattern
+       that is not a Table 5 word at all, so it never answered our R1. */
     reg = s->tx_trn_reg;
     diff = s->tx_trn_diff;
     if (v32bis_encode_startup_word(s->calling_party,
@@ -2292,20 +2495,8 @@ static int v32bis_tx_fill_word(v32bis_state_t *s, uint16_t word)
                                    &diff,
                                    s->startup_tx_symbols) != 8)
         return -1;
-    if (s->reneg_active)
-    {
-        /* 5.3.2 initialises the scrambler and the differential encoder ONCE
-           at the start of the rate signal, and clause 8's rate signal then
-           runs continuously through its repeated 16-bit sequences.
-           Reseeding every word, which is what the start-up path does as
-           this project's recorded policy, makes the transmitted dibits
-           repeat every 8 symbols, and a receiver whose own descrambler runs
-           continuously then recovers a stable 16-bit pattern that is not
-           the Table 5 word and never will be, at any phase. */
-        s->tx_trn_reg = reg;
-        s->tx_trn_diff = diff;
-    }
-    /*endif*/
+    s->tx_trn_reg = reg;
+    s->tx_trn_diff = diff;
     s->startup_tx_symbol_count = 8;
     s->startup_tx_symbol_pos = 0;
     return 0;
@@ -2537,7 +2728,7 @@ static void v32bis_tx_enter_phase(v32bis_state_t *s, int phase)
     case V32BIS_TX_PHASE_COND:
         s->tx_far_end_quiet = false;
         count = v32bis_build_conditioning(s->calling_party,
-                                          1280,
+                                          v32bis_trn_symbols(),
                                           s->startup_tx_symbols,
                                           &s->tx_trn_reg,
                                           &s->tx_trn_diff);
@@ -2908,6 +3099,7 @@ static void v32bis_tone_rx(v32bis_state_t *s, const int16_t amp[], int len)
 
             rev0 = v32bis_tone_det_rx(&s->tone[0], (float) amp[i], now);
             rev1 = v32bis_tone_det_rx(&s->tone[1], (float) amp[i], now);
+            s->tone_watch_pow += ((float) amp[i]*amp[i] - s->tone_watch_pow)*(1.0f/64.0f);
             if (s->tone_which < 0)
             {
                 /* 6.1: "conditioned to detect ... one of two incoming tones at
@@ -2926,7 +3118,20 @@ static void v32bis_tone_rx(v32bis_state_t *s, const int16_t amp[], int len)
                 {
                     int which = (s->tone[0].peak >= s->tone[1].peak) ? 0 : 1;
 
-                    if (s->tone[which].mag > 0.4f*s->tone[which].peak)
+                    /* And it has to be THAT tone, not something leaking into
+                       a 20 sample window whose main lobe is 800 Hz wide.  A
+                       call modem answering plain V.25 ANS with AA (A.2.1.3)
+                       is listening here while the answer modem may still be
+                       sending ANS, and 2100 Hz reaches the 3000 Hz detector
+                       at about 1.4 times the received rms, where one line of
+                       AC stands at W/2 = 10 times it -- and ANS's 180 degree
+                       reversals then read as reversals in "the tone".  The
+                       relative test alone passed it (slmodemd's ANS, then AC:
+                       "reversal 1" during ANS and a second 40 samples later,
+                       NT = 12 symbols).  Half the ideal is the bar. */
+                    if (s->tone[which].mag > 0.4f*s->tone[which].peak
+                        &&  s->tone[which].mag
+                            > 0.25f*V32BIS_TONE_WINDOW*sqrtf(s->tone_watch_pow))
                         s->tone_present_run++;
                     else
                         s->tone_present_run = 0;
@@ -3091,6 +3296,7 @@ SPAN_DECLARE(int) v32bis_start_tones(v32bis_state_t *s)
     s->tone_phase_active = true;
     s->tone_which = -1;
     s->tone_present_run = 0;
+    s->tone_watch_pow = 0.0f;
     s->tone_drop_run = 0;
     s->reversals_seen = 0;
     s->tone_transition_symbol = -1;
@@ -3208,6 +3414,7 @@ static void startup_rx_reset(v32bis_state_t *s)
     s->startup_rx_b1_reg = 0;
     s->startup_rx_b1_diff = V32BIS_STARTUP_A;
     s->startup_rx_b1_convolution = 0;
+    startup_b1_reset_vote(s);
     s->startup_remote_rates = 0;
     s->startup_selected_rate = 0;
     s->startup_complete = false;
