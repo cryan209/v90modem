@@ -57,6 +57,7 @@ typedef struct {
     int ans_tone;             /* last tone class SpanDSP reported */
     bool ansam_seen;          /* any modulated (V.8) answer tone ever seen */
     long ans_report_sample;   /* sample count when plain ANS was reported */
+    long ans_line_last_sample; /* end of the last block 2100 Hz dominated */
     long samples;
 } v25_automode_rx_t;
 
@@ -76,6 +77,10 @@ int v25am_aa_ms(const v25_automode_rx_t *s);
 bool v25am_usb1_detected(const v25_automode_rx_t *s);
 /* USB1 is on the line now (the last 100 ms), as opposed to ever. */
 bool v25am_usb1_present(const v25_automode_rx_t *s);
+/* Sample count at the end of the last 10 ms block in which a 2100 Hz answer
+   tone held most of the power, or -1.  V.32bis A.2.1.3 times "the remaining
+   answer tone" with it. */
+long v25am_ans_last_sample(const v25_automode_rx_t *s);
 /* Samples received since init. */
 long v25am_samples(const v25_automode_rx_t *s);
 /* Has V.21 channel 1 been seen at all since init? */

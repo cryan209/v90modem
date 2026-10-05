@@ -390,6 +390,11 @@ test: $(TEST_TARGETS)
 	./engine_pair_test --alaw --expect V22BIS --expect-connect 2400 --answer-env ME_V8=0 --answer-env ME_MODE=v22
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --call-env ME_V8=0 --call-env ME_MODE=v22
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_V8=0 --both-env ME_MODE=v22
+# A V.32bis call modem without V.8 answers that plain ANS with AA and must
+# then take USB1 (V.32bis A.2.1.3); needs SpanDSP's answerer not to restart
+# its transmitter on the AA-driven carrier-detect flaps.
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --call-env ME_V8=0 --answer-env ME_V8=0 --answer-env ME_MODE=v22
+	./engine_pair_test --alaw --expect V22BIS --expect-connect 2400 --call-env ME_V8=0 --answer-env ME_V8=0 --answer-env ME_MODE=v22
 # The same answerer with V.22bis 2.1's 1800 Hz guard tone (ME_V22_GUARD): our
 # USB1 detector must leave it out of the denominator.
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --answer-env ME_V8=0 --answer-env ME_MODE=v22 --answer-env ME_V22_GUARD=1800

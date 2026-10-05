@@ -880,7 +880,22 @@ SPAN_DECLARE(int) v22bis_rx(v22bis_state_t *s, const int16_t amp[], int len)
             /* Look for power below the carrier off point */
             if (power < s->rx.carrier_off_power)
             {
-                v22bis_restart(s, s->bit_rate);
+                /* Before the receiver has recognised anything, a carrier drop
+                   says nothing about the handshake, and restarting the
+                   transmitter as well only puts the answer modem back at the
+                   start of its 75ms of silence before USB1.  A tone at the
+                   edge of the receive band -- V.32bis A.2.1.3's AA at 1800Hz,
+                   which a V.32bis call modem sends into a V.22bis answer modem
+                   by design -- sits on the carrier detect threshold and flaps
+                   every few ms, which kept the answerer silent for the whole
+                   call (v90modem engine_pair_test, 2026-10-05).  V.22bis
+                   6.3.1.2.1 has the answer modem send USB1 until it detects
+                   S1 or SB1, so only the receiver restarts here. */
+                if (s->rx.training == V22BIS_RX_TRAINING_STAGE_SYMBOL_ACQUISITION)
+                    v22bis_rx_restart(s);
+                else
+                    v22bis_restart(s, s->bit_rate);
+                /*endif*/
                 v22bis_report_status_change(s, SIG_STATUS_CARRIER_DOWN);
                 continue;
             }

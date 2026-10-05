@@ -53,6 +53,7 @@ void v25am_rx_init(v25_automode_rx_t *s, bool want_ans)
     s->ans_tone = MODEM_CONNECT_TONES_NONE;
     s->ans_report_sample = -1;
     s->v21l_last_sample = -1;
+    s->ans_line_last_sample = -1;
     if (want_ans)
         s->ans_rx = modem_connect_tones_rx_init(NULL, MODEM_CONNECT_TONES_ANS_PR, NULL, NULL);
 }
@@ -81,6 +82,8 @@ static void block_done(v25_automode_rx_t *s)
         p[b] = 2.0*mag2/((double) V25AM_BLOCK*V25AM_BLOCK);
         s->s1[b] = s->s2[b] = 0.0f;
     }
+    if (ms > V25AM_FLOOR_MS && p[BIN_2100] >= 0.5*ms)
+        s->ans_line_last_sample = s->samples;
     rest = ms - p[BIN_2100];
     if (rest < 0.0)
         rest = 0.0;
@@ -179,6 +182,11 @@ bool v25am_usb1_detected(const v25_automode_rx_t *s)
 bool v25am_usb1_present(const v25_automode_rx_t *s)
 {
     return s->usb1_run >= V25AM_USB1_BLOCKS;
+}
+
+long v25am_ans_last_sample(const v25_automode_rx_t *s)
+{
+    return s->ans_line_last_sample;
 }
 
 long v25am_samples(const v25_automode_rx_t *s)

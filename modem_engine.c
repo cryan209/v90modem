@@ -847,6 +847,7 @@ static int v22bis_get_bit_cb(void *user_data)
 static bool g_v22bis_trained;
 /* V.32bis A.2.2: the V.22bis answer modem heard the caller's S1/SB1 in Ta. */
 static bool g_v22bis_carrier_seen;
+static int  g_v22bis_carrier_flaps;
 /* V.32bis A.2.2's Ta: how long USB1 runs before giving up on a V.22bis caller
  * and proceeding at 6.2.  Negative when not running. */
 static int  g_v25_ta_samples = -1;
@@ -857,6 +858,12 @@ static bool g_v25_usb1_phase;
  * count the call modem first heard USB1 (-1: not yet). */
 #define V25_TC_MS 3200
 static long g_v25_usb1_first_sample = -1;
+/* V.32bis A.2.1.3: the call modem answered a plain ANS with AA and is now
+ * prepared "to detect either signal USB1 or signal AC".  While set, the
+ * automode watch keeps running inside the V.32bis caller; g_v32bis_aa_sample
+ * is where in that watch's sample count AA began. */
+static bool g_v32bis_usb1_watch;
+static long g_v32bis_aa_sample = -1;
 /* Automode receive detectors, armed while V.8 (or V.25) runs and during Ta. */
 static v25_automode_rx_t g_v25am;
 
@@ -896,7 +903,11 @@ static void v22bis_put_bit_cb(void *user_data, int bit)
          * TRAINING_SUCCEEDED means trained. */
         if (bit == SIG_STATUS_CARRIER_UP) {
             g_v22bis_carrier_seen = true;
-            ME_LOG("[ME] V.22bis carrier up\n");
+            /* A tone at the edge of the receive band (V.32bis AA into our
+               answer modem) flaps the carrier detect every few ms; log the
+               first few transitions, not hundreds. */
+            if (++g_v22bis_carrier_flaps <= 3)
+                ME_LOG("[ME] V.22bis carrier up\n");
         } else if (bit == SIG_STATUS_TRAINING_SUCCEEDED) {
             g_v22bis_trained = true;
             /* V.22bis falls back to 1200 against a V.22 peer, so report
@@ -915,7 +926,8 @@ static void v22bis_put_bit_cb(void *user_data, int bit)
         } else if (bit == SIG_STATUS_CARRIER_DOWN) {
             /* Before training: the far end has stopped transmitting for the
              * moment.  Keep waiting -- the training timeout still bounds it. */
-            ME_LOG("[ME] V.22bis carrier down before training; still waiting\n");
+            if (g_v22bis_carrier_flaps <= 3)
+                ME_LOG("[ME] V.22bis carrier down before training; still waiting\n");
         }
         /*endif*/
         return;
@@ -6481,6 +6493,7 @@ static void start_v22bis_training(void)
     g_mod   = ME_MOD_V22BIS;
     g_state = ME_TRAINING;
     g_v22bis_trained = false;
+    g_v22bis_carrier_flaps = 0;
     g_phase_start_ms = trace_now_ms();
     /* V.22 mode: SpanDSP's V.22bis at 1200 sends no S1 and does not look
        for one, which is exactly a V.22 modem (V.22bis 6.3.1.1.1 c), 6.3.1.2.1
@@ -6648,6 +6661,7 @@ static void start_v32bis_training(const char *why, int hold_samples)
     g_v25am_armed = false;
     g_v25_ta_samples = -1;
     g_v25_usb1_phase = false;
+    g_v32bis_usb1_watch = false;
     g_mod   = ME_MOD_V32BIS;
     g_state = ME_TRAINING;
     g_v32bis_trained = false;
@@ -6769,6 +6783,7 @@ static void v25_automode_arm_locked(void)
     g_v25_listen_only = false;
     g_v25_ta_samples = -1;
     g_v25_usb1_phase = false;
+    g_v32bis_usb1_watch = false;
     g_v25_usb1_first_sample = -1;
     if (g_v25am_armed)
         v25am_rx_init(&g_v25am, g_calling_party);
@@ -6901,9 +6916,66 @@ static void v25_automode_rx(const int16_t *amp, int len)
     } else if (me_v32bis_enabled() && me_v25_ans_aa() && v25am_plain_ans_ms(&g_v25am) >= 1000) {
         /* A.2.1.3: "If signal ANS is detected for a period of at least
            1 second, the modem shall begin transmission of signal AA". */
+        long aa_at = v25am_samples(&g_v25am);
+
         start_v32bis_training("plain V.25 ANS for 1 s", 0);
+        if (me_v22_legacy_enabled()) {
+            g_v32bis_usb1_watch = true;
+            g_v32bis_aa_sample = aa_at;
+            g_v25_usb1_first_sample = -1;
+        }
     }
     pthread_mutex_unlock(&g_state_mtx);
+}
+
+/* V.32bis A.2.1.3, after AA has gone out in answer to a plain ANS: "When
+ * signal USB1 is detected for 155 +/- 10 ms, subsequent procedures shall
+ * depend on the duration of signal ANS measured by the timer.  If the
+ * duration was greater than 800 ms, the modem shall first stop transmitting
+ * AA, then, after 456 ms silent period, shall transmit signal S1 ... and
+ * then continue with Recommendation V.22 bis ...  Otherwise, the modem shall
+ * proceed in accordance with A.2.1.2" (Tc, during which AC still wins).  The
+ * V.22bis call modem's own 6.3.1.1.1 detection and 456 ms wait then run in
+ * the datapump.  Called locked from the V.32bis receive path; true when the
+ * call has moved to V.22bis. */
+static bool v32bis_a213_usb1_locked(const int16_t *amp, int len)
+{
+    long now;
+    long ans_ms;
+
+    if (!g_calling_party || g_v32bis_trained) {
+        g_v32bis_usb1_watch = false;
+        return false;
+    }
+    v25am_rx(&g_v25am, amp, len);
+    if (v25am_ac_detected(&g_v25am)) {
+        /* The far end is a V.32/V.32bis modem after all. */
+        g_v32bis_usb1_watch = false;
+        return false;
+    }
+    if (!v25am_usb1_present(&g_v25am))
+        return false;
+    now = v25am_samples(&g_v25am);
+    ans_ms = (v25am_ans_last_sample(&g_v25am) - g_v32bis_aa_sample)/8;
+    if (g_v25_usb1_first_sample < 0) {
+        g_v25_usb1_first_sample = now;
+        ME_LOG("[ME] Annex A/V.32bis A.2.1.3: USB1 after AA; answer tone ran %ld ms past AA\n",
+               ans_ms);
+        if (ans_ms <= 800) {
+            trace_phase("automode: USB1 after AA -> Tc (ANS %ld ms)", ans_ms);
+            return false;
+        }
+    } else if (now - g_v25_usb1_first_sample < (long) V25_TC_MS*8) {
+        return false;
+    }
+    ME_LOG("[ME] Annex A/V.32bis A.2.1.3: stopping AA; continuing as a V.22bis call modem\n");
+    trace_phase("automode: USB1 after AA -> V22BIS");
+    g_v32bis_usb1_watch = false;
+    v32bis_free(g_v32bis);
+    g_v32bis = NULL;
+    v25am_rx_release(&g_v25am);
+    start_v22bis_training();
+    return true;
 }
 
 /* Receive for a running V.32bis call.  Unlocked. */
@@ -6924,6 +6996,10 @@ static void v32bis_engine_rx(const int16_t *amp, int len)
         g_v32bis_hold_samples -= len;
         if (g_v32bis_hold_samples <= 0)
             g_v32bis_running = true;
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    if (g_v32bis_usb1_watch && v32bis_a213_usb1_locked(amp, len)) {
         pthread_mutex_unlock(&g_state_mtx);
         return;
     }
@@ -6976,6 +7052,7 @@ static void v32bis_release_locked(void)
     g_v25am_armed = false;
     g_v25_ta_samples = -1;
     g_v25_usb1_phase = false;
+    g_v32bis_usb1_watch = false;
     g_v32bis_trained = false;
     g_v32bis_running = false;
 }

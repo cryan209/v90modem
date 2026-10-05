@@ -479,9 +479,7 @@ V.32 bit, and `aa` failed about one run in eight under concurrent load.
 (`rf-tower-fb-6`), old binary against new, differ only in the V.32 bit of our
 CM/JM and the log line naming it.
 
-**Not done:** USB1 heard by a call modem AFTER it has started AA (A.2.1.3's
-V.22bis branch, with its >800 ms ANS rule) -- A.2.1.2 itself is done, see
-below; V.32bis clause 7 retrains from the engine; and any hardware
+**Not done:** V.32bis clause 7 retrains from the engine; and any hardware
 interop.  Clause 8 renegotiations by the far end are followed (the V.14 rate
 is updated) but the engine never initiates one.
 
@@ -510,6 +508,23 @@ and V.22-only) against that answerer, both laws; the legacy caller against
 our default V.8 answerer (which reaches USB1 only after retrying V.8 with its
 second answer tone, ~12 s -- inside any real caller's S7, but slow); legacy
 against legacy.
+
+**A.2.1.3 (USB1 after AA) is done too, and it found a SpanDSP defect.**  A
+V.32bis call modem that answered a plain ANS with AA keeps the automode watch
+running inside its clause 6 receiver, times the rest of the answer tone from
+AA's start, and on USB1 drops AA for V.22bis -- at once if ANS ran > 800 ms
+past AA, otherwise after Tc unless AC arrives.  It could not work at first
+because **our own V.22bis answer modem never sent USB1 while AA was on the
+line**: 1800 Hz sits at the edge of the 1200 Hz receive filter, lands on the
+carrier detect threshold and flaps every few ms, and `v22bis_rx.c` restarted
+the TRANSMITTER on every drop, holding USB1 in its initial 75 ms silence for
+the whole call (measured on the answer TX tap: RMS 0 after ANS).  A real
+V.22bis modem facing a real V.32bis caller has the same AA to cope with, by
+design.  Before the receiver has recognised anything, a carrier drop now
+restarts the receiver only; once it has, it is a real loss and both restart
+as before.  Rows: V.8-less V.32bis caller against the V.8-less V.22bis
+answerer, both laws (USB1 lands ~1.7 s after AA, so the immediate branch;
+the Tc branch has no row).
 
 ## Against slmodemd: the first foreign V.32bis peer (2026-10-05)
 
