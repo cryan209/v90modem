@@ -288,7 +288,7 @@ static void report(const v250_ctl_t *c, const v250_connect_report_t *r, const ch
 static void test_reports(void)
 {
     v250_ctl_t c;
-    v250_connect_report_t r = { "V34", 28800, 0, "LAPM", 1, true, true };
+    v250_connect_report_t r = { "V34", 28800, 0, "LAPM", 1, true, true, 0 };
 
     printf("connect reports (6.4.3, 6.5.5, 6.6.3):\n");
     v250_ctl_reset(&c);
@@ -324,8 +324,46 @@ static void test_reports(void)
     report(&c, &r, "+ER: LAPM\r\n+DR: V44\r\n", "each report is independent of the others");
 }
 
+/* 6.2.10-6.2.13, 6.4.2, 6.4.8. */
+static void test_interface_parameters(void)
+{
+    v250_ctl_t c;
+    v250_connect_report_t r = { "V34", 33600, 0, "LAPM", 1, true, true, 57600 };
+    char out[256];
+
+    printf("+IPR, +ICF, +IFC, +ILRR, +MSC, +MA:\n");
+    v250_ctl_reset(&c);
+    cmd(&c, "IPR?", V250_CTL_OK, "+IPR: 0");               /* recommended: autodetect */
+    cmd(&c, "IPR=?", V250_CTL_OK, "+IPR: (0,300,1200,2400,4800,9600,19200,38400,57600,115200,230400),()");
+    cmd(&c, "IPR=9600", V250_CTL_OK, NULL);
+    cmd(&c, "IPR?", V250_CTL_OK, "+IPR: 9600");
+    cmd(&c, "IPR=9601", V250_CTL_ERROR, NULL);
+    cmd(&c, "IPR?", V250_CTL_OK, "+IPR: 9600");
+    cmd(&c, "ICF?", V250_CTL_OK, "+ICF: 3,3");
+    cmd(&c, "ICF=?", V250_CTL_OK, "+ICF: (0,3),(0-3)");
+    cmd(&c, "ICF=5", V250_CTL_ERROR, NULL);                /* 7 bits: a pty is 8-bit */
+    cmd(&c, "ICF=0,1", V250_CTL_OK, NULL);
+    cmd(&c, "IFC?", V250_CTL_OK, "+IFC: 2,2");
+    cmd(&c, "IFC=?", V250_CTL_OK, "+IFC: (0,2),(0,2)");
+    cmd(&c, "IFC=1,1", V250_CTL_ERROR, NULL);              /* no XON/XOFF */
+    cmd(&c, "IFC=0,0", V250_CTL_OK, NULL);
+    cmd(&c, "ILRR?", V250_CTL_OK, "+ILRR: 0");
+    cmd(&c, "ILRR=1", V250_CTL_OK, NULL);
+    cmd(&c, "MSC?", V250_CTL_OK, "+MSC: 1");               /* 6.4.8 recommended default */
+    cmd(&c, "MSC=0", V250_CTL_OK, NULL);
+    cmd(&c, "MSC=2", V250_CTL_ERROR, NULL);
+    cmd(&c, "MA?", V250_CTL_ERROR, NULL);                  /* optional, not implemented */
+    cmd(&c, "MA=V34", V250_CTL_ERROR, NULL);
+    v250_ctl_format_report(&c, &r, out, sizeof(out));
+    check(!strcmp(out, "+ILRR: 57600\r\n"), "+ILRR alone reports the DTE rate");
+    c.mr = c.er = c.dr = 1;
+    v250_ctl_format_report(&c, &r, out, sizeof(out));
+    check(strstr(out, "+DR: V42B\r\n+ILRR: 57600\r\n") != NULL, "+ILRR follows +DR (6.2.13)");
+}
+
 int main(void)
 {
+    test_interface_parameters();
     test_error_control_parameters();
     test_defaults_and_reads();
     test_set_and_store();

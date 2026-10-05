@@ -408,7 +408,7 @@ static void test_v250_parameters(void)
      * and before CONNECT, and only as enabled. */
     expect(dte, "ATZ", "OK");
     di_set_connect_info_cb(fake_connect_info);
-    fake_report = (v250_connect_report_t) { "V90", 52000, 31200, "LAPM", 1, true, true };
+    fake_report = (v250_connect_report_t) { "V90", 52000, 31200, "LAPM", 1, true, true, 0 };
     expect(dte, "ATD1", "");
     di_on_connected(52000);
     collect(dte, buf, sizeof(buf), 150);
@@ -436,13 +436,39 @@ static void test_v250_parameters(void)
     collect(dte, buf, sizeof(buf), 150);
 
     /* A call that settled on no error control and no compression says so. */
-    fake_report = (v250_connect_report_t) { "V32B", 14400, 0, "NONE", 0, false, false };
+    fake_report = (v250_connect_report_t) { "V32B", 14400, 0, "NONE", 0, false, false, 0 };
     di_on_connected(14400);
     collect(dte, buf, sizeof(buf), 150);
     check(strstr(buf, "+MCR: V32B") && strstr(buf, "+MRR: 14400\r") && strstr(buf, "+ER: NONE")
           && strstr(buf, "+DR: NONE"), "an unprotected call reports NONE/NONE");
     di_on_disconnected();
     collect(dte, buf, sizeof(buf), 150);
+
+    /* +ILRR: the rate the DTE set on its own port (+IPR=0), or the fixed +IPR. */
+    {
+        struct termios tio;
+
+        tcgetattr(dte, &tio);
+        cfsetispeed(&tio, B57600);
+        cfsetospeed(&tio, B57600);
+        tcsetattr(dte, TCSANOW, &tio);
+    }
+    expect(dte, "AT+ILRR=1", "OK");
+    di_on_connected(14400);
+    collect(dte, buf, sizeof(buf), 150);
+    check(strstr(buf, "+DR: NONE\r\n+ILRR: 57600\r\n") && strstr(buf, "CONNECT 14400"),
+          "+ILRR: the DTE's own port rate, after +DR and before CONNECT");
+    if (!strstr(buf, "+ILRR: 57600"))
+        printf("       got \"%s\"\n", buf);
+    di_on_disconnected();
+    collect(dte, buf, sizeof(buf), 150);
+    expect(dte, "AT+IPR=19200", "OK");
+    di_on_connected(14400);
+    collect(dte, buf, sizeof(buf), 150);
+    check(strstr(buf, "+ILRR: 19200\r\n") != NULL, "+ILRR with a fixed +IPR reports that");
+    di_on_disconnected();
+    collect(dte, buf, sizeof(buf), 150);
+    expect(dte, "AT+ILRR=0;+IPR=0", "OK");
 
     /* Result codes: ATQ1 silences the reports with the rest. */
     expect(dte, "ATQ1", "");
@@ -641,7 +667,7 @@ static void test_help(void)
     di_set_connect_info_cb(fake_connect_info);
     di_set_link_detail_cb(fake_link_detail);
     fake_originate = true;
-    fake_report = (v250_connect_report_t) { "V90", 52000, 31200, "LAPM", 1, true, true };
+    fake_report = (v250_connect_report_t) { "V90", 52000, 31200, "LAPM", 1, true, true, 0 };
     expect(dte, "ATS2=42S12=10", "OK");              /* escape on "***" after 0.2 s */
     expect(dte, "ATD1", "");
     di_on_connected(52000);
@@ -659,7 +685,7 @@ static void test_help(void)
     collect(dte, buf, sizeof(buf), 100);
     /* Live: the engine pushes a renegotiated rate and a retrain in progress. */
     {
-        v250_connect_report_t now = { "V90", 48000, 26400, "LAPM", 1, true, true };
+        v250_connect_report_t now = { "V90", 48000, 26400, "LAPM", 1, true, true, 0 };
 
         di_update_link(&now, "Mode               v90 (offer V90)\r\nData-mode retrains 1", "retraining");
     }
@@ -687,7 +713,7 @@ static void test_help(void)
     expect(dte, "ATI11", "(at end of call)");
 
     /* An answered call that the DTE ended itself. */
-    fake_report = (v250_connect_report_t) { "V34", 28800, 0, "NONE", 0, false, false };
+    fake_report = (v250_connect_report_t) { "V34", 28800, 0, "NONE", 0, false, false, 0 };
     fake_originate = false;
     di_on_ring();
     collect(dte, buf, sizeof(buf), 100);

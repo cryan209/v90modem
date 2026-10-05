@@ -22,6 +22,7 @@
 #define DS_STRING_MAX 250
 
 static int parse_compound(const char *s, int max, long *vals, bool *present);
+static bool in_mask(long v, unsigned mask);
 
 void v250_ctl_reset(v250_ctl_t *c)
 {
@@ -41,6 +42,49 @@ void v250_ctl_reset(v250_ctl_t *c)
     c->etbm[2] = 20;
     c->ewind[0] = 15;
     c->efram[0] = 128;
+    /* 6.2.10-6.2.12 recommended defaults: autodetect, 8N1 (3,3), circuit flow
+     * control both ways.  +ILRR 0; +MSC 1 (6.4.8), which is what the engine
+     * has always done. */
+    c->icf[0] = 3;
+    c->icf[1] = 3;
+    c->ifc[0] = 2;
+    c->ifc[1] = 2;
+    c->msc = 1;
+}
+
+/* +IPR's rates: the ones a pty's termios can name.  0 is "what the DTE sets". */
+static const int ipr_rates[] = {
+    0, 300, 1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400
+};
+
+static v250_ctl_result_t ipr_command(v250_ctl_t *c, const char *arg, char *info, size_t len)
+{
+    long vals[1] = { 0 };
+    bool present[1] = { false };
+    size_t used;
+
+    if (arg[0] == '?' && arg[1] == '\0') {
+        snprintf(info, len, "+IPR: %d", c->ipr);
+        return V250_CTL_OK;
+    }
+    if (!strcmp(arg, "=?")) {
+        used = (size_t) snprintf(info, len, "+IPR: (");
+        for (size_t i = 0; i < sizeof(ipr_rates) / sizeof(ipr_rates[0]) && used < len; i++)
+            used += (size_t) snprintf(info + used, len - used, "%s%d", i ? "," : "", ipr_rates[i]);
+        if (used < len)
+            snprintf(info + used, len - used, "),()");
+        return V250_CTL_OK;
+    }
+    if (arg[0] != '=' || parse_compound(arg + 1, 1, vals, present) < 0)
+        return V250_CTL_ERROR;
+    if (!present[0])
+        return V250_CTL_OK;
+    for (size_t i = 0; i < sizeof(ipr_rates) / sizeof(ipr_rates[0]); i++)
+        if (vals[0] == ipr_rates[i]) {
+            c->ipr = (int) vals[0];
+            return V250_CTL_OK;
+        }
+    return V250_CTL_ERROR;
 }
 
 /* A compound parameter of up to three numeric fields, each with its own
@@ -51,18 +95,27 @@ typedef struct {
     int min[3];
     int max[3];
     bool first_required;    /* <value1> is not optional (+EWIND, +EFRAM) */
+    const char *test;       /* a test response that is not a set of ranges */
+    unsigned mask[3];       /* if set: exactly these values (small ones) */
 } range_param_t;
 
 static const range_param_t range_params[] = {
-    { "EB",    3, { 0, 0, 0 },  { 0, 0, 0 },     false },
-    { "EFCS",  1, { 0 },        { 0 },           false },
-    { "ETBM",  3, { 0, 1, 0 },  { 0, 2, 30 },    false },
-    { "EWIND", 2, { 1, 0 },     { 15, 15 },      true },
-    { "EFRAM", 2, { 1, 0 },     { 128, 128 },    true },
+    { "EB",    3, { 0, 0, 0 },  { 0, 0, 0 },     false, NULL, { 0 } },
+    { "EFCS",  1, { 0 },        { 0 },           false, NULL, { 0 } },
+    { "ETBM",  3, { 0, 1, 0 },  { 0, 2, 30 },    false, NULL, { 0 } },
+    { "EWIND", 2, { 1, 0 },     { 15, 15 },      true,  NULL, { 0 } },
+    { "EFRAM", 2, { 1, 0 },     { 128, 128 },    true,  NULL, { 0 } },
+    /* 6.2.11: a pty is 8-bit transparent, so 8N1 (or "auto"); parity is
+       meaningless without a parity bit and any value is kept. */
+    { "ICF",   2, { 0, 0 },     { 3, 3 },        false, "+ICF: (0,3),(0-3)", { BIT(0) | BIT(3), 0 } },
+    /* 6.2.12: no XON/XOFF filtering; 2 is the pty's own back-pressure. */
+    { "IFC",   2, { 0, 0 },     { 2, 2 },        false, "+IFC: (0,2),(0,2)", { BIT(0) | BIT(2), BIT(0) | BIT(2) } },
 };
 
 static int *range_store(v250_ctl_t *c, const char *name)
 {
+    if (!strcmp(name, "ICF"))   return c->icf;
+    if (!strcmp(name, "IFC"))   return c->ifc;
     if (!strcmp(name, "EB"))    return c->eb;
     if (!strcmp(name, "EFCS"))  return &c->efcs;
     if (!strcmp(name, "ETBM"))  return c->etbm;
@@ -85,6 +138,10 @@ static v250_ctl_result_t range_command(v250_ctl_t *c, const range_param_t *p,
             used += (size_t) snprintf(info + used, len - used, "%s%d", i ? "," : "", store[i]);
         return V250_CTL_OK;
     }
+    if (!strcmp(arg, "=?") && p->test) {
+        snprintf(info, len, "%s", p->test);
+        return V250_CTL_OK;
+    }
     if (!strcmp(arg, "=?")) {
         used = (size_t) snprintf(info, len, "+%s: ", p->name);
         for (int i = 0; i < p->fields && used < len; i++) {
@@ -102,7 +159,8 @@ static v250_ctl_result_t range_command(v250_ctl_t *c, const range_param_t *p,
     if (n < 0 || (p->first_required && !present[0]))
         return V250_CTL_ERROR;
     for (int i = 0; i < n; i++)
-        if (present[i] && (vals[i] < p->min[i] || vals[i] > p->max[i]))
+        if (present[i] && (vals[i] < p->min[i] || vals[i] > p->max[i]
+                           || (p->mask[i] && !in_mask(vals[i], p->mask[i]))))
             return V250_CTL_ERROR;
     for (int i = 0; i < n; i++)
         if (present[i])
@@ -297,6 +355,16 @@ v250_ctl_result_t v250_ctl_command(v250_ctl_t *c, const char *text,
     for (size_t i = 0; i < sizeof(range_params) / sizeof(range_params[0]); i++)
         if (!strcmp(name, range_params[i].name))
             return range_command(c, &range_params[i], text + n, info, info_len);
+    if (!strcmp(name, "IPR"))
+        return ipr_command(c, text + n, info, info_len);
+    if (!strcmp(name, "ILRR"))
+        return flag_command(&c->ilrr, "ILRR", text + n, info, info_len);
+    if (!strcmp(name, "MSC"))
+        return flag_command(&c->msc, "MSC", text + n, info, info_len);
+    /* 6.4.2 +MA is optional and not implemented: every form is ERROR rather
+       than an OK that changes nothing. */
+    if (!strcmp(name, "MA"))
+        return V250_CTL_ERROR;
     return V250_CTL_UNKNOWN;
 }
 
@@ -394,6 +462,9 @@ size_t v250_ctl_format_report(const v250_ctl_t *c, const v250_connect_report_t *
         else
             EMIT("+DR: %s %s\r\n", scheme, r->dc_rx ? "RD" : "TD");
     }
+    /* 6.2.13: after the modulation, error control and compression reports. */
+    if (c->ilrr && r->dte_rate > 0)
+        EMIT("+ILRR: %d\r\n", r->dte_rate);
 #undef EMIT
     return n < out_len ? n : (out_len ? out_len - 1 : 0);
 }

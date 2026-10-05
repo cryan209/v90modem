@@ -4657,25 +4657,7 @@ static const char *at_cmd_plus_IBM(at_state_t *s, const char *t)
 static const char *at_cmd_plus_ICF(at_state_t *s, const char *t)
 {
     /* V.250 6.2.11 - DTE-DCE character framing */
-    t += 4;
-    /* Character format
-        0:  auto detect
-        1:  8 data 2 stop
-        2:  8 data 1 parity 1 stop
-        3:  8 data 1 stop
-        4:  7 data 2 stop
-        5:  7 data 1 parity 1 stop
-        6:  7 data 1 stop
-
-       Parity
-        0:  Odd
-        1:  Even
-        2:  Mark
-        3:  Space */
-    if (!parse_2_out(s, &t, &s->dte_char_format, 6, &s->dte_parity, 3, "+ICF:", "(0-6),(0-3)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -4704,24 +4686,14 @@ static const char *at_cmd_plus_IDSR(at_state_t *s, const char *t)
 static const char *at_cmd_plus_IFC(at_state_t *s, const char *t)
 {
     /* V.250 6.2.12 - DTE-DCE local flow control */
-    /*  0:  None.
-        1:  XON/XOFF.
-        2:  Hardware (default) */
-    span_log(&s->logging, SPAN_LOG_FLOW, "+IFC received\n");
-    t += 4;
-    if (!parse_2_out(s, &t, &s->dte_dce_flow_control, 2, &s->dce_dte_flow_control, 2, "+IFC:", "(0-2),(0-2)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_ILRR(at_state_t *s, const char *t)
 {
     /* V.250 6.2.13 - DTE-DCE local rate reporting */
-    /* TODO: */
-    t += 5;
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -4739,12 +4711,7 @@ static const char *at_cmd_plus_ILSD(at_state_t *s, const char *t)
 static const char *at_cmd_plus_IPR(at_state_t *s, const char *t)
 {
     /* V.250 6.2.10 - Fixed DTE rate */
-    /* TODO: */
-    t += 4;
-    if (!parse_out(s, &t, &s->dte_rate, 115200, "+IPR:", "(115200),(115200)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -4771,9 +4738,7 @@ static const char *at_cmd_plus_ITF(at_state_t *s, const char *t)
 static const char *at_cmd_plus_MA(at_state_t *s, const char *t)
 {
     /* V.250 6.4.2 - Modulation automode control */
-    /* TODO: */
-    t += 3;
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -4813,14 +4778,7 @@ static const char *at_cmd_plus_MS(at_state_t *s, const char *t)
 static const char *at_cmd_plus_MSC(at_state_t *s, const char *t)
 {
     /* V.250 6.4.8 - Seamless rate change enable */
-    /*  0   Disables V.34 seamless rate change
-        1   Enables V.34 seamless rate change */
-    /* TODO: */
-    t += 4;
-    if (!parse_out(s, &t, NULL, 1, "+MSC:", "(0,1)"))
-        return NULL;
-    /*endif*/
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 

@@ -744,12 +744,45 @@ static const char *console_desc(char *buf, size_t len)
     return buf;
 }
 
+/* +ILRR with +IPR=0: the rate the DTE itself has set on the port that carries
+ * the payload.  A pty passes bytes at any rate, but termios keeps the speed
+ * the DTE asked for, and that is the DTE-DCE rate it believes in. */
+static int dte_port_rate(void)
+{
+    static const struct { speed_t sp; int bps; } speeds[] = {
+        { B300, 300 }, { B1200, 1200 }, { B2400, 2400 }, { B4800, 4800 },
+        { B9600, 9600 }, { B19200, 19200 }, { B38400, 38400 },
+#ifdef B57600
+        { B57600, 57600 },
+#endif
+#ifdef B115200
+        { B115200, 115200 },
+#endif
+#ifdef B230400
+        { B230400, 230400 },
+#endif
+    };
+    struct termios tio;
+    int fd = split_mode ? data_pty.slave_hold_fd : ctrl_pty.slave_hold_fd;
+    speed_t sp;
+
+    if (fd < 0 || tcgetattr(fd, &tio) != 0)
+        return 0;
+    sp = cfgetospeed(&tio);
+    for (size_t i = 0; i < sizeof(speeds) / sizeof(speeds[0]); i++)
+        if (speeds[i].sp == sp)
+            return speeds[i].bps;
+    return 0;
+}
+
 /* ATI4: the settings the next call will use, in the commands that set them. */
 static void info_settings(page_t *pg)
 {
     static const char *const fclass[] = { "0", "1", "1.0", "2.0" };
     static const int sregs[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12 };
-    static const char *const v250_reads[] = { "MR?", "ER?", "DR?", "ES?", "DS?" };
+    static const char *const v250_reads[] = {
+        "MR?", "ER?", "DR?", "ES?", "DS?", "EWIND?", "EFRAM?", "ETBM?", "IPR?", "ICF?", "IFC?", "MSC?"
+    };
     char line[160];
     v250_ctl_t cfg;
 
@@ -775,7 +808,7 @@ static void info_settings(page_t *pg)
         v250_ctl_t copy = cfg;
 
         if (v250_ctl_command(&copy, v250_reads[i], line, sizeof(line)) == V250_CTL_OK)
-            page_put(pg, "%s%s", line, i + 1 < sizeof(v250_reads) / sizeof(v250_reads[0]) ? "  " : "\r\n");
+            page_put(pg, "%s%s", line, i == 4 || i + 1 == sizeof(v250_reads) / sizeof(v250_reads[0]) ? "\r\n" : "  ");
     }
     page_put(pg, "Console: %s\r\n", console_desc(line, sizeof(line)));
 }
@@ -1530,6 +1563,7 @@ void di_on_connected(int rate)
         size_t n;
 
         di_get_v250_settings(&cfg);
+        rep.dte_rate = cfg.ipr ? cfg.ipr : dte_port_rate();
         n = v250_ctl_format_report(&cfg, &rep, text, sizeof(text));
         if (n)
             ctrl_write(text, n);

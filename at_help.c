@@ -84,6 +84,11 @@ static const at_help_entry_t plus_rows[] = {
     { "+ASTO=n,s", "Store dial string s in slot n (0-9); D S=n dials it", "+ASTO?" },
     { "+MS",       "Modulation for the next call (see +MS$)",         "+MS?" },
     { "+MR=0/1",   "Report +MCR/+MRR before CONNECT",                 "+MR?" },
+    { "+MSC=0/1",  "V.34 seamless rate change (11.6) on/off",         "+MSC?" },
+    { "+IPR=n",    "Fixed DTE rate; 0 = whatever the DTE sets",       "+IPR?" },
+    { "+ICF=f,p",  "Character framing: 8N1 (0 or 3) only",            "+ICF?" },
+    { "+IFC=a,b",  "Flow control: 0 none, 2 pty back-pressure",       "+IFC?" },
+    { "+ILRR=0/1", "Report +ILRR: <DTE rate> before CONNECT",         "+ILRR?" },
     { "+ES=o,f,a", "Error control: request, fallback, answer mode",   "+ES?" },
     { "+ER=0/1",   "Report +ER (LAPM/NONE) before CONNECT",           "+ER?" },
     { "+EWIND=t,r", "V.42 window k offered per direction (1-15)",     "+EWIND?" },
@@ -107,8 +112,7 @@ static const at_help_entry_t plus_rows[] = {
     { "+FLI +FPI", "Class 2.0: local and polling IDs",                NULL },
     { "+FNR +FBU", "Class 2.0: negotiation and HDLC reports",         NULL },
     { "+FCT +FIE", "Class 2.0: phase C timeout, procedure interrupts", NULL },
-    { "",          "Accepted, not yet applied: +IPR +ICF +IFC +MSC +MA +DS44", NULL },
-    { "",          "  and the V.92 +P commands.", NULL },
+    { "",          "Not implemented: +MA and +DS44 (ERROR), the V.92 +P commands.", NULL },
 };
 
 /* I$: the ATIn pages data_interface.c answers. */

@@ -57,6 +57,13 @@ typedef struct {
     int etbm[3];            /* +ETBM: pending TD, pending RD, timer */
     int ewind[2];           /* +EWIND: transmit, receive (0 = as transmit) */
     int efram[2];           /* +EFRAM: transmit, receive (0 = as transmit) */
+    /* 6.2.10-6.2.13 and 6.4.8.  The DTE port is a pty: it has whatever rate the
+     * DTE gives it, 8-bit characters, and back-pressure for flow control. */
+    int ipr;                /* +IPR: fixed DTE rate, 0 = what the DTE sets */
+    int icf[2];             /* +ICF: format (0 auto, 3 8N1), parity */
+    int ifc[2];             /* +IFC: DCE by DTE, DTE by DCE (0 none, 2 circuit) */
+    int ilrr;               /* +ILRR: report the DTE rate before CONNECT */
+    int msc;                /* +MSC: V.34 seamless rate change (11.6) */
 } v250_ctl_t;
 
 typedef enum {
@@ -117,6 +124,7 @@ typedef struct {
     int dc_scheme;          /* +DR: 0 none, 1 V.42bis, 2 V.44 */
     bool dc_tx;
     bool dc_rx;
+    int dte_rate;           /* +ILRR: the DTE-DCE rate; 0 = not reported */
 } v250_connect_report_t;
 
 /* Writes the lines the settings call for, in the order 6.4.3 / 6.5.5 / 6.6.3

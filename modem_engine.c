@@ -4491,7 +4491,16 @@ static int me_v34_reneg_enabled(void)
 
     if (cached < 0)
         cached = parse_env_int("ME_V34_RENEG", 1) ? 1 : 0;
-    return cached;
+    if (!cached)
+        return 0;
+    /* V.250 6.4.8 +MSC: the DTE's switch for V.34 seamless rate change.
+       Answering a peer's 11.6 is a "shall" and is not affected. */
+    {
+        v250_ctl_t cfg;
+
+        di_get_v250_settings(&cfg);
+        return cfg.msc ? 1 : 0;
+    }
 }
 
 static int me_v34_reneg_timeout_ms(void)
