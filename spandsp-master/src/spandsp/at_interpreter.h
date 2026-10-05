@@ -192,6 +192,11 @@ SPAN_DECLARE(void) at_set_call_info(at_state_t *s, char const *id, char const *v
 
 SPAN_DECLARE(void) at_display_call_info(at_state_t *s);
 
+/*! Change an S-register's factory value (what Z and &F restore), and the
+    current one.  For an application whose natural defaults differ from the
+    profile's -- a SIP modem server that should answer by itself. */
+SPAN_DECLARE(void) at_set_factory_s_reg(at_state_t *s, int reg, int value);
+
 SPAN_DECLARE(int) at_modem_control(at_state_t *s, int op, const char *num);
 
 SPAN_DECLARE(void) at_call_event(at_state_t *s, int event);

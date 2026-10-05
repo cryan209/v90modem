@@ -305,10 +305,11 @@ SPAN_DECLARE(void) at_call_event(at_state_t *s, int event)
     {
     case AT_CALL_EVENT_ALERTING:
         at_modem_control(s, AT_MODEM_CONTROL_RNG, (void *) 1);
-        if (s->display_call_info  &&  !s->call_info_displayed)
+        at_put_response_code(s, AT_RESPONSE_CODE_RING);
+        /* V.253 9.2.3.1: Caller ID is reported after the first ring. */
+        if (s->display_call_info  &&  !s->call_info_displayed  &&  s->call_id)
             at_display_call_info(s);
         /*endif*/
-        at_put_response_code(s, AT_RESPONSE_CODE_RING);
         ++s->rings_indicated;
         s->p.s_regs[1] = (uint8_t) ((s->rings_indicated > 255)  ?  255  :  s->rings_indicated);
         if (s->rings_indicated >= s->p.s_regs[0]  &&  s->p.s_regs[0])
@@ -467,6 +468,18 @@ SPAN_DECLARE(void) at_set_call_info(at_state_t *s, char const *id, char const *v
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(void) at_set_factory_s_reg(at_state_t *s, int reg, int value)
+{
+    if (reg < 0  ||  reg >= (int) sizeof(profiles[0].s_regs)  ||  value < 0  ||  value > 255)
+        return;
+    /*endif*/
+    profiles[0].s_regs[reg] = (uint8_t) value;
+    if (s)
+        s->p.s_regs[reg] = (uint8_t) value;
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) at_display_call_info(at_state_t *s)
 {
     char buf[132 + 1];
@@ -474,9 +487,10 @@ SPAN_DECLARE(void) at_display_call_info(at_state_t *s)
 
     while (call_id)
     {
+        /* V.253 Table 13: "Spaces are present on both sides of the equal sign." */
         snprintf(buf,
                  sizeof(buf),
-                 "%s=%s",
+                 "%s = %s",
                  (call_id->id)  ?  call_id->id  :  "NULL",
                  (call_id->value)  ?  call_id->value  :  "<NONE>");
         at_put_response(s, buf);
@@ -5235,10 +5249,10 @@ static const char *at_cmd_plus_VBT(at_state_t *s, const char *t)
 
 static const char *at_cmd_plus_VCID(at_state_t *s, const char *t)
 {
-    /* 3GPP TS 27.007 C.2.3 - Calling number ID presentation */
-    /* TODO: */
+    /* V.253 9.2.3.1 - Caller ID: 0 off, 1 formatted.  2 (the raw ICLID
+       packet) is not offered: there is no such packet on a SIP call. */
     t += 5;
-    if (!parse_out(s, &t, &s->display_call_info, 1, NULL, "0,1"))
+    if (!parse_out(s, &t, &s->display_call_info, 1, "+VCID: ", "(0,1)"))
          return NULL;
     /*endif*/
     return t;

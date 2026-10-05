@@ -134,6 +134,22 @@ void di_update_link(const v250_connect_report_t *rep, const char *detail, const 
 void di_on_ring(void);
 
 /*
+ * An incoming call is about to ring: what is known about the caller, for
+ * V.253 +VCID (DATE, TIME, NMBR, NAME after the first RING).  number may be
+ * "P" (private) or NULL; name may be NULL.  Also restarts the ring count.
+ */
+void di_set_caller_id(const char *number, const char *name);
+
+/*
+ * S0's factory value: answer after this many rings (0 = only on ATA).  ATZ
+ * and AT&F restore it, as they restore the rest of the profile.
+ */
+void di_set_auto_answer(int rings);
+
+/* S7's factory value (V.250 6.3.10, seconds from ATD/ATA to CONNECT). */
+void di_set_connect_timeout(int seconds);
+
+/*
  * Read DTE payload bytes (application → modem). Non-blocking; returns the
  * number of bytes copied (0 when idle, not in data transfer, or while the
  * V.250 +TLDL local DTE loop owns the payload route).

@@ -24,7 +24,7 @@ static const at_help_entry_t basic_rows[] = {
     { "+MS$",    "Modulations (generated from the +MS table)",        "+MS$" },
     { "I$",      "Identification and diagnostic (ATIn) pages",        "I$" },
     { "S$",      "S-registers, with current values",                  "S$" },
-    { "A",       "Answer the ringing call",                           NULL },
+    { "A",       "Answer the ringing call (S0 rings answer by itself)", NULL },
     { "Dn",      "Dial n (see D$)",                                   NULL },
     { "E0/E1",   "Command echo off/on",                               "E0" },
     { "H0",      "Hang up, or end a dial/answer still in progress",   NULL },
@@ -104,6 +104,7 @@ static const at_help_entry_t plus_rows[] = {
     { "+TNUM?",    "Error counts of the last test",                   "+TNUM?" },
     { "+TSELF=1",  "Partial self test; +TRES? reads the result",      "+TRES?" },
     { "+TMODE?",   "Test mode (point to point only)",                 "+TMODE?" },
+    { "+VCID=0/1", "Caller ID (DATE, TIME, NMBR, NAME) after 1st RING", "+VCID?" },
     { "+FCLASS=n", "0 data, 1/1.0 T.31 fax, 2.0 T.32 fax",            "+FCLASS?" },
     { "+FTS +FRS", "Class 1: silence send/wait",                      NULL },
     { "+FTM +FRM", "Class 1: send/receive image modulation",          NULL },
@@ -134,14 +135,14 @@ typedef struct {
 } s_row_t;
 
 static const s_row_t s_rows[] = {
-    { 0,  "Rings before auto-answer (0 = never)" },
+    { 0,  "Rings before answering (0 = ATA only; --auto-answer)" },
     { 1,  "Rings counted on this call" },
     { 2,  "Escape character (43 = '+'; above 127 disables)" },
     { 3,  "Command line terminator (13 = CR)" },
     { 4,  "Response formatting character (10 = LF)" },
     { 5,  "Command line editing character (8 = BS)" },
     { 6,  "Pause before blind dialling, s (stored only)" },
-    { 7,  "Connection completion timeout, s (NO CARRIER after)" },
+    { 7,  "Connection timeout, s (NO CARRIER; --connect-timeout)" },
     { 8,  "Comma pause, s (stored; SIP has no pause)" },
     { 10, "Carrier loss disconnect delay, 1/10 s (stored only)" },
     { 12, "Escape guard time, 1/50 s (50 = 1 s; 0 = none)" },

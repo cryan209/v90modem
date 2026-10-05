@@ -37,6 +37,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <errno.h>
 #include <signal.h>
 #include <unistd.h>
@@ -85,7 +86,7 @@ static void log_modem_diag_snapshot(const char *reason);
 
 /* Ring state for incoming calls — emulates S0 register auto-answer */
 #define RING_INTERVAL_MS    6000    /* 6 seconds between rings (realistic cadence) */
-#define AUTO_ANSWER_RINGS   2       /* Answer after this many rings */
+#define AUTO_ANSWER_RINGS   2       /* default S0: answer after this many rings */
 static pjsua_call_id   g_ringing_call = PJSUA_INVALID_ID;
 static int             g_ring_count   = 0;
 static pj_time_val     g_last_ring_time;
@@ -860,11 +861,39 @@ static void log_modem_diag_snapshot(const char *reason)
          (unsigned long long)snapshot.g711_linear_tx_octets));
 }
 
+/* The caller from a SIP remote URI: '"Display" <sip:user@host>', '<sip:user@
+ * host>' or 'sip:user@host'.  The user part is the number (V.253 Table 13's
+ * NMBR); "anonymous" -- RFC 3323's privacy form -- is reported as P. */
+static void caller_from_remote(const pj_str_t *remote, char *number, size_t nlen,
+                               char *name, size_t namelen)
+{
+    char buf[256];
+    const char *p;
+    const char *q;
+    size_t len = (size_t) remote->slen < sizeof(buf) - 1 ? (size_t) remote->slen : sizeof(buf) - 1;
+
+    memcpy(buf, remote->ptr, len);
+    buf[len] = '\0';
+    number[0] = name[0] = '\0';
+    if ((p = strchr(buf, '"')) && (q = strchr(p + 1, '"')))
+        snprintf(name, namelen, "%.*s", (int) (q - p - 1), p + 1);
+    if ((p = strstr(buf, "sip:")) || (p = strstr(buf, "sips:")) || (p = strstr(buf, "tel:"))) {
+        p = strchr(p, ':') + 1;
+        q = p + strcspn(p, "@;>");
+        snprintf(number, nlen, "%.*s", (int) (q - p), p);
+    }
+    if (!strcasecmp(number, "anonymous"))
+        snprintf(number, nlen, "P");
+}
+
 static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id,
                               pjsip_rx_data *rdata)
 {
     (void)acc_id; (void)rdata;
     pjsua_call_info ci;
+    char number[64];
+    char name[64];
+
     pjsua_call_get_info(call_id, &ci);
 
     PJ_LOG(3, ("sip_modem", "Incoming call from %.*s",
@@ -873,14 +902,17 @@ static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id,
     /* Send 180 Ringing to the caller — don't answer yet */
     pjsua_call_answer(call_id, 180, NULL, NULL);
 
-    /* Start the ring sequence */
+    /* Start the ring sequence.  Answering is the AT interpreter's: S0 rings
+     * (set by --auto-answer) or the DTE's ATA, both through on_answer(). */
     g_ringing_call = call_id;
     g_ring_count   = 1;
     pj_gettimeofday(&g_last_ring_time);
 
+    caller_from_remote(&ci.remote_info, number, sizeof(number), name, sizeof(name));
+    di_set_caller_id(number, name);
     /* First RING to the PTY */
     di_on_ring();
-    PJ_LOG(3, ("sip_modem", "RING 1/%d", AUTO_ANSWER_RINGS));
+    PJ_LOG(3, ("sip_modem", "RING 1 (caller %s)", number[0] ? number : "unknown"));
 }
 
 /* ------------------------------------------------------------------ */
@@ -966,11 +998,32 @@ static void on_dial(const char *number, void *user_data)
     me_dial(number);
 }
 
+/* ATA, or S0 reached (the interpreter answers on its own ring count).  ATA
+ * arrives on the PTY reader thread, and pjsua asserts when called from a
+ * thread pjlib does not know, so the answer is posted to the SIP loop, which
+ * carries it out in answer_ringing_call(). */
+static volatile int g_answer_requested = 0;
+
 static void on_answer(void *user_data)
 {
     (void)user_data;
-    if (g_call_id != PJSUA_INVALID_ID)
+    g_answer_requested = 1;
+}
+
+/* A ringing call is the one to answer; g_call_id is only set once it is. */
+static void answer_ringing_call(void)
+{
+    if (g_ringing_call != PJSUA_INVALID_ID) {
+        PJ_LOG(3, ("sip_modem", "Answering after %d ring(s)", g_ring_count));
+        g_call_id      = g_ringing_call;
+        g_ringing_call = PJSUA_INVALID_ID;
+        g_ring_count   = 0;
+        /* Set g_call_id before pjsua_call_answer(): stream-created callbacks
+         * may run synchronously from the answer call. */
         pjsua_call_answer(g_call_id, 200, NULL, NULL);
+    } else if (g_call_id != PJSUA_INVALID_ID) {
+        pjsua_call_answer(g_call_id, 200, NULL, NULL);
+    }
 }
 
 static void on_hangup(void *user_data)
@@ -1031,6 +1084,12 @@ static void print_usage(FILE *f, const char *argv0)
         "          [--pty-link path | --control-link path --data-link path]\n"
         "          [--local-port port] [--rtp-port port]\n"
         "          [--bind-addr ip] [--mode x2|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92] [--verbose]\n"
+        "          [--auto-answer rings] [--connect-timeout seconds]\n"
+        "\n"
+        "--auto-answer sets S0's power-on and factory value (default 2; 0 answers\n"
+        "only on ATA). AT+VCID=1 reports the SIP caller after the first RING.\n"
+        "--connect-timeout sets S7 likewise (default 120 s, 1-255): a dial or\n"
+        "answer that has not reached CONNECT by then ends with NO CARRIER.\n"
         "\n"
         "--mode sets the power-on V.8 offer (same as ME_MODE); AT+MS on the\n"
         "PTY changes it for later calls and ATZ/AT&F restore it.\n"
@@ -1060,6 +1119,10 @@ int main(int argc, char *argv[])
     bool        pty_link_given = false;
     const char *bind_addr   = NULL;
     const char *modem_mode  = NULL;
+    int auto_answer = AUTO_ANSWER_RINGS;
+    /* S7: V.90 against the rigs can take several 15 s retrain cycles before
+     * CONNECT, so 60 s would cut calls that complete. */
+    int connect_timeout = 120;
     char        bind_addr_buf[64];
     int         local_port  = 5060;
     int         rtp_port    = 0;
@@ -1096,6 +1159,18 @@ int main(int argc, char *argv[])
             rtp_port = atoi(argv[++i]);
         } else if (!strcmp(a, "--bind-addr") && has_val) {
             bind_addr = argv[++i];
+        } else if (!strcmp(a, "--auto-answer") && has_val) {
+            auto_answer = atoi(argv[++i]);
+            if (auto_answer < 0 || auto_answer > 255) {
+                fprintf(stderr, "--auto-answer takes 0 to 255 rings\n");
+                return 2;
+            }
+        } else if (!strcmp(a, "--connect-timeout") && has_val) {
+            connect_timeout = atoi(argv[++i]);
+            if (connect_timeout < 1 || connect_timeout > 255) {
+                fprintf(stderr, "--connect-timeout takes 1 to 255 seconds\n");
+                return 2;
+            }
         } else if (!strcmp(a, "--mode") && has_val) {
             modem_mode = argv[++i];
         } else {
@@ -1313,6 +1388,8 @@ int main(int argc, char *argv[])
         me_destroy();
         return 1;
     }
+    di_set_auto_answer(auto_answer);
+    di_set_connect_timeout(connect_timeout);
 
     /* ── Optional SIP account registration ──────────────────────── */
     if (sip_server && username) {
@@ -1390,7 +1467,16 @@ int main(int argc, char *argv[])
                 me_flush_io_schedule();
         }
 
-        /* ── Ring timer: send RING and auto-answer after N rings ── */
+        /* ── ATA / S0, posted from whichever thread raised it ── */
+        if (g_answer_requested) {
+            g_answer_requested = 0;
+            answer_ringing_call();
+        }
+
+        /* ── Ring timer: RING to the DTE every interval.  The interpreter
+         * answers when its ring count reaches S0 (or the DTE sends ATA); it
+         * used to be answered here after two rings whatever S0 said, and ATA
+         * could never answer a ringing call at all. ── */
         if (g_ringing_call != PJSUA_INVALID_ID) {
             pj_time_val now;
             pj_gettimeofday(&now);
@@ -1400,21 +1486,8 @@ int main(int argc, char *argv[])
             if (elapsed_ms >= RING_INTERVAL_MS) {
                 g_ring_count++;
                 g_last_ring_time = now;
+                PJ_LOG(3, ("sip_modem", "RING %d", g_ring_count));
                 di_on_ring();
-                PJ_LOG(3, ("sip_modem", "RING %d/%d",
-                           g_ring_count, AUTO_ANSWER_RINGS));
-
-                if (g_ring_count >= AUTO_ANSWER_RINGS) {
-                    /* Answer the call */
-                    PJ_LOG(3, ("sip_modem", "Auto-answering after %d rings",
-                               g_ring_count));
-                    g_call_id      = g_ringing_call;
-                    g_ringing_call = PJSUA_INVALID_ID;
-                    g_ring_count   = 0;
-                    /* Set g_call_id before pjsua_call_answer(): stream-created
-                     * callbacks may run synchronously from the answer call. */
-                    pjsua_call_answer(g_call_id, 200, NULL, NULL);
-                }
             }
         }
 

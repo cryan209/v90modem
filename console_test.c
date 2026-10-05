@@ -851,6 +851,69 @@ static void test_call_progress(void)
     expect(dte, "ATI6", "Timeout (S7)");
     expect(dte, "ATS7=60", "OK");
 
+    /* Caller ID (V.253 9.2.3.1) and answering on S0. */
+    expect(dte, "AT+VCID=?", "+VCID: (0,1)");
+    expect(dte, "AT+VCID?", "+VCID: 0");
+    expect(dte, "AT+VCID=2", "ERROR");               /* no raw ICLID packet on SIP */
+    di_set_caller_id("6004", "Apple Modem");
+    di_on_ring();
+    collect(dte, buf, sizeof(buf), 150);
+    check(strstr(buf, "RING") && !strstr(buf, "NMBR"), "+VCID=0: RING alone");
+    expect(dte, "ATH", "OK");
+    expect(dte, "AT+VCID=1", "OK");
+    di_set_caller_id("6004", "Apple Modem");
+    di_on_ring();
+    collect(dte, buf, sizeof(buf), 150);
+    {
+        const char *ring = strstr(buf, "RING");
+        const char *date = strstr(buf, "DATE = ");
+        const char *nmbr = strstr(buf, "NMBR = 6004");
+        const char *name = strstr(buf, "NAME = Apple Modem");
+
+        check(ring && date && strstr(buf, "TIME = ") && nmbr && name && ring < date && date < nmbr,
+              "+VCID=1: RING, then DATE, TIME, NMBR, NAME (spaces round '=')");
+        if (!nmbr)
+            printf("       got \"%s\"\n", buf);
+    }
+    di_on_ring();
+    collect(dte, buf, sizeof(buf), 150);
+    check(strstr(buf, "RING") && !strstr(buf, "NMBR"), "...after the first ring only");
+    expect(dte, "ATH", "OK");
+    di_set_caller_id("P", NULL);
+    di_on_ring();
+    collect(dte, buf, sizeof(buf), 150);
+    check(strstr(buf, "NMBR = P") && !strstr(buf, "NAME"), "a private caller is NMBR = P");
+    expect(dte, "ATH+VCID=0", "OK");
+
+    {
+        int a = answer_calls;
+
+        di_set_auto_answer(2);
+        expect(dte, "ATS0?", "002");
+        expect(dte, "ATZ", "OK");
+        expect(dte, "ATS0?", "002");                /* the factory value */
+        di_set_caller_id("6004", NULL);
+        di_on_ring();
+        collect(dte, buf, sizeof(buf), 100);
+        check(answer_calls == a, "S0=2: not answered on the first ring");
+        di_on_ring();
+        collect(dte, buf, sizeof(buf), 100);
+        check(answer_calls == a + 1, "S0=2: answered on the second");
+        usleep(150000);                             /* 5.6.1: 125 ms before an abort counts */
+        expect(dte, "ATH", "OK");
+        di_set_auto_answer(0);
+        expect(dte, "ATS0?", "000");
+        di_set_caller_id("6004", NULL);
+        di_on_ring();
+        di_on_ring();
+        di_on_ring();
+        collect(dte, buf, sizeof(buf), 150);
+        check(answer_calls == a + 1, "S0=0: never answered by itself");
+        expect(dte, "ATA", "");
+        check(answer_calls == a + 2, "...ATA answers the ringing call");
+        expect(dte, "ATH", "OK");
+    }
+
     /* Stored numbers: V.250 6.3.15 +ASTO and D S=<n> (6.3.1.8), the Courier's
        &Zn and DSn on the same slots, and Hayes DL. */
     expect(dte, "AT+ASTO=?", "+ASTO: (0-9),(40)");

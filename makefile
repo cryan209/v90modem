@@ -733,6 +733,13 @@ v34-duplex-test: v34_duplex_test
 v34_duplex_test: $(V34_DUPLEX_TEST_OBJS) spandsp
 	$(CC) $(V34_DUPLEX_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
+# Two sip_v90_modem instances over real SIP on 127.0.0.1 (no registrar):
+# ringing, caller ID, S0 and ATA answering, a dial nobody answers.  Binds UDP
+# ports 5070/5080 and RTP 41000/42000, so it is not part of make test.
+.PHONY: sip-loop-test
+sip-loop-test: $(TARGET)
+	python3 tools/sip_loop_test.py
+
 .PHONY: v56-test v56-sweep v56bis-filter-test v56bis-sweep
 .PHONY: pcm-loopback-test pcm-data-test pcm-matrix pcm-procedure-test
 pcm-loopback-test: pcm-data-test pcm-procedure-test

@@ -1638,6 +1638,43 @@ recorded:
         at_put_response_code(at, AT_RESPONSE_CODE_NO_CARRIER);
 }
 
+void di_set_caller_id(const char *number, const char *name)
+{
+    time_t now = time(NULL);
+    struct tm tm;
+    char date[8];
+    char tod[8];
+
+    if (!at)
+        return;
+    localtime_r(&now, &tm);
+    strftime(date, sizeof(date), "%m%d", &tm);
+    strftime(tod, sizeof(tod), "%H%M", &tm);
+    pthread_mutex_lock(&t31_mtx);
+    at_reset_call_info(at);
+    at_set_call_info(at, "DATE", date);
+    at_set_call_info(at, "TIME", tod);
+    if (number && number[0])
+        at_set_call_info(at, "NMBR", number);
+    if (name && name[0])
+        at_set_call_info(at, "NAME", name);
+    pthread_mutex_unlock(&t31_mtx);
+}
+
+void di_set_auto_answer(int rings)
+{
+    pthread_mutex_lock(&t31_mtx);
+    at_set_factory_s_reg(at, 0, rings);
+    pthread_mutex_unlock(&t31_mtx);
+}
+
+void di_set_connect_timeout(int seconds)
+{
+    pthread_mutex_lock(&t31_mtx);
+    at_set_factory_s_reg(at, 7, seconds);
+    pthread_mutex_unlock(&t31_mtx);
+}
+
 void di_on_ring(void)
 {
     pthread_mutex_lock(&test_mtx);
