@@ -27,6 +27,7 @@
 #include "v34_info_decode.h"
 #include "p3_demod.h"
 #include "phase12_decode.h"
+#include "legacy_pcm_decode.h"
 
 #include <spandsp.h>
 #include <spandsp/crc.h>
@@ -2090,6 +2091,9 @@ static void json_write_escaped(FILE *f, const char *text)
         case '\n': fputs("\\n", f); break;
         case '\r': fputs("\\r", f); break;
         case '\t': fputs("\\t", f); break;
+        case '<': fputs("\\u003c", f); break;
+        case '>': fputs("\\u003e", f); break;
+        case '&': fputs("\\u0026", f); break;
         default:
             if (*p < 0x20)
                 fprintf(f, "\\u%04x", (unsigned) *p);
@@ -2422,6 +2426,15 @@ static void build_visual_event_detail_html(const call_log_event_t *event, char *
     }
 
     pair_count = parse_detail_key_values(event->detail, pairs, (int) (sizeof(pairs) / sizeof(pairs[0])));
+    if ((strcmp(event->protocol, "Diagnostic") == 0
+         || strcmp(event->protocol, "x2") == 0
+         || strcmp(event->protocol, "K56flex") == 0) && pair_count > 0) {
+        appendf(out, out_len, "<div class=\"detail-kv\">");
+        for (int i = 0; i < pair_count; i++)
+            append_html_label_value(out, out_len, pairs[i].key, pairs[i].value);
+        appendf(out, out_len, "</div>");
+        return;
+    }
     if (strcmp(event->protocol, "V.90/V.92") == 0
         && strncmp(event->summary, "Short Phase 2 sequence", 22) == 0
         && pair_count > 0) {
@@ -3089,6 +3102,7 @@ static bool write_visualization_html(const char *output_path,
             ".detail-kv strong{color:#3b3329;}\n"
             "tbody tr{cursor:pointer;}\n"
             "tbody tr:hover{background:#fff6e7;}\n"
+            "tr.diagnostic{background:#f0f4f5;color:#52616b;} details{margin-top:6px;} pre{white-space:pre-wrap;overflow-wrap:anywhere;}\n"
             ".cursor{color:var(--accent);font-weight:700;}\n"
             ".swatches{display:flex;gap:10px;align-items:center;flex-wrap:wrap;color:var(--muted);margin-top:8px;}\n"
             ".swatch{display:inline-flex;gap:6px;align-items:center;}\n"
@@ -3103,10 +3117,20 @@ static bool write_visualization_html(const char *output_path,
             "<div class=\"wrap\">\n"
             "<div class=\"card\">\n"
             "<h1>vpcm_decode HTML visualization</h1>\n"
+            "<p>Best-effort offline decode. Diagnostic rows describe receiver candidates and inferred roles; they are not wire events and do not appear on the chart. CRC, soft-lock and source fields are retained in each event&#39;s raw evidence.</p>\n"
+            "<p>Positions are sample offsets in this input recording. Stereo WAV channels share its time origin; separate RX/TX tap files require independently established alignment. Coverage: V.8/V.8bis, V.34 and V.90/V.91/V.92; x2 peer INFO0/marker and MP/E; K56flex downstream probe/parameter evidence. Proprietary events use detection positions, not inferred signal starts. K56flex receiver-model stages and assumed report fields are explicit; payload is unverified. V.32bis session decoding is not implemented.</p>\n"
             "<div class=\"meta\">\n");
 
     fprintf(f, "<div><strong>Input:</strong> ");
-    json_write_escaped(f, input_path);
+    for (const unsigned char *c = (const unsigned char *) input_path; *c; c++) {
+        switch (*c) {
+        case '&': fputs("&amp;", f); break;
+        case '<': fputs("&lt;", f); break;
+        case '>': fputs("&gt;", f); break;
+        case '"': fputs("&quot;", f); break;
+        default: fputc(*c, f); break;
+        }
+    }
     fprintf(f, "</div>\n<div><strong>Tracks:</strong> %d</div>\n", track_count);
     fprintf(f, "<div><strong>Duration:</strong> %.3f s</div>\n",
             (double) viz_list[0]->total_samples / (double) viz_list[0]->sample_rate);
@@ -3135,11 +3159,11 @@ static bool write_visualization_html(const char *output_path,
             "const palette=['#b14d2d','#186d7a','#5d7a1f','#8b5cf6','#d97706','#2563eb','#a21caf','#0f766e','#c02626','#4338ca','#ca8a04','#7c3aed','#0f766e'];\n"
             "const mergePalette={a:'#c66a2b',b:'#1f7a8c'};\n"
             "function xForPoint(i,left,width,count){return left+(i/Math.max(1,count-1))*width;}\n"
-            "function eventColor(protocol){if(protocol==='V.8'||protocol==='V.8bis')return '#f08a5d';if(protocol==='V.34')return '#d4a017';if(protocol==='V.90 Phase 3'||protocol==='V.90')return '#2f7f6f';if(protocol==='V.92 Phase 3')return '#4b8a3f';if(protocol==='V.90/V.92')return '#6b5b95';if(protocol==='V.91')return '#2d5fb1';return '#777';}\n"
+            "function eventColor(protocol){if(protocol==='V.8'||protocol==='V.8bis')return '#f08a5d';if(protocol==='V.34')return '#d4a017';if(protocol==='V.90 Phase 3'||protocol==='V.90')return '#2f7f6f';if(protocol==='V.92 Phase 3')return '#4b8a3f';if(protocol==='V.90/V.92')return '#6b5b95';if(protocol==='V.91')return '#2d5fb1';if(protocol==='x2')return '#8a3fb0';if(protocol==='K56flex')return '#1768a6';return '#777';}\n"
             "function levelNorm(v,gamma,boost){const base=Math.max(0,Math.min(1,v/1000));return Math.min(1,Math.pow(base,gamma)*boost);}\n"
             "function heatColor(v,gamma,boost){const t=levelNorm(v,gamma,boost);const stops=[[8,19,29],[18,66,93],[31,140,168],[243,179,76],[251,238,197]];const seg=Math.min(stops.length-2,Math.floor(t*(stops.length-1)));const local=t*(stops.length-1)-seg;const a=stops[seg],b=stops[seg+1];const mix=n=>Math.round(a[n]+(b[n]-a[n])*local);return `rgb(${mix(0)},${mix(1)},${mix(2)})`;}\n"
             "function mergedTrack(a,b,mode,label){return{kind:'merged',label:label||'Merged',mode:mode||'overlay',primary:a,secondary:b,sampleRate:a.sampleRate,totalSamples:a.totalSamples,windowSamples:a.windowSamples,freqBinCount:a.freqBinCount,freqBinStartHz:a.freqBinStartHz,freqBinStepHz:a.freqBinStepHz};}\n"
-            "function renderTrack(track,mount){const root=mount||document.getElementById('tracks');root.innerHTML='';const merged=track.kind==='merged';const sharedSpectrogram=merged&&track.mode==='shared';const baseTrack=merged?track.primary:track;const otherTrack=merged?track.secondary:null;const card=document.createElement('div');card.className='card';card.innerHTML=`<div class=\"track-title\"><h2>${track.label}</h2><div class=\"hint\">${merged?(baseTrack.events.length+otherTrack.events.length):baseTrack.events.length} decoded events</div></div><div class=\"controls\"><div class=\"cursor\">Cursor: <span class=\"cursor-time\">0.0 ms</span></div><div class=\"hint hover-label\">Move across the chart to inspect this ${merged?(sharedSpectrogram?'shared diagnostic':'overlay'):'channel'}.</div></div><div class=\"controls\"><label>Spectral lift <input class=\"spec-boost\" type=\"range\" min=\"100\" max=\"900\" step=\"25\" value=\"320\"></label><label>Contrast <input class=\"spec-gamma\" type=\"range\" min=\"20\" max=\"100\" step=\"1\" value=\"42\"></label><label>Tone lift <input class=\"tone-boost\" type=\"range\" min=\"100\" max=\"900\" step=\"25\" value=\"260\"></label></div><div class=\"legend\"></div><canvas width=\"1360\" height=\"760\"></canvas><div class=\"hint\">${merged?(sharedSpectrogram?`Shared spectrogram with split tone overlays. ${baseTrack.label} uses orange and ${otherTrack.label} uses teal.`:`Merged overlay view. ${baseTrack.label} uses orange and ${otherTrack.label} uses teal.`):'Separate channel render.'} Lower-energy structure is display-boosted only; raw decode data is unchanged.</div><table><thead><tr><th>Start</th><th>Duration</th><th>Protocol</th><th>Summary</th><th>Detail</th></tr></thead><tbody></tbody></table>`;root.appendChild(card);const canvas=card.querySelector('canvas');const ctx=canvas.getContext('2d');const legend=card.querySelector('.legend');const tbody=card.querySelector('tbody');const cursorTime=card.querySelector('.cursor-time');const hoverLabel=card.querySelector('.hover-label');const specBoostInput=card.querySelector('.spec-boost');const specGammaInput=card.querySelector('.spec-gamma');const toneBoostInput=card.querySelector('.tone-boost');const enabled=new Set(baseTrack.tones.map(t=>t.key));let cursorIndex=0;function settings(){return{specBoost:Number(specBoostInput.value)/100,specGamma:Number(specGammaInput.value)/100,toneBoost:Number(toneBoostInput.value)/100};}function allEvents(){if(!merged)return baseTrack.events;return baseTrack.events.map(e=>({...e,trackLabel:baseTrack.label,trackColor:mergePalette.a})).concat(otherTrack.events.map(e=>({...e,trackLabel:otherTrack.label,trackColor:mergePalette.b}))).sort((x,y)=>x.start-y.start);}function draw(){const cfg=settings();const w=canvas.width,h=canvas.height;ctx.clearRect(0,0,w,h);const left=64,right=20,top=24,bottom=28;const plotW=w-left-right;const envelopeH=150;const gap=28;const specTop=top+envelopeH+gap;const specH=300;const toneTop=specTop+specH+gap;const toneAreaH=h-toneTop-bottom;const toneTrackH=toneAreaH/Math.max(1,baseTrack.tones.length);ctx.fillStyle='#fffdf8';ctx.fillRect(0,0,w,h);for(let i=0;i<=10;i++){const x=left+(plotW*i/10);ctx.strokeStyle='#d9cfc0';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x,top);ctx.lineTo(x,h-bottom);ctx.stroke();const ms=(baseTrack.totalSamples*i/10)*1000/baseTrack.sampleRate;ctx.fillStyle='#6a6257';ctx.fillText(ms.toFixed(0)+' ms',x-16,h-8);}for(let i=0;i<=6;i++){const y=top+(envelopeH*i/6);ctx.strokeStyle='#d9cfc0';ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();}ctx.fillStyle='#1d1b18';ctx.fillText(merged?'Envelope + Decoded Events (Overlay)':'Envelope + Decoded Events',left,16);allEvents().forEach(ev=>{const x1=left+(ev.start/baseTrack.totalSamples)*plotW;const x2=left+((ev.start+Math.max(ev.duration,baseTrack.windowSamples))/baseTrack.totalSamples)*plotW;ctx.fillStyle=(merged?(ev.trackColor||eventColor(ev.protocol)):eventColor(ev.protocol))+'38';ctx.fillRect(x1,top,Math.max(2,x2-x1),envelopeH);ctx.strokeStyle=merged?(ev.trackColor||eventColor(ev.protocol)):eventColor(ev.protocol);ctx.beginPath();ctx.moveTo(x1,top);ctx.lineTo(x1,specTop+specH);ctx.stroke();});const envA=baseTrack.envelope;const envB=merged?otherTrack.envelope:null;ctx.beginPath();for(let i=0;i<envA.length;i++){const x=xForPoint(i,left,plotW,envA.length);const v=merged?Math.max(envA[i],envB[i]):envA[i];const y=top+envelopeH-(v/1000)*envelopeH;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);}ctx.lineTo(left+plotW,top+envelopeH);ctx.lineTo(left,top+envelopeH);ctx.closePath();ctx.fillStyle=merged?'rgba(90,94,128,.20)':'rgba(177,77,45,.22)';ctx.fill();ctx.strokeStyle=merged?'#4f6b8a':'#b14d2d';ctx.lineWidth=1.6;ctx.stroke();if(merged){for(const series of [{env:envA,color:mergePalette.a},{env:envB,color:mergePalette.b}]){ctx.beginPath();series.env.forEach((v,i)=>{const x=xForPoint(i,left,plotW,series.env.length);const y=top+envelopeH-(v/1000)*envelopeH;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.strokeStyle=series.color;ctx.lineWidth=1.05;ctx.stroke();}}ctx.fillStyle='#1d1b18';ctx.fillText(merged?(sharedSpectrogram?'Frequency Diagnosis (Shared)':'Frequency Diagnosis (Overlay)'):'Frequency Diagnosis',left,specTop-8);const colW=plotW/Math.max(1,baseTrack.envelope.length);const rowH=specH/Math.max(1,baseTrack.freqBinCount);for(let i=0;i<baseTrack.envelope.length;i++){const x=left+i*colW;for(let b=0;b<baseTrack.freqBinCount;b++){const y=specTop+specH-(b+1)*rowH;if(merged&&sharedSpectrogram){const va=baseTrack.freqHeatmap[i*baseTrack.freqBinCount+b];const vb=otherTrack.freqHeatmap[i*otherTrack.freqBinCount+b];const v=va>vb?va:vb;ctx.fillStyle=heatColor(v,cfg.specGamma,cfg.specBoost);ctx.fillRect(x,y,Math.max(1,colW+0.4),Math.max(1,rowH+0.4));}else if(merged){const va=baseTrack.freqHeatmap[i*baseTrack.freqBinCount+b];const vb=otherTrack.freqHeatmap[i*otherTrack.freqBinCount+b];const a=levelNorm(va,cfg.specGamma,cfg.specBoost);const bb=levelNorm(vb,cfg.specGamma,cfg.specBoost);ctx.fillStyle=`rgba(198,106,43,${Math.min(.95,a)})`;ctx.fillRect(x,y,Math.max(1,colW+0.4),Math.max(1,rowH+0.4));ctx.fillStyle=`rgba(31,122,140,${Math.min(.95,bb)})`;ctx.fillRect(x,y,Math.max(1,colW+0.4),Math.max(1,rowH+0.4));}else{const v=baseTrack.freqHeatmap[i*baseTrack.freqBinCount+b];ctx.fillStyle=heatColor(v,cfg.specGamma,cfg.specBoost);ctx.fillRect(x,y,Math.max(1,colW+0.4),Math.max(1,rowH+0.4));}}}ctx.strokeStyle='#d9cfc0';for(let j=0;j<=6;j++){const freq=baseTrack.freqBinStartHz+j*((baseTrack.freqBinCount-1)*baseTrack.freqBinStepHz/6);const bin=(freq-baseTrack.freqBinStartHz)/baseTrack.freqBinStepHz;const y=specTop+specH-bin*rowH;ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();ctx.fillStyle='#6a6257';ctx.fillText(Math.round(freq)+' Hz',6,y+4);}ctx.strokeStyle='#8a7f70';ctx.strokeRect(left,specTop,plotW,specH);ctx.fillStyle='#1d1b18';ctx.fillText(merged?(sharedSpectrogram?'Tracked Tone Energies (Split)':'Tracked Tone Energies (Overlay)'):'Tracked Tone Energies',left,toneTop-8);baseTrack.tones.forEach((tone,toneIdx)=>{const y0=toneTop+toneIdx*toneTrackH;ctx.strokeStyle='#e6ddcf';ctx.beginPath();ctx.moveTo(left,y0+toneTrackH);ctx.lineTo(left+plotW,y0+toneTrackH);ctx.stroke();ctx.fillStyle='#6a6257';ctx.fillText(tone.label,left-4,y0+12);if(!enabled.has(tone.key))return;const drawTone=(values,color,width)=>{ctx.beginPath();values.forEach((v,i)=>{const x=xForPoint(i,left,plotW,baseTrack.envelope.length);const display=levelNorm(v,Math.min(0.85,cfg.specGamma+0.06),cfg.toneBoost);const y=y0+toneTrackH-display*(toneTrackH-6)-3;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.strokeStyle=color;ctx.lineWidth=width;ctx.stroke();};if(merged){drawTone(baseTrack.tones[toneIdx].values,sharedSpectrogram?'rgba(198,106,43,0.95)':mergePalette.a,sharedSpectrogram?1.3:1.15);drawTone(otherTrack.tones[toneIdx].values,sharedSpectrogram?'rgba(31,122,140,0.95)':mergePalette.b,sharedSpectrogram?1.3:1.15);}else{drawTone(baseTrack.tones[toneIdx].values,palette[toneIdx%%palette.length],1.35);}});const lastLabelX={};allEvents().forEach(ev=>{const tag=`${ev.trackLabel||''}:${ev.protocol}:${ev.summary}`;const x=left+(ev.start/baseTrack.totalSamples)*plotW;if(lastLabelX[tag]!==undefined&&x-lastLabelX[tag]<80)return;lastLabelX[tag]=x;ctx.save();ctx.translate(x+2,top+12);ctx.rotate(-Math.PI/10);ctx.fillStyle=merged?(ev.trackColor||eventColor(ev.protocol)):eventColor(ev.protocol);const prefix=merged&&ev.trackLabel?`[${ev.trackLabel}] `:'';const text=prefix+ev.summary;ctx.fillText(text.length>24?text.slice(0,24)+'...':text,0,0);ctx.restore();});const cursorX=xForPoint(cursorIndex,left,plotW,baseTrack.envelope.length);ctx.strokeStyle='#111';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(cursorX,top);ctx.lineTo(cursorX,h-bottom);ctx.stroke();}function updateCursor(index){const cfg=settings();cursorIndex=Math.max(0,Math.min(baseTrack.envelope.length-1,index));const start=cursorIndex*baseTrack.windowSamples;cursorTime.textContent=(start*1000/baseTrack.sampleRate).toFixed(1)+' ms';const toneSource=merged?baseTrack.tones.map(t=>({label:`${baseTrack.label} ${t.label}`,v:t.values[cursorIndex]})).concat(otherTrack.tones.map(t=>({label:`${otherTrack.label} ${t.label}`,v:t.values[cursorIndex]}))):baseTrack.tones.map(t=>({label:t.label,v:t.values[cursorIndex]}));const active=toneSource.sort((a,b)=>b.v-a.v).slice(0,4).filter(x=>x.v>6);let dominantA=0,dominantValA=-1;for(let b=0;b<baseTrack.freqBinCount;b++){const v=baseTrack.freqHeatmap[cursorIndex*baseTrack.freqBinCount+b];if(v>dominantValA){dominantValA=v;dominantA=b;}}let spectral=`dominant bin ${baseTrack.freqBinStartHz+dominantA*baseTrack.freqBinStepHz} Hz raw ${(dominantValA/10).toFixed(1)}%% display x${cfg.specBoost.toFixed(1)}`;if(merged){let dominantB=0,dominantValB=-1;for(let b=0;b<otherTrack.freqBinCount;b++){const v=otherTrack.freqHeatmap[cursorIndex*otherTrack.freqBinCount+b];if(v>dominantValB){dominantValB=v;dominantB=b;}}spectral=sharedSpectrogram?`shared ${baseTrack.freqBinStartHz+((dominantValA>dominantValB?dominantA:dominantB)*baseTrack.freqBinStepHz)} Hz | ${baseTrack.label}: ${(baseTrack.freqBinStartHz+dominantA*baseTrack.freqBinStepHz)} Hz ${(dominantValA/10).toFixed(1)}%% | ${otherTrack.label}: ${(otherTrack.freqBinStartHz+dominantB*otherTrack.freqBinStepHz)} Hz ${(dominantValB/10).toFixed(1)}%%`:`${baseTrack.label}: ${(baseTrack.freqBinStartHz+dominantA*baseTrack.freqBinStepHz)} Hz ${(dominantValA/10).toFixed(1)}%% | ${otherTrack.label}: ${(otherTrack.freqBinStartHz+dominantB*otherTrack.freqBinStepHz)} Hz ${(dominantValB/10).toFixed(1)}%%`;}hoverLabel.textContent=active.length?`${spectral} | `+active.map(x=>x.label+' raw '+(x.v/10).toFixed(1)+'%%').join(' | '):spectral;draw();}function rebuildLegend(){legend.innerHTML='';baseTrack.tones.forEach((tone,toneIdx)=>{const b=document.createElement('button');b.textContent=tone.label;b.style.borderColor=merged?mergePalette.a:palette[toneIdx%%palette.length];if(!enabled.has(tone.key))b.classList.add('off');b.onclick=()=>{if(enabled.has(tone.key))enabled.delete(tone.key);else enabled.add(tone.key);rebuildLegend();updateCursor(cursorIndex);};legend.appendChild(b);});if(merged){const key=document.createElement('div');key.className='hint';key.textContent=sharedSpectrogram?`${baseTrack.label} and ${otherTrack.label} share the spectrogram; tone overlays stay split orange/teal`:`${baseTrack.label} = orange, ${otherTrack.label} = teal`;legend.appendChild(key);}}canvas.addEventListener('mousemove',ev=>{const r=canvas.getBoundingClientRect();const x=(ev.clientX-r.left)*(canvas.width/r.width);const left=64;const plotW=canvas.width-left-20;updateCursor(Math.round(((x-left)/plotW)*(baseTrack.envelope.length-1)));});canvas.addEventListener('click',ev=>{const r=canvas.getBoundingClientRect();const x=(ev.clientX-r.left)*(canvas.width/r.width);const sample=((x-64)/(canvas.width-84))*baseTrack.totalSamples;let best=null;allEvents().forEach((e,rowIdx)=>{const end=e.start+Math.max(e.duration,baseTrack.windowSamples);if(sample>=e.start&&sample<=end)best=rowIdx;});if(best!==null){tbody.querySelectorAll('tr')[best]?.scrollIntoView({block:'center'});}});specBoostInput.addEventListener('input',()=>updateCursor(cursorIndex));specGammaInput.addEventListener('input',()=>updateCursor(cursorIndex));toneBoostInput.addEventListener('input',()=>updateCursor(cursorIndex));allEvents().forEach(ev=>{const tr=document.createElement('tr');const prefix=merged&&ev.trackLabel?`[${ev.trackLabel}] `:'';tr.innerHTML=`<td>${(ev.start*1000/baseTrack.sampleRate).toFixed(1)} ms</td><td>${(ev.duration*1000/baseTrack.sampleRate).toFixed(1)} ms</td><td>${ev.protocol}</td><td>${prefix}${ev.summary}</td><td>${ev.detailHtml||ev.detail||''}</td>`;tr.onclick=()=>updateCursor(Math.round(ev.start/baseTrack.windowSamples));tbody.appendChild(tr);});rebuildLegend();updateCursor(0);}\n"
+            "function renderTrack(track,mount){const root=mount||document.getElementById('tracks');root.innerHTML='';const merged=track.kind==='merged';const sharedSpectrogram=merged&&track.mode==='shared';const baseTrack=merged?track.primary:track;const otherTrack=merged?track.secondary:null;const card=document.createElement('div');card.className='card';card.innerHTML=`<div class=\"track-title\"><h2>${track.label}</h2><div class=\"hint\">${merged?(baseTrack.events.length+otherTrack.events.length):baseTrack.events.length} decoded events</div></div><div class=\"controls\"><div class=\"cursor\">Cursor: <span class=\"cursor-time\">0.0 ms</span></div><div class=\"hint hover-label\">Move across the chart to inspect this ${merged?(sharedSpectrogram?'shared diagnostic':'overlay'):'channel'}.</div></div><div class=\"controls\"><label>Spectral lift <input class=\"spec-boost\" type=\"range\" min=\"100\" max=\"900\" step=\"25\" value=\"320\"></label><label>Contrast <input class=\"spec-gamma\" type=\"range\" min=\"20\" max=\"100\" step=\"1\" value=\"42\"></label><label>Tone lift <input class=\"tone-boost\" type=\"range\" min=\"100\" max=\"900\" step=\"25\" value=\"260\"></label></div><div class=\"legend\"></div><canvas width=\"1360\" height=\"760\"></canvas><div class=\"hint\">${merged?(sharedSpectrogram?`Shared spectrogram with split tone overlays. ${baseTrack.label} uses orange and ${otherTrack.label} uses teal.`:`Merged overlay view. ${baseTrack.label} uses orange and ${otherTrack.label} uses teal.`):'Separate channel render.'} Lower-energy structure is display-boosted only; raw decode data is unchanged.</div><table><thead><tr><th>Start / sample</th><th>Duration</th><th>Protocol</th><th>Summary</th><th>Detail</th></tr></thead><tbody></tbody></table>`;root.appendChild(card);const canvas=card.querySelector('canvas');const ctx=canvas.getContext('2d');const legend=card.querySelector('.legend');const tbody=card.querySelector('tbody');const cursorTime=card.querySelector('.cursor-time');const hoverLabel=card.querySelector('.hover-label');const specBoostInput=card.querySelector('.spec-boost');const specGammaInput=card.querySelector('.spec-gamma');const toneBoostInput=card.querySelector('.tone-boost');const enabled=new Set(baseTrack.tones.map(t=>t.key));let cursorIndex=0;function settings(){return{specBoost:Number(specBoostInput.value)/100,specGamma:Number(specGammaInput.value)/100,toneBoost:Number(toneBoostInput.value)/100};}function allEvents(){if(!merged)return baseTrack.events;return baseTrack.events.map(e=>({...e,trackLabel:baseTrack.label,trackColor:mergePalette.a})).concat(otherTrack.events.map(e=>({...e,trackLabel:otherTrack.label,trackColor:mergePalette.b}))).sort((x,y)=>x.start-y.start);}function draw(){const cfg=settings();const w=canvas.width,h=canvas.height;ctx.clearRect(0,0,w,h);const left=64,right=20,top=24,bottom=28;const plotW=w-left-right;const envelopeH=150;const gap=28;const specTop=top+envelopeH+gap;const specH=300;const toneTop=specTop+specH+gap;const toneAreaH=h-toneTop-bottom;const toneTrackH=toneAreaH/Math.max(1,baseTrack.tones.length);ctx.fillStyle='#fffdf8';ctx.fillRect(0,0,w,h);for(let i=0;i<=10;i++){const x=left+(plotW*i/10);ctx.strokeStyle='#d9cfc0';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(x,top);ctx.lineTo(x,h-bottom);ctx.stroke();const ms=(baseTrack.totalSamples*i/10)*1000/baseTrack.sampleRate;ctx.fillStyle='#6a6257';ctx.fillText(ms.toFixed(0)+' ms',x-16,h-8);}for(let i=0;i<=6;i++){const y=top+(envelopeH*i/6);ctx.strokeStyle='#d9cfc0';ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();}ctx.fillStyle='#1d1b18';ctx.fillText(merged?'Envelope + Decoded Events (Overlay)':'Envelope + Decoded Events',left,16);allEvents().filter(ev=>ev.protocol!=='Diagnostic').forEach(ev=>{const x1=left+(ev.start/baseTrack.totalSamples)*plotW;const x2=left+((ev.start+Math.max(ev.duration,baseTrack.windowSamples))/baseTrack.totalSamples)*plotW;ctx.fillStyle=(merged?(ev.trackColor||eventColor(ev.protocol)):eventColor(ev.protocol))+'38';ctx.fillRect(x1,top,Math.max(2,x2-x1),envelopeH);ctx.strokeStyle=merged?(ev.trackColor||eventColor(ev.protocol)):eventColor(ev.protocol);ctx.beginPath();ctx.moveTo(x1,top);ctx.lineTo(x1,specTop+specH);ctx.stroke();});const envA=baseTrack.envelope;const envB=merged?otherTrack.envelope:null;ctx.beginPath();for(let i=0;i<envA.length;i++){const x=xForPoint(i,left,plotW,envA.length);const v=merged?Math.max(envA[i],envB[i]):envA[i];const y=top+envelopeH-(v/1000)*envelopeH;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);}ctx.lineTo(left+plotW,top+envelopeH);ctx.lineTo(left,top+envelopeH);ctx.closePath();ctx.fillStyle=merged?'rgba(90,94,128,.20)':'rgba(177,77,45,.22)';ctx.fill();ctx.strokeStyle=merged?'#4f6b8a':'#b14d2d';ctx.lineWidth=1.6;ctx.stroke();if(merged){for(const series of [{env:envA,color:mergePalette.a},{env:envB,color:mergePalette.b}]){ctx.beginPath();series.env.forEach((v,i)=>{const x=xForPoint(i,left,plotW,series.env.length);const y=top+envelopeH-(v/1000)*envelopeH;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.strokeStyle=series.color;ctx.lineWidth=1.05;ctx.stroke();}}ctx.fillStyle='#1d1b18';ctx.fillText(merged?(sharedSpectrogram?'Frequency Diagnosis (Shared)':'Frequency Diagnosis (Overlay)'):'Frequency Diagnosis',left,specTop-8);const colW=plotW/Math.max(1,baseTrack.envelope.length);const rowH=specH/Math.max(1,baseTrack.freqBinCount);for(let i=0;i<baseTrack.envelope.length;i++){const x=left+i*colW;for(let b=0;b<baseTrack.freqBinCount;b++){const y=specTop+specH-(b+1)*rowH;if(merged&&sharedSpectrogram){const va=baseTrack.freqHeatmap[i*baseTrack.freqBinCount+b];const vb=otherTrack.freqHeatmap[i*otherTrack.freqBinCount+b];const v=va>vb?va:vb;ctx.fillStyle=heatColor(v,cfg.specGamma,cfg.specBoost);ctx.fillRect(x,y,Math.max(1,colW+0.4),Math.max(1,rowH+0.4));}else if(merged){const va=baseTrack.freqHeatmap[i*baseTrack.freqBinCount+b];const vb=otherTrack.freqHeatmap[i*otherTrack.freqBinCount+b];const a=levelNorm(va,cfg.specGamma,cfg.specBoost);const bb=levelNorm(vb,cfg.specGamma,cfg.specBoost);ctx.fillStyle=`rgba(198,106,43,${Math.min(.95,a)})`;ctx.fillRect(x,y,Math.max(1,colW+0.4),Math.max(1,rowH+0.4));ctx.fillStyle=`rgba(31,122,140,${Math.min(.95,bb)})`;ctx.fillRect(x,y,Math.max(1,colW+0.4),Math.max(1,rowH+0.4));}else{const v=baseTrack.freqHeatmap[i*baseTrack.freqBinCount+b];ctx.fillStyle=heatColor(v,cfg.specGamma,cfg.specBoost);ctx.fillRect(x,y,Math.max(1,colW+0.4),Math.max(1,rowH+0.4));}}}ctx.strokeStyle='#d9cfc0';for(let j=0;j<=6;j++){const freq=baseTrack.freqBinStartHz+j*((baseTrack.freqBinCount-1)*baseTrack.freqBinStepHz/6);const bin=(freq-baseTrack.freqBinStartHz)/baseTrack.freqBinStepHz;const y=specTop+specH-bin*rowH;ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(left+plotW,y);ctx.stroke();ctx.fillStyle='#6a6257';ctx.fillText(Math.round(freq)+' Hz',6,y+4);}ctx.strokeStyle='#8a7f70';ctx.strokeRect(left,specTop,plotW,specH);ctx.fillStyle='#1d1b18';ctx.fillText(merged?(sharedSpectrogram?'Tracked Tone Energies (Split)':'Tracked Tone Energies (Overlay)'):'Tracked Tone Energies',left,toneTop-8);baseTrack.tones.forEach((tone,toneIdx)=>{const y0=toneTop+toneIdx*toneTrackH;ctx.strokeStyle='#e6ddcf';ctx.beginPath();ctx.moveTo(left,y0+toneTrackH);ctx.lineTo(left+plotW,y0+toneTrackH);ctx.stroke();ctx.fillStyle='#6a6257';ctx.fillText(tone.label,left-4,y0+12);if(!enabled.has(tone.key))return;const drawTone=(values,color,width)=>{ctx.beginPath();values.forEach((v,i)=>{const x=xForPoint(i,left,plotW,baseTrack.envelope.length);const display=levelNorm(v,Math.min(0.85,cfg.specGamma+0.06),cfg.toneBoost);const y=y0+toneTrackH-display*(toneTrackH-6)-3;if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);});ctx.strokeStyle=color;ctx.lineWidth=width;ctx.stroke();};if(merged){drawTone(baseTrack.tones[toneIdx].values,sharedSpectrogram?'rgba(198,106,43,0.95)':mergePalette.a,sharedSpectrogram?1.3:1.15);drawTone(otherTrack.tones[toneIdx].values,sharedSpectrogram?'rgba(31,122,140,0.95)':mergePalette.b,sharedSpectrogram?1.3:1.15);}else{drawTone(baseTrack.tones[toneIdx].values,palette[toneIdx%%palette.length],1.35);}});const lastLabelX={};allEvents().filter(ev=>ev.protocol!=='Diagnostic').forEach(ev=>{const tag=`${ev.trackLabel||''}:${ev.protocol}:${ev.summary}`;const x=left+(ev.start/baseTrack.totalSamples)*plotW;if(lastLabelX[tag]!==undefined&&x-lastLabelX[tag]<80)return;lastLabelX[tag]=x;ctx.save();ctx.translate(x+2,top+12);ctx.rotate(-Math.PI/10);ctx.fillStyle=merged?(ev.trackColor||eventColor(ev.protocol)):eventColor(ev.protocol);const prefix=merged&&ev.trackLabel?`[${ev.trackLabel}] `:'';const text=prefix+ev.summary;ctx.fillText(text.length>24?text.slice(0,24)+'...':text,0,0);ctx.restore();});const cursorX=xForPoint(cursorIndex,left,plotW,baseTrack.envelope.length);ctx.strokeStyle='#111';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(cursorX,top);ctx.lineTo(cursorX,h-bottom);ctx.stroke();}function updateCursor(index){const cfg=settings();cursorIndex=Math.max(0,Math.min(baseTrack.envelope.length-1,index));const start=cursorIndex*baseTrack.windowSamples;cursorTime.textContent=(start*1000/baseTrack.sampleRate).toFixed(1)+' ms';const toneSource=merged?baseTrack.tones.map(t=>({label:`${baseTrack.label} ${t.label}`,v:t.values[cursorIndex]})).concat(otherTrack.tones.map(t=>({label:`${otherTrack.label} ${t.label}`,v:t.values[cursorIndex]}))):baseTrack.tones.map(t=>({label:t.label,v:t.values[cursorIndex]}));const active=toneSource.sort((a,b)=>b.v-a.v).slice(0,4).filter(x=>x.v>6);let dominantA=0,dominantValA=-1;for(let b=0;b<baseTrack.freqBinCount;b++){const v=baseTrack.freqHeatmap[cursorIndex*baseTrack.freqBinCount+b];if(v>dominantValA){dominantValA=v;dominantA=b;}}let spectral=`dominant bin ${baseTrack.freqBinStartHz+dominantA*baseTrack.freqBinStepHz} Hz raw ${(dominantValA/10).toFixed(1)}%% display x${cfg.specBoost.toFixed(1)}`;if(merged){let dominantB=0,dominantValB=-1;for(let b=0;b<otherTrack.freqBinCount;b++){const v=otherTrack.freqHeatmap[cursorIndex*otherTrack.freqBinCount+b];if(v>dominantValB){dominantValB=v;dominantB=b;}}spectral=sharedSpectrogram?`shared ${baseTrack.freqBinStartHz+((dominantValA>dominantValB?dominantA:dominantB)*baseTrack.freqBinStepHz)} Hz | ${baseTrack.label}: ${(baseTrack.freqBinStartHz+dominantA*baseTrack.freqBinStepHz)} Hz ${(dominantValA/10).toFixed(1)}%% | ${otherTrack.label}: ${(otherTrack.freqBinStartHz+dominantB*otherTrack.freqBinStepHz)} Hz ${(dominantValB/10).toFixed(1)}%%`:`${baseTrack.label}: ${(baseTrack.freqBinStartHz+dominantA*baseTrack.freqBinStepHz)} Hz ${(dominantValA/10).toFixed(1)}%% | ${otherTrack.label}: ${(otherTrack.freqBinStartHz+dominantB*otherTrack.freqBinStepHz)} Hz ${(dominantValB/10).toFixed(1)}%%`;}hoverLabel.textContent=active.length?`${spectral} | `+active.map(x=>x.label+' raw '+(x.v/10).toFixed(1)+'%%').join(' | '):spectral;draw();}function rebuildLegend(){legend.innerHTML='';baseTrack.tones.forEach((tone,toneIdx)=>{const b=document.createElement('button');b.textContent=tone.label;b.style.borderColor=merged?mergePalette.a:palette[toneIdx%%palette.length];if(!enabled.has(tone.key))b.classList.add('off');b.onclick=()=>{if(enabled.has(tone.key))enabled.delete(tone.key);else enabled.add(tone.key);rebuildLegend();updateCursor(cursorIndex);};legend.appendChild(b);});if(merged){const key=document.createElement('div');key.className='hint';key.textContent=sharedSpectrogram?`${baseTrack.label} and ${otherTrack.label} share the spectrogram; tone overlays stay split orange/teal`:`${baseTrack.label} = orange, ${otherTrack.label} = teal`;legend.appendChild(key);}}canvas.addEventListener('mousemove',ev=>{const r=canvas.getBoundingClientRect();const x=(ev.clientX-r.left)*(canvas.width/r.width);const left=64;const plotW=canvas.width-left-20;updateCursor(Math.round(((x-left)/plotW)*(baseTrack.envelope.length-1)));});canvas.addEventListener('click',ev=>{const r=canvas.getBoundingClientRect();const x=(ev.clientX-r.left)*(canvas.width/r.width);const sample=((x-64)/(canvas.width-84))*baseTrack.totalSamples;let best=null;allEvents().forEach((e,rowIdx)=>{const end=e.start+Math.max(e.duration,baseTrack.windowSamples);if(sample>=e.start&&sample<=end)best=rowIdx;});if(best!==null){tbody.querySelectorAll('tr')[best]?.scrollIntoView({block:'center'});}});specBoostInput.addEventListener('input',()=>updateCursor(cursorIndex));specGammaInput.addEventListener('input',()=>updateCursor(cursorIndex));toneBoostInput.addEventListener('input',()=>updateCursor(cursorIndex));allEvents().forEach(ev=>{const tr=document.createElement('tr');const prefix=merged&&ev.trackLabel?`[${ev.trackLabel}] `:'';tr.innerHTML=`<td>${(ev.start*1000/baseTrack.sampleRate).toFixed(1)} ms<br>sample ${ev.start}</td><td>${(ev.duration*1000/baseTrack.sampleRate).toFixed(1)} ms</td><td>${ev.protocol}</td><td>${prefix}${ev.summary}</td><td>${ev.detailHtml||ev.detail||''}</td>`;if(ev.protocol==='Diagnostic')tr.className='diagnostic';const raw=document.createElement('details');const rawLabel=document.createElement('summary');rawLabel.textContent='Raw evidence';const rawText=document.createElement('pre');rawText.textContent=ev.detail||'No additional evidence';raw.appendChild(rawLabel);raw.appendChild(rawText);tr.querySelector('td:last-child').appendChild(raw);raw.addEventListener('click',e=>e.stopPropagation());tr.onclick=()=>updateCursor(Math.round(ev.start/baseTrack.windowSamples));tbody.appendChild(tr);});rebuildLegend();updateCursor(0);}\n"
             "function initViewer(){const root=document.getElementById('tracks');if(data.tracks.length<=1){renderTrack(data.tracks[0],root);return;}root.innerHTML='';const shell=document.createElement('div');shell.className='card';shell.innerHTML='<div class=\"track-title\"><h2>View Selector</h2><div class=\"hint\">Choose Left, Right, Merged, or Split</div></div><div class=\"hint selector-copy\"></div><div class=\"modebar\"></div><div class=\"swatches merge-key\"></div><div class=\"track-mount\"></div>';root.appendChild(shell);const modebar=shell.querySelector('.modebar');const selectorCopy=shell.querySelector('.selector-copy');const mergeKey=shell.querySelector('.merge-key');const mount=shell.querySelector('.track-mount');const views=[{button:'L',hint:data.tracks[0].label,track:data.tracks[0]},{button:'R',hint:data.tracks[1].label,track:data.tracks[1]},{button:'Merged',hint:`Overlay ${data.tracks[0].label} and ${data.tracks[1].label}`,track:mergedTrack(data.tracks[0],data.tracks[1],'overlay','Merged')},{button:'Split',hint:`Shared spectrogram with split ${data.tracks[0].label}/${data.tracks[1].label} tones`,track:mergedTrack(data.tracks[0],data.tracks[1],'shared','Merged Split') }];function setView(idx){modebar.querySelectorAll('button').forEach((x,i)=>x.classList.toggle('active',i===idx));const view=views[idx];selectorCopy.textContent=view.hint;mergeKey.innerHTML=idx>=2?`<span class=\"swatch\"><i style=\"background:${mergePalette.a}\"></i>${data.tracks[0].label}</span><span class=\"swatch\"><i style=\"background:${mergePalette.b}\"></i>${data.tracks[1].label}</span>`:'';renderTrack(view.track,mount);}views.forEach((view,idx)=>{const b=document.createElement('button');b.textContent=view.button;b.title=view.hint;b.onclick=()=>setView(idx);modebar.appendChild(b);});setView(0);}\n"
             "initViewer();\n"
             "</script>\n"
@@ -7207,6 +7231,15 @@ static bool v34_replay_upstream_from_phase4(const int16_t *samples,
                                    rx_mp->mp.use_non_linear_encoder,
                                    rx_mp->mp.expanded_shaping,
                                    rx_mp->mp.type ? coeffs : NULL) == 0) {
+                    /* V.90 9.4.1.6: once the recorded downstream MP has
+                     * supplied the receive parameters, this replay watches
+                     * the upstream E -> B1 handoff. The live seeding API
+                     * selects the project-owned CP framer, whose callback
+                     * is not installed in this offline MP/E replay. Keep
+                     * the trained front end and use the existing E watcher;
+                     * otherwise a CP preamble calls a null bit sink. */
+                    if (v34->rx.stage == V34_RX_STAGE_V90_CP)
+                        v34->rx.stage = V34_RX_STAGE_PHASE4_MP;
                     seeded_mp = true;
                 }
             } else if (offset + chunk > rx_mp->start_sample) {
@@ -16382,6 +16415,20 @@ static void v90_probe_downstream_post_mp(
             }
         }
         dist[i] = best;
+    }
+    /* Preserve the actual post-MP equalizer output for independent B1d
+     * acquisition. A data constellation can share the CPt levels, so a
+     * missing amplitude-change boundary is not evidence of absent data
+     * (V.90 9.4.1.5). This export adds no inferred boundary or payload. */
+    if (getenv("VPCM_V90_POST_MP_LEVELS_CSV")) {
+        FILE *csv = fopen(getenv("VPCM_V90_POST_MP_LEVELS_CSV"), "w");
+        if (csv) {
+            fprintf(csv, "sample,signed_level,cpt_distance\n");
+            for (int i = 0; i < deconv_count; i++)
+                fprintf(csv, "%d,%.12g,%.12g\n",
+                        window_start + i, value[i], dist[i]);
+            fclose(csv);
+        }
     }
     {
         double window_sum = 0.0;
@@ -31132,7 +31179,9 @@ static void collect_v34_events(call_log_t *log,
                                bool suppress_v90_phase2,
                                bool suppress_phase12_early_events,
                                int toneq_sample,
-                               int toneq_duration_samples)
+                               int toneq_duration_samples,
+                               const decode_v34_result_t *resolved_answerer,
+                               const decode_v34_result_t *resolved_caller)
 {
     decode_v34_result_t answerer;
     decode_v34_result_t caller;
@@ -31157,15 +31206,10 @@ static void collect_v34_events(call_log_t *log,
         } \
     } while (0)
 
-    v34_phase2_decode_pair(&g_v34_phase2_engine,
-                           samples,
-                           total_samples,
-                           law,
-                           !suppress_v90_phase2,
-                           &answerer,
-                           &have_answerer,
-                           &caller,
-                           &have_caller);
+    have_answerer = resolved_answerer != NULL;
+    have_caller = resolved_caller != NULL;
+    if (have_answerer) answerer = *resolved_answerer;
+    if (have_caller) caller = *resolved_caller;
 
     if (have_answerer && have_caller) {
         if (v34_phase2_result_spec_score(&answerer) >= v34_phase2_result_spec_score(&caller)) {
@@ -31464,7 +31508,7 @@ static void collect_v34_events(call_log_t *log,
         APPEND_V34_STAGE_EVENT(res__, rx_phase4_trn_sample, "Far-end Phase 4 SCR/TRN", "rx_stage=phase4_trn"); \
         if (res__->phase4_ready_seen) { \
             snprintf(detail, sizeof(detail), "role=%s event=%s (%d)", role_name, v34_event_to_str_local(res__->final_rx_event), res__->final_rx_event); \
-            call_log_append(log, res__->phase4_ready_sample, 0, "V.90/V.92", "Phase 4 training ready", detail); \
+            call_log_append(log, res__->phase4_ready_sample, 0, res__->plain_v34_mode ? "V.34" : "V.90/V.92", "Phase 4 training ready", detail); \
         } \
         if (res__->phase4_seen) { \
             snprintf(detail, sizeof(detail), "role=%s rx=%s(%d) tx=%s(%d)", \
@@ -31474,7 +31518,7 @@ static void collect_v34_events(call_log_t *log,
                      v34_tx_stage_to_str_local(res__->final_tx_stage), \
                      res__->final_tx_stage); \
             append_v34_mp_detail_fields(detail, sizeof(detail), res__); \
-            call_log_append(log, res__->phase4_sample, 0, "V.90/V.92", "Phase 4 / MP reached", detail); \
+            call_log_append(log, res__->phase4_sample, 0, res__->plain_v34_mode ? "V.34" : "V.90/V.92", "Phase 4 / MP reached", detail); \
         } \
     } while (0)
 
@@ -37185,6 +37229,12 @@ static void phase12_apply_stereo_short_p1_hint(phase12_result_t *p12,
                                                const phase12_stereo_short_p1_hint_t *hint,
                                                bool is_left);
 
+static void collect_legacy_event(void *user, int sample, const char *protocol,
+                                 const char *summary, const char *detail)
+{
+    call_log_append((call_log_t *) user, sample, 0, protocol, summary, detail);
+}
+
 static void collect_stream_call_log(call_log_t *log,
                                     const int16_t *linear_samples,
                                     const uint8_t *g711_codewords,
@@ -37196,71 +37246,62 @@ static void collect_stream_call_log(call_log_t *log,
                                     bool do_v34,
                                     bool do_v8,
                                     bool do_v91,
-                                    bool do_v90)
+                                    bool do_v90,
+                                    bool do_x2,
+                                    bool do_flex,
+                                    const stereo_decode_context_t *ctx)
 {
     decode_v34_result_t answerer;
     decode_v34_result_t caller;
     phase12_result_t phase12;
-    v8_probe_result_t capability_probe;
     bool have_answerer = false;
     bool have_caller = false;
-    bool have_capability_probe = false;
     bool have_phase12 = false;
     bool suppress_v90_phase2 = false;
-    bool have_phase12_capability = false;
     int earliest_phase2_sample = -1;
 
     if (!log || !linear_samples || !g711_codewords)
         return;
 
+    /* Borrow Stage A's result: it owns any Phase 1/2 allocations.  In
+     * particular, keep the cross-channel timing/MP recovery performed by
+     * stereo_resolve_cross_channel(), instead of rerunning a local probe. */
     phase12_result_init(&phase12);
-    phase12_apply_stereo_short_p1_hint(&phase12, stereo_hint, is_left_channel);
-
-    if (do_v8 || do_v34 || do_v90) {
-        have_phase12 = phase12_decode_with_codewords(linear_samples,
-                                                     g711_codewords,
-                                                     total_samples,
-                                                     total_codewords,
-                                                     law,
-                                                     8000,
-                                                     0,
-                                                     &phase12);
-        if (have_phase12) {
-            phase12_merge_to_call_log(&phase12, log, 8000);
-            have_phase12_capability = phase12.cm.detected || phase12.jm.detected
-                                      || phase12.info0.detected || phase12.info1.detected;
-            if (have_phase12_capability)
-                suppress_v90_phase2 = !(phase12.pcm_modem_capable || phase12.v90_capable || phase12.v92_capable);
-            if (phase12.info0.detected)
-                earliest_phase2_sample = first_non_negative(earliest_phase2_sample, phase12.info0.sample_offset);
-            if (phase12.info1.detected)
-                earliest_phase2_sample = first_non_negative(earliest_phase2_sample, phase12.info1.sample_offset);
-        }
+    if (ctx) {
+        have_phase12 = is_left_channel ? ctx->left_p12_valid : ctx->right_p12_valid;
+        if (have_phase12)
+            phase12 = is_left_channel ? ctx->left_p12 : ctx->right_p12;
+        suppress_v90_phase2 = is_left_channel ? ctx->left_suppress_v90_phase2
+                                             : ctx->right_suppress_v90_phase2;
+        have_answerer = is_left_channel ? ctx->left_answerer_valid : ctx->right_answerer_valid;
+        have_caller = is_left_channel ? ctx->left_caller_valid : ctx->right_caller_valid;
+        if (have_answerer)
+            answerer = is_left_channel ? ctx->left_answerer : ctx->right_answerer;
+        if (have_caller)
+            caller = is_left_channel ? ctx->left_caller : ctx->right_caller;
+    }
+    if (have_phase12) {
+        phase12_merge_to_call_log(&phase12, log, 8000);
+        if (phase12.info0.detected)
+            earliest_phase2_sample = first_non_negative(earliest_phase2_sample, phase12.info0.sample_offset);
+        if (phase12.info1.detected)
+            earliest_phase2_sample = first_non_negative(earliest_phase2_sample, phase12.info1.sample_offset);
+    }
+    if (stereo_hint && ctx && ctx->roles_assigned) {
+        char detail[256];
+        snprintf(detail, sizeof(detail),
+                 "source=stereo_resolved channel=%s inferred_side=%s u_info=%d u_info_source=%s",
+                 is_left_channel ? "left" : "right",
+                 ctx->digital_channel == (is_left_channel ? 0 : 1) ? "digital" : "analogue",
+                 ctx->cross_u_info_valid ? ctx->cross_u_info : -1,
+                 ctx->cross_u_info_valid ? (ctx->cross_u_info_source == 0 ? "left" : "right") : "unknown");
+        call_log_append(log, 0, 0, "Diagnostic", "Stereo role / U_INFO evidence", detail);
     }
 
     if (have_phase12)
         emit_phase12_side_evidence(log, &phase12);
 
-    if (!have_phase12_capability) {
-        have_capability_probe = get_cached_v8_channel_probe(linear_samples,
-                                                            total_samples,
-                                                            total_samples,
-                                                            &capability_probe);
-        suppress_v90_phase2 = have_capability_probe && !v8_probe_allows_v90_v92_digital(&capability_probe);
-    }
-    if (getenv("VPCM_FORCE_V90"))
-        suppress_v90_phase2 = false;
-
     if (do_v34 || do_v90) {
-        v34_phase2_decode_pair_cached(&g_v34_phase2_engine,
-                                      linear_samples,
-                                      total_samples,
-                                      law,
-                                      !suppress_v90_phase2,
-                                      &answerer,
-                                      &have_answerer,
-                                      &caller,
-                                      &have_caller);
         if (have_answerer)
             emit_v34_side_candidate_evidence(log, "answerer", &answerer);
         if (have_caller)
@@ -37291,7 +37332,9 @@ static void collect_stream_call_log(call_log_t *log,
                            (have_phase12 && phase12.call_init.v92_toneq_seen)
                                ? phase12.call_init.v92_toneq_sample : -1,
                            (have_phase12 && phase12.call_init.v92_toneq_seen)
-                               ? phase12.call_init.v92_toneq_duration_samples : 0);
+                               ? phase12.call_init.v92_toneq_duration_samples : 0,
+                           have_answerer ? &answerer : NULL,
+                           have_caller ? &caller : NULL);
     if (do_v8 && !have_phase12) {
         v8bis_collect_signal_events(log, linear_samples, total_samples, earliest_phase2_sample);
         v8bis_collect_msg_events(log, linear_samples, total_samples, earliest_phase2_sample);
@@ -37449,11 +37492,22 @@ static void collect_stream_call_log(call_log_t *log,
     }
     } /* end v34_has_phase3 check block */
 
+    if (do_x2 && legacy_pcm_decode_x2(linear_samples, (size_t) total_samples,
+                                      collect_legacy_event, log))
+        call_log_append(log, 0, 0, "Diagnostic", "x2 decoder unavailable", "source=legacy_pcm_decode reason=allocation_or_input");
+    if (do_flex) {
+        if (!do_v8) {
+            v8bis_collect_signal_events(log, linear_samples, total_samples, -1);
+            v8bis_collect_msg_events(log, linear_samples, total_samples, -1);
+        }
+        if (legacy_pcm_decode_flex(linear_samples, (size_t) total_samples,
+                                   law == V91_LAW_ALAW, collect_legacy_event, log))
+            call_log_append(log, 0, 0, "Diagnostic", "K56flex decoder unavailable", "source=legacy_pcm_decode reason=allocation_or_input");
+    }
     call_log_sort(log);
     call_log_prune_v8_after_phase2(log);
     call_log_dedupe_same_signal(log);
     call_log_sort(log);
-    phase12_result_reset(&phase12);
 }
 
 static void call_log_merge_with_channel(call_log_t *dst,
@@ -40839,6 +40893,8 @@ typedef struct {
     bool do_v8;
     bool do_v91;
     bool do_v90;
+    bool do_x2;
+    bool do_flex;
     bool do_p3;
     bool do_energy;
     bool do_tone_probe;
@@ -42695,7 +42751,8 @@ static void run_decode_stage_b(const char *label,
                                const phase12_stereo_short_p1_hint_t *stereo_hint,
                                bool is_left_channel,
                                const decode_options_t *opts,
-                               const stereo_decode_context_t *ctx)
+                               const stereo_decode_context_t *ctx,
+                               call_log_t *retained_log)
 {
     if (!linear_samples || !g711_codewords || !opts)
         return;
@@ -42876,10 +42933,11 @@ static void run_decode_stage_b(const char *label,
     }
 
     if (opts->do_call_log) {
-        call_log_t log;
-        call_log_init(&log);
+        call_log_t local_log;
+        call_log_t *log = retained_log ? retained_log : &local_log;
+        call_log_init(log);
 
-        collect_stream_call_log(&log,
+        collect_stream_call_log(log,
                                 linear_samples,
                                 g711_codewords,
                                 total_samples,
@@ -42890,9 +42948,9 @@ static void run_decode_stage_b(const char *label,
                                 opts->do_v34,
                                 opts->do_v8,
                                 opts->do_v91,
-                                opts->do_v90);
-        print_call_log(label, &log, total_samples, sample_rate);
-        call_log_reset(&log);
+                                opts->do_v90, opts->do_x2, opts->do_flex, ctx);
+        print_call_log(label, log, total_samples, sample_rate);
+        if (!retained_log) call_log_reset(log);
     }
 }
 
@@ -42909,7 +42967,8 @@ static void run_decode_suite(const char *label,
                              const decode_options_t *opts,
                              const codeword_stream_info_t *codeword_info,
                              int expected_rate_1,
-                             int expected_rate_2)
+                             int expected_rate_2,
+                             call_log_t *retained_log)
 {
     stereo_decode_context_t ctx;
     stereo_decode_context_init(&ctx);
@@ -42920,7 +42979,7 @@ static void run_decode_suite(const char *label,
     stereo_resolve_cross_channel(&ctx, NULL, NULL, 0);
     run_decode_stage_b(label, linear_samples, g711_codewords,
                        total_samples, total_codewords, sample_rate, law,
-                       stereo_hint, is_left_channel, opts, &ctx);
+                       stereo_hint, is_left_channel, opts, &ctx, retained_log);
     /* Clean up context-owned Phase 1/2 results */
     if (ctx.left_p12_valid) phase12_result_reset(&ctx.left_p12);
     if (ctx.right_p12_valid) phase12_result_reset(&ctx.right_p12);
@@ -43389,6 +43448,8 @@ int main(int argc, char **argv)
     bool do_v8 = false;
     bool do_v91 = false;
     bool do_v90 = false;
+    bool do_x2 = false;
+    bool do_flex = false;
     bool do_energy = false;
     bool do_tone_probe = false;
     bool do_stats = false;
@@ -43435,6 +43496,12 @@ int main(int argc, char **argv)
             explicit_decode_output = true;
         } else if (strcmp(argv[i], "--v90") == 0) {
             do_v90 = true;
+            explicit_decode_output = true;
+        } else if (strcmp(argv[i], "--x2") == 0) {
+            do_x2 = do_call_log = true;
+            explicit_decode_output = true;
+        } else if (strcmp(argv[i], "--k56flex") == 0) {
+            do_flex = do_call_log = true;
             explicit_decode_output = true;
         } else if (strcmp(argv[i], "--p3") == 0) {
             do_p3 = true;
@@ -43494,6 +43561,8 @@ int main(int argc, char **argv)
                    "  --v8               Decode V.8 negotiation\n"
                    "  --v91              Decode V.91 signals (INFO, CP, DIL, Ez, etc.)\n"
                    "  --v90              Decode V.90 signals (Sd, CP, etc.)\n"
+                   "  --x2               Decode x2 peer INFO0/marker and qualified MP/E\n"
+                   "  --k56flex          Decode K56flex downstream training/parameter evidence\n"
                    "  --p3               Lightweight Phase 3 demodulator scan\n"
                    "  --p3-symbol-export CSV\n"
                    "                     Export one configured P3 receiver pass to CSV\n"
@@ -43506,7 +43575,7 @@ int main(int argc, char **argv)
                    "                     structural report on analog recordings)\n"
                    "  --call-log         Print a best-effort chronological call log\n"
                    "  --emit-dil PREFIX  Write descriptor bits, summary, and generated DIL CSV\n"
-                   "  --visualize-html   Export a self-contained HTML audio/tone viewer\n"
+                   "  --visualize-html HTML  Export a self-contained HTML audio/tone viewer\n"
                    "  --all              Enable all decoders (default)\n"
                    "  --verbose / -v     Enable [p12] debug output to stderr\n"
                    "\nWAV files should be 8000 Hz, 16-bit (mono or stereo).\n"
@@ -43529,21 +43598,22 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (!do_v34 && !do_v8 && !do_v91 && !do_v90 && !do_p3 && !do_energy && !do_tone_probe && !do_stats && !do_call_log && !do_visualize_html && !do_phase12 && !do_dil_scan)
+    if (!do_v34 && !do_v8 && !do_v91 && !do_v90 && !do_x2 && !do_flex && !do_p3 && !do_energy && !do_tone_probe && !do_stats && !do_call_log && !do_visualize_html && !do_phase12 && !do_dil_scan)
         do_all = true;
 
     if (do_all) {
-        do_v34 = do_v8 = do_v91 = do_v90 = do_p3 = do_energy = do_stats = do_call_log = true;
+        do_v34 = do_v8 = do_v91 = do_v90 = do_x2 = do_flex = do_p3 = do_energy = do_stats = do_call_log = true;
     }
 
     if (do_visualize_html)
         do_call_log = true;
 
     if (do_call_log) {
-        if (!do_v34 && !do_v8 && !do_v91 && !do_v90) {
+        if (!do_v34 && !do_v8 && !do_v91 && !do_v90 && !do_x2 && !do_flex) {
             do_v34 = true;
             do_v91 = true;
             do_v90 = true;
+            do_x2 = do_flex = true;
             /* V.8 helps establish caller/answerer orientation; include it
                when we are auto-selecting all decoders. */
             do_v8 = true;
@@ -43709,6 +43779,8 @@ int main(int argc, char **argv)
         int expected_rate_1 = -1;
         int expected_rate_2 = -1;
         phase12_stereo_short_p1_hint_t stereo_hint;
+        call_log_t report_logs[2];
+        memset(report_logs, 0, sizeof(report_logs));
 
         memset(&stereo_hint, 0, sizeof(stereo_hint));
         printf("File: %s\n", input_path);
@@ -43726,6 +43798,8 @@ int main(int argc, char **argv)
         opts.do_v8 = do_v8;
         opts.do_v91 = do_v91;
         opts.do_v90 = do_v90;
+        opts.do_x2 = do_x2;
+        opts.do_flex = do_flex;
         opts.do_p3 = do_p3;
         opts.do_energy = do_energy;
         opts.do_tone_probe = do_tone_probe;
@@ -43797,56 +43871,24 @@ int main(int argc, char **argv)
                 /* Stage B: V.90 decode using cross-channel info */
                 run_decode_stage_b("Left", left_linear_samples, left_g711_codewords,
                                    total_samples, total_codewords, sample_rate, law,
-                                   &stereo_hint, true, &opts, &stereo_ctx);
+                                   &stereo_hint, true, &opts, &stereo_ctx, &report_logs[0]);
                 run_decode_stage_b("Right", right_linear_samples, right_g711_codewords,
                                    total_samples, total_codewords, sample_rate, law,
-                                   &stereo_hint, false, &opts, &stereo_ctx);
+                                   &stereo_hint, false, &opts, &stereo_ctx, &report_logs[1]);
 
                 /* Clean up context-owned Phase 1/2 results */
                 if (stereo_ctx.left_p12_valid) phase12_result_reset(&stereo_ctx.left_p12);
                 if (stereo_ctx.right_p12_valid) phase12_result_reset(&stereo_ctx.right_p12);
             }
             if (opts.do_call_log) {
-                call_log_t left_log;
-                call_log_t right_log;
                 call_log_t combined_log;
-
-                call_log_init(&left_log);
-                call_log_init(&right_log);
                 call_log_init(&combined_log);
-
-                collect_stream_call_log(&left_log,
-                                        left_linear_samples,
-                                        left_g711_codewords,
-                                        total_samples,
-                                        total_codewords,
-                                        law,
-                                        &stereo_hint,
-                                        true,
-                                        opts.do_v34,
-                                        opts.do_v8,
-                                        opts.do_v91,
-                                        opts.do_v90);
-                collect_stream_call_log(&right_log,
-                                        right_linear_samples,
-                                        right_g711_codewords,
-                                        total_samples,
-                                        total_codewords,
-                                        law,
-                                        &stereo_hint,
-                                        false,
-                                        opts.do_v34,
-                                        opts.do_v8,
-                                        opts.do_v91,
-                                        opts.do_v90);
-                call_log_merge_with_channel(&combined_log, &left_log, "left");
-                call_log_merge_with_channel(&combined_log, &right_log, "right");
+                call_log_merge_with_channel(&combined_log, &report_logs[0], "left");
+                call_log_merge_with_channel(&combined_log, &report_logs[1], "right");
                 call_log_sort(&combined_log);
                 v8bis_dedup_msgs(&combined_log);
                 print_call_log("Stereo Combined", &combined_log, total_samples, sample_rate);
 
-                call_log_reset(&left_log);
-                call_log_reset(&right_log);
                 call_log_reset(&combined_log);
             }
         } else {
@@ -43856,11 +43898,10 @@ int main(int argc, char **argv)
                              linear_samples, g711_codewords,
                              total_samples, total_codewords, sample_rate, law,
                              NULL, false, &opts, &codeword_info,
-                             expected_rate_1, expected_rate_2);
+                             expected_rate_1, expected_rate_2, &report_logs[0]);
         }
 
         if (do_visualize_html) {
-            call_log_t viz_logs[2];
             audio_visualization_t viz_data[2];
             const char *viz_labels[2];
             const call_log_t *viz_log_ptrs[2];
@@ -43869,40 +43910,13 @@ int main(int argc, char **argv)
             int viz_track_count = 0;
             bool wrote_html = false;
 
-            memset(viz_logs, 0, sizeof(viz_logs));
             memset(viz_data, 0, sizeof(viz_data));
 
             if (left_linear_samples && right_linear_samples && left_g711_codewords && right_g711_codewords) {
-                call_log_init(&viz_logs[0]);
-                call_log_init(&viz_logs[1]);
-                collect_stream_call_log(&viz_logs[0],
-                                        left_linear_samples,
-                                        left_g711_codewords,
-                                        total_samples,
-                                        total_codewords,
-                                        law,
-                                        &stereo_hint,
-                                        true,
-                                        opts.do_v34,
-                                        opts.do_v8,
-                                        opts.do_v91,
-                                        opts.do_v90);
-                collect_stream_call_log(&viz_logs[1],
-                                        right_linear_samples,
-                                        right_g711_codewords,
-                                        total_samples,
-                                        total_codewords,
-                                        law,
-                                        &stereo_hint,
-                                        false,
-                                        opts.do_v34,
-                                        opts.do_v8,
-                                        opts.do_v91,
-                                        opts.do_v90);
                 viz_labels[0] = gough_lui_caller_view ? "Caller RX (L)" : "Left (L)";
                 viz_labels[1] = gough_lui_caller_view ? "Caller TX (R)" : "Right (R)";
-                viz_log_ptrs[0] = &viz_logs[0];
-                viz_log_ptrs[1] = &viz_logs[1];
+                viz_log_ptrs[0] = &report_logs[0];
+                viz_log_ptrs[1] = &report_logs[1];
                 viz_track_count = 2;
                 if (!build_audio_visualization(&viz_data[0], left_linear_samples, total_samples, sample_rate)
                     || !build_audio_visualization(&viz_data[1], right_linear_samples, total_samples, sample_rate)) {
@@ -43912,23 +43926,10 @@ int main(int argc, char **argv)
                     viz_data_ptrs[1] = &viz_data[1];
                 }
             } else {
-                call_log_init(&viz_logs[0]);
-                collect_stream_call_log(&viz_logs[0],
-                                        linear_samples,
-                                        g711_codewords,
-                                        total_samples,
-                                        total_codewords,
-                                        law,
-                                        NULL,
-                                        false,
-                                        opts.do_v34,
-                                        opts.do_v8,
-                                        opts.do_v91,
-                                        opts.do_v90);
                 viz_labels[0] = channel == CH_LEFT ? "Left (L)"
                                 : channel == CH_RIGHT ? "Right (R)"
                                 : "Mono";
-                viz_log_ptrs[0] = &viz_logs[0];
+                viz_log_ptrs[0] = &report_logs[0];
                 viz_track_count = build_audio_visualization(&viz_data[0], linear_samples, total_samples, sample_rate) ? 1 : 0;
                 if (viz_track_count == 1)
                     viz_data_ptrs[0] = &viz_data[0];
@@ -43949,9 +43950,10 @@ int main(int argc, char **argv)
 
             for (int i = 0; i < 2; i++) {
                 audio_visualization_reset(&viz_data[i]);
-                call_log_reset(&viz_logs[i]);
             }
         }
+        for (int i = 0; i < 2; i++)
+            call_log_reset(&report_logs[i]);
     }
 
     free(linear_samples);

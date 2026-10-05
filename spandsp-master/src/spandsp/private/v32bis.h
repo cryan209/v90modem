@@ -220,6 +220,18 @@ struct v32bis_state_s
     int startup_selected_rate;
     bool startup_complete;
 
+    /* ITU-T V.32bis clause 7 retrain.  The tone phases schedule transmit
+       symbols off received sample instants, so a retrain taken from data mode
+       needs both clocks as they stand on the line: every sample handed to
+       v32bis_tx() and v32bis_rx() since v32bis_restart(). */
+    int64_t tx_line_samples;
+    int64_t rx_line_samples;
+    /* Samples for which the far end's retrain tone (7.1: 600 or 3000 Hz;
+       7.2: 1800 Hz) has been continuously present in data mode. */
+    int retrain_tone_run;
+    int retrain_count;
+    bool retrain_pending;
+
     /*! \brief Error and flow logging control */
     logging_state_t logging;
 };

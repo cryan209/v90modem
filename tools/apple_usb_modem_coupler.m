@@ -1001,8 +1001,14 @@ int main(int argc, char **argv)
         fprintf(stderr, "[APPLE] dialling %s, %d DTMF segments at %.0f/%.0f ms\n",
                 g_dial, tx_nseg, on_ms, off_ms);
 
-    for (double t = 0; t < hold && !g_stop; t += 0.25)
-        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.25, false);
+    /* The run loop is also where the DTE's bytes enter the engine: nothing in
+       the audio callbacks does it, and without me_pump_dte() the modem
+       connects and transmits idle marks for the whole call (the HSF coupler
+       did exactly that on every call it placed). */
+    for (double t = 0; t < hold && !g_stop; t += 0.01) {
+        (void)me_pump_dte();
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, false);
+    }
 
     AudioOutputUnitStop(au);
     AudioUnitUninitialize(au);

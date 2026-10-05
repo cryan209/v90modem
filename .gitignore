@@ -194,3 +194,5 @@ v92_tone_a_test
 /v90_engine_peer
 /audio_sock_modem
 /slm_bridge
+
+/legacy_pcm_decode_test

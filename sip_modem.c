@@ -1337,8 +1337,6 @@ int main(int argc, char *argv[])
     /* ── Main event loop ─────────────────────────────────────────── */
     while (g_running) {
         me_state_t state_now;
-        uint8_t dte_buf[256];
-        int dte_len;
 
         /* Poll for PJSIP events (10 ms tick) */
         pjsua_handle_events(10);
@@ -1346,26 +1344,7 @@ int main(int argc, char *argv[])
         /* Move online serial payload into the modem engine.  The PTY reader
          * owns AT/escape handling; only bytes exposed by di_read_data() are
          * connection payload. */
-        /* Take no more than the engine can accept: a byte read here and then
-         * refused is lost, while one left in the interface ring holds the
-         * DTE back through the pty. */
-        while (1) {
-            int room = me_put_space();
-
-            if (room <= 0)
-                break;
-            dte_len = di_read_data(dte_buf, room < (int) sizeof(dte_buf)
-                                            ? room : (int) sizeof(dte_buf));
-            if (dte_len <= 0)
-                break;
-            int accepted = me_put_data(dte_buf, dte_len);
-
-            if (accepted != dte_len) {
-                PJ_LOG(2, ("sip_modem", "DTE TX ring overrun: accepted %d/%d bytes",
-                           accepted, dte_len));
-                break;
-            }
-        }
+        (void) me_pump_dte();
 
         state_now = me_get_state();
         if (state_now != g_last_logged_me_state) {

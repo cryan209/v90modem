@@ -37,10 +37,9 @@ int main(int argc,char **argv) {
   if(count==0){ if(call)me_dial("closed-loop"); me_on_sip_connected(); }
   int n=header[0]|header[1]<<8; if(!n||n>4096)return 3;
   if(fread(rx,1,n,stdin)!=(size_t)n)return 3;
-  /* DTE payload into the engine, as sip_modem.c's main loop does it. */
-  for(;;){uint8_t dte[256]; int room=me_put_space(); if(room<=0)break;
-  int k=di_read_data(dte,room<(int)sizeof dte?room:(int)sizeof dte); if(k<=0)break;
-  if(me_put_data(dte,k)!=k)break;}
+  /* DTE payload into the engine, through the same helper sip_modem.c and the
+     couplers use, so engine_pair_test covers it. */
+  (void)me_pump_dte();
   me_rx_g711(rx,n); (void)me_tx_g711(tx,n); me_flush_g711_taps();
   if(fwrite(tx,1,n,output)!=(size_t)n || fflush(output))return 3;
   count+=n;

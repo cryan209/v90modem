@@ -216,3 +216,56 @@ out) with `ME_K56FLEX=probe` and `ME_G711_CAPTURE`. The log shows whether it
 answers our CRe and what its MS holds. Whether it reacts to the probes at all
 is visible in the capture, and would be the first on-wire evidence for the
 gate signals.
+
+## Offline call evidence
+
+`vpcm_decode --k56flex --visualize-html flex.html recording.wav` runs the
+existing linear-audio client without upstream gate callbacks and includes
+the generic V.8bis scan. P1 acquisition and checksum-valid parameter records
+are emitted as receive evidence; model stages, report assumptions and failures
+are diagnostic rows. No payload bits are exported. The bundled 48k recording
+acquires P1 but yields no valid parameter record with the current model. See
+`docs/html_call_export.md` for limitations and validation.
+
+
+### Gough Lui parameter recovery experiment, 5 October 2026
+
+The normal exporter above still stops before parameters. An independent offline
+FIR fit to known parameter training, followed by nearest **whole-block** probe
+decisions, recovers repeated CRC-valid initial and final parameter records from
+the bundled call: `03f1 8fff 0000 0000 0000 0000 0000 0000 0000` and the same
+with `83f1` first. Two equalizer lengths reproduce these records; an independent
+bit-level parser verifies their separators and CRCs (12 and 31 valid records).
+This uses the PARAM_B pacing hypothesis, not a decoded upstream report.
+
+The current firmware-derived rate interpretation reads field 15 as 60000 bit/s,
+which disagrees with the 48000 recording label and best payload geometry trial.
+That interpretation remains open. A longer offline equalizer yields 231 valid
+48 kbit/s PCM frames under assumed mapping/alignment, but zero CRC-valid HDLC
+frames and zero verified user bytes. These are candidate bits, not payload
+recovery. The experimental receiver is kept out of the production audio path;
+no DSP constants or live behavior changed. Measurements, scripts, raw records
+and candidate bits are in `artifacts/gough-payload-recovery-20261005/report.md`.
+
+
+The reusable offline record tool is now available:
+
+```sh
+.venv/bin/python tools/k56flex_record_recover.py \
+  gough-lui-v90-v92-modem-sounds/k56flex-48000.wav \
+  --channel L --output artifacts/flex-records
+```
+
+It requires NumPy and a C compiler, compiles only the small probe/mapper helper,
+and writes `records.json`, equalized streams and one-byte-per-bit candidate
+files. Raw records are promoted only when the same CRC-valid words repeat at
+least twice in both independent FIR fits. Pacing remains an explicit hypothesis;
+the tool assigns neither a downstream rate nor a decoded upstream report. It
+rejects the silence and x2 negative controls, and a one-bit mutation of a
+recovered record fails its independent CRC check. This is an offline parameter
+recovery tool, not a payload exporter or a live receiver.
+
+Further mapping searches found no FCS-valid payload over 806400 rate/report/start
+trials. Joint P1/PT_A fitting changes which rate wins the longest-PCM-run metric,
+so that metric cannot resolve the wire rate. The parameter field widths and
+interpretation outside the recovered MICA constructor remain open.

@@ -273,3 +273,11 @@ Production builds, recorded session/MP/E checks, B1 acquisition at 99.9%
 (17/160 samples and silence rejection), and all 402 V.34 data tests pass.
 Evidence: `../courier-emu/artifacts/x2-phase2-20261005/README.md`.
 The live harness's `--require-marker` asserts acceptance of 4D, not CONNECT.
+
+## Offline call evidence
+
+`vpcm_decode --x2 --visualize-html x2.html recording.wav` receives analogue
+INFO0/marker, repeated digital INFO0 and qualified Courier MP/E through
+`legacy_pcm_decode.c`. It emits detection positions and raw CRC evidence,
+without running a simulated transmitter dialogue. It does not decode the
+user payload. See `docs/html_call_export.md` for scope and validation.

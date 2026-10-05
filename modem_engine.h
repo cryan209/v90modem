@@ -269,6 +269,17 @@ int me_put_space(void);
 int me_put_data(const uint8_t *buf, int len);
 
 /*
+ * Move the DTE payload the PTY reader has exposed (di_read_data()) into the
+ * engine, taking no more than me_put_space() allows, so a byte the engine
+ * cannot take yet stays in the interface ring and holds the DTE back.
+ * NOTHING ELSE feeds the transmit data path: every program that hosts the
+ * engine on a PTY must call this periodically (sip_modem.c does it every
+ * 10 ms tick), or the modem trains, connects and transmits idle marks for
+ * the whole call.  Returns the number of bytes moved.
+ */
+int me_pump_dte(void);
+
+/*
  * Pull bytes destined for the application (downstream: SIP → modem → PTY).
  * Returns number of bytes copied (0 if none available).
  */

@@ -1768,6 +1768,21 @@ codec_done: ;
 				usleep((useconds_t)trickle_ms * 1000);
 			}
 		} else {
+#ifdef HSF_V90_COUPLER
+			/* The engine runs in the USB callbacks, but nothing there
+			 * moves the DTE's bytes into it: sip_modem.c does that from
+			 * its main loop, and this coupler slept here instead.  Every
+			 * call it placed therefore transmitted idle marks for the
+			 * whole of data mode -- demodulated off hsf-tx.raw, 100.0%
+			 * ones on every V.22bis call in artifacts/hsf-v90, which is
+			 * the "HSF-to-digital delivers no intact lines" result. */
+			if (g_v90_couple) {
+				for (long k = 0; k < (long)stream_secs * 100; k++) {
+					(void)me_pump_dte();
+					usleep(10 * 1000);
+				}
+			} else
+#endif
 			sleep((unsigned)stream_secs);
 		}
 

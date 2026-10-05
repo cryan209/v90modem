@@ -235,6 +235,23 @@ SPAN_DECLARE(int) v32bis_start_rate_renegotiation(v32bis_state_t *s, int bit_rat
     \return The count. */
 SPAN_DECLARE(int) v32bis_rate_renegotiation_count(v32bis_state_t *s);
 
+/*! ITU-T V.32bis clause 7: initiate a retrain during data transmission, as a
+    modem that "incorporates a means of detecting unsatisfactory signal
+    reception" may.  7.1 has the call modem turn circuit 106 OFF, clamp
+    circuit 104 and repeatedly transmit carrier state A; 7.2 has the answer
+    modem do the same and transmit alternating A and C for an even number of
+    symbol intervals not less than 128.  Each then follows 6.1/6.2 from the
+    third paragraph.  A retrain started by the far end is detected and
+    followed without any call here.
+    \param s The modem context.
+    \return 0 on success, -1 before the reactive start-up has reached data. */
+SPAN_DECLARE(int) v32bis_start_retrain(v32bis_state_t *s);
+
+/*! How many clause 7 retrains, by either end, this connection has begun.
+    \param s The modem context.
+    \return The count. */
+SPAN_DECLARE(int) v32bis_retrain_count(v32bis_state_t *s);
+
 /*! Set how many symbol intervals of ITU-T V.32bis clause 6 Note 3's optional
     echo canceller training sequence to transmit, 0 for none.
     \param s The modem context.

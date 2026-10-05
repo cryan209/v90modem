@@ -336,6 +336,7 @@ SPAN_DECLARE(int) v32bis_tx(v32bis_state_t *s, int16_t amp[], int len)
 {
     int ret;
 
+    s->tx_line_samples += len;
     if (s->reneg_cleared)
     {
         memset(amp, 0, len*sizeof(*amp));
@@ -397,6 +398,7 @@ SPAN_DECLARE(int) v32bis_rx(v32bis_state_t *s, const int16_t amp_in[], int len)
         memcpy(amp, &amp_in[off], this_len*sizeof(amp[0]));
         v32bis_echo_cancel(s, amp, this_len);
         v32bis_rx_clean(s, amp, this_len);
+        s->rx_line_samples += this_len;
     }
     /*endfor*/
     return 0;
@@ -404,8 +406,11 @@ SPAN_DECLARE(int) v32bis_rx(v32bis_state_t *s, const int16_t amp_in[], int len)
 /*- End of function --------------------------------------------------------*/
 
 static int v32bis_reneg_watch(v32bis_state_t *s, const int16_t amp[], int len);
+static int v32bis_retrain_watch(v32bis_state_t *s, const int16_t amp[], int len);
+static void v32bis_begin_retrain(v32bis_state_t *s, int64_t rx_line_sample, bool local);
 static void startup_b1_reset_vote(v32bis_state_t *s);
 static bool v32bis_rx_carrying_data(v32bis_state_t *s);
+static bool v32bis_rx_in_far_preamble(v32bis_state_t *s);
 
 static int v32bis_rx_clean(v32bis_state_t *s, const int16_t amp[], int len)
 {
@@ -422,6 +427,23 @@ static int v32bis_rx_clean(v32bis_state_t *s, const int16_t amp[], int len)
         used = v32bis_reneg_watch(s, amp, len);
         if (used >= 0)
             return v17_rx(&s->rx, &amp[used], len - used);
+    }
+    /*endif*/
+    if (s->startup_complete  &&  s->reactive_startup
+        &&  v32bis_rx_in_far_preamble(s))
+    {
+        /* 7.1/7.2: the far end's AA or AC may be a renegotiation preamble
+           (8: 56T, then the 180 degree reversal) or a retrain (more than
+           128T, no reversal).  The first 40T cannot tell them apart, so the
+           renegotiation watch has already clamped circuit 104; the tone is
+           followed on until it either breaks or outlasts any preamble. */
+        used = v32bis_retrain_watch(s, amp, len);
+        if (used >= 0)
+        {
+            v32bis_begin_retrain(s, s->rx_line_samples + used, false);
+            return v32bis_rx_clean(s, &amp[used], len - used);
+        }
+        /*endif*/
     }
     /*endif*/
     if (s->tone_phase_active)
@@ -1217,6 +1239,16 @@ static int v32bis_rx_set_rate(v32bis_state_t *s, int bit_rate);
 static bool v32bis_rx_carrying_data(v32bis_state_t *s)
 {
     return (s->startup_rx_stage == V32BIS_RX_DATA);
+}
+/*- End of function --------------------------------------------------------*/
+
+/*! Has the renegotiation watch fired on a far end tone that has not yet
+    broken into a preamble's reversal? */
+static bool v32bis_rx_in_far_preamble(v32bis_state_t *s)
+{
+    return s->startup_rx_stage == V32BIS_RX_RENEG_R
+        && s->reneg_far_preamble
+        && !s->reneg_pre_done;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -2796,7 +2828,12 @@ static void v32bis_tx_enter_phase(v32bis_state_t *s, int phase)
     the received signal's own rms, not its absolute level: at this point in
     the call the far end has been transmitting data at the same power, so an
     absolute threshold cannot separate them at all. */
-static int v32bis_reneg_watch(v32bis_state_t *s, const int16_t amp[], int len)
+/*! One received sample through the far end's tone detectors: is the far
+    end's AA (the call modem's, 1800 Hz) or AC (the answer modem's, 600 and
+    3000 Hz) on the line?  Shared by the clause 8 preamble watch and the
+    clause 7 retrain watch, which see the same tone and must not both run the
+    detectors over one sample. */
+static bool v32bis_far_tone_present(v32bis_state_t *s, int16_t x)
 {
     float mag;
     float rms;
@@ -2804,29 +2841,70 @@ static int v32bis_reneg_watch(v32bis_state_t *s, const int16_t amp[], int len)
        one. */
     const float threshold = V32BIS_RENEG_TONE_FRACTION*V32BIS_TONE_WINDOW
                           *sqrtf((s->calling_party  ?  2.0f  :  1.0f)/2.0f);
+
+    s->reneg_watch_pow += ((float) x*x - s->reneg_watch_pow)*(1.0f/64.0f);
+    if (s->calling_party)
+    {
+        /* The answer modem's preamble is alternating A and C, which is a
+           suppressed carrier pair at 1800 -/+ 1200 Hz, so each line
+           carries half the power and the two are added. */
+        v32bis_tone_det_rx(&s->tone[0], (float) x, s->rx_sample_count);
+        v32bis_tone_det_rx(&s->tone[1], (float) x, s->rx_sample_count);
+        mag = s->tone[0].mag + s->tone[1].mag;
+    }
+    else
+    {
+        v32bis_tone_det_rx(&s->tone[2], (float) x, s->rx_sample_count);
+        mag = s->tone[2].mag;
+    }
+    /*endif*/
+    s->rx_sample_count++;
+    rms = sqrtf(s->reneg_watch_pow);
+    if (rms > 1.0f  &&  mag > threshold*rms)
+    {
+        s->retrain_tone_run++;
+        return true;
+    }
+    /*endif*/
+    s->retrain_tone_run = 0;
+    return false;
+}
+/*- End of function --------------------------------------------------------*/
+
+/*! ITU-T V.32bis 7.1/7.2: "detection of one of two tones at frequencies
+    600 +/- 7 Hz and 3000 +/- 7 Hz for more than 128 symbol intervals" (call
+    modem), "a tone of frequency 1800 +/- 7 Hz for more than 128 symbol
+    intervals" (answer modem).  Those are the far end's AC and AA, which 8
+    also uses for its 56T preamble head -- so a retrain is told apart from a
+    renegotiation by duration alone.  A preamble's tone breaks at 56T, where
+    its 180 degree reversal sits in the detection window and the coherent
+    measurement dips, and then gives way to R4/R5, so it never approaches
+    128T.  Returns the index of the sample on which a retrain is declared, or
+    -1. */
+static int v32bis_retrain_watch(v32bis_state_t *s, const int16_t amp[], int len)
+{
     int i;
 
     for (i = 0;  i < len;  i++)
     {
-        s->reneg_watch_pow += ((float) amp[i]*amp[i] - s->reneg_watch_pow)*(1.0f/64.0f);
-        if (s->calling_party)
-        {
-            /* The answer modem's preamble is alternating A and C, which is a
-               suppressed carrier pair at 1800 -/+ 1200 Hz, so each line
-               carries half the power and the two are added. */
-            v32bis_tone_det_rx(&s->tone[0], (float) amp[i], s->rx_sample_count);
-            v32bis_tone_det_rx(&s->tone[1], (float) amp[i], s->rx_sample_count);
-            mag = s->tone[0].mag + s->tone[1].mag;
-        }
-        else
-        {
-            v32bis_tone_det_rx(&s->tone[2], (float) amp[i], s->rx_sample_count);
-            mag = s->tone[2].mag;
-        }
+        v32bis_far_tone_present(s, amp[i]);
+        if (s->retrain_tone_run
+                > (int) (V32BIS_RETRAIN_TONE_SYMBOLS*V32BIS_SAMPLES_PER_SYMBOL))
+            return i + 1;
         /*endif*/
-        s->rx_sample_count++;
-        rms = sqrtf(s->reneg_watch_pow);
-        if (rms > 1.0f  &&  mag > threshold*rms)
+    }
+    /*endfor*/
+    return -1;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int v32bis_reneg_watch(v32bis_state_t *s, const int16_t amp[], int len)
+{
+    int i;
+
+    for (i = 0;  i < len;  i++)
+    {
+        if (v32bis_far_tone_present(s, amp[i]))
         {
             /* The block is scanned here before v17_rx() sees any of it, so
                this is the frequency from before the data decoder was fed the

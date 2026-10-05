@@ -13763,6 +13763,31 @@ int me_put_data(const uint8_t *buf, int len)
     return dring_write(&downstream_ring, buf, len);
 }
 
+int me_pump_dte(void)
+{
+    uint8_t buf[256];
+    int moved = 0;
+
+    for (;;) {
+        int room = me_put_space();
+        int len;
+        int accepted;
+
+        if (room <= 0)
+            break;
+        len = di_read_data(buf, room < (int) sizeof(buf) ? room : (int) sizeof(buf));
+        if (len <= 0)
+            break;
+        accepted = me_put_data(buf, len);
+        moved += accepted > 0 ? accepted : 0;
+        if (accepted != len) {
+            ME_LOG("[ME] DTE TX ring overrun: accepted %d/%d bytes\n", accepted, len);
+            break;
+        }
+    }
+    return moved;
+}
+
 int me_get_data(uint8_t *buf, int max_len)
 {
     /* Downstream data: SIP → modem → application */
