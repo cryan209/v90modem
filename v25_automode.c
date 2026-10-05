@@ -110,7 +110,12 @@ static void block_done(v25_automode_rx_t *s)
         /* V.22bis 6.3.1.2.1 lets the answer modem send a guard tone with
            USB1 (1800 Hz, 6 dB down, or 550 Hz, 3 dB down), so neither counts
            against it. */
-        double data = rest - p[BIN_1800] - p[BIN_550];
+        /* Against the whole block, 2100 Hz included: ANS/ANSam is 1.5 bins
+           from 2250 Hz and leaks about 4% of its power there, so with 2100
+           Hz taken out of the denominator a clean ANSam read as USB1 -- live
+           against the RasFinder (rf-v22-v8-2), where the call modem then
+           started V.22bis into the far end's V.8 answer tone. */
+        double data = ms - p[BIN_1800] - p[BIN_550];
 
         if (data > V25AM_FLOOR_MS && p[BIN_2250] >= V25AM_LINE_FRAC*data) {
             if (++s->usb1_run >= V25AM_USB1_BLOCKS)

@@ -8117,9 +8117,39 @@ static int me_clear_start_locked(void)
     return rate;
 }
 
+/* Calling on early media, not yet answered: see me_on_sip_early_media(). */
+static bool g_awaiting_answer;
+
+void me_on_sip_early_media(void)
+{
+    pthread_mutex_lock(&g_state_mtx);
+    if (g_calling_party && g_state == ME_V8) {
+        g_awaiting_answer = true;
+        trace_phase("ringing: V.8 timeout waits for the answer");
+    }
+    pthread_mutex_unlock(&g_state_mtx);
+}
+
+void me_on_sip_answered(void)
+{
+    pthread_mutex_lock(&g_state_mtx);
+    if (g_awaiting_answer) {
+        g_awaiting_answer = false;
+        /* V.8's 15 s is for a negotiation with someone; measured from the
+           answer, not from the first ringback.  The RasFinder hunt group 3999
+           rings its ports in turn, and an answer more than 15 s in was hung up
+           mid-ring (rf-v22-v8-1, 2026-10-05). */
+        if (g_state == ME_V8)
+            g_phase_start_ms = trace_now_ms();
+        trace_phase("answered");
+    }
+    pthread_mutex_unlock(&g_state_mtx);
+}
+
 void me_on_sip_connected(void)
 {
     pthread_mutex_lock(&g_state_mtx);
+    g_awaiting_answer = false;
 
     /* AT+MS since the last call takes effect here, at the call boundary. */
     {
@@ -9392,7 +9422,10 @@ skip_8k_codewords:
     /* Check for phase timeouts */
     if (g_phase_start_ms > 0) {
         uint64_t elapsed = trace_now_ms() - g_phase_start_ms;
-        if (state == ME_V8 && elapsed > V8_TIMEOUT_MS) {
+        if (state == ME_V8
+            && elapsed > (g_awaiting_answer
+                          ? (uint64_t) parse_env_int("ME_V8_RING_TIMEOUT_MS", 60000)
+                          : (uint64_t) V8_TIMEOUT_MS)) {
             ME_LOG("[ME] V.8 negotiation timed out after %llu ms\n",
                     (unsigned long long)elapsed);
             trace_phase("V8 timeout after %llums", (unsigned long long)elapsed);

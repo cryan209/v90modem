@@ -719,6 +719,9 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e)
         /* Outgoing call answered after early media: start the engine now if
            the media is already active (see on_call_media_state). */
         on_call_media_state(call_id);
+    } else if (ci.state == PJSIP_INV_STATE_CONFIRMED) {
+        /* Already running on early media: restart V.8's clock at the answer. */
+        me_on_sip_answered();
     }
 
     if (ci.state == PJSIP_INV_STATE_DISCONNECTED) {
@@ -802,6 +805,8 @@ static void on_call_media_state(pjsua_call_id call_id)
             }
             if (!g_media_connected) {
                 me_on_sip_connected();
+                if (ci.role == PJSIP_ROLE_UAC && ci.state != PJSIP_INV_STATE_CONFIRMED)
+                    me_on_sip_early_media();
                 g_media_connected = PJ_TRUE;
                 g_last_logged_media_connected = 1;
                 log_modem_diag_snapshot("media-connected");

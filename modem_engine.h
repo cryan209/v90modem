@@ -174,6 +174,13 @@ void me_flush_io_schedule(void);
 
 /* Notify the engine that a SIP call has been connected (audio active). */
 void me_on_sip_connected(void);
+/* An outgoing call started on early media (ringback, before 200 OK): V.8's
+ * negotiation timeout waits for the answer, bounded meanwhile by a carrier-
+ * wait limit like S7 (ME_V8_RING_TIMEOUT_MS, default 60000).  Call after
+ * me_on_sip_connected(). */
+void me_on_sip_early_media(void);
+/* The far end has answered (SIP 200 OK). */
+void me_on_sip_answered(void);
 
 /*
  * Clock recovery: fed by sip_modem.c's RTP transport tap (see clock_recovery.h).

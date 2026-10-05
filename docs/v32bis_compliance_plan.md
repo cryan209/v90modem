@@ -526,6 +526,35 @@ as before.  Rows: V.8-less V.32bis caller against the V.8-less V.22bis
 answerer, both laws (USB1 lands ~1.7 s after AA, so the immediate branch;
 the Tc branch has no row).
 
+## V.22bis against the RasFinder, live (2026-10-05)
+
+First calls from this side to a foreign modem in V.22bis, dialling hunt group
+3999 from tower (`RF_EXT=3999 ME_MODE=... tools/soak/rasfinder_call.sh`).
+Kept as `artifacts/rf-v22-*` on tower and here.
+
+- **V.8 with V.22bis as the only offer** (`ME_MODE=v22`, rf-v22-v8-3):
+  `CONNECT 2400` and the BBS's banner and `login:` prompt, clean for the
+  whole 29 s hold.
+- **No V.8 at all** (`ME_MODE=v22 ME_V8=0`, rf-v22-legacy-1): the peer held
+  ANSam waiting for a CM, gave up and sent USB1 about 8 s after answering;
+  our call modem took it and connected V.22bis 2400, same banner.  This is
+  the 2250 Hz tone the RasFinder notes recorded as the peer abandoning V.8.
+
+Two defects came out of it, neither visible in loopback.
+
+- **The engine's 15 s V.8 timeout started at early media.** spandsp's V.8
+  sends CI through up to ~60 s of ringback (46544d05), but the engine hung up
+  any call not answered within 15 s -- 3999 rings its ports in turn, and the
+  first call here was dropped while still ringing (rf-v22-v8-1).  sip_modem
+  now reports early media and the answer (`me_on_sip_early_media()`,
+  `me_on_sip_answered()`): while unanswered the bound is
+  `ME_V8_RING_TIMEOUT_MS` (60000, an S7), and V.8's 15 s runs from the 200 OK.
+- **The USB1 detector fired on ANSam** (rf-v22-v8-2): 2100 Hz leaks ~4% of its
+  power into the 2250 Hz bin and was left out of the denominator, so on a
+  clean ANSam that leakage was the whole "rest" of the block.  The call modem
+  started V.22bis into the far end's V.8 answer tone, got CONNECT 1200 and a
+  stream of `U`, and lost carrier.  USB1 must now dominate the whole block.
+
 ## Against slmodemd: the first foreign V.32bis peer (2026-10-05)
 
 Everything above was measured between two copies of this modem, so a
