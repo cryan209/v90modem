@@ -122,7 +122,8 @@ SPAN_DECLARE(int) v42_set_xid_optional_functions_octets(v42_state_t *s, int octe
 /*! Set the LAP.M window sizes (k) and maximum information field lengths
     (N401, octets) this end offers in XID, per direction (V.250 +EWIND,
     +EFRAM).  Takes effect when the link is next established.
-    eturn 0, or -1 if a value is outside 1..V42_MAX_WINDOW_SIZE_K or
+    
+eturn 0, or -1 if a value is outside 1..V42_MAX_WINDOW_SIZE_K or
             1..V42_MAX_N_401 (15 and 128 here). */
 SPAN_DECLARE(int) v42_set_link_parameters(v42_state_t *s, int tx_k, int rx_k,
                                           int tx_n401, int rx_n401);
@@ -144,6 +145,11 @@ SPAN_DECLARE(int) v42_set_compression(v42_state_t *s, int p0, int p1, int p2);
  * restart. C0 must be zero: only stream method with XID negotiation is offered.
  * Values are local TX/RX proposals (V.44 7.4, Annex A, Cor.1/2002). */
 SPAN_DECLARE(int) v42_set_v44(v42_state_t *s, const v42_v44_parameters_t *parameters);
+
+/*! Offer V.44 as well as whatever V.42bis offer is configured (v42_set_v44()
+    withdraws V.42bis); the responder picks one.  \return 0, or -1 if the
+    parameters are invalid or not the stream method. */
+SPAN_DECLARE(int) v42_offer_v44(v42_state_t *s, const v42_v44_parameters_t *parameters);
 
 /*! Return the transmit bit rate currently used by the V.42 timers. */
 SPAN_DECLARE(int) v42_get_bit_rate(const v42_state_t *s);

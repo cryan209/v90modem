@@ -64,6 +64,9 @@ typedef struct {
     int ifc[2];             /* +IFC: DCE by DTE, DTE by DCE (0 none, 2 circuit) */
     int ilrr;               /* +ILRR: report the DTE rate before CONNECT */
     int msc;                /* +MSC: V.34 seamless rate change (11.6) */
+    /* 6.6.2 +DS44: direction, negotiation, capability, codewords tx/rx,
+     * string tx/rx, history tx/rx. */
+    int ds44[9];
 } v250_ctl_t;
 
 typedef enum {
@@ -114,6 +117,20 @@ void v250_ctl_compression(const v250_ctl_t *c, bool calling_party,
  * is satisfied by compression in either).  tx/rx are this DCE's transmit and
  * receive compression as negotiated. */
 bool v250_ctl_compression_satisfied(const v250_ctl_t *c, bool tx, bool rx);
+
+/* +DS44 as a V.44 offer: directions from this DCE's (and its DTE's) point of
+ * view, bit 0 transmit, bit 1 receive -- V.44 Annex A's sense, unlike +DS's
+ * P0.  enabled is false for <direction> 0; required for <negotiation> 1. */
+typedef struct {
+    bool enabled;
+    bool required;
+    int directions;
+    int tx_codewords, rx_codewords;
+    int tx_max_string, rx_max_string;
+    int tx_history, rx_history;
+} v250_v44_t;
+void v250_ctl_v44(const v250_ctl_t *c, v250_v44_t *out);
+bool v250_ctl_v44_satisfied(const v250_ctl_t *c, int scheme, bool tx, bool rx);
 
 /* Intermediate result code text, one line each, no CR/LF. */
 typedef struct {

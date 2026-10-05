@@ -696,6 +696,11 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
                        "did not negotiate it; disconnecting\n", cfg.ds[0]);
                 g_data_link_failed = true;
             }
+            if (!v250_ctl_v44_satisfied(&cfg, scheme, ctx, crx)) {
+                ME_LOG("[ME] +DS44 requires V.44 (direction %d) and the peer "
+                       "did not negotiate it; disconnecting\n", cfg.ds44[0]);
+                g_data_link_failed = true;
+            }
         }
         if (v42_get_negotiated_parameters(g_data_stack.v42, &p) == 0)
         {
@@ -850,6 +855,21 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
                                  data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
         if (result == 0)
             ds_set_fallback_buffered(&g_data_stack, g_ec_fallback_ok);
+        if (result == 0 && g_data_stack.v42) {
+            /* V.250 6.6.2 +DS44: V.44 as well, the responder choosing. */
+            v250_v44_t v44;
+
+            v250_ctl_v44(&cfg, &v44);
+            if (v44.enabled) {
+                v42_v44_parameters_t p = {
+                    0, v44.directions, v44.tx_codewords, v44.rx_codewords,
+                    v44.tx_max_string, v44.rx_max_string, v44.tx_history, v44.rx_history
+                };
+
+                if (v42_offer_v44(g_data_stack.v42, &p) != 0)
+                    result = -1;
+            }
+        }
         if (result == 0 && g_data_stack.v42) {
             /* V.250 +EWIND / +EFRAM: what this end offers in XID. */
             int tx_k, rx_k, tx_n401, rx_n401;

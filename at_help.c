@@ -98,6 +98,7 @@ static const at_help_entry_t plus_rows[] = {
     { "+EB=0,0,0", "Break handling: none (a pty carries no break)",   "+EB?" },
     { "+DS=d,n,s,l", "V.42bis: direction, required, dict, string",    "+DS?" },
     { "+DR=0/1",   "Report +DR before CONNECT",                       "+DR?" },
+    { "+DS44=d,n,...", "V.44 offer (with V.42bis): direction, required, ...", "+DS44?" },
     { "+TLDL=0/1", "Local digital loop of the DTE data (in a call)",  "+TLDL?" },
     { "+TTER=t,l,n,p", "Bit/block error test on the loop",            "+TTER?" },
     { "+TNUM?",    "Error counts of the last test",                   "+TNUM?" },
@@ -112,7 +113,7 @@ static const at_help_entry_t plus_rows[] = {
     { "+FLI +FPI", "Class 2.0: local and polling IDs",                NULL },
     { "+FNR +FBU", "Class 2.0: negotiation and HDLC reports",         NULL },
     { "+FCT +FIE", "Class 2.0: phase C timeout, procedure interrupts", NULL },
-    { "",          "Not implemented: +MA and +DS44 (ERROR), the V.92 +P commands.", NULL },
+    { "",          "Not implemented: +MA (ERROR) and the V.92 +P commands.", NULL },
 };
 
 /* I$: the ATIn pages data_interface.c answers. */

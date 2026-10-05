@@ -52,7 +52,7 @@ static void test_defaults_and_reads(void)
     cmd(&c, "DS=?", V250_CTL_OK, "+DS: (0-3),(0,1),(512-65535),(6-250)");
     cmd(&c, "es?", V250_CTL_OK, "+ES: 3,0,2");
     cmd(&c, "ES44?", V250_CTL_UNKNOWN, NULL);   /* a longer name is not +ES */
-    cmd(&c, "DS44=1", V250_CTL_UNKNOWN, NULL);
+    cmd(&c, "DS445=1", V250_CTL_UNKNOWN, NULL);
     cmd(&c, "EWINDX=1", V250_CTL_UNKNOWN, NULL);
 }
 
@@ -361,8 +361,37 @@ static void test_interface_parameters(void)
     check(strstr(out, "+DR: V42B\r\n+ILRR: 57600\r\n") != NULL, "+ILRR follows +DR (6.2.13)");
 }
 
+/* 6.6.2 +DS44. */
+static void test_ds44(void)
+{
+    v250_ctl_t c;
+    v250_v44_t v;
+
+    printf("+DS44:\n");
+    v250_ctl_reset(&c);
+    cmd(&c, "DS44?", V250_CTL_OK, "+DS44: 0,0,0,1024,1024,255,255,3072,3072");
+    cmd(&c, "DS44=?", V250_CTL_OK,
+        "+DS44: (0-3),(0-1),(0),(256-65535),(256-65535),(32-255),(32-255),(512-65535),(512-65535)");
+    v250_ctl_v44(&c, &v);
+    check(!v.enabled, "V.44 is not offered by default");
+    cmd(&c, "DS44=3", V250_CTL_OK, NULL);
+    cmd(&c, "DS44?", V250_CTL_OK, "+DS44: 3,0,0,1024,1024,255,255,3072,3072");
+    cmd(&c, "DS44=,,1", V250_CTL_ERROR, NULL);             /* packet method: not done */
+    cmd(&c, "DS44=,,,255", V250_CTL_ERROR, NULL);
+    cmd(&c, "DS44=,,,,,,31", V250_CTL_ERROR, NULL);
+    cmd(&c, "DS44=1,1,0,2048,512,64,32,4096,1024", V250_CTL_OK, NULL);
+    v250_ctl_v44(&c, &v);
+    check(v.enabled && v.required && v.directions == 1 && v.tx_codewords == 2048
+          && v.rx_codewords == 512 && v.tx_max_string == 64 && v.rx_history == 1024,
+          "+DS44 fields reach the V.44 offer");
+    check(v250_ctl_v44_satisfied(&c, 2, true, false), "required TX V.44 is met by V.44 TX");
+    check(!v250_ctl_v44_satisfied(&c, 1, true, true), "...and not by V.42bis");
+    check(!v250_ctl_v44_satisfied(&c, 2, false, true), "...nor by V.44 RX alone");
+}
+
 int main(void)
 {
+    test_ds44();
     test_interface_parameters();
     test_error_control_parameters();
     test_defaults_and_reads();

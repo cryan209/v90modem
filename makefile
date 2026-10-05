@@ -459,6 +459,14 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 # the end that gave up on a call
 # whose required error control was not met.
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-after ATI6 --both-after ATI11 --both-after ATY11 --call-expect "CONNECT 2400|Originate, in progress|Modulation         V22B|Rate               2400|V.42 LAPM|Line level now     RX|Extended Link Diagnostics (live)|Mode               v22 (offer V22)|Role               caller|Line Spectrum|  1200|  2400|Total  Rx" --answer-expect "CONNECT 2400|Answer, in progress|V.42bis TX RX|Role               answerer"
+# +DS44 (6.6.2): V.44 offered with V.42bis, the responder choosing; either end
+# without V.44 falls back to V.42bis, directions intersect, and "required"
+# ends a call that did not get V.44.
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+DR=1" --both-at "AT+DS44=3" --both-expect "+DR: V44|CONNECT 2400"
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+DR=1" --call-at "AT+DS44=3" --both-expect "+DR: V42B|CONNECT 2400"
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+DR=1" --answer-at "AT+DS44=3" --both-expect "+DR: V42B|CONNECT 2400"
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+DR=1" --call-at "AT+DS44=1" --answer-at "AT+DS44=2" --call-expect "+DR: V44 TD|CONNECT" --answer-expect "+DR: V44 RD|CONNECT"
+	./engine_pair_test --expect-hangup --both-env ME_MODE=v22 --seconds 60 --call-at "AT+DS44=3,1" --call-absent CONNECT --call-expect "NO CARRIER"
 # +EWIND/+EFRAM reach XID, and V.42 9.2.3/9.2.4's negotiation holds: each end
 # takes the far end's "transmit" as its own receive (Table 11 Note 2), the
 # responder chooses between the initiator's value and the default, and the

@@ -3865,9 +3865,7 @@ static const char *at_cmd_plus_DS(at_state_t *s, const char *t)
 static const char *at_cmd_plus_DS44(at_state_t *s, const char *t)
 {
     /* V.250 6.6.2 - V.44 data compression */
-    /* TODO: */
-    t += 5;
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 

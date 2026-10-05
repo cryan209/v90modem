@@ -691,72 +691,81 @@ static void transmit_xid(v42_state_t *ss, uint8_t addr)
 
     len += group_len;
 
-    if ((addr == s->cmd_addr && ss->config.v44_enabled)
-        || (addr == s->rsp_addr && ss->negotiated.valid && ss->negotiated.v44_valid))
+    /* A command may offer V.42bis and V.44 together and the response picks at
+       most one.  V.44's Annex A user data has no length and runs to the FCS,
+       so it goes last.  An offer of V.44 alone (no V.42bis configured) keeps
+       its V.44-only form. */
     {
-        const v42_v44_parameters_t *v = addr == s->cmd_addr
-                                       ? &ss->config.v44 : &ss->negotiated.v44;
-        int values[] = {v->capability, v->directions, v->tx_codewords, v->rx_codewords,
-                        v->tx_max_string, v->rx_max_string, v->tx_history, v->rx_history};
-        static const int widths[] = {1, 1, 2, 2, 1, 1, 2, 2};
-        *buf++ = 0xFF;  /* Annex A user-data subfield has no length octets. */
-        *buf++ = 0x40; *buf++ = 3;
-        *buf++ = 'V'; *buf++ = '4'; *buf++ = '4';
-        for (int i = 0; i < 8; i++)
+        bool v44_out = (addr == s->cmd_addr && ss->config.v44_enabled)
+                       || (addr == s->rsp_addr && ss->negotiated.valid && ss->negotiated.v44_valid);
+        bool v42bis_out = !v44_out || (addr == s->cmd_addr && ss->config.comp != 0);
+
+        if (v42bis_out)
         {
-            *buf++ = 0x41 + i;
-            *buf++ = widths[i];
-            if (widths[i] == 2)
-                *buf++ = (uint8_t)(values[i] >> 8);
-            *buf++ = (uint8_t)values[i];
+            /* V.42bis 5.1/Annex A: state P0 explicitly, including zero, so a
+               peer's compression proposal receives an unambiguous refusal. */
+            /* Private parameter negotiation group */
+            group_len = 15;
+            *buf++ = GI_PRIVATE_NEGOTIATION;
+            put_net_unaligned_uint16(buf, group_len);
+            buf += 2;
+            len += 3;
+
+            /* Private parameter for V.42 (ASCII for V42). V.42 says ".42", but V.42bis says "V42",
+               and that seems to be what should be used. */
+            *buf++ = PI_PARAMETER_SET_ID;
+            *buf++ = 3;
+            *buf++ = 'V';
+            *buf++ = '4';
+            *buf++ = '2';
+
+            /* V.42bis P0
+               00 Compression in neither direction (default);
+               01 Negotiation initiator-responder direction only;
+               10 Negotiation responder-initiator direction only;
+               11 Both directions. */
+            *buf++ = PI_V42BIS_COMPRESSION_REQUEST;
+            *buf++ = 1;
+            *buf++ = (addr == s->rsp_addr && ss->negotiated.valid)
+                         ? ss->negotiated.compression_p0 : ss->config.comp;
+
+            /* V.42bis P1 */
+            *buf++ = PI_V42BIS_NUM_CODEWORDS;
+            *buf++ = 2;
+            put_net_unaligned_uint16(buf, (addr == s->rsp_addr && ss->negotiated.valid)
+                                         ? ss->negotiated.compression_p1 : ss->config.comp_dict_size);
+            buf += 2;
+
+            /* V.42bis P2 */
+            *buf++ = PI_V42BIS_MAX_STRING_LENGTH;
+            *buf++ = 1;
+            *buf++ = (addr == s->rsp_addr && ss->negotiated.valid)
+                         ? ss->negotiated.compression_p2 : ss->config.comp_max_string;
+
+            len += group_len;
         }
-        len += 34;
+
+        if (v44_out)
+        {
+            const v42_v44_parameters_t *v = addr == s->cmd_addr
+                                           ? &ss->config.v44 : &ss->negotiated.v44;
+            int values[] = {v->capability, v->directions, v->tx_codewords, v->rx_codewords,
+                            v->tx_max_string, v->rx_max_string, v->tx_history, v->rx_history};
+            static const int widths[] = {1, 1, 2, 2, 1, 1, 2, 2};
+            *buf++ = 0xFF;  /* Annex A user-data subfield has no length octets. */
+            *buf++ = 0x40; *buf++ = 3;
+            *buf++ = 'V'; *buf++ = '4'; *buf++ = '4';
+            for (int i = 0; i < 8; i++)
+            {
+                *buf++ = 0x41 + i;
+                *buf++ = widths[i];
+                if (widths[i] == 2)
+                    *buf++ = (uint8_t)(values[i] >> 8);
+                *buf++ = (uint8_t)values[i];
+            }
+            len += 34;
+        }
     }
-    else
-    {
-        /* V.42bis 5.1/Annex A: state P0 explicitly, including zero, so a
-           peer's compression proposal receives an unambiguous refusal. */
-        /* Private parameter negotiation group */
-        group_len = 15;
-        *buf++ = GI_PRIVATE_NEGOTIATION;
-        put_net_unaligned_uint16(buf, group_len);
-        buf += 2;
-        len += 3;
-
-        /* Private parameter for V.42 (ASCII for V42). V.42 says ".42", but V.42bis says "V42",
-           and that seems to be what should be used. */
-        *buf++ = PI_PARAMETER_SET_ID;
-        *buf++ = 3;
-        *buf++ = 'V';
-        *buf++ = '4';
-        *buf++ = '2';
-
-        /* V.42bis P0
-           00 Compression in neither direction (default);
-           01 Negotiation initiator-responder direction only;
-           10 Negotiation responder-initiator direction only;
-           11 Both directions. */
-        *buf++ = PI_V42BIS_COMPRESSION_REQUEST;
-        *buf++ = 1;
-        *buf++ = (addr == s->rsp_addr && ss->negotiated.valid)
-                     ? ss->negotiated.compression_p0 : ss->config.comp;
-
-        /* V.42bis P1 */
-        *buf++ = PI_V42BIS_NUM_CODEWORDS;
-        *buf++ = 2;
-        put_net_unaligned_uint16(buf, (addr == s->rsp_addr && ss->negotiated.valid)
-                                     ? ss->negotiated.compression_p1 : ss->config.comp_dict_size);
-        buf += 2;
-
-        /* V.42bis P2 */
-        *buf++ = PI_V42BIS_MAX_STRING_LENGTH;
-        *buf++ = 1;
-        *buf++ = (addr == s->rsp_addr && ss->negotiated.valid)
-                     ? ss->negotiated.compression_p2 : ss->config.comp_max_string;
-
-        len += group_len;
-    }
-
     f->len = len;
 }
 /*- End of function --------------------------------------------------------*/
@@ -2145,6 +2154,15 @@ SPAN_DECLARE(int) v42_set_v44(v42_state_t *s, const v42_v44_parameters_t *p)
     if (!s || !valid_v44(p) || p->capability != 0)
         return -1;
     s->config.comp = 0;
+    s->config.v44_enabled = true;
+    s->config.v44 = *p;
+    return 0;
+}
+
+SPAN_DECLARE(int) v42_offer_v44(v42_state_t *s, const v42_v44_parameters_t *p)
+{
+    if (!s || !valid_v44(p) || p->capability != 0)
+        return -1;
     s->config.v44_enabled = true;
     s->config.v44 = *p;
     return 0;

@@ -45,6 +45,14 @@ void v250_ctl_reset(v250_ctl_t *c)
     /* 6.2.10-6.2.12 recommended defaults: autodetect, 8N1 (3,3), circuit flow
      * control both ways.  +ILRR 0; +MSC 1 (6.4.8), which is what the engine
      * has always done. */
+    /* +DS44: 6.6.2 recommends <direction> 3.  V.44 has passed every offline
+     * test here but has never been negotiated with a foreign modem on a call,
+     * so it is not offered unless the DTE asks; the rest are 6.6.2's own
+     * example values (V.44 Appendix I). */
+    c->ds44[0] = 0;
+    c->ds44[3] = c->ds44[4] = 1024;
+    c->ds44[5] = c->ds44[6] = 255;
+    c->ds44[7] = c->ds44[8] = 3072;
     c->icf[0] = 3;
     c->icf[1] = 3;
     c->ifc[0] = 2;
@@ -92,11 +100,11 @@ static v250_ctl_result_t ipr_command(v250_ctl_t *c, const char *arg, char *info,
 typedef struct {
     const char *name;
     int fields;
-    int min[3];
-    int max[3];
+    int min[9];
+    int max[9];
     bool first_required;    /* <value1> is not optional (+EWIND, +EFRAM) */
     const char *test;       /* a test response that is not a set of ranges */
-    unsigned mask[3];       /* if set: exactly these values (small ones) */
+    unsigned mask[9];       /* if set: exactly these values (small ones) */
 } range_param_t;
 
 static const range_param_t range_params[] = {
@@ -110,10 +118,15 @@ static const range_param_t range_params[] = {
     { "ICF",   2, { 0, 0 },     { 3, 3 },        false, "+ICF: (0,3),(0-3)", { BIT(0) | BIT(3), 0 } },
     /* 6.2.12: no XON/XOFF filtering; 2 is the pty's own back-pressure. */
     { "IFC",   2, { 0, 0 },     { 2, 2 },        false, "+IFC: (0,2),(0,2)", { BIT(0) | BIT(2), BIT(0) | BIT(2) } },
+    /* 6.6.2: the stream method only (the packet methods are not
+       implemented); the V.44 codec's own limits. */
+    { "DS44",  9, { 0, 0, 0, 256, 256, 32, 32, 512, 512 },
+                  { 3, 1, 0, 65535, 65535, 255, 255, 65535, 65535 }, false, NULL, { 0 } },
 };
 
 static int *range_store(v250_ctl_t *c, const char *name)
 {
+    if (!strcmp(name, "DS44"))  return c->ds44;
     if (!strcmp(name, "ICF"))   return c->icf;
     if (!strcmp(name, "IFC"))   return c->ifc;
     if (!strcmp(name, "EB"))    return c->eb;
@@ -127,8 +140,8 @@ static v250_ctl_result_t range_command(v250_ctl_t *c, const range_param_t *p,
                                        const char *arg, char *info, size_t len)
 {
     int *store = range_store(c, p->name);
-    long vals[3] = { 0 };
-    bool present[3] = { false };
+    long vals[9] = { 0 };
+    bool present[9] = { false };
     size_t used;
     int n;
 
@@ -412,6 +425,36 @@ void v250_ctl_compression(const v250_ctl_t *c, bool calling_party,
     out->p1 = c->ds[2];
     out->p2 = c->ds[3];
     out->required = out->enabled && c->ds[1] == 1;
+}
+
+void v250_ctl_v44(const v250_ctl_t *c, v250_v44_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->enabled = c->ds44[0] != 0;
+    out->required = out->enabled && c->ds44[1] == 1;
+    out->directions = c->ds44[0];
+    out->tx_codewords = c->ds44[3];
+    out->rx_codewords = c->ds44[4];
+    out->tx_max_string = c->ds44[5];
+    out->rx_max_string = c->ds44[6];
+    out->tx_history = c->ds44[7];
+    out->rx_history = c->ds44[8];
+}
+
+bool v250_ctl_v44_satisfied(const v250_ctl_t *c, int scheme, bool tx, bool rx)
+{
+    if (c->ds44[0] == 0 || c->ds44[1] == 0)
+        return true;
+    if (scheme != 2)
+        return false;
+    switch (c->ds44[0]) {
+    case 1:
+        return tx;
+    case 2:
+        return rx;
+    default:
+        return tx || rx;
+    }
 }
 
 bool v250_ctl_compression_satisfied(const v250_ctl_t *c, bool tx, bool rx)
