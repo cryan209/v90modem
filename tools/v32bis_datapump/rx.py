@@ -6,7 +6,17 @@ from dataclasses import dataclass
 
 from tools.v32bis_ref.negotiation import decode_e_rate
 from tools.v32bis_ref.receiver import V32bisLogicalReceiver
-from tools.v32bis_ref.rate_signal import decode_rate_sequence_symbols, is_e_sequence_bits, is_rate_signal_bits
+from tools.v32bis_ref.rate_signal import (
+    RATE_12000,
+    RATE_14400,
+    RATE_4800,
+    RATE_7200,
+    RATE_9600,
+    decode_rate_stream_symbols,
+    is_e_sequence_bits,
+    is_rate_signal_bits,
+)
+from tools.v32bis_ref.spec_policy import startup_diff_state_from_final_trn_symbol
 from tools.v32bis_ref.receiver import DetectedEvent
 from tools.v32bis_ref.rx_frontend import (
     ideal_symbol_samples,
@@ -28,10 +38,17 @@ STATE_POINTS = [
     startup_symbol_to_point("Q3"),
 ]
 
-# The reference transmitter encodes every startup word (R and E) from the
-# TRN-derived startup state, so blind word decoding must seed the scrambler
-# with the nominal TRN-end register rather than zero.
+# The first word of a rate signal is encoded from the TRN-derived startup
+# state, so blind decoding of it seeds the scrambler with the nominal TRN-end
+# register rather than zero.  Later words and E continue the same stream
+# (5.3) and are decoded with the preceding symbols as history.
 NOMINAL_TRN_LENGTH = 1280
+
+# S = ABAB (Figure 2-5: A = (-6,-2) and B = (2,-6), 180 degrees apart).
+S_STATE_PATTERN = (
+    startup_diff_state_from_final_trn_symbol("A"),
+    startup_diff_state_from_final_trn_symbol("B"),
+)
 
 
 @dataclass(frozen=True)
@@ -156,7 +173,7 @@ def _decode_rate_bits_from_states(
     initial_diff_state: int = 1,
     initial_scrambler_register: int = 0,
 ) -> list[int]:
-    return decode_rate_sequence_symbols(
+    return decode_rate_stream_symbols(
         [f"Q{state}" for state in states],
         calling_party=remote_calling_party,
         initial_diff_state=initial_diff_state,
@@ -178,16 +195,9 @@ def _is_decodable_e_bits(bits: list[int]) -> bool:
 
 def _rate_mask_from_bits(rate_mask_bits: list[int]) -> int:
     rate_mask = 0
-    if rate_mask_bits[5]:
-        rate_mask |= 0x0020
-    if rate_mask_bits[9]:
-        rate_mask |= 0x0040
-    if rate_mask_bits[6]:
-        rate_mask |= 0x0200
-    if rate_mask_bits[10]:
-        rate_mask |= 0x0400
-    if rate_mask_bits[12]:
-        rate_mask |= 0x1000
+    for rate in (RATE_4800, RATE_9600, RATE_7200, RATE_12000, RATE_14400):
+        if rate_mask_bits[rate.bit_length() - 1]:
+            rate_mask |= rate
     return rate_mask
 
 
@@ -199,21 +209,25 @@ def _decode_best_word_near(
     remote_calling_party: bool,
     predicate,
     seed_lookback: int = 1,
+    history_symbols: int = 0,
 ) -> list[int] | None:
-    """Decode a startup word near *center_index* with the TRN-derived seed.
+    """Decode a startup word near *center_index*.
 
-    The transmitter encodes each startup word from the TRN-end state, so the
-    differential seed is the recovered state at the end of the conditioning
-    segment (*seed_lookback* symbols before the word start) and the scrambler
-    seed is the nominal TRN-end register. If no window decodes with that
-    primary seed, a fallback pass retries with the remaining diff states to
-    tolerate a decision error on the single seed symbol.
+    The rate signal is one continuous scrambled, differentially encoded
+    stream (5.3).  Its first word is decoded from the TRN-end state: the
+    differential seed is the recovered state *seed_lookback* symbols before
+    the decode start, and the scrambler seed is the nominal TRN-end register.
+    A word that follows others in the stream (E after R3) is decoded with the
+    *history_symbols* before it run through the same descrambler first; 23
+    bits of history resynchronise it whatever the seed.  If no window decodes
+    with the primary seed, a fallback pass retries with the remaining diff
+    states to tolerate a decision error on the single seed symbol.
     """
 
     register_seed = trn_final_scrambler_register(remote_calling_party, NOMINAL_TRN_LENGTH)
 
     def decode_at(start: int, diff_seed: int) -> list[int] | None:
-        candidate = states[start:start + 8]
+        candidate = states[start - history_symbols:start + 8]
         try:
             bits = _decode_rate_bits_from_states(
                 candidate,
@@ -223,14 +237,15 @@ def _decode_best_word_near(
             )
         except ValueError:
             return None
+        bits = bits[-16:]
         return bits if predicate(bits) else None
 
     fallback: list[tuple[int, int]] = []
     for offset in range(-search_radius, search_radius + 1):
         start = center_index + offset
-        if start < 0 or start + 8 > len(states):
+        if start - history_symbols < 0 or start + 8 > len(states):
             continue
-        seed_index = start - seed_lookback
+        seed_index = start - history_symbols - seed_lookback
         primary_seed = states[seed_index] if 0 <= seed_index < len(states) else 1
         bits = decode_at(start, primary_seed)
         if bits is not None:
@@ -261,7 +276,7 @@ def _detect_events_from_startup_windows(states: list[int], *, remote_calling_par
             if start < 0 or start + 256 > len(states):
                 continue
             window = states[start:start + 256]
-            if all(window[i] == (i % 2) for i in range(256)):
+            if all(window[i] == S_STATE_PATTERN[i % 2] for i in range(256)):
                 return True
         return False
 
@@ -298,7 +313,7 @@ def _detect_events_from_startup_windows(states: list[int], *, remote_calling_par
         search_radius=8,
         remote_calling_party=remote_calling_party,
         predicate=_is_decodable_e_bits,
-        seed_lookback=1 + rate_symbols,
+        history_symbols=rate_symbols,
     )
     if e_bits is not None:
         events.append(DetectedEvent(name="E", selected_rate=decode_e_rate(e_bits)))
@@ -325,7 +340,7 @@ def _best_alternation_matches(
         if start < 0 or start + window_length > len(states):
             continue
         window = states[start:start + window_length]
-        matches = sum(1 for index, state in enumerate(window) if state == (index % 2))
+        matches = sum(1 for index, state in enumerate(window) if state == S_STATE_PATTERN[index % 2])
         if matches > best_matches:
             best_matches = matches
     return best_matches
@@ -340,6 +355,7 @@ def _best_rate_event_from_candidates(
     predicate,
     name: str,
     seed_lookback: int = 1,
+    history_symbols: int = 0,
 ) -> tuple[DetectedEvent | None, str | None]:
     best_event: DetectedEvent | None = None
     best_mode: str | None = None
@@ -352,6 +368,7 @@ def _best_rate_event_from_candidates(
             remote_calling_party=remote_calling_party,
             predicate=predicate,
             seed_lookback=seed_lookback,
+            history_symbols=history_symbols,
         )
         if bits is None:
             continue
@@ -455,7 +472,7 @@ def _detect_events_from_candidate_bank(
         remote_calling_party=remote_calling_party,
         predicate=_is_decodable_e_bits,
         name="E",
-        seed_lookback=1 + rate_symbols,
+        history_symbols=rate_symbols,
     )
     if e_event is not None and e_mode is not None:
         events.append(e_event)

@@ -9,11 +9,13 @@ from .stream import ObservableSymbol, flatten_startup_trace
 from .training import STATE_A, STATE_B, STATE_C, STATE_D
 
 
+# Figure 2-5: A = (-6,-2), D = (-2,6), B = (2,-6), C = (6,2) -- indices 0, 1,
+# 2, 3 of the 4800 table -- so S = ABAB alternates 180 degrees apart.
 SYNC_STATE_TO_INDEX = {
     STATE_A: 0,
-    STATE_B: 1,
+    STATE_D: 1,
+    STATE_B: 2,
     STATE_C: 3,
-    STATE_D: 2,
 }
 
 

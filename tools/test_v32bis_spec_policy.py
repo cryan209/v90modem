@@ -21,6 +21,7 @@ from tools.v32bis_ref import (
     startup_scrambler_register_from_trn,
 )
 from tools.v32bis_ref.scrambler import Scrambler, scrambler_tap
+from tools.v32bis_ref.spec_policy import StartupTransmitState
 
 
 class V32bisSpecPolicyTests(unittest.TestCase):
@@ -54,7 +55,30 @@ class V32bisSpecPolicyTests(unittest.TestCase):
         )
         self.assertEqual(trace[2].symbols, [f"Q{state}" for state in expected.differential_states])
 
-    def test_call_trace_repeats_identical_r2_word_and_keeps_e_standalone(self) -> None:
+    def _assert_continuous(self, rate, e, b1, *, calling_party, repetitions) -> None:
+        """5.3: the R words and E are one scrambled, differentially encoded
+        stream, and B1 carries on from where E left it."""
+
+        state = rate.initial_tx_state
+        expected: list[str] = []
+        for bits in [rate.bits] * repetitions + [e.bits]:
+            encoded = encode_rate_sequence_bits(
+                bits,
+                calling_party=calling_party,
+                initial_diff_state=state.diff_state,
+                initial_scrambler_register=state.scrambler_register,
+            )
+            expected.extend(f"Q{x}" for x in encoded.differential_states)
+            state = StartupTransmitState(encoded.final_scrambler_register, encoded.final_state)
+        self.assertEqual(rate.symbols + e.symbols, expected)
+        # Not reseeded per word, so a repeated word is not repeated symbols.
+        self.assertNotEqual(rate.symbols[:8], rate.symbols[8:16])
+        self.assertEqual(e.initial_tx_state, rate.final_tx_state)
+        self.assertEqual(b1.initial_tx_state.diff_state, e.final_tx_state.diff_state)
+        self.assertEqual(b1.initial_tx_state.scrambler_register, e.final_tx_state.scrambler_register)
+        self.assertEqual(b1.initial_tx_state.convolution_state, POST_E_INITIAL_CONVOLUTION_STATE)
+
+    def test_call_trace_r2_and_e_are_one_continuous_stream(self) -> None:
         trace = generate_call_startup_trace(
             r1_mask=RATE_7200 | RATE_9600 | RATE_12000,
             r2_mask=RATE_7200 | RATE_9600,
@@ -62,18 +86,9 @@ class V32bisSpecPolicyTests(unittest.TestCase):
             trn_length=260,
             r2_repetitions=2,
         )
-        r2 = trace[2]
-        e = trace[3]
-        b1 = trace[4]
-        self.assertIsNotNone(r2.final_tx_state)
-        self.assertEqual(r2.symbols[:8], r2.symbols[8:16])
-        self.assertEqual(e.initial_tx_state, r2.initial_tx_state)
-        self.assertIsNotNone(e.final_tx_state)
-        self.assertEqual(b1.initial_tx_state.diff_state, e.final_tx_state.diff_state)
-        self.assertEqual(b1.initial_tx_state.scrambler_register, e.final_tx_state.scrambler_register)
-        self.assertEqual(b1.initial_tx_state.convolution_state, POST_E_INITIAL_CONVOLUTION_STATE)
+        self._assert_continuous(trace[2], trace[3], trace[4], calling_party=True, repetitions=2)
 
-    def test_answer_trace_repeats_identical_r3_word_and_keeps_e_standalone(self) -> None:
+    def test_answer_trace_r3_and_e_are_one_continuous_stream(self) -> None:
         trace = generate_answer_startup_trace(
             r1_mask=RATE_7200 | RATE_9600 | RATE_12000,
             r2_mask=RATE_7200 | RATE_9600,
@@ -82,16 +97,7 @@ class V32bisSpecPolicyTests(unittest.TestCase):
             r1_repetitions=2,
             r3_repetitions=2,
         )
-        r3 = trace[3]
-        e = trace[4]
-        b1 = trace[5]
-        self.assertIsNotNone(r3.final_tx_state)
-        self.assertEqual(r3.symbols[:8], r3.symbols[8:16])
-        self.assertEqual(e.initial_tx_state, r3.initial_tx_state)
-        self.assertIsNotNone(e.final_tx_state)
-        self.assertEqual(b1.initial_tx_state.diff_state, e.final_tx_state.diff_state)
-        self.assertEqual(b1.initial_tx_state.scrambler_register, e.final_tx_state.scrambler_register)
-        self.assertEqual(b1.initial_tx_state.convolution_state, POST_E_INITIAL_CONVOLUTION_STATE)
+        self._assert_continuous(trace[3], trace[4], trace[5], calling_party=False, repetitions=2)
 
     def test_post_e_convolution_policy_is_explicit_zero(self) -> None:
         self.assertEqual(POST_E_INITIAL_CONVOLUTION_STATE, 0)
@@ -112,8 +118,8 @@ class V32bisSpecPolicyTests(unittest.TestCase):
         )
         self.assertEqual(state.convolution_state, POST_E_INITIAL_CONVOLUTION_STATE)
 
-    def test_normal_startup_scrambler_reset_remains_unresolved(self) -> None:
-        self.assertIsNone(NORMAL_STARTUP_SCRAMBLER_RESET_AFTER_E)
+    def test_normal_startup_does_not_reset_the_scrambler(self) -> None:
+        self.assertIs(NORMAL_STARTUP_SCRAMBLER_RESET_AFTER_E, False)
 
 
 if __name__ == "__main__":

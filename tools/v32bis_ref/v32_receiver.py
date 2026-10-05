@@ -28,14 +28,16 @@ from dataclasses import dataclass
 
 from .negotiation import detect_s_sequence
 from .stream import ObservableSymbol
-from .training import STATE_A, STATE_B, STATE_C, STATE_D
+from .coding import differential_decode
+from .scrambler import Descrambler, scrambler_tap
+from .spec_policy import startup_diff_state_from_final_trn_symbol
+from .training import STATE_A, STATE_B, STATE_C, STATE_D, trn_final_scrambler_register
 from .v32_rate_signal import (
     V32_CAP_4800,
     V32_CAP_9600,
     V32_CAP_CLEARDOWN,
     V32_CAP_TRELLIS,
     decode_v32_e_sequence,
-    decode_v32_rate_sequence_symbols,
     decode_v32_rate_signal,
     is_v32_e_sequence_bits,
     is_v32_rate_signal_bits,
@@ -89,8 +91,14 @@ class V32LogicalReceiver:
         self._s_window: deque[str] = deque(maxlen=self._S_LENGTH)
         self._in_s: bool = False
 
-        # Q-symbol run for V.32 R / E decoding
-        self._q_run: deque[str] = deque()
+        # Q-symbol run for V.32 R / E decoding.  The rate sequences are one
+        # continuous scrambled, differentially encoded stream (V.32 5.4), so
+        # the run is decoded symbol by symbol from a seed taken off the end
+        # of the preceding TRN, and words are matched over the decoded bits.
+        self._state_run: list[str] = []
+        self._q_run: deque[int] = deque()
+        self._q_descrambler: Descrambler | None = None
+        self._q_diff_state: int = 1
         self._rate_seqs: list[list[int]] = []
         self._seen_e: bool = False
         self._rate_count: int = 0
@@ -105,6 +113,8 @@ class V32LogicalReceiver:
 
     def _reset_q_run(self) -> None:
         self._q_run.clear()
+        self._q_descrambler = None
+        self._q_diff_state = 1
         self._rate_seqs.clear()
         self._seen_e = False
 
@@ -131,6 +141,7 @@ class V32LogicalReceiver:
         # ── A / B / C / D ──────────────────────────────────────────────
         if symbol in (STATE_A, STATE_B, STATE_C, STATE_D):
             self._reset_q_run()
+            self._state_run.append(symbol)
             self._b1_len = 0
             self._b1_emitted = False
 
@@ -169,12 +180,14 @@ class V32LogicalReceiver:
             events.extend(
                 self._process_q(symbol, observable.tx_calling_party, observable.source_name)
             )
+            self._state_run.clear()
             return events
 
         # ── B1 (scrambled ones) ────────────────────────────────────────
         if symbol == "B1":
             self._end_ac_pattern()
             self._reset_q_run()
+            self._state_run.clear()
             self._prev_ac = None
             self._s_window.clear()
             self._in_s = False
@@ -193,6 +206,7 @@ class V32LogicalReceiver:
         # ── Unknown symbol ─────────────────────────────────────────────
         self._end_ac_pattern()
         self._reset_q_run()
+        self._state_run.clear()
         self._prev_ac = None
         self._s_window.clear()
         self._in_s = False
@@ -258,28 +272,50 @@ class V32LogicalReceiver:
         self._prev_ac = symbol
         return events
 
+    def _seed_from_conditioning(self, calling_party: bool) -> tuple[int, int]:
+        """Differential state and scrambler register at the end of TRN.
+
+        Finds S (256 x AB), S-bar (16 x CD) and the TRN after it at the end
+        of the preceding run of state symbols; (1, 0) if there is none.
+        """
+
+        run = self._state_run
+        s_pattern = [STATE_A if i % 2 == 0 else STATE_B for i in range(self._S_LENGTH)]
+        s_bar = [STATE_C if i % 2 == 0 else STATE_D for i in range(16)]
+        for start in range(len(run) - self._S_LENGTH - 16, -1, -1):
+            if run[start:start + self._S_LENGTH] == s_pattern and \
+                    run[start + self._S_LENGTH:start + self._S_LENGTH + 16] == s_bar:
+                trn = run[start + self._S_LENGTH + 16:]
+                if trn:
+                    return (
+                        startup_diff_state_from_final_trn_symbol(trn[-1]),
+                        trn_final_scrambler_register(calling_party, len(trn)),
+                    )
+                break
+        return 1, 0
+
     def _process_q(
         self, symbol: str, calling_party: bool, source_name: str
     ) -> list[V32DetectedEvent]:
         """Decode Q-symbol run; detect V.32 R and E sequences."""
         events: list[V32DetectedEvent] = []
-        self._q_run.append(symbol)
+        if self._q_descrambler is None:
+            self._q_diff_state, register = self._seed_from_conditioning(calling_party)
+            self._q_descrambler = Descrambler(scrambler_tap(calling_party, transmit=True), register=register)
+        try:
+            output_state = int(symbol[1:])
+            dibit = differential_decode(self._q_diff_state, output_state, 4800)
+        except ValueError:
+            self._q_run.clear()
+            return events
+        self._q_diff_state = output_state
+        self._q_run.extend(self._q_descrambler.process_bits([dibit & 1, (dibit >> 1) & 1]))
 
-        while len(self._q_run) >= 8:
-            candidate = list(self._q_run)[:8]
-            try:
-                decoded = decode_v32_rate_sequence_symbols(
-                    candidate,
-                    calling_party=calling_party,
-                    initial_diff_state=1,
-                )
-            except ValueError:
-                self._q_run.popleft()
-                continue
+        while len(self._q_run) >= 16:
+            decoded = list(self._q_run)[:16]
 
             if is_v32_e_sequence_bits(decoded) and not self._seen_e:
-                for _ in range(8):
-                    self._q_run.popleft()
+                self._q_run.clear()
                 self._seen_e = True
                 try:
                     rate, trellis = decode_v32_e_sequence(decoded)
@@ -292,8 +328,7 @@ class V32LogicalReceiver:
                 break
 
             if is_v32_rate_signal_bits(decoded):
-                for _ in range(8):
-                    self._q_run.popleft()
+                self._q_run.clear()
                 self._rate_seqs.append(decoded)
                 if len(self._rate_seqs) >= 2 and self._rate_seqs[-2] == self._rate_seqs[-1]:
                     try:
@@ -314,7 +349,8 @@ class V32LogicalReceiver:
                         pass
                 continue
 
-            # Neither R nor E: resync by dropping one symbol
+            # Neither R nor E: slide the window one symbol
+            self._q_run.popleft()
             self._q_run.popleft()
 
         return events

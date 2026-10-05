@@ -18,12 +18,18 @@ from tools.v32bis_ref.rate_signal import (
     RATE_4800,
     RATE_7200,
     RATE_9600,
+    SUPPORTED_RATE_MASK,
+    bits_to_word,
+    decode_rate_sequence_symbols,
     e_sequence_bits,
     encode_rate_sequence_bits,
+    is_e_sequence_bits,
     list_from_rate_mask,
     rate_mask_from_list,
     rate_signal_bits,
+    word_to_bits,
 )
+from tools.v32bis_ref.spec_policy import StartupTransmitState, startup_state_from_trn
 from tools.v32bis_ref.negotiation import (
     decode_e_rate,
     decode_rate_mask,
@@ -211,7 +217,109 @@ class RateSignalTests(unittest.TestCase):
 
     def test_rate_signal_table_5_layout(self) -> None:
         bits = rate_signal_bits(RATE_4800 | RATE_7200 | RATE_14400)
-        self.assertEqual(bits, [0, 0, 0, 0, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0, 0, 0])
+        # Table 5: B7, B11 and B15 are all 1 (5.3.1 sync).
+        self.assertEqual(bits, [0, 0, 0, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1])
+
+    def test_rate_signal_every_rate_is_0x9ff0(self) -> None:
+        # The word slmodemd sends as R1, and the C datapump's
+        # v32bis_build_rate_signal(0x1660).
+        every = rate_mask_from_list([4800, 7200, 9600, 12000, 14400])
+        self.assertEqual(every, 0x1660)
+        self.assertEqual(bits_to_word(rate_signal_bits(every)), 0x9FF0)
+        self.assertEqual(word_to_bits(0x9FF0), rate_signal_bits(every))
+
+    def test_rate_masks_are_the_table_5_word_bits(self) -> None:
+        for rate, bit in ((4800, 5), (9600, 6), (7200, 9), (12000, 10), (14400, 12)):
+            self.assertEqual(rate_mask_from_list([rate]), 1 << bit)
+            self.assertEqual(rate_signal_bits(rate_mask_from_list([rate]))[bit], 1)
+
+    def test_e_sync_ignores_b8_b13_b14(self) -> None:
+        # Table 6 Note 1 (B8 = 0 at 4800 for V.32) and Note 2 (B13/B14 ignored).
+        bits = e_sequence_bits(4800)
+        self.assertTrue(is_e_sequence_bits(bits))
+        for index in (4, 8, 13, 14):
+            flipped = list(bits)
+            flipped[index] ^= 1
+            self.assertTrue(is_e_sequence_bits(flipped))
+        self.assertEqual(bits_to_word(e_sequence_bits(14400)), 0x999F)
+
+    def test_rate_signal_vectors_match_c_datapump(self) -> None:
+        # v32bis_spandsp_test.c test_startup_logic(): 0x9ff0 and the 14400 E,
+        # each encoded from the end of a 1280-symbol TRN.
+        every = rate_mask_from_list([4800, 7200, 9600, 12000, 14400])
+        cases = (
+            (True, 0x15C6B0, 0, [0, 0, 0, 0, 1, 1, 2, 3], 0x3055D8, 3, [3, 0, 2, 0, 3, 2, 1, 0], 0x30A3B8, 0),
+            (False, 0x3BBD8E, 1, [0, 2, 1, 0, 1, 0, 0, 2], 0x0E08C4, 2, [3, 2, 1, 1, 0, 3, 0, 1], 0x0EF92B, 1),
+        )
+        for calling, trn_reg, trn_diff, r_states, r_reg, r_diff, e_states, e_reg, e_diff in cases:
+            conditioning = generate_conditioning_signal(calling, 1280)
+            state = startup_state_from_trn(
+                conditioning.final_trn_symbol,
+                conditioning.trn_final_scrambler_register,
+            )
+            self.assertEqual(state.scrambler_register, trn_reg)
+            self.assertEqual(state.diff_state, trn_diff)
+            r = encode_rate_sequence_bits(
+                rate_signal_bits(every),
+                calling_party=calling,
+                initial_diff_state=state.diff_state,
+                initial_scrambler_register=state.scrambler_register,
+            )
+            self.assertEqual(r.differential_states, r_states)
+            self.assertEqual((r.final_scrambler_register, r.final_state), (r_reg, r_diff))
+            self.assertEqual(
+                decode_rate_sequence_symbols(
+                    [f"Q{x}" for x in r_states],
+                    calling_party=calling,
+                    initial_diff_state=trn_diff,
+                    initial_scrambler_register=trn_reg,
+                ),
+                rate_signal_bits(every),
+            )
+            e = encode_rate_sequence_bits(
+                e_sequence_bits(14400),
+                calling_party=calling,
+                initial_diff_state=state.diff_state,
+                initial_scrambler_register=state.scrambler_register,
+            )
+            self.assertEqual(e.differential_states, e_states)
+            self.assertEqual((e.final_scrambler_register, e.final_state), (e_reg, e_diff))
+
+    def test_rate_signal_is_one_continuous_stream(self) -> None:
+        # 5.3: repeated R words and E are scrambled and differentially encoded
+        # as one stream, so each continues from the state the last one left.
+        trace = generate_call_startup_trace(
+            r1_mask=SUPPORTED_RATE_MASK,
+            r2_mask=SUPPORTED_RATE_MASK,
+            r3_selected_rate=14400,
+            r2_repetitions=3,
+        )
+        r2 = next(segment for segment in trace if segment.name == "R2")
+        e = next(segment for segment in trace if segment.name == "E")
+        b1 = next(segment for segment in trace if segment.name == "B1")
+        state = r2.initial_tx_state
+        symbols: list[str] = []
+        for bits in [r2.bits] * 3 + [e.bits]:
+            encoded = encode_rate_sequence_bits(
+                bits,
+                calling_party=True,
+                initial_diff_state=state.diff_state,
+                initial_scrambler_register=state.scrambler_register,
+            )
+            symbols.extend(f"Q{x}" for x in encoded.differential_states)
+            state = StartupTransmitState(encoded.final_scrambler_register, encoded.final_state)
+        self.assertEqual(r2.symbols + e.symbols, symbols)
+        self.assertNotEqual(r2.symbols[:8], r2.symbols[8:16])
+        self.assertEqual(e.initial_tx_state, r2.final_tx_state)
+        self.assertEqual(b1.initial_tx_state.scrambler_register, state.scrambler_register)
+        self.assertEqual(b1.initial_tx_state.diff_state, state.diff_state)
+        # One descrambler run over the whole stream recovers every word.
+        decoded = decode_rate_sequence_symbols(
+            symbols[:8], calling_party=True,
+            initial_diff_state=r2.initial_tx_state.diff_state,
+            initial_scrambler_register=r2.initial_tx_state.scrambler_register,
+        )
+        self.assertEqual(decoded, r2.bits)
 
     def test_e_sequence_table_6_layout(self) -> None:
         bits = e_sequence_bits(12000)
@@ -248,11 +356,12 @@ class TrainingTests(unittest.TestCase):
     def test_trn_after_first_256_uses_direct_dibit_mapping(self) -> None:
         dibits = generate_trn_bits(True, 260)
         trn = generate_trn_segment(True, 260)
+        # Figure 2-5 by Y1Y2 with Y1 = b0: A = 00, B = 01, C = 11, D = 10.
         direct = {
             (0, 0): STATE_A,
-            (1, 0): STATE_B,
+            (0, 1): STATE_B,
             (1, 1): STATE_C,
-            (0, 1): STATE_D,
+            (1, 0): STATE_D,
         }
         for offset in range(256, 260):
             self.assertEqual(trn[offset], direct[dibits[offset]])
@@ -307,7 +416,12 @@ class ReceiverTests(unittest.TestCase):
             r3_selected_rate=9600,
         )
         r1_events = receiver.ingest_all(flatten_startup_trace([trace[1]]))
-        e_events = receiver.ingest_all(flatten_startup_trace([trace[4]]))
+        # E continues the R3 stream (5.3), so it is only decodable after R3.
+        e_events = [
+            event
+            for event in receiver.ingest_all(flatten_startup_trace(trace[2:5]))
+            if event.name == "E"
+        ]
         self.assertEqual(r1_events[0].name, "R1")
         self.assertEqual(r1_events[0].rate_mask, RATE_4800 | RATE_7200 | RATE_9600)
         self.assertEqual(e_events[0].name, "E")
@@ -389,7 +503,10 @@ class ReceiverTests(unittest.TestCase):
             r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
             r2_mask=RATE_4800 | RATE_9600,
             r3_selected_rate=9600,
-            r1_repetitions=3,
+            # The burst resets the run, so the descrambler restarts from an
+            # unknown seed and needs 23 bits to resynchronise (5.3's stream
+            # is continuous): words 2 and 3 are lost and 4/5 form the pair.
+            r1_repetitions=5,
         )
         stream = flatten_startup_trace(trace)
         r1_start = next(i for i, obs in enumerate(stream) if obs.source_name == "R1")
@@ -437,7 +554,8 @@ class ReceiverTests(unittest.TestCase):
             r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
             r2_mask=RATE_4800 | RATE_9600,
             r3_selected_rate=9600,
-            r1_repetitions=3,
+            # A slip corrupts the descrambler for 23 bits, i.e. into word 2.
+            r1_repetitions=4,
         )
         stream = flatten_startup_trace(trace)
         r1_start = next(i for i, obs in enumerate(stream) if obs.source_name == "R1")
@@ -454,7 +572,8 @@ class ReceiverTests(unittest.TestCase):
             r1_mask=RATE_4800 | RATE_7200 | RATE_9600,
             r2_mask=RATE_4800 | RATE_9600,
             r3_selected_rate=9600,
-            r1_repetitions=3,
+            # A slip corrupts the descrambler for 23 bits, i.e. into word 2.
+            r1_repetitions=4,
         )
         stream = flatten_startup_trace(trace)
         r1_start = next(i for i, obs in enumerate(stream) if obs.source_name == "R1")
@@ -551,10 +670,14 @@ class StartupSimulationTests(unittest.TestCase):
 
 class TxSymbolTests(unittest.TestCase):
     def test_startup_symbol_to_point_for_sync_states(self) -> None:
+        # Figure 2-5: D = 10 at (-2,6), B = 01 at (2,-6), so S = ABAB and
+        # S-bar = CDCD both alternate between points 180 degrees apart.
         self.assertEqual(startup_symbol_to_point("A"), complex(-6.0, -2.0))
-        self.assertEqual(startup_symbol_to_point("B"), complex(-2.0, 6.0))
+        self.assertEqual(startup_symbol_to_point("B"), complex(2.0, -6.0))
         self.assertEqual(startup_symbol_to_point("C"), complex(6.0, 2.0))
-        self.assertEqual(startup_symbol_to_point("D"), complex(2.0, -6.0))
+        self.assertEqual(startup_symbol_to_point("D"), complex(-2.0, 6.0))
+        self.assertEqual(startup_symbol_to_point("A"), -startup_symbol_to_point("C"))
+        self.assertEqual(startup_symbol_to_point("B"), -startup_symbol_to_point("D"))
 
     def test_startup_symbol_to_point_for_q_state(self) -> None:
         self.assertEqual(startup_symbol_to_point("Q3"), complex(6.0, 2.0))
@@ -957,6 +1080,9 @@ class RxFrontendTests(unittest.TestCase):
             r3_selected_rate=9600,
         )
         transmitted = startup_trace_to_complex_symbols(trace[:1])
+        # Start 0.4 T off, not at T/2: S = ABAB alternates 180 degrees
+        # (Figure 2-5), so T/2 is its eye crossing, where the sample is ~0 and
+        # gives the loops nothing to pull on (from there it slips 90 degrees).
         baseband = symbols_to_baseband(transmitted, samples_per_symbol=10, beta=0.5, span_symbols=8)
         passband = baseband_to_passband(baseband, sample_rate=24000, carrier_hz=1800.0)
         fixed = recover_symbols_with_frontend(
@@ -964,7 +1090,7 @@ class RxFrontendTests(unittest.TestCase):
             transmitted_symbols=transmitted,
             taps=baseband.taps,
             samples_per_symbol=10,
-            timing_offset=5,
+            timing_offset=4,
             carrier_hz=1810.0,
         )
         tracked = recover_symbols_with_tracking(
@@ -972,7 +1098,7 @@ class RxFrontendTests(unittest.TestCase):
             transmitted_symbols=transmitted,
             taps=baseband.taps,
             samples_per_symbol=10,
-            timing_offset=5.0,
+            timing_offset=4.0,
             carrier_hz=1810.0,
             phase_gain=0.3,
             timing_gain=0.02,
@@ -1434,6 +1560,28 @@ class RxFrontendTests(unittest.TestCase):
             early_late_spacing=0.5,
         )
         self.assertEqual(tracked.event_names, ["S", "R1", "S", "R3", "E", "B1"])
+
+
+class V32StartupTests(unittest.TestCase):
+    def test_v32_rate_sequences_decode_as_one_continuous_stream(self) -> None:
+        from tools.v32bis_ref.v32_receiver import V32LogicalReceiver
+        from tools.v32bis_ref.v32_startup import (
+            generate_v32_answer_startup_trace,
+            generate_v32_call_startup_trace,
+        )
+
+        call = V32LogicalReceiver().ingest_all(
+            flatten_startup_trace(generate_v32_call_startup_trace(selected_rate=9600))
+        )
+        self.assertEqual([event.name for event in call], ["AA", "CC", "S", "R2", "E", "B1"])
+        answer = V32LogicalReceiver().ingest_all(
+            flatten_startup_trace(generate_v32_answer_startup_trace(selected_rate=4800))
+        )
+        self.assertEqual(
+            [event.name for event in answer],
+            ["AC", "CA", "AC", "S", "R1", "S", "R3", "E", "B1"],
+        )
+        self.assertEqual(next(e for e in answer if e.name == "E").selected_rate, 4800)
 
 
 class DataModeTests(unittest.TestCase):

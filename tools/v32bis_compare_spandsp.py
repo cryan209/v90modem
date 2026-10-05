@@ -95,10 +95,12 @@ def parse_spandsp_scrambler_taps(c_path: Path) -> dict[str, int]:
         "calling_tx": r"s->tx\.scrambler_tap\s*=\s*(\d+);",
         "calling_rx": r"s->rx\.scrambler_tap\s*=\s*(\d+);",
     }
+    # v32bis.c has several `if (s->calling_party)` blocks; the scrambler one is
+    # the brace-free pair whose bodies assign scrambler_tap.
     if_match = re.search(
-        r"if\s*\(s->calling_party\)\s*\{(?P<if_body>.*?)\}\s*else\s*\{(?P<else_body>.*?)\}",
+        r"if\s*\(s->calling_party\)\s*\{(?P<if_body>[^{}]*scrambler_tap[^{}]*)\}"
+        r"\s*else\s*\{(?P<else_body>[^{}]*scrambler_tap[^{}]*)\}",
         text,
-        re.S,
     )
     if if_match is None:
         raise ValueError(f"could not find calling_party scrambler assignment in {c_path}")

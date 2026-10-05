@@ -10,11 +10,12 @@ from .negotiation import (
     detect_repeated_rate_signal,
     detect_s_sequence,
 )
+from .coding import differential_decode
 from .rate_signal import (
-    decode_rate_sequence_symbols,
     is_e_sequence_bits,
     is_rate_signal_bits,
 )
+from .scrambler import Descrambler, scrambler_tap
 from .spec_policy import startup_diff_state_from_final_trn_symbol
 from .stream import ObservableSymbol
 from .training import STATE_A, STATE_B, STATE_C, STATE_D, trn_final_scrambler_register
@@ -46,7 +47,12 @@ class V32bisLogicalReceiver:
     def __init__(self) -> None:
         self._recent_symbols: deque[str] = deque(maxlen=256)
         self._conditioning_symbols: deque[str] = deque()
-        self._q_run_symbols: deque[str] = deque()
+        # 5.3: the rate signal is one continuous scrambled, differentially
+        # encoded stream, so a Q run is decoded symbol by symbol from its seed
+        # and words are matched over the decoded bits.
+        self._q_bits: deque[int] = deque()
+        self._q_descrambler: Descrambler | None = None
+        self._q_diff_state = 1
         self._rate_sequences: list[list[int]] = []
         self._b1_run_length = 0
         self._in_s_run = False
@@ -65,13 +71,21 @@ class V32bisLogicalReceiver:
         self._q_initial_scrambler_register = 0
 
     def _reset_q_run(self) -> None:
-        self._q_run_symbols.clear()
+        self._q_bits.clear()
+        self._q_descrambler = None
+        self._q_diff_state = 1
         self._rate_sequences.clear()
         self._seen_e_in_run = False
         self._have_q_seed = False
         self._rate_event_seen_in_q_run = False
         self._q_initial_diff_state = 1
         self._q_initial_scrambler_register = 0
+
+    def _drop_q_symbol(self) -> None:
+        """Slide the word window one symbol (two decoded bits) on."""
+
+        self._q_bits.popleft()
+        self._q_bits.popleft()
 
     def _startup_seed_from_conditioning(self, *, calling_party: bool) -> tuple[int, int]:
         symbols = list(self._conditioning_symbols)
@@ -122,11 +136,12 @@ class V32bisLogicalReceiver:
             if observable.symbol in {STATE_A, STATE_B}:
                 self._recent_symbols.append(observable.symbol)
                 detected = len(self._recent_symbols) == 256 and detect_s_sequence(list(self._recent_symbols))
+                # One S per run of A/B symbols: the window reads BABA on every
+                # other symbol of an S longer than 256, which must not re-arm
+                # it.  The run ends on C/D or anything that is not a state.
                 if detected and not self._in_s_run:
                     self._in_s_run = True
                     events.append(DetectedEvent(name="S"))
-                elif not detected:
-                    self._in_s_run = False
             else:
                 self._recent_symbols.clear()
                 self._in_s_run = False
@@ -154,22 +169,28 @@ class V32bisLogicalReceiver:
                     )
                 self._have_q_seed = True
             self._conditioning_symbols.clear()
-            self._q_run_symbols.append(observable.symbol)
-            while len(self._q_run_symbols) >= 8:
-                candidate = list(self._q_run_symbols)[:8]
+            if self._q_descrambler is None:
+                self._q_descrambler = Descrambler(
+                    scrambler_tap(observable.tx_calling_party, transmit=True),
+                    register=self._q_initial_scrambler_register,
+                )
+                self._q_diff_state = self._q_initial_diff_state
+            try:
+                output_state = int(observable.symbol[1:])
+                dibit = differential_decode(self._q_diff_state, output_state, 4800)
+            except ValueError:
+                # Not a 4800 state: the word in progress is lost, and the
+                # window restarts on the next symbol.
                 self._q_candidates_tested += 1
-                try:
-                    decoded_bits = decode_rate_sequence_symbols(
-                        candidate,
-                        calling_party=observable.tx_calling_party,
-                        initial_diff_state=self._q_initial_diff_state,
-                        initial_scrambler_register=self._q_initial_scrambler_register,
-                    )
-                except ValueError:
-                    self._q_invalid_candidates += 1
-                    self._q_resync_shifts += 1
-                    self._q_run_symbols.popleft()
-                    continue
+                self._q_invalid_candidates += 1
+                self._q_resync_shifts += 1
+                self._q_bits.clear()
+                return events
+            self._q_diff_state = output_state
+            self._q_bits.extend(self._q_descrambler.process_bits([dibit & 0x01, (dibit >> 1) & 0x01]))
+            while len(self._q_bits) >= 16:
+                decoded_bits = list(self._q_bits)[:16]
+                self._q_candidates_tested += 1
                 if is_e_sequence_bits(decoded_bits) and not self._seen_e_in_run:
                     allow_e = observable.source_name == "E" or (
                         self._rate_event_seen_in_q_run
@@ -181,12 +202,11 @@ class V32bisLogicalReceiver:
                         except ValueError:
                             self._q_invalid_candidates += 1
                             self._q_resync_shifts += 1
-                            self._q_run_symbols.popleft()
+                            self._drop_q_symbol()
                             continue
                         self._q_valid_words += 1
                         self._e_words_detected += 1
-                        for _ in range(8):
-                            self._q_run_symbols.popleft()
+                        self._q_bits.clear()
                         self._seen_e_in_run = True
                         events.append(
                             DetectedEvent(
@@ -197,8 +217,7 @@ class V32bisLogicalReceiver:
                         break
                 if is_rate_signal_bits(decoded_bits):
                     self._q_valid_words += 1
-                    for _ in range(8):
-                        self._q_run_symbols.popleft()
+                    self._q_bits.clear()
                     self._rate_sequences.append(decoded_bits)
                     self._r_words_detected += 1
                     if len(self._rate_sequences) >= 2:
@@ -217,7 +236,7 @@ class V32bisLogicalReceiver:
                     continue
                 self._q_invalid_candidates += 1
                 self._q_resync_shifts += 1
-                self._q_run_symbols.popleft()
+                self._drop_q_symbol()
             return events
 
         if observable.symbol == "B1":

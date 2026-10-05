@@ -13,11 +13,14 @@ STATE_B = "B"
 STATE_C = "C"
 STATE_D = "D"
 
+# Figure 2-5 labels by Y1Y2: A = 00, D = 10, B = 01, C = 11.  The keys here
+# are dibit indices b0 | (b1 << 1) with b0 = Y1, so D is index 1 and B is
+# index 2 (the C datapump's V32BIS_STARTUP_* enum).
 TRN_DIRECT_MAP = {
     0b00: STATE_A,
-    0b01: STATE_B,
+    0b01: STATE_D,
+    0b10: STATE_B,
     0b11: STATE_C,
-    0b10: STATE_D,
 }
 
 

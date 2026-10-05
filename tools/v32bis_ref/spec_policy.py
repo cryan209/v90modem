@@ -13,18 +13,23 @@ TRN_INITIAL_SCRAMBLER_REGISTER = 0
 RENEGOTIATION_INITIAL_SCRAMBLER_REGISTER = 0
 POST_E_INITIAL_CONVOLUTION_STATE = 0
 
-# The Recommendation is explicit about zeroing the scrambler for TRN and
-# renegotiation, but it does not clearly say to reset the scrambler between
-# normal startup segments after TRN. We therefore model scrambler continuity
-# across TRN -> R -> E -> B1 as an interoperability assumption, not a proven
-# normative rule.
-NORMAL_STARTUP_SCRAMBLER_RESET_AFTER_E: bool | None = None
+# The Recommendation zeroes the scrambler for TRN (5.2.3) and for
+# renegotiation (5.3.2).  5.3 makes the rate signal one continuously
+# scrambled, differentially encoded stream, so the scrambler and the
+# differential encoder run on from TRN through every repeated R word, E and
+# into B1 -- nothing resets between them.  (An earlier model reseeded every
+# word from the end of TRN; slmodemd's R1 descrambled continuously reads as
+# identical valid words, and it never answered the reseeded form.  See the
+# "Against slmodemd" section of docs/v32bis_compliance_plan.md.)
+NORMAL_STARTUP_SCRAMBLER_RESET_AFTER_E = False
 
+# Figure 2-5: A = 00, D = 10, B = 01, C = 11 by Y1Y2, i.e. 4800 table indices
+# 0, 1, 2, 3 with b0 = Y1.
 _TRN_STATE_TO_DIFF_STATE = {
     "A": 0,
-    "B": 1,
+    "D": 1,
+    "B": 2,
     "C": 3,
-    "D": 2,
 }
 
 
@@ -32,13 +37,11 @@ _TRN_STATE_TO_DIFF_STATE = {
 class StartupTransmitState:
     """Reference transmitter state used when leaving TRN for startup signalling.
 
-    This models the ITU-oriented startup policy used by the reference code:
+    It seeds the first word of a rate signal; later words and E continue
+    from the state the previous word left (5.3):
     - differential state is derived from the final transmitted TRN symbol
     - scrambler register continuity is carried from the end of TRN
     - the trellis/convolution state is explicitly zero at B1 entry
-
-    The scrambler carry-forward remains an interoperability assumption rather
-    than a fully explicit normative statement from the Recommendation.
     """
 
     scrambler_register: int

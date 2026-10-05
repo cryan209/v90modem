@@ -571,9 +571,11 @@ so the transmitter is unchanged.
 Also from this session's offline harness: one informational row of the
 `v32bis_duplex_test` hybrid sweep (31.0 dB, 80 samples, canceller OFF) went from
 pass to fail; every canceller-on row still passes and the suite still exits 0.
-The Python reference (`tools/v32bis_ref`) still carries the old B11/B15 and B/D
-conventions; correcting it breaks 27 of its golden vectors and is left for
-separately.
+The Python reference (`tools/v32bis_ref`) has since been brought to the same
+conventions -- Table 5's sync bits, the B/D labels, the 9600/7200 masks, E's
+sync test and the continuous rate signal -- and its golden vectors regenerated
+and cross-checked against `v32bis_spandsp_test.c` (see "Startup Handoff
+Status").
 
 ## The near end echo canceller
 
@@ -764,23 +766,32 @@ Explicitly anchored in the Recommendation:
 - `TRN` starts with the scrambler register at zero.
 - Startup differential state is derived from the final transmitted `TRN`
   symbol.
+- The rate signal is one continuously scrambled, differentially encoded
+  stream (5.3): repeated `R` words and `E` run on from one another, and
+  nothing resets between `TRN`, `R`, `E` and `B1`.
 - The convolutional/trellis state is explicitly zero at `B1` entry.
 - Renegotiation startup is a separate case with an explicit scrambler reset.
 
-Current ITU-oriented reference policy:
+Reference policy (C datapump and `tools/v32bis_ref` agree):
 
-- Normal startup carries scrambler continuity forward from the end of `TRN`
-  into the `R`/`E`/`B1` path.
-- Repeated startup `R` words are one continuously scrambled, differentially
-  encoded stream (5.3), not reseeded per word -- the earlier reseeding policy
-  did not interoperate with slmodemd (see "Against slmodemd" above).
-- `E` is emitted as a standalone startup word with the same ITU-oriented seed
-  model, and `B1` begins with the carried scrambler/differential state plus
-  zero convolution state.
+- Normal startup carries scrambler and differential state forward from the
+  end of `TRN` into the first `R` word, then from each word into the next and
+  into `E` -- the earlier policy of reseeding every word (and `E`) from the
+  end of `TRN` was an inference, and slmodemd never answered it (see "Against
+  slmodemd" above).
+- `B1` begins with the scrambler/differential state `E` left plus zero
+  convolution state.  Where the differential encoder starts at `B1` is the one
+  convention left open (slmodemd starts it from 00; see above).
+- Labels follow Figure 2-5: `A` = 00 at (-6,-2), `D` = 10 at (-2,6), `B` = 01
+  at (2,-6), `C` = 11 at (6,2), i.e. 4800 table indices 0, 1, 2, 3.  `S` =
+  ABAB and `S-bar` = CDCD each alternate between points 180 degrees apart.
+- Table 5's sync bits are B0-B3 = 0 and B7, B11, B15 = 1 (every rate: 0x9ff0);
+  Table 6's `E` is recognised on B0-B3, B7, B11, B15 = 1 only (Notes 1, 2).
+  The reference's golden vectors (`test_rate_signal_vectors_match_c_datapump`)
+  are the C datapump's `v32bis_spandsp_test.c` ones.
 
 What remains inferred rather than fully proven from the Recommendation text:
 
-- The normal-startup scrambler carry-forward across `TRN -> R -> E -> B1`.
 - Whether every implementation should preserve exactly the same effective seed
   that SpanDSP uses at the first real post-training data symbol.
 
@@ -817,19 +828,21 @@ Current project stance:
 
 Blind (oracle-free) startup word decoding:
 
-- The reference transmitter encodes every startup word (each R word and E)
-  from the same TRN-derived state: differential state from the final TRN
-  symbol, scrambler register carried from the end of TRN. E does not continue
-  from the end of R3.
-- The blind datapump receiver therefore seeds each candidate word decode with
-  the recovered constellation state at the end of the relevant conditioning
-  segment (the TRN state labels map to the same points as `Q0..Q3`, so the
-  recovered state index is the differential seed directly) and the nominal
-  1280-symbol TRN-end scrambler register.
-- Decoding isolated 8-symbol windows from a zero scrambler register is wrong
-  under this policy: the 23-bit self-synchronizing descrambler never sees
-  enough history inside a single 16-bit word to recover, which silently
-  suppresses E detection while the looser R sync pattern can still match.
+- The first word of a rate signal is encoded from the TRN-derived state
+  (differential state from the final TRN symbol, scrambler register carried
+  from the end of TRN); every later word and E continue that stream.
+- The blind datapump receiver therefore seeds the first word's decode with
+  the recovered constellation state at the end of the conditioning segment
+  (the TRN state labels map to the same points as `Q0..Q3`, so the recovered
+  state index is the differential seed directly) and the nominal 1280-symbol
+  TRN-end scrambler register, and decodes E through the 16 symbols of R3
+  before it.  The logical receivers (`receiver.py`, `v32_receiver.py`) decode
+  each Q run as one stream and slide a 16-bit window over the bits.
+- Decoding isolated 8-symbol windows from a zero (or TRN-end) scrambler
+  register is wrong: the 23-bit self-synchronizing descrambler never sees
+  enough history inside a single 16-bit word to recover.  The flip side is
+  that a slip or erasure costs 23 bits, so recovering a corrupted R needs a
+  further two clean repetitions after it.
 - An E detection is only accepted when its rate field decodes to exactly one
   rate, mirroring the logical receiver's guard.
 

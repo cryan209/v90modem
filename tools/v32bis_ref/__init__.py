@@ -17,11 +17,16 @@ from .rate_signal import (
     RATE_7200,
     RATE_4800,
     SUPPORTED_RATE_MASK,
+    E_SYNC_BITS,
+    SYNC_BITS,
+    bits_to_word,
+    decode_rate_stream_symbols,
     e_sequence_bits,
     encode_rate_sequence_bits,
     list_from_rate_mask,
     rate_mask_from_list,
     rate_signal_bits,
+    word_to_bits,
 )
 from .scrambler import Descrambler, Scrambler, scrambler_tap
 from .negotiation import (
@@ -155,6 +160,11 @@ __all__ = [
     "rate_signal_bits",
     "e_sequence_bits",
     "encode_rate_sequence_bits",
+    "E_SYNC_BITS",
+    "SYNC_BITS",
+    "bits_to_word",
+    "decode_rate_stream_symbols",
+    "word_to_bits",
     "detect_s_sequence",
     "validate_rate_signal_bits",
     "validate_e_sequence_bits",

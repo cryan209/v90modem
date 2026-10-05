@@ -38,20 +38,34 @@ from .training import (
 from .v32_rate_signal import v32_e_sequence_bits, v32_rate_signal_bits
 
 
-def _encode_labels(
+def _encode_chain(
     bits: list[int],
     *,
     calling_party: bool,
     initial_diff_state: int,
     initial_scrambler_register: int,
-) -> list[str]:
-    encoded = encode_rate_sequence_bits(
-        bits,
-        calling_party=calling_party,
-        initial_diff_state=initial_diff_state,
-        initial_scrambler_register=initial_scrambler_register,
-    )
-    return [f"Q{state}" for state in encoded.differential_states]
+    repetitions: int = 1,
+) -> tuple[list[str], int, int]:
+    """Encode *repetitions* words as one continuous rate-signal stream (5.3).
+
+    Returns the state labels and the final (diff state, scrambler register),
+    from which the next word or E carries on.
+    """
+
+    labels: list[str] = []
+    diff_state = initial_diff_state
+    register = initial_scrambler_register
+    for _ in range(repetitions):
+        encoded = encode_rate_sequence_bits(
+            bits,
+            calling_party=calling_party,
+            initial_diff_state=diff_state,
+            initial_scrambler_register=register,
+        )
+        labels.extend(f"Q{state}" for state in encoded.differential_states)
+        diff_state = encoded.final_state
+        register = encoded.final_scrambler_register
+    return labels, diff_state, register
 
 
 def _rate_segment(
@@ -62,21 +76,23 @@ def _rate_segment(
     initial_diff_state: int,
     initial_scrambler_register: int,
     repetitions: int,
-) -> StartupSegment:
-    one = _encode_labels(
+) -> tuple[StartupSegment, int, int]:
+    labels, diff_state, register = _encode_chain(
         bits,
         calling_party=calling_party,
         initial_diff_state=initial_diff_state,
         initial_scrambler_register=initial_scrambler_register,
+        repetitions=repetitions,
     )
-    return StartupSegment(
+    segment = StartupSegment(
         name=name,
         kind="rate_signal",
         tx_calling_party=calling_party,
         bits=bits,
-        symbols=one * repetitions,
+        symbols=labels,
         repetitions=repetitions,
     )
+    return segment, diff_state, register
 
 
 def _e_segment(
@@ -88,18 +104,19 @@ def _e_segment(
     initial_scrambler_register: int,
 ) -> StartupSegment:
     bits = v32_e_sequence_bits(selected_rate, trellis=trellis)
+    labels, _, _ = _encode_chain(
+        bits,
+        calling_party=calling_party,
+        initial_diff_state=initial_diff_state,
+        initial_scrambler_register=initial_scrambler_register,
+    )
     return StartupSegment(
         name="E",
         kind="sequence_e",
         tx_calling_party=calling_party,
         bit_rate=selected_rate,
         bits=bits,
-        symbols=_encode_labels(
-            bits,
-            calling_party=calling_party,
-            initial_diff_state=initial_diff_state,
-            initial_scrambler_register=initial_scrambler_register,
-        ),
+        symbols=labels,
     )
 
 
@@ -226,24 +243,25 @@ def generate_v32_call_startup_trace(
         support_9600=support_9600,
         trellis=trellis,
     )
+    r2_segment, e_diff, e_scr = _rate_segment(
+        "R2",
+        r2_bits,
+        calling_party=True,
+        initial_diff_state=initial_diff_state,
+        initial_scrambler_register=initial_scrambler_register,
+        repetitions=r2_repetitions,
+    )
     return [
         generate_aa_segment(aa_length, calling_party=True),
         generate_cc_segment(cc_length, calling_party=True),
         _conditioning(True, conditioning),
-        _rate_segment(
-            "R2",
-            r2_bits,
-            calling_party=True,
-            initial_diff_state=initial_diff_state,
-            initial_scrambler_register=initial_scrambler_register,
-            repetitions=r2_repetitions,
-        ),
+        r2_segment,
         _e_segment(
             selected_rate,
             trellis=trellis and selected_rate == 9600,
             calling_party=True,
-            initial_diff_state=initial_diff_state,
-            initial_scrambler_register=initial_scrambler_register,
+            initial_diff_state=e_diff,
+            initial_scrambler_register=e_scr,
         ),
         _b1(selected_rate, b1_symbols, calling_party=True),
     ]
@@ -318,34 +336,36 @@ def generate_v32_answer_startup_trace(
         trellis=trellis and selected_rate == 9600,
     )
 
+    r1_segment, _, _ = _rate_segment(
+        "R1",
+        r1_bits,
+        calling_party=False,
+        initial_diff_state=r1_diff,
+        initial_scrambler_register=r1_scr,
+        repetitions=r1_repetitions,
+    )
+    r3_segment, e_diff, e_scr = _rate_segment(
+        "R3",
+        r3_bits,
+        calling_party=False,
+        initial_diff_state=r3_diff,
+        initial_scrambler_register=r3_scr,
+        repetitions=r3_repetitions,
+    )
     return [
         generate_ac_segment(ac_length, calling_party=False),
         generate_ca_segment(ca_length, calling_party=False),
         generate_ac_segment(ac_length // 2, calling_party=False),
         _conditioning(False, r1_cond),
-        _rate_segment(
-            "R1",
-            r1_bits,
-            calling_party=False,
-            initial_diff_state=r1_diff,
-            initial_scrambler_register=r1_scr,
-            repetitions=r1_repetitions,
-        ),
+        r1_segment,
         _conditioning(False, r3_cond),
-        _rate_segment(
-            "R3",
-            r3_bits,
-            calling_party=False,
-            initial_diff_state=r3_diff,
-            initial_scrambler_register=r3_scr,
-            repetitions=r3_repetitions,
-        ),
+        r3_segment,
         _e_segment(
             selected_rate,
             trellis=trellis and selected_rate == 9600,
             calling_party=False,
-            initial_diff_state=r3_diff,
-            initial_scrambler_register=r3_scr,
+            initial_diff_state=e_diff,
+            initial_scrambler_register=e_scr,
         ),
         _b1(selected_rate, b1_symbols, calling_party=False),
     ]

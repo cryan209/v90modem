@@ -91,18 +91,20 @@ def _rate_segment(
     repetitions: int,
 ) -> StartupSegment:
     bits = rate_signal_bits(rate_mask)
-    one_word_symbols, final_tx_state = _advance_startup_state(
+    # 5.3: one continuous scrambled, differentially encoded stream, so each
+    # repetition carries on from the state the previous one left.
+    symbols, final_tx_state = _advance_startup_state(
         bits,
         calling_party=calling_party,
         initial_tx_state=initial_tx_state,
-        repetitions=1,
+        repetitions=repetitions,
     )
     return StartupSegment(
         name=name,
         kind="rate_signal",
         tx_calling_party=calling_party,
         bits=bits,
-        symbols=one_word_symbols * repetitions,
+        symbols=symbols,
         repetitions=repetitions,
         initial_tx_state=initial_tx_state,
         final_tx_state=final_tx_state,
@@ -181,11 +183,11 @@ def generate_call_startup_trace(
     e_segment = _e_segment(
         r3_selected_rate,
         calling_party=True,
-        initial_tx_state=startup_state,
+        initial_tx_state=r2_segment.final_tx_state,
     )
     b1_state = StartupTransmitState(
-        scrambler_register=(e_segment.final_tx_state or startup_state).scrambler_register,
-        diff_state=(e_segment.final_tx_state or startup_state).diff_state,
+        scrambler_register=e_segment.final_tx_state.scrambler_register,
+        diff_state=e_segment.final_tx_state.diff_state,
         convolution_state=0,
     )
     return [
@@ -240,11 +242,11 @@ def generate_answer_startup_trace(
     e_segment = _e_segment(
         r3_selected_rate,
         calling_party=False,
-        initial_tx_state=r3_startup_state,
+        initial_tx_state=r3_segment.final_tx_state,
     )
     b1_state = StartupTransmitState(
-        scrambler_register=(e_segment.final_tx_state or r3_startup_state).scrambler_register,
-        diff_state=(e_segment.final_tx_state or r3_startup_state).diff_state,
+        scrambler_register=e_segment.final_tx_state.scrambler_register,
+        diff_state=e_segment.final_tx_state.diff_state,
         convolution_state=0,
     )
     return [

@@ -10,13 +10,16 @@ from .rate_signal import (
     RATE_4800,
     RATE_7200,
     RATE_9600,
+    E_SYNC_BITS,
+    SYNC_BITS,
     list_from_rate_mask,
 )
 from .training import STATE_A, STATE_B, generate_s_segment
 
 
-SYNC_RATE_BITS = {0: 0, 1: 0, 2: 0, 3: 0, 7: 1, 11: 0, 15: 0}
-SYNC_E_BITS = {0: 1, 1: 1, 2: 1, 3: 1, 4: 1, 7: 1, 8: 1, 11: 1, 13: 0, 14: 0, 15: 1}
+# Table 5 / Table 6 synchronization bits (5.3.1): B0-B3, B7, B11 and B15.
+SYNC_RATE_BITS = SYNC_BITS
+SYNC_E_BITS = E_SYNC_BITS
 
 
 def detect_s_sequence(symbols: list[str], min_length: int = 256) -> bool:
