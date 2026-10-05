@@ -389,8 +389,55 @@ static void test_ds44(void)
     check(!v250_ctl_v44_satisfied(&c, 2, false, true), "...nor by V.44 RX alone");
 }
 
+/* Courier/Rockwell spellings: each is its V.250 command, or ERROR. */
+static void test_courier_aliases(void)
+{
+    v250_ctl_t c;
+    char out[64];
+    v250_connect_report_t r = { "V34", 28800, 0, "LAPM", 1, true, true, 0 };
+
+    printf("Courier/Rockwell aliases:\n");
+    v250_ctl_reset(&c);
+    check(v250_ctl_alias(&c, "&M5") == V250_CTL_OK && c.es[0] == 3 && c.es[1] == 2 && c.es[2] == 4
+          && c.es_set, "&M5 is +ES=3,2,4 (and counts as the DTE's +ES)");
+    check(v250_ctl_alias(&c, "&M0") == V250_CTL_OK && c.es[0] == 1 && c.es[2] == 1, "&M0 is buffered");
+    check(v250_ctl_alias(&c, "\\N4") == V250_CTL_OK && c.es[1] == 3 && c.es[2] == 5, "\\N4 is LAPM required");
+    check(v250_ctl_alias(&c, "\\n3") == V250_CTL_OK && c.es[0] == 3 && c.es[1] == 0 && c.es[2] == 2,
+          "\\n3 (lower case) is the factory +ES");
+    check(v250_ctl_alias(&c, "&M1") == V250_CTL_ERROR && v250_ctl_alias(&c, "\\N1") == V250_CTL_ERROR
+          && v250_ctl_alias(&c, "\\N5") == V250_CTL_ERROR && c.es[0] == 3,
+          "sync, direct and MNP-only are ERROR and change nothing");
+    c.ds44[0] = 3;
+    check(v250_ctl_alias(&c, "&K0") == V250_CTL_OK && c.ds[0] == 0 && c.ds44[0] == 0 && c.ds_set,
+          "&K0 turns off V.42bis and V.44");
+    check(v250_ctl_alias(&c, "%C2") == V250_CTL_OK && c.ds[0] == 3 && c.ds[2] == 1024, "%C2 is +DS=3, rest kept");
+    check(v250_ctl_alias(&c, "%C3") == V250_CTL_ERROR, "%C3 (MNP5 only) is ERROR");
+    check(v250_ctl_alias(&c, "&H0") == V250_CTL_OK && c.ifc[0] == 2 && c.ifc[1] == 0, "&H0 is +IFC=,0");
+    check(v250_ctl_alias(&c, "&R1") == V250_CTL_OK && c.ifc[0] == 0 && c.ifc[1] == 0, "&R1 is +IFC=0");
+    check(v250_ctl_alias(&c, "&H2") == V250_CTL_ERROR && v250_ctl_alias(&c, "&I1") == V250_CTL_ERROR
+          && v250_ctl_alias(&c, "&R0") == V250_CTL_ERROR, "XON/XOFF and &R0 are ERROR");
+    check(v250_ctl_alias(&c, "&B1") == V250_CTL_OK && v250_ctl_alias(&c, "&I0") == V250_CTL_OK,
+          "&B and &I0 are accepted");
+    check(v250_ctl_alias(&c, "&A4") == V250_CTL_ERROR && v250_ctl_alias(&c, "&Q5") == V250_CTL_UNKNOWN,
+          "&A4 is ERROR, &Q5 is not ours");
+
+    v250_ctl_reset(&c);
+    v250_ctl_connect_suffix(&c, &r, out, sizeof(out));
+    check(!out[0], "&A0 (factory): no CONNECT suffix");
+    v250_ctl_alias(&c, "&A1");
+    v250_ctl_connect_suffix(&c, &r, out, sizeof(out));
+    check(!strcmp(out, "/ARQ"), "&A1: /ARQ");
+    v250_ctl_alias(&c, "&A3");
+    v250_ctl_connect_suffix(&c, &r, out, sizeof(out));
+    check(!strcmp(out, "/ARQ/V34/LAPM/V42BIS"), "&A3: /ARQ/V34/LAPM/V42BIS");
+    r.ec = "NONE";
+    v250_ctl_connect_suffix(&c, &r, out, sizeof(out));
+    check(!strcmp(out, "/V34"), "&A3 without error control: modulation only");
+}
+
 int main(void)
 {
+    test_courier_aliases();
     test_ds44();
     test_interface_parameters();
     test_error_control_parameters();

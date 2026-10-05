@@ -67,6 +67,10 @@ typedef struct {
     /* 6.6.2 +DS44: direction, negotiation, capability, codewords tx/rx,
      * string tx/rx, history tx/rx. */
     int ds44[9];
+    /* Not V.250: the USRobotics Courier's &A, how much of the call the
+     * CONNECT text names (0 nothing, 1 /ARQ, 2 + modulation, 3 + protocol).
+     * Factory 0 (the Courier ships &A1) so CONNECT stays what V.250 says. */
+    int arq;
 } v250_ctl_t;
 
 typedef enum {
@@ -89,6 +93,25 @@ void v250_ctl_link_params(const v250_ctl_t *c, int *tx_k, int *rx_k,
  * written to info for reads and tests. */
 v250_ctl_result_t v250_ctl_command(v250_ctl_t *c, const char *text,
                                    char *info, size_t info_len);
+
+/* The Courier/Rockwell spellings of these parameters, as the interpreter
+ * forwards them: "&M5", "\N3", "%C2" and so on (a letter and one number).
+ *   &M0 / \N0       +ES=1,0,1   buffered, no error control
+ *   &M4 / \N3       +ES=3,0,2   V.42, falling back to buffered (factory)
+ *   &M5 / \N2       +ES=3,2,4   error control required
+ *   \N4             +ES=3,3,5   LAPM required
+ *   &K0 / %C0        +DS=0, +DS44=0          no compression
+ *   &K1-3 / %C1-2    +DS=3                   V.42bis both ways
+ *   &H0 / &H1        +IFC=,0 / +IFC=,2       DTE flow-controlled by the DCE
+ *   &R1 / &R2        +IFC=0 / +IFC=2         DCE flow-controlled by the DTE
+ *   &I0              software flow control off (it always is)
+ *   &B0-2            serial rate fixed/variable: a pty has no rate (no effect)
+ *   &A0-3            the CONNECT suffix (arq above)
+ * What this DCE cannot do is ERROR, not an OK that changes nothing: &M1-3
+ * (synchronous, obsolete), \N1 (direct mode), \N5 and %C3 (MNP), &H2/&H3,
+ * &I1-5 (XON/XOFF), &R0 (CTS delayed after RTS: a pty has neither).
+ * V250_CTL_UNKNOWN for anything else. */
+v250_ctl_result_t v250_ctl_alias(v250_ctl_t *c, const char *text);
 
 /* What +ES asks of the error control layer for a call in this role. */
 typedef struct {
@@ -149,5 +172,11 @@ typedef struct {
  * so the caller can send the buffer verbatim). */
 size_t v250_ctl_format_report(const v250_ctl_t *c, const v250_connect_report_t *r,
                               char *out, size_t out_len);
+
+/* The Courier &A suffix for CONNECT ("/ARQ/V34/LAPM/V42BIS"), empty under
+ * &A0.  /ARQ and the protocol names appear only when error control is in
+ * use, as on the Courier. */
+void v250_ctl_connect_suffix(const v250_ctl_t *c, const v250_connect_report_t *r,
+                             char *out, size_t out_len);
 
 #endif /* V250_CTL_H */

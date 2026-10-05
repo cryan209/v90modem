@@ -6,7 +6,7 @@ profile n over it, `AT&Y<n>` picks the profile restored at power-on, `AT&F`
 is factory only, and `AT&V` shows the active configuration followed by the
 stored profiles in the file's own syntax.
 
-A profile holds E/Q/V/X/&C/&D, tone/pulse, S0/S2-S8/S10/S12, `+VCID`, `+MS`
+A profile holds E/Q/V/X/&C/&D/&A, tone/pulse, S0/S2-S8/S10/S12, `+VCID`, `+MS`
 and every V.250 parameter (`+MR +ER +DR +ES +DS +DS44 +EB +EFCS +ETBM +EWIND
 +EFRAM +IPR +ICF +IFC +ILRR +MSC`).  The stored dial strings (`&Z`, `+ASTO`)
 are **not** part of a profile, as on a Hayes modem: Z and &F leave them alone,
@@ -45,6 +45,7 @@ is still read, as profile 0, and is rewritten Cisco-style by the next `&W`.
 | `verbose` / `no verbose`| `V1` / `V0`         |
 | `result-codes N`        | `XN`                |
 | `dcd N`, `dtr N`        | `&CN`, `&DN`        |
+| `connect-suffix N`      | `&AN` (Courier: CONNECT .../ARQ/V34/LAPM/V42BIS) |
 | `dial tone` / `pulse`   | `T` / `P`           |
 | `s-register N V`        | `SN=V`              |
 | `+NAME value`           | `+NAME=value` (any extended command) |

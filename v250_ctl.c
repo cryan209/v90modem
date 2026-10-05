@@ -511,3 +511,97 @@ size_t v250_ctl_format_report(const v250_ctl_t *c, const v250_connect_report_t *
 #undef EMIT
     return n < out_len ? n : (out_len ? out_len - 1 : 0);
 }
+
+/* The Courier/Rockwell spellings.  Each maps onto the V.250 command it is
+ * another name for and goes through v250_ctl_command(), so validation and
+ * the es_set/ds_set bookkeeping are the V.250 path's own. */
+v250_ctl_result_t v250_ctl_alias(v250_ctl_t *c, const char *text)
+{
+    static const struct {
+        const char *name;
+        int value;              /* -1: any value (subject to max) */
+        const char *v250[2];    /* NULL, NULL: accepted, no effect */
+    } map[] = {
+        { "&M", 0, { "ES=1,0,1", NULL } },
+        { "&M", 4, { "ES=3,0,2", NULL } },
+        { "&M", 5, { "ES=3,2,4", NULL } },
+        { "\\N", 0, { "ES=1,0,1", NULL } },
+        { "\\N", 2, { "ES=3,2,4", NULL } },
+        { "\\N", 3, { "ES=3,0,2", NULL } },
+        { "\\N", 4, { "ES=3,3,5", NULL } },
+        { "&K", 0, { "DS=0", "DS44=0" } },
+        { "&K", 1, { "DS=3", NULL } },
+        { "&K", 2, { "DS=3", NULL } },
+        { "&K", 3, { "DS=3", NULL } },
+        { "%C", 0, { "DS=0", "DS44=0" } },
+        { "%C", 1, { "DS=3", NULL } },
+        { "%C", 2, { "DS=3", NULL } },
+        { "&H", 0, { "IFC=,0", NULL } },
+        { "&H", 1, { "IFC=,2", NULL } },
+        { "&R", 1, { "IFC=0", NULL } },
+        { "&R", 2, { "IFC=2", NULL } },
+        { "&I", 0, { NULL, NULL } },
+        { "&B", 0, { NULL, NULL } },
+        { "&B", 1, { NULL, NULL } },
+        { "&B", 2, { NULL, NULL } },
+    };
+    static const char *const known[] = { "&M", "\\N", "&K", "%C", "&H", "&R", "&I", "&B", "&A" };
+    char name[3];
+    char *end;
+    long v;
+    bool ours = false;
+
+    if (!text || strlen(text) < 3)
+        return V250_CTL_UNKNOWN;
+    name[0] = text[0];
+    name[1] = (char) toupper((unsigned char) text[1]);
+    name[2] = '\0';
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++)
+        ours |= !strcmp(name, known[i]);
+    if (!ours)
+        return V250_CTL_UNKNOWN;
+    if (!isdigit((unsigned char) text[2]))
+        return V250_CTL_ERROR;
+    v = strtol(text + 2, &end, 10);
+    if (*end)
+        return V250_CTL_ERROR;
+    if (!strcmp(name, "&A")) {
+        if (v > 3)
+            return V250_CTL_ERROR;
+        c->arq = (int) v;
+        return V250_CTL_OK;
+    }
+    for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++) {
+        v250_ctl_t trial = *c;
+        char info[64];
+
+        if (strcmp(map[i].name, name) || map[i].value != v)
+            continue;
+        for (int k = 0; k < 2 && map[i].v250[k]; k++)
+            if (v250_ctl_command(&trial, map[i].v250[k], info, sizeof(info)) != V250_CTL_OK)
+                return V250_CTL_ERROR;
+        *c = trial;             /* all of it or none (5.4.4.2) */
+        return V250_CTL_OK;
+    }
+    return V250_CTL_ERROR;
+}
+
+void v250_ctl_connect_suffix(const v250_ctl_t *c, const v250_connect_report_t *r,
+                             char *out, size_t out_len)
+{
+    bool ec = r->ec && strcmp(r->ec, "NONE");
+    size_t used = 0;
+
+    if (out_len == 0)
+        return;
+    out[0] = '\0';
+    if (c->arq >= 1 && ec)
+        used += (size_t) snprintf(out + used, out_len - used, "/ARQ");
+    if (c->arq >= 2 && r->carrier && r->carrier[0] && used < out_len)
+        used += (size_t) snprintf(out + used, out_len - used, "/%s", r->carrier);
+    if (c->arq >= 3 && ec && used < out_len) {
+        used += (size_t) snprintf(out + used, out_len - used, "/%s", r->ec);
+        if (r->dc_scheme && used < out_len)
+            snprintf(out + used, out_len - used, "/%s", r->dc_scheme == 2 ? "V44" : "V42BIS");
+    }
+}

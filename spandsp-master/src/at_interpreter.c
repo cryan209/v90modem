@@ -1677,7 +1677,14 @@ static const char *at_cmd_amp_D(at_state_t *s, const char *t)
 
 static const char *at_cmd_amp_F(at_state_t *s, const char *t)
 {
+    int val;
+
     t += 2;
+    /* Courier &F1 is the hardware flow control profile -- what a pty's
+       back-pressure is anyway -- so it is &F0.  &F2 (software flow) is not. */
+    if ((val = parse_num(&t, 1)) < 0)
+        return NULL;
+    /*endif*/
 
     /* V.250 6.1.2 - Set to factory-defined configuration */
     /* Just make sure we are on hook */
@@ -1690,6 +1697,82 @@ static const char *at_cmd_amp_F(at_state_t *s, const char *t)
     s->display_call_info = 0;
     at_modem_control(s, AT_MODEM_CONTROL_MODULATION, NULL);
     return t;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Courier/Rockwell commands that are another spelling of a V.250 parameter
+   (&M -> +ES, &K and %C -> +DS, &H/&R/&I -> +IFC, &A for the CONNECT text):
+   the application maps "&M5" and the like, and refuses what it cannot do
+   (MNP, direct mode, software flow control). */
+static const char *at_forward_alias(at_state_t *s, const char *t, int name_len, int max_value)
+{
+    char buf[16];
+    const char *name = t;
+    int val;
+
+    t += name_len;
+    if ((val = parse_num(&t, max_value)) < 0)
+        return NULL;
+    /*endif*/
+    snprintf(buf, sizeof(buf), "%.*s%d", name_len, name, val);
+    if (at_modem_control(s, AT_MODEM_CONTROL_PARAMETER, buf) < 0)
+        return NULL;
+    /*endif*/
+    return t;
+}
+/*- End of function --------------------------------------------------------*/
+
+static const char *at_cmd_amp_A(at_state_t *s, const char *t)
+{
+    return at_forward_alias(s, t, 2, 3);
+}
+/*- End of function --------------------------------------------------------*/
+
+static const char *at_cmd_amp_B(at_state_t *s, const char *t)
+{
+    return at_forward_alias(s, t, 2, 2);
+}
+/*- End of function --------------------------------------------------------*/
+
+static const char *at_cmd_amp_H(at_state_t *s, const char *t)
+{
+    return at_forward_alias(s, t, 2, 3);
+}
+/*- End of function --------------------------------------------------------*/
+
+static const char *at_cmd_amp_I(at_state_t *s, const char *t)
+{
+    return at_forward_alias(s, t, 2, 5);
+}
+/*- End of function --------------------------------------------------------*/
+
+static const char *at_cmd_amp_K(at_state_t *s, const char *t)
+{
+    return at_forward_alias(s, t, 2, 3);
+}
+/*- End of function --------------------------------------------------------*/
+
+static const char *at_cmd_amp_M(at_state_t *s, const char *t)
+{
+    return at_forward_alias(s, t, 2, 5);
+}
+/*- End of function --------------------------------------------------------*/
+
+static const char *at_cmd_amp_R(at_state_t *s, const char *t)
+{
+    return at_forward_alias(s, t, 2, 2);
+}
+/*- End of function --------------------------------------------------------*/
+
+static const char *at_cmd_bs_N(at_state_t *s, const char *t)
+{
+    return at_forward_alias(s, t, 2, 5);
+}
+/*- End of function --------------------------------------------------------*/
+
+static const char *at_cmd_pct_C(at_state_t *s, const char *t)
+{
+    return at_forward_alias(s, t, 2, 3);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -1728,7 +1811,7 @@ static const char *at_cmd_amp_W(at_state_t *s, const char *t)
     /* Hayes - Store the active configuration as profile n, the one Zn
        restores. */
     t += 2;
-    if ((val = parse_num(&t, 0)) < 0)
+    if ((val = parse_num(&t, stored_profile_max(s))) < 0)
         return NULL;
     /*endif*/
     if (profile_op(s, 'W', val) < 0)
@@ -1761,7 +1844,7 @@ static const char *at_cmd_amp_V(at_state_t *s, const char *t)
     /* Hayes - View active configuration.  The application's settings page
        (ATI4) is the configuration, so it answers this too. */
     t += 2;
-    if ((val = parse_num(&t, stored_profile_max(s))) < 0)
+    if ((val = parse_num(&t, 0)) < 0)
         return NULL;
     /*endif*/
     if (at_modem_control(s, AT_MODEM_CONTROL_INFO, "&V") <= 0)

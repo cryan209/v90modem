@@ -465,7 +465,11 @@ static int handle_v250_parameter(const char *text)
     v250_ctl_result_t r;
 
     pthread_mutex_lock(&v250_mtx);
-    r = v250_ctl_command(&v250, text, info, sizeof(info));
+    info[0] = '\0';
+    if (text[0] == '&' || text[0] == '\\' || text[0] == '%')
+        r = v250_ctl_alias(&v250, text);    /* Courier/Rockwell spelling */
+    else
+        r = v250_ctl_command(&v250, text, info, sizeof(info));
     pthread_mutex_unlock(&v250_mtx);
     if (r != V250_CTL_OK)
         return -1;
@@ -759,6 +763,7 @@ static void profile_settings(const di_profile_t *sp, pf_profile_t *out)
     pf_add(out, 0, "dial %s", sp->p.pulse_dial ? "pulse" : "tone");
     for (size_t i = 0; i < sizeof(sregs) / sizeof(sregs[0]); i++)
         pf_add(out, 0, "s-register %d %d", sregs[i], sp->p.s_regs[sregs[i]]);
+    pf_add(out, 0, "connect-suffix %d", sp->v250.arq);
     pf_add(out, 0, "+VCID %d", sp->vcid);
     if (sp->ms_valid) {
         at_ms_format_read(&sp->ms, info, sizeof(info));
@@ -1129,10 +1134,11 @@ static void info_settings(page_t *pg)
     v250_ctl_t cfg;
 
     page_put(pg, "Current Settings...\r\n");
-    page_put(pg, "E%d Q%d V%d X%d &C%d &D%d %s\r\n",
+    di_get_v250_settings(&cfg);
+    page_put(pg, "E%d Q%d V%d X%d &C%d &D%d %s &A%d\r\n",
              at->p.echo ? 1 : 0, at->p.result_code_format == DI_NO_RESULT_CODES ? 1 : 0,
              at->p.verbose ? 1 : 0, at->result_code_mode, at->rlsd_behaviour,
-             at->dtr_behaviour, at->p.pulse_dial ? "P" : "T");
+             at->dtr_behaviour, at->p.pulse_dial ? "P" : "T", cfg.arq);
     for (size_t i = 0; i < sizeof(sregs) / sizeof(sregs[0]); i++)
         page_put(pg, "S%02d=%03d%s", sregs[i], at->p.s_regs[sregs[i]],
                  i + 1 < sizeof(sregs) / sizeof(sregs[0]) ? " " : "\r\n");
@@ -1960,8 +1966,15 @@ void di_on_connected(int rate)
         snprintf(msg, sizeof(msg), "1%c", at->p.s_regs[3]);
     else if (at && at->result_code_mode == 0)
         snprintf(msg, sizeof(msg), "\r\nCONNECT\r\n");
-    else
-        snprintf(msg, sizeof(msg), "\r\nCONNECT %d\r\n", rate);
+    else {
+        /* Courier &A: "/ARQ/V34/LAPM/V42BIS" after the rate (X1 and up). */
+        v250_ctl_t cfg;
+        char suffix[48];
+
+        di_get_v250_settings(&cfg);
+        v250_ctl_connect_suffix(&cfg, &rep, suffix, sizeof(suffix));
+        snprintf(msg, sizeof(msg), "\r\nCONNECT %d%s\r\n", rate, suffix);
+    }
     ctrl_write(msg, strlen(msg));
 }
 

@@ -69,13 +69,22 @@ static const at_help_entry_t dial_rows[] = {
 
 /* &$ */
 static const at_help_entry_t amp_rows[] = {
+    { "&A0-3",   "CONNECT suffix: 0 none, 1 /ARQ, 2 +/V34, 3 +/LAPM/V42BIS", "&A0" },
+    { "&B0-2",   "Serial rate fixed/variable (accepted; a pty has no rate)", "&B1" },
     { "&C0/&C1", "DCD behaviour (stored; a pty has no DCD line)",     "&C1" },
     { "&D0-2",   "DTR behaviour (stored; a pty has no DTR line)",     "&D2" },
-    { "&F",      "Factory defaults (not the &W profile)",              NULL },
+    { "&F0/&F1", "Factory defaults (not the &W profile); &F2 is ERROR", NULL },
+    { "&H0/&H1", "Transmit flow control none/CTS (+IFC <DTE by DCE>)", "&H1" },
+    { "&I0",     "Software flow control off (XON/XOFF, &I1-5, is ERROR)", "&I0" },
+    { "&K0-3",   "Compression: &K0 none, &K1-3 V.42bis (+DS, +DS44)", NULL },
+    { "&M0/4/5", "Error control: none / V.42 or buffered / required (+ES)", NULL },
+    { "&R1/&R2", "Receive flow control: ignore RTS / RTS (+IFC <DCE by DTE>)", "&R2" },
     { "&V",      "View the active configuration and stored profiles", "&V" },
     { "&Wn",     "Store the active configuration as profile n (0-1)", NULL },
     { "&Yn",     "Profile restored at power-on (0-1; --profile file)", NULL },
     { "&Zn=s",   "Store number s in slot n (0-9); &Zn? shows it",     "&Z0?" },
+    { "\\N0/2-4", "Rockwell error control: 0 none, 2 required, 3 auto, 4 LAPM", NULL },
+    { "%C0-2",   "Rockwell compression: 0 none, 1/2 V.42bis (MNP5 is ERROR)", NULL },
 };
 
 /* +$: only commands that do what V.250/T.31/T.32 says.  Accepted-but-ignored

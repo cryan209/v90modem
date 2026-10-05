@@ -427,10 +427,10 @@ int main(int argc, char **argv)
         side_t *s = &side[k];
         char fin[512];
         const char *c = strstr(s->dte, "CONNECT");
-        char conn[32] = "none";
+        char conn[64] = "none";
 
         if (c)
-            sscanf(c, "%31[^\r\n]", conn);
+            sscanf(c, "%63[^\r\n]", conn);
         final_line(s, fin, sizeof(fin));
         printf("  %-6s %s at %.2f s; %s", s->name, conn,
                s->connect_frame >= 0 ? s->connect_frame * FRAME / 8000.0 : -1.0,
@@ -475,9 +475,16 @@ int main(int argc, char **argv)
         }
         if (expect_connect && !expect_hangup) {
             char want[64];
+            const char *hit;
+            size_t wl;
 
-            snprintf(want, sizeof(want), "CONNECT %s\r", expect_connect);
-            if (!strstr(s->dte, want)) {
+            /* The rate, then the end of the line or a Courier &A suffix. */
+            snprintf(want, sizeof(want), "CONNECT %s", expect_connect);
+            wl = strlen(want);
+            hit = strstr(s->dte, want);
+            while (hit && hit[wl] != '\r' && hit[wl] != '/')
+                hit = strstr(hit + 1, want);
+            if (!hit) {
                 printf("  %-6s FAIL: expected CONNECT %s\n", s->name, expect_connect);
                 failed = 1;
             }

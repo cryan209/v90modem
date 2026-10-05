@@ -82,6 +82,7 @@ int pf_setting_to_at(const char *setting, char *out, size_t cap)
     };
     static const struct { const char *name; const char *cmd; } numeric[] = {
         { "result-codes", "X" }, { "dcd", "&C" }, { "dtr", "&D" },
+        { "connect-suffix", "&A" },
     };
     char w[40];
     const char *rest = first_word(setting, w, sizeof(w));

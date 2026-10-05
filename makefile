@@ -442,6 +442,7 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --both-expect "+MCR: V22B|+MRR: 2400|+ER: LAPM|+DR: V42B|CONNECT 2400"
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --alaw --both-expect "+MCR: V22B|+MRR: 2400|+ER: LAPM|+DR: V42B|CONNECT 2400"
 	./engine_pair_test --expect V22BIS --expect-connect 1200 --both-at "AT+MS=V22" --both-at "AT+MR=1" --both-expect "+MCR: V22|+MRR: 1200|CONNECT 1200"
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT&A3" --both-at "AT&M4" --both-expect "CONNECT 2400/ARQ/V22B/LAPM/V42BIS"
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --both-at "AT+DS=0" --both-expect "+ER: LAPM|+DR: NONE|CONNECT"
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --call-at "AT+DS=1" --call-expect "+DR: V42B TD|CONNECT" --answer-expect "+DR: V42B RD|CONNECT"
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --call-at "AT+DS=2" --call-expect "+DR: V42B RD|CONNECT" --answer-expect "+DR: V42B TD|CONNECT"

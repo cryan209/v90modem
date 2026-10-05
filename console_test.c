@@ -436,6 +436,28 @@ static void test_v250_parameters(void)
     di_on_disconnected();
     collect(dte, buf, sizeof(buf), 150);
 
+    /* Courier &A: the call named in the CONNECT text; &M/&K/\\N reach +ES/+DS. */
+    expect(dte, "AT+MR=0;+ER=0;+DR=0", "OK");
+    expect(dte, "AT&A3", "OK");
+    di_on_connected(52000);
+    collect(dte, buf, sizeof(buf), 150);
+    check(strstr(buf, "CONNECT 52000/ARQ/V90/LAPM/V42BIS\r") != NULL, "&A3: CONNECT 52000/ARQ/V90/LAPM/V42BIS");
+    di_on_disconnected();
+    collect(dte, buf, sizeof(buf), 150);
+    expect(dte, "AT&A0&M5&K0", "OK");
+    expect(dte, "AT+ES?", "+ES: 3,2,4");
+    expect(dte, "AT+DS?", "+DS: 0,");
+    expect(dte, "AT\\N3%C2", "OK");
+    expect(dte, "AT+ES?", "+ES: 3,0,2");
+    expect(dte, "AT+DS?", "+DS: 3,");
+    expect(dte, "AT&M1", "ERROR");
+    expect(dte, "AT\\N5", "ERROR");
+    expect(dte, "AT&F2", "ERROR");
+    expect(dte, "AT&F1", "OK");
+    expect(dte, "AT&H1&R2&I0&B1", "OK");
+    expect(dte, "ATI4", "&A0");
+    expect(dte, "AT+MR=1;+ER=1;+DR=1", "OK");
+
     /* A call that settled on no error control and no compression says so. */
     fake_report = (v250_connect_report_t) { "V32B", 14400, 0, "NONE", 0, false, false, 0 };
     di_on_connected(14400);
@@ -1060,12 +1082,14 @@ static void test_profile(void)
     expect(dte, "ATE0", "OK");
     expect(dte, "AT&V", "none: ATZ restores the factory settings");
     expect(dte, "ATS0=3X2+ES=1,0,1;+VCID=1;+EWIND=6;+MS=V34;+ASTO=2,555", "OK");
+    expect(dte, "AT&A2", "OK");
     expect(dte, "AT&W", "OK");                      /* &W is &W0 */
     check(access(file, R_OK) == 0, "&W writes the --profile file");
     read_file(file, buf, sizeof(buf));
     check(strstr(buf, "profile 0\n no echo\n") && strstr(buf, " s-register 0 3\n")
           && strstr(buf, " +ES 1,0,1\n") && strstr(buf, "number 2 \"555\"\n")
-          && strstr(buf, "power-on-profile 0\n") && strstr(buf, "\nend\n"),
+          && strstr(buf, "power-on-profile 0\n") && strstr(buf, "\nend\n")
+          && strstr(buf, " connect-suffix 2\n"),
           "  ...in the Cisco-style syntax");
     expect(dte, "ATS0=5X3+MS=V90", "OK");
     expect(dte, "AT&W1", "OK");
@@ -1074,6 +1098,7 @@ static void test_profile(void)
     expect(dte, "ATZ", "OK");
     expect(dte, "ATS0?", "003");
     expect(dte, "ATI4", " X2 ");
+    expect(dte, "ATI4", "&A2");
     expect(dte, "AT+ES?", "+ES: 1,0,1");
     expect(dte, "AT+VCID?", "+VCID: 1");
     expect(dte, "AT+EWIND?", "+EWIND: 6,0");

@@ -34,9 +34,17 @@
 const char *wordlist[] =
 {
     " ",        /* Dummy to absorb spaces in commands */
+    "%C",       /* Rockwell - Data compression */
+    "&A",       /* Courier - ARQ/modulation/protocol in CONNECT */
+    "&B",       /* Courier - Fixed serial port rate */
     "&C",       /* V.250 6.2.8 - Circuit 109 (received line signal detector), behaviour */
     "&D",       /* V.250 6.2.9 - Circuit 108 (data terminal ready) behaviour */
     "&F",       /* V.250 6.1.2 - Set to factory-defined configuration */
+    "&H",       /* Courier - Transmit data flow control */
+    "&I",       /* Courier - Received data software flow control */
+    "&K",       /* Courier - Data compression */
+    "&M",       /* Courier - Error control */
+    "&R",       /* Courier - RTS (received data) flow control */
     "&V",       /* Hayes - View active configuration */
     "&W",       /* Hayes - Store the active configuration */
     "&Y",       /* Hayes - Select the stored profile used at power-on */
@@ -441,6 +449,7 @@ const char *wordlist[] =
     "T",        /* V.250 6.3.2 - Select tone dialling (command) */
     "V",        /* V.250 6.2.6 - DCE response format */
     "X",        /* V.250 6.2.7 - Result code selection and call progress monitoring control */
+    "\\N",      /* Rockwell - Error control mode */
     "Z",        /* V.250 6.1.1 - Reset to default configuration */
     NULL
 };
@@ -605,6 +614,12 @@ static void dump_trie(void)
             break;
         case '&':
             printf("    at_cmd_amp_%s,\n", wordlist[i] + 1);
+            break;
+        case '\\':
+            printf("    at_cmd_bs_%s,\n", wordlist[i] + 1);
+            break;
+        case '%':
+            printf("    at_cmd_pct_%s,\n", wordlist[i] + 1);
             break;
         default:
             printf("    at_cmd_%s,\n", wordlist[i]);

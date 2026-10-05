@@ -8,6 +8,7 @@
  *     result-codes N                XN
  *     dcd N                         &CN
  *     dtr N                         &DN
+ *     connect-suffix N              &AN          (Courier CONNECT .../ARQ/...)
  *     dial tone | dial pulse        T / P
  *     s-register N V                SN=V
  *     +NAME value                   +NAME=value  (+MS, +ES, +VCID, ... any)
