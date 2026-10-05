@@ -37,6 +37,7 @@ typedef enum {
     ME_MOD_V90,      /* V.90 downstream PCM + V.34 upstream (future) */
     ME_MOD_V34,      /* Full V.34 duplex (up to 33.6 kbps) */
     ME_MOD_V22BIS,   /* Full V.22bis duplex (fallback) */
+    ME_MOD_V32BIS,   /* V.32bis / V.32 duplex, echo cancelling */
     ME_MOD_X2       /* Experimental asymmetric PCM x2 digital endpoint */
 } me_modulation_t;
 

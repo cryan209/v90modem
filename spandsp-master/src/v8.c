@@ -1183,9 +1183,9 @@ static void handle_calling_modem_connect_tone(v8_state_t *s, int tone)
         ||
         tone == MODEM_CONNECT_TONES_ANSAM_PR
         ||
-        tone == MODEM_CONNECT_TONES_ANS
-        ||
-        tone == MODEM_CONNECT_TONES_ANS_PR)
+        (!s->parms.ans_is_legacy
+         &&
+         (tone == MODEM_CONNECT_TONES_ANS  ||  tone == MODEM_CONNECT_TONES_ANS_PR)))
     {
         /* On some packet networks the 15Hz AM on ANSam can be stripped or
            mangled while the 2100Hz/phase-reversal structure survives as ANS/ANS_PR.

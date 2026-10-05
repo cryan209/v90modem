@@ -154,6 +154,13 @@ struct v8_parms_s
     int32_t send_ci;
     int32_t v92;
     v8_cm_jm_parms_t jm_cm;
+    /*! Calling side: treat an answer tone WITHOUT the 15 Hz modulation (V.25
+        ANS, with or without phase reversals) as a non-V.8 answerer, as V.8 7.2
+        requires ("shall not transmit CM" without ANSam), and report
+        V8_STATUS_NON_V8_CALL rather than sending CM.  Off by default: the
+        historical behaviour accepts ANS as ANSam, for packet paths that strip
+        the modulation. */
+    bool ans_is_legacy;
 };
 
 #if defined(__cplusplus)

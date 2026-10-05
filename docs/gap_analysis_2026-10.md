@@ -45,8 +45,8 @@ suite run on this date. Interop claims come from the dated entries in
 | V.92 analogue | wired (`v92a`) | ideal-bearer harness | stops at Sd-bar timeout over a real loop. Phase 4 audio DATA assertion known-failing in the full `v92_startup_test` audio case. |
 | V.34 duplex | yes | 2400-3429 baud, up to 28800, echo, 11.6 | SmartLink: data mode, LAPM. RasFinder: `CONNECT 19200`, held 300 s calls. Intermittent MP'/E; first ask too high. |
 | V.34 half-duplex (fax) | probe only (`ME_V34_FAX_PROBE`) | control channel end to end | Canon reaches control-channel data. **T.30 Annex F absent.** |
-| V.32bis / V.32 | **not wired** | full clause 6/8 dialogue, echo canceller, renegotiation | none |
-| V.22bis / V.22 | yes (fallback, non-V.8) | SpanDSP | HSF loop: V.22bis carried traffic |
+| V.32bis / V.32 | **yes** (2026-10-05): V.8 when it is the carrier, V.32bis Annex A automode otherwise, `AT+MS=V32B`/`V32` | clause 6/8 dialogue; `engine_pair_test` engine against engine, both laws | none |
+| V.22bis / V.22 | yes (V.8, Annex A automode, `AT+MS=V22B`/`V22`) | SpanDSP; `engine_pair_test` | HSF loop: V.22bis carried traffic |
 | V.21, V.23, Bell 103, Bell 212A | **not wired** (FSK presets exist in SpanDSP) | none | none |
 | Fax class 1 / 2.0 (V.17/V.29/V.27ter/V.21) | yes, via T.31 / T.32 | `fax_class_test`, `fax_class2_test` | **none** |
 | x2, K56flex | experimental | receive replay | neither completes a call |
@@ -165,6 +165,24 @@ suite run on this date. Interop claims come from the dated entries in
     - The V.90/V.92 analogue receivers still lack continuous symbol-timing
       tracking. Measured: 163 ppm against the SIP side's clock.
     - The V.92 Phase 3 receiver has no equaliser.
+
+## Progress since this note
+
+- **2026-10-05, items 2, 4 and 5 (mostly) done.**
+  - `AT+MS` (V.250 6.4.1) now selects the carrier, automode and rate limits
+    for the next call. Unknown command-line flags are an error, and `--mode`
+    takes `v22` and `v32`.
+  - V.32bis runs in the engine.
+  - V.32bis Annex A automode connects pre-V.8 V.32bis and V.22bis modems in
+    both roles.
+  - `engine_pair_test` grades all of it with two whole engines.
+  - Still open from those items: the hundreds of experiment knobs are still
+    environment variables.
+- **New finding from the same harness.** V.34 engine-against-engine does
+  not train: both ends stall in Phase 2's INFO0 exchange. The bare
+  `v34_duplex_test` does train, so the fault is in the engine's V.34 path.
+  Reproduce with
+  `./engine_pair_test --seconds 60 --expect V34 --both-env ME_MODE=v34`.
 
 ## 4. Suggested order
 

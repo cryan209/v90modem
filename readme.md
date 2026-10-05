@@ -92,8 +92,22 @@ make
                 --pty-link /tmp/v90modem
 ```
 
-Select the highest modem family offered in V.8 with `--mode v34|v90|v92`.
-The default is `v90`; lower fallback modes remain advertised. For a plain V.34
+Select the highest modem family with `--mode v22|v32|v34|v90|v92` (or `x2`).
+The default is `v90`; lower fallback modes remain available. The DTE can change
+it for the next call with V.250 `AT+MS` -- `AT+MS=?` lists the carriers
+(`V92,V90,V34,V32B,V32,V22B,V22`), `AT+MS=V34,0` allows V.34 only (automode
+off), `AT+MS=V32B,1,0,9600` caps V.32bis at 9600, and a minimum rate clears a
+connection below it instead of reporting CONNECT. ATZ/AT&F return to the
+startup mode.
+
+Callers and answerers without V.8 are handled by V.32bis Annex A automode:
+an answerer hears V.32's AA during its answer tone and starts V.32bis, or
+answers V.22bis (USB1) and moves to V.32bis after Ta = 3 s with no S1/SB1;
+a caller that hears a plain V.25 ANS (no ANSam) does not send CM (V.8 7.2)
+and instead sends AA, falling back to V.22bis on USB1. `ME_V8=0` runs the
+modem as a pre-V.8 automode modem throughout (plain ANS when answering).
+`make test` runs two whole engines against each other for each pairing
+(`engine_pair_test`). For a plain V.34
 interoperability run, configure the peer for V.34 and start this endpoint with:
 
 ```bash
