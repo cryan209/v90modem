@@ -25,17 +25,28 @@ static const struct {
     const char *mode_exact; /* engine mode for automode 0, NULL = ERROR */
     const char *mode_auto;  /* engine mode for automode 1, NULL = ERROR */
     int max_rate;
+    const char *offer;      /* what the next call offers, for +MS$ */
 } carriers[] = {
-    { "V22",  { NULL },                       "v22", "v22",  1200 },
-    { "V22B", { "V22BIS", NULL },             "v22", "v22",  2400 },
-    { "V32",  { NULL },                       NULL,  "v22",  9600 },
-    { "V32B", { "V32BIS", NULL },             NULL,  "v22", 14400 },
-    { "V34",  { NULL },                       "v34", "v34", 33600 },
-    { "K56",  { "56", "56K", "K56FLEX" },     NULL,  "k56", 56000 },
-    { "V90",  { NULL },                       "v90", "v90", 56000 },
-    { "V92",  { NULL },                       "v92", "v92", 56000 },
-    { "V91",  { NULL },                       "v91", "v91", 64000 },
-    { "X2",   { NULL },                       "x2",  "x2",  56000 },
+    { "V22",  { NULL },                       "v22", "v22",  1200,
+      "V.22/V.22bis" },
+    { "V22B", { "V22BIS", NULL },             "v22", "v22",  2400,
+      "V.22/V.22bis" },
+    { "V32",  { NULL },                       NULL,  "v22",  9600,
+      "V.22bis (no V.32 here)" },
+    { "V32B", { "V32BIS", NULL },             NULL,  "v22", 14400,
+      "V.22bis (no V.32bis here)" },
+    { "V34",  { NULL },                       "v34", "v34", 33600,
+      "V.34, V.22bis; ,0: V.34" },
+    { "K56",  { "56", "56K", "K56FLEX" },     NULL,  "k56", 56000,
+      "K56flex V.8bis, then V.90" },
+    { "V90",  { NULL },                       "v90", "v90", 56000,
+      "V.90, V.34, V.22bis" },
+    { "V92",  { NULL },                       "v92", "v92", 56000,
+      "V.92/V.90, V.34, V.22bis" },
+    { "V91",  { NULL },                       "v91", "v91", 64000,
+      "V.91+V.90, V.34; ,0: V.91+V.34" },
+    { "X2",   { NULL },                       "x2",  "x2",  56000,
+      "x2 (V.34 upstream)" },
 };
 
 #define N_CARRIERS (sizeof(carriers) / sizeof(carriers[0]))
@@ -126,6 +137,8 @@ at_ms_op_t at_ms_parse(const char *args, at_ms_settings_t *out)
         return AT_MS_READ;
     if (!strcmp(t, "=?"))
         return AT_MS_TEST;
+    if (!strcmp(t, "$"))
+        return AT_MS_HELP;
     if (*t++ != '=')
         return AT_MS_ERROR;
 
@@ -217,4 +230,46 @@ void at_ms_format_test(char *buf, size_t len)
         snprintf(buf + used, len - used,
                  "),(0,1),(0-%d),(0-%d),(0-%d),(0-%d)", AT_MS_MAX_RATE,
                  AT_MS_MAX_RATE, AT_MS_MAX_RATE, AT_MS_MAX_RATE);
+}
+
+/* Courier-style help: syntax, then one row per carrier with its aliases,
+ * the automodes it accepts, its maximum rate and what the next call offers.
+ * Built from the table above, so it cannot disagree with the parser. */
+void at_ms_format_help(const at_ms_settings_t *cur, char *buf, size_t len)
+{
+    size_t used = 0;
+    char cur_text[64];
+
+#define HELP_PUT(...) do { \
+        if (used < len) \
+            used += (size_t) snprintf(buf + used, len - used, __VA_ARGS__); \
+    } while (0)
+
+    HELP_PUT("+MS  V.250 6.4.1 modulation selection\r\n");
+    HELP_PUT("  +MS=<carrier>[,<automode>[,<min>,<max>]]\r\n");
+    HELP_PUT("  +MS=<carrier>,<automode>,<min_tx>,<max_tx>,<min_rx>,<max_rx>\r\n");
+    HELP_PUT("  +MS?  current   +MS=?  ranges   +MS$  this help\r\n");
+    HELP_PUT("  <automode> 1 = may fall back to lower modulations (default)\r\n");
+    HELP_PUT("             0 = the named carrier only\r\n");
+    HELP_PUT("  <rate> bit/s, 0 = no limit, at most the carrier maximum;\r\n");
+    HELP_PUT("         reported, not enforced -- training picks the rate\r\n");
+    HELP_PUT("  Takes effect on the next call. ATZ, AT&F restore the default.\r\n");
+    HELP_PUT("\r\n");
+    HELP_PUT("  Carrier  Also             Auto  Max bit/s  Next call offers\r\n");
+    for (size_t i = 0; i < N_CARRIERS; i++) {
+        char aliases[32] = "";
+        size_t a_used = 0;
+
+        for (size_t a = 0; a < 3 && carriers[i].alias[a]; a++)
+            a_used += (size_t) snprintf(aliases + a_used, sizeof(aliases) - a_used,
+                                        "%s%s", a ? "," : "", carriers[i].alias[a]);
+        HELP_PUT("  %-8s %-16s %-5s %9d  %s\r\n", carriers[i].carrier, aliases,
+                 carriers[i].mode_exact ? "0,1" : "1", carriers[i].max_rate,
+                 carriers[i].offer);
+    }
+    if (cur) {
+        at_ms_format_read(cur, cur_text, sizeof(cur_text));
+        HELP_PUT("\r\n  Current: %s", cur_text + 5);   /* past "+MS: " */
+    }
+#undef HELP_PUT
 }

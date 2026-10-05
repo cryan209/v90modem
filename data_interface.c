@@ -203,13 +203,33 @@ static int at_tx_handler(void *user_data,
 /* V.250 6.4.1 +MS.  args is the text after "+MS", or NULL for ATZ/AT&F.
  * Runs inside the AT interpreter, so at_put_response() lands before the
  * final OK.  Returns <0 for ERROR. */
-static int handle_plus_ms(const char *args)
+/* What +MS? reports: the last AT+MS as given while the engine still holds
+ * the mode it mapped to, otherwise the engine's mode with no rate limits. */
+static void plus_ms_current(at_ms_settings_t *ms)
 {
-    at_ms_settings_t ms;
-    char buf[160];
     char mode[16];
     bool automode;
     const char *carrier;
+    const char *want;
+
+    ms_get_cb(mode, sizeof(mode), &automode);
+    want = ms_cur_valid ? at_ms_carrier_to_mode(ms_cur.carrier,
+                                                 ms_cur.automode != 0)
+                        : NULL;
+    if (want && !strcmp(want, mode) && (ms_cur.automode != 0) == automode) {
+        *ms = ms_cur;
+        return;
+    }
+    memset(ms, 0, sizeof(*ms));
+    carrier = at_ms_mode_to_carrier(mode);
+    snprintf(ms->carrier, sizeof(ms->carrier), "%s", carrier ? carrier : "V90");
+    ms->automode = automode ? 1 : 0;
+}
+
+static int handle_plus_ms(const char *args)
+{
+    at_ms_settings_t ms;
+    char buf[2048];
     const char *want;
 
     if (!ms_set_cb || !ms_get_cb || !ms_reset_cb)
@@ -228,23 +248,17 @@ static int handle_plus_ms(const char *args)
         ms_cur_valid = true;
         return 0;
     case AT_MS_READ:
-        ms_get_cb(mode, sizeof(mode), &automode);
-        want = ms_cur_valid ? at_ms_carrier_to_mode(ms_cur.carrier,
-                                                     ms_cur.automode != 0)
-                            : NULL;
-        if (want && !strcmp(want, mode) && (ms_cur.automode != 0) == automode) {
-            ms = ms_cur;
-        } else {
-            memset(&ms, 0, sizeof(ms));
-            carrier = at_ms_mode_to_carrier(mode);
-            snprintf(ms.carrier, sizeof(ms.carrier), "%s", carrier ? carrier : "V90");
-            ms.automode = automode ? 1 : 0;
-        }
+        plus_ms_current(&ms);
         at_ms_format_read(&ms, buf, sizeof(buf));
         at_put_response(at, buf);
         return 0;
     case AT_MS_TEST:
         at_ms_format_test(buf, sizeof(buf));
+        at_put_response(at, buf);
+        return 0;
+    case AT_MS_HELP:
+        plus_ms_current(&ms);
+        at_ms_format_help(&ms, buf, sizeof(buf));
         at_put_response(at, buf);
         return 0;
     default:

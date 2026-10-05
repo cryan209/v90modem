@@ -121,6 +121,19 @@ static void test_parser(void)
     at_ms_parse("=V90,0,0,0,4800,33600", &s);
     at_ms_format_read(&s, buf, sizeof(buf));
     check(!strcmp(buf, "+MS: V90,0,0,0,4800,33600"), buf);
+    check(at_ms_parse("$", &s) == AT_MS_HELP, "\"$\" is help");
+    {
+        char help[2048];
+
+        at_ms_parse("=V91,0", &s);
+        at_ms_format_help(&s, help, sizeof(help));
+        check(strstr(help, "K56      56,56K,K56FLEX   1         56000") != NULL
+              && strstr(help, "V34                       0,1       33600") != NULL
+              && strstr(help, "V32B     V32BIS           1         14400") != NULL
+              && strstr(help, "V91                       0,1       64000") != NULL
+              && strstr(help, "Current: V91,0,0,0,0,0") != NULL
+              && strlen(help) < sizeof(help) - 1, "+MS$ help rows and current setting");
+    }
     at_ms_format_test(buf, sizeof(buf));
     check(!strcmp(buf, "+MS: (V22,V22B,V32,V32B,V34,K56,V90,V92,V91,X2),(0,1),"
                        "(0-64000),(0-64000),(0-64000),(0-64000)"), buf);
@@ -227,6 +240,8 @@ static int test_engine(void)
     expect("AT+MS?", "+MS: V90,1,0,0,0,0");
     expect("AT+MS=?", "+MS: (V22,V22B,V32,V32B,V34,K56,V90,V92,V91,X2),(0,1)");
     expect_describe("V90|V34|V22");
+    expect("AT+MS$", "K56      56,56K,K56FLEX   1         56000  K56flex V.8bis, then V.90");
+    expect("AT+MS$", "Current: V90,1,0,0,0,0");
 
     expect("AT+MS=V34", "OK");
     expect_offer(V8_MOD_V34 | V8_MOD_V22, "V.34 (automode: V.22 fallback kept)");
@@ -251,6 +266,7 @@ static int test_engine(void)
     expect("AT+MS=K56", "OK");
     expect_describe("V90|V34|V22|+K56");
     expect("AT+MS?", "+MS: K56,1,0,0,0,0");
+    expect("AT+MS$", "Current: K56,1,0,0,0,0");
     expect("AT+MS=56", "OK");
     expect("AT+MS?", "+MS: K56,1,0,0,0,0");
     expect("AT+MS=K56,0", "ERROR");

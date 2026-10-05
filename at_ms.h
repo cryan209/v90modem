@@ -11,6 +11,7 @@
  *   +MS=<carrier>[,<automode>[,<min_tx_rate>[,<max_tx_rate>
  *                              [,<min_rx_rate>[,<max_rx_rate>]]]]]
  *   +MS?    read:  +MS: <carrier>,<automode>,<min_tx>,<max_tx>,<min_rx>,<max_rx>
+ *   +MS$    help:  syntax, and every carrier with its limits (Courier style)
  *   +MS=?   test:  +MS: (<carriers>),(0,1),(0-64000),(0-64000),(0-64000),(0-64000)
  *
  * The four-subparameter form is the common single-rate-pair variant: its
@@ -48,7 +49,8 @@ typedef enum {
     AT_MS_ERROR = -1,
     AT_MS_SET   = 0,
     AT_MS_READ  = 1,
-    AT_MS_TEST  = 2
+    AT_MS_TEST  = 2,
+    AT_MS_HELP  = 3    /* +MS$, Courier-style help */
 } at_ms_op_t;
 
 /* args is the text after "+MS".  On AT_MS_SET, *out holds the new settings
@@ -58,6 +60,9 @@ at_ms_op_t at_ms_parse(const char *args, at_ms_settings_t *out);
 /* Information text for +MS? and +MS=? (without CR/LF). */
 void at_ms_format_read(const at_ms_settings_t *s, char *buf, size_t len);
 void at_ms_format_test(char *buf, size_t len);
+/* +MS$ help, lines separated by CR LF, ending with the current setting when
+ * cur is not NULL.  Sized for 2048 bytes. */
+void at_ms_format_help(const at_ms_settings_t *cur, char *buf, size_t len);
 
 /* Carrier (or alias) -> engine mode name for that automode ("V34" -> "v34"),
  * NULL if unknown or not available with that automode.  mode -> canonical

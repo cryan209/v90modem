@@ -122,7 +122,10 @@ touched, and `ATZ`/`AT&F` restore the default:
 | `V91`      | as V90, with V.91 in V.8's PCM availability             | V.91 + V.34       |
 | `X2`       | x2 (V.34 upstream)                                       | same              |
 
-`AT+MS?` reads back e.g. `+MS: V34,1,0,0,0,0`; `AT+MS=?` lists the carriers.
+`AT+MS?` reads back e.g. `+MS: V34,1,0,0,0,0`; `AT+MS=?` lists the carriers;
+`AT+MS$` prints Courier-style help -- the syntax, every carrier with its
+aliases, accepted automodes, maximum rate and what the next call will offer,
+and the current setting.
 The rate subparameters (`<carrier>,<automode>,<min>,<max>` or V.250's
 `...,<min_tx>,<max_tx>,<min_rx>,<max_rx>`) may not exceed the carrier's
 maximum (14400 for V32B, 33600 for V34, 56000 for K56/V90/V92, 64000 for
