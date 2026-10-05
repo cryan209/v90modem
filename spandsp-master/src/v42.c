@@ -831,9 +831,23 @@ static void t401_expired(v42_state_t *ss)
         s->retry_count = 0;
         if (s->configuring)
         {
+            s->configuring = false;
+            if (!s->xid_response_seen  &&  s->state == LAPM_IDLE)
+            {
+                /* V.42 8.3.2.1: the error-corrected connection is requested by SABME, and
+                   8.10 makes XID a separate, optional negotiation (8.10.3: after N400
+                   unanswered XIDs, notify the control function that the procedure did not
+                   complete).  A peer that never answers XID at all has not mismatched
+                   anything: both ends keep the LAPM defaults.  Annex III.3's release is
+                   for a response that arrived and was corrupted.  So go on to SABME with
+                   the defaults; V.42bis was never negotiated and stays off. */
+                fprintf(stderr, "[V42] no XID response after %d attempts; establishing with SABME and LAPM defaults\n",
+                        ss->config.n400);
+                lapm_connect(ss);
+                return;
+            }
             /* V.42 8.10.3 and Annex III.3: failed XID must be reported;
                do not establish with a possibly different peer configuration. */
-            s->configuring = false;
             s->state = LAPM_IDLE;
             report_rx_status_change(ss, SIG_STATUS_LINK_ERROR);
             return;
@@ -1329,6 +1343,7 @@ static int rx_unnumbered_rsp_frame(v42_state_t *ss, const uint8_t *frame, int le
         /* TODO: */
         break;
     case LAPM_U_XID:
+        s->xid_response_seen = true;
         if (s->configuring)
         {
             int result = receive_xid(ss, frame, len);
@@ -1605,6 +1620,7 @@ static int lapm_config(v42_state_t *ss)
     lapm_state_t *s;
 
     s = &ss->lapm;
+    s->xid_response_seen = false;
     s->configuring = true;
     if (s->state == LAPM_DATA)
     {

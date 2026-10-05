@@ -100,6 +100,8 @@ typedef struct
     uint8_t vr;
     int state;
     int configuring;
+    /*! \brief Set once any XID frame has arrived from the peer during configuration. */
+    int xid_response_seen;
     uint8_t xid_optional_functions_octets;
     bool local_busy;
     bool far_busy;

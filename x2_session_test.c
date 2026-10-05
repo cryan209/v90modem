@@ -40,6 +40,27 @@ static void rx_frame(x2_session_t *s,unsigned body,unsigned n,unsigned delay)
     }
     x2_session_rx(s,samples,k);
 }
+/* Feed a real coherent Tone B and its phase reversal, rather than advancing
+   the transmitter by a timer. Phase-2 receiver state must survive chunk seams. */
+static void phase2_exchange(x2_session_t *s,unsigned block)
+{
+    int16_t rx[160];uint8_t tx[160];unsigned pos=0;
+    uint64_t start=s->tx_samples;
+    while(pos<1200) {
+        unsigned n=1200-pos;if(n>block)n=block;
+        for(unsigned j=0;j<n;++j) {
+            unsigned k=pos+j;
+            rx[j]=k>=800?0:(int16_t)((k>=720?-3000:3000)*cos(2*PI*1200*(double)((s->rx_samples+j)%20)/8000));
+        }
+        x2_session_rx(s,rx,n);x2_session_tx(s,tx,n);pos+=n;
+    }
+    assert(s->a_reversals==2 && s->b_reversed);
+    assert(s->second_a_tx_sample>=start+1032 && s->second_a_tx_sample<=start+1048);
+    assert(s->stage==X2_PROBE);
+    x2_session_tx(s,tx,1); /* Probe does not terminate on a guessed peer ACK. */
+    for(unsigned i=0;i<8;++i)x2_session_tx(s,tx,160);
+    assert(s->stage==X2_MARKER_WAIT);
+}
 static void info_recovery_test(void)
 {
     x2_session_t s;uint8_t pcm[2048];
@@ -52,12 +73,33 @@ static void info_recovery_test(void)
     assert(s.stage==X2_INFO0 && s.info_bits[28]);
     x2_session_tx(&s,pcm,654);
     assert(s.stage==X2_TONE_A);
-    x2_session_tx(&s,pcm,2001);
+    phase2_exchange(&s,1);
     assert(s.stage==X2_MARKER_WAIT);
     x2_session_tx(&s,pcm,160);
     for(unsigned i=0;i<160;++i)assert(pcm[i]==0x7f);
     rx_frame(&s,0x4d,7,11);
     assert(s.marker_valid && s.stage==X2_UPSTREAM_WAIT);
+}
+static void phase2_test(void)
+{
+    {
+        x2_session_t s;uint8_t pcm[654];
+        x2_session_init(&s);rx_frame(&s,0x25ff,17,7);
+        x2_session_tx(&s,pcm,654);assert(s.stage==X2_TONE_A);
+        rx_frame(&s,0x25ff,17,9);
+        assert(s.stage==X2_INFO0 && s.info_bits[28]);
+    }
+    const unsigned blocks[]={1,17,160};
+    for(unsigned b=0;b<3;++b) {
+        x2_session_t s;uint8_t pcm[654];int16_t silence[160]={0};
+        x2_session_init(&s);rx_frame(&s,0x21ff,17,7);
+        x2_session_tx(&s,pcm,654);assert(s.stage==X2_TONE_A);
+        for(unsigned i=0;i<20;++i){x2_session_rx(&s,silence,160);x2_session_tx(&s,pcm,160);}
+        assert(s.stage==X2_TONE_A && s.a_reversals==0);
+        /* Reset the tone duration so all chunk tests have the same clock origin. */
+        s.stage_samples=0;
+        phase2_exchange(&s,blocks[b]);
+    }
 }
 static void training_test(void)
 {
@@ -261,6 +303,6 @@ static void capture_test(const char *path)
 }
 int main(int argc,char **argv)
 {
-    codec_test();info_recovery_test();training_test();s_bar_test();record_test();source_activation_test();upstream_e_test(argc>1?argv[1]:NULL);if(argc>1)capture_test(argv[1]);
+    codec_test();info_recovery_test();phase2_test();training_test();s_bar_test();record_test();source_activation_test();upstream_e_test(argc>1?argv[1]:NULL);if(argc>1)capture_test(argv[1]);
     puts("x2 session: INFO codecs, marker semantics, received gates, 105 I-modem frames, recorded MP/E and payload activation passed");return 0;
 }

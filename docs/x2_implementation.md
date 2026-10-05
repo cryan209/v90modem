@@ -240,3 +240,36 @@ I-modem symmetric x2 also requires a separate session implementation.
 Full commands, raw streams, hashes, experiment matrix, and native traces:
 `../courier-emu/artifacts/x2-closed-loop-20261005/README.md` and the closed-loop
 section in `../courier-emu/docs/x2-v90-protocol-selection.md`.
+
+
+## Live analog Phase 2 fix, 5 October 2026
+
+The received-tone-driven transition is now implemented. The session detects
+1200 Hz Tone B, reverses Tone A after at least 50 ms, detects B's reversal,
+and schedules its second A reversal 40 ms after that received event. It
+continues A for 10 ms, emits a 160 ms Table 17 multitone probe, and waits for
+the x2 marker. V.34 (10/1996) §11.2.1.2.3–.5 and §10.1.2.4 define these
+ordinary timing/probe elements. The original successful PCM-server capture
+confirms a short probe with RMS about 2450; the previous silent-gap
+interpretation was incorrect. Repeated unacknowledged INFO0 now triggers
+acknowledged INFO0 recovery (§11.2.2.2.1). Tests exercise silence, recovery,
+and timing at RX/TX block sizes 1/17/160.
+
+Two fresh analog Courier 403 feedback calls accept marker 4D and CRC-valid MP
+0344/03FE/0000/0500. Native PC 9083 executes and fallback 909B does not. The
+software advances through DATA_STARTUP/PAYLOAD, but native upstream E/B1
+handlers never execute and neither call establishes CONNECT/user data. The
+next blocker is the native training/MP-to-E handoff, including acknowledgement
+and startup conditions; changing upstream detection alone cannot fix it.
+
+The I-modem S58=58 diagnostic now completes INFO0 recovery, both A reversals,
+and the probe, but receives no marker. An original native S58=58 caller versus
+native S58=48 answerer also fails, so this configuration does not qualify
+software interop. Other asymmetric native settings remain to be recovered;
+the known working symmetric S58=48 pair requires a separate software session.
+The prior closed-loop failures above describe the earlier code checkpoint.
+
+Production builds, recorded session/MP/E checks, B1 acquisition at 99.9%
+(17/160 samples and silence rejection), and all 402 V.34 data tests pass.
+Evidence: `../courier-emu/artifacts/x2-phase2-20261005/README.md`.
+The live harness's `--require-marker` asserts acceptance of 4D, not CONNECT.

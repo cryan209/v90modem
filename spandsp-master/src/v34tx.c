@@ -2756,7 +2756,7 @@ SPAN_DECLARE(int) v34_get_mapping_frame(v34_tx_state_t *s, int16_t bits[16])
 
         /* Table 11/V.34 step 3/8, 9.6.2/V.34 items 1 and 2 */
         s->p = precoder_tx_filter(s);
-        if (s->use_non_linear_encoder)
+        if (s->use_non_linear_encoder  &&  !s->nl_x_warp)
             s->p = v34_non_linear_encoder(&s->p);
         /*endif*/
         c_prev = s->c;
@@ -8707,10 +8707,26 @@ static complex_sig_t get_data_baud(v34_state_t *s)
        handed the modulator symbols 128x too large. v34_get_mapping_frame() keeps
        its Q9.7 output contract, since v34_get_mapping_frame_state() callers and
        the spandsp v34 tests read those raw values. */
-    v.re = FP_Q9_7_TO_F(s->tx.tx_mapping_frame_buf[2*s->tx.tx_mapping_frame_step])
-         * s->tx.data_symbol_scale;
-    v.im = FP_Q9_7_TO_F(s->tx.tx_mapping_frame_buf[2*s->tx.tx_mapping_frame_step + 1])
-         * s->tx.data_symbol_scale;
+    {
+        float xr;
+        float xi;
+
+        xr = FP_Q9_7_TO_F(s->tx.tx_mapping_frame_buf[2*s->tx.tx_mapping_frame_step]);
+        xi = FP_Q9_7_TO_F(s->tx.tx_mapping_frame_buf[2*s->tx.tx_mapping_frame_step + 1]);
+        if (s->tx.nl_x_warp  &&  s->tx.nl_avg_energy > 0.0f)
+        {
+            /* V.34 9.7: x'(n) = Phi(n)*x(n), Phi = 1 + zeta/6 + zeta^2/120,
+               zeta = theta*|x|^2/average(|x|^2), theta = 0.3125. */
+            float zeta = 0.3125f*(xr*xr + xi*xi)/s->tx.nl_avg_energy;
+            float phi = 1.0f + zeta/6.0f + zeta*zeta/120.0f;
+
+            xr *= phi;
+            xi *= phi;
+        }
+        /*endif*/
+        v.re = xr*s->tx.data_symbol_scale;
+        v.im = xi*s->tx.data_symbol_scale;
+    }
     /* Ground truth for the data mode, in the same Q9.7 units and the same order
        as the receiver's V34_DATA_FRAME_DUMP, so the two files subtract.  Every
        other read on a dense constellation is confounded by its own decisions
@@ -8789,6 +8805,7 @@ static void v34_normalise_data_symbol_scale(v34_state_t *s)
             int symbols = 0;
             int16_t frame[16];
             int frames = probe->tx.parms.p*probe->tx.parms.j;
+            double *xs = (double *) calloc((size_t) (frames > 0  ?  frames : 1)*16, sizeof(double));
 
             probe->tx.scrambler_tap = s->tx.scrambler_tap;
             probe->tx.super_frame = probe->tx.parms.j - 1;
@@ -8804,12 +8821,38 @@ static void v34_normalise_data_symbol_scale(v34_state_t *s)
                 {
                     double x = frame[i]/128.0;
                     energy += x*x;
+                    if (xs)
+                        xs[16*m + i] = x;
                 }
                 symbols += 8;
             }
             if (symbols > 0 && energy > 0.0)
             {
-                float rms = (float) sqrt(energy/symbols);
+                float rms;
+
+                if (s->tx.nl_x_warp  &&  xs)
+                {
+                    /* V.34 9.7 warps x(n) itself, which raises the average power.  The
+                       note in 10.1.3 asks the transmitter to compensate for the effect
+                       of non-linear encoding as well, so measure the warped signal. */
+                    double avg = energy/symbols;
+                    double warped = 0.0;
+
+                    s->tx.nl_avg_energy = (float) avg;
+                    for (int k = 0; k < symbols; k++)
+                    {
+                        double re = xs[2*k];
+                        double im = xs[2*k + 1];
+                        double zeta = 0.3125*(re*re + im*im)/avg;
+                        double phi = 1.0 + zeta/6.0 + zeta*zeta/120.0;
+
+                        warped += phi*phi*(re*re + im*im);
+                    }
+                    /*endfor*/
+                    energy = warped;
+                }
+                /*endif*/
+                rms = (float) sqrt(energy/symbols);
                 s->tx.data_symbol_scale = V34_NOMINAL_SYMBOL_RMS/rms;
                 V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - data modulation normalization: mapper_rms=%.4f "
@@ -8817,6 +8860,8 @@ static void v34_normalise_data_symbol_scale(v34_state_t *s)
                          rms, V34_NOMINAL_SYMBOL_RMS,
                          s->tx.data_symbol_scale);
             }
+            /*endif*/
+            free(xs);
         }
         if (probe)
             v34_free(probe);
@@ -8901,6 +8946,7 @@ static void data_baud_init(v34_state_t *s)
              s->tx.state, s->tx.y0);
     s->tx.y0 = 0;
     s->tx.state = 0;
+    s->tx.nl_x_warp = false;
     v34_normalise_data_symbol_scale(s);
     s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.tx_data_mode = true;
@@ -9715,6 +9761,8 @@ SPAN_DECLARE(int) v34_seed_tx_data(v34_state_t *s,
     s->tx.v0_pattern = s->tx.parms.j > 0
                      ? (uint16_t)(2*(s->tx.parms.j - 1)) : 0;
     s->tx.data_symbol_scale = 1.0f;
+    s->tx.nl_x_warp = false;
+    s->tx.nl_avg_energy = 0.0f;
     s->tx.current_get_bit = s->tx.get_bit;
     return 0;
 }
@@ -9737,6 +9785,10 @@ SPAN_DECLARE(int) v34_v90_begin_tx_data(v34_state_t *s,
         return -1;
     /* V.34 10.1.3: keep B1 and data at the PP/TRN power.  data_baud_init() does
        this for a native V.34 call; this entry used to leave the scale at 1.0. */
+    /* The digital modem's MP selects the non-linear encoder for this transmitter, and
+       V.34 9.7 applies it to the whole transmitted signal x(n). */
+    s->tx.nl_x_warp = (use_non_linear_encoder != 0);
+    if (getenv("ME_V90A_NO_NLWARP")) s->tx.nl_x_warp = false; /* TEMP A/B */
     v34_normalise_data_symbol_scale(s);
     /* V.90 §8.5.1/§9.4.2.5 uses V.34's B1: the first data frame is scrambled
        ones with every data-mode state reset.  get_data_baud() already does

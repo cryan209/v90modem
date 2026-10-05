@@ -26,6 +26,8 @@
 #include "clock_recovery.h"
 #include "v34_line_ec.h"
 #include "v90.h"
+#include "k56flex_v8bis.h"
+#include "k56flex_train.h"
 #include "v91.h"
 #include "v90_cp_live.h"
 #include "v90_cp_rx.h"
@@ -2063,6 +2065,7 @@ static x2_session_stage_t g_x2_last_stage;
 static bool g_x2_receiver_started;
 static bool g_x2_upstream_prepared, g_x2_upstream_started;
 static bool g_x2_data_stack_started;
+static unsigned g_x2_last_reversals, g_x2_last_b_reversed;
 
 /*
  * Which side of a V.90 call this endpoint offers to be.
@@ -2890,6 +2893,134 @@ static bool me_v8_no_ci(void)
     const char *value = getenv("ME_V8_NO_CI");
 
     return value && atoi(value) != 0;
+}
+
+/*
+ * K56flex (ME_K56FLEX, default off).  Draft 0.23 clause 4: V.8bis runs BEFORE
+ * V.8, so when enabled it owns the bearer until it ends.
+ *   ME_K56FLEX=1      V.8bis exchange only, then ordinary V.8 (the call carries on
+ *                     as V.90/V.34; the log records the peer's CL/MS octets).
+ *   ME_K56FLEX=probe  V.8bis, then the server's training stream (silence,
+ *                     identification, three probes, parameter training) as raw
+ *                     G.711 until the peer's signalling is needed.  That
+ *                     signalling is not recovered, so the stream runs to its
+ *                     first peer gate, waits ME_K56FLEX_GATE_MS (default 8000),
+ *                     then gives up and starts V.8.  Pair it with
+ *                     ME_G711_CAPTURE to record what the client sends back.
+ *                     ME_K56FLEX_RATE sets the downstream rate (default 56000).
+ * Neither mode completes a K56flex call (docs/k56flex_implementation.md).
+ */
+static k56flex_v8bis_t *g_k56 = NULL;
+static k56flex_train_t *g_k56_train = NULL;
+
+static int me_k56flex_mode(void)
+{
+    const char *v = getenv("ME_K56FLEX");
+    if (!v || !*v || *v == '0')
+        return 0;
+    return strcmp(v, "probe") == 0 ? 2 : 1;
+}
+
+static bool me_k56flex_enabled(void)
+{
+    return me_k56flex_mode() != 0;
+}
+
+static int me_start_or_restart_v8_locked(int answer_tone);
+
+static void me_k56_start_locked(void)
+{
+    k56flex_v8bis_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.role = g_calling_party ? K56FLEX_V8BIS_INITIATE : K56FLEX_V8BIS_RESPOND;
+    cfg.mu_law = g_law == ME_LAW_ULAW;
+    cfg.v90_capable = g_advertise_v90;
+    {
+        const char *role = getenv("ME_K56FLEX_ROLE"), *blind = getenv("ME_K56FLEX_BLIND");
+        cfg.client_model = role && strcmp(role, "client") == 0;     /* send the client octet */
+        cfg.blind = blind && *blind && *blind != '0';
+    }
+    if (g_k56)
+        k56flex_v8bis_free(g_k56);
+    g_k56 = k56flex_v8bis_new(&cfg);
+    g_state = ME_V8;
+    ME_LOG("[ME] K56flex V.8bis: %s as %s%s, %s advertised, v90=%d\n",
+           g_calling_party ? "initiating (CRe)" : "responding (listening for CRe)",
+           cfg.client_model ? "client" : "server", cfg.blind ? ", blind CL" : "",
+           cfg.mu_law ? "mu-law" : "A-law", cfg.v90_capable);
+}
+
+static void me_k56_progress_locked(void)
+{
+    k56flex_v8bis_state_t st;
+    if (!g_k56)
+        return;
+    st = k56flex_v8bis_state(g_k56);
+    if (st != K56V8B_DONE && st != K56V8B_FAILED)
+        return;
+    {
+        size_t n = 0;
+        const uint8_t *p = k56flex_v8bis_peer_payload(g_k56, &n);
+        char hex[3 * 32 + 1] = "";
+        for (size_t i = 0; p && i < n && i < 32; i++)
+            snprintf(hex + 3 * i, 4, "%02x ", p[i]);
+        ME_LOG("[ME] K56flex V.8bis %s: %s at %u ms, peer message [%s], ack=%d\n",
+               st == K56V8B_DONE ? "complete" : "ended", 
+               k56flex_v8bis_result_name(k56flex_v8bis_result(g_k56)),
+               k56flex_v8bis_elapsed_ms(g_k56), p ? hex : "none",
+               k56flex_v8bis_ack(g_k56));
+        trace_phase("K56flex V.8bis %s: %s", st == K56V8B_DONE ? "done" : "failed",
+                    k56flex_v8bis_result_name(k56flex_v8bis_result(g_k56)));
+    }
+    k56flex_v8bis_free(g_k56);
+    g_k56 = NULL;
+    if (me_k56flex_mode() == 2) {
+        k56flex_train_cfg_t tc;
+        const char *rate = getenv("ME_K56FLEX_RATE"), *gate = getenv("ME_K56FLEX_GATE_MS");
+        memset(&tc, 0, sizeof(tc));
+        tc.law = g_law == ME_LAW_ULAW ? K56FLEX_LAW_MU : K56FLEX_LAW_A;
+        tc.rate_bps = rate ? atoi(rate) : 56000;
+        tc.training_word = 0xffff;
+        /* a pair is 12 samples = 1.5 ms */
+        tc.gate_timeout_pairs = (unsigned)((gate ? atoi(gate) : 8000) * 2 / 3);
+        g_k56_train = calloc(1, sizeof(*g_k56_train));
+        if (g_k56_train && k56flex_train_init(g_k56_train, &tc) == 0) {
+            ME_LOG("[ME] K56flex probe: transmitting training stream (%s, %d bit/s), "
+                   "gives up %d ms after the probes if the peer does not answer\n",
+                   tc.law == K56FLEX_LAW_MU ? "mu-law" : "A-law", tc.rate_bps, gate ? atoi(gate) : 8000);
+            trace_phase("K56flex probe stream start");
+            return;
+        }
+        ME_LOG("[ME] K56flex probe: bad configuration, rate %d\n", tc.rate_bps);
+        free(g_k56_train);
+        g_k56_train = NULL;
+    }
+    if (me_start_or_restart_v8_locked(g_v8_answer_tone) != 0)
+        ME_LOG("[ME] v8_init failed after K56flex V.8bis\n");
+}
+
+/* Fill raw codewords from the training stream; call with g_state_mtx held. */
+static void me_k56_train_fill_locked(uint8_t *codewords, int count)
+{
+    size_t got = k56flex_train_g711(g_k56_train, codewords, (size_t)count);
+    static k56flex_train_phase_t last = K56T_FAILED;
+    k56flex_train_phase_t ph = k56flex_train_phase(g_k56_train);
+    if (ph != last) {
+        ME_LOG("[ME] K56flex probe: phase %s (%u pairs sent)\n", k56flex_train_phase_name(ph),
+               g_k56_train->pairs_total);
+        last = ph;
+    }
+    for (size_t i = got; i < (size_t)count; i++)
+        codewords[i] = pcm_idle();
+    if (ph == K56T_FAILED) {
+        ME_LOG("[ME] K56flex probe: no peer progress signal; continuing with V.8\n");
+        trace_phase("K56flex probe gave up after %u pairs", g_k56_train->pairs_total);
+        free(g_k56_train);
+        g_k56_train = NULL;
+        last = K56T_FAILED;
+        if (me_start_or_restart_v8_locked(g_v8_answer_tone) != 0)
+            ME_LOG("[ME] v8_init failed after K56flex probe\n");
+    }
 }
 
 static int me_start_or_restart_v8_locked(int answer_tone)
@@ -6431,6 +6562,12 @@ static int me_x2_payload_bit(void *unused)
 }
 static void me_x2_progress_locked(void)
 {
+    if(g_x2.a_reversals!=g_x2_last_reversals || g_x2.b_reversed!=g_x2_last_b_reversed) {
+        trace_phase("X2 Phase2: A reversals=%u B reversed=%u B present=%u second A sample=%llu",
+            g_x2.a_reversals,g_x2.b_reversed,g_x2.b_present,
+            (unsigned long long)g_x2.second_a_tx_sample);
+        g_x2_last_reversals=g_x2.a_reversals;g_x2_last_b_reversed=g_x2.b_reversed;
+    }
     if (g_x2.stage != g_x2_last_stage) {
         trace_phase("X2 stage=%s tx_sample=%llu rx_sample=%llu",
                     x2_session_stage_name(g_x2.stage),
@@ -6460,6 +6597,7 @@ static void me_x2_start_locked(void)
     g_x2_data_stack_started=false;
     g_x2_upstream_prepared=g_x2_upstream_started=false;
     g_x2_last_stage = X2_FAILED;
+    g_x2_last_reversals=g_x2_last_b_reversed=0;
     g_x2_receiver_started = false;
     g_mod = ME_MOD_X2;
     g_state = ME_TRAINING;
@@ -6964,6 +7102,8 @@ void me_destroy(void)
 {
     v90_cp_live_worker_stop();
     if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
+    if (g_k56)      { k56flex_v8bis_free(g_k56);                 g_k56      = NULL; }
+    if (g_k56_train){ free(g_k56_train);                         g_k56_train = NULL; }
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
     cleanup_v34_v90_training_locked();
     v91_live_reset();
@@ -7094,6 +7234,12 @@ void me_on_sip_connected(void)
     if (g_v8) {
         v8_free(g_v8);
         g_v8 = NULL;
+    }
+    if (me_k56flex_enabled()) {
+        me_k56_start_locked();
+        pthread_mutex_unlock(&g_state_mtx);
+        trace_phase("enter K56flex V.8bis before V.8");
+        return;
     }
     if (me_start_or_restart_v8_locked(g_v8_answer_tone) != 0) {
         ME_LOG("[ME] v8_init failed\n");
@@ -8145,6 +8291,14 @@ void me_rx_audio(const int16_t *amp, int len)
         di_fax_rx(amp, len);
         return;
     }
+
+    pthread_mutex_lock(&g_state_mtx);
+    if (g_k56) {
+        k56flex_v8bis_rx(g_k56, amp, len);
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    pthread_mutex_unlock(&g_state_mtx);
 
     pthread_mutex_lock(&g_state_mtx);
     me_state_t state = g_state;
@@ -10250,9 +10404,11 @@ static void me_v90_analogue_phase4_progress_locked(void)
             /* §9.4.2.4: the upstream rate is the maximum enabled in both
              * modems and no more than MP's cap. */
             ME_LOG("[ME] V.90 analogue MP: Type %d, max upstream drn=%u (%d bps), "
-                   "trellis=%u, rate mask 0x%04X, %s\n",
+                   "trellis=%u, nonlinear=%d, expanded shaping=%d, "
+                   "rate mask 0x%04X, %s\n",
                    mp->type1 ? 1 : 0, mp->max_drn, mp->max_drn*2400,
-                   mp->trellis, mp->rate_mask,
+                   mp->trellis, mp->nonlinear ? 1 : 0,
+                   mp->expanded_shaping ? 1 : 0, mp->rate_mask,
                    mp->acknowledge ? "MP' (acknowledged)" : "MP");
             if (mp->type1)
                 ME_LOG("[ME] V.90 analogue MP precoder: h1 %d%+di, h2 %d%+di, "
@@ -10966,6 +11122,15 @@ void me_tx_audio(int16_t *amp, int len)
         di_fax_tx(amp, len);
         return;
     }
+
+    pthread_mutex_lock(&g_state_mtx);
+    if (g_k56) {
+        k56flex_v8bis_tx(g_k56, amp, len);
+        me_k56_progress_locked();
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    pthread_mutex_unlock(&g_state_mtx);
 
     pthread_mutex_lock(&g_state_mtx);
     me_state_t state = g_state;
@@ -12444,6 +12609,17 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
             (void)fwrite(codewords, 1, (size_t)count, g_g711_tx_tap);
         return count;
     }
+
+    pthread_mutex_lock(&g_state_mtx);
+    if (g_k56_train) {
+        me_k56_train_fill_locked(codewords, count);
+        g_g711_tx_octets += (uint64_t)count;
+        pthread_mutex_unlock(&g_state_mtx);
+        if (g_g711_tx_tap)
+            (void)fwrite(codewords, 1, (size_t)count, g_g711_tx_tap);
+        return count;
+    }
+    pthread_mutex_unlock(&g_state_mtx);
 
     pthread_mutex_lock(&g_state_mtx);
     offset = mh_tx_locked(codewords, count);

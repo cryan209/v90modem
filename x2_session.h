@@ -4,7 +4,7 @@
 #include "x2_mp_rx.h"
 /* Draft 0.33 clauses 3..6 and 21. Asymmetric PCMU digital answerer. */
 typedef enum {
-    X2_INFO0, X2_TONE_A, X2_MARKER_WAIT, X2_UPSTREAM_WAIT,
+    X2_INFO0, X2_TONE_A, X2_PROBE, X2_MARKER_WAIT, X2_UPSTREAM_WAIT,
     X2_ZERO, X2_PATTERN_A, X2_TRAIN_B, X2_J, X2_J_ACK,
     X2_TRAIN_C, X2_TRAIN_D, X2_TRAIN_E, X2_RECORD_WAIT,
     X2_FINAL_TRAINING, X2_DATA_STARTUP, X2_PAYLOAD, X2_FAILED
@@ -22,6 +22,14 @@ typedef struct {
     unsigned peer_info_valid, marker_valid, upstream_ready, s_bar_seen;
     unsigned rejected_frames, accepted_frames;
     uint16_t peer_capabilities;
+    /* V.34 11.2.1.2: receive Tone B, reverse A, receive B reversal,
+       then reverse A 40 ms later and end it after 10 ms. */
+    int16_t probe[160];
+    int16_t b_window[40];
+    unsigned b_position, b_samples, b_stable, b_present;
+    unsigned a_reversals, b_reversed, b_crossing_valid;
+    double b_reference_re, b_reference_im;
+    uint64_t b_crossing_sample, second_a_tx_sample;
     x2_info_hypothesis_t info_rx[40];
     int16_t s_window[40];
     unsigned s_position, s_samples, s_stable, s_missing;

@@ -74,6 +74,16 @@ int x2_session_init(x2_session_t *s)
     /* Captured I-modem INFO0 body 11111111101111000, first bit first.
      * This is V.34's 17-bit INFO0, not V.90's extended INFO0d. */
     x2_info_encode(0x3dff,17,s->info_bits);
+    /* V.34 10.1.2.4/Table 17, 24 periods in 160 ms. The captured x2
+       digital-server probe (5.01..5.17 s) has RMS 2450, not ordinary
+       analogue L1's 6 dB boost. Preserve that PCM-server level here. */
+    static const unsigned frequencies[]={150,300,450,600,750,1050,1350,1500,1650,1950,2100,2250,2550,2700,2850,3000,3150,3300,3450,3600,3750};
+    static const int signs[]={1,-1,1,1,1,1,1,1,-1,1,1,-1,1,-1,1,-1,-1,-1,-1,1,1};
+    for(unsigned n=0;n<160;++n) {
+        double x=0;
+        for(unsigned j=0;j<21;++j)x+=signs[j]*cos(2*PI*frequencies[j]*n/8000.0);
+        s->probe[n]=(int16_t)lrint(750*x);
+    }
     for(i=0;i<40;++i)s->info_rx[i].clock=i*200;
     x2_scrambler_init(&s->training_scrambler,18,0);
     return 0;
@@ -109,6 +119,10 @@ static int payload_bit(void *context)
 static void stage(x2_session_t *s, x2_session_stage_t next)
 {
     s->stage=next;s->stage_samples=0;
+    if(next==X2_INFO0) {
+        s->a_reversals=s->b_reversed=s->b_present=s->b_stable=0;
+        s->b_samples=s->b_position=s->b_crossing_valid=0;
+    }
     if(next==X2_TRAIN_C)x2_mp_rx_init(&s->mp_rx,mp_received,s);
     if(next==X2_DATA_STARTUP) {
         /* Ie030002 A8F1/C940 (039F bit 7 clear): six final training
@@ -147,11 +161,14 @@ static void info_bit(x2_session_t *s,x2_info_hypothesis_t *h,unsigned bit)
     h->count=0;
     if(x2_info_decode(h->bits,17,&body)){++s->rejected_frames;return;}
     if(!(body&0x40) || (body&0x1800))return;
+    unsigned repeated=s->peer_info_valid && s->stage==X2_TONE_A && !s->a_reversals;
     s->peer_capabilities=(uint16_t)body;s->peer_info_valid=1;++s->accepted_frames;
     /* V.34 Table 14 bit 28 and Courier 8E8B/9120/9141: during error
      * recovery the peer repeats 17-bit INFO0 with ACK, even after the
-     * first INFO0 was accepted. Do not reinterpret it as a 7-bit marker. */
-    if((body&0x10000) && !s->info_bits[28]) {
+     * first INFO0 was accepted. V.34 11.2.2.2.1 also requires recovery
+     * on repeated INFO0c before the tone exchange, even without its ACK.
+     * Do not reinterpret either frame as a 7-bit marker. */
+    if(((body&0x10000) || repeated) && !s->info_bits[28]) {
         x2_info_encode(0x13dff,17,s->info_bits);
         s->info_position=s->info_clock=0;
         stage(s,X2_INFO0);
@@ -202,6 +219,46 @@ static void upstream_s_sample(x2_session_t *s, int16_t sample)
     ++s->s_stable;
     for(k=0;k<3;++k){s->s_reference_re[k]=re[k];s->s_reference_im[k]=im[k];}
 }
+/* V.34 10.1.2 and 11.2.1.2.3-.5. A 5 ms coherent window
+ * distinguishes sustained Tone B from INFO0 phase modulation. Retain the
+ * pre-reversal phase through cancellation, and timestamp its zero crossing
+ * at the window centre so detector confirmation does not extend the 40 ms.
+ * Courier x2 follows this with the short channel probe, then its
+ * directional marker in place of ordinary INFO1 (native 9083). */
+static void phase2_b_sample(x2_session_t *s,int16_t sample,uint64_t tx_time)
+{
+    double re=0,im=0,energy=0;
+    unsigned j;
+    s->b_window[s->b_position++]=sample;
+    s->b_position%=40;
+    if(s->b_samples<40){++s->b_samples;return;}
+    for(j=0;j<40;++j) {
+        double x=s->b_window[(s->b_position+j)%40];
+        double phase=2*PI*1200*(double)((s->rx_samples+1-40+j)%20)/8000;
+        re+=x*cos(phase);im-=x*sin(phase);energy+=x*x;
+    }
+    double power=re*re+im*im;
+    double reference=s->b_reference_re*s->b_reference_re+s->b_reference_im*s->b_reference_im;
+    double dot=re*s->b_reference_re+im*s->b_reference_im;
+    if(s->a_reversals==1 && s->b_present && !s->b_reversed) {
+        if(!s->b_crossing_valid && dot<0) {
+            s->b_crossing_sample=s->rx_samples-20;
+            s->b_crossing_valid=1;
+        }
+        if(reference>0 && dot < -0.8*reference && energy>100000) {
+            uint64_t age=s->rx_samples-s->b_crossing_sample;
+            s->second_a_tx_sample=tx_time+(age<320?320-age:0);
+            s->b_reversed=1;
+        }
+        return;
+    }
+    if(energy<100000 || 2*power<0.90*40*energy) {
+        s->b_stable=0;return;
+    }
+    if(reference>0 && dot<0.90*sqrt(power*reference))s->b_stable=0;
+    s->b_reference_re=re;s->b_reference_im=im;
+    if(++s->b_stable>=160)s->b_present=1;
+}
 void x2_session_rx(x2_session_t *s,const int16_t *samples,size_t count)
 {
     size_t k;unsigned i;
@@ -211,6 +268,8 @@ void x2_session_rx(x2_session_t *s,const int16_t *samples,size_t count)
     for(k=0;k<count;++k,++s->rx_samples) {
         double phase=2*PI*1200*(double)(s->rx_samples%20)/8000;
         double re=samples[k]*cos(phase),im=-samples[k]*sin(phase);
+        if(s->stage==X2_TONE_A && s->peer_info_valid)
+            phase2_b_sample(s,samples[k],s->tx_samples+k);
         if(s->stage==X2_J && !s->s_bar_seen)upstream_s_sample(s,samples[k]);
         if(s->marker_valid||s->stage==X2_FAILED)continue;
         for(i=0;i<40;++i) {
@@ -249,6 +308,15 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
         switch(s->stage) {
         case X2_INFO0:
         case X2_TONE_A: {
+            if(s->stage==X2_TONE_A) {
+                if(!s->a_reversals && n>=400 && s->peer_info_valid && s->b_present) {
+                    s->sign^=1;s->a_reversals=1;
+                    s->b_crossing_valid=0;
+                }
+                if(s->a_reversals==1 && s->b_reversed && s->tx_samples>=s->second_a_tx_sample) {
+                    s->sign^=1;s->a_reversals=2;
+                }
+            }
             if(s->stage==X2_INFO0 && s->info_clock<600 && s->info_bits[s->info_position])s->sign^=1;
             code=linear_ulaw((int)((s->sign?-3000:3000)*cos(2*PI*2400*(double)(s->tx_samples%10)/8000)));
             if(s->stage==X2_INFO0) {
@@ -257,20 +325,22 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
                     s->info_clock-=8000;
                     if(++s->info_position==49) {
                         s->info_position=0;
-                        if(s->peer_info_valid)stage(s,X2_TONE_A);
+                        stage(s,X2_TONE_A);
                     }
                 }
             } else if(s->stage==X2_TONE_A) {
-                /* Initial timing hypothesis: 100 ms before reversal, then
-                 * 150 ms. These waits need live peer confirmation. */
-                if(n==800)s->sign^=1;
-                if(n==2000)stage(s,X2_MARKER_WAIT);
+                if(s->a_reversals==2 && s->tx_samples>=s->second_a_tx_sample+79)
+                    stage(s,X2_PROBE);
             }
             break;
         }
         /* Courier/I-modem asymmetric wire trace: tone A ends before the
          * caller's marker (5.01 s vs 5.27 s). Holding A in MARKER_WAIT
          * prevents the real caller from leaving Phase 2. */
+        case X2_PROBE:
+            code=linear_ulaw(s->probe[n%160]);
+            if(n==1279)stage(s,X2_MARKER_WAIT);
+            break;
         case X2_MARKER_WAIT:
         case X2_UPSTREAM_WAIT:break;
         case X2_ZERO:if(n==19)stage(s,X2_PATTERN_A);break;
@@ -336,6 +406,6 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
 }
 const char *x2_session_stage_name(x2_session_stage_t s)
 {
-    static const char *names[]={"INFO0","TONE_A","MARKER_WAIT","UPSTREAM_WAIT","ZERO","PATTERN_A","TRAIN_B","J","J_ACK","TRAIN_C","TRAIN_D","TRAIN_E","RECORD_WAIT","FINAL_TRAINING","DATA_STARTUP","PAYLOAD","FAILED"};
+    static const char *names[]={"INFO0","TONE_A","PROBE","MARKER_WAIT","UPSTREAM_WAIT","ZERO","PATTERN_A","TRAIN_B","J","J_ACK","TRAIN_C","TRAIN_D","TRAIN_E","RECORD_WAIT","FINAL_TRAINING","DATA_STARTUP","PAYLOAD","FAILED"};
     return (unsigned)s<sizeof(names)/sizeof(names[0])?names[s]:"INVALID";
 }

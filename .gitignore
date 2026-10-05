@@ -177,9 +177,14 @@ v92_rsig_test
 v92_tone_a_test
 
 /x2_test
+/k56flex_test
+/k56flex_v8bis_test
 
 /x2_session_test
+/k56flex_probe_test
+/k56flex_train_test
 
 /x2_b1_test
+/k56flex_client_test
 
 /v90_engine_peer
