@@ -17,6 +17,7 @@
  * surface the real engine uses.
  */
 
+#include "profile_file.h"
 #include "data_interface.h"
 #include "at_help.h"
 #include "line_monitor.h"
@@ -763,7 +764,7 @@ static void test_call_progress(void)
         return;
     }
     expect(dte, "ATE0", "OK");
-    expect(dte, "ATZ1", "ERROR");                   /* only profile 0 exists */
+    expect(dte, "ATZ2", "ERROR");                   /* profiles are 0 and 1 */
     expect(dte, "ATI4", " X4 ");                    /* the default */
 
     /* CONNECT as X, V and Q say. */
@@ -949,35 +950,127 @@ static void test_call_progress(void)
     di_close();
 }
 
-/* Stored profile: &W, Z, &F, &V and --profile (di_load_profile). */
+static void write_file(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "w");
+
+    if (f) {
+        fputs(text, f);
+        fclose(f);
+    }
+}
+
+static size_t read_file(const char *path, char *buf, size_t max)
+{
+    FILE *f = fopen(path, "r");
+    size_t n = 0;
+
+    buf[0] = '\0';
+    if (f) {
+        n = fread(buf, 1, max - 1, f);
+        buf[n] = '\0';
+        fclose(f);
+    }
+    return n;
+}
+
+/* Open the console with a --profile file, as sip_modem.c does at start-up. */
+static int profile_session(const char *link, const char *file)
+{
+    if (di_open(link) < 0)
+        return -1;
+    di_set_callbacks(cb_dial, cb_answer, cb_hangup, NULL);
+    di_set_modulation_ops(fake_ms_set, fake_ms_get, fake_ms_reset);
+    fake_ms_reset();
+    di_load_profile(file);
+    return open_dte(link);
+}
+
+/* profile_file.c alone: both syntaxes, round trips, and what it refuses. */
+static void test_profile_file(void)
+{
+    static pf_doc_t doc, back;
+    static char text[16384];
+    char err[200];
+    char at[PF_LINE];
+
+    printf("Profile file syntax (Cisco-style, JSON, legacy AT lines):\n");
+    pf_doc_init(&doc);
+    doc.power_on = 1;
+    pf_add(&doc.global, 0, "number 3 \"9,55\\225\"");
+    pf_add(&doc.profile[1], 0, "no echo");
+    pf_add(&doc.profile[1], 0, "result-codes 4");
+    pf_add(&doc.profile[1], 0, "dial pulse");
+    pf_add(&doc.profile[1], 0, "s-register 0 2");
+    pf_add(&doc.profile[1], 0, "+MS V34,1,300,0,300,0");
+    pf_add(&doc.profile[1], 0, "at &K3");
+    for (int json = 0; json < 2; json++) {
+        int len = pf_render(&doc, json != 0, text, sizeof(text));
+        bool same;
+
+        check(len > 0 && pf_parse(text, &back, err, sizeof(err)) == 0,
+              json ? "JSON renders and parses back" : "Cisco-style renders and parses back");
+        same = back.power_on == 1 && back.global.n == 1 && back.profile[1].n == 6
+               && !back.profile[0].present && !strcmp(back.global.line[0], doc.global.line[0]);
+        for (int i = 0; same && i < back.profile[1].n; i++) {
+            bool found = false;
+
+            for (int k = 0; k < doc.profile[1].n; k++)
+                found |= !strcmp(back.profile[1].line[i], doc.profile[1].line[k]);
+            same = found;
+        }
+        check(same, json ? "  ...to the same settings (JSON)" : "  ...to the same settings (Cisco)");
+    }
+    check(strstr(text, "\"9,55\\\"5\"") != NULL, "JSON shows a dial string's quote as \\\", not \\22");
+    check(pf_setting_to_at("no verbose", at, sizeof(at)) == 0 && !strcmp(at, "V0"), "no verbose -> V0");
+    check(pf_setting_to_at("+ES 3,0,2", at, sizeof(at)) == 0 && !strcmp(at, "+ES=3,0,2"), "+ES 3,0,2 -> +ES=3,0,2");
+    check(pf_setting_to_at("s-register 7 60", at, sizeof(at)) == 0 && !strcmp(at, "S7=60"), "s-register 7 60 -> S7=60");
+    check(pf_parse("profile 0\n speaker on\n", &back, err, sizeof(err)) < 0
+          && strstr(err, "line 2") && strstr(err, "speaker"), "an unknown setting is refused with its line");
+    check(pf_parse("echo\n", &back, err, sizeof(err)) < 0, "a setting before any profile is refused");
+    check(pf_parse("{ \"profiles\": { \"0\": { \"echo\": 1.5 } } }", &back, err, sizeof(err)) < 0,
+          "JSON: a fractional number is refused");
+    check(pf_parse("{ \"profiles\": { \"0\": { \"s-registers\": { \"0\": 3 }, \"at\": [\"&K3\"] } } }",
+                   &back, err, sizeof(err)) == 0 && back.profile[0].n == 2
+          && !strcmp(back.profile[0].line[0], "s-register 0 3") && !strcmp(back.profile[0].line[1], "at &K3"),
+          "JSON: s-registers object and at list");
+    check(pf_parse("# old\nATE0X2\nATS0=3\n", &back, err, sizeof(err)) == 0 && back.power_on == 0
+          && back.profile[0].n == 2 && !strcmp(back.profile[0].line[1], "at S0=3"),
+          "legacy AT-line file reads as profile 0");
+    check(pf_path_is_json("x/p.JSON") && !pf_path_is_json("p.cfg"), "file syntax chosen by extension");
+}
+
+/* Stored profiles: &Wn, Zn, &Yn, &F, &V and --profile (di_load_profile). */
 static void test_profile(void)
 {
     const char *link = "/tmp/console_test_profile";
-    const char *file = "/tmp/console_test_profile.at";
-    char buf[8192];
+    const char *file = "/tmp/console_test_profile.cfg";
+    const char *jfile = "/tmp/console_test_profile.json";
+    char buf[16384];
     int dte;
 
-    printf("Stored profile (&W, Z, &F, &V, --profile):\n");
+    printf("Stored profiles (&Wn, Zn, &Yn, &F, &V, --profile):\n");
     unlink(file);
-    if (di_open(link) < 0) {
-        failures++;
-        return;
-    }
-    di_set_callbacks(cb_dial, cb_answer, cb_hangup, NULL);
-    di_set_modulation_ops(fake_ms_set, fake_ms_get, fake_ms_reset);
-    di_load_profile(file);                          /* no file yet: nothing stored */
-    dte = open_dte(link);
-    if (dte < 0) {
+    unlink(jfile);
+    if ((dte = profile_session(link, file)) < 0) {   /* no file yet: nothing stored */
         failures++;
         di_close();
         return;
     }
     expect(dte, "ATE0", "OK");
-    expect(dte, "AT&V", "Stored Profile 0: none");
+    expect(dte, "AT&V", "none: ATZ restores the factory settings");
     expect(dte, "ATS0=3X2+ES=1,0,1;+VCID=1;+EWIND=6;+MS=V34;+ASTO=2,555", "OK");
-    expect(dte, "AT&W", "OK");
+    expect(dte, "AT&W", "OK");                      /* &W is &W0 */
     check(access(file, R_OK) == 0, "&W writes the --profile file");
-    expect(dte, "ATS0=0X4+ES=3,0,2;+VCID=0;+EWIND=15;+MS=V90;+ASTO=2,1", "OK");
+    read_file(file, buf, sizeof(buf));
+    check(strstr(buf, "profile 0\n no echo\n") && strstr(buf, " s-register 0 3\n")
+          && strstr(buf, " +ES 1,0,1\n") && strstr(buf, "number 2 \"555\"\n")
+          && strstr(buf, "power-on-profile 0\n") && strstr(buf, "\nend\n"),
+          "  ...in the Cisco-style syntax");
+    expect(dte, "ATS0=5X3+MS=V90", "OK");
+    expect(dte, "AT&W1", "OK");
+    expect(dte, "AT&W2", "ERROR");                  /* profiles are 0 and 1 */
+    expect(dte, "ATS0=0X4+ES=3,0,2;+VCID=0;+EWIND=15;+ASTO=2,1", "OK");
     expect(dte, "ATZ", "OK");
     expect(dte, "ATS0?", "003");
     expect(dte, "ATI4", " X2 ");
@@ -985,52 +1078,87 @@ static void test_profile(void)
     expect(dte, "AT+VCID?", "+VCID: 1");
     expect(dte, "AT+EWIND?", "+EWIND: 6,0");
     expect(dte, "AT+MS?", "+MS: V34");
-    expect(dte, "AT+ASTO?", "+ASTO: 2,555");
-    expect(dte, "AT&F", "OK");                      /* factory, not the stored profile */
+    expect(dte, "AT+ASTO?", "+ASTO: 2,1");          /* numbers are not in a profile */
+    expect(dte, "ATZ1", "OK");
+    expect(dte, "ATS0?", "005");
+    expect(dte, "AT+MS?", "+MS: V90");
+    expect(dte, "AT&F", "OK");                      /* factory, not a stored profile */
     expect(dte, "ATS0?", "000");
     expect(dte, "AT+ES?", "+ES: 3,0,2");
-    expect(dte, "AT+MS?", "+MS: V90");
-    expect(dte, "ATE0Z", "OK");                     /* ...and Z brings it back */
+    expect(dte, "ATE0Z0", "OK");
     expect(dte, "ATS0?", "003");
-    expect(dte, "AT&V", "ATE0Q0V1X2&C1&D2T");
-    expect(dte, "AT&V", "AT+ASTO=2,\"555\"");
-    expect(dte, "AT&Y0", "OK");
-    expect(dte, "AT&Y1", "ERROR");
-    expect(dte, "AT&W1", "ERROR");
+    expect(dte, "AT&Y1", "OK");
+    expect(dte, "AT&Y2", "ERROR");
+    expect(dte, "AT&V", "power-on &Y1");
+    expect(dte, "AT&V", " +MS V90");
+    expect(dte, "AT&V", "number 2 \"1\"");          /* &Y wrote the numbers as they are now */
     close(dte);
     di_close();
 
-    /* A restart: the file is replayed at power-on, before any ATZ. */
-    if (di_open(link) < 0) {
+    /* A restart: &Y1 is what comes back, before any ATZ. */
+    if ((dte = profile_session(link, file)) < 0) {
         failures++;
+        di_close();
         return;
     }
-    di_set_callbacks(cb_dial, cb_answer, cb_hangup, NULL);
-    di_set_modulation_ops(fake_ms_set, fake_ms_get, fake_ms_reset);
-    fake_ms_reset();
-    di_load_profile(file);
-    dte = open_dte(link);
-    expect(dte, "ATS0?", "003");                    /* E0 is stored too: no echo */
+    expect(dte, "ATS0?", "005");                    /* E0 is stored too: no echo */
+    expect(dte, "AT+MS?", "+MS: V90");
+    expect(dte, "AT+ASTO?", "+ASTO: 2,1");
+    expect(dte, "ATZ0", "OK");
     expect(dte, "AT+ES?;+EWIND?", "+EWIND: 6,0");
-    expect(dte, "AT+MS?", "+MS: V34");
-    expect(dte, "AT+ASTO?", "+ASTO: 2,555");
-    collect(dte, buf, sizeof(buf), 50);
+    close(dte);
+    di_close();
+
+    /* A hand-written JSON file: Q1 inside a profile does not hide errors,
+     * a refused setting is skipped, and &W keeps the JSON syntax. */
+    write_file(jfile,
+               "{ \"power-on-profile\": 0,\n"
+               "  \"numbers\": { \"4\": \"123\" },\n"
+               "  \"profiles\": { \"0\": { \"quiet\": true, \"+ES\": \"9,9,9\",\n"
+               "                       \"s-registers\": { \"0\": 7 }, \"echo\": false } } }\n");
+    if ((dte = profile_session(link, jfile)) < 0) {
+        failures++;
+        di_close();
+        return;
+    }
+    expect(dte, "ATQ0", "OK");
+    expect(dte, "ATS0?", "007");
+    expect(dte, "AT+ES?", "+ES: 3,0,2");            /* the refused setting left the default */
+    expect(dte, "AT+ASTO?", "+ASTO: 4,123");
+    expect(dte, "AT&W", "OK");
+    read_file(jfile, buf, sizeof(buf));
+    check(buf[0] == '{' && strstr(buf, "\"s-registers\": {") && strstr(buf, "\"quiet\": false"),
+          "&W rewrites a .json file as JSON");
+    close(dte);
+    di_close();
+
+    /* A file that does not parse is left alone: &W is ERROR. */
+    write_file(file, "profile 0\n warp-drive engaged\n");
+    if ((dte = profile_session(link, file)) < 0) {
+        failures++;
+        di_close();
+        return;
+    }
+    expect(dte, "ATE0", "OK");
+    expect(dte, "AT&W", "ERROR");
+    read_file(file, buf, sizeof(buf));
+    check(strstr(buf, "warp-drive") != NULL, "  ...and the file is untouched");
     close(dte);
     di_close();
 
     /* An &W that cannot be kept is ERROR. */
-    if (di_open(link) < 0) {
+    if ((dte = profile_session(link, "/nonexistent-dir/profile.cfg")) < 0) {
         failures++;
+        di_close();
         return;
     }
-    di_load_profile("/nonexistent-dir/profile.at");
-    dte = open_dte(link);
     expect(dte, "ATE0", "OK");
     expect(dte, "AT&W", "ERROR");
-    expect(dte, "AT&V", "Stored Profile 0: none");
+    expect(dte, "AT&V", "none: ATZ restores");
     close(dte);
     di_close();
     unlink(file);
+    unlink(jfile);
 }
 
 int main(void)
@@ -1040,6 +1168,7 @@ int main(void)
     test_v250_parameters();
     test_help();
     test_call_progress();
+    test_profile_file();
     test_profile();
     printf("%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures, failures == 1 ? "" : "s");
     return failures != 0;

@@ -126,10 +126,11 @@ enum at_modem_control_operation_e
         V.250 command uses Y).  num is the decimal value.  A positive return
         means answered with at_put_response(); anything else is ERROR. */
     AT_MODEM_CONTROL_DIAG_TABLE,
-    /*! Stored profile (Hayes &W, V.250 6.1.1's Z).  num "W": store the
-        active configuration (a negative return is ERROR).  num "Z": Z has
-        just restored the factory values; the application puts back what &W
-        stored, if anything. */
+    /*! Stored profiles (Hayes &W/&Y, V.250 6.1.1's Z).  num "N": return how
+        many there are (numbered from 0).  "W<n>": store the active
+        configuration as profile n.  "Y<n>": restore profile n at power-on.
+        "Z<n>": Z has just restored the factory values; put back what &Wn
+        stored, if anything.  A negative return is ERROR. */
     AT_MODEM_CONTROL_PROFILE
 };
 

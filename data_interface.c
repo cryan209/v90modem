@@ -25,6 +25,7 @@
 #include "at_test.h"
 #include "at_help.h"
 #include "line_monitor.h"
+#include "profile_file.h"
 #include "build_version.h"
 
 #include <spandsp.h>
@@ -368,12 +369,16 @@ static void ctrl_write(const void *buf, size_t len)
  * its OKs are not the DTE's business. */
 static int profile_quiet = 0;
 
+static void replay_capture(const uint8_t *buf, size_t len);
+
 static int at_tx_handler(void *user_data,
                          const uint8_t *buf, size_t len)
 {
     (void)user_data;
-    if (profile_quiet)
+    if (profile_quiet) {
+        replay_capture(buf, len);
         return 0;
+    }
     ctrl_write(buf, len);
     return 0;
 }
@@ -655,11 +660,15 @@ static void link_reset(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Stored profile: &W, Z, --profile                                    */
+/* Stored profiles: &Wn, Zn, &Yn, --profile                            */
 /* ------------------------------------------------------------------ */
 
-/* What &W keeps and Z puts back.  +MS, the V.250 parameters and the stored
- * dial strings are part of it, as they are of the configuration Z resets. */
+/* Hayes: two stored profiles, 0 and 1.  The file syntax carries ten. */
+#define DI_PROFILES 2
+
+/* What &Wn keeps and Zn puts back.  The stored numbers (&Z, +ASTO) are not
+ * in it: as on a Hayes modem they are kept beside the profiles, Z and &F
+ * leave them alone, and &W saves them with everything else. */
 typedef struct {
     bool valid;
     at_profile_t p;
@@ -670,17 +679,25 @@ typedef struct {
     v250_ctl_t v250;
     bool ms_valid;
     at_ms_settings_t ms;
-    char dial[10][41];
 } di_profile_t;
 
-static di_profile_t stored_profile;
+static di_profile_t stored_profile[DI_PROFILES];
+static int power_on_profile;            /* &Y */
 static char profile_path[512];
+/* The file exists and did not parse: &W must not overwrite what the user
+ * wrote, so it is ERROR until the file is fixed and the modem restarted. */
+static bool profile_file_bad;
+/* Both under t31_mtx: a pf_doc_t is ~130 KB. */
+static pf_doc_t profile_doc;
+static char profile_text[65536];
 
 /* Power-on (di_open): no stored profile until one is loaded or written. */
 static void profile_forget(void)
 {
-    memset(&stored_profile, 0, sizeof(stored_profile));
+    memset(stored_profile, 0, sizeof(stored_profile));
+    power_on_profile = 0;
     profile_path[0] = '\0';
+    profile_file_bad = false;
 }
 
 /* Under t31_mtx (inside the interpreter, or the power-on load). */
@@ -698,7 +715,6 @@ static void profile_snapshot(di_profile_t *sp)
         plus_ms_current(&sp->ms);
         sp->ms_valid = true;
     }
-    memcpy(sp->dial, at->stored_dial, sizeof(sp->dial));
 }
 
 static void profile_apply(const di_profile_t *sp)
@@ -721,64 +737,59 @@ static void profile_apply(const di_profile_t *sp)
             ms_cur_valid = true;
         }
     }
-    memcpy(at->stored_dial, sp->dial, sizeof(sp->dial));
 }
 
-/* The profile as the AT command lines that recreate it -- the file format,
- * and what &V shows.  S3/S4/S5 go last so the lines before them still end
- * the way the reader expects.  Returns the number of lines. */
-static int profile_lines(const di_profile_t *sp, char lines[][200], int max)
+/* A profile as profile_file.h's settings, each one AT command. */
+static void profile_settings(const di_profile_t *sp, pf_profile_t *out)
 {
     static const char *const params[] = {
         "MR", "ER", "DR", "ES", "DS", "DS44", "EB", "EFCS", "ETBM", "EWIND", "EFRAM",
         "IPR", "ICF", "IFC", "ILRR", "MSC"
     };
-    int n = 0;
+    static const int sregs[] = { 0, 2, 3, 4, 5, 6, 7, 8, 10, 12 };
     char info[160];
-    size_t used;
 
-    if (!sp->valid)
-        return 0;
-    snprintf(lines[n++], 200, "ATE%dQ%dV%dX%d&C%d&D%d%s",
-             sp->p.echo ? 1 : 0, sp->p.result_code_format == DI_NO_RESULT_CODES ? 1 : 0,
-             sp->p.verbose ? 1 : 0, sp->result_code_mode, sp->rlsd, sp->dtr,
-             sp->p.pulse_dial ? "P" : "T");
-    snprintf(lines[n++], 200, "ATS0=%dS2=%dS6=%dS7=%dS8=%dS10=%dS12=%d+VCID=%d",
-             sp->p.s_regs[0], sp->p.s_regs[2], sp->p.s_regs[6], sp->p.s_regs[7],
-             sp->p.s_regs[8], sp->p.s_regs[10], sp->p.s_regs[12], sp->vcid);
+    out->present = true;
+    pf_add(out, 0, "%secho", sp->p.echo ? "" : "no ");
+    pf_add(out, 0, "%squiet", sp->p.result_code_format == DI_NO_RESULT_CODES ? "" : "no ");
+    pf_add(out, 0, "%sverbose", sp->p.verbose ? "" : "no ");
+    pf_add(out, 0, "result-codes %d", sp->result_code_mode);
+    pf_add(out, 0, "dcd %d", sp->rlsd);
+    pf_add(out, 0, "dtr %d", sp->dtr);
+    pf_add(out, 0, "dial %s", sp->p.pulse_dial ? "pulse" : "tone");
+    for (size_t i = 0; i < sizeof(sregs) / sizeof(sregs[0]); i++)
+        pf_add(out, 0, "s-register %d %d", sregs[i], sp->p.s_regs[sregs[i]]);
+    pf_add(out, 0, "+VCID %d", sp->vcid);
     if (sp->ms_valid) {
         at_ms_format_read(&sp->ms, info, sizeof(info));
         if (!strncmp(info, "+MS: ", 5))
-            snprintf(lines[n++], 200, "AT+MS=%s", info + 5);
+            pf_add(out, 0, "+MS %s", info + 5);
     }
-    used = 0;
-    for (size_t i = 0; i < sizeof(params) / sizeof(params[0]) && n < max - 2; i++) {
+    for (size_t i = 0; i < sizeof(params) / sizeof(params[0]); i++) {
         v250_ctl_t copy = sp->v250;
         char cmd[16];
         const char *colon;
 
         snprintf(cmd, sizeof(cmd), "%s?", params[i]);
-        if (v250_ctl_command(&copy, cmd, info, sizeof(info)) != V250_CTL_OK
-            || !(colon = strstr(info, ": ")))
-            continue;
-        if (used == 0)
-            used = (size_t) snprintf(lines[n], 200, "AT");
-        used += (size_t) snprintf(lines[n] + used, 200 - used, "%s+%s=%s",
-                                  used > 2 ? ";" : "", params[i], colon + 2);
-        if (used > 150) {
-            n++;
-            used = 0;
-        }
+        if (v250_ctl_command(&copy, cmd, info, sizeof(info)) == V250_CTL_OK
+            && (colon = strstr(info, ": ")))
+            pf_add(out, 0, "+%s %s", params[i], colon + 2);
     }
-    if (used)
-        n++;
-    for (int i = 0; i < 10 && n < max - 1; i++) {
+}
+
+/* The whole file: the stored profiles, &Y, and the numbers as they are now. */
+static void profile_build_doc(pf_doc_t *doc)
+{
+    pf_doc_init(doc);
+    doc->power_on = power_on_profile;
+    for (int i = 0; i < 10; i++) {
         char q[100];
         size_t k = 0;
 
-        if (!sp->dial[i][0])
+        if (!at->stored_dial[i][0])
             continue;
-        for (const char *c = sp->dial[i]; *c && k < sizeof(q) - 4; c++) {
+        q[k++] = '"';
+        for (const char *c = at->stored_dial[i]; *c && k < sizeof(q) - 5; c++) {
             if (*c == '"') {
                 memcpy(q + k, "\\22", 3);
                 k += 3;
@@ -786,81 +797,194 @@ static int profile_lines(const di_profile_t *sp, char lines[][200], int max)
                 q[k++] = *c;
             }
         }
+        q[k++] = '"';
         q[k] = '\0';
-        snprintf(lines[n++], 200, "AT+ASTO=%d,\"%s\"", i, q);
+        pf_add(&doc->global, 0, "number %d %s", i, q);
     }
-    snprintf(lines[n++], 200, "ATS3=%dS4=%dS5=%d",
-             sp->p.s_regs[3], sp->p.s_regs[4], sp->p.s_regs[5]);
-    return n;
+    for (int n = 0; n < DI_PROFILES; n++) {
+        if (stored_profile[n].valid)
+            profile_settings(&stored_profile[n], &doc->profile[n]);
+    }
 }
 
-static int profile_write_file(const di_profile_t *sp)
+static int profile_write_file(void)
 {
-    char lines[32][200];
     char tmp[600];
-    int n;
+    int len;
     FILE *f;
 
     if (!profile_path[0])
         return 0;
-    n = profile_lines(sp, lines, 32);
+    if (profile_file_bad)
+        return -1;
+    profile_build_doc(&profile_doc);
+    len = pf_render(&profile_doc, pf_path_is_json(profile_path), profile_text, sizeof(profile_text));
+    if (len < 0)
+        return -1;
     snprintf(tmp, sizeof(tmp), "%s.tmp", profile_path);
     if (!(f = fopen(tmp, "w")))
         return -1;
-    fprintf(f, "# v90modem stored profile (AT&W); replayed at power-on and by ATZ\n");
-    for (int i = 0; i < n; i++)
-        fprintf(f, "%s\n", lines[i]);
-    if (fclose(f) != 0 || rename(tmp, profile_path) != 0)
+    if (fwrite(profile_text, 1, (size_t) len, f) != (size_t) len) {
+        fclose(f);
+        unlink(tmp);
         return -1;
+    }
+    if (fclose(f) != 0 || rename(tmp, profile_path) != 0) {
+        unlink(tmp);
+        return -1;
+    }
     return 0;
 }
 
 /* AT_MODEM_CONTROL_PROFILE.  Inside the interpreter, under t31_mtx. */
 static int handle_profile(const char *op)
 {
+    int n;
+
     if (!op || !at)
         return -1;
-    if (!strcmp(op, "W")) {
-        di_profile_t snap;
+    if (!strcmp(op, "N"))
+        return DI_PROFILES;
+    n = atoi(op + 1);
+    if (n < 0 || n >= DI_PROFILES)
+        return -1;
+    if (op[0] == 'W') {
+        di_profile_t old = stored_profile[n];
 
-        profile_snapshot(&snap);
-        /* Written first: an &W that could not be kept is ERROR, and the
-         * profile in memory stays what the file says. */
-        if (profile_write_file(&snap) < 0)
+        profile_snapshot(&stored_profile[n]);
+        /* An &W that could not be kept is ERROR, and what is in memory stays
+         * what the file says. */
+        if (profile_write_file() < 0) {
+            stored_profile[n] = old;
             return -1;
-        stored_profile = snap;
+        }
         return 0;
     }
-    if (!strcmp(op, "Z")) {
-        profile_apply(&stored_profile);
+    if (op[0] == 'Y') {
+        int old = power_on_profile;
+
+        power_on_profile = n;
+        if (profile_write_file() < 0) {
+            power_on_profile = old;
+            return -1;
+        }
+        return 0;
+    }
+    if (op[0] == 'Z') {
+        profile_apply(&stored_profile[n]);
         return 0;
     }
     return -1;
 }
 
+/* What the interpreter said while a profile is replayed: the last line is
+ * its result code. */
+static char replay_out[1024];
+static size_t replay_len;
+
+static void replay_capture(const uint8_t *buf, size_t len)
+{
+    if (replay_len + len >= sizeof(replay_out))
+        replay_len = 0;          /* only the end matters */
+    if (len >= sizeof(replay_out))
+        return;
+    memcpy(replay_out + replay_len, buf, len);
+    replay_len += len;
+    replay_out[replay_len] = '\0';
+}
+
+/* One command through the interpreter, as the DTE would type it.  False
+ * when it answered ERROR.  Q1 would hide that, so result codes are on for
+ * the duration -- unless the command is the one that turns them off. */
+static bool profile_replay(const char *cmd)
+{
+    char line[PF_LINE + 8];
+    int fmt = at->p.result_code_format;
+    int forced = -1;
+    char *tail;
+    int n;
+
+    if (fmt == DI_NO_RESULT_CODES) {
+        forced = at->p.verbose ? 1 : 2;     /* ASCII / numeric */
+        at->p.result_code_format = forced;
+    }
+    replay_len = 0;
+    replay_out[0] = '\0';
+    n = snprintf(line, sizeof(line) - 1, "AT%s", cmd);
+    if (n < 0 || n >= (int) sizeof(line) - 1)
+        return false;
+    line[n] = (char) at->p.s_regs[3];
+    t31_at_rx(t31, line, n + 1);
+    if (forced >= 0 && at->p.result_code_format == forced)
+        at->p.result_code_format = fmt;
+    n = (int) replay_len;
+    while (n > 0 && (replay_out[n - 1] == '\r' || replay_out[n - 1] == '\n' || replay_out[n - 1] == ' '))
+        replay_out[--n] = '\0';
+    tail = replay_out + n;
+    while (tail > replay_out && tail[-1] != '\r' && tail[-1] != '\n')
+        tail--;
+    return strcmp(tail, "ERROR") && strcmp(tail, "4");
+}
+
+/* Replay one profile's settings; a refused one is reported and skipped. */
+static void profile_replay_settings(const pf_profile_t *p, const char *path)
+{
+    for (int i = 0; i < p->n; i++) {
+        char cmd[PF_LINE];
+
+        if (pf_setting_to_at(p->line[i], cmd, sizeof(cmd)) < 0 || !profile_replay(cmd))
+            fprintf(stderr, "[DI] %s line %d: \"%s\" (AT%s) refused; ignored\n",
+                    path, p->src[i], p->line[i], cmd);
+    }
+}
+
 void di_load_profile(const char *path)
 {
+    char err[200];
+    size_t len;
     FILE *f;
-    char line[256];
 
     snprintf(profile_path, sizeof(profile_path), "%s", path ? path : "");
     if (!path || !path[0] || !at || !(f = fopen(path, "r")))
         return;
     pthread_mutex_lock(&t31_mtx);
-    profile_quiet = 1;
-    while (fgets(line, sizeof(line), f)) {
-        size_t n = strcspn(line, "\r\n");
-
-        if (n < 2 || line[0] == '#')
-            continue;
-        line[n] = (char) at->p.s_regs[3];
-        t31_at_rx(t31, line, (int) n + 1);
+    len = fread(profile_text, 1, sizeof(profile_text) - 1, f);
+    profile_text[len] = '\0';
+    if (!feof(f) || ferror(f) || pf_parse(profile_text, &profile_doc, err, sizeof(err)) < 0) {
+        profile_file_bad = true;
+        fprintf(stderr, "[DI] %s: %s; profiles not loaded, and AT&W/AT&Y will answer ERROR "
+                "rather than overwrite it\n", path, err[0] && !ferror(f) ? err : "unreadable or too large");
+        pthread_mutex_unlock(&t31_mtx);
+        fclose(f);
+        return;
     }
-    profile_quiet = 0;
-    profile_snapshot(&stored_profile);
-    pthread_mutex_unlock(&t31_mtx);
     fclose(f);
-    fprintf(stderr, "[DI] stored profile loaded from %s\n", path);
+    profile_quiet = 1;
+    for (int n = 0; n < PF_PROFILES; n++) {
+        if (!profile_doc.profile[n].present)
+            continue;
+        if (n >= DI_PROFILES) {
+            fprintf(stderr, "[DI] %s: profile %d ignored (there are %d, 0-%d)\n",
+                    path, n, DI_PROFILES, DI_PROFILES - 1);
+            continue;
+        }
+        /* Each profile is the factory configuration with its settings
+         * applied, exactly as AT&F...&Wn would have made it. */
+        profile_replay("&F");
+        profile_replay_settings(&profile_doc.profile[n], path);
+        profile_snapshot(&stored_profile[n]);
+    }
+    profile_replay_settings(&profile_doc.global, path);
+    if (profile_doc.power_on >= DI_PROFILES)
+        fprintf(stderr, "[DI] %s: power-on-profile %d ignored\n", path, profile_doc.power_on);
+    else if (profile_doc.power_on >= 0)
+        power_on_profile = profile_doc.power_on;
+    profile_replay("&F");
+    profile_apply(&stored_profile[power_on_profile]);
+    profile_quiet = 0;
+    pthread_mutex_unlock(&t31_mtx);
+    fprintf(stderr, "[DI] stored profiles loaded from %s (power-on profile %d)\n",
+            path, power_on_profile);
 }
 
 void di_set_link_detail_cb(di_link_detail_cb_t cb)
@@ -1147,6 +1271,33 @@ static int handle_diag_table(const char *num)
     return 1;
 }
 
+/* &V: the stored profiles, in the file's own syntax. */
+static void profile_view(page_t *pg)
+{
+    bool any = false;
+    int len;
+
+    for (int n = 0; n < DI_PROFILES; n++)
+        any |= stored_profile[n].valid;
+    page_put(pg, "\r\nStored profiles (power-on &Y%d)%s%s:\r\n", power_on_profile,
+             profile_path[0] ? ", kept in " : ", not kept (no --profile file)",
+             profile_path);
+    if (!any) {
+        page_put(pg, "none: ATZ restores the factory settings\r\n");
+        return;
+    }
+    profile_build_doc(&profile_doc);
+    len = pf_render(&profile_doc, false, profile_text, sizeof(profile_text));
+    for (char *s = profile_text; len > 0 && *s; ) {
+        size_t k = strcspn(s, "\n");
+
+        /* The file's own comment header is for the file. */
+        if (s[0] != '!' || s[1] != ' ')
+            page_put(pg, "%.*s\r\n", (int) k, s);
+        s += k + (s[k] == '\n');
+    }
+}
+
 static int handle_info(const char *num)
 {
     char buf[4096];
@@ -1156,18 +1307,14 @@ static int handle_info(const char *num)
         return 0;
     buf[0] = '\0';
     if (!strcmp(num, "&V")) {
-        /* Hayes &V: the active configuration, then the stored one. */
-        char lines[32][200];
-        int n;
+        /* Hayes &V: the active configuration, then the stored profiles. */
+        static char vbuf[16384];
+        page_t vpg = { vbuf, sizeof(vbuf) };
 
-        info_settings(&pg);
-        page_put(&pg, "\r\nStored Profile 0%s\r\n",
-                 stored_profile.valid ? (profile_path[0] ? " (also in the --profile file):" : ":")
-                                      : ": none (ATZ restores the factory settings)");
-        n = profile_lines(&stored_profile, lines, 32);
-        for (int i = 0; i < n; i++)
-            page_put(&pg, "%s\r\n", lines[i]);
-        put_page(buf);
+        vbuf[0] = '\0';
+        info_settings(&vpg);
+        profile_view(&vpg);
+        put_page(vbuf);
         return 1;
     }
     if (!strcmp(num, "GCAP")) {

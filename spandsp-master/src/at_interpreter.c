@@ -1594,21 +1594,43 @@ static const char *at_cmd_X(at_state_t *s, const char *t)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* The highest stored profile number (Hayes &W/&Y/Z): the application keeps
+   the profiles, and with none there is still Z0, the factory one. */
+static int stored_profile_max(at_state_t *s)
+{
+    int n;
+
+    n = at_modem_control(s, AT_MODEM_CONTROL_PROFILE, "N");
+    return (n > 1  &&  n <= 10)  ?  n - 1  :  0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static int profile_op(at_state_t *s, char op, int n)
+{
+    char buf[8];
+
+    snprintf(buf, sizeof(buf), "%c%d", op, n);
+    return at_modem_control(s, AT_MODEM_CONTROL_PROFILE, buf);
+}
+/*- End of function --------------------------------------------------------*/
+
 static const char *at_cmd_Z(at_state_t *s, const char *t)
 {
     int val;
 
     /* V.250 6.1.1 - Reset to default configuration */
     t += 1;
-    /* Only profile 0 is defined: the others are all-zero, and restoring one
-       would set S3 to 0 and leave the DTE no way to end a command line. */
-    if ((val = parse_num(&t, 0)) < 0)
+    /* Zn restores the factory configuration (profiles[0]: the others in that
+       table are all-zero, and would set S3 to 0) and then whatever &Wn
+       stored over it.  The application says how many stored profiles there
+       are. */
+    if ((val = parse_num(&t, stored_profile_max(s))) < 0)
         return NULL;
     /*endif*/
     /* Just make sure we are on hook */
     at_modem_control(s, AT_MODEM_CONTROL_HANGUP, NULL);
     at_set_at_rx_mode(s, AT_MODE_ONHOOK_COMMAND);
-    s->p = profiles[val];
+    s->p = profiles[0];
     s->result_code_mode = AT_DEFAULT_RESULT_CODE_MODE;
     s->rlsd_behaviour = 1;     /* V.250 6.2.8 recommended &C1 */
     s->dtr_behaviour = 2;      /* &D2: the Hayes default (6.2.9 names none) */
@@ -1616,8 +1638,8 @@ static const char *at_cmd_Z(at_state_t *s, const char *t)
     at_reset_call_info(s);
     /* +MS is part of the configuration Z restores; NULL means "defaults" */
     at_modem_control(s, AT_MODEM_CONTROL_MODULATION, NULL);
-    /* ...and then whatever &W stored over the top of the defaults. */
-    at_modem_control(s, AT_MODEM_CONTROL_PROFILE, "Z");
+    /* ...and then whatever &Wn stored over the top of the defaults. */
+    profile_op(s, 'Z', val);
     return t;
 }
 /*- End of function --------------------------------------------------------*/
@@ -1703,13 +1725,13 @@ static const char *at_cmd_amp_W(at_state_t *s, const char *t)
 {
     int val;
 
-    /* Hayes - Store the active configuration as profile 0, the one Z (and
-       power-on) restores. */
+    /* Hayes - Store the active configuration as profile n, the one Zn
+       restores. */
     t += 2;
     if ((val = parse_num(&t, 0)) < 0)
         return NULL;
     /*endif*/
-    if (at_modem_control(s, AT_MODEM_CONTROL_PROFILE, "W") < 0)
+    if (profile_op(s, 'W', val) < 0)
         return NULL;
     /*endif*/
     return t;
@@ -1720,9 +1742,12 @@ static const char *at_cmd_amp_Y(at_state_t *s, const char *t)
 {
     int val;
 
-    /* Hayes - Select the stored profile for power-on: there is one, 0. */
+    /* Hayes - Select the stored profile restored at power-on. */
     t += 2;
-    if ((val = parse_num(&t, 0)) < 0)
+    if ((val = parse_num(&t, stored_profile_max(s))) < 0)
+        return NULL;
+    /*endif*/
+    if (profile_op(s, 'Y', val) < 0)
         return NULL;
     /*endif*/
     return t;
@@ -1736,7 +1761,7 @@ static const char *at_cmd_amp_V(at_state_t *s, const char *t)
     /* Hayes - View active configuration.  The application's settings page
        (ATI4) is the configuration, so it answers this too. */
     t += 2;
-    if ((val = parse_num(&t, 0)) < 0)
+    if ((val = parse_num(&t, stored_profile_max(s))) < 0)
         return NULL;
     /*endif*/
     if (at_modem_control(s, AT_MODEM_CONTROL_INFO, "&V") <= 0)

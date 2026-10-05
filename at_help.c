@@ -41,7 +41,7 @@ static const at_help_entry_t basic_rows[] = {
     { "T",       "Tone dial default",                                 "T" },
     { "V0/V1",   "Numeric/verbose result codes",                      "V1" },
     { "X0-4",    "X0 bare CONNECT; X1+ CONNECT rate; X3/4 BUSY; X2/4 NO DIALTONE", "X4" },
-    { "Z",       "Reset to the &W profile, else factory (Z0 only)",    NULL },
+    { "Zn",      "Reset: factory, then profile n (0-1) if &Wn stored it", NULL },
     { "+++",     "Escape to online command (S2 char, S12 guard)",      NULL },
     { "A/",      "Repeat the last command line (no Enter needed)",   NULL },
 };
@@ -72,9 +72,9 @@ static const at_help_entry_t amp_rows[] = {
     { "&C0/&C1", "DCD behaviour (stored; a pty has no DCD line)",     "&C1" },
     { "&D0-2",   "DTR behaviour (stored; a pty has no DTR line)",     "&D2" },
     { "&F",      "Factory defaults (not the &W profile)",              NULL },
-    { "&V",      "View the active and the stored configuration",      "&V" },
-    { "&W",      "Store the active configuration (ATZ restores it)",  NULL },
-    { "&Y0",     "Power-on profile (there is one, 0)",                 "&Y0" },
+    { "&V",      "View the active configuration and stored profiles", "&V" },
+    { "&Wn",     "Store the active configuration as profile n (0-1)", NULL },
+    { "&Yn",     "Profile restored at power-on (0-1; --profile file)", NULL },
     { "&Zn=s",   "Store number s in slot n (0-9); &Zn? shows it",     "&Z0?" },
 };
 
