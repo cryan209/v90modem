@@ -200,6 +200,7 @@ const char *cc_v110_cause_name(cc_v110_cause_t c)
     case CC_V110_CAUSE_SYNC_LOST: return "frame synchronization not recovered in 3 s (7.1.5)";
     case CC_V110_CAUSE_REMOTE:    return "far end's disconnect request (7.1.4.2)";
     case CC_V110_CAUSE_LOCAL:     return "our disconnect request acknowledged (7.1.4.3)";
+    case CC_V110_CAUSE_T2:        return "our disconnect request unanswered within T2 (7.1.4.1)";
     }
     return "?";
 }
@@ -207,6 +208,8 @@ const char *cc_v110_cause_name(cc_v110_cause_t c)
 /* T1 (7.1.2.2, suggested 10 s) and 7.1.5 e)'s 3 s, in DS0 octets. */
 #define V110_T1_OCTETS        80000u
 #define V110_RESYNC_OCTETS    24000u
+/* T2 (7.1.4.1, suggested 5 s): the far end has not answered our request. */
+#define V110_T2_OCTETS        40000u
 /* 5.1.3.2: loss only after three consecutive frames with a framing error. */
 #define V110_LOSS_FRAMES      3
 /* 5.1.3.1/7.1.2.4: a status change must persist this many frames. */
@@ -662,6 +665,14 @@ static void v110_timers(clear_channel_t *cc)
             cc->v110_cause = CC_V110_CAUSE_SYNC_LOST;
         }
         break;
+    case CC_V110_DISCONNECTING:
+        /* 7.1.4.1: guard against the far end never responding.  On ISDN
+         * T2 clears the call on the D channel; here, the SIP call. */
+        if (cc->rx_octets - cc->v110_disc_at >= V110_T2_OCTETS) {
+            cc->v110_state = CC_V110_DOWN;
+            cc->v110_cause = CC_V110_CAUSE_T2;
+        }
+        break;
     default:
         break;
     }
@@ -669,10 +680,15 @@ static void v110_timers(clear_channel_t *cc)
 
 void cc_v110_disconnect(clear_channel_t *cc)
 {
-    if (cc->mode != CC_V110 || cc->v110_state == CC_V110_DOWN)
+    if (cc->mode != CC_V110 || cc->v110_state == CC_V110_DOWN
+        || cc->v110_state == CC_V110_DISCONNECTING)
         return;
     cc->v110_state = CC_V110_DISCONNECTING;
     cc->v110_disc_frames = 0;
+    cc->v110_disc_at = cc->rx_octets;
+    /* 7.1.4.1 b): 106 OFF.  A character already on its way out is cut
+     * short -- c) puts binary 0 in the data bits from the next frame. */
+    cc->v110_tx_bits = cc->v110_tx_marks = 0;
 }
 
 bool cc_v110_finished(const clear_channel_t *cc)

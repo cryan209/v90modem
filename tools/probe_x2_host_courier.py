@@ -36,27 +36,99 @@ def main():
     parser.add_argument('--instructions', type=int, default=180000000)
     parser.add_argument('--fast', action='store_true')
     parser.add_argument('--message', default='COURIER-X2-HOST-0123456789\r\n')
+    parser.add_argument('--host-message', default='HOST-X2-0123456789\r\n')
+    parser.add_argument('--host-at', type=int, default=120000,
+                        help='inject host source bytes at this bearer sample')
+    parser.add_argument('--pty-source', action='store_true',
+                        help='send and receive through the real engine PTY after CONNECT')
+    parser.add_argument('--fixed-native-rate', action='store_true',
+                        help='retain the old diagnostic &U26&N39 Courier rate clamp')
     parser.add_argument('--capture-native', action='store_true',
                         help='read-only capture of Courier upstream mapper points')
+    parser.add_argument('--capture-receiver', action='store_true',
+                        help='read-only capture of Courier PCM receive frame state')
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
+    source = output / 'host-source.bin'
+    source.write_bytes(args.host_message.encode('ascii'))
     os.environ['ME_V90_UPSTREAM_BIT_DUMP'] = str(output / 'upstream.bits')
     os.environ['ME_V90_UPSTREAM_SYM_DUMP'] = str(output / 'upstream-symbols.txt')
-    if args.capture_native:
+    if args.capture_native or args.capture_receiver:
         os.environ['X2_HOST_NATIVE_CAPTURE'] = str(output / 'native-symbols.json')
+        os.environ['X2_HOST_CAPTURE_RECEIVER'] = '1' if args.capture_receiver else '0'
+        os.environ['COURIER_DSP_DUMP'] = str(output / 'native-dump')
     spec = importlib.util.spec_from_file_location('courier_host_probe', EMU / 'tools/probe_v90modem_closed_loop.py')
     probe = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(probe)
     launch = probe.subprocess.Popen
 
+    if args.pty_source:
+        base_peer = probe.EnginePeer
+
+        class PtyPeer(base_peer):
+            def start(self):
+                super().start()
+                if not hasattr(self, 'dte'):
+                    self.dte = bytearray()
+                    self.pty_fd = None
+                    self.source_offset = 0
+
+            def drain(self):
+                if self.pty_fd is None:
+                    try:
+                        self.pty_fd = os.open('/private/tmp/' + self.output.name + '-pty',
+                                              os.O_RDWR | os.O_NONBLOCK | os.O_NOCTTY)
+                    except FileNotFoundError:
+                        return
+                while True:
+                    try:
+                        data = os.read(self.pty_fd, 4096)
+                    except (BlockingIOError, OSError):
+                        break
+                    if not data:
+                        break
+                    self.dte.extend(data)
+
+            def exchange(self, octets):
+                reply = super().exchange(octets)
+                self.drain()
+                payload = args.host_message.encode('ascii')
+                if (b'CONNECT ' in self.dte and self.samples >= args.host_at
+                        and self.source_offset < len(payload)):
+                    try:
+                        self.source_offset += os.write(self.pty_fd, payload[self.source_offset:])
+                    except BlockingIOError:
+                        pass
+                return reply
+
+            def stop(self):
+                if hasattr(self, 'dte'):
+                    self.drain()
+                    (self.output / 'engine-dte.bin').write_bytes(self.dte)
+                super().stop()
+                if getattr(self, 'pty_fd', None) is not None:
+                    os.close(self.pty_fd)
+
+            def status(self):
+                status = super().status()
+                status['dte_hex'] = bytes(getattr(self, 'dte', b'')).hex()
+                status['source_queued'] = getattr(self, 'source_offset', 0)
+                return status
+
+        probe.EnginePeer = PtyPeer
+
     def native_payload(command, *a, **kw):
+        if str(command[0]) == str(ROOT / 'v90_engine_peer') and not args.pty_source:
+            command = [*command, '--tx-file', str(source), '--tx-at', str(args.host_at)]
         if '--at' in command:
             command = list(command)
             pos = command.index('--at') + 1
             command[pos] = command[pos].replace('ATX1', 'ATE0&M0&H0X1')
+            if not args.fixed_native_rate:
+                command[pos] = command[pos].replace('&U26&N39', '')
             command += ['--send-after-connect', args.message]
-            if args.capture_native:
+            if args.capture_native or args.capture_receiver:
                 assert command[1:3] == ['-m', 'courier_emu']
                 command = [command[0], str(ROOT / 'tools/x2_courier_capture.py'),
                            'cli', *command[3:]]
@@ -75,15 +147,25 @@ def main():
     result = json.loads((output / 'call.json').read_text())
     native = json.loads((output / 'analog-result.json').read_text())
     serial = bytes.fromhex(native.get('serial_hex', ''))
+    received = bytes.fromhex(result['engine'].get('dte_hex', '')) if args.pty_source else decoded
     checks = {'marker_4d': '4d' in result['engine']['accepted_markers'],
               'native_connect_x2': b'/x2/' in serial and b'CONNECT ' in serial,
               'engine_exit_ok': result['engine']['engine_exit'] == 0,
-              'native_to_host_complete': args.message.encode() in decoded}
+              'native_to_host_complete': args.message.encode() in received,
+              # Courier's DTE is 7E1; retain the untouched wire octets too.
+              'host_to_native_complete': args.host_message.encode() in
+                  bytes(value & 0x7f for value in serial)}
+    if args.pty_source:
+        checks['engine_connect'] = b'CONNECT ' in received
+        checks['pty_source_queued'] = result['engine']['source_queued'] == len(args.host_message.encode())
     result['checks'] = checks
     result['payload'] = {'expected': args.message,
-                         'native_to_host_complete': args.message.encode() in decoded,
+                         'host_expected': args.host_message,
+                         'host_source_at_sample': args.host_at,
+                         'host_to_native_complete': checks['host_to_native_complete'],
+                         'native_to_host_complete': args.message.encode() in received,
                          'decoded_octets': len(decoded),
-                         'source': 'waveform receiver bits, before engine qualification gate'}
+                         'source': 'engine PTY' if args.pty_source else 'waveform receiver bits'}
     (output / 'call.json').write_text(json.dumps(result, indent=2) + '\n')
     print(json.dumps(result['payload'], indent=2))
     return 0 if all(checks.values()) else 1

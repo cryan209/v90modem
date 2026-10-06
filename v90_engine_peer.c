@@ -2,6 +2,7 @@
  * Every frame returned here is generated after consuming peer RX, never replayed.
  *
  *   v90_engine_peer [pty-link] [--call] [--alaw]
+ *                   [--tx-file path --tx-at bearer-samples]
  *
  * --call makes this end the calling modem (as an ATD would), otherwise it
  * answers.  Frames on stdin are a 2-byte little-endian length then that many
@@ -17,11 +18,23 @@ static void dial(const char *uri, void *p) {(void)uri;(void)p;}
 static void control(void *p) {(void)p;}
 int main(int argc,char **argv) {
  const char *pty="/tmp/x2-loop-pty"; int call=0; me_law_t law=ME_LAW_ULAW;
+ const char *source_path=NULL; unsigned long source_at=120000;
+ uint8_t source[4096]; size_t source_len=0,source_pos=0;
  for(int i=1;i<argc;i++){
   if(!strcmp(argv[i],"--call"))call=1;
   else if(!strcmp(argv[i],"--alaw"))law=ME_LAW_ALAW;
+  else if(!strcmp(argv[i],"--tx-file") && i+1<argc)source_path=argv[++i];
+  else if(!strcmp(argv[i],"--tx-at") && i+1<argc){
+   char *end; const char *value=argv[++i]; source_at=strtoul(value,&end,10);
+   if(*value=='-' || !*value || *end)return 2;
+  }
   else if(argv[i][0]!='-')pty=argv[i];
-  else {fprintf(stderr,"usage: %s [pty-link] [--call] [--alaw]\n",argv[0]);return 2;}
+  else {fprintf(stderr,"usage: %s [pty-link] [--call] [--alaw] [--tx-file path --tx-at samples]\n",argv[0]);return 2;}
+ }
+ if(source_path){
+  FILE *f=fopen(source_path,"rb");if(!f){perror(source_path);return 2;}
+  source_len=fread(source,1,sizeof(source),f);
+  int invalid=ferror(f)||fgetc(f)!=EOF;fclose(f);if(invalid)return 2;
  }
  int wire=dup(STDOUT_FILENO); if(wire<0)return 2;
  dup2(STDERR_FILENO,STDOUT_FILENO);
@@ -40,7 +53,15 @@ int main(int argc,char **argv) {
   /* DTE payload into the engine, through the same helper sip_modem.c and the
      couplers use, so engine_pair_test covers it. */
   (void)me_pump_dte();
-  me_rx_g711(rx,n); (void)me_tx_g711(tx,n); me_flush_g711_taps();
+  me_rx_g711(rx,n);
+  /* Diagnostic source injection through the normal byte ring. This does
+   * not synthesize CONNECT or lift any protocol qualification gate. */
+  if(source_path && count>=source_at && source_pos<source_len){
+   int accepted=me_put_data(source+source_pos,(int)(source_len-source_pos));
+   if(accepted>0){source_pos+=(size_t)accepted;
+    fprintf(stderr,"closed loop: queued %d source bytes at bearer sample %lu\n",accepted,count);}
+  }
+  (void)me_tx_g711(tx,n); me_flush_g711_taps();
   if(fwrite(tx,1,n,output)!=(size_t)n || fflush(output))return 3;
   count+=n;
   /* sip_modem.c turns an engine hang-up request (a V.42 failure, +ES/+DS

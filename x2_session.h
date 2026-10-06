@@ -46,6 +46,7 @@ typedef struct {
     x2_pcm_config_t data_config;
     unsigned mp_valid, selected_index, upstream_rate_n;
     uint16_t upstream_rate_mask;
+    uint16_t downstream_rate_mask;
     unsigned record_position;
     uint8_t record_bits[96];
     x2_get_bit_func_t payload_source;

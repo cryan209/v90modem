@@ -275,9 +275,9 @@ static void session_output(x2_session_t *s,uint8_t *out,unsigned count,unsigned 
 static void source_activation_test(void)
 {
     const unsigned blocks[]={1,17,160};
-    /* Native CBB8/B54C framing: D284/03FE/0000, CRC C2CC, 11 pad
+    /* Native CBB8/B54C framing: D284/7FFF/0000, CRC FB0C, 11 pad
      * zeros. The downstream record is three words, not upstream MP's four. */
-    static const uint8_t record[]={0xff,0xff,0x11,0x4a,0xf3,0x1f,0,0,0x80,0x59,0x18,0};
+    static const uint8_t record[]={0xff,0xff,0x11,0x4a,0xfb,0xff,3,0,0x80,0x61,0x1f,0};
     for(unsigned b=0;b<3;++b) {
         x2_session_t s;x2_mp_t mp={{0x344,0x3fe,0,0x500},0};uint8_t octets[160],records[72];
         x2_session_init(&s);s.marker_valid=1;
@@ -292,6 +292,7 @@ static void source_activation_test(void)
         for(unsigned i=0;i<120;++i)assert(octets[i]!=0x7f);
         x2_session_receive_mp(&s,&mp);
         assert(s.mp_valid && s.selected_index==1 && s.upstream_rate_n==10);
+        assert(s.peer_mp.words[1]==0x03fe && s.downstream_rate_mask==0x7fff);
         assert(s.data_config.banks[0][1]==0xa8a8); /* Data alphabet, not E's A7. */
         session_output(&s,octets,54,blocks[b]);
         assert(s.stage==X2_RECORD_TX && !source_calls);

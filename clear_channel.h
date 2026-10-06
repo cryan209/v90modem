@@ -103,7 +103,8 @@ typedef enum {
     CC_V110_CAUSE_T1,        /* 7.1.2.4: no S = X = ON within T1 */
     CC_V110_CAUSE_SYNC_LOST, /* 7.1.5 e): framing not recovered in 3 s */
     CC_V110_CAUSE_REMOTE,    /* 7.1.4.2: far end's disconnect request */
-    CC_V110_CAUSE_LOCAL      /* 7.1.4.3: our request acknowledged */
+    CC_V110_CAUSE_LOCAL,     /* 7.1.4.3: our request acknowledged */
+    CC_V110_CAUSE_T2         /* 7.1.4.1: our request unanswered in T2 */
 } cc_v110_cause_t;
 
 typedef struct {
@@ -155,6 +156,7 @@ typedef struct {
     bool v110_rem_s_on, v110_rem_x_on;
     int v110_rem_on_run, v110_rem_disc_run;
     int v110_disc_frames;        /* frames sent in DISCONNECTING */
+    uint64_t v110_disc_at;       /* rx octet count our request began at */
     int v110_rx_bits;            /* RA0: -1 hunting, else bits taken */
     uint16_t v110_rx_shift;
     int v110_zero_run;
@@ -191,7 +193,9 @@ extern const int cc_v110_rates[];
 extern const int cc_v110_n_rates;
 /* The RA0 stream rate (5.3.3) for a user rate, or 0. */
 int  cc_v110_ra0_rate(int user_rate);
-/* 7.1.4.1: ask the far end to disconnect (S OFF, X ON, D = 0). */
+/* 7.1.4.1: ask the far end to disconnect (S OFF, X ON, D = 0): 106 OFF,
+ * no more data either way.  Ends in DOWN when the far end's S OFF or loss
+ * of framing acknowledges it (7.1.4.3), or after T2 = 5 s without. */
 void cc_v110_disconnect(clear_channel_t *cc);
 /* DOWN, and the disconnect request has been on the line long enough
  * (7.1.5 e): three frames) for the bearer to be released. */

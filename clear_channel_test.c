@@ -626,6 +626,61 @@ static void test_v110_procedures(void)
     free(eb);
 }
 
+/* A far end that keeps S = X = ON and D = 1 whatever it hears: Table 6e
+ * frames at 9600 bit/s (IR 16 kbit/s, two bits an octet) built here. */
+static int v110_enc_9600_on(uint8_t *line, int octets)
+{
+    uint8_t f[80];
+    int n = 0;
+
+    memset(f, 1, 80);
+    memset(f, 0, 8);
+    for (int o = 1; o < 10; o++)
+        if (o != 5)
+            f[o * 8 + 7] = 0;            /* S and X ON */
+    f[41] = 0; f[42] = 1; f[43] = 1;     /* E1-E3, Table 5 */
+    for (int i = 0; n < octets; i += 2)
+        line[n++] = (uint8_t) (0x3F | (f[i % 80] << 7) | (f[(i + 1) % 80] << 6));
+    return n;
+}
+
+static void test_v110_t2(void)
+{
+    end_t *e = calloc(1, sizeof(*e));
+    clear_channel_t a;
+    uint8_t out[160], in[160];
+    size_t pulled;
+
+    printf("V.110 local disconnect, unanswered:\n");
+    e->src = v110_text;
+    e->src_len = sizeof(v110_text);
+    cc_init_v110(&a, 9600, end_pull, end_push, e);
+    for (int t = 0; t < 50; t++) {               /* 1 s */
+        cc_tx(&a, out, 160);
+        v110_enc_9600_on(in, 160);
+        cc_rx(&a, in, 160);
+    }
+    check(a.v110_state == CC_V110_CONNECTED && e->src_pos > 0, "connected, data flowing");
+    cc_v110_disconnect(&a);
+    pulled = e->src_pos;
+    for (int t = 0; t < 240; t++) {              /* 4.8 s */
+        cc_tx(&a, out, 160);
+        v110_enc_9600_on(in, 160);
+        cc_rx(&a, in, 160);
+    }
+    check(a.v110_state == CC_V110_DISCONNECTING && e->src_pos == pulled,
+          "far end keeps S ON: still disconnecting at 4.8 s, nothing more pulled (106 OFF)");
+    for (int t = 0; t < 20; t++) {
+        cc_tx(&a, out, 160);
+        v110_enc_9600_on(in, 160);
+        cc_rx(&a, in, 160);
+    }
+    check(a.v110_state == CC_V110_DOWN && a.v110_cause == CC_V110_CAUSE_T2
+          && cc_v110_finished(&a), "T2 = 5 s: given up (7.1.4.1)");
+    cc_release(&a);
+    free(e);
+}
+
 /* RA0 receive, fed by an independent Table 6e encoder (9600 bit/s, IR
  * 16 kbit/s): a deleted stop element (5.3.4), a NUL, and a break (5.3.5). */
 static uint8_t enc_bits[20000];
@@ -819,6 +874,121 @@ static void engine_loop_v110(const char *connect)
     drain(resp, sizeof(resp), 300);
 }
 
+/* ATH on a V.110 call (me_hangup(), the DTE's hang-up callback): the SIP
+ * call stays up while 7.1.4.1's request goes out, and ends once it is
+ * acknowledged -- here by our own S OFF coming back round the loop. */
+static void engine_v110_ath(void)
+{
+    char resp[2048];
+    uint8_t ds0[160];
+    int ticks = 0;
+    bool held;
+
+    me_on_sip_connected();
+    for (int t = 0; t < 25; t++) {
+        me_tx_g711(ds0, 160);
+        me_rx_g711(ds0, 160);
+    }
+    drain(resp, sizeof(resp), 200);
+    for (int t = 0; t < 50; t++) {      /* past a periodic link report */
+        me_tx_g711(ds0, 160);
+        me_rx_g711(ds0, 160);
+    }
+    check(strstr(resp, "CONNECT 9600") != NULL && me_get_state() == ME_DATA,
+          "V.110 ATH: connected first, and a bounded 9600 call stays up "
+          "(the link report used the previous call's rate)");
+    me_hangup();
+    held = me_get_state() == ME_DATA;
+    while (me_get_state() == ME_DATA && ticks < 50) {
+        me_tx_g711(ds0, 160);
+        me_rx_g711(ds0, 160);
+        ticks++;
+    }
+    check(held && me_get_state() == ME_HANGUP && ticks >= 1 && ticks < 10,
+          "V.110 ATH: call held for the 7.1.4.1 request, then hung up on its acknowledgement");
+    me_on_sip_disconnected();
+    drain(resp, sizeof(resp), 300);
+
+    /* The same through the PTY: escape, ATH, and the DTE is owed OK, not
+     * NO CARRIER, once the request has been acknowledged. */
+    me_on_sip_connected();
+    for (int t = 0; t < 25; t++) {
+        me_tx_g711(ds0, 160);
+        me_rx_g711(ds0, 160);
+    }
+    drain(resp, sizeof(resp), 1100);            /* V.250 guard time */
+    if (write(dte_fd, "+++", 3) != 3)
+        perror("write");
+    drain(resp, sizeof(resp), 1300);
+    if (write(dte_fd, "ATH\r", 4) != 4)
+        perror("write");
+    usleep(200000);
+    held = me_get_state() == ME_DATA;
+    for (ticks = 0; me_get_state() == ME_DATA && ticks < 50; ticks++) {
+        me_tx_g711(ds0, 160);
+        me_rx_g711(ds0, 160);
+    }
+    if (me_get_state() == ME_HANGUP)
+        me_on_sip_disconnected();               /* what sip_modem.c does */
+    drain(resp, sizeof(resp), 300);
+    check(held && ticks < 10 && strstr(resp, "OK") && !strstr(resp, "NO CARRIER"),
+          "V.110 +++ ATH on the PTY: request sent, then OK");
+
+    /* The far end's request (7.1.4.2), from an independent V.110 instance
+     * on the other side of the DS0: the engine hangs up and the DTE gets
+     * NO CARRIER. */
+    {
+        end_t *pe = calloc(1, sizeof(*pe));
+        clear_channel_t peer;
+        uint8_t back[160];
+
+        cc_init_v110(&peer, 9600, end_pull, end_push, pe);
+        me_on_sip_connected();
+        for (int t = 0; t < 50; t++) {
+            me_tx_g711(ds0, 160);
+            cc_rx(&peer, ds0, 160);
+            cc_tx(&peer, back, 160);
+            me_rx_g711(back, 160);
+        }
+        drain(resp, sizeof(resp), 200);
+        held = strstr(resp, "CONNECT 9600") != NULL && peer.v110_state == CC_V110_CONNECTED;
+        cc_v110_disconnect(&peer);
+        for (ticks = 0; me_get_state() == ME_DATA && ticks < 50; ticks++) {
+            me_tx_g711(ds0, 160);
+            cc_rx(&peer, ds0, 160);
+            cc_tx(&peer, back, 160);
+            me_rx_g711(back, 160);
+        }
+        check(held && me_get_state() == ME_HANGUP && ticks < 10
+              && peer.v110_state == CC_V110_DOWN && peer.v110_cause == CC_V110_CAUSE_LOCAL,
+              "V.110 far-end disconnect request: engine hangs up, peer sees it acknowledged");
+        me_on_sip_disconnected();
+        drain(resp, sizeof(resp), 300);
+        check(strstr(resp, "NO CARRIER") != NULL, "V.110 far-end disconnect: NO CARRIER to the DTE");
+        cc_release(&peer);
+        free(pe);
+    }
+
+    /* A second request does not wait. */
+    me_on_sip_connected();
+    for (int t = 0; t < 25; t++) {
+        me_tx_g711(ds0, 160);
+        me_rx_g711(ds0, 160);
+    }
+    me_hangup();
+    me_hangup();
+    check(me_get_state() == ME_HANGUP, "V.110 ATH twice: immediate");
+    me_on_sip_disconnected();
+    drain(resp, sizeof(resp), 300);
+}
+
+/* sip_modem.c's DI hang-up callback: ATH reaches the engine through it. */
+static void test_on_hangup(void *user_data)
+{
+    (void) user_data;
+    me_hangup();
+}
+
 static int test_engine(void)
 {
     const char *link = "/tmp/clear_channel_test_pty";
@@ -833,6 +1003,7 @@ static int test_engine(void)
     me_init();
     if (di_open(link) < 0)
         return -1;
+    di_set_callbacks(NULL, NULL, test_on_hangup, NULL);
     if ((dte_fd = open(link, O_RDWR | O_NOCTTY | O_NONBLOCK)) < 0)
         return -1;
     if (tcgetattr(dte_fd, &tio) == 0) {
@@ -873,6 +1044,7 @@ static int test_engine(void)
     expect("AT+MS=V110,0,0,9600", "OK");
     expect("AT+MS?", "+MS: V110,0,0,9600,0,9600");
     engine_loop_v110("CONNECT 9600");
+    engine_v110_ath();
     expect("AT+MS=V110,0,9601,9700", "ERROR");      /* no Table 8 rate */
     expect("AT+MS=V110,0,50,70", "ERROR");
     expect("ATZ", "OK");
@@ -909,6 +1081,7 @@ int main(void)
     }
     test_v110_procedures();
     test_v110_ra0_rx();
+    test_v110_t2();
     if (test_engine() < 0) {
         printf("  FAIL engine/PTY setup\n");
         failures++;

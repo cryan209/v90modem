@@ -6667,9 +6667,13 @@ static void v34_put_bit_cb(void *user_data, int bit)
 {
     (void)user_data;
     if (g_mod == ME_MOD_X2) {
-        /* x2 MP/E is sequenced externally. The experimental B1 template
-         * has not acquired the captured Courier data; keep user data and
-         * CONNECT gated until the upstream mapper is verified. */
+        /* x2 owns MP/E (Draft 0.33 sections 20..21); the V.34 receiver
+         * suppresses B1 internally and supplies descrambled payload bits.
+         * Keep them behind the accepted-record/E/acquisition boundary. */
+        if(bit>=0 && !g_x2.symmetric && g_x2_data_stack_started
+           && g_x2_upstream_started && g_x2.stage==X2_PAYLOAD
+           && g_v34 && v34_v90_upstream_rx_acquired(g_v34))
+            ds_rx_put_bit(&g_data_stack,bit);
         return;
     }
     if (g_v34hdx_fax_control_started && di_fax_active()) {
@@ -7888,10 +7892,22 @@ static void me_x2_progress_locked(void)
         g_x2_last_stage = g_x2.stage;
     }
     if (g_x2.stage == X2_FAILED) g_state = ME_HANGUP;
+    if(!g_x2.symmetric && g_state==ME_TRAINING && g_x2.stage==X2_PAYLOAD
+       && g_x2.mp_valid && g_x2_data_stack_started && g_x2_upstream_started
+       && g_v34 && v34_v90_upstream_rx_acquired(g_v34)) {
+        int downstream=(int)(x2_pcm_frame_bits(&g_x2.data_config)*8000/6);
+        int upstream=(int)g_x2.upstream_rate_n*2400;
+        g_state=ME_DATA;g_phase_start_ms=0;
+        g_report_tx_rate=downstream;g_report_rx_rate=upstream;
+        trace_phase("X2 host enter DATA: downstream=%d upstream=%d",downstream,upstream);
+        if(g_data_framing!=DS_FRAMING_V42 && !g_data_connect_reported) {
+            g_data_connect_reported=true;di_on_connected(downstream);
+        }
+    }
 }
 static bool me_x2_tx_locked(uint8_t *codewords, int count)
 {
-    if (g_mod != ME_MOD_X2 || (g_state != ME_TRAINING && !(g_x2.symmetric && g_state==ME_DATA))) return false;
+    if (g_mod != ME_MOD_X2 || (g_state != ME_TRAINING && g_state!=ME_DATA)) return false;
     x2_session_tx(&g_x2, codewords, (size_t)count);
     if(g_x2.symmetric)me_x2_symmetric_progress_locked();
     me_x2_progress_locked();
@@ -8619,6 +8635,20 @@ void me_hangup(void)
         pthread_mutex_unlock(&g_state_mtx);
         return;
     }
+    /* V.110 7.1.4.1: the DTE's disconnect turns our S OFF with D = 0, and
+     * the bearer goes once the far end acknowledges (7.1.4.3) or T2
+     * expires -- me_v110_progress_locked() sets ME_HANGUP then.  Only from
+     * a state where the far end can read the request; a second request,
+     * like the V.90 one above, is immediate. */
+    if (g_cc_active && g_mod == ME_MOD_CLEAR && g_state == ME_DATA
+        && g_cc.mode == CC_V110
+        && (g_cc.v110_state == CC_V110_SYNCED || g_cc.v110_state == CC_V110_CONNECTED)) {
+        cc_v110_disconnect(&g_cc);
+        ME_LOG("[ME] V.110: disconnect requested: S OFF, X ON, D = 0 (7.1.4.1)\n");
+        trace_phase("V.110 disconnect request");
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
     g_state = ME_HANGUP;
     pthread_mutex_unlock(&g_state_mtx);
     /* sip_modem.c will detect ME_HANGUP and hang up the SIP call */
@@ -8703,6 +8733,7 @@ static int me_v110_progress_locked(void)
         case CC_V110_CAUSE_REMOTE: g_hangup_cause = "Remote (V.110 disconnect request)"; break;
         case CC_V110_CAUSE_LOCAL:  g_hangup_cause = "Local (V.110 disconnect)"; break;
         case CC_V110_CAUSE_T1:     g_hangup_cause = "Modem (V.110: no S = X = ON within T1)"; break;
+        case CC_V110_CAUSE_T2:     g_hangup_cause = "Local (V.110 disconnect, unanswered in T2)"; break;
         default:                   g_hangup_cause = "Modem (V.110 frame synchronization lost)"; break;
         }
         g_state = ME_HANGUP;
@@ -8728,6 +8759,9 @@ static int me_clear_start_locked(void)
         if (cc_init_v110(&g_cc, rate, data_stack_pull_dte_byte,
                          data_stack_push_dte_byte, NULL) != 0)
             return 0;
+        /* The rate the periodic link report (and its +MS bounds check)
+         * reads; only the CLEAR path sets it, via data_stack_start_online(). */
+        g_data_connect_rate = rate;
         g_cc_active = true;
         g_mod = ME_MOD_CLEAR;
         g_state = ME_DATA;
@@ -8747,6 +8781,7 @@ static int me_clear_start_locked(void)
                          data_stack_pull_dte_byte, data_stack_push_dte_byte,
                          NULL) != 0)
             return 0;
+        g_data_connect_rate = rate;   /* as for V.110 above */
     } else {
         /* The DS0 is the datapump; the data stack frames DTE characters on
          * it exactly as it would for a modem: V.14 unless LAPM was forced
@@ -10010,11 +10045,15 @@ void me_rx_audio(const int16_t *amp, int len)
     me_modulation_t mod = g_mod;
     pthread_mutex_unlock(&g_state_mtx);
 
-    if (mod == ME_MOD_X2 && state == ME_TRAINING) {
+    if (mod == ME_MOD_X2 && (state == ME_TRAINING || state == ME_DATA)) {
         pthread_mutex_lock(&g_state_mtx);
-        if (g_mod == ME_MOD_X2 && g_state == ME_TRAINING)
+        if (g_mod == ME_MOD_X2 && (g_state == ME_TRAINING || g_state == ME_DATA))
             me_x2_rx_locked(amp,len);
         pthread_mutex_unlock(&g_state_mtx);
+        uint8_t buf[256];
+        int n;
+        while ((n = dring_read(&upstream_ring, buf, sizeof(buf))) > 0)
+            di_write_data(buf, n);
         return;
     }
 
@@ -12846,7 +12885,7 @@ void me_tx_audio(int16_t *amp, int len)
 static void me_tx_audio_impl(int16_t *amp, int len)
 {
     pthread_mutex_lock(&g_state_mtx);
-    if (g_mod == ME_MOD_X2 && g_state == ME_TRAINING) {
+    if (g_mod == ME_MOD_X2 && (g_state == ME_TRAINING || g_state == ME_DATA)) {
         uint8_t raw[320];
         for (int offset=0; offset<len;) {
             int count=len-offset;

@@ -16,11 +16,11 @@ def main():
     args = parser.parse_args()
     root = args.capture
     trace = json.loads((root / 'native-symbols.json').read_text())
-    # NativeC5x capture header has seven words; use the recorded address list.
+    # NativeC5x capture header has five words; use the recorded address list.
     addresses = trace['addresses']
-    re = 7 + addresses.index(0x3c8)
-    im = 7 + addresses.index(0x3ca)
-    b = 7 + addresses.index(0x3a2)
+    re = 5 + addresses.index(0x3f8)
+    im = 5 + addresses.index(0x3f9)
+    b = 5 + addresses.index(0x3a4)
     def signed(value):
         return (value + 32768) % 65536 - 32768
     native = [complex(signed(row[re]), signed(row[im])) / 128

@@ -89,6 +89,7 @@ int x2_session_init(x2_session_t *s)
     if (!s) return -1;
     memset(s,0,sizeof(*s)); s->stage=X2_INFO0;s->answering=1;
     s->upstream_rate_mask=0x3fff;
+    s->downstream_rate_mask=0x7fff;
     /* Captured I-modem INFO0 body 11111111101111000, first bit first.
      * This is V.34's 17-bit INFO0, not V.90's extended INFO0d. */
     x2_info_encode(0x3dff,17,s->info_bits);
@@ -118,7 +119,7 @@ void x2_session_receive_mp(x2_session_t *s,const x2_mp_t *mp)
 {
     x2_pcm_config_t c;unsigned eligible,n=0;
     if(!s||!mp||s->stage<X2_TRAIN_C||s->stage>X2_RECORD_TX)return;
-    int index=x2_short_record_config(mp,0x7fff,&c);
+    int index=x2_short_record_config(mp,s->downstream_rate_mask,&c);
     if(index<0){s->stage=X2_FAILED;return;}
     /* W2 is the V.34 upstream capability mask, independent of PCM N1.
      * Highest allowed N no greater than N2; bit zero represents N=1. */
@@ -174,7 +175,12 @@ static void stage(x2_session_t *s, x2_session_stage_t next)
          * nonlinear encoding: keep it clear because the upstream receiver
          * uses a linear constellation (V.34 9.7). */
         uint16_t words[3]={(uint16_t)(0xd000|(s->selected_index<<2)|(s->upstream_rate_n<<6)),
-                           s->peer_mp.words[1],0};
+                           s->downstream_rate_mask,0};
+        /* Draft 0.33 section 20: W2 advertises THIS endpoint's rate
+         * capabilities. Courier 403 A675..A690 intersects this PCM mask
+         * with its own N1 ceiling for receive data. Copying its upstream
+         * V.34 mask (e.g. 03FE) excludes PCM index 1 and makes A661 return
+         * zero; C573 then reads an instruction instead of a B-table entry. */
         uint16_t crc=0xffff;unsigned p=0;
         memset(s->record_bits,0,sizeof(s->record_bits));
         for(unsigned i=0;i<17;++i)s->record_bits[p++]=1;

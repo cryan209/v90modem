@@ -90,7 +90,7 @@ of Tables 6a/6b/6c (600/1200/2400, D bits repeated 8/4/2 times) and 6e
 | Start (7.1.2) | Frames with D = 1, S = X = OFF; framing found -> S = X = ON; the far end's S = X = ON for two frames -> 107/109 ON (**CONNECT** is reported now, not when the call answers); 106 ON N = 24 bits later (6.3); T1 = 10 s. |
 | Data (7.1.3) | S/X not mapped to circuits (7.1.3.3). The far end's X OFF holds our data back at a character boundary (7.1.5 c, 5.4.2). A deleted stop element is re-inserted (5.3.4); 20 or more zeros is a break (5.3.5), counted and not delivered as NULs. |
 | Loss of framing (7.1.5) | Stop delivering, X OFF, resynchronize; X back ON and 106 after N bits on success; after 3 s, three frames of all-status-OFF D = 0 and hang up. |
-| Disconnect (7.1.4) | The far end's S OFF with D = 0 is its request: NO CARRIER. `cc_v110_disconnect()` sends ours (S OFF, X ON, D = 0) and the far end's S OFF or loss of framing acknowledges it -- but the engine does **not** call it yet: a local ATH ends the SIP call at once, without 7.1.4.1's frames. |
+| Disconnect (7.1.4) | The far end's S OFF with D = 0 is its request: hang up, NO CARRIER. A local ATH (the DTE's hang-up callback, `me_hangup()`) sends ours -- S OFF, X ON, D = 0, 106 OFF -- and keeps the SIP call up until the far end's S OFF or loss of framing acknowledges it (7.1.4.3), or T2 = 5 s passes (7.1.4.1); the DTE then gets OK. A second ATH, or one before framing is found, hangs up at once. |
 
 Not implemented: synchronous user rates (Tables 6d/6f, 7a-7c), 7/5-bit
 characters, parity and 2 stop elements as separate formats (8 data bits
@@ -105,7 +105,9 @@ late, data both ways byte-exact, with each frame on the wire graded by an
 independent checker written from Table 2/5/6 (alignment, E bits, unused bits
 1, repeats equal, S = X = OFF before ON); disconnect both sides; T1; a 0.4 s
 loss of framing and recovery with no data pulled while X is OFF; a 4 s loss
-ending in 7.1.5 e)'s disconnect; RA0 receive from an independent Table 6e
+ending in 7.1.5 e)'s disconnect; T2 against a far end that never acknowledges;
+a local ATH through the engine (direct and via `+++`/`ATH` on the PTY, held
+for the request and then OK) and a far end's request ending in NO CARRIER; RA0 receive from an independent Table 6e
 encoder (deleted stop, NUL, break); and the engine through the PTY, where
 CONNECT must come after the S/X exchange and not with the call. `make test`
 also runs `engine_pair_test` (two whole engines, numbered lines both ways)

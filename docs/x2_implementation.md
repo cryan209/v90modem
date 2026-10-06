@@ -9,9 +9,11 @@ the recovered low-level training alphabet.
 
 The supported short-record path receives MP, transmits its three-word response,
 waits for upstream E and activates the downstream payload source. Fresh original
-Courier 403 feedback reaches native CONNECT and upstream B1 acquisition. An
-error-free bidirectional user-data connection is still unverified; CONNECT and
-user-bit delivery from our engine remain gated.
+Courier 403 feedback reaches native CONNECT and upstream B1 acquisition.
+The PCM response-mask correction below establishes complete messages in both
+directions against that emulator. The engine enters DATA after accepted MP/E
+and upstream B1 acquisition; LAPM and sustained hardware operation remain
+unqualified.
 
 ## Implemented
 
@@ -484,3 +486,41 @@ narrows the next investigation to common framing/source handoff and the native
 AFC9/B006-to-AF6F caller change; it does not prove a native defect, because
 both experiments still use our frame decoder. Evidence and commands:
 `artifacts/x2-host-analog-20261006/README.md`.
+
+
+## Analog Courier downstream mask correction, 6 October 2026
+
+The corruption was a direction mix-up in the host three-word response, not
+an error in the PCM mapper. Draft 0.33 section 20's downstream W2 must carry
+our PCM rate mask (`7FFF`); we had copied the peer's upstream V.34 mask
+(`03FE`). Original Courier A675..A690 intersects that word with its PCM N1
+ceiling. With N1=1, `03FE` excludes its only candidate and selects index zero.
+C573 then reads the word before the amplitude-bit table (`C8CF`, 51407) instead
+of index one's 19 bits. `7FFF` selects index one, B=19 and MD=5. Symmetric x2
+uses a different capability exchange and does not exercise this selection.
+
+The corrected response for the standalone N=10 fixture is
+`D284/7FFF/0000`, CRC `FB0C`. Fresh native 403 calls with the diagnostic
+`&U26&N39` clamp recover both `HOST-X2-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ`
+and `COURIER-X2-0123456789-ABCDEFGHIJKLMNOPQRSTUVWXYZ` completely. The
+transmitted profile carries 32000 bit/s downstream and 4800 upstream, despite
+the native nominal `CONNECT 53333` label. The engine reports its actual
+32000 bit/s downstream rate.
+
+`tools/probe_x2_host_courier.py --pty-source` exercises the normal PTY source
+and sink after an actual engine CONNECT. The engine's x2 receive branch now
+flushes the upstream byte ring to that sink, just as the other data paths do.
+The gate requires accepted MP/E, PAYLOAD stage and acquired upstream B1.
+This does not qualify LAPM, higher upstream rates, or later native rate changes;
+the long capture still becomes noisy after the initial complete message.
+
+Evidence: `artifacts/x2-downstream-20261006/`, with fresh calls in the sibling
+`x2-downstream-20261006-mask-fixed`, `-long-fixed` and `-pty-fixed` directories.
+
+The unclamped Courier control (`-pty-auto`) also receives the complete host
+message, confirming the downstream correction beyond the fixed-rate fixture.
+Its upstream long message has a localized corruption around `IJK`, with the
+following suffix intact; both waveform decoding and the PTY show it. Upstream
+reliability therefore remains open even at the selected 4800 bit/s. B1 fits
+100% in that call, so acquisition alone is not sufficient evidence of an
+error-free data connection.

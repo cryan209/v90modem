@@ -26,9 +26,14 @@ rows = []
 # Courier 403 B08C: raw mapper point, source words and rate/frame state.
 addresses = [0x3c8, 0x3ca, 0x3f8, 0x3f9, 0x39f, 0x6f, 0x340,
              *range(0x3a2, 0x3ae), 0x4b6, 0x4de, 0x367]
+receiver = os.environ.get('X2_HOST_CAPTURE_RECEIVER') == '1'
+if receiver:
+    addresses = [0x39f, 0x6f, 0x351, 0x364, 0x343, 0x340, 0x341,
+                 *range(0x940, 0x944), 0x31c, 0x37d, 0x36e,
+                 *range(0x320, 0x333), *range(0x350, 0x36b)]
 def step(self, *a, **kw):
     if not getattr(self, '_x2_host_capture', False):
-        self.set_pc_capture(0xb08c, addresses)
+        self.set_pc_capture(0xe11c if receiver else 0xb08c, addresses)
         self._x2_host_capture = True
     result = original_step(self, *a, **kw)
     rows.extend(r for r in self.pc_captures() if len(rows) < 100000)
