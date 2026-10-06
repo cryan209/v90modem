@@ -1780,6 +1780,33 @@ static void negotiation_rx_bit(v42_state_t *s, int new_bit)
     }
     /*endif*/
     new_bit &= 1;
+    /* V.42 8.10 makes the detection phase optional, so the far end may skip
+       it and open with LAPM flags (slmodemd's V.32bis originator does).
+       Flags cannot occur in ODP, ADP or V.14 idle -- none carries a run of
+       exactly six ones -- so eight back-to-back flags are that peer, and
+       waiting out T400 for an ODP that will never come would fall back to
+       V.14 and hand its frames to the DTE as text. */
+    s->neg.flag_sr = ((s->neg.flag_sr << 1) | new_bit) & 0xFF;
+    if (s->neg.flag_sr == 0x7E)
+    {
+        s->neg.flag_run = (s->neg.flag_bits == 7)  ?  s->neg.flag_run + 1  :  1;
+        s->neg.flag_bits = 0;
+        if (s->neg.flag_run >= 8)
+        {
+            span_log(&s->logging, SPAN_LOG_FLOW, "HDLC flags during detection; far end skipped it, starting LAPM\n");
+            t400_stop(s);
+            s->lapm.state = LAPM_IDLE;
+            report_rx_status_change(s, V42_STATUS_DETECTION_SUCCEEDED);
+            restart_lapm(s);
+            return;
+        }
+        /*endif*/
+    }
+    else if (++s->neg.flag_bits > 7)
+    {
+        s->neg.flag_run = 0;
+    }
+    /*endif*/
     s->neg.rxstream = (s->neg.rxstream << 1) | new_bit;
     switch (s->neg.rx_negotiation_step)
     {
@@ -2228,6 +2255,9 @@ SPAN_DECLARE(void) v42_restart(v42_state_t *s)
         s->neg.txadps = 0;
         s->neg.rx_negotiation_step = 0;
         s->neg.odp_seen = false;
+        s->neg.flag_sr = 0;
+        s->neg.flag_bits = 0;
+        s->neg.flag_run = 0;
         t400_start(s);
         s->lapm.state = LAPM_DETECT;
         report_rx_status_change(s, V42_STATUS_DETECTING);

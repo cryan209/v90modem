@@ -163,6 +163,11 @@ typedef struct
     int txbits;
     int txstream;
     int txadps;
+    /*! HDLC flag tracking while detecting: a far end that skips the
+        detection phase is already sending LAPM flags. */
+    int flag_sr;
+    int flag_bits;
+    int flag_run;
 } v42_negotiation_t;
 
 /*!

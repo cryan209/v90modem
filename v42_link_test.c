@@ -731,6 +731,47 @@ static bool run_hold_case(int rate_before, int rate_after, int cut, int *resume_
     return ok;
 }
 
+/* V.42 8.10's detection phase is optional: a far end that skips it opens
+ * with LAPM flags (slmodemd's V.32bis originator does).  The end that is
+ * detecting must take the flags as the answer instead of waiting out T400 and
+ * falling back to buffered mode.  skip_caller picks which end skips. */
+static bool run_one_sided_detection_case(int bit_rate, bool skip_caller)
+{
+    endpoint_t c_ep, a_ep;
+    v42_state_t *c, *a;
+    endpoint_t *det_ep = skip_caller ? &a_ep : &c_ep;
+    bool ok;
+
+    init_payload(&c_ep, 1024, 0x1234567U);
+    init_payload(&a_ep, 1024, 0x7654321U);
+    c = v42_init(NULL, true, !skip_caller, get_payload, put_payload, &c_ep);
+    a = v42_init(NULL, false, skip_caller, get_payload, put_payload, &a_ep);
+    if (!c || !a)
+        return false;
+    v42_set_status_callback(c, status_changed, &c_ep);
+    v42_set_status_callback(a, status_changed, &a_ep);
+    v42_set_bit_rate(c, bit_rate);
+    v42_set_bit_rate(a, bit_rate);
+    v42_restart(c);
+    v42_restart(a);
+    for (uint64_t tick = 1; tick < (uint64_t)bit_rate*20U; tick++) {
+        c_ep.tick = a_ep.tick = tick;
+        v42_rx_bit(a, v42_tx_bit(c));
+        v42_rx_bit(c, v42_tx_bit(a));
+        if (c_ep.rx_len == 1024 && a_ep.rx_len == 1024)
+            break;
+    }
+    ok = det_ep->detecting && det_ep->detection_succeeded
+      && !det_ep->detection_unsupported
+      && c_ep.connected && a_ep.connected
+      && c_ep.rx_len == 1024 && a_ep.rx_len == 1024
+      && memcmp(c_ep.rx, a_ep.tx, 1024) == 0
+      && memcmp(a_ep.rx, c_ep.tx, 1024) == 0;
+    v42_free(c);
+    v42_free(a);
+    return ok;
+}
+
 int main(void)
 {
     static const int rates[] = { 2400, 9600, 28800, 33600 };
@@ -744,6 +785,10 @@ int main(void)
                  "V.42 T400 is clocked at the configured %d bit/s", rates[i]);
         CHECK(run_detection_timeout_case(rates[i]), label);
     }
+    CHECK(run_one_sided_detection_case(14400, true),
+          "V.42 answerer detecting takes a non-detecting originator's flags as LAPM");
+    CHECK(run_one_sided_detection_case(14400, false),
+          "V.42 originator detecting takes a non-detecting answerer's flags as LAPM");
     CHECK(run_link_case(9600, 2048, 5000, false, false, 0),
           "V.42 retransmits corrupted frames without payload corruption");
     CHECK(run_link_case(9600, 2048, 0, true, false, 0),

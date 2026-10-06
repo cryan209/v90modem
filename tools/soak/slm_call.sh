@@ -42,6 +42,12 @@ sleep 6
 # raw and -echo first: in echo mode the tty hands every byte we receive back
 # to us as DTE input, which we then transmit to the peer.
 docker exec v90modem-sip sh -c "stty -F /tmp/v90slm raw -echo; (cat /tmp/v90slm > $DIR/pty-rx.bin &) ; true"
+# OURS_INIT='AT+DS44=3,0;AT+PIG=0' -- AT commands for our DTE before the call.
+if [ -n "${OURS_INIT:-}" ]; then
+    echo "$OURS_INIT" | tr ';' '\n' | while read -r c; do
+        [ -n "$c" ] && docker exec v90modem-sip sh -c "printf '%s\r' '$c' > /tmp/v90slm"; sleep 1
+    done
+fi
 
 docker restart d-modem >/dev/null 2>&1
 sleep 8
@@ -86,7 +92,21 @@ if [ "$ORIG" = ours ]; then
             echo "peer registered after ${i}s (after config)"; break
         fi
     done
-    docker exec v90modem-sip sh -c "printf 'AT\r' > /tmp/v90slm; sleep 1; printf 'ATD$PEER\r' > /tmp/v90slm"
+    # The PBX sometimes answers a call to a freshly registered 6000 itself
+    # (instant 200 OK, no INVITE in d-modem's log); redial until it is ours.
+    for attempt in 1 2 3; do
+        docker exec v90modem-sip sh -c "printf 'AT\r' > /tmp/v90slm; sleep 1; printf 'ATD$PEER\r' > /tmp/v90slm"
+        got=no
+        for i in $(seq 1 6); do
+            sleep 1
+            if docker exec d-modem sh -c 'grep -ac "Incoming call" /tmp/slm.log' 2>/dev/null | grep -qv '^0$'; then
+                got=yes; break
+            fi
+        done
+        [ $got = yes ] && { echo "peer took the call on dial attempt $attempt"; break; }
+        echo "dial attempt $attempt never reached the peer; redialling"
+        docker exec v90modem-sip sh -c "sleep 1; printf '+++' > /tmp/v90slm; sleep 2; printf 'ATH\r' > /tmp/v90slm; sleep 3"
+    done
 fi
 wait $peerpid
 
