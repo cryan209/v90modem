@@ -1095,6 +1095,13 @@ static bool v90_v92_cpd_gain_per_lu(void)
     return cached != 0;
 }
 
+double v90_get_v92_upstream_ds0_per_unit(const v90_state_t *s)
+{
+    if (s && s->v92_upstream_lu_rx > 1.0 && v90_v92_cpd_gain_per_lu())
+        return s->v92_upstream_lu_rx;
+    return 1.0;
+}
+
 bool v90_set_v92_upstream_noise(v90_state_t *s, double sigma_linear,
                                 double lu_rx)
 {

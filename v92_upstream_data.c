@@ -368,6 +368,7 @@ static bool select_equivalence_point(const v92_cpd_frame_t *cpd,
                                      const int eta_frame[4],
                                      const double u_history[V92_CPD_MAX_TAPS],
                                      const double x_history[V92_CPD_MAX_TAPS],
+                                     int class_member,
                                      int *eta_out,
                                      double *u_out,
                                      double *x_out)
@@ -403,7 +404,12 @@ static bool select_equivalence_point(const v92_cpd_frame_t *cpd,
             continue;
         u = constellation_value(cpd, set, eta);
         x = u + fixed;
-        cost = fabs(x);
+        if (class_member == V92_UPSTREAM_MEMBER_MOST_NEGATIVE)
+            cost = (double)eta;
+        else if (class_member == V92_UPSTREAM_MEMBER_MOST_POSITIVE)
+            cost = -(double)eta;
+        else
+            cost = fabs(x);
         if (!found || cost < best_cost
             || (cost == best_cost && abs(eta) < abs(best_eta))) {
             found = true;
@@ -455,7 +461,7 @@ bool v92_upstream_wave_encode_ki(v92_upstream_wave_tx_t *state,
                                       trial.convolutional_state & 1,
                                       eta_frame,
                                       trial.u_history, trial.x_history,
-                                      &eta, &u, &x))
+                                      trial.class_member, &eta, &u, &x))
             return false;
         eta_frame[k] = eta;
         v = prefilter_output(cpd, x, trial.x_history, trial.v_history);

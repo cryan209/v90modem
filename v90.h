@@ -475,6 +475,11 @@ bool v90_set_v92_cpd_profile(v90_state_t *s,
 bool v90_set_v92_upstream_noise(v90_state_t *s, double sigma_linear,
                                 double lu_rx);
 
+/* DS0 linear units per unit of G x point in the CPd this context builds:
+ * the received LU under ME_V92_CPD_GAIN_PER_LU, else 1.  What the B1u/data
+ * decoder's input has to be divided by. */
+double v90_get_v92_upstream_ds0_per_unit(const v90_state_t *s);
+
 /*
  * Fill the native Table 30 CPd frame this context would transmit: profile
  * rate/trellis/gain, modulus parameters, and the robbed-bit-safe upstream

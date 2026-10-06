@@ -371,3 +371,181 @@ int v92_upstream_b1_rx_feed(v92_upstream_rx_t *rx,
     }
     return delivered;
 }
+
+/* ---- Equalised mode ------------------------------------------------------ */
+
+bool v92_upstream_b1_rx_init_equalized(v92_upstream_rx_t *rx,
+                                       const v92_cpd_frame_t *cpd,
+                                       v92_upstream_byte_handler_t handler,
+                                       void *user_data)
+{
+    if (!rx || !cpd || !v92_upstream_wave_profile_validate(cpd))
+        return false;
+    memset(rx, 0, sizeof(*rx));
+    rx->cpd = *cpd;
+    rx->handler = handler;
+    rx->user_data = user_data;
+    rx->equalized_input = true;
+    rx->gain = 1.0;
+    v92_upstream_wave_rx_init(&rx->wave_rx);
+    return true;
+}
+
+static bool decode_frame_with(v92_upstream_rx_t *rx,
+                              v92_upstream_wave_rx_t *state,
+                              const double frame[V92_UPSTREAM_INTERVALS],
+                              uint8_t bits[V92_UPSTREAM_MAX_FRAME_BITS])
+{
+    /* The Viterbi decoder serves the unfiltered profile; with precoder or
+     * prefilter coefficients only the symbol-by-symbol path exists. */
+    return rx->cpd.coeffs_present
+        ? v92_upstream_wave_decode_frame(state, &rx->cpd, frame, bits,
+                                         V92_UPSTREAM_MAX_FRAME_BITS)
+        : v92_upstream_wave_decode_viterbi_frame(state, &rx->cpd, frame, bits,
+                                                 V92_UPSTREAM_MAX_FRAME_BITS);
+}
+
+static int count_non_ones(const uint8_t *bits, int k)
+{
+    int n = 0;
+
+    for (int i = 0; i < k; i++)
+        n += bits[i] != 1;
+    return n;
+}
+
+static void deliver_bits(v92_upstream_rx_t *rx, const uint8_t *bits, int k)
+{
+    for (int i = 0; i < k; i++) {
+        rx->byte_accumulator |= (uint8_t)(bits[i] << rx->byte_bits);
+        rx->byte_bits++;
+        rx->output_bits++;
+        if (rx->byte_bits == 8) {
+            if (rx->handler)
+                rx->handler(rx->user_data, rx->byte_accumulator);
+            rx->byte_accumulator = 0;
+            rx->byte_bits = 0;
+            rx->output_bytes++;
+        }
+    }
+}
+
+/* B1u is 48 frames of scrambled ones (8.7.1); the scrambler starts at zero
+ * with it, so the descrambled stream is ones from its first bit.  A
+ * candidate must decode its first frame without a single other bit -- K is
+ * 34..72 bits, so a wrong alignment passes that by chance about once in
+ * 2^34 -- and keep at least 99% ones over the rest, which leaves room for
+ * the occasional symbol error a line that only just carries the rate makes
+ * without letting data mode pass for B1u. */
+#define V92_B1U_MAX_NON_ONE_PERMILLE 10
+
+static void try_start_candidate(v92_upstream_rx_t *rx, int k)
+{
+    v92_b1u_candidate_t c;
+    uint8_t bits[V92_UPSTREAM_MAX_FRAME_BITS];
+
+    memset(&c, 0, sizeof(c));
+    v92_upstream_wave_rx_init(&c.state);
+    rx->candidates_started++;
+    if (!decode_frame_with(rx, &c.state, rx->recent, bits))
+        return;
+    if (k - count_non_ones(bits, k) > rx->best_first_ones)
+        rx->best_first_ones = k - count_non_ones(bits, k);
+    if (count_non_ones(bits, k) != 0)
+        return;
+    rx->candidates_passed++;
+    if (rx->best_frames < 1)
+        rx->best_frames = 1;
+    c.frames = 1;
+    if (rx->ncandidates < V92_B1U_CANDIDATES)
+        rx->candidates[rx->ncandidates++] = c;
+}
+
+static bool advance_candidate(v92_upstream_rx_t *rx,
+                              v92_b1u_candidate_t *c,
+                              double value, int k, bool *alive)
+{
+    uint8_t bits[V92_UPSTREAM_MAX_FRAME_BITS];
+
+    *alive = true;
+    c->frame[c->frame_pos++] = value;
+    if (c->frame_pos < V92_UPSTREAM_INTERVALS)
+        return false;
+    c->frame_pos = 0;
+    if (!decode_frame_with(rx, &c->state, c->frame, bits)) {
+        *alive = false;
+        return false;
+    }
+    c->zero_bits += count_non_ones(bits, k);
+    c->frames++;
+    if (c->frames > rx->best_frames)
+        rx->best_frames = c->frames;
+    if ((long)c->zero_bits*1000 > (long)c->frames*k*V92_B1U_MAX_NON_ONE_PERMILLE) {
+        *alive = false;
+        return false;
+    }
+    return c->frames == V92_B1U_FRAMES;
+}
+
+int v92_upstream_b1_rx_feed_values(v92_upstream_rx_t *rx,
+                                   const double *values,
+                                   int count)
+{
+    int before;
+    int k;
+
+    if (!rx || !values || count < 0 || !rx->equalized_input)
+        return 0;
+    before = (int)rx->output_bytes;
+    k = v92_upstream_bits_per_frame(rx->cpd.selected_upstream_drn);
+    for (int n = 0; n < count; n++) {
+        double v = values[n];
+
+        rx->input_symbols++;
+        if (rx->locked) {
+            uint8_t bits[V92_UPSTREAM_MAX_FRAME_BITS];
+
+            rx->frame[rx->frame_pos++] = v;
+            if (rx->frame_pos < V92_UPSTREAM_INTERVALS)
+                continue;
+            rx->frame_pos = 0;
+            if (decode_frame_with(rx, &rx->wave_rx, rx->frame, bits))
+                deliver_bits(rx, bits, k);
+            else
+                rx->rejected_frames++;
+            continue;
+        }
+
+        /* Follow the candidates already started. */
+        for (int i = 0; i < rx->ncandidates; ) {
+            bool alive;
+
+            if (advance_candidate(rx, &rx->candidates[i], v, k, &alive)) {
+                rx->wave_rx = rx->candidates[i].state;
+                rx->locked = true;
+                rx->frame_pos = 0;
+                rx->correlation = 1.0
+                    - (double)rx->candidates[i].zero_bits
+                      /((double)V92_B1U_FRAMES*k);
+                rx->ncandidates = 0;
+                break;
+            }
+            if (!alive)
+                rx->candidates[i] = rx->candidates[--rx->ncandidates];
+            else
+                i++;
+        }
+        if (rx->locked)
+            continue;
+
+        /* And try the frame that ends with this sample as B1u's first. */
+        memmove(&rx->recent[0], &rx->recent[1],
+                (V92_UPSTREAM_INTERVALS - 1)*sizeof(rx->recent[0]));
+        rx->recent[V92_UPSTREAM_INTERVALS - 1] = v;
+        if (rx->recent_fill < V92_UPSTREAM_INTERVALS)
+            rx->recent_fill++;
+        if (rx->recent_fill == V92_UPSTREAM_INTERVALS)
+            try_start_candidate(rx, k);
+    }
+    return (int)rx->output_bytes - before;
+}

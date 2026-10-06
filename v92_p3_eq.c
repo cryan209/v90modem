@@ -298,7 +298,19 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
         ? reference_next(&eq->gpa) : 0;
     if (ref)
         d = ref;
-    else if (eq->pam4) {
+    else if (eq->nlevels > 0) {
+        double best = fabs(y - eq->levels[0]);
+
+        d = eq->levels[0];
+        for (int j = 1; j < eq->nlevels; j++) {
+            double dist = fabs(y - eq->levels[j]);
+
+            if (dist < best) {
+                best = dist;
+                d = eq->levels[j];
+            }
+        }
+    } else if (eq->pam4) {
         double a = fabs(y)*sqrt(5.0);
 
         d = (a >= 2.0 ? 3.0 : 1.0)/sqrt(5.0);
@@ -388,6 +400,17 @@ void v92_p3_eq_hold(v92_p3_eq_t *eq, bool hold)
 void v92_p3_eq_set_pam4(v92_p3_eq_t *eq, bool pam4)
 {
     eq->pam4 = pam4;
+}
+
+void v92_p3_eq_set_levels(v92_p3_eq_t *eq, const double *positive, int n)
+{
+    if (n < 0 || n > V92_P3_EQ_MAX_LEVELS || (n > 0 && !positive))
+        n = 0;
+    for (int j = 0; j < n; j++) {
+        eq->levels[n - 1 - j] = -positive[j];
+        eq->levels[n + j] = positive[j];
+    }
+    eq->nlevels = 2*n;
 }
 
 void v92_p3_eq_train_from(v92_p3_eq_t *eq, int64_t k0, int n)

@@ -37,12 +37,21 @@ typedef struct {
     int previous_differential_sign;    /* d(f-1), initialized to zero */
 } v92_upstream_rx_state_t;
 
+/* Which member of E(Ki) the precoder sends.  6.4.2 defines the classes
+ * and leaves the choice to the transmitter; ours minimises |x(n)|.  The
+ * others exist so a receiver can be tested against a peer that chooses
+ * differently.  Set after v92_upstream_wave_tx_init(), which zeroes it. */
+#define V92_UPSTREAM_MEMBER_MIN_X        0
+#define V92_UPSTREAM_MEMBER_MOST_NEGATIVE 1
+#define V92_UPSTREAM_MEMBER_MOST_POSITIVE 2
+
 typedef struct {
     v92_upstream_tx_state_t data;
     uint8_t convolutional_state;
     double u_history[V92_CPD_MAX_TAPS];
     double x_history[V92_CPD_MAX_TAPS];
     double v_history[V92_CPD_MAX_TAPS];
+    int class_member;                  /* V92_UPSTREAM_MEMBER_* */
 } v92_upstream_wave_tx_t;
 
 typedef struct {

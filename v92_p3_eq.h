@@ -59,6 +59,7 @@
 #define V92_P3_EQ_HISTORY      2048   /* input samples kept (power of two) */
 #define V92_P3_EQ_INTERP_HALF  8      /* windowed-sinc half length */
 #define V92_P3_EQ_AGREE_WINDOW 256
+#define V92_P3_EQ_MAX_LEVELS   128    /* positive levels for set_levels() */
 
 /* Timing detectors.  GRADIENT (default) is the normalised data-aided MSE
  * gradient.  CENTROID holds the taps' energy centroid where the seed put it;
@@ -124,6 +125,11 @@ typedef struct {
                                       (+/-1/sqrt5, +/-3/sqrt5) rather than
                                       +/-1: TRN2u, SUVu and CPu */
 
+    /* Decide on these levels instead (V.92 data mode: B1u and after),
+     * ascending, in output units; nlevels 0 = the +/-1 or PAM4 slicer. */
+    double levels[2*V92_P3_EQ_MAX_LEVELS];
+    int nlevels;
+
     double y_prev;
     double d_prev;
     bool have_prev;
@@ -171,6 +177,11 @@ void v92_p3_eq_hold(v92_p3_eq_t *eq, bool hold);
  * decision feedback, tap and timing adaptation all use the 4-level slicer.
  * Two-level decisions on a four-level signal corrupt every feedback term. */
 void v92_p3_eq_set_pam4(v92_p3_eq_t *eq, bool pam4);
+/* Decide on a symmetric constellation from here on: `positive` holds n
+ * ascending positive levels in output units, and the slicer uses them and
+ * their negatives.  For V.92 PCM-upstream data (6.4), whose decision
+ * feedback must see the data points, not Table 28's; n = 0 reverts. */
+void v92_p3_eq_set_levels(v92_p3_eq_t *eq, const double *positive, int n);
 
 /* Train data-aided again, on a TRN1u whose first symbol is eq symbol k0
  * (9.5.1.1.10's second TRN1u is zero-initialised like the first), for n

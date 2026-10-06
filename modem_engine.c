@@ -1313,6 +1313,12 @@ static v92_trn2u_demod_t g_v92_trn2u_demod;
 static v92_upstream_rx_t g_v92_upstream_rx;
 static bool           g_v92_upstream_rx_active = false;
 static bool           g_v92_upstream_lock_logged = false;
+/* The B1u receiver takes the Phase 3/4 equaliser's output (decoder units)
+ * rather than raw codewords; the slicer switch to the data constellation
+ * happens on the analogue modem's acknowledged SUVu'/CPu', just ahead of
+ * E2u and B1u (9.6.2.1.4/.5). */
+static bool           g_v92_upstream_eq_mode = false;
+static bool           g_v92_upstream_slicer_set = false;
 static uint8_t        g_v90_data_frame[V90_DATA_FRAME_LEN];
 static int            g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
 static bool           g_v34_fallback_to_v22bis_pending = false;
@@ -5761,6 +5767,94 @@ static void v92_upstream_live_byte(void *user_data, uint8_t byte)
     ds_rx_push_bytes(&g_data_stack, &byte, 1);
 }
 
+static bool me_v92_p4_eq_enabled(void);
+
+/* Received TRN2u rms in DS0 linear units: LU as it arrives. */
+static double me_v92_lu_rx_locked(void)
+{
+    return g_v92_trn2u_npow ? sqrt(g_v92_trn2u_pow/(double)g_v92_trn2u_npow)
+                            : 0.0;
+}
+
+/* The analogue modem has acknowledged our CPd: what follows its last
+ * SUVu'/CPu' is E2u (one frame of Table 28 four-level) and then B1u in the
+ * CPd's data constellation (8.7.1).  Freeze the equaliser trained on TRN2u
+ * and make its decision feedback slice on the data points -- deciding them
+ * as four-level PAM would put a wrong symbol into every feedback tap.  The
+ * equaliser's unit is the received LU; a point's DS0 level is G x point
+ * times v90_get_v92_upstream_ds0_per_unit(). */
+static void me_v92_data_slicer_locked(void)
+{
+    double positive[V92_P3_EQ_MAX_LEVELS];
+    const v92_cpd_frame_t *cpd = &g_v92_upstream_rx.cpd;
+    double lu = me_v92_lu_rx_locked();
+    double unit;
+    double g;
+    int n;
+
+    if (!g_v92_upstream_rx_active || !g_v92_upstream_eq_mode
+        || g_v92_upstream_slicer_set || !g_v90 || g_v92_p3_rx.eq_law < 0
+        || lu <= 0.0)
+        return;
+    unit = v90_get_v92_upstream_ds0_per_unit(g_v90);
+    g = (double)cpd->gain_q0_16/(4.0*65536.0);
+    n = cpd->set_sizes[0];
+    if (n > V92_P3_EQ_MAX_LEVELS)
+        n = V92_P3_EQ_MAX_LEVELS;
+    for (int i = 0; i < n; i++)
+        positive[i] = g*cpd->points[0][i]*unit/lu;
+    v92_p3_eq_hold(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law], true);
+    v92_p3_eq_set_levels(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law], positive, n);
+    g_v92_upstream_slicer_set = true;
+    ME_LOG("[ME] V.92 PCM upstream: CPd acknowledged; equaliser frozen, slicing "
+           "on %d data levels (%.3f..%.3f LU), B1u search on its output\n",
+           n, n ? positive[0] : 0.0, n ? positive[n - 1] : 0.0);
+}
+
+static void enter_v90_data_locked(void);
+
+static void me_v92_b1u_locked_locked(void)
+{
+    if (!g_v92_upstream_lock_logged) {
+        g_v92_upstream_lock_logged = true;
+        if (g_v92_upstream_eq_mode)
+            ME_LOG("[ME] V.92 PCM upstream: B1u locked by decoding, %.4f of "
+                   "its bits ones, after %llu alignments\n",
+                   g_v92_upstream_rx.correlation,
+                   (unsigned long long)g_v92_upstream_rx.candidates_started);
+        else
+            ME_LOG("[ME] V.92 PCM upstream: B1u locked corr=%.6f gain=%.6f offset=%.2f eq_delay=%d\n",
+                   g_v92_upstream_rx.correlation,
+                   g_v92_upstream_rx.gain,
+                   g_v92_upstream_rx.offset,
+                   g_v92_upstream_rx.equalizer_delay);
+        trace_phase("V92 B1u locked corr=%.6f", g_v92_upstream_rx.correlation);
+    }
+    if (g_v90 && v90_get_tx_phase(g_v90) == V90_TX_DATA)
+        enter_v90_data_locked();
+}
+
+static void me_v92_b1u_feed_values_locked(const double *values, int n)
+{
+    bool was_locked = g_v92_upstream_rx.locked;
+    uint64_t before = g_v92_upstream_rx.input_symbols;
+
+    (void)v92_upstream_b1_rx_feed_values(&g_v92_upstream_rx, values, n);
+    /* Once a second while hunting: how close the search is getting. */
+    if (!g_v92_upstream_rx.locked
+        && g_v92_upstream_rx.input_symbols/8000 != before/8000)
+        ME_LOG("[ME] V.92 B1u search: %llu s, %llu alignments, %llu decoded frame 0 "
+               "as ones, best %d of 48 frames, best frame-0 %d of %d ones\n",
+               (unsigned long long)(g_v92_upstream_rx.input_symbols/8000),
+               (unsigned long long)g_v92_upstream_rx.candidates_started,
+               (unsigned long long)g_v92_upstream_rx.candidates_passed,
+               g_v92_upstream_rx.best_frames,
+               g_v92_upstream_rx.best_first_ones,
+               v92_upstream_bits_per_frame(g_v92_upstream_rx.cpd.selected_upstream_drn));
+    if (!was_locked && g_v92_upstream_rx.locked)
+        me_v92_b1u_locked_locked();
+}
+
 /* Runs synchronously inside me_rx_g711() while g_state_mtx is held. */
 static void v92_live_p4u_frame(void *user_data,
                                v92_p4u_kind_t kind,
@@ -5806,14 +5900,28 @@ static void v92_live_p4u_frame(void *user_data,
                  * E2u.  Arm the B1u correlator as soon as that profile is
                  * fixed; its 48-frame validation supplies the E2u-to-B1u
                  * boundary without treating a random zero run as E2u. */
+                /* With the Phase 3 equaliser carried into Phase 4 (the
+                 * only path that has ever decoded this upstream), B1u is
+                 * taken from its output and found by decoding; raw
+                 * codewords and the reference correlator are the fallback. */
+                bool eq_mode = g_v92_p3_trn1u2_locked && g_v92_p3_rx.eq_law >= 0
+                             && me_v92_p4_eq_enabled();
+
                 if (v90_build_v92_cpd_frame(g_v90, &cpd)
-                    && v92_upstream_b1_rx_init(
-                        &g_v92_upstream_rx, &cpd,
-                        v92_upstream_live_byte, NULL)) {
+                    && (eq_mode
+                        ? v92_upstream_b1_rx_init_equalized(
+                              &g_v92_upstream_rx, &cpd,
+                              v92_upstream_live_byte, NULL)
+                        : v92_upstream_b1_rx_init(
+                              &g_v92_upstream_rx, &cpd,
+                              v92_upstream_live_byte, NULL))) {
                     g_v92_upstream_rx_active = true;
+                    g_v92_upstream_eq_mode = eq_mode;
+                    g_v92_upstream_slicer_set = false;
                     g_v92_upstream_lock_logged = false;
-                    ME_LOG("[ME] V.92 PCM-upstream B1u receiver armed: drn=%u rate=%d bps, "
+                    ME_LOG("[ME] V.92 PCM-upstream B1u receiver armed (%s): drn=%u rate=%d bps, "
                            "%u points (largest %u), 4G=%u/65536, TRN2u error %.3f LU over %llu, rx rms %.0f\n",
+                           eq_mode ? "equalised, decoded lock" : "raw, correlator",
                            (unsigned)cpd.selected_upstream_drn,
                            ((int)cpd.selected_upstream_drn + 17)*8000/6,
                            (unsigned)cpd.set_sizes[0],
@@ -5841,6 +5949,8 @@ static void v92_live_p4u_frame(void *user_data,
         ack = cpus->frame.acknowledge ? 1 : 0;
     }
 
+    if (accepted && ack && (kind == V92_P4U_KIND_SUVU || kind == V92_P4U_KIND_CPU))
+        me_v92_data_slicer_locked();
     ME_LOG("[ME] V.92 strict RX frame=%s bits=%d drn=%u ack=%d accepted=%d\n",
            name, bits, drn, ack, accepted ? 1 : 0);
     trace_phase("V92 strict RX frame=%s bits=%d drn=%u ack=%d accepted=%d",
@@ -5951,6 +6061,8 @@ static void cleanup_v34_v90_training_locked(void)
     g_v92_trn2u_nerr = g_v92_trn2u_npow = g_v92_trn2u_pushed = 0;
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
+    g_v92_upstream_eq_mode = false;
+    g_v92_upstream_slicer_set = false;
     g_v92_active = false;
     g_v92_v8_offered = false;
     g_v92_info0_local_advertised = false;
@@ -6080,6 +6192,8 @@ static bool restart_v90_phase2_locked(const char *reason)
     g_v92_trn2u_nerr = g_v92_trn2u_npow = g_v92_trn2u_pushed = 0;
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
+    g_v92_upstream_eq_mode = false;
+    g_v92_upstream_slicer_set = false;
     memset(&g_v92_trn2u_demod, 0, sizeof(g_v92_trn2u_demod));
     v92_p3_rx_init(&g_v92_p3_rx);
     v92_cp_rx_reset(&g_v92_p3_cpt_rx);
@@ -9003,6 +9117,8 @@ static void v92_call_state_reset_locked(void)
     g_v92_trn2u_nerr = g_v92_trn2u_npow = g_v92_trn2u_pushed = 0;
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
+    g_v92_upstream_eq_mode = false;
+    g_v92_upstream_slicer_set = false;
 }
 
 /* Called by sip_modem.c when the SIP call media becomes active */
@@ -14802,10 +14918,17 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
         (void)v92_trn2u_demod_feed_adaptive(&g_v92_p3_cpt_demod,
                                              codewords, count);
     }
+    /* The equaliser also runs on through B1u and data once the B1u
+     * receiver takes its output (g_v92_upstream_slicer_set). */
+    bool v92_eq_feeds_b1u = g_v92_upstream_rx_active && g_v92_upstream_eq_mode
+                          && g_v92_upstream_slicer_set;
     if (g_v92_trn2u_active && g_v92_active && g_v90
-        && g_state == ME_TRAINING
+        && (g_state == ME_TRAINING || (g_state == ME_DATA && v92_eq_feeds_b1u))
         && v90_get_tx_phase(g_v90) >= V90_TX_TRN2D
-        && v90_get_tx_phase(g_v90) < V90_TX_DATA) {
+        && (v90_get_tx_phase(g_v90) < V90_TX_DATA || v92_eq_feeds_b1u)) {
+        bool trn2u_phase = g_state == ME_TRAINING
+                         && v90_get_tx_phase(g_v90) < V90_TX_DATA;
+
         if (g_v92_p3_trn1u2_locked && g_v92_p3_rx.eq_law >= 0
             && me_v92_p4_eq_enabled()) {
             /* E1u, TRN2u, SUVu and CPu arrive through the same upstream path
@@ -14851,36 +14974,35 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                     (void)v90_set_v92_upstream_noise(g_v90, sigma, lu_rx);
                     g_v92_trn2u_pushed = g_v92_trn2u_nerr;
                 }
-                if (n > 0)
+                if (n > 0 && v92_eq_feeds_b1u) {
+                    /* Decoder units: the equaliser's LU unit is lu_rx DS0
+                     * linear, of which ds0_per_unit make one G x point. */
+                    double scale = me_v92_lu_rx_locked()
+                                 / v90_get_v92_upstream_ds0_per_unit(g_v90);
+                    double dec[4];
+
+                    for (int k = 0; k < n; k++)
+                        dec[k] = values[k]/g_v92_trn2u_lu*scale;
+                    me_v92_b1u_feed_values_locked(dec, n);
+                }
+                if (n > 0 && trn2u_phase)
                     (void)v92_trn2u_demod_feed_values(&g_v92_trn2u_demod,
                                                       values, n);
             }
-        } else {
+        } else if (trn2u_phase) {
             (void)v92_trn2u_demod_feed_adaptive(&g_v92_trn2u_demod,
                                                  codewords, count);
         }
     }
-    if (g_v92_upstream_rx_active && g_v92_active
+    if (g_v92_upstream_rx_active && g_v92_active && !g_v92_upstream_eq_mode
         && (g_state == ME_TRAINING || g_state == ME_DATA)) {
         for (int i = 0; i < count; i++) {
             int16_t linear = pcm_to_linear(codewords[i]);
             bool was_locked = g_v92_upstream_rx.locked;
 
             (void)v92_upstream_b1_rx_feed(&g_v92_upstream_rx, &linear, 1);
-            if (!was_locked && g_v92_upstream_rx.locked) {
-                if (!g_v92_upstream_lock_logged) {
-                    g_v92_upstream_lock_logged = true;
-                    ME_LOG("[ME] V.92 PCM upstream: B1u locked corr=%.6f gain=%.6f offset=%.2f eq_delay=%d\n",
-                           g_v92_upstream_rx.correlation,
-                           g_v92_upstream_rx.gain,
-                           g_v92_upstream_rx.offset,
-                           g_v92_upstream_rx.equalizer_delay);
-                    trace_phase("V92 B1u locked corr=%.6f",
-                                g_v92_upstream_rx.correlation);
-                }
-                if (g_v90 && v90_get_tx_phase(g_v90) == V90_TX_DATA)
-                    enter_v90_data_locked();
-            }
+            if (!was_locked && g_v92_upstream_rx.locked)
+                me_v92_b1u_locked_locked();
         }
     }
     pthread_mutex_unlock(&g_state_mtx);
