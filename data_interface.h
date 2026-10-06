@@ -191,6 +191,9 @@ int di_write_data(const uint8_t *buf, int len);
 int di_fax_active(void);
 int di_fax_rx(const int16_t *amp, int len);
 int di_fax_tx(int16_t *amp, int len);
+int di_fax_v34hdx_profile(int calling, int *source, int *max_rate);
+void di_fax_v34hdx_set_channel(int mode);
+int di_fax_v34hdx_get_request(int *rate);
 int di_fax_v34hdx_start_control(int primary_bit_rate);
 /* Advance external T.30 timers once per received 8 kHz DS0 block. */
 void di_fax_v34hdx_advance(int samples);

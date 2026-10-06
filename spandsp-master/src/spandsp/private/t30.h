@@ -51,6 +51,8 @@ struct t30_state_s
 
     /*! \brief Internet aware FAX mode bit mask. */
     int iaf;
+    /* T.30 Annex F: rate is negotiated by V.34 MPh, outside DCS. */
+    int v34hdx_bit_rate;
     /*! \brief A bit mask of the currently supported modem types. */
     int supported_modems;
     /*! \brief A bit mask of the currently supported image compression modes for use

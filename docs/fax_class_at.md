@@ -1,4 +1,4 @@
-# Fax service classes over the AT interface (T.31 class 1, T.32 class 2.0)
+# Fax service classes over the AT interface (T.31 class 1, T.32 classes 2.0/2.1)
 
 ## What was wrong
 
@@ -846,3 +846,75 @@ CRC-valid DIS frames and exactly one CRC-valid DCN; the DTE must then receive
 coverage. This fixes transport lifecycle, not the remaining Annex F primary
 channel turnarounds or hardware fax interoperability. The advertised classes
 remain `0,1,1.0,2.0`; legacy Class 2 and Class 2.1 are not implemented.
+
+
+## V.34 fax page transport (2026-10-07)
+
+Class 1/1.0 and Class 2.1 now carry complete ECM page transmissions and
+receptions over the engine's V.34 half-duplex modem. This supersedes the
+control-channel-only status above. The advertised service classes are
+`0,1,1.0,2.0,2.1`.
+
+For automatic V.8 negotiation use `AT+FCLASS=1.0` (or `AT+FCLASS=1` followed
+by `AT+F34=12,1,1`). Class 1 leaves T.30 and page coding to the DTE, using
+T.31 Amendment 1 Annex B's duplex HDLC stream: DLE-shielded frames, received
+FCS, ETX/ferr completion, primary/control channel commands, rate indications,
+and retained receive frames during DC3/DC1 flow control. Channel commands
+occupy the same FIFO as frames, so a queued PPS cannot precede the return to
+the control channel. EOT drains the FIFO and emits termination marks before
+returning to off-hook command mode. The negotiated rate must satisfy the
+retained `+F34` minimum and maximum.
+
+`AT+FCLASS=2.1` selects automatic V.8 and T.30 Annex F when ECM is enabled,
+including when the configured maximum is 14.4 kbit/s or lower. Its default `+FIS` maximum
+is hexadecimal B (28.8 kbit/s), with EC=1. T.32 Amendment 1 Annex C's BR
+parameter is hexadecimal in units of 2400 bit/s minus one; EC=1 enables ECM
+and does not request Class 2.0's 64-octet frame size. Existing `+FDT` and
+`+FDR` page handling applies. Class 2.0 retains its existing legacy behavior.
+
+The fax V.8 offer has the appropriate T.30 source/recipient call function,
+V.34 half-duplex and legacy fax fallbacks, without a V.42 or PCM-modem offer.
+T.30 Annex F uses two initial HDLC flags, waits for CFR without sending TCF,
+and exchanges at least forty marks and waits for recipient flags to stop
+before primary transmission. Returning to control resynchronizes the modem
+and resets the HDLC frame detector. The modem clock continues to advance
+T.30 timers throughout those transitions.
+
+Validation: `make fax-v34-test` checks both classes, both G.711 laws, and
+80/160-sample blocks. Each combination sends and receives single-page and
+two-page documents, checks the decoded raster, negotiated ECM frame size,
+page results and disconnect results. The Class 1 fixture uses a software
+T.30 DTE through the actual T.31 serial frame interface; both tests run the
+actual V.34 primary/control waveforms through G.711. `make fax-v34-engine-test` additionally runs the same single-page and
+two-page TX/RX raster checks through two production `v90_engine_peer`
+processes and their PTYs, in both classes, both laws and both callback sizes.
+The remote Class 1 DTE owns a software T.30 terminal; the engines negotiate
+V.8 and train themselves, with no injected CONNECT or modem-ready events.
+Class 2.1 receives its page commands/data through the real PTY. Its DTE waits
+for `+FCO` before `+FDR` and consumes complete page responses, including the
+final result code. A transmit case also waits for `+FCO`, issues `+FDT`, waits
+for `CONNECT`, and only then supplies its image, verifying normal DTE ordering
+without preloading the page before the call. The driver drains PTYs while waiting for audio so receive
+page backpressure cannot block the bearer. `make test` includes these targets. The legacy
+Class 1 PTY and full Class 2.0 suites also pass.
+
+Supported production offer: primary rates through 28.8 kbit/s and a
+1200-bit/s control channel. Page regression waveforms use 9600 bit/s;
+higher primary rates have separate modem payload tests. DTE-controlled V.8
+(`+A8E`/`+A8M`), turnaround polling that restarts V.8, and 31.2/33.6 kbit/s
+fax are not established by this work. No new hardware fax call has been made;
+the earlier Canon modem startup result is not evidence of page interoperability.
+The full suite currently stops before fax at three K56flex A-law noisy-line
+priming assertions; see the dedicated targets for fax results.
+
+
+The full engine page test exposed another clause 11/clause 12 crossover:
+the ordinary V.34/V.90 retrain watcher treated the 70 ms silence required by
+12.6.3's primary transition as abandonment of Phase 4, restarting the modem
+at the default data profile. Half-duplex links now use their dedicated
+12.7 recovery-tone detector instead of the data modem's tone/silence
+heuristics. The full page engine tests and primary, turnaround, retrain and
+startup-recovery targets verify both the normal transitions and recovery.
+`+FCO` is now emitted when the fax transport connects (T.32 8.4.1.1 and
+Amendment 1's V.34 session examples); previously a real Class 2 DTE had no
+connection indication to release its first page command.

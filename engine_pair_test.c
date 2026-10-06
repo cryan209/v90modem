@@ -235,6 +235,7 @@ int main(int argc, char **argv)
     int failed = 0;
     int done_frame = -1;
     int expect_hangup = 0;
+    int fax_hdlc = 0;
 
     memset(side, 0, sizeof(side));
     side[0].name = "call";
@@ -269,6 +270,8 @@ int main(int argc, char **argv)
                 if ((both || k == which) && side[k].n_after < MAX_ENV)
                     side[k].after[side[k].n_after++] = cmd;
             }
+        } else if (!strcmp(argv[i], "--fax-hdlc")) {
+            fax_hdlc = 1;
         } else if (!strcmp(argv[i], "--expect-hangup")) {
             expect_hangup = 1;
         } else if ((!strcmp(argv[i], "--call-expect") || !strcmp(argv[i], "--answer-expect")
@@ -323,7 +326,7 @@ int main(int argc, char **argv)
             fprintf(stderr, "usage: %s [--alaw] [--seconds N] [--expect MOD] [--expect-connect RATE] "
                     "[--both-env K=V] [--call-env K=V] [--answer-env K=V]\n"
                     "       [--both-at CMD] [--call-at CMD] [--answer-at CMD]\n"
-                    "       [--both-after CMD] [--call-after CMD] [--answer-after CMD]\n", argv[0]);
+                    "       [--both-after CMD] [--call-after CMD] [--answer-after CMD] [--fax-hdlc]\n", argv[0]);
             return 2;
         }
     }
@@ -340,6 +343,7 @@ int main(int argc, char **argv)
                                                 sizeof(s->payload) - s->payload_len,
                                                 "%c%04d the quick brown fox jumps over the lazy dog\r\n",
                                                 k ? 'A' : 'C', line);
+        if (fax_hdlc) { s->payload_len = snprintf(s->payload,sizeof(s->payload),"%c Class 1 duplex HDLC payload",k ? 'A' : 'C'); }
         s->connect_frame = -1;
         if (spawn(s, alaw) != 0 || open_pty(s) != 0) {
             fprintf(stderr, "could not start the %s side\n", s->name);
@@ -398,6 +402,7 @@ int main(int argc, char **argv)
             if (!s->sent && side[0].connect_frame >= 0 && side[1].connect_frame >= 0
                 && f > side[0].connect_frame + 25 && f > side[1].connect_frame + 25) {
                 write_full(s->pty_fd, s->payload, s->payload_len);
+                if (fax_hdlc) { const uint8_t end[2] = {0x10,0x03}; write_full(s->pty_fd,end,2); }
                 s->sent = 1;
             }
         }
@@ -559,7 +564,7 @@ int main(int argc, char **argv)
                 failed = 1;
             }
         }
-        if (!expect_hangup && !strstr(side[1 - k].dte, s->payload)) {
+        if (!expect_hangup && !(fax_hdlc ? memmem(side[1-k].dte,side[1-k].dte_len,s->payload,s->payload_len) : strstr(side[1 - k].dte, s->payload))) {
             printf("  %-6s FAIL: its DTE text did not arrive intact at the %s side\n",
                    s->name, side[1 - k].name);
             failed = 1;

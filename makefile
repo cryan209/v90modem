@@ -280,6 +280,7 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 	./v34_gardner_test
 	./fax_class_test
 	./fax_class2_test
+	$(MAKE) fax-v34-test
 	./at_ms_test
 	./line_monitor_test
 	./v250_ctl_test
@@ -1391,3 +1392,30 @@ x2_sym_test: $(X2_SYM_TEST_OBJS)
 .PHONY: x2-sym-test
 x2-sym-test: x2_sym_test
 	./x2_sym_test
+
+# T.31 Annex B / T.32 Annex C page transfers over byte-exact G.711.
+.PHONY: fax-v34-test
+fax-v34-test: fax_class_test fax_class2_test engine_pair_test v90_engine_peer
+	./fax_class_test --v34
+	@set -e; for class in --v34-class1 --v34-class21; do \
+	  for law in ulaw alaw; do \
+	    for block in 80 160; do \
+	      ./fax_class2_test $$class $$law $$block; \
+	    done; \
+	  done; \
+	done
+	$(MAKE) fax-v34-engine-test
+	./engine_pair_test --fax-hdlc --both-at 'AT+FCLASS=1.0' --both-at 'AT+F34=4,1,1' --seconds 25
+	./engine_pair_test --alaw --fax-hdlc --both-at 'AT+FCLASS=1.0' --both-at 'AT+F34=4,1,1' --seconds 25
+
+# Full pages through two production engines and their PTYs; no injected
+# modem events. The far-end Class 1 DTE owns a software T.30 terminal.
+.PHONY: fax-v34-engine-test
+fax-v34-engine-test: fax_class2_test v90_engine_peer
+	@set -e; for class in --engine-class1 --engine-class21; do \
+	  for law in ulaw alaw; do \
+	    for block in 80 160; do \
+	      ./fax_class2_test $$class $$law $$block; \
+	    done; \
+	  done; \
+	done

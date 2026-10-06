@@ -4282,7 +4282,10 @@ static complex_sig_t get_initial_hdx_b_not_b_baud(v34_state_t *s)
     {
     case V34_TX_STAGE_HDX_FIRST_B:
         /* Send pure tone (V.34/12.2.1.1.1) */
-        if (s->rx.received_event == V34_EVENT_INFO0_OK)
+        /* 12.2.1.1.2 / 12.2.2.2: INFO0 may finish while our own
+         * INFO0 is still transmitting. Tone A can replace the event before
+         * this stage runs; the CRC-validated latch is the durable authority. */
+        if (s->rx.info0_received)
         {
             s->tx.stage = V34_TX_STAGE_HDX_FIRST_B_INFO_SEEN;
         }
@@ -4297,7 +4300,8 @@ static complex_sig_t get_initial_hdx_b_not_b_baud(v34_state_t *s)
         break;
     case V34_TX_STAGE_HDX_FIRST_B_INFO_SEEN:
         /* Continue sending pure tone (V.34/12.2.1.1.1) */
-        if (s->rx.received_event == V34_EVENT_REVERSAL_1)
+        if (s->rx.phase2_reversal_count >= 1
+            || s->rx.received_event == V34_EVENT_REVERSAL_1)
         {
             /* First reversal seen - continue sending pure tone for 40+-1ms */
             s->tx.tone_duration = 1;

@@ -3604,6 +3604,13 @@ static bool me_v34_fax_probe(void)
     return cached != 0;
 }
 
+static bool g_fax_legacy;
+
+static bool me_fax_v34_enabled(void)
+{
+    return !g_fax_legacy && (me_v34_fax_probe() || di_fax_v34hdx_profile(g_calling_party, NULL, NULL));
+}
+
 static bool me_v8_no_ci(void)
 {
     const char *value = getenv("ME_V8_NO_CI");
@@ -3998,6 +4005,14 @@ static int me_start_or_restart_v8_locked(int answer_tone)
         ME_LOG("[ME] V.34 fax probe: offering V.34 half-duplex in JM "
                "(ME_V34_FAX_PROBE)\n");
     }
+    if (di_fax_v34hdx_profile(g_calling_party, NULL, NULL)) {
+        int source;
+        di_fax_v34hdx_profile(g_calling_party, &source, NULL);
+        /* T.32 Amd 1 C.5.3 / V.8: first message direction before dialing. */
+        v8_parms.jm_cm.call_function = source ? V8_CALL_T30_TX : V8_CALL_T30_RX;
+        v8_parms.jm_cm.modulations = V8_MOD_V34HDX | V8_MOD_V17 | V8_MOD_V29 | V8_MOD_V27TER | V8_MOD_V21;
+        v8_parms.jm_cm.pcm_modem_availability = 0;
+    }
     v8_parms.jm_cm.protocols          = V8_PROTOCOL_LAPM_V42;
     {
         /* V.250 +ES: a DTE that has turned error control off for this role
@@ -4057,6 +4072,14 @@ static int me_start_or_restart_v8_locked(int answer_tone)
          * connections, and ours is, so say so. */
         if (g_offer_v91)
             v8_parms.jm_cm.pstn_access        = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
+    }
+    if (me_fax_v34_enabled())
+    {
+        /* T.30 Annex F uses its own ECM link, not V.42 or a PCM modem. */
+        v8_parms.jm_cm.protocols = V8_PROTOCOL_NONE;
+        v8_parms.jm_cm.pstn_access = 0;
+        v8_parms.jm_cm.pcm_modem_availability = 0;
+        v8_parms.v92 = -1;
     }
     v8_parms.jm_cm.nsf                = -1;
     v8_parms.jm_cm.t66                = -1;
@@ -4276,7 +4299,9 @@ static void v34_update_echo_policy(void)
     float rx_carrier;
     float separation;
 
-    if (!g_v34 || g_mod != ME_MOD_V34)
+    /* Clause 12 has separate primary/control channels; retain the byte
+     * stream's fax path without the data modem's echo/notch policy. */
+    if (!g_v34 || g_mod != ME_MOD_V34 || !v34_is_duplex(g_v34))
         return;
     tx_code = v34_get_tx_baud_rate(g_v34);
     rx_code = v34_get_rx_baud_rate(g_v34);
@@ -7921,6 +7946,8 @@ static void start_v34hdx_training(void)
 {
     /* Must be called with g_state_mtx held */
     int bps;
+    int source = 0, max_rate = 28800;
+    di_fax_v34hdx_profile(g_calling_party, &source, &max_rate);
 
     g_mod   = ME_MOD_V34;
     g_state = ME_TRAINING;
@@ -7938,6 +7965,8 @@ static void start_v34hdx_training(void)
         g_v34 = NULL;
     }
     bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(g_v34_start_baud);
+    if (max_rate > 28800) max_rate = 28800;
+    if (bps > max_rate) bps = max_rate;
     g_v34 = v34_init(NULL,
                      g_v34_start_baud,
                      bps,
@@ -7961,7 +7990,7 @@ static void start_v34hdx_training(void)
        image on the primary channel, so it is the source and we are the
        recipient.  12.2.1.2.6 then has this end send INFOh, and 12.3.2.1 has
        it go silent and wait for the source's S. */
-    v34_half_duplex_change_mode(g_v34, V34_HALF_DUPLEX_RECIPIENT);
+    v34_half_duplex_change_mode(g_v34, source ? V34_HALF_DUPLEX_SOURCE : V34_HALF_DUPLEX_RECIPIENT);
 
     /* No echo canceller and no notch.  Both are tuned for the V.90/V.34 data
        paths, both are applied AFTER the RX G.711 tap, and both have been the
@@ -7977,9 +8006,9 @@ static void start_v34hdx_training(void)
     g_tx_buf_wr = 0;
     g_tx_buf_rd = 0;
 
-    ME_LOG("[ME] V.34 fax probe: half-duplex clause 12 started as RECIPIENT "
-           "(%d baud, ceiling %d bps)\n", g_v34_start_baud, bps);
-    trace_phase("enter TRAINING: mod=V34HDX role=recipient");
+    ME_LOG("[ME] V.34 fax: half-duplex clause 12 started as %s "
+           "(%d baud, ceiling %d bps)\n", source ? "source" : "recipient", g_v34_start_baud, bps);
+    trace_phase("enter TRAINING: mod=V34HDX role=%s", source ? "source" : "recipient");
 }
 
 
@@ -8497,6 +8526,20 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
         return;
     }
 
+    if (di_fax_active()
+        && (result->status == V8_STATUS_NON_V8_CALL
+            || (result->status == V8_STATUS_V8_CALL
+                && !(result->jm_cm.modulations & V8_MOD_V34HDX)))) {
+        /* T.30 F.2: retain ordinary Group 3 operation with a legacy peer. */
+        pthread_mutex_lock(&g_state_mtx);
+        g_fax_legacy = true;
+        g_state = ME_DATA;
+        g_mod = ME_MOD_NONE;
+        g_phase_start_ms = 0;
+        pthread_mutex_unlock(&g_state_mtx);
+        di_on_connected(0);
+        return;
+    }
     if (result->status == V8_STATUS_NON_V8_CALL) {
         /*
          * Remote end doesn't support V.8 (e.g. plain V.22bis modem or
@@ -9382,6 +9425,7 @@ void me_on_sip_connected(void)
     g_data_link_failed = false;
     g_data_connect_reported = false;
 
+    g_fax_legacy = false;
     /* Outgoing dial = caller role; incoming auto-answer = answerer role. */
     g_calling_party = (g_state == ME_DIALING);
     if (g_invert_v34_role)
@@ -9392,7 +9436,7 @@ void me_on_sip_connected(void)
      * Class 1 drives T.30 from the DTE and Class 2.0 drives it in
      * fax_class2.c; in either case V.8/V.34 negotiation is a data-modem
      * startup sequence and would overwrite the fax tones. */
-    if (di_fax_active() && !me_v34_fax_probe()) {
+    if (di_fax_active() && !me_fax_v34_enabled()) {
         g_state = ME_DATA;
         g_mod = ME_MOD_NONE;
         g_phase_start_ms = 0;
@@ -10500,7 +10544,7 @@ static bool me_fax_rx_g711(const uint8_t *codewords, int count)
 
     /* Annex F keeps the bearer in V.8/V.34; T.30 is attached to the V.34
        control-channel bit callbacks after clause 12 start-up. */
-    if (!di_fax_active() || me_v34_fax_probe())
+    if (!di_fax_active() || me_fax_v34_enabled())
         return false;
 
     for (offset = 0; offset < count; ) {
@@ -10521,7 +10565,7 @@ static bool me_fax_tx_g711(uint8_t *codewords, int count)
 {
     int offset;
 
-    if (!di_fax_active() || me_v34_fax_probe())
+    if (!di_fax_active() || me_fax_v34_enabled())
         return false;
 
     for (offset = 0; offset < count; ) {
@@ -10549,7 +10593,7 @@ void me_rx_audio(const int16_t *amp, int len)
         me_link_publish_tick(len);
     }
 
-    if (di_fax_active() && !me_v34_fax_probe()) {
+    if (di_fax_active() && !me_fax_v34_enabled()) {
         di_fax_rx(amp, len);
         return;
     }
@@ -10826,18 +10870,31 @@ skip_8k_codewords:
                         trace_phase("V34HDX enter T30 control: primary=%d",
                                     primary_rate);
                     }
+                    else
+                    {
+                        ME_LOG("[ME] V.34 fax transport rejected negotiated rate %d\n", primary_rate);
+                        g_hangup_cause = "Modem (V.34 fax rate or transport unavailable)";
+                        g_state = ME_HANGUP;
+                    }
                 }
 
                 if (g_v34hdx_fax_control_started) {
                     di_fax_v34hdx_advance(len);
+                    int request_rate;
+                    int request = di_fax_v34hdx_get_request(&request_rate);
+                    if (request == 1) v34_half_duplex_start_control_retrain(g_v34);
+                    else if (request == 2) v34_start_retrain(g_v34);
+                    else if (request == 3) v34_half_duplex_request_parameters(g_v34, request_rate);
                     int requested_mode = di_fax_v34hdx_get_mode();
 
                     if (requested_mode != g_v34hdx_fax_mode) {
                         ME_LOG("[ME] T.30 Annex F channel request: %s\n",
                                requested_mode == V34_HALF_DUPLEX_PRIMARY_CHANNEL
                                    ? "primary" : "control");
-                        v34_half_duplex_change_mode(g_v34, requested_mode);
-                        g_v34hdx_fax_mode = requested_mode;
+                        if (v34_half_duplex_change_mode(g_v34, requested_mode) == 0) {
+                            g_v34hdx_fax_mode = requested_mode;
+                            di_fax_v34hdx_set_channel(requested_mode);
+                        }
                     }
                 }
 
@@ -13508,7 +13565,7 @@ static void me_tx_audio_impl(int16_t *amp, int len)
         return;
     }
     pthread_mutex_unlock(&g_state_mtx);
-    if (di_fax_active() && !me_v34_fax_probe()) {
+    if (di_fax_active() && !me_fax_v34_enabled()) {
         di_fax_tx(amp, len);
         return;
     }
@@ -15112,7 +15169,7 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
         int path;
 
         path_samples += (uint64_t)count;
-        path = di_fax_active() && !me_v34_fax_probe() ? 3 : 0;
+        path = di_fax_active() && !me_fax_v34_enabled() ? 3 : 0;
         if (path_samples >= 8000  ||  path != last_path) {
             path_samples = 0;
             last_path = path;

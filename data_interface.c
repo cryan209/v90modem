@@ -1178,7 +1178,7 @@ static int dte_port_rate(void)
 /* ATI4: the settings the next call will use, in the commands that set them. */
 static void info_settings(page_t *pg)
 {
-    static const char *const fclass[] = { "0", "1", "1.0", "2.0" };
+    static const char *const fclass[] = { "0", "1", "1.0", "2.0", "2.1" };
     static const int sregs[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12 };
     static const char *const v250_reads[] = {
         "MR?", "ER?", "DR?", "ES?", "DS?", "EWIND?", "EFRAM?", "ETBM?", "IPR?", "ICF?", "IFC?", "MSC?",
@@ -1197,7 +1197,7 @@ static void info_settings(page_t *pg)
         page_put(pg, "S%02d=%03d%s", sregs[i], at->p.s_regs[sregs[i]],
                  i + 1 < sizeof(sregs) / sizeof(sregs[0]) ? " " : "\r\n");
     page_put(pg, "+FCLASS=%s\r\n",
-             at->fclass_mode >= 0 && at->fclass_mode < 4 ? fclass[at->fclass_mode] : "?");
+             at->fclass_mode >= 0 && at->fclass_mode < 5 ? fclass[at->fclass_mode] : "?");
     if (ms_get_cb) {
         at_ms_settings_t ms;
 
@@ -1602,7 +1602,7 @@ static void handle_online_data_bytes(const uint8_t *buf, int n)
  * T.31's, so this follows it rather than parsing +FCLASS twice. */
 static void sync_fax_class(void)
 {
-    int want = (at && at->fclass_mode == 3);
+    int want = at && at->fclass_mode == 4 ? 2 : (at && at->fclass_mode == 3);
     if(at && at->fclass_mode!=0)diagnostic_reset(false);
 
     if (want != fc2_active()) {
@@ -1989,6 +1989,7 @@ void di_on_connected(int rate)
 
     if (di_fax_active()) {
         pthread_mutex_lock(&t31_mtx);
+        if (rate > 0) { pthread_mutex_unlock(&t31_mtx); return; }
         t31_call_event(t31, AT_CALL_EVENT_CONNECTED);
         pthread_mutex_unlock(&t31_mtx);
         return;
@@ -2232,29 +2233,84 @@ int di_fax_tx(int16_t *amp, int len)
     return len;
 }
 
+static int di_v34_source;
+
+int di_fax_v34hdx_profile(int calling, int *source, int *max_rate)
+{
+    if (fc2_active()) return fc2_v34hdx_profile(calling, source, max_rate);
+    int enabled = 0;
+    pthread_mutex_lock(&t31_mtx);
+    if (at && (at->fclass_mode == 1 || at->fclass_mode == 2)
+        && (at->fclass_mode == 2 || at->fax_v34_rates[0] > 0) && at->fax_v34_rates[2] != 2) {
+        enabled = 1;
+        di_v34_source = calling;
+        if (source) *source = calling;
+        if (max_rate) *max_rate = at->fax_v34_rates[0] ? at->fax_v34_rates[0]*2400 : 28800;
+    }
+    pthread_mutex_unlock(&t31_mtx);
+    return enabled;
+}
+
+void di_fax_v34hdx_set_channel(int mode)
+{
+    if (fc2_active()) { fc2_v34hdx_set_channel(mode); return; }
+    pthread_mutex_lock(&t31_mtx);
+    if (t31) t31_v34hdx_set_channel(t31, mode);
+    pthread_mutex_unlock(&t31_mtx);
+}
+
+int di_fax_v34hdx_get_request(int *rate)
+{
+    if (fc2_active()) return 0;
+    int r = 0;
+    pthread_mutex_lock(&t31_mtx);
+    if (t31) r = t31_v34hdx_get_request(t31, rate);
+    pthread_mutex_unlock(&t31_mtx);
+    return r;
+}
+
 int di_fax_v34hdx_start_control(int primary_bit_rate)
 {
-    return fc2_active() ? fc2_v34hdx_start_control(primary_bit_rate) : -1;
+    if (fc2_active()) return fc2_v34hdx_start_control(primary_bit_rate);
+    int r = -1;
+    pthread_mutex_lock(&t31_mtx);
+    if (t31) r = t31_v34hdx_start(t31, primary_bit_rate, di_v34_source);
+    pthread_mutex_unlock(&t31_mtx);
+    return r;
 }
 
 void di_fax_v34hdx_advance(int samples)
 {
-    if (fc2_active())
-        fc2_v34hdx_advance(samples);
+    if (fc2_active()) { fc2_v34hdx_advance(samples); return; }
+    pthread_mutex_lock(&t31_mtx);
+    if (t31) t31_v34hdx_advance(t31, samples);
+    pthread_mutex_unlock(&t31_mtx);
 }
 
 int di_fax_v34hdx_get_bit(void)
 {
-    return fc2_active() ? fc2_v34hdx_get_bit() : SIG_STATUS_END_OF_DATA;
+    if (fc2_active()) return fc2_v34hdx_get_bit();
+    int bit = SIG_STATUS_END_OF_DATA;
+    pthread_mutex_lock(&t31_mtx);
+    if (t31) bit = t31_v34hdx_get_bit(t31);
+    pthread_mutex_unlock(&t31_mtx);
+    return bit;
 }
 
 void di_fax_v34hdx_put_bit(int bit)
 {
-    if (fc2_active())
-        fc2_v34hdx_put_bit(bit);
+    if (fc2_active()) { fc2_v34hdx_put_bit(bit); return; }
+    pthread_mutex_lock(&t31_mtx);
+    if (t31) t31_v34hdx_put_bit(t31, bit);
+    pthread_mutex_unlock(&t31_mtx);
 }
 
 int di_fax_v34hdx_get_mode(void)
 {
-    return fc2_active() ? fc2_v34hdx_get_mode() : V34_HALF_DUPLEX_SILENCE;
+    if (fc2_active()) return fc2_v34hdx_get_mode();
+    int mode = V34_HALF_DUPLEX_SILENCE;
+    pthread_mutex_lock(&t31_mtx);
+    if (t31) mode = t31_v34hdx_get_mode(t31);
+    pthread_mutex_unlock(&t31_mtx);
+    return mode;
 }

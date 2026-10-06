@@ -99,6 +99,8 @@ struct at_state_s
     char *local_id;
     /*! The currently select FAX modem class. 0 = data modem mode. */
     int fclass_mode;
+    /* T.31 Amd 1 B.6.1: retained initial V.34 rate controls. */
+    int fax_v34_rates[5];
     int at_rx_mode;
     int rings_indicated;
     int do_hangup;

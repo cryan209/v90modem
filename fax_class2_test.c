@@ -14,6 +14,8 @@
 #include "fax_class2.h"
 
 #include <spandsp.h>
+#include <spandsp/v34.h>
+#include <spandsp/t31.h>
 #include <spandsp/private/hdlc.h>
 #include <tiffio.h>
 
@@ -21,11 +23,27 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/wait.h>
 
 #define IMAGE_WIDTH  1728
 #define IMAGE_ROWS   80
 
 static int failures;
+static int external_class21;
+static int external_class1;
+static t31_state_t *class1_terminal;
+static hdlc_rx_state_t class1_dte_decoder;
+static int class1_capture_active, class1_escape, class1_frame_len, class1_dte_mode;
+static uint8_t class1_frame[300];
+static int external_alaw;
+static int external_block = 160;
+static int engine_fax_test;
+static int engine_at(const char *line);
+static void engine_reset(void);
+static void pump_engine_fax(fax_state_t *peer);
 
 /* ------------------------------------------------------------------ */
 /* Test images                                                         */
@@ -225,6 +243,7 @@ static int dte_saw(const char *s) { return dte_find(s) != NULL; }
 
 static void at(const char *line)
 {
+    if (engine_fax_test && external_class21) { engine_at(line); return; }
     if (!fc2_at_line(line))
         printf("  note: \"%s\" was not handled by the class 2.0 layer\n", line);
 }
@@ -263,11 +282,11 @@ static void test_v34hdx_control_dis(void)
 
     printf("V.34 Annex F control channel: initial DIS over external HDLC\n");
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
     fc2_on_connected();
     v34hdx_frame_len = 0;
     v34hdx_dis_count = v34hdx_dcn_count = 0;
-    hdlc_rx_init(&rx, false, true, 5, v34hdx_hdlc_accept, NULL);
+    hdlc_rx_init(&rx, false, true, 2, v34hdx_hdlc_accept, NULL);
     check(fc2_v34hdx_start_control(21600) == 0,
           "the trained V.34 control channel attaches to T.30");
     for (int i = 0; i < 20000 && v34hdx_frame_len == 0; i++) {
@@ -428,6 +447,10 @@ static fax_state_t *peer_start(int calling, const char *tx_file, const char *rx_
         return NULL;
     fax_set_transmit_on_idle(f, true);
     t30 = fax_get_t30_state(f);
+    if (getenv("FAX_TEST_LOG")) {
+        span_log_set_level(t30_get_logging_state(t30), SPAN_LOG_FLOW | SPAN_LOG_SHOW_TAG);
+        span_log_set_tag(t30_get_logging_state(t30), "peer");
+    }
     t30_set_tx_ident(t30, "peer");
     t30_set_ecm_capability(t30, peer_ecm ? true : false);
     t30_set_ecm_frame_size(t30, peer_ecm_octets);
@@ -481,12 +504,218 @@ static fax_state_t *peer_start(int calling, const char *tx_file, const char *rx_
 static void release_post_page(fax_state_t *peer);
 
 /* One 20 ms frame each way, then whatever the DCE has queued for the DTE. */
+static int external_fax_test;
+static int external_audio_test;
+static int external_attached;
+static int external_source;
+static v34_state_t *external_modems[2];
+static int external_modes[2];
+static int external_ticks;
+/* A software T.30 DTE drives T.31 using Annex B serial frames. Its
+ * existing fax backend is clocked independently of the Class 1 datapump. */
+static int class1_modem_control(t31_state_t *s, void *u, int op, const char *n)
+{ (void)s; (void)u; (void)op; (void)n; return 0; }
+static int class1_dte_receive(void *user, const uint8_t *data, size_t len)
+{
+    (void)user;
+    if (!class1_capture_active) return 0;
+    for (size_t i = 0; i < len; i++) {
+        int c = data[i];
+        if (!class1_escape && c == 0x10) { class1_escape = 1; continue; }
+        if (class1_escape) {
+            class1_escape = 0;
+            if (c == 3 || c == 7) {
+                if (class1_frame_len >= 2) {
+                    hdlc_tx_state_t *tx = hdlc_tx_init(NULL, false, 2, false, NULL, NULL);
+                    hdlc_tx_flags(tx, 3);
+                    hdlc_tx_frame(tx, class1_frame, class1_frame_len - 2);
+                    if (c == 7) hdlc_tx_corrupt_frame(tx);
+                    for (int b = 0; b < class1_frame_len*10 + 80; b++) fc2_v34hdx_put_bit(hdlc_tx_get_bit(tx));
+                    hdlc_tx_free(tx);
+                }
+                class1_frame_len = 0; continue;
+            }
+            if (c == 0x51) c = 0x11;
+            else if (c == 0x53) c = 0x13;
+            else if (c != 0x10) continue;
+        }
+        if (class1_frame_len < (int)sizeof(class1_frame)) class1_frame[class1_frame_len++] = c;
+    }
+    return 0;
+}
+static void class1_dte_send(void *user, const uint8_t *data, int len, int ok)
+{
+    (void)user;
+    if (len <= 0 || !ok) return;
+    if (getenv("FAX_TEST_LOG")) fprintf(stderr,"DTE SEND fcf=%02x len=%d mode=%d\n",data[2],len,class1_dte_mode);
+    uint8_t out[600]; int n = 0;
+    for (int i = 0; i < len; i++) {
+        int c = data[i];
+        if (c == 0x10 || c == 0x11 || c == 0x13) { out[n++] = 0x10; out[n++] = c == 0x11 ? 0x51 : c == 0x13 ? 0x53 : c; }
+        else out[n++] = c;
+    }
+    out[n++] = 0x10; out[n++] = 0x03;
+    t31_at_rx(class1_terminal, (const char *)out, n);
+}
+static void class1_start(void)
+{
+    class1_capture_active = 0;
+    class1_frame_len = class1_escape = 0;
+    class1_terminal = t31_init(NULL,class1_dte_receive,NULL,class1_modem_control,NULL,NULL,NULL);
+    const char *setup = "AT+FCLASS=1.0;+F34=4,1,1\r";
+    t31_at_rx(class1_terminal,setup,strlen(setup));
+    check(t31_v34hdx_start(class1_terminal,9600,external_source) == 0, "Class 1 DTE attaches to trained modem");
+    class1_capture_active = 1;
+    class1_dte_mode = V34_HALF_DUPLEX_CONTROL_CHANNEL;
+    hdlc_rx_init(&class1_dte_decoder,false,true,2,class1_dte_send,NULL);
+}
+static void class1_drive_dte(void)
+{
+    int mode = fc2_v34hdx_get_mode();
+    if (mode != class1_dte_mode) {
+        uint8_t command[2] = {0x10, mode == V34_HALF_DUPLEX_PRIMARY_CHANNEL ? 0x6B : 0x6D};
+        if (external_source) t31_at_rx(class1_terminal,(const char *)command,2);
+        fc2_v34hdx_set_channel(mode);
+        class1_dte_mode = mode;
+        hdlc_rx_init(&class1_dte_decoder,false,true,2,class1_dte_send,NULL);
+    }
+    int bits = class1_dte_mode == V34_HALF_DUPLEX_PRIMARY_CHANNEL ? external_block*9600/8000 : external_block*1200/8000;
+    for (int i = 0; i < bits; i++) hdlc_rx_put_bit(&class1_dte_decoder, fc2_v34hdx_get_bit());
+    t31_v34hdx_advance(class1_terminal,external_block);
+}
+static void external_reset(void)
+{
+    if (engine_fax_test) engine_reset();
+    external_attached = 0;
+    for (int i=0;i<2;i++) { if (external_modems[i]) v34_free(external_modems[i]); external_modems[i]=NULL; }
+    if (class1_terminal) t31_free(class1_terminal);
+    class1_terminal = NULL;
+}
+
+static int external_get(void *user)
+{
+    if (!user && external_class1) return class1_terminal ? t31_v34hdx_get_bit(class1_terminal) : SIG_STATUS_END_OF_DATA;
+    return user ? fax_v34hdx_get_bit(user) : fc2_v34hdx_get_bit();
+}
+static void external_put(void *user, int bit)
+{
+    if (user) fax_v34hdx_put_bit(user, bit);
+    else if (external_class1) { if(class1_terminal) t31_v34hdx_put_bit(class1_terminal,bit); }
+    else fc2_v34hdx_put_bit(bit);
+}
+
+static int external_channel;
+static void pump_external_audio(fax_state_t *peer)
+{
+    if (!external_modems[0])
+    {
+        external_modems[0] = v34_init(NULL, 3200, 9600, external_source, false, external_get, NULL, external_put, NULL);
+        external_modems[1] = v34_init(NULL, 3200, 9600, !external_source, false, external_get, peer, external_put, peer);
+        v34_half_duplex_change_mode(external_modems[0], external_source ? V34_HALF_DUPLEX_SOURCE : V34_HALF_DUPLEX_RECIPIENT);
+        v34_half_duplex_change_mode(external_modems[1], external_source ? V34_HALF_DUPLEX_RECIPIENT : V34_HALF_DUPLEX_SOURCE);
+        external_modes[0] = external_modes[1] = V34_HALF_DUPLEX_CONTROL_CHANNEL;
+        external_ticks = 0;
+    }
+    if (!external_attached && v34_get_hdx_control_channel_ready(external_modems[0]) && v34_get_hdx_control_channel_ready(external_modems[1]))
+    {
+        check(fc2_v34hdx_start_control(9600) == 0, "attach DCE to trained V.34");
+        check(fax_v34hdx_start_control(peer, 9600) == 0, "attach peer to trained V.34");
+        external_attached = 1;
+        if (external_class1) class1_start();
+    }
+    if (external_attached)
+    {
+        if (external_class1) class1_drive_dte();
+        int wanted[2] = { external_class1 ? t31_v34hdx_get_mode(class1_terminal) : fc2_v34hdx_get_mode(), fax_v34hdx_get_mode(peer) };
+        for (int i = 0; i < 2; i++)
+            if (wanted[i] != external_modes[i] && v34_half_duplex_change_mode(external_modems[i], wanted[i]) == 0)
+            {
+                if (getenv("FAX_TEST_LOG")) fprintf(stderr, "MODE endpoint=%d tick=%d wanted=%d\n", i, external_ticks, wanted[i]);
+                external_modes[i] = wanted[i];
+                if (i) fax_v34hdx_set_channel(peer, wanted[i]);
+                else if (external_class1) {
+                    t31_v34hdx_set_channel(class1_terminal,wanted[i]);
+                    if (!external_source && wanted[i] == V34_HALF_DUPLEX_PRIMARY_CHANNEL) {
+                        /* The software DTE front end also observes the modem's
+                         * forty-mark transition; its HDLC adapter filters marks. */
+                        for (int b=0;b<40;b++) fc2_v34hdx_put_bit(1);
+                        fc2_v34hdx_set_channel(wanted[i]);
+                        class1_dte_mode = wanted[i];
+                        hdlc_rx_init(&class1_dte_decoder,false,true,2,class1_dte_send,NULL);
+                    }
+                }
+                else fc2_v34hdx_set_channel(wanted[i]);
+            }
+        fc2_v34hdx_advance(external_block);
+        fax_v34hdx_advance(peer, external_block);
+    }
+    int16_t audio[2][160];
+    for (int i = 0; i < 2; i++)
+    {
+        int n = v34_tx(external_modems[i], audio[i], external_block);
+        for (; n < external_block; n++) audio[i][n] = 0;
+        for (int j = 0; j < external_block; j++) audio[i][j] = external_alaw ? alaw_to_linear(linear_to_alaw(audio[i][j])) : ulaw_to_linear(linear_to_ulaw(audio[i][j]));
+    }
+    v34_rx(external_modems[0], audio[1], external_block);
+    v34_rx(external_modems[1], audio[0], external_block);
+    external_ticks++;
+}
+
+static void pump_external(fax_state_t *peer)
+{
+    if (!external_attached)
+    {
+        check(fc2_v34hdx_start_control(9600) == 0, "attach DCE Annex F");
+        check(fax_v34hdx_start_control(peer, 9600) == 0, "attach peer Annex F");
+        external_attached = 1;
+        external_channel = V34_HALF_DUPLEX_CONTROL_CHANNEL;
+    }
+    int a_mode = fc2_v34hdx_get_mode();
+    int b_mode = fax_v34hdx_get_mode(peer);
+    if (a_mode == b_mode && a_mode != external_channel)
+    {
+        external_channel = a_mode;
+        fc2_v34hdx_set_channel(a_mode);
+        fax_v34hdx_set_channel(peer, b_mode);
+    }
+    int bits = external_channel == V34_HALF_DUPLEX_PRIMARY_CHANNEL ? 192 : 24;
+    for (int b = 0; b < bits; b++)
+    {
+        /* Recipient stops CC flags once it has seen forty source marks. */
+        int a = fc2_v34hdx_get_bit();
+        int c = fax_v34hdx_get_bit(peer);
+        if (external_channel == V34_HALF_DUPLEX_PRIMARY_CHANNEL || a_mode != V34_HALF_DUPLEX_PRIMARY_CHANNEL)
+            fax_v34hdx_put_bit(peer, a);
+        if (external_channel == V34_HALF_DUPLEX_PRIMARY_CHANNEL || b_mode != V34_HALF_DUPLEX_PRIMARY_CHANNEL)
+            fc2_v34hdx_put_bit(c);
+    }
+    fc2_v34hdx_advance(160);
+    fax_v34hdx_advance(peer, 160);
+}
+
+#include "fax_engine_test.h"
+#define fc2_select test_fc2_select
+#define fc2_dte_bytes test_fc2_dte_bytes
+#define fc2_on_connected test_fc2_on_connected
+#define fc2_on_disconnected test_fc2_on_disconnected
+#define fc2_poll test_fc2_poll
+
 static void pump(fax_state_t *peer, int frames)
 {
+    /* Fixture durations are in 20 ms units; production callbacks may be
+     * 10 ms. Preserve the requested bearer duration in either schedule. */
+    if (engine_fax_test && external_block == 80) frames *= 2;
     for (int i = 0; i < frames; i++) {
         int16_t a[160];
         int16_t b[160];
 
+        if (engine_fax_test)
+            pump_engine_fax(peer);
+        else if (external_audio_test)
+            pump_external_audio(peer);
+        else if (external_fax_test)
+            pump_external(peer);
+        else {
         memset(a, 0, sizeof(a));
         fc2_tx(a, 160);
         memset(b, 0, sizeof(b));
@@ -494,6 +723,7 @@ static void pump(fax_state_t *peer, int frames)
 
         fax_rx(peer, a, 160);
         fc2_rx(b, 160);
+        }
 
         if (peer_reject_pages > 0) {
             int ppr = (peer_pages_judged < peer_reject_pages) ? T30_RTN : T30_MCF;
@@ -520,7 +750,9 @@ static void pump_until(fax_state_t *peer, int frames, const char *needle)
     for (int i = 0; i < frames; i++) {
         pump(peer, 1);
         fc2_poll();
-        if (dte_find(needle))
+        if (dte_find(needle)
+            && (!(engine_fax_test && external_class21 && !strcmp(needle,"+FPS:"))
+                || dte_find("\r\nOK\r\n")))
             return;
         if (peer_done)
             return;
@@ -681,11 +913,12 @@ static void test_transmit(int fbo, int ec)
     int bad;
     int n;
 
-    printf("+FDT: class 2.0 sends a page (+FBO=%d, EC=%d)\n", fbo, ec);
+    printf("+FDT: Class %s sends a page (+FBO=%d, EC=%d)\n",
+           external_class1 ? "1 DTE" : external_class21 ? "2.1" : "2.0", fbo, ec);
 
     unlink(PEER_RX);
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
 
     dte_reset();
     at("AT+FLI=\"sender\"");
@@ -769,7 +1002,7 @@ static void test_transmit(int fbo, int ec)
          * still reassemble the page here, since the frames carry their own
          * lengths.
          */
-        int want64 = (ec == 1);
+        int want64 = (ec == 1 && !external_class21);
 
         check(peer_saw_dcs_ecm64 == want64,
               "the DCS says which ECM frame size is in use");
@@ -804,7 +1037,8 @@ static void test_receive(int fbo, int ec)
 
     char cmd2[40];
 
-    printf("+FDR: class 2.0 receives a page (+FBO=%d, EC=%d)\n", fbo, ec);
+    printf("+FDR: Class %s receives a page (+FBO=%d, EC=%d)\n",
+           external_class1 ? "1 DTE" : external_class21 ? "2.1" : "2.0", fbo, ec);
 
     unlink(DTE_RX);
     /* test_bit_order_is_real() compares the two captures against each other,
@@ -812,7 +1046,7 @@ static void test_receive(int fbo, int ec)
      * now runs more than once per +FBO setting. */
     cap_len[fbo & 1] = 0;
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
 
     dte_reset();
     at("AT+FLI=\"receiver\"");
@@ -873,7 +1107,7 @@ static void test_receive(int fbo, int ec)
          * allows it not to), so the frames on the wire are the proof that the
          * request left this end at all.
          */
-        int want64 = (ec == 1);
+        int want64 = (ec == 1 && !external_class21);
 
         check(peer_saw_dcs_ecm64 == want64,
               "the far end's DCS says which ECM frame size is in use");
@@ -973,7 +1207,7 @@ static void run_fnr_session(const char *fnr)
     int n;
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
     unlink(PEER_RX);
 
     at("AT+FLI=\"sender\"");
@@ -1134,7 +1368,7 @@ static void test_post_page_hold(void)
     peer_interrupt = 0;
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
     at("AT+FCR=1");
     at("AT+FNR=0,1,0,0");
     at("AT+FIS=1,3,0,2,0,0,0,0,0");
@@ -1189,7 +1423,7 @@ static void test_held_response_timeout(void)
     printf("+FCT: the held response times out (T.32 8.5.2.6)\n");
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
     dte_reset();
     at("AT+FCT?");
     check(dte_saw("30"), "AT+FCT? defaults to 30 seconds (1Eh)");
@@ -1259,7 +1493,7 @@ static void test_transmit_timeout(int feed_part)
     peer_interrupt = 0;
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
     unlink(PEER_RX);
 
     at("AT+FCT=1");
@@ -1344,7 +1578,7 @@ static void test_transmit_timeout_not_tripped(void)
     peer_interrupt = 0;
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
     unlink(PEER_RX);
 
     at("AT+FCT=1");
@@ -1445,7 +1679,7 @@ static void test_multipage_transmit(int connect_midway, int ec)
     peer_interrupt = 0;
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
     unlink(PEER_RX);
 
     at("AT+FLI=\"sender\"");
@@ -1521,11 +1755,11 @@ static void test_multipage_transmit(int connect_midway, int ec)
         /* Both pages go out in error correction mode, at the frame size the
          * DCS names.  T.30 A.1 restarts the ECM block per page, so a size
          * that came from a stale partial page would show here. */
-        check(peer_saw_dcs_ecm64 == (ec == 1),
+        check(peer_saw_dcs_ecm64 == (ec == 1 && !external_class21),
               "the DCS says which ECM frame size is in use");
-        check(peer_fcd_count > 2 && peer_fcd_max == ((ec == 1) ? 64 : 256),
+        check(peer_fcd_count > 2 && peer_fcd_max == ((ec == 1 && !external_class21) ? 64 : 256),
               "both pages go out in frames of that size");
-        if (peer_fcd_max != ((ec == 1) ? 64 : 256))
+        if (peer_fcd_max != ((ec == 1 && !external_class21) ? 64 : 256))
             printf("       (%d FCD frames, %d..%d octets, DCS bit 28 = %d)\n",
                    peer_fcd_count, peer_fcd_min, peer_fcd_max,
                    peer_saw_dcs_ecm64);
@@ -1571,7 +1805,7 @@ static void test_multipage_receive(int ec)
     peer_interrupt = 0;
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
 
     dte_reset();
     at("AT+FLI=\"receiver\"");
@@ -1680,11 +1914,11 @@ static void test_multipage_receive(int ec)
           "the far end reports a good session");
 
     if (ec) {
-        check(peer_saw_dcs_ecm64 == (ec == 1),
+        check(peer_saw_dcs_ecm64 == (ec == 1 && !external_class21),
               "the far end's DCS says which ECM frame size is in use");
-        check(peer_fcd_count > 2 && peer_fcd_max == ((ec == 1) ? 64 : 256),
+        check(peer_fcd_count > 2 && peer_fcd_max == ((ec == 1 && !external_class21) ? 64 : 256),
               "both pages arrive in frames of that size");
-        if (peer_fcd_max != ((ec == 1) ? 64 : 256))
+        if (peer_fcd_max != ((ec == 1 && !external_class21) ? 64 : 256))
             printf("       (%d FCD frames, %d..%d octets, DCS bit 28 = %d)\n",
                    peer_fcd_count, peer_fcd_min, peer_fcd_max,
                    peer_saw_dcs_ecm64);
@@ -1733,7 +1967,7 @@ static void test_page_rejected_rtn(int ec)
     peer_retransmit = 1;
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
 
     dte_reset();
     at("AT+FLI=\"receiver\"");
@@ -1915,7 +2149,7 @@ static void test_receive_last_page_rejected(void)
     peer_retransmit = 1;
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
 
     dte_reset();
     at("AT+FLI=\"receiver\"");
@@ -2013,7 +2247,7 @@ static void test_fdt_before_the_call(void)
     peer_interrupt = 0;
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
 
     dte_reset();
     at("AT+FLI=\"sender\"");
@@ -2107,7 +2341,7 @@ static void test_page_at_a_time(int ec)
     peer_interrupt = 0;
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
     unlink(PEER_RX);
 
     at("AT+FLI=\"sender\"");
@@ -2218,7 +2452,7 @@ static void test_transmit_page_rejected(int at_eop)
     peer_reject_pages = 1;
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
     unlink(PEER_RX);
 
     at("AT+FLI=\"sender\"");
@@ -2423,7 +2657,7 @@ static void test_rejected_page_never_resent(void)
     peer_reject_pages = 1;
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
     unlink(PEER_RX);
 
     at("AT+FCT=2");
@@ -2492,7 +2726,7 @@ static void test_unfinished_document_discarded(void)
     peer_interrupt = 0;
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
     at("AT+FNR=0,1,0,0");
     at("AT+FIS=1,3,0,2,0,0,0,0,0");
 
@@ -2552,7 +2786,7 @@ static void run_interrupt_tx_session(const char *fie, int send_pri)
     int n;
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
     unlink(PEER_RX);
 
     at("AT+FLI=\"sender\"");
@@ -2600,7 +2834,7 @@ static void test_procedure_interrupt(void)
     printf("+FIE/+FVO: procedure interrupts (T.32 8.5.2.1, 8.4.4.2)\n");
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
     dte_reset();
     at("AT+FIE=1");
     check(dte_saw("OK"), "AT+FIE=1 is accepted");
@@ -2670,7 +2904,7 @@ static void test_procedure_interrupt(void)
         char cmd[16];
 
         fc2_select(0);
-        fc2_select(1);
+        fc2_select(external_class21 ? 2 : 1);
         snprintf(cmd, sizeof(cmd), "AT+FIE=%d", fie);
         at(cmd);
         at("AT+FCR=1");
@@ -2711,7 +2945,7 @@ static void test_procedure_interrupt(void)
         fax_state_t *peer;
 
         fc2_select(0);
-        fc2_select(1);
+        fc2_select(external_class21 ? 2 : 1);
         at("AT+FIE=1");
         at("AT+FCR=1");
         at("AT+FNR=0,1,0,0");
@@ -2754,7 +2988,7 @@ static void test_fns(void)
     printf("+FNS: non-standard frame sending (T.32 8.5.1.6)\n");
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
 
     dte_reset();
     at("AT+FNS=?");
@@ -2851,7 +3085,7 @@ static void test_fns(void)
 
     /* The other direction: a received NSS is 8.4.2.4's +FNS: report. */
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
     at("AT+FCR=1");
     at("AT+FNR=0,0,1,1");
     at("AT+FIS=1,3,0,2,0,0,0,0,0");
@@ -2898,7 +3132,7 @@ static void run_fbu_session(const char *fbu, const char *fbo, const char *fis)
     int n;
 
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
     unlink(PEER_RX);
 
     at("AT+FLI=\"sender\"");
@@ -3024,7 +3258,7 @@ static void test_poll_remote(void)
 
     unlink(DTE_RX);
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
 
     at("AT+FLI=\"poller\"");
     at("AT+FCR=1");
@@ -3116,7 +3350,7 @@ static void test_be_polled(int flp)
 
     unlink(PEER_RX);
     fc2_select(0);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
 
     at("AT+FLI=\"polled\"");
     at("AT+FNR=0,1,0,0");
@@ -3181,8 +3415,51 @@ static void test_be_polled(int flp)
     fc2_on_disconnected();
 }
 
-int main(void)
+/* A production Class 2.1 DTE uses +FCO to open transmission, waits for
+ * CONNECT before providing the page, then waits for its final result. */
+static void test_engine_transmit_after_connection(void)
 {
+    static uint8_t page[1 << 20];
+    int rows = 0, n;
+    external_source = 1;
+    printf("Class 2.1 engine TX: +FCO -> +FDT -> CONNECT -> page\n");
+    unlink(PEER_RX);
+    fc2_select(0);
+    fc2_select(2);
+    dte_reset();
+    at("AT+FNR=0,1,0,0");
+    at("AT+FIS=1,3,0,2,0,1,0,0,0");
+    at("ATD5551234");
+    fax_state_t *peer = peer_start(0,NULL,PEER_RX);
+    check(peer != NULL,"the receiving fax terminal starts");
+    if (!peer) return;
+    pump_until(peer,60*50,"+FCO");
+    check(dte_saw("+FCO"),"the production engine identifies the fax connection");
+    check(!dte_saw("CONNECT"),"no page CONNECT before the DTE requests transmission");
+    dte_reset();
+    at("AT+FDT");
+    pump_until(peer,60*50,"CONNECT\r\n");
+    check(dte_saw("+FCS:") && dte_saw("CONNECT\r\n"),
+          "FDT negotiates the page and releases CONNECT before image input");
+    n = encode_page_for_dte(SRC_TIFF,T4_COMPRESSION_T4_1D,0,page,sizeof(page));
+    check(n > 0,"the DTE page encodes");
+    dte_reset();
+    for (int off=0;off<n;off+=512)
+        fc2_dte_bytes(page+off,n-off > 512 ? 512 : n-off);
+    pump(peer,60*50);
+    for (int i=0;i<20;i++) fc2_poll();
+    check(peer_done && peer_status == T30_ERR_OK,"the receiving fax accepts the page");
+    check(dte_saw("OK"),"FDT completes through the production PTY");
+    check(compare_page(PEER_RX,0,&rows) == 0 && rows == IMAGE_ROWS,
+          "the page supplied after CONNECT arrives raster-exact");
+    fax_free(peer);
+    fc2_on_disconnected();
+    external_reset();
+}
+
+int main(int argc, char **argv)
+{
+    setvbuf(stdout,NULL,_IOLBF,0);
     TIFFSetWarningHandler(NULL);
     TIFFSetErrorHandler(NULL);
 
@@ -3196,8 +3473,42 @@ int main(void)
     }
 
     fc2_init(dce_write, dce_dial, dce_answer, dce_hangup, NULL);
-    fc2_select(1);
+    fc2_select(external_class21 ? 2 : 1);
 
+    if (argc > 1 && (strcmp(argv[1], "--v34") == 0 || strcmp(argv[1], "--v34-audio") == 0 || strcmp(argv[1], "--v34-class21") == 0 || strcmp(argv[1], "--v34-class1") == 0 || strcmp(argv[1], "--engine-class1") == 0 || strcmp(argv[1], "--engine-class21") == 0))
+    {
+        external_fax_test = 1;
+        external_audio_test = strcmp(argv[1], "--v34") != 0;
+        engine_fax_test = strncmp(argv[1], "--engine-", 9) == 0;
+        external_class21 = strcmp(argv[1], "--v34-class21") == 0 || strcmp(argv[1], "--engine-class21") == 0;
+        external_class1 = strcmp(argv[1], "--v34-class1") == 0 || strcmp(argv[1], "--engine-class1") == 0;
+        external_alaw = argc > 2 && strcmp(argv[2], "alaw") == 0;
+        external_block = argc > 3 ? atoi(argv[3]) : 160;
+        if (external_block != 80 && external_block != 160) return 2;
+        if (engine_fax_test)
+            printf("Production engine fax: Class %s, %s, %d-sample callbacks\n",
+                   external_class21 ? "2.1" : "1", external_alaw ? "A-law" : "u-law", external_block);
+        if (argc > 4 && !strcmp(argv[4],"--connect-only") && engine_fax_test && external_class21) {
+            test_engine_transmit_after_connection();
+            printf("Annex F: %d failures\n", failures);
+            return failures ? 1 : 0;
+        }
+        external_source = 1;
+        test_transmit(0, external_class21 ? 1 : 2);
+        external_reset();
+        external_source = 0;
+        test_receive(0, external_class21 ? 1 : 2);
+        external_reset();
+        external_source = 1;
+        test_multipage_transmit(0, external_class21 ? 1 : 2);
+        external_reset();
+        external_source = 0;
+        test_multipage_receive(external_class21 ? 1 : 2);
+        external_reset();
+        if (engine_fax_test && external_class21) test_engine_transmit_after_connection();
+        printf("Annex F: %d failures\n", failures);
+        return failures ? 1 : 0;
+    }
     test_v34hdx_control_dis();
     test_parameters();
     test_transmit(0, 0);

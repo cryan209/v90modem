@@ -15112,7 +15112,10 @@ static void v34_rx_watch_peer_retrain(v34_rx_state_t *s,
        before Phase 3 has begun.  A loopback cannot show this -- there both
        ends are the same code with no propagation or processing delay, so the
        source's tone stops exactly when the recipient stops listening. */
-    if (!s->duplex  &&  s->stage == V34_RX_STAGE_PHASE3_WAIT_S)
+    /* Clause 12 links have their own 12.7 recovery-tone detector below.
+     * The clause 11 watcher also mistakes the primary-channel transition
+     * for a retrain in PHASE4_S when driven by the production engine. */
+    if (!s->duplex)
     {
         s->phase34_tone_a_blocks = 0;
         return;
@@ -15485,7 +15488,10 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
         phase4_cp_wait_bauds = PHASE4_CP_ACQUISITION_WAIT_SECONDS
                                * baud_rate_parameters[s->baud_rate].baud_rate;
 
-    if (v34_rx_stage_is_primary_training(s->stage)
+    /* 12.6.3's primary transition includes 70 ms of silence. Clause 12
+     * recovery is handled by hdx_recovery_tone(), not this clause 11/9
+     * silence heuristic (which otherwise restarts the production engine). */
+    if (s->duplex && v34_rx_stage_is_primary_training(s->stage)
         && s->stage > V34_RX_STAGE_PHASE3_TRAINING
         && !(s->stage == V34_RX_STAGE_V90_CP
              && s->duration < phase4_cp_wait_bauds))

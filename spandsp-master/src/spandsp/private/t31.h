@@ -205,6 +205,19 @@ struct t31_state_s
 
     /*! True if DLE prefix just used */
     bool dled;
+    /* T.31 Annex B external V.34 HDLC transport. */
+    struct {
+        bool active, source, escape, overflow, paused;
+        int rate, mode, channel, request, transition, marks, tx_marks;
+        int rx_age, idle_bit, rate_request;
+        unsigned flag_shift;
+        hdlc_tx_state_t tx;
+        hdlc_rx_state_t rx;
+        t31_hdlc_state_t frames;
+        t31_hdlc_state_t received;
+        uint8_t frame[T31_MAX_HDLC_LEN];
+        int len;
+    } v34hdx;
 
     /*! \brief Samples of silence awaited, as specified in a "wait for silence" command */
     int silence_awaited;

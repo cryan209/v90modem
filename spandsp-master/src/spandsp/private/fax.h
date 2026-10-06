@@ -49,6 +49,14 @@ struct fax_state_s
     bool v34hdx_external;
     int v34hdx_primary_bit_rate;
     int v34hdx_requested_mode;
+    int v34hdx_channel;
+    int v34hdx_transition; /* 1: source marks, 2: recipient waiting marks */
+    int v34hdx_ones;
+    int v34hdx_tx_ones;
+    int v34hdx_idle_bit;
+    int v34hdx_rx_age;
+    unsigned v34hdx_flag_shift;
+    bool v34hdx_tx_complete;
 };
 
 #endif

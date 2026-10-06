@@ -11,6 +11,9 @@
  */
 
 #include "data_interface.h"
+#include <spandsp.h>
+#include <spandsp/t31.h>
+#include <spandsp/v34.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -135,8 +138,116 @@ static double tx_rms(void)
     return samples ? sqrt(energy / (double)samples) : 0.0;
 }
 
-int main(void)
+typedef struct { uint8_t bytes[32768]; int len; } v34_capture_t;
+static int v34_capture(void *user, const uint8_t *buf, size_t len)
 {
+    v34_capture_t *c = user;
+    if (len <= sizeof(c->bytes) - c->len) { memcpy(c->bytes + c->len, buf, len); c->len += len; }
+    return 0;
+}
+static int v34_control(t31_state_t *s, void *u, int op, const char *num)
+{ (void)s; (void)u; (void)op; (void)num; return 0; }
+static void v34_check(int good, const char *what)
+{ printf("  %s %s\n", good ? "ok  " : "FAIL", what); if (!good) failures++; }
+static void v34_send_frame(t31_state_t *s, const uint8_t *frame, int len)
+{
+    uint8_t data[600]; int n = 0;
+    for (int i = 0; i < len; i++) {
+        int c = frame[i];
+        if (c == 0x10 || c == 0x11 || c == 0x13) { data[n++] = 0x10; data[n++] = c == 0x11 ? 0x51 : c == 0x13 ? 0x53 : c; }
+        else data[n++] = c;
+    }
+    data[n++] = 0x10; data[n++] = 0x03;
+    /* Fragment every escape pair across separate DTE writes. */
+    for (int i = 0; i < n; i++) t31_at_rx(s, (const char *)&data[i], 1);
+}
+static int v34_frame_matches(v34_capture_t *c, const uint8_t *frame, int len, int ferr)
+{
+    uint8_t out[300]; int n = 0;
+    for (int i = 0; i < c->len; i++) {
+        int b = c->bytes[i];
+        if (b == 0x10 && i + 1 < c->len) {
+            b = c->bytes[++i];
+            if (b == 3 || b == 7) {
+                if (b == (ferr ? 7 : 3) && n == len + 2 && !memcmp(out, frame, len)
+                    && (ferr || crc_itu16_check(out, n))) return 1;
+                n = 0; continue;
+            }
+            if (b == 0x51) b = 0x11;
+            else if (b == 0x53) b = 0x13;
+            else if (b != 0x10) continue;
+        }
+        if (n < (int)sizeof(out)) out[n++] = b;
+    }
+    return 0;
+}
+static void test_v34_class1(void)
+{
+    v34_capture_t captures[2] = {{{0},0},{{0},0}};
+    t31_state_t *a = t31_init(NULL, v34_capture, &captures[0], v34_control, NULL, NULL, NULL);
+    t31_state_t *b = t31_init(NULL, v34_capture, &captures[1], v34_control, NULL, NULL, NULL);
+    v34_check(a && b, "Class 1 Annex B terminals start");
+    if (!a || !b) return;
+    const char *limits = "AT+FCLASS=1.0\rAT+F34=12,5,1\r";
+    t31_at_rx(a,limits,strlen(limits));
+    v34_check(t31_v34hdx_start(a,9600,true) < 0,
+              "the negotiated rate cannot violate the retained F34 minimum");
+    const char *setup = "AT+FCLASS=1.0\rAT+F34=12,1,1\r";
+    t31_at_rx(a, setup, strlen(setup)); t31_at_rx(b, setup, strlen(setup));
+    v34_check(t31_v34hdx_start(a, 9600, true) == 0 && t31_v34hdx_start(b, 9600, false) == 0,
+              "trained Class 1 transport attaches in both roles");
+    v34_check(memmem(captures[0].bytes, captures[0].len, "+F34:4,1", 8) != NULL,
+              "negotiated primary/control rates precede CONNECT");
+    captures[0].len = captures[1].len = 0;
+    uint8_t frames[2][7] = {{0xFF,0x13,0x84,0x10,0x11,0x13,0x51},{0xFF,0x13,0x80,0x13,0x10,0x11,0x53}};
+    v34_send_frame(a, frames[0], 7); v34_send_frame(b, frames[1], 7);
+    for (int i = 0; i < 2000; i++) { int x = t31_v34hdx_get_bit(a), y = t31_v34hdx_get_bit(b); t31_v34hdx_put_bit(a,y); t31_v34hdx_put_bit(b,x); }
+    v34_check(v34_frame_matches(&captures[0], frames[1], 7, 0) && v34_frame_matches(&captures[1], frames[0], 7, 0),
+              "duplex HDLC frames preserve shielded octets and received FCS");
+    const char pri[] = {0x10,0x6B}; t31_at_rx(a, pri, 2);
+    for (int tick = 0; tick < 20; tick++) {
+        for (int bit = 0; bit < 24; bit++) {
+            int x = t31_v34hdx_get_bit(a);
+            t31_v34hdx_put_bit(b,x);
+            if (t31_v34hdx_get_mode(b) != V34_HALF_DUPLEX_PRIMARY_CHANNEL) t31_v34hdx_put_bit(a,t31_v34hdx_get_bit(b));
+        }
+        t31_v34hdx_advance(a,160); t31_v34hdx_advance(b,160);
+    }
+    v34_check(t31_v34hdx_get_mode(a) == V34_HALF_DUPLEX_PRIMARY_CHANNEL && t31_v34hdx_get_mode(b) == V34_HALF_DUPLEX_PRIMARY_CHANNEL,
+              "DLE pri exchanges forty marks and waits for recipient flags to stop");
+    t31_v34hdx_set_channel(a,V34_HALF_DUPLEX_PRIMARY_CHANNEL); t31_v34hdx_set_channel(b,V34_HALF_DUPLEX_PRIMARY_CHANNEL);
+    captures[1].len = 0;
+    uint8_t image[260] = {0xFF,0x03,0x06,0}; for (int i = 4; i < 260; i++) image[i] = i;
+    v34_send_frame(a,image,260);
+    for (int i = 0; i < 4000; i++) t31_v34hdx_put_bit(b,t31_v34hdx_get_bit(a));
+    v34_check(v34_frame_matches(&captures[1],image,260,0), "ECM image frame crosses the primary channel without alteration");
+    captures[1].len = 0;
+    const char pause[] = {0x10,0x13}, resume[] = {0x10,0x11};
+    t31_at_rx(b,pause,2);
+    hdlc_tx_state_t *tx = hdlc_tx_init(NULL,false,2,false,NULL,NULL);
+    hdlc_tx_flags(tx,3); hdlc_tx_frame(tx,image,260); hdlc_tx_corrupt_frame(tx);
+    for (int i = 0; i < 4000; i++) t31_v34hdx_put_bit(b,hdlc_tx_get_bit(tx));
+    v34_check(captures[1].len == 0, "DC3 pauses frame delivery without discarding it");
+    t31_at_rx(b,resume,2);
+    v34_check(v34_frame_matches(&captures[1],image,260,1), "DC1 releases the retained bad-FCS frame with DLE ferr");
+    captures[0].len = 0;
+    const char eot[] = {0x10,0x04};
+    t31_at_rx(a,eot,2);
+    int marks = 0;
+    for (int i = 0; i < 128; i++)
+        if (t31_v34hdx_get_bit(a) == 1) marks++;
+    v34_check(marks >= 40 && t31_v34hdx_get_mode(a) != V34_HALF_DUPLEX_SILENCE,
+              "EOT sends termination marks before releasing the carrier");
+    t31_v34hdx_advance(a,320);
+    v34_check(t31_v34hdx_get_mode(a) == V34_HALF_DUPLEX_SILENCE
+              && memmem(captures[0].bytes,captures[0].len,"OK",2),
+              "EOT returns to off-hook command mode after peer flags cease");
+    hdlc_tx_free(tx); t31_free(a); t31_free(b);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc > 1 && !strcmp(argv[1], "--v34")) { test_v34_class1(); return failures ? 1 : 0; }
     const char *link = "/tmp/fax_class_test_pty";
     char resp[4096];
     double rms;
@@ -156,7 +267,12 @@ int main(void)
     printf("T.31 capability reporting:\n");
     expect("ATE0",         "OK",        300);
     expect("AT+GCAP",      "+GCAP: +FCLASS", 300);
-    expect("AT+FCLASS=?",  "0,1,1.0,2.0", 300);
+    expect("AT+FCLASS=?",  "0,1,1.0,2.0,2.1", 300);
+    expect("AT+FCLASS=2.1", "OK", 300);
+    expect("AT+FCLASS?", "2.1", 300);
+    expect("AT+FCC?", "1,B,0,2,3,1,0,7,0", 300);
+    expect("AT+FCC=?", "(0-B)", 300);
+    expect("AT+FCLASS=0", "OK", 300);
 
     /*
      * Class 2.0 (T.32) is a different module behind the same PTY, so check it
@@ -267,6 +383,7 @@ int main(void)
     close(dte_fd);
     di_close();
 
+    test_v34_class1();
     printf("%s: %d failure(s)\n", failures ? "FAIL" : "PASS", failures);
     return failures ? 1 : 0;
 }

@@ -1159,3 +1159,28 @@ long-lived service was not changed.
 The subsequent codec completion removes that temporary 4096-entry limit,
 implements C-INIT and encoder RESET, and corrects repeated/aligned flushes.
 See `v42bis.md` for the supported range, lifecycle and current validation.
+
+
+## AT fax page integration (2026-10-07)
+
+The external transport now completes single-page and multipage ECM fax TX
+and RX in Class 1/1.0 and Class 2.1. See [fax_class_at.md](fax_class_at.md#v34-fax-page-transport-2026-10-07)
+for configuration, supported profiles, test coverage and hardware limitations.
+`make fax-v34-test` runs the eight class/law/callback-size page combinations
+and the full production engine page matrix, as well as two Class 1 control
+exchanges. `make fax-v34-engine-test` runs the production page matrix alone.
+
+The production engine exposed a Phase 2 event-lifetime defect not seen when
+starting two bare V.34 modems together: INFO0 can finish while our transmitter
+is still draining its own INFO0, and Tone A replaces the INFO0_OK event. The
+source's 12.2.1.1.2/12.2.2.2 transition now uses the CRC-validated INFO0 latch.
+The first reversal uses the durable counter where available and the Tone-B
+detector's event for the answer-source role. The primary, turnaround and
+retrain modem regression targets pass in both roles.
+
+The production page tests also found that the full-duplex silence heuristic
+reported a peer retrain during 12.6.3's mandatory 70 ms silence, even though
+the clause 12 primary-channel receiver was correctly waiting for S. Tone
+and silence recovery heuristics for clauses 9/11 now stand down on half-duplex
+links; `hdx_recovery_tone()` retains clause 12.7 recovery. This fixes complete
+page transfer through the engine, beyond the earlier direct modem coverage.

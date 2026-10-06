@@ -426,8 +426,16 @@ static const struct
     { 7200, T30_MODEM_V29,      T30_SUPPORT_V29,    (          DISBIT4 | DISBIT3)},
     { 4800, T30_MODEM_V27TER,   T30_SUPPORT_V27TER, (          DISBIT4          )},
     { 2400, T30_MODEM_V27TER,   T30_SUPPORT_V27TER, (0                          )},
+    {33600, T30_MODEM_V34HDX,   T30_SUPPORT_V34HDX, (0                          )},
     {    0, 0,                  0,                  (0                          )}
 };
+
+/* Annex F.3.1: MPh determines the primary rate; DCS modem bits are zero. */
+static int current_bit_rate(t30_state_t *s)
+{
+    return s->v34hdx_bit_rate ? s->v34hdx_bit_rate
+                            : fallback_sequence[s->current_fallback].bit_rate;
+}
 
 static void queue_phase(t30_state_t *s, int phase);
 static void set_phase(t30_state_t *s, int phase);
@@ -609,7 +617,7 @@ static int step_fallback_entry(t30_state_t *s)
         /*endif*/
     }
     /*endwhile*/
-    if (fallback_sequence[s->current_fallback].bit_rate == 0)
+    if (current_bit_rate(s) == 0)
     {
         /* Reset the fallback sequence */
         s->current_fallback = 0;
@@ -1423,7 +1431,8 @@ int t30_build_dis_or_dtc(t30_state_t *s)
         set_ctrl_bit(s->local_dis_dtc_frame, T30_DIS_BIT_T38);
     /*endif*/
     /* No 3G mobile  */
-    /* No V.8 */
+    if (s->supported_modems & T30_SUPPORT_V34HDX)
+        set_ctrl_bit(s->local_dis_dtc_frame, T30_DIS_BIT_V8_CAPABILITY);
     /* 256 octets preferred - don't bother making this optional, as everything uses 256 */
     /* Ready to transmit a fax (polling) will be determined separately, and this message edited. */
     /* Ready to receive a fax will be determined separately, and this message edited. */
@@ -2247,6 +2256,15 @@ static int analyze_rx_dis_dtc(t30_state_t *s, const uint8_t *msg, int len)
         s->mutual_image_sizes &= ~T4_SUPPORT_LENGTH_US_LEGAL;
     /*endif*/
 
+    if (s->v34hdx_bit_rate)
+    {
+        /* F.3: ECM is mandatory; modulation is already negotiated. */
+        if (!s->error_correcting_mode)
+            return -1;
+        s->current_permitted_modems = T30_SUPPORT_V34HDX;
+        s->current_fallback = 8;
+        return 0;
+    }
     switch (s->far_dis_dtc_frame[4] & (DISBIT6 | DISBIT5 | DISBIT4 | DISBIT3))
     {
     case (DISBIT6 | DISBIT4 | DISBIT3):
@@ -2722,6 +2740,13 @@ static int analyze_rx_dcs(t30_state_t *s, const uint8_t *msg, int len)
         span_log(&s->logging, SPAN_LOG_PROTOCOL_WARNING, "Remote is not requesting receive in DCS\n");
     /*endif*/
 
+    if (s->v34hdx_bit_rate)
+    {
+        if (!s->error_correcting_mode)
+            return -1;
+        s->current_fallback = 8;
+        return 0;
+    }
     if ((s->current_fallback = find_fallback_entry(dcs_frame[4] & (DISBIT6 | DISBIT5 | DISBIT4 | DISBIT3))) < 0)
     {
         span_log(&s->logging, SPAN_LOG_FLOW, "Remote asked for a modem standard we do not support\n");
@@ -3050,7 +3075,7 @@ static void set_min_scan_time(t30_state_t *s)
     if ((s->iaf & T30_IAF_MODE_NO_FILL_BITS))
         min_row_bits = 0;
     else
-        min_row_bits = (fallback_sequence[s->current_fallback].bit_rate*min_scan_times[s->min_scan_time_code])/1000;
+        min_row_bits = (current_bit_rate(s)*min_scan_times[s->min_scan_time_code])/1000;
     /*endif*/
     span_log(&s->logging, SPAN_LOG_FLOW, "Minimum bits per row will be %d\n", min_row_bits);
     t4_tx_set_min_bits_per_row(&s->t4.tx, min_row_bits);
@@ -3292,7 +3317,7 @@ static int process_rx_dis_dtc(t30_state_t *s, const uint8_t *msg, int len)
                  "Put document with modem (%d) %s at %dbps\n",
                  fallback_sequence[s->current_fallback].modem_type,
                  t30_modem_to_str(fallback_sequence[s->current_fallback].modem_type),
-                 fallback_sequence[s->current_fallback].bit_rate);
+                 current_bit_rate(s));
         s->retries = 0;
         send_dcs_sequence(s, true);
         return 0;
@@ -3367,7 +3392,7 @@ static int process_rx_dcs(t30_state_t *s, const uint8_t *msg, int len)
              "Get document with modem (%d) %s at %dbps\n",
              fallback_sequence[s->current_fallback].modem_type,
              t30_modem_to_str(fallback_sequence[s->current_fallback].modem_type),
-             fallback_sequence[s->current_fallback].bit_rate);
+             current_bit_rate(s));
     if (s->rx_file[0] == '\0')
     {
         span_log(&s->logging, SPAN_LOG_FLOW, "No document to receive\n");
@@ -6155,7 +6180,7 @@ static void process_rx_control_msg(t30_state_t *s, const uint8_t *msg, int len)
 
 static void queue_phase(t30_state_t *s, int phase)
 {
-    if (s->rx_signal_present)
+    if (s->rx_signal_present && !s->v34hdx_bit_rate)
     {
         /* We need to wait for that signal to go away */
         if (s->next_phase != T30_PHASE_IDLE)
@@ -6253,7 +6278,7 @@ static void set_phase(t30_state_t *s, int phase)
                an HDLC message on the slow modem, which has disabled the fast modem, will prevent the same
                fast modem from restarting. */
             s->set_rx_type_handler(s->set_rx_type_user_data, T30_MODEM_NONE, 0, false, false);
-            s->set_rx_type_handler(s->set_rx_type_user_data, fallback_sequence[s->current_fallback].modem_type, fallback_sequence[s->current_fallback].bit_rate, s->short_train, false);
+            s->set_rx_type_handler(s->set_rx_type_user_data, fallback_sequence[s->current_fallback].modem_type, current_bit_rate(s), s->short_train, false);
         }
         /*endif*/
         if (s->set_tx_type_handler)
@@ -6264,7 +6289,7 @@ static void set_phase(t30_state_t *s, int phase)
         /* Pause before switching from anything to phase C */
         /* Always prime the training count for 1.5s of data at the current rate. Its harmless if
            we prime it and are not doing TCF. */
-        s->tcf_test_bits = (3*fallback_sequence[s->current_fallback].bit_rate)/2;
+        s->tcf_test_bits = (3*current_bit_rate(s))/2;
         if (s->set_rx_type_handler)
         {
             /* Momentarily stop the receive modem, so the next change is forced to happen. If we don't do this
@@ -6275,12 +6300,12 @@ static void set_phase(t30_state_t *s, int phase)
         }
         /*endif*/
         if (s->set_tx_type_handler)
-            s->set_tx_type_handler(s->set_tx_type_user_data, fallback_sequence[s->current_fallback].modem_type, fallback_sequence[s->current_fallback].bit_rate, s->short_train, false);
+            s->set_tx_type_handler(s->set_tx_type_user_data, fallback_sequence[s->current_fallback].modem_type, current_bit_rate(s), s->short_train, false);
         /*endif*/
         break;
     case T30_PHASE_C_ECM_RX:
         if (s->set_rx_type_handler)
-            s->set_rx_type_handler(s->set_rx_type_user_data, fallback_sequence[s->current_fallback].modem_type, fallback_sequence[s->current_fallback].bit_rate, s->short_train, true);
+            s->set_rx_type_handler(s->set_rx_type_user_data, fallback_sequence[s->current_fallback].modem_type, current_bit_rate(s), s->short_train, true);
         /*endif*/
         if (s->set_tx_type_handler)
             s->set_tx_type_handler(s->set_tx_type_user_data, T30_MODEM_NONE, 0, false, false);
@@ -6292,7 +6317,7 @@ static void set_phase(t30_state_t *s, int phase)
             s->set_rx_type_handler(s->set_rx_type_user_data, T30_MODEM_NONE, 0, false, false);
         /*endif*/
         if (s->set_tx_type_handler)
-            s->set_tx_type_handler(s->set_tx_type_user_data, fallback_sequence[s->current_fallback].modem_type, fallback_sequence[s->current_fallback].bit_rate, s->short_train, true);
+            s->set_tx_type_handler(s->set_tx_type_user_data, fallback_sequence[s->current_fallback].modem_type, current_bit_rate(s), s->short_train, true);
         /*endif*/
         break;
     case T30_PHASE_E:
@@ -6900,9 +6925,9 @@ static void t30_non_ecm_rx_status(void *user_data, int status)
                 /*endif*/
                 span_log(&s->logging, SPAN_LOG_FLOW, "Trainability (TCF) test result - %d total bits. longest run of zeros was %d\n", s->tcf_test_bits, s->tcf_most_zeros);
 #if defined(SPANDSP_SUPPORT_SSLFAX)
-                if (!s->sslfax.server  &&  (s->tcf_most_zeros < fallback_sequence[s->current_fallback].bit_rate))
+                if (!s->sslfax.server  &&  (s->tcf_most_zeros < current_bit_rate(s)))
 #else
-                if (s->tcf_most_zeros < fallback_sequence[s->current_fallback].bit_rate)
+                if (s->tcf_most_zeros < current_bit_rate(s))
 #endif
                 {
                     span_log(&s->logging, SPAN_LOG_FLOW, "Trainability (TCF) test failed - longest run of zeros was %d\n", s->tcf_most_zeros);
@@ -7541,7 +7566,14 @@ SPAN_DECLARE(void) t30_front_end_status(void *user_data, int status)
         case T30_STATE_D:
             if (send_dcs_sequence(s, false))
             {
-                if ((s->iaf & T30_IAF_MODE_NO_TCF))
+                if (s->v34hdx_bit_rate)
+                {
+                    /* F.3.2.1: omit TCF, but still wait for CFR. */
+                    set_state(s, T30_STATE_D_POST_TCF);
+                    set_phase(s, T30_PHASE_B_RX);
+                    timer_t4_start(s);
+                }
+                else if ((s->iaf & T30_IAF_MODE_NO_TCF))
                 {
                     /* Skip the trainability test */
                     s->retries = 0;
@@ -7816,7 +7848,7 @@ SPAN_DECLARE(void) t30_get_transfer_statistics(t30_state_t *s, t30_stats_t *t)
 {
     t4_stats_t stats;
 
-    t->bit_rate = fallback_sequence[s->current_fallback].bit_rate;
+    t->bit_rate = current_bit_rate(s);
     t->error_correcting_mode = s->error_correcting_mode;
     t->error_correcting_mode_retries = s->error_correcting_mode_retries;
     switch (s->operation_in_progress)

@@ -4132,23 +4132,16 @@ static const char *at_cmd_plus_EWIND(at_state_t *s, const char *t)
 
 static const char *at_cmd_plus_F34(at_state_t *s, const char *t)
 {
-    static const int maxes[5] =
-    {
-        14, 14, 2, 14, 14
-    };
-    int *locations[5];
-    int i;
-
-    /* T.31 B.6.1 - Initial V.34 rate controls for FAX */
-    /* Syntax: +F34=[<maxp>][,[<minp>][,<prefc>][,<maxp2>][,<minp2]] */
-    /* TODO */
+    static const int maxes[5] = {14, 12, 1, 14, 12};
+    int values[5], *locations[5];
+    /* T.31 Amd 1 B.6.1: retained limits; negotiate at most the supported
+     * 28.8 kbit/s primary and 1200 bit/s control profiles. */
+    memcpy(values, s->fax_v34_rates, sizeof(values));
     t += 4;
-    for (i = 0;  i < 5;  i++)
-        locations[i] = NULL;
-    /*endfor*/
-    if (!parse_n_out(s, &t, locations, maxes, 5, "+F34:", "(0-14),(0-14),(0-2),(0-14),(0-14)"))
-        return NULL;
-    /*endif*/
+    for (int i=0;i<5;i++) locations[i] = &values[i];
+    if (!parse_n_out(s, &t, locations, maxes, 5, "+F34:", "(0-14),(0-12),(0-1),(0-14),(0-12)")) return NULL;
+    if ((values[0] && values[1] > values[0]) || (values[3] && values[4] > values[3])) return NULL;
+    memcpy(s->fax_v34_rates, values, sizeof(values));
     return t;
 }
 /*- End of function --------------------------------------------------------*/
@@ -4237,7 +4230,7 @@ static const char *at_cmd_plus_FCLASS(at_state_t *s, const char *t)
        it "0,1,1.0" makes things compatible with a lot more software
        that may be expecting a pre-T.31 modem.  2.0 is the T.32 service
        class, where the DCE runs T.30 rather than the DTE. */
-    if (!parse_string_list_out(s, &t, &s->fclass_mode, 3, NULL, "0,1,1.0,2.0"))
+    if (!parse_string_list_out(s, &t, &s->fclass_mode, 4, NULL, "0,1,1.0,2.0,2.1"))
         return NULL;
     /*endif*/
     return t;

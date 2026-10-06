@@ -57,6 +57,15 @@ SPAN_DECLARE(void) t31_call_event(t31_state_t *s, int event);
     \return The number of bytes of free space. */
 SPAN_DECLARE(int) t31_at_rx_free_space(t31_state_t *s);
 
+/* T.31 Amd 1 Annex B: externally trained clause-12 modem interface. */
+SPAN_DECLARE(int) t31_v34hdx_start(t31_state_t *s, int primary_rate, bool source);
+SPAN_DECLARE(int) t31_v34hdx_get_bit(t31_state_t *s);
+SPAN_DECLARE(void) t31_v34hdx_put_bit(t31_state_t *s, int bit);
+SPAN_DECLARE(void) t31_v34hdx_advance(t31_state_t *s, int samples);
+SPAN_DECLARE(int) t31_v34hdx_get_mode(t31_state_t *s);
+SPAN_DECLARE(void) t31_v34hdx_set_channel(t31_state_t *s, int mode);
+SPAN_DECLARE(int) t31_v34hdx_get_request(t31_state_t *s, int *rate);
+
 SPAN_DECLARE(int) t31_at_rx(t31_state_t *s, const char *t, int len);
 
 /*! Process a block of received T.31 modem audio samples.

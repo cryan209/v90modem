@@ -137,6 +137,7 @@ static struct {
 
 static fax_state_t     *fax;
 static int              call_up;
+static int              fax_connection_reported;
 static int              calling_party;
 static int              t30_started;
 
@@ -284,6 +285,8 @@ static void put_error(void)  { put_line("\r\nERROR\r\n"); }
 
 static int bps_to_br(int bps)
 {
+    if (bps >= 2400 && bps <= 33600 && bps % 2400 == 0)
+        return bps / 2400 - 1;
     switch (bps) {
     case 2400:  return 0;
     case 4800:  return 1;
@@ -465,7 +468,7 @@ static int t30_ppr_to_fps(int result, int *known)
 
 static void params_to_string(const fc2_params_t *p, char *out, size_t max)
 {
-    snprintf(out, max, "%d,%d,%d,%d,%d,%d,%d,%d,%d",
+    snprintf(out, max, "%d,%X,%d,%d,%d,%d,%d,%d,%d",
              p->vr, p->br, p->wd, p->ln, p->df, p->ec, p->bf, p->st, p->jp);
 }
 
@@ -494,9 +497,9 @@ static int parse_params(const char *s, fc2_params_t *p)
             /* A range list is a query response, not an assignment. */
             return 0;
         }
-        if (!isdigit((unsigned char) *s))
+        if (!(idx == 1 ? isxdigit((unsigned char)*s) : isdigit((unsigned char)*s)))
             return 0;
-        *wfield[idx] = (int) strtol(s, (char **) &s, 10);
+        *wfield[idx] = (int) strtol(s, (char **) &s, idx == 1 ? 16 : 10);
         if (*s == ',') {
             s++;
             idx++;
@@ -504,6 +507,9 @@ static int parse_params(const char *s, fc2_params_t *p)
             return 0;
         }
     }
+    if (*s || work.br < 0 || work.br > (selected == 2 ? 11 : 5)
+        || work.ec < 0 || work.ec > (selected == 2 ? 1 : 2))
+        return 0;
     *p = work;
     return 1;
 }
@@ -569,6 +575,19 @@ static void dis_to_params(const uint8_t *msg, int len, fc2_params_t *p)
                 ? 1 : 2;
     }
 
+    if (selected == 2)
+    {
+        /* T.32 Annex C: EC is an enable flag; V.34's rate was settled
+         * by MPh before this DIS/DTC (T.30 Annex F). */
+        p->ec = !!p->ec;
+        if (fax && fif_bit(msg, len, T30_DIS_BIT_V8_CAPABILITY))
+        {
+            t30_stats_t stats;
+            t30_get_transfer_statistics(fax_get_t30_state(fax), &stats);
+            p->br = bps_to_br(stats.bit_rate);
+        }
+    }
+
     /* T.30 Table 2 bits 21-24, in the order T.32's ST subparameter uses. */
     p->st = (fif_bit(msg, len, T30_DIS_BIT_MIN_SCAN_LINE_TIME_CAPABILITY_1) ? 1 : 0)
           | (fif_bit(msg, len, T30_DIS_BIT_MIN_SCAN_LINE_TIME_CAPABILITY_2) ? 2 : 0)
@@ -590,6 +609,12 @@ static void real_time_frame_handler(void *user_data, bool incoming,
     if (len < 3)
         return;
     fcf = msg[2];
+    if (incoming && call_up && !fax_connection_reported) {
+        /* T.32 8.4.1.1: legacy fax recognition is the first received
+         * HDLC frame; the SIP connection alone does not identify a fax. */
+        queue_line("\r\n+FCO\r\n");
+        fax_connection_reported = 1;
+    }
 
     /*
      * The DCS is where the frame size is settled (T.30 Table 2 bits 27 and
@@ -748,7 +773,7 @@ static void update_negotiated_params(void)
     /* T.32 8.5.1.3: 1 is ECM with 64-octet frames, 2 with 256.  Taken from
      * the DCS rather than echoed from +FIS -- T.30 note 42 lets a transmitter
      * ignore a 64-octet request, so an offer is not what was agreed. */
-    p_cs.ec = t.error_correcting_mode ? (dcs_ecm_64 ? 1 : 2) : 0;
+    p_cs.ec = t.error_correcting_mode ? (selected == 2 ? 1 : (dcs_ecm_64 ? 1 : 2)) : 0;
     p_cs.df = compression_to_df(t.compression);
     p_cs.vr = (t.y_resolution > 100) ? 1 : 0;
     if (t.width > 0 && t.width != 1728)
@@ -983,7 +1008,7 @@ static void session_start(void)
      * gives the choice to the transmitting terminal and Table 2 bit 7 of the
      * DIS/DTC is how a receiver asks, so this is a preference in both
      * directions rather than a setting. */
-    t30_set_ecm_frame_size(t30, (p_is.ec == 1) ? 64 : 256);
+    t30_set_ecm_frame_size(t30, (selected != 2 && p_is.ec == 1) ? 64 : 256);
     /*
      * T.30 Figure 5-2c: a transmitter whose page is refused with RTN asks
      * "CAPABLE RE-XMIT?", and goes back to phase B and repeats the page if it
@@ -1547,7 +1572,7 @@ static int list_param(const char *t, fc2_params_t *p, int read_only)
     }
     if (t[0] == '=' && t[1] == '?' && t[2] == '\0') {
         /* T.32 8.5.1.1: the ranges the DCE supports, in subparameter order. */
-        put_line("\r\n(0,1),(0-5),(0),(0-2),(0,1,3),(0-2),(0),(0-7),(0)\r\n");
+        put_line(selected == 2 ? "\r\n(0,1),(0-B),(0),(0-2),(0,1,3),(0,1),(0),(0-7),(0)\r\n" : "\r\n(0,1),(0-5),(0),(0-2),(0,1,3),(0-2),(0),(0-7),(0)\r\n");
         put_ok();
         return 1;
     }
@@ -2069,7 +2094,13 @@ void fc2_select(int on)
         session_stop();
         spool_abandon();
     }
-    selected = on ? 1 : 0;
+    selected = on;
+    if (on == 2) {
+        /* T.32 Amd 1 C.5: BR in 2400-bit/s units, EC=1 for Annex F.
+         * Only rates with verified V.34 primary payload are offered. */
+        p_cc.br = p_is.br = 11;
+        p_cc.ec = p_is.ec = 1;
+    }
     pthread_mutex_unlock(&fc2_mtx);
 }
 
@@ -2103,6 +2134,13 @@ int fc2_active(void)
 void fc2_on_connected(void)
 {
     pthread_mutex_lock(&fc2_mtx);
+    /* T.32 Amendment 1, C.7.1/C.7.2: successful V.8 fax
+     * negotiation identifies a V.34 peer before its page commands. Legacy
+     * fax waits for received HDLC flags (8.4.1.1), in the frame handler. */
+    if (!call_up) {
+        fax_connection_reported = selected == 2 && p_is.ec == 1;
+        if (fax_connection_reported) queue_line("\r\n+FCO\r\n");
+    }
     call_up = 1;
     /*
      * This used to wait until the DTE had finished handing the document over,
@@ -2131,6 +2169,17 @@ void fc2_on_disconnected(void)
     pthread_mutex_unlock(&fc2_mtx);
 }
 
+int fc2_v34hdx_profile(int calling, int *source, int *max_rate)
+{
+    int enabled;
+    pthread_mutex_lock(&fc2_mtx);
+    enabled = selected == 2 && p_is.ec == 1;
+    if (source) *source = calling ? !(p_sp && p_cr) : (p_lp || !p_cr);
+    if (max_rate) *max_rate = (p_is.br + 1) * 2400;
+    pthread_mutex_unlock(&fc2_mtx);
+    return enabled;
+}
+
 int fc2_v34hdx_start_control(int primary_bit_rate)
 {
     int r = -1;
@@ -2139,6 +2188,10 @@ int fc2_v34hdx_start_control(int primary_bit_rate)
     if (selected && call_up) {
         session_start();
         if (fax && !v34hdx_external) {
+            if (getenv("FAX_TEST_LOG")) {
+                span_log_set_level(t30_get_logging_state(fax_get_t30_state(fax)), SPAN_LOG_FLOW | SPAN_LOG_SHOW_TAG);
+                span_log_set_tag(t30_get_logging_state(fax_get_t30_state(fax)), "DCE");
+            }
             r = fax_v34hdx_start_control(fax, primary_bit_rate);
             if (r == 0)
                 v34hdx_external = 1;
@@ -2184,6 +2237,14 @@ void fc2_v34hdx_put_bit(int bit)
     pthread_mutex_lock(&fc2_mtx);
     if (fax)
         fax_v34hdx_put_bit(fax, bit);
+    pthread_mutex_unlock(&fc2_mtx);
+}
+
+void fc2_v34hdx_set_channel(int mode)
+{
+    pthread_mutex_lock(&fc2_mtx);
+    if (fax)
+        fax_v34hdx_set_channel(fax, mode);
     pthread_mutex_unlock(&fc2_mtx);
 }
 

@@ -72,12 +72,14 @@ void fc2_on_connected(void);
 void fc2_on_disconnected(void);
 
 /* External V.34 Annex F control-channel transport. */
+int fc2_v34hdx_profile(int calling, int *source, int *max_rate);
 int  fc2_v34hdx_start_control(int primary_bit_rate);
 /* Advance external T.30 timers once per received 8 kHz DS0 block. */
 void fc2_v34hdx_advance(int samples);
 int  fc2_v34hdx_get_bit(void);
 void fc2_v34hdx_put_bit(int bit);
 int  fc2_v34hdx_get_mode(void);
+void fc2_v34hdx_set_channel(int mode);
 
 /* Audio, linear 16-bit PCM at 8 kHz.  fc2_tx() always fills the buffer. */
 int fc2_rx(const int16_t *amp, int len);

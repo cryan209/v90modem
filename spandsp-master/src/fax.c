@@ -158,6 +158,13 @@ static void v8_handler(void *user_data, v8_parms_t *result)
 }
 /*- End of function --------------------------------------------------------*/
 
+static void fax_external_send_hdlc(void *user_data, const uint8_t *msg, int len)
+{
+    fax_state_t *s = user_data;
+    s->v34hdx_tx_complete = false;
+    fax_modems_hdlc_tx_frame(&s->modems, msg, len);
+}
+
 static void hdlc_underflow_handler(void *user_data)
 {
     t30_state_t *s;
@@ -262,18 +269,27 @@ SPAN_DECLARE(int) fax_v34hdx_start_control(fax_state_t *s, int primary_bit_rate)
         return -1;
     /* T.30 Annex F/F.3.1.4: after V.34 start-up, T.30 frames use HDLC on
        the V.34 control channel.  Annex F has no TCF and requires ECM. */
+    if (s->v34hdx_external)
+        return -1;
     s->v34hdx_external = true;
+    s->t30.v34hdx_bit_rate = primary_bit_rate;
+    s->v34hdx_channel = V34_HALF_DUPLEX_CONTROL_CHANNEL;
+    s->v34hdx_transition = s->v34hdx_ones = s->v34hdx_tx_ones = 0;
+    s->v34hdx_rx_age = s->v34hdx_idle_bit = 0;
     s->v34hdx_primary_bit_rate = primary_bit_rate;
     s->v34hdx_requested_mode = V34_HALF_DUPLEX_CONTROL_CHANNEL;
     t30_set_supported_modems(&s->t30, s->t30.supported_modems | T30_SUPPORT_V34HDX);
     t30_set_ecm_capability(&s->t30, true);
+    s->t30.send_hdlc_handler = fax_external_send_hdlc;
+    s->t30.send_hdlc_user_data = s;
     t30_set_iaf_mode(&s->t30, s->t30.iaf | T30_IAF_MODE_NO_TCF);
-    hdlc_rx_init(&s->modems.hdlc_rx, false, true, HDLC_FRAMING_OK_THRESHOLD,
+    hdlc_rx_init(&s->modems.hdlc_rx, false, true, 2,
                  fax_modems_hdlc_accept, &s->modems);
     /* The ordinary answer path reaches this transition when CED completes.
        V.8/V.34 already replaced CED here, so release the initial DIS sequence
        directly into the external control-channel HDLC queue. */
-    t30_front_end_status(&s->t30, T30_FRONT_END_SEND_STEP_COMPLETE);
+    if (!s->t30.calling_party)
+        t30_front_end_status(&s->t30, T30_FRONT_END_SEND_STEP_COMPLETE);
     return 0;
 }
 /*- End of function --------------------------------------------------------*/
@@ -286,6 +302,14 @@ SPAN_DECLARE(void) fax_v34hdx_advance(fax_state_t *s, int samples)
 
     if (s == NULL || !s->v34hdx_external || samples <= 0)
         return;
+    s->v34hdx_rx_age += samples;
+    /* F.3.2.3: do not start primary until 40 ones AND absent peer flags. */
+    if (s->v34hdx_transition == 1 && s->v34hdx_tx_ones >= 40
+        && s->v34hdx_rx_age >= 320)
+    {
+        s->v34hdx_transition = 0;
+        s->v34hdx_requested_mode = V34_HALF_DUPLEX_PRIMARY_CHANNEL;
+    }
     t30_timer_update(&s->t30, samples);
     while (samples > 0 && s->modems.current_tx_type == T30_MODEM_PAUSE)
     {
@@ -306,6 +330,21 @@ SPAN_DECLARE(void) fax_v34hdx_put_bit(fax_state_t *s, int bit)
 {
     if (s == NULL || !s->v34hdx_external)
         return;
+    if (bit >= 0)
+    {
+        s->v34hdx_flag_shift = (s->v34hdx_flag_shift << 1) | (bit & 1);
+        if ((s->v34hdx_flag_shift & 255) == 0x7E)
+            s->v34hdx_rx_age = 0;
+        if (s->v34hdx_transition == 2)
+        {
+            s->v34hdx_ones = bit ? s->v34hdx_ones + 1 : 0;
+            if (s->v34hdx_ones >= 40)
+            {
+                s->v34hdx_transition = 0;
+                s->v34hdx_requested_mode = V34_HALF_DUPLEX_PRIMARY_CHANNEL;
+            }
+        }
+    }
     hdlc_rx_put_bit(&s->modems.hdlc_rx, bit);
 }
 /*- End of function --------------------------------------------------------*/
@@ -314,16 +353,48 @@ SPAN_DECLARE(int) fax_v34hdx_get_bit(fax_state_t *s)
 {
     if (s == NULL || !s->v34hdx_external)
         return SIG_STATUS_END_OF_DATA;
+    if (s->v34hdx_transition == 1)
+    {
+        s->v34hdx_tx_ones++;
+        return 1;
+    }
+    if (s->v34hdx_transition == 2 || s->v34hdx_tx_complete
+        || s->v34hdx_channel != s->v34hdx_requested_mode)
+    {
+        int bit = (0x7E >> s->v34hdx_idle_bit) & 1;
+        s->v34hdx_idle_bit = (s->v34hdx_idle_bit + 1) & 7;
+        return bit;
+    }
     int bit = hdlc_tx_get_bit(&s->modems.hdlc_tx);
 
     /* The legacy FSK modem reports shutdown after HDLC's end marker. The
        external transport must provide the same completion notification, or
        DIS retries and DCN remain stuck waiting for a modem we never run. */
     if (bit == SIG_STATUS_END_OF_DATA)
+    {
+        s->v34hdx_tx_complete = true;
         t30_front_end_status(&s->t30, T30_FRONT_END_SEND_STEP_COMPLETE);
+        return 1;
+    }
     return bit;
 }
 /*- End of function --------------------------------------------------------*/
+
+/* Called at the actual modem boundary, not at the T.30 request. */
+SPAN_DECLARE(void) fax_v34hdx_set_channel(fax_state_t *s, int mode)
+{
+    if (!s || !s->v34hdx_external || mode == s->v34hdx_channel)
+        return;
+    s->v34hdx_channel = mode;
+    if (mode == V34_HALF_DUPLEX_CONTROL_CHANNEL)
+        hdlc_rx_put_bit(&s->modems.hdlc_rx, SIG_STATUS_CARRIER_DOWN);
+    hdlc_rx_init(&s->modems.hdlc_rx, false, true, 2,
+                 fax_modems_hdlc_accept, &s->modems);
+    if (mode == V34_HALF_DUPLEX_CONTROL_CHANNEL)
+        hdlc_tx_flags(&s->modems.hdlc_tx, 2);
+    else
+        t30_hdlc_accept(&s->t30, NULL, SIG_STATUS_TRAINING_SUCCEEDED, true);
+}
 
 SPAN_DECLARE(int) fax_v34hdx_get_mode(fax_state_t *s)
 {
@@ -350,28 +421,19 @@ static void fax_set_rx_type(void *user_data, int type, int bit_rate, int short_t
 
     s = (fax_state_t *) user_data;
     t = &s->modems;
-    /* T.30 Annex F/F.3.1.5 uses the primary channel for phase C and the
-       control channel for phases B and D.  The ordinary fax front end asks
-       for a legacy fast modem here; translate that request for the external
-       V.34 datapump. */
     if (s->v34hdx_external)
     {
-        switch (type)
+        if (type == T30_MODEM_V34HDX)
         {
-        case T30_MODEM_V17:
-        case T30_MODEM_V27TER:
-        case T30_MODEM_V29:
-            s->v34hdx_requested_mode = V34_HALF_DUPLEX_PRIMARY_CHANNEL;
-            break;
-        case T30_MODEM_V21:
-            s->v34hdx_requested_mode = V34_HALF_DUPLEX_CONTROL_CHANNEL;
-            break;
-        default:
-            break;
+            /* F.3.2.2: keep sending flags after CFR until forty ones. */
+            s->v34hdx_transition = 2;
+            s->v34hdx_ones = 0;
         }
-        /*endswitch*/
+        else if (type == T30_MODEM_V21)
+            s->v34hdx_requested_mode = V34_HALF_DUPLEX_CONTROL_CHANNEL;
+        t->current_rx_type = type;
+        return;
     }
-    /*endif*/
 #if defined(SPANDSP_SUPPORT_SSLFAX)
     if (s->t30.sslfax.server  &&  type != T30_MODEM_DONE)
     {
@@ -431,6 +493,26 @@ static void fax_set_tx_type(void *user_data, int type, int bit_rate, int short_t
 
     s = (fax_state_t *) user_data;
     t = &s->modems;
+    if (s->v34hdx_external)
+    {
+        if (type == T30_MODEM_V34HDX)
+        {
+            /* F.3.2.3: marks on control before requesting primary. */
+            s->v34hdx_transition = 1;
+            s->v34hdx_tx_ones = 0;
+            s->v34hdx_rx_age = 0;
+            hdlc_tx_flags(&t->hdlc_tx, 2);
+        }
+        else if (type == T30_MODEM_V21)
+        {
+            s->v34hdx_requested_mode = V34_HALF_DUPLEX_CONTROL_CHANNEL;
+            hdlc_tx_flags(&t->hdlc_tx, 2);
+        }
+        else if (type == T30_MODEM_PAUSE)
+            silence_gen_alter(&t->silence_gen, milliseconds_to_samples(short_train));
+        t->current_tx_type = type;
+        return;
+    }
 #if defined(SPANDSP_SUPPORT_SSLFAX)
     if (s->t30.sslfax.server  &&  type != T30_MODEM_DONE)
     {

@@ -2663,6 +2663,7 @@ static int process_class1_cmd(void *user_data, int direction, int operation, int
 
 SPAN_DECLARE(void) t31_call_event(t31_state_t *s, int event)
 {
+    if (event == AT_CALL_EVENT_HANGUP) s->v34hdx.active = false;
     span_log(&s->logging, SPAN_LOG_FLOW, "Call event %s (%d) received\n", at_call_state_to_str(event), event);
     at_call_event(&s->at_state, event);
 }
@@ -2674,8 +2675,261 @@ SPAN_DECLARE(int) t31_at_rx_free_space(t31_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* T.31 Amd 1 Table B.1: frame data remain duplex throughout ATO. */
+static void v34_dte(t31_state_t *s, const uint8_t *data, int len)
+{
+    s->at_state.at_tx_handler(s->at_state.at_tx_user_data, data, len);
+}
+
+static void v34_indicate(t31_state_t *s, int code)
+{
+    uint8_t out[2] = {0x10, code};
+    v34_dte(s, out, 2);
+}
+
+static void v34_deliver_frame(t31_state_t *s, const uint8_t *msg, int len, int ok)
+{
+    uint8_t out[2*T31_MAX_HDLC_LEN + 8];
+    int n = 0;
+    for (int i = 0; i < len; i++)
+    {
+        int c = msg[i];
+        if (c == 0x10 || c == 0x11 || c == 0x13)
+        {
+            out[n++] = 0x10;
+            out[n++] = c == 0x11 ? 0x51 : c == 0x13 ? 0x53 : 0x10;
+        }
+        else out[n++] = c;
+    }
+    out[n++] = 0x10;
+    out[n++] = ok ? 0x03 : 0x07;
+    v34_dte(s, out, n);
+}
+
+static void v34_deliver_pending(t31_state_t *s)
+{
+    while (!s->v34hdx.paused && s->v34hdx.received.in != s->v34hdx.received.out)
+    {
+        t31_hdlc_buf_t *b = &s->v34hdx.received.buf[s->v34hdx.received.out];
+        v34_deliver_frame(s, b->buf, abs(b->len), b->len > 0);
+        s->v34hdx.received.out = (s->v34hdx.received.out + 1) % T31_TX_HDLC_BUFS;
+    }
+}
+
+static void v34_accept(void *user, const uint8_t *msg, int len, int ok)
+{
+    t31_state_t *s = user;
+    if (len < 0 || len > T31_MAX_HDLC_LEN - 2) return;
+    /* B.7.3 includes the received FCS, even for a bad frame. */
+    if (s->v34hdx.paused)
+    {
+        int next = (s->v34hdx.received.in + 1) % T31_TX_HDLC_BUFS;
+        if (next == s->v34hdx.received.out) { v34_indicate(s, 0x07); return; }
+        t31_hdlc_buf_t *b = &s->v34hdx.received.buf[s->v34hdx.received.in];
+        memcpy(b->buf, msg, len + 2);
+        b->len = ok ? len + 2 : -(len + 2);
+        s->v34hdx.received.in = next;
+    }
+    else v34_deliver_frame(s, msg, len + 2, ok);
+    if (!s->v34hdx.source && len >= 3 && msg[2] == 0x86)
+        s->v34hdx.mode = V34_HALF_DUPLEX_CONTROL_CHANNEL;
+}
+
+static void v34_load_frame(void *user)
+{
+    t31_state_t *s = user;
+    if (!s->v34hdx.request && !s->v34hdx.transition
+        && s->v34hdx.mode == s->v34hdx.channel
+        && s->v34hdx.frames.out != s->v34hdx.frames.in)
+    {
+        t31_hdlc_buf_t *b = &s->v34hdx.frames.buf[s->v34hdx.frames.out];
+        if (b->len < 0) s->v34hdx.request = -b->len;
+        else hdlc_tx_frame(&s->v34hdx.tx, b->buf, b->len);
+        s->v34hdx.frames.out = (s->v34hdx.frames.out + 1) % T31_TX_HDLC_BUFS;
+    }
+}
+
+SPAN_DECLARE(int) t31_v34hdx_start(t31_state_t *s, int rate, bool source)
+{
+    if (!s || s->v34hdx.active || rate < 2400 || rate > 28800 || rate % 2400
+        || (s->at_state.fax_v34_rates[1] && rate < s->at_state.fax_v34_rates[1]*2400)
+        || (s->at_state.fax_v34_rates[0] && rate > s->at_state.fax_v34_rates[0]*2400))
+        return -1;
+    memset(&s->v34hdx, 0, sizeof(s->v34hdx));
+    s->v34hdx.active = true;
+    s->v34hdx.source = source;
+    s->v34hdx.rate = rate;
+    s->v34hdx.mode = s->v34hdx.channel = V34_HALF_DUPLEX_CONTROL_CHANNEL;
+    hdlc_tx_init(&s->v34hdx.tx, false, 2, false, v34_load_frame, s);
+    hdlc_tx_flags(&s->v34hdx.tx, 2);
+    hdlc_rx_init(&s->v34hdx.rx, false, true, 2, v34_accept, s);
+    char report[64];
+    snprintf(report, sizeof(report), "+F34:%d,1", rate / 2400);
+    at_put_response(&s->at_state, report);
+    at_put_response_code(&s->at_state, AT_RESPONSE_CODE_CONNECT);
+    v34_indicate(s, 0x6D);
+    v34_indicate(s, 0x70 + rate / 2400 - 1);
+    v34_indicate(s, 0x6E);
+    return 0;
+}
+
+SPAN_DECLARE(void) t31_v34hdx_set_channel(t31_state_t *s, int mode)
+{
+    if (!s || !s->v34hdx.active || mode == s->v34hdx.channel) return;
+    s->v34hdx.channel = mode;
+    hdlc_rx_init(&s->v34hdx.rx, false, true, 2, v34_accept, s);
+    hdlc_tx_flags(&s->v34hdx.tx, 2);
+    v34_indicate(s, mode == V34_HALF_DUPLEX_PRIMARY_CHANNEL ? 0x6B : 0x6D);
+    v34_indicate(s, 0x70 + s->v34hdx.rate / 2400 - 1);
+    if (mode == V34_HALF_DUPLEX_CONTROL_CHANNEL) v34_indicate(s, 0x6E);
+}
+
+SPAN_DECLARE(int) t31_v34hdx_get_mode(t31_state_t *s)
+{
+    return s && s->v34hdx.active ? s->v34hdx.mode : V34_HALF_DUPLEX_SILENCE;
+}
+
+SPAN_DECLARE(void) t31_v34hdx_advance(t31_state_t *s, int samples)
+{
+    if (!s || !s->v34hdx.active || samples <= 0) return;
+    s->v34hdx.rx_age += samples;
+    if (s->v34hdx.transition == 2 && s->v34hdx.tx_marks >= 40
+        && s->v34hdx.rx_age >= 320)
+    {
+        /* T.31 Annex B.9.3.2: drain frames, terminate the carrier,
+         * report EOT/OK, and remain off hook in command mode. */
+        s->v34hdx.transition = 0;
+        s->v34hdx.active = false;
+        s->v34hdx.mode = V34_HALF_DUPLEX_SILENCE;
+        v34_indicate(s, 0x04);
+        at_put_response_code(&s->at_state, AT_RESPONSE_CODE_OK);
+        t31_set_at_rx_mode(s, AT_MODE_OFFHOOK_COMMAND);
+        return;
+    }
+    if (s->v34hdx.transition == 1 && s->v34hdx.tx_marks >= 40 && s->v34hdx.rx_age >= 320)
+    {
+        s->v34hdx.transition = 0;
+        s->v34hdx.mode = V34_HALF_DUPLEX_PRIMARY_CHANNEL;
+    }
+}
+
+SPAN_DECLARE(void) t31_v34hdx_put_bit(t31_state_t *s, int bit)
+{
+    if (!s || !s->v34hdx.active) return;
+    if (bit >= 0)
+    {
+        s->v34hdx.flag_shift = (s->v34hdx.flag_shift << 1) | (bit & 1);
+        if ((s->v34hdx.flag_shift & 255) == 0x7E) s->v34hdx.rx_age = 0;
+        if (!s->v34hdx.source && s->v34hdx.channel == V34_HALF_DUPLEX_CONTROL_CHANNEL)
+        {
+            s->v34hdx.marks = bit ? s->v34hdx.marks + 1 : 0;
+            if (s->v34hdx.marks == 40)
+                s->v34hdx.mode = V34_HALF_DUPLEX_PRIMARY_CHANNEL;
+        }
+    }
+    hdlc_rx_put_bit(&s->v34hdx.rx, bit);
+}
+
+SPAN_DECLARE(int) t31_v34hdx_get_bit(t31_state_t *s)
+{
+    if (!s || !s->v34hdx.active) return SIG_STATUS_END_OF_DATA;
+    if (s->v34hdx.request && !s->v34hdx.tx.len && !s->v34hdx.tx.bits)
+    {
+        int request = s->v34hdx.request;
+        s->v34hdx.request = 0;
+        if (request == V34_HALF_DUPLEX_PRIMARY_CHANNEL)
+        {
+            s->v34hdx.transition = 1;
+            s->v34hdx.tx_marks = s->v34hdx.rx_age = 0;
+        }
+        else if (request == V34_HALF_DUPLEX_SILENCE)
+        {
+            s->v34hdx.transition = 2;
+            s->v34hdx.tx_marks = s->v34hdx.rx_age = 0;
+        }
+        else s->v34hdx.mode = request;
+    }
+    if (s->v34hdx.transition) { s->v34hdx.tx_marks++; return 1; }
+    if (s->v34hdx.mode != s->v34hdx.channel) return 1;
+    if (!s->v34hdx.tx.len) v34_load_frame(s);
+    return hdlc_tx_get_bit(&s->v34hdx.tx);
+}
+
+SPAN_DECLARE(int) t31_v34hdx_get_request(t31_state_t *s, int *rate)
+{
+    int request = s->v34hdx.rate_request;
+    s->v34hdx.rate_request = 0;
+    if (rate) *rate = s->v34hdx.rate;
+    return request;
+}
+
+/* B.8.4: a channel command follows all preceding frames but precedes
+ * subsequent frames. A scalar request would also drain the next channel's
+ * queued data on the old channel. Keep commands in the same FIFO. */
+static void v34_queue_mode(t31_state_t *s, int mode)
+{
+    int next = (s->v34hdx.frames.in + 1) % T31_TX_HDLC_BUFS;
+    if (next == s->v34hdx.frames.out) { v34_indicate(s, 0x07); return; }
+    s->v34hdx.frames.buf[s->v34hdx.frames.in].len = -mode;
+    s->v34hdx.frames.in = next;
+}
+
+static void v34_at_data(t31_state_t *s, const char *data, int len)
+{
+    for (int i = 0; i < len; i++)
+    {
+        int c = (uint8_t)data[i];
+        if (!s->v34hdx.escape && c == 0x10) { s->v34hdx.escape = true; continue; }
+        if (s->v34hdx.escape)
+        {
+            s->v34hdx.escape = false;
+            switch (c)
+            {
+            case 0x03:
+            {
+                int next = (s->v34hdx.frames.in + 1) % T31_TX_HDLC_BUFS;
+                if (s->v34hdx.overflow || next == s->v34hdx.frames.out)
+                    v34_indicate(s, 0x07);
+                else if (s->v34hdx.len)
+                {
+                    t31_hdlc_buf_t *b = &s->v34hdx.frames.buf[s->v34hdx.frames.in];
+                    memcpy(b->buf, s->v34hdx.frame, s->v34hdx.len);
+                    b->len = s->v34hdx.len;
+                    s->v34hdx.frames.in = next;
+                }
+                s->v34hdx.len = 0; s->v34hdx.overflow = false;
+                continue;
+            }
+            case 0x6B: if (s->v34hdx.source) v34_queue_mode(s, V34_HALF_DUPLEX_PRIMARY_CHANNEL); continue;
+            case 0x6D: if (s->v34hdx.source) v34_queue_mode(s, V34_HALF_DUPLEX_CONTROL_CHANNEL); continue;
+            case 0x68: /* B.9.8 turnaround marks */
+            case 0x04: v34_queue_mode(s, V34_HALF_DUPLEX_SILENCE); continue;
+            case 0x69: s->v34hdx.rate_request = 1; continue; /* CC retrain */
+            case 0x6A: s->v34hdx.rate_request = 2; continue; /* primary retrain */
+            case 0x6C: s->v34hdx.rate_request = 3; continue; /* MPh parameters */
+            case 0x6E: continue; /* supported 1200-bit/s CC */
+            case 0x6F: v34_indicate(s, 0x07); continue; /* unsupported CC rate */
+            case 0x13: s->v34hdx.paused = true; continue;
+            case 0x11: s->v34hdx.paused = false; v34_deliver_pending(s); continue;
+            case 0x51: c = 0x11; break;
+            case 0x53: c = 0x13; break;
+            case 0x10: break;
+            case 0x1A:
+                if (s->v34hdx.len < T31_MAX_HDLC_LEN) s->v34hdx.frame[s->v34hdx.len++] = 0x10;
+                c = 0x10; break;
+            default:
+                if (c >= 0x70 && c <= 0x7B) { s->v34hdx.rate = (c - 0x70 + 1)*2400; continue; }
+                v34_indicate(s, 0x07); continue;
+            }
+        }
+        if (s->v34hdx.len < T31_MAX_HDLC_LEN) s->v34hdx.frame[s->v34hdx.len++] = c;
+        else s->v34hdx.overflow = true;
+    }
+}
+
 SPAN_DECLARE(int) t31_at_rx(t31_state_t *s, const char *t, int len)
 {
+    if (s->v34hdx.active) { v34_at_data(s, t, len); return len; }
     if (s->dte_data_timeout)
         s->dte_data_timeout = s->call_samples + milliseconds_to_samples(5000);
     /*endif*/

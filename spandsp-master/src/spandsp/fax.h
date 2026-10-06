@@ -86,6 +86,8 @@ SPAN_DECLARE(void) fax_v34hdx_put_bit(fax_state_t *s, int bit);
 SPAN_DECLARE(int) fax_v34hdx_get_bit(fax_state_t *s);
 
 /*! Return the V.34 half-duplex channel currently requested by T.30. */
+SPAN_DECLARE(void) fax_v34hdx_set_channel(fax_state_t *s, int mode);
+
 SPAN_DECLARE(int) fax_v34hdx_get_mode(fax_state_t *s);
 
 /*! Select whether silent audio will be sent when FAX transmit is idle.
