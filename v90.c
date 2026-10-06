@@ -5937,6 +5937,17 @@ bool v90_set_v92_cpu(v90_state_t *s, const vpcm_cp_frame_t *cpu)
                         (unsigned long long)prod, s->data_mapper_k);
             }
         }
+        {
+            /* Test only: reassign which constellation each data frame
+             * interval uses, e.g. V92_DATA_DFI=111110. */
+            const char *dv = getenv("V92_DATA_DFI");
+
+            if (dv && strlen(dv) == VPCM_CP_FRAME_INTERVALS) {
+                for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++)
+                    s->data_cp_frame.dfi[i] = (uint8_t)(dv[i] - '0');
+                fprintf(stderr, "[V90] V92_DATA_DFI override: %s\n", dv);
+            }
+        }
         s->v92_cpu_received = true;
         if (cpu->acknowledge)
             s->v92_remote_ack_received = true;

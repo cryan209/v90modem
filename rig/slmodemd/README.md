@@ -542,3 +542,16 @@ machinery (--p3 / p3-symbol-export, which has proper RRC + timing) on
 the raw Right channel over the CPt era vs the CP'/E era and compare
 differential-product structure receiver-independently.  That settles
 peer-vs-us in one run, on the same capture, no rig needed.
+
+### V.92 downstream: slmodemd's frozen echo canceller (2026-10-07)
+
+`v92_demapper_ec_wrap.c` interposes (objcopy aliases, same recipe as the TRN2d
+hook, offsets from `objdump -t dsplibs.o`: `V90Demapper::reset` .text:0x30870,
+`resetNoSpectral` 0x30cf0, `V90SignBitsExtractor::reset` 0x31960,
+`V92EchoCanceller::process` 0x11870) and logs the demapper's parameters to
+`/tmp/v90map.txt`; with `DM_V92EC_BYPASS=1` it makes `V92EchoCanceller::process`
+a pass-through.  The SIP rig has no near-end echo, the canceller is trained on
+silence and frozen, and its taps then add noise proportional to slmodemd's own
+PCM upstream: V.92 downstream Error Energy 18-25 (HDLC errors ~8/s, no LAPM)
+becomes 8-12 and LAPM/V.42bis come up.  Run with
+`SLMODEMD=/src/slmodemd/slmodemd_map DM_V92EC_BYPASS=1 tools/soak/slm_call.sh`.
