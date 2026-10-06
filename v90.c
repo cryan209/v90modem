@@ -3234,8 +3234,35 @@ static uint8_t v90_dil_symbol_codeword(v90_law_t law,
     int uchord_idx = v90_dil_uchord_index(training_ucode);
     int lsp = v90_clamp_positive(desc->lsp, V90_DIL_MAX_PAT_BITS);
     int ltp = v90_clamp_positive(desc->ltp, V90_DIL_MAX_PAT_BITS);
-    int sp_bit = desc->sp[pos % lsp] ? 1 : 0;
-    int tp_bit = desc->tp[pos % ltp] ? 1 : 0;
+    int sp_i = pos % lsp;
+    int tp_i = pos % ltp;
+    int sp_bit, tp_bit;
+    static int variant = -1;
+
+    /* ME_V90_DIL_VARIANT (rig experiment, default 0 = the Recommendation as
+     * read): 1 SP bit order reversed, 2 TP bit order reversed, 4 SP inverted,
+     * 8 TP inverted, 16 patterns run on across segments (no restart). */
+    if (variant < 0) {
+        const char *v = getenv("ME_V90_DIL_VARIANT");
+        variant = v ? atoi(v) : 0;
+    }
+    if (variant & 16) {
+        int run = 0, k;
+        for (k = 0; k < seg_idx; k++)
+            run += v90_dil_segment_len(desc, k);
+        sp_i = (run + pos) % lsp;
+        tp_i = (run + pos) % ltp;
+    }
+    if (variant & 1)
+        sp_i = lsp - 1 - sp_i;
+    if (variant & 2)
+        tp_i = ltp - 1 - tp_i;
+    sp_bit = desc->sp[sp_i] ? 1 : 0;
+    tp_bit = desc->tp[tp_i] ? 1 : 0;
+    if (variant & 4)
+        sp_bit ^= 1;
+    if (variant & 8)
+        tp_bit ^= 1;
     int ucode = tp_bit ? training_ucode : (desc->ref[uchord_idx] & 0x7F);
 
     return v90_pcm_signed_codeword(law, ucode, sp_bit);
