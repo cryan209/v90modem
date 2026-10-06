@@ -677,6 +677,7 @@ struct v90_state_s {
      * fits inside the peer's WaitForSd patience. */
     bool             jd_resync_wait;
     bool             dil_terminate_requested;
+    bool             v92_ri_on_frame;           /* CPt seen: Ri at next frame */
     bool             v92_phase3;
     bool             v92_trn1u_trained;
     bool             v92_su_seen;
@@ -3229,6 +3230,7 @@ static void v90_dil_reset_tx(v90_state_t *s)
     s->dil_segment_index = 0;
     s->dil_pos_in_segment = 0;
     s->dil_terminate_requested = false;
+    s->v92_ri_on_frame = false;
 }
 
 /* Length in symbols of DIL-segment seg_idx (§8.4.1: Lc = (Hc + 1) * 6). */
@@ -3384,6 +3386,15 @@ static uint8_t v90_dil_codeword(v90_state_t *s)
     codeword = v90_dil_symbol_codeword(s->law, &s->dil, seg_idx, s->dil_pos_in_segment);
 
     s->sample_count++;
+    if (s->v92_ri_on_frame && (s->sample_count % V90_FRAME_LEN) == 0) {
+        /* V.92 9.5.1.1.12, see V90_RX_EVENT_CP_VALID: this DIL symbol ends
+         * a data frame, so Ri starts on the grid the analogue modem holds. */
+        s->v92_ri_on_frame = false;
+        s->tx_phase = V90_TX_RI;
+        s->sample_count = 0;
+        s->phase4_hold_logged = false;
+        return codeword;
+    }
     s->dil_pos_in_segment++;
     if (s->dil_pos_in_segment >= seg_len) {
         s->dil_pos_in_segment = 0;
@@ -4498,6 +4509,7 @@ v90_state_t *v90_init_with_v34(v34_state_t *v34, v90_law_t law)
     s->training_complete = false;
     s->dil_requested = false;
     s->dil_terminate_requested = false;
+    s->v92_ri_on_frame = false;
     memset(&s->dil, 0, sizeof(s->dil));
     v90_dil_reset_tx(s);
 
@@ -4533,6 +4545,7 @@ v90_state_t *v90_init(int baud_rate,
     s->training_complete = false;
     s->dil_requested = false;
     s->dil_terminate_requested = false;
+    s->v92_ri_on_frame = false;
     memset(&s->dil, 0, sizeof(s->dil));
     v90_dil_reset_tx(s);
 
@@ -4610,6 +4623,7 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->v92_su_bar_seen = false;
     s->training_complete = false;
     s->dil_terminate_requested = false;
+    s->v92_ri_on_frame = false;
     s->cp_ready = false;
     s->cp_ack_received = false;
     s->e_received = false;
@@ -4663,6 +4677,7 @@ void v90_set_dil_descriptor(v90_state_t *s, const v90_dil_desc_t *desc)
     memset(&s->dil, 0, sizeof(s->dil));
     s->dil_requested = false;
     s->dil_terminate_requested = false;
+    s->v92_ri_on_frame = false;
     v90_dil_reset_tx(s);
 
     if (!desc)
@@ -4823,6 +4838,19 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
             /* V.92 §9.5.1.1.12/.13: CPt ends the Phase-3 DIL/SCR wait and
              * starts Ri.  The following E1u/TRN2u stream is handled by the
              * native Phase-4 receiver once Ri reaches TRN2d. */
+            /* "Upon receiving CPt, the digital modem shall transmit Ri" --
+             * but Ri's +++--- is defined on the data frame, and the CPt event
+             * arrives at an arbitrary DIL symbol.  Switching there put Ri two
+             * symbols off slmodemd's frame grid; it never recognised it and
+             * sent CPt for 8 s until it retrained.  DIL hands over at the end
+             * of the current frame (SCR is generated frame-aligned already). */
+            if (s->tx_phase == V90_TX_DIL) {
+                if (!s->v92_ri_on_frame)
+                    fprintf(stderr,
+                            "[V92] Phase 3: valid 2-point CPt received; Ri at the next data frame\n");
+                s->v92_ri_on_frame = true;
+                return true;
+            }
             fprintf(stderr,
                     "[V92] Phase 3: valid 2-point CPt received; starting Ri\n");
             s->tx_phase = V90_TX_RI;
@@ -4925,6 +4953,7 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
             s->v92_su_seen = false;
             s->v92_su_bar_seen = false;
             s->dil_terminate_requested = false;
+            s->v92_ri_on_frame = false;
             s->dil_requested = false;
             s->dil_segment_index = 0;
             s->phase4_hold_logged = false;
