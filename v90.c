@@ -794,6 +794,8 @@ struct v90_state_s {
     uint8_t          v92_upstream_drn;          /* Table 30 drn, 0..19 */
     uint8_t          v92_trellis_select;
     uint16_t         v92_gain_q0_16;
+    double           v92_upstream_sigma;        /* TRN2u noise, DS0 linear rms */
+    double           v92_upstream_lu_rx;        /* received TRN2u rms, DS0 linear */
 
     /* Downstream PCM encoder state (data mode) */
     v90_scrambler_t  data_scrambler;
@@ -1058,6 +1060,55 @@ static bool v90_build_v92_suvd_mapped(v90_state_t *s, bool ack)
  * absent until real upstream channel measurements exist.  The acknowledge
  * bit reflects whether a valid CPu has been received.
  */
+static bool v90_v92_upstream_design_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *v = getenv("ME_V92_UPSTREAM_DESIGN");
+        cached = (v && *v == '0') ? 0 : 1;
+    }
+    return cached != 0;
+}
+
+static double v90_v92_upstream_margin(void)
+{
+    static double cached = -1.0;
+
+    if (cached < 0.0) {
+        const char *v = getenv("ME_V92_UPSTREAM_MARGIN");
+        double m = v ? atof(v) : 0.0;
+
+        cached = (m >= 1.0 && m <= 10.0) ? m : 4.0;
+    }
+    return cached;
+}
+
+static bool v90_v92_cpd_gain_per_lu(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *v = getenv("ME_V92_CPD_GAIN_PER_LU");
+        cached = (v && *v == '1') ? 1 : 0;
+    }
+    return cached != 0;
+}
+
+bool v90_set_v92_upstream_noise(v90_state_t *s, double sigma_linear,
+                                double lu_rx)
+{
+    if (!s || !(sigma_linear > 0.0) || s->v92_cpd_sent)
+        return false;
+    s->v92_upstream_sigma = sigma_linear;
+    s->v92_upstream_lu_rx = lu_rx;
+    /* Ask for the most the moduli carry; the back-off in
+     * v90_build_v92_cpd_frame() takes drn down to what they allow. */
+    if (v90_v92_upstream_design_enabled())
+        s->v92_upstream_drn = 19;
+    return true;
+}
+
 bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
 {
     int points = 0;
@@ -1072,6 +1123,60 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
     out->extend_e2u = false;
     out->acknowledge = s->v92_cpu_received;
     out->gain_q0_16 = s->v92_gain_q0_16;
+    /* The digital modem designs the upstream constellation (V.92 6.4,
+     * Table 30) and nothing else will: a point closer to its neighbour than
+     * the receiver's noise allows only adds errors.  Every odd Ucode put a
+     * 16-unit step at the bottom of the set against a measured TRN2u noise
+     * of ~30-60 units (slmodemd, slm-r7-v92-in-1), and its 41333 bit/s
+     * could not be decoded at any equaliser.  Keep the points at least
+     * 2 x margin x sigma apart; never fewer than 8 (drn 1 needs 8^12 >= 2^36),
+     * relaxing the spacing if the noise would leave fewer. */
+    double spacing = 0.0;
+    double scale;                 /* DS0 linear level -> CPd point */
+
+    if (!out->gain_q0_16)
+        return false;
+    /* ME_V92_CPD_GAIN_PER_LU=1: slmodemd transmits G x LU x v (its log:
+     * "constellation gain (after Lu multiplication)"), i.e. it reads a point
+     * in units of LU.  The only reference the two ends share is LU, which
+     * arrives here at the received TRN2u rms R, so for that convention G
+     * must carry 1/R.  Points are rescaled after G is quantised so G x R x
+     * point still lands on the intended level.  Our own analogue role
+     * transmits G x v, so this stays opt-in. */
+    if (s->v92_upstream_lu_rx > 1.0 && v90_v92_cpd_gain_per_lu()) {
+        long gq = lround((double)s->v92_gain_q0_16 / s->v92_upstream_lu_rx);
+
+        if (gq < 1) gq = 1;
+        out->gain_q0_16 = (uint16_t)gq;
+        scale = (4.0*65536.0) / ((double)gq * s->v92_upstream_lu_rx);
+    } else {
+        scale = (4.0*65536.0) / out->gain_q0_16;
+    }
+    if (s->v92_upstream_sigma > 0.0 && v90_v92_upstream_design_enabled())
+        spacing = 2.0*v90_v92_upstream_margin()*s->v92_upstream_sigma;
+    for (int attempt = 0; attempt < 32; attempt++) {
+        int n = 0;
+        int16_t prev = 0;
+
+        for (int ucode = 1; ucode < 128; ucode += 2) {
+            int16_t linear = v90_pcm_to_linear(
+                s->law, ucode_to_pcm_positive(s->law, ucode));
+
+            if (linear <= 0)
+                continue;
+            if ((double)linear * scale > 65535.0)
+                break;
+            if (n == 0 ? (double)linear < spacing/2.0
+                       : (double)(linear - prev) < spacing)
+                continue;
+            prev = linear;
+            n++;
+        }
+        if (n >= 8 || spacing <= 0.0)
+            break;
+        spacing *= 0.9;
+    }
+    int16_t prev_linear = 0;
     for (int ucode = 1; ucode < 128 && points < V92_CPD_MAX_POINTS;
          ucode += 2) {
         int16_t linear = v90_pcm_to_linear(
@@ -1079,12 +1184,15 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
 
         if (linear <= 0)
             continue;
+        if (points == 0 ? (double)linear < spacing/2.0
+                        : (double)(linear - prev_linear) < spacing)
+            continue;
+        prev_linear = linear;
         /* V.92 6.4.2/Table 30: CPd points precede the gain G. Choose
          * their inverse images so G*point lands on the desired network
          * reconstruction level. Sending the G.711 levels themselves
          * attenuated low points into the same ADC cell (often zero). */
-        if (!out->gain_q0_16) return false;
-        double point = (double)linear * (4.0*65536.0) / out->gain_q0_16;
+        double point = (double)linear * scale;
         if (point > 65535.0) break;
         out->points[0][points++] = (uint16_t)lround(point);
     }

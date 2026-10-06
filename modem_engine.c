@@ -1276,6 +1276,22 @@ static v92_su_t       g_v92_su_rx;
 static bool           g_v92_su_rx_active = false;
 static bool           g_v92_su_final_pending = false;
 static bool           g_v92_trn2u_active = false;
+/* V.92 PCM upstream from Phase 4 on: nothing the V.34 receiver could
+ * demodulate arrives any more (TRN2u, SUVu, CPu, E2u, B1u and data are all
+ * PCM, and the retrain watch is v92_retrain_watch_locked()), so it is not
+ * fed.  Fed, it sat in PHASE4_MP brute-forcing an MP that never comes --
+ * ~78 ms per media callback (mp_apply_boundary_slip) -- and its 20000-baud
+ * MP timeout tore the call down 3 s into our DATA (slm-r7-v92-in-1). */
+static bool           g_v92_v34_rx_parked = false;
+/* TRN2u (and the four-level SUVu/CPu after it) measured through the Phase
+ * 3 equaliser: squared distance from each output to its Table 28 decision,
+ * in LU units, and the received DS0 power, for the CPd design
+ * (v90_set_v92_upstream_noise()). */
+static double         g_v92_trn2u_err2 = 0.0;
+static double         g_v92_trn2u_pow = 0.0;
+static uint64_t       g_v92_trn2u_nerr = 0;
+static uint64_t       g_v92_trn2u_npow = 0;
+static uint64_t       g_v92_trn2u_pushed = 0;
 static int            g_v92_trn2u_points = 4;
 static double         g_v92_trn2u_lu = 8000.0;
 
@@ -5796,9 +5812,16 @@ static void v92_live_p4u_frame(void *user_data,
                         v92_upstream_live_byte, NULL)) {
                     g_v92_upstream_rx_active = true;
                     g_v92_upstream_lock_logged = false;
-                    ME_LOG("[ME] V.92 PCM-upstream B1u receiver armed: drn=%u rate=%d bps\n",
+                    ME_LOG("[ME] V.92 PCM-upstream B1u receiver armed: drn=%u rate=%d bps, "
+                           "%u points (largest %u), 4G=%u/65536, TRN2u error %.3f LU over %llu, rx rms %.0f\n",
                            (unsigned)cpd.selected_upstream_drn,
-                           ((int)cpd.selected_upstream_drn + 17)*8000/6);
+                           ((int)cpd.selected_upstream_drn + 17)*8000/6,
+                           (unsigned)cpd.set_sizes[0],
+                           cpd.set_sizes[0] ? (unsigned)cpd.points[0][cpd.set_sizes[0] - 1] : 0u,
+                           (unsigned)cpd.gain_q0_16,
+                           g_v92_trn2u_nerr ? sqrt(g_v92_trn2u_err2/(double)g_v92_trn2u_nerr) : 0.0,
+                           (unsigned long long)g_v92_trn2u_nerr,
+                           g_v92_trn2u_npow ? sqrt(g_v92_trn2u_pow/(double)g_v92_trn2u_npow) : 0.0);
                 } else {
                     g_v92_upstream_rx_active = false;
                     ME_LOG("[ME] V.92 PCM-upstream CPd profile cannot arm B1u receiver\n");
@@ -5923,6 +5946,9 @@ static void cleanup_v34_v90_training_locked(void)
     g_v92_p3_logged_gate = false;
     v92_su_rx_reset_locked();
     g_v92_trn2u_active = false;
+    g_v92_v34_rx_parked = false;
+    g_v92_trn2u_err2 = g_v92_trn2u_pow = 0.0;
+    g_v92_trn2u_nerr = g_v92_trn2u_npow = g_v92_trn2u_pushed = 0;
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
     g_v92_active = false;
@@ -6049,6 +6075,9 @@ static bool restart_v90_phase2_locked(const char *reason)
     g_v92_info0_mutual = false;
     g_v92_info0_peer_logged = false;
     g_v92_trn2u_active = false;
+    g_v92_v34_rx_parked = false;
+    g_v92_trn2u_err2 = g_v92_trn2u_pow = 0.0;
+    g_v92_trn2u_nerr = g_v92_trn2u_npow = g_v92_trn2u_pushed = 0;
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
     memset(&g_v92_trn2u_demod, 0, sizeof(g_v92_trn2u_demod));
@@ -8969,6 +8998,9 @@ static void v92_call_state_reset_locked(void)
     g_v92_p3_logged_gate = false;
     v92_su_rx_reset_locked();
     g_v92_trn2u_active = false;
+    g_v92_v34_rx_parked = false;
+    g_v92_trn2u_err2 = g_v92_trn2u_pow = 0.0;
+    g_v92_trn2u_nerr = g_v92_trn2u_npow = g_v92_trn2u_pushed = 0;
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
 }
@@ -10839,7 +10871,7 @@ skip_8k_codewords:
                  * as well only produces events about signals that are not
                  * there, and its Phase 3 detectors act on them.
                  */
-                if (!g_v90a_started) {
+                if (!g_v90a_started && !g_v92_v34_rx_parked) {
                     if (g_v34_rx_samples == 0) {
                         g_v34_rx_started_at = g_g711_rx_octets;
                         g_rx_audio_started_at =
@@ -12016,6 +12048,11 @@ static void v92_apply_p3_ja_locked(void)
 
     g_v90_pending_dil = ja->desc;
     g_v90_pending_dil_valid = true;
+    /* The Ja deadline measures Phase 3 time WITHOUT a descriptor; restart it
+     * as v90_note_ja_confirmed_by_descriptor() does for V.90.  Unrestarted,
+     * a V.92 call's first retrain more than 20 s after its first Phase 3 was
+     * conceded to plain V.34 although Ja had parsed (slm-r7-v92-in-1). */
+    g_v90_phase3_first_samples = 0;
     v90_set_dil_descriptor(g_v90, &ja->desc);
     g_v92_p3_rx_result_applied = true;
     g_v92_p3_rx_active = false;
@@ -12969,6 +13006,9 @@ static void enter_v90_phase4_rx_locked(void)
         v34_force_v90_phase4_cp_rx(g_v34);
     } else {
         v34_force_phase4(g_v34);
+        g_v92_v34_rx_parked = true;
+        ME_LOG("[ME] V.92 PCM upstream: V.34 receiver parked for Phase 4 "
+               "and data (upstream is PCM from here on)\n");
     }
 }
 
@@ -14620,8 +14660,9 @@ static void v92_retrain_watch_locked(const uint8_t *codewords, int count)
         capable = g_v92_info0_peer_capable;
         short2 = g_v92_info0_peer_short_phase2;
         mutual = g_v92_info0_mutual;
-        ME_LOG("[ME] V.92 9.7.1.2: Tone A on the PCM upstream for >50 ms; "
-               "responding to the analogue modem's retrain\n");
+        ME_LOG("[ME] V.92 9.7.1.2: Tone A on the PCM upstream for >50 ms "
+               "(rx octet %llu); responding to the analogue modem's retrain\n",
+               (unsigned long long)(g_g711_rx_octets + (uint64_t)off));
         trace_phase("V92 Tone A retrain detected");
         if (restart_v90_phase2_locked("V.92 9.7.1.2: peer retrain (Tone A)")) {
             g_v92_info0_local_advertised = local;
@@ -14784,9 +14825,32 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                 int n = v92_p3_rx_follow(&g_v92_p3_rx, codewords[i],
                                          (int)(first_sample + (uint64_t)i),
                                          values, 4);
+                double lin = (double)pcm_to_linear(codewords[i]);
 
-                for (int k = 0; k < n; k++)
+                g_v92_trn2u_pow += lin*lin;
+                g_v92_trn2u_npow++;
+                for (int k = 0; k < n; k++) {
+                    double v = values[k]*sqrt(5.0);
+                    double d = 2.0*floor(v/2.0) + 1.0;
+
+                    if (d > 3.0) d = 3.0;
+                    if (d < -3.0) d = -3.0;
+                    g_v92_trn2u_err2 += (v - d)*(v - d)/5.0;
+                    g_v92_trn2u_nerr++;
                     values[k] *= g_v92_trn2u_lu;
+                }
+                if (g_v92_trn2u_nerr >= 2000
+                    && g_v92_trn2u_nerr - g_v92_trn2u_pushed >= 500) {
+                    /* The equaliser holds TRN2u at unit rms (LU), and V.92
+                     * 3.8 makes LU the data mode transmit power, so the
+                     * received TRN2u rms converts its error to DS0 units. */
+                    double lu_rx = sqrt(g_v92_trn2u_pow/(double)g_v92_trn2u_npow);
+                    double sigma = sqrt(g_v92_trn2u_err2/(double)g_v92_trn2u_nerr)
+                                 * lu_rx;
+
+                    (void)v90_set_v92_upstream_noise(g_v90, sigma, lu_rx);
+                    g_v92_trn2u_pushed = g_v92_trn2u_nerr;
+                }
                 if (n > 0)
                     (void)v92_trn2u_demod_feed_values(&g_v92_trn2u_demod,
                                                       values, n);

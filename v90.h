@@ -461,6 +461,21 @@ bool v90_set_v92_cpd_profile(v90_state_t *s,
                              uint16_t gain_q0_16);
 
 /*
+ * The upstream decision noise measured on TRN2u, as an rms in DS0 linear
+ * units (the units of the G.711 levels G x point is meant to land on).  The
+ * CPd constellation is then thinned so adjacent points are at least
+ * 2 x margin x sigma apart (ME_V92_UPSTREAM_MARGIN, default 4), and drn
+ * follows from the moduli that leaves.  Ignored once a CPd has been sent:
+ * the analogue modem designs from what it received, and our B1u receiver
+ * is armed from the same frame.  ME_V92_UPSTREAM_DESIGN=0 keeps the old
+ * fixed profile (every odd Ucode, drn 14).  lu_rx is the received TRN2u
+ * rms in the same units; ME_V92_CPD_GAIN_PER_LU=1 folds it into G for a
+ * peer that scales points by LU.
+ */
+bool v90_set_v92_upstream_noise(v90_state_t *s, double sigma_linear,
+                                double lu_rx);
+
+/*
  * Fill the native Table 30 CPd frame this context would transmit: profile
  * rate/trellis/gain, modulus parameters, and the robbed-bit-safe upstream
  * constellation set; the acknowledge bit reflects CPu receipt.
