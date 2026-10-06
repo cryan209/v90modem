@@ -53,6 +53,18 @@ void v250_ctl_reset(v250_ctl_t *c)
     c->ds44[3] = c->ds44[4] = 1024;
     c->ds44[5] = c->ds44[6] = 255;
     c->ds44[7] = c->ds44[8] = 3072;
+    /* 6.8.  +PMH and +PIG default to 0 (enabled) in 6.8.2/6.8.5; here both
+     * features are unverified against any foreign V.92 modem, so they stay
+     * off until the DTE (or ME_V92_MH / ME_V92_PCM_UPSTREAM) asks.  +PMHT 3
+     * is what the engine has always granted (30 s).  +PQC 3: the short
+     * Phase 1/2 procedures are decode-only here, not live.  +PCW 2: a second
+     * SIP call is refused busy (6.8.1 names 0, which needs circuit 125). */
+    c->pcw = 2;
+    c->pmh = 1;
+    c->pmht = 3;
+    c->pig = 1;
+    c->pqc = 3;
+    c->pss = 0;
     c->icf[0] = 3;
     c->icf[1] = 3;
     c->ifc[0] = 2;
@@ -118,6 +130,15 @@ static const range_param_t range_params[] = {
     { "ICF",   2, { 0, 0 },     { 3, 3 },        false, "+ICF: (0,3),(0-3)", { BIT(0) | BIT(3), 0 } },
     /* 6.2.12: no XON/XOFF filtering; 2 is the pty's own back-pressure. */
     { "IFC",   2, { 0, 0 },     { 2, 2 },        false, "+IFC: (0,2),(0,2)", { BIT(0) | BIT(2), BIT(0) | BIT(2) } },
+    /* 6.8.1: 1 hangs up the data call so the waiting one can ring, 2
+       refuses it busy.  0 (circuit 125 and caller ID mid-call) is not. */
+    { "PCW",   1, { 1 },        { 2 },           false, "+PCW: (1,2)", { 0 } },
+    { "PMH",   1, { 0 },        { 1 },           false, NULL, { 0 } },
+    { "PMHT",  1, { 0 },        { 13 },          false, NULL, { 0 } },
+    { "PIG",   1, { 0 },        { 1 },           false, NULL, { 0 } },
+    /* 6.8.7/6.8.8: no live short startup, so only "disabled" and "full". */
+    { "PQC",   1, { 3 },        { 3 },           false, "+PQC: (3)", { 0 } },
+    { "PSS",   1, { 0 },        { 2 },           false, "+PSS: (0,2)", { BIT(0) | BIT(2) } },
     /* 6.6.2: the stream method only (the packet methods are not
        implemented); the V.44 codec's own limits. */
     { "DS44",  9, { 0, 0, 0, 256, 256, 32, 32, 512, 512 },
@@ -133,6 +154,12 @@ static int *range_store(v250_ctl_t *c, const char *name)
     if (!strcmp(name, "EFCS"))  return &c->efcs;
     if (!strcmp(name, "ETBM"))  return c->etbm;
     if (!strcmp(name, "EWIND")) return c->ewind;
+    if (!strcmp(name, "PCW"))   return &c->pcw;
+    if (!strcmp(name, "PMH"))   return &c->pmh;
+    if (!strcmp(name, "PMHT"))  return &c->pmht;
+    if (!strcmp(name, "PIG"))   return &c->pig;
+    if (!strcmp(name, "PQC"))   return &c->pqc;
+    if (!strcmp(name, "PSS"))   return &c->pss;
     return c->efram;
 }
 
@@ -377,6 +404,11 @@ v250_ctl_result_t v250_ctl_command(v250_ctl_t *c, const char *text,
     /* 6.4.2 +MA is optional and not implemented: every form is ERROR rather
        than an OK that changes nothing. */
     if (!strcmp(name, "MA"))
+        return V250_CTL_ERROR;
+    /* 6.8.6: "If this command is initiated and the modem is not On Hold,
+       ERROR is returned."  This is the digital modem: what goes on hold is the
+       analogue modem's subscriber line, and there is none here to flash. */
+    if (!strcmp(name, "PMHF"))
         return V250_CTL_ERROR;
     return V250_CTL_UNKNOWN;
 }

@@ -55,6 +55,27 @@ because the previous state was ME_HANGUP, so the DTE was never told
 ATH, which is answered by OK. `ATO` also now follows 6.3.7 (NO CARRIER with no
 call, ERROR for a value other than 0).
 
+## V.92 controls, AT-6 (2026-10-06)
+
+The 6.8 `+P` commands were stubs that answered OK and stored nothing.  Now:
+
+| Command | Supported | Effect |
+|---|---|---|
+| `+PCW` | 1, 2 (factory 2) | A second SIP INVITE mid-call: 2 answers 486 Busy Here; 1 hangs up the call in progress (NO CARRIER) and the new one then rings.  0 needs circuit 125 and is ERROR.  This also fixed a real defect: a second INVITE used to get 180 and restart the ring sequence, and S0/ATA would then have answered it over the live call. |
+| `+PMH` | 0, 1 (factory **1**) | Arms V.92 9.10 modem-on-hold at V.92 data entry (`ME_V92_MH` still wins when set). 6.8.2's default is 0; MH has never met a foreign V.92 modem, so it stays off until asked. |
+| `+PMHT` | 0-13 (factory 3) | 0 denies an incoming MHreq; 1-13 grants with that T1 code (V.250 Table 33 and V.92 Table 33 number the timeouts alike). `ME_V92_MH_T1`/`_GRANT` win when set. |
+| `+PMHR` | action | ERROR unless MH is armed on a call in data mode; else OK, the engine sends MHreq, and `+PMHR: <n>` follows (granted T1 code, 0 denied/no answer/ended first, 14 MHnack 0101). |
+| `+PMHF` | ERROR | The digital modem never holds a subscriber line to flash. |
+| `+PIG` | 0, 1 (factory **1**) | Offers V.92 PCM upstream (`ME_V92_PCM_UPSTREAM` wins when set). Same deviation and reason as `+PMH`. |
+| `+PQC` | 3 only | The short Phase 1/2 procedures are decode-only here, not live. |
+| `+PSS` | 0, 2 | 1 (force short) is ERROR for the same reason. |
+
+All are stored by `&W`.  `+PMHR` and `+PCW` have no live verification: no
+V.92 peer has exercised MH against this modem, and the second-call path is
+`sip_modem.c` only (no offline harness drives SIP).  Tests: `v250_ctl_test`
+(values), `v92_mh_test` (the Table 34 outcome of each MH transaction),
+`console_test` (`+PMHR` through the console).
+
 ## Help and identification (2026-10-06)
 
 Manufacturer extensions, not V.250 clauses: Courier-style `AT$`, `ATD$`, `AT&$`,

@@ -25,6 +25,7 @@
 
 #include "modem_engine.h"
 #include "data_interface.h"
+#include "v250_ctl.h"
 
 #include <pjsua-lib/pjsua.h>
 #include <pjmedia-codec/passthrough.h>
@@ -88,6 +89,10 @@ static void log_modem_diag_snapshot(const char *reason);
 #define RING_INTERVAL_MS    6000    /* 6 seconds between rings (realistic cadence) */
 #define AUTO_ANSWER_RINGS   2       /* default S0: answer after this many rings */
 static pjsua_call_id   g_ringing_call = PJSUA_INVALID_ID;
+/* A call that arrived mid-call under +PCW=1 (V.250 6.8.1, "hang up"): it is
+ * sent 180 and rings to the DTE once the call it interrupted has gone. */
+static pjsua_call_id   g_waiting_call = PJSUA_INVALID_ID;
+static void ring_incoming(pjsua_call_id call_id);
 static int             g_ring_count   = 0;
 static pj_time_val     g_last_ring_time;
 
@@ -732,6 +737,10 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e)
             g_ringing_call = PJSUA_INVALID_ID;
             g_ring_count   = 0;
         }
+        if (call_id == g_waiting_call) {
+            PJ_LOG(3, ("sip_modem", "Waiting caller hung up"));
+            g_waiting_call = PJSUA_INVALID_ID;
+        }
         if (call_id == g_call_id) {
             /* A rejected or failed outgoing INVITE can disconnect before the
              * media callback ever runs.  The engine is still in ME_DIALING in
@@ -743,6 +752,12 @@ static void on_call_state(pjsua_call_id call_id, pjsip_event *e)
                 g_media_connected = PJ_FALSE;
             }
             g_call_id = PJSUA_INVALID_ID;
+            if (g_waiting_call != PJSUA_INVALID_ID) {
+                pjsua_call_id waiting = g_waiting_call;
+
+                g_waiting_call = PJSUA_INVALID_ID;
+                ring_incoming(waiting);
+            }
         }
     }
 }
@@ -891,16 +906,47 @@ static void on_incoming_call(pjsua_acc_id acc_id, pjsua_call_id call_id,
 {
     (void)acc_id; (void)rdata;
     pjsua_call_info ci;
-    char number[64];
-    char name[64];
 
     pjsua_call_get_info(call_id, &ci);
 
     PJ_LOG(3, ("sip_modem", "Incoming call from %.*s",
                (int)ci.remote_info.slen, ci.remote_info.ptr));
 
+    /* A second call while this modem is busy is call waiting, and V.250 6.8.1
+     * +PCW says what to do: 1 hangs up the call in progress so the new one
+     * can ring, 2 ignores the new one -- 486 Busy Here, so its caller is not
+     * left ringing.  A call that is only ringing is not interrupted. */
+    if (g_call_id != PJSUA_INVALID_ID || g_ringing_call != PJSUA_INVALID_ID
+        || g_waiting_call != PJSUA_INVALID_ID) {
+        v250_ctl_t cfg;
+
+        di_get_v250_settings(&cfg);
+        if (cfg.pcw == 1 && g_call_id != PJSUA_INVALID_ID
+            && g_ringing_call == PJSUA_INVALID_ID && g_waiting_call == PJSUA_INVALID_ID) {
+            PJ_LOG(3, ("sip_modem", "Call waiting (+PCW=1): hanging up for the new call"));
+            pjsua_call_answer(call_id, 180, NULL, NULL);
+            g_waiting_call = call_id;
+            me_hangup();
+        } else {
+            PJ_LOG(3, ("sip_modem", "Call waiting (+PCW=%d): busy", cfg.pcw));
+            pjsua_call_answer(call_id, 486, NULL, NULL);
+        }
+        return;
+    }
+
     /* Send 180 Ringing to the caller — don't answer yet */
     pjsua_call_answer(call_id, 180, NULL, NULL);
+    ring_incoming(call_id);
+}
+
+/* The ring sequence for a call that has been sent 180. */
+static void ring_incoming(pjsua_call_id call_id)
+{
+    pjsua_call_info ci;
+    char number[64];
+    char name[64];
+
+    pjsua_call_get_info(call_id, &ci);
 
     /* Start the ring sequence.  Answering is the AT interpreter's: S0 rings
      * (set by --auto-answer) or the DTE's ATA, both through on_answer(). */

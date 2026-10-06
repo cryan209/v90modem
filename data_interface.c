@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -459,10 +460,36 @@ static int handle_plus_ms(const char *args)
 }
 
 /* V.250 6.4.3, 6.5.1, 6.5.5, 6.6.1, 6.6.3: see v250_ctl.c. */
+static di_pmhr_cb_t pmhr_cb;
+
+void di_set_pmhr_cb(di_pmhr_cb_t cb)
+{
+    pmhr_cb = cb;
+}
+
+/* V.250 6.8.4: "+PMHR: <value>", delayed until the far end has answered. */
+void di_report_pmhr(int value)
+{
+    char line[32];
+    int n;
+
+    if (!at)
+        return;
+    n = snprintf(line, sizeof(line), "%s+PMHR: %d\r\n", at->p.verbose ? "\r\n" : "", value);
+    ctrl_write(line, (size_t) n);
+}
+
 static int handle_v250_parameter(const char *text)
 {
     char info[160];
     v250_ctl_result_t r;
+
+    /* 6.8.4: "ERROR if Modem on Hold is not enabled or if the DCE is in an
+     * idle condition"; otherwise OK now and +PMHR: <value> once answered.
+     * The engine checks both without taking its lock (this path holds
+     * t31_mtx and must not). */
+    if (!strcasecmp(text, "PMHR"))
+        return pmhr_cb && pmhr_cb() >= 0 ? 0 : -1;
 
     pthread_mutex_lock(&v250_mtx);
     info[0] = '\0';
@@ -748,7 +775,7 @@ static void profile_settings(const di_profile_t *sp, pf_profile_t *out)
 {
     static const char *const params[] = {
         "MR", "ER", "DR", "ES", "DS", "DS44", "EB", "EFCS", "ETBM", "EWIND", "EFRAM",
-        "IPR", "ICF", "IFC", "ILRR", "MSC"
+        "IPR", "ICF", "IFC", "ILRR", "MSC", "PCW", "PMH", "PMHT", "PIG", "PQC", "PSS"
     };
     static const int sregs[] = { 0, 2, 3, 4, 5, 6, 7, 8, 10, 12 };
     char info[160];
@@ -1128,7 +1155,8 @@ static void info_settings(page_t *pg)
     static const char *const fclass[] = { "0", "1", "1.0", "2.0" };
     static const int sregs[] = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12 };
     static const char *const v250_reads[] = {
-        "MR?", "ER?", "DR?", "ES?", "DS?", "EWIND?", "EFRAM?", "ETBM?", "IPR?", "ICF?", "IFC?", "MSC?"
+        "MR?", "ER?", "DR?", "ES?", "DS?", "EWIND?", "EFRAM?", "ETBM?", "IPR?", "ICF?", "IFC?", "MSC?",
+        "PCW?", "PMH?", "PMHT?", "PIG?", "PQC?", "PSS?"
     };
     char line[160];
     v250_ctl_t cfg;
@@ -1156,7 +1184,7 @@ static void info_settings(page_t *pg)
         v250_ctl_t copy = cfg;
 
         if (v250_ctl_command(&copy, v250_reads[i], line, sizeof(line)) == V250_CTL_OK)
-            page_put(pg, "%s%s", line, i == 4 || i + 1 == sizeof(v250_reads) / sizeof(v250_reads[0]) ? "\r\n" : "  ");
+            page_put(pg, "%s%s", line, i == 4 || i == 11 || i + 1 == sizeof(v250_reads) / sizeof(v250_reads[0]) ? "\r\n" : "  ");
     }
     page_put(pg, "Console: %s\r\n", console_desc(line, sizeof(line)));
 }

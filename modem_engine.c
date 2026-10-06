@@ -1309,15 +1309,21 @@ static unsigned me_v34_training_fail_retrains(void)
  * because the PCM-upstream receiver is still experimental: its B1u and
  * 16-state data path now exist, but foreign-bearer timing/equalizer coverage
  * does not.  Set ME_V92_PCM_UPSTREAM=1 to exercise it explicitly. */
+/* ME_V92_PCM_UPSTREAM when set, else the DTE's +PIG (V.250 6.8.5: 0 is
+ * "enable PCM upstream"). */
 static bool v92_pcm_upstream_advertised(void)
 {
-    static int cached = -1;
+    static int cached = -2;
+    v250_ctl_t cfg;
 
-    if (cached < 0) {
+    if (cached == -2) {
         const char *v = getenv("ME_V92_PCM_UPSTREAM");
-        cached = (v && *v && *v != '0') ? 1 : 0;
+        cached = (v && *v) ? (*v != '0') : -1;
     }
-    return cached != 0;
+    if (cached >= 0)
+        return cached != 0;
+    di_get_v250_settings(&cfg);
+    return cfg.pig == 0;
 }
 static int            g_v34_fallback_status = 0;
 static int            g_last_v90_bridge_rx_stage = -1;
@@ -8221,6 +8227,7 @@ void me_init(void)
             g_data_framing_auto = true;
         }
         if (framing && strcmp(framing, "auto") != 0 && strcmp(framing, "v14") != 0)
+        di_set_pmhr_cb(me_v92_mh_request);
             g_data_framing_auto = false;
         ME_LOG("[ME] DTE framing: %s%s\n",
                g_data_framing == DS_FRAMING_V14 ? "V.14 8N1" :
@@ -13501,11 +13508,33 @@ void me_flush_io_schedule(void)
 
 static bool me_v92_mh_enabled(void)
 {
-    static int cached = -1;
+    static int cached = -2;
+    v250_ctl_t cfg;
 
-    if (cached < 0)
-        cached = parse_env_int("ME_V92_MH", 0) != 0;
-    return cached != 0;
+    if (cached == -2) {
+        const char *v = getenv("ME_V92_MH");
+
+        cached = (v && *v) ? (atoi(v) != 0) : -1;
+    }
+    if (cached >= 0)
+        return cached != 0;
+    di_get_v250_settings(&cfg);
+    return cfg.pmh == 0;
+}
+
+/* +PMHR (V.250 6.8.4): set by the AT path without the engine lock, which it
+ * must never take; taken by the media thread at the next received block. */
+static volatile int g_mh_dte_request = 0;
+static bool           g_mh_dte_pending = false;
+/* Published for that lock-free check: armed on a call in data mode. */
+static volatile int g_mh_armed_pub = 0;
+
+int me_v92_mh_request(void)
+{
+    if (!g_mh_armed_pub)
+        return -1;
+    g_mh_dte_request = 1;
+    return 0;
 }
 
 /* Data-mode entry: arm only where 9.10 can apply.  Both modems V.92 (the
@@ -13515,12 +13544,26 @@ static void mh_arm_locked(void)
 {
     if (g_v92_info0_mutual)
         g_mh_call_capable = true;
-    if (!me_v92_mh_enabled() || g_mh_armed || me_v90_analogue_role()
+    if (g_mh_armed || !me_v92_mh_enabled() || me_v90_analogue_role()
         || g_mod != ME_MOD_V90 || !g_mh_call_capable)
         return;
     v92_mh_ctrl_init(&g_mh, 200);
-    g_mh.t1_code = (uint8_t)(parse_env_int("ME_V92_MH_T1", 0x3) & 0xF);
-    g_mh.grant = parse_env_int("ME_V92_MH_GRANT", 1) != 0;
+    {
+        /* +PMHT (V.250 6.8.3): 0 denies, 1-13 grants with that V.92 Table 33
+         * T1 code (the two tables number the timeouts alike).  The env knobs
+         * still win when set. */
+        v250_ctl_t cfg;
+
+        di_get_v250_settings(&cfg);
+        g_mh.t1_code = (uint8_t)(cfg.pmht > 0 ? cfg.pmht : 0x3);
+        g_mh.grant = cfg.pmht > 0;
+    }
+    if (getenv("ME_V92_MH_T1"))
+        g_mh.t1_code = (uint8_t)(parse_env_int("ME_V92_MH_T1", 0x3) & 0xF);
+    if (getenv("ME_V92_MH_GRANT"))
+        g_mh.grant = parse_env_int("ME_V92_MH_GRANT", 1) != 0;
+    g_mh_dte_request = 0;
+    g_mh_dte_pending = false;
     v92_mh_line_init(&g_mh_line, false, -12.0);
     g_mh_armed = true;
     g_mh_engaged = false;
@@ -13534,6 +13577,7 @@ static void mh_disarm_locked(void)
     g_mh_engaged = false;
 }
 
+/* ME_V92_MH when set, else the DTE's +PMH (V.250 6.8.2: 0 is enabled). */
 /* New Phase 1 inside the same SIP call (9.10.2.1 and 9.10.2.3: "proceed
  * with Phase 1 of the start-up procedure ... disregarding information
  * received in previous phase 1 signals").  The data stack is NOT touched:
@@ -13559,6 +13603,7 @@ static void mh_restart_phase1_locked(bool as_caller, const char *why)
     }
 }
 
+    g_mh_armed_pub = 1;
 static void mh_handle_actions_locked(void)
 {
     v92_mh_action_t a;
@@ -13567,6 +13612,13 @@ static void mh_handle_actions_locked(void)
         switch (a) {
         case V92_MH_ACT_SUSPEND_LINK:
             ds_suspend_link(&g_data_stack);
+    g_mh_armed_pub = 0;
+    g_mh_dte_request = 0;
+    if (g_mh_dte_pending) {
+        /* Ended (retrain, cleardown, hang-up) before an answer: Table 34's 0. */
+        g_mh_dte_pending = false;
+        di_report_pmhr(0);
+    }
             ME_LOG("[ME] V.92 9.10: leaving data mode, V.42 suspended (Amd.2 9.10.3)\n");
             break;
         case V92_MH_ACT_ON_HOLD:
@@ -13630,6 +13682,7 @@ static void mh_handle_actions_locked(void)
 static bool mh_initiate_due_locked(void)
 {
     static int after_ms = -2;
+                g_mh_armed_pub = 0;
 
     if (after_ms == -2)
         after_ms = parse_env_int("ME_V92_MH_AFTER_MS", 20000);
@@ -13691,6 +13744,17 @@ static int mh_tx_locked(uint8_t *codewords, int count)
             k = v92_mh_line_retrain_reply_fill(&g_mh_line, linear, n);
             for (int i = 0; i < k; i++)
                 codewords[done + i] = linear_to_pcm(linear[i]);
+    if (g_mh_dte_request) {
+        g_mh_dte_request = 0;
+        if (g_mh.state == V92_MH_ST_IDLE && g_state == ME_DATA
+            && v92_mh_ctrl_initiate(&g_mh, V92_MH_REQ, 0)) {
+            g_mh_dte_pending = true;
+            ME_LOG("[ME] V.92 9.10: initiating MHreq (+PMHR)\n");
+        } else {
+            /* Already in a transaction, or MHnack 0101 forbade it. */
+            di_report_pmhr(g_mh.no_outgoing_requests ? 14 : 0);
+        }
+    }
             done += k;
             if (k < n) {
                 /* The reversed tone ends on this sample: 11.2.1.1.4 times
@@ -13700,6 +13764,11 @@ static int mh_tx_locked(uint8_t *codewords, int count)
                 g_mh_engaged = false;
                 ME_LOG("[ME] V.92 9.10.1.1: Tone B reversal sent; V.34 Phase 2 resumes\n");
                 break;
+    if (g_mh_dte_pending && g_mh.request_result >= 0) {
+        g_mh_dte_pending = false;
+        ME_LOG("[ME] V.92 9.10: +PMHR: %d\n", g_mh.request_result);
+        di_report_pmhr(g_mh.request_result);
+    }
             }
         }
         return done;

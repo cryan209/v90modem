@@ -1008,6 +1008,49 @@ static int profile_session(const char *link, const char *file)
     return open_dte(link);
 }
 
+static int fake_pmhr_result = -1;
+
+static int fake_pmhr(void)
+{
+    return fake_pmhr_result;
+}
+
+/* V.250 6.8.4 +PMHR through the console: ERROR unless the engine says MH is
+ * armed on a call; the answer arrives later as an information line. */
+static void test_pmhr(void)
+{
+    const char *link = "/tmp/console_test_pmhr";
+    char buf[1024];
+    int dte;
+
+    printf("+PMHR and the V.92 parameters:\n");
+    if (di_open(link) < 0) {
+        failures++;
+        return;
+    }
+    dte = open_dte(link);
+    expect(dte, "ATE0", "OK");
+    expect(dte, "AT+PMHR", "ERROR");                /* no engine at all */
+    di_set_pmhr_cb(fake_pmhr);
+    fake_pmhr_result = -1;
+    expect(dte, "AT+PMHR", "ERROR");                /* not armed / idle */
+    fake_pmhr_result = 0;
+    expect(dte, "AT+PMHR", "OK");
+    di_report_pmhr(5);
+    collect(dte, buf, sizeof(buf), 150);
+    check(strstr(buf, "\r\n+PMHR: 5\r\n") != NULL, "the far end's answer: +PMHR: 5");
+    expect(dte, "AT+PMH=0;+PMHT=6;+PIG=0;+PCW=1", "OK");
+    expect(dte, "AT+PMH?;+PMHT?", "+PMHT: 6");
+    expect(dte, "ATI4", "+PCW: 1");
+    expect(dte, "AT+PQC=0", "ERROR");
+    expect(dte, "AT+PMHF", "ERROR");
+    expect(dte, "AT&F", "OK");
+    expect(dte, "AT+PMH?", "+PMH: 1");
+    di_set_pmhr_cb(NULL);
+    close(dte);
+    di_close();
+}
+
 /* profile_file.c alone: both syntaxes, round trips, and what it refuses. */
 static void test_profile_file(void)
 {
@@ -1193,6 +1236,7 @@ int main(void)
     test_v250_parameters();
     test_help();
     test_call_progress();
+    test_pmhr();
     test_profile_file();
     test_profile();
     printf("%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures, failures == 1 ? "" : "s");

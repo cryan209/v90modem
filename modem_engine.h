@@ -307,4 +307,9 @@ const char     *me_law_to_str(me_law_t law);
  */
 const char *me_get_dial_uri(void);
 
+/* V.250 6.8.4 +PMHR: ask for V.92 modem-on-hold at the next opportunity.
+ * Safe from the AT path (takes no engine lock).  -1 when modem-on-hold is not
+ * armed on a call in data mode; the answer arrives as di_report_pmhr(). */
+int me_v92_mh_request(void);
+
 #endif /* MODEM_ENGINE_H */

@@ -186,4 +186,12 @@ int di_fax_v34hdx_get_bit(void);
 void di_fax_v34hdx_put_bit(int bit);
 int di_fax_v34hdx_get_mode(void);
 
+/* V.250 6.8.4 +PMHR.  The callback starts a modem-on-hold request without
+ * taking the engine lock (the AT path holds t31_mtx) and returns -1 when MH
+ * is not enabled or there is no call in data mode; the far end's answer
+ * comes back through di_report_pmhr() as a Table 34 value. */
+typedef int (*di_pmhr_cb_t)(void);
+void di_set_pmhr_cb(di_pmhr_cb_t cb);
+void di_report_pmhr(int value);
+
 #endif /* DATA_INTERFACE_H */

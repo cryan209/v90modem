@@ -222,7 +222,15 @@ void v92_mh_ctrl_init(v92_mh_ctrl_t *c, int round_trip_ms)
     c->skip_rt_if_peer_rt = true;
     c->state = V92_MH_ST_IDLE;
     c->tx = V92_MH_TX_DATA;
+    c->request_result = -1;
     v92_mh_rx_init(&c->rx);
+}
+
+/* An MHreq of ours that ended without MHack or MHnack: Table 34's 0. */
+static void request_unanswered(v92_mh_ctrl_t *c)
+{
+    if (c->initiated == V92_MH_REQ && c->request_result < 0)
+        c->request_result = 0;
 }
 
 static void enter(v92_mh_ctrl_t *c, v92_mh_state_t s, v92_mh_tx_t tx)
@@ -298,6 +306,7 @@ bool v92_mh_ctrl_initiate(v92_mh_ctrl_t *c, v92_mh_signal_t s, uint8_t info)
         return false;
     c->initiator = true;
     c->initiated = s;
+    c->request_result = -1;
     c->tx_frame.signal = s;
     c->tx_frame.info = info;
     c->total_ms = 0;
@@ -384,10 +393,14 @@ static void handle_frame(v92_mh_ctrl_t *c, const v92_mh_frame_t *f)
              * releases the responder into ANSam; it follows an MH so its
              * floor is 20 ms. */
             c->t1_ms = v92_mh_t1_seconds(f->info) > 0 ? v92_mh_t1_seconds(f->info) * 1000 : -1;
+            if (c->initiated == V92_MH_REQ)
+                c->request_result = f->info;    /* Table 33 code = Table 34 value */
             after_sequence(c, V92_MH_ST_INIT_HOLD, V92_MH_TX_RT, V92_MH_ACT_ON_HOLD);
         } else if (f->signal == V92_MH_NACK) {
             if (f->info == V92_MH_NACK_NEVER)
                 c->no_outgoing_requests = true;
+            if (c->initiated == V92_MH_REQ)
+                c->request_result = f->info == V92_MH_NACK_NEVER ? 14 : 0;
             /* Table 34: MHnack is itself initiating; answer within 10 s. */
             c->peer_initiated = V92_MH_NACK;
             c->since_init_seen_ms = 0;
@@ -470,14 +483,17 @@ void v92_mh_ctrl_tick(v92_mh_ctrl_t *c, int ms, const v92_mh_detect_t *l)
             else
                 send_mh(c, V92_MH_ST_INIT_SEND, c->initiated, c->tx_frame.info);
         } else if (c->ms >= timeout) {
+            request_unanswered(c);
             enter(c, V92_MH_ST_DONE, V92_MH_TX_SILENCE);
             push_action(c, V92_MH_ACT_RETRAIN);
         }
         break;
 
     case V92_MH_ST_INIT_SEND:
-        if (c->ms >= timeout)
+        if (c->ms >= timeout) {
+            request_unanswered(c);
             after_sequence(c, V92_MH_ST_DONE, V92_MH_TX_SILENCE, V92_MH_ACT_RETRAIN);
+        }
         break;
 
     case V92_MH_ST_INIT_AWAIT_ANSAM:

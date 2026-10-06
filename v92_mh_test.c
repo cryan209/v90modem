@@ -247,6 +247,8 @@ static void test_request_granted(void)
     assert(has(&a, V92_MH_ACT_SUSPEND_LINK, NULL) && has(&b, V92_MH_ACT_SUSPEND_LINK, NULL));
     assert(has(&a, V92_MH_ACT_ON_HOLD, &t_hold_a) && has(&b, V92_MH_ACT_ON_HOLD, &t_hold_b));
     assert(a.c.state == V92_MH_ST_INIT_HOLD && a.c.tx == V92_MH_TX_RT);
+    assert(a.c.request_result == 1);     /* V.250 +PMHR: 10 s granted */
+    assert(b.c.request_result == -1);    /* the responder asked for nothing */
     assert(b.c.state == V92_MH_ST_ON_HOLD && b.c.tx == V92_MH_TX_ANSAM);
     /* Figure 20: ANSam within 80 ms of the last MHack. */
     assert(b.ansam_start >= b.last_mh_end && b.ansam_start - b.last_mh_end <= 80);
@@ -282,6 +284,7 @@ static void test_denied_cleardown(void)
     assert(has(&a, V92_MH_ACT_DISCONNECT, NULL) && has(&b, V92_MH_ACT_DISCONNECT, NULL));
     assert(!has(&b, V92_MH_ACT_ON_HOLD, NULL));
     assert(a.c.no_outgoing_requests);
+    assert(a.c.request_result == 14);    /* +PMHR: denied for the session */
     puts("PASS: Figure 21 MHreq/MHnack/MHcda, both disconnect; MHnack 0101 remembered");
 }
 
@@ -296,6 +299,7 @@ static void test_denied_reconnect(void)
     assert(has(&b, V92_MH_ACT_PHASE1_ANSWER, &tb));
     assert(has(&a, V92_MH_ACT_PHASE1_CALL, &ta));
     assert(ta - tb >= 1000);              /* 1 s of ANSam (9.10.2.3) */
+    assert(a.c.request_result == 0);     /* +PMHR: denied, may ask later */
     assert(b.ansam_start - b.last_mh_end <= 80);
     printf("PASS: Figure 22 MHreq/MHnack/MHfrr/ANSam (B answer at %d, A call at %d ms)\n", tb, ta);
 }
@@ -316,6 +320,7 @@ static void test_fast_reconnect(void)
     start(&a, &b);
     assert(v92_mh_ctrl_initiate(&a.c, V92_MH_FRR, 0));
     run(&a, &b, 3000);
+    assert(a.c.request_result == -1);    /* not an MHreq: nothing for +PMHR */
     assert(has(&b, V92_MH_ACT_PHASE1_ANSWER, NULL) && has(&a, V92_MH_ACT_PHASE1_CALL, NULL));
     puts("PASS: Figure 24 MHfrr/ANSam");
 }
@@ -331,6 +336,7 @@ static void test_timeout_retrain(void)
     run(&a, &b, 4000);
     assert(has(&a, V92_MH_ACT_RETRAIN, &t));
     assert(t >= 100 + 70 + 2000 + 2 * DELAY_MS);
+    assert(a.c.request_result == 0);     /* +PMHR: no answer is "not available" */
     printf("PASS: 9.10.1.1 no response -> sequence completed, retrain at %d ms\n", t);
 }
 

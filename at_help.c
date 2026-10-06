@@ -125,7 +125,13 @@ static const at_help_entry_t plus_rows[] = {
     { "+FLI +FPI", "Class 2.0: local and polling IDs",                NULL },
     { "+FNR +FBU", "Class 2.0: negotiation and HDLC reports",         NULL },
     { "+FCT +FIE", "Class 2.0: phase C timeout, procedure interrupts", NULL },
-    { "",          "Not implemented: +MA (ERROR) and the V.92 +P commands.", NULL },
+    { "+PMH=0/1",  "V.92 modem-on-hold: 0 enabled, 1 disabled (factory)", "+PMH?" },
+    { "+PMHT=n",   "Grant MOH with V.92 T1 code n (1-13), 0 denies",  "+PMHT?" },
+    { "+PMHR",     "Ask the far end for MOH; +PMHR: n follows (ERROR if not armed)", NULL },
+    { "+PIG=0/1",  "V.92 PCM upstream: 0 offered, 1 not (factory)",   "+PIG?" },
+    { "+PCW=1/2",  "Second call mid-call: 1 hang up for it, 2 busy (486)", "+PCW?" },
+    { "+PQC=3 +PSS", "Short Phase 1/2 are not live: PQC 3, PSS 0 or 2 only", "+PQC?" },
+    { "",          "Not implemented: +MA and +PMHF (ERROR: no line to flash).", NULL },
 };
 
 /* I$: the ATIn pages data_interface.c answers. */

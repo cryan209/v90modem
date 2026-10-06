@@ -5022,72 +5022,56 @@ static const char *at_cmd_plus_MV18S(at_state_t *s, const char *t)
 static const char *at_cmd_plus_PCW(at_state_t *s, const char *t)
 {
     /* V.250 6.8.1 - Call waiting enable (V.92 DCE) */
-    /* TODO: */
-    t += 4;
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_PIG(at_state_t *s, const char *t)
 {
     /* V.250 6.8.5 - PCM upstream ignore */
-    /* TODO: */
-    t += 4;
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_PMH(at_state_t *s, const char *t)
 {
     /* V.250 6.8.2 - Modem on hold enable */
-    /* TODO: */
-    t += 4;
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_PMHF(at_state_t *s, const char *t)
 {
     /* V.250 6.8.6 - V.92 Modem on hold hook flash */
-    /* TODO: */
-    t += 5;
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_PMHR(at_state_t *s, const char *t)
 {
     /* V.250 6.8.4 - Initiate modem on hold */
-    /* TODO: */
-    t += 5;
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_PMHT(at_state_t *s, const char *t)
 {
     /* V.250 6.8.3 - Modem on hold timer */
-    /* TODO: */
-    t += 5;
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_PQC(at_state_t *s, const char *t)
 {
     /* V.250 6.8.7 - V.92 Phase 1 and Phase 2 Control */
-    /* TODO: */
-    t += 4;
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 
 static const char *at_cmd_plus_PSS(at_state_t *s, const char *t)
 {
     /* V.250 6.8.8 - V.92 Use Short Sequence */
-    /* TODO: */
-    t += 4;
-    return t;
+    return at_forward_parameter(s, t);
 }
 /*- End of function --------------------------------------------------------*/
 

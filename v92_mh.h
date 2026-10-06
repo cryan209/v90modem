@@ -178,6 +178,11 @@ typedef struct {
     v92_mh_signal_t initiated;        /* what we initiated */
     v92_mh_signal_t peer_initiated;   /* what we are responding to */
     v92_mh_signal_t last_response;
+    /* How the far end answered an MHreq we initiated, as V.250 6.8.4 Table
+     * 34 numbers it for +PMHR: the granted T1 code (1-13, MHack), 0 denied
+     * or no answer, 14 MHnack 0101 (never again this call).  -1 until then,
+     * and for anything but MHreq. */
+    int request_result;
     v92_mh_rx_t rx;
 } v92_mh_ctrl_t;
 

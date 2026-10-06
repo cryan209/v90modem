@@ -435,8 +435,41 @@ static void test_courier_aliases(void)
     check(!strcmp(out, "/V34"), "&A3 without error control: modulation only");
 }
 
+/* 6.8: the V.92 parameters accept only what this DCE honours. */
+static void test_v92_parameters(void)
+{
+    v250_ctl_t c;
+    char info[160];
+
+    printf("V.92 parameters (6.8):\n");
+    v250_ctl_reset(&c);
+    check(v250_ctl_command(&c, "PCW?", info, sizeof(info)) == V250_CTL_OK && !strcmp(info, "+PCW: 2"),
+          "+PCW: 2 (busy) by default");
+    check(v250_ctl_command(&c, "PCW=?", info, sizeof(info)) == V250_CTL_OK && !strcmp(info, "+PCW: (1,2)"),
+          "+PCW=? lists 1 and 2 only");
+    check(v250_ctl_command(&c, "PCW=0", info, sizeof(info)) == V250_CTL_ERROR && c.pcw == 2,
+          "+PCW=0 (circuit 125) is ERROR");
+    check(v250_ctl_command(&c, "PCW=1", info, sizeof(info)) == V250_CTL_OK && c.pcw == 1, "+PCW=1 stored");
+    check(c.pmh == 1 && c.pig == 1 && c.pmht == 3 && c.pqc == 3 && c.pss == 0,
+          "factory: MH and PCM upstream off, grant 30 s, no short startup");
+    check(v250_ctl_command(&c, "PMH=0", info, sizeof(info)) == V250_CTL_OK && c.pmh == 0, "+PMH=0 enables MH");
+    check(v250_ctl_command(&c, "PMHT=13", info, sizeof(info)) == V250_CTL_OK && c.pmht == 13
+          && v250_ctl_command(&c, "PMHT=14", info, sizeof(info)) == V250_CTL_ERROR,
+          "+PMHT 0-13");
+    check(v250_ctl_command(&c, "PMHT=?", info, sizeof(info)) == V250_CTL_OK && !strcmp(info, "+PMHT: (0-13)"),
+          "+PMHT=? is (0-13)");
+    check(v250_ctl_command(&c, "PIG=0", info, sizeof(info)) == V250_CTL_OK && c.pig == 0, "+PIG=0 enables PCM upstream");
+    check(v250_ctl_command(&c, "PQC=0", info, sizeof(info)) == V250_CTL_ERROR
+          && v250_ctl_command(&c, "PQC=3", info, sizeof(info)) == V250_CTL_OK, "+PQC: only 3");
+    check(v250_ctl_command(&c, "PSS=1", info, sizeof(info)) == V250_CTL_ERROR
+          && v250_ctl_command(&c, "PSS=2", info, sizeof(info)) == V250_CTL_OK && c.pss == 2,
+          "+PSS: 0 and 2, not 1");
+    check(v250_ctl_command(&c, "PMHF", info, sizeof(info)) == V250_CTL_ERROR, "+PMHF is ERROR (never on hold)");
+}
+
 int main(void)
 {
+    test_v92_parameters();
     test_courier_aliases();
     test_ds44();
     test_interface_parameters();

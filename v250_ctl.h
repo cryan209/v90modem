@@ -71,6 +71,15 @@ typedef struct {
      * CONNECT text names (0 nothing, 1 /ARQ, 2 + modulation, 3 + protocol).
      * Factory 0 (the Courier ships &A1) so CONNECT stays what V.250 says. */
     int arq;
+    /* 6.8 V.92 controls.  Only what this DCE honours is accepted; see the
+     * range table in v250_ctl.c and v250_ctl_reset() for the defaults that
+     * differ from 6.8's. */
+    int pcw;                /* +PCW: a second call arriving mid-call */
+    int pmh;                /* +PMH: 0 modem-on-hold enabled, 1 disabled */
+    int pmht;               /* +PMHT: 0 deny, 1-13 grant with V.92 Table 33's T1 */
+    int pig;                /* +PIG: 0 PCM upstream enabled, 1 disabled */
+    int pqc;                /* +PQC: short Phase 1/2 (3: both disabled) */
+    int pss;                /* +PSS: 0 DCEs decide, 2 force the full startup */
 } v250_ctl_t;
 
 typedef enum {
