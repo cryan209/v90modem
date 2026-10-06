@@ -75,14 +75,12 @@ static const struct {
      * always ERROR; +MS=? leaves them out and +MS$ lists them apart, so a
      * DTE that sends them learns why rather than meeting a bare ERROR.
      * Bell 103 is 300 bit/s with nothing below it to fall back to, and
-     * 212A answers with 2225 Hz rather than V.8.  V.110 and X.75 would need
-     * no datapump either (see CLEAR/V120 below), only their framing. */
+     * 212A answers with 2225 Hz rather than V.8.  X.75 would need no
+     * datapump either (see CLEAR/V120 below), only its framing. */
     { "B103",  { NULL },                      NULL,  NULL,     300,
       "Bell 103" },
     { "B212",  { "B212A", NULL },             NULL,  NULL,    1200,
       "Bell 212A" },
-    { "V110",  { NULL },                      NULL,  NULL,   64000,
-      "ISDN V.110 rate adaption" },
     { "X75",   { NULL },                      NULL,  NULL,   64000,
       "ISDN X.75" },
     /* The bearer is a byte-exact 64 kbit/s DS0 (clear_channel.h), so these
@@ -93,6 +91,10 @@ static const struct {
       "DS0 bits, V.14/LAPM; <=56000: 56k" },
     { "V120",  { NULL },                      "v120", "v120",   64000,
       "V.120 UI frames; <=56000: 56k" },
+    /* V.110 (02/2000) for an asynchronous DTE, also with no datapump: the
+     * +MS maximum picks the Table 8 user rate (38400 if unbounded). */
+    { "V110",  { NULL },                      "v110", "v110",   38400,
+      "V.110 async 8N1, rate = max (<=38400)" },
 };
 
 #define N_CARRIERS (sizeof(carriers) / sizeof(carriers[0]))
@@ -365,7 +367,7 @@ void at_ms_format_help(const at_ms_settings_t *cur, char *buf, size_t len)
     for (size_t i = 0; i < N_CARRIERS; i++)
         if (available(i) && used < len)
             used += help_row(i, buf + used, len - used);
-    HELP_PUT("  CLEAR, V120: no V.8 or negotiation -- set both ends alike, as on\r\n");
+    HELP_PUT("  CLEAR, V120, V110: no V.8 or negotiation -- set both ends alike, as on\r\n");
     HELP_PUT("  ISDN; the bearer must be byte-exact end to end (no transcoding).\r\n");
     HELP_PUT("\r\n  Recognised, no datapump here (always ERROR):\r\n");
     for (size_t i = 0; i < N_CARRIERS; i++)

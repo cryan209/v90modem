@@ -1,5 +1,5 @@
 /*
- * clear_channel.h — 64 kbit/s clear channel and V.120 over the DS0
+ * clear_channel.h — 64 kbit/s clear channel, V.120 and V.110 over the DS0
  *
  * The SIP/G.711 bearer here is passed through byte-exact (no transcoding,
  * PJMEDIA_HAS_PASSTHROUGH_CODECS), so each RTP payload octet IS a DS0 octet
@@ -22,16 +22,30 @@
  * 8..2 and sends bit 1 (the LSB, which robbed-bit signalling overwrites) as
  * 1; the receiver ignores it.
  *
- * Neither mode has a handshake: as on ISDN, the bearer is agreed outside the
- * channel (here, both ends configured alike with AT+MS), and the data starts
- * when the call connects.
+ * CLEAR and V120 have no handshake: as on ISDN, the bearer is agreed outside
+ * the channel (here, both ends configured alike with AT+MS), and the data
+ * starts when the call connects.
  *
- * V.120 is NOT in "ITU Docs/" and could not be fetched from this
- * environment, so the frame layout below is from the Recommendation as
- * commonly implemented (ISDN TAs, Linux isdn4linux) rather than checked
- * clause by clause: default LLI 256, address octets 0x08 0x01 (+ C/R),
- * control 0x03 (UI), header 0x83 (E=1, B=1, F=1).  Check it against V.120
- * (10/96) before claiming interoperability with ISDN equipment.
+ *   CC_V110   ITU-T V.110 (02/2000) rate adaption for an asynchronous DTE:
+ *             RA0 (5.3.3, start/stop characters onto a 2^n x 600 bit/s
+ *             stream), RA1 (5.1.2, the 80-bit frame of Table 2 with the bit
+ *             assignments of Tables 6a/6b/6c/6e) and RA2 (5.1.4 -> I.460: an
+ *             8/16/32 kbit/s intermediate rate in the first 1/2/4 bits of
+ *             each octet, the rest set to 1).  Clause 7.1's sequence runs on
+ *             the S/X status bits: frames with S = X = OFF until the far
+ *             end's framing is found (two alignment patterns, 5.1.3.1),
+ *             then S = X = ON; the far end's S = X = ON makes the call
+ *             "connected" (107/109 ON) and, N = 24 bits later (6.3), data
+ *             flows (106 ON).  The far end's X OFF holds our data back at a
+ *             character boundary (7.1.5 c, 5.4.2); our loss of framing (three
+ *             bad frames, 5.1.3.2) turns our X OFF and is a disconnect if
+ *             not recovered in 3 s (7.1.5 e); the far end's S OFF with data
+ *             bits 0 is its disconnect request (7.1.4.2); T1 = 10 s bounds
+ *             the start (7.1.2.2).  8 data bits, no parity, 1 stop element.
+ *
+ * V.120 (10/96) and V.110 (02/2000) are in "ITU Docs/"; see
+ * docs/clear_channel_v120.md and docs/v120_conformance_audit.md for what
+ * is implemented clause by clause.
  */
 #ifndef CLEAR_CHANNEL_H
 #define CLEAR_CHANNEL_H
@@ -43,7 +57,8 @@
 
 typedef enum {
     CC_CLEAR = 0,
-    CC_V120  = 1
+    CC_V120  = 1,
+    CC_V110  = 2
 } cc_mode_t;
 
 /* CC_CLEAR: next line bit, or <0 for "nothing to send" (sent as mark, 1). */
@@ -54,8 +69,8 @@ typedef int  (*cc_pull_byte_fn)(void *ctx);
 typedef void (*cc_push_byte_fn)(void *ctx, uint8_t byte);
 
 #define CC_V120_DEFAULT_LLI   256
-/* User octets per V.120 frame: N201 is 260 octets of information field,
- * which here is the header octet plus data. */
+/* User octets per V.120 frame.  3.2.2: N2120 = N201 (Q.922 5.9.3, agreed
+ * per call) minus the header; 256 + H fits Q.922's default N201 of 260. */
 #define CC_V120_MAX_DATA      256
 
 /* V.120 header octet (terminal adaption header) bits. */
@@ -63,11 +78,38 @@ typedef void (*cc_push_byte_fn)(void *ctx, uint8_t byte);
 #define CC_V120_H_BR          0x40   /* break */
 #define CC_V120_H_B           0x02   /* begin (first segment) */
 #define CC_V120_H_F           0x01   /* final (last segment) */
+#define CC_V120_H_RES         0x30   /* bits 5, 6: reserved, sent 0 */
+/* Control-state octet (3.1.2, Figure 5). */
+#define CC_V120_CS_E          0x80   /* always 1: CS is the last octet */
+#define CC_V120_CS_DR         0x40
+#define CC_V120_CS_SR         0x20
+#define CC_V120_CS_RR         0x10   /* 0 = flow control asserted (3.2.4.1) */
+
+/* V.110 */
+#define CC_V110_N_BITS        24     /* 6.3: 106 ON N bits after 109 ON */
+#define CC_V110_FRAME_BITS    80
+
+typedef enum {
+    CC_V110_SEARCH = 0,      /* sending S = X = OFF, looking for framing */
+    CC_V110_SYNCED,          /* framing found, S = X = ON sent, waiting for
+                                the far end's S = X = ON */
+    CC_V110_CONNECTED,       /* 107/109 ON: data transfer state (7.1.3) */
+    CC_V110_DISCONNECTING,   /* we asked: S OFF, D = 0 (7.1.4.1) */
+    CC_V110_DOWN             /* finished: see cc->v110_cause */
+} cc_v110_state_t;
+
+typedef enum {
+    CC_V110_CAUSE_NONE = 0,
+    CC_V110_CAUSE_T1,        /* 7.1.2.4: no S = X = ON within T1 */
+    CC_V110_CAUSE_SYNC_LOST, /* 7.1.5 e): framing not recovered in 3 s */
+    CC_V110_CAUSE_REMOTE,    /* 7.1.4.2: far end's disconnect request */
+    CC_V110_CAUSE_LOCAL      /* 7.1.4.3: our request acknowledged */
+} cc_v110_cause_t;
 
 typedef struct {
     cc_mode_t mode;
     bool r56;                /* restricted 56 kbit/s: 7 bits per octet */
-    bool caller;             /* V.120 C/R: originator commands with C/R 0 */
+    bool caller;             /* informational: C/R does not depend on it */
     int lli;
 
     cc_get_bit_fn get_bit;
@@ -79,31 +121,93 @@ typedef struct {
     hdlc_tx_state_t *htx;
     hdlc_rx_state_t *hrx;
     bool tx_frame_queued;
+    bool v120_peer_rr;           /* RR(R), 3.2.3.1: 1 until a CS says so */
+
+    /* V.110 */
+    int v110_user_rate;          /* asynchronous DTE rate, Table 8 */
+    int v110_ra0_rate;           /* synchronous stream, 2^n x 600 */
+    int v110_ir_bits;            /* intermediate rate / 8000: bits per octet */
+    int v110_rep;                /* D-bit repetition (Tables 6a/6b/6c) */
+    uint8_t v110_e123;           /* E1 E2 E3, Table 5, in bits 2..0 */
+    cc_v110_state_t v110_state;
+    cc_v110_cause_t v110_cause;
+    /* transmit */
+    uint8_t v110_txf[CC_V110_FRAME_BITS];
+    int v110_txf_pos;
+    uint32_t v110_tx_frame_no;
+    bool v110_tx_s_on, v110_tx_x_on;
+    bool v110_tx_d_zero;         /* disconnect: data bits 0 */
+    int v110_n_count;            /* user bits since 109 ON / resync */
+    uint16_t v110_tx_shift;      /* RA0: character bits, LSB first */
+    int v110_tx_bits;
+    int v110_tx_marks;           /* stop elements still owed */
+    uint64_t v110_tx_pace;       /* RA0 stop-element padding accumulator */
+    int v110_os_acc;             /* below 600 bit/s: sampling accumulator */
+    int v110_os_bit;
+    /* receive */
+    uint8_t v110_hist[CC_V110_FRAME_BITS];
+    int v110_hist_n;
+    bool v110_synced, v110_verify;
+    int v110_bad_run;            /* consecutive frames with framing errors */
+    uint64_t v110_lost_at;       /* rx octet count framing was lost at */
+    uint64_t v110_start_at;
+    bool v110_sync_seen;         /* framing found at least once */
+    bool v110_rem_s_on, v110_rem_x_on;
+    int v110_rem_on_run, v110_rem_disc_run;
+    int v110_disc_frames;        /* frames sent in DISCONNECTING */
+    int v110_rx_bits;            /* RA0: -1 hunting, else bits taken */
+    uint16_t v110_rx_shift;
+    int v110_zero_run;
+    int v110_held_nuls;          /* NULs that may yet be a break */
+    int v110_rx_n, v110_rx_next; /* below 600: samples since start edge */
+    int v110_rx_prev;
+    uint8_t v110_rx_e123;
 
     /* Statistics */
     uint64_t tx_octets, rx_octets;
     uint64_t tx_frames, rx_frames;
     uint64_t tx_data_bytes, rx_data_bytes;
-    uint64_t rx_bad_frames;      /* FCS errors, aborts, runts */
+    uint64_t rx_bad_frames;      /* FCS errors, aborts, runts, bad headers */
     uint64_t rx_unsupported;     /* I-frames and other non-UI frames */
+    uint64_t rx_other_lli;       /* V.120 frames for a link we do not serve */
     uint64_t rx_breaks;
+    uint64_t v110_frame_errors;  /* V.110 frames with a framing bit wrong */
+    uint64_t v110_sync_losses;
+    uint64_t v110_rate_mismatch; /* frames whose E1-E3 name another rate */
 } clear_channel_t;
 
 int  cc_init_clear(clear_channel_t *cc, bool r56,
                    cc_get_bit_fn get_bit, cc_put_bit_fn put_bit, void *ctx);
 int  cc_init_v120(clear_channel_t *cc, bool r56, bool caller,
                   cc_pull_byte_fn pull, cc_push_byte_fn push, void *ctx);
+/* user_rate: one of cc_v110_rates[].  -1 for a rate V.110 does not carry,
+ * or one this asynchronous 8N1 profile does not (50 bit/s is 5 data units). */
+int  cc_init_v110(clear_channel_t *cc, int user_rate,
+                  cc_pull_byte_fn pull, cc_push_byte_fn push, void *ctx);
 void cc_release(clear_channel_t *cc);
+
+/* Table 8 asynchronous user rates this profile carries, ascending. */
+extern const int cc_v110_rates[];
+extern const int cc_v110_n_rates;
+/* The RA0 stream rate (5.3.3) for a user rate, or 0. */
+int  cc_v110_ra0_rate(int user_rate);
+/* 7.1.4.1: ask the far end to disconnect (S OFF, X ON, D = 0). */
+void cc_v110_disconnect(clear_channel_t *cc);
+/* DOWN, and the disconnect request has been on the line long enough
+ * (7.1.5 e): three frames) for the bearer to be released. */
+bool cc_v110_finished(const clear_channel_t *cc);
+const char *cc_v110_cause_name(cc_v110_cause_t c);
 
 /* Fill n DS0 octets to transmit / consume n received DS0 octets. */
 void cc_tx(clear_channel_t *cc, uint8_t *octets, int n);
 void cc_rx(clear_channel_t *cc, const uint8_t *octets, int n);
 
-/* 64000 or 56000. */
+/* 64000 or 56000 (V.110: the user rate). */
 int  cc_line_rate(const clear_channel_t *cc);
 
 /* The address + control + header V.120 puts in front of user data (4
- * octets), for tests and for anyone checking a capture. */
+ * octets), for tests and for anyone checking a capture.  UI is a command,
+ * so C/R is 0 from either end (6.2.2.3, Table 4). */
 void cc_v120_frame_header(const clear_channel_t *cc, uint8_t hdr[4]);
 
 #endif

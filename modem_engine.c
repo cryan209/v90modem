@@ -372,6 +372,7 @@ static const char *me_mod_to_str(me_modulation_t mod)
     case ME_MOD_V34:    return "V34";
     case ME_MOD_V22BIS: return "V22BIS";
     case ME_MOD_V32BIS: return "V32BIS";
+    case ME_MOD_CLEAR:  return "CLEAR";      /* CLEAR, V120 or V110 */
     default:            return "UNKNOWN";
     }
 }
@@ -2232,9 +2233,13 @@ static bool g_advertise_v22 = true;
  * when set, override them; see me_k56flex_mode() and me_advertise_v91(). */
 static bool g_offer_k56 = false;
 static bool g_offer_v91 = false;
-/* AT+MS=CLEAR / V120: no V.8, the DS0 itself is the bit pump. */
+/* AT+MS=CLEAR / V120 / V110: no V.8, the DS0 itself is the bit pump. */
 static bool g_offer_clear = false;
 static bool g_offer_v120 = false;
+static bool g_offer_v110 = false;
+static int g_offer_v110_rate = 38400;   /* V.110 user rate, from +MS bounds */
+static bool g_v110_mismatch_logged = false;
+static uint64_t g_v110_losses_logged = 0;
 static bool g_offer_r56 = false;
 static clear_channel_t g_cc;
 static bool g_cc_active = false;
@@ -2288,6 +2293,8 @@ typedef struct {
     bool x2, x2_symmetric, v90, v34, v32, v22, v92, k56, v91;
     bool v32bis_ok;          /* V.32bis reachable at all (V.8 or Annex A) */
     bool clear, v120, r56;   /* no V.8: clear channel or V.120 on the DS0 */
+    bool v110;               /* no V.8: V.110 async rate adaption */
+    int v110_rate;           /* its user rate, from the +MS bounds */
     const char *name;
 } me_offer_t;
 
@@ -2303,6 +2310,10 @@ static int me_offer_bits(bool v22, bool v32, bool v34, bool v90)
 static void me_offer_describe(const me_offer_t *o, bool k56, bool v91,
                               char *buf, size_t len)
 {
+    if (o->v110) {
+        snprintf(buf, len, "V110 %d async, no V.8", o->v110_rate);
+        return;
+    }
     if (o->clear || o->v120) {
         snprintf(buf, len, "%s %s, no V.8", o->v120 ? "V120" : "CLEAR",
                  o->r56 ? "56k" : "64k");
@@ -2332,6 +2343,8 @@ static const char *me_offer_str(void)
     o.v22 = g_advertise_v22;
     o.clear = g_offer_clear;
     o.v120 = g_offer_v120;
+    o.v110 = g_offer_v110;
+    o.v110_rate = g_offer_v110_rate;
     o.r56 = g_offer_r56;
     me_offer_describe(&o, me_k56flex_mode() != 0, me_advertise_v91(),
                       buf, sizeof(buf));
@@ -2389,6 +2402,15 @@ static bool me_offer_from_mode(const char *mode, bool automode, me_offer_t *o)
                           : (o->r56 ? "clear56" : "clear");
         o->v22 = false;
         o->v32 = false;
+        return true;
+    } else if (strcmp(mode, "v110") == 0) {
+        /* V.110 (02/2000) rate adaption for an asynchronous DTE: no V.8, the
+         * user rate is the +MS maximum (me_offer_apply_limits()), and the
+         * far end must be set alike, as on ISDN. */
+        o->v90 = o->v34 = o->v22 = o->v32 = false;
+        o->v110 = true;
+        o->v110_rate = 38400;
+        o->name = "v110";
         return true;
     } else if (strcmp(mode, "k56") == 0) {
         /* K56flex V.8bis identification, then ordinary V.8 offering V.90:
@@ -2484,6 +2506,19 @@ static bool me_offer_apply_limits(me_offer_t *o, const int *l, bool analogue)
     int umin = analogue ? l[LIM_MIN_TX] : l[LIM_MIN_RX];
     int umax = analogue ? l[LIM_MAX_TX] : l[LIM_MAX_RX];
 
+    if (o->v110) {
+        /* The highest Table 8 rate the bounds admit both ways: V.110 runs
+         * one user rate in both directions. */
+        for (int i = cc_v110_n_rates - 1; i >= 0; i--) {
+            const int r[1] = { cc_v110_rates[i] };
+
+            if (lim_symmetric(r, 1, l)) {
+                o->v110_rate = cc_v110_rates[i];
+                return true;
+            }
+        }
+        return false;
+    }
     if (!l[0] && !l[1] && !l[2] && !l[3])
         return true;
     if (o->clear || o->v120) {
@@ -2539,6 +2574,8 @@ static bool me_resolve_offer(const char *mode, bool automode)
     g_offer_v91 = o.v91;
     g_offer_clear = o.clear;
     g_offer_v120 = o.v120;
+    g_offer_v110 = o.v110;
+    g_offer_v110_rate = o.v110_rate;
     g_offer_r56 = o.r56;
     g_mode_name = o.name;
     g_v90_analogue_role = o.v90 && role && strcmp(role, "analogue") == 0;
@@ -8271,7 +8308,7 @@ static void me_connect_info(int rate, v250_connect_report_t *r)
     case ME_MOD_V22BIS: r->carrier = strcmp(g_mode_name, "v22-1200") == 0 ? "V22" : "V22B"; break;
     case ME_MOD_V32BIS: r->carrier = strcmp(g_mode_name, "v32") == 0 ? "V32" : "V32B"; break;
     case ME_MOD_X2:     r->carrier = "X2"; break;
-    case ME_MOD_CLEAR:  r->carrier = g_offer_v120 ? "V120" : "CLEAR"; break;
+    case ME_MOD_CLEAR:  r->carrier = g_offer_v110 ? "V110" : g_offer_v120 ? "V120" : "CLEAR"; break;
     default:            r->carrier = at_ms_mode_to_carrier(g_mode_name); break;
     }
     if (g_report_tx_rate > 0) {
@@ -8630,9 +8667,54 @@ static void clear_put_bit(void *ctx, int bit)
     ds_rx_put_bit(&g_data_stack, bit);
 }
 
-/* AT+MS=CLEAR or V120: straight to data on the DS0, no V.8 (as an ISDN
- * terminal adaptor starts once the bearer is up).  Returns the line rate, or
- * 0 on failure.  Called with g_state_mtx held. */
+/* V.110 clause 7 on the RX path: the CONNECT rate once 107 has come ON
+ * (7.1.2.4 a), else 0; ME_HANGUP once the TA has finished a disconnect
+ * (7.1.4) or given up (T1, 7.1.5 e).  Called with g_state_mtx held. */
+static int me_v110_progress_locked(void)
+{
+    int connect = 0;
+
+    if (g_cc.v110_rate_mismatch && !g_v110_mismatch_logged) {
+        g_v110_mismatch_logged = true;
+        ME_LOG("[ME] V.110: far end's E1-E3 = %d%d%d where %d bit/s sends "
+               "%d%d%d (Table 5) -- is it set to the same rate?\n",
+               (g_cc.v110_rx_e123 >> 2) & 1, (g_cc.v110_rx_e123 >> 1) & 1,
+               g_cc.v110_rx_e123 & 1, g_cc.v110_user_rate,
+               (g_cc.v110_e123 >> 2) & 1, (g_cc.v110_e123 >> 1) & 1,
+               g_cc.v110_e123 & 1);
+    }
+    if (g_cc.v110_sync_losses != g_v110_losses_logged) {
+        g_v110_losses_logged = g_cc.v110_sync_losses;
+        ME_LOG("[ME] V.110: frame synchronization lost (%llu so far, %llu "
+               "framing errors); resynchronizing, X OFF (7.1.5)\n",
+               (unsigned long long) g_cc.v110_sync_losses,
+               (unsigned long long) g_cc.v110_frame_errors);
+    }
+    if (g_cc.v110_state == CC_V110_CONNECTED && !g_data_connect_reported) {
+        g_data_connect_reported = true;
+        connect = g_cc.v110_user_rate;
+        trace_phase("V.110 enter DATA: %d bit/s, S = X = ON both ways", connect);
+        ME_LOG("[ME] V.110: far end's S = X = ON; 107/109 ON, CONNECT %d\n",
+               connect);
+    }
+    if (cc_v110_finished(&g_cc)) {
+        ME_LOG("[ME] V.110: %s\n", cc_v110_cause_name(g_cc.v110_cause));
+        switch (g_cc.v110_cause) {
+        case CC_V110_CAUSE_REMOTE: g_hangup_cause = "Remote (V.110 disconnect request)"; break;
+        case CC_V110_CAUSE_LOCAL:  g_hangup_cause = "Local (V.110 disconnect)"; break;
+        case CC_V110_CAUSE_T1:     g_hangup_cause = "Modem (V.110: no S = X = ON within T1)"; break;
+        default:                   g_hangup_cause = "Modem (V.110 frame synchronization lost)"; break;
+        }
+        g_state = ME_HANGUP;
+    }
+    return connect;
+}
+
+/* AT+MS=CLEAR, V120 or V110: straight to data on the DS0, no V.8 (as an
+ * ISDN terminal adaptor starts once the bearer is up).  Returns the line
+ * rate, or 0 on failure.  Called with g_state_mtx held.  V.110 reports
+ * CONNECT later, once clause 7.1's S/X exchange has turned 107 ON
+ * (me_v110_progress_locked()). */
 static int me_clear_start_locked(void)
 {
     int rate = g_offer_r56 ? 56000 : 64000;
@@ -8640,6 +8722,25 @@ static int me_clear_start_locked(void)
     if (g_cc_active) {
         cc_release(&g_cc);
         g_cc_active = false;
+    }
+    if (g_offer_v110) {
+        rate = g_offer_v110_rate;
+        if (cc_init_v110(&g_cc, rate, data_stack_pull_dte_byte,
+                         data_stack_push_dte_byte, NULL) != 0)
+            return 0;
+        g_cc_active = true;
+        g_mod = ME_MOD_CLEAR;
+        g_state = ME_DATA;
+        g_phase_start_ms = 0;
+        g_data_connect_reported = false;
+        g_v110_mismatch_logged = false;
+        g_v110_losses_logged = 0;
+        trace_phase("V.110 start: %d bit/s async, RA0 %d, frame search", rate,
+                    cc_v110_ra0_rate(rate));
+        ME_LOG("[ME] V.110: %d bit/s async 8N1 on a %d bit/s RA0 stream, "
+               "%d kbit/s intermediate rate, no V.8; searching for framing\n",
+               rate, cc_v110_ra0_rate(rate), g_cc.v110_ir_bits * 8);
+        return rate;
     }
     if (g_offer_v120) {
         if (cc_init_v120(&g_cc, g_offer_r56, g_calling_party,
@@ -8766,7 +8867,7 @@ void me_on_sip_connected(void)
         return;
     }
 
-    if (g_offer_clear || g_offer_v120) {
+    if (g_offer_clear || g_offer_v120 || g_offer_v110) {
         int rate = me_clear_start_locked();
 
         pthread_mutex_unlock(&g_state_mtx);
@@ -8774,7 +8875,8 @@ void me_on_sip_connected(void)
             me_hangup();
             return;
         }
-        di_on_connected(rate);
+        if (!g_offer_v110)
+            di_on_connected(rate);
         return;
     }
 
@@ -8847,7 +8949,7 @@ void me_on_sip_disconnected_status(int sip_status)
     if (g_cc_active) {
         ME_LOG("[ME] %s: tx %llu frames/%llu bytes, rx %llu frames/%llu bytes, "
                "%llu bad, %llu unsupported\n",
-               g_cc.mode == CC_V120 ? "V.120" : "clear channel",
+               g_cc.mode == CC_V110 ? "V.110" : g_cc.mode == CC_V120 ? "V.120" : "clear channel",
                (unsigned long long) g_cc.tx_frames, (unsigned long long) g_cc.tx_data_bytes,
                (unsigned long long) g_cc.rx_frames, (unsigned long long) g_cc.rx_data_bytes,
                (unsigned long long) g_cc.rx_bad_frames,
@@ -14107,10 +14209,14 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
     }
     if (g_cc_active && g_mod == ME_MOD_CLEAR && g_state == ME_DATA) {
         uint8_t buf[256];
-        int n;
+        int n, connect = 0;
 
         cc_rx(&g_cc, codewords, count);
+        if (g_cc.mode == CC_V110)
+            connect = me_v110_progress_locked();
         pthread_mutex_unlock(&g_state_mtx);
+        if (connect > 0)
+            di_on_connected(connect);
         if (g_g711_rx_tap)
             (void)fwrite(codewords, 1, (size_t)count, g_g711_rx_tap);
         while ((n = dring_read(&upstream_ring, buf, sizeof(buf))) > 0)

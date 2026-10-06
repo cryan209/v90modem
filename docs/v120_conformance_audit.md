@@ -31,6 +31,16 @@ negotiation. Both ends must agree on this restricted profile beforehand.
 | V120-4 | 3.1.2, 3.2.3, 3.2.4.1 | RX discards even a well-formed CS octet and TX never consults RR. The current receive-variant test uses CS=`80`, which includes RR=0, and merely expects its removal. | A CS-capable UI profile must maintain DR/SR/RR and honour receive-ready flow control. Alternatively explicitly limit the supported profile to CS disabled by prior agreement; accepting and ignoring an active peer's flow-control state is not equivalent to supporting it. |
 | V120-5 | 3.2.1.1; 7.2.1, 7.2.2(5) | RX increments `rx_breaks` for every BR-marked frame, without delivering a break to the DTE. There is no outbound break callback or BR frame generation. | Preserve break ordering after the frame's queued characters; represent break start/end in the byte/PTY API. A counter alone does not implement TE2 break delivery. |
 
+## Status (2026-10-06)
+
+| ID | Status |
+|---|---|
+| V120-1 | **Fixed.** Both ends send `08 01 03 83`; `clear_channel_test` reads both directions off the wire with an independent HDLC receiver. The receiver still accepts C/R 1 on UI, so older builds interoperate. |
+| V120-2 | **Fixed.** H.E = 0 requires exactly one CS octet with E = 1; `03 00 80 AB` and `H=03` at end of frame are bad frames and deliver nothing. |
+| V120-3 | **Fixed.** Only LLI 256 reaches the DTE; LLI 0, 257, etc. are counted in `rx_other_lli`, apart from corrupt frames. |
+| V120-4 | **Fixed, receive side.** RR(R) starts at 1 (3.2.3.1) and follows each received CS; RR = 0 stops new user data (3.2.4.1). The profile does not send CS (3.2.3 makes it optional), so we never flow-control the peer. |
+| V120-5 | **Open.** BR is counted; neither direction of the byte/PTY interface can carry a break. |
+
 ## Correct behaviour and bounded omissions
 
 | Clause | Assessment |
