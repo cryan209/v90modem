@@ -1071,6 +1071,17 @@ static bool v90_v92_upstream_design_enabled(void)
     return cached != 0;
 }
 
+static bool v90_v92_k3_half_moduli(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *v = getenv("ME_V92_K3_HALF_MODULI");
+        cached = (v && *v == '0') ? 0 : 1;
+    }
+    return cached != 0;
+}
+
 static double v90_v92_upstream_margin(void)
 {
     static double cached = -1.0;
@@ -1203,6 +1214,19 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
         if (point > 65535.0) break;
         out->points[0][points++] = (uint16_t)lround(point);
     }
+    /* The fourth symbol of each trellis frame (k = 3: intervals 3, 7, 11)
+     * carries the convolutional code's parity, and 6.4.2 makes its
+     * equivalence classes modulo 2*Mi.  Give it Mi = LC/2 with LC even.
+     * Mi = LC is legal too, but slmodemd's precoder computes the k = 3 z
+     * range by truncating division and without the parity bit, so for
+     * 2Ki + parity >= LC it picks eta >= LC, reads past its table and
+     * transmits 0 -- half of every k = 3 symbol in slm-r9, recovered by
+     * deconvolving its own output.  With LC even and Mi = LC/2 its range
+     * is exactly the valid members.  ME_V92_K3_HALF_MODULI=0 restores
+     * Mi = LC throughout. */
+    bool k3_half = v90_v92_k3_half_moduli();
+    if (k3_half && points > 2 && (points & 1))
+        points--;                             /* drop the largest point */
     out->set_sizes[0] = (uint8_t)points;
     /* V.92 §6.4.2: k=3 uses equivalence classes modulo 2*Mi across a
      * constellation of N=2*LC signed points.  Therefore Mi must not exceed
@@ -1210,13 +1234,13 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
      * representative in the constellation, so no analogue transmitter could
      * honour the CPd. */
     for (int i = 0; i < 12; i++)
-        out->moduli[i] = (uint8_t)points;
+        out->moduli[i] = (uint8_t)((k3_half && i%4 == 3) ? points/2 : points);
     if (points > 0) {
         __uint128_t product = 1;
         int drn = out->selected_upstream_drn;
 
         for (int i = 0; i < 12; i++)
-            product *= (unsigned)points;
+            product *= (unsigned)out->moduli[i];
         /* §6.4.1 requires product(Mi) >= 2^K, with Table 30/§6.1 giving
          * K=2*(drn+17).  Back off the offer rather than emitting a CPd whose
          * modulus alphabet cannot carry its selected rate. */

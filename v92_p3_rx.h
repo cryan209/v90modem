@@ -158,6 +158,7 @@ typedef struct {
     /* ------- TRN1u equaliser and gate (v92_p3_eq) ------- */
     int      law;            /* 0 u-law, 1 A-law, -1 not told: try both */
     bool     no_equaliser;   /* v92_p3_rx_set_equaliser(rx, false) */
+    int      eq_ntaps;       /* feed-forward taps; 0 = v92_p3_eq default */
     v92_p3_eq_t eq[2];       /* indexed by law */
     bool     eq_running[2];
     bool     eq_gate_done;
@@ -258,6 +259,11 @@ void v92_p3_rx_set_law(v92_p3_rx_t *rx, int law);
  * CPt paths.  For one-variable A/B (ME_V92_P3_EQ, v92_p3_probe --no-eq).
  * Call after v92_p3_rx_start. */
 void v92_p3_rx_set_equaliser(v92_p3_rx_t *rx, bool on);
+/* Feed-forward taps for the equaliser (odd, up to V92_P3_EQ_MAX_TAPS; 0 =
+ * the default 31).  Set before TRN1u is found.  The engine asks for more:
+ * the same equaliser runs on into V.92 data, where slmodemd's 9600 Hz
+ * transmit high-pass needs a longer inverse than TRN1u/TRN2u reveal. */
+void v92_p3_rx_set_equaliser_taps(v92_p3_rx_t *rx, int ntaps);
 
 /*
  * Feed one raw G.711 codeword (µ-law or A-law; sign bit is MSB in both).

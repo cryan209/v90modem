@@ -467,8 +467,15 @@ static void trn1u_align(v92_p3_rx_t *rx)
         rx->eq_running[law] = false;
         if (rx->no_equaliser || (rx->law >= 0 && law != rx->law))
             continue;
-        if (!v92_p3_eq_init(&rx->eq[law], NULL))
-            continue;
+        {
+            v92_p3_eq_config_t cfg;
+
+            v92_p3_eq_default_config(&cfg);
+            if (rx->eq_ntaps > 0)
+                cfg.ntaps = rx->eq_ntaps;
+            if (!v92_p3_eq_init(&rx->eq[law], &cfg))
+                continue;
+        }
         for (int i = 0; i < rx->ja_buf_fill; i++)
             v92_p3_eq_push(&rx->eq[law], law ? alaw_to_linear(rx->ja_buf[i])
                                              : ulaw_to_linear(rx->ja_buf[i]));
@@ -863,6 +870,13 @@ void v92_p3_rx_set_equaliser(v92_p3_rx_t *rx, bool on)
 {
     if (rx)
         rx->no_equaliser = !on;
+}
+
+void v92_p3_rx_set_equaliser_taps(v92_p3_rx_t *rx, int ntaps)
+{
+    if (rx)
+        rx->eq_ntaps = (ntaps > 0 && ntaps <= V92_P3_EQ_MAX_TAPS && (ntaps & 1))
+                     ? ntaps : 0;
 }
 
 void v92_p3_rx_set_law(v92_p3_rx_t *rx, int law)

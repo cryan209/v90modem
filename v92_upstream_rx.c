@@ -439,26 +439,42 @@ static void deliver_bits(v92_upstream_rx_t *rx, const uint8_t *bits, int k)
  * without letting data mode pass for B1u. */
 #define V92_B1U_MAX_NON_ONE_PERMILLE 10
 
+/* The receiver may join B1u part way through (V92_B1U_LOCK_FRAMES), where
+ * 8.7.1's zero memories no longer hold: the trellis may be in any state,
+ * d(f-1) may be either sign, and the GPA descrambler needs 23 bits of the
+ * stream before its output is right.  A first frame is therefore decoded
+ * from any trellis state, with both signs, and judged on its bits after the
+ * descrambler's 23 -- at B1u's true start all three are zero anyway. */
 static void try_start_candidate(v92_upstream_rx_t *rx, int k)
 {
     v92_b1u_candidate_t c;
     uint8_t bits[V92_UPSTREAM_MAX_FRAME_BITS];
 
-    memset(&c, 0, sizeof(c));
-    v92_upstream_wave_rx_init(&c.state);
     rx->candidates_started++;
-    if (!decode_frame_with(rx, &c.state, rx->recent, bits))
+    for (int sign = 0; sign < 2; sign++) {
+        int ones;
+
+        memset(&c, 0, sizeof(c));
+        v92_upstream_wave_rx_init(&c.state);
+        c.state.any_initial_state = true;
+        c.state.data.previous_differential_sign = sign;
+        if (!decode_frame_with(rx, &c.state, rx->recent, bits))
+            continue;
+        ones = k - V92_B1U_DESCRAMBLER_BITS
+             - count_non_ones(bits + V92_B1U_DESCRAMBLER_BITS,
+                              k - V92_B1U_DESCRAMBLER_BITS);
+        if (ones > rx->best_first_ones)
+            rx->best_first_ones = ones;
+        if (ones != k - V92_B1U_DESCRAMBLER_BITS)
+            continue;
+        rx->candidates_passed++;
+        if (rx->best_frames < 1)
+            rx->best_frames = 1;
+        c.frames = 1;
+        if (rx->ncandidates < V92_B1U_CANDIDATES)
+            rx->candidates[rx->ncandidates++] = c;
         return;
-    if (k - count_non_ones(bits, k) > rx->best_first_ones)
-        rx->best_first_ones = k - count_non_ones(bits, k);
-    if (count_non_ones(bits, k) != 0)
-        return;
-    rx->candidates_passed++;
-    if (rx->best_frames < 1)
-        rx->best_frames = 1;
-    c.frames = 1;
-    if (rx->ncandidates < V92_B1U_CANDIDATES)
-        rx->candidates[rx->ncandidates++] = c;
+    }
 }
 
 static bool advance_candidate(v92_upstream_rx_t *rx,
@@ -484,7 +500,7 @@ static bool advance_candidate(v92_upstream_rx_t *rx,
         *alive = false;
         return false;
     }
-    return c->frames == V92_B1U_FRAMES;
+    return c->frames == V92_B1U_LOCK_FRAMES;
 }
 
 int v92_upstream_b1_rx_feed_values(v92_upstream_rx_t *rx,
@@ -526,7 +542,7 @@ int v92_upstream_b1_rx_feed_values(v92_upstream_rx_t *rx,
                 rx->frame_pos = 0;
                 rx->correlation = 1.0
                     - (double)rx->candidates[i].zero_bits
-                      /((double)V92_B1U_FRAMES*k);
+                      /((double)V92_B1U_LOCK_FRAMES*k);
                 rx->ncandidates = 0;
                 break;
             }

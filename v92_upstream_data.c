@@ -379,11 +379,53 @@ static bool select_equivalence_point(const v92_cpd_frame_t *cpd,
     int k = interval%4;
     int parity = 0;
     double fixed = precoder_fixed(cpd, u_history, x_history);
+
     double best_cost = HUGE_VAL;
     int best_eta = 0;
     double best_u = 0.0;
     double best_x = 0.0;
     bool found = false;
+
+    if (class_member == V92_UPSTREAM_MEMBER_SLMODEMD) {
+        int par = 0;
+        int zmin, zmax;
+
+        if (k == 3)
+            par = positive_mod(eta_frame[0] + eta_frame[1]
+                             + eta_frame[2] + y0, 2);
+        /* C division truncates toward zero, as the x87 code's idivl does. */
+        if (k < 3) {
+            zmin = -((lc + ki)/modulus);
+            zmax = (lc - 1 - ki)/modulus;
+        } else {
+            zmin = -((2*ki + lc + par)/(2*modulus));
+            zmax = (lc - 1 - 2*ki)/(2*modulus);
+        }
+        for (int z = zmin; z <= zmax; z++) {
+            int eta = k < 3 ? ki + z*modulus : 2*ki + 2*z*modulus + par;
+            double u = 0.0;
+            double x;
+
+            if (eta >= 0 && eta < lc)
+                u = (double)cpd->points[set][eta];
+            else if (eta < 0 && -eta - 1 < lc)
+                u = -(double)cpd->points[set][-eta - 1];
+            x = u + fixed;
+            if (!found || x*x < best_cost) {
+                found = true;
+                best_cost = x*x;
+                best_eta = eta;
+                best_u = u;
+                best_x = x;
+            }
+        }
+        if (!found)
+            return false;
+        *eta_out = best_eta;
+        *u_out = best_u;
+        *x_out = best_x;
+        return true;
+    }
 
     if (k == 3)
         parity = positive_mod(eta_frame[0] + eta_frame[1]
@@ -673,6 +715,7 @@ v92_rm_class_t v92_upstream_rm_classify(const v92_cpd_frame_t *cpd,
 typedef struct {
     bool valid;
     double metric;
+    int origin;                        /* trellis state the path began in */
     int eta[V92_UPSTREAM_INTERVALS];
 } v92_viterbi_path_t;
 
@@ -736,6 +779,13 @@ bool v92_upstream_wave_decode_viterbi_frame(
     memset(paths, 0, sizeof(paths));
     initial_state = state->convolutional_state;
     paths[initial_state].valid = true;
+    if (state->any_initial_state) {
+        for (int st = 0; st < 16; st++)
+            paths[st].valid = true;
+        state->any_initial_state = false;
+    }
+    for (int st = 0; st < 16; st++)
+        paths[st].origin = st;
     for (int group = 0; group < 3; group++) {
         int base = 4*group;
 
@@ -798,7 +848,9 @@ bool v92_upstream_wave_decode_viterbi_frame(
                 ki[i] = (uint8_t)positive_mod(eta, modulus);
             } else {
                 int base = i - 3;
-                int y0_state = initial_state;
+                /* The path's own start: with any_initial_state it need
+                 * not be state->convolutional_state. */
+                int y0_state = paths[destination].origin;
 
                 /* Replay the two preceding trellis transitions to obtain
                  * the state whose Y0 belongs to this four-symbol group. */

@@ -25,6 +25,17 @@ typedef void (*v92_upstream_byte_handler_t)(void *user_data, uint8_t byte);
 
 /* Candidate B1u alignments followed at once in the equalised mode. */
 #define V92_B1U_CANDIDATES 8
+/* Frames of B1u an equalised-mode candidate must decode before it is
+ * believed.  Not all 48: the receiver can only start once the analogue
+ * modem's acknowledged SUVu' has been decoded and the equaliser switched to
+ * the data levels, and against slmodemd that is ~15 frames into B1u
+ * (slm-r10-v92-k3).  B1u decodes exactly from mid-stream with zeroed
+ * memories (no precoder/prefilter memory; the scrambler self-synchronises),
+ * and 16 frames of >= 34 bits of ones cannot happen by chance. */
+#define V92_B1U_LOCK_FRAMES 16
+/* Bits at the start of a candidate's first frame not judged: the GPA
+ * descrambler's memory, unknown when B1u is joined part way through. */
+#define V92_B1U_DESCRAMBLER_BITS 23
 
 typedef struct {
     v92_upstream_wave_rx_t state;  /* memories zero at B1u's first symbol */
@@ -101,9 +112,11 @@ int v92_upstream_b1_rx_feed(v92_upstream_rx_t *rx,
  * matches only a peer that chooses identically.  Instead every alignment is
  * decoded -- nearest point, then Ki from eta mod Mi through the same trellis
  * decoder data mode uses, from the zero memories 8.7.1 puts at B1u's first
- * symbol -- and B1u is the alignment whose frames all descramble to ones.
- * After lock the frames are decoded as they arrive; there is no internal
- * equaliser or decision-directed update.
+ * symbol -- and B1u is the alignment whose frames descramble to ones,
+ * V92_B1U_LOCK_FRAMES of them, which need not start at B1u's first frame.
+ * After lock every frame is decoded and delivered (what is left of B1u
+ * reaches the DTE as idle ones); there is no internal equaliser or
+ * decision-directed update.
  */
 bool v92_upstream_b1_rx_init_equalized(v92_upstream_rx_t *rx,
                                        const v92_cpd_frame_t *cpd,

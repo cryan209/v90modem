@@ -92,6 +92,9 @@ static double mulaw(double x)
     return s*(double)((((2*mant + 33) << e) - 33)*4);
 }
 
+static bool k3_half_profile;
+static int member_policy = V92_UPSTREAM_MEMBER_MIN_X;
+
 static void make_cpd(v92_cpd_frame_t *cpd)
 {
     static const int pts[15] = { 1983, 6079, 10110, 14271, 19212, 23374,
@@ -103,11 +106,15 @@ static void make_cpd(v92_cpd_frame_t *cpd)
     cpd->constellations_present = true;
     cpd->selected_upstream_drn = 6;
     cpd->gain_q0_16 = 23;
-    for (int i = 0; i < 15; i++)
+    int n = k3_half_profile ? 14 : 15;
+
+    for (int i = 0; i < n; i++)
         cpd->points[0][i] = (uint16_t)pts[i];
-    cpd->set_sizes[0] = 15;
+    cpd->set_sizes[0] = (uint8_t)n;
     for (int i = 0; i < 12; i++)
-        cpd->moduli[i] = 15;
+        cpd->moduli[i] = (uint8_t)((k3_half_profile && i%4 == 3) ? n/2 : n);
+    if (k3_half_profile)
+        cpd->selected_upstream_drn = 4;      /* 14^9 x 7^3 ~ 2^42.7 */
 }
 
 typedef struct { const uint8_t *exp; int nexp; int got; int wrong; } sink_t;
@@ -143,6 +150,7 @@ static void run(int channel)
     sink_t sink = { 0 };
     double g;
     double levels[15];
+    int nlev;
     double e2 = 0.0, d2 = 0.0;
     int ne = 0, nd = 0;
     double tx_rms = 0.0, rx_rms = 0.0;
@@ -167,6 +175,7 @@ static void run(int channel)
     }
     b1u_at = p;
     v92_upstream_wave_tx_init(&tx);
+    tx.class_member = member_policy;
     for (int f = 0; f < V92_B1U_FRAMES + DATA_FRAMES; f++) {
         double v[12];
         const uint8_t *src = ones;
@@ -250,10 +259,12 @@ static void run(int channel)
     sink.nexp = DATA_FRAMES*k;
     v92_upstream_b1_rx_init_equalized(rx, &cpd, put_byte, &sink);
     v92_p3_eq_default_config(&cfg);
+    cfg.ntaps = 63;                          /* as the engine asks */
     if (getenv("EQ_TAPS")) cfg.ntaps = atoi(getenv("EQ_TAPS"));
     if (getenv("EQ_FB")) cfg.nfb = atoi(getenv("EQ_FB"));
     v92_p3_eq_init(eq, &cfg);
-    for (int i = 0; i < 15; i++)
+    nlev = cpd.set_sizes[0];
+    for (int i = 0; i < nlev; i++)
         levels[i] = g*cpd.points[0][i];      /* LU units: TRN2u rms = LU */
     bool started = false, pam4 = false, frozen = false;
     for (int i = 0; i < nout; i++) {
@@ -280,13 +291,13 @@ static void run(int channel)
             }
             if (!frozen && sk >= TRN1U + TRN2U - 60) {
                 v92_p3_eq_hold(eq, true);
-                v92_p3_eq_set_levels(eq, levels, 15);
+                v92_p3_eq_set_levels(eq, levels, nlev);
                 frozen = true;
             }
             if (frozen) {
                 double best = 1e9;
 
-                for (int j = 0; j < 15; j++) {
+                for (int j = 0; j < nlev; j++) {
                     if (fabs(eq->y - levels[j]) < fabs(best)) best = eq->y - levels[j];
                     if (fabs(eq->y + levels[j]) < fabs(best)) best = eq->y + levels[j];
                 }
@@ -318,9 +329,19 @@ static void run(int channel)
 
 int main(void)
 {
+    /* Our min-|x| transmitter, the profile slmodemd accepted in r9. */
     run(CH_IDENTITY);
     run(CH_SLM);
     run(CH_RESAMPLERS_ONLY);
     run(CH_FIR_ONLY);
+    /* slmodemd's own precoder (V92_UPSTREAM_MEMBER_SLMODEMD) through its
+     * chain: the r9 profile, then LC even with Mi = LC/2 at k = 3. */
+    member_policy = V92_UPSTREAM_MEMBER_SLMODEMD;
+    printf("--- slmodemd precoder, r9 profile (Mi = LC = 15)\n");
+    run(CH_SLM);
+    k3_half_profile = true;
+    printf("--- slmodemd precoder, LC 14, Mi = 7 at k = 3\n");
+    run(CH_IDENTITY);
+    run(CH_SLM);
     return failures ? 1 : 0;
 }

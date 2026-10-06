@@ -5899,9 +5899,10 @@ static void me_v92_b1u_feed_values_locked(const double *values, int n)
                (unsigned long long)(g_v92_upstream_rx.input_symbols/8000),
                (unsigned long long)g_v92_upstream_rx.candidates_started,
                (unsigned long long)g_v92_upstream_rx.candidates_passed,
-               g_v92_upstream_rx.best_frames,
+               g_v92_upstream_rx.best_frames, V92_B1U_LOCK_FRAMES,
                g_v92_upstream_rx.best_first_ones,
-               v92_upstream_bits_per_frame(g_v92_upstream_rx.cpd.selected_upstream_drn),
+               v92_upstream_bits_per_frame(g_v92_upstream_rx.cpd.selected_upstream_drn)
+                   - V92_B1U_DESCRAMBLER_BITS,
                g_v92_data_nerr ? sqrt(g_v92_data_err2/(double)g_v92_data_nerr) : 0.0);
     if (!was_locked && g_v92_upstream_rx.locked)
         me_v92_b1u_locked_locked();
@@ -12986,6 +12987,13 @@ static void prepare_v90_phase3_locked(void)
                 v92_p3_rx_set_md_length(&g_v92_p3_rx, (int)info1a.md * 276);
                 v92_p3_rx_set_law(&g_v92_p3_rx, g_law == ME_LAW_ALAW);
                 v92_p3_rx_set_equaliser(&g_v92_p3_rx, v92_p3_eq_enabled());
+                /* 63 feed-forward taps: this equaliser carries on into
+                 * B1u and data, and slmodemd's 9600 Hz transmit high-pass
+                 * (DC gain 0.129) needs the length there -- 31 decodes its
+                 * TRN2u to 0.02 LU and its data not at all
+                 * (v92_slm_chain_test).  ME_V92_P3_EQ_TAPS=31 restores. */
+                v92_p3_rx_set_equaliser_taps(&g_v92_p3_rx,
+                    parse_env_int("ME_V92_P3_EQ_TAPS", 63));
                 g_v92_p3_rx_active = true;
                 g_v92_p3_rx_result_applied = false;
                 g_v92_p3_rx_failure_logged = false;

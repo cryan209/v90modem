@@ -44,6 +44,12 @@ typedef struct {
 #define V92_UPSTREAM_MEMBER_MIN_X        0
 #define V92_UPSTREAM_MEMBER_MOST_NEGATIVE 1
 #define V92_UPSTREAM_MEMBER_MOST_POSITIVE 2
+/* slmodemd's V92Precoder::process, from its disassembly: minimum x^2, but
+ * the z range is computed with C truncation and, for k = 3, without the
+ * parity bit, so when 2Ki + parity >= LC it admits eta >= LC, reads past
+ * the constellation (zero) and sends 0 -- not a point.  For testing CPd
+ * profiles against that peer. */
+#define V92_UPSTREAM_MEMBER_SLMODEMD     3
 
 typedef struct {
     v92_upstream_tx_state_t data;
@@ -62,6 +68,10 @@ typedef struct {
     double v_history[V92_CPD_MAX_TAPS];
     uint64_t symbols;
     uint64_t slicing_errors;
+    /* Next Viterbi frame starts from any trellis state (joining a stream
+     * part way through, e.g. B1u after its first frame); cleared by the
+     * decode, which leaves the survivor's end state. */
+    bool any_initial_state;
 } v92_upstream_wave_rx_t;
 
 /* V.92 Table 30 and §6.1: rate=(drn+17)*8000/6, hence a twelve-symbol
