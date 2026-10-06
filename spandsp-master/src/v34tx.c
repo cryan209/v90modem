@@ -9836,6 +9836,7 @@ static void hdx_begin_control_retrain(v34_state_t *s, bool responding)
     /* 12.8: preserve the trained primary channel and negotiated profile;
        reset only the control receiver and the MPh/E exchange. */
     v34_condition_rx_for_pph(s, responding ? "12.8.2 responding" : "12.8.1 initiating");
+    s->rx.pph_bounded_acquisition = true;
     s->tx.hdx_cc_resync = false;
     s->tx.hdx_retrain_initiator = !responding;
     s->tx.hdx_retrain_responding = responding;

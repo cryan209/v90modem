@@ -97,12 +97,34 @@ recorded in `t30_annex_f_v34_fax.md`. Shared regression checks include the PCM
 loopback suite, 3200/21600 full-duplex in both laws, and both fax-class suites.
 These are offline/G.711 loopbacks, not new Canon hardware interoperability.
 
+Control retrain PPh detection (10.2.4.5/12.8) uses a bounded, normalized
+16-symbol window at each T/2 eye phase, requiring four further matching
+windows. The previous exponential history included arbitrary old data/AC
+and missed the responder's entire 32T PPh after a delayed request. Initial
+12.4 startup keeps its established detector: changing that acquisition time
+also shifted primary training and broke a mirrored 3200-baud retrain row.
+The 212 existing HDX rows pass with the recovery-only detector.
+
 ## Remaining conformance and interoperability work
 
 - Parameter-change API currently changes the primary rate ceiling. Changes to
   other MPh options and control rate need their own API and interoperability tests.
-- Noise/delay tests and simultaneous **primary** retrain beyond the existing
-  clean channel, one-direction-loss and simultaneous-control cases remain open.
+- `make v34-hdx-channel-test` covers 36 deterministic impaired-channel rows:
+  primary payload with 20/80/200 ms one-way propagation in both laws, clean
+  and uniform analogue noise of peak 32 PCM units; primary/control retrain
+  initiated by either end or both simultaneously with 80/200 ms asymmetric
+  propagation and peak-8 noise, both source call roles and both laws.
+  Noise is added before G.711 encoding, and encoded samples are delayed
+  without inserting/dropping samples. This does not cover clock drift,
+  echoes, frequency offsets, or a measured telephone-line impairment model.
+- Delayed page turnarounds remain open: at 80/200 ms asymmetric delay,
+  ordinary Sh/E return produces unaligned source control data; parameter
+  changes can stall after the source receives MPh while the recipient has
+  not acquired the source PPh. Reproduce with `V34_HDX_PRIMARY=1
+  V34_HDX_TURNAROUND=1 V34_HDX_DELAY_MS=80 V34_HDX_REVERSE_DELAY_MS=200
+  V34_HDX_NOISE_PEAK=8 ./v34_hdx_test 3200 9600 ulaw 30`; add
+  `V34_HDX_PARAMETERS=1` for the parameter-change case.
+
 - Phase 2 recovery beyond the newly covered startup tone fallback and primary
   retrain needs a separate clause-by-clause audit against foreign waveforms.
   INFOh now governs the source symbol rate, carrier, requested power reduction,

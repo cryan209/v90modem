@@ -393,7 +393,7 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 	./v34_hdx_test 3200 21600 ulaw 20 9600
 	./v34_hdx_test 3429 14400 alaw 20 19200
 	./v34_hdx_test 3429 28800 alaw 20 4800
-	$(MAKE) v34-hdx-primary-test v34-hdx-turnaround-test v34-hdx-recovery-test v34-hdx-parameters-test v34-hdx-retrain-test v34-hdx-startup-recovery-test v34-hdx-infoh-test
+	$(MAKE) v34-hdx-primary-test v34-hdx-turnaround-test v34-hdx-recovery-test v34-hdx-parameters-test v34-hdx-retrain-test v34-hdx-startup-recovery-test v34-hdx-infoh-test v34-hdx-channel-test
 	./v32bis_spandsp_test
 	./v32bis_duplex_test
 	./v32bis_engine_pair_test ulaw v8
@@ -850,6 +850,26 @@ v56bis-sweep: v56_loopback_test v56bis-filter-test
 # 12.5 resynchronization followed by at least 8000 error-free primary bits.
 # All symbol rates and laws; unequal ceilings also check the MPh-to-mapper seam.
 # V.34 Table 22: recipient selects a carrier different from the source default.
+# Sample-exact delayed G.711 channel with deterministic analogue noise.
+.PHONY: v34-hdx-channel-test
+v34-hdx-channel-test: v34_hdx_test
+	@set -e; for delay in 20 80 200; do \
+	  for law in ulaw alaw; do \
+	    for noise in 0 32; do \
+	      V34_HDX_PRIMARY=1 V34_HDX_DELAY_MS=$$delay V34_HDX_NOISE_PEAK=$$noise ./v34_hdx_test 3200 9600 $$law 20; \
+	    done; \
+	  done; \
+	done
+	@set -e; for law in ulaw alaw; do \
+	  for initiator in 1 2 3; do \
+	    for mirror in 0 1; do \
+	      if [ $$mirror = 1 ]; then export V34_HDX_ANSWER_SOURCE=1; else unset V34_HDX_ANSWER_SOURCE; fi; \
+	      V34_HDX_CONTROL_RETRAIN=$$initiator V34_HDX_DELAY_MS=80 V34_HDX_REVERSE_DELAY_MS=200 V34_HDX_NOISE_PEAK=8 ./v34_hdx_test 3200 9600 $$law 30; \
+	      V34_HDX_PRIMARY=1 V34_HDX_PRIMARY_RETRAIN=$$initiator V34_HDX_DELAY_MS=80 V34_HDX_REVERSE_DELAY_MS=200 V34_HDX_NOISE_PEAK=8 ./v34_hdx_test 3200 9600 $$law 30; \
+	    done; \
+	  done; \
+	done
+
 .PHONY: v34-hdx-infoh-test
 v34-hdx-infoh-test: v34_hdx_test
 	@set -e; for baud in 2400 2743 2800 3000 3200 3429; do \

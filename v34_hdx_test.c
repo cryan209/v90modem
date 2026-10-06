@@ -116,14 +116,39 @@ static void put_bit(void *user_data, int bit)
     /*endif*/
 }
 
-static void g711_round_trip(int16_t out[], const int16_t in[], int len, int alaw)
+/* Test-only analogue channel before G.711 quantization, followed by a
+   sample-exact propagation delay. Never insert/drop samples after startup. */
+typedef struct
 {
-    int i;
+    int16_t delay[8001];
+    int delay_samples;
+    int pos;
+    int noise_peak;
+    uint32_t noise_state;
+} test_channel_t;
 
-    for (i = 0;  i < len;  i++)
+static void channel_process(test_channel_t *c, int16_t out[], const int16_t in[], int len, int alaw)
+{
+    for (int i = 0; i < len; i++)
     {
-        out[i] = alaw ? alaw_to_linear(linear_to_alaw(in[i]))
-                      : ulaw_to_linear(linear_to_ulaw(in[i]));
+        int sample = in[i];
+        if (c->noise_peak)
+        {
+            c->noise_state = c->noise_state*1664525U + 1013904223U;
+            sample += (int)((c->noise_state >> 16) % (2*c->noise_peak + 1)) - c->noise_peak;
+            if (sample > 32767) sample = 32767;
+            if (sample < -32768) sample = -32768;
+        }
+        int16_t pcm = alaw ? alaw_to_linear(linear_to_alaw(sample))
+                          : ulaw_to_linear(linear_to_ulaw(sample));
+        if (c->delay_samples)
+        {
+            out[i] = c->delay[c->pos];
+            c->delay[c->pos] = pcm;
+            c->pos = (c->pos + 1) % c->delay_samples;
+        }
+        else
+            out[i] = pcm;
     }
 }
 
@@ -135,6 +160,21 @@ int main(int argc, char *argv[])
         fprintf(stderr, "V34_HDX_BLOCK_SAMPLES must be 1..160\n");
         return 1;
     }
+    static test_channel_t source_channel = {.noise_state = 0x12345678U};
+    static test_channel_t recipient_channel = {.noise_state = 0x87654321U};
+    int delay_ms = getenv("V34_HDX_DELAY_MS") ? atoi(getenv("V34_HDX_DELAY_MS")) : 0;
+    int reverse_delay_ms = getenv("V34_HDX_REVERSE_DELAY_MS")
+                         ? atoi(getenv("V34_HDX_REVERSE_DELAY_MS")) : delay_ms;
+    int noise_peak = getenv("V34_HDX_NOISE_PEAK") ? atoi(getenv("V34_HDX_NOISE_PEAK")) : 0;
+    if (delay_ms < 0 || delay_ms > 1000 || reverse_delay_ms < 0
+        || reverse_delay_ms > 1000 || noise_peak < 0 || noise_peak > 32767)
+    {
+        fprintf(stderr, "channel delay must be 0..1000 ms and noise peak 0..32767\n");
+        return 1;
+    }
+    source_channel.delay_samples = delay_ms*8;
+    recipient_channel.delay_samples = reverse_delay_ms*8;
+    source_channel.noise_peak = recipient_channel.noise_peak = noise_peak;
     int baud = (argc > 1) ? atoi(argv[1]) : 3200;
     int bps = (argc > 2) ? atoi(argv[2]) : 9600;
     int alaw = (argc > 3  &&  strcmp(argv[3], "alaw") == 0);
@@ -431,17 +471,22 @@ int main(int argc, char *argv[])
             answ_e.bits_out = answ_e.bits_in = answ_e.rx_len = 0;
             if (primary_retrain)
             {
-                v34_state_t *initiator = primary_retrain == 1 ? call_modem : answ_modem;
-                span_sample_timer_t tx_time = initiator->tx.sample_time;
-                span_sample_timer_t rx_time = initiator->rx.sample_time;
-                v34_start_retrain(initiator);
-                if (initiator->tx.sample_time != tx_time || initiator->rx.sample_time != rx_time
-                    || initiator->tx.current_modulator != V34_MODULATION_SILENCE
-                    || initiator->tx.tone_duration != 560
-                    || initiator->rx.current_demodulator != V34_MODULATION_SILENCE)
+                for (int end = 1; end <= 2; end++)
                 {
-                    fprintf(stderr, "primary retrain silence/clamp/clock violation\n");
-                    return 1;
+                    if (primary_retrain != 3 && primary_retrain != end)
+                        continue;
+                    v34_state_t *initiator = end == 1 ? call_modem : answ_modem;
+                    span_sample_timer_t tx_time = initiator->tx.sample_time;
+                    span_sample_timer_t rx_time = initiator->rx.sample_time;
+                    v34_start_retrain(initiator);
+                    if (initiator->tx.sample_time != tx_time || initiator->rx.sample_time != rx_time
+                        || initiator->tx.current_modulator != V34_MODULATION_SILENCE
+                        || initiator->tx.tone_duration != 560
+                        || initiator->rx.current_demodulator != V34_MODULATION_SILENCE)
+                    {
+                        fprintf(stderr, "primary retrain silence/clamp/clock violation\n");
+                        return 1;
+                    }
                 }
             }
             primary_started = control_ok = 0;
@@ -510,8 +555,8 @@ int main(int argc, char *argv[])
         memset(answ_tx, 0, sizeof(answ_tx));
         v34_tx(call_modem, call_tx, frame_samples);
         v34_tx(answ_modem, answ_tx, frame_samples);
-        g711_round_trip(answ_rx, call_tx, frame_samples, alaw);
-        g711_round_trip(call_rx, answ_tx, frame_samples, alaw);
+        channel_process(&source_channel, answ_rx, call_tx, frame_samples, alaw);
+        channel_process(&recipient_channel, call_rx, answ_tx, frame_samples, alaw);
         /* Drop one control direction for four seconds starting at the
            first PPh. The peers must recover through 12.8, not restart
            the whole modem or receive any ideal symbols from the harness. */
@@ -604,6 +649,9 @@ int main(int argc, char *argv[])
 
     printf("V.34 half-duplex (clause 12), %d baud %d bps %s, %.1f s\n",
            baud, bps, alaw ? "A-law" : "u-law", seconds);
+    if (delay_ms || reverse_delay_ms || noise_peak)
+        printf("  test channel: source->recipient %d ms, reverse %d ms, uniform noise peak %d PCM units\n",
+               delay_ms, reverse_delay_ms, noise_peak);
     printf("  call   (source)    tx stage %2d (max %2d)  rx stage %2d (max %2d)\n",
            v34_get_tx_stage(call_modem), best_call_tx,
            v34_get_rx_stage(call_modem), best_call_rx);

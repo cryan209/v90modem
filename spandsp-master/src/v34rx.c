@@ -487,8 +487,8 @@ static int phase3_rx_dump_count = 0;
     winning every step in both.  A score gate alone therefore separates the
     symbol rates from each other rather than a real PPh from noise, which a
     stable argmax does not. */
-#define PPH_ACQUIRE_DECAY       0.94f
 #define PPH_ACQUIRE_MIN_BAUDS   16
+#define PPH_ACQUIRE_DECAY       0.94f
 #define PPH_ACQUIRE_SCORE_MIN   0.55f
 #define PPH_ACQUIRE_HOLD_STEPS  8
 
@@ -7825,50 +7825,95 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
         int best_phase;
         int best_half;
         float best_score;
-        float mag;
-
         s->pph_hunt_bauds++;
-        mag = sqrtf(sample->re*sample->re + sample->im*sample->im);
-        s->pph_corr_energy = PPH_ACQUIRE_DECAY*s->pph_corr_energy + mag*mag;
-        s->pph_corr_weight = PPH_ACQUIRE_DECAY*s->pph_corr_weight + 1.0f;
-        best_phase = 0;
-        best_half = 0;
-        best_score = -1.0f;
+        if (s->pph_bounded_acquisition)
         {
-            int half = s->baud_half;
-            for (phase = 0;  phase < 8;  phase++)
+            /* 10.2.4.5: two complete eight-symbol periods, normalized with
+               the energy of this same eye-phase window. Four further matching
+               windows confirm the signal within its 32T duration. A bounded
+               window excludes arbitrary old user data/AC during 12.8 recovery;
+               the former exponential history could dilute the entire PPh. */
+            best_phase = 0;
+            best_half = s->baud_half;
+            best_score = -1.0f;
             {
-                complexf_t cand;
-                float corr_mag;
-                float denom;
-                float score;
-
-                /* pph_symbols[] is the whole 32 symbol signal, but it is the
-                   8 symbol period repeated four times, so an 8-entry phase
-                   search covers it. */
-                cand = pph_symbols[((s->pph_hunt_bauds >> 1) + phase)%8];
-                s->pph_corr[half][phase].re = PPH_ACQUIRE_DECAY*s->pph_corr[half][phase].re
-                                            + sample->re*cand.re + sample->im*cand.im;
-                s->pph_corr[half][phase].im = PPH_ACQUIRE_DECAY*s->pph_corr[half][phase].im
-                                            + sample->im*cand.re - sample->re*cand.im;
-                corr_mag = sqrtf(s->pph_corr[half][phase].re*s->pph_corr[half][phase].re
-                               + s->pph_corr[half][phase].im*s->pph_corr[half][phase].im);
-                denom = sqrtf(s->pph_corr_energy*s->pph_corr_weight);
-                score = (denom > 0.0001f) ? corr_mag/denom : 0.0f;
-                if (score > best_score)
+                int half = s->baud_half;
+                complexf_t *history = s->pph_history[half];
+                float energy = 0.0f;
+                memmove(history, history + 1, 15*sizeof(*history));
+                history[15] = *sample;
+                if (s->pph_history_count[half] < 16)
+                    s->pph_history_count[half]++;
+                for (int k = 0; k < 16; k++)
+                    energy += history[k].re*history[k].re + history[k].im*history[k].im;
+                for (phase = 0; phase < 8; phase++)
                 {
-                    best_score = score;
-                    best_phase = phase;
-                    best_half = half;
+                    complexf_t corr = {0.0f, 0.0f};
+                    float pattern_energy = 0.0f;
+                    for (int k = 0; k < 16; k++)
+                    {
+                        complexf_t cand = pph_symbols[(k + phase)%8];
+                        corr.re += history[k].re*cand.re + history[k].im*cand.im;
+                        corr.im += history[k].im*cand.re - history[k].re*cand.im;
+                        pattern_energy += cand.re*cand.re + cand.im*cand.im;
+                    }
+                    float denom = sqrtf(energy*pattern_energy);
+                    float score = (denom > 0.0001f && s->pph_history_count[half] == 16)
+                                ? sqrtf(corr.re*corr.re + corr.im*corr.im)/denom : 0.0f;
+                    if (score > best_score)
+                    {
+                        best_score = score;
+                        best_phase = phase;
+                    }
                 }
-                /*endif*/
             }
-            /*endfor*/
+        }
+        else
+        {
+            float mag = sqrtf(sample->re*sample->re + sample->im*sample->im);
+            s->pph_corr_energy = PPH_ACQUIRE_DECAY*s->pph_corr_energy + mag*mag;
+            s->pph_corr_weight = PPH_ACQUIRE_DECAY*s->pph_corr_weight + 1.0f;
+            best_phase = 0;
+            best_half = 0;
+            best_score = -1.0f;
+            {
+                int half = s->baud_half;
+                for (phase = 0;  phase < 8;  phase++)
+                {
+                    complexf_t cand;
+                    float corr_mag;
+                    float denom;
+                    float score;
+
+                    /* pph_symbols[] is the whole 32 symbol signal, but it is the
+                       8 symbol period repeated four times, so an 8-entry phase
+                       search covers it. */
+                    cand = pph_symbols[((s->pph_hunt_bauds >> 1) + phase)%8];
+                    s->pph_corr[half][phase].re = PPH_ACQUIRE_DECAY*s->pph_corr[half][phase].re
+                                                + sample->re*cand.re + sample->im*cand.im;
+                    s->pph_corr[half][phase].im = PPH_ACQUIRE_DECAY*s->pph_corr[half][phase].im
+                                                + sample->im*cand.re - sample->re*cand.im;
+                    corr_mag = sqrtf(s->pph_corr[half][phase].re*s->pph_corr[half][phase].re
+                                   + s->pph_corr[half][phase].im*s->pph_corr[half][phase].im);
+                    denom = sqrtf(s->pph_corr_energy*s->pph_corr_weight);
+                    score = (denom > 0.0001f) ? corr_mag/denom : 0.0f;
+                    if (score > best_score)
+                    {
+                        best_score = score;
+                        best_phase = phase;
+                        best_half = half;
+                    }
+                    /*endif*/
+                }
+                /*endfor*/
+            }
         }
         /* The hold is counted PER PARITY.  Steps alternate between the two
            banks, so comparing against the previous step's winner compares two
            different correlators and the count can never accumulate. */
-        if (best_score >= PPH_ACQUIRE_SCORE_MIN  &&  best_phase == s->pph_best_phase[best_half])
+        if (best_score >= (s->pph_bounded_acquisition ? 0.85f : PPH_ACQUIRE_SCORE_MIN)
+            && best_phase == (s->pph_bounded_acquisition
+                 ? ((s->pph_best_phase[best_half] + 1) % 8) : s->pph_best_phase[best_half]))
             s->pph_hold_steps[best_half]++;
         else
             s->pph_hold_steps[best_half] = 0;
@@ -7876,7 +7921,7 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
         s->pph_best_phase[best_half] = best_phase;
         if (s->pph_hunt_bauds >= PPH_ACQUIRE_MIN_BAUDS
             &&
-            s->pph_hold_steps[best_half] >= PPH_ACQUIRE_HOLD_STEPS)
+            s->pph_hold_steps[best_half] >= (s->pph_bounded_acquisition ? 4 : PPH_ACQUIRE_HOLD_STEPS))
         {
             V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - CC: PPh detected after %d T/2 steps (phase=%d half=%d score=%.3f held=%d)\n",
@@ -15865,9 +15910,12 @@ void v34_condition_rx_for_pph(v34_state_t *s, const char *why)
     memset(s->rx.hdx_sh_count, 0, sizeof(s->rx.hdx_sh_count));
     memset(s->rx.hdx_sh_history, 0, sizeof(s->rx.hdx_sh_history));
     s->rx.pph_hunt_bauds = 0;
+    s->rx.pph_bounded_acquisition = false;
     s->rx.pph_corr_energy = 0.0f;
     s->rx.pph_corr_weight = 0.0f;
     memset(s->rx.pph_corr, 0, sizeof(s->rx.pph_corr));
+    memset(s->rx.pph_history, 0, sizeof(s->rx.pph_history));
+    memset(s->rx.pph_history_count, 0, sizeof(s->rx.pph_history_count));
     s->rx.cc_level = 0.0f;
     s->rx.pph_best_phase[0] = s->rx.pph_best_phase[1] = -1;
     s->rx.pph_hold_steps[0] = s->rx.pph_hold_steps[1] = 0;

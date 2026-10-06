@@ -2263,6 +2263,9 @@ typedef struct
     complexf_t pph_corr[2][8];
     float pph_corr_energy;
     float pph_corr_weight;
+    bool pph_bounded_acquisition;
+    complexf_t pph_history[2][16];
+    int pph_history_count[2];
     /*! \brief Set once PPh has been detected in V34_RX_STAGE_CC, so the
         detector stops and the MPh scanner below owns the symbol stream. */
     bool pph_detected;
