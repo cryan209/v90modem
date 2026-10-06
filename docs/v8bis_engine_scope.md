@@ -59,6 +59,12 @@ Done and tested (`v8bis_test`, in `make test`, ~2 s): `v8bis_tones.[ch]`, `v8bis
 
 Findings worth carrying into stage 2: the tone detector is robust (see CLAUDE.md for numbers) but only has a 3-block confirmation, so `detect_sample` lands ~60-80 ms into segment 2 -- a responder that must answer inside the preamble window should budget for that; and the framing receiver reports invalid frames by class (7.2.9) so 9.8's NAK(1) rule can be driven directly.
 
+## Stage 2 status (2026-10-06)
+
+Done and tested (`v8bis_fsm_test`, in `make test`, under 0.1 s): `v8bis_fsm.[ch]`, covering Figures 14 and 15, all 13 Table 7 transactions, ACK(1) suppression (9.7), NAK(1)/(2)/(3), ACK(2) segmentation (9.10) and the 9.8 five-second rule. Two layers remain for stage 3: the sample-level modem (tone generator/detector from stage 1, V.21 FSK tx/rx, the 100 ms mark preamble and ES handling) that turns actions into audio and audio into events, and the engine glue. The FSM's action list is that layer's contract: SIGNAL, MESSAGES (with ES and the 1.5 s gap flag), MS_MODE (with who sent MS, the start-up procedure, and whether to send ANS/ANSam next), INITIAL.
+
+Spec readings worth re-checking against a real peer: transaction 6's shape (Figure 14 and Table 7 disagree, Table 7 followed), CLR carrying capabilities, and NAK(1) leaving any state.
+
 ## Staging
 
 1. **Stage 1, codec and tones** (A, B, C). Testable with no state machine. Fixes the offline decoder's defect list at the same time, since both can share `v8bis_ie`.
