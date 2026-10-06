@@ -197,3 +197,41 @@ samples needs inspection before retuning our receiver or weakening its
 acquisition guards. The 9600 residual is already present before G.711;
 its precise cause (pulse shaping, codec/resampler, or scheduling) is not yet
 established. Sampling at T/3 instead of T/2 does not establish that boundary.
+
+## Native DAC wrap located, 2026-10-06
+
+`X2_HOST_CAPTURE_CODEC=1` with `--capture-native` enables a read-only
+pre-resampler sample/clock capture in `tools/x2_courier_capture.py`.
+It preserves generation offsets across DSP resets in `native-codec.json`
+and the signed DAC samples in `native-codec.s16`. The fresh failing 9600
+call is `artifacts/x2-codec-path-20261006-9600`.
+
+The independent native/B1 correlation puts B1 at sample 254360 in the
+concatenated codec stream. Its clock is 9600 Hz throughout this interval.
+The held-out native-symbol inverse fit remains 0.107158 with 21 taps and
+0.108731 with 65, so the damage precedes socket FIFO handling, line padding
+and codec-to-line resampling.
+
+A forward pulse-shaper fit is more decisive. Insert the native symbols every
+three codec samples, mix at 1920 Hz, and fit a 61-tap complex FIR (122 real
+coefficients) to 6000 DAC samples; grade the next 5900. The large innovations
+are approximately +/-32768 DAC units: for example, sample 6482 relative to
+B1 is +15864 against a prediction of -16252, and sample 6611 is -16092
+against +16318. The AC01 output gain is 2 (-6 dB), so this is a 65536-unit
+signed-word wrap before that gain, not clipping at the analogue output.
+
+As a DIAGNOSTIC using the known native symbols, iteratively fit on the
+training portion and add integer multiples of 32768 to samples selected by
+the fitted waveform. Twelve corrections over the whole window reduce
+held-out waveform MSE from 1106309.7 to 2.9255 (RMS 1.7104 DAC units,
+maximum residual 5.3046). This is strong evidence of signed output-word
+wrapping, rather than a receive timing/echo/equalizer problem in this window.
+It is not a production receiver repair: it uses the known transmitted points.
+
+The native serial ISR reads the transmit-ring word and ORs control bits before
+writing DXR at 818f. `C5xCore::codec_transmit` masks the low two control bits
+and applies the -6 dB gain; its conversion cannot restore a word that already
+wrapped. The precise producing instruction or parameter error upstream of
+that word remains to be traced. Do not replace an emulator instruction's
+wrapping with saturation without checking its architectural semantics; nor
+assume this proves the original hardware would emit the same damaged stream.
