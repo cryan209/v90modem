@@ -1419,6 +1419,11 @@ typedef struct
        carriers' three lines (see v34_rx_watch_v90_jd_s()).  Armed by the
        engine only for the Jd stage. */
     bool v90jd_s_armed;
+    /* DIL mode: stay armed through DIL, ignore phase3_s_present, hold off
+       between events (the 9.3.2.10 S is 128T and may come after a Jd S). */
+    bool v90jd_dil_mode;
+    bool v90jd_line_event;      /* the last S event came from the line watch */
+    int v90jd_holdoff;
     /* V.90 digital: the Phase 3 eye freeze (see process_primary_half_baud())
        ends once Ja has been accepted. */
     bool v90_p3_eye_released;

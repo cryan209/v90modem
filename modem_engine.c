@@ -11468,7 +11468,13 @@ skip_8k_codewords:
                            Echo, silence, RX/TX ratio and Tone-A gates still
                            apply in Jd; retain this extra classifier only for
                            the DIL termination it was introduced to protect. */
+                        /* An S the line watch found has already been checked on its
+                         * three lines (it is the only detector that sees 3429 baud's
+                         * single carrier, and p3_demod's 6-symbol pattern test rejected
+                         * the Intel V92 modem's real 9.3.2.10 S at the end of DIL). */
+                        bool line_s = g_v34 && v34_v90_take_line_s_event(g_v34);
                         if ((int)v90_get_tx_phase(g_v90) == V90_TX_DIL
+                            && !line_s
                             && !v90_p3_confirm_signal_locked(P3_SIGNAL_S)) {
                             fprintf(stderr,
                                     "[ME] V.90 strict RX event: index=%d event=S tx_phase=%d "
@@ -14637,7 +14643,8 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
              * RasFinder sends it on the other carrier -- see
              * v34_rx_watch_v90_jd_s(). */
             if (g_v34)
-                v34_v90_arm_jd_s_watch(g_v34, tx_phase == V90_TX_JD);
+                v34_v90_arm_jd_s_watch(g_v34, tx_phase == V90_TX_JD ? 1 :
+                                       (tx_phase == V90_TX_DIL ? 2 : 0));
         }
     } else if (!g_v90) {
         /* The server runs many calls per process; a latch that outlives the

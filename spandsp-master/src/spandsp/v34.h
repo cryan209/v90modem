@@ -388,6 +388,8 @@ SPAN_DECLARE(int) v34_get_rx_high_carrier(v34_state_t *s);
    carriers, because the RasFinder sends that S on the other carrier from its
    Phase 3 upstream. */
 SPAN_DECLARE(void) v34_v90_arm_jd_s_watch(v34_state_t *s, int on);
+/* True once if the last S event was found by the line watch (already spectrally verified). */
+SPAN_DECLARE(bool) v34_v90_take_line_s_event(v34_state_t *s);
 
 /*! Get the current TX symbol-rate code (v34_baud_rate_e, 0=2400..5=3429).
     \param s The modem context.

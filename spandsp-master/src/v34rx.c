@@ -14552,7 +14552,7 @@ static void v34_rx_watch_v90_jd_s(v34_rx_state_t *s,
     if (disabled
         ||  !s->v90jd_s_armed
         ||  s->stage != V34_RX_STAGE_PHASE3_WAIT_S
-        ||  s->phase3_s_present
+        ||  (s->phase3_s_present  &&  !s->v90jd_dil_mode)
         ||  s->baud_rate < 0  ||  s->baud_rate >= 6)
     {
         memset(s->v90jd_g1, 0, sizeof(s->v90jd_g1));
@@ -14621,15 +14621,26 @@ static void v34_rx_watch_v90_jd_s(v34_rx_state_t *s,
                 /*endif*/
             }
             /*endif*/
+            if (s->v90jd_holdoff > 0)
+            {
+                s->v90jd_holdoff--;
+                on = -1;
+            }
+            /*endif*/
             s->v90jd_blocks = (on >= 0)  ?  s->v90jd_blocks + 1  :  0;
             if (s->v90jd_blocks >= 2)
             {
                 s->v90jd_blocks = 0;
-                s->v90jd_s_armed = false;
+                if (s->v90jd_dil_mode)
+                    s->v90jd_holdoff = 10;      /* 200 ms between events */
+                else
+                    s->v90jd_s_armed = false;
+                /*endif*/
                 s->phase3_s_present = true;
                 s->phase3_s_event_count++;
                 s->phase3_s_fired_symbol = -1;
                 s->received_event = V34_EVENT_S;
+                s->v90jd_line_event = true;
                 span_log(s->logging, SPAN_LOG_WARNING,
                          "Rx - V.90 Phase 3: analogue S during Jd found on the line, %s carrier "
                          "(%.0f Hz; lines %.2f/%.2f; receiver on %s)\n",
@@ -16140,6 +16151,19 @@ SPAN_DECLARE(void) v34_v90_set_phase3_expect_silence(v34_state_t *s, int expect)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(bool) v34_v90_take_line_s_event(v34_state_t *s)
+{
+    bool r;
+
+    if (!s)
+        return false;
+    /*endif*/
+    r = s->rx.v90jd_line_event;
+    s->rx.v90jd_line_event = false;
+    return r;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v34_v90_arm_jd_s_watch(v34_state_t *s, int on)
 {
     if (!s)
@@ -16155,6 +16179,8 @@ SPAN_DECLARE(void) v34_v90_arm_jd_s_watch(v34_state_t *s, int on)
     }
     /*endif*/
     s->rx.v90jd_s_armed = (on != 0);
+    s->rx.v90jd_dil_mode = (on == 2);
+    s->rx.v90jd_holdoff = 0;
 }
 /*- End of function --------------------------------------------------------*/
 
