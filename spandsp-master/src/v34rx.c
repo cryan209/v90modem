@@ -14604,7 +14604,17 @@ static void v34_rx_watch_v90_jd_s(v34_rx_state_t *s,
             s->v90jd_samples = 0;
             if (busy  &&  denom > 0.0f)
             {
-                if (line[0] > 0.6f*denom  &&  line[1] < 0.2f*denom)
+                if (fabsf(fc[0] - fc[1]) < 1.0f)
+                {
+                    /* 3429 baud has ONE carrier (1959.2 Hz), so both line sets are the same three
+                       lines and "this set high, the other low" can never hold.  An Intel/Conexant
+                       V.92 modem chose 3429 in INFO1a and its S, 0.4 s of 0.5-0.6 of the energy on
+                       those lines, went unseen for the whole of Jd (artifacts/serial-flex-a2). */
+                    if (line[0] > 0.45f*denom)
+                        on = 0;
+                    /*endif*/
+                }
+                else if (line[0] > 0.6f*denom  &&  line[1] < 0.2f*denom)
                     on = 0;
                 else if (line[1] > 0.6f*denom  &&  line[0] < 0.2f*denom)
                     on = 1;
