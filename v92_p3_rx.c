@@ -888,6 +888,7 @@ bool v92_p3_rx_feed(v92_p3_rx_t *rx, uint8_t codeword, int sample_index)
 {
     v92_p3_rx_state_t prev = rx->state;
 
+    rx->fed_until = sample_index;
     if (rx->state != V92_P3_RX_IDLE && sample_index < rx->arm_sample_min) {
         if (rx->last_reject != V92_P3_RX_REJECT_PRE_ARM) {
             p3rx_set_reject(rx,
@@ -1416,6 +1417,13 @@ int v92_p3_rx_follow(v92_p3_rx_t *rx, uint8_t codeword, int sample_index,
         return 0;
     law = rx->eq_law;
     eq = &rx->eq[law];
+    /* The engine finds Ja part way through a block and then follows from
+     * that block's first codeword, so without this the samples between the
+     * two went into the equaliser twice (65 against slmodemd), shifting
+     * every later symbol index -- and with it the reference the second
+     * TRN1u is retrained against, which then diverged to chance. */
+    if (sample_index <= rx->fed_until)
+        return 0;
     if (!rx->follow_started) {
         v92_p3_eq_hold(eq, true);
         rx->follow_started = true;

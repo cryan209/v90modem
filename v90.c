@@ -803,6 +803,22 @@ struct v90_state_s {
     bool             owns_v34;      /* true if we allocated v34 (v90_init), false if external */
 };
 
+/* V.92 9.5.1.1.11-12: the digital modem sends the requested DIL until it
+ * receives CPt, which the analogue modem sends within 5000 ms of Su
+ * (9.5.2.1.11) once it has studied enough of it.  There is no cycle count to
+ * stop at, and cutting DIL after one cycle sent Ri into slmodemd just as its
+ * study finished, so its CPt was truncated to one frame and we entered
+ * Phase 4 without one.  The V.90 cap stays the default only where it was
+ * measured; ME_V90_DIL_AUTOTERMINATE_CYCLES set explicitly still wins. */
+static int v90_dil_cycle_cap(const v90_state_t *s)
+{
+    const char *value = getenv("ME_V90_DIL_AUTOTERMINATE_CYCLES");
+
+    if (s->v92_phase3 && !(value && *value))
+        return 0;
+    return v90_dil_autoterminate_cycles();
+}
+
 static int v90_sd_delay_samples(const v90_state_t *s)
 {
     const char *value;
@@ -3380,7 +3396,7 @@ static uint8_t v90_dil_codeword(v90_state_t *s)
             s->phase4_hold_logged = false;
         } else if ((s->dil_segment_index % n) == 0) {
             int cycles = s->dil_segment_index / n;
-            int cycle_limit = v90_dil_autoterminate_cycles();
+            int cycle_limit = v90_dil_cycle_cap(s);
 
             if (cycle_limit > 0 && cycles >= cycle_limit) {
                 fprintf(stderr,
@@ -3395,7 +3411,7 @@ static uint8_t v90_dil_codeword(v90_state_t *s)
                         n);
             }
         } else {
-            int cycle_limit = v90_dil_autoterminate_cycles();
+            int cycle_limit = v90_dil_cycle_cap(s);
             int early_symbols = v90_dil_autoterminate_early_symbols();
             int target_symbols = cycle_limit * v90_dil_cycle_len(&s->dil);
 

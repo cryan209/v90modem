@@ -182,6 +182,7 @@ typedef struct {
     int      trn1u2_state;   /* 0 not expected, 1 searching, 3 retraining,
                                 2 trained, -1 refused */
     int      follow_sample;  /* DS0 sample of the newest codeword followed */
+    int      fed_until;      /* newest DS0 sample v92_p3_rx_feed consumed */
     uint8_t  follow_sign[1024]; /* raw codeword signs, by sample & 1023 */ /* ignore Phase-3 lock before this sample */
 
     /* ------- TRN1u accumulator ------- */

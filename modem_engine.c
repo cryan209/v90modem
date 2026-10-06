@@ -14672,8 +14672,15 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
         for (int i = 0; i < count; i++)
             v92_su_rx_feed_locked(codewords[i], first_sample + (uint64_t)i);
     }
+    /* g_v92_trn2u_active is set when INFO1a selects PCM upstream, long
+     * before Phase 4, so gating the follow receiver on it alone switched the
+     * second-TRN1u/CPt path off for the whole of Phase 3: no CPt was ever
+     * decoded and the call reached Phase 4 only on the DIL-cycle fallback
+     * (live against slmodemd).  Hand over where the TRN2u feed below takes
+     * over, at our TRN2d. */
     if (g_v92_p3_follow_active && g_v92_active && g_state == ME_TRAINING
-        && !g_v92_trn2u_active)
+        && !(g_v92_trn2u_active && g_v90
+             && v90_get_tx_phase(g_v90) >= V90_TX_TRN2D))
         me_v92_p3_follow_locked(codewords, count, first_sample);
     if (g_v92_p3_cpt_active && g_v92_active && g_state == ME_TRAINING
         && !g_v92_p3_follow_active) {
