@@ -122,3 +122,37 @@ hybrid sweep. The engine's separate V.34 NLMS path still needs independent
 qualification of transmit-reference alignment, per-call reset and adaptation
 while the far end is active. Later native x2 MP/rate transitions and hardware
 interop remain separate from the verified initial 4800 transfer.
+
+## Higher-rate qualification, 2026-10-06
+
+Fresh original Courier runs with `ME_X2_UPSTREAM_MAX_RATE` set to 7200,
+9600 and 12000 use the same 3500-byte source (70 complete lines) and short
+host message as the passing 4800 control. No fixed native `&U26&N39` clamp
+is applied. Results are preserved under `artifacts/x2-higher-20261006-*`.
+
+| Selected upstream rate | B1 / engine DATA | Foreign source through engine PTY | Host message at native DTE |
+|---|---|---|---|
+| 4800 control | Acquired; DATA | All 3500 bytes exact | Complete |
+| 7200 | B1 acquisition fails; no engine CONNECT | No complete lines | Not queued: engine never CONNECTs |
+| 9600 | 100% B1 fit; DATA | Only 6 of 70 lines intact; whole source fails | Complete |
+| 12000 | B1 acquisition fails; no engine CONNECT | No complete lines | Not queued: engine never CONNECTs |
+
+Read-only native captures contain 18, 24 and 30 bits per mapping frame,
+respectively. Passing those exact points (Q9.7) to the 3200-baud expanded,
+64-state, zero-precoder mapping decoder with GPA, starting at native point 5,
+recovers all 3500 source bytes at all three rates. Independently generating
+V.34 10.1.3.1's reset-state B1 with the same parameters matches the native
+first 128 B1 symbols exactly at all three rates. Thus the native mapper and
+our inverse mapper agree for this source; neither higher-rate B1 failure is
+evidence that the native B1 convention differs.
+
+At 9600 the waveform reports low decision-grid distance initially but has
+isolated symbol disturbances and corrupt text well before the later MP/rate
+transition. The existing native/waveform comparison tool rejects its first
+256-symbol alignment (MSE 0.166878 > 0.05), so do not turn that rejected
+alignment into a qualified symbol-error count. Distinguishing damage already
+present in the PCM waveform from analytic-filter/equalizer damage requires a
+held-out fit against native points and independently established sample
+alignment. At 7200/12000, acquisition's coarse shortlist and receive front
+end need examination despite the exact native/template match. The validated
+default remains 4800; higher rates are diagnostic offers, not qualified ones.
