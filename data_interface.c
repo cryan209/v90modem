@@ -181,6 +181,22 @@ static uint64_t test_bit_fraction;
 
 /* AT+MS: the engine owns the modulation offer, the rates live here. */
 static di_ms_set_cb_t   ms_set_cb;
+static di_ms_limits_cb_t ms_limits_cb;
+
+void di_set_modulation_limits_op(di_ms_limits_cb_t cb)
+{
+    ms_limits_cb = cb;
+}
+
+/* A +MS setting to the engine: mode, automode and, where the engine takes
+ * them, the 6.4.1 rate bounds (tx then rx, this DCE's side). */
+static int ms_apply(const char *mode, const at_ms_settings_t *ms)
+{
+    if (ms_limits_cb)
+        return ms_limits_cb(mode, ms->automode != 0, ms->min_tx_rate, ms->max_tx_rate,
+                            ms->min_rx_rate, ms->max_rx_rate);
+    return ms_set_cb(mode, ms->automode != 0);
+}
 static di_ms_get_cb_t   ms_get_cb;
 static di_ms_reset_cb_t ms_reset_cb;
 /* What the last accepted AT+MS said, so +MS? can report the carrier name and
@@ -435,7 +451,7 @@ static int handle_plus_ms(const char *args)
     switch (at_ms_parse(args, &ms)) {
     case AT_MS_SET:
         want = at_ms_settings_to_mode(&ms);
-        if (!want || ms_set_cb(want, ms.automode != 0) < 0)
+        if (!want || ms_apply(want, &ms) < 0)
             return -1;
         ms_cur = ms;
         ms_cur_valid = true;
@@ -683,6 +699,8 @@ static void profile_forget(void);
 
 static void link_reset(void)
 {
+    /* Power-on: no ATH is owed its OK instead of NO CARRIER. */
+    local_hangup = 0;
     profile_forget();
     pthread_mutex_lock(&test_mtx);
     memset(&link_now, 0, sizeof(link_now));
@@ -763,7 +781,7 @@ static void profile_apply(const di_profile_t *sp)
     if (sp->ms_valid && ms_set_cb) {
         const char *mode = at_ms_settings_to_mode(&sp->ms);
 
-        if (mode && ms_set_cb(mode, sp->ms.automode != 0) == 0) {
+        if (mode && ms_apply(mode, &sp->ms) == 0) {
             ms_cur = sp->ms;
             ms_cur_valid = true;
         }
@@ -1935,6 +1953,11 @@ void di_on_connected(int rate)
     rep.ec = "NONE";
     if (connect_info_cb && !fax)
         connect_info_cb(rate, &rep);
+    if (rep.refused) {
+        /* V.250 6.4.1: outside the +MS bounds is not a connection.  The
+         * engine is hanging up, and its disconnect brings NO CARRIER. */
+        return;
+    }
     link_latch(rate, &rep, fax);
 
     diagnostic_reset(false);

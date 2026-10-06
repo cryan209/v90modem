@@ -409,7 +409,7 @@ static void test_v250_parameters(void)
      * and before CONNECT, and only as enabled. */
     expect(dte, "ATZ", "OK");
     di_set_connect_info_cb(fake_connect_info);
-    fake_report = (v250_connect_report_t) { "V90", 52000, 31200, "LAPM", 1, true, true, 0 };
+    fake_report = (v250_connect_report_t) { "V90", 52000, 31200, "LAPM", 1, true, true, 0, false };
     expect(dte, "ATD1", "");
     di_on_connected(52000);
     collect(dte, buf, sizeof(buf), 150);
@@ -459,7 +459,7 @@ static void test_v250_parameters(void)
     expect(dte, "AT+MR=1;+ER=1;+DR=1", "OK");
 
     /* A call that settled on no error control and no compression says so. */
-    fake_report = (v250_connect_report_t) { "V32B", 14400, 0, "NONE", 0, false, false, 0 };
+    fake_report = (v250_connect_report_t) { "V32B", 14400, 0, "NONE", 0, false, false, 0, false };
     di_on_connected(14400);
     collect(dte, buf, sizeof(buf), 150);
     check(strstr(buf, "+MCR: V32B") && strstr(buf, "+MRR: 14400\r") && strstr(buf, "+ER: NONE")
@@ -690,7 +690,7 @@ static void test_help(void)
     di_set_connect_info_cb(fake_connect_info);
     di_set_link_detail_cb(fake_link_detail);
     fake_originate = true;
-    fake_report = (v250_connect_report_t) { "V90", 52000, 31200, "LAPM", 1, true, true, 0 };
+    fake_report = (v250_connect_report_t) { "V90", 52000, 31200, "LAPM", 1, true, true, 0, false };
     expect(dte, "ATS2=42S12=10", "OK");              /* escape on "***" after 0.2 s */
     expect(dte, "ATD1", "");
     di_on_connected(52000);
@@ -708,7 +708,7 @@ static void test_help(void)
     collect(dte, buf, sizeof(buf), 100);
     /* Live: the engine pushes a renegotiated rate and a retrain in progress. */
     {
-        v250_connect_report_t now = { "V90", 48000, 26400, "LAPM", 1, true, true, 0 };
+        v250_connect_report_t now = { "V90", 48000, 26400, "LAPM", 1, true, true, 0, false };
 
         di_update_link(&now, "Mode               v90 (offer V90)\r\nData-mode retrains 1", "retraining");
     }
@@ -736,7 +736,7 @@ static void test_help(void)
     expect(dte, "ATI11", "(at end of call)");
 
     /* An answered call that the DTE ended itself. */
-    fake_report = (v250_connect_report_t) { "V34", 28800, 0, "NONE", 0, false, false, 0 };
+    fake_report = (v250_connect_report_t) { "V34", 28800, 0, "NONE", 0, false, false, 0, false };
     fake_originate = false;
     di_on_ring();
     collect(dte, buf, sizeof(buf), 100);
@@ -1008,6 +1008,66 @@ static int profile_session(const char *link, const char *file)
     return open_dte(link);
 }
 
+static int fake_lim[4];
+static int fake_lim_ok = 0;
+
+static int fake_ms_limits(const char *mode, bool automode, int min_tx, int max_tx,
+                          int min_rx, int max_rx)
+{
+    if (fake_lim_ok < 0)
+        return -1;
+    fake_ms_set(mode, automode);
+    fake_lim[0] = min_tx;
+    fake_lim[1] = max_tx;
+    fake_lim[2] = min_rx;
+    fake_lim[3] = max_rx;
+    return 0;
+}
+
+/* V.250 6.4.1: +MS's rate subparameters reach the engine, the engine may
+ * refuse them, and a call it reports as outside them is not a CONNECT. */
+static void test_ms_limits(void)
+{
+    const char *link = "/tmp/console_test_mslim";
+    char buf[1024];
+    int dte;
+
+    printf("+MS rate bounds:\n");
+    if (di_open(link) < 0) {
+        failures++;
+        return;
+    }
+    di_set_callbacks(cb_dial, cb_answer, cb_hangup, NULL);
+    di_set_modulation_ops(fake_ms_set, fake_ms_get, fake_ms_reset);
+    di_set_modulation_limits_op(fake_ms_limits);
+    dte = open_dte(link);
+    expect(dte, "ATE0", "OK");
+    expect(dte, "AT+MS=V34,1,4800,9600,2400,7200", "OK");
+    check(fake_lim[0] == 4800 && fake_lim[1] == 9600 && fake_lim[2] == 2400 && fake_lim[3] == 7200
+          && !strcmp(fake_mode, "v34"), "tx and rx bounds reach the engine");
+    expect(dte, "AT+MS=V34,1,0,9600", "OK");
+    check(fake_lim[2] == 0 && fake_lim[3] == 9600, "the four-value form bounds both directions");
+    fake_lim_ok = -1;
+    expect(dte, "AT+MS=V32B,0,10000,11000", "ERROR");
+    expect(dte, "AT+MS?", "+MS: V34,1,0,9600,0,9600");      /* unchanged */
+    fake_lim_ok = 0;
+
+    di_set_connect_info_cb(fake_connect_info);
+    fake_report = (v250_connect_report_t) { "V22B", 1200, 0, "NONE", 0, false, false, 0, true };
+    expect(dte, "ATD1", "");
+    di_on_connected(1200);
+    collect(dte, buf, sizeof(buf), 150);
+    check(!strstr(buf, "CONNECT"), "a call the engine refused is not reported as CONNECT");
+    di_on_disconnected();
+    collect(dte, buf, sizeof(buf), 150);
+    if (!strstr(buf, "NO CARRIER")) printf("       got \"%s\"\n", buf);
+    check(strstr(buf, "NO CARRIER") != NULL, "  ...it ends with NO CARRIER");
+    di_set_connect_info_cb(NULL);
+    di_set_modulation_limits_op(NULL);
+    close(dte);
+    di_close();
+}
+
 static int fake_pmhr_result = -1;
 
 static int fake_pmhr(void)
@@ -1236,6 +1296,7 @@ int main(void)
     test_v250_parameters();
     test_help();
     test_call_progress();
+    test_ms_limits();
     test_pmhr();
     test_profile_file();
     test_profile();

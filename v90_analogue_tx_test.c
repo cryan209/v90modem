@@ -22,6 +22,7 @@
  * the symbols are right before they reach it.
  */
 
+#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -603,6 +604,41 @@ static int write_ulaw(const char *path, const v90_analogue_tx_config_t *cfg)
     return 0;
 }
 
+/* V.250 6.4.1 +MS on the digital side: Jd's Table 13 downstream rate mask
+ * (bits 18:33 then 35:40, mask bit k = 28000 + k*8000/6 bit/s) offers only
+ * the rates the DTE allowed; the analogue modem chooses from it. */
+static unsigned jd_rate_mask(int min_bps, int max_bps)
+{
+    v90_state_t *s = v90_init_data_pump(V90_LAW_ULAW);
+    uint8_t bits[72];
+    unsigned mask = 0;
+
+    assert(s);
+    v90_set_downstream_rate_limits(s, min_bps, max_bps);
+    v90_start_phase3(s, 78);
+    assert(v90_copy_jd_bits(s, bits, 72) == 72);
+    for (int k = 0; k < 22; k++)
+        if (bits[k < 16 ? 18 + k : 19 + k])
+            mask |= 1u << k;
+    v90_free(s);
+    return mask;
+}
+
+static void test_jd_downstream_rate_limits(void)
+{
+    unsigned m;
+
+    assert(jd_rate_mask(0, 0) == 0x3FFFFF);          /* all 22 rates */
+    m = jd_rate_mask(40000, 48000);
+    /* k = 9 (40000) through 15 (48000) */
+    assert(m == (((1u << 16) - 1) & ~((1u << 9) - 1)));
+    m = jd_rate_mask(0, 33333);
+    assert(m == 0x1F);                                /* 28000..33333 */
+    m = jd_rate_mask(50000, 0);
+    assert(m == (0x3FFFFF & ~((1u << 17) - 1)));      /* k = 17 (50666) up */
+    printf("PASS: Jd downstream rate mask follows the +MS bounds\n");
+}
+
 int main(int argc, char *argv[])
 {
     const char *ulaw_path;
@@ -623,6 +659,7 @@ int main(int argc, char *argv[])
     test_ja_carries_the_descriptor();
     test_rate_renegotiation_silence_cycle();
     test_v34_analogue_retrain_entry();
+    test_jd_downstream_rate_limits();
 
     if (ulaw_path) {
         v90_analogue_tx_config_t cfg;

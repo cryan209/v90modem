@@ -55,6 +55,30 @@ because the previous state was ME_HANGUP, so the DTE was never told
 ATH, which is answered by OK. `ATO` also now follows 6.3.7 (NO CARRIER with no
 call, ERROR for a value other than 0).
 
+## +MS rate bounds, AT-1 (2026-10-06)
+
+The six +MS rates now bind the next call.  Where each one acts:
+
+| Layer | What it does |
+|---|---|
+| `+MS` set | ERROR when no modulation the setting offers can connect inside the bounds (5.4.4.2), e.g. `+MS=V32B,0,10000,11000`; the previous setting stands. |
+| V.8 offer | A modulation whose rates cannot fit is withdrawn: V.22 (1200/2400), V.32bis (4800-14400, or 4800/9600 for V32), V.34 (2400-33600 each way), V.90/V.92 (Table 13's 28000-56000 down, V.34 or V.92 PCM up).  A PCM offer keeps its V.34 bit. |
+| V.22bis | Held at 1200 when 2400 does not fit both ways. |
+| V.32bis | The R1/R2/R3 rate mask carries only rates that fit both ways (6: one rate both directions). |
+| V.34 | Our MP's rate fields are capped per direction and its rate mask (shared by both directions, Table 20) loses rates below the lower minimum, so 11.4.1.1.4 settles inside the bounds or on nothing.  The receive back-off never steps below the receive minimum. |
+| V.90 | Jd's downstream mask offers only rates between the transmit bounds; the MP upstream mask is capped at the receive maximum and floored at the receive minimum. |
+| CONNECT | Backstop for what a peer can still choose (V.22bis falling to 1200, a downstream the analogue modem picks, V.91): a call outside the bounds is not reported CONNECT, it is hung up, and the DTE gets NO CARRIER. |
+
+Tests: `at_ms_test` (feasibility and the pruned offer, through the real
+engine), `console_test` (bounds reach the engine; a refused call is NO
+CARRIER), `v90_analogue_tx_test` (the Jd mask), `v34_duplex_test` with
+`V34_DUPLEX_CALL_LIMITS`/`V34_DUPLEX_EXPECT_RATES` (two V.34 modems settle on
+asymmetric 7200/9600 and carry payload without error), and `engine_pair_test`
+rows: V.32bis capped at 9600, and a 2400 minimum against a V.22 peer ending in
+NO CARRIER.  A V.34 pair with no common rate never reaches data mode (checked
+once; 60 s, so not in `make test`).  Nothing here is verified against a
+foreign modem.
+
 ## V.92 controls, AT-6 (2026-10-06)
 
 The 6.8 `+P` commands were stubs that answered OK and stored nothing.  Now:

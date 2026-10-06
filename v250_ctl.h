@@ -174,6 +174,7 @@ typedef struct {
     bool dc_tx;
     bool dc_rx;
     int dte_rate;           /* +ILRR: the DTE-DCE rate; 0 = not reported */
+    bool refused;           /* settled outside the +MS bounds: no CONNECT */
 } v250_connect_report_t;
 
 /* Writes the lines the settings call for, in the order 6.4.3 / 6.5.5 / 6.6.3

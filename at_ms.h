@@ -31,8 +31,11 @@
  * are recognised and always ERROR; +MS$ lists them.
  *
  * A rate of 0 means "no limit"; a rate above the carrier's maximum is ERROR.
- * Rates are otherwise stored and reported but NOT enforced: the engine
- * chooses rates from its own training.
+ * The engine enforces the rest (me_set_modulation_limits()): bounds no
+ * offered modulation can meet are ERROR, modulations that cannot fit are
+ * withdrawn from the offer, the V.22bis/V.32bis rates, the V.34 MP rates and
+ * mask and the V.90 Jd and MP masks are bounded, and a call that settles
+ * outside the bounds anyway ends with NO CARRIER instead of CONNECT.
  */
 #ifndef AT_MS_H
 #define AT_MS_H

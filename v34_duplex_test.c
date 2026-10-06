@@ -393,6 +393,20 @@ static int run_case(int baud, int bps, bool alaw)
     }
     v34_tx_power(call_modem, -12.0f);
     v34_tx_power(answer_modem, -12.0f);
+    /* V.250 6.4.1 +MS bounds on either modem's MP, "min_tx,max_tx,min_rx,max_rx"
+       in bit/s from that modem's side (v34_set_mp_rate_limits()). */
+    {
+        const char *names[2] = { "V34_DUPLEX_CALL_LIMITS", "V34_DUPLEX_ANSWER_LIMITS" };
+        v34_state_t *modems[2] = { call_modem, answer_modem };
+
+        for (int k = 0; k < 2; k++) {
+            const char *v = getenv(names[k]);
+            int l[4] = { 0, 0, 0, 0 };
+
+            if (v && sscanf(v, "%d,%d,%d,%d", &l[0], &l[1], &l[2], &l[3]) == 4)
+                v34_set_mp_rate_limits(modems[k], l[0], l[1], l[2], l[3]);
+        }
+    }
     if (getenv("V34_DUPLEX_ROT") || getenv("V34_DUPLEX_CONJ")
         || getenv("V34_DUPLEX_SCALE")) {
         int rotation = getenv("V34_DUPLEX_ROT") ? atoi(getenv("V34_DUPLEX_ROT")) : 0;
@@ -619,6 +633,26 @@ static int run_case(int baud, int bps, bool alaw)
            caller.rx_bits, answer.rx_bits,
            caller.bit_errors, answer.bit_errors,
            completed_block >= 0 ? (completed_block + 1)*0.020 : max_blocks*0.020);
+    /* V34_DUPLEX_EXPECT_RATES=a2c,c2a: the MP exchange must have settled on
+       exactly these rates (bit/s), at both ends. */
+    if (getenv("V34_DUPLEX_EXPECT_RATES")) {
+        int want_a2c = 0, want_c2a = 0;
+        int got[2][2] = { { 0, 0 }, { 0, 0 } };
+        bool ok;
+
+        sscanf(getenv("V34_DUPLEX_EXPECT_RATES"), "%d,%d", &want_a2c, &want_c2a);
+        ok = v34_get_negotiated_mp_rates(call_modem, &got[0][0], &got[0][1]) == 0
+          && v34_get_negotiated_mp_rates(answer_modem, &got[1][0], &got[1][1]) == 0;
+        printf("MP rates: caller a2c=%d c2a=%d, answerer a2c=%d c2a=%d (want %d/%d)\n",
+               got[0][0]*2400, got[0][1]*2400, got[1][0]*2400, got[1][1]*2400,
+               want_a2c, want_c2a);
+        for (int k = 0; k < 2; k++)
+            ok = ok && got[k][0]*2400 == want_a2c && got[k][1]*2400 == want_c2a;
+        if (!ok) {
+            printf("FAIL: MP rates differ from V34_DUPLEX_EXPECT_RATES\n");
+            return 1;
+        }
+    }
     printf("  source bits: caller=%d answer=%d; sync skipped=%d/%d; "
            "peaks=%d/%d clipped=%d/%d\n",
            caller.tx_bits, answer.tx_bits, caller.skipped_bits, answer.skipped_bits,

@@ -345,6 +345,7 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 # 540 ms L2 its answerer passes 7/8 of delays 0/3/7/11/17/23/31/40 against
 # 8/8 with 400 ms, the one failure at delay 0 (71 post-resync bit errors).
 	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2400 9600 ulaw
+	V34_DUPLEX_CALL_LIMITS=0,9600,0,7200 V34_DUPLEX_EXPECT_RATES=7200,9600 ./v34_duplex_test 3200 21600 ulaw
 	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2400 9600 alaw
 # 2743 A-law and 2800 u-law are out: both already failed at zero channel
 # delay before 2026-10-02 (the answerer never resynchronises), and over eight
@@ -443,6 +444,8 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --alaw --both-expect "+MCR: V22B|+MRR: 2400|+ER: LAPM|+DR: V42B|CONNECT 2400"
 	./engine_pair_test --expect V22BIS --expect-connect 1200 --both-at "AT+MS=V22" --both-at "AT+MR=1" --both-expect "+MCR: V22|+MRR: 1200|CONNECT 1200"
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT&A3" --both-at "AT&M4" --both-expect "CONNECT 2400/ARQ/V22B/LAPM/V42BIS"
+	./engine_pair_test --expect V32BIS --expect-connect 9600 --both-env ME_MODE=v32bis --call-at "AT+MS=V32B,1,0,9600"
+	./engine_pair_test --expect V22BIS --call-at "AT+MS=V22B,1,2400" --answer-env ME_MODE=v22-1200 --expect-hangup --call-absent CONNECT --call-expect "NO CARRIER"
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --both-at "AT+DS=0" --both-expect "+ER: LAPM|+DR: NONE|CONNECT"
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --call-at "AT+DS=1" --call-expect "+DR: V42B TD|CONNECT" --answer-expect "+DR: V42B RD|CONNECT"
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-at "AT+MR=1" --both-at "AT+ER=1" --both-at "AT+DR=1" --call-at "AT+DS=2" --call-expect "+DR: V42B RD|CONNECT" --answer-expect "+DR: V42B TD|CONNECT"

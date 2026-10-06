@@ -237,6 +237,13 @@ void v90_enable_v92_phase3(v90_state_t *s);
  */
 void v90_set_dil_descriptor(v90_state_t *s, const v90_dil_desc_t *desc);
 
+/*
+ * V.250 6.4.1 +MS bounds on the downstream (this modem's transmit), bit/s,
+ * 0 = none: Jd's Table 13 rate mask then offers only rates between them.
+ * ME_V90_MAX_DOWNSTREAM_RATE still caps it when lower.
+ */
+void v90_set_downstream_rate_limits(v90_state_t *s, int min_bps, int max_bps);
+
 /* Initialise default analogue-side Phase 2 INFO contracts. */
 void v90_info0a_init(v90_info0a_t *info);
 void v90_info1a_init(v90_info1a_t *info);
@@ -395,6 +402,11 @@ void v90_notify_cp_ready(v90_state_t *s);
  * capability mask) at the rate the V.34 upstream receiver actually trained
  * at.  0 clears the cap (echo the peer's CPt mask verbatim). */
 void v90_set_upstream_rate_limit(v90_state_t *s, int bps);
+/* V.250 6.4.1 +MS receive minimum: MP's upstream mask then leaves out the
+ * rates below it.  0 clears it. */
+void v90_set_upstream_rate_floor(v90_state_t *s, int bps);
+/* The 72 Jd bits (Table 13) as built for Phase 3, one per byte.  For tests. */
+int v90_copy_jd_bits(const v90_state_t *s, uint8_t *bits, int max_bits);
 
 /*
  * Enable V.92 Phase 4 mode on this digital modem context.

@@ -2412,6 +2412,97 @@ static bool me_offer_from_mode(const char *mode, bool automode, me_offer_t *o)
     return true;
 }
 
+/* V.250 6.4.1 +MS rate bounds in bit/s, from this modem's side (transmit,
+ * receive), 0 = no bound.  g_cfg_lim is the next call's, under g_cfg_mtx
+ * like g_cfg_mode; g_lim is the current call's, taken at the call boundary. */
+enum { LIM_MIN_TX, LIM_MAX_TX, LIM_MIN_RX, LIM_MAX_RX };
+static int g_cfg_lim[4];
+static int g_lim[4];
+/* The call settled outside g_lim: me_get_state() tears it down. */
+static bool g_lim_refused = false;
+static const char *g_hangup_cause = NULL;
+
+static bool lim_admits(int bps, int min, int max)
+{
+    return (min <= 0 || bps >= min) && (max <= 0 || bps <= max);
+}
+
+/* Some rate of the ladder lo, lo + num/den, ... <= hi within [min, max]. */
+static bool lim_ladder(int lo, int hi, int num, int den, int min, int max)
+{
+    for (int k = 0; lo + k * num / den <= hi; k++)
+        if (lim_admits(lo + k * num / den, min, max))
+            return true;
+    return false;
+}
+
+/* V.34 (and the V.90/V.92 upstream as V.34): 2400-33600 in 2400s. */
+static bool lim_v34(int min, int max)
+{
+    return lim_ladder(2400, 33600, 2400, 1, min, max);
+}
+
+/* V.90 Table 13's downstream rates: 28000 + k*8000/6, k = 0..21. */
+static bool lim_pcm_downstream(int min, int max)
+{
+    return lim_ladder(28000, 56000, 8000, 6, min, max);
+}
+
+/* A rate both directions may use: V.22bis and V.32bis run one rate both ways. */
+static bool lim_symmetric(const int *rates, int n, const int *l)
+{
+    for (int i = 0; i < n; i++)
+        if (lim_admits(rates[i], l[LIM_MIN_TX], l[LIM_MAX_TX])
+            && lim_admits(rates[i], l[LIM_MIN_RX], l[LIM_MAX_RX]))
+            return true;
+    return false;
+}
+
+static const int lim_v22_rates[] = { 1200, 2400 };
+static const int lim_v32_rates[] = { 4800, 9600 };
+static const int lim_v32bis_rates[] = { 4800, 7200, 9600, 12000, 14400 };
+
+/* Withdraw from an offer what cannot connect inside the bounds (V.250 6.4.1:
+ * min/max are "the lowest/highest value at which the DCE may establish a
+ * connection").  False when nothing is left.  V.91 is not pruned (its rate
+ * adapts after DIL); the CONNECT-time check in me_connect_info() is the
+ * backstop for it and for anything a peer settles outside the bounds. */
+static bool me_offer_apply_limits(me_offer_t *o, const int *l, bool analogue)
+{
+    int dmin = analogue ? l[LIM_MIN_RX] : l[LIM_MIN_TX];
+    int dmax = analogue ? l[LIM_MAX_RX] : l[LIM_MAX_TX];
+    int umin = analogue ? l[LIM_MIN_TX] : l[LIM_MIN_RX];
+    int umax = analogue ? l[LIM_MAX_TX] : l[LIM_MAX_RX];
+
+    if (!l[0] && !l[1] && !l[2] && !l[3])
+        return true;
+    if (o->clear || o->v120) {
+        int rate = o->r56 ? 56000 : 64000;
+        const int r[1] = { rate };
+
+        return lim_symmetric(r, 1, l);
+    }
+    if ((o->v90 || o->x2 || o->k56)
+        && !(lim_pcm_downstream(dmin, dmax)
+             && (lim_v34(umin, umax)
+                 /* V.92 PCM upstream: up to 48000, same 8000/6 steps */
+                 || (o->v92 && lim_ladder(24000, 48000, 8000, 6, umin, umax)))))
+        o->v90 = o->v92 = o->x2 = o->k56 = false;
+    /* A PCM offer keeps V.8's V.34 bit whatever the bounds: V.90's upstream
+     * is V.34 (and so is its fallback), so the bit is part of offering V.90
+     * at all.  A V.34 fallback outside the bounds is refused at CONNECT. */
+    if (o->v34 && !o->v90 && !o->x2
+        && !(lim_v34(l[LIM_MIN_TX], l[LIM_MAX_TX]) && lim_v34(l[LIM_MIN_RX], l[LIM_MAX_RX])))
+        o->v34 = false;
+    if (o->v32bis_ok && !(strcmp(o->name, "v32") == 0
+                          ? lim_symmetric(lim_v32_rates, 2, l)
+                          : lim_symmetric(lim_v32bis_rates, 5, l)))
+        o->v32bis_ok = o->v32 = false;
+    if (o->v22 && !lim_symmetric(lim_v22_rates, strcmp(o->name, "v22-1200") == 0 ? 1 : 2, l))
+        o->v22 = false;
+    return o->v90 || o->x2 || o->v34 || o->v32bis_ok || o->v22 || o->v91;
+}
+
 static bool me_resolve_offer(const char *mode, bool automode)
 {
     const char *role = getenv("ME_V90_ROLE");
@@ -2419,6 +2510,9 @@ static bool me_resolve_offer(const char *mode, bool automode)
 
     if (!me_offer_from_mode(mode, automode, &o))
         return false;
+    if (!me_offer_apply_limits(&o, g_lim, o.v90 && role && strcmp(role, "analogue") == 0))
+        ME_LOG("[ME] AT+MS: no modulation of mode %s connects within %d-%d/%d-%d bit/s\n",
+               mode, g_lim[0], g_lim[1], g_lim[2], g_lim[3]);
     g_enable_x2 = o.x2;
     g_advertise_v90 = o.v90;
     g_advertise_v34 = o.v34;
@@ -2438,16 +2532,33 @@ static bool me_resolve_offer(const char *mode, bool automode)
 
 int me_set_modulation_offer(const char *mode, bool automode)
 {
+    return me_set_modulation_limits(mode, automode, 0, 0, 0, 0);
+}
+
+int me_set_modulation_limits(const char *mode, bool automode,
+                             int min_tx, int max_tx, int min_rx, int max_rx)
+{
+    const char *role = getenv("ME_V90_ROLE");
+    const int l[4] = { min_tx, max_tx, min_rx, max_rx };
     me_offer_t o;
 
     if (!me_offer_from_mode(mode, automode, &o))
         return -1;
+    /* V.250 5.4.4.2: a setting this DCE cannot honour is ERROR, not an OK
+     * that leaves the next call unable to connect. */
+    if (!me_offer_apply_limits(&o, l, o.v90 && role && strcmp(role, "analogue") == 0))
+        return -1;
+    me_offer_from_mode(mode, automode, &o);     /* the name, unpruned */
     pthread_mutex_lock(&g_cfg_mtx);
     snprintf(g_cfg_mode, sizeof(g_cfg_mode), "%s", o.name);
     g_cfg_automode = automode;
+    memcpy(g_cfg_lim, l, sizeof(g_cfg_lim));
     pthread_mutex_unlock(&g_cfg_mtx);
     ME_LOG("[ME] AT+MS: next call is mode %s, automode %d\n", o.name,
            automode ? 1 : 0);
+    if (min_tx || max_tx || min_rx || max_rx)
+        ME_LOG("[ME] AT+MS: next call limited to TX %d-%d, RX %d-%d bit/s (0 = none)\n",
+               min_tx, max_tx, min_rx, max_rx);
     return 0;
 }
 
@@ -2466,7 +2577,20 @@ void me_reset_modulation_offer(void)
     pthread_mutex_lock(&g_cfg_mtx);
     snprintf(g_cfg_mode, sizeof(g_cfg_mode), "%s", g_default_mode);
     g_cfg_automode = true;
+    memset(g_cfg_lim, 0, sizeof(g_cfg_lim));
     pthread_mutex_unlock(&g_cfg_mtx);
+}
+
+/* The next call's offer as its +MS bounds leave it. */
+static void me_offer_cfg_limits(me_offer_t *o)
+{
+    const char *role = getenv("ME_V90_ROLE");
+    int l[4];
+
+    pthread_mutex_lock(&g_cfg_mtx);
+    memcpy(l, g_cfg_lim, sizeof(l));
+    pthread_mutex_unlock(&g_cfg_mtx);
+    me_offer_apply_limits(o, l, o->v90 && role && strcmp(role, "analogue") == 0);
 }
 
 void me_modulation_offer_describe(char *buf, size_t len)
@@ -2481,6 +2605,7 @@ void me_modulation_offer_describe(char *buf, size_t len)
         snprintf(buf, len, "none");
         return;
     }
+    me_offer_cfg_limits(&o);
     me_offer_describe(&o, (k && *k) ? (*k != '0') : o.k56,
                       v ? true : o.v91,
                       buf, len);
@@ -2495,6 +2620,7 @@ int me_modulation_offer_bits(void)
     me_get_modulation_offer(mode, sizeof(mode), &automode);
     if (!me_offer_from_mode(mode, automode, &o))
         return 0;
+    me_offer_cfg_limits(&o);
     return me_offer_bits(o.v22, o.v32, o.v34, o.v90);
 }
 
@@ -4296,7 +4422,11 @@ static void v34_rx_rate_backoff_locked(void)
     want = *ours - parse_env_int("ME_V34_RX_RATE_BACKOFF_STEP", 2);
     if (want < 2)
         want = 2;
-    if (want == *ours)
+    /* Not below the DTE's +MS receive minimum: a slower call is one it has
+       said it will not have. */
+    if (want * 2400 < g_lim[LIM_MIN_RX])
+        want = (g_lim[LIM_MIN_RX] + 2399) / 2400;
+    if (want >= *ours)
         return;
     ME_LOG("[ME] V.34 receive rate back-off %d: asking for %d bps instead of "
            "%d bps (other direction left at %d bps)\n",
@@ -6649,6 +6779,11 @@ static void start_v22bis_training(void)
        for one, which is exactly a V.22 modem (V.22bis 6.3.1.1.1 c), 6.3.1.2.1
        d)); a V.22bis peer then settles at 1200 too. */
     int bps = strcmp(g_mode_name, "v22-1200") == 0 ? 1200 : 2400;
+    const int r2400[1] = { 2400 };
+
+    /* +MS bounds that leave no room for 2400 both ways: V.22 at 1200. */
+    if (bps == 2400 && !lim_symmetric(r2400, 1, g_lim))
+        bps = 1200;
 
     trace_phase("enter TRAINING: mod=V22BIS role=%s max=%d",
                 g_calling_party ? "caller" : "answerer", bps);
@@ -6776,15 +6911,26 @@ static int me_v32bis_rate_mask(void)
 
     /* AT+MS=V32 / ME_MODE=v32: V.32 proper, 9600 and 4800 only. */
     if (strcmp(g_mode_name, "v32") == 0) {
+        const int r9600[1] = { 9600 };
+        const int r4800[1] = { 4800 };
+        int m;
+
         if (max > 9600)
             max = 9600;
-        return (max >= 9600 ? V32BIS_RATE_9600 : 0) | V32BIS_RATE_4800;
+        m = (max >= 9600 && lim_symmetric(r9600, 1, g_lim) ? V32BIS_RATE_9600 : 0)
+          | (lim_symmetric(r4800, 1, g_lim) ? V32BIS_RATE_4800 : 0);
+        return m ? m : V32BIS_RATE_4800;
     }
     int mask = 0;
 
-    for (size_t i = 0; i < sizeof(table)/sizeof(table[0]); i++)
-        if (table[i].bps <= max)
+    for (size_t i = 0; i < sizeof(table)/sizeof(table[0]); i++) {
+        const int r[1] = { table[i].bps };
+
+        /* V.32bis runs one rate both ways (6.2's R3): +MS must admit it in
+         * both directions. */
+        if (table[i].bps <= max && lim_symmetric(r, 1, g_lim))
             mask |= table[i].mask;
+    }
     return mask ? mask : V32BIS_RATE_4800;
 }
 
@@ -7491,6 +7637,9 @@ static void start_v34_training(void)
                      true,          /* full duplex */
                      v34_get_bit_cb, NULL,
                      v34_put_bit_cb, NULL);
+    /* V.250 6.4.1 +MS: our MP never offers a rate outside the DTE's bounds. */
+    v34_set_mp_rate_limits(g_v34, g_lim[LIM_MIN_TX], g_lim[LIM_MAX_TX],
+                           g_lim[LIM_MIN_RX], g_lim[LIM_MAX_RX]);
     if (!g_v34) {
         ME_LOG("[ME] v34_init failed, falling back to V.22bis\n");
         start_v22bis_training();
@@ -8072,6 +8221,24 @@ static void me_connect_info(int rate, v250_connect_report_t *r)
         r->tx_rate = g_report_tx_rate;
         r->rx_rate = g_report_rx_rate;
     }
+    /* V.250 6.4.1: min/max are the lowest/highest rates at which the DCE
+     * "may establish a connection".  Everything above steers the call into
+     * the bounds; a peer can still settle outside them (V.22bis falling back
+     * to 1200, a V.90 analogue modem choosing its downstream, V.91), and such
+     * a call is not reported as connected -- it ends with NO CARRIER. */
+    if (r->tx_rate > 0) {
+        int rx = r->rx_rate > 0 ? r->rx_rate : r->tx_rate;
+
+        if (!lim_admits(r->tx_rate, g_lim[LIM_MIN_TX], g_lim[LIM_MAX_TX])
+            || !lim_admits(rx, g_lim[LIM_MIN_RX], g_lim[LIM_MAX_RX])) {
+            ME_LOG("[ME] AT+MS: call settled at TX %d / RX %d bit/s, outside "
+                   "TX %d-%d / RX %d-%d; not connecting\n", r->tx_rate, rx,
+                   g_lim[LIM_MIN_TX], g_lim[LIM_MAX_TX], g_lim[LIM_MIN_RX], g_lim[LIM_MAX_RX]);
+            r->refused = true;
+            g_lim_refused = true;
+            g_hangup_cause = "Modem (rate outside the +MS bounds)";
+        }
+    }
     if (g_data_framing == DS_FRAMING_V42 && ds_link_is_ready(&g_data_stack)) {
         r->ec = "LAPM";
         ds_compression_state(&g_data_stack, &scheme, &ctx, &crx);
@@ -8192,6 +8359,8 @@ void me_init(void)
         snprintf(g_default_mode, sizeof(g_default_mode), "%s", g_mode_name);
         snprintf(g_cfg_mode, sizeof(g_cfg_mode), "%s", g_mode_name);
         g_cfg_automode = true;
+        di_set_pmhr_cb(me_v92_mh_request);
+        di_set_modulation_limits_op(me_set_modulation_limits);
         di_set_modulation_ops(me_set_modulation_offer, me_get_modulation_offer,
                               me_reset_modulation_offer);
         di_set_connect_info_cb(me_connect_info);
@@ -8227,7 +8396,6 @@ void me_init(void)
             g_data_framing_auto = true;
         }
         if (framing && strcmp(framing, "auto") != 0 && strcmp(framing, "v14") != 0)
-        di_set_pmhr_cb(me_v92_mh_request);
             g_data_framing_auto = false;
         ME_LOG("[ME] DTE framing: %s%s\n",
                g_data_framing == DS_FRAMING_V14 ? "V.14 8N1" :
@@ -8489,6 +8657,11 @@ void me_on_sip_connected(void)
         bool automode;
 
         me_get_modulation_offer(mode, sizeof(mode), &automode);
+        pthread_mutex_lock(&g_cfg_mtx);
+        memcpy(g_lim, g_cfg_lim, sizeof(g_lim));
+        pthread_mutex_unlock(&g_cfg_mtx);
+        g_lim_refused = false;
+        g_hangup_cause = NULL;
         me_resolve_offer(mode, automode);
         if (was != g_mode_name || was_v22 != g_advertise_v22)
             ME_LOG("[ME] Modem mode for this call: %s (V.8 offer %s, AT+MS)\n",
@@ -8650,7 +8823,8 @@ void me_on_sip_disconnected_status(int sip_status)
         di_on_call_failed(sip_status);
     else if (prev == ME_DATA || prev == ME_TRAINING || prev == ME_V8 || prev == ME_HANGUP)
         di_on_disconnected_cause(prev == ME_HANGUP
-                                 ? "Modem (protocol or training failure)"
+                                 ? (g_hangup_cause ? g_hangup_cause
+                                                   : "Modem (protocol or training failure)")
                                  : "Remote (call cleared)", was_caller);
 }
 
@@ -11871,6 +12045,8 @@ static void prepare_v90_phase3_locked(void)
         if (!g_v90) {
             v90_law_t law = (g_law == ME_LAW_ALAW) ? V90_LAW_ALAW : V90_LAW_ULAW;
             g_v90 = v90_init_with_v34(g_v34, law);
+            /* V.250 6.4.1 +MS: the downstream is our transmit direction. */
+            v90_set_downstream_rate_limits(g_v90, g_lim[LIM_MIN_TX], g_lim[LIM_MAX_TX]);
             if (g_v90 && g_v90_pending_dil_valid)
                 v90_set_dil_descriptor(g_v90, &g_v90_pending_dil);
             if (g_v90 && g_v90_phase2_restarts > 0) {
@@ -12162,9 +12338,13 @@ static void enter_v90_phase4_rx_locked(void)
          * digital modem to advertise any enabled subset, so this must remain
          * opt-in; uncapping can make a peer select a rate above the receiver's
          * trained ceiling (observed against SmartLink). */
+        /* V.250 6.4.1 +MS: the upstream is our receive direction. */
+        if (g_lim[LIM_MAX_RX] > 0 && (limit <= 0 || limit > g_lim[LIM_MAX_RX]))
+            limit = g_lim[LIM_MAX_RX];
         if (parse_env_int("ME_V90_MP_UNCAPPED", 0) != 0)
             limit = 0;
         v90_set_upstream_rate_limit(g_v90, limit);
+        v90_set_upstream_rate_floor(g_v90, g_lim[LIM_MIN_RX]);
         ME_LOG("[ME] V.90 upstream selection: %d baud, rate cap %d bps, %s carrier\n",
                baud == 3 ? 3000 : 3200, limit,
                v34_get_rx_high_carrier(g_v34) ? "high" : "low");
@@ -13506,6 +13686,7 @@ void me_flush_io_schedule(void)
 /* V.92 9.10 modem-on-hold                                             */
 /* ------------------------------------------------------------------ */
 
+/* ME_V92_MH when set, else the DTE's +PMH (V.250 6.8.2: 0 is enabled). */
 static bool me_v92_mh_enabled(void)
 {
     static int cached = -2;
@@ -13567,6 +13748,7 @@ static void mh_arm_locked(void)
     v92_mh_line_init(&g_mh_line, false, -12.0);
     g_mh_armed = true;
     g_mh_engaged = false;
+    g_mh_armed_pub = 1;
     ME_LOG("[ME] V.92 9.10 modem-on-hold armed (Tone B; T1 code %u; %s on-hold)\n",
            (unsigned)g_mh.t1_code, g_mh.grant ? "grants" : "denies");
 }
@@ -13575,9 +13757,15 @@ static void mh_disarm_locked(void)
 {
     g_mh_armed = false;
     g_mh_engaged = false;
+    g_mh_armed_pub = 0;
+    g_mh_dte_request = 0;
+    if (g_mh_dte_pending) {
+        /* Ended (retrain, cleardown, hang-up) before an answer: Table 34's 0. */
+        g_mh_dte_pending = false;
+        di_report_pmhr(0);
+    }
 }
 
-/* ME_V92_MH when set, else the DTE's +PMH (V.250 6.8.2: 0 is enabled). */
 /* New Phase 1 inside the same SIP call (9.10.2.1 and 9.10.2.3: "proceed
  * with Phase 1 of the start-up procedure ... disregarding information
  * received in previous phase 1 signals").  The data stack is NOT touched:
@@ -13603,7 +13791,6 @@ static void mh_restart_phase1_locked(bool as_caller, const char *why)
     }
 }
 
-    g_mh_armed_pub = 1;
 static void mh_handle_actions_locked(void)
 {
     v92_mh_action_t a;
@@ -13612,13 +13799,6 @@ static void mh_handle_actions_locked(void)
         switch (a) {
         case V92_MH_ACT_SUSPEND_LINK:
             ds_suspend_link(&g_data_stack);
-    g_mh_armed_pub = 0;
-    g_mh_dte_request = 0;
-    if (g_mh_dte_pending) {
-        /* Ended (retrain, cleardown, hang-up) before an answer: Table 34's 0. */
-        g_mh_dte_pending = false;
-        di_report_pmhr(0);
-    }
             ME_LOG("[ME] V.92 9.10: leaving data mode, V.42 suspended (Amd.2 9.10.3)\n");
             break;
         case V92_MH_ACT_ON_HOLD:
@@ -13647,6 +13827,7 @@ static void mh_handle_actions_locked(void)
                 v92_mh_line_retrain_reply(&g_mh_line, since);
                 g_mh_retrain_reply = true;
                 g_mh_armed = false;
+                g_mh_armed_pub = 0;
                 ME_LOG("[ME] V.92 9.10.1.1: retrain, not modem-on-hold; answering its "
                        "Tone A reversal (seen %d ms ago) before V.34 Phase 2\n", since / 8);
                 trace_phase("V92 MH retrain by reversal, reply %d ms after it", since / 8);
@@ -13682,7 +13863,6 @@ static void mh_handle_actions_locked(void)
 static bool mh_initiate_due_locked(void)
 {
     static int after_ms = -2;
-                g_mh_armed_pub = 0;
 
     if (after_ms == -2)
         after_ms = parse_env_int("ME_V92_MH_AFTER_MS", 20000);
@@ -13709,6 +13889,17 @@ static bool mh_rx_locked(const uint8_t *codewords, int count)
                v92_mh_signal_name(sig));
         (void) v92_mh_ctrl_initiate(&g_mh, sig, V92_MH_CLRD_OTHER);
     }
+    if (g_mh_dte_request) {
+        g_mh_dte_request = 0;
+        if (g_mh.state == V92_MH_ST_IDLE && g_state == ME_DATA
+            && v92_mh_ctrl_initiate(&g_mh, V92_MH_REQ, 0)) {
+            g_mh_dte_pending = true;
+            ME_LOG("[ME] V.92 9.10: initiating MHreq (+PMHR)\n");
+        } else {
+            /* Already in a transaction, or MHnack 0101 forbade it. */
+            di_report_pmhr(g_mh.no_outgoing_requests ? 14 : 0);
+        }
+    }
     for (int off = 0; off < count; ) {
         int n = count - off;
 
@@ -13717,6 +13908,11 @@ static bool mh_rx_locked(const uint8_t *codewords, int count)
             linear[i] = pcm_to_linear(codewords[off + i]);
         v92_mh_line_rx(&g_mh_line, &g_mh, linear, n);
         off += n;
+    }
+    if (g_mh_dte_pending && g_mh.request_result >= 0) {
+        g_mh_dte_pending = false;
+        ME_LOG("[ME] V.92 9.10: +PMHR: %d\n", g_mh.request_result);
+        di_report_pmhr(g_mh.request_result);
     }
     if (!g_mh_engaged && g_mh.state != V92_MH_ST_IDLE) {
         g_mh_engaged = true;
@@ -13744,17 +13940,6 @@ static int mh_tx_locked(uint8_t *codewords, int count)
             k = v92_mh_line_retrain_reply_fill(&g_mh_line, linear, n);
             for (int i = 0; i < k; i++)
                 codewords[done + i] = linear_to_pcm(linear[i]);
-    if (g_mh_dte_request) {
-        g_mh_dte_request = 0;
-        if (g_mh.state == V92_MH_ST_IDLE && g_state == ME_DATA
-            && v92_mh_ctrl_initiate(&g_mh, V92_MH_REQ, 0)) {
-            g_mh_dte_pending = true;
-            ME_LOG("[ME] V.92 9.10: initiating MHreq (+PMHR)\n");
-        } else {
-            /* Already in a transaction, or MHnack 0101 forbade it. */
-            di_report_pmhr(g_mh.no_outgoing_requests ? 14 : 0);
-        }
-    }
             done += k;
             if (k < n) {
                 /* The reversed tone ends on this sample: 11.2.1.1.4 times
@@ -13764,11 +13949,6 @@ static int mh_tx_locked(uint8_t *codewords, int count)
                 g_mh_engaged = false;
                 ME_LOG("[ME] V.92 9.10.1.1: Tone B reversal sent; V.34 Phase 2 resumes\n");
                 break;
-    if (g_mh_dte_pending && g_mh.request_result >= 0) {
-        g_mh_dte_pending = false;
-        ME_LOG("[ME] V.92 9.10: +PMHR: %d\n", g_mh.request_result);
-        di_report_pmhr(g_mh.request_result);
-    }
             }
         }
         return done;
@@ -14251,6 +14431,11 @@ static bool me_data_hold_locked(void)
 me_state_t me_get_state(void)
 {
     pthread_mutex_lock(&g_state_mtx);
+    if (g_lim_refused && g_state != ME_HANGUP && g_state != ME_IDLE) {
+        g_lim_refused = false;
+        trace_phase("rate outside +MS bounds -> HANGUP");
+        g_state = ME_HANGUP;
+    }
     if (g_data_link_failed && g_state == ME_DATA && !me_data_hold_locked()) {
         g_data_link_failed = false;
         ME_LOG("[ME] V.42 failure requested call teardown\n");

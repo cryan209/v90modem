@@ -399,6 +399,25 @@ static int test_engine(void)
     unsetenv("ME_V8_ADVERTISE_V91");
 
     close(dte_fd);
+    /* 6.4.1 rate bounds: a modulation that cannot connect inside them is not
+     * offered, and bounds nothing can meet are ERROR (5.4.4.2). */
+    expect("AT+MS=V32B,0,10000,11000", "ERROR");    /* no V.32bis rate in there */
+    expect("AT+MS=V34,1,0,9600", "OK");
+    expect("AT+MS?", "+MS: V34,1,0,9600,0,9600");
+    expect_offer(V8_MOD_V34 | V8_MOD_V32 | V8_MOD_V22, "max 9600: V.34, V.32bis and V.22 still fit");
+    expect("AT+MS=V34,1,4800,9600", "OK");
+    expect_offer(V8_MOD_V34 | V8_MOD_V32, "min 4800: V.22bis (2400 at most) withdrawn");
+    expect("AT+MS=V90,1,0,26000,0,0", "OK");
+    expect_offer(V8_MOD_V34 | V8_MOD_V32 | V8_MOD_V22,
+                 "transmit max 26000: below V.90's 28000 downstream floor, V.90 withdrawn");
+    expect("AT+MS=V90,1,40000,0,0,0", "OK");
+    expect_offer(V8_MOD_V90 | V8_MOD_V34,
+                 "transmit min 40000: V.90 alone (its V.34 bit kept), no V.32bis/V.22");
+    expect("AT+MS=V90,0,0,0,40000,0", "ERROR");      /* nothing receives 40000 */
+    expect("AT+MS?", "+MS: V90,1,40000,0,0,0");      /* ...and the setting stands */
+    expect("AT+MS=V90", "OK");
+    expect_offer(V8_MOD_V90 | V8_MOD_V34 | V8_MOD_V32 | V8_MOD_V22, "no bounds: the full offer again");
+
     di_close();
     return 0;
 }

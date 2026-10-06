@@ -67,6 +67,12 @@ typedef void (*di_ms_get_cb_t)(char *mode, size_t len, bool *automode);
 typedef void (*di_ms_reset_cb_t)(void);
 void di_set_modulation_ops(di_ms_set_cb_t set, di_ms_get_cb_t get,
                            di_ms_reset_cb_t reset);
+/* Optional: the +MS rate subparameters too (V.250 6.4.1), this DCE's
+ * transmit then receive, bit/s, 0 = none.  When set it is used in place of
+ * the set callback above; -1 makes the +MS command ERROR. */
+typedef int  (*di_ms_limits_cb_t)(const char *mode, bool automode, int min_tx,
+                                  int max_tx, int min_rx, int max_rx);
+void di_set_modulation_limits_op(di_ms_limits_cb_t cb);
 
 /*
  * V.250 +MR/+ES/+ER/+DS/+DR (v250_ctl.h).  di_get_v250_settings() copies what

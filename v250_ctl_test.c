@@ -288,7 +288,7 @@ static void report(const v250_ctl_t *c, const v250_connect_report_t *r, const ch
 static void test_reports(void)
 {
     v250_ctl_t c;
-    v250_connect_report_t r = { "V34", 28800, 0, "LAPM", 1, true, true, 0 };
+    v250_connect_report_t r = { "V34", 28800, 0, "LAPM", 1, true, true, 0, false };
 
     printf("connect reports (6.4.3, 6.5.5, 6.6.3):\n");
     v250_ctl_reset(&c);
@@ -328,7 +328,7 @@ static void test_reports(void)
 static void test_interface_parameters(void)
 {
     v250_ctl_t c;
-    v250_connect_report_t r = { "V34", 33600, 0, "LAPM", 1, true, true, 57600 };
+    v250_connect_report_t r = { "V34", 33600, 0, "LAPM", 1, true, true, 57600, false };
     char out[256];
 
     printf("+IPR, +ICF, +IFC, +ILRR, +MSC, +MA:\n");
@@ -394,7 +394,7 @@ static void test_courier_aliases(void)
 {
     v250_ctl_t c;
     char out[64];
-    v250_connect_report_t r = { "V34", 28800, 0, "LAPM", 1, true, true, 0 };
+    v250_connect_report_t r = { "V34", 28800, 0, "LAPM", 1, true, true, 0, false };
 
     printf("Courier/Rockwell aliases:\n");
     v250_ctl_reset(&c);

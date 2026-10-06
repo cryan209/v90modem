@@ -1146,6 +1146,12 @@ typedef struct
     /*! \brief Optional explicit MP direction-rate policy. When false, MP rate
                advertisement falls back to locally-derived defaults. */
     bool mp_rate_policy_valid;
+    /*! V.250 6.4.1 +MS bounds in bit/s, this modem's transmit and receive
+        directions (0 = none).  Applied over whatever chose the MP rates. */
+    int mp_lim_min_tx;
+    int mp_lim_max_tx;
+    int mp_lim_min_rx;
+    int mp_lim_max_rx;
     /*! \brief Explicit MP maximum answerer-to-caller signalling rate (N*2400). */
     int mp_rate_a_to_c;
     /*! \brief Explicit MP maximum caller-to-answerer signalling rate (N*2400). */

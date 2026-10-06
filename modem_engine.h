@@ -123,6 +123,13 @@ void me_hangup(void);
  * me_reset_modulation_offer() (ATZ, AT&F) restores.
  */
 int  me_set_modulation_offer(const char *mode, bool automode);
+/* The same, with V.250 6.4.1 +MS rate bounds in bit/s from this modem's
+ * side (0 = none).  -1 when no modulation of the offer can connect inside
+ * them.  They bound the next call's V.8 offer, the V.22bis/V.32bis rates,
+ * the V.34 MP rates and mask and the V.90 Jd downstream mask, and a call
+ * that settles outside them anyway is hung up rather than reported. */
+int  me_set_modulation_limits(const char *mode, bool automode,
+                              int min_tx, int max_tx, int min_rx, int max_rx);
 void me_get_modulation_offer(char *mode, size_t len, bool *automode);
 void me_reset_modulation_offer(void);
 /* The CM/JM modulations the next call will offer, as V8_MOD_* bits. */

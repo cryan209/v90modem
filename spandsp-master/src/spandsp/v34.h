@@ -626,6 +626,16 @@ SPAN_DECLARE(int) v34_get_negotiated_mp_rates(v34_state_t *s,
                                               int *bit_rate_a_to_c,
                                               int *bit_rate_c_to_a);
 
+/*! Bound the data signalling rates this modem's MP offers, as V.250 6.4.1's
+    +MS asks: per direction (this modem's transmit and receive), in bit/s,
+    0 meaning no bound.  The maxima cap the MP rate fields; the minima clear
+    the slower rates from the MP rate mask, which both directions share
+    (Table 20 bits 35:49), so the floor there is the lower of the two minima
+    and a direction-specific minimum above it is the caller's to enforce.
+    Survives v34_restart(); v34_init() clears it. */
+SPAN_DECLARE(void) v34_set_mp_rate_limits(v34_state_t *s, int min_tx, int max_tx,
+                                          int min_rx, int max_rx);
+
 /*! Clear any explicit MP signalling-rate override so Phase 4 falls back to the
     modem's locally-derived defaults.
     \param s The modem context. */

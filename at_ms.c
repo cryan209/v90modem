@@ -354,7 +354,8 @@ void at_ms_format_help(const at_ms_settings_t *cur, char *buf, size_t len)
     HELP_PUT("  <automode> 1 = may fall back to lower modulations (default)\r\n");
     HELP_PUT("             0 = the named carrier only\r\n");
     HELP_PUT("  <rate> bit/s, 0 = no limit, at most the carrier maximum;\r\n");
-    HELP_PUT("         reported, not enforced -- training picks the rate\r\n");
+    HELP_PUT("         a modulation that cannot fit is not offered, and a\r\n");
+    HELP_PUT("         call that settles outside the bounds is NO CARRIER\r\n");
     HELP_PUT("  Takes effect on the next call. ATZ, AT&F restore the default.\r\n");
     HELP_PUT("\r\n");
     HELP_PUT("  Carrier  Also             Auto  Max bit/s  Next call offers\r\n");

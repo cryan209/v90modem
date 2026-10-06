@@ -7987,7 +7987,7 @@ SPAN_DECLARE(void) v34_set_trn_rate_selection(v34_state_t *s, bool enable)
 }
 /*- End of function --------------------------------------------------------*/
 
-static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_rate_c_to_a)
+static void v34_tx_get_mp_rates_unbounded(v34_state_t *s, int *bit_rate_a_to_c, int *bit_rate_c_to_a)
 {
     int a_to_c;
     int c_to_a;
@@ -8079,6 +8079,77 @@ static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_r
     }
     *bit_rate_a_to_c = a_to_c;
     *bit_rate_c_to_a = c_to_a;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Which MP rate field is this modem's receive direction: answer-to-call for
+   the call modem (and for a V.90 call fallen back to V.34, where the digital
+   modem is the V.34 call modem, 9.2.1.1.8). */
+static bool mp_rx_is_a_to_c(const v34_state_t *s)
+{
+    return s->calling_party  ||  s->tx.v90_v34_fallback;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* V.250 6.4.1 +MS: the MP rates, capped at the DTE's maxima. */
+static void v34_tx_get_mp_rates(v34_state_t *s, int *bit_rate_a_to_c, int *bit_rate_c_to_a)
+{
+    int *rx;
+    int *tx;
+
+    v34_tx_get_mp_rates_unbounded(s, bit_rate_a_to_c, bit_rate_c_to_a);
+    if (!bit_rate_a_to_c  ||  !bit_rate_c_to_a)
+        return;
+    /*endif*/
+    rx = mp_rx_is_a_to_c(s)  ?  bit_rate_a_to_c  :  bit_rate_c_to_a;
+    tx = (rx == bit_rate_a_to_c)  ?  bit_rate_c_to_a  :  bit_rate_a_to_c;
+    /* In V.90 proper only the upstream (call-to-answer) is V.34; the
+       downstream is PCM, whose rate is Jd's mask and CP's business. */
+    if (s->tx.v90_mode  &&  !s->tx.v90_v34_fallback)
+    {
+        if (rx != bit_rate_c_to_a)
+            rx = NULL;
+        else
+            tx = NULL;
+        /*endif*/
+    }
+    /*endif*/
+    if (rx  &&  s->tx.mp_lim_max_rx > 0  &&  *rx > s->tx.mp_lim_max_rx/2400)
+        *rx = s->tx.mp_lim_max_rx/2400;
+    /*endif*/
+    if (tx  &&  s->tx.mp_lim_max_tx > 0  &&  *tx > s->tx.mp_lim_max_tx/2400)
+        *tx = s->tx.mp_lim_max_tx/2400;
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
+/* The MP rate mask's floor, N, from the +MS minima: the mask is shared by
+   both directions, so only the lower minimum can be applied there. */
+static int mp_rate_floor_n(const v34_state_t *s)
+{
+    int lo;
+
+    if (s->tx.v90_mode  &&  !s->tx.v90_v34_fallback)
+        lo = s->calling_party  ?  s->tx.mp_lim_min_tx  :  s->tx.mp_lim_min_rx;
+    else if (s->tx.mp_lim_min_tx <= 0  ||  s->tx.mp_lim_min_rx <= 0)
+        lo = 0;
+    else
+        lo = (s->tx.mp_lim_min_tx < s->tx.mp_lim_min_rx)  ?  s->tx.mp_lim_min_tx  :  s->tx.mp_lim_min_rx;
+    /*endif*/
+    return (lo + 2399)/2400;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(void) v34_set_mp_rate_limits(v34_state_t *s, int min_tx, int max_tx,
+                                          int min_rx, int max_rx)
+{
+    if (!s)
+        return;
+    /*endif*/
+    s->tx.mp_lim_min_tx = (min_tx > 0)  ?  min_tx  :  0;
+    s->tx.mp_lim_max_tx = (max_tx > 0)  ?  max_tx  :  0;
+    s->tx.mp_lim_min_rx = (min_rx > 0)  ?  min_rx  :  0;
+    s->tx.mp_lim_max_rx = (max_rx > 0)  ?  max_rx  :  0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -8502,6 +8573,12 @@ static void mp_or_mph_baud_init(v34_state_t *s)
                 && baud_rate_parameters[s->rx.baud_rate].mappings[i * 2].b > 0)
                 mask |= (1 << i);
         }
+        /*endfor*/
+        /* V.250 6.4.1 +MS minimum: rates below it are not ones this modem
+           will connect at, so they are not offered (11.4.1.1.4 then settles
+           on a common rate above it, or on none). */
+        for (i = 0;  i < mp_rate_floor_n(s) - 1  &&  i < 14;  i++)
+            mask &= ~(1 << i);
         /*endfor*/
         s->tx.mp.signalling_rate_mask = mask;
         s->tx.mp.bit_rate_a_to_c =

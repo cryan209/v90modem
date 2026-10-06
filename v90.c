@@ -663,6 +663,8 @@ struct v90_state_s {
     int              rep_count;     /* Repetition counter (for Jd, Sd, etc.) */
     bool             phase4_hold_logged;
     bool             jd_rate_cap_logged;
+    int              jd_min_bps;     /* V.250 +MS downstream bounds, 0 = none */
+    int              jd_max_bps;
     int              phase4_ri_align_remaining;
     bool             jd_terminate_requested;
     bool             jp_terminate_requested;
@@ -723,6 +725,7 @@ struct v90_state_s {
     bool             e_received;
     bool             b1_received;
     int              upstream_rate_limit_bps;   /* actual V.34 upstream rate; 0 = no cap */
+    int              upstream_rate_floor_bps;   /* V.250 +MS receive minimum; 0 = none */
 
     /* V.90 Phase 4 Type-0 MP and CPt-selected modulus/shaping mapper. */
     uint8_t          mp_bits[V90_MP_MAX_BITS];
@@ -1269,10 +1272,11 @@ static uint16_t v90_capped_upstream_mask(const v90_state_t *s)
     uint16_t mask = s->cp_frame.upstream_rate_mask;
     uint16_t limited = 0;
 
-    if (s->upstream_rate_limit_bps <= 0)
+    if (s->upstream_rate_limit_bps <= 0 && s->upstream_rate_floor_bps <= 0)
         return mask;
     for (int bit = 0; bit <= 12; bit++) {
-        if ((bit + 2) * 2400 <= s->upstream_rate_limit_bps)
+        if ((s->upstream_rate_limit_bps <= 0 || (bit + 2) * 2400 <= s->upstream_rate_limit_bps)
+            && (bit + 2) * 2400 >= s->upstream_rate_floor_bps)
             limited |= (uint16_t)(1U << bit);
     }
     if ((mask & limited) == 0) {
@@ -1283,6 +1287,24 @@ static uint16_t v90_capped_upstream_mask(const v90_state_t *s)
         return mask;
     }
     return (uint16_t)(mask & limited);
+}
+
+void v90_set_upstream_rate_floor(v90_state_t *s, int bps)
+{
+    if (!s || bps < 0)
+        return;
+    s->upstream_rate_floor_bps = bps;
+}
+
+int v90_copy_jd_bits(const v90_state_t *s, uint8_t *bits, int max_bits)
+{
+    int n = 0;
+
+    if (!s || !bits)
+        return 0;
+    for (; n < 72 && n < max_bits; n++)
+        bits[n] = (uint8_t) ((s->jd_bits[n / 8] >> (n % 8)) & 1);
+    return n;
 }
 
 void v90_set_upstream_rate_limit(v90_state_t *s, int bps)
@@ -2688,13 +2710,27 @@ static int v90_jd_rate_bit_bps(int k)
     return 28000 + (k * 8000) / 6;
 }
 
-/* Whether mask bit k should be set given a cap.  The floor rate (k=0, 28000)
- * is always advertised so the mask stays non-empty and contiguous. */
-static bool v90_jd_rate_bit_enabled(int k, int cap_bps)
+/* Whether mask bit k should be set given a cap and a floor.  Without a floor
+ * the lowest rate (k=0, 28000) is always advertised so the mask stays
+ * non-empty; a floor (V.250 +MS minimum) clears the rates below it, and the
+ * caller has checked that some rate lies between the two. */
+static bool v90_jd_rate_bit_enabled(int k, int cap_bps, int floor_bps)
 {
-    if (cap_bps <= 0 || k == 0)
+    int bps = v90_jd_rate_bit_bps(k);
+
+    if (floor_bps > 0 && bps < floor_bps)
+        return false;
+    if (cap_bps <= 0 || (k == 0 && floor_bps <= 0))
         return true;
-    return v90_jd_rate_bit_bps(k) <= cap_bps;
+    return bps <= cap_bps;
+}
+
+void v90_set_downstream_rate_limits(v90_state_t *s, int min_bps, int max_bps)
+{
+    if (!s)
+        return;
+    s->jd_min_bps = min_bps > 0 ? min_bps : 0;
+    s->jd_max_bps = max_bps > 0 ? max_bps : 0;
 }
 
 /* Jd bits 49:50, Table 13: 1..3.  Default unchanged at 1 pending a live result;
@@ -2751,9 +2787,15 @@ static void v90_build_jd(v90_state_t *s)
      * enable all; ME_V90_MAX_DOWNSTREAM_RATE clears the bits above the cap so
      * the peer selects a lower, more robust downstream constellation. */
     int rate_cap = v90_max_downstream_rate_bps();
+    int rate_floor = s->jd_min_bps;
     int rate_mask_top = 0;
+
+    /* V.250 6.4.1 +MS bounds on what we transmit: the peer chooses the
+     * downstream rate from this mask (9.4.1), so it is where a cap binds. */
+    if (s->jd_max_bps > 0 && (rate_cap <= 0 || s->jd_max_bps < rate_cap))
+        rate_cap = s->jd_max_bps;
     for (int i = 18; i <= 33; i++) {
-        if (v90_jd_rate_bit_enabled(i - 18, rate_cap)) {
+        if (v90_jd_rate_bit_enabled(i - 18, rate_cap, rate_floor)) {
             s->jd_bits[pos/8] |= (1 << (pos%8));
             rate_mask_top = i - 18;
         }
@@ -2768,7 +2810,7 @@ static void v90_build_jd(v90_state_t *s)
      * capability mask (mask bits k=16..21, i.e. Jd bit 19+k).  Bits 41:46 are
      * reserved by Table 13 and must be zero. */
     for (int i = 35; i <= 40; i++) {
-        if (v90_jd_rate_bit_enabled(i - 19, rate_cap)) {
+        if (v90_jd_rate_bit_enabled(i - 19, rate_cap, rate_floor)) {
             s->jd_bits[pos/8] |= (1 << (pos%8));
             rate_mask_top = i - 19;
         }
@@ -2776,11 +2818,11 @@ static void v90_build_jd(v90_state_t *s)
     }
     pos += 6; /* bits 41:46 reserved = 0 */
 
-    if (rate_cap > 0 && !s->jd_rate_cap_logged) {
+    if ((rate_cap > 0 || rate_floor > 0) && !s->jd_rate_cap_logged) {
         fprintf(stderr,
-                "[V90] Jd downstream-rate cap: %d bps -> mask top bit k=%d "
+                "[V90] Jd downstream-rate mask %d-%d bps -> top bit k=%d "
                 "(%d bps); full mask disabled\n",
-                rate_cap, rate_mask_top, v90_jd_rate_bit_bps(rate_mask_top));
+                rate_floor, rate_cap, rate_mask_top, v90_jd_rate_bit_bps(rate_mask_top));
         s->jd_rate_cap_logged = true;
     }
 
