@@ -125,6 +125,7 @@ typedef struct {
 
 typedef struct {
     v8bis_act_type_t type;
+    v8bis_role_t role;                        /* our role when the action was queued: picks the V.21 channel */
     /* SIGNAL */
     v8bis_signal_t sig;
     bool responding_set;
@@ -173,6 +174,9 @@ void v8bis_fsm_signal(v8bis_fsm_t *f, v8bis_signal_t sig, bool responding_set);
 void v8bis_fsm_message(v8bis_fsm_t *f, const v8bis_msg_t *m);
 /* A frame failed 7.2.9: NAK(1) and back to the Initial State (9.8). */
 void v8bis_fsm_invalid_frame(v8bis_fsm_t *f);
+/* Give up the current transaction quietly and return to the Initial State
+ * (no action is queued): for a station that is about to try again. */
+void v8bis_fsm_abandon(v8bis_fsm_t *f);
 /* ANS/ANSam heard after we sent an MS that did not ask for ACK(1) (9.7). */
 void v8bis_fsm_startup_signal(v8bis_fsm_t *f);
 /* Time passes: the 9.8 five second rule. */

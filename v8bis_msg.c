@@ -190,6 +190,8 @@ append:
         s->nbits = 0;
         return;
     }
+    if (s->nbits == 0)
+        s->open_flags = s->flags_seen;
     if (bit)
         s->buf[s->nbits >> 3] |= (uint8_t)(1u << (s->nbits & 7));
     else

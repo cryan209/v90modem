@@ -51,6 +51,7 @@ typedef struct {
     unsigned nbits;
     uint8_t buf[V8BIS_MAX_INFO_OCTETS + 8];
     unsigned flags_seen;            /* consecutive flags before the current frame */
+    unsigned open_flags;            /* flags that preceded the frame now being received (7.2.5: 2-5) */
 } v8bis_frame_rx_t;
 
 void v8bis_frame_rx_init(v8bis_frame_rx_t *s, v8bis_frame_cb_t cb, void *user);

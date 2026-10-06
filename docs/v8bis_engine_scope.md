@@ -65,6 +65,10 @@ Done and tested (`v8bis_fsm_test`, in `make test`, under 0.1 s): `v8bis_fsm.[ch]
 
 Spec readings worth re-checking against a real peer: transaction 6's shape (Figure 14 and Table 7 disagree, Table 7 followed), CLR carrying capabilities, and NAK(1) leaving any state.
 
+## Stage 3a status (2026-10-06)
+
+Done and tested (`v8bis_modem_test`): `v8bis_modem.[ch]`, the sample-level station -- tones, V.21(L)/(H), the preamble as ES segment 2, the 9.4 gap, 10.2.2's silence and retransmission, channel selection by role, echo rejection, deferred signal delivery. Its API is `rx(amp,len)` / `tx(amp,len)` in step, `initiate()`, `event()`, `startup_signal()`. **Still to do for stage 3b:** link into `SRCS`; start it from `modem_engine.c` before V.8 behind `ME_V8BIS` (default off); turn MS_MODE events into the V.8, short V.8 or V.25 start-up (ANS/ANSam on the MS receiver, CM/CJ on the sender -- 9.9), translating MS's selected modulation into the engine's V.8 offer; bound the whole thing so a peer without V.8bis falls through to V.8 quickly; and the G.711 path (the modem works in linear 8 kHz and has been run through mu-law and A-law, but the engine's RX/TX entry points have not been touched).
+
 ## Staging
 
 1. **Stage 1, codec and tones** (A, B, C). Testable with no state machine. Fixes the offline decoder's defect list at the same time, since both can share `v8bis_ie`.

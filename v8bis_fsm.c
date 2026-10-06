@@ -291,6 +291,7 @@ static void push(v8bis_fsm_t *f, const v8bis_action_t *a)
         f->qn--;
     }
     f->q[(f->qh + f->qn) % V8BIS_ACTION_QUEUE] = *a;
+    f->q[(f->qh + f->qn) % V8BIS_ACTION_QUEUE].role = f->role;
     f->qn++;
 }
 
@@ -346,6 +347,18 @@ static void act_simple(v8bis_fsm_t *f, unsigned type)
     act_msgs(f, V8BIS_ES_NONE, &m, NULL);
 }
 
+static void reset_transaction(v8bis_fsm_t *f)
+{
+    f->role = V8BIS_ROLE_NONE;
+    f->got_cl = false;
+    f->peer_more_info = false;
+    f->seg_next = 0;
+    f->our_ms_valid = false;
+    f->init_clr = false;
+    f->sent_mr_signal = false;
+    enter(f, V8BIS_S_INITIAL);
+}
+
 static void go_initial(v8bis_fsm_t *f, v8bis_why_t why, unsigned nak)
 {
     v8bis_action_t a;
@@ -355,13 +368,13 @@ static void go_initial(v8bis_fsm_t *f, v8bis_why_t why, unsigned nak)
     a.why = why;
     a.nak = nak;
     push(f, &a);
-    f->role = V8BIS_ROLE_NONE;
-    f->got_cl = false;
-    f->peer_more_info = false;
-    f->seg_next = 0;
-    f->our_ms_valid = false;
-    f->init_clr = false;
-    enter(f, V8BIS_S_INITIAL);
+    reset_transaction(f);
+}
+
+void v8bis_fsm_abandon(v8bis_fsm_t *f)
+{
+    if (f->state != V8BIS_S_MS_MODE)
+        reset_transaction(f);
 }
 
 static void enter_mode(v8bis_fsm_t *f, bool we_sent_ms, const v8bis_msg_t *ms, bool ack_sent,
