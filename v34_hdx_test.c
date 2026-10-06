@@ -274,6 +274,18 @@ int main(int argc, char *argv[])
         answ_modem->tx.high_carrier = false;
         answ_modem->rx.high_carrier = false;
     }
+    int cc_source = getenv("V34_HDX_CC_SOURCE") ? atoi(getenv("V34_HDX_CC_SOURCE")) : 1200;
+    int cc_recipient = getenv("V34_HDX_CC_RECIPIENT") ? atoi(getenv("V34_HDX_CC_RECIPIENT")) : 1200;
+    int cc_asym_source = getenv("V34_HDX_CC_ASYM_SOURCE") != NULL;
+    int cc_asym_recipient = getenv("V34_HDX_CC_ASYM_RECIPIENT") != NULL;
+    if (v34_half_duplex_set_control_rate(call_modem, cc_source, cc_asym_source)
+        || v34_half_duplex_set_control_rate(answ_modem, cc_recipient, cc_asym_recipient)
+        || v34_half_duplex_set_control_rate(NULL, 1200, false) != -1
+        || v34_half_duplex_set_control_rate(call_modem, 1800, false) != -1)
+    {
+        fprintf(stderr, "control-rate configuration validation failed\n");
+        return 1;
+    }
     v34_tx_power(call_modem, -12.0f);
     v34_tx_power(answ_modem, -12.0f);
     /* Unknown modes and a primary request before MPh/E must be refused. */
@@ -534,10 +546,9 @@ int main(int argc, char *argv[])
         if (bad_mph && !bad_mph_sent && answ_modem->tx.stage == V34_TX_STAGE_HDX_PPH)
         {
             /* CRC-valid Table 23 offer asks this implementation to transmit
-               its unsupported 2400 bit/s CC. It must reject and recover,
-               not silently accept the rate and keep sending 1200 bit/s. */
+               an invalid zero primary ceiling. It must reject and recover. */
             if (bad_mph == 1)
-                answ_modem->tx.mph.control_channel_2400 = 1;
+                answ_modem->tx.mph.max_data_rate = 0;
             else
                 answ_modem->tx.mph.signalling_rate_mask = 1 << 13;
             bad_mph_sent = 1;
@@ -647,6 +658,20 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    int source_cc_tx, source_cc_rx, recipient_cc_tx, recipient_cc_rx;
+    int symmetric = !(cc_asym_source && cc_asym_recipient);
+    int expected_cc_tx = symmetric ? (cc_source < cc_recipient ? cc_source : cc_recipient) : cc_recipient;
+    int expected_cc_rx = symmetric ? expected_cc_tx : cc_source;
+    if (v34_get_hdx_control_rates(call_modem, &source_cc_tx, &source_cc_rx)
+        || v34_get_hdx_control_rates(answ_modem, &recipient_cc_tx, &recipient_cc_rx)
+        || source_cc_tx != expected_cc_tx || source_cc_rx != expected_cc_rx
+        || recipient_cc_tx != expected_cc_rx || recipient_cc_rx != expected_cc_tx)
+    {
+        fprintf(stderr, "control-rate negotiation mismatch\n");
+        failed = 1;
+    }
+    printf("  control rates: source tx/rx %d/%d, recipient tx/rx %d/%d bit/s\n",
+           source_cc_tx, source_cc_rx, recipient_cc_tx, recipient_cc_rx);
     printf("V.34 half-duplex (clause 12), %d baud %d bps %s, %.1f s\n",
            baud, bps, alaw ? "A-law" : "u-law", seconds);
     if (delay_ms || reverse_delay_ms || noise_peak)

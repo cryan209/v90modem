@@ -3549,6 +3549,13 @@ static bool mph_apply_parameters(v34_state_t *s, const mph_t *remote)
         return false;
     }
     /*endif*/
+    /* Table 23: bit 27 selects the REMOTE transmitter. Bit 50 permits
+       different rates only with mutual consent; otherwise use the lower. */
+    bool asym = s->tx.mph.asymmetric_rates_allowed && remote->asymmetric_rates_allowed;
+    s->tx.hdx_control_tx_rate = remote->control_channel_2400 ? 2400 : 1200;
+    s->rx.hdx_control_rx_rate = s->tx.mph.control_channel_2400 ? 2400 : 1200;
+    if (!asym && s->tx.hdx_control_tx_rate != s->rx.hdx_control_rx_rate)
+        s->tx.hdx_control_tx_rate = s->rx.hdx_control_rx_rate = 1200;
     s->tx.hdx_negotiated_rate_n = rate_n;
     s->bit_rate = rate_n*2400;
     /* The bit rate CODE is the index into Table 16's mapping for the symbol
@@ -6519,6 +6526,9 @@ static __inline__ void cc_symbol_sync(v34_rx_state_t *s)
     p = v - s->cc_ted.symbol_sync_dc_filter[1];
     s->cc_ted.symbol_sync_dc_filter[1] = s->cc_ted.symbol_sync_dc_filter[0];
     s->cc_ted.symbol_sync_dc_filter[0] = v;
+    /* Reduce data-directed jitter for the multilevel control constellation. */
+    if (s->mp_seen >= 2 && s->hdx_control_rx_rate == 2400)
+        p *= 0.01f;
     /* A little integration will now filter away much of the HF noise */
     s->cc_ted.baud_phase -= p;
     v = abs(s->cc_ted.baud_phase);
@@ -6548,6 +6558,9 @@ static __inline__ void cc_symbol_sync(v34_rx_state_t *s)
         p = -ted_error_clip;
     s->cc_ted.symbol_sync_dc_filter[1] = s->cc_ted.symbol_sync_dc_filter[0];
     s->cc_ted.symbol_sync_dc_filter[0] = v;
+    /* Reduce data-directed jitter for the multilevel control constellation. */
+    if (s->mp_seen >= 2 && s->hdx_control_rx_rate == 2400)
+        p *= 0.01f;
     /* A little integration will now filter away much of the HF noise */
     s->cc_ted.baud_phase -= p;
     if (!isfinite(s->cc_ted.baud_phase))
@@ -7965,11 +7978,31 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
 
     /* On alternate insertions we have a whole baud and must process it. */
     if ((s->baud_half ^= 1))
+    {
+        s->cc_qam_mid = *sample;
         return;
+    }
     /*endif*/
-    cc_symbol_sync(s);
+    if (s->hdx_control_rx_rate == 2400 ||
+        (s->stage == V34_RX_STAGE_CC && s->mp_seen < 1 &&
+         ((v34_state_t *)((char *)s - offsetof(v34_state_t, rx)))->hdx_control_requested_rate == 2400))
+    {
+        float power = s->last_sample.re*s->last_sample.re + s->last_sample.im*s->last_sample.im
+                    + sample->re*sample->re + sample->im*sample->im;
+        float error = ((s->last_sample.re-sample->re)*s->cc_qam_mid.re
+                     + (s->last_sample.im-sample->im)*s->cc_qam_mid.im)/(power+0.001f);
+        s->cc_ted.baud_phase += error*20.0f;
+        int correction = (int)s->cc_ted.baud_phase;
+        if (correction > 4) correction = 4;
+        if (correction < -4) correction = -4;
+        s->eq_put_step += correction;
+        s->total_baud_timing_correction += correction;
+        s->cc_ted.baud_phase -= correction;
+    }
+    else
+        cc_symbol_sync(s);
 
-    if (s->stage == V34_RX_STAGE_CC)
+    if (s->stage == V34_RX_STAGE_CC && !(s->mp_seen >= 2 && s->hdx_control_rx_rate == 2400))
     {
         float cc_mag = sqrtf(sample->re*sample->re + sample->im*sample->im);
 
@@ -7991,6 +8024,65 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
     }
     /*endif*/
 
+    if (s->mp_seen >= 2 && s->hdx_control_rx_rate == 2400)
+    {
+        /* 10.2.4/Figure 5. Keep Zn's reference separate from Q's phase;
+           differencing two raw 16-QAM angles would mix Q bits into I bits. */
+        static const complexf_t quarter[4] = {{-1,-1}, {3,-1}, {-1,3}, {3,3}};
+        if (!s->cc_qam_started)
+        {
+            float mag = hypotf(s->last_sample.re, s->last_sample.im);
+            s->cc_qam_gain = mag > 0.01f ? mag : CC_AGC_TARGET_MAG;
+            s->cc_qam_reference.re = (-s->last_sample.re - s->last_sample.im)*0.707106781f/s->cc_qam_gain;
+            s->cc_qam_reference.im = (s->last_sample.re - s->last_sample.im)*0.707106781f/s->cc_qam_gain;
+            s->cc_qam_started = true;
+        }
+        complexf_t ref = s->cc_qam_reference;
+        float re = (sample->re*ref.re + sample->im*ref.im)/s->cc_qam_gain;
+        float im = (sample->im*ref.re - sample->re*ref.im)/s->cc_qam_gain;
+        float best = 1.0e30f;
+        int chosen = 0;
+        for (int q = 0; q < 4; q++)
+        {
+            float x = quarter[q].re*0.316227766f;
+            float y = quarter[q].im*0.316227766f;
+            for (int z = 0; z < 4; z++)
+            {
+                float dist = (re-x)*(re-x) + (im-y)*(im-y);
+                if (dist < best) { best = dist; chosen = (q << 2) | z; }
+                float tmp = x; x = y; y = -tmp;
+            }
+        }
+        if (getenv("V34_QAM_TRACE") && s->cc_stat_n++ < 30)
+            fprintf(stderr, "QAM %p xy=%.3f,%.3f bits=%d dist=%.3f gain=%.3f level=%.3f\n", (void *)s,re,im,chosen,best,s->cc_qam_gain,s->cc_level);
+        int q = chosen >> 2;
+        complexf_t next = {sample->re*quarter[q].re + sample->im*quarter[q].im,
+                          sample->im*quarter[q].re - sample->re*quarter[q].im};
+        float norm = hypotf(next.re, next.im);
+        /* Advance the differential reference by the decoded I dibit,
+           then track residual carrier phase slowly. QAM's instantaneous
+           angle is not a reliable carrier estimate. */
+        for (int z = 0; z < (chosen & 3); z++)
+        {
+            float tmp = ref.re; ref.re = ref.im; ref.im = -tmp;
+        }
+        if (norm > 0.001f)
+        {
+            float x = ref.re*0.98f + (next.re/norm)*0.02f;
+            float y = ref.im*0.98f + (next.im/norm)*0.02f;
+            float mag = hypotf(x,y);
+            s->cc_qam_reference.re = x/mag;
+            s->cc_qam_reference.im = y/mag;
+        }
+        float gain = hypotf(sample->re, sample->im)/
+                     (hypotf(quarter[q].re, quarter[q].im)*0.316227766f);
+        s->cc_qam_gain += (gain-s->cc_qam_gain)/64.0f;
+        for (int k = 0; k < 4; k++)
+            s->put_bit(s->put_bit_user_data, v34_rx_descramble(s, (chosen >> k) & 1));
+        s->last_sample = *sample;
+        return;
+    }
+
     /* Slice the phase difference, to get a pair of data bits */
     ang1 = arctan2(sample->im, sample->re);
     ang2 = arctan2(s->last_sample.im, s->last_sample.re);
@@ -8004,6 +8096,37 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
        it is a property of the encoder and the table, not of the channel, so
        there is nothing here to search for. */
     data_bits = (4 - data_bits) & 0x3;
+
+    if (s->hdx_control_rx_rate == 2400)
+    {
+        /* Establish the QAM carrier/gain reference during the remaining
+           1200-bit/s MPh/E training, before future QAM pulses affect E's
+           final matched-filter sample. Point 0's phase is 225 degrees. */
+        float mag = hypotf(sample->re, sample->im);
+        if (mag > 0.01f)
+        {
+            complexf_t obs = {(-sample->re-sample->im)*0.707106781f/mag,
+                             (sample->re-sample->im)*0.707106781f/mag};
+            if (!s->cc_qam_started)
+            {
+                s->cc_qam_reference = obs;
+                s->cc_qam_gain = mag;
+                s->cc_qam_started = true;
+            }
+            else
+            {
+                complexf_t pred = s->cc_qam_reference;
+                for (int z = 0; z < data_bits; z++)
+                { float x = pred.re; pred.re = pred.im; pred.im = -x; }
+                float x = pred.re*0.9f + obs.re*0.1f;
+                float y = pred.im*0.9f + obs.im*0.1f;
+                float norm = hypotf(x,y);
+                s->cc_qam_reference.re = x/norm;
+                s->cc_qam_reference.im = y/norm;
+                s->cc_qam_gain += (mag-s->cc_qam_gain)*0.2f;
+            }
+        }
+    }
 
     /* Descramble the data bits. */
     for (i = 0;  i < 2;  i++)
@@ -8060,6 +8183,8 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
             V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                      "Rx - CC: E signal detected, MP exchange complete\n");
             s->mp_seen = 2;
+            if (s->hdx_control_rx_rate == 2400)
+                s->cc_ted.baud_phase = 0;
             if (s->duplex)
             {
                 report_status_change(s, SIG_STATUS_TRAINING_SUCCEEDED);
@@ -8125,7 +8250,7 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
                                would silently transmit the wrong bit stream.
                                Likewise, a CRC alone cannot validate a rate
                                offer with no common enabled primary rate. */
-                            if (mph.control_channel_2400 || !mph_apply_parameters(t, &mph))
+                            if (!mph_apply_parameters(t, &mph))
                             {
                                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
                                            "Rx - CC: rejecting unsupported MPh parameters\n");
@@ -15921,6 +16046,7 @@ void v34_condition_rx_for_pph(v34_state_t *s, const char *why)
     s->rx.pph_hold_steps[0] = s->rx.pph_hold_steps[1] = 0;
     s->rx.hdx_await_trn_end = false;
     s->rx.hdx_silence_bauds = 0;
+    s->rx.cc_qam_started = false;
     s->rx.mp_seen = 0;
     s->rx.mp_count = -1;
     s->rx.mp_remote_ack_seen = 0;

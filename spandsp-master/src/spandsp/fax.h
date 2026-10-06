@@ -76,6 +76,9 @@ SPAN_DECLARE(int) fax_tx(fax_state_t *s, int16_t *amp, int max_len);
     V.34 F.3.1.4 carries T.30 HDLC on the control channel instead of V.21. */
 SPAN_DECLARE(int) fax_v34hdx_start_control(fax_state_t *s, int primary_bit_rate);
 
+/*! Advance external transport timers by received 8 kHz samples. */
+SPAN_DECLARE(void) fax_v34hdx_advance(fax_state_t *s, int samples);
+
 /*! Supply one received V.34 control-channel bit to T.30's HDLC receiver. */
 SPAN_DECLARE(void) fax_v34hdx_put_bit(fax_state_t *s, int bit);
 

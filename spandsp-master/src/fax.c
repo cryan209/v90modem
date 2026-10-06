@@ -278,6 +278,30 @@ SPAN_DECLARE(int) fax_v34hdx_start_control(fax_state_t *s, int primary_bit_rate)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* T.30 5.4.3.1: external V.34 transport still clocks protocol timers and
+   explicit front-end pauses, including the final disconnect flush pause. */
+SPAN_DECLARE(void) fax_v34hdx_advance(fax_state_t *s, int samples)
+{
+    int16_t silence[160];
+
+    if (s == NULL || !s->v34hdx_external || samples <= 0)
+        return;
+    t30_timer_update(&s->t30, samples);
+    while (samples > 0 && s->modems.current_tx_type == T30_MODEM_PAUSE)
+    {
+        int chunk = (samples > 160) ? 160 : samples;
+        int n = silence_gen(&s->modems.silence_gen, silence, chunk);
+
+        samples -= chunk;
+        if (n < chunk)
+        {
+            t30_front_end_status(&s->t30, T30_FRONT_END_SEND_STEP_COMPLETE);
+            break;
+        }
+    }
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) fax_v34hdx_put_bit(fax_state_t *s, int bit)
 {
     if (s == NULL || !s->v34hdx_external)
@@ -290,7 +314,14 @@ SPAN_DECLARE(int) fax_v34hdx_get_bit(fax_state_t *s)
 {
     if (s == NULL || !s->v34hdx_external)
         return SIG_STATUS_END_OF_DATA;
-    return hdlc_tx_get_bit(&s->modems.hdlc_tx);
+    int bit = hdlc_tx_get_bit(&s->modems.hdlc_tx);
+
+    /* The legacy FSK modem reports shutdown after HDLC's end marker. The
+       external transport must provide the same completion notification, or
+       DIS retries and DCN remain stuck waiting for a modem we never run. */
+    if (bit == SIG_STATUS_END_OF_DATA)
+        t30_front_end_status(&s->t30, T30_FRONT_END_SEND_STEP_COMPLETE);
+    return bit;
 }
 /*- End of function --------------------------------------------------------*/
 

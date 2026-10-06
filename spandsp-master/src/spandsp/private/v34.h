@@ -1171,6 +1171,7 @@ typedef struct
         direction, not two, and no acknowledge bit to distinguish a first
         offer from a settled one. */
     int hdx_negotiated_rate_n;
+    int hdx_control_tx_rate;
     int hdx_primary_ceiling_n;
 
     int persistence2;
@@ -2269,6 +2270,11 @@ typedef struct
     /*! \brief Set once PPh has been detected in V34_RX_STAGE_CC, so the
         detector stops and the MPh scanner below owns the symbol stream. */
     bool pph_detected;
+    int hdx_control_rx_rate;
+    bool cc_qam_started;
+    complexf_t cc_qam_reference;
+    float cc_qam_gain;
+    complexf_t cc_qam_mid;
     /*! Clause 12.6: Sh/Sh-bar acquisition at both T/2 eye phases. */
     bool hdx_cc_resync;
     bool hdx_sh_seen;
@@ -2473,6 +2479,8 @@ typedef struct
 */
 struct v34_state_s
 {
+    int hdx_control_requested_rate;
+    bool hdx_control_asymmetric;
     /*! \brief True if this is the calling side modem. */
     bool calling_party;
     /*! \brief True if this is a full duplex modem. */

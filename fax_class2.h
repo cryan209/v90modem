@@ -73,6 +73,8 @@ void fc2_on_disconnected(void);
 
 /* External V.34 Annex F control-channel transport. */
 int  fc2_v34hdx_start_control(int primary_bit_rate);
+/* Advance external T.30 timers once per received 8 kHz DS0 block. */
+void fc2_v34hdx_advance(int samples);
 int  fc2_v34hdx_get_bit(void);
 void fc2_v34hdx_put_bit(int bit);
 int  fc2_v34hdx_get_mode(void);

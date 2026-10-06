@@ -10645,6 +10645,7 @@ skip_8k_codewords:
                 }
 
                 if (g_v34hdx_fax_control_started) {
+                    di_fax_v34hdx_advance(len);
                     int requested_mode = di_fax_v34hdx_get_mode();
 
                     if (requested_mode != g_v34hdx_fax_mode) {
@@ -11683,11 +11684,29 @@ static bool get_strict_v90_info1a_locked(v90_info1a_t *info, bool *v92_selected)
      * have run as V.90.  Reaching here with g_v92_info0_mutual set is the
      * demotion path; the caller keys g_v92_active off *v92_selected, not off
      * the INFO0 contract, so a demoted call runs as ordinary V.90. */
+    /* Table 10 bits 34:36: 3 = 3000, 4 = 3200, 5 = 3429, and the rate "shall be
+     * consistent with INFO1d".  We do not enable 3429 (INFO0d bit 40 = 0, and
+     * every INFO1d we send has that row at zero), and our Phase 4/data upstream
+     * receivers only exist for 3000/3200.  The Intel/Conexant V.92 modem selects
+     * 3429 on some attempts anyway; following it put the whole of Phase 4 on a
+     * baud rate nothing here can decode (artifacts/serial-x0-2052: repeated CPt
+     * at 3429, no frame ever accepted, the modem retrained 2.8 s into Ri).  It
+     * picks 3200 on the retrain that follows. */
+    if (received.upstream_symbol_rate_code == 5) {
+        static bool logged;
+
+        if (!logged) {
+            ME_LOG("[ME] V.90 INFO1a selects upstream 3429 baud, which this modem did not enable "
+                   "(INFO0d bit 40 = 0, INFO1d row 0); treating the INFO1a as invalid\n");
+            logged = true;
+        }
+        return false;
+    }
     return received.raw_12_17 == 0
         && received.raw_32_33 == 0
         && received.u_info > 0
-        && received.upstream_symbol_rate_code >= 0
-        && received.upstream_symbol_rate_code <= 5
+        && received.upstream_symbol_rate_code >= 3
+        && received.upstream_symbol_rate_code <= 4
         && received.downstream_rate_code == 6
         && v90_info1a_validate(info);
 }

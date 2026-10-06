@@ -2237,6 +2237,12 @@ int di_fax_v34hdx_start_control(int primary_bit_rate)
     return fc2_active() ? fc2_v34hdx_start_control(primary_bit_rate) : -1;
 }
 
+void di_fax_v34hdx_advance(int samples)
+{
+    if (fc2_active())
+        fc2_v34hdx_advance(samples);
+}
+
 int di_fax_v34hdx_get_bit(void)
 {
     return fc2_active() ? fc2_v34hdx_get_bit() : SIG_STATUS_END_OF_DATA;

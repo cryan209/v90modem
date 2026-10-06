@@ -823,3 +823,26 @@ an `ATE0` that must still reach T.31, and the way back to class 0), which
   offline and loopback paths only. A real fax session against a far-end fax
   machine is unverified — and for class 2.0 that includes the `+FDT` ordering
   deviation above, which no loopback against our own sequencing can expose.
+
+## V.34 external transport clock (2026-10-06)
+
+The initial Annex F control-channel bridge now advances T.30 timers from each
+received 8 kHz DS0 block, including blocks with no decoded user bits. Previously
+only `fax_rx()` advanced them, but the V.34 engine bypasses that legacy audio
+front end. T.30 5.4.3.1's identification and response timeouts could therefore
+remain pending indefinitely. The same clock advances explicit front-end pauses,
+including the final disconnect flush, and keeps T.32 8.5.2.6's `+FCT` clock
+running. It does not run the legacy fax demodulators on V.34 audio.
+
+HDLC's end-of-data marker now supplies the send-complete notification normally
+provided by the legacy FSK transmitter. Without that notification, T.30 can send
+a frame but stall before retries or the final disconnect pause. A repeated
+attachment is rejected rather than restarting an active exchange.
+
+`fax_class2_test` drives only external HDLC bits and the DS0 sample clock against
+a silent peer. Its independent HDLC decoder verifies the initial DIS, repeated
+CRC-valid DIS frames and exactly one CRC-valid DCN; the DTE must then receive
+`+FHS:`. The full Class 2 session suite and PTY Class 1 tests remain the regression
+coverage. This fixes transport lifecycle, not the remaining Annex F primary
+channel turnarounds or hardware fax interoperability. The advertised classes
+remain `0,1,1.0,2.0`; legacy Class 2 and Class 2.1 are not implemented.

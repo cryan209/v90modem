@@ -942,6 +942,8 @@ static void phase_e_handler(void *user_data, int completion_code)
     session_done = 1;
 }
 
+static int v34hdx_external;
+
 static void session_stop(void)
 {
     if (fax) {
@@ -949,6 +951,7 @@ static void session_stop(void)
         fax = NULL;
     }
     t30_started = 0;
+    v34hdx_external = 0;
 }
 
 static void session_start(void)
@@ -2135,11 +2138,34 @@ int fc2_v34hdx_start_control(int primary_bit_rate)
     pthread_mutex_lock(&fc2_mtx);
     if (selected && call_up) {
         session_start();
-        if (fax)
+        if (fax && !v34hdx_external) {
             r = fax_v34hdx_start_control(fax, primary_bit_rate);
+            if (r == 0)
+                v34hdx_external = 1;
+        }
     }
     pthread_mutex_unlock(&fc2_mtx);
     return r;
+}
+
+static void fct_expired(void);
+
+/* T.30 5.4.3.1 and Annex F.3.2: timers remain sample-clocked when
+ * V.34 owns the audio. Call once per received DS0 block, including silence,
+ * rather than per decoded bit (there may be no bits during resynchronization).
+ * Do not run the legacy fax demodulators alongside the external datapump. */
+void fc2_v34hdx_advance(int samples)
+{
+    if (samples <= 0)
+        return;
+    pthread_mutex_lock(&fc2_mtx);
+    if (fax && v34hdx_external) {
+        fax_v34hdx_advance(fax, samples);
+        rx_samples += (uint64_t) samples;
+        if (fct_deadline && rx_samples >= fct_deadline)
+            fct_expired();
+    }
+    pthread_mutex_unlock(&fc2_mtx);
 }
 
 int fc2_v34hdx_get_bit(void)

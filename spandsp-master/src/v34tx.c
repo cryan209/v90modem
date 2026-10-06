@@ -8584,15 +8584,10 @@ static void prepare_mph(v34_state_t *s)
     s->tx.mph.trellis_size = v34_rx_current_trellis_code(&s->rx);
     s->tx.mph.use_non_linear_encoder = s->rx.use_non_linear_encoder;
     s->tx.mph.expanded_shaping = s->rx.parms.expanded_shaping;
-    /* Bit 27 asks the far end's control channel transmitter for 1200 or 2400
-       bit/s.  10.2.4's 2400 bit/s mode puts four bits on each symbol by
-       selecting a point from the quarter superconstellation with Q1/Q2 rather
-       than always point 0; this modem only implements the two-bit form, so
-       asking for 2400 would be asking for something it could not then read.
-       Bit 50 follows: 12.4 note to Table 23 allows asymmetric control channel
-       rates only when BOTH modems set it. */
-    s->tx.mph.control_channel_2400 = 0;
-    s->tx.mph.asymmetric_rates_allowed = false;
+    /* V.34 Table 23 bits 27/50 describe the remote control transmitter.
+       Training remains at 1200; the selected data rate takes effect after E. */
+    s->tx.mph.control_channel_2400 = s->hdx_control_requested_rate == 2400;
+    s->tx.mph.asymmetric_rates_allowed = s->hdx_control_asymmetric;
     memset(s->tx.mph.precoder_coeffs, 0, sizeof(s->tx.mph.precoder_coeffs));
 }
 /*- End of function --------------------------------------------------------*/
@@ -8772,7 +8767,7 @@ static complex_sig_t get_cc_data_baud(v34_state_t *s)
        with the differential encoder enabled -- the same modulation ALT, E and
        MPh have just used, with real data in place of the training pattern. */
     data_bits = 0;
-    for (i = 0;  i < 2;  i++)
+    for (i = 0;  i < (s->tx.hdx_control_tx_rate == 2400 ? 4 : 2);  i++)
     {
         /* Corrected Figure 27 and 12.6.1.4/12.6.2.2: circuit 106
            remains off until the peer's E has arrived as well. */
@@ -8798,9 +8793,19 @@ static complex_sig_t get_cc_data_baud(v34_state_t *s)
         data_bits |= scramble(&s->tx, bit) << i;
     }
     /*endfor*/
-    s->tx.diff = (s->tx.diff + data_bits) & 3;
+    s->tx.diff = (s->tx.diff + (data_bits & 3)) & 3;
     if (s->tx.hdx_primary_after_cc_tail)
         s->tx.hdx_cc_tail_symbols--;
+    if (s->tx.hdx_control_tx_rate == 2400)
+    {
+        /* 10.2.4/Figure 5: I1/I2 advance Zn clockwise; Q1/Q2 select
+           quarter points 0..3. Normalize the 16-QAM mean energy (10)
+           to the same nominal line power as the 4-point training signal. */
+        complex_sig_t point = training_constellation_16[(data_bits & 12) | s->tx.diff];
+        point.re *= 0.316227766f;
+        point.im *= 0.316227766f;
+        return point;
+    }
     return training_constellation_4[s->tx.diff];
 }
 /*- End of function --------------------------------------------------------*/
@@ -9858,6 +9863,24 @@ static void hdx_begin_control_retrain(v34_state_t *s, bool responding)
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                "Tx - control channel retrain (%s, 12.8)\n",
                responding ? "responding" : "initiating");
+}
+
+SPAN_DECLARE(int) v34_half_duplex_set_control_rate(v34_state_t *s, int rate, bool asymmetric)
+{
+    if (!s || s->duplex || (rate != 1200 && rate != 2400))
+        return -1;
+    s->hdx_control_requested_rate = rate;
+    s->hdx_control_asymmetric = asymmetric;
+    return 0;
+}
+
+SPAN_DECLARE(int) v34_get_hdx_control_rates(v34_state_t *s, int *tx_rate, int *rx_rate)
+{
+    if (!s || s->duplex || !tx_rate || !rx_rate)
+        return -1;
+    *tx_rate = s->tx.hdx_control_tx_rate;
+    *rx_rate = s->rx.hdx_control_rx_rate;
+    return 0;
 }
 
 SPAN_DECLARE(int) v34_half_duplex_start_control_retrain(v34_state_t *s)
@@ -11294,6 +11317,9 @@ SPAN_DECLARE(int) v34_restart(v34_state_t *s, int baud_rate, int bit_rate, bool 
         memset(&s->rx.eye_prev_off, 0, sizeof(s->rx.eye_prev_off));
     }
     s->tx.hdx_negotiated_rate_n = 0;
+    s->tx.hdx_control_tx_rate = 0;
+    s->rx.hdx_control_rx_rate = 0;
+    s->rx.cc_qam_started = false;
     s->tx.hdx_pph_after_silence = false;
     s->tx.hdx_primary_tail_samples = 0;
     s->tx.hdx_primary_after_cc_tail = false;

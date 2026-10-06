@@ -241,6 +241,8 @@ static void check(int cond, const char *what)
 
 static uint8_t v34hdx_frame[64];
 static int v34hdx_frame_len;
+static int v34hdx_dis_count;
+static int v34hdx_dcn_count;
 
 static void v34hdx_hdlc_accept(void *user_data, const uint8_t *msg, int len, int ok)
 {
@@ -248,6 +250,10 @@ static void v34hdx_hdlc_accept(void *user_data, const uint8_t *msg, int len, int
     if (ok && len > 0 && len <= (int) sizeof(v34hdx_frame)) {
         memcpy(v34hdx_frame, msg, (size_t) len);
         v34hdx_frame_len = len;
+        if (len >= 3 && (msg[2] & 0xFE) == (T30_DIS & 0xFE))
+            v34hdx_dis_count++;
+        if (len >= 3 && (msg[2] & 0xFE) == (T30_DCN & 0xFE))
+            v34hdx_dcn_count++;
     }
 }
 
@@ -260,6 +266,7 @@ static void test_v34hdx_control_dis(void)
     fc2_select(1);
     fc2_on_connected();
     v34hdx_frame_len = 0;
+    v34hdx_dis_count = v34hdx_dcn_count = 0;
     hdlc_rx_init(&rx, false, true, 5, v34hdx_hdlc_accept, NULL);
     check(fc2_v34hdx_start_control(21600) == 0,
           "the trained V.34 control channel attaches to T.30");
@@ -272,6 +279,26 @@ static void test_v34hdx_control_dis(void)
     check(v34hdx_frame_len >= 3
           && (v34hdx_frame[2] & 0xFE) == (T30_DIS & 0xFE),
           "T.30 emits a CRC-valid DIS frame through V.34 user bits");
+    /* Only the DS0 clock advances here: no fax_rx/fax_tx legacy audio.
+     * A silent peer must time out and deliver the T.32 termination report. */
+    dte_reset();
+    check(fc2_v34hdx_start_control(21600) < 0,
+          "a second attach cannot restart the active T.30 exchange");
+    for (int tick = 0; tick < 80 * 50 && !dte_saw("+FHS:"); tick++) {
+        for (int b = 0; b < 24; b++) {
+            int bit = fc2_v34hdx_get_bit();
+            if (bit == 0 || bit == 1)
+                hdlc_rx_put_bit(&rx, bit);
+        }
+        fc2_v34hdx_advance(160);
+        fc2_poll();
+    }
+    check(v34hdx_dis_count > 1,
+          "a silent peer receives CRC-valid DIS retries on the control channel");
+    check(v34hdx_dcn_count == 1,
+          "timeout sends one CRC-valid DCN before the termination report");
+    check(dte_saw("+FHS:"),
+          "a silent V.34 peer times out through the external sample clock");
     fc2_on_disconnected();
 }
 

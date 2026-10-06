@@ -241,6 +241,14 @@ SPAN_DECLARE(int) v34_half_duplex_request_parameters(v34_state_t *s, int bit_rat
     control channel. Returns -1 for other modes or unfinished exchanges. */
 SPAN_DECLARE(int) v34_half_duplex_start_control_retrain(v34_state_t *s);
 
+/*! Configure Table 23 bits 27/50 for the next MPh exchange. rate (1200 or
+    2400) requests the remote transmitter's rate. Both ends must allow
+    asymmetric rates; otherwise differing requests settle at 1200. */
+SPAN_DECLARE(int) v34_half_duplex_set_control_rate(v34_state_t *s, int rate, bool asymmetric);
+/*! Read negotiated control rates in bit/s. Returns -1 outside HDX or for
+    null outputs; returns 0 rates before negotiation. */
+SPAN_DECLARE(int) v34_get_hdx_control_rates(v34_state_t *s, int *tx_rate, int *rx_rate);
+
 /*! Reinitialise an existing V.34 modem context, so it may be reused.
     \brief Reinitialise an existing V.34 modem context.
     \param s The modem context.
