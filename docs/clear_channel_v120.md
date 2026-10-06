@@ -73,8 +73,21 @@ what is still open (V120-5, break -- since done at the framing level, see below)
   data held until the response and begun anyway when the retries are spent;
   an XID command is always answered, in either mode, and 4.2.3's collision
   (XID while an SABME is outstanding) is answered without a state change.
-  Not implemented: Annex C's XID parameter negotiation (V.42bis over V.120),
-  FRMR, our own RNR (the DTE-side ring does not back-pressure V.120 yet),
+  **Annex C (V.42bis over V.120)** is `ME_V120_COMPRESS=1` (needs the
+  acknowledged link): once it is up, the TA that set it up (the caller)
+  sends an XID command -- FI 0x82, GI 0xF0, PI 0 "V120", P0 = 3 (both
+  directions), P1 = 1024, P2 = 32, P/F = 0 -- with TM20/NM20; the other end
+  agrees to no more than was asked and returns the values in the same form
+  and both start SpanDSP's V.42bis (`v42bis_init`, the initiator's P0 bits
+  swapped as `data_stack.c` does). The caller's data waits for the answer;
+  an answer with no V120 subfield (a peer without Annex C) or NM20 silent
+  tries means no compression (C.2.3 a). A new link (SABME) drops compression
+  (C.1). The compressor is flushed whenever the DTE runs dry, and before a
+  break, so a break still follows its data; the decompressor is flushed after
+  every frame. Not implemented: re-negotiating after data has started ("for
+  further study" in C.2.1), manufacturer-ID user data, V.44, the P0 = 1/2
+  single-direction offers (we ask for both and answer what we are asked).
+  Not implemented either: FRMR, our own RNR (the DTE-side ring does not back-pressure V.120 yet),
   and the V.42-style "mode collision" handling of 4.2.3.
 - **Break (audit V120-5).** Both directions exist at the framing level:
   `cc_send_break()` sends a frame with BR = 1 after every character already

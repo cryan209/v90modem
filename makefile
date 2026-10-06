@@ -414,6 +414,8 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 	./engine_pair_test --expect CLEAR --expect-connect 64000 --both-at "AT+MS=V120"
 	./engine_pair_test --expect CLEAR --expect-connect 64000 --both-at "AT+MS=V120" --both-env ME_V120_ACK=1
 	./engine_pair_test --expect CLEAR --expect-connect 64000 --both-at "AT+MS=V120" --both-env ME_V120_VERIFY=1
+	./engine_pair_test --expect CLEAR --expect-connect 64000 --both-at "AT+MS=V120" --both-env ME_V120_ACK=1 --both-env ME_V120_COMPRESS=1 --answer-after "ATI11" --answer-expect "V.42bis over V.120 P0 3 P1 1024 P2 32"
+	./engine_pair_test --expect CLEAR --expect-connect 64000 --both-at "AT+MS=V120" --both-env ME_V120_ACK=1 --call-env ME_V120_COMPRESS=1
 	./engine_pair_test --expect CLEAR --expect-connect 64000 --both-at "AT+MS=V120" --call-env ME_V120_VERIFY=1
 # \B (Hayes/Courier break) through the PTY: sent by the caller, seen by the answerer's ATI11.
 	./engine_pair_test --expect CLEAR --expect-connect 64000 --both-at "AT+MS=V120" --call-after 'AT\B2' --answer-after "ATI11" --answer-expect "received 1"

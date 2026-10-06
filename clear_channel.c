@@ -85,6 +85,33 @@ static int v120_pull_data(clear_channel_t *cc, uint8_t *dst)
     return n;
 }
 
+/* The characters for one frame: the DTE's, or with Annex C compression active
+ * the V.42bis codewords for them.  The compressor is flushed whenever the DTE
+ * runs dry, so nothing lingers in it. */
+static int v120_source(clear_channel_t *cc, uint8_t *data)
+{
+    int n;
+
+    if (!cc->cz || !(cc->caller ? (cc->cz_dir & 1) : (cc->cz_dir & 2)))
+        return cc->pull ? v120_pull_data(cc, data) : 0;
+    if (cc->cz_out_len < CC_V120_MAX_DATA) {
+        uint8_t in[CC_V120_MAX_DATA];
+        int k = cc->pull ? v120_pull_data(cc, in) : 0;
+
+        if (k > 0) {
+            cc->cz_tx_in += (uint64_t) k;
+            v42bis_compress(cc->cz, in, k);
+        }
+        if (k < CC_V120_MAX_DATA)
+            v42bis_compress_flush(cc->cz);
+    }
+    n = cc->cz_out_len < CC_V120_MAX_DATA ? cc->cz_out_len : CC_V120_MAX_DATA;
+    memcpy(data, cc->cz_out, (size_t) n);
+    memmove(cc->cz_out, cc->cz_out + n, (size_t) (cc->cz_out_len - n));
+    cc->cz_out_len -= n;
+    return n;
+}
+
 /* The next information field's header octet and characters, or -1 for
  * nothing to send.  V.120 3.1.1.2/7.2.2: a break goes in a frame with BR = 1
  * after every queued character, and a later frame with BR = 0 ends it; the
@@ -98,11 +125,10 @@ static int v120_build_info(clear_channel_t *cc, uint8_t *data, int *n)
         if (cc->tx_octets < cc->brk_end_at)
             return -1;
         cc->brk_active = false;               /* this frame is the end */
-        *n = cc->pull ? v120_pull_data(cc, data) : 0;
+        *n = v120_source(cc, data);
         return h;
     }
-    if (cc->pull)
-        *n = v120_pull_data(cc, data);
+    *n = v120_source(cc, data);
     if (cc->brk_pending && *n < CC_V120_MAX_DATA) {
         cc->brk_pending = false;
         cc->brk_active = true;
@@ -144,6 +170,126 @@ static void lf_send_s(clear_channel_t *cc, bool response, uint8_t ctl, bool pf)
     v120_queue(cc, f, 4);
 }
 
+/* ---- V.120 Annex C: V.42bis over the acknowledged link, XID-negotiated ---- */
+
+#define CZ_P1_DEFAULT 1024
+#define CZ_P2_DEFAULT 32
+
+static void cz_encoded(void *user, const uint8_t *msg, int len)
+{
+    clear_channel_t *cc = user;
+
+    if (cc->cz_out_len + len > (int) sizeof(cc->cz_out))
+        len = (int) sizeof(cc->cz_out) - cc->cz_out_len;   /* cannot happen: drained at 256 */
+    memcpy(cc->cz_out + cc->cz_out_len, msg, (size_t) len);
+    cc->cz_out_len += len;
+    cc->cz_tx_out += (uint64_t) len;
+}
+
+static void cz_decoded(void *user, const uint8_t *msg, int len)
+{
+    clear_channel_t *cc = user;
+
+    for (int i = 0; i < len; i++) {
+        if (cc->push)
+            cc->push(cc->ctx, msg[i]);
+        cc->rx_data_bytes++;
+    }
+}
+
+static void cz_release(clear_channel_t *cc)
+{
+    if (cc->cz) {
+        v42bis_free(cc->cz);
+        cc->cz = NULL;
+    }
+    cc->cz_out_len = 0;
+    cc->cz_dir = 0;
+}
+
+/* dir: Table C.1's P0 nn, relative to the negotiation initiator. */
+static void cz_activate(clear_channel_t *cc, int dir, int p1, int p2)
+{
+    int local = cc->caller ? ((dir & 1) << 1) | ((dir & 2) >> 1) : dir;   /* bit1 encode, bit0 decode */
+
+    cz_release(cc);
+    if (!dir)
+        return;
+    cc->cz = v42bis_init(NULL, local, p1, p2, cz_encoded, cc, 256, cz_decoded, cc, 256);
+    if (cc->cz) {
+        cc->cz_dir = dir;
+        cc->cz_p1 = p1;
+        cc->cz_p2 = p2;
+    }
+}
+
+/* Annex C.4.2: FI 0x82, GI 0xF0 (private parameter negotiation), PI 0 "V120",
+ * P0, P1 (two octets), P2. */
+static int cz_build_info(uint8_t *o, int dir, int p1, int p2)
+{
+    int n = 0;
+
+    o[n++] = 0x82;
+    o[n++] = 0xF0;
+    o[n++] = 0;                              /* GL, filled below */
+    o[n++] = 0;
+    o[n++] = 0; o[n++] = 4; memcpy(o + n, "V120", 4); n += 4;
+    o[n++] = 1; o[n++] = 1; o[n++] = (uint8_t) dir;
+    o[n++] = 2; o[n++] = 2; o[n++] = (uint8_t) (p1 >> 8); o[n++] = (uint8_t) p1;
+    o[n++] = 3; o[n++] = 1; o[n++] = (uint8_t) p2;
+    o[2] = (uint8_t) ((n - 4) >> 8);
+    o[3] = (uint8_t) (n - 4);
+    return n;
+}
+
+/* Returns 0 and the values if `info` carries a V120 negotiation subfield. */
+static int cz_parse_info(const uint8_t *info, int len, int *dir, int *p1, int *p2)
+{
+    int pos = 1, found = 0;
+
+    *dir = 0; *p1 = CZ_P1_DEFAULT; *p2 = CZ_P2_DEFAULT;
+    if (len < 4 || info[0] != 0x82)
+        return -1;
+    while (pos + 3 <= len) {
+        int gi = info[pos], gl = (info[pos + 1] << 8) | info[pos + 2];
+        int end = pos + 3 + gl;
+
+        if (end > len)
+            return -1;
+        if (gi == 0xF0) {                    /* fields not recognised are ignored */
+            int q = pos + 3;
+
+            while (q + 2 <= end) {
+                int pi = info[q], pl = info[q + 1];
+
+                if (q + 2 + pl > end)
+                    return -1;
+                if (pi == 0 && pl == 4 && !memcmp(info + q + 2, "V120", 4))
+                    found = 1;
+                else if (pi == 1 && pl == 1)
+                    *dir = info[q + 2] & 3;
+                else if (pi == 2 && pl == 2)
+                    *p1 = (info[q + 2] << 8) | info[q + 3];
+                else if (pi == 3 && pl == 1)
+                    *p2 = info[q + 2];
+                q += 2 + pl;
+            }
+        }
+        pos = end;
+    }
+    return found ? 0 : -1;
+}
+
+static void lf_send_xid(clear_channel_t *cc, bool response, const uint8_t *info, int n)
+{
+    uint8_t f[3 + 64];
+
+    lf_addr(cc, response, f);
+    f[2] = 0xAF;                             /* P/F = 0 (Annex C.2.1) */
+    memcpy(f + 3, info, (size_t) n);
+    v120_queue(cc, f, 3 + n);
+}
+
 static void lf_reset_vars(clear_channel_t *cc)
 {
     cc->lf_vs = cc->lf_va = cc->lf_vnew = cc->lf_vr = 0;
@@ -151,6 +297,10 @@ static void lf_reset_vars(clear_channel_t *cc)
     cc->lf_pend_ack = cc->lf_enquire = false;
     cc->lf_t200_on = false;
     cc->lf_retries = 0;
+    /* Annex C.1: a new logical link starts with V.42bis not in use. */
+    cz_release(cc);
+    cc->cz_state = 0;
+    cc->cz_xid_retries = 0;
 }
 
 static void lf_t200_start(clear_channel_t *cc)
@@ -196,8 +346,8 @@ static bool lf_send_i(clear_channel_t *cc)
     } else {
         int n;
 
-        if (((cc->lf_vnew - cc->lf_va) & (LF_MOD - 1)) >= CC_LF_K)
-            return false;
+        if (((cc->lf_vnew - cc->lf_va) & (LF_MOD - 1)) >= CC_LF_K || cc->cz_state == 1)
+            return false;                   /* window full, or XID negotiation under way */
         int h = v120_build_info(cc, f + 5, &n);
 
         if (h < 0)
@@ -265,7 +415,10 @@ static void v120_ack_poll(clear_channel_t *cc)
     }
     if (cc->lf_pend_xid) {                  /* 4.2.3: respond and stay in state */
         cc->lf_pend_xid = false;
-        lf_send_u(cc, true, 0xAF, false);
+        if (cc->lf_xid_resp_len)
+            lf_send_xid(cc, true, cc->lf_xid_resp, cc->lf_xid_resp_len);
+        else
+            lf_send_u(cc, true, 0xAF, false);
         return;
     }
     if (cc->lf_state == CC_LF_DOWN) {
@@ -277,6 +430,22 @@ static void v120_ack_poll(clear_channel_t *cc)
     }
     if (cc->lf_state != CC_LF_UP)
         return;
+    /* Annex C.2.1: the TA that set the link up negotiates V.42bis at once. */
+    if (cc->cz_enable && cc->caller && (cc->cz_state == 0
+        || (cc->cz_state == 1 && cc->tx_octets >= cc->cz_xid_at))) {
+        uint8_t info[32];
+
+        if (cc->cz_state == 1 && ++cc->cz_xid_retries > CC_V120_NM20) {
+            cc->cz_state = 2;                      /* C.2.3 a): carry on uncompressed */
+            cc->cz_gave_up++;
+        } else {
+            cc->cz_state = 1;
+            cc->cz_req_dir = 3;
+            cc->cz_xid_at = cc->tx_octets + CC_V120_TM20_OCTETS;
+            lf_send_xid(cc, false, info, cz_build_info(info, 3, CZ_P1_DEFAULT, CZ_P2_DEFAULT));
+            return;
+        }
+    }
     if (cc->lf_pend_rr_f) {
         cc->lf_pend_rr_f = false;
         cc->lf_pend_ack = false;
@@ -412,9 +581,28 @@ static void lf_rx(clear_channel_t *cc, const uint8_t *pkt, int len)
             cc->lf_resets++;
         }
         break;
-    case 0xAF:                                     /* XID (4.2.2, 4.2.3) */
+    case 0xAF:                                     /* XID (4.2.2, 4.2.3, Annex C) */
         if (cmd) {
+            int dir, p1, p2;
+
             cc->lf_pend_xid = true;               /* always answered, any state */
+            cc->lf_xid_resp_len = 0;
+            if (cc->cz_enable && cc->v120_ack && cc->lf_state == CC_LF_UP && len > 3
+                && cz_parse_info(pkt + 3, len - 3, &dir, &p1, &p2) == 0) {
+                /* C.2.2: return what we agree to, never more than asked. */
+                p1 = p1 < 512 ? 512 : p1 > CZ_P1_DEFAULT ? CZ_P1_DEFAULT : p1;
+                p2 = p2 < 6 ? 6 : p2 > 250 ? 250 : p2;
+                if (!(cc->cz && cc->cz_dir == dir && cc->cz_p1 == p1 && cc->cz_p2 == p2))
+                    cz_activate(cc, dir, p1, p2);   /* a repeated command changes nothing */
+                cc->cz_state = 2;
+                cc->lf_xid_resp_len = cz_build_info(cc->lf_xid_resp, dir, p1, p2);
+            }
+        } else if (cc->cz_state == 1) {            /* the answer to our negotiation */
+            int dir, p1, p2;
+
+            if (len > 3 && cz_parse_info(pkt + 3, len - 3, &dir, &p1, &p2) == 0)
+                cz_activate(cc, dir & cc->cz_req_dir, p1, p2);
+            cc->cz_state = 2;                     /* no V120 subfield: peer has none (C.2.3 a) */
         } else if (cc->vf_state == 1) {
             cc->vf_state = 2;                     /* link verified */
             cc->vf_ok++;
@@ -515,6 +703,15 @@ static void v120_deliver(clear_channel_t *cc, const uint8_t *info, int len)
         cc->rx_in_break = false;
         if (cc->brk_cb)
             cc->brk_cb(cc->ctx, false);
+    }
+    if (cc->cz && (cc->caller ? (cc->cz_dir & 2) : (cc->cz_dir & 1))) {
+        if (len > pos) {
+            if (v42bis_decompress(cc->cz, info + pos, len - pos) != 0)
+                cc->rx_bad_frames++;
+            else
+                v42bis_decompress_flush(cc->cz);   /* as data_stack.c: nothing held back */
+        }
+        pos = len;
     }
     for (; pos < len; pos++) {
         if (cc->push)
@@ -1331,6 +1528,12 @@ int cc_init_clear(clear_channel_t *cc, bool r56,
     return 0;
 }
 
+void cc_v120_set_compression(clear_channel_t *cc, bool on)
+{
+    cc->cz_enable = on;
+    cc->cz_state = 0;
+}
+
 void cc_v120_set_verify(clear_channel_t *cc, bool on)
 {
     cc->vf_enable = on;
@@ -1373,6 +1576,7 @@ int cc_init_v120(clear_channel_t *cc, bool r56, bool caller,
 
 void cc_release(clear_channel_t *cc)
 {
+    cz_release(cc);
     if (cc->htx)
         hdlc_tx_free(cc->htx);
     if (cc->hrx)

@@ -210,6 +210,7 @@ static void ack_spy_frame(void *user, const uint8_t *pkt, int len, int ok)
 
 /* Run an acknowledged pair; blocks of 160 octets A->B in [la0,la1) and
  * B->A in [lb0,lb1) are destroyed.  Returns when `ticks` have run. */
+static hdlc_rx_state_t *ack_spy_ba;     /* optional: B's transmit side too */
 static void ack_run(clear_channel_t *a, clear_channel_t *b, int ticks,
                     int la0, int la1, int lb0, int lb1, hdlc_rx_state_t *spy)
 {
@@ -222,6 +223,10 @@ static void ack_run(clear_channel_t *a, clear_channel_t *b, int ticks,
             for (int i = 0; i < 160; i++)
                 for (int k = 0; k < 8; k++)
                     hdlc_rx_put_bit(spy, (ab[i] >> (7 - k)) & 1);
+        if (ack_spy_ba)
+            for (int i = 0; i < 160; i++)
+                for (int k = 0; k < 8; k++)
+                    hdlc_rx_put_bit(ack_spy_ba, (ba[i] >> (7 - k)) & 1);
         if (t >= la0 && t < la1)
             memset(ab, 0x55, sizeof(ab));
         if (t >= lb0 && t < lb1)
@@ -543,6 +548,159 @@ static void test_v120_verify(void)
     }
     cc_release(&a);
     cc_release(&b);
+    free(ea);
+    free(eb);
+}
+
+/* ---- V.120 Annex C: V.42bis over the acknowledged link ---- */
+
+static uint8_t cz_xid_cmd[64], cz_xid_rsp[64];
+static int cz_xid_cmd_len, cz_xid_rsp_len, cz_data_before_rsp, cz_seen_rsp;
+static void cz_spy_frame(void *user, const uint8_t *pkt, int len, int ok)
+{
+    /* user != NULL: the responder's side, where only the XID answer matters. */
+    if (len < 3 || !ok || (user && pkt[2] != 0xAF))
+        return;
+    if (pkt[2] == 0xAF && len > 3) {
+        if (pkt[0] & 0x02) {
+            if (!cz_xid_rsp_len) {
+                memcpy(cz_xid_rsp, pkt + 3, (size_t) (len - 3));
+                cz_xid_rsp_len = len - 3;
+            }
+            cz_seen_rsp = 1;
+        } else if (!cz_xid_cmd_len) {
+            memcpy(cz_xid_cmd, pkt + 3, (size_t) (len - 3));
+            cz_xid_cmd_len = len - 3;
+        }
+    } else if (!(pkt[2] & 1) && !(pkt[0] & 0x02) && len > 5 && !cz_seen_rsp) {
+        cz_data_before_rsp++;                /* an I-frame with data before the XID answer */
+    }
+}
+
+static uint8_t cz_text[6000];
+
+static void test_v120_compress(void)
+{
+    end_t *ea = calloc(1, sizeof(*ea)), *eb = calloc(1, sizeof(*eb));
+    clear_channel_t a, b;
+    hdlc_rx_state_t *spy;
+    /* Table C.1 as printed: FI 82, GI F0, GL, PI0 "V120", P0 = 3, P1 = 0x0400, P2 = 32. */
+    static const uint8_t want[] = { 0x82, 0xF0, 0x00, 0x10, 0x00, 0x04, 'V', '1', '2', '0',
+                                    0x01, 0x01, 0x03, 0x02, 0x02, 0x04, 0x00, 0x03, 0x01, 0x20 };
+
+    printf("V.120 Annex C: V.42bis over V.120:\n");
+    for (size_t i = 0; i < sizeof(cz_text); i++)
+        cz_text[i] = (uint8_t) "lines of text compress very well; lines of text compress very well.\r\n"[i % 68];
+    ea->src = cz_text; ea->src_len = sizeof(cz_text);
+    eb->src = cz_text + 5; eb->src_len = 4000;
+    cc_init_v120(&a, false, true, end_pull, end_push, ea);
+    cc_init_v120(&b, false, false, end_pull, end_push, eb);
+    cc_v120_set_ack(&a, true);
+    cc_v120_set_ack(&b, true);
+    cc_v120_set_compression(&a, true);
+    cc_v120_set_compression(&b, true);
+    cz_xid_cmd_len = cz_xid_rsp_len = cz_data_before_rsp = cz_seen_rsp = 0;
+    spy = hdlc_rx_init(NULL, false, true, 1, cz_spy_frame, NULL);
+    hdlc_rx_set_max_frame_len(spy, 400);
+    ack_spy_ba = hdlc_rx_init(NULL, false, true, 1, cz_spy_frame, (void *) 1);
+    hdlc_rx_set_max_frame_len(ack_spy_ba, 400);
+    ack_run(&a, &b, 400, 0, 0, 0, 0, spy);
+    hdlc_rx_free(ack_spy_ba);
+    ack_spy_ba = NULL;
+    check(a.cz_state == 2 && b.cz_state == 2 && a.cz && b.cz && a.cz_dir == 3 && b.cz_dir == 3,
+          "XID negotiated V.42bis in both directions on both ends");
+    check(cz_xid_cmd_len == (int) sizeof(want) && !memcmp(cz_xid_cmd, want, sizeof(want)),
+          "the XID command on the wire is Table C.1's encoding (FI 82, GI F0, V120, P0 3, P1 1024, P2 32)");
+    check(cz_xid_rsp_len == (int) sizeof(want) && !memcmp(cz_xid_rsp, want, sizeof(want)),
+          "the XID response returns the agreed values in the same form");
+    check(cz_data_before_rsp == 0, "no user data from the initiator before the XID response");
+    check(eb->dst_len == sizeof(cz_text) && !memcmp(eb->dst, cz_text, sizeof(cz_text))
+          && ea->dst_len == 4000 && !memcmp(ea->dst, cz_text + 5, 4000),
+          "6000 + 4000 characters exact both ways through the compressors");
+    check(a.cz_tx_out * 2 < a.cz_tx_in && b.cz_tx_out * 2 < b.cz_tx_in,
+          "compression is real: under half the octets on the wire, both directions");
+    hdlc_rx_free(spy);
+    cc_release(&a);
+    cc_release(&b);
+
+    /* Loss in both directions while compressing: the link repeats frames, the
+     * decompressors must still see each exactly once, in order. */
+    memset(ea, 0, sizeof(*ea));
+    memset(eb, 0, sizeof(*eb));
+    ea->src = cz_text; ea->src_len = sizeof(cz_text);
+    eb->src = cz_text + 5; eb->src_len = 4000;
+    cc_init_v120(&a, false, true, end_pull, end_push, ea);
+    cc_init_v120(&b, false, false, end_pull, end_push, eb);
+    cc_v120_set_ack(&a, true);
+    cc_v120_set_ack(&b, true);
+    cc_v120_set_compression(&a, true);
+    cc_v120_set_compression(&b, true);
+    ack_run(&a, &b, 900, 3, 7, 6, 12, NULL);        /* includes the XID exchange */
+    check(eb->dst_len == sizeof(cz_text) && !memcmp(eb->dst, cz_text, sizeof(cz_text))
+          && ea->dst_len == 4000 && !memcmp(ea->dst, cz_text + 5, 4000)
+          && a.lf_state == CC_LF_UP && a.lf_rewinds + b.lf_rewinds + a.lf_discarded + b.lf_discarded > 0,
+          "with frames destroyed both ways (XID included): still exact, recovery ran");
+    cc_release(&a);
+    cc_release(&b);
+
+    /* One direction only: responder agrees to initiator->responder alone is
+     * not something we do (we always accept what is asked), so ask for it by
+     * hand-built XID against a plain peer instead: no V120 subfield, no
+     * compression, data exact. */
+    memset(ea, 0, sizeof(*ea));
+    memset(eb, 0, sizeof(*eb));
+    ea->src = cz_text; ea->src_len = 2000;
+    eb->src = cz_text + 5; eb->src_len = 1500;
+    cc_init_v120(&a, false, true, end_pull, end_push, ea);
+    cc_init_v120(&b, false, false, end_pull, end_push, eb);
+    cc_v120_set_ack(&a, true);
+    cc_v120_set_ack(&b, true);
+    cc_v120_set_compression(&a, true);              /* B does not implement Annex C */
+    ack_run(&a, &b, 200, 0, 0, 0, 0, NULL);
+    check(a.cz_state == 2 && !a.cz && !b.cz && eb->dst_len == 2000 && ea->dst_len == 1500
+          && !memcmp(eb->dst, cz_text, 2000) && !memcmp(ea->dst, cz_text + 5, 1500),
+          "a peer without Annex C answers the XID bare: no compression, data exact (C.2.3 a)");
+    cc_release(&a);
+    cc_release(&b);
+
+    /* A break after compressed data: the data, flushed, then the break. */
+    {
+        static brk_end_t ba, bb;
+        clear_channel_t x, y;
+        uint8_t ab[160], ba2[160];
+
+        memset(&ba, 0, sizeof(ba));
+        memset(&bb, 0, sizeof(bb));
+        cc_init_v120(&x, false, true, brk_pull, brk_push, &ba);
+        cc_init_v120(&y, false, false, brk_pull, brk_push, &bb);
+        cc_v120_set_ack(&x, true);
+        cc_v120_set_ack(&y, true);
+        cc_v120_set_compression(&x, true);
+        cc_v120_set_compression(&y, true);
+        cc_set_break_cb(&y, brk_mark);
+        for (int tk = 0; tk < 200; tk++) {
+            if (tk == 30) {
+                ba.src = "ABCABCABCABC";
+                ba.src_len = 12;
+                ba.src_pos = 0;
+            }
+            if (tk == 31)
+                cc_send_break(&x, 200);
+            if (tk == 45) {
+                ba.src = "DEF";
+                ba.src_len = 3;
+                ba.src_pos = 0;
+            }
+            cc_tx(&x, ab, 160);
+            cc_tx(&y, ba2, 160);
+            cc_rx(&y, ab, 160);
+            cc_rx(&x, ba2, 160);
+        }
+        bb.ev[bb.ev_len] = 0;
+            check(!strcmp(bb.ev, "ABCABCABCABC[]DEF"), "compressed data, then the break, then more data, in order");
+        cc_release(&x);
+        cc_release(&y);
+    }
     free(ea);
     free(eb);
 }
@@ -1712,6 +1870,7 @@ int main(void)
     test_v120_ack();
     test_break();
     test_v120_verify();
+    test_v120_compress();
     if (test_engine() < 0) {
         printf("  FAIL engine/PTY setup\n");
         failures++;

@@ -8444,6 +8444,10 @@ static void me_link_detail(char *out, size_t len, bool *originate)
                    g_cc.lf_state == CC_LF_UP ? "Q.922 up" : g_cc.lf_state == CC_LF_UI ? "UI" : "down",
                    (unsigned long long) g_cc.lf_resets, (unsigned long long) g_cc.lf_rewinds,
                    (unsigned long long) g_cc.lf_fallbacks);
+        if (g_cc.mode == CC_V120 && g_cc.cz)
+            DETAIL("V.42bis over V.120 P0 %d P1 %d P2 %d, sent %llu -> %llu octets\r\n",
+                   g_cc.cz_dir, g_cc.cz_p1, g_cc.cz_p2,
+                   (unsigned long long) g_cc.cz_tx_in, (unsigned long long) g_cc.cz_tx_out);
     }
     DETAIL("Training retrains  %u\r\n", g_training_fail_retrains);
     DETAIL("Data-mode retrains %u\r\n", g_loss_retrains);
@@ -8852,7 +8856,15 @@ static int me_clear_start_locked(void)
             const char *vf = getenv("ME_V120_VERIFY");
 
             cc_v120_set_ack(&g_cc, ack && *ack == '1');
+            const char *cz = getenv("ME_V120_COMPRESS");
+
             cc_v120_set_verify(&g_cc, vf && *vf == '1');
+            if (cz && *cz == '1') {
+                if (ack && *ack == '1')
+                    cc_v120_set_compression(&g_cc, true);
+                else
+                    ME_LOG("[ME] V.120: ME_V120_COMPRESS needs ME_V120_ACK=1 (Annex C wants the acknowledged link)\n");
+            }
             cc_set_break_cb(&g_cc, me_cc_break_cb);
         }
         g_data_connect_rate = rate;   /* as for V.110 above */

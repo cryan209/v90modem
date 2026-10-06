@@ -155,6 +155,15 @@ typedef struct {
     uint64_t lf_t200_at;
     uint8_t lf_win[16][1 + CC_V120_MAX_DATA];
     int lf_win_len[16];
+    /* Annex C: V.42bis */
+    bool cz_enable;
+    int cz_state, cz_dir, cz_p1, cz_p2, cz_req_dir, cz_xid_retries;   /* state: 0 idle, 1 XID out, 2 settled */
+    v42bis_state_t *cz;
+    uint8_t cz_out[2048];
+    int cz_out_len;
+    uint64_t cz_xid_at, cz_tx_in, cz_tx_out, cz_gave_up;
+    uint8_t lf_xid_resp[64];
+    int lf_xid_resp_len;
     bool vf_enable, lf_pend_xid;
     int vf_state, vf_retries;          /* 0 not started, 1 XID out, 2 verified */
     uint64_t vf_at, vf_ok, vf_gave_up;
@@ -256,6 +265,11 @@ void cc_v120_set_ack(clear_channel_t *cc, bool ack);
  * until the XID response (TM20 2.5 s, NM20 3; then data starts anyway, as
  * 4.2.2 allows).  An XID command is answered whether or not this is on. */
 void cc_v120_set_verify(clear_channel_t *cc, bool on);
+/* V.120 Annex C: negotiate V.42bis by XID once the acknowledged link is up
+ * (the caller proposes both directions, P1 1024, P2 32; the responder
+ * agrees to no more than asked).  Needs cc_v120_set_ack(); a peer that does
+ * not answer in NM20 tries gets uncompressed data (C.2.3 a). */
+void cc_v120_set_compression(clear_channel_t *cc, bool on);
 /* V.110 5.4.2: turn X OFF towards the far end when the DTE-side receive
  * buffer is under a quarter free (characters already in flight still fit),
  * back ON once it is over a half free.  Only in the data transfer state. */
