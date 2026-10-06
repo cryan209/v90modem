@@ -1319,6 +1319,13 @@ static bool           g_v92_upstream_lock_logged = false;
  * E2u and B1u (9.6.2.1.4/.5). */
 static bool           g_v92_upstream_eq_mode = false;
 static bool           g_v92_upstream_slicer_set = false;
+/* The data levels the slicer was given, and how close the equaliser's
+ * output lands on them once data arrives: the same figure the offline
+ * chain test reports, so a live call and the model can be compared. */
+static double         g_v92_data_levels[V92_P3_EQ_MAX_LEVELS];
+static int            g_v92_data_nlevels = 0;
+static double         g_v92_data_err2 = 0.0;
+static uint64_t       g_v92_data_nerr = 0;
 static uint8_t        g_v90_data_frame[V90_DATA_FRAME_LEN];
 static int            g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
 static bool           g_v34_fallback_to_v22bis_pending = false;
@@ -5803,8 +5810,14 @@ static void me_v92_data_slicer_locked(void)
         n = V92_P3_EQ_MAX_LEVELS;
     for (int i = 0; i < n; i++)
         positive[i] = g*cpd->points[0][i]*unit/lu;
+    ME_LOG("[ME] V.92 data slicer: equaliser at %+.1f ppm\n",
+           v92_p3_eq_ppm(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law]));
     v92_p3_eq_hold(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law], true);
     v92_p3_eq_set_levels(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law], positive, n);
+    memcpy(g_v92_data_levels, positive, (size_t)n*sizeof(positive[0]));
+    g_v92_data_nlevels = n;
+    g_v92_data_err2 = 0.0;
+    g_v92_data_nerr = 0;
     g_v92_upstream_slicer_set = true;
     ME_LOG("[ME] V.92 PCM upstream: CPd acknowledged; equaliser frozen, slicing "
            "on %d data levels (%.3f..%.3f LU), B1u search on its output\n",
@@ -5839,6 +5852,19 @@ static void me_v92_b1u_feed_values_locked(const double *values, int n)
     bool was_locked = g_v92_upstream_rx.locked;
     uint64_t before = g_v92_upstream_rx.input_symbols;
 
+    for (int i = 0; i < n && g_v92_data_nlevels > 0; i++) {
+        double best = 1e300;
+
+        for (int j = 0; j < g_v92_data_nlevels; j++) {
+            double a = fabs(values[i] - g_v92_data_levels[j]);
+            double b = fabs(values[i] + g_v92_data_levels[j]);
+
+            if (a < best) best = a;
+            if (b < best) best = b;
+        }
+        g_v92_data_err2 += best*best;
+        g_v92_data_nerr++;
+    }
     (void)v92_upstream_b1_rx_feed_values(&g_v92_upstream_rx, values, n);
     /* Once a second while hunting: how close the search is getting. */
     if (!g_v92_upstream_rx.locked
@@ -5850,7 +5876,8 @@ static void me_v92_b1u_feed_values_locked(const double *values, int n)
                (unsigned long long)g_v92_upstream_rx.candidates_passed,
                g_v92_upstream_rx.best_frames,
                g_v92_upstream_rx.best_first_ones,
-               v92_upstream_bits_per_frame(g_v92_upstream_rx.cpd.selected_upstream_drn));
+               v92_upstream_bits_per_frame(g_v92_upstream_rx.cpd.selected_upstream_drn),
+               g_v92_data_nerr ? sqrt(g_v92_data_err2/(double)g_v92_data_nerr) : 0.0);
     if (!was_locked && g_v92_upstream_rx.locked)
         me_v92_b1u_locked_locked();
 }
@@ -5930,6 +5957,15 @@ static void v92_live_p4u_frame(void *user_data,
                            g_v92_trn2u_nerr ? sqrt(g_v92_trn2u_err2/(double)g_v92_trn2u_nerr) : 0.0,
                            (unsigned long long)g_v92_trn2u_nerr,
                            g_v92_trn2u_npow ? sqrt(g_v92_trn2u_pow/(double)g_v92_trn2u_npow) : 0.0);
+                    {
+                        char pl[1024];
+                        int at = 0;
+
+                        for (int i = 0; i < cpd.set_sizes[0] && at < (int)sizeof(pl) - 8; i++)
+                            at += snprintf(pl + at, sizeof(pl) - (size_t)at, " %u",
+                                           (unsigned)cpd.points[0][i]);
+                        ME_LOG("[ME] V.92 CPd points:%s\n", pl);
+                    }
                 } else {
                     g_v92_upstream_rx_active = false;
                     ME_LOG("[ME] V.92 PCM-upstream CPd profile cannot arm B1u receiver\n");

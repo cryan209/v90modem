@@ -814,6 +814,11 @@ pcm-procedure-test: vpcm_loopback_test v92_proc_eval_test v92_mh_test v92_mh_lin
 	./v92_rsig_test
 	./v92_tone_a_test
 
+# Diagnostic, not in `make test`: our V.92 upstream receiver against a model
+# of slmodemd's transmit chain (EQ_TAPS=63 locks it).
+v92_slm_chain_test: v92_slm_chain_test.o v92_p3_eq.o v92_upstream_rx.o v92_upstream_data.o
+	$(CC) $^ -o $@ -lm
+
 v92_b1u_lock_test: $(V92_B1U_LOCK_TEST_OBJS)
 	$(CC) $(V92_B1U_LOCK_TEST_OBJS) -o $@ -lm
 
