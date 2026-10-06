@@ -105,9 +105,13 @@ These are offline/G.711 loopbacks, not new Canon hardware interoperability.
   clean channel, one-direction-loss and simultaneous-control cases remain open.
 - Phase 2 recovery beyond the newly covered startup tone fallback and primary
   retrain needs a separate clause-by-clause audit against foreign waveforms.
-  Tests configure matching symbol-rate profiles; non-default INFOh choices
-  (carrier, symbol rate, pre-emphasis and power reduction) still need an
-  enforcement audit and independent waveform tests.
+  INFOh now governs the source symbol rate, carrier, requested power reduction,
+  pre-emphasis and TRN constellation (Table 22/12.3.1), independent of call role.
+  Reserved symbol-rate and pre-emphasis indices cannot release Phase 3.
+  `make v34-hdx-infoh-test` verifies low-carrier selection against the source's
+  high-carrier default: all six symbol rates, both laws and both source call
+  roles (24 rows, error-free primary payload). Different symbol-rate profiles,
+  nonzero power/pre-emphasis and 16-point TRN still need waveform tests.
 - 10.2.4's optional 2400 bit/s control channel remains unimplemented and is
   not advertised. Unsupported remote requests are rejected explicitly.
 - Primary rates 31.2 and 33.6 kbit/s remain unverified, with known loopback

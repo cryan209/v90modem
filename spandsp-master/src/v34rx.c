@@ -4950,7 +4950,9 @@ static int process_rx_infoh(v34_rx_state_t *s, infoh_t *infoh, uint8_t buf[])
     infoh->trn16 = bitstream_get(&bs, &t, 1);
 
     log_infoh(s->logging, false, infoh);
-    return 0;
+    /* V.34 Table 22 reserves symbol-rate indices 6/7 and pre-emphasis
+       indices 11..15. A valid CRC does not make those selections usable. */
+    return (infoh->baud_rate <= 5 && infoh->preemphasis_filter <= 10) ? 0 : -1;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -6033,7 +6035,8 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                     }
                     break;
                 case V34_RX_STAGE_INFOH:
-                    process_rx_infoh(s, &s->infoh, s->info_buf);
+                    if (process_rx_infoh(s, &s->infoh, s->info_buf) != 0)
+                        break;
                     /* V34_EVENT_INFOH_OK is what the half-duplex transmitter
                        waits on in V34_TX_STAGE_HDX_POST_L2_B (12.2.1.1.4).  It
                        was defined, named and waited on, but NEVER RAISED

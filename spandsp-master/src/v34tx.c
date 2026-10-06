@@ -6179,6 +6179,10 @@ static complex_sig_t get_infoh_baud(v34_state_t *s)
            v34_force_phase3_rx() is the usual way in, but it starts with
            s_not_s_baud_init() and would have the recipient TRANSMIT S, which is
            exactly what 12.3.2.1 forbids.  Take the receive half only. */
+        /* 12.3.2.1: receive on the primary carrier selected in our INFOh. */
+        s->rx.high_carrier = s->tx.infoh.use_high_carrier;
+        s->rx.v34_carrier_phase_rate =
+            dds_phase_ratef(carrier_frequency(s->rx.baud_rate, s->rx.high_carrier));
         reset_primary_rx_frontend_for_phase3(s);
         s->primary_channel_active = true;
         s->rx.current_demodulator = V34_MODULATION_V34;
@@ -6650,7 +6654,23 @@ static void s_not_s_baud_init(v34_state_t *s)
     int carrier_idx;
 
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - s_not_s_baud_init()\n");
-    if (s->tx.v90_v34_fallback  &&  s->rx.info1a_received)
+    if (!s->duplex)
+    {
+        /* V.34 10.2.2/Table 22 and 12.3.1: INFOh governs the source
+           transmitter, independently of which modem placed the call. */
+        s->tx.baud_rate = s->rx.infoh.baud_rate;
+        s->tx.high_carrier = s->rx.infoh.use_high_carrier;
+        s->tx.parms.samples_per_symbol_numerator =
+            baud_rate_parameters[s->tx.baud_rate].samples_per_symbol_numerator;
+        s->tx.parms.samples_per_symbol_denominator =
+            baud_rate_parameters[s->tx.baud_rate].samples_per_symbol_denominator;
+        s->tx.parms.max_bit_rate_code = baud_rate_parameters[s->tx.baud_rate].max_bit_rate_code;
+        s->tx.v34_carrier_phase_rate =
+            dds_phase_ratef(carrier_frequency(s->tx.baud_rate, s->tx.high_carrier));
+        /* The shared TRN/J generator reads tx.infoh for constellation size. */
+        s->tx.infoh = s->rx.infoh;
+    }
+    else     if (s->tx.v90_v34_fallback  &&  s->rx.info1a_received)
     {
         /* V.90 §9.2.1.1.8 V.34 fallback, call-modem role.  Table 11 dictates
            our transmit configuration: bits 37:39 the digital->analogue symbol
@@ -6729,7 +6749,13 @@ static void s_not_s_baud_init(v34_state_t *s)
        bits before accepting them. */
     baud_idx = s->tx.baud_rate;
     carrier_idx = s->tx.high_carrier ? 1 : 0;
-    if (s->tx.v90_v34_fallback  &&  s->rx.info1a_received)
+    if (!s->duplex)
+    {
+        info1_source = "INFOh";
+        power_reduction = s->rx.infoh.power_reduction;
+        preemp_idx = s->rx.infoh.preemphasis_filter;
+    }
+    else     if (s->tx.v90_v34_fallback  &&  s->rx.info1a_received)
     {
         /* V.90 Table 11 (V.34-selected INFO1a): bits 12:14 are the minimum
            power reduction for the DIGITAL modem transmitter and 15:17 the

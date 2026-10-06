@@ -393,7 +393,7 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 	./v34_hdx_test 3200 21600 ulaw 20 9600
 	./v34_hdx_test 3429 14400 alaw 20 19200
 	./v34_hdx_test 3429 28800 alaw 20 4800
-	$(MAKE) v34-hdx-primary-test v34-hdx-turnaround-test v34-hdx-recovery-test v34-hdx-parameters-test v34-hdx-retrain-test v34-hdx-startup-recovery-test
+	$(MAKE) v34-hdx-primary-test v34-hdx-turnaround-test v34-hdx-recovery-test v34-hdx-parameters-test v34-hdx-retrain-test v34-hdx-startup-recovery-test v34-hdx-infoh-test
 	./v32bis_spandsp_test
 	./v32bis_duplex_test
 	./v32bis_engine_pair_test ulaw v8
@@ -849,6 +849,16 @@ v56bis-sweep: v56_loopback_test v56bis-filter-test
 .PHONY: v34-hdx-primary-test
 # 12.5 resynchronization followed by at least 8000 error-free primary bits.
 # All symbol rates and laws; unequal ceilings also check the MPh-to-mapper seam.
+# V.34 Table 22: recipient selects a carrier different from the source default.
+.PHONY: v34-hdx-infoh-test
+v34-hdx-infoh-test: v34_hdx_test
+	@set -e; for baud in 2400 2743 2800 3000 3200 3429; do \
+	  for law in ulaw alaw; do \
+	    V34_HDX_LOW_CARRIER=1 V34_HDX_PRIMARY=1 ./v34_hdx_test $$baud 9600 $$law 12; \
+	    V34_HDX_LOW_CARRIER=1 V34_HDX_PRIMARY=1 V34_HDX_ANSWER_SOURCE=1 ./v34_hdx_test $$baud 9600 $$law 12; \
+	  done; \
+	done
+
 v34-hdx-primary-test: v34_hdx_test
 	@set -e; for baud in 2400 2743 2800 3000 3200 3429; do \
 	  for law in ulaw alaw; do \

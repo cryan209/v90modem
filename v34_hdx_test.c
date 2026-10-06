@@ -227,6 +227,13 @@ int main(int argc, char *argv[])
         fprintf(stderr, "v34_hdx_test: v34_init failed\n");
         return 1;
     }
+    /* Foreign recipient selects the low carrier; the source starts with its
+       default high carrier and must learn the selection from INFOh. */
+    if (getenv("V34_HDX_LOW_CARRIER"))
+    {
+        answ_modem->tx.high_carrier = false;
+        answ_modem->rx.high_carrier = false;
+    }
     v34_tx_power(call_modem, -12.0f);
     v34_tx_power(answ_modem, -12.0f);
     /* Unknown modes and a primary request before MPh/E must be refused. */
@@ -587,6 +594,12 @@ int main(int argc, char *argv[])
             best_call_rx = v34_get_rx_stage(call_modem);
         if (v34_get_rx_stage(answ_modem) > best_answ_rx)
             best_answ_rx = v34_get_rx_stage(answ_modem);
+    }
+
+    if (getenv("V34_HDX_LOW_CARRIER") && call_modem->tx.high_carrier)
+    {
+        fprintf(stderr, "source ignored INFOh low-carrier selection\n");
+        return 1;
     }
 
     printf("V.34 half-duplex (clause 12), %d baud %d bps %s, %.1f s\n",
