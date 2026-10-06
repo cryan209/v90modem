@@ -65,9 +65,12 @@ static const struct {
       "V.91+V.90, V.34; ,0: V.91+V.34" },
     /* 64000: x2's digital symmetric mode (x2 up and down) runs PCM both
      * ways at up to 64000.  Only the asymmetric session (PCM down, V.34
-     * up) exists here; docs/x2_implementation.md. */
+     * up) is selected by X2; X2S selects the digital symmetric session.
+     * See docs/x2_implementation.md. */
     { "X2",   { NULL },                       "x2",  "x2",  64000,
-      "x2 asym (symmetric 64k not here)" },
+      "x2 asymmetric digital answerer" },
+    { "X2S", { "X2SYMM", NULL }, "x2-symm", "x2-symm", 64000,
+      "x2 digital symmetric (56/64k)" },
     /* Recognised, with no datapump in this engine.  Both modes NULL, so
      * always ERROR; +MS=? leaves them out and +MS$ lists them apart, so a
      * DTE that sends them learns why rather than meeting a bare ERROR.

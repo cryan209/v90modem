@@ -46,6 +46,23 @@ static uint8_t linear_ulaw(int sample)
     while (exponent > 0 && !(sample & mask)) { --exponent; mask >>= 1; }
     return (uint8_t)~(sign | (exponent << 4) | ((sample >> (exponent+3)) & 15));
 }
+static uint8_t linear_code(x2_session_t *s,int sample)
+{
+    if(!s->alaw)return linear_ulaw(sample);
+    int mask=sample>=0?0xd5:0x55;
+    if(sample<0)sample=-sample-1;
+    unsigned seg=0,v=(unsigned)sample|255;
+    while(v>>=1)++seg;
+    seg-=7;
+    return (uint8_t)(((seg<<4)|((sample>>(seg?seg+3:4))&15))^mask);
+}
+int x2_session_init_symmetric(x2_session_t *s,unsigned alaw,unsigned answering)
+{
+    if(answering>1 || alaw>1 || x2_session_init(s))return -1;
+    s->alaw=alaw;s->symmetric=1;s->answering=answering;
+    x2_sym_link_init(&s->sym,answering,NULL,NULL,NULL);
+    return 0;
+}
 static int positive_ulaw(unsigned code)
 {
     unsigned c = (~code) & 127;
@@ -70,7 +87,8 @@ int x2_session_init(x2_session_t *s)
 {
     unsigned i;
     if (!s) return -1;
-    memset(s,0,sizeof(*s)); s->stage=X2_INFO0;
+    memset(s,0,sizeof(*s)); s->stage=X2_INFO0;s->answering=1;
+    s->upstream_rate_mask=0x3fff;
     /* Captured I-modem INFO0 body 11111111101111000, first bit first.
      * This is V.34's 17-bit INFO0, not V.90's extended INFO0d. */
     x2_info_encode(0x3dff,17,s->info_bits);
@@ -104,7 +122,7 @@ void x2_session_receive_mp(x2_session_t *s,const x2_mp_t *mp)
     if(index<0){s->stage=X2_FAILED;return;}
     /* W2 is the V.34 upstream capability mask, independent of PCM N1.
      * Highest allowed N no greater than N2; bit zero represents N=1. */
-    eligible=mp->words[1]&((1u<<((mp->words[0]>>6)&15))-1);
+    eligible=s->upstream_rate_mask&mp->words[1]&((1u<<((mp->words[0]>>6)&15))-1);
     while(eligible){++n;eligible>>=1;}
     if(!n || n>14){s->stage=X2_FAILED;return;}
     s->peer_mp=*mp;s->data_config=c;s->selected_index=(unsigned)index;
@@ -197,7 +215,10 @@ static void info_bit(x2_session_t *s,x2_info_hypothesis_t *h,unsigned bit)
     if(length!=33)return;
     h->count=0;
     if(x2_info_decode(h->bits,17,&body)){++s->rejected_frames;return;}
-    if(!(body&0x40) || (body&0x1800))return;
+    if(!(body&0x40))return;
+    if(s->symmetric) {
+        if(x2_info_role_select(0x3dff,body)!=X2_ROLE_SYMMETRIC)return;
+    } else if(body&0x1800)return;
     unsigned repeated=s->peer_info_valid && s->stage==X2_TONE_A && !s->a_reversals;
     s->peer_capabilities=(uint16_t)body;s->peer_info_valid=1;++s->accepted_frames;
     /* V.34 Table 14 bit 28 and Courier 8E8B/9120/9141: during error
@@ -271,12 +292,24 @@ static void phase2_b_sample(x2_session_t *s,int16_t sample,uint64_t tx_time)
     if(s->b_samples<40){++s->b_samples;return;}
     for(j=0;j<40;++j) {
         double x=s->b_window[(s->b_position+j)%40];
-        double phase=2*PI*1200*(double)((s->rx_samples+1-40+j)%20)/8000;
+        double phase=2*PI*(s->answering?1200:2400)*(double)((s->rx_samples+1-40+j)%20)/8000;
         re+=x*cos(phase);im-=x*sin(phase);energy+=x*x;
     }
     double power=re*re+im*im;
     double reference=s->b_reference_re*s->b_reference_re+s->b_reference_im*s->b_reference_im;
     double dot=re*s->b_reference_re+im*s->b_reference_im;
+    /* V.34 §11.2.1.1.3: caller reverses B 40 ms after the first A
+     * reversal, sends reversed B for 10 ms, then waits silently. */
+    if(!s->answering && s->b_present) {
+        if(!s->b_crossing_valid && dot<0) {
+            s->b_crossing_sample=s->rx_samples-20;s->b_crossing_valid=1;
+        }
+        if(!s->b_reversed && reference>0 && dot < -0.8*reference && energy>100000) {
+            uint64_t age=s->rx_samples-s->b_crossing_sample;
+            s->b_reversed=1;s->second_a_tx_sample=tx_time+(age<320?320-age:0);
+        }
+        return;
+    }
     if(s->a_reversals==1 && s->b_present && !s->b_reversed) {
         if(!s->b_crossing_valid && dot<0) {
             s->b_crossing_sample=s->rx_samples-20;
@@ -303,7 +336,7 @@ void x2_session_rx(x2_session_t *s,const int16_t *samples,size_t count)
     if(s->stage>=X2_TRAIN_C && s->stage<=X2_PAYLOAD && !s->mp_rx.e_detected)
         x2_mp_rx_audio(&s->mp_rx,samples,count);
     for(k=0;k<count;++k,++s->rx_samples) {
-        double phase=2*PI*1200*(double)(s->rx_samples%20)/8000;
+        double phase=2*PI*(s->answering?1200:2400)*(double)(s->rx_samples%20)/8000;
         double re=samples[k]*cos(phase),im=-samples[k]*sin(phase);
         if(s->stage==X2_TONE_A && s->peer_info_valid)
             phase2_b_sample(s,samples[k],s->tx_samples+k);
@@ -341,21 +374,21 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
     for(k=0;k<count;++k,++s->tx_samples) {
         unsigned n=s->stage_samples;uint8_t code=0x7f;
         x2_session_stage_t old_stage=s->stage;
-        if(n>80000 && s->stage!=X2_FAILED && s->stage!=X2_PAYLOAD){stage(s,X2_FAILED);old_stage=s->stage;n=0;}
+        if(n>80000 && s->stage!=X2_FAILED && s->stage!=X2_PAYLOAD && !(s->stage==X2_SYMMETRIC && s->sym.tx_data && s->sym.rx_data)){stage(s,X2_FAILED);old_stage=s->stage;n=0;}
         switch(s->stage) {
         case X2_INFO0:
         case X2_TONE_A: {
             if(s->stage==X2_TONE_A) {
-                if(!s->a_reversals && n>=400 && s->peer_info_valid && s->b_present) {
+                if(s->answering && !s->a_reversals && n>=400 && s->peer_info_valid && s->b_present) {
                     s->sign^=1;s->a_reversals=1;
                     s->b_crossing_valid=0;
                 }
-                if(s->a_reversals==1 && s->b_reversed && s->tx_samples>=s->second_a_tx_sample) {
-                    s->sign^=1;s->a_reversals=2;
+                if(((s->answering && s->a_reversals==1) || (!s->answering && !s->a_reversals)) && s->b_reversed && s->tx_samples>=s->second_a_tx_sample) {
+                    s->sign^=1;s->a_reversals=s->answering?2:1;
                 }
             }
             if(s->stage==X2_INFO0 && s->info_clock<600 && s->info_bits[s->info_position])s->sign^=1;
-            code=linear_ulaw((int)((s->sign?-3000:3000)*cos(2*PI*2400*(double)(s->tx_samples%10)/8000)));
+            code=linear_code(s,(int)((s->sign?-3000:3000)*cos(2*PI*(s->answering?2400:1200)*(double)(s->tx_samples%20)/8000)));
             if(s->stage==X2_INFO0) {
                 s->info_clock+=600;
                 if(s->info_clock>=8000) {
@@ -366,8 +399,8 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
                     }
                 }
             } else if(s->stage==X2_TONE_A) {
-                if(s->a_reversals==2 && s->tx_samples>=s->second_a_tx_sample+79)
-                    stage(s,X2_PROBE);
+                if(s->a_reversals==(s->answering?2u:1u) && s->tx_samples>=s->second_a_tx_sample+79)
+                    stage(s,s->symmetric?X2_SYMMETRIC:X2_PROBE);
             }
             break;
         }
@@ -378,6 +411,8 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
             code=linear_ulaw(s->probe[n%160]);
             if(n==1279)stage(s,X2_MARKER_WAIT);
             break;
+        case X2_SYMMETRIC:
+            x2_sym_link_tx(&s->sym,&code,1);break;
         case X2_MARKER_WAIT:
         case X2_UPSTREAM_WAIT:break;
         case X2_ZERO:if(n==19)stage(s,X2_PATTERN_A);break;
@@ -457,6 +492,6 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
 }
 const char *x2_session_stage_name(x2_session_stage_t s)
 {
-    static const char *names[]={"INFO0","TONE_A","PROBE","MARKER_WAIT","UPSTREAM_WAIT","ZERO","PATTERN_A","TRAIN_B","J","J_ACK","TRAIN_C","TRAIN_D","TRAIN_E","RECORD_WAIT","RECORD_ALIGN","RECORD_TX","FINAL_TRAINING","DATA_STARTUP","PAYLOAD","FAILED"};
+    static const char *names[]={"INFO0","TONE_A","PROBE","MARKER_WAIT","UPSTREAM_WAIT","ZERO","PATTERN_A","TRAIN_B","J","J_ACK","TRAIN_C","TRAIN_D","TRAIN_E","RECORD_WAIT","RECORD_ALIGN","RECORD_TX","FINAL_TRAINING","DATA_STARTUP","PAYLOAD","SYMMETRIC","FAILED"};
     return (unsigned)s<sizeof(names)/sizeof(names[0])?names[s]:"INVALID";
 }

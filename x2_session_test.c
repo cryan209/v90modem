@@ -329,6 +329,13 @@ static void source_activation_test(void)
         uint32_t history=s.training_mapper.scrambler.history;
         session_output(&s,NULL,6,blocks[b]);assert(source_calls==24);
         assert(history!=s.training_mapper.scrambler.history);
+        /* Draft 0.33 section 20: host limit intersects W2 and N2, rather
+         * than confusing the upstream rate with the PCM downstream index. */
+        s.stage=X2_RECORD_WAIT;s.upstream_rate_mask=3;
+        x2_session_receive_mp(&s,&mp);
+        assert(s.mp_valid && s.upstream_rate_n==2 && s.selected_index==1);
+        s.upstream_rate_mask=0;
+        x2_session_receive_mp(&s,&mp);assert(s.stage==X2_FAILED);
         /* Malformed MP cannot overwrite accepted parameters. */
         s.stage=X2_RECORD_WAIT;mp.words[2]=1;
         x2_session_receive_mp(&s,&mp);assert(s.stage==X2_FAILED);

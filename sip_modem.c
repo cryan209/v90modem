@@ -13,7 +13,7 @@
  *   ./sip_v90_modem [--sip-server <host>] [--username <user>]
  *                   [--password <pass>]  [--pty-link <path> | --control-link <p> --data-link <p>]
  *                   [--local-port <port>] [--rtp-port <port>]
- *                   [--bind-addr <ip>] [--mode x2|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92|\n"
+ *                   [--bind-addr <ip>] [--mode x2|x2-symm|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92|\n"
         "          clear|clear56|v120|v120-56]
  *                   [--verbose]
  *
@@ -1129,7 +1129,7 @@ static void print_usage(FILE *f, const char *argv0)
         "Usage: %s [--sip-server host] [--username u] [--password p]\n"
         "          [--pty-link path | --control-link path --data-link path]\n"
         "          [--local-port port] [--rtp-port port]\n"
-        "          [--bind-addr ip] [--mode x2|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92] [--verbose]\n"
+        "          [--bind-addr ip] [--mode x2|x2-symm|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92] [--verbose]\n"
         "          [--auto-answer rings] [--connect-timeout seconds] [--profile file]\n"
         "\n"
         "--auto-answer sets S0's power-on and factory value (default 2; 0 answers\n"
@@ -1256,6 +1256,8 @@ int main(int argc, char *argv[])
 
     if (modem_mode
         && strcmp(modem_mode, "x2") != 0
+        && strcmp(modem_mode, "x2-symm") != 0
+        && strcmp(modem_mode, "x2-sym") != 0
         && strcmp(modem_mode, "v22") != 0
         && strcmp(modem_mode, "v22-1200") != 0
         && strcmp(modem_mode, "v32") != 0
@@ -1269,7 +1271,7 @@ int main(int argc, char *argv[])
         && strcmp(modem_mode, "clear56") != 0
         && strcmp(modem_mode, "v120") != 0
         && strcmp(modem_mode, "v120-56") != 0) {
-        fprintf(stderr, "Invalid --mode '%s' (expected x2, k56, v22, v34, v90, "
+        fprintf(stderr, "Invalid --mode '%s' (expected x2, x2-symm, k56, v22, v34, v90, "
                         "v91, v92, clear, clear56, v120 or v120-56)\n",
                 modem_mode);
         return 2;

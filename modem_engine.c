@@ -188,6 +188,11 @@ enum v34_events_e {
 
 /* Current G.711 law (set by sip_modem.c after codec negotiation). */
 static me_law_t g_law = ME_LAW_ULAW;
+/* Native digital x2 peers may use a fixed PCMU control alphabet even on
+ * an A-law-labelled DS0. Explicit peer compatibility setting; it selects
+ * our signalling codebook, never converts received/transmitted octets.
+ * Symmetric data remains opaque bytes. Draft 0.33 §§12–13. */
+static bool g_x2_mu_control;
 
 #define V90_DATA_FRAME_LEN 6
 #define V90_RATE_BPS       56000
@@ -198,14 +203,14 @@ static me_law_t g_law = ME_LAW_ULAW;
  */
 static inline int16_t pcm_to_linear(uint8_t codeword)
 {
-    if (g_law == ME_LAW_ALAW)
+    if (g_law == ME_LAW_ALAW && !g_x2_mu_control)
         return alaw_to_linear(codeword);
     return ulaw_to_linear(codeword);
 }
 
 static inline uint8_t linear_to_pcm(int16_t sample)
 {
-    if (g_law == ME_LAW_ALAW)
+    if (g_law == ME_LAW_ALAW && !g_x2_mu_control)
         return linear_to_alaw(sample);
     return linear_to_ulaw(sample);
 }
@@ -215,7 +220,7 @@ static inline uint8_t linear_to_pcm(int16_t sample)
  */
 static inline uint8_t pcm_idle(void)
 {
-    return v90_idle_codeword(g_law == ME_LAW_ALAW ? V90_LAW_ALAW : V90_LAW_ULAW);
+    return v90_idle_codeword(g_law == ME_LAW_ALAW && !g_x2_mu_control ? V90_LAW_ALAW : V90_LAW_ULAW);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2236,6 +2241,7 @@ static bool g_cc_active = false;
 static bool g_enable_v92 = false;
 static const char *g_mode_name = "v90";
 static bool g_enable_x2 = false;
+static bool g_enable_x2_symmetric = false;
 /* The offer the NEXT call takes (AT+MS), and the power-on default ME_MODE
  * set, which ATZ/AT&F restore.  Applied in me_on_sip_connected() so a change
  * never reaches a call in progress. */
@@ -2279,7 +2285,7 @@ static bool me_v90_analogue_role(void)
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    bool x2, v90, v34, v32, v22, v92, k56, v91;
+    bool x2, x2_symmetric, v90, v34, v32, v22, v92, k56, v91;
     bool v32bis_ok;          /* V.32bis reachable at all (V.8 or Annex A) */
     bool clear, v120, r56;   /* no V.8: clear channel or V.120 on the DS0 */
     const char *name;
@@ -2342,6 +2348,10 @@ static bool me_offer_from_mode(const char *mode, bool automode, me_offer_t *o)
     if (!mode || !*mode || strcmp(mode, "auto") == 0) {
         o->v92 = parse_env_int("ME_V92_ENABLE", 0) != 0;
         o->name = o->v92 ? "v92" : "v90";
+    } else if (strcmp(mode, "x2-symm") == 0 || strcmp(mode, "x2-sym") == 0) {
+        o->x2 = o->x2_symmetric = true;
+        o->v90 = false;
+        o->name = "x2-symm";
     } else if (strcmp(mode, "x2") == 0) {
         o->x2 = true;
         o->v90 = false;
@@ -2514,6 +2524,11 @@ static bool me_resolve_offer(const char *mode, bool automode)
         ME_LOG("[ME] AT+MS: no modulation of mode %s connects within %d-%d/%d-%d bit/s\n",
                mode, g_lim[0], g_lim[1], g_lim[2], g_lim[3]);
     g_enable_x2 = o.x2;
+    g_enable_x2_symmetric = o.x2_symmetric;
+    {
+        const char *control=getenv("ME_X2_CONTROL_LAW");
+        g_x2_mu_control=o.x2_symmetric && control && !strcmp(control,"ulaw");
+    }
     g_advertise_v90 = o.v90;
     g_advertise_v34 = o.v34;
     g_advertise_v22 = o.v22;
@@ -7797,6 +7812,29 @@ static int me_x2_payload_bit(void *unused)
     int bit=ds_tx_get_bit(&g_data_stack);
     return bit==0 || bit==1 ? bit : 1;
 }
+static void me_x2_symmetric_bit(void *unused,int bit)
+{
+    (void)unused; ds_rx_put_bit(&g_data_stack,bit);
+}
+static void me_x2_symmetric_progress_locked(void)
+{
+    x2_sym_link_t *link=&g_x2.sym;
+    if(link->failed){g_state=ME_HANGUP;return;}
+    if(link->cap_valid && !g_x2_data_stack_started) {
+        if(data_stack_start_online((int)link->rate,g_calling_party)){g_state=ME_HANGUP;return;}
+        g_x2_data_stack_started=true;
+        g_report_tx_rate=g_report_rx_rate=(int)link->rate;
+        trace_phase("X2 symmetric capability: rate=%u errors=%02x mask=%02x scrambling=%u",
+                    link->rate,link->errors,link->mask,link->scramble);
+    }
+    if(link->rx_data && link->tx_data && g_state==ME_TRAINING) {
+        g_state=ME_DATA;g_phase_start_ms=0;
+        trace_phase("X2 symmetric enter DATA: %u bit/s",link->rate);
+        if(g_data_framing!=DS_FRAMING_V42 && !g_data_connect_reported) {
+            g_data_connect_reported=true;di_on_connected((int)link->rate);
+        }
+    }
+}
 static void me_x2_progress_locked(void)
 {
     if(g_x2.a_reversals!=g_x2_last_reversals || g_x2.b_reversed!=g_x2_last_b_reversed) {
@@ -7816,20 +7854,38 @@ static void me_x2_progress_locked(void)
 }
 static bool me_x2_tx_locked(uint8_t *codewords, int count)
 {
-    if (g_mod != ME_MOD_X2 || g_state != ME_TRAINING) return false;
+    if (g_mod != ME_MOD_X2 || (g_state != ME_TRAINING && !(g_x2.symmetric && g_state==ME_DATA))) return false;
     x2_session_tx(&g_x2, codewords, (size_t)count);
+    if(g_x2.symmetric)me_x2_symmetric_progress_locked();
     me_x2_progress_locked();
     return true;
 }
 static void me_x2_start_locked(void)
 {
-    if (g_calling_party || g_law != ME_LAW_ULAW) {
-        ME_LOG("[ME] x2 currently requires an answering PCMU digital endpoint\n");
+    const char *sym=getenv("ME_X2_SYMMETRIC");
+    bool symmetric=sym ? atoi(sym)!=0 : g_enable_x2_symmetric;
+    if (!symmetric && (g_calling_party || g_law != ME_LAW_ULAW)) {
+        ME_LOG("[ME] x2 currently requires an answerer; asymmetric x2 requires PCMU\n");
         g_state = ME_HANGUP;
         return;
     }
     if (g_v34) { v34_free(g_v34); g_v34 = NULL; }
-    x2_session_init(&g_x2);
+    if(symmetric)x2_session_init_symmetric(&g_x2,g_law==ME_LAW_ALAW && !g_x2_mu_control,!g_calling_party);
+    else {
+        x2_session_init(&g_x2);
+        /* x2 Draft 0.33 section 20: select N2 from the peer's W2 rates.
+         * Keep the current 4800-bit/s diagnostic default explicit; a higher
+         * rate still needs native payload qualification, not just B1 fit. */
+        const char *limit=getenv("ME_X2_UPSTREAM_MAX_RATE");
+        int rate=limit ? atoi(limit) : 4800;
+        if(rate<2400 || rate>33600 || rate%2400) {
+            ME_LOG("[ME] invalid ME_X2_UPSTREAM_MAX_RATE: %s\n",limit);
+            g_state=ME_HANGUP;return;
+        }
+        g_x2.upstream_rate_mask=(uint16_t)((1u<<(rate/2400))-1);
+        trace_phase("X2 host upstream limit: %d bit/s",rate);
+    }
+    x2_sym_link_init(&g_x2.sym,!g_calling_party,me_x2_payload_bit,me_x2_symmetric_bit,NULL);
     x2_session_set_payload_source(&g_x2,me_x2_payload_bit,NULL);
     g_x2_data_stack_started=false;
     g_x2_upstream_prepared=g_x2_upstream_started=false;
@@ -7851,7 +7907,8 @@ static void me_x2_start_locked(void)
             x2_session_rx(&g_x2,history,(size_t)n);offset+=n;
         }
     }
-    ME_LOG("[ME] x2 digital startup: INFO0=3dff; waiting for CRC-valid peer marker (RX sample %llu)\n",
+    ME_LOG("[ME] x2 digital startup: INFO0=3dff; waiting for %s (RX sample %llu)\n",
+           symmetric?"symmetric INFO0/tone exchange":"CRC-valid peer marker",
            (unsigned long long)g_rx_audio_samples);
     me_x2_progress_locked();
 }
@@ -14036,6 +14093,18 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
     pthread_mutex_lock(&g_state_mtx);
     first_sample = g_g711_rx_octets;
     g_g711_rx_octets += (uint64_t)count;
+    if(g_mod==ME_MOD_X2 && g_x2.symmetric && g_x2.stage==X2_SYMMETRIC
+       && (g_state==ME_TRAINING || g_state==ME_DATA)) {
+        for(int i=0;i<count;++i) {
+            x2_sym_link_rx(&g_x2.sym,codewords+i,1);
+            me_x2_symmetric_progress_locked();
+        }
+        pthread_mutex_unlock(&g_state_mtx);
+        if(g_g711_rx_tap)(void)fwrite(codewords,1,(size_t)count,g_g711_rx_tap);
+        uint8_t buf[256];int n;
+        while((n=dring_read(&upstream_ring,buf,sizeof(buf)))>0)di_write_data(buf,n);
+        return;
+    }
     if (g_cc_active && g_mod == ME_MOD_CLEAR && g_state == ME_DATA) {
         uint8_t buf[256];
         int n;

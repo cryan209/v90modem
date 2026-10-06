@@ -230,3 +230,16 @@ size_t x2_pcm_tx_g711(x2_pcm_tx_t *tx, uint8_t *octets, size_t count)
     }
     return written;
 }
+
+/* Draft 0.33 §12.2; Ie030002 95AE..95C2 and QF060003 9749..975D.
+ * ITU 18 (body 6) is high-carrier 3200 ability, 23 (body 11) symmetric
+ * ability, 24 (body 12) CME/server. Symmetric takes priority over CME.
+ * The caller chooses a role only after validating the received INFO0 CRC. */
+x2_role_t x2_info_role_select(uint32_t local, uint32_t peer)
+{
+    if (local >= (1u << 17) || peer >= (1u << 17) || !(peer & 0x40))
+        return X2_ROLE_NONE;
+    if (local & peer & 0x800) return X2_ROLE_SYMMETRIC;
+    if (!((local ^ peer) & 0x1000)) return X2_ROLE_NONE;
+    return (local & 0x1000) ? X2_ROLE_HOST : X2_ROLE_CLIENT;
+}

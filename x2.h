@@ -5,6 +5,10 @@
 #define X2_H
 #include <stdint.h>
 #include <stddef.h>
+/* Draft 0.33 §12.2, INFO0 body bits 0..16 (ITU bits 12..28).
+ * Bearer role is independent of SIP calling/answering role. */
+typedef enum { X2_ROLE_NONE, X2_ROLE_HOST, X2_ROLE_CLIENT, X2_ROLE_SYMMETRIC } x2_role_t;
+x2_role_t x2_info_role_select(uint32_t local_body, uint32_t peer_body);
 #define X2_POSITIONS 6
 #define X2_BANK_MAX 128
 #define X2_MP_BITS 104

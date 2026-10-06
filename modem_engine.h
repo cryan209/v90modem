@@ -38,7 +38,7 @@ typedef enum {
     ME_MOD_V90,      /* V.90 downstream PCM + V.34 upstream (future) */
     ME_MOD_V34,      /* Full V.34 duplex (up to 33.6 kbps) */
     ME_MOD_V22BIS,   /* Full V.22bis duplex (fallback) */
-    ME_MOD_X2,      /* Experimental asymmetric PCM x2 digital endpoint */
+    ME_MOD_X2,      /* Proprietary digital-side asymmetric/symmetric x2 */
     ME_MOD_V32BIS,  /* V.32bis/V.32 duplex, 4800-14400 bit/s */
     ME_MOD_CLEAR    /* 64/56 kbit/s clear channel or V.120 on the DS0, no V.8 */
 } me_modulation_t;
@@ -109,7 +109,7 @@ void me_hangup(void);
 /*
  * V.8 modulation offer for subsequent calls -- what AT+MS (V.250 6.4.1)
  * drives, through data_interface.c.  mode is one of "v22", "v34", "v90",
- * "v92", "v91", "k56", "x2", "clear", "clear56", "v120", "v120-56", or
+ * "v92", "v91", "k56", "x2", "x2-symm", "clear", "clear56", "v120", "v120-56", or
  * "auto" (= the v90 default); the same names ME_MODE takes.  "k56" needs
  * automode (K56flex V.8bis, then V.8 to V.90).  The clear and v120 modes
  * skip V.8 altogether and use the DS0 as a bit pipe (clear_channel.h); both

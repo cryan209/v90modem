@@ -334,3 +334,153 @@ INFO0/marker, repeated digital INFO0 and qualified Courier MP/E through
 `legacy_pcm_decode.c`. It emits detection positions and raw CRC evidence,
 without running a simulated transmitter dialogue. It does not decode the
 user payload. See `docs/html_call_export.md` for scope and validation.
+
+## Digital symmetric components, 6 October 2026
+
+`x2_sym.c` implements the recovered raw-DS0 startup source and receiver for
+both digital call roles, the capability-frame codec/merge, and continuous
+seven/eight-bit data transforms. `x2_info_role_select` in `x2.c` separates
+HOST, CLIENT and SYMMETRIC from the calling/answering role: both INFO0 bodies
+setting ITU bit 23 select symmetric; otherwise different CME bits select the
+asymmetric direction. Equal CME without mutual symmetric capability rejects
+x2. Received INFO0 must already have passed its CRC before this selector is
+called. References: Draft 0.33 §§12.2 and 13.1–13.3, and the decoded native
+routines in `../courier-emu/docs/x2-v90-protocol-selection.md`.
+
+The answerer emits 1747 `7e` octets, seven zeros and 128 `(i,255-i)` pairs.
+The caller emits `ff` until it has acquired the answerer's complete ramp,
+then starts its own source. The receiver tolerates low-bit errors and records
+them per six-sample phase; a larger ramp error restarts acquisition. TX stops
+at the exact source boundary and RX stops at the exact ramp boundary, leaving
+subsequent capability words to the caller. The error-map phase is relative to
+the component's receive counter; its absolute origin against native startup
+still needs qualification.
+
+The capability codec uses two start octets, five body octets and four
+inverted-CRC nibbles. Merge unions error maps, intersects masks and enables
+scrambling only if both flag words request it. An empty error map selects
+64000 with the default mask `41`; low-bit impairment removes its full-width
+flag and leaves 56000. This codec is tested independently of the session; its
+wire output has not yet been compared against a fresh native capability
+exchange. No guessed confirmation timer or CONNECT transition is supplied.
+
+The data component masks source words, scrambles LSB first with GPC and
+optionally reverses octets; RX reverses before masking and descrambling.
+Separate TX/RX histories continue across words. It operates only on raw
+G.711 octets and never converts them to linear audio. It does not use the
+asymmetric six-symbol amplitude mapper.
+
+`make x2-sym-test` checks both startup roles at block sizes 1/17/160, all six
+single-phase low-bit impairments, larger-error rejection and reacquisition,
+all 128 capability error maps, CRC corruption rejection without output
+mutation, all INFO0 role combinations, and bidirectional data transforms at
+both widths with scrambling/reversal enabled and disabled. It also checks
+128 original Ie030002 E97E source/history transitions (64 per role), including
+their derived wire octets. Regenerate the fixtures with:
+
+```
+python3 tools/generate_x2_sym_vectors.py ../courier-emu/artifacts/x2-xc-pair-20261004 x2_sym_vectors.h
+make x2-sym-test x2-test
+```
+
+These are components, not three completed engine modes. The current engine
+still runs only the asymmetric digital answerer. Next requirements are the
+symmetric INFO0/tone handoff and streamed capability/confirmation dialogue,
+then native closed-loop payload verification. The asymmetric client still
+needs its downstream training/measurement/record receiver and upstream TX
+integration; the ideal codeword inverse alone does not supply those pieces.
+The host's existing upstream payload qualification remains open.
+
+The asymmetric session regression was attempted at this checkpoint and fails
+its expected N=10 assertion with the pre-existing local `0x0003` upstream mask
+in `x2_session_receive_mp`. That concurrent change was not altered by this
+work. The mapper and new symmetric tests and `make sip_v90_modem` pass.
+An additional AddressSanitizer/UBSan run did not complete and was interrupted;
+no sanitizer result is claimed.
+
+## Symmetric engine and native interoperability, 6 October 2026
+
+Select `--mode x2-symm`, `ME_MODE=x2-symm`, or `AT+MS=X2S`. The `x2-sym`
+mode and `X2SYMM` carrier are aliases. Ordinary `x2` retains its asymmetric
+answerer. Symmetric mode advertises INFO0 symmetric capability, runs the
+calling/answering tone exchange, then carries the digital startup,
+CRC-protected capability frame and four-word confirmation dialogue on the
+raw G.711 path. TX and RX enter data at their separate confirmed boundaries.
+The negotiated bit rate starts the existing data stack; LAPM establishes
+before CONNECT, and PTY bytes are carried in both directions.
+
+Native Ie030002 feedback exposed two additional requirements. The source
+repeats until RX releases it: answerer switches to capability TX after the
+peer ramp, caller after the peer's valid capability CRC. Premature capability
+TX suppresses the native caller's source entirely. Original E365..E368,
+E48D..E498 and E51B..E528 establish those gates. The answerer sends FF then
+four 81 words first; the caller responds only after receiving those four
+(E3F9..E41B, E548..E56D). Acquisition resets the error map and phase counter
+to four (E580..E588), and zero words 2/3 set error bit six (E59C). This
+supersedes the phase-origin qualification in the component notes above.
+
+The engine-to-engine test establishes 64000 and exchanges complete PTY
+payloads in A-law, including the calling startup path:
+
+```
+./engine_pair_test --alaw --seconds 15 --expect X2 --expect-connect 64000 --both-env ME_MODE=x2-symm --both-env ME_DATA_FRAMING=lapm
+```
+
+The native tests use our engine as answerer and the original I-modem as
+caller. Both DTEs are configured for 8N1; both must report 64000, the native
+CONNECT must identify x2/LAPM, and both complete test messages must arrive.
+The driver verifies the native requested Q.931 bearer: `90 90 a2` for µ-law
+and `90 90 a3` for A-law. No PCM recording supplies a response, no firmware
+code or DSP state is patched, and no bearer codewords are transcoded.
+
+**Ie030002's control alphabet is PCMU even on its A-law bearer.** Changing
+S58 to 52 and offering A3 does not change its V.8/Phase-2 waveform coding.
+`ME_X2_CONTROL_LAW=ulaw` explicitly selects that native control alphabet for
+our symmetric mode while retaining the negotiated bearer law and the opaque
+64k data path. It selects signal generation and receive lookup; it never
+converts an incoming or outgoing bearer octet. Other A-law peers can use the
+normal A-law control alphabet by leaving this override unset. This is a
+peer compatibility setting, not general A-law hardware interoperability.
+
+`tools/probe_x2_symmetric_imodem.py` creates a derivative sealed test profile
+without altering the input NVRAM. A-law selects NET3, S58=52, A3 and the native
+control override. The test network primes NET3's data link with a ring and
+releases that call through Q.931 before native dialling. µ-law selects
+National ISDN-1, S58=48 and A2. Reproduce fresh calls with:
+
+```
+../courier-emu/.venv/bin/python tools/probe_x2_symmetric_imodem.py imodem --law ulaw --fast --instructions 150000000 --output artifacts/x2-sym-u-fresh
+../courier-emu/.venv/bin/python tools/probe_x2_symmetric_imodem.py imodem --law alaw --fast --instructions 150000000 --output artifacts/x2-sym-a-fresh
+```
+
+Evidence is in `artifacts/x2-symmetric-20261006`. `call.json` contains checked
+results, environment and executable/profile hashes; raw RX/TX and both DTE
+transcripts are preserved. These native runs qualify our **answering** role.
+The exploratory reverse-call native test fell to V.32bis during V.8 and did
+not qualify our calling role against native firmware; the engine pair passes
+that role. The asymmetric client and hardware/network interoperability remain
+separate unfinished work. The existing asymmetric regression's N=10 failure
+with the unrelated local `0x0003` upstream mask remains unchanged.
+
+## Analog Courier host payload investigation, 6 October 2026
+
+The asymmetric host now has a reusable fresh-feedback known-text harness,
+`tools/probe_x2_host_courier.py`, with optional read-only native mapper capture.
+The short `AX2A` control is recovered completely from the waveform receiver at
+4800 bit/s. A longer `COURIER-X2-HOST-0123456789` message still fails, so engine
+CONNECT remains gated and no bidirectional/LAPM qualification is claimed.
+
+`ME_X2_UPSTREAM_MAX_RATE` exposes the existing host diagnostic limit (default
+4800; multiples of 2400 through 33600). The session's supported mask is again
+independent of this engine policy, intersecting peer W2 and N2 per Draft 0.33
+section 20. Session tests now pass their native N=10 record and separately
+check a host cap and empty intersection.
+
+Native point-to-waveform comparison follows 44841 actual mapper points with
+MSE about 0.00035 in most 3200-symbol windows, with eight isolated large errors
+in the complete windows. Exact native-point decoding also loses the long
+message after `COURIER-X2-HOS`, independently of those waveform errors. This
+narrows the next investigation to common framing/source handoff and the native
+AFC9/B006-to-AF6F caller change; it does not prove a native defect, because
+both experiments still use our frame decoder. Evidence and commands:
+`artifacts/x2-host-analog-20261006/README.md`.
