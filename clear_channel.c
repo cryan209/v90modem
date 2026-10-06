@@ -629,6 +629,32 @@ const char *cc_v110_cause_name(cc_v110_cause_t c)
  * element deleted between two NULs (19 zeros); with M = 10 it is a break. */
 #define V110_BREAK_ZEROS      20
 
+/* Synchronous D-bit layouts for the rates whose frames carry fill bits:
+ * slot (in the order of the eight data octets' six bits each) -> D index,
+ * -1 for an F (fill) bit.  Table 6d (N x 3600) has D1..D36, Table 6f
+ * (N x 12000) D1..D30. */
+static const int8_t v110_map_6d[48] = {
+     0,  1,  2,  3,  4,  5,    6,  7,  8,  9, -1, -1,
+    10, 11, -1, -1, 12, 13,   -1, -1, 14, 15, 16, 17,
+    18, 19, 20, 21, 22, 23,   24, 25, 26, 27, -1, -1,
+    28, 29, -1, -1, 30, 31,   -1, -1, 32, 33, 34, 35
+};
+static const int8_t v110_map_6f[48] = {
+     0,  1,  2,  3,  4,  5,    6,  7,  8,  9, -1, -1,
+    10, 11, -1, -1, 12, 13,   -1, -1, 14, -1, -1, -1,
+    15, 16, 17, 18, 19, 20,   21, 22, 23, 24, -1, -1,
+    25, 26, -1, -1, 27, 28,   -1, -1, 29, -1, -1, -1
+};
+
+static int v110_nd(const clear_channel_t *cc)
+{
+    if (cc->v110_map == v110_map_6d)
+        return 36;
+    if (cc->v110_map == v110_map_6f)
+        return 30;
+    return 48 / cc->v110_rep;
+}
+
 static bool v110_106_on(const clear_channel_t *cc)
 {
     /* 7.1.2.4 d): N bits after 109; 7.1.5 c) and 5.4.2: OFF while the far
@@ -708,6 +734,47 @@ static int v110_ra0_tx_bit(clear_channel_t *cc)
     return cc->v110_os_bit;
 }
 
+/* Synchronous transmit (V.110 5.1): the DTE's octets, LSB first, are the
+ * D-bit stream.  Byte alignment is from the first data frame: when 106 first
+ * goes ON, at D1 of the next frame, the stream opens with 0x00 0xFF -- a
+ * run of eight zeros after the binary-1 fill -- and the receiver's octet
+ * boundary is where that run starts.  From there every eight D slots are an
+ * octet, whether the slot carried data, idle fill (0xFF) or the binary 1s
+ * sent while 106 is OFF; a hold (7.1.5 c, 5.4.2) begins only at an octet
+ * boundary and ends at one, so the receiver, which counts slots, never loses
+ * the phase. */
+static int v110_sync_tx_bit(clear_channel_t *cc, bool frame_start)
+{
+    int bit;
+
+    if (!cc->sy_tx_started) {
+        if (!v110_106_on(cc) || !frame_start)
+            return 1;
+        cc->sy_tx_started = true;
+        cc->sy_tx_shift = 0xFF00;            /* 0x00 then 0xFF, LSB first */
+        cc->sy_tx_bits = 16;
+        cc->sy_tx_phase = 0;
+    }
+    if (cc->sy_tx_bits == 0) {
+        if (cc->sy_tx_phase == 0 && v110_106_on(cc)) {
+            int b = cc->pull ? cc->pull(cc->ctx) : -1;
+
+            if (b >= 0)
+                cc->tx_data_bytes++;
+            cc->sy_tx_shift = (uint16_t) (b < 0 ? 0xFF : b & 0xFF);
+            cc->sy_tx_bits = 8;
+        } else {
+            cc->sy_tx_phase = (uint8_t) ((cc->sy_tx_phase + 1) & 7);
+            return 1;                        /* fill or hold */
+        }
+    }
+    bit = cc->sy_tx_shift & 1;
+    cc->sy_tx_shift >>= 1;
+    cc->sy_tx_bits--;
+    cc->sy_tx_phase = (uint8_t) ((cc->sy_tx_phase + 1) & 7);
+    return bit;
+}
+
 /* RA1 transmit: build one 80-bit frame (Table 2 with Tables 6a-6e). */
 static void v110_build_frame(clear_channel_t *cc)
 {
@@ -716,7 +783,7 @@ static void v110_build_frame(clear_channel_t *cc)
     bool down = cc->v110_state == CC_V110_DISCONNECTING
              || cc->v110_state == CC_V110_DOWN;
     int s_bit, x_bit, slot = 0;
-    int nd = 48 / cc->v110_rep;
+    int nd = v110_nd(cc);
     uint8_t d[48];
 
     if (down) {
@@ -748,7 +815,8 @@ static void v110_build_frame(clear_channel_t *cc)
             d[i] = 0;
         else if (cc->v110_state == CC_V110_CONNECTED) {
             /* 7.1.2.4 b)/e): data once 106 is ON, binary 1 before. */
-            d[i] = (uint8_t) v110_ra0_tx_bit(cc);
+            d[i] = (uint8_t) (cc->v110_sync ? v110_sync_tx_bit(cc, i == 0)
+                                            : v110_ra0_tx_bit(cc));
             if (cc->v110_n_count < CC_V110_N_BITS)
                 cc->v110_n_count++;
         } else
@@ -760,7 +828,8 @@ static void v110_build_frame(clear_channel_t *cc)
         int o = status_octet[k];
 
         for (int b = 1; b <= 6; b++, slot++)
-            f[o * 8 + b] = d[slot / cc->v110_rep];
+            f[o * 8 + b] = cc->v110_map ? (uint8_t) (cc->v110_map[slot] >= 0 ? d[cc->v110_map[slot]] : 1)
+                                        : d[slot / cc->v110_rep];
         /* bit 8: S1, X, S3, S4, S6, X, S8, S9 */
         f[o * 8 + 7] = (uint8_t) ((o == 2 || o == 7) ? x_bit : s_bit);
     }
@@ -949,10 +1018,57 @@ static void v110_lose_sync(clear_channel_t *cc)
     cc->v110_lost_at = cc->rx_octets;
 }
 
+/* Synchronous receive.  Hunt for the sender's opening 1 0^8 1^8 in the D
+ * stream; its first zero is an octet boundary and every eight D slots after
+ * it are an octet.  Frames lost to a loss of framing are accounted for from
+ * the intermediate-rate bit count (the bearer is bit-exact and a frame is
+ * 80 bits), so the phase survives a resynchronisation; the octet that
+ * straddles the gap is dropped. */
+static void v110_sync_rx_frame(clear_channel_t *cc, const uint8_t *d, int nd)
+{
+    if (cc->sy_rx_locked) {
+        uint64_t end = cc->v110_ir_pos;
+
+        if (cc->sy_rx_last_end && end > cc->sy_rx_last_end + CC_V110_FRAME_BITS) {
+            uint64_t missed = (end - cc->sy_rx_last_end) / CC_V110_FRAME_BITS - 1;
+
+            cc->sy_rx_phase = (uint8_t) ((cc->sy_rx_phase + missed * (uint64_t) nd) & 7);
+            cc->sy_rx_skip = true;
+            cc->sy_rx_gaps++;
+        }
+        cc->sy_rx_last_end = end;
+    }
+    for (int i = 0; i < nd; i++) {
+        int bit = d[i];
+
+        if (!cc->sy_rx_locked) {
+            cc->sy_rx_win = ((cc->sy_rx_win << 1) | (uint32_t) bit) & 0x1FFFF;
+            if (cc->sy_rx_win == 0x100FF) {          /* 1 0^8 1^8 */
+                cc->sy_rx_locked = true;
+                cc->sy_rx_phase = 0;
+                cc->sy_rx_acc = 0;
+                cc->sy_rx_skip = false;
+                cc->sy_rx_last_end = 0;
+            }
+            continue;
+        }
+        cc->sy_rx_acc = (uint8_t) ((cc->sy_rx_acc >> 1) | (bit << 7));   /* LSB first */
+        if (++cc->sy_rx_phase == 8) {
+            cc->sy_rx_phase = 0;
+            if (cc->sy_rx_skip)
+                cc->sy_rx_skip = false;
+            else if (cc->v110_state == CC_V110_CONNECTED && cc->v110_synced)
+                v110_push(cc, cc->sy_rx_acc);
+        }
+    }
+    if (cc->sy_rx_locked && !cc->sy_rx_last_end)
+        cc->sy_rx_last_end = cc->v110_ir_pos;
+}
+
 static void v110_frame(clear_channel_t *cc, const uint8_t *f)
 {
     static const uint8_t s_pos[] = { 15, 31, 39, 55, 71, 79 };   /* S1 S3 S4 S6 S8 S9 */
-    int nd = 48 / cc->v110_rep, s_zero = 0, slot = 0;
+    int nd = v110_nd(cc), s_zero = 0, slot = 0;
     uint8_t d[48];
     bool d_all_zero = true;
 
@@ -992,6 +1108,15 @@ static void v110_frame(clear_channel_t *cc, const uint8_t *f)
         static const uint8_t data_octet[] = { 1, 2, 3, 4, 6, 7, 8, 9 };
         int ones[48] = { 0 }, first[48];
 
+        if (cc->v110_map) {
+            for (int k = 0; k < 8; k++)
+                for (int b = 1; b <= 6; b++, slot++)
+                    if (cc->v110_map[slot] >= 0) {
+                        d[cc->v110_map[slot]] = f[data_octet[k] * 8 + b];
+                        if (d[cc->v110_map[slot]])
+                            d_all_zero = false;
+                    }
+        } else {
         for (int k = 0; k < 8; k++)
             for (int b = 1; b <= 6; b++, slot++) {
                 int i = slot / cc->v110_rep;
@@ -1008,7 +1133,11 @@ static void v110_frame(clear_channel_t *cc, const uint8_t *f)
             if (d[i])
                 d_all_zero = false;
         }
+        }
     }
+
+    if (cc->v110_sync && (cc->v110_state == CC_V110_SYNCED || cc->v110_state == CC_V110_CONNECTED))
+        v110_sync_rx_frame(cc, d, nd);
 
     switch (cc->v110_state) {
     case CC_V110_SYNCED:
@@ -1035,7 +1164,7 @@ static void v110_frame(clear_channel_t *cc, const uint8_t *f)
         } else {
             cc->v110_rem_disc_run = 0;
         }
-        for (int i = 0; i < nd; i++) {
+        for (int i = 0; i < nd && !cc->v110_sync; i++) {
             if (cc->v110_user_rate >= 600)
                 v110_ra0_rx_bit(cc, d[i]);
             else
@@ -1073,6 +1202,7 @@ static void v110_sync_found(clear_channel_t *cc)
 /* One bit of the intermediate-rate stream (RA2 already undone). */
 static void v110_rx_ir_bit(clear_channel_t *cc, int bit)
 {
+    cc->v110_ir_pos++;
     if (cc->v110_synced) {
         cc->v110_hist[cc->v110_hist_n++] = (uint8_t) bit;
         if (cc->v110_hist_n == CC_V110_FRAME_BITS) {
@@ -1319,8 +1449,35 @@ void cc_set_break_cb(clear_channel_t *cc, cc_break_fn fn)
 
 void cc_send_break(clear_channel_t *cc, int ms)
 {
-    if (cc->mode == CC_CLEAR)
-        return;
+    if (cc->mode == CC_CLEAR || (cc->mode == CC_V110 && cc->v110_sync))
+        return;                    /* a synchronous stream has no break */
     cc->brk_ms = ms < 1 ? 1 : ms;
     cc->brk_pending = true;
+}
+
+/* Table 1 intermediate rate and Table 5's E1 E2 E3 for each synchronous rate. */
+int cc_v110_set_sync(clear_channel_t *cc)
+{
+    static const struct { int rate, ir, e123; const int8_t *map; int rep; } t[] = {
+        {   600, 1, 0x4, NULL, 8 }, {  1200, 1, 0x2, NULL, 4 }, {  2400, 1, 0x6, NULL, 2 },
+        {  4800, 1, 0x3, NULL, 1 }, {  7200, 2, 0x5, v110_map_6d, 1 },
+        {  9600, 2, 0x3, NULL, 1 }, { 12000, 4, 0x1, v110_map_6f, 1 },
+        { 14400, 4, 0x5, v110_map_6d, 1 }, { 19200, 4, 0x3, NULL, 1 },
+        { 24000, 8, 0x1, v110_map_6f, 1 }, { 28800, 8, 0x5, v110_map_6d, 1 },
+        { 38400, 8, 0x3, NULL, 1 }
+    };
+
+    if (cc->mode != CC_V110)
+        return -1;
+    for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++)
+        if (t[i].rate == cc->v110_user_rate) {
+            cc->v110_sync = true;
+            cc->v110_ir_bits = t[i].ir;
+            cc->v110_e123 = (uint8_t) t[i].e123;
+            cc->v110_map = t[i].map;
+            cc->v110_rep = t[i].rep;
+            cc->v110_ra0_rate = t[i].rate;
+            return 0;
+        }
+    return -1;
 }

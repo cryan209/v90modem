@@ -423,6 +423,10 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 	./engine_pair_test --expect CLEAR --expect-connect 64000 --both-at "AT+MS=V120" --call-env ME_V120_ACK=1
 	./engine_pair_test --expect CLEAR --expect-connect 9600 --both-at "AT+MS=V110,0,0,9600"
 	./engine_pair_test --expect CLEAR --expect-connect 38400 --both-at "AT+MS=V110"
+# Synchronous V.110 (ME_V110_SYNC=1): the DTE's octets are the D-bit stream.
+	./engine_pair_test --expect CLEAR --expect-connect 9600 --both-at "AT+MS=V110,0,0,9600" --both-env ME_V110_SYNC=1
+	./engine_pair_test --expect CLEAR --expect-connect 14400 --both-at "AT+MS=V110,0,0,14400" --both-env ME_V110_SYNC=1
+	./engine_pair_test --expect CLEAR --expect-connect 38400 --both-at "AT+MS=V110" --both-env ME_V110_SYNC=1
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-at "AT+MS=V22B"
 	./engine_pair_test --expect V32BIS --both-env ME_V8=0
 # A V.22bis modem that does not do V.8 (ME_V8=0 with V.22 alone: V.25 ANS then

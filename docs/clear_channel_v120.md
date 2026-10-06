@@ -120,12 +120,51 @@ of Tables 6a/6b/6c (600/1200/2400, D bits repeated 8/4/2 times) and 6e
 | Loss of framing (7.1.5) | Stop delivering, X OFF, resynchronize; X back ON and 106 after N bits on success; after 3 s, three frames of all-status-OFF D = 0 and hang up. |
 | Disconnect (7.1.4) | The far end's S OFF with D = 0 is its request: hang up, NO CARRIER. A local ATH (the DTE's hang-up callback, `me_hangup()`) sends ours -- S OFF, X ON, D = 0, 106 OFF -- and keeps the SIP call up until the far end's S OFF or loss of framing acknowledges it (7.1.4.3), or T2 = 5 s passes (7.1.4.1); the DTE then gets OK. A second ATH, or one before framing is found, hangs up at once. |
 
-Not implemented: synchronous user rates (Tables 6d/6f, 7a-7c), 7/5-bit
+Not implemented: 48/56 kbit/s synchronous (Tables 7a-7c), 7/5-bit
 characters, parity and 2 stop elements as separate formats (8 data bits
 include any parity, 5.3.6), sending break, the
 in-band parameter exchange of Appendix I, half duplex (7.2), and restricted
 56k at 38400 (an IR of 64 kbit/s needs every bit; IR 8/16/32 never uses the
 robbed LSB anyway).
+
+### V.110 synchronous (`ME_V110_SYNC=1`, `cc_v110_set_sync()`)
+
+The DTE's octets are the D-bit stream at the user rate, **least significant
+bit first** (as HDLC and the async path send them), for 600, 1200, 2400,
+4800, 7200, 9600, 12000, 14400, 19200, 24000, 28800 and 38400 bit/s: Table 1's
+intermediate rate, Table 5's E1-E3 and Tables 6a-6f's D-bit layouts,
+including the F fill bits of 6d (N x 3600, 36 D bits a frame) and 6f
+(N x 12000, 30). Any other rate stays asynchronous, with a log line. The
+S/X/106/109 procedure of 7.1 is unchanged; there is no break (`\B` is ERROR).
+
+**Octet alignment is from the first data frame**, since V.110 itself defines
+none (5.1.2.6). When 106 first goes ON, at D1 of the next frame, the sender
+opens the stream with `0x00 0xFF` -- a run of eight zeros after the binary-1
+fill -- and the receiver, hunting `1 0^8 1^8` in the D stream from the moment
+it has framing, takes the first zero as an octet boundary and discards those
+two octets. After that every eight D slots are an octet, whether they carried
+data, idle or a hold. Three consequences:
+- **Idle is 0xFF and is delivered.** A synchronous stream is continuous, so
+  the far end's idle fill reaches the DTE as 0xFF octets at the line rate;
+  the DTE's protocol (HDLC flags/idle, say) is what tells it from data. A
+  DTE that wants only data must discard 0xFF itself, which also discards real
+  0xFF data.
+- **Holds are octet-aligned.** The far end's X OFF (7.1.5 c, 5.4.2) stops the
+  sender at an octet boundary and it resumes at one, counting the 1s it sent
+  meanwhile as slots.
+- **Alignment survives a loss of framing.** The receiver counts the
+  intermediate-rate bits, a frame being 80 of them on a bit-exact bearer, so
+  the slots of frames it could not read are added to its phase on
+  resynchronisation; the octet that straddles the gap is dropped. Tested at
+  every rate with 0.4 s lost, and with that accounting disabled the rates
+  whose frames are not a whole number of octets (600, 1200, 7200, 12000,
+  14400, 24000, 28800) fail while the rest do not.
+
+The independent wire checker in `clear_channel_test` decodes each frame's D
+bits from Tables 6a-6f as printed and finds the opening pattern and the DTE's
+octets in the transmitted stream. **A foreign terminal adaptor will not send
+the `0x00 0xFF` opening**, so receiving from one hunts forever and delivers
+nothing; the alignment rule is ours, as the Recommendation leaves it open.
 
 Tests (`clear_channel_test`): every Table 8 rate back to back with B joining
 late, data both ways byte-exact, with each frame on the wire graded by an

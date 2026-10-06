@@ -8812,6 +8812,12 @@ static int me_clear_start_locked(void)
         if (cc_init_v110(&g_cc, rate, data_stack_pull_dte_byte,
                          data_stack_push_dte_byte, NULL) != 0)
             return 0;
+        {
+            const char *sy = getenv("ME_V110_SYNC");
+
+            if (sy && *sy == '1' && cc_v110_set_sync(&g_cc) != 0)
+                ME_LOG("[ME] V.110: %d bit/s has no synchronous form; asynchronous\n", rate);
+        }
         cc_v110_set_rx_room(&g_cc, data_stack_rx_room);
         cc_set_break_cb(&g_cc, me_cc_break_cb);
         /* The rate the periodic link report (and its +MS bounds check)
@@ -8826,9 +8832,10 @@ static int me_clear_start_locked(void)
         g_v110_losses_logged = 0;
         trace_phase("V.110 start: %d bit/s async, RA0 %d, frame search", rate,
                     cc_v110_ra0_rate(rate));
-        ME_LOG("[ME] V.110: %d bit/s async 8N1 on a %d bit/s RA0 stream, "
+        ME_LOG("[ME] V.110: %d bit/s %s on a %d bit/s RA0 stream, "
                "%d kbit/s intermediate rate, no V.8; searching for framing\n",
-               rate, cc_v110_ra0_rate(rate), g_cc.v110_ir_bits * 8);
+               rate, g_cc.v110_sync ? "synchronous" : "async", cc_v110_ra0_rate(rate),
+               g_cc.v110_ir_bits * 8);
         return rate;
     }
     if (g_offer_v120) {

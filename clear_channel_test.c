@@ -1040,6 +1040,235 @@ static void test_v110_flow(void)
     free(eb);
 }
 
+/* ---- V.110 synchronous user data ---- */
+
+/* Independent decode of the D bits of one wire frame, from Tables 6a-6f as
+ * printed (not from clear_channel.c's maps).  Returns the number of D bits. */
+static int sync_wire_d(const uint8_t *f, int rate, uint8_t *d)
+{
+    static const char *t6d[8] = { "123456", "789aFF", "bcFFde", "FFfghi",
+                                  "jklmno", "pqrsFF", "tuFFvw", "FFxyzA" };
+    static const char *t6f[8] = { "123456", "789aFF", "bcFFde", "FFfFFF",
+                                  "ghijkl", "mnopFF", "qrFFst", "FFuFFF" };
+    int slot = 0, n = 0, rows[8] = { 1, 2, 3, 4, 6, 7, 8, 9 };
+
+    for (int k = 0; k < 8; k++)
+        for (int b = 1; b <= 6; b++, slot++) {
+            int bit = f[rows[k] * 8 + b];
+
+            if (rate == 600 || rate == 1200 || rate == 2400) {
+                int rep = rate == 600 ? 8 : rate == 1200 ? 4 : 2;
+
+                if (slot % rep == 0)
+                    d[n++] = (uint8_t) bit;
+            } else if (rate == 7200 || rate == 14400 || rate == 28800) {
+                if (t6d[k][b - 1] != 'F')
+                    d[n++] = (uint8_t) bit;
+            } else if (rate == 12000 || rate == 24000) {
+                if (t6f[k][b - 1] != 'F')
+                    d[n++] = (uint8_t) bit;
+            } else {
+                d[n++] = (uint8_t) bit;
+            }
+        }
+    return n;
+}
+
+typedef struct {
+    int rate, ir_bits, e123;
+    uint8_t win[80];
+    int n, aligned, frames, bad, e_bad, unused_bad;
+    uint8_t stream[200000];
+    size_t slen;
+    bool on;                    /* S = X = ON seen */
+} sync_spy_t;
+
+static void sync_spy_octets(sync_spy_t *w, const uint8_t *o, int n)
+{
+    for (int i = 0; i < n; i++) {
+        uint8_t unused = (uint8_t) (0xFF >> w->ir_bits);
+
+        if ((o[i] & unused) != unused)
+            w->unused_bad++;
+        for (int b = 0; b < w->ir_bits; b++) {
+            int bit = (o[i] >> (7 - b)) & 1;
+
+            if (!w->aligned) {
+                if (w->n < 80)
+                    w->win[w->n++] = (uint8_t) bit;
+                else {
+                    memmove(w->win, w->win + 1, 79);
+                    w->win[79] = (uint8_t) bit;
+                }
+                if (w->n == 80 && spy_align(w->win))
+                    w->aligned = 1;
+                else
+                    continue;
+            } else {
+                w->win[w->n++] = (uint8_t) bit;
+                if (w->n < 80)
+                    continue;
+            }
+            w->n = 0;
+            w->frames++;
+            if (!spy_align(w->win)) {
+                w->bad++;
+                continue;
+            }
+            if (((w->win[41] << 2) | (w->win[42] << 1) | w->win[43]) != w->e123
+                || !w->win[44] || !w->win[45] || !w->win[46])
+                w->e_bad++;
+            if (!w->win[15] && !w->win[23])
+                w->on = true;
+            if (w->on && w->slen + 48 < sizeof(w->stream))
+                w->slen += (size_t) sync_wire_d(w->win, w->rate, w->stream + w->slen);
+        }
+    }
+}
+
+/* Find 1 0^8 1^8 in the wire's D stream; the octets after it, LSB first. */
+static int sync_wire_octets(const sync_spy_t *w, uint8_t *out, int max)
+{
+    for (size_t i = 0; i + 17 < w->slen; i++) {
+        int ok = w->stream[i] == 1;
+
+        for (int k = 1; ok && k <= 8; k++)
+            ok = w->stream[i + k] == 0;
+        for (int k = 9; ok && k <= 16; k++)
+            ok = w->stream[i + k] == 1;
+        if (!ok)
+            continue;
+        {
+            int n = 0;
+
+            for (size_t p = i + 17; p + 8 <= w->slen && n < max; p += 8, n++) {
+                uint8_t v = 0;
+
+                for (int k = 0; k < 8; k++)
+                    v = (uint8_t) (v | (w->stream[p + k] << k));
+                out[n] = v;
+            }
+            return n;
+        }
+    }
+    return -1;
+}
+
+/* Sync data is a continuous stream: the far end's idle (0xFF fill) reaches the
+ * DTE too.  The text used here has no 0xFF, so dropping them recovers it. */
+static size_t sync_strip_idle(const uint8_t *in, size_t n, uint8_t *out)
+{
+    size_t m = 0;
+
+    for (size_t i = 0; i < n; i++)
+        if (in[i] != 0xFF)
+            out[m++] = in[i];
+    return m;
+}
+
+static uint8_t sync_text[3200];
+
+static void test_v110_sync_rate(int rate, int gap_test)
+{
+    static const struct { int rate, ir, e123; } tab[] = {
+        { 600, 1, 4 }, { 1200, 1, 2 }, { 2400, 1, 6 }, { 4800, 1, 3 }, { 7200, 2, 5 },
+        { 9600, 2, 3 }, { 12000, 4, 1 }, { 14400, 4, 5 }, { 19200, 4, 3 }, { 24000, 8, 1 },
+        { 28800, 8, 5 }, { 38400, 8, 3 }
+    };
+    static sync_spy_t spy;
+    end_t *ea = calloc(1, sizeof(*ea)), *eb = calloc(1, sizeof(*eb));
+    clear_channel_t a, b;
+    char what[200];
+    size_t na, nb;
+    int octets, ti = 0;
+    static uint8_t wire[4096];
+
+    while (tab[ti].rate != rate)
+        ti++;
+    na = (size_t) (gap_test ? rate / 4 : rate / 20);
+    if (na < 24)
+        na = 24;
+    if (na > 3000)
+        na = 3000;
+    nb = na * 2 / 3;
+    ea->src = sync_text; ea->src_len = na;
+    eb->src = sync_text + 11; eb->src_len = nb;
+    check(cc_init_v110(&a, rate, end_pull, end_push, ea) == 0
+          && cc_init_v110(&b, rate, end_pull, end_push, eb) == 0
+          && cc_v110_set_sync(&a) == 0 && cc_v110_set_sync(&b) == 0, "V.110 sync init");
+    memset(&spy, 0, sizeof(spy));
+    spy.rate = rate; spy.ir_bits = tab[ti].ir; spy.e123 = tab[ti].e123;
+    octets = (int) (8000.0 * ((double) na * 8.0 / rate * 1.5 + (gap_test ? 3.5 : 1.5)));
+    {
+        uint8_t ab[160], ba[160];
+
+        for (int done = 0; done < octets; done += 160) {
+            cc_tx(&a, ab, 160);
+            cc_tx(&b, ba, 160);
+            sync_spy_octets(&spy, ab, 160);
+            if (gap_test && done >= 3200 && done < 3200 + 3200)   /* 0.4 s of nothing */
+                memset(ab, 0xFF, sizeof(ab));
+            cc_rx(&b, ab, 160);
+            cc_rx(&a, ba, 160);
+        }
+    }
+    if (!gap_test) {
+        int nw;
+        static uint8_t sa[8192], sb[8192];
+        size_t la = sync_strip_idle(eb->dst, eb->dst_len, sa), lb = sync_strip_idle(ea->dst, ea->dst_len, sb);
+
+        snprintf(what, sizeof(what), "V.110 sync %5d (IR %2d k): %zu + %zu octets exact, connected",
+                 rate, tab[ti].ir * 8, na, nb);
+        check(a.v110_state == CC_V110_CONNECTED && b.v110_state == CC_V110_CONNECTED
+              && la == na && !memcmp(sa, sync_text, na)
+              && lb == nb && !memcmp(sb, sync_text + 11, nb), what);
+        check(spy.frames > 20 && spy.bad == 0 && spy.e_bad == 0 && spy.unused_bad == 0
+              && a.v110_frame_errors == 0 && a.v110_rate_mismatch == 0,
+              "       wire: frames aligned, E1-E3 per Table 5, unused bits 1");
+        nw = sync_wire_octets(&spy, wire, (int) na);
+        check(nw == (int) na && !memcmp(wire, sync_text, na),
+              "       wire: 1 0^8 1^8 opens the stream and the octets after it are the DTE's, LSB first");
+    } else {
+        snprintf(what, sizeof(what),
+                 "V.110 sync %5d, 0.4 s loss of framing: tail of the stream still octet-aligned", rate);
+        static uint8_t sa[8192];
+        size_t la = sync_strip_idle(eb->dst, eb->dst_len, sa);
+
+        check(b.v110_sync_losses >= 1 && b.sy_rx_gaps >= 1 && la >= 60 && la < na
+              && !memcmp(sa + la - 60, sync_text + na - 60, 60), what);
+    }
+    cc_release(&a);
+    cc_release(&b);
+    free(ea);
+    free(eb);
+}
+
+static void test_v110_sync(void)
+{
+    for (size_t i = 0; i < sizeof(sync_text); i++)
+        sync_text[i] = (uint8_t) (0x20 + (i * 7 + i / 13) % 95);
+
+    static const int rates[] = { 600, 1200, 2400, 4800, 7200, 9600, 12000, 14400, 19200,
+                                 24000, 28800, 38400 };
+
+    printf("V.110 synchronous (5.1, Tables 6a-6f):\n");
+    for (size_t i = 0; i < sizeof(rates) / sizeof(rates[0]); i++)
+        test_v110_sync_rate(rates[i], 0);
+    {
+        end_t *e = calloc(1, sizeof(*e));
+        clear_channel_t c;
+
+        check(cc_init_v110(&c, 110, end_pull, end_push, e) == 0 && cc_v110_set_sync(&c) == -1,
+              "an asynchronous-only rate (110) is refused for synchronous");
+        cc_release(&c);
+        free(e);
+    }
+    for (size_t i = 0; i < sizeof(rates) / sizeof(rates[0]); i++)
+        if (rates[i] != 4800 && rates[i] != 9600 && rates[i] != 19200 && rates[i] != 38400
+            && rates[i] != 2400)
+            test_v110_sync_rate(rates[i], 1);
+}
+
 static void test_v110_t2(void)
 {
     end_t *e = calloc(1, sizeof(*e));
@@ -1479,6 +1708,7 @@ int main(void)
     test_v110_ra0_rx();
     test_v110_t2();
     test_v110_flow();
+    test_v110_sync();
     test_v120_ack();
     test_break();
     test_v120_verify();

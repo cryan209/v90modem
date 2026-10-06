@@ -161,6 +161,17 @@ typedef struct {
     uint64_t lf_fallbacks, lf_resets, lf_rewinds, lf_discarded;
 
     /* V.110 */
+    bool v110_sync;              /* synchronous user data (5.1), octets from the DTE */
+    const int8_t *v110_map;      /* Table 6d/6f slot map, or NULL (repetition) */
+    uint64_t v110_ir_pos;        /* intermediate-rate bits received */
+    bool sy_tx_started;
+    uint16_t sy_tx_shift;
+    int sy_tx_bits;
+    uint8_t sy_tx_phase;
+    bool sy_rx_locked, sy_rx_skip;
+    uint32_t sy_rx_win;
+    uint8_t sy_rx_acc, sy_rx_phase;
+    uint64_t sy_rx_last_end, sy_rx_gaps;
     int v110_user_rate;          /* asynchronous DTE rate, Table 8 */
     int v110_ra0_rate;           /* synchronous stream, 2^n x 600 */
     int v110_ir_bits;            /* intermediate rate / 8000: bits per octet */
@@ -224,6 +235,13 @@ int  cc_init_v120(clear_channel_t *cc, bool r56, bool caller,
 int  cc_init_v110(clear_channel_t *cc, int user_rate,
                   cc_pull_byte_fn pull, cc_push_byte_fn push, void *ctx);
 void cc_release(clear_channel_t *cc);
+/* V.110 synchronous user data (5.1.2, Tables 1, 5, 6a-6f): the DTE's octets
+ * (LSB first) are the D-bit stream at the user rate, which must be one of
+ * 600 1200 2400 4800 7200 9600 12000 14400 19200 24000 28800 38400.  Call
+ * right after cc_init_v110(); -1 for any other rate.  Octet alignment is
+ * from the first data frame (see clear_channel.c: the stream opens with
+ * 0x00 0xFF, which the receiver consumes), idle is 0xFF, no break. */
+int  cc_v110_set_sync(clear_channel_t *cc);
 /* Break (V.120 3.1.1.2/7.2.2; V.110 5.3.5).  cc_send_break() queues one of
  * `ms` milliseconds after the characters already pulled; a received break
  * is reported through the callback in order, after the characters that
