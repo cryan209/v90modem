@@ -2642,6 +2642,18 @@ int me_set_modulation_limits(const char *mode, bool automode,
     return 0;
 }
 
+/* The NEXT call's offer is the +MS configuration (applied to g_offer_* at
+ * me_on_sip_connected(), after the INVITE or answer has gone out). */
+bool me_offer_is_digital_bearer(void)
+{
+    me_offer_t o;
+    char mode[sizeof(g_cfg_mode)];
+    bool automode;
+
+    me_get_modulation_offer(mode, sizeof(mode), &automode);
+    return me_offer_from_mode(mode, automode, &o) && (o.clear || o.v120 || o.v110);
+}
+
 void me_get_modulation_offer(char *mode, size_t len, bool *automode)
 {
     pthread_mutex_lock(&g_cfg_mtx);

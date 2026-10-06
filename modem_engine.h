@@ -99,6 +99,8 @@ void me_destroy(void);
  * The function is asynchronous; SIP setup happens via sip_modem.c.
  */
 void me_dial(const char *sip_uri);
+/* True when the offer is CLEAR, V.110 or V.120: the DS0 is a bit pipe. */
+bool me_offer_is_digital_bearer(void);
 
 /* Answer an incoming call (received via SIP). */
 void me_answer(void);

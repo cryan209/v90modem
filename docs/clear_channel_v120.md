@@ -156,7 +156,11 @@ V.110 has no live measurement at all yet; the rows above predate it.
 
 ## Not done
 
-- **SDP**: we still offer PCMU/PCMA, not RFC 4040's `CLEARMODE/8000`. It
-  works wherever the G.711 path is byte-exact end to end; a gateway that
-  transcodes, or applies digital pads, echo cancellation or VAD, breaks it.
+- **SDP**: `ME_CLEARMODE=1` offers RFC 4040 `CLEARMODE/8000` ahead of PCMU/PCMA
+  when the next call's `AT+MS` offer is CLEAR, V.110 or V.120 (a codec added
+  to the vendored pjmedia passthrough table: octets copied, no VAD/PLC).
+  The answerer picks it the same way; a gateway that lacks it falls back to
+  PCMU/PCMA as before. Default off, since no CLEARMODE gateway has been tried
+  (`make sip-clearmode-test` proves two of our own endpoints negotiate it and
+  carry V.120 over it; it proves nothing about a real gateway).
 - X.75 is recognised by `AT+MS` and always ERROR.

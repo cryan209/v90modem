@@ -222,6 +222,14 @@ codec_desc[] =
                     64000, 64000, 2, 1, 1
     },
 #   endif
+
+    /* RFC 4040: the payload is the DS0 octets themselves, 8000/s.  Used by
+     * the modem's CLEAR/V.110/V.120 modes; never decoded, like PCMU/PCMA
+     * here (vad/plc off: nothing may touch the octets). */
+    {1, "CLEARMODE", PJMEDIA_RTP_PT_DYNAMIC,  PJMEDIA_FORMAT_CLEARMODE,
+                    8000, 1,  80,
+                    64000, 64000, 2, 0, 0
+    },
 };
 
 
@@ -525,7 +533,8 @@ static pj_status_t default_attr ( pjmedia_codec_factory *factory,
         if ((pj_stricmp(&id->encoding_name, &name) == 0) &&
             (id->clock_rate == (unsigned)codec_desc[i].clock_rate) &&
             (id->channel_cnt == (unsigned)codec_desc[i].channel_count) &&
-            (id->pt == (unsigned)codec_desc[i].pt))
+            (id->pt == (unsigned)codec_desc[i].pt
+             || codec_desc[i].fmt_id == PJMEDIA_FORMAT_CLEARMODE))
         {
             attr->info.pt = (pj_uint8_t)id->pt;
             attr->info.channel_cnt = codec_desc[i].channel_count;

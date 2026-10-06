@@ -75,6 +75,9 @@ typedef enum pjmedia_format_id
     /** Aliaw for PJMEDIA_FORMAT_PCMU */
     PJMEDIA_FORMAT_ULAW     = PJMEDIA_FORMAT_PCMU,
 
+    /** RFC 4040 CLEARMODE: 64 kbit/s unrestricted digital octets, opaque */
+    PJMEDIA_FORMAT_CLEARMODE = PJMEDIA_FORMAT_PACK('C', 'L', 'R', 'M'),
+
     /** AMR narrowband */
     PJMEDIA_FORMAT_AMR      = PJMEDIA_FORMAT_PACK(' ', 'A', 'M', 'R'),
 

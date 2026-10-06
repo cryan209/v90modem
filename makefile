@@ -752,6 +752,10 @@ v34_duplex_test: $(V34_DUPLEX_TEST_OBJS) spandsp
 # Two sip_v90_modem instances over real SIP on 127.0.0.1 (no registrar):
 # ringing, caller ID, S0 and ATA answering, a dial nobody answers.  Binds UDP
 # ports 5070/5080 and RTP 41000/42000, so it is not part of make test.
+.PHONY: sip-clearmode-test
+sip-clearmode-test: $(TARGET)
+	python3 tools/sip_clearmode_test.py
+
 .PHONY: sip-loop-test
 sip-loop-test: $(TARGET)
 	python3 tools/sip_loop_test.py

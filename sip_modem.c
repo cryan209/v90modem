@@ -786,6 +786,9 @@ static void on_call_media_state(pjsua_call_id call_id)
                 if (pj_stricmp(&si.info.aud.fmt.encoding_name, &pcma_name) == 0) {
                     me_set_law(ME_LAW_ALAW);
                     PJ_LOG(3, ("sip_modem", "Codec: PCMA (A-law passthrough)"));
+                } else if (pj_stricmp2(&si.info.aud.fmt.encoding_name, "CLEARMODE") == 0) {
+                    me_set_law(ME_LAW_ULAW);   /* octets are opaque; fill value only */
+                    PJ_LOG(3, ("sip_modem", "Codec: CLEARMODE (RFC 4040, octets passed unmodified)"));
                 } else {
                     me_set_law(ME_LAW_ULAW);
                     PJ_LOG(3, ("sip_modem", "Codec: PCMU (u-law passthrough)"));
@@ -965,6 +968,40 @@ static void ring_incoming(pjsua_call_id call_id)
 /* Codec setup — G.711 µ-law only                                      */
 /* ------------------------------------------------------------------ */
 
+/* RFC 4040 CLEARMODE for the digital-bearer modes (CLEAR, V.110, V.120).
+ * Opt-in (ME_CLEARMODE=1): offered ahead of PCMU/PCMA when the engine's
+ * offer is one of them, so a gateway that speaks it carries the DS0 octets
+ * as a 64 kbit/s unrestricted bearer with no companding, pads or echo
+ * cancellation; one that does not simply picks PCMU as before.  Called
+ * before every INVITE we send and every answer, because the offer is set
+ * by AT+MS after the codecs were first configured. */
+static void restrict_to_g711(void);
+
+static void apply_bearer_codecs(void)
+{
+    const char *e = getenv("ME_CLEARMODE");
+    pj_str_t cm = pj_str("CLEARMODE/8000");
+    pj_str_t pcmu = pj_str("PCMU/8000");
+    pj_str_t pcma = pj_str("PCMA/8000");
+    pj_bool_t on = e && *e == '1' && me_offer_is_digital_bearer();
+    const char *fu = getenv("SIP_FORCE_PCMU"), *fa = getenv("SIP_FORCE_PCMA");
+
+    restrict_to_g711();                        /* back to the G.711 baseline */
+    if (!on) {
+        pjsua_codec_set_priority(&cm, PJMEDIA_CODEC_PRIO_DISABLED);
+        return;
+    }
+    pjsua_codec_set_priority(&cm, PJMEDIA_CODEC_PRIO_HIGHEST);
+    /* G.711 stays as the fallback, in the order restrict_to_g711() chose. */
+    if (!(fa && *fa && strcmp(fa, "0")))
+        pjsua_codec_set_priority(&pcmu, PJMEDIA_CODEC_PRIO_NEXT_HIGHER);
+    if (!(fu && *fu && strcmp(fu, "0")))
+        pjsua_codec_set_priority(&pcma, (fa && *fa && strcmp(fa, "0"))
+                                        ? PJMEDIA_CODEC_PRIO_NEXT_HIGHER
+                                        : PJMEDIA_CODEC_PRIO_NORMAL);
+    PJ_LOG(3, ("sip_modem", "CLEARMODE offered first, G.711 behind it"));
+}
+
 static void restrict_to_g711(void)
 {
     pj_str_t pcmu = pj_str("PCMU/8000");
@@ -1006,7 +1043,7 @@ static pj_status_t register_g711_passthrough(void)
 {
 #if PJMEDIA_HAS_PASSTHROUGH_CODECS
     pjmedia_codec_passthrough_setting setting;
-    pjmedia_format fmts[2];
+    pjmedia_format fmts[3];
 #endif
 
 #if !PJMEDIA_HAS_PASSTHROUGH_CODECS
@@ -1019,7 +1056,9 @@ static pj_status_t register_g711_passthrough(void)
     pjmedia_format_init_audio(&fmts[0], PJMEDIA_FORMAT_PCMU, 8000, 1, 8, 20000, 64000, 64000);
     pjmedia_format_init_audio(&fmts[1], PJMEDIA_FORMAT_PCMA, 8000, 1, 8, 20000, 64000, 64000);
 
-    setting.fmt_cnt = 2;
+    pjmedia_format_init_audio(&fmts[2], PJMEDIA_FORMAT_CLEARMODE, 8000, 1, 8, 20000, 64000, 64000);
+
+    setting.fmt_cnt = 3;
     setting.fmts = fmts;
     setting.ilbc_mode = 20;
 
@@ -1066,8 +1105,10 @@ static void answer_ringing_call(void)
         g_ring_count   = 0;
         /* Set g_call_id before pjsua_call_answer(): stream-created callbacks
          * may run synchronously from the answer call. */
+        apply_bearer_codecs();
         pjsua_call_answer(g_call_id, 200, NULL, NULL);
     } else if (g_call_id != PJSUA_INVALID_ID) {
+        apply_bearer_codecs();
         pjsua_call_answer(g_call_id, 200, NULL, NULL);
     }
 }
@@ -1581,6 +1622,7 @@ int main(int argc, char *argv[])
                 pj_str_t dst = pj_str((char *)resolved_uri);
                 pjsua_call_setting opt;
                 pjsua_call_setting_default(&opt);
+                apply_bearer_codecs();
                 status = pjsua_call_make_call(g_acc_id, &dst, &opt,
                                               NULL, NULL, &g_call_id);
                 if (status != PJ_SUCCESS) {
