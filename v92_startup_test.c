@@ -929,8 +929,9 @@ static void test_spec_trn2u_contexts(void)
     prev = 0;
     assert(v92_trn2u_tx_ones_linear(&tx, out, 240) == 240);
     for (int s = 0; s < 240; s++) {
-        int msb = ORACLE_BIT(1) ^ prev;
-        (void)ORACLE_BIT(1);
+        int msb;
+        (void)ORACLE_BIT(1);            /* magnitude: LSB, first in time */
+        msb = ORACLE_BIT(1) ^ prev;     /* sign: MSB, second (Table 28) */
         prev = msb;
         assert((out[s] < 0) == (msb == 1));
     }
@@ -939,8 +940,9 @@ static void test_spec_trn2u_contexts(void)
         ebits[i] = (uint8_t)((i * 7 + 3) % 5 == 0);
     assert(v92_trn2u_tx_bits_linear(&tx, ebits, 48, out, 600) == 24);
     for (int s = 0; s < 24; s++) {
-        int msb = ORACLE_BIT(ebits[2*s]) ^ prev;
-        (void)ORACLE_BIT(ebits[2*s+1]);
+        int msb;
+        (void)ORACLE_BIT(ebits[2*s]);
+        msb = ORACLE_BIT(ebits[2*s+1]) ^ prev;
         prev = msb;
         assert((out[s] < 0) == (msb == 1));
     }
@@ -948,8 +950,9 @@ static void test_spec_trn2u_contexts(void)
     v92_trn2u_tx_start_context(&tx, V92_TRN2U_RENEG_SECOND, prev);
     assert(v92_trn2u_tx_ones_linear(&tx, out, 240) == 240);
     for (int s = 0; s < 240; s++) {
-        int msb = ORACLE_BIT(1) ^ prev;
-        (void)ORACLE_BIT(1);
+        int msb;
+        (void)ORACLE_BIT(1);            /* magnitude: LSB, first in time */
+        msb = ORACLE_BIT(1) ^ prev;     /* sign: MSB, second (Table 28) */
         prev = msb;
         assert((out[s] < 0) == (msb == 1));
     }

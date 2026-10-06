@@ -263,7 +263,7 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
     const double *du;
     double y = 0.0;
     int ref;
-    int d;
+    double d;
 
     if (!eq || !eq->started)
         return false;
@@ -296,8 +296,17 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
         y += eq->fb[j]*eq->dhist[j];
     ref = eq->k >= eq->ref_from && eq->k < eq->ref_until
         ? reference_next(&eq->gpa) : 0;
-    d = ref ? ref : (y >= 0.0 ? 1 : -1);
-    record(eq, y, d, ref);
+    if (ref)
+        d = ref;
+    else if (eq->pam4) {
+        double a = fabs(y)*sqrt(5.0);
+
+        d = (a >= 2.0 ? 3.0 : 1.0)/sqrt(5.0);
+        if (y < 0.0)
+            d = -d;
+    } else
+        d = y >= 0.0 ? 1 : -1;
+    record(eq, y, (int)(d >= 0.0 ? 1 : -1), ref);
 
     if (eq->k >= eq->cfg.seed_symbols && eq->hold)
         eq->tau += eq->freq;
@@ -374,6 +383,11 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
 void v92_p3_eq_hold(v92_p3_eq_t *eq, bool hold)
 {
     eq->hold = hold;
+}
+
+void v92_p3_eq_set_pam4(v92_p3_eq_t *eq, bool pam4)
+{
+    eq->pam4 = pam4;
 }
 
 void v92_p3_eq_train_from(v92_p3_eq_t *eq, int64_t k0, int n)

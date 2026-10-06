@@ -4065,6 +4065,13 @@ static bool test_v92_trn2u_loopback(void)
                 return false;
             nsym = v92_test_analogue_bits(&utx, frame_bits, nbits,
                                      codewords, (int)sizeof(codewords));
+            /* The adaptive demodulator interpolates between codewords, so
+             * a frame's last symbol leaves it only when the next codeword
+             * arrives; on a line something always follows.  Whether a bare
+             * frame came out depended on the timing phase -- A-law 4-point
+             * lost it once the 8.5.x bit order was corrected. */
+            if (nsym > 0)
+                nsym += v92_test_analogue_ones(&utx, codewords + nsym, 12);
             if (nsym <= 0
                 || v92_trn2u_demod_feed_adaptive(&udemod, codewords, nsym) != 1
                 || capture.suvu_count != 1
@@ -4082,6 +4089,8 @@ static bool test_v92_trn2u_loopback(void)
                 return false;
             nsym = v92_test_analogue_bits(&utx, frame_bits, nbits,
                                      codewords, (int)sizeof(codewords));
+            if (nsym > 0)
+                nsym += v92_test_analogue_ones(&utx, codewords + nsym, 12);
             if (nsym <= 0
                 || v92_trn2u_demod_feed_adaptive(&udemod, codewords, nsym) != 1
                 || capture.cp_count != 1
@@ -4101,6 +4110,8 @@ static bool test_v92_trn2u_loopback(void)
                 return false;
             nsym = v92_test_analogue_bits(&utx, frame_bits, nbits,
                                      codewords, (int)sizeof(codewords));
+            if (nsym > 0)
+                nsym += v92_test_analogue_ones(&utx, codewords + nsym, 12);
             if (nsym <= 0
                 || v92_trn2u_demod_feed_adaptive(&udemod, codewords, nsym) != 1
                 || capture.cpus_count != 1

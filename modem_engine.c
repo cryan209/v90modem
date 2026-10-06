@@ -1267,6 +1267,7 @@ static bool           g_v92_p3_cpt_active = false;
  * Phase 3 path, and its hand-on after Ja (step 7).  Per call. */
 static bool           g_v92_p3_follow_active = false;
 static bool           g_v92_p3_trn1u2_locked = false;
+static bool           g_v92_p4_pam4 = false;    /* E1u seen: TRN2u follows */
 static bool           g_v92_p3_trn1u2_reported = false;
 static bool           g_v92_p3_logged_align = false;
 static bool           g_v92_p3_logged_gate = false;
@@ -5752,6 +5753,8 @@ static void v92_live_p4u_frame(void *user_data,
                                const v92_suvu_diag_t *suvu)
 {
     if (kind == V92_P4U_KIND_E1U) {
+        /* 9.6.2.1.1: TRN2u, four-level, follows E1u at once. */
+        g_v92_p4_pam4 = true;
         if (g_v92_active && g_v90)
             (void)v90_handle_rx_event(g_v90, V90_RX_EVENT_E);
         return;
@@ -5914,6 +5917,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v92_p3_cpt_active = false;
     g_v92_p3_follow_active = false;
     g_v92_p3_trn1u2_locked = false;
+    g_v92_p4_pam4 = false;
     g_v92_p3_trn1u2_reported = false;
     g_v92_p3_logged_align = false;
     g_v92_p3_logged_gate = false;
@@ -6059,6 +6063,7 @@ static bool restart_v90_phase2_locked(const char *reason)
     g_v92_p3_cpt_active = false;
     g_v92_p3_follow_active = false;
     g_v92_p3_trn1u2_locked = false;
+    g_v92_p4_pam4 = false;
     g_v92_p3_trn1u2_reported = false;
     g_v92_p3_logged_align = false;
     g_v92_p3_logged_gate = false;
@@ -8958,6 +8963,7 @@ static void v92_call_state_reset_locked(void)
     g_v92_p3_cpt_active = false;
     g_v92_p3_follow_active = false;
     g_v92_p3_trn1u2_locked = false;
+    g_v92_p4_pam4 = false;
     g_v92_p3_trn1u2_reported = false;
     g_v92_p3_logged_align = false;
     g_v92_p3_logged_gate = false;
@@ -11853,6 +11859,45 @@ static void v92_p3_rx_report_progress_locked(int sample_index)
     g_v92_p3_rx_last_rejects = rejects;
 }
 
+/* The Phase 3 equaliser carried into Phase 4.  Frozen from our Ri (the
+ * analogue modem answers it with the rest of CPt and E1u, both two-level,
+ * then four-level TRN2u at once), and decision-directed on 4-point PAM from
+ * E1u -- or from our TRN2d, by which time TRN2u has certainly begun.
+ * Adapting on two-level decisions over TRN2u walked the taps off; frozen,
+ * its decision feedback still used two-level decisions and its learned
+ * frequency drifted the instant, and either alone smeared the slicer input
+ * (against slmodemd: no cluster at all, where a fixed fit on the same
+ * samples gives 0.15 rms error against a 0.447 half-spacing). */
+static void me_v92_p4_eq_mode_locked(void)
+{
+    v92_p3_eq_t *eq;
+    int phase;
+
+    if (!g_v90 || g_v92_p3_rx.eq_law < 0)
+        return;
+    eq = &g_v92_p3_rx.eq[g_v92_p3_rx.eq_law];
+    phase = v90_get_tx_phase(g_v90);
+    if (g_v92_p4_pam4 || phase >= V90_TX_TRN2D) {
+        v92_p3_eq_set_pam4(eq, true);
+        v92_p3_eq_hold(eq, false);
+    } else if (phase >= V90_TX_RI) {
+        v92_p3_eq_hold(eq, true);
+    }
+}
+
+/* ME_V92_P4_EQ=0: demodulate the Phase 4 upstream from raw codewords, as
+ * before the Phase 3 equaliser was carried into it. */
+static bool me_v92_p4_eq_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *v = getenv("ME_V92_P4_EQ");
+        cached = (v && *v == '0') ? 0 : 1;
+    }
+    return cached != 0;
+}
+
 /*
  * After Ja (plan step 7): the trained equaliser runs on, held through Su,
  * retrains on the second TRN1u and decodes CPt.  If it refuses the second
@@ -11864,6 +11909,15 @@ static void me_v92_p3_follow_locked(const uint8_t *codewords, int count,
 {
     double values[4];
     int state;
+
+    /* Our Ri answers the analogue modem's CPt, and it sends E1u and then
+     * four-level TRN2u as soon as it sees Ri -- well before our transmitter
+     * reaches TRN2d.  Left adapting, the equaliser's two-level
+     * decision-directed loop walked off on that TRN2u (outputs to 3 LU
+     * against slmodemd).  Freeze it from Ri: CPt, E1u and TRN2u then all go
+     * through the taps the second TRN1u trained. */
+    if (g_v90 && g_v92_p3_trn1u2_locked && g_v92_p3_rx.eq_law >= 0)
+        me_v92_p4_eq_mode_locked();
 
     for (int i = 0; i < count && g_v92_p3_follow_active; i++) {
         int n = v92_p3_rx_follow(&g_v92_p3_rx, codewords[i],
@@ -12675,6 +12729,7 @@ static void prepare_v90_phase3_locked(void)
                 g_v92_p3_cpt_active = false;
     g_v92_p3_follow_active = false;
     g_v92_p3_trn1u2_locked = false;
+    g_v92_p4_pam4 = false;
     g_v92_p3_trn1u2_reported = false;
     g_v92_p3_logged_align = false;
     g_v92_p3_logged_gate = false;
@@ -14691,8 +14746,36 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
         && g_state == ME_TRAINING
         && v90_get_tx_phase(g_v90) >= V90_TX_TRN2D
         && v90_get_tx_phase(g_v90) < V90_TX_DATA) {
-        (void)v92_trn2u_demod_feed_adaptive(&g_v92_trn2u_demod,
-                                             codewords, count);
+        if (g_v92_p3_trn1u2_locked && g_v92_p3_rx.eq_law >= 0
+            && me_v92_p4_eq_enabled()) {
+            /* E1u, TRN2u, SUVu and CPu arrive through the same upstream path
+             * as TRN1u, and raw codewords do not survive it: against
+             * slmodemd (its 9600 Hz DSP behind an interpolator) the raw
+             * demodulator took 115676 bits and found no frame while the
+             * peer sent SUVu and then CPu.  Keep the equaliser trained on
+             * the second TRN1u, now deciding on Table 28's four levels
+             * (+/-LU/sqrt5, +/-3LU/sqrt5; see me_v92_p4_eq_mode_locked),
+             * and slice its output, scaled back to LU. */
+            double values[4];
+            v92_p3_eq_t *eq = &g_v92_p3_rx.eq[g_v92_p3_rx.eq_law];
+
+            (void)eq;
+            me_v92_p4_eq_mode_locked();
+            for (int i = 0; i < count; i++) {
+                int n = v92_p3_rx_follow(&g_v92_p3_rx, codewords[i],
+                                         (int)(first_sample + (uint64_t)i),
+                                         values, 4);
+
+                for (int k = 0; k < n; k++)
+                    values[k] *= g_v92_trn2u_lu;
+                if (n > 0)
+                    (void)v92_trn2u_demod_feed_values(&g_v92_trn2u_demod,
+                                                      values, n);
+            }
+        } else {
+            (void)v92_trn2u_demod_feed_adaptive(&g_v92_trn2u_demod,
+                                                 codewords, count);
+        }
     }
     if (g_v92_upstream_rx_active && g_v92_active
         && (g_state == ME_TRAINING || g_state == ME_DATA)) {

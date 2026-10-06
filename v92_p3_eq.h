@@ -120,6 +120,9 @@ typedef struct {
     int64_t ref_until;             /* trained on the 8.5.7 reference */
     bool hold;                     /* no adaptation: taps and timing frozen,
                                       the learned frequency still applied */
+    bool pam4;                     /* decide on V.92 Table 28's 4-point PAM
+                                      (+/-1/sqrt5, +/-3/sqrt5) rather than
+                                      +/-1: TRN2u, SUVu and CPu */
 
     double y_prev;
     double d_prev;
@@ -164,6 +167,10 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq);
  * of something the equaliser must not train on (V.92 Phase 3's silences
  * and three-level Su) costs only the frequency error times its length. */
 void v92_p3_eq_hold(v92_p3_eq_t *eq, bool hold);
+/* Decision-directed on 4-point PAM from here on (Phase 4): decisions,
+ * decision feedback, tap and timing adaptation all use the 4-level slicer.
+ * Two-level decisions on a four-level signal corrupt every feedback term. */
+void v92_p3_eq_set_pam4(v92_p3_eq_t *eq, bool pam4);
 
 /* Train data-aided again, on a TRN1u whose first symbol is eq symbol k0
  * (9.5.1.1.10's second TRN1u is zero-initialised like the first), for n

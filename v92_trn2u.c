@@ -138,11 +138,16 @@ static int16_t v92_trn2u_tx_symbol(v92_trn2u_tx_t *tx, const int *bits)
     int label = 0;
     double value;
 
-    /* First bit is the constellation MSB (sign), differentially encoded. */
-    msb = bits[0] ^ tx->prev_sign;
+    /* Tables 28/29 are written MSB:LSB with the sign as MSB, and V.92's bits
+     * enter LSB first ("b0 is first in time"): the magnitude bit(s) come
+     * first and the sign bit, differentially encoded, last.  This had the
+     * sign first -- consistent with our own demodulator, so no loopback
+     * could see it, and the reverse of slmodemd, whose TRN2u descrambles to
+     * ones only in this order. */
+    msb = bits[bps - 1] ^ tx->prev_sign;
     tx->prev_sign = msb;
-    for (int i = 1; i < bps; i++)
-        label = (label << 1) | bits[i];
+    for (int i = 0; i < bps - 1; i++)
+        label |= bits[i] << i;
     value = v92_trn2u_level(tx->constellation_points, label, tx->lu);
     if (msb)
         value = -value;
@@ -370,9 +375,11 @@ static int v92_trn2u_demod_linear(v92_trn2u_demod_t *demod,
             msb ^= 1;
         demod->prev_sign = sign;
         demod->prev_sign_valid = true;
-        recovered[0] = msb;
-        for (int i = 1; i < bps; i++)
-            recovered[i] = (label >> (bps - 1 - i)) & 1;
+        /* LSB first in time: magnitude bit(s), then the sign (see
+         * v92_trn2u_tx_symbol). */
+        for (int i = 0; i < bps - 1; i++)
+            recovered[i] = (label >> i) & 1;
+        recovered[bps - 1] = msb;
 
         for (int i = 0; i < bps; i++)
             v92_trn2u_put_recovered_bit(
