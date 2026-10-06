@@ -155,7 +155,7 @@ LIBUSB_LIBS   := $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo "-L$(H
 SRCS   = profile_file.c line_monitor.c at_help.c v250_ctl.c at_test.c legacy_pcm_decode.c k56flex_client.c k56flex_rxfe.c at_ms.c clear_channel.c v25_automode.c k56flex_train.c k56flex_probe.c k56flex_v8bis.c k56flex.c x2.c x2_sym.c v34_line_ec.c v92_mh.c v92_mh_line.c v92_rn.c v92_rsig.c v92_tone_a.c v92_analogue_audio.c v92_analogue_phase4.c v92_analogue_phase3.c v92_su.c sip_modem.c modem_engine.c v90_analogue_linear.c v90_analogue_fse.c v90_analogue_sd.c v34_pp_fit.c v90_sounder.c clock_recovery.c data_interface.c fax_class2.c data_stack.c v44.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_p3_eq.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c x2_session.c x2_mp_rx.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
-TEST_TARGETS = line_monitor_test v250_ctl_test at_test_test pcm_ber_test v56_loopback_test legacy_pcm_decode_test at_ms_test console_test clear_channel_test k56flex_client_test k56flex_train_test k56flex_probe_test k56flex_v8bis_test k56flex_test x2_test v42bis_test v44_test v92_startup_test port_cp_stream_test port_data_rx_test port_v34_fixed_test port_v34_fixed_lms_test port_v34_fixed_solve_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v42_throughput_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test fax_class_test fax_class2_test v90_upstream_replay v90_engine_replay v34_duplex_test v32bis_spandsp_test v32bis_duplex_test v32bis_engine_pair_test engine_pair_test v90_engine_peer v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test v90_analogue_sd_test v34_pp_fit_test v34_hdx_test v92_p3_rx_line_test v92_mh_test v92_mh_line_test v92_mh_retrain_test v92_rn_test v92_rsig_test v92_tone_a_test x2_session_test x2_sym_test x2_b1_test v76_test v75_test v70_test v70_v34_test
+TEST_TARGETS = line_monitor_test v250_ctl_test at_test_test pcm_ber_test v56_loopback_test legacy_pcm_decode_test at_ms_test console_test clear_channel_test k56flex_client_test k56flex_train_test k56flex_probe_test k56flex_v8bis_test k56flex_test x2_test v42bis_test v44_test v92_startup_test port_cp_stream_test port_data_rx_test port_v34_fixed_test port_v34_fixed_lms_test port_v34_fixed_solve_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v42_throughput_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test fax_class_test fax_class2_test v90_upstream_replay v90_engine_replay v34_duplex_test v32bis_spandsp_test v32bis_duplex_test v32bis_engine_pair_test engine_pair_test v90_engine_peer v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test v90_analogue_sd_test v34_pp_fit_test v34_hdx_test v92_p3_rx_line_test v92_mh_test v92_mh_line_test v92_mh_retrain_test v92_rn_test v92_rsig_test v92_tone_a_test x2_session_test x2_sym_test x2_b1_test v8bis_test v76_test v75_test v70_test v70_v34_test
 TEST_OBJS = v92_su.o vpcm_loopback_test.o v90.o v90_cp_rx.o v90_dil_rx.o v90_dil_measure.o v90_dil_presets.o v90_analogue_tx.o v90_analogue_rx.o v90_analogue_phase3.o v90_analogue_phase4.o v91.o vpcm_cp.o vpcm_g711_stream.o vpcm_call.o vpcm_call_pair.o vpcm_link.o vpcm_v90_session.o vpcm_v91_session.o vpcm_v91_loopback.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_p3_eq.o v92_cp_rx.o v92_trn2u.o v92_upstream_data.o v92_upstream_rx.o p3_demod.o
 DECODE_OBJS = legacy_pcm_decode.o x2_session.o x2_sym.o x2_mp_rx.o x2.o k56flex_client.o k56flex_rxfe.o k56flex_train.o k56flex_probe.o k56flex.o vpcm_decode.o v90_dil_measure.o v90_dil_presets.o v34_phase2_decode.o v34_info_decode.o v8bis_decode.o v92_short_phase1_decode.o v92_short_phase2_decode.o v92_phase3_decode.o v92_phase3_ru.o v92_phase4_decode.o v92_ja_decode.o v92_p3_rx.o v92_p3_eq.o v92_anspcm_decode.o p3_demod.o v90.o v90_cp_rx.o v91.o vpcm_cp.o v21_fsk_demod.o phase12_decode.o call_init_tone_probe.o v90_dil_rx.o
 ENCODE_OBJS = vpcm_encode.o v90.o v91.o vpcm_cp.o v92_phase4_decode.o v90_dil_measure.o v90_dil_presets.o
@@ -168,6 +168,7 @@ V42_THROUGHPUT_TEST_OBJS = v42_throughput_test.o
 # V.70 DSVD: V.76 multiplex, V.75 control entity, V.70 terminal.  Not in SRCS: nothing
 # in the engine links them yet (docs/v70_dsvd.md says what is missing).
 V70_STACK_OBJS = v76.o per.o h245_schema.o v75_h245.o v75.o v70.o
+V8BIS_TEST_OBJS = v8bis_test.o v8bis_tones.o v8bis_msg.o v8bis_ie.o
 V76_TEST_OBJS = v76_test.o v76.o
 V75_TEST_OBJS = v75_test.o v75.o v75_h245.o per.o h245_schema.o v76.o
 V70_TEST_OBJS = v70_test.o v70.o v75.o v75_h245.o per.o h245_schema.o v76.o
@@ -262,6 +263,7 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 	./v42bis_test
 	./v42_link_test
 	./v42_throughput_test
+	./v8bis_test
 	./v76_test
 	./v75_test
 	./v70_test
@@ -679,6 +681,11 @@ v42_link_test: $(V42_LINK_TEST_OBJS) spandsp
 
 v42_throughput_test: $(V42_THROUGHPUT_TEST_OBJS) spandsp
 	$(CC) $(V42_THROUGHPUT_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+
+# V.8bis stage 1: tones, framing and the information field codec.  Not in SRCS yet:
+# the engine does not use them until stage 3 (docs/v8bis_engine_scope.md).
+v8bis_test: $(V8BIS_TEST_OBJS) spandsp
+	$(CC) $(V8BIS_TEST_OBJS) -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
 v76_test: $(V76_TEST_OBJS)
 	$(CC) $(V76_TEST_OBJS) -o $@ $(SYSTEM_LIBS)
@@ -1157,7 +1164,7 @@ fixed-compare:
 clean:
 	rm -f audio_sock_modem audio_sock_modem.o slm_bridge v90_engine_peer v90_engine_peer.o engine_pair_test engine_pair_test.o k56flex_client_test.o k56flex_train_test.o k56flex_probe_test.o k56flex_v8bis_test.o k56flex_test.o x2_test.o x2_sym_test.o v42bis_test.o $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(LEGACY_PCM_DECODE_TEST_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(V92_P3_RX_LINE_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V44_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(V42_THROUGHPUT_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V56_LOOPBACK_TEST_OBJS) $(AT_TEST_TEST_OBJS) $(PCM_BER_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(V92_MH_TEST_OBJS) $(V92_MH_LINE_TEST_OBJS) $(V92_MH_RETRAIN_TEST_OBJS) $(V92_RN_TEST_OBJS) $(V92_RSIG_TEST_OBJS) $(V92_TONE_A_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test *.d tools/*.d $(APPLE_USB_MODEM_PROBE_OBJS) apple_usb_modem_probe apple_usb_modem_audio \
 	    tools/apple_usb_modem_coupler.o apple_usb_modem_coupler
-	rm -f $(V70_STACK_OBJS) per.o h245_schema.o v76_test.o v75_test.o v70_test.o v70_v34_test.o
+	rm -f $(V8BIS_TEST_OBJS) $(V70_STACK_OBJS) per.o h245_schema.o v76_test.o v75_test.o v70_test.o v70_v34_test.o
 
 distclean: clean
 	rm -f "$(SPANDSP_HOST_STAMP)" "$(PJ_HOST_STAMP)" $(BUILD_MODE_STAMP)

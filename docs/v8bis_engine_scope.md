@@ -53,6 +53,12 @@ So the transport (tones, V.21, HDLC, FCS) is mostly a generalisation of `k56flex
 - Foreign evidence: replay recorded V.92 captures that contain QC2/QCA2 through the new receiver and compare with the offline decoder's calls (the strict-decode plan already lists which captures carry them).
 - No hardware yet: the CX93001 at 6004 is the candidate, and it is the only V.92 peer known to want QC2.
 
+## Stage 1 status (2026-10-06)
+
+Done and tested (`v8bis_test`, in `make test`, ~2 s): `v8bis_tones.[ch]`, `v8bis_msg.[ch]`, `v8bis_ie.[ch]`. Not yet linked into `SRCS`. Still to do inside stage 1's remit: nothing; the offline decoder (`v8bis_decode.c`) has NOT been moved onto `v8bis_ie` yet and keeps its catalogued defects, so it remains diagnostic only.
+
+Findings worth carrying into stage 2: the tone detector is robust (see CLAUDE.md for numbers) but only has a 3-block confirmation, so `detect_sample` lands ~60-80 ms into segment 2 -- a responder that must answer inside the preamble window should budget for that; and the framing receiver reports invalid frames by class (7.2.9) so 9.8's NAK(1) rule can be driven directly.
+
 ## Staging
 
 1. **Stage 1, codec and tones** (A, B, C). Testable with no state machine. Fixes the offline decoder's defect list at the same time, since both can share `v8bis_ie`.
