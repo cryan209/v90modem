@@ -3427,10 +3427,15 @@ static const char *me_v92_anspcm_level_to_str(int level)
 
    V.250 +ES governs when the DTE has issued it; the environment's fixed
    framings (ME_DATA_FRAMING=lapm, v14, ...) then yield to it, and a DTE that has
-   not touched +ES gets the recommended 3,0,2 ("V.42 with detection, optional")
-   on top of the V.8 auto decision.  Required error control ignores what V.8
-   said about the peer -- the detection phase is the real test -- and
-   disconnects when it fails; optional falls back to buffered V.14. */
+   not touched +ES gets the recommended 3,0,2 ("V.42 with detection, optional").
+
+   Whether to ATTEMPT V.42 does not depend on what V.8 said.  V.42 8.10's
+   ODP/ADP detection phase is the negotiation; V.8's protocol octet is only an
+   advertisement, and two common cases never carry it: V.32bis entered through
+   V.32bis Annex A has no V.8 at all, and slmodemd's V.90 CM omits the LAPM
+   octet.  Gating on it left us mute to slmodemd's ODP, so it sat in EC_ESTAB
+   with no CONNECT to its DTE.  Required error control disconnects when
+   detection fails; optional falls back to buffered V.14. */
 static void me_decide_data_framing(bool v8_lapm)
 {
     v250_ctl_t cfg;
@@ -3442,12 +3447,10 @@ static void me_decide_data_framing(bool v8_lapm)
     if (cfg.es_set) {
         if (!pol.attempt) {
             g_data_framing = DS_FRAMING_V14;
-        } else if (pol.required || v8_lapm) {
+        } else {
             g_data_framing = DS_FRAMING_V42;
             g_data_lapm_detect = pol.detect;
             g_ec_fallback_ok = !pol.required;
-        } else {
-            g_data_framing = DS_FRAMING_V14;
         }
         ME_LOG("[ME] DTE framing (+ES %d,%d,%d, %s): %s\n", cfg.es[0], cfg.es[1], cfg.es[2],
                g_calling_party ? "originator" : "answerer",
@@ -3457,9 +3460,22 @@ static void me_decide_data_framing(bool v8_lapm)
         return;
     }
     if (g_data_framing_auto) {
-        g_data_framing = v8_lapm ? DS_FRAMING_V42 : DS_FRAMING_V14;
-        g_data_lapm_detect = v8_lapm;
-        g_ec_fallback_ok = v8_lapm;
+        /* The factory +ES (3,0,2) always attempts V.42 with detection and
+           allows the buffered fallback; v8_lapm only reports the peer's
+           advertisement.  ME_V42_REQUIRE_V8=1 restores the old gate. */
+        static int require_v8 = -1;
+
+        if (require_v8 < 0) {
+            const char *e = getenv("ME_V42_REQUIRE_V8");
+            require_v8 = (e && *e && *e != '0') ? 1 : 0;
+        }
+        if (require_v8 && !v8_lapm) {
+            g_data_framing = DS_FRAMING_V14;
+        } else {
+            g_data_framing = pol.attempt ? DS_FRAMING_V42 : DS_FRAMING_V14;
+            g_data_lapm_detect = pol.detect;
+            g_ec_fallback_ok = !pol.required;
+        }
     }
 }
 
@@ -9222,9 +9238,9 @@ void me_on_sip_connected(void)
         return;
     }
     if (me_v8bis_enabled() && me_v8bis_start_locked()) {
-        if (g_data_framing_auto)
-            g_data_framing = DS_FRAMING_V14;
-        g_ec_fallback_ok = false;
+        /* The V.8 result re-decides; a call that never gets one (V.32bis
+           Annex A, V.25) keeps this, i.e. +ES's own policy. */
+        me_decide_data_framing(false);
         pthread_mutex_unlock(&g_state_mtx);
         trace_phase("enter V.8bis before V.8 as %s", g_calling_party ? "caller" : "answerer");
         ME_LOG("[ME] SIP connected as %s, trying V.8bis for up to %u ms before V.8\n",
@@ -9256,9 +9272,9 @@ void me_on_sip_connected(void)
         }
     }
     pthread_mutex_unlock(&g_state_mtx);
-    if (g_data_framing_auto)
-        g_data_framing = DS_FRAMING_V14;   /* until this call's V.8 says LAPM */
-    g_ec_fallback_ok = false;
+    /* Re-decided from this call's V.8 result when there is one; a call that
+       never gets one (V.32bis Annex A, V.25 ANS) keeps +ES's own policy. */
+    me_decide_data_framing(false);
     trace_phase("enter V8: mode=%s advertised mods=%s", g_mode_name,
                 me_offer_str());
 
