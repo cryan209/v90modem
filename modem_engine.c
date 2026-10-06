@@ -3796,7 +3796,7 @@ static bool me_v8bis_start_locked(void)
     cfg.fsm.mr_reply = V8BIS_MRR_CRD;          /* transaction 10/11 */
     cfg.fsm.accept = me_v8bis_accept;
     cfg.fsm.select_ms = me_v8bis_select_ms;
-    cfg.retries = 0;                           /* the window decides, not the retransmit count */
+    cfg.retries = (unsigned)parse_env_int("ME_V8BIS_RETRIES", 0);   /* 10.2.2/10.1: 3 s after each signal; the window still decides */
     cfg.fsm.answering_station = !g_calling_party;
     if ((v = getenv("ME_V8BIS_LEVEL_DBM0")) && *v)
         cfg.level_dbm0 = atof(v);
