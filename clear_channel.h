@@ -67,6 +67,8 @@ typedef void (*cc_put_bit_fn)(void *ctx, int bit);
 /* CC_V120: next DTE byte to send, or -1 for none; one received DTE byte. */
 typedef int  (*cc_pull_byte_fn)(void *ctx);
 typedef void (*cc_push_byte_fn)(void *ctx, uint8_t byte);
+/* Free space (and total size) of the DTE-side receive buffer, for V.110 5.4.2. */
+typedef void (*cc_room_fn)(void *ctx, int *free_bytes, int *size);
 
 #define CC_V120_DEFAULT_LLI   256
 /* User octets per V.120 frame.  3.2.2: N2120 = N201 (Q.922 5.9.3, agreed
@@ -118,6 +120,8 @@ typedef struct {
     cc_pull_byte_fn pull;
     cc_push_byte_fn push;
     void *ctx;
+    cc_room_fn room;             /* optional: V.110 flow control, 5.4.2 */
+    bool v110_rx_hold;           /* we are sending X OFF: our buffer is full */
 
     hdlc_tx_state_t *htx;
     hdlc_rx_state_t *hrx;
@@ -175,6 +179,7 @@ typedef struct {
     uint64_t rx_breaks;
     uint64_t v110_frame_errors;  /* V.110 frames with a framing bit wrong */
     uint64_t v110_sync_losses;
+    uint64_t v110_flow_holds;    /* times we turned X OFF for our own buffer */
     uint64_t v110_rate_mismatch; /* frames whose E1-E3 name another rate */
 } clear_channel_t;
 
@@ -187,6 +192,10 @@ int  cc_init_v120(clear_channel_t *cc, bool r56, bool caller,
 int  cc_init_v110(clear_channel_t *cc, int user_rate,
                   cc_pull_byte_fn pull, cc_push_byte_fn push, void *ctx);
 void cc_release(clear_channel_t *cc);
+/* V.110 5.4.2: turn X OFF towards the far end when the DTE-side receive
+ * buffer is under a quarter free (characters already in flight still fit),
+ * back ON once it is over a half free.  Only in the data transfer state. */
+void cc_v110_set_rx_room(clear_channel_t *cc, cc_room_fn room);
 
 /* Table 8 asynchronous user rates this profile carries, ascending. */
 extern const int cc_v110_rates[];

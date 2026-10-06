@@ -89,13 +89,13 @@ of Tables 6a/6b/6c (600/1200/2400, D bits repeated 8/4/2 times) and 6e
 | Framing | Two consecutive 17-bit alignment patterns to acquire (5.1.3.1); lost after three consecutive frames with a framing-bit error (5.1.3.2). |
 | Start (7.1.2) | Frames with D = 1, S = X = OFF; framing found -> S = X = ON; the far end's S = X = ON for two frames -> 107/109 ON (**CONNECT** is reported now, not when the call answers); 106 ON N = 24 bits later (6.3); T1 = 10 s. |
 | Data (7.1.3) | S/X not mapped to circuits (7.1.3.3). The far end's X OFF holds our data back at a character boundary (7.1.5 c, 5.4.2). A deleted stop element is re-inserted (5.3.4); 20 or more zeros is a break (5.3.5), counted and not delivered as NULs. |
+| Flow control (5.4.2) | Our X goes OFF while the engine's DTE receive ring is under a quarter free and back ON over a half free (`cc_v110_set_rx_room()`), data transfer state only; counted in `v110_flow_holds`. Characters already in flight still fit in the quarter. |
 | Loss of framing (7.1.5) | Stop delivering, X OFF, resynchronize; X back ON and 106 after N bits on success; after 3 s, three frames of all-status-OFF D = 0 and hang up. |
 | Disconnect (7.1.4) | The far end's S OFF with D = 0 is its request: hang up, NO CARRIER. A local ATH (the DTE's hang-up callback, `me_hangup()`) sends ours -- S OFF, X ON, D = 0, 106 OFF -- and keeps the SIP call up until the far end's S OFF or loss of framing acknowledges it (7.1.4.3), or T2 = 5 s passes (7.1.4.1); the DTE then gets OK. A second ATH, or one before framing is found, hangs up at once. |
 
 Not implemented: synchronous user rates (Tables 6d/6f, 7a-7c), 7/5-bit
 characters, parity and 2 stop elements as separate formats (8 data bits
-include any parity, 5.3.6), sending break, the 5.4 flow-control use of X
-towards the far end (we never turn X OFF for our own receive buffer), the
+include any parity, 5.3.6), sending break, the
 in-band parameter exchange of Appendix I, half duplex (7.2), and restricted
 56k at 38400 (an IR of 64 kbit/s needs every bit; IR 8/16/32 never uses the
 robbed LSB anyway).

@@ -302,7 +302,22 @@ static void v110_build_frame(clear_channel_t *cc)
         cc->v110_disc_frames++;
     } else {
         s_bit = cc->v110_tx_s_on ? 0 : 1;
-        x_bit = cc->v110_tx_x_on ? 0 : 1;
+        if (cc->v110_state == CC_V110_CONNECTED && cc->room) {
+            int fr = 0, sz = 0;
+
+            cc->room(cc->ctx, &fr, &sz);
+            if (sz > 0) {
+                if (!cc->v110_rx_hold && fr * 4 < sz) {
+                    cc->v110_rx_hold = true;
+                    cc->v110_flow_holds++;
+                } else if (cc->v110_rx_hold && fr * 2 > sz) {
+                    cc->v110_rx_hold = false;
+                }
+            }
+        } else {
+            cc->v110_rx_hold = false;
+        }
+        x_bit = (cc->v110_tx_x_on && !cc->v110_rx_hold) ? 0 : 1;
     }
     for (int i = 0; i < nd; i++) {
         if (down)
@@ -829,4 +844,9 @@ void cc_rx(clear_channel_t *cc, const uint8_t *octets, int n)
         for (int b = 0; b < nbits; b++)
             took_bit(cc, (octets[i] >> (7 - b)) & 1);
     cc->rx_octets += (uint64_t) n;
+}
+
+void cc_v110_set_rx_room(clear_channel_t *cc, cc_room_fn room)
+{
+    cc->room = room;
 }

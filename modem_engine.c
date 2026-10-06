@@ -674,6 +674,16 @@ static void data_stack_push_dte_byte(void *user_data, uint8_t byte)
         ME_LOG("[ME] DTE RX ring overrun; byte discarded\n");
 }
 
+static void data_stack_rx_room(void *user_data, int *free_bytes, int *size)
+{
+    (void)user_data;
+    pthread_mutex_lock(&upstream_ring.mtx);
+    *free_bytes = DATA_RING_SIZE - 1
+        - (upstream_ring.head - upstream_ring.tail + DATA_RING_SIZE) % DATA_RING_SIZE;
+    pthread_mutex_unlock(&upstream_ring.mtx);
+    *size = DATA_RING_SIZE - 1;
+}
+
 static void data_stack_link_event(void *user_data, ds_link_event_t event)
 {
     (void)user_data;
@@ -8759,6 +8769,7 @@ static int me_clear_start_locked(void)
         if (cc_init_v110(&g_cc, rate, data_stack_pull_dte_byte,
                          data_stack_push_dte_byte, NULL) != 0)
             return 0;
+        cc_v110_set_rx_room(&g_cc, data_stack_rx_room);
         /* The rate the periodic link report (and its +MS bounds check)
          * reads; only the CLEAR path sets it, via data_stack_start_online(). */
         g_data_connect_rate = rate;

@@ -644,6 +644,53 @@ static int v110_enc_9600_on(uint8_t *line, int octets)
     return n;
 }
 
+static int g_room_free = 16000, g_room_size = 16000;
+static void test_room(void *ctx, int *fr, int *sz)
+{
+    (void)ctx;
+    *fr = g_room_free;
+    *sz = g_room_size;
+}
+
+/* 5.4.2: our own receive buffer filling turns X OFF towards the far end. */
+static void test_v110_flow(void)
+{
+    end_t *ea = calloc(1, sizeof(*ea)), *eb = calloc(1, sizeof(*eb));
+    clear_channel_t a, b;
+    size_t at;
+
+    printf("V.110 5.4.2 flow control towards the far end:\n");
+    ea->src = v110_text;
+    ea->src_len = 1400;
+    cc_init_v110(&a, 9600, end_pull, end_push, ea);
+    cc_init_v110(&b, 9600, end_pull, end_push, eb);
+    cc_v110_set_rx_room(&b, test_room);
+    g_room_free = 16000;
+    v110_run(&a, &b, 3200, 0, 0, 0, NULL);       /* connect, some data */
+    check(a.v110_state == CC_V110_CONNECTED && b.v110_state == CC_V110_CONNECTED
+          && !b.v110_rx_hold, "connected, buffer empty: X stays ON");
+    g_room_free = 1000;                           /* under a quarter free */
+    v110_run(&a, &b, 800, 0, 0, 0, NULL);        /* let in-flight drain */
+    at = ea->src_pos;
+    v110_run(&a, &b, 3200, 0, 0, 0, NULL);
+    check(b.v110_rx_hold && b.v110_flow_holds == 1 && ea->src_pos == at
+          && ea->src_pos < 1400, "buffer nearly full: B's X OFF stops A's data");
+    g_room_free = 5000;                           /* over a quarter, under half */
+    v110_run(&a, &b, 1600, 0, 0, 0, NULL);
+    check(b.v110_rx_hold && ea->src_pos == at, "hysteresis: still held below half free");
+    g_room_free = 12000;
+    v110_run(&a, &b, 16000, 0, 0, 0, NULL);
+    check(!b.v110_rx_hold && ea->src_pos == 1400 && eb->dst_len == 1400
+          && !memcmp(eb->dst, v110_text, 1400),
+          "drained: X back ON, the rest arrives, nothing lost or repeated");
+    check(b.v110_sync_losses == 0 && a.v110_state == CC_V110_CONNECTED,
+          "flow control is not a loss of framing");
+    cc_release(&a);
+    cc_release(&b);
+    free(ea);
+    free(eb);
+}
+
 static void test_v110_t2(void)
 {
     end_t *e = calloc(1, sizeof(*e));
@@ -1082,6 +1129,7 @@ int main(void)
     test_v110_procedures();
     test_v110_ra0_rx();
     test_v110_t2();
+    test_v110_flow();
     if (test_engine() < 0) {
         printf("  FAIL engine/PTY setup\n");
         failures++;
