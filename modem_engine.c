@@ -15076,8 +15076,18 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                                          values, 4);
                 double lin = (double)pcm_to_linear(codewords[i]);
 
-                g_v92_trn2u_pow += lin*lin;
-                g_v92_trn2u_npow++;
+                /* LU is the TRN2u/SUVu/CPu received rms.  Once the data
+                 * slicer is set the signal is the data constellation, whose
+                 * rms is higher (2170 against 1390 on slmodemd), and a
+                 * running average that kept accumulating it drifted the
+                 * decoder's unit up by 55% over ten seconds -- the levels
+                 * slid away from the slicer and decoded bits went from
+                 * ones to white within 1.3 s of B1u (artifacts r27).
+                 * Freeze it at CPd's acknowledgement. */
+                if (!g_v92_upstream_slicer_set) {
+                    g_v92_trn2u_pow += lin*lin;
+                    g_v92_trn2u_npow++;
+                }
                 for (int k = 0; k < n; k++) {
                     double v = values[k]*sqrt(5.0);
                     double d = 2.0*floor(v/2.0) + 1.0;

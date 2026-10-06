@@ -8,6 +8,32 @@
 
 #include <math.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+/* V92_UP_BIT_DUMP=<path>: every decoded upstream frame as a line of 0/1
+ * characters (one line per frame, after the GPA descrambler), so the stream
+ * can be compared with what the peer's DTE sent. */
+static void up_bit_dump(const uint8_t *bits, int k)
+{
+    static FILE *f;
+    static int init;
+
+    if (!init) {
+        const char *path = getenv("V92_UP_BIT_DUMP");
+
+        init = 1;
+        if (path && *path)
+            f = fopen(path, "w");
+    }
+    if (!f)
+        return;
+    for (int i = 0; i < k; i++)
+        fputc('0' + (bits[i] & 1), f);
+    fputc('\n', f);
+    fflush(f);
+}
+
 
 static void acquisition_linearize(const v92_upstream_rx_t *rx, double *out)
 {
@@ -293,7 +319,6 @@ static int deliver_frame(v92_upstream_rx_t *rx)
     if (v92_upstream_wave_encode_frame(&rx->decision_tx, &rx->cpd,
                                        bits, k, target)) {
         const double mu = 0.05;
-
         for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++) {
             double error = target[i] - rx->frame[i];
             double norm = 1.0;
@@ -308,6 +333,7 @@ static int deliver_frame(v92_upstream_rx_t *rx)
             rx->equalizer_updates++;
         }
     }
+    up_bit_dump(bits, k);
     for (int i = 0; i < k; i++) {
         rx->byte_accumulator |= (uint8_t)(bits[i] << rx->byte_bits);
         rx->byte_bits++;
@@ -416,6 +442,7 @@ static int count_non_ones(const uint8_t *bits, int k)
 
 static void deliver_bits(v92_upstream_rx_t *rx, const uint8_t *bits, int k)
 {
+    up_bit_dump(bits, k);
     for (int i = 0; i < k; i++) {
         rx->byte_accumulator |= (uint8_t)(bits[i] << rx->byte_bits);
         rx->byte_bits++;
