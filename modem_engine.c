@@ -5895,7 +5895,8 @@ static void me_v92_b1u_feed_values_locked(const double *values, int n)
     if (!g_v92_upstream_rx.locked
         && g_v92_upstream_rx.input_symbols/8000 != before/8000)
         ME_LOG("[ME] V.92 B1u search: %llu s, %llu alignments, %llu decoded frame 0 "
-               "as ones, best %d of 48 frames, best frame-0 %d of %d ones\n",
+               "as ones, best %d of %d frames, best frame-0 %d of %d ones, "
+               "%.3f from the nearest level\n",
                (unsigned long long)(g_v92_upstream_rx.input_symbols/8000),
                (unsigned long long)g_v92_upstream_rx.candidates_started,
                (unsigned long long)g_v92_upstream_rx.candidates_passed,
@@ -13159,7 +13160,16 @@ static void enter_v90_data_locked(void)
        ME_TX_DISRUPT_AFTER_MS could never exercise a V.90 peer response. */
     g_v34_data_entry_ms = trace_now_ms();
     g_v34_data_entry_samples = g_rx_audio_samples;
-    g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
+    /* V.92 reaches here from the RX path when B1u locks, which is not tied
+     * to the transmitter: the TRAINING transmit path may already be part way
+     * through a downstream data frame (it runs the data mapper as soon as
+     * B1d is complete).  Starting a fresh frame here throws away the rest of
+     * that frame and moves the six-symbol frame grid, so the analogue
+     * modem's frame sync -- taken from TRN2d/SUVd/CPd -- decodes every later
+     * frame against the wrong constellation interval.  V.90 enters at the
+     * exact end of B1d, where the position is already a frame boundary. */
+    if (!(g_v92_active && v90_get_tx_phase(g_v90) == V90_TX_DATA))
+        g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     mh_arm_locked();
     ME_LOG("[ME] %s startup complete (upstream %s %d bps, downstream PCM %d bps)\n",
            g_v92_active ? "V.92" : "V.90",
@@ -13512,6 +13522,21 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
          * B1d, which is the Phase 4 transmitter, not the data mapper. */
         if (v90_rate_renegotiation_active(g_v90)
             && !v90_rate_renegotiation_pending(g_v90)) {
+            while (pos < len && v90_get_tx_phase(g_v90) != V90_TX_DATA) {
+                if (v90_phase3_tx_codewords(g_v90, codewords + pos, 1) != 1)
+                    return false;
+                pos++;
+            }
+            if (pos < len)
+                generate_v90_data_codewords_locked(codewords + pos, len - pos);
+            return true;
+        }
+
+        /* V.92 can enter DATA (B1u locked) before our own B1d is finished.
+         * Finish the Phase 4 sequence first: cutting B1d short and starting
+         * the data mapper at the next pull shifts the six-symbol frame grid
+         * the analogue modem synchronised on during TRN2d (V.92 8.8.1). */
+        if (g_v92_active && v90_get_tx_phase(g_v90) != V90_TX_DATA) {
             while (pos < len && v90_get_tx_phase(g_v90) != V90_TX_DATA) {
                 if (v90_phase3_tx_codewords(g_v90, codewords + pos, 1) != 1)
                     return false;

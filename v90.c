@@ -1986,6 +1986,9 @@ static bool v90_configure_data_mapper(v90_state_t *s,
                                    &s->data_cp_frame))
         return false;
 
+    fprintf(stderr, "[V90] data mapper: D=%d K=%d Sr=%d ld=%d drn=%d\n",
+            s->data_mapper_d, s->data_mapper_k, s->data_mapper_sr,
+            (int)cp->shaping_lookahead, (int)cp->drn);
     s->data_cp_received = true;
     s->data_mapper_ready = true;
     v90_reset_negotiated_data_mapper(s);
@@ -5904,13 +5907,68 @@ bool v90_set_v92_cpu(v90_state_t *s, const vpcm_cp_frame_t *cpu)
         if (!v90_configure_data_mapper(s, &expected))
             return false;
         s->data_cp_frame.acknowledge = cpu->acknowledge;
+        {
+            /* Test only: map the downstream on this Ucode list in every
+             * interval instead of the CPu's sets (slmodemd designs 55 points
+             * and sends 50/51 -- which one does its demodulator use?). */
+            const char *ov = getenv("V92_DATA_UCODES");
+
+            if (ov && *ov) {
+                vpcm_cp_frame_t *f = &s->data_cp_frame;
+                uint64_t prod = 1;
+
+                memset(f->masks[0], 0, sizeof(f->masks[0]));
+                for (const char *q = ov; *q; ) {
+                    char *e;
+                    long u = strtol(q, &e, 10);
+
+                    if (e == q) break;
+                    vpcm_cp_mask_set(f->masks[0], (int)u, true);
+                    q = (*e == ',') ? e + 1 : e;
+                }
+                f->constellation_count = 1;
+                f->codec_constellations_differ = false;
+                for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+                    f->dfi[i] = 0;
+                    prod *= (uint64_t)vpcm_cp_mask_population(f->masks[0]);
+                }
+                fprintf(stderr, "[V90] V92_DATA_UCODES override: %d points, product %llu vs 2^%d\n",
+                        vpcm_cp_mask_population(f->masks[0]),
+                        (unsigned long long)prod, s->data_mapper_k);
+            }
+        }
         s->v92_cpu_received = true;
         if (cpu->acknowledge)
             s->v92_remote_ack_received = true;
         fprintf(stderr,
-                "[V90] Phase 4 V.92: CPu%s accepted (drn=%u, D=%d, K=%d, Sr=%d)\n",
+                "[V90] Phase 4 V.92: CPu%s accepted (drn=%u, D=%d, K=%d, Sr=%d, ld=%d)\n",
                 cpu->acknowledge ? "'" : "", (unsigned)cpu->drn,
-                s->data_mapper_d, s->data_mapper_k, s->data_mapper_sr);
+                s->data_mapper_d, s->data_mapper_k, s->data_mapper_sr,
+                (int)s->data_cp_frame.shaping_lookahead);
+        fprintf(stderr, "[V90] CPu raw: count=%d differ=%d dfi=%d%d%d%d%d%d pops tx=%d,%d,%d codec=%d,%d,%d\n",
+                cpu->constellation_count, cpu->codec_constellations_differ ? 1 : 0,
+                cpu->dfi[0], cpu->dfi[1], cpu->dfi[2], cpu->dfi[3], cpu->dfi[4], cpu->dfi[5],
+                vpcm_cp_mask_population(cpu->masks[0]), vpcm_cp_mask_population(cpu->masks[1]),
+                vpcm_cp_mask_population(cpu->masks[2]),
+                vpcm_cp_mask_population(cpu->codec_masks[0]), vpcm_cp_mask_population(cpu->codec_masks[1]),
+                vpcm_cp_mask_population(cpu->codec_masks[2]));
+        for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+            int c = s->data_cp_frame.dfi[i];
+            int top = -1;
+
+            for (int u = VPCM_CP_MASK_BITS - 1; u >= 0; u--)
+                if (vpcm_cp_mask_get(s->data_cp_frame.masks[c], u)) { top = u; break; }
+            fprintf(stderr, "[V90] Phase 4 V.92: CPu interval %d: constellation %d, %d points, top Ucode %d (received set %d points)\n",
+                    i, c, vpcm_cp_mask_population(s->data_cp_frame.masks[c]), top,
+                    vpcm_cp_mask_population(cpu->masks[c]));
+            if (getenv("V92_CPU_MASK_DEBUG")) {
+                fprintf(stderr, "[V90] CPu interval %d set:", i);
+                for (int u = VPCM_CP_MASK_BITS - 1; u >= 0; u--)
+                    if (vpcm_cp_mask_get(s->data_cp_frame.masks[c], u))
+                        fprintf(stderr, " %d", u);
+                fprintf(stderr, "\n");
+            }
+        }
         return true;
     }
 
