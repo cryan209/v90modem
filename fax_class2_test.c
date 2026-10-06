@@ -29,7 +29,9 @@
 #include <sys/wait.h>
 
 #define IMAGE_WIDTH  1728
-#define IMAGE_ROWS   80
+#define IMAGE_ROWS   image_rows
+static int image_rows = 80;
+static const char *image_paper = "strip";
 
 static int failures;
 static int external_class21;
@@ -54,6 +56,27 @@ static int row_variant;     /* shifts the pattern, so pages are distinguishable 
 
 static void make_row(uint8_t *row, int y)
 {
+    if (image_rows > 80) {
+        /* Full fine-resolution fax pages: T.4's 1728-pel scan line at
+         * 204 x 196 dpi, with A4/Letter physical page lengths. Sparse
+         * features keep the fixture realistic while each row has its own
+         * binary index, detecting lost, duplicated and reordered rows. */
+        memset(row, 0, IMAGE_WIDTH / 8); /* MINISWHITE: zero is white */
+        for (int x = 0; x < IMAGE_WIDTH; x++) {
+            int border = (x >= 80 && x < 84) || (x >= 1644 && x < 1648)
+                       || (y >= 80 && y < 84) || (y >= image_rows-84 && y < image_rows-80);
+            int code = x >= 120 && x < 264
+                    && (((y + row_variant * 4096) >> ((x-120)/12)) & 1);
+            int panel = y >= 180 && y < 500 && x >= 400 && x < 1300
+                     && ((x/40 + y/40 + row_variant) % 2 == 0);
+            int rules = y > 600 && y < image_rows-160 && y % 196 < 3
+                     && x >= 320 && x < 1500;
+            int diagonal = x == 320 + (y + row_variant*17) % 1200;
+            if (border || code || panel || rules || diagonal)
+                row[x >> 3] |= (uint8_t) (0x80 >> (x & 7));
+        }
+        return;
+    }
     y += row_variant * 7;
 
     int stride = IMAGE_WIDTH / 8;
@@ -106,14 +129,14 @@ static int write_test_tiff(const char *path)
  * in the multi-page receive test.
  */
 /*
- * Each page of the far end's document is a different length as well as a
- * different pattern.  Both matter: 8.4.3's line counts are latched when the
+ * Short legacy pages have different lengths as well as different patterns;
+ * full engine pages retain the selected paper length.  Both matter: 8.4.3's line counts are latched when the
  * page ends and held until the DTE collects it, and pages of equal length
  * would report the right number even if the latch were never updated.
  */
 static int page_rows(int page)
 {
-    return IMAGE_ROWS - 8 * page;
+    return IMAGE_ROWS > 80 ? IMAGE_ROWS : IMAGE_ROWS - 8 * page;
 }
 
 static int write_test_tiff_pages(const char *path, int pages)
@@ -188,7 +211,7 @@ static int compare_page(const char *path, int page, int *rows_out)
         return -1;
     }
     *rows_out = (int) h;
-    for (uint32_t y = 0; y < h && y < IMAGE_ROWS; y++) {
+    for (uint32_t y = 0; y < h; y++) {
         if (TIFFReadScanline(tif, got, y, 0) < 0) {
             TIFFClose(tif);
             return -1;
@@ -254,6 +277,8 @@ static void check(int cond, const char *what)
         printf("  ok   %s\n", what);
     } else {
         printf("  FAIL %s\n", what);
+        if (engine_fax_test && external_class21 && dte_len < 4096)
+            printf("       DTE: %.*s\n",dte_len,dte_buf);
         failures++;
     }
 }
@@ -703,7 +728,9 @@ static void pump_external(fax_state_t *peer)
 static void pump(fax_state_t *peer, int frames)
 {
     /* Fixture durations are in 20 ms units; production callbacks may be
-     * 10 ms. Preserve the requested bearer duration in either schedule. */
+     * 10 ms. Full paper pages get a larger transfer timeout; preserve the
+     * bearer duration in either callback schedule. */
+    if (engine_fax_test && image_rows > 80 && frames >= 30*50) frames *= 3;
     if (engine_fax_test && external_block == 80) frames *= 2;
     for (int i = 0; i < frames; i++) {
         int16_t a[160];
@@ -747,6 +774,7 @@ static void pump(fax_state_t *peer, int frames)
  */
 static void pump_until(fax_state_t *peer, int frames, const char *needle)
 {
+    if (engine_fax_test && image_rows > 80 && frames >= 30*50) frames *= 3;
     for (int i = 0; i < frames; i++) {
         pump(peer, 1);
         fc2_poll();
@@ -967,7 +995,10 @@ static void test_transmit(int fbo, int ec)
 
     dte_reset();
     fc2_on_connected();
-    pump(peer, 60 * 50);                 /* up to 60 s of call */
+    pump(peer, 60 * 50);
+    /* The recipient's phase E callback can precede the source's final
+     * PTY report. Clock the source shutdown before grading its result. */
+    if (engine_fax_test && external_class21) pump_regardless(peer, 2*50);
 
     check(peer_done, "the far end reached T.30 phase E");
     check(peer_status == T30_ERR_OK, "the far end reports a good session");
@@ -1704,7 +1735,12 @@ static void test_multipage_transmit(int connect_midway, int ec)
      * page to hand over.  T.30 must not be started on half a document, or it
      * sends the first page and an EOP after it.
      */
-    if (connect_midway) {
+    if (engine_fax_test && external_class21) {
+        /* T.32 8.3.3.4: the next FDT follows the first page's result.
+         * Full pages exceed the PTY buffer, so exercise real DTE ordering. */
+        pump_until(peer,120*50,"\r\nOK\r\n");
+        check(dte_saw("\r\nOK\r\n"),"first page completes before the second FDT");
+    } else if (connect_midway) {
         dte_reset();
         fc2_on_connected();
         /*
@@ -3463,6 +3499,15 @@ int main(int argc, char **argv)
     TIFFSetWarningHandler(NULL);
     TIFFSetErrorHandler(NULL);
 
+    if (argc > 1 && strncmp(argv[1], "--engine-", 9) == 0) {
+        image_paper = getenv("FAX_TEST_PAGE");
+        if (!image_paper) image_paper = "a4";
+        if (!strcmp(image_paper,"a4")) image_rows = 2292;
+        else if (!strcmp(image_paper,"letter")) image_rows = 2156;
+        else { fprintf(stderr,"FAX_TEST_PAGE must be a4 or letter\n"); return 2; }
+        printf("Full %s fax page: %d x %d, 204 x 196 dpi\n",
+               image_paper,IMAGE_WIDTH,IMAGE_ROWS);
+    }
     if (!write_test_tiff(SRC_TIFF)) {
         fprintf(stderr, "cannot write the test page\n");
         return 1;

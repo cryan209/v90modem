@@ -29,7 +29,12 @@ static void engine_write(int fd, const void *data, size_t len)
     const uint8_t *p = data;
     while (len) {
         ssize_t n = write(fd,p,len);
-        if (n < 0 && (errno == EINTR || errno == EAGAIN)) { usleep(1000); continue; }
+        if (n < 0 && (errno == EINTR || errno == EAGAIN)) {
+            /* A whole page can fill the PTY in both directions (including
+             * command echo). Drain reports while feeding image bytes. */
+            if (engine_running) for (int k=0;k<2;k++) engine_poll_side(k);
+            usleep(1000); continue;
+        }
         if (n <= 0) engine_io_fail("fax engine write");
         p += n; len -= n;
     }

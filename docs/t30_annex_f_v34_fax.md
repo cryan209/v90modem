@@ -1168,7 +1168,13 @@ and RX in Class 1/1.0 and Class 2.1. See [fax_class_at.md](fax_class_at.md#v34-f
 for configuration, supported profiles, test coverage and hardware limitations.
 `make fax-v34-test` runs the eight class/law/callback-size page combinations
 and the full production engine page matrix, as well as two Class 1 control
-exchanges. `make fax-v34-engine-test` runs the production page matrix alone.
+exchanges. `make fax-v34-engine-test` runs the production page matrix alone,
+with both A4 (1728 × 2292) and Letter (1728 × 2156) fine-resolution rasters
+in every class/law/callback combination. Engine tests default to A4;
+`FAX_TEST_PAGE=letter ./fax_class2_test --engine-class21 ulaw 160` selects
+Letter. The full-height pattern includes margins, a checkerboard, horizontal
+rules and distinct row indices; every received raster row is compared. The
+short 80-row fixtures remain in the direct transport and legacy AT tests.
 
 The production engine exposed a Phase 2 event-lifetime defect not seen when
 starting two bare V.34 modems together: INFO0 can finish while our transmitter

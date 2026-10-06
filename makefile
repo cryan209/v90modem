@@ -1415,7 +1415,9 @@ fax-v34-engine-test: fax_class2_test v90_engine_peer
 	@set -e; for class in --engine-class1 --engine-class21; do \
 	  for law in ulaw alaw; do \
 	    for block in 80 160; do \
-	      ./fax_class2_test $$class $$law $$block; \
+	      for paper in a4 letter; do \
+        FAX_TEST_PAGE=$$paper ./fax_class2_test $$class $$law $$block; \
+      done; \
 	    done; \
 	  done; \
 	done
