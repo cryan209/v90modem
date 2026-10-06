@@ -1764,6 +1764,25 @@ static const char *at_cmd_amp_R(at_state_t *s, const char *t)
 }
 /*- End of function --------------------------------------------------------*/
 
+static const char *at_cmd_bs_B(at_state_t *s, const char *t)
+{
+    char buf[8];
+    int val = 3;                       /* Courier: 300 ms by default */
+
+    /* Hayes/Courier \B<n>: send a break of n x 100 ms to the far end.  Only
+       the application knows whether a break can go anywhere. */
+    t += 2;
+    if (isdigit((int) t[0])  &&  (val = parse_num(&t, 9)) < 0)
+        return NULL;
+    /*endif*/
+    snprintf(buf, sizeof(buf), "\\B%d", val);
+    if (at_modem_control(s, AT_MODEM_CONTROL_PARAMETER, buf) < 0)
+        return NULL;
+    /*endif*/
+    return t;
+}
+/*- End of function --------------------------------------------------------*/
+
 static const char *at_cmd_bs_N(at_state_t *s, const char *t)
 {
     return at_forward_alias(s, t, 2, 5);

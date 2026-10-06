@@ -39,7 +39,7 @@ negotiation. Both ends must agree on this restricted profile beforehand.
 | V120-2 | **Fixed.** H.E = 0 requires exactly one CS octet with E = 1; `03 00 80 AB` and `H=03` at end of frame are bad frames and deliver nothing. |
 | V120-3 | **Fixed.** Only LLI 256 reaches the DTE; LLI 0, 257, etc. are counted in `rx_other_lli`, apart from corrupt frames. |
 | V120-4 | **Fixed, receive side.** RR(R) starts at 1 (3.2.3.1) and follows each received CS; RR = 0 stops new user data (3.2.4.1). The profile does not send CS (3.2.3 makes it optional), so we never flow-control the peer. |
-| V120-5 | **Open.** BR is counted; neither direction of the byte/PTY interface can carry a break. |
+| V120-5 | **Fixed at the framing level, 2026-10-06.** BR=1 frames after queued characters and a BR=0 end, both directions, ordered (`cc_send_break`, `cc_set_break_cb`); V.110's 5.3.5 break too. The PTY cannot carry a break either way, so the DTE has `AT\\B<n>` and an ATI11 counter -- see `clear_channel_v120.md`. |
 
 ## Correct behaviour and bounded omissions
 

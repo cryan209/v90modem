@@ -68,6 +68,7 @@ typedef void (*cc_put_bit_fn)(void *ctx, int bit);
 typedef int  (*cc_pull_byte_fn)(void *ctx);
 typedef void (*cc_push_byte_fn)(void *ctx, uint8_t byte);
 /* Free space (and total size) of the DTE-side receive buffer, for V.110 5.4.2. */
+typedef void (*cc_break_fn)(void *ctx, bool on);
 typedef void (*cc_room_fn)(void *ctx, int *free_bytes, int *size);
 
 #define CC_V120_DEFAULT_LLI   256
@@ -129,6 +130,11 @@ typedef struct {
     cc_pull_byte_fn pull;
     cc_push_byte_fn push;
     void *ctx;
+    cc_break_fn brk_cb;          /* a break arrived (on) / ended (off) */
+    bool brk_pending, brk_active, rx_in_break;
+    int brk_ms;
+    uint64_t brk_end_at;
+    int v110_brk_bits;
     cc_room_fn room;             /* optional: V.110 flow control, 5.4.2 */
     bool v110_rx_hold;           /* we are sending X OFF: our buffer is full */
 
@@ -213,6 +219,12 @@ int  cc_init_v120(clear_channel_t *cc, bool r56, bool caller,
 int  cc_init_v110(clear_channel_t *cc, int user_rate,
                   cc_pull_byte_fn pull, cc_push_byte_fn push, void *ctx);
 void cc_release(clear_channel_t *cc);
+/* Break (V.120 3.1.1.2/7.2.2; V.110 5.3.5).  cc_send_break() queues one of
+ * `ms` milliseconds after the characters already pulled; a received break
+ * is reported through the callback in order, after the characters that
+ * preceded it, and again (on = false) when it ends.  No-op for CC_CLEAR. */
+void cc_set_break_cb(clear_channel_t *cc, cc_break_fn fn);
+void cc_send_break(clear_channel_t *cc, int ms);
 /* V.120 4.2: carry the data in Q.922 I-frames (SABME/UA, mod 128, k = 15,
  * T200 1.5 s, N200 3) instead of UI frames.  Call right after cc_init_v120().
  * A peer that refuses (DM) or never answers SABME gets UI frames. */

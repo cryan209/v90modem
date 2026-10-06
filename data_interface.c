@@ -495,6 +495,9 @@ void di_report_pmhr(int value)
     ctrl_write(line, (size_t) n);
 }
 
+static di_break_cb_t break_cb;
+void di_set_break_cb(di_break_cb_t cb) { break_cb = cb; }
+
 static int handle_v250_parameter(const char *text)
 {
     char info[160];
@@ -506,6 +509,11 @@ static int handle_v250_parameter(const char *text)
      * t31_mtx and must not). */
     if (!strcasecmp(text, "PMHR"))
         return pmhr_cb && pmhr_cb() >= 0 ? 0 : -1;
+
+    /* Hayes/Courier \B<n>: break of n x 100 ms to the far end.  ERROR where
+     * the framing has no break (V.34/V.90 datapumps, CLEAR). */
+    if (text[0] == '\\' && (text[1] == 'B' || text[1] == 'b'))
+        return break_cb && break_cb(atoi(text + 2) * 100) == 0 ? 0 : -1;
 
     pthread_mutex_lock(&v250_mtx);
     info[0] = '\0';

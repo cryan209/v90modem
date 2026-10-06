@@ -197,6 +197,28 @@ static void final_line(const side_t *s, char *out, size_t max)
     fclose(f);
 }
 
+/* After the call phase: keep exchanging audio (`n` frames) so a command that
+ * puts something on the line (\B) is carried to the far end. */
+static void pump_frames(side_t *side, uint8_t tx[2][FRAME], int n, int tag)
+{
+    for (int i = 0; i < n; i++) {
+        uint8_t next[2][FRAME], rx[FRAME];
+
+        for (int k = 0; k < 2; k++) {
+            uint8_t header[2] = { FRAME & 0xFF, FRAME >> 8 };
+
+            memcpy(rx, tx[1 - k], FRAME);
+            if (write_full(side[k].to_fd, header, 2) || write_full(side[k].to_fd, rx, FRAME)
+                || read_full(side[k].from_fd, next[k], FRAME))
+                return;
+        }
+        memcpy(tx, next, sizeof(next));
+        for (int k = 0; k < 2; k++)
+            poll_dte(&side[k], tag);
+        usleep(1000);
+    }
+}
+
 int main(int argc, char **argv)
 {
     side_t side[2];
@@ -384,6 +406,9 @@ int main(int argc, char **argv)
 
         if (s->n_after == 0)
             continue;
+        /* Keep the line running (a break sent by the previous side's command
+           has to cross it before this side can be asked about it). */
+        pump_frames(side, tx, 60, frames);
         poll_dte(s, frames);
         if (s->connect_frame >= 0 && !strstr(s->dte, "NO CARRIER")) {
             size_t mark = s->dte_len;
@@ -404,9 +429,11 @@ int main(int argc, char **argv)
             write_full(s->pty_fd, line, (size_t) n);
             for (int w = 0; w < 200 && !strstr(s->dte + mark, "OK\r")
                  && !strstr(s->dte + mark, "ERROR"); w++) {
+                pump_frames(side, tx, 2, frames);
                 usleep(10000);
                 poll_dte(s, frames);
             }
+            pump_frames(side, tx, 40, frames);   /* 0.8 s: the command's effect crosses the line */
         }
     }
 

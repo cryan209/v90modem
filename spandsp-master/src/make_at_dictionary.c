@@ -449,6 +449,7 @@ const char *wordlist[] =
     "T",        /* V.250 6.3.2 - Select tone dialling (command) */
     "V",        /* V.250 6.2.6 - DCE response format */
     "X",        /* V.250 6.2.7 - Result code selection and call progress monitoring control */
+    "\\B",      /* Hayes/Courier - Transmit break, n x 100 ms */
     "\\N",      /* Rockwell - Error control mode */
     "Z",        /* V.250 6.1.1 - Reset to default configuration */
     NULL

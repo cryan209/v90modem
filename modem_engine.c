@@ -2253,6 +2253,24 @@ static uint64_t g_v110_losses_logged = 0;
 static bool g_offer_r56 = false;
 static clear_channel_t g_cc;
 static bool g_cc_active = false;
+static volatile int g_cc_tx_break_ms;       /* \B from the AT path, taken by the media thread */
+static volatile int g_cc_rx_break_state;    /* 1 while the far end's break is on */
+static volatile uint64_t g_cc_tx_breaks;
+
+static void me_cc_break_cb(void *ctx, bool on)
+{
+    (void)ctx;
+    g_cc_rx_break_state = on ? 1 : 0;
+}
+
+/* data_interface.c's \B: no engine lock (the AT path holds t31_mtx). */
+static int me_request_break(int ms)
+{
+    if (!g_cc_active || g_cc.mode == CC_CLEAR || g_state != ME_DATA)
+        return -1;
+    g_cc_tx_break_ms = ms > 0 ? ms : 100;
+    return 0;
+}
 static bool g_enable_v92 = false;
 static const char *g_mode_name = "v90";
 static bool g_enable_x2 = false;
@@ -8403,6 +8421,18 @@ static void me_link_detail(char *out, size_t len, bool *originate)
             DETAIL("LAPM frame size    TX %d  RX %d\r\n", np.tx_n401, np.rx_n401);
         }
     }
+    if (g_cc_active && g_cc.mode != CC_CLEAR) {
+        DETAIL("Breaks             sent %llu  received %llu%s\r\n",
+               (unsigned long long) g_cc_tx_breaks, (unsigned long long) g_cc.rx_breaks,
+               g_cc_rx_break_state ? " (on now)" : "");
+        if (g_cc.mode == CC_V110)
+            DETAIL("V.110 X OFF holds  %llu\r\n", (unsigned long long) g_cc.v110_flow_holds);
+        else if (g_cc.v120_ack)
+            DETAIL("V.120 link         %s, %llu resets, %llu rewinds, %llu UI fallbacks\r\n",
+                   g_cc.lf_state == CC_LF_UP ? "Q.922 up" : g_cc.lf_state == CC_LF_UI ? "UI" : "down",
+                   (unsigned long long) g_cc.lf_resets, (unsigned long long) g_cc.lf_rewinds,
+                   (unsigned long long) g_cc.lf_fallbacks);
+    }
     DETAIL("Training retrains  %u\r\n", g_training_fail_retrains);
     DETAIL("Data-mode retrains %u\r\n", g_loss_retrains);
     if (g_v34 && (g_mod == ME_MOD_V34 || g_mod == ME_MOD_V90)) {
@@ -8485,6 +8515,7 @@ void me_init(void)
                               me_reset_modulation_offer);
         di_set_connect_info_cb(me_connect_info);
         di_set_link_detail_cb(me_link_detail);
+        di_set_break_cb(me_request_break);
 
         ME_LOG("[ME] Modem mode: %s (V.8 offer %s)\n", g_mode_name,
                me_offer_str());
@@ -8770,6 +8801,7 @@ static int me_clear_start_locked(void)
                          data_stack_push_dte_byte, NULL) != 0)
             return 0;
         cc_v110_set_rx_room(&g_cc, data_stack_rx_room);
+        cc_set_break_cb(&g_cc, me_cc_break_cb);
         /* The rate the periodic link report (and its +MS bounds check)
          * reads; only the CLEAR path sets it, via data_stack_start_online(). */
         g_data_connect_rate = rate;
@@ -8799,6 +8831,7 @@ static int me_clear_start_locked(void)
             const char *ack = getenv("ME_V120_ACK");
 
             cc_v120_set_ack(&g_cc, ack && *ack == '1');
+            cc_set_break_cb(&g_cc, me_cc_break_cb);
         }
         g_data_connect_rate = rate;   /* as for V.110 above */
     } else {
@@ -14516,6 +14549,15 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
 
     pthread_mutex_lock(&g_state_mtx);
     if (g_cc_active && g_mod == ME_MOD_CLEAR && g_state == ME_DATA) {
+        {
+            int bms = g_cc_tx_break_ms;
+
+            if (bms > 0) {
+                g_cc_tx_break_ms = 0;
+                cc_send_break(&g_cc, bms);
+                g_cc_tx_breaks++;
+            }
+        }
         cc_tx(&g_cc, codewords, count);
         g_g711_tx_octets += (uint64_t)count;
         pthread_mutex_unlock(&g_state_mtx);

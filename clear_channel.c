@@ -85,6 +85,33 @@ static int v120_pull_data(clear_channel_t *cc, uint8_t *dst)
     return n;
 }
 
+/* The next information field's header octet and characters, or -1 for
+ * nothing to send.  V.120 3.1.1.2/7.2.2: a break goes in a frame with BR = 1
+ * after every queued character, and a later frame with BR = 0 ends it; the
+ * DTE's data waits for that end, since BR = 0 on a data frame is it. */
+static int v120_build_info(clear_channel_t *cc, uint8_t *data, int *n)
+{
+    uint8_t h = CC_V120_H_E | CC_V120_H_B | CC_V120_H_F;
+
+    *n = 0;
+    if (cc->brk_active) {
+        if (cc->tx_octets < cc->brk_end_at)
+            return -1;
+        cc->brk_active = false;               /* this frame is the end */
+        *n = cc->pull ? v120_pull_data(cc, data) : 0;
+        return h;
+    }
+    if (cc->pull)
+        *n = v120_pull_data(cc, data);
+    if (cc->brk_pending && *n < CC_V120_MAX_DATA) {
+        cc->brk_pending = false;
+        cc->brk_active = true;
+        cc->brk_end_at = cc->tx_octets + (uint64_t) cc->brk_ms * 8u;
+        return h | CC_V120_H_BR;
+    }
+    return *n ? h : -1;
+}
+
 /* ---- Q.922 multiple-frame acknowledged operation (V.120 4.2) ---- */
 
 #define LF_MOD        128
@@ -169,12 +196,13 @@ static bool lf_send_i(clear_channel_t *cc)
     } else {
         int n;
 
-        if (((cc->lf_vnew - cc->lf_va) & (LF_MOD - 1)) >= CC_LF_K || !cc->pull)
+        if (((cc->lf_vnew - cc->lf_va) & (LF_MOD - 1)) >= CC_LF_K)
             return false;
-        n = v120_pull_data(cc, f + 5);
-        if (n == 0)
+        int h = v120_build_info(cc, f + 5, &n);
+
+        if (h < 0)
             return false;
-        f[4] = CC_V120_H_E | CC_V120_H_B | CC_V120_H_F;
+        f[4] = (uint8_t) h;
         ilen = 1 + n;
         ns = cc->lf_vnew;
         memcpy(cc->lf_win[ns & 15], f + 4, (size_t) ilen);
@@ -402,16 +430,18 @@ static void v120_load_frame(clear_channel_t *cc)
         lf_send_u(cc, true, 0x0F, cc->lf_pend_f);
         return;
     }
-    if (!cc->pull)
-        return;
     /* 3.2.4.1: the peer's RR = 0 asserts flow control; no user data until
      * a control-state octet sets it back to 1. */
     if (!cc->v120_peer_rr)
         return;
-    n = v120_pull_data(cc, frame + 4);
-    if (n == 0)
-        return;
-    cc_v120_frame_header(cc, frame);
+    {
+        int h = v120_build_info(cc, frame + 4, &n);
+
+        if (h < 0)
+            return;
+        cc_v120_frame_header(cc, frame);
+        frame[3] = (uint8_t) h;
+    }
     v120_queue(cc, frame, 4 + n);
     cc->tx_data_bytes += (uint64_t) n;
 }
@@ -446,15 +476,22 @@ static void v120_deliver(clear_channel_t *cc, const uint8_t *info, int len)
         pos = 2;
     }
     cc->rx_frames++;
-    /* 3.1.1.2: BR = 1 is a break.  The byte interface cannot carry one to
-     * the DTE, so it is counted (audit V120-5, open); the frame's
-     * characters still precede it. */
-    if (h & CC_V120_H_BR)
-        cc->rx_breaks++;
+    if (!(h & CC_V120_H_BR) && cc->rx_in_break) {   /* BR = 0: the end (3.1.1.2) */
+        cc->rx_in_break = false;
+        if (cc->brk_cb)
+            cc->brk_cb(cc->ctx, false);
+    }
     for (; pos < len; pos++) {
         if (cc->push)
             cc->push(cc->ctx, info[pos]);
         cc->rx_data_bytes++;
+    }
+    /* 7.2.2 (5): a break follows the frame's characters. */
+    if ((h & CC_V120_H_BR) && !cc->rx_in_break) {
+        cc->rx_in_break = true;
+        cc->rx_breaks++;
+        if (cc->brk_cb)
+            cc->brk_cb(cc->ctx, true);
     }
 }
 
@@ -581,6 +618,21 @@ static int v110_async_tx_bit(clear_channel_t *cc, bool allow_new)
     if (cc->v110_tx_marks > 0) {
         cc->v110_tx_marks--;
         return 1;
+    }
+    if (allow_new && cc->v110_brk_bits > 0) {   /* 5.3.5: all zeros */
+        if (--cc->v110_brk_bits == 0)
+            cc->v110_tx_marks = 12;           /* idle mark before the next start */
+        return 0;
+    }
+    if (allow_new && cc->brk_pending) {
+        int bits = (int) ((int64_t) cc->brk_ms * cc->v110_user_rate / 1000);
+
+        /* More than 2M zeros is what the far end reads as a break; M = 10. */
+        cc->brk_pending = false;
+        cc->v110_brk_bits = (bits < 24 ? 24 : bits) - 1;
+        if (cc->v110_brk_bits == 0)
+            cc->v110_tx_marks = 12;
+        return 0;
     }
     if (!allow_new || !cc->pull || (b = cc->pull(cc->ctx)) < 0)
         return 1;                        /* idle: stop polarity */
@@ -733,11 +785,20 @@ static void v110_ra0_rx_bit(clear_channel_t *cc, int bit)
         cc->v110_held_nuls = 0;
         cc->rx_breaks++;
         cc->v110_rx_bits = -2;
+        cc->rx_in_break = true;
+        if (cc->brk_cb)
+            cc->brk_cb(cc->ctx, true);
         return;
     }
     if (cc->v110_rx_bits == -2) {            /* break: wait for stop polarity */
-        if (bit)
+        if (bit) {
             cc->v110_rx_bits = -1;
+            if (cc->rx_in_break) {
+                cc->rx_in_break = false;
+                if (cc->brk_cb)
+                    cc->brk_cb(cc->ctx, false);
+            }
+        }
         return;
     }
     if (cc->v110_rx_bits == -1) {
@@ -777,6 +838,11 @@ static void v110_ra0_rx_sample(clear_channel_t *cc, int bit)
 {
     int r = cc->v110_user_rate;
 
+    if (cc->rx_in_break && bit) {            /* line back to mark: break over */
+        cc->rx_in_break = false;
+        if (cc->brk_cb)
+            cc->brk_cb(cc->ctx, false);
+    }
     if (cc->v110_rx_bits < 0) {
         if (cc->v110_rx_prev && !bit) {
             cc->v110_rx_bits = 0;
@@ -798,6 +864,16 @@ static void v110_ra0_rx_sample(clear_channel_t *cc, int bit)
         if (j >= 1 && j <= 8)
             cc->v110_rx_shift |= (uint16_t) (bit << (j - 1));
         if (j == 9) {
+            if (!bit && cc->v110_rx_shift == 0) {   /* all zeros, no stop: a break */
+                if (!cc->rx_in_break) {
+                    cc->rx_in_break = true;
+                    cc->rx_breaks++;
+                    if (cc->brk_cb)
+                        cc->brk_cb(cc->ctx, true);
+                }
+                cc->v110_rx_bits = -1;
+                return;
+            }
             v110_push(cc, (uint8_t) cc->v110_rx_shift);
             cc->v110_rx_bits = -1;
             return;
@@ -1193,4 +1269,17 @@ void cc_rx(clear_channel_t *cc, const uint8_t *octets, int n)
 void cc_v110_set_rx_room(clear_channel_t *cc, cc_room_fn room)
 {
     cc->room = room;
+}
+
+void cc_set_break_cb(clear_channel_t *cc, cc_break_fn fn)
+{
+    cc->brk_cb = fn;
+}
+
+void cc_send_break(clear_channel_t *cc, int ms)
+{
+    if (cc->mode == CC_CLEAR)
+        return;
+    cc->brk_ms = ms < 1 ? 1 : ms;
+    cc->brk_pending = true;
 }

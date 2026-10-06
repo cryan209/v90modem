@@ -49,7 +49,7 @@ The initial implementation was written without the Recommendation available.
 V.120 (10/1996) and Corrigendum 1 are now in `ITU Docs/`; the
 [2026-10-05 conformance audit](v120_conformance_audit.md) found five defects,
 and its status section records what has since been fixed (V120-1 to -4) and
-what is still open (V120-5, break).
+what is still open (V120-5, break -- since done at the framing level, see below).
 
 | Field | Sent | Accepted |
 |---|---|---|
@@ -71,8 +71,21 @@ what is still open (V120-5, break).
   Not implemented: 4.2.2 XID link verification (XID counts as unsupported),
   FRMR, our own RNR (the DTE-side ring does not back-pressure V.120 yet),
   and the V.42-style "mode collision" handling of 4.2.3.
-- A received BR is counted, not delivered: the byte interface to the PTY has
-  no way to signal a break (audit V120-5). Break is not sent either.
+- **Break (audit V120-5).** Both directions exist at the framing level:
+  `cc_send_break()` sends a frame with BR = 1 after every character already
+  pulled (3.1.1.2, 7.2.2), holds the DTE's data for the break's length and
+  ends it with a BR = 0 frame; a received BR = 1 is reported through
+  `cc_set_break_cb()` after that frame's characters and ends on the next
+  BR = 0 frame, before its characters. V.110 sends zeros for the break (never
+  fewer than 24, i.e. more than 2M for M = 10, 5.3.5) then a mark, and reads
+  more than 19 zeros -- or, below 600 bit/s, an all-zero character with a zero
+  stop element -- as one. **The PTY cannot carry a break**: nothing written to
+  a pty master makes the slave see BREAK, and a slave's `tcsendbreak` never
+  reaches the master. So the DTE surface is Courier's `AT\B<n>` (n x 100 ms,
+  default 3; online command mode, i.e. after `+++`; ERROR on CLEAR or with no
+  call) for sending, and for receiving a counter in ATI11 ("Breaks sent N
+  received M"). The data stream itself carries nothing for a received break;
+  a DTE that must see one needs a different console than a pty.
 - Not implemented: synchronous (HDLC) and bit-transparent modes, segmentation,
   multiple LLIs, Q.931/LLC signalling (there is none on SIP).
 

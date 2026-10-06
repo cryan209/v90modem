@@ -131,6 +131,10 @@ void di_set_link_detail_cb(di_link_detail_cb_t cb);
  * "retraining").  Takes only a leaf lock, so the engine may call it holding
  * nothing or anything; ignored when no call has reported CONNECT.
  */
+/* \B<n>: ask the engine to send a break of `ms`; 0 if it can, -1 if not.
+ * Called on the AT path: must not take engine locks. */
+typedef int (*di_break_cb_t)(int ms);
+void di_set_break_cb(di_break_cb_t cb);
 void di_update_link(const v250_connect_report_t *rep, const char *detail, const char *state);
 
 /*

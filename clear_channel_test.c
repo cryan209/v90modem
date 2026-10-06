@@ -231,6 +231,97 @@ static void ack_run(clear_channel_t *a, clear_channel_t *b, int ticks,
     }
 }
 
+/* ---- break, both framings, both directions ---- */
+
+typedef struct {
+    const char *src; size_t src_len, src_pos;
+    char ev[256]; size_t ev_len;               /* received characters and break markers */
+} brk_end_t;
+
+static int brk_pull(void *ctx)
+{
+    brk_end_t *e = ctx;
+
+    return e->src_pos < e->src_len ? (uint8_t) e->src[e->src_pos++] : -1;
+}
+static void brk_push(void *ctx, uint8_t b)
+{
+    brk_end_t *e = ctx;
+
+    if (e->ev_len < sizeof(e->ev) - 1)
+        e->ev[e->ev_len++] = (char) b;
+}
+static void brk_mark(void *ctx, bool on)
+{
+    brk_end_t *e = ctx;
+
+    if (e->ev_len < sizeof(e->ev) - 1)
+        e->ev[e->ev_len++] = on ? '[' : ']';
+}
+
+static void brk_run(clear_channel_t *a, clear_channel_t *b, brk_end_t *ea, int ticks)
+{
+    uint8_t ab[160], ba[160];
+
+    for (int t = 0; t < ticks; t++) {
+        if (t == 30)
+            cc_send_break(a, 200);
+        if (t == 32) {              /* more text, queued while the break is on */
+            ea->src = "DEF";
+            ea->src_len = 3;
+            ea->src_pos = 0;
+        }
+        cc_tx(a, ab, 160);
+        cc_tx(b, ba, 160);
+        cc_rx(b, ab, 160);
+        cc_rx(a, ba, 160);
+    }
+}
+
+static void test_break(void)
+{
+    static brk_end_t ea, eb;
+    clear_channel_t a, b;
+    int n;
+
+    printf("break (V.120 3.1.1.2, V.110 5.3.5):\n");
+    for (n = 0; n < 4; n++) {
+        const char *what[] = { "V.120 UI", "V.120 acknowledged", "V.110 9600", "V.110 300" };
+
+        memset(&ea, 0, sizeof(ea));
+        memset(&eb, 0, sizeof(eb));
+        ea.src = "ABC";
+        ea.src_len = 3;
+        if (n < 2) {
+            cc_init_v120(&a, false, true, brk_pull, brk_push, &ea);
+            cc_init_v120(&b, false, false, brk_pull, brk_push, &eb);
+            if (n == 1) {
+                cc_v120_set_ack(&a, true);
+                cc_v120_set_ack(&b, true);
+            }
+        } else {
+            int rate = n == 2 ? 9600 : 300;
+
+            cc_init_v110(&a, rate, brk_pull, brk_push, &ea);
+            cc_init_v110(&b, rate, brk_pull, brk_push, &eb);
+        }
+        cc_set_break_cb(&b, brk_mark);
+        cc_set_break_cb(&a, brk_mark);
+        brk_run(&a, &b, &ea, n >= 2 ? 400 : 120);
+        eb.ev[eb.ev_len] = 0;
+        {
+            char msg[120];
+
+            snprintf(msg, sizeof(msg), "%s: B hears \"ABC[ ]DEF\" in order (got \"%s\")", what[n], eb.ev);
+            check(!strcmp(eb.ev, "ABC[]DEF"), msg);
+        }
+        if (n < 2)
+            check(b.rx_breaks == 1 && a.rx_breaks == 0, "exactly one break counted, none at the sender");
+        cc_release(&a);
+        cc_release(&b);
+    }
+}
+
 static void test_v120_ack(void)
 {
     end_t *ea = calloc(1, sizeof(*ea)), *eb = calloc(1, sizeof(*eb));
@@ -1264,6 +1355,7 @@ int main(void)
     test_v110_t2();
     test_v110_flow();
     test_v120_ack();
+    test_break();
     if (test_engine() < 0) {
         printf("  FAIL engine/PTY setup\n");
         failures++;
