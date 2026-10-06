@@ -2,6 +2,8 @@
  * v92_cp_rx.c — Native V.92 upstream Phase 4 control-frame receiver
  */
 
+#include <stdio.h>
+#include <stdlib.h>
 #include "v92_cp_rx.h"
 
 #include <spandsp.h>
@@ -552,7 +554,19 @@ static bool v92_cp_rx_dispatch(v92_cp_rx_t *rx)
         v92_cp_diag_t diag;
 
         if (v92_cp_decode_diag(rx->bits, rx->bit_count, &diag)
-            && diag.frame.codec_alaw == rx->expected_alaw) {
+            && diag.frame.codec_alaw != rx->expected_alaw
+            && diag.valid && !getenv("V92_CP_LAW_STRICT")) {
+            /* Table 23 bit 35 names the analogue modem's codec law, but the
+             * RTP payload IS the DS0 and its law is not in doubt here, so a
+             * CRC-valid frame that disagrees can only be the peer's field
+             * being wrong, and rejecting it left the call in DIL until the
+             * peer's Phase 4 timeout (slmodemd sets A-law on a PCMU call,
+             * its own log reading MU_LAW; artifacts r25).  Transmit and
+             * receive follow the bearer's law.  V92_CP_LAW_STRICT=1
+             * restores the rejection. */
+            diag.frame.codec_alaw = rx->expected_alaw;
+        }
+        if (diag.valid && diag.frame.codec_alaw == rx->expected_alaw) {
             rx->valid_frames++;
             if (rx->handler)
                 rx->handler(rx->user_data,
@@ -659,6 +673,23 @@ bool v92_cp_rx_put_bit(v92_cp_rx_t *rx, int bit)
         accepted = v92_cp_rx_dispatch(rx);
         if (!accepted)
             rx->rejected_frames++;
+        if (getenv("V92_CP_RX_DEBUG")) {
+            fprintf(stderr, "[V92CPRX] frame bits=%d target=%d accepted=%d points=%d alaw=%d: ",
+                    rx->bit_count, rx->target_bits, accepted ? 1 : 0,
+                    rx->constellation_points, rx->expected_alaw ? 1 : 0);
+            for (int i = 0; i < rx->bit_count; i++) fputc('0' + rx->bits[i], stderr);
+            fputc('\n', stderr);
+            {
+                v92_cp_diag_t dg;
+                (void)v92_cp_decode_diag(rx->bits, rx->bit_count, &dg);
+                fprintf(stderr, "[V92CPRX]  sync=%d ident=%d start=%d resv=%d params=%d fill=%d crc=%d (%04x vs %04x) type=%d drn=%d ack=%d alaw=%d differ=%d dfi=%d%d%d%d%d%d\n",
+                        dg.frame_sync_ok, dg.identifier_ok, dg.start_bits_ok, dg.reserved_ok,
+                        dg.parameters_ok, dg.fill_bits_ok, dg.crc_ok, dg.crc_field, dg.crc_expected,
+                        dg.frame.type, dg.frame.drn, dg.frame.acknowledge, dg.frame.codec_alaw,
+                        dg.frame.codec_constellations_differ, dg.frame.dfi[0], dg.frame.dfi[1],
+                        dg.frame.dfi[2], dg.frame.dfi[3], dg.frame.dfi[4], dg.frame.dfi[5]);
+            }
+        }
         bool cpt = accepted && rx->constellation_points == 2
                 && !rx->bits[18] && v92_cp_get_bits(rx->bits, 19, 2) == V92_CP_TYPE_CPT;
         v92_cp_rx_reset(rx);
