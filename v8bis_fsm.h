@@ -93,7 +93,8 @@ typedef struct {
     v8bis_msg_t preset_ms;
     /* optional policy hooks; NULL selects the defaults described in v8bis_fsm.c */
     v8bis_accept_t (*accept)(void *user, const v8bis_msg_t *ms);
-    bool (*select_ms)(void *user, const v8bis_msg_t *peer_caps_or_null, v8bis_msg_t *ms_out);
+    bool (*select_ms)(void *user, const v8bis_msg_t *ours, const v8bis_msg_t *peer_caps_or_null,
+                      v8bis_msg_t *ms_out);
     void *user;
 } v8bis_fsm_cfg_t;
 

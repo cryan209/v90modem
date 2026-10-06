@@ -67,6 +67,10 @@ typedef struct {
     int n_seq;
     const char *absent[MAX_ENV];
     int n_absent;
+    const char *log_has[MAX_ENV];    /* --X-log: must appear in the engine's stderr log */
+    int n_log_has;
+    const char *log_not[MAX_ENV];    /* --X-nolog: must not */
+    int n_log_not;
     char dte[65536];    /* everything read from the DTE side */
     size_t dte_len;
     char payload[2048];
@@ -287,6 +291,24 @@ int main(int argc, char **argv)
                 if ((both || k == which) && side[k].n_absent < MAX_ENV)
                     side[k].absent[side[k].n_absent++] = str;
             }
+        } else if ((!strcmp(argv[i], "--call-log") || !strcmp(argv[i], "--answer-log")
+                    || !strcmp(argv[i], "--both-log") || !strcmp(argv[i], "--call-nolog")
+                    || !strcmp(argv[i], "--answer-nolog") || !strcmp(argv[i], "--both-nolog"))
+                   && i + 1 < argc) {
+            /* what the engine itself reported: needs VPCM_ME_VERBOSE=1 on that side */
+            int no = strstr(argv[i], "nolog") != NULL;
+            int both = argv[i][2] == 'b';
+            int which = argv[i][2] == 'c' ? 0 : 1;
+            const char *str = argv[++i];
+
+            for (int k = 0; k < 2; k++) {
+                if (!(both || k == which))
+                    continue;
+                if (no && side[k].n_log_not < MAX_ENV)
+                    side[k].log_not[side[k].n_log_not++] = str;
+                else if (!no && side[k].n_log_has < MAX_ENV)
+                    side[k].log_has[side[k].n_log_has++] = str;
+            }
         } else if ((!strcmp(argv[i], "--both-env") || !strcmp(argv[i], "--call-env")
                     || !strcmp(argv[i], "--answer-env")) && i + 1 < argc) {
             int both = argv[i][2] == 'b';
@@ -490,6 +512,27 @@ int main(int argc, char **argv)
                 printf("  %-6s FAIL: DTE stream lacks \"%s\" (in order)\n", s->name, s->seq[q]);
                 failed = 1;
             }
+        }
+        if (s->n_log_has || s->n_log_not) {
+            static char logbuf[1 << 20];
+            size_t n = 0;
+            FILE *lf = fopen(s->log_path, "r");
+
+            if (lf) {
+                n = fread(logbuf, 1, sizeof(logbuf) - 1, lf);
+                fclose(lf);
+            }
+            logbuf[n] = '\0';
+            for (int q = 0; q < s->n_log_has; q++)
+                if (!strstr(logbuf, s->log_has[q])) {
+                    printf("  %-6s FAIL: engine log lacks \"%s\"\n", s->name, s->log_has[q]);
+                    failed = 1;
+                }
+            for (int q = 0; q < s->n_log_not; q++)
+                if (strstr(logbuf, s->log_not[q])) {
+                    printf("  %-6s FAIL: engine log contains \"%s\"\n", s->name, s->log_not[q]);
+                    failed = 1;
+                }
         }
         if (expect && !expect_hangup) {
             char want[64];

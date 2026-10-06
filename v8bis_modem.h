@@ -72,6 +72,8 @@ bool v8bis_modem_event(v8bis_modem_t *m, v8bis_modem_event_t *ev);
 void v8bis_modem_startup_signal(v8bis_modem_t *m);
 
 bool v8bis_modem_tx_busy(const v8bis_modem_t *m);
+/* Has anything from the peer (a signal, a message, a bad frame) been heard in this transaction? */
+bool v8bis_modem_heard_peer(const v8bis_modem_t *m);
 uint64_t v8bis_modem_now(const v8bis_modem_t *m);
 const v8bis_fsm_t *v8bis_modem_fsm(const v8bis_modem_t *m);
 

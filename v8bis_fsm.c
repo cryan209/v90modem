@@ -404,7 +404,7 @@ static bool pick_ms(v8bis_fsm_t *f)
     bool ok;
 
     if (f->cfg.select_ms)
-        ok = f->cfg.select_ms(f->cfg.user, peer, &ms);
+        ok = f->cfg.select_ms(f->cfg.user, &f->cfg.caps, peer, &ms);
     else if (!peer && f->cfg.have_preset_ms) {
         ms = f->cfg.preset_ms;
         ok = true;

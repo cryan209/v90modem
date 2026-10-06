@@ -69,6 +69,10 @@ Spec readings worth re-checking against a real peer: transaction 6's shape (Figu
 
 Done and tested (`v8bis_modem_test`): `v8bis_modem.[ch]`, the sample-level station -- tones, V.21(L)/(H), the preamble as ES segment 2, the 9.4 gap, 10.2.2's silence and retransmission, channel selection by role, echo rejection, deferred signal delivery. Its API is `rx(amp,len)` / `tx(amp,len)` in step, `initiate()`, `event()`, `startup_signal()`. **Still to do for stage 3b:** link into `SRCS`; start it from `modem_engine.c` before V.8 behind `ME_V8BIS` (default off); turn MS_MODE events into the V.8, short V.8 or V.25 start-up (ANS/ANSam on the MS receiver, CM/CJ on the sender -- 9.9), translating MS's selected modulation into the engine's V.8 offer; bound the whole thing so a peer without V.8bis falls through to V.8 quickly; and the G.711 path (the modem works in linear 8 kHz and has been run through mu-law and A-law, but the engine's RX/TX entry points have not been touched).
 
+## Stage 3b status (2026-10-06)
+
+Done: `modem_engine.c` starts the V.8bis modem from the SIP-connected path when `ME_V8BIS=1` and hands off to V.8 (9.9.1) on MS mode, falls through to V.8 on no peer, a peer that would swap roles, an ANS/ANSam heard first, or the time limit. Tested as two whole engines over G.711 (`engine_pair_test`, rows in `make test`). **Open decisions I made and you may want to revisit:** the default window is 2 s (a V.8bis-less peer pays up to 2 s only when the feature is on, and the calling side pays nothing against a V.8 answerer because ANSam ends the wait); the feature is off by default everywhere, including calls the engine originates over the SIP hunt-group path (which has not been tried with it on); and the capabilities offer V.8 start-up only. **Remaining:** short V.8 (needs a JM-from-MS path in the engine's V.8 layer), early-media start, V.92 QC2/QCA2 on top, `AT` control (V.250 Annex A of V.25ter), and every live call.
+
 ## Staging
 
 1. **Stage 1, codec and tones** (A, B, C). Testable with no state machine. Fixes the offline decoder's defect list at the same time, since both can share `v8bis_ie`.

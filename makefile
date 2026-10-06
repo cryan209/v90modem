@@ -152,7 +152,7 @@ LDFLAGS = $(PJ_LIBS) $(SPANDSP_LIB) $(SYSTEM_LIBS)
 LIBUSB_CFLAGS := $(shell pkg-config --cflags libusb-1.0 2>/dev/null || echo "-I$(HOMEBREW_PREFIX)/include/libusb-1.0")
 LIBUSB_LIBS   := $(shell pkg-config --libs libusb-1.0 2>/dev/null || echo "-L$(HOMEBREW_PREFIX)/lib -lusb-1.0")
 
-SRCS   = profile_file.c line_monitor.c at_help.c v250_ctl.c at_test.c legacy_pcm_decode.c k56flex_client.c k56flex_rxfe.c at_ms.c clear_channel.c v25_automode.c k56flex_train.c k56flex_probe.c k56flex_v8bis.c k56flex.c x2.c x2_sym.c v34_line_ec.c v92_mh.c v92_mh_line.c v92_rn.c v92_rsig.c v92_tone_a.c v92_analogue_audio.c v92_analogue_phase4.c v92_analogue_phase3.c v92_su.c sip_modem.c modem_engine.c v90_analogue_linear.c v90_analogue_fse.c v90_analogue_sd.c v34_pp_fit.c v90_sounder.c clock_recovery.c data_interface.c fax_class2.c data_stack.c v44.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_p3_eq.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c x2_session.c x2_mp_rx.c
+SRCS   = v8bis_modem.c v8bis_fsm.c v8bis_ie.c v8bis_msg.c v8bis_tones.c profile_file.c line_monitor.c at_help.c v250_ctl.c at_test.c legacy_pcm_decode.c k56flex_client.c k56flex_rxfe.c at_ms.c clear_channel.c v25_automode.c k56flex_train.c k56flex_probe.c k56flex_v8bis.c k56flex.c x2.c x2_sym.c v34_line_ec.c v92_mh.c v92_mh_line.c v92_rn.c v92_rsig.c v92_tone_a.c v92_analogue_audio.c v92_analogue_phase4.c v92_analogue_phase3.c v92_su.c sip_modem.c modem_engine.c v90_analogue_linear.c v90_analogue_fse.c v90_analogue_sd.c v34_pp_fit.c v90_sounder.c clock_recovery.c data_interface.c fax_class2.c data_stack.c v44.c v90.c v90_cp_rx.c v90_cp_live.c v90_analogue_tx.c v90_analogue_rx.c v90_analogue_phase3.c v90_analogue_phase4.c v90_dil_measure.c v90_dil_presets.c p3_demod.c v91.c vpcm_cp.c vpcm_g711_stream.c vpcm_call.c vpcm_call_pair.c vpcm_link.c vpcm_v91_session.c v92_phase3_decode.c v92_phase3_ru.c v92_ja_decode.c v92_p3_rx.c v92_p3_eq.c v92_phase4_decode.c v92_cp_rx.c v92_trn2u.c v92_upstream_data.c v92_upstream_rx.c x2_session.c x2_mp_rx.c
 OBJS   = $(SRCS:.c=.o)
 TARGET = sip_v90_modem
 TEST_TARGETS = line_monitor_test v250_ctl_test at_test_test pcm_ber_test v56_loopback_test legacy_pcm_decode_test at_ms_test console_test clear_channel_test k56flex_client_test k56flex_train_test k56flex_probe_test k56flex_v8bis_test k56flex_test x2_test v42bis_test v44_test v92_startup_test port_cp_stream_test port_data_rx_test port_v34_fixed_test port_v34_fixed_lms_test port_v34_fixed_solve_test vpcm_loopback_test vpcm_decode vpcm_encode v92_trn2u_replay data_stack_test v42_link_test v42_throughput_test v34_phase2_decode_test v34_mp_test v34_data_test v34_gardner_test fax_class_test fax_class2_test v90_upstream_replay v90_engine_replay v34_duplex_test v32bis_spandsp_test v32bis_duplex_test v32bis_engine_pair_test engine_pair_test v90_engine_peer v92_proc_eval_test v90_analogue_tx_test v90_analogue_rx_test v90_analogue_sd_test v34_pp_fit_test v34_hdx_test v92_p3_rx_line_test v92_mh_test v92_mh_line_test v92_mh_retrain_test v92_rn_test v92_rsig_test v92_tone_a_test x2_session_test x2_sym_test x2_b1_test v8bis_test v8bis_fsm_test v8bis_modem_test v76_test v75_test v70_test v70_v34_test
@@ -416,6 +416,11 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 	./engine_pair_test --expect V32BIS --expect-connect 14400 --both-env ME_MODE=v32bis
 	./engine_pair_test --expect V32BIS --expect-connect 9600 --both-at "AT+MS=V32"
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-env ME_V8BIS=1 --both-env VPCM_ME_VERBOSE=1 --both-log "V.8bis complete" --both-log "MS mode" --both-nolog "ended without a mode"
+	./engine_pair_test --alaw --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-env ME_V8BIS=1 --both-env VPCM_ME_VERBOSE=1 --both-log "V.8bis complete" --both-nolog "ended without a mode"
+	./engine_pair_test --expect V32BIS --expect-connect 14400 --both-env ME_MODE=v32bis --both-env ME_V8BIS=1 --both-env VPCM_ME_VERBOSE=1 --both-log "V.8bis complete"
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --answer-env ME_V8BIS=1 --answer-env VPCM_ME_VERBOSE=1 --answer-log "nothing heard inside the window"
+	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --call-env ME_V8BIS=1 --call-env VPCM_ME_VERBOSE=1 --call-log "ANS/ANSam heard first"
 # No datapump: the DS0 is the bit pipe (clear_channel.c), two whole engines.
 	./engine_pair_test --expect CLEAR --expect-connect 64000 --both-at "AT+MS=V120"
 	./engine_pair_test --expect CLEAR --expect-connect 64000 --both-at "AT+MS=V120" --both-env ME_V120_ACK=1
@@ -1020,7 +1025,7 @@ $(SPANDSP_LIB): FORCE
 -include $(wildcard *.d tools/*.d)
 
 sip_modem.o:      sip_modem.c      modem_engine.h data_interface.h
-modem_engine.o:   modem_engine.c   modem_engine.h v25_automode.h v92_mh.h v92_mh_line.h data_stack.h clock_recovery.h v90.h v90_cp_rx.h v91.h v92_p3_rx.h v92_cp_rx.h v92_trn2u.h v92_upstream_rx.h
+modem_engine.o:   modem_engine.c   v8bis_modem.h v8bis_fsm.h modem_engine.h v25_automode.h v92_mh.h v92_mh_line.h data_stack.h clock_recovery.h v90.h v90_cp_rx.h v91.h v92_p3_rx.h v92_cp_rx.h v92_trn2u.h v92_upstream_rx.h
 clock_recovery.o: clock_recovery.c clock_recovery.h
 # ATI3/ATI7 name the build.  Rewritten only when git describe changes, so it
 # does not force a rebuild of data_interface.o on every make.

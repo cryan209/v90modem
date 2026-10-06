@@ -30,6 +30,7 @@
 #include "v34_line_ec.h"
 #include "v90.h"
 #include "k56flex_v8bis.h"
+#include "v8bis_modem.h"
 #include "k56flex_train.h"
 #include "v91.h"
 #include "v90_cp_live.h"
@@ -3702,6 +3703,208 @@ static void me_k56_train_fill_locked(uint8_t *codewords, int count)
     }
 }
 
+/*
+ * V.8bis before V.8 (ME_V8BIS=1, default off).  docs/v8bis_engine_scope.md.
+ *
+ * The station runs the standard V.8bis transactions (v8bis_modem.c) for a short
+ * window before V.8, so a V.8bis peer can settle a mode without the CI/ANSam
+ * exchange.  What this layer owns:
+ *   - roles.  9.9 makes the station that RECEIVES the MS the answer modem
+ *     whichever end called, but this engine's roles are fixed by the call (the
+ *     SIP answerer is the answer/digital modem).  So the calling engine takes
+ *     control (answers CRe/MRe with CRd and sends the MS) and refuses an MS of
+ *     its own, and the answering engine sends CRe and never an MS.  A peer that
+ *     would invert the roles is dropped to V.8.
+ *   - hand-off.  Only 9.9.1 (V.8 start-up) is offered: the capabilities carry
+ *     the V.8 codepoint and neither short V.8 nor V.25, because SpanDSP's V.8
+ *     has no short procedure.  MS mode then means "start V.8 now", with no CI
+ *     from the caller (the MS did CI's job).
+ *   - a bound.  If nothing from the peer is heard inside ME_V8BIS_WINDOW_MS
+ *     (2000) the ordinary V.8 start-up begins; a transaction under way may run
+ *     to ME_V8BIS_MAX_MS (12000).  An ANS/ANSam heard first (10.2.1) goes
+ *     straight to V.8.
+ * Started from the SIP-connected path only: a call that starts V.8 on early
+ * media (ME_V8_ON_EARLY_MEDIA) is not offered V.8bis.  Nothing here has met a
+ * foreign V.8bis station.
+ */
+static bool me_v8_disabled(void);
+static void v25_automode_arm_locked(void);
+
+static v8bis_modem_t *g_v8bis = NULL;
+static bool g_v8bis_handoff = false;       /* the next V.8 start follows an MS: no CI */
+static bool g_v8bis_to_v8 = false;         /* MS mode reached: start V.8 once our audio is out */
+static uint64_t g_v8bis_samples = 0;
+static unsigned g_v8bis_window_ms = 2000, g_v8bis_max_ms = 12000;
+static int g_v8bis_ans_run = 0;
+static bool g_v8bis_ans_seen = false;
+static int16_t g_v8bis_ans_buf[160];
+static unsigned g_v8bis_ans_fill = 0;
+
+static bool me_v8bis_enabled(void)
+{
+    const char *v = getenv("ME_V8BIS");
+
+    return v && *v && atoi(v) != 0 && !me_v8_disabled();
+}
+
+static v8bis_accept_t me_v8bis_accept(void *user, const v8bis_msg_t *ms)
+{
+    (void)user;
+    (void)ms;
+    return g_calling_party ? V8BIS_ACCEPT_NAK3 : V8BIS_ACCEPT_ACK;     /* the caller never answers */
+}
+
+static bool me_v8bis_select_ms(void *user, const v8bis_msg_t *ours, const v8bis_msg_t *peer,
+                               v8bis_msg_t *ms)
+{
+    (void)user;
+    if (!g_calling_party)
+        return false;                                                  /* the answerer never calls the mode */
+    return v8bis_default_select_ms(ours, peer, true, ms);
+}
+
+/* What we can do, in V.8bis terms: the data modulations this call advertises and the V.8 start-up. */
+static bool me_v8bis_caps(v8bis_msg_t *c)
+{
+    v8bis_msg_init(c, V8BIS_MT_CL);
+    c->id_npar1 = V8BIS_ID_V8;
+    c->s_spar1 = V8BIS_S_DATA;
+    c->data[0] = V8BIS_DATA_TRANSPARENT | V8BIS_DATA_V42;
+    if (g_advertise_v34 || g_advertise_v90)
+        c->data[1] |= V8BIS_DATA2_V34;
+    if (g_advertise_v32) {
+        c->data[1] |= V8BIS_DATA2_V32BIS;
+        c->data[2] |= V8BIS_DATA3_V32;
+    }
+    if (g_advertise_v22)
+        c->data[2] |= V8BIS_DATA3_V22BIS | V8BIS_DATA3_V22;
+    return c->data[1] || c->data[2];
+}
+
+static bool me_v8bis_start_locked(void)
+{
+    v8bis_modem_cfg_t cfg;
+    const char *v;
+
+    v8bis_modem_cfg_default(&cfg);
+    if (!me_v8bis_caps(&cfg.fsm.caps))
+        return false;
+    cfg.fsm.auto_answer_call = true;
+    cfg.fsm.answering_station = !g_calling_party;
+    cfg.fsm.cr_reply = V8BIS_CRR_CRD;          /* transaction 12/13: the caller sends the MS */
+    cfg.fsm.mr_reply = V8BIS_MRR_CRD;          /* transaction 10/11 */
+    cfg.fsm.accept = me_v8bis_accept;
+    cfg.fsm.select_ms = me_v8bis_select_ms;
+    cfg.retries = 0;                           /* the window decides, not the retransmit count */
+    if ((v = getenv("ME_V8BIS_LEVEL_DBM0")) && *v)
+        cfg.level_dbm0 = atof(v);
+    g_v8bis_window_ms = (unsigned)parse_env_int("ME_V8BIS_WINDOW_MS", 2000);
+    g_v8bis_max_ms = (unsigned)parse_env_int("ME_V8BIS_MAX_MS", 12000);
+    if (g_v8bis)
+        v8bis_modem_free(g_v8bis);
+    g_v8bis = v8bis_modem_new(&cfg);
+    if (!g_v8bis)
+        return false;
+    g_v8bis_samples = 0;
+    g_v8bis_to_v8 = false;
+    g_v8bis_handoff = false;
+    g_v8bis_ans_run = 0;
+    g_v8bis_ans_seen = false;
+    g_v8bis_ans_fill = 0;
+    if (!g_calling_party)
+        v8bis_modem_initiate(g_v8bis, V8BIS_INIT_CR);       /* 10.2.2: CRe after 400 ms of silence */
+    g_state = ME_V8;
+    return true;
+}
+
+static void me_v8bis_finish_locked(const char *why, bool handoff)
+{
+    ME_LOG("[ME] V.8bis %s after %llu ms: %s\n", handoff ? "complete" : "ended without a mode",
+           (unsigned long long)(g_v8bis_samples / 8), why);
+    trace_phase("V.8bis %s: %s", handoff ? "done" : "fell through to V.8", why);
+    v8bis_modem_free(g_v8bis);
+    g_v8bis = NULL;
+    g_v8bis_to_v8 = false;
+    g_v8bis_handoff = handoff;
+    if (me_start_or_restart_v8_locked(g_v8_answer_tone) != 0) {
+        ME_LOG("[ME] v8_init failed after V.8bis\n");
+        return;
+    }
+    v25_automode_arm_locked();
+}
+
+/* 2100 Hz (ANS/ANSam) in the receive audio means a V.8 answerer that knows nothing of V.8bis. */
+static void me_v8bis_rx_locked(const int16_t *amp, int len)
+{
+    v8bis_modem_rx(g_v8bis, amp, len);
+    for (int i = 0; i < len; i++) {
+        g_v8bis_ans_buf[g_v8bis_ans_fill++] = amp[i];
+        if (g_v8bis_ans_fill == 160) {
+            double w = 2.0 * M_PI * 2100.0 / 8000.0, c = 2.0 * cos(w), s1 = 0, s2 = 0, tot = 0;
+
+            for (int k = 0; k < 160; k++) {
+                double s0 = g_v8bis_ans_buf[k] + c * s1 - s2;
+
+                s2 = s1;
+                s1 = s0;
+                tot += (double)g_v8bis_ans_buf[k] * g_v8bis_ans_buf[k];
+            }
+            if (tot > 160.0 * 900.0
+                && 2.0 * (s1 * s1 + s2 * s2 - c * s1 * s2) / (160.0 * tot) > 0.5)
+                g_v8bis_ans_run++;
+            else
+                g_v8bis_ans_run = 0;
+            if (g_v8bis_ans_run >= 8)                     /* 160 ms of it */
+                g_v8bis_ans_seen = true;
+            g_v8bis_ans_fill = 0;
+        }
+    }
+}
+
+static void me_v8bis_progress_locked(int len)
+{
+    v8bis_modem_event_t e;
+    unsigned ms;
+
+    g_v8bis_samples += (uint64_t)len;
+    while (g_v8bis && v8bis_modem_event(g_v8bis, &e)) {
+        if (e.type == V8BIS_MEV_MODE) {
+            bool answer_modem = e.mode.answer_modem;
+
+            ME_LOG("[ME] V.8bis: MS %s, start-up %d, %s modem; data %02x %02x %02x\n",
+                   e.mode.we_sent_ms ? "sent" : "received", (int)e.mode.startup,
+                   answer_modem ? "answer" : "call", e.mode.ms.data[0], e.mode.ms.data[1],
+                   e.mode.ms.data[2]);
+            if (answer_modem == g_calling_party || e.mode.startup != V8BIS_STARTUP_V8) {
+                me_v8bis_finish_locked(answer_modem == g_calling_party
+                                           ? "the MS would swap the call and answer roles"
+                                           : "the MS asks for a start-up we do not do",
+                                       false);
+                return;
+            }
+            g_v8bis_to_v8 = true;
+        } else if (e.type == V8BIS_MEV_INITIAL || e.type == V8BIS_MEV_NO_PEER) {
+            me_v8bis_finish_locked(e.type == V8BIS_MEV_NO_PEER ? "no V.8bis peer"
+                                                               : v8bis_why_name(e.why), false);
+            return;
+        }
+    }
+    if (!g_v8bis)
+        return;
+    if (g_v8bis_to_v8) {
+        if (!v8bis_modem_tx_busy(g_v8bis))                /* the ACK(1) has to be out first */
+            me_v8bis_finish_locked("MS mode", true);
+        return;
+    }
+    ms = (unsigned)(g_v8bis_samples / 8);
+    if (g_calling_party && g_v8bis_ans_seen)
+        me_v8bis_finish_locked("ANS/ANSam heard first (10.2.1)", false);
+    else if (ms >= g_v8bis_max_ms)
+        me_v8bis_finish_locked("time limit", false);
+    else if (ms >= g_v8bis_window_ms && !v8bis_modem_heard_peer(g_v8bis))
+        me_v8bis_finish_locked("nothing heard inside the window", false);
+}
+
 static int me_start_or_restart_v8_locked(int answer_tone)
 {
     v8_parms_t v8_parms;
@@ -3715,7 +3918,8 @@ static int me_start_or_restart_v8_locked(int answer_tone)
      * it -- measured against the HT802 leg, 3.7 s from starting V.8 to the CM
      * leaving, against an answerer whose CM-wait budget is 200 + 5000 ms.
      * ME_V8_NO_CI=1 skips CI so V8_AWAIT_ANSAM is entered directly. */
-    v8_parms.send_ci            = g_calling_party && !me_v8_no_ci();
+    v8_parms.send_ci            = g_calling_party && !me_v8_no_ci() && !g_v8bis_handoff;
+    g_v8bis_handoff = false;                    /* one start only: a V.8 retry announces itself again */
     /* V.92 Tables 5/14 QC/QCA: this endpoint is always the digital modem.
        The current Jp profile selects the mandatory 4-point TRN2u channel.
        v8.c gates the QCA response on a received QC per V.92 9.2.4.1/.2;
@@ -8644,6 +8848,7 @@ void me_destroy(void)
     v90_cp_live_worker_stop();
     if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
     if (g_k56)      { k56flex_v8bis_free(g_k56);                 g_k56      = NULL; }
+    if (g_v8bis)    { v8bis_modem_free(g_v8bis);                 g_v8bis    = NULL; }
     if (g_k56_train){ free(g_k56_train);                         g_k56_train = NULL; }
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
     v32bis_release_locked();
@@ -9011,6 +9216,16 @@ void me_on_sip_connected(void)
         trace_phase("enter K56flex V.8bis before V.8");
         return;
     }
+    if (me_v8bis_enabled() && me_v8bis_start_locked()) {
+        if (g_data_framing_auto)
+            g_data_framing = DS_FRAMING_V14;
+        g_ec_fallback_ok = false;
+        pthread_mutex_unlock(&g_state_mtx);
+        trace_phase("enter V.8bis before V.8 as %s", g_calling_party ? "caller" : "answerer");
+        ME_LOG("[ME] SIP connected as %s, trying V.8bis for up to %u ms before V.8\n",
+               g_calling_party ? "caller" : "answerer", g_v8bis_window_ms);
+        return;
+    }
     if (me_start_or_restart_v8_locked(g_v8_answer_tone) != 0) {
         ME_LOG("[ME] v8_init failed\n");
         pthread_mutex_unlock(&g_state_mtx);
@@ -9059,6 +9274,10 @@ void me_on_sip_disconnected(void)
 void me_on_sip_disconnected_status(int sip_status)
 {
     pthread_mutex_lock(&g_state_mtx);
+
+    if (g_v8bis)    { v8bis_modem_free(g_v8bis);                 g_v8bis    = NULL; }
+    g_v8bis_handoff = false;
+    g_v8bis_to_v8 = false;
 
     if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
@@ -10127,6 +10346,11 @@ void me_rx_audio(const int16_t *amp, int len)
     pthread_mutex_lock(&g_state_mtx);
     if (g_k56) {
         k56flex_v8bis_rx(g_k56, amp, len);
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    if (g_v8bis) {
+        me_v8bis_rx_locked(amp, len);
         pthread_mutex_unlock(&g_state_mtx);
         return;
     }
@@ -13000,6 +13224,12 @@ static void me_tx_audio_impl(int16_t *amp, int len)
     if (g_k56) {
         k56flex_v8bis_tx(g_k56, amp, len);
         me_k56_progress_locked();
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    if (g_v8bis) {
+        v8bis_modem_tx(g_v8bis, amp, len);
+        me_v8bis_progress_locked(len);
         pthread_mutex_unlock(&g_state_mtx);
         return;
     }

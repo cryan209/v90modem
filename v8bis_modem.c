@@ -242,6 +242,11 @@ bool v8bis_modem_tx_busy(const v8bis_modem_t *m)
     return m->cur_valid || m->sn > 0;
 }
 
+bool v8bis_modem_heard_peer(const v8bis_modem_t *m)
+{
+    return m->rx_active;
+}
+
 uint64_t v8bis_modem_now(const v8bis_modem_t *m)
 {
     return m->now;
