@@ -1704,6 +1704,14 @@ static bool v90_t3_dd_gate_ok(v34_rx_state_t *s)
    restores the old ungated behaviour for A/B. */
 static bool v90_t3_phase_evidence_ok(v34_rx_state_t *s)
 {
+    /* x2's accepted reset-state B1 establishes the Table-12 input epoch
+       (V.34 10.1.3.1/11.4.1.1.4). Real 4800-bit/s traffic has K=0, so
+       neither the shell bound nor a falling idle-marks fraction provides
+       evidence for moving it. Sweeping after an idle preamble corrupts a
+       correctly decoded busy line. A new E/B1, not user content, owns the
+       next epoch. */
+    if (s->x2_mode)
+        return false;
     static int gate = -1;
 
     if (gate < 0)
@@ -3790,7 +3798,11 @@ void v34_rx_pack_output_bitstream(v34_rx_state_t *s)
         for (  ;  i < kk;  i++)
         {
             bit = bitstream_get(&s->bs, &u, 1);
-            s->put_bit(s->put_bit_user_data, v90_t3_probe_descramble(s, bit));
+            int out_bit = v90_t3_probe_descramble(s, bit);
+            /* Advance the scrambler through B1, but clamp its delayed
+               output until DATA (V.34 11.4.1.1.5). */
+            if (!s->x2_mode || !s->v90_t3_suppress_output)
+                s->put_bit(s->put_bit_user_data, out_bit);
         }
         /*endfor*/
         /* Auxiliary data bits are not scrambled (V.34/7) */
@@ -3803,7 +3815,9 @@ void v34_rx_pack_output_bitstream(v34_rx_state_t *s)
     for (  ;  i < bb;  i++)
     {
         bit = bitstream_get(&s->bs, &u, 1);
-        s->put_bit(s->put_bit_user_data, v90_t3_probe_descramble(s, bit));
+        int out_bit = v90_t3_probe_descramble(s, bit);
+        if (!s->x2_mode || !s->v90_t3_suppress_output)
+            s->put_bit(s->put_bit_user_data, out_bit);
     }
     /*endfor*/
 }
@@ -12327,7 +12341,19 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                 float mean = s->v90_t3_b1_frame_err/s->v90_t3_b1_symbols;
 
                 s->v90_t3_b1_frame_err = 0.0f;
-                if (mean < 1.0f)
+                if (s->x2_mode)
+                {
+                    /* V.34 10.1.3.1 and 11.4.1.1.4: B1 is one data
+                       frame at the final-superframe epoch; DATA starts a
+                       new superframe. Original Courier mapper capture
+                       confirms this boundary. Do not park the input epoch
+                       back at j-1 after consuming that frame: doing so
+                       invalidates Table 12's trellis parity in DATA. */
+                    s->v90_t3_in_b1 = false;
+                    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                               "Rx - x2 reset-state B1 complete; retaining DATA input epoch and trellis parity\n");
+                }
+                else if (mean < 1.0f)
                 {
                     /* Still B1: keep the receiver parked on the final frame
                        of a superframe, exactly as the reset left it. */
@@ -12372,7 +12398,8 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
             /*endif*/
         }
         /*endif*/
-        s->v90_t3_suppress_output = s->v90_t3_in_b1;
+        s->v90_t3_suppress_output = s->v90_t3_in_b1
+            || (s->x2_mode && s->v90_t3_next_symbol < s->v90_t3_publish_symbol);
         if (!s->v90_t3_in_b1)
             s->v90_t3_data_symbols++;
         /*endif*/
@@ -13341,6 +13368,14 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
         if (trellis_parameters(best_trellis, &table, &states)
             || viterbi_set_trellis(&s->viterbi, table, states))
             return;
+        /* V.34 9.6.3, Table 11: this x2 short-record profile has h=0,
+           hence C0=0 and U0=Y0 XOR V0. Acquisition replays the reset-state
+           B1 from its first symbol, so its input epoch is authoritative.
+           Retain this constraint to correct isolated channel errors. */
+        s->viterbi.zero_precoder = true;
+        for (int i = 0; i < 3; i++)
+            if (s->h[i].re != 0 || s->h[i].im != 0)
+                s->viterbi.zero_precoder = false;
     }
     memcpy(s->v90_t3_fse, best_coeff, sizeof(best_coeff));
     v90_t3_fse_taps_replaced(s);
@@ -13359,7 +13394,10 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
        published bit stream that was nevertheless pure white. */
     {
         int frame_symbols = 8*s->parms.p;
-        int flush = (frame_symbols > 0) ? frame_symbols : 32;
+        /* x2 replays the specified single reset-state B1. The traceback
+           delays output by 15 4D pairs; suppress its trailing B1 bits, not
+           a complete extra DATA frame (V.34 10.1.3.1/11.4.1.1.5). */
+        int flush = s->x2_mode ? 2*15 : (frame_symbols > 0) ? frame_symbols : 32;
 
         s->v90_t3_publish_symbol =
             best_first + 3*(s->v90_t3_b1_symbols + flush);

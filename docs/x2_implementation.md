@@ -524,3 +524,21 @@ following suffix intact; both waveform decoding and the PTY show it. Upstream
 reliability therefore remains open even at the selected 4800 bit/s. B1 fits
 100% in that call, so acquisition alone is not sufficient evidence of an
 error-free data connection.
+
+## x2 V.34 B1 handoff and busy-line phase correction, 6 October 2026
+
+The 4800 upstream corruption was partly our decoder state. The accepted
+reset-state B1 now retains its natural Table-12 epoch into DATA instead of
+parking it back at j-1, and h=0 trellis parity is enabled. The output gate
+accounts for the 15-pair traceback delay. The subsequent frame-phase search
+also treated an idle-to-busy DTE transition as a lost epoch and corrupted a
+long transfer. x2 retains B1's authoritative epoch instead of sweeping from
+user content. V.34 9.6.3, 10.1.3.1 and 11.4.1.1.4/5 govern these changes.
+
+All 3500 bytes of a fresh native Courier source now reach the real engine
+PTY; replays at 17/80/160 samples also recover the complete source. The
+940-byte downstream stress is still incomplete at the native serial
+interface. The short downstream message remains the bidirectional control.
+See `docs/x2_v34_upstream_review.md` for evidence, sampling decisions and
+remaining echo/recovery qualification. The upstream cap stays at 4800 until
+higher rates pass foreign payload tests.

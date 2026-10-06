@@ -61,3 +61,64 @@ errors from inverse mapping/epoch errors before changing any loop gains.
 
 The diagnostic default remains 4800. Raising it without a complete native
 payload test would advertise a rate that this receiver has not qualified.
+
+## 4800 receive corrections and sample-rate decision
+
+The follow-up native Courier investigation found two receiver defects, without
+changing DSP constants, scrambler conventions or the G.711 bearer:
+
+1. The T/3 B1 watcher parked the input Table-12 epoch back at the final data
+   frame after consuming B1. That can accommodate an extended V.90 training
+   stream, but original Courier x2 mapper execution verifies the single
+   reset-state frame of V.34 10.1.3.1. x2 now advances naturally into the new
+   superframe and enables the h=0 trellis parity constraint (9.6.3/Table 11).
+   Trailing B1 bits remain suppressed through the 15-pair traceback delay.
+2. After initial idle, the V.90 frame-phase heuristic treated busy 4800 data
+   as a loss of synchronization and swept the epoch. At K=0 there is no shell
+   bound, and a falling fraction of marks is ordinary user traffic. x2 now
+   retains the epoch established by B1; content is not grounds to move it.
+
+Read-only native point capture recovered the complete original source from
+exact points. The waveform receiver had isolated pairs of errors despite
+approximately 0.00035 MSE in most windows. Enabling the correctly phased
+constraint recovers the previously corrupt short source. The first long run
+then exposed the phase sweep: 13 complete lines before corruption even with
+an open constellation. Preserving the epoch recovers all 70 lines / 3500
+bytes from that recording at 17-, 80- and 160-sample receive block sizes.
+A fresh native call also delivers all 3500 upstream bytes through the real
+engine PTY. Its simultaneous 940-byte downstream burst is incomplete at the
+native serial interface, so that run is not a complete bidirectional pass.
+A second fresh call (`artifacts/x2-rx-improve-20261006-long-rx-fixed`)
+passes all seven checks: the full 3500-byte upstream source and a short
+downstream message both reach their real PTYs. The final output-clamp build
+repeats this pass in `artifacts/x2-rx-improve-20261006-final`.
+Evidence: `artifacts/x2-rx-improve-20261006-*`.
+
+Receive sampling was checked rather than changed speculatively:
+
+| Receiver | Internal equalizer input | Decision |
+|---|---|---|
+| x2 / V.90 V.34 upstream | Three complex samples/symbol, 9600 Hz at 3200 baud | Retained; verified by complete-engine foreign-payload replays. |
+| Plain V.34 | Polyphase matched filter at half-symbol intervals | Retained; its separate acquisition path is not qualified by x2 results. |
+| V.32 / V.32bis | V.17-derived matched filter and FSE at half-symbol intervals | Retained; existing duplex suite passes all rates/laws and echo/retrain/renegotiation cases. |
+
+Three samples/symbol is not a normative requirement, and changing the two
+working half-symbol receivers would introduce new timing and training
+handoffs without fixing the measured errors above. Internal interpolation
+operates on the receiver's copy of linear samples; wire codewords and the
+8000-sample/s bearer accounting remain unchanged.
+
+Validation: `v34_data_test` (402 exact mapper/trellis/V0 cases), recorded
+`x2_b1_test` (17/160-sample acquisition and silence rejection), x2 mapper,
+session and symmetric tests, and `v32bis_duplex_test` pass. The new
+`tools/test_x2_host_replay.py <tap> --expected-file <source>` requires
+the preserved native tap and source
+and asserts complete foreign bytes, DATA, exact RX/TX sample counts, T/3
+operation, B1 handoff and absence of content-triggered phase shifts.
+
+Echo cancellation was inspected but not retuned on this evidence. V.32bis
+already trains its canceller in the clause-6 quiet window and passes its
+hybrid sweep. The engine's separate V.34 NLMS path still needs independent
+qualification of transmit-reference alignment, per-call reset and adaptation
+while the far end is active. Later native x2 MP/rate transitions and hardware
+interop remain separate from the verified initial 4800 transfer.
