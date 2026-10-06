@@ -109,6 +109,15 @@ typedef enum {
     CC_V110_CAUSE_T2         /* 7.1.4.1: our request unanswered in T2 */
 } cc_v110_cause_t;
 
+/* V.120 data link: UI frames only, or Q.922 acknowledged operation (4.2). */
+typedef enum {
+    CC_LF_UI = 0,            /* UI frames (also the fallback if SABME fails) */
+    CC_LF_DOWN,              /* acknowledged mode wanted, SABME not sent yet */
+    CC_LF_SETUP,             /* SABME sent, awaiting UA */
+    CC_LF_UP                 /* multiple-frame mode established */
+} cc_lf_state_t;
+#define CC_LF_K 15           /* window k; a power of two minus one fits mod 128 */
+
 typedef struct {
     cc_mode_t mode;
     bool r56;                /* restricted 56 kbit/s: 7 bits per octet */
@@ -127,6 +136,18 @@ typedef struct {
     hdlc_rx_state_t *hrx;
     bool tx_frame_queued;
     bool v120_peer_rr;           /* RR(R), 3.2.3.1: 1 until a CS says so */
+
+    /* V.120 acknowledged mode (Q.922 mod 128) */
+    bool v120_ack;
+    cc_lf_state_t lf_state;
+    int lf_vs, lf_va, lf_vnew, lf_vr, lf_retries;
+    bool lf_peer_busy, lf_rej_sent, lf_timer_rec, lf_enquire;
+    bool lf_pend_ack, lf_pend_ua, lf_pend_dm, lf_pend_f, lf_pend_rr_f, lf_pend_rej, lf_pend_rej_f;
+    bool lf_t200_on;
+    uint64_t lf_t200_at;
+    uint8_t lf_win[16][1 + CC_V120_MAX_DATA];
+    int lf_win_len[16];
+    uint64_t lf_fallbacks, lf_resets, lf_rewinds, lf_discarded;
 
     /* V.110 */
     int v110_user_rate;          /* asynchronous DTE rate, Table 8 */
@@ -192,6 +213,10 @@ int  cc_init_v120(clear_channel_t *cc, bool r56, bool caller,
 int  cc_init_v110(clear_channel_t *cc, int user_rate,
                   cc_pull_byte_fn pull, cc_push_byte_fn push, void *ctx);
 void cc_release(clear_channel_t *cc);
+/* V.120 4.2: carry the data in Q.922 I-frames (SABME/UA, mod 128, k = 15,
+ * T200 1.5 s, N200 3) instead of UI frames.  Call right after cc_init_v120().
+ * A peer that refuses (DM) or never answers SABME gets UI frames. */
+void cc_v120_set_ack(clear_channel_t *cc, bool ack);
 /* V.110 5.4.2: turn X OFF towards the far end when the DTE-side receive
  * buffer is under a quarter free (characters already in flight still fit),
  * back ON once it is over a half free.  Only in the data transfer state. */

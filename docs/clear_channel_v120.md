@@ -58,10 +58,19 @@ what is still open (V120-5, break).
 | Header | `83`: E=1, B=1, F=1, no CS octet (3.2.3: CS is optional) | H plus at most one CS; with H.E=0 the CS must be present with E=1 (3.1.2.1), else the frame is bad and nothing is delivered |
 | CS | never sent | RR is honoured: RR=0 stops user data, RR=1 resumes (3.2.4.1); DR/SR ignored |
 
-- **Unacknowledged mode only** (UI frames). The multiple-frame acknowledged
-  mode (SABME, I-frames, RR/REJ, T200) and 4.2.2's optional XID link
-  verification are not implemented; such frames are counted as unsupported
-  and dropped, so a peer that insists on either will not get data through.
+- **UI frames by default; Q.922 acknowledged mode with `ME_V120_ACK=1`**
+  (`cc_v120_set_ack()`). Acknowledged operation (4.2) is modulo 128 with
+  k = 15, T200 = 1.5 s, N200 = 3: SABME (P=1) / UA (F=1) from both ends (a
+  collision answers UA and waits for the peer's), I-frames carrying the same
+  H octet and data as UI, RR/RNR/REJ, an RR enquiry (P=1) on T200 followed
+  by go-back-N, re-establishment when N200 runs out or an N(R) is invalid,
+  DISC answered with UA. **Policy, not in the Recommendation:** a caller
+  whose SABME is answered DM (an UI-only peer, as this one is by default) or
+  not at all (N200 SABMEs, ~6 s) falls back to UI frames, so mixed pairs
+  work and nothing is lost; the cost against a silent peer is that delay.
+  Not implemented: 4.2.2 XID link verification (XID counts as unsupported),
+  FRMR, our own RNR (the DTE-side ring does not back-pressure V.120 yet),
+  and the V.42-style "mode collision" handling of 4.2.3.
 - A received BR is counted, not delivered: the byte interface to the PTY has
   no way to signal a break (audit V120-5). Break is not sent either.
 - Not implemented: synchronous (HDLC) and bit-transparent modes, segmentation,

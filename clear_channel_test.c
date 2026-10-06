@@ -198,6 +198,139 @@ static void spy_frame(void *user_data, const uint8_t *pkt, int len, int ok)
         spy_max_len = len;
 }
 
+/* ---- V.120 acknowledged mode (Q.922, V.120 4.2) ---- */
+
+static int ack_ctl_seen[256];
+static void ack_spy_frame(void *user, const uint8_t *pkt, int len, int ok)
+{
+    (void) user;
+    if (len >= 3 && ok)
+        ack_ctl_seen[pkt[2]]++;
+}
+
+/* Run an acknowledged pair; blocks of 160 octets A->B in [la0,la1) and
+ * B->A in [lb0,lb1) are destroyed.  Returns when `ticks` have run. */
+static void ack_run(clear_channel_t *a, clear_channel_t *b, int ticks,
+                    int la0, int la1, int lb0, int lb1, hdlc_rx_state_t *spy)
+{
+    uint8_t ab[160], ba[160];
+
+    for (int t = 0; t < ticks; t++) {
+        cc_tx(a, ab, 160);
+        cc_tx(b, ba, 160);
+        if (spy)
+            for (int i = 0; i < 160; i++)
+                for (int k = 0; k < 8; k++)
+                    hdlc_rx_put_bit(spy, (ab[i] >> (7 - k)) & 1);
+        if (t >= la0 && t < la1)
+            memset(ab, 0x55, sizeof(ab));
+        if (t >= lb0 && t < lb1)
+            memset(ba, 0x55, sizeof(ba));
+        cc_rx(b, ab, 160);
+        cc_rx(a, ba, 160);
+    }
+}
+
+static void test_v120_ack(void)
+{
+    end_t *ea = calloc(1, sizeof(*ea)), *eb = calloc(1, sizeof(*eb));
+    clear_channel_t a, b;
+    hdlc_rx_state_t *spy;
+
+    printf("V.120 acknowledged mode (Q.922):\n");
+    ea->src = text_a; ea->src_len = sizeof(text_a);
+    eb->src = text_b; eb->src_len = sizeof(text_b);
+    cc_init_v120(&a, false, true, end_pull, end_push, ea);
+    cc_init_v120(&b, false, false, end_pull, end_push, eb);
+    cc_v120_set_ack(&a, true);
+    cc_v120_set_ack(&b, true);
+    memset(ack_ctl_seen, 0, sizeof(ack_ctl_seen));
+    spy = hdlc_rx_init(NULL, false, true, 1, ack_spy_frame, NULL);
+    hdlc_rx_set_max_frame_len(spy, 400);
+    ack_run(&a, &b, 100, 0, 0, 0, 0, spy);
+    check(a.lf_state == CC_LF_UP && b.lf_state == CC_LF_UP, "SABME / UA: both ends established");
+    check(ack_ctl_seen[0x7F] >= 1 && ack_ctl_seen[0x73] >= 1,
+          "on the wire: SABME (P = 1) 0x7F and UA (F = 1) 0x73, from independent decoding");
+    check(eb->dst_len == sizeof(text_a) && !memcmp(eb->dst, text_a, sizeof(text_a))
+          && ea->dst_len == sizeof(text_b) && !memcmp(ea->dst, text_b, sizeof(text_b)),
+          "data both ways byte-exact over I-frames");
+    check(a.rx_bad_frames == 0 && b.rx_bad_frames == 0 && a.lf_resets == 0 && b.lf_resets == 0
+          && a.lf_state == CC_LF_UP && a.lf_va == a.lf_vnew,
+          "no bad frames, no resets, everything acknowledged");
+    {
+        int i_frames = 0;
+
+        for (int c = 0; c < 256; c += 2)
+            i_frames += ack_ctl_seen[c];
+        check(i_frames >= 12 && ack_ctl_seen[0x03] == 0, "I-frames carried the data, no UI frames");
+    }
+    hdlc_rx_free(spy);
+    cc_release(&a);
+    cc_release(&b);
+
+    /* Loss: 6 blocks (0.12 s) of A's frames destroyed mid-transfer, and a
+     * stretch of B's acknowledgements too.  REJ / T200 recovery must deliver
+     * every byte exactly once and in order. */
+    memset(ea, 0, sizeof(*ea));
+    memset(eb, 0, sizeof(*eb));
+    ea->src = text_a; ea->src_len = sizeof(text_a);
+    eb->src = text_b; eb->src_len = sizeof(text_b);
+    cc_init_v120(&a, false, true, end_pull, end_push, ea);
+    cc_init_v120(&b, false, false, end_pull, end_push, eb);
+    cc_v120_set_ack(&a, true);
+    cc_v120_set_ack(&b, true);
+    ack_run(&a, &b, 400, 5, 9, 10, 14, NULL);
+    check(eb->dst_len == sizeof(text_a) && !memcmp(eb->dst, text_a, sizeof(text_a))
+          && ea->dst_len == sizeof(text_b) && !memcmp(ea->dst, text_b, sizeof(text_b)),
+          "after loss both ways: every byte exactly once, in order");
+    check(b.lf_discarded + a.lf_discarded + a.lf_rewinds + b.lf_rewinds > 0
+          && a.lf_state == CC_LF_UP && b.lf_state == CC_LF_UP,
+          "recovery actually ran (REJ / enquiry / rewind) and the link stayed up");
+    cc_release(&a);
+    cc_release(&b);
+
+    /* An acknowledged caller against a UI-only peer: DM refuses, UI follows. */
+    memset(ea, 0, sizeof(*ea));
+    memset(eb, 0, sizeof(*eb));
+    ea->src = text_a; ea->src_len = 800;
+    eb->src = text_b; eb->src_len = 500;
+    cc_init_v120(&a, false, true, end_pull, end_push, ea);
+    cc_init_v120(&b, false, false, end_pull, end_push, eb);
+    cc_v120_set_ack(&a, true);
+    ack_run(&a, &b, 60, 0, 0, 0, 0, NULL);
+    check(a.lf_state == CC_LF_UI && a.lf_fallbacks == 1
+          && eb->dst_len == 800 && !memcmp(eb->dst, text_a, 800)
+          && ea->dst_len == 500 && !memcmp(ea->dst, text_b, 500),
+          "UI-only peer answers SABME with DM: caller falls back to UI, data exact");
+    cc_release(&a);
+    cc_release(&b);
+
+    /* A peer that says nothing at all: N200 SABMEs, then UI. */
+    memset(ea, 0, sizeof(*ea));
+    ea->src = text_a; ea->src_len = 300;
+    cc_init_v120(&a, false, true, end_pull, end_push, ea);
+    cc_v120_set_ack(&a, true);
+    {
+        uint8_t o[160], quiet[160];
+
+        memset(quiet, 0xFF, sizeof(quiet));
+        for (int t = 0; t < 40; t++) {            /* 0.8 s: still trying */
+            cc_tx(&a, o, 160);
+            cc_rx(&a, quiet, 160);
+        }
+        check(a.lf_state == CC_LF_SETUP && ea->src_pos == 0, "SABME unanswered: no data sent yet");
+        for (int t = 0; t < 400; t++) {           /* 8 s more */
+            cc_tx(&a, o, 160);
+            cc_rx(&a, quiet, 160);
+        }
+        check(a.lf_state == CC_LF_UI && ea->src_pos == 300,
+              "after N200 retries a silent peer gets UI frames");
+    }
+    cc_release(&a);
+    free(ea);
+    free(eb);
+}
+
 static void test_v120_pair(bool r56)
 {
     end_t *ea = calloc(1, sizeof(*ea)), *eb = calloc(1, sizeof(*eb));
@@ -1130,6 +1263,7 @@ int main(void)
     test_v110_ra0_rx();
     test_v110_t2();
     test_v110_flow();
+    test_v120_ack();
     if (test_engine() < 0) {
         printf("  FAIL engine/PTY setup\n");
         failures++;

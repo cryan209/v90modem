@@ -412,6 +412,8 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22
 # No datapump: the DS0 is the bit pipe (clear_channel.c), two whole engines.
 	./engine_pair_test --expect CLEAR --expect-connect 64000 --both-at "AT+MS=V120"
+	./engine_pair_test --expect CLEAR --expect-connect 64000 --both-at "AT+MS=V120" --both-env ME_V120_ACK=1
+	./engine_pair_test --expect CLEAR --expect-connect 64000 --both-at "AT+MS=V120" --call-env ME_V120_ACK=1
 	./engine_pair_test --expect CLEAR --expect-connect 9600 --both-at "AT+MS=V110,0,0,9600"
 	./engine_pair_test --expect CLEAR --expect-connect 38400 --both-at "AT+MS=V110"
 	./engine_pair_test --expect V22BIS --expect-connect 2400 --both-at "AT+MS=V22B"

@@ -60,33 +60,360 @@ void cc_v120_frame_header(const clear_channel_t *cc, uint8_t hdr[4])
     hdr[3] = CC_V120_H_E | CC_V120_H_B | CC_V120_H_F;
 }
 
-/* Queue a frame of whatever the DTE has, if it has anything. */
-static void v120_load_frame(clear_channel_t *cc)
+/* Queue a built frame (address .. FCS-less body). */
+static void v120_queue(clear_channel_t *cc, const uint8_t *frame, int len)
 {
-    uint8_t frame[4 + CC_V120_MAX_DATA];
+    if (hdlc_tx_frame(cc->htx, frame, (size_t) len) == 0) {
+        cc->tx_frame_queued = true;
+        cc->tx_frames++;
+    }
+}
+
+/* Pull up to one frame's worth of DTE characters behind a header of
+ * 'hdr' octets already in frame[]; returns the count. */
+static int v120_pull_data(clear_channel_t *cc, uint8_t *dst)
+{
     int n = 0;
 
-    if (cc->tx_frame_queued || !cc->pull)
-        return;
-    /* 3.2.4.1: the peer's RR = 0 asserts flow control; no user data until
-     * a control-state octet sets it back to 1. */
-    if (!cc->v120_peer_rr)
-        return;
     while (n < CC_V120_MAX_DATA) {
         int b = cc->pull(cc->ctx);
 
         if (b < 0)
             break;
-        frame[4 + n++] = (uint8_t) b;
+        dst[n++] = (uint8_t) b;
     }
+    return n;
+}
+
+/* ---- Q.922 multiple-frame acknowledged operation (V.120 4.2) ---- */
+
+#define LF_MOD        128
+#define LF_T200_OCTETS 12000u     /* 1.5 s (Q.922 default) */
+#define LF_N200       3
+
+/* Address octets for a command (C/R 0) or response (C/R 1), Table 4. */
+static void lf_addr(const clear_channel_t *cc, bool response, uint8_t *a)
+{
+    a[0] = (uint8_t) ((((cc->lli >> 7) & 0x3F) << 2) | (response ? 0x02 : 0));
+    a[1] = (uint8_t) (((cc->lli & 0x7F) << 1) | 1);
+}
+
+static void lf_send_u(clear_channel_t *cc, bool response, uint8_t ctl, bool pf)
+{
+    uint8_t f[3];
+
+    lf_addr(cc, response, f);
+    f[2] = (uint8_t) (ctl | (pf ? 0x10 : 0));
+    v120_queue(cc, f, 3);
+}
+
+static void lf_send_s(clear_channel_t *cc, bool response, uint8_t ctl, bool pf)
+{
+    uint8_t f[4];
+
+    lf_addr(cc, response, f);
+    f[2] = ctl;
+    f[3] = (uint8_t) ((cc->lf_vr << 1) | (pf ? 1 : 0));
+    v120_queue(cc, f, 4);
+}
+
+static void lf_reset_vars(clear_channel_t *cc)
+{
+    cc->lf_vs = cc->lf_va = cc->lf_vnew = cc->lf_vr = 0;
+    cc->lf_peer_busy = cc->lf_rej_sent = cc->lf_timer_rec = false;
+    cc->lf_pend_ack = cc->lf_enquire = false;
+    cc->lf_t200_on = false;
+    cc->lf_retries = 0;
+}
+
+static void lf_t200_start(clear_channel_t *cc)
+{
+    cc->lf_t200_on = true;
+    cc->lf_t200_at = cc->tx_octets + LF_T200_OCTETS;
+}
+
+/* Q.922 5.6.x: N(R) acknowledges everything before it, if it is in range. */
+static bool lf_ack_upto(clear_channel_t *cc, int nr)
+{
+    int outstanding = (cc->lf_vnew - cc->lf_va) & (LF_MOD - 1);
+    int acked = (nr - cc->lf_va) & (LF_MOD - 1);
+
+    if (acked > outstanding)
+        return false;                       /* invalid N(R) */
+    if (acked) {
+        cc->lf_va = nr;
+        cc->lf_retries = 0;
+        if (cc->lf_va == cc->lf_vnew)
+            cc->lf_t200_on = false;
+        else
+            lf_t200_start(cc);
+    }
+    return true;
+}
+
+static void v120_deliver(clear_channel_t *cc, const uint8_t *info, int len);
+
+/* One I-frame: a retransmission from the window, or new DTE data. */
+static bool lf_send_i(clear_channel_t *cc)
+{
+    uint8_t f[4 + 1 + CC_V120_MAX_DATA];
+    int ilen, ns;
+
+    if (cc->lf_peer_busy || cc->lf_timer_rec)
+        return false;
+    if (cc->lf_vs != cc->lf_vnew) {
+        ns = cc->lf_vs;
+        ilen = cc->lf_win_len[ns & 15];
+        memcpy(f + 4, cc->lf_win[ns & 15], (size_t) ilen);
+        cc->lf_vs = (cc->lf_vs + 1) & (LF_MOD - 1);
+    } else {
+        int n;
+
+        if (((cc->lf_vnew - cc->lf_va) & (LF_MOD - 1)) >= CC_LF_K || !cc->pull)
+            return false;
+        n = v120_pull_data(cc, f + 5);
+        if (n == 0)
+            return false;
+        f[4] = CC_V120_H_E | CC_V120_H_B | CC_V120_H_F;
+        ilen = 1 + n;
+        ns = cc->lf_vnew;
+        memcpy(cc->lf_win[ns & 15], f + 4, (size_t) ilen);
+        cc->lf_win_len[ns & 15] = ilen;
+        cc->lf_vnew = cc->lf_vs = (cc->lf_vnew + 1) & (LF_MOD - 1);
+        cc->tx_data_bytes += (uint64_t) n;
+    }
+    lf_addr(cc, false, f);
+    f[2] = (uint8_t) (ns << 1);
+    f[3] = (uint8_t) (cc->lf_vr << 1);
+    cc->lf_pend_ack = false;               /* N(R) rides on this frame */
+    if (!cc->lf_t200_on)
+        lf_t200_start(cc);
+    v120_queue(cc, f, 4 + ilen);
+    return true;
+}
+
+static void lf_timers(clear_channel_t *cc)
+{
+    if (!cc->lf_t200_on || cc->tx_octets < cc->lf_t200_at)
+        return;
+    cc->lf_t200_on = false;
+    if (cc->lf_state == CC_LF_SETUP) {
+        if (++cc->lf_retries > LF_N200) {
+            /* Nobody answers SABME: a UI-only peer drops it silently.
+             * Carry the data in UI frames, as the audit's profile does. */
+            cc->lf_state = CC_LF_UI;
+            cc->lf_fallbacks++;
+        } else {
+            lf_send_u(cc, false, 0x6F, true);
+            lf_t200_start(cc);
+        }
+    } else if (cc->lf_state == CC_LF_UP) {
+        if (++cc->lf_retries > LF_N200) {
+            /* Q.922 5.6.7: N200 exhausted, re-establish the link. */
+            cc->lf_state = CC_LF_DOWN;
+            cc->lf_resets++;
+        } else {
+            cc->lf_timer_rec = true;       /* enquire with RR, P = 1 */
+            cc->lf_enquire = true;
+            lf_t200_start(cc);
+        }
+    }
+}
+
+static void v120_ack_poll(clear_channel_t *cc)
+{
+    lf_timers(cc);
+    if (cc->tx_frame_queued)
+        return;
+    if (cc->lf_pend_dm) {
+        cc->lf_pend_dm = false;
+        lf_send_u(cc, true, 0x0F, cc->lf_pend_f);
+        return;
+    }
+    if (cc->lf_pend_ua) {
+        cc->lf_pend_ua = false;
+        lf_send_u(cc, true, 0x63, cc->lf_pend_f);
+        return;
+    }
+    if (cc->lf_state == CC_LF_DOWN) {
+        lf_reset_vars(cc);
+        cc->lf_state = CC_LF_SETUP;
+        lf_send_u(cc, false, 0x6F, true);
+        lf_t200_start(cc);
+        return;
+    }
+    if (cc->lf_state != CC_LF_UP)
+        return;
+    if (cc->lf_pend_rr_f) {
+        cc->lf_pend_rr_f = false;
+        cc->lf_pend_ack = false;
+        lf_send_s(cc, true, 0x01, true);
+        return;
+    }
+    if (cc->lf_pend_rej) {
+        cc->lf_pend_rej = false;
+        cc->lf_pend_ack = false;
+        lf_send_s(cc, true, 0x09, cc->lf_pend_rej_f);
+        return;
+    }
+    if (cc->lf_enquire) {
+        cc->lf_enquire = false;
+        lf_send_s(cc, false, 0x01, true);
+        return;
+    }
+    if (lf_send_i(cc))
+        return;
+    if (cc->lf_pend_ack) {
+        cc->lf_pend_ack = false;
+        lf_send_s(cc, true, 0x01, false);
+    }
+}
+
+/* Receive: everything with an address for our LLI that is not a UI frame. */
+static void lf_rx(clear_channel_t *cc, const uint8_t *pkt, int len)
+{
+    bool cmd = (pkt[0] & 0x02) == 0;
+    uint8_t ctl = pkt[2];
+
+    if ((ctl & 0x01) == 0) {                       /* I frame */
+        int ns, nr;
+        bool p;
+
+        if (len < 5 || !cc->v120_ack || cc->lf_state != CC_LF_UP) {
+            cc->rx_unsupported++;
+            if (cc->lf_state != CC_LF_UP) {         /* Q.922: DM when no link */
+                cc->lf_pend_dm = true;
+                cc->lf_pend_f = (pkt[3] & 1) != 0;
+            }
+            return;
+        }
+        ns = ctl >> 1;
+        nr = pkt[3] >> 1;
+        p = (pkt[3] & 1) != 0;
+        if (!lf_ack_upto(cc, nr)) {
+            cc->lf_state = CC_LF_DOWN;            /* invalid N(R): re-establish */
+            cc->lf_resets++;
+            return;
+        }
+        if (ns == cc->lf_vr) {
+            cc->lf_vr = (cc->lf_vr + 1) & (LF_MOD - 1);
+            cc->lf_rej_sent = false;
+                    v120_deliver(cc, pkt + 4, len - 4);
+            cc->lf_pend_ack = true;
+            if (p)
+                cc->lf_pend_rr_f = true;
+        } else {
+            cc->lf_discarded++;
+            if (!cc->lf_rej_sent || p) {           /* one REJ per gap, F = P */
+                cc->lf_rej_sent = true;
+                cc->lf_pend_rej = true;
+                cc->lf_pend_rej_f = p;
+            }
+        }
+        return;
+    }
+    if ((ctl & 0x03) == 0x01) {                    /* S frame: RR, RNR, REJ */
+        int nr = pkt[3] >> 1;
+        bool pf = (pkt[3] & 1) != 0;
+
+        if (len < 4 || cc->lf_state != CC_LF_UP)
+            return;
+        if (!lf_ack_upto(cc, nr)) {
+            cc->lf_state = CC_LF_DOWN;
+            cc->lf_resets++;
+            return;
+        }
+        switch (ctl & 0x0C) {
+        case 0x00: cc->lf_peer_busy = false; break;   /* RR */
+        case 0x04: cc->lf_peer_busy = true;  break;   /* RNR */
+        case 0x08: cc->lf_peer_busy = false;          /* REJ: go back to N(R) */
+                   cc->lf_vs = cc->lf_va; cc->lf_rewinds++; break;
+        }
+        if (cmd && pf)
+            cc->lf_pend_rr_f = true;
+        if (!cmd && pf && cc->lf_timer_rec) {      /* answer to our enquiry */
+            cc->lf_timer_rec = false;
+            if (cc->lf_va != cc->lf_vnew) {
+                cc->lf_vs = cc->lf_va;             /* nothing heard: resend */
+                cc->lf_rewinds++;
+                lf_t200_start(cc);
+            }
+        }
+        return;
+    }
+    switch (ctl & ~0x10) {                         /* U frames */
+    case 0x6F:                                     /* SABME */
+        if (!cc->v120_ack) {                       /* Q.922: refuse with DM */
+            cc->lf_pend_dm = true;
+            cc->lf_pend_f = (ctl & 0x10) != 0;
+            cc->rx_unsupported++;
+            return;
+        }
+        cc->lf_pend_ua = true;
+        cc->lf_pend_f = (ctl & 0x10) != 0;
+        if (cc->lf_state == CC_LF_UP)
+            cc->lf_resets++;
+        if (cc->lf_state != CC_LF_SETUP) {         /* collision: wait for UA */
+            lf_reset_vars(cc);
+            cc->lf_state = CC_LF_UP;
+        }
+        break;
+    case 0x63:                                     /* UA */
+        if (cc->lf_state == CC_LF_SETUP) {
+            lf_reset_vars(cc);
+            cc->lf_state = CC_LF_UP;
+        }
+        break;
+    case 0x0F:                                     /* DM */
+        if (cc->lf_state == CC_LF_SETUP) {
+            cc->lf_state = CC_LF_UI;               /* refused: UI frames */
+            cc->lf_t200_on = false;
+            cc->lf_fallbacks++;
+        }
+        break;
+    case 0x43:                                     /* DISC */
+        cc->lf_pend_ua = true;
+        cc->lf_pend_f = (ctl & 0x10) != 0;
+        if (cc->lf_state == CC_LF_UP) {
+            cc->lf_state = CC_LF_DOWN;
+            cc->lf_resets++;
+        }
+        break;
+    default:
+        cc->rx_unsupported++;                      /* XID, FRMR */
+        break;
+    }
+}
+
+/* Queue a frame of whatever the DTE has, if it has anything. */
+static void v120_load_frame(clear_channel_t *cc)
+{
+    uint8_t frame[4 + CC_V120_MAX_DATA];
+    int n;
+
+    if (cc->tx_frame_queued)
+        return;
+    if (cc->v120_ack && cc->lf_state != CC_LF_UI) {
+        v120_ack_poll(cc);
+        return;
+    }
+    if (cc->lf_pend_dm) {                  /* refuse a SABME (Q.922 5.5) */
+        cc->lf_pend_dm = false;
+        lf_send_u(cc, true, 0x0F, cc->lf_pend_f);
+        return;
+    }
+    if (!cc->pull)
+        return;
+    /* 3.2.4.1: the peer's RR = 0 asserts flow control; no user data until
+     * a control-state octet sets it back to 1. */
+    if (!cc->v120_peer_rr)
+        return;
+    n = v120_pull_data(cc, frame + 4);
     if (n == 0)
         return;
     cc_v120_frame_header(cc, frame);
-    if (hdlc_tx_frame(cc->htx, frame, (size_t) (4 + n)) == 0) {
-        cc->tx_frame_queued = true;
-        cc->tx_frames++;
-        cc->tx_data_bytes += (uint64_t) n;
-    }
+    v120_queue(cc, frame, 4 + n);
+    cc->tx_data_bytes += (uint64_t) n;
 }
 
 static void v120_underflow(void *user_data)
@@ -97,15 +424,48 @@ static void v120_underflow(void *user_data)
     v120_load_frame(cc);
 }
 
+/* The information field: H, an optional control-state octet, the data. */
+static void v120_deliver(clear_channel_t *cc, const uint8_t *info, int len)
+{
+    int pos = 1;
+    uint8_t h = info[0];
+
+    /* 3.1: the header is H plus at most ONE control-state octet.  With
+     * H.E = 0 the CS must be present and carry E = 1 (3.1.2.1: "the receipt
+     * of a control state octet with the E bit set to 0 shall be considered
+     * an error").  Reject before any payload is delivered -- audit V120-2. */
+    if (!(h & CC_V120_H_E)) {
+        if (len < 2 || !(info[1] & CC_V120_CS_E)) {
+            cc->rx_bad_frames++;
+            return;
+        }
+        /* 3.2.3.3/3.2.4.1: RR(R) follows the received RR; RR = 0 holds
+         * our user data back.  DR and SR map V.24 circuits this byte
+         * interface does not have. */
+        cc->v120_peer_rr = (info[1] & CC_V120_CS_RR) != 0;
+        pos = 2;
+    }
+    cc->rx_frames++;
+    /* 3.1.1.2: BR = 1 is a break.  The byte interface cannot carry one to
+     * the DTE, so it is counted (audit V120-5, open); the frame's
+     * characters still precede it. */
+    if (h & CC_V120_H_BR)
+        cc->rx_breaks++;
+    for (; pos < len; pos++) {
+        if (cc->push)
+            cc->push(cc->ctx, info[pos]);
+        cc->rx_data_bytes++;
+    }
+}
+
 static void v120_frame(void *user_data, const uint8_t *pkt, int len, int ok)
 {
     clear_channel_t *cc = (clear_channel_t *) user_data;
-    int pos, lli;
-    uint8_t h;
+    int lli;
 
     if (len < 0)
         return;            /* a status report, not a frame */
-    if (!ok || len < 4) {
+    if (!ok || len < 3) {
         cc->rx_bad_frames++;
         return;
     }
@@ -117,49 +477,26 @@ static void v120_frame(void *user_data, const uint8_t *pkt, int len, int ok)
     /* 6.2.2.1: LLI0 (bits 8..3 of octet 1) then LLI1 (bits 8..2 of octet
      * 2).  Only our link's frames reach the DTE: LLI 0 is in-channel
      * signalling, 8191 layer management, and any other value is another
-     * logical link (Table 3) -- audit V120-3.  C/R is not checked: UI is a
-     * command (C/R 0), but builds before 2026-10-06 sent C/R 1 from the
-     * answerer and a lenient receiver costs nothing here. */
+     * logical link (Table 3) -- audit V120-3.  C/R is not checked for UI:
+     * UI is a command (C/R 0), but builds before 2026-10-06 sent C/R 1
+     * from the answerer and a lenient receiver costs nothing here. */
     lli = (((pkt[0] >> 2) & 0x3F) << 7) | ((pkt[1] >> 1) & 0x7F);
     if (lli != cc->lli) {
         cc->rx_other_lli++;
         return;
     }
-    /* UI (P/F either way).  Anything else -- I-frames, RR, SABME, XID --
-     * belongs to the multiple-frame acknowledged mode or 4.2.2's optional
-     * link verification, neither of which this implements. */
-    if ((pkt[2] & ~0x10) != 0x03) {
-        cc->rx_unsupported++;
-        return;
-    }
-    /* 3.1: the header is H plus at most ONE control-state octet.  With
-     * H.E = 0 the CS must be present and carry E = 1 (3.1.2.1: "the receipt
-     * of a control state octet with the E bit set to 0 shall be considered
-     * an error").  Reject before any payload is delivered -- audit V120-2. */
-    h = pkt[3];
-    pos = 4;
-    if (!(h & CC_V120_H_E)) {
-        if (len < 5 || !(pkt[4] & CC_V120_CS_E)) {
+    /* UI (P/F either way) carries the V.120 header directly; everything
+     * else is Q.922 acknowledged operation (4.2) or XID (4.2.2, optional
+     * link verification, not implemented). */
+    if ((pkt[2] & ~0x10) == 0x03) {
+        if (len < 4) {
             cc->rx_bad_frames++;
             return;
         }
-        /* 3.2.3.3/3.2.4.1: RR(R) follows the received RR; RR = 0 holds
-         * our user data back.  DR and SR map V.24 circuits this byte
-         * interface does not have. */
-        cc->v120_peer_rr = (pkt[4] & CC_V120_CS_RR) != 0;
-        pos = 5;
+        v120_deliver(cc, pkt + 3, len - 3);
+        return;
     }
-    cc->rx_frames++;
-    /* 3.1.1.2: BR = 1 is a break.  The byte interface cannot carry one to
-     * the DTE, so it is counted (audit V120-5, open); the frame's
-     * characters still precede it. */
-    if (h & CC_V120_H_BR)
-        cc->rx_breaks++;
-    for (; pos < len; pos++) {
-        if (cc->push)
-            cc->push(cc->ctx, pkt[pos]);
-        cc->rx_data_bytes++;
-    }
+    lf_rx(cc, pkt, len);
 }
 
 /* ---------------------------------------------------------------- */
@@ -753,6 +1090,12 @@ int cc_init_clear(clear_channel_t *cc, bool r56,
     return 0;
 }
 
+void cc_v120_set_ack(clear_channel_t *cc, bool ack)
+{
+    cc->v120_ack = ack;
+    cc->lf_state = ack ? CC_LF_DOWN : CC_LF_UI;
+}
+
 int cc_init_v120(clear_channel_t *cc, bool r56, bool caller,
                  cc_pull_byte_fn pull, cc_push_byte_fn push, void *ctx)
 {
@@ -762,6 +1105,7 @@ int cc_init_v120(clear_channel_t *cc, bool r56, bool caller,
     cc->caller = caller;
     cc->lli = CC_V120_DEFAULT_LLI;
     cc->v120_peer_rr = true;     /* 3.2.3.1: assume 1 until a CS arrives */
+    cc->lf_state = CC_LF_UI;
     cc->pull = pull;
     cc->push = push;
     cc->ctx = ctx;
@@ -771,7 +1115,7 @@ int cc_init_v120(clear_channel_t *cc, bool r56, bool caller,
         cc_release(cc);
         return -1;
     }
-    hdlc_tx_set_max_frame_len(cc->htx, 4 + CC_V120_MAX_DATA);
+    hdlc_tx_set_max_frame_len(cc->htx, 5 + CC_V120_MAX_DATA);
     /* SpanDSP's transmitter starts with no flag at all, so a frame queued
      * at once would begin at the first octet with nothing to sync a
      * receiver to.  Open with flags, as a line idles before data. */
@@ -811,7 +1155,7 @@ void cc_tx(clear_channel_t *cc, uint8_t *octets, int n)
     }
 
     if (cc->mode == CC_V120)
-        v120_load_frame(cc);
+        v120_load_frame(cc);   /* also runs the acknowledged-mode timers */
     for (int i = 0; i < n; i++) {
         uint8_t o = 0;
 

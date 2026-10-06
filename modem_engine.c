@@ -8792,6 +8792,14 @@ static int me_clear_start_locked(void)
                          data_stack_pull_dte_byte, data_stack_push_dte_byte,
                          NULL) != 0)
             return 0;
+        {
+            /* V.120 4.2: Q.922 acknowledged operation, falling back to UI
+             * frames if the peer refuses or stays silent.  Off by default:
+             * a UI-only peer that drops SABME silently costs ~4.5 s. */
+            const char *ack = getenv("ME_V120_ACK");
+
+            cc_v120_set_ack(&g_cc, ack && *ack == '1');
+        }
         g_data_connect_rate = rate;   /* as for V.110 above */
     } else {
         /* The DS0 is the datapump; the data stack frames DTE characters on
@@ -8812,7 +8820,7 @@ static int me_clear_start_locked(void)
     trace_phase("%s enter DATA: %d bit/s on the DS0, no V.8",
                 g_offer_v120 ? "V.120" : "clear channel", rate);
     ME_LOG("[ME] %s: %d bit/s on the DS0 (%s), no V.8\n",
-           g_offer_v120 ? "V.120 UI frames" : "clear channel", rate,
+           g_offer_v120 ? (g_cc.v120_ack ? "V.120 Q.922 acknowledged mode" : "V.120 UI frames") : "clear channel", rate,
            g_offer_r56 ? "restricted, bit 8 = 1" : "unrestricted");
     return rate;
 }
@@ -9000,6 +9008,12 @@ void me_on_sip_disconnected_status(int sip_status)
                (unsigned long long) g_cc.rx_frames, (unsigned long long) g_cc.rx_data_bytes,
                (unsigned long long) g_cc.rx_bad_frames,
                (unsigned long long) g_cc.rx_unsupported);
+        if (g_cc.mode == CC_V120 && g_cc.v120_ack)
+            ME_LOG("[ME] V.120 acknowledged mode: link %s, %llu UI fallbacks, "
+                   "%llu resets, %llu go-back-N rewinds\n",
+                   g_cc.lf_state == CC_LF_UP ? "up" : g_cc.lf_state == CC_LF_UI ? "UI" : "down",
+                   (unsigned long long) g_cc.lf_fallbacks, (unsigned long long) g_cc.lf_resets,
+                   (unsigned long long) g_cc.lf_rewinds);
         cc_release(&g_cc);
         g_cc_active = false;
     }
