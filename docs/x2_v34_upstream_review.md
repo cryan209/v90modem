@@ -156,3 +156,44 @@ held-out fit against native points and independently established sample
 alignment. At 7200/12000, acquisition's coarse shortlist and receive front
 end need examination despite the exact native/template match. The validated
 default remains 4800; higher rates are diagnostic offers, not qualified ones.
+
+## PCM versus native-point bound, 2026-10-06
+
+The higher-rate failure logs need the FIRST acquisition attempt, not just
+later retry failures. At 7200 the search finds the correct first=8413 but
+rejects 94.2% fit against 95%. At 12000 it finds 97.6% fit at that same
+boundary, then rejects held-out lattice distance 0.119 (0.01125 of power,
+limit 0.002). Thus a coarse shortlist miss is not the measured explanation
+for either original rejection.
+
+Independent numpy-only analysis forms an FFT analytic signal directly from
+the received PCM, interpolates to 9600 Hz, mixes at the 1920 Hz high carrier
+and correlates against the exact native-matched B1. It finds B1 at PCM
+sample 111140 in all three taps. A complex least-squares equalizer trained
+on the first 2048 native symbols and graded on the next 2048 gives:
+
+| Rate | 21-tap held-out MSE | 65-tap held-out MSE |
+|---|---|---|
+| 7200 | 0.136369 | 0.139571 |
+| 9600 | 0.107829 | 0.109328 |
+| 12000 | 0.332653 | 0.341256 |
+
+At 9600, independently align the Courier's outgoing `analog-tx.wav` by
+waveform values, not file lengths: it is 150880 samples ahead of the engine
+RX tap, with normalized waveform correlation 0.999827 over the 1000-sample
+B1 window. Decoding G.711 here uses quarter-scale linear units, hence the
+fitted gain 0.127380 equals the bearer gain divided by four. Repeating the
+native-symbol held-out fit on this PRE-G.711 linear audio gives 0.107162
+(21 taps), 0.108860 (65 taps), and the same 16 residuals above unit squared
+distance. G.711 quantization and our streaming analytic branch therefore
+cannot explain these bursts by themselves. These are empirical bounds for
+this captured window, not proof that no nonlinear/time-varying receiver
+could improve it.
+
+Correct the earlier inference: exact native mapper points prove the source
+and inverse mapping, not an ideal emitted PCM waveform. The remaining
+transmit-side boundary between native mapper execution and outgoing codec
+samples needs inspection before retuning our receiver or weakening its
+acquisition guards. The 9600 residual is already present before G.711;
+its precise cause (pulse shaping, codec/resampler, or scheduling) is not yet
+established. Sampling at T/3 instead of T/2 does not establish that boundary.
