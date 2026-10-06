@@ -608,6 +608,11 @@ static void test_line_conditions(void)
     sweep("own echo at -10 dB, 3 ms", l, 100);
     l.echo_delay = 400;
     sweep("own echo at -10 dB, 50 ms", l, 100);
+    l.echo_gain = 0.1;
+    l.echo_delay = 1600;
+    sweep("own echo at -20 dB, 200 ms", l, 100);       /* the ATA path: 190-260 ms round trip */
+    l.echo_delay = 2200;
+    sweep("own echo at -20 dB, 275 ms", l, 100);
     l = clean_line();
     l.law = LAW_ULAW;
     l.delay = 160;

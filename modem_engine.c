@@ -3737,6 +3737,7 @@ static uint64_t g_v8bis_samples = 0;
 static unsigned g_v8bis_window_ms = 2000, g_v8bis_max_ms = 12000;
 static int g_v8bis_ans_run = 0;
 static bool g_v8bis_ans_seen = false;
+static bool g_v8bis_probe = false;         /* ME_V8BIS_PROBE=1: the caller opens with CRd instead of only listening */
 static int16_t g_v8bis_ans_buf[160];
 static unsigned g_v8bis_ans_fill = 0;
 
@@ -3796,6 +3797,7 @@ static bool me_v8bis_start_locked(void)
     cfg.fsm.accept = me_v8bis_accept;
     cfg.fsm.select_ms = me_v8bis_select_ms;
     cfg.retries = 0;                           /* the window decides, not the retransmit count */
+    cfg.fsm.answering_station = !g_calling_party;
     if ((v = getenv("ME_V8BIS_LEVEL_DBM0")) && *v)
         cfg.level_dbm0 = atof(v);
     g_v8bis_window_ms = (unsigned)parse_env_int("ME_V8BIS_WINDOW_MS", 2000);
@@ -3811,8 +3813,11 @@ static bool me_v8bis_start_locked(void)
     g_v8bis_ans_run = 0;
     g_v8bis_ans_seen = false;
     g_v8bis_ans_fill = 0;
+    g_v8bis_probe = g_calling_party && parse_env_int("ME_V8BIS_PROBE", 0) != 0;
     if (!g_calling_party)
         v8bis_modem_initiate(g_v8bis, V8BIS_INIT_CR);       /* 10.2.2: CRe after 400 ms of silence */
+    else if (g_v8bis_probe)
+        v8bis_modem_initiate(g_v8bis, V8BIS_INIT_CR);       /* 10.1.1: ask a station that may not know V.8bis */
     g_state = ME_V8;
     return true;
 }
@@ -3897,7 +3902,7 @@ static void me_v8bis_progress_locked(int len)
         return;
     }
     ms = (unsigned)(g_v8bis_samples / 8);
-    if (g_calling_party && g_v8bis_ans_seen)
+    if (g_calling_party && g_v8bis_ans_seen && !g_v8bis_probe)
         me_v8bis_finish_locked("ANS/ANSam heard first (10.2.1)", false);
     else if (ms >= g_v8bis_max_ms)
         me_v8bis_finish_locked("time limit", false);

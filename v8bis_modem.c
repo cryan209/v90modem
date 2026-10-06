@@ -20,6 +20,7 @@
  * bit, so a run of bits that starts a modulation carries one mark bit more than it was given. */
 #define MODULATOR_LEAD_BITS 1
 #define PREAMBLE_ARM_BITS 12                         /* marks seen before a flag for a frame to count */
+#define ECHO_IDENTITY_WINDOW (2 * 8000)             /* 2 s: longer than any round trip we expect */
 #define TONE_MUTE_AFTER 800                          /* 100 ms of rx tone deafness after our own tone */
 #define SILENT_BAND_POWER 400.0                      /* amplitude 20 in one tone: well under any signal */
 #define BITS_MAX (2 * V8BIS_MAX_FRAME_BITS + 2 * MARK_PREAMBLE_BITS)
@@ -67,6 +68,10 @@ struct v8bis_modem_s {
     bool bits_over;
     unsigned blk_off;                   /* position in the block being generated, for exact timestamps */
     uint64_t tone_mute_until;
+    bool have_last_tone;                /* the last signal we sent, to recognise its echo */
+    v8bis_signal_t last_tone_sig;
+    bool last_tone_set;
+    uint64_t last_tone_end;
     bool tone_active;
     unsigned idle_acc;
 
@@ -75,6 +80,7 @@ struct v8bis_modem_s {
     chan_t ch[2];
     int16_t rxbuf[V8BIS_RX_BLOCK];
     unsigned rxfill;
+    int not_dominant_run[2];
     double band_peak;                   /* recent strongest block, for judging the quiet ones */
     uint64_t rx_pos;                    /* samples through the last processed block */
     bool pend_valid;                    /* a detected signal waits for its own end before the FSM sees it */
@@ -212,6 +218,10 @@ static bool next_segment(v8bis_modem_t *m)
         if (m->cur.seg1_only)
             v8bis_tone_tx_seg1_only(&m->tone);
         m->tone_active = true;
+        m->have_last_tone = true;
+        m->last_tone_sig = m->cur.sig;
+        m->last_tone_set = m->cur.set;
+        m->last_tone_end = UINT64_MAX;              /* still sending */
         break;
     case SEG_BITS:
         fsk_tx_restart(m->ftx[m->cur.high], &preset_fsk_specs[m->cur.high ? FSK_V21CH2 : FSK_V21CH1]);
@@ -229,6 +239,7 @@ static void end_segment(v8bis_modem_t *m)
 {
     if (m->cur.kind == SEG_TONE) {
         m->tone_active = false;
+        m->last_tone_end = m->now + m->blk_off;
         if (m->cur.watch) {
             m->watch_armed = true;
             m->watch_from = m->now + m->blk_off;
@@ -571,8 +582,19 @@ static void update_dominance(v8bis_modem_t *m, const int16_t *x, int n)
         return;
     }
     m->band_peak = lo + hi > m->band_peak * 0.98 ? lo + hi : m->band_peak * 0.98;
-    m->ch[0].dominant = lo > 4.0 * hi;
-    m->ch[1].dominant = hi > 4.0 * lo;
+    /* One block of doubt is not enough to distrust a channel: the block in which a message ends
+     * holds its last bits, the demodulator's lag and, on a line with echo, the other direction's
+     * tail.  A message heard through a hybrid is the other channel's the whole way along. */
+    for (int c = 0; c < 2; c++) {
+        bool raw = c == 0 ? lo > 4.0 * hi : hi > 4.0 * lo;
+
+        if (raw) {
+            m->ch[c].dominant = true;
+            m->not_dominant_run[c] = 0;
+        } else if (++m->not_dominant_run[c] >= 2) {
+            m->ch[c].dominant = false;
+        }
+    }
 }
 
 static void deliver_signal(v8bis_modem_t *m, v8bis_signal_t sig, bool set)
@@ -598,6 +620,12 @@ static void rx_block(v8bis_modem_t *m, const int16_t *x)
     while (v8bis_tone_rx_event(&m->trx, &te)) {
         if (m->now < m->tone_mute_until)
             continue;                           /* our own signal coming back */
+        /* A hybrid returns our own signal after the line's round trip, which on a VoIP leg is a
+         * quarter of a second or more -- well past the mute.  The same signal in the same tone set,
+         * a moment after we sent it, is that echo and not a peer that happened to say the same. */
+        if (m->have_last_tone && te.sig == m->last_tone_sig && te.responding_set == m->last_tone_set
+            && m->now < m->last_tone_end + ECHO_IDENTITY_WINDOW)
+            continue;
         /* The detector knows a signal at the second tone; the peer is still sending the rest of
          * it.  Answering over its tail would put our preamble on top of its segment 2, so the FSM
          * hears of it when the signal's 500 ms are over. */
