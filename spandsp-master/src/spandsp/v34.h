@@ -220,6 +220,12 @@ SPAN_DECLARE(void) v34_tx_power(v34_state_t *s, float power);
 SPAN_DECLARE(int) v34_get_current_bit_rate(v34_state_t *s);
 
 /*! Change the operating mode of a V.34 half-duplex modem.
+    PRIMARY_CHANNEL requests 12.6.3's four-symbol control turn-off and
+    12.5's S/S-bar/PP/B1 primary start. CONTROL_CHANNEL from primary mode
+    requests 12.5.3's 35 ms tail and 12.6's Sh/Sh-bar/ALT/E return using
+    retained modulation parameters. These transitions complete as samples
+    are generated/received; success means the request was accepted.
+    Control recovery uses AC/PPh/MPh/E (12.8), not a full modem restart.
     \brief Change the operating mode of a V.34 half-duplex modem.
     \param s The modem context.
     \param mode The new mode to be selected.

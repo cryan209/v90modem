@@ -20,8 +20,12 @@
 #include <math.h>
 
 #include "spandsp.h"
+#include "spandsp/private/bitstream.h"
+#include "spandsp/private/power_meter.h"
+#include "spandsp/private/logging.h"
+#include "spandsp/private/v34.h"
 
-#define BLOCK_SAMPLES 160
+#define MAX_BLOCK_SAMPLES 160
 
 #define RX_CAPTURE_BITS 65536
 
@@ -125,6 +129,12 @@ static void g711_round_trip(int16_t out[], const int16_t in[], int len, int alaw
 
 int main(int argc, char *argv[])
 {
+    int frame_samples = getenv("V34_HDX_frame_samples")
+                      ? atoi(getenv("V34_HDX_frame_samples")) : MAX_BLOCK_SAMPLES;
+    if (frame_samples < 1 || frame_samples > MAX_BLOCK_SAMPLES) {
+        fprintf(stderr, "V34_HDX_frame_samples must be 1..160\n");
+        return 1;
+    }
     int baud = (argc > 1) ? atoi(argv[1]) : 3200;
     int bps = (argc > 2) ? atoi(argv[2]) : 9600;
     int alaw = (argc > 3  &&  strcmp(argv[3], "alaw") == 0);
@@ -152,14 +162,27 @@ int main(int argc, char *argv[])
     int control_ok = 0;
     int restart = getenv("V34_HDX_RESTART") != NULL;
     int restarted = 0;
+    int answer_source = getenv("V34_HDX_ANSWER_SOURCE") != NULL;
+    int turnaround = getenv("V34_HDX_TURNAROUND") != NULL;
+    int returning = 0;
+    int second_primary = 0;
+    int drop_control = getenv("V34_HDX_DROP_CONTROL")
+                     ? atoi(getenv("V34_HDX_DROP_CONTROL")) : 0;
+    int drop_start = -1;
+    int drop_reset = 0;
+    int drop_retrain_seen = 0;
+    int bad_mph = getenv("V34_HDX_BAD_MPH")
+                ? atoi(getenv("V34_HDX_BAD_MPH")) : 0;
+    int bad_mph_sent = 0;
+    int bad_mph_recovered = 0;
     v34_state_t *call_modem;
     v34_state_t *answ_modem;
     int failed = 0;
-    int16_t call_tx[BLOCK_SAMPLES];
-    int16_t answ_tx[BLOCK_SAMPLES];
-    int16_t call_rx[BLOCK_SAMPLES];
-    int16_t answ_rx[BLOCK_SAMPLES];
-    int blocks = (int) (seconds*8000.0/BLOCK_SAMPLES);
+    int16_t call_tx[MAX_BLOCK_SAMPLES];
+    int16_t answ_tx[MAX_BLOCK_SAMPLES];
+    int16_t call_rx[MAX_BLOCK_SAMPLES];
+    int16_t answ_rx[MAX_BLOCK_SAMPLES];
+    int blocks = (int) (seconds*8000.0/frame_samples);
     int block;
     int best_call_tx = -1;
     int best_answ_tx = -1;
@@ -174,9 +197,9 @@ int main(int argc, char *argv[])
     /* duplex = false selects the clause 12 half-duplex modem. V.34 3.11/3.14:
        the source modem transmits primary channel data, the recipient receives
        it; the control channel is bidirectional throughout. */
-    call_modem = v34_init(NULL, baud, bps, true, false,
+    call_modem = v34_init(NULL, baud, bps, !answer_source, false,
                           get_bit, &call_e, put_bit, &call_e);
-    answ_modem = v34_init(NULL, baud, answ_bps, false, false,
+    answ_modem = v34_init(NULL, baud, answ_bps, answer_source, false,
                           get_bit, &answ_e, put_bit, &answ_e);
     if (call_modem == NULL  ||  answ_modem == NULL)
     {
@@ -213,6 +236,50 @@ int main(int argc, char *argv[])
 
     for (block = 0;  block < blocks;  block++)
     {
+        if (primary && turnaround && primary_started && !returning
+            && !second_primary && answ_e.rx_len >= 10000)
+        {
+            int skip;
+            if (grade_rx_skip(&answ_e, call_seed, 2048, &answ_graded,
+                              &answ_offset, &skip) != 0 || answ_offset != 0
+                || answ_graded < 8000
+                || v34_half_duplex_change_mode(answ_modem, V34_HALF_DUPLEX_CONTROL_CHANNEL)
+                || v34_half_duplex_change_mode(call_modem, V34_HALF_DUPLEX_CONTROL_CHANNEL))
+            {
+                fprintf(stderr, "primary/control turnaround failed\n");
+                failed = 1;
+                break;
+            }
+            call_e.lfsr = call_seed;
+            answ_e.lfsr = answ_seed;
+            call_e.bits_out = call_e.bits_in = call_e.rx_len = 0;
+            answ_e.bits_out = answ_e.bits_in = answ_e.rx_len = 0;
+            returning = 1;
+            printf("  return to control requested at %.3fs\n", block*frame_samples/8000.0);
+        }
+        if (returning && v34_get_hdx_control_channel_ready(call_modem)
+            && v34_get_hdx_control_channel_ready(answ_modem)
+            && call_e.rx_len >= 512 && answ_e.rx_len >= 512)
+        {
+            int call_skip, answ_skip;
+            if (grade_rx_skip(&call_e, answ_seed, 64, &call_graded, &call_offset, &call_skip) != 0
+                || grade_rx_skip(&answ_e, call_seed, 64, &answ_graded, &answ_offset, &answ_skip) != 0
+                || call_offset != 0 || answ_offset != 0
+                || v34_half_duplex_change_mode(answ_modem, V34_HALF_DUPLEX_PRIMARY_CHANNEL)
+                || v34_half_duplex_change_mode(call_modem, V34_HALF_DUPLEX_PRIMARY_CHANNEL))
+            {
+                fprintf(stderr, "returned control payload/second primary failed\n");
+                failed = 1;
+                break;
+            }
+            call_e.lfsr = call_seed;
+            answ_e.lfsr = answ_seed;
+            call_e.bits_out = call_e.bits_in = call_e.rx_len = 0;
+            answ_e.bits_out = answ_e.bits_in = answ_e.rx_len = 0;
+            returning = 0;
+            second_primary = 1;
+            printf("  second primary requested after verified bidirectional control at %.3fs\n", block*frame_samples/8000.0);
+        }
         if (primary && restart && primary_started && !restarted
             && answ_e.rx_len >= 10000)
         {
@@ -234,7 +301,7 @@ int main(int argc, char *argv[])
             primary_started = control_ok = 0;
             restarted = 1;
             printf("  restarted after verified primary payload at %.3fs\n",
-                   block*BLOCK_SAMPLES/8000.0);
+                   block*frame_samples/8000.0);
         }
         if (primary && !primary_started
             && v34_get_hdx_control_channel_ready(call_modem)
@@ -257,16 +324,73 @@ int main(int argc, char *argv[])
             answ_e.bits_out = answ_e.bits_in = answ_e.rx_len = 0;
             primary_started = 1;
             printf("  primary channel requested at %.3fs after verified control data\n",
-                   block*BLOCK_SAMPLES/8000.0);
+                   block*frame_samples/8000.0);
+        }
+        if (bad_mph && !bad_mph_sent && answ_modem->tx.stage == V34_TX_STAGE_HDX_PPH)
+        {
+            /* CRC-valid Table 23 offer asks this implementation to transmit
+               its unsupported 2400 bit/s CC. It must reject and recover,
+               not silently accept the rate and keep sending 1200 bit/s. */
+            if (bad_mph == 1)
+                answ_modem->tx.mph.control_channel_2400 = 1;
+            else
+                answ_modem->tx.mph.signalling_rate_mask = 1 << 13;
+            bad_mph_sent = 1;
+        }
+        if (bad_mph && bad_mph_sent && !bad_mph_recovered
+            && call_modem->tx.stage == V34_TX_STAGE_HDX_AC)
+        {
+            call_e.lfsr = call_seed;
+            answ_e.lfsr = answ_seed;
+            call_e.bits_out = call_e.bits_in = call_e.rx_len = 0;
+            answ_e.bits_out = answ_e.bits_in = answ_e.rx_len = 0;
+            bad_mph_recovered = 1;
         }
         memset(call_tx, 0, sizeof(call_tx));
         memset(answ_tx, 0, sizeof(answ_tx));
-        v34_tx(call_modem, call_tx, BLOCK_SAMPLES);
-        v34_tx(answ_modem, answ_tx, BLOCK_SAMPLES);
-        g711_round_trip(answ_rx, call_tx, BLOCK_SAMPLES, alaw);
-        g711_round_trip(call_rx, answ_tx, BLOCK_SAMPLES, alaw);
-        v34_rx(answ_modem, answ_rx, BLOCK_SAMPLES);
-        v34_rx(call_modem, call_rx, BLOCK_SAMPLES);
+        v34_tx(call_modem, call_tx, frame_samples);
+        v34_tx(answ_modem, answ_tx, frame_samples);
+        g711_round_trip(answ_rx, call_tx, frame_samples, alaw);
+        g711_round_trip(call_rx, answ_tx, frame_samples, alaw);
+        /* Drop one control direction for four seconds starting at the
+           first PPh. The peers must recover through 12.8, not restart
+           the whole modem or receive any ideal symbols from the harness. */
+        if (drop_control && drop_start < 0
+            && !v34_get_hdx_control_channel_ready(call_modem)
+            && ((drop_control == 1 && v34_get_tx_stage(call_modem) == V34_TX_STAGE_HDX_PPH)
+                || (drop_control == 2 && call_modem->rx.pph_detected && call_modem->rx.mp_seen == 0)
+                || (drop_control == 3 && call_modem->rx.mp_seen == 1)))
+            drop_start = block;
+        if (drop_start >= 0 && block < drop_start + 32000/frame_samples)
+            memset(call_rx, 0, sizeof(call_rx));
+        if (drop_start >= 0 && block == drop_start + 32000/frame_samples && !drop_reset)
+        {
+            call_e.lfsr = call_seed;
+            answ_e.lfsr = answ_seed;
+            call_e.bits_out = call_e.bits_in = call_e.rx_len = 0;
+            answ_e.bits_out = answ_e.bits_in = answ_e.rx_len = 0;
+            drop_reset = 1;
+        }
+        v34_rx(answ_modem, answ_rx, frame_samples);
+        if (drop_control == 3 && call_modem->rx.stage == V34_RX_STAGE_CC)
+        {
+            /* MPh and E may arrive in one media block. Observe the
+               receive state at sample boundaries to remove E specifically,
+               rather than accidentally missing this fault window. */
+            for (int k = 0; k < frame_samples; k++)
+            {
+                if (drop_start < 0 && call_modem->rx.mp_seen == 1)
+                    drop_start = block;
+                int16_t sample = (drop_start >= 0
+                    && block < drop_start + 32000/frame_samples) ? 0 : call_rx[k];
+                v34_rx(call_modem, &sample, 1);
+            }
+        }
+        else
+            v34_rx(call_modem, call_rx, frame_samples);
+        if (drop_control && (v34_get_tx_stage(call_modem) == V34_TX_STAGE_HDX_AC
+            || v34_get_tx_stage(answ_modem) == V34_TX_STAGE_HDX_AC))
+            drop_retrain_seen = 1;
 
         if (getenv("V34_HDX_RMS"))
         {
@@ -274,14 +398,14 @@ int main(int argc, char *argv[])
             double f = 0.0;
             int k;
 
-            for (k = 0;  k < BLOCK_SAMPLES;  k++)
+            for (k = 0;  k < frame_samples;  k++)
             {
                 e += (double) call_tx[k]*call_tx[k];
                 f += (double) answ_tx[k]*answ_tx[k];
             }
             printf("  %7.3fs  src tx rms %8.1f  rcp tx rms %8.1f  (src stage %d)\n",
-                   block*BLOCK_SAMPLES/8000.0,
-                   sqrt(e/BLOCK_SAMPLES), sqrt(f/BLOCK_SAMPLES),
+                   block*frame_samples/8000.0,
+                   sqrt(e/frame_samples), sqrt(f/frame_samples),
                    v34_get_tx_stage(call_modem));
         }
         /*endif*/
@@ -296,7 +420,7 @@ int main(int argc, char *argv[])
             if (ct != p_ct  ||  at != p_at  ||  cr != p_cr  ||  ar != p_ar)
             {
                 printf("  %7.3fs  src tx=%-2d rx=%-2d | rcp tx=%-2d rx=%-2d\n",
-                       block*BLOCK_SAMPLES/8000.0, ct, cr, at, ar);
+                       block*frame_samples/8000.0, ct, cr, at, ar);
                 p_ct = ct;  p_at = at;  p_cr = cr;  p_ar = ar;
             }
             /*endif*/
@@ -328,8 +452,11 @@ int main(int argc, char *argv[])
            call_e.bits_out, call_e.bits_in, answ_e.bits_out, answ_e.bits_in);
     if (!primary)
     {
-        call_errors = grade_rx(&call_e, answ_seed, &call_graded, &call_offset);
-        answ_errors = grade_rx(&answ_e, call_seed, &answ_graded, &answ_offset);
+        int call_skip, answ_skip;
+        call_errors = grade_rx_skip(&call_e, answ_seed, (drop_control || bad_mph) ? 64 : 0,
+                                    &call_graded, &call_offset, &call_skip);
+        answ_errors = grade_rx_skip(&answ_e, call_seed, (drop_control || bad_mph) ? 64 : 0,
+                                    &answ_graded, &answ_offset, &answ_skip);
         if (call_errors < 0)
             printf("  control channel data call<-answer: NO ALIGNMENT in %d bits\n", call_e.rx_len);
         else
@@ -364,6 +491,7 @@ int main(int argc, char *argv[])
         printf("  primary recipient: %d errors in %d bits (B1 skipped %d, source offset %d)\n",
                answ_errors, answ_graded, skip, answ_offset);
         failed |= !primary_started || !control_ok || (restart && !restarted)
+               || (turnaround && !second_primary)
                || answ_errors != 0
                || answ_graded < 8000 || answ_offset != 0
                || answ_e.bits_out != 0 || call_e.bits_in != 0;
@@ -372,6 +500,11 @@ int main(int argc, char *argv[])
     {
         failed |= call_errors != 0 || answ_errors != 0;
     }
+    failed |= bad_mph && (!bad_mph_sent || !bad_mph_recovered);
+    failed |= drop_control && (!drop_reset || drop_start < 0 || !drop_retrain_seen
+              || !v34_get_hdx_control_channel_ready(call_modem)
+              || !v34_get_hdx_control_channel_ready(answ_modem)
+              || call_graded < 512 || answ_graded < 512);
     failed |= call_rate != expect_bps || answ_rate != expect_bps;
     v34_free(call_modem);
     v34_free(answ_modem);

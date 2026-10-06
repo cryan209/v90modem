@@ -265,6 +265,7 @@ static const char *v34_tx_stage_to_str(int stage)
     case V34_TX_STAGE_HDX_CC_SILENCE: return "HDX_CC_SILENCE";
     case V34_TX_STAGE_HDX_CC_DATA: return "HDX_CC_DATA";
     case V34_TX_STAGE_HDX_PRIMARY_DATA: return "HDX_PRIMARY_DATA";
+    case V34_TX_STAGE_HDX_AC: return "HDX_AC";
     case V34_TX_STAGE_INFO1: return "INFO1";
     case V34_TX_STAGE_FIRST_B: return "FIRST_B";
     case V34_TX_STAGE_FIRST_B_INFO_SEEN: return "FIRST_B_INFO_SEEN";
@@ -8201,6 +8202,11 @@ static complex_sig_t get_hdx_recipient_phase3_baud(v34_state_t *s)
                    "Tx - half-duplex recipient: source S detected; training on PP/TRN (12.3.2.2)\n");
     }
     /*endif*/
+    if (s->tx.hdx_cc_resync && s->rx.hdx_sh_seen)
+    {
+        sh_baud_init(s);
+        return zero;
+    }
     if (s->rx.received_event == V34_EVENT_PPH)
     {
         /* V.34 12.4.2.1: "After detecting signal PPh, it shall transmit signal
@@ -8485,9 +8491,10 @@ static void prepare_mph(v34_state_t *s)
        ceiling.  Half-duplex has ONE primary channel -- 3.11/3.14 put the
        source at the transmitting end -- so the source's ceiling is its
        transmitter's and the recipient's is its receiver's. */
-    max_n = source
-          ? ((s->tx.parms.max_bit_rate_code >> 1) + 1)
-          : ((s->rx.parms.max_bit_rate_code >> 1) + 1);
+    /* Working mapper parameters are rebuilt for B1 and contain the baud
+       profile's maximum afterwards. Retain the configured ceiling across
+       12.8 retrains instead of silently increasing the next MPh offer. */
+    max_n = s->tx.hdx_primary_ceiling_n;
     if (max_n > 14)
         max_n = 14;
     /*endif*/
@@ -8700,7 +8707,11 @@ static complex_sig_t get_cc_data_baud(v34_state_t *s)
     data_bits = 0;
     for (i = 0;  i < 2;  i++)
     {
-        bit = s->tx.current_get_bit(s->tx.get_bit_user_data);
+        /* Corrected Figure 27 and 12.6.1.4/12.6.2.2: circuit 106
+           remains off until the peer's E has arrived as well. */
+        bit = !s->tx.hdx_primary_after_cc_tail
+            && (!s->tx.hdx_cc_resync || s->rx.mp_seen >= 2)
+            ? s->tx.current_get_bit(s->tx.get_bit_user_data) : 1;
         if (bit == SIG_STATUS_END_OF_DATA)
         {
             /* V.34 12.4.1.4/12.4.2.5 and T.30 F.3.1.4 keep the control
@@ -8721,6 +8732,8 @@ static complex_sig_t get_cc_data_baud(v34_state_t *s)
     }
     /*endfor*/
     s->tx.diff = (s->tx.diff + data_bits) & 3;
+    if (s->tx.hdx_primary_after_cc_tail)
+        s->tx.hdx_cc_tail_symbols--;
     return training_constellation_4[s->tx.diff];
 }
 /*- End of function --------------------------------------------------------*/
@@ -9066,6 +9079,7 @@ static void hdx_control_channel_start_init(v34_state_t *s)
        PP while the recipient's control channel went by. */
     v34_condition_rx_for_pph(s, "12.4.1.1, before the control channel silence");
     s->tx.hdx_pph_after_silence = true;
+    s->tx.hdx_cc_resync = false;
     s->tx.tone_duration = milliseconds_to_samples(70);
     s->tx.current_modulator = V34_MODULATION_SILENCE;
     s->tx.stage = V34_TX_STAGE_HDX_CC_SILENCE;
@@ -9110,7 +9124,7 @@ static complex_sig_t get_second_alt_baud(v34_state_t *s)
            on the far-end PPh, not on a timer -- ending it on the timer alone
            put MPh in front of a peer that had not yet started its own control
            channel. */
-        if (s->rx.received_event == V34_EVENT_PPH  ||  s->tx.tone_duration >= 120)
+        if (s->rx.pph_detected)
         {
             /* Control channel training */
             mp_or_mph_baud_init(s);
@@ -9148,10 +9162,28 @@ static complex_sig_t get_first_alt_baud(v34_state_t *s)
     bit = scramble(&s->tx, 0);
     bit = (scramble(&s->tx, 1) << 1) | bit;
     s->tx.diff = (s->tx.diff + bit) & 3;
+    if (s->tx.hdx_cc_resync && s->rx.hdx_sh_seen && !s->tx.hdx_alt_peer_seen)
+    {
+        /* 12.6.1.4: at least 16T of ALT AFTER detecting the returned
+           Sh/Sh-bar. The ALT already sent under 12.6.1.2 is not that
+           interval. The recipient has detected Sh before sending its own,
+           so this also preserves 12.6.2.2's 16T ALT after local Sh-bar. */
+        s->tx.hdx_alt_peer_seen = true;
+        s->tx.tone_duration = 0;
+    }
     if (++s->tx.tone_duration >= 16)
     {
         /* We have reached the absolute minimum allowed for the duration of ALT */
-        if (s->tx.tone_duration >= 120)
+        if (s->tx.hdx_cc_resync && s->rx.hdx_sh_seen)
+        {
+            e_baud_init(s);
+        }
+        else if (s->tx.hdx_cc_resync && s->rx.pph_detected)
+        {
+            s->tx.hdx_cc_resync = false;
+            pph_baud_init(s); /* 12.6.1.3: peer requests new parameters */
+        }
+        else if (!s->tx.hdx_cc_resync && s->tx.tone_duration >= 120)
         {
             /* TODO: Should allow for early termination. */
             /* Control channel training */
@@ -9191,7 +9223,7 @@ static complex_sig_t get_sh_baud(v34_state_t *s)
     i = s->tx.tone_duration;
     if (++s->tx.tone_duration == SH_PLUS_NO_SH_SYMBOLS)
     {
-        /* The Sh and !Sh have finished */
+        /* 12.6.1.2/12.6.2.2: Sh/Sh-bar is followed by ALT. */
         first_alt_baud_init(s);
     }
     /*endif*/
@@ -9208,6 +9240,7 @@ static void sh_baud_init(v34_state_t *s)
     /* 10.2.3.3: "Signals Sh and Sh-bar are transmitted using the control
        channel modulation described in 10.2.4." */
     s->tx.current_modulator = V34_MODULATION_CC;
+    s->tx.hdx_alt_peer_seen = false;
     s->tx.stage = V34_TX_STAGE_HDX_SH;
     s->tx.current_getbaud = get_sh_baud;
 }
@@ -9360,6 +9393,63 @@ static int tx_v34_modulation(v34_state_t *s, int16_t amp[], int max_len)
 }
 /*- End of function --------------------------------------------------------*/
 
+static void hdx_primary_channel_enter(v34_state_t *s)
+{
+    s->tx.hdx_primary_after_cc_tail = false;
+    if (s->half_duplex_source == V34_HALF_DUPLEX_SOURCE)
+    {
+        /* 12.5.1: reuse the duplex S/S-bar and PP waveform generators,
+           then the shared reset-state B1/data mapper (10.1.3.1). */
+        s->primary_channel_active = true;
+        s->tx.current_modulator = V34_MODULATION_V34;
+        s->tx.current_getbaud = get_s_not_s_baud;
+        s->tx.stage = V34_TX_STAGE_FIRST_S;
+        s->tx.tone_duration = 0;
+        s->tx.baud_phase = 0;
+        s->tx.rrc_filter_step = 0;
+        memset(s->tx.rrc_filter_re, 0, sizeof(s->tx.rrc_filter_re));
+        memset(s->tx.rrc_filter_im, 0, sizeof(s->tx.rrc_filter_im));
+        s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
+        s->rx.current_demodulator = V34_MODULATION_SILENCE;
+    }
+    else if (s->half_duplex_source == V34_HALF_DUPLEX_RECIPIENT)
+    {
+        /* V.34 12.6.3.2 and 12.5.2: the recipient becomes silent and
+           conditions its receiver for S/S-bar, PP and B1. */
+        s->tx.current_modulator = V34_MODULATION_SILENCE;
+        s->tx.current_getbaud = get_silence_baud;
+        s->rx.hdx_primary_resync = true;
+        s->rx.hdx_s_silence_seen = false;
+        s->rx.hdx_silence_bauds = 0;
+        /* The CC AGC uses the same live scaling register. Restore the
+           primary gain frozen during Phase 3 before using its trained
+           equalizer again for 12.5.2; the CC gain is a different domain. */
+        if (s->rx.agc_scaling_save > 0.0f)
+            s->rx.agc_scaling = s->rx.agc_scaling_save;
+        s->rx.eq_put_step = 0;
+        s->rx.shaper_t2_acc = 0;
+        /* The old PP flag holds the eye chooser until duration >232T.
+           This exchange starts with only 128T of S: release that guard
+           and discard the previous primary interval's eye statistics. */
+        s->rx.phase3_pp_started = 0;
+        s->rx.eye_flip_pending = false;
+        s->rx.eye_flips = 0;
+        s->rx.eye_votes = 0;
+        s->rx.eye_n = 0;
+        s->rx.eye_on_sum = s->rx.eye_off_sum = 0.0f;
+        s->rx.eye_on_aerr = s->rx.eye_off_aerr = 0.0f;
+        memset(&s->rx.eye_prev_on, 0, sizeof(s->rx.eye_prev_on));
+        memset(&s->rx.eye_prev_off, 0, sizeof(s->rx.eye_prev_off));
+        memset(&s->rx.last_sample, 0, sizeof(s->rx.last_sample));
+        phase4_rx_conditioning_init(s, V34_RX_STAGE_PHASE4_S,
+                                    "12.5.2 S/S-bar, PP, then B1");
+        V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                 "V.34 12.5.2: recipient entering primary-channel resynchronization\n");
+    }
+    /*endif*/
+}
+
+
 static int tx_cc_modulation(v34_state_t *s, int16_t amp[], int max_len)
 {
 #if defined(SPANDSP_USE_FIXED_POINT)
@@ -9387,6 +9477,11 @@ static int tx_cc_modulation(v34_state_t *s, int16_t amp[], int max_len)
         if ((s->tx.baud_phase += 3) >= 40)
         {
             s->tx.baud_phase -= 40;
+            if (s->tx.hdx_primary_after_cc_tail && s->tx.hdx_cc_tail_symbols == 0)
+            {
+                hdx_primary_channel_enter(s);
+                return sample;
+            }
             if (s->tx.current_getbaud == NULL)
             {
                 V34_TX_LOG(&s->logging, SPAN_LOG_ERROR,
@@ -9457,6 +9552,11 @@ static int tx_silence(v34_state_t *s, int16_t amp[], int max_len)
         {
             s->tx.training_stage = 0x101;
             transmission_preamble_init(s);
+        }
+        else if (s->tx.hdx_sh_after_silence)
+        {
+            s->tx.hdx_sh_after_silence = false;
+            sh_baud_init(s);
         }
         else if (s->tx.hdx_pph_after_silence)
         {
@@ -9636,11 +9736,109 @@ SPAN_DECLARE(void) v34_tx_stop_external_symbols(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static complex_sig_t get_hdx_ac_baud(v34_state_t *s)
+{
+    complex_sig_t symbol = training_constellation_4[(s->tx.tone_duration++ & 1) ? 2 : 0];
+
+    /* 12.8.1: the initiating modem answers received PPh with PPh/ALT. */
+    if (s->rx.pph_detected)
+    {
+        s->tx.hdx_retrain_initiator = false;
+        pph_baud_init(s);
+    }
+    return symbol;
+}
+
+static void hdx_begin_control_retrain(v34_state_t *s, bool responding)
+{
+    /* 12.8: preserve the trained primary channel and negotiated profile;
+       reset only the control receiver and the MPh/E exchange. */
+    v34_condition_rx_for_pph(s, responding ? "12.8.2 responding" : "12.8.1 initiating");
+    s->tx.hdx_cc_resync = false;
+    s->tx.hdx_retrain_initiator = !responding;
+    s->tx.hdx_retrain_responding = responding;
+    s->tx.hdx_watch_samples = 0;
+    s->tx.hdx_watch_state = -1;
+    s->tx.hdx_sh_after_silence = false;
+    s->tx.hdx_pph_after_silence = false;
+    s->tx.tx_data_mode = false;
+    s->primary_channel_active = false;
+    if (responding)
+        pph_baud_init(s);
+    else
+    {
+        s->tx.current_modulator = V34_MODULATION_CC;
+        s->tx.current_getbaud = get_hdx_ac_baud;
+        s->tx.stage = V34_TX_STAGE_HDX_AC;
+        s->tx.tone_duration = 0;
+    }
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+               "Tx - control channel retrain (%s, 12.8)\n",
+               responding ? "responding" : "initiating");
+}
+
+static void hdx_control_watch(v34_state_t *s, int samples)
+{
+    int state;
+
+    if (s->duplex || s->rx.current_demodulator != V34_MODULATION_CC
+        || s->rx.stage != V34_RX_STAGE_CC)
+        return;
+    if (v34_get_hdx_control_channel_ready(s) && s->tx.hdx_retrain_responding)
+    {
+        /* AC may continue while the responder waits for the initiating
+           PPh. Consume that old detection once this exchange completes;
+           it must not request another retrain after E. */
+        s->rx.hdx_ac_seen = false;
+        s->rx.hdx_ac_count[0] = s->rx.hdx_ac_count[1] = 0;
+        s->tx.hdx_retrain_responding = false;
+    }
+    if (s->rx.hdx_ac_seen && !s->tx.hdx_retrain_responding)
+    {
+        hdx_begin_control_retrain(s, true);
+        return;
+    }
+    if (s->tx.hdx_retrain_initiator || v34_get_hdx_control_channel_ready(s))
+        return;
+    /* 12.4.3/12.4.4 and 12.6.1.5/.6/12.6.2.4/.5: separate
+       three-second bounds for acquisition, MPh and E. */
+    state = s->rx.pph_detected ? (s->rx.mp_seen >= 1 ? 2 : 1) : 0;
+    if (s->tx.hdx_cc_resync)
+    {
+        if (s->tx.half_duplex_source == V34_HALF_DUPLEX_SOURCE
+            && (s->tx.stage == V34_TX_STAGE_HDX_CC_SILENCE
+                || s->tx.stage == V34_TX_STAGE_HDX_SH))
+            return;
+        /* 12.6: E and acquisition share the same deadline measured
+           from local Sh/Sh-bar, not a fresh deadline on remote Sh. */
+        if (s->tx.stage == V34_TX_STAGE_HDX_FIRST_ALT
+            || s->tx.stage == V34_TX_STAGE_HDX_E
+            || s->tx.stage == V34_TX_STAGE_HDX_CC_DATA)
+            state = 3;
+    }
+    else if (state == 0 && s->tx.half_duplex_source == V34_HALF_DUPLEX_SOURCE
+             && (s->tx.stage == V34_TX_STAGE_HDX_CC_SILENCE
+                 || s->tx.stage == V34_TX_STAGE_HDX_PPH))
+        return; /* 12.4.3.2 starts after sending PPh. */
+    else if (state == 1 && s->tx.half_duplex_source == V34_HALF_DUPLEX_RECIPIENT
+             && s->tx.stage == V34_TX_STAGE_HDX_PPH)
+        return; /* 12.4.4.2 starts after sending PPh. */
+    if (state != s->tx.hdx_watch_state)
+    {
+        s->tx.hdx_watch_state = state;
+        s->tx.hdx_watch_samples = 0;
+    }
+    s->tx.hdx_watch_samples += samples;
+    if (s->tx.hdx_watch_samples >= milliseconds_to_samples(3000))
+        hdx_begin_control_retrain(s, false);
+}
+
 SPAN_DECLARE(int) v34_tx(v34_state_t *s, int16_t amp[], int max_len)
 {
     int len;
     int lenx;
 
+    hdx_control_watch(s, max_len);
     v34_tx_log_state_change(s);
     len = 0;
     lenx = -1;
@@ -9649,7 +9847,30 @@ SPAN_DECLARE(int) v34_tx(v34_state_t *s, int16_t amp[], int max_len)
         switch (s->tx.current_modulator)
         {
         case V34_MODULATION_V34:
-            lenx = tx_v34_modulation(s, &amp[len], max_len - len);
+            if (s->tx.hdx_primary_tail_samples > 0)
+            {
+                int chunk = max_len - len;
+                if (chunk > s->tx.hdx_primary_tail_samples)
+                    chunk = s->tx.hdx_primary_tail_samples;
+                lenx = tx_v34_modulation(s, &amp[len], chunk);
+                s->tx.hdx_primary_tail_samples -= lenx;
+                if (s->tx.hdx_primary_tail_samples == 0)
+                {
+                    /* 12.5.3.1 -> 12.6.1.1: preserve the data mapper
+                       through the 35 ms tail, then emit 70 ms silence. */
+                    s->tx.current_get_bit = s->tx.get_bit;
+                    s->tx.tx_data_mode = false;
+                    s->primary_channel_active = false;
+                    v34_condition_rx_for_pph(s, "12.6.1.2 Sh or PPh");
+                    s->rx.hdx_cc_resync = true;
+                    s->tx.hdx_sh_after_silence = true;
+                    s->tx.current_modulator = V34_MODULATION_SILENCE;
+                    s->tx.tone_duration = milliseconds_to_samples(70);
+                    s->tx.stage = V34_TX_STAGE_HDX_CC_SILENCE;
+                }
+            }
+            else
+                lenx = tx_v34_modulation(s, &amp[len], max_len - len);
             break;
         case V34_MODULATION_CC:
             lenx = tx_cc_modulation(s, &amp[len], max_len - len);
@@ -9987,6 +10208,7 @@ SPAN_DECLARE(bool) v34_get_hdx_control_channel_ready(v34_state_t *s)
 {
     return s != NULL
            && !s->duplex
+           && !s->tx.hdx_primary_after_cc_tail
            && s->rx.stage == V34_RX_STAGE_CC
            && s->rx.mp_seen >= 2
            && s->tx.stage == V34_TX_STAGE_HDX_CC_DATA;
@@ -10666,6 +10888,12 @@ SPAN_DECLARE(int) v34_half_duplex_change_mode(v34_state_t *s, int mode)
     if (!s || s->duplex)
         return -1;
     /*endif*/
+    if (mode == V34_HALF_DUPLEX_CONTROL_CHANNEL && s->tx.hdx_primary_after_cc_tail)
+        return -1;
+    if (mode == V34_HALF_DUPLEX_PRIMARY_CHANNEL
+        && (s->tx.hdx_primary_after_cc_tail
+            || s->half_duplex_state == V34_HALF_DUPLEX_PRIMARY_CHANNEL))
+        return 0;
     if (mode == V34_HALF_DUPLEX_PRIMARY_CHANNEL
         && (!v34_get_hdx_control_channel_ready(s) || s->tx.hdx_negotiated_rate_n < 1))
         return -1;
@@ -10679,6 +10907,28 @@ SPAN_DECLARE(int) v34_half_duplex_change_mode(v34_state_t *s, int mode)
         s->half_duplex_source = mode;
         break;
     case V34_HALF_DUPLEX_CONTROL_CHANNEL:
+        if (s->half_duplex_state == V34_HALF_DUPLEX_PRIMARY_CHANNEL)
+        {
+            s->tx.hdx_cc_resync = true;
+            if (s->half_duplex_source == V34_HALF_DUPLEX_SOURCE)
+            {
+                /* 12.5.3.1: circuit 105 off; stop consuming user bits
+                   and transmit 35 ms of scrambled ones without resetting
+                   the mapper, scrambler, carrier or pulse shaper. */
+                s->tx.current_get_bit = fake_get_bit;
+                s->tx.hdx_primary_tail_samples = milliseconds_to_samples(35);
+            }
+            else
+            {
+                /* 12.5.3.2/12.6.2.1: clamp primary output and hunt Sh/PPh. */
+                s->primary_channel_active = false;
+                v34_condition_rx_for_pph(s, "12.6.2.1 Sh or PPh");
+                s->rx.hdx_cc_resync = true;
+                s->rx.hdx_primary_resync = false;
+                s->tx.current_modulator = V34_MODULATION_CC;
+                s->tx.current_getbaud = get_hdx_recipient_phase3_baud;
+            }
+        }
         s->rx.half_duplex_state =
         s->tx.half_duplex_state =
         s->half_duplex_state = mode;
@@ -10687,55 +10937,11 @@ SPAN_DECLARE(int) v34_half_duplex_change_mode(v34_state_t *s, int mode)
         s->rx.half_duplex_state =
         s->tx.half_duplex_state =
         s->half_duplex_state = mode;
-        if (s->half_duplex_source == V34_HALF_DUPLEX_SOURCE)
-        {
-            /* 12.5.1: reuse the duplex S/S-bar and PP waveform generators,
-               then the shared reset-state B1/data mapper (10.1.3.1). */
-            s->primary_channel_active = true;
-            s->tx.current_modulator = V34_MODULATION_V34;
-            s->tx.current_getbaud = get_s_not_s_baud;
-            s->tx.stage = V34_TX_STAGE_FIRST_S;
-            s->tx.tone_duration = 0;
-            s->tx.baud_phase = 0;
-            s->tx.rrc_filter_step = 0;
-            memset(s->tx.rrc_filter_re, 0, sizeof(s->tx.rrc_filter_re));
-            memset(s->tx.rrc_filter_im, 0, sizeof(s->tx.rrc_filter_im));
-            s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
-            s->rx.current_demodulator = V34_MODULATION_SILENCE;
-        }
-        else if (s->half_duplex_source == V34_HALF_DUPLEX_RECIPIENT)
-        {
-            /* V.34 12.6.3.2 and 12.5.2: the recipient becomes silent and
-               conditions its receiver for S/S-bar, PP and B1. */
-            s->tx.current_modulator = V34_MODULATION_SILENCE;
-            s->tx.current_getbaud = get_silence_baud;
-            s->rx.hdx_primary_resync = true;
-            /* The CC AGC uses the same live scaling register. Restore the
-               primary gain frozen during Phase 3 before using its trained
-               equalizer again for 12.5.2; the CC gain is a different domain. */
-            if (s->rx.agc_scaling_save > 0.0f)
-                s->rx.agc_scaling = s->rx.agc_scaling_save;
-            s->rx.eq_put_step = 0;
-            s->rx.shaper_t2_acc = 0;
-            /* The old PP flag holds the eye chooser until duration >232T.
-               This exchange starts with only 128T of S: release that guard
-               and discard the previous primary interval's eye statistics. */
-            s->rx.phase3_pp_started = 0;
-            s->rx.eye_flip_pending = false;
-            s->rx.eye_flips = 0;
-            s->rx.eye_votes = 0;
-            s->rx.eye_n = 0;
-            s->rx.eye_on_sum = s->rx.eye_off_sum = 0.0f;
-            s->rx.eye_on_aerr = s->rx.eye_off_aerr = 0.0f;
-            memset(&s->rx.eye_prev_on, 0, sizeof(s->rx.eye_prev_on));
-            memset(&s->rx.eye_prev_off, 0, sizeof(s->rx.eye_prev_off));
-            memset(&s->rx.last_sample, 0, sizeof(s->rx.last_sample));
-            phase4_rx_conditioning_init(s, V34_RX_STAGE_PHASE4_S,
-                                        "12.5.2 S/S-bar, PP, then B1");
-            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
-                     "V.34 12.5.2: recipient entering primary-channel resynchronization\n");
-        }
-        /*endif*/
+        /* 12.6.3.1/.2: finish with four control-channel symbols of
+           scrambled ones before either endpoint changes modulation. */
+        s->tx.hdx_primary_after_cc_tail = true;
+        s->tx.hdx_cc_tail_symbols = 4;
+        s->rx.current_demodulator = V34_MODULATION_SILENCE;
         break;
     case V34_HALF_DUPLEX_SILENCE:
         s->rx.half_duplex_state =
@@ -10801,6 +11007,7 @@ static int v34_tx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_
        an initial mapper choice.  10.1.2.3.4 may project lower rates from L2,
        but must not advertise above the configured ceiling. */
     s->tx.parms.max_bit_rate_code = bit_rate;
+    s->tx.hdx_primary_ceiling_n = (bit_rate >> 1) + 1;
 
 #if defined(SPANDSP_USE_FIXED_POINT)
     vec_zeroi16(s->tx.rrc_filter_re, sizeof(s->tx.rrc_filter_re)/sizeof(s->tx.rrc_filter_re[0]));
@@ -10921,8 +11128,28 @@ SPAN_DECLARE(int) v34_restart(v34_state_t *s, int baud_rate, int bit_rate, bool 
     s->tx.half_duplex_state =
     s->rx.half_duplex_state = V34_HALF_DUPLEX_SILENCE;
     s->rx.hdx_primary_resync = false;
+    if (!duplex)
+    {
+        /* 12.2/12.3 fresh acquisition cannot inherit a previous page's
+           T/2 eye votes, exhausted flip budget or pending PP decision. */
+        s->rx.eye_flip_pending = false;
+        s->rx.eye_flips = s->rx.eye_votes = s->rx.eye_n = 0;
+        s->rx.eye_on_sum = s->rx.eye_off_sum = 0.0f;
+        s->rx.eye_on_aerr = s->rx.eye_off_aerr = 0.0f;
+        memset(&s->rx.eye_prev_on, 0, sizeof(s->rx.eye_prev_on));
+        memset(&s->rx.eye_prev_off, 0, sizeof(s->rx.eye_prev_off));
+    }
     s->tx.hdx_negotiated_rate_n = 0;
     s->tx.hdx_pph_after_silence = false;
+    s->tx.hdx_primary_tail_samples = 0;
+    s->tx.hdx_primary_after_cc_tail = false;
+    s->tx.hdx_cc_tail_symbols = 0;
+    s->tx.hdx_watch_state = -1;
+    s->tx.hdx_watch_samples = 0;
+    s->tx.hdx_retrain_initiator = false;
+    s->tx.hdx_retrain_responding = false;
+    s->tx.hdx_sh_after_silence = false;
+    s->tx.hdx_cc_resync = false;
     if (!duplex)
         s->tx.tx_data_mode = false;
     /*endif*/

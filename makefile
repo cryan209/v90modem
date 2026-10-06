@@ -393,7 +393,7 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 	./v34_hdx_test 3200 21600 ulaw 20 9600
 	./v34_hdx_test 3429 14400 alaw 20 19200
 	./v34_hdx_test 3429 28800 alaw 20 4800
-	$(MAKE) v34-hdx-primary-test
+	$(MAKE) v34-hdx-primary-test v34-hdx-turnaround-test v34-hdx-recovery-test
 	./v32bis_spandsp_test
 	./v32bis_duplex_test
 	./v32bis_engine_pair_test ulaw v8
@@ -881,6 +881,34 @@ v34-hdx-primary-test: v34_hdx_test
 	V34_HDX_PRIMARY=1 V34_HDX_RESTART=1 ./v34_hdx_test 2400 9600 ulaw 12
 	V34_HDX_PRIMARY=1 V34_HDX_RESTART=1 ./v34_hdx_test 3200 9600 alaw 12
 	V34_HDX_PRIMARY=1 V34_HDX_RESTART=1 ./v34_hdx_test 3429 9600 ulaw 12
+
+# Clause 12.5.3/12.6: primary -> control -> a second primary interval.
+.PHONY: v34-hdx-turnaround-test v34-hdx-recovery-test
+v34-hdx-turnaround-test: v34_hdx_test
+	@set -e; for baud in 2400 2743 2800 3000 3200 3429; do \
+	  for law in ulaw alaw; do \
+	    V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 ./v34_hdx_test $$baud 9600 $$law 12; \
+	    V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 V34_HDX_ANSWER_SOURCE=1 ./v34_hdx_test $$baud 9600 $$law 12; \
+	  done; \
+	done
+	V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 ./v34_hdx_test 3200 21600 ulaw 12
+	V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 ./v34_hdx_test 3200 21600 alaw 12
+	V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 V34_HDX_BLOCK_SAMPLES=80 ./v34_hdx_test 3200 21600 alaw 12
+
+# Four-second loss of one control direction forces the three-second recovery.
+v34-hdx-recovery-test: v34_hdx_test
+	@set -e; for law in ulaw alaw; do \
+	  for fault in 1 2 3; do \
+	    V34_HDX_DROP_CONTROL=$$fault ./v34_hdx_test 3200 9600 $$law 16; \
+	    V34_HDX_DROP_CONTROL=$$fault V34_HDX_ANSWER_SOURCE=1 ./v34_hdx_test 3200 9600 $$law 16; \
+	  done; \
+	done
+	V34_HDX_DROP_CONTROL=1 V34_HDX_BLOCK_SAMPLES=80 ./v34_hdx_test 3200 9600 ulaw 16
+	@set -e; for law in ulaw alaw; do \
+	  for invalid in 1 2; do \
+	    V34_HDX_BAD_MPH=$$invalid ./v34_hdx_test 3200 9600 $$law 16; \
+	  done; \
+	done
 
 # Diagnostic gate for the dense profiles still under development. Every
 # failure remains a failure; run the whole matrix before returning status.

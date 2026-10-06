@@ -453,6 +453,19 @@ Each module's header comment states its role and the spec sections it implements
 
 - **Spec audit of V.90 Phase 3/4 started (2026-10-06): `docs/v90_phase3_4_spec_audit.md`.** Rows: the post-Jd S and the 9.3.2.10 S both assumed a low/high carrier pair (3429 baud has one carrier); our own `p3_demod` structural veto rejected the real DIL-ending S and then ACCEPTED the modem's retrain tone as it; 9.3.1.6's "subsequent S-to-S-bar transition" is approximated by a one-cycle count; and **the Intel V92 modem picks upstream 3429 baud (INFO1a code 5) although our INFO0d bit 40 is 0 and every INFO1d 3429 row is 0 ("shall be consistent with INFO1d")** -- `v90_selected_upstream_baud_locked()` quietly maps it to 3200, so Phase 4's CP receivers run at the wrong rate against a modem sending repeated 1244-bit CPt at 3429 (`serial-x0-2052`, graded at 3429/1959.18 Hz with `tools/v90_phase4_capture_check.py`; white at 3200). A validator change that rejects code 5 is written and untested (serial adapter dropped off the Mac). Also: another session works in this tree (fax edits in `data_interface.c`, `fax_class2.*`, `v34rx.c`, `v34tx.c`, one `modem_engine.c` hunk) -- stage hunks, never whole files.
 
+## V.34 half-duplex clause 12 audit (2026-10-06)
+
+Normal primary/control/primary cycles now run 12.5.3/12.6, including the
+35 ms primary tail, 70 ms silence, Sh/Sh-bar/ALT/E, and 12.6.3's four-symbol
+control turn-off. Three-second control recovery uses AC/PPh/MPh/E (12.8),
+not a full Phase 2 restart. MPh rejects unsupported CC rates and unusable
+primary masks; its configured primary ceiling survives mapper rebuilds.
+`make v34-hdx-turnaround-test v34-hdx-recovery-test` grades both source roles,
+both G.711 laws and injected loss; the existing primary matrix still applies.
+Do not infer complete fax conformance: 12.4.3.1's tone recovery, clause 12.7,
+2400 bit/s CC, 31.2/33.6 kbit/s payload, Annex F image transfer and new hardware
+interop remain open. See `docs/v34_hdx_conformance_audit.md` for exact scope.
+
 ## Fax service class (T.31 class 1, T.32 class 2.0)
 
 - **Correction: the HSF codec transport is now running continuously (2026-09-02).** The second script 9 in the earlier `9,5,9` reading is only `hsfusbcd2165_`'s 1400 ms timeout retry. The normal path waits for script 9's event, sends script 5, and starts the data pump from script 5's completion callback. The pump primes four 128-byte TX buffers and refills immediately on every completion; reproducing that, rather than polling TX from the probe's main loop, yields continuous 64-byte RX packets. A 20-second live run returned 841,472 bytes in 13,148 packets with zero USB errors; 10- and 5-second repeats returned 421,376 and 211,520 bytes. The shared engine rings carry signed-linear samples, apparently two 16-bit slots per four-byte frame at roughly a 10.6667 kHz device clock, but the slot meanings and exact rate remain provisional pending a controlled tone. Open now: physical off-hook/profile sequencing and exact sample framing, not transport start. -- `docs/hsf_usb_daa.md`

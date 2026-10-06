@@ -7728,6 +7728,71 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
     s->eq_step = (s->eq_step + 1) & V34_EQUALIZER_MASK;
 #endif
 
+    if (s->stage == V34_RX_STAGE_CC)
+    {
+        /* 10.2.4.1/12.8.2: AC alternates antipodal points. Require
+           more than 100 ms on one eye phase, with energy at both symbols;
+           silence and a single reversal cannot request a control retrain. */
+        int half = s->baud_half;
+        complexf_t prev = s->hdx_ac_previous[half];
+        float dot = prev.re*sample->re + prev.im*sample->im;
+        float cross = prev.re*sample->im - prev.im*sample->re;
+        float power = sample->re*sample->re + sample->im*sample->im;
+        float old_power = prev.re*prev.re + prev.im*prev.im;
+        if (power > 0.01f && old_power > 0.01f && dot < 0.0f
+            && cross*cross < 0.10f*power*old_power)
+            s->hdx_ac_count[half]++;
+        else
+            s->hdx_ac_count[half] = 0;
+        if (s->hdx_ac_count[half] > 60)
+            s->hdx_ac_seen = true;
+        s->hdx_ac_previous[half] = *sample;
+    }
+    if (s->stage == V34_RX_STAGE_CC && !s->pph_detected && s->hdx_cc_resync)
+    {
+        /* 10.2.3.3 and 12.6: correlate the complete 24T Sh + 8T Sh-bar
+           at each eye phase. Requiring the barred suffix distinguishes
+           the resynchronization signal from a continuous alternating tone.
+           Normalized complex correlation permits unknown carrier phase. */
+        int half = s->baud_half;
+        int count = s->hdx_sh_count[half]++;
+        int j;
+        complexf_t corr = {0.0f, 0.0f};
+        float energy = 0.0f, reference_energy = 0.0f;
+
+        s->hdx_sh_history[half][count & 31] = *sample;
+        if (count >= 31)
+        {
+            for (j = 0; j < 32; j++)
+            {
+                int point = j < 24 ? ((j & 1) ? 1 : 2) : ((j & 1) ? 3 : 0);
+                /* Table 10.2.3.3 points, normalized; only direction
+                   matters to the normalized correlation. */
+                complexf_t ref = { point < 2 ? -1.0f : 1.0f,
+                                   (point == 0 || point == 3) ? -1.0f : 1.0f };
+                complexf_t z = s->hdx_sh_history[half][(count + 1 + j) & 31];
+                corr.re += z.re*ref.re + z.im*ref.im;
+                corr.im += z.im*ref.re - z.re*ref.im;
+                energy += z.re*z.re + z.im*z.im;
+                reference_energy += ref.re*ref.re + ref.im*ref.im;
+            }
+            if (energy > 0.01f && corr.re*corr.re + corr.im*corr.im >
+                0.92f*energy*reference_energy)
+            {
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                           "Rx - CC: Sh/Sh-bar detected (12.6), half=%d\n", half);
+                s->hdx_sh_seen = true;
+                s->pph_detected = true;
+                s->baud_half = 0;
+                s->mp_seen = 1; /* retained MPh parameters; now hunt E */
+                s->mp_count = -1;
+                s->bitstream = 0;
+                s->bit_count = 0;
+                memset(&s->last_sample, 0, sizeof(s->last_sample));
+                return;
+            }
+        }
+    }
     if (s->stage == V34_RX_STAGE_CC  &&  !s->pph_detected)
     {
         /* V.34 12.4.1.1/12.4.2.1: the modem conditions its receiver to detect
@@ -8001,6 +8066,19 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
                         {
                             process_rx_mph(s, &mph, s->info_buf);
                             t = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
+                            /* Table 23 bit 27 selects this transmitter's
+                               control rate (12.4.1.4/12.4.2.5). This modem
+                               implements only 1200 bit/s; accepting 2400
+                               would silently transmit the wrong bit stream.
+                               Likewise, a CRC alone cannot validate a rate
+                               offer with no common enabled primary rate. */
+                            if (mph.control_channel_2400 || !mph_apply_parameters(t, &mph))
+                            {
+                                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                                           "Rx - CC: rejecting unsupported MPh parameters\n");
+                                s->mp_count = -1;
+                                continue;
+                            }
                             if (mph.type == 1)
                             {
                                 /* Set the precoder coefficients we are to use */
@@ -8010,7 +8088,6 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
                             if (set_trellis_mode(t, mph.trellis_size))
                                 V34_RX_LOG(&t->logging, SPAN_LOG_FLOW, "Rx - Unexpected trellis size code %d\n", mph.trellis_size);
                             /*endif*/
-                            mph_apply_parameters(t, &mph);
                         }
                         /*endif*/
                         s->mp_seen = 1;
@@ -8934,6 +9011,42 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
         data_bits = (ang3 >> 30) & 0x3;
         s->duration++;
 
+        if (s->hdx_primary_resync && !s->hdx_s_silence_seen)
+        {
+            float power = sym->re*sym->re + sym->im*sym->im;
+            if (power < 0.01f)
+                s->hdx_silence_bauds++;
+            else
+                s->hdx_silence_bauds = 0;
+            /* 12.5.1 supplies 70 ms of silence. Sixteen low-energy
+               symbols establish its presence after the CC filter tail;
+               this is a detector qualification, not an added protocol delay. */
+            if (s->hdx_silence_bauds >= 16
+                && s->duration >= (baud_rate_parameters[s->baud_rate].baud_rate*65)/1000)
+            {
+                s->hdx_s_silence_seen = true;
+                s->eye_n = s->eye_votes = 0;
+                s->eye_on_sum = s->eye_off_sum = 0.0f;
+                s->s_detect_count = 0;
+                s->s_window = 0;
+                s->phase4_s_last_step = -1;
+            }
+        }
+
+        /* 12.6.3's four CC tail symbols can ring through the primary
+           receive filter. The following 12.5.1 silence breaks that evidence:
+           discard its S votes and junction history on a below-threshold
+           symbol instead of carrying them into a phase change in silence. */
+        if (s->hdx_primary_resync
+            && (sym->re*sym->re + sym->im*sym->im < 0.01f
+                || s->last_sample.re*s->last_sample.re
+                   + s->last_sample.im*s->last_sample.im < 0.01f))
+        {
+            s->s_window = 0;
+            s->s_detect_count = 0;
+            s->phase4_s_last_step = -1;
+        }
+
         /* Sliding window: shift in new bit, shift out old */
         {
             int idx = (s->duration - 1) & 31;  /* circular index 0-31 */
@@ -8944,7 +9057,8 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                from an empty filter are not evidence of S; both symbols in
                the differential decision must contain a signal. */
             if (s->hdx_primary_resync
-                && (sym->re*sym->re + sym->im*sym->im < 0.01f
+                && (!s->hdx_s_silence_seen
+                    || sym->re*sym->re + sym->im*sym->im < 0.01f
                     || s->last_sample.re*s->last_sample.re
                        + s->last_sample.im*s->last_sample.im < 0.01f))
                 new_is_2 = 0;
@@ -8990,6 +9104,10 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             s->duration >= 64
             &&
             s->s_detect_count >= 24
+            && (!s->hdx_primary_resync
+                || (s->hdx_s_silence_seen && sym->re*sym->re + sym->im*sym->im >= 0.01f
+                    && s->last_sample.re*s->last_sample.re
+                       + s->last_sample.im*s->last_sample.im >= 0.01f))
             &&
             (data_bits == 1  ||  data_bits == 3)
             &&
@@ -11394,7 +11512,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         /*endif*/
         /* 12.5.1 gives only 128T of S before S-bar/PP. Reacquire the T/2
            eye within that signal, rather than after a 256-symbol window. */
-        if (++s->eye_n >= ((s->hdx_primary_resync && s->stage == V34_RX_STAGE_PHASE4_S)
+        if (++s->eye_n >= (((s->hdx_primary_resync && s->stage == V34_RX_STAGE_PHASE4_S)
+                           || (!s->duplex && s->stage == V34_RX_STAGE_PHASE3_WAIT_S))
                           ? 64 : v34_eye_window()))
         {
             bool cp_angle = (s->stage == V34_RX_STAGE_V90_CP
@@ -15723,8 +15842,19 @@ void v34_condition_rx_for_pph(v34_state_t *s, const char *why)
              "Rx - CC: conditioned to detect PPh (%s)\n", why);
     s->rx.stage = V34_RX_STAGE_CC;
     s->rx.current_demodulator = V34_MODULATION_CC;
+    /* A new control interval owns fresh 12.4/12.6 deadlines, even when
+       the previous page ended in the same watchdog state. */
+    s->tx.hdx_watch_state = -1;
+    s->tx.hdx_watch_samples = 0;
     s->rx.received_event = V34_EVENT_NONE;
     s->rx.pph_detected = false;
+    s->rx.hdx_cc_resync = false;
+    s->rx.hdx_sh_seen = false;
+    s->rx.hdx_ac_seen = false;
+    memset(s->rx.hdx_ac_previous, 0, sizeof(s->rx.hdx_ac_previous));
+    memset(s->rx.hdx_ac_count, 0, sizeof(s->rx.hdx_ac_count));
+    memset(s->rx.hdx_sh_count, 0, sizeof(s->rx.hdx_sh_count));
+    memset(s->rx.hdx_sh_history, 0, sizeof(s->rx.hdx_sh_history));
     s->rx.pph_hunt_bauds = 0;
     s->rx.pph_corr_energy = 0.0f;
     s->rx.pph_corr_weight = 0.0f;

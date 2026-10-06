@@ -1,5 +1,11 @@
 # V.34 fax: T.30 Annex F, and the V.34 half-duplex layer under it
 
+Current clause-12 audit and October 6 turnaround/recovery implementation:
+[`v34_hdx_conformance_audit.md`](v34_hdx_conformance_audit.md). The investigation
+entries below retain their historical observations; their early statements
+that the return to control and all control recovery are absent are superseded
+by that audit.
+
 V.34 fax is two layers, and they are in very different states:
 
 - **ITU-T V.34 clause 12**, the half-duplex modem (control channel plus

@@ -710,7 +710,8 @@ enum v34_tx_stages_e
     V34_TX_STAGE_HDX_CC_DATA,
     /*! \brief V.34 12.5.1: B1 and user primary-channel data. Appended to
         preserve the numeric values mirrored by application diagnostics. */
-    V34_TX_STAGE_HDX_PRIMARY_DATA
+    V34_TX_STAGE_HDX_PRIMARY_DATA,
+    V34_TX_STAGE_HDX_AC
 };
 
 enum v34_events_e
@@ -1170,6 +1171,7 @@ typedef struct
         direction, not two, and no acknowledge bit to distinguish a first
         offer from a settled one. */
     int hdx_negotiated_rate_n;
+    int hdx_primary_ceiling_n;
 
     int persistence2;
 
@@ -1206,6 +1208,17 @@ typedef struct
     logging_state_t *logging;
     /*! \brief V.34 12.4.1.1: start PPh when the current silence ends. */
     bool hdx_pph_after_silence;
+    /*! Clause 12.5.3/12.6 normal return to the control channel. */
+    int hdx_primary_tail_samples;
+    bool hdx_primary_after_cc_tail;
+    int hdx_cc_tail_symbols;
+    bool hdx_sh_after_silence;
+    int hdx_watch_samples;
+    int hdx_watch_state;
+    bool hdx_retrain_initiator;
+    bool hdx_retrain_responding;
+    bool hdx_cc_resync;
+    bool hdx_alt_peer_seen;
 } v34_tx_state_t;
 
 typedef struct
@@ -1660,6 +1673,7 @@ typedef struct
     int phase4_s_bar_left;
     /*! V.34 12.5.2 resynchronization: S/S-bar, PP, then B1/data (no TRN/MP). */
     bool hdx_primary_resync;
+    bool hdx_s_silence_seen;
 
     bitstream_state_t bs;
     uint32_t bitstream;
@@ -2249,6 +2263,14 @@ typedef struct
     /*! \brief Set once PPh has been detected in V34_RX_STAGE_CC, so the
         detector stops and the MPh scanner below owns the symbol stream. */
     bool pph_detected;
+    /*! Clause 12.6: Sh/Sh-bar acquisition at both T/2 eye phases. */
+    bool hdx_cc_resync;
+    bool hdx_sh_seen;
+    bool hdx_ac_seen;
+    complexf_t hdx_ac_previous[2];
+    int hdx_ac_count[2];
+    complexf_t hdx_sh_history[2][32];
+    int hdx_sh_count[2];
     /*! \brief The control channel's own AGC level estimate.  See
         CC_AGC_TARGET_MAG in v34rx.c for why it cannot inherit the primary
         channel's. */
