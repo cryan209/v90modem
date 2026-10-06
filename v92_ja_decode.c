@@ -366,13 +366,32 @@ static bool v92_parse_table20_descriptor_strict(const uint8_t *bits,
     {
         int p = v92_fill_pos + 1;
 
-        while ((p % 12) != 0) {
-            if (p >= bit_count || ja_get_packed_bit(bits, p) != 0)
-                return false;
+        /* 8.5.4: fill zeros extend Ja to the next multiple of 12 bits.
+         * slmodemd ends a descriptor short of that -- its 144-segment
+         * descriptor repeats every 1736 bits, 8 mod 12, the next frame's
+         * sync following one zero after the fill bit -- so a pad cut short
+         * by the following frame sync is accepted.  The CRC above has
+         * already validated every information bit; only a 1 that is not
+         * the start of a frame sync rejects. */
+        while ((p % 12) != 0 && p < bit_count) {
+            if (ja_get_packed_bit(bits, p) != 0) {
+                int ones = 0;
+
+                while (ones < 17 && p + ones < bit_count
+                       && ja_get_packed_bit(bits, p + ones))
+                    ones++;
+                if (ones < 17 && p + ones < bit_count)
+                    return false;
+                break;
+            }
             p++;
         }
         if (bit_len_out)
             *bit_len_out = p;
+        /* Everything the V.90 parse below needs ends at the fill bit; the
+         * caller's bit_count runs to the end of its search buffer, which
+         * can exceed patched[]. */
+        bit_count = p;
     }
 
     patched_len = (bit_count + 7) / 8;
