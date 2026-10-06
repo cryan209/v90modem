@@ -235,3 +235,94 @@ wrapped. The precise producing instruction or parameter error upstream of
 that word remains to be traced. Do not replace an emulator instruction's
 wrapping with saturation without checking its architectural semantics; nor
 assume this proves the original hardware would emit the same damaged stream.
+
+## Output gain/store cause established, 2026-10-06
+
+Further read-only instruction traces follow the native word through its
+producer, runtime gain and serial handoff. The pulse output written by B461
+stays within signed 16-bit range (observed -18799..20202). Gain cell 0392 is
+31999, loaded from FFF0 at 8E5C. At 80E1, the accumulator equals exactly
+`2 * pulse * gain + 65536` for every nonzero pulse in the captured window;
+23 of 20001 accumulators exceed the signed range of the following shifted
+output store. The data-ring write at 80E7 is `SACH *+,1` in a delayed branch.
+
+A temporary core copy adds ONLY trace provenance to the capture header.
+Its instruction behavior is unchanged; the patch is preserved with
+`artifacts/x2-pm-origin-20261006-9600`. It records PM=1, last explicitly
+set by ADBC (`SPM #1`) in the native receiver routine, or preserved by the
+interrupt context restore. This is not a spurious extra multiply invented by
+the emulator: TI SPRU056D, SPM instruction (6-252), defines PM=01 as a
+one-bit left shift of PREG. SACH (6-221) explicitly loses high bits during
+its left shift and does not saturate. Do not change those semantics as a fix.
+
+The headroom bound before the AC01's -6 dB output gain is therefore
+`abs(pulse) < 32768**2 / (2*31999)`, approximately 16778, while the native
+pulse output reaches 20202. That produces the measured signed wraps. The
+codec attenuation happens too late to prevent them. Its resampler and socket
+FIFO carry the already damaged samples faithfully.
+
+For a causal experiment, `X2_HOST_DIAGNOSTIC_TX_GAIN=15999` changes native
+runtime cells 0392 and FFF0 after codec sample 180000, before B1, while leaving
+firmware instructions and our receiver untouched. It requires
+`X2_HOST_CAPTURE_CODEC=1` and `--capture-native`. Capture JSON records the
+old/new values, and the harness result records `native_runtime_controls`.
+These are deliberately MODIFIED runtime-level experiments, not unmodified
+native interop qualification and not a production receiver repair.
+
+The initial 130-million-instruction diagnostic runs end before the entire
+3500-byte source can be transmitted; do not count their incomplete-source
+check as a decode error or a full-transfer pass. Full-length repeats are under
+`artifacts/x2-headroom-full-20261006-*`. The 7200, 9600 and 12000 repeats pass all seven
+checks, with all 3500 bytes and the host message exact at each rate. B1 fit
+is 100% in all three; at 7200 it improves from 94.2% without relaxing
+acquisition thresholds. At 12000 the B1 lattice distance falls from 0.119
+to 0.002. This independently
+confirms the transmit headroom cause. The native profile's chosen transmit
+level should be qualified against hardware/protocol power control before
+making this diagnostic intervention a default or calling the emulator's
+unmodified low-rate waveform an ideal receiver test.
+
+
+The 14400 diagnostic repeat also passes all seven checks, carrying all 3500
+upstream bytes and the short downstream message through the real PTY.
+B1 chooses 64-state expanded shaping, fits 100%, and grades the following
+256 symbols at lattice distance 0.003. Its working parameters are b=36,
+p=16, w=0, j=7, k=24 at 3200 baud. Capture:
+`artifacts/x2-headroom-full-20261006-14400`.
+
+This does not resolve the later native MP/data discontinuity: the 14400 call
+also eventually asks for resynchronization. Initial payload qualification and
+long-term rate-transition handling remain separate issues.
+
+A further source review finds that Courier B06E unconditionally calls B0F6
+(the mapper normalization) before its bit-13-selected nonlinear polynomial
+at B073..B08B. The optional transform must not be enabled in our MP until the
+receiver implements the matching inverse: merely changing the flag would
+invalidate its linear B1 template and lattice validation. V.34 (10/96) 9.7
+defines the energy-normalized transform; 10.1.3's note requires modulation
+power compensation through B1 and data. Whether the native profile's
+normalization/power configuration accounts for its missing output headroom
+remains open.
+
+
+The 19200 diagnostic repeat passes all seven checks as well, with the whole
+3500-byte source exact and the host message received by the Courier.
+Its B1 fit is 100%; the independent following-symbol check measures lattice
+distance 0.009, and working parameters are b=48, p=16, w=0, j=7, k=28.
+`artifacts/x2-headroom-full-20261006-19200` preserves this run.
+
+
+The 24000 diagnostic repeat passes all seven checks, including the entire
+3500-byte upstream source and short host message. B1 fit remains 100%; the
+following-symbol lattice distance is 0.028, with working parameters b=60,
+p=16, w=0, j=7, k=24. Capture:
+`artifacts/x2-headroom-full-20261006-24000`.
+
+The six successful higher-rate runs are on the harness's default mu-law
+bearer. They establish receive capability at 7200/9600/12000/14400/19200/24000
+when native output headroom is restored, without changing our receiver or
+its thresholds. They do not qualify higher-rate A-law or unmodified native
+transmit power, and do not resolve the later MP/data discontinuity. Native
+mapper captures now also include DP=7 normalization cells 03E7 and 03F5 for
+further power-control analysis; direct-address operands must be resolved
+against their live DP rather than inferred from the mapper's other cells.

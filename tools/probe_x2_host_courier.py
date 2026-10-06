@@ -2,7 +2,8 @@
 """Fresh x2 host feedback against the original analog Courier emulator.
 
 The sibling courier-emu supplies its existing calibrated analog bearer; no
-recorded audio or firmware patches supply either endpoint's response.
+recorded audio or firmware patches supply either endpoint's response. Explicit
+X2_HOST_DIAGNOSTIC_* controls mark modified native-runtime experiments.
 """
 import argparse
 import importlib.util
@@ -145,6 +146,10 @@ def main():
     decoded = async_octets(bits.read_bytes()) if bits.exists() else b''
     (output / 'upstream-decoded.bin').write_bytes(decoded)
     result = json.loads((output / 'call.json').read_text())
+    result['native_runtime_controls'] = {
+        'diagnostic_tx_gain': os.environ.get('X2_HOST_DIAGNOSTIC_TX_GAIN'),
+        'diagnostic_library': os.environ.get('X2_HOST_CAPTURE_LIBRARY'),
+    }
     native = json.loads((output / 'analog-result.json').read_text())
     serial = bytes.fromhex(native.get('serial_hex', ''))
     received = bytes.fromhex(result['engine'].get('dte_hex', '')) if args.pty_source else decoded
