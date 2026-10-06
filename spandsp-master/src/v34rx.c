@@ -5559,6 +5559,8 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
             if (++s->persistence2 == 20)
             {
                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - Tone A detected\n");
+                if (!s->duplex)
+                    s->hdx_tone_a_present = true;
                 /* Only set TONE_SEEN if we haven't already seen a reversal —
                    otherwise we'd overwrite REVERSAL_1 and the next reversal
                    would be misidentified as the first instead of the second. */
@@ -5627,11 +5629,14 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
             case 1:
                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - reversal 1 in tone A\n");
                 s->received_event = V34_EVENT_REVERSAL_1;
+                if (!s->duplex && s->half_duplex_source == V34_HALF_DUPLEX_RECIPIENT)
+                    l1_l2_analysis_init(s); /* 12.2.2.1.4: first A reversal */
                 break;
             case 2:
                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - reversal 2 in tone A\n");
                 s->received_event = V34_EVENT_REVERSAL_2;
-                l1_l2_analysis_init(s);
+                if (s->duplex || s->half_duplex_source == V34_HALF_DUPLEX_RECIPIENT)
+                    l1_l2_analysis_init(s);
                 if (s->v90_mode  &&  s->calling_party)
                 {
                     /* 9.2.1.1.7: INFO1d follows the digital modem's L2 with no
@@ -11512,9 +11517,10 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         /*endif*/
         /* 12.5.1 gives only 128T of S before S-bar/PP. Reacquire the T/2
            eye within that signal, rather than after a 256-symbol window. */
-        if (++s->eye_n >= (((s->hdx_primary_resync && s->stage == V34_RX_STAGE_PHASE4_S)
-                           || (!s->duplex && s->stage == V34_RX_STAGE_PHASE3_WAIT_S))
-                          ? 64 : v34_eye_window()))
+        int eye_window = ((s->hdx_primary_resync && s->stage == V34_RX_STAGE_PHASE4_S)
+                          || (!s->duplex && s->stage == V34_RX_STAGE_PHASE3_WAIT_S))
+                         ? 64 : v34_eye_window();
+        if (++s->eye_n >= eye_window)
         {
             bool cp_angle = (s->stage == V34_RX_STAGE_V90_CP
                              &&  v34_v90_cp_eye_angle_enabled());
@@ -11532,7 +11538,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                to use, not the line power meter: it is the quantity the
                decision is actually made on. */
             if (s->eye_on_sum + s->eye_off_sum
-                    > 2.0f*v34_eye_min_mag()*v34_eye_window()
+                    > 2.0f*v34_eye_min_mag()*eye_window
                 &&
                 (cp_angle
                  ?  (on_rms_deg > 15.0f  &&  2.0f*s->eye_off_aerr < s->eye_on_aerr)
@@ -15887,10 +15893,68 @@ void v34_condition_rx_for_pph(v34_state_t *s, const char *why)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* 12.7.1.2/12.7.2.2: a sustained foreign Tone A/B requests a primary
+   retrain, including while the source's primary receiver is silent.
+   Use raw DS0 samples so the primary equalizer cannot disguise the tone. */
+static int hdx_recovery_tone(v34_state_t *s, const int16_t amp[], int len)
+{
+    float coefficient = s->calling_party ? -0.61803399f : 1.17557050f;
+    int i;
+    int action = s->half_duplex_state == V34_HALF_DUPLEX_PRIMARY_CHANNEL ? 1 : 0;
+    /* An initiating recipient can still hear old primary data until the
+       source detects its tone and responds. Qualify the returned tone on
+       raw samples before allowing the first Phase 2 reversal. */
+    if (!action && s->tx.retrain_omit_info0
+        && (s->tx.stage == V34_TX_STAGE_HDX_INITIAL_A
+            || s->tx.stage == V34_TX_STAGE_HDX_FIRST_A))
+        action = 3;
+    if (!action && s->half_duplex_source == V34_HALF_DUPLEX_SOURCE
+        && s->tx.hdx_initial_control_startup
+        && s->rx.stage == V34_RX_STAGE_CC && !s->rx.pph_detected
+        && !s->tx.hdx_cc_resync && !s->tx.hdx_retrain_initiator
+        && !s->tx.hdx_retrain_responding
+        && (s->tx.stage == V34_TX_STAGE_HDX_CC_SILENCE
+            || s->tx.stage == V34_TX_STAGE_HDX_PPH
+            || s->tx.stage == V34_TX_STAGE_HDX_SECOND_ALT))
+        action = 2; /* 12.4.3.1, before initial peer PPh only */
+    if (s->duplex || !action)
+    {
+        s->rx.hdx_retrain_samples = s->rx.hdx_retrain_tone_samples = 0;
+        s->rx.hdx_retrain_g1 = s->rx.hdx_retrain_g2 = s->rx.hdx_retrain_energy = 0.0f;
+        return 0;
+    }
+    for (i = 0; i < len; i++)
+    {
+        float x = amp[i];
+        float v = x + coefficient*s->rx.hdx_retrain_g1 - s->rx.hdx_retrain_g2;
+        s->rx.hdx_retrain_g2 = s->rx.hdx_retrain_g1;
+        s->rx.hdx_retrain_g1 = v;
+        s->rx.hdx_retrain_energy += x*x;
+        if (++s->rx.hdx_retrain_samples == 80)
+        {
+            float power = s->rx.hdx_retrain_g1*s->rx.hdx_retrain_g1
+                        + s->rx.hdx_retrain_g2*s->rx.hdx_retrain_g2
+                        - coefficient*s->rx.hdx_retrain_g1*s->rx.hdx_retrain_g2;
+            if (s->rx.hdx_retrain_energy > 80.0f*100.0f*100.0f
+                && power > 0.85f*40.0f*s->rx.hdx_retrain_energy)
+                s->rx.hdx_retrain_tone_samples += 80;
+            else
+                s->rx.hdx_retrain_tone_samples = 0;
+            s->rx.hdx_retrain_samples = 0;
+            s->rx.hdx_retrain_g1 = s->rx.hdx_retrain_g2 = 0.0f;
+            s->rx.hdx_retrain_energy = 0.0f;
+            if (s->rx.hdx_retrain_tone_samples > milliseconds_to_samples(50))
+                return action;
+        }
+    }
+    return 0;
+}
+
 SPAN_DECLARE(int) v34_rx(v34_state_t *s, const int16_t amp[], int len)
 {
     int leny;
     int lenx;
+    int hdx_retrain = hdx_recovery_tone(s, amp, len);
 
     v34_rx_log_state_change(&s->rx);
     leny = 0;
@@ -15935,6 +15999,12 @@ SPAN_DECLARE(int) v34_rx(v34_state_t *s, const int16_t amp[], int len)
     /*endif*/
     /* If there is any residue, this should be the end of operation of the modem,
        so we don't really need to add that residue to the sample time. */
+    if (hdx_retrain == 1)
+        v34_start_retrain(s);
+    else if (hdx_retrain == 2)
+        v34_hdx_startup_tone_recovery(s);
+    else if (hdx_retrain == 3)
+        s->rx.hdx_retrain_peer_tone = true;
     return leny;
 }
 /*- End of function --------------------------------------------------------*/

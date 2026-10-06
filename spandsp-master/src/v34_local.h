@@ -35,6 +35,7 @@ void log_mph(logging_state_t *log, bool tx, const mph_t *mph);
    half-duplex control channel.  Both the source and the recipient turn on
    this, and it is the only way into V34_RX_STAGE_CC. */
 void v34_condition_rx_for_pph(v34_state_t *s, const char *why);
+void v34_hdx_startup_tone_recovery(v34_state_t *s);
 
 int v34_rx_restart(v34_state_t *s, int baud_rate, int bit_rate, int high_carrier);
 void v34_rx_set_primary_channel(v34_state_t *s, int baud_rate, int high_carrier);

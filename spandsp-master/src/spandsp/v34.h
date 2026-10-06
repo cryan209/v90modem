@@ -232,6 +232,15 @@ SPAN_DECLARE(int) v34_get_current_bit_rate(v34_state_t *s);
     \return ??? */
 SPAN_DECLARE(int) v34_half_duplex_change_mode(v34_state_t *s, int mode);
 
+/*! Request a recipient parameter change at the next primary-to-control
+    turnaround (12.6.2.3). bit_rate is the new primary ceiling in bit/s.
+    Returns -1 unless in recipient primary mode with a supported ceiling. */
+SPAN_DECLARE(int) v34_half_duplex_request_parameters(v34_state_t *s, int bit_rate);
+
+/*! Initiate the 12.8.1 AC/PPh control retrain from an established HDX
+    control channel. Returns -1 for other modes or unfinished exchanges. */
+SPAN_DECLARE(int) v34_half_duplex_start_control_retrain(v34_state_t *s);
+
 /*! Reinitialise an existing V.34 modem context, so it may be reused.
     \brief Reinitialise an existing V.34 modem context.
     \param s The modem context.
@@ -502,6 +511,10 @@ SPAN_DECLARE(void) v34_v90_retrain_first_b_silence(v34_state_t *s);
            INFO0 exchange omitted.  Use INSTEAD of restarting into Phase 2 at
            INFO0, which puts a modulated carrier in front of a peer that is
            waiting for a tone.
+    In half-duplex primary mode, run clause 12.7 with a fresh tone ranging
+    and primary training exchange, preserving DS0 sample clocks. From an
+    established half-duplex control channel, initiate the clause 12.8 AC
+    exchange instead.
     \param s The V.34 context. */
 SPAN_DECLARE(void) v34_start_retrain(v34_state_t *s);
 

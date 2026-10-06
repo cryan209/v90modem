@@ -129,10 +129,10 @@ static void g711_round_trip(int16_t out[], const int16_t in[], int len, int alaw
 
 int main(int argc, char *argv[])
 {
-    int frame_samples = getenv("V34_HDX_frame_samples")
-                      ? atoi(getenv("V34_HDX_frame_samples")) : MAX_BLOCK_SAMPLES;
+    int frame_samples = getenv("V34_HDX_BLOCK_SAMPLES")
+                      ? atoi(getenv("V34_HDX_BLOCK_SAMPLES")) : MAX_BLOCK_SAMPLES;
     if (frame_samples < 1 || frame_samples > MAX_BLOCK_SAMPLES) {
-        fprintf(stderr, "V34_HDX_frame_samples must be 1..160\n");
+        fprintf(stderr, "V34_HDX_BLOCK_SAMPLES must be 1..160\n");
         return 1;
     }
     int baud = (argc > 1) ? atoi(argv[1]) : 3200;
@@ -160,10 +160,23 @@ int main(int argc, char *argv[])
     int primary = getenv("V34_HDX_PRIMARY") != NULL;
     int primary_started = 0;
     int control_ok = 0;
+    int source_probe_seen = 0;
+    int recipient_probe_seen = 0;
     int restart = getenv("V34_HDX_RESTART") != NULL;
     int restarted = 0;
+    int primary_retrain_peer_seen = 0;
+    int primary_retrain = getenv("V34_HDX_PRIMARY_RETRAIN")
+                        ? atoi(getenv("V34_HDX_PRIMARY_RETRAIN")) : 0;
     int answer_source = getenv("V34_HDX_ANSWER_SOURCE") != NULL;
     int turnaround = getenv("V34_HDX_TURNAROUND") != NULL;
+    int control_retrain = getenv("V34_HDX_CONTROL_RETRAIN")
+                        ? atoi(getenv("V34_HDX_CONTROL_RETRAIN")) : 0;
+    int control_retrain_started = 0;
+    int control_retrain_complete = 0;
+    int control_retrain_peer_seen = 0;
+    int parameters = getenv("V34_HDX_PARAMETERS") != NULL;
+    int parameter_pph_seen = 0;
+    int parameter_ac_seen = 0;
     int returning = 0;
     int second_primary = 0;
     int drop_control = getenv("V34_HDX_DROP_CONTROL")
@@ -173,6 +186,14 @@ int main(int argc, char *argv[])
     int drop_retrain_seen = 0;
     int bad_mph = getenv("V34_HDX_BAD_MPH")
                 ? atoi(getenv("V34_HDX_BAD_MPH")) : 0;
+    int startup_tone = getenv("V34_HDX_STARTUP_TONE") != NULL;
+    int startup_tone_sent = 0;
+    int startup_tone_seen = 0;
+#if defined(SPANDSP_USE_FIXED_POINT)
+    complexi16_t (*recipient_tone_getbaud)(v34_state_t *) = NULL;
+#else
+    complexf_t (*recipient_tone_getbaud)(v34_state_t *) = NULL;
+#endif
     int bad_mph_sent = 0;
     int bad_mph_recovered = 0;
     v34_state_t *call_modem;
@@ -210,6 +231,10 @@ int main(int argc, char *argv[])
     v34_tx_power(answ_modem, -12.0f);
     /* Unknown modes and a primary request before MPh/E must be refused. */
     if (v34_half_duplex_change_mode(NULL, V34_HALF_DUPLEX_PRIMARY_CHANNEL) != -1
+        || v34_half_duplex_start_control_retrain(NULL) != -1
+        || v34_half_duplex_start_control_retrain(call_modem) != -1
+        || v34_half_duplex_request_parameters(NULL, 7200) != -1
+        || v34_half_duplex_request_parameters(call_modem, 7200) != -1
         || v34_half_duplex_change_mode(call_modem, -1) != -1
         || v34_half_duplex_change_mode(call_modem, V34_HALF_DUPLEX_PRIMARY_CHANNEL) != -1)
     {
@@ -236,10 +261,94 @@ int main(int argc, char *argv[])
 
     for (block = 0;  block < blocks;  block++)
     {
+        if (call_modem->tx.current_modulator == V34_MODULATION_L1_L2)
+            source_probe_seen = 1;
+        if (answ_modem->tx.current_modulator == V34_MODULATION_L1_L2)
+            recipient_probe_seen = 1;
+        if (startup_tone && (answ_modem->tx.stage == V34_TX_STAGE_HDX_INITIAL_A
+            || answ_modem->tx.stage == V34_TX_STAGE_HDX_FIRST_A))
+            recipient_tone_getbaud = answ_modem->tx.current_getbaud;
+        if (startup_tone && !startup_tone_sent && recipient_tone_getbaud
+            && call_modem->tx.stage == V34_TX_STAGE_HDX_CC_SILENCE)
+        {
+            /* Emulate a foreign recipient falling back to 12.2.1.2.5:
+               Tone A waits for returned Tone B, then INFOh. Only mutate
+               the peer; the source must identify its actual G.711 signal. */
+            span_sample_timer_t tx_time = answ_modem->tx.sample_time;
+            span_sample_timer_t rx_time = answ_modem->rx.sample_time;
+            v34_restart(answ_modem, baud, answ_bps, false);
+            v34_half_duplex_change_mode(answ_modem, V34_HALF_DUPLEX_RECIPIENT);
+            answ_modem->tx.sample_time = tx_time;
+            answ_modem->rx.sample_time = rx_time;
+            answ_modem->tx.training_stage = 0;
+            answ_modem->tx.stage = V34_TX_STAGE_HDX_SECOND_A;
+            answ_modem->tx.current_modulator = V34_MODULATION_CC;
+            answ_modem->tx.current_getbaud = recipient_tone_getbaud;
+            answ_modem->tx.tone_duration = 0;
+            answ_modem->tx.lastbit.re = 4;
+            answ_modem->tx.lastbit.im = 0;
+            answ_modem->rx.current_demodulator = V34_MODULATION_TONES;
+            answ_modem->rx.stage = answ_modem->calling_party ? V34_RX_STAGE_TONE_A : V34_RX_STAGE_TONE_B;
+            answ_modem->rx.tone_b_present = false;
+            answ_modem->rx.received_event = V34_EVENT_NONE;
+            startup_tone_sent = 1;
+        }
+        if (startup_tone_sent && call_modem->tx.stage == V34_TX_STAGE_HDX_POST_L2_B)
+            startup_tone_seen = 1;
+        if (control_retrain && !control_retrain_started
+            && v34_get_hdx_control_channel_ready(call_modem)
+            && v34_get_hdx_control_channel_ready(answ_modem)
+            && call_e.rx_len >= 512 && answ_e.rx_len >= 512)
+        {
+            int call_skip, answ_skip;
+            if (grade_rx_skip(&call_e, answ_seed, 64, &call_graded, &call_offset, &call_skip)
+                || grade_rx_skip(&answ_e, call_seed, 64, &answ_graded, &answ_offset, &answ_skip)
+                || (control_retrain != 2 && v34_half_duplex_start_control_retrain(call_modem))
+                || (control_retrain != 1 && v34_half_duplex_start_control_retrain(answ_modem)))
+            {
+                fprintf(stderr, "explicit control retrain request failed\n");
+                return 1;
+            }
+            call_e.lfsr = call_seed;
+            answ_e.lfsr = answ_seed;
+            call_e.bits_out = call_e.bits_in = call_e.rx_len = 0;
+            answ_e.bits_out = answ_e.bits_in = answ_e.rx_len = 0;
+            control_retrain_started = 1;
+        }
+        if (control_retrain_started && !control_retrain_peer_seen
+            && call_modem->tx.stage != V34_TX_STAGE_HDX_CC_DATA
+            && answ_modem->tx.stage != V34_TX_STAGE_HDX_CC_DATA)
+        {
+            /* The responder may deliver the in-flight old stream until AC
+               has been sustained for 100 ms. Grade only the new exchange. */
+            call_e.lfsr = call_seed;
+            answ_e.lfsr = answ_seed;
+            call_e.bits_out = call_e.bits_in = call_e.rx_len = 0;
+            answ_e.bits_out = answ_e.bits_in = answ_e.rx_len = 0;
+            control_retrain_peer_seen = 1;
+        }
+        if (control_retrain_started && control_retrain_peer_seen
+            && v34_get_hdx_control_channel_ready(call_modem)
+            && v34_get_hdx_control_channel_ready(answ_modem)
+            && call_e.rx_len >= 512 && answ_e.rx_len >= 512)
+            control_retrain_complete = 1;
         if (primary && turnaround && primary_started && !returning
             && !second_primary && answ_e.rx_len >= 10000)
         {
             int skip;
+            if (parameters)
+            {
+                if (v34_half_duplex_request_parameters(call_modem, 7200) != -1
+                    || v34_half_duplex_request_parameters(answ_modem, 0) != -1
+                    || v34_half_duplex_request_parameters(answ_modem, 10000) != -1
+                    || v34_half_duplex_request_parameters(answ_modem, 36000) != -1
+                    || v34_half_duplex_request_parameters(answ_modem, 7200) != 0)
+                {
+                    fprintf(stderr, "recipient parameter request failed\n");
+                    return 1;
+                }
+                expect_bps = 7200;
+            }
             if (grade_rx_skip(&answ_e, call_seed, 2048, &answ_graded,
                               &answ_offset, &skip) != 0 || answ_offset != 0
                 || answ_graded < 8000
@@ -257,12 +366,27 @@ int main(int argc, char *argv[])
             returning = 1;
             printf("  return to control requested at %.3fs\n", block*frame_samples/8000.0);
         }
+        if (returning && parameters)
+        {
+            parameter_pph_seen |= call_modem->tx.stage == V34_TX_STAGE_HDX_PPH;
+            parameter_ac_seen |= call_modem->tx.stage == V34_TX_STAGE_HDX_AC
+                              || answ_modem->tx.stage == V34_TX_STAGE_HDX_AC;
+            if (answ_modem->tx.stage == V34_TX_STAGE_HDX_MPH
+                && !answ_modem->rx.pph_detected)
+            {
+                fprintf(stderr, "recipient MPh preceded real source PPh\n");
+                return 1;
+            }
+        }
         if (returning && v34_get_hdx_control_channel_ready(call_modem)
             && v34_get_hdx_control_channel_ready(answ_modem)
             && call_e.rx_len >= 512 && answ_e.rx_len >= 512)
         {
             int call_skip, answ_skip;
-            if (grade_rx_skip(&call_e, answ_seed, 64, &call_graded, &call_offset, &call_skip) != 0
+            if ((parameters && (!parameter_pph_seen || parameter_ac_seen
+                    || v34_get_hdx_negotiated_bit_rate(call_modem) != 7200
+                    || v34_get_hdx_negotiated_bit_rate(answ_modem) != 7200))
+                || grade_rx_skip(&call_e, answ_seed, 64, &call_graded, &call_offset, &call_skip) != 0
                 || grade_rx_skip(&answ_e, call_seed, 64, &answ_graded, &answ_offset, &answ_skip) != 0
                 || call_offset != 0 || answ_offset != 0
                 || v34_half_duplex_change_mode(answ_modem, V34_HALF_DUPLEX_PRIMARY_CHANNEL)
@@ -280,15 +404,15 @@ int main(int argc, char *argv[])
             second_primary = 1;
             printf("  second primary requested after verified bidirectional control at %.3fs\n", block*frame_samples/8000.0);
         }
-        if (primary && restart && primary_started && !restarted
+        if (primary && (restart || primary_retrain) && primary_started && !restarted
             && answ_e.rx_len >= 10000)
         {
             int skip;
             if (grade_rx_skip(&answ_e, call_seed, 2048, &answ_graded,
                               &answ_offset, &skip) != 0 || answ_offset != 0
                 || answ_graded < 8000
-                || v34_restart(call_modem, baud, bps, false)
-                || v34_restart(answ_modem, baud, answ_bps, false))
+                || (!primary_retrain && (v34_restart(call_modem, baud, bps, false)
+                    || v34_restart(answ_modem, baud, answ_bps, false))))
             {
                 fprintf(stderr, "primary payload/restart failed\n");
                 failed = 1;
@@ -298,10 +422,39 @@ int main(int argc, char *argv[])
             answ_e.lfsr = answ_seed;
             call_e.bits_out = call_e.bits_in = call_e.rx_len = 0;
             answ_e.bits_out = answ_e.bits_in = answ_e.rx_len = 0;
+            if (primary_retrain)
+            {
+                v34_state_t *initiator = primary_retrain == 1 ? call_modem : answ_modem;
+                span_sample_timer_t tx_time = initiator->tx.sample_time;
+                span_sample_timer_t rx_time = initiator->rx.sample_time;
+                v34_start_retrain(initiator);
+                if (initiator->tx.sample_time != tx_time || initiator->rx.sample_time != rx_time
+                    || initiator->tx.current_modulator != V34_MODULATION_SILENCE
+                    || initiator->tx.tone_duration != 560
+                    || initiator->rx.current_demodulator != V34_MODULATION_SILENCE)
+                {
+                    fprintf(stderr, "primary retrain silence/clamp/clock violation\n");
+                    return 1;
+                }
+            }
             primary_started = control_ok = 0;
+            source_probe_seen = recipient_probe_seen = 0;
             restarted = 1;
             printf("  restarted after verified primary payload at %.3fs\n",
                    block*frame_samples/8000.0);
+        }
+        if (primary_retrain && restarted && !primary_retrain_peer_seen
+            && call_modem->half_duplex_state != V34_HALF_DUPLEX_PRIMARY_CHANNEL
+            && answ_modem->half_duplex_state != V34_HALF_DUPLEX_PRIMARY_CHANNEL)
+        {
+            /* The unprompted peer clamps only once it detects the tone;
+               discard old in-flight primary bits before grading the fresh
+               control stream, not bits from the recovered user interval. */
+            call_e.lfsr = call_seed;
+            answ_e.lfsr = answ_seed;
+            call_e.bits_out = call_e.bits_in = call_e.rx_len = 0;
+            answ_e.bits_out = answ_e.bits_in = answ_e.rx_len = 0;
+            primary_retrain_peer_seen = 1;
         }
         if (primary && !primary_started
             && v34_get_hdx_control_channel_ready(call_modem)
@@ -453,9 +606,9 @@ int main(int argc, char *argv[])
     if (!primary)
     {
         int call_skip, answ_skip;
-        call_errors = grade_rx_skip(&call_e, answ_seed, (drop_control || bad_mph) ? 64 : 0,
+        call_errors = grade_rx_skip(&call_e, answ_seed, (drop_control || bad_mph || control_retrain) ? 64 : 0,
                                     &call_graded, &call_offset, &call_skip);
-        answ_errors = grade_rx_skip(&answ_e, call_seed, (drop_control || bad_mph) ? 64 : 0,
+        answ_errors = grade_rx_skip(&answ_e, call_seed, (drop_control || bad_mph || control_retrain) ? 64 : 0,
                                     &answ_graded, &answ_offset, &answ_skip);
         if (call_errors < 0)
             printf("  control channel data call<-answer: NO ALIGNMENT in %d bits\n", call_e.rx_len);
@@ -490,7 +643,7 @@ int main(int argc, char *argv[])
                                     &answ_graded, &answ_offset, &skip);
         printf("  primary recipient: %d errors in %d bits (B1 skipped %d, source offset %d)\n",
                answ_errors, answ_graded, skip, answ_offset);
-        failed |= !primary_started || !control_ok || (restart && !restarted)
+        failed |= !primary_started || !control_ok || ((restart || primary_retrain) && !restarted)
                || (turnaround && !second_primary)
                || answ_errors != 0
                || answ_graded < 8000 || answ_offset != 0
@@ -505,6 +658,10 @@ int main(int argc, char *argv[])
               || !v34_get_hdx_control_channel_ready(call_modem)
               || !v34_get_hdx_control_channel_ready(answ_modem)
               || call_graded < 512 || answ_graded < 512);
+    failed |= !source_probe_seen || recipient_probe_seen;
+    failed |= startup_tone && (!startup_tone_sent || !startup_tone_seen);
+    failed |= primary_retrain && !primary_retrain_peer_seen;
+    failed |= control_retrain && !control_retrain_complete;
     failed |= call_rate != expect_bps || answ_rate != expect_bps;
     v34_free(call_modem);
     v34_free(answ_modem);

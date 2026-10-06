@@ -1219,6 +1219,9 @@ typedef struct
     bool hdx_retrain_responding;
     bool hdx_cc_resync;
     bool hdx_alt_peer_seen;
+    bool hdx_parameter_change;
+    bool hdx_primary_retrain_after_silence;
+    bool hdx_initial_control_startup;
 } v34_tx_state_t;
 
 typedef struct
@@ -2266,6 +2269,10 @@ typedef struct
     /*! Clause 12.6: Sh/Sh-bar acquisition at both T/2 eye phases. */
     bool hdx_cc_resync;
     bool hdx_sh_seen;
+    bool hdx_tone_a_present;
+    bool hdx_retrain_peer_tone;
+    float hdx_retrain_g1, hdx_retrain_g2, hdx_retrain_energy;
+    int hdx_retrain_samples, hdx_retrain_tone_samples;
     bool hdx_ac_seen;
     complexf_t hdx_ac_previous[2];
     int hdx_ac_count[2];

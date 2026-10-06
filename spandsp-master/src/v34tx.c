@@ -4128,7 +4128,8 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
 
 static complex_sig_t get_initial_hdx_a_not_a_baud(v34_state_t *s)
 {
-    /* Answering side */
+    /* Recipient's 12.2.1.2 / 12.2.2.1 sequence. The actual carrier
+       remains B for a call modem and A for an answer modem. */
     switch (s->tx.stage)
     {
     case V34_TX_STAGE_HDX_INITIAL_A:
@@ -4141,17 +4142,28 @@ static complex_sig_t get_initial_hdx_a_not_a_baud(v34_state_t *s)
         /*endif*/
         break;
     case V34_TX_STAGE_HDX_FIRST_A:
-        /* Continue sending pure tone until we see an INFO0c message (V.34/12.2.1.2.3) */
-        if (s->rx.received_event == V34_EVENT_INFO0_OK)
+        /* INFO0 completes the capability exchange; then wait for
+           the opposite tone, per 12.2.1.2.3 / 12.2.2.1.3. */
+        /* 12.2.1.2.3 / 12.2.2.1.3 require the peer tone as well
+           as the completed INFO0 exchange (omitted during 12.7). */
+        if (s->tx.retrain_omit_info0 ? s->rx.hdx_retrain_peer_tone
+            : (s->rx.info0_received
+               && (s->calling_party ? (s->rx.hdx_tone_a_present
+                                      && s->rx.tone_a_bin_frac_valid
+                                      && s->rx.tone_a_bin_frac > 0.80f)
+                                    : s->rx.tone_b_present)))
         {
+            /* 12.7.2: on retrain, Tone B replaces the INFO0 exchange. */
+            s->tx.retrain_omit_info0 = false;
             /* First reversal seen - send a phase reversal back */
             s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.tone_duration = 1;
             s->tx.stage = V34_TX_STAGE_HDX_FIRST_NOT_A;
         }
-        else if (s->rx.received_event == V34_EVENT_INFO0_BAD
-                 ||
-                 s->rx.received_event == V34_EVENT_TONE_SEEN)
+        else if (!s->tx.retrain_omit_info0
+                 && (s->rx.received_event == V34_EVENT_INFO0_BAD
+                     || (s->rx.received_event == V34_EVENT_TONE_SEEN
+                         && !s->rx.info0_received)))
         {
             /* Go back to sending INFO0a until we get a clean INFO0c */
             info0_baud_init(s);
@@ -4188,11 +4200,12 @@ static complex_sig_t get_initial_hdx_a_not_a_baud(v34_state_t *s)
                180 ms later.  When L2_SEEN is missed, allow 600T/1000 ms here;
                detected L2 still advances immediately, and 12.2.1.4.3's
                2000 ms recovery bound remains the outer limit. */
-            s->rx.stage = V34_RX_STAGE_TONE_B;
+            s->rx.stage = s->calling_party ? V34_RX_STAGE_TONE_A : V34_RX_STAGE_TONE_B;
             s->rx.persistence1 = 0;
             s->rx.persistence2 = 0;
             s->rx.received_event = V34_EVENT_NONE;
             s->rx.tone_b_present = false;
+            s->rx.hdx_tone_a_present = false;
             s->rx.tone_b_ended = false;
             s->tx.lastbit.re = -s->tx.lastbit.re;
             s->tx.tone_duration = 1;
@@ -4225,14 +4238,18 @@ static complex_sig_t get_initial_hdx_a_not_a_baud(v34_state_t *s)
            interval (30T = 50 ms, matching the established post-L2 guard in
            the duplex path) before accepting Tone B.  This remains well inside
            12.2.1.4.3's 2000 ms recovery bound. */
-        if ((s->tx.tone_duration >= 30  &&  s->rx.tone_b_present)
+        if ((s->tx.tone_duration >= 30
+             && (s->calling_party ? (s->rx.hdx_tone_a_present
+                                  && s->rx.tone_a_bin_frac_valid
+                                  && s->rx.tone_a_bin_frac > 0.80f)
+                                  : s->rx.tone_b_present))
             ||  s->tx.tone_duration >= (600*2000)/1000)
         {
-            if (!s->rx.tone_b_present)
+            if (s->tx.tone_duration >= (600*2000)/1000)
             {
                 V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
-                           "Tx - half-duplex recipient: no Tone B within 2000 ms, "
-                           "sending INFOh anyway\n");
+                           "Tx - half-duplex recipient: no Tone %c within 2000 ms, "
+                           "sending INFOh anyway\n", s->calling_party ? 'A' : 'B');
             }
             /*endif*/
             /* Continue sending pure tone for 25 ms, then INFOh */
@@ -4260,7 +4277,7 @@ static complex_sig_t get_initial_hdx_a_not_a_baud(v34_state_t *s)
 
 static complex_sig_t get_initial_hdx_b_not_b_baud(v34_state_t *s)
 {
-    /* Calling side */
+    /* Source's 12.2.1.1 / 12.2.2.2 probe sequence. */
     switch (s->tx.stage)
     {
     case V34_TX_STAGE_HDX_FIRST_B:
@@ -4414,7 +4431,9 @@ static void initial_ab_not_ab_baud_init(v34_state_t *s)
     }
     else
     {
-        if (s->tx.calling_party)
+        /* 12.2.1/12.2.2: the source sends the probe; the recipient
+           sends the first reversal and INFOh, independent of call role. */
+        if (s->half_duplex_source == V34_HALF_DUPLEX_SOURCE)
         {
             s->tx.current_getbaud = get_initial_hdx_b_not_b_baud;
             s->tx.stage = V34_TX_STAGE_HDX_FIRST_B;
@@ -4575,10 +4594,7 @@ static int tx_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                 }
                 else
                 {
-                    if (s->tx.calling_party)
-                        second_b_baud_init(s);
-                    else
-                        second_a_baud_init(s);
+                    second_b_baud_init(s); /* 12.2.1.1.4 / 12.2.2.2.4 */
                     /*endif*/
                 }
                 /*endif*/
@@ -4711,10 +4727,7 @@ static int tx_pcm_l1_l2(v34_state_t *s, int16_t amp[], int max_len)
                 }
                 else
                 {
-                    if (s->tx.calling_party)
-                        second_b_baud_init(s);
-                    else
-                        second_a_baud_init(s);
+                    second_b_baud_init(s); /* 12.2.1.1.4 / 12.2.2.2.4 */
                 }
                 break;
             }
@@ -6055,6 +6068,7 @@ static void v34_condition_rx_for_infoh(v34_state_t *s)
        which Table 22 defines as 51 bits (0:50).  INFO0 itself is unchanged. */
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                "Tx - half-duplex: conditioned the receiver for INFOh (51 bits)\n");
+    s->rx.current_demodulator = V34_MODULATION_TONES;
     s->rx.stage = V34_RX_STAGE_INFOH;
     s->rx.target_bits = 51 - (4 + 8 + 4);
     s->rx.bit_count = 0;
@@ -6119,6 +6133,20 @@ static void second_b_baud_init(v34_state_t *s)
        on the third Tone A reversal, and half-duplex 12.2.1.2 has only ONE Tone
        A reversal (12.2.1.2.3), so that trigger can never fire on this path. */
     v34_condition_rx_for_infoh(s);
+}
+/*- End of function --------------------------------------------------------*/
+
+void v34_hdx_startup_tone_recovery(v34_state_t *s)
+{
+    /* 12.4.3.1 applies only to initial control startup: respond to
+       foreign Tone A/B with our B/A and receive INFOh, then repeat 12.3.1.
+       There is no AC sequence or 70 ms silence in this recovery. */
+    v34_rx_restart(s, s->rx.baud_rate, s->rx.bit_rate, s->rx.high_carrier);
+    s->rx.current_demodulator = V34_MODULATION_TONES;
+    s->rx.received_event = V34_EVENT_NONE;
+    s->tx.hdx_pph_after_silence = false;
+    s->primary_channel_active = false;
+    second_b_baud_init(s);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -8204,7 +8232,20 @@ static complex_sig_t get_hdx_recipient_phase3_baud(v34_state_t *s)
     /*endif*/
     if (s->tx.hdx_cc_resync && s->rx.hdx_sh_seen)
     {
-        sh_baud_init(s);
+        if (s->tx.hdx_parameter_change)
+        {
+            /* 12.6.2.3: answer Sh with PPh/ALT, then wait for the
+               source's PPh before sending the new MPh offer. */
+            s->tx.hdx_parameter_change = false;
+            s->tx.hdx_cc_resync = false;
+            /* Sh acquisition marks the retained-parameter E hunt as
+               pph_detected/mp_seen. Those are not evidence of a new PPh
+               or MPh; recondition for the actual source response. */
+            v34_condition_rx_for_pph(s, "12.6.2.3, after Sh/Sh-bar");
+            pph_baud_init(s);
+        }
+        else
+            sh_baud_init(s);
         return zero;
     }
     if (s->rx.received_event == V34_EVENT_PPH)
@@ -9079,6 +9120,7 @@ static void hdx_control_channel_start_init(v34_state_t *s)
        PP while the recipient's control channel went by. */
     v34_condition_rx_for_pph(s, "12.4.1.1, before the control channel silence");
     s->tx.hdx_pph_after_silence = true;
+    s->tx.hdx_initial_control_startup = true;
     s->tx.hdx_cc_resync = false;
     s->tx.tone_duration = milliseconds_to_samples(70);
     s->tx.current_modulator = V34_MODULATION_SILENCE;
@@ -9097,6 +9139,7 @@ static void pph_baud_init(v34_state_t *s)
        transmit time, the local half of the negotiation was still all zeroes
        when the remote half arrived, and the intersection was empty. */
     prepare_mph(s);
+    s->tx.hdx_parameter_change = false;
     s->tx.tone_duration = 0;
     s->tx.current_modulator = V34_MODULATION_CC;
     s->tx.stage = V34_TX_STAGE_HDX_PPH;
@@ -9553,6 +9596,19 @@ static int tx_silence(v34_state_t *s, int16_t amp[], int max_len)
             s->tx.training_stage = 0x101;
             transmission_preamble_init(s);
         }
+        else if (s->tx.hdx_primary_retrain_after_silence)
+        {
+            /* 12.7: the 70 ms silence precedes Tone B (call) or A
+               (answer), with INFO0 omitted and fresh reversal ordinals. */
+            s->tx.hdx_primary_retrain_after_silence = false;
+            s->rx.current_demodulator = V34_MODULATION_TONES;
+            s->rx.received_event = V34_EVENT_NONE;
+            s->rx.persistence1 = s->rx.persistence2 = 0;
+            s->rx.phase2_reversal_count = 0;
+            initial_ab_not_ab_baud_init(s);
+            if (s->half_duplex_source == V34_HALF_DUPLEX_SOURCE)
+                s->tx.stage = V34_TX_STAGE_HDX_FIRST_B_INFO_SEEN;
+        }
         else if (s->tx.hdx_sh_after_silence)
         {
             s->tx.hdx_sh_after_silence = false;
@@ -9777,6 +9833,14 @@ static void hdx_begin_control_retrain(v34_state_t *s, bool responding)
                responding ? "responding" : "initiating");
 }
 
+SPAN_DECLARE(int) v34_half_duplex_start_control_retrain(v34_state_t *s)
+{
+    if (!s || s->duplex || !v34_get_hdx_control_channel_ready(s))
+        return -1;
+    hdx_begin_control_retrain(s, false);
+    return 0;
+}
+
 static void hdx_control_watch(v34_state_t *s, int samples)
 {
     int state;
@@ -9784,6 +9848,8 @@ static void hdx_control_watch(v34_state_t *s, int samples)
     if (s->duplex || s->rx.current_demodulator != V34_MODULATION_CC
         || s->rx.stage != V34_RX_STAGE_CC)
         return;
+    if (v34_get_hdx_control_channel_ready(s))
+        s->tx.hdx_initial_control_startup = false;
     if (v34_get_hdx_control_channel_ready(s) && s->tx.hdx_retrain_responding)
     {
         /* AC may continue while the responder waits for the initiating
@@ -10582,6 +10648,47 @@ SPAN_DECLARE(void) v34_start_retrain(v34_state_t *s)
     if (!s)
         return;
     /*endif*/
+    if (!s->duplex)
+    {
+        int role = s->half_duplex_source;
+        int ceiling_n = s->tx.hdx_primary_ceiling_n;
+        int restart_n = ceiling_n;
+        span_sample_timer_t rx_time = s->rx.sample_time;
+        span_sample_timer_t tx_time = s->tx.sample_time;
+        if (v34_get_hdx_control_channel_ready(s))
+        {
+            hdx_begin_control_retrain(s, false);
+            return;
+        }
+        /* 12.7 re-runs primary equalizer training via 12.2 tone ranging,
+           retaining capabilities but resetting the previous transaction.
+           Keep the DS0 clocks monotonic across the frontend reset. */
+        /* A capability ceiling can exceed this symbol rate's Table 16
+           mapping. Choose a valid reset profile, retaining the ceiling. */
+        while (restart_n > 0
+               && baud_rate_parameters[s->tx.baud_rate].mappings[2*(restart_n - 1)].b == 0)
+            restart_n--;
+        if (restart_n < 1
+            || v34_restart(s, baud_rate_parameters[s->tx.baud_rate].baud_rate,
+                           restart_n*2400, false))
+            return;
+        s->tx.hdx_primary_ceiling_n = ceiling_n;
+        s->rx.sample_time = rx_time;
+        s->tx.sample_time = tx_time;
+        v34_half_duplex_change_mode(s, role);
+        s->tx.training_stage = 0;
+        s->tx.retrain_omit_info0 = true;
+        s->tx.hdx_primary_retrain_after_silence = true;
+        s->primary_channel_active = false;
+        s->tx.current_modulator = V34_MODULATION_SILENCE;
+        s->tx.tone_duration = milliseconds_to_samples(70);
+        s->tx.stage = V34_TX_STAGE_HDX_CC_SILENCE;
+        s->rx.current_demodulator = V34_MODULATION_SILENCE;
+        s->rx.stage = s->calling_party ? V34_RX_STAGE_TONE_A : V34_RX_STAGE_TONE_B;
+        s->rx.received_event = V34_EVENT_NONE;
+        s->rx.tone_b_present = s->rx.tone_b_ended = false;
+        return;
+    }
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - V.34 11.5 retrain: 70 ms of silence, then Tone %c\n",
              (s->calling_party == s->tx.v90_mode) ? 'A' : 'B');
@@ -10883,6 +10990,24 @@ SPAN_DECLARE(void) v34_set_v92_pcm_upstream_capability(v34_state_t *s,
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(int) v34_half_duplex_request_parameters(v34_state_t *s, int bit_rate)
+{
+    if (!s || s->duplex
+        || s->half_duplex_source != V34_HALF_DUPLEX_RECIPIENT
+        || s->half_duplex_state != V34_HALF_DUPLEX_PRIMARY_CHANNEL
+        || bit_rate < 2400 || bit_rate > 33600 || bit_rate % 2400)
+        return -1;
+    if (!(v34_hdx_rate_mask(hdx_negotiated_baud_rate(s))
+          & ((1 << (bit_rate/2400)) - 1)))
+        return -1;
+    /* Table 23: update the MPh primary ceiling, not the running mapper.
+       The next 12.6.2.3 exchange applies the new negotiated profile. */
+    s->tx.hdx_primary_ceiling_n = bit_rate/2400;
+    s->tx.hdx_parameter_change = true;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v34_half_duplex_change_mode(v34_state_t *s, int mode)
 {
     if (!s || s->duplex)
@@ -11128,6 +11253,8 @@ SPAN_DECLARE(int) v34_restart(v34_state_t *s, int baud_rate, int bit_rate, bool 
     s->tx.half_duplex_state =
     s->rx.half_duplex_state = V34_HALF_DUPLEX_SILENCE;
     s->rx.hdx_primary_resync = false;
+    s->rx.hdx_tone_a_present = false;
+    s->rx.hdx_retrain_peer_tone = false;
     if (!duplex)
     {
         /* 12.2/12.3 fresh acquisition cannot inherit a previous page's
@@ -11144,6 +11271,11 @@ SPAN_DECLARE(int) v34_restart(v34_state_t *s, int baud_rate, int bit_rate, bool 
     s->tx.hdx_primary_tail_samples = 0;
     s->tx.hdx_primary_after_cc_tail = false;
     s->tx.hdx_cc_tail_symbols = 0;
+    s->tx.hdx_parameter_change = false;
+    s->tx.hdx_primary_retrain_after_silence = false;
+    s->tx.hdx_initial_control_startup = false;
+    s->rx.hdx_retrain_g1 = s->rx.hdx_retrain_g2 = s->rx.hdx_retrain_energy = 0.0f;
+    s->rx.hdx_retrain_samples = s->rx.hdx_retrain_tone_samples = 0;
     s->tx.hdx_watch_state = -1;
     s->tx.hdx_watch_samples = 0;
     s->tx.hdx_retrain_initiator = false;

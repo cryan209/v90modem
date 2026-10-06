@@ -393,7 +393,7 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 	./v34_hdx_test 3200 21600 ulaw 20 9600
 	./v34_hdx_test 3429 14400 alaw 20 19200
 	./v34_hdx_test 3429 28800 alaw 20 4800
-	$(MAKE) v34-hdx-primary-test v34-hdx-turnaround-test v34-hdx-recovery-test
+	$(MAKE) v34-hdx-primary-test v34-hdx-turnaround-test v34-hdx-recovery-test v34-hdx-parameters-test v34-hdx-retrain-test v34-hdx-startup-recovery-test
 	./v32bis_spandsp_test
 	./v32bis_duplex_test
 	./v32bis_engine_pair_test ulaw v8
@@ -894,6 +894,46 @@ v34-hdx-turnaround-test: v34_hdx_test
 	V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 ./v34_hdx_test 3200 21600 ulaw 12
 	V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 ./v34_hdx_test 3200 21600 alaw 12
 	V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 V34_HDX_BLOCK_SAMPLES=80 ./v34_hdx_test 3200 21600 alaw 12
+
+# 12.6.2.3: recipient requests a lower ceiling; both peers exchange MPh.
+.PHONY: v34-hdx-parameters-test
+v34-hdx-parameters-test: v34_hdx_test
+	@set -e; for baud in 2400 2743 2800 3000 3200 3429; do \
+	  for law in ulaw alaw; do \
+	    V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 V34_HDX_PARAMETERS=1 ./v34_hdx_test $$baud 9600 $$law 12; \
+	    V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 V34_HDX_PARAMETERS=1 V34_HDX_ANSWER_SOURCE=1 ./v34_hdx_test $$baud 9600 $$law 12; \
+	  done; \
+	done
+	V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 V34_HDX_PARAMETERS=1 V34_HDX_BLOCK_SAMPLES=80 ./v34_hdx_test 3200 9600 alaw 12
+
+# 12.7: one peer initiates; the other detects its tone without a host request.
+# 12.8: either peer or both peers may initiate the control retrain.
+.PHONY: v34-hdx-retrain-test
+v34-hdx-retrain-test: v34_hdx_test
+	@set -e; for law in ulaw alaw; do \
+	  for initiator in 1 2; do \
+	    for baud in 2400 2743 2800 3000 3200 3429; do \
+	      V34_HDX_PRIMARY=1 V34_HDX_PRIMARY_RETRAIN=$$initiator ./v34_hdx_test $$baud 9600 $$law 14; \
+	      V34_HDX_PRIMARY=1 V34_HDX_PRIMARY_RETRAIN=$$initiator V34_HDX_ANSWER_SOURCE=1 ./v34_hdx_test $$baud 9600 $$law 14; \
+	    done; \
+	  done; \
+	  for initiator in 1 2 3; do \
+	    V34_HDX_CONTROL_RETRAIN=$$initiator ./v34_hdx_test 3200 9600 $$law 12; \
+	  done; \
+	done
+	V34_HDX_PRIMARY=1 V34_HDX_PRIMARY_RETRAIN=2 V34_HDX_BLOCK_SAMPLES=80 ./v34_hdx_test 3200 9600 alaw 14
+	V34_HDX_CONTROL_RETRAIN=3 V34_HDX_BLOCK_SAMPLES=80 ./v34_hdx_test 3200 9600 alaw 12
+
+# 12.4.3.1: foreign recipient returns to Tone A rather than sending PPh.
+.PHONY: v34-hdx-startup-recovery-test
+v34-hdx-startup-recovery-test: v34_hdx_test
+	@set -e; for baud in 2400 2743 2800 3000 3200 3429; do \
+	  for law in ulaw alaw; do \
+	    V34_HDX_STARTUP_TONE=1 ./v34_hdx_test $$baud 9600 $$law 12; \
+	    V34_HDX_STARTUP_TONE=1 V34_HDX_ANSWER_SOURCE=1 ./v34_hdx_test $$baud 9600 $$law 12; \
+	  done; \
+	done
+	V34_HDX_STARTUP_TONE=1 V34_HDX_BLOCK_SAMPLES=80 ./v34_hdx_test 3200 9600 alaw 12
 
 # Four-second loss of one control direction forces the three-second recovery.
 v34-hdx-recovery-test: v34_hdx_test
