@@ -8842,7 +8842,10 @@ static int me_clear_start_locked(void)
              * a UI-only peer that drops SABME silently costs ~4.5 s. */
             const char *ack = getenv("ME_V120_ACK");
 
+            const char *vf = getenv("ME_V120_VERIFY");
+
             cc_v120_set_ack(&g_cc, ack && *ack == '1');
+            cc_v120_set_verify(&g_cc, vf && *vf == '1');
             cc_set_break_cb(&g_cc, me_cc_break_cb);
         }
         g_data_connect_rate = rate;   /* as for V.110 above */

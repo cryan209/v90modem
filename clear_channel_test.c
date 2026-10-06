@@ -422,6 +422,131 @@ static void test_v120_ack(void)
     free(eb);
 }
 
+/* ---- V.120 4.2.2 UI-only link verification ---- */
+
+static int vf_xid_cmd, vf_xid_rsp, vf_ui_before_rsp, vf_seen_rsp;
+static void vf_spy_frame(void *user, const uint8_t *pkt, int len, int ok)
+{
+    (void) user;
+    if (len < 3 || !ok)
+        return;
+    if ((pkt[2] & ~0x10) == 0xAF) {
+        if (pkt[0] & 0x02) {
+            vf_xid_rsp++;
+            vf_seen_rsp = 1;
+        } else {
+            vf_xid_cmd++;
+        }
+    } else if ((pkt[2] & ~0x10) == 0x03 && !vf_seen_rsp) {
+        vf_ui_before_rsp++;
+    }
+}
+
+static void test_v120_verify(void)
+{
+    end_t *ea = calloc(1, sizeof(*ea)), *eb = calloc(1, sizeof(*eb));
+    clear_channel_t a, b;
+    hdlc_rx_state_t *spy;
+
+    printf("V.120 4.2.2 link verification (UI only):\n");
+    ea->src = text_a; ea->src_len = 600;
+    eb->src = text_b; eb->src_len = 400;
+    cc_init_v120(&a, false, true, end_pull, end_push, ea);
+    cc_init_v120(&b, false, false, end_pull, end_push, eb);
+    cc_v120_set_verify(&a, true);
+    cc_v120_set_verify(&b, true);
+    vf_xid_cmd = vf_xid_rsp = vf_ui_before_rsp = vf_seen_rsp = 0;
+    spy = hdlc_rx_init(NULL, false, true, 1, vf_spy_frame, NULL);
+    hdlc_rx_set_max_frame_len(spy, 400);
+    ack_run(&a, &b, 40, 0, 0, 0, 0, spy);
+    check(a.vf_state == 2 && b.vf_state == 2 && a.vf_gave_up == 0 && b.vf_gave_up == 0,
+          "both ends verified by the XID exchange");
+    check(vf_xid_cmd >= 1 && vf_xid_rsp >= 1, "XID command (C/R 0) and XID response (C/R 1) on the wire");
+    check(eb->dst_len == 600 && ea->dst_len == 400 && !memcmp(eb->dst, text_a, 600)
+          && !memcmp(ea->dst, text_b, 400), "data exact both ways after verification");
+    check(vf_ui_before_rsp == 0, "no UI data frame from A before it saw B's XID response");
+    hdlc_rx_free(spy);
+    cc_release(&a);
+    cc_release(&b);
+
+    /* The peer does not verify itself but still answers (4.2.2 "shall"). */
+    memset(ea, 0, sizeof(*ea));
+    memset(eb, 0, sizeof(*eb));
+    ea->src = text_a; ea->src_len = 300;
+    cc_init_v120(&a, false, true, end_pull, end_push, ea);
+    cc_init_v120(&b, false, false, end_pull, end_push, eb);
+    cc_v120_set_verify(&a, true);
+    ack_run(&a, &b, 20, 0, 0, 0, 0, NULL);
+    check(a.vf_state == 2 && a.vf_gave_up == 0 && eb->dst_len == 300, "a non-verifying peer answers the XID");
+    cc_release(&a);
+    cc_release(&b);
+
+    /* Nobody answers: NM20 retransmissions, then data begins (4.2.2). */
+    memset(ea, 0, sizeof(*ea));
+    ea->src = text_a; ea->src_len = 200;
+    cc_init_v120(&a, false, true, end_pull, end_push, ea);
+    cc_v120_set_verify(&a, true);
+    {
+        uint8_t o[160], quiet[160];
+
+        memset(quiet, 0xFF, sizeof(quiet));
+        for (int t = 0; t < 300; t++) {           /* 6 s: still waiting */
+            cc_tx(&a, o, 160);
+            cc_rx(&a, quiet, 160);
+        }
+        check(a.vf_state == 1 && ea->src_pos == 0, "no response: data held back, XID repeated");
+        for (int t = 0; t < 300; t++) {           /* to 12 s: 3 retries x 2.5 s spent */
+            cc_tx(&a, o, 160);
+            cc_rx(&a, quiet, 160);
+        }
+        check(a.vf_state == 2 && a.vf_gave_up == 1 && ea->src_pos == 200,
+              "NM20 spent: data begins anyway");
+    }
+    cc_release(&a);
+
+    /* 4.2.3: an XID command while an SABME is outstanding is answered and the
+     * state is kept. */
+    memset(ea, 0, sizeof(*ea));
+    memset(eb, 0, sizeof(*eb));
+    ea->src = text_a; ea->src_len = 200;
+    eb->src = text_b; eb->src_len = 200;
+    cc_init_v120(&a, false, true, end_pull, end_push, ea);
+    cc_init_v120(&b, false, false, end_pull, end_push, eb);
+    cc_v120_set_ack(&a, true);
+    cc_v120_set_ack(&b, true);
+    {
+        uint8_t xid[3] = { 0x08, 0x01, 0xAF }, pk[64];
+        int n = 0;
+        hdlc_tx_state_t *tx = hdlc_tx_init(NULL, false, 1, false, NULL, NULL);
+        uint8_t line[64];
+
+        hdlc_tx_flags(tx, 2);
+        hdlc_tx_frame(tx, xid, 3);
+        for (int i = 0; i < 40; i++) {
+            uint8_t o = 0;
+
+            for (int k = 0; k < 8; k++) {
+                int bit = hdlc_tx_get_bit(tx);
+
+                o = (uint8_t) (o | ((bit < 0 ? 1 : bit) << (7 - k)));
+            }
+            line[n++ % 64] = o;
+        }
+        hdlc_tx_free(tx);
+        (void) pk;
+        cc_tx(&a, (uint8_t[160]) {0}, 160);     /* A sends its SABME */
+        check(a.lf_state == CC_LF_SETUP, "A has an SABME outstanding");
+        cc_rx(&a, line, 40);                    /* an XID command arrives meanwhile */
+        ack_run(&a, &b, 200, 0, 0, 0, 0, NULL);   /* the first SABME was dropped: T200 resends */
+        check(a.lf_state == CC_LF_UP && b.lf_state == CC_LF_UP && ea->src_pos == 200,
+              "XID during SABME did not disturb establishment (4.2.3)");
+    }
+    cc_release(&a);
+    cc_release(&b);
+    free(ea);
+    free(eb);
+}
+
 static void test_v120_pair(bool r56)
 {
     end_t *ea = calloc(1, sizeof(*ea)), *eb = calloc(1, sizeof(*eb));
@@ -1356,6 +1481,7 @@ int main(void)
     test_v110_flow();
     test_v120_ack();
     test_break();
+    test_v120_verify();
     if (test_engine() < 0) {
         printf("  FAIL engine/PTY setup\n");
         failures++;

@@ -117,6 +117,8 @@ typedef enum {
     CC_LF_SETUP,             /* SABME sent, awaiting UA */
     CC_LF_UP                 /* multiple-frame mode established */
 } cc_lf_state_t;
+#define CC_V120_TM20_OCTETS 20000u  /* 2.5 s: Q.922 App. III XID value */
+#define CC_V120_NM20 3
 #define CC_LF_K 15           /* window k; a power of two minus one fits mod 128 */
 
 typedef struct {
@@ -153,6 +155,9 @@ typedef struct {
     uint64_t lf_t200_at;
     uint8_t lf_win[16][1 + CC_V120_MAX_DATA];
     int lf_win_len[16];
+    bool vf_enable, lf_pend_xid;
+    int vf_state, vf_retries;          /* 0 not started, 1 XID out, 2 verified */
+    uint64_t vf_at, vf_ok, vf_gave_up;
     uint64_t lf_fallbacks, lf_resets, lf_rewinds, lf_discarded;
 
     /* V.110 */
@@ -229,6 +234,10 @@ void cc_send_break(clear_channel_t *cc, int ms);
  * T200 1.5 s, N200 3) instead of UI frames.  Call right after cc_init_v120().
  * A peer that refuses (DM) or never answers SABME gets UI frames. */
 void cc_v120_set_ack(clear_channel_t *cc, bool ack);
+/* V.120 4.2.2: in UI-only mode send an XID command first and hold the data
+ * until the XID response (TM20 2.5 s, NM20 3; then data starts anyway, as
+ * 4.2.2 allows).  An XID command is answered whether or not this is on. */
+void cc_v120_set_verify(clear_channel_t *cc, bool on);
 /* V.110 5.4.2: turn X OFF towards the far end when the DTE-side receive
  * buffer is under a quarter free (characters already in flight still fit),
  * back ON once it is over a half free.  Only in the data transfer state. */

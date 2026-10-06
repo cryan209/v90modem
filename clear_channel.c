@@ -263,6 +263,11 @@ static void v120_ack_poll(clear_channel_t *cc)
         lf_send_u(cc, true, 0x63, cc->lf_pend_f);
         return;
     }
+    if (cc->lf_pend_xid) {                  /* 4.2.3: respond and stay in state */
+        cc->lf_pend_xid = false;
+        lf_send_u(cc, true, 0xAF, false);
+        return;
+    }
     if (cc->lf_state == CC_LF_DOWN) {
         lf_reset_vars(cc);
         cc->lf_state = CC_LF_SETUP;
@@ -407,8 +412,16 @@ static void lf_rx(clear_channel_t *cc, const uint8_t *pkt, int len)
             cc->lf_resets++;
         }
         break;
+    case 0xAF:                                     /* XID (4.2.2, 4.2.3) */
+        if (cmd) {
+            cc->lf_pend_xid = true;               /* always answered, any state */
+        } else if (cc->vf_state == 1) {
+            cc->vf_state = 2;                     /* link verified */
+            cc->vf_ok++;
+        }
+        break;
     default:
-        cc->rx_unsupported++;                      /* XID, FRMR */
+        cc->rx_unsupported++;                      /* FRMR and the rest */
         break;
     }
 }
@@ -432,6 +445,28 @@ static void v120_load_frame(clear_channel_t *cc)
     }
     /* 3.2.4.1: the peer's RR = 0 asserts flow control; no user data until
      * a control-state octet sets it back to 1. */
+    if (cc->lf_pend_xid) {                 /* 4.2.2: shall respond to an XID command */
+        cc->lf_pend_xid = false;
+        lf_send_u(cc, true, 0xAF, false);
+        return;
+    }
+    /* 4.2.2: UI-only link verification, when wanted: XID command, TM20, NM20;
+     * no data until the response (or, retries spent, "may begin"). */
+    if (cc->vf_enable && !cc->v120_ack && cc->vf_state != 2) {
+        if (cc->vf_state == 0 || cc->tx_octets >= cc->vf_at) {
+            if (cc->vf_state == 1 && ++cc->vf_retries > CC_V120_NM20) {
+                cc->vf_state = 2;                 /* begin transmission anyway */
+                cc->vf_gave_up++;
+            } else {
+                cc->vf_state = 1;
+                cc->vf_at = cc->tx_octets + CC_V120_TM20_OCTETS;
+                lf_send_u(cc, false, 0xAF, false);
+                return;
+            }
+        } else {
+            return;
+        }
+    }
     if (!cc->v120_peer_rr)
         return;
     {
@@ -1164,6 +1199,12 @@ int cc_init_clear(clear_channel_t *cc, bool r56,
     cc->put_bit = put_bit;
     cc->ctx = ctx;
     return 0;
+}
+
+void cc_v120_set_verify(clear_channel_t *cc, bool on)
+{
+    cc->vf_enable = on;
+    cc->vf_state = 0;
 }
 
 void cc_v120_set_ack(clear_channel_t *cc, bool ack)

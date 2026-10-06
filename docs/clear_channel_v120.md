@@ -68,7 +68,12 @@ what is still open (V120-5, break -- since done at the framing level, see below)
   whose SABME is answered DM (an UI-only peer, as this one is by default) or
   not at all (N200 SABMEs, ~6 s) falls back to UI frames, so mixed pairs
   work and nothing is lost; the cost against a silent peer is that delay.
-  Not implemented: 4.2.2 XID link verification (XID counts as unsupported),
+  4.2.2 link verification for UI-only mode is `ME_V120_VERIFY=1`: an XID
+  command (empty information field, which 4.2.2 allows), TM20 2.5 s, NM20 3,
+  data held until the response and begun anyway when the retries are spent;
+  an XID command is always answered, in either mode, and 4.2.3's collision
+  (XID while an SABME is outstanding) is answered without a state change.
+  Not implemented: Annex C's XID parameter negotiation (V.42bis over V.120),
   FRMR, our own RNR (the DTE-side ring does not back-pressure V.120 yet),
   and the V.42-style "mode collision" handling of 4.2.3.
 - **Break (audit V120-5).** Both directions exist at the framing level:
