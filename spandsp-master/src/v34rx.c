@@ -4664,6 +4664,7 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
     bitstream_state_t bs;
     const uint8_t *t;
     uint16_t raw_freq;
+    info1a_t saved_info1a;
 
     bitstream_init(&bs, true);
     t = buf;
@@ -4793,6 +4794,7 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
         s->info1a_raw_32_33 = 0;
         s->info1a_raw_40_49 = 0;
         /* Standard V.34 INFO1a parsing */
+        saved_info1a = *info1a;
         /* 12:14    Minimum power reduction */
         info1a->power_reduction = bitstream_get(&bs, &t, 3);
         /* 15:17    Additional power reduction */
@@ -4813,6 +4815,24 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
         info1a->freq_offset = bitstream_get(&bs, &t, 10);
         if ((info1a->freq_offset & 0x200))
             info1a->freq_offset = -(info1a->freq_offset ^ 0x3FF) - 1;
+        /*endif*/
+        /* Table 16: symbol-rate indices 0..5, pre-emphasis 0..10, projected
+           rate 0..14.  A frame naming anything else is not a negotiation:
+           reject it whole, before it can retune the receiver or publish
+           INFO1_OK, and keep the previous values. */
+        if (info1a->baud_rate_a_to_c > V34_BAUD_RATE_3429
+            || info1a->baud_rate_c_to_a > V34_BAUD_RATE_3429
+            || info1a->preemphasis_filter > 10
+            || info1a->max_data_rate > 14)
+        {
+            V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                       "Rx INFO1a rejected: undefined selection (a2c baud %d, c2a baud %d, "
+                       "pre-emphasis %d, projected rate %d)\n",
+                       info1a->baud_rate_a_to_c, info1a->baud_rate_c_to_a,
+                       info1a->preemphasis_filter, info1a->max_data_rate);
+            *info1a = saved_info1a;
+            return -1;
+        }
         /*endif*/
         /* V.34 10.1.2.3.5/Table 16 bits 34:36 select answer->call,
            which is this call modem receiver's direction.  Carrier and
@@ -6056,7 +6076,13 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                     s->received_event = V34_EVENT_INFO1_OK;
                     break;
                 case V34_RX_STAGE_INFO1A:
-                    process_rx_info1a(s, &s->info1a, s->info_buf);
+                    if (process_rx_info1a(s, &s->info1a, s->info_buf) < 0)
+                    {
+                        /* Undefined selections: no INFO1_OK, no state change. */
+                        s->received_event = V34_EVENT_NONE;
+                        break;
+                    }
+                    /*endif*/
                     if (s->v90_mode)
                     {
                         /* V.90 §9.2.1.1.8: INFO1a received — now proceed to Phase 3.
@@ -10480,9 +10506,11 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         if (expected_mp_type >= 0  &&  type != expected_mp_type)
                             continue;
                         /*endif*/
-                        if (type == 0 && s->mp_frame_bits[19] != 0)
-                            continue;
-                        /*endif*/
+                        /* Table 20 bit 19 is not interpreted by the receiver, and
+                           mp_seed_frame_prefix() writes only positions 0..18, so
+                           position 19 here is left over from an EARLIER frame:
+                           testing it skipped valid preambles after any frame that
+                           had it set.  It is collected with the body for the CRC. */
                         s->mp_frame_target = (type == 1)  ?  188  :  88;
                         s->mp_frame_pos = 19;
                         s->mp_count = 0;

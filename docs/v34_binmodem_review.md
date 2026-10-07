@@ -238,3 +238,26 @@ INFO1_OK event on rejection.
 Both temporary probes compiled successfully with the checkout's configured
 SpanDSP headers and static library. No production protocol implementation
 was edited in this follow-up.
+
+## Resolution (2026-10-07)
+
+Fixed, each with a test: **the stale bit-19 pre-collection check** (removed;
+Table 20 bit 19 is not interpreted and the helper never wrote that position),
+and **undefined INFO1a selections** (symbol-rate codes above 5, pre-emphasis
+above 10, projected rate above 14 now reject the whole frame, restore the
+previous values, set no `info1a_received` and publish no INFO1_OK; plain V.34
+only, the V.90 layouts are untouched). `v34_info1a_validate_test` is new and in
+`make test`; `v34_mp_test`, `v34_data_test` and all 46 `v34_duplex_test` rows
+in the makefile pass. The bit-19 change has no dedicated regression (no
+waveform-level injection exists for it).
+
+**Not fixed, deliberately:** cleardown MP (needs a separate 11.7 path with
+MP/MP' completion and an engine carrier-loss event); E replacing a lost peer
+MP' (the receiver has no reliable frame grid once a frame is damaged, so
+accepting E without the remote acknowledgement reopens the early-E false
+detect the current guard exists for); the clause 11.4 E deadlines, the
+answerer's TRN upper bound and the 11.6 timeout (all need role/CME/RTD-aware
+sample-position timing and a recovery decision, and none can be exercised by
+the duplex harness); duplex J's 16-point request reaching TRN/MP/E; and the
+timer-driven second Tone B reversal, which this document itself says must wait
+on the 21600 acquisition fix.
