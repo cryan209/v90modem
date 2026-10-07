@@ -774,6 +774,9 @@ struct v90_state_s {
     bool             v92_remote_ack_received;   /* CPu'/SUVu' ack, or E2u */
     bool             v92_cpd_sent;
     bool             v92_cpd_retry;
+    /* 9.6.1.1.3: sticky once the initial CPd's acknowledgement has timed
+     * out -- CPd then repeats at each complete-message boundary until Ed. */
+    bool             v92_cpd_repeat;
     uint64_t         v92_symbol_clock, v92_cpd_end;
     /* V.92 9.11 (Amd.1 item 6) cleardown: drn = 0 in our CPd, or the
      * analogue modem's CPu.  No Ed follows; instead the call goes on-hook
@@ -1436,11 +1439,14 @@ static uint16_t v90_capped_upstream_mask(const v90_state_t *s)
             limited |= (uint16_t)(1U << bit);
     }
     if ((mask & limited) == 0) {
+        /* An empty intersection stays empty: MP must offer only rates this
+         * receiver accepts, and the caller treats mask 0 as a failed
+         * negotiation instead of advertising a rate outside the limits. */
         fprintf(stderr,
-                "[V90] MP: peer upstream mask 0x%04x offers no rate <= %d bps; "
-                "echoing it uncapped\n",
-                mask, s->upstream_rate_limit_bps);
-        return mask;
+                "[V90] MP: peer upstream mask 0x%04x has no rate within "
+                "[%d, %d] bps; no MP can be offered\n",
+                mask, s->upstream_rate_floor_bps, s->upstream_rate_limit_bps);
+        return 0;
     }
     return (uint16_t)(mask & limited);
 }
@@ -1882,7 +1888,7 @@ static bool v90_configure_phase4_mapper(v90_state_t *s,
         || cp->acknowledge
         || cp->shaping_redundancy > 3
         || (cp->shaping_redundancy != 0 && cp->shaping_lookahead > 3)
-        || cp->drn < 4 || cp->drn > 22)
+        || cp->drn < 1 || cp->drn > 22)
         return false;
 
     s->phase4_d = cp->drn + 8;
@@ -4430,7 +4436,7 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                     && !s->v92_cleardown && !s->v92_peer_cleardown) {
                     s->tx_phase = V90_TX_ED;
                     s->sample_count = 0;
-                } else if ((!s->v92_cpd_sent || s->v92_cpd_retry)
+                } else if ((!s->v92_cpd_sent || s->v92_cpd_retry || s->v92_cpd_repeat)
                            && (s->v92_suvu_received || s->v92_cpu_received)) {
                     /* §9.6.1.1.2: a single CPd per received SUVu/CPu. */
                     if (v90_build_v92_cpd_native(s)) {
@@ -4497,6 +4503,20 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                     s->v92_cleardown_at = s->v92_cpd_end + 800u + s->v92_round_trip_symbols / 2;
                 s->phase4_hold_logged = false;
                 s->sample_count = 0;
+                if (s->v92_cpd_repeat && !s->v92_cleardown
+                    && !s->v92_peer_cleardown) {
+                    /* 9.6.1.1.3: after the timeout the transmitter sends
+                     * repeated CPd sequences, not SUVd, until the exchange
+                     * is acknowledged both ways. */
+                    if (s->v92_ack_sent && s->v92_remote_ack_received) {
+                        s->tx_phase = V90_TX_ED;
+                        return codeword;
+                    }
+                    if (v90_build_v92_cpd_native(s)) {
+                        s->tx_phase = V90_TX_CP;
+                        return codeword;
+                    }
+                }
                 (void)v90_build_v92_suvd_mapped(s, s->v92_cpu_received);
                 s->tx_phase = V90_TX_SUVD;
             }
@@ -4791,6 +4811,7 @@ void v90_start_phase3(v90_state_t *s, int u_info)
     s->v92_remote_ack_received = false;
     s->v92_cpd_sent = false;
     s->v92_cpd_retry = false;
+    s->v92_cpd_repeat = false;
     s->v92_symbol_clock = s->v92_cpd_end = 0;
     s->v92_ack_sent = false;
     s->v92_tx_nbits = 0;
@@ -5860,7 +5881,7 @@ static void v92_check_cpd_retry(v90_state_t *s, bool acknowledge)
      * 100 ms + round-trip interval, then repeat CPd at a TX boundary. */
     if (!acknowledge && !s->v92_remote_ack_received && s->v92_cpd_sent && s->tx_phase != V90_TX_CP
         && s->v92_symbol_clock - s->v92_cpd_end >= 800ULL + s->v92_round_trip_symbols)
-        s->v92_cpd_retry = true;
+        s->v92_cpd_retry = s->v92_cpd_repeat = true;
 }
 
 bool v90_set_v92_suvu(v90_state_t *s, bool acknowledge)

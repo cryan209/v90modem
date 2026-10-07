@@ -21,9 +21,13 @@ static bool v90_cp_diag_is_strict(const v90_cp_rx_t *rx,
         return false;
     /* Accept both CPt (bit 19 = 0) and data-mode CP (bit 19 = 1). The V.90
      * state machine applies the phase-specific distinction. */
-    return diag->frame.drn >= 1
-        && diag->frame.drn <= 22
-        && diag->bits[18] == 0
+    /* V.90 9.7 / Table 14: a data-mode CP (bit 19 = 1) with drn = 0 requests
+     * cleardown and its constellation fields are not interpreted. */
+    if (diag->frame.drn == 0)
+        return diag->frame.v90_compatibility && diag->bits[30] == 0;
+    return diag->frame.drn <= 22
+        /* bit 18 (transparent mode) is reserved in V.90 Table 14 and is
+         * not interpreted by the digital modem */
         && diag->bits[30] == 0
         && diag->frame.upstream_rate_mask != 0
         && ((diag->bits[35] != 0) == rx->expected_alaw);
@@ -207,14 +211,12 @@ bool v90_cp_rx_put_bit(v90_cp_rx_t *rx, int bit)
             rx->rejected_frames++;
             if (diag.frame_sync_ok
                 && diag.start_bits_ok
-                && diag.reserved_bits_ok
                 && diag.v90_compat_ok
                 && diag.fill_ok
                 && diag.crc_remainder != 0) {
                 rx->crc_rejected_frames++;
             } else if (diag.frame_sync_ok
                        && diag.start_bits_ok
-                       && diag.reserved_bits_ok
                        && diag.v90_compat_ok
                        && diag.fill_ok
                        && diag.crc_remainder == 0) {

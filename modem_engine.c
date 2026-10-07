@@ -5353,6 +5353,16 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
     if (!diag || !g_v90 || g_mod != ME_MOD_V90)
         return false;
     frame = &diag->frame;
+    if (frame->drn == 0 && frame->v90_compatibility) {
+        /* V.90 9.7: CP with drn = 0 is the peer's protocol cleardown. Its
+         * constellation fields are ignored, so it must not reach the mapper. */
+        ME_LOG("[ME] V.90 peer requested §9.7 cleardown (CP drn=0, source=%s)\n",
+               source ? source : "unknown");
+        trace_phase("V90 peer cleardown");
+        g_hangup_cause = "Remote (V.90 9.7 cleardown)";
+        g_state = ME_HANGUP;
+        return true;
+    }
     if (parse_env_int("ME_V90_SMARTLINK_DUMMY_CPT", 0) != 0) {
         repaired_frame = diag->frame;
         if (v90_repair_smartlink_dummy_cpt(&repaired_frame)) {

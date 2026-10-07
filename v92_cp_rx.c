@@ -304,7 +304,7 @@ bool v92_cp_decode_diag(const uint8_t *bits, int nbits, v92_cp_diag_t *diag)
                && local.frame_sync_ok
                && local.identifier_ok
                && local.start_bits_ok
-               && local.reserved_ok
+               /* reserved bits are diagnostic only: V.92 Tables 23/24/27/30 have the receiver ignore them */
                && local.parameters_ok
                && local.fill_bits_ok
                && local.crc_ok;
@@ -382,7 +382,7 @@ bool v92_cpus_decode_diag(const uint8_t *bits, int nbits, v92_cpus_diag_t *diag)
                && local.frame_sync_ok
                && local.identifier_ok
                && local.start_bits_ok
-               && local.reserved_ok
+               /* reserved bits are diagnostic only: V.92 Tables 23/24/27/30 have the receiver ignore them */
                && local.parameters_ok
                && local.fill_bits_ok
                && local.crc_ok;
@@ -462,7 +462,7 @@ bool v92_suvu_decode_diag(const uint8_t *bits, int nbits, v92_suvu_diag_t *diag)
                && local.frame_sync_ok
                && local.identifier_ok
                && local.start_bits_ok
-               && local.reserved_ok
+               /* reserved bits are diagnostic only: V.92 Tables 23/24/27/30 have the receiver ignore them */
                && local.fill_bits_ok
                && local.crc_ok;
     *diag = local;

@@ -19,6 +19,10 @@ struct v92a4_s {
     v92_cpd_frame_t cpd;
     uint32_t rate_mask;
     bool suvd, cpd_seen, remote_ack, ack_sent, cpu_sent, downstream, cpu_retry;
+    /* 9.6.2.1.3: once the unacknowledged initial CPu has timed out the
+     * transmitter stays in repeated-CPu mode until E; ed_seen is 9.6.2.1.4's
+     * alternative to an acknowledged CPd/SUVd. */
+    bool cpu_repeat, ed_seen;
     unsigned symbols, stage_symbols, cpu_end, round_trip_symbols;
     bool peer_cleardown, cpd_ack_seen;
     unsigned cleardown_at;            /* 0 = not scheduled */
@@ -95,9 +99,12 @@ static bool control(void *user, const uint8_t *bits, int n)
         }
         if (!s->remote_ack && s->cpu_sent
             && s->symbols-s->cpu_end >= 800ULL + s->round_trip_symbols)
-            s->cpu_retry = true;
+            s->cpu_retry = s->cpu_repeat = true;
         s->window_len = 0;
-        return s->cpd_seen && s->remote_ack;
+        /* Arm the Ed detector on any complete CPd once its parameters are
+         * known: an acknowledged CPd/SUVd may be lost on the way back while
+         * the peer, having accepted ours, sends Ed (9.6.2.1.4). */
+        return s->cpd_seen;
     }
     return false;
 }
@@ -194,12 +201,12 @@ static int16_t sample(v92a4_t *s)
                 s->stage = V92A4_CLEARDOWN;
                 return 0;
             }
-            if (s->ack_sent && s->remote_ack && s->cpd_seen
+            if (s->ack_sent && (s->remote_ack || s->ed_seen) && s->cpd_seen
                 && s->cpu.drn != 0 && !s->peer_cleardown) {
                 s->stage = V92A4_E;
                 s->stage_symbols = 0;
             } else if (!message(s, s->suvd && (!s->cpu_sent
-                         || s->cpu_retry))) {
+                         || s->cpu_retry || s->cpu_repeat))) {
                 fail(s, "cannot encode Phase-4 control message");
             }
         }
@@ -259,6 +266,8 @@ void v92a4_rx(v92a4_t *s, const int16_t *samples, int count)
         if (v90a_linear_put(s->linear, samples+i, 1, &cw, 1) != 1) continue;
         unsigned e = v90_analogue_phase4_put(s->rx, &cw, 1);
         if (e) fprintf(stderr, "P4RX event=%x\n", e);
+        if (e & V90A4_RX_EVENT_ED)
+            s->ed_seen = true;
         if (e & V90A4_RX_EVENT_DATA) {
             if (v90_analogue_phase4_b1d_bit_errors(s->rx)) fail(s, "B1d validation failed");
             else s->downstream = true;

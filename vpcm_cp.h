@@ -61,6 +61,9 @@ void vpcm_cp_init(vpcm_cp_frame_t *cp);
 bool vpcm_cp_validate(const vpcm_cp_frame_t *cp, char *reason, size_t reason_len);
 int vpcm_cp_bit_length(const vpcm_cp_frame_t *cp);
 int vpcm_cp_modulated_bit_length(const vpcm_cp_frame_t *cp, int constellation_points);
+/* Information-only CRC over bits [0, crc_start): what the CRC field at
+ * crc_start must hold (Table 14).  Exposed for tests that edit a frame. */
+uint16_t vpcm_cp_crc_information(const uint8_t *bits, int crc_start);
 bool vpcm_cp_encode_bits(const vpcm_cp_frame_t *cp, uint8_t *bits_out, int *nbits_out);
 bool vpcm_cp_encode_modulated_bits(const vpcm_cp_frame_t *cp,
                                    int constellation_points,

@@ -12,6 +12,9 @@
 #include "v92_su.h"
 #include "v90_dil_presets.h"
 #include "v92_upstream_rx.h"
+#include "vpcm_cp.h"
+#include "v90_cp_rx.h"
+#include "v90.h"
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -905,6 +908,27 @@ static void test_spec_crc(void)
     for (int i = 0; i < 16; i++) bits[35+i] = (crc >> i)&1;
     assert(v92_suvd_decode(bits, V92_SUVD_BITS, &d, &diag));
     assert(!diag.reserved_ok && diag.crc_ok && d.acknowledge);
+    /* Tables 24/27: a CRC-valid SUVu/CPus with a reserved bit set is still
+     * accepted (BinModem audit finding 3); the deviation is diagnostic. */
+    {
+        v92_suvu_frame_t su = {true, 16, false, true};
+        v92_suvu_diag_t sd;
+        int nb;
+        assert(v92_suvu_encode(&su, 4, bits, sizeof(bits), &nb));
+        bits[19] = 1;
+        crc = spec_crc(bits, 1);
+        for (int i = 0; i < 16; i++) bits[35+i] = (crc >> i)&1;
+        assert(v92_suvu_decode_diag(bits, nb, &sd));
+        assert(!sd.reserved_ok && sd.crc_ok);
+        v92_cpus_frame_t cs = {5, true};
+        v92_cpus_diag_t cd;
+        assert(v92_cpus_encode(&cs, 4, bits, sizeof(bits), &nb));
+        bits[26] = 1;
+        crc = spec_crc(bits, 1);
+        for (int i = 0; i < 16; i++) bits[35+i] = (crc >> i)&1;
+        assert(v92_cpus_decode_diag(bits, nb, &cd));
+        assert(!cd.reserved_ok && cd.crc_ok);
+    }
     puts("PASS: independent V.92 control CRCs and amended SUVd reserved-bit handling");
 }
 
@@ -1018,6 +1042,96 @@ static void test_spec_scr(bool alaw)
     printf("PASS: amended SCR GPC/differential continuity %s\n", alaw ? "PCMA" : "PCMU");
 }
 
+/* BinModem audit findings 4, 6, 7, 9: V.90 Table 14 control-frame handling. */
+static int v90_cp_handler_calls;
+static void v90_cp_count_handler(void *user, const vpcm_cp_diag_t *diag)
+{
+    (void)user; (void)diag;
+    v90_cp_handler_calls++;
+}
+
+static int v90_cp_feed(const uint8_t *bits, int nbits, bool alaw)
+{
+    v90_cp_rx_t rx;
+
+    v90_cp_handler_calls = 0;
+    v90_cp_rx_init(&rx, 4, alaw, v90_cp_count_handler, NULL);
+    for (int i = 0; i < 40; i++)
+        v90_cp_rx_put_bit(&rx, 1);
+    for (int i = 0; i < nbits; i++)
+        v90_cp_rx_put_bit(&rx, bits[i]);
+    for (int i = 0; i < 32; i++)
+        v90_cp_rx_put_bit(&rx, 0);
+    return v90_cp_handler_calls;
+}
+
+static void test_v90_cp_control_fields(void)
+{
+    vpcm_cp_frame_t cp;
+    uint8_t bits[VPCM_CP_MAX_BITS];
+    uint8_t one[1] = {0};
+    int nbits, crc_start;
+
+    vpcm_cp_init_robbed_bit_safe_profile(&cp, 10, false);
+    cp.upstream_rate_mask = 0x0fff;
+    assert(vpcm_cp_encode_bits(&cp, bits, &nbits));
+    assert(v90_cp_feed(bits, nbits, false) >= 1);
+    crc_start = 136 + 136 * cp.constellation_count + 1;
+
+    /* Reserved bits 18 and 25:29 and 129:135 are ignored, CRC-valid. */
+    for (int rb = 0; rb < 3; rb++) {
+        uint8_t edited[VPCM_CP_MAX_BITS];
+        int bit = rb == 0 ? 18 : rb == 1 ? 26 : 131;
+        uint16_t crc;
+        vpcm_cp_diag_t diag;
+
+        memcpy(edited, bits, (size_t)nbits);
+        edited[bit] = 1;
+        crc = vpcm_cp_crc_information(edited, crc_start);
+        for (int i = 0; i < 16; i++) edited[crc_start + i] = (crc >> i) & 1;
+        assert(vpcm_cp_decode_diag(edited, nbits, &diag));
+        assert(!diag.reserved_bits_ok || bit == 18);
+        assert(v90_cp_feed(edited, nbits, false) >= 1);
+    }
+
+    /* 9.7: drn = 0 in a data-mode CP is cleardown and reaches the handler. */
+    cp.drn = 0;
+    assert(vpcm_cp_encode_bits(&cp, bits, &nbits));
+    assert(v90_cp_feed(bits, nbits, false) >= 1);
+
+    /* Truncated buffers must be rejected without reading past the end. */
+    {
+        vpcm_cp_diag_t diag;
+        for (int n = 1; n < 136; n++)
+            assert(!vpcm_cp_decode_diag(one, n, &diag));
+    }
+    puts("PASS: V.90 CP reserved fields ignored, drn=0 cleardown accepted, truncated CP rejected");
+}
+
+/* V.90 8.6.5/Table 17: shaped CPt profiles with K = 6 must configure. */
+static void test_v90_cpt_small_drn(void)
+{
+    static const struct { int drn, sr; } rows[] = {{4,0},{3,1},{2,2},{1,3}};
+    for (unsigned r = 0; r < sizeof(rows)/sizeof(rows[0]); r++) {
+        v90_state_t *v = v90_init_data_pump(V90_LAW_ULAW);
+        vpcm_cp_frame_t cp;
+
+        assert(v);
+        vpcm_cp_init(&cp);
+        cp.v90_compatibility = false;
+        cp.drn = rows[r].drn;
+        cp.shaping_redundancy = rows[r].sr;
+        cp.shaping_lookahead = rows[r].sr ? 1 : 0;
+        cp.upstream_rate_mask = 0x0fff;
+        cp.constellation_count = 1;
+        for (int u = 0; u < 128; u += 2)
+            vpcm_cp_mask_set(cp.masks[0], u + 1, true);
+        assert(v90_set_phase4_cp(v, &cp));
+        v90_free(v);
+    }
+    puts("PASS: V.90 CPt accepted down to K=6 for every Sr");
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 2 && !strcmp(argv[1], "--audio-checks")) {
@@ -1100,6 +1214,8 @@ int main(int argc, char **argv)
         return 0;
     }
     test_spec_crc();
+    test_v90_cp_control_fields();
+    test_v90_cpt_small_drn();
     test_spec_scr(false);
     test_spec_scr(true);
     test_spec_trn2u_contexts();

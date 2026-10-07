@@ -257,6 +257,15 @@ static bool mp_crc_ok(const uint8_t *bits)
     return true;
 }
 
+static uint32_t get_bits(const uint8_t *bits, int first, int count)
+{
+    uint32_t v = 0;
+
+    for (int i = 0; i < count; i++)
+        v |= (uint32_t) (bits[first + i] & 1U) << i;
+    return v;
+}
+
 /* Table 16's fixed fields.  A frame that fails these is not an MP however
  * plausible the CRC looks. */
 static bool mp_structure_ok(const uint8_t *bits, int avail)
@@ -269,22 +278,21 @@ static bool mp_structure_ok(const uint8_t *bits, int avail)
         if (bits[i] != 1)
             return false;
     }
-    /* Start bits 17, 34, 51, 68 and the reserved fields the digital modem
-     * sets to zero (19:23, 28, 35, 50). */
+    /* Start bits 17, 34, 51, 68.  The reserved fields (19:23, 28, 35, 50,
+     * 52:67) are transmitted as zero but are not interpreted by the
+     * receiver (BinModem audit finding 6), so they do not gate validity. */
     if (bits[17] || bits[34] || bits[51] || bits[68])
         return false;
-    for (i = 19; i <= 23; i++) {
-        if (bits[i])
+    /* Parameter selections, as opposed to ignored fields: maximum drn is
+     * 2..14 (0 = cleardown, 1 and 15 undefined) and trellis 3 is reserved. */
+    {
+        uint32_t drn = get_bits(bits, 24, 4);
+
+        if (drn == 1 || drn == 15 || get_bits(bits, 29, 2) == 3)
             return false;
     }
-    if (bits[28] || bits[35] || bits[50])
-        return false;
     if (bits[18] == 0) {
-        /* Type 0: 52:67 reserved, bit 85 fill. */
-        for (i = 52; i <= 67; i++) {
-            if (bits[i])
-                return false;
-        }
+        /* Type 0: bit 85 fill. */
         if (bits[85])
             return false;
     } else {
@@ -296,21 +304,8 @@ static bool mp_structure_ok(const uint8_t *bits, int avail)
             || bits[136] || bits[153] || bits[170] || bits[187]) {
             return false;
         }
-        for (i = 154; i <= 169; i++) {
-            if (bits[i])
-                return false;
-        }
     }
     return mp_crc_ok(bits);
-}
-
-static uint32_t get_bits(const uint8_t *bits, int first, int count)
-{
-    uint32_t v = 0;
-
-    for (int i = 0; i < count; i++)
-        v |= (uint32_t) (bits[first + i] & 1U) << i;
-    return v;
 }
 
 static void mp_decode(const uint8_t *bits, v90_analogue_mp_t *out)

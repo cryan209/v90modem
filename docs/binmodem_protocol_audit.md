@@ -355,3 +355,33 @@ rate intersections, and deferred handoff failures. Full wire-level malformed
 MP injection was not run; the executable tested the actual acceptance gate.
 
 These follow-up probes changed no protocol code and made no hardware calls.
+
+## Resolution (2026-10-07, same day)
+
+Findings 1-10 are addressed except as noted. `make v92_startup_test` and
+`v90_analogue_rx_test` pass (linked against SpanDSP only; the pjproject-linked
+suites, `vpcm_loopback_test` among them, were NOT run in this environment, and
+`modem_engine.c`'s one hunk was not compiled here). No hardware interop claim.
+
+- **1** digital (`v90.c`, sticky `v92_cpd_repeat`) and analogue
+  (`v92_analogue_phase4.c`, `cpu_repeat`): after the 9.6.x.1.3 timeout the
+  transmitter repeats CP at each message boundary until the exchange is
+  acknowledged both ways. The 9.11 cleardown paths deliberately do not set it.
+  No fault-injection regression yet.
+- **2** analogue: the Ed detector is armed on any complete CPd once its
+  parameters are known, and a received Ed completes the exchange like an
+  acknowledged CPd/SUVd. **Limit:** an Ed after a DAMAGED final control message
+  is still missed, because the damaged message's non-zero frames disarm the
+  detector (8.8.2 guard); covering it needs message-length-based re-arming.
+- **3, 6** reserved bits no longer gate validity in `v92_cp_rx.c`,
+  `v92_phase4_decode.c`, `vpcm_cp.c`, `v90_cp_rx.c` (incl. bit 18) or the
+  analogue MP receiver; they stay diagnostics. Undefined MP drn (1, 15) and
+  trellis 3 are now rejected (finding 10). Tests: `v92_startup_test`.
+- **4** a data-mode CP with drn = 0 reaches the engine, which hangs up
+  (`Remote (V.90 9.7 cleardown)`) before any mapper setup.
+- **5 NOT fixed:** CPs (bit 30) still stops at the strict parser. Passing it on
+  without the 9.6.1.2.3-.6 silence procedure would turn it into an ordinary
+  Ed/B1d, which is worse than dropping it.
+- **7** `drn >= 4` is now `drn >= 1`; the K 6..24 check already follows.
+- **8** an empty upstream-rate intersection stays empty and fails MP build.
+- **9** `vpcm_cp_decode_diag()` rejects `nbits < 136` before reading the header.

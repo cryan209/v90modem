@@ -47,7 +47,7 @@ static bool vpcm_cp_crc_excluded_bit(int bit)
     return bit >= 136 && ((bit - 136) % 17) == 0;
 }
 
-static uint16_t vpcm_cp_crc_information(const uint8_t *bits, int crc_start)
+uint16_t vpcm_cp_crc_information(const uint8_t *bits, int crc_start)
 {
     uint16_t crc;
     int i;
@@ -348,7 +348,8 @@ bool vpcm_cp_build_diag(const vpcm_cp_frame_t *cp, vpcm_cp_diag_t *diag)
     }
     diag->valid = (diag->frame_sync_ok
                    && diag->start_bits_ok
-                   && diag->reserved_bits_ok
+                   /* Table 14 reserved bits are not interpreted by the digital
+                    * modem; reserved_bits_ok stays a diagnostic. */
                    && diag->v90_compat_ok
                    && diag->fill_ok
                    && diag->crc_remainder == 0);
@@ -368,6 +369,10 @@ bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag)
     memcpy(diag->bits, bits, (size_t) nbits);
     diag->nbits = nbits;
     vpcm_cp_init(&diag->frame);
+    /* The fixed header (Table 14 bits 0:135) is read below before the
+     * variable length is known; a shorter buffer would read past its end. */
+    if (nbits < 136)
+        return false;
 
     diag->frame_sync_ok = true;
     for (i = 0; i <= 16; i++) {
@@ -465,7 +470,8 @@ bool vpcm_cp_decode_diag(const uint8_t *bits, int nbits, vpcm_cp_diag_t *diag)
 
     diag->valid = (diag->frame_sync_ok
                    && diag->start_bits_ok
-                   && diag->reserved_bits_ok
+                   /* Table 14 reserved bits are not interpreted by the digital
+                    * modem; reserved_bits_ok stays a diagnostic. */
                    && diag->v90_compat_ok
                    && diag->fill_ok
                    && diag->crc_remainder == 0
