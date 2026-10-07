@@ -5821,7 +5821,37 @@ static void put_info_bit(v34_rx_state_t *s, int bit, int time_offset)
                 s->received_event = V34_EVENT_REVERSAL_3;
                 break;
             case V34_EVENT_REVERSAL_1:
-                /* TODO: Need to avoid getting here falsely, just because the tone has resumed */
+                /* The phase step here is only 11.2.1.1.6's second Tone B
+                   reversal if the answer modem has itself sent its post-L2
+                   Tone A and reversal (11.2.1.2.6): that reversal is what the
+                   call modem is answering, 40 ms later, and 11.2.1.2.7 starts
+                   the probe receiver off it.  Before then a step in Tone B is
+                   the tone RESUMING after the call modem's silence (11.2.1.1.5
+                   transmits Tone B again once it has received our L2) -- or, with
+                   our own L2 echoing back, a phase jump in a tone that never
+                   seemed to stop.  Taking it as the reversal opened the L1/L2
+                   window up to 0.7 s ahead of a probe that the conformant call
+                   modem sends only after our reversal, so the window closed on
+                   Tone B and INFO1a was built from noise ("snr=-28.8 dB").
+                   The old timer-driven call modem sent its probe at about the
+                   same time as the resumption, which is the only reason this
+                   was ever right. */
+                if (!s->v90_mode  &&  s->duplex  &&  !s->calling_party)
+                {
+                    const v34_state_t *owner =
+                        (const v34_state_t *) ((const char *) s - offsetof(v34_state_t, rx));
+
+                    if (owner->tx.stage < V34_TX_STAGE_POST_L2_NOT_A)
+                    {
+                        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Tone B phase step before our post-L2 Tone A reversal "
+                                 "(tx stage %d); the tone resuming, not 11.2.1.2.7's reversal\n",
+                                 owner->tx.stage);
+                        break;
+                    }
+                    /*endif*/
+                }
+                /*endif*/
                 V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Rx - reversal 2 in tone B\n");
                 s->tone_ab_hop_time = s->sample_time + time_offset;
                 s->received_event = V34_EVENT_REVERSAL_2;

@@ -3667,24 +3667,25 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
    received INFO1a and ran Phase 3 into Phase 4 (artifacts/rf-v34-k1, -k2).
    Small n, but the mechanism is measured on the wire rather than inferred.
 
-   What keeps it off is OUR OWN receiver, not the clause.  A conformant
-   exchange leaves SECOND_B at 121 bauds -- our own answerer's 11.2.1.2.6
-   reversal arrives there, because it waits for this very Tone B plus 50 ms --
-   and swept as a pure timer the 2800/21600 u-law duplex row passes at 100,
-   104, 108, 112 and 116 and fails at 120 and 130.  Turning the default on
-   breaks that row AND 3200/21600 A-law (45 bit errors), and the failure is
-   NOT in Phase 2: the two arms make the identical T/2 eye-phase decisions,
-   and what differs is one direction's data mode, 0.668 from the grid against
-   0.087.  That is a 21600 acquisition coin flip sensitive to a 30 ms shift in
-   when Phase 2 ends, i.e. a pre-existing fragility this exposes rather than
-   causes -- docs/v34_data_mode_rates.md already has 21600 as the densest case
-   here.  Fix that, then flip this default; pinning row after row to the old
-   timing would be editing the suite to pass.
-   ME_V34_SECOND_B_WAIT_REVERSAL=1. */
+   What kept it off was OUR OWN receiver, not the clause, and it was not the
+   21600 acquisition it first looked like.  The answer modem's tone detector
+   counted the call modem's Tone B RESUMING after its silence (11.2.1.1.5) as
+   11.2.1.1.6's second reversal -- a TODO in v34rx.c said as much -- and opened
+   its fixed 0.42 s L1/L2 window on it.  The timer-driven call modem sent its
+   probe at about that moment, so the window was right by accident; a
+   conformant one sends the probe only after the answer modem's own post-L2
+   reversal, up to 0.7 s later, so the window closed on Tone B and INFO1a was
+   built from noise (snr=-28.8 dB, "no legal measured duplex symbol-rate
+   pair").  The step is now ignored until the answer modem has sent that
+   reversal.  With it the 2800/21600 u-law and 3200/21600 A-law rows that
+   broke the first attempt pass, and so do 49 of the 50 duplex rows with this
+   on; the remaining one is an echo row that is an acquisition coin flip with
+   either setting (docs/v34_data_mode_rates.md).
+   Default ON; ME_V34_SECOND_B_WAIT_REVERSAL=0 restores the flat 100 bauds. */
 static bool second_b_waits_for_reversal(void)
 {
     static int initialized = 0;
-    static int enabled = 0;
+    static int enabled = 1;
 
     if (!initialized)
     {

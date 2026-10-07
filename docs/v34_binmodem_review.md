@@ -295,5 +295,11 @@ waveform-level injection exists for it).
   RESPONDS to a peer's cleardown -- nothing in the engine initiates one (ATH
   still drops the SIP call), and no foreign modem has been tried.
 
-**Still not done:** the timer-driven second Tone B reversal, which this document
-itself says must wait on the 21600 acquisition fix.
+- **Second Tone B reversal** (11.2.1.1.6): now waits for the answer modem's
+  reversal by default (`ME_V34_SECOND_B_WAIT_REVERSAL=0` restores the timer).
+  The failures that kept it off were not 21600 acquisition: the answer modem
+  took the call modem's Tone B resuming as the reversal and opened its L1/L2
+  window up to 0.7 s early, so INFO1a was built from noise. It now ignores that
+  step until its own post-L2 reversal has been sent. 49 of 50 duplex rows pass;
+  3000/28800 at 20 dB echo is a coin flip either way and is pinned to
+  `V34_DUPLEX_DELAY=3` in the makefile. Not live-verified.
