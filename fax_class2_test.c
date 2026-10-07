@@ -31,6 +31,8 @@
 #define IMAGE_WIDTH  1728
 #define IMAGE_ROWS   image_rows
 static int image_rows = 80;
+static int image_colour;
+static int encode_page_for_dte(const char *, int, int, uint8_t *, int);
 static const char *image_paper = "strip";
 
 static int failures;
@@ -92,8 +94,43 @@ static void make_row(uint8_t *row, int y)
     }
 }
 
+static int write_colour_tiff(const char *path)
+{
+    TIFF *tif = TIFFOpen(path,"w");
+    uint8_t row[IMAGE_WIDTH*3];
+    if (!tif) return 0;
+    TIFFSetField(tif,TIFFTAG_IMAGEWIDTH,IMAGE_WIDTH);
+    TIFFSetField(tif,TIFFTAG_IMAGELENGTH,IMAGE_ROWS);
+    TIFFSetField(tif,TIFFTAG_BITSPERSAMPLE,8);
+    TIFFSetField(tif,TIFFTAG_SAMPLESPERPIXEL,3);
+    TIFFSetField(tif,TIFFTAG_PHOTOMETRIC,PHOTOMETRIC_RGB);
+    TIFFSetField(tif,TIFFTAG_COMPRESSION,COMPRESSION_LZW);
+    TIFFSetField(tif,TIFFTAG_PLANARCONFIG,PLANARCONFIG_CONTIG);
+    TIFFSetField(tif,TIFFTAG_ROWSPERSTRIP,32);
+    TIFFSetField(tif,TIFFTAG_XRESOLUTION,200.0);
+    TIFFSetField(tif,TIFFTAG_YRESOLUTION,200.0);
+    TIFFSetField(tif,TIFFTAG_RESOLUTIONUNIT,RESUNIT_INCH);
+    for (int y=0;y<IMAGE_ROWS;y++) {
+        for (int x=0;x<IMAGE_WIDTH;x++) {
+            int panel = y >= 200 && y < 1000 && x >= 160 && x < 1568;
+            int band = (x-160)/176;
+            row[x*3] = panel ? ((band & 1) ? 220 : 40) : 255;
+            row[x*3+1] = panel ? ((band & 2) ? 220 : 40) : 255;
+            row[x*3+2] = panel ? ((band & 4) ? 220 : 40) : 255;
+            if (y >= 1200 && y < IMAGE_ROWS-150 && x >= 160 && x < 1568) {
+                row[x*3]=(x-160)*255/1408;
+                row[x*3+1]=(y-1200)*255/(IMAGE_ROWS-1350);
+                row[x*3+2]=128;
+            }
+        }
+        if (TIFFWriteScanline(tif,row,y,0)<0) { TIFFClose(tif); return 0; }
+    }
+    TIFFClose(tif); return 1;
+}
+
 static int write_test_tiff(const char *path)
 {
+    if (image_colour) return write_colour_tiff(path);
     TIFF *tif;
     uint8_t row[IMAGE_WIDTH / 8];
 
@@ -188,8 +225,32 @@ static int write_test_tiff_pages(const char *path, int pages)
  * there.  Returns the number of differing rows, or -1 if the page could not
  * be read at all.
  */
+/* JPEG is lossy at encoding. Grade the compressed payload byte-for-byte,
+ * which detects bearer corruption without demanding lossless RGB coding. */
+static int compare_colour_page(const char *path, int page, int *rows_out)
+{
+    static uint8_t stuffed[1<<20], expected[1<<20], received[1<<20];
+    int n=encode_page_for_dte("/tmp/fc2_test_src.tif",T4_COMPRESSION_T42_T81,0,stuffed,sizeof(stuffed));
+    int len=0;
+    for (int i=0;i<n-2;i++) {
+        if (stuffed[i]==0x10 && i+1<n-2) i++;
+        expected[len++]=stuffed[i];
+    }
+    TIFF *tif=TIFFOpen(path,"r"); uint32_t w=0,h=0;
+    uint16_t bits=0,samples=0;
+    if (!tif || !TIFFSetDirectory(tif,page)) { if(tif)TIFFClose(tif); return -1; }
+    TIFFGetField(tif,TIFFTAG_IMAGEWIDTH,&w); TIFFGetField(tif,TIFFTAG_IMAGELENGTH,&h);
+    TIFFGetField(tif,TIFFTAG_BITSPERSAMPLE,&bits); TIFFGetField(tif,TIFFTAG_SAMPLESPERPIXEL,&samples);
+    *rows_out=h;
+    tmsize_t size=TIFFReadRawStrip(tif,0,received,sizeof(received));
+    TIFFClose(tif);
+    printf("       colour JPEG: %d expected bytes, %ld received; %u x %u, %u-bit, %u components\n",len,(long)size,w,h,bits,samples);
+    return w==IMAGE_WIDTH && h==(uint32_t)IMAGE_ROWS && bits==8 && samples==3 && size==len && !memcmp(expected,received,len) ? 0 : -1;
+}
+
 static int compare_page(const char *path, int page, int *rows_out)
 {
+    if (image_colour) return compare_colour_page(path,page,rows_out);
     TIFF *tif;
     uint32_t w = 0, h = 0;
     uint8_t got[IMAGE_WIDTH / 8];
@@ -493,10 +554,11 @@ static fax_state_t *peer_start(int calling, const char *tx_file, const char *rx_
         t30_set_tx_nsf(t30, peer_nsf, peer_nsf_len);
     if (peer_nss)
         t30_set_tx_nss(t30, peer_nss, peer_nss_len);
-    t30_set_supported_compressions(t30, T4_COMPRESSION_T4_1D
+    t30_set_supported_compressions(t30, (image_colour ? T4_COMPRESSION_T42_T81 | T4_COMPRESSION_COLOUR | T4_COMPRESSION_GRAYSCALE : 0) | T4_COMPRESSION_T4_1D
                                         | T4_COMPRESSION_T4_2D
                                         | (peer_t6 ? T4_COMPRESSION_T6 : 0));
-    t30_set_supported_output_compressions(t30, T4_COMPRESSION_T4_1D
+    t30_set_supported_colour_resolutions(t30,image_colour ? T4_RESOLUTION_200_200 : 0);
+    t30_set_supported_output_compressions(t30, (image_colour ? T4_COMPRESSION_T42_T81 : 0) | T4_COMPRESSION_T4_1D
                                                | T4_COMPRESSION_T4_2D
                                                | T4_COMPRESSION_T6);
     t30_set_phase_e_handler(t30, peer_phase_e, NULL);
@@ -832,10 +894,12 @@ static int encode_page_for_dte(const char *path, int compression, int reversed,
 
     if ((tx = t4_tx_init(NULL, path, -1, -1)) == NULL)
         return 0;
-    t4_tx_set_tx_image_format(tx, compression,
+    if (getenv("FAX_TEST_LOG")) span_log_set_level(t4_tx_get_logging_state(tx),SPAN_LOG_FLOW | SPAN_LOG_SHOW_TAG);
+    int format = t4_tx_set_tx_image_format(tx, compression | (image_colour ? T4_COMPRESSION_COLOUR | T4_COMPRESSION_GRAYSCALE : 0),
                               T4_SUPPORT_WIDTH_215MM,
-                              T4_RESOLUTION_R8_STANDARD | T4_RESOLUTION_R8_FINE,
-                              0);
+                              T4_RESOLUTION_R8_STANDARD | T4_RESOLUTION_R8_FINE | T4_RESOLUTION_200_200,
+                              image_colour ? T4_RESOLUTION_200_200 : 0);
+    if (format != T4_IMAGE_FORMAT_OK) { t4_tx_free(tx); return 0; }
     if (t4_tx_start_page(tx)) {
         t4_tx_free(tx);
         return 0;
@@ -855,6 +919,7 @@ static int encode_page_for_dte(const char *path, int compression, int reversed,
     }
     t4_tx_end_page(tx);
     t4_tx_free(tx);
+    if (len < 0 || !n) return 0;
 
     if (n + 2 < max) {
         out[n++] = 0x10;
@@ -956,7 +1021,7 @@ static void test_transmit(int fbo, int ec)
     /* MH, fine resolution.  EC=0 is the plainest thing a fax machine sends;
      * EC=2 is T.30 Annex A error correction with 256-octet frames, which is
      * what every modern peer negotiates. */
-    snprintf(cmd, sizeof(cmd), "AT+FIS=1,3,0,2,0,%d,0,0,0", ec); at(cmd);
+    snprintf(cmd, sizeof(cmd), "AT+FIS=1,3,0,2,0,%d,0,0,%d", ec,image_colour ? 3 : 0); at(cmd);
     at("ATD5551234");
     check(dial_seen, "ATD reached the engine");
 
@@ -970,7 +1035,7 @@ static void test_transmit(int fbo, int ec)
      */
     check(!dte_saw("CONNECT"), "AT+FDT does not answer CONNECT before the call");
 
-    n = encode_page_for_dte(SRC_TIFF, T4_COMPRESSION_T4_1D, fbo & 1,
+    n = encode_page_for_dte(SRC_TIFF, image_colour ? T4_COMPRESSION_T42_T81 : T4_COMPRESSION_T4_1D, fbo & 1,
                             page, sizeof(page));
     check(n > 0, "the test page encodes to a class 2.0 data stream");
 
@@ -1084,7 +1149,7 @@ static void test_receive(int fbo, int ec)
     at("AT+FNR=0,1,0,0");
     { char cmd[32]; snprintf(cmd, sizeof(cmd), "AT+FBO=%d", fbo); at(cmd); }
     at("AT+FCR=1");
-    snprintf(cmd2, sizeof(cmd2), "AT+FIS=1,3,0,2,0,%d,0,0,0", ec); at(cmd2);
+    snprintf(cmd2, sizeof(cmd2), "AT+FIS=1,3,0,2,0,%d,0,0,%d", ec,image_colour ? 3 : 0); at(cmd2);
     at("ATA");
 
     peer = peer_start(1, PEER_TX, NULL);
@@ -1166,15 +1231,15 @@ static void test_receive(int fbo, int ec)
     body += strlen("CONNECT\r\n");
     start = (int) (body - dte_buf);
 
-    decode = t4_rx_init(NULL, DTE_RX, T4_COMPRESSION_T4_1D
+    decode = t4_rx_init(NULL, DTE_RX, (image_colour ? T4_COMPRESSION_T42_T81 : 0) | T4_COMPRESSION_T4_1D
                                       | T4_COMPRESSION_T4_2D
                                       | T4_COMPRESSION_T6);
     check(decode != NULL, "the decoder for the DTE stream starts");
     if (decode) {
-        t4_rx_set_rx_encoding(decode, T4_COMPRESSION_T4_1D);
+        t4_rx_set_rx_encoding(decode, image_colour ? T4_COMPRESSION_T42_T81 : T4_COMPRESSION_T4_1D);
         t4_rx_set_image_width(decode, IMAGE_WIDTH);
-        t4_rx_set_x_resolution(decode, T4_X_RESOLUTION_R8);
-        t4_rx_set_y_resolution(decode, T4_Y_RESOLUTION_FINE);
+        t4_rx_set_x_resolution(decode, image_colour ? T4_X_RESOLUTION_200 : T4_X_RESOLUTION_R8);
+        t4_rx_set_y_resolution(decode, image_colour ? T4_Y_RESOLUTION_200 : T4_Y_RESOLUTION_FINE);
         t4_rx_start_page(decode);
         for (int i = start; i < dte_len; i++) {
             uint8_t byte = (uint8_t) dte_buf[i];
@@ -1715,7 +1780,7 @@ static void test_multipage_transmit(int connect_midway, int ec)
 
     at("AT+FLI=\"sender\"");
     at("AT+FNR=0,1,0,0");
-    snprintf(cmd, sizeof(cmd), "AT+FIS=1,3,0,2,0,%d,0,0,0", ec); at(cmd);
+    snprintf(cmd, sizeof(cmd), "AT+FIS=1,3,0,2,0,%d,0,0,%d", ec,image_colour ? 3 : 0); at(cmd);
     at("ATD5551234");
 
     /* Page one, ended with MPS: another page of the same format follows. */
@@ -3499,11 +3564,13 @@ int main(int argc, char **argv)
     TIFFSetWarningHandler(NULL);
     TIFFSetErrorHandler(NULL);
 
+    image_colour = getenv("FAX_TEST_COLOUR") && atoi(getenv("FAX_TEST_COLOUR"));
+    if (image_colour) image_rows = 2339;
     if (argc > 1 && strncmp(argv[1], "--engine-", 9) == 0) {
         image_paper = getenv("FAX_TEST_PAGE");
         if (!image_paper) image_paper = "a4";
-        if (!strcmp(image_paper,"a4")) image_rows = 2292;
-        else if (!strcmp(image_paper,"letter")) image_rows = 2156;
+        if (!strcmp(image_paper,"a4")) image_rows = image_colour ? 2339 : 2292;
+        else if (!strcmp(image_paper,"letter")) image_rows = image_colour ? 2200 : 2156;
         else { fprintf(stderr,"FAX_TEST_PAGE must be a4 or letter\n"); return 2; }
         printf("Full %s fax page: %d x %d, 204 x 196 dpi\n",
                image_paper,IMAGE_WIDTH,IMAGE_ROWS);
@@ -3544,6 +3611,7 @@ int main(int argc, char **argv)
         external_source = 0;
         test_receive(0, external_class21 ? 1 : 2);
         external_reset();
+        if (image_colour) { printf("Colour JPEG: %d failures\n",failures); return failures ? 1 : 0; }
         external_source = 1;
         test_multipage_transmit(0, external_class21 ? 1 : 2);
         external_reset();

@@ -468,7 +468,7 @@ static int t30_ppr_to_fps(int result, int *known)
 
 static void params_to_string(const fc2_params_t *p, char *out, size_t max)
 {
-    snprintf(out, max, "%d,%X,%d,%d,%d,%d,%d,%d,%d",
+    snprintf(out, max, "%d,%X,%d,%d,%d,%d,%d,%d,%X",
              p->vr, p->br, p->wd, p->ln, p->df, p->ec, p->bf, p->st, p->jp);
 }
 
@@ -497,9 +497,9 @@ static int parse_params(const char *s, fc2_params_t *p)
             /* A range list is a query response, not an assignment. */
             return 0;
         }
-        if (!(idx == 1 ? isxdigit((unsigned char)*s) : isdigit((unsigned char)*s)))
+        if (!((idx == 1 || idx == 8) ? isxdigit((unsigned char)*s) : isdigit((unsigned char)*s)))
             return 0;
-        *wfield[idx] = (int) strtol(s, (char **) &s, idx == 1 ? 16 : 10);
+        *wfield[idx] = (int) strtol(s, (char **) &s, (idx == 1 || idx == 8) ? 16 : 10);
         if (*s == ',') {
             s++;
             idx++;
@@ -508,7 +508,9 @@ static int parse_params(const char *s, fc2_params_t *p)
         }
     }
     if (*s || work.br < 0 || work.br > (selected == 2 ? 11 : 5)
-        || work.ec < 0 || work.ec > (selected == 2 ? 1 : 2))
+        || work.ec < 0 || work.ec > (selected == 2 ? 1 : 2)
+        || (work.jp != 0 && work.jp != 1 && work.jp != 3)
+        || (work.jp && !work.ec))
         return 0;
     *p = work;
     return 1;
@@ -775,6 +777,9 @@ static void update_negotiated_params(void)
      * ignore a 64-octet request, so an offer is not what was agreed. */
     p_cs.ec = t.error_correcting_mode ? (selected == 2 ? 1 : (dcs_ecm_64 ? 1 : 2)) : 0;
     p_cs.df = compression_to_df(t.compression);
+    /* T.32 Table 21, JP; report the negotiated image, not our offer. */
+    p_cs.jp = t.compression == T4_COMPRESSION_T42_T81
+            ? 1 | ((t.image_type == T4_IMAGE_TYPE_COLOUR_8BIT) ? 2 : 0) : 0;
     p_cs.vr = (t.y_resolution > 100) ? 1 : 0;
     if (t.width > 0 && t.width != 1728)
         p_cs.wd = (t.width >= 2432) ? 2 : 1;
@@ -1001,7 +1006,13 @@ static void session_start(void)
 
     t30_set_tx_ident(t30, local_id[0] ? local_id : "");
     t30_set_supported_modems(t30, br_to_modems(p_is.br));
-    t30_set_supported_compressions(t30, df_to_supported_compressions(p_is.df));
+    /* T.30 Annex E / T.32 Table 21: JPEG requires ECM; JP bit 1
+     * enables colour, otherwise the multilevel image is grayscale. */
+    int formats = df_to_supported_compressions(p_is.df);
+    if (p_is.jp & 1) formats |= T4_COMPRESSION_T42_T81 | T4_COMPRESSION_GRAYSCALE;
+    if (p_is.jp & 2) formats |= T4_COMPRESSION_COLOUR;
+    t30_set_supported_compressions(t30, formats);
+    t30_set_supported_colour_resolutions(t30, p_is.jp ? T4_RESOLUTION_200_200 : 0);
     t30_set_supported_bilevel_resolutions(t30, vr_to_resolutions(p_is.vr));
     t30_set_ecm_capability(t30, p_is.ec != 0);
     /* T.32 8.5.1.2 EC: 1 asks for 64-octet ECM frames, 2 for 256.  T.30 A.3.1
@@ -1095,7 +1106,8 @@ static void session_start(void)
         t30_set_supported_output_compressions(t30,
                                               T4_COMPRESSION_T4_1D
                                               | T4_COMPRESSION_T4_2D
-                                              | T4_COMPRESSION_T6);
+                                              | T4_COMPRESSION_T6
+                                              | (p_is.jp ? T4_COMPRESSION_T42_T81 : 0));
         t30_set_rx_file(t30, rx_tiff, -1);
     }
 
@@ -1166,7 +1178,7 @@ static void make_temp_name(char *out, size_t max, const char *tag)
  */
 static int spool_open(void)
 {
-    int compression = df_to_compression(p_is.df);
+    int compression = p_is.jp ? T4_COMPRESSION_T42_T81 : df_to_compression(p_is.df);
 
     if (compression == 0)
         return 0;
@@ -1203,13 +1215,14 @@ static int spool_open(void)
      */
     spool_rx = t4_rx_init(NULL, tx_tiff, T4_COMPRESSION_T4_1D
                                          | T4_COMPRESSION_T4_2D
-                                         | T4_COMPRESSION_T6);
+                                         | T4_COMPRESSION_T6
+                                         | (p_is.jp ? T4_COMPRESSION_T42_T81 : 0));
     if (!spool_rx)
         return 0;
     t4_rx_set_rx_encoding(spool_rx, compression);
     t4_rx_set_image_width(spool_rx, 1728);
-    t4_rx_set_x_resolution(spool_rx, T4_X_RESOLUTION_R8);
-    t4_rx_set_y_resolution(spool_rx, (p_is.vr & 1) ? T4_Y_RESOLUTION_FINE
+    t4_rx_set_x_resolution(spool_rx, p_is.jp ? T4_X_RESOLUTION_200 : T4_X_RESOLUTION_R8);
+    t4_rx_set_y_resolution(spool_rx, p_is.jp ? T4_Y_RESOLUTION_200 : (p_is.vr & 1) ? T4_Y_RESOLUTION_FINE
                                                    : T4_Y_RESOLUTION_STANDARD);
     t4_rx_start_page(spool_rx);
     return 1;
@@ -1345,7 +1358,7 @@ static int send_page_to_dte(int page)
 {
     t4_tx_state_t *tx;
     uint8_t buf[512];
-    int compression = df_to_compression(p_cs.df);
+    int compression = p_cs.jp ? T4_COMPRESSION_T42_T81 : df_to_compression(p_cs.df);
     int len;
 
     if (compression == 0)
@@ -1354,10 +1367,11 @@ static int send_page_to_dte(int page)
     tx = t4_tx_init(NULL, rx_tiff, page, page);
     if (!tx)
         return 0;
-    t4_tx_set_tx_image_format(tx, compression,
+    t4_tx_set_tx_image_format(tx, compression | (p_cs.jp ? T4_COMPRESSION_GRAYSCALE : 0)
+                              | ((p_cs.jp & 2) ? T4_COMPRESSION_COLOUR : 0),
                               T4_SUPPORT_WIDTH_215MM,
-                              T4_RESOLUTION_R8_STANDARD | T4_RESOLUTION_R8_FINE,
-                              0);
+                              T4_RESOLUTION_R8_STANDARD | T4_RESOLUTION_R8_FINE | T4_RESOLUTION_200_200,
+                              p_cs.jp ? T4_RESOLUTION_200_200 : 0);
     if (t4_tx_start_page(tx)) {
         t4_tx_free(tx);
         return 0;
@@ -1572,7 +1586,7 @@ static int list_param(const char *t, fc2_params_t *p, int read_only)
     }
     if (t[0] == '=' && t[1] == '?' && t[2] == '\0') {
         /* T.32 8.5.1.1: the ranges the DCE supports, in subparameter order. */
-        put_line(selected == 2 ? "\r\n(0,1),(0-B),(0),(0-2),(0,1,3),(0,1),(0),(0-7),(0)\r\n" : "\r\n(0,1),(0-5),(0),(0-2),(0,1,3),(0-2),(0),(0-7),(0)\r\n");
+        put_line(selected == 2 ? "\r\n(0,1),(0-B),(0),(0-2),(0,1,3),(0,1),(0),(0-7),(0,1,3)\r\n" : "\r\n(0,1),(0-5),(0),(0-2),(0,1,3),(0-2),(0),(0-7),(0,1,3)\r\n");
         put_ok();
         return 1;
     }
