@@ -399,6 +399,18 @@ SPAN_DECLARE(float) v34_get_guard_carrier_db(v34_state_t *s, int *valid);
     control-channel rate.  Primarily a regression-test hook.
     \param s The modem context.
     \return The RX baud-rate code, or -1 on error. */
+/*! Start a V.34 11.7 cleardown from data mode: S, S-bar, then MP requesting
+    zero rates.  Returns 0 if started.  The responder is the ordinary 11.6
+    responder; both end by v34_cleardown_complete() reading true. */
+SPAN_DECLARE(int) v34_start_cleardown(v34_state_t *s);
+
+/*! True once an 11.7 cleardown has completed (MP' received and sent): the
+    caller should now terminate the connection. */
+SPAN_DECLARE(bool) v34_cleardown_complete(v34_state_t *s);
+
+/*! The peer's INFO0 CME bit (V.34 11.4/11.6 use a 30 s deadline when it is set). */
+SPAN_DECLARE(bool) v34_get_far_cme(v34_state_t *s);
+
 SPAN_DECLARE(int) v34_get_rx_baud_rate(v34_state_t *s);
 
 /*! Get the current RX carrier selection.

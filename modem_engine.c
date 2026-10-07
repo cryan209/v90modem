@@ -5012,6 +5012,9 @@ static bool retrain_on_loss_due(int cap)
 #define ME_V34_RENEG_E_TIMEOUT_MS_DEFAULT 4000
 
 static int64_t g_v34_reneg_start_ms = 0;
+/* g_rx_audio_samples when the renegotiation was requested (clause 11.6.2.1
+ * counts audio, not host time). */
+static uint64_t g_v34_reneg_start_samples = 0;
 
 static int me_v34_reneg_enabled(void)
 {
@@ -5044,6 +5047,7 @@ static int me_v34_reneg_timeout_ms(void)
 static void v34_reneg_begin_locked(void)
 {
     g_v34_reneg_start_ms = trace_now_ms();
+    g_v34_reneg_start_samples = g_rx_audio_samples;
 }
 
 /* ME_V34_RENEG_AFTER_MS=<n> opens a §11.6 rate renegotiation n ms after the
@@ -5279,8 +5283,24 @@ static bool v34_reneg_timed_out_locked(void)
 {
     if (g_v34_reneg_start_ms == 0)
         return false;
-    return (trace_now_ms() - g_v34_reneg_start_ms)
-               >= me_v34_reneg_timeout_ms();
+    /* 11.6.2.1: 2500 ms + 2 RTD after the S-to-S-bar transition, or 30 s when
+     * the peer's INFO0 carried the CME bit.  Counted in received audio from
+     * the request (the S and S-bar, ~150 ms, precede the clause's origin) and
+     * with a 250 ms round-trip allowance.  ME_V34_RENEG_TIMEOUT_MS, when set,
+     * replaces the whole thing as an explicit diagnostic deviation. */
+    {
+        int64_t elapsed_ms = (int64_t)((g_rx_audio_samples
+                                        - g_v34_reneg_start_samples) / 8);
+        int limit_ms;
+
+        if (getenv("ME_V34_RENEG_TIMEOUT_MS"))
+            limit_ms = me_v34_reneg_timeout_ms();
+        else if (g_v34 && v34_get_far_cme(g_v34))
+            limit_ms = 30000;
+        else
+            limit_ms = 2500 + 2 * 250 + 150;
+        return elapsed_ms >= limit_ms;
+    }
 }
 
 static void v90_reset_upstream_data_arming(void)
@@ -11546,6 +11566,15 @@ skip_8k_codewords:
                             trace_phase("V34 answering peer rate renegotiation");
                             v34_reneg_begin_locked();
                         }
+                    } else if (v34_cleardown_complete(g_v34)) {
+                        /* §11.7.1.4/11.7.2.3: MP' sent and received on a
+                         * cleardown -- the connection is over. */
+                        ME_LOG("[ME] V.34 §11.7 cleardown complete; "
+                               "releasing the call\n");
+                        trace_phase("V34 cleardown complete");
+                        g_hangup_cause = "Remote (V.34 11.7 cleardown)";
+                        v34_reneg_clear_locked();
+                        g_state = ME_HANGUP;
                     } else if (v34_rate_renegotiation_active(g_v34)) {
                         /* §11.6.2: "If after transmitting the S-to-S-bar
                          * transition, the modem has not received sequence E

@@ -349,6 +349,15 @@ static int run_case(int baud, int bps, bool alaw)
        directions on the far side of it. */
     int reneg_at = getenv("V34_DUPLEX_RENEG")
                  ? atoi(getenv("V34_DUPLEX_RENEG")) : 0;
+    /* V34_DUPLEX_CLEARDOWN=<bits>: the same exercise with the caller opening
+       an 11.7 cleardown instead (S, S-bar, MP requesting zero rates).  The
+       answerer responds as it does to 11.6; the pass criterion is both ends
+       reporting the cleardown complete (MP' sent and received). */
+    int cleardown_at = getenv("V34_DUPLEX_CLEARDOWN")
+                     ? atoi(getenv("V34_DUPLEX_CLEARDOWN")) : 0;
+    bool cleardown_ok = false;
+    if (cleardown_at > 0)
+        reneg_at = cleardown_at;
     bool reneg_started = false;
     int reneg_block = -1;
     int caller_data_stage = -1;
@@ -555,7 +564,8 @@ static int run_case(int baud, int bps, bool alaw)
                     answer_data_stage = answer_stage;
                 if (caller.rx_bits >= reneg_at && answer.rx_bits >= reneg_at
                     && caller_data_stage >= 0 && answer_data_stage >= 0) {
-                    if (v34_start_rate_renegotiation(call_modem) == 0) {
+                    if ((cleardown_at > 0 ? v34_start_cleardown(call_modem)
+                                          : v34_start_rate_renegotiation(call_modem)) == 0) {
                         reneg_started = true;
                         reneg_block = block;
                         fprintf(stderr,
@@ -575,6 +585,13 @@ static int run_case(int baud, int bps, bool alaw)
                         fprintf(stderr,
                                 "[RENEG] block=%d answerer detected S and "
                                 "responded per 11.6.1.2\n", block);
+                }
+                if (cleardown_at > 0 && v34_cleardown_complete(call_modem)
+                    && v34_cleardown_complete(answer_modem)) {
+                    fprintf(stderr, "[CLEARDOWN] block=%d both ends complete\n", block);
+                    cleardown_ok = true;
+                    completed_block = block;
+                    break;
                 }
                 if (caller_stage != caller_data_stage)
                     caller_left_data = true;
@@ -679,6 +696,8 @@ static int run_case(int baud, int bps, bool alaw)
 
     v34_free(call_modem);
     v34_free(answer_modem);
+    if (cleardown_at > 0)
+        return (cleardown_ok && completed_block >= 0) ? 0 : 1;
     if (reneg_at > 0) {
         return (completed_block >= 0
                 && caller_resynced && answer_resynced

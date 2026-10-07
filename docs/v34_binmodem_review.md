@@ -251,13 +251,49 @@ only, the V.90 layouts are untouched). `v34_info1a_validate_test` is new and in
 in the makefile pass. The bit-19 change has no dedicated regression (no
 waveform-level injection exists for it).
 
-**Not fixed, deliberately:** cleardown MP (needs a separate 11.7 path with
-MP/MP' completion and an engine carrier-loss event); E replacing a lost peer
-MP' (the receiver has no reliable frame grid once a frame is damaged, so
-accepting E without the remote acknowledgement reopens the early-E false
-detect the current guard exists for); the clause 11.4 E deadlines, the
-answerer's TRN upper bound and the 11.6 timeout (all need role/CME/RTD-aware
-sample-position timing and a recovery decision, and none can be exercised by
-the duplex harness); duplex J's 16-point request reaching TRN/MP/E; and the
-timer-driven second Tone B reversal, which this document itself says must wait
-on the 21600 acquisition fix.
+### Second pass (same day): the rest, except one
+
+- **E in place of a lost peer MP'** (11.4.1.1.3/11.4.1.2.3). Two defects, not one.
+  The receiver ran `mp_unlock_after_reject()` on every CRC failure and, after
+  three, rotated the decode mode -- so after one damaged MP' it had thrown away
+  a lock that had just decoded a good MP, and was no longer looking for E at
+  all. After a frame has been accepted a later reject now keeps the lock. E is
+  then accepted without the peer's MP' only if our own complete MP' has gone
+  out and the 20 ones end on the MP frame grid (`mp_bits_since_frame`, a whole
+  number of frames plus 20 after the last decoded one, at least one frame in
+  between), which is what keeps an MP body's ones from reading as E. The
+  transmitter completes on E the same way. Test: `V34_TEST_LOST_MP_PRIME=1`
+  makes one modem damage every MP' it sends; without the change the call never
+  trains (60 s), with it both ends train with zero errors (`E after 372 bits`).
+  Two rows in `make test`.
+- **E deadline** (11.4.1.1/11.4.2): once an MP has been accepted, no E within
+  2500 ms + 3 RTD (30 s with the peer's CME bit, new `v34_get_far_cme()`) raises
+  TRAINING_FAILED. Measured from the first accepted MP, which is later than the
+  clause's origins, and RTD is a 250 ms allowance (`ME_V34_RTD_MS`). Not
+  exercised by a test of its own; the 50 duplex rows show it does not fire on a
+  healthy call.
+- **Answerer TRN bound** (11.4.1.2.2): TRN now stops at 2000 ms + a 250 ms RTD
+  allowance (`ME_V34_TRN_RTD_MS`, 0 disables) and MP starts anyway, logged.
+  Same caveat: no test forces the bound.
+- **11.6 timeout**: counted in received audio from the request, 2500 + 2 x 250 +
+  150 ms (S and S-bar), 30 s on CME; `ME_V34_RENEG_TIMEOUT_MS` still replaces it
+  as a labelled deviation. The old 4000 ms wall-clock default is gone.
+- **Duplex J's 16-point request**: the Phase 4 TRN, MP, MP' and E of a duplex
+  modem now use the constellation of the J it received (10.1.3.3); 16-point MP
+  is four scrambled bits per symbol with Q selecting the point and I
+  differentially encoded, E is five symbols, and 11.6 stays four-point.
+  `v34_phase4_16pt_test` calls the real generators. **Generator level only: our
+  receiver has no 16-point Phase 4 path, so there is no loopback for it** and it
+  has met no foreign modem. We still always ask for four-point ourselves.
+- **Cleardown** (11.7): `v34_start_cleardown()` is the 11.6 start with an MP
+  requesting zero in both directions; an MP with both rates zero is accepted
+  inside a renegotiation and not otherwise; the responder is the ordinary 11.6
+  responder; both ends finish when MP' has been sent and received
+  (`v34_cleardown_complete()`), after which the engine releases the call.
+  `V34_DUPLEX_CLEARDOWN` rows (ulaw 2400, alaw 3200) pass. **Deviations:** we
+  still send TRN between S-bar and MP (11.7.1.1 has none), and the engine only
+  RESPONDS to a peer's cleardown -- nothing in the engine initiates one (ATH
+  still drops the SIP call), and no foreign modem has been tried.
+
+**Still not done:** the timer-driven second Tone B reversal, which this document
+itself says must wait on the 21600 acquisition fix.

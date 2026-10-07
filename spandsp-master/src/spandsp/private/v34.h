@@ -1081,6 +1081,8 @@ typedef struct
         renegotiation rather than a startup, which matters at the TRN-to-MP
         seam: 11.4 waits for the far end's J', and 11.6 has no J at all. */
     bool reneg_active;
+    /*! 11.7: this renegotiation is a cleardown -- our MP asks for zero rates. */
+    bool cleardown;
     /* Let the Phase-4 TRN SNR cap the receive rate this modem asks for in
        MP (v34_set_trn_rate_selection()). */
     bool trn_rate_select;
@@ -2319,6 +2321,14 @@ typedef struct
     mp_t last_rx_mp;
     /*! \brief Baud count when mp_seen was first set to 1 (for E-detect timeout) */
     int mp_accepted_baud;
+    /*! \brief Bits received since the last accepted MP frame ended, and that
+        frame's length: the grid a later E must fall on if an MP' is lost. */
+    /*! 11.7: the peer's MP asked for zero rates in both directions during a
+        renegotiation, and the exchange then completed. */
+    bool cleardown_requested;
+    bool cleardown_complete;
+    int mp_bits_since_frame;
+    int mp_last_frame_bits;
     /*! \brief Consecutive bauds of above-threshold equalizer output seen
         since entering Phase 4 MP search, used to require the CMA
         equalizer time to re-adapt after a post-TRN silence/ramp-up gap

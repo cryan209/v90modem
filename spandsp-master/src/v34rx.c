@@ -2604,6 +2604,24 @@ static void mp_unlock_after_reject(v34_rx_state_t *s, bool count_tap_reject)
 {
     const int tap_switch_rejects = 3;
 
+    if (s->duplex  &&  s->stage == V34_RX_STAGE_PHASE4_MP  &&  s->mp_seen >= 1
+        &&  s->mp_last_frame_bits > 0)
+    {
+        /* A frame has already been accepted with this hypothesis and decode
+           mode, so a later CRC failure is damage to that frame (a lost MP'),
+           not evidence the lock is wrong.  Dropping it -- and rotating the
+           decode mode after three such frames -- is what stopped the E that
+           follows from ever being looked for (11.4.1.x.3 lets E replace the
+           peer's MP').  Keep the lock and wait for the next frame boundary. */
+        s->mp_early_rejects = 0;
+        s->mp_frame_pos = 0;
+        s->mp_frame_target = 0;
+        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                 "Rx - Phase 4: keeping MP hypothesis=%d after a rejected frame (an earlier MP was accepted)\n",
+                 s->mp_hypothesis);
+        return;
+    }
+    /*endif*/
     V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
              "Rx - Phase 4: unlock MP hypothesis=%d after rejected frame\n",
              s->mp_hypothesis);
@@ -3462,6 +3480,21 @@ static bool mp_apply_parameters(v34_state_t *s, const mp_t *remote)
 {
     int rx_rate_n;
 
+    /* 11.7.1.1: a cleardown is an MP requesting zero for BOTH directions,
+       exchanged inside a rate renegotiation.  There is nothing to negotiate. */
+    if (remote->bit_rate_a_to_c == 0  &&  remote->bit_rate_c_to_a == 0
+        &&  s->tx.reneg_active)
+    {
+        s->rx.cleardown_requested = true;
+        return true;
+    }
+    /*endif*/
+    /* The initiator's own MP asks for zero, so the responder's ordinary MP has
+       no rates to be intersected with; it only has to be received. */
+    if (s->tx.cleardown  &&  s->tx.reneg_active)
+        return true;
+    /*endif*/
+
     /* V.34 10.1.3.9/Table 20: a modem's MP encoder fields select the
        remote-end transmitter.  Keep TX and RX choices directional. */
     if (remote->type == 1)
@@ -3605,7 +3638,13 @@ static bool mp_semantic_ok_phase4(v34_rx_state_t *s, const mp_t *mp, int type, c
                  type, bits[19]);
     }
     /*endif*/
-    if (mp->bit_rate_a_to_c < 1  ||  mp->bit_rate_a_to_c > 14
+    if (mp->bit_rate_a_to_c == 0  &&  mp->bit_rate_c_to_a == 0
+        &&  ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)))->tx.reneg_active)
+    {
+        /* 11.7.1.1 cleardown request: legal, and handled by
+           mp_apply_parameters() rather than by rate selection. */
+    }
+    else if (mp->bit_rate_a_to_c < 1  ||  mp->bit_rate_a_to_c > 14
         ||  mp->bit_rate_c_to_a < 1  ||  mp->bit_rate_c_to_a > 14)
     {
         V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
@@ -7984,6 +8023,8 @@ static void process_cc_half_baud(v34_rx_state_t *s, const complexf_t *sample)
                from a clean slate rather than from whatever PPh left behind. */
             s->bitstream = 0;
             s->mp_seen = 0;
+            s->mp_bits_since_frame = 0;
+            s->mp_last_frame_bits = 0;
             s->mp_count = -1;
             s->crc = 0xFFFF;
             s->bit_count = 0;
@@ -10305,6 +10346,45 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             s->received_event = V34_EVENT_TRAINING_FAILED;
         }
         /*endif*/
+        /* 11.4.1.1.3/11.4.2.1.2 (caller: 2500 ms + 2 RTD after J'), 11.4.2.2.2
+           (answerer: 2500 ms + 3 RTD from S-bar), 30 s when the peer's INFO0 has
+           the CME bit: if E has not arrived the modem retrains.  The MP-only
+           watchdog above stops looking once any MP is accepted, so a peer that
+           goes quiet after its first MP was never given up on.  Measured from
+           the first accepted MP, which is later than the clause's origins and so
+           errs towards waiting; the round trip is an allowance
+           (ME_V34_RTD_MS, default 250), not a measurement. */
+        if (s->duplex
+            && s->mp_seen == 1
+            && s->mp_accepted_baud > 0
+            && s->baud_rate >= 0  &&  s->baud_rate <= 5
+            && s->received_event != V34_EVENT_TRAINING_FAILED)
+        {
+            static int rtd_ms = -1;
+            int wait_ms;
+
+            if (rtd_ms < 0)
+            {
+                const char *v = getenv("ME_V34_RTD_MS");
+
+                rtd_ms = (v  &&  *v)  ?  atoi(v)  :  250;
+                if (rtd_ms < 0)
+                    rtd_ms = 0;
+                /*endif*/
+            }
+            /*endif*/
+            wait_ms = s->far_capabilities.from_cme_modem  ?  30000  :  2500 + 3*rtd_ms;
+            if (s->duration - s->mp_accepted_baud
+                >= (baud_rate_parameters[s->baud_rate].baud_rate*wait_ms + 500)/1000)
+            {
+                V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                         "Rx - Phase 4: no E within %d ms of the first MP (11.4); signalling failure\n",
+                         wait_ms);
+                s->received_event = V34_EVENT_TRAINING_FAILED;
+            }
+            /*endif*/
+        }
+        /*endif*/
         if (s->mp_hypothesis < 0
             && s->mp_seen == 0
             && (s->duration % 400) == 0)
@@ -10388,6 +10468,9 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             for (i = 0;  i < 2;  i++)
             {
                 s->bitstream = (s->bitstream << 1) | bits[i];
+                if (s->mp_bits_since_frame < 1000000)
+                    s->mp_bits_since_frame++;
+                /*endif*/
                 if (s->mp_hypothesis >= 0  &&  s->mp_frame_pos == 0  &&  s->mp_seen == 0)
                 {
                     int preamble_wait_limit;
@@ -10447,10 +10530,36 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     continue;
                 }
                 /*endif*/
+                /* 11.4.1.1.3/11.4.1.2.3: after sending MP' a modem may complete on
+                   E even when the peer's own MP' was damaged.  Without the
+                   acknowledged frame there is no exact boundary to start the
+                   20-one test from, and an MP body's ones can mimic E, so it is
+                   accepted only when (a) our own complete MP' has gone out, and
+                   (b) the 20 ones end on a bit offset that is a whole number of
+                   MP frames, plus 20, after the last frame we did decode, with at
+                   least one whole frame (the lost MP') in between. */
+                bool e_without_ack = false;
                 if (s->mp_seen == 1
-                    && s->mp_remote_ack_seen
+                    && !s->mp_remote_ack_seen
+                    && s->mp_last_frame_bits > 0
+                    && (s->bitstream & 0xFFFFF) == 0xFFFFF
+                    && s->mp_bits_since_frame >= s->mp_last_frame_bits + 20
+                    && ((s->mp_bits_since_frame - 20) % s->mp_last_frame_bits) == 0)
+                {
+                    v34_state_t *owner = ((v34_state_t *) ((char *)(s) - offsetof(v34_state_t, rx)));
+
+                    e_without_ack = owner->tx.mp.mp_acknowledged
+                                 && owner->tx.mp_prime_frames >= 1;
+                }
+                /*endif*/
+                if (s->mp_seen == 1
+                    && (s->mp_remote_ack_seen  ||  e_without_ack)
                     && (s->bitstream & 0xFFFFF) == 0xFFFFF)
                 {
+                    if (e_without_ack)
+                        V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
+                                 "Rx - Phase 4: E after %d bits on the MP frame grid with no peer MP' decoded (11.4.1.x.3)\n",
+                                 s->mp_bits_since_frame);
                     /* V.34 11.4.1.1.3/11.4.1.2.3 permits E only after MP' has
                        been received.  Requiring the acknowledged frame is also
                        essential for alignment: the tail of an ordinary MP can
@@ -11126,7 +11235,14 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                         }
                         /*endif*/
                         if (frame_accepted)
+                        {
                             s->mp_phase4_reject_streak = 0;
+                            /* The frame grid E must fall on if a later frame is
+                               lost: bits since this frame's last bit, and its
+                               length. */
+                            s->mp_bits_since_frame = 0;
+                            s->mp_last_frame_bits = s->mp_frame_target;
+                        }
                         /*endif*/
                     }
                     if (s->mp_hypothesis >= 0)
@@ -16082,6 +16198,8 @@ void v34_condition_rx_for_pph(v34_state_t *s, const char *why)
     s->rx.hdx_silence_bauds = 0;
     s->rx.cc_qam_started = false;
     s->rx.mp_seen = 0;
+    s->rx.mp_bits_since_frame = 0;
+    s->rx.mp_last_frame_bits = 0;
     s->rx.mp_count = -1;
     s->rx.mp_remote_ack_seen = 0;
     s->rx.mp_remote_ack_count = 0;
@@ -16316,6 +16434,8 @@ SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
     s->rx.bitstream = 0;
     s->rx.bit_count = 0;
     s->rx.mp_seen = 0;
+    s->rx.mp_bits_since_frame = 0;
+    s->rx.mp_last_frame_bits = 0;
     s->rx.mp_remote_ack_seen = 0;
     s->rx.mp_remote_ack_count = 0;
     s->rx.mp_count = -1;

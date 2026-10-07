@@ -7566,6 +7566,24 @@ static void trn_baud_init(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* 10.1.3.3: "J indicates constellation size used by the remote modem for
+   transmitting sequences TRN, MP, MP' and E during Phase 4" -- so a duplex
+   modem's Phase 4 transmit constellation is chosen by the J it RECEIVED, not
+   by anything of its own (infoh.trn16 is the half-duplex INFOh field, and
+   shares storage with INFO1 in duplex).  11.6 renegotiation is explicitly
+   four-point. */
+static bool phase4_tx_16point(const v34_state_t *s)
+{
+    if (s->tx.reneg_active)
+        return false;
+    /*endif*/
+    if (s->tx.duplex)
+        return s->rx.phase3_j_trn16 > 0;
+    /*endif*/
+    return s->tx.infoh.trn16;
+}
+/*- End of function --------------------------------------------------------*/
+
 /* Phase 4 answer modem timing (V.34 §11.4.1.2):
    - S for 128T
    - S-bar for 16T
@@ -7623,6 +7641,35 @@ static int phase4_trn_tx_max_bauds(void)
     }
     /*endif*/
     return bauds;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Hard bound on the answerer's Phase 4 TRN (11.4.1.2.2: "no longer than
+   2000 ms plus a round trip delay").  Without it a receiver that never
+   publishes PHASE4_TRN_READY keeps TRN on the air until the engine's 60 s
+   training timeout.  The round trip is not measured here, so it is a
+   allowance, ME_V34_TRN_RTD_MS (default 250 ms; 0 disables the bound).  At
+   the cap MP starts anyway: the peer's own 11.4 timers are running and its
+   receiver may still lock on MP. */
+static int phase4_trn_hard_cap_bauds(const v34_state_t *s)
+{
+    static int rtd_ms = -1;
+
+    if (rtd_ms < 0)
+    {
+        const char *v = getenv("ME_V34_TRN_RTD_MS");
+
+        rtd_ms = (v  &&  *v)  ?  atoi(v)  :  250;
+        if (rtd_ms < 0)
+            rtd_ms = 0;
+        /*endif*/
+    }
+    /*endif*/
+    if (rtd_ms == 0  ||  s->tx.baud_rate < 0  ||  s->tx.baud_rate > 5)
+        return 0;
+    /*endif*/
+    return phase4_trn_max_bauds(s)
+         + (baud_rate_parameters[s->tx.baud_rate].baud_rate*rtd_ms + 500)/1000;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -7733,7 +7780,7 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
 
             i_sym = scramble(&s->tx, 1);
             i_sym = (scramble(&s->tx, 1) << 1) | i_sym;
-            if (s->tx.infoh.trn16)
+            if (phase4_tx_16point(s))
             {
                 q_sym = scramble(&s->tx, 1);
                 q_sym = (scramble(&s->tx, 1) << 1) | q_sym;
@@ -7804,8 +7851,17 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
             else if (s->tx.tone_duration >= PHASE4_TRN_BAUDS
                 && (s->rx.received_event == V34_EVENT_PHASE4_TRN_READY
                     ||  (phase4_trn_tx_max_bauds() > 0
-                         &&  s->tx.tone_duration >= phase4_trn_tx_max_bauds())))
+                         &&  s->tx.tone_duration >= phase4_trn_tx_max_bauds())
+                    ||  (phase4_trn_hard_cap_bauds(s) > 0
+                         &&  s->tx.tone_duration >= phase4_trn_hard_cap_bauds(s))))
             {
+                if (s->rx.received_event != V34_EVENT_PHASE4_TRN_READY
+                    &&  phase4_trn_hard_cap_bauds(s) > 0
+                    &&  s->tx.tone_duration >= phase4_trn_hard_cap_bauds(s))
+                    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                             "Tx - Phase 4: TRN reached the 11.4.1.2.2 bound (%d bauds) without far-end readiness; sending MP anyway\n",
+                             s->tx.tone_duration);
+
                 V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - Phase 4: TRN complete (%d bauds) and far-end J'/TRN confirmed, starting MP\n",
                          s->tx.tone_duration);
@@ -7838,7 +7894,7 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
                 /*endif*/
             }
             /*endif*/
-            return s->tx.infoh.trn16 ? training_constellation_16[trn_sym]
+            return phase4_tx_16point(s) ? training_constellation_16[trn_sym]
                                      : training_constellation_4[trn_sym];
         }
 
@@ -8377,6 +8433,26 @@ static void phase4_wait_init(v34_state_t *s)
    began: that gives the far end two or three MP' frames.  Bounded at
    ME_V34_MP_PRIME_MAX frames (default 4) in case the far end has stopped
    sending MP'; ME_V34_MP_FRESH_ACK=0 restores the single-MP' behaviour. */
+/* V34_TEST_LOST_MP_PRIME=1: the first modem in the process to receive an MP
+   sends three more plain MP frames and then damages every MP' it sends (a
+   CRC-covered bit flipped in the reused buffer), still ending with E once the
+   peer's MP' arrives.  The peer therefore decodes MP frames, never an MP', and
+   then sees E: the 11.4.1.x.3 "E in place of the peer's MP'" case.  Test hook. */
+static const v34_state_t *lost_mp_prime_owner = NULL;
+static int lost_mp_prime_plain = 0;
+
+static bool lost_mp_prime_hook_defer(const v34_state_t *s)
+{
+    if (!getenv("V34_TEST_LOST_MP_PRIME"))
+        return false;
+    /*endif*/
+    if (!lost_mp_prime_owner)
+        lost_mp_prime_owner = s;
+    /*endif*/
+    return lost_mp_prime_owner == s  &&  lost_mp_prime_plain++ < 3;
+}
+/*- End of function --------------------------------------------------------*/
+
 static bool mp_prime_may_end(v34_state_t *s)
 {
     static int fresh = -1;
@@ -8412,9 +8488,18 @@ static bool mp_prime_may_end(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+static complex_sig_t get_cleardown_silence_baud(v34_state_t *s)
+{
+    (void) s;
+    return zero;
+}
+/*- End of function --------------------------------------------------------*/
+
 static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
 {
     int bit;
+    int q16 = 0;
+    bool point16 = false;
 
     /* Transmit silence for the first MP_TX_SILENCE_BAUDS to test
        whether echo of our own TX is corrupting MP reception. */
@@ -8436,6 +8521,16 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
 
     bit = scramble(&s->tx, get_data_bit(&s->tx));
     bit = (scramble(&s->tx, get_data_bit(&s->tx)) << 1) | bit;
+    if (s->tx.duplex  &&  phase4_tx_16point(s))
+    {
+        /* 10.1.3.9: four scrambled bits I1 I2 Q1 Q2 per symbol; Q picks the
+           point from the quarter-superconstellation, I is differentially
+           encoded into the rotation. */
+        q16 = scramble(&s->tx, get_data_bit(&s->tx));
+        q16 = (scramble(&s->tx, get_data_bit(&s->tx)) << 1) | q16;
+        point16 = true;
+    }
+    /*endif*/
     if (s->tx.txptr >= s->tx.txbits)
     {
         if (s->tx.duplex)
@@ -8445,13 +8540,23 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
                V.34 §11.4.2: "When the modem has received its first valid MP
                sequence from the far end, it shall begin transmitting MP' with
                the acknowledge bit set to 1." */
-            if (s->rx.mp_seen >= 1  &&  !s->tx.mp.mp_acknowledged)
+            if (s->rx.mp_seen >= 1  &&  !s->tx.mp.mp_acknowledged
+                &&  !lost_mp_prime_hook_defer(s))
             {
                 s->tx.mp.mp_acknowledged = 1;
                 s->tx.txbits = mp_sequence_tx(&s->tx, &s->tx.mp);
                 s->tx.txptr = 0;
                 s->tx.mp_prime_ack_base = s->rx.mp_remote_ack_count;
                 s->tx.mp_prime_frames = 0;
+                if (lost_mp_prime_owner == s)
+                {
+                    /* Test hook: every MP' this modem sends is damaged (a
+                       CRC-covered bit flipped; the buffer is reused for each
+                       repeat), and it still ends with E once the peer's MP'
+                       arrives -- the peer sees lost MP' frames and then E. */
+                    s->tx.txbuf[70 >> 3] ^= (uint8_t) (1 << (70 & 7));
+                }
+                /*endif*/
                 V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - far-end MP received, switching to MP'\n");
                 /* V.34 11.4.1.1.3/11.4.1.2.4 requires a complete MP'
@@ -8459,7 +8564,21 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
                    remote acknowledgement in this same end-of-MP iteration
                    and skip transmission of our newly built MP' entirely. */
             }
-            else if (s->tx.mp.mp_acknowledged  &&  s->rx.mp_remote_ack_seen
+            else if (s->tx.mp.mp_acknowledged  &&  s->tx.reneg_active
+                     &&  (s->tx.cleardown  ||  s->rx.cleardown_requested)
+                     &&  s->rx.mp_remote_ack_seen
+                     &&  mp_prime_may_end(s))
+            {
+                /* 11.7.1.4 / 11.7.2.3: both receiving and sending MP' ends the
+                   connection.  No E, no B1, no data. */
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - 11.7 cleardown complete: MP' sent and received\n");
+                s->rx.cleardown_complete = true;
+                s->tx.current_getbaud = get_cleardown_silence_baud;
+                s->tx.txptr = 0;
+            }
+            else if (s->tx.mp.mp_acknowledged
+                     &&  (s->rx.mp_remote_ack_seen  ||  s->rx.stage == V34_RX_STAGE_DATA)
                      &&  mp_prime_may_end(s))
             {
                 /* A complete local MP' has now been sent and remote MP' was
@@ -8499,6 +8618,9 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
     }
     /*endif*/
     s->tx.diff = (s->tx.diff + bit) & 3;
+    if (point16)
+        return training_constellation_16[(q16 << 2) | s->tx.diff];
+    /*endif*/
     return training_constellation_4[s->tx.diff];
 }
 /*- End of function --------------------------------------------------------*/
@@ -8658,6 +8780,14 @@ static void mp_or_mph_baud_init(v34_state_t *s)
             mp_highest_masked_rate(s->tx.mp.bit_rate_a_to_c, mask);
         s->tx.mp.bit_rate_c_to_a =
             mp_highest_masked_rate(s->tx.mp.bit_rate_c_to_a, mask);
+        if (s->tx.cleardown)
+        {
+            /* 11.7.1.1: "MP sequences requesting zeros for the call-to-answer
+               and answer-to-call data rates". */
+            s->tx.mp.bit_rate_a_to_c = 0;
+            s->tx.mp.bit_rate_c_to_a = 0;
+        }
+        /*endif*/
 
         /* V.34 10.1.3.9/Table 20: these encoder fields select the
            remote-end transmitter, so advertise this receiver's requested
@@ -8737,6 +8867,20 @@ static complex_sig_t get_e_baud(v34_state_t *s)
     bit = scramble(&s->tx, 1);
     bit = (scramble(&s->tx, 1) << 1) | bit;
     s->tx.diff = (s->tx.diff + bit) & 3;
+    if (s->tx.duplex  &&  phase4_tx_16point(s))
+    {
+        /* 10.1.3.2: the 16-point E is generated as 10.1.3.9's MP -- 20 bits
+           at four per symbol is five symbols, not ten. */
+        int q;
+
+        q = scramble(&s->tx, 1);
+        q = (scramble(&s->tx, 1) << 1) | q;
+        if (++s->tx.tone_duration >= 5)
+            data_baud_init(s);
+        /*endif*/
+        return training_constellation_16[(q << 2) | s->tx.diff];
+    }
+    /*endif*/
     if (++s->tx.tone_duration == 10)
     {
         V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
@@ -10271,6 +10415,12 @@ SPAN_DECLARE(float) v34_get_guard_carrier_db(v34_state_t *s, int *valid)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(bool) v34_get_far_cme(v34_state_t *s)
+{
+    return s  &&  s->rx.far_capabilities.from_cme_modem;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v34_get_rx_baud_rate(v34_state_t *s)
 {
     if (!s)
@@ -10670,6 +10820,29 @@ SPAN_DECLARE(void) v34_v90_condition_rx_for_reneg_s(v34_state_t *s)
     /*endif*/
     phase4_rx_conditioning_init(s, V34_RX_STAGE_PHASE4_S,
                                 "9.6 rate renegotiation: S, S-bar, then CP");
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v34_start_cleardown(v34_state_t *s)
+{
+    int rc;
+
+    rc = start_rate_renegotiation(s, V34_RX_STAGE_PHASE4_S, false,
+                                  "11.7 cleardown: S, S-bar, MP requesting zero rates");
+    if (rc == 0)
+    {
+        s->tx.cleardown = true;
+        s->rx.cleardown_requested = false;
+        s->rx.cleardown_complete = false;
+    }
+    /*endif*/
+    return rc;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(bool) v34_cleardown_complete(v34_state_t *s)
+{
+    return s  &&  s->rx.cleardown_complete;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -11297,6 +11470,9 @@ SPAN_DECLARE(int) v34_restart(v34_state_t *s, int baud_rate, int bit_rate, bool 
        in flight is over.  Left set, it would change the Phase 4 TRN-to-MP
        seam on the next startup. */
     s->tx.reneg_active = false;
+    s->tx.cleardown = false;
+    s->rx.cleardown_requested = false;
+    s->rx.cleardown_complete = false;
     /* v34_start_retrain() sets this again if this restart is a retrain.  It
        must not survive into an ordinary startup, where INFO0 does arrive. */
     s->tx.retrain_omit_info0 = false;
