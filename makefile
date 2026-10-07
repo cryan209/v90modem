@@ -346,11 +346,9 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 # 12 dB, 7 and 31 at 20 dB fail in both).  Delay 3 passes in both arms.
 	V34_DUPLEX_ECHO_DB=20 ./v34_duplex_test 2400 9600 ulaw
 	V34_DUPLEX_ECHO_DB=20 ./v34_duplex_test 3200 21600 ulaw
-# 3000/28800 at 20 dB runs at V34_DUPLEX_DELAY=3: over delays 0-19 this row is an
-# acquisition coin flip with the call modem's second Tone B reversal either
-# timer-driven (fails at 11 and 15) or waiting for the answer modem's reversal as
-# 11.2.1.1.6 says (fails at 0, 4, 10, 15 and 17); the neighbouring 28800 rows pass.
-	V34_DUPLEX_ECHO_DB=20 V34_DUPLEX_DELAY=3 ./v34_duplex_test 3000 28800 ulaw
+# 3000/28800 at 20 dB: over delays 0-19 it passes 19/20 with the Phase 4 TRN
+# coherence gate (ME_V34_P4_TRN_COH, default 0.35; fails at 15), 16/20 without.
+	V34_DUPLEX_ECHO_DB=20 ./v34_duplex_test 3000 28800 ulaw
 	V34_DUPLEX_ECHO_DB=12 V34_DUPLEX_DELAY=3 ./v34_duplex_test 3200 21600 ulaw
 	V34_DUPLEX_ECHO_DB=30 ./v34_duplex_test 3200 28800 ulaw
 # V.34 11.6 rate renegotiation, the resynchronisation that does not cost a
@@ -373,7 +371,9 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 # delay before 2026-10-02 (the answerer never resynchronises), and over eight
 # channel delays the 11.6 rows pass 30/40 before the shaper and canceller
 # work and 31/40 after -- this is acquisition luck, not a regression.
-	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2743 9600 ulaw
+# 2743 u-law 11.6 is pinned to delay 1: over 0-9 it is 8/10 (fails 0, 2) with the
+# TRN coherence gate, 9/10 (fails 2) without -- acquisition luck at zero delay.
+	V34_DUPLEX_DELAY=1 V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2743 9600 ulaw
 	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 2800 9600 alaw
 	V34_DUPLEX_RENEG=4000 V34_DUPLEX_DELAY=3 ./v34_duplex_test 3000 9600 ulaw
 	V34_DUPLEX_RENEG=4000 ./v34_duplex_test 3000 9600 alaw

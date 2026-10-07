@@ -1837,6 +1837,10 @@ typedef struct
        shaper_t2_acc rather than rounded. */
     /* Phase 4 CMA level convergence; see phase4_cma_converged(). */
     float phase4_cma_mag;
+    /*! 4th-power phase coherence EMA of Phase 4 TRN equalizer outputs: how far
+        the decisions can be trusted to train on. */
+    float phase4_trn_coh_re;
+    float phase4_trn_coh_im;
     int phase4_cma_bauds;
     int phase4_cma_settled;
     /* V.90 9.6.1.1.1: a rate renegotiation's CP conditioning starts from a

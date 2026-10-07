@@ -603,8 +603,11 @@ static int phase3_rx_dump_count = 0;
 #define PHASE3_PP_ONSET_SCORE           400
 #define PHASE3_PP_ONSET_NOMINAL         40
 #define PHASE3_PP_ONSET_MAX_SKIP        160
+#define PHASE3_PP_ONSET_MIN_RISE        16
 
 static int v34_pp_onset_trim_enabled(void);
+static float v34_p4_trn_coh_gate(void);
+static int v34_p4_eye_flip_reopens_cma(void);
 #define PHASE3_PP_ACQUIRE_DECAY         0.98f
 #define V34_AGC_POWER_MIN               100000
 #define V34_AGC_SCALING_MIN             0.00001f
@@ -8825,15 +8828,25 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    payload with it.  ME_V34_PP_ONSET_TRIM=0 disables. */
                 s->phase3_pp_skip = 0;
                 if (s->phase3_pp_onset >= 0
-                    &&  s->v90_mode
-                    &&  !s->calling_party
-                    &&  !s->v90_v34_fallback  /* a V.34 call from Phase 3 on */
-                    &&  v34_pp_onset_trim_enabled())
+                    &&  v34_pp_onset_trim_enabled()
+                    &&  ((s->v90_mode  &&  !s->calling_party
+                          &&  !s->v90_v34_fallback  /* a V.34 call from Phase 3 on */)
+                         ||  (!s->v90_mode  &&  v34_pp_onset_trim_enabled() >= 2)))
                 {
                     int late = acquire_bauds - s->phase3_pp_onset - PHASE3_PP_ONSET_NOMINAL;
 
-                    if (late > 0)
-                        s->phase3_pp_skip = (late > PHASE3_PP_ONSET_MAX_SKIP)  ?  PHASE3_PP_ONSET_MAX_SKIP  :  late;
+                    /* An onset stamped in the first few bauds of acquisition is
+                       not a PP rising out of silence: the score was already
+                       over threshold when this receiver started looking (a
+                       correlation carried over from earlier signal), so
+                       "onset N ago" is just how long it has been looking, and
+                       trimming by it throws away PP that is there. */
+                    if (s->v90_mode  ||  s->phase3_pp_onset >= PHASE3_PP_ONSET_MIN_RISE)
+                    {
+                        if (late > 0)
+                            s->phase3_pp_skip = (late > PHASE3_PP_ONSET_MAX_SKIP)  ?  PHASE3_PP_ONSET_MAX_SKIP  :  late;
+                        /*endif*/
+                    }
                     /*endif*/
                 }
                 /*endif*/
@@ -11412,10 +11425,43 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    level is right, and above 2400 baud it walks it off: the
                    Phase 4 TRN hypothesis search then reads a flat 50% ones for
                    the rest of the call.  Let it converge, then stop it. */
+                bool p4_trn_trusted = true;
+
+                if (s->stage == V34_RX_STAGE_PHASE4_TRN
+                    &&  (!s->v90_mode  ||  s->v90_v34_fallback)
+                    &&  !t_cma->tx.reneg_active   /* 11.6's TRN is short and re-seeded */
+                    &&  v34_p4_trn_coh_gate() > 0.0f)
+                {
+                    /* Decision-directed training is only worth anything while the
+                       decisions are right.  TRN's symbols are on the 4-point
+                       grid, so the fourth power of an equalizer output that is
+                       locked is a steady phase: track its coherence. */
+                    float mag2 = sym->re*sym->re + sym->im*sym->im;
+
+                    if (mag2 > 1e-6f)
+                    {
+                        float a = sym->re*sym->re - sym->im*sym->im;
+                        float b = 2.0f*sym->re*sym->im;
+                        float re4 = (a*a - b*b)/(mag2*mag2);
+                        float im4 = (2.0f*a*b)/(mag2*mag2);
+
+                        s->phase4_trn_coh_re += 0.02f*(re4 - s->phase4_trn_coh_re);
+                        s->phase4_trn_coh_im += 0.02f*(im4 - s->phase4_trn_coh_im);
+                    }
+                    /*endif*/
+                    p4_trn_trusted = sqrtf(s->phase4_trn_coh_re*s->phase4_trn_coh_re
+                                         + s->phase4_trn_coh_im*s->phase4_trn_coh_im)
+                                   >= v34_p4_trn_coh_gate();
+                    if (!p4_trn_trusted)
+                        freeze_mp_cma = false;
+                    /*endif*/
+                }
+                /*endif*/
                 if (s->stage == V34_RX_STAGE_PHASE4_TRN
                     &&  (!s->v90_mode  ||  s->v90_v34_fallback)
                     &&  v34_p4_trn_dd_start() > 0
-                    &&  s->phase4_trn_after_j >= v34_p4_trn_dd_start())
+                    &&  s->phase4_trn_after_j >= v34_p4_trn_dd_start()
+                    &&  p4_trn_trusted)
                 {
                     /* V.34 11.4.1.1.2/11.4.1.2.2: TRN is sent "until the
                        receiver is trained adequately", and it is the
@@ -11442,7 +11488,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                             tune_equalizer_cma(s, sym);
                         /*endif*/
                     }
-                    else if (!phase4_cma_converged(s, sym))
+                    else if (!p4_trn_trusted  ||  !phase4_cma_converged(s, sym))
                         tune_equalizer_cma(s, sym);
                     else if (getenv("V34_PHASE4_DD_TRN")
                              && s->stage == V34_RX_STAGE_PHASE4_TRN)
@@ -11596,6 +11642,52 @@ static int v34_pp_onset_trim_enabled(void)
     if (cache < 0)
     {
         const char *value = getenv("ME_V34_PP_ONSET_TRIM");
+
+        cache = (value  &&  value[0] == '0')  ?  0  :  ((value  &&  value[0] == '2')  ?  2  :  1);
+    }
+    /*endif*/
+    return cache;
+}
+
+/* ME_V34_P4_TRN_COH: Phase 4 TRN decision-directed training waits for the
+   equalizer output's 4th-power coherence (0 = random phase, 1 = locked on the
+   4-point grid) to reach this; below it blind CMA keeps running instead of the
+   equalizer being frozen.  Default 0.35, 0 disables.
+
+   Why: the DD-LMS starts at TRN symbol 256 whatever the decisions are worth.
+   On the alignments where the receiver is not yet locked (3000/28800 at 20 dB
+   echo, delays 0, 4, 17; coherence 0.02-0.08 for the whole 4800-symbol TRN, the
+   main tap decaying 0.82 -> 0.42, Phase 4 TRN SNR 3.0 dB) it trained on wrong
+   decisions and diverged; on the neighbouring alignment the same receiver is at
+   0.97 within 512 symbols.  Over delays 0-27 at six rows this default is equal
+   to or one run better than no gate everywhere (target row 8/10 -> 9/10, and
+   24/30 -> 28/30 over delays 0-29 at 0.5), and 0.25 happened to lose 3429/21600
+   A-law at zero delay, so the value is not a fine-tuned one.  Not the PP
+   conditioning: a late PP lock at the same rows is real (docs), but trimming it
+   for plain V.34 trades one failure for another (2743/26400 A-law loses a
+   payload burst), see ME_V34_PP_ONSET_TRIM=2. */
+static float v34_p4_trn_coh_gate(void)
+{
+    static float cache = -1.0f;
+
+    if (cache < 0.0f)
+    {
+        const char *value = getenv("ME_V34_P4_TRN_COH");
+
+        cache = value  ?  strtof(value, NULL)  :  0.35f;
+    }
+    /*endif*/
+    return cache;
+}
+
+/* ME_V34_P4_EYE_FLIP_CMA=0 leaves CMA settled across a Phase 4 eye flip. */
+static int v34_p4_eye_flip_reopens_cma(void)
+{
+    static int cache = -1;
+
+    if (cache < 0)
+    {
+        const char *value = getenv("ME_V34_P4_EYE_FLIP_CMA");
 
         cache = (value  &&  value[0] == '0')  ?  0  :  1;
     }
@@ -11937,6 +12029,21 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 s->baud_half ^= 1;
                 s->eye_prev_on = complex_setf(0.0f, 0.0f);
                 s->eye_prev_off = complex_setf(0.0f, 0.0f);
+                if (s->stage == V34_RX_STAGE_PHASE4_TRN  &&  v34_p4_eye_flip_reopens_cma())
+                {
+                    /* The taps were trained, and CMA declared settled, with the
+                       symbol instant where it was.  Half a symbol later they
+                       are wrong, and a frozen wrong solution is what the
+                       decision-directed LMS then fed on: caller 4th-power
+                       coherence 0.02-0.08 for the whole of an 8 s Phase 4 TRN,
+                       its main tap decaying 0.82 -> 0.42, against 0.97 within
+                       512 symbols on the neighbouring alignment.  Let blind CMA
+                       find the level again. */
+                    s->phase4_cma_settled = 0;
+                    s->phase4_cma_bauds = 0;
+                    s->phase4_cma_mag = 0.0f;
+                }
+                /*endif*/
             }
             /*endif*/
             s->eye_on_sum = 0.0f;
