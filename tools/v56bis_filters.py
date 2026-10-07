@@ -7,6 +7,7 @@ disabled EDD generator. --check checks the committed coefficients too.
 from __future__ import annotations
 
 import argparse
+import re
 import cmath
 import json
 import math
@@ -142,6 +143,18 @@ def validate(h: list[float], ad: list[tuple[float,float]], edd: list[tuple[float
             "reference_delay_samples":delay_ref*FS/1000,"failures":failures}
 
 
+def same_header(a: str, b: str) -> bool:
+    """Equal text, with every number allowed 1e-9 relative drift: the design
+    uses floating point whose last digits differ between platforms/libm."""
+    num=re.compile(r"[-+]?\d+\.?\d*(?:[eE][-+]?\d+)?")
+    if num.sub("#",a)!=num.sub("#",b):
+        return False
+    xa=[float(x) for x in num.findall(a)]
+    xb=[float(x) for x in num.findall(b)]
+    return len(xa)==len(xb) and all(
+        abs(x-y)<=1e-9*max(abs(x),abs(y))+1e-18 for x,y in zip(xa,xb))
+
+
 def main() -> int:
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument("--check",action="store_true")
@@ -179,7 +192,7 @@ def main() -> int:
         return 1
     content="".join(output)
     if args.check:
-        if not HEADER.is_file() or HEADER.read_text()!=content:
+        if not HEADER.is_file() or not same_header(HEADER.read_text(),content):
             print("Generated header is missing or stale")
             return 1
     else:
