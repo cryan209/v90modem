@@ -3378,10 +3378,26 @@ static bool test_v92_native_cpu_receiver(void)
     v92_test_build_cpu(&cpu, true, false);   /* A-law against µ-law receiver */
     if (!v92_cp_encode(&cpu, 4, bits, (int)sizeof(bits), &nbits))
         return false;
-    if (v92_test_feed_frame(&rx, bits, nbits) || rx.rejected_frames != 2) {
-        fprintf(stderr, "V.92 receiver accepted a codec-law mismatch\n");
+    /* Default (commit 4d8dce8): the RTP payload IS the DS0, so a CRC-valid
+     * frame naming the other law is taken in the bearer's law and delivered. */
+    {
+        int before = capture.cp_count;
+
+        if (!v92_test_feed_frame(&rx, bits, nbits)
+            || capture.cp_count != before + 1
+            || capture.last_cp.codec_alaw != rx.expected_alaw) {
+            fprintf(stderr, "V.92 receiver rejected a codec-law mismatch it should follow\n");
+            return false;
+        }
+    }
+    /* V92_CP_LAW_STRICT=1 restores the rejection. */
+    setenv("V92_CP_LAW_STRICT", "1", 1);
+    if (v92_test_feed_frame(&rx, bits, nbits)) {
+        unsetenv("V92_CP_LAW_STRICT");
+        fprintf(stderr, "V.92 receiver accepted a codec-law mismatch under V92_CP_LAW_STRICT\n");
         return false;
     }
+    unsetenv("V92_CP_LAW_STRICT");
 
     vpcm_log("PASS: V.92 Table 23/24/27 CPu/CPus/SUVu codecs and bitstream receiver");
     return true;
