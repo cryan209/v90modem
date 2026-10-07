@@ -24,11 +24,13 @@ static bool v90_cp_diag_is_strict(const v90_cp_rx_t *rx,
     /* V.90 9.7 / Table 14: a data-mode CP (bit 19 = 1) with drn = 0 requests
      * cleardown and its constellation fields are not interpreted. */
     if (diag->frame.drn == 0)
-        return diag->frame.v90_compatibility && diag->bits[30] == 0;
+        return diag->frame.v90_compatibility;
     return diag->frame.drn <= 22
         /* bit 18 (transparent mode) is reserved in V.90 Table 14 and is
          * not interpreted by the digital modem */
-        && diag->bits[30] == 0
+        /* bit 30 is a CPs (V.90 9.6.1.2.3): whether this endpoint can act on
+         * it is for v90_set_phase4_cp(), which knows if a renegotiation is
+         * running. */
         && diag->frame.upstream_rate_mask != 0
         && ((diag->bits[35] != 0) == rx->expected_alaw);
 }

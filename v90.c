@@ -714,6 +714,15 @@ struct v90_state_s {
     int64_t          reneg_rbar_symbol;         /* symbol count at the Rd→R̄d transition */
     int64_t          reneg_symbol_clock;        /* symbols emitted since renegotiation began */
     int              reneg_count;
+    /* §9.6.1.2.3-.6, the analogue modem's echo-reconditioning form (Figure
+     * 10).  silence_req: its CP carried bit 30 (a CPs), so Ed is followed by
+     * silence instead of B1d.  rt_pending: a CP with bit 30 clear arrived
+     * during that silence, so Rt (384T) and Rt-bar (24T) follow on the next
+     * data frame boundary.  rt: Rt/Rt-bar is on the air, and MP (no TRN2d)
+     * follows it. */
+    bool             reneg_silence_req;
+    bool             reneg_rt_pending;
+    bool             reneg_rt;
     vpcm_cp_frame_t  cp_frame;                  /* CP frame to transmit */
     /* The CPt/CP exactly as the peer sent it.  cp_frame/data_cp_frame may
      * carry the 8.5.2 pad repair below, and a repeated frame has to be
@@ -4359,7 +4368,24 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                  * acknowledgement (§9.4.1.1).  Expose TRN2d immediately
                  * after returning that symbol so the next codeword is the
                  * first mapped TRN2d symbol (§9.4.1.2). */
-                if (s->tx_phase == V90_TX_RI_ACK)
+                if (s->tx_phase == V90_TX_RI_ACK && s->reneg_rt) {
+                    /* §9.6.1.2.6 / Figure 10: Rt, Rt-bar, then MP -- there
+                     * is no TRN2d.  MP is a fresh mapped signal after the
+                     * silence, so its mapper memories start from zero. */
+                    s->reneg_rt = false;
+                    s->tx_phase = V90_TX_MP;
+                    s->sample_count = 0;
+                    s->phase4_hold_logged = false;
+                    v90_scrambler_init(&s->phase4_scrambler);
+                    s->phase4_prev_sign = 0;
+                    memset(&s->phase4_shaper, 0, sizeof(s->phase4_shaper));
+                    s->phase4_frame_pos = V90_FRAME_LEN;
+                    s->cp_ack_received = false;
+                    s->data_cp_received = false;
+                    (void) v90_build_mp_type0(s, false);
+                    fprintf(stderr, "[V90] Rate renegotiation %d: Rt-bar "
+                            "complete; MP (§9.6.1.2.6)\n", s->reneg_count);
+                } else if (s->tx_phase == V90_TX_RI_ACK)
                     s->tx_phase = V90_TX_TRN2D;
             }
             return codeword;
@@ -4589,6 +4615,19 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                 codeword = v90_phase4_codeword(s, V90_PHASE4_INPUT_ZEROS);
             }
             s->sample_count++;
+            if (s->sample_count >= tx_symbols && s->reneg_active
+                && s->reneg_silence_req) {
+                /* §9.6.1.2.5: Ed is followed by silence (Ucode 0), keeping
+                 * data frame alignment; the data mapper is untouched until
+                 * the second Ed. */
+                fprintf(stderr, "[V90] Rate renegotiation %d: Ed sent; "
+                        "silence until a CP with bit 30 clear "
+                        "(§9.6.1.2.5)\n", s->reneg_count);
+                s->tx_phase = V90_TX_RENEG_SILENCE;
+                s->sample_count = 0;
+                s->phase4_hold_logged = false;
+                return codeword;
+            }
             if (s->sample_count >= tx_symbols) {
                 s->tx_phase = V90_TX_B1D;
                 s->sample_count = 0;
@@ -4599,6 +4638,34 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
             }
             return codeword;
         }
+
+    case V90_TX_RENEG_SILENCE:
+        /* §9.6.1.2.5: PCM codewords of Ucode 0, data frame alignment kept
+         * (the Ed that precedes this ends on a frame boundary, so the frame
+         * position is sample_count modulo the frame length).  §9.6.1.2.6:
+         * Rt starts on a frame boundary once a CP with bit 30 clear is in. */
+        if (s->reneg_rt_pending && (s->sample_count % V90_FRAME_LEN) == 0) {
+            s->reneg_rt_pending = false;
+            s->reneg_silence_req = false;
+            s->reneg_rt = true;
+            s->tx_phase = V90_TX_RI;
+            s->sample_count = 0;
+            s->cp_ready = false;
+            s->phase4_hold_logged = false;
+            s->phase4_ri_align_remaining = 0;
+            fprintf(stderr, "[V90] Rate renegotiation %d: CP with bit 30 "
+                    "clear; Rt for %dT (§9.6.1.2.6)\n",
+                    s->reneg_count, V90_RD_RENEG_SYMBOLS);
+            s->sample_count = 1;   /* the first Rt symbol goes out now */
+            return v90_ri_codeword(s, 0, false);
+        }
+        if (!s->phase4_hold_logged) {
+            fprintf(stderr, "[V90] Rate renegotiation %d: silence "
+                    "(Ucode 0)\n", s->reneg_count);
+            s->phase4_hold_logged = true;
+        }
+        s->sample_count++;
+        return v90_pcm_signed_codeword(s->law, 0, 1);
 
     case V90_TX_B1D:
         /* §8.6.1/§9.4.1.5: 48 complete data frames of scrambled ones,
@@ -5190,6 +5257,19 @@ bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp)
 
     if (!s->phase4_mapper_ready)
         return false;
+    /* Table 14 bit 30 (CPs): only meaningful inside a rate renegotiation
+     * (§9.6.1.2.3-.6).  Anywhere else it is not a frame this procedure can
+     * act on, so it is refused as it was before the parser let it through. */
+    if (cp->silence_request && !s->reneg_active)
+        return false;
+    if (s->tx_phase == V90_TX_RENEG_SILENCE) {
+        /* §9.6.1.2.6: a CP with bit 30 clear ends the silence.  Late copies
+         * of the CPs/CPs' that preceded it do not. */
+        if (cp->silence_request || cp->acknowledge)
+            return false;
+        s->reneg_rt_pending = true;
+        return true;
+    }
     /* Acknowledged CP (CP') is valid only after the analogue modem has
      * received MP (§9.4.2).  Reject it before configuring the data mapper:
      * a rejected early CP' must not leave data_cp_received latched and cause
@@ -5214,13 +5294,19 @@ bool v90_set_phase4_cp(v90_state_t *s, const vpcm_cp_frame_t *cp)
             return false;
     }
 
-    /* Repeated data-mode CP/CP' frames may change only acknowledge. */
+    /* Repeated data-mode CP/CP' frames may change only acknowledge (and,
+     * in a renegotiation, bit 30: CPs, CPs' and the CP that follows them
+     * carry the same parameters). */
     expected = s->data_cp_frame_rx;
     received = *cp;
     expected.acknowledge = false;
     received.acknowledge = false;
+    expected.silence_request = false;
+    received.silence_request = false;
     if (!vpcm_cp_frames_equal(&expected, &received))
         return false;
+    if (cp->silence_request)
+        s->reneg_silence_req = true;
     if (cp->acknowledge)
         s->cp_ack_received = true;
     s->data_cp_received = true;
@@ -6130,6 +6216,9 @@ bool v90_rate_renegotiation_start(v90_state_t *s)
      * the Rd defect above -- startup state carried into §9.6. */
     s->cp_ack_received = false;
     s->data_cp_received = false;
+    s->reneg_silence_req = false;
+    s->reneg_rt_pending = false;
+    s->reneg_rt = false;
     (void) v90_build_mp_type0(s, false);
     fprintf(stderr,
             "[V90] Rate renegotiation %d: sending Rd for %dT on a data frame "

@@ -4623,17 +4623,9 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
         return false;
     }
 
-    cp.transparent_mode_granted = true; /* V.90 reserves Table 14 bit 18. */
-    if (!vpcm_cp_encode_modulated_bits(&cp, 4, damaged, &nbits))
-        return false;
-    for (int i = 0; i < nbits; i++)
-        v90_cp_rx_put_bit(&rx, damaged[i]);
-    if (capture.count != 0 || rx.rejected_frames != 2
-        || rx.semantic_rejected_frames != 1) {
-        fprintf(stderr, "V.90 strict CP receiver accepted reserved bit 18\n");
-        return false;
-    }
-    cp.transparent_mode_granted = false;
+    /* Table 14 bit 18 is reserved and NOT interpreted by the digital modem:
+     * a CRC-valid CP with it set is accepted (v92_startup_test covers that;
+     * BinModem audit finding 6). */
 
     cp.v90_compatibility = true; /* Data-mode CP is also a valid Table 14 frame. */
     if (!vpcm_cp_encode_modulated_bits(&cp, 4, damaged, &nbits))
@@ -4656,7 +4648,7 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
         return false;
     for (int i = 0; i < nbits; i++)
         v90_cp_rx_put_bit(&rx, damaged[i]);
-    if (capture.count != 1 || rx.rejected_frames != 3) {
+    if (capture.count != 1 || rx.rejected_frames != 2) {
         fprintf(stderr, "V.90 strict CP receiver accepted DRN above 22\n");
         return false;
     }
@@ -4667,7 +4659,7 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
         return false;
     for (int i = 0; i < nbits; i++)
         v90_cp_rx_put_bit(&rx, damaged[i]);
-    if (capture.count != 1 || rx.rejected_frames != 4) {
+    if (capture.count != 1 || rx.rejected_frames != 3) {
         fprintf(stderr, "V.90 strict CP receiver accepted the wrong codec law\n");
         return false;
     }
@@ -4690,7 +4682,7 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
         return false;
     for (int i = 0; i < nbits; i++)
         v90_cp_rx_put_bit(&rx, damaged[i]);
-    if (capture.count != 2 || rx.rejected_frames != 5) {
+    if (capture.count != 2 || rx.rejected_frames != 4) {
         fprintf(stderr, "V.90 strict CP receiver accepted an empty upstream-rate mask\n");
         return false;
     }
@@ -4762,9 +4754,9 @@ static bool test_v90_strict_cp_bitstream_receiver(v91_law_t law)
         v90_cp_rx_put_bit(&rx, bits[i]);
     if (capture.count != 5
         || rx.valid_frames != 5
-        || rx.sync_candidates != 10
+        || rx.sync_candidates != 9
         || rx.crc_rejected_frames != 1
-        || rx.semantic_rejected_frames != 4
+        || rx.semantic_rejected_frames != 3
         || rx.structure_rejected_frames != 0
         || !vpcm_cp_frames_equal(&cp, &capture.frame)) {
         fprintf(stderr,

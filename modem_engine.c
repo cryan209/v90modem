@@ -5410,7 +5410,13 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
      * against slmodemd -- whose CP' we do not always decode -- the upstream
      * receiver was never prepared, so B1 was hunted with default parameters,
      * correlated at 5%, and no upstream byte ever reached the DTE. */
+    /* A CPs/CPs' (bit 30) is followed by the analogue modem's SCR -- scrambled
+     * ones, i.e. 20+ ones on this channel -- while it recovers its echo
+     * canceller (V.90 9.6.2.1.6).  That is not E: arming the E watch on a
+     * CPs would start the data receiver in the middle of the procedure, so it
+     * waits for the CP with bit 30 clear that follows (9.6.2.1.7). */
     if (accepted && (frame->acknowledge || frame->v90_compatibility)
+        && !frame->silence_request
         && !g_v34_upstream_data_armed && g_v34) {
         int baud = v90_selected_upstream_baud_locked();
         int rate = v34_get_current_bit_rate(g_v34);

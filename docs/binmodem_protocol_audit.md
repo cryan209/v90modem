@@ -359,9 +359,9 @@ These follow-up probes changed no protocol code and made no hardware calls.
 ## Resolution (2026-10-07, same day)
 
 Findings 1-10 are addressed except as noted. `make v92_startup_test` and
-`v90_analogue_rx_test` pass (linked against SpanDSP only; the pjproject-linked
-suites, `vpcm_loopback_test` among them, were NOT run in this environment, and
-`modem_engine.c`'s one hunk was not compiled here). No hardware interop claim.
+`v90_analogue_rx_test` pass; `vpcm_loopback_test --all-tests` passes with
+`V92_CP_LAW_STRICT=1` (without it the V.92 "codec-law mismatch" row fails, and
+did before this work: commit 4d8dce8 made the receiver follow the bearer's law). No hardware interop claim.
 
 - **1** digital (`v90.c`, sticky `v92_cpd_repeat`) and analogue
   (`v92_analogue_phase4.c`, `cpu_repeat`): after the 9.6.x.1.3 timeout the
@@ -379,9 +379,19 @@ suites, `vpcm_loopback_test` among them, were NOT run in this environment, and
   trellis 3 are now rejected (finding 10). Tests: `v92_startup_test`.
 - **4** a data-mode CP with drn = 0 reaches the engine, which hangs up
   (`Remote (V.90 9.7 cleardown)`) before any mapper setup.
-- **5 NOT fixed:** CPs (bit 30) still stops at the strict parser. Passing it on
-  without the 9.6.1.2.3-.6 silence procedure would turn it into an ordinary
-  Ed/B1d, which is worse than dropping it.
+- **5** (2026-10-07, later) the digital modem now runs 9.6.1.2.3-.6: a CPs
+  passes the strict parser (`v90_set_phase4_cp()` refuses bit 30 outside a
+  renegotiation), MP' repeats until CPs', Ed is followed by Ucode-0 silence on
+  the frame grid (`V90_TX_RENEG_SILENCE`), a CP with bit 30 clear starts Rt
+  384T / Rt-bar 24T on the next frame boundary, then MP with no TRN2d, then the
+  9.4.1.4 tail. The engine does not arm its E watch on a CPs, because the
+  analogue modem's SCR is scrambled ones and reads as E. `v90_reneg_silence_test`
+  (new, in `make test`) drives the whole of Figure 10 against the transmit
+  state machine. **Not covered:** a coupled run against our own analogue
+  initiator or any foreign modem, and whether the receiver's CP stage stays
+  open across the Ed/SCR gap on a live line. A renegotiation that CHANGES the
+  rate is still refused by the "CP may change only acknowledge" equality check,
+  as before.
 - **7** `drn >= 4` is now `drn >= 1`; the K 6..24 check already follows.
 - **8** an empty upstream-rate intersection stays empty and fails MP build.
 - **9** `vpcm_cp_decode_diag()` rejects `nbits < 136` before reading the header.

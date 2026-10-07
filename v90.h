@@ -171,6 +171,7 @@ typedef enum {
     V90_TX_SUVD_ACK,      /* V.92 Phase 4: SUVd' (ack bit set) — acknowledges CPu */
     V90_TX_ED,            /* Phase 4: Ed — 2 data frames of scrambled zeros */
     V90_TX_B1D,           /* Phase 4: B1d — 48 mapped data frames */
+    V90_TX_RENEG_SILENCE, /* §9.6.1.2.5: Ed, then Ucode-0 silence while the analogue modem retrains its echo canceller */
     V90_TX_DATA,          /* Data mode — modulus encoder */
 } v90_tx_phase_t;
 
