@@ -4483,6 +4483,32 @@ static int l2_cycles(const v34_state_t *s)
     }
     if (s->tx.calling_party  &&  (s->tx.duplex  ||  s->tx.v90_mode))
         return (forced > 0)  ?  forced  :  27;
+    /*endif*/
+    /* The ANSWERING end of a V.90 call (the digital modem) sends 15 periods
+       (300 ms) of L2, not 20.  The far modem reads all of the L2 it is given
+       and raises its own tone only afterwards; 11.2.2.2.3 measures that tone
+       against 600 ms plus a round trip from the START of L2, so a long L2
+       leaves it ~100 ms to be heard over our echo.  BinModem, 2026-09-17: a
+       real modem answered 92-103 ms after our 500 ms of L2 had arrived, a few
+       ms either side of that deadline, then ignored our reversal and probe and
+       retrained; the modems that connected answered in 20-50 ms, and a short
+       L2 is what BinModem now sends.  Scoped to V.90 answering because the
+       call-side lengthening above was measured against MICA and the RasFinder
+       for the opposite reason.  ME_V34_L2_CYCLES_ANSWER=20 restores. */
+    if (s->tx.v90_mode)
+    {
+        static int answer = -1;
+
+        if (answer < 0)
+        {
+            const char *e = getenv("ME_V34_L2_CYCLES_ANSWER");
+
+            answer = (e  &&  atoi(e) >= 1  &&  atoi(e) <= 27)  ?  atoi(e)  :  15;
+        }
+        /*endif*/
+        return answer;
+    }
+    /*endif*/
     return 20;
 }
 /*- End of function --------------------------------------------------------*/
@@ -7682,18 +7708,36 @@ static int phase4_trn_hard_cap_bauds(const v34_state_t *s)
  * reconvergence: the receiver has just been re-seeded and TRN is the only
  * known signal it gets before a data constellation returns.
  * ME_V34_RENEG_TRN_BAUDS overrides the Phase 4 minimum. */
-static int v34_reneg_trn_bauds(void)
+static int v34_reneg_trn_bauds(const v34_state_t *s)
 {
-    static int cached = -1;
+    static int override = -1;
+    int bauds;
 
-    if (cached < 0)
+    if (override < 0)
     {
         const char *e = getenv("ME_V34_RENEG_TRN_BAUDS");
 
-        cached = (e  &&  atoi(e) > 0)  ?  atoi(e)  :  PHASE4_TRN_BAUDS;
+        override = (e  &&  atoi(e) > 0)  ?  atoi(e)  :  0;
     }
     /*endif*/
-    return cached;
+    if (override > 0)
+        return override;
+    /*endif*/
+    /* About one second by default.  A far end that started the renegotiation
+       to resynchronise has lost its place in our signal and needs TRN to find
+       it again: BinModem measured a provider modem pool that could not read
+       256 symbols and never acknowledged an MP, while it sends 1.85 s of its
+       own.  ME_V34_RENEG_TRN_BAUDS=512 restores the old Phase 4 minimum. */
+    bauds = PHASE4_TRN_BAUDS;
+    if (s->tx.baud_rate >= 0  &&  s->tx.baud_rate <= 5)
+    {
+        bauds = baud_rate_parameters[s->tx.baud_rate].baud_rate;
+        if (bauds < PHASE4_TRN_BAUDS)
+            bauds = PHASE4_TRN_BAUDS;
+        /*endif*/
+    }
+    /*endif*/
+    return bauds;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -7825,7 +7869,7 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
             }
             /*endif*/
             if (s->tx.reneg_active
-                && s->tx.tone_duration >= v34_reneg_trn_bauds())
+                && s->tx.tone_duration >= v34_reneg_trn_bauds(s))
             {
                 /* V.34 11.6.1.1.1/11.6.1.2.2: "The modem may then transmit
                    signal TRN for a maximum of 2000 ms, followed by sequence
@@ -8465,7 +8509,7 @@ static bool mp_prime_may_end(v34_state_t *s)
         const char *m = getenv("ME_V34_MP_PRIME_MAX");
 
         fresh = !(v  &&  strcmp(v, "0") == 0);
-        max_frames = (m  &&  atoi(m) > 0)  ?  atoi(m)  :  4;
+        max_frames = (m  &&  atoi(m) > 0)  ?  atoi(m)  :  8;
     }
     /*endif*/
     if (!fresh)
@@ -8496,6 +8540,31 @@ static complex_sig_t get_cleardown_silence_baud(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* The half-duplex SOURCE holds its E until the recipient's E has been heard,
+   bounded.  12.4.1.3 lets the source send E at the end of the first MPh it
+   receives, and over a delayed line that put E ahead of the recipient's own
+   at a real Super G3 fax machine: the machine never read another frame from
+   the source (BinModem, 2026-09-27).  The recipient (12.4.2.4) sends E on its
+   first MPh and does not wait, so two of these do not wait for each other;
+   this bounds the wait for a far end that does.  12.4.4.3 gives the
+   recipient 3 s from the source's MPh to receive E.  Control channel baud is
+   600.  ME_V34_HDX_E_WAIT_MS=0 restores the immediate E. */
+static int hdx_source_e_wait_bauds(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *e = getenv("ME_V34_HDX_E_WAIT_MS");
+        long ms = (e  &&  *e)  ?  atol(e)  :  2000;
+
+        cached = (int) (ms*600/1000);
+    }
+    /*endif*/
+    return cached;
+}
+/*- End of function --------------------------------------------------------*/
+
 static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
 {
     int bit;
@@ -8520,6 +8589,9 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
         }
     }
 
+    if (s->rx.mp_seen >= 1)
+        s->tx.hdx_e_wait_bauds++;
+    /*endif*/
     bit = scramble(&s->tx, get_data_bit(&s->tx));
     bit = (scramble(&s->tx, get_data_bit(&s->tx)) << 1) | bit;
     if (s->tx.duplex  &&  phase4_tx_16point(s))
@@ -8597,7 +8669,10 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
             }
             /*endif*/
         }
-        else if (s->rx.mp_seen >= 1)
+        else if (s->rx.mp_seen >= 1
+                 &&  !(s->tx.half_duplex_source == V34_HALF_DUPLEX_SOURCE
+                       &&  s->rx.mp_seen < 2
+                       &&  s->tx.hdx_e_wait_bauds < hdx_source_e_wait_bauds()))
         {
             /* 12.4.1.3/12.4.2.4: "When the modem has received at least one MPh
                sequence and the modem is sending MPh sequences, the modem shall
@@ -8678,6 +8753,7 @@ static void prepare_mph(v34_state_t *s)
        carried "Maximum data signalling rate = 0" and an empty capability mask
        and 12.4.1.3/12.4.2.4 had nothing to negotiate from. */
     source = (s->tx.half_duplex_source == V34_HALF_DUPLEX_SOURCE);
+    s->tx.hdx_e_wait_bauds = 0;
     baud = hdx_negotiated_baud_rate(s);
     mask = v34_hdx_rate_mask(baud);
 
@@ -8975,6 +9051,7 @@ static void cc_data_baud_init(v34_state_t *s)
 static void e_baud_init(v34_state_t *s)
 {
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW, "Tx - e_baud_init()\n");
+    s->tx.hdx_e_wait_bauds = 0;
     s->tx.tone_duration = 0;
     s->tx.stage = V34_TX_STAGE_HDX_E;
     s->tx.current_getbaud = get_e_baud;

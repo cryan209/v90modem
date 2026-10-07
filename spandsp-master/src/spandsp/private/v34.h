@@ -1146,6 +1146,8 @@ typedef struct
        many MP' frames it has sent since (11.4.1.1.3). */
     int mp_prime_ack_base;
     int mp_prime_frames;
+    /* Bauds the half-duplex source has held its E for the recipient's. */
+    int hdx_e_wait_bauds;
     /*! \brief Optional explicit MP direction-rate policy. When false, MP rate
                advertisement falls back to locally-derived defaults. */
     bool mp_rate_policy_valid;

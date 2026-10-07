@@ -1306,13 +1306,21 @@ bool v90_analogue_phase4_build_zero_dil_cp(v90_law_t law,
     cp.shaping_lookahead = (uint8_t) shaping_lookahead;
     cp.trn1d_gain_q3_13 = 8192;       /* unity, Q3.13 */
     cp.upstream_rate_mask = 0x0FFF;   /* mandatory 4800..28800 plus 31200 */
-    cp.constellation_count = 1;
-    cp.dfi[0] = cp.dfi[1] = cp.dfi[2] = 0;
-    cp.dfi[3] = cp.dfi[4] = cp.dfi[5] = 0;
     /* V.90 5.4.5 / V.92 5: every point carries a sign. The two mu-law
      * zero codewords collapse at the D/A, so Ucode 0 cannot carry that bit. */
     for (int ucode = 1; ucode <= 8; ucode++)
         vpcm_cp_mask_set(cp.masks[0], ucode, true);
+    /* One field per interval, identical masks, rather than six intervals
+     * sharing field 0.  8.5.2 allows sharing ("only the number of different
+     * constellations need to be sent") but never asks for it, and a real
+     * server pool froze in Phase 4 on CPs that shared fields while the calls
+     * that reached data mode sent six (BinModem, live-1789986037).  It costs
+     * 136 bits a field (Table 14's gamma). */
+    cp.constellation_count = VPCM_CP_FRAME_INTERVALS;
+    for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
+        cp.dfi[i] = (uint8_t) i;
+        memcpy(cp.masks[i], cp.masks[0], VPCM_CP_MASK_BYTES);
+    }
 
     /* Keeping drn=4 makes D=12 and K=6+Sr, inside Table 17 for every Sr and
      * comfortably inside the same 2^18 constellation product. */
