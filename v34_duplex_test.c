@@ -224,6 +224,59 @@ static int16_t channel_delay(int dir, int16_t sample)
     return out;
 }
 
+/* Offline clock-error bearer.  Resample only the synthetic analogue waveform,
+   before G.711, never the production DS0 path.  A 256-sample look-ahead keeps
+   the window available throughout this harness's bounded 60-second run at
+   +/-200 ppm.  V34_DUPLEX_PPM=0 exercises the same FIR without clock drift. */
+static int16_t channel_clock(int dir, int16_t sample)
+{
+    enum { SIZE = 4096, PHASES = 4096, HALF = 32 };
+    static int initialized, enabled;
+    static float taps[PHASES][2*HALF + 1];
+    static int16_t history[2][SIZE];
+    static int64_t written[2];
+    static double position[2] = {-256.0, -256.0};
+    static double ratio;
+    double out = 0.0;
+    int64_t centre;
+    int phase;
+
+    if (!initialized)
+    {
+        const char *value = getenv("V34_DUPLEX_PPM");
+        enabled = value != NULL;
+        ratio = 1.0 + (value ? strtod(value, NULL) : 0.0)*1e-6;
+        if (!isfinite(ratio) || ratio < 0.9998 || ratio > 1.0002)
+        {
+            fprintf(stderr, "V34_DUPLEX_PPM must be -200..200\n");
+            exit(2);
+        }
+        for (int p = 0; enabled && p < PHASES; p++)
+        {
+            double sum = 0.0;
+            for (int k = -HALF; k <= HALF; k++)
+            {
+                double x = k - (double)p/PHASES;
+                double sinc = fabs(x) < 1e-12 ? 1.0 : sin(M_PI*x)/(M_PI*x);
+                double window = 0.42 + 0.5*cos(M_PI*x/HALF)
+                              + 0.08*cos(2.0*M_PI*x/HALF);
+                taps[p][k + HALF] = fabs(x) <= HALF ? sinc*window : 0.0;
+                sum += taps[p][k + HALF];
+            }
+            for (int k = 0; k <= 2*HALF; k++) taps[p][k] /= sum;
+        }
+        initialized = 1;
+    }
+    if (!enabled) return sample;
+    history[dir][written[dir]++ & (SIZE - 1)] = sample;
+    centre = (int64_t)floor(position[dir]);
+    phase = (int)((position[dir] - centre)*PHASES);
+    for (int k = -HALF; k <= HALF; k++)
+        out += taps[phase][k + HALF]*history[dir][(centre + k) & (SIZE - 1)];
+    position[dir] += ratio;
+    return (int16_t)lrint(fmax(-32768.0, fmin(32767.0, out)));
+}
+
 /* Near-end hybrid echo.  V34_DUPLEX_ECHO_DB=<return loss> returns each
    side's own transmission to its own receiver through a three-tap hybrid
    (three taps, so a canceller cannot pass by being a pure delay and gain)
@@ -484,9 +537,9 @@ static int run_case(int baud, int bps, bool alaw)
             if (answer_abs > answer.peak_sample) answer.peak_sample = (int16_t)answer_abs;
             if (call_abs >= 32760) caller.clipped_samples++;
             if (answer_abs >= 32760) answer.clipped_samples++;
-            answer_rx[i] = g711_roundtrip(sat16(channel_delay(0, call_tx[i])
+            answer_rx[i] = g711_roundtrip(sat16(channel_delay(0, channel_clock(0, call_tx[i]))
                                                 + echo_step(0, answer_tx[i])), alaw);
-            call_rx[i] = g711_roundtrip(sat16(channel_delay(1, answer_tx[i])
+            call_rx[i] = g711_roundtrip(sat16(channel_delay(1, channel_clock(1, answer_tx[i]))
                                               + echo_step(1, call_tx[i])), alaw);
         }
         if (getenv("V34_DUPLEX_TXRMS")) {

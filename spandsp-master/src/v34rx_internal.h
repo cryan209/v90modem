@@ -29,7 +29,7 @@ void  v34_rx_pack_output_bitstream(v34_rx_state_t *s);
 
 /* Data-mode tuning knobs, each caching its own getenv. */
 int   v34_rx_data_mode_eq_enabled(void);
-float v34_rx_data_mode_eq_step(void);
+float v34_rx_data_mode_eq_step(const v34_rx_state_t *s);
 float v34_rx_data_mode_freq_gain(void);
 float v34_rx_data_mode_decision_gate(void);
 int   v34_rx_gain_sweep_enabled(void);
@@ -130,8 +130,12 @@ void     v34_rx_phase3_wait_s_symbol(v34_rx_state_t *s, const complexf_t *sym);
    enclosing switch: the stage was already self-contained in (s, sym). */
 void  v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym);
 
-/* 12.5.2 HDX B1 conditioning and replay from received T/2 samples. */
+/* 11.4/12.5.2 B1 conditioning and replay from received T/2 samples. */
 void v34_rx_condition_b1_equalizer(v34_rx_state_t *s, float gain, float phase);
 complexf_t v34_rx_b1_equalized_symbol(const v34_rx_state_t *s, int symbol);
+
+/* V.34 11.4 B1 conditioning for dense full-duplex constellations. */
+bool v34_rx_b1_batch_eq_enabled(const v34_rx_state_t *s);
+bool v34_rx_data_mm_timing_enabled(const v34_rx_state_t *s);
 
 #endif

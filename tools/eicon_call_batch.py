@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded Eicon V.34/V.90 calls with exact echo checks and per-call evidence.
+"""Bounded Eicon modem calls with exact echo checks and per-call evidence.
 
 Runs sequentially, preserves G.711 law, and never changes the gateway or peer.
 Use the isolated 5078/14600 SIP/RTP ports; no other probe may use them at once.
@@ -14,9 +14,12 @@ import termios
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+MODE_CARRIERS = {'v34': 'V34', 'v90': 'V90', 'v92': 'V92',
+                 'v32bis': 'V32B', 'v32': 'V32', 'v22': 'V22B',
+                 'v22-1200': 'V22'}
 
 
-def call(directory, mode, law, lines, startup_seconds):
+def call(directory, mode, law, lines, startup_seconds, echo_timeout=20):
     directory.mkdir(parents=True, exist_ok=False)
     ext, account = ('7900', '2905') if law == 'alaw' else ('7910', '2900')
     pty = '/tmp/eicon-batch-' + directory.name
@@ -30,6 +33,7 @@ def call(directory, mode, law, lines, startup_seconds):
                ME_IO_SCHEDULE=str((directory/'io.bin').resolve()))
     env['SIP_FORCE_PCMA' if law == 'alaw' else 'SIP_FORCE_PCMU'] = '1'
     result = dict(mode=mode, law=law, extension=ext, stage='launch',
+                  echo_timeout_seconds=echo_timeout,
                   started_utc=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
                   events=[], echoes=[], settings={k: v for k, v in env.items()
                   if k.startswith(('ME_', 'SIP_FORCE_'))})
@@ -86,7 +90,7 @@ def call(directory, mode, law, lines, startup_seconds):
             attrs[2] |= termios.CLOCAL | termios.CREAD
             termios.tcsetattr(fd, termios.TCSANOW, attrs)
             time.sleep(3)
-            for command in ('ATE0', 'AT+MS=' + mode.upper() + ',0'):
+            for command in ('ATE0', 'AT+MS=' + MODE_CARRIERS[mode] + ',0'):
                 result['stage'] = 'configure'
                 os.write(fd, command.encode()+b'\r')
                 if not read_until(b'OK', 3):
@@ -109,7 +113,7 @@ def call(directory, mode, law, lines, startup_seconds):
                     + '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'*3).encode()
                 event('send_line', sequence=sequence, bytes=len(payload))
                 os.write(fd, payload+b'\r')
-                ok = read_until(b'ECHO: '+payload+b'\r\n', 12)
+                ok = read_until(b'ECHO: '+payload+b'\r\n', echo_timeout)
                 result['echoes'].append(dict(sequence=sequence, bytes=len(payload), ok=ok))
                 event('echo_result', sequence=sequence, ok=ok)
                 print(directory.name, 'echo', sequence, ok, flush=True)
@@ -141,11 +145,12 @@ def main():
     parser.add_argument('--repeats', type=int, default=2)
     parser.add_argument('--lines', type=int, default=10)
     parser.add_argument('--startup-seconds', type=float, default=70)
-    parser.add_argument('--mode', choices=('v34', 'v90'))
+    parser.add_argument('--echo-timeout', type=float, default=20)
+    parser.add_argument('--mode', choices=tuple(MODE_CARRIERS))
     parser.add_argument('--law', choices=('ulaw', 'alaw'))
     args = parser.parse_args()
-    if args.repeats < 1 or args.lines < 1 or args.startup_seconds <= 0:
-        parser.error('repeats, lines and startup-seconds must be positive')
+    if args.repeats < 1 or args.lines < 1 or min(args.startup_seconds, args.echo_timeout) <= 0:
+        parser.error('repeats, lines and timeouts must be positive')
     if bool(args.mode) != bool(args.law):
         parser.error('--mode and --law must be used together')
     args.output.mkdir(parents=True, exist_ok=False)
@@ -162,7 +167,8 @@ def main():
                 time.sleep(delay)
             name = '%02d-%s-%s' % (len(results)+1, mode, law)
             print('CALL', name, 'repetition', repetition, flush=True)
-            result = call(args.output/name, mode, law, args.lines, args.startup_seconds)
+            result = call(args.output/name, mode, law, args.lines, args.startup_seconds,
+                          args.echo_timeout)
             ended[law] = time.monotonic()
             results.append(dict(directory=name, **result))
             (args.output/'summary.json').write_text(json.dumps(results, indent=2)+'\n')

@@ -263,7 +263,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
             int n = s->b1_observed_symbols++;
             int search = v34_rx_b1_search_symbols();
 
-            if (!s->duplex && n == 0)
+            if ((!s->duplex || v34_rx_b1_batch_eq_enabled(s)) && n == 0)
                 s->v90_t3_e_anchor = s->v90_t3_raw_count - 2 - V34_EQUALIZER_PRE_LEN;
 
             if (s->v90_t3_b1_symbols + search > V34_V90_T3_B1_MAX_SYMBOLS)
@@ -398,7 +398,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     /*endif*/
                     if (b1_offset > 0)
                     {
-                        if (!s->duplex)
+                        if (!s->duplex || v34_rx_b1_batch_eq_enabled(s))
                             s->v90_t3_e_anchor += 2*b1_offset;
                         memmove(&s->b1_observed[0], &s->b1_observed[b1_offset],
                                 sizeof(s->b1_observed[0])*(size_t) (s->v90_t3_b1_symbols + search - b1_offset));
@@ -501,7 +501,8 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                            decision-directed loop pulled it to zero. */
                         /* 12.5.2: HDX B1 also conditions the carrier for DATA;
                            its phase must refer to the end of B1. */
-                        if (!s->duplex || v34_rx_b1_supervised_eq_enabled())
+                        if (!s->duplex || v34_rx_b1_batch_eq_enabled(s)
+                            || v34_rx_b1_supervised_eq_enabled())
                         {
                             phase += dphi
                                    *(float) (s->v90_t3_b1_symbols - 1)/2.0f;
@@ -539,6 +540,11 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 s->data_decision_ema = 0.0f;
                 s->data_decision_baseline = 0.0f;
                 s->data_decision_count = 0;
+                s->data_timing_error = 0.0f;
+                s->data_timing_phase = 0.0f;
+                s->data_timing_frequency = 0.0f;
+                s->data_timing_power = 0.0f;
+                s->data_timing_count = 0;
                 /* The centroid steer's reference is latched once the data
                    mode has run 2048 symbols, not here: straight after B1 the
                    DD-LMS can re-settle the taps to a different centroid with
@@ -643,7 +649,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 if (!b1_fallback)
                     v34_rx_condition_b1_equalizer(s, gain, phase);
                 /*endif*/
-                if (!s->duplex)
+                if (!s->duplex || v34_rx_b1_batch_eq_enabled(s))
                 {
                     for (int i = 0; i < leftovers; i++)
                     {
@@ -654,10 +660,10 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 s->mapping_frame_count = 0;
                 for (int i = 0; i < s->v90_t3_b1_symbols; i++)
                 {
-                    complexf_t o = s->duplex ? s->b1_observed[i]
+                    complexf_t o = (s->duplex && !v34_rx_b1_batch_eq_enabled(s)) ? s->b1_observed[i]
                                            : v34_rx_b1_equalized_symbol(s, i);
                     float replay_phase = phase;
-                    if (!s->duplex)
+                    if (!s->duplex || v34_rx_b1_batch_eq_enabled(s))
                         replay_phase -= s->phase4_da_derot_rate
                                       *(3.14159265358979f/2147483648.0f)
                                       *(s->v90_t3_b1_symbols - 1 - i);
@@ -858,7 +864,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     {
                         float saved = s->eq_delta;
 
-                        s->eq_delta *= v34_rx_data_mode_eq_step();
+                        s->eq_delta *= v34_rx_data_mode_eq_step(s);
                         v34_rx_tune_equalizer(s, sym, &da_target);
                         s->eq_delta = saved;
                     }
@@ -1260,6 +1266,63 @@ skip_gain_report:
                 /*endif*/
             }
             /*endif*/
+
+            /* Decision-directed Mueller/Muller timing for the dense T/2 path.
+               The passband Godard loop's data-dependent steps and the full
+               training LMS gain introduced errors even on linear loopback.
+               Normalize by constellation power, average the timing detector,
+               and use a PI loop so clock error is tracked rather than frozen.
+               Corrections remain in the existing 1/192-sample scheduler; no
+               DS0 samples are inserted or discarded. */
+            if (v34_rx_t2_data_path(s) && v34_rx_data_mm_timing_enabled(s))
+            {
+                float re = transformed_re*s->data_symbol_scale;
+                float im = transformed_im*s->data_symbol_scale;
+                float tr = 2.0f*floorf(re/2.0f) + 1.0f;
+                float ti = 2.0f*floorf(im/2.0f) + 1.0f;
+                float power = tr*tr + ti*ti;
+                float d2 = (re - tr)*(re - tr) + (im - ti)*(im - ti);
+                if (s->data_timing_count && d2 < v34_rx_data_mode_decision_gate())
+                {
+                    float e = (s->data_timing_decision.re*re
+                             + s->data_timing_decision.im*im
+                             - tr*s->data_timing_previous.re
+                             - ti*s->data_timing_previous.im)
+                            / fmaxf(1.0f, s->data_timing_power);
+                    s->data_timing_error += 0.01f*(e - s->data_timing_error);
+                    static float mm_gain = 1000.0f;
+
+                    if (mm_gain == 1000.0f)
+                    {
+                        const char *value = getenv("ME_V34_DATA_MM_GAIN");
+                        mm_gain = value ? strtof(value, NULL) : 5.0f;
+                    }
+                    s->data_timing_frequency += 0.0002f*mm_gain*s->data_timing_error;
+                    s->data_timing_frequency = fmaxf(-0.25f,
+                                                    fminf(0.25f, s->data_timing_frequency));
+                    s->data_timing_phase += mm_gain*s->data_timing_error
+                                          + s->data_timing_frequency;
+                    if (fabsf(s->data_timing_phase) >= 1.0f)
+                    {
+                        int correction = s->data_timing_phase > 0.0f ? 1 : -1;
+                        s->eq_put_step += correction;
+                        s->total_baud_timing_correction += correction;
+                        s->data_timing_phase -= correction;
+                    }
+                }
+                s->data_timing_previous = complex_setf(re, im);
+                s->data_timing_decision = complex_setf(tr, ti);
+                if (!s->data_timing_count)
+                    s->data_timing_power = power;
+                else
+                    s->data_timing_power += 0.01f*(power - s->data_timing_power);
+                s->data_timing_count++;
+                if (getenv("V34_DATA_TIMING_LOG") && !(s->data_timing_count & 1023))
+                    fprintf(stderr, "[MM] %s n=%d error=%.6f freq=%.6f correction=%d\n",
+                            s->calling_party ? "caller" : "answer", s->data_timing_count,
+                            s->data_timing_error, s->data_timing_frequency,
+                            s->total_baud_timing_correction);
+            }
 
             /* Decision-directed carrier tracking against the DATA
                constellation.  Root cause (2026-07-23, offline 4th-power

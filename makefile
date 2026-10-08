@@ -326,6 +326,13 @@ test: $(TEST_TARGETS) v56-test pcm-data-test
 	./v34_duplex_test 3200 21600 alaw
 	./v34_duplex_test 3429 21600 ulaw
 	./v34_duplex_test 3429 21600 alaw
+# Dense full-duplex B1 conditioning and decision-directed clock tracking.
+# Long payloads catch the late corruption a 16k-bit startup check misses.
+	V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 ulaw
+	V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 alaw
+	V34_DUPLEX_DELAY=23 V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 alaw
+	V34_DUPLEX_LINEAR=1 V34_DUPLEX_PPM=50 V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 ulaw
+	V34_DUPLEX_LINEAR=1 V34_DUPLEX_PPM=-50 V34_DUPLEX_PAYLOAD=1000000 ./v34_duplex_test 3429 33600 ulaw
 # 26400 and 28800, which did not decode at all until the transmit pulse
 # shaper stopped putting a -39 dB conjugate image in band (2026-10-02).  The
 # rows asserted are the ones that pass at every, or all but one, of eight

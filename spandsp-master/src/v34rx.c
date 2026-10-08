@@ -6710,6 +6710,10 @@ static __inline__ void pri_symbol_sync(v34_rx_state_t *s)
     const float ted_phase_clip = 500.0f;
 #endif
 
+    if (s->stage == V34_RX_STAGE_DATA
+        && v34_rx_data_mm_timing_enabled(s))
+        return;
+
     /* This routine adapts the position of the half baud samples entering the equalizer. */
 
     /* This symbol sync scheme is based on the technique first described by Dominique Godard in
@@ -7002,18 +7006,18 @@ float v34_rx_data_mode_freq_gain(void)
    0.66 within twelve thousand symbols and cost three quarters of the payload,
    while the same call with data-mode adaptation off held 0.10 to the end.
    ME_V34_DATA_EQ_STEP sweeps it. */
-float v34_rx_data_mode_eq_step(void)
+float v34_rx_data_mode_eq_step(const v34_rx_state_t *s)
 {
-    static float step = -1.0f;
+    static float step = -2.0f;
 
-    if (step < 0.0f)
+    if (step < -1.0f)
     {
         const char *value = getenv("ME_V34_DATA_EQ_STEP");
 
-        step = (value  &&  *value)  ?  (float) atof(value)  :  1.0f;
+        step = (value  &&  *value)  ?  (float) atof(value)  :  -1.0f;
     }
     /*endif*/
-    return step;
+    return step >= 0.0f ? step : (v34_rx_b1_batch_eq_enabled(s) ? 0.03f : 1.0f);
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -11796,9 +11800,10 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
     /* Ordinary V.34 uses the historical T/2 front end.  The V.90 DATA-only
        T/3 branch calls process_primary_symbol() directly after its supervised
        B1 equalizer, so both paths share the mapper and protocol state. */
-    /* HDX owns this history while the V.90 T/3 receiver is inactive.
-       Retain both T/2 phases for 12.5.2 B1 conditioning and replay. */
-    if (!s->duplex && s->half_duplex_state == V34_HALF_DUPLEX_PRIMARY_CHANNEL)
+    /* Retain both T/2 phases for supervised B1 conditioning and replay:
+       12.5.2 in HDX and 11.4 in the dense full-duplex path. */
+    if ((!s->duplex && s->half_duplex_state == V34_HALF_DUPLEX_PRIMARY_CHANNEL)
+        || v34_rx_b1_batch_eq_enabled(s))
     {
         s->v90_t3_raw[s->v90_t3_raw_count & V34_V90_T3_RAW_MASK] = *sample;
         s->v90_t3_raw_count++;
@@ -12116,7 +12121,37 @@ static bool v90_t3_solve(double *a, double *b, double *x, int n)
     return true;
 }
 
-/* 12.5.2: use B1's known data constellation to remove residual ISI left
+/* V.34 11.4.1.1.5/11.4.1.2.5 conditions the receiver on the complete B1
+   frame.  Scalar calibration alone leaves the dense 3429-baud modes exposed
+   to the Phase-4 tap solution and acquisition phase.  The known 10.1.3.1
+   symbols permit a supervised fit before any user decisions steer the taps.
+   Keep the proven lower-rate and V.90 paths on their existing conditioning. */
+bool v34_rx_b1_batch_eq_enabled(const v34_rx_state_t *s)
+{
+    static int override = -2;
+    if (override == -2)
+    {
+        const char *value = getenv("ME_V34_B1_BATCH_EQ");
+        override = value ? atoi(value) != 0 : -1;
+    }
+    /* bit_rate encodes 2*(N - 1): N >= 13 means 31200/33600 bit/s. */
+    return s->duplex && !s->v90_mode
+        && (override >= 0 ? override
+            : s->baud_rate == V34_BAUD_RATE_3429 && s->bit_rate >= 24);
+}
+
+bool v34_rx_data_mm_timing_enabled(const v34_rx_state_t *s)
+{
+    static int override = -2;
+    if (override == -2)
+    {
+        const char *value = getenv("ME_V34_DATA_MM_TIMING");
+        override = value ? atoi(value) != 0 : -1;
+    }
+    return override >= 0 ? override : v34_rx_b1_batch_eq_enabled(s);
+}
+
+/* 11.4/12.5.2: use B1's known data constellation to remove residual ISI left
    by the periodic PP reference. Fit a symbol-spaced correction to the
    existing FSE, using the same acquisition aperture as the T/3 receiver. The detected
    B1 offset also moves the raw anchor. The FSE group delay supplies the
@@ -12130,7 +12165,8 @@ void v34_rx_condition_b1_equalizer(v34_rx_state_t *s, float gain, float phase)
     int pre = T/2, length = s->v90_t3_b1_symbols;
     double trace = 0.0;
     double rate = s->phase4_da_derot_rate*(M_PI/2147483648.0);
-    if (s->duplex || s->data_symbol_conjugate || length <= 2*T
+    if ((s->duplex && !v34_rx_b1_batch_eq_enabled(s))
+        || s->data_symbol_conjugate || length <= 2*T
         || s->v90_t3_e_anchor < 0
         || s->v90_t3_e_anchor < s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE
         || s->v90_t3_e_anchor + 2*(length - pre - 1) + pre >= s->v90_t3_raw_count)

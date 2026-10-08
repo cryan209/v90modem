@@ -2417,6 +2417,15 @@ typedef struct
         out is one the adapting one turns permanent, because it then trains on
         decisions the disturbance has already made wrong. */
     float data_decision_ema;
+    /*! Dense-data Mueller/Muller clock loop: normalized detector,
+        phase/frequency in 1/192-sample scheduling units. */
+    float data_timing_error;
+    complexf_t data_timing_previous;
+    complexf_t data_timing_decision;
+    float data_timing_phase;
+    float data_timing_frequency;
+    float data_timing_power;
+    int data_timing_count;
     float data_decision_baseline;
     /* Data-mode equalizer tap-energy centroid at B1, and a symbol counter for
        steering the sampling instant back to it (v34rx_data.c). */
