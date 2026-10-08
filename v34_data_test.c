@@ -1,6 +1,7 @@
 /* Exact-symbol V.34 mapper/demapper regression (ITU-T V.34 clauses 7-9). */
 #include <stdbool.h>
 #include <stdint.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -183,6 +184,93 @@ done:
     return rc;
 }
 
+static int get_one(void *user_data)
+{
+    (void)user_data;
+    return 1;
+}
+
+/* V.90 8.5.1 uses V.34's upstream encoder.  Check 9.6.2's raw precoded
+   energy and 9.7's projection separately: a loopback demapper cannot detect
+   calibration performed with a different feedback path. */
+static int run_v90_power_case(int rate_n, int nonlinear,
+                              const int16_t precoder[6])
+{
+    v34_state_t *tx = v34_init(NULL, 3200, rate_n*2400, true, true,
+                               get_one, NULL, NULL, NULL);
+    v34_state_t *reference = v34_init(NULL, 3200, rate_n*2400, true, true,
+                                      get_one, NULL, NULL, NULL);
+    double energy = 0.0;
+    double fourth = 0.0;
+    double sixth = 0.0;
+    double eighth = 0.0;
+    double tenth = 0.0;
+    int symbols = 0;
+    int rc = 1;
+
+    if (!tx || !reference
+        || v34_v90_begin_tx_data(tx, rate_n, 0, nonlinear, 1, precoder)
+        || v34_seed_tx_data(reference, rate_n, 0, 0, 1, precoder))
+        goto done;
+    reference->tx.scrambler_tap = 4;
+    /* Nonlinearity is absent from 9.6.2's feedback.  Build x(n) with a
+       linear mapper and evaluate equations 9-33..35 independently below. */
+    for (int m = 0; m < reference->tx.parms.p*reference->tx.parms.j; m++)
+    {
+        int16_t frame[16];
+        int16_t actual[16];
+        if (v34_get_mapping_frame_state(reference, frame) != 16
+            || v34_get_mapping_frame_state(tx, actual) != 16)
+            goto done;
+        /* Calibration must not advance B1's live mapper state, and 9.7
+           must not change 9.6.2's raw x(n) or feedback history. */
+        if (memcmp(frame, actual, sizeof(frame)))
+        {
+            fprintf(stderr, "V.90 raw precoder FAIL N=%d nonlinear=%d frame=%d\n",
+                    rate_n, nonlinear, m);
+            goto done;
+        }
+        for (int k = 0; k < 8; k++)
+        {
+            double re = frame[2*k]/128.0;
+            double im = frame[2*k + 1]/128.0;
+            double e = re*re + im*im;
+            energy += e;
+            fourth += e*e;
+            sixth += e*e*e;
+            eighth += e*e*e*e;
+            tenth += e*e*e*e*e;
+            symbols++;
+        }
+    }
+    {
+        double avg = energy/symbols;
+        double a = nonlinear ? 0.3125/(6.0*avg) : 0.0;
+        double b = nonlinear ? 0.3125*0.3125/(120.0*avg*avg) : 0.0;
+        /* Expand e*(1+a*e+b*e^2)^2 rather than duplicating the
+           production projection loop. */
+        double projected = energy + 2*a*fourth + (a*a + 2*b)*sixth
+                         + 2*a*b*eighth + b*b*tenth;
+        /* Existing PP/TRN reference amplitude (v34tx.c); this test changes
+           neither that reference nor the pulse-shaper coefficients. */
+        double expected_scale = 4.4843/sqrt(projected/symbols);
+        if ((nonlinear && fabs(tx->tx.nl_avg_energy/avg - 1.0) > 1e-6)
+            || fabs(tx->tx.data_symbol_scale/expected_scale - 1.0) > 1e-6)
+        {
+            fprintf(stderr, "V.90 power FAIL N=%d nonlinear=%d "
+                    "energy=%.9g expected=%.9g scale=%.9g expected=%.9g\n",
+                    rate_n, nonlinear, tx->tx.nl_avg_energy, avg,
+                    tx->tx.data_symbol_scale, expected_scale);
+            goto done;
+        }
+    }
+    rc = 0;
+done:
+    if (tx) v34_free(tx);
+    if (reference) v34_free(reference);
+    return rc;
+}
+
 int main(void)
 {
     /* V.34 Tables 8/20: the maximum N rises with the symbol rate.  The V.90
@@ -197,6 +285,22 @@ int main(void)
                  {3429, 14}};
 
     int cases = 0;
+
+    /* First row: actual Type-1 MP from the Eicon 7910 live call.
+       The stronger legal filter makes the feedback mismatch conspicuous. */
+    static const int16_t filters[][6] = {
+        {56, -6, -32, 2, 38, -13},
+        {4096, -1024, -2048, 512, 1024, -256},
+        {0, 0, 0, 0, 0, 0}
+    };
+    for (size_t f = 0; f < sizeof(filters)/sizeof(filters[0]); f++)
+        for (int nonlinear = 0; nonlinear <= 1; nonlinear++)
+            for (int n = 5; n <= 13; n += 4)
+            {
+                if (run_v90_power_case(n, nonlinear, filters[f]))
+                    return 1;
+                cases++;
+            }
 
     for (int trellis = 0; trellis < 3; trellis++) {
         for (size_t r = 0; r < sizeof(rates)/sizeof(rates[0]); r++) {
@@ -231,6 +335,6 @@ int main(void)
             cases++;
         }
     }
-    printf("v34_data_test: OK (%d cases, including 6 trellis correction and 6 V0 acquisition cases)\n", cases);
+    printf("v34_data_test: OK (%d cases, including 18 V.90 power, 6 trellis correction and 6 V0 acquisition cases)\n", cases);
     return 0;
 }

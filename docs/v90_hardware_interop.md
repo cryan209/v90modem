@@ -67,3 +67,21 @@ without unexplained errors.
 | Modem/chipset | Gateway | Law | V.8 | Phase 3 | CPt/CP | E/B1d | DATA | Rates | Evidence |
 |---|---|---:|---:|---:|---:|---:|---:|---|---|
 | _pending_ | _pending_ | - | - | - | - | - | - | - | - |
+
+## Eicon, 8 October 2026: clean LAN results and native V.34 corrections
+
+Using our analogue caller against Eicon endpoints 7910 (PCMU) and 7900
+(PCMA), the current-source LAN build passes V.90 checked echo: 10 and 30
+201-byte lines respectively, at 56000 downstream / 31200 upstream.
+The simultaneous PCMU capture has 4257 upstream RTP packets with no loss
+and 536875 continuous exact decoded samples at the card input; no card CRC
+errors. Earlier Mac failures show actual packet loss after entering the
+cryanfw WireGuard tunnel, verified by captures at both ends.
+
+Native V.34 on the clean LAN exposes two additional defects: exact
+Table-18 J(16) was forced to J(4), and the selected 16-point Phase 4
+constellation added 10 dB because its energy was not normalized. Corrected
+per V.34 10.1.3/10.1.3.3/10.1.3.8/10.1.3.9, native V.34 now passes ten
+201-byte echoes in each law at 31200 upstream / 21600 downstream, with
+Eicon aborted/CRC 0/0 on both calls. Details and artifact paths are in
+`eicon_rtp_causality_20261008.md` and `v34_tx_eicon_audit.md`.

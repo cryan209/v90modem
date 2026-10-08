@@ -113,6 +113,7 @@ int      v34_rx_descramble_reg(uint32_t *reg, int scrambler_tap, int in_bit);
 int      v34_rx_map_phase4_raw_bits(int dibit, int hypothesis);
 void     v34_rx_bits16_to_str(uint16_t v, char out[17]);
 int      v34_rx_phase3_tracking_enabled(void);
+int      v34_rx_j_classify(uint16_t word, int *distance);
 int      v34_rx_phase3_j_pattern_bit(int pat_type, int bit_idx);
 uint16_t v34_rx_j_ordered16(uint16_t rx_recent16, int total_bits, int phase);
 int      v34_rx_j_hint_enabled(void);

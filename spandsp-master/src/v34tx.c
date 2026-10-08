@@ -2518,25 +2518,6 @@ static void shell_map(v34_tx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
-static complexi16_t v34_non_linear_encoder(complexi16_t *pre)
-{
-    int32_t zeta;
-    int32_t x;
-    complexi16_t post;
-
-    /* V.34/9.7 for the 0.3125 case */
-    /* 341/2048 is 1/6 */
-    zeta = ((((int32_t) pre->re*(int32_t) pre->re + (int32_t) pre->im*(int32_t) pre->im + 0x800) >> 12)*341 + 0x800) >> 12;
-    /* 15127/16384 is 0.92328 */
-    /* 19661/65536 is 6*6/120 */
-    x = (zeta*zeta + 0x2000) >> 14;
-    x = (zeta + ((x*19661) >> 16)*15127 + 0x4000) >> 14;
-    post.re = (int16_t) ((int32_t) pre->re*x >> 14);
-    post.im = (int16_t) ((int32_t) pre->im*x >> 14);
-    return post;
-}
-/*- End of function --------------------------------------------------------*/
-
 static complexi16_t rotate90_clockwise(complexi16_t *x, int quads)
 {
     complexi16_t y;
@@ -2757,9 +2738,8 @@ SPAN_DECLARE(int) v34_get_mapping_frame(v34_tx_state_t *s, int16_t bits[16])
 
         /* Table 11/V.34 step 3/8, 9.6.2/V.34 items 1 and 2 */
         s->p = precoder_tx_filter(s);
-        if (s->use_non_linear_encoder  &&  !s->nl_x_warp)
-            s->p = v34_non_linear_encoder(&s->p);
-        /*endif*/
+        /* 9.6.2/Figure 7: feedback is computed from unprojected x(n).
+           9.7 projects the transmitted x(n) in get_data_baud(), never p(n). */
         c_prev = s->c;
         /* Table 11/V.34 step 3/8, 9.6.2/V.34 item 3 */
         s->c = quantize_tx(s, &s->p);
@@ -7611,6 +7591,25 @@ static bool phase4_tx_16point(const v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.34 10.1.3: all Phase 3/4 signals use the selected power level.
+   The raw 16-point table has mean energy 10*TRAINING_AMP^2, while
+   the 4-point table has TRAINING_AMP^2. Normalize duplex Phase 4
+   TRN/MP/E together; selecting J(16) must not add 10 dB of line power. */
+static complex_sig_t phase4_training_point(const v34_state_t *s, int index)
+{
+    if (phase4_tx_16point(s))
+    {
+        complex_sig_t point = training_constellation_16[index];
+        if (s->tx.duplex)
+        {
+            point.re *= 0.316227766f;
+            point.im *= 0.316227766f;
+        }
+        return point;
+    }
+    return training_constellation_4[index];
+}
+
 /* Phase 4 answer modem timing (V.34 §11.4.1.2):
    - S for 128T
    - S-bar for 16T
@@ -7939,8 +7938,7 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
                 /*endif*/
             }
             /*endif*/
-            return phase4_tx_16point(s) ? training_constellation_16[trn_sym]
-                                     : training_constellation_4[trn_sym];
+            return phase4_training_point(s, trn_sym);
         }
 
     default:
@@ -8695,7 +8693,7 @@ static complex_sig_t get_mp_or_mph_baud(v34_state_t *s)
     /*endif*/
     s->tx.diff = (s->tx.diff + bit) & 3;
     if (point16)
-        return training_constellation_16[(q16 << 2) | s->tx.diff];
+        return phase4_training_point(s, (q16 << 2) | s->tx.diff);
     /*endif*/
     return training_constellation_4[s->tx.diff];
 }
@@ -8925,8 +8923,8 @@ static void mp_or_mph_baud_init(v34_state_t *s)
     s->tx.current_getbaud = get_mp_or_mph_baud;
 
     /* Phase 4 MP exchange is DUPLEX on the PRIMARY channel, not CC.
-       V.34 §11.4: Both sides transmit MP using the same 4-point constellation
-       at the negotiated baud rate.
+       V.34 10.1.3.3/10.1.3.9: each transmitter uses the 4- or 16-point
+       constellation requested by the remote J, at the selected symbol rate.
        DO NOT touch RX state here — the RX progresses independently
        through TRN/J' conditioning into MP decode.
        The RX stage was set in phase4_wait_init(). */
@@ -8955,7 +8953,7 @@ static complex_sig_t get_e_baud(v34_state_t *s)
         if (++s->tx.tone_duration >= 5)
             data_baud_init(s);
         /*endif*/
-        return training_constellation_16[(q << 2) | s->tx.diff];
+        return phase4_training_point(s, (q << 2) | s->tx.diff);
     }
     /*endif*/
     if (++s->tx.tone_duration == 10)
@@ -9327,6 +9325,10 @@ static void data_baud_init(v34_state_t *s)
     s->tx.c.im = 0;
     s->tx.p.re = 0;
     s->tx.p.im = 0;
+    /* 10.1.3.1 explicitly resets the precoding filter tap delay line.
+       Clearing p/c alone leaves the previous call/recovery's x(n-p) in
+       precoder_tx_filter(), corrupting the next reset-state B1 sequence. */
+    memset(s->tx.x, 0, sizeof(s->tx.x));
     s->tx.z = 0;
     V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
              "Tx - data_baud_init(): trellis state on entry state=%d y0=%d "
@@ -9334,7 +9336,7 @@ static void data_baud_init(v34_state_t *s)
              s->tx.state, s->tx.y0);
     s->tx.y0 = 0;
     s->tx.state = 0;
-    s->tx.nl_x_warp = false;
+    s->tx.nl_x_warp = s->tx.use_non_linear_encoder;
     v34_normalise_data_symbol_scale(s);
     s->tx.current_modulator = V34_MODULATION_V34;
     s->tx.tx_data_mode = true;

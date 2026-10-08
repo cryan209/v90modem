@@ -76,6 +76,25 @@
 
 #define V34_TRACE_DIAGNOSTICS v34_rx_trace_diagnostics()
 
+/* V.34 10.1.3.3/Table 18 and 10.1.3.4/Table 19, in receive word order. */
+int v34_rx_j_classify(uint16_t word, int *distance)
+{
+    static const uint16_t pattern[3] = {0x8990U, 0x89B0U, 0x899FU};
+    int best = 0;
+    int dmin = 17;
+    for (int i = 0; i < 3; i++)
+    {
+        int d = __builtin_popcount((unsigned) (word ^ pattern[i]));
+        if (d < dmin)
+        {
+            best = i;
+            dmin = d;
+        }
+    }
+    *distance = dmin;
+    return best;
+}
+
 static int v90_ja_capture_skip_symbols(void)
 {
     static int initialized = 0;
@@ -486,29 +505,10 @@ void v34_rx_phase3_wait_s_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     d4 = __builtin_popcount((unsigned) (rx_ordered16 ^ 0x8990U));
                     d16 = __builtin_popcount((unsigned) (rx_ordered16 ^ 0x89B0U));
                     djd = __builtin_popcount((unsigned) (rx_ordered16 ^ 0x899FU));
-                    dmin = d4;
-                    pat = 0;
-                    if (d16 < dmin)
-                    {
-                        dmin = d16;
-                        pat = 1;
-                    }
-                    /*endif*/
-                    if (djd < dmin)
-                    {
-                        dmin = djd;
-                        pat = 2;
-                    }
-                    /*endif*/
-                    if (pat == 1  &&  (d16 + 1) >= d4)
-                    {
-                        /* Prefer 4-point when J(4)/J(16) are nearly tied.
-                           A weak 1-bit advantage for 16-point is not stable
-                           enough and can mis-classify TRN mode. */
-                        pat = 0;
-                        dmin = d4;
-                    }
-                    /*endif*/
+                    /* Table 18's patterns differ by only one bit: a one-bit
+                       advantage must select J(16), including its exact word.
+                       Confidence comes from the sustained sequence below. */
+                    pat = v34_rx_j_classify(rx_ordered16, &dmin);
                     canonical_ok = (dmin <= 3);
                     if (pat == 1)
                         j_validity = canonical_ok ? "valid J(16-point)" : "near/non-canonical";

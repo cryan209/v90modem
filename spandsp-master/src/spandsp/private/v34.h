@@ -1033,8 +1033,8 @@ typedef struct
     /*! \brief Clause 10.1.3 modulation-factor power normalization. */
     float data_symbol_scale;
     /*! \brief V.34 9.7: apply the non-linear encoder (theta 0.3125) to the whole
-        transmitted signal x(n), not just to the precoder term.  Used by the V.90
-        analogue upstream, where the digital modem's MP selects it. */
+        transmitted signal x(n), after linear precoder feedback.  Used by native
+        V.34 and V.90 analogue upstream when the peer's MP/MPh selects it. */
     bool nl_x_warp;
     /*! \brief Average energy of x(n) in lattice units, the denominator of zeta in 9.7. */
     float nl_avg_energy;
