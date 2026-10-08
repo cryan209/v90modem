@@ -85,3 +85,20 @@ per V.34 10.1.3/10.1.3.3/10.1.3.8/10.1.3.9, native V.34 now passes ten
 201-byte echoes in each law at 31200 upstream / 21600 downstream, with
 Eicon aborted/CRC 0/0 on both calls. Details and artifact paths are in
 `eicon_rtp_causality_20261008.md` and `v34_tx_eicon_audit.md`.
+
+### Menu ZMODEM upload and download
+
+`artifacts/eicon-zmodem-20261008/` tests both transfers on one Tower LAN
+V.90 PCMU call using the corrected isolated build. Menu option 2/Z receives
+65536 binary bytes (including every byte value) with an exact SHA-256 match,
+in 20.61 s measured by the card menu, approximately 3179 bytes/s. Option 3/Z
+then sends 65536 bytes of the menu's repetitive text payload; the downloaded
+file matches the generator exactly by SHA-256 and length, completing in
+2.82 s locally. The download payload is compressible under V.42bis, so that
+elapsed time is not an uncompressed line-rate benchmark. Both lrzsz commands
+exit 0 and the menu reports Transfer complete. Upload test files are
+verified and then discarded by the menu's existing implementation.
+
+`tools/eicon_zmodem_test.py` repeats the checks with exclusive binary-safe
+PTY ownership by sz/rz, preserving the ZMODEM headers after textual prompts.
+Run it inside the LAN modem build; it uses the isolated 5078/14600 ports.
