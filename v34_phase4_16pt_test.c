@@ -9,6 +9,39 @@
 #include <assert.h>
 #include "spandsp-master/src/v34rx_internal.h"
 
+static void check_hdx_control_burst_after_silence(void)
+{
+    v34_state_t *clean = v34_init(NULL, 3429, 9600, true, false,
+                                 fake_get_bit, NULL, NULL, NULL);
+    v34_state_t *dirty = v34_init(NULL, 3429, 9600, true, false,
+                                 fake_get_bit, NULL, NULL, NULL);
+    assert(clean && dirty);
+    for (int i = 0; i < V34_TX_FILTER_STEPS; i++)
+    {
+        dirty->tx.rrc_filter_re[i] = 200.0f + i;
+        dirty->tx.rrc_filter_im[i] = -300.0f - i;
+    }
+    dirty->tx.baud_phase = 6;
+    dirty->tx.rrc_filter_step = V34_TX_FILTER_STEPS - 1;
+    int16_t silence[560], a[600], b[600];
+    v34_state_t *states[] = {clean, dirty};
+    for (int i = 0; i < 2; i++)
+    {
+        states[i]->tx.tone_duration = 560;
+        states[i]->tx.training_stage = 0;
+        states[i]->tx.hdx_pph_after_silence = true;
+        assert(tx_silence(states[i], silence, 560) == 560);
+        assert(states[i]->tx.stage == V34_TX_STAGE_HDX_PPH);
+        for (int j = 0; j < 560; j++)
+            assert(silence[j] == 0);
+    }
+    assert(v34_tx(clean, a, 600) == 600);
+    assert(v34_tx(dirty, b, 600) == 600);
+    assert(memcmp(a, b, sizeof(a)) == 0);
+    v34_free(clean);
+    v34_free(dirty);
+}
+
 static bool on_16point_table(complex_sig_t p)
 {
     for (int i = 0; i < 16; i++)
@@ -234,6 +267,8 @@ int main(void)
     }
     v34_free(hdx);
     puts("PASS: half-duplex Phase 3 TRN preserves selected power in both constellations (10.2.3)");
+    check_hdx_control_burst_after_silence();
+    puts("PASS: 12.4.1.1 control burst cannot inherit primary pulse-shaper history");
     for (int calling = 0; calling <= 1; calling++)
         for (int rate_n = 5; rate_n <= 13; rate_n += 4)
             for (int nonlinear = 1; nonlinear >= 0; nonlinear--)

@@ -501,7 +501,11 @@ static void fax_set_tx_type(void *user_data, int type, int bit_rate, int short_t
             s->v34hdx_transition = 1;
             s->v34hdx_tx_ones = 0;
             s->v34hdx_rx_age = 0;
-            hdlc_tx_flags(&t->hdlc_tx, 2);
+            /* T.30 F.3.2.3/F.3.4 and T.4 A.3.1: after primary training,
+               every new message transmission needs nominal 200 ms of HDLC
+               flags. Two flags are the control-channel minimum, not the
+               primary ECM synchronization preamble. */
+            hdlc_tx_flags(&t->hdlc_tx, (s->v34hdx_primary_bit_rate + 39)/40);
         }
         else if (type == T30_MODEM_V21)
         {

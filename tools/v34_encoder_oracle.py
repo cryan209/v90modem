@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Independent V.34 raw-symbol oracle for 3200 baud, expanded, 16-state/GPA.
+"""Independent V.34 raw-symbol oracle for 3200/3429 baud, expanded, 16-state.
 
 Implements V.34 7, 9.1, 9.3–9.6 and B1 10.1.3.1 using integer arithmetic.
 No production constellation, shell or convolutional tables are imported.
-Input is DS_TX_BIT_DUMP (ASCII bits); output is V34_DATA_TX_DUMP (Q9.7).
+Input is DS_TX_BIT_DUMP or V34_PRIMARY_TX_BIT_DUMP (ASCII bits);
+compare against V34_DATA_TX_DUMP (Q9.7).
 Requires a continuous bit capture from the first payload mapping frame.
 This checks raw x(n); nonlinear projection/modulation are separate stages.
 """
@@ -27,25 +28,44 @@ def main():
     parser.add_argument('bits', type=Path)
     parser.add_argument('symbols', type=Path)
     parser.add_argument('--coefficients', nargs=6, type=int, required=True)
-    parser.add_argument('--bps', type=int, choices=(12000, 21600, 31200), default=12000)
+    parser.add_argument('--bps', type=int, choices=(9600, 12000, 21600, 31200), default=12000)
+    parser.add_argument('--baud', type=int, choices=(3200, 3429), default=3200)
+    parser.add_argument('--scrambler', choices=('gpa', 'gpc'), default='gpa')
     parser.add_argument('--idle-frames', type=int, default=0,
                         help='unrecorded idle mapping frames before V.42 bit dump starts')
     parser.add_argument('--frames', type=int, default=1000)
+    parser.add_argument('--includes-b1', action='store_true',
+                        help='input is V34_PRIMARY_TX_BIT_DUMP, including B1')
     args = parser.parse_args()
     if args.idle_frames < 0 or args.frames < 16:
         parser.error('idle-frames must be nonnegative and frames at least 16')
     payload = args.bits.read_text().strip()
     if set(payload)-{'0', '1'}:
         parser.error('bit dump must contain only ASCII 0/1')
-    bbits = args.bps//400
-    kbits, rings, qbits = {12000: (18, 6, 0), 21600: (26, 12, 2),
-                          31200: (26, 12, 5)}[args.bps]
-    source = '1'*((16+args.idle_frames)*bbits) + payload
+    if args.baud == 3429:
+        if args.bps != 9600:
+            parser.error('3429 oracle currently covers 9600 bit/s only')
+        # Tables 7, 8, 10: J=8 P=15 N=336 b=23 r=6 M=3 Q=0.
+        bbits, base_kbits, rings, qbits, pframes, jframes, high_count = 23, 11, 3, 0, 15, 8, 6
+    else:
+        bbits = args.bps//400
+        base_kbits, rings, qbits = {9600: (12, 4, 0), 12000: (18, 6, 0), 21600: (26, 12, 2),
+                                  31200: (26, 12, 5)}[args.bps]
+        pframes, jframes, high_count = 16, 7, 16
+    def frame_bits(frame):
+        # 8.2: reset counter at each data frame, increment before each frame.
+        i = frame % pframes
+        high = ((i+1)*high_count)//pframes > (i*high_count)//pframes
+        return bbits if high else bbits-1
+    prefix_bits = sum(frame_bits(i) for i in range(pframes+args.idle_frames))
+    source = payload if args.includes_b1 else '1'*prefix_bits + payload
+    if args.includes_b1 and (args.idle_frames or source[:prefix_bits] != '1'*prefix_bits):
+        parser.error('includes-b1 requires the complete all-ones B1 and no idle-frames')
     raw = args.symbols.read_bytes()
     observed = list(struct.iter_unpack('<hh', raw[:len(raw)//4*4]))
-    if len(observed) < 128:
+    if len(observed) < pframes*8:
         parser.error('symbol capture must contain at least the full B1')
-    # Table 7/8/10: P=16 J=7, all-high mapping frames at these rates.
+    # 9.4 shell enumerator; independently constructed, not production tables.
     g2 = [rings-abs(p-rings+1) for p in range(2*rings-1)]
     g4 = convolution(g2, g2)
     g8 = convolution(g4, g4)
@@ -65,7 +85,9 @@ def main():
     coeff = list(zip(args.coefficients[::2], args.coefficients[1::2]))
     history = [(0, 0)]*3
     reg = rotation = state = symbol_count = 0
-    inversion = '01110111111110'
+    inversion = '0111011111111010' if jframes == 8 else '01110111111110'
+    source_pos = 0
+    inversion_index = 2*(jframes-1)
 
     def round_towards_zero_tie(value, denominator):
         magnitude, rem = divmod(abs(value), denominator)
@@ -91,10 +113,14 @@ def main():
         raise ValueError('shell rank outside support')
 
     p, c = prediction()
-    for frame in range(min(len(source)//bbits, len(observed)//8, args.frames)):
+    for frame in range(min(len(observed)//8, args.frames)):
+        nbits = frame_bits(frame)
+        kbits = base_kbits-(bbits-nbits)
+        if source_pos+nbits > len(source):
+            break
         scrambled = []
-        for bit in source[frame*bbits:(frame+1)*bbits]:
-            out = (int(bit) ^ (reg >> 4) ^ (reg >> 22)) & 1
+        for bit in source[source_pos:source_pos+nbits]:
+            out = (int(bit) ^ (reg >> (4 if args.scrambler == 'gpa' else 17)) ^ (reg >> 22)) & 1
             reg = ((reg << 1) | out) & ((1 << 23)-1)
             scrambled.append(out)
         r0 = sum(bit << j for j, bit in enumerate(scrambled[:kbits]))
@@ -115,9 +141,12 @@ def main():
             i1, i2, i3 = scrambled[pos:pos+3]
             rotation = (rotation+i2+2*i3) % 4
             subset = []
-            v0 = int(inversion[12 if frame == 0 else 13]) if frame in (0, 8) else 0
-            if frame >= 16 and frame % 8 == 0:
-                v0 = int(inversion[((frame-16)//8) % 14])
+            # 9.6.3: first 4D interval of each HALF data frame. With P=15
+            # the second boundary lands in the third pair of frame 7.
+            v0 = 0
+            if (4*(frame % pframes)+pair) % (2*pframes) == 0:
+                v0 = int(inversion[inversion_index % (2*jframes)])
+                inversion_index += 1
             u0 = 0
             for k in range(2):
                 q = sum(bit << j for j, bit in enumerate(
@@ -140,13 +169,17 @@ def main():
                 p, c = prediction()
                 if k == 0:
                     c0 = ((sum(old_c)//2) ^ (sum(c)//2)) & 1
-                    u0 = (state & 1) ^ c0 ^ (v0 if pair == 0 else 0)
+                    u0 = (state & 1) ^ c0 ^ v0
                 else:
                     inp = table13[subset[0]][subset[1]]
                     t1, t2, t3, t4 = [(state >> j) & 1 for j in range(4)]
                     state = ((t1 << 3) | ((t4 ^ t1 ^ ((inp >> 1)&1)) << 2)
                              | ((t3 ^ ((inp >> 1)&1)) << 1) | (t2 ^ (inp & 1)))
-    print(json.dumps(dict(ok=True, raw_symbols_checked=symbol_count,
+        source_pos += nbits
+        if frame == pframes-1:
+            inversion_index = 0
+    print(json.dumps(dict(ok=True, baud=args.baud, bps=args.bps,
+                         scrambler=args.scrambler, raw_symbols_checked=symbol_count,
                          payload_bits_available=len(payload)), indent=2))
 
 

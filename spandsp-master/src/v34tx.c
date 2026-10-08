@@ -2198,6 +2198,35 @@ static int fake_get_bit(void *user_data)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Buffered, opt-in wire diagnosis: record the input to clause 7's scrambler
+   for independent 9.3--9.6/B1 verification. Calibration probes are not live
+   data transmitters and must not contaminate the capture. */
+static int primary_channel_get_bit(v34_tx_state_t *s)
+{
+    int bit = s->current_get_bit(s->get_bit_user_data);
+    static FILE *fp[2];
+    static int initialized[2];
+    int who = s->calling_party ? 1 : 0;
+
+    if (s->tx_data_mode && bit >= 0)
+    {
+        if (!initialized[who])
+        {
+            const char *path = V34_DIAG_GETENV("V34_PRIMARY_TX_BIT_DUMP");
+            initialized[who] = 1;
+            if (path && *path)
+            {
+                char name[1024];
+                snprintf(name, sizeof(name), "%s.%s", path, who ? "caller" : "answer");
+                fp[who] = fopen(name, "wb");
+            }
+        }
+        if (fp[who])
+            fputc('0' + (bit & 1), fp[who]);
+    }
+    return bit;
+}
+
 static void parse_primary_channel_bitstream(v34_tx_state_t *s)
 {
     uint8_t *u;
@@ -2244,7 +2273,7 @@ static void parse_primary_channel_bitstream(v34_tx_state_t *s)
            the first of the I bits. */
         for (  ;  i < kk;  i++)
         {
-            if ((bit = s->current_get_bit(s->get_bit_user_data)) == SIG_STATUS_END_OF_DATA)
+            if ((bit = primary_channel_get_bit(s)) == SIG_STATUS_END_OF_DATA)
             {
                 /* TODO: Need to handle things properly here. SIG_STATUS_END_OF_DATA may not
                          mean shut down the modem. It may mean shut down the current mode, when
@@ -2262,7 +2291,7 @@ static void parse_primary_channel_bitstream(v34_tx_state_t *s)
     }
     for (  ;  i < bb;  i++)
     {
-        if ((bit = s->current_get_bit(s->get_bit_user_data)) == SIG_STATUS_END_OF_DATA)
+        if ((bit = primary_channel_get_bit(s)) == SIG_STATUS_END_OF_DATA)
         {
             /* TODO: Need to handle things properly here. SIG_STATUS_END_OF_DATA may not
                      mean shut down the modem. It may mean shut down the current mode, when
@@ -9885,7 +9914,14 @@ static int tx_silence(v34_state_t *s, int16_t amp[], int max_len)
         }
         else if (s->tx.hdx_pph_after_silence)
         {
-            /* V.34 12.4.1.1: the 70 ms silence has run, so start PPh. */
+            /* V.34 12.4.1.1: the 70 ms silence has run, so start PPh.
+               tx_silence() bypasses the pulse shaper. The shared history
+               still contains primary TRN symbols, which must not reappear
+               in the new 600-baud control burst after this silent interval. */
+            s->tx.baud_phase = 0;
+            s->tx.rrc_filter_step = 0;
+            memset(s->tx.rrc_filter_re, 0, sizeof(s->tx.rrc_filter_re));
+            memset(s->tx.rrc_filter_im, 0, sizeof(s->tx.rrc_filter_im));
             s->tx.hdx_pph_after_silence = false;
             pph_baud_init(s);
         }
