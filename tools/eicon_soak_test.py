@@ -24,13 +24,16 @@ def main():
     ap.add_argument('--mode', choices=('v90', 'v34'), default='v90')
     ap.add_argument('--local-port', type=int, default=5078)
     ap.add_argument('--rtp-port', type=int, default=14600)
-    ap.add_argument('--test', choices=('soak', 'ppp'), default='soak')
+    ap.add_argument('--jitter-buffer-ms', type=int, help='fixed RTP prefetch; 40 ms tested on Tower LAN')
+    ap.add_argument('--test', choices=('soak', 'probe', 'ppp'), default='soak')
     ap.add_argument('--http-bytes', type=int, default=0, help='HTTP download and POST upload over PPP')
     ap.add_argument('--http-port', type=int, default=19890)
     ap.add_argument('--download-seconds', type=int, default=610)
     ap.add_argument('--upload-seconds', type=int, default=610)
     ap.add_argument('--duplex-seconds', type=int, default=310)
     args = ap.parse_args()
+    if args.jitter_buffer_ms is not None and not 1 <= args.jitter_buffer_ms <= 2000:
+        ap.error('jitter-buffer-ms must be 1..2000')
     for value in (args.download_seconds, args.upload_seconds, args.duplex_seconds):
         if not 1 <= value <= 3600: ap.error('durations must be 1..3600')
     if not 0 <= args.http_bytes <= 16*1024*1024: ap.error('http-bytes must be 0..16777216')
@@ -44,9 +47,12 @@ def main():
     env.update(ME_MODE=args.mode, ME_V90_ROLE='analogue', VPCM_ME_VERBOSE='1',
                ME_DUMP_DIR=str(d), VPCM_G711_TAP_DIR=str(d), ME_IO_SCHEDULE=str(d/'io.bin'))
     env['SIP_FORCE_PCMU' if args.law == 'ulaw' else 'SIP_FORCE_PCMA'] = '1'
+    if args.jitter_buffer_ms is not None:
+        env['ME_JB_MS'] = str(args.jitter_buffer_ms)
     account, ext = ('2900', '7910') if args.law == 'ulaw' else ('2905', '7900')
     pty = '/tmp/eicon-soak-'+str(os.getpid())
-    result = dict(mode=args.mode, law=args.law, test=args.test)
+    result = dict(mode=args.mode, law=args.law, test=args.test,
+                  jitter_buffer_ms=env.get('ME_JB_MS', '200'))
     fd = None
     proc = None
     start = time.monotonic()
@@ -91,7 +97,7 @@ def main():
             text = read_until(b'Select: ', 60)
             line = next(line for line in text.splitlines() if line.startswith(b'STREAM RESULT '))
             peer = json.loads(line[len(b'STREAM RESULT '):])
-            minimum = 300 if kind == 'duplex' else 600
+            minimum = max(0, seconds-2) if args.test == 'probe' else (300 if kind == 'duplex' else 600)
             receivers = [local] if kind == 'download' else [peer] if kind == 'upload' else [local, peer]
             ok = (local['ok'] and peer['ok'] and local['tx_bytes'] == peer['rx_bytes']
                   and local['rx_bytes'] == peer['tx_bytes']

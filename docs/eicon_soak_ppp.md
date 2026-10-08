@@ -176,3 +176,60 @@ Evidence is preserved in `artifacts/eicon-http-ppp-v90-ulaw-20261008/` and
 `artifacts/eicon-http-ppp-v90-alaw-20261008/`, including downloaded binaries,
 upload receipts, route records, modem/PPP logs and DS0 taps. The temporary
 HTTP listeners and PPP runner were removed after the test.
+
+## Tower LAN throughput profile, 8 October 2026
+
+A controlled PCMU comparison kept the same binary, V.90 56000/31200 call,
+LAPM parameters and 90/90/30-second binary probe. The only media setting
+changed was fixed RTP prefetch: 200 ms versus 40 ms. The caller can now
+select it explicitly with `--jitter-buffer-ms 40`; leaving this flag absent
+retains the engine/environment default. The requested setting is saved in
+new summaries. `--test probe` grades the selected short receive spans
+(with a two-second tolerance), rather than claiming a ten-minute soak.
+
+```sh
+V42_STATS=5 python3 tools/eicon_soak_test.py artifacts/lan-perf \
+  --test probe --download-seconds 90 --upload-seconds 90 --duplex-seconds 30 \
+  --jitter-buffer-ms 40
+```
+
+| PCMU binary payload | 200 ms | 40 ms |
+|---|---:|---:|
+| Download alone | 5,320.5 B/s | 6,444.6 B/s |
+| Upload alone | 3,583.8 B/s | 3,590.2 B/s |
+| Simultaneous download | 4,673.2 B/s | 6,447.0 B/s |
+| Simultaneous upload | 3,566.4 B/s | 3,576.7 B/s |
+
+Both probes passed all exact payload/count checks, with no retrains or
+reported RTP loss. The improved download is **92.1% of 56,000/8 B/s**;
+simultaneous download also reaches 92.1%. Steady downstream LAPM information
+rate rose from 5,425 to 6,572 octets/s. Steady saturated upstream I-frame
+acknowledgement RTT fell from 345 to 194 ms, and both arms had zero LAPM
+retransmissions. The negotiated window was k=15 and N401=128 in both arms.
+
+The window permits 1,920 information octets outstanding. At roughly 350 ms
+round trip it cannot sustain the full 7,000 B/s raw downstream rate. The
+latency reduction and matching throughput increase are consistent with that
+window limit. The caller's `idle-window` statistic describes its **upstream**
+transmitter; it does not directly measure the Eicon's downstream window stalls.
+Statistics must be separated by test phase; averages across download,
+upload and duplex periods are not continuous-direction throughput.
+
+Evidence: `artifacts/eicon-throughput-baseline-20261008/` and
+`artifacts/eicon-throughput-jb40-20261008/`. This is one call per arm and
+shorter than the earlier 26-minute soaks. The 40 ms setting is verified on
+the wired Tower LAN path; the engine's general 200 ms default is unchanged.
+
+HTTP confirmation at 40 ms used a 512 KiB GET followed by a 512 KiB POST
+on one PCMU PPP call. Both passed exact length and SHA-256 checks. Download
+was **6,212.5 B/s in 84.392 s**, versus the earlier 200 ms HTTP result of
+5,227.9 B/s (1 MiB). Upload was **3,474.9 B/s in 150.879 s**, essentially
+unchanged. HTTP download therefore reached **88.8%** of the raw downstream
+rate, close to 90%; it must not be reported as exceeding 90%. The comparison
+uses different payload lengths and includes HTTP connection/setup time.
+Evidence: `artifacts/eicon-http-ppp-jb40-20261008/`.
+
+```sh
+python3 tools/eicon_soak_test.py artifacts/lan-http \
+  --test ppp --http-bytes 1048576 --jitter-buffer-ms 40
+```

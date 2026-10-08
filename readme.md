@@ -351,7 +351,9 @@ Both endpoints verify incompressible payloads, byte counts and receive duration.
 `--test ppp` starts an explicit host-terminated PPP link and checks IPCP
 and 30 pings. Add `--http-bytes 1048576` for checked HTTP download and
 POST upload to the PPP peer. Run from the Tower LAN, with `/dev/ppp` and
-`NET_ADMIN` for PPP inside Docker. See [deployment and evidence](docs/eicon_soak_ppp.md).
+`NET_ADMIN` for PPP inside Docker. On the wired Tower LAN,
+`--jitter-buffer-ms 40` improved checked binary download to 6.44 kB/s
+and HTTP to 6.21 kB/s. See [deployment and evidence](docs/eicon_soak_ppp.md).
 
 ### V.92 Phase 4
 
