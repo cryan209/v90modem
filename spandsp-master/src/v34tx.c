@@ -7328,8 +7328,18 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             /*endif*/
         }
         /*endif*/
-        return s->tx.infoh.trn16 ? training_constellation_16[trn_sym]
-                                 : training_constellation_4[trn_sym];
+        if (s->tx.infoh.trn16)
+        {
+            /* V.34 10.2.3 requires the selected transmit power for
+               half-duplex Phase 3. Table 22 bit 30 changes the TRN
+               constellation, not that power: the raw 16-point table has
+               ten times the mean energy of the 4-point table. */
+            complex_sig_t point = training_constellation_16[trn_sym];
+            point.re *= 0.316227766f;
+            point.im *= 0.316227766f;
+            return point;
+        }
+        return training_constellation_4[trn_sym];
     case V34_TX_STAGE_J:
         /* Send the J signal (V.34 §10.1.3.3).
            J uses DIFFERENTIAL encoding unlike TRN:

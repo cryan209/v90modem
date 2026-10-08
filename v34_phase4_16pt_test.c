@@ -210,6 +210,30 @@ int main(void)
     }
     check_spec_encoder(s);
     v34_free(s);
+    /* Table 22 bit 30 selects half-duplex Phase 3 TRN size. Grade the
+     * actual generator over a long scrambled sequence: 10.2.3 requires
+     * the same selected line power for either constellation. */
+    v34_state_t *hdx = v34_init(NULL, 3429, 9600, true, false,
+                               fake_get_bit, NULL, NULL, NULL);
+    assert(hdx);
+    for (int point16 = 0; point16 <= 1; point16++)
+    {
+        hdx->tx.stage = V34_TX_STAGE_TRN;
+        hdx->tx.tone_duration = 0;
+        hdx->tx.scramble_reg = 0;
+        hdx->tx.infoh.trn16 = point16;
+        hdx->rx.infoh.baud_rate = V34_BAUD_RATE_3429;
+        hdx->rx.infoh.length_of_trn = 127;
+        double energy = 0;
+        for (int i = 0; i < 8192; i++)
+        {
+            complex_sig_t p = get_trn_baud(hdx);
+            energy += p.re*p.re + p.im*p.im;
+        }
+        assert(fabs(energy/8192/(nominal*nominal) - 1.0) < 0.025);
+    }
+    v34_free(hdx);
+    puts("PASS: half-duplex Phase 3 TRN preserves selected power in both constellations (10.2.3)");
     for (int calling = 0; calling <= 1; calling++)
         for (int rate_n = 5; rate_n <= 13; rate_n += 4)
             for (int nonlinear = 1; nonlinear >= 0; nonlinear--)
