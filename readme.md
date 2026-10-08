@@ -343,6 +343,16 @@ Each run is stored under `artifacts/v90-hardware/` with `manifest.json` and
 `summary.json`. Password arguments are redacted from the manifest. Use
 `--dry-run` to verify the command without starting the modem or writing files.
 
+### Eicon sustained transfers and PPP
+
+`tools/eicon_soak_test.py` runs a 610-second binary download, 610-second
+upload and 310-second simultaneous test against the Eicon BRI answerer.
+Both endpoints verify incompressible payloads, byte counts and receive duration.
+`--test ppp` starts an explicit host-terminated PPP link and checks IPCP
+and 30 pings. Add `--http-bytes 1048576` for checked HTTP download and
+POST upload to the PPP peer. Run from the Tower LAN, with `/dev/ppp` and
+`NET_ADMIN` for PPP inside Docker. See [deployment and evidence](docs/eicon_soak_ppp.md).
+
 ### V.92 Phase 4
 
 Strict Table 31 SUVd and mandatory-part Table 30 CPd codecs are implemented,
