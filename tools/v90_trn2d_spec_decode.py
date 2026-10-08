@@ -32,9 +32,11 @@ and every MP must pass its CRC.
 trn2d_start_sample is the first TRN2d symbol in the tap: find Ri (U_INFO,
 +++--- signs), its 4 x ---+++ barred repetitions, and take the next sample.
 The mask is the CPt TRANSMIT mask (Table 14 bits 136.., not the bit-128
-codec-output set) and must be the same in all six intervals.
+codec-output set). Supply one comma-separated mask for all intervals, or six
+semicolon-separated masks in interval order (quote this shell argument).
 """
 import sys
+import math
 import numpy as np
 
 
@@ -45,12 +47,18 @@ def main():
     tap = sys.argv[1]
     start = int(sys.argv[2])
     ntrn = int(sys.argv[3])
-    mask = sorted((int(u) for u in sys.argv[4].split(',')), reverse=True)
+    # A semicolon separates the six interval masks for mixed-radix CPt.
+    # A single mask retains the original uniform-constellation interface.
+    masks = [sorted((int(u) for u in field.split(',')), reverse=True)
+             for field in sys.argv[4].split(';')]
+    if len(masks) == 1:
+        masks *= 6
+    if len(masks) != 6 or any(not m or len(set(m)) != len(m) for m in masks):
+        sys.exit("provide one mask or six nonempty masks without duplicate Ucodes")
     law = sys.argv[5] if len(sys.argv) > 5 else 'ulaw'
-    m = len(mask)
-    k_bits = 6 * (m.bit_length() - 1)
-    if (1 << (k_bits // 6)) != m:
-        sys.exit("only power-of-two constellations (K = 6*log2 M) are handled")
+    sizes = [len(m) for m in masks]
+    # V.90 5.4.3: K = floor(log2(product(Mi))), interval 0 least significant.
+    k_bits = math.prod(sizes).bit_length() - 1
     s_bits = 5
     d_bits = k_bits + s_bits
 
@@ -60,22 +68,24 @@ def main():
     else:
         ucode = 0x7F - (x & 0x7F)
     sign = ((x & 0x80) != 0).astype(int)     # 5.4.6: 1 = positive
-    label = {u: i for i, u in enumerate(mask)}
+    labels = [{u: i for i, u in enumerate(mask)} for mask in masks]
 
     bits = []
     prev = [0] * 6
     prev2 = [0] * 6
     stop = None
+    overflow = 0
     for j in range((len(x) - start) // 6):
         a = start + 6 * j
         us = ucode[a:a + 6]
         sg = list(sign[a:a + 6])
-        if any(int(u) not in label for u in us):
+        if any(int(u) not in labels[i] for i, u in enumerate(us)):
             stop = j
             break
         r = 0
         for i in reversed(range(6)):
-            r = r * m + label[int(us[i])]
+            r = r * sizes[i] + labels[i][int(us[i])]
+        overflow += r >= (1 << k_bits)
         b = [(r >> i) & 1 for i in range(k_bits)]
         z = [sg[k] ^ prev[k] for k in range(6)]
         zp5 = prev[5] ^ prev2[5]
@@ -88,14 +98,18 @@ def main():
     o = d.copy()
     for n in range(len(d)):
         o[n] = d[n] ^ (d[n - 18] if n >= 18 else 0) ^ (d[n - 23] if n >= 23 else 0)
-    print("D=%d K=%d S=%d M=%d; %d frames decoded%s"
-          % (d_bits, k_bits, s_bits, m, len(bits) // d_bits,
+    print("D=%d K=%d S=%d Mi=%s; %d frames decoded%s"
+          % (d_bits, k_bits, s_bits, sizes, len(bits) // d_bits,
              "" if stop is None else
              ", stopped at frame %d (symbol outside the mask)" % stop))
+    print("Mixed-radix overflow frames: %d" % overflow)
     tb = ntrn // 6 * d_bits
     trn = o[:tb]
+    if len(trn) < tb:
+        print("TRN2d incomplete: recovered %d of %d expected bits" % (len(trn), tb))
     print("TRN2d: %.4f ones over %d bits%s"
-          % (trn.mean(), tb, "" if trn.min() else "  <-- NOT all ones"))
+          % (trn.mean() if len(trn) else 0.0, len(trn),
+             "" if len(trn) and trn.min() else "  <-- NOT all ones"))
 
     def crc16(v):
         c = 0xFFFF
