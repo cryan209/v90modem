@@ -16,15 +16,15 @@ int main(int argc, char **argv)
     vpcm_cp_diag_t diag;
     v90_cp_live_meta_t meta;
 
-    if (argc != 4 && argc != 5) {
+    if (argc < 4 || argc > 6) {
         fprintf(stderr,
-                "usage: %s input.s16le phase4_hint_sample compatibility [baud-code]\n",
+                "usage: %s input.s16le phase4_hint_sample compatibility [baud-code [cp.bits]]\n",
                 argv[0]);
         return 2;
     }
     hint = atoi(argv[2]);
     compatibility = atoi(argv[3]);
-    baud_code = argc == 5 ? atoi(argv[4]) : 4;
+    baud_code = argc >= 5 ? atoi(argv[4]) : 4;
     fp = fopen(argv[1], "rb");
     if (!fp || fseek(fp, 0, SEEK_END) != 0
         || (bytes = ftell(fp)) < 0 || fseek(fp, 0, SEEK_SET) != 0) {
@@ -106,6 +106,27 @@ int main(int argc, char **argv)
                 printf("%02x", diag.frame.codec_masks[constellation][byte]);
         }
         putchar('\n');
+    }
+    if (argc == 6) {
+        FILE *dump = fopen(argv[5], "w");
+        uint8_t bits[VPCM_CP_MAX_BITS];
+        int nbits;
+
+        if (!dump || !vpcm_cp_encode_bits(&diag.frame, bits, &nbits)) {
+            fprintf(stderr, "cannot dump decoded CP to %s\n", argv[5]);
+            if (dump)
+                fclose(dump);
+            free(samples);
+            return 2;
+        }
+        for (int i = 0; i < nbits; i++)
+            fputc(bits[i] ? '1' : '0', dump);
+        fputc('\n', dump);
+        if (fclose(dump) != 0) {
+            perror(argv[5]);
+            free(samples);
+            return 2;
+        }
     }
     free(samples);
     return 0;

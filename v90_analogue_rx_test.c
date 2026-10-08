@@ -169,7 +169,7 @@ static bool read_cp_dump(const char *path, vpcm_cp_frame_t *cp)
  * cannot be attributed to echo, receiver drift, or the RasFinder analogue
  * channel. */
 static int trace_phase4_stream(const char *stream_path, const char *cp_path,
-                               long start)
+                               long start, long end)
 {
     v90_analogue_phase4_config_t cfg;
     v90_analogue_phase4_t *rx;
@@ -214,13 +214,20 @@ static int trace_phase4_stream(const char *stream_path, const char *cp_path,
         free(data);
         return 2;
     }
+    if (end > 0 && (end <= start || end > len)) {
+        fprintf(stderr, "end offset %ld is outside (%ld, %ld]\n",
+                end, start, len);
+        free(data);
+        return 2;
+    }
     if ((rx = v90_analogue_phase4_init(&cfg)) == NULL) {
         fprintf(stderr, "CPt cannot configure the Phase 4 receiver\n");
         free(data);
         return 2;
     }
-    for (long off = start; off < len; off += 160) {
-        int take = (int)((len - off < 160) ? len - off : 160);
+    long limit = end > 0 ? end : len;
+    for (long off = start; off < limit; off += 160) {
+        int take = (int)((limit - off < 160) ? limit - off : 160);
         unsigned before = events;
 
         events |= v90_analogue_phase4_put(rx, data + off, take);
@@ -232,7 +239,9 @@ static int trace_phase4_stream(const char *stream_path, const char *cp_path,
                    v90_analogue_phase4_trn2d_symbols(rx),
                    v90_analogue_phase4_mp_frames(rx));
         }
-        if (events & V90A4_RX_EVENT_MP)
+        /* An explicit end grades the whole interval, including repeated MP
+         * (§9.4.1.3-.4), rather than certifying only the first sequence. */
+        if (end <= 0 && (events & V90A4_RX_EVENT_MP))
             break;
     }
     mp = v90_analogue_phase4_mp(rx);
@@ -258,10 +267,16 @@ static int trace_phase4_stream(const char *stream_path, const char *cp_path,
     for (int i = 0; i < cfg.cpt.constellation_count; i++)
         printf("%s%d", i ? "," : "", vpcm_cp_mask_population(cfg.cpt.masks[i]));
     printf(" codec-differ=%u\n", cfg.cpt.codec_constellations_differ ? 1U : 0U);
-    if (mp)
+    if (mp) {
         printf("  MP: type=%u max_drn=%u trellis=%u rate_mask=0x%04X ack=%u\n",
                mp->type1 ? 1U : 0U, mp->max_drn, mp->trellis, mp->rate_mask,
                mp->acknowledge ? 1U : 0U);
+        if (mp->type1)
+            printf("  MP precoder: (%d,%d) (%d,%d) (%d,%d)\n",
+                   mp->precoder[0][0], mp->precoder[0][1],
+                   mp->precoder[1][0], mp->precoder[1][1],
+                   mp->precoder[2][0], mp->precoder[2][1]);
+    }
     v90_analogue_phase4_free(rx);
     free(data);
     return ((events & V90A4_RX_EVENT_MP) != 0) ? 0 : 1;
@@ -2363,7 +2378,8 @@ int main(int argc, char *argv[])
         return trace_stream(argv[2], (argc >= 4) ? atoi(argv[3]) : 48);
     if (argc >= 4  &&  strcmp(argv[1], "--phase4-trace") == 0)
         return trace_phase4_stream(argv[2], argv[3],
-                                   (argc >= 5) ? atol(argv[4]) : 0);
+                                   (argc >= 5) ? atol(argv[4]) : 0,
+                                   (argc >= 6) ? atol(argv[5]) : 0);
 
     for (i = 0; i < sizeof(fixtures)/sizeof(fixtures[0]); i++)
         test_fixture(&fixtures[i]);
