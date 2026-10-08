@@ -601,6 +601,10 @@ SPAN_DECLARE(void) v34_v90_start_analogue_retrain(v34_state_t *s);
     \return A monotonically increasing count for the current training attempt. */
 SPAN_DECLARE(int) v34_get_phase3_s_event_count(v34_state_t *s);
 
+/* True while the Phase 3 S detector has confirmed the alternating-point
+   structure of V.34 10.1.3.7, rather than only a dominant rotation. */
+SPAN_DECLARE(bool) v34_phase3_s_alternation_confirmed(v34_state_t *s);
+
 /* Keep the V.34 upstream receiver in the V.90 Phase 3 S-detection path after
    the digital-side application has consumed analogue Ja.  The V.90 digital
    transmitter is external to SpanDSP, so the ordinary V.34 transmitter must

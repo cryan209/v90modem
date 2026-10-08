@@ -16851,6 +16851,13 @@ SPAN_DECLARE(void) v34_v90_set_phase3_expect_silence(v34_state_t *s, int expect)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(bool) v34_phase3_s_alternation_confirmed(v34_state_t *s)
+{
+    return s && s->rx.phase3_s_present
+        && s->rx.phase3_s_alt_count >= PHASE3_S_ALTERNATING_MIN
+        && s->rx.phase3_s_stable_windows >= PHASE3_S_STABLE_WINDOWS;
+}
+
 SPAN_DECLARE(bool) v34_v90_take_line_s_event(v34_state_t *s)
 {
     bool r;

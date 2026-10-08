@@ -9906,7 +9906,14 @@ static double me_v90_dil_s_active_fraction(void)
     if (cached < 0.0) {
         const char *v = getenv("ME_V90_DIL_S_ACTIVE_FRACTION");
 
-        cached = 0.5;
+        /* V.90 §9.3.2.9 explicitly permits silence during DIL, followed by
+         * §9.3.2.10's 128T S + 16T S-bar (45 ms at 3200 baud). Requiring
+         * activity in half of a 300 ms window rejects that legal burst.
+         * Eicon capture eicon-v90a-dil2-20261009 reproduces it: the real
+         * terminator has active=0.10/0.13 and was discarded. The raw energy,
+         * echo, structural-S and retrain-tone gates still apply. Retain this
+         * override only for explicitly requested diagnostic comparisons. */
+        cached = 0.0;
         if (v && *v) {
             char *end;
             double parsed = strtod(v, &end);
@@ -11784,8 +11791,17 @@ skip_8k_codewords:
                          * single carrier, and p3_demod's 6-symbol pattern test rejected
                          * the Intel V92 modem's real 9.3.2.10 S at the end of DIL). */
                         bool line_s = g_v34 && v34_v90_take_line_s_event(g_v34);
+                        /* V.90 §9.3.2.9-.10 permits a short S burst after
+                         * silence. The 64-symbol alternation detector has
+                         * already verified V.34 §10.1.3.7's structure; a
+                         * 200 ms classifier dominated by preceding silence
+                         * must not veto it. Rotation-only candidates retain
+                         * that check, as they can also be tones or noise. */
+                        bool alternating_s = g_v34
+                            && v34_phase3_s_alternation_confirmed(g_v34);
                         if ((int)v90_get_tx_phase(g_v90) == V90_TX_DIL
                             && !line_s
+                            && !alternating_s
                             && !v90_p3_confirm_signal_locked(P3_SIGNAL_S)) {
                             fprintf(stderr,
                                     "[ME] V.90 strict RX event: index=%d event=S tx_phase=%d "

@@ -163,6 +163,51 @@ static bool read_cp_dump(const char *path, vpcm_cp_frame_t *cp)
     return decoded;
 }
 
+/* Compare a foreign transmitter's TRN2d against our generator, including
+ * §5.4 spectral-shaping choices that a successful demap does not verify.
+ * §8.6.5 initializes all memories to zero at the first TRN2d symbol. */
+static int compare_trn2d_reference(const char *stream_path, const char *cp_path,
+                                  long start, int symbols)
+{
+    vpcm_cp_frame_t cp;
+    v90_shaped_rx_state_t initial = {0};
+    long len;
+    uint8_t *data = read_file(stream_path, &len);
+    uint8_t *generated;
+    int errors = 0, magnitude_errors = 0, first_error = -1;
+
+    if (!data || start < 0 || symbols <= 0 || symbols % 6
+        || start > len || symbols > len - start
+        || !read_cp_dump(cp_path, &cp) || cp.v90_compatibility) {
+        fprintf(stderr, "invalid TRN2d reference interval or CPt\n");
+        free(data);
+        return 2;
+    }
+    generated = malloc((size_t)symbols);
+    if (!generated || v90_generate_trn2d_codewords(V90_LAW_ULAW, &cp,
+            &initial, symbols / 6, generated, symbols) != symbols) {
+        fprintf(stderr, "cannot generate reference TRN2d\n");
+        free(generated);
+        free(data);
+        return 2;
+    }
+    for (int i = 0; i < symbols; i++) {
+        if (generated[i] != data[start + i]) {
+            if (first_error < 0)
+                first_error = i;
+            errors++;
+            if ((generated[i] & 0x7f) != (data[start + i] & 0x7f))
+                magnitude_errors++;
+        }
+    }
+    printf("TRN2d reference: %d symbols, %d byte mismatches, "
+           "%d magnitude mismatches, first mismatch=%d\n",
+           symbols, errors, magnitude_errors, first_error);
+    free(generated);
+    free(data);
+    return errors ? 1 : 0;
+}
+
 /* Grade the exact downstream DS0 emitted in a live call against the CPt the
  * peer accepted.  Unlike the analogue front end, this consumes the transmit
  * codewords before the line, so any failure here is our §5.4/§8.6 mapping and
@@ -2372,6 +2417,9 @@ int main(int argc, char *argv[])
 {
     size_t i;
 
+    if (argc == 6 && strcmp(argv[1], "--trn2d-reference") == 0)
+        return compare_trn2d_reference(argv[2], argv[3], atol(argv[4]),
+                                      atoi(argv[5]));
     if (argc >= 4 && strcmp(argv[1], "--line-trace") == 0)
         return trace_line(argv[2], atoi(argv[3]), argc >= 5 ? argv[4] : NULL);
     if (argc >= 3  &&  strcmp(argv[1], "--trace") == 0)
