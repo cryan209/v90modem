@@ -267,6 +267,10 @@ int main(int argc, char *argv[])
         fprintf(stderr, "v34_hdx_test: v34_init failed\n");
         return 1;
     }
+    /* Table 23 bit 31 requests the remote primary transmitter's nonlinear
+       encoder (9.7). Hardware recipients can request it even at low rates. */
+    if (getenv("V34_HDX_NON_LINEAR"))
+        answ_modem->rx.use_non_linear_encoder = true;
     /* Foreign recipient selects the low carrier; the source starts with its
        default high carrier and must learn the selection from INFOh. */
     if (getenv("V34_HDX_LOW_CARRIER"))
@@ -711,6 +715,14 @@ int main(int argc, char *argv[])
     }
     if (primary)
     {
+        if (getenv("V34_HDX_NON_LINEAR"))
+        {
+            printf("  nonlinear primary encoder requested/selected: %d/%d\n",
+                   answ_modem->tx.mph.use_non_linear_encoder,
+                   call_modem->tx.use_non_linear_encoder);
+            failed |= !answ_modem->tx.mph.use_non_linear_encoder
+                   || !call_modem->tx.use_non_linear_encoder;
+        }
         const char *dump = getenv("V34_HDX_RX_DUMP");
         if (dump)
         {

@@ -904,6 +904,10 @@ v34-hdx-infoh-test: v34_hdx_test
 	done
 
 v34-hdx-primary-test: v34_hdx_test
+	@set -e; for law in ulaw alaw; do \
+	  V34_HDX_PRIMARY=1 V34_HDX_NON_LINEAR=1 ./v34_hdx_test 3429 9600 $$law 12; \
+	  V34_HDX_PRIMARY=1 V34_HDX_NON_LINEAR=1 V34_HDX_ANSWER_SOURCE=1 ./v34_hdx_test 3429 9600 $$law 12; \
+	done
 	@set -e; for baud in 2400 2743 2800 3000 3200 3429; do \
 	  for law in ulaw alaw; do \
 	    V34_HDX_PRIMARY=1 ./v34_hdx_test $$baud 9600 $$law 8; \
