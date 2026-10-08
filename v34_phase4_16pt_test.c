@@ -9,6 +9,47 @@
 #include <assert.h>
 #include "spandsp-master/src/v34rx_internal.h"
 
+static void check_hdx_source_mph_unused_fields(void)
+{
+    /* Table 23 note 2 applies to the primary source in either call role.
+       Inspect serialized MPh, not just the intermediate offer structure. */
+    for (int caller = 0; caller < 2; caller++)
+    {
+        v34_state_t *s = v34_init(NULL, 3429, 9600, caller, false,
+                                  fake_get_bit, NULL, NULL, NULL);
+        assert(s);
+        v34_half_duplex_change_mode(s, V34_HALF_DUPLEX_SOURCE);
+        s->rx.use_non_linear_encoder = true;
+        s->rx.parms.expanded_shaping = true;
+        prepare_mph(s);
+        mph_sequence_tx(&s->tx, &s->tx.mph);
+        for (int bit = 29; bit <= 32; bit++)
+            assert(((s->tx.txbuf[bit >> 3] >> (bit & 7)) & 1) == 0);
+        v34_half_duplex_change_mode(s, V34_HALF_DUPLEX_RECIPIENT);
+        prepare_mph(s);
+        mph_sequence_tx(&s->tx, &s->tx.mph);
+        assert(((s->tx.txbuf[31 >> 3] >> (31 & 7)) & 1) == 1);
+        assert(((s->tx.txbuf[32 >> 3] >> (32 & 7)) & 1) == 1);
+        v34_free(s);
+    }
+}
+
+static void check_hdx_pph_power(void)
+{
+    v34_state_t *s = v34_init(NULL, 3429, 9600, true, false,
+                              fake_get_bit, NULL, NULL, NULL);
+    assert(s);
+    pph_baud_init(s);
+    for (int i = 0; i < PPH_SYMBOLS; i++)
+    {
+        complex_sig_t x = get_pph_baud(s);
+        double power = x.re*x.re + x.im*x.im;
+        assert(fabs(power - TRAINING_AMP*TRAINING_AMP) < 0.001);
+    }
+    assert(s->tx.stage == V34_TX_STAGE_HDX_SECOND_ALT);
+    v34_free(s);
+}
+
 static void check_hdx_control_burst_after_silence(void)
 {
     v34_state_t *clean = v34_init(NULL, 3429, 9600, true, false,
@@ -268,6 +309,10 @@ int main(void)
     v34_free(hdx);
     puts("PASS: half-duplex Phase 3 TRN preserves selected power in both constellations (10.2.3)");
     check_hdx_control_burst_after_silence();
+    check_hdx_source_mph_unused_fields();
+    check_hdx_pph_power();
+    puts("PASS: 10.2.4.5 PPh preserves nominal control-channel power");
+    puts("PASS: Table 23 note 2 source MPh bits 29:32 are zero in both call roles");
     puts("PASS: 12.4.1.1 control burst cannot inherit primary pulse-shaper history");
     for (int calling = 0; calling <= 1; calling++)
         for (int rate_n = 5; rate_n <= 13; rate_n += 4)

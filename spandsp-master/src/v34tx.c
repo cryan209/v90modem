@@ -8816,14 +8816,12 @@ static void prepare_mph(v34_state_t *s)
     s->tx.mph.type = 0;
     s->tx.mph.max_data_rate = max_n;
     s->tx.mph.signalling_rate_mask = mask;
-    /* Table 23 bits 29:32 select the REMOTE-END transmitter, so they carry
-       this modem's own receiver's requirements, exactly as the duplex Table 20
-       fields do.  On the source they describe a primary channel direction that
-       does not exist in half-duplex; they are still sent, and are still this
-       receiver's answer if 12.6 ever turns the link round. */
-    s->tx.mph.trellis_size = v34_rx_current_trellis_code(&s->rx);
-    s->tx.mph.use_non_linear_encoder = s->rx.use_non_linear_encoder;
-    s->tx.mph.expanded_shaping = s->rx.parms.expanded_shaping;
+    /* Table 23 note 2: the source does not use bits 29:32 and should
+       transmit zero. Only the recipient requests primary encoder settings.
+       A later change of source role rebuilds this offer in prepare_mph(). */
+    s->tx.mph.trellis_size = source ? 0 : v34_rx_current_trellis_code(&s->rx);
+    s->tx.mph.use_non_linear_encoder = source ? 0 : s->rx.use_non_linear_encoder;
+    s->tx.mph.expanded_shaping = source ? 0 : s->rx.parms.expanded_shaping;
     /* V.34 Table 23 bits 27/50 describe the remote control transmitter.
        Training remains at 1200; the selected data rate takes effect after E. */
     s->tx.mph.control_channel_2400 = s->hdx_control_requested_rate == 2400;
@@ -9389,6 +9387,7 @@ static void data_baud_init(v34_state_t *s)
 static complex_sig_t get_pph_baud(v34_state_t *s)
 {
     int i;
+    complex_sig_t x;
 
     /* This is the beginning of half-duplex control channel restart */
     /* The 8 symbol PPh signal, which is repeated 4 times, to make a 32 symbol sequence */
@@ -9400,7 +9399,14 @@ static complex_sig_t get_pph_baud(v34_state_t *s)
     if (++s->tx.tone_duration >= PPH_SYMBOLS)
         second_alt_baud_init(s);
     /*endif*/
-    return pph_symbols[i];
+    /* 10.2.4/10.2.4.5: the unit-magnitude PPh table specifies phase, not
+       an attenuation relative to ALT/MPh. As for primary PP, scale it to
+       the nominal training amplitude expected by v34_tx_power(). Otherwise
+       the receiver trains on PPh 13 dB below the following control data. */
+    x = pph_symbols[i];
+    x.re *= TRAINING_SCALE(TRAINING_AMP);
+    x.im *= TRAINING_SCALE(TRAINING_AMP);
+    return x;
 }
 /*- End of function --------------------------------------------------------*/
 
