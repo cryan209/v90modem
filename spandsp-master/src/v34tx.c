@@ -6516,6 +6516,11 @@ static void v34_rotate_180(complex_sig_t *p)
 
 static complex_sig_t get_s_not_s_baud(v34_state_t *s)
 {
+    /* 10.1.3.7/12.5.1: emit the current primary-resync point before
+       advancing alternation or applying the next segment's reversal. */
+    complex_sig_t primary_point = s->tx.lastbit;
+    bool primary_resync = !s->tx.duplex
+                      && s->tx.half_duplex_state == V34_HALF_DUPLEX_PRIMARY_CHANNEL;
 #if defined(SPANDSP_USE_FIXED_POINT)
     int16_t x;
 #else
@@ -6606,7 +6611,7 @@ static complex_sig_t get_s_not_s_baud(v34_state_t *s)
     x = s->tx.lastbit.re;
     s->tx.lastbit.re = s->tx.lastbit.im;
     s->tx.lastbit.im = x;
-    return s->tx.lastbit;
+    return primary_resync ? primary_point : s->tx.lastbit;
 }
 /*- End of function --------------------------------------------------------*/
 

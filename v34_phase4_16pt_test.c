@@ -75,6 +75,31 @@ static void check_hdx_pph_power(void)
     v34_free(s);
 }
 
+static void check_hdx_primary_s_sequence(void)
+{
+    v34_state_t *s = v34_init(NULL, 3200, 9600, true, false,
+                             fake_get_bit, NULL, NULL, NULL);
+    assert(s);
+    s->half_duplex_source = V34_HALF_DUPLEX_SOURCE;
+    s->tx.half_duplex_state = V34_HALF_DUPLEX_PRIMARY_CHANNEL;
+    hdx_primary_channel_enter(s);
+    for (int i = 0; i < 224; i++)
+    {
+        complex_sig_t p = get_s_not_s_baud(s);
+        assert(p.re == 0 && p.im == 0);
+    }
+    /* 10.1.3.7: 0,90 for 128T, then 180,270 for 16T. */
+    for (int i = 0; i < 144; i++)
+    {
+        complex_sig_t p = get_s_not_s_baud(s);
+        float sign = i < 128 ? 1.0f : -1.0f;
+        assert(fabs(p.re - ((i & 1) ? 0 : sign*TRAINING_AMP)) < 0.001);
+        assert(fabs(p.im - ((i & 1) ? sign*TRAINING_AMP : 0)) < 0.001);
+    }
+    assert(s->tx.current_getbaud == get_pp_baud);
+    v34_free(s);
+}
+
 static void check_hdx_control_burst_after_silence(void)
 {
     v34_state_t *clean = v34_init(NULL, 3429, 9600, true, false,
@@ -336,6 +361,7 @@ int main(void)
     check_hdx_control_burst_after_silence();
     check_hdx_source_mph_unused_fields();
     check_hdx_pph_power();
+    check_hdx_primary_s_sequence();
     check_low_rate_mapping_bit_count();
     puts("PASS: 8.2/9.3.2 low-rate mapping consumes the normative bit count");
     puts("PASS: 10.2.4.5 PPh preserves nominal control-channel power");
