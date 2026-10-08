@@ -28,7 +28,7 @@ def main():
     parser.add_argument('bits', type=Path)
     parser.add_argument('symbols', type=Path)
     parser.add_argument('--coefficients', nargs=6, type=int, required=True)
-    parser.add_argument('--bps', type=int, choices=(9600, 12000, 21600, 31200), default=12000)
+    parser.add_argument('--bps', type=int, choices=(4800, 9600, 12000, 14400, 21600, 31200), default=12000)
     parser.add_argument('--baud', type=int, choices=(3200, 3429), default=3200)
     parser.add_argument('--scrambler', choices=('gpa', 'gpc'), default='gpa')
     parser.add_argument('--idle-frames', type=int, default=0,
@@ -43,13 +43,17 @@ def main():
     if set(payload)-{'0', '1'}:
         parser.error('bit dump must contain only ASCII 0/1')
     if args.baud == 3429:
-        if args.bps != 9600:
-            parser.error('3429 oracle currently covers 9600 bit/s only')
-        # Tables 7, 8, 10: J=8 P=15 N=336 b=23 r=6 M=3 Q=0.
-        bbits, base_kbits, rings, qbits, pframes, jframes, high_count = 23, 11, 3, 0, 15, 8, 6
+        if args.bps not in (4800, 9600, 14400):
+            parser.error('3429 oracle covers 4800, 9600 and 14400 bit/s')
+        # Tables 7, 8, 10: J=8 P=15, expanded shaping, no Q bits.
+        bbits, base_kbits, rings, high_count = {
+            4800: (12, 0, 1, 3), 9600: (23, 11, 3, 6),
+            14400: (34, 22, 8, 9)}[args.bps]
+        qbits, pframes, jframes = 0, 15, 8
     else:
         bbits = args.bps//400
-        base_kbits, rings, qbits = {9600: (12, 4, 0), 12000: (18, 6, 0), 21600: (26, 12, 2),
+        base_kbits, rings, qbits = {4800: (0, 1, 0), 9600: (12, 4, 0),
+                                  14400: (24, 10, 0), 12000: (18, 6, 0), 21600: (26, 12, 2),
                                   31200: (26, 12, 5)}[args.bps]
         pframes, jframes, high_count = 16, 7, 16
     def frame_bits(frame):
@@ -115,7 +119,7 @@ def main():
     p, c = prediction()
     for frame in range(min(len(observed)//8, args.frames)):
         nbits = frame_bits(frame)
-        kbits = base_kbits-(bbits-nbits)
+        kbits = max(0, base_kbits-(bbits-nbits))
         if source_pos+nbits > len(source):
             break
         scrambled = []
@@ -123,6 +127,16 @@ def main():
             out = (int(bit) ^ (reg >> (4 if args.scrambler == 'gpa' else 17)) ^ (reg >> 22)) & 1
             reg = ((reg << 1) | out) & ((1 << 23)-1)
             scrambled.append(out)
+        if bbits <= 12:
+            # 9.3.2: groups with only two input bits have implicit I3=0.
+            grouped, cursor = [], 0
+            for pair in range(4):
+                width = 3 if pair < nbits-8 else 2
+                grouped.extend(scrambled[cursor:cursor+width])
+                cursor += width
+                if width == 2:
+                    grouped.append(0)
+            scrambled = grouped
         r0 = sum(bit << j for j, bit in enumerate(scrambled[:kbits]))
         a = bisect_right(z8, r0)-1
         rank = [r0-z8[a]]

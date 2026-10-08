@@ -9,6 +9,31 @@
 #include <assert.h>
 #include "spandsp-master/src/v34rx_internal.h"
 
+static int count_primary_bit(void *user_data)
+{
+    ++*(int *)user_data;
+    return 1;
+}
+
+static void check_low_rate_mapping_bit_count(void)
+{
+    const int baud[] = {3200, 3429};
+    const int bits_per_data_frame[] = {192, 168}; /* Tables 7/8, 4800. */
+    for (int row = 0; row < 2; row++)
+    {
+        int count = 0;
+        int16_t frame[16];
+        v34_state_t *s = v34_init(NULL, baud[row], 4800, true, false,
+                                  count_primary_bit, &count, NULL, NULL);
+        assert(s);
+        assert(!v34_seed_tx_data(s, 2, V34_TRELLIS_16, 0, 1, NULL));
+        for (int i = 0; i < s->tx.parms.p; i++)
+            assert(v34_get_mapping_frame(&s->tx, frame) == 16);
+        assert(count == bits_per_data_frame[row]);
+        v34_free(s);
+    }
+}
+
 static void check_hdx_source_mph_unused_fields(void)
 {
     /* Table 23 note 2 applies to the primary source in either call role.
@@ -311,6 +336,8 @@ int main(void)
     check_hdx_control_burst_after_silence();
     check_hdx_source_mph_unused_fields();
     check_hdx_pph_power();
+    check_low_rate_mapping_bit_count();
+    puts("PASS: 8.2/9.3.2 low-rate mapping consumes the normative bit count");
     puts("PASS: 10.2.4.5 PPh preserves nominal control-channel power");
     puts("PASS: Table 23 note 2 source MPh bits 29:32 are zero in both call roles");
     puts("PASS: 12.4.1.1 control burst cannot inherit primary pulse-shaper history");

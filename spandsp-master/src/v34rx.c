@@ -3733,8 +3733,7 @@ void v34_rx_pack_output_bitstream(v34_rx_state_t *s)
     bb = s->parms.b;
     kk = s->parms.k;
     /* If there are S bits, we switch between high mapping frames and low mapping frames based
-       on the SWP pattern. We derive SWP algorithmically. Note that high/low mapping is only
-       relevant when b >= 12. */
+       on the SWP pattern. We derive SWP algorithmically. */
     s->s_bit_cnt += s->parms.r;
     if (s->s_bit_cnt >= s->parms.p)
     {
@@ -3743,13 +3742,10 @@ void v34_rx_pack_output_bitstream(v34_rx_state_t *s)
     }
     else
     {
-        if (bb > 12)
-        {
-            /* We need one less bit in a low mapping frame */
-            bb--;
+        /* 8.2/Table 8 and 9.3.2: K=0 still has low mapping frames. */
+        bb--;
+        if (kk > 0)
             kk--;
-        }
-        /*endif*/
     }
     /*endif*/
     if (s->parms.k)

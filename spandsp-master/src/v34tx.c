@@ -2244,8 +2244,7 @@ static void parse_primary_channel_bitstream(v34_tx_state_t *s)
     bb = s->parms.b;
     kk = s->parms.k;
     /* If there are S bits we switch between high mapping frames and low mapping frames based
-       on the SWP pattern. We derive SWP algorithmically.  Note that high/low mapping is only
-       relevant when b >= 12. */
+       on the SWP pattern. We derive SWP algorithmically. */
     s->s_bit_cnt += s->parms.r;
     if (s->s_bit_cnt >= s->parms.p)
     {
@@ -2254,13 +2253,12 @@ static void parse_primary_channel_bitstream(v34_tx_state_t *s)
     }
     else
     {
-        if (bb > 12)
-        {
-            /* We need one less bit in a low mapping frame */
-            bb--;
+        /* 8.2/Table 8 and 9.3.2: low frames also apply when K=0,
+           including 12/11-bit frames at 3429/4800. Only the shell-bit
+           count is conditional on a shell mapper being present. */
+        bb--;
+        if (kk > 0)
             kk--;
-        }
-        /*endif*/
     }
     /*endif*/
     i = 0;
