@@ -125,6 +125,9 @@ typedef struct
     int pos;
     int noise_peak;
     uint32_t noise_state;
+    /* V34_HDX_TX_TAP=<prefix>: the G.711 codewords each direction carries,
+       as <prefix>.call and <prefix>.answer, for offline waveform analysis. */
+    FILE *tap;
 } test_channel_t;
 
 static void channel_process(test_channel_t *c, int16_t out[], const int16_t in[], int len, int alaw)
@@ -139,8 +142,10 @@ static void channel_process(test_channel_t *c, int16_t out[], const int16_t in[]
             if (sample > 32767) sample = 32767;
             if (sample < -32768) sample = -32768;
         }
-        int16_t pcm = alaw ? alaw_to_linear(linear_to_alaw(sample))
-                          : ulaw_to_linear(linear_to_ulaw(sample));
+        uint8_t code = alaw ? linear_to_alaw(sample) : linear_to_ulaw(sample);
+        int16_t pcm = alaw ? alaw_to_linear(code) : ulaw_to_linear(code);
+        if (c->tap)
+            fputc(code, c->tap);
         if (c->delay_samples)
         {
             out[i] = c->delay[c->pos];
@@ -162,6 +167,15 @@ int main(int argc, char *argv[])
     }
     static test_channel_t source_channel = {.noise_state = 0x12345678U};
     static test_channel_t recipient_channel = {.noise_state = 0x87654321U};
+    if (getenv("V34_HDX_TX_TAP"))
+    {
+        char path[1024];
+
+        snprintf(path, sizeof(path), "%s.call", getenv("V34_HDX_TX_TAP"));
+        source_channel.tap = fopen(path, "wb");
+        snprintf(path, sizeof(path), "%s.answer", getenv("V34_HDX_TX_TAP"));
+        recipient_channel.tap = fopen(path, "wb");
+    }
     int delay_ms = getenv("V34_HDX_DELAY_MS") ? atoi(getenv("V34_HDX_DELAY_MS")) : 0;
     int reverse_delay_ms = getenv("V34_HDX_REVERSE_DELAY_MS")
                          ? atoi(getenv("V34_HDX_REVERSE_DELAY_MS")) : delay_ms;

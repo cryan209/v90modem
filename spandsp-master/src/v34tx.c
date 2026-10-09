@@ -6514,6 +6514,78 @@ static void v34_rotate_180(complex_sig_t *p)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.34 10.1.3.7 S and S-bar for the half-duplex Phase 3 (12.3.1.1) and the
+   primary channel resynchronization (12.5.1), symbol by symbol:
+
+     S:     128T alternating point 0 of Figure 5 and point 0 rotated
+            counterclockwise by 90 degrees, starting with point 0 and so
+            ending on the rotated point;
+     S-bar: 16T alternating point 0 rotated by 180 degrees and by 270
+            degrees, starting with the 180 degree point.
+
+   Point 0 of Figure 5 is (1, 1), i.e. 45 degrees on the axes PP is defined
+   on (10.1.3.6), so S is 45/135 and S-bar 225/315 relative to PP.  The
+   duplex generator below alternates by swapping re and im from (A, 0),
+   which puts S at 0/90 -- 45 degrees off the constellation's own axes --
+   and, outside 12.5.1, also starts S on its second point so S-bar begins
+   one symbol early.  A Diva card's own half-duplex source transmits exactly
+   the sequence above (artifacts/eicon-v34fax-native-20261009), and a
+   recipient that takes its carrier phase from S or times PP from the
+   S-to-S-bar reversal is misled by either error, while an offline decoder
+   trained on PP sees neither. */
+/* V34_HDX_SPEC_TRAINING=0 restores the pre-2026-10-09 half-duplex S/S-bar and
+   Phase 3 TRN points, for A/B comparison against a peer only. */
+static bool hdx_spec_s_enabled(void)
+{
+    static int enabled = -1;
+
+    if (enabled < 0)
+    {
+        const char *env = getenv("V34_HDX_SPEC_TRAINING");
+
+        enabled = !(env  &&  env[0] == '0');
+    }
+    /*endif*/
+    return enabled != 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static complex_sig_t get_hdx_s_not_s_baud(v34_state_t *s, int silence_bauds)
+{
+    complex_sig_t point;
+    int n;
+
+    switch (s->tx.stage)
+    {
+    case V34_TX_STAGE_FIRST_S:
+        if (++s->tx.tone_duration <= silence_bauds)
+            return zero;
+        /*endif*/
+        n = s->tx.tone_duration - silence_bauds - 1;
+        /* training_constellation_4: [2] is point 0 (45 degrees), [1] is
+           point 0 rotated counterclockwise by 90 degrees. */
+        point = training_constellation_4[(n & 1)  ?  1  :  2];
+        if (n == 127)
+        {
+            s->tx.stage = V34_TX_STAGE_FIRST_NOT_S;
+            s->tx.tone_duration = 0;
+        }
+        /*endif*/
+        return point;
+    case V34_TX_STAGE_FIRST_NOT_S:
+    default:
+        n = s->tx.tone_duration++;
+        /* [0] is point 0 rotated by 180 degrees, [3] by 270 degrees. */
+        point = training_constellation_4[(n & 1)  ?  3  :  0];
+        if (n == 15)
+            pp_baud_init(s);
+        /*endif*/
+        return point;
+    }
+    /*endswitch*/
+}
+/*- End of function --------------------------------------------------------*/
+
 static complex_sig_t get_s_not_s_baud(v34_state_t *s)
 {
     /* 10.1.3.7/12.5.1: emit the current primary-resync point before
@@ -6539,6 +6611,9 @@ static complex_sig_t get_s_not_s_baud(v34_state_t *s)
     /*endif*/
     if (silence_bauds < 0)
         silence_bauds = 0;
+    /*endif*/
+    if (!s->tx.duplex  &&  hdx_spec_s_enabled())
+        return get_hdx_s_not_s_baud(s, silence_bauds);
     /*endif*/
 
     /* MD is optional and disabled in this implementation.
@@ -7369,8 +7444,27 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
             complex_sig_t point = training_constellation_16[trn_sym];
             point.re *= 0.316227766f;
             point.im *= 0.316227766f;
+            if (!s->tx.duplex  &&  hdx_spec_s_enabled())
+            {
+                /* 10.1.3.8: 2*Q2+Q1 picks Figure 5 point 0..3 -- (1,1),
+                   (-3,1), (1,-3), (-3,-3) -- rotated clockwise by In*90
+                   degrees.  The table is that rotated by 180 degrees
+                   (index 0 is 225 degrees where point 0 is at 45), which
+                   a duplex receiver resolves blind but a half-duplex
+                   recipient, whose phase reference is the PP just before
+                   TRN, does not: measured against PP the Diva card's
+                   half-duplex TRN is this table negated, symbol for
+                   symbol (artifacts/eicon-v34fax-native-20261009). */
+                point.re = -point.re;
+                point.im = -point.im;
+            }
+            /*endif*/
             return point;
         }
+        /*endif*/
+        if (!s->tx.duplex  &&  hdx_spec_s_enabled())
+            return training_constellation_4[(trn_sym + 2) & 3];
+        /*endif*/
         return training_constellation_4[trn_sym];
     case V34_TX_STAGE_J:
         /* Send the J signal (V.34 §10.1.3.3).
