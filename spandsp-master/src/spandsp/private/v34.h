@@ -489,7 +489,7 @@ static __inline__ int v34_ja_window_get(const uint8_t *cap, int total, int i)
     search finds no offset that scores better, so whatever a bearer slip does
     to this receiver is not a whole-sample move of the symbol instant that a
     T/3 search can undo.  Left at 0 -- the behaviour that predates it -- with
-    the measurement beside it, and ME_V90_UPSTREAM_SLIP_MULT to sweep it. */
+    the measurement beside it. */
 #define V34_V90_T3_SLIP_MULT                0.0f
 /*! Never arm the search below this, whatever the settled error: the scorer
     needs a real degradation to choose between candidates, and an eye that
@@ -1869,8 +1869,7 @@ typedef struct
     int reneg_cp_silent_blocks;
     int reneg_cp_reacquires;
     /* Set once the CP-stage level has settled on SCR.  reneg_cp_train is NOT
-       that signal: with ME_V90_RENEG_CP_ADAPT at its default the taps keep
-       adapting through the CP burst, so the flag never clears. */
+       that signal: it is not cleared on every path. */
     int reneg_cp_settled;
     /* T/2 eye selection; see process_primary_half_baud(). */
     float eye_on_sum;

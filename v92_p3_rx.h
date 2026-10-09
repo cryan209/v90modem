@@ -256,7 +256,7 @@ void v92_p3_rx_set_law(v92_p3_rx_t *rx, int law);
  * default.  Off, the receiver is the raw-sign one it replaced: TRN1u judged
  * by descrambled ones (>= 75% over 256 symbols), Ja searched in raw signs
  * only, and v92_p3_rx_follow() idle -- the caller keeps its raw Su lock and
- * CPt paths.  For one-variable A/B (ME_V92_P3_EQ, v92_p3_probe --no-eq).
+ * CPt paths.  For one-variable A/B (v92_p3_probe --no-eq).
  * Call after v92_p3_rx_start. */
 void v92_p3_rx_set_equaliser(v92_p3_rx_t *rx, bool on);
 /* Feed-forward taps for the equaliser (odd, up to V92_P3_EQ_MAX_TAPS; 0 =

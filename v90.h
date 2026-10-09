@@ -371,7 +371,7 @@ bool v90_repair_smartlink_dummy_cpt(vpcm_cp_frame_t *cp);
 
 /*
  * Override the pre-Sd delay (§9.3.1.3) for this training attempt, in
- * milliseconds; a negative value restores the ME_V90_SD_DELAY_MS env default.
+ * milliseconds; a negative value restores the default of 0.
  * A §9.5-retrained attempt needs a longer delay than the initial one: the
  * pre-converged Phase 2 makes our Ja detection outrun the peer's WaitForSd
  * arming, and an early Sd leaves its equalizer training unanchored.

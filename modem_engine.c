@@ -1265,18 +1265,12 @@ static uint64_t       g_v92_trn2u_pushed = 0;
 static int            g_v92_trn2u_points = 4;
 static double         g_v92_trn2u_lu = 8000.0;
 
-/* ME_V92_P3_EQ=0 switches the V.92 Phase 3 receiver's TRN1u equaliser off
- * (v92_p3_rx_set_equaliser): the raw-sign receiver it replaced, which a real
- * 2-wire loop's ISI defeats (docs/v92_p3_rx_line_plan.md).  Default on. */
+/* The V.92 Phase 3 receiver's TRN1u equaliser (v92_p3_rx_set_equaliser) is
+ * on; the raw-sign receiver it replaced is defeated by a real 2-wire loop's
+ * ISI (docs/v92_p3_rx_line_plan.md). */
 static bool v92_p3_eq_enabled(void)
 {
-    static int cached = -1;
-
-    if (cached < 0) {
-        const char *v = getenv("ME_V92_P3_EQ");
-        cached = (v && *v == '0') ? 0 : 1;
-    }
-    return cached != 0;
+    return true;
 }
 static v92_cp_rx_t    g_v92_cp_rx;
 static v92_trn2u_demod_t g_v92_trn2u_demod;
@@ -4130,16 +4124,10 @@ static int v34_echo_policy_mode(void)
  * CRC-anchored RX 23.0 s).  Fit against the most recently transmitted
  * samples, not the old queue cursor accumulated while cancellation was off.
  * This changes only the internal demodulator input; DS0 octets are untouched.
- * Default off until both acquisition and payload have hardware coverage. */
+ * Off: the V.90 line echo canceller (me_v90_line_ec) took over this job. */
 static bool v90_cp_echo_enabled(void)
 {
-    static int cached = -1;
-
-    if (cached < 0) {
-        const char *value = getenv("ME_V90_CP_ECHO");
-        cached = value && atoi(value) != 0;
-    }
-    return cached != 0;
+    return false;
 }
 
 static void notch_filter_init(notch_filter_t *nf, float freq, float q, float fs)
@@ -6425,7 +6413,6 @@ static bool v90_dil_capture_try_parse_at(int start)
  * arrive: a peer that declined V.90 (Table 10 downstream code 0-5) is doing
  * plain V.34, whose J carries no DIL descriptor at all.
  *
- * ME_V90_JA_HEURISTICS=1 restores the old always-on behaviour.
  * ME_V90_JA_HEURISTIC_FALLBACK_MS>0 re-enables them that many ms after the
  * first suppressed attempt, as a bounded escape hatch; the default is 500
  * (why is below) and 0 means never.
@@ -6445,8 +6432,6 @@ static bool v90_ja_heuristic_allowed(const char *source)
 
     /* Descriptor already in hand -- J has fired, nothing left to protect. */
     if (g_v90_dil_parse_logged)
-        return true;
-    if (parse_env_int("ME_V90_JA_HEURISTICS", 0) != 0)
         return true;
     /* Peer declined V.90: plain V.34 J, no descriptor will ever parse. */
     if (g_v34
@@ -8939,9 +8924,6 @@ void me_init(void)
     g_g711_raw_v90_tx_octets = 0;
     g_g711_linear_tx_octets = 0;
     {
-        int env_lu = parse_env_int("V92_TRN2U_LU", (int)g_v92_trn2u_lu);
-        if (env_lu >= 500 && env_lu <= 30000)
-            g_v92_trn2u_lu = (double)env_lu;
         ME_LOG("[ME] V.92 TRN2u receiver: %d-point PAM, L_U=%.0f\n",
                g_v92_trn2u_points, g_v92_trn2u_lu);
     }
@@ -9666,23 +9648,9 @@ static double v90_s_tone_a_fraction_locked(void)
 
 static double me_v90_s_tone_a_max_fraction(void)
 {
-    static double cached = -1.0;
-
-    if (cached < 0.0) {
-        const char *v = getenv("ME_V90_S_TONE_A_MAX_FRACTION");
-
-        /* Midway (in log terms) between the measured 0.09 real-signal ceiling
-         * and the 0.79 Tone A floor.  0 disables the gate. */
-        cached = 0.35;
-        if (v && *v) {
-            char *end;
-            double parsed = strtod(v, &end);
-
-            if (end != v && *end == '\0' && parsed >= 0.0 && parsed <= 1.0)
-                cached = parsed;
-        }
-    }
-    return cached;
+    /* Midway (in log terms) between the measured 0.09 real-signal ceiling
+     * and the 0.79 Tone A floor. */
+    return 0.35;
 }
 
 /* RMS of our OWN transmit over the same window, for the RX/TX ratio test. */
@@ -9926,8 +9894,8 @@ static bool v90_p3_confirm_signal_locked(p3_signal_type_t want)
  * Throttled to every 80 ms.  The 800 ms history lets a weak foreign
  * convention trade Table-18 score for sustained periodicity; a clean J still
  * takes the immediate short-evidence path.  Both remain within WaitForSd.
- * With this as the primary detector, ME_V90_SD_DELAY_MS and
- * ME_V90_SD_DELAY_RETRAIN_MS can both default to 0 (§9.3.1.3 allows
+ * With this as the primary detector, the initial and retrained Sd delays
+ * can both start at 0 (§9.3.1.3 allows
  * 0–500 ms; 0 is valid when Ja is detected structurally rather than
  * by bit count).
  *
@@ -9935,8 +9903,6 @@ static bool v90_p3_confirm_signal_locked(p3_signal_type_t want)
  * becomes a no-op.  On retrain resync back to WAIT_JA, scanning resumes
  * automatically (the sample counter resets when the phase changes).
  *
- * Disabled by ME_V90_P3_CONFIRM=0 (same kill switch as the S/J
- * confirmation gates), or on its own by ME_V90_P3_JA_SCAN=0.
  *
  * COST, measured 2026-09-30: this runs on the media thread, and in its old
  * form -- a PP-trained p3_demod over 800 ms, for BOTH V.90 upstream rates
@@ -9950,8 +9916,7 @@ static bool v90_p3_confirm_signal_locked(p3_signal_type_t want)
  * the old form still cost ~0.8x real time.  So the default now scans only
  * the INFO1a-selected rate on the carrier the receiver is actually on
  * (v34_rx_watch_phase3_carrier() has already retuned it to the peer's), every
- * 160 ms: one eighth of the work.  ME_V90_P3_JA_SCAN=full restores the old
- * four-pass, 80 ms scan.  Deliberately not a wall-clock budget: that would
+ * 160 ms: one eighth of the work, against the old four-pass, 80 ms scan.  Deliberately not a wall-clock budget: that would
  * make v90_engine_replay non-deterministic. */
 enum { P3_JA_SCAN_THROTTLE_FULL = 640 };   /* 80 ms at 8 kHz, old form */
 enum { P3_JA_SCAN_THROTTLE = 1280 };       /* 160 ms at 8 kHz */
@@ -10198,18 +10163,9 @@ static void v90_p3_scan_ja_locked(int len)
     }
     /* 0 = off, 1 = one pass every 160 ms (default), 2 = the old full scan. */
     {
-        static int mode = -1;
+        const int mode = 1;
         static int sync_mode = -1;
 
-        if (mode < 0) {
-            const char *v = getenv("ME_V90_P3_JA_SCAN");
-
-            mode = 1;
-            if (v && !strcmp(v, "0"))
-                mode = 0;
-            else if (v && !strcmp(v, "full"))
-                mode = 2;
-        }
         if (sync_mode < 0) {
             const char *v = getenv("ME_V90_P3_JA_SCAN_SYNC");
 
@@ -12908,26 +12864,15 @@ static void prepare_v90_phase3_locked(void)
             if (g_v90 && g_v90_pending_dil_valid)
                 v90_set_dil_descriptor(g_v90, &g_v90_pending_dil);
             if (g_v90 && g_v90_phase2_restarts > 0) {
-                const char *configured = getenv("ME_V90_SD_DELAY_RETRAIN_MS");
                 int retrain_delay;
 
                 /* §9.3.1.3 permits the digital modem to wait 0..500 ms after
                  * detecting Ja before Sd.  SmartLink's WaitForSd acquisition
                  * has a narrow, attempt-dependent window: repeating the
-                 * initial ME_V90_SD_DELAY_MS on every retrain produced three
-                 * identical misses live (2026-08-11).  Probe the legal window
-                 * deterministically on successive retrains unless an explicit
-                 * fixed interoperability value was requested. */
-                if (configured && *configured) {
-                    retrain_delay = parse_env_int("ME_V90_SD_DELAY_RETRAIN_MS", 0);
-                    if (retrain_delay < 0)
-                        retrain_delay = 0;
-                    if (retrain_delay > 500)
-                        retrain_delay = 500;
-                    ME_LOG("[ME] V.90: retrained attempt %u; fixed Sd delay %d ms "
-                           "(ME_V90_SD_DELAY_RETRAIN_MS)\n",
-                           g_v90_phase2_restarts, retrain_delay);
-                } else {
+                 * initial Sd delay on every retrain produced three identical
+                 * misses live (2026-08-11).  Probe the legal window
+                 * deterministically on successive retrains. */
+                {
                     /* The peer normally permits two V.90 retries before its
                      * third failure drops to V.34.  With Ja now gated to the
                      * current strong Table 18 match, try the immediate legal
@@ -12940,9 +12885,8 @@ static void prepare_v90_phase3_locked(void)
                     ME_LOG("[ME] V.90: retrained attempt %u; adaptive §9.3.1.3 Sd delay %d ms\n",
                            g_v90_phase2_restarts, retrain_delay);
                 }
-                /* Set zero explicitly.  Leaving the override unset here used
-                 * to inherit ME_V90_SD_DELAY_MS, despite the old log/comment
-                 * claiming that the retrained-attempt default was zero. */
+                /* Set explicitly: an unset override used to inherit the
+                 * initial attempt's delay. */
                 v90_set_sd_delay_ms(g_v90, retrain_delay);
             }
         }

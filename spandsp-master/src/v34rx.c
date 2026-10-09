@@ -120,21 +120,7 @@
 
 static int v90_reneg_cp_reacquire_enabled(void)
 {
-    static int cached = -1;
-
-    if (cached < 0)
-    {
-        const char *v = getenv("ME_V90_RENEG_CP_REACQUIRE");
-
-        /* DEFAULT OFF.  It does not recover the constellation after the loss
-           that motivated it -- 22.5 degrees from the 4-point family either
-           way, which is this metric's white -- and the only positive is a
-           second window on one recording (0 -> 2 CRC-valid CP frames).  One
-           recording is not a measurement; see the write-up. */
-        cached = (v  &&  atoi(v) == 1)  ?  1  :  0;
-    }
-    /*endif*/
-    return cached;
+    return 0;      /* it did not recover the constellation; see the write-up */
 }
 
 /* RMS of the block of line samples the receiver was last handed, read by
@@ -153,7 +139,7 @@ static double v90_reneg_feed_rms = 0.0;
    domain/tap/bit-order and publishing them as phase4_trn_lock_*, which the MP
    case then uses as its lock hint.  All three are fixed by 8.5.2/10.1.3.3 and
    the ordering of training_constellation_4, so the discovery looks removable
-   -- exactly the reasoning that ME_V90_CP_STREAM_STARTUP measured and found
+   -- exactly the reasoning that streaming startup CP measured and found
    false for the MP search itself.  Withholding the hint and letting MP start
    from the pinned defaults is the same question one stage earlier, and it
    stops plain V.34 training (v34rx_phase4_trn.c). */
@@ -556,8 +542,8 @@ static float v34_p4_trn_coh_gate(void);
 /* Phase 4 TRN: hand the equalizer from blind CMA to decision-directed LMS
    after this many bauds of TRN. */
 #define V34_P4_TRN_DD_START             256
-/* 9.6 CP window: dead blocks before ME_V90_RENEG_CP_REACQUIRE re-arms the
-   one-shot CP acquisition. */
+/* 9.6 CP window: dead blocks before re-arming the one-shot CP acquisition
+   (v90_reneg_cp_reacquire_enabled(), off). */
 #define V90_RENEG_CP_REACQUIRE_BLOCKS   2
 /* The Phase 3 S/J detector constants moved to v34rx_internal.h with the stage
    that uses them; their rationale travelled with them. */
@@ -607,7 +593,7 @@ static const char *v34_rx_stage_to_str(int stage)
     }
 }
 
-/* ME_V90_CP_ADAPT_STARTUP: let the CP stage's taps adapt at STARTUP, the way
+/* The CP stage's taps adapt at STARTUP, the way
    9.6's CP conditioning is allowed to while it finds the level.
    v34_force_v90_phase4_cp_rx() freezes them on the stated assumption that
    "9.4.2.2 assumes the channel is static through this seam", and against the
@@ -618,7 +604,7 @@ static const char *v34_rx_stage_to_str(int stage)
    phase NOISE while every loop is static -- where an offline demodulation of
    the same tap with a freshly adapted CMA reads 5.75.  9.6's own
    adapt-vs-freeze A/B came out the other way over 28 windows
-   (ME_V90_RENEG_CP_ADAPT defaults to frozen), so this is measured here and
+   (9.6 freezes once the level has settled), so this is measured here and
    not assumed by analogy.
 
    DEFAULT ON since 2026-09-30.  Scored on six wired-rig RasFinder calls, each
@@ -630,23 +616,13 @@ static const char *v34_rx_stage_to_str(int stage)
    BOTH T/2 phases white (26 deg) at the CP stage -- no symbol instant can
    rescue that, adapting on the constant-modulus CPt does.  That call missed
    all 11 of the peer's CRC-valid CPt frames live and was retrained out of
-   Ri.  ME_V90_CP_ADAPT_STARTUP=0 restores the freeze. */
+   Ri. */
 static bool v90_startup_cp_adapt(void)
 {
-    static int cached = -1;
-
-    if (cached < 0)
-    {
-        const char *v = getenv("ME_V90_CP_ADAPT_STARTUP");
-
-        cached = (v  &&  *v)  ?  (atoi(v) != 0)  :  1;
-    }
-    /*endif*/
-    return cached != 0;
+    return true;
 }
 
-/* Step size: while ME_V90_CP_ADAPT_STARTUP is on the CP stage adapts at the
-   ordinary CMA step.  Adaptation at that step
+/* Step size: the CP stage adapts at the ordinary CMA step.  Adaptation at that step
    is measurably ON but ineffective: over the RasFinder's 10432-symbol CP
    stage the main tap creeps 0.74367 -> 0.75576, 1.6%, while the channel
    steps at symbol ~4000 and the differential margin goes 5.4 -> 21 deg and
@@ -1574,18 +1550,7 @@ static float v90_t3_fse_lost_err(v34_rx_state_t *s)
    site. */
 static bool v90_t3_dd_gate_ok(v34_rx_state_t *s)
 {
-    static float mult = -1.0f;
-
-    if (mult < 0.0f)
-    {
-        const char *value = getenv("ME_V90_UPSTREAM_DD_GATE");
-
-        mult = value ? (float) atof(value) : V34_V90_T3_DD_GATE_MULT;
-        if (mult < 0.0f)
-            mult = 0.0f;
-        /*endif*/
-    }
-    /*endif*/
+    const float mult = V34_V90_T3_DD_GATE_MULT;
     if (mult <= 0.0f
         ||
         s->v90_t3_err_base_n < V34_V90_T3_ERR_BASE_SYMBOLS)
@@ -1602,8 +1567,7 @@ static bool v90_t3_dd_gate_ok(v34_rx_state_t *s)
    Both its inputs -- the shell-index check that releases a standing lock and
    the sweep score that ranks candidates -- describe how the bits are GROUPED,
    and neither can separate a wrong grouping from symbols the eye no longer
-   resolves.  See V34_V90_T3_PHASE_TRUST_MULT.  ME_V90_PHASE_EYE_GATE=0
-   restores the old ungated behaviour for A/B. */
+   resolves.  See V34_V90_T3_PHASE_TRUST_MULT. */
 static bool v90_t3_phase_evidence_ok(v34_rx_state_t *s)
 {
     /* x2's accepted reset-state B1 establishes the Table-12 input epoch
@@ -1614,18 +1578,6 @@ static bool v90_t3_phase_evidence_ok(v34_rx_state_t *s)
        next epoch. */
     if (s->x2_mode)
         return false;
-    static int gate = -1;
-
-    if (gate < 0)
-    {
-        const char *value = getenv("ME_V90_PHASE_EYE_GATE");
-
-        gate = (value  &&  atoi(value) == 0) ? 0 : 1;
-    }
-    /*endif*/
-    if (!gate)
-        return true;
-    /*endif*/
     if (s->v90_t3_err_base_n < V34_V90_T3_ERR_BASE_SYMBOLS)
         return s->v90_t3_sym_err_ema < V34_V90_T3_SWEEP_ERR;
     /*endif*/
@@ -1686,16 +1638,11 @@ static void v90_t3_blind_recover(v34_rx_state_t *s,
                                  float frac,
                                  float energy)
 {
-    static int enabled = -1;
     float p2;
     float e;
     float mu;
 
-    if (enabled < 0)
-    {
-        const char *value = getenv("ME_V90_UPSTREAM_CMA");
-
-        /* Default on, but only once the fourth-power carrier term is held:
+    /* On, but only worth it once the fourth-power carrier term is held:
            on its own it is worth nothing, because it reopens the eye into a
            frequency that estimator has meanwhile walked away.  With the hold
            in, 28800 goes from 23% of the call clean to 55% and its longest
@@ -1703,14 +1650,7 @@ static void v90_t3_blind_recover(v34_rx_state_t *s,
 
            Beware the first result this produced -- 17% becoming 82% -- which
            was the diverged-receiver artefact V34_V90_T3_DIVERGED_POWER now
-           names, measured at a mean symbol power of 1.5e20.
-           ME_V90_UPSTREAM_CMA=0 disables. */
-        enabled = (value  &&  atoi(value) == 0) ? 0 : 1;
-    }
-    /*endif*/
-    if (!enabled)
-        return;
-    /*endif*/
+       names, measured at a mean symbol power of 1.5e20. */
     /* Only ever against a dispersion constant this call measured for itself,
        and only once the receiver has an operating point to compare with. */
     if (s->v90_t3_cma_r2 <= 0.0f)
@@ -3674,20 +3614,8 @@ void v34_rx_pack_output_bitstream(v34_rx_state_t *s)
        invariant under a reversal.  Only a foreign peer sending real
        characters can show it -- and against slmodemd the idle stream decodes
        at 100% ones while the payload is indistinguishable from noise, with no
-       periodicity at any frame lag.  ME_V90_UPSTREAM_BIT_ORDER=lsb flips it
-       for an A/B. */
-    {
-        static int msb_first = -1;
-
-        if (msb_first < 0)
-        {
-            const char *value = getenv("ME_V90_UPSTREAM_BIT_ORDER");
-
-            msb_first = (value && value[0] == 'l') ? 0 : 1;
-        }
-        /*endif*/
-        bitstream_init(&s->bs, msb_first != 0);
-    }
+       periodicity at any frame lag. */
+    bitstream_init(&s->bs, true);
     u = s->rxbuf;
     /* The first of the I bits might be auxiliary data */
     i = 0;
@@ -6879,27 +6807,7 @@ static int phase4_cma_converged(v34_rx_state_t *s, const complexf_t *z)
    See the call site for why the startup freeze does not carry over. */
 static int v90_reneg_cp_adapt_through_burst(void)
 {
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *value = getenv("ME_V90_RENEG_CP_ADAPT");
-
-        /* DEFAULT OFF -- freeze once the level has settled.  It was on, on
-           the argument that both signals in the window are constant modulus
-           so blind CMA is legitimate throughout, and on a measurement that
-           found it neutral -- but that measurement was one recording.  Over
-           the 26 reneg recordings in artifacts/ (28 CP windows), freezing is
-           neutral on 27 and turns one failure into a completion:
-           reneg-ab-225015Z/reneg-r3's second window goes from valid=1
-           cp_ack=0 to valid=6 cp_ack=1.  No recording is worse.  CMA is
-           phase-blind, so what it costs when it is not needed is exactly
-           what the startup path's comment says: it keeps walking a solution
-           that was already right. */
-        cache = (value  &&  atoi(value) == 1)  ?  1  :  0;
-    }
-    /*endif*/
-    return cache;
+    return 0;      /* frozen once the level has settled: see the history in docs */
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -6945,7 +6853,7 @@ static int v90_reneg_cma_converged(v34_rx_state_t *s, const complexf_t *z)
          * constant modulus -- Figure 8's SCR is scrambled ones and 8.5.2's CP
          * goes out through J's 4-point modulation -- so CMA is legitimate
          * across the whole of it, which is not true of the startup seam.
-         * ME_V90_RENEG_CP_ADAPT=0 restores the freeze for an A/B. */
+         * Measured, freezing wins (see v90_reneg_cp_adapt_through_burst()). */
         if (v90_reneg_cp_adapt_through_burst())
         {
             s->reneg_cma_bauds = 0;
@@ -8166,24 +8074,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
        JaTXMIT at the same instant it enters Phase 3 (measured: 772.931916 vs
        772.931933), so there is no TRN in this window at all and the lock has
        to be found on Ja itself -- which costs ~0.75 s of a peer budget of
-       1.88 s before the equalizer starts converging.
-       ME_V90_JA_EARLY_TRACK=1 arms it on stage entry instead. */
-    if (s->stage == V34_RX_STAGE_PHASE3_WAIT_S  &&  !s->phase3_tracking_armed)
-    {
-        static int early_track = -1;
-
-        if (early_track < 0)
-        {
-            const char *v = getenv("ME_V90_JA_EARLY_TRACK");
-
-            early_track = (v  &&  atoi(v) != 0);
-        }
-        /*endif*/
-        if (early_track)
-            s->phase3_tracking_armed = true;
-        /*endif*/
-    }
-    /*endif*/
+       1.88 s before the equalizer starts converging. */
 
     /* Phase 3 S signal detection state machine */
     switch (s->stage)
@@ -11103,20 +10994,10 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
    biased there: the equalizer is frozen from Phase 3 and was trained at the
    CURRENT phase, so |z| favours staying put, and against the RasFinder the
    one CP-stage decision it took was an 8% call (264.9 vs 244.6, replay of
-   rf-tower-shp-ld0-23988).  ME_V90_CP_EYE_ANGLE=0 restores the magnitude
-   vote. */
+   rf-tower-shp-ld0-23988). */
 static int v34_v90_cp_eye_angle_enabled(void)
 {
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *v = getenv("ME_V90_CP_EYE_ANGLE");
-
-        cache = (v  &&  strcmp(v, "0") == 0)  ?  0  :  1;
-    }
-    /*endif*/
-    return cache;
+    return 1;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -11238,8 +11119,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
        peer used the high carrier its flip lands during DIL and is what lets
        Phase 4 decode the CPt -- freezing to the end of Phase 3 loses it
        (rf-tower-scan1-6, rf-tower-nop3-1: 4 CPt -> 0), and so does disabling
-       the chooser outright.  ME_V90_P3_EYE_AFTER_PP=1 restores the old
-       behaviour. */
+       the chooser outright. */
     if (eye_check
         &&  s->v90_mode
         &&  !s->calling_party
@@ -11249,21 +11129,8 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         &&  (s->stage == V34_RX_STAGE_PHASE3_TRAINING
              ||  s->stage == V34_RX_STAGE_PHASE3_WAIT_S))
     {
-        static int allow = -1;
-
-        if (allow < 0)
-        {
-            const char *v = getenv("ME_V90_P3_EYE_AFTER_PP");
-
-            allow = (v  &&  strcmp(v, "0") != 0);
-        }
-        /*endif*/
-        if (!allow)
-        {
-            eye_check = false;
-            s->eye_flip_pending = false;
-        }
-        /*endif*/
+        eye_check = false;
+        s->eye_flip_pending = false;
     }
     /*endif*/
     /* Never move the symbol instant while 10.1.3.6's PP is being conditioned
@@ -12492,8 +12359,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                it.  The plain V.34 data mode reached the same conclusion from
                the other end (docs/v34_data_mode_rates.md: a smaller step is
                the wrong lever; adapt only while the error stays near the
-               baseline that settled just after B1).  ME_V90_UPSTREAM_DD_GATE
-               sweeps the multiple; 0 restores the absolute-only gate. */
+               baseline that settled just after B1). */
             if (e_re*e_re + e_im*e_im < 8.0f
                 &&
                 v90_t3_dd_gate_ok(s)
@@ -12786,8 +12652,7 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
            back whole samples and keeps the fraction, which the reader above
            interpolates by -- see v34_gardner.h for why the fraction matters
            and v34_gardner_test for the S-curve, acquisition, tracking and
-           quiescence it is held to.  ME_V90_UPSTREAM_TIMING=0 restores the
-           fixed step. */
+           quiescence it is held to. */
         if (s->v90_t3_timing_enabled)
         {
             /* Gardner wants the symbol instant and the point halfway back to
@@ -13445,25 +13310,12 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_cma_active = false;
     s->v90_t3_cma_run = 0;
     s->v90_t3_cma_episodes = 0;
+    /* Decision-directed adaptation step (gated by v90_t3_dd_gate_ok()). */
+    s->v90_t3_dd_mu = 0.02f;
     {
-        const char *value = getenv("ME_V90_UPSTREAM_DD_MU");
-
-        /* Off by default.  Decision-directed adaptation is only meaningful
-           once the data-era symbols are on the constellation, and right now
-           their mean-square distance to it is 2/3 -- exactly the figure for
-           symbols bearing no relation to the lattice.  Adapting towards
-           meaningless decisions cannot help and might hurt.  Enable with
-           ME_V90_UPSTREAM_DD_MU=0.05 once that is fixed. */
-        s->v90_t3_dd_mu = value ? (float) atof(value) : 0.02f;
-    }
-    {
-        const char *value = getenv("ME_V90_UPSTREAM_CARRIER");
-
-        s->v90_t3_carrier_enabled = (value == NULL || atoi(value) != 0);
+        s->v90_t3_carrier_enabled = true;
         v34_carrier_init(&s->v90_t3_carrier);
         {
-            const char *value = getenv("ME_V90_UPSTREAM_NDA");
-
             /* Held by default.  A fourth-power line is a real thing on a
                4-point training constellation and a much weaker one on the
                768-point shaped constellation this receiver runs at 28800, so
@@ -13474,28 +13326,19 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
                takes 19200 from 18% of the call clean to 48% and its longest
                hold from 18.7 s to 36.2 s, and 28800 from 17% to 23%, with
                nothing anywhere getting worse.  It is also what makes the
-               blind recovery below worth anything at all.
-               ME_V90_UPSTREAM_NDA=1 restores it. */
-            s->v90_t3_carrier.nda_freq_hold =
-                (value  &&  atoi(value) != 0) ? 0 : 1;
+               blind recovery below worth anything at all. */
+            s->v90_t3_carrier.nda_freq_hold = 1;
         }
     }
     {
-        const char *value = getenv("ME_V90_UPSTREAM_TIMING");
-
-        /* On by default: without it this receiver decodes correctly for
-           about fifteen seconds and then walks off, which is what the whole
+        /* Without timing recovery this receiver decodes correctly for about
+           fifteen seconds and then walks off, which is what the whole
            upstream investigation kept running into.  The gains are the ones
            v34_gardner_test holds to an S-curve, a static offset, a 50 ppm
-           ramp and a perfect clock; ME_V90_UPSTREAM_TIMING=0 goes back to
-           the fixed three-samples-per-symbol step for an A/B. */
-        s->v90_t3_timing_enabled = (value == NULL || atoi(value) != 0);
+           ramp and a perfect clock. */
+        s->v90_t3_timing_enabled = true;
         {
-            const char *det = getenv("ME_V90_UPSTREAM_TIMING_DET");
-            const char *sm = getenv("ME_V90_UPSTREAM_SLIP_MULT");
-
-            s->v90_t3_slip_mult = sm ? (float) atof(sm)
-                                     : V34_V90_T3_SLIP_MULT;
+            s->v90_t3_slip_mult = V34_V90_T3_SLIP_MULT;
 
             v34_gardner_init(&s->v90_t3_gardner,
                              V34_GARDNER_DEFAULT_MU,
@@ -13504,12 +13347,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
                one this loop was built on, and it is the wrong one once a
                dense constellation is carrying data: see v34_gardner.h and
                docs/v90_upstream_data_path.md for the matrix that says so. */
-            s->v90_t3_gardner.detector =
-                (det == NULL) ? V34_GARDNER_DET_MM
-              : (strcmp(det, "dd") == 0) ? V34_GARDNER_DET_DD
-              : (strcmp(det, "mm") == 0) ? V34_GARDNER_DET_MM
-              : (strcmp(det, "auto") == 0) ? V34_GARDNER_DET_AUTO
-              : V34_GARDNER_DET_GARDNER;
+            s->v90_t3_gardner.detector = V34_GARDNER_DET_MM;
         }
     }
     /* The supervised filter already maps onto the exact Q9.7 template grid. */
@@ -13576,12 +13414,8 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
        between them is the advance per symbol.  Averaging coherently inside
        each half before taking an angle is what makes it work over so few
        symbols -- the obvious one-lag autocorrelation reads an order of
-       magnitude high because it never averages the noise down first.
-       ME_V90_UPSTREAM_B1_FREQ=0 leaves the loop to acquire on its own. */
+       magnitude high because it never averages the noise down first. */
     {
-        const char *e_env = getenv("ME_V90_UPSTREAM_B1_FREQ");
-
-        if (!(e_env  &&  e_env[0] == '0'))
         {
             complexf_t c0 = {0.0f, 0.0f};
             complexf_t c1 = {0.0f, 0.0f};
@@ -14468,28 +14302,19 @@ static void v34_rx_watch_phase3_s(v34_rx_state_t *s,
    energy on one set is S.  Armed only while we transmit Jd, when the peer's
    Ja is over (it ends on our Sd->S-bar-d, 9.3.2.4) and 9.3.2.7 allows nothing
    but silence or S -- so Ja, whose J pattern also puts energy on these
-   lines, cannot be mistaken for it.  ME_V90_JD_S_WATCH=0 disables. */
+   lines, cannot be mistaken for it. */
 static void v34_rx_watch_v90_jd_s(v34_rx_state_t *s,
                                   const int16_t amp[],
                                   int len)
 {
     enum { BLK = 160 };
-    static int disabled = -1;
     float fc[2];
     float half;
     float coeff[6];
     int i;
     int k;
 
-    if (disabled < 0)
-    {
-        const char *v = getenv("ME_V90_JD_S_WATCH");
-
-        disabled = (v  &&  strcmp(v, "0") == 0);
-    }
-    /*endif*/
-    if (disabled
-        ||  !s->v90jd_s_armed
+    if (!s->v90jd_s_armed
         ||  s->stage != V34_RX_STAGE_PHASE3_WAIT_S
         ||  (s->phase3_s_present  &&  !s->v90jd_dil_mode)
         ||  s->baud_rate < 0  ||  s->baud_rate >= 6)
@@ -14982,7 +14807,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
      * on the silence by its own power gate), the carrier loop's frequency
      * never moves (its error term is zero on zero input), the Godard timing
      * loop's total correction never moves, and freezing the taps
-     * (ME_V90_RENEG_CP_ADAPT=0) changes neither the angle nor the frame
+     * changes neither the angle nor the frame
      * count.  What is missing is a way BACK: the CP conditioning's
      * acquisition -- a fresh equalizer trained by Figure 8's SCR -- is
      * one-shot, so once it has converged there is nothing left that can
@@ -14993,8 +14818,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
      * on the first live block after one, re-arm exactly what
      * v34_v90_force_reneg_cp_rx() arms.  Bounded per renegotiation, because a
      * line that is dead repeatedly is not one this can rescue.
-     * ME_V90_RENEG_CP_REACQUIRE=1 enables it; it is default OFF, on the
-     * measurement in docs/retrain_and_resync.md. */
+     * It is OFF, on the measurement in docs/retrain_and_resync.md. */
     if (s->stage == V34_RX_STAGE_V90_CP  &&  len > 0)
     {
         if (v90_reneg_feed_rms == 0.0)
@@ -15013,8 +14837,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
                converged at all (23.2 degrees from the 4-point family
                throughout, 0 valid frames, against 1.5 degrees and 4 frames
                with it left alone).  The test is reneg_cp_settled and NOT
-               reneg_cp_train, which with ME_V90_RENEG_CP_ADAPT at its default
-               is never cleared at all. */
+               reneg_cp_train, which is not cleared on every path. */
             if (v90_reneg_cp_reacquire_enabled()
                 &&
                 s->reneg_cp_settled
@@ -15950,7 +15773,7 @@ SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
        moments ago and must not be walked.  Only the renegotiation path below
        turns training back on. */
     s->rx.reneg_cp_train = 0;
-    /* ME_V90_CP_STREAM_STARTUP belongs HERE, in the startup conditioning.
+    /* Streaming startup CP belonged HERE, in the startup conditioning.
        It was read in v34_begin_rx_data() instead -- the DATA receiver's
        start, which runs long after the CP stage -- so it never reached this
        path at all: the startup CP bits came out byte-identical with the knob
@@ -15960,11 +15783,7 @@ SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
        the DATA stage and to 11.6, not about startup CP, which had never been
        measured either way.  Default stays 0 so this is a plumbing fix and not
        a behaviour change. */
-    {
-        const char *v = getenv("ME_V90_CP_STREAM_STARTUP");
-
-        s->rx.v90_cp_stream = (v  &&  atoi(v) != 0) ? 1 : 0;
-    }
+    s->rx.v90_cp_stream = 0;
     s->rx.v90_cp_stream_reg = 0;
     s->rx.scrambler_tap = 4;
     s->rx.mp_phase4_default_scrambler_tap = 4;
@@ -16060,14 +15879,8 @@ SPAN_DECLARE(void) v34_v90_force_reneg_cp_rx(v34_state_t *s)
     s->rx.reneg_cp_silent_blocks = 0;
     s->rx.reneg_cp_reacquires = 0;
     s->rx.reneg_cp_settled = 0;
-    if (!getenv("ME_V90_RENEG_CP_STREAM")
-        ||
-        atoi(getenv("ME_V90_RENEG_CP_STREAM")) != 0)
-    {
-        s->rx.v90_cp_stream = 1;
-        s->rx.v90_cp_stream_reg = 0;
-    }
-    /*endif*/
+    s->rx.v90_cp_stream = 1;
+    s->rx.v90_cp_stream_reg = 0;
     /* Save the FRESH taps: the periodic equalizer restore would otherwise put
        the stale ones back a few hundred milliseconds later. */
     equalizer_save(&s->rx);
@@ -16466,24 +16279,20 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
        coefficients to the SELECTED upstream rate, so if the save was taken at
        another baud rate or carrier assignment the restore puts an equalizer
        from one grid in front of a demodulator running on another.  Log the
-       pair on every seam, and let ME_V90_UPSTREAM_EQ_RESTORE=0 skip the
-       restore entirely: a live 28800 upstream loses the constellation 0.9 s
+       pair on every seam.  Skipping the restore was the probe for why a live
+       28800 upstream loses the constellation 0.9 s
        after B1 while a replay of its own recording -- same samples, same
        parameters, ring length ruled out by a 14 s / 0.4 s control -- holds it
        for the whole call, and the equalizer live inherits here and the replay
        does not is the state that differs. */
     {
-        const char *restore = getenv("ME_V90_UPSTREAM_EQ_RESTORE");
-
         V34_RX_LOG(&s->logging, SPAN_LOG_FLOW,
                  "Rx - V.90 upstream data prepare: equalizer saved at baud %d "
-                 "carrier %s, preparing baud %d carrier %s%s\n",
+                 "carrier %s, preparing baud %d carrier %s\n",
                  s->rx.eq_coeff_save_baud_rate,
                  s->rx.eq_coeff_save_high_carrier ? "high" : "low",
                  baud_rate,
-                 high_carrier ? "high" : "low",
-                 (restore && atoi(restore) == 0) ? " [restore skipped]" : "");
-        if (!restore || atoi(restore) != 0)
+                 high_carrier ? "high" : "low");
         {
             cvec_copyf(s->rx.eq_coeff, s->rx.eq_coeff_save,
                        V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN);
@@ -17026,7 +16835,7 @@ SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
        argument does not distinguish them -- domain, dibit transform,
        scrambler tap and bit order are fixed by 8.5.2/10.1.3.3 and the
        constellation table in BOTH -- so it is worth knowing whether the
-       search is needed here.  ME_V90_CP_STREAM_STARTUP=1 streams instead.
+       search is needed here.
 
        MEASURED, AND THE ANSWER IS THAT IT IS NEEDED.  On the startup CP
        receive itself streaming is indistinguishable -- vpcm_loopback_test
@@ -17040,15 +16849,11 @@ SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
        does not do for itself, and the streamed path is NOT a drop-in here the
        way it is for 9.6.
 
-       Left in, default off, with the measurement beside it: the question will
-       come up again the next time someone reads the 24-hypothesis machinery
+       The switch that streamed it is gone; the measurement stays here because
+       the question will come up again the next time someone reads the 24-hypothesis machinery
        and concludes it is dead weight.  It is not. */
-    {
-        const char *v = getenv("ME_V90_CP_STREAM_STARTUP");
-
-        s->rx.v90_cp_stream = (v  &&  atoi(v) != 0) ? 1 : 0;
-        s->rx.v90_cp_stream_reg = 0;
-    }
+    s->rx.v90_cp_stream = 0;
+    s->rx.v90_cp_stream_reg = 0;
     s->rx.step_2d = 0;
     s->rx.data_frame = 0;
     s->rx.mapping_frame_count = 0;

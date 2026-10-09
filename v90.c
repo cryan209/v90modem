@@ -82,7 +82,7 @@
  * (500 ms) of renegotiation TRN2d it gave up after 0.54 s and retrained, on
  * all of the renegotiations tried.  So default to the clause's ceiling.
  *
- * ME_V90_RENEG_TRN2D_SYMBOLS overrides; §9.6.1.1.1's 2000 ms is the cap. */
+ * §9.6.1.1.1's 2000 ms is the cap. */
 #define V90_RENEG_TRN2D_DEFAULT_SYMBOLS 16000
 
 static int v90_reneg_trn2d_symbols(void)
@@ -90,17 +90,7 @@ static int v90_reneg_trn2d_symbols(void)
     static int cached;
 
     if (cached == 0) {
-        const char *value = getenv("ME_V90_RENEG_TRN2D_SYMBOLS");
-        char *end;
-        long parsed;
-
         cached = V90_RENEG_TRN2D_DEFAULT_SYMBOLS;
-        if (value && *value) {
-            parsed = strtol(value, &end, 10);
-            if (end != value && *end == '\0'
-                && parsed >= 2040 && parsed <= 16000)
-                cached = (int)parsed;
-        }
         cached -= cached % V90_FRAME_LEN;
         if (cached < 2040)
             cached = 2040;
@@ -253,28 +243,12 @@ static int v90_trn1d_len(void)
  * detector, which fires right when the peer starts listening for Sd. */
 #define V90_WAIT_JA_FALLBACK_SAMPLES_DEFAULT 48000
 
-/* ME_V90_WAIT_JA_FALLBACK_MS overrides the bound (1000..30000 ms).  §9.3.2.3
- * only limits the analogue modem's MD+TRN to one round trip plus 4000 ms,
+/* §9.3.2.3 only limits the analogue modem's MD+TRN to one round trip plus 4000 ms,
  * and a peer that uses the allowance plus a long round trip can outlast the
  * default -- in which case the fallback transmits Sd into its TRN. */
 static int v90_wait_ja_fallback_samples(void)
 {
-    static int cached = -1;
-
-    if (cached < 0) {
-        const char *value = getenv("ME_V90_WAIT_JA_FALLBACK_MS");
-
-        cached = V90_WAIT_JA_FALLBACK_SAMPLES_DEFAULT;
-        if (value && *value) {
-            char *end = NULL;
-            long parsed = strtol(value, &end, 10);
-
-            if (end != value && *end == '\0'
-                && parsed >= 1000 && parsed <= 30000)
-                cached = (int) parsed * 8;
-        }
-    }
-    return cached;
+    return V90_WAIT_JA_FALLBACK_SAMPLES_DEFAULT;
 }
 
 /* How long Jd may run without the analogue modem's S, in Jd symbols.
@@ -293,21 +267,12 @@ static int v90_wait_ja_fallback_samples(void)
  * counting.  That is the "NO S RECEIVED" seen on every live d-modem call. */
 static int v90_jd_s_wait_symbols(void)
 {
-    const char *value;
-    char *end;
-    long parsed;
     /* §9.3.1.5 does not bound the "round-trip delay" term, and we do not
      * measure rtd anywhere yet.  The d-modem rig reports rtd of 484-1808
      * samples; 500 ms is comfortably above that and still spec-legal, since
      * the allowance only ever makes us more patient than the minimum. */
     int rtd_allowance = 4000;
 
-    value = getenv("ME_V90_JD_RTD_SYMBOLS");
-    if (value && *value) {
-        parsed = strtol(value, &end, 10);
-        if (end != value && *end == '\0' && parsed >= 0 && parsed <= INT_MAX)
-            rtd_allowance = (int) parsed;
-    }
     return 5100*8 - v90_trn1d_len() + rtd_allowance;
 }
 
@@ -375,9 +340,8 @@ static int v90_dil_autoterminate_cycles(void)
  * mean) so the average codeword stays at U_INFO -- the peer already has U_INFO
  * from INFO1a; TRN1d only trains its equaliser.
  *
- * This returns the peak dither radius in Ucodes (0 disables, spec-pure
- * default).  Live-tunable via ME_V90_TRN1D_SHAPE so the amplitude can be swept
- * against the peer's RBS variance threshold without a rebuild.
+ * This returns the peak dither radius in Ucodes: 0, spec-pure.  The amplitude
+ * was swept against the peer's RBS variance threshold (below).
  *
  * LIVE RESULT 2026-07-22 -- kept as a diagnostic, but it does NOT move this
  * peer.  With dither amp=9 the TX tap carried a clear 8.3% per-phase magnitude
@@ -392,15 +356,6 @@ static int v90_dil_autoterminate_cycles(void)
  * disassemble the blob's V90AutoDigitalImpDetector; see the interop-rig notes. */
 static int v90_trn1d_shape_amplitude(void)
 {
-    const char *value = getenv("ME_V90_TRN1D_SHAPE");
-    char *end;
-    long parsed;
-
-    if (value && *value) {
-        parsed = strtol(value, &end, 10);
-        if (end != value && *end == '\0' && parsed >= 0 && parsed <= 20)
-            return (int) parsed;
-    }
     return 0;
 }
 
@@ -470,8 +425,7 @@ static int v90_jd_resync_symbols(void)
 
 /* Milliseconds of silence to hold after detecting Ja before starting to
  * transmit Sd (§9.3.1.3 permits up to 500ms here). Default 0 preserves the
- * original immediate-Sd behaviour. See ME_V90_SD_DELAY_MS callers for the
- * value measured against the d-modem/slmodemd rig. */
+ * original immediate-Sd behaviour; retrains set it per attempt. */
 static int v90_sd_delay_samples(const v90_state_t *s);
 
 /* Ucode-to-PCM codeword mapping (ITU-T V.90 Table 1/V.90) */
@@ -560,8 +514,8 @@ struct v90_state_s {
     v34_state_t     *v34;
     v90_law_t        law;
 
-    /* Per-attempt override for the pre-Sd delay; < 0 uses the
-     * ME_V90_SD_DELAY_MS env default.  See v90_set_sd_delay_ms(). */
+    /* Per-attempt override for the pre-Sd delay; < 0 uses the default of 0.
+     * See v90_set_sd_delay_ms(). */
     int              sd_delay_override_samples;
 
     /* Phase 3/4 TX state */
@@ -746,23 +700,13 @@ static int v90_dil_cycle_cap(const v90_state_t *s)
 
 static int v90_sd_delay_samples(const v90_state_t *s)
 {
-    const char *value;
-    char *end;
-    long parsed;
-
     if (s && s->sd_delay_override_samples >= 0)
         return s->sd_delay_override_samples;
-    value = getenv("ME_V90_SD_DELAY_MS");
-    if (value && *value) {
-        parsed = strtol(value, &end, 10);
-        if (end != value && *end == '\0' && parsed >= 0 && parsed <= 500)
-            return (int) (parsed * 8);   /* ms -> samples at 8000 Hz */
-    }
     return 0;
 }
 
 /* Override the pre-Sd delay for this training attempt.  A negative ms value
- * restores the ME_V90_SD_DELAY_MS env default.  Needed because the delay that
+ * restores the default of 0.  Needed because the delay that
  * suits an initial attempt does not suit a §9.5-retrained one: with the whole
  * Phase 2 chain pre-converged, our Ja detection outruns the peer's
  * WaitForSd arming, and an Sd transmitted before that arming leaves its
@@ -1486,8 +1430,7 @@ bool v90_repair_smartlink_dummy_cpt(vpcm_cp_frame_t *cp)
  * on, it is not this.
  *
  * The check therefore stays as a measurement and a log line -- it is what
- * made the peer's mis-measured pad visible -- and the substitution is behind
- * ME_V90_CP_PAD_REPAIR=1, default off.
+ * made the peer's mis-measured pad visible -- and the substitution is off.
  *
  * The margin is deliberately loose.  A conformant peer's own finite-precision
  * design can land slightly over (this one's working constellation is 1.2 dB
@@ -1534,34 +1477,12 @@ static bool v90_cp_power_enforced(void)
  */
 static bool v90_cp_pad_repair_enabled(void)
 {
-    static int cached = -1;
-
-    if (cached < 0) {
-        const char *env = getenv("ME_V90_CP_PAD_REPAIR");
-
-        cached = (env && *env) ? (atoi(env) != 0) : 0;
-    }
-    return cached != 0;
+    return false;
 }
 
 static double v90_cp_power_margin_db(void)
 {
-    static int cached = 0;
-    static double value = 3.0;
-
-    if (!cached) {
-        const char *env = getenv("ME_V90_CP_POWER_MARGIN_DB");
-        char *end;
-
-        cached = 1;
-        if (env && *env) {
-            double parsed = strtod(env, &end);
-
-            if (end != env && *end == '\0' && parsed >= 0.0 && parsed <= 24.0)
-                value = parsed;
-        }
-    }
-    return value;
+    return 3.0;
 }
 
 static double v90_cp_set_power(const vpcm_cp_frame_t *cp,
@@ -1655,9 +1576,9 @@ static bool v90_cp_power_within_limit(const v90_state_t *s,
                 "codec-output constellation is within Table 15 -- the peer "
                 "has assumed a digital pad between us that this bearer does "
                 "not have.  Transmitting the codec-output constellation "
-                "instead (this is ME_V90_CP_PAD_REPAIR=1, which the rig "
-                "measured as HARMFUL and which is off by default; "
-                "ME_V90_CP_POWER_MARGIN_DB=24 disables the check "
+                "instead (the pad repair, which the rig "
+                "measured as HARMFUL and which is off; "
+                "a 24 dB margin would disable the check "
                 "altogether and restores the pre-2026-08-26 behaviour).\n",
                 what, 10.0*log10(wire/limit), v90_declared_max_tx_dbm0());
         for (int i = 0; i < VPCM_CP_MAX_CONSTELLATIONS; i++)
@@ -1675,8 +1596,7 @@ static bool v90_cp_power_within_limit(const v90_state_t *s,
             (codec <= allowed && cp->codec_constellations_differ)
                 ? ", and its codec-output set is within it -- the peer has "
                   "assumed a digital pad this bearer does not have, but "
-                  "substituting is off (ME_V90_CP_PAD_REPAIR=1 enables it; "
-                  "the rig measured it as harmful)"
+                  "substituting is off (the rig measured it as harmful)"
                 : ", and its codec-output set is over too, so there is "
                   "nothing to substitute",
             v90_cp_power_enforced() ? "; refusing the frame"
@@ -2019,21 +1939,10 @@ static bool v90_shaper_rule_inverts(int rule, int position)
  * this transmit-levels default, the peer's Error Energy settles at 11-17
  * (the codec-metric era plateaued pinned at 300-380), and the peer
  * progressed through MP into transmitting data-mode CP for the first time
- * ever.  ME_V90_SHAPER_METRIC=codec restores the far-codec metric for
- * experiments.  Cached: this runs inside the per-symbol metric loop. */
+ * ever. */
 static bool v90_shaper_metric_transmit_levels(void)
 {
-    static int cached = -1;
-
-    if (cached < 0) {
-        const char *value = getenv("ME_V90_SHAPER_METRIC");
-
-        cached = (value && strcmp(value, "codec") == 0) ? 0 : 1;
-        fprintf(stderr,
-                "[V90] ACTIVE shaper metric input: %s levels\n",
-                cached ? "transmitted bearer-law" : "far-codec output");
-    }
-    return cached != 0;
+    return true;
 }
 
 static v90_shaper_filter_state_t v90_evaluate_shaper_rule(
@@ -2249,24 +2158,10 @@ static int v90_select_shaper_rule(v90_state_t *s,
     return best_rule;
 }
 
-/* Test-only: ME_V90_SHAPER_LD=<0..3> forces the look-ahead depth the
- * rule SELECTION uses, leaving the CPt's ld (and so the frame delay it
- * implies) alone.  NOT conformant (§5.4.5.5 takes ld from CP); it exists to
- * ask whether a data-aided peer regenerates our TRN2d signs with a different
- * look-ahead than the one it requested. */
+/* §5.4.5.5: rule selection uses the CPt's ld. */
 static int v90_shaper_select_lookahead(const vpcm_cp_frame_t *cp)
 {
-    static int forced = -2;
-
-    if (forced == -2) {
-        const char *v = getenv("ME_V90_SHAPER_LD");
-
-        forced = (v && *v && atoi(v) >= 0 && atoi(v) <= 3) ? atoi(v) : -1;
-        if (forced >= 0)
-            fprintf(stderr, "[V90] TEST: shaper rule selection look-ahead forced to %d\n",
-                    forced);
-    }
-    return forced >= 0 ? forced : cp->shaping_lookahead;
+    return cp->shaping_lookahead;
 }
 
 static void v90_shape_data_signs(v90_state_t *s,
@@ -2754,25 +2649,11 @@ void v90_set_downstream_rate_limits(v90_state_t *s, int min_bps, int max_bps)
     s->jd_max_bps = max_bps > 0 ? max_bps : 0;
 }
 
-/* Jd bits 49:50, Table 13: 1..3.  Default unchanged at 1 pending a live result;
- * ME_V90_JD_SHAPING_LOOKAHEAD=3 matches the Eicon card's working downstream. */
+/* Jd bits 49:50, Table 13: 1..3.  1; 3 (the Eicon card's value) was tried
+ * against the Intel modem and changed nothing. */
 static int v90_jd_shaping_lookahead(void)
 {
-    static int cached;
-
-    if (cached == 0) {
-        const char *value = getenv("ME_V90_JD_SHAPING_LOOKAHEAD");
-
-        cached = 1;
-        if (value && *value) {
-            char *end;
-            long parsed = strtol(value, &end, 10);
-
-            if (end != value && *end == '\0' && parsed >= 1 && parsed <= 3)
-                cached = (int) parsed;
-        }
-    }
-    return cached;
+    return 1;
 }
 
 static void v90_build_jd(v90_state_t *s)
@@ -4756,7 +4637,7 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
 
             if (delay_samples > 0) {
                 fprintf(stderr,
-                        "[V90] Phase 3: analogue Ja detected, delaying Sd by %d ms (ME_V90_SD_DELAY_MS)\n",
+                        "[V90] Phase 3: analogue Ja detected, delaying Sd by %d ms\n",
                         delay_samples / 8);
                 s->tx_phase = V90_TX_SD_DELAY;
             } else {
