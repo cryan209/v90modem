@@ -215,9 +215,7 @@ void p3_demod_init(p3_demod_t *d, int baud_code, int carrier_sel, int sample_rat
     d->bypass_equalizer = getenv("P3_BYPASS_EQUALIZER") != NULL;
     d->rrc_agc_gain = 0.0017f;
     d->rrc_input_power = 0.0f;
-    d->use_instant_rrc_agc = getenv("P3_INSTANT_RRC_AGC") != NULL;
     d->rrc_signal_active = false;
-    d->use_dd_equalizer = getenv("P3_DD_EQUALIZER") != NULL;
     /* PP-directed training is opt-in.  p3_demod_init() zeroes the state, so
      * leaving this at zero would silently train every ordinary run from the
      * first input sample.  The two-pass runner replaces -1 with the detected
@@ -225,12 +223,6 @@ void p3_demod_init(p3_demod_t *d, int baud_code, int carrier_sel, int sample_rat
     d->pp_train_start_sample = -1;
     d->eq_coeff_re[63] = 1.0f;
     d->eq_delta = 0.21f / 127.0f;
-    if (getenv("P3_EQ_DELTA_SCALE")) {
-        float scale = strtof(getenv("P3_EQ_DELTA_SCALE"), NULL);
-
-        if (isfinite(scale) && scale > 0.0f && scale <= 32.0f)
-            d->eq_delta *= scale;
-    }
     d->s_previous_dibit = -1;
 
     /* AGC */
@@ -286,12 +278,6 @@ void p3_demod_reset(p3_demod_t *d)
     d->eq_coeff_re[63] = 1.0f;
     d->eq_buf_pos = 0;
     d->eq_delta = 0.21f / 127.0f;
-    if (getenv("P3_EQ_DELTA_SCALE")) {
-        float scale = strtof(getenv("P3_EQ_DELTA_SCALE"), NULL);
-
-        if (isfinite(scale) && scale > 0.0f && scale <= 32.0f)
-            d->eq_delta *= scale;
-    }
     d->cma_freeze_symbols = 0;
     d->cma_freeze_after_sample = -1;
     d->pll_freeze_after_sample = -1;
@@ -818,12 +804,7 @@ static int p3_rrc_demod_process(p3_demod_t *d,
                 && isfinite(raw_mag)) {
                 float target_gain;
 
-                if (d->use_instant_rrc_agc) {
-                    /* Diagnostic compatibility with the original front end. */
-                    target_gain = 1.0f / raw_mag;
-                    d->rrc_agc_gain =
-                        0.995f * d->rrc_agc_gain + 0.005f * target_gain;
-                } else if (d->rrc_input_power > 100000.0f
+                if (d->rrc_input_power > 100000.0f
                            && isfinite(d->rrc_input_power)) {
                     target_gain = 2.17f / sqrtf(d->rrc_input_power);
                     if (target_gain < 0.00001f)
@@ -879,9 +860,7 @@ static int p3_rrc_demod_process(p3_demod_t *d,
                     /* PP training complete: switch to decision-directed
                      * for the remaining TRN/Ja. */
                     equalizer_tune_qpsk(d, eq_re, eq_im);
-                } else if (d->use_dd_equalizer)
-                    equalizer_tune_qpsk(d, eq_re, eq_im);
-                else
+                } else
                     equalizer_tune_cma(d, eq_re, eq_im);
                 if (!d->emit_half_baud) {
                     emit_symbol(d,

@@ -52,6 +52,27 @@ SETTINGS = [
     ("VPCM_ME_VERBOSE", "Engine log verbosity."),
 ]
 
+# Switches kept deliberately although nothing in the tree sets them, with the
+# reason, so the removal backlog does not list them.
+KEPT = {
+    "ME_V90_UPSTREAM_T2": "pending experiment: the V.90 upstream through the ordinary V.34 receiver has never been compared",
+    "ME_V90_PHASE_SWEEP": "diagnostic mode: holds one upstream frame-phase candidate for grading",
+    "ME_V92_CPD_GAIN_PER_LU": "interop: slmodemd's G x LU convention (stops its V.92 upstream railing)",
+    "ME_V90_CP_BAUD_CODE": "offline CP search control (v90_cp_live.c)",
+    "ME_V90_CP_BROAD_MAP": "offline CP search control (v90_cp_live.c)",
+    "ME_V90_CP_CARRIER": "offline CP search control (v90_cp_live.c)",
+    "ME_V90_CP_CARRIER_STEP": "offline CP search control (v90_cp_live.c)",
+    "ME_V90_CP_DIRECT_CARRIER_STEP": "offline CP search control (v90_cp_live.c)",
+    "ME_V90_CP_DISABLE_DIRECT": "offline CP search control (v90_cp_live.c)",
+    "ME_V90_CP_ENABLE_ADAPTIVE_FALLBACK": "offline CP analysis: the slow adaptive receiver",
+    "ME_V90_CP_FREEZE_SAMPLE": "offline CP search control (v90_cp_live.c)",
+    "ME_V90_CP_MAP": "offline CP search control (v90_cp_live.c)",
+    "ME_V90_CP_ORDER": "offline CP search control (v90_cp_live.c)",
+    "ME_V90_CP_SEARCH_END": "offline CP search control (v90_cp_live.c)",
+    "ME_V90_CP_SEARCH_START": "offline CP search control (v90_cp_live.c)",
+    "ME_V90_CP_TIMING": "offline CP search control (v90_cp_live.c)",
+}
+
 READERS = r"getenv|parse_env_int|V34_DIAG_GETENV|env_or|v34_diag_flag|parse_v8_answer_tone_env"
 CALL = re.compile(r"\b(?:%s)\(\s*\"([A-Z][A-Z0-9]*_[A-Z0-9_]+)\"\s*(?:,\s*([^)]{0,40}))?" % READERS)
 COMMENT = re.compile(r"(?:/\*|//|^\*)\s*(.+?)\s*(?:\*/)?$")
@@ -117,7 +138,8 @@ def main():
 
     tests = read_all(["makefile"] + glob.glob("tests/*.list") + glob.glob("*_test.c"))
     scripts = read_all([p for p in glob.glob("tools/**/*", recursive=True) + glob.glob("rig/**/*", recursive=True)
-                        if os.path.isfile(p) and p.endswith((".sh", ".py"))])
+                        if os.path.isfile(p) and p.endswith((".sh", ".py"))
+                        and not p.endswith("env_knobs_inventory.py")])
     docs = read_all([p for p in glob.glob("docs/*.md")
                      if not p.endswith(("project_history.md", "env_knobs.md"))] + ["readme.md"])
     history = read_all(["docs/project_history.md"])
@@ -138,9 +160,9 @@ def main():
             "name": name,
             "files": ", ".join(sorted(d["files"])),
             "live": any(f in live for f in d["files"]),
-            "cat": "setting" if name in settings else classify(name),
+            "cat": "setting" if name in settings else "kept" if name in KEPT else classify(name),
             "default": d["default"] or "",
-            "ctx": settings.get(name, d["ctx"]),
+            "ctx": settings.get(name, KEPT.get(name, d["ctx"])),
             "refs": ("c" if name in setters else "")
                     + "".join(c for c, t in (("t", tests), ("s", scripts), ("d", docs), ("h", history))
                               if used(name, t)),
@@ -173,8 +195,8 @@ def main():
         r = next((r for r in rows if r["name"] == name), None)
         w("| `%s` | %s | %s |\n" % (name, r["files"] if r else "**not found**", meaning))
 
-    for title, cat in (("Live-path switches", "switch"), ("Live-path diagnostics", "diagnostic"),
-                       ("Live-path test hooks", "test hook")):
+    for title, cat in (("Live-path switches", "switch"), ("Kept on purpose", "kept"),
+                       ("Live-path diagnostics", "diagnostic"), ("Live-path test hooks", "test hook")):
         sel = [r for r in live_rows if r["cat"] == cat]
         unused = sum(1 for r in sel if not set(r["refs"]) & set("ctsd"))
         w("\n## %s (%d, %d with no test/script/doc reference)\n\n" % (title, len(sel), unused))

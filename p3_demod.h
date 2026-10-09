@@ -130,9 +130,7 @@ typedef struct {
     bool  bypass_equalizer;
     float rrc_agc_gain;
     float rrc_input_power;
-    bool  use_instant_rrc_agc;
     bool  rrc_signal_active;
-    bool  use_dd_equalizer;
     bool  emit_half_baud;
 
     /* PP-directed equalizer training (SPRA159 §3.2.3 fast equalizer).

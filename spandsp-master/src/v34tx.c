@@ -10585,7 +10585,6 @@ SPAN_DECLARE(int) v34_v90_begin_tx_data(v34_state_t *s,
     /* The digital modem's MP selects the non-linear encoder for this transmitter, and
        V.34 9.7 applies it to the whole transmitted signal x(n). */
     s->tx.nl_x_warp = (use_non_linear_encoder != 0);
-    if (getenv("ME_V90A_NO_NLWARP")) s->tx.nl_x_warp = false; /* TEMP A/B */
     v34_normalise_data_symbol_scale(s);
     /* V.90 §8.5.1/§9.4.2.5 uses V.34's B1: the first data frame is scrambled
        ones with every data-mode state reset.  get_data_baud() already does

@@ -277,27 +277,6 @@ static int v90_wait_ja_fallback_samples(void)
     return cached;
 }
 
-/* The explicit SmartLink Ja look-ahead starts the digital sequence before the
- * analogue modem has completed its fixed Phase 3 training study.  Suppress S
- * candidates until enough Jd has been presented for that study to finish.
- * Normal standards-driven Ja decoding has no artificial guard; an explicit
- * value can override either behaviour for other interoperability rigs. */
-static int v90_min_jd_symbols(void)
-{
-    const char *value;
-    char *end;
-    long parsed;
-
-    value = getenv("ME_V90_MIN_JD_SYMBOLS");
-    if (value && *value) {
-        parsed = strtol(value, &end, 10);
-        if (end != value && *end == '\0' && parsed >= 0 && parsed <= INT_MAX)
-            return (int) parsed;
-    }
-    value = getenv("ME_V90_J_LOOKAHEAD_BITS");
-    return (value && *value && strcmp(value, "0") != 0) ? 10000 : 0;
-}
-
 /* How long Jd may run without the analogue modem's S, in Jd symbols.
  *
  * §9.3.1.5 gives the digital modem 5100 ms plus a round-trip delay measured
@@ -330,45 +309,6 @@ static int v90_jd_s_wait_symbols(void)
             rtd_allowance = (int) parsed;
     }
     return 5100*8 - v90_trn1d_len() + rtd_allowance;
-}
-
-static int v90_jd_autoterminate_symbols(void)
-{
-    const char *value;
-    char *end;
-    long parsed;
-
-    value = getenv("ME_V90_JD_AUTOTERMINATE_SYMBOLS");
-    if (value && *value) {
-        parsed = strtol(value, &end, 10);
-        if (end != value && *end == '\0' && parsed >= 0 && parsed <= INT_MAX)
-            return (int) parsed;
-    }
-    /* Interop fallback: push on to J'd/DIL rather than retraining, for peers
-     * whose S we cannot detect.  Only ever after the full §9.3.1.5 wait --
-     * cutting it short is what stopped the peer from ever getting to send S. */
-    value = getenv("ME_V90_J_LOOKAHEAD_BITS");
-    return (value && *value && strcmp(value, "0") != 0)
-           ? v90_jd_s_wait_symbols()
-           : 0;
-}
-
-/* Jd' is exactly 12 symbols in V.90 §8.4.3.  Keep that interoperable
- * default, while allowing a longer all-zero diagnostic window to distinguish
- * a receiver decision/alignment miss from a wrong Jd' bit stream on live
- * hardware. */
-static int v90_jd_prime_symbols(void)
-{
-    const char *value = getenv("ME_V90_JD_PRIME_SYMBOLS");
-    char *end;
-    long parsed;
-
-    if (value && *value) {
-        parsed = strtol(value, &end, 10);
-        if (end != value && *end == '\0' && parsed >= 12 && parsed <= 720)
-            return (int) parsed;
-    }
-    return 12;
 }
 
 /* Per V.90 §9.3.1.6 and §8.4.1 the digital modem should repeat the entire DIL
@@ -410,24 +350,6 @@ static int v90_dil_autoterminate_cycles(void)
                   || strcmp(value, "smartlink-adi") == 0))
         return 1;
     return 1;
-}
-
-/* Interop-only allowance for a peer whose upstream S termination request is
- * not yet recovered reliably.  DIL must still end at a segment boundary; this
- * only permits the bounded auto-termination target to fall slightly before a
- * complete synthetic fallback cycle.  The standards-driven default is zero. */
-static int v90_dil_autoterminate_early_symbols(void)
-{
-    const char *value = getenv("ME_V90_DIL_EARLY_SYMBOLS");
-    char *end;
-    long parsed;
-
-    if (value && *value) {
-        parsed = strtol(value, &end, 10);
-        if (end != value && *end == '\0' && parsed >= 0 && parsed <= 8000)
-            return (int) parsed;
-    }
-    return 0;
 }
 
 /* Interop-only per-DS0-phase amplitude shaping for TRN1d.
@@ -530,19 +452,7 @@ static int v90_trn1d_phase_dither(int phase, int amplitude)
  * its log showed "Error Energy = -0.000" throughout.  A short silence still
  * protects a peer that is genuinely re-ranging; this one just has to land
  * inside its window. */
-static int v90_wait_ja_resync_samples(void)
-{
-    const char *value = getenv("ME_V90_WAIT_JA_RESYNC_SAMPLES");
-    char *end;
-    long parsed;
-
-    if (value && *value) {
-        parsed = strtol(value, &end, 10);
-        if (end != value && *end == '\0' && parsed >= 0 && parsed <= INT_MAX)
-            return (int) parsed;
-    }
-    return 9600;   /* 1.2 s at 8 kHz */
-}
+#define V90_WAIT_JA_RESYNC_SAMPLES 9600    /* 1.2 s at 8 kHz */
 
 static int v90_jd_resync_symbols(void)
 {
@@ -1072,40 +982,8 @@ static bool v90_build_v92_suvd_mapped(v90_state_t *s, bool ack)
  * absent until real upstream channel measurements exist.  The acknowledge
  * bit reflects whether a valid CPu has been received.
  */
-static bool v90_v92_upstream_design_enabled(void)
-{
-    static int cached = -1;
-
-    if (cached < 0) {
-        const char *v = getenv("ME_V92_UPSTREAM_DESIGN");
-        cached = (v && *v == '0') ? 0 : 1;
-    }
-    return cached != 0;
-}
-
-static bool v90_v92_k3_half_moduli(void)
-{
-    static int cached = -1;
-
-    if (cached < 0) {
-        const char *v = getenv("ME_V92_K3_HALF_MODULI");
-        cached = (v && *v == '0') ? 0 : 1;
-    }
-    return cached != 0;
-}
-
-static double v90_v92_upstream_margin(void)
-{
-    static double cached = -1.0;
-
-    if (cached < 0.0) {
-        const char *v = getenv("ME_V92_UPSTREAM_MARGIN");
-        double m = v ? atof(v) : 0.0;
-
-        cached = (m >= 1.0 && m <= 10.0) ? m : 4.0;
-    }
-    return cached;
-}
+/* CPd points are kept at least 2 x this x the measured TRN2u sigma apart. */
+#define V92_UPSTREAM_MARGIN 4.0
 
 static bool v90_v92_cpd_gain_per_lu(void)
 {
@@ -1134,8 +1012,7 @@ bool v90_set_v92_upstream_noise(v90_state_t *s, double sigma_linear,
     s->v92_upstream_lu_rx = lu_rx;
     /* Ask for the most the moduli carry; the back-off in
      * v90_build_v92_cpd_frame() takes drn down to what they allow. */
-    if (v90_v92_upstream_design_enabled())
-        s->v92_upstream_drn = 19;
+    s->v92_upstream_drn = 19;
     return true;
 }
 
@@ -1182,8 +1059,8 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
     } else {
         scale = (4.0*65536.0) / out->gain_q0_16;
     }
-    if (s->v92_upstream_sigma > 0.0 && v90_v92_upstream_design_enabled())
-        spacing = 2.0*v90_v92_upstream_margin()*s->v92_upstream_sigma;
+    if (s->v92_upstream_sigma > 0.0)
+        spacing = 2.0*V92_UPSTREAM_MARGIN*s->v92_upstream_sigma;
     for (int attempt = 0; attempt < 32; attempt++) {
         int n = 0;
         int16_t prev = 0;
@@ -1234,10 +1111,8 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
      * 2Ki + parity >= LC it picks eta >= LC, reads past its table and
      * transmits 0 -- half of every k = 3 symbol in slm-r9, recovered by
      * deconvolving its own output.  With LC even and Mi = LC/2 its range
-     * is exactly the valid members.  ME_V92_K3_HALF_MODULI=0 restores
-     * Mi = LC throughout. */
-    bool k3_half = v90_v92_k3_half_moduli();
-    if (k3_half && points > 2 && (points & 1))
+     * is exactly the valid members. */
+    if (points > 2 && (points & 1))
         points--;                             /* drop the largest point */
     out->set_sizes[0] = (uint8_t)points;
     /* V.92 §6.4.2: k=3 uses equivalence classes modulo 2*Mi across a
@@ -1246,7 +1121,7 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
      * representative in the constellation, so no analogue transmitter could
      * honour the CPd. */
     for (int i = 0; i < 12; i++)
-        out->moduli[i] = (uint8_t)((k3_half && i%4 == 3) ? points/2 : points);
+        out->moduli[i] = (uint8_t)((i%4 == 3) ? points/2 : points);
     if (points > 0) {
         __uint128_t product = 1;
         int drn = out->selected_upstream_drn;
@@ -1669,27 +1544,6 @@ static bool v90_cp_pad_repair_enabled(void)
     return cached != 0;
 }
 
-/* EXPERIMENT, default off: send TRN2d and MP on CPt's CODEC-OUTPUT set
- * instead of its transmit set.  On the RasFinder that puts TRN2d at RMS 977
- * against TRN1d's 943 -- TRN1d's level, the only level the peer has
- * measured -- where the transmit set it asks for is 6 dB hotter (1888).  It
- * departs from 8.6.5 (TRN2d is mapped on "the constellation set passed in
- * CPt", i.e. the transmit set), so the peer's regenerated waveform no longer
- * matches; the point is only to see whether the level moves its 2.24 s abort.
- * ME_V90_CP_PAD_REPAIR does the same substitution but only behind the 8.5.2
- * power check, which no longer fires at our declared maximum. */
-static bool v90_trn2d_codec_level(void)
-{
-    static int cached = -1;
-
-    if (cached < 0) {
-        const char *env = getenv("ME_V90_TRN2D_CODEC_LEVEL");
-
-        cached = (env && *env) ? (atoi(env) != 0) : 0;
-    }
-    return cached != 0;
-}
-
 static double v90_cp_power_margin_db(void)
 {
     static int cached = 0;
@@ -1927,13 +1781,6 @@ static bool v90_configure_phase4_mapper(v90_state_t *s,
     s->cp_frame = *cp;
     if (!v90_cp_power_within_limit(s, cp, s->phase4_k, "CPt", &s->cp_frame))
         return false;
-    if (v90_trn2d_codec_level() && cp->codec_constellations_differ) {
-        for (int i = 0; i < VPCM_CP_MAX_CONSTELLATIONS; i++)
-            memcpy(s->cp_frame.masks[i], cp->codec_masks[i],
-                   VPCM_CP_MASK_BYTES);
-        fprintf(stderr, "[V90] Phase 4: EXPERIMENT ME_V90_TRN2D_CODEC_LEVEL -- "
-                        "TRN2d/MP mapped on CPt's codec-output set\n");
-    }
     v90_scrambler_init(&s->phase4_scrambler);
     s->phase4_prev_sign = 0;
     memset(&s->phase4_shaper, 0, sizeof(s->phase4_shaper));
@@ -3412,32 +3259,9 @@ static uint8_t v90_dil_symbol_codeword(v90_law_t law,
     int sp_i = pos % lsp;
     int tp_i = pos % ltp;
     int sp_bit, tp_bit;
-    static int variant = -1;
 
-    /* ME_V90_DIL_VARIANT (rig experiment, default 0 = the Recommendation as
-     * read): 1 SP bit order reversed, 2 TP bit order reversed, 4 SP inverted,
-     * 8 TP inverted, 16 patterns run on across segments (no restart). */
-    if (variant < 0) {
-        const char *v = getenv("ME_V90_DIL_VARIANT");
-        variant = v ? atoi(v) : 0;
-    }
-    if (variant & 16) {
-        int run = 0, k;
-        for (k = 0; k < seg_idx; k++)
-            run += v90_dil_segment_len(desc, k);
-        sp_i = (run + pos) % lsp;
-        tp_i = (run + pos) % ltp;
-    }
-    if (variant & 1)
-        sp_i = lsp - 1 - sp_i;
-    if (variant & 2)
-        tp_i = ltp - 1 - tp_i;
     sp_bit = desc->sp[sp_i] ? 1 : 0;
     tp_bit = desc->tp[tp_i] ? 1 : 0;
-    if (variant & 4)
-        sp_bit ^= 1;
-    if (variant & 8)
-        tp_bit ^= 1;
     int ucode = tp_bit ? training_ucode : (desc->ref[uchord_idx] & 0x7F);
 
     return v90_pcm_signed_codeword(law, ucode, sp_bit);
@@ -3577,25 +3401,6 @@ static uint8_t v90_dil_codeword(v90_state_t *s)
                 fprintf(stderr,
                         "[V90] Phase 3: completed one full DIL cycle (%d segments), repeating\n",
                         n);
-            }
-        } else {
-            int cycle_limit = v90_dil_cycle_cap(s);
-            int early_symbols = v90_dil_autoterminate_early_symbols();
-            int target_symbols = cycle_limit * v90_dil_cycle_len(&s->dil);
-
-            if (cycle_limit > 0 && early_symbols > 0
-                && s->sample_count < target_symbols
-                && s->sample_count + early_symbols >= target_symbols) {
-                fprintf(stderr,
-                        "[V90] Phase 3: DIL interop fallback ending %d symbols "
-                        "before %d-cycle target at segment %d/%d; entering Phase 4\n",
-                        target_symbols - s->sample_count,
-                        cycle_limit,
-                        s->dil_segment_index,
-                        n);
-                s->tx_phase = V90_TX_RI;
-                s->sample_count = 0;
-                s->phase4_hold_logged = false;
             }
         }
     }
@@ -3949,7 +3754,7 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
     switch (s->tx_phase) {
     case V90_TX_WAIT_JA: {
         int wait_limit = s->jd_resync_wait
-                       ? v90_wait_ja_resync_samples()
+                       ? V90_WAIT_JA_RESYNC_SAMPLES
                        : v90_wait_ja_fallback_samples();
 
         if (!s->v92_phase3 && ++s->sample_count >= wait_limit) {
@@ -4094,15 +3899,6 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
              * first: pushing on to J'd/DIL is strictly more useful than tearing
              * Phase 3 down, and if the fallback is disabled the resync still
              * fires on the same symbol. */
-            if (!s->v92_phase3
-                && !s->jd_terminate_requested
-                && v90_jd_autoterminate_symbols() > 0
-                && s->sample_count >= v90_jd_autoterminate_symbols()) {
-                fprintf(stderr,
-                        "[V90] Phase 3: Jd interop timeout after %d symbols, terminating at the next frame boundary\n",
-                        s->sample_count);
-                s->jd_terminate_requested = true;
-            }
             /* Interop resync: with no S and no fallback, the peer did not lock
              * our Sd and will retrain.  Continuing to transmit Jd (and then
              * Phase 4) here pours a modem-like signal over the peer's fresh
@@ -4156,7 +3952,7 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
     case V90_TX_JD_PRIME:
         /* §8.4.3: J'd = 12 scrambled zeros as sign of U_INFO */
         {
-            int jd_prime_symbols = v90_jd_prime_symbols();
+            int jd_prime_symbols = 12;
             int scrambled = v90_scramble_bit(&s->scrambler, 0);
             s->diff_enc ^= scrambled;
             sign = s->diff_enc;
@@ -4977,7 +4773,6 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
         if (s->v92_phase3)
             return false;
         if (s->tx_phase == V90_TX_JD
-            && s->sample_count >= v90_min_jd_symbols()
             && !s->jd_terminate_requested) {
             fprintf(stderr,
                     "[V90] Phase 3: far-end S detected after %d Jd symbols, "
@@ -4986,14 +4781,6 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
             s->jd_terminate_requested = true;
             s->jd_terminated_by_s = true;
             return true;
-        }
-        if (s->tx_phase == V90_TX_JD
-            && !s->jd_terminate_requested
-            && s->sample_count < v90_min_jd_symbols()) {
-            fprintf(stderr,
-                    "[V90] Phase 3: ignored early far-end S after %d Jd symbols "
-                    "(minimum %d)\n",
-                    s->sample_count, v90_min_jd_symbols());
         }
         if (s->tx_phase == V90_TX_DIL && !s->dil_terminate_requested) {
             int cycle_limit = v90_dil_autoterminate_cycles();
@@ -6014,47 +5801,6 @@ bool v90_set_v92_cpu(v90_state_t *s, const vpcm_cp_frame_t *cpu)
         if (!v90_configure_data_mapper(s, &expected))
             return false;
         s->data_cp_frame.acknowledge = cpu->acknowledge;
-        {
-            /* Test only: map the downstream on this Ucode list in every
-             * interval instead of the CPu's sets (slmodemd designs 55 points
-             * and sends 50/51 -- which one does its demodulator use?). */
-            const char *ov = getenv("V92_DATA_UCODES");
-
-            if (ov && *ov) {
-                vpcm_cp_frame_t *f = &s->data_cp_frame;
-                uint64_t prod = 1;
-
-                memset(f->masks[0], 0, sizeof(f->masks[0]));
-                for (const char *q = ov; *q; ) {
-                    char *e;
-                    long u = strtol(q, &e, 10);
-
-                    if (e == q) break;
-                    vpcm_cp_mask_set(f->masks[0], (int)u, true);
-                    q = (*e == ',') ? e + 1 : e;
-                }
-                f->constellation_count = 1;
-                f->codec_constellations_differ = false;
-                for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++) {
-                    f->dfi[i] = 0;
-                    prod *= (uint64_t)vpcm_cp_mask_population(f->masks[0]);
-                }
-                fprintf(stderr, "[V90] V92_DATA_UCODES override: %d points, product %llu vs 2^%d\n",
-                        vpcm_cp_mask_population(f->masks[0]),
-                        (unsigned long long)prod, s->data_mapper_k);
-            }
-        }
-        {
-            /* Test only: reassign which constellation each data frame
-             * interval uses, e.g. V92_DATA_DFI=111110. */
-            const char *dv = getenv("V92_DATA_DFI");
-
-            if (dv && strlen(dv) == VPCM_CP_FRAME_INTERVALS) {
-                for (int i = 0; i < VPCM_CP_FRAME_INTERVALS; i++)
-                    s->data_cp_frame.dfi[i] = (uint8_t)(dv[i] - '0');
-                fprintf(stderr, "[V90] V92_DATA_DFI override: %s\n", dv);
-            }
-        }
         s->v92_cpu_received = true;
         if (cpu->acknowledge)
             s->v92_remote_ack_received = true;

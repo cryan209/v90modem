@@ -125,36 +125,6 @@ static int v90_ja_capture_skip_symbols(void)
 }
 /*- End of function --------------------------------------------------------*/
 
-static int v90_phase3_j_lookahead_bits(void)
-{
-    static int initialized = 0;
-    static int lookahead_bits = 0;
-
-    if (!initialized)
-    {
-        const char *value;
-        char *end;
-        long parsed;
-
-        value = getenv("ME_V90_J_LOOKAHEAD_BITS");
-        if (value  &&  value[0] != '\0')
-        {
-            end = NULL;
-            parsed = strtol(value, &end, 10);
-            if (end != value  &&  end  &&  *end == '\0'
-                && parsed >= 256  &&  parsed <= 20000)
-            {
-                lookahead_bits = (int) parsed;
-            }
-            /*endif*/
-        }
-        /*endif*/
-        initialized = 1;
-    }
-    /*endif*/
-    return lookahead_bits;
-}
-
 static void phase3_ja_capture_append(v34_rx_state_t *s, int bit0, int bit1)
 {
     if (!s)
@@ -398,28 +368,6 @@ void v34_rx_phase3_wait_s_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 }
                 /*endfor*/
                 s->phase3_j_bits += 2;
-                if (!s->calling_party
-                    && s->v90_mode
-                    && s->phase3_j_trn16 < 0
-                    && v90_phase3_j_lookahead_bits() > 0
-                    && s->phase3_j_bits >= v90_phase3_j_lookahead_bits()
-                    && (s->received_event == V34_EVENT_NONE
-                        || s->received_event == V34_EVENT_S))
-                {
-                    /* The SmartLink test rig has roughly one media frame more
-                       receive latency than its downstream-Sd wait permits.  An
-                       explicitly configured recovered-bit threshold starts the
-                       digital side early enough to compensate.  SmartLink uses
-                       the 4-point TRN path in this rig; pin it so the later S
-                       transition remains detectable after this synthetic J. */
-                    s->phase3_j_trn16 = 0;
-                    s->phase3_s_detect_armed = true;
-                    s->received_event = V34_EVENT_J;
-                    span_log(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 3: configured V.90 J look-ahead fired at bits=%d (ME_V90_J_LOOKAHEAD_BITS=%d, trn=4-point)\n",
-                             s->phase3_j_bits, v90_phase3_j_lookahead_bits());
-                }
-                /*endif*/
                 {
                     int capture_h;
 
