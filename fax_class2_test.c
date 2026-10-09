@@ -12,6 +12,8 @@
  */
 
 #include "fax_class2.h"
+#include "test_tmp.h"
+#define SRC_TIFF test_tmp("fc2_test_src.tif")
 
 #include <spandsp.h>
 #include <spandsp/v34.h>
@@ -230,7 +232,7 @@ static int write_test_tiff_pages(const char *path, int pages)
 static int compare_colour_page(const char *path, int page, int *rows_out)
 {
     static uint8_t stuffed[1<<20], expected[1<<20], received[1<<20];
-    int n=encode_page_for_dte("/tmp/fc2_test_src.tif",T4_COMPRESSION_T42_T81,0,stuffed,sizeof(stuffed));
+    int n=encode_page_for_dte(SRC_TIFF,T4_COMPRESSION_T42_T81,0,stuffed,sizeof(stuffed));
     int len=0;
     for (int i=0;i<n-2;i++) {
         if (stuffed[i]==0x10 && i+1<n-2) i++;
@@ -936,14 +938,13 @@ static int encode_page_for_dte(const char *path, int compression, int reversed,
 static uint8_t cap_buf[2][1 << 18];
 static int     cap_len[2];
 
-static const char *SRC_TIFF  = "/tmp/fc2_test_src.tif";
-static const char *PEER_RX   = "/tmp/fc2_test_peer_rx.tif";
-static const char *PEER_TX   = "/tmp/fc2_test_peer_tx.tif";
-static const char *DTE_RX    = "/tmp/fc2_test_dte_rx.tif";
-static const char *MULTI_TIFF = "/tmp/fc2_test_multi.tif";
+#define PEER_RX test_tmp("fc2_test_peer_rx.tif")
+#define PEER_TX test_tmp("fc2_test_peer_tx.tif")
+#define DTE_RX test_tmp("fc2_test_dte_rx.tif")
+#define MULTI_TIFF test_tmp("fc2_test_multi.tif")
 /* The far end's own multi-page document, kept separate from the one the DTE
  * feeds through +FDT so neither test can be fed the other's file. */
-static const char *PEER_MULTI = "/tmp/fc2_test_peer_multi.tif";
+#define PEER_MULTI test_tmp("fc2_test_peer_multi.tif")
 
 static void test_parameters(void)
 {

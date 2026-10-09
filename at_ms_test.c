@@ -9,6 +9,7 @@
  */
 
 #include "at_ms.h"
+#include "test_tmp.h"
 #include "data_interface.h"
 #include "modem_engine.h"
 
@@ -268,7 +269,7 @@ static void expect_describe(const char *want)
 
 static int test_engine(void)
 {
-    const char *link = "/tmp/at_ms_test_pty";
+    const char *link = test_tmp("at_ms_test_pty");
 
     printf("AT+MS through the PTY and the engine:\n");
     /* The power-on default must be the shipped one, whatever the caller's

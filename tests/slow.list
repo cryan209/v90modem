@@ -1,0 +1,22 @@
+# Slow tier: `make test-slow`.  Real-time engine runs that take 50-380 s each
+# (they wait on the fax protocol, not on the CPU).  Measured 2026-10-10.
+
+@group fax-v34-test fax-v34-engine-test
+FAX_TEST_PAGE=a4 ./fax_class2_test --engine-class1 ulaw 80
+FAX_TEST_PAGE=letter ./fax_class2_test --engine-class1 ulaw 80
+FAX_TEST_PAGE=a4 ./fax_class2_test --engine-class1 ulaw 160
+FAX_TEST_PAGE=letter ./fax_class2_test --engine-class1 ulaw 160
+FAX_TEST_PAGE=a4 ./fax_class2_test --engine-class1 alaw 80
+FAX_TEST_PAGE=letter ./fax_class2_test --engine-class1 alaw 80
+FAX_TEST_PAGE=a4 ./fax_class2_test --engine-class1 alaw 160
+FAX_TEST_PAGE=letter ./fax_class2_test --engine-class1 alaw 160
+FAX_TEST_PAGE=a4 ./fax_class2_test --engine-class21 ulaw 80
+FAX_TEST_PAGE=letter ./fax_class2_test --engine-class21 ulaw 80
+FAX_TEST_PAGE=a4 ./fax_class2_test --engine-class21 ulaw 160
+FAX_TEST_PAGE=letter ./fax_class2_test --engine-class21 ulaw 160
+FAX_TEST_PAGE=a4 ./fax_class2_test --engine-class21 alaw 80
+FAX_TEST_PAGE=letter ./fax_class2_test --engine-class21 alaw 80
+FAX_TEST_PAGE=a4 ./fax_class2_test --engine-class21 alaw 160
+FAX_TEST_PAGE=letter ./fax_class2_test --engine-class21 alaw 160
+@group
+./console_test

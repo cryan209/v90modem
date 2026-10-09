@@ -11,6 +11,7 @@
  */
 
 #include "data_interface.h"
+#include "test_tmp.h"
 #include <spandsp.h>
 #include <spandsp/t31.h>
 #include <spandsp/v34.h>
@@ -248,7 +249,7 @@ static void test_v34_class1(void)
 int main(int argc, char **argv)
 {
     if (argc > 1 && !strcmp(argv[1], "--v34")) { test_v34_class1(); return failures ? 1 : 0; }
-    const char *link = "/tmp/fax_class_test_pty";
+    const char *link = test_tmp("fax_class_test_pty");
     char resp[4096];
     double rms;
 

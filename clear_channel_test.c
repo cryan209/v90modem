@@ -12,6 +12,7 @@
  */
 
 #include "clear_channel.h"
+#include "test_tmp.h"
 #include "data_stack.h"
 #include "data_interface.h"
 #include "modem_engine.h"
@@ -1774,7 +1775,7 @@ static void test_on_hangup(void *user_data)
 
 static int test_engine(void)
 {
-    const char *link = "/tmp/clear_channel_test_pty";
+    const char *link = test_tmp("clear_channel_test_pty");
     struct termios tio;
     char desc[64];
 

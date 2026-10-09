@@ -224,3 +224,6 @@ v34_info1a_validate_test
 v34_phase4_16pt_test
 
 tools/eicon/__pycache__/
+
+# tools/run_tests.py output
+test-logs/

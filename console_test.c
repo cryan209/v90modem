@@ -18,6 +18,7 @@
  */
 
 #include "profile_file.h"
+#include "test_tmp.h"
 #include "data_interface.h"
 #include "at_help.h"
 #include "line_monitor.h"
@@ -146,7 +147,7 @@ static int engine_reads(char *out, int max, int timeout_ms)
 
 static void test_classic(void)
 {
-    const char *link = "/tmp/console_test_classic";
+    const char *link = test_tmp("console_test_classic");
     char buf[4096];
     char got[256];
     int dte;
@@ -237,8 +238,8 @@ static void test_classic(void)
 
 static void test_split(void)
 {
-    const char *clink = "/tmp/console_test_ctl";
-    const char *dlink = "/tmp/console_test_data";
+    const char *clink = test_tmp("console_test_ctl");
+    const char *dlink = test_tmp("console_test_data");
     char buf[4096];
     char got[256];
     int ctl, dat;
@@ -353,7 +354,7 @@ static void exchange(int fd, const char *cmd, char *out, size_t max)
 
 static void test_v250_parameters(void)
 {
-    const char *link = "/tmp/console_test_v250";
+    const char *link = test_tmp("console_test_v250");
     char buf[4096];
     int dte;
 
@@ -557,7 +558,7 @@ static void test_help(void)
         "Command Quick Reference", "Dial Commands", "Ampersand Commands",
         "Extended Commands", "Identification and Diagnostics", "S-Registers"
     };
-    const char *link = "/tmp/console_test_help";
+    const char *link = test_tmp("console_test_help");
     char buf[8192];
     char what[256];
     int dte;
@@ -768,7 +769,7 @@ static void test_help(void)
 /* Call progress: V.250 6.2.5-6.2.7, 6.3.1 (Table 8), 6.3.10 and 5.6.1. */
 static void test_call_progress(void)
 {
-    const char *link = "/tmp/console_test_progress";
+    const char *link = test_tmp("console_test_progress");
     char buf[4096];
     int dte;
     int h;
@@ -1028,7 +1029,7 @@ static int fake_ms_limits(const char *mode, bool automode, int min_tx, int max_t
  * refuse them, and a call it reports as outside them is not a CONNECT. */
 static void test_ms_limits(void)
 {
-    const char *link = "/tmp/console_test_mslim";
+    const char *link = test_tmp("console_test_mslim");
     char buf[1024];
     int dte;
 
@@ -1079,7 +1080,7 @@ static int fake_pmhr(void)
  * armed on a call; the answer arrives later as an information line. */
 static void test_pmhr(void)
 {
-    const char *link = "/tmp/console_test_pmhr";
+    const char *link = test_tmp("console_test_pmhr");
     char buf[1024];
     int dte;
 
@@ -1168,9 +1169,9 @@ static void test_profile_file(void)
 /* Stored profiles: &Wn, Zn, &Yn, &F, &V and --profile (di_load_profile). */
 static void test_profile(void)
 {
-    const char *link = "/tmp/console_test_profile";
-    const char *file = "/tmp/console_test_profile.cfg";
-    const char *jfile = "/tmp/console_test_profile.json";
+    const char *link = test_tmp("console_test_profile");
+    const char *file = test_tmp("console_test_profile.cfg");
+    const char *jfile = test_tmp("console_test_profile.json");
     char buf[16384];
     int dte;
 
