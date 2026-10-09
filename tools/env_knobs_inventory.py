@@ -65,6 +65,13 @@ def live_sources():
     return set()
 
 
+def tracked(paths):
+    """Only files in git: the doc describes the repository, not a working tree."""
+    out = subprocess.run(["git", "ls-files"], capture_output=True, text=True).stdout
+    known = set(out.split())
+    return [p for p in paths if p in known]
+
+
 def read_all(paths):
     texts = []
     for p in paths:
@@ -86,8 +93,8 @@ def classify(name):
 
 def main():
     live = live_sources() | set(os.path.basename(p) for p in glob.glob("spandsp-master/src/*.c"))
-    files = (glob.glob("*.c") + glob.glob("spandsp-master/src/*.c") + glob.glob("tools/*.c")
-             + glob.glob("rig/**/*.c", recursive=True))
+    files = tracked(glob.glob("*.c") + glob.glob("spandsp-master/src/*.c") + glob.glob("tools/*.c")
+                    + glob.glob("rig/**/*.c", recursive=True))
     info = {}
     for path in files:
         try:
@@ -114,6 +121,11 @@ def main():
     docs = read_all([p for p in glob.glob("docs/*.md")
                      if not p.endswith(("project_history.md", "env_knobs.md"))] + ["readme.md"])
     history = read_all(["docs/project_history.md"])
+    # A program that sets a variable for code it calls (vpcm_decode sweeping
+    # VPCM_V90_PP_PHASE) is a user of it.
+    setters = set()
+    for text in read_all(files):
+        setters.update(re.findall(r'\bsetenv\(\s*"([A-Z][A-Z0-9]*_[A-Z0-9_]+)"', text))
 
     def used(name, texts):
         rx = re.compile(r"\b%s\b" % re.escape(name))
@@ -129,8 +141,9 @@ def main():
             "cat": "setting" if name in settings else classify(name),
             "default": d["default"] or "",
             "ctx": settings.get(name, d["ctx"]),
-            "refs": "".join(c for c, t in (("t", tests), ("s", scripts), ("d", docs), ("h", history))
-                            if used(name, t)),
+            "refs": ("c" if name in setters else "")
+                    + "".join(c for c, t in (("t", tests), ("s", scripts), ("d", docs), ("h", history))
+                              if used(name, t)),
         })
 
     live_rows = [r for r in rows if r["live"]]
@@ -149,10 +162,11 @@ def main():
       "  before a measured fix (`=0 disables`) or enable an experiment that was measured\n"
       "  and left off. They are the removal backlog: hard-code the default that the\n"
       "  measurement chose and delete the other branch.\n\n"
-      "`refs` says where a name is mentioned outside the code that reads it: `t` a test\n"
+      "`refs` says where a name is used outside the code that reads it: `c` code that\n"
+      "sets it for a callee, `t` a test\n"
       "or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`\n"
-      "(where the measurement behind most switches is recorded). A switch with no `t`,\n"
-      "`s` or `d` is the first thing to remove.\n\n")
+      "(where the measurement behind most switches is recorded). A switch with no `c`,\n"
+      "`t`, `s` or `d` is the first thing to remove.\n\n")
 
     w("## Settings\n\n| name | read in | meaning |\n|---|---|---|\n")
     for name, meaning in SETTINGS:
@@ -162,7 +176,7 @@ def main():
     for title, cat in (("Live-path switches", "switch"), ("Live-path diagnostics", "diagnostic"),
                        ("Live-path test hooks", "test hook")):
         sel = [r for r in live_rows if r["cat"] == cat]
-        unused = sum(1 for r in sel if not set(r["refs"]) & set("tsd"))
+        unused = sum(1 for r in sel if not set(r["refs"]) & set("ctsd"))
         w("\n## %s (%d, %d with no test/script/doc reference)\n\n" % (title, len(sel), unused))
         w("| name | read in | default | refs | nearest comment |\n|---|---|---|---|---|\n")
         for r in sel:

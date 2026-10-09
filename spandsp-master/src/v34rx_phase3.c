@@ -707,9 +707,7 @@ void v34_rx_phase3_wait_s_symbol(v34_rx_state_t *s, const complexf_t *sym)
                      * was still wrong.  Clear the counters and the latch once,
                      * a little after tracking engages, so the lock is retaken
                      * on post-convergence data only. */
-                    if (v34_rx_phase3_tracking_enabled()
-                        &&
-                        s->phase3_tracking_armed
+                    if (s->phase3_tracking_armed
                         &&
                         s->phase3_trn_rescore_bits == 0
                         &&

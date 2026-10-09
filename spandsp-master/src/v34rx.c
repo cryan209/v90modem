@@ -118,36 +118,6 @@
    drops out more often than this is not one a renegotiation can rescue. */
 #define V34_V90_RENEG_CP_MAX_REACQUIRES 8
 
-/* Whether §9.6's streamed CP window keeps the decision-aided derotator and
-   its data-aided LMS.  Default off; see the call site. */
-static int v90_reneg_cp_da_enabled(void)
-{
-    static int cached = -1;
-
-    if (cached < 0)
-    {
-        const char *v = getenv("ME_V90_RENEG_CP_DA");
-
-        cached = (v  &&  atoi(v) == 1)  ?  1  :  0;
-    }
-    /*endif*/
-    return cached;
-}
-
-static int v90_reneg_cp_reacquire_blocks(void)
-{
-    static int cached = -1;
-
-    if (cached < 0)
-    {
-        const char *v = getenv("ME_V90_RENEG_CP_REACQUIRE_BLOCKS");
-
-        cached = (v  &&  atoi(v) > 0)  ?  atoi(v)  :  2;
-    }
-    /*endif*/
-    return cached;
-}
-
 static int v90_reneg_cp_reacquire_enabled(void)
 {
     static int cached = -1;
@@ -178,7 +148,7 @@ static double v90_reneg_feed_rms = 0.0;
    be a scaling one", which is a bring-up question, and it costs about 330
    float ops PER SYMBOL: at 3200 baud roughly 1 Mflop/s, which is around half
    the arithmetic budget of this whole receiver on an embedded target.
-   ME_V90_UPSTREAM_GAIN_SWEEP=0 turns it off. */
+   ME_V90_DATA_LEAN=1 turns it off. */
 /* PHASE4_TRN spends most of its length discovering the MP decode's
    domain/tap/bit-order and publishing them as phase4_trn_lock_*, which the MP
    case then uses as its lock hint.  All three are fixed by 8.5.2/10.1.3.3 and
@@ -195,19 +165,6 @@ static bool v34_rx_caller_hearing_own_phase3(v34_rx_state_t *s);
 static bool v34_rx_is_v34_call_modem(const v34_rx_state_t *s);
 static bool v34_rx_answerer_sending_own_phase3(v34_rx_state_t *s);
 
-static int v34_p4_trn_dd_start(void)
-{
-    static int cached = -2;
-
-    if (cached == -2)
-    {
-        const char *e = getenv("ME_V34_P4_TRN_DD");
-
-        cached = (e  &&  *e)  ?  atoi(e)  :  256;
-    }
-    /*endif*/
-    return cached;
-}
 static bool v34_rx_caller_hearing_own_phase3_m(v34_rx_state_t *s, int what);
 
 int v34_rx_j_hint_enabled(void)
@@ -217,22 +174,6 @@ int v34_rx_j_hint_enabled(void)
     if (cache < 0)
     {
         const char *v = getenv("ME_V34_J_HINT");
-
-        cache = (v && *v) ? (atoi(v) != 0) : 1;
-    }
-    /*endif*/
-    return cache;
-}
-/*- End of function --------------------------------------------------------*/
-
-
-int v34_rx_gain_sweep_enabled(void)
-{
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *v = getenv("ME_V90_UPSTREAM_GAIN_SWEEP");
 
         cache = (v && *v) ? (atoi(v) != 0) : 1;
     }
@@ -607,7 +548,6 @@ static int phase3_rx_dump_count = 0;
 
 static int v34_pp_onset_trim_enabled(void);
 static float v34_p4_trn_coh_gate(void);
-static int v34_p4_eye_flip_reopens_cma(void);
 #define PHASE3_PP_ACQUIRE_DECAY         0.98f
 #define V34_AGC_POWER_MIN               100000
 #define V34_AGC_SCALING_MIN             0.00001f
@@ -623,6 +563,12 @@ static int v34_p4_eye_flip_reopens_cma(void);
 #define PHASE4_CMA_SETTLE_BAUDS         128
 #define PHASE4_CMA_SETTLE_TOL           0.05f
 #define PHASE4_CMA_MAX_BAUDS            100000
+/* Phase 4 TRN: hand the equalizer from blind CMA to decision-directed LMS
+   after this many bauds of TRN. */
+#define V34_P4_TRN_DD_START             256
+/* 9.6 CP window: dead blocks before ME_V90_RENEG_CP_REACQUIRE re-arms the
+   one-shot CP acquisition. */
+#define V90_RENEG_CP_REACQUIRE_BLOCKS   2
 /* The Phase 3 S/J detector constants moved to v34rx_internal.h with the stage
    that uses them; their rationale travelled with them. */
 #define PHASE3_PP_ACQUIRE_LOG_INTERVAL  256
@@ -637,7 +583,6 @@ static int v34_p4_eye_flip_reopens_cma(void);
    comparison in docs/v90_phase3_s_and_rbs_false_positive.md 35a, which varied
    the recording and the decoder state together and could attribute nothing.
    Zero (the default) leaves the receiver exactly as it was. */
-
 
 enum
 {
@@ -710,8 +655,8 @@ static bool v90_startup_cp_adapt(void)
     return cached != 0;
 }
 
-/* ME_V90_CP_ADAPT_MU: the CP stage's CMA step, as a multiple of the ordinary
-   one, while ME_V90_CP_ADAPT_STARTUP is on.  Adaptation at the default step
+/* Step size: while ME_V90_CP_ADAPT_STARTUP is on the CP stage adapts at the
+   ordinary CMA step.  Adaptation at that step
    is measurably ON but ineffective: over the RasFinder's 10432-symbol CP
    stage the main tap creeps 0.74367 -> 0.75576, 1.6%, while the channel
    steps at symbol ~4000 and the differential margin goes 5.4 -> 21 deg and
@@ -734,28 +679,13 @@ static bool v90_startup_cp_adapt(void)
    solution off -- the main tap goes 0.74367 -> 0.39985 at mu=20 -- and
    destroys the CPt #1 that the ordinary step decodes cleanly, which is the
    failure this file's other CMA comments already describe.  Throwing the
-   Phase-3 solution away instead (ME_V90_CP_RESET_EQ=1, the renegotiation
+   Phase-3 solution away instead (equalizer_reset(), the renegotiation
    path's choice) is also worse, not better: 9.61 / 22.28 / 0.317, so CPt #1
    degrades from 5.90 and the post-step region does not move at all.
 
    So the post-step degradation is immune to EVERY equalizer treatment tried
    -- freeze, slow adapt, fast adapt, reset-and-adapt -- and is therefore not
-   an equalizer problem.  Default 1.0: the knob exists to keep that sweep
-   attached to the code, not because any value above 1 is useful. */
-static float v90_startup_cp_adapt_mu(void)
-{
-    static float cached = -1.0f;
-
-    if (cached < 0.0f)
-    {
-        const char *v = getenv("ME_V90_CP_ADAPT_MU");
-        float parsed = (v  &&  *v) ? strtof(v, NULL) : 0.0f;
-
-        cached = (parsed > 0.0f) ? parsed : 1.0f;
-    }
-    /*endif*/
-    return cached;
-}
+   an equalizer problem, and the ordinary step (mu=1 above) stays. */
 
 static bool v34_rx_stage_is_phase4_frame(int stage)
 {
@@ -942,27 +872,6 @@ int v34_rx_descramble(v34_rx_state_t *s, int in_bit)
     out_bit = (in_bit ^ (s->scramble_reg >> s->scrambler_tap) ^ (s->scramble_reg >> (23 - 1))) & 1;
     s->scramble_reg = (s->scramble_reg << 1) | in_bit;
     return out_bit;
-}
-/*- End of function --------------------------------------------------------*/
-
-/* Whether the receiver keeps adapting through Phase 3 once TRN is locked.
-   Default on; ME_V34_TRACK_PHASE3=0 restores the old frozen behaviour for A/B. */
-int v34_rx_phase3_tracking_enabled(void)
-{
-    static int initialized = 0;
-    static int enabled = 1;
-
-    if (!initialized)
-    {
-        const char *value = getenv("ME_V34_TRACK_PHASE3");
-
-        if (value  &&  value[0] != '\0'  &&  strcmp(value, "0") == 0)
-            enabled = 0;
-        /*endif*/
-        initialized = 1;
-    }
-    /*endif*/
-    return enabled;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -1756,24 +1665,6 @@ static bool v90_t3_phase_evidence_ok(v34_rx_state_t *s)
    the decision-directed one is gated off -- and it is stopped the moment the
    eye reopens, so the steady state is unchanged: the DD-LMS owns the taps
    whenever there are decisions worth owning them with. */
-/* ME_V90_UPSTREAM_CMA_MU sweeps the blind loop's step. */
-static float v90_t3_cma_mu(void)
-{
-    static float mu = -1.0f;
-
-    if (mu < 0.0f)
-    {
-        const char *value = getenv("ME_V90_UPSTREAM_CMA_MU");
-
-        mu = value ? (float) atof(value) : V34_V90_T3_CMA_MU;
-        if (mu <= 0.0f)
-            mu = V34_V90_T3_CMA_MU;
-        /*endif*/
-    }
-    /*endif*/
-    return mu;
-}
-/*- End of function --------------------------------------------------------*/
 
 /* The fixed-point FSE runs from its OWN copy of the taps: v90_t3_fse_fx, and
    the wide accumulator behind it, seeded from the float array once at prime
@@ -1952,7 +1843,7 @@ static void v90_t3_blind_recover(v34_rx_state_t *s,
     if (!isfinite(e)  ||  !isfinite(p2)  ||  fabsf(e) > 64.0f)
         return;
     /*endif*/
-    mu = v90_t3_cma_mu()/energy;
+    mu = V34_V90_T3_CMA_MU/energy;
     for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
     {
         complexf_t x = v90_t3_raw_get_frac(
@@ -1973,27 +1864,6 @@ static void v90_t3_blind_recover(v34_rx_state_t *s,
 }
 /*- End of function --------------------------------------------------------*/
 
-/* Whether an equalizer restore also discards the timing loop's frequency.
-   See the call site: the estimate it drops is the peer's clock offset, which
-   the restore has no reason to believe has changed.  ME_V90_TIMING_FREQ_KEEP=0
-   restores the old behaviour for an A/B. */
-static int v90_t3_restore_zeroes_timing_freq(void)
-{
-    static int cached = -1;
-
-    if (cached < 0)
-    {
-        const char *e = getenv("ME_V90_TIMING_FREQ_KEEP");
-
-        /* Default is to zero it, as before.  Keeping it was measured on
-           artifacts/goal-v90-073744Z and is slightly worse (30 clean windows
-           against 50), so the knob stays for the next investigation rather
-           than changing behaviour. */
-        cached = (e  &&  atoi(e) != 0) ? 0 : 1;
-    }
-    /*endif*/
-    return cached;
-}
 /*- End of function --------------------------------------------------------*/
 
 /* Hypothesis index whose map_table row is dibit -> (-dibit) & 3, i.e.
@@ -2228,9 +2098,6 @@ void v34_rx_phase4_trn_hyp_reset(v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
-
-
-
 static int phase4_trn_should_freeze_tracking(const v34_rx_state_t *s)
 {
     /* Also freeze carrier tracking during MP — the carrier phase was locked
@@ -2262,7 +2129,6 @@ static void phase3_trn_hyp_reset(v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
-
 static int mp_alternate_scrambler_tap(int tap)
 {
     /* V.34 uses the two complementary scrambler taps (x^-5 and x^-18),
@@ -2270,7 +2136,6 @@ static int mp_alternate_scrambler_tap(int tap)
     return (tap == 17) ? 4 : 17;
 }
 /*- End of function --------------------------------------------------------*/
-
 
 const char *v34_rx_phase4_trn_order_name(int order_idx)
 {
@@ -5460,59 +5325,11 @@ static int put_info_bit_count = 0;
    chance, falsely tripping "Tone A detected"/reversal events. This
    threshold requires real carrier-level power, not just "louder than the
    off/on hysteresis", before letting persistence2 accumulate at all. */
-/* Absolute override for the Tone A carrier gate.  Returns 0 when unset, which
-   selects the adaptive SNR gate in tone_a_carrier_present() below. */
-static int32_t tone_a_min_power_override(void)
-{
-    static int initialized = 0;
-    static int32_t threshold = 0;
-
-    if (!initialized)
-    {
-        const char *value = getenv("V34_TONE_A_MIN_POWER");
-        if (value  &&  value[0] != '\0')
-        {
-            char *end = NULL;
-            long parsed = strtol(value, &end, 10);
-            if (end != value  &&  end  &&  *end == '\0'  &&  parsed > 0)
-                threshold = (int32_t) parsed;
-            /*endif*/
-        }
-        /*endif*/
-        initialized = 1;
-    }
-    /*endif*/
-    return threshold;
-}
-/*- End of function --------------------------------------------------------*/
-
 /* How far below the measured carrier reference still counts as a real
    carrier.  The original absolute gate sat at 13000000 against a peer whose
    real carrier measured ~185000000 -- a ratio of ~14 -- so 8 reproduces that
    intent while being slightly more permissive. */
-static int32_t tone_a_carrier_divisor(void)
-{
-    static int initialized = 0;
-    static int32_t divisor = 8;         /* ~9 dB below the carrier reference */
-
-    if (!initialized)
-    {
-        const char *value = getenv("V34_TONE_A_CARRIER_DIVISOR");
-        if (value  &&  value[0] != '\0')
-        {
-            char *end = NULL;
-            long parsed = strtol(value, &end, 10);
-            if (end != value  &&  end  &&  *end == '\0'  &&  parsed > 1)
-                divisor = (int32_t) parsed;
-            /*endif*/
-        }
-        /*endif*/
-        initialized = 1;
-    }
-    /*endif*/
-    return divisor;
-}
-/*- End of function --------------------------------------------------------*/
+#define TONE_A_CARRIER_DIVISOR          8       /* ~9 dB below the carrier reference */
 
 /* Is info_rx() currently looking at a real carrier rather than line noise?
  *
@@ -5534,17 +5351,11 @@ static int32_t tone_a_carrier_divisor(void)
  * "aborting after 6 INFO1a timeouts".
  *
  * Gate relative to a measured carrier reference instead, so the same relative
- * discrimination applies at any absolute level.  V34_TONE_A_MIN_POWER still
- * forces the old absolute behaviour if a specific peer ever needs it. */
+ * discrimination applies at any absolute level. */
 static int tone_a_carrier_present(v34_rx_state_t *s)
 {
-    int32_t absolute;
     int32_t reference;
 
-    absolute = tone_a_min_power_override();
-    if (absolute > 0)
-        return s->last_info_rx_power >= absolute;
-    /*endif*/
     /* V.90 digital modem hearing the analogue modem's Tone A.  On a call we
        originate, V.8 completes on our side (JM received, CJ and 75 ms of
        silence sent) while the peer is still sending JM, which it stops only
@@ -5572,7 +5383,7 @@ static int tone_a_carrier_present(v34_rx_state_t *s)
         return true;
     }
     /*endif*/
-    return s->last_info_rx_power >= reference/tone_a_carrier_divisor();
+    return s->last_info_rx_power >= reference/TONE_A_CARRIER_DIVISOR;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -6579,7 +6390,7 @@ V34_RX_LOG(s->logging, SPAN_LOG_FLOW, "Signal up\n");
                  "Rx info_rx diag: ref=%d gate=%d carrier=%d "
                  "stage=%d sig=%d pwr=%d bits=%d\n",
                  s->info_rx_carrier_ref,
-                 s->info_rx_carrier_ref/tone_a_carrier_divisor(),
+                 s->info_rx_carrier_ref/TONE_A_CARRIER_DIVISOR,
                  tone_a_carrier_present(s),
                  s->stage, s->signal_present, power, s->bit_count);
     }
@@ -6735,8 +6546,7 @@ static __inline__ void pri_symbol_sync(v34_rx_state_t *s)
     /* A little integration will now filter away much of the HF noise */
     s->pri_ted.baud_phase -= p;
     v = abs(s->pri_ted.baud_phase);
-    if (v > 100*FP_FACTOR
-        && !(getenv("ME_V34_FREEZE_TIMING_DURING_MP") && phase4_trn_should_freeze_tracking(s)))
+    if (v > 100*FP_FACTOR)
     {
         i = (v > 1000*FP_FACTOR)  ?  15  :  1;
         if (s->pri_ted.baud_phase < 0)
@@ -6771,29 +6581,18 @@ static __inline__ void pri_symbol_sync(v34_rx_state_t *s)
     else if (s->pri_ted.baud_phase < -ted_phase_clip)
         s->pri_ted.baud_phase = -ted_phase_clip;
     v = fabsf(s->pri_ted.baud_phase);
-    if (v > ted_fine_trigger
-        && !(getenv("ME_V34_FREEZE_TIMING_DURING_MP") && phase4_trn_should_freeze_tracking(s)))
+    if (v > ted_fine_trigger)
     {
         i = (v > ted_coarse_trigger)  ?  2  :  1;
         if (s->pri_ted.baud_phase < 0.0f)
             i = -i;
         /*endif*/
-        /* ME_V34_FREEZE_TIMING_DURING_MP (experimental, 2026-07-19): live
-           interop showed the Godard symbol-timing loop, which is NOT frozen
-           during Phase 4 MP the way carrier tracking already is
-           (phase4_trn_should_freeze_tracking()), holding baud_phase steady
-           at exactly 0.0 for the entire preceding TRN period, then firing
-           one large, sustained eq_put_step correction right at the TRN->MP
-           boundary and settling into a new equilibrium it never recovers
-           from. Looked like a plausible cause of MP frames failing CRC with
-           errors that get worse later in the frame -- but verified live
-           with this flag set (confirmed via V34_TRACE_DIAGNOSTICS that
-           eq_put_step genuinely stayed frozen through the transition) that
-           the decoded MP frame bits come out byte-for-byte identical to the
-           unfrozen case anyway. Ruled out as the cause; left available
-           (default off) since it's a real, harmless option and the negative
-           result is worth being able to reproduce rather than silently losing
-           the finding. See rig/README.md for the fuller elimination list. */
+        /* This loop is NOT frozen during Phase 4 MP the way carrier tracking
+           is (phase4_trn_should_freeze_tracking()).  Freezing it there was
+           tested live on 2026-07-19 because it fires one large correction at
+           the TRN->MP boundary: the decoded MP bits came out byte-for-byte
+           identical, so it is not why MP frames failed CRC.  See
+           rig/README.md for the fuller elimination list. */
         //printf("v = %10.5f %5d - %f %f %d\n", v, i, p, s->pri_ted.baud_phase, s->total_baud_timing_correction);
         s->eq_put_step += i;
         s->total_baud_timing_correction += i;
@@ -6978,26 +6777,6 @@ int v34_rx_data_mode_eq_enabled(void)
 }
 /*- End of function --------------------------------------------------------*/
 
-/* Squared distance, in grid units, beyond which a data-mode decision is not
-   trusted to steer the equalizer or the carrier loop.  ME_V34_DATA_EQ_GATE
-   sweeps it; see the note at the call site for what the value costs. */
-/* Integrator gain of the second-order data-mode carrier loop.
-   ME_V34_DATA_FREQ_GAIN sweeps it. */
-float v34_rx_data_mode_freq_gain(void)
-{
-    static float gain = -1.0f;
-
-    if (gain < 0.0f)
-    {
-        const char *value = getenv("ME_V34_DATA_FREQ_GAIN");
-
-        gain = (value  &&  *value)  ?  (float) atof(value)  :  (1.0f/4096.0f);
-    }
-    /*endif*/
-    return gain;
-}
-/*- End of function --------------------------------------------------------*/
-
 /* Step-size scale for the data-mode DD-LMS, relative to the training step.
    Training's step is sized for a constant-modulus reference that is right every
    time; data decisions are neither, and on a real channel a step that is fine
@@ -7018,21 +6797,6 @@ float v34_rx_data_mode_eq_step(const v34_rx_state_t *s)
     }
     /*endif*/
     return step >= 0.0f ? step : (v34_rx_b1_batch_eq_enabled(s) ? 0.03f : 1.0f);
-}
-/*- End of function --------------------------------------------------------*/
-
-float v34_rx_data_mode_decision_gate(void)
-{
-    static float gate = -1.0f;
-
-    if (gate < 0.0f)
-    {
-        const char *value = getenv("ME_V34_DATA_EQ_GATE");
-
-        gate = (value  &&  *value)  ?  (float) atof(value)  :  0.35f;
-    }
-    /*endif*/
-    return gate;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -7088,33 +6852,7 @@ void v34_rx_tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complex
  * settled estimate sits inside a tolerance of the unit circle CMA drives to.
  * Once it does, CMA stands down for the rest of Phase 4 and the 11.3 solution
  * is carried into MP unchanged.  Deliberately sticky: a momentary excursion
- * must not restart the blind gradient, which is the behaviour being removed.
- * ME_V34_PHASE4_CMA=full restores the unbounded historical loop for A/B. */
-static int phase4_cma_settle_bauds(void)
-{
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *value = getenv("ME_V34_PHASE4_CMA_BAUDS");
-
-        cache = (value && atoi(value) > 0) ? atoi(value) : PHASE4_CMA_SETTLE_BAUDS;
-    }
-    return cache;
-}
-
-static float phase4_cma_settle_tol(void)
-{
-    static float cache = -1.0f;
-
-    if (cache < 0.0f)
-    {
-        const char *value = getenv("ME_V34_PHASE4_CMA_TOL");
-
-        cache = (value && strtof(value, NULL) > 0.0f) ? strtof(value, NULL) : PHASE4_CMA_SETTLE_TOL;
-    }
-    return cache;
-}
+ * must not restart the blind gradient, which is the behaviour being removed. */
 
 /* Phase 3 keeps adapting through the peer's TRN and Ja so that Ja -- which is
    data, and needs every symbol right -- is not decoded through a frozen,
@@ -7140,35 +6878,10 @@ static int phase3_cma_disabled(void)
 }
 /*- End of function --------------------------------------------------------*/
 
-static int phase4_cma_max_bauds(void)
-{
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *value = getenv("ME_V34_PHASE4_CMA_MAX_BAUDS");
-
-        cache = (value  &&  atoi(value) >= 0)  ?  atoi(value)  :  PHASE4_CMA_MAX_BAUDS;
-    }
-    /*endif*/
-    return cache;
-}
-
 static int phase4_cma_converged(v34_rx_state_t *s, const complexf_t *z)
 {
-    static int unbounded = -1;
     float mag;
 
-    if (unbounded < 0)
-    {
-        const char *value = getenv("ME_V34_PHASE4_CMA");
-
-        unbounded = (value  &&  strcmp(value, "full") == 0);
-    }
-    /*endif*/
-    if (unbounded)
-        return 0;
-    /*endif*/
     if (s->stage != V34_RX_STAGE_PHASE4_TRN)
         return 0;
     /*endif*/
@@ -7185,9 +6898,9 @@ static int phase4_cma_converged(v34_rx_state_t *s, const complexf_t *z)
         s->phase4_cma_mag += 0.02f*(mag - s->phase4_cma_mag);
     /*endif*/
     s->phase4_cma_bauds++;
-    if ((s->phase4_cma_bauds >= phase4_cma_settle_bauds()
-         &&  fabsf(s->phase4_cma_mag - 1.0f) <= phase4_cma_settle_tol())
-        ||  s->phase4_cma_bauds >= phase4_cma_max_bauds())
+    if ((s->phase4_cma_bauds >= PHASE4_CMA_SETTLE_BAUDS
+         &&  fabsf(s->phase4_cma_mag - 1.0f) <= PHASE4_CMA_SETTLE_TOL)
+        ||  s->phase4_cma_bauds >= PHASE4_CMA_MAX_BAUDS)
     {
         s->phase4_cma_settled = 1;
         V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
@@ -7256,9 +6969,9 @@ static int v90_reneg_cma_converged(v34_rx_state_t *s, const complexf_t *z)
         s->reneg_cma_mag += 0.02f*(mag - s->reneg_cma_mag);
     /*endif*/
     s->reneg_cma_bauds++;
-    if (s->reneg_cma_bauds >= phase4_cma_settle_bauds()
+    if (s->reneg_cma_bauds >= PHASE4_CMA_SETTLE_BAUDS
         &&
-        fabsf(s->reneg_cma_mag - 1.0f) <= phase4_cma_settle_tol())
+        fabsf(s->reneg_cma_mag - 1.0f) <= PHASE4_CMA_SETTLE_TOL)
     {
         s->reneg_cp_settled = 1;
         /* Whether to keep adapting through the peer's CP burst.
@@ -7290,7 +7003,7 @@ static int v90_reneg_cma_converged(v34_rx_state_t *s, const complexf_t *z)
         return 1;
     }
     /*endif*/
-    if (s->reneg_cma_bauds >= phase4_cma_max_bauds())
+    if (s->reneg_cma_bauds >= PHASE4_CMA_MAX_BAUDS)
     {
         s->reneg_cp_train = 0;
         V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
@@ -7301,43 +7014,6 @@ static int v90_reneg_cma_converged(v34_rx_state_t *s, const complexf_t *z)
     }
     /*endif*/
     return 0;
-}
-/*- End of function --------------------------------------------------------*/
-
-/* How many of the 127 T/2 equalizer taps blind adaptation is allowed to
-   touch, centred on the main tap.  0 (the default) means all of them. */
-/* Leakage applied to the blind CMA update: each adapted tap is pulled
-   towards zero by this fraction per update, which caps the misadjustment
-   noise a 127-tap filter accumulates on a near-delta channel without
-   having to choose a span per symbol rate.  0 (the default) disables it. */
-static float v34_eq_leak(void)
-{
-    static float cache = -1.0f;
-
-    if (cache < 0.0f)
-    {
-        const char *value = getenv("ME_V34_EQ_LEAK");
-
-        cache = (value  &&  strtof(value, NULL) > 0.0f)
-              ?  strtof(value, NULL)  :  0.0f;
-    }
-    /*endif*/
-    return cache;
-}
-/*- End of function --------------------------------------------------------*/
-
-static int v34_eq_adapt_span(void)
-{
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *value = getenv("ME_V34_EQ_ADAPT_SPAN");
-
-        cache = (value  &&  atoi(value) > 0)  ?  atoi(value)  :  0;
-    }
-    /*endif*/
-    return cache;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -7367,43 +7043,7 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
     R2 = 1.0f;
     error = R2 - y_mag2;
 
-    /* On a real analogue line, the Phase 3 solution is usually useful at
-       the start of Phase 4.  Keep CMA available for slow level correction,
-       but avoid letting its blind phase-insensitive gradient pull the taps
-       away from that trained solution while MP/CP is being acquired.  This
-       is deliberately opt-in for live A/B testing. */
     cma_delta = s->eq_delta;
-    if (v34_rx_stage_is_phase4_frame(s->stage)
-        && getenv("ME_V34_SLOW_CMA_DURING_MP"))
-    {
-        cma_delta *= EQUALIZER_SLOW_ADAPT_RATIO;
-    }
-    /* Startup CP, adapting: re-converge rather than creep.  See
-       v90_startup_cp_adapt_mu(). */
-    if (s->stage == V34_RX_STAGE_V90_CP
-        &&
-        !s->reneg_cp_train
-        &&
-        v90_startup_cp_adapt())
-    {
-        cma_delta *= v90_startup_cp_adapt_mu();
-    }
-    /*endif*/
-    if (s->stage == V34_RX_STAGE_PHASE4_TRN)
-    {
-        static float mu_scale = -1.0f;
-
-        if (mu_scale < 0.0f)
-        {
-            const char *value = getenv("ME_V34_PHASE4_CMA_MU");
-
-            mu_scale = (value  &&  strtof(value, NULL) > 0.0f)
-                     ?  strtof(value, NULL)  :  1.0f;
-        }
-        /*endif*/
-        cma_delta *= mu_scale;
-    }
-    /*endif*/
 
     /* Log CMA error periodically */
     if (V34_TRACE_DIAGNOSTICS && ((s->duration & 0xFF) == 0))
@@ -7430,36 +7070,16 @@ static void tune_equalizer_cma(v34_rx_state_t *s, const complexf_t *z)
         gz.im = 0.1f * cma_delta * error * z->im / norm;
     }
 
+    p = s->eq_step - 1;
+    for (i = 0;  i < V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN;  i++)
     {
-        int span = v34_eq_adapt_span();
-        int lo = 0;
-        int hi = V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN;
-
-        if (span > 0 && span < hi)
-        {
-            lo = V34_EQUALIZER_PRE_LEN - span/2;
-            hi = lo + span;
-            if (lo < 0)
-                lo = 0;
-            /*endif*/
-        }
-        /*endif*/
-        float keep = 1.0f - v34_eq_leak();
-
-        p = s->eq_step - 1;
-        for (i = 0;  i < V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN;  i++)
-        {
-            p = (p - 1) & V34_EQUALIZER_MASK;
-            if (i < lo  ||  i >= hi)
-                continue;
-            /*endif*/
-            z1 = complex_conjf(&s->eq_buf[p]);
-            z1 = complex_mulf(&gz, &z1);
-            s->eq_coeff[i].re = s->eq_coeff[i].re*keep + z1.re;
-            s->eq_coeff[i].im = s->eq_coeff[i].im*keep + z1.im;
-        }
-        /*endfor*/
+        p = (p - 1) & V34_EQUALIZER_MASK;
+        z1 = complex_conjf(&s->eq_buf[p]);
+        z1 = complex_mulf(&gz, &z1);
+        s->eq_coeff[i].re += z1.re;
+        s->eq_coeff[i].im += z1.im;
     }
+    /*endfor*/
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -8851,6 +8471,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 }
                 /*endif*/
                 s->phase3_pp_phase = (s->phase3_pp_phase + acquire_bauds - s->phase3_pp_skip + 4*PP_PERIOD_SYMBOLS) % PP_PERIOD_SYMBOLS;
+                /* vpcm_decode's VPCM_V90_PP_SWEEP sets this to grade each phase. */
                 if (getenv("VPCM_V90_PP_PHASE"))
                 {
                     int forced_phase = atoi(getenv("VPCM_V90_PP_PHASE"));
@@ -9480,25 +9101,6 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
             s->stage = V34_RX_STAGE_PHASE4_TRN;
             s->duration = 0;
             s->scramble_reg = 0;
-            {
-                static int nudge = -1000000;
-
-                if (nudge == -1000000)
-                {
-                    const char *value = getenv("ME_V34_PHASE4_TIMING_NUDGE");
-
-                    nudge = value  ?  atoi(value)  :  0;
-                }
-                /*endif*/
-                if (nudge)
-                {
-                    s->eq_put_step += nudge;
-                    V34_RX_LOG(s->logging, SPAN_LOG_FLOW,
-                             "Rx - Phase 4: sampling phase nudged by %d/%d sample\n",
-                             nudge, V34_RX_PULSESHAPER_COEFF_SETS);
-                }
-                /*endif*/
-            }
             phase4_j_detector_reset(s);
             v34_rx_phase4_trn_hyp_reset(s);
             if (v34_rx_is_v34_call_modem(s))
@@ -9654,17 +9256,8 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
            90-degree ambiguity that V.34's differential quadrant bits absorb
            in data mode) and drive the existing carrier loop with the angle
            error, so the constellation is pulled onto the true grid before
-           E/B1 hands over to the DATA slicer.  ME_V34_PHASE4_DA_TRACK=0
-           disables for A/B. */
+           E/B1 hands over to the DATA slicer. */
         {
-            static int da_enabled = -1;
-
-            if (da_enabled < 0)
-            {
-                const char *value = getenv("ME_V34_PHASE4_DA_TRACK");
-
-                da_enabled = (value == NULL || atoi(value) != 0);
-            }
             float da_sym_mag2 = sym->re*sym->re + sym->im*sym->im;
 
             /* V.90 9.6: the decision-aided derotator and its data-aided LMS
@@ -9684,12 +9277,12 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                events and steps by +25, +24, +27, +25, -20 and +23 degrees at
                six instants, each one a re-lock.  So the loop is not tracking
                the channel here, it is stepping the constellation around on
-               its own decisions.  ME_V90_RENEG_CP_DA=1 restores it. */
-            if (s->v90_cp_stream  &&  !v90_reneg_cp_da_enabled())
+               its own decisions, so it is off while CP is streamed. */
+            if (s->v90_cp_stream)
             {
                 s->phase4_da_active = 0;
             }
-            else if (!da_enabled || s->mp_hypothesis < 0)
+            else if (s->mp_hypothesis < 0)
             {
                 s->phase4_da_active = 0;
             }
@@ -11312,10 +10905,8 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
            frame after them grouped three symbols late (19 mod 8), a clean eye
            decoding to white bits, and no V.42 ODP ever seen
            (artifacts/slm-v90-lapm3).  No data-frame phase can fix that,
-           which is why the frame-phase sweep never found one.
-           ME_V90_T3_ADMIT_T2=1 restores the old behaviour. */
-        if (!v34_rx_t2_data_path(s)  &&  !s->v90_t3_in_emit
-            &&  !getenv("ME_V90_T3_ADMIT_T2"))
+           which is why the frame-phase sweep never found one. */
+        if (!v34_rx_t2_data_path(s)  &&  !s->v90_t3_in_emit)
             break;
         /*endif*/
         v34_rx_data_symbol(s, sym);
@@ -11370,13 +10961,11 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
              *
              * Gated on phase3_trn_lock_hyp >= 0 so this only switches on once
              * TRN is locked, i.e. well past the S detector -- S is carried as
-             * phase reversals and must not be tracked out.  Set
-             * ME_V34_TRACK_PHASE3=0 to restore the frozen behaviour. */
+             * phase reversals and must not be tracked out. */
             if ((s->stage == V34_RX_STAGE_PHASE4_TRN
                  || v34_rx_stage_is_phase4_frame(s->stage)
                  || (s->stage == V34_RX_STAGE_PHASE3_WAIT_S
                      && s->phase3_tracking_armed
-                     && v34_rx_phase3_tracking_enabled()
                      && !v34_rx_caller_hearing_own_phase3_m(s, 1)))
                 &&
                 !(s->stage == V34_RX_STAGE_PHASE3_WAIT_S && phase3_cma_disabled()))
@@ -11459,8 +11048,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                 /*endif*/
                 if (s->stage == V34_RX_STAGE_PHASE4_TRN
                     &&  (!s->v90_mode  ||  s->v90_v34_fallback)
-                    &&  v34_p4_trn_dd_start() > 0
-                    &&  s->phase4_trn_after_j >= v34_p4_trn_dd_start()
+                    &&  s->phase4_trn_after_j >= V34_P4_TRN_DD_START
                     &&  p4_trn_trusted)
                 {
                     /* V.34 11.4.1.1.2/11.4.1.2.2: TRN is sent "until the
@@ -11476,8 +11064,8 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                        directed LMS on TRN's own 4-point decisions for the rest
                        of the segment takes the same recording to 1.1 degrees,
                        |z| spread 0.015 and B1 at 1.000 (32 dB)
-                       (rf-tower-v34b-1).  ME_V34_P4_TRN_DD=0 disables; the
-                       value is the TRN symbol it starts at. */
+                       (rf-tower-v34b-1).  V34_P4_TRN_DD_START is the TRN
+                       symbol it starts at. */
                     v34_rx_tune_equalizer(s, sym, &eq_target);
                 }
                 else if (!t_cma->tx.tx_data_mode && !freeze_mp_cma && !da_owns_eq)
@@ -11490,9 +11078,6 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     }
                     else if (!p4_trn_trusted  ||  !phase4_cma_converged(s, sym))
                         tune_equalizer_cma(s, sym);
-                    else if (getenv("V34_PHASE4_DD_TRN")
-                             && s->stage == V34_RX_STAGE_PHASE4_TRN)
-                        v34_rx_tune_equalizer(s, sym, &eq_target);
                     /*endif*/
                 }
                 /*endif*/
@@ -11507,7 +11092,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                   && (!s->phase3_pp_started
                       || s->duration <= PHASE3_PP_TRAIN_BAUDS))
                 && (s->stage != V34_RX_STAGE_PHASE3_WAIT_S
-                 || (s->phase3_tracking_armed && v34_rx_phase3_tracking_enabled()
+                 || (s->phase3_tracking_armed
                      && !v34_rx_caller_hearing_own_phase3_m(s, 2)))
                 && !phase4_trn_should_freeze_tracking(s))
             {
@@ -11680,91 +11265,6 @@ static float v34_p4_trn_coh_gate(void)
     return cache;
 }
 
-/* ME_V34_P4_EYE_FLIP_CMA=0 leaves CMA settled across a Phase 4 eye flip. */
-static int v34_p4_eye_flip_reopens_cma(void)
-{
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *value = getenv("ME_V34_P4_EYE_FLIP_CMA");
-
-        cache = (value  &&  value[0] == '0')  ?  0  :  1;
-    }
-    /*endif*/
-    return cache;
-}
-
-static int v34_eye_votes_needed(void)
-{
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *value = getenv("ME_V34_EYE_VOTES");
-
-        cache = (value && atoi(value) > 0) ? atoi(value) : V34_EYE_VOTES;
-    }
-    /*endif*/
-    return cache;
-}
-
-static int v34_eye_window(void)
-{
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *value = getenv("ME_V34_EYE_WINDOW");
-
-        cache = (value && atoi(value) > 0) ? atoi(value) : V34_EYE_OBSERVE_SYMBOLS;
-    }
-    /*endif*/
-    return cache;
-}
-
-static float v34_eye_margin(void)
-{
-    static float cache = -1.0f;
-
-    if (cache < 0.0f)
-    {
-        const char *value = getenv("ME_V34_EYE_MARGIN");
-
-        cache = value  ?  strtof(value, NULL)  :  V34_EYE_MARGIN;
-    }
-    /*endif*/
-    return cache;
-}
-
-static int v34_eye_max_flips(void)
-{
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *value = getenv("ME_V34_EYE_MAX_FLIPS");
-
-        cache = value  ?  atoi(value)  :  V34_EYE_MAX_FLIPS;
-    }
-    /*endif*/
-    return cache;
-}
-
-static float v34_eye_min_mag(void)
-{
-    static float cache = -1.0f;
-
-    if (cache < 0.0f)
-    {
-        const char *value = getenv("ME_V34_EYE_MIN_MAG");
-
-        cache = value  ?  strtof(value, NULL)  :  V34_EYE_MIN_MAG;
-    }
-    /*endif*/
-    return cache;
-}
-
 static bool v34_eye_pp_defer_enabled(void)
 {
     static int cache = -1;
@@ -11816,7 +11316,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
        coin-flip chance of moving the symbol instant to the wrong phase just
        before the far end's Phase 4 S arrives. */
     eye_check = (v34_rx_stage_is_primary_training(s->stage)
-                 &&  s->eye_flips < v34_eye_max_flips()
+                 &&  s->eye_flips < V34_EYE_MAX_FLIPS
                  &&  v34_eye_select_enabled()
                  &&  !v34_rx_caller_hearing_own_phase3_m(s, 4));
     /* V.90 digital modem: once PP conditioning has begun, leave the symbol
@@ -11959,7 +11459,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
            eye within that signal, rather than after a 256-symbol window. */
         int eye_window = ((s->hdx_primary_resync && s->stage == V34_RX_STAGE_PHASE4_S)
                           || (!s->duplex && s->stage == V34_RX_STAGE_PHASE3_WAIT_S))
-                         ? 64 : v34_eye_window();
+                         ? 64 : V34_EYE_OBSERVE_SYMBOLS;
         if (++s->eye_n >= eye_window)
         {
             bool cp_angle = (s->stage == V34_RX_STAGE_V90_CP
@@ -11978,11 +11478,11 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                to use, not the line power meter: it is the quantity the
                decision is actually made on. */
             if (s->eye_on_sum + s->eye_off_sum
-                    > 2.0f*v34_eye_min_mag()*eye_window
+                    > 2.0f*V34_EYE_MIN_MAG*eye_window
                 &&
                 (cp_angle
                  ?  (on_rms_deg > 15.0f  &&  2.0f*s->eye_off_aerr < s->eye_on_aerr)
-                 :  (s->eye_off_sum > v34_eye_margin()*s->eye_on_sum)))
+                 :  (s->eye_off_sum > V34_EYE_MARGIN*s->eye_on_sum)))
                 s->eye_votes++;
             else
                 s->eye_votes = 0;
@@ -11999,7 +11499,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                1.17 samples apart and a single window decided by ratios of 1.05
                to 1.19, so the receiver flipped four times in one call and
                finished wherever the cap left it. */
-            if (s->eye_votes >= v34_eye_votes_needed()  &&  eye_hold)
+            if (s->eye_votes >= V34_EYE_VOTES  &&  eye_hold)
             {
                 /* Measured, and not acted on until PP is over.  See above. */
                 s->eye_votes = 0;
@@ -12018,7 +11518,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                          "but PP is being conditioned on; not moving the symbol instant\n",
                          (double) s->eye_off_sum, (double) s->eye_on_sum);
             }
-            else if (s->eye_votes >= v34_eye_votes_needed())
+            else if (s->eye_votes >= V34_EYE_VOTES)
             {
                 s->eye_votes = 0;
                 s->eye_flips++;
@@ -12030,7 +11530,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
                 s->baud_half ^= 1;
                 s->eye_prev_on = complex_setf(0.0f, 0.0f);
                 s->eye_prev_off = complex_setf(0.0f, 0.0f);
-                if (s->stage == V34_RX_STAGE_PHASE4_TRN  &&  v34_p4_eye_flip_reopens_cma())
+                if (s->stage == V34_RX_STAGE_PHASE4_TRN)
                 {
                     /* The taps were trained, and CMA declared settled, with the
                        symbol instant where it was.  Half a symbol later they
@@ -13353,10 +12853,10 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                    of the sampling position, and zeroing it moves that
                    position by up to a whole sample with nothing to
                    compensate -- manufacturing, on the recovery path, exactly
-                   the fault the search below is there to undo. */
-                if (v90_t3_restore_zeroes_timing_freq())
-                    s->v90_t3_gardner.freq = 0.0f;
-                /*endif*/
+                   the fault the search below is there to undo.  Keeping the
+                   frequency instead was measured slightly worse (30 clean
+                   windows against 50, artifacts/goal-v90-073744Z). */
+                s->v90_t3_gardner.freq = 0.0f;
                 s->v90_t3_gardner.hold = 0;
                 s->v90_t3_fse_restores++;
                 V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
@@ -14100,9 +13600,6 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
            the fixed three-samples-per-symbol step for an A/B. */
         s->v90_t3_timing_enabled = (value == NULL || atoi(value) != 0);
         {
-            const char *mu = getenv("ME_V90_UPSTREAM_TIMING_MU");
-            const char *beta = getenv("ME_V90_UPSTREAM_TIMING_BETA");
-
             const char *det = getenv("ME_V90_UPSTREAM_TIMING_DET");
             const char *sm = getenv("ME_V90_UPSTREAM_SLIP_MULT");
 
@@ -14110,9 +13607,8 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
                                      : V34_V90_T3_SLIP_MULT;
 
             v34_gardner_init(&s->v90_t3_gardner,
-                             mu ? (float) atof(mu) : V34_GARDNER_DEFAULT_MU,
-                             beta ? (float) atof(beta)
-                                  : V34_GARDNER_DEFAULT_BETA);
+                             V34_GARDNER_DEFAULT_MU,
+                             V34_GARDNER_DEFAULT_BETA);
             /* Which timing error detector.  Non-data-aided Gardner is the
                one this loop was built on, and it is the wrong one once a
                dense constellation is carrying data: see v34_gardner.h and
@@ -15691,7 +15187,7 @@ static int primary_channel_rx(v34_rx_state_t *s, const int16_t amp[], int len)
                 &&
                 s->reneg_cp_settled
                 &&
-                blocks >= v90_reneg_cp_reacquire_blocks()
+                blocks >= V90_RENEG_CP_REACQUIRE_BLOCKS
                 &&
                 s->reneg_cp_reacquires < V34_V90_RENEG_CP_MAX_REACQUIRES)
             {
@@ -16589,8 +16085,8 @@ SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
        --split, which feeds RX as the two 80-sample calls per tick pjmedia
        makes live).  CPt is constant-modulus DPSK sent until we answer it,
        so give the stage two flips of its own and a fresh window. */
-    if (v34_eye_max_flips() - s->rx.eye_flips < 2)
-        s->rx.eye_flips = v34_eye_max_flips() - 2;
+    if (V34_EYE_MAX_FLIPS - s->rx.eye_flips < 2)
+        s->rx.eye_flips = V34_EYE_MAX_FLIPS - 2;
     /*endif*/
     s->rx.eye_votes = 0;
     s->rx.eye_on_sum = 0.0f;
@@ -16665,18 +16161,10 @@ SPAN_DECLARE(void) v34_force_v90_phase4_cp_rx(v34_state_t *s)
        DA loop to establish absolute phase, but §9.4.2.2/V.90 assumes the
        channel is static through this seam: adapting the CMA equalizer to a
        hypothesis that has not yet passed CP CRC can destroy the multi-level
-       data slicer's only valid equalizer.
-
-       ME_V90_CP_RESET_EQ=1 takes the renegotiation path's choice instead --
-       throw the Phase-3 solution away and let CMA converge from scratch on
-       the CP/SCR signal, which is constant modulus and therefore legitimate
-       training material.  Default off; see the sweep recorded against
-       v90_startup_cp_adapt_mu(). */
-    if (getenv("ME_V90_CP_RESET_EQ")  &&  atoi(getenv("ME_V90_CP_RESET_EQ")) != 0)
-        equalizer_reset(&s->rx);
-    else
-        equalizer_save(&s->rx);
-    /*endif*/
+       data slicer's only valid equalizer.  Resetting it instead, as the
+       renegotiation path does, was measured worse (see the step-size note
+       after v90_startup_cp_adapt()). */
+    equalizer_save(&s->rx);
     s->rx.phase4_da_active = 0;
     s->rx.phase4_da_seeded = 0;
     s->rx.phase4_da_derot = 0;

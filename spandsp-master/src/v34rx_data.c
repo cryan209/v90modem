@@ -845,7 +845,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    behaviour as the worst case. */
                 if (healthy
                     &&  !s->b1_replaying
-                    &&  d2 < v34_rx_data_mode_decision_gate()
+                    &&  d2 < V34_DATA_DECISION_GATE
                     &&  s->data_symbol_scale > 0.0f)
                 {
                     complexf_t da_target;
@@ -1127,7 +1127,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    scaling one -- V.34's per-rate modulation factor being the
                    obvious candidate -- and if none does, the symbols are not
                    a scaled version of the constellation at all. */
-                if (v34_rx_gain_sweep_enabled()  &&  !v34_rx_data_lean())
+                if (!v34_rx_data_lean())
                 {
                     for (int g = 0;  g < V34_V90_T3_GAIN_TRIALS;  g++)
                     {
@@ -1149,7 +1149,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                     char gains[256];
                     int len = 0;
 
-                    if (!v34_rx_gain_sweep_enabled()  ||  v34_rx_data_lean())
+                    if (v34_rx_data_lean())
                         goto skip_gain_report;
                     /*endif*/
                     for (int g = 0;  g < V34_V90_T3_GAIN_TRIALS;  g++)
@@ -1282,7 +1282,7 @@ skip_gain_report:
                 float ti = 2.0f*floorf(im/2.0f) + 1.0f;
                 float power = tr*tr + ti*ti;
                 float d2 = (re - tr)*(re - tr) + (im - ti)*(im - ti);
-                if (s->data_timing_count && d2 < v34_rx_data_mode_decision_gate())
+                if (s->data_timing_count && d2 < V34_DATA_DECISION_GATE)
                 {
                     float e = (s->data_timing_decision.re*re
                              + s->data_timing_decision.im*im
@@ -1376,7 +1376,7 @@ skip_gain_report:
                     if (sym_mag > 0.5f && tgt_mag > 0.5f
                         &&
                         ((g_re - t_re)*(g_re - t_re)
-                         + (g_im - t_im)*(g_im - t_im)) < v34_rx_data_mode_decision_gate())
+                         + (g_im - t_im)*(g_im - t_im)) < V34_DATA_DECISION_GATE)
                     {
                         /* Phase error in the transformed (grid) domain equals
                            the error in the equalizer domain: the transform is
@@ -1405,7 +1405,7 @@ skip_gain_report:
                            residual of -24 dB at the start of a 21600 call into
                            -12 dB by the end. */
                         s->phase4_da_derot_rate +=
-                            (int32_t) (error*v34_rx_data_mode_freq_gain()
+                            (int32_t) (error*V34_DATA_FREQ_GAIN
                                        *2147483648.0f/3.14159265f);
                     }
                 }

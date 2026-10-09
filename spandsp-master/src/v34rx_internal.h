@@ -30,9 +30,11 @@ void  v34_rx_pack_output_bitstream(v34_rx_state_t *s);
 /* Data-mode tuning knobs, each caching its own getenv. */
 int   v34_rx_data_mode_eq_enabled(void);
 float v34_rx_data_mode_eq_step(const v34_rx_state_t *s);
-float v34_rx_data_mode_freq_gain(void);
-float v34_rx_data_mode_decision_gate(void);
-int   v34_rx_gain_sweep_enabled(void);
+/* Integrator gain of the second-order data-mode carrier loop. */
+#define V34_DATA_FREQ_GAIN              (1.0f/4096.0f)
+/* Squared distance, in grid units, beyond which a data-mode decision is not
+   trusted to steer the equalizer or the carrier loop. */
+#define V34_DATA_DECISION_GATE          0.35f
 
 /* Shared constants and the diagnostics gate.  MP_HYPOTHESIS_COUNT is the size
    of map_phase4_raw_bits()'s transform table; V34_TRACE_DIAGNOSTICS caches its
@@ -112,7 +114,6 @@ void         v34_rx_phase4_trn_symbol(v34_rx_state_t *s, const complexf_t *sym);
 int      v34_rx_descramble_reg(uint32_t *reg, int scrambler_tap, int in_bit);
 int      v34_rx_map_phase4_raw_bits(int dibit, int hypothesis);
 void     v34_rx_bits16_to_str(uint16_t v, char out[17]);
-int      v34_rx_phase3_tracking_enabled(void);
 int      v34_rx_j_classify(uint16_t word, int *distance);
 int      v34_rx_phase3_j_pattern_bit(int pat_type, int bit_idx);
 uint16_t v34_rx_j_ordered16(uint16_t rx_recent16, int total_bits, int phase);
