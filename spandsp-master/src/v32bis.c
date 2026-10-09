@@ -190,9 +190,7 @@ SPAN_DECLARE(float) v32bis_rx_signal_power(v32bis_state_t *s)
 
 static int v32bis_echo_mu_slow(void)
 {
-    const char *e = getenv("V32BIS_ECHO_MU");
-
-    return (e != NULL) ? atoi(e) : V32BIS_ECHO_MU_SHIFT;
+    return V32BIS_ECHO_MU_SHIFT;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -206,16 +204,7 @@ static int v32bis_echo_mu_fast(void)
     for none.  It is optional, so 0 is a conformant modem. */
 static int v32bis_ec_train_symbols(void)
 {
-    const char *e = getenv("V32BIS_EC_TRAIN");
-    int n = (e != NULL) ? atoi(e) : V32BIS_EC_TRAIN_SYMBOLS;
-
-    if (n < 0)
-        n = 0;
-    /*endif*/
-    if (n > V32BIS_EC_TRAIN_MAX_SYMBOLS)
-        n = V32BIS_EC_TRAIN_MAX_SYMBOLS;
-    /*endif*/
-    return n;
+    return V32BIS_EC_TRAIN_SYMBOLS;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -228,9 +217,7 @@ static int v32bis_trn_ec_symbols(void)
 
 static bool v32bis_echo_can(void)
 {
-    const char *e = getenv("V32BIS_ECHO_CAN");
-
-    return (e == NULL  ||  atoi(e) != 0);
+    return true;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -556,21 +543,12 @@ SPAN_DECLARE(void) v32bis_set_put_bit(v32bis_state_t *s, span_put_bit_func_t put
 /*! Energy-normalized LMS. Default OFF, and its premise is now refuted. It was
     written for a residual that looked like gradient noise; that residual was
     the unlatched AGC below, and with the AGC latched the plain step recovers
-    every rate/law row without error while this costs 7952. Swept over
-    V32BIS_EQ_FAST it never bettered the plain step at any setting, and above
-    about 14x the equalizer diverges. V32BIS_NLMS=1 enables it. */
+    every rate/law row without error while this costs 7952. Swept over the
+    fast step it never bettered the plain step at any setting, and above
+    about 14x the equalizer diverges.  Off. */
 static bool v32bis_use_nlms(void)
 {
-    static int cached = -1;
-    const char *e;
-
-    if (cached < 0)
-    {
-        e = getenv("V32BIS_NLMS");
-        cached = (e != NULL  &&  atoi(e) != 0);
-    }
-    /*endif*/
-    return (bool) cached;
+    return false;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -579,64 +557,32 @@ static bool v32bis_use_nlms(void)
     equalizer buffer energy and so changes the effective step by that factor. */
 static float v32bis_eq_delta_fast(void)
 {
-    static float cached = -1.0f;
-    const char *e;
-
-    if (cached < 0.0f)
-    {
-        e = getenv("V32BIS_EQ_FAST");
-        cached = (e != NULL) ? (float) atof(e)*V32BIS_EQ_DELTA_FAST_BASE
-                             : V32BIS_EQ_DELTA_FAST_BASE;
-    }
-    /*endif*/
-    return cached;
+    return V32BIS_EQ_DELTA_FAST_BASE;
 }
 /*- End of function --------------------------------------------------------*/
 
 /*! Decision-directed equalizer adaption through the data phase. */
 static bool v32bis_data_eq(void)
 {
-    const char *e = getenv("V32BIS_DATA_EQ");
-
-    return (e == NULL  ||  atoi(e) != 0);
+    return true;
 }
 /*- End of function --------------------------------------------------------*/
 
 static float v32bis_eq_delta_slow(void)
 {
-    static float cached = -1.0f;
-    const char *e;
-
-    if (cached < 0.0f)
-    {
-        e = getenv("V32BIS_EQ_SLOW");
-        cached = (e != NULL) ? (float) atof(e)*V32BIS_EQ_DELTA_FAST
-                             : 0.1f*V32BIS_EQ_DELTA_FAST;
-    }
-    /*endif*/
-    return cached;
+    return 0.1f*V32BIS_EQ_DELTA_FAST;
 }
 /*- End of function --------------------------------------------------------*/
 
 static int v32bis_trn_fast_symbols(void)
 {
-    static int cached = -1;
-    const char *e;
-    int n;
-
-    if (cached >= 0)
-        return cached;
-    /*endif*/
-    e = getenv("V32BIS_TRN_FAST");
-    if (e != NULL  &&  (n = atoi(e)) >= 0)
-        return (cached = n);
     /* Swept over both laws at all five rates: 160/320/640 give 4539/5144/5415
        total bit errors at the 0.1 anneal.  Since the AGC latch below, the
        anneal is no longer load-bearing: every combination of TRN_FAST in
        {0, 80, 160, 320, 640, 1280} and EQ_SLOW in {0.1, 0.3, 1.0} recovers all
        ten rate/law rows without error.  It is kept because it still helps at
        the smallest steps, where 0.05 costs up to 743 bit errors. */
-    return (cached = 160);
+    return 160;
 }
 /*- End of function --------------------------------------------------------*/
 /*! ITU-T V.32bis 6.  B1 is the marks segment between E and data. */
@@ -665,11 +611,6 @@ static int v32bis_trn_symbols(void)
 
 static int v32bis_b1_symbols(void)
 {
-    const char *e = getenv("V32BIS_B1_SYMBOLS");
-    int n;
-
-    if (e != NULL  &&  (n = atoi(e)) > 0)
-        return n;
     return 128;
 }
 /*- End of function --------------------------------------------------------*/
@@ -3848,12 +3789,7 @@ SPAN_DECLARE(v32bis_state_t *) v32bis_init(v32bis_state_t *s,
     s->echo_can_enabled = v32bis_echo_can();
     s->ec_train_symbols = v32bis_ec_train_symbols();
     s->trn_ec_symbols = v32bis_trn_ec_symbols();
-    {
-        const char *e = getenv("V32BIS_ECHO_MU");
-
-        (void) e;
-        modem_echo_can_step_size(s->ec, v32bis_echo_mu_slow());
-    }
+    modem_echo_can_step_size(s->ec, v32bis_echo_mu_slow());
 
     {
         const char *d;

@@ -1475,54 +1475,10 @@ SPAN_DECLARE(int) v8_rx(v8_state_t *s, const int16_t *amp, int len)
                 report_event(s);
             }
             /*endif*/
-            /* Restart CM when the answerer has not replied.  Over the
-               RasFinder corpus a peer that hears CM at all hears it within
-               about a second of it starting; when it does not, it holds ANSam
-               its full 5.4 s and falls back to V.22, however long we stream
-               CM continuously.  A real calling modem keeps retrying, so break
-               CM with a short silence and start it afresh -- a new carrier
-               onset and preamble for a detector that missed the first.
-               ME_V8_CM_RESTART_MS sets the interval.  DEFAULT OFF: live on the
-               RasFinder hunt group (rf-cmr*), 1500 ms passed V.8 on 1 of 6
-               calls against 4 of 6 without it -- the break evidently lands
-               while the peer is acquiring. */
-            {
-                static int restart_ms = -1;
-
-                if (restart_ms < 0)
-                {
-                    const char *v = getenv("ME_V8_CM_RESTART_MS");
-
-                    restart_ms = (v  &&  *v)  ?  atoi(v)  :  0;
-                }
-                /*endif*/
-                if (s->cm_gap_samples > 0)
-                {
-                    if ((s->cm_gap_samples -= len) <= 0)
-                    {
-                        s->cm_gap_samples = 0;
-                        s->cm_on_samples = 0;
-                        fsk_tx_restart(&s->v21tx, &preset_fsk_specs[FSK_V21CH1]);
-                        send_cm_jm(s);
-                        s->fsk_tx_on = true;
-                        span_log(&s->logging, SPAN_LOG_FLOW, "CM restarted\n");
-                    }
-                    /*endif*/
-                    break;
-                }
-                /*endif*/
-                s->cm_on_samples += len;
-                if (restart_ms > 0
-                    &&  s->cm_on_samples >= milliseconds_to_samples(restart_ms)
-                    &&  s->rx_data_ptr == 0)
-                {
-                    queue_flush(s->tx_queue);
-                    s->fsk_tx_on = false;
-                    s->cm_gap_samples = milliseconds_to_samples(100);
-                    break;
-                }
-                /*endif*/
-            }
+            /* CM is streamed without a break.  Restarting it after a short
+               silence (for a detector that missed the first onset) was
+               measured on the RasFinder hunt group (rf-cmr*): with a 1500 ms
+               restart V.8 passed on 1 of 6 calls against 4 of 6 without. */
             if (queue_contents(s->tx_queue) < 10)
             {
                 /* Send CM again */
