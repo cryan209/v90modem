@@ -14,23 +14,8 @@
  * separate wideband streams (a stereo sound card looped back L->L, R->R), so
  * there is no echo path and no echo canceller.
  *
- * Slot k occupies [4000k, 4000k + 4000) Hz.  An 8 kHz real line signal lives
- * in 0..4000 Hz (V.34 at 3429 baud: 245..3674 Hz, roll-off to ~40..3880), so
- * the shift has to be single-sideband or the negative-frequency image lands in
- * the neighbouring slot:
- *
- *   TX  z[n] = x[n] e^{-j pi n/2}           (8 kHz; the wanted half now sits
- *                                            in -1960..+1880 Hz)
- *       u    = L-fold interpolation of z through a low-pass that keeps only
- *              that half (the other half sits 2120..5960 Hz, mod 8000)
- *       w[m] = 2 Re{ u[m] e^{j 2 pi (4000k + 2000) m / fs} }
- *   RX  v    = low-pass + L-fold decimation of w[m] e^{-j 2 pi (...) m / fs}
- *       x[n] = 2 Re{ v[n] e^{+j pi n/2} }
- *
- * which returns x exactly (to the filters) for a pure delay channel; a delay
- * also rotates the carrier, which the modem's own carrier recovery absorbs.
- * Adjacent slots are only ~160 Hz apart at the roll-off edges, so the one
- * low-pass prototype is long (Kaiser, see FDM_TAPS / FDM_BETA).
+ * Slot k occupies [4000k, 4000k + 4000) Hz; the SSB channel bank that puts
+ * each pair there and takes it out again is fdm_bank.[ch].
  *
  * The wideband stream is quantised to 16 bits after scaling the composite to
  * FDM_LEVEL_DBFS, so the 16-bit sound-card floor is in the loop.
@@ -70,10 +55,10 @@
 
 #include <spandsp.h>
 
+#include "fdm_bank.h"
+
 #define BLOCK_8K 160
 #define MAX_SLOTS 32
-#define SLOT_HZ 4000
-#define SHIFT_HZ 2000          /* e^{-j pi n/2} at 8 kHz */
 
 /* ------------------------------------------------------------------------ */
 /* Payload endpoints: identical pattern and sync to v34_duplex_test.        */
@@ -150,169 +135,6 @@ static void endpoint_init(endpoint_t *ep, uint32_t tx_seed, uint32_t rx_seed)
 }
 
 /* ------------------------------------------------------------------------ */
-/* Channel bank.                                                            */
-
-typedef struct { float re, im; } cf_t;
-
-static int g_fs;            /* wideband rate */
-static int g_l;             /* fs / 8000 */
-static int g_p;             /* prototype taps per 8 kHz sample */
-static int g_ntaps;         /* g_l * g_p */
-static float *g_h;          /* low-pass prototype at fs, unity DC gain */
-static float *g_cos;        /* cos(2 pi i / fs), i < fs */
-static float *g_sin;
-
-static double bessel_i0(double x)
-{
-    double sum = 1.0, term = 1.0;
-
-    for (int k = 1; k < 64; k++) {
-        term *= (x/(2.0*k))*(x/(2.0*k));
-        sum += term;
-        if (term < sum*1e-12)
-            break;
-    }
-    return sum;
-}
-
-static void design_prototype(double beta)
-{
-    /* Passband to ~1880 Hz, adjacent slot's roll-off edge at ~2040 Hz:
-       centre the cutoff in that gap. */
-    double fc = 1960.0/g_fs;
-    double mid = (g_ntaps - 1)/2.0;
-    double i0b = bessel_i0(beta);
-    double sum = 0.0;
-
-    g_h = calloc((size_t)g_ntaps, sizeof(float));
-    for (int i = 0; i < g_ntaps; i++) {
-        double t = i - mid;
-        double sinc = (t == 0.0) ? 2.0*fc : sin(2.0*M_PI*fc*t)/(M_PI*t);
-        double r = t/mid;
-        double w = bessel_i0(beta*sqrt(fmax(0.0, 1.0 - r*r)))/i0b;
-
-        g_h[i] = (float)(sinc*w);
-        sum += g_h[i];
-    }
-    for (int i = 0; i < g_ntaps; i++)
-        g_h[i] = (float)(g_h[i]/sum);
-
-    g_cos = malloc((size_t)g_fs*sizeof(float));
-    g_sin = malloc((size_t)g_fs*sizeof(float));
-    for (int i = 0; i < g_fs; i++) {
-        g_cos[i] = (float)cos(2.0*M_PI*i/g_fs);
-        g_sin[i] = (float)sin(2.0*M_PI*i/g_fs);
-    }
-}
-
-/* One slot's modulator: 8 kHz real in, wideband real added into out[]. */
-typedef struct {
-    int carrier_hz;     /* 4000k + 2000 */
-    int phase;          /* carrier phase index, mod fs */
-    int n8;             /* 8 kHz sample counter, for e^{-j pi n/2} */
-    cf_t *hist;         /* last g_p baseband samples, newest at [0] */
-} slot_tx_t;
-
-/* One slot's demodulator: wideband real in, 8 kHz real out. */
-typedef struct {
-    int carrier_hz;
-    int phase;
-    int n8;
-    int fill;           /* wideband samples since the last 8 kHz output */
-    int pos;            /* ring write position */
-    cf_t *ring;         /* 2*g_ntaps, mirrored for contiguous reads */
-} slot_rx_t;
-
-static void slot_tx_init(slot_tx_t *t, int slot)
-{
-    t->carrier_hz = slot*SLOT_HZ + SHIFT_HZ;
-    t->phase = 0;
-    t->n8 = 0;
-    t->hist = calloc((size_t)g_p, sizeof(cf_t));
-}
-
-static void slot_rx_init(slot_rx_t *r, int slot)
-{
-    r->carrier_hz = slot*SLOT_HZ + SHIFT_HZ;
-    r->phase = 0;
-    r->n8 = 0;
-    r->fill = 0;
-    r->pos = 0;
-    r->ring = calloc((size_t)2*g_ntaps, sizeof(cf_t));
-}
-
-static void slot_tx_run(slot_tx_t *t, const float *x, int n, float *out)
-{
-    /* e^{-j pi n/2}: 1, -j, -1, +j */
-    static const float qr[4] = { 1.0f, 0.0f, -1.0f, 0.0f };
-    static const float qi[4] = { 0.0f, -1.0f, 0.0f, 1.0f };
-
-    for (int i = 0; i < n; i++) {
-        int q = t->n8++ & 3;
-
-        memmove(t->hist + 1, t->hist, (size_t)(g_p - 1)*sizeof(cf_t));
-        t->hist[0].re = x[i]*qr[q];
-        t->hist[0].im = x[i]*qi[q];
-        for (int ph = 0; ph < g_l; ph++) {
-            float ur = 0.0f, ui = 0.0f;
-            const float *h = g_h + ph;
-
-            for (int k = 0; k < g_p; k++) {
-                ur += h[k*g_l]*t->hist[k].re;
-                ui += h[k*g_l]*t->hist[k].im;
-            }
-            /* gain L restores the interpolated amplitude; x2 for the real
-               part of a one-sided signal */
-            ur *= (float)g_l;
-            ui *= (float)g_l;
-            *out++ += 2.0f*(ur*g_cos[t->phase] - ui*g_sin[t->phase]);
-            t->phase += t->carrier_hz;
-            if (t->phase >= g_fs)
-                t->phase -= g_fs;
-        }
-    }
-}
-
-/* Consumes n wideband samples, writes up to n/L 8 kHz samples; returns count. */
-static int slot_rx_run(slot_rx_t *r, const float *w, int n, float *x)
-{
-    static const float qr[4] = { 1.0f, 0.0f, -1.0f, 0.0f };
-    static const float qi[4] = { 0.0f, 1.0f, 0.0f, -1.0f };   /* e^{+j pi n/2} */
-    int produced = 0;
-
-    for (int i = 0; i < n; i++) {
-        cf_t s;
-
-        s.re = w[i]*g_cos[r->phase];
-        s.im = -w[i]*g_sin[r->phase];
-        r->phase += r->carrier_hz;
-        if (r->phase >= g_fs)
-            r->phase -= g_fs;
-        r->ring[r->pos] = s;
-        r->ring[r->pos + g_ntaps] = s;
-        if (++r->pos >= g_ntaps)
-            r->pos = 0;
-        if (++r->fill < g_l)
-            continue;
-        r->fill = 0;
-        {
-            /* ring[pos .. pos+ntaps-1] is oldest..newest */
-            const cf_t *c = r->ring + r->pos;
-            float vr = 0.0f, vi = 0.0f;
-            int q = r->n8++ & 3;
-
-            for (int k = 0; k < g_ntaps; k++) {
-                float hk = g_h[g_ntaps - 1 - k];
-                vr += hk*c[k].re;
-                vi += hk*c[k].im;
-            }
-            x[produced++] = 2.0f*(vr*qr[q] - vi*qi[q]);
-        }
-    }
-    return produced;
-}
-
-/* ------------------------------------------------------------------------ */
 
 static double gauss(void)
 {
@@ -325,8 +147,8 @@ static double gauss(void)
 typedef struct {
     endpoint_t caller, answer;
     v34_state_t *call_modem, *answer_modem;
-    slot_tx_t tx_c2a, tx_a2c;
-    slot_rx_t rx_c2a, rx_a2c;
+    fdm_slot_tx_t tx_c2a, tx_a2c;
+    fdm_slot_rx_t rx_c2a, rx_a2c;
     float snr_db;          /* in-band noise; <= 0 = none */
     double pow_c, pow_a;   /* running signal power, for snr_db */
     long npow;
@@ -366,25 +188,23 @@ int main(int argc, char *argv[])
     int completed_block = -1;
     clock_t t0 = clock();
     int pass;
+    fdm_bank_t bank;
 
-    g_fs = getenv("FDM_RATE") ? atoi(getenv("FDM_RATE")) : 96000;
-    if (g_fs < 8000 || g_fs % 8000) {
+    if (fdm_bank_init(&bank,
+                      getenv("FDM_RATE") ? atoi(getenv("FDM_RATE")) : 96000,
+                      getenv("FDM_TAPS") ? atoi(getenv("FDM_TAPS")) : 96,
+                      beta) != 0) {
         fprintf(stderr, "FDM_RATE must be a multiple of 8000\n");
         return 2;
     }
-    g_l = g_fs/8000;
-    g_p = getenv("FDM_TAPS") ? atoi(getenv("FDM_TAPS")) : 96;
-    if (g_p < 8) g_p = 8;
-    g_ntaps = g_l*g_p;
     first = getenv("FDM_FIRST_SLOT") ? atoi(getenv("FDM_FIRST_SLOT")) : 0;
-    nslots = getenv("FDM_SLOTS") ? atoi(getenv("FDM_SLOTS")) : g_fs/(2*SLOT_HZ) - first;
-    if (first < 0 || nslots < 1 || first + nslots > g_fs/(2*SLOT_HZ) || nslots > MAX_SLOTS) {
+    nslots = getenv("FDM_SLOTS") ? atoi(getenv("FDM_SLOTS")) : fdm_bank_slots(&bank) - first;
+    if (first < 0 || nslots < 1 || first + nslots > fdm_bank_slots(&bank) || nslots > MAX_SLOTS) {
         fprintf(stderr, "slots %d..%d do not fit below %d Hz\n",
-                first, first + nslots - 1, g_fs/2);
+                first, first + nslots - 1, bank.fs/2);
         return 2;
     }
     if (delay < 0) delay = 0;
-    design_prototype(beta);
 
     /* V.34 transmits at -12 dBm0, about RMS 4000 on this int16 scale; scale
        each slot so the N-slot composite sits at FDM_LEVEL_DBFS. */
@@ -418,10 +238,10 @@ int main(int argc, char *argv[])
                 span_log_set_tag(v34_get_logging_state(sl->answer_modem), "answer");
             }
             start_block[s] = s*stagger_blocks;
-            slot_tx_init(&sl->tx_c2a, k);
-            slot_tx_init(&sl->tx_a2c, k);
-            slot_rx_init(&sl->rx_c2a, k);
-            slot_rx_init(&sl->rx_a2c, k);
+            fdm_slot_tx_init(&sl->tx_c2a, &bank, k);
+            fdm_slot_tx_init(&sl->tx_a2c, &bank, k);
+            fdm_slot_rx_init(&sl->rx_c2a, &bank, k);
+            fdm_slot_rx_init(&sl->rx_a2c, &bank, k);
             if (snr) {
                 sl->snr_db = strtof(snr, NULL);
                 snr = strchr(snr, ',');
@@ -430,7 +250,7 @@ int main(int argc, char *argv[])
         }
     }
     for (int d = 0; d < 2; d++) {
-        wide[d] = malloc((size_t)BLOCK_8K*g_l*sizeof(float));
+        wide[d] = malloc((size_t)BLOCK_8K*bank.l*sizeof(float));
         dline[d] = calloc((size_t)(delay + 1), sizeof(float));
     }
     if (getenv("FDM_TAP")) {
@@ -443,13 +263,13 @@ int main(int argc, char *argv[])
 
     printf("V.34 FDM: fs=%d, slots %d..%d (%d), %d baud/%d bps per slot, "
            "prototype %d taps (beta %.1f), composite %.1f dBFS%s\n",
-           g_fs, first, first + nslots - 1, nslots, baud, bps, g_ntaps, beta,
+           bank.fs, first, first + nslots - 1, nslots, baud, bps, bank.ntaps, beta,
            level_dbfs, delay ? ", delayed" : "");
     fflush(stdout);
 
     srand(12345);
     for (int block = 0; block < max_blocks; block++) {
-        int nw = BLOCK_8K*g_l;
+        int nw = BLOCK_8K*bank.l;
 
         memset(wide[0], 0, (size_t)nw*sizeof(float));
         memset(wide[1], 0, (size_t)nw*sizeof(float));
@@ -485,8 +305,8 @@ int main(int argc, char *argv[])
                 cf[i] *= gain;
                 af[i] *= gain;
             }
-            slot_tx_run(&sl->tx_c2a, cf, BLOCK_8K, wide[0]);
-            slot_tx_run(&sl->tx_a2c, af, BLOCK_8K, wide[1]);
+            fdm_slot_tx_run(&sl->tx_c2a, cf, BLOCK_8K, wide[0]);
+            fdm_slot_tx_run(&sl->tx_a2c, af, BLOCK_8K, wide[1]);
         }
 
         /* The wideband bearer: noise, 16-bit quantisation, bulk delay. */
@@ -527,11 +347,11 @@ int main(int argc, char *argv[])
             int16_t x16[BLOCK_8K + 4];
             int n;
 
-            n = slot_rx_run(&sl->rx_c2a, wide[0], nw, xf);
+            n = fdm_slot_rx_run(&sl->rx_c2a, wide[0], nw, xf);
             for (int i = 0; i < n; i++) x16[i] = sat16(xf[i]);
             if (block >= start_block[s])
                 (void)v34_rx(sl->answer_modem, x16, n);
-            n = slot_rx_run(&sl->rx_a2c, wide[1], nw, xf);
+            n = fdm_slot_rx_run(&sl->rx_a2c, wide[1], nw, xf);
             for (int i = 0; i < n; i++) x16[i] = sat16(xf[i]);
             if (block >= start_block[s]) {
                 (void)v34_rx(sl->call_modem, x16, n);
@@ -582,7 +402,7 @@ int main(int argc, char *argv[])
                     snprintf(done, sizeof(done), "%.2f",
                              (sl->caller.done_block + 1 - start_block[s])*0.020);
                 printf("%3d   %5d-%-5d     %d/%d    %-6d %-6d %7d/%-7d %5d/%-5d   %s\n",
-                       k, k*SLOT_HZ, k*SLOT_HZ + SLOT_HZ, sl->caller.trained, sl->answer.trained,
+                       k, k*FDM_SLOT_HZ, k*FDM_SLOT_HZ + FDM_SLOT_HZ, sl->caller.trained, sl->answer.trained,
                        a2c*2400, c2a*2400, sl->caller.rx_bits, sl->answer.rx_bits,
                        sl->caller.bit_errors, sl->answer.bit_errors, done);
             }

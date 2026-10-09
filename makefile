@@ -526,8 +526,8 @@ v34_duplex_test: $(V34_DUPLEX_TEST_OBJS) spandsp
 
 # N unmodified 8 kHz V.34 pairs frequency-multiplexed over one 48/96 kHz
 # linear channel (docs/v34_fdm.md).  Exploratory; not part of make test.
-v34_fdm_test: v34_fdm_test.o spandsp
-	$(CC) v34_fdm_test.o -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
+v34_fdm_test: v34_fdm_test.o fdm_bank.o spandsp
+	$(CC) v34_fdm_test.o fdm_bank.o -o $@ $(SPANDSP_LIB) $(SYSTEM_LIBS)
 
 # Two sip_v90_modem instances over real SIP on 127.0.0.1 (no registrar):
 # ringing, caller ID, S0 and ATA answering, a dial nobody answers.  Binds UDP
@@ -844,7 +844,8 @@ v34_gardner_test.o: v34_gardner_test.c $(SPANDSP_DIR)/v34_gardner.h
 v90_upstream_replay.o: v90_upstream_replay.c $(SPANDSP_DIR)/spandsp/v34.h
 v90_engine_replay.o: v90_engine_replay.c modem_engine.h
 v34_duplex_test.o: v34_duplex_test.c $(SPANDSP_DIR)/spandsp/v34.h
-v34_fdm_test.o: v34_fdm_test.c $(SPANDSP_DIR)/spandsp/v34.h
+v34_fdm_test.o: v34_fdm_test.c fdm_bank.h $(SPANDSP_DIR)/spandsp/v34.h
+fdm_bank.o: fdm_bank.c fdm_bank.h
 v32bis_duplex_test.o: v32bis_duplex_test.c $(SPANDSP_DIR)/spandsp/v32bis.h spandsp
 v32bis_spandsp_test.o: v32bis_spandsp_test.c $(SPANDSP_DIR)/spandsp/v32bis.h spandsp
 v34_info_decode.o: v34_info_decode.c v34_info_decode.h v90.h
@@ -1022,8 +1023,8 @@ x2-b1-test: x2_b1_test
 # A clocked, byte-exact PCMU peer for foreign emulator closed-loop tests.
 # Two whole engines, each a v90_engine_peer process, against each other one
 # 20 ms frame at a time (engine_pair_test.c).
-engine_pair_test: engine_pair_test.o v90_engine_peer
-	$(CC) engine_pair_test.o -o $@
+engine_pair_test: engine_pair_test.o fdm_bank.o v90_engine_peer
+	$(CC) engine_pair_test.o fdm_bank.o -o $@ -lm
 
 # The engine on a raw G.711 audio socket instead of SIP (audio_sock_modem.c),
 # and the slmodemd -e program that puts the SmartLink soft modem on that

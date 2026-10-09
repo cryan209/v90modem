@@ -32,6 +32,20 @@
  * join that side's DTE stream, so --X-expect can grade them.
  *
  * MOD is the engine's modulation name (V32BIS, V22BIS, V34, ...).
+ *
+ * --fdm-slot K carries the call through slot K of the docs/v34_fdm.md channel
+ * bank instead of a byte-exact DS0.  Each direction is G.711-expanded (the
+ * exchange codec's D/A), put through that slot of a wideband stream at
+ * --fdm-rate (96000), quantised to 16 bits with the slot at its share of an
+ * --fdm-bank-slots (all) bank whose composite sits at --fdm-level-dbfs (-20),
+ * taken out again and G.711-compressed (the far codec's A/D).  So a PCM
+ * modem's codewords cross a real band-limited analogue hop, as on a line
+ * card, rather than arriving byte-exact.  --fdm-tap PATH writes the wideband
+ * streams as raw int16 to PATH.c2a and PATH.a2c.  --fdm-call-linear makes the
+ * calling side an analogue modem with converters of its own: it transmits
+ * linear samples and receives the slot's output at 8 and 16 kHz (the T/2
+ * stream a V.90 analogue receiver equalises), as the HSF coupler feeds the
+ * engine; only the answering side sees an exchange codec.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -45,8 +59,149 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <math.h>
+
+#include <spandsp.h>
+
+#include "fdm_bank.h"
+
 #define FRAME 160
 #define MAX_ENV 16
+
+/* --fdm-slot: one direction of the channel-bank bearer. */
+typedef struct {
+    fdm_slot_tx_t tx;
+    fdm_slot_rx_t rx;
+    fdm_slot_rx_t rx16;  /* T/2 copy, into a linear side only */
+    float *wide;
+    FILE *tap;
+} fdm_dir_t;
+
+static struct {
+    int on;
+    int alaw;
+    fdm_bank_t bank;
+    float gain;         /* 8 kHz linear -> wideband int16 scale */
+    fdm_dir_t dir[2];   /* [k] = the direction INTO side k */
+    int linear[2];      /* side k transmits and receives linear samples */
+    long clipped;
+} g_fdm;
+
+static int16_t fdm_sat16(float v)
+{
+    if (v > 32767.0f) return 32767;
+    if (v < -32768.0f) return -32768;
+    return (int16_t) lrintf(v);
+}
+
+static int fdm_open(int alaw, int slot, int fs, int taps, int bank_slots,
+                    float level_dbfs, const char *tap, int call_linear)
+{
+    if (fdm_bank_init(&g_fdm.bank, fs, taps, 7.0) != 0) {
+        fprintf(stderr, "--fdm-rate must be a multiple of 8000\n");
+        return -1;
+    }
+    if (slot < 0 || slot >= fdm_bank_slots(&g_fdm.bank)) {
+        fprintf(stderr, "--fdm-slot %d does not fit below %d Hz\n", slot, fs/2);
+        return -1;
+    }
+    if (bank_slots <= 0 || bank_slots > fdm_bank_slots(&g_fdm.bank))
+        bank_slots = fdm_bank_slots(&g_fdm.bank);
+    /* The same per-slot level as v34_fdm_test: a -12 dBm0 signal (about RMS
+       4000 on the int16 scale) in each of bank_slots slots puts the composite
+       at level_dbfs.  The slot is unity end to end; only the 16-bit
+       quantisation sees the gain. */
+    g_fdm.gain = (float) (32768.0*pow(10.0, level_dbfs/20.0)/(4000.0*sqrt((double) bank_slots)));
+    g_fdm.alaw = alaw;
+    g_fdm.linear[0] = call_linear;
+    if (call_linear && fs % 16000) {
+        fprintf(stderr, "--fdm-call-linear needs --fdm-rate a multiple of 16000\n");
+        return -1;
+    }
+    for (int k = 0; k < 2; k++) {
+        fdm_dir_t *d = &g_fdm.dir[k];
+
+        if (fdm_slot_tx_init(&d->tx, &g_fdm.bank, slot) || fdm_slot_rx_init(&d->rx, &g_fdm.bank, slot)
+            || (g_fdm.linear[k] && fdm_slot_rx_init_rate(&d->rx16, &g_fdm.bank, slot, 16000))
+            || !(d->wide = malloc((size_t) FRAME*g_fdm.bank.l*sizeof(float))))
+            return -1;
+        if (tap) {
+            char path[1024];
+
+            /* side 0 is the caller: INTO side 1 is caller-to-answerer */
+            snprintf(path, sizeof(path), "%s.%s", tap, k ? "c2a" : "a2c");
+            if (!(d->tap = fopen(path, "wb"))) {
+                perror(path);
+                return -1;
+            }
+        }
+    }
+    g_fdm.on = 1;
+    printf("bearer: FDM slot %d (%d-%d Hz) of %d Hz, prototype %d taps, slot level for a %d-slot bank at %.1f dBFS%s\n",
+           slot, slot*FDM_SLOT_HZ, (slot + 1)*FDM_SLOT_HZ, fs, g_fdm.bank.ntaps, bank_slots, level_dbfs,
+           call_linear ? "; caller on linear converters" : "");
+    return 0;
+}
+
+/* The frame side k is sent: its length header and what the line delivers,
+   given the frame the other side transmitted.  A G.711 side sends and gets
+   FRAME codewords; a linear side sends FRAME int16 samples and gets FRAME at
+   8 kHz followed by 2*FRAME at 16 kHz.  Returns the payload size in bytes. */
+static size_t bearer(int k, const uint8_t *from, uint8_t *to)
+{
+    fdm_dir_t *d;
+    float x[2*FRAME + 4];
+    int nw, n;
+
+    if (!g_fdm.on) {
+        memcpy(to, from, FRAME);
+        return FRAME;
+    }
+    d = &g_fdm.dir[k];
+    nw = FRAME*g_fdm.bank.l;
+    for (int i = 0; i < FRAME; i++) {
+        float v;
+
+        if (g_fdm.linear[1 - k]) {
+            int16_t l;
+
+            memcpy(&l, from + 2*i, sizeof(l));
+            v = (float) l;
+        } else {
+            v = (float) (g_fdm.alaw ? alaw_to_linear(from[i]) : ulaw_to_linear(from[i]));
+        }
+        x[i] = v*g_fdm.gain;
+    }
+    memset(d->wide, 0, (size_t) nw*sizeof(float));
+    fdm_slot_tx_run(&d->tx, x, FRAME, d->wide);
+    for (int i = 0; i < nw; i++) {
+        int16_t q = fdm_sat16(d->wide[i]);
+
+        if (q == 32767 || q == -32768)
+            g_fdm.clipped++;
+        if (d->tap)
+            fwrite(&q, sizeof(q), 1, d->tap);
+        d->wide[i] = (float) q/g_fdm.gain;
+    }
+    n = fdm_slot_rx_run(&d->rx, d->wide, nw, x);
+    if (g_fdm.linear[k]) {
+        int16_t *out = (int16_t *) (void *) to;
+
+        for (int i = 0; i < FRAME; i++)
+            out[i] = fdm_sat16(i < n ? x[i] : 0.0f);
+        n = fdm_slot_rx_run(&d->rx16, d->wide, nw, x);
+        for (int i = 0; i < 2*FRAME; i++)
+            out[FRAME + i] = fdm_sat16(i < n ? x[i] : 0.0f);
+        return 3*FRAME*sizeof(int16_t);
+    }
+    for (int i = 0; i < FRAME; i++) {
+        int16_t v = fdm_sat16(i < n ? x[i] : 0.0f);
+
+        to[i] = g_fdm.alaw ? linear_to_alaw(v) : linear_to_ulaw(v);
+    }
+    return FRAME;
+}
+
 
 typedef struct {
     const char *name;
@@ -77,6 +232,7 @@ typedef struct {
     size_t payload_len;
     int connect_frame;  /* frame index CONNECT was seen, -1 if not */
     int sent;
+    int linear;         /* --fdm-call-linear: an analogue modem's converters */
 } side_t;
 
 static int read_full(int fd, void *buf, size_t len)
@@ -111,6 +267,19 @@ static int write_full(int fd, const void *buf, size_t len)
     return 0;
 }
 
+/* One frame of the line for side k: send it what the other side transmitted,
+   read back what it transmits next. */
+static int exchange(side_t *side, int k, const uint8_t *from, uint8_t *next)
+{
+    uint8_t header[2] = { FRAME & 0xFF, FRAME >> 8 };
+    uint8_t rx[3*FRAME*sizeof(int16_t)];
+    size_t len = bearer(k, from, rx);
+    size_t back = side[k].linear ? FRAME*sizeof(int16_t) : FRAME;
+
+    return write_full(side[k].to_fd, header, 2) || write_full(side[k].to_fd, rx, len)
+        || read_full(side[k].from_fd, next, back);
+}
+
 static int spawn(side_t *s, int alaw)
 {
     int in[2], out[2];
@@ -122,7 +291,7 @@ static int spawn(side_t *s, int alaw)
         return -1;
     if (s->pid == 0) {
         int log = open(s->log_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        const char *args[6];
+        const char *args[7];
         int n = 0;
 
         dup2(in[0], STDIN_FILENO);
@@ -140,6 +309,8 @@ static int spawn(side_t *s, int alaw)
             args[n++] = "--call";
         if (alaw)
             args[n++] = "--alaw";
+        if (s->linear)
+            args[n++] = "--linear";
         args[n] = NULL;
         execv(args[0], (char *const *) args);
         perror("execv v90_engine_peer");
@@ -203,17 +374,13 @@ static void final_line(const side_t *s, char *out, size_t max)
 
 /* After the call phase: keep exchanging audio (`n` frames) so a command that
  * puts something on the line (\B) is carried to the far end. */
-static void pump_frames(side_t *side, uint8_t tx[2][FRAME], int n, int tag)
+static void pump_frames(side_t *side, uint8_t tx[2][2*FRAME], int n, int tag)
 {
     for (int i = 0; i < n; i++) {
-        uint8_t next[2][FRAME], rx[FRAME];
+        uint8_t next[2][2*FRAME];
 
         for (int k = 0; k < 2; k++) {
-            uint8_t header[2] = { FRAME & 0xFF, FRAME >> 8 };
-
-            memcpy(rx, tx[1 - k], FRAME);
-            if (write_full(side[k].to_fd, header, 2) || write_full(side[k].to_fd, rx, FRAME)
-                || read_full(side[k].from_fd, next[k], FRAME))
+            if (exchange(side, k, tx[1 - k], next[k]))
                 return;
         }
         memcpy(tx, next, sizeof(next));
@@ -230,12 +397,16 @@ int main(int argc, char **argv)
     double seconds = 40.0;
     const char *expect = NULL;
     const char *expect_connect = NULL;
-    uint8_t tx[2][FRAME], rx[FRAME];
+    uint8_t tx[2][2*FRAME];     /* a linear side's are int16 */
     int frames;
     int failed = 0;
     int done_frame = -1;
     int expect_hangup = 0;
     int fax_hdlc = 0;
+    int fdm_slot = -1, fdm_rate = 96000, fdm_taps = 96, fdm_bank_slots = 0;
+    float fdm_level = -20.0f;
+    const char *fdm_tap = NULL;
+    int fdm_call_linear = 0;
 
     memset(side, 0, sizeof(side));
     side[0].name = "call";
@@ -270,6 +441,20 @@ int main(int argc, char **argv)
                 if ((both || k == which) && side[k].n_after < MAX_ENV)
                     side[k].after[side[k].n_after++] = cmd;
             }
+        } else if (!strcmp(argv[i], "--fdm-slot") && i + 1 < argc) {
+            fdm_slot = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--fdm-rate") && i + 1 < argc) {
+            fdm_rate = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--fdm-taps") && i + 1 < argc) {
+            fdm_taps = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--fdm-bank-slots") && i + 1 < argc) {
+            fdm_bank_slots = atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--fdm-level-dbfs") && i + 1 < argc) {
+            fdm_level = strtof(argv[++i], NULL);
+        } else if (!strcmp(argv[i], "--fdm-tap") && i + 1 < argc) {
+            fdm_tap = argv[++i];
+        } else if (!strcmp(argv[i], "--fdm-call-linear")) {
+            fdm_call_linear = 1;
         } else if (!strcmp(argv[i], "--fax-hdlc")) {
             fax_hdlc = 1;
         } else if (!strcmp(argv[i], "--expect-hangup")) {
@@ -326,11 +511,21 @@ int main(int argc, char **argv)
             fprintf(stderr, "usage: %s [--alaw] [--seconds N] [--expect MOD] [--expect-connect RATE] "
                     "[--both-env K=V] [--call-env K=V] [--answer-env K=V]\n"
                     "       [--both-at CMD] [--call-at CMD] [--answer-at CMD]\n"
-                    "       [--both-after CMD] [--call-after CMD] [--answer-after CMD] [--fax-hdlc]\n", argv[0]);
+                    "       [--both-after CMD] [--call-after CMD] [--answer-after CMD] [--fax-hdlc]\n"
+                    "       [--fdm-slot K [--fdm-rate HZ] [--fdm-taps P] [--fdm-bank-slots N]\n"
+                    "        [--fdm-level-dbfs L] [--fdm-tap PATH] [--fdm-call-linear]]\n", argv[0]);
             return 2;
         }
     }
 
+    if (fdm_call_linear && fdm_slot < 0) {
+        fprintf(stderr, "--fdm-call-linear needs --fdm-slot\n");
+        return 2;
+    }
+    if (fdm_slot >= 0 && fdm_open(alaw, fdm_slot, fdm_rate, fdm_taps, fdm_bank_slots, fdm_level, fdm_tap,
+                                  fdm_call_linear) != 0)
+        return 2;
+    side[0].linear = fdm_call_linear;
     signal(SIGPIPE, SIG_IGN);
     for (int k = 0; k < 2; k++) {
         side_t *s = &side[k];
@@ -374,17 +569,14 @@ int main(int argc, char **argv)
         side[k].connect_frame = -1;
     }
 
-    memset(tx, alaw ? 0xD5 : 0xFF, sizeof(tx));
+    for (int k = 0; k < 2; k++)
+        memset(tx[k], side[k].linear ? 0 : alaw ? 0xD5 : 0xFF, sizeof(tx[k]));
     frames = (int) (seconds * 8000.0 / FRAME);
     for (int f = 0; f < frames; f++) {
-        uint8_t next[2][FRAME];
+        uint8_t next[2][2*FRAME];
 
         for (int k = 0; k < 2; k++) {
-            uint8_t header[2] = { FRAME & 0xFF, FRAME >> 8 };
-
-            memcpy(rx, tx[1 - k], FRAME);
-            if (write_full(side[k].to_fd, header, 2) || write_full(side[k].to_fd, rx, FRAME)
-                || read_full(side[k].from_fd, next[k], FRAME)) {
+            if (exchange(side, k, tx[1 - k], next[k])) {
                 fprintf(stderr, "%s side stopped at frame %d\n", side[k].name, f);
                 failed = 1;
                 break;
@@ -477,6 +669,12 @@ int main(int argc, char **argv)
                                     : (done_frame >= 0 ? "payload exchanged" : "payload NOT exchanged"));
     if (expect_hangup && done_frame < 0)
         failed = 1;
+    if (g_fdm.on) {
+        printf("  FDM bearer: %ld clipped wideband samples\n", g_fdm.clipped);
+        for (int k = 0; k < 2; k++)
+            if (g_fdm.dir[k].tap)
+                fclose(g_fdm.dir[k].tap);
+    }
     for (int k = 0; k < 2; k++) {
         side_t *s = &side[k];
         char fin[512];
@@ -584,6 +782,11 @@ int main(int argc, char **argv)
         }
         printf("  logs: %s %s\n", side[0].log_path, side[1].log_path);
         return 1;
+    }
+    if (g_fdm.on && fdm_tap) {
+        /* a tapped channel-bank call is an experiment: keep its logs */
+        printf("  logs: %s %s\n", side[0].log_path, side[1].log_path);
+        return 0;
     }
     for (int k = 0; k < 2; k++)
         unlink(side[k].log_path);

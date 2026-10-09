@@ -80,6 +80,55 @@ constellation cap (a 90 dB slot still gets ~10 bits/symbol), the roll-off
 and guard band in each slot, and a rate measurement that cannot read above
 ~34 dB.
 
+## PCM (V.90) through one slot (2026-10-10)
+
+The bank is `fdm_bank.[ch]` now, shared with `engine_pair_test --fdm-slot K`,
+which carries a whole-engine call through slot K instead of a byte-exact DS0
+(`v34_fdm_test`'s output is bit-identical after the move). A G.711 side gets
+the exchange codec at each end of the slot: its codewords are expanded into
+the slot and the slot's output is compressed back. `--fdm-call-linear` makes
+the caller an analogue modem with converters of its own, which is what V.90
+needs: it transmits linear samples and receives the slot at 8 kHz and at
+16 kHz, the T/2 stream its equaliser runs on, fed the way the HSF coupler
+feeds the engine (`me_rx_v90a_16k()` then `me_rx_audio()`). The slot is at
+its share of a full bank's -20 dBFS composite, so the 16-bit floor is the
+one the V.34 bank sees.
+
+| call (96 kHz, ME_V90_JA_HEURISTIC_FALLBACK_MS=0 on the digital side) | result |
+|---|---|
+| plain V.34 both ends, slot 5, G.711 both sides | CONNECT 24000, payload intact (`make test` row) |
+| V.90, clean DS0, no slot | CONNECT 56000 down / 31200 up, payload intact (`make test` row) |
+| V.90, slot 0 or 5, caller on G.711 | Phase 2 completes; the analogue receiver never finds Sd |
+| V.90, slot 0, caller linear | **Phase 3 completes**; Phase 4 stops at TRN2d (0 ones), §9.4.2 deadline, retrain loop |
+
+What a slot does to PCM, all as predicted from the band:
+
+- **The slot removes Sd's defining component.** §8.4.4's six-codeword Sd has
+  a large 4000 Hz term and the slot keeps ~40..3880 Hz, so the codeword-domain
+  Sd detector (which wants exact levels) cannot work through it. Over linear
+  converters the analogue role's line path finds it on its 1333 Hz line
+  (`line fraction 0.572`), CMA trains on TRN1d (256/256 ones) and Jd
+  decodes CRC-clean.
+- **The DIL measurement then refuses a constellation**: "none at a 3-sigma
+  noise margin", 46667 bps (drn 15) with noise ignored, 56 of 65 Ucodes
+  usable, coverage 53%, and **RBS reported in all six slots (0x3F)**. There
+  is no RBS here; a band-limited hop's residual reads as robbed bits. CP goes
+  out at drn 3 (30667 bps) and the digital side accepts it and sends TRN2d
+  and MP, which the analogue Phase 4 receiver decodes as 0 ones.
+- **This is the HSF real-line rig's frontier, offline.** That rig stops at
+  the same "none at a 3-sigma margin" and then cannot receive Phase 4
+  (`docs/hsf_analogue_v90_coupler.md`); the slot reproduces it in a minute,
+  deterministically, with no line and no hardware, and gets one stage
+  further (Ri and R-bar-i acquired). Use it to work on the analogue role's
+  linear path.
+- Spectrogram of that call (`--fdm-tap`, resampled to 16 kHz): the downstream
+  PCM signals (TRN1d, DIL, TRN2d) fill the slot to its 4 kHz edge, where the
+  upstream V.34-style signals stop near 3.7 kHz. The DIL is a comb, as
+  repeated codeword patterns should be.
+
+Note for anyone rendering the taps: ffmpeg's `showspectrum mode=separate`
+draws channel 0 at the BOTTOM.
+
 ## Not done
 
 - No sound card yet. The next step is the same bank on CoreAudio in stereo
@@ -89,3 +138,6 @@ and guard band in each slot, and a rate measurement that cannot read above
 - No echo, i.e. two-wire operation.
 - No byte striping across slots: payload is per-slot PRBS.
 - 48 kHz, 6 slots, 3429/33600: 6/6 clean, 403.2 kbit/s aggregate, from one run. Not swept.
+- V.90 through a slot past Phase 4 (above), then V.92 and V.91. V.91 has no
+  equaliser (`v91.c`) and wants byte-exact codewords, so expect it to need
+  the same line path the analogue role has.

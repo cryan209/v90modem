@@ -452,6 +452,36 @@ SIP_FORCE_PCMU=1 ME_V90_ROLE=analogue VPCM_ME_VERBOSE=1 ./sip_v90_modem \
     --local-port 5062 --rtp-port 4100 --pty-link /tmp/v90modem-analogue  # ATD6001
 ```
 
+### The two halves meet in one process pair (2026-10-10)
+
+`engine_pair_test --call-env ME_V90_ROLE=analogue` runs this role against our
+own digital answerer, whole engines over a byte-exact DS0, offline. It now
+connects at 56000 down / 31200 up with payload intact both ways, in u-law and
+A-law, and is a `make test` row. Two things stood in the way:
+
+1. **INFO0d was sent before this receiver existed.** §9.2.1.1.1 has the
+   digital modem send INFO0d after its 75 ms, timed from detecting CJ (and
+   SpanDSP takes CJ on two of its three octets), while V.8 8.1.2 holds the
+   caller silent 75 ms after CJ ends. INFO0d (6.48-6.58 s) was over before the
+   analogue receiver started (6.56 s), and neither side then ran §9.2.2.2.1's
+   repeat-INFO0 recovery, so both sat in Phase 2 forever. The engine already
+   replayed V.8-era audio from the post-JM gap into a new Phase 2 receiver for
+   the digital role on an originated call (for the peer's INFO0a); the
+   analogue role, which always originates, now gets the same pre-roll.
+2. **The digital side's Ja fallback misfires on a conformant analogue
+   modem.** The energy-gap heuristic read INFO1a's tail as Phase 3 energy and
+   §9.3.2.1's 70 ms INFO1a-to-S silence as the TRN-to-Ja gap; 500 ms later
+   (`ME_V90_JA_HEURISTIC_FALLBACK_MS`) it started Sd during our TRN, before Ja.
+   §9.3.2.4 only lets Sd end Ja, so Ja ran to its 1500 ms deadline and
+   retrained, every attempt. The test row sets the fallback to 0; the default
+   stays 500, because it was set against live peers (SmartLink, Apple,
+   RasFinder) whose Ja does not decode, and none of them is in this harness.
+
+`engine_pair_test --fdm-slot K --fdm-call-linear` carries the same call
+through a channel-bank slot with this side on linear converters: Phase 3
+completes and Phase 4 stops at TRN2d, the HSF line's frontier
+(`docs/v34_fdm.md`).
+
 ### Phase 3 completes against the card (run 7, 2026-08-11)
 
 The whole of §9.3.2 now runs in a live call, ending in a measurement:

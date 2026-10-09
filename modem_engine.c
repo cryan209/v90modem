@@ -3209,8 +3209,8 @@ static bool           g_v90_dil_capture_start_logged = false;
  * digital-role receiver starts on an originated call, hand it the audio from
  * the start of the most recent silence gap -- the §8/V.8 75 ms that separates
  * the peer's JM from its Phase 2 -- before the first live frame.  Starting at
- * the gap keeps the JM's FSK out of the V.34 receiver.  ME_V90_INFO0A_PREROLL=0
- * disables it.
+ * the gap keeps the JM's FSK out of the V.34 receiver.  The analogue role
+ * (always the originator) needs the same for the digital answerer's INFO0d.
  */
 #define V8_RX_HIST_SAMPLES  8000        /* 1 s */
 static int16_t        g_v8_rx_hist[V8_RX_HIST_SAMPLES];
@@ -6427,7 +6427,16 @@ static bool v90_dil_capture_try_parse_at(int start)
  *
  * ME_V90_JA_HEURISTICS=1 restores the old always-on behaviour.
  * ME_V90_JA_HEURISTIC_FALLBACK_MS>0 re-enables them that many ms after the
- * first suppressed attempt, as a bounded escape hatch.  Default 0: never. */
+ * first suppressed attempt, as a bounded escape hatch; the default is 500
+ * (why is below) and 0 means never.
+ *
+ * The energy-gap source misfires against a peer that keeps §9.3.2.1's order
+ * exactly: our own analogue role (engine_pair_test, 2026-10-10) sends INFO1a,
+ * 70 ms of silence, then S.  The gate reads INFO1a's tail as "Phase 3
+ * energy" and that silence as the TRN-to-Ja gap, so the fallback starts Sd
+ * during the peer's TRN, before Ja; §9.3.1.3 allows Sd only after Ja, the
+ * peer never sees an Sd it is waiting for, and its §9.3.2.4 1500 ms Ja
+ * deadline retrains the call, every time.  With 0 that pair connects. */
 static bool v90_ja_heuristic_allowed(const char *source)
 {
     v34_v90_info1a_t received;
@@ -7914,11 +7923,11 @@ static void start_v34hdx_training(void)
     trace_phase("enter TRAINING: mod=V34HDX role=%s", source ? "source" : "recipient");
 }
 
-/* Choose the V.8 history to replay into a new digital-role receiver: from the
- * start of the most recent quiet stretch of at least 20 ms (the post-JM gap)
- * to now.  Nothing if there is no such gap -- then we cannot tell the peer's
- * JM from its Phase 2, and replaying FSK into the V.34 receiver is worse than
- * the late start. */
+/* Choose the V.8 history to replay into a new Phase 2 receiver on a call we
+ * originated (digital or analogue role): from the start of the most recent
+ * quiet stretch of at least 20 ms (the post-JM gap) to now.  Nothing if
+ * there is no such gap -- then we cannot tell the peer's JM from its Phase 2,
+ * and replaying FSK into the V.34 receiver is worse than the late start. */
 static void me_v90_prepare_info0a_preroll(void)
 {
     enum { BLK = 40, QUIET_BLKS = 4 };
@@ -7951,7 +7960,7 @@ static void me_v90_prepare_info0a_preroll(void)
     }
     if (best < 0) {
         ME_LOG("[ME] V.90 originate: no post-JM gap in the last %d ms of V.8 "
-               "audio (rx sample %llu); INFO0a pre-roll skipped\n",
+               "audio (rx sample %llu); INFO0 pre-roll skipped\n",
                n/8, (unsigned long long)g_rx_audio_samples);
         return;
     }
@@ -7959,8 +7968,8 @@ static void me_v90_prepare_info0a_preroll(void)
         g_v34_preroll[g_v34_preroll_len++] =
             g_v8_rx_hist[(first + i) % V8_RX_HIST_SAMPLES];
     ME_LOG("[ME] V.90 originate: replaying %d ms of post-JM audio (of %d ms "
-           "held, rx sample %llu) into the Phase 2 receiver so INFO0a is not "
-           "cut (ME_V90_INFO0A_PREROLL=0 disables)\n", g_v34_preroll_len/8,
+           "held, rx sample %llu) into the Phase 2 receiver so the peer's "
+           "INFO0 is not cut\n", g_v34_preroll_len/8,
            n/8, (unsigned long long)g_rx_audio_samples);
 }
 
@@ -8542,6 +8551,12 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
             start_v34_training();
             g_v34_start_baud = saved_baud;
             g_mod = ME_MOD_V90;
+            /* §9.2.1.1.1 has the digital answerer send INFO0d after ITS
+             * 75 ms, timed from detecting CJ, while V.8 8.1.2 holds us silent
+             * 75 ms after CJ ends: INFO0d starts before this receiver exists,
+             * and §9.2.2.1.2's "after receiving INFO0d" never happens.  The
+             * mirror of the digital-role originate case above. */
+            me_v90_prepare_info0a_preroll();
 
             /*
              * SpanDSP's V.90 mode plus calling_party is already the analogue

@@ -465,6 +465,11 @@ ME_V8_ADVERTISE_V32=0 ./v32bis_engine_pair_test alaw automode
 PAIR_RETRAIN=call ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test ulaw v8
 PAIR_RETRAIN=answer ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test alaw v8
 ./engine_pair_test --expect V32BIS --expect-connect 14400 --both-env ME_MODE=v32bis
+# Our V.90 analogue role against our digital side, whole engines (docs/v90_analogue_role.md).
+./engine_pair_test --expect V90 --call-expect "CONNECT 31200" --answer-expect "CONNECT 56000" --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0
+./engine_pair_test --alaw --expect V90 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0
+# A whole V.34 call through one slot of the channel bank (docs/v34_fdm.md).
+./engine_pair_test --expect V34 --expect-connect 24000 --both-env ME_MODE=v34 --fdm-slot 5
 ./engine_pair_test --expect V32BIS --expect-connect 9600 --both-at "AT+MS=V32"
 ./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22
 ./engine_pair_test --expect V22BIS --expect-connect 2400 --both-env ME_MODE=v22 --both-env ME_V8BIS=1 --both-env VPCM_ME_VERBOSE=1 --both-log "V.8bis complete" --both-log "MS mode" --both-nolog "ended without a mode"

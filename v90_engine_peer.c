@@ -6,7 +6,13 @@
  *
  * --call makes this end the calling modem (as an ATD would), otherwise it
  * answers.  Frames on stdin are a 2-byte little-endian length then that many
- * received codewords; the same number of transmitted codewords go to stdout. */
+ * received codewords; the same number of transmitted codewords go to stdout.
+ *
+ * --linear makes this end an analogue modem with its own converters, as the
+ * HSF coupler (hsf_fxo_probe.c) is: after the length n come n int16 samples
+ * at 8 kHz for me_rx_audio() and then 2n at 16 kHz for me_rx_v90a_16k(),
+ * and n int16 samples from me_tx_audio() go back.  Native byte order; the
+ * driver is engine_pair_test --fdm-call-linear on the same machine. */
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,19 +23,20 @@
 static void dial(const char *uri, void *p) {(void)uri;(void)p;}
 static void control(void *p) {(void)p;}
 int main(int argc,char **argv) {
- const char *pty="/tmp/x2-loop-pty"; int call=0; me_law_t law=ME_LAW_ULAW;
+ const char *pty="/tmp/x2-loop-pty"; int call=0, linear=0; me_law_t law=ME_LAW_ULAW;
  const char *source_path=NULL; unsigned long source_at=120000;
  uint8_t source[4096]; size_t source_len=0,source_pos=0;
  for(int i=1;i<argc;i++){
   if(!strcmp(argv[i],"--call"))call=1;
   else if(!strcmp(argv[i],"--alaw"))law=ME_LAW_ALAW;
+  else if(!strcmp(argv[i],"--linear"))linear=1;
   else if(!strcmp(argv[i],"--tx-file") && i+1<argc)source_path=argv[++i];
   else if(!strcmp(argv[i],"--tx-at") && i+1<argc){
    char *end; const char *value=argv[++i]; source_at=strtoul(value,&end,10);
    if(*value=='-' || !*value || *end)return 2;
   }
   else if(argv[i][0]!='-')pty=argv[i];
-  else {fprintf(stderr,"usage: %s [pty-link] [--call] [--alaw] [--tx-file path --tx-at samples]\n",argv[0]);return 2;}
+  else {fprintf(stderr,"usage: %s [pty-link] [--call] [--alaw] [--linear] [--tx-file path --tx-at samples]\n",argv[0]);return 2;}
  }
  if(source_path){
   FILE *f=fopen(source_path,"rb");if(!f){perror(source_path);return 2;}
@@ -44,16 +51,25 @@ int main(int argc,char **argv) {
  if(di_open(pty)<0)return 2;
  me_set_law(law);
  uint8_t header[2],rx[4096],tx[4096]; unsigned long count=0; int hung=0;
+ int16_t rx8[1024],rx16[2048],tx8[1024];
  while(fread(header,1,2,stdin)==2) {
   /* The call starts with the first frame, so a driver can configure the
      modem over its PTY (AT+MS, ...) beforehand, as a DTE would. */
   if(count==0){ if(call)me_dial("closed-loop"); me_on_sip_connected(); }
   int n=header[0]|header[1]<<8; if(!n||n>4096)return 3;
-  if(fread(rx,1,n,stdin)!=(size_t)n)return 3;
+  if(linear){
+   if(n>1024)return 3;
+   if(fread(rx8,sizeof(int16_t),n,stdin)!=(size_t)n
+      || fread(rx16,sizeof(int16_t),2*n,stdin)!=(size_t)(2*n))return 3;
+  } else if(fread(rx,1,n,stdin)!=(size_t)n)return 3;
   /* DTE payload into the engine, through the same helper sip_modem.c and the
      couplers use, so engine_pair_test covers it. */
   (void)me_pump_dte();
-  me_rx_g711(rx,n);
+  if(linear){
+   /* hsf_fxo_probe.c's order: the T/2 stream first, then the 8 kHz one */
+   me_rx_v90a_16k(rx16,2*n);
+   me_rx_audio(rx8,n);
+  } else me_rx_g711(rx,n);
   /* Diagnostic source injection through the normal byte ring. This does
    * not synthesize CONNECT or lift any protocol qualification gate. */
   if(source_path && count>=source_at && source_pos<source_len){
@@ -61,8 +77,13 @@ int main(int argc,char **argv) {
    if(accepted>0){source_pos+=(size_t)accepted;
     fprintf(stderr,"closed loop: queued %d source bytes at bearer sample %lu\n",accepted,count);}
   }
-  (void)me_tx_g711(tx,n); me_flush_g711_taps();
-  if(fwrite(tx,1,n,output)!=(size_t)n || fflush(output))return 3;
+  if(linear){
+   me_tx_audio(tx8,n);
+   if(fwrite(tx8,sizeof(int16_t),n,output)!=(size_t)n || fflush(output))return 3;
+  } else {
+   (void)me_tx_g711(tx,n); me_flush_g711_taps();
+   if(fwrite(tx,1,n,output)!=(size_t)n || fflush(output))return 3;
+  }
   count+=n;
   /* sip_modem.c turns an engine hang-up request (a V.42 failure, +ES/+DS
      "required" not met) into a SIP BYE and so into me_on_sip_disconnected();
