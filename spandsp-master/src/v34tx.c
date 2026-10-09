@@ -1320,23 +1320,11 @@ static int v34_configured_rate_n(const v34_state_t *s, int baud_idx)
    stops training as a result.  The live problem it was written for is fixed
    instead by the start profile itself -- g_v34_start_baud was 2400 for a
    reason that no longer holds -- so the gate keeps the rows honest about what
-   we can actually receive.  ME_V34_INFO1C_ALL_RATES=1 enables it. */
+   we can actually receive. */
 static bool v34_info1c_offer_all_rates(const v34_state_t *s)
 {
-    static int initialized = 0;
-    static int enabled = 0;
-
-    if (!initialized)
-    {
-        const char *env = getenv("ME_V34_INFO1C_ALL_RATES");
-
-        if (env  &&  env[0] != '\0')
-            enabled = (strtol(env, NULL, 10) != 0);
-        /*endif*/
-        initialized = 1;
-    }
-    /*endif*/
-    return enabled  &&  !s->tx.v90_mode  &&  s->tx.duplex;
+    (void) s;
+    return false;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -3670,23 +3658,10 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
    broke the first attempt pass, and so do 49 of the 50 duplex rows with this
    on; the remaining one is an echo row that is an acquisition coin flip with
    either setting (docs/v34_data_mode_rates.md).
-   Default ON; ME_V34_SECOND_B_WAIT_REVERSAL=0 restores the flat 100 bauds. */
+   The flat 100 bauds it replaced is gone. */
 static bool second_b_waits_for_reversal(void)
 {
-    static int initialized = 0;
-    static int enabled = 1;
-
-    if (!initialized)
-    {
-        const char *env = getenv("ME_V34_SECOND_B_WAIT_REVERSAL");
-
-        if (env  &&  env[0] != '\0')
-            enabled = (strtol(env, NULL, 10) != 0);
-        /*endif*/
-        initialized = 1;
-    }
-    /*endif*/
-    return enabled != 0;
+    return true;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -4991,7 +4966,7 @@ static complex_sig_t get_second_a_baud(v34_state_t *s)
                 s->tx.phase2_info0_repeated = true;
                 V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - repeated INFO0c during INFO1c wait; repeating INFO0a "
-                         "with bit 28 %s (11.2.2.2.1, ME_V34_INFO0_RETRY)\n",
+                         "with bit 28 %s (11.2.2.2.1)\n",
                          (answer_info0_retry_policy() == 1) ? "set" : "clear");
                 s->tx.info0_acknowledgement = (answer_info0_retry_policy() == 1);
                 info0_baud_init(s);
@@ -5150,27 +5125,12 @@ static void second_a_baud_init(v34_state_t *s)
    once it is past 11.2.1.2.5.  The clause offers two, and only one of them
    transmits anything: acknowledge with bit 28, or -- "if the answer modem
    detects Tone B and has received INFO0c" -- complete the current INFO0a and
-   transmit Tone A, which past 11.2.1.2.5 means no INFO0a at all.  This
-   selects between them so a peer can be measured against both; "noack" is a
-   third, non-conformant setting kept only for that measurement. */
+   transmit Tone A, which past 11.2.1.2.5 means no INFO0a at all.  This modem
+   acknowledges (1); 0 = none and 2 = unacknowledged were measured against
+   SmartLink and failed the same way. */
 static int answer_info0_retry_policy(void)
 {
-    static int initialized = 0;
-    static int policy = 1;      /* 0 = none, 1 = acknowledged, 2 = unacknowledged */
-
-    if (!initialized)
-    {
-        const char *value = getenv("ME_V34_INFO0_RETRY");
-
-        if (value  &&  strcmp(value, "none") == 0)
-            policy = 0;
-        else if (value  &&  strcmp(value, "noack") == 0)
-            policy = 2;
-        /*endif*/
-        initialized = 1;
-    }
-    /*endif*/
-    return policy;
+    return 1;     /* 0 = none, 1 = acknowledged, 2 = unacknowledged */
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -5232,27 +5192,9 @@ static void answer_resume_probe(v34_state_t *s, const char *reason)
    "send INFO1c regardless" path rather than to 11.5.1.1. */
 static int post_l2_tone_a_wait_bauds(v34_state_t *s)
 {
-    static int initialized = 0;
-    static long ms = 1500;
+    const long ms = 1500;
     int rtd_bauds;
 
-    if (!initialized)
-    {
-        const char *env = getenv("ME_V34_POST_L2_TONE_A_WAIT_MS");
-
-        if (env  &&  env[0] != '\0')
-        {
-            char *end = NULL;
-            long parsed = strtol(env, &end, 10);
-
-            if (end != env  &&  end  &&  *end == '\0'  &&  parsed >= 0)
-                ms = parsed;
-            /*endif*/
-        }
-        /*endif*/
-        initialized = 1;
-    }
-    /*endif*/
     rtd_bauds = (s->rx.round_trip_delay_estimate > 0)
                 ? (s->rx.round_trip_delay_estimate*600 + 4000)/8000
                 : 0;
@@ -7208,7 +7150,7 @@ static complex_sig_t get_trn_baud(v34_state_t *s)
        the time that modem needs to detect our own J.  A 1000 ms bound was
        shorter than that at every symbol rate, so it fired on the normal path
        and raced the answerer into Phase 4 while the caller was still in TRN. */
-    j_wait_ms = getenv("V34_J_WAIT_MAX_MS") ? atoi(getenv("V34_J_WAIT_MAX_MS")) : 4000;
+    j_wait_ms = 4000;
     for (i = 0;  i < 6;  i++)
         j_wait_max_bauds[i] = (baud_rate_hz[i]*j_wait_ms + 999)/1000;
     /*endfor*/
@@ -7734,25 +7676,15 @@ static int phase4_trn_max_bauds(const v34_state_t *s)
 /* Hard bound on the answerer's Phase 4 TRN (11.4.1.2.2: "no longer than
    2000 ms plus a round trip delay").  Without it a receiver that never
    publishes PHASE4_TRN_READY keeps TRN on the air until the engine's 60 s
-   training timeout.  The round trip is not measured here, so it is a
-   allowance, ME_V34_TRN_RTD_MS (default 250 ms; 0 disables the bound).  At
+   training timeout.  The round trip is not measured here, so it is an
+   allowance of 250 ms.  At
    the cap MP starts anyway: the peer's own 11.4 timers are running and its
    receiver may still lock on MP. */
 static int phase4_trn_hard_cap_bauds(const v34_state_t *s)
 {
-    static int rtd_ms = -1;
+    const int rtd_ms = 250;
 
-    if (rtd_ms < 0)
-    {
-        const char *v = getenv("ME_V34_TRN_RTD_MS");
-
-        rtd_ms = (v  &&  *v)  ?  atoi(v)  :  250;
-        if (rtd_ms < 0)
-            rtd_ms = 0;
-        /*endif*/
-    }
-    /*endif*/
-    if (rtd_ms == 0  ||  s->tx.baud_rate < 0  ||  s->tx.baud_rate > 5)
+    if (s->tx.baud_rate < 0  ||  s->tx.baud_rate > 5)
         return 0;
     /*endif*/
     return phase4_trn_max_bauds(s)
@@ -7766,28 +7698,16 @@ static int phase4_trn_hard_cap_bauds(const v34_state_t *s)
  * 2000 ms plus a round trip delay, followed by sequence MP."  So the length
  * is ours to choose up to that cap, and what it buys is equalizer
  * reconvergence: the receiver has just been re-seeded and TRN is the only
- * known signal it gets before a data constellation returns.
- * ME_V34_RENEG_TRN_BAUDS overrides the Phase 4 minimum. */
+ * known signal it gets before a data constellation returns. */
 static int v34_reneg_trn_bauds(const v34_state_t *s)
 {
-    static int override = -1;
     int bauds;
 
-    if (override < 0)
-    {
-        const char *e = getenv("ME_V34_RENEG_TRN_BAUDS");
-
-        override = (e  &&  atoi(e) > 0)  ?  atoi(e)  :  0;
-    }
-    /*endif*/
-    if (override > 0)
-        return override;
-    /*endif*/
     /* About one second by default.  A far end that started the renegotiation
        to resynchronise has lost its place in our signal and needs TRN to find
        it again: BinModem measured a provider modem pool that could not read
        256 symbols and never acknowledged an MP, while it sends 1.85 s of its
-       own.  ME_V34_RENEG_TRN_BAUDS=512 restores the old Phase 4 minimum. */
+       own. */
     bauds = PHASE4_TRN_BAUDS;
     if (s->tx.baud_rate >= 0  &&  s->tx.baud_rate <= 5)
     {
@@ -8170,18 +8090,6 @@ static int v34_rx_current_trellis_code(const v34_rx_state_t *s)
    logged, because that constancy is the measurement worth having. */
 static bool v34_trn_rate_selection_enabled(const v34_state_t *s)
 {
-    static int cached = -1;
-
-    if (cached < 0)
-    {
-        const char *e = getenv("ME_V34_TRN_RATE");
-
-        cached = (e  &&  *e)  ?  ((e[0] == '1'  ||  e[0] == 'y'  ||  e[0] == 'Y')  ?  1  :  0)  :  -2;
-    }
-    /*endif*/
-    if (cached >= 0)
-        return cached != 0;
-    /*endif*/
     return s->tx.trn_rate_select;
 }
 
@@ -8189,7 +8097,7 @@ static bool v34_trn_rate_selection_enabled(const v34_state_t *s)
    follows the line, and the engine turns it on for real calls.  It stays
    off by default for the loopback harnesses, whose ceiling is G.711 itself
    (a clean loopback reads ~29 dB, where the live-channel calibration would
-   cap the asserted 21600 rows); ME_V34_TRN_RATE=1/0 forces it either way. */
+   cap the asserted 21600 rows). */
 SPAN_DECLARE(void) v34_set_trn_rate_selection(v34_state_t *s, bool enable)
 {
     if (s)
@@ -10831,28 +10739,12 @@ SPAN_DECLARE(int) v34_start_rate_renegotiation(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
-/* ME_V34_RENEG_ANSWER: how the responder conditions its receiver.  Experiment
-   switch: s-reset (the initiator's conditioning), s-retain, trn-reset,
-   trn-retain. */
+/* How the responder conditions its receiver: 0 s-reset (the initiator's
+   conditioning), 1 s-retain, 2 trn-reset, 3 trn-retain.  3 was the
+   experiment's winner. */
 static int reneg_answer_mode(void)
 {
-    static int cached = -1;
-
-    if (cached < 0)
-    {
-        const char *e = getenv("ME_V34_RENEG_ANSWER");
-
-        cached = 3;
-        if (e  &&  strcmp(e, "s-reset") == 0)
-            cached = 0;
-        else if (e  &&  strcmp(e, "s-retain") == 0)
-            cached = 1;
-        else if (e  &&  strcmp(e, "trn-reset") == 0)
-            cached = 2;
-        /*endif*/
-    }
-    /*endif*/
-    return cached;
+    return 3;
 }
 /*- End of function --------------------------------------------------------*/
 

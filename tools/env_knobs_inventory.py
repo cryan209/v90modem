@@ -224,6 +224,17 @@ def main():
             w("| `%s` | %s | %s | %s | %s |\n" % (r["name"], r["files"], r["default"].replace("|", "/"),
                                                   r["refs"] or "-", r["ctx"]))
 
+    removed = []
+    if os.path.exists("tools/env_knobs_removed.tsv"):
+        with open("tools/env_knobs_removed.tsv") as f:
+            removed = [l.rstrip("\n").split("\t") for l in f if l.strip() and not l.startswith("#")]
+    w("\n## Removed (%d)\n\n" % len(removed))
+    w("Switches that used to exist and are gone; the behaviour is fixed at what was\n"
+      "their default.  Older docs and the project history still mention them.\n"
+      "Kept in `tools/env_knobs_removed.tsv`.\n\n| name | removed by |\n|---|---|\n")
+    for name, commit in removed:
+        w("| `%s` | %s |\n" % (name, commit))
+
     w("\n## Offline tools and tests (%d)\n\n" % len(off_rows))
     w("Options of analysis tools and harnesses, not of the modem. These belong on\n"
       "the tools' command lines; listed here so nothing reads an environment silently.\n\n")

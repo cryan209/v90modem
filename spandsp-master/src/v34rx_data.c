@@ -128,22 +128,13 @@ static int v34_rx_data_lean(void)
 #endif
 /*- End of function --------------------------------------------------------*/
 
-/* The clause-correct second-Tone-B timing currently exposes the B1
-   acquisition weakness this experiment addresses.  Keep it on the same A/B
-   arm until the remaining 2800-baud transient is eliminated; applying the
-   incomplete conditioning generally costs the default 3000/21600 row. */
+/* Supervised B1 equalizer conditioning, off: it was an experiment on the
+   clause-correct second-Tone-B timing (it shared that switch's name, with the
+   opposite default) and applying the incomplete conditioning generally costs
+   the 3000/21600 row. */
 static bool v34_rx_b1_supervised_eq_enabled(void)
 {
-    static int enabled = -1;
-
-    if (enabled < 0)
-    {
-        const char *value = getenv("ME_V34_SECOND_B_WAIT_REVERSAL");
-
-        enabled = (value  &&  *value  &&  atoi(value) != 0);
-    }
-    /*endif*/
-    return enabled != 0;
+    return false;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -159,23 +150,10 @@ static bool v34_rx_b1_supervised_eq_enabled(void)
  * than the 20 of 10.1.3.2's E before B1, and every plain V.34 data mode
  * against it has been white from its first symbol because B1 calibrated gain,
  * phase and conjugation on the wrong 128 symbols.  Search 0..24 and take the
- * best; the symbols collected past B1 are then decoded as data.
- * ME_V34_B1_SEARCH=0 restores the fixed position. */
+ * best; the symbols collected past B1 are then decoded as data. */
 static int v34_rx_b1_search_symbols(void)
 {
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *value = getenv("ME_V34_B1_SEARCH");
-
-        cache = (value  &&  *value)  ?  atoi(value)  :  24;
-        if (cache < 0)
-            cache = 0;
-        /*endif*/
-    }
-    /*endif*/
-    return cache;
+    return 24;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -197,25 +175,15 @@ static float v34_rx_tap_centroid(const v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
-/* ME_V34_B1_FALLBACK: normalized B1 correlation below which a B1 is taken to
-   match no template and the blind calibration is used (needs an earlier good
-   B1 in the call).  Default 0.5; 0 disables.  Live against the RasFinder
+/* Normalized B1 correlation below which a B1 is taken to match no template
+   and the blind calibration is used (needs an earlier good B1 in the call).  Live against the RasFinder
    (artifacts/rf-bbs-6) every B1 after its 11.6 renegotiations read 0.20-0.31
    and this calibration resumed data mode at 0.002-0.06 from the grid, ten
    times in one call.  (No offline test of it is valid: a replay cannot judge
    anything after its first divergent transmission, and our MP' is one.) */
 static float v34_rx_b1_fallback_threshold(void)
 {
-    static float cached = -1.0f;
-
-    if (cached < 0.0f)
-    {
-        const char *e = getenv("ME_V34_B1_FALLBACK");
-
-        cached = (e  &&  *e)  ?  (float) atof(e)  :  0.5f;
-    }
-    /*endif*/
-    return cached;
+    return 0.5f;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -240,19 +208,10 @@ static float v34_rx_b1_fallback_threshold(void)
    held at 63.15, distance to grid 0.080 -> 0.063 (about 2 dB better than
    the drifting baseline at the same point).  A positive integer N is the
    old fixed-size step of N (N x 8.1 ppm of tracking at 3200 baud; 2 is as
-   good as proportional here, 1 too slow, 8 jitters); 0 disables. */
+   good as proportional here, 1 too slow, 8 jitters). */
 static int v34_rx_centroid_steer(void)
 {
-    static int cached = -99;
-
-    if (cached == -99)
-    {
-        const char *e = getenv("ME_V34_DATA_CENTROID_STEER");
-
-        cached = (e  &&  *e)  ?  atoi(e)  :  -1;
-    }
-    /*endif*/
-    return cached;
+    return -1;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -805,7 +764,7 @@ void v34_rx_data_symbol(v34_rx_state_t *s, const complexf_t *sym)
                decision region away from where they belong.
                The decision is taken in the grid domain and mapped back
                through the derotator into the equalizer's own domain, which is
-               where the taps live.  ME_V34_DATA_EQ=0 disables. */
+               where the taps live. */
             if (v34_rx_t2_data_path(s)  &&  v34_rx_data_mode_eq_enabled())
             {
                 float g_re = transformed_re*s->data_symbol_scale;
@@ -1290,13 +1249,7 @@ skip_gain_report:
                              - ti*s->data_timing_previous.im)
                             / fmaxf(1.0f, s->data_timing_power);
                     s->data_timing_error += 0.01f*(e - s->data_timing_error);
-                    static float mm_gain = 1000.0f;
-
-                    if (mm_gain == 1000.0f)
-                    {
-                        const char *value = getenv("ME_V34_DATA_MM_GAIN");
-                        mm_gain = value ? strtof(value, NULL) : 5.0f;
-                    }
+                    const float mm_gain = 5.0f;
                     s->data_timing_frequency += 0.0002f*mm_gain*s->data_timing_error;
                     s->data_timing_frequency = fmaxf(-0.25f,
                                                     fminf(0.25f, s->data_timing_frequency));

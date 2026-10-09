@@ -154,13 +154,12 @@ static double v90_reneg_feed_rms = 0.0;
    case then uses as its lock hint.  All three are fixed by 8.5.2/10.1.3.3 and
    the ordering of training_constellation_4, so the discovery looks removable
    -- exactly the reasoning that ME_V90_CP_STREAM_STARTUP measured and found
-   false for the MP search itself.  ME_V34_TRN_HINT=0 withholds the hint and
-   lets MP start from the pinned defaults, which is the same question one
-   stage earlier. */
-/* The PHASE3_WAIT_S counterpart of ME_V34_TRN_HINT: this stage publishes
+   false for the MP search itself.  Withholding the hint and letting MP start
+   from the pinned defaults is the same question one stage earlier, and it
+   stops plain V.34 training (v34rx_phase4_trn.c). */
+/* The PHASE3_WAIT_S counterpart of the TRN hint: this stage publishes
    phase3_j_lock_hyp, which the MP case falls back to when PHASE4_TRN has not
-   produced a lock (see the hint_h line in the MP stage).  ME_V34_J_HINT=0
-   withholds it. */
+   produced a lock (see the hint_h line in the MP stage). */
 static bool v34_rx_caller_hearing_own_phase3(v34_rx_state_t *s);
 static bool v34_rx_is_v34_call_modem(const v34_rx_state_t *s);
 static bool v34_rx_answerer_sending_own_phase3(v34_rx_state_t *s);
@@ -169,16 +168,7 @@ static bool v34_rx_caller_hearing_own_phase3_m(v34_rx_state_t *s, int what);
 
 int v34_rx_j_hint_enabled(void)
 {
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *v = getenv("ME_V34_J_HINT");
-
-        cache = (v && *v) ? (atoi(v) != 0) : 1;
-    }
-    /*endif*/
-    return cache;
+    return 1;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -6760,20 +6750,10 @@ static complexf_t equalizer_get(v34_rx_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
-/* ME_V34_DATA_EQ=0 turns off decision-directed equalizer adaptation in data
-   mode, for A/B against the frozen-tap behaviour it replaces. */
+/* Decision-directed equalizer adaptation in data mode is on. */
 int v34_rx_data_mode_eq_enabled(void)
 {
-    static int enabled = -1;
-
-    if (enabled < 0)
-    {
-        const char *value = getenv("ME_V34_DATA_EQ");
-
-        enabled = (value == NULL  ||  atoi(value) != 0);
-    }
-    /*endif*/
-    return enabled;
+    return 1;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -6783,20 +6763,10 @@ int v34_rx_data_mode_eq_enabled(void)
    over a flat loopback walks the taps off: measured live at 3000 baud/9600, the
    full step took a call that had been sitting at 0.10 from the lattice out to
    0.66 within twelve thousand symbols and cost three quarters of the payload,
-   while the same call with data-mode adaptation off held 0.10 to the end.
-   ME_V34_DATA_EQ_STEP sweeps it. */
+   while the same call with data-mode adaptation off held 0.10 to the end. */
 float v34_rx_data_mode_eq_step(const v34_rx_state_t *s)
 {
-    static float step = -2.0f;
-
-    if (step < -1.0f)
-    {
-        const char *value = getenv("ME_V34_DATA_EQ_STEP");
-
-        step = (value  &&  *value)  ?  (float) atof(value)  :  -1.0f;
-    }
-    /*endif*/
-    return step >= 0.0f ? step : (v34_rx_b1_batch_eq_enabled(s) ? 0.03f : 1.0f);
+    return v34_rx_b1_batch_eq_enabled(s) ? 0.03f : 1.0f;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -6861,20 +6831,11 @@ void v34_rx_tune_equalizer(v34_rx_state_t *s, const complexf_t *z, const complex
    where they belong: measured over the G.711 round trip the equalizer is the
    identity at the end of PP refinement (main tap 0.99 of 1.00 total energy)
    and has been walked to 0.83 by the time Phase 4 starts, with the off-centre
-   energy quadrupled.  ME_V34_PHASE3_CMA=off keeps the carrier loop and stops
-   the blind tap gradient. */
+   energy quadrupled.  Stopping the blind tap gradient here was tried; CMA
+   stays on. */
 static int phase3_cma_disabled(void)
 {
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *value = getenv("ME_V34_PHASE3_CMA");
-
-        cache = (value  &&  strcmp(value, "off") == 0);
-    }
-    /*endif*/
-    return cache;
+    return 0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -8445,7 +8406,7 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
                    at the excess, keeping the PP index continuous; it then ends where
                    a timely detection would have.  V.90 digital receiver only: plain V.34
                    3200/21600 A-law, where every PP is timely, stops decoding its
-                   payload with it.  ME_V34_PP_ONSET_TRIM=0 disables. */
+                   payload with it. */
                 s->phase3_pp_skip = 0;
                 if (s->phase3_pp_onset >= 0
                     &&  v34_pp_onset_trim_enabled()
@@ -9989,26 +9950,16 @@ static void process_primary_symbol(v34_rx_state_t *s, const complexf_t *sym)
            goes quiet after its first MP was never given up on.  Measured from
            the first accepted MP, which is later than the clause's origins and so
            errs towards waiting; the round trip is an allowance
-           (ME_V34_RTD_MS, default 250), not a measurement. */
+           (250 ms), not a measurement. */
         if (s->duplex
             && s->mp_seen == 1
             && s->mp_accepted_baud > 0
             && s->baud_rate >= 0  &&  s->baud_rate <= 5
             && s->received_event != V34_EVENT_TRAINING_FAILED)
         {
-            static int rtd_ms = -1;
+            const int rtd_ms = 250;
             int wait_ms;
 
-            if (rtd_ms < 0)
-            {
-                const char *v = getenv("ME_V34_RTD_MS");
-
-                rtd_ms = (v  &&  *v)  ?  atoi(v)  :  250;
-                if (rtd_ms < 0)
-                    rtd_ms = 0;
-                /*endif*/
-            }
-            /*endif*/
             wait_ms = s->far_capabilities.from_cme_modem  ?  30000  :  2500 + 3*rtd_ms;
             if (s->duration - s->mp_accepted_baud
                 >= (baud_rate_parameters[s->baud_rate].baud_rate*wait_ms + 500)/1000)
@@ -11189,49 +11140,17 @@ static float v34_eye_diff_angle_err2(complexf_t z, complexf_t *prev)
 
 static int v34_eye_select_enabled(void)
 {
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *value = getenv("ME_V34_EYE_SELECT");
-
-        cache = !(value  &&  (strcmp(value, "off") == 0
-                              ||  value[0] == '0'
-                              ||  value[0] == 'n'
-                              ||  value[0] == 'N'));
-    }
-    /*endif*/
-    return cache;
+    return 1;
 }
 
 static int v34_eye_pp_guard_enabled(void)
 {
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *value = getenv("ME_V34_EYE_PP_GUARD");
-
-        cache = (value  &&  (value[0] == '0'  ||  value[0] == 'n'  ||  value[0] == 'N'))
-              ?  0
-              :  ((value  &&  value[0] == '2')  ?  2  :  1);
-    }
-    /*endif*/
-    return cache;
+    return 1;
 }
 
 static int v34_pp_onset_trim_enabled(void)
 {
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *value = getenv("ME_V34_PP_ONSET_TRIM");
-
-        cache = (value  &&  value[0] == '0')  ?  0  :  ((value  &&  value[0] == '2')  ?  2  :  1);
-    }
-    /*endif*/
-    return cache;
+    return 1;
 }
 
 /* ME_V34_P4_TRN_COH: Phase 4 TRN decision-directed training waits for the
@@ -11250,7 +11169,7 @@ static int v34_pp_onset_trim_enabled(void)
    A-law at zero delay, so the value is not a fine-tuned one.  Not the PP
    conditioning: a late PP lock at the same rows is real (docs), but trimming it
    for plain V.34 trades one failure for another (2743/26400 A-law loses a
-   payload burst), see ME_V34_PP_ONSET_TRIM=2. */
+   payload burst). */
 static float v34_p4_trn_coh_gate(void)
 {
     static float cache = -1.0f;
@@ -11267,28 +11186,13 @@ static float v34_p4_trn_coh_gate(void)
 
 static bool v34_eye_pp_defer_enabled(void)
 {
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *value = getenv("ME_V34_EYE_PP_DEFER");
-
-        cache = (value  &&  strcmp(value, "0") == 0)  ?  0  :  (value  &&  strcmp(value, "all") == 0)  ?  2  :  1;
-    }
-    /*endif*/
-    return cache != 0;
+    return true;
 }
 
-/* ME_V34_EYE_PP_DEFER=all also applies the PP-deferred flip outside the V.90
-   digital receiver (plain V.34, both roles).  Experiment. */
+/* The PP-deferred flip applies to the V.90 digital receiver only. */
 static bool v34_eye_pp_defer_all(void)
 {
-    (void) v34_eye_pp_defer_enabled();
-    {
-        const char *value = getenv("ME_V34_EYE_PP_DEFER");
-
-        return value  &&  strcmp(value, "all") == 0;
-    }
+    return false;
 }
 
 static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sample)
@@ -11395,7 +11299,7 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
        live pjmedia call delivers (ME_IO_SCHEDULE) it landed after, the
        detector read S at the eye crossing as 180-degree steps (dom=2 25/32
        against alt 30/32), and the call was lost -- which is what happened
-       live.  ME_V34_EYE_PP_DEFER=0 restores discarding it. */
+       live. */
     if (s->eye_flip_pending  &&  !eye_hold  &&  eye_check)
     {
         s->eye_flip_pending = false;
@@ -11628,27 +11532,14 @@ static bool v90_t3_solve(double *a, double *b, double *x, int n)
    Keep the proven lower-rate and V.90 paths on their existing conditioning. */
 bool v34_rx_b1_batch_eq_enabled(const v34_rx_state_t *s)
 {
-    static int override = -2;
-    if (override == -2)
-    {
-        const char *value = getenv("ME_V34_B1_BATCH_EQ");
-        override = value ? atoi(value) != 0 : -1;
-    }
     /* bit_rate encodes 2*(N - 1): N >= 13 means 31200/33600 bit/s. */
     return s->duplex && !s->v90_mode
-        && (override >= 0 ? override
-            : s->baud_rate == V34_BAUD_RATE_3429 && s->bit_rate >= 24);
+        && s->baud_rate == V34_BAUD_RATE_3429 && s->bit_rate >= 24;
 }
 
 bool v34_rx_data_mm_timing_enabled(const v34_rx_state_t *s)
 {
-    static int override = -2;
-    if (override == -2)
-    {
-        const char *value = getenv("ME_V34_DATA_MM_TIMING");
-        override = value ? atoi(value) != 0 : -1;
-    }
-    return override >= 0 ? override : v34_rx_b1_batch_eq_enabled(s);
+    return v34_rx_b1_batch_eq_enabled(s);
 }
 
 /* 11.4/12.5.2: use B1's known data constellation to remove residual ISI left
@@ -14168,22 +14059,12 @@ static void v34_rx_watch_peer_reneg_s(v34_rx_state_t *s,
  * Detecting S is enough to unblock the rest, because PP conditioning that
  * follows carries the T/2 eye-phase chooser, which is what fixes the instant.
  *
- * Opt-in (V34_PHASE3_S_SPECTRAL=1): it publishes V34_EVENT_S without any of
- * the J/TRN evidence the alternation path carries, so it is deliberately not
- * on the default path that the symbol-rate matrix and the loopback tests
- * exercise. */
+ * Not enabled: it publishes V34_EVENT_S without any of the J/TRN evidence
+ * the alternation path carries, and it did not rescue the HSF call it was
+ * written for (PP conditioning after S stays constellation-domain). */
 static int v34_phase3_s_spectral_enabled(void)
 {
-    static int enabled = -1;
-
-    if (enabled < 0)
-    {
-        const char *v = V34_DIAG_GETENV("V34_PHASE3_S_SPECTRAL");
-
-        enabled = (v  &&  atoi(v) != 0);
-    }
-    /*endif*/
-    return enabled;
+    return 0;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -14217,22 +14098,12 @@ static bool v34_rx_is_v34_call_modem(const v34_rx_state_t *s)
  * read that Tone A as S.  The three-bin measurement needs no eye, and on both
  * taps fires after exactly three 10 ms blocks of the real S (ratio 0.98-1.00)
  * and nowhere else.  Arming it only once our J is on the air keeps our own
- * S from being read through the echo when both directions share a carrier.
- * ME_V34_P4_S_SPECTRAL=0 restores the constellation detector alone. */
+ * S from being read through the echo when both directions share a carrier. */
 bool v34_rx_caller_awaiting_phase4_s(v34_rx_state_t *s)
 {
-    static int enabled = -1;
     const v34_state_t *owner;
 
-    if (enabled < 0)
-    {
-        const char *v = getenv("ME_V34_P4_S_SPECTRAL");
-
-        enabled = !(v  &&  strcmp(v, "0") == 0);
-    }
-    /*endif*/
-    if (!enabled
-        ||  !v34_rx_is_v34_call_modem(s)
+    if (!v34_rx_is_v34_call_modem(s)
         ||  !s->duplex
         ||  s->stage != V34_RX_STAGE_PHASE3_WAIT_S)
         return false;
@@ -14253,22 +14124,12 @@ bool v34_rx_caller_awaiting_phase4_s(v34_rx_state_t *s)
  * wrecked the call modem's echo canceller window.  At -20 dB the window
  * boundary happened to fall before S and the call trained.  The three-bin
  * watch fires on it either way.  Armed only while our own J is on the air,
- * as for the call modem, so our own S cannot be read back through the echo.
- * ME_V34_P3_S_SPECTRAL_ANSWER=0 restores the constellation detector alone. */
+ * as for the call modem, so our own S cannot be read back through the echo. */
 static bool v34_rx_answerer_awaiting_phase3_s(v34_rx_state_t *s)
 {
-    static int enabled = -1;
     const v34_state_t *owner;
 
-    if (enabled < 0)
-    {
-        const char *v = getenv("ME_V34_P3_S_SPECTRAL_ANSWER");
-
-        enabled = !(v  &&  strcmp(v, "0") == 0);
-    }
-    /*endif*/
-    if (!enabled
-        ||  s->v90_mode
+    if (s->v90_mode
         ||  s->calling_party
         ||  !s->duplex
         ||  s->stage != V34_RX_STAGE_PHASE3_WAIT_S)
@@ -14293,9 +14154,9 @@ static bool v34_rx_answerer_awaiting_phase3_s(v34_rx_state_t *s)
  * Hold blind CMA there; 11.4.1.1.1 conditions the receiver on the peer's
  * Phase 4 TRN, which is where adapting resumes.  (The 55% TRN score is not
  * what changes -- the MP does: decoded and acknowledged instead of never.) */
-/* ME_V34_P3_ECHO_FREEZE: which loops v34_rx_caller_hearing_own_phase3() holds.
+/* Which loops v34_rx_caller_hearing_own_phase3() holds.
    Bits 1 blind CMA, 2 carrier tracking, 4 T/2 eye chooser, 8 band-edge timing;
-   default 1, 0 disables.  CMA is the one that matters: replayed on
+   1, blind CMA only.  CMA is the one that matters: replayed on
    rf-tower-v34p4s-1 it alone takes the peer's MP from never decoding to
    decoding and acknowledged, and the call on to B1.  Holding the eye chooser
    as well (4) costs rf-v34-q3 -- a 09-28 call that reached data mode -- its
@@ -14303,16 +14164,7 @@ static bool v34_rx_answerer_awaiting_phase3_s(v34_rx_state_t *s)
    those stay free.  Swept over d2, q1, q3 and both 2026-09-30 wired calls. */
 static int v34_p3_echo_freeze_mask(void)
 {
-    static int mask = -1;
-
-    if (mask < 0)
-    {
-        const char *v = getenv("ME_V34_P3_ECHO_FREEZE");
-
-        mask = v  ?  atoi(v)  :  1;
-    }
-    /*endif*/
-    return mask;
+    return 1;
 }
 
 /* The plain V.34 answer modem's own Phase 3.  It goes out first, while the
@@ -14329,21 +14181,12 @@ static int v34_p3_echo_freeze_mask(void)
    J is NOT included: the call modem's S may legitimately arrive while the
    answer modem is still sending J.  Only the PP acquisition is withheld; the
    other loops are left running, because freezing them too measurably cost
-   2400/21600 its S detection on a clean bearer (15/16 delays -> 7/16).
-   ME_V34_ANSWER_P3_ECHO_GUARD=0 disables. */
+   2400/21600 its S detection on a clean bearer (15/16 delays -> 7/16). */
 static bool v34_rx_answerer_sending_own_phase3(v34_rx_state_t *s)
 {
-    static int enabled = -1;
     const v34_state_t *owner;
 
-    if (enabled < 0)
-    {
-        const char *v = getenv("ME_V34_ANSWER_P3_ECHO_GUARD");
-
-        enabled = !(v  &&  strcmp(v, "0") == 0);
-    }
-    /*endif*/
-    if (!enabled  ||  s->v90_mode  ||  s->calling_party  ||  !s->duplex)
+    if (s->v90_mode  ||  s->calling_party  ||  !s->duplex)
         return false;
     /*endif*/
     if (s->stage != V34_RX_STAGE_PHASE3_TRAINING)
@@ -14424,27 +14267,16 @@ SPAN_DECLARE(bool) v34_rx_hearing_own_echo(v34_state_t *s)
 
 SPAN_DECLARE(bool) v34_rx_line_ec_window(v34_state_t *s)
 {
-    static int answer_role = -1;
     const v34_rx_state_t *rx;
 
     if (!s)
         return false;
-    /*endif*/
-    if (answer_role < 0)
-    {
-        const char *v = getenv("ME_V34_LINE_EC_ANSWER");
-
-        answer_role = !(v  &&  strcmp(v, "0") == 0);
-    }
     /*endif*/
     rx = &s->rx;
     /* A V.90 call that fell back to V.34 is a V.34 call from Phase 3 on, with
        this modem the call modem (V.90 9.2.1.1.8): its S-bar..TRN goes out
        while the analogue modem is silent (11.3.1.2.4) exactly as here. */
     if ((rx->v90_mode  &&  !rx->v90_v34_fallback)  ||  !rx->duplex)
-        return false;
-    /*endif*/
-    if (!v34_rx_is_v34_call_modem(rx)  &&  !answer_role)
         return false;
     /*endif*/
     /* From our S-bar to the end of our TRN.  J is excluded: the far end

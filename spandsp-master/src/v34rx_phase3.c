@@ -16,7 +16,7 @@
  *
  * The J lock hint this stage publishes (phase3_j_lock_hyp) is the MP stage's
  * FALLBACK, used only when PHASE4_TRN has not produced one.  Measured with
- * ME_V34_J_HINT=0 it is never decisive in any coverage available here; see
+ * it withheld it is never decisive in any coverage available here; see
  * docs/v34_flow_mapping.md, which also records why that is not the same as
  * saying it is dead.
  */

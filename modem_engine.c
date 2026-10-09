@@ -3048,19 +3048,13 @@ static int  g_notch_rx_high = -1;
 static bool g_v34_use_echo_can = false;
 /* Plain V.34 line echo canceller (v34_line_ec.c): fitted once on the call
    modem's own Phase 3, when V.34 11.3.1.2.4 has the far end silent, and held
-   through Phase 4 and data mode.  ME_V34_LINE_EC=0 disables. */
+   through Phase 4 and data mode. */
 static v34_line_ec_t g_lec;
 static bool g_lec_armed = false;
 
 static bool me_line_ec_enabled(void)
 {
-    static int cached = -1;
-
-    if (cached < 0) {
-        const char *e = getenv("ME_V34_LINE_EC");
-        cached = !(e && strcmp(e, "0") == 0);
-    }
-    return cached != 0;
+    return true;
 }
 
 /* The same canceller on a V.90 call (this modem the DIGITAL side).  V.90
@@ -4706,7 +4700,7 @@ static void v34_rx_rate_backoff_locked(void)
     int *ours;
     int want;
 
-    if (!g_v34  ||  parse_env_int("ME_V34_RX_RATE_BACKOFF", 1) == 0)
+    if (!g_v34)
         return;
     if (v34_get_negotiated_mp_rates(g_v34, &a_to_c, &c_to_a) != 0)
         return;
@@ -4721,7 +4715,7 @@ static void v34_rx_rate_backoff_locked(void)
        1.5 bits per symbol, so four attempts walk 31200 -> 26400 -> 21600 ->
        16800 -> 12000 and span the plausible range of a real line instead of
        creeping down one rung per 20 s dwell. */
-    want = *ours - parse_env_int("ME_V34_RX_RATE_BACKOFF_STEP", 2);
+    want = *ours - 2;
     if (want < 2)
         want = 2;
     /* Not below the DTE's +MS receive minimum: a slower call is one it has
@@ -4754,7 +4748,7 @@ static void v34_rx_rate_backoff_locked(void)
  * report uses (bits/symbol ~ (SNR + 13)/6, docs/v34_data_mode_rates.md), which
  * a B1 measurement taken straight after E makes conservative.  Only our own
  * receive direction is touched, the retrain counts against the same per-call
- * cap as any other, and ME_V34_B1_RATE_CHECK=0 disables it. */
+ * cap as any other. */
 static bool g_v34_b1_rate_checked = false;
 static bool retrain_on_loss_due(int cap);
 static void v34_reneg_clear_locked(void);
@@ -4776,8 +4770,6 @@ static bool v34_b1_rate_check_locked(void)
     if (g_v34_b1_rate_checked || !g_v34 || v34_get_b1_snr_db(g_v34, &snr) != 0)
         return false;
     g_v34_b1_rate_checked = true;
-    if (parse_env_int("ME_V34_B1_RATE_CHECK", 1) == 0)
-        return false;
     if (v34_get_negotiated_mp_rates(g_v34, &a_to_c, &c_to_a) != 0)
         return false;
     rx_code = v34_get_rx_baud_rate(g_v34);
@@ -4795,7 +4787,7 @@ static bool v34_b1_rate_check_locked(void)
        the call straight to the 4800 floor.  Below 6 dB, read it as "too
        high" and step down two N, as v34_rx_rate_backoff_locked() does. */
     if (snr < 6.0f)
-        supported = *ours - parse_env_int("ME_V34_RX_RATE_BACKOFF_STEP", 2);
+        supported = *ours - 2;
     if (supported < 2)
         supported = 2;
     ME_LOG("[ME] V.34 B1: receive SNR %.1f dB at %d baud carries about %d bps; "
@@ -4924,16 +4916,6 @@ static int me_v34_reneg_enabled(void)
         di_get_v250_settings(&cfg);
         return cfg.msc ? 1 : 0;
     }
-}
-
-static int me_v34_reneg_timeout_ms(void)
-{
-    static int cached = -1;
-
-    if (cached < 0)
-        cached = parse_env_int("ME_V34_RENEG_TIMEOUT_MS",
-                               ME_V34_RENEG_E_TIMEOUT_MS_DEFAULT);
-    return cached;
 }
 
 static void v34_reneg_begin_locked(void)
@@ -5176,16 +5158,13 @@ static bool v34_reneg_timed_out_locked(void)
     /* 11.6.2.1: 2500 ms + 2 RTD after the S-to-S-bar transition, or 30 s when
      * the peer's INFO0 carried the CME bit.  Counted in received audio from
      * the request (the S and S-bar, ~150 ms, precede the clause's origin) and
-     * with a 250 ms round-trip allowance.  ME_V34_RENEG_TIMEOUT_MS, when set,
-     * replaces the whole thing as an explicit diagnostic deviation. */
+     * with a 250 ms round-trip allowance. */
     {
         int64_t elapsed_ms = (int64_t)((g_rx_audio_samples
                                         - g_v34_reneg_start_samples) / 8);
         int limit_ms;
 
-        if (getenv("ME_V34_RENEG_TIMEOUT_MS"))
-            limit_ms = me_v34_reneg_timeout_ms();
-        else if (g_v34 && v34_get_far_cme(g_v34))
+        if (g_v34 && v34_get_far_cme(g_v34))
             limit_ms = 30000;
         else
             limit_ms = 2500 + 2 * 250 + 150;

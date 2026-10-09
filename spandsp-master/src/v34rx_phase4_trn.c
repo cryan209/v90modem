@@ -10,8 +10,8 @@
  * detector, and the scoring that produces phase4_trn_lock_* -- the hint the MP
  * stage locks against.
  *
- * That hint is NOT optional.  Measured with ME_V34_TRN_HINT=0, withholding it
- * stops plain V.34 training altogether: trained=0/0, zero bits, 60 s timeout,
+ * That hint is NOT optional.  Measured, withholding it stops plain V.34
+ * training altogether: trained=0/0, zero bits, 60 s timeout,
  * at 3200/21600 as well as 2400/9600.  The V.90 native startup CP receive is
  * byte-identical either way, because that path does not use the V.34 MP hint,
  * so the stage-local metric signs off on a change that breaks the modem --
@@ -78,16 +78,7 @@
 
 static int v34_trn_hint_enabled(void)
 {
-    static int cache = -1;
-
-    if (cache < 0)
-    {
-        const char *v = getenv("ME_V34_TRN_HINT");
-
-        cache = (v && *v) ? (atoi(v) != 0) : 1;
-    }
-    /*endif*/
-    return cache;
+    return 1;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -188,7 +179,7 @@ static void phase4_trn_recent_update(v34_rx_state_t *s, int raw_sym)
    (artifacts/rf-v34-d2 and -c3).  So the score alone is the wrong instrument,
    and it gates PHASE4_TRN_READY_MIN_SCORE.
  
-   ME_V34_TRN_DIBIT_SPREAD=0 disables the check and keeps the log line. */
+   */
 static bool phase4_trn_dibits_are_spread(v34_rx_state_t *s)
 {
     int total;
@@ -217,20 +208,7 @@ static bool phase4_trn_dibits_are_spread(v34_rx_state_t *s)
 
 static bool phase4_trn_dibit_spread_required(void)
 {
-    static int initialized = 0;
-    static int enabled = 1;
-
-    if (!initialized)
-    {
-        const char *env = getenv("ME_V34_TRN_DIBIT_SPREAD");
-
-        if (env  &&  env[0] != '\0')
-            enabled = (strtol(env, NULL, 10) != 0);
-        /*endif*/
-        initialized = 1;
-    }
-    /*endif*/
-    return enabled != 0;
+    return true;
 }
 /*- End of function --------------------------------------------------------*/
 

@@ -278,7 +278,7 @@ SPAN_DECLARE(bool) v34_rx_hearing_own_echo(v34_state_t *s);
     window a line echo canceller trains on.  Unlike v34_rx_hearing_own_echo()
     it does not require the echo to be weak, so a poor hybrid is still
     trained on; the canceller's own ERLE gate rejects a window the far end
-    was not silent for.  ME_V34_LINE_EC_ANSWER=0 limits it to the call modem.
+    was not silent for.
     \param s The modem context. */
 SPAN_DECLARE(bool) v34_rx_line_ec_window(v34_state_t *s);
 
