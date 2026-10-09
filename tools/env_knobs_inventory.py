@@ -33,6 +33,7 @@ SETTINGS = [
     ("ME_V8_ADVERTISE_V32", "0 withdraws the V.32 bit from V.8."),
     ("ME_V8_ADVERTISE_V91", "1 offers V.91 in V.8."),
     ("ME_V8_TX_POWER_DBM0", "V.8 transmit level."),
+    ("ME_V34_TX_DBM0", "V.34 nominal transmit level before INFO1 power reduction (default -14)."),
     ("ME_V25_ANS_AA", "1 answers plain ANS with V.32bis AA (Annex A.2.1.3)."),
     ("ME_V22_LEGACY", "0 withdraws the V.8-less V.22bis (USB1) path."),
     ("ME_V22_GUARD", "V.22bis guard tone in Hz (0, 550 or 1800)."),
@@ -85,6 +86,10 @@ KEPT = {
     "ME_K56FLEX_RATE": "K56flex: area under active work, not touched in the knob clean-up",
     "ME_K56FLEX_ROLE": "K56flex: area under active work, not touched in the knob clean-up",
     "ME_X2_SYMMETRIC": "x2: alongside K56flex, not touched in the knob clean-up",
+    "ME_V34_TX_PREEMP": "diagnostic: forces Phase 3 pre-emphasis to measure a peer against a flat spectrum",
+    "ME_ANS_NOTCH_RATIO": "interop: lets ANSam through band noise on a poor line (a caller otherwise sends CI all call)",
+    "ME_SOUNDER_RMS": "measurement: level of the channel sounder (ME_SOUNDER)",
+    "V32BIS_TRN_SYMBOLS": "test hook: a far end that sends long TRN (slmodemd runs to ~8000)",
 }
 
 READERS = r"getenv|parse_env_int|V34_DIAG_GETENV|env_or|v34_diag_flag|parse_v8_answer_tone_env"

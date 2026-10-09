@@ -1743,25 +1743,7 @@ SPAN_DECLARE(logging_state_t *) v8_get_logging_state(v8_state_t *s)
 
 static int v8_ansam_start_delay_ms(void)
 {
-    static int initialized = 0;
-    static int delay_ms = 750;
-
-    if (!initialized)
-    {
-        const char *value = getenv("V8_ANSAM_START_DELAY_MS");
-        if (value  &&  value[0] != '\0')
-        {
-            char *end = NULL;
-            long parsed = strtol(value, &end, 10);
-            if (end != value  &&  end  &&  *end == '\0'  &&  parsed >= 0)
-                delay_ms = (int) parsed;
-            /*endif*/
-        }
-        /*endif*/
-        initialized = 1;
-    }
-    /*endif*/
-    return delay_ms;
+    return 750;
 }
 /*- End of function --------------------------------------------------------*/
 

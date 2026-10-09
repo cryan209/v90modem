@@ -198,9 +198,7 @@ static int v32bis_echo_mu_slow(void)
 
 static int v32bis_echo_mu_fast(void)
 {
-    const char *e = getenv("V32BIS_ECHO_MU_FAST");
-
-    return (e != NULL) ? atoi(e) : V32BIS_ECHO_MU_FAST_SHIFT;
+    return V32BIS_ECHO_MU_FAST_SHIFT;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -224,16 +222,7 @@ static int v32bis_ec_train_symbols(void)
 /*! The TRN extension for echo canceller training, 0 for none. */
 static int v32bis_trn_ec_symbols(void)
 {
-    const char *e = getenv("V32BIS_TRN_EC");
-    int n = (e != NULL) ? atoi(e) : V32BIS_TRN_EC_SYMBOLS;
-
-    if (n < 0)
-        n = 0;
-    /*endif*/
-    if (n > 8192 - 1280)
-        n = 8192 - 1280;
-    /*endif*/
-    return n;
+    return V32BIS_TRN_EC_SYMBOLS;
 }
 /*- End of function --------------------------------------------------------*/
 

@@ -324,7 +324,7 @@ void ds_init(data_stack_t *s,
    answering our first XID 4.7 s into a data mode that follows a retrain
    (rf-tower-fb-19) and not inside 6 s at all on two other calls (fb-17,
    fb-18), each of which then tore down a clean 16800 data mode.  20 gives
-   ~20 s.  ME_V42_N400 overrides. */
+   ~20 s. */
 /* ME_V42_T400_MS overrides V.42 9.1.1's 750 ms T400; 0 = default. */
 int ds_v42_t400_ms(void)
 {
@@ -335,14 +335,7 @@ int ds_v42_t400_ms(void)
 
 static int ds_v42_n400(void)
 {
-    static int n = -1;
-    if (n < 0) {
-        const char *e = getenv("ME_V42_N400");
-        n = (e && *e) ? atoi(e) : 20;
-        if (n < 1)
-            n = 1;
-    }
-    return n;
+    return 20;
 }
 
 int ds_init_v42_ex(data_stack_t *s,

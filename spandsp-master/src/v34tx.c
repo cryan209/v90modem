@@ -187,20 +187,6 @@
    (Table 16 bits 30:33): over the VG224 the RasFinder projects only 9600
    for what we send at 3200 baud, against 24000 the other way, on a noisier
    D/A-to-loop path where only our level can buy SNR. */
-static bool v34_tx_no_3200_high(void)
-{
-    static int cached = -1;
-
-    if (cached < 0)
-    {
-        const char *e = getenv("ME_V34_TX_NO_3200_HIGH");
-
-        cached = (e  &&  atoi(e) != 0)  ?  1  :  0;
-    }
-    return cached != 0;
-}
-/*- End of function --------------------------------------------------------*/
-
 static float v34_nominal_tx_dbm0(void)
 {
     static float cached = 1.0f;
@@ -1036,12 +1022,8 @@ static int info0_sequence_tx(v34_tx_state_t *s)
     bitstream_put(&bs, &t, (v34_capabilities.support_baud_rate_high_carrier[V34_BAUD_RATE_3000])  ?  1  :  0, 1);
     /* 17       Set to 1 indicates the ability to transmit at the low carrier frequency with a symbol rate of 3200. */
     bitstream_put(&bs, &t, (v34_capabilities.support_baud_rate_low_carrier[V34_BAUD_RATE_3200])  ?  1  :  0, 1);
-    /* 18       Set to 1 indicates the ability to transmit at the high carrier frequency with a symbol rate of 3200.
-                ME_V34_TX_NO_3200_HIGH=1 clears it (diagnostic, default off): bits 15:18 describe
-                OUR TRANSMITTER (V.34 Table 12), so this makes the answer modem put our direction
-                on the 3200 low carrier or another symbol rate, to tell a carrier-specific transmit
-                impairment from a general one. */
-    bitstream_put(&bs, &t, (v34_capabilities.support_baud_rate_high_carrier[V34_BAUD_RATE_3200] && !v34_tx_no_3200_high())  ?  1  :  0, 1);
+    /* 18       Set to 1 indicates the ability to transmit at the high carrier frequency with a symbol rate of 3200. */
+    bitstream_put(&bs, &t, v34_capabilities.support_baud_rate_high_carrier[V34_BAUD_RATE_3200]  ?  1  :  0, 1);
     /* 19       Set to 0 indicates that transmission with a symbol rate of 3429 is disallowed. */
     bitstream_put(&bs, &t, (v34_capabilities.rate_3429_allowed)  ?  1  :  0, 1);
     /* 20       Set to 1 indicates the ability to reduce transmit power to a value lower than the nominal setting. */
@@ -4483,19 +4465,11 @@ static void initial_ab_not_ab_baud_init(v34_state_t *s)
    direction at every transmit level and on both 3200-baud carriers, while
    accepting 16800-21600 from us whenever its MP did not follow that
    projection.  540 ms needs no round-trip estimate to stay inside the bound.
-   ME_V34_L2_CYCLES overrides (diagnostic).  The answer modem keeps 400 ms. */
+   The answer modem keeps 400 ms. */
 static int l2_cycles(const v34_state_t *s)
 {
-    static int forced = -2;
-
-    if (forced == -2)
-    {
-        const char *e = getenv("ME_V34_L2_CYCLES");
-
-        forced = (e  &&  atoi(e) >= 1  &&  atoi(e) <= 27)  ?  atoi(e)  :  -1;
-    }
     if (s->tx.calling_party  &&  (s->tx.duplex  ||  s->tx.v90_mode))
-        return (forced > 0)  ?  forced  :  27;
+        return 27;
     /*endif*/
     /* The ANSWERING end of a V.90 call (the digital modem) sends 15 periods
        (300 ms) of L2, not 20.  The far modem reads all of the L2 it is given
@@ -4507,20 +4481,9 @@ static int l2_cycles(const v34_state_t *s)
        retrained; the modems that connected answered in 20-50 ms, and a short
        L2 is what BinModem now sends.  Scoped to V.90 answering because the
        call-side lengthening above was measured against MICA and the RasFinder
-       for the opposite reason.  ME_V34_L2_CYCLES_ANSWER=20 restores. */
+       for the opposite reason. */
     if (s->tx.v90_mode)
-    {
-        static int answer = -1;
-
-        if (answer < 0)
-        {
-            const char *e = getenv("ME_V34_L2_CYCLES_ANSWER");
-
-            answer = (e  &&  atoi(e) >= 1  &&  atoi(e) <= 27)  ?  atoi(e)  :  15;
-        }
-        /*endif*/
-        return answer;
-    }
+        return 15;
     /*endif*/
     return 20;
 }
@@ -5214,29 +5177,10 @@ static int answer_info0_retry_policy(void)
 /* Backstop on the Tone A hold after the INFO0 acknowledgement, in 600ths of a
    second.  The normal exit is the call modem dropping Tone B, which 11.2.1.1.3
    has it do exactly when it is ready to receive L1/L2; this only bounds the
-   wait if that never happens.  ME_V34_RESUME_DELAY_MS. */
+   wait if that never happens: 800 ms. */
 static int post_info0_resume_bauds(void)
 {
-    static int initialized = 0;
-    static int bauds = (600*800 + 500)/1000;
-
-    if (!initialized)
-    {
-        const char *value = getenv("ME_V34_RESUME_DELAY_MS");
-
-        if (value  &&  *value)
-        {
-            long ms = strtol(value, NULL, 10);
-
-            if (ms > 0  &&  ms < 5000)
-                bauds = (int) ((600*ms + 500)/1000);
-            /*endif*/
-        }
-        /*endif*/
-        initialized = 1;
-    }
-    /*endif*/
-    return bauds;
+    return (600*800 + 500)/1000;
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -7784,33 +7728,8 @@ static int phase4_trn_max_bauds(const v34_state_t *s)
    call modem only guarantees 512T of its own TRN and then waits for our MP, so
    spending the entire budget before sending it leaves the peer's own recovery
    timer to expire first: measured, it decoded our MP, logged "MP detected,
-   starting MP' txmit", and retrained 20 ms later.  ME_V34_PHASE4_TRN_MAX
-   bounds our TRN independently of the receiver's readiness; 0 (the default)
-   keeps the old behaviour, where the two are tied together. */
-static int phase4_trn_tx_max_bauds(void)
-{
-    static int initialized = 0;
-    static int bauds = 0;
-
-    if (!initialized)
-    {
-        const char *value = getenv("ME_V34_PHASE4_TRN_MAX");
-
-        if (value  &&  *value)
-        {
-            long v = strtol(value, NULL, 10);
-
-            if (v >= PHASE4_TRN_BAUDS  &&  v < 100000)
-                bauds = (int) v;
-            /*endif*/
-        }
-        /*endif*/
-        initialized = 1;
-    }
-    /*endif*/
-    return bauds;
-}
-/*- End of function --------------------------------------------------------*/
+   starting MP' txmit", and retrained 20 ms later.  Our TRN
+   stays tied to the receiver's readiness. */
 
 /* Hard bound on the answerer's Phase 4 TRN (11.4.1.2.2: "no longer than
    2000 ms plus a round trip delay").  Without it a receiver that never
@@ -8036,8 +7955,7 @@ static complex_sig_t get_phase4_baud(v34_state_t *s)
             }
             else if (s->tx.tone_duration >= PHASE4_TRN_BAUDS
                 && (s->rx.received_event == V34_EVENT_PHASE4_TRN_READY
-                    ||  (phase4_trn_tx_max_bauds() > 0
-                         &&  s->tx.tone_duration >= phase4_trn_tx_max_bauds())
+
                     ||  (phase4_trn_hard_cap_bauds(s) > 0
                          &&  s->tx.tone_duration >= phase4_trn_hard_cap_bauds(s))))
             {
@@ -8106,14 +8024,7 @@ static void phase4_rx_conditioning_init_ex(v34_state_t *s, int initial_stage, co
        otherwise read as "junction already reached". */
     s->rx.phase4_s_bar_left = -1;
     s->rx.phase4_s_last_step = -1;
-    const char *retain_env;
-    bool retain_phase3_frontend;
-
-    retain_env = getenv("ME_V34_RETAIN_PHASE3_FRONTEND");
-    retain_phase3_frontend = retain_frontend
-                          || (s->rx.v90_mode
-                              && retain_env
-                              && atoi(retain_env) != 0);
+    bool retain_phase3_frontend = retain_frontend;
 
     s->primary_channel_active = true;
     s->rx.current_demodulator = V34_MODULATION_V34;
@@ -8615,9 +8526,8 @@ static void phase4_wait_init(v34_state_t *s)
    what a fallback call sends whenever it decodes the peer's MP late, and on
    rf-tower-fb-8 the RasFinder held MP' for 3.1 s afterwards and retrained,
    having taken neither.  So count only an MP' (or E) received after ours
-   began: that gives the far end two or three MP' frames.  Bounded at
-   ME_V34_MP_PRIME_MAX frames (default 4) in case the far end has stopped
-   sending MP'; ME_V34_MP_FRESH_ACK=0 restores the single-MP' behaviour. */
+   began: that gives the far end two or three MP' frames.  Bounded at 8
+   frames in case the far end has stopped sending MP'. */
 /* V34_TEST_LOST_MP_PRIME=1: the first modem in the process to receive an MP
    sends three more plain MP frames and then damages every MP' it sends (a
    CRC-covered bit flipped in the reused buffer), still ending with E once the
@@ -8640,21 +8550,8 @@ static bool lost_mp_prime_hook_defer(const v34_state_t *s)
 
 static bool mp_prime_may_end(v34_state_t *s)
 {
-    static int fresh = -1;
-    static int max_frames = -1;
+    const int max_frames = 8;
 
-    if (fresh < 0)
-    {
-        const char *v = getenv("ME_V34_MP_FRESH_ACK");
-        const char *m = getenv("ME_V34_MP_PRIME_MAX");
-
-        fresh = !(v  &&  strcmp(v, "0") == 0);
-        max_frames = (m  &&  atoi(m) > 0)  ?  atoi(m)  :  8;
-    }
-    /*endif*/
-    if (!fresh)
-        return true;
-    /*endif*/
     if (s->rx.mp_remote_ack_count > s->tx.mp_prime_ack_base)
         return true;
     /*endif*/
@@ -8688,20 +8585,10 @@ static complex_sig_t get_cleardown_silence_baud(v34_state_t *s)
    first MPh and does not wait, so two of these do not wait for each other;
    this bounds the wait for a far end that does.  12.4.4.3 gives the
    recipient 3 s from the source's MPh to receive E.  Control channel baud is
-   600.  ME_V34_HDX_E_WAIT_MS=0 restores the immediate E. */
+   600. */
 static int hdx_source_e_wait_bauds(void)
 {
-    static int cached = -1;
-
-    if (cached < 0)
-    {
-        const char *e = getenv("ME_V34_HDX_E_WAIT_MS");
-        long ms = (e  &&  *e)  ?  atol(e)  :  2000;
-
-        cached = (int) (ms*600/1000);
-    }
-    /*endif*/
-    return cached;
+    return 2000*600/1000;
 }
 /*- End of function --------------------------------------------------------*/
 
