@@ -220,6 +220,10 @@ int main(int argc, char *argv[])
     int fast = 0;
     int dial = 0;
     int split = 0;
+
+    /* The live engine runs the Phase 3 Ja scan on a worker thread; a replay
+       must see its result at the same sample every run. */
+    setenv("ME_V90_P3_JA_SCAN_SYNC", "1", 0);
     double from = -1.0;
     const char *schedule = NULL;
     /* Its own link, so a replay never fights a live server for /tmp/modem0. */

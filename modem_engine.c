@@ -5799,6 +5799,9 @@ static void *v90_cp_live_worker(void *user_data)
     return NULL;
 }
 
+static void v90_p3_ja_worker_start(void);
+static void v90_p3_ja_worker_stop(void);
+
 static void v90_cp_live_worker_start(void)
 {
     pthread_mutex_init(&g_v90_cp_live_mtx, NULL);
@@ -9004,6 +9007,7 @@ void me_init(void)
     fprintf(stderr, "[ME] V.34 datapath: %s\n",
             v34_datapath_is_fixed_point() ? "fixed point" : "floating point");
     v90_cp_live_worker_start();
+    v90_p3_ja_worker_start();
     {
         const char *mode = getenv("ME_MODE");
         const char *role = getenv("ME_V90_ROLE");
@@ -9132,6 +9136,7 @@ void me_init(void)
 void me_destroy(void)
 {
     v90_cp_live_worker_stop();
+    v90_p3_ja_worker_stop();
     if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
     if (g_k56)      { k56flex_v8bis_free(g_k56);                 g_k56      = NULL; }
     if (g_v8bis)    { v8bis_modem_free(g_v8bis);                 g_v8bis    = NULL; }
@@ -10164,14 +10169,225 @@ static int g_v90_p3_ja_scan_samples = 0;
 static int g_v90_p3_ja_scan_total = 0;   /* total samples scanned since WAIT_JA */
 static bool g_v90_p3_ja_fired = false;
 
+/* The scan runs on its own thread.  Run inline it blocked the media thread
+ * for 50-130 ms every 160 ms of Phase 3 on tower, and because RX and TX share
+ * that thread our RTP stopped and then burst.  Against the Eicon card through
+ * the Cisco the burst made its adaptive playout buffer insert 30 ms during
+ * Phase 3 and later delete 30 ms out of our DIL (card Audio1 vs our TX tap,
+ * artifacts/eicon-v90a-trn1d-ab-native{3,4}-r1-20261009).  A DS0 the far D/A
+ * sees must be a steady 8 kHz stream, so the media thread now only copies the
+ * window and hands it over; the next tick acts on the answer.
+ * ME_V90_P3_JA_SCAN_SYNC=1 keeps the old inline scan, which v90_engine_replay
+ * sets so a replay stays deterministic. */
+typedef struct {
+    int start_sample;
+    int end_sample;
+    int length;
+    int match_pct;
+    int periodic_pct;
+    int baud;
+    int carrier;
+} v90_p3_ja_hit_t;
+
+static pthread_t g_v90_p3_ja_thread;
+static bool g_v90_p3_ja_thread_started = false;
+static pthread_mutex_t g_v90_p3_ja_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_v90_p3_ja_cond = PTHREAD_COND_INITIALIZER;
+static bool g_v90_p3_ja_shutdown = false;
+static bool g_v90_p3_ja_pending = false;   /* job posted, not yet taken */
+static bool g_v90_p3_ja_busy = false;      /* posted or running */
+static bool g_v90_p3_ja_done = false;      /* result waiting for the media thread */
+static bool g_v90_p3_ja_found = false;
+static unsigned g_v90_p3_ja_generation = 0;
+static unsigned g_v90_p3_ja_job_generation = 0;
+static int16_t g_v90_p3_ja_job_window[P3_JA_SCAN_WINDOW];
+static int g_v90_p3_ja_job_n = 0;
+static int g_v90_p3_ja_job_baud = 0;
+static int g_v90_p3_ja_job_carrier = 0;
+static int g_v90_p3_ja_job_throttle = 0;
+static bool g_v90_p3_ja_job_full = false;
+static v90_p3_ja_hit_t g_v90_p3_ja_hit;
+
+/* Pure: grade one window.  Returns true with *hit filled on a current J. */
+static bool v90_p3_ja_grade(const int16_t *window, int n, int baud_code,
+                            int rx_carrier, bool scan_full, int throttle,
+                            v90_p3_ja_hit_t *hit)
+{
+    int try_bauds[2];
+    int n_try = 0;
+
+    /* V.90 §6.2 limits this upstream to 3000/3200 (3429 is optional and is
+     * not offered by the current profile).  Try INFO1a's selected rate first
+     * and the other required digital-modem rate as fallback.  This bounds the
+     * 800 ms grader to four rate/carrier passes per 80 ms tick. */
+    try_bauds[n_try++] = baud_code;
+    if (scan_full)
+        try_bauds[n_try++] = baud_code == P3_BAUD_3000
+                           ? P3_BAUD_3200 : P3_BAUD_3000;
+
+    for (int bi = 0; bi < n_try; bi++) {
+        int b = try_bauds[bi];
+
+        for (int ci = 0; ci <= 1; ci++) {
+            int carrier = ci ? P3_CARRIER_LOW : P3_CARRIER_HIGH;
+            p3_result_t *result;
+
+            if (!scan_full && carrier != rx_carrier)
+                continue;
+
+            result = p3_demod_run_pp_trained(window, n, 0, b, carrier, 8000);
+            if (!result)
+                continue;
+
+            for (int i = 0; i < result->segment_count; i++) {
+                const p3_segment_t *seg = &result->segments[i];
+
+                /* The rolling analysis window overlaps PP/TRN and old Ja on
+                 * every invocation.  Accepting a J segment anywhere in it can
+                 * fire on stale training hundreds of milliseconds before the
+                 * peer enters WaitForSd; SmartLink then reports zero Sd energy
+                 * and retrains.  Require J evidence in the newest throttle
+                 * interval, matching the scan cadence.
+                 * p3_is_adaptive_ja_candidate() accepts either a strong short
+                 * Table 18 match or a weaker run only after duration and
+                 * periodicity independently prove sustained J.  Live false
+                 * TRN matches scored 69-71% but lasted only 48 symbols; the
+                 * foreign 3200-low Ja scores 63% yet persists for 600+ ms. */
+                if (seg->type == P3_SIGNAL_J
+                    && seg->end_sample >= n - throttle
+                    && p3_is_adaptive_ja_candidate(
+                           seg, (int)(result->baud_rate_estimate + 0.5f))) {
+                    hit->start_sample = seg->start_sample;
+                    hit->end_sample = seg->end_sample;
+                    hit->length = seg->length;
+                    hit->match_pct = seg->j_table_match_pct;
+                    hit->periodic_pct = seg->j_periodic_match_pct;
+                    hit->baud = b;
+                    hit->carrier = carrier;
+                    p3_result_free(result);
+                    return true;
+                }
+            }
+            p3_result_free(result);
+        }
+    }
+    return false;
+}
+
+static void *v90_p3_ja_worker(void *user_data)
+{
+    (void)user_data;
+    for (;;) {
+        static int16_t window[P3_JA_SCAN_WINDOW];
+        v90_p3_ja_hit_t hit;
+        int n, baud, carrier, throttle;
+        bool full, found;
+        unsigned generation;
+
+        pthread_mutex_lock(&g_v90_p3_ja_mtx);
+        while (!g_v90_p3_ja_pending && !g_v90_p3_ja_shutdown)
+            pthread_cond_wait(&g_v90_p3_ja_cond, &g_v90_p3_ja_mtx);
+        if (g_v90_p3_ja_shutdown) {
+            pthread_mutex_unlock(&g_v90_p3_ja_mtx);
+            break;
+        }
+        g_v90_p3_ja_pending = false;
+        n = g_v90_p3_ja_job_n;
+        memcpy(window, g_v90_p3_ja_job_window, (size_t)n*sizeof(window[0]));
+        baud = g_v90_p3_ja_job_baud;
+        carrier = g_v90_p3_ja_job_carrier;
+        throttle = g_v90_p3_ja_job_throttle;
+        full = g_v90_p3_ja_job_full;
+        generation = g_v90_p3_ja_job_generation;
+        pthread_mutex_unlock(&g_v90_p3_ja_mtx);
+
+        found = v90_p3_ja_grade(window, n, baud, carrier, full, throttle, &hit);
+
+        pthread_mutex_lock(&g_v90_p3_ja_mtx);
+        if (generation == g_v90_p3_ja_generation) {
+            g_v90_p3_ja_found = found;
+            if (found)
+                g_v90_p3_ja_hit = hit;
+            g_v90_p3_ja_done = true;
+        }
+        g_v90_p3_ja_busy = false;
+        pthread_mutex_unlock(&g_v90_p3_ja_mtx);
+    }
+    return NULL;
+}
+
+static void v90_p3_ja_worker_start(void)
+{
+    g_v90_p3_ja_shutdown = false;
+    if (pthread_create(&g_v90_p3_ja_thread, NULL, v90_p3_ja_worker, NULL) == 0)
+        g_v90_p3_ja_thread_started = true;
+    else
+        fprintf(stderr, "[ME] WARNING: unable to start V.90 Ja scan worker; "
+                        "scanning inline\n");
+}
+
+static void v90_p3_ja_worker_stop(void)
+{
+    if (!g_v90_p3_ja_thread_started)
+        return;
+    pthread_mutex_lock(&g_v90_p3_ja_mtx);
+    g_v90_p3_ja_shutdown = true;
+    pthread_cond_signal(&g_v90_p3_ja_cond);
+    pthread_mutex_unlock(&g_v90_p3_ja_mtx);
+    pthread_join(g_v90_p3_ja_thread, NULL);
+    g_v90_p3_ja_thread_started = false;
+}
+
+/* Invalidate any job in flight: a result for an earlier WAIT_JA visit must
+ * not fire J in this one. */
+static void v90_p3_ja_invalidate(void)
+{
+    pthread_mutex_lock(&g_v90_p3_ja_mtx);
+    g_v90_p3_ja_generation++;
+    g_v90_p3_ja_done = false;
+    g_v90_p3_ja_pending = false;
+    pthread_mutex_unlock(&g_v90_p3_ja_mtx);
+}
+
+static void v90_p3_ja_fire_locked(const v90_p3_ja_hit_t *hit, int n)
+{
+    bool accepted;
+
+    /* Fire J event directly.  The post-processing (DIL capture, S-detector
+     * arming) mirrors the v34rx J event handler so the downstream state is
+     * identical regardless of which detector fired first. */
+    g_v90_p3_ja_fired = true;
+    /* Keep decoding Ja either way -- it is the descriptor parse that is now
+       allowed to fire J. */
+    (void)v90_dil_capture_try_v34_hypotheses();
+    accepted = v90_ja_heuristic_allowed("p3_demod")
+             ? v90_handle_rx_event(g_v90, V90_RX_EVENT_J)
+             : false;
+    if (accepted) {
+        (void)v90_dil_capture_try_v34_hypotheses();
+        v34_v90_arm_phase3_s_detector(g_v34);
+    }
+    fprintf(stderr,
+            "[ME] V.90 p3_demod: current J detected (adaptive structural, %d ms window, "
+            "segment=%d..%d samples/%d symbols table=%d%% periodic=%d%%, "
+            "baud=%d carrier=%s); accepted=%d\n",
+            n * 1000 / 8000, hit->start_sample, hit->end_sample, hit->length,
+            hit->match_pct, hit->periodic_pct, hit->baud,
+            hit->carrier == P3_CARRIER_HIGH ? "high" : "low",
+            accepted ? 1 : 0);
+    trace_phase("V90 p3_demod J detected accepted=%d", accepted ? 1 : 0);
+}
+
 static void v90_p3_scan_ja_locked(int len)
 {
     int16_t window[P3_JA_SCAN_WINDOW];
     int baud_code;
     int n;
     int throttle;
+    int rx_carrier;
     bool scan_full;
-    p3_result_t *result;
+    bool sync;
+    v90_p3_ja_hit_t hit;
 
     if (!g_v90 || g_v92_active || !g_v34)
         return;
@@ -10180,6 +10396,8 @@ static void v90_p3_scan_ja_locked(int len)
      * back to WAIT_JA, scanning resumes.  The counter reset on phase
      * change ensures we don't carry stale throttle state across retrains. */
     if (v90_get_tx_phase(g_v90) != V90_TX_WAIT_JA) {
+        if (g_v90_p3_ja_scan_total || g_v90_p3_ja_fired)
+            v90_p3_ja_invalidate();
         g_v90_p3_ja_scan_samples = 0;
         g_v90_p3_ja_scan_total = 0;
         g_v90_p3_ja_fired = false;
@@ -10188,6 +10406,7 @@ static void v90_p3_scan_ja_locked(int len)
     /* 0 = off, 1 = one pass every 160 ms (default), 2 = the old full scan. */
     {
         static int mode = -1;
+        static int sync_mode = -1;
 
         if (mode < 0) {
             const char *v = getenv("ME_V90_P3_JA_SCAN");
@@ -10202,11 +10421,37 @@ static void v90_p3_scan_ja_locked(int len)
             if (c && !strcmp(c, "0"))
                 mode = 0;
         }
+        if (sync_mode < 0) {
+            const char *v = getenv("ME_V90_P3_JA_SCAN_SYNC");
+
+            sync_mode = (v && *v && strcmp(v, "0")) ? 1 : 0;
+        }
         if (mode == 0)
             return;
         scan_full = (mode == 2);
+        sync = sync_mode || !g_v90_p3_ja_thread_started;
     }
     throttle = scan_full ? P3_JA_SCAN_THROTTLE_FULL : P3_JA_SCAN_THROTTLE;
+    n = P3_JA_SCAN_WINDOW;
+    if (n > TX_BUF_SIZE)
+        n = TX_BUF_SIZE;
+
+    /* Act on a finished background scan first. */
+    if (!sync) {
+        bool found = false;
+
+        pthread_mutex_lock(&g_v90_p3_ja_mtx);
+        if (g_v90_p3_ja_done) {
+            g_v90_p3_ja_done = false;
+            found = g_v90_p3_ja_found;
+            hit = g_v90_p3_ja_hit;
+        }
+        pthread_mutex_unlock(&g_v90_p3_ja_mtx);
+        if (found) {
+            v90_p3_ja_fire_locked(&hit, n);
+            return;
+        }
+    }
 
     g_v90_p3_ja_scan_samples += len;
     g_v90_p3_ja_scan_total += len;
@@ -10217,10 +10462,9 @@ static void v90_p3_scan_ja_locked(int len)
     baud_code = v90_selected_upstream_baud_locked();
     if (baud_code != P3_BAUD_3000 && baud_code != P3_BAUD_3200)
         baud_code = P3_BAUD_3200;
+    rx_carrier = v34_get_rx_high_carrier(g_v34) ? P3_CARRIER_HIGH
+                                                : P3_CARRIER_LOW;
 
-    n = P3_JA_SCAN_WINDOW;
-    if (n > TX_BUF_SIZE)
-        n = TX_BUF_SIZE;
     /* Grade Ja on the pre-echo-canceller observation.  With INFO1d selecting
      * 3200-low, SmartLink's raw 1829 Hz Ja remains 94% periodic while the
      * ordinary V.34 echo front end erases it.  Payload RX remains filtered;
@@ -10228,91 +10472,29 @@ static void v90_p3_scan_ja_locked(int len)
     for (int i = 0; i < n; i++)
         window[i] = g_rx_raw_buf[(g_rx_ref_wr - n + i) & TX_BUF_MASK];
 
-    /* V.90 §6.2 limits this upstream to 3000/3200 (3429 is optional and is
-     * not offered by the current profile).  Try INFO1a's selected rate first
-     * and the other required digital-modem rate as fallback.  This bounds the
-     * 800 ms grader to four rate/carrier passes per 80 ms tick. */
-    {
-        int try_bauds[2];
-        int n_try = 0;
-        int rx_carrier = v34_get_rx_high_carrier(g_v34)
-                       ? P3_CARRIER_HIGH : P3_CARRIER_LOW;
-
-        try_bauds[n_try++] = baud_code;
-        if (scan_full)
-            try_bauds[n_try++] = baud_code == P3_BAUD_3000
-                               ? P3_BAUD_3200 : P3_BAUD_3000;
-
-        for (int bi = 0; bi < n_try; bi++) {
-            int b = try_bauds[bi];
-
-            for (int ci = 0; ci <= 1; ci++) {
-                int carrier = ci ? P3_CARRIER_LOW : P3_CARRIER_HIGH;
-
-                if (!scan_full && carrier != rx_carrier)
-                    continue;
-
-                result = p3_demod_run_pp_trained(window, n, 0, b, carrier, 8000);
-                if (!result)
-                    continue;
-
-                for (int i = 0; i < result->segment_count; i++) {
-                    const p3_segment_t *seg = &result->segments[i];
-
-                    if (seg->type == P3_SIGNAL_J
-                        && seg->end_sample >= n - throttle
-                        && p3_is_adaptive_ja_candidate(
-                               seg, (int)(result->baud_rate_estimate + 0.5f))) {
-                        bool accepted;
-                        int start_sample = seg->start_sample;
-                        int end_sample = seg->end_sample;
-                        int length = seg->length;
-                        int match_pct = seg->j_table_match_pct;
-                        int periodic_pct = seg->j_periodic_match_pct;
-
-                        /* The rolling analysis window overlaps PP/TRN and old
-                         * Ja on every invocation.  Accepting a J segment
-                         * anywhere in it can fire on stale training hundreds
-                         * of milliseconds before the peer enters WaitForSd;
-                         * SmartLink then reports zero Sd energy and retrains.
-                         * Require J evidence in the newest 80 ms, matching the
-                         * scan cadence.  p3_is_adaptive_ja_candidate() accepts
-                         * either a strong short Table 18 match or a weaker run
-                         * only after duration and periodicity independently
-                         * prove sustained J.  Live false TRN matches scored
-                         * 69-71% but lasted only 48 symbols; the foreign
-                         * 3200-low Ja scores 63% yet persists for 600+ ms. */
-                        p3_result_free(result);
-                        /* Fire J event directly.  The post-processing (DIL
-                         * capture, S-detector arming) mirrors the v34rx J
-                         * event handler so the downstream state is identical
-                         * regardless of which detector fired first. */
-                        g_v90_p3_ja_fired = true;
-                        /* Keep decoding Ja either way -- it is the descriptor
-                           parse that is now allowed to fire J. */
-                        (void)v90_dil_capture_try_v34_hypotheses();
-                        accepted = v90_ja_heuristic_allowed("p3_demod")
-                                 ? v90_handle_rx_event(g_v90, V90_RX_EVENT_J)
-                                 : false;
-                        if (accepted) {
-                            (void)v90_dil_capture_try_v34_hypotheses();
-                            v34_v90_arm_phase3_s_detector(g_v34);
-                        }
-                        fprintf(stderr,
-                                "[ME] V.90 p3_demod: current J detected (adaptive structural, %d ms window, "
-                                "segment=%d..%d samples/%d symbols table=%d%% periodic=%d%%, "
-                                "baud=%d carrier=%s); accepted=%d\n",
-                                n * 1000 / 8000, start_sample, end_sample, length,
-                                match_pct, periodic_pct, b,
-                                carrier == P3_CARRIER_HIGH ? "high" : "low",
-                                accepted ? 1 : 0);
-                        trace_phase("V90 p3_demod J detected accepted=%d", accepted ? 1 : 0);
-                        return;
-                    }
-                }
-                p3_result_free(result);
-            }
+    if (sync) {
+        if (v90_p3_ja_grade(window, n, baud_code, rx_carrier, scan_full,
+                            throttle, &hit)) {
+            v90_p3_ja_fire_locked(&hit, n);
+            return;
         }
+    } else {
+        /* One job at a time; if the worker is still on the last window this
+           tick is skipped rather than queued, so it cannot fall behind. */
+        pthread_mutex_lock(&g_v90_p3_ja_mtx);
+        if (!g_v90_p3_ja_busy) {
+            memcpy(g_v90_p3_ja_job_window, window, (size_t)n*sizeof(window[0]));
+            g_v90_p3_ja_job_n = n;
+            g_v90_p3_ja_job_baud = baud_code;
+            g_v90_p3_ja_job_carrier = rx_carrier;
+            g_v90_p3_ja_job_throttle = throttle;
+            g_v90_p3_ja_job_full = scan_full;
+            g_v90_p3_ja_job_generation = g_v90_p3_ja_generation;
+            g_v90_p3_ja_pending = true;
+            g_v90_p3_ja_busy = true;
+            pthread_cond_signal(&g_v90_p3_ja_cond);
+        }
+        pthread_mutex_unlock(&g_v90_p3_ja_mtx);
     }
 
     /* Diagnostic: log periodically so we can see p3_demod is running but
