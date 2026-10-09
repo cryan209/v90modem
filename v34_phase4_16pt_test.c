@@ -88,13 +88,18 @@ static void check_hdx_primary_s_sequence(void)
         complex_sig_t p = get_s_not_s_baud(s);
         assert(p.re == 0 && p.im == 0);
     }
-    /* 10.1.3.7: 0,90 for 128T, then 180,270 for 16T. */
+    /* 10.1.3.7: Figure 5 point 0 (45 degrees) alternating with its 90
+       degree CCW rotation for 128T, then the same pair rotated 180 degrees
+       for 16T: 45,135 then 225,315 degrees, checked by angle so the test
+       does not share the transmitter's table. */
     for (int i = 0; i < 144; i++)
     {
         complex_sig_t p = get_s_not_s_baud(s);
-        float sign = i < 128 ? 1.0f : -1.0f;
-        assert(fabs(p.re - ((i & 1) ? 0 : sign*TRAINING_AMP)) < 0.001);
-        assert(fabs(p.im - ((i & 1) ? sign*TRAINING_AMP : 0)) < 0.001);
+        double want = 45.0 + ((i & 1) ? 90.0 : 0.0) + (i < 128 ? 0.0 : 180.0);
+        double got = atan2(p.im, p.re)*180.0/M_PI;
+        double d = fmod(got - want + 720.0, 360.0);
+        assert(d < 0.01 || d > 359.99);
+        assert(fabs(p.re*p.re + p.im*p.im - TRAINING_AMP*TRAINING_AMP) < 0.01*TRAINING_AMP*TRAINING_AMP);
     }
     assert(s->tx.current_getbaud == get_pp_baud);
     v34_free(s);
