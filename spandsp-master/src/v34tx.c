@@ -3780,8 +3780,14 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
         break;
     case V34_TX_STAGE_FIRST_B:
         /* Send pure tone (V.34 answerer side). */
-        if (s->rx.received_event == V34_EVENT_INFO0_OK)
+        if (s->rx.received_event == V34_EVENT_INFO0_OK
+            ||  (s->rx.info0_received  &&  s->rx.received_event == V34_EVENT_TONE_SEEN))
         {
+            /* INFO0a is a durable fact.  The receiver publishes INFO0_OK and
+               then, moving on to Tone A, overwrites the single event slot with
+               TONE_SEEN; reading that as "Tone A without INFO0a" sent a call
+               modem that HAD the INFO0a back into INFO0c retries it could
+               never leave (two engines never trained V.34 against each other). */
             s->tx.stage = V34_TX_STAGE_FIRST_B_INFO_SEEN;
         }
         else if (s->rx.received_event == V34_EVENT_INFO0_BAD
