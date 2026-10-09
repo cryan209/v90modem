@@ -627,32 +627,7 @@ static bool valid_v34_bps(int bps)
  * 8-bit windows of the *framed* stream, relocating start bits.
  * ME_V90_DATA_BIT_ORDER=msb keeps the experiment available; scoped to V.90
  * so the V.22bis/V.34 fallback paths always keep spec order. */
-static bool me_v90_data_bit_order_msb(void)
-{
-    static int cached = -1;
-
-    if (cached < 0) {
-        const char *value = getenv("ME_V90_DATA_BIT_ORDER");
-
-        cached = (value && strcasecmp(value, "msb") == 0) ? 1 : 0;
-    }
-    return cached != 0;
-}
-
-static uint8_t me_reverse8(uint8_t v)
-{
-    v = (uint8_t)(((v & 0xF0) >> 4) | ((v & 0x0F) << 4));
-    v = (uint8_t)(((v & 0xCC) >> 2) | ((v & 0x33) << 2));
-    v = (uint8_t)(((v & 0xAA) >> 1) | ((v & 0x55) << 1));
-    return v;
-}
-
 static me_modulation_t g_mod;   /* defined below with the engine state */
-
-static bool me_v90_reverse_dte_bytes_locked(void)
-{
-    return g_mod == ME_MOD_V90 && me_v90_data_bit_order_msb();
-}
 
 static int data_stack_pull_dte_byte(void *user_data)
 {
@@ -661,16 +636,12 @@ static int data_stack_pull_dte_byte(void *user_data)
     (void)user_data;
     if (dring_read(&downstream_ring, &byte, 1) != 1)
         return -1;
-    if (me_v90_reverse_dte_bytes_locked())
-        byte = me_reverse8(byte);
     return byte;
 }
 
 static void data_stack_push_dte_byte(void *user_data, uint8_t byte)
 {
     (void)user_data;
-    if (me_v90_reverse_dte_bytes_locked())
-        byte = me_reverse8(byte);
     if (dring_write(&upstream_ring, &byte, 1) != 1)
         ME_LOG("[ME] DTE RX ring overrun; byte discarded\n");
 }
@@ -1051,7 +1022,6 @@ static me_state_t      g_state     = ME_IDLE;
 static me_modulation_t g_mod       = ME_MOD_NONE;   /* tentatively declared above the DTE callbacks */
 static pthread_mutex_t g_state_mtx;
 static bool            g_calling_party = false; /* false=answerer, true=caller */
-static bool            g_invert_v34_role = false; /* debug override via env */
 static int             g_v8_answer_tone = MODEM_CONNECT_TONES_ANSAM_PR;
 static int             g_v8_active_answer_tone = MODEM_CONNECT_TONES_ANSAM_PR;
 static bool            g_v8_answer_tone_retry_done = false;
@@ -1342,11 +1312,7 @@ static unsigned       g_training_fail_retrains = 0;
 
 static unsigned me_v34_training_fail_retrains(void)
 {
-    static int cached = -1;
-
-    if (cached < 0)
-        cached = parse_env_int("ME_V34_TRAINING_FAIL_RETRAINS", 3);
-    return cached < 0 ? 0 : (unsigned) cached;
+    return 3;
 }
 
 /* INFO1d Table 17 bit 70.  PCM upstream is V.92's only data-pump gain over
@@ -2900,7 +2866,6 @@ static const char *me_v90_tx_stage_name(int tx_phase)
     }
 }
 
-
 static bool     g_v90a_complete_logged = false;
 static bool     g_v90a_failed_logged = false;
 static bool     g_v90a_retrain_logged = false;
@@ -3109,17 +3074,7 @@ static bool me_line_ec_enabled(void)
  * 2026-09-30 that reached Phase 4 (rf-tower-jds-1..3, nop3-1, scan1-6).
  * Without it a 700-bit CP frame would essentially never pass its CRC.
  * The fit is put in force only if it removes 6 dB, so a path with no echo
- * (the SIP-only SmartLink rig) is untouched.  ME_V90_LINE_EC=0 disables. */
-static bool me_v90_line_ec_enabled(void)
-{
-    static int cached = -1;
-
-    if (cached < 0) {
-        const char *e = getenv("ME_V90_LINE_EC");
-        cached = !(e && strcmp(e, "0") == 0);
-    }
-    return cached != 0;
-}
+ * (the SIP-only SmartLink rig) is untouched. */
 
 /* The window closes when the TX moves on from Jd, which follows our
  * DETECTION of the peer's S; S (128T) and the detector's own 64 symbols are
@@ -3466,7 +3421,7 @@ static const char *me_v92_anspcm_level_to_str(int level)
    octet.  Gating on it left us mute to slmodemd's ODP, so it sat in EC_ESTAB
    with no CONNECT to its DTE.  Required error control disconnects when
    detection fails; optional falls back to buffered V.14. */
-static void me_decide_data_framing(bool v8_lapm)
+static void me_decide_data_framing(void)
 {
     v250_ctl_t cfg;
     v250_ec_policy_t pol;
@@ -3492,20 +3447,10 @@ static void me_decide_data_framing(bool v8_lapm)
     if (g_data_framing_auto) {
         /* The factory +ES (3,0,2) always attempts V.42 with detection and
            allows the buffered fallback; v8_lapm only reports the peer's
-           advertisement.  ME_V42_REQUIRE_V8=1 restores the old gate. */
-        static int require_v8 = -1;
-
-        if (require_v8 < 0) {
-            const char *e = getenv("ME_V42_REQUIRE_V8");
-            require_v8 = (e && *e && *e != '0') ? 1 : 0;
-        }
-        if (require_v8 && !v8_lapm) {
-            g_data_framing = DS_FRAMING_V14;
-        } else {
-            g_data_framing = pol.attempt ? DS_FRAMING_V42 : DS_FRAMING_V14;
-            g_data_lapm_detect = pol.detect;
-            g_ec_fallback_ok = !pol.required;
-        }
+           advertisement. */
+        g_data_framing = pol.attempt ? DS_FRAMING_V42 : DS_FRAMING_V14;
+        g_data_lapm_detect = pol.detect;
+        g_ec_fallback_ok = !pol.required;
     }
 }
 
@@ -3549,7 +3494,7 @@ static void me_log_v8_peer_summary(const v8_parms_t *result)
 
         if (!lapm && qc_lapm)
             lapm = true;
-        me_decide_data_framing(lapm);
+        me_decide_data_framing();
         ME_LOG("[ME] DTE framing from V.8 protocol%s: %s\n",
                (qc_lapm && result->jm_cm.protocols != V8_PROTOCOL_LAPM_V42)
                    ? " (V.92 QC LAPM bit)" : "",
@@ -3838,7 +3783,6 @@ static bool me_v8bis_caps(v8bis_msg_t *c)
 static bool me_v8bis_start_locked(void)
 {
     v8bis_modem_cfg_t cfg;
-    const char *v;
 
     v8bis_modem_cfg_default(&cfg);
     if (!me_v8bis_caps(&cfg.fsm.caps))
@@ -3849,12 +3793,10 @@ static bool me_v8bis_start_locked(void)
     cfg.fsm.mr_reply = V8BIS_MRR_CRD;          /* transaction 10/11 */
     cfg.fsm.accept = me_v8bis_accept;
     cfg.fsm.select_ms = me_v8bis_select_ms;
-    cfg.retries = (unsigned)parse_env_int("ME_V8BIS_RETRIES", 0);   /* 10.2.2/10.1: 3 s after each signal; the window still decides */
+    cfg.retries = 0;   /* 10.2.2/10.1: 3 s after each signal; the window still decides */
     cfg.fsm.answering_station = !g_calling_party;
-    if ((v = getenv("ME_V8BIS_LEVEL_DBM0")) && *v)
-        cfg.level_dbm0 = atof(v);
-    g_v8bis_window_ms = (unsigned)parse_env_int("ME_V8BIS_WINDOW_MS", 2000);
-    g_v8bis_max_ms = (unsigned)parse_env_int("ME_V8BIS_MAX_MS", 12000);
+    g_v8bis_window_ms = 2000;
+    g_v8bis_max_ms = 12000;
     if (g_v8bis)
         v8bis_modem_free(g_v8bis);
     g_v8bis = v8bis_modem_new(&cfg);
@@ -4604,22 +4546,10 @@ static int g_v90_upstream_e_run = 0;
  * part of a second of downstream (384T of Rd, 24T of R̄d, TRN2d, the MP
  * exchange and 48 data frames of B1d), so a link that needs one every few
  * seconds is not being helped by them and should be left alone rather than
- * spending the rest of the call renegotiating.  ME_V90_MAX_RENEG overrides. */
+ * spending the rest of the call renegotiating. */
 #define ME_V90_MAX_RENEGOTIATIONS_DEFAULT 8
 
-static int me_v90_max_renegotiations(void)
-{
-    static int cached = -1;
-
-    if (cached < 0) {
-        const char *e = getenv("ME_V90_MAX_RENEG");
-
-        cached = (e && atoi(e) >= 0) ? atoi(e)
-                                     : ME_V90_MAX_RENEGOTIATIONS_DEFAULT;
-    }
-    return cached;
-}
-#define ME_V90_MAX_RENEGOTIATIONS (me_v90_max_renegotiations())
+#define ME_V90_MAX_RENEGOTIATIONS ME_V90_MAX_RENEGOTIATIONS_DEFAULT
 
 /* Off by default -- but NOT for the reason this comment used to give, which
  * was wrong, and wrong in the direction that blamed the peer.
@@ -4833,25 +4763,6 @@ static bool restart_v90_phase2_locked(const char *reason);
 static int me_v34_reneg_enabled(void);
 static void v34_reneg_begin_locked(void);
 static int64_t data_mode_elapsed_ms(void);
-/* A §11.6 rate change B1 asked for, held until data mode has run for
-   ME_V34_B1_RENEG_DELAY_MS (default 2000; 0 opens it at once).  V.34 11.6 lets
-   it be opened "at any time during data mode", but the RasFinder ignored one
-   opened 0.16 s after B1 (rf-tower-fb-11: our S on the wire at 55.705 s, no S
-   back in the next 4.6 s, then its own retrain), while the one renegotiation
-   it has answered was opened 20 s into a settled data mode (reneg-live-r1).
-   A workaround for that peer, not a spec requirement. */
-static bool g_v34_b1_reneg_pending = false;
-static int g_v34_b1_reneg_bps = 0;
-
-static int me_v34_b1_reneg_delay_ms(void)
-{
-    static int cached = -1;
-
-    if (cached < 0)
-        cached = parse_env_int("ME_V34_B1_RENEG_DELAY_MS", 2000);
-    return cached;
-}
-
 static bool v34_b1_rate_check_locked(void)
 {
     static const int baud_by_code[6] = {2400, 2743, 2800, 3000, 3200, 3429};
@@ -4899,9 +4810,8 @@ static bool v34_b1_rate_check_locked(void)
        the densest 2400-baud constellation.  The peer then left our XIDs
        unanswered for 30 s and retrained twice (rf-tower-n400-2) -- V.42 never
        came up on a data mode we were decoding at 33 dB.  The final rate is
-       the minimum of both MPs (V.34 11.4.2.1.1), so this only ever lowers it.
-       ME_V34_TX_FOLLOWS_RX=0 leaves the transmit direction alone. */
-    if (parse_env_int("ME_V34_TX_FOLLOWS_RX", 1)) {
+       the minimum of both MPs (V.34 11.4.2.1.1), so this only ever lowers it. */
+    {
         int *theirs = (ours == &a_to_c) ? &c_to_a : &a_to_c;
         if (*theirs > supported) {
             ME_LOG("[ME] V.34 B1: capping our transmit rate at %d bps too (was %d bps)\n",
@@ -4921,29 +4831,11 @@ static bool v34_b1_rate_check_locked(void)
        B1 at 21600 spent that minute retraining to 14400 (rf-tower-fb-10).
        The MP the renegotiation sends reads the rate policy just set.  If 11.6
        is disabled or will not start, retrain as before; if it starts and no
-       E arrives, the existing 11.6.2 timeout retrains. */
-    /* Default: retrain.  The §11.6 path below is kept behind
-       ME_V34_B1_RENEG=1 for peers that answer it; the RasFinder ignored a
-       correct renegotiation opened both 0.16 s (rf-tower-fb-11) and 2.0 s
-       (rf-tower-fb-13) into data mode -- our S on the wire, none back -- so
-       against it each attempt only added ~6 s before the same retrain. */
-    if (parse_env_int("ME_V34_B1_RENEG", 0) != 0 && me_v34_reneg_enabled()) {
-        if (me_v34_b1_reneg_delay_ms() > 0) {
-            g_v34_b1_reneg_pending = true;
-            g_v34_b1_reneg_bps = supported*2400;
-            ME_LOG("[ME] V.34 B1: will ask for %d bps by a §11.6 rate "
-                   "renegotiation %d ms into data mode\n",
-                   supported*2400, me_v34_b1_reneg_delay_ms());
-            return true;
-        }
-        if (v34_start_rate_renegotiation(g_v34) == 0) {
-            ME_LOG("[ME] V.34 B1: asking for %d bps by a §11.6 rate "
-                   "renegotiation\n", supported*2400);
-            trace_phase("V34 B1 rate -> §11.6 renegotiation to %d", supported*2400);
-            v34_reneg_begin_locked();
-            return true;
-        }
-    }
+       E arrives, the existing 11.6.2 timeout retrains.  But the RasFinder
+       ignored a correct renegotiation opened both 0.16 s (rf-tower-fb-11) and
+       2.0 s (rf-tower-fb-13) into data mode -- our S on the wire, none back --
+       so each attempt only added ~6 s before the same retrain, and the B1
+       rate change retrains directly. */
     ME_LOG("[ME] V.34 B1: asking for %d bps and retraining per 11.5\n",
            supported*2400);
     if (g_v90_fallback_v34_logged) {
@@ -5162,7 +5054,6 @@ static bool g_v90_reneg_cp_ack_seen = false;
 static unsigned g_v90_reneg_dead_blocks = 0;
 static unsigned g_v90_reneg_dead_samples = 0;
 
-
 static void v90_reneg_cp_mark_locked(void)
 {
     g_v90_reneg_cp_rx_mark = g_v90_cp_rx;
@@ -5171,7 +5062,6 @@ static void v90_reneg_cp_mark_locked(void)
     g_v90_reneg_dead_blocks = 0;
     g_v90_reneg_dead_samples = 0;
 }
-
 
 static void v90_reneg_cp_report_locked(const char *why)
 {
@@ -5838,8 +5728,6 @@ static void v92_upstream_live_byte(void *user_data, uint8_t byte)
     ds_rx_push_bytes(&g_data_stack, &byte, 1);
 }
 
-static bool me_v92_p4_eq_enabled(void);
-
 /* Received TRN2u rms in DS0 linear units: LU as it arrives. */
 static double me_v92_lu_rx_locked(void)
 {
@@ -5997,8 +5885,7 @@ static void v92_live_p4u_frame(void *user_data,
                  * only path that has ever decoded this upstream), B1u is
                  * taken from its output and found by decoding; raw
                  * codewords and the reference correlator are the fallback. */
-                bool eq_mode = g_v92_p3_trn1u2_locked && g_v92_p3_rx.eq_law >= 0
-                             && me_v92_p4_eq_enabled();
+                bool eq_mode = g_v92_p3_trn1u2_locked && g_v92_p3_rx.eq_law >= 0;
 
                 if (v90_build_v92_cpd_frame(g_v90, &cpd)
                     && (eq_mode
@@ -6202,7 +6089,6 @@ static void cleanup_v34_v90_training_locked(void)
  * physical layer survives a retrain, so the data stack is not touched. */
 static bool restart_v34_phase2_locked(const char *reason)
 {
-    g_v34_b1_reneg_pending = false;
     int baud;
     int bps;
 
@@ -6245,7 +6131,6 @@ static bool restart_v34_phase2_locked(const char *reason)
 
 static bool restart_v90_phase2_locked(const char *reason)
 {
-    g_v34_b1_reneg_pending = false;
     int bps;
 
     if (g_mod != ME_MOD_V90 || !g_v34)
@@ -6986,9 +6871,7 @@ static bool v90_dil_capture_try_v34_hypotheses(void)
             g_v90_dil_hyp_dumped = true;
         }
     }
-    int retry_bits = parse_env_int("ME_V90_DIL_HYP_RETRY_BITS", 512);
-    if (retry_bits < 0)
-        retry_bits = 512;
+    int retry_bits = 512;
     /* Throttle on the TOTAL bits ever captured, not on what the copy-out
      * returned.  The capture is a ring now, so the returned length saturates
      * at the window size while bits keep arriving; keying the throttle on it
@@ -8052,19 +7935,6 @@ static void start_v34hdx_training(void)
     trace_phase("enter TRAINING: mod=V34HDX role=%s", source ? "source" : "recipient");
 }
 
-
-static int me_v90_info0a_preroll_enabled(void)
-{
-    static int cached = -1;
-
-    if (cached < 0) {
-        const char *v = getenv("ME_V90_INFO0A_PREROLL");
-
-        cached = (v && v[0] == '0') ? 0 : 1;
-    }
-    return cached;
-}
-
 /* Choose the V.8 history to replay into a new digital-role receiver: from the
  * start of the most recent quiet stretch of at least 20 ms (the post-JM gap)
  * to now.  Nothing if there is no such gap -- then we cannot tell the peer's
@@ -8081,7 +7951,7 @@ static void me_v90_prepare_info0a_preroll(void)
     int best = -1;
 
     g_v34_preroll_len = 0;
-    if (!me_v90_info0a_preroll_enabled() || nblk == 0)
+    if (nblk == 0)
         return;
     for (int b = 0; b < nblk; b++) {
         int64_t e = 0;
@@ -8129,10 +7999,9 @@ static void start_v34_training(void)
     g_mod   = ME_MOD_V34;
     g_state = ME_TRAINING;
     v34_line_ec_reset(&g_lec);
-    g_v34_b1_reneg_pending = false;
     g_training_fail_retrain_pending = false;
     g_training_fail_retrains = 0;
-    g_lec_armed = v90_upstream ? me_v90_line_ec_enabled() : me_line_ec_enabled();
+    g_lec_armed = v90_upstream ? true : me_line_ec_enabled();
     if (v90_upstream)
         g_lec.tail_trim = V90_LEC_TAIL_TRIM;
     g_phase_start_ms = trace_now_ms();
@@ -9083,13 +8952,6 @@ void me_init(void)
                g_v92_trn2u_points, g_v92_trn2u_lu);
     }
     g711_taps_init();
-    {
-        const char *inv = getenv("ME_V34_INVERT_ROLE");
-        g_invert_v34_role = (inv && (inv[0] == '1' || inv[0] == 'y' || inv[0] == 'Y' ||
-                                     inv[0] == 't' || inv[0] == 'T'));
-        if (g_invert_v34_role)
-            ME_LOG("[ME] DEBUG: role inversion enabled (ME_V34_INVERT_ROLE)\n");
-    }
     g_v8_answer_tone = parse_v8_answer_tone_env("ME_V8_ANSWER_TONE",
                                                 MODEM_CONNECT_TONES_ANSAM_PR);
     ME_LOG("[ME] V.8 answer tone: %s\n",
@@ -9471,8 +9333,6 @@ void me_on_sip_connected(void)
     g_fax_legacy = false;
     /* Outgoing dial = caller role; incoming auto-answer = answerer role. */
     g_calling_party = (g_state == ME_DIALING);
-    if (g_invert_v34_role)
-        g_calling_party = !g_calling_party;
     trace_phase("SIP media connected: role=%s", g_calling_party ? "caller" : "answerer");
 
     /* A selected legacy fax service class owns the bearer from this point.  T.31
@@ -9517,7 +9377,7 @@ void me_on_sip_connected(void)
     if (me_v8bis_enabled() && me_v8bis_start_locked()) {
         /* The V.8 result re-decides; a call that never gets one (V.32bis
            Annex A, V.25) keeps this, i.e. +ES's own policy. */
-        me_decide_data_framing(false);
+        me_decide_data_framing();
         pthread_mutex_unlock(&g_state_mtx);
         trace_phase("enter V.8bis before V.8 as %s", g_calling_party ? "caller" : "answerer");
         ME_LOG("[ME] SIP connected as %s, trying V.8bis for up to %u ms before V.8\n",
@@ -9551,7 +9411,7 @@ void me_on_sip_connected(void)
     pthread_mutex_unlock(&g_state_mtx);
     /* Re-decided from this call's V.8 result when there is one; a call that
        never gets one (V.32bis Annex A, V.25 ANS) keeps +ES's own policy. */
-    me_decide_data_framing(false);
+    me_decide_data_framing();
     trace_phase("enter V8: mode=%s advertised mods=%s", g_mode_name,
                 me_offer_str());
 
@@ -9696,22 +9556,7 @@ enum {
  */
 static double me_v90_s_min_rx_rms(void)
 {
-    static double cached = -1.0;
-
-    if (cached < 0.0) {
-        const char *v = getenv("ME_V90_S_MIN_RX_RMS");
-
-        cached = 64.0;
-        if (v && *v) {
-            char *end;
-            double parsed = strtod(v, &end);
-
-            /* 0 disables the floor. */
-            if (end != v && *end == '\0' && parsed >= 0.0)
-                cached = parsed;
-        }
-    }
-    return cached;
+    return 64.0;
 }
 
 /* RMS of the same window the correlation gate scores. */
@@ -9886,22 +9731,7 @@ static double v90_s_tx_rms_locked(void)
  * correct, since there is no echo to mistake for signal. */
 static double me_v90_s_min_rx_tx_ratio(void)
 {
-    static double cached = -1.0;
-
-    if (cached < 0.0) {
-        const char *v = getenv("ME_V90_S_MIN_RX_TX_RATIO");
-
-        cached = 0.15;
-        if (v && *v) {
-            char *end;
-            double parsed = strtod(v, &end);
-
-            /* 0 disables the test. */
-            if (end != v && *end == '\0' && parsed >= 0.0 && parsed <= 10.0)
-                cached = parsed;
-        }
-    }
-    return cached;
+    return 0.15;
 }
 
 static double me_v90_dil_s_active_fraction(void)
@@ -9933,22 +9763,7 @@ static double me_v90_dil_s_active_fraction(void)
 
 static int me_v90_s_echo_gate_pct(void)
 {
-    static int cached = -1;
-
-    if (cached < 0) {
-        const char *v = getenv("ME_V90_S_ECHO_GATE_PCT");
-
-        cached = 50;    /* reject an S whose window is >50% our own TX */
-        if (v && *v) {
-            char *end;
-            long parsed = strtol(v, &end, 10);
-
-            /* 0 disables the gate entirely. */
-            if (end != v && *end == '\0' && parsed >= 0 && parsed <= 100)
-                cached = (int)parsed;
-        }
-    }
-    return cached;
+    return 50;
 }
 
 /* Sum of rx[k]*tx[k+lag] over the window, plus the TX energy at that lag.
@@ -10048,28 +9863,12 @@ enum { P3_CONFIRM_SAMPLES = 1600 };   /* 200 ms at 8 kHz */
 
 static bool v90_p3_confirm_signal_locked(p3_signal_type_t want)
 {
-    static int disabled = -1;
     int16_t window[P3_CONFIRM_SAMPLES];
     int baud_code;
     int n;
     bool found = false;
     bool ran = false;
 
-    if (disabled < 0)
-        disabled = getenv("ME_V90_P3_CONFIRM") &&
-                   !strcmp(getenv("ME_V90_P3_CONFIRM"), "0") ? 1 : 0;
-    if (disabled)
-        return true;
-    /* The J gate can be independently disabled: the SmartLink interop rig
-     * uses ME_V90_J_LOOKAHEAD_BITS to fire a synthetic J early (before the
-     * strict canonical path would confirm it), and p3_demod may not have a
-     * clear enough window at that point.  The S gate is the one that
-     * directly fixes the false-S DIL cutoff; the J detector is already very
-     * strict. */
-    if (want == P3_SIGNAL_J
-        && getenv("ME_V90_P3_CONFIRM_J")
-        && !strcmp(getenv("ME_V90_P3_CONFIRM_J"), "0"))
-        return true;
     if (!g_v34)
         return true;
 
@@ -10410,16 +10209,12 @@ static void v90_p3_scan_ja_locked(int len)
 
         if (mode < 0) {
             const char *v = getenv("ME_V90_P3_JA_SCAN");
-            const char *c = getenv("ME_V90_P3_CONFIRM");
 
             mode = 1;
             if (v && !strcmp(v, "0"))
                 mode = 0;
             else if (v && !strcmp(v, "full"))
                 mode = 2;
-            /* Reuse the confirmation gate's env kill switch. */
-            if (c && !strcmp(c, "0"))
-                mode = 0;
         }
         if (sync_mode < 0) {
             const char *v = getenv("ME_V90_P3_JA_SCAN_SYNC");
@@ -10735,18 +10530,14 @@ static void me_rx_accounting_check(void)
     /*endif*/
     missing = arrived - g_v34_rx_samples;
     if (!g_v34_rx_accounting_logged || missing >= last_reported + 8000) {
-        const char *v = getenv("ME_RX_ACCOUNTING");
-
-        if (!v || atoi(v) != 0) {
-            ME_LOG("[ME] RX sample accounting: %llu of %llu samples never "
-                   "reached v34_rx (%.1f ppm of the wire); %llu reached "
-                   "me_rx_audio\n",
-                   (unsigned long long)missing,
-                   (unsigned long long)arrived,
-                   arrived ? 1.0e6*(double)missing/(double)arrived : 0.0,
-                   (unsigned long long)(g_rx_audio_samples
-                                        - g_rx_audio_started_at));
-        }
+        ME_LOG("[ME] RX sample accounting: %llu of %llu samples never "
+               "reached v34_rx (%.1f ppm of the wire); %llu reached "
+               "me_rx_audio\n",
+               (unsigned long long)missing,
+               (unsigned long long)arrived,
+               arrived ? 1.0e6*(double)missing/(double)arrived : 0.0,
+               (unsigned long long)(g_rx_audio_samples
+                                    - g_rx_audio_started_at));
         g_v34_rx_accounting_logged = true;
         last_reported = missing;
     }
@@ -11689,12 +11480,11 @@ skip_8k_codewords:
                         && rx_stage != V34_RX_STAGE_PHASE4_TRN
                         && rx_stage != V34_RX_STAGE_PHASE4_MP
                         && rx_stage != V34_RX_STAGE_DATA) {
-                        int limit = parse_env_int("ME_V90_FALLBACK_S_TIMEOUT_MS", 2000);
+                        int limit = 2000;
 
                         if (g_v90_fallback_j_ms == 0)
                             g_v90_fallback_j_ms = trace_now_ms();
-                        else if (limit > 0
-                                 && trace_now_ms() - g_v90_fallback_j_ms
+                        else if (trace_now_ms() - g_v90_fallback_j_ms
                                     > (uint64_t) limit) {
                             g_v90_fallback_j_ms = 0;
                             ME_LOG("[ME] V.90->V.34 fallback: no S from the "
@@ -11784,23 +11574,6 @@ skip_8k_codewords:
                                     "rate renegotiation timeout");
                             }
                         }
-                    } else if (g_v34_b1_reneg_pending
-                               && data_mode_elapsed_ms() >= me_v34_b1_reneg_delay_ms()) {
-                        g_v34_b1_reneg_pending = false;
-                        if (v34_start_rate_renegotiation(g_v34) == 0) {
-                            ME_LOG("[ME] V.34 B1: asking for %d bps by a §11.6 "
-                                   "rate renegotiation (%lld ms into data mode)\n",
-                                   g_v34_b1_reneg_bps,
-                                   (long long) data_mode_elapsed_ms());
-                            trace_phase("V34 B1 rate -> §11.6 renegotiation to %d",
-                                        g_v34_b1_reneg_bps);
-                            v34_reneg_begin_locked();
-                        } else {
-                            /* Left data mode meanwhile: whatever took it out
-                               (a retrain, the loss path) owns the recovery. */
-                            ME_LOG("[ME] V.34 B1: scheduled §11.6 renegotiation "
-                                   "dropped -- no longer in data mode\n");
-                        }
                     } else if (g_mod == ME_MOD_V34 && v34_b1_rate_check_locked()) {
                         /* Retrained at a rate B1 says this line carries. */
                     } else if (v34_retrain_probe_due_locked()) {
@@ -11831,7 +11604,6 @@ skip_8k_codewords:
                          * that is simply too poor is left alone rather than
                          * recovered in a loop. */
                         v34_clear_data_carrier_lost(g_v34);
-                        g_v34_b1_reneg_pending = false;
                         g_loss_retrains++;
                         g_last_loss_retrain_ms = trace_now_ms();
                         v34_rx_rate_backoff_locked();
@@ -12388,19 +12160,6 @@ static void me_v92_p4_eq_mode_locked(void)
     } else if (phase >= V90_TX_RI) {
         v92_p3_eq_hold(eq, true);
     }
-}
-
-/* ME_V92_P4_EQ=0: demodulate the Phase 4 upstream from raw codewords, as
- * before the Phase 3 equaliser was carried into it. */
-static bool me_v92_p4_eq_enabled(void)
-{
-    static int cached = -1;
-
-    if (cached < 0) {
-        const char *v = getenv("ME_V92_P4_EQ");
-        cached = (v && *v == '0') ? 0 : 1;
-    }
-    return cached != 0;
 }
 
 /*
@@ -13455,16 +13214,9 @@ static void enter_v90_phase4_rx_locked(void)
          * at 31200 the symbols arrive with 3-4 units of error against a
          * constellation spacing of 2 -- too dense for this path to decode. */
         limit = me_v90_upstream_cap(limit);
-        /* Interop probe for peers that reject an MP capability mask narrowed
-         * below the mask they supplied in CPt.  V.90 Table 16 permits the
-         * digital modem to advertise any enabled subset, so this must remain
-         * opt-in; uncapping can make a peer select a rate above the receiver's
-         * trained ceiling (observed against SmartLink). */
         /* V.250 6.4.1 +MS: the upstream is our receive direction. */
         if (g_lim[LIM_MAX_RX] > 0 && (limit <= 0 || limit > g_lim[LIM_MAX_RX]))
             limit = g_lim[LIM_MAX_RX];
-        if (parse_env_int("ME_V90_MP_UNCAPPED", 0) != 0)
-            limit = 0;
         v90_set_upstream_rate_limit(g_v90, limit);
         v90_set_upstream_rate_floor(g_v90, g_lim[LIM_MIN_RX]);
         ME_LOG("[ME] V.90 upstream selection: %d baud, rate cap %d bps, %s carrier\n",
@@ -14175,7 +13927,6 @@ static void me_v90_analogue_rx_codewords_locked(const uint8_t *codewords, int co
     unsigned events;
     uint8_t data_bits[2048];
     int nbits;
-
 
     /* Phase 3 and Phase 4/data are one byte-exact DS0 stream.  The Phase 4
      * receiver changes from CPt to CP at Ed and retains that mapper into
@@ -15298,8 +15049,7 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
         bool trn2u_phase = g_state == ME_TRAINING
                          && v90_get_tx_phase(g_v90) < V90_TX_DATA;
 
-        if (g_v92_p3_trn1u2_locked && g_v92_p3_rx.eq_law >= 0
-            && me_v92_p4_eq_enabled()) {
+        if (g_v92_p3_trn1u2_locked && g_v92_p3_rx.eq_law >= 0) {
             /* E1u, TRN2u, SUVu and CPu arrive through the same upstream path
              * as TRN1u, and raw codewords do not survive it: against
              * slmodemd (its 9600 Hz DSP behind an interpolator) the raw

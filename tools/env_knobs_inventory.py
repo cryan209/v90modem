@@ -71,6 +71,20 @@ KEPT = {
     "ME_V90_CP_SEARCH_END": "offline CP search control (v90_cp_live.c)",
     "ME_V90_CP_SEARCH_START": "offline CP search control (v90_cp_live.c)",
     "ME_V90_CP_TIMING": "offline CP search control (v90_cp_live.c)",
+    "ME_V90_SMARTLINK_DUMMY_CPT": "interop: the only way to enable v90_repair_smartlink_dummy_cpt() (tested in vpcm_loopback_test)",
+    "ME_TRAINING_TIMEOUT_MS": "interop: lengthens the 60 s training cap for multi-retrain calls",
+    "V8_GUARD_TONE_HZ": "national V.8 guard-tone option, off by default",
+    "V8_GUARD_TONE_LEVEL": "national V.8 guard-tone option, off by default",
+    "ME_V92_MH_INITIATE": "test hook: provokes V.92 9.10 modem-on-hold against a real peer",
+    "ME_V92_MH_GRANT": "test hook: V.92 9.10 modem-on-hold grant/deny",
+    "ME_V90A_8K_FEED": "open investigation: V.90 analogue role over a real loop",
+    "ME_V90A_DIL_REQUIRE_PLAN": "open investigation: V.90 analogue role over a real loop",
+    "ME_V90A_TRN1D_ADAPT": "open investigation: V.90 analogue role over a real loop",
+    "ME_V90A_TRN1D_MU": "open investigation: V.90 analogue role over a real loop",
+    "ME_K56FLEX_BLIND": "K56flex: area under active work, not touched in the knob clean-up",
+    "ME_K56FLEX_RATE": "K56flex: area under active work, not touched in the knob clean-up",
+    "ME_K56FLEX_ROLE": "K56flex: area under active work, not touched in the knob clean-up",
+    "ME_X2_SYMMETRIC": "x2: alongside K56flex, not touched in the knob clean-up",
 }
 
 READERS = r"getenv|parse_env_int|V34_DIAG_GETENV|env_or|v34_diag_flag|parse_v8_answer_tone_env"
