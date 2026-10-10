@@ -1402,8 +1402,11 @@ places (D698, D6D5, D886), always the same way:
 
 The six profile records at PM 8F9C are the V.34 symbol rates at 8 kHz:
 10/3, 35/12, 20/7, 8/3, 5/2 and 7/3 samples per symbol (2400, 2743, 2800, 3000,
-3200 and 3429 baud). Other modulations select others (18D2, 4F07, overlay 80);
-**K56flex only ever selects profile 0, 2400 baud.** Profile 0 has two carriers:
+3200 and 3429 baud). The general setup at 18C5 copies the B3CA record into
+words 1F.. and then calls 8F23(word 71) and 94BA(word 72), so the same
+transmitter engine runs at whatever symbol rate and carrier the caller
+negotiated. **Overlay 8E's three K56flex sites alone hard-code profile 0
+(2400 baud) and carrier select 1.** Profile 0 has two carriers:
 select 0 (PM 8FFC, three phasors stepping -120 degrees a symbol) is 1600 Hz,
 and select 1 (PM 9002: 0, -90, 180, +90 degrees) is 1800 Hz. **K56flex passes select
 1, so its startup carrier is 1800 Hz.** 43D1 applies the phasor per symbol;
@@ -1454,12 +1457,23 @@ make k56flex-test
 
 Still open: the module's own width (1F), mapping mode, producer, amplitude
 (3E) and gain (11) for this path; the oracle sweeps them as inputs. The
-B3CA record (`2, 1, 8F6F, 97A2, 93EA, 97C3`) suggests width 2, the 8F6F
-producer and absolute mapping, but the overlay never references B3CA
-directly, so that is unconfirmed. Also open: what words 2F..31 and 4E mean,
+B3CA record (`2, 1, 8F6F, 97A2, 93EA, 97C3`), which 18CE copies into
+words 1F..26 on the general path, gives width 2, the 8F6F producer and
+absolute mapping there. Overlay 8E never copies it, so the K56flex values
+are unconfirmed. Also open: what words 2F..31 and 4E mean,
 the 4A6C source write each symbol, the 92FF zero-symbol prefill (D6AF runs
 18), the cadence from DA51/933B, and how the output ring reaches the codec.
-This recovers the module's 2400-baud startup transmitter (Draft 0.23
-clause 4.12 path); which handshake segments use it on the wire is not yet
-tied to a capture. The receiver for the client's signalling remains the gap
-before CONNECT.
+**This is not the upstream data rate.** With 2 bits a symbol this is a
+4800 bit/s, 4-point (9159, 9159) differential channel: the same constellation
+the receive side slices for the 16/24-bit response and report words. It is
+signalling. The upstream DATA direction is the client's transmitter, which
+MICA receives. The Rockwell K56flex image (kewsast3) reports its TX rate
+from the same $2F28 table as the PCM ladder, whose indices 0..16 are 300 ...
+28800, 31200, 33600. That table is shared with the client's V.34 mode, so it
+shows the client can report up to 33600, not which rate a K56flex call
+reached. The data-mode upstream receiver, and its symbol rate (presumably
+selected like 18C5 does, from negotiated words, rather than fixed), has NOT
+been identified. Everything recovered on the receive side so far (4-point
+decisions, response/report collectors, the 5A32 loop) is the signalling path.
+The firmware also does not show which handshake segments use this
+transmitter on the wire; that needs a capture.
