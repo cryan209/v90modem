@@ -206,7 +206,11 @@ carrier to settle. Each V.90 process also starts with its V.90 power-on offer;
 starting it as V.22 and only changing +MS did not complete PCM training.
 The settled SIP pair has returned the complete all-byte pattern; immediate writes at CONNECT produced errors
 in an earlier run. This is a GUI test readiness delay, not DSP sample buffering.
-V.92 PCM upstream is not included. This is a two-modem local
+V.91 adds a verified symmetric digital PCM pair. The V.92 offer profile
+configures both ends with V92 but the analogue role currently suppresses
+its V.92 V.8 capability octet (`modem_engine.c`), so the actual connection
+is V.90. The selector labels this fallback explicitly; it does not test
+V.92 PCM upstream. This is a two-modem local
 SIP/G.711 test, not an implementation of V.54 analogue/digital loopbacks.
 
 Both modem logs and telemetry stay in bounded memory, including on the peer,
@@ -216,7 +220,7 @@ modems and removes temporary PTYs. SIP server/credentials/network port/profile
 options are rejected in loopback mode, which owns its localhost addressing.
 Optional explicit diagnostic capture settings retain their usual effect.
 
-`make gui-loopback-test` verifies all eight profiles over real localhost SIP,
+`make gui-loopback-test` verifies all ten profiles over real localhost SIP,
 byte-exact echoes including all 256 byte values, repeated calls and PTY
 cleanup. `python3 tools/gui_loopback_test.py v90` runs just the strict
 V.90 payload check. The deterministic
@@ -238,3 +242,15 @@ The FSK view labels its nominal centre frequency and leaves QAM/eye panels
 explicitly unavailable. V.21's 980/1180 Hz and 1650/1850 Hz shifts are visible
 in the audio spectrum and waterfall. Native and browser monitoring suppress
 the automatic V.90 Phase 3 raw dump as well as ordinary V.34 dumps.
+
+## Native listening playback
+
+RX/TX listening now primes 300 ms before playback and limits scheduled audio
+to 600 ms. The previous player began each roughly 150 ms update immediately,
+so polling jitter could exhaust its queue. Queue accounting now uses samples
+rather than buffer count. Switching direction, call epoch changes, missed
+ring windows or excess queued latency stop and re-prime the listening player.
+Stale completion callbacks cannot affect a new queue. All buffering is in
+bounded RAM and affects listening only, never RTP or DSP sample accounting.
+A telemetry outage longer than the snapshot ring still produces a playback
+gap; this change cannot recover audio that was never delivered to the UI.

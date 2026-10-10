@@ -245,7 +245,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let carrierLabel = NSTextField(labelWithString:"Carrier: waiting")
     let listen = NSPopUpButton()
     let audioEngine = AVAudioEngine(), player = AVAudioPlayerNode()
-    var audioSeen = [0,0], audioEpoch = -1, queued = 0, audioGeneration = 0
+    var audioSeen = [0,0], audioEpoch = -1, queuedSamples = 0, audioGeneration = 0, audioDirection = 0
     let atInput = NSTextField(), dataInput = NSTextField()
     let loopbackMode = NSPopUpButton()
     let loopbackStatus = NSTextField(labelWithString:"")
@@ -410,28 +410,48 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }.resume()
     }
+    // Listening only: 300 ms prebuffer, bounded to 600 ms. Never touches DSP.
+    func resetAudio() {
+        player.stop(); queuedSamples = 0; audioGeneration += 1
+    }
     func monitorAudio(_ s:[String:Any]) {
-        let current = s["epoch"] as? Int ?? 0
-        if current != audioEpoch { audioEpoch = current; audioSeen = [0,0]; player.stop(); queued = 0; audioGeneration += 1 }
-        let frames = s["listen"] as? [[String:Any]] ?? []
-        for (d,frame) in frames.enumerated() where d < 2 {
-            let count = frame["count"] as? Int ?? 0, hex = Array(frame["hex"] as? String ?? "")
-            let n = hex.count/4, fresh = min(n,max(0,count-audioSeen[d])); audioSeen[d] = count
-            guard listen.indexOfSelectedItem == d+1, fresh > 0, queued < 3 else { continue }
-            do { if !audioEngine.isRunning { try audioEngine.start() } } catch { self.error.stringValue = "Audio: \(error.localizedDescription)"; continue }
-            guard let format = AVAudioFormat(standardFormatWithSampleRate:8000,channels:1), let buffer = AVAudioPCMBuffer(pcmFormat:format,frameCapacity:AVAudioFrameCount(fresh)), let channel = buffer.floatChannelData?[0] else { continue }
-            buffer.frameLength = AVAudioFrameCount(fresh)
-            for i in 0..<fresh {
-                let at = (n-fresh+i)*4
-                let lo = UInt16(String(hex[at..<at+2]),radix:16) ?? 0, hi = UInt16(String(hex[at+2..<at+4]),radix:16) ?? 0
-                channel[i] = Float(Int16(bitPattern:lo | hi<<8))/32768
-            }
-            queued += 1
-            let generation = audioGeneration
-            player.scheduleBuffer(buffer,completionCallbackType:.dataPlayedBack) { [weak self] _ in DispatchQueue.main.async { if let self = self, generation == self.audioGeneration { self.queued = max(0,self.queued-1) } } }
-            if !player.isPlaying { player.play() }
+        let current = s["epoch"] as? Int ?? 0, direction = listen.indexOfSelectedItem
+        if current != audioEpoch || direction != audioDirection {
+            audioEpoch = current; audioDirection = direction; audioSeen = [0,0]; resetAudio()
         }
-        if listen.indexOfSelectedItem == 0 { player.stop(); queued = 0; audioGeneration += 1 }
+        guard direction > 0 else { return }
+        let d = direction-1, frames = s["listen"] as? [[String:Any]] ?? []
+        guard frames.indices.contains(d) else { return }
+        let frame = frames[d], count = frame["count"] as? Int ?? 0
+        let hex = Array(frame["hex"] as? String ?? ""), n = hex.count/4
+        let delta = max(0,count-audioSeen[d])
+        guard delta > 0 else { return }
+        // A missed ring window or excess latency starts a fresh bounded listen.
+        if audioSeen[d] > 0 && delta > n { resetAudio() }
+        let fresh = min(n,delta)
+        if queuedSamples+fresh > 4800 { resetAudio() }
+        do { if !audioEngine.isRunning { try audioEngine.start() } }
+        catch { self.error.stringValue = "Audio: \(error.localizedDescription)"; return }
+        guard let format = AVAudioFormat(standardFormatWithSampleRate:8000,channels:1),
+              let buffer = AVAudioPCMBuffer(pcmFormat:format,frameCapacity:AVAudioFrameCount(fresh)),
+              let channel = buffer.floatChannelData?[0] else { return }
+        buffer.frameLength = AVAudioFrameCount(fresh)
+        for i in 0..<fresh {
+            let at = (n-fresh+i)*4
+            let lo = UInt16(String(hex[at..<at+2]),radix:16) ?? 0
+            let hi = UInt16(String(hex[at+2..<at+4]),radix:16) ?? 0
+            channel[i] = Float(Int16(bitPattern:lo | hi<<8))/32768
+        }
+        audioSeen[d] = count; queuedSamples += fresh
+        let generation = audioGeneration
+        player.scheduleBuffer(buffer,completionCallbackType:.dataPlayedBack) { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self = self, generation == self.audioGeneration else { return }
+                self.queuedSamples = max(0,self.queuedSamples-fresh)
+                if self.queuedSamples == 0 { self.resetAudio() }
+            }
+        }
+        if !player.isPlaying && queuedSamples >= 2400 { player.play() }
     }
     func poll() {
         guard !loading else { return }; loading = true
