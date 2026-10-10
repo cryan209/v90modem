@@ -328,9 +328,12 @@ v32bis-test: v32bis_spandsp_test v32bis_duplex_test v32bis-ref-test v32bis-datap
 	./v32bis_duplex_test
 
 # AppKit is optional; ordinary/headless modem builds remain C-only.
-.PHONY: gui gui-smoke-test
+.PHONY: gui gui-smoke-test gui-loopback-test
 gui-smoke-test: $(TARGET)
 	python3 tools/gui_smoke_test.py
+
+gui-loopback-test: $(TARGET)
+	python3 tools/gui_loopback_test.py
 
 gui: $(TARGET) modem_gui_native
 

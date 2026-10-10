@@ -1215,11 +1215,13 @@ static void print_usage(FILE *f, const char *argv0)
     fprintf(f,
         "Usage: %s [--sip-server host] [--username u] [--password p]\n"
         "          [--pty-link path | --control-link path --data-link path]\n"
-        "          [--gui | --gui-web] (native macOS / browser signal monitor)\n"
+        "          [--gui | --gui-web | --gui-loopback] (native macOS / browser signal monitor)\n"
         "          [--local-port port] [--rtp-port port]\n"
         "          [--bind-addr ip] [--mode x2|x2-symm|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92] [--verbose]\n"
         "          [--auto-answer rings] [--connect-timeout seconds] [--profile file]\n"
         "\n"
+        "--gui-loopback runs a local echo peer with selectable test profiles.\n"
+        "Use --gui-web --loopback for the browser version.\n\n"
         "--auto-answer sets S0's power-on and factory value (default 2; 0 answers\n"
         "only on ATA). AT+VCID=1 reports the SIP caller after the first RING.\n"
         "--profile keeps the AT&W0/&W1 stored profiles, the &Y power-on choice\n"
@@ -1269,7 +1271,7 @@ int main(int argc, char *argv[])
 
     /* Hand GUI ownership to the local launcher before starting SIP threads. */
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--gui") && strcmp(argv[i], "--gui-web")) continue;
+        if (strcmp(argv[i], "--gui") && strcmp(argv[i], "--gui-web") && strcmp(argv[i], "--gui-loopback")) continue;
         char executable[PATH_MAX], script[PATH_MAX];
         if (!realpath(argv[0], executable)) { perror("--gui executable"); return 2; }
         char *slash = strrchr(executable, '/');
@@ -1282,6 +1284,7 @@ int main(int argc, char *argv[])
         int at = 2;
         if (!strcmp(argv[i], "--gui-web")) args[at++] = "--web";
         for (int j = 0; j < argc; j++) if (j != i) args[at++] = argv[j];
+        if (!strcmp(argv[i], "--gui-loopback")) args[at++] = "--loopback";
         execvp(args[0], args);
         perror("--gui python3 launcher"); free(args); return 2;
     }

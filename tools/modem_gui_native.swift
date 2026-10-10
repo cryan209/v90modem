@@ -247,6 +247,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let audioEngine = AVAudioEngine(), player = AVAudioPlayerNode()
     var audioSeen = [0,0], audioEpoch = -1, queued = 0, audioGeneration = 0
     let atInput = NSTextField(), dataInput = NSTextField()
+    let loopbackMode = NSPopUpButton()
+    let loopbackStatus = NSTextField(labelWithString:"")
+    var loopbackRow: NSStackView!, startLoop: NSButton!, pattern: NSButton!
+    var loopbackProfiles: [String] = []
     let eyeSource = NSPopUpButton()
     var eyeCountSeen = -1, eyeUpdated = Date.distantPast
     let eyeDir = NSPopUpButton(), dataMode = NSPopUpButton()
@@ -335,8 +339,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         tab("Waterfall",pair(panel("RX · newest at top · −90 to 0 dBFS",[rxWaterfall]),panel("TX · 31.25 Hz bins · 128 updates",[txWaterfall])))
         tab("Process log",log.scroll)
         diagnostics.heightAnchor.constraint(equalToConstant:160).isActive = true
+        startLoop = button("Start loopback",#selector(startLoopback))
+        pattern = button("256-byte pattern",#selector(sendPattern))
+        loopbackRow = row([label("Local test"),loopbackMode,startLoop,pattern,loopbackStatus]); loopbackRow.isHidden = true
         let items: [NSView] = [
-            row([status,listen,button("Freeze",#selector(freeze))]),error,
+            row([status,listen,button("Freeze",#selector(freeze))]),loopbackRow,error,
             pair(panel("RX line · 64 ms",[rx]),panel("TX line · 64 ms",[tx])),
             row([eyeDir,eyeSource,carrierLabel]),
             diagnostics,
@@ -376,14 +383,22 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         } else { data = Data((value+"\r\n").utf8) }
         send("data",data); dataInput.stringValue = ""
     }
+    @objc func startLoopback() {
+        guard loopbackProfiles.indices.contains(loopbackMode.indexOfSelectedItem) else { return }
+        post("loopback",["profile":loopbackProfiles[loopbackMode.indexOfSelectedItem]])
+    }
+    @objc func sendPattern() { send("data",Data((0..<256).map { UInt8($0) })) }
     func send(_ port:String, _ data:Data) {
         guard data.count <= 8000 else { error.stringValue = "Send at most 8,000 bytes at once"; return }
-        var req = URLRequest(url:URL(string:"send",relativeTo:base)!.absoluteURL)
+        post("send",["port":port,"data":data.base64EncodedString()])
+    }
+    func post(_ endpoint:String,_ payload:[String:Any]) {
+        var req = URLRequest(url:URL(string:endpoint,relativeTo:base)!.absoluteURL)
         req.httpMethod = "POST"
         req.setValue("application/json",forHTTPHeaderField:"Content-Type")
         let components = URLComponents(url:base,resolvingAgainstBaseURL:true)!
         req.setValue("http://127.0.0.1:\(components.port!)",forHTTPHeaderField:"Origin")
-        req.httpBody = try? JSONSerialization.data(withJSONObject:["port":port,"data":data.base64EncodedString()])
+        req.httpBody = try? JSONSerialization.data(withJSONObject:payload)
         session.dataTask(with:req) { [weak self] data,response,err in
             DispatchQueue.main.async {
                 guard let self = self else { return }
@@ -440,6 +455,21 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let mode = (s["v92"] as? Int ?? 0)>0 ? "V.92" : mods.indices.contains(mod) ? mods[mod] : "—"
         status.stringValue = "\(call)  ·  \(mode)  ·  \((s["law"] as? Int ?? 0)>0 ? "PCMA" : "PCMU")  |  RX \(s["rx_signal"] as? String ?? "—")  |  TX \(s["tx_signal"] as? String ?? "—")"
         dataInput.isEnabled = dataReady; sendData.isEnabled = dataReady
+        let local = s["loopback"] as? [String:Any]
+        loopbackRow.isHidden = local == nil
+        if let local = local {
+            let profiles = local["profiles"] as? [[String]] ?? []
+            if loopbackProfiles.isEmpty {
+                loopbackProfiles = profiles.compactMap { $0.first }
+                loopbackMode.addItems(withTitles:profiles.compactMap { $0.last })
+                if let i = loopbackProfiles.firstIndex(of:"v22") { loopbackMode.selectItem(at:i) }
+            }
+            let busy = local["busy"] as? Bool ?? false
+            startLoop.isEnabled = !busy && state == 0 && (local["peer_state"] as? Int ?? 0) == 0 && (local["ready"] as? Bool ?? false)
+            loopbackMode.isEnabled = startLoop.isEnabled
+            pattern.isEnabled = dataReady && !busy
+            loopbackStatus.stringValue = dataReady ? "Echoed \(local["echoed"] as? Int ?? 0) bytes" : local["status"] as? String ?? ""
+        }
         let streams = s["streams"] as? [String:[[Any]]] ?? [:]
         at.update(streams["at"] ?? [],binary:false); serial.update(streams["data"] ?? [],binary:true); log.update(streams["log"] ?? [],binary:false)
         let paths = s["ports"] as? [String:String] ?? [:]
@@ -450,6 +480,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         for (i,event) in events.enumerated() where count-events.count+i >= eventSeen { history.append(event) }
         eventSeen = count; history = Array(history.suffix(120)); training.replace(history.joined(separator:"\n"))
         if let exit = s["exit"] as? Int { error.stringValue = "Modem exited: \(exit)" }
+        else if error.stringValue.hasPrefix("Modem exited:") { error.stringValue = "" }
         monitorAudio(s)
         guard !frozen else { return }
         let audio = s["audio"] as? [[Double]] ?? [[],[]]

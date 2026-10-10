@@ -176,3 +176,49 @@ Validation includes eye ring wrap/reset/JSON checks, real localhost V.22bis
 SIP samples with alternating T/2 phases and byte-exact serial transport, and
 V.32bis/V.34 duplex tests with the observer enabled and error-free PRBS payload
 in both directions. Offline tests do not establish hardware interoperability.
+
+## Built-in local loopback
+
+```sh
+./sip_v90_modem --gui-loopback
+# Browser:
+./sip_v90_modem --gui-web --loopback
+```
+
+The launcher owns two loopback-only SIP endpoints and a serial echo peer.
+Select a Local test profile and click Start loopback; a fresh pair of modem
+processes is started for that test, and both receive
+`AT+MS` through their separate control PTYs before the caller dials the peer.
+Hang up before changing profiles. The 256-byte pattern button sends every
+byte value from 00 through FF; returned bytes appear in the serial console.
+The echoed-byte counter counts far-end PTY bytes successfully written back,
+not a BER measurement or a guarantee that every sent byte arrived correctly.
+
+Profiles cover V.22 at 1200, V.22bis at 2400, V.32 at 9600, V.32bis at
+14400, and V.34 at 9600/21600. Defaults use V.14 framing on both ends;
+an explicitly set `ME_DATA_FRAMING` is inherited by both. `--mode` can set
+an initial V.22/V.32/V.34 offer; the Local test selector controls each test.
+V.90/V.92 PCM roles need a different digital/analogue fixture, so they are
+not presented as interchangeable same-mode peers. This is a two-modem local
+SIP/G.711 test, not an implementation of V.54 analogue/digital loopbacks.
+
+Both modem logs and telemetry stay in bounded memory, including on the peer,
+with no automatic V.34 raw captures. Echo holds at most one 4 KiB block under
+backpressure. Closing the window or stopping the launcher terminates both
+modems and removes temporary PTYs. SIP server/credentials/network port/profile
+options are rejected in loopback mode, which owns its localhost addressing.
+Optional explicit diagnostic capture settings retain their usual effect.
+
+`make gui-loopback-test` verifies each profile over real localhost SIP,
+byte-exact echoes including all 256 byte values, repeated calls and PTY
+cleanup. This does not establish hardware interoperability.
+
+The initial reuse-of-processes experiment passed 1200 bit/s but the next
+2400 bit/s call ended with NO CARRIER. The loopback runner therefore isolates
+each test with fresh SIP/DSP instances; this does not fix or claim to diagnose
+that production reconnect issue. Its regression covers switching all offered
+profiles, with cleanup between test runs. The UI service and bounded histories
+remain in the same window while modem processes restart.
+
+The 33600 bit/s local preset did not train with the default offers and is
+excluded from the selector. No DSP negotiation settings are changed by this UI.
