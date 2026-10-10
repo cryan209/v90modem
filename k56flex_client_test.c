@@ -279,6 +279,16 @@ int main(void)
         k56flex_channel_cfg_t d = {0.5, 5.7, 1500, 100, 0, 2, 3, 4};
         linear("ideal wire, pad 9 dB, mu 56k", K56FLEX_LAW_MU, 56000, 0x00, 0x8880, &a, 0, 12000, 1);
         linear("RC loop + HP + noise, 30 sym latency, A 32k", K56FLEX_LAW_A, 32000, 0x03, 0x8890, &b, 30, 12000, 1);
+        /* Baseline wander at the sparse-record -> PCM handoff must recover
+         * across noise realizations and codec offsets, without relaxing BER. */
+        for (unsigned seed = 5; seed <= 8; ++seed) {
+            char name[80];
+            k56flex_channel_cfg_t e = b;
+            e.seed = seed;
+            e.dc = seed & 1 ? -20 : 20;
+            snprintf(name, sizeof(name), "RC/HP A 32k, seed %u DC %+.0f", seed, e.dc);
+            linear(name, K56FLEX_LAW_A, 32000, 0x03, 0x8890, &e, 30, 12000, 1);
+        }
         linear("heavy roll-off (edge -20 dB), training only", K56FLEX_LAW_MU, 32000, 0x00, 0x8880, &c, 17, 0, 0);
         linear("fractional delay 5.7, +3 ppm (training only)", K56FLEX_LAW_MU, 32000, 0x00, 0x8880, &d, 25, 0, 0);
     }

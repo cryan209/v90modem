@@ -116,6 +116,213 @@ void k56flex_report_rx_init(k56flex_report_rx_t *rx, unsigned tap);
  * records with a valid header have been seen at some alignment. */
 int k56flex_report_rx_bit(k56flex_report_rx_t *rx, int bit);
 
+/* Repeated 16-bit response collector, Draft 0.23 receive boundary;
+ * original resident 1D0E/1D27/1D9E. These are already-sliced dibits,
+ * not PCM samples. Tap selection is supplied by the receiver mode. */
+typedef struct {
+    uint32_t hist;
+    uint16_t window, word;
+    unsigned tap;
+    int remaining, accepted;
+} k56flex_response_rx_t;
+/* Returns -1 for an unsupported descrambler tap (only 5 and 18 exist). */
+int k56flex_response_rx_init(k56flex_response_rx_t *rx, unsigned tap);
+int k56flex_response_rx_dibit(k56flex_response_rx_t *rx, unsigned dibit);
+
+/* Bank-8E E4A9 feedback mode only: original BC84/BC88/BC90 tables,
+ * nearest-point 5903 and differential 5961, Draft 0.23 clause 11.
+ * Inputs are equalized firmware coordinates, not linear PCM samples. */
+unsigned k56flex_feedback_slice(int16_t real, int16_t imag);
+unsigned k56flex_feedback_dibit(unsigned *previous_raw, unsigned raw);
+
+/* Original 5A54 complex rotation, supplied signed Q15 phasor and bias.
+ * Matches the verified OVM-clear arithmetic: rounding and modulo stores.
+ * Coefficient generation/carrier recovery are separate stages. */
+void k56flex_feedback_rotate(int16_t real, int16_t imag,
+                             int16_t u, int16_t v, int16_t bias,
+                             int16_t *out_real, int16_t *out_imag);
+
+/* Original 6910 forward stage for the recovered 48-tap/two-row descriptor.
+ * Input ring is in logical (not DSP bit-reversed) order. No samples consumed,
+ * and no coefficient adaptation performed here. See Draft 0.23 clause 7.16. */
+void k56flex_feedback_fir(const int16_t input[256], unsigned phase,
+                          const int16_t coefficients[192], int16_t output[4]);
+
+typedef struct {
+    unsigned tap, history_index, remaining;
+} k56flex_feedback_adapt_t;
+/* 6910/6B54 sweep with descriptor m70=2 and m73=m74=0, clause 7.16.
+ * History is caller-owned logical workspace. Return -1 without changes for
+ * invalid state or the unresolved zero-spacing refresh (DSP repeat FFFF). */
+int k56flex_feedback_adapt(k56flex_feedback_adapt_t *state,
+                           int16_t coefficients[192], int16_t history[256],
+                           unsigned spacing, unsigned wrap,
+                           const int16_t input[256], unsigned input_phase,
+                           const int16_t errors[128], unsigned error_phase);
+
+typedef struct {
+    unsigned source_cursor, output_cursor, output_available;
+    int slip; /* -1, 0, +1, cleared after a successful block */
+} k56flex_feedback_resample_t;
+/* Original 51CE/4580 bounded ring/gain path, Draft 0.23 clause 7.17.
+ * Raw ring words are the supplied firmware lane ring, not an asserted PCM ABI.
+ * Return -1 without mutation for unsupported state or filter overflow. */
+int k56flex_feedback_resample(k56flex_feedback_resample_t *state,
+                              const int16_t raw[128], unsigned available,
+                              unsigned table_phase, unsigned shift,
+                              int16_t gain, int16_t bias, int16_t output[256]);
+
+/* Original 45B8/460E/535B timing control, DP-11B register image.
+ * Returns -1 without mutation when arithmetic leaves the verified nonsaturating
+ * domain. Caller owns initialization and phase/slip bookkeeping (542D). */
+int k56flex_feedback_timing(uint16_t state[128], const int16_t ring[256],
+                            unsigned phase, unsigned tick);
+
+/* Original 542D phase/correction gating, same DP-11B image as timing.
+ * Keeps pending coarse status and clears correction/scratch on every path. */
+void k56flex_feedback_phase(uint16_t state[128]);
+
+/* 533F reset with BD01 (startup) or BD05 (symbol-loop) constants. */
+void k56flex_feedback_timing_init(uint16_t state[128], int symbol_loop);
+/* 6C50's four-SUBC block accumulator, DP119 image. Nonzero return gives
+ * number of blocks, sets 8CAB and preserves the original four-bit quotient. */
+unsigned k56flex_feedback_block_count(uint16_t state[128]);
+
+/* Original 4AAA..4ABD input subtraction after predictor processing.
+ * bypass corresponds to DM8F4F bit4. Inputs/outputs are signed lane words. */
+void k56flex_feedback_residual(int16_t raw[2], const int16_t predicted[2], int bypass);
+
+/* 4A91..4AF0 predictor mix, residual and conjugate error rotation;
+ * optional diagnostic path 8CD8 is excluded. Supplied pairs and phasor. */
+void k56flex_feedback_predictor(int16_t lane[2], const int16_t source[2],
+                                const int16_t phasor[2], int bypass,
+                                int16_t prediction[2], int16_t error[2]);
+
+/* DAB7 forward predictor: logical 8192-word source ring, three complex
+ * 48-tap rows, effective division by 2^18. No adaptation or input consumption. */
+void k56flex_feedback_predictor_fir(const int16_t input[8192], unsigned phase,
+                                    const int16_t coefficients[288], int16_t output[6]);
+
+/* DAB7 6CF8/6ADD adaptation profile: update all 48 taps in three rows.
+ * History is a retained PM window with refresh at index 256 and old prefix.
+ * Supports tap 0 or 48, profile spacing 24 / wrap 95 / remaining 0 or 1. */
+int k56flex_feedback_predictor_adapt(k56flex_feedback_adapt_t *state,
+                                      int16_t coefficients[288], int16_t history[512],
+                                      const int16_t input[8192], unsigned input_phase,
+                                      const int16_t errors[128], unsigned error_phase);
+
+/* Original 6D4E correlation-to-angle conversion with PM0320 polynomials.
+ * Returns the signed high-word phase-error term consumed by 6D93. */
+uint32_t k56flex_feedback_predictor_angle(const uint16_t correlation[4]);
+
+/* Mode-15 4B59..4B86 correlation accumulator, D930..D933 high/low pairs.
+ * Three supplied complex input/reference pairs; no angle conversion/reset. */
+void k56flex_feedback_predictor_correlate(uint16_t correlation[4],
+                                         const int16_t input[6], const int16_t reference[6]);
+
+/* 6D93..6DA8 loop filter. DP119 words 33/34 measured phase error, 36/37 gains,
+ * 38/39 integrator; returns the increment consumed by 4BB1. */
+uint32_t k56flex_feedback_predictor_increment(uint16_t state[128]);
+
+/* 4BB1..4BCD predictor phase advance and phasor lookup. DP119 state,
+ * supplied post-loop increment and original 512-word cosine table. */
+void k56flex_feedback_predictor_phase(uint16_t state[128], uint32_t increment,
+                                      const int16_t cosine[512]);
+
+/* Complete 4AF3 mode-15 controller, including enable/bypass, correlation,
+ * timer, angle conversion, reset, loop filter and phasor production.
+ * Supplied pairs/cosine table; caller must select firmware mode EE9B=15. */
+void k56flex_feedback_predictor_control15(uint16_t state[128], uint16_t correlation[4],
+                                          const int16_t input[6], const int16_t reference[6],
+                                          const int16_t cosine[512]);
+
+/* Complete 4AF3 controller for EE9B modes other than 15, PMST.TRM=1.
+ * Supplied three complex pairs in logical order, including AR5 references. */
+void k56flex_feedback_predictor_control(uint16_t state[128],
+                                        const int16_t input[6], const int16_t reference[6],
+                                        const int16_t cosine[512]);
+
+/* Join the three-pair 6C50 processing body: optional active-profile adaptation,
+ * forward FIR, predictor/residual/error and controller. Caller supplies source
+ * and raw blocks, schedules cursors and applies firmware adaptation gates.
+ * Does not run the capture callback or diagnostic output path. */
+int k56flex_feedback_predictor_block(uint16_t state[128],
+                                      k56flex_feedback_adapt_t *adaptation,
+                                      int16_t coefficients[288], int16_t history[512],
+                                      const int16_t source[8192], unsigned source_phase,
+                                      int16_t raw[6], int16_t errors[128], unsigned error_phase,
+                                      unsigned mode, int bypass, const int16_t cosine[512],
+                                      uint16_t correlation[4], int16_t prediction[6]);
+
+typedef struct {
+    unsigned source, raw, error, output; /* logical word positions */
+} k56flex_feedback_predictor_cursors_t;
+
+/* 6C50 cadence and consecutive three-pair blocks, profile 44=2/45=3.
+ * state[9] is available pairs, state[42] the retained remainder (0..2).
+ * Source production and the optional capture callback are caller-owned; cursors
+ * replace DSP addresses. Returns blocks processed, or -1 for unsupported state. */
+int k56flex_feedback_predictor_run(uint16_t state[128],
+                                    k56flex_feedback_predictor_cursors_t *cursors,
+                                    k56flex_feedback_adapt_t *adaptation,
+                                    int16_t coefficients[288], int16_t history[512],
+                                    const int16_t source[8192], int16_t raw[128],
+                                    int16_t errors[128], unsigned mode, int bypass,
+                                    const int16_t cosine[512], uint16_t correlation[4]);
+
+/* Original 4A6C source pair mix into DAB7's logical ring (clause 7.18).
+ * Supplied symbols/carrier coefficients; updates only the source ring cursor. */
+void k56flex_feedback_source_pair(int16_t ring[8192], unsigned *cursor,
+                                  const int16_t pair[2], const int16_t phasor[2]);
+
+/* Original 97A2/97A8 quadrant coding followed by 97C3's startup mapper,
+ * DP118 and SPM=0. Word 7 is the nibble, 0C prior quadrant, 3E amplitude;
+ * outputs 0F/10. Does not select amplitudes or dispatch transmit modes. */
+/* Original 8F6F/8F74 word-history producer, DP118. */
+void k56flex_feedback_startup_bits(uint16_t state[128], uint16_t input,
+                                   int scramble);
+/* Original BE68 alternate profile, including scratch word 12. */
+void k56flex_feedback_extended_bits(uint16_t state[128], uint16_t input);
+/* Bounded original 90FF extraction: width 1..15, remaining 0..15.
+ * Producers 0=8F6F, 1=8F74, 2=BE68. Returns next-word consumption or -1. */
+int k56flex_feedback_startup_take(uint16_t state[128], uint16_t input,
+                                 unsigned producer);
+/* Overlay 88 43D1 rotation; supplied PM phasor, bounded phase range. */
+int k56flex_feedback_startup_rotate(uint16_t state[128], int16_t pair[2],
+                                   const int16_t phasor[2]);
+/* Original 9367 at SPM=0; normalized 64-word BR0 output ring. */
+int k56flex_feedback_startup_output(const uint16_t state[128],
+                                   const int16_t pair[2], int16_t ring[64],
+                                   unsigned *cursor);
+/* Original 8274..827E sample count, bounded SPM=0 operands; -1 invalid. */
+int k56flex_feedback_startup_sample_count(uint16_t state[128], unsigned symbols);
+/* Original 829E..82A3 at SPM=0/OVM=0; caller-selected PM coefficients. */
+int k56flex_feedback_startup_fir(const int16_t history[64], unsigned cursor,
+                                const int16_t *coefficients, unsigned taps,
+                                int16_t *sample);
+/* Original 828B..8299 phase/bank selection; normalized history cursor. */
+int k56flex_feedback_startup_phase(uint16_t state[128], unsigned *cursor,
+                                  uint16_t *bank_address);
+/* Bounded 8270 datapath, phase-major caller-supplied coefficient banks.
+ * Positive count or -1; normalized cursors, external output counter omitted. */
+int k56flex_feedback_startup_samples(uint16_t state[128], unsigned symbols,
+                                    const int16_t history[64], unsigned *history_cursor,
+                                    const int16_t *banks, unsigned bank_words,
+                                    int16_t output[128], unsigned *output_cursor);
+void k56flex_feedback_startup_symbol(uint16_t state[128], int differential);
+
+/* 9320 preset installation and 4A6C phase-cycle writer, DP118, SPM=1.
+ * Original PM650C's eleven presets and PM6490 carrier pairs. Emit returns
+ * 1 when the phase cycle resets, 0 otherwise, -1 for unsupported
+ * phase/cursor. Symbols remain caller-supplied; no transmit-mode selection. */
+int k56flex_feedback_source_init(uint16_t state[128], unsigned profile);
+int k56flex_feedback_source_emit(uint16_t state[128], int16_t ring[8192],
+                                  unsigned *cursor, const int16_t pair[2]);
+/* Same writer with explicit C5x SPM 0/1/2 (product shifts 0/1/4).
+ * SPM=0 is required when joining to the verified startup symbol mapper. */
+int k56flex_feedback_source_emit_scaled(uint16_t state[128], int16_t ring[8192],
+                                         unsigned *cursor, const int16_t pair[2], unsigned spm);
+
 /* ---- V.8bis capability frame (clauses 4.4-4.6) ------------------------- */
 typedef enum {
     K56FLEX_V8BIS_MS = 0, K56FLEX_V8BIS_CL, K56FLEX_V8BIS_ACK1, K56FLEX_V8BIS_NAK1

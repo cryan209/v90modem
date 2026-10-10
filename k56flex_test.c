@@ -196,6 +196,148 @@ static void test_report(void)
         }
 }
 
+static void test_response(void)
+{
+    unsigned tap, payload, offset, valid;
+    for (tap = 5; tap <= 18; tap += 13)
+        for (payload = 0; payload < 32; ++payload)
+            for (offset = 0; offset < 16; offset += 2)
+                for (valid = 0; valid < 2; ++valid) {
+                    k56flex_response_rx_t rx;
+                    uint32_t history = 0;
+                    uint16_t word = 0x8880 | ((payload * 0x1230) & 0x7770) | !valid;
+                    unsigned n, dibit = 0;
+                    CHECK(k56flex_response_rx_init(&rx, tap) == 0, "response init");
+                    for (n = 0; n < 224; ++n) {
+                        unsigned x = n < offset ? 0 : (word >> ((n-offset) % 16)) & 1;
+                        unsigned y = x ^ ((history >> (tap-1)) & 1) ^ ((history >> 22) & 1);
+                        history = (history << 1) | y;
+                        dibit |= y << (n & 1);
+                        if (n & 1) {
+                            k56flex_response_rx_dibit(&rx, dibit);
+                            dibit = 0;
+                        }
+                    }
+                    CHECK(rx.accepted == (int)valid, "response tap %u offset %u valid %u", tap, offset, valid);
+                    if (valid) CHECK(rx.word == word, "response word");
+                }
+}
+
+static void test_feedback_coordinates(void)
+{
+    static const int16_t points[4][2] = {{12953,0},{0,12953},{-12953,0},{0,-12953}};
+    static const unsigned labels[4] = {0,1,2,3};
+    static const unsigned diff[16] = {2,0,1,3,3,2,0,1,1,3,2,0,0,1,3,2};
+    unsigned i, j;
+    for (i = 0; i < 4; ++i) {
+        CHECK(k56flex_feedback_slice(points[i][0], points[i][1]) == labels[i], "feedback point %u", i);
+        for (j = 0; j < 4; ++j) {
+            unsigned previous = i;
+            CHECK(k56flex_feedback_dibit(&previous, j) == diff[4*i+j], "feedback differential %u/%u", i, j);
+            CHECK(previous == j, "feedback history");
+        }
+    }
+    CHECK(k56flex_feedback_slice(9000,9000) == 0, "feedback positive tie");
+    CHECK(k56flex_feedback_slice(-9000,-9000) == 2, "feedback negative tie");
+}
+
+static void test_feedback_filter(void)
+{
+    int16_t input[256] = {0}, coefficients[192] = {0}, out[4], real, imag;
+    unsigned phase;
+    k56flex_feedback_rotate(-1, 1, 16384, 0, 0, &real, &imag);
+    CHECK(real == 0 && imag == 1, "rotor signed half rounding");
+    k56flex_feedback_rotate(32767, -32768, 0, 32767, 0, &real, &imag);
+    CHECK(real == 32767 && imag == 32766, "rotor quadrant");
+    coefficients[0] = 8192;
+    coefficients[96 + 48] = 8192;
+    for (phase = 0; phase < 256; ++phase) {
+        memset(input, 0, sizeof(input));
+        input[(phase - 2) & 255] = -123;
+        input[(phase - 1) & 255] = 456;
+        k56flex_feedback_fir(input, phase, coefficients, out);
+        CHECK(out[0] == -123 && out[1] == 456 && out[2] == -456 && out[3] == -123,
+              "FIR row/phase %u", phase);
+    }
+    memset(coefficients, 0, sizeof(coefficients));
+    coefficients[0] = 4096;
+    input[0] = -1; input[1] = 1;
+    k56flex_feedback_fir(input, 2, coefficients, out);
+    CHECK(out[0] == 0 && out[1] == 1, "FIR signed half rounding");
+}
+
+static void test_feedback_adaptation(void)
+{
+    int16_t cf[192] = {0}, h[256] = {0}, input[256] = {0}, errors[128] = {0};
+    k56flex_feedback_adapt_t state = {7, 12, 0};
+    h[12] = 16384;
+    errors[0] = 100; errors[1] = 40;
+    errors[2] = -20; errors[3] = 80;
+    CHECK(k56flex_feedback_adapt(&state, cf, h, 0, 0, input, 0, errors, 4) == 0, "adapt call");
+    CHECK(cf[7] == 70 && cf[55] == -30 && cf[103] == 30 && cf[151] == 50,
+          "adapt updates both complex rows");
+    CHECK(state.tap == 8 && state.history_index == 11 && state.remaining == 2, "adapt sweep state");
+    state.tap = 48;
+    CHECK(k56flex_feedback_adapt(&state, cf, h, 0, 0, input, 0, errors, 4) == -1 && state.tap == 48,
+          "zero-spacing refresh needs full PM model");
+    input[0] = 10; input[1] = 20; input[254] = 30; input[255] = 40;
+    input[252] = 50; input[253] = 60;
+    CHECK(k56flex_feedback_adapt(&state, cf, h, 1, 0, input, 0, errors, 4) == 0, "adapt refresh");
+    CHECK(h[0] == 10 && h[1] == 20 && h[2] == 30 && h[3] == 40 && h[4] == 50 && h[5] == 60,
+          "adapt history source wrap");
+    CHECK(state.tap == 1 && state.history_index == 1 && state.remaining == 1, "adapt refreshed sweep");
+}
+
+static void test_feedback_resampling(void)
+{
+    int16_t raw[128] = {0}, output[256] = {0};
+    k56flex_feedback_resample_t state = {127, 254, 0, 1};
+    unsigned i;
+    CHECK(k56flex_feedback_resample(&state, raw, 2, 0, 15, 512, 3, output) == 0, "resample zero/bias");
+    CHECK(state.source_cursor == 3 && state.output_cursor == 4 && state.output_available == 3 && !state.slip,
+          "resample slip and ring accounting");
+    for (i = 0; i < 6; ++i) CHECK(output[(254+i)&255] == 3, "resample bias output");
+    state.slip = -1;
+    CHECK(k56flex_feedback_resample(&state, raw, 0, 0, 15, 512, 0, output) == -1 && state.slip == -1,
+          "resample invalid negative count does not mutate");
+    for (i = 0; i < 128; ++i) raw[i] = 1200;
+    state = (k56flex_feedback_resample_t){0, 0, 0, 0};
+    CHECK(k56flex_feedback_resample(&state, raw, 1, 1, 14, -32768, 0, output) == 0, "resample extreme gain");
+    CHECK(output[0] == 32767 && output[1] == 32767, "resample scaled product wraps before saturation");
+}
+
+static void test_feedback_clock(void)
+{
+    uint16_t s[128] = {0};
+    int16_t ring[256] = {0};
+    s[0x5d] = 0x10; /* freeze still applies the existing rate correction */
+    s[0x45] = 2; s[0x5e] = 1;
+    CHECK(k56flex_feedback_timing(s, ring, 0, 1) == 0 && s[0x5c] == 64, "timing frozen rate term");
+    k56flex_feedback_phase(s);
+    CHECK(s[0x5e] == 1 && s[0x5f] == 0 && s[0x5c] == 0, "phase freeze clears correction");
+    s[0x5d] = 0x20; s[0x5b] = 0; s[0x5c] = 64; s[0x3e] = 1;
+    k56flex_feedback_phase(s);
+    CHECK(s[0x5e] == 0 && s[0x5f] == 65472 && s[0x3e] == 1, "phase subtraction retains pending slip");
+    s[0x3e] = 0; s[0x64] = 0x1000;
+    k56flex_feedback_phase(s);
+    CHECK(s[0x3f] == 0xf000 && s[0x3e] == 0xf000, "phase coarse boundary");
+}
+
+static void test_feedback_initialization(void)
+{
+    uint16_t state[128] = {0};
+    unsigned i, count=0;
+    state[0x5d]=0x10;
+    k56flex_feedback_timing_init(state,0);
+    CHECK(state[0x57]==0x140 && state[0x58]==0x1800 && state[0x43]==0x7fff && state[0x5d]==0x10,
+          "timing startup initializer preserves flags");
+    k56flex_feedback_timing_init(state,1);
+    CHECK(state[0x57]==0x324 && state[0x58]==0x800, "timing symbol constants");
+    memset(state,0,sizeof(state)); state[9]=1; state[0x45]=3;
+    for(i=0;i<30;++i) { k56flex_feedback_block_count(state); count+=state[0x2b]; }
+    CHECK(count==30 && state[0x42]==0, "block cadence conserves supplied samples");
+}
+
 static void test_v8bis(void)
 {
     static const uint8_t check[9] = {'1','2','3','4','5','6','7','8','9'};
@@ -261,6 +403,13 @@ int main(void)
     test_roundtrip_and_blocks();
     test_rejects();
     test_report();
+    test_response();
+    test_feedback_coordinates();
+    test_feedback_filter();
+    test_feedback_adaptation();
+    test_feedback_resampling();
+    test_feedback_clock();
+    test_feedback_initialization();
     test_v8bis();
     test_params();
     printf(failures ? "k56flex_test: %d FAILURES\n" : "k56flex_test: all passed\n", failures);

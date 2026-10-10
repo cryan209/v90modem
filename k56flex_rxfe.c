@@ -26,6 +26,7 @@ struct k56flex_rxfe {
     uint64_t nin;                 /* samples received */
     /* acquisition */
     double blk_energy;
+    double dc_sum, input_dc;
     unsigned blk_n;
     double floor_rms;
     unsigned blocks_seen;
@@ -58,6 +59,7 @@ struct k56flex_rxfe {
     uint64_t nout;
     float mu;
     double err_pow, ref_pow;
+    double baseline;              /* decision-directed baseline correction in PCM frames */
 };
 
 k56flex_rxfe_t *k56flex_rxfe_new(k56flex_law_t law, k56flex_rxfe_sink_fn sink, void *user)
@@ -152,6 +154,7 @@ static void try_acquire(k56flex_rxfe_t *fe)
     fe->nout = 0;
     fe->hist_n = 0;
     fe->ppm = 0;
+    fe->baseline = 0;
     fe->tnext = 0;
     fe->have_prev = 0;
     fe->nehist = 0;
@@ -235,13 +238,18 @@ static void run_symbols(k56flex_rxfe_t *fe)
             }
         }
         ++fe->nout;
-        emit_symbol(fe, (float)y);
+        emit_symbol(fe, (float)(y + fe->baseline));
     }
 }
 
 void k56flex_rxfe_push(k56flex_rxfe_t *fe, int16_t sample)
 {
-    fe->ring[fe->nin % RING] = (float)sample;
+    /* Learn the codec offset from the initial quiet floor, before identification. */
+    if (fe->nin < 160) {
+        fe->dc_sum += sample;
+        if (fe->nin == 159) fe->input_dc = fe->dc_sum / 160.0;
+    }
+    fe->ring[fe->nin % RING] = (float)(sample - fe->input_dc);
     ++fe->nin;
     switch (fe->state) {
     case FE_ENERGY: detect_energy(fe, (float)sample); break;
@@ -421,6 +429,7 @@ uint64_t k56flex_rxfe_symbols(const k56flex_rxfe_t *fe) { return fe->hist_n; }
 void k56flex_rxfe_block(k56flex_rxfe_t *fe, uint64_t first_symbol, const int16_t *reference, unsigned n, int known)
 {
     unsigned j;
+    double residual = 0;
     if (fe->state != FE_RUN || n == 0 || n > HIST || first_symbol + n > fe->hist_n || fe->hist_n - first_symbol > HIST) return;
     if (first_symbol == 0) fe->tnext = 0;
     for (j = 0; j < n; ++j) {
@@ -428,6 +437,7 @@ void k56flex_rxfe_block(k56flex_rxfe_t *fe, uint64_t first_symbol, const int16_t
         double ref = (double)reference[j];
         uint64_t sym = first_symbol + j;
         const float *d = fe->dv[idx];
+        if (known == 0) residual += ref - fe->ycap[idx];
         fe->refring[sym % XR] = (float)ref;
         if (known >= 0) {
             /* Least squares throughout: on the known stream against the expected levels,
@@ -449,4 +459,11 @@ void k56flex_rxfe_block(k56flex_rxfe_t *fe, uint64_t first_symbol, const int16_t
             fe->tnext += TBLK;
         }
     }
+    /* The AC-coupled loop removes DC; the sparse parameter stream and PCM
+     * frames have different local means. A finite FIR trained on the former
+     * leaves baseline wander at the handoff. Track the mean decision residual
+     * once per PCM frame, independently of the FIR (Draft 0.23, 7.15-7.23
+     * receiver design; the transmitted mapper and DC/sign rules are unchanged).
+     * ycap includes the correction already applied, so this is incremental. */
+    if (known == 0) fe->baseline += residual / n;
 }

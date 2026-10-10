@@ -196,8 +196,8 @@ static void frame_block(k56flex_client_t *c, const uint8_t *o)
     if (!ensure_rx(c)) { c->failed = 1; return; }
     k56flex_train_samples(sh, exp, 8);           /* advance the mirror */
     nb = k56flex_pcm_rx_frame(&c->rx, o, bits);
-    if (c->fe) { int16_t dl[8]; level_block(c, o, 8, dl); k56flex_rxfe_block(c->fe, c->qfirst, dl, 8, 0); }
     if (nb < 0) { c->failed = 1; return; }
+    if (c->fe) { int16_t dl[8]; level_block(c, o, 8, dl); k56flex_rxfe_block(c->fe, c->qfirst, dl, 8, 0); }
     if (ph == K56T_PRIME) {
         int i;
         ++c->prime_frames;

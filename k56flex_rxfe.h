@@ -6,7 +6,7 @@
  * symbol-rate equalized levels the decision-level client slices and consumes:
  *
  *   energy onset -> correlation against the known P1 probe (timing, fractional phase, gain)
- *   -> cubic resampler with a timing loop (clock offset) -> T-spaced NLMS equalizer trained
+ *   -> windowed-sinc resampler with a timing loop (clock offset) -> T-spaced LS equalizer trained
  *   on the known training stream, then decision-directed -> nearest-level slicer.
  *
  * Everything is our own design, informed by the spec's receive stages (resampler, FIR,
