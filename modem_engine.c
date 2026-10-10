@@ -2284,6 +2284,7 @@ static x2_session_t g_x2;
 static x2_session_stage_t g_x2_last_stage;
 static bool g_x2_receiver_started;
 static bool g_x2_upstream_prepared, g_x2_upstream_started;
+static bool g_x2_reneg_seen;
 static bool g_x2_data_stack_started;
 static unsigned g_x2_last_reversals, g_x2_last_b_reversed;
 
@@ -8359,6 +8360,7 @@ static void me_x2_start_locked(void)
     x2_session_set_payload_source(&g_x2,me_x2_payload_bit,NULL);
     g_x2_data_stack_started=false;
     g_x2_squelch=false;g_x2_squelched_bits=0;g_x2_good_bits=0;
+    g_x2_reneg_seen=false;
     g_x2_upstream_prepared=g_x2_upstream_started=false;
     g_x2_last_stage = X2_FAILED;
     g_x2_last_reversals=g_x2_last_b_reversed=0;
@@ -8415,6 +8417,26 @@ static void me_x2_rx_locked(const int16_t *samples, int count)
             if (log) span_log_set_level(log,me_span_flow_level());
             trace_phase("X2 accepted marker=%02x: upstream 3200 high carrier",g_x2.marker);
         }
+    }
+    if (g_x2_receiver_started && g_v34 && x2_session_renegotiating(&g_x2)
+        && !g_x2_reneg_seen) {
+        /* The Courier's in-data fall forward: its upstream restarts with
+           MP, E and B1 at the rate its new MP selects, so prepare and
+           acquire again, and judge the squelch against the new operating
+           point. */
+        g_x2_reneg_seen=true;
+        g_x2_upstream_prepared=g_x2_upstream_started=false;
+        v34_v90_upstream_rearm(g_v34);
+        g_x2_squelch=false;g_x2_good_bits=0;
+        trace_phase("X2 peer rate change: S from the Courier, answering with the record (renegotiation %u)",
+                    g_x2.renegotiations);
+    }
+    if (!x2_session_renegotiating(&g_x2) && g_x2_reneg_seen && g_x2.stage==X2_PAYLOAD) {
+        g_x2_reneg_seen=false;
+        int downstream=(int)(x2_pcm_frame_bits(&g_x2.data_config)*8000/6);
+        g_report_tx_rate=downstream;g_report_rx_rate=(int)g_x2.upstream_rate_n*2400;
+        trace_phase("X2 rate change complete: index=%u downstream=%d upstream=%u",
+                    g_x2.selected_index,downstream,g_x2.upstream_rate_n*2400);
     }
     if (g_x2_receiver_started && g_v34) {
         /* Courier F87D/W2 and Ie030002 AB24 select the V.34 upstream

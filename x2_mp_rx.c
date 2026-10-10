@@ -75,6 +75,18 @@ static void symbol(x2_mp_rx_t *r,unsigned timing,double re,double im)
         unsigned rotation=(unsigned)((int)lround((angle-base)/90)+8)%4;
         unsigned z=(4-rotation+offset[orbit])%4;
         x2_mp_rx_hypothesis_t *h=&r->hypotheses[timing][p];
+        if(r->four_point) {
+            /* Points at 45 degrees; the same clockwise differential
+             * convention as the 16-point quadrant bits, LSB first, GPA.
+             * Decodes the captured in-data MP 0378/1ffe/0000/0500 and its
+             * acknowledged 8378 (I-modem pair, 50.27/50.33 s). */
+            unsigned quadrant=(unsigned)((int)lround((angle-45)/90)+8)%4;
+            unsigned z4=(4-quadrant)%4;
+            unsigned dibit=(z4+4-h->previous_rotation)%4;h->previous_rotation=z4;
+            for(unsigned k=0;k<2;++k)x2_mp_rx_bit(r,timing,p,
+                x2_descramble_bit(&h->descrambler,(dibit>>k)&1));
+            continue;
+        }
         unsigned nibble=(orbit<<2)|((z+4-h->previous_rotation)%4);h->previous_rotation=z;
         /* Courier C20F/AF63: differential I bits followed by point Q bits,
          * LSB first, through GPA. CRC owns acceptance, not constellation fit. */

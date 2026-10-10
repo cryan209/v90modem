@@ -49,6 +49,12 @@ typedef struct {
     uint16_t downstream_rate_mask;
     unsigned record_position;
     uint8_t record_bits[96];
+    /* In-data fall forward (V.90 9.6.2.1 shape, x2 server response):
+       the Courier sends S for 128T then S-bar/SCR/MP/E; we answer with the
+       RECORD_ALIGN sign pattern and the rate record in the current data
+       banks, then restart DATA_STARTUP in the bank its new MP selects. */
+    unsigned reneg, renegotiations, reneg_ack, reneg_record_started, record_ack_built;
+    x2_pcm_config_t reneg_config;
     x2_get_bit_func_t payload_source;
     void *payload_context;
 } x2_session_t;
@@ -62,6 +68,8 @@ void x2_session_set_payload_source(x2_session_t *session, x2_get_bit_func_t get_
 void x2_session_receive_mp(x2_session_t *session, const x2_mp_t *mp);
 void x2_session_upstream_j(x2_session_t *session);
 void x2_session_upstream_s_bar(x2_session_t *session);
+/* Non-zero while an in-data rate change is running (engine re-arms B1). */
+unsigned x2_session_renegotiating(const x2_session_t *session);
 size_t x2_session_tx(x2_session_t *session, uint8_t *octets, size_t count);
 const char *x2_session_stage_name(x2_session_stage_t stage);
 #endif

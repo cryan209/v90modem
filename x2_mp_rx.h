@@ -21,6 +21,9 @@ typedef struct {
     /* Courier AF2E/AF38 and Ie030002 AACB: twenty decoded ones after
      * qualified MP, on the same timing/phase hypothesis. */
     unsigned e_detected, e_timing, e_phase;
+    /* In-data rate change (Courier, V.90 9.6 Jd bit 48 = 0): MP, MP' and E
+     * on the 4-point constellation, two differential bits per symbol. */
+    unsigned four_point;
     uint64_t e_sample;
 } x2_mp_rx_t;
 void x2_mp_rx_init(x2_mp_rx_t *rx, x2_mp_received_t received, void *context);

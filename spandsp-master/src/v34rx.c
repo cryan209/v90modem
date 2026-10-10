@@ -16344,6 +16344,23 @@ SPAN_DECLARE(int) v34_v90_upstream_rx_acquired(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(void) v34_v90_upstream_rearm(v34_state_t *s)
+{
+    if (!s)
+        return;
+    /*endif*/
+    /* B1 acquisition solves the T/3 equalizer from B1 itself (supervised
+       least squares), so a restart needs no training sequence -- the same
+       state the call started from at the startup E. */
+    s->rx.v90_t3_active = false;
+    s->rx.v90_t3_acquired = false;
+    s->rx.v90_t3_capture_only = false;
+    s->rx.v90_t3_prepared = false;
+    s->rx.v90_t3_lost_run = 0;
+    s->rx.v90_t3_err_base_n = 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(float) v34_v90_upstream_rx_error(v34_state_t *s, float *settled)
 {
     if (settled)

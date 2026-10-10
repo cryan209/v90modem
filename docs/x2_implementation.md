@@ -622,3 +622,58 @@ exposed three things:
 
 Fresh call against committed courier-emu, with both directions exact:
 `artifacts/x2-strict-20261010`.
+
+## In-data fall forward, 10 October 2026
+
+**Correction to the section above: the "13-second collapse" is not a DSP
+stall.** The Courier trains at PCM index 1 (B=19, 32000 bit/s; "53333" is its
+display label). Its in-data rate check (DSP report 0020, then supervisor
+0054) then asks to fall forward, here to index 14. The original server
+(Ie030002, an I-modem pair in courier-emu) completes the change in about
+0.8 s. We did not answer, so the Courier fell back to V.90 9.5.2.1's retrain
+(70 ms silence, then 2400 Hz Tone A with the 1800 Hz guard), which is the
+1800/2400 Hz signal. Answering that Tone A with Tone B does make the Courier
+reverse it, but the retrain is only the fallback.
+
+The exchange, decoded from the I-modem pair and confirmed against our own
+calls. It has V.90 9.6.2.1's shape, with x2 signals in place of Rd/CP:
+
+| direction | signal |
+|---|---|
+| Courier -> server | V.34 S for 128T (40 ms; lines at 320/1920/3520 Hz), S-bar, then 4-point MP `0378 1ffe 0000 0500` (N1=14, N2=13, W2=1ffe) and `8378` (ACK), then E and B1 at the new upstream rate |
+| server -> Courier | on the six-sample grid, our `RECORD_ALIGN` sign pattern (Courier f7d8..f854 matches the signs `0x71c7` four times, then `0x71f8`, within 1.5 s), then the three-word record **in the current data banks**: `733c 7fff 0000` x10, then `f33c` (ACK) once the Courier's MP is in. Then the 6 final samples and 4080 `DATA_STARTUP` samples in the new bank |
+
+The 4-point MP is two bits per symbol, differential with the same clockwise
+quadrant convention as the 16-point startup MP, LSB first, through GPA.
+`x2_mp_rx` now has a `four_point` mode. It decodes the I-modem pair's
+`0378`/`8378` and ours from raw audio, which the 16-point demodulator could
+not.
+
+Implemented: `x2_session.c` detects S then S-bar (or the end of S) in
+PAYLOAD, sends `RECORD_ALIGN` and the record on a frame boundary (no source bit
+is lost), ACKs after the Courier's MP, and on its E runs
+FINAL_TRAINING/DATA_STARTUP into the bank the MP selects. The engine re-arms
+the T/3 upstream (`v34_v90_upstream_rearm()`), so the next prepare and E
+acquire a fresh B1 at the new rate, and it resets the squelch baseline.
+
+Live (committed courier-emu, `artifacts/x2-ff3-20261010`):
+`X2 rate change complete: index=14 downstream=54666 upstream=31200`. B1 is
+re-acquired at 31200 with 100% fit. The call runs on for more than 150 s, and
+the Courier starts a second rate change at 182 s. **Upstream carries 498 of 500
+lines across the change**: one line is lost in the switch (no error control)
+and the last is in flight at hangup.
+
+**Open: downstream at index 14 is corrupted at the Courier**: most lines
+have short error bursts. Things ruled out:
+- Our index-14 banks: they reproduce the I-modem's idle index-14 stream
+  exactly (100% ones after descrambling).
+- Our own transmit tap: it carries the message intact.
+- DC: the I-modem's downstream has the same +7.6 mean.
+- Upstream rate: capping it at 28800, as the I-modem had, changes nothing.
+- Declining: the Courier picks the index itself, and the record's ceiling
+  field does not limit it.
+
+The I-modem pair runs LAPM, so whether the Courier receives index 14 cleanly
+from the original server is still unmeasured. Next step: an I-modem pair
+without error control, or a bit-level comparison of the Courier's received
+downstream decisions.

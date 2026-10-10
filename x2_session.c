@@ -128,10 +128,45 @@ void x2_session_receive_mp(x2_session_t *s,const x2_mp_t *mp)
     if(!n || n>14){s->stage=X2_FAILED;return;}
     s->peer_mp=*mp;s->data_config=c;s->selected_index=(unsigned)index;
     s->upstream_rate_n=n;s->mp_valid=1;
+    if(s->reneg)s->reneg_ack=1;   /* ACK the record from here on */
+}
+static void build_record(x2_session_t *s)
+{
+    uint16_t words[3]={(uint16_t)(0xd000|(s->selected_index<<2)|(s->upstream_rate_n<<6)),
+                       s->downstream_rate_mask,0};
+    if(s->reneg) {
+        /* Ie030002 in-data fall forward (captured I-modem pair, 50.25 s):
+         * 733c x10 then f33c -- our highest PCM index as the ceiling the
+         * Courier selects under, the current upstream N, and bit 15
+         * (ACK) only once its new MP has arrived. Bit 13 (Courier B06E
+         * nonlinear encoding) stays clear: our upstream is linear. */
+        unsigned ceiling=15;
+        while(ceiling>1 && !(s->downstream_rate_mask&(1u<<(ceiling-1))))--ceiling;
+        words[0]=(uint16_t)((s->reneg_ack?0xd000:0x5000)|(ceiling<<2)|(s->upstream_rate_n<<6));
+    }
+    /* Draft 0.33 section 20: W2 advertises THIS endpoint's rate
+     * capabilities. Courier 403 A675..A690 intersects this PCM mask
+     * with its own N1 ceiling for receive data. Copying its upstream
+     * V.34 mask (e.g. 03FE) excludes PCM index 1 and makes A661 return
+     * zero; C573 then reads an instruction instead of a B-table entry. */
+    uint16_t crc=0xffff;unsigned p=0;
+    memset(s->record_bits,0,sizeof(s->record_bits));
+    for(unsigned i=0;i<17;++i)s->record_bits[p++]=1;
+    ++p;
+    for(unsigned j=0;j<3;++j) {
+        for(unsigned i=0;i<16;++i) {
+            unsigned bit=(words[j]>>i)&1;
+            s->record_bits[p++]=(uint8_t)bit;crc=crc_step(crc,bit);
+        }
+        ++p;
+    }
+    for(unsigned i=0;i<16;++i)s->record_bits[p++]=(uint8_t)((crc>>i)&1);
+    s->record_ack_built=s->reneg_ack;
 }
 static int record_bit(void *context)
 {
     x2_session_t *s=context;
+    if(s->record_position==0 && s->reneg && s->record_ack_built!=s->reneg_ack)build_record(s);
     unsigned bit=s->record_bits[s->record_position++];
     if(s->record_position==sizeof(s->record_bits))s->record_position=0;
     return (int)bit;
@@ -174,27 +209,12 @@ static void stage(x2_session_t *s, x2_session_stage_t next)
          * independently from the PCM index. Courier B06E tests bit 13 for
          * nonlinear encoding: keep it clear because the upstream receiver
          * uses a linear constellation (V.34 9.7). */
-        uint16_t words[3]={(uint16_t)(0xd000|(s->selected_index<<2)|(s->upstream_rate_n<<6)),
-                           s->downstream_rate_mask,0};
-        /* Draft 0.33 section 20: W2 advertises THIS endpoint's rate
-         * capabilities. Courier 403 A675..A690 intersects this PCM mask
-         * with its own N1 ceiling for receive data. Copying its upstream
-         * V.34 mask (e.g. 03FE) excludes PCM index 1 and makes A661 return
-         * zero; C573 then reads an instruction instead of a B-table entry. */
-        uint16_t crc=0xffff;unsigned p=0;
-        memset(s->record_bits,0,sizeof(s->record_bits));
-        for(unsigned i=0;i<17;++i)s->record_bits[p++]=1;
-        ++p;
-        for(unsigned j=0;j<3;++j) {
-            for(unsigned i=0;i<16;++i) {
-                unsigned bit=(words[j]>>i)&1;
-                s->record_bits[p++]=(uint8_t)bit;crc=crc_step(crc,bit);
-            }
-            ++p;
-        }
-        for(unsigned i=0;i<16;++i)s->record_bits[p++]=(uint8_t)((crc>>i)&1);
+        build_record(s);
         s->record_position=0;
         x2_pcm_config_t c;training_config(&c);
+        /* In data the record rides the current data banks: the captured
+         * I-modem record decodes in them, not in the training alphabet. */
+        if(s->reneg)c=s->reneg_config;
         if(x2_pcm_tx_init(&s->training_mapper,&c,18,record_bit,s))s->stage=X2_FAILED;
     }
 }
@@ -245,6 +265,21 @@ static void info_bit(x2_session_t *s,x2_info_hypothesis_t *h,unsigned bit)
  * Require sustained coherent S, then its polarity reversal into S-bar.
  * A time limit or S onset alone must not release the J acknowledgement.
  * The 40-sample window adds at most one window of detection latency. */
+/* The Courier opens an in-data rate change (after its rate check measures a
+ * higher PCM index: DSP 0020 reports, then supervisor 0054) with V.34 S for
+ * 128T, S-bar and SCR, then its MP and E -- V.90 9.6.2.1's shape. Its DSP
+ * then waits up to 1.5 s for the server's RECORD_ALIGN sign pattern (eight
+ * --+++- periods then the reversed group; Courier f7d8..f854 matches 0x71c7
+ * four times, then 0x71f8) before falling back to a Tone A retrain. */
+static void begin_renegotiation(x2_session_t *s)
+{
+    if(s->stage!=X2_PAYLOAD || s->reneg || s->symmetric)return;
+    s->reneg=1;s->reneg_ack=0;++s->renegotiations;
+    s->reneg_config=s->data_config;
+    s->mp_valid=0;
+    x2_mp_rx_init(&s->mp_rx,mp_received,s);
+    s->mp_rx.four_point=1;
+}
 static void upstream_s_sample(x2_session_t *s, int16_t sample)
 {
     static const unsigned frequencies[] = {320,1920,3520};
@@ -266,6 +301,7 @@ static void upstream_s_sample(x2_session_t *s, int16_t sample)
        || power[0]<0.08*total || power[1]<0.08*total || power[2]<0.08*total) {
         /* Preserve the last coherent reference across the reversal's short
          * cancellation window, but abandon it after 10 ms without S. */
+        if(s->stage==X2_PAYLOAD && s->s_stable>=32 && s->s_missing==1)begin_renegotiation(s);
         if(++s->s_missing>16)s->s_stable=0;
         return;
     }
@@ -347,6 +383,7 @@ void x2_session_rx(x2_session_t *s,const int16_t *samples,size_t count)
         if(s->stage==X2_TONE_A && s->peer_info_valid)
             phase2_b_sample(s,samples[k],s->tx_samples+k);
         if(s->stage==X2_J && !s->s_bar_seen)upstream_s_sample(s,samples[k]);
+        if(s->stage==X2_PAYLOAD && !s->symmetric && !s->reneg)upstream_s_sample(s,samples[k]);
         if(s->marker_valid||s->stage==X2_FAILED)continue;
         for(i=0;i<40;++i) {
             x2_info_hypothesis_t *h=&s->info_rx[i];
@@ -372,6 +409,11 @@ void x2_session_upstream_j(x2_session_t *s)
 void x2_session_upstream_s_bar(x2_session_t *s)
 {
     if(s && s->stage==X2_J)s->s_bar_seen=1;
+    if(s && s->stage==X2_PAYLOAD)begin_renegotiation(s);
+}
+unsigned x2_session_renegotiating(const x2_session_t *s)
+{
+    return s ? s->reneg : 0;
 }
 size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
 {
@@ -485,8 +527,17 @@ size_t x2_session_tx(x2_session_t *s,uint8_t *octets,size_t count)
             break;
         case X2_DATA_STARTUP:
         case X2_PAYLOAD:
+            if(s->stage==X2_PAYLOAD && s->reneg && s->training_mapper.output_position==6) {
+                /* On the six-sample frame boundary: no source bit is lost. */
+                stage(s,X2_RECORD_ALIGN);
+                code=0xa5;s->stage_samples=1;
+                break;
+            }
             if(x2_pcm_tx_g711(&s->training_mapper,&code,1)!=1)return k;
-            if(s->stage==X2_DATA_STARTUP && n==4079)stage(s,X2_PAYLOAD);
+            if(s->stage==X2_DATA_STARTUP && n==4079) {
+                stage(s,X2_PAYLOAD);
+                s->reneg=0;s->s_stable=0;s->s_missing=0;s->s_samples=0;
+            }
             break;
         case X2_FAILED:break;
         }

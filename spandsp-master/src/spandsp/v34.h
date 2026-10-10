@@ -808,6 +808,10 @@ SPAN_DECLARE(int) v34_v90_prepare_upstream_data(v34_state_t *s,
     timing/equalizer solution from the known B1 frame (9 kHz at 3000 baud,
     9.6 kHz at 3200 baud). */
 SPAN_DECLARE(int) v34_v90_upstream_rx_acquired(v34_state_t *s);
+/* Drop the T/3 upstream lock so the next v34_v90_prepare_upstream_data()
+   restarts capture and v34_begin_rx_data() acquires a fresh B1: an x2
+   in-data rate change ends in E and B1 at the newly selected rate. */
+SPAN_DECLARE(void) v34_v90_upstream_rearm(v34_state_t *s);
 /* Fast decision-error estimate of the V.90/x2 T/3 upstream and the operating
    point it settled at after B1 (0 until settled).  A caller that delivers
    bits without error control uses them to stop passing noise upward. */
