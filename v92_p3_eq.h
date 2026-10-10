@@ -150,6 +150,13 @@ typedef struct {
     int64_t post_seed_symbols;
     int64_t post_seed_agree;
     double post_seed_err2;
+
+    /* v92_p3_eq_refit(): normal equations accumulated over decided
+     * symbols, feed-forward window then decision feedback, as the seed. */
+    int refit_left;                /* symbols still to accumulate; 0 = idle */
+    int refits;                    /* completed refits */
+    double refit_m[V92_P3_EQ_MAX_TAPS + V92_P3_EQ_MAX_FB]
+                  [V92_P3_EQ_MAX_TAPS + V92_P3_EQ_MAX_FB + 1];
 } v92_p3_eq_t;
 
 void v92_p3_eq_default_config(v92_p3_eq_config_t *cfg);
@@ -188,6 +195,16 @@ void v92_p3_eq_set_levels(v92_p3_eq_t *eq, const double *positive, int n);
  * symbols; releases the hold.  k0 may already be past -- the reference is
  * advanced to the symbol produced next.  Agreement statistics restart. */
 void v92_p3_eq_train_from(v92_p3_eq_t *eq, int64_t k0, int n);
+
+/* Solve the taps and decision feedback by least squares over the next n
+ * symbols produced, against their decisions, and replace the adapted ones.
+ * NLMS reaches the least-squares point only slowly when decision-directed:
+ * on slmodemd's TRN2u it sat at the LINEAR equaliser's error (0.040 LU)
+ * while the same structure solved directly reaches 0.019.  The window must
+ * be decision-reliable (TRN2u, whose four levels the adapted equaliser
+ * already separates).  v92_p3_eq_refits() counts completed solves. */
+void v92_p3_eq_refit(v92_p3_eq_t *eq, int n);
+int v92_p3_eq_refits(const v92_p3_eq_t *eq);
 
 /* The 8.5.7 TRN1u reference, +1/-1, for n symbols from its first. */
 void v92_p3_eq_reference(int8_t *ref, int n);

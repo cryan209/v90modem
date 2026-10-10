@@ -1310,6 +1310,12 @@ static double         g_v92_trn2u_err2 = 0.0;
 static double         g_v92_trn2u_lvl_sum[4], g_v92_trn2u_lvl_sum2[4];
 static uint64_t       g_v92_trn2u_lvl_n[4];
 static double         g_v92_trn2u_sigma;           /* last pushed to the CPd design */
+/* One least-squares refit of the Phase 3/4 equaliser on TRN2u (see
+ * v92_p3_eq_refit()); the noise figures above restart when it lands. */
+#define V92_P4_REFIT_SYMBOLS 4000
+#define V92_DATA_REFIT_SYMBOLS 16000  /* data-mode least-squares window */
+static bool           g_v92_p4_refit_armed = false;
+static int            g_v92_p4_refits_seen = 0;
 static double         g_v92_trn2u_pow = 0.0;
 static uint64_t       g_v92_trn2u_nerr = 0;
 static uint64_t       g_v92_trn2u_npow = 0;
@@ -1341,6 +1347,8 @@ static bool           g_v92_upstream_slicer_set = false;
 static double         g_v92_data_levels[V92_P3_EQ_MAX_LEVELS];
 static int            g_v92_data_nlevels = 0;
 static double         g_v92_data_err2 = 0.0;
+/* Window sums for the 10 s y = g d + c fit over decided levels d. */
+static double         g_v92_data_sdd, g_v92_data_syd, g_v92_data_sd, g_v92_data_sy;
 static uint64_t       g_v92_data_nerr = 0;
 static uint8_t        g_v90_data_frame[V90_DATA_FRAME_LEN];
 static int            g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
@@ -5790,14 +5798,22 @@ static void me_v92_data_slicer_locked(void)
         positive[i] = g*cpd->points[0][i]*unit/lu;
     ME_LOG("[ME] V.92 data slicer: equaliser at %+.1f ppm\n",
            v92_p3_eq_ppm(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law]));
+    /* Held for NLMS and timing; v92_p3_eq_refit() re-solves it back to back
+     * in data mode instead (see the data loop).  Frozen taps drifted off
+     * slmodemd's channel at 1.5 DS0 per 10 s (27.6 -> 43.7 DS0 over 120 s,
+     * gain and offset steady) until it hung up; NLMS with the timing loop
+     * on the dense data levels made it worse, while a least-squares solve
+     * every 2 s on the same decisions held the residual at 26-44 for the
+     * whole call, offline on its tap. */
     v92_p3_eq_hold(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law], true);
     v92_p3_eq_set_levels(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law], positive, n);
     memcpy(g_v92_data_levels, positive, (size_t)n*sizeof(positive[0]));
     g_v92_data_nlevels = n;
     g_v92_data_err2 = 0.0;
     g_v92_data_nerr = 0;
+    g_v92_data_sdd = g_v92_data_syd = g_v92_data_sd = g_v92_data_sy = 0.0;
     g_v92_upstream_slicer_set = true;
-    ME_LOG("[ME] V.92 PCM upstream: CPd acknowledged; equaliser frozen, slicing "
+    ME_LOG("[ME] V.92 PCM upstream: CPd acknowledged; equaliser re-solved every 2 s, slicing "
            "on %d data levels (%.3f..%.3f LU), B1u search on its output\n",
            n, n ? positive[0] : 0.0, n ? positive[n - 1] : 0.0);
 }
@@ -5831,17 +5847,40 @@ static void me_v92_b1u_feed_values_locked(const double *values, int n)
     uint64_t before = g_v92_upstream_rx.input_symbols;
 
     for (int i = 0; i < n && g_v92_data_nlevels > 0; i++) {
-        double best = 1e300;
+        double best = 1e300, dec = 0.0;
 
         for (int j = 0; j < g_v92_data_nlevels; j++) {
             double a = fabs(values[i] - g_v92_data_levels[j]);
             double b = fabs(values[i] + g_v92_data_levels[j]);
 
-            if (a < best) best = a;
-            if (b < best) best = b;
+            if (a < best) best = a, dec = g_v92_data_levels[j];
+            if (b < best) best = b, dec = -g_v92_data_levels[j];
         }
         g_v92_data_err2 += best*best;
         g_v92_data_nerr++;
+        g_v92_data_sdd += dec*dec;
+        g_v92_data_syd += values[i]*dec;
+        g_v92_data_sd += dec;
+        g_v92_data_sy += values[i];
+        /* Once every 10 s of data: the frozen equaliser's distance from the
+         * data levels, in DS0 units, so drift shows before LAPM does. */
+        if (g_v92_data_nerr % 80000 == 0) {
+            double lu = me_v92_lu_rx_locked();
+
+            double nn = 80000.0;
+            double gain = (nn*g_v92_data_syd - g_v92_data_sd*g_v92_data_sy)
+                        /(nn*g_v92_data_sdd - g_v92_data_sd*g_v92_data_sd + 1e-30);
+            double offset = (g_v92_data_sy - gain*g_v92_data_sd)/nn;
+
+            ME_LOG("[ME] V.92 upstream data: rms distance to nearest level %.1f DS0 "
+                   "(%.0f s, %llu frames rejected; fit gain %.4f offset %.1f DS0)\n",
+                   sqrt(g_v92_data_err2/80000.0)*lu,
+                   g_v92_data_nerr/8000.0,
+                   (unsigned long long)g_v92_upstream_rx.rejected_frames,
+                   gain, offset*lu);
+            g_v92_data_err2 = 0.0;
+            g_v92_data_sdd = g_v92_data_syd = g_v92_data_sd = g_v92_data_sy = 0.0;
+        }
     }
     (void)v92_upstream_b1_rx_feed_values(&g_v92_upstream_rx, values, n);
     /* Once a second while hunting: how close the search is getting. */
@@ -6082,6 +6121,8 @@ static void cleanup_v34_v90_training_locked(void)
     memset(g_v92_trn2u_lvl_sum, 0, sizeof(g_v92_trn2u_lvl_sum));
     memset(g_v92_trn2u_lvl_sum2, 0, sizeof(g_v92_trn2u_lvl_sum2));
     memset(g_v92_trn2u_lvl_n, 0, sizeof(g_v92_trn2u_lvl_n));
+    g_v92_p4_refit_armed = false;
+    g_v92_p4_refits_seen = 0;
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
     g_v92_upstream_eq_mode = false;
@@ -6214,6 +6255,8 @@ static bool restart_v90_phase2_locked(const char *reason)
     memset(g_v92_trn2u_lvl_sum, 0, sizeof(g_v92_trn2u_lvl_sum));
     memset(g_v92_trn2u_lvl_sum2, 0, sizeof(g_v92_trn2u_lvl_sum2));
     memset(g_v92_trn2u_lvl_n, 0, sizeof(g_v92_trn2u_lvl_n));
+    g_v92_p4_refit_armed = false;
+    g_v92_p4_refits_seen = 0;
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
     g_v92_upstream_eq_mode = false;
@@ -9268,6 +9311,8 @@ static void v92_call_state_reset_locked(void)
     memset(g_v92_trn2u_lvl_sum, 0, sizeof(g_v92_trn2u_lvl_sum));
     memset(g_v92_trn2u_lvl_sum2, 0, sizeof(g_v92_trn2u_lvl_sum2));
     memset(g_v92_trn2u_lvl_n, 0, sizeof(g_v92_trn2u_lvl_n));
+    g_v92_p4_refit_armed = false;
+    g_v92_p4_refits_seen = 0;
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
     g_v92_upstream_eq_mode = false;
@@ -12328,6 +12373,11 @@ static void me_v92_p4_eq_mode_locked(void)
     if (g_v92_p4_pam4 || phase >= V90_TX_TRN2D) {
         v92_p3_eq_set_pam4(eq, true);
         v92_p3_eq_hold(eq, false);
+        if (!g_v92_p4_refit_armed) {
+            g_v92_p4_refit_armed = true;
+            g_v92_p4_refits_seen = v92_p3_eq_refits(eq);
+            v92_p3_eq_refit(eq, V92_P4_REFIT_SYMBOLS);
+        }
     } else if (phase >= V90_TX_RI) {
         v92_p3_eq_hold(eq, true);
     }
@@ -15260,6 +15310,21 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                         g_v92_trn2u_lvl_n[lvl]++;
                     }
                     values[k] *= g_v92_trn2u_lu;
+                }
+                if (g_v92_upstream_slicer_set && eq->refit_left == 0)
+                    v92_p3_eq_refit(eq, V92_DATA_REFIT_SYMBOLS);
+                if (!g_v92_upstream_slicer_set
+                    && v92_p3_eq_refits(eq) != g_v92_p4_refits_seen) {
+                    /* The equaliser was just re-solved: what it measured
+                     * before is not the noise the CPd will face. */
+                    g_v92_p4_refits_seen = v92_p3_eq_refits(eq);
+                    g_v92_trn2u_err2 = 0.0;
+                    g_v92_trn2u_nerr = g_v92_trn2u_pushed = 0;
+                    memset(g_v92_trn2u_lvl_sum, 0, sizeof(g_v92_trn2u_lvl_sum));
+                    memset(g_v92_trn2u_lvl_sum2, 0, sizeof(g_v92_trn2u_lvl_sum2));
+                    memset(g_v92_trn2u_lvl_n, 0, sizeof(g_v92_trn2u_lvl_n));
+                    ME_LOG("[ME] V.92 Phase 4: equaliser re-solved by least squares "
+                           "over %d TRN2u symbols\n", V92_P4_REFIT_SYMBOLS);
                 }
                 if (g_v92_trn2u_nerr >= 2000
                     && g_v92_trn2u_nerr - g_v92_trn2u_pushed >= 500) {

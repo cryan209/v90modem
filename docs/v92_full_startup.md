@@ -492,3 +492,45 @@ the distance-based error (0.038 LU), so it is real impairment (slmodemd's
 Not testable on this rig: A-law (d-modem offers only PCMU; a 2905 call came
 up CLEARMODE and dropped at once), and us calling slmodemd in V.92 (its
 answer-mode JM offers no PCM).
+
+## 2026-10-11: slmodemd upstream 24000 -> 32000
+
+What bound 24000 was our receiver, not the line. On the `v92lu-pay1` tap,
+TRN2u fitted offline:
+
+| fit | residual |
+|---|---|
+| best 63-tap linear equaliser (receiver) | 55.7 DS0 (0.040 LU) |
+| linear channel model (transmitter-side bound) | 21.6 DS0 |
+| least-squares DFE, 63 + 8 taps | 26.8 DS0 (0.019 LU) |
+
+The engine's equaliser has that DFE structure (8 feedback taps) but its
+decision-directed NLMS had stopped at the LINEAR equaliser's error (53).
+Two changes, both receiver-only:
+
+1. `v92_p3_eq_refit()` solves the feed-forward and feedback taps by least
+   squares over a window of decided symbols, the same rows as the TRN1u
+   seed. The engine runs one over 4000 TRN2u symbols and restarts the noise
+   statistics afterwards, so the CPd is designed from the solved equaliser:
+   sigma 53 -> 26.9, 10 -> 20 points, drn 1 -> 7, **24000 -> 32000**
+   (`Link: DP is V.92, rate: rx 56000, tx 32000`).
+2. **Data mode re-solves every 2 s instead of freezing.** At 32000 the frozen
+   taps drifted off this channel at ~1.5 DS0 per 10 s (27.6 -> 43.7 over
+   120 s; gain and offset steady), rejected frames rose to ~1300 and
+   slmodemd hung up. Re-solving the same structure per window offline held
+   26-44; its feed-forward centroid wanders by about a sample over 100 s
+   (~1 ppm). NLMS with the timing loop on the dense data levels made it
+   WORSE (46.8 by 70 s), and the timing loop alone did nothing. Live with
+   back-to-back 16000-symbol least-squares solves (`v92ls-pay5`): distance
+   to the data levels flat at 26.4-27.2 DS0 for 120 s, **zero rejected
+   frames, 163,700 lines up and 108,600 down with no gaps**.
+
+`[ME] V.92 upstream data:` now logs every 10 s of data: rms distance to the
+nearest level, frames rejected, and a y = g d + c fit (gain, DC offset).
+
+Precoding (Table 30 z2/p1, which slmodemd parses: `prefilterPrecoderPresent`)
+was evaluated and not built: the rate here is bound by Table 30's power
+(the levels must fit within LU_rx's mean square), and a transmit-side
+prefilter's +1.9 dB power penalty eats most of what its lower noise buys
+(modelled 28000 at best with a pessimistic precoder power, against 32000
+from the receiver fixes).

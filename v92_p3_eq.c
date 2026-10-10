@@ -117,26 +117,12 @@ static int reference_next(uint32_t *reg)
 /* Solve (A'A + lambda I) w = A'r by Gaussian elimination.  Row k of A is
  * the ntaps-long window of z starting at k followed by the nfb reference
  * symbols before k (zero before TRN1u: not known, and not TRN1u). */
-static bool least_squares(const double *z, const int8_t *ref, int rows,
-                          int n, int nfb, double fb_scale, double *w)
+/* Solve the accumulated upper-triangular normal equations m (right-hand
+ * side in column dim) in place, with a whisker of ridge. */
+static bool solve_normal(double m[LS_MAX][LS_MAX + 1], int dim, double *w)
 {
-    static double m[LS_MAX][LS_MAX + 1];
-    const int dim = n + nfb;
-    double a[LS_MAX];
     double trace = 0.0;
 
-    memset(m, 0, sizeof(m));
-    for (int k = 0; k < rows; k++) {
-        for (int i = 0; i < n; i++)
-            a[i] = z[k + i];
-        for (int j = 0; j < nfb; j++)
-            a[n + j] = k - 1 - j >= 0 ? ref[k - 1 - j]*fb_scale : 0.0;
-        for (int i = 0; i < dim; i++) {
-            m[i][dim] += a[i]*ref[k];
-            for (int j = i; j < dim; j++)
-                m[i][j] += a[i]*a[j];
-        }
-    }
     for (int i = 0; i < dim; i++) {
         for (int j = 0; j < i; j++)
             m[i][j] = m[j][i];
@@ -174,6 +160,34 @@ static bool least_squares(const double *z, const int8_t *ref, int rows,
     for (int i = 0; i < dim; i++)
         w[i] = m[i][dim]/m[i][i];
     return true;
+}
+
+static void accumulate(double m[LS_MAX][LS_MAX + 1], int dim,
+                       const double *a, double target)
+{
+    for (int i = 0; i < dim; i++) {
+        m[i][dim] += a[i]*target;
+        for (int j = i; j < dim; j++)
+            m[i][j] += a[i]*a[j];
+    }
+}
+
+static bool least_squares(const double *z, const int8_t *ref, int rows,
+                          int n, int nfb, double fb_scale, double *w)
+{
+    static double m[LS_MAX][LS_MAX + 1];
+    const int dim = n + nfb;
+    double a[LS_MAX];
+
+    memset(m, 0, sizeof(m));
+    for (int k = 0; k < rows; k++) {
+        for (int i = 0; i < n; i++)
+            a[i] = z[k + i];
+        for (int j = 0; j < nfb; j++)
+            a[n + j] = k - 1 - j >= 0 ? ref[k - 1 - j]*fb_scale : 0.0;
+        accumulate(m, dim, a, ref[k]);
+    }
+    return solve_normal(m, dim, w);
 }
 
 /* Energy centroid of the taps, in tap positions. */
@@ -319,6 +333,22 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
     } else
         d = y >= 0.0 ? 1 : -1;
     record(eq, y, (int)(d >= 0.0 ? 1 : -1), ref);
+    if (eq->refit_left > 0) {
+        const int dim = n + eq->cfg.nfb;
+        double a[LS_MAX];
+        double w[LS_MAX];
+
+        for (int j = 0; j < n; j++)
+            a[j] = u[j];
+        for (int j = 0; j < eq->cfg.nfb; j++)
+            a[n + j] = eq->dhist[j];
+        accumulate(eq->refit_m, dim, a, d);
+        if (--eq->refit_left == 0 && solve_normal(eq->refit_m, dim, w)) {
+            memcpy(eq->taps, w, (size_t)n*sizeof(double));
+            memcpy(eq->fb, w + n, (size_t)eq->cfg.nfb*sizeof(double));
+            eq->refits++;
+        }
+    }
 
     if (eq->k >= eq->cfg.seed_symbols && eq->hold)
         eq->tau += eq->freq;
@@ -392,10 +422,22 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
     return true;
 }
 
+void v92_p3_eq_refit(v92_p3_eq_t *eq, int n)
+{
+    memset(eq->refit_m, 0, sizeof(eq->refit_m));
+    eq->refit_left = n > 0 ? n : 0;
+}
+
+int v92_p3_eq_refits(const v92_p3_eq_t *eq)
+{
+    return eq->refits;
+}
+
 void v92_p3_eq_hold(v92_p3_eq_t *eq, bool hold)
 {
     eq->hold = hold;
 }
+
 
 void v92_p3_eq_set_pam4(v92_p3_eq_t *eq, bool pam4)
 {
