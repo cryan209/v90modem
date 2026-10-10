@@ -13,6 +13,11 @@ V.8bis preflight for the next call; `ME_K56FLEX=probe` selects the transmit
 probe. Neither is a complete live K56flex data connection: the upstream
 gates are still unrecovered (Draft 0.23, Table 1a and clause 11).
 
+**Read first:** MICA overlay 8E is the V.32/V.32bis datapump, not K56flex.
+Sections below that cite "bank 8E" (the response collector, gate trace,
+2400-baud startup transmitter) describe V.32bis code; see "Overlay 8E is
+MICA's V.32/V.32bis datapump" near the end. The K56flex PCM module is 8C/8D.
+
 ## Implemented
 
 - Shipped level payloads for all 82 (law, pad-group, rate) tables
@@ -1388,9 +1393,45 @@ codec. The fixture supplies coefficients and geometry, so the result is
 verified arithmetic, not a recovered startup waveform. Hardware CONNECT is
 still unverified.
 
-## Startup transmitter as the module configures it (2026-10-10)
+## Overlay 8E is MICA's V.32/V.32bis datapump, not K56flex (2026-10-10)
 
-The K56flex module (overlay 8E) sets up its startup transmitter in three
+**Correction to the section below and to earlier sections that cite "bank
+8E" as K56flex.** Overlay 8E is not loaded by the K56flex branch. 0C7F's
+loader 2BF6 loads module 8C or 8D (by processor role), and that is the
+K56flex PCM module. Overlay 8E (with 8F, or 80/81 when DM EEAC bit 10 is
+set) is loaded by 2C05 from the general answer path at 98F5/1FB6/9DEB. The
+two share the D600 window, so 8E code cannot run while 8C is resident. A
+status bit 8E sets in DM 8F31 is therefore not a K56flex gate source.
+
+What 8E contains is V.32bis (Recommendation V.32bis, 1991):
+
+- its transmitter is fixed at 2400 symbols/s on an 1800 Hz carrier (§2.1);
+- 2 bits a symbol, differential, 4800 bit/s, are the rate-signal
+  format of §5.3 (Table 2 coding);
+- the "training word" 8990 packs Table 5's rate signal R LSB-first (B4, B7,
+  B8, B11, B15 set). 89B0 adds B5, "4800 bit/s enabled";
+- the "response collector" headers 8880 and 888F are the synchronising
+  bits B0-B3, B7, B11, B15 of R (B0-B3 = 0000) and of E (Table 6, B0-B3 =
+  1111);
+- the collector's 5/23 and 18/23 descramblers are V.32's GPA and GPC (§4).
+
+So the 2400-baud startup transmitter below, the E259 gate trace and the
+1D0E/E259 response collector are V.32bis code, verified against the
+original instructions. The arithmetic stands; the K56flex attribution does
+not. The resident 13BE/1402 path that expects an R-format word (1D05,
+8990 with B5 variable) is reached only from 1242, the branch 0C7C takes
+when DM 8FAA bit 0 is CLEAR, i.e. the side that does not load the PCM
+module. It is probably the non-PCM/fallback path, but that is not traced.
+
+The K56flex upstream DATA direction is the client's transmitter. The
+Rockwell K56flex image reports client TX rates up to 33600 (see below), and
+V.90's own upstream is V.34-derived, so V.34 is the likely candidate. Which
+MICA receiver module 8C uses after DC3B's data activation (resident 6582
+runs every cycle) has not been traced.
+
+## Startup transmitter in overlay 8E (V.32bis; see the correction above)
+
+Overlay 8E (V.32bis, see above) sets up its transmitter in three
 places (D698, D6D5, D886), always the same way:
 
 | Call | What it sets (DP118 words) | Source |
@@ -1405,8 +1446,8 @@ The six profile records at PM 8F9C are the V.34 symbol rates at 8 kHz:
 3200 and 3429 baud). The general setup at 18C5 copies the B3CA record into
 words 1F.. and then calls 8F23(word 71) and 94BA(word 72), so the same
 transmitter engine runs at whatever symbol rate and carrier the caller
-negotiated. **Overlay 8E's three K56flex sites alone hard-code profile 0
-(2400 baud) and carrier select 1.** Profile 0 has two carriers:
+negotiated. **Overlay 8E's three sites alone hard-code profile 0 (2400 baud) and
+carrier select 1, as V.32bis requires.** Profile 0 has two carriers:
 select 0 (PM 8FFC, three phasors stepping -120 degrees a symbol) is 1600 Hz,
 and select 1 (PM 9002: 0, -90, 180, +90 degrees) is 1800 Hz. **K56flex passes select
 1, so its startup carrier is 1800 Hz.** 43D1 applies the phasor per symbol;
@@ -1463,10 +1504,9 @@ absolute mapping there. Overlay 8E never copies it, so the K56flex values
 are unconfirmed. Also open: what words 2F..31 and 4E mean,
 the 4A6C source write each symbol, the 92FF zero-symbol prefill (D6AF runs
 18), the cadence from DA51/933B, and how the output ring reaches the codec.
-**This is not the upstream data rate.** With 2 bits a symbol this is a
-4800 bit/s, 4-point (9159, 9159) differential channel: the same constellation
-the receive side slices for the 16/24-bit response and report words. It is
-signalling. The upstream DATA direction is the client's transmitter, which
+**This is not the K56flex upstream data rate.** With 2 bits a symbol this is
+V.32bis's 4800 bit/s differential rate-signal channel, on the (9159, 9159)
+points that the same overlay slices for R and E. The upstream DATA direction is the client's transmitter, which
 MICA receives. The Rockwell K56flex image (kewsast3) reports its TX rate
 from the same $2F28 table as the PCM ladder, whose indices 0..16 are 300 ...
 28800, 31200, 33600. That table is shared with the client's V.34 mode, so it
