@@ -673,7 +673,20 @@ have short error bursts. Things ruled out:
 - Declining: the Courier picks the index itself, and the record's ceiling
   field does not limit it.
 
-The I-modem pair runs LAPM, so whether the Courier receives index 14 cleanly
-from the original server is still unmeasured. Next step: an I-modem pair
-without error control, or a bit-level comparison of the Courier's received
-downstream decisions.
+**Resolved as an emulator limitation, not ours.** An I-modem pair without error
+control (courier-emu HEAD, `&M0` on both ends, a numbered line every second)
+falls forward the same way, from index 8 to 14. The Courier then corrupts the
+original server's index-14 downstream identically:
+- lines sent at index 8 are intact;
+- every line after the change has short error bursts, and then the DTE fills
+  with garbage.
+
+The errors are systematic: the same plaintext turns into the same garbage in
+different lines. That points at a level- or bandwidth-dependent fault in
+courier-emu's emulated receive path (8 to 9.6 kHz reconstruction into the
+AC01 model, band-edge SNR, codec input gain or clipping), consistent with
+courier-emu's own note that 56000 was never reached with the I-modem.
+Evidence: courier-emu worktree `admiring-ramanujan-9d7101`,
+`artifacts/x2-47s-fall-forward/imodem-pair-no-ec/`. Our downstream at
+index 14 behaves exactly like the original server's, so qualifying x2 above
+index 1 needs that emulator fix or real hardware.
