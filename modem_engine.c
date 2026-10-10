@@ -7050,6 +7050,45 @@ static void me_data_rx_first_bit(void)
     }
 }
 
+/* x2 runs without error control (CONNECT .../NONE), so a receiver that has
+   stopped decoding hands noise straight to the DTE: 71 KB of it after the
+   Courier's upstream changed under us at 12.7 s (artifacts/x2-rates-20261010).
+   Squelch on the receiver's own fast decision error against the operating
+   point it settled at after B1, with hysteresis; on recovery the V.14
+   assembler re-hunts for a start bit.  Losing those bits is the honest
+   outcome -- nothing above can tell noise from data. */
+#define ME_X2_SQUELCH_MULT   4.0f   /* drop above this many times the settled error */
+#define ME_X2_RESUME_MULT    2.0f   /* resume below this many times it */
+#define ME_X2_SQUELCH_FLOOR  0.08f  /* never squelch below this error */
+static bool g_x2_squelch;
+static uint64_t g_x2_squelched_bits;
+static uint64_t g_x2_good_bits;
+static bool me_x2_upstream_squelched(void)
+{
+    float settled=0.0f;
+    float err=v34_v90_upstream_rx_error(g_v34,&settled);
+    if(settled<=0.0f)return false;
+    float drop=ME_X2_SQUELCH_MULT*settled, resume=ME_X2_RESUME_MULT*settled;
+    if(drop<ME_X2_SQUELCH_FLOOR)drop=ME_X2_SQUELCH_FLOOR;
+    if(resume<ME_X2_SQUELCH_FLOOR/2)resume=ME_X2_SQUELCH_FLOOR/2;
+    /* The fast estimate flickers below the resume level inside noise, so a
+       resume needs a second of consecutive good decisions. */
+    uint64_t hold=(uint64_t)(g_x2.upstream_rate_n ? g_x2.upstream_rate_n*2400u : 2400u);
+    if(g_x2_squelch)g_x2_good_bits=err<resume ? g_x2_good_bits+1 : 0;
+    if(!g_x2_squelch && err>drop) {
+        g_x2_squelch=true;g_x2_good_bits=0;
+        trace_phase("X2 upstream squelched: decision error %.3f > %.3f (settled %.3f)",err,drop,settled);
+    } else if(g_x2_squelch && g_x2_good_bits>=hold) {
+        g_x2_squelch=false;
+        ds_rx_put_bit(&g_data_stack,-1);   /* re-hunt for a start bit */
+        trace_phase("X2 upstream resumed: decision error %.3f < %.3f after %llu bits",
+                    err,resume,(unsigned long long)g_x2_squelched_bits);
+        g_x2_squelched_bits=0;
+    }
+    if(g_x2_squelch)g_x2_squelched_bits++;
+    return g_x2_squelch;
+}
+
 static void v34_put_bit_cb(void *user_data, int bit)
 {
     (void)user_data;
@@ -7060,6 +7099,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
         if(bit>=0 && !g_x2.symmetric && g_x2_data_stack_started
            && g_x2_upstream_started && g_x2.stage==X2_PAYLOAD
            && g_v34 && v34_v90_upstream_rx_acquired(g_v34)) {
+            if(me_x2_upstream_squelched())return;
             me_data_rx_first_bit();
             ds_rx_put_bit(&g_data_stack,bit);
         }
@@ -8318,6 +8358,7 @@ static void me_x2_start_locked(void)
     x2_sym_link_init(&g_x2.sym,!g_calling_party,me_x2_payload_bit,me_x2_symmetric_bit,NULL);
     x2_session_set_payload_source(&g_x2,me_x2_payload_bit,NULL);
     g_x2_data_stack_started=false;
+    g_x2_squelch=false;g_x2_squelched_bits=0;g_x2_good_bits=0;
     g_x2_upstream_prepared=g_x2_upstream_started=false;
     g_x2_last_stage = X2_FAILED;
     g_x2_last_reversals=g_x2_last_b_reversed=0;

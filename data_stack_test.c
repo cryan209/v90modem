@@ -751,10 +751,15 @@ static void test_detection_fallback_forwards_early_data(void)
         return;
     }
     ds_set_fallback_buffered(&answerer, true);
+    int answerer_zeros = 0;
     for (int tick = 0; tick < 9600 * 3; tick++) {
         ds_rx_put_bit(&answerer, ds_tx_get_bit(&peer));
-        (void) ds_tx_get_bit(&answerer);
+        /* V.42 7.2.1.3: marks until detection ends, then V.14 idle -- no
+           lone 0 for the peer to read as a start bit. */
+        if (ds_tx_get_bit(&answerer) == 0)
+            answerer_zeros++;
     }
+    CHECK(answerer_zeros == 0, "V.42 answerer sends only marks through detection and fallback");
     CHECK(fallback_events == 1 && fallback_sink_at_event == 0
           && rx_sink_len == len && memcmp(rx_sink, msg, (size_t) len) == 0
           && answerer.framing == DS_FRAMING_V14,

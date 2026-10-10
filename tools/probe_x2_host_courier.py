@@ -187,7 +187,23 @@ def main():
               # Courier's DTE is 7E1; retain the untouched wire octets too.
               'host_to_native_complete': args.host_message.encode() in
                   bytes(value & 0x7f for value in serial)}
+    # Exact delivery: after the CONNECT line, the DTE must see the source and
+    # nothing else (a trailing result code such as NO CARRIER is allowed).
+    # "Contains the message" let 71 KB of post-collapse noise pass.
+    def exact_after_connect(stream, payload):
+        start = stream.find(b'CONNECT ')
+        if start < 0:
+            return False
+        body = stream[stream.find(b'\r\n', start) + 2:]
+        for code in (b'\r\nNO CARRIER\r\n', b'NO CARRIER\r\n'):
+            if body.endswith(code):
+                body = body[:-len(code)]
+                break
+        return body == payload
+    checks['host_to_native_exact'] = exact_after_connect(
+        bytes(value & 0x7f for value in serial), args.host_message.encode())
     if args.pty_source:
+        checks['native_to_host_exact'] = exact_after_connect(received, args.message.encode())
         checks['engine_connect'] = b'CONNECT ' in received
         checks['pty_source_queued'] = result['engine']['source_queued'] == len(args.host_message.encode())
     result['checks'] = checks

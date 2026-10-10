@@ -16344,6 +16344,16 @@ SPAN_DECLARE(int) v34_v90_upstream_rx_acquired(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(float) v34_v90_upstream_rx_error(v34_state_t *s, float *settled)
+{
+    if (settled)
+        *settled = (s && s->rx.v90_t3_err_base_n >= V34_V90_T3_ERR_BASE_SYMBOLS)
+                   ? s->rx.v90_t3_err_base : 0.0f;
+    /*endif*/
+    return s ? s->rx.v90_t3_sym_err_fast : 0.0f;
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(int) v34_v90_upstream_carrier_lost(v34_state_t *s)
 {
     if (!s)

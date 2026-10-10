@@ -589,3 +589,36 @@ emulated Courier's NVRAM holds S39 (the V.34 transmit level index) at 0, an
 index its own parser rejects. At its factory S39=8, every rate it offers
 (7200..24000) carries a 3500-byte source exactly. The trace and the
 qualification table are in `docs/x2_v34_upstream_review.md`.
+
+## "Does the data work": the 13-second collapse, 10 October 2026
+
+The harness used to pass a call whose PTY held the source *plus 71 KB of
+noise*. It now also requires exact delivery after the CONNECT line in both
+directions (`native_to_host_exact`, `host_to_native_exact`). Those checks
+exposed three things:
+
+- **The collapse is the emulated Courier's DSP stalling, not a protocol
+  event.** From exactly 46.92 s after emulator start, in every run (every
+  rate, the 6 October runs, every engine build), the Courier's transmit audio
+  repeats one 40-sample block exactly: the 1800/2400 Hz lines are its 200 Hz
+  harmonics. Its DSP sits in the `IDLE` at 80FA, waiting for a serial-port
+  interrupt that never comes (the idle itself is the normal empty-ring wait).
+  Its data stream to the supervisor stops at the same point. Nothing on the
+  wire asks for a retrain or renegotiation, so there is nothing for our side
+  to answer. The cause is inside courier-emu and still open. Calls are clean
+  up to that point (13 s of data at 24000 here).
+- **Squelch.** x2 runs without error control, so a receiver that has stopped
+  decoding handed noise straight to the DTE. The x2 path now stops delivering
+  when the T/3 receiver's fast decision error exceeds 4x the level it settled
+  at after B1 (floor 0.08). It resumes only after one second of decisions
+  below 2x, and the V.14 assembler then re-hunts for a start bit. New
+  accessor: `v34_v90_upstream_rx_error()`.
+- **Stray leading byte downstream.** Detection's T400 expires inside
+  `v42_tx_bit()`, and the bit returned from that call came from the abandoned
+  entity's freshly reset HDLC transmitter: a lone 0. The Courier read it as a
+  start bit and printed `0xFF` before the first character. The answerer now
+  sends mark for that bit (V.42 7.2.1.3), and `data_stack_test` checks that
+  it sends marks only.
+
+Fresh call against committed courier-emu, with both directions exact:
+`artifacts/x2-strict-20261010`.

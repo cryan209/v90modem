@@ -629,6 +629,13 @@ int ds_tx_get_bit(data_stack_t *s)
             if (path && *path) dump = fopen(path, "w");
         }
         bit = s->v42 ? v42_tx_bit(s->v42) : 1;
+        /* Detection can conclude inside that call (T400 runs on the bit
+           clock).  The bit it then returns belongs to an entity that has just
+           given up -- a lone 0 that a non-error-correcting peer reads as a
+           start bit and delivers as 0xFF before the first real character.
+           V.42 7.2.1.3: the answerer sends marks until detection ends. */
+        if (s->demote_pending)
+            bit = 1;
         if (dump) fputc(bit ? '1' : '0', dump);
         return bit;
     }
