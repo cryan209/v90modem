@@ -209,3 +209,37 @@ suite run on this date. Interop claims come from the dated entries in
 
 Steps 2-4 are mostly integration of DSP that already exists and is tested.
 Steps 6-8 are where the open signal-processing problems are.
+
+## CPU per line, measured live (2026-10-10)
+
+One live V.90 call against the d-modem/slmodemd rig, from tower: `main` at
+175ccb33, `-O2 -g`, `--verbose`, μ-law, `CONNECT 54666` down / 31200 up, 128 s
+of bidirectional payload (13429 U-lines, 43141 D-lines). Tower is a Ryzen 7
+5700X (8 cores, 16 threads) with other load on it (load average ~3).
+`tools/soak/cpu_sampler.py` read every thread's utime+stime from `/proc`
+every 0.5 s. Phases are aligned to the server log's wall clock.
+
+| Window | Duration | CPU (% of one core) |
+|---|---|---|
+| Registered, idle | 49 s | 0.3 |
+| V.8 | 6.6 s | 0.5 |
+| Phase 2-4 training | 21.1 s | 29.1 average |
+| Data mode, both directions | 128 s | 6.6 (6.3 in the steady 100 s) |
+
+- **The real-time work is cheap.** The engine runs in pjmedia's `clock`
+  thread, at 5-6% through training and data and 10% at its peak.
+- **The one burst is the strict live CP worker** (`v90_cp_live_worker`,
+  `modem_engine.c`). It runs at ~98% of a core for the ~3.5 s between TRN2d
+  and the first valid data-mode CP, about 4.3 CPU-s per call. Each attempt
+  re-demodulates the whole buffered waveform: 147200-156080 samples, about
+  18 s of history, at 16 timings. A new attempt starts 320 samples (40 ms)
+  after the last one finishes, so the thread never idles. It is a separate
+  thread, so the media clock was not starved on this call.
+- **Rough capacity.** At 6.3% a line in data mode, about 15 lines per core
+  are steady-state. Call setup costs about 6 CPU-s, 4.3 of them in the CP
+  worker. That only matters when many calls reach Phase 4 together.
+- **Caveats.** This is one call, with verbose logging included, on a shared
+  host. The Ja worker (Phase 3) was ~5% and is not a factor.
+- **If density matters,** bound the CP worker's search to recent waveform
+  rather than all 18 s. The batch search keeps pre-transition CPt on purpose
+  (see the classifier comment), so that change needs its own live A/B.
