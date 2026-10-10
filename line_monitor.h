@@ -46,4 +46,12 @@ float lm_bands_dbm0(float *rx, float *tx);
 /* The ATY11 page (CR LF line ends, no final OK). */
 int lm_format_bands(char *out, size_t len);
 
+/* Passive GUI taps; datapump bytes are eight consecutive LSB-first line bits
+   (V.14 §6 / V.42 §7), not DTE characters or decoded LAPM frames. */
+void lm_gui_enable(void);
+void lm_wire_bit(int dir, int bit);
+void lm_qam(float re, float im, bool decision);
+void lm_event(const char *text);
+int lm_gui_json(char *out, size_t size);
+
 #endif

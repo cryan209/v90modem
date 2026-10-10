@@ -24,12 +24,28 @@ typedef struct {
 } lm_ring_t;
 
 static lm_ring_t rings[2];
+static bool gui_enabled;
+static uint8_t wire[2][256], pcm[2][256];
+static uint64_t wire_count[2], pcm_count[2];
+static unsigned partial[2], partial_bits[2];
+static float iq[2][256][2];
+static uint64_t iq_count[2];
+static char events[16][192];
+static uint64_t event_count, gui_epoch;
+
 static pthread_mutex_t lm_mtx = PTHREAD_MUTEX_INITIALIZER;
 
 void lm_reset(void)
 {
     pthread_mutex_lock(&lm_mtx);
     memset(rings, 0, sizeof(rings));
+    memset(wire_count, 0, sizeof(wire_count));
+    memset(pcm_count, 0, sizeof(pcm_count));
+    memset(partial, 0, sizeof(partial));
+    memset(partial_bits, 0, sizeof(partial_bits));
+    memset(iq_count, 0, sizeof(iq_count));
+    event_count = 0;
+    gui_epoch++;
     pthread_mutex_unlock(&lm_mtx);
 }
 
@@ -57,8 +73,10 @@ void lm_feed_g711(int dir, const uint8_t *codewords, int len, bool alaw)
     if (!codewords || len <= 0 || (dir != LM_RX && dir != LM_TX))
         return;
     pthread_mutex_lock(&lm_mtx);
-    for (int i = 0; i < len; i++)
+    for (int i = 0; i < len; i++) {
         put_locked(&rings[dir], alaw ? alaw_to_linear(codewords[i]) : ulaw_to_linear(codewords[i]));
+        if (gui_enabled) pcm[dir][pcm_count[dir]++ % 256] = codewords[i];
+    }
     pthread_mutex_unlock(&lm_mtx);
 }
 
@@ -255,4 +273,84 @@ int lm_format_bands(char *out, size_t len)
     level(&s, lm_level_dbm0(LM_TX, &tot) ? tot : -99.0f);
     put(&s, " dBm0\r\n");
     return (int) s.used;
+}
+
+/* All GUI storage is bounded. No I/O or analysis runs on the media clock. */
+void lm_gui_enable(void) { gui_enabled = true; }
+void lm_wire_bit(int dir, int bit)
+{
+    if (!gui_enabled || (bit != 0 && bit != 1) || dir < 0 || dir > 1) return;
+    pthread_mutex_lock(&lm_mtx);
+    partial[dir] |= (unsigned)bit << partial_bits[dir];
+    if (++partial_bits[dir] == 8) {
+        wire[dir][wire_count[dir]++ % 256] = partial[dir];
+        partial[dir] = partial_bits[dir] = 0;
+    }
+    pthread_mutex_unlock(&lm_mtx);
+}
+void lm_qam(float re, float im, bool decision)
+{
+    if (!gui_enabled || !isfinite(re) || !isfinite(im)) return;
+    int d = decision ? 1 : 0;
+    pthread_mutex_lock(&lm_mtx);
+    unsigned i = iq_count[d]++ % 256;
+    iq[d][i][0] = re; iq[d][i][1] = im;
+    pthread_mutex_unlock(&lm_mtx);
+}
+void lm_event(const char *text)
+{
+    if (!gui_enabled) return;
+    pthread_mutex_lock(&lm_mtx);
+    snprintf(events[event_count++ % 16], 192, "%s", text);
+    pthread_mutex_unlock(&lm_mtx);
+}
+int lm_gui_json(char *out, size_t size)
+{
+    size_t at = 0;
+#define ADD(...) do { if (at < size) { int added = snprintf(out+at, size-at, __VA_ARGS__); if (added > 0) at += (size_t)added; } } while (0)
+    pthread_mutex_lock(&lm_mtx);
+    ADD("\"epoch\":%llu,\"audio\":[", (unsigned long long)gui_epoch);
+    for (int d = 0; d < 2; d++) {
+        int n = rings[d].fed < 512 ? rings[d].fed : 512;
+        ADD("%s[", d ? "," : "");
+        for (int i = 0; i < n; i++) ADD("%s%d", i ? "," : "", rings[d].buf[(rings[d].wr-n+i+RING)%RING]);
+        ADD("]");
+    }
+    ADD("],\"wire\":[");
+    for (int d = 0; d < 2; d++) {
+        uint64_t n = wire_count[d] < 256 ? wire_count[d] : 256;
+        ADD("%s{\"count\":%llu,\"hex\":\"", d ? "," : "", (unsigned long long)wire_count[d]);
+        for (uint64_t i = wire_count[d]-n; i < wire_count[d]; i++) ADD("%02x", wire[d][i%256]);
+        ADD("\"}");
+    }
+    ADD("],\"pcm\":[");
+    for (int d = 0; d < 2; d++) {
+        uint64_t n = pcm_count[d] < 256 ? pcm_count[d] : 256;
+        ADD("%s{\"count\":%llu,\"hex\":\"", d ? "," : "", (unsigned long long)pcm_count[d]);
+        for (uint64_t i = pcm_count[d]-n; i < pcm_count[d]; i++) ADD("%02x", pcm[d][i%256]);
+        ADD("\"}");
+    }
+    ADD("],\"iq\":[");
+    for (int d = 0; d < 2; d++) {
+        uint64_t n = iq_count[d] < 256 ? iq_count[d] : 256;
+        ADD("%s[", d ? "," : "");
+        for (uint64_t i = iq_count[d]-n; i < iq_count[d]; i++)
+            ADD("%s[%.5g,%.5g]", i > iq_count[d]-n ? "," : "", iq[d][i%256][0], iq[d][i%256][1]);
+        ADD("]");
+    }
+    ADD("],\"event_count\":%llu,\"events\":[", (unsigned long long)event_count);
+    uint64_t n = event_count < 16 ? event_count : 16;
+    for (uint64_t i = event_count-n; i < event_count; i++) {
+        ADD("%s\"", i > event_count-n ? "," : "");
+        for (const unsigned char *c = (unsigned char *)events[i%16]; *c; c++) {
+            if (*c == '"' || *c == '\\') ADD("\\%c", *c);
+            else if (*c >= 32 && *c < 127) ADD("%c", *c);
+            else ADD(" ");
+        }
+        ADD("\"");
+    }
+    ADD("]");
+    pthread_mutex_unlock(&lm_mtx);
+#undef ADD
+    return at < size ? (int)at : -1;
 }

@@ -8,6 +8,15 @@ answers the call, performs V.90 digital modem negotiation over the G.711 μ-law 
 stream, and bridges the resulting data connection to a PTY (virtual serial port) or
 TCP socket.
 
+## Live GUI
+
+Run `./sip_v90_modem --gui` with your usual SIP options for the native macOS
+console, or use `--gui-web` for a local browser. It shows live RX/TX waveforms,
+QAM/TCM constellations, adjustable line-derived eyes, separate datapump/DS0 byte
+views, AT control, serial payload, and training transitions. Histories are
+bounded in memory; no diagnostic recordings accumulate on disk.
+See [GUI mode](docs/gui_mode.md) for launch options, tap locations and plot limits.
+
 ## Architecture
 
 ```

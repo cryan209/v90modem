@@ -26,6 +26,9 @@
 #include "modem_engine.h"
 #include "data_interface.h"
 #include "v250_ctl.h"
+#include "line_monitor.h"
+#include <fcntl.h>
+#include <limits.h>
 
 #include <pjsua-lib/pjsua.h>
 #include <pjmedia-codec/passthrough.h>
@@ -1164,11 +1167,55 @@ static int detect_local_ip_for_host(const char *host, char *buf, size_t buflen)
     return rc;
 }
 
+/* The GUI receives passive snapshots over a loopback UDP socket. Sending is
+ * nonblocking and happens in the control loop, never on the media clock. */
+static int gui_socket = -1;
+static struct sockaddr_in gui_dest;
+static void gui_start_monitor(void)
+{
+    const char *port = getenv("ME_GUI_PORT");
+    if (!port) return;
+    int n = atoi(port);
+    if (n < 1 || n > 65535) return;
+    gui_socket = socket(AF_INET, SOCK_DGRAM, 0);
+    if (gui_socket < 0) return;
+    int send_buffer = 65536;
+    setsockopt(gui_socket, SOL_SOCKET, SO_SNDBUF, &send_buffer, sizeof(send_buffer));
+    fcntl(gui_socket, F_SETFL, O_NONBLOCK);
+    gui_dest.sin_family = AF_INET;
+    gui_dest.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    gui_dest.sin_port = htons(n);
+}
+static void gui_publish(void)
+{
+    static uint64_t last;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now = (uint64_t)ts.tv_sec*1000 + ts.tv_nsec/1000000;
+    if (gui_socket < 0 || now-last < 100) return;
+    last = now;
+    me_diag_snapshot_t d;
+    me_get_diag_snapshot(&d);
+    char buf[48000];
+    int n = snprintf(buf, sizeof(buf),
+        "{\"state\":%d,\"modulation\":%d,\"v92\":%d,\"law\":%d,"
+        "\"rx_signal\":\"%s\",\"tx_signal\":\"%s\",\"rx_baud\":%d,\"tx_baud\":%d,"
+        "\"data_ready\":%d,\"elapsed\":%llu,", d.state, d.modulation, d.v92_active, d.law,
+        d.rx_signal, d.tx_signal, d.rx_baud, d.tx_baud, d.data_ready,
+        (unsigned long long)d.phase_elapsed_ms);
+    int extra = lm_gui_json(buf+n, sizeof(buf)-(size_t)n-2);
+    if (extra < 0) return;
+    n += extra;
+    buf[n++] = '}';
+    sendto(gui_socket, buf, n, 0, (struct sockaddr *)&gui_dest, sizeof(gui_dest));
+}
+
 static void print_usage(FILE *f, const char *argv0)
 {
     fprintf(f,
         "Usage: %s [--sip-server host] [--username u] [--password p]\n"
         "          [--pty-link path | --control-link path --data-link path]\n"
+        "          [--gui | --gui-web] (native macOS / browser signal monitor)\n"
         "          [--local-port port] [--rtp-port port]\n"
         "          [--bind-addr ip] [--mode x2|x2-symm|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92] [--verbose]\n"
         "          [--auto-answer rings] [--connect-timeout seconds] [--profile file]\n"
@@ -1219,6 +1266,25 @@ int main(int argc, char *argv[])
     int         local_port  = 5060;
     int         rtp_port    = 0;
     pj_bool_t   aud_subsys_inited = PJ_FALSE;
+
+    /* Hand GUI ownership to the local launcher before starting SIP threads. */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--gui") && strcmp(argv[i], "--gui-web")) continue;
+        char executable[PATH_MAX], script[PATH_MAX];
+        if (!realpath(argv[0], executable)) { perror("--gui executable"); return 2; }
+        char *slash = strrchr(executable, '/');
+        if (!slash) return 2;
+        *slash = 0;
+        snprintf(script, sizeof(script), "%s/tools/modem_gui.py", executable);
+        char **args = calloc((size_t)argc+4, sizeof(char *));
+        if (!args) return 2;
+        args[0] = "python3"; args[1] = script;
+        int at = 2;
+        if (!strcmp(argv[i], "--gui-web")) args[at++] = "--web";
+        for (int j = 0; j < argc; j++) if (j != i) args[at++] = argv[j];
+        execvp(args[0], args);
+        perror("--gui python3 launcher"); free(args); return 2;
+    }
 
     /* Parse command-line arguments.  An unknown flag, or one missing its
        value, is an error: silently ignoring them is how --pty (for
@@ -1539,7 +1605,9 @@ int main(int argc, char *argv[])
     log_modem_diag_snapshot("startup");
 
     /* ── Main event loop ─────────────────────────────────────────── */
+    gui_start_monitor();
     while (g_running) {
+        gui_publish();
         me_state_t state_now;
 
         /* Poll for PJSIP events (10 ms tick) */
@@ -1692,6 +1760,7 @@ int main(int argc, char *argv[])
         pjmedia_aud_subsys_shutdown();
     pjsua_destroy();
 
+    if (gui_socket >= 0) close(gui_socket);
     di_close();
     me_destroy();
 

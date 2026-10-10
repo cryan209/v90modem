@@ -163,6 +163,8 @@ def read_all(paths):
 
 
 def classify(name):
+    if name == "ME_GUI_PORT":
+        return "diagnostic"
     if re.search(r"DUMP|_LOG|LOG_|TRACE|DEBUG|_TAP|TAP$|VERBOSE|CAPTURE|STATS|PRINT|_DIAG|DIAG_", name):
         return "diagnostic"
     if re.search(r"AFTER_MS|FORCE|INJECT|DISRUPT|_HOLD|HOLD$|TEST|_PROBE$|SIMULAT", name):

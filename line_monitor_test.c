@@ -87,6 +87,31 @@ int main(void)
     lm_format_bands(page, sizeof(page));
     check(strstr(page, "  3000 -10.0") && strstr(page, "  3900") && strstr(page, "Total"),
           "the page lists every band, 150..3900 Hz, and the totals");
+    /* The GUI sees exact codewords and bit packing without touching DSP. */
+    lm_gui_enable();
+    lm_reset();
+    uint8_t codes[] = {0x00, 0x7f, 0x80, 0xff};
+    lm_feed_g711(LM_RX, codes, 4, false);
+    for (int i = 0; i < 8; i++) lm_wire_bit(LM_TX, (0xa5 >> i) & 1);
+    lm_wire_bit(LM_TX, -1);
+    lm_qam(1.25f, -2.5f, false);
+    lm_qam(2.0f, -3.0f, true);
+    lm_event("TRN \"quoted\" \\ E");
+    char json[48000];
+    check(lm_gui_json(json, sizeof(json)) > 0, "GUI snapshot fits bounded buffer");
+    check(strstr(json, "\"hex\":\"007f80ff\"") != NULL, "GUI preserves exact G.711 octets");
+    check(strstr(json, "\"hex\":\"a5\"") != NULL, "GUI packs line bits LSB first, ignores status codes");
+    check(strstr(json, "[1.25,-2.5]") && strstr(json, "[2,-3]"), "GUI distinguishes measured QAM from decisions");
+    check(strstr(json, "TRN \\\"quoted\\\" \\\\ E") != NULL, "GUI escapes event JSON");
+    check(lm_gui_json(page, 8) == -1, "GUI rejects truncated snapshots");
+    for (int i = 0; i < 257*8; i++) lm_wire_bit(LM_RX, 1);
+    lm_gui_json(json, sizeof(json));
+    check(strstr(json, "\"count\":257") != NULL, "GUI wire ring wraps while retaining total count");
+    lm_wire_bit(LM_TX, 1); /* an incomplete octet must not leak to next call */
+    lm_reset();
+    for (int i = 0; i < 8; i++) lm_wire_bit(LM_TX, 0);
+    lm_gui_json(json, sizeof(json));
+    check(strstr(json, "\"hex\":\"00\"") && !strstr(json, "quoted"), "GUI resets partial bits and events per call");
     printf("%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures, failures == 1 ? "" : "s");
     return failures != 0;
 }

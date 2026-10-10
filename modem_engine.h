@@ -50,6 +50,9 @@ typedef enum {
 } me_law_t;
 
 typedef struct {
+    char rx_signal[64], tx_signal[64];
+    int rx_baud, tx_baud;
+    int data_ready;
     me_state_t state;
     me_modulation_t modulation;
     me_law_t law;

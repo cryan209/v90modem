@@ -609,7 +609,7 @@ static int ds_tx_load(data_stack_t *s)
     return 1;
 }
 
-int ds_tx_get_bit(data_stack_t *s)
+static int ds_tx_get_bit_impl(data_stack_t *s)
 {
     int bit;
 
@@ -652,6 +652,18 @@ int ds_tx_get_bit(data_stack_t *s)
     bit = s->tx_shift & 1;
     s->tx_shift >>= 1;
     s->tx_bits--;
+    return bit;
+}
+
+static void (*wire_observer)(data_stack_t *, int, int);
+void ds_set_wire_observer(void (*observer)(data_stack_t *, int, int))
+{
+    wire_observer = observer;
+}
+int ds_tx_get_bit(data_stack_t *s)
+{
+    int bit = ds_tx_get_bit_impl(s);
+    if (wire_observer) wire_observer(s, 1, bit);
     return bit;
 }
 
@@ -711,6 +723,7 @@ static int ds_v14_rx_bit(data_stack_t *s, int bit)
 
 void ds_rx_put_bit(data_stack_t *s, int bit)
 {
+    if (wire_observer) wire_observer(s, 0, bit);
     FILE *dump = ds_rx_bit_dump();
     int ch;
 

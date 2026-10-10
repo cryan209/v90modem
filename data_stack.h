@@ -192,6 +192,8 @@ void ds_set_v14_rates(data_stack_t *s, int dte_bit_rate, int line_bit_rate);
 
 /* Line side, bit-oriented (V.22bis / V.34 datapump callbacks).
  * Returns 0/1, or DS_TX_NO_DATA in RAW framing when idle. */
+/* Optional process-local passive line observer. Install before media starts. */
+void ds_set_wire_observer(void (*observer)(data_stack_t *, int, int));
 int ds_tx_get_bit(data_stack_t *s);
 void ds_rx_put_bit(data_stack_t *s, int bit);
 

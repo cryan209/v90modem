@@ -274,6 +274,7 @@ static int dring_read(data_ring_t *r, uint8_t *buf, int max) {
 static data_ring_t downstream_ring; /* data → modem → SIP (downstream TX) */
 static data_ring_t upstream_ring;   /* SIP → modem → data (upstream RX) */
 static data_stack_t g_data_stack;
+static bool g_gui_enabled;
 static ds_framing_t g_data_framing = DS_FRAMING_V14;
 /* ME_DATA_FRAMING unset or "auto": run V.42 LAPM (with V.42 detection)
    whenever V.8 agreed it -- our CM offers V8_PROTOCOL_LAPM_V42 and the peer's
@@ -432,6 +433,14 @@ static void trace_phase(const char *fmt, ...)
     if (g_trace_start_ms == 0)
         g_trace_start_ms = now;
 
+    if (g_gui_enabled) {
+        char gui_event[192];
+        va_list gui_ap;
+        va_start(gui_ap, fmt);
+        vsnprintf(gui_event, sizeof(gui_event), fmt, gui_ap);
+        va_end(gui_ap);
+        lm_event(gui_event);
+    }
     if (!me_verbose_enabled())
         return;
 
@@ -473,6 +482,18 @@ static int parse_v8_answer_tone_env(const char *name, int fallback)
             "[ME] Ignoring invalid %s=%s (expected ansam or ansam_pr)\n",
             name, s);
     return fallback;
+}
+
+static void gui_wire_observer(data_stack_t *stack, int dir, int bit)
+{
+    if (stack == &g_data_stack) lm_wire_bit(dir, bit);
+}
+static void gui_qam_report(void *user, const complexf_t *point,
+                           const complexf_t *target, int symbol)
+{
+    (void)user; (void)symbol;
+    if (point) lm_qam(point->re, point->im, false);
+    if (target) lm_qam(target->re, target->im, true);
 }
 
 static const char *v34_rx_stage_name(int stage)
@@ -7286,6 +7307,8 @@ static void start_v22bis_training(void)
                            v22bis_put_bit_cb, NULL);
     if (!g_v22bis)
         ME_LOG("[ME] v22bis_init failed\n");
+    else if (g_gui_enabled)
+        v22bis_rx_set_qam_report_handler(g_v22bis, gui_qam_report, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -7481,6 +7504,7 @@ static void start_v32bis_training(const char *why, int hold_samples)
         ME_LOG("[ME] v32bis_init failed\n");
         return;
     }
+    if (g_gui_enabled) v32bis_set_qam_report_handler(g_v32bis, gui_qam_report, NULL);
     v32bis_set_supported_bit_rates(g_v32bis, rates);
     /* The whole of clause 6, tone phases included, so NT and MT are measured
        on this call's line rather than assumed. */
@@ -7928,6 +7952,7 @@ static void start_v34hdx_training(void)
         me_hangup();
         return;
     }
+    if (g_gui_enabled) v34_set_qam_report_handler(g_v34, gui_qam_report, NULL);
     {
         logging_state_t *log = v34_get_logging_state(g_v34);
 
@@ -8114,6 +8139,7 @@ static void start_v34_training(void)
         start_v22bis_training();
         return;
     }
+    if (g_gui_enabled) v34_set_qam_report_handler(g_v34, gui_qam_report, NULL);
     g_v34_preroll_len = 0;
     if (v90_upstream && g_calling_party)
         me_v90_prepare_info0a_preroll();
@@ -8412,6 +8438,7 @@ static void me_x2_rx_locked(const int16_t *samples, int count)
         if (!g_v34 || v34_x2_prepare_upstream(g_v34,4,1)) {
             g_x2.stage = X2_FAILED;
         } else {
+            if (g_gui_enabled) v34_set_qam_report_handler(g_v34, gui_qam_report, NULL);
             g_x2_receiver_started = true;
             logging_state_t *log = v34_get_logging_state(g_v34);
             if (log) span_log_set_level(log,me_span_flow_level());
@@ -8933,6 +8960,12 @@ static void me_link_publish_tick(int samples)
 
 void me_init(void)
 {
+    /* Launcher-owned diagnostic port; enable bounded passive GUI taps. */
+    g_gui_enabled = getenv("ME_GUI_PORT") != NULL;
+    if (g_gui_enabled) {
+        lm_gui_enable();
+        ds_set_wire_observer(gui_wire_observer);
+    }
     pthread_mutex_init(&g_state_mtx, NULL);
     /* Report the arithmetic libspandsp was built with, not the flag this
        object saw: an A/B of the two datapaths has to be able to confirm from
@@ -11850,7 +11883,9 @@ skip_8k_codewords:
                 /* RX PCM dump during training */
                 {
                     static FILE *rx_dump = NULL;
-                    if (!rx_dump) {
+                    /* GUI diagnostics are bounded in memory; only an explicit
+                     * capture directory enables the legacy disk tap there. */
+                    if (!rx_dump && (!g_gui_enabled || getenv("ME_DUMP_DIR"))) {
                         /* Two engines on one host -- the two ends of a call
                          * between two analogue modems -- would otherwise both
                          * write this one path and neither tap would be of
@@ -13777,7 +13812,7 @@ static void me_tx_audio_impl(int16_t *amp, int len)
                 static FILE *tx_dump = NULL;
                 static int64_t tx_energy = 0;
                 static int tx_count = 0;
-                if (!tx_dump) {
+                if (!tx_dump && (!g_gui_enabled || getenv("ME_DUMP_DIR"))) {
                     const char *dir = getenv("ME_DUMP_DIR");   /* see the RX dump */
                     char path[512];
                     snprintf(path, sizeof path, "%s/v34_tx.raw",
@@ -15482,6 +15517,22 @@ void me_get_diag_snapshot(me_diag_snapshot_t *snapshot)
         return;
 
     pthread_mutex_lock(&g_state_mtx);
+    /* Passive signal names: V.34 §10.1 and V.90 §§9.2–9.4. */
+    snapshot->data_ready = g_data_connect_reported && !g_data_link_failed && g_state == ME_DATA;
+    snapshot->rx_baud = g_v34 ? v34_get_rx_baud_rate(g_v34) : (g_mod == ME_MOD_V22BIS ? 600 : 0);
+    snapshot->tx_baud = g_v34 ? v34_get_tx_baud_rate(g_v34) : (g_mod == ME_MOD_V22BIS ? 600 : 0);
+    snprintf(snapshot->rx_signal, sizeof(snapshot->rx_signal), "%s", g_v34 ? v34_rx_stage_name(v34_get_rx_stage(g_v34)) : "unavailable");
+    const char *tx_signal = g_v90 ? me_v90_tx_stage_name(v90_get_tx_phase(g_v90)) : NULL;
+    snprintf(snapshot->tx_signal, sizeof(snapshot->tx_signal), "%s", tx_signal ? tx_signal : g_v34 ? v34_tx_stage_name(v34_get_tx_stage(g_v34)) : "unavailable");
+    if (g_mod == ME_MOD_V22BIS) {
+        snprintf(snapshot->rx_signal, sizeof(snapshot->rx_signal), "%s",
+                 g_v22bis_trained ? "DATA" : g_v22bis_carrier_seen ? "CARRIER_TRAINING" : "CARRIER_SEARCH");
+        snprintf(snapshot->tx_signal, sizeof(snapshot->tx_signal), "%s", g_state == ME_DATA ? "DATA" : "V22BIS_TRAINING");
+    } else if (g_mod == ME_MOD_V32BIS) {
+        snprintf(snapshot->rx_signal, sizeof(snapshot->rx_signal), "%s", g_v32bis_trained ? "DATA" : "V32BIS_TRAINING");
+        snprintf(snapshot->tx_signal, sizeof(snapshot->tx_signal), "%s", g_state == ME_DATA ? "DATA" : "V32BIS_TRAINING");
+    }
+    if (g_v92_trn2u_active) snprintf(snapshot->rx_signal, sizeof(snapshot->rx_signal), "TRN2u");
     snapshot->state = g_state;
     snapshot->modulation = g_mod;
     snapshot->law = g_law;

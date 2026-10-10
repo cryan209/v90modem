@@ -767,8 +767,34 @@ static void test_detection_fallback_forwards_early_data(void)
     ds_release(&answerer);
 }
 
+static int observed[2][16], observed_count[2];
+static void observe_wire(data_stack_t *s, int dir, int bit)
+{
+    (void)s;
+    if (observed_count[dir] < 16) observed[dir][observed_count[dir]++] = bit;
+}
+static void test_wire_observer(void)
+{
+    data_stack_t tx, rx;
+    uint8_t payload = 0xa5;
+    load_tx(&payload, 1);
+    ds_init(&tx, DS_FRAMING_RAW, pull_byte, NULL, push_byte, NULL);
+    ds_init(&rx, DS_FRAMING_RAW, pull_byte, NULL, push_byte, NULL);
+    ds_set_wire_observer(observe_wire);
+    for (int i = 0; i < 8; i++) ds_rx_put_bit(&rx, ds_tx_get_bit(&tx));
+    CHECK(ds_tx_get_bit(&tx) == DS_TX_NO_DATA, "wire observer preserves idle status");
+    ds_set_wire_observer(NULL);
+    CHECK(observed_count[0] == 8 && observed_count[1] == 9, "wire observer sees each line bit once");
+    int exact = 1;
+    for (int i = 0; i < 8; i++)
+        if (observed[0][i] != ((payload >> i) & 1) || observed[1][i] != observed[0][i]) exact = 0;
+    CHECK(exact && rx_sink_len == 1 && rx_sink[0] == payload, "passive observer leaves payload byte-exact");
+    ds_release(&tx); ds_release(&rx);
+}
+
 int main(void)
 {
+    test_wire_observer();
     test_v14_roundtrip();
     test_v14_idle_is_mark();
     test_v14_deleted_stop_bits();

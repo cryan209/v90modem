@@ -327,6 +327,16 @@ v32bis-test: v32bis_spandsp_test v32bis_duplex_test v32bis-ref-test v32bis-datap
 	./v32bis_spandsp_test
 	./v32bis_duplex_test
 
+# AppKit is optional; ordinary/headless modem builds remain C-only.
+.PHONY: gui gui-smoke-test
+gui-smoke-test: $(TARGET)
+	python3 tools/gui_smoke_test.py
+
+gui: $(TARGET) modem_gui_native
+
+modem_gui_native: tools/modem_gui_native.swift
+	@cache=$$(mktemp -d); trap 'rm -rf "$$cache"' EXIT; swiftc -module-cache-path "$$cache" -O $< -o $@
+
 $(TARGET): $(OBJS) spandsp $(PJ_BUILD_PREREQ)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS)
 
@@ -944,6 +954,8 @@ fixed-compare:
 	fi
 
 clean:
+	rm -f modem_gui_native
+	rm -rf "Modem GUI.app"
 	rm -f audio_sock_modem audio_sock_modem.o slm_bridge v90_engine_peer v90_engine_peer.o engine_pair_test engine_pair_test.o k56flex_client_test.o k56flex_train_test.o k56flex_probe_test.o k56flex_v8bis_test.o k56flex_test.o mica_qam_test.o mica_qam.o x2_test.o x2_sym_test.o v42bis_test.o $(OBJS) $(TARGET) $(TEST_OBJS) $(DECODE_OBJS) $(LEGACY_PCM_DECODE_TEST_OBJS) $(V92_REPLAY_OBJS) $(V92_STARTUP_TEST_OBJS) $(V92_P3_RX_LINE_TEST_OBJS) $(DATA_STACK_TEST_OBJS) $(V44_TEST_OBJS) $(V42_LINK_TEST_OBJS) $(V42_THROUGHPUT_TEST_OBJS) $(FAX_CLASS_TEST_OBJS) $(FAX_CLASS2_TEST_OBJS) $(V34_PHASE2_DECODE_TEST_OBJS) $(V34_MP_TEST_OBJS) $(V34_DATA_TEST_OBJS) $(V34_DUPLEX_TEST_OBJS) $(V56_LOOPBACK_TEST_OBJS) $(AT_TEST_TEST_OBJS) $(PCM_BER_TEST_OBJS) $(V90_ANALOGUE_TX_TEST_OBJS) $(V90_ANALOGUE_RX_TEST_OBJS) $(V92_MH_TEST_OBJS) $(V92_MH_LINE_TEST_OBJS) $(V92_MH_RETRAIN_TEST_OBJS) $(V92_RN_TEST_OBJS) $(V92_RSIG_TEST_OBJS) $(V92_TONE_A_TEST_OBJS) $(TEST_TARGETS) v34_duplex_test *.d tools/*.d $(APPLE_USB_MODEM_PROBE_OBJS) apple_usb_modem_probe apple_usb_modem_audio \
 	    tools/apple_usb_modem_coupler.o apple_usb_modem_coupler
 	rm -f $(V8BIS_TEST_OBJS) $(V8BIS_FSM_TEST_OBJS) $(V8BIS_MODEM_TEST_OBJS) $(V70_STACK_OBJS) per.o h245_schema.o v76_test.o v75_test.o v70_test.o v70_v34_test.o
