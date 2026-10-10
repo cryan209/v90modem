@@ -363,7 +363,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         eye.pcm = (s[eyeDir.indexOfSelectedItem == 0 ? "rx_pcm" : "tx_pcm"] as? Int ?? 0)>0
         eye.baud = Double(s[eyeDir.indexOfSelectedItem == 0 ? "rx_baud" : "tx_baud"] as? Int ?? 3200); if eye.baud < 300 { eye.baud = 3200 }
         eye.carrier = s[eyeDir.indexOfSelectedItem == 0 ? "rx_carrier" : "tx_carrier"] as? Double ?? 0; spectrum.carrier = s["rx_carrier"] as? Double ?? 0
-        carrierLabel.stringValue = eye.carrier > 0 ? String(format:"%@ · %@ %.1f Hz · %g baud",eye.pcm ? "PCM eye" : "QAM eye",eyeDir.indexOfSelectedItem == 0 ? "RX recovered carrier" : "TX nominal carrier",eye.carrier,eye.baud) : "RX carrier: waiting for QAM receiver"
+        carrierLabel.stringValue = eye.pcm ? "PCM eye · 8,000 samples/s" : eye.carrier > 0 ? String(format:"%@ · %@ %.1f Hz · %g baud",eye.pcm ? "PCM eye" : "QAM eye",eyeDir.indexOfSelectedItem == 0 ? "RX recovered carrier" : "TX nominal carrier",eye.carrier,eye.baud) : "RX carrier: waiting for QAM receiver"
         eye.phase = 0
         for plot in [rx,tx,constellation,eye,histogram,spectrum] { plot.needsDisplay = true }
         let values = s["wire"] as? [[String:Any]] ?? []
