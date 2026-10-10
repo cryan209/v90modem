@@ -44,7 +44,7 @@ done
 if lsof -nP -iUDP:5060 >/dev/null 2>&1; then
   echo "CONTROL: UDP 5060 is already held -- refusing to start:"
   lsof -nP -iUDP:5060 2>/dev/null | sed 's/^/  /'
-  echo "CONTROL: pkill -f 'sip_v90_modem\.(fixedpt|floatpt)' if it is a stale arm"
+  echo "CONTROL: . tools/soak/rig_server.sh; rig_server_kill 5060  if it is a stale arm"
   exit 2
 fi
 

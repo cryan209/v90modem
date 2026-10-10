@@ -10,12 +10,13 @@
 #
 #   soak_rounds.sh <rundir> <rounds> <attempts-per-round>
 SP="$(cd "$(dirname "$0")" && pwd)"
+. "$SP/rig_server.sh" || exit 2
 RD="$1"; ROUNDS="${2:-6}"; PER="${3:-6}"
 [ -n "$RD" ] || { echo "usage: soak_rounds.sh <rundir> [rounds] [attempts]" >&2; exit 2; }
 
 for round in $(seq 1 "$ROUNDS"); do
     echo "=== ROUND $round/$ROUNDS $(date -u +%H:%M:%SZ): fresh server"
-    pkill -f sip_v90_modem; sleep 3
+    rig_server_kill 5060; sleep 3
     RDIR="$RD/round$round"; mkdir -p "$RDIR/tap"
     ME_V34_DATA_CARRIER_TRACK=0 SIP_FORCE_PCMU=1 VPCM_ME_VERBOSE=1 \
         ME_V90_UPSTREAM_MAX_BPS=9600 VPCM_G711_TAP_DIR="$RDIR/tap" \

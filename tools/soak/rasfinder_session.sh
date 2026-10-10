@@ -14,6 +14,7 @@
 # (Ctrl-] detaches and leaves the call up.)  Environment as rasfinder_call.sh:
 # RF_EXT (default 3999, the RasFinder hunt group), RF_USER, RF_PTY; ME_/V34_/V90_/V42_ pass through.
 set -u
+. "$(cd "$(dirname "$0")" && pwd)/rig_server.sh" || exit 2
 DIR=${1:?usage: rasfinder_session.sh <artifact-dir> [max-seconds]}
 MAX=${2:-1800}
 EXT=${RF_EXT:-3999}
@@ -32,7 +33,7 @@ if [ -z "${SIP_FORCE_PCMU:-}" ] && [ -z "${SIP_FORCE_PCMA:-}" ]; then
         *)        export SIP_FORCE_PCMU=1 ;;
     esac
 fi
-if pgrep -x sip_v90_modem >/dev/null && pgrep -fl "local-port $PORT" >/dev/null 2>&1; then
+if [ -n "$(rig_server_pids "$PORT")" ]; then
     echo "rasfinder_session: a server already holds port $PORT" >&2
     exit 1
 fi

@@ -33,12 +33,13 @@ OUT=${1:?usage: v90_reneg_ab.sh outdir [repeats] [seconds]}
 REPEATS=${2:-3}
 SECS=${3:-600}
 SP="$(cd "$(dirname "$0")" && pwd)"
+. "$SP/rig_server.sh" || exit 2
 ROOT="$(cd "$SP/../.." && pwd)"
 mkdir -p "$OUT"
 
-if pgrep -x sip_v90_modem > /dev/null 2>&1; then
-  echo "CONTROL: a sip_v90_modem is already running -- kill it first:"
-  pgrep -lx sip_v90_modem | sed 's/^/  /'
+if [ -n "$(rig_server_pids 5060)" ]; then
+  echo "CONTROL: a sip_v90_modem already holds SIP port 5060 -- kill it first:"
+  rig_server_pids 5060 | sed "s/^/  pid /"
   exit 1
 fi
 

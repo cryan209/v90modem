@@ -15,6 +15,12 @@
 # V.92 PCM-upstream ignore), ME_*/V34_*/V90_*/... to our server.
 # PAYLOAD=1 sends numbered lines both ways once the call is up and grades them.
 set -u
+# rig_server.sh must sit beside this script (copy both when running it from
+# /root on tower): it stops only the server on SRV_PORT, never the other
+# sip_v90_modem services that share the v90modem-sip container.
+SP="$(cd "$(dirname "$0")" && pwd)"
+. "$SP/rig_server.sh" || exit 2
+SRV_PORT=5074
 NAME=${1:?usage: ORIG=slm|ours slm_call.sh <artifact-dir-name> [hold-seconds]}
 HOLD=${2:-120}
 ORIG=${ORIG:-slm}
@@ -32,11 +38,11 @@ case "$ACCT" in 290[5-9]) LAW=SIP_FORCE_PCMA=1 ;; *) LAW=SIP_FORCE_PCMU=1 ;; esa
 envs=$(env | grep -E '^(ME|V34|V90|V92|VPCM|V42|V44|DS)_' | sed 's/^/-e /' | tr '\n' ' ')
 slmenvs=$(env | grep -E '^(SLM|DM)_[A-Z0-9_]*=' | grep -vE '^(SLM_(ACCT|PEER)|DM_RS_HEADROOM)=' | sed 's/^/-e /' | tr '\n' ' ')
 
-docker exec v90modem-sip sh -c "pkill -x sip_v90_modem; pkill -f '[c]at /tmp/v90slm'; mkdir -p $DIR; true"
+docker exec v90modem-sip sh -c "$(rig_server_kill_cmd $SRV_PORT); pkill -f '[c]at /tmp/v90slm'; mkdir -p $DIR; true"
 docker exec -d $envs -e $LAW -e ME_LAPM_XID_OPTION_OCTETS=auto -e VPCM_G711_TAP_DIR=$DIR \
     v90modem-sip sh -c "cd /root/v90modem && timeout $((HOLD + 60)) ./sip_v90_modem \
         --sip-server asterisk.net.cryan.nz --username $ACCT --password $ACCT \
-        --local-port 5074 --rtp-port 14100 --pty-link /tmp/v90slm --verbose \
+        --local-port $SRV_PORT --rtp-port 14100 --pty-link /tmp/v90slm --verbose \
         > $DIR/server.log 2>&1"
 sleep 6
 # raw and -echo first: in echo mode the tty hands every byte we receive back
@@ -114,7 +120,7 @@ docker exec d-modem sh -c 'cat /tmp/slm.log' > /tmp/slm-peer-$NAME.log 2>/dev/nu
 docker cp /tmp/slm-serial-$NAME.out v90modem-sip:$DIR/peer-serial.out
 docker cp /tmp/slm-peer-$NAME.log v90modem-sip:$DIR/peer.log
 sleep 5
-docker exec v90modem-sip sh -c "pkill -x sip_v90_modem; pkill -f '[c]at /tmp/v90slm'; true"
+docker exec v90modem-sip sh -c "$(rig_server_kill_cmd $SRV_PORT); pkill -f '[c]at /tmp/v90slm'; true"
 docker exec v90modem-sip sh -c "cd $DIR; \
   echo ours: \$(grep -ao 'CONNECT[^\r]*' pty-rx.bin | head -1); \
   echo peer: \$(grep -ao 'CONNECT[^\r]*' peer-serial.out | head -1); \

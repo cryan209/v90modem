@@ -11,6 +11,7 @@
 #
 # The RasFinder rejects close redials: leave 60-90 s between calls.
 set -u
+. "$(cd "$(dirname "$0")" && pwd)/rig_server.sh" || exit 2
 DIR=${1:?usage: rasfinder_call.sh <artifact-dir> [hold-seconds]}
 HOLD=${2:-45}
 EXT=${RF_EXT:-8416}
@@ -35,13 +36,10 @@ if [ -z "${SIP_FORCE_PCMU:-}" ] && [ -z "${SIP_FORCE_PCMA:-}" ]; then
 fi
 
 # A stray server holding the SIP port makes every call die with a short log and
-# no call at all, which reads exactly like the rig refusing to connect.  Note
-# pgrep -f would match this script's own command line.
-if pgrep -x sip_v90_modem >/dev/null; then
-    if pgrep -fl "local-port $PORT" >/dev/null 2>&1; then
-        echo "rasfinder_call: a server already holds port $PORT" >&2
-        exit 1
-    fi
+# no call at all, which reads exactly like the rig refusing to connect.
+if [ -n "$(rig_server_pids "$PORT")" ]; then
+    echo "rasfinder_call: a server already holds port $PORT" >&2
+    exit 1
 fi
 
 # XID compatibility is detected from the peer; 3/4 remain diagnostic overrides.

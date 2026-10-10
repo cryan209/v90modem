@@ -34,6 +34,7 @@ CALLS=${2:-3}
 AFTER=${3:-20000}
 SECS=${4:-105}
 SP="$(cd "$(dirname "$0")" && pwd)"
+. "$SP/rig_server.sh" || exit 2
 mkdir -p "$OUT"
 
 # A stray server from an earlier batch holds the SIP port and every call in
@@ -41,9 +42,9 @@ mkdir -p "$OUT"
 # byte server.log and no call at all, which reads exactly like a rig that is
 # refusing to connect.  That silently burned five of six calls once; fail
 # fast instead.
-if pgrep -x sip_v90_modem > /dev/null 2>&1; then
-  echo "CONTROL: a sip_v90_modem is already running -- kill it first:"
-  pgrep -lx sip_v90_modem | sed 's/^/  /'
+if [ -n "$(rig_server_pids 5060)" ]; then
+  echo "CONTROL: a sip_v90_modem already holds SIP port 5060 -- kill it first:"
+  rig_server_pids 5060 | sed "s/^/  pid /"
   exit 1
 fi
 

@@ -7,6 +7,7 @@
 # answerer CM-wait.  Arms ALTERNATE so a drifting rig cannot masquerade as an
 # effect, and the server is restarted per call so each gets its own G.711 taps.
 set -u
+. "$(cd "$(dirname "$0")" && pwd)/rig_server.sh" || exit 2
 OUT=${OUT:-artifacts/noci-ab-$(date -u +%H%M%SZ)}
 REPEATS=${REPEATS:-3}
 SECS=${SECS:-60}
@@ -17,7 +18,7 @@ for r in $(seq 1 "$REPEATS"); do
     v=0; [ "$arm" = noci ] && v=1
     RUN="$OUT/$arm-r$r"
     mkdir -p "$RUN"
-    pkill -x sip_v90_modem 2>/dev/null; sleep 4
+    rig_server_kill 5060; sleep 4
     VPCM_G711_TAP_DIR="$RUN" nohup ./sip_v90_modem --sip-server asterisk.net.cryan.nz \
         --username 6001 --password 6001 --pty-link /tmp/v90server > "$RUN/server.log" 2>&1 &
     sleep 6
@@ -26,7 +27,7 @@ for r in $(seq 1 "$REPEATS"); do
     echo "== $arm r$r done"
   done
 done
-pkill -x sip_v90_modem 2>/dev/null; sleep 3
+rig_server_kill 5060; sleep 3
 nohup ./sip_v90_modem --sip-server asterisk.net.cryan.nz --username 6001 \
     --password 6001 --pty-link /tmp/v90server > /tmp/v90server.log 2>&1 &
 echo "OUT=$OUT"
