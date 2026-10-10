@@ -32,7 +32,10 @@ SLMODEMD=${SLMODEMD:-/src/slmodemd/slmodemd}
 HEADROOM=${HEADROOM:-0.25}
 PAYLOAD=${PAYLOAD:-}
 PAY_DELAY=${PAY_DELAY:-50}       # seconds from the dial to the first payload line
-DIR=/root/v90modem/artifacts/$NAME
+# SRV_DIR: the tree whose sip_v90_modem is under test.  /root/v90modem also
+# runs a long-lived service; build a candidate elsewhere and point here.
+SRV_DIR=${SRV_DIR:-/root/v90modem}
+DIR=$SRV_DIR/artifacts/$NAME
 case "$ACCT" in 290[5-9]) LAW=SIP_FORCE_PCMA=1 ;; *) LAW=SIP_FORCE_PCMU=1 ;; esac
 
 envs=$(env | grep -E '^(ME|V34|V90|V92|VPCM|V42|V44|DS)_' | sed 's/^/-e /' | tr '\n' ' ')
@@ -40,7 +43,7 @@ slmenvs=$(env | grep -E '^(SLM|DM)_[A-Z0-9_]*=' | grep -vE '^(SLM_(ACCT|PEER)|DM
 
 docker exec v90modem-sip sh -c "$(rig_server_kill_cmd $SRV_PORT); pkill -f '[c]at /tmp/v90slm'; mkdir -p $DIR; true"
 docker exec -d $envs -e $LAW -e ME_LAPM_XID_OPTION_OCTETS=auto -e VPCM_G711_TAP_DIR=$DIR \
-    v90modem-sip sh -c "cd /root/v90modem && timeout $((HOLD + 60)) ./sip_v90_modem \
+    v90modem-sip sh -c "cd $SRV_DIR && timeout $((HOLD + 60)) ./sip_v90_modem \
         --sip-server asterisk.net.cryan.nz --username $ACCT --password $ACCT \
         --local-port $SRV_PORT --rtp-port 14100 --pty-link /tmp/v90slm --verbose \
         > $DIR/server.log 2>&1"

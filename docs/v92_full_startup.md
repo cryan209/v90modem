@@ -452,3 +452,43 @@ separation and backs drn off until 5.4.3's 2^K <= prod(Mi) holds
 keeps CPu a subset of the Phase 3 CP. Result: byte-exact rows unchanged
 (drn 22); the audio rows thin, PCMA from 92/93 to 66/77 points at the same
 drn 22, PCMU to drn 21. The shared V.90 analogue role is not changed.
+
+## 2026-10-11: V.92 PCM upstream against slmodemd, with payload
+
+Live on the tower rig (`tools/soak/slm_call.sh`, slmodemd dialling us; our
+build from a separate tree via the new `SRV_DIR`, because `/root/v90modem`
+also runs a long-lived service):
+
+```sh
+SRV_DIR=/root/v90cpu/v90modem ORIG=slm MS=92,0,300,56000 \
+SLMODEMD=/src/slmodemd/slmodemd_map SLM_V92_PCM_UPSTREAM=1 DM_V92EC_BYPASS=1 \
+ME_MODE=v92 ME_V92_PCM_UPSTREAM=1 PAYLOAD=1 PAY_DELAY=50 ./slm_call.sh <name> 150
+```
+
+`v92lu-pay1`: slmodemd reports `Link: DP is V.92, rate: rx 56000, tx 24000`;
+our B1u locked by decoding, LAPM + V.42bis came up, and **150,564 numbered
+lines arrived upstream and 111,800 downstream with no gaps** until the
+harness hung up at the end of the hold. This is the first V.92 PCM-upstream
+call against a foreign modem to carry DTE data.
+
+The first attempt under the LU x G x v convention (`v92lu-r1`) never sent a
+CPd: the Table 30 power bound took every point as equally likely, which on
+slmodemd's quiet upstream (LU_rx 1402) left too few points for drn 1, so the
+peer waited in Phase 4 and retrained to V.90. Table 30's note has the
+analogue modem minimise power at the precoder output, and with Mi = LC each
+class is {p[K], -p[LC-1-K]}, so the power is the mean of
+min(p[K], p[LC-1-K])^2. `v90_build_v92_cpd_frame()` now bounds that. A side
+effect: `v92_startup_test`'s digital side had never reported noise, so it
+designed against sigma = 0 and the densest set now reached the top codec
+levels, which the reconstructed-audio transmitter's tracked-clock
+interpolation cannot carry; `v90_set_v92_upstream_lu()` now takes the
+within-level TRN2u spread too, as the engine measures it.
+
+24000 is what this rig's upstream supports at the 4-sigma spacing and LU
+power: sigma 53 against LU_rx 1402 (about 28 dB), and here sigma agrees with
+the distance-based error (0.038 LU), so it is real impairment (slmodemd's
+9600 Hz transmit FIR and d-modem's resampler), not codec rounding.
+
+Not testable on this rig: A-law (d-modem offers only PCMU; a 2905 call came
+up CLEARMODE and dropped at once), and us calling slmodemd in V.92 (its
+answer-mode JM offers no PCM).

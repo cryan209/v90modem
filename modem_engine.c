@@ -5949,7 +5949,10 @@ static void v92_live_p4u_frame(void *user_data,
                     }
                 } else {
                     g_v92_upstream_rx_active = false;
-                    ME_LOG("[ME] V.92 PCM-upstream CPd profile cannot arm B1u receiver\n");
+                    ME_LOG("[ME] V.92 PCM-upstream CPd profile cannot arm B1u receiver "
+                           "(noise sigma %.2f DS0, rx rms %.0f)\n",
+                           g_v92_trn2u_sigma,
+                           g_v92_trn2u_npow ? sqrt(g_v92_trn2u_pow/(double)g_v92_trn2u_npow) : 0.0);
                 }
             }
         }

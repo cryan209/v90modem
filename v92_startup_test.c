@@ -373,6 +373,8 @@ static bool phase3_pair_at(bool alaw, bool dil, bool drop_cpd, unsigned audio_ra
     bool p4_started = false;
     double lu_pow = 0.0;           /* received TRN2u power, for LU_rx */
     long lu_n = 0;
+    double lvl_sum[4] = {0}, lvl_sum2[4] = {0};
+    long lvl_n[4] = {0};
     p3_pair_sink_t sink = {.digital = digital};
     bool ja_seen = false, cpt_started = false;
     int ja_hold = -1;
@@ -533,8 +535,29 @@ static bool phase3_pair_at(bool alaw, bool dil, bool drop_cpd, unsigned audio_ra
             double lin = alaw ? alaw_to_linear(u) : ulaw_to_linear(u);
 
             lu_pow += lin*lin;
-            if (++lu_n % 200 == 0)
-                (void)v90_set_v92_upstream_lu(digital, sqrt(lu_pow/(double)lu_n));
+            ++lu_n;
+            /* And the decision noise, as the spread within each of Table
+             * 28's four levels (a fixed per-level offset is not noise). */
+            if (lu_n > 200) {
+                double rms = sqrt(lu_pow/(double)lu_n);
+                int l = (lin >= 0 ? 2 : 0) + (fabs(lin) >= 2.0*rms/sqrt(5.0) ? 1 : 0);
+
+                lvl_sum[l] += lin;
+                lvl_sum2[l] += lin*lin;
+                lvl_n[l]++;
+            }
+            if (lu_n % 200 == 0) {
+                double within = 0.0;
+                long nw = 0;
+
+                for (int l = 0; l < 4; l++) {
+                    if (lvl_n[l] < 2) continue;
+                    within += lvl_sum2[l] - lvl_sum[l]*lvl_sum[l]/lvl_n[l];
+                    nw += lvl_n[l];
+                }
+                (void)v90_set_v92_upstream_lu(digital, sqrt(lu_pow/(double)lu_n),
+                                              nw ? sqrt(fmax(within, 0.0)/nw) : 0.0);
+            }
         }
         if (sink.b1_armed) {
             int16_t sample = alaw ? alaw_to_linear(u) : ulaw_to_linear(u);

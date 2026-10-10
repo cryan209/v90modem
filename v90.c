@@ -946,11 +946,12 @@ double v90_get_v92_upstream_ds0_per_unit(const v90_state_t *s)
     return 1.0;
 }
 
-bool v90_set_v92_upstream_lu(v90_state_t *s, double lu_rx)
+bool v90_set_v92_upstream_lu(v90_state_t *s, double lu_rx, double sigma_linear)
 {
-    if (!s || !(lu_rx > 1.0) || s->v92_cpd_sent)
+    if (!s || !(lu_rx > 1.0) || !(sigma_linear >= 0.0) || s->v92_cpd_sent)
         return false;
     s->v92_upstream_lu_rx = lu_rx;
+    s->v92_upstream_sigma = sigma_linear;
     return true;
 }
 
@@ -1062,24 +1063,33 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
         out->points[0][points++] = (uint16_t)lround(point);
     }
     /* Table 30: the design assumes G x (prefilter output) at mean square 1
-     * is the analogue modem's desired power, which 3.8 makes LU's.  So keep
-     * the constellation's mean square within the received LU's: drop the
-     * largest points until it is (each magnitude is about equally likely
-     * from the modulus encoder).  This, not G's range, is what bounds the
-     * top level. */
+     * is the analogue modem's desired power, which 3.8 makes LU's, and its
+     * note has the analogue modem minimise the power at the precoder output
+     * symbol by symbol.  With Mi = LC (and 2Mi = LC at k = 3) each
+     * equivalence class holds the positive point p[K] and the negative point
+     * of magnitude p[LC-1-K], and the precoder sends the smaller: the mean
+     * square is over min(p[K], p[LC-1-K]), not over the whole set.  Taking
+     * the whole set (each point equally likely) left too few points on
+     * slmodemd's TRN2u level for even drn 1, so no CPd went out and the
+     * peer retrained out of Phase 4.  Drop the largest points until that
+     * mean square is within the received LU's.  This, not G's range, is
+     * what bounds the top level. */
     if (s->v92_upstream_lu_rx > 1.0) {
         double unit = s->v92_upstream_lu_rx*(double)out->gain_q0_16/(4.0*65536.0);
         double lu = s->v92_upstream_lu_rx;
 
         while (points > 8) {
+            int lc = points & ~1;          /* the LC the frame will carry */
             double ms = 0.0;
 
-            for (int i = 0; i < points; i++) {
-                double level = unit*out->points[0][i];
+            for (int i = 0; i < lc; i++) {
+                double a = out->points[0][i];
+                double b = out->points[0][lc - 1 - i];
+                double level = unit*(a < b ? a : b);
 
                 ms += level*level;
             }
-            if (ms/points <= lu*lu)
+            if (ms/lc <= lu*lu)
                 break;
             points--;
         }

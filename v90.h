@@ -474,11 +474,13 @@ bool v90_set_v92_cpd_profile(v90_state_t *s,
 bool v90_set_v92_upstream_noise(v90_state_t *s, double sigma_linear,
                                 double lu_rx);
 
-/* The received TRN2u rms, LU_rx, alone (the profile's drn is kept).  V.92
- * Table 30 has the analogue modem transmit LU x G x v, so a point reaches
- * the network ADC as LU_rx x G x point: without LU_rx the CPd cannot put
- * its points on codec levels.  Ignored once a CPd has been sent. */
-bool v90_set_v92_upstream_lu(v90_state_t *s, double lu_rx);
+/* The received TRN2u rms, LU_rx, and its decision noise, keeping the
+ * profile's drn (v90_set_v92_upstream_noise() asks for the most the moduli
+ * carry instead).  V.92 Table 30 has the analogue modem transmit LU x G x v,
+ * so a point reaches the network ADC as LU_rx x G x point: without LU_rx the
+ * CPd cannot put its points on codec levels, and without sigma it packs
+ * them as densely as the codec allows.  Ignored once a CPd has been sent. */
+bool v90_set_v92_upstream_lu(v90_state_t *s, double lu_rx, double sigma_linear);
 
 /* DS0 linear units per unit of G x point in the CPd this context builds:
  * LU_rx once measured, else 1.  What the B1u/data decoder's input has to be
