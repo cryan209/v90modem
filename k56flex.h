@@ -310,6 +310,26 @@ int k56flex_feedback_startup_samples(uint16_t state[128], unsigned symbols,
                                     const int16_t *banks, unsigned bank_words,
                                     int16_t output[128], unsigned *output_cursor);
 void k56flex_feedback_startup_symbol(uint16_t state[128], int differential);
+/* K56flex startup transmitter as the module configures it (overlay 8E
+ * D698/D6D5/D886): 8F23 profile 0 (2400 baud, 10 samples per 3 symbols),
+ * 94BA carrier select 1 (1800 Hz), 82B4 history clear, 83A3 overlay 0x11
+ * banks. Per symbol: 90FF, 97A2|97A8, 97C3, 43D1, 9367, 8270 (one symbol).
+ * Width, producer, mapping, amplitude (3E) and gain (11) are caller inputs:
+ * the module's settings for them are not yet traced. 4A6C is not run. */
+typedef struct {
+    uint16_t state[128];        /* DP118 words; 13/2D/2E hold PM addresses */
+    int16_t history[64];        /* 9367 ring, logical order */
+    int16_t output[128];        /* 8270 ring, logical order */
+    unsigned history_write, history_read, output_write;
+    unsigned producer, differential;
+    uint32_t samples;           /* the external counter at DM 8EEA */
+} k56flex_startup_tx_t;
+int k56flex_startup_tx_init(k56flex_startup_tx_t *tx, unsigned width,
+                            unsigned producer, unsigned differential,
+                            uint16_t amplitude, uint16_t gain);
+/* One symbol: 3 or 4 samples into pcm[], or -1 (state unchanged). */
+int k56flex_startup_tx_symbol(k56flex_startup_tx_t *tx, uint16_t word,
+                              int16_t pcm[4], int *consumed);
 
 /* 9320 preset installation and 4A6C phase-cycle writer, DP118, SPM=1.
  * Original PM650C's eleven presets and PM6490 carrier pairs. Emit returns

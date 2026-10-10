@@ -46,7 +46,7 @@ def main():
                     consumed=native.k56flex_feedback_startup_take(state,word,producer)
                     assert consumed==int(width>remaining)
                     run(0x7240)
-                    for offset in [1,2,4,7,8,0x79]:
+                    for offset in [1,2,4,7,8,0x12,0x79]:
                         assert cpu.data(0x8c00+offset)==state[offset],(producer,width,remaining,repeat,hex(offset),cpu.data(0x8c00+offset),state[offset])
                     cases.append(dict(producer=producer,width=width,remaining=remaining,input=word,symbol=state[7],consumed=consumed))
     report=dict(production_source_sha256=hashlib.sha256((repo/'k56flex.c').read_bytes()).hexdigest(),cases=cases,comparisons=len(cases),limitations=__doc__,

@@ -1274,6 +1274,65 @@ int k56flex_feedback_startup_samples(uint16_t state[128], unsigned symbols,
     return count;
 }
 
+int k56flex_startup_tx_init(k56flex_startup_tx_t *tx, unsigned width,
+                            unsigned producer, unsigned differential,
+                            uint16_t amplitude, uint16_t gain)
+{
+    /* Draft 0.23 clause 4.12. The order is the module's own (D698..D6A2). */
+    uint16_t *s=tx->state;
+    if(!width || width>15 || producer>2 || differential>1) return -1;
+    memset(tx,0,sizeof(*tx));
+    tx->producer=producer; tx->differential=differential;
+    s[0x1f]=(uint16_t)width; s[0x3e]=amplitude; s[0x11]=gain;
+    s[0x21]=(uint16_t)(producer==0 ? 0x8f6f : producer==1 ? 0x8f74 : 0xbe68); /* B3CA/B3BD */
+    /* 8F23(0): PM 8F96[0] -> 8F9C, twelve words to 27..32. */
+    memcpy(&s[0x27],k56flex_startup_profile0,sizeof(k56flex_startup_profile0));
+    /* 94BA(1): 2C = select, 2D/2E from PM 8FE4 + 4*2B + 2*2C, 94B6 sets
+     * 13 = 2D, 4F = 2*2B + 2C and 2F..31 from PM 2ECD + 3*4F. */
+    s[0x2c]=1;
+    s[0x2d]=(uint16_t)(K56FLEX_STARTUP_CARRIER_PM+6);
+    s[0x2e]=(uint16_t)(K56FLEX_STARTUP_CARRIER_PM+14);
+    s[0x13]=s[0x2d];
+    s[0x4f]=1;
+    memcpy(&s[0x2f],k56flex_startup_select1_words,sizeof(k56flex_startup_select1_words));
+    /* 82B4: history cleared, read cursor one word behind the writer. */
+    tx->history_write=0; tx->history_read=63;
+    s[0x4c]=0;
+    s[0x4d]=s[0x55]=(uint16_t)(s[0x27]-s[0x28]);
+    s[0x4e]=0x6116;
+    /* 83A3: E504 pointer table, 46-word banks. */
+    s[0x2a]=0xe504; s[0x29]=0x2d;
+    return 0;
+}
+
+int k56flex_startup_tx_symbol(k56flex_startup_tx_t *tx, uint16_t word,
+                              int16_t pcm[4], int *consumed)
+{
+    k56flex_startup_tx_t next=*tx;
+    int16_t pair[2];
+    unsigned start=next.output_write,carrier;
+    int used,count;
+    if(next.state[0x13]<K56FLEX_STARTUP_CARRIER_PM) return -1;
+    carrier=next.state[0x13]-K56FLEX_STARTUP_CARRIER_PM;
+    if(carrier+1>=sizeof(k56flex_startup_carriers)/sizeof(k56flex_startup_carriers[0])) return -1;
+    used=k56flex_feedback_startup_take(next.state,word,next.producer);
+    if(used<0) return -1;
+    k56flex_feedback_startup_symbol(next.state,next.differential);
+    pair[0]=(int16_t)next.state[0x0f]; pair[1]=(int16_t)next.state[0x10];
+    if(k56flex_feedback_startup_rotate(next.state,pair,&k56flex_startup_carriers[carrier])
+       || k56flex_feedback_startup_output(next.state,pair,next.history,&next.history_write))
+        return -1;
+    next.state[0x0f]=(uint16_t)pair[0]; next.state[0x10]=(uint16_t)pair[1];
+    count=k56flex_feedback_startup_samples(next.state,1,next.history,&next.history_read,
+                                           k56flex_startup_fir_banks,460,
+                                           next.output,&next.output_write);
+    if(count<3 || count>4) return -1;
+    for(int i=0;i<count;++i) pcm[i]=next.output[(start+i)&127];
+    next.samples+=(unsigned)count;
+    *tx=next; *consumed=used;
+    return count;
+}
+
 int k56flex_feedback_startup_phase(uint16_t state[128], unsigned *cursor,
                                   uint16_t *bank_address)
 {
@@ -1383,6 +1442,7 @@ int k56flex_feedback_startup_take(uint16_t state[128], uint16_t input,
     } else bits=(uint32_t)state[1]>>(16-remaining);
     state[7]=(uint16_t)(bits&((1u<<width)-1));
     state[8]=0;
+    state[0x12]=1; /* 9157: scratch for the 1<<width mask, after any producer */
     state[4]=(remaining-width)&15;
     return consumed;
 }

@@ -1387,3 +1387,79 @@ caller that schedules 8270, and how the output ring and DM 8EEA reach the
 codec. The fixture supplies coefficients and geometry, so the result is
 verified arithmetic, not a recovered startup waveform. Hardware CONNECT is
 still unverified.
+
+## Startup transmitter as the module configures it (2026-10-10)
+
+The K56flex module (overlay 8E) sets up its startup transmitter in three
+places (D698, D6D5, D886), always the same way:
+
+| Call | What it sets (DP118 words) | Source |
+|---|---|---|
+| 8F23(0) | 27..32 from profile record 0 | PM 8F96[0] -> 8F9C |
+| 94BA(1) | 2C = 1; 2D/2E carrier start/end; 13 = 2D (94B6); 4F; 2F..31 | PM 8FE4 + 4*2B + 2*2C; PM 2ECD + 3*4F |
+| 82B4 | history ring cleared (base DM 8ED5), 1A = base, 19 one word behind; 4C = 0; 4D = 55 = 27 - 28; 4E = 6116 | |
+| 83A3 | DM E504 + p = base + 46 p for p = 0..(word 27); overlay 0x11 loaded at base (DM 8EEF); 2A = E504, 29 = 2D (46 taps) | |
+
+The six profile records at PM 8F9C are the V.34 symbol rates at 8 kHz:
+10/3, 35/12, 20/7, 8/3, 5/2 and 7/3 samples per symbol (2400, 2743, 2800, 3000,
+3200 and 3429 baud). Other modulations select others (18D2, 4F07, overlay 80);
+**K56flex only ever selects profile 0, 2400 baud.** Profile 0 has two carriers:
+select 0 (PM 8FFC, three phasors stepping -120 degrees a symbol) is 1600 Hz,
+and select 1 (PM 9002: 0, -90, 180, +90 degrees) is 1800 Hz. **K56flex passes select
+1, so its startup carrier is 1800 Hz.** 43D1 applies the phasor per symbol;
+the 10-phase, 23-complex-tap bank in overlay 0x11 does the rest of the
+modulation, so its per-phase sums swing with the carrier. 8F23's record says
+44 taps (2B) and 83A3 overrides it with 46. The final rotor table entry
+(p = 10) is built but never selected.
+
+`k56flex_startup_tx_init()` / `k56flex_startup_tx_symbol()` reproduce that
+setup and the per-symbol chain 90FF, 97A2|97A8, 97C3, 43D1, 9367, 8270, with
+the tables extracted into `k56flex_feedback_tables.h`.
+`tools/k56flex_startup_tx_oracle.py` runs **the original setup routines**
+with only the 2D3A overlay loader stubbed (overlay 0x11 preloaded at the
+base), and compares all 128 DP118 words, the cleared history and the
+E504 table with the C initializer. It then runs the original symbol chain
+on that setup. Over 24 configurations x 384 symbols (30,720 samples) every
+DP118 word (bar physical cursors and the fixture's queue pointers), both
+rings and the DM 8EEA sample counter match after every symbol.
+
+Two defects of ours this exposed:
+
+- `k56flex_feedback_startup_take()` did not leave word 12 = 1. 90FF stores 1
+  there at 9157 to build the `1 << width` mask, after whichever producer ran,
+  so it also overwrites BE68's scratch value. No earlier oracle compared
+  word 12 after 90FF; the take oracle now does (its inputs randomise it).
+- The producer selection lives in word 21 (B3CA/B3BD write it); the
+  initializer now stores it there.
+
+MicaEmu's `native/k56flex_startup_tx.c` / `verify_k56flex_startup_tx.py`
+predate this. They supply the geometry instead of running the setup, offer a
+3200-baud mode the module never selects, and patch overlays 00..0A in as
+"eleven carrier presets" for 43D1. Those are not carrier tables, so that
+fixture verifies arithmetic only. (The eleven presets in
+`k56flex_source_profiles` are 4A6C's source-writer table at PM 650C; 931F
+selects preset 0 for K56flex. That table is real and separate.)
+
+Independent check (`k56flex_test`): with random dibits the output has 10
+samples per 3 symbols, one source word per 8 dibits, and a 600..3000 Hz
+passband 46-53 dB above 300 and 3300 Hz, symmetric about 1800 Hz. Within the
+band the spectrum tilts up by 1-2 dB (centroid about 1970 Hz). That is a
+property of the shipped filter, not explained here.
+
+```sh
+python3 tools/k56flex_startup_tx_oracle.py --mica ../MicaEmu \
+  --output artifacts/k56flex-response-20261009/startup-tx.json
+make k56flex-test
+```
+
+Still open: the module's own width (1F), mapping mode, producer, amplitude
+(3E) and gain (11) for this path; the oracle sweeps them as inputs. The
+B3CA record (`2, 1, 8F6F, 97A2, 93EA, 97C3`) suggests width 2, the 8F6F
+producer and absolute mapping, but the overlay never references B3CA
+directly, so that is unconfirmed. Also open: what words 2F..31 and 4E mean,
+the 4A6C source write each symbol, the 92FF zero-symbol prefill (D6AF runs
+18), the cadence from DA51/933B, and how the output ring reaches the codec.
+This recovers the module's 2400-baud startup transmitter (Draft 0.23
+clause 4.12 path); which handshake segments use it on the wire is not yet
+tied to a capture. The receiver for the client's signalling remains the gap
+before CONNECT.

@@ -379,6 +379,58 @@ static void test_feedback_startup_samples(void)
           "startup samples rejects short banks without mutation");
 }
 
+static double goertzel(const int16_t *x, unsigned n, double coefficient)
+{
+    /* coefficient = 2 cos(2 pi f / 8000); n = 512, Hann window built by
+     * rotating (cos, sin) through 2 pi / 512 so no libm is needed. */
+    double s1 = 0, s2 = 0, c = 1, si = 0;
+    for (unsigned i = 0; i < n; ++i) {
+        double s0 = x[i]*(0.5 - 0.5*c) + coefficient*s1 - s2, t;
+        s2 = s1; s1 = s0;
+        t = c*0.99992470183914450 - si*0.012271538285719925;
+        si = si*0.99992470183914450 + c*0.012271538285719925; c = t;
+    }
+    return s1*s1 + s2*s2 - coefficient*s1*s2;
+}
+
+static void test_startup_tx(void)
+{
+    /* Module configuration (8F23 profile 0, 94BA select 1, 82B4, 83A3); the
+     * per-symbol match with the DSP is tools/k56flex_startup_tx_oracle.py.
+     * Independent check: 2400 baud on 1800 Hz occupies 600..3000 Hz. */
+    static int16_t pcm[16000];
+    k56flex_startup_tx_t tx, saved;
+    unsigned n = 0, words = 0, symbols = 0, seed = 1;
+    int16_t out[4] = {11, 22, 33, 44};
+    int used = -1, count;
+    double band = 0, low = 0, high = 0;
+    CHECK(k56flex_startup_tx_init(&tx, 2, 1, 1, 4096, 4096) == 0, "startup tx init");
+    CHECK(tx.state[0x27] == 10 && tx.state[0x28] == 3 && tx.state[0x29] == 0x2d && tx.state[0x2a] == 0xe504
+          && tx.state[0x2d] == 0x9002 && tx.state[0x2e] == 0x900a && tx.state[0x4d] == 7,
+          "startup tx profile 0, carrier select 1, 82B4/83A3");
+    while (n + 4 <= sizeof(pcm)/sizeof(pcm[0])) {
+        seed = seed*1103515245u + 12345u;
+        count = k56flex_startup_tx_symbol(&tx, (uint16_t)(seed >> 8), &pcm[n], &used);
+        if (count < 0) break;
+        n += (unsigned)count; words += (unsigned)used; ++symbols;
+    }
+    CHECK(n == symbols*10/3 || n == symbols*10/3 + 1, "startup tx 10 samples per 3 symbols (%u, %u)", n, symbols);
+    CHECK(words == (symbols*2 + 15)/16, "startup tx consumes one word per 8 dibits (%u, %u)", words, symbols);
+    for (unsigned i = 1024; i + 512 <= n; i += 512) {
+        band += goertzel(&pcm[i], 512, 0.31286893008046185) + goertzel(&pcm[i], 512, 1.7820130483767358)
+              + goertzel(&pcm[i], 512, -1.414213562373095);
+        low += goertzel(&pcm[i], 512, 1.9447398407953531);
+        high += goertzel(&pcm[i], 512, -1.7052803287081844);
+    }
+    CHECK(band > 3000*low && band > 3000*high,
+          "startup tx passband 600..3000 Hz, >30 dB above 300/3300 Hz (%.0f %.0f %.0f)", band, low, high);
+    saved = tx; used = 99;
+    tx.state[0x13] = 0x900a;
+    CHECK(k56flex_startup_tx_symbol(&tx, 0, out, &used) == -1 && out[0] == 11 && used == 99,
+          "startup tx rejects a carrier pointer outside the table");
+    tx = saved;
+}
+
 static void test_v8bis(void)
 {
     static const uint8_t check[9] = {'1','2','3','4','5','6','7','8','9'};
@@ -452,6 +504,7 @@ int main(void)
     test_feedback_clock();
     test_feedback_initialization();
     test_feedback_startup_samples();
+    test_startup_tx();
     test_v8bis();
     test_params();
     printf(failures ? "k56flex_test: %d FAILURES\n" : "k56flex_test: all passed\n", failures);
