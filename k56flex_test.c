@@ -338,6 +338,47 @@ static void test_feedback_initialization(void)
     CHECK(count==30 && state[0x42]==0, "block cadence conserves supplied samples");
 }
 
+static void test_feedback_startup_samples(void)
+{
+    /* Properties the 8270 oracles pinned (k56flex_startup_*_oracle.py). */
+    uint16_t state[128] = {0}, before[128], address;
+    int16_t history[64], banks[20], output[128] = {0}, sample;
+    const int16_t unit[1] = {4096}, tiny[1] = {1};
+    unsigned h = 5, o = 126, j, pattern[3], total = 0;
+    for (j = 0; j < 64; ++j) history[j] = (int16_t)(100 * j - 3000);
+    CHECK(k56flex_feedback_startup_fir(history, 5, unit, 1, &sample) == 0 && sample == history[5],
+          "startup FIR unit tap");
+    history[7] = -1;
+    CHECK(k56flex_feedback_startup_fir(history, 7, tiny, 1, &sample) == 0 && sample == -1,
+          "startup FIR SACH shift 4 floors negative sums");
+    for (j = 0; j < 10; ++j) { banks[2*j] = 4096; banks[2*j+1] = (int16_t)(j * 409); }
+    state[0x27] = 10; state[0x28] = 3; state[0x29] = 1; state[0x2a] = 0x7900;
+    state[0x4d] = 10 - 3; /* 82B4 initializer */
+    for (j = 0; j < 3; ++j) {
+        uint16_t ref[128]; unsigned rh = h, ro = o; int k, n;
+        int16_t want[128];
+        memcpy(ref, state, sizeof(ref)); memcpy(want, output, sizeof(want));
+        n = k56flex_feedback_startup_sample_count(ref, 1);
+        for (k = 0; k < n; ++k) {
+            k56flex_feedback_startup_phase(ref, &rh, &address);
+            CHECK(address == (uint16_t)(ref[0x4d] + 0x7900), "startup bank lookup address");
+            k56flex_feedback_startup_fir(history, rh, banks + ref[0x4d]*2, 2, &want[ro]);
+            ro = (ro + 1) & 127;
+        }
+        pattern[j] = (unsigned)k56flex_feedback_startup_samples(state, 1, history, &h, banks, 20, output, &o);
+        CHECK(pattern[j] == (unsigned)n && !memcmp(state, ref, sizeof(ref)) && h == rh && o == ro
+              && !memcmp(output, want, sizeof(want)), "startup samples equal phase+FIR composition");
+        total += pattern[j];
+    }
+    CHECK(pattern[0] == 3 && pattern[1] == 3 && pattern[2] == 4 && total == 10,
+          "startup 10/3 sample pattern 3,3,4 (got %u,%u,%u)", pattern[0], pattern[1], pattern[2]);
+    CHECK(h == 11 && o == 8, "one history pair per symbol, output ring wraps (h=%u o=%u)", h, o);
+    memcpy(before, state, sizeof(before));
+    CHECK(k56flex_feedback_startup_samples(state, 1, history, &h, banks, 19, output, &o) == -1
+          && !memcmp(state, before, sizeof(before)) && h == 11 && o == 8,
+          "startup samples rejects short banks without mutation");
+}
+
 static void test_v8bis(void)
 {
     static const uint8_t check[9] = {'1','2','3','4','5','6','7','8','9'};
@@ -410,6 +451,7 @@ int main(void)
     test_feedback_resampling();
     test_feedback_clock();
     test_feedback_initialization();
+    test_feedback_startup_samples();
     test_v8bis();
     test_params();
     printf(failures ? "k56flex_test: %d FAILURES\n" : "k56flex_test: all passed\n", failures);

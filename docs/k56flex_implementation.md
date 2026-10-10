@@ -1349,3 +1349,41 @@ make k56flex-test
 This recovers the bounded phase selection separately from the FIR. Actual
 profile coefficient tables and the joined 8270 sample loop still need
 verification before treating the startup waveform as recovered.
+
+### Joined 8270 sample loop verified (2026-10-10)
+
+`k56flex_feedback_startup_samples()` joins the three pieces above into the
+whole original 8270: the sample-count prefix, then for each sample the phase
+step, the coefficient-bank fetch and the FIR, writing a 128-word output ring.
+Its banks are phase-major: bank `p` is what the DM pointer at word 2A + `p`
+addresses. The bank is selected by the phase **after** that sample's step.
+
+`tools/k56flex_startup_samples_oracle.py` runs original 8270 from a call
+stub and matches **512 blocks**: the count, words 4C/4D/55/57, the history
+and output cursors, the whole output ring, the unchanged history and the
+external sample counter at DM 8EEA. Half of the cases use the 10/3 ratio with
+44 taps. The other half draw random ratios up to 12 and 1..64 taps. Sample
+counts cover 1..31, the full range BRC can represent. Every case permutes the
+DM pointer table, so a match requires reading the banks through the pointers.
+Using the pre-step phase for the bank fails on the first case.
+
+The first version of this fixture could never pass: it put the sample counter
+at DM 7770, which is slot 7 of the 7700..777F output ring, so the original's
+counter increment overwrote one output word. The counter now lives at 7880.
+
+`k56flex_test` pins the same properties without MicaEmu: the 3, 3, 4 pattern
+at 10/3, one history pair per symbol, output-ring wrap, floor (not truncation)
+in the FIR store, and rejection without mutation.
+
+```sh
+python3 tools/k56flex_startup_samples_oracle.py --mica ../MicaEmu \
+  --output artifacts/k56flex-response-20261009/startup-samples.json
+make k56flex-test
+```
+
+This supersedes the "joined 8270 sample loop" items left open above. Still
+open: the live profile's words 27/28/29/2A and its PM coefficient tables, the
+caller that schedules 8270, and how the output ring and DM 8EEA reach the
+codec. The fixture supplies coefficients and geometry, so the result is
+verified arithmetic, not a recovered startup waveform. Hardware CONNECT is
+still unverified.
