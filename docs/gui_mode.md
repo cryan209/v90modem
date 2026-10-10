@@ -245,12 +245,19 @@ the automatic V.90 Phase 3 raw dump as well as ordinary V.34 dumps.
 
 ## Native listening playback
 
-RX/TX listening now primes 300 ms before playback and limits scheduled audio
-to 600 ms. The previous player began each roughly 150 ms update immediately,
-so polling jitter could exhaust its queue. Queue accounting now uses samples
-rather than buffer count. Switching direction, call epoch changes, missed
-ring windows or excess queued latency stop and re-prime the listening player.
-Stale completion callbacks cannot affect a new queue. All buffering is in
-bounded RAM and affects listening only, never RTP or DSP sample accounting.
-A telemetry outage longer than the snapshot ring still produces a playback
-gap; this change cannot recover audio that was never delivered to the UI.
+RX/TX listening primes 300 ms before playback and limits pending audio to
+800 ms. Listening snapshots retain 400 ms, accommodating the 100 ms publisher
+and 150 ms GUI poll cadence plus modest jitter. The first prebuffer attempt
+used a 200 ms snapshot and whole-buffer completion counts; delayed polls
+could repeatedly stop/re-prime playback, while already played buffer prefixes
+were counted as pending. The corrected player measures pending samples from
+AVAudioPlayerNode's actual sample clock and does not restart at buffer ends.
+
+Switching direction, call epoch changes, genuinely missed ring windows or
+excess queued latency re-prime listening. Buffering remains in bounded RAM
+and never affects RTP or DSP sample accounting. Outages longer than the
+snapshot window still lose listening audio.
+
+`make gui-audio-test` on macOS runs an offline AVAudioEngine check for
+partial-buffer occupancy, continuous PCM across scheduled buffers and the
+sample-clock origin after a stop/restart. It plays no sound and saves no audio.

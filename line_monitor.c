@@ -358,7 +358,7 @@ int lm_gui_json(char *out, size_t size)
     }
     ADD("],\"listen\":[");
     for (int d = 0; d < 2; d++) {
-        int n = rings[d].fed < 1600 ? rings[d].fed : 1600;
+        int n = rings[d].fed < 3200 ? rings[d].fed : 3200;
         ADD("%s{\"count\":%llu,\"hex\":\"", d ? "," : "", (unsigned long long)rings[d].total);
         for (int i = 0; i < n; i++) {
             uint16_t v = (uint16_t)rings[d].buf[(rings[d].wr-n+i+RING)%RING];

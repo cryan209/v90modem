@@ -86,7 +86,7 @@ def main():
                 assert all(len(p) == 5 for p in s['eye'])
                 assert all(s['eye'][i][4] != s['eye'][i+1][4] for i in range(127)), 'Recovered T/2 phases must alternate'
                 assert all(p['count'] > 0 for p in s['pcm'])
-                assert all(len(p['hex']) == 6400 for p in s['listen'])
+                assert all(len(p['hex']) == 12800 for p in s['listen'])
                 assert 2390 < s['rx_carrier'] < 2410 and s['tx_carrier'] == 1200
                 assert all(w['runs'] for w in s['wire'])
                 assert len(json.dumps(s)) > 9216, 'Must exercise large telemetry datagrams'

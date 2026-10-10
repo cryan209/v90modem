@@ -245,7 +245,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let carrierLabel = NSTextField(labelWithString:"Carrier: waiting")
     let listen = NSPopUpButton()
     let audioEngine = AVAudioEngine(), player = AVAudioPlayerNode()
-    var audioSeen = [0,0], audioEpoch = -1, queuedSamples = 0, audioGeneration = 0, audioDirection = 0
+    var audioSeen = [0,0], audioEpoch = -1, audioScheduled = 0, audioDirection = 0
     let atInput = NSTextField(), dataInput = NSTextField()
     let loopbackMode = NSPopUpButton()
     let loopbackStatus = NSTextField(labelWithString:"")
@@ -410,9 +410,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }.resume()
     }
-    // Listening only: 300 ms prebuffer, bounded to 600 ms. Never touches DSP.
+    // Listening only: 300 ms prebuffer, bounded to 800 ms. Never touches DSP.
     func resetAudio() {
-        player.stop(); queuedSamples = 0; audioGeneration += 1
+        player.stop(); audioScheduled = 0
     }
     func monitorAudio(_ s:[String:Any]) {
         let current = s["epoch"] as? Int ?? 0, direction = listen.indexOfSelectedItem
@@ -429,7 +429,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // A missed ring window or excess latency starts a fresh bounded listen.
         if audioSeen[d] > 0 && delta > n { resetAudio() }
         let fresh = min(n,delta)
-        if queuedSamples+fresh > 4800 { resetAudio() }
+        // Completion callbacks count whole buffers, including already played
+        // prefixes. Use the output clock to measure the actual pending tail.
+        var pending = audioScheduled
+        if player.isPlaying, let render = player.lastRenderTime,
+           let played = player.playerTime(forNodeTime:render) {
+            pending = max(0,audioScheduled-Int(played.sampleTime))
+        }
+        if pending+fresh > 6400 { resetAudio() }
         do { if !audioEngine.isRunning { try audioEngine.start() } }
         catch { self.error.stringValue = "Audio: \(error.localizedDescription)"; return }
         guard let format = AVAudioFormat(standardFormatWithSampleRate:8000,channels:1),
@@ -442,16 +449,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let hi = UInt16(String(hex[at+2..<at+4]),radix:16) ?? 0
             channel[i] = Float(Int16(bitPattern:lo | hi<<8))/32768
         }
-        audioSeen[d] = count; queuedSamples += fresh
-        let generation = audioGeneration
-        player.scheduleBuffer(buffer,completionCallbackType:.dataPlayedBack) { [weak self] _ in
-            DispatchQueue.main.async {
-                guard let self = self, generation == self.audioGeneration else { return }
-                self.queuedSamples = max(0,self.queuedSamples-fresh)
-                if self.queuedSamples == 0 { self.resetAudio() }
-            }
-        }
-        if !player.isPlaying && queuedSamples >= 2400 { player.play() }
+        audioSeen[d] = count; audioScheduled += fresh
+        player.scheduleBuffer(buffer)
+        if !player.isPlaying && audioScheduled >= 2400 { player.play() }
     }
     func poll() {
         guard !loading else { return }; loading = true

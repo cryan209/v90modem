@@ -116,10 +116,10 @@ int main(void)
     for (int i = 0; i < 8; i++) lm_wire_bit(LM_TX, 0);
     lm_gui_json(json, sizeof(json));
     check(strstr(json, "\"hex\":\"00\"") && !strstr(json, "quoted"), "GUI resets partial bits and events per call");
-    int16_t monitor_audio[1700];
-    for (int i = 0; i < 1700; i++) monitor_audio[i] = (i & 1) ? -32768 : 32767;
+    int16_t monitor_audio[4000];
+    for (int i = 0; i < 4000; i++) monitor_audio[i] = (i & 1) ? -32768 : 32767;
     for (int d = 0; d < 2; d++) {
-        lm_feed(d, monitor_audio, 1700);
+        lm_feed(d, monitor_audio, 4000);
         for (int i = 0; i < 300; i++) for (int b = 0; b < 8; b++) lm_wire_bit(d, (i >> b) & 1);
     }
     for (int i = 0; i < 256; i++) {
@@ -127,8 +127,11 @@ int main(void)
         lm_qam(-23456.78f, 12345.67f, true);
     }
     check(lm_gui_json(json, sizeof(json)) > 0, "GUI full audio, runs and IQ fit one bounded UDP snapshot");
-    check(strstr(json, "\"listen\":[{\"count\":1700,\"hex\":\"ff7f0080") != NULL,
+    check(strstr(json, "\"listen\":[{\"count\":4000,\"hex\":\"ff7f0080") != NULL,
           "GUI listening has sample count and exact little-endian diagnostic samples");
+    const char *listen_hex = strstr(json, "\"listen\":[{\"count\":4000,\"hex\":\"");
+    if (listen_hex) listen_hex = strstr(listen_hex, "\"hex\":\"")+7;
+    check(listen_hex && strcspn(listen_hex, "\"") == 3200*4, "Listening retains exactly 400 ms in a bounded snapshot");
     for (int i = 0; i < 140; i++) lm_eye(i, -i, i*2, -i*2, i%2);
     lm_gui_json(json, sizeof(json));
     check(strstr(json, "\"eye_count\":140,\"eye\":[[12,-12,24,-24,0]") != NULL, "GUI recovered eye ring wraps independently and resets per call");
