@@ -231,15 +231,42 @@ every 0.5 s. Phases are aligned to the server log's wall clock.
 - **The one burst is the strict live CP worker** (`v90_cp_live_worker`,
   `modem_engine.c`). It runs at ~98% of a core for the ~3.5 s between TRN2d
   and the first valid data-mode CP, about 4.3 CPU-s per call. Each attempt
-  re-demodulates the whole buffered waveform: 147200-156080 samples, about
-  18 s of history, at 16 timings. A new attempt starts 320 samples (40 ms)
-  after the last one finishes, so the thread never idles. It is a separate
-  thread, so the media clock was not starved on this call.
+  re-demodulated everything from 8 s before Ri to the newest sample (about
+  10 s, and growing) at 16 timings, and on alternate attempts the
+  classifier searched it again for CPt. A new attempt starts 320 samples
+  (40 ms) after the last one finishes, so the thread never idles. It is a
+  separate thread, so the media clock was not starved on this call.
 - **Rough capacity.** At 6.3% a line in data mode, about 15 lines per core
   are steady-state. Call setup costs about 6 CPU-s, 4.3 of them in the CP
   worker. That only matters when many calls reach Phase 4 together.
 - **Caveats.** This is one call, with verbose logging included, on a shared
   host. The Ja worker (Phase 3) was ~5% and is not a factor.
-- **If density matters,** bound the CP worker's search to recent waveform
-  rather than all 18 s. The batch search keeps pre-transition CPt on purpose
-  (see the classifier comment), so that change needs its own live A/B.
+
+### Bounding the CP worker's search (same day)
+
+`v90_cp_live_recover()` now searches at most the newest 5 s
+(`V90_CP_LIVE_SEARCH_WINDOW`). That is enough for 13 periods of the
+largest Table 14 frame at 2400 baud, the most the repeated-copy vote reads.
+The peer repeats CPt and CP until our response (V.90 9.4.2.1-9.4.2.4), so
+every frame falls wholly inside some attempt's window. Separately, the
+first-CPt decoder now checks the 18-bit frame sync after 9 symbols. It used
+to descramble the full 894-symbol frame at every symbol offset first. The
+bits are identical; it was the worker's dominant cost.
+
+- **Offline equivalence.** 20 earlier live recordings, 1040 snapshots across
+  Phase 4, old against new. 923 agree byte for byte. All 117 differences are
+  the old code returning a CPt or CP' that had ended more than 5 s
+  (40240-40822 samples) before the snapshot. Each frame is still found at
+  the same first snapshot. The early-sync change alone is byte-identical,
+  `ME_V90_CP_DIAG` trace included. Decode time is 342 s against 92 s.
+- **Live A/B.** Six alternated calls against slmodemd, three per arm, all
+  `CONNECT 54666` with payload both ways. Ri to DATA is 4.50 s in every
+  call. Worker CPU fell from 4.04-4.12 s to 3.24-3.30 s, a 20% cut.
+- **Why the cut is only 20%.** Faster attempts mean more of them: 8
+  classifier lines per call instead of 2, about four times as many
+  attempts, each on fresher audio. The worker still runs flat out until CP
+  arrives. Its CPU per call is set by the retry cadence, 40 ms after each
+  attempt ends, not by the search. Cutting it further means pacing the
+  retries, which trades away detection latency that 9.4.1.1 cares about.
+  On this peer the SpanDSP path delivers CP first, so the batch path's
+  latency did not decide any of the six calls.

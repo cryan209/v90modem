@@ -19,6 +19,17 @@
 #define V90_CP_LIVE_MIN_BITS 292
 #define V90_CP_DIRECT_RRC_HALF 27
 #define V90_CP_DIRECT_RRC_ALPHA 0.10f
+/* Longest stretch of waveform one search examines, counted back from the
+ * newest sample.  v90_cp_live_decode_repeated() votes over up to 4 skipped
+ * plus 9 voted periods; at the largest Table 14 frame (VPCM_CP_MAX_BITS =
+ * 1788 bits, 894 dibits) and the slowest baud (2400, 10/3 samples a symbol)
+ * 13 periods span 38740 samples.  The analogue modem repeats CPt until it
+ * sees our Ri-to-R-bar-i transition and CP until it receives MP' or Ed
+ * (V.90 9.4.2.1-9.4.2.4), and the live worker retries every
+ * 40 ms after an attempt ends, so every frame falls wholly inside some
+ * attempt's window: older waveform only made each retry slower, and every
+ * retry slower than the last. */
+#define V90_CP_LIVE_SEARCH_WINDOW (5 * V90_CP_LIVE_SAMPLE_RATE)
 
 static int v90_cp_live_find_carrier_rise(const int16_t *samples,
                                          int search_start,
@@ -388,29 +399,45 @@ static bool v90_cp_live_decode_first_cpt(const uint8_t *quadrants,
             available = 2 * available_symbols;
             bits[0] = (uint8_t)v90_cp_live_descramble(&descrambler, 1);
             bits[1] = (uint8_t)v90_cp_live_descramble(&descrambler, 1);
-            for (int symbol = 1; symbol < available_symbols; symbol++) {
-                int mapped = map_table[map]
-                                      [quadrants[symbol_offset + symbol] & 3];
-                int first = order ? (mapped >> 1) & 1 : mapped & 1;
-                int second = order ? mapped & 1 : (mapped >> 1) & 1;
-                int bit = 2 * symbol;
+            /* The 18-bit frame sync is bits 0-17, symbols 0-8.  Descramble
+             * those, and the rest of the frame only at an offset whose sync
+             * holds: the descrambler runs in order, so the bits are the same
+             * either way, but the full frame at every offset made this the
+             * worker's dominant cost. */
+            for (int pass = 0; pass < 2; pass++) {
+                int symbol_begin = pass == 0 ? 1 : 9;
+                int symbol_end = pass == 0 ? 9 : available_symbols;
 
-                bits[bit] = (uint8_t)v90_cp_live_descramble(
-                    &descrambler, first);
-                bits[bit + 1] = (uint8_t)v90_cp_live_descramble(
-                    &descrambler, second);
-            }
-            for (int bit = 0; bit <= 16; bit++) {
-                sync = sync && bits[bit] != 0;
-                sync_errors += bits[bit] == 0;
-            }
-            sync = sync && bits[17] == 0;
-            sync_errors += bits[17] != 0;
-            if (sync_errors < best_sync_errors) {
-                best_sync_errors = sync_errors;
-                best_sync_map = map;
-                best_sync_order = order;
-                best_sync_symbol = symbol_offset;
+                for (int symbol = symbol_begin; symbol < symbol_end;
+                     symbol++) {
+                    int mapped = map_table[map]
+                                          [quadrants[symbol_offset + symbol]
+                                           & 3];
+                    int first = order ? (mapped >> 1) & 1 : mapped & 1;
+                    int second = order ? mapped & 1 : (mapped >> 1) & 1;
+                    int bit = 2 * symbol;
+
+                    bits[bit] = (uint8_t)v90_cp_live_descramble(
+                        &descrambler, first);
+                    bits[bit + 1] = (uint8_t)v90_cp_live_descramble(
+                        &descrambler, second);
+                }
+                if (pass > 0)
+                    break;
+                for (int bit = 0; bit <= 16; bit++) {
+                    sync = sync && bits[bit] != 0;
+                    sync_errors += bits[bit] == 0;
+                }
+                sync = sync && bits[17] == 0;
+                sync_errors += bits[17] != 0;
+                if (sync_errors < best_sync_errors) {
+                    best_sync_errors = sync_errors;
+                    best_sync_map = map;
+                    best_sync_order = order;
+                    best_sync_symbol = symbol_offset;
+                }
+                if (!sync)
+                    break;
             }
             if (!sync)
                 continue;
@@ -1203,6 +1230,9 @@ bool v90_cp_live_recover(const int16_t *samples,
     }
     if (equalizer_freeze_sample < capture_start)
         equalizer_freeze_sample = capture_start;
+    /* After the carrier-rise search, which reads its own fixed region. */
+    if (search_start < sample_count - V90_CP_LIVE_SEARCH_WINDOW)
+        search_start = sample_count - V90_CP_LIVE_SEARCH_WINDOW;
 
     /* Diagnostic overrides keep offline waveform sweeps bounded.  Production
      * uses both carriers and all timing phases unless explicitly requested. */
