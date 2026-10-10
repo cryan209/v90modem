@@ -46,6 +46,9 @@
  * linear samples and receives the slot's output at 8 and 16 kHz (the T/2
  * stream a V.90 analogue receiver equalises), as the HSF coupler feeds the
  * engine; only the answering side sees an exchange codec.
+ *
+ * ENGINE_PAIR_KEEP_LOGS=1 keeps both engines' logs after a passing call too,
+ * to compare a passing configuration against a failing one.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -783,7 +786,7 @@ int main(int argc, char **argv)
         printf("  logs: %s %s\n", side[0].log_path, side[1].log_path);
         return 1;
     }
-    if (g_fdm.on && fdm_tap) {
+    if ((g_fdm.on && fdm_tap) || getenv("ENGINE_PAIR_KEEP_LOGS")) {
         /* a tapped channel-bank call is an experiment: keep its logs */
         printf("  logs: %s %s\n", side[0].log_path, side[1].log_path);
         return 0;

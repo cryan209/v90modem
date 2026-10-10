@@ -5283,9 +5283,20 @@ static int tone_a_carrier_present(v34_rx_state_t *s)
        before INFO0a had been sent, and the INFO0a search was off by the time
        it arrived (artifacts/rasfinder-info0a-200334Z).  The level test below
        cannot see that: JM is as loud as Tone A.  The spectrum can -- Tone A
-       is a 2400 Hz line. */
+       is a 2400 Hz line.
+
+       Only until INFO0a has been received, though: JM is over by then, and
+       9.2.2.1.1 puts Tone A straight after INFO0a.  The bin is measured over
+       40 ms blocks, so the block that straddles INFO0a's tail reads low and
+       blanked the next 40 ms of real Tone A -- by an amount that depended on
+       INFO0a's bit content.  9.2.2.1.3 lets the analogue modem reverse after
+       only 50 ms of Tone A, the 30 bauds this detector needs anyway, so the
+       reversal was lost and both modems waited on each other for ever.
+       Setting INFO0a bit 26 (V.92 capability, V.92 Table 16) was enough to
+       move that block onto the wrong side of the threshold. */
     if (s->v90_mode
         &&  !s->calling_party
+        &&  !s->info0_received
         &&  s->tone_a_bin_frac_valid
         &&  s->tone_a_bin_frac < 0.15f)
     {

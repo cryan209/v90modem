@@ -314,3 +314,47 @@ the focused PCMU regression for the complete measured-DIL path through the
 Ed-to-B1d handoff.  It follows V.92 8.8.1 and 9.6.1.1.5, which inherit V.90
 8.6.1's 48 reset-state data-mode frames.  No G.711 conversion, DSP constant,
 sample accounting or protocol timing changed.
+
+## 2026-10-11: whole engines reach V.92 data mode, analogue against digital
+
+Two complete engines (`engine_pair_test`, byte-exact G.711, both laws) now
+run V.8, full Phase 2 with INFO0 bits 26/27, a Table 18 INFO1a, V.92
+Phase 3 (Ru/TRN1u/Ja, Sd/TRN1d/Jd, Su, CPt), Phase 4 (SUVd/SUVu, CPd/CPu,
+Ed, B1d/B1u) and data mode, and exchange DTE payload in both directions
+over LAPM + V.42bis. Both ends report `Modulation V92` in ATI6.
+mu-law connects at 34666 up / 56000 down, A-law at 24000 / 56000. The
+regression rows are in `tests/fast.list`; the GUI loopback's V.92 profile
+asserts the same over localhost SIP. Three things stood in the way, none of
+them in the V.92 layer itself:
+
+1. **+PIG.** PCM upstream is offered only with `AT+PIG=0` (or
+   `ME_V92_PCM_UPSTREAM=1`); +PIG is factory 1 here, a documented deviation
+   from 6.8.5's default of 0 (`docs/v250_command_conformance_audit.md`). With +PIG=1, V.92 mode still sets the INFO0
+   capability bits and falls back to a V.90 INFO1a (V.92 9.3), which the
+   third regression row checks. V.92 capability is negotiated in INFO0, not
+   in the V.8 QC octet; the analogue role leaving that octet out is correct
+   for full startup.
+2. **A Phase 2 deadlock in the digital receiver (SpanDSP `v34rx.c`).** The
+   2400 Hz spectral gate in `tone_a_carrier_present()` exists to stop the
+   V.21 JM tail reading as Tone A before INFO0a arrives. It is measured over
+   40 ms blocks and stayed active after INFO0a, so the block straddling
+   INFO0a's tail read low and blanked the next 40 ms of real Tone A. V.90
+   9.2.2.1.3 lets the analogue modem reverse after 50 ms of Tone A, which is
+   the 30 bauds the detector needs anyway, so the reversal was lost and the
+   analogue (FIRST_NOT_A) and digital (V90_PHASE2_B_INFO0_SEEN) waited on
+   each other for ever. Whether the block landed on the wrong side depended
+   on INFO0a's bit content: setting bit 26 was enough. The gate now applies
+   only until INFO0a is received (V.90 9.2.1.1.2: Tone A follows INFO0a).
+   Any analogue peer that reverses near the 50 ms minimum was exposed to
+   this, V.92 or not.
+3. **The analogue V.92 receive path never drained to the DTE.**
+   `me_rx_audio()`'s `g_v92a` branch returned before reading
+   `upstream_ring`. A digital-TX / analogue-RX bit dump
+   (`DS_TX_BIT_DUMP`/`DS_RX_BIT_DUMP`) showed 626k downstream bits with
+   zero errors, LAPM connected, and 0 octets reached the PTY.
+   `v92_startup_test` grades upstream payload only, so nothing had graded
+   downstream payload after B1d.
+
+Still open: the upstream rate on a perfect bearer (34666 mu-law, 24000
+A-law) is below V.92's 48000 and has not been examined; no foreign V.92
+modem has been tried; the bearer here is byte-exact, not an analogue loop.

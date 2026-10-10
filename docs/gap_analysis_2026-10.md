@@ -46,7 +46,7 @@ suite run on this date. Interop claims come from the dated entries in
 | V.92 digital | opt-in (`ME_MODE=v92`, `ME_V92_PCM_UPSTREAM`) | startup, 9.8/9.9/9.10/9.11 in harnesses | PCM upstream never validated: the slmodemd transmitter for it is malformed, and no other peer has been tried. MH, QC and short phases not proven live. |
 | V.91 | yes (V.8 PCM bit) | loopback | none |
 | V.90 analogue (client) | yes (`ME_V90_ROLE=analogue`) | yes | Eicon emulator: reaches V.42 detection, then a peer retrain. Over a real loop the codeword receiver has no timing loop. |
-| V.92 analogue | wired (`v92a`) | ideal-bearer harness | stops at Sd-bar timeout over a real loop. Phase 4 audio DATA assertion known-failing in the full `v92_startup_test` audio case. |
+| V.92 analogue | wired (`v92a`); **2026-10-11: whole engines reach V.92 data mode against our digital side, payload both ways** (`AT+PIG=0`) | ideal-bearer harness, `engine_pair_test` | stops at Sd-bar timeout over a real loop. Phase 4 audio DATA assertion known-failing in the full `v92_startup_test` audio case. |
 | V.34 duplex | yes | 2400-3429 baud, up to 28800, echo, 11.6 | SmartLink: data mode, LAPM. RasFinder: `CONNECT 19200`, held 300 s calls. Intermittent MP'/E; first ask too high. |
 | V.34 half-duplex (fax) | probe only (`ME_V34_FAX_PROBE`) | control channel end to end | Canon reaches control-channel data. **T.30 Annex F absent.** |
 | V.32bis / V.32 | **yes** (2026-10-05): V.8 when it is the carrier, V.32bis Annex A automode otherwise, `AT+MS=V32B`/`V32` | clause 6/8 dialogue; `engine_pair_test` engine against engine, both laws | none |

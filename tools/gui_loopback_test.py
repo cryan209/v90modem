@@ -52,9 +52,10 @@ def main():
             if profile not in ('v21','v90','v91','v92'):
                 assert len(s['eye']) == 128, 'Recovered samples missing'
             if profile == 'v21': assert s['modulation'] == 8 and s['rx_baud'] == 300
-            if profile in ('v90','v92'): assert s['modulation'] == 2 and s['rx_pcm'] and not s['tx_pcm']
+            if profile == 'v90': assert s['modulation'] == 2 and s['rx_pcm'] and not s['tx_pcm']
+            if profile == 'v92': assert s['modulation'] == 2 and s['rx_pcm'] and s['tx_pcm']
             if profile == 'v91': assert s['modulation'] == 1 and s['rx_pcm'] and s['tx_pcm']
-            if profile == 'v92': assert not s['v92'], 'Update fallback expectation when native V.92 negotiation is supported'
+            if profile == 'v92': assert s['v92'], 'V.92 PCM upstream was not negotiated'
             start = max((ident for ident,_ in s['streams']['data']), default=0)
             payload = bytes(range(256))+b'local-loopback\x00\xff\r\n'
             send('data', payload)

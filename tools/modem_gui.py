@@ -24,7 +24,7 @@ import webbrowser
 LOOPBACK_PROFILES = {
     'v21': ('V.21 · 300', 'V21,0,300,300'),
     'v91': ('V.91 · symmetric PCM', 'V91,0'),
-    'v92': ('V.92 offer · V.90 fallback', 'V92,0'),
+    'v92': ('V.92 · PCM upstream', 'V92,0'),
     'v90': ('V.90 · analogue ↔ digital', 'V90,0'),
     'v22-1200': ('V.22 · 1200', 'V22B,0,1200,1200'),
     'v22': ('V.22bis · 2400', 'V22B,0,2400,2400'),
@@ -246,6 +246,10 @@ def main():
                     stop.wait(.05)
                 at_transaction('peer_at', 'AT+MS='+LOOPBACK_PROFILES[profile][1])
                 at_transaction('at', 'AT+MS='+LOOPBACK_PROFILES[profile][1])
+                if profile == 'v92':
+                    # +PIG is factory 1 here (docs/v250_command_conformance_audit.md).
+                    at_transaction('peer_at', 'AT+PIG=0')
+                    at_transaction('at', 'AT+PIG=0')
                 payload = b'ATD6004\r'
                 if os.write(fds['at'], payload) != len(payload): raise ValueError('Partial dial command')
                 record('at', b'\n> '+payload+b'\n')

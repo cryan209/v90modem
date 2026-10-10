@@ -206,11 +206,13 @@ carrier to settle. Each V.90 process also starts with its V.90 power-on offer;
 starting it as V.22 and only changing +MS did not complete PCM training.
 The settled SIP pair has returned the complete all-byte pattern; immediate writes at CONNECT produced errors
 in an earlier run. This is a GUI test readiness delay, not DSP sample buffering.
-V.91 adds a verified symmetric digital PCM pair. The V.92 offer profile
-configures both ends with V92 but the analogue role currently suppresses
-its V.92 V.8 capability octet (`modem_engine.c`), so the actual connection
-is V.90. The selector labels this fallback explicitly; it does not test
-V.92 PCM upstream. This is a two-modem local
+V.91 adds a verified symmetric digital PCM pair. The V.92 profile sets
+`AT+MS=V92,0` and `AT+PIG=0` on both ends (+PIG is factory 1 here), so the
+pair negotiates V.92 PCM upstream through INFO0 bits 26/27 and a Table 18
+INFO1a; the test asserts V.92 and PCM in both directions. (V.92 capability
+is carried in INFO0, not the V.8 QC octet; the earlier fallback was a
+Phase 2 deadlock and an undrained receive path, see
+`docs/v92_full_startup.md`, 2026-10-11.) This is a two-modem local
 SIP/G.711 test, not an implementation of V.54 analogue/digital loopbacks.
 
 Both modem logs and telemetry stay in bounded memory, including on the peer,

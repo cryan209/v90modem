@@ -469,6 +469,12 @@ PAIR_RETRAIN=answer ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test alaw v8
 # Our V.90 analogue role against our digital side, whole engines (docs/v90_analogue_role.md).
 ./engine_pair_test --expect V90 --call-expect "CONNECT 31200" --answer-expect "CONNECT 56000" --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0
 ./engine_pair_test --alaw --expect V90 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0
+# The same pair as V.92 with PCM upstream (+PIG=0): INFO0 bit 26/27, Table 18
+# INFO1a, V.92 Phases 3-4, both B1s, payload both ways (docs/v92_full_startup.md).
+# V.92 mode with +PIG=1 still sets the INFO0 bits and must fall back to V.90.
+./engine_pair_test --expect V90 --both-at "AT+PIG=0" --both-env ME_MODE=v92 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --call-expect "CONNECT 34666" --answer-expect "CONNECT 56000" --both-after ATI6 --both-expect "Modulation         V92"
+./engine_pair_test --alaw --expect V90 --both-at "AT+PIG=0" --both-env ME_MODE=v92 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --both-after ATI6 --both-expect "Modulation         V92"
+./engine_pair_test --expect V90 --both-env ME_MODE=v92 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --call-expect "CONNECT 31200" --both-after ATI6 --both-expect "Modulation         V90"
 # A whole V.34 call through one slot of the channel bank (docs/v34_fdm.md).
 ./engine_pair_test --expect V34 --expect-connect 24000 --both-env ME_MODE=v34 --fdm-slot 5
 ./engine_pair_test --expect V32BIS --expect-connect 9600 --both-at "AT+MS=V32"

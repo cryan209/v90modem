@@ -16,8 +16,8 @@ QAM/TCM constellations, adjustable line-derived eyes, separate datapump/DS0 byte
 views, AT control, serial payload, and training transitions. Histories are
 bounded in memory; no diagnostic recordings accumulate on disk.
 Use `./sip_v90_modem --gui-loopback` for a self-contained local echo pair,
-with 300-baud V.21, V.22/V.32/V.34, V.90/V.91, a labelled V.92 fallback
-profile and a 256-byte test pattern.
+with 300-baud V.21, V.22/V.32/V.34, V.90/V.91, V.92 PCM upstream
+profiles and a 256-byte test pattern.
 See [GUI mode](docs/gui_mode.md) for launch options, tap locations and plot limits.
 
 ## Architecture

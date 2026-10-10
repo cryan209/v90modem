@@ -8860,7 +8860,8 @@ static void me_connect_info(int rate, v250_connect_report_t *r)
     (void) rate;
     switch (g_mod) {
     case ME_MOD_V91:    r->carrier = "V91"; break;
-    case ME_MOD_V90:    r->carrier = g_v92_active ? "V92" : "V90"; break;
+    /* g_v92a: the analogue role's V.92 controller (Table 18 selected). */
+    case ME_MOD_V90:    r->carrier = (g_v92_active || g_v92a) ? "V92" : "V90"; break;
     case ME_MOD_V34:    r->carrier = "V34"; break;
     case ME_MOD_V22BIS: r->carrier = strcmp(g_mode_name, "v22-1200") == 0 ? "V22" : "V22B"; break;
     case ME_MOD_V32BIS: r->carrier = strcmp(g_mode_name, "v32") == 0 ? "V32" : "V32B"; break;
@@ -10783,9 +10784,17 @@ void me_rx_audio(const int16_t *amp, int len)
      * here exactly once. Physical 8 kHz linear input uses this same seam. */
     pthread_mutex_lock(&g_state_mtx);
     if (g_v92a && (g_state == ME_TRAINING || g_state == ME_DATA)) {
+        uint8_t buf[256];
+        int n;
+
         v92a_rx(g_v92a, amp, len);
         me_v92a_progress_locked();
         pthread_mutex_unlock(&g_state_mtx);
+        /* Every other datapump's return path drains the received octets to
+           the DTE; this one never did, so a bit-exact downstream reached
+           LAPM and stopped there. */
+        while ((n = dring_read(&upstream_ring, buf, sizeof(buf))) > 0)
+            di_write_data(buf, n);
         return;
     }
     pthread_mutex_unlock(&g_state_mtx);
@@ -15590,7 +15599,8 @@ void me_get_diag_snapshot(me_diag_snapshot_t *snapshot)
     /* Passive signal names: V.34 §10.1 and V.90 §§9.2–9.4. */
     snapshot->data_ready = g_data_connect_reported && !g_data_link_failed && g_state == ME_DATA;
     snapshot->rx_pcm = g_v92_trn2u_active || g_v92_upstream_rx_active || (g_mod == ME_MOD_V90 && me_v90_analogue_role()) || g_mod == ME_MOD_V91;
-    snapshot->tx_pcm = (g_mod == ME_MOD_V90 && !me_v90_analogue_role()) || g_mod == ME_MOD_X2 || g_mod == ME_MOD_V91;
+    /* g_v92a: the analogue role's V.92 PCM upstream (Table 18). */
+    snapshot->tx_pcm = (g_mod == ME_MOD_V90 && !me_v90_analogue_role()) || g_v92a || g_mod == ME_MOD_X2 || g_mod == ME_MOD_V91;
     snapshot->rx_carrier = g_v34 ? v34_rx_carrier_frequency(g_v34) : g_v22bis ? v22bis_rx_carrier_frequency(g_v22bis) : g_v32bis ? v32bis_rx_carrier_frequency(g_v32bis) : 0;
     static const int gui_baud[] = {2400,2743,2800,3000,3200,3429};
     int gui_rx_code = g_v34 ? v34_get_rx_baud_rate(g_v34) : -1;
@@ -15632,7 +15642,7 @@ void me_get_diag_snapshot(me_diag_snapshot_t *snapshot)
     snapshot->v90_cp_input_bits = g_v90_cp_rx.input_bits;
     snapshot->v90_cp_valid_frames = g_v90_cp_rx.valid_frames;
     snapshot->v90_cp_rejected_frames = g_v90_cp_rx.rejected_frames;
-    snapshot->v92_active = g_v92_active ? 1 : 0;
+    snapshot->v92_active = (g_v92_active || g_v92a) ? 1 : 0;
     snapshot->v92_trn2u_active = g_v92_trn2u_active ? 1 : 0;
     snapshot->v92_trn2u_symbols = g_v92_trn2u_demod.symbols;
     snapshot->v92_trn2u_longest_ones =
