@@ -11181,6 +11181,21 @@ static void process_primary_half_baud(v34_rx_state_t *s, const complexf_t *sampl
         s->baud_half ^= 1;
     }
     /*endif*/
+    /* V.34 §5.2 / §10.1: recovered primary-channel T/2 samples.
+       Evaluate the FSE without equalizer_get()'s divergence-reset side effect.
+       No coefficients, timing, carrier or sample accounting are changed. */
+    if (s->eye_report)
+    {
+        complexf_t eye = zero;
+        int p = s->eq_step - 1;
+        for (int i = 0; i < V34_EQUALIZER_PRE_LEN + 1 + V34_EQUALIZER_POST_LEN; i++)
+        {
+            p = (p - 1) & V34_EQUALIZER_MASK;
+            complexf_t term = complex_mulf(&s->eq_coeff[i], &s->eq_buf[p]);
+            eye = complex_addf(&eye, &term);
+        }
+        s->eye_report(s->eye_user_data, sample, &eye, s->baud_half ^ 1);
+    }
     if ((s->baud_half ^= 1))
     {
         if (eye_check)
@@ -17271,4 +17286,10 @@ SPAN_DECLARE(int) v34_x2_prepare_upstream(v34_state_t *s, int baud_index, int hi
     s->rx.stage = V34_RX_STAGE_PHASE3_TRAINING;
     s->rx.phase3_s_guard_samples = 0;
     return 0;
+}
+
+SPAN_DECLARE(void) v34_set_eye_report_handler(v34_state_t *s, qam_report_handler_t handler, void *user_data)
+{
+    s->rx.eye_report = handler;
+    s->rx.eye_user_data = user_data;
 }

@@ -488,6 +488,12 @@ static void gui_wire_observer(data_stack_t *stack, int dir, int bit)
 {
     if (stack == &g_data_stack) lm_wire_bit(dir, bit);
 }
+static void gui_eye_report(void *user, const complexf_t *input,
+                           const complexf_t *equalized, int phase)
+{
+    (void)user;
+    if (input && equalized) lm_eye(input->re, input->im, equalized->re, equalized->im, phase);
+}
 static void gui_qam_report(void *user, const complexf_t *point,
                            const complexf_t *target, int symbol)
 {
@@ -7307,8 +7313,10 @@ static void start_v22bis_training(void)
                            v22bis_put_bit_cb, NULL);
     if (!g_v22bis)
         ME_LOG("[ME] v22bis_init failed\n");
-    else if (g_gui_enabled)
+    else if (g_gui_enabled) {
         v22bis_rx_set_qam_report_handler(g_v22bis, gui_qam_report, NULL);
+        v22bis_rx_set_eye_report_handler(g_v22bis, gui_eye_report, NULL);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -7505,6 +7513,7 @@ static void start_v32bis_training(const char *why, int hold_samples)
         return;
     }
     if (g_gui_enabled) v32bis_set_qam_report_handler(g_v32bis, gui_qam_report, NULL);
+    if (g_gui_enabled) v32bis_set_eye_report_handler(g_v32bis, gui_eye_report, NULL);
     v32bis_set_supported_bit_rates(g_v32bis, rates);
     /* The whole of clause 6, tone phases included, so NT and MT are measured
        on this call's line rather than assumed. */
@@ -7953,6 +7962,7 @@ static void start_v34hdx_training(void)
         return;
     }
     if (g_gui_enabled) v34_set_qam_report_handler(g_v34, gui_qam_report, NULL);
+    if (g_gui_enabled) v34_set_eye_report_handler(g_v34, gui_eye_report, NULL);
     {
         logging_state_t *log = v34_get_logging_state(g_v34);
 
@@ -8140,6 +8150,7 @@ static void start_v34_training(void)
         return;
     }
     if (g_gui_enabled) v34_set_qam_report_handler(g_v34, gui_qam_report, NULL);
+    if (g_gui_enabled) v34_set_eye_report_handler(g_v34, gui_eye_report, NULL);
     g_v34_preroll_len = 0;
     if (v90_upstream && g_calling_party)
         me_v90_prepare_info0a_preroll();
@@ -8439,6 +8450,7 @@ static void me_x2_rx_locked(const int16_t *samples, int count)
             g_x2.stage = X2_FAILED;
         } else {
             if (g_gui_enabled) v34_set_qam_report_handler(g_v34, gui_qam_report, NULL);
+    if (g_gui_enabled) v34_set_eye_report_handler(g_v34, gui_eye_report, NULL);
             g_x2_receiver_started = true;
             logging_state_t *log = v34_get_logging_state(g_v34);
             if (log) span_log_set_level(log,me_span_flow_level());

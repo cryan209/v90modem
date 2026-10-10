@@ -32,14 +32,18 @@ the child modem; for the browser monitor use Ctrl-C in its launching terminal.
   delayed Viterbi traceback lattice decisions. Receivers without that callback
   show no points; the GUI does not synthesize a constellation from arbitrary
   line audio. TCM is coding over a QAM signal, so it shares the QAM eye view.
-- **Eye:** a two-period view folded from line samples using the reported baud and carrier, with automatic PCM/QAM direction
-  selection. The native PCM view uses an eightfold windowed-sinc reconstruction
-  for display; QAM also mixes down an I channel and applies a short smoother.
-  The browser uses direct sample interpolation. These are exploratory
-  line-derived eyes, **not recovered-clock/equalizer eyes** or a model of the
-  remote D/A's actual filter. Eye reconstruction never affects DSP. For a V.90 digital
-  call the PCM downstream is TX, while the QAM upstream is RX; the analogue
-  role reverses those directions. V.92 can use PCM in both directions.
+- **Recovered eye:** actual receiver T/2 samples, with separate I and Q traces,
+  from V.22bis, V.32bis's V.17 front end, and V.34's primary T/2 path.
+  Select receiver input or equalizer output. The receiver's phase flag aligns
+  decision samples at 0, T and 2T; intervening samples are measured at T/2.
+  Lines join measurements for readability; they are not extra measured points.
+  TCM uses the same QAM view. TX has no receive clock, and PCM/T/3 paths do
+  not yet expose this recovered-eye tap; unavailable/stale taps are labelled.
+- **Line estimate:** the previous exploratory two-period fold remains an
+  explicit option, using the reported baud and carrier and automatic PCM/QAM
+  direction selection. It is display-only sinc reconstruction/mixing, not
+  recovered timing or the remote D/A's actual filter. V.90 digital downstream
+  is TX PCM; the analogue role reverses the direction.
 - **Datapump wire bytes:** observations of `ds_tx_get_bit` / `ds_rx_put_bit`,
   after transmit framing/compression and before receive deframing/decompression
   (V.14 §6; V.42 §7). Eight consecutive bits are packed LSB first from call
@@ -106,8 +110,8 @@ have no scrolling history; the relay still uses bounded in-memory retention.
 The browser view also uses a compact fixed viewport and latest-line consoles.
 
 The manual PCM/QAM selector is replaced by automatic direction/role selection.
-TCM codes a QAM constellation; PCM is a sample-level signal. The line-derived
-eye still uses display-only timing/mixing, not recovered receiver timing.
+TCM codes a QAM constellation; PCM is a sample-level signal. The explicit line estimate still uses display-only timing/mixing; the default
+RX eye uses recovered receiver samples where available.
 Fewer overlaid eye traces and just centre axes reduce clutter.
 
 Wire telemetry retains 256 run records per direction in addition to its raw
@@ -149,3 +153,26 @@ Each direction holds exactly 128 rows in memory, overwriting old rows.
 Duplicate sample counters add no rows; call reset clears the display, and
 Freeze pauses it. Rows represent received GUI updates rather than a calibrated
 time axis; skipped telemetry is not reconstructed or recorded.
+
+## Recovered-eye observation
+
+A separate optional callback reports the input and current FSE output at every
+recovered T/2 insertion, with phase 0 at the decision instant and phase 1 at
+its intervening sample. The V.34 tap is on the primary channel, not its
+control-channel decoder. Its diagnostic dot product deliberately bypasses
+`equalizer_get()`'s divergence reset: observation cannot change coefficients.
+V.22bis and V.32bis similarly use read-only FSE evaluation. These callbacks
+are installed only in GUI mode; normal decoding, carrier/timing loops and
+sample accounting retain their existing arithmetic and order. QAM modulation
+references: V.22bis §2.3, V.32bis §2.2, V.34 §§5.2, 10.1.
+
+The monitor stores 128 five-value records (input I/Q, equalized I/Q, phase)
+in a per-call ring. Nonfinite samples and invalid phases are ignored. No eye
+captures go to disk. The native/browser clients reject stale samples and skip
+trace segments across a discontinuous phase sequence; receiver timing slips
+are not disguised with synthesized samples.
+
+Validation includes eye ring wrap/reset/JSON checks, real localhost V.22bis
+SIP samples with alternating T/2 phases and byte-exact serial transport, and
+V.32bis/V.34 duplex tests with the observer enabled and error-free PRBS payload
+in both directions. Offline tests do not establish hardware interoperability.

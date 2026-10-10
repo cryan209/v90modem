@@ -82,6 +82,9 @@ def main():
                     return s if s.get('state') == 4 and s.get('age', 9) < 1 and len(s.get('iq', [[]])[0]) == 256 else None
                 s = wait_for(connected)
                 assert all(len(a) == 512 for a in s['audio'])
+                assert len(s['eye']) == 128 and s['eye_count'] >= 128
+                assert all(len(p) == 5 for p in s['eye'])
+                assert all(s['eye'][i][4] != s['eye'][i+1][4] for i in range(127)), 'Recovered T/2 phases must alternate'
                 assert all(p['count'] > 0 for p in s['pcm'])
                 assert all(len(p['hex']) == 6400 for p in s['listen'])
                 assert 2390 < s['rx_carrier'] < 2410 and s['tx_carrier'] == 1200

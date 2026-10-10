@@ -7,10 +7,13 @@ let rxColor = NSColor.systemTeal
 let txColor = NSColor.systemOrange
 
 final class SignalPlot: NSView {
-    enum Kind { case waveform, constellation, eye, histogram, spectrum }
+    enum Kind { case waveform, constellation, eye, recoveredEye, histogram, spectrum }
     var kind: Kind = .waveform
     var samples: [Double] = []
     var points: [[[Double]]] = [[], []]
+    var recovered: [[Double]] = []
+    var beforeEqualizer = false
+    var eyeMessage = "Waiting for recovered samples"
     var color = rxColor
     var pcm = true
     var baud = 3200.0
@@ -26,6 +29,35 @@ final class SignalPlot: NSView {
         grid.move(to:NSPoint(x:w/2,y:0)); grid.line(to:NSPoint(x:w/2,y:h))
         grid.move(to:NSPoint(x:0,y:h/2)); grid.line(to:NSPoint(x:w,y:h/2))
         grid.stroke()
+        if kind == .recoveredEye {
+            let attrs:[NSAttributedString.Key:Any] = [.font:NSFont.systemFont(ofSize:10),.foregroundColor:NSColor.secondaryLabelColor]
+            guard recovered.count >= 5 else { (eyeMessage as NSString).draw(at:NSPoint(x:10,y:h/2-5),withAttributes:attrs); return }
+            let offset = beforeEqualizer ? 0 : 2
+            let scale = max(1e-6,recovered.flatMap { [$0[offset],$0[offset+1]] }.map { abs($0) }.max() ?? 1)
+            // Actual T/2 measurements only. Straight joins are a visual aid,
+            // not oversampled measurements or an invented pulse shape.
+            for channel in 0..<2 {
+                let mid = channel == 0 ? h*0.25 : h*0.75
+                let ink = channel == 0 ? rxColor : txColor
+                for start in 0..<(recovered.count-4) where recovered[start][4] == 0 {
+                    let segment = Array(recovered[start...start+4])
+                    guard segment.enumerated().allSatisfy({ Int($0.element[4]) == $0.offset%2 }) else { continue }
+                    let line = NSBezierPath()
+                    for j in 0..<5 {
+                        let p = NSPoint(x:Double(j)*w/4,y:mid-segment[j][offset+channel]/scale*h*0.20)
+                        j == 0 ? line.move(to:p) : line.line(to:p)
+                        ink.withAlphaComponent(j%2 == 0 ? 0.5 : 0.2).setFill()
+                        NSBezierPath(ovalIn:NSRect(x:p.x-1,y:p.y-1,width:2,height:2)).fill()
+                    }
+                    ink.withAlphaComponent(0.12).setStroke(); line.stroke()
+                }
+                ((channel == 0 ? "I" : "Q") as NSString).draw(at:NSPoint(x:3,y:mid-10),withAttributes:attrs)
+            }
+            ("0" as NSString).draw(at:NSPoint(x:3,y:h-13),withAttributes:attrs)
+            ("T" as NSString).draw(at:NSPoint(x:w/2,y:h-13),withAttributes:attrs)
+            ("2T · dots are measured T/2 samples" as NSString).draw(at:NSPoint(x:max(w/2+12,w-195),y:h-13),withAttributes:attrs)
+            return
+        }
         if kind == .histogram || kind == .spectrum {
             var bins = [Double](repeating:0,count:64)
             if kind == .histogram {
@@ -215,6 +247,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let audioEngine = AVAudioEngine(), player = AVAudioPlayerNode()
     var audioSeen = [0,0], audioEpoch = -1, queued = 0, audioGeneration = 0
     let atInput = NSTextField(), dataInput = NSTextField()
+    let eyeSource = NSPopUpButton()
+    var eyeCountSeen = -1, eyeUpdated = Date.distantPast
     let eyeDir = NSPopUpButton(), dataMode = NSPopUpButton()
     let atPath = NSTextField(labelWithString:""), dataPath = NSTextField(labelWithString:"")
     var sendData: NSButton!
@@ -276,6 +310,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         status.font = .systemFont(ofSize:14,weight:.semibold)
         error.textColor = .systemRed
         eyeDir.addItems(withTitles:["RX","TX"])
+        eyeSource.addItems(withTitles:["Recovered · equalizer","Recovered · input","Line estimate"])
         dataMode.addItems(withTitles:["UTF-8 + CRLF","Hex bytes"])
         atInput.placeholderString = "ATDnumber or AT command"; atInput.target = self; atInput.action = #selector(sendAT)
         dataInput.placeholderString = "Serial payload"; dataInput.target = self; dataInput.action = #selector(sendSerial)
@@ -294,7 +329,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             NSLayoutConstraint.activate([view.leadingAnchor.constraint(equalTo:container.leadingAnchor,constant:4),view.trailingAnchor.constraint(equalTo:container.trailingAnchor,constant:-4),view.topAnchor.constraint(equalTo:container.topAnchor,constant:4)])
             item.view = container; diagnostics.addTabViewItem(item)
         }
-        tab("Signal",pair(panel("Received constellation · teal samples / orange decisions",[constellation]),panel("Eye · follows selected direction",[eye])))
+        tab("Signal",pair(panel("Received constellation · teal samples / orange decisions",[constellation]),panel("Eye · I/Q at recovered timing, or explicit line estimate",[eye])))
         tab("Audio",pair(panel("RX amplitude histogram · −32768 to +32767",[histogram]),panel("RX spectrum · 0 to 4000 Hz",[spectrum])))
         for plot in [rxWaterfall,txWaterfall] { plot.heightAnchor.constraint(equalToConstant:100).isActive = true }
         tab("Waterfall",pair(panel("RX · newest at top · −90 to 0 dBFS",[rxWaterfall]),panel("TX · 31.25 Hz bins · 128 updates",[txWaterfall])))
@@ -303,7 +338,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let items: [NSView] = [
             row([status,listen,button("Freeze",#selector(freeze))]),error,
             pair(panel("RX line · 64 ms",[rx]),panel("TX line · 64 ms",[tx])),
-            row([eyeDir,carrierLabel,label("Carrier demodulation → I/Q points. TCM uses the same QAM signal.")]),
+            row([eyeDir,eyeSource,carrierLabel]),
             diagnostics,
             pair(panel("RX wire · repeated bytes collapsed",[rxWire.scroll]),panel("TX wire · repeated bytes collapsed",[txWire.scroll])),
             pair(panel("AT control",[row([button("Answer",#selector(answer)),button("Hang up",#selector(hangup)),button("Info",#selector(info))]),at.scroll,row([atInput,button("Send AT",#selector(sendAT))])]),
@@ -410,7 +445,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let paths = s["ports"] as? [String:String] ?? [:]
         atPath.stringValue = paths["at"] ?? ""; dataPath.stringValue = paths["data"] ?? ""
         let currentEpoch = s["epoch"] as? Int ?? 0
-        if currentEpoch != epoch { epoch = currentEpoch; eventSeen = 0; history = []; rxWaterfall.reset(); txWaterfall.reset() }
+        if currentEpoch != epoch { epoch = currentEpoch; eventSeen = 0; history = []; rxWaterfall.reset(); txWaterfall.reset(); eyeCountSeen = -1; eyeUpdated = .distantPast }
         let events = s["events"] as? [String] ?? [], count = s["event_count"] as? Int ?? 0
         for (i,event) in events.enumerated() where count-events.count+i >= eventSeen { history.append(event) }
         eventSeen = count; history = Array(history.suffix(120)); training.replace(history.joined(separator:"\n"))
@@ -432,6 +467,13 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         eye.carrier = s[eyeDir.indexOfSelectedItem == 0 ? "rx_carrier" : "tx_carrier"] as? Double ?? 0; spectrum.carrier = s["rx_carrier"] as? Double ?? 0
         carrierLabel.stringValue = eye.pcm ? "PCM eye · 8,000 samples/s" : eye.carrier > 0 ? String(format:"%@ · %@ %.1f Hz · %g baud",eye.pcm ? "PCM eye" : "QAM eye",eyeDir.indexOfSelectedItem == 0 ? "RX recovered carrier" : "TX nominal carrier",eye.carrier,eye.baud) : "RX carrier: waiting for QAM receiver"
         eye.phase = 0
+        let eyeCount = s["eye_count"] as? Int ?? 0
+        if eyeCount != eyeCountSeen { eyeCountSeen = eyeCount; if eyeCount > 0 { eyeUpdated = Date() } }
+        eye.kind = eyeSource.indexOfSelectedItem == 2 ? .eye : .recoveredEye
+        eye.beforeEqualizer = eyeSource.indexOfSelectedItem == 1
+        let available = eyeDir.indexOfSelectedItem == 0 && !eye.pcm && Date().timeIntervalSince(eyeUpdated)<1 && (s["age"] as? Double ?? 9)<1
+        eye.recovered = available ? (s["eye"] as? [[Double]] ?? []).filter { $0.count == 5 } : []
+        eye.eyeMessage = eyeDir.indexOfSelectedItem == 1 ? "TX has no receiver clock · select Line estimate" : eye.pcm ? "PCM recovery tap unavailable · select Line estimate" : "Waiting for live recovered T/2 samples"
         for plot in [rx,tx,constellation,eye,histogram,spectrum] { plot.needsDisplay = true }
         let values = s["wire"] as? [[String:Any]] ?? []
         for (i,console) in [rxWire,txWire].enumerated() where values.indices.contains(i) {

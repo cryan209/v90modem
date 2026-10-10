@@ -1343,6 +1343,9 @@ typedef struct
     /*! \brief A callback function which may be enabled to report every symbol's
                constellation position. */
     qam_report_handler_t qam_report;
+    /* Passive recovered T/2 input/output samples; phase 0 is decision instant. */
+    qam_report_handler_t eye_report;
+    void *eye_user_data;
     /*! \brief A user specified opaque pointer passed to the qam_report callback
                routine. */
     void *qam_user_data;

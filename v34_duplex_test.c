@@ -15,6 +15,19 @@
 
 #include <spandsp.h>
 
+static bool test_eye_enabled;
+static unsigned eye_phases[2][2];
+static bool eye_bad;
+static void test_eye(void *user, const complexf_t *input, const complexf_t *output, int phase)
+{
+    int dir = (int)(intptr_t)user;
+    if (!input || !output || !isfinite(input->re) || !isfinite(input->im)
+        || !isfinite(output->re) || !isfinite(output->im) || (phase != 0 && phase != 1)) {
+        eye_bad = true; return;
+    }
+    eye_phases[dir][phase]++;
+}
+
 #include "v34_line_ec.h"
 
 #define BLOCK_SAMPLES 160
@@ -453,6 +466,10 @@ static int run_case(int baud, int bps, bool alaw)
         if (answer_modem) v34_free(answer_modem);
         return 1;
     }
+    if (test_eye_enabled) {
+        v34_set_eye_report_handler(call_modem, test_eye, (void *)(intptr_t)0);
+        v34_set_eye_report_handler(answer_modem, test_eye, (void *)(intptr_t)1);
+    }
     v34_tx_power(call_modem, -12.0f);
     v34_tx_power(answer_modem, -12.0f);
     /* V.250 6.4.1 +MS bounds on either modem's MP, "min_tx,max_tx,min_rx,max_rx"
@@ -747,6 +764,10 @@ static int run_case(int baud, int bps, bool alaw)
                answer.resync_restarts, answer.resyncing);
     }
 
+    if (test_eye_enabled && (eye_bad || !eye_phases[0][0] || !eye_phases[0][1] || !eye_phases[1][0] || !eye_phases[1][1])) {
+        fprintf(stderr, "Recovered eye did not report finite samples on both timing phases\n");
+        v34_free(call_modem); v34_free(answer_modem); return 1;
+    }
     v34_free(call_modem);
     v34_free(answer_modem);
     if (cleardown_at > 0)
@@ -771,5 +792,6 @@ int main(int argc, char *argv[])
     if (argc > 1) baud = atoi(argv[1]);
     if (argc > 2) bps = atoi(argv[2]);
     if (argc > 3) alaw = strcmp(argv[3], "alaw") == 0;
+    test_eye_enabled = argc > 4 && strcmp(argv[4], "eye") == 0;
     return run_case(baud, bps, alaw);
 }

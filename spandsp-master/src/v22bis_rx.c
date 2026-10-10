@@ -490,6 +490,17 @@ static __inline__ void process_half_baud(v22bis_state_t *s, const complexf_t *sa
     /*endif*/
 
     /* On alternate insertions we have a whole baud and must process it. */
+    /* V.22bis §2.3 / V.32bis §2.2: inspect the timing loop's T/2
+       samples with the current FSE. This extra dot product changes no state. */
+    if (s->rx.eye_report)
+    {
+#if defined(SPANDSP_USE_FIXED_POINT)
+        complexi16_t eye = equalizer_get(s);
+#else
+        complexf_t eye = equalizer_get(s);
+#endif
+        s->rx.eye_report(s->rx.eye_user_data, sample, &eye, s->rx.baud_phase ^ 1);
+    }
     if ((s->rx.baud_phase ^= 1))
         return;
     /*endif*/
@@ -1077,3 +1088,9 @@ SPAN_DECLARE(void) v22bis_rx_set_qam_report_handler(v22bis_state_t *s, qam_repor
 }
 /*- End of function --------------------------------------------------------*/
 /*- End of file ------------------------------------------------------------*/
+
+SPAN_DECLARE(void) v22bis_rx_set_eye_report_handler(v22bis_state_t *s, qam_report_handler_t handler, void *user_data)
+{
+    s->rx.eye_report = handler;
+    s->rx.eye_user_data = user_data;
+}

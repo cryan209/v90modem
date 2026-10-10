@@ -603,3 +603,8 @@ python3 tools/v56bis_filters.py --check
 python3 tools/pcm_sweep.py --v92-drns 1,9,13 --seeds 1,7 --chunks 37,160 --require-clean
 python3 tools/pcm_ber_regression.py
 @group
+
+# Passive recovered-eye callbacks must preserve real duplex payload.
+./v34_duplex_test 2400 9600 ulaw eye
+./v34_duplex_test 3200 21600 alaw eye
+./v32bis_duplex_test --eye-only

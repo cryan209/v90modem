@@ -3890,3 +3890,8 @@ SPAN_DECLARE(void) v32bis_set_qam_report_handler(v32bis_state_t *s, qam_report_h
 }
 /*- End of function --------------------------------------------------------*/
 /*- End of file ------------------------------------------------------------*/
+
+SPAN_DECLARE(void) v32bis_set_eye_report_handler(v32bis_state_t *s, qam_report_handler_t handler, void *user_data)
+{
+    v17_rx_set_eye_report_handler(&s->rx, handler, user_data);
+}

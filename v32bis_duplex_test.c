@@ -26,6 +26,19 @@
 #define SPANDSP_EXPOSE_INTERNAL_STRUCTURES
 #include <spandsp.h>
 
+static bool test_eye_enabled;
+static unsigned eye_phases[2][2];
+static bool eye_bad;
+static void test_eye(void *user, const complexf_t *input, const complexf_t *output, int phase)
+{
+    int dir = (int)(intptr_t)user;
+    if (!input || !output || !isfinite(input->re) || !isfinite(input->im)
+        || !isfinite(output->re) || !isfinite(output->im) || (phase != 0 && phase != 1)) {
+        eye_bad = true; return;
+    }
+    eye_phases[dir][phase]++;
+}
+
 typedef struct
 {
     uint32_t state;
@@ -321,6 +334,10 @@ static int run_duplex(int alaw,
     {
         fprintf(stderr, "V.32bis duplex initialisation failed\n");
         return -1;
+    }
+    if (test_eye_enabled) {
+        v32bis_set_eye_report_handler(call, test_eye, (void *)(intptr_t)0);
+        v32bis_set_eye_report_handler(answer, test_eye, (void *)(intptr_t)1);
     }
     if (v32bis_set_supported_bit_rates(call, call_rates) != 0
         || v32bis_set_supported_bit_rates(answer, answer_rates) != 0
@@ -714,6 +731,7 @@ static int run_duplex(int alaw,
                 call_rx.first_err,
                 answer_rx.first_err);
     }
+    if (test_eye_enabled && (eye_bad || !eye_phases[0][0] || !eye_phases[0][1] || !eye_phases[1][0] || !eye_phases[1][1])) failed = 1;
     v32bis_free(call);
     v32bis_free(answer);
     return failed ? -1 : 0;
@@ -1024,6 +1042,12 @@ static int rate_renegotiation_tests(void)
 
 int main(int argc, char *argv[])
 {
+    if (argc > 1 && strcmp(argv[1], "--eye-only") == 0) {
+        test_eye_enabled = true;
+        return run_duplex(0, V32BIS_RATE_14400 | V32BIS_RATE_9600,
+                          V32BIS_RATE_14400 | V32BIS_RATE_9600,
+                          14400, 0, 0, 1, 0, 0, 1, 2048, 2048, 0, 0) != 0;
+    }
     if (argc > 1 && strcmp(argv[1], "--reneg-only") == 0)
         return rate_renegotiation_tests() != 0;
     if (argc > 1 && strcmp(argv[1], "--retrain-only") == 0)

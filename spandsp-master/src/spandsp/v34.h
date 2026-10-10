@@ -199,6 +199,10 @@ SPAN_DECLARE(void) v34_rx_set_signal_cutoff(v34_state_t *s, float cutoff);
     \param user_data An opaque pointer passed to the handler routine. */
 SPAN_DECLARE(void) v34_set_qam_report_handler(v34_state_t *s, qam_report_handler_t handler, void *user_data);
 
+/* Recovered T/2 eye: callback(input, equalized, phase), phase 0 at the
+   receiver decision instant, phase 1 halfway between decisions. Read-only. */
+SPAN_DECLARE(void) v34_set_eye_report_handler(v34_state_t *s, qam_report_handler_t handler, void *user_data);
+
 /*! Generate a block of V.34 modem audio samples.
     \brief Generate a block of V.34 modem audio samples.
     \param s The modem context.

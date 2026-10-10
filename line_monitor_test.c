@@ -94,6 +94,8 @@ int main(void)
     lm_feed_g711(LM_RX, codes, 4, false);
     for (int i = 0; i < 8; i++) lm_wire_bit(LM_TX, (0xa5 >> i) & 1);
     lm_wire_bit(LM_TX, -1);
+    lm_eye(1, 2, 3, 4, 0);
+    lm_eye(5, 6, 7, 8, 1);
     lm_qam(1.25f, -2.5f, false);
     lm_qam(2.0f, -3.0f, true);
     lm_event("TRN \"quoted\" \\ E");
@@ -103,6 +105,7 @@ int main(void)
     check(strstr(json, "\"hex\":\"a5\"") != NULL, "GUI packs line bits LSB first, ignores status codes");
     check(strstr(json, "[1.25,-2.5]") && strstr(json, "[2,-3]"), "GUI distinguishes measured QAM from decisions");
     check(strstr(json, "TRN \\\"quoted\\\" \\\\ E") != NULL, "GUI escapes event JSON");
+    check(strstr(json, "\"eye_count\":2,\"eye\":[[1,2,3,4,0],[5,6,7,8,1]]") != NULL, "GUI preserves measured input/equalizer samples and recovered phase");
     check(lm_gui_json(page, 8) == -1, "GUI rejects truncated snapshots");
     for (int i = 0; i < 257*8; i++) lm_wire_bit(LM_RX, 1);
     lm_gui_json(json, sizeof(json));
@@ -126,6 +129,9 @@ int main(void)
     check(lm_gui_json(json, sizeof(json)) > 0, "GUI full audio, runs and IQ fit one bounded UDP snapshot");
     check(strstr(json, "\"listen\":[{\"count\":1700,\"hex\":\"ff7f0080") != NULL,
           "GUI listening has sample count and exact little-endian diagnostic samples");
+    for (int i = 0; i < 140; i++) lm_eye(i, -i, i*2, -i*2, i%2);
+    lm_gui_json(json, sizeof(json));
+    check(strstr(json, "\"eye_count\":140,\"eye\":[[12,-12,24,-24,0]") != NULL, "GUI recovered eye ring wraps independently and resets per call");
     printf("%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures, failures == 1 ? "" : "s");
     return failures != 0;
 }

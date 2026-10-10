@@ -33,6 +33,8 @@ static gui_run_t runs[2][256];
 static uint64_t run_count[2];
 static unsigned partial[2], partial_bits[2];
 static float iq[2][256][2];
+static float eye[128][5];
+static uint64_t eye_count;
 static uint64_t iq_count[2];
 static char events[16][192];
 static uint64_t event_count, gui_epoch;
@@ -50,6 +52,7 @@ void lm_reset(void)
     memset(partial_bits, 0, sizeof(partial_bits));
     memset(iq_count, 0, sizeof(iq_count));
     event_count = 0;
+    eye_count = 0;
     gui_epoch++;
     pthread_mutex_unlock(&lm_mtx);
 }
@@ -306,6 +309,14 @@ void lm_qam(float re, float im, bool decision)
     iq[d][i][0] = re; iq[d][i][1] = im;
     pthread_mutex_unlock(&lm_mtx);
 }
+void lm_eye(float in_re, float in_im, float eq_re, float eq_im, int phase)
+{
+    if (!gui_enabled || !isfinite(in_re) || !isfinite(in_im) || !isfinite(eq_re) || !isfinite(eq_im) || (phase != 0 && phase != 1)) return;
+    pthread_mutex_lock(&lm_mtx);
+    float *p = eye[eye_count++ % 128];
+    p[0] = in_re; p[1] = in_im; p[2] = eq_re; p[3] = eq_im; p[4] = phase;
+    pthread_mutex_unlock(&lm_mtx);
+}
 void lm_event(const char *text)
 {
     if (!gui_enabled) return;
@@ -362,6 +373,12 @@ int lm_gui_json(char *out, size_t size)
         for (uint64_t i = iq_count[d]-n; i < iq_count[d]; i++)
             ADD("%s[%.5g,%.5g]", i > iq_count[d]-n ? "," : "", iq[d][i%256][0], iq[d][i%256][1]);
         ADD("]");
+    }
+    ADD("],\"eye_count\":%llu,\"eye\":[", (unsigned long long)eye_count);
+    uint64_t ne = eye_count < 128 ? eye_count : 128;
+    for (uint64_t i = eye_count-ne; i < eye_count; i++) {
+        float *p = eye[i%128];
+        ADD("%s[%.5g,%.5g,%.5g,%.5g,%d]", i > eye_count-ne ? "," : "", p[0], p[1], p[2], p[3], (int)p[4]);
     }
     ADD("],\"event_count\":%llu,\"events\":[", (unsigned long long)event_count);
     uint64_t n = event_count < 16 ? event_count : 16;
