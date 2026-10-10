@@ -287,7 +287,13 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         audioEngine.connect(player,to:audioEngine.mainMixerNode,format:AVAudioFormat(standardFormatWithSampleRate:8000,channels:1))
         player.volume = 0.25
         let diagnostics = NSTabView()
-        func tab(_ title:String,_ view:NSView) { let item = NSTabViewItem(identifier:title); item.label = title; item.view = view; diagnostics.addTabViewItem(item) }
+        func tab(_ title:String,_ view:NSView) {
+            let item = NSTabViewItem(identifier:title); item.label = title
+            let container = NSView(); view.translatesAutoresizingMaskIntoConstraints = false
+            container.addSubview(view)
+            NSLayoutConstraint.activate([view.leadingAnchor.constraint(equalTo:container.leadingAnchor,constant:4),view.trailingAnchor.constraint(equalTo:container.trailingAnchor,constant:-4),view.topAnchor.constraint(equalTo:container.topAnchor,constant:4)])
+            item.view = container; diagnostics.addTabViewItem(item)
+        }
         tab("Signal",pair(panel("Received constellation · teal samples / orange decisions",[constellation]),panel("Eye · follows selected direction",[eye])))
         tab("Audio",pair(panel("RX amplitude histogram · −32768 to +32767",[histogram]),panel("RX spectrum · 0 to 4000 Hz",[spectrum])))
         for plot in [rxWaterfall,txWaterfall] { plot.heightAnchor.constraint(equalToConstant:100).isActive = true }
