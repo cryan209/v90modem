@@ -107,6 +107,57 @@ final class SignalPlot: NSView {
     }
 }
 
+// Display-only spectrum history: 128 rows × 129 bins, overwritten in memory.
+// Fixed dBFS colour scale preserves level changes between successive rows.
+final class Waterfall: NSView {
+    static let rows = 128, bins = 129, fftSize = 256
+    var levels = [[Double]](repeating:[Double](repeating:-90,count:bins),count:rows)
+    var next = 0, held = 0, seen = -1
+    var carrier = 0.0
+    override var isFlipped: Bool { true }
+    func reset() { next = 0; held = 0; seen = -1; needsDisplay = true }
+    func update(_ samples:[Double], count:Int) {
+        guard count > seen, samples.count >= Self.fftSize else { return }
+        seen = count
+        let signal = Array(samples.suffix(Self.fftSize))
+        let window = (0..<Self.fftSize).map { 0.5-0.5*cos(2*Double.pi*Double($0)/Double(Self.fftSize-1)) }
+        let weight = window.reduce(0,+)
+        for k in 0..<Self.bins {
+            var re = 0.0, im = 0.0
+            for i in 0..<Self.fftSize {
+                let angle = 2*Double.pi*Double(k*i)/Double(Self.fftSize)
+                let v = signal[i]*window[i]
+                re += v*cos(angle); im -= v*sin(angle)
+            }
+            let amplitude = sqrt(re*re+im*im)*(k == 0 || k == Self.bins-1 ? 1 : 2)/weight/32768
+            levels[next][k] = max(-90,min(0,20*log10(max(1e-12,amplitude))))
+        }
+        next = (next+1)%Self.rows; held = min(Self.rows,held+1); needsDisplay = true
+    }
+    override func draw(_ dirtyRect:NSRect) {
+        NSColor(calibratedWhite:0.055,alpha:1).setFill(); bounds.fill()
+        let plotHeight = max(1,bounds.height-16), rowHeight = plotHeight/Double(Self.rows)
+        let binWidth = bounds.width/Double(Self.bins)
+        for row in 0..<held {
+            let source = (next-1-row+Self.rows)%Self.rows
+            for bin in 0..<Self.bins {
+                let strength = (levels[source][bin]+90)/90
+                NSColor(calibratedHue:0.67-strength*0.67,saturation:0.9,brightness:0.08+0.92*strength,alpha:1).setFill()
+                NSRect(x:Double(bin)*binWidth,y:Double(row)*rowHeight,width:binWidth+0.5,height:rowHeight+0.5).fill()
+            }
+        }
+        if carrier > 0 && carrier < 4000 {
+            NSColor.systemYellow.withAlphaComponent(0.6).setStroke()
+            let marker = NSBezierPath(); let x = carrier/4000*bounds.width
+            marker.move(to:NSPoint(x:x,y:0)); marker.line(to:NSPoint(x:x,y:plotHeight)); marker.stroke()
+        }
+        let attrs:[NSAttributedString.Key:Any] = [.font:NSFont.systemFont(ofSize:9),.foregroundColor:NSColor.secondaryLabelColor]
+        ("0 Hz" as NSString).draw(at:NSPoint(x:2,y:plotHeight+2),withAttributes:attrs)
+        ("2 kHz" as NSString).draw(at:NSPoint(x:bounds.width/2-15,y:plotHeight+2),withAttributes:attrs)
+        ("4 kHz" as NSString).draw(at:NSPoint(x:bounds.width-32,y:plotHeight+2),withAttributes:attrs)
+    }
+}
+
 final class Console {
     let scroll = NSScrollView()
     let text = NSTextView()
@@ -158,6 +209,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let at = Console(height:64), serial = Console(height:64), training = Console(height:28), log = Console(height:130)
     let rxWire = Console(height:54), txWire = Console(height:54)
     let histogram = SignalPlot(), spectrum = SignalPlot()
+    let rxWaterfall = Waterfall(), txWaterfall = Waterfall()
     let carrierLabel = NSTextField(labelWithString:"Carrier: waiting")
     let listen = NSPopUpButton()
     let audioEngine = AVAudioEngine(), player = AVAudioPlayerNode()
@@ -238,6 +290,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         func tab(_ title:String,_ view:NSView) { let item = NSTabViewItem(identifier:title); item.label = title; item.view = view; diagnostics.addTabViewItem(item) }
         tab("Signal",pair(panel("Received constellation · teal samples / orange decisions",[constellation]),panel("Eye · follows selected direction",[eye])))
         tab("Audio",pair(panel("RX amplitude histogram · −32768 to +32767",[histogram]),panel("RX spectrum · 0 to 4000 Hz",[spectrum])))
+        for plot in [rxWaterfall,txWaterfall] { plot.heightAnchor.constraint(equalToConstant:100).isActive = true }
+        tab("Waterfall",pair(panel("RX · newest at top · −90 to 0 dBFS",[rxWaterfall]),panel("TX · 31.25 Hz bins · 128 updates",[txWaterfall])))
         tab("Process log",log.scroll)
         diagnostics.heightAnchor.constraint(equalToConstant:160).isActive = true
         let items: [NSView] = [
@@ -350,7 +404,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let paths = s["ports"] as? [String:String] ?? [:]
         atPath.stringValue = paths["at"] ?? ""; dataPath.stringValue = paths["data"] ?? ""
         let currentEpoch = s["epoch"] as? Int ?? 0
-        if currentEpoch != epoch { epoch = currentEpoch; eventSeen = 0; history = [] }
+        if currentEpoch != epoch { epoch = currentEpoch; eventSeen = 0; history = []; rxWaterfall.reset(); txWaterfall.reset() }
         let events = s["events"] as? [String] ?? [], count = s["event_count"] as? Int ?? 0
         for (i,event) in events.enumerated() where count-events.count+i >= eventSeen { history.append(event) }
         eventSeen = count; history = Array(history.suffix(120)); training.replace(history.joined(separator:"\n"))
@@ -359,6 +413,13 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard !frozen else { return }
         let audio = s["audio"] as? [[Double]] ?? [[],[]]
         if audio.count == 2 { rx.samples = audio[0]; tx.samples = audio[1]; eye.samples = audio[max(0,eyeDir.indexOfSelectedItem)]; histogram.samples = audio[0]; spectrum.samples = audio[0] }
+        let listening = s["listen"] as? [[String:Any]] ?? []
+        if audio.count == 2 && listening.count == 2 {
+            rxWaterfall.carrier = s["rx_carrier"] as? Double ?? 0
+            txWaterfall.carrier = s["tx_carrier"] as? Double ?? 0
+            rxWaterfall.update(audio[0],count:listening[0]["count"] as? Int ?? 0)
+            txWaterfall.update(audio[1],count:listening[1]["count"] as? Int ?? 0)
+        }
         constellation.points = s["iq"] as? [[[Double]]] ?? [[],[]]
         eye.pcm = (s[eyeDir.indexOfSelectedItem == 0 ? "rx_pcm" : "tx_pcm"] as? Int ?? 0)>0
         eye.baud = Double(s[eyeDir.indexOfSelectedItem == 0 ? "rx_baud" : "tx_baud"] as? Int ?? 3200); if eye.baud < 300 { eye.baud = 3200 }

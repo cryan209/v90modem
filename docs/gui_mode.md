@@ -136,3 +136,16 @@ region (Figure 6). A suitable measured constellation can show displacement
 around data points, but our existing QAM reports do not implement or identify
 V.61. Future ASVD inspection would need its own receiver tap before voice
 subtraction. V.61 §5.1 specifies its carrier and modulation rate.
+
+## Spectrum waterfall
+
+The native Waterfall tab shows RX and TX together in the existing diagnostic
+area, without enlarging the window. Frequency runs from 0 to 4000 Hz;
+newest rows appear at the top. Each row uses the latest 256 samples with a
+Hann window and 129 bins (31.25 Hz spacing). Colour is fixed from −90 to
+0 dBFS, rather than normalized per row, so level changes remain visible.
+Yellow lines mark the recovered RX / nominal TX carrier where available.
+Each direction holds exactly 128 rows in memory, overwriting old rows.
+Duplicate sample counters add no rows; call reset clears the display, and
+Freeze pauses it. Rows represent received GUI updates rather than a calibrated
+time axis; skipped telemetry is not reconstructed or recorded.
