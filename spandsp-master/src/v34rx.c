@@ -4757,7 +4757,7 @@ static void v90_enter_phase3_from_info1a(v34_rx_state_t *s)
     /*endif*/
     v34_force_phase3_rx(owner);
 
-    if (!phase3_rx_dump_fp)
+    if (!phase3_rx_dump_fp && !getenv("ME_GUI_PORT"))
     {
         phase3_rx_dump_fp = fopen("/tmp/v90_phase3_rx.raw", "wb");
         phase3_rx_dump_count = 0;

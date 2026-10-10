@@ -40,7 +40,8 @@ typedef enum {
     ME_MOD_V22BIS,   /* Full V.22bis duplex (fallback) */
     ME_MOD_X2,      /* Proprietary digital-side asymmetric/symmetric x2 */
     ME_MOD_V32BIS,  /* V.32bis/V.32 duplex, 4800-14400 bit/s */
-    ME_MOD_CLEAR    /* the DS0 as a bit pipe, no V.8: clear channel, V.120 or V.110 */
+    ME_MOD_CLEAR,   /* the DS0 as a bit pipe, no V.8: clear channel, V.120 or V.110 */
+    ME_MOD_V21      /* V.21 duplex 300 bit/s FSK */
 } me_modulation_t;
 
 /* G.711 encoding law for the RTP stream */

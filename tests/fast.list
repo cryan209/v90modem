@@ -608,3 +608,6 @@ python3 tools/pcm_ber_regression.py
 ./v34_duplex_test 2400 9600 ulaw eye
 ./v34_duplex_test 3200 21600 alaw eye
 ./v32bis_duplex_test --eye-only
+
+# V.21 §§2–4, 7(a): complementary 300-bit/s FSK channels, async data.
+./engine_pair_test --expect V21 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-at AT+MS=V21,0,300,300

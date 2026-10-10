@@ -372,6 +372,7 @@ static const char *me_mod_to_str(me_modulation_t mod)
     case ME_MOD_V91:    return "V91";
     case ME_MOD_V90:    return "V90";
     case ME_MOD_V34:    return "V34";
+    case ME_MOD_V21: return "V21";
     case ME_MOD_V22BIS: return "V22BIS";
     case ME_MOD_V32BIS: return "V32BIS";
     case ME_MOD_CLEAR:  return "CLEAR";      /* CLEAR, V120 or V110 */
@@ -974,6 +975,16 @@ static v25_automode_rx_t g_v25am;
  * v32bis_engine_pair_test's automode case.  While V.21 channel 1 is on the
  * line, nothing the V.22bis receiver reports is S1/SB1. */
 static v22bis_state_t *g_v22bis  = NULL;
+/* V.21 §§2–4, 7(a): binary FSK, caller channel 1, answerer channel 2.
+ * The vendored presets define the normative frequencies and 300 bit/s rate.
+ * Fixed V.21 is selected out of band; no V.8/QAM training is involved. */
+static fsk_tx_state_t *g_v21_tx;
+static fsk_rx_state_t *g_v21_rx;
+static void v21_release(void)
+{
+    if (g_v21_tx) { fsk_tx_free(g_v21_tx); g_v21_tx = NULL; }
+    if (g_v21_rx) { fsk_rx_free(g_v21_rx); g_v21_rx = NULL; }
+}
 
 static bool v22bis_status_is_v8_fsk(int bit)
 {
@@ -2340,7 +2351,7 @@ static bool me_v90_analogue_role(void)
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-    bool x2, x2_symmetric, v90, v34, v32, v22, v92, k56, v91;
+    bool x2, x2_symmetric, v90, v34, v32, v22, v92, k56, v91, v21;
     bool v32bis_ok;          /* V.32bis reachable at all (V.8 or Annex A) */
     bool clear, v120, r56;   /* no V.8: clear channel or V.120 on the DS0 */
     bool v110;               /* no V.8: V.110 async rate adaption */
@@ -2360,6 +2371,7 @@ static int me_offer_bits(bool v22, bool v32, bool v34, bool v90)
 static void me_offer_describe(const me_offer_t *o, bool k56, bool v91,
                               char *buf, size_t len)
 {
+    if (o->v21) { snprintf(buf, len, "V21 300, no V.8"); return; }
     if (o->v110) {
         snprintf(buf, len, "V110 %d async, no V.8", o->v110_rate);
         return;
@@ -2387,6 +2399,7 @@ static const char *me_offer_str(void)
     me_offer_t o;
 
     memset(&o, 0, sizeof(o));
+    o.v21 = strcmp(g_mode_name, "v21") == 0;
     o.v90 = g_advertise_v90;
     o.v34 = g_advertise_v34;
     o.v32 = g_advertise_v32;
@@ -2419,6 +2432,9 @@ static bool me_offer_from_mode(const char *mode, bool automode, me_offer_t *o)
         o->x2 = true;
         o->v90 = false;
         o->name = "x2";
+    } else if (strcmp(mode, "v21") == 0) {
+        o->v90 = o->v34 = false; o->v21 = true; o->name = "v21";
+        return true;
     } else if (strcmp(mode, "v34") == 0) {
         o->v90 = false;
         o->name = "v34";
@@ -2556,6 +2572,7 @@ static bool me_offer_apply_limits(me_offer_t *o, const int *l, bool analogue)
     int umin = analogue ? l[LIM_MIN_TX] : l[LIM_MIN_RX];
     int umax = analogue ? l[LIM_MAX_TX] : l[LIM_MAX_RX];
 
+    if (o->v21) { const int rates[] = {300}; return lim_symmetric(rates, 1, l); }
     if (o->v110) {
         /* The highest Table 8 rate the bounds admit both ways: V.110 runs
          * one user rate in both directions. */
@@ -7272,6 +7289,24 @@ static void v34_put_bit_cb(void *user_data, int bit)
 /* V.8 result callback                                                 */
 /* ------------------------------------------------------------------ */
 
+static int v21_get_bit(void *user)
+{
+    (void)user;
+    int bit = g_state == ME_DATA ? ds_tx_get_bit(&g_data_stack) : 1;
+    return bit < 0 ? 1 : bit;
+}
+static void v21_put_bit(void *user, int bit)
+{
+    (void)user;
+    if (bit == SIG_STATUS_CARRIER_UP)
+        on_training_complete(ME_MOD_V21, 300, "V.21");
+    else if (bit == SIG_STATUS_CARRIER_DOWN && g_state == ME_DATA)
+        me_hangup();
+    else if (bit >= 0 && g_state == ME_DATA)
+        ds_rx_put_bit(&g_data_stack, bit);
+}
+
+
 /* Start V.22bis training — shared helper used by V.8 result handler */
 static void start_v22bis_training(void)
 {
@@ -9110,6 +9145,7 @@ void me_destroy(void)
     if (g_k56)      { k56flex_v8bis_free(g_k56);                 g_k56      = NULL; }
     if (g_v8bis)    { v8bis_modem_free(g_v8bis);                 g_v8bis    = NULL; }
     if (g_k56_train){ free(g_k56_train);                         g_k56_train = NULL; }
+    v21_release();
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
     v32bis_release_locked();
     cleanup_v34_v90_training_locked();
@@ -9458,6 +9494,21 @@ void me_on_sip_connected(void)
         return;
     }
 
+    if (strcmp(g_mode_name, "v21") == 0) {
+        v21_release();
+        me_decide_data_framing();
+        g_mod = ME_MOD_V21; g_state = ME_TRAINING;
+        g_phase_start_ms = trace_now_ms();
+        data_stack_prepare(300);
+        g_v21_tx = fsk_tx_init(NULL, &preset_fsk_specs[g_calling_party ? FSK_V21CH1 : FSK_V21CH2], v21_get_bit, NULL);
+        g_v21_rx = fsk_rx_init(NULL, &preset_fsk_specs[g_calling_party ? FSK_V21CH2 : FSK_V21CH1], FSK_FRAME_MODE_ASYNC, v21_put_bit, NULL);
+        bool ready = g_v21_tx && g_v21_rx;
+        pthread_mutex_unlock(&g_state_mtx);
+        trace_phase("V21 300: awaiting opposite-channel FSK carrier");
+        if (!ready) me_hangup();
+        return;
+    }
+
     if (g_offer_clear || g_offer_v120 || g_offer_v110) {
         int rate = me_clear_start_locked();
 
@@ -9545,6 +9596,7 @@ void me_on_sip_disconnected_status(int sip_status)
     g_v8bis_to_v8 = false;
 
     if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
+    v21_release();
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
     v32bis_release_locked();
     cleanup_v34_v90_training_locked();
@@ -11957,6 +12009,8 @@ skip_8k_codewords:
             pthread_mutex_unlock(&g_state_mtx);
         } else if (g_mod == ME_MOD_V32BIS) {
             v32bis_engine_rx(amp, len);
+        } else if (g_v21_rx) {
+            fsk_rx(g_v21_rx, amp, len);
         } else if (g_v22bis) {
             v25_ta_rx(amp, len);
             v22bis_rx(g_v22bis, amp, len);
@@ -13870,6 +13924,8 @@ static void me_tx_audio_impl(int16_t *amp, int len)
             }
         } else if (g_mod == ME_MOD_V32BIS) {
             v32bis_engine_tx(amp, len);
+        } else if (g_v21_tx) {
+            fsk_tx(g_v21_tx, amp, len);
         } else if (g_v22bis)
             v22bis_tx(g_v22bis, amp, len);
         break;
@@ -13916,6 +13972,8 @@ static void me_tx_audio_impl(int16_t *amp, int len)
             }
         } else if (g_mod == ME_MOD_V32BIS) {
             v32bis_engine_tx(amp, len);
+        } else if (g_v21_tx) {
+            fsk_tx(g_v21_tx, amp, len);
         } else {
             /* V.22bis duplex downstream TX */
             if (g_v22bis)
@@ -15544,7 +15602,13 @@ void me_get_diag_snapshot(me_diag_snapshot_t *snapshot)
     snprintf(snapshot->rx_signal, sizeof(snapshot->rx_signal), "%s", g_v34 ? v34_rx_stage_name(v34_get_rx_stage(g_v34)) : "unavailable");
     const char *tx_signal = g_v90 ? me_v90_tx_stage_name(v90_get_tx_phase(g_v90)) : NULL;
     snprintf(snapshot->tx_signal, sizeof(snapshot->tx_signal), "%s", tx_signal ? tx_signal : g_v34 ? v34_tx_stage_name(v34_get_tx_stage(g_v34)) : "unavailable");
-    if (g_mod == ME_MOD_V22BIS) {
+    if (g_mod == ME_MOD_V21) {
+        snapshot->rx_baud = snapshot->tx_baud = 300;
+        snapshot->rx_carrier = g_calling_party ? 1750 : 1080;
+        snapshot->tx_carrier = g_calling_party ? 1080 : 1750;
+        snprintf(snapshot->rx_signal, sizeof(snapshot->rx_signal), "%s", g_state == ME_DATA ? "FSK_DATA" : "FSK_CARRIER_SEARCH");
+        snprintf(snapshot->tx_signal, sizeof(snapshot->tx_signal), "%s", g_state == ME_DATA ? "FSK_DATA" : "FSK_MARK");
+    } else if (g_mod == ME_MOD_V22BIS) {
         snprintf(snapshot->rx_signal, sizeof(snapshot->rx_signal), "%s",
                  g_v22bis_trained ? "DATA" : g_v22bis_carrier_seen ? "CARRIER_TRAINING" : "CARRIER_SEARCH");
         snprintf(snapshot->tx_signal, sizeof(snapshot->tx_signal), "%s", g_state == ME_DATA ? "DATA" : "V22BIS_TRAINING");

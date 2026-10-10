@@ -22,6 +22,8 @@ import webbrowser
 
 
 LOOPBACK_PROFILES = {
+    'v21': ('V.21 · 300', 'V21,0,300,300'),
+    'v90': ('V.90 · analogue ↔ digital', 'V90,0'),
     'v22-1200': ('V.22 · 1200', 'V22B,0,1200,1200'),
     'v22': ('V.22bis · 2400', 'V22B,0,2400,2400'),
     'v32': ('V.32 · 9600', 'V32,0,9600,9600'),
@@ -80,8 +82,8 @@ def main():
     if loopback:
         env.setdefault('ME_DATA_FRAMING', 'v14')
         mode = args[args.index('--mode')+1] if '--mode' in args else 'v22'
-        if mode not in ('v22', 'v22-1200', 'v32', 'v32bis', 'v34'):
-            raise SystemExit('GUI loopback supports v22, v22-1200, v32, v32bis and v34; PCM roles require a different test rig')
+        if mode not in ('v21', 'v90', 'v22', 'v22-1200', 'v32', 'v32bis', 'v34'):
+            raise SystemExit('GUI loopback supports v21, v22, v22-1200, v32, v32bis, v34 and v90')
         if '--mode' not in args: args += ['--mode', mode]
         caller_port, peer_port = local_sip_ports()
         args += ['--bind-addr', '127.0.0.1', '--local-port', str(caller_port), '--sip-server', f'127.0.0.1:{peer_port}', '--auto-answer', '0']
@@ -220,8 +222,16 @@ def main():
                 with lock:
                     generation += 1; telemetry.clear(); peer_telemetry.clear()
                     test['status'] = 'Starting fresh local pair · '+LOOPBACK_PROFILES[profile][0]
-                child = subprocess.Popen(args,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
-                peer = subprocess.Popen(peer_args,env=peer_env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+                # V.90 §5: unlike QAM pairs, PCM needs complementary roles.
+                caller_env = dict(env, ME_V90_ROLE='analogue' if profile == 'v90' else 'digital')
+                answer_env = dict(peer_env, ME_V90_ROLE='digital')
+                caller_args, answer_args = list(args), list(peer_args)
+                if profile == 'v90':
+                    caller_args[caller_args.index('--mode')+1] = 'v90'
+                    answer_args[answer_args.index('--mode')+1] = 'v90'
+                    answer_env['ME_V90_JA_HEURISTIC_FALLBACK_MS'] = '0'
+                child = subprocess.Popen(caller_args,env=caller_env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+                peer = subprocess.Popen(answer_args,env=answer_env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
                 for process,prefix in [(child,b''),(peer,b'[peer] ')]:
                     threading.Thread(target=log_reader,args=(process,prefix),daemon=True).start()
                 launch_ports()
@@ -262,7 +272,11 @@ def main():
                     value['streams'] = {k: list(v) for k, v in streams.items()}
                     value['ports'] = ports
                     value['exit'] = None if test['busy'] else child.poll()
-                    value['loopback'] = dict(test, ready=all(name in fds for name in ('at','data','peer_at','peer_data')), peer_exit=peer.poll(), peer_state=peer_telemetry.get('state', 0)) if peer is not None else None
+                    pair_ready = bool(value.get('data_ready') and peer_telemetry.get('data_ready'))
+                    if not pair_ready: test['connected_since'] = None
+                    elif test.get('connected_since') is None: test['connected_since'] = time.monotonic()
+                    settled = pair_ready and (test.get('profile') != 'v90' or time.monotonic()-test['connected_since'] >= 1)
+                    value['loopback'] = dict(test, pattern_ready=settled, ready=all(name in fds for name in ('at','data','peer_at','peer_data')), peer_exit=peer.poll(), peer_state=peer_telemetry.get('state', 0)) if peer is not None else None
                 self.respond(200, json.dumps(value).encode())
             else:
                 self.respond(404, b'{}')
@@ -285,7 +299,7 @@ def main():
                     with lock:
                         if telemetry.get('state', 0) != 0 or peer_telemetry.get('state', 0) != 0 or peer.poll() is not None:
                             test_lock.release(); raise ValueError('Hang up first; local peer must be running')
-                        test.update(busy=True, status='Configuring both local modems', echoed=0)
+                        test.update(busy=True, status='Configuring both local modems', echoed=0, profile=profile, connected_since=None)
                     threading.Thread(target=start_test,args=(profile,),daemon=True).start()
                     return self.respond(200, b'{}')
                 name = req['port']

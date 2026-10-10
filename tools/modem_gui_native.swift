@@ -448,7 +448,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func render(_ s:[String:Any]) {
         let states = ["Idle","Dialling","V.8 negotiation","Training","Connected","Hanging up"]
-        let mods = ["—","V.91","V.90","V.34","V.22bis","x2","V.32bis","Clear channel"]
+        let mods = ["—","V.91","V.90","V.34","V.22bis","x2","V.32bis","Clear channel","V.21"]
         let state = s["state"] as? Int ?? 0, mod = s["modulation"] as? Int ?? 0
         let dataReady = (s["data_ready"] as? Int ?? 0)>0
         let call = (s["age"] as? Double ?? 9)>2 ? "Telemetry stale" : states.indices.contains(state) ? (state == 4 && !dataReady ? "Carrier up · negotiating link" : states[state]) : "Starting"
@@ -467,8 +467,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let busy = local["busy"] as? Bool ?? false
             startLoop.isEnabled = !busy && state == 0 && (local["peer_state"] as? Int ?? 0) == 0 && (local["ready"] as? Bool ?? false)
             loopbackMode.isEnabled = startLoop.isEnabled
-            pattern.isEnabled = dataReady && !busy
-            loopbackStatus.stringValue = dataReady ? "Echoed \(local["echoed"] as? Int ?? 0) bytes" : local["status"] as? String ?? ""
+            pattern.isEnabled = dataReady && !busy && (local["pattern_ready"] as? Bool ?? false)
+            loopbackStatus.stringValue = dataReady && !pattern.isEnabled ? "Waiting for both carriers to settle" : dataReady ? "Echoed \(local["echoed"] as? Int ?? 0) bytes" : local["status"] as? String ?? ""
         }
         let streams = s["streams"] as? [String:[[Any]]] ?? [:]
         at.update(streams["at"] ?? [],binary:false); serial.update(streams["data"] ?? [],binary:true); log.update(streams["log"] ?? [],binary:false)
@@ -492,11 +492,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             rxWaterfall.update(audio[0],count:listening[0]["count"] as? Int ?? 0)
             txWaterfall.update(audio[1],count:listening[1]["count"] as? Int ?? 0)
         }
+        constellation.kind = mod == 8 ? .recoveredEye : .constellation
+        constellation.eyeMessage = "V.21 uses frequency shifts · no QAM constellation"
         constellation.points = s["iq"] as? [[[Double]]] ?? [[],[]]
         eye.pcm = (s[eyeDir.indexOfSelectedItem == 0 ? "rx_pcm" : "tx_pcm"] as? Int ?? 0)>0
         eye.baud = Double(s[eyeDir.indexOfSelectedItem == 0 ? "rx_baud" : "tx_baud"] as? Int ?? 3200); if eye.baud < 300 { eye.baud = 3200 }
         eye.carrier = s[eyeDir.indexOfSelectedItem == 0 ? "rx_carrier" : "tx_carrier"] as? Double ?? 0; spectrum.carrier = s["rx_carrier"] as? Double ?? 0
         carrierLabel.stringValue = eye.pcm ? "PCM eye · 8,000 samples/s" : eye.carrier > 0 ? String(format:"%@ · %@ %.1f Hz · %g baud",eye.pcm ? "PCM eye" : "QAM eye",eyeDir.indexOfSelectedItem == 0 ? "RX recovered carrier" : "TX nominal carrier",eye.carrier,eye.baud) : "RX carrier: waiting for QAM receiver"
+        if mod == 8 { carrierLabel.stringValue = "V.21 FSK · 300 baud · RX centre \(Int(s["rx_carrier"] as? Double ?? 0)) Hz" }
         eye.phase = 0
         let eyeCount = s["eye_count"] as? Int ?? 0
         if eyeCount != eyeCountSeen { eyeCountSeen = eyeCount; if eyeCount > 0 { eyeUpdated = Date() } }
@@ -505,6 +508,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let available = eyeDir.indexOfSelectedItem == 0 && !eye.pcm && Date().timeIntervalSince(eyeUpdated)<1 && (s["age"] as? Double ?? 9)<1
         eye.recovered = available ? (s["eye"] as? [[Double]] ?? []).filter { $0.count == 5 } : []
         eye.eyeMessage = eyeDir.indexOfSelectedItem == 1 ? "TX has no receiver clock · select Line estimate" : eye.pcm ? "PCM recovery tap unavailable · select Line estimate" : "Waiting for live recovered T/2 samples"
+        if mod == 8 { eye.kind = .recoveredEye; eye.recovered = []; eye.eyeMessage = "FSK · use waveform, spectrum or waterfall" }
         for plot in [rx,tx,constellation,eye,histogram,spectrum] { plot.needsDisplay = true }
         let values = s["wire"] as? [[String:Any]] ?? []
         for (i,console) in [rxWire,txWire].enumerated() where values.indices.contains(i) {

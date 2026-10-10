@@ -194,12 +194,19 @@ byte value from 00 through FF; returned bytes appear in the serial console.
 The echoed-byte counter counts far-end PTY bytes successfully written back,
 not a BER measurement or a guarantee that every sent byte arrived correctly.
 
-Profiles cover V.22 at 1200, V.22bis at 2400, V.32 at 9600, V.32bis at
-14400, and V.34 at 9600/21600. Defaults use V.14 framing on both ends;
+Verified echo profiles cover V.21 FSK at 300, V.22 at 1200, V.22bis at 2400,
+V.32 at 9600, V.32bis at 14400, and V.34 at 9600/21600. Defaults use V.14 framing on both ends;
 an explicitly set `ME_DATA_FRAMING` is inherited by both. `--mode` can set
-an initial V.22/V.32/V.34 offer; the Local test selector controls each test.
-V.90/V.92 PCM roles need a different digital/analogue fixture, so they are
-not presented as interchangeable same-mode peers. This is a two-modem local
+an initial offer; the Local test selector controls each test.
+The V.90 profile starts an analogue caller and digital answerer
+(V.90 §5), with V.8/PCM training displayed live. It uses the deterministic
+engine-pair fixture's strict Ja setting on the digital peer. The pattern button
+waits until both ends report data ready, then allows one second for the PCM
+carrier to settle. Each V.90 process also starts with its V.90 power-on offer;
+starting it as V.22 and only changing +MS did not complete PCM training.
+The settled SIP pair has returned the complete all-byte pattern; immediate writes at CONNECT produced errors
+in an earlier run. This is a GUI test readiness delay, not DSP sample buffering.
+V.92 PCM upstream is not included. This is a two-modem local
 SIP/G.711 test, not an implementation of V.54 analogue/digital loopbacks.
 
 Both modem logs and telemetry stay in bounded memory, including on the peer,
@@ -209,9 +216,12 @@ modems and removes temporary PTYs. SIP server/credentials/network port/profile
 options are rejected in loopback mode, which owns its localhost addressing.
 Optional explicit diagnostic capture settings retain their usual effect.
 
-`make gui-loopback-test` verifies each profile over real localhost SIP,
+`make gui-loopback-test` verifies all eight profiles over real localhost SIP,
 byte-exact echoes including all 256 byte values, repeated calls and PTY
-cleanup. This does not establish hardware interoperability.
+cleanup. `python3 tools/gui_loopback_test.py v90` runs just the strict
+V.90 payload check. The deterministic
+V.90 `engine_pair_test` continues to exchange payloads successfully.
+This does not establish hardware interoperability.
 
 The initial reuse-of-processes experiment passed 1200 bit/s but the next
 2400 bit/s call ended with NO CARRIER. The loopback runner therefore isolates
@@ -222,3 +232,9 @@ remain in the same window while modem processes restart.
 
 The 33600 bit/s local preset did not train with the default offers and is
 excluded from the selector. No DSP negotiation settings are changed by this UI.
+
+V.21 uses the vendored FSK channels at 300 baud (V.21 §§2–4, 7(a)).
+The FSK view labels its nominal centre frequency and leaves QAM/eye panels
+explicitly unavailable. V.21's 980/1180 Hz and 1650/1850 Hz shifts are visible
+in the audio spectrum and waterfall. Native and browser monitoring suppress
+the automatic V.90 Phase 3 raw dump as well as ordinary V.34 dumps.

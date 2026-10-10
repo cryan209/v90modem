@@ -96,7 +96,8 @@ static void test_parser(void)
     parse_bad("=K56,1,0,62000");
     parse_ok("=X2,1,0,64000", "X2", 1, 0, 64000, 0, 64000);
     parse_bad("=V91,1,0,64001");
-    parse_bad("=V21");
+    parse_ok("=V21,0,300,300", "V21", 0, 300, 300, 300, 300);
+    parse_bad("=V21,0,1200,1200");
     parse_ok("=V34+", "V34", 1, 0, 0, 0, 0);
     parse_ok("=V34B,0", "V34", 0, 0, 0, 0, 0);
     parse_ok("=HST,1,0,16800", "HST", 1, 0, 16800, 0, 16800);
@@ -200,7 +201,7 @@ static void test_parser(void)
               && strlen(help) < sizeof(help) - 1, "+MS$ help rows and current setting");
     }
     at_ms_format_test(buf, sizeof(buf));
-    check(!strcmp(buf, "+MS: (V22,V22B,V32,V32B,HST,V32TERBO,VFC,V34,K56,V90,V92,V91,X2,X2S,CLEAR,V120,V110),(0,1),"
+    check(!strcmp(buf, "+MS: (V21,V22,V22B,V32,V32B,HST,V32TERBO,VFC,V34,K56,V90,V92,V91,X2,X2S,CLEAR,V120,V110),(0,1),"
                        "(0-64000),(0-64000),(0-64000),(0-64000)"), buf);
 }
 
@@ -303,7 +304,7 @@ static int test_engine(void)
     expect("ATE0", "OK");
     expect_offer(V8_MOD_V90 | V8_MOD_V34 | V8_MOD_V32 | V8_MOD_V22, "V.90|V.34|V.32|V.22 by default");
     expect("AT+MS?", "+MS: V90,1,0,0,0,0");
-    expect("AT+MS=?", "+MS: (V22,V22B,V32,V32B,HST,V32TERBO,VFC,V34,K56,V90,V92,V91,X2,X2S,CLEAR,V120,V110),(0,1)");
+    expect("AT+MS=?", "+MS: (V21,V22,V22B,V32,V32B,HST,V32TERBO,VFC,V34,K56,V90,V92,V91,X2,X2S,CLEAR,V120,V110),(0,1)");
     expect_describe("V90|V34|V32|V22");
     expect("AT+MS$", "K56      56,56K,K56FLEX   1         60000  K56flex V.8bis, then V.90");
     expect("AT+MS$", "Current: V90,1,0,0,0,0");

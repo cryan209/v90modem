@@ -29,8 +29,9 @@ static const struct {
 } carriers[] = {
     /* V.22 proper: the V.22bis datapump held at 1200 bit/s, which never
      * sends S1 and so trains as a V.22 modem against either (V.22bis
-     * 6.3.1.1.1/6.3.1.2.1).  V.22 is the bottom of the ladder, so automode
+     * 6.3.1.1.1/6.3.1.2.1).  V.22 is the bottom of the V.8 ladder, so automode
      * changes nothing. */
+    { "V21", { NULL }, "v21", "v21", 300, "V.21 (300), no V.8" },
     { "V22",  { NULL },                       "v22-1200", "v22-1200", 1200,
       "V.22 (1200)" },
     { "V22B", { "V22BIS", NULL },             "v22", "v22",  2400,
