@@ -46,6 +46,17 @@ def main():
                         help='with --pty-source, queue at most one host byte per this many '
                              'bearer samples (0: one burst). Without error control nothing '
                              'stops a burst faster than the Courier DTE rate overrunning it')
+    parser.add_argument('--dsp-watch', metavar='ADDR',
+                        help='record every native DSP write to this data cell (hex), '
+                             'replacing the default 039f watch')
+    parser.add_argument('--native-arg', action='append', default=[],
+                        help='extra argument for the Courier emulator run (repeatable)')
+    parser.add_argument('--courier-at', default='S39=8',
+                        help="extra Courier AT settings inserted before dialling. The default "
+                             "restores the factory V.34 transmit level index: the emulated "
+                             "unit's NVRAM holds S39=0, which its own parser rejects (1..29) "
+                             "and which wraps its transmit word above 4800 bit/s. Pass '' "
+                             "for the unmodified NVRAM profile")
     parser.add_argument('--pty-source', action='store_true',
                         help='send and receive through the real engine PTY after CONNECT')
     parser.add_argument('--fixed-native-rate', action='store_true',
@@ -138,9 +149,13 @@ def main():
             command = list(command)
             pos = command.index('--at') + 1
             command[pos] = command[pos].replace('ATX1', 'ATE0&M0&H0X1')
+            if args.courier_at:
+                command[pos] = command[pos].replace('DT', args.courier_at + 'DT', 1)
             if not args.fixed_native_rate:
                 command[pos] = command[pos].replace('&U26&N39', '')
-            command += ['--send-after-connect', args.message]
+            if args.dsp_watch and '--dsp-write-watch' in command:
+                command[command.index('--dsp-write-watch') + 1] = args.dsp_watch
+            command += ['--send-after-connect', args.message, *args.native_arg]
             if args.capture_native or args.capture_receiver:
                 assert command[1:3] == ['-m', 'courier_emu']
                 command = [command[0], str(ROOT / 'tools/x2_courier_capture.py'),
@@ -176,6 +191,7 @@ def main():
         checks['engine_connect'] = b'CONNECT ' in received
         checks['pty_source_queued'] = result['engine']['source_queued'] == len(args.host_message.encode())
     result['checks'] = checks
+    result['courier_at'] = args.courier_at
     result['payload'] = {'expected': args.message,
                          'host_pace_samples': args.host_pace_samples,
                          'host_expected': args.host_message,

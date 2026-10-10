@@ -580,3 +580,12 @@ judge it.
 A fresh native call with the fix and the paced 940-byte source passes all
 seven checks, with both directions complete through the real PTYs
 (`artifacts/x2-ds-pace-20261010-fixed`).
+
+## Upstream above 4800, 10 October 2026
+
+The 4800 default cap is gone. The engine offers every V.34 upstream rate and
+the peer's W2 selects. The cap stood in for a peer misconfiguration: the
+emulated Courier's NVRAM holds S39 (the V.34 transmit level index) at 0, an
+index its own parser rejects. At its factory S39=8, every rate it offers
+(7200..24000) carries a 3500-byte source exactly. The trace and the
+qualification table are in `docs/x2_v34_upstream_review.md`.

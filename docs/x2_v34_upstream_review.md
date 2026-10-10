@@ -327,3 +327,65 @@ transmit power, and do not resolve the later MP/data discontinuity. Native
 mapper captures now also include DP=7 normalization cells 03E7 and 03F5 for
 further power-control analysis; direct-address operands must be resolved
 against their live DP rather than inferred from the mapper's other cells.
+
+## The 4800 cap removed: the peer's transmit level was mis-set, 10 October 2026
+
+The output wrap above is real Courier behaviour, but it is driven by a
+configuration value the emulated unit should not have. Traced end to end:
+
+- DSP host command **tag 0x1A** (handler 822A, dispatch base 83E9) copies the
+  host's word into the transmit gain cells 0392 and FFF0.
+- The supervisor sends it from C9B24..C9B39 (segment C800). The gain is
+  `table[index] - 0x300` (0x300 subtracted while [014B] bit 0 is clear). The
+  table at physical C9B50 runs from 0x7FFF (0 dB) down in 1 dB steps; index 8
+  is 13014.
+- The index is `[072B]` if [0D74] bit 2 is set, `[072A]` if [04F2] is
+  nonzero, and otherwise `[04B5]`, which is **S39** (S-register block based at
+  048E; S56 is 04C6). In these calls [0D74]=0 and [04F2]=0, so S39 decides.
+  The alternatives are local AT/NVRAM options as well. Nothing the far end
+  sends reaches this level: x2 has no INFO1a power-reduction exchange.
+- At boot S39 is loaded with its factory default **8** (from [0CD8]), then
+  overwritten with **0** when the stored NVRAM profile is restored (loop
+  88065..). The AT parser for this register (CA2DB) only accepts 1..29. This
+  is the board whose NVRAM was never given `AT&F1, AT+SF, AT&W`
+  (courier-emu `docs/idsdl-extended-registers.md`). Its DTMF levels read zero
+  for the same reason.
+
+S39 scales the Courier's whole call, not only data. At S39=8 its Phase 3 TRN
+arrives about 8.3 dB lower (RMS 2342 against 6121) and the data gain is 12246
+instead of 31999, so the shifted output word no longer wraps.
+
+Qualification against **committed** courier-emu (dbcb0a0) with an unmodified
+native runtime: `--courier-at S39=8`, a 3500-byte Courier source, the engine
+PTY, and a short downstream message. Every rate passes all seven checks, with
+100% B1 fit:
+
+| upstream | result | evidence |
+|---|---|---|
+| 7200, 9600, 12000, 14400 | all 70 lines exact, host message complete | `artifacts/x2-s39q-20261010-{7200,9600,12000,14400}` |
+| 19200, 24000 | same | `artifacts/x2-s39q-20261010-{19200,24000}` |
+| 26400, 28800 offered | Courier selects 24000 (its MP mask 03FE tops out at N=10); passes | `artifacts/x2-s39q-20261010-{26400,28800}` |
+| default build, no environment | offers 33600, Courier selects 24000, passes | `artifacts/x2-final-20261010-default` |
+| default build, unmodified NVRAM (S39=0) | 24000 selected, B1 100%, **11 of 70 lines intact** | `artifacts/x2-final-20261010-nvram` |
+
+The engine therefore offers every V.34 rate by default, and the peer's W2
+decides (Draft 0.33 section 20). `ME_X2_UPSTREAM_MAX_RATE` remains as a cap.
+`tools/probe_x2_host_courier.py` configures the Courier at its factory S39=8;
+pass `--courier-at ''` for the raw NVRAM. A real peer with S39=0 would wrap
+the same way. The server cannot correct that, and 4800 is the only rate it
+carries cleanly.
+
+Two rig hazards found on the way:
+
+- An uncommitted change to courier-emu `native/c5x_core.cpp` (block-repeat
+  redirection moved into `ROPCODE`, XC condition latched at a delay slot) is
+  compiled into `.build/libcourier_c5x.dylib` whenever the tree builds. With
+  it, every 9600 call stalls after RECORD_TX (no upstream E, and the Courier
+  holds a constant-RMS signal). This happens with our 6 October engine too, and
+  committed courier-emu does not do it. Qualify against a clean courier-emu
+  worktree.
+- X2 started V.42 detection at the accepted MP, about 1.5 s before upstream
+  B1. T400 then ran off our transmitter, and the fallback reported
+  `CONNECT 32000` on calls whose upstream never acquired. As on V.90, T400 now
+  waits for the first upstream bit (V.42 7.2.1.3, bounded at 10 s), and x2
+  host CONNECT waits for DATA.

@@ -628,6 +628,7 @@ static bool valid_v34_bps(int bps)
  * ME_V90_DATA_BIT_ORDER=msb keeps the experiment available; scoped to V.90
  * so the V.22bis/V.34 fallback paths always keep spec order. */
 static me_modulation_t g_mod;   /* defined below with the engine state */
+static me_state_t g_state;      /* likewise */
 
 static int data_stack_pull_dte_byte(void *user_data)
 {
@@ -709,7 +710,9 @@ static void data_stack_link_event(void *user_data, ds_link_event_t event)
         ME_LOG("[ME] V.42 detection found no error-control peer; continuing in "
                "buffered V.14 mode (+ES fallback)\n");
         g_data_framing = DS_FRAMING_V14;
-        if (!g_data_connect_reported) {
+        /* x2 host: CONNECT waits for DATA (accepted MP/E and upstream B1),
+           which reports it now that the framing is V.14. */
+        if (!g_data_connect_reported && !(g_mod == ME_MOD_X2 && g_state != ME_DATA)) {
             g_data_connect_reported = true;
             di_on_connected(g_data_connect_rate);
         }
@@ -1018,7 +1021,7 @@ static void v22bis_put_bit_cb(void *user_data, int bit)
 /* Module state                                                        */
 /* ------------------------------------------------------------------ */
 
-static me_state_t      g_state     = ME_IDLE;
+static me_state_t      g_state     = ME_IDLE;   /* tentatively declared above the DTE callbacks */
 static me_modulation_t g_mod       = ME_MOD_NONE;   /* tentatively declared above the DTE callbacks */
 static pthread_mutex_t g_state_mtx;
 static bool            g_calling_party = false; /* false=answerer, true=caller */
@@ -7034,6 +7037,19 @@ static int me_span_flow_level(void)
     return level;
 }
 
+/* V.42 7.2.1.3: a deferred answerer T400 starts on the first received data bit. */
+static void me_data_rx_first_bit(void)
+{
+    if (!g_data_rx_first_bit_seen) {
+        g_data_rx_first_bit_seen = true;
+        if (g_data_t400_deferred) {
+            /* 0 = the configured/default T400, counted from here. */
+            ds_v42_restart_t400(&g_data_stack, ds_v42_t400_ms());
+            trace_phase("data RX first bit; V.42 T400 started");
+        }
+    }
+}
+
 static void v34_put_bit_cb(void *user_data, int bit)
 {
     (void)user_data;
@@ -7043,8 +7059,10 @@ static void v34_put_bit_cb(void *user_data, int bit)
          * Keep them behind the accepted-record/E/acquisition boundary. */
         if(bit>=0 && !g_x2.symmetric && g_x2_data_stack_started
            && g_x2_upstream_started && g_x2.stage==X2_PAYLOAD
-           && g_v34 && v34_v90_upstream_rx_acquired(g_v34))
+           && g_v34 && v34_v90_upstream_rx_acquired(g_v34)) {
+            me_data_rx_first_bit();
             ds_rx_put_bit(&g_data_stack,bit);
+        }
         return;
     }
     if (g_v34hdx_fax_control_started && di_fax_active()) {
@@ -7178,14 +7196,7 @@ static void v34_put_bit_cb(void *user_data, int bit)
         ME_LOG("[ME] V.34 status: %s (%d)\n", signal_status_to_str(bit), bit);
         return;
     }
-    if (!g_data_rx_first_bit_seen) {
-        g_data_rx_first_bit_seen = true;
-        if (g_data_t400_deferred) {
-            /* 0 = the configured/default T400, counted from here. */
-            ds_v42_restart_t400(&g_data_stack, ds_v42_t400_ms());
-            trace_phase("data RX first bit; V.42 T400 started");
-        }
-    }
+    me_data_rx_first_bit();
     ds_rx_put_bit(&g_data_stack, bit);
 }
 
@@ -8287,11 +8298,16 @@ static void me_x2_start_locked(void)
     if(symmetric)x2_session_init_symmetric(&g_x2,g_law==ME_LAW_ALAW && !g_x2_mu_control,!g_calling_party);
     else {
         x2_session_init(&g_x2);
-        /* x2 Draft 0.33 section 20: select N2 from the peer's W2 rates.
-         * Keep the current 4800-bit/s diagnostic default explicit; a higher
-         * rate still needs native payload qualification, not just B1 fit. */
+        /* x2 Draft 0.33 section 20: select N2 from the peer's W2 rates; by
+         * default we offer every V.34 rate and the peer's mask decides.  The
+         * old 4800 cap stood in for a peer defect: the emulated Courier's
+         * NVRAM holds S39=0, an index its own AT parser rejects (1..29),
+         * which drives its V.34 transmit gain to 31999 and wraps its signed
+         * output word above 4800.  At its factory S39=8 every rate it offers
+         * (7200..24000) carries 3500 foreign bytes exactly
+         * (docs/x2_v34_upstream_review.md, 10 October 2026). */
         const char *limit=getenv("ME_X2_UPSTREAM_MAX_RATE");
-        int rate=limit ? atoi(limit) : 4800;
+        int rate=limit ? atoi(limit) : 33600;
         if(rate<2400 || rate>33600 || rate%2400) {
             ME_LOG("[ME] invalid ME_X2_UPSTREAM_MAX_RATE: %s\n",limit);
             g_state=ME_HANGUP;return;
@@ -8333,6 +8349,13 @@ static void me_x2_rx_locked(const int16_t *samples, int count)
         unsigned bits=x2_pcm_frame_bits(&g_x2.data_config);
         if(data_stack_start_online((int)(bits*8000/6),false))g_x2.stage=X2_FAILED;
         else {
+            /* As on V.90: the downstream payload starts at the accepted MP,
+               well before upstream B1, so V.42 7.2.1.3's T400 waits for the
+               first upstream bit (bounded) instead of running off our TX. */
+            if(g_data_framing==DS_FRAMING_V42) {
+                ds_v42_restart_t400(&g_data_stack,ME_V42_T400_DEFER_MS);
+                g_data_t400_deferred=true;
+            }
             g_x2_data_stack_started=true;
             trace_phase("X2 MP=%04x/%04x/%04x/%04x selected index=%u B=%u MD=%u upstream=%u",
                 g_x2.peer_mp.words[0],g_x2.peer_mp.words[1],g_x2.peer_mp.words[2],g_x2.peer_mp.words[3],
