@@ -357,10 +357,46 @@ capture) with the client's transmitted points, in V.34 lattice spacings
 - **Not mu-law.** The 9600 run peaks at 7082 (-13 dBFS) with no clipping,
   about 37 dB of mu-law SNR, far above the ~25 dB measured here.
 
-Candidates for the floor, untested: MICA's equalizer not converged on this
-client's TRN; MICA's echo canceller (the DAB7 predictor, fed from 4A6C)
-adapting on a link with no echo (v90modem's own NLMS echo canceller did exactly
-that, `docs/v90_upstream_data_path.md`); timing-loop or resampler jitter at 2.5
-samples a symbol. Next: capture the same measurement at 9600 to see if the
-absolute noise is rate-independent, then capture the DAB7 prediction and the
-timing correction during data to attribute it.
+### Located: MICA's equalizer, out of training (2026-10-10)
+
+Method (no MicaEmu files changed): rerun the saved `connect-xc-input` command
+(`*-command.json`) with every output in a scratch directory and
+`tools/k56flex_upstream_rig/tee_peer.py` between `mica_trace` and the client.
+It records the exact G.711 MICA is fed, and with `TEE_UP_GAIN` scales the
+whole upstream like a line gain. The rerun is deterministic: its 47B9 capture
+is byte-identical to the original, and it runs in 10 s.
+
+- **The waveform is clean.** `offline_rx.py` fits the best fixed linear
+  receiver (exact V.34 carrier, 25 taps, no adaptation) to the recorded
+  upstream: **0.13 spacings, 38 dB, over all 2.8 s, with no drift**. That is
+  the mu-law limit at the client's -24 dBFS. MICA's trellis input on the
+  same audio is 0.51-0.62. About 11 dB is lost inside MICA's receiver.
+- **Not level or fixed-point.** +5 dB of line gain leaves MICA's error at
+  0.52 spacings, so it scales with the signal. A floor fixed relative to
+  full scale would have dropped. That also rules out echo or downstream
+  leakage. (+8 dB stops startup before data: a separate level limit.)
+- **Not timing or carrier jitter.** Regressing each symbol's squared error
+  on 1, |r|^2 and |r[k+1]-r[k-1]|^2 puts ~90% on the constant term, ~10% on
+  phase and ~0% on the timing derivative. Radial and tangential errors are
+  equal and flat with amplitude.
+- **Equalizer.** A widely-linear ISI fit shrinks the error 0.62 -> 0.51
+  (+/-3), 0.46 (+/-8), 0.40 (+/-16), 0.335 (+/-24) and no further (+/-40):
+  ISI spread across exactly a 48-tap T/2 span, the size of MICA's 6910 FIR,
+  where the channel needs ~10 symbols. The ISI is the same in every
+  1024-symbol window from the first data symbol on (change 0.015), so it
+  comes out of training and does not grow in data. The remaining 0.32 is
+  coloured but not static-ISI, consistent with tap jitter (a large LMS step).
+- **Not training length.** TRN 512 / 2048 / 4096 gives 0.63 / 0.56 / 0.68 at
+  the start of data, and all three reset at 476A.
+
+Budget at 28800 (spacings squared): static ISI 0.28, unexplained 0.085,
+mu-law 0.017. Next: dump the 6910 coefficient rows twice in data
+(`mica_trace --dump`) to see tap jitter and the step size this mode uses. Also
+bear in mind that every oracle compares C against the same emulated C53 core,
+so a core arithmetic bug in the equalizer path would pass them all, as the XC
+repeat-end bug did. Real MICA runs 33600 on real lines.
+
+```sh
+python3 tools/k56flex_upstream_rig/offline_rx.py UPSTREAM.ulaw TX.caller
+python3 tools/k56flex_upstream_rig/isi_by_window.py CAPTURE.txt TX.caller 18.74 21.55
+```
