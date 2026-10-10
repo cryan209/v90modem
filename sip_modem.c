@@ -1196,12 +1196,12 @@ static void gui_publish(void)
     last = now;
     me_diag_snapshot_t d;
     me_get_diag_snapshot(&d);
-    char buf[48000];
+    char buf[60000];
     int n = snprintf(buf, sizeof(buf),
         "{\"state\":%d,\"modulation\":%d,\"v92\":%d,\"law\":%d,"
         "\"rx_signal\":\"%s\",\"tx_signal\":\"%s\",\"rx_baud\":%d,\"tx_baud\":%d,"
-        "\"data_ready\":%d,\"elapsed\":%llu,", d.state, d.modulation, d.v92_active, d.law,
-        d.rx_signal, d.tx_signal, d.rx_baud, d.tx_baud, d.data_ready,
+        "\"rx_pcm\":%d,\"tx_pcm\":%d,\"rx_carrier\":%.3f,\"tx_carrier\":%.3f,\"data_ready\":%d,\"elapsed\":%llu,", d.state, d.modulation, d.v92_active, d.law,
+        d.rx_signal, d.tx_signal, d.rx_baud, d.tx_baud, d.rx_pcm, d.tx_pcm, d.rx_carrier, d.tx_carrier, d.data_ready,
         (unsigned long long)d.phase_elapsed_ms);
     int extra = lm_gui_json(buf+n, sizeof(buf)-(size_t)n-2);
     if (extra < 0) return;

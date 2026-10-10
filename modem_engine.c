@@ -15519,8 +15519,16 @@ void me_get_diag_snapshot(me_diag_snapshot_t *snapshot)
     pthread_mutex_lock(&g_state_mtx);
     /* Passive signal names: V.34 §10.1 and V.90 §§9.2–9.4. */
     snapshot->data_ready = g_data_connect_reported && !g_data_link_failed && g_state == ME_DATA;
-    snapshot->rx_baud = g_v34 ? v34_get_rx_baud_rate(g_v34) : (g_mod == ME_MOD_V22BIS ? 600 : 0);
-    snapshot->tx_baud = g_v34 ? v34_get_tx_baud_rate(g_v34) : (g_mod == ME_MOD_V22BIS ? 600 : 0);
+    snapshot->rx_pcm = g_v92_trn2u_active || g_v92_upstream_rx_active || (g_mod == ME_MOD_V90 && me_v90_analogue_role()) || g_mod == ME_MOD_V91;
+    snapshot->tx_pcm = (g_mod == ME_MOD_V90 && !me_v90_analogue_role()) || g_mod == ME_MOD_X2 || g_mod == ME_MOD_V91;
+    snapshot->rx_carrier = g_v34 ? v34_rx_carrier_frequency(g_v34) : g_v22bis ? v22bis_rx_carrier_frequency(g_v22bis) : g_v32bis ? v32bis_rx_carrier_frequency(g_v32bis) : 0;
+    static const int gui_baud[] = {2400,2743,2800,3000,3200,3429};
+    int gui_rx_code = g_v34 ? v34_get_rx_baud_rate(g_v34) : -1;
+    int gui_tx_code = g_v34 ? v34_get_tx_baud_rate(g_v34) : -1;
+    snapshot->rx_baud = g_v34 ? (gui_rx_code >= 0 && gui_rx_code < 6 ? gui_baud[gui_rx_code] : 0) : (g_mod == ME_MOD_V22BIS ? 600 : g_mod == ME_MOD_V32BIS ? 2400 : 0);
+    snapshot->tx_baud = g_v34 ? (gui_tx_code >= 0 && gui_tx_code < 6 ? gui_baud[gui_tx_code] : 0) : (g_mod == ME_MOD_V22BIS ? 600 : g_mod == ME_MOD_V32BIS ? 2400 : 0);
+    /* Nominal TX carrier: V.22bis §2.1, V.32bis §2.1, V.34 §5.3. */
+    snapshot->tx_carrier = g_v34 && snapshot->tx_baud ? v34_primary_carrier_hz(snapshot->tx_baud, v34_get_tx_high_carrier(g_v34)) : g_mod == ME_MOD_V22BIS ? (g_calling_party ? 1200 : 2400) : g_mod == ME_MOD_V32BIS ? 1800 : 0;
     snprintf(snapshot->rx_signal, sizeof(snapshot->rx_signal), "%s", g_v34 ? v34_rx_stage_name(v34_get_rx_stage(g_v34)) : "unavailable");
     const char *tx_signal = g_v90 ? me_v90_tx_stage_name(v90_get_tx_phase(g_v90)) : NULL;
     snprintf(snapshot->tx_signal, sizeof(snapshot->tx_signal), "%s", tx_signal ? tx_signal : g_v34 ? v34_tx_stage_name(v34_get_tx_stage(g_v34)) : "unavailable");

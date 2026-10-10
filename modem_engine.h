@@ -52,6 +52,8 @@ typedef enum {
 typedef struct {
     char rx_signal[64], tx_signal[64];
     int rx_baud, tx_baud;
+    float rx_carrier, tx_carrier;
+    int rx_pcm, tx_pcm;
     int data_ready;
     me_state_t state;
     me_modulation_t modulation;

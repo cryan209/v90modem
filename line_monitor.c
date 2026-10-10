@@ -21,12 +21,16 @@ typedef struct {
     int16_t buf[RING];
     int wr;                      /* next write position */
     int fed;                     /* samples held, up to RING */
+    uint64_t total;
 } lm_ring_t;
 
 static lm_ring_t rings[2];
 static bool gui_enabled;
 static uint8_t wire[2][256], pcm[2][256];
 static uint64_t wire_count[2], pcm_count[2];
+typedef struct { uint8_t byte; uint64_t count; } gui_run_t;
+static gui_run_t runs[2][256];
+static uint64_t run_count[2];
 static unsigned partial[2], partial_bits[2];
 static float iq[2][256][2];
 static uint64_t iq_count[2];
@@ -40,6 +44,7 @@ void lm_reset(void)
     pthread_mutex_lock(&lm_mtx);
     memset(rings, 0, sizeof(rings));
     memset(wire_count, 0, sizeof(wire_count));
+    memset(run_count, 0, sizeof(run_count));
     memset(pcm_count, 0, sizeof(pcm_count));
     memset(partial, 0, sizeof(partial));
     memset(partial_bits, 0, sizeof(partial_bits));
@@ -51,6 +56,7 @@ void lm_reset(void)
 
 static void put_locked(lm_ring_t *r, int16_t v)
 {
+    r->total++;
     r->buf[r->wr] = v;
     if (++r->wr == RING)
         r->wr = 0;
@@ -284,6 +290,9 @@ void lm_wire_bit(int dir, int bit)
     partial[dir] |= (unsigned)bit << partial_bits[dir];
     if (++partial_bits[dir] == 8) {
         wire[dir][wire_count[dir]++ % 256] = partial[dir];
+        gui_run_t *last = run_count[dir] ? &runs[dir][(run_count[dir]-1)%256] : NULL;
+        if (last && last->byte == partial[dir]) last->count++;
+        else { gui_run_t *r = &runs[dir][run_count[dir]++%256]; r->byte = partial[dir]; r->count = 1; }
         partial[dir] = partial_bits[dir] = 0;
     }
     pthread_mutex_unlock(&lm_mtx);
@@ -321,13 +330,29 @@ int lm_gui_json(char *out, size_t size)
         uint64_t n = wire_count[d] < 256 ? wire_count[d] : 256;
         ADD("%s{\"count\":%llu,\"hex\":\"", d ? "," : "", (unsigned long long)wire_count[d]);
         for (uint64_t i = wire_count[d]-n; i < wire_count[d]; i++) ADD("%02x", wire[d][i%256]);
-        ADD("\"}");
+        ADD("\",\"runs\":[");
+        uint64_t nr = run_count[d] < 256 ? run_count[d] : 256;
+        for (uint64_t i = run_count[d]-nr; i < run_count[d]; i++) {
+            gui_run_t *r = &runs[d][i%256];
+            ADD("%s[%u,%llu]", i > run_count[d]-nr ? "," : "", r->byte, (unsigned long long)r->count);
+        }
+        ADD("]}");
     }
     ADD("],\"pcm\":[");
     for (int d = 0; d < 2; d++) {
         uint64_t n = pcm_count[d] < 256 ? pcm_count[d] : 256;
         ADD("%s{\"count\":%llu,\"hex\":\"", d ? "," : "", (unsigned long long)pcm_count[d]);
         for (uint64_t i = pcm_count[d]-n; i < pcm_count[d]; i++) ADD("%02x", pcm[d][i%256]);
+        ADD("\"}");
+    }
+    ADD("],\"listen\":[");
+    for (int d = 0; d < 2; d++) {
+        int n = rings[d].fed < 1600 ? rings[d].fed : 1600;
+        ADD("%s{\"count\":%llu,\"hex\":\"", d ? "," : "", (unsigned long long)rings[d].total);
+        for (int i = 0; i < n; i++) {
+            uint16_t v = (uint16_t)rings[d].buf[(rings[d].wr-n+i+RING)%RING];
+            ADD("%02x%02x", v & 255, v >> 8);
+        }
         ADD("\"}");
     }
     ADD("],\"iq\":[");

@@ -83,6 +83,9 @@ def main():
                 s = wait_for(connected)
                 assert all(len(a) == 512 for a in s['audio'])
                 assert all(p['count'] > 0 for p in s['pcm'])
+                assert all(len(p['hex']) == 6400 for p in s['listen'])
+                assert 2390 < s['rx_carrier'] < 2410 and s['tx_carrier'] == 1200
+                assert all(w['runs'] for w in s['wire'])
                 assert len(json.dumps(s)) > 9216, 'Must exercise large telemetry datagrams'
                 send('data', b'GUI-to-peer\x00\xff\r\n')
                 received = bytearray()

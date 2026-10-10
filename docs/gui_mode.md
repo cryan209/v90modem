@@ -32,12 +32,12 @@ the child modem; for the browser monitor use Ctrl-C in its launching terminal.
   delayed Viterbi traceback lattice decisions. Receivers without that callback
   show no points; the GUI does not synthesize a constellation from arbitrary
   line audio. TCM is coding over a QAM signal, so it shares the QAM eye view.
-- **Eye:** a two-period view folded from line samples using manual baud, carrier
-  and phase. The native PCM view uses an eightfold windowed-sinc reconstruction
+- **Eye:** a two-period view folded from line samples using the reported baud and carrier, with automatic PCM/QAM direction
+  selection. The native PCM view uses an eightfold windowed-sinc reconstruction
   for display; QAM also mixes down an I channel and applies a short smoother.
   The browser uses direct sample interpolation. These are exploratory
   line-derived eyes, **not recovered-clock/equalizer eyes** or a model of the
-  remote D/A's actual filter. Eye settings never affect DSP. For a V.90 digital
+  remote D/A's actual filter. Eye reconstruction never affects DSP. For a V.90 digital
   call the PCM downstream is TX, while the QAM upstream is RX; the analogue
   role reverses those directions. V.92 can use PCM in both directions.
 - **Datapump wire bytes:** observations of `ds_tx_get_bit` / `ds_rx_put_bit`,
@@ -96,3 +96,43 @@ snapshots larger than 9 KiB, increasing wire counters, byte-exact binary serial
 data both ways, and hangup. It uses temporary files/PTYs and cleans up children.
 This is a local GUI/transport check, not evidence of hardware interoperability.
 The native AppKit console was additionally opened and its AT controls checked.
+
+## Compact native dashboard
+
+The native window fits a single 1200 × 760 screen area with no page scrolling.
+AT and serial controls remain visible together. Signal, audio analysis and
+process output share one tab area. Consoles show the latest visible lines and
+have no scrolling history; the relay still uses bounded in-memory retention.
+The browser view also uses a compact fixed viewport and latest-line consoles.
+
+The manual PCM/QAM selector is replaced by automatic direction/role selection.
+TCM codes a QAM constellation; PCM is a sample-level signal. The line-derived
+eye still uses display-only timing/mixing, not recovered receiver timing.
+Fewer overlaid eye traces and just centre axes reduce clutter.
+
+Wire telemetry retains 256 run records per direction in addition to its raw
+256-byte suffix. Repetitions of four or more bytes display as `FF ×2109`;
+shorter runs remain hex bytes. A continuing idle run updates its complete count
+without displacing preceding records. The dashboard shows the latest lines;
+it is not a capture/archive browser.
+
+The native Audio tab shows an RX amplitude histogram and a Hann-windowed
+spectrum (62.5 Hz bins, relative magnitude). A yellow marker and numeric label
+show the live receiver carrier estimate from SpanDSP where available. Carrier
+mixing removes the passband carrier to form baseband I/Q; a constellation
+alone does not show its absolute frequency.
+
+Audio off / Listen RX / Listen TX plays a diagnostic copy through the Mac's
+output device at 25% volume. It is off initially. Snapshots carry at most 1600
+samples per direction with a per-call sample counter; playback deduplicates
+snapshots and queues at most three buffers. Missed samples are discarded,
+never replayed from an unbounded backlog. Device-rate conversion exists only
+in the monitor player and never changes modem/RTP samples. Slow UI polling
+can cause listening gaps; this is a monitor, not a recording facility.
+
+ASVD is V.61, not a pure constellation rotation. V.61 §5.5.1.1 sums a complex
+voice signal element with each data signal element, constrained to its data
+region (Figure 6). A suitable measured constellation can show displacement
+around data points, but our existing QAM reports do not implement or identify
+V.61. Future ASVD inspection would need its own receiver tap before voice
+subtraction. V.61 §5.1 specifies its carrier and modulation rate.

@@ -97,7 +97,7 @@ int main(void)
     lm_qam(1.25f, -2.5f, false);
     lm_qam(2.0f, -3.0f, true);
     lm_event("TRN \"quoted\" \\ E");
-    char json[48000];
+    char json[60000];
     check(lm_gui_json(json, sizeof(json)) > 0, "GUI snapshot fits bounded buffer");
     check(strstr(json, "\"hex\":\"007f80ff\"") != NULL, "GUI preserves exact G.711 octets");
     check(strstr(json, "\"hex\":\"a5\"") != NULL, "GUI packs line bits LSB first, ignores status codes");
@@ -107,11 +107,25 @@ int main(void)
     for (int i = 0; i < 257*8; i++) lm_wire_bit(LM_RX, 1);
     lm_gui_json(json, sizeof(json));
     check(strstr(json, "\"count\":257") != NULL, "GUI wire ring wraps while retaining total count");
+    check(strstr(json, "[255,257]") != NULL, "GUI keeps complete repeated byte run beyond raw ring");
     lm_wire_bit(LM_TX, 1); /* an incomplete octet must not leak to next call */
     lm_reset();
     for (int i = 0; i < 8; i++) lm_wire_bit(LM_TX, 0);
     lm_gui_json(json, sizeof(json));
     check(strstr(json, "\"hex\":\"00\"") && !strstr(json, "quoted"), "GUI resets partial bits and events per call");
+    int16_t monitor_audio[1700];
+    for (int i = 0; i < 1700; i++) monitor_audio[i] = (i & 1) ? -32768 : 32767;
+    for (int d = 0; d < 2; d++) {
+        lm_feed(d, monitor_audio, 1700);
+        for (int i = 0; i < 300; i++) for (int b = 0; b < 8; b++) lm_wire_bit(d, (i >> b) & 1);
+    }
+    for (int i = 0; i < 256; i++) {
+        lm_qam(12345.67f, -23456.78f, false);
+        lm_qam(-23456.78f, 12345.67f, true);
+    }
+    check(lm_gui_json(json, sizeof(json)) > 0, "GUI full audio, runs and IQ fit one bounded UDP snapshot");
+    check(strstr(json, "\"listen\":[{\"count\":1700,\"hex\":\"ff7f0080") != NULL,
+          "GUI listening has sample count and exact little-endian diagnostic samples");
     printf("%s (%d failure%s)\n", failures ? "FAILED" : "PASSED", failures, failures == 1 ? "" : "s");
     return failures != 0;
 }

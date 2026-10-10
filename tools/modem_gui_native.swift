@@ -1,12 +1,13 @@
 // Native passive modem console. AppKit owns rendering; the modem's control
 // loop publishes bounded snapshots. Signal data never passes through this UI.
 import AppKit
+import AVFoundation
 
 let rxColor = NSColor.systemTeal
 let txColor = NSColor.systemOrange
 
 final class SignalPlot: NSView {
-    enum Kind { case waveform, constellation, eye }
+    enum Kind { case waveform, constellation, eye, histogram, spectrum }
     var kind: Kind = .waveform
     var samples: [Double] = []
     var points: [[[Double]]] = [[], []]
@@ -22,9 +23,33 @@ final class SignalPlot: NSView {
         let w = bounds.width, h = bounds.height
         NSColor(calibratedWhite: 0.18, alpha: 1).setStroke()
         let grid = NSBezierPath()
-        for i in 1..<8 { grid.move(to: NSPoint(x: w*Double(i)/8, y: 0)); grid.line(to: NSPoint(x: w*Double(i)/8, y: h)) }
-        for i in 1..<4 { grid.move(to: NSPoint(x: 0, y: h*Double(i)/4)); grid.line(to: NSPoint(x: w, y: h*Double(i)/4)) }
+        grid.move(to:NSPoint(x:w/2,y:0)); grid.line(to:NSPoint(x:w/2,y:h))
+        grid.move(to:NSPoint(x:0,y:h/2)); grid.line(to:NSPoint(x:w,y:h/2))
         grid.stroke()
+        if kind == .histogram || kind == .spectrum {
+            var bins = [Double](repeating:0,count:64)
+            if kind == .histogram {
+                for sample in samples { bins[min(63,max(0,Int((sample+32768)/1024)))] += 1 }
+            } else if !samples.isEmpty {
+                for k in 0..<64 {
+                    var re = 0.0, im = 0.0
+                    for (i,v) in samples.enumerated() {
+                        let win = 0.5-0.5*cos(2*Double.pi*Double(i)/Double(max(1,samples.count-1)))
+                        let angle = 2*Double.pi*Double(k)*Double(i)/128
+                        re += v*win*cos(angle); im -= v*win*sin(angle)
+                    }
+                    bins[k] = sqrt(re*re+im*im)
+                }
+            }
+            let peak = max(1,bins.max() ?? 1)
+            color.setFill()
+            for (i,v) in bins.enumerated() { NSRect(x:Double(i)*w/64,y:h-v/peak*h*0.9,width:max(1,w/64-1),height:v/peak*h*0.9).fill() }
+            if kind == .spectrum && carrier > 0 {
+                NSColor.systemYellow.setStroke(); let marker = NSBezierPath()
+                marker.move(to:NSPoint(x:carrier/4000*w,y:0)); marker.line(to:NSPoint(x:carrier/4000*w,y:h)); marker.stroke()
+            }
+            return
+        }
         if kind == .constellation {
             let scale = max(1, points.flatMap { $0 }.flatMap { $0 }.map { abs($0) }.max() ?? 1)*1.15
             for (dir, values) in points.enumerated() {
@@ -60,7 +85,7 @@ final class SignalPlot: NSView {
             // Eightfold display-only windowed sinc reconstruction makes the
             // DS0's one-sample-per-symbol PCM ladder visible between samples.
             var previous = 0.0
-            for sub in 0..<max(0,(y.count-1)*8) {
+            for sub in 0..<max(0,(min(y.count,64)-1)*8) {
                 let t = Double(sub)/8
                 let at = Int(t)
                 var value = 0.0, weights = 0.0
@@ -95,12 +120,12 @@ final class Console {
         text.isHorizontallyResizable = false
         text.textContainer?.widthTracksTextView = true
         scroll.documentView = text
-        scroll.hasVerticalScroller = true
+        scroll.hasVerticalScroller = false
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.heightAnchor.constraint(equalToConstant: height).isActive = true
     }
     func replace(_ value: String) {
-        let bounded = String(value.suffix(24000))
+        let bounded = String(value.suffix(24000)).split(separator:"\n",omittingEmptySubsequences:false).suffix(max(2,Int(scroll.frame.height/14))).joined(separator:"\n")
         if text.string != bounded { text.string = bounded }
     }
     func append(_ value: String) {
@@ -130,11 +155,15 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let status = NSTextField(labelWithString:"Starting modem…")
     let error = NSTextField(labelWithString:"")
     let rx = SignalPlot(), tx = SignalPlot(), constellation = SignalPlot(), eye = SignalPlot()
-    let at = Console(height:140), serial = Console(height:140), training = Console(height:120), log = Console(height:160)
-    let rxWire = Console(height:130), txWire = Console(height:130)
+    let at = Console(height:64), serial = Console(height:64), training = Console(height:28), log = Console(height:130)
+    let rxWire = Console(height:54), txWire = Console(height:54)
+    let histogram = SignalPlot(), spectrum = SignalPlot()
+    let carrierLabel = NSTextField(labelWithString:"Carrier: waiting")
+    let listen = NSPopUpButton()
+    let audioEngine = AVAudioEngine(), player = AVAudioPlayerNode()
+    var audioSeen = [0,0], audioEpoch = -1, queued = 0, audioGeneration = 0
     let atInput = NSTextField(), dataInput = NSTextField()
-    let eyeMode = NSPopUpButton(), eyeDir = NSPopUpButton(), wireMode = NSPopUpButton(), dataMode = NSPopUpButton()
-    let baud = NSTextField(string:"3200"), carrier = NSTextField(string:"1800"), phase = NSTextField(string:"0")
+    let eyeDir = NSPopUpButton(), dataMode = NSPopUpButton()
     let atPath = NSTextField(labelWithString:""), dataPath = NSTextField(labelWithString:"")
     var sendData: NSButton!
     var timer: Timer?
@@ -159,9 +188,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         NSButton(title:title, target:self, action:action)
     }
     func panel(_ title: String, _ children: [NSView]) -> NSBox {
-        let box = NSBox(); box.title = title; box.contentViewMargins = NSSize(width:12,height:12)
+        let box = NSBox(); box.title = title; box.contentViewMargins = NSSize(width:6,height:6)
         let stack = NSStackView(views:children)
-        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8
+        stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 4
         stack.translatesAutoresizingMaskIntoConstraints = false
         box.contentView = NSView()
         box.contentView!.addSubview(stack)
@@ -179,47 +208,52 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named:.darkAqua)
-        window = NSWindow(contentRect:NSRect(x:0,y:0,width:1380,height:900),
+        window = NSWindow(contentRect:NSRect(x:0,y:0,width:1200,height:760),
             styleMask:[.titled,.closable,.miniaturizable,.resizable], backing:.buffered, defer:false)
         window.title = "Modem · Live line"
-        window.minSize = NSSize(width:1050,height:650)
+        window.minSize = NSSize(width:1000,height:720)
         window.delegate = self
-        let scroll = NSScrollView(); scroll.hasVerticalScroller = true
-        let root = NSStackView(); root.orientation = .vertical; root.alignment = .leading; root.spacing = 12
-        root.edgeInsets = NSEdgeInsets(top:18,left:18,bottom:18,right:18)
+        let root = NSStackView(); root.orientation = .vertical; root.alignment = .leading; root.spacing = 6
+        root.edgeInsets = NSEdgeInsets(top:8,left:10,bottom:8,right:10)
         root.translatesAutoresizingMaskIntoConstraints = false
-        scroll.documentView = root
-        window.contentView = scroll
-        root.widthAnchor.constraint(equalTo:scroll.contentView.widthAnchor).isActive = true
-        for plot in [rx,tx,constellation,eye] { plot.heightAnchor.constraint(equalToConstant:165).isActive = true }
+        let content = NSView(); window.contentView = content; content.addSubview(root)
+        NSLayoutConstraint.activate([root.leadingAnchor.constraint(equalTo:content.leadingAnchor),root.trailingAnchor.constraint(equalTo:content.trailingAnchor),root.topAnchor.constraint(equalTo:content.topAnchor),root.bottomAnchor.constraint(lessThanOrEqualTo:content.bottomAnchor)])
+        for plot in [rx,tx,constellation,eye] { plot.heightAnchor.constraint(equalToConstant:72).isActive = true }
+        for plot in [constellation,eye] { plot.constraints.filter { $0.firstAttribute == .height }.forEach { $0.constant = 100 } }
         tx.color = txColor; constellation.kind = .constellation; eye.kind = .eye
         status.font = .systemFont(ofSize:14,weight:.semibold)
         error.textColor = .systemRed
-        eyeMode.addItems(withTitles:["PCM · reconstructed DS0","QAM / TCM · mixed I"])
         eyeDir.addItems(withTitles:["RX","TX"])
-        wireMode.addItems(withTitles:["Datapump line bits · packed octets","G.711 DS0 · exact codewords"])
         dataMode.addItems(withTitles:["UTF-8 + CRLF","Hex bytes"])
-        for input in [baud,carrier,phase] { input.widthAnchor.constraint(equalToConstant:65).isActive = true }
         atInput.placeholderString = "ATDnumber or AT command"; atInput.target = self; atInput.action = #selector(sendAT)
         dataInput.placeholderString = "Serial payload"; dataInput.target = self; dataInput.action = #selector(sendSerial)
         sendData = button("Send data",#selector(sendSerial))
+        histogram.kind = .histogram; spectrum.kind = .spectrum
+        for plot in [histogram,spectrum] { plot.heightAnchor.constraint(equalToConstant:100).isActive = true }
+        listen.addItems(withTitles:["Audio off","Listen RX","Listen TX"])
+        audioEngine.attach(player)
+        audioEngine.connect(player,to:audioEngine.mainMixerNode,format:AVAudioFormat(standardFormatWithSampleRate:8000,channels:1))
+        player.volume = 0.25
+        let diagnostics = NSTabView()
+        func tab(_ title:String,_ view:NSView) { let item = NSTabViewItem(identifier:title); item.label = title; item.view = view; diagnostics.addTabViewItem(item) }
+        tab("Signal",pair(panel("Received constellation · teal samples / orange decisions",[constellation]),panel("Eye · follows selected direction",[eye])))
+        tab("Audio",pair(panel("RX amplitude histogram · −32768 to +32767",[histogram]),panel("RX spectrum · 0 to 4000 Hz",[spectrum])))
+        tab("Process log",log.scroll)
+        diagnostics.heightAnchor.constraint(equalToConstant:160).isActive = true
         let items: [NSView] = [
-            row([status,button("Freeze plots",#selector(freeze))]),
-            label("Signal → datapump wire → serial data. AT control stays separate. All histories are bounded in memory."), error,
-            pair(panel("RX waveform",[rx,label("64 ms · 8,000 samples/s · fixed ±32768 scale · expanded G.711")]),
-                 panel("TX waveform",[tx,label("64 ms · exact transmitted G.711 levels")])),
-            pair(panel("Receive QAM / TCM constellation",[constellation,label("Teal: receiver report. Orange: reported decisions, including V.34 trellis traceback. Waiting receivers show no points.")]),
-                 panel("Line-derived eye",[row([eyeMode,eyeDir]),
-                    row([label("Baud"),baud,label("Carrier Hz"),carrier,label("Phase T"),phase]),eye,
-                    label("Two symbol periods. Manual timing; display-only sinc reconstruction and QAM mixing/smoothing. Not the receiver's recovered eye.")])),
-            panel("Live wire bytes",[wireMode,label("Line bits after V.14/V.42 framing/compression, before modulation scrambling/mapping. Packed LSB first from call start, not DTE characters or aligned LAPM frames. DS0 view shows exact G.711 codes, including training."),
-                pair(panel("RX",[rxWire.scroll]),panel("TX",[txWire.scroll]))]),
-            pair(panel("AT control interface",[atPath,row([button("Answer",#selector(answer)),button("Hang up",#selector(hangup)),button("Modulation",#selector(modulation)),button("Info",#selector(info))]),at.scroll,row([atInput,button("Send AT",#selector(sendAT))])]),
-                 panel("Serial data interface",[dataPath,serial.scroll,row([dataInput,dataMode,sendData]),label("DTE payload after deframing/decompression. Nonprintable bytes appear as \\xNN.")])),
-            panel("Dialling & carrier acquisition",[training.scroll]),
-            panel("Modem process log · latest output",[log.scroll])]
-        for view in items { root.addArrangedSubview(view); view.widthAnchor.constraint(equalTo:root.widthAnchor,constant:-36).isActive = true }
+            row([status,listen,button("Freeze",#selector(freeze))]),error,
+            pair(panel("RX line · 64 ms",[rx]),panel("TX line · 64 ms",[tx])),
+            row([eyeDir,carrierLabel,label("Carrier demodulation → I/Q points. TCM uses the same QAM signal.")]),
+            diagnostics,
+            pair(panel("RX wire · repeated bytes collapsed",[rxWire.scroll]),panel("TX wire · repeated bytes collapsed",[txWire.scroll])),
+            pair(panel("AT control",[row([button("Answer",#selector(answer)),button("Hang up",#selector(hangup)),button("Info",#selector(info))]),at.scroll,row([atInput,button("Send AT",#selector(sendAT))])]),
+                 panel("Serial data",[serial.scroll,row([dataInput,dataMode,sendData])])),
+            training.scroll]
+        for view in items { root.addArrangedSubview(view); view.widthAnchor.constraint(equalTo:root.widthAnchor,constant:-20).isActive = true }
+        at.scroll.toolTip = "Separate AT PTY; latest output. No history is saved to disk."
+        rxWire.scroll.toolTip = "Framed/compressed line bits before modulation scrambling, packed LSB first. Latest 256 byte runs."
         for path in [atPath,dataPath] { path.font = .monospacedSystemFont(ofSize:10,weight:.regular); path.lineBreakMode = .byTruncatingMiddle }
+        if let screen = NSScreen.main { window.setFrame(NSRect(x:screen.visibleFrame.midX-600,y:screen.visibleFrame.midY-380,width:min(1200,screen.visibleFrame.width),height:min(760,screen.visibleFrame.height)),display:true) }
         window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps:true)
         timer = Timer.scheduledTimer(withTimeInterval:0.15,repeats:true) { [weak self] _ in self?.poll() }
         poll()
@@ -266,6 +300,29 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }.resume()
     }
+    func monitorAudio(_ s:[String:Any]) {
+        let current = s["epoch"] as? Int ?? 0
+        if current != audioEpoch { audioEpoch = current; audioSeen = [0,0]; player.stop(); queued = 0; audioGeneration += 1 }
+        let frames = s["listen"] as? [[String:Any]] ?? []
+        for (d,frame) in frames.enumerated() where d < 2 {
+            let count = frame["count"] as? Int ?? 0, hex = Array(frame["hex"] as? String ?? "")
+            let n = hex.count/4, fresh = min(n,max(0,count-audioSeen[d])); audioSeen[d] = count
+            guard listen.indexOfSelectedItem == d+1, fresh > 0, queued < 3 else { continue }
+            do { if !audioEngine.isRunning { try audioEngine.start() } } catch { self.error.stringValue = "Audio: \(error.localizedDescription)"; continue }
+            guard let format = AVAudioFormat(standardFormatWithSampleRate:8000,channels:1), let buffer = AVAudioPCMBuffer(pcmFormat:format,frameCapacity:AVAudioFrameCount(fresh)), let channel = buffer.floatChannelData?[0] else { continue }
+            buffer.frameLength = AVAudioFrameCount(fresh)
+            for i in 0..<fresh {
+                let at = (n-fresh+i)*4
+                let lo = UInt16(String(hex[at..<at+2]),radix:16) ?? 0, hi = UInt16(String(hex[at+2..<at+4]),radix:16) ?? 0
+                channel[i] = Float(Int16(bitPattern:lo | hi<<8))/32768
+            }
+            queued += 1
+            let generation = audioGeneration
+            player.scheduleBuffer(buffer,completionCallbackType:.dataPlayedBack) { [weak self] _ in DispatchQueue.main.async { if let self = self, generation == self.audioGeneration { self.queued = max(0,self.queued-1) } } }
+            if !player.isPlaying { player.play() }
+        }
+        if listen.indexOfSelectedItem == 0 { player.stop(); queued = 0; audioGeneration += 1 }
+    }
     func poll() {
         guard !loading else { return }; loading = true
         var req = URLRequest(url:URL(string:"state",relativeTo:base)!.absoluteURL)
@@ -298,22 +355,33 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         for (i,event) in events.enumerated() where count-events.count+i >= eventSeen { history.append(event) }
         eventSeen = count; history = Array(history.suffix(120)); training.replace(history.joined(separator:"\n"))
         if let exit = s["exit"] as? Int { error.stringValue = "Modem exited: \(exit)" }
+        monitorAudio(s)
         guard !frozen else { return }
         let audio = s["audio"] as? [[Double]] ?? [[],[]]
-        if audio.count == 2 { rx.samples = audio[0]; tx.samples = audio[1]; eye.samples = audio[max(0,eyeDir.indexOfSelectedItem)] }
+        if audio.count == 2 { rx.samples = audio[0]; tx.samples = audio[1]; eye.samples = audio[max(0,eyeDir.indexOfSelectedItem)]; histogram.samples = audio[0]; spectrum.samples = audio[0] }
         constellation.points = s["iq"] as? [[[Double]]] ?? [[],[]]
-        eye.pcm = eyeMode.indexOfSelectedItem == 0
-        eye.baud = Double(baud.stringValue) ?? 3200; eye.carrier = Double(carrier.stringValue) ?? 1800; eye.phase = Double(phase.stringValue) ?? 0
-        for plot in [rx,tx,constellation,eye] { plot.needsDisplay = true }
-        let values = s[wireMode.indexOfSelectedItem == 0 ? "wire" : "pcm"] as? [[String:Any]] ?? []
+        eye.pcm = (s[eyeDir.indexOfSelectedItem == 0 ? "rx_pcm" : "tx_pcm"] as? Int ?? 0)>0
+        eye.baud = Double(s[eyeDir.indexOfSelectedItem == 0 ? "rx_baud" : "tx_baud"] as? Int ?? 3200); if eye.baud < 300 { eye.baud = 3200 }
+        eye.carrier = s[eyeDir.indexOfSelectedItem == 0 ? "rx_carrier" : "tx_carrier"] as? Double ?? 0; spectrum.carrier = s["rx_carrier"] as? Double ?? 0
+        carrierLabel.stringValue = eye.carrier > 0 ? String(format:"%@ · %@ %.1f Hz · %g baud",eye.pcm ? "PCM eye" : "QAM eye",eyeDir.indexOfSelectedItem == 0 ? "RX recovered carrier" : "TX nominal carrier",eye.carrier,eye.baud) : "RX carrier: waiting for QAM receiver"
+        eye.phase = 0
+        for plot in [rx,tx,constellation,eye,histogram,spectrum] { plot.needsDisplay = true }
+        let values = s["wire"] as? [[String:Any]] ?? []
         for (i,console) in [rxWire,txWire].enumerated() where values.indices.contains(i) {
-            let count = values[i]["count"] as? Int ?? 0, hex = values[i]["hex"] as? String ?? ""
-            let chars = Array(hex), n = chars.count/2
-            var lines: [String] = []
-            for start in stride(from:0,to:n,by:16) {
-                lines.append((start..<min(n,start+16)).map { String(chars[2*$0...2*$0+1]) }.joined(separator:" "))
+            let count = values[i]["count"] as? Int ?? 0
+            let runs = values[i]["runs"] as? [[Int]] ?? []
+            var lines: [String] = [], row: [String] = []
+            for run in runs where run.count == 2 {
+                if run[1] >= 4 {
+                    if !row.isEmpty { lines.append(row.joined(separator:" ")); row = [] }
+                    lines.append(String(format:"%02X ×%d",run[0],run[1]))
+                } else {
+                    for _ in 0..<run[1] { row.append(String(format:"%02X",run[0])); if row.count == 16 { lines.append(row.joined(separator:" ")); row = [] } }
+                }
             }
-            console.replace(count == 0 ? "No bytes observed" : "\(count) octets observed · latest \(n)\n"+lines.joined(separator:"\n"))
+            if !row.isEmpty { lines.append(row.joined(separator:" ")) }
+            console.replace(count == 0 ? "No line bytes yet" : "\(count) bytes total\n"+lines.joined(separator:"\n"))
+
         }
     }
 }
