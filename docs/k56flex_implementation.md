@@ -313,15 +313,18 @@ clock offsets and the missing live upstream path remain open.
   (response collector, coordinate decoder, FIR, resampler, timing, DAB7
   predictor, 90FF..8270 transmit chain, the 8E gate trace) now live in
   `mica_qam.c`; see `docs/mica_qam_firmware.md`.
-- **Open: the resident report path.** The 24-bit report collector here
+- **The resident report path is K56flex's.** The 24-bit report collector here
   (`k56flex_report_*`, 1D5A, header `(report & 888F) == 8880`) uses a V.32bis
-  R-shaped word. Its result, DM 8FEF (built by 1521), is consumed by 8C (report
-  bit 4 halves the parameter pacing). It is reached via 13BE/1402 from 1242,
-  the branch 0C7C takes when DM 8FAA bit 0 is clear. That path may be K56flex's
-  own pre-PCM report exchange in a V.32bis format, or a fallback. Not traced.
-- **Upstream data.** The client's transmitter carries upstream data and MICA
-  receives it. The Rockwell K56flex image reports client TX rates from the same
-  $2F28 table as the PCM ladder, whose indices 0..16 are 300 ... 28800, 31200,
-  33600 (shared with its V.34 mode). V.90's upstream is V.34-derived, so V.34
-  is the likely candidate. MICA's receiver for it is untraced; 8C's data loop
-  calls resident 6582 every cycle, which is the first lead.
+  R-shaped word, and its result DM 8FEF (1521) is consumed by 8C. MicaEmu's
+  live rig (`artifacts/k56flex-client-20261009/README.md`, 10 October 2026)
+  shows original 13DE/1402/1D5A accepting a repeated 24-bit report and the
+  899F terminator inside K56flex calls, over the upstream described next.
+- **Upstream: V.34 signalling and data at 3200 baud.** In the MicaEmu live
+  rig, MICA accepts an upstream of S, S-bar, PP, TRN at 3200 baud (SpanDSP's
+  V.34 modulator), V.34 MP framing (10.1.3.9, Table 20) with 18/23 scrambling,
+  then E, B1 and V.34 data; a 2400-baud control fails at the first gate (23CD).
+  The rig's verified reference connection is 38000 down / 9600 up (7616 exact
+  upstream bytes); a 28800 proposal resets at MICA's 476A trellis-loss check.
+  The Rockwell K56flex image reports client TX rates up to 33600 from the same
+  $2F28 table as the PCM ladder. MICA's upstream receiver is resident code
+  (5903/5961, the 4734/476A trellis path), not a K56flex overlay.
