@@ -328,3 +328,39 @@ clock offsets and the missing live upstream path remain open.
   The Rockwell K56flex image reports client TX rates up to 33600 from the same
   $2F28 table as the PCM ladder. MICA's upstream receiver is resident code
   (5903/5961, the 4734/476A trellis path), not a K56flex overlay.
+
+## Why the 28800 upstream fails in MicaEmu's rig (2026-10-10)
+
+`tools/k56flex_upstream_lattice.py` compares MICA's trellis input (the 47B9
+capture) with the client's transmitted points, in V.34 lattice spacings
+(points are odd multiples of 128, so one spacing is 256). On the post-XC-fix
+28800 call `connect-xc-input` (MicaEmu `artifacts/k56flex-client-20261009`):
+
+| Window | Error RMS | After ISI fit: radial / tangential | Phase |
+|---|---|---|---|
+| 18.74-19.06 s (1024 symbols) | 0.69 | 0.32 / 0.42 | jitter 2.8 deg |
+| 18.74-21.55 s (8996 symbols) | 2.69 | 0.48 / 2.61 | ramp -22.5 -> +23.6 deg, 0.0487 Hz |
+
+- **Radial gain is flat (1.00 from |point| 3 to 31).** There is no compression
+  or clipping. Intersymbol interference is small (largest tap 0.02).
+- **Constant 0.0487 Hz frequency offset, untracked.** The client's carrier is
+  exact (SpanDSP `carrier_frequency()` with code 4: 3200 x 4/7 Hz, 32-bit
+  DDS). Rounding a 16-bit NCO increment for 1828.571 Hz gives 0.0419 Hz, so the
+  offset is MICA's. A decision-directed loop normally removes it, and does at
+  9600. At 28800 its decisions are already wrong, so it cannot. **The ramp is a
+  consequence, not the cause.**
+- **The cause is the floor: about 0.3 spacings of radial noise and 2.8 deg of
+  phase jitter** (lag-1 autocorrelation 0.5) on a noise-free emulated link.
+  28800 needs about 0.15 spacings or better. 9600's +/-1, +/-3 points
+  tolerate it. That is why the reference connection works at 9600 and nothing
+  above does.
+- **Not mu-law.** The 9600 run peaks at 7082 (-13 dBFS) with no clipping,
+  about 37 dB of mu-law SNR, far above the ~25 dB measured here.
+
+Candidates for the floor, untested: MICA's equalizer not converged on this
+client's TRN; MICA's echo canceller (the DAB7 predictor, fed from 4A6C)
+adapting on a link with no echo (v90modem's own NLMS echo canceller did exactly
+that, `docs/v90_upstream_data_path.md`); timing-loop or resampler jitter at 2.5
+samples a symbol. Next: capture the same measurement at 9600 to see if the
+absolute noise is rate-independent, then capture the DAB7 prediction and the
+timing correction during data to attribute it.
