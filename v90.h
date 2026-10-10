@@ -465,20 +465,24 @@ bool v90_set_v92_cpd_profile(v90_state_t *s,
  * The upstream decision noise measured on TRN2u, as an rms in DS0 linear
  * units (the units of the G.711 levels G x point is meant to land on).  The
  * CPd constellation is then thinned so adjacent points are at least
- * 2 x margin x sigma apart (ME_V92_UPSTREAM_MARGIN, default 4), and drn
- * follows from the moduli that leaves.  Ignored once a CPd has been sent:
- * the analogue modem designs from what it received, and our B1u receiver
- * is armed from the same frame.  ME_V92_UPSTREAM_DESIGN=0 keeps the old
- * fixed profile (every odd Ucode, drn 14).  lu_rx is the received TRN2u
- * rms in the same units; ME_V92_CPD_GAIN_PER_LU=1 folds it into G for a
- * peer that scales points by LU.
+ * 2 x margin x sigma apart (margin 4), and drn follows from the moduli
+ * that leaves.  Ignored once a CPd has been sent: the analogue modem designs
+ * from what it received, and our B1u receiver is armed from the same frame.
+ * lu_rx is the received TRN2u rms in the same units (see
+ * v90_set_v92_upstream_lu()).
  */
 bool v90_set_v92_upstream_noise(v90_state_t *s, double sigma_linear,
                                 double lu_rx);
 
+/* The received TRN2u rms, LU_rx, alone (the profile's drn is kept).  V.92
+ * Table 30 has the analogue modem transmit LU x G x v, so a point reaches
+ * the network ADC as LU_rx x G x point: without LU_rx the CPd cannot put
+ * its points on codec levels.  Ignored once a CPd has been sent. */
+bool v90_set_v92_upstream_lu(v90_state_t *s, double lu_rx);
+
 /* DS0 linear units per unit of G x point in the CPd this context builds:
- * the received LU under ME_V92_CPD_GAIN_PER_LU, else 1.  What the B1u/data
- * decoder's input has to be divided by. */
+ * LU_rx once measured, else 1.  What the B1u/data decoder's input has to be
+ * divided by. */
 double v90_get_v92_upstream_ds0_per_unit(const v90_state_t *s);
 
 /*

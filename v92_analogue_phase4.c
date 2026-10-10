@@ -31,6 +31,13 @@ struct v92a4_s {
     uint8_t bits[V92_CP_RX_MAX_BITS];
     int bit_pos, bit_count;
     double frame[12];
+    double lu;                        /* 3.8: the data-mode transmit level */
+    /* TRN2d decision noise (G.711 linear), for the CPu design. */
+    double trn2d_err2;
+    unsigned trn2d_errs;
+    bool cpu_designed;
+    vpcm_cp_frame_t cp;               /* the data-mode CP, as CPu offers it */
+    v91_law_t law;
     int (*get_bit)(void *);
     void *data_user;
 };
@@ -120,6 +127,9 @@ v92a4_t *v92a4_init(const v90_analogue_phase4_config_t *cfg,
     s->linear = v90a_linear_init(cfg->law);
     if (!s->rx || !s->linear) { v92a4_free(s); return NULL; }
     s->alignment = cfg->cpt.drn+8;
+    s->lu = lu;
+    s->cp = cfg->cp;
+    s->law = (v91_law_t)cfg->law;
     s->rate_mask = rate_mask;
     s->round_trip_symbols = round_trip_symbols;
     v90_analogue_phase4_set_control_receiver(s->rx, control, s);
@@ -155,12 +165,74 @@ void v92a4_start(v92a4_t *s, int sign)
     v92_trn2u_tx_start(&s->tx, sign);
     s->stage = V92A4_TRN;
 }
+/*
+ * V.92 9.6.2: CPu follows TRN2d, so design it from TRN2d.  The CP that came
+ * out of Phase 3 was planned from the DIL, which holds each level for a
+ * whole segment: the noise that a receiver adds on RANDOM symbols (its
+ * equaliser's data-dependent misadjustment) never shows there.  TRN2d is
+ * random mapped symbols, so its decision noise is the data-mode figure.
+ * Measured in the reconstructed-audio pair: DIL planned A-law levels 16
+ * apart at 3 sigma, and B1d then sliced 136 as 152.  Thin each constellation
+ * to the same 3-sigma separation v90_analogue_phase4_build_cp() applies,
+ * then take drn down until 5.4.3's 2^K <= prod(Mi) holds.  Thinning keeps
+ * CP a subset of the Phase 3 CP, so its power and CPt rules still hold.
+ */
+#define V92A4_CPU_SIGMAS     3.0
+#define V92A4_CPU_MIN_ERRS   500
+
+static void design_cpu(v92a4_t *s)
+{
+    vpcm_cp_frame_t cp = s->cp;
+    double sigma;
+    int drn;
+
+    s->cpu_designed = true;
+    if (s->trn2d_errs < V92A4_CPU_MIN_ERRS)
+        return;
+    sigma = sqrt(s->trn2d_err2/s->trn2d_errs);
+    for (int c = 0; c < cp.constellation_count; c++) {
+        double prev = 0.0;
+        bool first = true;
+
+        for (int u = 1; u < 128; u++) {
+            double level;
+
+            if (!vpcm_cp_mask_get(cp.masks[c], u))
+                continue;
+            level = fabs(v91_codeword_to_linear(s->law,
+                                                v91_ucode_to_codeword(s->law, u, true)));
+            /* +/-level against each other, then each against its neighbour. */
+            if (first ? level < V92A4_CPU_SIGMAS*sigma
+                      : level - prev < 2.0*V92A4_CPU_SIGMAS*sigma) {
+                vpcm_cp_mask_set(cp.masks[c], u, false);
+                continue;
+            }
+            prev = level;
+            first = false;
+        }
+    }
+    for (drn = cp.drn; drn > 0; drn--) {
+        cp.drn = (uint8_t)drn;
+        if (v90_analogue_phase4_cp_k(&cp) >= 0)
+            break;
+    }
+    /* Never offer less than the line can carry at all: keep the Phase 3 CP
+     * if thinning leaves nothing usable. */
+    if (drn < 1 || !v90_analogue_phase4_set_cp(s->rx, &cp))
+        return;
+    s->cp = cp;
+    s->cpu.drn = cp.drn;
+    memcpy(s->cpu.masks, cp.masks, sizeof(s->cpu.masks));
+}
+
 static bool message(v92a4_t *s, bool cpu)
 {
     s->bit_pos = 0;
     s->stage_symbols = 0;
     s->stage = cpu ? V92A4_CP : V92A4_SUV;
     if (cpu) {
+        if (!s->cpu_designed && !s->cpu_sent && s->cpu.drn != 0)
+            design_cpu(s);
         s->cpu_retry = false;
         s->cpu.acknowledge = s->cpd_seen;
         return v92_cp_encode(&s->cpu, s->tx.constellation_points,
@@ -240,7 +312,9 @@ static int16_t sample(v92a4_t *s)
                 fail(s, "cannot encode B1u"); return 0;
             }
         }
-        double v = s->frame[pos];
+        /* Table 30: G x v at mean square 1 is the desired power, which
+         * 3.8 makes LU's, so the line carries LU x G x v. */
+        double v = s->lu*s->frame[pos];
         if (!isfinite(v) || v < -32768 || v > 32767) {
             fail(s, "upstream waveform exceeds linear PCM range"); return 0;
         }
@@ -264,6 +338,12 @@ void v92a4_rx(v92a4_t *s, const int16_t *samples, int count)
         int n = v90_analogue_phase4_slicer_ucodes(s->rx, ucodes, sizeof(ucodes));
         v90a_linear_set_constellation(s->linear, ucodes, n);
         if (v90a_linear_put(s->linear, samples+i, 1, &cw, 1) != 1) continue;
+        if (v90_analogue_phase4_stage(s->rx) == V90A4_RX_TRN2D) {
+            double e = samples[i] - v90a_linear_last_decision(s->linear);
+
+            s->trn2d_err2 += e*e;
+            s->trn2d_errs++;
+        }
         unsigned e = v90_analogue_phase4_put(s->rx, &cw, 1);
         if (e) fprintf(stderr, "P4RX event=%x\n", e);
         if (e & V90A4_RX_EVENT_ED)
@@ -295,4 +375,9 @@ int v92a4_get_data_bits(v92a4_t *s, uint8_t *bits, int capacity)
 int v92a4_downstream_rate(const v92a4_t *s)
 {
     return s ? (int)vpcm_cp_drn_to_bps(s->cpu.drn) : 0;
+}
+
+double v92a4_trn2d_sigma(const v92a4_t *s)
+{
+    return s && s->trn2d_errs ? sqrt(s->trn2d_err2/s->trn2d_errs) : 0.0;
 }

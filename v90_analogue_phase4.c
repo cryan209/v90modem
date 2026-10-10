@@ -1012,6 +1012,19 @@ bool v90_analogue_phase4_start_rate_renegotiation(v90_analogue_phase4_t *s,
     return true;
 }
 
+bool v90_analogue_phase4_set_cp(v90_analogue_phase4_t *s,
+                                const vpcm_cp_frame_t *cp)
+{
+    /* Only while TRN2d/MP still use CPt: B1d starts the data mapper from
+     * cfg.cp, so a change after that would split the two ends. */
+    if (s == NULL || cp == NULL
+        || (s->stage != V90A4_RX_TRN2D && s->stage != V90A4_RX_MP)
+        || v90_analogue_phase4_cp_k(cp) < 0)
+        return false;
+    s->cfg.cp = *cp;
+    return true;
+}
+
 int v90_analogue_phase4_get_data_bits(v90_analogue_phase4_t *s,
                                       uint8_t *bits, int max_bits)
 {

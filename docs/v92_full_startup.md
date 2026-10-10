@@ -400,10 +400,55 @@ to zero (94 levels, decision distance 4 DS0 units at the bottom) it was also
 error-free, so the 4.4 still in sigma is not noise data mode sees on this
 bearer; the remaining 4 x sigma margin is deliberate headroom for real lines.
 
-Two things this does not settle. The spec's own convention is that the
-analogue modem transmits LU x G x v (Table 30's mean-square rule; slmodemd
-does this, `ME_V92_CPD_GAIN_PER_LU=1` adapts our digital side to it); our
-analogue sends G x v, so moving it to the spec convention would make G's
-range irrelevant and leave power as the only bound. And the within-level
-sigma has only been checked on a byte-exact bearer; on an analogue loop it
-includes linear ISI the data path also suffers, which is intended.
+The within-level sigma has only been checked on a byte-exact bearer; on an
+analogue loop it includes linear ISI the data path also suffers, which is
+intended. (The G x v gain convention used above was replaced the same day;
+see the next section.)
+
+## 2026-10-11: the spec's LU x G x v upstream convention, both ends
+
+Table 30: the digital modem "shall design the modulation parameters
+assuming that, when the prefilter output multiplied by G has a mean-square
+value of 1, the analogue modem will transmit at the desired power", and 3.8
+makes LU that power. A conforming analogue modem therefore transmits
+LU x G x v, and a point reaches the network ADC as LU_rx x G x point. Ours
+used to transmit G x v, a private convention that capped levels at
+65535 x G; slmodemd follows the spec, and `ME_V92_CPD_GAIN_PER_LU=1` was the
+opt-in that adapted our digital side to it. Now both ends follow the spec
+and the knob is gone:
+
+- **Analogue** (`v92_analogue_phase4.c`): data-mode samples are
+  LU x (G x v); the wave core stays normalised, so the BER/loopback/B1u
+  harnesses that exercise it directly are unchanged.
+- **Digital** (`v90_build_v92_cpd_frame()`): once LU_rx (the received TRN2u
+  rms) is known, G is derived -- the smallest 4G that still lets a 16-bit
+  point reach the top codeword -- and points are placed so G x LU_rx x point
+  is the codec level. The Table 30 power bound then sets the top level.
+  Without LU_rx, G x point is taken as the DS0 level (LU_rx = 1).
+  `v90_set_v92_upstream_lu()` reports LU_rx alone, keeping a pinned drn;
+  `v92_startup_test` now measures it the way the engine does.
+- `V90_V92_TX_QUEUE_BITS` was 2048. With every codec level in range a single
+  128-point set is 2176 bits of points, and the CPd silently failed to
+  encode. It is now `V92_CPD_MAX_BITS`.
+
+Engine pair, both laws: 48000 up / 56000 down; 60 s holds carried
+2,915,280 upstream and ~3.4 M downstream bits each, zero errors.
+
+### The downstream twin: the analogue's CPu now follows TRN2d
+
+The conversion changed CPd content and tipped one reconstructed-audio row
+(PCMA, measured DIL): B1d frame 0 sliced A-law 136 as 152 (equaliser output
+145, 88% of the way to the boundary), and the self-synchronising
+descrambler carried that into frame 1. The digital sent identical B1d
+codewords either way; the analogue's own CPu had offered A-law levels 16
+apart. That CPu came from Phase 3's `v90_analogue_phase4_build_cp()`, which
+applies 3 sigma, but with sigma measured on the DIL. The DIL holds each
+level for a segment, so the equaliser's data-dependent noise on random
+symbols never shows there. V.92 9.6.2 puts CPu after TRN2d, and TRN2d is
+random mapped symbols, so `v92a4` now measures decision noise on TRN2d and,
+just before its first CPu, thins each constellation to the same 3-sigma
+separation and backs drn off until 5.4.3's 2^K <= prod(Mi) holds
+(`v90_analogue_phase4_set_cp()` gives the receiver the same CP). Thinning
+keeps CPu a subset of the Phase 3 CP. Result: byte-exact rows unchanged
+(drn 22); the audio rows thin, PCMA from 92/93 to 66/77 points at the same
+drn 22, PCMU to drn 21. The shared V.90 analogue role is not changed.

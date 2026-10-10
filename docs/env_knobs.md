@@ -156,7 +156,6 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_SLIP_ROT_SWEEP` | v34rx.c |  | d | diagnostic: static-rotation sweep in the upstream slip search |
 | `ME_V90_SMARTLINK_DUMMY_CPT` | modem_engine.c | 0 | - | interop: the only way to enable v90_repair_smartlink_dummy_cpt() (tested in vpcm_loopback_test) |
 | `ME_V90_UPSTREAM_T2` | v34rx.c |  | - | pending experiment: the V.90 upstream through the ordinary V.34 receiver has never been compared |
-| `ME_V92_CPD_GAIN_PER_LU` | v90.c |  | h | interop: slmodemd's G x LU convention (stops its V.92 upstream railing) |
 | `ME_V92_MH_GRANT` | modem_engine.c | 1 | h | test hook: V.92 9.10 modem-on-hold grant/deny |
 | `ME_V92_MH_INITIATE` | modem_engine.c |  | h | test hook: provokes V.92 9.10 modem-on-hold against a real peer |
 | `ME_V92_MH_T1` | modem_engine.c | 0x3 | dh | test hook: V.92 9.10 modem-on-hold T1 code |

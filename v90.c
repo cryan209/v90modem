@@ -123,9 +123,11 @@ static int v90_trn2d_symbols(void)
 #define V90_B1D_FRAMES    48
 #define V90_B1D_SYMBOLS   (V90_B1D_FRAMES * V90_FRAME_LEN)
 #define V90_MP_MAX_BITS  256
-/* Native V.92 mapped SUVd/CPd queue: a profile CPd (base + modulus +
- * one 64-point constellation set) is ~1.4k bits after frame fill. */
-#define V90_V92_TX_QUEUE_BITS 2048
+/* Native V.92 mapped SUVd/CPd queue: room for the largest CPd Table 30
+ * allows (V92_CPD_MAX_BITS).  2048 held one 64-point set; with every
+ * codec level in range a single 128-point set is 2176 bits of points
+ * alone, and the CPd then silently failed to encode. */
+#define V90_V92_TX_QUEUE_BITS V92_CPD_MAX_BITS
 
 /* V.92 Phase 4 constants (ITU-T V.92 §8.8.5 Table 31) */
 /* SUVd: 17 sync + 1 start + 1 id + 13 rsv + 1 silent + 1 ack + 1 start
@@ -929,22 +931,27 @@ static bool v90_build_v92_suvd_mapped(v90_state_t *s, bool ack)
 /* CPd points are kept at least 2 x this x the measured TRN2u sigma apart. */
 #define V92_UPSTREAM_MARGIN 4.0
 
-static bool v90_v92_cpd_gain_per_lu(void)
-{
-    static int cached = -1;
-
-    if (cached < 0) {
-        const char *v = getenv("ME_V92_CPD_GAIN_PER_LU");
-        cached = (v && *v == '1') ? 1 : 0;
-    }
-    return cached != 0;
-}
-
+/* V.92 Table 30: "the digital modem shall design the modulation parameters
+ * assuming that, when the prefilter output multiplied by G has a
+ * mean-square value of 1, the analogue modem will transmit at the desired
+ * power", and 3.8 sets LU to that power.  The analogue modem therefore
+ * transmits LU x G x v, and a point reaches the network ADC as
+ * LU_rx x G x point, LU_rx being the received TRN2u rms.  Until that is
+ * measured there is no shared reference: G x point is taken as the DS0
+ * level itself (LU_rx = 1). */
 double v90_get_v92_upstream_ds0_per_unit(const v90_state_t *s)
 {
-    if (s && s->v92_upstream_lu_rx > 1.0 && v90_v92_cpd_gain_per_lu())
+    if (s && s->v92_upstream_lu_rx > 1.0)
         return s->v92_upstream_lu_rx;
     return 1.0;
+}
+
+bool v90_set_v92_upstream_lu(v90_state_t *s, double lu_rx)
+{
+    if (!s || !(lu_rx > 1.0) || s->v92_cpd_sent)
+        return false;
+    s->v92_upstream_lu_rx = lu_rx;
+    return true;
 }
 
 bool v90_set_v92_upstream_noise(v90_state_t *s, double sigma_linear,
@@ -987,17 +994,20 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
 
     if (!out->gain_q0_16)
         return false;
-    /* ME_V92_CPD_GAIN_PER_LU=1: slmodemd transmits G x LU x v (its log:
-     * "constellation gain (after Lu multiplication)"), i.e. it reads a point
-     * in units of LU.  The only reference the two ends share is LU, which
-     * arrives here at the received TRN2u rms R, so for that convention G
-     * must carry 1/R.  Points are rescaled after G is quantised so G x R x
-     * point still lands on the intended level.  Our own analogue role
-     * transmits G x v, so this stays opt-in. */
-    if (s->v92_upstream_lu_rx > 1.0 && v90_v92_cpd_gain_per_lu()) {
-        long gq = lround((double)s->v92_gain_q0_16 / s->v92_upstream_lu_rx);
+    /* G x point x LU_rx must land on a codec level (see
+     * v90_get_v92_upstream_ds0_per_unit()).  With LU_rx measured, G is
+     * ours to choose: the smallest that still lets a 16-bit point reach the
+     * top codeword, so no level is out of range and points keep the finest
+     * resolution; the power bound below then decides the top level.  Points
+     * are computed after G is quantised, so G x LU_rx x point still lands
+     * on the level. */
+    if (s->v92_upstream_lu_rx > 1.0) {
+        double top = (double)v90_pcm_to_linear(s->law,
+                                               ucode_to_pcm_positive(s->law, 127));
+        long gq = (long)ceil(4.0*65536.0*top/(65535.0*s->v92_upstream_lu_rx));
 
         if (gq < 1) gq = 1;
+        if (gq > 65535) gq = 65535;
         out->gain_q0_16 = (uint16_t)gq;
         scale = (4.0*65536.0) / ((double)gq * s->v92_upstream_lu_rx);
     } else {
@@ -1061,8 +1071,6 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
         double unit = s->v92_upstream_lu_rx*(double)out->gain_q0_16/(4.0*65536.0);
         double lu = s->v92_upstream_lu_rx;
 
-        if (!v90_v92_cpd_gain_per_lu())
-            unit = (double)out->gain_q0_16/(4.0*65536.0);     /* G x point is DS0 */
         while (points > 8) {
             double ms = 0.0;
 
@@ -5634,11 +5642,9 @@ void v90_enable_v92_mode(v90_state_t *s)
     if (s->v92_gain_q0_16 == 0) {
         s->v92_upstream_drn = 14;      /* (14 + 17) x 8000 / 6 bps */
         s->v92_trellis_select = 0;     /* 16-state */
-        /* 4G at Table 30's largest, G ~ 0.25: points are 16-bit, so G
-         * caps the levels at 65535 x G.  0x8000 (G = 0.125) cut off every
-         * level above 8191 -- mu-law's top two segments -- and left 94
-         * of 127 Ucodes even on a noiseless bearer.  The power bound in
-         * v90_build_v92_cpd_frame() now decides the top level. */
+        /* Used only until LU_rx is measured (then G is derived; see
+         * v90_build_v92_cpd_frame()).  Points are 16-bit, so here G caps
+         * the levels at 65535 x G: take Table 30's largest 4G. */
         s->v92_gain_q0_16 = 0xFFFF;
     }
 }

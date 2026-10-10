@@ -371,6 +371,8 @@ static bool phase3_pair_at(bool alaw, bool dil, bool drop_cpd, unsigned audio_ra
     v92_trn2u_demod_t cpt_demod, p4_demod;
     v92_cp_rx_t p4_rx;
     bool p4_started = false;
+    double lu_pow = 0.0;           /* received TRN2u power, for LU_rx */
+    long lu_n = 0;
     p3_pair_sink_t sink = {.digital = digital};
     bool ja_seen = false, cpt_started = false;
     int ja_hold = -1;
@@ -524,6 +526,16 @@ static bool phase3_pair_at(bool alaw, bool dil, bool drop_cpd, unsigned audio_ra
             if (sink.cpt_count) break;
         } else if (p4_started) v92_trn2u_demod_feed(&p4_demod, &u, 1);
         else if (cpt_started) v92_trn2u_demod_feed(&cpt_demod, &u, 1);
+        if (p4_started && !sink.b1_armed) {
+            /* LU_rx for the CPd, as the engine measures it: the received
+             * TRN2u rms (Table 30: points arrive as LU_rx x G x point).
+             * Rejected once the CPd has gone out. */
+            double lin = alaw ? alaw_to_linear(u) : ulaw_to_linear(u);
+
+            lu_pow += lin*lin;
+            if (++lu_n % 200 == 0)
+                (void)v90_set_v92_upstream_lu(digital, sqrt(lu_pow/(double)lu_n));
+        }
         if (sink.b1_armed) {
             int16_t sample = alaw ? alaw_to_linear(u) : ulaw_to_linear(u);
             v92_upstream_b1_rx_feed(&sink.b1, &sample, 1);

@@ -1,4 +1,6 @@
 /* V.92 9.6.2: analogue final training. Calibrated 8 kHz linear PCM.
+ * lu is 3.8's LU: TRN2u's level and, per Table 30, the scale of the
+ * data-mode signal, which goes out as LU x G x v.
  * The network codec is outside this endpoint. Supports the implemented
  * 16-state upstream encoder; unsupported CPd profiles fail explicitly. */
 #ifndef V92_ANALOGUE_PHASE4_H
@@ -22,6 +24,8 @@ const v92_cpd_frame_t *v92a4_cpd(const v92a4_t *s);
 void v92a4_set_data_source(v92a4_t *s, int (*get_bit)(void *), void *user);
 int v92a4_get_data_bits(v92a4_t *s, uint8_t *bits, int capacity);
 int v92a4_downstream_rate(const v92a4_t *s);
+/* RMS TRN2d decision noise, G.711 linear: what CPu was designed against. */
+double v92a4_trn2d_sigma(const v92a4_t *s);
 const char *v92a4_failure(const v92a4_t *s);
 /* 9.11 (Amd.1 item 6): a CPd with drn = 0 is the digital modem clearing
  * down -- answered with an acknowledged CPu, then V92A4_CLEARDOWN 100 ms +

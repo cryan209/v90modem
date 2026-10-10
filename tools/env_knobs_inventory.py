@@ -70,7 +70,6 @@ SETTINGS = [
 KEPT = {
     "ME_V90_UPSTREAM_T2": "pending experiment: the V.90 upstream through the ordinary V.34 receiver has never been compared",
     "ME_V90_PHASE_SWEEP": "diagnostic mode: holds one upstream frame-phase candidate for grading",
-    "ME_V92_CPD_GAIN_PER_LU": "interop: slmodemd's G x LU convention (stops its V.92 upstream railing)",
     "ME_V90_CP_BAUD_CODE": "offline CP search control (v90_cp_live.c)",
     "ME_V90_CP_BROAD_MAP": "offline CP search control (v90_cp_live.c)",
     "ME_V90_CP_CARRIER": "offline CP search control (v90_cp_live.c)",

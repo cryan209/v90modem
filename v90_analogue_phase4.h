@@ -157,6 +157,11 @@ int v90_analogue_phase4_rate_renegotiations(const v90_analogue_phase4_t *s);
 /* Arm §9.6.2.1's optional CPs/echo-reconditioning cycle before local S. */
 bool v90_analogue_phase4_start_rate_renegotiation(v90_analogue_phase4_t *s,
                                                    bool silence_request);
+/* Replace the data-mode CP this receiver demaps B1d and data with -- a
+ * CP redesigned after TRN2d (V.92 CPu).  Accepted only before B1d and only
+ * for a CP whose K its moduli can carry. */
+bool v90_analogue_phase4_set_cp(v90_analogue_phase4_t *s,
+                                const vpcm_cp_frame_t *cp);
 int v90_analogue_phase4_get_data_bits(v90_analogue_phase4_t *s,
                                       uint8_t *bits, int max_bits);
 
