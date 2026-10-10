@@ -1009,7 +1009,7 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
         int n = 0;
         int16_t prev = 0;
 
-        for (int ucode = 1; ucode < 128; ucode += 2) {
+        for (int ucode = 1; ucode < 128; ucode++) {
             int16_t linear = v90_pcm_to_linear(
                 s->law, ucode_to_pcm_positive(s->law, ucode));
 
@@ -1028,8 +1028,12 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
         spacing *= 0.9;
     }
     int16_t prev_linear = 0;
+    /* Every Ucode is a candidate; the spacing above decides.  Odd Ucodes
+     * alone are at most 64 levels, and 12*log2(62) - 3 = 68 bits per frame
+     * stops 6.4.1's product(Mi) >= 2^K at drn 17 (45333) even on a
+     * noiseless bearer: 48000 (K = 72) needs about 76 levels. */
     for (int ucode = 1; ucode < 128 && points < V92_CPD_MAX_POINTS;
-         ucode += 2) {
+         ucode++) {
         int16_t linear = v90_pcm_to_linear(
             s->law, ucode_to_pcm_positive(s->law, ucode));
 
@@ -1047,6 +1051,31 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
         if (point > 65535.0) break;
         out->points[0][points++] = (uint16_t)lround(point);
     }
+    /* Table 30: the design assumes G x (prefilter output) at mean square 1
+     * is the analogue modem's desired power, which 3.8 makes LU's.  So keep
+     * the constellation's mean square within the received LU's: drop the
+     * largest points until it is (each magnitude is about equally likely
+     * from the modulus encoder).  This, not G's range, is what bounds the
+     * top level. */
+    if (s->v92_upstream_lu_rx > 1.0) {
+        double unit = s->v92_upstream_lu_rx*(double)out->gain_q0_16/(4.0*65536.0);
+        double lu = s->v92_upstream_lu_rx;
+
+        if (!v90_v92_cpd_gain_per_lu())
+            unit = (double)out->gain_q0_16/(4.0*65536.0);     /* G x point is DS0 */
+        while (points > 8) {
+            double ms = 0.0;
+
+            for (int i = 0; i < points; i++) {
+                double level = unit*out->points[0][i];
+
+                ms += level*level;
+            }
+            if (ms/points <= lu*lu)
+                break;
+            points--;
+        }
+    }
     /* The fourth symbol of each trellis frame (k = 3: intervals 3, 7, 11)
      * carries the convolutional code's parity, and 6.4.2 makes its
      * equivalence classes modulo 2*Mi.  Give it Mi = LC/2 with LC even.
@@ -1058,6 +1087,10 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
      * is exactly the valid members. */
     if (points > 2 && (points & 1))
         points--;                             /* drop the largest point */
+    /* Dropped points must not linger past LC: the frame is compared and
+     * encoded whole. */
+    for (int i = points; i < V92_CPD_MAX_POINTS; i++)
+        out->points[0][i] = 0;
     out->set_sizes[0] = (uint8_t)points;
     /* V.92 §6.4.2: k=3 uses equivalence classes modulo 2*Mi across a
      * constellation of N=2*LC signed points.  Therefore Mi must not exceed
@@ -5601,7 +5634,12 @@ void v90_enable_v92_mode(v90_state_t *s)
     if (s->v92_gain_q0_16 == 0) {
         s->v92_upstream_drn = 14;      /* (14 + 17) x 8000 / 6 bps */
         s->v92_trellis_select = 0;     /* 16-state */
-        s->v92_gain_q0_16 = 0x8000;    /* 4G = 0.5 -> G = 0.125 */
+        /* 4G at Table 30's largest, G ~ 0.25: points are 16-bit, so G
+         * caps the levels at 65535 x G.  0x8000 (G = 0.125) cut off every
+         * level above 8191 -- mu-law's top two segments -- and left 94
+         * of 127 Ucodes even on a noiseless bearer.  The power bound in
+         * v90_build_v92_cpd_frame() now decides the top level. */
+        s->v92_gain_q0_16 = 0xFFFF;
     }
 }
 

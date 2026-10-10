@@ -355,6 +355,55 @@ them in the V.92 layer itself:
    `v92_startup_test` grades upstream payload only, so nothing had graded
    downstream payload after B1d.
 
-Still open: the upstream rate on a perfect bearer (34666 mu-law, 24000
-A-law) is below V.92's 48000 and has not been examined; no foreign V.92
-modem has been tried; the bearer here is byte-exact, not an analogue loop.
+Still open: no foreign V.92 modem has been tried; the bearer here is
+byte-exact, not an analogue loop. (The upstream rate is resolved below.)
+
+## 2026-10-11: upstream 34666 -> 48000 -- the CPd design, not the channel
+
+On the byte-exact engine pair the digital modem offered 34666 (A-law
+24000) because its Table 30 constellation had 24 levels. Three limits in
+`v90_build_v92_cpd_frame()` and its inputs compounded; a model of the
+greedy level picker reproduces every observed rate from them:
+
+| design | levels | rate |
+|---|---|---|
+| before: sigma 27.5, odd Ucodes, G = 0.125 | 24 | 34666 |
+| sigma 4.4, every Ucode, G = 0.125 | 64 | 45333 |
+| sigma 4.4, every Ucode, G = 0.25, power-bounded | 78 | 48000 |
+
+1. **The noise figure was the network ADC's rounding of TRN2u.** Points are
+   spaced 2 x 4 x sigma apart. Sigma was the equaliser output's distance to
+   the ideal Table 28 level, but those levels (+/-LU/sqrt5, +/-3LU/sqrt5) are
+   off the G.711 grid, so the ADC rounds each one by a fixed amount, and
+   3LU/sqrt5 = 8050 clips at the top codeword. Table 30's data points are
+   codec levels (6.4.2) and are never rounded. Sigma is now the spread
+   *within* each decided level, which drops the fixed per-level offset:
+   27.5 -> 4.4 DS0 units (A-law 5.9). A least-squares fit that also
+   removed non-linear leakage into neighbours measured the same 4.4, so the
+   simple estimator stays.
+2. **Only odd Ucodes were candidates.** At most 64 levels; 12 log2 62 - 3 =
+   68 bits per frame stops 6.4.1's product(Mi) >= 2^K at drn 17 (45333) even
+   with sigma = 0. 48000 (K = 72) needs about 76 levels. Every Ucode is now a
+   candidate and the spacing rule thins them.
+3. **G = 0.125 cut off mu-law's top two segments.** Points are 16-bit and,
+   in the convention our two ends share (the analogue sends G x v), G x point
+   is the DS0 level, so 4G = 0x8000 capped levels at 8191. 4G now defaults
+   to Table 30's largest (0xFFFF), and the top level is set by Table 30's
+   power rule instead: the design assumes G x v at mean square 1 is the
+   desired power, which 3.8 makes LU's, so the constellation's mean square is
+   held at or below the received LU's.
+
+Validated with `engine_pair_test --hold-seconds 60` and bit dumps
+(`DS_TX_BIT_DUMP` on the analogue, `DS_RX_BIT_DUMP` on the digital): 48000 on
+both laws, 2,915,280 upstream bits each, zero errors. With the spacing forced
+to zero (94 levels, decision distance 4 DS0 units at the bottom) it was also
+error-free, so the 4.4 still in sigma is not noise data mode sees on this
+bearer; the remaining 4 x sigma margin is deliberate headroom for real lines.
+
+Two things this does not settle. The spec's own convention is that the
+analogue modem transmits LU x G x v (Table 30's mean-square rule; slmodemd
+does this, `ME_V92_CPD_GAIN_PER_LU=1` adapts our digital side to it); our
+analogue sends G x v, so moving it to the spec convention would make G's
+range irrelevant and leave power as the only bound. And the within-level
+sigma has only been checked on a byte-exact bearer; on an analogue loop it
+includes linear ISI the data path also suffers, which is intended.

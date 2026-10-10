@@ -1299,6 +1299,17 @@ static bool           g_v92_v34_rx_parked = false;
  * in LU units, and the received DS0 power, for the CPd design
  * (v90_set_v92_upstream_noise()). */
 static double         g_v92_trn2u_err2 = 0.0;
+/* The same outputs grouped by their decision (-3, -1, 1, 3): the spread
+ * WITHIN a level is the noise the data constellation must clear.  The
+ * distance to the ideal level is not: TRN2u's levels are off the G.711
+ * grid, so the network ADC rounds each one by a fixed amount (and clips
+ * 3LU/sqrt5 above the top codeword), while Table 30's data points are
+ * codec levels by construction (6.4.2) and are not rounded at all.
+ * Measured on a byte-exact bearer: 27 DS0 units by distance, 4.4 within
+ * level, and data decoding error-free at zero margin. */
+static double         g_v92_trn2u_lvl_sum[4], g_v92_trn2u_lvl_sum2[4];
+static uint64_t       g_v92_trn2u_lvl_n[4];
+static double         g_v92_trn2u_sigma;           /* last pushed to the CPd design */
 static double         g_v92_trn2u_pow = 0.0;
 static uint64_t       g_v92_trn2u_nerr = 0;
 static uint64_t       g_v92_trn2u_npow = 0;
@@ -5915,7 +5926,8 @@ static void v92_live_p4u_frame(void *user_data,
                     g_v92_upstream_slicer_set = false;
                     g_v92_upstream_lock_logged = false;
                     ME_LOG("[ME] V.92 PCM-upstream B1u receiver armed (%s): drn=%u rate=%d bps, "
-                           "%u points (largest %u), 4G=%u/65536, TRN2u error %.3f LU over %llu, rx rms %.0f\n",
+                           "%u points (largest %u), 4G=%u/65536, TRN2u error %.3f LU over %llu, rx rms %.0f, "
+                           "noise sigma %.2f DS0\n",
                            eq_mode ? "equalised, decoded lock" : "raw, correlator",
                            (unsigned)cpd.selected_upstream_drn,
                            ((int)cpd.selected_upstream_drn + 17)*8000/6,
@@ -5924,7 +5936,8 @@ static void v92_live_p4u_frame(void *user_data,
                            (unsigned)cpd.gain_q0_16,
                            g_v92_trn2u_nerr ? sqrt(g_v92_trn2u_err2/(double)g_v92_trn2u_nerr) : 0.0,
                            (unsigned long long)g_v92_trn2u_nerr,
-                           g_v92_trn2u_npow ? sqrt(g_v92_trn2u_pow/(double)g_v92_trn2u_npow) : 0.0);
+                           g_v92_trn2u_npow ? sqrt(g_v92_trn2u_pow/(double)g_v92_trn2u_npow) : 0.0,
+                           g_v92_trn2u_sigma);
                     {
                         char pl[1024];
                         int at = 0;
@@ -6063,6 +6076,9 @@ static void cleanup_v34_v90_training_locked(void)
     g_v92_v34_rx_parked = false;
     g_v92_trn2u_err2 = g_v92_trn2u_pow = 0.0;
     g_v92_trn2u_nerr = g_v92_trn2u_npow = g_v92_trn2u_pushed = 0;
+    memset(g_v92_trn2u_lvl_sum, 0, sizeof(g_v92_trn2u_lvl_sum));
+    memset(g_v92_trn2u_lvl_sum2, 0, sizeof(g_v92_trn2u_lvl_sum2));
+    memset(g_v92_trn2u_lvl_n, 0, sizeof(g_v92_trn2u_lvl_n));
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
     g_v92_upstream_eq_mode = false;
@@ -6192,6 +6208,9 @@ static bool restart_v90_phase2_locked(const char *reason)
     g_v92_v34_rx_parked = false;
     g_v92_trn2u_err2 = g_v92_trn2u_pow = 0.0;
     g_v92_trn2u_nerr = g_v92_trn2u_npow = g_v92_trn2u_pushed = 0;
+    memset(g_v92_trn2u_lvl_sum, 0, sizeof(g_v92_trn2u_lvl_sum));
+    memset(g_v92_trn2u_lvl_sum2, 0, sizeof(g_v92_trn2u_lvl_sum2));
+    memset(g_v92_trn2u_lvl_n, 0, sizeof(g_v92_trn2u_lvl_n));
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
     g_v92_upstream_eq_mode = false;
@@ -9243,6 +9262,9 @@ static void v92_call_state_reset_locked(void)
     g_v92_v34_rx_parked = false;
     g_v92_trn2u_err2 = g_v92_trn2u_pow = 0.0;
     g_v92_trn2u_nerr = g_v92_trn2u_npow = g_v92_trn2u_pushed = 0;
+    memset(g_v92_trn2u_lvl_sum, 0, sizeof(g_v92_trn2u_lvl_sum));
+    memset(g_v92_trn2u_lvl_sum2, 0, sizeof(g_v92_trn2u_lvl_sum2));
+    memset(g_v92_trn2u_lvl_n, 0, sizeof(g_v92_trn2u_lvl_n));
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
     g_v92_upstream_eq_mode = false;
@@ -15227,6 +15249,13 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                     if (d < -3.0) d = -3.0;
                     g_v92_trn2u_err2 += (v - d)*(v - d)/5.0;
                     g_v92_trn2u_nerr++;
+                    {
+                        int lvl = (int)(d + 3.0)/2;      /* -3,-1,1,3 -> 0..3 */
+
+                        g_v92_trn2u_lvl_sum[lvl] += v;
+                        g_v92_trn2u_lvl_sum2[lvl] += v*v;
+                        g_v92_trn2u_lvl_n[lvl]++;
+                    }
                     values[k] *= g_v92_trn2u_lu;
                 }
                 if (g_v92_trn2u_nerr >= 2000
@@ -15235,8 +15264,24 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                      * 3.8 makes LU the data mode transmit power, so the
                      * received TRN2u rms converts its error to DS0 units. */
                     double lu_rx = sqrt(g_v92_trn2u_pow/(double)g_v92_trn2u_npow);
-                    double sigma = sqrt(g_v92_trn2u_err2/(double)g_v92_trn2u_nerr)
-                                 * lu_rx;
+                    double within = 0.0, sigma;
+                    uint64_t nwithin = 0;
+
+                    for (int l = 0; l < 4; l++) {
+                        if (g_v92_trn2u_lvl_n[l] < 2)
+                            continue;
+                        within += g_v92_trn2u_lvl_sum2[l]
+                                - g_v92_trn2u_lvl_sum[l]*g_v92_trn2u_lvl_sum[l]
+                                  /(double)g_v92_trn2u_lvl_n[l];
+                        nwithin += g_v92_trn2u_lvl_n[l];
+                    }
+                    /* Units of +/-1, +/-3 -> LU (/sqrt5) -> DS0. */
+                    sigma = nwithin ? sqrt(fmax(within, 0.0)/(5.0*(double)nwithin))*lu_rx
+                                    : 0.0;
+                    /* v90_set_v92_upstream_noise() needs a positive figure. */
+                    if (sigma < 0.01)
+                        sigma = 0.01;
+                    g_v92_trn2u_sigma = sigma;
 
                     (void)v90_set_v92_upstream_noise(g_v90, sigma, lu_rx);
                     g_v92_trn2u_pushed = g_v92_trn2u_nerr;

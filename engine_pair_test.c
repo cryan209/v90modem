@@ -47,6 +47,9 @@
  * stream a V.90 analogue receiver equalises), as the HSF coupler feeds the
  * engine; only the answering side sees an exchange codec.
  *
+ * --hold-seconds N keeps the call in data mode N seconds longer after the
+ * payload, before any --X-after command.
+ *
  * ENGINE_PAIR_KEEP_LOGS=1 keeps both engines' logs after a passing call too,
  * to compare a passing configuration against a failing one.
  */
@@ -398,6 +401,7 @@ int main(int argc, char **argv)
     side_t side[2];
     int alaw = 0;
     double seconds = 40.0;
+    double hold_seconds = 0.0;
     const char *expect = NULL;
     const char *expect_connect = NULL;
     uint8_t tx[2][2*FRAME];     /* a linear side's are int16 */
@@ -420,6 +424,8 @@ int main(int argc, char **argv)
             alaw = 1;
         } else if (!strcmp(argv[i], "--seconds") && i + 1 < argc) {
             seconds = atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--hold-seconds") && i + 1 < argc) {
+            hold_seconds = atof(argv[++i]);
         } else if (!strcmp(argv[i], "--expect") && i + 1 < argc) {
             expect = argv[++i];
         } else if (!strcmp(argv[i], "--expect-connect") && i + 1 < argc) {
@@ -619,6 +625,11 @@ int main(int argc, char **argv)
         else if ((f & 7) == 0)
             usleep(1000);
     }
+
+    /* --hold-seconds: stay in data mode before grading, so a bit dump
+       (DS_TX_BIT_DUMP / DS_RX_BIT_DUMP) covers more than the payload. */
+    if (hold_seconds > 0)
+        pump_frames(side, tx, (int) (hold_seconds*8000.0/FRAME), frames);
 
     /* Questions for the DTE to ask after the call phase (ATI6...).  The peers
        are still running; the AT interpreter is on their PTY reader thread, so
