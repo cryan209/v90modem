@@ -271,6 +271,8 @@ static void ds_v42_status(void *user_data, int status)
         if (s->compression_failed && !s->v42bis)
             return;
         s->compression_failed = false;
+        /* V.42 Appendix I.3: a successful detection delivers none of its bits. */
+        s->detect_rx_len = 0;
         /* V.42bis 5.6: every L-ESTABLISH indication/confirmation is
            C-INIT, including SABME re-establishment without a fresh XID. */
         s->compressed_tx_len = s->compressed_tx_pos = 0;
@@ -472,13 +474,19 @@ static void ds_demote(data_stack_t *s)
     s->tx_shift = 0;
     s->tx_bits = 0;
     s->tx_mark_bits = 0;
-    s->rx_hunting = 1;
-    s->rx_shift = 0;
-    s->rx_bits = 0;
+    /* The receive assembler kept running through detection: keep its
+     * character phase rather than re-hunting mid-character. */
     s->fallback_buffered = false;
     ds_set_v14_rates(s, rate, rate);
     if (s->link_event)
         s->link_event(s->link_event_ctx, DS_LINK_FALLBACK);
+    /* After the fallback event, so CONNECT reaches the DTE first. */
+    for (int i = 0; i < s->detect_rx_len; i++) {
+        if (s->push)
+            s->push(s->push_ctx, s->detect_rx[i]);
+        s->rx_chars++;
+    }
+    s->detect_rx_len = 0;
 }
 
 bool ds_link_is_ready(const data_stack_t *s)
@@ -531,6 +539,7 @@ void ds_reset(data_stack_t *s)
     s->rx_hunting = 1;
     s->rx_shift = 0;
     s->rx_bits = 0;
+    s->detect_rx_len = 0;
     s->link_ready = false;
     ds_compression_release(s);
     s->compression_failed = false;
@@ -659,9 +668,44 @@ static FILE *ds_rx_bit_dump(void)
     return f;
 }
 
+/* V.14 start-stop character assembly.  Returns the completed character, or
+ * -1.  V.14 transmitters may delete stop bits under overspeed, so a 0 in the
+ * stop-bit position is the start bit of the next character, not a framing
+ * error. */
+static int ds_v14_rx_bit(data_stack_t *s, int bit)
+{
+    int ch;
+
+    if (s->rx_hunting) {
+        if (bit == 0) {
+            /* start bit */
+            s->rx_hunting = 0;
+            s->rx_shift = 0;
+            s->rx_bits = 0;
+        }
+        return -1;
+    }
+    if (s->rx_bits < 8) {
+        s->rx_shift |= (uint8_t) (bit << s->rx_bits);
+        s->rx_bits++;
+        return -1;
+    }
+    ch = s->rx_shift;
+    if (bit == 1) {
+        s->rx_hunting = 1;
+    } else {
+        s->rx_deleted_stop_bits++;
+        s->rx_hunting = 0;
+        s->rx_shift = 0;
+        s->rx_bits = 0;
+    }
+    return ch;
+}
+
 void ds_rx_put_bit(data_stack_t *s, int bit)
 {
     FILE *dump = ds_rx_bit_dump();
+    int ch;
 
     if (s->demote_pending)
         ds_demote(s);
@@ -684,6 +728,19 @@ void ds_rx_put_bit(data_stack_t *s, int bit)
     bit &= 1;
 
     if (s->framing == DS_FRAMING_V42) {
+        /* V.42 Appendix I.3 b): while detection may still fall back, keep
+         * the start-stop characters too.  A non-error-correcting peer has
+         * already told its DTE to go ahead (Appendix I.2), so what it sends
+         * inside T400 is user data; option a) discarded it. */
+        if (s->fallback_buffered && !s->link_ready) {
+            ch = ds_v14_rx_bit(s, bit);
+            if (ch >= 0) {
+                if (s->detect_rx_len < (int) sizeof(s->detect_rx))
+                    s->detect_rx[s->detect_rx_len++] = (uint8_t) ch;
+                else
+                    s->detect_rx_dropped++;
+            }
+        }
         if (s->v42)
             v42_rx_bit(s->v42, bit);
         return;
@@ -702,36 +759,11 @@ void ds_rx_put_bit(data_stack_t *s, int bit)
     }
 
     /* V.14 */
-    if (s->rx_hunting) {
-        if (bit == 0) {
-            /* start bit */
-            s->rx_hunting = 0;
-            s->rx_shift = 0;
-            s->rx_bits = 0;
-        }
-        return;
-    }
-
-    if (s->rx_bits < 8) {
-        s->rx_shift |= (uint8_t) (bit << s->rx_bits);
-        if (++s->rx_bits < 8)
-            return;
-        return;
-    }
-
-    /* Stop-bit position. V.14 transmitters may delete stop bits under
-     * overspeed, so a 0 here is the start bit of the next character, not a
-     * framing error. */
-    if (s->push)
-        s->push(s->push_ctx, s->rx_shift);
-    s->rx_chars++;
-    if (bit == 1) {
-        s->rx_hunting = 1;
-    } else {
-        s->rx_deleted_stop_bits++;
-        s->rx_hunting = 0;
-        s->rx_shift = 0;
-        s->rx_bits = 0;
+    ch = ds_v14_rx_bit(s, bit);
+    if (ch >= 0) {
+        if (s->push)
+            s->push(s->push_ctx, (uint8_t) ch);
+        s->rx_chars++;
     }
 }
 

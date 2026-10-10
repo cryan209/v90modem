@@ -87,7 +87,8 @@ an open constellation. Preserving the epoch recovers all 70 lines / 3500
 bytes from that recording at 17-, 80- and 160-sample receive block sizes.
 A fresh native call also delivers all 3500 upstream bytes through the real
 engine PTY. Its simultaneous 940-byte downstream burst is incomplete at the
-native serial interface, so that run is not a complete bidirectional pass.
+native serial interface (since shown to be a Courier DTE overrun in the test, not a modem fault; see
+`docs/x2_implementation.md`, 10 October 2026), so that run is not a complete bidirectional pass.
 A second fresh call (`artifacts/x2-rx-improve-20261006-long-rx-fixed`)
 passes all seven checks: the full 3500-byte upstream source and a short
 downstream message both reach their real PTYs. The final output-clamp build

@@ -538,7 +538,45 @@ user content. V.34 9.6.3, 10.1.3.1 and 11.4.1.1.4/5 govern these changes.
 All 3500 bytes of a fresh native Courier source now reach the real engine
 PTY; replays at 17/80/160 samples also recover the complete source. The
 940-byte downstream stress is still incomplete at the native serial
-interface. The short downstream message remains the bidirectional control.
+interface. (since shown to be a Courier DTE overrun in the test, not a modem fault; see
+`docs/x2_implementation.md`, 10 October 2026) The short downstream message remains the bidirectional control.
 See `docs/x2_v34_upstream_review.md` for evidence, sampling decisions and
 remaining echo/recovery qualification. The upstream cap stays at 4800 until
 higher rates pass foreign payload tests.
+
+
+## Downstream "stress" and lost upstream opening bytes, 10 October 2026
+
+Two open x2 results turned out not to be x2 defects.
+
+**The 940-byte downstream burst was a DTE overrun in the test, not a
+modem fault.** Decoding our own transmit tap
+(`artifacts/x2-rx-improve-20261006-long-fixed/engine-tx.g711`, inverse mapper
+from tx sample 111005, GPC descrambler, 8N1) recovers all 940 bytes exactly.
+The call has no error control (`CONNECT 53333/x2/NONE`), so nothing can hold
+off the far end. It sends 32000 bit/s into a Courier whose emulated DTE is
+paced at the firmware-programmed serial rate. The Courier output shows a
+clean 42-byte omission and then a missing tail, which is an overrun pattern,
+not line errors. A/B with `tools/probe_x2_host_courier.py --host-pace-samples`:
+an unpaced burst loses data again (454 bytes reach the Courier DTE), while
+one byte per 16 samples delivers all 940
+(`artifacts/x2-ds-pace-20261010-{burst,paced}`).
+
+**The upstream opening message was being discarded by V.42 detection.**
+Since `ef7b5464` the factory `+ES` attempts V.42 detection on every call. The
+Courier sends its first line inside the answerer's T400, and the detection
+phase dropped those characters on fallback (V.42 Appendix I.3 option a).
+Both arms above lost `COURIER-X2-HOST-0123456789`, with the receiver at 0.000
+symbol error. `v90_engine_replay` of the paced tap reproduces this. With
+`ME_DATA_FRAMING=v14`, or with the data-stack fix (Appendix I.3 option b,
+forward the buffered characters after the fallback event), the message
+reaches the PTY right after `CONNECT 32000`. This affected every
+non-error-correcting peer that talks first, not just x2.
+
+The line noise after about 18 s in these captures is the Courier's later
+upstream collapse (the known MP/data discontinuity), and a replay cannot
+judge it.
+
+A fresh native call with the fix and the paced 940-byte source passes all
+seven checks, with both directions complete through the real PTYs
+(`artifacts/x2-ds-pace-20261010-fixed`).

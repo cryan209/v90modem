@@ -40,6 +40,12 @@ def main():
     parser.add_argument('--host-message', default='HOST-X2-0123456789\r\n')
     parser.add_argument('--host-at', type=int, default=120000,
                         help='inject host source bytes at this bearer sample')
+    parser.add_argument('--host-message-file', type=Path,
+                        help='host source bytes from a file (overrides --host-message)')
+    parser.add_argument('--host-pace-samples', type=int, default=0,
+                        help='with --pty-source, queue at most one host byte per this many '
+                             'bearer samples (0: one burst). Without error control nothing '
+                             'stops a burst faster than the Courier DTE rate overrunning it')
     parser.add_argument('--pty-source', action='store_true',
                         help='send and receive through the real engine PTY after CONNECT')
     parser.add_argument('--fixed-native-rate', action='store_true',
@@ -52,6 +58,8 @@ def main():
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     source = output / 'host-source.bin'
+    if args.host_message_file:
+        args.host_message = args.host_message_file.read_bytes().decode('ascii')
     source.write_bytes(args.host_message.encode('ascii'))
     os.environ['ME_V90_UPSTREAM_BIT_DUMP'] = str(output / 'upstream.bits')
     os.environ['ME_V90_UPSTREAM_SYM_DUMP'] = str(output / 'upstream-symbols.txt')
@@ -97,8 +105,12 @@ def main():
                 payload = args.host_message.encode('ascii')
                 if (b'CONNECT ' in self.dte and self.samples >= args.host_at
                         and self.source_offset < len(payload)):
+                    end = len(payload)
+                    if args.host_pace_samples > 0:
+                        end = min(end, 1 + (self.samples - args.host_at) // args.host_pace_samples)
                     try:
-                        self.source_offset += os.write(self.pty_fd, payload[self.source_offset:])
+                        if end > self.source_offset:
+                            self.source_offset += os.write(self.pty_fd, payload[self.source_offset:end])
                     except BlockingIOError:
                         pass
                 return reply
@@ -165,6 +177,7 @@ def main():
         checks['pty_source_queued'] = result['engine']['source_queued'] == len(args.host_message.encode())
     result['checks'] = checks
     result['payload'] = {'expected': args.message,
+                         'host_pace_samples': args.host_pace_samples,
                          'host_expected': args.host_message,
                          'host_source_at_sample': args.host_at,
                          'host_to_native_complete': checks['host_to_native_complete'],

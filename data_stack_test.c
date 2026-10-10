@@ -718,6 +718,50 @@ static void test_v42bis_fills_frames_on_long_round_trip(void)
     ds_release(&answerer);
 }
 
+/* V.42 Appendix I.2/I.3 b): a non-error-correcting originator's DTE was
+ * told to go ahead at CONNECT, so what it sends inside the answerer's T400
+ * is user data.  The fallback must forward it, after the fallback event. */
+static int fallback_events;
+static int fallback_sink_at_event;
+
+static void fallback_event(void *ctx, ds_link_event_t event)
+{
+    (void) ctx;
+    if (event == DS_LINK_FALLBACK) {
+        fallback_events++;
+        fallback_sink_at_event = rx_sink_len;
+    }
+}
+
+static void test_detection_fallback_forwards_early_data(void)
+{
+    static const uint8_t msg[] = "COURIER-X2-HOST-0123456789\r\n";
+    data_stack_t peer;
+    data_stack_t answerer;
+    int len = (int) sizeof(msg) - 1;
+
+    fallback_events = 0;
+    fallback_sink_at_event = -1;
+    load_tx(msg, len);
+    ds_init(&peer, DS_FRAMING_V14, pull_byte, NULL, NULL, NULL);
+    ds_set_v14_rates(&peer, 9600, 9600);
+    if (ds_init_v42(&answerer, false, true, 9600, NULL, NULL, push_byte, NULL,
+                    fallback_event, NULL) != 0) {
+        CHECK(0, "V.42 detection fallback forwards data sent inside T400");
+        return;
+    }
+    ds_set_fallback_buffered(&answerer, true);
+    for (int tick = 0; tick < 9600 * 3; tick++) {
+        ds_rx_put_bit(&answerer, ds_tx_get_bit(&peer));
+        (void) ds_tx_get_bit(&answerer);
+    }
+    CHECK(fallback_events == 1 && fallback_sink_at_event == 0
+          && rx_sink_len == len && memcmp(rx_sink, msg, (size_t) len) == 0
+          && answerer.framing == DS_FRAMING_V14,
+          "V.42 detection fallback forwards data sent inside T400 (Appendix I.3 b)");
+    ds_release(&answerer);
+}
+
 int main(void)
 {
     test_v14_roundtrip();
@@ -743,6 +787,7 @@ int main(void)
           "V.42bis refusal falls back to plain LAPM in both directions");
     test_lapm_data_stack_case(false, 3, 3, true, false, 65535,
           "V.42bis full two-octet P1 negotiation and transfer");
+    test_detection_fallback_forwards_early_data();
     test_compression_error();
     test_v44_stack(3,3,true,false,false,"V.44 detection and duplex compressed transfer");
     test_v44_stack(3,3,false,true,false,"V.44 retransmission preserves dictionary synchronization");

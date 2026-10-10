@@ -89,6 +89,11 @@ typedef struct {
     bool suspended;                /* V.92 9.10.3 modem-on-hold */
     bool fallback_buffered;        /* unsupported peer => V.14 instead of failing */
     bool demote_pending;
+    /* V.42 Appendix I.3 b): characters a non-error-correcting peer sent
+     * during the failed detection phase, forwarded on fallback. */
+    uint8_t detect_rx[2048];
+    int detect_rx_len;
+    uint64_t detect_rx_dropped;
 
     /* TX shift register: bit 0 is the next bit on the line.  V.14 keeps
      * start+data here and emits the rate-adapted stop/idle marks separately. */

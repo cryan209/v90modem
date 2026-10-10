@@ -699,6 +699,12 @@ adding V.150.1 to this project phase.
 - Explicit argv-safe exec before AUTOPPP sniffing.
 - S0 owns auto-answer; SIP only reports and executes call policy.
 - V.14 is the fallback when LAPM is preferred but unavailable.
+- Characters received during a detection phase that then falls back are
+  forwarded to the DTE after `CONNECT` (V.42 Appendix I.3 b), up to 2048;
+  a successful detection delivers none of them (I.3, first paragraph).
+  Option a) discarded them, which lost the opening bytes of every
+  non-error-correcting peer that talks first -- the Courier x2 `/NONE`
+  call sends its first line inside T400 (`data_stack_test`, 2026-10-10).
 - LAPM-required never silently falls back.
 - V.42bis follows negotiated XID values; hard-coded parameters are test-only.
 - Raw byte framing is diagnostic-only.
