@@ -400,3 +400,43 @@ repeat-end bug did. Real MICA runs 33600 on real lines.
 python3 tools/k56flex_upstream_rig/offline_rx.py UPSTREAM.ulaw TX.caller
 python3 tools/k56flex_upstream_rig/isi_by_window.py CAPTURE.txt TX.caller 18.74 21.55
 ```
+
+### Equalizer timeline and an 8 dB shortfall (2026-10-10)
+
+Watches and dumps on the deterministic rerun (`--watch 0x8d24 0xdae7`,
+`--writers`, `--dump`, `--callers`):
+
+| Time (s) | Event |
+|---|---|
+| 16.395 | 8F31 = 0800 (preamble gate) |
+| 16.494 | 6AB5/6AB7 zero the 192 coefficients (DM 0B80..0C3F); worker 8D24 -> 588D (known-reference TRN) |
+| 16.494-16.653 | 4DD0/4DD6 full-vector block LMS (16-term gradient, `satl` by TREG1 = 4/5, 16-bit rounded store): ~200 updates per tap, from zero |
+| 16.653 | worker -> 58F2 (decision slicer). **Fixed ~509 symbols: TRN 4096 ends at the same instant** |
+| 16.916 | 8F31 = 0400; DAE7 sequential-tap sweep starts (699C/69A0), decision-directed |
+| 18.697 | data starts; the sweep sticks at tap 33 (6A02 rewrites 0BA1) |
+| 19.061 | 6B30 clears DAE7: equalizer frozen |
+
+Coefficients after TRN: main tap 36 at ~7600, tails ~410 RMS (about -25 dB),
+and the decision-directed sweep never improves them. DAB7 (the "predictor",
+an echo canceller) has all-zero taps throughout: echo is ruled out.
+5882 (the other known-reference worker) is never called.
+
+`tools/k56flex_upstream_rig/ideal_lms.py`: an ideal complex LMS from zero on
+the recorded upstream (25 taps at 8 kHz per symbol parity) reaches **0.22
+spacings after the same 509 symbols** (best step) and 0.16 after 2048. Least
+squares gives 0.13. MICA reaches 0.50-0.63 after TRN plus the 2 s sweep:
+**about 8 dB worse than its own algorithm class should get.**
+
+Line gain -10, -5, 0, +5 dB: MICA error 0.528, 0.533, 0.507, 0.523. Gain
+control normalises the level, so the LMS step is not mis-scaled by level.
+
+Emulator audit so far: SATL/SATH (right shifts), ZPR, EXAR, ADD16, ADDS,
+APAC, LTA and MADS match SPRU056D. Latent bug in courier-emu: MADD and MADS
+(and the TREG0 write at c5x_ops.ipp:1876) do not copy TREG0 into TREG1/TREG2
+when PMST.TRM = 0, while LT/LTA/MAC/MACD do. Harmless here: PMST = 003B
+(TRM = 1) during the TRN LMS.
+
+Open: why MICA's 509-symbol LMS lands 8 dB short. Candidates: the 16-bit
+rounded coefficient store (the 32-bit path at 4DBB is not taken: DM
+90A4+0x19 is zero), the 4-point TRN as the only excitation, its front end
+(4580 resampler/AGC) before the equalizer, or a remaining core fault.
