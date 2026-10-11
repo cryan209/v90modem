@@ -40,6 +40,9 @@ def main():
     parser.add_argument('--host-message', default='HOST-X2-0123456789\r\n')
     parser.add_argument('--host-at', type=int, default=120000,
                         help='inject host source bytes at this bearer sample')
+    parser.add_argument('--host-after-rate-change', action='store_true',
+                        help='with --pty-source, wait for a completed x2 rate change '
+                             'before queuing host payload')
     parser.add_argument('--host-message-file', type=Path,
                         help='host source bytes from a file (overrides --host-message)')
     parser.add_argument('--host-pace-samples', type=int, default=0,
@@ -66,6 +69,8 @@ def main():
     parser.add_argument('--capture-receiver', action='store_true',
                         help='read-only capture of Courier PCM receive frame state')
     args = parser.parse_args()
+    if args.host_after_rate_change and not args.pty_source:
+        parser.error('--host-after-rate-change requires --pty-source')
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     source = output / 'host-source.bin'
@@ -93,6 +98,9 @@ def main():
                     self.dte = bytearray()
                     self.pty_fd = None
                     self.source_offset = 0
+                    self.source_first_sample = None
+                    self.source_pace_origin = None
+                    self.rate_change_seen = False
 
             def drain(self):
                 if self.pty_fd is None:
@@ -114,14 +122,23 @@ def main():
                 reply = super().exchange(octets)
                 self.drain()
                 payload = args.host_message.encode('ascii')
+                if args.host_after_rate_change and not self.rate_change_seen:
+                    self.rate_change_seen = 'X2 rate change complete:' in (
+                        self.output / 'engine.log').read_text(errors='replace')
                 if (b'CONNECT ' in self.dte and self.samples >= args.host_at
+                        and (not args.host_after_rate_change or self.rate_change_seen)
                         and self.source_offset < len(payload)):
+                    if self.source_pace_origin is None:
+                        self.source_pace_origin = self.samples
                     end = len(payload)
                     if args.host_pace_samples > 0:
-                        end = min(end, 1 + (self.samples - args.host_at) // args.host_pace_samples)
+                        end = min(end, 1 + (self.samples - self.source_pace_origin) // args.host_pace_samples)
                     try:
                         if end > self.source_offset:
-                            self.source_offset += os.write(self.pty_fd, payload[self.source_offset:end])
+                            written = os.write(self.pty_fd, payload[self.source_offset:end])
+                            if written and self.source_first_sample is None:
+                                self.source_first_sample = self.samples
+                            self.source_offset += written
                     except BlockingIOError:
                         pass
                 return reply
@@ -138,6 +155,8 @@ def main():
                 status = super().status()
                 status['dte_hex'] = bytes(getattr(self, 'dte', b'')).hex()
                 status['source_queued'] = getattr(self, 'source_offset', 0)
+                status['source_first_sample'] = getattr(self, 'source_first_sample', None)
+                status['source_after_rate_change'] = getattr(self, 'rate_change_seen', False)
                 return status
 
         probe.EnginePeer = PtyPeer
@@ -206,12 +225,17 @@ def main():
         checks['native_to_host_exact'] = exact_after_connect(received, args.message.encode())
         checks['engine_connect'] = b'CONNECT ' in received
         checks['pty_source_queued'] = result['engine']['source_queued'] == len(args.host_message.encode())
+        if args.host_after_rate_change:
+            checks['host_queued_after_rate_change'] = (
+                result['engine']['source_after_rate_change']
+                and result['engine']['source_first_sample'] is not None)
     result['checks'] = checks
     result['courier_at'] = args.courier_at
     result['payload'] = {'expected': args.message,
                          'host_pace_samples': args.host_pace_samples,
                          'host_expected': args.host_message,
                          'host_source_at_sample': args.host_at,
+                         'host_after_rate_change': args.host_after_rate_change,
                          'host_to_native_complete': checks['host_to_native_complete'],
                          'native_to_host_complete': args.message.encode() in received,
                          'decoded_octets': len(decoded),

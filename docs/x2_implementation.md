@@ -722,3 +722,33 @@ attempt could not bind the local Unix socket and was interrupted before a
 call; its directory `artifacts/x2-codex-20261012-control/` is not evidence
 of an interop failure. The completed tests used permission to open the local
 socket and PTY.
+
+## Payload after fall-forward, 12 October 2026
+
+The same isolated committed emulator was tested with 20 numbered host lines
+(1080 bytes), paced one byte per 16 bearer samples, injected at sample 220000
+(27.5 seconds). The harness now offers `--host-after-rate-change`, requiring
+the engine's completed-rate-change trace before injection, and records the
+first source sample and that gate in `call.json`. Pacing starts when the gate
+actually releases, avoiding a backlog burst if the change occurs late.
+
+`artifacts/x2-codex-20261012-after-change/` completes the index-14 handoff
+(54666 downstream / 31200 upstream) and B1 reacquisition with 100% fit.
+All 1080 source bytes are queued after the change. Initial Courier -> host
+payload is exact, but host -> Courier complete/exact checks FAIL: the native
+DTE contains localized corruption from the first line onward. This run does
+not test upstream source injection after the change.
+
+Our transmit tap was checked first, using `x2_pcm_decode` with the negotiated
+index-14 banks, continuous GPC descrambling and 8N1 assembly. Of the six
+candidate alignments starting at samples 219000..219005, sample 219005 decodes
+6832 frames with zero invalid frames and recovers the entire 1080-byte source
+exactly. Results are in `tx-tap-check.json` and `tx-tap-decoded.bin`. Thus the
+payload is intact at our raw-G.711 transmit boundary, while the emulated
+Courier fails to recover it. This reproduces the previously documented
+index-14 receive limitation; it does not independently identify its cause.
+No modem DSP constants or bearer handling were changed.
+
+Validation: the fresh closed-loop test exercises the new injection gate and
+pacing; Python compilation passes. The expected interop failure is retained
+as a failed `call.json`, not counted as a passing payload qualification.
