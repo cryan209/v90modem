@@ -580,3 +580,28 @@ Two defects of ours, fixed:
 `ME_V34_RETRAIN_AFTER_MS`) initiates a 9.5.1.1 retrain n ms into data. Our own
 V.92 analogue role does not answer a retrain yet, so this is checked against
 slmodemd only.
+
+### Retrains against slmodemd: one PCM-upstream attempt, then a V.34 upstream
+
+With the V.92 INFO0 state kept across retrains (91bd8b55) a forced retrain
+(`ME_V90_RETRAIN_AFTER_MS=40000`) does return to V.92 with PCM upstream
+(slmodemd: `selected=92`, `isPCM - 1`) -- and then slmodemd's retrained V.92
+startup fails, identically to the millisecond on every call: it never logs
+`Jd Detected` in attempts 1 and 3 (in startup and attempt 2 it does, 0.54 s
+after `waitForJd`), and in attempt 2 its Phase 4 evaluator retrains on
+`ph4MeanErrorEnergyBeforeToAfterUpdateRatio = +1.825`.  Our Jd decodes
+bit-identical and CRC-valid in every attempt, starts 0.63 s before slmodemd
+waits for it in every attempt including the successful ones, and reaches its
+DSP intact (`dm_to_dsp.raw` against our tap: lag 0 throughout).  After four
+attempts slmodemd itself asks for DP 34 and the call ends on plain V.34
+21600/24000 (`v92rt1`).
+
+INFO1d bit 70 only OFFERS PCM upstream, so the engine now makes one
+retrain attempt with it and, if the peer retrains again before data,
+withdraws the offer for the rest of the call: the next retrain stays in
+V.92's Phase 2, slmodemd selects a V.34 upstream, and the data link resumes.
+Live (`v92rt2`, 3/3 calls): V.92 32000 -> forced retrain -> one failed
+PCM attempt -> V.92 54667/31200, LAPM retained, payload gapless.
+
+Open: why slmodemd's retrained V.92 Phase 3/4 fails where its startup one
+succeeds on the same signals.

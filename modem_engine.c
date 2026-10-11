@@ -1315,6 +1315,15 @@ static double         g_v92_trn2u_sigma;           /* last pushed to the CPd des
 #define V92_P4_REFIT_SYMBOLS 4000
 #define V92_DATA_REFIT_SYMBOLS 16000  /* data-mode least-squares window */
 static bool           g_v92_p4_refit_armed = false;
+/* V.92 9.3 sends a retrain between two V.92 modems back through V.92's
+ * Phase 2, where INFO1d bit 70 OFFERS PCM upstream.  slmodemd's retrained
+ * V.92 startup fails repeatably on this rig (it misses an intact Jd, or
+ * abandons Phase 4) and then gives up on V.92 altogether, ending on plain
+ * V.34.  So offer PCM upstream on one retrain; if the peer retrains again
+ * before data, withdraw the offer for the rest of the call -- the retrain
+ * stays V.92 Phase 2, with a V.34 upstream the peer completes reliably. */
+static bool           g_v92_retrain_pending_data = false;
+static bool           g_v92_pcm_upstream_withdrawn = false;
 static int            g_v92_p4_refits_seen = 0;
 static double         g_v92_trn2u_pow = 0.0;
 static uint64_t       g_v92_trn2u_nerr = 0;
@@ -6327,8 +6336,17 @@ static bool restart_v90_phase2_locked(const char *reason)
     v34_set_v92_info0_capabilities(g_v34,
                                     g_v92_info0_local_advertised ? 1 : 0,
                                     0);
+    if (g_v92_retrain_pending_data && !g_v92_pcm_upstream_withdrawn
+        && g_v92_info0_mutual && v92_pcm_upstream_advertised()) {
+        g_v92_pcm_upstream_withdrawn = true;
+        ME_LOG("[ME] V.92: the PCM-upstream retrain did not reach data; "
+               "withdrawing the PCM upstream offer (INFO1d bit 70) for this call\n");
+        trace_phase("V92 PCM upstream offer withdrawn after a failed retrain");
+    }
+    g_v92_retrain_pending_data = true;
     v34_set_v92_pcm_upstream_capability(g_v34,
-                                        v92_pcm_upstream_advertised() ? 1 : 0);
+                                        (v92_pcm_upstream_advertised()
+                                         && !g_v92_pcm_upstream_withdrawn) ? 1 : 0);
     /* v34_restart() cleared the peer's INFO0a bits and the retrain will not
      * resend them; restore what the startup exchange established. */
     v34_set_v90_peer_info0_flags(g_v34,
@@ -9319,6 +9337,8 @@ void me_hangup(void)
  * (V.92 9.10 on-hold / fast reconnect). */
 static void v92_call_state_reset_locked(void)
 {
+    g_v92_retrain_pending_data = false;
+    g_v92_pcm_upstream_withdrawn = false;
     g_v92_active = false;
     g_v92_v8_offered = false;
     g_v92_info0_local_advertised = false;
@@ -13423,6 +13443,7 @@ static void enter_v90_data_locked(void)
            g_v92_active ? "V.92" : "V.90",
            g_v92_active ? "PCM" : "V.34",
            upstream_rate, downstream_rate);
+    g_v92_retrain_pending_data = false;
     trace_phase("%s enter DATA after B1: upstream=%d downstream=%d",
                 g_v92_active ? "V92" : "V90",
                 upstream_rate, downstream_rate);
