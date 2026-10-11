@@ -224,6 +224,19 @@ suite run on this date. Interop claims come from the dated entries in
     as V.23 carrier. It now qualifies on the mark only, as V.21 8.2.1.1 and
     V.23 8.3.1.1 define the response time.
 
+- **2026-10-11, item 1 (cheap option).** `--lines N` runs N lines as N
+  worker processes under a supervisor (`docs/multi_line.md`). Each worker has
+  its own ports, console, profile file and diagnostic paths, and dead workers
+  are restarted. `--recycle` gives each call a fresh process.
+  - The "second INVITE overwrites the ringing call" above was already stale:
+    a busy line answers 486, and +PCW handles call waiting.
+  - Local tests run concurrent calls echoed byte-exact: 3 lines V.22bis,
+    4 lines V.34, and 4 lines V.90 at 56000.
+  - At 8 lines V.90, one payload fails. It also fails alone on a single
+    line: a content-dependent V.90 upstream defect, not the supervisor.
+  - Not yet tried behind the rig's Asterisk, which needs `max_contacts` on
+    the AOR.
+
 ## 4. Suggested order
 
 1. Build fixes (done with this note). Still to do: make `make test` run

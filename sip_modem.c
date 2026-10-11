@@ -24,6 +24,7 @@
  */
 
 #include "modem_engine.h"
+#include "line_supervisor.h"
 #include "data_interface.h"
 #include "v250_ctl.h"
 #include "line_monitor.h"
@@ -65,6 +66,11 @@ static pj_pool_t       *g_pool       = NULL;
 static pjsua_acc_id     g_acc_id     = PJSUA_INVALID_ID;
 static pjsua_call_id    g_call_id    = PJSUA_INVALID_ID;
 static volatile int     g_running    = 1;
+/* --line-index (set by the line supervisor): this worker's line. */
+static int              g_line_index = 0;
+/* --exit-after-call (the supervisor's --recycle): leave once a call is over. */
+static bool             g_exit_after_call = false;
+static bool             g_had_call = false;
 static pj_bool_t        g_media_connected = PJ_FALSE;
 static pj_bool_t        g_passthrough_enabled = PJ_FALSE;
 
@@ -90,6 +96,7 @@ static void log_modem_diag_snapshot(const char *reason);
 
 /* Ring state for incoming calls — emulates S0 register auto-answer */
 #define RING_INTERVAL_MS    6000    /* 6 seconds between rings (realistic cadence) */
+#define LINE_ANSWER_STAGGER_MS 500  /* per --line-index, see ring_incoming() */
 #define AUTO_ANSWER_RINGS   2       /* default S0: answer after this many rings */
 static pjsua_call_id   g_ringing_call = PJSUA_INVALID_ID;
 /* A call that arrived mid-call under +PCW=1 (V.250 6.8.1, "hang up"): it is
@@ -959,6 +966,13 @@ static void ring_incoming(pjsua_call_id call_id)
     g_ringing_call = call_id;
     g_ring_count   = 1;
     pj_gettimeofday(&g_last_ring_time);
+    /* Under --lines every idle worker registered on one account rings for a
+     * forked INVITE; stagger the ring cadence so the lowest idle line
+     * reaches S0 first and the PBX cancels the others before they answer. */
+    if (g_line_index > 0) {
+        g_last_ring_time.msec += g_line_index * LINE_ANSWER_STAGGER_MS;
+        pj_time_val_normalize(&g_last_ring_time);
+    }
 
     caller_from_remote(&ci.remote_info, number, sizeof(number), name, sizeof(name));
     di_set_caller_id(number, name);
@@ -1219,6 +1233,7 @@ static void print_usage(FILE *f, const char *argv0)
         "          [--local-port port] [--rtp-port port]\n"
         "          [--bind-addr ip] [--mode v21|b103|b212|v23c|x2|x2-symm|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92] [--verbose]\n"
         "          [--auto-answer rings] [--connect-timeout seconds] [--profile file]\n"
+        "          [--lines N [--recycle]]\n"
         "\n"
         "--gui-loopback runs a local echo peer with selectable test profiles.\n"
         "Use --gui-web --loopback for the browser version.\n\n"
@@ -1230,6 +1245,11 @@ static void print_usage(FILE *f, const char *argv0)
         "by AT&W/AT&Y; without it they last until exit.\n"
         "--connect-timeout sets S7 likewise (default 120 s, 1-255): a dial or\n"
         "answer that has not reached CONNECT by then ends with NO CARRIER.\n"
+        "\n"
+        "--lines N runs N lines, one worker process each: SIP port local-port+i,\n"
+        "RTP port rtp-port+100*i, console <link>.i, profile <file>.i, and the i-th\n"
+        "of a comma-separated --username/--password (docs/multi_line.md).\n"
+        "--recycle gives every call a fresh worker process.\n"
         "\n"
         "--mode sets the power-on V.8 offer (same as ME_MODE); AT+MS on the\n"
         "PTY changes it for later calls and ATZ/AT&F restore it.\n"
@@ -1249,6 +1269,18 @@ int main(int argc, char *argv[])
        though the process is running fine. Force line buffering so live
        debugging actually sees output as it happens. */
     setvbuf(stdout, NULL, _IOLBF, 0);
+
+    {
+        bool recycle;
+        int lines = line_supervisor_parse(argc, argv, &recycle);
+
+        if (lines < 0) {
+            fprintf(stderr, "%s: --lines takes 1 to %d\n", argv[0], LINE_SUPERVISOR_MAX_LINES);
+            return 2;
+        }
+        if (lines > 0 || recycle)
+            return line_supervisor_run(argc, argv, lines > 0 ? lines : 1, recycle);
+    }
 
     const char *sip_server  = NULL;
     const char *username    = NULL;
@@ -1336,11 +1368,16 @@ int main(int argc, char *argv[])
             }
         } else if (!strcmp(a, "--mode") && has_val) {
             modem_mode = argv[++i];
+        } else if (!strcmp(a, "--line-index") && has_val) {
+            g_line_index = atoi(argv[++i]);
+        } else if (!strcmp(a, "--exit-after-call")) {
+            g_exit_after_call = true;
         } else {
             static const char *const takes_value[] = {
                 "--sip-server", "--username", "--password", "--pty-link",
                 "--control-link", "--data-link",
-                "--local-port", "--rtp-port", "--bind-addr", "--mode"
+                "--local-port", "--rtp-port", "--bind-addr", "--mode",
+                "--line-index"
             };
             bool missing = false;
 
@@ -1718,6 +1755,17 @@ int main(int argc, char *argv[])
         } else {
             g_last_rtp_rx_time.sec = 0;
             g_last_rtp_rx_octets = 0;
+        }
+
+        /* --exit-after-call: once a call has had media and everything is
+         * back to idle, leave; the supervisor starts a fresh worker. */
+        if (g_media_connected)
+            g_had_call = true;
+        if (g_exit_after_call && g_had_call && g_call_id == PJSUA_INVALID_ID
+            && g_ringing_call == PJSUA_INVALID_ID && g_waiting_call == PJSUA_INVALID_ID
+            && me_get_state() == ME_IDLE) {
+            PJ_LOG(3, ("sip_modem", "Call over; exiting for a fresh worker (--exit-after-call)"));
+            g_running = 0;
         }
 
         /* Check if the modem engine requested a hang-up */

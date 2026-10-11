@@ -653,3 +653,8 @@ python3 tools/pcm_ber_regression.py
 ./engine_pair_test --seconds 60 --expect V23 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --payload-lines 2 --answer-at AT+MS=V23C,0 --call-log "Automode: 1300 Hz" --call-expect "CONNECT 1200"
 # +MS automode 0 is the named carrier only: no fallback.
 ./engine_pair_test --seconds 20 --expect-no-connect --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --call-at AT+MS=V21,0,300,300 --answer-at AT+MS=V34,0 --answer-nolog "Automode:"
+# Multi-line server (docs/multi_line.md): one supervisor, N worker processes,
+# N concurrent local SIP calls echoed byte-exact; --recycle gives each call a
+# fresh worker and the second round runs on them.
+python3 tools/multi_line_test.py --lines 3 --mode v22
+python3 tools/multi_line_test.py --lines 3 --mode v22 --recycle

@@ -20,3 +20,5 @@ FAX_TEST_PAGE=a4 ./fax_class2_test --engine-class21 alaw 160
 FAX_TEST_PAGE=letter ./fax_class2_test --engine-class21 alaw 160
 @group
 ./console_test
+# Multi-line server: four concurrent V.34 calls.
+python3 tools/multi_line_test.py --lines 4 --mode v34 --connect-timeout 90
