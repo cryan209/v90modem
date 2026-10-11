@@ -534,3 +534,49 @@ was evaluated and not built: the rate here is bound by Table 30's power
 prefilter's +1.9 dB power penalty eats most of what its lower noise buys
 (modelled 28000 at best with a pessimistic precoder power, against 32000
 from the receiver fixes).
+
+## 2026-10-11: repeated runs against slmodemd at 32000
+
+Three 10-call batches (slmodemd dialling us, V.92 PCM upstream, payload both
+ways, 150 s holds; `v92_batch.sh` on tower, one summary line per call):
+every call linked at V.92 tx 32000 / rx 56000 with sigma 26.87 and drn 7, and
+every call delivered its lines with no gaps.
+
+| outcome | calls |
+|---|---|
+| clean for the whole hold | 24 / 30 |
+| ended by slmodemd's LAPM (2 x DISC, 3 x `EC UNLINK`) | 5 / 30 |
+| slmodemd retrain, link survived | 1 / 30 |
+
+The five LAPM endings all came with our modem layer healthy (level distance
+~27 DS0, few rejects). On `v92b3-4` our transmit tap against what
+slmodemd's DSP received (`/tmp/dm_to_dsp.raw`) shows the downstream intact to
+the last second (lag 0, correlation constant), so the d-modem/RTP path is
+cleared; slmodemd logs ~25 downstream FCS errors per V.92 call against 1-2 per
+V.90 call on the same rig. A V.90 control batch (`v90c1`, 6 calls) held every
+call -- but its V.34 upstream at 31200 delivered about a tenth of the lines
+(we sent ~80 REJ per call; V.92 calls none).
+
+Two defects of ours, fixed:
+
+1. **The data-mode refit could ratchet.** One clean call went 26.8 -> 78.4 DS0
+   in a single 10 s window; a fresh least-squares solve on the same samples
+   stayed at 35-46, so the signal was fine and our solve had fitted a burst
+   of wrong decisions. `v92_p3_eq_refit()` now keeps its current taps when a
+   solve's own residual exceeds twice the first accepted one's
+   (`v92_p3_eq_refits_rejected()`; the 10 s data log reports solves, refusals
+   and the last residual).
+2. **A retrain lost V.92.** slmodemd retrained once; we answered with V.90
+   9.5.1.2's INFO0-less retrain, but `v34_restart()` had cleared its INFO0a
+   bits and the engine its V.92 confirmation, so INFO1d went out in the V.90
+   form and slmodemd logged "V92 capabilities: local=1, remote=1,
+   selected=90 ... isPCM - 0": V.34 upstream at 31200 for the rest of the
+   call. V.92 9.3: "any subsequent retrains shall use Phase 2 of V.92". The
+   confirmation now survives `restart_v90_phase2_locked()` (all of whose
+   callers are 9.5 retrains) and `v34_set_v90_peer_info0_flags()` restores
+   the peer's bits in SpanDSP.
+
+`ME_V90_RETRAIN_AFTER_MS` (test hook, the sibling of
+`ME_V34_RETRAIN_AFTER_MS`) initiates a 9.5.1.1 retrain n ms into data. Our own
+V.92 analogue role does not answer a retrain yet, so this is checked against
+slmodemd only.

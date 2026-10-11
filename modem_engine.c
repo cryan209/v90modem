@@ -5143,6 +5143,31 @@ static bool v90_reneg_probe_due_locked(void)
     return data_mode_elapsed_ms() >= me_v90_reneg_after_ms();
 }
 
+/* ME_V90_RETRAIN_AFTER_MS=<n> initiates a 9.5.1.1 retrain n ms after the call
+ * reaches V.90/V.92 data mode, once.  A TEST HOOK, the sibling of
+ * ME_V34_RETRAIN_AFTER_MS and ME_V90_RENEG_AFTER_MS: a healthy call never
+ * retrains, and V.92 9.3 makes a retrain between two V.92 modems keep V.92's
+ * Phase 2 -- which needs a retrain to check.  Zero, the default, means never. */
+static bool g_v90_retrain_probe_done = false;
+
+static int me_v90_retrain_after_ms(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+        cached = parse_env_int("ME_V90_RETRAIN_AFTER_MS", 0);
+    return cached;
+}
+
+static bool v90_retrain_probe_due_locked(void)
+{
+    if (me_v90_retrain_after_ms() <= 0 || g_v90_retrain_probe_done)
+        return false;
+    if (g_v34_data_entry_ms == 0)
+        return false;
+    return data_mode_elapsed_ms() >= me_v90_retrain_after_ms();
+}
+
 static bool v34_retrain_probe_due_locked(void)
 {
     if (me_v34_retrain_after_ms() <= 0 || g_v34_retrain_probe_done)
@@ -5872,12 +5897,17 @@ static void me_v92_b1u_feed_values_locked(const double *values, int n)
                         /(nn*g_v92_data_sdd - g_v92_data_sd*g_v92_data_sd + 1e-30);
             double offset = (g_v92_data_sy - gain*g_v92_data_sd)/nn;
 
+            const v92_p3_eq_t *eq = &g_v92_p3_rx.eq[g_v92_p3_rx.eq_law];
+
             ME_LOG("[ME] V.92 upstream data: rms distance to nearest level %.1f DS0 "
-                   "(%.0f s, %llu frames rejected; fit gain %.4f offset %.1f DS0)\n",
+                   "(%.0f s, %llu frames rejected; fit gain %.4f offset %.1f DS0; "
+                   "solves %d, refused %d, last residual %.1f DS0)\n",
                    sqrt(g_v92_data_err2/80000.0)*lu,
                    g_v92_data_nerr/8000.0,
                    (unsigned long long)g_v92_upstream_rx.rejected_frames,
-                   gain, offset*lu);
+                   gain, offset*lu,
+                   v92_p3_eq_refits(eq), v92_p3_eq_refits_rejected(eq),
+                   v92_p3_eq_refit_residual(eq)*lu);
             g_v92_data_err2 = 0.0;
             g_v92_data_sdd = g_v92_data_syd = g_v92_data_sd = g_v92_data_sy = 0.0;
         }
@@ -6088,6 +6118,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v34_data_entry_samples = 0;
     g_v34_reneg_probe_done = false;
     g_v90_reneg_probe_done = false;
+    g_v90_retrain_probe_done = false;
     g_v90_reneg_await_s = false;
     g_v90_reneg_cp_rx_marked = false;
     g_v90_reneg_cp_ack_seen = false;
@@ -6243,11 +6274,12 @@ static bool restart_v90_phase2_locked(const char *reason)
     g_v90_dil_capture_start_logged = false;
     g_v90_data_frame_pos = V90_DATA_FRAME_LEN;
     v90_reset_upstream_data_arming();
+    /* The INFO0 confirmation is kept: every caller is a V.90 9.5 retrain,
+     * which omits INFO0, and V.92 9.3 makes the capability exchanged at
+     * startup govern every subsequent retrain.  Clearing it built the
+     * retrain's INFO1d in the V.90 form, and slmodemd answered "V92
+     * capabilities: local=1, remote=1, selected=90" with V.34 upstream. */
     g_v92_active = false;
-    g_v92_info0_peer_capable = false;
-    g_v92_info0_peer_short_phase2 = false;
-    g_v92_info0_mutual = false;
-    g_v92_info0_peer_logged = false;
     g_v92_trn2u_active = false;
     g_v92_v34_rx_parked = false;
     g_v92_trn2u_err2 = g_v92_trn2u_pow = 0.0;
@@ -6297,6 +6329,11 @@ static bool restart_v90_phase2_locked(const char *reason)
                                     0);
     v34_set_v92_pcm_upstream_capability(g_v34,
                                         v92_pcm_upstream_advertised() ? 1 : 0);
+    /* v34_restart() cleared the peer's INFO0a bits and the retrain will not
+     * resend them; restore what the startup exchange established. */
+    v34_set_v90_peer_info0_flags(g_v34,
+                                 (g_v92_info0_peer_capable ? 1 : 0)
+                                 | (g_v92_info0_peer_short_phase2 ? 2 : 0));
     v34_tx_power(g_v34, -10.0f);
     v34_set_put_aux_bit(g_v34, v34_put_aux_bit_cb, NULL);
     v34_set_put_phase4_bit(g_v34, v90_live_cp_bit, NULL);
@@ -12195,8 +12232,8 @@ static void v92_refresh_info0_confirmation_locked(void)
     v34_v90_info0a_t info0a;
     bool old_mutual = g_v92_info0_mutual;
 
-    g_v92_info0_peer_capable = false;
-    g_v92_info0_peer_short_phase2 = false;
+    /* No INFO0a since the last v34_restart() (a 9.5 retrain omits it):
+     * the startup exchange's answer stands, so leave it alone. */
     if (g_v92_info0_local_advertised
         && g_v34
         && v34_get_v90_received_info0a(g_v34, &info0a)) {
@@ -13551,6 +13588,15 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
         if (v90_rate_renegotiation_timed_out(g_v90)) {
             v90_reneg_cp_report_locked("timeout");
             (void) restart_v90_phase2_locked("rate renegotiation timeout");
+            return false;
+        }
+
+        if (v90_retrain_probe_due_locked()) {
+            g_v90_retrain_probe_done = true;
+            ME_LOG("[ME] V.90: ME_V90_RETRAIN_AFTER_MS probe; initiating a "
+                   "§9.5.1.1 retrain\n");
+            (void) restart_v90_phase2_locked(
+                "retrain probe (ME_V90_RETRAIN_AFTER_MS)");
             return false;
         }
 

@@ -264,6 +264,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V90_CP_POWER_ENFORCE` | v90.c |  | dh | Default off -- see v90_cp_power_within_limit()'s header. |
 | `ME_V90_PHASE_FORCE_OFFSET` | v34rx.c |  | dh | ME_V90_PHASE_FORCE_OFFSET=n displaces the decoder n |
 | `ME_V90_RENEG_AFTER_MS` | modem_engine.c | 0 | sdh |  |
+| `ME_V90_RETRAIN_AFTER_MS` | modem_engine.c | 0 | dh | test hook: a 9.5.1.1 retrain n ms into V.90/V.92 data, once (V.92 9.3 retrains keep V.92 Phase 2). |
 | `ME_V90_V8_FAIL_HOLD` | modem_engine.c | 0 | dh | ends and the peer retries.  Default off: unchanged behaviour. |
 | `ME_V92_MH_AFTER_MS` | modem_engine.c | 20000 | h |  |
 | `ME_VOICE_TEST_TX_FILE` | modem_engine.c |  | s |  |

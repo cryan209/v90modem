@@ -343,10 +343,29 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
         for (int j = 0; j < eq->cfg.nfb; j++)
             a[n + j] = eq->dhist[j];
         accumulate(eq->refit_m, dim, a, d);
-        if (--eq->refit_left == 0 && solve_normal(eq->refit_m, dim, w)) {
-            memcpy(eq->taps, w, (size_t)n*sizeof(double));
-            memcpy(eq->fb, w + n, (size_t)eq->cfg.nfb*sizeof(double));
-            eq->refits++;
+        eq->refit_dd += d*d;
+        eq->refit_n++;
+        if (--eq->refit_left == 0) {
+            double atd[LS_MAX];
+            double fit = 0.0;
+
+            for (int i = 0; i < dim; i++)
+                atd[i] = eq->refit_m[i][dim];
+            if (solve_normal(eq->refit_m, dim, w)) {
+                /* For the least-squares w, |Aw - d|^2 = d'd - w'A'd. */
+                for (int i = 0; i < dim; i++)
+                    fit += w[i]*atd[i];
+                eq->refit_resid = sqrt(fmax(eq->refit_dd - fit, 0.0)/eq->refit_n);
+                if (eq->refit_base > 0.0 && eq->refit_resid > 2.0*eq->refit_base) {
+                    eq->refits_rejected++;
+                } else {
+                    if (eq->refit_base == 0.0)
+                        eq->refit_base = eq->refit_resid;
+                    memcpy(eq->taps, w, (size_t)n*sizeof(double));
+                    memcpy(eq->fb, w + n, (size_t)eq->cfg.nfb*sizeof(double));
+                    eq->refits++;
+                }
+            }
         }
     }
 
@@ -426,11 +445,23 @@ void v92_p3_eq_refit(v92_p3_eq_t *eq, int n)
 {
     memset(eq->refit_m, 0, sizeof(eq->refit_m));
     eq->refit_left = n > 0 ? n : 0;
+    eq->refit_dd = 0.0;
+    eq->refit_n = 0;
 }
 
 int v92_p3_eq_refits(const v92_p3_eq_t *eq)
 {
     return eq->refits;
+}
+
+int v92_p3_eq_refits_rejected(const v92_p3_eq_t *eq)
+{
+    return eq->refits_rejected;
+}
+
+double v92_p3_eq_refit_residual(const v92_p3_eq_t *eq)
+{
+    return eq->refit_resid;
 }
 
 void v92_p3_eq_hold(v92_p3_eq_t *eq, bool hold)

@@ -11221,6 +11221,14 @@ SPAN_DECLARE(void) v34_set_v92_info0_capabilities(v34_state_t *s,
 }
 /*- End of function --------------------------------------------------------*/
 
+SPAN_DECLARE(void) v34_set_v90_peer_info0_flags(v34_state_t *s, int raw_26_27)
+{
+    if (!s)
+        return;
+    s->rx.info0_raw_26_27 = (uint8_t) (raw_26_27 & 0x03);
+}
+/*- End of function --------------------------------------------------------*/
+
 SPAN_DECLARE(void) v34_set_v92_pcm_upstream_capability(v34_state_t *s,
                                                         int pcm_upstream_capable)
 {

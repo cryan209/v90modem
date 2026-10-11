@@ -155,6 +155,11 @@ typedef struct {
      * symbols, feed-forward window then decision feedback, as the seed. */
     int refit_left;                /* symbols still to accumulate; 0 = idle */
     int refits;                    /* completed refits */
+    int refits_rejected;           /* solves refused by the residual test */
+    int refit_n;                   /* symbols in the window being summed */
+    double refit_dd;               /* sum of decision^2 over the window */
+    double refit_base;             /* first accepted solve's rms residual */
+    double refit_resid;            /* last solve's rms residual */
     double refit_m[V92_P3_EQ_MAX_TAPS + V92_P3_EQ_MAX_FB]
                   [V92_P3_EQ_MAX_TAPS + V92_P3_EQ_MAX_FB + 1];
 } v92_p3_eq_t;
@@ -205,6 +210,14 @@ void v92_p3_eq_train_from(v92_p3_eq_t *eq, int64_t k0, int n);
  * already separates).  v92_p3_eq_refits() counts completed solves. */
 void v92_p3_eq_refit(v92_p3_eq_t *eq, int n);
 int v92_p3_eq_refits(const v92_p3_eq_t *eq);
+/* Solves refused because their own residual exceeded twice the first
+ * accepted one's: decided on a burst of wrong decisions, such a solve fits
+ * them, decides worse, and the next solve fits those -- it ratcheted a
+ * clean slmodemd call from 26.8 to 78.4 DS0 in one window, where a fresh
+ * solve on the same samples stayed at 35-46.  The current taps are kept. */
+int v92_p3_eq_refits_rejected(const v92_p3_eq_t *eq);
+/* The last solve's rms residual, in output units (0 before any). */
+double v92_p3_eq_refit_residual(const v92_p3_eq_t *eq);
 
 /* The 8.5.7 TRN1u reference, +1/-1, for n symbols from its first. */
 void v92_p3_eq_reference(int8_t *ref, int n);

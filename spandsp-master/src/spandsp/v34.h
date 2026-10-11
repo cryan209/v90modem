@@ -913,6 +913,14 @@ SPAN_DECLARE(void) v34_put_mapping_frame_state(v34_state_t *s,
     \param pcm_law PCM coding: 0 = µ-law, 1 = A-law. */
 SPAN_DECLARE(void) v34_set_v90_mode(v34_state_t *s, int pcm_law);
 
+/*! Re-supply the peer's INFO0 bits 26:27 (V.92 Table 16 capability and
+    short-Phase-2 request) after v34_restart() when the following Phase 2
+    omits INFO0, as a V.90 9.5 retrain does.  V.92 9.3 makes the capability
+    exchanged at startup govern every subsequent retrain; v34_restart()
+    clears it, and without it INFO1d is built in the V.90 form with no
+    PCM-upstream bit. */
+SPAN_DECLARE(void) v34_set_v90_peer_info0_flags(v34_state_t *s, int raw_26_27);
+
 /*! Configure V.92 INFO0 capability/request bits for either role.
     Table 15 INFO0d assigns short request to bit 26 and capability to bit 27;
     Table 16 INFO0a reverses those meanings. Peer capability must still be
