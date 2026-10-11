@@ -989,6 +989,8 @@ static fsk_rx_state_t *g_v21_rx;
 static me_modulation_t g_v21_mod = ME_MOD_V21;  /* this call's: V21, BELL103 or V23 */
 /* V.23: the offer's direction (me_offer_t.v23_dir), and this call's rates. */
 static int g_offer_v23_dir;
+/* V.250 6.4.1 +MS <automode> of this call's offer: licence to fall back. */
+static bool g_offer_automode = true;
 static int g_v23_tx_rate, g_v23_rx_rate;
 /* Tone qualification for the FSK and Bell 212A paths.  SpanDSP's FSK
  * carrier detect is broadband power, so on its own it reports carrier ~20 ms
@@ -1004,6 +1006,7 @@ static int g_v23_tx_rate, g_v23_rx_rate;
 #define TONE_QUAL_FRAC   0.5f
 typedef struct {
     int nf;              /* 1 or 2 frequencies */
+    float frac;          /* fraction of the power the tones must hold */
     float coef[2];
     float gz[2][2];      /* Goertzel state per frequency */
     int n;
@@ -1016,6 +1019,7 @@ static void tone_qual_init(me_tone_qual_t *q, float f0, float f1)
 {
     memset(q, 0, sizeof(*q));
     q->nf = f1 > 0.0f ? 2 : 1;
+    q->frac = TONE_QUAL_FRAC;
     q->coef[0] = 2.0f * cosf(2.0f * (float) M_PI * f0 / SAMPLE_RATE);
     q->coef[1] = 2.0f * cosf(2.0f * (float) M_PI * f1 / SAMPLE_RATE);
 }
@@ -1044,7 +1048,7 @@ static void tone_qual_feed(me_tone_qual_t *q, const int16_t *amp, int len, bool 
             tone += a * a + b * b - q->coef[k] * a * b;
         }
         bool held = q->energy > 0.0f
-            && 2.0f * tone >= TONE_QUAL_FRAC * (float) TONE_QUAL_BLOCK * q->energy;
+            && 2.0f * tone >= q->frac * (float) TONE_QUAL_BLOCK * q->energy;
         int ms = TONE_QUAL_BLOCK / (SAMPLE_RATE / 1000);
 
         q->run_ms = held && gate ? q->run_ms + ms : 0;
@@ -1056,9 +1060,9 @@ static void tone_qual_feed(me_tone_qual_t *q, const int16_t *amp, int len, bool 
 }
 
 /* Circuit 109.  V.21 §8.2.2 Table 2 gives OFF-to-ON as 300-700 ms on the
- * switched network, so CONNECT waits until the receive channel's two
- * characteristic frequencies (§3) have carried most of the received power
- * for V21_QUALIFY_MS without a break. */
+ * switched network, so CONNECT waits until the receive channel's mark (§3;
+ * see v21_qualify_init()) has carried most of the received power for
+ * V21_QUALIFY_MS without a break. */
 #define V21_QUALIFY_MS     400
 static bool  g_v21_fsk_up;       /* SpanDSP has reported carrier */
 static me_tone_qual_t g_v21_qual;
@@ -1075,6 +1079,11 @@ static me_tone_qual_t g_v21_qual;
 static bool g_b212;              /* this call is Bell 212A */
 static bool g_b212_pending;      /* V.22 trained; the tone gate has not cleared */
 static bool g_b212_tone_ended;   /* caller: told the datapump the tone stopped */
+/* Reached by automode on a 2225 Hz answer tone (legacy_automode_check_locked()),
+ * not set by AT+MS: the answerer may be a Bell 103 that never drops it. */
+static bool g_b212_auto;
+static long g_b212_samples;      /* caller: since the datapump started */
+#define B212_AUTO_103_AFTER_MS 2500
 static me_tone_qual_t g_b212_qual;
 static void v21_release(void)
 {
@@ -2825,6 +2834,7 @@ static bool me_resolve_offer(const char *mode, bool automode)
     g_offer_v110_rate = o.v110_rate;
     g_offer_r56 = o.r56;
     g_offer_v23_dir = o.v23_dir;
+    g_offer_automode = automode;
     g_mode_name = o.name;
     g_v90_analogue_role = o.v90 && role && strcmp(role, "analogue") == 0;
     return true;
@@ -7581,16 +7591,61 @@ static void v21_put_bit(void *user, int bit)
         ds_rx_put_bit(&g_data_stack, bit);
 }
 
+/* On the mark alone: V.21 8.2.1.1 and V.23 8.3.1.1 define circuit 109's
+ * response with "a frequency corresponding to the characteristic frequency
+ * of binary 1", and the far end's starting signal is binary 1 (V.25 2.4).
+ * The space would also admit a 2100 Hz answer tone, which is V.23's forward
+ * space: a V.23 call modem qualified V.8's ANSam as carrier. */
 static void v21_qualify_init(const fsk_spec_t *rx_spec)
 {
     g_v21_fsk_up = false;
-    tone_qual_init(&g_v21_qual, rx_spec->freq_zero, rx_spec->freq_one);
+    tone_qual_init(&g_v21_qual, rx_spec->freq_one, 0.0f);
 }
 
 /* Feed received audio; CONNECT once circuit 109 qualifies (see above). */
+/* V.25 3.10 iii): a duplex call modem puts its starting signal on the line
+ * once it has detected the end of the answer tone (absent 75 +/- 20 ms).  A
+ * fixed V.21 or V.23 call modem therefore holds its transmitter silent while
+ * a 2100 Hz answer tone is on the line, or until the far end's own carrier
+ * arrives without one.  A Bell 103 originate modem keys on carrier instead
+ * and never holds.  The receiver runs throughout. */
+#define FSK_ANS_HEARD_MS 200
+#define FSK_ANS_GONE_MS   80
+static bool g_fsk_tx_hold;
+static bool g_fsk_ans_heard;
+static me_tone_qual_t g_fsk_ans_qual;
+
+static void fsk_hold_for_answer_tone_locked(void)
+{
+    g_fsk_tx_hold = true;
+    g_fsk_ans_heard = false;
+    tone_qual_init(&g_fsk_ans_qual, 2100.0f, 0.0f);
+}
+
+static void fsk_engine_tx(int16_t *amp, int len)
+{
+    if (g_fsk_tx_hold)
+        memset(amp, 0, sizeof(int16_t) * (size_t) len);
+    else
+        fsk_tx(g_v21_tx, amp, len);
+}
+
 static void v21_qualify_rx(const int16_t *amp, int len)
 {
     tone_qual_feed(&g_v21_qual, amp, len, g_v21_fsk_up);
+    if (g_fsk_tx_hold) {
+        tone_qual_feed(&g_fsk_ans_qual, amp, len, true);
+        if (g_fsk_ans_qual.run_ms >= FSK_ANS_HEARD_MS)
+            g_fsk_ans_heard = true;
+        if ((g_fsk_ans_heard && g_fsk_ans_qual.clear_ms >= FSK_ANS_GONE_MS)
+            || g_v21_qual.run_ms >= V21_QUALIFY_MS) {
+            g_fsk_tx_hold = false;
+            ME_LOG("[ME] %s call modem: %s; sending our mark\n",
+                   g_v21_mod == ME_MOD_V23 ? "V.23" : "V.21",
+                   g_fsk_ans_heard ? "answer tone ended (V.25 3.10)"
+                                   : "the answer modem's carrier, with no answer tone");
+        }
+    }
     /* V.23 8.3.2 Table 3 gives circuit 109 the same 300-700 ms during call
        establishment.  CONNECT carries the rate the DTE receives at. */
     if (g_v21_qual.run_ms >= V21_QUALIFY_MS && g_state == ME_TRAINING)
@@ -7607,6 +7662,7 @@ static bool fsk_start_locked(me_modulation_t mod, int tx_ch, int rx_ch, int tx_r
     const fsk_spec_t *rx_spec = &preset_fsk_specs[rx_ch];
 
     v21_release();
+    g_fsk_tx_hold = false;
     g_v21_mod = mod;
     g_mod = g_v21_mod;
     g_state = ME_TRAINING;
@@ -7632,14 +7688,18 @@ static bool fsk300_start_locked(bool bell)
  * backward channel at 75 bit/s, 390/450 Hz.  Without +MS bounds that pick
  * a direction, the answerer sends 1200: the videotex arrangement, where the
  * calling terminal keys at 75 bit/s and the host answers with pages. */
-static bool v23_start_locked(void)
+static bool v23_start_dir_locked(bool forward)
 {
-    bool forward = g_offer_v23_dir > 0 || (g_offer_v23_dir == 0 && !g_calling_party);
-
     g_v23_tx_rate = forward ? 1200 : 75;
     g_v23_rx_rate = forward ? 75 : 1200;
     return fsk_start_locked(ME_MOD_V23, forward ? FSK_V23CH1 : FSK_V23CH2,
                             forward ? FSK_V23CH2 : FSK_V23CH1, g_v23_tx_rate);
+}
+
+static bool v23_start_locked(void)
+{
+    return v23_start_dir_locked(g_offer_v23_dir > 0
+                                || (g_offer_v23_dir == 0 && !g_calling_party));
 }
 
 /* Bell 212A, after each block of received audio: the tone gates above. */
@@ -7655,6 +7715,7 @@ static void b212_rx_gate(const int16_t *amp, int len)
         if (g_b212_qual.run_ms >= B212_TONE_HEARD_MS) {
             ME_LOG("[ME] Bell 212A caller: 2225 Hz answer tone heard for %d ms; "
                    "sending scrambled ones\n", g_b212_qual.run_ms);
+            g_b212_samples = 0;
             start_v22bis_training();
             pthread_mutex_unlock(&g_state_mtx);
             trace_phase("B212 caller: answer tone heard -> V22 1200");
@@ -7678,6 +7739,26 @@ static void b212_rx_gate(const int16_t *amp, int len)
         ready = fsk300_start_locked(true);
         pthread_mutex_unlock(&g_state_mtx);
         trace_phase("B212 answerer: Bell 103 caller -> B103 300");
+        if (!ready)
+            me_hangup();
+        return;
+    }
+    /* Automode only: a Bell 103 answer modem's 2225 Hz is its mark, and it
+       never drops it for our scrambled ones.  A 212A answer modem has after
+       270 ms (V.22's timing); well past that, answer as a Bell 103
+       originate modem instead, which a 103/212A answerer also accepts. */
+    if (g_calling_party && g_v22bis && g_b212_auto && !g_b212_tone_ended
+        && (g_b212_samples += len) >= (long) B212_AUTO_103_AFTER_MS * 8) {
+        bool ready;
+
+        ME_LOG("[ME] Bell 212A caller: the 2225 Hz tone has not ended in %d ms; "
+               "answering as a Bell 103 originate modem\n", B212_AUTO_103_AFTER_MS);
+        g_b212 = g_b212_auto = g_b212_pending = false;
+        v22bis_free(g_v22bis);
+        g_v22bis = NULL;
+        ready = fsk300_start_locked(true);
+        pthread_mutex_unlock(&g_state_mtx);
+        trace_phase("automode: 2225 Hz never ended -> B103 300");
         if (!ready)
             me_hangup();
         return;
@@ -7712,7 +7793,7 @@ static void start_v22bis_training(void)
     /* V.22 mode: SpanDSP's V.22bis at 1200 sends no S1 and does not look
        for one, which is exactly a V.22 modem (V.22bis 6.3.1.1.1 c), 6.3.1.2.1
        d)); a V.22bis peer then settles at 1200 too. */
-    bool bell212a = strcmp(g_mode_name, "b212") == 0;
+    bool bell212a = g_b212 || strcmp(g_mode_name, "b212") == 0;
     int bps = strcmp(g_mode_name, "v22-1200") == 0 || bell212a ? 1200 : 2400;
     const int r2400[1] = { 2400 };
 
@@ -8034,17 +8115,182 @@ static void v25_ta_tick(int len)
 
 /* During Ta, keep classifying what the caller sends, so the V.22bis receive
  * path can tell S1/SB1 from a V.8 CM.  Unlocked; before v22bis_rx(). */
+static int legacy_automode_rx_locked(const int16_t *amp, int len);
+
 static void v25_ta_rx(const int16_t *amp, int len)
 {
+    int moved = 0;
+
     pthread_mutex_lock(&g_state_mtx);
-    if (g_v25_usb1_phase && g_mod == ME_MOD_V22BIS && !g_v22bis_trained)
+    if (g_v25_usb1_phase && g_mod == ME_MOD_V22BIS && !g_v22bis_trained) {
         v25am_rx(&g_v25am, amp, len);
+        /* A V.21, Bell 103 or V.23 call modem starts its mark once the answer
+           tone has ended (V.25 3.10), i.e. during this USB1. */
+        moved = legacy_automode_rx_locked(amp, len);
+    }
     pthread_mutex_unlock(&g_state_mtx);
+    if (moved < 0)
+        me_hangup();
+}
+
+/* Legacy automode: the V.8-less modems V.25 still reaches, recognised by
+ * the starting signal each one puts on the line.  V.25 3.10 iii): a duplex
+ * call modem sends its starting signal (binary 1) once the answer tone has
+ * ended, and an answer modem sends its own after the tone; a Bell 103
+ * originate modem keys on any energy in its 2025-2225 Hz receive band, which
+ * a 2100 Hz answer tone is.  Each signal is a steady mark:
+ *
+ *   heard by the answer modem             heard by the call modem
+ *   980 Hz   V.21 ch 1 mark (§3)          1650 Hz  V.21 ch 2 mark
+ *   1270 Hz  Bell 103 originate mark      2225 Hz  Bell 103/212A answer
+ *   390 Hz   V.23 backward mark (§4)      1300 Hz  V.23 forward mark (§2)
+ *   1300 Hz  V.23 forward mark, for 1 s (V.25 2.1's calling tone is 1300 Hz
+ *            in 0.5-0.7 s bursts)
+ *
+ * "Steady" is one 50 Hz bin holding LEGACY_PURE of the power for 400 ms, the
+ * V.21/V.23 circuit 109 qualification time.  V.8's CI, CM and JM are FSK
+ * data on the same channels and fail it in any 20 ms block holding a zero
+ * bit; once a CM has been received the answer side stops looking.  Only
+ * under +MS automode, and only for what the +MS bounds admit. */
+enum { LG_V21_CALL, LG_B103_CALL, LG_V23_CALL_75, LG_V23_CALL_1200,
+       LG_V21_ANS, LG_BELL_ANS, LG_V23_ANS_1200, LG_N };
+static const struct {
+    float hz;
+    int ms;
+    bool call_modem_listens;
+    const char *what;
+} lg_sig[LG_N] = {
+    {  980.0f,  400, false, "980 Hz, a V.21 call modem's mark" },
+    { 1270.0f,  400, false, "1270 Hz, a Bell 103 originate modem's mark" },
+    {  390.0f,  400, false, "390 Hz, a V.23 terminal's backward channel" },
+    { 1300.0f, 1000, false, "1300 Hz, a V.23 modem sending 1200 bit/s" },
+    { 1650.0f,  400, true,  "1650 Hz, a V.21 answer modem's mark" },
+    { 2225.0f,  400, true,  "2225 Hz, a Bell 103/212A answer modem" },
+    { 1300.0f,  400, true,  "1300 Hz, a V.23 host sending 1200 bit/s" },
+};
+#define LEGACY_PURE 0.85f
+static me_tone_qual_t g_lg_q[LG_N];
+static bool g_lg_armed;
+
+static bool me_legacy_automode_enabled(void)
+{
+    return g_offer_automode && parse_env_int("ME_LEGACY_AUTOMODE", 1) != 0;
+}
+
+/* V.23 in a given direction within the +MS bounds (me_offer_apply_limits()'s
+ * rule: bounds copied from the transmit ones say nothing about receive). */
+static bool lim_v23(int tx, int rx)
+{
+    bool same = g_lim[LIM_MIN_TX] == g_lim[LIM_MIN_RX] && g_lim[LIM_MAX_TX] == g_lim[LIM_MAX_RX];
+
+    return lim_admits(tx, g_lim[LIM_MIN_TX], g_lim[LIM_MAX_TX])
+           && (same || lim_admits(rx, g_lim[LIM_MIN_RX], g_lim[LIM_MAX_RX]));
+}
+
+static bool legacy_admits(int k)
+{
+    static const int r300[1] = { 300 }, r1200[1] = { 1200 };
+
+    switch (k) {
+    case LG_V23_CALL_75:   return lim_v23(1200, 75);
+    case LG_V23_CALL_1200:
+    case LG_V23_ANS_1200:  return lim_v23(75, 1200);
+    case LG_BELL_ANS:      return lim_symmetric(r1200, 1, g_lim) || lim_symmetric(r300, 1, g_lim);
+    default:               return lim_symmetric(r300, 1, g_lim);
+    }
+}
+
+static void legacy_automode_arm_locked(void)
+{
+    g_lg_armed = me_legacy_automode_enabled();
+    for (int k = 0; k < LG_N; k++) {
+        tone_qual_init(&g_lg_q[k], lg_sig[k].hz, 0.0f);
+        g_lg_q[k].frac = LEGACY_PURE;
+    }
+}
+
+/* Leave V.8 / V.25 / the USB1 phase for a legacy datapump.  Called locked. */
+static void legacy_leave_automode_locked(void)
+{
+    g_lg_armed = false;
+    g_v25am_armed = false;
+    g_v25_listen_only = false;
+    g_v25_usb1_phase = false;
+    g_v25_ta_samples = -1;
+    if (g_v25_ans_tx) {
+        modem_connect_tones_tx_free(g_v25_ans_tx);
+        g_v25_ans_tx = NULL;
+    }
+    if (g_v22bis) {
+        v22bis_free(g_v22bis);
+        g_v22bis = NULL;
+    }
+    g_b212 = g_b212_auto = g_b212_pending = g_b212_tone_ended = false;
+}
+
+/* Feed received audio and act on a qualified legacy signal.  Called locked
+ * while V.8 runs or in the answer modem's USB1 phase.  0: nothing yet;
+ * 1: the call moved to a legacy datapump; -1: that datapump failed to start
+ * (the caller hangs up, unlocked). */
+static int legacy_automode_rx_locked(const int16_t *amp, int len)
+{
+    if (!g_lg_armed)
+        return 0;
+    if (!g_calling_party && g_v8_cm_seen) {
+        g_lg_armed = false;
+        return 0;
+    }
+    for (int k = 0; k < LG_N; k++) {
+        bool ok;
+
+        if (lg_sig[k].call_modem_listens != g_calling_party)
+            continue;
+        tone_qual_feed(&g_lg_q[k], amp, len, true);
+        if (g_lg_q[k].run_ms < lg_sig[k].ms || !legacy_admits(k))
+            continue;
+        ME_LOG("[ME] Automode: %s for %d ms\n", lg_sig[k].what, g_lg_q[k].run_ms);
+        legacy_leave_automode_locked();
+        switch (k) {
+        case LG_V21_CALL:
+        case LG_V21_ANS:
+            ok = fsk300_start_locked(false);
+            break;
+        case LG_B103_CALL:
+            ok = fsk300_start_locked(true);
+            break;
+        case LG_V23_CALL_75:
+            ok = v23_start_dir_locked(true);
+            break;
+        case LG_BELL_ANS: {
+            static const int r1200[1] = { 1200 };
+
+            if (!lim_symmetric(r1200, 1, g_lim)) {
+                ok = fsk300_start_locked(true);
+                break;
+            }
+            /* Bell 212A first: it is the faster, and a Bell 103 answer
+               modem is caught by B212_AUTO_103_AFTER_MS (b212_rx_gate()). */
+            g_b212 = g_b212_auto = true;
+            g_b212_samples = 0;
+            tone_qual_init(&g_b212_qual, 2225.0f, 2250.0f);
+            start_v22bis_training();
+            ok = g_v22bis != NULL;
+            break;
+        }
+        default:
+            ok = v23_start_dir_locked(false);
+            break;
+        }
+        trace_phase("automode: %s -> %s", lg_sig[k].what, me_mod_to_str(g_mod));
+        return ok ? 1 : -1;
+    }
+    return 0;
 }
 
 /* Arm the automode watch at the start of V.8.  Called locked. */
 static void v25_automode_arm_locked(void)
 {
+    legacy_automode_arm_locked();
     g_v25am_armed = me_automode_enabled();
     g_v8_cm_seen = false;
     g_v25_listen_only = false;
@@ -8123,6 +8369,16 @@ static bool v25am_aa_watch_v8_ok(void)
 static void v25_automode_rx(const int16_t *amp, int len)
 {
     pthread_mutex_lock(&g_state_mtx);
+    if (g_state == ME_V8) {
+        int moved = legacy_automode_rx_locked(amp, len);
+
+        if (moved) {
+            pthread_mutex_unlock(&g_state_mtx);
+            if (moved < 0)
+                me_hangup();
+            return;
+        }
+    }
     if (!g_v25am_armed || g_state != ME_V8) {
         pthread_mutex_unlock(&g_state_mtx);
         return;
@@ -9918,6 +10174,8 @@ void me_on_sip_connected(void)
 
         me_decide_data_framing();
         ready = fsk300_start_locked(bell);
+        if (ready && g_calling_party && !bell)
+            fsk_hold_for_answer_tone_locked();
         pthread_mutex_unlock(&g_state_mtx);
         trace_phase("%s 300: awaiting opposite-channel FSK carrier", bell ? "B103" : "V21");
         if (!ready) me_hangup();
@@ -9929,6 +10187,8 @@ void me_on_sip_connected(void)
 
         me_decide_data_framing();
         ready = v23_start_locked();
+        if (ready && g_calling_party)
+            fsk_hold_for_answer_tone_locked();
         pthread_mutex_unlock(&g_state_mtx);
         trace_phase("V23 TX %d/RX %d: awaiting the far end's carrier", g_v23_tx_rate, g_v23_rx_rate);
         if (!ready) me_hangup();
@@ -9952,7 +10212,10 @@ void me_on_sip_connected(void)
             g_state = ME_TRAINING;
             g_v22bis_trained = false;
             g_phase_start_ms = trace_now_ms();
-            tone_qual_init(&g_b212_qual, 2225.0f, 0.0f);
+            /* 2225 Hz, and V.22's USB1 at 2250 Hz: a V.22 answer modem
+               opens with USB1 and moves to scrambled ones on hearing ours,
+               exactly as a 212A one does with its tone (spandsp/v22bis.h). */
+            tone_qual_init(&g_b212_qual, 2225.0f, 2250.0f);
         } else {
             start_v22bis_training();
             tone_qual_init(&g_b212_qual, preset_fsk_specs[FSK_BELL103CH1].freq_zero,
@@ -10054,7 +10317,7 @@ void me_on_sip_disconnected_status(int sip_status)
 
     if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
     v21_release();
-    g_b212 = g_b212_pending = false;
+    g_b212 = g_b212_pending = g_b212_auto = false;
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
     v32bis_release_locked();
     cleanup_v34_v90_training_locked();
@@ -12482,8 +12745,10 @@ skip_8k_codewords:
             b212_rx_gate(amp, len);     /* Bell 212A caller, awaiting the tone */
         } else if (g_v22bis) {
             v25_ta_rx(amp, len);
-            v22bis_rx(g_v22bis, amp, len);
-            if (g_b212)
+            /* v25_ta_rx() may have moved the call to a legacy datapump. */
+            if (g_v22bis)
+                v22bis_rx(g_v22bis, amp, len);
+            if (g_v22bis && g_b212)
                 b212_rx_gate(amp, len);
             v25_ta_tick(len);
         }
@@ -14411,7 +14676,7 @@ static void me_tx_audio_impl(int16_t *amp, int len)
         } else if (g_mod == ME_MOD_V32BIS) {
             v32bis_engine_tx(amp, len);
         } else if (g_v21_tx) {
-            fsk_tx(g_v21_tx, amp, len);
+            fsk_engine_tx(amp, len);
         } else if (g_v22bis)
             v22bis_tx(g_v22bis, amp, len);
         break;
@@ -14459,7 +14724,7 @@ static void me_tx_audio_impl(int16_t *amp, int len)
         } else if (g_mod == ME_MOD_V32BIS) {
             v32bis_engine_tx(amp, len);
         } else if (g_v21_tx) {
-            fsk_tx(g_v21_tx, amp, len);
+            fsk_engine_tx(amp, len);
         } else {
             /* V.22bis duplex downstream TX */
             if (g_v22bis)

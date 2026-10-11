@@ -36,6 +36,7 @@ SETTINGS = [
     ("ME_V34_TX_DBM0", "V.34 nominal transmit level before INFO1 power reduction (default -14)."),
     ("ME_V25_ANS_AA", "1 answers plain ANS with V.32bis AA (Annex A.2.1.3)."),
     ("ME_V22_LEGACY", "0 withdraws the V.8-less V.22bis (USB1) path."),
+    ("ME_LEGACY_AUTOMODE", "0 withdraws automode detection of V.21, Bell 103/212A and V.23 peers."),
     ("ME_V22_GUARD", "V.22bis guard tone in Hz (0, 550 or 1800)."),
     ("ME_V34_BAUD", "V.34 start symbol rate."),
     ("ME_V34_BPS", "V.34 start bit rate ceiling (0 = the symbol rate's maximum)."),

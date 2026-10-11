@@ -215,6 +215,14 @@ suite run on this date. Interop claims come from the dated entries in
   6.4.1 describes, the receive bounds choose which end sends 1200; by
   default the answerer does. Item 6 now lacks only V.25 automode detection
   of FSK and 212A callers.
+- **2026-10-11, legacy automode (item 4's remainder, and item 6 done).**
+  Under +MS automode, a V.8 call that meets a V.8-less V.21, Bell 103/212A
+  or V.23 modem moves to that datapump, in either role
+  (`docs/legacy_automode.md`). Each peer is recognised by the steady mark
+  it sends once the answer tone ends (V.25 3.10).
+  - The work found that FSK carrier detect admitted a 2100 Hz answer tone
+    as V.23 carrier. It now qualifies on the mark only, as V.21 8.2.1.1 and
+    V.23 8.3.1.1 define the response time.
 
 ## 4. Suggested order
 

@@ -638,3 +638,18 @@ python3 tools/pcm_ber_regression.py
 ./engine_pair_test --alaw --seconds 40 --expect V23 --both-env ME_DATA_FRAMING=v14 --payload-lines 2 --both-at AT+MS=V23C,0
 ./engine_pair_test --seconds 40 --expect V23 --both-env ME_DATA_FRAMING=v14 --payload-lines 2 --call-at AT+MS=V23C,0,1200,1200,75,75 --answer-at AT+MS=V23C,0,75,75,1200,1200 --call-expect "CONNECT 75" --answer-expect "CONNECT 1200"
 ./engine_pair_test --seconds 10 --expect-no-connect --both-env ME_DATA_FRAMING=v14 --both-at AT+MS=V23C,0,1200,1200,75,75
+# Legacy automode (docs/legacy_automode.md).  Answer side: our default
+# offer against V.8-less call modems.  V.21 and V.23 callers hold until the
+# answer tone ends (V.25 3.10), so they are caught in the USB1 phase.
+./engine_pair_test --seconds 40 --expect V21 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --call-at AT+MS=V21,0,300,300 --call-log "answer tone ended (V.25 3.10)" --answer-log "Automode: 980 Hz"
+./engine_pair_test --seconds 30 --expect B103 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --call-at AT+MS=B103,0,300,300 --answer-log "Automode: 1270 Hz"
+./engine_pair_test --seconds 60 --expect V23 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --payload-lines 2 --call-at AT+MS=V23C,0 --call-log "answer tone ended" --answer-log "Automode: 390 Hz" --answer-expect "CONNECT 75"
+./engine_pair_test --seconds 40 --expect V22BIS --expect-connect 1200 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --call-at AT+MS=B212,0,1200,1200 --call-log "answer tone ended"
+# Call side: our default offer against V.8-less answer modems.  A Bell 103
+# answerer never drops 2225 Hz, so 212A gives way to 103.
+./engine_pair_test --seconds 30 --expect V21 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --answer-at AT+MS=V21,0,300,300 --call-log "Automode: 1650 Hz"
+./engine_pair_test --seconds 30 --expect V22BIS --expect-connect 1200 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --answer-at AT+MS=B212,0,1200,1200 --call-log "Automode: 2225 Hz"
+./engine_pair_test --seconds 30 --expect B103 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --answer-at AT+MS=B103,0,300,300 --call-log "answering as a Bell 103 originate modem"
+./engine_pair_test --seconds 60 --expect V23 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --payload-lines 2 --answer-at AT+MS=V23C,0 --call-log "Automode: 1300 Hz" --call-expect "CONNECT 1200"
+# +MS automode 0 is the named carrier only: no fallback.
+./engine_pair_test --seconds 20 --expect-no-connect --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --call-at AT+MS=V21,0,300,300 --answer-at AT+MS=V34,0 --answer-nolog "Automode:"
