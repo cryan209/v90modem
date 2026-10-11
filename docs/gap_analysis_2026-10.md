@@ -53,7 +53,7 @@ suite run on this date. Interop claims come from the dated entries in
 | V.22bis / V.22 | yes (V.8, Annex A automode, pre-V.8 USB1 both roles; `AT+MS=V22B`, `AT+MS=V22` = V.22 at 1200) | SpanDSP; `engine_pair_test` incl. V.22 vs V.22bis and V.8-less peers | HSF loop: V.22bis carried traffic |
 | V.21, Bell 103 | **yes, fixed mode** (2026-10-11): `AT+MS=V21` / `B103`, no V.8, circuit 109 qualified per V.21 §8.2.2 (`docs/v21.md`) | `engine_pair_test` both laws, plus a mismatched-family no-connect case | none |
 | Bell 212A | **yes, fixed mode** (2026-10-11): `AT+MS=B212`, 2225 Hz answer tone, answerer falls back to Bell 103 (`docs/bell212a.md`) | `bell212a_test` (datapump, bearer delay to 400 ms), `engine_pair_test` | none |
-| V.23 | **not wired** (FSK presets exist in SpanDSP) | none | none |
+| V.23 | **yes, fixed mode** (2026-10-11): `AT+MS=V23C`, 1200/75, +MS receive bounds pick the direction (`docs/v23.md`) | `engine_pair_test` both laws and both directions | none |
 | Fax class 1 / 2.0 (V.17/V.29/V.27ter/V.21) | yes, via T.31 / T.32 | `fax_class_test`, `fax_class2_test` | **none** |
 | x2, K56flex | experimental | receive replay | neither completes a call |
 | V.42 LAPM / V.42bis / V.44 | yes | yes | LAPM + V.42bis live; V.44 never offered by a peer |
@@ -210,6 +210,11 @@ suite run on this date. Interop claims come from the dated entries in
     descrambles to all ones. The answerer falls back to Bell 103 instead.
   - Still open from item 6: V.23, and V.25 automode detection of FSK and
     212A callers.
+- **2026-10-11, V.23.** `AT+MS=V23C` runs mode 2 with the 75 bit/s backward
+  channel on the FSK path, with V.23's circuit-109 qualification. As V.250
+  6.4.1 describes, the receive bounds choose which end sends 1200; by
+  default the answerer does. Item 6 now lacks only V.25 automode detection
+  of FSK and 212A callers.
 
 ## 4. Suggested order
 

@@ -468,7 +468,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func render(_ s:[String:Any]) {
         let states = ["Idle","Dialling","V.8 negotiation","Training","Connected","Hanging up"]
-        let mods = ["—","V.91","V.90","V.34","V.22bis","x2","V.32bis","Clear channel","V.21","Bell 103"]
+        let mods = ["—","V.91","V.90","V.34","V.22bis","x2","V.32bis","Clear channel","V.21","Bell 103","V.23"]
         let state = s["state"] as? Int ?? 0, mod = s["modulation"] as? Int ?? 0
         let dataReady = (s["data_ready"] as? Int ?? 0)>0
         let call = (s["age"] as? Double ?? 9)>2 ? "Telemetry stale" : states.indices.contains(state) ? (state == 4 && !dataReady ? "Carrier up · negotiating link" : states[state]) : "Starting"
@@ -519,7 +519,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         eye.baud = Double(s[eyeDir.indexOfSelectedItem == 0 ? "rx_baud" : "tx_baud"] as? Int ?? 3200); if eye.baud < 300 { eye.baud = 3200 }
         eye.carrier = s[eyeDir.indexOfSelectedItem == 0 ? "rx_carrier" : "tx_carrier"] as? Double ?? 0; spectrum.carrier = s["rx_carrier"] as? Double ?? 0
         carrierLabel.stringValue = eye.pcm ? "PCM eye · 8,000 samples/s" : eye.carrier > 0 ? String(format:"%@ · %@ %.1f Hz · %g baud",eye.pcm ? "PCM eye" : "QAM eye",eyeDir.indexOfSelectedItem == 0 ? "RX recovered carrier" : "TX nominal carrier",eye.carrier,eye.baud) : "RX carrier: waiting for QAM receiver"
-        if mod >= 8 { carrierLabel.stringValue = "\(mods[min(mod, mods.count - 1)]) FSK · 300 baud · RX centre \(Int(s["rx_carrier"] as? Double ?? 0)) Hz" }
+        if mod >= 8 { carrierLabel.stringValue = "\(mods[min(mod, mods.count - 1)]) FSK · RX \(Int(s["rx_baud"] as? Double ?? 0)) baud · RX centre \(Int(s["rx_carrier"] as? Double ?? 0)) Hz" }
         eye.phase = 0
         let eyeCount = s["eye_count"] as? Int ?? 0
         if eyeCount != eyeCountSeen { eyeCountSeen = eyeCount; if eyeCount > 0 { eyeUpdated = Date() } }

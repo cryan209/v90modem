@@ -79,6 +79,12 @@ static const struct {
     /* Bell 212A: V.22's 1200 bit/s DPSK with the 2225 Hz answer tone and no
      * guard tone.  Fixed like B103: a 212A answerer's 103 fallback is not
      * offered. */
+    /* V.23 mode 2 with its 75 bit/s backward channel, constant carrier
+     * (V.250 Table 13).  Distinct receive bounds pick the direction:
+     * V23C,0,1200,1200,75,75 sends 1200; V23C,0,75,75,1200,1200 sends 75.
+     * Without them the answerer sends 1200. */
+    { "V23C",  { "V23", NULL },               "v23c", "v23c", 1200,
+      "V.23 1200/75, no V.8; RX bounds pick direction" },
     { "B212",  { "B212A", NULL },             "b212", "b212", 1200,
       "Bell 212A (1200), no V.8" },
     /* Recognised, with no datapump in this engine.  Both modes NULL, so

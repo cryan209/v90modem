@@ -13,7 +13,7 @@
  *   ./sip_v90_modem [--sip-server <host>] [--username <user>]
  *                   [--password <pass>]  [--pty-link <path> | --control-link <p> --data-link <p>]
  *                   [--local-port <port>] [--rtp-port <port>]
- *                   [--bind-addr <ip>] [--mode v21|b103|b212|x2|x2-symm|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92|\n"
+ *                   [--bind-addr <ip>] [--mode v21|b103|b212|v23c|x2|x2-symm|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92|\n"
         "          clear|clear56|v120|v120-56]
  *                   [--verbose]
  *
@@ -1217,7 +1217,7 @@ static void print_usage(FILE *f, const char *argv0)
         "          [--pty-link path | --control-link path --data-link path]\n"
         "          [--gui | --gui-web | --gui-loopback] (native macOS / browser signal monitor)\n"
         "          [--local-port port] [--rtp-port port]\n"
-        "          [--bind-addr ip] [--mode v21|b103|b212|x2|x2-symm|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92] [--verbose]\n"
+        "          [--bind-addr ip] [--mode v21|b103|b212|v23c|x2|x2-symm|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92] [--verbose]\n"
         "          [--auto-answer rings] [--connect-timeout seconds] [--profile file]\n"
         "\n"
         "--gui-loopback runs a local echo peer with selectable test profiles.\n"
@@ -1365,7 +1365,7 @@ int main(int argc, char *argv[])
     }
 
     if (modem_mode && !me_mode_name_valid(modem_mode)) {
-        fprintf(stderr, "Invalid --mode '%s' (expected v21, b103, b212, v22, v22-1200, v32, "
+        fprintf(stderr, "Invalid --mode '%s' (expected v21, b103, b212, v23c, v22, v22-1200, v32, "
                         "v32bis, v34, v90, v91, v92, k56, x2, x2-symm, clear, clear56, "
                         "v120, v120-56 or v110)\n", modem_mode);
         return 2;

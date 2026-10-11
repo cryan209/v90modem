@@ -42,7 +42,8 @@ typedef enum {
     ME_MOD_V32BIS,  /* V.32bis/V.32 duplex, 4800-14400 bit/s */
     ME_MOD_CLEAR,   /* the DS0 as a bit pipe, no V.8: clear channel, V.120 or V.110 */
     ME_MOD_V21,     /* V.21 duplex 300 bit/s FSK */
-    ME_MOD_BELL103  /* Bell 103 duplex 300 bit/s FSK, the V.21 path's other presets */
+    ME_MOD_BELL103, /* Bell 103 duplex 300 bit/s FSK, the V.21 path's other presets */
+    ME_MOD_V23      /* V.23 mode 2: 1200 bit/s forward, 75 bit/s backward FSK */
 } me_modulation_t;
 
 /* G.711 encoding law for the RTP stream */

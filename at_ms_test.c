@@ -109,6 +109,9 @@ static void test_parser(void)
     parse_bad("=B103,0,1200,1200");
     parse_ok("=B212A,0,1200,1200", "B212", 0, 1200, 1200, 1200, 1200);
     parse_bad("=B212,0,2400,2400");
+    parse_ok("=V23C,0,1200,1200,75,75", "V23C", 0, 1200, 1200, 75, 75);
+    parse_ok("=V23,0", "V23C", 0, 0, 0, 0, 0);
+    parse_bad("=V23C,0,2400,2400");
     parse_ok("=CLEAR", "CLEAR", 1, 0, 0, 0, 0);
     parse_ok("=CLEARMODE,0", "CLEAR", 0, 0, 0, 0, 0);
     parse_ok("=64K,1,0,56000", "CLEAR", 1, 0, 56000, 0, 56000);
@@ -203,7 +206,7 @@ static void test_parser(void)
               && strlen(help) < sizeof(help) - 1, "+MS$ help rows and current setting");
     }
     at_ms_format_test(buf, sizeof(buf));
-    check(!strcmp(buf, "+MS: (V21,V22,V22B,V32,V32B,HST,V32TERBO,VFC,V34,K56,V90,V92,V91,X2,X2S,B103,B212,CLEAR,V120,V110),(0,1),"
+    check(!strcmp(buf, "+MS: (V21,V22,V22B,V32,V32B,HST,V32TERBO,VFC,V34,K56,V90,V92,V91,X2,X2S,B103,V23C,B212,CLEAR,V120,V110),(0,1),"
                        "(0-64000),(0-64000),(0-64000),(0-64000)"), buf);
 }
 
@@ -306,7 +309,7 @@ static int test_engine(void)
     expect("ATE0", "OK");
     expect_offer(V8_MOD_V90 | V8_MOD_V34 | V8_MOD_V32 | V8_MOD_V22, "V.90|V.34|V.32|V.22 by default");
     expect("AT+MS?", "+MS: V90,1,0,0,0,0");
-    expect("AT+MS=?", "+MS: (V21,V22,V22B,V32,V32B,HST,V32TERBO,VFC,V34,K56,V90,V92,V91,X2,X2S,B103,B212,CLEAR,V120,V110),(0,1)");
+    expect("AT+MS=?", "+MS: (V21,V22,V22B,V32,V32B,HST,V32TERBO,VFC,V34,K56,V90,V92,V91,X2,X2S,B103,V23C,B212,CLEAR,V120,V110),(0,1)");
     expect_describe("V90|V34|V32|V22");
     expect("AT+MS$", "K56      56,56K,K56FLEX   1         60000  K56flex V.8bis, then V.90");
     expect("AT+MS$", "Current: V90,1,0,0,0,0");
@@ -365,6 +368,18 @@ static int test_engine(void)
     expect("AT+MS=HST", "OK");
     expect_describe("V32|V22");
     expect("AT+MS?", "+MS: HST,1,0,0,0,0");
+    /* V.23: the bounds choose the direction; a pair that leaves neither
+     * 1200-out/75-in nor 75-out/1200-in is ERROR. */
+    expect("AT+MS=V23C,0,1200,1200,75,75", "OK");
+    expect_describe("V23C TX 1200/RX 75, no V.8");
+    expect("AT+MS=V23C,0,75,75", "OK");
+    expect_describe("V23C TX 75/RX 1200, no V.8");
+    expect("AT+MS=V23C,0,1200,1200,1200,1200", "OK");
+    expect_describe("V23C TX 1200/RX 75, no V.8");
+    expect("AT+MS=V23C,0,1200,1200,1200,2400", "ERROR");
+    expect("AT+MS=V23C,0,300,300", "ERROR");
+    expect("AT+MS=V23C", "OK");
+    expect_describe("V23C 1200/75 (answerer sends 1200), no V.8");
     expect("AT+MS=B212A", "OK");
     expect("AT+MS?", "+MS: B212,1,0,0,0,0");
     expect("AT+MS=HST", "OK");

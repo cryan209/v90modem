@@ -49,10 +49,12 @@ def main():
             wait_for(lambda: state()['loopback']['pattern_ready'])
             s = state()
             assert s['age'] < 1 and len(s['audio'][0]) == 512
-            if profile not in ('v21','b103','v90','v91','v92'):
+            if profile not in ('v21','b103','v23','v90','v91','v92'):
                 assert len(s['eye']) == 128, 'Recovered samples missing'
             if profile == 'v21': assert s['modulation'] == 8 and s['rx_baud'] == 300
             if profile == 'b103': assert s['modulation'] == 9 and s['rx_baud'] == 300
+            # The GUI side calls, so it sends at 75 bit/s and receives at 1200.
+            if profile == 'v23': assert s['modulation'] == 10 and s['rx_baud'] == 1200 and s['tx_baud'] == 75
             if profile == 'v90': assert s['modulation'] == 2 and s['rx_pcm'] and not s['tx_pcm']
             if profile == 'v92': assert s['modulation'] == 2 and s['rx_pcm'] and s['tx_pcm']
             if profile == 'v91': assert s['modulation'] == 1 and s['rx_pcm'] and s['tx_pcm']
@@ -71,7 +73,7 @@ def main():
                 received.extend(b''.join(chunk for chunk in chunks if not chunk.startswith(b'\n> ')))
                 return payload in received and s['loopback']['echoed'] >= len(payload)
 
-            wait_for(returned, timeout=30 if profile in ('v21', 'b103') else 8)
+            wait_for(returned, timeout=90 if profile == 'v23' else 30 if profile in ('v21', 'b103') else 8)
             if index != len(profiles)-1:
                 send('at', b'ATH\r')
                 wait_for(lambda: state().get('state') == 0)

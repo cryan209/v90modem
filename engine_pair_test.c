@@ -16,7 +16,7 @@
  *                    [--both-at CMD] [--call-at CMD] [--answer-at CMD]
  *                    [--both-expect SEQ] [--call-expect SEQ] [--answer-expect SEQ]
  *                    [--both-after CMD] [--call-after CMD] [--answer-after CMD]
- *                    [--expect-hangup] [--expect-no-connect]
+ *                    [--expect-hangup] [--expect-no-connect] [--payload-lines N]
  *
  * SEQ is "A|B|C": those strings must appear in that side's DTE stream, in that
  * order (V.250 intermediate result codes before CONNECT, say).  --X-absent STR
@@ -26,7 +26,9 @@
  * --X-absent CONNECT; the far end of a one-sided refusal can still connect).
  * --expect-no-connect is for a pair that must never come up at all (two
  * fixed modes that do not match): the whole --seconds runs, and neither side
- * may report CONNECT.
+ * may report CONNECT.  --payload-lines (1-12, default 12) shortens each
+ * side's DTE text, 51 octets a line, for slow channels (V.23's 75 bit/s
+ * moves a line in about 7 s).
  *
  * The AT commands are sent to that side's PTY before the call starts, each
  * required to answer OK -- the way a DTE configures a modem (AT+MS).  The
@@ -413,6 +415,7 @@ int main(int argc, char **argv)
     int done_frame = -1;
     int expect_hangup = 0;
     int no_connect = 0;
+    int payload_lines = 12;
     int fax_hdlc = 0;
     int fdm_slot = -1, fdm_rate = 96000, fdm_taps = 96, fdm_bank_slots = 0;
     float fdm_level = -20.0f;
@@ -472,6 +475,10 @@ int main(int argc, char **argv)
             fax_hdlc = 1;
         } else if (!strcmp(argv[i], "--expect-hangup")) {
             expect_hangup = 1;
+        } else if (!strcmp(argv[i], "--payload-lines") && i + 1 < argc) {
+            payload_lines = atoi(argv[++i]);
+            if (payload_lines < 1 || payload_lines > 12)
+                payload_lines = 12;
         } else if (!strcmp(argv[i], "--expect-no-connect")) {
             no_connect = 1;
         } else if ((!strcmp(argv[i], "--call-expect") || !strcmp(argv[i], "--answer-expect")
@@ -548,7 +555,7 @@ int main(int argc, char **argv)
         snprintf(s->pty_path, sizeof(s->pty_path), "/tmp/engine_pair_%d_%s", (int) getpid(), s->name);
         snprintf(s->log_path, sizeof(s->log_path), "/tmp/engine_pair_%d_%s.log", (int) getpid(), s->name);
         s->payload_len = 0;
-        for (int line = 0; line < 12; line++)
+        for (int line = 0; line < payload_lines; line++)
             s->payload_len += (size_t) snprintf(s->payload + s->payload_len,
                                                 sizeof(s->payload) - s->payload_len,
                                                 "%c%04d the quick brown fox jumps over the lazy dog\r\n",

@@ -374,6 +374,7 @@ static const char *me_mod_to_str(me_modulation_t mod)
     case ME_MOD_V34:    return "V34";
     case ME_MOD_V21:    return "V21";
     case ME_MOD_BELL103: return "B103";
+    case ME_MOD_V23:    return "V23";
     case ME_MOD_V22BIS: return "V22BIS";
     case ME_MOD_V32BIS: return "V32BIS";
     case ME_MOD_CLEAR:  return "CLEAR";      /* CLEAR, V120 or V110 */
@@ -985,7 +986,10 @@ static v22bis_state_t *g_v22bis  = NULL;
  * Bell 103 answerer does anyway. */
 static fsk_tx_state_t *g_v21_tx;
 static fsk_rx_state_t *g_v21_rx;
-static me_modulation_t g_v21_mod = ME_MOD_V21;  /* this call's: V21 or BELL103 */
+static me_modulation_t g_v21_mod = ME_MOD_V21;  /* this call's: V21, BELL103 or V23 */
+/* V.23: the offer's direction (me_offer_t.v23_dir), and this call's rates. */
+static int g_offer_v23_dir;
+static int g_v23_tx_rate, g_v23_rx_rate;
 /* Tone qualification for the FSK and Bell 212A paths.  SpanDSP's FSK
  * carrier detect is broadband power, so on its own it reports carrier ~20 ms
  * after ANY signal: another modem family, ringback, speech; and its V.22
@@ -2478,6 +2482,8 @@ static bool me_v90_analogue_role(void)
 typedef struct {
     bool x2, x2_symmetric, v90, v34, v32, v22, v92, k56, v91, v21;
     bool b212;               /* no V.8: Bell 212A, V.22's 1200 with 2225 Hz */
+    bool v23;                /* no V.8: V.23 1200/75 constant carrier */
+    int v23_dir;             /* +1 we send 1200, -1 we send 75, 0 by role */
     bool v32bis_ok;          /* V.32bis reachable at all (V.8 or Annex A) */
     bool clear, v120, r56;   /* no V.8: clear channel or V.120 on the DS0 */
     bool v110;               /* no V.8: V.110 async rate adaption */
@@ -2502,6 +2508,11 @@ static void me_offer_describe(const me_offer_t *o, bool k56, bool v91,
         return;
     }
     if (o->b212) { snprintf(buf, len, "B212 1200, no V.8"); return; }
+    if (o->v23) {
+        snprintf(buf, len, "V23C %s, no V.8", o->v23_dir > 0 ? "TX 1200/RX 75"
+                 : o->v23_dir < 0 ? "TX 75/RX 1200" : "1200/75 (answerer sends 1200)");
+        return;
+    }
     if (o->v110) {
         snprintf(buf, len, "V110 %d async, no V.8", o->v110_rate);
         return;
@@ -2532,6 +2543,8 @@ static const char *me_offer_str(void)
     o.v21 = strcmp(g_mode_name, "v21") == 0 || strcmp(g_mode_name, "b103") == 0;
     o.name = g_mode_name;
     o.b212 = strcmp(g_mode_name, "b212") == 0;
+    o.v23 = strcmp(g_mode_name, "v23c") == 0;
+    o.v23_dir = g_offer_v23_dir;
     o.v90 = g_advertise_v90;
     o.v34 = g_advertise_v34;
     o.v32 = g_advertise_v32;
@@ -2568,6 +2581,12 @@ static bool me_offer_from_mode(const char *mode, bool automode, me_offer_t *o)
         /* 300 bit/s FSK, V.21 or Bell 103: no V.8, set alike at both ends. */
         o->v90 = o->v34 = false; o->v21 = true;
         o->name = strcmp(mode, "v21") == 0 ? "v21" : "b103";
+        return true;
+    } else if (strcmp(mode, "v23c") == 0) {
+        /* V.23 mode 2 with the backward channel, constant carrier (V.250
+         * Table 13 "V23C"): asymmetric FDM, no V.8, set alike at both ends.
+         * The +MS bounds choose the direction (me_offer_apply_limits()). */
+        o->v90 = o->v34 = false; o->v23 = true; o->name = "v23c";
         return true;
     } else if (strcmp(mode, "b212") == 0) {
         /* Bell 212A: V.22's 1200 bit/s DPSK, answered with 2225 Hz rather
@@ -2713,6 +2732,20 @@ static bool me_offer_apply_limits(me_offer_t *o, const int *l, bool analogue)
 
     if (o->v21) { const int rates[] = {300}; return lim_symmetric(rates, 1, l); }
     if (o->b212) { const int rates[] = {1200}; return lim_symmetric(rates, 1, l); }
+    if (o->v23) {
+        /* V.250 6.4.1: distinct receive bounds "select either direction for
+         * asymmetric modulations like ITU-T Rec. V.23 with constant
+         * carrier".  Without them the receive bounds are a copy of the
+         * transmit ones, and only the transmit bounds speak. */
+        bool same = l[LIM_MIN_TX] == l[LIM_MIN_RX] && l[LIM_MAX_TX] == l[LIM_MAX_RX];
+        bool send1200 = lim_admits(1200, l[LIM_MIN_TX], l[LIM_MAX_TX])
+                        && (same || lim_admits(75, l[LIM_MIN_RX], l[LIM_MAX_RX]));
+        bool send75 = lim_admits(75, l[LIM_MIN_TX], l[LIM_MAX_TX])
+                      && (same || lim_admits(1200, l[LIM_MIN_RX], l[LIM_MAX_RX]));
+
+        o->v23_dir = send1200 && send75 ? 0 : send1200 ? 1 : -1;
+        return send1200 || send75;
+    }
     if (o->v110) {
         /* The highest Table 8 rate the bounds admit both ways: V.110 runs
          * one user rate in both directions. */
@@ -2791,6 +2824,7 @@ static bool me_resolve_offer(const char *mode, bool automode)
     g_offer_v110 = o.v110;
     g_offer_v110_rate = o.v110_rate;
     g_offer_r56 = o.r56;
+    g_offer_v23_dir = o.v23_dir;
     g_mode_name = o.name;
     g_v90_analogue_role = o.v90 && role && strcmp(role, "analogue") == 0;
     return true;
@@ -7557,30 +7591,55 @@ static void v21_qualify_init(const fsk_spec_t *rx_spec)
 static void v21_qualify_rx(const int16_t *amp, int len)
 {
     tone_qual_feed(&g_v21_qual, amp, len, g_v21_fsk_up);
+    /* V.23 8.3.2 Table 3 gives circuit 109 the same 300-700 ms during call
+       establishment.  CONNECT carries the rate the DTE receives at. */
     if (g_v21_qual.run_ms >= V21_QUALIFY_MS && g_state == ME_TRAINING)
-        on_training_complete(g_v21_mod, 300,
-                             g_v21_mod == ME_MOD_BELL103 ? "Bell 103" : "V.21");
+        on_training_complete(g_v21_mod, g_v21_mod == ME_MOD_V23 ? g_v23_rx_rate : 300,
+                             g_v21_mod == ME_MOD_BELL103 ? "Bell 103"
+                             : g_v21_mod == ME_MOD_V23 ? "V.23" : "V.21");
 }
 
 
 /* Start 300 bit/s FSK, V.21 or Bell 103, for this call's role.  Called with
  * g_state_mtx held; false if SpanDSP could not allocate. */
+static bool fsk_start_locked(me_modulation_t mod, int tx_ch, int rx_ch, int tx_rate)
+{
+    const fsk_spec_t *rx_spec = &preset_fsk_specs[rx_ch];
+
+    v21_release();
+    g_v21_mod = mod;
+    g_mod = g_v21_mod;
+    g_state = ME_TRAINING;
+    g_phase_start_ms = trace_now_ms();
+    data_stack_prepare(tx_rate);
+    g_v21_tx = fsk_tx_init(NULL, &preset_fsk_specs[tx_ch], v21_get_bit, NULL);
+    g_v21_rx = fsk_rx_init(NULL, rx_spec, FSK_FRAME_MODE_ASYNC, v21_put_bit, NULL);
+    v21_qualify_init(rx_spec);
+    return g_v21_tx && g_v21_rx;
+}
+
 static bool fsk300_start_locked(bool bell)
 {
     int ch_orig = bell ? FSK_BELL103CH1 : FSK_V21CH1;
     int ch_ans = bell ? FSK_BELL103CH2 : FSK_V21CH2;
-    const fsk_spec_t *rx_spec = &preset_fsk_specs[g_calling_party ? ch_ans : ch_orig];
 
-    v21_release();
-    g_v21_mod = bell ? ME_MOD_BELL103 : ME_MOD_V21;
-    g_mod = g_v21_mod;
-    g_state = ME_TRAINING;
-    g_phase_start_ms = trace_now_ms();
-    data_stack_prepare(300);
-    g_v21_tx = fsk_tx_init(NULL, &preset_fsk_specs[g_calling_party ? ch_orig : ch_ans], v21_get_bit, NULL);
-    g_v21_rx = fsk_rx_init(NULL, rx_spec, FSK_FRAME_MODE_ASYNC, v21_put_bit, NULL);
-    v21_qualify_init(rx_spec);
-    return g_v21_tx && g_v21_rx;
+    return fsk_start_locked(bell ? ME_MOD_BELL103 : ME_MOD_V21,
+                            g_calling_party ? ch_orig : ch_ans,
+                            g_calling_party ? ch_ans : ch_orig, 300);
+}
+
+/* V.23 mode 2 (§2) forward channel at 1200 bit/s, 1300/2100 Hz, and the §4
+ * backward channel at 75 bit/s, 390/450 Hz.  Without +MS bounds that pick
+ * a direction, the answerer sends 1200: the videotex arrangement, where the
+ * calling terminal keys at 75 bit/s and the host answers with pages. */
+static bool v23_start_locked(void)
+{
+    bool forward = g_offer_v23_dir > 0 || (g_offer_v23_dir == 0 && !g_calling_party);
+
+    g_v23_tx_rate = forward ? 1200 : 75;
+    g_v23_rx_rate = forward ? 75 : 1200;
+    return fsk_start_locked(ME_MOD_V23, forward ? FSK_V23CH1 : FSK_V23CH2,
+                            forward ? FSK_V23CH2 : FSK_V23CH1, g_v23_tx_rate);
 }
 
 /* Bell 212A, after each block of received audio: the tone gates above. */
@@ -9208,6 +9267,11 @@ static void me_connect_info(int rate, v250_connect_report_t *r)
     case ME_MOD_X2:     r->carrier = "X2"; break;
     case ME_MOD_V21:    r->carrier = "V21"; break;
     case ME_MOD_BELL103: r->carrier = "B103"; break;
+    case ME_MOD_V23:
+        r->carrier = "V23C";
+        r->tx_rate = g_v23_tx_rate;
+        r->rx_rate = g_v23_rx_rate;
+        break;
     case ME_MOD_CLEAR:  r->carrier = g_offer_v110 ? "V110" : g_offer_v120 ? "V120" : "CLEAR"; break;
     default:            r->carrier = at_ms_mode_to_carrier(g_mode_name); break;
     }
@@ -9222,9 +9286,13 @@ static void me_connect_info(int rate, v250_connect_report_t *r)
      * a call is not reported as connected -- it ends with NO CARRIER. */
     if (r->tx_rate > 0) {
         int rx = r->rx_rate > 0 ? r->rx_rate : r->tx_rate;
+        /* V.23 without distinct receive bounds: they copy the transmit ones,
+         * which only choose the direction (me_offer_apply_limits()). */
+        bool rx_bounded = !(g_mod == ME_MOD_V23 && g_lim[LIM_MIN_TX] == g_lim[LIM_MIN_RX]
+                            && g_lim[LIM_MAX_TX] == g_lim[LIM_MAX_RX]);
 
         if (!lim_admits(r->tx_rate, g_lim[LIM_MIN_TX], g_lim[LIM_MAX_TX])
-            || !lim_admits(rx, g_lim[LIM_MIN_RX], g_lim[LIM_MAX_RX])) {
+            || (rx_bounded && !lim_admits(rx, g_lim[LIM_MIN_RX], g_lim[LIM_MAX_RX]))) {
             ME_LOG("[ME] AT+MS: call settled at TX %d / RX %d bit/s, outside "
                    "TX %d-%d / RX %d-%d; not connecting\n", r->tx_rate, rx,
                    g_lim[LIM_MIN_TX], g_lim[LIM_MAX_TX], g_lim[LIM_MIN_RX], g_lim[LIM_MAX_RX]);
@@ -9852,6 +9920,17 @@ void me_on_sip_connected(void)
         ready = fsk300_start_locked(bell);
         pthread_mutex_unlock(&g_state_mtx);
         trace_phase("%s 300: awaiting opposite-channel FSK carrier", bell ? "B103" : "V21");
+        if (!ready) me_hangup();
+        return;
+    }
+
+    if (strcmp(g_mode_name, "v23c") == 0) {
+        bool ready;
+
+        me_decide_data_framing();
+        ready = v23_start_locked();
+        pthread_mutex_unlock(&g_state_mtx);
+        trace_phase("V23 TX %d/RX %d: awaiting the far end's carrier", g_v23_tx_rate, g_v23_rx_rate);
         if (!ready) me_hangup();
         return;
     }
@@ -16048,7 +16127,15 @@ void me_get_diag_snapshot(me_diag_snapshot_t *snapshot)
     snprintf(snapshot->rx_signal, sizeof(snapshot->rx_signal), "%s", g_v34 ? v34_rx_stage_name(v34_get_rx_stage(g_v34)) : "unavailable");
     const char *tx_signal = g_v90 ? me_v90_tx_stage_name(v90_get_tx_phase(g_v90)) : NULL;
     snprintf(snapshot->tx_signal, sizeof(snapshot->tx_signal), "%s", tx_signal ? tx_signal : g_v34 ? v34_tx_stage_name(v34_get_tx_stage(g_v34)) : "unavailable");
-    if (g_mod == ME_MOD_V21 || g_mod == ME_MOD_BELL103) {
+    if (g_mod == ME_MOD_V23) {
+        /* V.23 §2 mode 2 F0 1700 Hz; §4 backward channel centre 420 Hz. */
+        snapshot->tx_baud = g_v23_tx_rate;
+        snapshot->rx_baud = g_v23_rx_rate;
+        snapshot->tx_carrier = g_v23_tx_rate == 1200 ? 1700 : 420;
+        snapshot->rx_carrier = g_v23_rx_rate == 1200 ? 1700 : 420;
+        snprintf(snapshot->rx_signal, sizeof(snapshot->rx_signal), "%s", g_state == ME_DATA ? "FSK_DATA" : "FSK_CARRIER_SEARCH");
+        snprintf(snapshot->tx_signal, sizeof(snapshot->tx_signal), "%s", g_state == ME_DATA ? "FSK_DATA" : "FSK_MARK");
+    } else if (g_mod == ME_MOD_V21 || g_mod == ME_MOD_BELL103) {
         /* FSK centre frequencies: V.21 §2, Bell 103 1170/2125 Hz. */
         int orig = g_mod == ME_MOD_BELL103 ? 1170 : 1080;
         int ans = g_mod == ME_MOD_BELL103 ? 2125 : 1750;

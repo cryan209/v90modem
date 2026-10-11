@@ -632,3 +632,9 @@ python3 tools/pcm_ber_regression.py
 # answerer falls back to Bell 103 for a 103 caller.
 ./engine_pair_test --seconds 15 --expect-no-connect --both-env ME_DATA_FRAMING=v14 --call-at AT+MS=B212,0,1200,1200 --answer-at AT+MS=B103,0,300,300
 ./engine_pair_test --expect B103 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --call-at AT+MS=B103,0,300,300 --answer-at AT+MS=B212 --answer-log "falling back to Bell 103" --answer-after ATI6 --answer-expect "Modulation         B103"
+# V.23 mode 2 + 75 bit/s backward channel (V.250 "V23C").  Default: the
+# answerer sends 1200; +MS receive bounds reverse it.  Short payload: 75 bit/s.
+./engine_pair_test --seconds 40 --expect V23 --both-env ME_DATA_FRAMING=v14 --payload-lines 2 --both-at AT+MS=V23C,0 --both-after ATI6 --call-expect "Rate               TX 75  RX 1200" --answer-expect "Rate               TX 1200  RX 75"
+./engine_pair_test --alaw --seconds 40 --expect V23 --both-env ME_DATA_FRAMING=v14 --payload-lines 2 --both-at AT+MS=V23C,0
+./engine_pair_test --seconds 40 --expect V23 --both-env ME_DATA_FRAMING=v14 --payload-lines 2 --call-at AT+MS=V23C,0,1200,1200,75,75 --answer-at AT+MS=V23C,0,75,75,1200,1200 --call-expect "CONNECT 75" --answer-expect "CONNECT 1200"
+./engine_pair_test --seconds 10 --expect-no-connect --both-env ME_DATA_FRAMING=v14 --both-at AT+MS=V23C,0,1200,1200,75,75
