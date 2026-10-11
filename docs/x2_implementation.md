@@ -690,3 +690,35 @@ Evidence: courier-emu worktree `admiring-ramanujan-9d7101`,
 `artifacts/x2-47s-fall-forward/imodem-pair-no-ec/`. Our downstream at
 index 14 behaves exactly like the original server's, so qualifying x2 above
 index 1 needs that emulator fix or real hardware.
+
+## Fresh Courier emulator controls, 12 October 2026
+
+Current engine `ac0b1fe5` was rebuilt and tested against committed courier-emu
+`b73483f3aa2986e54f193496490a6543bc9b3998`, exported to an isolated temporary
+source tree with its own native-library build. The sibling checkout has a
+modified `native/c5x_core.cpp`; that modification was excluded. Firmware and
+fixtures came from the committed export. No native runtime patches or capture
+hooks were enabled. The harness used its factory `S39=8` setting, PCMU,
+`--fast --pty-source --host-pace-samples 16`, and 180 million instructions.
+
+Both calls pass all nine checks, including exact delivery after CONNECT in
+both real PTYs (no extra data):
+
+| call | Courier -> host | host -> Courier | evidence |
+|---|---:|---:|---|
+| short control | 28 bytes | 20 bytes | `artifacts/x2-codex-20261012-control-socket/` |
+| numbered lines | 3710 bytes / 70 lines | 1000 bytes / 20 lines | `artifacts/x2-codex-20261012-long/` |
+
+Each run clocks exactly 260000 received and transmitted bearer samples
+(32.5 seconds). Initial selection is index 1, 32000 downstream / 24000
+upstream. Both also complete the Draft 0.33 section 22 / V.90 9.6.2.1-shaped
+fall-forward to index 14, 54666 downstream / 31200 upstream, and reacquire
+upstream B1 with 100% fit. Payload injection finishes before the rate change;
+these runs qualify initial exact transfer and the observed rate handoff,
+not payload delivery after that handoff or long-term reliability.
+
+`make x2-test x2-session-test x2-sym-test` passes. The initial sandboxed
+attempt could not bind the local Unix socket and was interrupted before a
+call; its directory `artifacts/x2-codex-20261012-control/` is not evidence
+of an interop failure. The completed tests used permission to open the local
+socket and PTY.
