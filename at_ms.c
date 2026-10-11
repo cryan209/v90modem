@@ -76,13 +76,16 @@ static const struct {
      * ends set alike); 300 bit/s has nothing below it to fall back to. */
     { "B103",  { NULL },                      "b103", "b103",  300,
       "Bell 103 (300), no V.8" },
+    /* Bell 212A: V.22's 1200 bit/s DPSK with the 2225 Hz answer tone and no
+     * guard tone.  Fixed like B103: a 212A answerer's 103 fallback is not
+     * offered. */
+    { "B212",  { "B212A", NULL },             "b212", "b212", 1200,
+      "Bell 212A (1200), no V.8" },
     /* Recognised, with no datapump in this engine.  Both modes NULL, so
      * always ERROR; +MS=? leaves them out and +MS$ lists them apart, so a
      * DTE that sends them learns why rather than meeting a bare ERROR.
-     * Bell 212A answers with 2225 Hz rather than V.8.  X.75 would need no
+     * X.75 would need no
      * datapump either (see CLEAR/V120 below), only its framing. */
-    { "B212",  { "B212A", NULL },             NULL,  NULL,    1200,
-      "Bell 212A" },
     { "X75",   { NULL },                      NULL,  NULL,   64000,
       "ISDN X.75" },
     /* The bearer is a byte-exact 64 kbit/s DS0 (clear_channel.h), so these

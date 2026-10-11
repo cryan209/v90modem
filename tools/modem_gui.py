@@ -28,6 +28,7 @@ LOOPBACK_PROFILES = {
     'v92': ('V.92 · PCM upstream', 'V92,0'),
     'v90': ('V.90 · analogue ↔ digital', 'V90,0'),
     'v22-1200': ('V.22 · 1200', 'V22B,0,1200,1200'),
+    'b212': ('Bell 212A · 1200', 'B212,0,1200,1200'),
     'v22': ('V.22bis · 2400', 'V22B,0,2400,2400'),
     'v32': ('V.32 · 9600', 'V32,0,9600,9600'),
     'v32bis': ('V.32bis · 14400', 'V32B,0,14400,14400'),
@@ -85,8 +86,8 @@ def main():
     if loopback:
         env.setdefault('ME_DATA_FRAMING', 'v14')
         mode = args[args.index('--mode')+1] if '--mode' in args else 'v22'
-        if mode not in ('v21', 'b103', 'v90', 'v91', 'v92', 'v22', 'v22-1200', 'v32', 'v32bis', 'v34'):
-            raise SystemExit('GUI loopback supports v21, b103, v22, v22-1200, v32, v32bis, v34, v90, v91 and v92')
+        if mode not in ('v21', 'b103', 'b212', 'v90', 'v91', 'v92', 'v22', 'v22-1200', 'v32', 'v32bis', 'v34'):
+            raise SystemExit('GUI loopback supports v21, b103, b212, v22, v22-1200, v32, v32bis, v34, v90, v91 and v92')
         if '--mode' not in args: args += ['--mode', mode]
         caller_port, peer_port = local_sip_ports()
         args += ['--bind-addr', '127.0.0.1', '--local-port', str(caller_port), '--sip-server', f'127.0.0.1:{peer_port}', '--auto-answer', '0']

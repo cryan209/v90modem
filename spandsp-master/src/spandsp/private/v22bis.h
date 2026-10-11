@@ -247,6 +247,13 @@ struct v22bis_state_s
         uint32_t guard_tone_phase;
         /*! \brief The update rate for the phase of the guard tone (i.e. the DDS increment). */
         int32_t guard_tone_phase_rate;
+        /*! \brief Bell 212A answer tone (2225Hz) phase, and its level. */
+        uint32_t answer_tone_phase;
+#if defined(SPANDSP_USE_FIXED_POINT)
+        int16_t answer_tone_gain;
+#else
+        float answer_tone_gain;
+#endif
         /*! \brief The current fractional phase of the baud timing. */
         int baud_phase;
         /*! \brief The code number for the current position in the constellation. */

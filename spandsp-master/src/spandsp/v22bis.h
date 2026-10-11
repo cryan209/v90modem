@@ -68,7 +68,15 @@ typedef enum
     /* 1800Hz guard tone is the norm is some areas, such as the UK and much of the Commonwealth */
     V22BIS_GUARD_TONE_1800HZ = 2,
     /* Change the operation of the modem to follow the original Bell212A spec, from which V.22bis was
-       developed. This is basically for old systems in North America. */
+       developed. This is basically for old systems in North America. Use it at 1200bps.
+       The answering modem sends the Bell 2225Hz answer tone in place of unscrambled ones
+       until it detects the caller's scrambled ones; the rest of the handshake is V.22's.
+       The calling modem is to be started only once the application has detected that
+       tone: it sends scrambled ones at once, and the application calls
+       v22bis_bell212a_answer_tone_ended() when the tone stops. (A plain V.22
+       caller may take 2225Hz for unscrambled ones -- -105 degrees a symbol at 600 baud,
+       nearest the 270 degree step of binary 11 -- but only when its carrier loop happens
+       to pull 25Hz onto it.) */
     V22BIS_BELL212A_COMPATIBILITY_MODE = 0x100,
     /* Use unscrambled 00 instead of unscrambled 11 during the handshake. This is not something you
        should use day to day. Its here to allow testing that receivers will function correctly with
@@ -182,6 +190,13 @@ SPAN_DECLARE(int) v22bis_remote_loopback(v22bis_state_t *s, bool enable);
     \brief Report the current operating bit rate of a V.22bis modem context
     \param s The modem context. */
 SPAN_DECLARE(int) v22bis_get_current_bit_rate(v22bis_state_t *s);
+
+/*! Bell 212A calling modem (V22BIS_BELL212A_COMPATIBILITY_MODE): the application's
+    tone detector has seen the 2225Hz answer tone end, so the answerer has begun its
+    scrambled ones.
+    \param s The modem context.
+    \return 0 if the modem moved on, -1 if it was not waiting for that. */
+SPAN_DECLARE(int) v22bis_bell212a_answer_tone_ended(v22bis_state_t *s);
 
 /*! Initialise a V.22bis modem context. This must be called before the first
     use of the context, to initialise its contents.

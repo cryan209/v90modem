@@ -986,22 +986,92 @@ static v22bis_state_t *g_v22bis  = NULL;
 static fsk_tx_state_t *g_v21_tx;
 static fsk_rx_state_t *g_v21_rx;
 static me_modulation_t g_v21_mod = ME_MOD_V21;  /* this call's: V21 or BELL103 */
-/* Circuit 109 qualification.  SpanDSP's FSK carrier detect is broadband
- * power, so on its own it reports carrier ~20 ms after ANY signal: another
- * modem family, ringback, speech.  V.21 §8.2.2 Table 2 gives circuit 109
- * OFF-to-ON as 300-700 ms on the switched network, so CONNECT waits until
- * the receive channel's two characteristic frequencies (§3) have carried
- * most of the received power for V21_QUALIFY_MS without a break. */
+/* Tone qualification for the FSK and Bell 212A paths.  SpanDSP's FSK
+ * carrier detect is broadband power, so on its own it reports carrier ~20 ms
+ * after ANY signal: another modem family, ringback, speech; and its V.22
+ * handshake takes a steady tone for unscrambled or scrambled ones, since a
+ * constant dibit descrambles to all ones.  me_tone_qual_t measures, in 20 ms
+ * blocks, the fraction of the received power at one or two frequencies:
+ * for a block of N samples a tone at a bin's frequency gives
+ * |X|^2 = N/2 * sum(x^2), so 2 sum|X_k|^2 / (N sum(x^2)) is that fraction.
+ * The bins are 50 Hz wide, so Bell 103 and V.21 channel 1 (90 Hz apart)
+ * stay distinct. */
+#define TONE_QUAL_BLOCK  160
+#define TONE_QUAL_FRAC   0.5f
+typedef struct {
+    int nf;              /* 1 or 2 frequencies */
+    float coef[2];
+    float gz[2][2];      /* Goertzel state per frequency */
+    int n;
+    float energy;
+    int run_ms;          /* consecutive time the tones held the power (and gate) */
+    int clear_ms;        /* consecutive time they did not */
+} me_tone_qual_t;
+
+static void tone_qual_init(me_tone_qual_t *q, float f0, float f1)
+{
+    memset(q, 0, sizeof(*q));
+    q->nf = f1 > 0.0f ? 2 : 1;
+    q->coef[0] = 2.0f * cosf(2.0f * (float) M_PI * f0 / SAMPLE_RATE);
+    q->coef[1] = 2.0f * cosf(2.0f * (float) M_PI * f1 / SAMPLE_RATE);
+}
+
+/* gate false holds run_ms at zero (V.21: SpanDSP has not reported carrier). */
+static void tone_qual_feed(me_tone_qual_t *q, const int16_t *amp, int len, bool gate)
+{
+    for (int i = 0; i < len; i++) {
+        float x = amp[i];
+
+        q->energy += x * x;
+        for (int k = 0; k < q->nf; k++) {
+            float v = x + q->coef[k] * q->gz[k][0] - q->gz[k][1];
+
+            q->gz[k][1] = q->gz[k][0];
+            q->gz[k][0] = v;
+        }
+        if (++q->n < TONE_QUAL_BLOCK)
+            continue;
+
+        float tone = 0.0f;
+
+        for (int k = 0; k < q->nf; k++) {
+            float a = q->gz[k][0], b = q->gz[k][1];
+
+            tone += a * a + b * b - q->coef[k] * a * b;
+        }
+        bool held = q->energy > 0.0f
+            && 2.0f * tone >= TONE_QUAL_FRAC * (float) TONE_QUAL_BLOCK * q->energy;
+        int ms = TONE_QUAL_BLOCK / (SAMPLE_RATE / 1000);
+
+        q->run_ms = held && gate ? q->run_ms + ms : 0;
+        q->clear_ms = held ? 0 : q->clear_ms + ms;
+        q->n = 0;
+        q->energy = 0.0f;
+        memset(q->gz, 0, sizeof(q->gz));
+    }
+}
+
+/* Circuit 109.  V.21 §8.2.2 Table 2 gives OFF-to-ON as 300-700 ms on the
+ * switched network, so CONNECT waits until the receive channel's two
+ * characteristic frequencies (§3) have carried most of the received power
+ * for V21_QUALIFY_MS without a break. */
 #define V21_QUALIFY_MS     400
-#define V21_QUALIFY_BLOCK  160    /* 20 ms: 50 Hz bins, so Bell 103 and V.21
-                                     channel 1 (90 Hz apart) stay distinct */
-#define V21_QUALIFY_FRAC   0.5
 static bool  g_v21_fsk_up;       /* SpanDSP has reported carrier */
-static int   g_v21_qual_ms;      /* consecutive in-band time */
-static int   g_v21_blk_n;
-static float g_v21_blk_energy;
-static float g_v21_gz[2][2];     /* Goertzel state, space and mark */
-static float g_v21_gz_coef[2];
+static me_tone_qual_t g_v21_qual;
+
+/* Bell 212A gates.  The caller watches for the answerer's 2225 Hz tone and
+ * reports CONNECT only once it has gone: a 212A answerer stops it to send
+ * scrambled ones, and a Bell 103 answerer, whose 2225 Hz mark SpanDSP's V.22
+ * caller trains on, never does.  The answerer watches its low band for Bell
+ * 103's 1070/1270 Hz and, once those qualify as V.21 carrier does, falls
+ * back to Bell 103 as a 103/212A answer modem does; until they are gone it
+ * does not take a V.22 training on them either. */
+#define B212_TONE_GONE_MS  200
+#define B212_TONE_HEARD_MS 150   /* answer tone before the caller transmits */
+static bool g_b212;              /* this call is Bell 212A */
+static bool g_b212_pending;      /* V.22 trained; the tone gate has not cleared */
+static bool g_b212_tone_ended;   /* caller: told the datapump the tone stopped */
+static me_tone_qual_t g_b212_qual;
 static void v21_release(void)
 {
     if (g_v21_tx) { fsk_tx_free(g_v21_tx); g_v21_tx = NULL; }
@@ -1040,6 +1110,11 @@ static void v22bis_put_bit_cb(void *user_data, int bit)
                first few transitions, not hundreds. */
             if (++g_v22bis_carrier_flaps <= 3)
                 ME_LOG("[ME] V.22bis carrier up\n");
+        } else if (bit == SIG_STATUS_TRAINING_SUCCEEDED
+                   && g_b212 && g_b212_qual.clear_ms < B212_TONE_GONE_MS) {
+            g_b212_pending = true;
+            ME_LOG("[ME] Bell 212A: V.22 trained with the far end's tone (2225 Hz "
+                   "answer, or Bell 103 originate) still on the line; not connecting on it\n");
         } else if (bit == SIG_STATUS_TRAINING_SUCCEEDED) {
             g_v22bis_trained = true;
             /* V.22bis falls back to 1200 against a V.22 peer, so report
@@ -2402,6 +2477,7 @@ static bool me_v90_analogue_role(void)
 
 typedef struct {
     bool x2, x2_symmetric, v90, v34, v32, v22, v92, k56, v91, v21;
+    bool b212;               /* no V.8: Bell 212A, V.22's 1200 with 2225 Hz */
     bool v32bis_ok;          /* V.32bis reachable at all (V.8 or Annex A) */
     bool clear, v120, r56;   /* no V.8: clear channel or V.120 on the DS0 */
     bool v110;               /* no V.8: V.110 async rate adaption */
@@ -2425,6 +2501,7 @@ static void me_offer_describe(const me_offer_t *o, bool k56, bool v91,
         snprintf(buf, len, "%s 300, no V.8", strcmp(o->name, "b103") == 0 ? "B103" : "V21");
         return;
     }
+    if (o->b212) { snprintf(buf, len, "B212 1200, no V.8"); return; }
     if (o->v110) {
         snprintf(buf, len, "V110 %d async, no V.8", o->v110_rate);
         return;
@@ -2454,6 +2531,7 @@ static const char *me_offer_str(void)
     memset(&o, 0, sizeof(o));
     o.v21 = strcmp(g_mode_name, "v21") == 0 || strcmp(g_mode_name, "b103") == 0;
     o.name = g_mode_name;
+    o.b212 = strcmp(g_mode_name, "b212") == 0;
     o.v90 = g_advertise_v90;
     o.v34 = g_advertise_v34;
     o.v32 = g_advertise_v32;
@@ -2490,6 +2568,11 @@ static bool me_offer_from_mode(const char *mode, bool automode, me_offer_t *o)
         /* 300 bit/s FSK, V.21 or Bell 103: no V.8, set alike at both ends. */
         o->v90 = o->v34 = false; o->v21 = true;
         o->name = strcmp(mode, "v21") == 0 ? "v21" : "b103";
+        return true;
+    } else if (strcmp(mode, "b212") == 0) {
+        /* Bell 212A: V.22's 1200 bit/s DPSK, answered with 2225 Hz rather
+         * than V.8 or V.25; set alike at both ends. */
+        o->v90 = o->v34 = false; o->b212 = true; o->name = "b212";
         return true;
     } else if (strcmp(mode, "v34") == 0) {
         o->v90 = false;
@@ -2629,6 +2712,7 @@ static bool me_offer_apply_limits(me_offer_t *o, const int *l, bool analogue)
     int umax = analogue ? l[LIM_MAX_TX] : l[LIM_MAX_RX];
 
     if (o->v21) { const int rates[] = {300}; return lim_symmetric(rates, 1, l); }
+    if (o->b212) { const int rates[] = {1200}; return lim_symmetric(rates, 1, l); }
     if (o->v110) {
         /* The highest Table 8 rate the bounds admit both ways: V.110 runs
          * one user rate in both directions. */
@@ -7466,54 +7550,96 @@ static void v21_put_bit(void *user, int bit)
 static void v21_qualify_init(const fsk_spec_t *rx_spec)
 {
     g_v21_fsk_up = false;
-    g_v21_qual_ms = 0;
-    g_v21_blk_n = 0;
-    g_v21_blk_energy = 0.0f;
-    memset(g_v21_gz, 0, sizeof(g_v21_gz));
-    g_v21_gz_coef[0] = 2.0f * cosf(2.0f * (float) M_PI * rx_spec->freq_zero / SAMPLE_RATE);
-    g_v21_gz_coef[1] = 2.0f * cosf(2.0f * (float) M_PI * rx_spec->freq_one / SAMPLE_RATE);
+    tone_qual_init(&g_v21_qual, rx_spec->freq_zero, rx_spec->freq_one);
 }
 
-/* Feed received audio; CONNECT once circuit 109 qualifies (see above).
- * For a block of N samples, a tone at a bin's frequency gives
- * |X|^2 = N/2 * sum(x^2), so 2(|Xs|^2 + |Xm|^2) / (N sum(x^2)) is the
- * fraction of the block's power at the two characteristic frequencies. */
+/* Feed received audio; CONNECT once circuit 109 qualifies (see above). */
 static void v21_qualify_rx(const int16_t *amp, int len)
 {
-    for (int i = 0; i < len; i++) {
-        float x = amp[i];
-
-        g_v21_blk_energy += x * x;
-        for (int k = 0; k < 2; k++) {
-            float v = x + g_v21_gz_coef[k] * g_v21_gz[k][0] - g_v21_gz[k][1];
-
-            g_v21_gz[k][1] = g_v21_gz[k][0];
-            g_v21_gz[k][0] = v;
-        }
-        if (++g_v21_blk_n < V21_QUALIFY_BLOCK)
-            continue;
-
-        float tone = 0.0f;
-
-        for (int k = 0; k < 2; k++) {
-            float a = g_v21_gz[k][0], b = g_v21_gz[k][1];
-
-            tone += a * a + b * b - g_v21_gz_coef[k] * a * b;
-        }
-        float frac = g_v21_blk_energy > 0.0f
-            ? 2.0f * tone / ((float) V21_QUALIFY_BLOCK * g_v21_blk_energy) : 0.0f;
-
-        g_v21_qual_ms = g_v21_fsk_up && frac >= V21_QUALIFY_FRAC
-            ? g_v21_qual_ms + V21_QUALIFY_BLOCK / (SAMPLE_RATE / 1000) : 0;
-        g_v21_blk_n = 0;
-        g_v21_blk_energy = 0.0f;
-        memset(g_v21_gz, 0, sizeof(g_v21_gz));
-        if (g_v21_qual_ms >= V21_QUALIFY_MS && g_state == ME_TRAINING)
-            on_training_complete(g_v21_mod, 300,
-                                 g_v21_mod == ME_MOD_BELL103 ? "Bell 103" : "V.21");
-    }
+    tone_qual_feed(&g_v21_qual, amp, len, g_v21_fsk_up);
+    if (g_v21_qual.run_ms >= V21_QUALIFY_MS && g_state == ME_TRAINING)
+        on_training_complete(g_v21_mod, 300,
+                             g_v21_mod == ME_MOD_BELL103 ? "Bell 103" : "V.21");
 }
 
+
+/* Start 300 bit/s FSK, V.21 or Bell 103, for this call's role.  Called with
+ * g_state_mtx held; false if SpanDSP could not allocate. */
+static bool fsk300_start_locked(bool bell)
+{
+    int ch_orig = bell ? FSK_BELL103CH1 : FSK_V21CH1;
+    int ch_ans = bell ? FSK_BELL103CH2 : FSK_V21CH2;
+    const fsk_spec_t *rx_spec = &preset_fsk_specs[g_calling_party ? ch_ans : ch_orig];
+
+    v21_release();
+    g_v21_mod = bell ? ME_MOD_BELL103 : ME_MOD_V21;
+    g_mod = g_v21_mod;
+    g_state = ME_TRAINING;
+    g_phase_start_ms = trace_now_ms();
+    data_stack_prepare(300);
+    g_v21_tx = fsk_tx_init(NULL, &preset_fsk_specs[g_calling_party ? ch_orig : ch_ans], v21_get_bit, NULL);
+    g_v21_rx = fsk_rx_init(NULL, rx_spec, FSK_FRAME_MODE_ASYNC, v21_put_bit, NULL);
+    v21_qualify_init(rx_spec);
+    return g_v21_tx && g_v21_rx;
+}
+
+/* Bell 212A, after each block of received audio: the tone gates above. */
+static void b212_rx_gate(const int16_t *amp, int len)
+{
+    tone_qual_feed(&g_b212_qual, amp, len, true);
+    pthread_mutex_lock(&g_state_mtx);
+    if (!g_b212 || g_state != ME_TRAINING) {
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    if (g_calling_party && !g_v22bis) {
+        if (g_b212_qual.run_ms >= B212_TONE_HEARD_MS) {
+            ME_LOG("[ME] Bell 212A caller: 2225 Hz answer tone heard for %d ms; "
+                   "sending scrambled ones\n", g_b212_qual.run_ms);
+            start_v22bis_training();
+            pthread_mutex_unlock(&g_state_mtx);
+            trace_phase("B212 caller: answer tone heard -> V22 1200");
+            if (!g_v22bis)
+                me_hangup();
+            return;
+        }
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    if (!g_calling_party && g_b212_qual.run_ms >= V21_QUALIFY_MS) {
+        bool ready;
+
+        ME_LOG("[ME] Bell 212A answerer: the caller is sending Bell 103 "
+               "originate tones; falling back to Bell 103\n");
+        g_b212 = g_b212_pending = false;
+        if (g_v22bis) {
+            v22bis_free(g_v22bis);
+            g_v22bis = NULL;
+        }
+        ready = fsk300_start_locked(true);
+        pthread_mutex_unlock(&g_state_mtx);
+        trace_phase("B212 answerer: Bell 103 caller -> B103 300");
+        if (!ready)
+            me_hangup();
+        return;
+    }
+    /* Two clear 20 ms blocks: the answerer has moved on to scrambled ones. */
+    if (g_calling_party && !g_b212_tone_ended && g_b212_qual.clear_ms >= 2 * TONE_QUAL_BLOCK / 8) {
+        g_b212_tone_ended = true;
+        ME_LOG("[ME] Bell 212A caller: answer tone ended\n");
+        v22bis_bell212a_answer_tone_ended(g_v22bis);
+    }
+    if (g_b212_pending && g_b212_qual.clear_ms >= B212_TONE_GONE_MS) {
+        int rate = g_v22bis ? v22bis_get_current_bit_rate(g_v22bis) : 1200;
+
+        g_b212_pending = false;
+        g_v22bis_trained = true;
+        pthread_mutex_unlock(&g_state_mtx);
+        on_training_complete(ME_MOD_V22BIS, rate, "Bell 212A");
+        return;
+    }
+    pthread_mutex_unlock(&g_state_mtx);
+}
 
 /* Start V.22bis training — shared helper used by V.8 result handler */
 static void start_v22bis_training(void)
@@ -7527,7 +7653,8 @@ static void start_v22bis_training(void)
     /* V.22 mode: SpanDSP's V.22bis at 1200 sends no S1 and does not look
        for one, which is exactly a V.22 modem (V.22bis 6.3.1.1.1 c), 6.3.1.2.1
        d)); a V.22bis peer then settles at 1200 too. */
-    int bps = strcmp(g_mode_name, "v22-1200") == 0 ? 1200 : 2400;
+    bool bell212a = strcmp(g_mode_name, "b212") == 0;
+    int bps = strcmp(g_mode_name, "v22-1200") == 0 || bell212a ? 1200 : 2400;
     const int r2400[1] = { 2400 };
 
     /* +MS bounds that leave no room for 2400 both ways: V.22 at 1200. */
@@ -7551,6 +7678,10 @@ static void start_v22bis_training(void)
     int guard = guard_hz == 1800 ? V22BIS_GUARD_TONE_1800HZ
               : guard_hz == 550 ? V22BIS_GUARD_TONE_550HZ : V22BIS_GUARD_TONE_NONE;
 
+    /* Bell 212A has no guard tone; its answerer sends 2225 Hz where V.22
+       sends unscrambled ones (spandsp/v22bis.h). */
+    if (bell212a)
+        guard = V22BIS_GUARD_TONE_NONE | V22BIS_BELL212A_COMPATIBILITY_MODE;
     g_v22bis = v22bis_init(NULL, bps, guard, g_calling_party,
                            v22bis_get_bit_cb, NULL,
                            v22bis_put_bit_cb, NULL);
@@ -9071,7 +9202,8 @@ static void me_connect_info(int rate, v250_connect_report_t *r)
     /* g_v92a: the analogue role's V.92 controller (Table 18 selected). */
     case ME_MOD_V90:    r->carrier = (g_v92_active || g_v92a) ? "V92" : "V90"; break;
     case ME_MOD_V34:    r->carrier = "V34"; break;
-    case ME_MOD_V22BIS: r->carrier = strcmp(g_mode_name, "v22-1200") == 0 ? "V22" : "V22B"; break;
+    case ME_MOD_V22BIS: r->carrier = strcmp(g_mode_name, "b212") == 0 ? "B212"
+                                   : strcmp(g_mode_name, "v22-1200") == 0 ? "V22" : "V22B"; break;
     case ME_MOD_V32BIS: r->carrier = strcmp(g_mode_name, "v32") == 0 ? "V32" : "V32B"; break;
     case ME_MOD_X2:     r->carrier = "X2"; break;
     case ME_MOD_V21:    r->carrier = "V21"; break;
@@ -9714,21 +9846,43 @@ void me_on_sip_connected(void)
 
     if (strcmp(g_mode_name, "v21") == 0 || strcmp(g_mode_name, "b103") == 0) {
         bool bell = strcmp(g_mode_name, "b103") == 0;
-        int ch_orig = bell ? FSK_BELL103CH1 : FSK_V21CH1;
-        int ch_ans = bell ? FSK_BELL103CH2 : FSK_V21CH2;
+        bool ready;
 
-        v21_release();
         me_decide_data_framing();
-        g_v21_mod = bell ? ME_MOD_BELL103 : ME_MOD_V21;
-        g_mod = g_v21_mod; g_state = ME_TRAINING;
-        g_phase_start_ms = trace_now_ms();
-        data_stack_prepare(300);
-        g_v21_tx = fsk_tx_init(NULL, &preset_fsk_specs[g_calling_party ? ch_orig : ch_ans], v21_get_bit, NULL);
-        g_v21_rx = fsk_rx_init(NULL, &preset_fsk_specs[g_calling_party ? ch_ans : ch_orig], FSK_FRAME_MODE_ASYNC, v21_put_bit, NULL);
-        v21_qualify_init(&preset_fsk_specs[g_calling_party ? ch_ans : ch_orig]);
-        bool ready = g_v21_tx && g_v21_rx;
+        ready = fsk300_start_locked(bell);
         pthread_mutex_unlock(&g_state_mtx);
         trace_phase("%s 300: awaiting opposite-channel FSK carrier", bell ? "B103" : "V21");
+        if (!ready) me_hangup();
+        return;
+    }
+
+    if (strcmp(g_mode_name, "b212") == 0) {
+        /* Bell 212A: no V.8 and no V.25 ANS; the answerer's 2225 Hz tone
+           and the caller's scrambled ones are the whole handshake. */
+        me_decide_data_framing();
+        g_b212 = true;
+        g_b212_pending = g_b212_tone_ended = false;
+        if (g_calling_party) {
+            /* The datapump starts when the answer tone has been heard
+               (b212_rx_gate()); until then, silence. */
+            if (g_v22bis) {
+                v22bis_free(g_v22bis);
+                g_v22bis = NULL;
+            }
+            g_mod = ME_MOD_V22BIS;
+            g_state = ME_TRAINING;
+            g_v22bis_trained = false;
+            g_phase_start_ms = trace_now_ms();
+            tone_qual_init(&g_b212_qual, 2225.0f, 0.0f);
+        } else {
+            start_v22bis_training();
+            tone_qual_init(&g_b212_qual, preset_fsk_specs[FSK_BELL103CH1].freq_zero,
+                           preset_fsk_specs[FSK_BELL103CH1].freq_one);
+        }
+        bool ready = g_calling_party || g_v22bis != NULL;
+        pthread_mutex_unlock(&g_state_mtx);
+        trace_phase("B212 1200: %s", g_calling_party ? "awaiting 2225 Hz answer tone"
+                                                     : "sending 2225 Hz answer tone");
         if (!ready) me_hangup();
         return;
     }
@@ -9821,6 +9975,7 @@ void me_on_sip_disconnected_status(int sip_status)
 
     if (g_v8)       { v8_free(g_v8);                             g_v8       = NULL; }
     v21_release();
+    g_b212 = g_b212_pending = false;
     if (g_v22bis)   { v22bis_free(g_v22bis);                     g_v22bis   = NULL; }
     v32bis_release_locked();
     cleanup_v34_v90_training_locked();
@@ -12244,9 +12399,13 @@ skip_8k_codewords:
         } else if (g_v21_rx) {
             fsk_rx(g_v21_rx, amp, len);
             v21_qualify_rx(amp, len);
+        } else if (g_b212 && !g_v22bis) {
+            b212_rx_gate(amp, len);     /* Bell 212A caller, awaiting the tone */
         } else if (g_v22bis) {
             v25_ta_rx(amp, len);
             v22bis_rx(g_v22bis, amp, len);
+            if (g_b212)
+                b212_rx_gate(amp, len);
             v25_ta_tick(len);
         }
 

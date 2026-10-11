@@ -602,6 +602,12 @@ static __inline__ void process_half_baud(v22bis_state_t *s, const complexf_t *sa
             s->rx.gardner_step = 4;
             s->rx.pattern_repeats = 0;
             s->rx.training = (s->calling_party)  ?  V22BIS_RX_TRAINING_STAGE_UNSCRAMBLED_ONES  :  V22BIS_RX_TRAINING_STAGE_SCRAMBLED_ONES_AT_1200;
+            /* A Bell 212A caller is started once its application has heard the 2225Hz
+               answer tone, and is already sending scrambled ones: it only waits for the
+               tone to end. Demodulating the tone as unscrambled ones is not reliable
+               (it is 25Hz off 2250Hz, and the carrier loop drifts onto it or not). */
+            if (s->calling_party  &&  (s->options & V22BIS_BELL212A_COMPATIBILITY_MODE))
+                s->rx.training = V22BIS_RX_TRAINING_STAGE_UNSCRAMBLED_ONES_SUSTAINING;
             /* Be pessimistic and see what the handshake brings */
             s->negotiated_bit_rate = 1200;
         }
@@ -667,10 +673,18 @@ static __inline__ void process_half_baud(v22bis_state_t *s, const complexf_t *sa
         /* Calling modem only. */
         /* Wait for the end of the unscrambled ones at 1200bps. */
         target = &v22bis_constellation[nearest];
-        track_carrier(s, &z, target);
+        /* Bell 212A: the answer tone says nothing about the carrier; tracking it would
+           drag the loop ~25Hz off before the real signal arrives. */
+        if (!(s->options & V22BIS_BELL212A_COMPATIBILITY_MODE))
+            track_carrier(s, &z, target);
         raw_bits = phase_steps[((nearest >> 2) - (s->rx.constellation_state >> 2)) & 3];
         s->rx.constellation_state = nearest;
-        if (raw_bits != s->rx.last_raw_bits)
+        if ((s->options & V22BIS_BELL212A_COMPATIBILITY_MODE))
+        {
+            /* Bell 212A: this is the 2225Hz answer tone, and its end is reported by
+               v22bis_bell212a_answer_tone_ended(), from a tone detector. */
+        }
+        else if (raw_bits != s->rx.last_raw_bits)
         {
             /* This looks like the end of the sustained initial unscrambled 11 or 00. */
             s->tx.training_count = 0;
@@ -1025,6 +1039,30 @@ SPAN_DECLARE(int) v22bis_rx_fillin(v22bis_state_t *s, int len)
     }
     /*endfor*/
     /* TODO: Advance the symbol phase the appropriate amount */
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v22bis_bell212a_answer_tone_ended(v22bis_state_t *s)
+{
+    if (!s->calling_party
+        ||
+        !(s->options & V22BIS_BELL212A_COMPATIBILITY_MODE)
+        ||
+        s->rx.training != V22BIS_RX_TRAINING_STAGE_UNSCRAMBLED_ONES_SUSTAINING)
+    {
+        return -1;
+    }
+    /*endif*/
+    span_log(&s->logging, SPAN_LOG_FLOW, "+++ Bell 212A answer tone ended (Caller)\n");
+    /* As at the end of V.22's unscrambled ones: sustain our scrambled ones for the
+       timed period, and train on the answerer's, from the nominal carrier. */
+    s->rx.carrier_phase_rate = DDS_PHASE_RATE(HIGH_CARRIER_FREQUENCY);
+    s->tx.training_count = 0;
+    s->tx.training = V22BIS_TX_TRAINING_STAGE_TIMED_S11;
+    s->rx.training_count = 0;
+    s->rx.training = V22BIS_RX_TRAINING_STAGE_SCRAMBLED_ONES_AT_1200;
+    s->rx.pattern_repeats = 0;
     return 0;
 }
 /*- End of function --------------------------------------------------------*/

@@ -643,6 +643,24 @@ SPAN_DECLARE(int) v22bis_tx(v22bis_state_t *s, int16_t amp[], int len)
     /*endif*/
     for (sample = 0;  sample < len;  sample++)
     {
+        if ((s->options & V22BIS_BELL212A_COMPATIBILITY_MODE)
+            &&
+            !s->calling_party
+            &&
+            s->tx.training == V22BIS_TX_TRAINING_STAGE_U11)
+        {
+            /* Bell 212A: the 2225Hz answer tone stands where V.22 sends unscrambled ones.
+               The receiver moves the transmitter on to scrambled ones when the caller's
+               scrambled ones are heard, exactly as it ends U11. The pulse shaper still
+               holds the initial silence, so modulation restarts cleanly. */
+#if defined(SPANDSP_USE_FIXED_POINT)
+            amp[sample] = dds_mod(&s->tx.answer_tone_phase, dds_phase_rate(2225.0f), s->tx.answer_tone_gain, 0);
+#else
+            amp[sample] = (int16_t) lfastrintf(dds_modf(&s->tx.answer_tone_phase, dds_phase_ratef(2225.0f), s->tx.answer_tone_gain, 0));
+#endif
+            continue;
+        }
+        /*endif*/
         if ((s->tx.baud_phase += 3) >= 40)
         {
             s->tx.baud_phase -= 40;
@@ -722,9 +740,12 @@ SPAN_DECLARE(void) v22bis_tx_power(v22bis_state_t *s, float power)
 #if defined(SPANDSP_USE_FIXED_POINT)
     s->tx.gain = (int16_t) sig_gain;
     s->tx.guard_tone_gain = (int16_t) guard_tone_gain;
+    /* The Bell 212A answer tone goes out at the data signal's power. */
+    s->tx.answer_tone_gain = (int16_t) (db_to_amplitude_ratio(power - DBM0_MAX_SINE_POWER)*32768.0f);
 #else
     s->tx.gain = sig_gain;
     s->tx.guard_tone_gain = guard_tone_gain;
+    s->tx.answer_tone_gain = db_to_amplitude_ratio(power - DBM0_MAX_SINE_POWER)*32768.0f;
 #endif
 }
 /*- End of function --------------------------------------------------------*/
@@ -741,7 +762,9 @@ static int v22bis_tx_restart(v22bis_state_t *s)
     s->tx.rrc_filter_step = 0;
     s->tx.scramble_reg = 0;
     s->tx.scrambler_pattern_count = 0;
-    if (s->calling_party)
+    if (s->calling_party  &&  (s->options & V22BIS_BELL212A_COMPATIBILITY_MODE))
+        s->tx.training = V22BIS_TX_TRAINING_STAGE_S11;      /* see v22bis.h */
+    else if (s->calling_party)
         s->tx.training = V22BIS_TX_TRAINING_STAGE_INITIAL_SILENCE;
     else
         s->tx.training = V22BIS_TX_TRAINING_STAGE_INITIAL_TIMED_SILENCE;
@@ -749,6 +772,7 @@ static int v22bis_tx_restart(v22bis_state_t *s)
     s->tx.training_count = 0;
     s->tx.carrier_phase = 0;
     s->tx.guard_tone_phase = 0;
+    s->tx.answer_tone_phase = 0;
     s->tx.baud_phase = 0;
     s->tx.constellation_state = 0;
     s->tx.current_get_bit = fake_get_bit;
@@ -889,6 +913,8 @@ SPAN_DECLARE(v22bis_state_t *) v22bis_init(v22bis_state_t *s,
     s->get_bit_user_data = get_bit_user_data;
     s->put_bit = put_bit;
     s->put_bit_user_data = put_bit_user_data;
+    /* Both roles keep the options: Bell 212A changes the caller's receiver too. */
+    s->options = options;
 
     if (s->calling_party)
     {
@@ -897,7 +923,6 @@ SPAN_DECLARE(v22bis_state_t *) v22bis_init(v22bis_state_t *s,
     else
     {
         s->tx.carrier_phase_rate = dds_phase_ratef(HIGH_CARRIER_FREQUENCY);
-        s->options = options;
         switch ((options & 0xFF))
         {
         case V22BIS_GUARD_TONE_550HZ:

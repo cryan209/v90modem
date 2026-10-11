@@ -107,7 +107,8 @@ static void test_parser(void)
     parse_bad("=V32TERBO,1,0,21600");
     parse_ok("=B103,0,300,300", "B103", 0, 300, 300, 300, 300);
     parse_bad("=B103,0,1200,1200");
-    parse_bad("=B212A");          /* recognised, no datapump */
+    parse_ok("=B212A,0,1200,1200", "B212", 0, 1200, 1200, 1200, 1200);
+    parse_bad("=B212,0,2400,2400");
     parse_ok("=CLEAR", "CLEAR", 1, 0, 0, 0, 0);
     parse_ok("=CLEARMODE,0", "CLEAR", 0, 0, 0, 0, 0);
     parse_ok("=64K,1,0,56000", "CLEAR", 1, 0, 56000, 0, 56000);
@@ -117,7 +118,7 @@ static void test_parser(void)
     parse_ok("=V120", "V120", 1, 0, 0, 0, 0);
     parse_bad("=V120,1,0,64001");
     parse_bad("=X75");
-    check(at_ms_carrier_available("V34") && !at_ms_carrier_available("B212")
+    check(at_ms_carrier_available("V34") && !at_ms_carrier_available("X75")
           && at_ms_carrier_available("64K") && at_ms_carrier_available("V120")
           && at_ms_carrier_available("V110") && at_ms_carrier_max_rate("V110") == 38400
           && at_ms_carrier_max_rate("X75") == 64000,
@@ -192,17 +193,17 @@ static void test_parser(void)
               && strstr(help, "V91                       0,1       64000") != NULL
               && strstr(help, "V32TERBO TERBO,V32T       1         19200") != NULL
               && strstr(help, "Recognised, no datapump here") != NULL
-              && strstr(help, "B212     B212A            -          1200  Bell 212A") != NULL
+              && strstr(help, "B212     B212A            0,1        1200  Bell 212A (1200), no V.8") != NULL
               && strstr(help, "Recognised") > strstr(help, "V120 ")
               && strstr(help, "CLEAR    CLEARMODE,64K    0,1       64000  DS0 bits, V.14/LAPM") != NULL
               && strstr(help, "V110                      0,1       38400  V.110 async") != NULL
               && strstr(help, "X75                       -         64000") != NULL
-              && strstr(help, "Recognised") < strstr(help, "B212")
+              && strstr(help, "Recognised") > strstr(help, "B212")
               && strstr(help, "Current: V91,0,0,0,0,0") != NULL
               && strlen(help) < sizeof(help) - 1, "+MS$ help rows and current setting");
     }
     at_ms_format_test(buf, sizeof(buf));
-    check(!strcmp(buf, "+MS: (V21,V22,V22B,V32,V32B,HST,V32TERBO,VFC,V34,K56,V90,V92,V91,X2,X2S,B103,CLEAR,V120,V110),(0,1),"
+    check(!strcmp(buf, "+MS: (V21,V22,V22B,V32,V32B,HST,V32TERBO,VFC,V34,K56,V90,V92,V91,X2,X2S,B103,B212,CLEAR,V120,V110),(0,1),"
                        "(0-64000),(0-64000),(0-64000),(0-64000)"), buf);
 }
 
@@ -305,7 +306,7 @@ static int test_engine(void)
     expect("ATE0", "OK");
     expect_offer(V8_MOD_V90 | V8_MOD_V34 | V8_MOD_V32 | V8_MOD_V22, "V.90|V.34|V.32|V.22 by default");
     expect("AT+MS?", "+MS: V90,1,0,0,0,0");
-    expect("AT+MS=?", "+MS: (V21,V22,V22B,V32,V32B,HST,V32TERBO,VFC,V34,K56,V90,V92,V91,X2,X2S,B103,CLEAR,V120,V110),(0,1)");
+    expect("AT+MS=?", "+MS: (V21,V22,V22B,V32,V32B,HST,V32TERBO,VFC,V34,K56,V90,V92,V91,X2,X2S,B103,B212,CLEAR,V120,V110),(0,1)");
     expect_describe("V90|V34|V32|V22");
     expect("AT+MS$", "K56      56,56K,K56FLEX   1         60000  K56flex V.8bis, then V.90");
     expect("AT+MS$", "Current: V90,1,0,0,0,0");
@@ -364,7 +365,9 @@ static int test_engine(void)
     expect("AT+MS=HST", "OK");
     expect_describe("V32|V22");
     expect("AT+MS?", "+MS: HST,1,0,0,0,0");
-    expect("AT+MS=B212", "ERROR");
+    expect("AT+MS=B212A", "OK");
+    expect("AT+MS?", "+MS: B212,1,0,0,0,0");
+    expect("AT+MS=HST", "OK");
     expect("AT+MS=X75", "ERROR");
     expect("AT+MS?", "+MS: HST,1,0,0,0,0");
     expect("AT+MS=V22B,0", "OK");

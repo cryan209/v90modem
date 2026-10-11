@@ -623,3 +623,12 @@ python3 tools/pcm_ber_regression.py
 # V.21 §8.2.2 circuit 109: a peer in the other 300 bit/s family is energy
 # but not carrier, so neither side may CONNECT.
 ./engine_pair_test --seconds 10 --expect-no-connect --both-env ME_DATA_FRAMING=v14 --call-at AT+MS=B103,0,300,300 --answer-at AT+MS=V21,0,300,300
+# Bell 212A: V.22's 1200 bit/s DPSK with the 2225 Hz answer tone.  The
+# datapump alone (tone, handshake, delayed bearer), then two engines.
+./bell212a_test
+./engine_pair_test --expect V22BIS --expect-connect 1200 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --both-at AT+MS=B212,0,1200,1200 --call-log "answer tone heard" --call-log "answer tone ended" --both-after ATI6 --both-expect "Modulation         B212"
+./engine_pair_test --alaw --expect V22BIS --expect-connect 1200 --both-env ME_DATA_FRAMING=v14 --both-at AT+MS=B212,0,1200,1200
+# A 212A caller must not train on a Bell 103 answerer's 2225 Hz mark; a 212A
+# answerer falls back to Bell 103 for a 103 caller.
+./engine_pair_test --seconds 15 --expect-no-connect --both-env ME_DATA_FRAMING=v14 --call-at AT+MS=B212,0,1200,1200 --answer-at AT+MS=B103,0,300,300
+./engine_pair_test --expect B103 --expect-connect 300 --both-env ME_DATA_FRAMING=v14 --both-env VPCM_ME_VERBOSE=1 --call-at AT+MS=B103,0,300,300 --answer-at AT+MS=B212 --answer-log "falling back to Bell 103" --answer-after ATI6 --answer-expect "Modulation         B103"
