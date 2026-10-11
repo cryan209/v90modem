@@ -2820,3 +2820,68 @@ Hilbert kernel's sign convention — and the probe now makes each of those a
 one-run experiment rather than a guess. Fix stage B first, then the bound
 becomes a straight T/3 least-squares fit on the reconstructed 9600 Hz stream,
 which is the same computation the tool already does with a different stride.
+
+## The trellis was never correcting anything (2026-10-11)
+
+Our own analogue caller against our own digital side over local SIP, V.14
+framing, 31200 upstream: `tools/multi_line_test.py --mode v90
+--payload-offset 6` corrupted the upstream every time and offsets 0 and 3
+never did. It looked content-sensitive. It was not.
+
+**Every hard symbol error went straight to the DTE.** The caller's
+`V34_DATA_TX_DUMP` and the receiver's `V34_DATA_FRAME_DUMP` line up frame for
+frame on this path (offset 0). Over one call 23 frames carry a symbol on the
+wrong side of a decision boundary (error 1.1-1.2 against a half-spacing of
+1; the call reads 0.14 from the constellation, 37 dB), and **all 23** show
+up in `ME_V90_UPSTREAM_BIT_DUMP` as a 78-bit burst four mapping frames later
+(the Viterbi delay), plus 23 bits of descrambler spread. Between them the
+bits are exact. Offset 6 simply puts one of those bursts inside the 0.13 s
+payload; a V.14 receiver then misframes the back-to-back characters that
+follow, which is the "every fourth byte, bit-shifted" signature. Which offset
+fails is fixed by where the payload lands relative to that call's errors, so
+dumps that shift the timing (the receiver frame dump's `fflush`) make it
+"pass".
+
+**Why:** V.34 9.6.3.2 / Table 11 -- with h=0, C0=0 and U0 = Y0 XOR V0, so
+the 16-state code's parity ties each 4D subset pair to the encoder state.
+Without that constraint every pair is legal from every state and the Viterbi
+decoder is a hard slicer. `v34_begin_rx_data()` deliberately left it off in
+V.90 mode, because the T/3 path re-pins B1 and frame phase itself and does
+not inherit the V0 inversion epoch the constraint needs. That was correct
+caution: the epoch the B1 parking leaves is **60 4D pairs** from the one the
+code proves, on every call measured.
+
+**Fix:** prove the epoch from the received code instead of inheriting it.
+Figure 10's parity check gives a syndrome per 4D pair that is content
+independent; `v34_rx_track_v0_v90()` scores every candidate epoch on it over
+the last superframe, re-judged every half superframe:
+
+- a wrong epoch fails the parity at 12 or more of a superframe's pairs for
+  every p and j (44 or more unless it is off by whole half data frames);
+  noise at the right epoch measured 0-7 per superframe (each hard error
+  spoils three or four syndromes). An epoch is taken only when it beats every
+  other by 8;
+- a held epoch failing more than 22 with no clear successor (a slip has
+  re-paired the 2D symbols) drops the constraint until one is clear again;
+- the frame-phase search relabelling frames re-arms the search, since
+  `input_4d` then follows the labelling rather than the code.
+
+The plain-V.34 acquirer (unique zero syndrome over a whole superframe) was
+tried first and is too strict at this error rate: it locked 1.35 s into
+data, and data sent before that was still uncorrected. Tracking locks after
+one superframe (0.28 s at 3200 baud). It is left in place for plain V.34,
+whose `v34_data_test` pins its "a damaged first window must not be accepted"
+behaviour.
+
+Result: both recorded failing calls replay with **0 bit errors** after the
+lock (664 before), `--payload-offset 0..7` all pass live, and the new
+`engine_pair_test --both-env ME_DATA_FRAMING=v14 --payload-printable "line 6 "
+--payload-reps 100` rows (10 KB of back-to-back V.14 upstream, u-law and
+A-law) fail before the change and pass after. The default engine pair never
+saw this: it runs V.42, whose FCS and retransmission hide every one of these
+bursts. **Grade a PCM upstream with V.14 framing, not LAPM, or the trellis
+can be absent without any test noticing.**
+
+Not yet seen live against a peer: the slip/relabel paths re-arm and drop to
+the old unconstrained decoder, so the worst case on the rig is the previous
+behaviour, but no rig call has yet shown a "V0 phase lost" or "moved" line.

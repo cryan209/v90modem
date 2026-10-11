@@ -1708,6 +1708,15 @@ typedef struct
     uint8_t v0_u[5];
     uint8_t v0_input[5];
     uint16_t v0_score[512];
+    /*! V.90 upstream: the V0 epoch is tracked rather than acquired once.
+        v0_score holds the current half-superframe of parity misses per
+        candidate epoch and v0_half the previous one; their sum over the
+        last superframe picks (or drops) the epoch, see
+        v34_rx_track_v0_v90(). */
+    bool v0_tracking;
+    int v0_window_pairs;
+    int v0_track_pairs;
+    uint16_t v0_half[512];
 
     /*! \brief Buffer to accumulate 8 equalized 2D symbols (as Q9.7 re,im pairs)
                before calling v34_put_mapping_frame() */

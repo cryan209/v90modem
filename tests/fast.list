@@ -469,6 +469,12 @@ PAIR_RETRAIN=answer ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test alaw v8
 # Our V.90 analogue role against our digital side, whole engines (docs/v90_analogue_role.md).
 ./engine_pair_test --expect V90 --call-expect "CONNECT 31200" --answer-expect "CONNECT 56000" --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0
 ./engine_pair_test --alaw --expect V90 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0
+# 10 KB of back-to-back V.14 characters upstream, no V.42 to retransmit: the
+# 31200 upstream takes a hard symbol error every few hundred mapping frames,
+# and only the 16-state trellis's parity (V.34 9.6.3, V0 epoch tracked from
+# the code itself) keeps them off the DTE (docs/v90_upstream_data_path.md).
+./engine_pair_test --expect V90 --both-env ME_DATA_FRAMING=v14 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --payload-printable "line 6 " --payload-reps 100 --seconds 60
+./engine_pair_test --alaw --expect V90 --both-env ME_DATA_FRAMING=v14 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --payload-printable "line 6 " --payload-reps 100 --seconds 60
 # The same pair as V.92 with PCM upstream (+PIG=0): INFO0 bit 26/27, Table 18
 # INFO1a, V.92 Phases 3-4, both B1s, payload both ways (docs/v92_full_startup.md).
 # V.92 mode with +PIG=1 still sets the INFO0 bits and must fall back to V.90.

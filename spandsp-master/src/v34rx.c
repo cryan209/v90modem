@@ -842,6 +842,7 @@ int v34_rx_descramble(v34_rx_state_t *s, int in_bit)
 /*- End of function --------------------------------------------------------*/
 
 static void v34_reset_rx_data_frame_state(v34_rx_state_t *s, int super_frame);
+static void v34_rx_arm_v0_acquisition(v34_rx_state_t *s);
 static bool v90_t3_phase_evidence_ok(v34_rx_state_t *s);
 static complexf_t v90_t3_raw_get_frac(const v34_rx_state_t *s,
                                       int64_t index,
@@ -12267,6 +12268,21 @@ static void v90_t3_emit_ready(v34_rx_state_t *s)
                              "(frame error %.3f); publishing data\n",
                              (int) ((idx + 1)/s->v90_t3_b1_symbols), mean);
                     s->v90_t3_in_b1 = false;
+                    /* V.34 9.6.3.2 / Table 11: with h=0, C0=0 and
+                       U0 = Y0 XOR V0, so the 16-state code's parity is what
+                       lets the Viterbi decoder correct an isolated symbol
+                       error at all -- without it every subset pair is legal
+                       from every state and the decoder is a hard slicer.
+                       That needs the V0 inversion epoch, which this path
+                       does not inherit: B1's length is measured, not known,
+                       and the frame-phase search relabels frames later.  So
+                       prove the epoch from the received code itself
+                       (Figure 10's parity check) rather than assume it.
+                       Measured on our own analogue caller at 31200: every
+                       one of a call's 23 hard symbol errors reached the DTE
+                       as a 78-bit burst, and one inside a V.14 run of
+                       back-to-back characters misframed the rest of it. */
+                    v34_rx_arm_v0_acquisition(s);
                     /* ME_V90_PHASE_FORCE_OFFSET=n displaces the decoder n
                        data frames from the phase B1 pins.  It has to happen
                        HERE and not at acquisition: applied while B1 is still
@@ -12805,6 +12821,9 @@ static void v34_reset_rx_data_frame_state(v34_rx_state_t *s, int super_frame)
     s->super_frame = super_frame;
     s->v0_pattern = (uint16_t) (2*super_frame);
     s->input_4d = super_frame*4*s->parms.p;
+    if (s->v90_mode  &&  !s->x2_mode)
+        v34_rx_arm_v0_acquisition(s);
+    /*endif*/
     prior = (s->viterbi.ptr - 1) & 0xF;
     for (int state = 0;  state < s->viterbi.state_count;  state++)
     {
@@ -15207,6 +15226,130 @@ static int v34_v0_at(const v34_rx_state_t *s, int pair)
          ? (0x5FEE >> (pair/(2*s->parms.p))) & 1 : 0;
 }
 
+/* V.90 upstream V0 epoch tracking.  Every candidate epoch is scored on
+   Figure 10's parity over the last superframe (4*p*j 4D pairs), re-judged
+   every half superframe:
+
+   - A wrong epoch fails the parity at 12 or more pairs of a superframe for
+     every p and j (Table 12's pattern; 44 or more unless the error is a
+     whole number of half data frames), while channel noise at the right
+     epoch measured 0-7 per superframe on a 37 dB call -- each hard symbol
+     error spoils three or four syndromes.  So an epoch is taken only when it
+     beats every other candidate by V34_V0_EPOCH_MARGIN: noise heavy enough
+     to fake that would already have made the data undecodable.
+   - A held epoch that fails more than V34_V0_EPOCH_MAX_MISSES with no clear
+     successor means the 2D symbols have been re-paired by a slip (about half
+     the syndromes fail), and the U0 constraint would now reject the correct
+     symbols, so the trellis drops back to unconstrained until a clear epoch
+     returns.
+   - A clear winner other than the held epoch (the frame-phase search
+     relabelled frames, or the 4D pairing moved by whole pairs) is adopted.
+
+   Unlike the plain-V.34 acquirer this does not demand a perfect
+   superframe: at the error rates a 31200 upstream runs at, that took over a
+   second, and data sent in that second was decoded with no trellis
+   correction at all. */
+#define V34_V0_EPOCH_MARGIN         8
+#define V34_V0_EPOCH_MAX_MISSES     22
+
+/* (Re)start V0 epoch acquisition, with the U0 constraint off until it
+   succeeds.  Only the 16-state code with h=0 has the C0=0 parity check this
+   relies on (9.6.3.2, Figure 10). */
+static void v34_rx_arm_v0_acquisition(v34_rx_state_t *s)
+{
+    bool zero_h = true;
+
+    for (int i = 0;  i < 3;  i++)
+        if (s->h[i].re != 0  ||  s->h[i].im != 0)
+            zero_h = false;
+    /*endfor*/
+    s->viterbi.zero_precoder = false;
+    s->v0_acquiring = false;
+    s->v0_tracking = (s->viterbi.state_count == 16  &&  zero_h);
+    s->v0_pairs = 0;
+    s->v0_window_pairs = 0;
+    s->v0_track_pairs = 0;
+    memset(s->v0_score, 0, sizeof(s->v0_score));
+    memset(s->v0_half, 0, sizeof(s->v0_half));
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v34_rx_track_v0_v90(v34_rx_state_t *s, int syndrome, int span)
+{
+    int best = -1;
+    int best_score = INT32_MAX;
+    int second_score = INT32_MAX;
+    int held_score;
+
+    for (int delta = 0;  delta < span;  delta++)
+    {
+        int expected = v34_v0_at(s, s->input_4d + delta)
+                     ^ v34_v0_at(s, s->input_4d + delta - 3)
+                     ^ v34_v0_at(s, s->input_4d + delta - 4);
+
+        s->v0_score[delta] += syndrome != expected;
+    }
+    /*endfor*/
+    s->v0_track_pairs++;
+    if (++s->v0_window_pairs < span/2)
+        return;
+    /*endif*/
+    s->v0_window_pairs = 0;
+    if (s->v0_track_pairs >= span)
+    {
+        for (int delta = 0;  delta < span;  delta++)
+        {
+            int score = s->v0_score[delta] + s->v0_half[delta];
+
+            if (score < best_score)
+            {
+                second_score = best_score;
+                best_score = score;
+                best = delta;
+            }
+            else if (score < second_score)
+            {
+                second_score = score;
+            }
+            /*endif*/
+        }
+        /*endfor*/
+        held_score = s->v0_score[0] + s->v0_half[0];
+        if (second_score - best_score >= V34_V0_EPOCH_MARGIN
+            &&
+            (best != 0  ||  !s->viterbi.zero_precoder))
+        {
+            /* Candidates are scored relative to input_4d, so moving the
+               epoch renumbers them: start the evidence afresh. */
+            s->input_4d = (s->input_4d + best) % span;
+            V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                       "Rx - V0 phase %s: advance %d 4D pairs, %d of %d pairs fail the "
+                       "9.6.3 parity there, the next best %d (Table 12)\n",
+                       s->viterbi.zero_precoder  ?  "moved"  :  "acquired",
+                       best, best_score, span, second_score);
+            s->viterbi.zero_precoder = true;
+            s->v0_track_pairs = 0;
+            memset(s->v0_score, 0, sizeof(s->v0_score));
+            memset(s->v0_half, 0, sizeof(s->v0_half));
+            return;
+        }
+        /*endif*/
+        if (s->viterbi.zero_precoder  &&  held_score > V34_V0_EPOCH_MAX_MISSES)
+        {
+            V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                       "Rx - V0 phase lost: %d of %d pairs fail the 9.6.3 parity check "
+                       "and no epoch is clear; trellis unconstrained until one is\n",
+                       held_score, span);
+            s->viterbi.zero_precoder = false;
+        }
+        /*endif*/
+    }
+    /*endif*/
+    memcpy(s->v0_half, s->v0_score, sizeof(s->v0_half));
+    memset(s->v0_score, 0, sizeof(s->v0_score));
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v34_rx_acquire_v0(v34_rx_state_t *s)
 {
     int nearest[2] = {0, 0};
@@ -15217,7 +15360,7 @@ static void v34_rx_acquire_v0(v34_rx_state_t *s)
     int winner = -1;
     int winners = 0;
 
-    if (!s->v0_acquiring || span <= 0 || span > 512)
+    if ((!s->v0_acquiring  &&  !s->v0_tracking)  ||  span <= 0  ||  span > 512)
         return;
     for (int i = 0; i < 2; i++)
     {
@@ -15228,6 +15371,23 @@ static void v34_rx_acquire_v0(v34_rx_state_t *s)
     }
     s->v0_u[n%5] = (label[1] - label[0]) & 1;
     s->v0_input[n%5] = conv_encode_input[label[0]][label[1]];
+    if (s->v0_tracking)
+    {
+        /* Keep the five-deep history indexed consistently while the pair
+           counter stays bounded. */
+        s->v0_pairs = (n >= 4)  ?  5 + (n + 1)%5  :  n + 1;
+        if (n >= 4)
+        {
+            syndrome = s->v0_u[n%5] ^ s->v0_u[(n-3)%5] ^ s->v0_u[(n-4)%5]
+                     ^ ((s->v0_input[(n-3)%5] >> 1) & 1)
+                     ^ ((s->v0_input[(n-2)%5] >> 1) & 1)
+                     ^ (s->v0_input[(n-1)%5] & 1);
+            v34_rx_track_v0_v90(s, syndrome, span);
+        }
+        /*endif*/
+        return;
+    }
+    /*endif*/
     if (n >= 4)
     {
         syndrome = s->v0_u[n%5] ^ s->v0_u[(n-3)%5] ^ s->v0_u[(n-4)%5]
@@ -15457,6 +15617,12 @@ SPAN_DECLARE(void) v34_put_mapping_frame(v34_rx_state_t *s, int16_t bits[16])
                                      s->super_frame, s->data_frame);
                             s->v90_t3_phase_delta = 0;
                             s->v90_t3_phase_pending = false;
+                            /* input_4d now follows the new labelling, not
+                               the epoch the parity check proved: re-prove
+                               it before constraining the trellis again. */
+                            if (!s->x2_mode)
+                                v34_rx_arm_v0_acquisition(s);
+                            /*endif*/
                             /* Start the measurement where the candidate
                                starts.  The change is scheduled at the end of
                                a window and lands here, up to a superframe
@@ -16921,9 +17087,11 @@ SPAN_DECLARE(int) v34_begin_rx_data(v34_state_t *s)
     s->rx.viterbi.ptr = 0;
     s->rx.viterbi.windup = 15;
     s->rx.v0_acquiring = false;
-    /* The V.90 T/3 path independently re-pins B1/frame phase and does not
-       yet preserve the input inversion epoch required by this constraint.
-       Keep its existing decoder until that acquisition path is corrected. */
+    s->rx.v0_tracking = false;
+    /* The V.90 T/3 path re-pins B1/frame phase itself and does not inherit
+       the input inversion epoch this constraint needs, so it starts
+       unconstrained and proves the epoch once B1 has ended (see
+       v34_rx_arm_v0_acquisition()). */
     s->rx.viterbi.zero_precoder = !s->rx.v90_mode;
     for (int i = 0; i < 3; i++)
         if (s->rx.h[i].re != 0 || s->rx.h[i].im != 0)

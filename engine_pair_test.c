@@ -17,6 +17,7 @@
  *                    [--both-expect SEQ] [--call-expect SEQ] [--answer-expect SEQ]
  *                    [--both-after CMD] [--call-after CMD] [--answer-after CMD]
  *                    [--expect-hangup] [--expect-no-connect] [--payload-lines N]
+ *                    [--payload-printable PREFIX] [--payload-reps N]
  *
  * SEQ is "A|B|C": those strings must appear in that side's DTE stream, in that
  * order (V.250 intermediate result codes before CONNECT, say).  --X-absent STR
@@ -28,7 +29,9 @@
  * fixed modes that do not match): the whole --seconds runs, and neither side
  * may report CONNECT.  --payload-lines (1-12, default 12) shortens each
  * side's DTE text, 51 octets a line, for slow channels (V.23's 75 bit/s
- * moves a line in about 7 s).
+ * moves a line in about 7 s).  --payload-printable PREFIX makes each side's
+ * text (PREFIX, then every printable ASCII octet 32-126, then CRLF) x N
+ * (--payload-reps, 1-128, default 4).
  *
  * The AT commands are sent to that side's PTY before the call starts, each
  * required to answer OK -- the way a DTE configures a modem (AT+MS).  The
@@ -239,10 +242,11 @@ typedef struct {
     int n_log_not;
     char dte[65536];    /* everything read from the DTE side */
     size_t dte_len;
-    char payload[2048];
+    char payload[16384];
     size_t payload_len;
     int connect_frame;  /* frame index CONNECT was seen, -1 if not */
     int sent;
+    size_t sent_len;    /* payload octets the PTY has accepted so far */
     int linear;         /* --fdm-call-linear: an analogue modem's converters */
 } side_t;
 
@@ -416,6 +420,8 @@ int main(int argc, char **argv)
     int expect_hangup = 0;
     int no_connect = 0;
     int payload_lines = 12;
+    const char *payload_printable = NULL;
+    int payload_reps = 4;
     int fax_hdlc = 0;
     int fdm_slot = -1, fdm_rate = 96000, fdm_taps = 96, fdm_bank_slots = 0;
     float fdm_level = -20.0f;
@@ -479,6 +485,12 @@ int main(int argc, char **argv)
             payload_lines = atoi(argv[++i]);
             if (payload_lines < 1 || payload_lines > 12)
                 payload_lines = 12;
+        } else if (!strcmp(argv[i], "--payload-printable") && i + 1 < argc) {
+            payload_printable = argv[++i];
+        } else if (!strcmp(argv[i], "--payload-reps") && i + 1 < argc) {
+            payload_reps = atoi(argv[++i]);
+            if (payload_reps < 1 || payload_reps > 128)
+                payload_reps = 4;
         } else if (!strcmp(argv[i], "--expect-no-connect")) {
             no_connect = 1;
         } else if ((!strcmp(argv[i], "--call-expect") || !strcmp(argv[i], "--answer-expect")
@@ -560,6 +572,22 @@ int main(int argc, char **argv)
                                                 sizeof(s->payload) - s->payload_len,
                                                 "%c%04d the quick brown fox jumps over the lazy dog\r\n",
                                                 k ? 'A' : 'C', line);
+        if (payload_printable) {
+            /* (PREFIX + every printable ASCII octet + CRLF) x reps: the
+               multi-line test's payload, back-to-back V.14 characters
+               with no idle marks between them to resynchronise on. */
+            s->payload_len = 0;
+            for (int rep = 0; rep < payload_reps; rep++) {
+                s->payload_len += (size_t) snprintf(s->payload + s->payload_len,
+                                                    sizeof(s->payload) - s->payload_len,
+                                                    "%s", payload_printable);
+                for (int c = 32; c < 127; c++)
+                    s->payload[s->payload_len++] = (char) c;
+                s->payload[s->payload_len++] = '\r';
+                s->payload[s->payload_len++] = '\n';
+            }
+            s->payload[s->payload_len] = '\0';
+        }
         if (fax_hdlc) { s->payload_len = snprintf(s->payload,sizeof(s->payload),"%c Class 1 duplex HDLC payload",k ? 'A' : 'C'); }
         s->connect_frame = -1;
         if (spawn(s, alaw) != 0 || open_pty(s) != 0) {
@@ -615,9 +643,17 @@ int main(int argc, char **argv)
             /* Half a second after both ends report CONNECT, each DTE sends. */
             if (!s->sent && side[0].connect_frame >= 0 && side[1].connect_frame >= 0
                 && f > side[0].connect_frame + 25 && f > side[1].connect_frame + 25) {
-                write_full(s->pty_fd, s->payload, s->payload_len);
-                if (fax_hdlc) { const uint8_t end[2] = {0x10,0x03}; write_full(s->pty_fd,end,2); }
-                s->sent = 1;
+                /* The PTY is non-blocking and holds about 1 KB: a longer
+                   payload goes in as the engine drains it, frame by frame. */
+                ssize_t n = write(s->pty_fd, s->payload + s->sent_len,
+                                  s->payload_len - s->sent_len);
+
+                if (n > 0)
+                    s->sent_len += (size_t) n;
+                if (s->sent_len >= s->payload_len) {
+                    if (fax_hdlc) { const uint8_t end[2] = {0x10,0x03}; write_full(s->pty_fd,end,2); }
+                    s->sent = 1;
+                }
             }
         }
         if (expect_hangup && (strstr(side[0].dte, "NO CARRIER") || strstr(side[1].dte, "NO CARRIER"))) {
