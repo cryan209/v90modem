@@ -51,7 +51,8 @@ suite run on this date. Interop claims come from the dated entries in
 | V.34 half-duplex (fax) | probe only (`ME_V34_FAX_PROBE`) | control channel end to end | Canon reaches control-channel data. **T.30 Annex F absent.** |
 | V.32bis / V.32 | **yes** (2026-10-05): V.8 when it is the carrier, V.32bis Annex A automode otherwise, `AT+MS=V32B`/`V32` | clause 6/8 dialogue; `engine_pair_test` engine against engine, both laws | none |
 | V.22bis / V.22 | yes (V.8, Annex A automode, pre-V.8 USB1 both roles; `AT+MS=V22B`, `AT+MS=V22` = V.22 at 1200) | SpanDSP; `engine_pair_test` incl. V.22 vs V.22bis and V.8-less peers | HSF loop: V.22bis carried traffic |
-| V.21, V.23, Bell 103, Bell 212A | **not wired** (FSK presets exist in SpanDSP) | none | none |
+| V.21, Bell 103 | **yes, fixed mode** (2026-10-11): `AT+MS=V21` / `B103`, no V.8, circuit 109 qualified per V.21 §8.2.2 (`docs/v21.md`) | `engine_pair_test` both laws, plus a mismatched-family no-connect case | none |
+| V.23, Bell 212A | **not wired** (V.23 FSK presets exist in SpanDSP) | none | none |
 | Fax class 1 / 2.0 (V.17/V.29/V.27ter/V.21) | yes, via T.31 / T.32 | `fax_class_test`, `fax_class2_test` | **none** |
 | x2, K56flex | experimental | receive replay | neither completes a call |
 | V.42 LAPM / V.42bis / V.44 | yes | yes | LAPM + V.42bis live; V.44 never offered by a peer |
@@ -187,6 +188,16 @@ suite run on this date. Interop claims come from the dated entries in
   `v34_duplex_test` does train, so the fault is in the engine's V.34 path.
   Reproduce with
   `./engine_pair_test --seconds 60 --expect V34 --both-env ME_MODE=v34`.
+
+- **2026-10-11, item 6 (part).** V.21 and Bell 103 run as fixed modes on one
+  FSK path. Their carrier detect now follows V.21 §8.2.2: it qualifies on
+  the receive channel's tones for 400 ms. Before this, either family
+  connected in 20 ms to any energy, including the other family.
+  - `--mode` is now validated by the engine's own mode parser. The
+    hard-coded list had rejected `v21` and `v110`, which the docs and the
+    GUI both used.
+  - Still open from item 6: V.23, Bell 212A, and V.25 automode detection
+    of FSK callers.
 
 ## 4. Suggested order
 

@@ -72,14 +72,15 @@ static const struct {
       "x2 asymmetric digital answerer" },
     { "X2S", { "X2SYMM", NULL }, "x2-symm", "x2-symm", 64000,
       "x2 digital symmetric (56/64k)" },
+    /* Bell 103 runs on V.21's FSK path with its own tones (no V.8, both
+     * ends set alike); 300 bit/s has nothing below it to fall back to. */
+    { "B103",  { NULL },                      "b103", "b103",  300,
+      "Bell 103 (300), no V.8" },
     /* Recognised, with no datapump in this engine.  Both modes NULL, so
      * always ERROR; +MS=? leaves them out and +MS$ lists them apart, so a
      * DTE that sends them learns why rather than meeting a bare ERROR.
-     * Bell 103 is 300 bit/s with nothing below it to fall back to, and
-     * 212A answers with 2225 Hz rather than V.8.  X.75 would need no
+     * Bell 212A answers with 2225 Hz rather than V.8.  X.75 would need no
      * datapump either (see CLEAR/V120 below), only its framing. */
-    { "B103",  { NULL },                      NULL,  NULL,     300,
-      "Bell 103" },
     { "B212",  { "B212A", NULL },             NULL,  NULL,    1200,
       "Bell 212A" },
     { "X75",   { NULL },                      NULL,  NULL,   64000,

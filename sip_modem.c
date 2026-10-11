@@ -13,7 +13,7 @@
  *   ./sip_v90_modem [--sip-server <host>] [--username <user>]
  *                   [--password <pass>]  [--pty-link <path> | --control-link <p> --data-link <p>]
  *                   [--local-port <port>] [--rtp-port <port>]
- *                   [--bind-addr <ip>] [--mode v21|x2|x2-symm|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92|\n"
+ *                   [--bind-addr <ip>] [--mode v21|b103|x2|x2-symm|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92|\n"
         "          clear|clear56|v120|v120-56]
  *                   [--verbose]
  *
@@ -1217,7 +1217,7 @@ static void print_usage(FILE *f, const char *argv0)
         "          [--pty-link path | --control-link path --data-link path]\n"
         "          [--gui | --gui-web | --gui-loopback] (native macOS / browser signal monitor)\n"
         "          [--local-port port] [--rtp-port port]\n"
-        "          [--bind-addr ip] [--mode v21|x2|x2-symm|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92] [--verbose]\n"
+        "          [--bind-addr ip] [--mode v21|b103|x2|x2-symm|k56|v22|v22-1200|v32|v32bis|v34|v90|v91|v92] [--verbose]\n"
         "          [--auto-answer rings] [--connect-timeout seconds] [--profile file]\n"
         "\n"
         "--gui-loopback runs a local echo peer with selectable test profiles.\n"
@@ -1364,26 +1364,10 @@ int main(int argc, char *argv[])
         return 2;
     }
 
-    if (modem_mode
-        && strcmp(modem_mode, "x2") != 0
-        && strcmp(modem_mode, "x2-symm") != 0
-        && strcmp(modem_mode, "x2-sym") != 0
-        && strcmp(modem_mode, "v22") != 0
-        && strcmp(modem_mode, "v22-1200") != 0
-        && strcmp(modem_mode, "v32") != 0
-        && strcmp(modem_mode, "v32bis") != 0
-        && strcmp(modem_mode, "v34") != 0
-        && strcmp(modem_mode, "v90") != 0
-        && strcmp(modem_mode, "v92") != 0
-        && strcmp(modem_mode, "v91") != 0
-        && strcmp(modem_mode, "k56") != 0
-        && strcmp(modem_mode, "clear") != 0
-        && strcmp(modem_mode, "clear56") != 0
-        && strcmp(modem_mode, "v120") != 0
-        && strcmp(modem_mode, "v120-56") != 0) {
-        fprintf(stderr, "Invalid --mode '%s' (expected x2, x2-symm, k56, v22, v34, v90, "
-                        "v91, v92, clear, clear56, v120 or v120-56)\n",
-                modem_mode);
+    if (modem_mode && !me_mode_name_valid(modem_mode)) {
+        fprintf(stderr, "Invalid --mode '%s' (expected v21, b103, v22, v22-1200, v32, "
+                        "v32bis, v34, v90, v91, v92, k56, x2, x2-symm, clear, clear56, "
+                        "v120, v120-56 or v110)\n", modem_mode);
         return 2;
     }
     if (modem_mode)

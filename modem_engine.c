@@ -372,7 +372,8 @@ static const char *me_mod_to_str(me_modulation_t mod)
     case ME_MOD_V91:    return "V91";
     case ME_MOD_V90:    return "V90";
     case ME_MOD_V34:    return "V34";
-    case ME_MOD_V21: return "V21";
+    case ME_MOD_V21:    return "V21";
+    case ME_MOD_BELL103: return "B103";
     case ME_MOD_V22BIS: return "V22BIS";
     case ME_MOD_V32BIS: return "V32BIS";
     case ME_MOD_CLEAR:  return "CLEAR";      /* CLEAR, V120 or V110 */
@@ -977,9 +978,30 @@ static v25_automode_rx_t g_v25am;
 static v22bis_state_t *g_v22bis  = NULL;
 /* V.21 §§2–4, 7(a): binary FSK, caller channel 1, answerer channel 2.
  * The vendored presets define the normative frequencies and 300 bit/s rate.
- * Fixed V.21 is selected out of band; no V.8/QAM training is involved. */
+ * Fixed V.21 is selected out of band; no V.8/QAM training is involved.
+ * Bell 103 runs on the same path with its own presets: originate mark/space
+ * 1270/1070 Hz, answer 2225/2025 Hz.  Its answer tone is simply the
+ * answerer's 2225 Hz mark, so starting both channels at connect is what a
+ * Bell 103 answerer does anyway. */
 static fsk_tx_state_t *g_v21_tx;
 static fsk_rx_state_t *g_v21_rx;
+static me_modulation_t g_v21_mod = ME_MOD_V21;  /* this call's: V21 or BELL103 */
+/* Circuit 109 qualification.  SpanDSP's FSK carrier detect is broadband
+ * power, so on its own it reports carrier ~20 ms after ANY signal: another
+ * modem family, ringback, speech.  V.21 §8.2.2 Table 2 gives circuit 109
+ * OFF-to-ON as 300-700 ms on the switched network, so CONNECT waits until
+ * the receive channel's two characteristic frequencies (§3) have carried
+ * most of the received power for V21_QUALIFY_MS without a break. */
+#define V21_QUALIFY_MS     400
+#define V21_QUALIFY_BLOCK  160    /* 20 ms: 50 Hz bins, so Bell 103 and V.21
+                                     channel 1 (90 Hz apart) stay distinct */
+#define V21_QUALIFY_FRAC   0.5
+static bool  g_v21_fsk_up;       /* SpanDSP has reported carrier */
+static int   g_v21_qual_ms;      /* consecutive in-band time */
+static int   g_v21_blk_n;
+static float g_v21_blk_energy;
+static float g_v21_gz[2][2];     /* Goertzel state, space and mark */
+static float g_v21_gz_coef[2];
 static void v21_release(void)
 {
     if (g_v21_tx) { fsk_tx_free(g_v21_tx); g_v21_tx = NULL; }
@@ -2399,7 +2421,10 @@ static int me_offer_bits(bool v22, bool v32, bool v34, bool v90)
 static void me_offer_describe(const me_offer_t *o, bool k56, bool v91,
                               char *buf, size_t len)
 {
-    if (o->v21) { snprintf(buf, len, "V21 300, no V.8"); return; }
+    if (o->v21) {
+        snprintf(buf, len, "%s 300, no V.8", strcmp(o->name, "b103") == 0 ? "B103" : "V21");
+        return;
+    }
     if (o->v110) {
         snprintf(buf, len, "V110 %d async, no V.8", o->v110_rate);
         return;
@@ -2427,7 +2452,8 @@ static const char *me_offer_str(void)
     me_offer_t o;
 
     memset(&o, 0, sizeof(o));
-    o.v21 = strcmp(g_mode_name, "v21") == 0;
+    o.v21 = strcmp(g_mode_name, "v21") == 0 || strcmp(g_mode_name, "b103") == 0;
+    o.name = g_mode_name;
     o.v90 = g_advertise_v90;
     o.v34 = g_advertise_v34;
     o.v32 = g_advertise_v32;
@@ -2460,8 +2486,10 @@ static bool me_offer_from_mode(const char *mode, bool automode, me_offer_t *o)
         o->x2 = true;
         o->v90 = false;
         o->name = "x2";
-    } else if (strcmp(mode, "v21") == 0) {
-        o->v90 = o->v34 = false; o->v21 = true; o->name = "v21";
+    } else if (strcmp(mode, "v21") == 0 || strcmp(mode, "b103") == 0) {
+        /* 300 bit/s FSK, V.21 or Bell 103: no V.8, set alike at both ends. */
+        o->v90 = o->v34 = false; o->v21 = true;
+        o->name = strcmp(mode, "v21") == 0 ? "v21" : "b103";
         return true;
     } else if (strcmp(mode, "v34") == 0) {
         o->v90 = false;
@@ -2641,6 +2669,13 @@ static bool me_offer_apply_limits(me_offer_t *o, const int *l, bool analogue)
     if (o->v22 && !lim_symmetric(lim_v22_rates, strcmp(o->name, "v22-1200") == 0 ? 1 : 2, l))
         o->v22 = false;
     return o->v90 || o->x2 || o->v34 || o->v32bis_ok || o->v22 || o->v91;
+}
+
+bool me_mode_name_valid(const char *mode)
+{
+    me_offer_t o;
+
+    return mode && *mode && me_offer_from_mode(mode, true, &o);
 }
 
 static bool me_resolve_offer(const char *mode, bool automode)
@@ -7419,11 +7454,64 @@ static void v21_put_bit(void *user, int bit)
 {
     (void)user;
     if (bit == SIG_STATUS_CARRIER_UP)
-        on_training_complete(ME_MOD_V21, 300, "V.21");
+        g_v21_fsk_up = true;
     else if (bit == SIG_STATUS_CARRIER_DOWN && g_state == ME_DATA)
         me_hangup();
+    else if (bit == SIG_STATUS_CARRIER_DOWN)
+        g_v21_fsk_up = false;
     else if (bit >= 0 && g_state == ME_DATA)
         ds_rx_put_bit(&g_data_stack, bit);
+}
+
+static void v21_qualify_init(const fsk_spec_t *rx_spec)
+{
+    g_v21_fsk_up = false;
+    g_v21_qual_ms = 0;
+    g_v21_blk_n = 0;
+    g_v21_blk_energy = 0.0f;
+    memset(g_v21_gz, 0, sizeof(g_v21_gz));
+    g_v21_gz_coef[0] = 2.0f * cosf(2.0f * (float) M_PI * rx_spec->freq_zero / SAMPLE_RATE);
+    g_v21_gz_coef[1] = 2.0f * cosf(2.0f * (float) M_PI * rx_spec->freq_one / SAMPLE_RATE);
+}
+
+/* Feed received audio; CONNECT once circuit 109 qualifies (see above).
+ * For a block of N samples, a tone at a bin's frequency gives
+ * |X|^2 = N/2 * sum(x^2), so 2(|Xs|^2 + |Xm|^2) / (N sum(x^2)) is the
+ * fraction of the block's power at the two characteristic frequencies. */
+static void v21_qualify_rx(const int16_t *amp, int len)
+{
+    for (int i = 0; i < len; i++) {
+        float x = amp[i];
+
+        g_v21_blk_energy += x * x;
+        for (int k = 0; k < 2; k++) {
+            float v = x + g_v21_gz_coef[k] * g_v21_gz[k][0] - g_v21_gz[k][1];
+
+            g_v21_gz[k][1] = g_v21_gz[k][0];
+            g_v21_gz[k][0] = v;
+        }
+        if (++g_v21_blk_n < V21_QUALIFY_BLOCK)
+            continue;
+
+        float tone = 0.0f;
+
+        for (int k = 0; k < 2; k++) {
+            float a = g_v21_gz[k][0], b = g_v21_gz[k][1];
+
+            tone += a * a + b * b - g_v21_gz_coef[k] * a * b;
+        }
+        float frac = g_v21_blk_energy > 0.0f
+            ? 2.0f * tone / ((float) V21_QUALIFY_BLOCK * g_v21_blk_energy) : 0.0f;
+
+        g_v21_qual_ms = g_v21_fsk_up && frac >= V21_QUALIFY_FRAC
+            ? g_v21_qual_ms + V21_QUALIFY_BLOCK / (SAMPLE_RATE / 1000) : 0;
+        g_v21_blk_n = 0;
+        g_v21_blk_energy = 0.0f;
+        memset(g_v21_gz, 0, sizeof(g_v21_gz));
+        if (g_v21_qual_ms >= V21_QUALIFY_MS && g_state == ME_TRAINING)
+            on_training_complete(g_v21_mod, 300,
+                                 g_v21_mod == ME_MOD_BELL103 ? "Bell 103" : "V.21");
+    }
 }
 
 
@@ -8986,6 +9074,8 @@ static void me_connect_info(int rate, v250_connect_report_t *r)
     case ME_MOD_V22BIS: r->carrier = strcmp(g_mode_name, "v22-1200") == 0 ? "V22" : "V22B"; break;
     case ME_MOD_V32BIS: r->carrier = strcmp(g_mode_name, "v32") == 0 ? "V32" : "V32B"; break;
     case ME_MOD_X2:     r->carrier = "X2"; break;
+    case ME_MOD_V21:    r->carrier = "V21"; break;
+    case ME_MOD_BELL103: r->carrier = "B103"; break;
     case ME_MOD_CLEAR:  r->carrier = g_offer_v110 ? "V110" : g_offer_v120 ? "V120" : "CLEAR"; break;
     default:            r->carrier = at_ms_mode_to_carrier(g_mode_name); break;
     }
@@ -9622,17 +9712,23 @@ void me_on_sip_connected(void)
         return;
     }
 
-    if (strcmp(g_mode_name, "v21") == 0) {
+    if (strcmp(g_mode_name, "v21") == 0 || strcmp(g_mode_name, "b103") == 0) {
+        bool bell = strcmp(g_mode_name, "b103") == 0;
+        int ch_orig = bell ? FSK_BELL103CH1 : FSK_V21CH1;
+        int ch_ans = bell ? FSK_BELL103CH2 : FSK_V21CH2;
+
         v21_release();
         me_decide_data_framing();
-        g_mod = ME_MOD_V21; g_state = ME_TRAINING;
+        g_v21_mod = bell ? ME_MOD_BELL103 : ME_MOD_V21;
+        g_mod = g_v21_mod; g_state = ME_TRAINING;
         g_phase_start_ms = trace_now_ms();
         data_stack_prepare(300);
-        g_v21_tx = fsk_tx_init(NULL, &preset_fsk_specs[g_calling_party ? FSK_V21CH1 : FSK_V21CH2], v21_get_bit, NULL);
-        g_v21_rx = fsk_rx_init(NULL, &preset_fsk_specs[g_calling_party ? FSK_V21CH2 : FSK_V21CH1], FSK_FRAME_MODE_ASYNC, v21_put_bit, NULL);
+        g_v21_tx = fsk_tx_init(NULL, &preset_fsk_specs[g_calling_party ? ch_orig : ch_ans], v21_get_bit, NULL);
+        g_v21_rx = fsk_rx_init(NULL, &preset_fsk_specs[g_calling_party ? ch_ans : ch_orig], FSK_FRAME_MODE_ASYNC, v21_put_bit, NULL);
+        v21_qualify_init(&preset_fsk_specs[g_calling_party ? ch_ans : ch_orig]);
         bool ready = g_v21_tx && g_v21_rx;
         pthread_mutex_unlock(&g_state_mtx);
-        trace_phase("V21 300: awaiting opposite-channel FSK carrier");
+        trace_phase("%s 300: awaiting opposite-channel FSK carrier", bell ? "B103" : "V21");
         if (!ready) me_hangup();
         return;
     }
@@ -12147,6 +12243,7 @@ skip_8k_codewords:
             v32bis_engine_rx(amp, len);
         } else if (g_v21_rx) {
             fsk_rx(g_v21_rx, amp, len);
+            v21_qualify_rx(amp, len);
         } else if (g_v22bis) {
             v25_ta_rx(amp, len);
             v22bis_rx(g_v22bis, amp, len);
@@ -15792,10 +15889,14 @@ void me_get_diag_snapshot(me_diag_snapshot_t *snapshot)
     snprintf(snapshot->rx_signal, sizeof(snapshot->rx_signal), "%s", g_v34 ? v34_rx_stage_name(v34_get_rx_stage(g_v34)) : "unavailable");
     const char *tx_signal = g_v90 ? me_v90_tx_stage_name(v90_get_tx_phase(g_v90)) : NULL;
     snprintf(snapshot->tx_signal, sizeof(snapshot->tx_signal), "%s", tx_signal ? tx_signal : g_v34 ? v34_tx_stage_name(v34_get_tx_stage(g_v34)) : "unavailable");
-    if (g_mod == ME_MOD_V21) {
+    if (g_mod == ME_MOD_V21 || g_mod == ME_MOD_BELL103) {
+        /* FSK centre frequencies: V.21 §2, Bell 103 1170/2125 Hz. */
+        int orig = g_mod == ME_MOD_BELL103 ? 1170 : 1080;
+        int ans = g_mod == ME_MOD_BELL103 ? 2125 : 1750;
+
         snapshot->rx_baud = snapshot->tx_baud = 300;
-        snapshot->rx_carrier = g_calling_party ? 1750 : 1080;
-        snapshot->tx_carrier = g_calling_party ? 1080 : 1750;
+        snapshot->rx_carrier = g_calling_party ? ans : orig;
+        snapshot->tx_carrier = g_calling_party ? orig : ans;
         snprintf(snapshot->rx_signal, sizeof(snapshot->rx_signal), "%s", g_state == ME_DATA ? "FSK_DATA" : "FSK_CARRIER_SEARCH");
         snprintf(snapshot->tx_signal, sizeof(snapshot->tx_signal), "%s", g_state == ME_DATA ? "FSK_DATA" : "FSK_MARK");
     } else if (g_mod == ME_MOD_V22BIS) {

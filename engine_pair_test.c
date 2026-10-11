@@ -16,7 +16,7 @@
  *                    [--both-at CMD] [--call-at CMD] [--answer-at CMD]
  *                    [--both-expect SEQ] [--call-expect SEQ] [--answer-expect SEQ]
  *                    [--both-after CMD] [--call-after CMD] [--answer-after CMD]
- *                    [--expect-hangup]
+ *                    [--expect-hangup] [--expect-no-connect]
  *
  * SEQ is "A|B|C": those strings must appear in that side's DTE stream, in that
  * order (V.250 intermediate result codes before CONNECT, say).  --X-absent STR
@@ -24,6 +24,9 @@
  * a call that must NOT stand: it ends when a side reports NO CARRIER, and no
  * payload may have been exchanged (say which side must not CONNECT with
  * --X-absent CONNECT; the far end of a one-sided refusal can still connect).
+ * --expect-no-connect is for a pair that must never come up at all (two
+ * fixed modes that do not match): the whole --seconds runs, and neither side
+ * may report CONNECT.
  *
  * The AT commands are sent to that side's PTY before the call starts, each
  * required to answer OK -- the way a DTE configures a modem (AT+MS).  The
@@ -409,6 +412,7 @@ int main(int argc, char **argv)
     int failed = 0;
     int done_frame = -1;
     int expect_hangup = 0;
+    int no_connect = 0;
     int fax_hdlc = 0;
     int fdm_slot = -1, fdm_rate = 96000, fdm_taps = 96, fdm_bank_slots = 0;
     float fdm_level = -20.0f;
@@ -468,6 +472,8 @@ int main(int argc, char **argv)
             fax_hdlc = 1;
         } else if (!strcmp(argv[i], "--expect-hangup")) {
             expect_hangup = 1;
+        } else if (!strcmp(argv[i], "--expect-no-connect")) {
+            no_connect = 1;
         } else if ((!strcmp(argv[i], "--call-expect") || !strcmp(argv[i], "--answer-expect")
                     || !strcmp(argv[i], "--both-expect")) && i + 1 < argc) {
             int both = argv[i][2] == 'b';
@@ -679,8 +685,9 @@ int main(int argc, char **argv)
     printf("engine pair (%s):", alaw ? "A-law" : "u-law");
     for (int i = 1; i < argc; i++)
         printf(" %s", argv[i]);
-    printf("\n  %s\n", expect_hangup ? (done_frame >= 0 ? "call ended without payload" : "call did NOT end")
-                                    : (done_frame >= 0 ? "payload exchanged" : "payload NOT exchanged"));
+    printf("\n  %s\n", no_connect ? "fixed modes that must not meet"
+                   : expect_hangup ? (done_frame >= 0 ? "call ended without payload" : "call did NOT end")
+                                   : (done_frame >= 0 ? "payload exchanged" : "payload NOT exchanged"));
     if (expect_hangup && done_frame < 0)
         failed = 1;
     if (g_fdm.on) {
@@ -701,7 +708,11 @@ int main(int argc, char **argv)
         printf("  %-6s %s at %.2f s; %s", s->name, conn,
                s->connect_frame >= 0 ? s->connect_frame * FRAME / 8000.0 : -1.0,
                fin[0] ? fin : "no summary\n");
-        if (!expect_hangup && s->connect_frame < 0)
+        if (no_connect && s->connect_frame >= 0) {
+            printf("  %-6s FAIL: connected with a peer it cannot talk to\n", s->name);
+            failed = 1;
+        }
+        if (!expect_hangup && !no_connect && s->connect_frame < 0)
             failed = 1;
         for (int q = 0; q < s->n_absent; q++) {
             if (strstr(s->dte, s->absent[q])) {
@@ -751,7 +762,7 @@ int main(int argc, char **argv)
                     failed = 1;
                 }
         }
-        if (expect && !expect_hangup) {
+        if (expect && !expect_hangup && !no_connect) {
             char want[64];
 
             snprintf(want, sizeof(want), "modulation=%s ", expect);
@@ -760,7 +771,7 @@ int main(int argc, char **argv)
                 failed = 1;
             }
         }
-        if (expect_connect && !expect_hangup) {
+        if (expect_connect && !expect_hangup && !no_connect) {
             char want[64];
             const char *hit;
             size_t wl;
@@ -776,7 +787,7 @@ int main(int argc, char **argv)
                 failed = 1;
             }
         }
-        if (!expect_hangup && !(fax_hdlc ? memmem(side[1-k].dte,side[1-k].dte_len,s->payload,s->payload_len) : strstr(side[1 - k].dte, s->payload))) {
+        if (!expect_hangup && !no_connect && !(fax_hdlc ? memmem(side[1-k].dte,side[1-k].dte_len,s->payload,s->payload_len) : strstr(side[1 - k].dte, s->payload))) {
             printf("  %-6s FAIL: its DTE text did not arrive intact at the %s side\n",
                    s->name, side[1 - k].name);
             failed = 1;

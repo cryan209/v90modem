@@ -41,7 +41,8 @@ typedef enum {
     ME_MOD_X2,      /* Proprietary digital-side asymmetric/symmetric x2 */
     ME_MOD_V32BIS,  /* V.32bis/V.32 duplex, 4800-14400 bit/s */
     ME_MOD_CLEAR,   /* the DS0 as a bit pipe, no V.8: clear channel, V.120 or V.110 */
-    ME_MOD_V21      /* V.21 duplex 300 bit/s FSK */
+    ME_MOD_V21,     /* V.21 duplex 300 bit/s FSK */
+    ME_MOD_BELL103  /* Bell 103 duplex 300 bit/s FSK, the V.21 path's other presets */
 } me_modulation_t;
 
 /* G.711 encoding law for the RTP stream */
@@ -131,6 +132,9 @@ void me_hangup(void);
  * me_reset_modulation_offer() (ATZ, AT&F) restores.
  */
 int  me_set_modulation_offer(const char *mode, bool automode);
+/* Is mode a name --mode / ME_MODE accepts?  Checks the name only, with
+ * automode on; changes no state. */
+bool me_mode_name_valid(const char *mode);
 /* The same, with V.250 6.4.1 +MS rate bounds in bit/s from this modem's
  * side (0 = none).  -1 when no modulation of the offer can connect inside
  * them.  They bound the next call's V.8 offer, the V.22bis/V.32bis rates,

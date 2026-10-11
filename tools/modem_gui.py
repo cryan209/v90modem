@@ -23,6 +23,7 @@ import webbrowser
 
 LOOPBACK_PROFILES = {
     'v21': ('V.21 · 300', 'V21,0,300,300'),
+    'b103': ('Bell 103 · 300', 'B103,0,300,300'),
     'v91': ('V.91 · symmetric PCM', 'V91,0'),
     'v92': ('V.92 · PCM upstream', 'V92,0'),
     'v90': ('V.90 · analogue ↔ digital', 'V90,0'),
@@ -84,8 +85,8 @@ def main():
     if loopback:
         env.setdefault('ME_DATA_FRAMING', 'v14')
         mode = args[args.index('--mode')+1] if '--mode' in args else 'v22'
-        if mode not in ('v21', 'v90', 'v91', 'v92', 'v22', 'v22-1200', 'v32', 'v32bis', 'v34'):
-            raise SystemExit('GUI loopback supports v21, v22, v22-1200, v32, v32bis, v34, v90, v91 and v92')
+        if mode not in ('v21', 'b103', 'v90', 'v91', 'v92', 'v22', 'v22-1200', 'v32', 'v32bis', 'v34'):
+            raise SystemExit('GUI loopback supports v21, b103, v22, v22-1200, v32, v32bis, v34, v90, v91 and v92')
         if '--mode' not in args: args += ['--mode', mode]
         caller_port, peer_port = local_sip_ports()
         args += ['--bind-addr', '127.0.0.1', '--local-port', str(caller_port), '--sip-server', f'127.0.0.1:{peer_port}', '--auto-answer', '0']
