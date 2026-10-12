@@ -84,6 +84,29 @@ Conclusions, and their limits:
 - Untested: a calling peer. With a V.32 AA/AC or V.8 CM tone fed in, the
   negotiated stage may load others. 90/91, 8A/8B and 80/81 never loaded here.
 
+### Injected callers (same day)
+
+A spandsp calling modem was fed to the answerer through the linked C53's G.711
+queue (`tools/mica_overlay_probe/`), ATS29=2 against ATS29=3, 500-800M
+instructions (about 50-75 s of line time) each:
+
+1. a V.32bis caller sending AC from the start (`inj.py`);
+2. a V.8 caller offering only V.32/V.32bis (`v8inj.py`).
+
+Result: **the two settings are indistinguishable.** Loader sequence, cycle
+counts (8E/8F at 18.50M, 7E/7F at 151,088,145) and the channel handler
+timeline (`34870`, `351e0`, `353a0`, `359b0`, `37f80`) are identical. Neither
+caller connected: the V.8 handler never fired and the V.32bis caller never
+completed start-up.
+
+What this does not show: that the answerer cannot do V.32. The answerer is
+silent for 4 s and then steps through several tone phases that I did not
+identify (the spectra are mirrored about 2 kHz, which I do not understand and
+may be a decoding or sampling artefact). I could not confirm it ever hears the
+injected audio or that the line model supports an answer-side
+negotiation. Treat this as "no terbo-specific difference found", not "no
+terbo".
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler
@@ -91,9 +114,10 @@ Conclusions, and their limits:
    8880/888F headers and 5/23, 18/23 descramblers). 7E/7F, 80/81, 8A/8B and
    90/91 are the candidates for V.32terbo, V.22bis and V.34. That settles
    whether MICA holds a V.32terbo datapump we could lift.
-2. Done without a peer (see above): inconclusive. Repeat with a V.32 calling
-   tone or V.8 CM injected through `queue_g711_rx` so the answerer actually
-   negotiates, and with ATS29=2 vs 3 compared.
+2. Done with and without injected callers (see above): no difference between
+   S29=2 and 3. Before repeating, show that the answerer hears injected
+   audio at all (a known tone into the receiver, observed in DSP state), and
+   explain the 4 s of silence and the mirrored tone phases.
 3. Only then decide on a V.32terbo datapump. The rate signalling (R words
    above 14400) is not in any ITU document here, so without MICA or Courier
    code we cannot write it from a spec.
