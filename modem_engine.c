@@ -9225,9 +9225,23 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
 
     if (di_fax_active()
         && (result->status == V8_STATUS_NON_V8_CALL
+            || result->status == V8_STATUS_FAX_CNG_TONE_RECEIVED
+            || (g_calling_party && result->status == V8_STATUS_FAILED
+                && result->modem_connect_tone == MODEM_CONNECT_TONES_FAX_CED
+                && result->jm_cm.peer_modulations == 0)
             || (result->status == V8_STATUS_V8_CALL
                 && !(result->jm_cm.modulations & V8_MOD_V34HDX)))) {
-        /* T.30 F.2: retain ordinary Group 3 operation with a legacy peer. */
+        /* T.30 F.2: retain ordinary Group 3 operation with a legacy peer.
+         * CNG identifies an ordinary fax caller. A calling fax may also hear
+         * CED (plain ANS), try V.8 for compatibility, then receive no JM.
+         * Neither outcome belongs in the V.25/V.22bis data-modem fallback.
+         * Keep ECM configured: it is also supported by legacy T.30 Annex A.
+         * A failed V.8 exchange after ANSam or a decoded peer offer is not
+         * evidence of a legacy peer, so leave those failures unchanged. */
+        ME_LOG("[ME] V.8 fax fallback: status=%s tone=%s -> legacy T.30\n",
+               v8_status_to_str(result->status),
+               modem_connect_tone_to_str(result->modem_connect_tone));
+        trace_phase("V8 fax fallback -> legacy T30 (status=%d)", result->status);
         pthread_mutex_lock(&g_state_mtx);
         g_fax_legacy = true;
         g_state = ME_DATA;

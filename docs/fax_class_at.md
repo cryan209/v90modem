@@ -918,3 +918,31 @@ startup-recovery targets verify both the normal transitions and recovery.
 `+FCO` is now emitted when the fax transport connects (T.32 8.4.1.1 and
 Amendment 1's V.34 session examples); previously a real Class 2 DTE had no
 connection indication to release its first page command.
+
+## Legacy fallback from Class 2.1 (2026-10-12)
+
+Mixed Class 2.1/Class 2.0 calls with ECM enabled stalled before phase B.
+The 2.1 answerer received `V8_STATUS_FAX_CNG_TONE_RECEIVED`, retried ANSam,
+and entered the V.25 USB1/V.22bis data fallback. The 2.1 caller recognised
+plain ANS/CED, tried V.8, received no JM, then reported `V8_STATUS_FAILED`
+and listened for V.32bis AC until the 15-second engine timeout. The DTE's
+`+FDT`/`+FDR` subsequently timed out. Disabling ECM had hidden the defect by
+avoiding V.8 entirely.
+
+T.30 Annex F, F.2 requires ordinary Group 3 interoperability. The engine now
+routes received fax CNG directly to the existing legacy T.30 audio path.
+A calling fax also takes that path after V.8 failure when the received answer
+tone was plain CED/ANS and no peer modulation offer was decoded. Failure
+after ANSam or an actual peer offer keeps the existing handling. ECM stays
+configured: legacy fax supports ECM under T.30 Annex A independently of V.34.
+The per-call `g_fax_legacy` flag already resets on media connection.
+
+The production two-process SIP/RTP test in the adjacent fax-work repository,
+`deploy/test-v90modem-pair.py`, reproduces both directions using Class 2.1
+and Class 2.0 with `+FIS=1,5,0,2,0,1,0,0,0`. Enable `+FNR=1,1,1,1` to verify
+that `+FCS` reports EC=1 after fallback. It compares both the modem's received
+TIFF and the DTE's decoded Group 3 stream to the source raster. Mixed calls
+now pass in both directions. Same-class 2.1 calls still attach T.30 Annex F
+to the V.34 control channel at 14400 bit/s. The existing fast-list
+`fax-v34-test` group passed all 11 checks across both G.711 laws and 80/160
+sample callbacks. These local checks do not establish hardware interop.
