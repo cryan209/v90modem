@@ -662,6 +662,51 @@ the code's invariance under that exchange is not tested here.) The tie-break
 Still open: the radial warp's strength (0.40, measured not derived), and a
 non-constant data run to test the whole path on real traffic.
 
+
+### The warp constant, measured against the exact constellation (2026-10-13)
+
+`demod/warpfit.py`, `warpfit2.py`, `warpfit3.py`. With the unwarped constellation
+known exactly (`pointmap_gen.py`), the warp is a regression instead of a
+spacing estimate: the mean received point of each of the 512 sites (12-40
+symbols each, clean region) against its ideal position x = (i - 0.5, j - 0.5),
+`z = A x phi(c |x|^2) + o` with A and o complex (equalizer gain/rotation and
+residual offset), phi the V.34 series of clause 9.7 (eq. 9-34).
+
+| | recording 2 | recording 1 |
+|---|---|---|
+| E, mean unwarped energy (cell^2, exact for this set) | 81.59 | 81.59 |
+| best c (per cell^2) | 0.00490 | 0.00490 |
+| **kappa = c E** (V.34's Theta) | **0.3998 (0.3982-0.4006)** | 0.3998 (same band) |
+| reduced chi-square, 512 sites | 1.01 | 1.06 |
+| no-warp residual / best residual | 115x | |
+
+- **The shape is V.34's, to the noise.** Reduced chi-square is 1.0 with the
+  series phi = 1 + zeta/6 + zeta^2/120; the exact sinh(sqrt zeta)/sqrt zeta
+  gives the same residual (6.60 against 6.60e-4), so the series is not the
+  thing being tested. A free two-parameter phi = 1 + alpha u + beta u^2 prefers
+  beta ~ 0 but the residual is flat in beta (the data constrain the first-order
+  gain, which is what kappa is), so "the same function as V.34" rests on the
+  curve fit of the previous section (0.5 percent over four radii) and not on
+  this regression.
+- **The constant is 2/5, not 5/16.** kappa = 0.3998 +- 0.0012; V.34's
+  Theta = 0.3125 is 70 sigma away. The ratio is 1.280 +- 0.004 = 32/25.
+- **Equivalent forms, indistinguishable on one constellation:** the warp at the
+  rim is zeta = 0.797 +- 0.003 (0.8 gives kappa 0.4016, 1.5 sigma away); the
+  peak amplitude gain is 1.138; the output energy is 1.193 x the input energy.
+  A single constellation cannot say which of "Theta = 0.4", "rim zeta = 0.8" or
+  "normalised to a different energy" is the design.
+
+What I could not derive: *why* 0.4. I looked for an energy convention that turns
+V.34's 0.3125 into 0.4, which needs a normalising energy of 0.78125 x E = 63.75
+cell^2 (= 25/32 E). Mean energy of the lowest 256 / 384 / 448 points
+(40.7 / 61.1 / 71.3), the median, the 128-point lattice's energy (20.4), the
+rim (162.5), the output energy (97.3) and a disc of the same area (81.5)
+give nothing near it. So the honest status is **measured, to 0.3 percent, as
+Theta = 0.400, not derived**. The way to separate the three readings is another
+constellation size: B13 (16800, 256 points) would put the rim at a different
+fraction of E (a fixed Theta = 0.4 and a fixed rim zeta = 0.8 then differ by
+several percent in gain).
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler
