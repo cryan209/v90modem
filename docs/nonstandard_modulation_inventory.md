@@ -921,6 +921,52 @@ disabled; a MICA setting for the latter has not been looked for.
 the caller's rate set is a single trellis rate of 14400, 9600 or 7200. That is
 the 5 s V.42 detection running twice; not looked at.)
 
+
+### Two MICAs on one line; and the retrain has a setting (2026-10-13)
+
+**The retrain is S32/S35.** `AT%R` lists MICA's registers: S30 maximum connect
+rate (33600), S31 minimum (300), **S32 signal-quality threshold = 2** ("2 = BER >=
+1:1000"; 0 = no action on bit errors), S33 speed-change squelch 500 ms, S34
+fall-forward timer 2000 (x10 ms), **S35 fallback timer = 50 (x10 ms) = 500 ms**.
+That 500 ms is the gap between STEADY and `0x00A3`/`0x0884`. With `ATS32=0`
+(S29 = 3, the default rate set, which retrained every ~8 s) the call is steady
+from 22.15 s to the end of a 40 s run. So SS_RETRAINING is MICA's bit-error
+fallback acting on its own (bad) receive, as the previous section inferred; the
+setting turns it off.
+
+**Long terbo transfer.** `ATS29=2`, `ATS32=0`, the terbo-transmitting caller and
+`dte_client.py`'s 4480 bytes: STEADY at 17.08 s, no retrain through 40 s. Decoded
+with the chain from the earlier sections (lattice frame: quarter-turn 3 of
+recording 2's, found by trying the four): marks read 1.00 ones before and after,
+and the data window, 17.073 s to about 19.4 s, async-decodes to
+**4480 of 4480 bytes, exact** -- the whole message, not the half second the
+retrain allowed. (The frame differs from the earlier calls' because the
+equalizer's phase ambiguity differs per call, not because the chain does.)
+
+**The trellis receiver, two MICAs against each other** (`mica_pair.cpp`, a second
+board in the same process: A answers, B is given the answer command and a dial
+string; its dial alone fails with event `0x41`, "digit generation failed", the
+digital MICA has no tone dial-out, so B runs as the calling side after the answer
+command; the audio of each is the other's input, 20 ms blocks). The two do a real
+V.32bis start-up (A's AA tones at 3.5 s, B's 1800 Hz tone, B silent until its
+training at 8 s) and reach data at 13 s. Per-second statistics of the words each
+C53 delivers (`AT_BOTH="ATS30=<max>;ATS32=0"` on both boards):
+
+| max rate | words/s | ones fraction, A / B | what the words are |
+|---|---|---|---|
+| 4800 (no trellis) | 272 | 0.741 / 0.741, constant | periodic: `00111111` repeated (the V.42 detection pattern), clean |
+| 7200 | 406 | 0.54 / 0.54 | random |
+| 9600 | 544 | 0.52 / 0.53 | random |
+| 14400 | 816 | 0.55 / 0.54 | random |
+
+So MICA's trellis receive path produces noise from **MICA's own transmitter**,
+while its non-trellis path decodes cleanly. That clears SpanDSP's conventions as
+the cause (MICA's TX is decoded correctly by SpanDSP; MICA's RX fails on SpanDSP's
+TX and on MICA's own): it is the emulated C53's V.32bis trellis receiver, or the
+board's handling of it. The V.34 overlay's trellis decode works in the same
+emulator (16 000 bytes each way byte-identical over V.90, `handoff.md`), so the
+fault is specific to overlay 8E's receiver. Not localised further.
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler
