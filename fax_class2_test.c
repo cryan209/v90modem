@@ -997,6 +997,30 @@ static void test_parameters(void)
     check(dte_saw("ERROR"), "AT+FBS= is refused");
 }
 
+/* T.32 Amd 1 C.5: BR=C/D adds 31200/33600 for Class 2.1 only. */
+static void test_class21_high_rates(void)
+{
+    int source = 0, max_rate = 0;
+    fc2_select(2);
+    dte_reset(); at("AT+FCC?");
+    check(dte_saw("1,D,"), "Class 2.1 reports 33600 capability");
+    dte_reset(); at("AT+FIS=?");
+    check(dte_saw("(0-D)"), "Class 2.1 advertises BR through D");
+    dte_reset(); at("AT+FIS=,D");
+    check(dte_saw("OK"), "Class 2.1 accepts 33600");
+    check(fc2_v34hdx_profile(1, &source, &max_rate) && max_rate == 33600,
+          "Class 2.1 passes its 33600 ceiling to the modem");
+    dte_reset(); at("AT+FIS=,E");
+    check(dte_saw("ERROR"), "Class 2.1 rejects rates above 33600");
+    dte_reset(); at("AT+FIS?");
+    check(dte_saw("1,D,"), "Rejected assignment preserves the 33600 offer");
+    dte_reset(); at("AT+FIS=,C");
+    check(dte_saw("OK"), "Class 2.1 accepts 31200");
+    fc2_select(1);
+    dte_reset(); at("AT+FIS=,D");
+    check(dte_saw("ERROR"), "Class 2.0 retains its legacy rate range");
+}
+
 /* Retain the selected service class across a completed call. */
 static int reuse_selection_once;
 
@@ -3646,6 +3670,7 @@ int main(int argc, char **argv)
     }
     test_v34hdx_control_dis();
     test_parameters();
+    test_class21_high_rates();
     test_transmit(0, 0);
     test_receive(0, 0);
 

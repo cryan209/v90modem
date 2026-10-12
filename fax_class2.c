@@ -507,7 +507,7 @@ static int parse_params(const char *s, fc2_params_t *p)
             return 0;
         }
     }
-    if (*s || work.br < 0 || work.br > (selected == 2 ? 11 : 5)
+    if (*s || work.br < 0 || work.br > (selected == 2 ? 13 : 5)
         || work.ec < 0 || work.ec > (selected == 2 ? 1 : 2)
         || (work.jp != 0 && work.jp != 1 && work.jp != 3)
         || (work.jp && !work.ec))
@@ -1586,7 +1586,7 @@ static int list_param(const char *t, fc2_params_t *p, int read_only)
     }
     if (t[0] == '=' && t[1] == '?' && t[2] == '\0') {
         /* T.32 8.5.1.1: the ranges the DCE supports, in subparameter order. */
-        put_line(selected == 2 ? "\r\n(0,1),(0-B),(0),(0-2),(0,1,3),(0,1),(0),(0-7),(0,1,3)\r\n" : "\r\n(0,1),(0-5),(0),(0-2),(0,1,3),(0-2),(0),(0-7),(0,1,3)\r\n");
+        put_line(selected == 2 ? "\r\n(0,1),(0-D),(0),(0-2),(0,1,3),(0,1),(0),(0-7),(0,1,3)\r\n" : "\r\n(0,1),(0-5),(0),(0-2),(0,1,3),(0-2),(0),(0-7),(0,1,3)\r\n");
         put_ok();
         return 1;
     }
@@ -2132,7 +2132,8 @@ void fc2_select(int on)
     if (on == 2) {
         /* T.32 Amd 1 C.5: BR in 2400-bit/s units, EC=1 for Annex F.
          * Only rates with verified V.34 primary payload are offered. */
-        p_cc.br = p_is.br = 11;
+        p_cc.br = 13;
+        p_is.br = 11;
         p_cc.ec = p_is.ec = 1;
     }
     pthread_mutex_unlock(&fc2_mtx);

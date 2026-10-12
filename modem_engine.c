@@ -8616,7 +8616,7 @@ static void v32bis_release_locked(void)
 static void start_v34hdx_training(void)
 {
     /* Must be called with g_state_mtx held */
-    int bps;
+    int bps, baud;
     int source = 0, max_rate = 28800;
     di_fax_v34hdx_profile(g_calling_party, &source, &max_rate);
 
@@ -8635,11 +8635,14 @@ static void start_v34hdx_training(void)
         v34_free(g_v34);
         g_v34 = NULL;
     }
-    bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(g_v34_start_baud);
-    if (max_rate > 28800) max_rate = 28800;
+    /* V.34 clause 12 and Table 22: 33600 needs the 3429-symbol/s
+     * primary profile. Keep the established 3200 profile for lower offers. */
+    baud = max_rate > 31200 ? 3429 : g_v34_start_baud;
+    bps = g_v34_start_bps ? g_v34_start_bps : max_v34_bps_for_baud(baud);
+    if (max_rate > 33600) max_rate = 33600;
     if (bps > max_rate) bps = max_rate;
     g_v34 = v34_init(NULL,
-                     g_v34_start_baud,
+                     baud,
                      bps,
                      g_calling_party,
                      false,         /* half duplex: V.34 clause 12 */
@@ -8680,7 +8683,7 @@ static void start_v34hdx_training(void)
     g_tx_buf_rd = 0;
 
     ME_LOG("[ME] V.34 fax: half-duplex clause 12 started as %s "
-           "(%d baud, ceiling %d bps)\n", source ? "source" : "recipient", g_v34_start_baud, bps);
+           "(%d baud, ceiling %d bps)\n", source ? "source" : "recipient", baud, bps);
     trace_phase("enter TRAINING: mod=V34HDX role=%s", source ? "source" : "recipient");
 }
 
@@ -12319,7 +12322,9 @@ skip_8k_codewords:
                  * so a peer that gave up and held its tone was answered with
                  * a data mapper still running over the top of it, and the
                  * call died where §11.5.1.2 says to resynchronise. */
-                if (g_mod == ME_MOD_V34 && g_v34) {
+                /* Clause 12 fax recovery uses 12.7/12.8 in the modem;
+                 * the full-duplex loss watchdog must not launch 11.6 over it. */
+                if (g_mod == ME_MOD_V34 && g_v34 && v34_is_duplex(g_v34)) {
                     /* Plain V.34 can sit in PHASE3_WAIT_S for the whole call
                      * when the far end's symbol clock is not phase-locked to
                      * our sample grid -- measured over a Conexant HSF DAA

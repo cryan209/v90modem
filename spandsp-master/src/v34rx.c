@@ -11433,7 +11433,11 @@ bool v34_rx_b1_batch_eq_enabled(const v34_rx_state_t *s)
 
 bool v34_rx_data_mm_timing_enabled(const v34_rx_state_t *s)
 {
-    return v34_rx_b1_batch_eq_enabled(s);
+    /* V.34 12.5.2: the 3429/33600 primary also needs DATA timing
+     * recovery after PP/B1. Without it, the second primary burst loses
+     * the dense constellation even though B1 correlation is valid. */
+    return v34_rx_b1_batch_eq_enabled(s)
+        || (!s->duplex && s->baud_rate == V34_BAUD_RATE_3429 && s->bit_rate >= 26);
 }
 
 /* 11.4/12.5.2: use B1's known data constellation to remove residual ISI left

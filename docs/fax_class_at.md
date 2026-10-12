@@ -975,3 +975,29 @@ process pair; distinct source images in successive calls checked that old
 spooled data was not replayed. The fax-work harness exposes --height, --pages,
 --rate-codes, --bit-orders, --page-delay, --calls and --alternate-direction.
 It explicitly hangs up and waits for SIP teardown before redialling.
+
+
+## Class 2.1 at 33600 bit/s (2026-10-13)
+
+T.32 Amendment 1 C.5 BR=C/D selects 31200/33600 bit/s. Class 2.1
+accepts and advertises BR through D; Class 2.0 retains BR through 5. The
+session defaults to BR=B (28800); `AT+FIS=,D` requests the 33600 ceiling.
+ECM remains mandatory for T.30 Annex F (F.3). The engine selects the existing
+3429-symbol/s primary profile for 33600 (V.34 Table 22 and clause 12), rather
+than applying that rate to the 3200-symbol/s profile.
+
+V.34 12.5.2 primary resynchronization exposed missing DATA timing recovery
+in the dense half-duplex profile. The existing timing loop is now enabled
+for 3429/33600 after PP/B1. The regression previously corrupted the second
+primary burst despite valid B1 correlation; both source roles, G.711 laws
+and 80/160-sample blocks now decode without bit errors. Full-duplex 11.5/11.6
+recovery is restricted to full-duplex modems; clause-12 fax keeps its own
+12.7/12.8 recovery. Otherwise the generic loss watchdog could interrupt a
+long fax page with a full-duplex renegotiation.
+
+Local two-process SIP/RTP validation covers eight varied short-page patterns,
+full A4 charts and dense text, repeated calls with reversed roles, exact TIFF
+and DTE raster comparisons, and an asymmetric D/B offer negotiating 28800.
+The fax-work harness can require the actual rate with `--expected-rate-code D`.
+This establishes local waveform and production-path behavior; hardware
+interoperability at 33600 remains unverified.
