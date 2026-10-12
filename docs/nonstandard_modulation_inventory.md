@@ -707,6 +707,52 @@ constellation size: B13 (16800, 256 points) would put the rim at a different
 fraction of E (a fixed Theta = 0.4 and a fixed rim zeta = 0.8 then differ by
 several percent in gain).
 
+
+### Non-constant data: not obtainable here; what was tested instead (2026-10-13)
+
+**No recording carries non-constant MICA data.** Every recording is MICA
+transmitting marks: `call3.py` hands the emulated answerer no host data, and
+the caller (`v32caller.c`) also sends `get_bit() == 1`. The emulator has no
+established path for host data into the DSP (the V.90 loopback work in the
+MicaEmu `handoff.md` is the nearest, and nothing there feeds a terbo
+transmit). So the descrambler has not been run on real non-constant MICA
+traffic, and that is the one thing the recordings cannot answer.
+
+What marks do and do not establish. Scrambled marks pass through the chain
+as a pseudo-random bit stream, so the coder, differential encoder, point map
+and bit order have all seen every transition (and the energy-rank structure of
+the word is an independent check on the bit order). What they cannot tell
+apart is a **self-synchronising** scrambler (V.32bis: output fed back) from an
+**additive** one (an independent keystream XORed with the data): for in = 1
+both satisfy `o[n] = 1 ^ o[n-5] ^ o[n-23]` (`model_loop.py` checks both on the
+same register). V.32bis specifies the self-synchronising form, and the coder
+and labelling matched V.32bis, so I take it as the form, but **this is
+assumed, not measured**.
+
+A model transmitter + receiver (`demod/model_loop.py`) built from the
+recovered chain (GPA scrambler, differential encoder, V.32bis 8-state coder,
+energy-rank point map, V.34 warp kappa = 0.40, Gaussian noise) was run on
+20000 symbols (159816 data bits) each of random data, text-like data and
+marks. Receiver: unwarp, nearest point, coset and word, dibit difference,
+8-bit group, self-synchronising descrambler.
+
+| noise per axis (cells; measured within-site 0.088) | random data | text-like | marks |
+|---|---|---|---|
+| 0 | 0 errors | 0 | 0 |
+| 0.088 | 0 | 0 | 0 |
+| 0.150 | 83 | 62 | 74 (about 3 per raw bit error, the descrambler's tap count) |
+
+This shows the chain decodes arbitrary data and that the descrambler's error
+multiplication is the expected 3x; it is a consistency test of the model
+against itself, not evidence about MICA.
+
+To test the real thing: a transmit with known non-constant data. Either feed
+the emulated MICA host data in data mode (needs the i960's data path through
+the queue, not mapped here), or find a state in which the real hardware echoes
+the caller's data (the caller would then need `get_bit` returning a known
+sequence, and the descrambled output compared against it; an additive
+scrambler would then show as a descrambled stream that never matches).
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler
