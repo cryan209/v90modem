@@ -636,10 +636,31 @@ point of a subset is equally likely; numbering by energy is how a mapper would
 generate a 64-point subset from a rule rather than a table, and it explains the
 circular outline and the absence of shaping measured earlier.
 
-Not resolved: why the rotation is 2a + parity (it is V.32bis's quadrant
-symmetry in some labelling, since the four rotations of a Y0 class are the four
-dibits, but that is not shown), and the radial warp's strength. A non-constant
-data run is still needed to test the whole path on real traffic.
+Why the rotation is 2a + parity: it is not an extra rule. **The point map is
+invariant under a quarter turn about the cell centre**: with R(i, j) = (1 - j, i)
+(recording 2's frame), word(R p) = word(p) for **512 / 512 points** in both
+recordings. R carries each coset onto another coset with the identical word
+layout, and the eight cosets fall into two 4-cycles under R, (0,0) > (1,0) >
+(1,1) > (0,1) and (0,2) > (1,2) > (1,3) > (0,3). So only two cosets have
+independent orderings, the cycle representatives (0,0) and (0,2), and every
+other coset's order is the representative's turned through R^k. The "rotation
+of the tie-break frame" is that k read backwards (4 - steps mod 4), and
+2a + parity is just the position of (a, parity) along the cycle
+(0,0), (1,1), (1,0), (0,1). The other bit of the coset (the one that
+distinguishes the two cycles) does not enter, as measured.
+
+In coder terms (recording 2's frame, the dibit d from the iso found earlier):
+R flips Y0 and subtracts 1 from d (mod 4), for all eight cosets; R^2
+keeps Y0 and adds 2. That is the V.32bis quadrant symmetry: a 90-degree phase
+rotation of the received signal changes the dibit by a constant, which the
+differential encoder absorbs, and the six-bit word is untouched. (Flipping Y0
+is because the rotation is about a cell centre, i.e. the lattice is the
+half-integer one, so a quarter turn exchanges the two checkerboard classes;
+the code's invariance under that exchange is not tested here.) The tie-break
+(x + y, then -x) only has to be stated once, on the two representatives.
+
+Still open: the radial warp's strength (0.40, measured not derived), and a
+non-constant data run to test the whole path on real traffic.
 
 ## Next steps, in order of what could actually be lifted
 
