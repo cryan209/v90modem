@@ -44,7 +44,7 @@ companion, by testing a bit of `@05`/`DM 6F`:
 | `2BBA` | 7C / 7D | none found | 1-word files, empty |
 | `2BC9` | 90 / 91 (10,020 B, largest) | `CBAC` | **no** |
 | `2BD8` | 8A / 8B (6,800 B) | `07F8` | **no** (contains 1180, 600, 1200: V.21/V.22 constants?) |
-| `2BE7` | 7E / 7F (5,798 B) | `C8BB` | **no** |
+| `2BE7` | 7E / 7F (5,798 B) | `C8BB` | **non-V.8 answer path**: loads when ANSam times out for S29 = 2-4 |
 | `2BF6` | 8C / 8D | `0C7F` | K56flex PCM module |
 | `2C05` | 80 / 81 if DM `2C` bit 10, else 8E / 8F | `1FB6`, `98F5`, `9DEB` | 8E/8F V.32bis; 80/81 **no** |
 
@@ -65,6 +65,9 @@ in the help strings). 0 V.34+ with terbo, 1 V.34+ no terbo, 2 V.32terbo,
 `Module` with the linked C53, `ATS29=n`, `configure_call` + `start_answer`,
 `core.set_coverage(True)`, then `first_exec()` of each loader stub. No peer
 was attached, so this shows only what the answerer loads before negotiation.
+**Caveat:** this used `start_answer` and mono framing, which the corrected
+harness below replaces. The loader result (8E/8F first, 7E/7F at the ANSam
+timeout for S29 = 2-4) did survive the correction; the timings did not.
 
 | S29 | Stubs hit in 30M instructions |
 |---|---|
@@ -84,52 +87,68 @@ Conclusions, and their limits:
 - Untested: a calling peer. With a V.32 AA/AC or V.8 CM tone fed in, the
   negotiated stage may load others. 90/91, 8A/8B and 80/81 never loaded here.
 
-### Injected callers (same day)
+### Why the earlier injected-caller runs saw nothing (corrected)
 
-A spandsp calling modem was fed to the answerer through the linked C53's G.711
-queue (`tools/mica_overlay_probe/`), ATS29=2 against ATS29=3, 500-800M
-instructions (about 50-75 s of line time) each:
+The first caller injections (`inj.py`, `v8inj.py`, `tone.py`) were wrong, and
+their conclusions ("the answerer never advances", "mirrored tone phases") are
+withdrawn. Three harness errors, all visible in `mica_line.cpp`:
 
-1. a V.32bis caller sending AC from the start (`inj.py`);
-2. a V.8 caller offering only V.32/V.32bis (`v8inj.py`).
+1. **Two lanes.** One C53 carries two channels as alternating G.711 octets.
+   Channel 0 is the even lane of `g711_tx()`; the receive queue must get each
+   sample duplicated into both lanes. Reading the interleaved stream as mono
+   produced the mirrored spectra and a doubled time base.
+2. **Call start.** The answer is `host.dsp_command(0, 0xA0, [0])` after
+   `configure_call`, as `mica_peer_probe.py` does, not `start_answer`.
+3. **V.8bis.** S53 (V.8bis) holds the first seconds of the answer; the
+   answerer's first 2 s are silence either way.
 
-Result: **the two settings are indistinguishable.** Loader sequence, cycle
-counts (8E/8F at 18.50M, 7E/7F at 151,088,145) and the channel handler
-timeline (`34870`, `351e0`, `353a0`, `359b0`, `37f80`) are identical. Neither
-caller connected: the V.8 handler never fired and the V.32bis caller never
-completed start-up.
+`tools/mica_overlay_probe/call3.py` is the corrected harness.
 
-What this does not show: that the answerer cannot do V.32. The answerer is
-silent for 4 s and then steps through several tone phases that I did not
-identify (the spectra are mirrored about 2 kHz, which I do not understand and
-may be a decoding or sampling artefact). I could not confirm it ever hears the
-injected audio or that the line model supports an answer-side
-negotiation. Treat this as "no terbo-specific difference found", not "no
-terbo".
+### What the answerer actually does (S29, correct framing, 2026-10-12)
 
-### Does the answerer hear us? (tone test, same day)
+ANSam (2100 Hz, AM) starts at 2.0 s. Then it depends on S29:
 
-`tone.py`, `dc.py`, `dep.py` in `tools/mica_overlay_probe/`.
+| S29 | Answerer | Evidence |
+|---|---|---|
+| 0, 1 (V.34+ automode, with / without terbo), 5 (K56flex), 6 (V.90) | V.8: JM at ~4.1-4.4 s, modulations `0xA16` = V.21, V.22, V.23, V.32/V.32bis, V.34 | SpanDSP V.8 caller offering every modulation |
+| 2 (V.32terbo), 3 (V.32bis), 4 (V.22bis) | **no V.8**: ANSam times out at 6.0 s, overlay 7E/7F loads (the non-V.8 answer path), V.8 caller fails at 8.6-9.4 s | same caller; loader trace |
 
-- **The DSP reads the injected audio.** A constant +4000 versus -4000 input,
-  diffed over all 64K words of DSP data memory after the same instruction
-  count, changes 336 words. DM `0x380..0x3FF` is a receive-sample ring that
-  holds +4 for one input and -4 for the other (and `0x317 + 16k` holds
-  +/-4092), so the G.711 octets reach the C53 and are decoded. The queue
-  also drains in step with the frame clock (underruns stop growing).
-  Note the queue must be topped up at line rate (about 74 samples per 100k
-  instructions); an earlier run over-queued 5x and consumed little.
-- **No tone changes the answerer's state.** 2100, 1300, 1650, 980, 2225 and
-  600 Hz at 8000 peak, against silence, S29=2: the same channel handler
-  (`359b0`) at 1500 x 100k instructions and the same handler timeline. The
-  transmit stream hashes differ from silence, but 1300 = 2100 and 1650 = 2225
-  hash identically and lengths differ by a few octets, so this looks like
-  frame-timing coupling to the receive queue rather than a logic reaction.
-  Not proven either way.
-- So the earlier failure of the V.32bis and V.8 callers is not "the audio
-  never arrives". The answerer hears it and does not respond, within the
-  ~100 s tried. Either its answer sequence needs a different calling signal,
-  or the emulated line and call state stop it from advancing.
+Plain V.32bis caller (no V.8, SpanDSP, AC from 0 s or 3 s): start-up
+completes against S29 = 0, 1, 2, 3, 5 and 6 at 14400, and not against S29 = 4.
+The channel handler reaches `35d70` at about 10.5 s (about 9.5 s when the caller
+starts at 0 s).
+
+### V.32terbo is a V.32bis R-word extension (new)
+
+`V32BIS_TRACE=1` prints the 16-bit words the caller decodes. MICA's opening
+rate signal differs:
+
+| S29 | R word from MICA |
+|---|---|
+| 2 (V.32terbo) | `0xFFF0` |
+| 0, 1, 3 | `0x9FF0` |
+
+Bits `0x2000` and `0x4000` are the difference: two extra bits in the rate
+word, beyond V.32bis Table 5, which has five rates (4800, 7200, 9600, 12000,
+14400; mask `0x1660`). SpanDSP ignores them (its decoder masks to the five
+known bits). Two extra bits fit the two extra terbo rates, 16800 and 19200,
+but that mapping is inferred, not read from a document.
+
+DSP configuration agrees. Snapshots of DSP data memory 1.5M instructions after
+`0xA0` (`cfg.py`) show S29 = 2 matching S29 = 0 (the "with terbo" setting)
+and S29 = 1/3/4/6 matching each other across a block of words:
+
+- `E6D0`: `0x00FF` (terbo, and `0x3FFF` for 0) against `0x003F` (V.32bis); two
+  more bits set, which would fit the same two extra rates;
+- `8D45`, `8D49`, `8E0E..8E4B` (including tables at `8E24..8E38`),
+  `EC04..EC13` (a repeating four-word table), `EC80`, `EC84`, `D9FB`/`ED1D`,
+  `DA63`, `E6CD`: terbo values for 0 and 2, standard values for the rest.
+
+What is not known: the data-mode constellations and trellis for 16800 and
+19200, the exact meaning of the two R bits, and how the caller echoes them.
+SpanDSP cannot be the peer for that, because it will not offer those bits.
+The `EC04..EC13` and `8E24..8E38` tables are the first place to look for the
+terbo mapper, since they are the words that change.
 
 ## Next steps, in order of what could actually be lifted
 
@@ -138,11 +157,11 @@ terbo".
    8880/888F headers and 5/23, 18/23 descramblers). 7E/7F, 80/81, 8A/8B and
    90/91 are the candidates for V.32terbo, V.22bis and V.34. That settles
    whether MICA holds a V.32terbo datapump we could lift.
-2. Done with and without injected callers (see above): no difference between
-   S29=2 and 3. Before repeating, show that the answerer hears injected
-   audio at all (a known tone into the receiver, observed in DSP state), and
-   explain the 4 s of silence and the mirrored tone phases.
-3. Only then decide on a V.32terbo datapump. The rate signalling (R words
+2. Done (see above). V.32terbo is real in MICA: an extended R word and a
+   changed block of DSP configuration, selected by S29 = 2.
+3. Next: make the caller offer the extra R bits (a patched copy of the vendored
+   `v32bis.c` rate-signal code) and see whether MICA, at S29 = 2, then answers
+   16800/19200, and what its data-mode signal looks like. Only then decide on a V.32terbo datapump. The rate signalling (R words
    above 14400) is not in any ITU document here, so without MICA or Courier
    code we cannot write it from a spec.
 4. HST and V.FC have no overlay in MICA's list; the Courier DSP image is the
