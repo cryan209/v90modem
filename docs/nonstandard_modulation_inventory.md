@@ -753,6 +753,62 @@ the caller's data (the caller would then need `get_bit` returning a known
 sequence, and the descrambled output compared against it; an additive
 scrambler would then show as a descrambled stream that never matches).
 
+
+### Known data out of the emulated MICA: the descrambler works (2026-10-13)
+
+The previous section said no recording carried non-constant data. The emulated
+MICA can be given some: MicaEmu's C++ board (`native/mica_line`) moves a call's
+bytes between a TCP socket and the line (`handoff.md`, "The call's data").
+Two small changes were needed, kept as `tools/mica_overlay_probe/micaemu-init-at.patch`
+(MicaEmu itself is untouched): `--init-at ATS29=2` (the AT console before the
+answer, as `call3.py`'s `converse`) and letting the DTE connect at
+EC_NEGOTIATING. The far end is `terbo_peer.c` (the same SpanDSP caller as
+`call3.py`, on mica_line's block protocol; build against the vendored
+`libspandsp.a`); the DTE client is `dte_client.py`, which sends 4480 bytes of
+`THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG 0123456789\r\n` x 80.
+
+```text
+mica_line --map mica-portware-map.bin --seconds 30 --init-at ATS29=2 \
+  --capture mica.g711 --dte-tcp 7013 -- terbo_peer 4.5 0x4000 1     # + dte_client.py 7013 out
+```
+
+(The call runs at about 5x real time, 7 s wall.) MICA reached TRAINUP at 4.68 s,
+EC_NEGOTIATING at 11.99 s, STEADY at 17.07 s and SS_RETRAINING at 17.60 s. It
+holds the input ring until STEADY, so the known bytes leave 17.07-17.60 s; the
+retrain is because the SpanDSP caller never sends terbo-rate data, so MICA loses
+its receiver. About half a second of data, then.
+
+Decoding it (`gen.py rec.bin 9.5 2.0` with `dur=8`, `nsym=18000`, then
+`live_decode.py`; the lattice frame is recording 2's, 100 percent of symbols on
+the generated 512-point set; the delay of 2.0 s matters: a 5.0 s decision-
+directed gap left the equalizer too noisy, 2 percent symbol errors):
+
+- **Descrambled with the V.32bis self-synchronising GPA descrambler, the marks
+  period reads as exactly 1.00 ones** from 14.3 s to 16.84 s, then falls to
+  0.5 at 17.05 s: the data. The group bit order (Q1, Q2, then six word bits,
+  LSB first) is therefore right too: with marks, a wrong order breaks the
+  recursion.
+- **The text comes out.** Async 8N1 framing (start 0, eight data bits LSB
+  first, stop 1) on the descrambled bits starting at 17.0825 s decodes to
+  `THE QUICK BROWN FOX JUMPS OVER THE LAZY DOG 0123456789` + CR LF, repeating:
+  **993 bytes exact, from the first byte to 17.600 s**, which is the instant
+  of the retrain. All 10 UART phases give the same text.
+- **This settles the scrambler form.** An additive scrambler (independent
+  keystream) would produce garbage through the self-synchronising descrambler
+  used here; the text is recovered with no state hand-off at the start of
+  data. V.32bis's self-synchronising GPA, the answerer's, on all eight bits of
+  every symbol, is confirmed by real traffic.
+
+So the receive chain is now verified end to end on known non-constant data:
+samples -> equalizer -> unwarp -> nearest point -> coset and word ->
+differential decode -> self-synchronising GPA descrambler -> async bytes.
+The transmit direction (our own terbo encoder) is the model in `model_loop.py`.
+
+Remaining: a longer data run (the caller needs terbo-rate transmit, or MICA's
+retrain on lost receive has to be avoided), the caller's direction (MICA
+receiving terbo data; the SpanDSP caller can only send 14400), and the B13
+(16800) rate. The warp constant's origin is still open.
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler

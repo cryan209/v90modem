@@ -1,0 +1,46 @@
+--- /Users/scottcryan/MicaEmu/native/mica_line.cpp	2026-09-27 20:52:15
++++ /private/tmp/claude-501/-Users-scottcryan-v90modem/b442a30f-0d70-488d-a0ac-3b8d09113582/scratchpad/rig/native/mica_line.cpp	2026-10-13 11:51:43
+@@ -152,6 +152,7 @@
+     bool realtime = false, idle_skip = true, interrupts = true, result_codes = false;
+     int prime_blocks = PRIME_BLOCKS, dte_fd = -1;
+     std::string dte_pty, dte_tcp;
++    std::vector<std::string> init_at;
+     char **peer_argv = nullptr;
+     for(int i = 1; i < argc; ++i) {
+         const std::string arg = argv[i];
+@@ -168,6 +169,7 @@
+         else if(arg == "--lead-ms") lead_ms = std::stod(value());
+         else if(arg == "--no-idle-skip") idle_skip = false;
+         else if(arg == "--prime") prime_blocks = std::stoi(value());
++        else if(arg == "--init-at") init_at.push_back(value());
+         else if(arg == "--dte-pty") dte_pty = value();
+         else if(arg == "--dte-tcp") dte_tcp = value();
+         else if(arg == "--dte-fd") dte_fd = std::stoi(value());
+@@ -234,6 +236,16 @@
+                 }
+             };
+ 
++        // AT commands for the console before the answer (call3.py's converse()).
++        for(const std::string &line : init_at) {
++            const std::string text = line + "\r";
++            board.dte_write(0, reinterpret_cast<const uint8_t *>(text.data()), text.size());
++            board.run(3000000);
++            uint8_t sink[256];
++            std::string reply;
++            for(size_t n; (n = board.dte_read(0, sink, sizeof(sink))) > 0;) reply.append(reinterpret_cast<char *>(sink), n);
++            std::fprintf(stderr, "AT> %s -> %zu bytes: %s\n", line.c_str(), reply.size(), reply.c_str());
++        }
+         if(!board.configure_call(0, false))
+             throw std::runtime_error("channel 0 host queue is occupied");
+         board.run(CALL_SETUP_INSTRUCTIONS);
+--- /Users/scottcryan/MicaEmu/native/mica_dte.cpp	2026-09-27 20:52:15
++++ /private/tmp/claude-501/-Users-scottcryan-v90modem/b442a30f-0d70-488d-a0ac-3b8d09113582/scratchpad/rig/native/mica_dte.cpp	2026-10-13 11:55:49
+@@ -162,7 +162,7 @@
+ 
+ void Dte::state(int state)
+ {
+-    if(state == STATE_STEADY && !m_connected) {
++    if((state == STATE_STEADY || state == 5) && !m_connected) {
+         m_connected = true;
+         if(m_result_codes)
+             m_out.insert(m_out.end(), {'\r', '\n', 'C', 'O', 'N', 'N', 'E', 'C', 'T', '\r', '\n'});
