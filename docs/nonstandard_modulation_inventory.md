@@ -458,6 +458,51 @@ count, not an estimate: **the terbo data constellation has 512 points**,
 equiprobable, in a circular region of radius 12.75 cells, radially warped by
 V.34's nonlinear-encoding function with kappa about 0.40.
 
+
+### The terbo data is trellis-coded: 8 data bits + 1 code bit (2026-10-13)
+
+Test (`demod/trellis*.py`, run on both recordings): unwarp with c = 0.48/0.49,
+slice the 14000 equalized symbols to integer lattice sites (0.35 / 0.77
+percent fall off the 512-site set), label each by its coset of an index-N
+sublattice of Z^2, and measure block entropy of the label sequence
+(Miller-Madow corrected).
+
+- **No code at depth 2, a code at depth 3-4.** Every coset label is uniform and
+  memoryless to three symbols (index 4: 2.000 bit, index 8: 2.997-3.000 of
+  3.000, all 15 index-8 sublattices tried). Only the standard Ungerboeck
+  partition Z^2 > 2RZ^2 (index 8, `L=<(2,2),(0,4)>`) drops at the fourth
+  symbol: H(4th | previous 3) = **2.20 bit** (recording 2) and 2.52 (recording
+  1, noisier), against 3.00 for the other partitions. A synthetic 8-state
+  systematic code run through the same estimator gives 2.00, so the method is
+  sensitive; a 0.35 percent slicing error rate accounts for the excess over 2.
+- **What is constrained is the checkerboard parity** p = (i+j) mod 2 (the
+  Z^2 > RZ^2 split). Given the previous three labels the next label lies in
+  one of the two parity classes, {0,2,5,7} or {1,3,4,6}, in 438 of 512
+  contexts (recording 2) with exactly four labels each. p given the previous
+  1 or 2 labels: 49 / 47 percent error (chance); given 3: **4.4 percent**
+  (recording 1: 13.6), given 6: 0.2 (0.5). It is a function of the past,
+  with a memory of three symbols.
+- **Which bits matter.** Reducing each lagged label to a coarser class shows p
+  depends on: the parity of the label 3 back; (a, b0) of the label 1 back; and
+  (p, b1) of the label 2 back, where a = i mod 2 and b = (j - 2 floor(i/2))
+  mod 4 = b0 + 2 b1. That is five bits of the past, 1 + 2 + 2, not a simple
+  GF(2) sum in this basis (best linear fit only 73 percent: the labels form
+  Z2 x Z4, so the differential encoding is mod 4).
+
+So the 512-point constellation carries **one redundant (code) bit per symbol:
+8 data bits x 2400 baud = 19200 bit/s**, and the B14 = 19200 reading no longer
+rests on an assumed trellis. The 21600 alternative (no code) is excluded.
+B13 = 16800 (7 data bits, 256 points + code bit) is still inferred; no
+recording has used it.
+
+Not established: the code's exact form (state count, polynomials, the
+differential encoding of the data bits). The five-bit dependence is
+consistent with an Ungerboeck-style coder on top of a mod-4 differential
+encoder like V.32bis's, but I have not fitted one; V.32bis's own coder with
+its 128-point lattice is the obvious first candidate to adapt. The scrambler
+is not accounted for either (it sits before the coder, so it does not affect
+this test).
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler
