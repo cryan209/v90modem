@@ -102,6 +102,9 @@ struct v32bis_state_s
     uint16_t tx_rate_extension;
     /*! Probe: accept MICA's V.32terbo R3 and answer with a matching E. */
     bool probe_terbo;
+    /*! Probe only: transmit the V.32terbo 512-point constellation (19200 bit/s) after E. */
+    bool terbo_tx;
+    complexf_t terbo_table[512];
     uint16_t tx_e_word_override;
 
     /* One §5.2 conditioning sequence, two identical Table 5 words and one

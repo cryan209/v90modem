@@ -85,6 +85,9 @@
 #define FP_CONSTELLATION_SCALE(x)       FP_SCALE(x)
 
 #include "v17_v32bis_tx_constellation_maps.h"
+#if !defined(SPANDSP_USE_FIXED_POINT)
+#include "v32bis_terbo_tx_map.h"
+#endif
 #include "v17_v32bis_rx_constellation_maps.h"
 #include "v17_v32bis_tx_rrc.h"
 #include "v17_v32bis_rx_rrc.h"
@@ -2654,6 +2657,16 @@ static int v32bis_tx_enter_data(v32bis_state_t *s)
                                    &diff,
                                    s->startup_tx_symbols) != 8)
         return -1;
+    if (getenv("V32BIS_TRACE"))
+        fprintf(stderr, "[V32BIS %s] entering data: rate %d, E word 0x%04x, terbo tx %d\n", s->calling_party ? "caller" : "answerer", rate, word, s->terbo_tx);
+    /*endif*/
+    if (s->terbo_tx  &&  !s->reneg_active)
+    {
+        s->tx.bits_per_symbol = 8;
+        s->tx.constellation = s->terbo_table;
+        s->tx.bit_rate = 19200;
+    }
+    /*endif*/
     s->bit_rate = rate;
     s->reneg_selected_rate = rate;
     s->tx.scramble_reg = reg;
@@ -3688,6 +3701,41 @@ SPAN_DECLARE(int) v32bis_set_rate_signal_extension(v32bis_state_t *s, uint16_t b
 {
     s->tx_rate_extension = bits & 0x6000;
     return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_set_terbo_tx(v32bis_state_t *s, bool enable, int iso, int quarter_turns, bool mirror)
+{
+#if defined(SPANDSP_USE_FIXED_POINT)
+    return -1;
+#else
+    int i;
+    float c;
+    float sn;
+    float a;
+    float x;
+    float y;
+
+    if (iso < 0  ||  iso > 3)
+        return -1;
+    /*endif*/
+    a = 0.78539816f + 1.57079633f*(float) (quarter_turns & 3);
+    c = cosf(a);
+    sn = sinf(a);
+    for (i = 0;  i < 512;  i++)
+    {
+        x = v32bis_terbo_points[iso][i][0];
+        y = v32bis_terbo_points[iso][i][1];
+        if (mirror)
+            y = -y;
+        /*endif*/
+        s->terbo_table[i].re = x*c - y*sn;
+        s->terbo_table[i].im = x*sn + y*c;
+    }
+    /*endfor*/
+    s->terbo_tx = enable;
+    return 0;
+#endif
 }
 /*- End of function --------------------------------------------------------*/
 

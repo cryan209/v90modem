@@ -228,7 +228,8 @@ static __inline__ int diff_and_convolutional_encode(v17_tx_state_t *s, int q)
 
     /* The final result is the combination of some uncoded bits, 2 differentially
        encoded bits, and the convolutionally encoded redundant bit. */
-    return ((q << 1) & 0x78) | (s->diff << 1) | ((s->convolution >> 2) & 1);
+    /* Eight bits per symbol is MICA's V.32terbo (512 points): six uncoded bits. */
+    return ((q << 1) & ((s->bits_per_symbol == 8)  ?  0x1F8  :  0x78)) | (s->diff << 1) | ((s->convolution >> 2) & 1);
 }
 /*- End of function --------------------------------------------------------*/
 

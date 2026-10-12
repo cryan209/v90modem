@@ -173,6 +173,12 @@ SPAN_DECLARE(int) v32bis_set_rate_signal_extension(v32bis_state_t *s, uint16_t b
     answer with E = that word | 0xF. Default off. */
 SPAN_DECLARE(int) v32bis_set_terbo_probe(v32bis_state_t *s, bool enable);
 
+/*! Probe only: after E, transmit MICA's V.32terbo data constellation (512 points, 8 data bits
+    per symbol, 19200 bit/s) instead of the negotiated V.32bis one. \a iso selects one of four
+    equivalent coder labellings (0-3), \a quarter_turns rotates the constellation (0-3) and
+    \a mirror conjugates it. Float build only. Default off. */
+SPAN_DECLARE(int) v32bis_set_terbo_tx(v32bis_state_t *s, bool enable, int iso, int quarter_turns, bool mirror);
+
 /*! Build or decode the Table 5 rate signal. */
 SPAN_DECLARE(int) v32bis_build_rate_signal(int rates, uint16_t *word);
 SPAN_DECLARE(int) v32bis_decode_rate_signal(uint16_t word, int *rates);

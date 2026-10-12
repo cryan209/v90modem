@@ -2,6 +2,7 @@
  * rate signal (call3.py's caller, without the Python).  stdin: 160-octet PCMU blocks of MICA's audio;
  * stdout: 160 octets of ours.  Silence until START seconds, then the caller.
  * usage: terbo_peer START_SECONDS EXT_HEX PROBE(0/1) [CALLER_BYTES_FILE]
+ * env TERBO_TX=iso,quarter_turns,mirror makes the caller transmit the 512-point constellation after E.
  * The caller's own payload is a known byte pattern if a file is given (async 8N1 would need a UART
  * model, so it is raw bits, LSB first); otherwise marks. */
 #define SPANDSP_EXPOSE_INTERNAL_STRUCTURES
@@ -28,9 +29,10 @@ int main(int argc,char**argv){
       v32bis_set_supported_bit_rates(s,0x1260);
       v32bis_start_tones(s);
       v32bis_set_rate_signal_extension(s,(uint16_t)ext); v32bis_set_terbo_probe(s,probe!=0);
+      if(getenv("TERBO_TX")){int iso=0,k=0,m=0; sscanf(getenv("TERBO_TX"),"%d,%d,%d",&iso,&k,&m); fprintf(stderr,"terbo tx iso %d quarter-turns %d mirror %d: %d\n",iso,k,m,v32bis_set_terbo_tx(s,true,iso,k,m!=0));}
       on=1; fprintf(stderr,"[%5.2fs] V.32bis caller starts\n",t);
     }
-    if(!on){memset(out,0xFF,160);}
+    if(!on || (getenv("SILENT_AT") && t>=atof(getenv("SILENT_AT")))){memset(out,0xFF,160); if(on){v32bis_rx(s,a,0);} }
     else{
       for(int i=0;i<160;i++)a[i]=ulaw_to_linear(in[i]);
       v32bis_rx(s,a,160); v32bis_tx(s,a,160);

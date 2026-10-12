@@ -1,5 +1,5 @@
 --- /Users/scottcryan/MicaEmu/native/mica_line.cpp	2026-09-27 20:52:15
-+++ /private/tmp/claude-501/-Users-scottcryan-v90modem/b442a30f-0d70-488d-a0ac-3b8d09113582/scratchpad/rig/native/mica_line.cpp	2026-10-13 11:51:43
++++ /private/tmp/claude-501/-Users-scottcryan-v90modem/b442a30f-0d70-488d-a0ac-3b8d09113582/scratchpad/rig/native/mica_line.cpp	2026-10-13 12:11:32
 @@ -152,6 +152,7 @@
      bool realtime = false, idle_skip = true, interrupts = true, result_codes = false;
      int prime_blocks = PRIME_BLOCKS, dte_fd = -1;
@@ -16,7 +16,19 @@
          else if(arg == "--dte-pty") dte_pty = value();
          else if(arg == "--dte-tcp") dte_tcp = value();
          else if(arg == "--dte-fd") dte_fd = std::stoi(value());
-@@ -234,6 +236,16 @@
+@@ -225,6 +227,11 @@
+         if(interrupts)
+             board.on_slice = [&] {
+                 while(board.take_message(0, message)) {
++                    if(std::getenv("MICA_MSG")) {
++                        std::fprintf(stderr, "msg %.2f s:", call_time());
++                        for(uint16_t w : message) std::fprintf(stderr, " %04x", w);
++                        std::fprintf(stderr, "\n");
++                    }
+                     const int now = mica::channel_state(message);
+                     if(now >= 0 && now != state) {
+                         std::fprintf(stderr, "channel 0: %s at %.2f s\n", mica::channel_state_name(now), call_time());
+@@ -234,6 +241,28 @@
                  }
              };
  
@@ -30,6 +42,18 @@
 +            for(size_t n; (n = board.dte_read(0, sink, sizeof(sink))) > 0;) reply.append(reinterpret_cast<char *>(sink), n);
 +            std::fprintf(stderr, "AT> %s -> %zu bytes: %s\n", line.c_str(), reply.size(), reply.c_str());
 +        }
++        if(std::getenv("MICA_DSPW"))
++            board.on_dsp_write = [&](int dsp, uint32_t address, uint16_t value) {
++                if(dsp == 0 && address >= 0xFEFFE880 && address < 0xFEFFE900)
++                {
++                    std::fprintf(stderr, "dspw %.3f s: %08x <- %04x", call_time(), address, value);
++                    if(address == 0xFEFFE882 && (value == 0x00a3 || value == 0x0884 || value == 0x00ab || value == 0x0184 || value == 0x0086)) {
++                        std::fprintf(stderr, "  pc=%04x stack:", core.program_counter());
++                        for(unsigned i = 0; i < 8; ++i) std::fprintf(stderr, " %04x", core.stack_entry(i));
++                    }
++                    std::fprintf(stderr, "\n");
++                }
++            };
          if(!board.configure_call(0, false))
              throw std::runtime_error("channel 0 host queue is occupied");
          board.run(CALL_SETUP_INSTRUCTIONS);
