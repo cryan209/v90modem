@@ -365,6 +365,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let session = URLSession(configuration: .ephemeral)
     var window: NSWindow!
     let status = NSTextField(labelWithString:"Starting modem…")
+    let hardwareLabel = NSTextField(labelWithString:"")
     let error = NSTextField(labelWithString:"")
     let rx = SignalPlot(), tx = SignalPlot(), constellation = SignalPlot(), eye = SignalPlot()
     let at = Console(height:64), serial = Console(height:64), training = Console(height:28), log = Console(height:130)
@@ -479,7 +480,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         pattern = button("256-byte pattern",#selector(sendPattern))
         loopbackRow = row([label("Local test"),loopbackMode,startLoop,pattern,loopbackStatus]); loopbackRow.isHidden = true
         let items: [NSView] = [
-            row([status,listen,button("Freeze",#selector(freeze))]),loopbackRow,error,
+            row([status,listen,button("Freeze",#selector(freeze))]),hardwareLabel,loopbackRow,error,
             pair(panel("RX line · 64 ms",[rx]),panel("TX line · 64 ms",[tx])),
             row([eyeDir,eyeSource,carrierLabel]),
             row([label("FFT"),fftSizeControl,averageControl,peakControl,button("Clear peaks",#selector(clearSpectrumPeaks))]),
@@ -618,7 +619,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let dataReady = (s["data_ready"] as? Int ?? 0)>0
         let call = (s["age"] as? Double ?? 9)>2 ? "Telemetry stale" : states.indices.contains(state) ? (state == 4 && !dataReady ? "Carrier up · negotiating link" : states[state]) : "Starting"
         let mode = (s["v92"] as? Int ?? 0)>0 ? "V.92" : mods.indices.contains(mod) ? mods[mod] : "—"
-        status.stringValue = "\(call)  ·  \(mode)  ·  \((s["law"] as? Int ?? 0)>0 ? "PCMA" : "PCMU")  |  RX \(s["rx_signal"] as? String ?? "—")  |  TX \(s["tx_signal"] as? String ?? "—")"
+        let transport = s["hardware"] != nil ? "Analogue" : (s["law"] as? Int ?? 0)>0 ? "PCMA" : "PCMU"
+        status.stringValue = "\(call)  ·  \(mode)  ·  \(transport)  |  RX \(s["rx_signal"] as? String ?? "—")  |  TX \(s["tx_signal"] as? String ?? "—")"
         dataInput.isEnabled = dataReady; sendData.isEnabled = dataReady
         let local = s["loopback"] as? [String:Any]
         loopbackRow.isHidden = local == nil
@@ -634,6 +636,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             loopbackMode.isEnabled = startLoop.isEnabled
             pattern.isEnabled = dataReady && !busy && (local["pattern_ready"] as? Bool ?? false)
             loopbackStatus.stringValue = dataReady && !pattern.isEnabled ? "Waiting for both carriers to settle" : dataReady ? "Echoed \(local["echoed"] as? Int ?? 0) bytes" : local["status"] as? String ?? ""
+        }
+        let hardware = s["hardware"] as? [String:String]
+        hardwareLabel.isHidden = hardware == nil
+        if let hardware = hardware {
+            window.title = "Modem · Apple USB analogue line"
+            hardwareLabel.stringValue = "Apple USB · \(s["hardware_status"] as? String ?? "Starting") · USB \(hardware["usb_address"] ?? "Automatic") · Audio \(hardware["audio_uid"] ?? "Automatic") · ATDnumber to dial; ATA waits for a ring"
         }
         let streams = s["streams"] as? [String:[[Any]]] ?? [:]
         at.update(streams["at"] ?? [],binary:false); serial.update(streams["data"] ?? [],binary:true); log.update(streams["log"] ?? [],binary:false)

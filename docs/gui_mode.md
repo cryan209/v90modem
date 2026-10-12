@@ -21,6 +21,54 @@ The serial console enables sending after the DCE reports the data connection,
 not merely after the physical carrier appears. Closing the native window stops
 the child modem; for the browser monitor use Ctrl-C in its launching terminal.
 
+## Apple USB Modem (macOS)
+
+The native and browser GUIs can run the existing A1082 (`05ac:1401`) analogue
+backend instead of SIP. This device is a host-driven Motorola SM56 codec/DAA;
+it does not expose a serial AT port. Our coupler supplies the engine and AT
+interpreter, USB line control and CoreAudio transport. See
+`docs/apple_usb_modem_sm56.md` for the hardware findings and live limitations.
+
+```sh
+make gui-apple
+# Browser alternative, after building the coupler:
+python3 tools/modem_gui.py --web --apple ./apple_usb_modem_coupler --hold 3600
+```
+
+The GUI starts in on-hook command mode without opening USB or CoreAudio.
+Use `AT+MS` to choose the next call's offer, then `ATDnumber` to dial the
+physical line. Answer (`ATA`) waits for CDC ring detection before seizing
+it; `--ring-wait` controls the wait (default 60 seconds). Hang up (`ATH`) or
+close the GUI to release an active line. No automatic incoming-call answer
+is implemented in this launcher. The coupler's `--hold` bounds each active
+call; `make gui-apple` uses one hour.
+
+The default codec rate remains 9600 Hz, feeding the existing exact rational
+analogue frontend. GUI audio/spectrum taps show the engine's 8 kHz RX/TX
+streams; they are not raw 9600 Hz device captures or byte-exact RTP codewords.
+The RX stream is shown while the engine runs; device DTMF/ringing and pre-engine
+answer detection are not included in these GUI audio taps. Diagnostic player
+and FFT controls do not alter the analogue frontend or SIP's G.711 path.
+
+Select a specific USB device and its corresponding CoreAudio device with the
+existing `APPLE_MODEM_ADDR=bus:addr` and `APPLE_MODEM_AUDIO_UID=substring`
+environment variables before launching. The GUI displays these selections.
+They are independent identifiers: do not assume two enumeration lists match.
+With one modem, automatic selection is sufficient.
+
+Each completed, failed or cancelled call exits its backend process. The GUI
+retains its bounded consoles and starts a fresh on-hook backend, clearing
+telemetry histories and all per-call DSP/audio state. AT settings return to
+the power-on defaults (`ME_MODE`, default V.90); reapply `AT+MS` before another
+call if needed. Missing devices and line errors remain visible in the process
+log. Startup/configuration errors stop the launcher rather than repeatedly
+spawning a broken backend.
+
+`make gui-apple-test` exercises localhost telemetry, split PTYs, `AT+MS`, idle
+hang-up and dial/answer failure recovery using the deliberately invalid USB
+address `0:0`. It never seizes a telephone line. This test and the coupler
+resampler selftest do not establish live hardware interoperability.
+
 ## What the views measure
 
 - **Waveforms:** the last 512 received/transmitted 8 kHz samples, expanded from

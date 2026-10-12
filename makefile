@@ -328,9 +328,12 @@ v32bis-test: v32bis_spandsp_test v32bis_duplex_test v32bis-ref-test v32bis-datap
 	./v32bis_duplex_test
 
 # AppKit is optional; ordinary/headless modem builds remain C-only.
-.PHONY: gui gui-smoke-test gui-loopback-test gui-audio-test gui-fft-test gui-spectrum-test
+.PHONY: gui-apple gui-apple-test gui gui-smoke-test gui-loopback-test gui-audio-test gui-fft-test gui-spectrum-test
 gui-smoke-test: $(TARGET)
 	python3 tools/gui_smoke_test.py
+
+gui-apple-test: apple_usb_modem_coupler
+	python3 tools/gui_apple_test.py
 
 gui-spectrum-test:
 	python3 tools/gui_spectrum_test.py
@@ -343,6 +346,9 @@ gui-audio-test:
 
 gui-loopback-test: $(TARGET)
 	python3 tools/gui_loopback_test.py
+
+gui-apple: apple_usb_modem_coupler modem_gui_native
+	python3 tools/modem_gui.py --apple ./apple_usb_modem_coupler --hold 3600
 
 gui: $(TARGET) modem_gui_native
 
@@ -395,7 +401,7 @@ apple_usb_modem_coupler: $(APPLE_USB_MODEM_COUPLER_OBJS) spandsp $(PJ_BUILD_PRER
 
 tools/apple_usb_modem_coupler.o: CFLAGS += $(LIBUSB_CFLAGS)
 tools/apple_usb_modem_coupler.o: tools/apple_usb_modem_coupler.m \
-    modem_engine.h data_interface.h
+    modem_engine.h data_interface.h line_monitor.h
 	$(CC) $(CFLAGS) $(LIBUSB_CFLAGS) -c $< -o $@
 
 vpcm_loopback_test: $(TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)

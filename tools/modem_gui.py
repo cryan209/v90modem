@@ -50,6 +50,14 @@ def main():
         args.pop(0)
     if not args:
         raise SystemExit('Usage: tools/modem_gui.py ./sip_v90_modem [modem options]')
+    apple = '--apple' in args
+    if apple:
+        args.remove('--apple')
+        if sys.platform != 'darwin': raise SystemExit('Apple USB modem support requires macOS')
+        conflicts = ('--loopback','--sip-server','--username','--password','--mode','--dial','--answer','--hook','--rx-replay')
+        if any(flag in args for flag in conflicts):
+            raise SystemExit('Apple GUI starts idle; dial with ATD or wait for a ring with ATA. Use ME_MODE for the power-on offer.')
+        args += ['--gui-control']
     loopback = '--loopback' in args
     if loopback:
         args.remove('--loopback')
@@ -283,6 +291,9 @@ def main():
                     value['age'] = time.monotonic()-value.pop('received', time.monotonic())
                     value['streams'] = {k: list(v) for k, v in streams.items()}
                     value['ports'] = ports
+                    value['interfaces_ready'] = all(name in fds for name in ('at','data'))
+                    value['backend'] = 'Apple USB modem' if apple else 'SIP/G.711'
+                    if apple: value['hardware'] = {'usb_address': env.get('APPLE_MODEM_ADDR','Automatic'), 'audio_uid': env.get('APPLE_MODEM_AUDIO_UID','Automatic')}
                     value['exit'] = None if test['busy'] else child.poll()
                     pair_ready = bool(value.get('data_ready') and peer_telemetry.get('data_ready'))
                     if not pair_ready: test['connected_since'] = None
@@ -318,11 +329,12 @@ def main():
                 if name not in ('at','data'): raise ValueError('Use the caller AT or serial interface')
                 if test.get('busy'): raise ValueError('Wait for loopback setup to finish')
                 data = base64.b64decode(req['data'], validate=True)
-                if name not in fds:
-                    raise ValueError('Port not ready')
-                written = os.write(fds[name], data)
-                if written != len(data):
-                    raise ValueError(f'Only {written} of {len(data)} bytes sent')
+                with lifecycle:
+                    if name not in fds:
+                        raise ValueError('Port not ready')
+                    written = os.write(fds[name], data)
+                    if written != len(data):
+                        raise ValueError(f'Only {written} of {len(data)} bytes sent')
                 record(name, b'\n> '+data+b'\n')
                 self.respond(200, b'{}')
             except (KeyError, ValueError, OSError) as e:
@@ -354,13 +366,35 @@ def main():
         webbrowser.open(url)
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
+    def restart_apple():
+        nonlocal child, generation
+        with lifecycle:
+            port_stop.set()
+            for thread in port_threads: thread.join(timeout=1)
+            for fd in list(fds.values()): os.close(fd)
+            fds.clear()
+            if stop.is_set(): return
+            # A fresh process owns every call: no CoreAudio or DSP state leaks.
+            for path in ports.values():
+                try:
+                    if os.path.islink(path): os.unlink(path)
+                except FileNotFoundError: pass
+            with lock:
+                generation += 1; telemetry.clear()
+            child = subprocess.Popen(args,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+            threading.Thread(target=log_reader,args=(child,),daemon=True).start()
+            launch_ports()
+
     def shutdown(*_):
         stop.set()
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
     try:
         while not stop.wait(.2):
-            if not test["busy"] and child.poll() is not None: break
+            if not test["busy"] and child.poll() is not None:
+                if not apple or not telemetry: break
+                record('log',f'Apple session ended ({child.returncode}); returning to on-hook command mode\n'.encode())
+                restart_apple()
             if not test["busy"] and peer is not None and peer.poll() is not None:
                 record('log', b'Local loopback peer exited\n'); break
             if native is not None and native.poll() is not None:

@@ -88,9 +88,15 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <pthread.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <time.h>
 
 #include "modem_engine.h"
 #include "data_interface.h"
+#include "line_monitor.h"
 
 #define VID 0x05ac
 #define PID 0x1401
@@ -359,6 +365,82 @@ static const char *g_replay_path;
 static volatile int g_answered, g_engine_running, g_stop;
 static int g_answer_mode;
 static unsigned g_ans_good, g_ans_bad;
+
+/* GUI call requests are posted by the V.250 PTY thread and consumed by the
+ * control loop. USB/CoreAudio operations never run on that reader thread.
+ * This backend is V.90 §5's analogue role; training telemetry describes
+ * the engine's existing V.34 §10.1 / V.90 §9 transitions. */
+static int g_gui_control, g_di_open;
+static void close_dte(void)
+{
+    if (g_di_open) { di_close(); g_di_open = 0; }
+}
+static const char *g_control_link, *g_data_link;
+static pthread_mutex_t gui_request_lock = PTHREAD_MUTEX_INITIALIZER;
+static int gui_request;
+static char gui_number[128];
+static int gui_socket = -1;
+static struct sockaddr_in gui_destination;
+static const char *gui_status = "Idle · line on-hook";
+
+static void gui_dial(const char *number, void *user)
+{
+    (void)user;
+    pthread_mutex_lock(&gui_request_lock);
+    if (!gui_request) {
+        int n = snprintf(gui_number, sizeof gui_number, "%s", number);
+        gui_request = n < 0 || (size_t)n >= sizeof gui_number ? 3 : 1;
+    }
+    pthread_mutex_unlock(&gui_request_lock);
+}
+static void gui_answer(void *user)
+{
+    (void)user;
+    pthread_mutex_lock(&gui_request_lock);
+    if (!gui_request) gui_request = 2;
+    pthread_mutex_unlock(&gui_request_lock);
+}
+static void gui_hangup(void *user) { (void)user; g_stop = 1; }
+
+static void gui_monitor_start(void)
+{
+    const char *port = getenv("ME_GUI_PORT");
+    int n = port ? atoi(port) : 0;
+    if (n < 1 || n > 65535) return;
+    gui_socket = socket(AF_INET, SOCK_DGRAM, 0);
+    if (gui_socket < 0) return;
+    int bytes = 65536;
+    setsockopt(gui_socket, SOL_SOCKET, SO_SNDBUF, &bytes, sizeof bytes);
+    fcntl(gui_socket, F_SETFL, O_NONBLOCK);
+    gui_destination.sin_family = AF_INET;
+    gui_destination.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    gui_destination.sin_port = htons(n);
+}
+static void gui_publish(void)
+{
+    static uint64_t last;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now = (uint64_t)ts.tv_sec*1000 + ts.tv_nsec/1000000;
+    if (gui_socket < 0 || now-last < 100) return;
+    last = now;
+    me_diag_snapshot_t d;
+    me_get_diag_snapshot(&d);
+    char buf[60000];
+    int n = snprintf(buf, sizeof buf,
+        "{\"state\":%d,\"modulation\":%d,\"v92\":%d,\"law\":%d,"
+        "\"rx_signal\":\"%s\",\"tx_signal\":\"%s\",\"rx_baud\":%d,\"tx_baud\":%d,"
+        "\"rx_pcm\":%d,\"tx_pcm\":%d,\"rx_carrier\":%.3f,\"tx_carrier\":%.3f,"
+        "\"data_ready\":%d,\"elapsed\":%llu,\"hardware_status\":\"%s\",",
+        d.state,d.modulation,d.v92_active,d.law,d.rx_signal,d.tx_signal,
+        d.rx_baud,d.tx_baud,d.rx_pcm,d.tx_pcm,d.rx_carrier,d.tx_carrier,
+        d.data_ready,(unsigned long long)d.phase_elapsed_ms,gui_status);
+    if (n < 0 || (size_t)n >= sizeof buf-2) return;
+    int extra = lm_gui_json(buf+n,sizeof buf-(size_t)n-2);
+    if (extra < 0) return;
+    n += extra; buf[n++] = '}';
+    sendto(gui_socket,buf,n,0,(struct sockaddr *)&gui_destination,sizeof gui_destination);
+}
 
 /* DC blocker, one pole at 40 Hz.  See the header: this is not optional. */
 static double dc_px, dc_py;
@@ -837,6 +919,7 @@ static int wait_for_ring(double secs)
     libusb_claim_interface(usb, 0);
     fprintf(stderr, "[APPLE] waiting up to %.0f s for a ring\n", secs);
     for (int t = 0; t < (int)(secs / 0.5 + 0.5) && !g_stop; t++) {
+        gui_publish();
         if (libusb_interrupt_transfer(usb, 0x81, b, sizeof b, &n, 500) != 0)
             continue;
         if (n >= 2 && b[0] == 0xa1 && b[1] == 0x09) {
@@ -861,6 +944,9 @@ static void usage(const char *a0)
         "       %s --hook on|off\n"
         "       %s --selftest\n"
         "\n"
+        "  --gui-control wait on split AT/data PTYs for ATD or ATA; one call per\n"
+        "               process, with passive ME_GUI_PORT telemetry\n"
+        "  --control-link PATH --data-link PATH  split consoles for GUI mode\n"
         "  --dial       seize the line, DTMF the number, wait for 2100 Hz, run\n"
         "               the engine.  Goes back on-hook on exit or SIGINT\n"
         "  --answer     wait for CDC RING_DETECT on the interrupt endpoint, go\n"
@@ -894,7 +980,10 @@ int main(int argc, char **argv)
     int rc = 1;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--answer"))                          g_answer_mode = 1;
+        if (!strcmp(argv[i], "--gui-control"))                     g_gui_control = 1;
+        else if (!strcmp(argv[i], "--control-link") && i+1 < argc) g_control_link = argv[++i];
+        else if (!strcmp(argv[i], "--data-link") && i+1 < argc)    g_data_link = argv[++i];
+        else if (!strcmp(argv[i], "--answer"))                          g_answer_mode = 1;
         else if (!strcmp(argv[i], "--ring-wait") && i + 1 < argc)   ring_wait = atof(argv[++i]);
         else if (!strcmp(argv[i], "--dial") && i + 1 < argc)        g_dial = argv[++i];
         else if (!strcmp(argv[i], "--pty-link") && i + 1 < argc)   g_pty_link = argv[++i];
@@ -911,6 +1000,42 @@ int main(int argc, char **argv)
         const char *m = getenv("APPLE_MODEM_DTMF_MS"), *sl = strchr(m, '/');
         on_ms = atof(m);
         if (sl) off_ms = atof(sl + 1);
+    }
+
+    if ((g_control_link == NULL) != (g_data_link == NULL) ||
+        (g_pty_link && g_control_link) ||
+        (g_gui_control && (!g_control_link || g_dial || g_answer_mode || hook_arg || g_replay_path))) {
+        fprintf(stderr,"GUI control requires split PTYs and excludes immediate call/replay/hook options\n");
+        return 2;
+    }
+    if (g_gui_control) {
+        signal(SIGINT,on_signal); signal(SIGTERM,on_signal);
+        setenv("ME_V90_ROLE","analogue",0);
+        me_set_verbose(1); me_init(); me_set_law(ME_LAW_ULAW);
+        di_set_callbacks(gui_dial,gui_answer,gui_hangup,NULL);
+        if (di_open_split(g_control_link,g_data_link) < 0) { me_destroy(); return 1; }
+        g_di_open = 1;
+        gui_monitor_start();
+        fprintf(stderr,"[APPLE] GUI ready; line remains on-hook until ATD or ATA\n");
+        while (!g_stop) {
+            gui_publish();
+            pthread_mutex_lock(&gui_request_lock);
+            int request = gui_request;
+            pthread_mutex_unlock(&gui_request_lock);
+            if (request) {
+                if (request == 3) {
+                    fprintf(stderr,"[APPLE] dial string exceeds GUI limit; no line seized\n");
+                    close_dte(); me_destroy(); return 1;
+                }
+                if (request == 1) g_dial = gui_number;
+                else g_answer_mode = 1;
+                break;
+            }
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.01,false);
+        }
+        if (g_stop) { close_dte(); me_destroy(); return 0; }
+        gui_status = g_answer_mode ? "Waiting for ring · line on-hook" : "Opening USB line";
+        gui_publish();
     }
 
     if (hook_arg) {
@@ -965,13 +1090,15 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    me_set_verbose(1);
-    me_init();
-    me_set_law(ME_LAW_ULAW);
-    if (g_pty_link && di_open(g_pty_link) < 0) {
-        fprintf(stderr, "failed to open PTY %s\n", g_pty_link);
-        me_destroy();
-        return 1;
+    if (!g_gui_control) {
+        me_set_verbose(1); me_init(); me_set_law(ME_LAW_ULAW);
+        di_set_callbacks(gui_dial,gui_answer,gui_hangup,NULL);
+        if ((g_control_link ? di_open_split(g_control_link,g_data_link) :
+             g_pty_link ? di_open(g_pty_link) : 0) < 0) {
+            fprintf(stderr,"failed to open PTY\n"); me_destroy(); return 1;
+        }
+        g_di_open = g_control_link != NULL || g_pty_link != NULL;
+        gui_monitor_start();
     }
     if (g_answer_mode) {
         me_answer();
@@ -982,14 +1109,18 @@ int main(int argc, char **argv)
         me_dial(g_dial);
     }
 
+    if (g_stop) { close_dte(); me_destroy(); libusb_close(usb); libusb_exit(NULL); return 0; }
     if (line_hook(1) < 0) {                  /* off-hook; refuses with no pair */
+        close_dte();
         me_destroy();
         libusb_close(usb);
         libusb_exit(NULL);
         return 1;
     }
+    if (g_stop) { line_hook(0); close_dte(); me_destroy(); libusb_close(usb); libusb_exit(NULL); return 0; }
     if (audio_start() < 0) {
         line_hook(0);
+        close_dte();
         me_destroy();
         libusb_close(usb);
         libusb_exit(NULL);
@@ -1001,18 +1132,23 @@ int main(int argc, char **argv)
         fprintf(stderr, "[APPLE] dialling %s, %d DTMF segments at %.0f/%.0f ms\n",
                 g_dial, tx_nseg, on_ms, off_ms);
 
+    gui_status = "Line active · analogue engine";
     /* The run loop is also where the DTE's bytes enter the engine: nothing in
        the audio callbacks does it, and without me_pump_dte() the modem
        connects and transmits idle marks for the whole call (the HSF coupler
        did exactly that on every call it placed). */
     for (double t = 0; t < hold && !g_stop; t += 0.01) {
         (void)me_pump_dte();
+        gui_publish();
+        if (g_gui_control && g_engine_running &&
+            (me_get_state() == ME_HANGUP || me_get_state() == ME_IDLE)) break;
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, false);
     }
 
     AudioOutputUnitStop(au);
     AudioUnitUninitialize(au);
     if (g_engine_running) me_on_sip_disconnected();
+    close_dte();
     me_destroy();
     taps_close();
     fprintf(stderr, "[APPLE] render errors %d, engine %s, DTMF %s\n",

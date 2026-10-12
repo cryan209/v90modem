@@ -11,6 +11,23 @@ Interest here is as an **analogue side over a real 2-wire line**, the role
 `docs/hsf_usb_daa.md`.  The audio transport is solved and needs no work; the
 line control is not.
 
+## GUI entry point
+
+`make gui-apple` launches the native console against this coupler, initially
+on-hook. `ATDnumber` starts an outgoing call; Answer (`ATA`) waits for a ring;
+Hang up (`ATH`) cancels a pending/active call. The GUI shows the engine's
+existing 8 kHz diagnostic taps, constellation, recovered eye, wire bytes and
+FFT views. Device DTMF and pre-engine audio are outside these taps. The
+transport, resamplers and training algorithms are unchanged by this entry
+point (V.90 §5 analogue role; V.34 §10.1 training).
+
+A fresh backend process owns each call; the console survives failures and
+hang-ups and returns to on-hook command mode. AT configuration returns to the
+power-on defaults between calls. Device selection still uses
+`APPLE_MODEM_ADDR` and `APPLE_MODEM_AUDIO_UID`. Full usage and hardware-free
+verification are in `docs/gui_mode.md`, under Apple USB Modem. This GUI
+integration makes no new live CONNECT or interoperability claim.
+
 ## What the descriptors say
 
 One configuration, six interfaces, bus powered at 50 mA:
