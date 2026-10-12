@@ -107,6 +107,30 @@ injected audio or that the line model supports an answer-side
 negotiation. Treat this as "no terbo-specific difference found", not "no
 terbo".
 
+### Does the answerer hear us? (tone test, same day)
+
+`tone.py`, `dc.py`, `dep.py` in `tools/mica_overlay_probe/`.
+
+- **The DSP reads the injected audio.** A constant +4000 versus -4000 input,
+  diffed over all 64K words of DSP data memory after the same instruction
+  count, changes 336 words. DM `0x380..0x3FF` is a receive-sample ring that
+  holds +4 for one input and -4 for the other (and `0x317 + 16k` holds
+  +/-4092), so the G.711 octets reach the C53 and are decoded. The queue
+  also drains in step with the frame clock (underruns stop growing).
+  Note the queue must be topped up at line rate (about 74 samples per 100k
+  instructions); an earlier run over-queued 5x and consumed little.
+- **No tone changes the answerer's state.** 2100, 1300, 1650, 980, 2225 and
+  600 Hz at 8000 peak, against silence, S29=2: the same channel handler
+  (`359b0`) at 1500 x 100k instructions and the same handler timeline. The
+  transmit stream hashes differ from silence, but 1300 = 2100 and 1650 = 2225
+  hash identically and lengths differ by a few octets, so this looks like
+  frame-timing coupling to the receive queue rather than a logic reaction.
+  Not proven either way.
+- So the earlier failure of the V.32bis and V.8 callers is not "the audio
+  never arrives". The answerer hears it and does not respond, within the
+  ~100 s tried. Either its answer sequence needs a different calling signal,
+  or the emulated line and call state stop it from advancing.
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler
