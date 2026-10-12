@@ -308,6 +308,59 @@ What this does not show:
 - The estimate is a power/spacing one, good to about 5-10 percent, not a count.
 - B13/B14 to 16800/19200 and the trellis question remain inferred.
 
+### The terbo constellation is warped, not shaped (2026-10-12)
+
+Why the earlier terbo clusters never resolved: the points do not sit on a
+uniform lattice. A windowed local fit (Hann-weighted 1-D lattice spacing along
+lattice rows and columns, `demod/warp2.py`) gives, for the same equalized
+data:
+
+| | standard 14400 (control) | terbo run |
+|---|---|---|
+| spacing at the centre | 0.2253 | 0.1011-0.1058 |
+| spacing at \|x\| = 0.5 | 0.2253 | 0.1067 |
+| spacing at \|x\| = 0.7 | 0.2253-0.2257 | 0.1094-0.1122 |
+| spacing at \|x\| = 0.9-1.05 | 0.2253-0.2262 | 0.1145-0.1185 (clipped by the fit range) |
+| local lattice score | 0.92-0.94 everywhere | 0.90 near the centre falling to 0.24 at the rim |
+
+So the control is uniform to +-0.4 percent and the terbo spacing grows by
+10-17 percent towards the edge, symmetrically on both axes. It is anisotropic:
+the tangential spacing near r = 0.8 is 0.1055 against about 0.115-0.118
+radially, which is what a radial map `r -> g(r)` of a uniform lattice gives.
+Locally the lattice is crisp (score 0.9 on a single row), so the blur in the
+global fits was the warp itself.
+
+Fitting `g(r) = r (1 + a r^2 + b r^4)` (in the equalizer's unit-power scale)
+by maximising the lattice score of the unwarped points (`demod/unwarp.py`,
+`unwarp2.py`): the score goes **0.28 (no warp) -> 0.62** at a = 0.08-0.085,
+b = 0, and the pre-warp lattice spacing is d0 = 0.1006. After unwarping:
+
+- the ranked site occupancy now has a **knee at rank 510-525** (counts 21,
+  19, 16, 13, 7, 1 at ranks 450, 480, 500, 510, 520, 540); before it only
+  tapered;
+- sites at or above 0.25, 0.35 and 0.50 of the mean count (27.3 for 14000
+  symbols over 512 sites): **525, 517, 509**;
+- the region is a **circle**: the farthest site in each of twelve 30-degree
+  sectors is 12.7-12.8 cells from the centre (pi x 12.75^2 = 511), 26 rows
+  and 26 columns, row lengths 5, 10, 14, 18, 20, 20, 22, 22, 24, 24, 26, 26,
+  25, 25, 26, 26, 24, 24, 22, 22, 19, 20, 17, 13, 10, 5 (509 in all);
+- **no probability shaping**: mean count per site in five radial bands is
+  26.3, 27.1, 27.1, 28.1, 25.1 (expected 27.3 for 512 equiprobable points),
+  and the control is flat as well (111.0 to 107.8). A shell-mapped
+  (Gaussian-like) distribution would fall with radius; this does not.
+
+So the data constellation is **about 512 equiprobable lattice points in a
+circular region, with a radial warp that stretches the outer points by 10-17
+percent**. 512 points is 9 bits per symbol, and the earlier 19200 bit/s
+reading (8 data bits plus one trellis bit at 2400 baud) now rests on a count
+(509-525 sites) and not only on a power estimate.
+
+Limits: the cluster spread after unwarping is still 0.24 of the spacing, so
+this is a threshold count, not a resolved one; the warp is a two-parameter
+polynomial fitted by score, not a recovered formula (V.34's nonlinear
+encoding is a similar idea, but nothing here identifies the function); and
+trellis, rate-to-bits mapping and the B13 = 16800 reading are still inferred.
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler
