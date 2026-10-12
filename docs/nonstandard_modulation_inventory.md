@@ -477,8 +477,9 @@ sublattice of Z^2, and measure block entropy of the label sequence
   sensitive; a 0.35 percent slicing error rate accounts for the excess over 2.
 - **What is constrained is the checkerboard parity** p = (i+j) mod 2 (the
   Z^2 > RZ^2 split). Given the previous three labels the next label lies in
-  one of the two parity classes, {0,2,5,7} or {1,3,4,6}, in 438 of 512
-  contexts (recording 2) with exactly four labels each. p given the previous
+  a set of about four labels (439 of 512 contexts, recording 2), and the
+  supports seen most often are exactly the two parity classes {0,2,5,7} and
+  {1,3,4,6} (438 of the 2570 four-label contexts show a clean one). p given the previous
   1 or 2 labels: 49 / 47 percent error (chance); given 3: **4.4 percent**
   (recording 1: 13.6), given 6: 0.2 (0.5). It is a function of the past,
   with a memory of three symbols.
