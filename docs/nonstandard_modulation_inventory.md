@@ -406,6 +406,58 @@ measurement from one call. The next test is a second recording, and the
 V.34 field that signals the encoder in MP (Table 23's bit 31) has no terbo
 counterpart that I know of.
 
+### Second recording (2026-10-12): the warp constant replicates
+
+A fresh terbo call, recorded with `EXT=0x4000 PROBE=1 call3.py 2 0 45 0 4.5`:
+caller started at 4.5 s instead of 3 s, **B14 only** instead of B13+B14, so
+the timing (TRN2 at 10.105 s instead of 8.607 s), the echoed word and the
+random payload all differ. The caller framed R3 `0xC990`, answered E
+`0xC99F`, and MICA answered `0xC99F`, exactly as before. `demod/gen.py` now
+finds TRN2 and the lattice rotation itself (it reproduces the first
+recording: TRN at 8.607 s, MSE 0.00017). Second recording: TRN match 300 of
+300, training MSE 0.00017, lattice score 0.43 before refinement.
+
+Radial spacing ratio to the centre, same windowed fit as before
+(`demod/curve2.py`; four estimates per radius, x and y, both signs):
+
+| radius | 0.30 | 0.60 | 0.90 | 1.15 | best V.34-family c |
+|---|---|---|---|---|---|
+| recording 1, original analysis | 1.021 | 1.084 | 1.178 | 1.272 | 0.47 (0.46-0.49) |
+| recording 1, generalised pipeline | 1.025 | 1.089 | 1.184 | 1.279 | 0.49 (0.47-0.50) |
+| recording 2 | 1.022 | 1.084 | 1.182 | 1.279 | 0.48 (0.47-0.50) |
+
+Three fits of c from two different calls agree to 0.02, against V.34's
+prediction of 0.377. The scale-independent product kappa = c x E (E is the
+mean energy of the unwarped points, so an equalizer scale error cancels):
+
+| | c | E (unwarped) | kappa = c x E |
+|---|---|---|---|
+| recording 1 | 0.49 | 0.826 | 0.405 |
+| recording 2 | 0.48 | 0.827 | 0.397 |
+| V.34 | | | 0.3125 |
+
+So the effective constant is **0.40 +-0.01, 27 percent above V.34's 0.3125**,
+and it is not an equalizer-scale artefact (kappa is invariant to it). That
+disposes of the second explanation I left open; a bias in the local-spacing
+estimator on a chirped lattice is still not excluded, but the estimator
+reproduces a flat control and the same curve in two independent calls.
+
+The constellation checks replicate too, and recording 2 is cleaner:
+
+| | recording 1 | recording 2 |
+|---|---|---|
+| lattice score after unwarp | 0.62 | 0.77 |
+| sites >= 0.25 / 0.35 / 0.5 of the mean count (27.3) | 525 / 517 / 509 | **512 / 512 / 512** |
+| sites >= 0.65 | 494 | 499 |
+| rows kept | 26 | 26 |
+| farthest site per 30-degree sector (cells) | 12.7-12.8 | 12.7-12.7 |
+| mean count per site, five radial bands | 26.3 27.1 27.1 28.0 25.8 | 26.3 27.1 27.1 28.2 26.8 |
+
+A plateau of exactly 512 over a threshold range from 0.25 to 0.5 is a direct
+count, not an estimate: **the terbo data constellation has 512 points**,
+equiprobable, in a circular region of radius 12.75 cells, radially warped by
+V.34's nonlinear-encoding function with kappa about 0.40.
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler
