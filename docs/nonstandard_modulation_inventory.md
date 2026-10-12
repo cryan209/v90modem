@@ -361,6 +361,51 @@ polynomial fitted by score, not a recovered formula (V.34's nonlinear
 encoding is a similar idea, but nothing here identifies the function); and
 trellis, rate-to-bits mapping and the B13 = 16800 reading are still inferred.
 
+### Against V.34's nonlinear encoding (2026-10-12)
+
+V.34's nonlinear encoder (clause 9, implemented in `v34tx.c` and exercised by
+`v34_data_test.c`/`v34_phase4_16pt_test.c`) maps each point x to
+`y = x * phi(zeta)`, `zeta = 0.3125 |x|^2 / E`, `phi = 1 + zeta/6 + zeta^2/120`
+(the series of sinh(sqrt zeta)/sqrt zeta), with E the average energy of the
+unwarped constellation. Tested as a one-parameter family `zeta = c r^2`
+against the terbo data (`demod/v34nl*.py`, `v34curve.py`):
+
+**The shape fits.** Measured spacing ratio to the centre (unclipped, Hann-
+windowed local fit along central rows; the control gives 1.000 +-0.004 at every
+radius) against the V.34 family at its best c = 0.48:
+
+| radius (equalizer units) | 0.30 | 0.60 | 0.90 | 1.15 |
+|---|---|---|---|---|
+| measured, radial | 1.020 | 1.089 | 1.178 | 1.275 |
+| V.34 form, c = 0.48 | 1.021 | 1.083 | 1.178 | 1.278 |
+| V.34 form, c = 0.377 (the V.34 value, below) | 1.017 | 1.066 | 1.144 | 1.226 |
+
+Four points, one parameter, agreement to 0.5 percent. The lattice-score fit
+agrees: the best one-parameter V.34 family scores 0.614 (c = 0.46-0.54) against
+0.616 for the free polynomial. The tangential spacing, measured more roughly,
+is 1.015, 1.015 and 1.104 at 0.3, 0.6 and 1.15 against 1.007, 1.027 and 1.091
+predicted at c = 0.48.
+
+**The strength does not match V.34's constant.** V.34 fixes `c = 0.3125 / E`.
+Measured on the unwarped constellation, E = 0.83 (a 512-point disc of radius
+12.75 cells x 0.1010 = 1.288 has E = R^2/2 = 0.829; the unwarped data agree),
+so V.34 predicts **c = 0.377** and a rim zeta of 0.625 for any equiprobable
+disc. The fits want **c = 0.48 (0.46-0.50)**, rim zeta about 0.80, i.e. an
+effective constant `c x E` of **0.40 +-0.03** instead of 0.3125, 27 percent
+stronger. At c = 0.377 the radial misfit is 0.0044 in squared ratio against
+0.0002 at the optimum, about twenty times worse, and the errors are 3-5
+percent where the estimator is good to about 0.5 percent. The lattice score
+alone cannot make this call (0.594 against 0.614, about 1.5 sigma), the
+curves can.
+
+So: **the same nonlinear-encoding family as V.34, with a larger constant
+(about 0.40, perhaps 2/5)**. Not excluded: a bias in the local-spacing
+estimator on a chirped lattice that the flat control cannot reveal, or an
+equalizer scale error (it would shift r and c together); and the 0.40 is one
+measurement from one call. The next test is a second recording, and the
+V.34 field that signals the encoder in MP (Table 23's bit 31) has no terbo
+counterpart that I know of.
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler
