@@ -169,6 +169,10 @@ SPAN_DECLARE(int) v32bis_set_supported_bit_rates(v32bis_state_t *s, int rates);
     the clause 6 dialogue. Default 0. For interop probing of V.32terbo peers. */
 SPAN_DECLARE(int) v32bis_set_rate_signal_extension(v32bis_state_t *s, uint16_t bits);
 
+/*! Probe only: accept an R3 that names its rate with B13/B14 (MICA V.32terbo) and
+    answer with E = that word | 0xF. Default off. */
+SPAN_DECLARE(int) v32bis_set_terbo_probe(v32bis_state_t *s, bool enable);
+
 /*! Build or decode the Table 5 rate signal. */
 SPAN_DECLARE(int) v32bis_build_rate_signal(int rates, uint16_t *word);
 SPAN_DECLARE(int) v32bis_decode_rate_signal(uint16_t word, int *rates);

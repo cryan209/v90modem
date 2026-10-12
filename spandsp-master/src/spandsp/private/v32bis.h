@@ -100,6 +100,9 @@ struct v32bis_state_s
     uint16_t permitted_rates_signal;
     /*! Reserved Table 5 bits (B13/B14) ORed into transmitted rate signals. */
     uint16_t tx_rate_extension;
+    /*! Probe: accept MICA's V.32terbo R3 and answer with a matching E. */
+    bool probe_terbo;
+    uint16_t tx_e_word_override;
 
     /* One §5.2 conditioning sequence, two identical Table 5 words and one
        Table 6 word.  Later reactive phases refill this buffer rather than

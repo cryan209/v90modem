@@ -1852,6 +1852,31 @@ static void startup_finish_word(v32bis_state_t *s)
     }
     else if (s->startup_rx_stage == V32BIS_RX_E)
     {
+        if (s->probe_terbo
+            &&  (word & V32BIS_RATE_SYNC_MASK) == V32BIS_RATE_SYNC_VALUE
+            &&  (word & 0x6000) != 0
+            &&  (word & V32BIS_VALID_RATE_MASK) == 0)
+        {
+            /* Probe only: MICA's V.32terbo R3 (0xC990 when the caller's R2
+               carried B13/B14) names its rate with B13/B14 and no Table 5
+               rate bit.  Answer it with E = the same word with B0-B3 set,
+               the relation Table 6 has to Table 5 (0x9990 / 0x999F). */
+            if (word != s->rx_repeat_word  &&  v32bis_trace())
+                fprintf(stderr, "[V32BIS %s] terbo R3 0x%04x, answering E 0x%04x\n",
+                        s->calling_party ? "call  " : "answer", word, word | 0xF);
+            /*endif*/
+            s->rx_repeat_word = word;
+            s->tx_e_word_override = (uint16_t) (word | 0xF);
+            s->startup_remote_rates = V32BIS_RATE_14400;
+            s->startup_selected_rate = 14400;
+            if (s->reactive_startup
+                &&  (s->tx_phase == V32BIS_TX_PHASE_SILENT  ||  s->tx_phase == V32BIS_TX_PHASE_R))
+                s->tx_released = true;
+            /*endif*/
+            s->startup_rx_word_pos = 0;
+            return;
+        }
+        /*endif*/
         if (word == s->rx_repeat_word)
         {
             /* The far end is still repeating the rate signal while it waits
@@ -2074,6 +2099,32 @@ static int v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
             {
                 older = (uint16_t) (s->startup_rx_slide_bits & 0xFFFF);
                 newer = (uint16_t) (s->startup_rx_slide_bits >> 16);
+                if (s->probe_terbo
+                    &&  older == newer
+                    &&  (newer & V32BIS_RATE_SYNC_MASK) == V32BIS_RATE_SYNC_VALUE
+                    &&  (newer & 0x6000) != 0
+                    &&  (newer & V32BIS_VALID_RATE_MASK) == 0)
+                {
+                    /* Probe only: MICA's V.32terbo R3 (see the E stage). */
+                    if (v32bis_trace())
+                        fprintf(stderr, "[V32BIS %s] terbo R3 0x%04x framed after %d symbols of TRN, answering E 0x%04x\n",
+                                s->calling_party ? "call  " : "answer", newer,
+                                1280 + s->startup_rx_slide_count - 16, newer | 0xF);
+                    /*endif*/
+                    s->startup_rx_first_r = newer;
+                    s->startup_remote_rates = V32BIS_RATE_14400;
+                    s->startup_selected_rate = 14400;
+                    s->rx_repeat_word = newer;
+                    s->tx_e_word_override = (uint16_t) (newer | 0xF);
+                    if (s->reactive_startup
+                        &&  (s->tx_phase == V32BIS_TX_PHASE_SILENT  ||  s->tx_phase == V32BIS_TX_PHASE_R))
+                        s->tx_released = true;
+                    /*endif*/
+                    s->startup_rx_stage = V32BIS_RX_E;
+                    s->startup_rx_word_pos = 0;
+                    return -1;
+                }
+                /*endif*/
                 if (older == newer
                     &&  v32bis_decode_rate_signal(newer, &expected) == 0)
                 {
@@ -2118,6 +2169,11 @@ static int v32bis_startup_symbol_sink(void *user_data, const complexf_t *symbol)
     case V32BIS_RX_E:
         if (startup_power(&z) < 10.0f)
         {
+            if (v32bis_trace())
+                fprintf(stderr, "[V32BIS %s] rx power %.1f < 10 in stage %d at rx symbol %d: back to S search\n",
+                        s->calling_party ? "call  " : "answer", (double) startup_power(&z),
+                        s->startup_rx_stage, s->startup_rx_symbol_count);
+            /*endif*/
             /* The far end has stopped transmitting.  Go back to looking for
                the next conditioning signal rather than framing silence. */
             s->startup_rx_stage = V32BIS_RX_SEARCH_S;
@@ -2587,6 +2643,9 @@ static int v32bis_tx_enter_data(v32bis_state_t *s)
         || v32bis_tx_set_rate(s, rate) != 0
         || v32bis_build_e_signal(rate, &word) != 0)
         return -1;
+    if (s->tx_e_word_override)
+        word = s->tx_e_word_override;
+    /*endif*/
     reg = s->tx_trn_reg;
     diff = s->tx_trn_diff;
     if (v32bis_encode_startup_word(s->calling_party,
@@ -3628,6 +3687,14 @@ static int v32bis_tx_build_word(v32bis_state_t *s, uint16_t *word)
 SPAN_DECLARE(int) v32bis_set_rate_signal_extension(v32bis_state_t *s, uint16_t bits)
 {
     s->tx_rate_extension = bits & 0x6000;
+    return 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_set_terbo_probe(v32bis_state_t *s, bool enable)
+{
+    s->probe_terbo = enable;
+    s->tx_e_word_override = 0;
     return 0;
 }
 /*- End of function --------------------------------------------------------*/

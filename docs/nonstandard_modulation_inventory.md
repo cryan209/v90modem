@@ -199,11 +199,11 @@ Timeline from the recordings (mono time, S29 = 2, caller started at 3 s):
 
 | t | Standard run | Echoed bit (`0x6000`) |
 |---|---|---|
-| 8.4-8.6 s | S, S-bar | same |
-| 8.61-10.48 s | TRN, then R1 | same, identical audio |
-| 10.456 s | audio diverges (our R2 reaches MICA) | |
-| ~10.5 s | R3 `0x9990` x16, E, then dense data | R3 = **`0xC990` x502** (4016 symbols, 1.67 s) |
-| ~12.1 s | | MICA gives up on R3 and goes to a dense signal |
+| 3.5-7.0 s | first sequence: S, S-bar, TRN1, R1 (`0x9FF0`; `0xFFF0` at S29 = 2) | same |
+| 7.0-8.0 s | MICA silent, waiting for our R2 | same |
+| 8.4-8.6 s | second sequence: S, S-bar | same |
+| 8.61-10.46 s | TRN2 (4400+ symbols, exact scrambled ones) | same, identical audio |
+| 10.456 s | R3 `0x9990` x22, E `0x999F`, then dense data | R3 = **`0xC990` x502** if the caller never answers (4016 symbols, 1.67 s) |
 
 `0xC990 ^ 0x9990 = 0x5000`: **the 14400 bit (B12) is cleared and B14 is set.**
 So in terbo mode R3 names the extended rate by B14 instead of B12. Offering
@@ -215,10 +215,43 @@ The most natural reading is B14 = 19200 and B13 = 16800 (higher rate on the
 higher bit), but **that mapping is inferred, not observed**: nothing here
 has measured the data rate.
 
+(Corrected: an earlier version of this table put R1 and R3 in one sequence; the
+caller's trace shows R1, a silence of about a second while MICA waits for R2,
+then a second S/S-bar/TRN of 4464 symbols before R3. The audio agrees.)
+
 MICA repeats R3 until it sees E and, getting none (SpanDSP does not accept
 `0xC990` as a valid rate signal, so the caller never sends E), times out
 after about 1.67 s. The caller side therefore stalls at R3, not at R1/R2: the
 gate (a terbo bit in R2) and the answer (`0xC990`) are both understood now.
+
+### Answering with E `0xC99F` (probe caller, 2026-10-12)
+
+`v32bis_set_terbo_probe()` (default off) makes the caller accept an R3 that
+names its rate by B13/B14 only, in the TRN-to-R framing stage and the E
+stage, and answer with E = that word | `0xF`. The caller's receiver also
+traces when it drops back to S search (`V32BIS_TRACE=1`: "rx power ... back to
+S search"); that is the normal silence after R1, seen in the standard run too.
+
+Against S29 = 2 with `EXT=0x6000`:
+
+- the caller frames `0xC990` after 4464 symbols of TRN2, exactly as it frames
+  `0x9990` in the standard run, and sends **E `0xC99F`**;
+- MICA answers with its own **E `0xC99F`** at the same position as the
+  standard `0x999F`. So MICA accepted the terbo rate selection and left the
+  rate negotiation: E-for-E mirrors the standard dialogue;
+- after E, MICA runs at 2400 baud like the standard run, and its audio is the
+  standard run's until 10.456 s. The symbol-power kurtosis (E|s|^4 over
+  (E|s|^2)^2 of the demodulated symbols, best sampling instant) is **1.363**
+  for the standard 14400 run (what a 128-point cross constellation gives) and
+  **1.41-1.42** for the terbo run: a different constellation, not noise at the
+  same density. Uniform square QAM tops out near 1.40, so a value above that
+  also says the points are not uniformly spread (non-uniform amplitudes, or
+  our equalizer-less demodulator's ISI adding to it).
+
+Not established: the data rate. SpanDSP has no constellation for it, so the
+caller's data-mode receiver does not lock (`done` stays 0) and no payload is
+read. The next measurement is an equalized, decision-directed constellation
+of MICA's data signal, from which the number of points follows.
 
 ## Next steps, in order of what could actually be lifted
 
