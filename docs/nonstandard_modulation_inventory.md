@@ -504,6 +504,56 @@ its 128-point lattice is the obvious first candidate to adapt. The scrambler
 is not accounted for either (it sits before the coder, so it does not affect
 this test).
 
+
+### The coder is V.32bis's 8-state coder (2026-10-13)
+
+Fitting (`demod/minimize.py`, `replay_rec1.py`, `cmp_map.py`). Not found by
+guessing: a first fit of the spandsp table to the labels at chance (50 percent)
+because it assumed a particular output bit and a fixed label-to-dibit map.
+Found by inference instead:
+
+1. Label each sliced symbol with Ungerboeck bits (z0, z1, z2) for the chain
+   Z^2 > RZ^2 > 2Z^2 > 2RZ^2 (z0 is the checkerboard parity).
+2. The next z0 is a deterministic function of the previous three full labels
+   (128 histories; 620 of 13997 symbols disagree with the majority, the slicing
+   noise).
+3. Moore-minimise that function over the 8 possible next labels: **exactly 8
+   states**, consistent for all 128 histories. Output z0 is a function of the
+   state alone; the other two label bits (z1, z2) drive the transition, four
+   ways from every state.
+4. Compare with the V.17 / V.32bis coder in `spandsp-master/src/v32bis.c`
+   (`convolutional[8][4]`, `s' = conv[s][d]`, Y0 = bit 2 of s' = bit 0 of s).
+   The recovered machine is **isomorphic to it**: four isomorphisms exist
+   (they differ only by the unobservable initial state and Y0 polarity), and
+   they require the dibit d to be assigned to the lattice cosets with a
+   different permutation in the Y0 = 0 and Y0 = 1 classes. With a single
+   permutation for both classes there is no isomorphism, and the graph does not
+   match with output bits 1 or 2 either.
+5. Replaying `conv` directly on the sliced labels predicts Y0 correctly for
+   **94.6 percent of 14000 symbols (recording 2) and 86.2 percent (recording 1,
+   noisier slicing, after a 90-degree lattice rotation)**, against 51 percent
+   for the same labels in shuffled order. The shortfall is the model's recovery
+   after a mis-sliced symbol (memory three), not a different code: the 128
+   history rows have no inconsistent entry.
+
+So the terbo trellis is V.32bis's 8-state rate-2/3-style convolutional coder
+operating on a 512-point lattice, with 8 data bits + 1 code bit = 19200 bit/s
+(B14).
+
+What differs from V.32bis, and what is not shown:
+
+- V.32bis's own subset labelling is not periodic on any index-8 sublattice (its
+  (d, Y0) labels are not a function of any coset: `demod/cmp_map.py`), whereas
+  MICA's lattice is labelled by cosets of 2RZ^2. So the point-to-label map is not
+  the V.32bis one, even though the coder is. The per-class dibit permutations
+  are determined only up to the four isomorphisms.
+- The differential encoder in front of the coder (V.32bis Table 3) and the
+  scrambler are not yet checked; the replay uses d as read off the labels, so
+  it tests the convolutional part only. Undoing the differential encoder is the
+  next step, and the first test that the descrambled bit stream is sensible.
+- Initial state, and the mapping of the remaining uncoded bits (the other 6 of
+  8 data bits) to the position inside a coset, are unexamined.
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler
