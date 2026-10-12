@@ -869,6 +869,58 @@ half-second is all the call gives), and a longer decode needs the retrain
 understood first. Whether MICA's receiver accepts the terbo transmitter is
 untested: nothing observable depends on it yet.
 
+
+### What triggers the retrain at STEADY: MICA's own speed shift (2026-10-13)
+
+`SS_RETRAINING` is a **speed shift**. MICA starts one about 0.5 s after STEADY
+when it judges its receive quality at the negotiated rate to be too poor, and
+the quality is poor because **its receiver cannot decode any trellis-coded
+signal from the SpanDSP caller**. Nothing about the terbo constellation is
+involved.
+
+Evidence (all in MicaEmu's C++ board, S29 = 3 plain V.32bis unless said):
+
+1. **Sequence.** The i960 sends the DSP commands `0x90` (17.050 s) and `0xAB`
+   (17.060 s, with STEADY); the DSP echoes `0xAB`, 515 ms later posts `0xA3`,
+   10 ms after that `0x0884` (`0x84`, parameter 8), and the i960 enters
+   SS_RETRAINING. Sending `0x90` + `0xAB` by hand in `--no-interrupts` mode (no
+   STEADY) does nothing: the commands are not sufficient, the DSP then
+   decides from what it has measured. (`DSPCMD_AT=` in the patched mica_line.)
+2. **What it received is garbage for every trellis rate and clean for 4800.**
+   MICA's received words (C53 writes at `0xFEFFE98C...`, read with `mica_trace
+   --events`) for a caller that sends scrambled marks: **4800 bit/s (no trellis):
+   1.000 ones, exactly right**; 7200 / 9600 / 12000 / 14400: 0.65 / 0.62 / 0.59 /
+   0.53 ones. The garbage has no linear relation to what was sent (cross-
+   correlation against the transmitted scrambled bits at every lag: chance;
+   Berlekamp-Massey linear complexity of 1200 bits: 599, i.e. random), so it is
+   not a wrong descrambler, and it does not depend on the caller's level (gain
+   0.5, 1, 2 give the same). MICA's own transmission is fine in the other
+   direction: SpanDSP decodes MICA's 14400 data as all ones. So MICA's
+   trellis/Viterbi receive path is the failing piece, either an emulation fault
+   or a convention that differs from SpanDSP's transmitter. Same symptom as the
+   V.90 upstream "open boundary" in `handoff.md`.
+3. **Shift needs somewhere to go.** With the caller offering a single rate (5
+   runs, 4800 / 7200 / 9600 / 12000 / 14400 each alone, 34 s) there is no
+   retrain at all. Offering two: 12000 + 4800 shifts down once (STEADY at 17.06
+   s, STEADY again at 17.74 s, then 43 s at 4800 with clean receive), 7200 + 4800
+   likewise, and 14400 + 4800 / 9600 + 4800 / 14400 + 9600 + 4800 retrain every
+   ~8 s, because SpanDSP's caller cannot follow a shift down and re-trains at
+   the same rate.
+4. **The terbo case.** With S29 = 2, the same caller offering no terbo bit and a
+   single rate (14400) is steady for 36 s. Any terbo bit in R (B13, B14 or
+   both, with or without a single plain rate, probe on or off) retrains: the
+   terbo offer gives MICA lower rates to move to, and its receive is bad.
+
+So the control that matters is the **rate set offered**: `RATES=0x1000` with no
+extension keeps MICA up, but then it transmits plain V.32bis, not terbo. For a
+long terbo-mode call the receiver fault has to be understood (why does MICA's
+Viterbi path decode noise from a conforming caller?), or MICA's speed shift
+disabled; a MICA setting for the latter has not been looked for.
+
+(Aside, from the same runs: STEADY comes at 22.13 s instead of 17.06 s whenever
+the caller's rate set is a single trellis rate of 14400, 9600 or 7200. That is
+the 5 s V.42 detection running twice; not looked at.)
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler

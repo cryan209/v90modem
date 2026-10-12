@@ -15,7 +15,8 @@
 static v32bis_state_t *s;
 static uint8_t *pay; static long paylen, pos; static int bitn;
 static int get_bit(void *u){(void)u; if(!pay||pos>=paylen) return 1; int b=(pay[pos]>>bitn)&1; if(++bitn==8){bitn=0;pos++;} return b;}
-static void put_bit(void *u,int b){(void)u;(void)b;}
+static long pb_ones,pb_total;
+static void put_bit(void *u,int b){(void)u; if(b==0||b==1){pb_total++; pb_ones+=b;}}
 static int rd(int fd,uint8_t*b,int n){int g=0;while(g<n){int r=read(fd,b+g,n-g);if(r<=0)return 0;g+=r;}return 1;}
 int main(int argc,char**argv){
   double start=argc>1?atof(argv[1]):4.5; int ext=argc>2?(int)strtol(argv[2],0,0):0; int probe=argc>3?atoi(argv[3]):0;
@@ -26,7 +27,7 @@ int main(int argc,char**argv){
     double t=blk*0.02; blk++;
     if(!on && t>=start){
       s=v32bis_init(NULL,14400,1,get_bit,NULL,put_bit,NULL);
-      v32bis_set_supported_bit_rates(s,0x1260);
+      v32bis_set_supported_bit_rates(s,getenv("RATES")?(int)strtol(getenv("RATES"),0,0):0x1260);
       v32bis_start_tones(s);
       v32bis_set_rate_signal_extension(s,(uint16_t)ext); v32bis_set_terbo_probe(s,probe!=0);
       if(getenv("TERBO_TX")){int iso=0,k=0,m=0; sscanf(getenv("TERBO_TX"),"%d,%d,%d",&iso,&k,&m); fprintf(stderr,"terbo tx iso %d quarter-turns %d mirror %d: %d\n",iso,k,m,v32bis_set_terbo_tx(s,true,iso,k,m!=0));}
@@ -36,8 +37,9 @@ int main(int argc,char**argv){
     else{
       for(int i=0;i<160;i++)a[i]=ulaw_to_linear(in[i]);
       v32bis_rx(s,a,160); v32bis_tx(s,a,160);
+      if(getenv("GAIN")){double g=atof(getenv("GAIN")); for(int i=0;i<160;i++){double v=a[i]*g; a[i]=v>32767?32767:(v<-32768?-32768:(int16_t)v);}}
       for(int i=0;i<160;i++)out[i]=linear_to_ulaw(a[i]);
-      if(blk%50==0) fprintf(stderr,"[%5.2fs] caller rate=%d done=%d\n",t,v32bis_current_bit_rate(s),v32bis_startup_complete(s));
+      if(blk%50==0) fprintf(stderr,"[%5.2fs] caller rate=%d done=%d rx bits %ld ones %.3f\n",t,v32bis_current_bit_rate(s),v32bis_startup_complete(s),pb_total,pb_total?(double)pb_ones/pb_total:0.0); pb_total=pb_ones=0;
     }
     if(write(out_fd,out,160)!=160)break;
   }

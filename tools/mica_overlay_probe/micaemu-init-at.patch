@@ -1,5 +1,5 @@
 --- /Users/scottcryan/MicaEmu/native/mica_line.cpp	2026-09-27 20:52:15
-+++ /private/tmp/claude-501/-Users-scottcryan-v90modem/b442a30f-0d70-488d-a0ac-3b8d09113582/scratchpad/rig/native/mica_line.cpp	2026-10-13 12:11:32
++++ /private/tmp/claude-501/-Users-scottcryan-v90modem/b442a30f-0d70-488d-a0ac-3b8d09113582/scratchpad/rig/native/mica_line.cpp	2026-10-13 12:38:10
 @@ -152,6 +152,7 @@
      bool realtime = false, idle_skip = true, interrupts = true, result_codes = false;
      int prime_blocks = PRIME_BLOCKS, dte_fd = -1;
@@ -57,6 +57,36 @@
          if(!board.configure_call(0, false))
              throw std::runtime_error("channel 0 host queue is occupied");
          board.run(CALL_SETUP_INSTRUCTIONS);
+@@ -287,6 +316,29 @@
+                     std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(ahead - lead_ms));
+             }
+             board.run(LINK_RUN_SLICE);
++            if(const char *dc = std::getenv("DSPCMD_AT")) {   // "seconds:hexcmd[,seconds:hexcmd...]"
++                static std::vector<std::pair<double, unsigned>> pending;
++                static bool parsed = false;
++                if(!parsed) {
++                    parsed = true;
++                    std::string text = dc;
++                    size_t pos = 0;
++                    while(pos < text.size()) {
++                        size_t comma = text.find(',', pos);
++                        std::string item = text.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
++                        size_t colon = item.find(':');
++                        pending.push_back({std::stod(item.substr(0, colon)), (unsigned)std::stoul(item.substr(colon + 1), nullptr, 16)});
++                        if(comma == std::string::npos) break;
++                        pos = comma + 1;
++                    }
++                }
++                while(!pending.empty() && call_time() >= pending.front().first) {
++                    const bool ok = board.dsp_command(0, uint16_t(pending.front().second), {0});
++                    std::fprintf(stderr, "DSPCMD %02x at %.3f s: %s\n", pending.front().second, call_time(), ok ? "sent" : "queue busy");
++                    if(ok) pending.erase(pending.begin());
++                    else break;
++                }
++            }
+             // The character stream, between run slices.
+             dte.service(board, 0);
+             const std::vector<uint8_t> &tx = core.g711_tx();
 --- /Users/scottcryan/MicaEmu/native/mica_dte.cpp	2026-09-27 20:52:15
 +++ /private/tmp/claude-501/-Users-scottcryan-v90modem/b442a30f-0d70-488d-a0ac-3b8d09113582/scratchpad/rig/native/mica_dte.cpp	2026-10-13 11:55:49
 @@ -162,7 +162,7 @@
