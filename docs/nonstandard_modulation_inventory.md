@@ -253,6 +253,61 @@ caller's data-mode receiver does not lock (`done` stays 0) and no payload is
 read. The next measurement is an equalized, decision-directed constellation
 of MICA's data signal, from which the number of points follows.
 
+### Counting MICA's terbo constellation (equalized, 2026-10-12)
+
+Method (`tools/mica_overlay_probe/demod/`, pure Python): resample the 1800 Hz
+baseband to T/2 with a windowed sinc (the first cubic interpolator left too
+much noise), train a 32-tap fractionally spaced LMS equalizer with a carrier
+PLL on the **known** second TRN (4400 symbols, scrambled ones; mirror=True
+state order; after aligning on a correlation peak 3 half-samples in, the
+training MSE is 0.0002), keep those weights through the data that follows,
+then refine them decision-directed against a lattice. Lattice parameters come
+from a 2-D Fourier scan over spacing and rotation, which does not need the
+carrier tracked first (the 4th-power tracker is unreliable on dense
+constellations).
+
+Control (the standard 14400 run, mono time 11.5-17.5 s):
+
+| | |
+|---|---|
+| lattice spacing d | 0.2256, rotation 12-16 deg to the TRN frame, odd lattice (offset 0.5 d) |
+| lattice score | 0.94 (1.0 = perfect); rms distance to nearest site 0.08 d |
+| occupied sites | **128**, the same at every threshold from 0.1 to 0.5 of the mean |
+| rows and columns | **12 and 12**, exactly the V.32bis 128-point cross |
+| ranked-occupancy knee | at rank 126-128 |
+| 6P/d^2 + 1 | 124 (3 percent under the true 128) |
+
+Terbo run (S29 = 2, caller echoing B13/B14, after E `0xC99F`), same method:
+
+| | |
+|---|---|
+| symbol rate, carrier | 2400 baud, 1800 Hz (unchanged) |
+| lattice spacing d | **0.105-0.110**, same orientation (12 deg), same odd offset; the secondary peak at 0.075 and 57 deg is the lattice diagonal d/sqrt(2), not a finer lattice |
+| mean power | 1.00 against 1.05 for the standard run (same equalizer scale) |
+| 6P/d^2 + 1 | **525-545** (about 560 after the control's 3 percent) |
+| rows / columns | about 28 blurred, edge counts taper over about 8 rows |
+| sites above half the typical count | 513 (577 at 0.3, 603 at 0.1) |
+| knee | none: occupancy falls smoothly from 41 to 9 between rank 0 and 580 |
+
+So the data constellation has **roughly four times as many points as the
+standard 128, most consistent with 512** (9 bits per symbol). 256 is excluded
+(it would need d = 0.153) and so is 1024 (d = 0.077). With V.32bis's one
+trellis bit that is 8 data bits per symbol: **8 x 2400 = 19200 bit/s**, which
+fits B14 = 19200 and gives B13 = 16800 (7 data bits, 256 points) by elimination
+of the neighbours. If MICA's terbo mode used no trellis, 9 data bits would be
+21600; nothing here distinguishes the two.
+
+What this does not show:
+
+- **No cell-exact count.** The terbo clusters never resolve: rms distance to
+  the nearest site stays at 0.3 d. Borrowing the equalizer that converged on
+  the standard run changed nothing, so it is not equalizer error. A single
+  uniform lattice may be the wrong model (warping, shaping or precoding would
+  broaden every peak); I tried a radius-split spacing fit, but it is invalid
+  for truncated sets and gave nothing.
+- The estimate is a power/spacing one, good to about 5-10 percent, not a count.
+- B13/B14 to 16800/19200 and the trellis question remain inferred.
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler
