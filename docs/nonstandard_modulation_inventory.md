@@ -57,6 +57,33 @@ false positives: `4B00` is a `bit 11,@00` opcode, not a rate. Carrier
 constants (1920 in 7E, 3000 in 80, 1180/600 in 8A and 90) are weak hints,
 not identifications. Do not read 7E as V.32terbo from this note.
 
+## Live overlay probe (2026-10-12)
+
+Setting: the "Modulation Standards" parameter is **S29** (`ATS29=n`; `%29M`
+in the help strings). 0 V.34+ with terbo, 1 V.34+ no terbo, 2 V.32terbo,
+3 V.32bis, 4 V.22bis, 5 K56flex 1.1, 6 V.90 (default). Probe: MicaEmu
+`Module` with the linked C53, `ATS29=n`, `configure_call` + `start_answer`,
+`core.set_coverage(True)`, then `first_exec()` of each loader stub. No peer
+was attached, so this shows only what the answerer loads before negotiation.
+
+| S29 | Stubs hit in 30M instructions |
+|---|---|
+| 0, 1, 2, 3, 4, 5, 6 | `2C05` only, taking the 8E/8F branch (cycle 21.50M for 2-4 and 6, 21.52M for 1 and 5) |
+| 2 and 3, run 250M | additionally `2BE7` (7E/7F) at cycle 154,087,137, identical for both |
+
+Conclusions, and their limits:
+
+- **No terbo-specific overlay is selected by S29.** V.32terbo (2) and V.32bis
+  (3) load the same overlays at the same cycles. Any terbo behaviour must live
+  inside 8E/8F (rate mask or R-word table) or in a later stage.
+- Every setting starts the answer in 8E/8F, so 8E is the generic answer
+  overlay, not only V.32bis; the earlier "8E is V.32bis" wording is true of
+  its transmitter and gates, not of how it is selected.
+- 7E/7F loads at the same late cycle for both, which points to an
+  answer-timeout/fallback path rather than a modulation. Not verified.
+- Untested: a calling peer. With a V.32 AA/AC or V.8 CM tone fed in, the
+  negotiated stage may load others. 90/91, 8A/8B and 80/81 never loaded here.
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler
@@ -64,8 +91,9 @@ not identifications. Do not read 7E as V.32terbo from this note.
    8880/888F headers and 5/23, 18/23 descramblers). 7E/7F, 80/81, 8A/8B and
    90/91 are the candidates for V.32terbo, V.22bis and V.34. That settles
    whether MICA holds a V.32terbo datapump we could lift.
-2. Run MicaEmu with `%15S2` set (V.32terbo automode) and watch which loader
-   stub fires; the stub identifies the overlay without disassembly.
+2. Done without a peer (see above): inconclusive. Repeat with a V.32 calling
+   tone or V.8 CM injected through `queue_g711_rx` so the answerer actually
+   negotiates, and with ATS29=2 vs 3 compared.
 3. Only then decide on a V.32terbo datapump. The rate signalling (R words
    above 14400) is not in any ITU document here, so without MICA or Courier
    code we cannot write it from a spec.
