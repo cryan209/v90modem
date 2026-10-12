@@ -172,11 +172,53 @@ at 3 s, `EXT` is the bits sent in R2:
   and the caller never frames an R3. SpanDSP can only frame the standard
   sequence, so what MICA sends after R2 is **not decoded**. I do not know
   whether it is a 16800/19200 R3, a longer training, or an error path.
+- (Superseded by the demodulation below: what MICA sends is R3 `0xC990`.)
 - So the handshake gate is found (terbo needs a terbo bit in the caller's
   R2) but the terbo continuation is not read. Next: capture MICA's lane-0
   audio for that call (`call3.py` writes `mono_<S29>_<EXT>.bin` as G.711) and
   analyse it by hand with a 4-point symbol demodulator at 2400 baud, 1800 Hz,
   starting around 8 s, to see what replaces R3.
+
+### What replaces R3: `0xC990` (demodulated, 2026-10-12)
+
+`tools/mica_overlay_probe/demod/` is a small pure-Python V.32bis demodulator
+for MICA's lane-0 audio: mix down from 1800 Hz, 61-tap low-pass, symbol
+timing from the 2400 Hz line in |z|^2 (sampling offset 0.75), 4th-power
+carrier tracking kept continuous across blocks, then SpanDSP's own startup
+word decoding (differential decoder, 23-bit self-synchronising descrambler,
+tap 4 for the answerer). Validated on the standard run: S (`0xAAAA` x 21),
+S-bar (`0x3333` x 29), **TRN matches the scrambled-ones sequence for 4400
+consecutive symbols with no errors**, then `0x9990` (R3 selecting 14400)
+exactly as SpanDSP's trace reports. Pitfalls found on the way: the state
+numbering needs the mirrored constellation order (`[0,2,3,1]`; the obvious
+order matches only 50 percent of TRN), and the per-block 4th-power
+derotation must be unwrapped against the previous block or differential
+decoding breaks at every block edge.
+
+Timeline from the recordings (mono time, S29 = 2, caller started at 3 s):
+
+| t | Standard run | Echoed bit (`0x6000`) |
+|---|---|---|
+| 8.4-8.6 s | S, S-bar | same |
+| 8.61-10.48 s | TRN, then R1 | same, identical audio |
+| 10.456 s | audio diverges (our R2 reaches MICA) | |
+| ~10.5 s | R3 `0x9990` x16, E, then dense data | R3 = **`0xC990` x502** (4016 symbols, 1.67 s) |
+| ~12.1 s | | MICA gives up on R3 and goes to a dense signal |
+
+`0xC990 ^ 0x9990 = 0x5000`: **the 14400 bit (B12) is cleared and B14 is set.**
+So in terbo mode R3 names the extended rate by B14 instead of B12. Offering
+B13 alone, B14 alone or both (`EXT` = `0x2000`, `0x4000`, `0x6000`) gave the
+same MICA behaviour, and its power after 20 s was identical, so MICA picked
+the same rate each time; with only B13 offered it still answered B14, which
+means the answerer chose its own best terbo rate rather than echoing ours.
+The most natural reading is B14 = 19200 and B13 = 16800 (higher rate on the
+higher bit), but **that mapping is inferred, not observed**: nothing here
+has measured the data rate.
+
+MICA repeats R3 until it sees E and, getting none (SpanDSP does not accept
+`0xC990` as a valid rate signal, so the caller never sends E), times out
+after about 1.67 s. The caller side therefore stalls at R3, not at R1/R2: the
+gate (a terbo bit in R2) and the answer (`0xC990`) are both understood now.
 
 ## Next steps, in order of what could actually be lifted
 

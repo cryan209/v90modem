@@ -20,3 +20,9 @@ Framing that matters (`mica_line.cpp`): answer with `dsp_command(0, 0xA0, [0])`;
 channel 0 is the even lane of `g711_tx()`; feed each received sample into both
 lanes; hand 160-octet blocks over between 100,000-instruction slices. Scripts
 moved from scratch space keep rewritten paths and were not re-run afterwards.
+
+`demod/` reads the G.711 files `call3.py` saves (`mono_<S29>_<EXT>.bin`):
+`ext_decode.py FILE SECONDS` finds the TRN, reports where it ends and decodes
+the 16-bit words after it at all eight alignments. `dem.py` is the front end,
+`words.py`/`trn.py` the state and word layers. Pure Python, no numpy; about a
+minute per 4 s of audio. The state order is the mirrored `[0,2,3,1]`.
