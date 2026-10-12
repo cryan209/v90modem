@@ -121,8 +121,8 @@ without displacing preceding records. The dashboard shows the latest lines;
 it is not a capture/archive browser.
 
 The native Audio tab shows an RX amplitude histogram and a Hann-windowed
-spectrum (62.5 Hz bins, relative magnitude). A yellow marker and numeric label
-show the live receiver carrier estimate from SpanDSP where available. Carrier
+spectrum computed with a radix-2 FFT (62.5 Hz bins, relative magnitude).
+A yellow marker and numeric label show the live receiver carrier estimate from SpanDSP where available. Carrier
 mixing removes the passband carrier to form baseband I/Q; a constellation
 alone does not show its absolute frequency.
 
@@ -146,8 +146,8 @@ subtraction. V.61 §5.1 specifies its carrier and modulation rate.
 The native Waterfall tab shows RX and TX together in the existing diagnostic
 area, without enlarging the window. Frequency runs from 0 to 4000 Hz;
 newest rows appear at the top. Each row uses the latest 256 samples with a
-Hann window and 129 bins (31.25 Hz spacing). Colour is fixed from −90 to
-0 dBFS, rather than normalized per row, so level changes remain visible.
+Hann window and a radix-2 FFT with 129 bins (31.25 Hz spacing). Colour is
+fixed from −90 to 0 dBFS, rather than normalized per row, so level changes remain visible.
 Yellow lines mark the recovered RX / nominal TX carrier where available.
 Each direction holds exactly 128 rows in memory, overwriting old rows.
 Duplicate sample counters add no rows; call reset clears the display, and

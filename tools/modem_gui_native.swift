@@ -3,6 +3,41 @@
 import AppKit
 import AVFoundation
 
+// Display-only radix-2 FFT. Folding windowed samples modulo size preserves
+// the old spectrum's frequency grid even when a snapshot exceeds that size.
+func spectrumMagnitudes(_ samples: [Double], size: Int) -> [Double] {
+    precondition(size >= 2 && size & (size-1) == 0)
+    var re = [Double](repeating: 0, count: size)
+    var im = re
+    for (i, value) in samples.enumerated() {
+        let window = 0.5-0.5*cos(2*Double.pi*Double(i)/Double(max(1,samples.count-1)))
+        re[i % size] += value*window
+    }
+    var j = 0
+    for i in 1..<size {
+        var bit = size >> 1
+        while j & bit != 0 { j ^= bit; bit >>= 1 }
+        j ^= bit
+        if i < j { re.swapAt(i,j); im.swapAt(i,j) }
+    }
+    var length = 2
+    while length <= size {
+        let half = length/2
+        for k in 0..<half {
+            let angle = -2*Double.pi*Double(k)/Double(length)
+            let wr = cos(angle), wi = sin(angle)
+            for start in stride(from: 0, to: size, by: length) {
+                let a = start+k, b = a+half
+                let tr = wr*re[b]-wi*im[b], ti = wr*im[b]+wi*re[b]
+                re[b] = re[a]-tr; im[b] = im[a]-ti
+                re[a] += tr; im[a] += ti
+            }
+        }
+        length *= 2
+    }
+    return (0...size/2).map { hypot(re[$0],im[$0]) }
+}
+
 let rxColor = NSColor.systemTeal
 let txColor = NSColor.systemOrange
 
@@ -63,15 +98,7 @@ final class SignalPlot: NSView {
             if kind == .histogram {
                 for sample in samples { bins[min(63,max(0,Int((sample+32768)/1024)))] += 1 }
             } else if !samples.isEmpty {
-                for k in 0..<64 {
-                    var re = 0.0, im = 0.0
-                    for (i,v) in samples.enumerated() {
-                        let win = 0.5-0.5*cos(2*Double.pi*Double(i)/Double(max(1,samples.count-1)))
-                        let angle = 2*Double.pi*Double(k)*Double(i)/128
-                        re += v*win*cos(angle); im -= v*win*sin(angle)
-                    }
-                    bins[k] = sqrt(re*re+im*im)
-                }
+                bins = Array(spectrumMagnitudes(samples, size: 128).prefix(64))
             }
             let peak = max(1,bins.max() ?? 1)
             color.setFill()
@@ -154,14 +181,9 @@ final class Waterfall: NSView {
         let signal = Array(samples.suffix(Self.fftSize))
         let window = (0..<Self.fftSize).map { 0.5-0.5*cos(2*Double.pi*Double($0)/Double(Self.fftSize-1)) }
         let weight = window.reduce(0,+)
+        let magnitudes = spectrumMagnitudes(signal, size: Self.fftSize)
         for k in 0..<Self.bins {
-            var re = 0.0, im = 0.0
-            for i in 0..<Self.fftSize {
-                let angle = 2*Double.pi*Double(k*i)/Double(Self.fftSize)
-                let v = signal[i]*window[i]
-                re += v*cos(angle); im -= v*sin(angle)
-            }
-            let amplitude = sqrt(re*re+im*im)*(k == 0 || k == Self.bins-1 ? 1 : 2)/weight/32768
+            let amplitude = magnitudes[k]*(k == 0 || k == Self.bins-1 ? 1 : 2)/weight/32768
             levels[next][k] = max(-90,min(0,20*log10(max(1e-12,amplitude))))
         }
         next = (next+1)%Self.rows; held = min(Self.rows,held+1); needsDisplay = true
