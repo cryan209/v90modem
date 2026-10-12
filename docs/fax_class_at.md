@@ -946,3 +946,32 @@ now pass in both directions. Same-class 2.1 calls still attach T.30 Annex F
 to the V.34 control channel at 14400 bit/s. The existing fast-list
 `fax-v34-test` group passed all 11 checks across both G.711 laws and 80/160
 sample callbacks. These local checks do not establish hardware interop.
+
+## Reusing a selected fax class across calls (2026-10-12)
+
+The expanded localhost test kept both modem processes and their selected
+classes alive for successive documents. After an explicit ATH and confirmed
+SIP teardown, the second mixed-class ECM call still failed: `phase_b_done`
+and receive-page counters survived the first disconnect. `+FDT` could answer
+CONNECT before the new call negotiated, and `+FDR` could skip the new page.
+The new transmit/receive regressions keep FCLASS selected instead of
+reselecting it between calls; they failed nine checks before the fix.
+
+T.32 8.3.3/8.3.4 and Table 16 apply to each call. `call_state_reset()` now
+clears phase-B, page-accounting, transfer, interrupt, polling and role state
+on disconnect and at initial class selection. Configured +FIS, +FBO, +FNR
+and identifiers remain intact, and the final hangup status/report queue is
+retained. The regression checks configuration persistence as well as phase-B
+ordering and the decoded received image. It now passes.
+
+Expanded validation passed all 16 full-page production-engine combinations
+(Class 1/2.1, A4/Letter, A-law/u-law, 80/160-sample callbacks), 14 fast fax
+regressions and 10 non-V.8 data-fallback tests. Additional production SIP/RTP
+calls carried three A4 pages at 28800 bit/s, two Letter pages through mixed
+classes at 9600 bit/s, and two A4 pages at 4800 bit/s. All four +FBO values
+were exercised, with exact decoded pixels in both the received TIFF and DTE
+stream. Repeated mixed-class and V.34 calls switched TX/RX roles on the same
+process pair; distinct source images in successive calls checked that old
+spooled data was not replayed. The fax-work harness exposes --height, --pages,
+--rate-codes, --bit-orders, --page-delay, --calls and --alternate-direction.
+It explicitly hangs up and waits for SIP teardown before redialling.

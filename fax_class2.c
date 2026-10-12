@@ -2075,6 +2075,45 @@ void fc2_release(void)
     pthread_mutex_unlock(&fc2_mtx);
 }
 
+/* T.32 8.3.3/8.3.4 and Table 16: phase B and page accounting belong to
+ * one call, not to the lifetime of a selected service class. Caller holds
+ * fc2_mtx. Keep configured parameters and the final +FHS/report queue. */
+static void call_state_reset(void)
+{
+    rx_pages_done = 0;
+    rx_pages_given = 0;
+    rx_page_rows = 0;
+    rx_page_bad_rows = 0;
+    rx_page_bad_run = 0;
+    dcs_ecm_64 = 0;
+    retransmit_wanted = 0;
+    phase_b_done = 0;
+    fdt_await_connect = 0;
+    tx_pages_sent = 0;
+    tx_tiff_ready = 0;
+    dte_mode = FC2_IDLE;
+    interrupt_requested = 0;
+    interrupt_negotiated = 0;
+    orderly_abort = 0;
+    fct_deadline = 0;
+    doc_pages = 0;
+    doc_pages_sent = 0;
+    doc_complete = 0;
+    page_ppm = T32_PPM_EOP;
+    calling_party = 0;
+    fdr_pending = 0;
+    fdt_await_page = 0;
+    dte_saw_dle = 0;
+    remote_pollable = 0;
+    have_fet = 0;
+    pending_fet = 0;
+    dtc_seen = 0;
+    dtc_refused = 0;
+    last_ident_fcf = 0;
+    fax_connection_reported = 0;
+    rx_samples = 0;
+}
+
 void fc2_select(int on)
 {
     pthread_mutex_lock(&fc2_mtx);
@@ -2082,26 +2121,7 @@ void fc2_select(int on)
         params_reset();
         make_temp_name(rx_tiff, sizeof(rx_tiff), "rx");
         unlink(rx_tiff);
-        rx_pages_done = 0;
-        rx_pages_given = 0;
-        rx_page_rows = 0;
-        rx_page_bad_rows = 0;
-        rx_page_bad_run = 0;
-        dcs_ecm_64 = 0;
-        retransmit_wanted = 0;
-        phase_b_done = 0;
-        fdt_await_connect = 0;
-        tx_pages_sent = 0;
-        tx_tiff_ready = 0;
-        dte_mode = FC2_IDLE;
-        interrupt_requested = 0;
-        interrupt_negotiated = 0;
-        orderly_abort = 0;
-        fct_deadline = 0;
-        doc_pages = 0;
-        doc_pages_sent = 0;
-        doc_complete = 0;
-        page_ppm = T32_PPM_EOP;
+        call_state_reset();
         report_len = 0;
         spool_abandon();
     } else if (!on && selected) {
@@ -2179,7 +2199,7 @@ void fc2_on_disconnected(void)
     session_stop();
     /* A document the DTE never finished belongs to the call that ended. */
     spool_abandon();
-    dte_mode = FC2_IDLE;
+    call_state_reset();
     pthread_mutex_unlock(&fc2_mtx);
 }
 

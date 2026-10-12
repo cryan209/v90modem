@@ -997,6 +997,9 @@ static void test_parameters(void)
     check(dte_saw("ERROR"), "AT+FBS= is refused");
 }
 
+/* Retain the selected service class across a completed call. */
+static int reuse_selection_once;
+
 /* Class 2.0 sends a page (T.32 8.3.3) to a plain fax terminal. */
 static void test_transmit(int fbo, int ec)
 {
@@ -1011,8 +1014,17 @@ static void test_transmit(int fbo, int ec)
            external_class1 ? "1 DTE" : external_class21 ? "2.1" : "2.0", fbo, ec);
 
     unlink(PEER_RX);
-    fc2_select(0);
-    fc2_select(external_class21 ? 2 : 1);
+    if (reuse_selection_once) {
+        printf("  reusing the selected fax class after disconnect\n");
+        reuse_selection_once = 0;
+        dte_reset();
+        at("AT+FIS?");
+        check(dte_saw("1,3,0,2,0,2,0,0,0"),
+              "disconnect preserves the configured fax parameters");
+    } else {
+        fc2_select(0);
+        fc2_select(external_class21 ? 2 : 1);
+    }
 
     dte_reset();
     at("AT+FLI=\"sender\"");
@@ -1142,8 +1154,17 @@ static void test_receive(int fbo, int ec)
      * so each session replaces its own rather than appending to it -- this
      * now runs more than once per +FBO setting. */
     cap_len[fbo & 1] = 0;
-    fc2_select(0);
-    fc2_select(external_class21 ? 2 : 1);
+    if (reuse_selection_once) {
+        printf("  reusing the selected fax class after disconnect\n");
+        reuse_selection_once = 0;
+        dte_reset();
+        at("AT+FIS?");
+        check(dte_saw("1,3,0,2,0,2,0,0,0"),
+              "disconnect preserves the configured fax parameters");
+    } else {
+        fc2_select(0);
+        fc2_select(external_class21 ? 2 : 1);
+    }
 
     dte_reset();
     at("AT+FLI=\"receiver\"");
@@ -3638,6 +3659,12 @@ int main(int argc, char **argv)
      * DTE as "+FPS:1,0,0,0,0".
      */
     test_transmit(0, 2);
+    /* T.32 8.3.3/8.3.4 and Table 16: every new call must negotiate phase B
+     * and deliver its own page, even when FCLASS stays selected. */
+    reuse_selection_once = 1;
+    test_transmit(0, 2);
+    test_receive(0, 2);
+    reuse_selection_once = 1;
     test_receive(0, 2);
 
     /*
