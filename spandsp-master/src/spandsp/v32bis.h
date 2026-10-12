@@ -165,6 +165,10 @@ SPAN_DECLARE(void) v32bis_tx_power(v32bis_state_t *s, float power);
     \return 0 for OK, -1 for bad parameter. */
 SPAN_DECLARE(int) v32bis_set_supported_bit_rates(v32bis_state_t *s, int rates);
 
+/*! OR the reserved Table 5 bits B13/B14 (mask 0x6000) into the rate signals sent in
+    the clause 6 dialogue. Default 0. For interop probing of V.32terbo peers. */
+SPAN_DECLARE(int) v32bis_set_rate_signal_extension(v32bis_state_t *s, uint16_t bits);
+
 /*! Build or decode the Table 5 rate signal. */
 SPAN_DECLARE(int) v32bis_build_rate_signal(int rates, uint16_t *word);
 SPAN_DECLARE(int) v32bis_decode_rate_signal(uint16_t word, int *rates);

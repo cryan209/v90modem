@@ -32,7 +32,7 @@ with Module(Path('mica-portware-map.bin').read_bytes(), courier='../courier-emu'
         while len(mono)-consumed>=BLK:
             feed(caller(bytes(mono[consumed:consumed+BLK]))); consumed+=BLK
         t=len(mono)/8000
-        if phase=='wait' and t>=START: phase='v32'; v32.caller_init(0x1260); print(f'[{t:5.2f}s] V.32bis caller starts',flush=True)
+        if phase=='wait' and t>=START: phase='v32'; v32.caller_init(0x1260); v32.caller_ext(int(__import__('os').environ.get('EXT','0'),0)); print(f'[{t:5.2f}s] V.32bis caller starts',flush=True)
         st=v8.v8c_status()
         if phase=='v8' and st!=v8st: v8st=st; print(f'[{t:5.2f}s] V.8 status {st} mods={v8.v8c_mod():#x} peer={v8.v8c_peer():#x}',flush=True)
         if phase=='v8' and st==2: phase='v32'; v32.caller_init(0x1260); print(f'[{t:5.2f}s] -> V.32bis caller',flush=True)
@@ -41,4 +41,5 @@ with Module(Path('mica-portware-map.bin').read_bytes(), courier='../courier-emu'
             if f and pc not in seen: seen[pc]=f; print(f'[{t:5.2f}s] loader {nm}',flush=True)
         h=m.host.channel_state(0)['handler']
         if h!=last: last=h; print(f'[{t:5.2f}s] handler {h:#x}'+(f' v32 rate={v32.caller_rate()} done={v32.caller_done()}' if phase=='v32' else ''),flush=True)
+    open(SP+'/mono_%d_%s.bin'%(S29,__import__('os').environ.get('EXT','0')),'wb').write(bytes(mono))
     print('end',phase,(v32.caller_rate(),v32.caller_done(),'remote_rates=%#x'%v32.caller_remote_rates()) if phase=='v32' else '')

@@ -24,3 +24,4 @@ int caller_rate(void){return v32bis_current_bit_rate(s);}
 int caller_done(void){return v32bis_startup_complete(s);}
 int caller_remote_rates(void){return v32bis_startup_remote_rates(s);}
 int caller_nt_mt(int *nt,int *mt){return v32bis_round_trip_symbols(s,nt,mt);}
+int caller_ext(int b){return v32bis_set_rate_signal_extension(s,(uint16_t)b);}

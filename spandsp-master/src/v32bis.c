@@ -510,6 +510,8 @@ SPAN_DECLARE(void) v32bis_set_put_bit(v32bis_state_t *s, span_put_bit_func_t put
 }
 /*- End of function --------------------------------------------------------*/
 
+static int v32bis_tx_build_word(v32bis_state_t *s, uint16_t *word);
+
 #define V32BIS_VALID_RATE_MASK   (V32BIS_RATE_14400 | V32BIS_RATE_12000 \
                                 | V32BIS_RATE_9600 | V32BIS_RATE_7200 \
                                 | V32BIS_RATE_4800)
@@ -2448,7 +2450,7 @@ static void v32bis_tx_tone_symbol(v32bis_state_t *s);
     6.1: R2 "shall exclude rates not appearing in the previously received rate
     signal R1".  6.2: the rate selected by R3 "shall be within those indicated
     by R2". */
-static int v32bis_tx_build_word(v32bis_state_t *s, uint16_t *word)
+static int v32bis_tx_build_word_base(v32bis_state_t *s, uint16_t *word)
 {
     int local_rates;
     int rates;
@@ -3604,6 +3606,29 @@ static void startup_rx_reset(v32bis_state_t *s)
     s->reneg_remote_rates = 0;
     s->reneg_preamble_run = 0;
     s->reneg_watch_pow = 0.0f;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Extra bits ORed into every rate signal this modem sends in the clause 6
+   dialogue (B13/B14 are reserved in Table 5).  Zero by default, so the
+   engine is unchanged.  MICA's V.32terbo sets B13 and B14 in its R1
+   (0xFFF0 against 0x9FF0), which this lets a test peer echo. */
+static int v32bis_tx_build_word(v32bis_state_t *s, uint16_t *word)
+{
+    int ret;
+
+    ret = v32bis_tx_build_word_base(s, word);
+    if (ret == 0)
+        *word |= s->tx_rate_extension;
+    /*endif*/
+    return ret;
+}
+/*- End of function --------------------------------------------------------*/
+
+SPAN_DECLARE(int) v32bis_set_rate_signal_extension(v32bis_state_t *s, uint16_t bits)
+{
+    s->tx_rate_extension = bits & 0x6000;
+    return 0;
 }
 /*- End of function --------------------------------------------------------*/
 

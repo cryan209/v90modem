@@ -150,6 +150,34 @@ SpanDSP cannot be the peer for that, because it will not offer those bits.
 The `EC04..EC13` and `8E24..8E38` tables are the first place to look for the
 terbo mapper, since they are the words that change.
 
+### Echoing the terbo bits (patched caller, 2026-10-12)
+
+`v32bis_set_rate_signal_extension(s, bits)` (vendored `v32bis.c`, default 0,
+so the engine is unchanged; `v32bis_*` tests pass) ORs B13/B14 into the rate
+signals the caller sends in the clause 6 dialogue. Against MICA, caller starts
+at 3 s, `EXT` is the bits sent in R2:
+
+| S29 | EXT | MICA R1 | R3 | Start-up |
+|---|---|---|---|---|
+| 2 | 0 | `0xFFF0` | `0x9990` (14400), E `0x999F` | completes |
+| 2 | `0x2000`, `0x4000` or `0x6000` | `0xFFF0` | **none decodable** | does not complete |
+| 3 | `0x6000` | `0x9FF0` | `0x9990` | completes, bits ignored |
+
+- MICA keys on the **presence** of a terbo bit: each of B13 and B14 alone gives
+  the same result as both. At S29 = 3 the bits make no difference, so this is a
+  terbo-mode behaviour, not a general V.32bis one.
+- After our R2, MICA at S29 = 2 leaves the standard sequence. Its signal is
+  identical to the standard run until about 8.5 s, then 1.5 percent lower
+  power in 20-28 s (rms 3292 against 3343, the same for all three EXT values),
+  and the caller never frames an R3. SpanDSP can only frame the standard
+  sequence, so what MICA sends after R2 is **not decoded**. I do not know
+  whether it is a 16800/19200 R3, a longer training, or an error path.
+- So the handshake gate is found (terbo needs a terbo bit in the caller's
+  R2) but the terbo continuation is not read. Next: capture MICA's lane-0
+  audio for that call (`call3.py` writes `mono_<S29>_<EXT>.bin` as G.711) and
+  analyse it by hand with a 4-point symbol demodulator at 2400 baud, 1800 Hz,
+  starting around 8 s, to see what replaces R3.
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler
