@@ -38,11 +38,24 @@ func spectrumMagnitudes(_ samples: [Double], size: Int) -> [Double] {
     return (0...size/2).map { hypot(re[$0],im[$0]) }
 }
 
+// One-sided peak-amplitude dBFS; a full-scale bin-centred sine reads 0 dBFS.
+func spectrumAmplitudes(_ samples: [Double], size: Int) -> [Double] {
+    let signal = Array(samples.suffix(size))
+    guard signal.count == size else { return [] }
+    let weight = Double(size-1)/2
+    return spectrumMagnitudes(signal, size: size).enumerated().map {
+        $0.element * ($0.offset == 0 || $0.offset == size/2 ? 1 : 2) / weight / 32768
+    }
+}
+func spectrumDB(_ amplitude: Double) -> Double {
+    max(-90,min(0,20*log10(max(1e-12,amplitude))))
+}
+
 let rxColor = NSColor.systemTeal
 let txColor = NSColor.systemOrange
 
 final class SignalPlot: NSView {
-    enum Kind { case waveform, constellation, eye, recoveredEye, histogram, spectrum }
+    enum Kind { case waveform, constellation, eye, recoveredEye, histogram }
     var kind: Kind = .waveform
     var samples: [Double] = []
     var points: [[[Double]]] = [[], []]
@@ -93,20 +106,12 @@ final class SignalPlot: NSView {
             ("2T · dots are measured T/2 samples" as NSString).draw(at:NSPoint(x:max(w/2+12,w-195),y:h-13),withAttributes:attrs)
             return
         }
-        if kind == .histogram || kind == .spectrum {
+        if kind == .histogram {
             var bins = [Double](repeating:0,count:64)
-            if kind == .histogram {
-                for sample in samples { bins[min(63,max(0,Int((sample+32768)/1024)))] += 1 }
-            } else if !samples.isEmpty {
-                bins = Array(spectrumMagnitudes(samples, size: 128).prefix(64))
-            }
+            for sample in samples { bins[min(63,max(0,Int((sample+32768)/1024)))] += 1 }
             let peak = max(1,bins.max() ?? 1)
             color.setFill()
             for (i,v) in bins.enumerated() { NSRect(x:Double(i)*w/64,y:h-v/peak*h*0.9,width:max(1,w/64-1),height:v/peak*h*0.9).fill() }
-            if kind == .spectrum && carrier > 0 {
-                NSColor.systemYellow.setStroke(); let marker = NSBezierPath()
-                marker.move(to:NSPoint(x:carrier/4000*w,y:0)); marker.line(to:NSPoint(x:carrier/4000*w,y:h)); marker.stroke()
-            }
             return
         }
         if kind == .constellation {
@@ -166,38 +171,136 @@ final class SignalPlot: NSView {
     }
 }
 
+// Spectrum histories advance only on fresh sample counters, never on redraw.
+final class SpectrumPlot: NSView {
+    var size = 256, averaging = false, peakHold = false
+    var amplitudes: [[Double]] = [[],[]], peaks: [[Double]] = [[],[]]
+    var seen = [-1,-1], carriers = [0.0,0.0]
+    var hover: NSPoint?
+    var tracking: NSTrackingArea?
+    override var isFlipped: Bool { true }
+    func reset() { amplitudes = [[],[]]; peaks = [[],[]]; seen = [-1,-1]; needsDisplay = true }
+    func clearPeaks() { peaks = amplitudes; needsDisplay = true }
+    func update(_ audio: [[Double]], counts: [Int]) {
+        for dir in 0..<2 where counts[dir] > seen[dir] {
+            let next = spectrumAmplitudes(audio[dir], size:size)
+            guard !next.isEmpty else { continue }
+            seen[dir] = counts[dir]
+            if averaging && amplitudes[dir].count == next.count {
+                // Exponential average of power, not logarithmic levels.
+                amplitudes[dir] = zip(amplitudes[dir],next).map { sqrt(0.8*$0*$0+0.2*$1*$1) }
+            } else { amplitudes[dir] = next }
+            if peaks[dir].count != next.count { peaks[dir] = next }
+            else { peaks[dir] = zip(peaks[dir],next).map { max($0,$1) } }
+        }
+        needsDisplay = true
+    }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking = tracking { removeTrackingArea(tracking) }
+        tracking = NSTrackingArea(rect:.zero,options:[.mouseMoved,.mouseEnteredAndExited,.activeInKeyWindow,.inVisibleRect],owner:self,userInfo:nil)
+        addTrackingArea(tracking!)
+    }
+    override func mouseMoved(with event:NSEvent) { hover = convert(event.locationInWindow,from:nil); needsDisplay = true }
+    override func mouseExited(with event:NSEvent) { hover = nil; needsDisplay = true }
+    override func draw(_ dirtyRect:NSRect) {
+        NSColor(calibratedWhite:0.055,alpha:1).setFill(); bounds.fill()
+        let left = 34.0, width = max(1,bounds.width-left-4), height = max(1,bounds.height-28)
+        let attrs: [NSAttributedString.Key:Any] = [.font:NSFont.systemFont(ofSize:9),.foregroundColor:NSColor.secondaryLabelColor]
+        for level in stride(from:0,through:-90,by:-30) {
+            let y = -Double(level)/90*height
+            NSColor.darkGray.setStroke(); let line = NSBezierPath()
+            line.move(to:NSPoint(x:left,y:y)); line.line(to:NSPoint(x:left+width,y:y)); line.stroke()
+            ("\(level)" as NSString).draw(at:NSPoint(x:1,y:max(0,y-9)),withAttributes:attrs)
+        }
+        for dir in 0..<2 {
+            let color = dir == 0 ? rxColor : txColor
+            for held in [false,true] where !held || peakHold {
+                let values = held ? peaks[dir] : amplitudes[dir]
+                guard values.count > 1 else { continue }
+                let line = NSBezierPath(); line.lineWidth = held ? 0.7 : 1.3
+                for (i,v) in values.enumerated() {
+                    let point = NSPoint(x:left+Double(i)*width/Double(size/2),y:-spectrumDB(v)/90*height)
+                    i == 0 ? line.move(to:point) : line.line(to:point)
+                }
+                if held { line.setLineDash([3,3],count:2,phase:0) }
+                color.withAlphaComponent(held ? 0.45 : 1).setStroke(); line.stroke()
+            }
+            if carriers[dir] > 0 && carriers[dir] < 4000 {
+                color.withAlphaComponent(0.4).setStroke(); let marker = NSBezierPath()
+                let x = left+carriers[dir]/4000*width
+                marker.move(to:NSPoint(x:x,y:0)); marker.line(to:NSPoint(x:x,y:height)); marker.stroke()
+            }
+        }
+        ("0 Hz" as NSString).draw(at:NSPoint(x:left,y:height+1),withAttributes:attrs)
+        ("2 kHz" as NSString).draw(at:NSPoint(x:left+width/2-14,y:height+1),withAttributes:attrs)
+        ("4 kHz · dBFS" as NSString).draw(at:NSPoint(x:left+width-65,y:height+1),withAttributes:attrs)
+        if let point = hover {
+            let bin = min(size/2,max(0,Int(((point.x-left)/width*Double(size/2)).rounded())))
+            let frequency = Double(bin)*8000/Double(size)
+            NSColor.white.withAlphaComponent(0.4).setStroke(); let cursor = NSBezierPath()
+            let x = left+Double(bin)*width/Double(size/2)
+            cursor.move(to:NSPoint(x:x,y:0)); cursor.line(to:NSPoint(x:x,y:height)); cursor.stroke()
+            let values = (0..<2).map { dir -> String in
+                guard amplitudes[dir].indices.contains(bin) else { return "—" }
+                return String(format:"%.1f dBFS",spectrumDB(amplitudes[dir][bin]))
+            }
+            (String(format:"%.1f Hz · RX %@ · TX %@",frequency,values[0],values[1]) as NSString).draw(at:NSPoint(x:left,y:height+14),withAttributes:attrs)
+        } else {
+            ("RX teal · TX orange · hover for frequency and level" as NSString).draw(at:NSPoint(x:left,y:height+14),withAttributes:attrs)
+        }
+    }
+}
+
 // Display-only spectrum history: 128 rows × 129 bins, overwritten in memory.
 // Fixed dBFS colour scale preserves level changes between successive rows.
 final class Waterfall: NSView {
-    static let rows = 128, bins = 129, fftSize = 256
-    var levels = [[Double]](repeating:[Double](repeating:-90,count:bins),count:rows)
+    static let rows = 128
+    var fftSize = 256
+    var bins: Int { fftSize/2+1 }
+    var levels = [[Double]](repeating:[Double](repeating:-90,count:129),count:rows)
     var next = 0, held = 0, seen = -1
     var carrier = 0.0
+    var stamps = [Double](repeating:0,count:rows)
+    var markers = [String](repeating:"",count:rows)
+    var lastPhase = ""
     override var isFlipped: Bool { true }
-    func reset() { next = 0; held = 0; seen = -1; needsDisplay = true }
-    func update(_ samples:[Double], count:Int) {
-        guard count > seen, samples.count >= Self.fftSize else { return }
+    func reset() { next = 0; held = 0; seen = -1; lastPhase = ""; levels = Array(repeating:Array(repeating:-90,count:bins),count:Self.rows); needsDisplay = true }
+    func update(_ samples:[Double], count:Int, phase:String) {
+        guard count > seen, samples.count >= fftSize else { return }
         seen = count
-        let signal = Array(samples.suffix(Self.fftSize))
-        let window = (0..<Self.fftSize).map { 0.5-0.5*cos(2*Double.pi*Double($0)/Double(Self.fftSize-1)) }
-        let weight = window.reduce(0,+)
-        let magnitudes = spectrumMagnitudes(signal, size: Self.fftSize)
-        for k in 0..<Self.bins {
-            let amplitude = magnitudes[k]*(k == 0 || k == Self.bins-1 ? 1 : 2)/weight/32768
-            levels[next][k] = max(-90,min(0,20*log10(max(1e-12,amplitude))))
-        }
+        let signal = Array(samples.suffix(fftSize))
+        let amplitudes = spectrumAmplitudes(signal,size:fftSize)
+        for k in 0..<bins { levels[next][k] = spectrumDB(amplitudes[k]) }
+        stamps[next] = Double(count)/8000
+        markers[next] = phase != lastPhase ? phase : ""
+        lastPhase = phase
         next = (next+1)%Self.rows; held = min(Self.rows,held+1); needsDisplay = true
     }
     override func draw(_ dirtyRect:NSRect) {
         NSColor(calibratedWhite:0.055,alpha:1).setFill(); bounds.fill()
-        let plotHeight = max(1,bounds.height-16), rowHeight = plotHeight/Double(Self.rows)
-        let binWidth = bounds.width/Double(Self.bins)
+        let plotHeight = max(1,bounds.height-28), rowHeight = plotHeight/Double(Self.rows)
+        let binWidth = bounds.width/Double(bins)
         for row in 0..<held {
             let source = (next-1-row+Self.rows)%Self.rows
-            for bin in 0..<Self.bins {
+            for bin in 0..<bins {
                 let strength = (levels[source][bin]+90)/90
                 NSColor(calibratedHue:0.67-strength*0.67,saturation:0.9,brightness:0.08+0.92*strength,alpha:1).setFill()
                 NSRect(x:Double(bin)*binWidth,y:Double(row)*rowHeight,width:binWidth+0.5,height:rowHeight+0.5).fill()
+            }
+        }
+        let markerAttrs: [NSAttributedString.Key:Any] = [.font:NSFont.systemFont(ofSize:9),.foregroundColor:NSColor.white,.backgroundColor:NSColor.black.withAlphaComponent(0.7)]
+        var previousLabelY = -12.0
+        for row in 0..<held {
+            let source = (next-1-row+Self.rows)%Self.rows
+            if !markers[source].isEmpty {
+                let y = Double(row)*rowHeight
+                NSColor.white.withAlphaComponent(0.5).setStroke(); let line = NSBezierPath()
+                line.move(to:NSPoint(x:0,y:y)); line.line(to:NSPoint(x:bounds.width,y:y)); line.stroke()
+                if y-previousLabelY >= 12 && y <= plotHeight-11 {
+                    (String(format:"%.2fs · %@",stamps[source],markers[source]) as NSString).draw(at:NSPoint(x:2,y:y),withAttributes:markerAttrs)
+                    previousLabelY = y
+                }
             }
         }
         if carrier > 0 && carrier < 4000 {
@@ -209,6 +312,10 @@ final class Waterfall: NSView {
         ("0 Hz" as NSString).draw(at:NSPoint(x:2,y:plotHeight+2),withAttributes:attrs)
         ("2 kHz" as NSString).draw(at:NSPoint(x:bounds.width/2-15,y:plotHeight+2),withAttributes:attrs)
         ("4 kHz" as NSString).draw(at:NSPoint(x:bounds.width-32,y:plotHeight+2),withAttributes:attrs)
+        if held > 0 {
+            let newest = (next-1+Self.rows)%Self.rows, oldest = (next-held+Self.rows)%Self.rows
+            (String(format:"%.2f–%.2f s · sample clock · gaps omitted",stamps[oldest],stamps[newest]) as NSString).draw(at:NSPoint(x:2,y:plotHeight+14),withAttributes:attrs)
+        }
     }
 }
 
@@ -262,7 +369,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let rx = SignalPlot(), tx = SignalPlot(), constellation = SignalPlot(), eye = SignalPlot()
     let at = Console(height:64), serial = Console(height:64), training = Console(height:28), log = Console(height:130)
     let rxWire = Console(height:54), txWire = Console(height:54)
-    let histogram = SignalPlot(), spectrum = SignalPlot()
+    let histogram = SignalPlot()
+    let spectrum = SpectrumPlot()
+    let fftSizeControl = NSPopUpButton()
+    let averageControl = NSButton(checkboxWithTitle:"Average",target:nil,action:nil)
+    let peakControl = NSButton(checkboxWithTitle:"Peak hold",target:nil,action:nil)
     let rxWaterfall = Waterfall(), txWaterfall = Waterfall()
     let carrierLabel = NSTextField(labelWithString:"Carrier: waiting")
     let listen = NSPopUpButton()
@@ -341,8 +452,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         atInput.placeholderString = "ATDnumber or AT command"; atInput.target = self; atInput.action = #selector(sendAT)
         dataInput.placeholderString = "Serial payload"; dataInput.target = self; dataInput.action = #selector(sendSerial)
         sendData = button("Send data",#selector(sendSerial))
-        histogram.kind = .histogram; spectrum.kind = .spectrum
-        for plot in [histogram,spectrum] { plot.heightAnchor.constraint(equalToConstant:100).isActive = true }
+        histogram.kind = .histogram
+        fftSizeControl.addItems(withTitles:["128 · 62.5 Hz", "256 · 31.25 Hz", "512 · 15.625 Hz"])
+        fftSizeControl.selectItem(at:1)
+        for control in [fftSizeControl,averageControl,peakControl] as [NSControl] { control.target = self; control.action = #selector(spectrumOptions) }
+        for plot in [histogram,spectrum] as [NSView] { plot.heightAnchor.constraint(equalToConstant:100).isActive = true }
         listen.addItems(withTitles:["Audio off","Listen RX","Listen TX"])
         audioEngine.attach(player)
         audioEngine.connect(player,to:audioEngine.mainMixerNode,format:AVAudioFormat(standardFormatWithSampleRate:8000,channels:1))
@@ -356,9 +470,9 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             item.view = container; diagnostics.addTabViewItem(item)
         }
         tab("Signal",pair(panel("Received constellation · teal samples / orange decisions",[constellation]),panel("Eye · I/Q at recovered timing, or explicit line estimate",[eye])))
-        tab("Audio",pair(panel("RX amplitude histogram · −32768 to +32767",[histogram]),panel("RX spectrum · 0 to 4000 Hz",[spectrum])))
+        tab("Audio",pair(panel("RX amplitude histogram · −32768 to +32767",[histogram]),panel("RX/TX spectrum · −90 to 0 dBFS",[spectrum])))
         for plot in [rxWaterfall,txWaterfall] { plot.heightAnchor.constraint(equalToConstant:100).isActive = true }
-        tab("Waterfall",pair(panel("RX · newest at top · −90 to 0 dBFS",[rxWaterfall]),panel("TX · 31.25 Hz bins · 128 updates",[txWaterfall])))
+        tab("Waterfall",pair(panel("RX · newest at top · −90 to 0 dBFS",[rxWaterfall]),panel("TX · newest at top · −90 to 0 dBFS",[txWaterfall])))
         tab("Process log",log.scroll)
         diagnostics.heightAnchor.constraint(equalToConstant:160).isActive = true
         startLoop = button("Start loopback",#selector(startLoopback))
@@ -368,6 +482,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             row([status,listen,button("Freeze",#selector(freeze))]),loopbackRow,error,
             pair(panel("RX line · 64 ms",[rx]),panel("TX line · 64 ms",[tx])),
             row([eyeDir,eyeSource,carrierLabel]),
+            row([label("FFT"),fftSizeControl,averageControl,peakControl,button("Clear peaks",#selector(clearSpectrumPeaks))]),
             diagnostics,
             pair(panel("RX wire · repeated bytes collapsed",[rxWire.scroll]),panel("TX wire · repeated bytes collapsed",[txWire.scroll])),
             pair(panel("AT control",[row([button("Answer",#selector(answer)),button("Hang up",#selector(hangup)),button("Info",#selector(info))]),at.scroll,row([atInput,button("Send AT",#selector(sendAT))])]),
@@ -385,6 +500,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationWillTerminate(_ notification: Notification) { timer?.invalidate() }
     @objc func freeze(_ sender:NSButton) { frozen.toggle(); sender.title = frozen ? "Resume plots" : "Freeze plots" }
+    @objc func spectrumOptions() {
+        spectrum.size = [128,256,512][max(0,fftSizeControl.indexOfSelectedItem)]
+        spectrum.averaging = averageControl.state == .on
+        spectrum.peakHold = peakControl.state == .on
+        spectrum.reset()
+        for plot in [rxWaterfall,txWaterfall] { plot.fftSize = spectrum.size; plot.reset() }
+    }
+    @objc func clearSpectrumPeaks() { spectrum.clearPeaks() }
     @objc func answer() { send("at",Data("ATA\r".utf8)) }
     @objc func hangup() { send("at",Data("ATH\r".utf8)) }
     @objc func modulation() { send("at",Data("AT+MS?\r".utf8)) }
@@ -517,7 +640,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let paths = s["ports"] as? [String:String] ?? [:]
         atPath.stringValue = paths["at"] ?? ""; dataPath.stringValue = paths["data"] ?? ""
         let currentEpoch = s["epoch"] as? Int ?? 0
-        if currentEpoch != epoch { epoch = currentEpoch; eventSeen = 0; history = []; rxWaterfall.reset(); txWaterfall.reset(); eyeCountSeen = -1; eyeUpdated = .distantPast }
+        if currentEpoch != epoch { epoch = currentEpoch; eventSeen = 0; history = []; rxWaterfall.reset(); txWaterfall.reset(); spectrum.reset(); eyeCountSeen = -1; eyeUpdated = .distantPast }
         let events = s["events"] as? [String] ?? [], count = s["event_count"] as? Int ?? 0
         for (i,event) in events.enumerated() where count-events.count+i >= eventSeen { history.append(event) }
         eventSeen = count; history = Array(history.suffix(120)); training.replace(history.joined(separator:"\n"))
@@ -526,20 +649,24 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         monitorAudio(s)
         guard !frozen else { return }
         let audio = s["audio"] as? [[Double]] ?? [[],[]]
-        if audio.count == 2 { rx.samples = audio[0]; tx.samples = audio[1]; eye.samples = audio[max(0,eyeDir.indexOfSelectedItem)]; histogram.samples = audio[0]; spectrum.samples = audio[0] }
+        if audio.count == 2 { rx.samples = audio[0]; tx.samples = audio[1]; eye.samples = audio[max(0,eyeDir.indexOfSelectedItem)]; histogram.samples = audio[0] }
         let listening = s["listen"] as? [[String:Any]] ?? []
         if audio.count == 2 && listening.count == 2 {
             rxWaterfall.carrier = s["rx_carrier"] as? Double ?? 0
             txWaterfall.carrier = s["tx_carrier"] as? Double ?? 0
-            rxWaterfall.update(audio[0],count:listening[0]["count"] as? Int ?? 0)
-            txWaterfall.update(audio[1],count:listening[1]["count"] as? Int ?? 0)
+            let counts = listening.map { $0["count"] as? Int ?? 0 }
+            spectrum.carriers = [rxWaterfall.carrier,txWaterfall.carrier]
+            spectrum.update(audio,counts:counts)
+            let phase = states.indices.contains(state) ? states[state] : "Unknown"
+            rxWaterfall.update(audio[0],count:counts[0],phase:phase+" · "+(s["rx_signal"] as? String ?? "—"))
+            txWaterfall.update(audio[1],count:counts[1],phase:phase+" · "+(s["tx_signal"] as? String ?? "—"))
         }
         constellation.kind = mod >= 8 ? .recoveredEye : .constellation
         constellation.eyeMessage = "\(mods[min(mod, mods.count - 1)]) uses frequency shifts · no QAM constellation"
         constellation.points = s["iq"] as? [[[Double]]] ?? [[],[]]
         eye.pcm = (s[eyeDir.indexOfSelectedItem == 0 ? "rx_pcm" : "tx_pcm"] as? Int ?? 0)>0
         eye.baud = Double(s[eyeDir.indexOfSelectedItem == 0 ? "rx_baud" : "tx_baud"] as? Int ?? 3200); if eye.baud < 300 { eye.baud = 3200 }
-        eye.carrier = s[eyeDir.indexOfSelectedItem == 0 ? "rx_carrier" : "tx_carrier"] as? Double ?? 0; spectrum.carrier = s["rx_carrier"] as? Double ?? 0
+        eye.carrier = s[eyeDir.indexOfSelectedItem == 0 ? "rx_carrier" : "tx_carrier"] as? Double ?? 0
         carrierLabel.stringValue = eye.pcm ? "PCM eye · 8,000 samples/s" : eye.carrier > 0 ? String(format:"%@ · %@ %.1f Hz · %g baud",eye.pcm ? "PCM eye" : "QAM eye",eyeDir.indexOfSelectedItem == 0 ? "RX recovered carrier" : "TX nominal carrier",eye.carrier,eye.baud) : "RX carrier: waiting for QAM receiver"
         if mod >= 8 { carrierLabel.stringValue = "\(mods[min(mod, mods.count - 1)]) FSK · RX \(Int(s["rx_baud"] as? Double ?? 0)) baud · RX centre \(Int(s["rx_carrier"] as? Double ?? 0)) Hz" }
         eye.phase = 0
@@ -551,7 +678,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         eye.recovered = available ? (s["eye"] as? [[Double]] ?? []).filter { $0.count == 5 } : []
         eye.eyeMessage = eyeDir.indexOfSelectedItem == 1 ? "TX has no receiver clock · select Line estimate" : eye.pcm ? "PCM recovery tap unavailable · select Line estimate" : "Waiting for live recovered T/2 samples"
         if mod >= 8 { eye.kind = .recoveredEye; eye.recovered = []; eye.eyeMessage = "FSK · use waveform, spectrum or waterfall" }
-        for plot in [rx,tx,constellation,eye,histogram,spectrum] { plot.needsDisplay = true }
+        for plot in [rx,tx,constellation,eye,histogram,spectrum] as [NSView] { plot.needsDisplay = true }
         let values = s["wire"] as? [[String:Any]] ?? []
         for (i,console) in [rxWire,txWire].enumerated() where values.indices.contains(i) {
             let count = values[i]["count"] as? Int ?? 0

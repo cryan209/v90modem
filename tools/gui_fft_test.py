@@ -7,7 +7,7 @@ import tempfile
 source = Path(__file__).with_name('modem_gui_native.swift').read_text()
 helper = source[source.index('func spectrumMagnitudes('):source.index('let rxColor')]
 checks = r'''
-for size in [128, 256] {
+for size in [128, 256, 512] {
     for count in [0, 1, 64, 128, 256, 1600] {
         // Include DC, Nyquist, an on-grid tone and an off-grid tone.
         var samples: [Double] = []
@@ -31,6 +31,17 @@ for size in [128, 256] {
                          "Mismatch: size \(size), count \(count), bin \(k)")
         }
     }
+}
+for size in [128,256,512] {
+    let sine = (0..<size).map { 32768*cos(2*Double.pi*Double($0)*13/Double(size)) }
+    let bins = spectrumAmplitudes(sine,size:size)
+    precondition(abs(spectrumDB(bins[13])) < 0.001)
+    precondition(spectrumDB(0) == -90)
+    let dc = spectrumAmplitudes(Array(repeating:32768,count:size),size:size)
+    precondition(abs(spectrumDB(dc[0])) < 0.001)
+    let nyquist = (0..<size).map { $0 % 2 == 0 ? 32768.0 : -32768.0 }
+    precondition(abs(spectrumDB(spectrumAmplitudes(nyquist,size:size)[size/2])) < 0.001)
+    precondition(spectrumAmplitudes([1,2],size:size).isEmpty)
 }
 print("GUI FFT matches direct DFT for all bins, including DC/Nyquist and long snapshots")
 '''

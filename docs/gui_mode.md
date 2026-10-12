@@ -120,11 +120,19 @@ shorter runs remain hex bytes. A continuing idle run updates its complete count
 without displacing preceding records. The dashboard shows the latest lines;
 it is not a capture/archive browser.
 
-The native Audio tab shows an RX amplitude histogram and a Hann-windowed
-spectrum computed with a radix-2 FFT (62.5 Hz bins, relative magnitude).
-A yellow marker and numeric label show the live receiver carrier estimate from SpanDSP where available. Carrier
-mixing removes the passband carrier to form baseband I/Q; a constellation
-alone does not show its absolute frequency.
+The native Audio tab shows an RX amplitude histogram and overlaid RX (teal)
+and TX (orange) Hann-windowed spectra. The fixed −90 to 0 dBFS scale shows
+one-sided peak amplitude: a full-scale bin-centred sine reads 0 dBFS. Hover
+for the nearest bin's frequency and both levels. Carrier markers show the
+recovered RX and nominal TX frequencies where available.
+
+The FFT selector applies to the spectrum and both waterfalls: 128, 256 or
+512 samples, giving 62.5, 31.25 or 15.625 Hz bin spacing at 8 kHz. These use
+the most recent contiguous samples (16, 32 or 64 ms); Hann-window resolution
+is broader than bin spacing. Average applies exponential smoothing to power
+(80% previous, 20% new) on fresh updates. Peak hold adds dashed traces of the
+maximum unaveraged amplitude; Clear peaks restarts them from current levels.
+Changing options or starting a new call resets spectrum histories.
 
 Audio off / Listen RX / Listen TX plays a diagnostic copy through the Mac's
 output device at 25% volume. It is off initially. Snapshots carry at most 1600
@@ -145,14 +153,19 @@ subtraction. V.61 §5.1 specifies its carrier and modulation rate.
 
 The native Waterfall tab shows RX and TX together in the existing diagnostic
 area, without enlarging the window. Frequency runs from 0 to 4000 Hz;
-newest rows appear at the top. Each row uses the latest 256 samples with a
-Hann window and a radix-2 FFT with 129 bins (31.25 Hz spacing). Colour is
-fixed from −90 to 0 dBFS, rather than normalized per row, so level changes remain visible.
-Yellow lines mark the recovered RX / nominal TX carrier where available.
-Each direction holds exactly 128 rows in memory, overwriting old rows.
-Duplicate sample counters add no rows; call reset clears the display, and
-Freeze pauses it. Rows represent received GUI updates rather than a calibrated
-time axis; skipped telemetry is not reconstructed or recorded.
+newest rows appear at the top. Each row uses the selected FFT size with a
+Hann window. Colour is fixed from −90 to 0 dBFS, so level changes remain
+visible. Yellow lines mark the recovered RX / nominal TX carrier where
+available. Each direction holds exactly 128 rows in memory, overwriting old
+rows. Duplicate sample counters add no rows; call reset or option changes
+clear the display, and Freeze pauses it.
+
+Timestamp labels use the per-call 8 kHz sample counter at the end of each
+window. Horizontal markers label observed call-state and RX/TX signal
+transitions at the first GUI update showing them, rather than claiming an
+exact protocol-event timestamp. Rows represent received GUI updates; gaps
+are omitted, explicitly labelled, and never reconstructed. The displayed
+time range comes from the oldest and newest retained sample counters.
 
 ## Recovered-eye observation
 
