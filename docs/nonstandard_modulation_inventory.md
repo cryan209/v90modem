@@ -554,6 +554,56 @@ What differs from V.32bis, and what is not shown:
 - Initial state, and the mapping of the remaining uncoded bits (the other 6 of
   8 data bits) to the position inside a coset, are unexamined.
 
+
+### Differential decode and descrambling (2026-10-13)
+
+`demod/descramble.py`, `register3.py`, `uncoded.py`. With the coder known, the
+dibit d of each symbol is read off the coset labels, the differential encoder
+(V.32bis Table 3, `d = d_prev + Q mod 4`) is undone as `Q = d[n] - d[n-1] mod 4`,
+and Q1 = bit 0, Q2 = bit 1 are tested against the V.32bis scrambler.
+
+- **Scrambler = GPA, 1 + x^-5 + x^-23 (the answerer's), on all-ones input.**
+  For marks, the 8th power of the recursion gives a test that needs only Q1/Q2
+  (the other six bits of each 8-bit group drop out): z[m] ^ z[m-5] ^ z[m-23]
+  = 1. It holds for **both** bit streams (95.7 / 95.2 percent over the whole
+  record, 86.4 / 86.6 percent in recording 1), against 49.7 percent for the
+  caller's GPC (lags 18, 23) and 50 percent for neighbouring lag pairs.
+- **After the start of the data it holds exactly.** The violation rate per 1000
+  symbols is 0.476, 0.131, then **0.000 for the remaining 12000 symbols** in
+  recording 2; recording 1 reaches zero after about 4000 symbols (0.49, 0.51,
+  0.52, 0.38, then 0.000). The 95.7 percent above is therefore the
+  pre-data stretch, not slicing noise: the sliced symbols and the coder and
+  differential decode are error-free in the clean region. What those first
+  1500 / 4000 symbols are (the tail of the startup, or data before the
+  scrambler locks) is not examined.
+- **The register is recoverable and reproduces everything.** On the clean
+  region the 23-bit register solves by GF(2) elimination (RANSAC over the
+  symbols, `register.py`); Q1/Q2 are then reproduced **23998 / 23998** bits
+  (recording 2: register 0x2782f9) and 18998 / 18998 (recording 1:
+  0x6e67e1). Any two adjacent bit positions k, k+1 fit equally (the position
+  shift is absorbed by the register), so Q1 precedes Q2 and nothing else about
+  the group order is fixed by marks.
+- **The six uncoded bits are the next six scrambler bits, and select the
+  point inside the coset.** The predicted word of each symbol is a function of
+  the lattice site: **11999 / 11999 and 9499 / 9499 symbols** equal their
+  site's word, 9.8 / 11.6 percent when the words are shuffled between
+  symbols. All 512 sites are seen, the 64 sites of each coset carry 64
+  distinct words, so the map site <-> (coset, 6-bit word) is a bijection
+  (`terbo_site_words.json`, in each recording's own lattice frame, which are
+  rotated 90 degrees relative to each other).
+
+So the whole chain is now accounted for, at 8 data bits per symbol and 2400
+baud: scrambled ones (GPA) -> 8-bit group (Q1Q2 then six uncoded bits) ->
+differential encoder on Q1Q2 -> V.32bis 8-state coder -> coset (Y0, d) + the
+six bits choosing 1 of 64 points -> the 512-point lattice with the radial warp.
+MICA was sending marks, so the descrambled output is all ones; the payload
+path (a descrambler on real data) is the same code with a different input.
+
+Remaining: the structure of the six-bit point map (it is a table here, not a
+formula; V.32bis's own mapping is the thing to compare), the unscrambled
+stretch at the start, and a data run to test the descrambler on non-constant
+input. B13 = 16800 is still untested.
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler
