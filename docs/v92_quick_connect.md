@@ -407,3 +407,23 @@ Tools: `v90_engine_replay --at "AT..;AT.."` plays the live DTE's configuration b
 (the `+PQC`/`+PIG` a V.92 replay needs; `--fast` reproduces the live numbers exactly);
 `v92_slm_chain_test` has the live 20-point profile (locks in the model) and
 `CHAIN_DMODEM_UP=sinc65` for the new d-modem decimator.
+
+### B1u data-aided training: B1u locks, V.92 startup completes (798af366, 2026-10-14)
+
+V.92 8.7.1 starts B1u from zero scrambler, encoder, precoder and prefilter memories, so the
+CPd alone fixes all 576 B1u symbols; our encoder regenerates slmodemd's (hooked) B1u exactly
+(rms difference 0.38 units of ~4000, min-|x| member). The data equaliser now keeps each
+symbol's input window from the slicer on, finds B1u by correlation after 1400 symbols, solves
+the feed-forward taps against it, re-equalises the capture and restarts the B1u receiver on
+it. It also samples whole input samples from the slicer on: at the TRN2u fractional offset
+the 16-tap interpolator left 0.12 LU against B1u that no taps removed; on whole samples the
+B1u solve reads 0.036 LU.
+
+Live (`b1u1`, +PQC=1, slmodemd_map): **B1u locked by decoding (all ones), V.92 startup
+complete, both DTEs CONNECT (54666 / 54667), slmodemd `Link: DP is V.92, rx 54667, tx 32000`,
+and 22797 numbered lines downstream reached slmodemd's DTE.** The upstream does not hold in
+data: 5 lines reached our DTE, rejected frames 201 at 10 s -> 8537 at 70 s (~18%), data error
+~72 DS0 (0.05 LU). After B1u the 2 s re-solves are decision-directed on the slicer again and
+settle back at TRN2u quality. Next: data-aided re-solves in data mode from the trellis
+decoder's output re-encoded (the decoded bits through our encoder give the transmitted
+symbols wherever the decode is right), instead of the hard slicer.
