@@ -85,6 +85,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -112,6 +113,9 @@
 /* ------------------------------------------------------------------ */
 
 static libusb_device_handle *usb;
+static int g_gui_control, gui_watch;
+static void gui_ring_notice(void);
+static int gui_sense = -1, gui_hook = -1;
 
 static int reg_read(unsigned char idx)
 {
@@ -122,6 +126,7 @@ static int reg_read(unsigned char idx)
         return -1;
     /* RESPONSE_AVAILABLE if interface 0 is ours; not required. */
     libusb_interrupt_transfer(usb, 0x81, notify, sizeof notify, &xfer, 300);
+    if (g_gui_control && gui_watch && xfer >= 2 && notify[0] == 0xa1 && notify[1] == 0x09) gui_ring_notice();
     for (int try = 0; try < 4; try++) {
         rc = libusb_control_transfer(usb, 0xA1, 0x01, 0, IF_CMD, in, sizeof in, 1000);
         if (rc > 0) return in[0];
@@ -140,6 +145,7 @@ static int reg_write(unsigned char idx, unsigned char val)
 static int usb_open_line(void)
 {
     int cfg = -1;
+    if (usb) return 0;
 
     if (libusb_init(NULL) < 0) { fprintf(stderr, "libusb_init failed\n"); return -1; }
     {   /* Two of these on one host is the ordinary case -- one dials, the
@@ -167,7 +173,7 @@ static int usb_open_line(void)
         fprintf(stderr, "no %04x:%04x on the bus%s%s\n", VID, PID,
                 getenv("APPLE_MODEM_ADDR") ? " at APPLE_MODEM_ADDR=" : "",
                 getenv("APPLE_MODEM_ADDR") ? getenv("APPLE_MODEM_ADDR") : "");
-        return -1;
+        libusb_exit(NULL); return -1;
     }
     libusb_get_configuration(usb, &cfg);
     /* An unconfigured device stalls EVERY request, including standard ones, and
@@ -176,12 +182,12 @@ static int usb_open_line(void)
      * happen before CoreAudio is asked for the device. */
     if (cfg != 1 && libusb_set_configuration(usb, 1) < 0) {
         fprintf(stderr, "could not set configuration 1\n");
-        return -1;
+        libusb_close(usb); usb = NULL; libusb_exit(NULL); return -1;
     }
     libusb_claim_interface(usb, IF_ACM);
     if (libusb_claim_interface(usb, IF_CMD) < 0) {
         fprintf(stderr, "could not claim the command interface\n");
-        return -1;
+        libusb_close(usb); usb = NULL; libusb_exit(NULL); return -1;
     }
     return 0;
 }
@@ -200,8 +206,9 @@ static int line_hook(int off_hook)
     }
     usleep(500000);
     sense = reg_read(REG_SENSE);
+    gui_sense = sense; gui_hook = reg_read(REG_HOOK);
     fprintf(stderr, "[APPLE] %s: register 5 = 0x%02x, line sense 0x%02x%s\n",
-            off_hook ? "off-hook" : "on-hook", reg_read(REG_HOOK) & 0xff,
+            off_hook ? "off-hook" : "on-hook", gui_hook & 0xff,
             sense & 0xff, sense == 0 ? "   <- NO PAIR CONNECTED" : "");
     return sense == 0 ? -1 : 0;
 }
@@ -358,7 +365,7 @@ static int16_t clip16(double v)
 
 static AudioUnit au;
 static AudioBufferList *in_abl;
-static int  render_errors;
+static _Atomic int render_errors;
 static const char *g_pty_link;
 static const char *g_dial;
 static const char *g_replay_path;
@@ -370,7 +377,7 @@ static unsigned g_ans_good, g_ans_bad;
  * control loop. USB/CoreAudio operations never run on that reader thread.
  * This backend is V.90 §5's analogue role; training telemetry describes
  * the engine's existing V.34 §10.1 / V.90 §9 transitions. */
-static int g_gui_control, g_di_open;
+static int g_di_open;
 static void close_dte(void)
 {
     if (g_di_open) { di_close(); g_di_open = 0; }
@@ -381,6 +388,16 @@ static int gui_request;
 static char gui_number[128];
 static int gui_socket = -1;
 static struct sockaddr_in gui_destination;
+static int gui_control_fd = -1, gui_monitor_only, gui_audio_active;
+static int gui_rings;
+static uint64_t gui_last_ring;
+static void gui_commands(void);
+static void gui_ring_poll(void);
+static void gui_ring_notice(void);
+static NSString *gui_raw_json(void);
+static void gui_raw_feed(int dir, const int16_t *samples, unsigned n);
+static void gui_audio_stop(void);
+
 static const char *gui_status = "Idle · line on-hook";
 
 static void gui_dial(const char *number, void *user)
@@ -418,6 +435,7 @@ static void gui_monitor_start(void)
 }
 static void gui_publish(void)
 {
+    @autoreleasepool {
     static uint64_t last;
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -426,7 +444,7 @@ static void gui_publish(void)
     last = now;
     me_diag_snapshot_t d;
     me_get_diag_snapshot(&d);
-    char buf[60000];
+    char buf[65500];
     int n = snprintf(buf, sizeof buf,
         "{\"state\":%d,\"modulation\":%d,\"v92\":%d,\"law\":%d,"
         "\"rx_signal\":\"%s\",\"tx_signal\":\"%s\",\"rx_baud\":%d,\"tx_baud\":%d,"
@@ -438,8 +456,22 @@ static void gui_publish(void)
     if (n < 0 || (size_t)n >= sizeof buf-2) return;
     int extra = lm_gui_json(buf+n,sizeof buf-(size_t)n-2);
     if (extra < 0) return;
-    n += extra; buf[n++] = '}';
+    n += extra;
+    pthread_mutex_lock(&gui_request_lock);
+    int pending = gui_request;
+    pthread_mutex_unlock(&gui_request_lock);
+    int added = snprintf(buf+n,sizeof buf-(size_t)n,
+        ",\"line_health\":{\"usb_open\":%s,\"sense\":%d,\"hook_register\":%d,\"rings\":%d,\"watching\":%s,\"monitoring\":%s,\"call_pending\":%s}}",
+        usb ? "true" : "false",gui_sense,gui_hook,gui_rings,
+        gui_watch ? "true" : "false",gui_monitor_only ? "true" : "false",
+        pending ? "true" : "false");
+    if (added < 0 || (size_t)added >= sizeof buf-(size_t)n) return;
+    n += added;
     sendto(gui_socket,buf,n,0,(struct sockaddr *)&gui_destination,sizeof gui_destination);
+    NSString *raw = [NSString stringWithFormat:@"{\"kind\":\"apple_device\",\"hardware_audio\":%@}",gui_raw_json()];
+    NSData *packet = [raw dataUsingEncoding:NSUTF8StringEncoding];
+    sendto(gui_socket,packet.bytes,packet.length,0,(struct sockaddr *)&gui_destination,sizeof gui_destination);
+    }
 }
 
 /* DC blocker, one pole at 40 Hz.  See the header: this is not optional. */
@@ -512,6 +544,11 @@ static struct resamp rs_8k, rs_16k, rs_tx;
 static int16_t fb8[1024];
 static long    fb8_n;
 
+#define GUI_RAW_N 1600
+static pthread_mutex_t gui_raw_lock = PTHREAD_MUTEX_INITIALIZER;
+static int16_t gui_raw[2][GUI_RAW_N];
+static uint64_t gui_raw_count[2], gui_clipped[2], gui_empty_tx, gui_overruns;
+
 static void engine_block_8k(const int16_t *s, long n)
 {
     long off = 0;
@@ -544,7 +581,7 @@ static void engine_block_8k(const int16_t *s, long n)
                           : rs_put(&rs_tx, out[i], up, 8);
                 for (int j = 0; j < got; j++) {
                     unsigned nw = (ring_w + 1) % RING_N;
-                    if (nw == ring_r) break;      /* consumer behind; drop */
+                    if (nw == ring_r) { if (g_gui_control) { pthread_mutex_lock(&gui_raw_lock); gui_overruns++; pthread_mutex_unlock(&gui_raw_lock); } break; }      /* consumer behind; drop */
                     ring[ring_w] = clip16(up[j] * g_tx_gain);
                     ring_w = nw;
                 }
@@ -614,6 +651,55 @@ static void taps_close(void)
     if (tx_tap) { fclose(tx_tap); tx_tap = NULL; }
 }
 
+/* Passive device tap: at most 1600 samples per direction. No playback queue,
+ * filtering or sample insertion exists here. Formatting stays on the control
+ * thread. V.90 §5: these are analogue codec samples, never DS0 codewords. */
+static void gui_raw_feed(int dir, const int16_t *samples, unsigned n)
+{
+    if (!g_gui_control) return;
+    pthread_mutex_lock(&gui_raw_lock);
+    for (unsigned i = 0; i < n; i++) {
+        gui_raw[dir][gui_raw_count[dir] % GUI_RAW_N] = samples[i];
+        gui_raw_count[dir]++;
+        if (samples[i] >= 32760 || samples[i] <= -32760) gui_clipped[dir]++;
+    }
+    pthread_mutex_unlock(&gui_raw_lock);
+}
+static NSString *gui_raw_json(void)
+{
+    int16_t copy[2][GUI_RAW_N];
+    uint64_t counts[2], clipped[2], empty, overruns;
+    pthread_mutex_lock(&gui_raw_lock);
+    for (int dir = 0; dir < 2; dir++) {
+        counts[dir] = gui_raw_count[dir]; clipped[dir] = gui_clipped[dir];
+        unsigned n = (unsigned)(counts[dir] < GUI_RAW_N ? counts[dir] : GUI_RAW_N);
+        for (unsigned i = 0; i < n; i++) copy[dir][i] = gui_raw[dir][(counts[dir]-n+i)%GUI_RAW_N];
+    }
+    empty = gui_empty_tx; overruns = gui_overruns;
+    pthread_mutex_unlock(&gui_raw_lock);
+    NSMutableArray *audio = [NSMutableArray array], *listen = [NSMutableArray array], *metrics = [NSMutableArray array];
+    for (int dir = 0; dir < 2; dir++) {
+        unsigned n = (unsigned)(counts[dir] < GUI_RAW_N ? counts[dir] : GUI_RAW_N);
+        NSMutableArray *samples = [NSMutableArray array];
+        NSMutableString *hex = [NSMutableString string];
+        double sum = 0, square = 0;
+        for (unsigned i = 0; i < n; i++) {
+            uint16_t v = (uint16_t)copy[dir][i];
+            [hex appendFormat:@"%02x%02x",v&255,v>>8];
+            sum += copy[dir][i]; square += (double)copy[dir][i]*copy[dir][i];
+            if (i+512 >= n) [samples addObject:@(copy[dir][i])];
+        }
+        double mean = n ? sum/n : 0;
+        [audio addObject:samples];
+        [listen addObject:@{@"count":@(counts[dir]),@"hex":hex}];
+        [metrics addObject:@{@"dc":@(mean),@"rms":@(n ? sqrt(fmax(0,square/n-mean*mean)) : 0),@"clipped":@(clipped[dir])}];
+    }
+    NSDictionary *value = @{@"rate":@(g_rate),@"audio":audio,@"listen":listen,@"metrics":metrics,
+        @"render_errors":@(render_errors),@"tx_empty_samples":@(empty),@"tx_ring_overruns":@(overruns)};
+    NSData *json = [NSJSONSerialization dataWithJSONObject:value options:0 error:NULL];
+    return [[[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding] autorelease];
+}
+
 static OSStatus input_cb(void *ref, AudioUnitRenderActionFlags *flags,
                          const AudioTimeStamp *ts, UInt32 bus, UInt32 nframes,
                          AudioBufferList *unused)
@@ -632,7 +718,8 @@ static OSStatus input_cb(void *ref, AudioUnitRenderActionFlags *flags,
     }
     if (rx_tap)
         fwrite(in_abl->mBuffers[0].mData, 2, nframes, rx_tap);
-    engine_feed(in_abl->mBuffers[0].mData, nframes);
+    gui_raw_feed(0,in_abl->mBuffers[0].mData,nframes);
+    if (!gui_monitor_only) engine_feed(in_abl->mBuffers[0].mData,nframes);
     return noErr;
 }
 
@@ -643,8 +730,10 @@ static OSStatus output_cb(void *ref, AudioUnitRenderActionFlags *flags,
     int16_t *out = io->mBuffers[0].mData;
 
     (void)ref; (void)flags; (void)ts; (void)bus;
+    unsigned empty_samples = 0;
     for (UInt32 i = 0; i < nframes; i++) {
         double v = 0;
+        if (gui_monitor_only) { out[i] = 0; continue; }
 
         /* DTMF first: while the script has samples left it owns the line, and
          * the engine's output is not yet meaningful anyway. */
@@ -663,8 +752,10 @@ static OSStatus output_cb(void *ref, AudioUnitRenderActionFlags *flags,
         }
         tx_dtmf_done = 1;
         if (ring_r != ring_w) { out[i] = ring[ring_r]; ring_r = (ring_r + 1) % RING_N; }
-        else                    out[i] = 0;
+        else { out[i] = 0; if (g_engine_running) empty_samples++; }
     }
+    if (g_gui_control) { pthread_mutex_lock(&gui_raw_lock); gui_empty_tx += empty_samples; pthread_mutex_unlock(&gui_raw_lock); }
+    gui_raw_feed(1,out,nframes);
     if (tx_tap)
         fwrite(out, 2, nframes, tx_tap);
     return noErr;
@@ -796,6 +887,78 @@ static int audio_start(void)
 }
 
 /* ------------------------------------------------------------------ */
+static void gui_audio_stop(void)
+{
+    if (!au) return;
+    AudioOutputUnitStop(au); AudioUnitUninitialize(au); AudioComponentInstanceDispose(au);
+    au = NULL;
+    if (in_abl) { free(in_abl->mBuffers[0].mData); free(in_abl); in_abl = NULL; }
+    gui_audio_active = 0;
+    taps_close();
+}
+
+/* Commands arrive over launcher-owned stdin. Only the control loop executes
+ * USB/CoreAudio operations; malformed commands have no device side effects. */
+static void gui_commands(void)
+{
+    static char pending[128]; static size_t used;
+    if (gui_control_fd < 0) return;
+    char c;
+    while (read(gui_control_fd,&c,1) == 1) {
+        if (c != '\n') { if (used+1 < sizeof pending) pending[used++] = c; continue; }
+        pending[used] = 0; used = 0;
+        if (strcmp(pending,"probe") && strcmp(pending,"monitor1") && strcmp(pending,"monitor0") && strcmp(pending,"watch1") && strcmp(pending,"watch0")) continue;
+        if (!strcmp(pending,"monitor0")) { gui_audio_stop(); gui_monitor_only = 0; gui_status = "Idle · line on-hook"; continue; }
+        if (!strcmp(pending,"watch0")) { gui_watch = 0; continue; }
+        if (usb_open_line() < 0) { gui_status = "No selected USB modem"; continue; }
+        if (!strcmp(pending,"probe")) {
+            gui_hook = reg_read(REG_HOOK); gui_sense = reg_read(REG_SENSE);
+            gui_status = "Idle · line checked";
+        } else if (!strcmp(pending,"watch1")) {
+            gui_watch = 1; gui_rings = 0; gui_last_ring = 0;
+            di_set_caller_id(NULL,NULL);
+        } else if (!strcmp(pending,"monitor1")) {
+            int v = reg_read(REG_HOOK);
+            if (v < 0 || (v & REG_HOOK_BIT) || reg_write(REG_HOOK,(unsigned char)(v|REG_MONITOR_BIT)) < 0) {
+                gui_status = "On-hook monitor unavailable"; continue;
+            }
+            gui_hook = v|REG_MONITOR_BIT; gui_sense = reg_read(REG_SENSE);
+            if (!gui_audio_active) {
+                gui_monitor_only = 1;
+                if (audio_start() < 0) { gui_audio_stop(); gui_monitor_only = 0; gui_status = "CoreAudio monitor failed"; continue; }
+                gui_audio_active = 1;
+            }
+            gui_status = "On-hook raw audio monitor";
+        }
+    }
+}
+static int gui_ring_burst(uint64_t now, uint64_t *last)
+{
+    int fresh = !*last || now-*last > 1500;
+    *last = now;
+    return fresh;
+}
+static int gui_recent_ring(void)
+{
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+    uint64_t now = (uint64_t)ts.tv_sec*1000+ts.tv_nsec/1000000;
+    return gui_last_ring && now-gui_last_ring < 8000;
+}
+static void gui_ring_notice(void)
+{
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC,&ts);
+    uint64_t now = (uint64_t)ts.tv_sec*1000+ts.tv_nsec/1000000;
+    // One ring burst, rather than one USB notification. Notifications within
+    // 1.5 s extend the burst; this is host observation, not a DAA voltage code.
+    if (gui_ring_burst(now,&gui_last_ring)) { gui_rings++; di_on_ring(); }
+}
+static void gui_ring_poll(void)
+{
+    if (!gui_watch || !usb) return;
+    unsigned char b[16]; int n = 0;
+    if (libusb_interrupt_transfer(usb,0x81,b,sizeof b,&n,1) == 0 && n >= 2 && b[0] == 0xa1 && b[1] == 0x09) gui_ring_notice();
+}
+
 /* Offline replay -- the way to work on this with no line             */
 /* ------------------------------------------------------------------ */
 
@@ -813,10 +976,12 @@ static int replay(const char *path)
      * 9600 Hz samples to an 8000 Hz entry point, and it "passed" only because
      * the answer detector was mis-tuned by the same ratio.  Two wrongs.  The tap
      * must be at --rate, since that is what the device produced. */
-    for (;;) {
+    for (; !g_stop;) {
         size_t n = fread(buf, 2, 80, fp);
         if (n == 0) break;
+        gui_raw_feed(0,buf,(unsigned)n);
         engine_feed(buf, (long)n);
+        if (g_gui_control) { gui_status = "Offline replay · no USB line"; gui_publish(); CFRunLoopRunInMode(kCFRunLoopDefaultMode,(double)n/g_rate,false); }
         ring_r = ring_w;                 /* no line to transmit into */
         total += (long)n;
     }
@@ -923,6 +1088,7 @@ static int wait_for_ring(double secs)
         if (libusb_interrupt_transfer(usb, 0x81, b, sizeof b, &n, 500) != 0)
             continue;
         if (n >= 2 && b[0] == 0xa1 && b[1] == 0x09) {
+            if (g_gui_control) gui_ring_notice();
             if (++rings == 1) fprintf(stderr, "[APPLE] RING\n");
             libusb_release_interface(usb, 0);
             return 0;
@@ -944,6 +1110,9 @@ static void usage(const char *a0)
         "       %s --hook on|off\n"
         "       %s --selftest\n"
         "\n"
+        "  --devices    read-only USB/CoreAudio device inventory as JSON\n"
+        "  --diagnostic-selftest  check passive raw taps without hardware\n"
+        "  --gui-replay PATH  offline raw RX replay with GUI split consoles\n"
         "  --gui-control wait on split AT/data PTYs for ATD or ATA; one call per\n"
         "               process, with passive ME_GUI_PORT telemetry\n"
         "  --control-link PATH --data-link PATH  split consoles for GUI mode\n"
@@ -973,6 +1142,75 @@ static void usage(const char *a0)
         a0, a0, a0, a0, a0);
 }
 
+static int gui_diagnostic_selftest(void)
+{
+    @autoreleasepool {
+        g_gui_control = 1;
+        int16_t signal[4096], before[4096];
+        const int16_t pattern[] = {1000,-1000,32767,-32768};
+        for (unsigned i = 0; i < 4096; i++) signal[i] = pattern[i%4];
+        memcpy(before,signal,sizeof signal);
+        gui_raw_feed(0,signal,4096);
+        if (memcmp(signal,before,sizeof signal)) return 1;
+        NSString *json = gui_raw_json();
+        NSDictionary *v = [NSJSONSerialization JSONObjectWithData:[json dataUsingEncoding:NSUTF8StringEncoding] options:0 error:NULL];
+        NSArray *audio = v[@"audio"], *listen = v[@"listen"], *metrics = v[@"metrics"];
+        double expected = sqrt((1000000.0+1000000.0+32767.0*32767.0+32768.0*32768.0)/4-0.0625);
+        if ([audio[0] count] != 512 || [audio[1] count] != 0 ||
+            [listen[0][@"count"] unsignedLongLongValue] != 4096 || [listen[0][@"hex"] length] != 6400 ||
+            ![listen[0][@"hex"] hasPrefix:@"e80318fcff7f0080"] ||
+            [metrics[0][@"clipped"] unsignedLongLongValue] != 2048 ||
+            fabs([metrics[0][@"dc"] doubleValue]+0.25) > 1e-9 ||
+            fabs([metrics[0][@"rms"] doubleValue]-expected) > 1e-9 ||
+            [json length] > 25000) return 1;
+        uint64_t last = 0;
+        if (!gui_ring_burst(100,&last) || gui_ring_burst(1000,&last) ||
+            gui_ring_burst(2000,&last) || !gui_ring_burst(4000,&last)) return 1;
+        puts("Apple passive raw tap: bounded history, immutable input, endian order, DC/RMS/clipping and ring-burst checks passed");
+        return 0;
+    }
+}
+
+static int gui_devices(void)
+{
+    @autoreleasepool {
+    NSMutableArray *usbDevices = [NSMutableArray array], *audioDevices = [NSMutableArray array];
+    if (libusb_init(NULL) == 0) {
+        libusb_device **list; ssize_t n = libusb_get_device_list(NULL,&list);
+        for (ssize_t i = 0; i < n; i++) {
+            struct libusb_device_descriptor d;
+            if (libusb_get_device_descriptor(list[i],&d) == 0 && d.idVendor == VID && d.idProduct == PID) {
+                NSString *address = [NSString stringWithFormat:@"%u:%u",libusb_get_bus_number(list[i]),libusb_get_device_address(list[i])];
+                [usbDevices addObject:@{@"id":address,@"label":[@"Apple A1082 · " stringByAppendingString:address]}];
+            }
+        }
+        if (n >= 0) libusb_free_device_list(list,1);
+        libusb_exit(NULL);
+    }
+    AudioObjectPropertyAddress a = {kAudioHardwarePropertyDevices,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain};
+    UInt32 bytes = 0;
+    if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject,&a,0,NULL,&bytes) == noErr && bytes) {
+        AudioObjectID *ids = malloc(bytes);
+        if (AudioObjectGetPropertyData(kAudioObjectSystemObject,&a,0,NULL,&bytes,ids) == noErr) {
+            for (unsigned i = 0; i < bytes/sizeof(*ids); i++) {
+                CFStringRef name = NULL, uid = NULL; UInt32 len = sizeof(name);
+                AudioObjectPropertyAddress p = {kAudioObjectPropertyName,kAudioObjectPropertyScopeGlobal,kAudioObjectPropertyElementMain};
+                if (AudioObjectGetPropertyData(ids[i],&p,0,NULL,&len,&name) != noErr || !name) continue;
+                p.mSelector = kAudioDevicePropertyDeviceUID; len = sizeof(uid);
+                AudioObjectGetPropertyData(ids[i],&p,0,NULL,&len,&uid);
+                NSString *label = (__bridge NSString *)name;
+                if (uid && [label rangeOfString:@"Modem" options:NSCaseInsensitiveSearch].location != NSNotFound)
+                    [audioDevices addObject:@{@"id":(__bridge NSString *)uid,@"label":label}];
+                CFRelease(name); if (uid) CFRelease(uid);
+            }
+        }
+        free(ids);
+    }
+    NSData *json = [NSJSONSerialization dataWithJSONObject:@{@"usb":usbDevices,@"audio":audioDevices} options:0 error:NULL];
+    fwrite(json.bytes,1,json.length,stdout); putchar('\n'); return 0;
+    }
+}
+
 int main(int argc, char **argv)
 {
     const char *hook_arg = NULL;
@@ -980,7 +1218,10 @@ int main(int argc, char **argv)
     int rc = 1;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--gui-control"))                     g_gui_control = 1;
+        if (!strcmp(argv[i], "--diagnostic-selftest")) return gui_diagnostic_selftest();
+        else if (!strcmp(argv[i], "--devices")) return gui_devices();
+        else if (!strcmp(argv[i], "--gui-control"))                     g_gui_control = 1;
+        else if (!strcmp(argv[i], "--gui-replay") && i+1 < argc) g_replay_path = argv[++i];
         else if (!strcmp(argv[i], "--control-link") && i+1 < argc) g_control_link = argv[++i];
         else if (!strcmp(argv[i], "--data-link") && i+1 < argc)    g_data_link = argv[++i];
         else if (!strcmp(argv[i], "--answer"))                          g_answer_mode = 1;
@@ -1004,7 +1245,7 @@ int main(int argc, char **argv)
 
     if ((g_control_link == NULL) != (g_data_link == NULL) ||
         (g_pty_link && g_control_link) ||
-        (g_gui_control && (!g_control_link || g_dial || g_answer_mode || hook_arg || g_replay_path))) {
+        (g_gui_control && (!g_control_link || g_dial || g_answer_mode || hook_arg))) {
         fprintf(stderr,"GUI control requires split PTYs and excludes immediate call/replay/hook options\n");
         return 2;
     }
@@ -1015,10 +1256,20 @@ int main(int argc, char **argv)
         di_set_callbacks(gui_dial,gui_answer,gui_hangup,NULL);
         if (di_open_split(g_control_link,g_data_link) < 0) { me_destroy(); return 1; }
         g_di_open = 1;
+        di_set_auto_answer(0);
+        const char *profile = getenv("APPLE_GUI_PROFILE");
+        if (profile) di_load_profile(profile);
+        gui_control_fd = STDIN_FILENO;
+        fcntl(gui_control_fd,F_SETFL,fcntl(gui_control_fd,F_GETFL)|O_NONBLOCK);
         gui_monitor_start();
+        if (g_replay_path) {
+            rs_setup(); me_dial("replay");
+            rc = replay(g_replay_path);
+            close_dte(); me_destroy(); return rc;
+        }
         fprintf(stderr,"[APPLE] GUI ready; line remains on-hook until ATD or ATA\n");
         while (!g_stop) {
-            gui_publish();
+            gui_commands(); gui_ring_poll(); gui_publish();
             pthread_mutex_lock(&gui_request_lock);
             int request = gui_request;
             pthread_mutex_unlock(&gui_request_lock);
@@ -1033,7 +1284,12 @@ int main(int argc, char **argv)
             }
             CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.01,false);
         }
-        if (g_stop) { close_dte(); me_destroy(); return 0; }
+        gui_watch = 0;
+        if (g_stop) {
+            gui_audio_stop(); gui_monitor_only = 0;
+            if (usb) { libusb_close(usb); libusb_exit(NULL); }
+            close_dte(); me_destroy(); return 0;
+        }
         gui_status = g_answer_mode ? "Waiting for ring · line on-hook" : "Opening USB line";
         gui_publish();
     }
@@ -1084,7 +1340,7 @@ int main(int argc, char **argv)
 
     if (usb_open_line() < 0) return 1;
     if (g_dial && build_dial_script(g_dial, on_ms, off_ms) < 0) return 2;
-    if (g_answer_mode && wait_for_ring(ring_wait) < 0) {
+    if (g_answer_mode && !(g_gui_control && gui_recent_ring()) && wait_for_ring(ring_wait) < 0) {
         libusb_close(usb);
         libusb_exit(NULL);
         return 1;
@@ -1109,16 +1365,18 @@ int main(int argc, char **argv)
         me_dial(g_dial);
     }
 
-    if (g_stop) { close_dte(); me_destroy(); libusb_close(usb); libusb_exit(NULL); return 0; }
+    if (g_stop) { gui_audio_stop(); close_dte(); me_destroy(); libusb_close(usb); libusb_exit(NULL); return 0; }
     if (line_hook(1) < 0) {                  /* off-hook; refuses with no pair */
+        line_hook(0); gui_audio_stop();
         close_dte();
         me_destroy();
         libusb_close(usb);
         libusb_exit(NULL);
         return 1;
     }
-    if (g_stop) { line_hook(0); close_dte(); me_destroy(); libusb_close(usb); libusb_exit(NULL); return 0; }
-    if (audio_start() < 0) {
+    if (g_stop) { line_hook(0); gui_audio_stop(); close_dte(); me_destroy(); libusb_close(usb); libusb_exit(NULL); return 0; }
+    gui_monitor_only = 0;
+    if (!gui_audio_active && audio_start() < 0) {
         line_hook(0);
         close_dte();
         me_destroy();
@@ -1126,6 +1384,7 @@ int main(int argc, char **argv)
         libusb_exit(NULL);
         return 1;
     }
+    gui_audio_active = 1;
     if (g_answer_mode)
         fprintf(stderr, "[APPLE] answered; engine runs from the first block\n");
     else

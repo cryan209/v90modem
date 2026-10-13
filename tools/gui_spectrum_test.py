@@ -36,7 +36,11 @@ waterfall.update(quiet,count:8000,phase:"Connected")
 precondition(waterfall.held == 1 && waterfall.markers[0] == "Training · S")
 waterfall.update(quiet,count:16000,phase:"Connected")
 precondition(waterfall.stamps[1] == 2 && waterfall.markers[1] == "Connected")
-for i in 3...140 { waterfall.update(tone,count:i*8000,phase:"Connected") }
+waterfall.sampleRate = 9600
+waterfall.update(quiet,count:28800,phase:"Connected")
+precondition(waterfall.stamps[2] == 3, "Raw device waterfall used the engine clock")
+waterfall.sampleRate = 8000
+for i in 4...140 { waterfall.update(tone,count:i*8000,phase:"Connected") }
 precondition(waterfall.held == 128 && waterfall.stamps[(waterfall.next-1+128)%128] == 140)
 waterfall.fftSize = 512; waterfall.reset()
 precondition(waterfall.held == 0 && waterfall.levels[0].count == 257)

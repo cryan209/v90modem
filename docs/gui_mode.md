@@ -35,39 +35,52 @@ make gui-apple
 python3 tools/modem_gui.py --web --apple ./apple_usb_modem_coupler --hold 3600
 ```
 
-The GUI starts in on-hook command mode without opening USB or CoreAudio.
-Use `AT+MS` to choose the next call's offer, then `ATDnumber` to dial the
-physical line. Answer (`ATA`) waits for CDC ring detection before seizing
-it; `--ring-wait` controls the wait (default 60 seconds). Hang up (`ATH`) or
-close the GUI to release an active line. No automatic incoming-call answer
-is implemented in this launcher. The coupler's `--hold` bounds each active
-call; `make gui-apple` uses one hour.
+The GUI starts on-hook. The Apple tab provides USB and CoreAudio device
+pickers; refresh lists both independently, so select the matching pair when
+using multiple modems. Environment selections remain supported. Saved choices
+live in `artifacts/gui-apple/hardware.json` (`APPLE_GUI_HOME` overrides the root).
 
-The default codec rate remains 9600 Hz, feeding the existing exact rational
-analogue frontend. GUI audio/spectrum taps show the engine's 8 kHz RX/TX
-streams; they are not raw 9600 Hz device captures or byte-exact RTP codewords.
-The RX stream is shown while the engine runs; device DTMF/ringing and pre-engine
-answer detection are not included in these GUI audio taps. Diagnostic player
-and FFT controls do not alter the analogue frontend or SIP's G.711 path.
+Check line opens the selected USB device and displays the actual hook register
+and sense register. Zero sense means no pair; nonzero values are uncalibrated.
+On-hook monitor enables the DAA monitor bit and CoreAudio with silent output,
+without feeding the engine or seizing the line. Device audio selects raw codec
+RX/TX for waveforms and native FFT, waterfall and listening, including DTMF
+and pre-engine audio. Turn it off to inspect the engine's 8 kHz diagnostic taps.
+Raw views use the actual codec rate (normally 9600 Hz); recovered eye and
+constellation remain engine measurements. Diagnostic playback is output-only.
 
-Select a specific USB device and its corresponding CoreAudio device with the
-existing `APPLE_MODEM_ADDR=bus:addr` and `APPLE_MODEM_AUDIO_UID=substring`
-environment variables before launching. The GUI displays these selections.
-They are independent identifiers: do not assume two enumeration lists match.
-With one modem, automatic selection is sufficient.
+Watch rings polls the CDC interrupt endpoint. Notifications separated by more
+than 1.5 seconds count as separate bursts; this heuristic needs hardware
+validation. Auto-answer uses the existing S0 interpreter, with 0 disabling it
+and 1–9 selecting a burst count. A saved positive setting resumes ring watching
+on launch and after calls. `ATA` waits for a ring unless one was recently seen;
+`--ring-wait` defaults to 60 seconds. `ATDnumber` dials the physical line.
+`ATH`, closing the GUI, or the `--hold` limit releases an active call.
 
-Each completed, failed or cancelled call exits its backend process. The GUI
-retains its bounded consoles and starts a fresh on-hook backend, clearing
-telemetry histories and all per-call DSP/audio state. AT settings return to
-the power-on defaults (`ME_MODE`, default V.90); reapply `AT+MS` before another
-call if needed. Missing devices and line errors remain visible in the process
-log. Startup/configuration errors stop the launcher rather than repeatedly
-spawning a broken backend.
+Save AT settings writes profile 0. The launcher saves it before dial/answer and
+before device, recording or replay restarts; each fresh backend loads it from
+`artifacts/gui-apple/profile.at`. This retains `AT+MS` across calls. Each call
+still owns a fresh process, clearing all per-call DSP state. Errors remain in
+the process log; startup/configuration errors stop the launcher.
 
-`make gui-apple-test` exercises localhost telemetry, split PTYs, `AT+MS`, idle
-hang-up and dial/answer failure recovery using the deliberately invalid USB
-address `0:0`. It never seizes a telephone line. This test and the coupler
-resampler selftest do not establish live hardware interoperability.
+Record RX/TX creates a timestamped directory under `artifacts/gui-apple/captures`
+with `session.json`, `rx.s16` and `tx.s16`: signed little-endian raw codec samples
+at the recorded rate. Recording starts when CoreAudio starts and continues from
+on-hook monitoring into a call. Replay RX feeds a selected capture through the
+existing receive path at its recorded pace without opening USB or seizing a
+line. Stop replay returns to the live idle backend and its original rate.
+Recordings consume disk space until deleted; ordinary GUI telemetry stays bounded.
+
+The Apple diagnostics show raw DC, RMS after removing the mean, near-rail sample
+count (absolute amplitude at least 32760), CoreAudio render errors, empty TX
+samples and TX ring overruns. These measurements do not change samples, gains,
+resamplers or the SIP G.711 path (V.90 §5; V.34 §10.1).
+
+`make gui-apple-test` uses deliberately invalid USB address `0:0` and a synthetic
+capture to verify settings persistence, device validation, failure recovery,
+capture metadata, bounded raw replay, stopping and rate restoration. The
+coupler's `--diagnostic-selftest` checks raw copies, metrics and ring debounce.
+These and the resampler selftest do not establish live hardware interoperability.
 
 ## What the views measure
 
@@ -111,7 +124,8 @@ resampler selftest do not establish live hardware interoperability.
 
 ## Bounded storage and media isolation
 
-No GUI waveform, byte or process-log files are written. GUI mode also disables
+Except for explicitly enabled Apple raw recording, no GUI waveform, byte or
+process-log files are written. GUI mode also disables
 the engine’s automatic V.34 training raw files unless `ME_DUMP_DIR` is explicitly
 set. The existing optional capture environment variables still have their
 existing behavior if explicitly set. The monitor retains a one-second audio ring each way, 256 wire octets and
@@ -121,7 +135,8 @@ events. Snapshots expose just the latest 512 audio samples.
 Each control/data/log stream holds at most 256 chunks of at most 4 KiB in the
 Python relay. Every native/browser console displays at most 24,000 characters;
 training history retains at most 120 events. New output evicts old output.
-There is no per-call file archive and no backlog for a slow client. A paused UI
+Apple raw recording is the explicit file-archive exception; there is no
+telemetry backlog for a slow client. A paused UI
 freezes its plots while the relay continues overwriting its bounded histories.
 The native client permits only one outstanding polling request.
 

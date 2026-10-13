@@ -13,20 +13,19 @@ line control is not.
 
 ## GUI entry point
 
-`make gui-apple` launches the native console against this coupler, initially
-on-hook. `ATDnumber` starts an outgoing call; Answer (`ATA`) waits for a ring;
-Hang up (`ATH`) cancels a pending/active call. The GUI shows the engine's
-existing 8 kHz diagnostic taps, constellation, recovered eye, wire bytes and
-FFT views. Device DTMF and pre-engine audio are outside these taps. The
-transport, resamplers and training algorithms are unchanged by this entry
-point (V.90 §5 analogue role; V.34 §10.1 training).
+`make gui-apple` launches an on-hook console with device pickers, hook/sense
+readback, on-hook raw audio monitoring, ring watching and S0 auto-answer.
+Raw codec audio is available before engine startup and during dialling;
+engine eye and constellation remain separate. Optional RX/TX captures include
+rate metadata and can be replayed without USB. Diagnostics report raw DC/RMS,
+near-rail samples and transport counters. Profile 0 and hardware choices persist
+across the fresh backend processes used for each call.
 
-A fresh backend process owns each call; the console survives failures and
-hang-ups and returns to on-hook command mode. AT configuration returns to the
-power-on defaults between calls. Device selection still uses
-`APPLE_MODEM_ADDR` and `APPLE_MODEM_AUDIO_UID`. Full usage and hardware-free
-verification are in `docs/gui_mode.md`, under Apple USB Modem. This GUI
-integration makes no new live CONNECT or interoperability claim.
+Full controls, capture locations and hardware-free checks are documented in
+`docs/gui_mode.md`. The transport, resamplers and training algorithms are
+unchanged (V.90 §5 analogue role; V.34 §10.1 training). Ring burst counting and
+on-hook monitoring require live hardware validation; this integration makes
+no new CONNECT or interoperability claim.
 
 ## What the descriptors say
 

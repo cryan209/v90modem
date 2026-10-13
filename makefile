@@ -333,6 +333,7 @@ gui-smoke-test: $(TARGET)
 	python3 tools/gui_smoke_test.py
 
 gui-apple-test: apple_usb_modem_coupler
+	./apple_usb_modem_coupler --diagnostic-selftest
 	python3 tools/gui_apple_test.py
 
 gui-spectrum-test:

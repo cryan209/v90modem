@@ -19,6 +19,7 @@ import threading
 import time
 import tty
 import webbrowser
+import datetime
 
 
 LOOPBACK_PROFILES = {
@@ -91,6 +92,63 @@ def main():
     udp.settimeout(.2)
     env = dict(os.environ, ME_GUI_PORT=str(udp.getsockname()[1]))
     temp = tempfile.TemporaryDirectory(prefix='modem-gui-')
+    apple_home = Path(env.get('APPLE_GUI_HOME', str(Path(__file__).resolve().parents[1]/'artifacts/gui-apple')))
+    apple_options = {'auto_answer':0, 'capture':False, 'capture_path':'', 'devices':{'usb':[], 'audio':[]}, 'replay':False}
+    if apple:
+        apple_home.mkdir(parents=True,exist_ok=True)
+        config_path = apple_home/'hardware.json'
+        if config_path.exists():
+            config = json.loads(config_path.read_text())
+            apple_options['auto_answer'] = config.get('auto_answer',0)
+            for key in ('APPLE_MODEM_ADDR','APPLE_MODEM_AUDIO_UID'):
+                if key not in env and config.get(key): env[key] = config[key]
+        env['APPLE_GUI_PROFILE'] = str(apple_home/'profile.at')
+
+    def discover_apple():
+        result = subprocess.run([args[0],'--devices'],env=env,capture_output=True,timeout=5,check=True)
+        devices = json.loads(result.stdout)
+        with lock: apple_options['devices'] = devices
+        return devices
+
+    def apple_captures():
+        directory = apple_home/'captures'
+        if not directory.exists(): return []
+        items = []
+        for path in sorted(directory.glob('*/session.json'),reverse=True)[:100]:
+            try:
+                meta = json.loads(path.read_text())
+                if (path.parent/'rx.s16').exists(): items.append({'id':path.parent.name,'label':meta.get('created',path.parent.name), 'rate':meta.get('rate',9600)})
+            except (ValueError,OSError): pass
+        return items
+
+    def apple_process(replay=None):
+        call_env = dict(env)
+        call_args = list(args)
+        if replay:
+            call_args += ['--gui-replay',str(replay[0])]
+            if '--rate' in call_args: call_args[call_args.index('--rate')+1] = str(replay[1])
+            else: call_args += ['--rate',str(replay[1])]
+        elif apple_options['capture']:
+            directory = apple_home/'captures'; directory.mkdir(parents=True,exist_ok=True)
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ-')
+            capture = Path(tempfile.mkdtemp(prefix=stamp,dir=directory))
+            rate = float(args[args.index('--rate')+1]) if '--rate' in args else 9600
+            metadata = {'created':datetime.datetime.now(datetime.timezone.utc).isoformat(), 'rate':rate,
+                'usb_address':env.get('APPLE_MODEM_ADDR','Automatic'),'audio_uid':env.get('APPLE_MODEM_AUDIO_UID','Automatic')}
+            (capture/'session.json').write_text(json.dumps(metadata,indent=2)+'\n')
+            call_env.update(APPLE_MODEM_RX_TAP=str(capture/'rx.s16'),APPLE_MODEM_TX_TAP=str(capture/'tx.s16'))
+            with lock: apple_options['capture_path'] = str(capture)
+        with lock: apple_options['replay'] = replay is not None
+        process = subprocess.Popen(call_args,env=call_env,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+        if not replay and apple_options['auto_answer'] > 0:
+            process.stdin.write(b'watch1\n'); process.stdin.flush()
+        return process
+
+    if apple:
+        try: discover_apple()
+        except (OSError,ValueError,subprocess.SubprocessError) as error:
+            record('log',f'Apple discovery: {error}\n'.encode())
+
     peer = None; peer_udp = None
     if loopback:
         env.setdefault('ME_DATA_FRAMING', 'v14')
@@ -123,7 +181,7 @@ def main():
                 str(Path(__file__).with_name('modem_gui_native.swift')), '-o', str(native_binary)], check=True)
     if loopback: peer = subprocess.Popen(peer_args, env=peer_env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     try:
-        child = subprocess.Popen(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        child = apple_process() if apple else subprocess.Popen(args, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     except Exception:
         if peer is not None: peer.terminate(); peer.wait(timeout=5)
         raise
@@ -131,7 +189,7 @@ def main():
     generation = 0
     port_stop = threading.Event()
     port_threads = []
-    lifecycle = threading.Lock()
+    lifecycle = threading.RLock()
 
     def reader(sock=udp, destination=telemetry):
         while not stop.is_set():
@@ -139,9 +197,14 @@ def main():
                 payload, _ = sock.recvfrom(65535)
                 value = json.loads(payload)
                 with lock:
-                    destination.clear()
-                    value["epoch"] = value.get("epoch", 0)+generation*1000000
-                    destination.update(value, received=time.monotonic())
+                    if value.pop('kind',None) == 'apple_device':
+                        destination.update(value)
+                    else:
+                        raw = destination.get('hardware_audio')
+                        destination.clear()
+                        if raw is not None: destination['hardware_audio'] = raw
+                        value["epoch"] = value.get("epoch", 0)+generation*1000000
+                        destination.update(value, received=time.monotonic())
             except socket.timeout:
                 pass
             except (ValueError, OSError):
@@ -293,7 +356,7 @@ def main():
                     value['ports'] = ports
                     value['interfaces_ready'] = all(name in fds for name in ('at','data'))
                     value['backend'] = 'Apple USB modem' if apple else 'SIP/G.711'
-                    if apple: value['hardware'] = {'usb_address': env.get('APPLE_MODEM_ADDR','Automatic'), 'audio_uid': env.get('APPLE_MODEM_AUDIO_UID','Automatic')}
+                    if apple: value['hardware'] = dict(apple_options, usb_address=env.get('APPLE_MODEM_ADDR','Automatic'), audio_uid=env.get('APPLE_MODEM_AUDIO_UID','Automatic'), profile_path=env['APPLE_GUI_PROFILE'], captures=apple_captures())
                     value['exit'] = None if test['busy'] else child.poll()
                     pair_ready = bool(value.get('data_ready') and peer_telemetry.get('data_ready'))
                     if not pair_ready: test['connected_since'] = None
@@ -308,13 +371,17 @@ def main():
             # Capability URL + same-origin check: arbitrary websites cannot operate PTYs.
             origin = self.headers.get('Origin')
             expected = f'http://127.0.0.1:{self.server.server_port}'
-            if self.path not in ('/'+token+'/send', '/'+token+'/loopback') or origin != expected:
+            if self.path not in ('/'+token+'/send', '/'+token+'/loopback', '/'+token+'/apple') or origin != expected:
                 return self.respond(403, b'{}')
             try:
                 length = int(self.headers.get('Content-Length', '0'))
                 if not 0 < length <= 16384:
                     raise ValueError('Invalid message size')
                 req = json.loads(self.rfile.read(length))
+                if not isinstance(req,dict): raise ValueError('Expected a JSON object')
+                if self.path.endswith('/apple'):
+                    apple_action(req)
+                    return self.respond(200,b'{}')
                 if self.path.endswith('/loopback'):
                     profile = req.get('profile')
                     if not loopback or profile not in LOOPBACK_PROFILES: raise ValueError('Unknown loopback profile')
@@ -329,6 +396,8 @@ def main():
                 if name not in ('at','data'): raise ValueError('Use the caller AT or serial interface')
                 if test.get('busy'): raise ValueError('Wait for loopback setup to finish')
                 data = base64.b64decode(req['data'], validate=True)
+                if apple and name == 'at' and data.strip().upper().startswith((b'ATD',b'ATA')):
+                    data = b'AT&W0\r'+data
                 with lifecycle:
                     if name not in fds:
                         raise ValueError('Port not ready')
@@ -366,7 +435,7 @@ def main():
         webbrowser.open(url)
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
-    def restart_apple():
+    def restart_apple(replay=None):
         nonlocal child, generation
         with lifecycle:
             port_stop.set()
@@ -381,9 +450,79 @@ def main():
                 except FileNotFoundError: pass
             with lock:
                 generation += 1; telemetry.clear()
-            child = subprocess.Popen(args,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+            child = apple_process(replay)
             threading.Thread(target=log_reader,args=(child,),daemon=True).start()
             launch_ports()
+
+    def apple_action(req):
+        with lifecycle:
+            return apple_action_locked(req)
+
+    def apple_action_locked(req):
+        if not apple: raise ValueError('Apple backend is not selected')
+        action = req.get('action')
+        if action == 'refresh':
+            try: discover_apple()
+            except (OSError,ValueError,subprocess.SubprocessError) as error: raise ValueError(str(error))
+            return
+        if action == 'stop':
+            with lifecycle:
+                if child.poll() is None: child.terminate()
+            return
+        with lock:
+            if telemetry.get('state',0) != 0 or telemetry.get('line_health',{}).get('call_pending') or apple_options['replay']:
+                raise ValueError('Hang up or stop replay before changing hardware options')
+        if action == 'auto_answer':
+            rings = req.get('rings')
+            if type(rings) is not int or not 0 <= rings <= 9: raise ValueError('Choose 0 through 9 rings')
+            at_transaction('at',f'ATS0={rings}&W0')
+            with lock: apple_options['auto_answer'] = rings
+            config = {key:env.get(key,'') for key in ('APPLE_MODEM_ADDR','APPLE_MODEM_AUDIO_UID')}
+            config['auto_answer'] = rings
+            config_path.write_text(json.dumps(config,indent=2)+'\n')
+            if rings > 0:
+                child.stdin.write(b'watch1\n'); child.stdin.flush()
+            return
+        if action == 'save_settings':
+            at_transaction('at','AT&W0')
+            return
+        if action in ('probe','monitor','watch'):
+            if action != 'probe' and type(req.get('enabled')) is not bool: raise ValueError('Monitoring requires a boolean')
+            command = 'probe' if action == 'probe' else action+('1' if req.get('enabled') is True else '0')
+            with lifecycle:
+                if child.poll() is not None or child.stdin is None: raise ValueError('Backend is starting')
+                child.stdin.write((command+'\n').encode()); child.stdin.flush()
+            return
+        replay = None
+        if action == 'configure':
+            choices = apple_options['devices']
+            for field,key,group in [('usb_address','APPLE_MODEM_ADDR','usb'),('audio_uid','APPLE_MODEM_AUDIO_UID','audio')]:
+                value = req.get(field,'')
+                if not isinstance(value,str) or value and value not in [item['id'] for item in choices[group]]:
+                    raise ValueError('Refresh and select an enumerated device')
+            for field,key in [('usb_address','APPLE_MODEM_ADDR'),('audio_uid','APPLE_MODEM_AUDIO_UID')]:
+                value = req.get(field,'')
+                if value: env[key] = value
+                else: env.pop(key,None)
+            config_path.write_text(json.dumps(dict({key:env.get(key,'') for key in ('APPLE_MODEM_ADDR','APPLE_MODEM_AUDIO_UID')},auto_answer=apple_options['auto_answer']),indent=2)+'\n')
+        elif action == 'capture':
+            if not isinstance(req.get('enabled'),bool): raise ValueError('Capture requires a boolean')
+            with lock: apple_options['capture'] = req['enabled']; apple_options['capture_path'] = ''
+        elif action == 'replay':
+            ident = req.get('id')
+            capture = next((item for item in apple_captures() if item['id'] == ident),None)
+            if not capture or capture['rate'] not in (8000,9600): raise ValueError('Select a capture at 8000 or 9600 Hz')
+            path = (apple_home/'captures'/ident/'rx.s16').resolve()
+            if not path.is_relative_to((apple_home/'captures').resolve()): raise ValueError('Invalid capture path')
+            replay = (path,capture['rate'])
+        else: raise ValueError('Unknown Apple action')
+        at_transaction('at','AT&W0')
+        with lifecycle:
+            if child.poll() is None:
+                child.terminate()
+                try: child.wait(timeout=5)
+                except subprocess.TimeoutExpired: raise ValueError('Backend did not stop')
+        restart_apple(replay)
 
     def shutdown(*_):
         stop.set()
@@ -391,10 +530,11 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
     try:
         while not stop.wait(.2):
-            if not test["busy"] and child.poll() is not None:
-                if not apple or not telemetry: break
-                record('log',f'Apple session ended ({child.returncode}); returning to on-hook command mode\n'.encode())
-                restart_apple()
+            with lifecycle:
+                if not test["busy"] and child.poll() is not None:
+                    if not apple or not telemetry: break
+                    record('log',f'Apple session ended ({child.returncode}); returning to on-hook command mode\n'.encode())
+                    restart_apple()
             if not test["busy"] and peer is not None and peer.poll() is not None:
                 record('log', b'Local loopback peer exited\n'); break
             if native is not None and native.poll() is not None:

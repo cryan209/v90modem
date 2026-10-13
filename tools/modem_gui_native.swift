@@ -174,6 +174,7 @@ final class SignalPlot: NSView {
 // Spectrum histories advance only on fresh sample counters, never on redraw.
 final class SpectrumPlot: NSView {
     var size = 256, averaging = false, peakHold = false
+    var sampleRate = 8000.0
     var amplitudes: [[Double]] = [[],[]], peaks: [[Double]] = [[],[]]
     var seen = [-1,-1], carriers = [0.0,0.0]
     var hover: NSPoint?
@@ -226,18 +227,18 @@ final class SpectrumPlot: NSView {
                 if held { line.setLineDash([3,3],count:2,phase:0) }
                 color.withAlphaComponent(held ? 0.45 : 1).setStroke(); line.stroke()
             }
-            if carriers[dir] > 0 && carriers[dir] < 4000 {
+            if carriers[dir] > 0 && carriers[dir] < sampleRate/2 {
                 color.withAlphaComponent(0.4).setStroke(); let marker = NSBezierPath()
-                let x = left+carriers[dir]/4000*width
+                let x = left+carriers[dir]/(sampleRate/2)*width
                 marker.move(to:NSPoint(x:x,y:0)); marker.line(to:NSPoint(x:x,y:height)); marker.stroke()
             }
         }
         ("0 Hz" as NSString).draw(at:NSPoint(x:left,y:height+1),withAttributes:attrs)
-        ("2 kHz" as NSString).draw(at:NSPoint(x:left+width/2-14,y:height+1),withAttributes:attrs)
-        ("4 kHz · dBFS" as NSString).draw(at:NSPoint(x:left+width-65,y:height+1),withAttributes:attrs)
+        (String(format:"%g kHz",sampleRate/4000) as NSString).draw(at:NSPoint(x:left+width/2-14,y:height+1),withAttributes:attrs)
+        (String(format:"%g kHz · dBFS",sampleRate/2000) as NSString).draw(at:NSPoint(x:left+width-65,y:height+1),withAttributes:attrs)
         if let point = hover {
             let bin = min(size/2,max(0,Int(((point.x-left)/width*Double(size/2)).rounded())))
-            let frequency = Double(bin)*8000/Double(size)
+            let frequency = Double(bin)*sampleRate/Double(size)
             NSColor.white.withAlphaComponent(0.4).setStroke(); let cursor = NSBezierPath()
             let x = left+Double(bin)*width/Double(size/2)
             cursor.move(to:NSPoint(x:x,y:0)); cursor.line(to:NSPoint(x:x,y:height)); cursor.stroke()
@@ -257,6 +258,7 @@ final class SpectrumPlot: NSView {
 final class Waterfall: NSView {
     static let rows = 128
     var fftSize = 256
+    var sampleRate = 8000.0
     var bins: Int { fftSize/2+1 }
     var levels = [[Double]](repeating:[Double](repeating:-90,count:129),count:rows)
     var next = 0, held = 0, seen = -1
@@ -272,7 +274,7 @@ final class Waterfall: NSView {
         let signal = Array(samples.suffix(fftSize))
         let amplitudes = spectrumAmplitudes(signal,size:fftSize)
         for k in 0..<bins { levels[next][k] = spectrumDB(amplitudes[k]) }
-        stamps[next] = Double(count)/8000
+        stamps[next] = Double(count)/sampleRate
         markers[next] = phase != lastPhase ? phase : ""
         lastPhase = phase
         next = (next+1)%Self.rows; held = min(Self.rows,held+1); needsDisplay = true
@@ -303,15 +305,15 @@ final class Waterfall: NSView {
                 }
             }
         }
-        if carrier > 0 && carrier < 4000 {
+        if carrier > 0 && carrier < sampleRate/2 {
             NSColor.systemYellow.withAlphaComponent(0.6).setStroke()
-            let marker = NSBezierPath(); let x = carrier/4000*bounds.width
+            let marker = NSBezierPath(); let x = carrier/(sampleRate/2)*bounds.width
             marker.move(to:NSPoint(x:x,y:0)); marker.line(to:NSPoint(x:x,y:plotHeight)); marker.stroke()
         }
         let attrs:[NSAttributedString.Key:Any] = [.font:NSFont.systemFont(ofSize:9),.foregroundColor:NSColor.secondaryLabelColor]
         ("0 Hz" as NSString).draw(at:NSPoint(x:2,y:plotHeight+2),withAttributes:attrs)
-        ("2 kHz" as NSString).draw(at:NSPoint(x:bounds.width/2-15,y:plotHeight+2),withAttributes:attrs)
-        ("4 kHz" as NSString).draw(at:NSPoint(x:bounds.width-32,y:plotHeight+2),withAttributes:attrs)
+        (String(format:"%g kHz",sampleRate/4000) as NSString).draw(at:NSPoint(x:bounds.width/2-15,y:plotHeight+2),withAttributes:attrs)
+        (String(format:"%g kHz",sampleRate/2000) as NSString).draw(at:NSPoint(x:bounds.width-40,y:plotHeight+2),withAttributes:attrs)
         if held > 0 {
             let newest = (next-1+Self.rows)%Self.rows, oldest = (next-held+Self.rows)%Self.rows
             (String(format:"%.2f–%.2f s · sample clock · gaps omitted",stamps[oldest],stamps[newest]) as NSString).draw(at:NSPoint(x:2,y:plotHeight+14),withAttributes:attrs)
@@ -365,6 +367,18 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let session = URLSession(configuration: .ephemeral)
     var window: NSWindow!
     let status = NSTextField(labelWithString:"Starting modem…")
+    let diagnostics = NSTabView()
+    var appleTab: NSTabViewItem?
+    let usbPicker = NSPopUpButton(), audioPicker = NSPopUpButton(), capturePicker = NSPopUpButton(), autoAnswer = NSPopUpButton()
+    let onHookMonitor = NSButton(checkboxWithTitle:"On-hook monitor",target:nil,action:nil)
+    let watchRings = NSButton(checkboxWithTitle:"Watch rings",target:nil,action:nil)
+    let rawSource = NSButton(checkboxWithTitle:"Device audio",target:nil,action:nil)
+    let captureAudio = NSButton(checkboxWithTitle:"Record RX/TX",target:nil,action:nil)
+    let lineHealth = NSTextField(labelWithString:"Line: unchecked"), audioHealth = NSTextField(labelWithString:"Audio: waiting")
+    let capturePath = NSTextField(labelWithString:"")
+    var appleUSBIDs = [""], appleAudioIDs = [""], appleCaptureIDs: [String] = []
+    var appleInventoryKey = "", appleCaptureKey = ""
+    var audioRate = 8000.0
     let hardwareLabel = NSTextField(labelWithString:"")
     let error = NSTextField(labelWithString:"")
     let rx = SignalPlot(), tx = SignalPlot(), constellation = SignalPlot(), eye = SignalPlot()
@@ -432,10 +446,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.appearance = NSAppearance(named:.darkAqua)
-        window = NSWindow(contentRect:NSRect(x:0,y:0,width:1200,height:760),
+        window = NSWindow(contentRect:NSRect(x:0,y:0,width:1200,height:810),
             styleMask:[.titled,.closable,.miniaturizable,.resizable], backing:.buffered, defer:false)
         window.title = "Modem · Live line"
-        window.minSize = NSSize(width:1000,height:720)
+        window.minSize = NSSize(width:1000,height:770)
         window.delegate = self
         let root = NSStackView(); root.orientation = .vertical; root.alignment = .leading; root.spacing = 6
         root.edgeInsets = NSEdgeInsets(top:8,left:10,bottom:8,right:10)
@@ -462,26 +476,40 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         audioEngine.attach(player)
         audioEngine.connect(player,to:audioEngine.mainMixerNode,format:AVAudioFormat(standardFormatWithSampleRate:8000,channels:1))
         player.volume = 0.25
-        let diagnostics = NSTabView()
-        func tab(_ title:String,_ view:NSView) {
+        @discardableResult func tab(_ title:String,_ view:NSView) -> NSTabViewItem {
             let item = NSTabViewItem(identifier:title); item.label = title
             let container = NSView(); view.translatesAutoresizingMaskIntoConstraints = false
             container.addSubview(view)
             NSLayoutConstraint.activate([view.leadingAnchor.constraint(equalTo:container.leadingAnchor,constant:4),view.trailingAnchor.constraint(equalTo:container.trailingAnchor,constant:-4),view.topAnchor.constraint(equalTo:container.topAnchor,constant:4)])
             item.view = container; diagnostics.addTabViewItem(item)
+            return item
         }
         tab("Signal",pair(panel("Received constellation · teal samples / orange decisions",[constellation]),panel("Eye · I/Q at recovered timing, or explicit line estimate",[eye])))
         tab("Audio",pair(panel("RX amplitude histogram · −32768 to +32767",[histogram]),panel("RX/TX spectrum · −90 to 0 dBFS",[spectrum])))
         for plot in [rxWaterfall,txWaterfall] { plot.heightAnchor.constraint(equalToConstant:100).isActive = true }
         tab("Waterfall",pair(panel("RX · newest at top · −90 to 0 dBFS",[rxWaterfall]),panel("TX · newest at top · −90 to 0 dBFS",[txWaterfall])))
         tab("Process log",log.scroll)
-        diagnostics.heightAnchor.constraint(equalToConstant:160).isActive = true
+        for picker in [usbPicker,audioPicker,capturePicker] { picker.widthAnchor.constraint(equalToConstant:210).isActive = true }
+        autoAnswer.addItems(withTitles:["Auto-answer off"] + (1...9).map { "After \($0) ring\($0 == 1 ? "" : "s")" })
+        autoAnswer.target = self; autoAnswer.action = #selector(setAutoAnswer)
+        for (control,action) in [(onHookMonitor,#selector(setOnHookMonitor)),(watchRings,#selector(setWatchRings)),(captureAudio,#selector(setCaptureAudio)),(rawSource,#selector(spectrumOptions))] {
+            control.target = self; control.action = action
+        }
+        rawSource.state = .on
+        for field in [lineHealth,audioHealth,capturePath] { field.font = .systemFont(ofSize:10); field.lineBreakMode = .byTruncatingMiddle }
+        appleTab = tab("Apple hardware",panel("Codec / line controls · raw audio and saved AT settings",[
+            row([label("USB"),usbPicker,label("Audio"),audioPicker,button("Refresh",#selector(refreshApple)),button("Apply",#selector(applyApple))]),
+            row([button("Check line",#selector(probeApple)),onHookMonitor,rawSource,watchRings,autoAnswer,button("Save AT settings",#selector(saveAppleSettings))]),
+            row([captureAudio,capturePicker,button("Replay RX",#selector(replayApple)),button("Stop replay",#selector(stopAppleReplay))]),
+            lineHealth,audioHealth,capturePath]))
+        diagnostics.removeTabViewItem(appleTab!)
+        diagnostics.heightAnchor.constraint(equalToConstant:205).isActive = true
         startLoop = button("Start loopback",#selector(startLoopback))
         pattern = button("256-byte pattern",#selector(sendPattern))
         loopbackRow = row([label("Local test"),loopbackMode,startLoop,pattern,loopbackStatus]); loopbackRow.isHidden = true
         let items: [NSView] = [
             row([status,listen,button("Freeze",#selector(freeze))]),hardwareLabel,loopbackRow,error,
-            pair(panel("RX line · 64 ms",[rx]),panel("TX line · 64 ms",[tx])),
+            pair(panel("RX line · latest 512 samples",[rx]),panel("TX line · latest 512 samples",[tx])),
             row([eyeDir,eyeSource,carrierLabel]),
             row([label("FFT"),fftSizeControl,averageControl,peakControl,button("Clear peaks",#selector(clearSpectrumPeaks))]),
             diagnostics,
@@ -493,7 +521,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         at.scroll.toolTip = "Separate AT PTY; latest output. No history is saved to disk."
         rxWire.scroll.toolTip = "Framed/compressed line bits before modulation scrambling, packed LSB first. Latest 256 byte runs."
         for path in [atPath,dataPath] { path.font = .monospacedSystemFont(ofSize:10,weight:.regular); path.lineBreakMode = .byTruncatingMiddle }
-        if let screen = NSScreen.main { window.setFrame(NSRect(x:screen.visibleFrame.midX-600,y:screen.visibleFrame.midY-380,width:min(1200,screen.visibleFrame.width),height:min(760,screen.visibleFrame.height)),display:true) }
+        if let screen = NSScreen.main { window.setFrame(NSRect(x:screen.visibleFrame.midX-600,y:screen.visibleFrame.midY-405,width:min(1200,screen.visibleFrame.width),height:min(810,screen.visibleFrame.height)),display:true) }
         window.center(); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps:true)
         timer = Timer.scheduledTimer(withTimeInterval:0.15,repeats:true) { [weak self] _ in self?.poll() }
         poll()
@@ -509,6 +537,63 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         for plot in [rxWaterfall,txWaterfall] { plot.fftSize = spectrum.size; plot.reset() }
     }
     @objc func clearSpectrumPeaks() { spectrum.clearPeaks() }
+    @objc func refreshApple() { post("apple",["action":"refresh"]) }
+    @objc func applyApple() {
+        post("apple",["action":"configure","usb_address":appleUSBIDs[max(0,usbPicker.indexOfSelectedItem)],"audio_uid":appleAudioIDs[max(0,audioPicker.indexOfSelectedItem)]])
+    }
+    @objc func probeApple() { post("apple",["action":"probe"]) }
+    @objc func setOnHookMonitor() { post("apple",["action":"monitor","enabled":onHookMonitor.state == .on]) }
+    @objc func setWatchRings() { post("apple",["action":"watch","enabled":watchRings.state == .on]) }
+    @objc func setAutoAnswer() { post("apple",["action":"auto_answer","rings":max(0,autoAnswer.indexOfSelectedItem)]) }
+    @objc func saveAppleSettings() { post("apple",["action":"save_settings"]) }
+    @objc func setCaptureAudio() { post("apple",["action":"capture","enabled":captureAudio.state == .on]) }
+    @objc func replayApple() {
+        guard appleCaptureIDs.indices.contains(capturePicker.indexOfSelectedItem) else { return }
+        post("apple",["action":"replay","id":appleCaptureIDs[capturePicker.indexOfSelectedItem]])
+    }
+    @objc func stopAppleReplay() { post("apple",["action":"stop"]) }
+    func renderApple(_ s:[String:Any], _ hardware:[String:Any]) {
+        if let tab = appleTab, !diagnostics.tabViewItems.contains(where: { $0 === tab }) {
+            diagnostics.addTabViewItem(tab); diagnostics.selectTabViewItem(tab)
+        }
+        let devices = hardware["devices"] as? [String:[[String:String]]] ?? [:]
+        let usb = devices["usb"] ?? [], audio = devices["audio"] ?? []
+        let selectedUSB = hardware["usb_address"] as? String ?? "Automatic", selectedAudio = hardware["audio_uid"] as? String ?? "Automatic"
+        let key = (try? JSONSerialization.data(withJSONObject:devices,options:[.sortedKeys])).map { String(decoding:$0,as:UTF8.self) } ?? ""
+        let inventory = key+selectedUSB+selectedAudio
+        if inventory != appleInventoryKey {
+            appleInventoryKey = inventory
+            appleUSBIDs = [""]+usb.compactMap { $0["id"] }; appleAudioIDs = [""]+audio.compactMap { $0["id"] }
+            usbPicker.removeAllItems(); audioPicker.removeAllItems()
+            usbPicker.addItems(withTitles:["Automatic"]+usb.map { $0["label"] ?? $0["id"] ?? "USB" })
+            audioPicker.addItems(withTitles:["Automatic"]+audio.map { ($0["label"] ?? "Audio")+" · "+($0["id"] ?? "") })
+            if let i = appleUSBIDs.firstIndex(of:selectedUSB) { usbPicker.selectItem(at:i) }
+            if let i = appleAudioIDs.firstIndex(of:selectedAudio) { audioPicker.selectItem(at:i) }
+        }
+        let captures = hardware["captures"] as? [[String:Any]] ?? []
+        let ids = captures.compactMap { $0["id"] as? String }
+        if ids.joined() != appleCaptureKey {
+            let previous = appleCaptureIDs.indices.contains(capturePicker.indexOfSelectedItem) ? appleCaptureIDs[capturePicker.indexOfSelectedItem] : ""
+            appleCaptureKey = ids.joined(); appleCaptureIDs = ids
+            capturePicker.removeAllItems(); capturePicker.addItems(withTitles:captures.map { $0["label"] as? String ?? "Capture" })
+            if let i = ids.firstIndex(of:previous) { capturePicker.selectItem(at:i) }
+        }
+        captureAudio.state = (hardware["capture"] as? Bool ?? false) ? .on : .off
+        autoAnswer.selectItem(at:min(9,max(0,hardware["auto_answer"] as? Int ?? 0)))
+        let health = s["line_health"] as? [String:Any] ?? [:]
+        onHookMonitor.state = (health["monitoring"] as? Bool ?? false) ? .on : .off
+        watchRings.state = (health["watching"] as? Bool ?? false) ? .on : .off
+        let hook = health["hook_register"] as? Int ?? -1, sense = health["sense"] as? Int ?? -1
+        let hookText = hook < 0 ? "unchecked" : hook & 1 == 1 ? "off-hook" : "on-hook"
+        let senseText = sense < 0 ? "unchecked" : sense == 0 ? "no telephone pair" : String(format:"0x%02X · uncalibrated",sense)
+        lineHealth.stringValue = "USB \((health["usb_open"] as? Bool ?? false) ? "open" : "not opened") · Hook \(hookText) · Line sense \(senseText) · \(health["rings"] as? Int ?? 0) ring bursts"
+        let raw = s["hardware_audio"] as? [String:Any] ?? [:], metrics = raw["metrics"] as? [[String:Any]] ?? []
+        let levels = metrics.enumerated().map { dir,m -> String in
+            String(format:"%@ DC %.0f · RMS %.0f · clipped %d",dir == 0 ? "RX" : "TX",m["dc"] as? Double ?? 0,m["rms"] as? Double ?? 0,m["clipped"] as? Int ?? 0)
+        }.joined(separator:" | ")
+        audioHealth.stringValue = "\(levels) · Render errors \(raw["render_errors"] as? Int ?? 0) · TX empty \(raw["tx_empty_samples"] as? Int ?? 0) · Ring overruns \(raw["tx_ring_overruns"] as? Int ?? 0)"
+        capturePath.stringValue = (hardware["replay"] as? Bool ?? false) ? "Offline RX replay · no USB line" : (hardware["capture_path"] as? String ?? "").isEmpty ? "Recording off · Device audio changes waveform, spectrum and listening; eye stays on the engine tap" : "Recording: \(hardware["capture_path"] as? String ?? "")"
+    }
     @objc func answer() { send("at",Data("ATA\r".utf8)) }
     @objc func hangup() { send("at",Data("ATH\r".utf8)) }
     @objc func modulation() { send("at",Data("AT+MS?\r".utf8)) }
@@ -561,6 +646,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         player.stop(); audioScheduled = 0
     }
     func monitorAudio(_ s:[String:Any]) {
+        let rate = s["audio_rate"] as? Double ?? 8000
+        if rate != audioRate {
+            resetAudio(); audioEngine.stop(); audioEngine.disconnectNodeOutput(player)
+            audioEngine.connect(player,to:audioEngine.mainMixerNode,format:AVAudioFormat(standardFormatWithSampleRate:rate,channels:1))
+            audioRate = rate; audioSeen = [0,0]
+        }
         let current = s["epoch"] as? Int ?? 0, direction = listen.indexOfSelectedItem
         if current != audioEpoch || direction != audioDirection {
             audioEpoch = current; audioDirection = direction; audioSeen = [0,0]; resetAudio()
@@ -582,10 +673,10 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
            let played = player.playerTime(forNodeTime:render) {
             pending = max(0,audioScheduled-Int(played.sampleTime))
         }
-        if pending+fresh > 6400 { resetAudio() }
+        if pending+fresh > Int(rate*0.8) { resetAudio() }
         do { if !audioEngine.isRunning { try audioEngine.start() } }
         catch { self.error.stringValue = "Audio: \(error.localizedDescription)"; return }
-        guard let format = AVAudioFormat(standardFormatWithSampleRate:8000,channels:1),
+        guard let format = AVAudioFormat(standardFormatWithSampleRate:rate,channels:1),
               let buffer = AVAudioPCMBuffer(pcmFormat:format,frameCapacity:AVAudioFrameCount(fresh)),
               let channel = buffer.floatChannelData?[0] else { return }
         buffer.frameLength = AVAudioFrameCount(fresh)
@@ -597,7 +688,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         audioSeen[d] = count; audioScheduled += fresh
         player.scheduleBuffer(buffer)
-        if !player.isPlaying && audioScheduled >= 2400 { player.play() }
+        if !player.isPlaying && audioScheduled >= Int(rate*0.3) { player.play() }
     }
     func poll() {
         guard !loading else { return }; loading = true
@@ -637,11 +728,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             pattern.isEnabled = dataReady && !busy && (local["pattern_ready"] as? Bool ?? false)
             loopbackStatus.stringValue = dataReady && !pattern.isEnabled ? "Waiting for both carriers to settle" : dataReady ? "Echoed \(local["echoed"] as? Int ?? 0) bytes" : local["status"] as? String ?? ""
         }
-        let hardware = s["hardware"] as? [String:String]
+        let hardware = s["hardware"] as? [String:Any]
         hardwareLabel.isHidden = hardware == nil
         if let hardware = hardware {
+            renderApple(s,hardware)
             window.title = "Modem · Apple USB analogue line"
-            hardwareLabel.stringValue = "Apple USB · \(s["hardware_status"] as? String ?? "Starting") · USB \(hardware["usb_address"] ?? "Automatic") · Audio \(hardware["audio_uid"] ?? "Automatic") · ATDnumber to dial; ATA waits for a ring"
+            hardwareLabel.stringValue = "Apple USB · \(s["hardware_status"] as? String ?? "Starting") · USB \(hardware["usb_address"] as? String ?? "Automatic") · Audio \(hardware["audio_uid"] as? String ?? "Automatic") · ATDnumber to dial; ATA waits for a ring"
         }
         let streams = s["streams"] as? [String:[[Any]]] ?? [:]
         at.update(streams["at"] ?? [],binary:false); serial.update(streams["data"] ?? [],binary:true); log.update(streams["log"] ?? [],binary:false)
@@ -654,11 +746,22 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         eventSeen = count; history = Array(history.suffix(120)); training.replace(history.joined(separator:"\n"))
         if let exit = s["exit"] as? Int { error.stringValue = "Modem exited: \(exit)" }
         else if error.stringValue.hasPrefix("Modem exited:") { error.stringValue = "" }
-        monitorAudio(s)
+        var display = s
+        let useRaw = hardware != nil && rawSource.state == .on
+        if useRaw, let raw = s["hardware_audio"] as? [String:Any] {
+            display["audio"] = raw["audio"]; display["listen"] = raw["listen"]; display["audio_rate"] = raw["rate"]
+        }
+        display["epoch"] = (s["epoch"] as? Int ?? 0)*2+(useRaw ? 1 : 0)
+        monitorAudio(display)
         guard !frozen else { return }
-        let audio = s["audio"] as? [[Double]] ?? [[],[]]
-        if audio.count == 2 { rx.samples = audio[0]; tx.samples = audio[1]; eye.samples = audio[max(0,eyeDir.indexOfSelectedItem)]; histogram.samples = audio[0] }
-        let listening = s["listen"] as? [[String:Any]] ?? []
+        let audio = display["audio"] as? [[Double]] ?? [[],[]]
+        if audio.count == 2 { rx.samples = audio[0]; tx.samples = audio[1]; eye.samples = (s["audio"] as? [[Double]] ?? [[],[]])[max(0,eyeDir.indexOfSelectedItem)]; histogram.samples = audio[0] }
+        let rate = display["audio_rate"] as? Double ?? 8000
+        if spectrum.sampleRate != rate {
+            spectrum.sampleRate = rate; spectrum.reset()
+            for waterfall in [rxWaterfall,txWaterfall] { waterfall.sampleRate = rate; waterfall.reset() }
+        }
+        let listening = display["listen"] as? [[String:Any]] ?? []
         if audio.count == 2 && listening.count == 2 {
             rxWaterfall.carrier = s["rx_carrier"] as? Double ?? 0
             txWaterfall.carrier = s["tx_carrier"] as? Double ?? 0
