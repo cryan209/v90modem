@@ -561,8 +561,45 @@ static pj_status_t dmodem_put_frame(pjmedia_port *this_port, pjmedia_frame *fram
 	return PJ_SUCCESS;
 }
 
-/* DSP 9600 -> net 8000: the upstream is V.34-modulated, band-limited
- * well below 3.4 kHz, so simple linear interpolation is adequate. */
+/* DSP 9600 -> net 8000.  Linear interpolation was chosen when the upstream
+ * was only ever V.34, band-limited well below 3.4 kHz.  A V.92 PCM upstream
+ * is not: measured on the Proxmox rig against an ideal resampling of
+ * dm_from_dsp_9600.raw, linear interpolation leaves an error 12.8 dB below the
+ * signal, and it is time-varying (five phases), so no equaliser removes it;
+ * our TRN2u receiver saw sigma 0.154 LU and refused every CPd.
+ * DM_UP_RESAMPLER=sinc decimates with a 65-tap Hann-windowed sinc at 4 kHz
+ * instead: 192 in, 160 out per frame as before, plus a constant 32-sample
+ * (3.3 ms) delay. */
+#define UP_HALF 32
+#define UP_HIST (2*UP_HALF + 2)
+static int up_sinc = -1;
+static double up_coef[5][2*UP_HALF + 1];
+static pj_int16_t up_hist[UP_HIST];
+
+static void up_sinc_init(void)
+{
+	const char *e = getenv("DM_UP_RESAMPLER");
+
+	up_sinc = (e && strcmp(e, "sinc") == 0);
+	if (!up_sinc)
+		return;
+	for (int ph = 0; ph < 5; ph++) {
+		double frac = ph / 5.0, sum = 0.0;
+
+		for (int j = -UP_HALF; j <= UP_HALF; j++) {
+			double y = (j - frac) * (8000.0 / 9600.0);
+			double s = (fabs(y) < 1e-12) ? 1.0 : sin(M_PI*y)/(M_PI*y);
+			double t = (j - frac + UP_HALF) / (2.0*UP_HALF);
+			double w = (t <= 0.0 || t >= 1.0) ? 0.0 : 0.5 - 0.5*cos(2.0*M_PI*t);
+
+			up_coef[ph][j + UP_HALF] = s * w;
+			sum += s * w;
+		}
+		for (int j = 0; j <= 2*UP_HALF; j++)
+			up_coef[ph][j] /= sum;       /* unity DC gain on every phase */
+	}
+	printf("upstream 9600->8000: windowed-sinc decimator (DM_UP_RESAMPLER=sinc)\n");
+}
 static pj_status_t dmodem_get_frame(pjmedia_port *this_port, pjmedia_frame *frame) {
 	struct dmodem *sm = (struct dmodem *)this_port;
 	pj_int16_t raw[1152];
@@ -610,6 +647,30 @@ static pj_status_t dmodem_get_frame(pjmedia_port *this_port, pjmedia_frame *fram
 	if (!dm_tap_tx_9600) dm_tap_tx_9600 = fopen("/tmp/dm_from_dsp_9600.raw","wb");
 	if (dm_tap_tx_9600) { fwrite(raw,2,(size_t)in_n,dm_tap_tx_9600); fflush(dm_tap_tx_9600); }
 	out = (pj_int16_t *)frame->buf;
+	if (up_sinc < 0)
+		up_sinc_init();
+	if (up_sinc) {
+		/* x[] = the last UP_HIST input samples, then this frame.  Output k
+		 * sits at k*1.2 in the frame, taken UP_HALF+1 samples late so that
+		 * all 65 taps are already in hand. */
+		pj_int16_t x[UP_HIST + 1152];
+
+		memcpy(x, up_hist, sizeof(up_hist));
+		memcpy(x + UP_HIST, raw, (size_t)in_n * 2);
+		for (k = 0; k < out_n; k++) {
+			int num = k * 6;
+			int centre = UP_HIST + num / 5 - (UP_HALF + 1);
+			const double *c = up_coef[num % 5];
+			double acc = 0.0;
+
+			for (int j = -UP_HALF; j <= UP_HALF; j++)
+				acc += c[j + UP_HALF] * x[centre + j];
+			if (acc > 32767.0) acc = 32767.0;
+			if (acc < -32768.0) acc = -32768.0;
+			out[k] = (pj_int16_t)lrint(acc);
+		}
+		memcpy(up_hist, x + in_n, sizeof(up_hist));
+	} else
 	for (k = 0; k < out_n; k++) {
 		int num = k * 6;
 		int i = num / 5;

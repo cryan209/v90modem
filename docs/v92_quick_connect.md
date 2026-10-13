@@ -353,3 +353,24 @@ its TRN2 check passes (ratio +1.171, `disable linear mapping study`), it designs
 constellations and the SUVd/SUVu exchange runs. Next blocker, ours: the CPd design
 refuses the upstream, `CPd profile cannot arm B1u receiver (noise sigma 193.27 DS0, rx rms
 1252)` (the tower measured ~27), no CPd goes out, and slmodemd ends on `Phase4 TimeOut`.
+
+### Upstream sigma 193 was the rig: d-modem's linear 9600 -> 8000 interpolation
+
+d-modem taps slmodemd's transmit before (`dm_from_dsp_9600.raw`) and after
+(`dm_from_dsp.raw`) its 9600 -> 8000 conversion. Against an ideal resampling of the first,
+the linear interpolation leaves an error 12.8 dB below the signal throughout the V.92
+segments (time-varying across its five phases, so no equaliser removes it). Our TRN2u error
+was 0.154 LU, just under that floor. `SLM_CODECTYPE=4 SLM_IODELAY=0` changed nothing
+(sigma 192.3). `rig/d-modem/d-modem.c` now has `DM_UP_RESAMPLER=sinc`, a 65-tap Hann sinc
+decimator (192 in / 160 out per frame, constant 33-sample delay), and `qc_slm_pve.sh` uses
+it by default.
+
+With it (`upsinc1`, +PQC=1): TRN2u error **0.019 LU, sigma 26.6 DS0** (the tower's figure),
+CPd designed for **32000 bps** (20 points), and slmodemd reaches **V.92 data mode with PCM
+upstream**, `Link: DP is V.92, rate: rx 54667, tx 32000`, `CONNECT 54667`. Not yet usable:
+- our B1u never locks: after 10 s the best alignment holds 3 of 16 frames, the equalised
+  data sits 0.10 LU from the nearest level (142.7 DS0 rms), and the data-mode equaliser
+  re-solve was refused 5 of 6 times (residual above twice the first); we never print
+  CONNECT, no lines move either way, and slmodemd hangs up.
+- slmodemd's Phase 4 verdict on attempt 1 varies between calls (ratio 1.171 passed in
+  `sufix1`, 2.504 failed here), so attempt 1 does not always reach data.
