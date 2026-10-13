@@ -423,6 +423,24 @@ static bool v92_short_test_no_reply(void)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* Test hook: the digital modem treats its first INFO0a as needing the 9.4.1.2.1
+   recovery (repeat INFO0d with bit 28 set), so the short procedure has to carry
+   on from there. */
+static bool v92_short_test_info0_recovery(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *e = getenv("V92_SHORT_TEST_INFO0_RECOVERY");
+
+        cached = (e  &&  e[0]  &&  e[0] != '0')  ?  1  :  0;
+    }
+    /*endif*/
+    return cached != 0;
+}
+/*- End of function --------------------------------------------------------*/
+
 static bool v92_short_phase2_agreed(const v34_state_t *s)
 {
     return s->tx.v90_mode
@@ -3047,7 +3065,8 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
             if (s->rx.info0_received)
             {
                 if (!s->tx.info0_acknowledgement
-                    &&  s->tx.stage == V34_TX_STAGE_INFO0)
+                    &&  s->tx.stage == V34_TX_STAGE_INFO0
+                    &&  !(s->tx.v92_short_phase2_requested  &&  v92_short_test_info0_recovery()))
                 {
                     /* V.90 9.2.1.1.1-9.2.1.1.2 error-free path: INFO0d is
                        transmitted once, followed by Tone B.  The ack'd
@@ -3109,6 +3128,12 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                          reason);
                 initial_ab_not_ab_baud_init(s);
                 s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
+                /* V.92 9.4.1.2.1: after the INFO0 recovery "the digital modem
+                   shall then proceed according to 9.4.1.1.3", i.e. the short
+                   procedure goes on when both ends asked for it. */
+                if (s->tx.v92_short_armed  &&  s->rx.info0_received  &&  v92_short_phase2_agreed(s))
+                    v92_short_begin(s, "digital");
+                /*endif*/
             }
             else if (s->tx.info0_acknowledgement
                      || s->tx.stage == V34_TX_STAGE_INFO0_RETRY)
@@ -3143,6 +3168,9 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                              s->rx.info0_received);
                     initial_ab_not_ab_baud_init(s);
                     s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
+                    if (s->tx.v92_short_armed  &&  s->rx.info0_received  &&  v92_short_phase2_agreed(s))
+                        v92_short_begin(s, "digital");
+                    /*endif*/
                 }
                 else
                 {
@@ -3847,7 +3875,17 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                      s->rx.signal_present, s->rx.persistence1,
                      s->rx.persistence2, s->rx.current_demodulator);
         }
-        if (s->rx.info0_received)
+        if (s->rx.info0_received  &&  s->tx.v92_short_armed  &&  !s->tx.info0_acknowledgement
+            &&  s->tx.v92_short_phase2_requested  &&  v92_short_test_info0_recovery())
+        {
+            /* Test: as if INFO0a had only just been received after a Tone A:
+               9.4.1.2.1 repeats INFO0d with bit 28 set. */
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.92 9.4.1.2.1 (test): repeating INFO0d with bit 28 set\n");
+            s->tx.info0_acknowledgement = true;
+            info0_baud_init(s);
+        }
+        else if (s->rx.info0_received)
         {
             V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                      "Tx - V.90: INFO0a received, continuing Tone B and waiting for Tone A reversal\n");

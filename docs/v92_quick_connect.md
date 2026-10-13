@@ -174,24 +174,14 @@ way the full Phase 2 is then kept for the rest of the call. `V92_SHORT_TEST_NO_R
 makes the analogue modem ignore the reversal so that path runs end to end
 (`tests/fast.list`). A retrain omits INFO0 and never starts a short Phase 2.
 
-Not done: the INFO0 error-recovery loops (9.4.1.2.1: repeated INFO0, bit 28) do
-not lead into the short procedure, they leave the call on the full one; and
-nothing here has met a foreign V.92 modem.
+INFO0 recovery (9.4.1.2.1, 9.4.2.2.1): when the digital modem repeats INFO0d (bit 28 set
+after a correct INFO0a) or the analogue modem repeats INFO0a, both then "proceed
+according to 9.4.1.1.3" -- the short procedure carries on. `v34tx.c` calls
+`v92_short_begin` at the points where the recovery hands back to Tone B (the
+acknowledged-exchange exit and the retry-guard exit), when the armed flag and the
+received INFO0 bits 26/27 still agree. `V92_SHORT_TEST_INFO0_RECOVERY=1` makes the
+digital modem take the recovery once (`tests/fast.list`). Before this the recovery
+quietly left the call on the full Phase 2 on the digital side, which the analogue
+side then waited out.
 
-## Not implemented (either procedure)
-
-- An analogue answerer for a V.90 call (Phase 2), which also limits the digital
-  answerer's role swap on QC1d (9.2.4.1) to Phase 1.
-- No foreign peer has been qualified. A V.92 analogue modem that sends QC1a
-  (the Motorola, USR and Agere captures in `docs/v92_short_phase1_plan.md` do)
-  is the next test; the factory `+PQC=3` keeps the working slmodemd flow
-  unchanged until that is done.
-
-## ODP/ADP bypass (9.2.5, 9.3.1)
-
-When the call is V.92 (digital `g_v92_active`, analogue `g_v92a`) and both ends signalled
-LAPM (our V.8/V.8bis offer, the peer's protocol octet or QC P bit), `data_stack_start_online`
-starts V.42 with `detect=false`: the originator goes straight to XID/SABME and no ODP/ADP is
-sent or waited for (`me_v92_odp_bypass`, log "ODP/ADP bypassed"). It applies after the short
-and the full startup alike and only while a Quick Connect feature is enabled (`+PQC` != 3):
-slmodemd sends ODP regardless of V.92, so the factory setting keeps the detection phase.
+Not done: nothing here has met a foreign V.92 modem.
