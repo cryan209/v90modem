@@ -93,6 +93,28 @@ silence, QTS, QTS\, ANSpcm, and from there it is the sequence above.
 An ANSam heard first still sends the caller to the QC1a route; QCA2a (an analogue
 answerer) and the digital modem taking the analogue role are not handled.
 
+## Both modems analogue (9.2.1.1, 9.2.1.2, 9.2.3; Figures 7 and 8)
+
+`ME_V90_ROLE=analogue` on both ends, `+PQC` 0 or 1. There is no PCM leg, so the
+short Phase 1 ends in an ordinary V.34 Phase 2 and the only tone the two need is
+ANSam in place of ANSpcm.
+
+- **Answerer** (`v92_qc_start_analogue_answer`): QC1a (or, over V.8bis, QC2a) is
+  answered by QCA1a (Table 4) or QCA2a (Table 5), then V.8 sends ANSam after its
+  own 75 ms of silence (`v8_parms.ansam_no_delay` drops the 750 ms hold that
+  otherwise precedes ANSam). While ANSam plays the TONEq detector listens
+  (`V92_QC_WATCH`); a CM goes to V.8 as usual (9.2.3.4). TONEq ends ANSam, then 75
+  ms of silence and V.34 Phase 2.
+- **Caller** (`v92_qca_start_ansam`): QCA1a/QCA2a makes it stop CM, go silent, and
+  send TONEq once ANSam has been heard (200 ms after QCA1a, 1 s after QCA2a, 9.2.1.1
+  and 9.2.1.2); when ANSam is gone, 75 ms of silence and V.34 Phase 2.
+- The result handler had assumed an analogue caller always meets a digital answerer.
+  It now takes the V.34 path when the peer offers only the analogue role, whether
+  or not Quick Connect is on; without that the two analogue modems did not
+  connect at all.
+
+Not covered: a digital caller (QC1d, QC2d), which this engine never is.
+
 ## Short Phase 2 (9.4), both roles
 
 With `+PQC` 0 or 2 each modem's INFO0 carries the V.92 capability bit and the
@@ -134,8 +156,8 @@ nothing here has met a foreign V.92 modem.
 
 ## Not implemented (either procedure)
 
-- The cases where the answerer is an analogue modem (QCA2a too) (QCA1a, Figures 7/8, 9.2.1.1/9.2.1.4), or
-  the digital answerer takes the analogue role (9.2.4.1).
+- A digital modem calling (QC1d/QC2d), and a digital answerer taking the
+  analogue role when it hears QC1d (9.2.4.1).
 - **ODP/ADP bypass** (9.2.5) on the live path: the P bit is sent and read, and
   the existing LAPM handling takes the caller's P bit, but no V.42 detection
   phase is skipped here.

@@ -700,7 +700,7 @@ static void v92_decode(v8_state_t *s)
        and sees QCA1d (Table 5; octet bits 3-5 are the 000 before LM) is
        answered by a digital modem that has taken the offer. */
     else if (s->calling_party  &&  s->parms.v92_quick_connect  &&  !s->qc_reported
-             &&  from_digital  &&  qca  &&  (v92 & 0x38) == 0)
+             &&  qca  &&  (from_digital  ?  (v92 & 0x38) == 0  :  (v92 & 0x10) == 0))
     {
         /* A QCA octet is not yet Quick Connect: an answerer that has no such
            thing but saw our QC sends it ahead of its JM, in the V.8 stream.
@@ -1792,7 +1792,7 @@ SPAN_DECLARE(int) v8_restart(v8_state_t *s, bool calling_party, v8_parms_t *parm
            0.5-0.7s ON) has room to finish before our own tone starts
            overlapping it on a line with no echo cancellation. */
         s->state = V8_CM_WAIT;
-        s->ansam_start_delay_timer = milliseconds_to_samples(v8_ansam_start_delay_ms());
+        s->ansam_start_delay_timer = milliseconds_to_samples(s->parms.ansam_no_delay ? 0 : v8_ansam_start_delay_ms());
         /* Extend the CM-wait budget by the delay, so it doesn't eat into
            the time actually available for ANSam/CM once it starts. */
         s->negotiation_timer = milliseconds_to_samples(200 + 5000) + s->ansam_start_delay_timer;

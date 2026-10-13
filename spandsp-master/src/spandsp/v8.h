@@ -161,6 +161,10 @@ struct v8_parms_s
     v8_cm_jm_parms_t jm_cm;
     /*! Answerer only: report V8_STATUS_V92_QUICK_CONNECT the moment a QC1a is decoded. */
     int32_t v92_quick_connect;
+    /*! Answerer only: start ANSam after the 75 ms V.8 silence alone, without the
+        750 ms hold that lets a V.25 calling tone finish.  V.92 9.2.3.1 has the
+        analogue answerer send ANSam 75 +/- 5 ms after QCA1a. */
+    int32_t ansam_no_delay;
 };
 
 #if defined(__cplusplus)

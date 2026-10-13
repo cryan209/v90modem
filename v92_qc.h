@@ -43,7 +43,9 @@ typedef enum {
     V92_QC_ANSPCM,      /* until TONEq or the 2 s limit */
     V92_QC_SILENCE,     /* 75 ms after TONEq */
     V92_QC_PHASE2,      /* done: proceed to Phase 2 */
-    V92_QC_V8           /* done: no TONEq, send ANSam and run V.8 */
+    V92_QC_V8,          /* done: no TONEq, send ANSam and run V.8 */
+    V92_QC_ANSAM,       /* done (analogue answerer): QCA1a sent, ANSam next */
+    V92_QC_WATCH        /* analogue answerer: V.8 sends ANSam, we listen for TONEq */
 } v92_qc_state_t;
 
 #define V92_QC_SILENCE_SYMBOLS   600     /* 75 ms */
@@ -67,6 +69,7 @@ typedef struct {
     long anspcm_pos;                  /* ANSpcm symbols sent */
     bool toneq_seen;
 
+    bool ana_answer;                  /* the sequence is the analogue answerer's QCA1a (9.2.3.1) */
     void *fsk;                        /* spandsp fsk_tx_state_t, QCA1d only */
     uint8_t qca_bits[70];
     int qca_bit;
@@ -90,6 +93,14 @@ void v92_qc_free(v92_qc_t *q);
  * usable (the caller then stays on ordinary V.8). */
 bool v92_qc_start(v92_qc_t *q, v91_law_t law, int uqts_ucode,
                   int anspcm_level, bool lapm);
+
+/* 9.2.3.1: this is an analogue answering modem and the caller's QC1a came from an
+ * analogue modem too (Figure 7).  Sends QCA1a, then ends in V92_QC_ANSAM: the
+ * caller (the engine) starts V.8's ANSam, which brings its own 75 ms of silence. */
+bool v92_qc_start_analogue_answer(v92_qc_t *q, v91_law_t law, bool lapm);
+/* 9.2.3.4: ANSam is being sent by V.8; the detector runs and TONEq moves the state
+ * to V92_QC_SILENCE (75 ms, then PHASE2) -- from then on tx is ours. */
+bool v92_qc_watch_start(v92_qc_t *q, v91_law_t law);
 
 /* As v92_qc_start(), for the V.8bis route (9.2.4.2): the caller's QC2a has been
  * answered by QCA2d, which the V.8bis modem sent, so the sequence resumes at the
@@ -135,11 +146,16 @@ typedef struct {
     double blk_e, blk_s1, blk_s2;
     int pcm_run, pcm_miss;
     long tonq_symbols;
+    int pcm_blocks_needed;
 } v92_qca_t;
 
 void v92_qca_init(v92_qca_t *q);
 /* Begin once QCA1d has been detected: stop CM, go silent, listen for ANSpcm. */
 bool v92_qca_start(v92_qca_t *q, v91_law_t law);
+/* The answerer is an analogue modem (QCA1a/QCA2a): it is ANSam that is waited for
+ * and then answered with TONEq, for `blocks` 10 ms blocks (9.2.1.1: until
+ * detected; 9.2.1.2: for 1 s). */
+bool v92_qca_start_ansam(v92_qca_t *q, v91_law_t law, int blocks);
 /* As v92_qc_tx(): returns how many codewords it supplied, short at the end. */
 int v92_qca_tx(v92_qca_t *q, uint8_t *codewords, int n);
 void v92_qca_rx(v92_qca_t *q, const uint8_t *codewords, int n);
@@ -154,7 +170,8 @@ static inline v92_qc_state_t v92_qc_state(const v92_qc_t *q) { return q->state; 
 static inline bool v92_qc_running(const v92_qc_t *q)
 {
     return q->state != V92_QC_IDLE && q->state != V92_QC_PHASE2
-        && q->state != V92_QC_V8;
+        && q->state != V92_QC_V8 && q->state != V92_QC_ANSAM
+        && q->state != V92_QC_WATCH;
 }
 const char *v92_qc_state_name(v92_qc_state_t s);
 

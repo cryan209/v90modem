@@ -35,6 +35,8 @@ const char *v92_qc_state_name(v92_qc_state_t s)
     case V92_QC_SILENCE: return "silence";
     case V92_QC_PHASE2:  return "phase2";
     case V92_QC_V8:      return "v8";
+    case V92_QC_ANSAM:   return "ansam";
+    case V92_QC_WATCH:   return "watch";
     }
     return "?";
 }
@@ -95,6 +97,37 @@ bool v92_qc_start(v92_qc_t *q, v91_law_t law, int uqts_ucode,
     return true;
 }
 
+bool v92_qc_start_analogue_answer(v92_qc_t *q, v91_law_t law, bool lapm)
+{
+    v92_qc_free(q);
+    v92_qc_init(q);
+    q->law = law;
+    q->lapm = lapm;
+    q->ana_answer = true;
+    /* QCA1a, Table 4: analogue, QCA; W0XYZ is the UQTS of a digital caller's QTS,
+       which an analogue caller does not use, so 0. */
+    q->qca_len = v92_build_short_phase1_sequence(false, true, lapm, 0,
+                                                 q->qca_bits, (int) sizeof(q->qca_bits));
+    if (q->qca_len != 70)
+        return false;
+    q->fsk = fsk_tx_init(NULL, &preset_fsk_specs[FSK_V21CH2], qc_get_bit, q);
+    if (!q->fsk)
+        return false;
+    toneq_reset(q);
+    q->state = V92_QC_QCA1D;
+    return true;
+}
+
+bool v92_qc_watch_start(v92_qc_t *q, v91_law_t law)
+{
+    v92_qc_free(q);
+    v92_qc_init(q);
+    q->law = law;
+    toneq_reset(q);
+    q->state = V92_QC_WATCH;
+    return true;
+}
+
 bool v92_qc_start_after_qca(v92_qc_t *q, v91_law_t law, int uqts_ucode,
                             int anspcm_level, bool lapm, unsigned silent)
 {
@@ -138,6 +171,8 @@ int v92_qc_tx(v92_qc_t *q, uint8_t *cw, int n)
         case V92_QC_IDLE:
         case V92_QC_PHASE2:
         case V92_QC_V8:
+        case V92_QC_ANSAM:
+        case V92_QC_WATCH:
             return done;
 
         case V92_QC_QCA1D: {
@@ -154,6 +189,10 @@ int v92_qc_tx(v92_qc_t *q, uint8_t *cw, int n)
             q->total += got;
             if (got < want) {
                 /* The last bit has gone out; QCA1d is over. */
+                if (q->ana_answer) {
+                    q->state = V92_QC_ANSAM;
+                    return done;
+                }
                 q->state = V92_QC_GAP;
                 q->pos = 0;
                 q->since_qca = 0;
@@ -258,7 +297,8 @@ void v92_qc_rx(v92_qc_t *q, const uint8_t *cw, int n)
         q->rx_total++;
         if (++q->blk_n == V92_QC_TONEQ_BLOCK)
             toneq_block_done(q);
-        if (q->toneq_run >= V92_QC_TONEQ_BLOCKS && q->state == V92_QC_ANSPCM) {
+        if (q->toneq_run >= V92_QC_TONEQ_BLOCKS
+            && (q->state == V92_QC_ANSPCM || q->state == V92_QC_WATCH)) {
             /* 9.2.4.3: TONEq detected -- stop ANSpcm, 75 +/- 5 ms of silence. */
             q->toneq_seen = true;
             q->state = V92_QC_SILENCE;
@@ -295,7 +335,13 @@ void v92_qca_init(v92_qca_t *q)
 
 bool v92_qca_start(v92_qca_t *q, v91_law_t law)
 {
+    return v92_qca_start_ansam(q, law, V92_QCA_PCM_BLOCKS);
+}
+
+bool v92_qca_start_ansam(v92_qca_t *q, v91_law_t law, int blocks)
+{
     v92_qca_init(q);
+    q->pcm_blocks_needed = blocks;
     q->law = law;
     q->state = V92_QCA_WAIT_PCM;
     return true;
@@ -360,7 +406,7 @@ static void qca_block_done(v92_qca_t *q)
         }
         q->pcm_run = 0;
     }
-    if (q->state == V92_QCA_WAIT_PCM && q->pcm_run >= V92_QCA_PCM_BLOCKS) {
+    if (q->state == V92_QCA_WAIT_PCM && q->pcm_run >= q->pcm_blocks_needed) {
         /* 9.2.1.3: ANSpcm detected for 1 s -- TONEq. */
         q->state = V92_QCA_TONEQ;
         q->tone_phase = 0.0;
