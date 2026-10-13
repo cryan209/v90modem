@@ -1,0 +1,27 @@
+--- /Users/scottcryan/MicaEmu/native/mica_trace.cpp	2026-10-10 19:03:46
++++ /private/tmp/claude-501/-Users-scottcryan-v90modem/b47a019e-8ea7-4213-a9d3-2f7dd4bbb146/scratchpad/bld/mica_trace_poke.cpp	2026-10-12 15:25:27
+@@ -104,6 +104,7 @@
+     uint32_t i960_lo = 1, i960_hi = 0;
+     uint32_t watch_writer = 0;
+     double i960_ms = 0;
++    struct Poke{double t;uint16_t a,v;bool done;bool pm;}; std::vector<Poke> pokes;
+     double dump_at = -1.0, callers_ms = 0.0, dump_i960_at = -1.0;
+     std::string profile_path;
+     int writers_of = -1;
+@@ -162,6 +163,8 @@
+             capture_words.push_back(uint16_t(address));
+         }
+         else if(arg == "--dump-i960") { dump_i960_at = std::stod(value()); dump_i960_path = value(); }
++        else if(arg == "--poke") { double pt = std::stod(value()); uint16_t pa = uint16_t(std::stoul(value(), nullptr, 0)); uint16_t pv = uint16_t(std::stoul(value(), nullptr, 0)); pokes.push_back({pt, pa, pv, false, false}); }
++        else if(arg == "--poke-pm") { double pt = std::stod(value()); uint16_t pa = uint16_t(std::stoul(value(), nullptr, 0)); uint16_t pv = uint16_t(std::stoul(value(), nullptr, 0)); pokes.push_back({pt, pa, pv, false, true}); }
+         else if(arg == "--dump") { dump_at = std::stod(value()); dump_prefix = value(); }
+         else if(arg == "--greg") {
+             greg_filter = int(std::stoul(value(), nullptr, 0));
+@@ -559,6 +562,7 @@
+             std::fprintf(stderr, "dumped the i960 Portware region at %.3f s\n", t);
+             dump_i960_at = -1.0;
+         }
++        for(auto &pk : pokes) if(!pk.done && t >= pk.t && in_bank()) { if(pk.pm) core.load_program(&pk.v, 1, pk.a); else core.set_data(pk.a, pk.v); pk.done = true; std::fprintf(stderr, "poked %04x=%04x at %.4f\n", pk.a, pk.v, t); }
+         if(dump_at >= 0 && t >= dump_at && in_bank()) {
+             dump();
+             dump_at = -1.0;

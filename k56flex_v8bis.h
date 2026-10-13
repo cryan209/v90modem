@@ -46,9 +46,10 @@ typedef struct {
     k56flex_v8bis_role_t role;
     int mu_law;             /* octet-18 law bit we advertise */
     int v90_capable;        /* octet-12 capability bit we advertise */
-    int client_model;       /* test only: send the client version octet (0x02) and accept the
-                             * server's (0x42).  Default is the digital-side server, whichever
-                             * role it plays on a call. */
+    int client_model;       /* test only: send a Rockwell HCF client's messages (version offer
+                             * 0x03 in CL, 0x02 in MS, three-octet NPar block) and accept a
+                             * server (version bit 6).  Default is the digital-side server,
+                             * whichever role it plays on a call. */
     int blind;              /* initiator: if no CRd arrives, send CL anyway and wait for MS */
     unsigned listen_ms;     /* responder CRe window / initiator CRd window; 0 = defaults */
 } k56flex_v8bis_cfg_t;
@@ -70,11 +71,13 @@ const uint8_t *k56flex_v8bis_peer_payload(const k56flex_v8bis_t *s, size_t *len)
 /* 1 = peer sent ACK1, 2 = NAK1, 0 = none seen.  For the initiator this is what
  * we sent. */
 int k56flex_v8bis_ack(const k56flex_v8bis_t *s);
-/* Server-side peer-field acceptance (AC6D checks the client's CL or MS this way,
- * whichever direction it arrives; a client_model object instead requires the
- * server value 0x42).  AC6D's documented predicate (offset 13 is 0x02 or
- * 0x21; the server value 0x42 and 0x00/0x01 are rejected), plus type nibble
- * MS/CL and the minimum length. */
+/* Server-side peer-field acceptance of the client's CL or MS, whichever
+ * direction it arrives (a client_model object instead requires a server's
+ * version octet, bit 6 set).  The version octet is located by walking the
+ * parameter blocks (k56flex_v8bis_flex_version).  Accepted: AC6D's 0x02 and
+ * 0x21, and any client value (bit 6 clear) with version bit 1, such as the
+ * Rockwell offer 0x03; 0x42 and 0x00/0x01 are rejected.  Also checks the
+ * type nibble MS/CL and the minimum length. */
 bool k56flex_v8bis_peer_acceptable(const uint8_t *payload, size_t len);
 /* Milliseconds from our clock start to the last state change (for logs). */
 unsigned k56flex_v8bis_elapsed_ms(const k56flex_v8bis_t *s);

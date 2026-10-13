@@ -500,8 +500,71 @@ size_t k56flex_v8bis_payload(k56flex_v8bis_msg_t type, int v90_capable, int mu_l
     memcpy(out, v8bis_template, 16);
     out[0] = type == K56FLEX_V8BIS_CL ? 0x12 : 0x11;
     out[12] = v90_capable ? 0x83 : 0x81;
-    if (mu_law) out[15] |= 0x20;
+    /* Octet 15 bit 5 marks an A-law server.  The Rockwell client parser
+     * (WIN95AC 100A4B54) prints "Server is an ALaw server." for it, and EC6E
+     * bit 0 = 1 selects the A-law tables (see k56flex_law_t). */
+    if (!mu_law) out[15] |= 0x20;
     return 16;
+}
+
+/* The Rockwell HCF client's MS/CL as built by WIN95AC 10031251 and sent by
+ * 10031AD2 (octets 1, 2, 4 of its I-field, SPar(1), one NPar block, NS).  The
+ * NPar block is three octets, so the NS fields sit two octets later than in
+ * the MICA template.  CL offers version bits 0x03; MS answers a 0x42 server
+ * with 0x02.  DSP version 0x47 is the HSF constant (HCF reads it from the
+ * chip); 0x85 is the client's law/revision octet. */
+size_t k56flex_v8bis_rockwell_client_payload(k56flex_v8bis_msg_t type, uint8_t out[18])
+{
+    static const uint8_t cl[18] = {
+        0x12, 0xc1, 0x80, 0x80, 0x81, 0x80, 0xb0, 0xcf,
+        0x09, 0xb5, 0x02, 0x00, 0x94, 0x81, 0x83, 0x03, 0x47, 0x85
+    };
+    switch (type) {
+    case K56FLEX_V8BIS_ACK1: out[0] = 0x14; return 1;
+    case K56FLEX_V8BIS_NAK1: out[0] = 0x18; return 1;
+    default: break;
+    }
+    memcpy(out, cl, sizeof(cl));
+    if (type == K56FLEX_V8BIS_MS) {
+        out[0] = 0x11;
+        out[15] = 0x02;
+    }
+    return sizeof(cl);
+}
+
+int k56flex_v8bis_ns_offset(const uint8_t *p, size_t len)
+{
+    size_t i = 5, bit;
+    if (!p || len < 6 || !(p[1] & 0x40))         /* I-field octet 1 bit 6: NS present */
+        return -1;
+    /* SPar(1) bits 0 and 1 each announce a parameter block ended by an octet
+     * with both delimiting bits set; bit 2 announces one octet (WIN95AC
+     * 10031AD2; Patton overlay 11 PM2BD7 walks the bit-0 block the same way). */
+    for (bit = 0; bit < 2; ++bit) {
+        if (!(p[4] & (1u << bit)))
+            continue;
+        do {
+            if (i >= len) return -1;
+        } while ((p[i++] & 0xc0) != 0xc0);
+    }
+    if (p[4] & 4)
+        ++i;
+    if (i + 2 >= len || p[i] < 7 || p[i + 1] != 0xb5)   /* length, T.35 country */
+        return -1;
+    return (int)i;
+}
+
+int k56flex_v8bis_flex_version(const uint8_t *p, size_t len)
+{
+    int ns = k56flex_v8bis_ns_offset(p, len);
+    size_t at;
+    if (ns < 0)
+        return -1;
+    /* length, country, provider length, provider code, licensee, capabilities */
+    at = (size_t)ns + 3 + p[ns + 2] + 2;
+    if (at >= len || at > (size_t)ns + p[ns])
+        return -1;
+    return p[at];
 }
 
 uint16_t k56flex_v8bis_fcs(const uint8_t *data, size_t len)

@@ -5,7 +5,7 @@ spec=importlib.util.spec_from_file_location('l',__import__('os').path.join(__imp
 cap,tx,t0,t1=sys.argv[1],sys.argv[2],float(sys.argv[3]),float(sys.argv[4])
 rx=l.load(cap,t0,t1); ref=np.array([complex(x,y) for x,y in struct.iter_unpack('<hh',open(tx,'rb').read())])/256
 n=len(rx);best=None
-for s in range(min(600,len(ref)-n)):
+for s in range(min(int(__import__('os').environ.get('ISI_SEARCH','600')),len(ref)-n)):
     r=ref[s:s+n];c=abs(np.vdot(r,rx))/np.sqrt(np.vdot(r,r).real*np.vdot(rx,rx).real)
     if best is None or c>best[0]:best=(c,s)
 r=ref[best[1]:best[1]+n]; z=np.zeros(n,complex)

@@ -206,16 +206,16 @@ static void test_v8bis(void)
     CHECK(k56flex_v8bis_fcs(check, 9) == 0x906e, "CRC check value");
     for (i = 0; i < 4; ++i) {
         uint8_t p[16], f[32], bits[300];
-        size_t n = k56flex_v8bis_payload(kinds[i], 0, 0, p), fn = k56flex_v8bis_frame(p, n, f);
+        size_t n = k56flex_v8bis_payload(kinds[i], 0, 1, p), fn = k56flex_v8bis_frame(p, n, f);
         CHECK(fn == n + 7 && f[3 + n] == fcs_tail[i][0] && f[4 + n] == fcs_tail[i][1], "FCS template %u: %02x %02x", i, f[3 + n], f[4 + n]);
         CHECK(k56flex_v8bis_stuff(f, fn, bits) == bitcount[i], "stuffed bits template %u", i);
     }
     {
         uint8_t p[16];
-        k56flex_v8bis_payload(K56FLEX_V8BIS_MS, 1, 1, p);
-        CHECK(p[12] == 0x83 && p[15] == 0xe0 && p[0] == 0x11, "template edits");
-        k56flex_v8bis_payload(K56FLEX_V8BIS_CL, 0, 0, p);
-        CHECK(p[12] == 0x81 && p[15] == 0xc0 && p[0] == 0x12 && p[13] == 0x42, "CL template");
+        k56flex_v8bis_payload(K56FLEX_V8BIS_MS, 1, 0, p);
+        CHECK(p[12] == 0x83 && p[15] == 0xe0 && p[0] == 0x11, "template edits (A-law sets 0x20)");
+        k56flex_v8bis_payload(K56FLEX_V8BIS_CL, 0, 1, p);
+        CHECK(p[12] == 0x81 && p[15] == 0xc0 && p[0] == 0x12 && p[13] == 0x42, "CL template (mu-law)");
     }
     /* Stuffing: no six-ones run outside literal 0x7e, and removal restores the octets. */
     {

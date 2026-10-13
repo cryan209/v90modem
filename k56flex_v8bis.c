@@ -98,11 +98,27 @@ static void rx_put_bit(void *user, int bit)
 bool k56flex_v8bis_peer_acceptable(const uint8_t *p, size_t len)
 {
     unsigned type;
+    int flex;
     if (!p || len < 14) return false;
     type = p[0] >> 4;
     if (type != 1) return false;                 /* revision-1 MS/CL octets are 11/12 */
     if ((p[0] & 0x0f) != 1 && (p[0] & 0x0f) != 2) return false;
-    return p[13] == 0x02 || p[13] == 0x21;
+    /* The version octet is found through the parameter blocks: a Rockwell
+     * client's three-octet NPar block puts it at 15, not 13. */
+    flex = k56flex_v8bis_flex_version(p, len);
+    if (flex < 0) return false;
+    /* AC6D's documented values, plus the Rockwell rule: a client (bit 6
+     * clear) sharing our version bit 1.  That admits the client's CL offer
+     * 0x03, which Patton answers with 0x42 (overlay 11 PM2E43..2E47). */
+    return flex == 0x21 || (!(flex & 0x40) && (flex & 0x02));
+}
+
+/* What a Rockwell client requires of the server (WIN95AC 100A4927..100A4972):
+ * bit 6 set and a version bit in common with its own 0x03. */
+static bool server_acceptable(const uint8_t *p, size_t len)
+{
+    int flex = k56flex_v8bis_flex_version(p, len);
+    return len >= 1 && (p[0] >> 4) == 1 && flex >= 0 && (flex & 0x40) && (flex & 0x03);
 }
 
 static void on_frame(void *user, const uint8_t *pkt, int len, int ok)
@@ -118,19 +134,17 @@ static void on_frame(void *user, const uint8_t *pkt, int len, int ok)
         && (size_t)len <= sizeof(s->peer)) {
         memcpy(s->peer, pkt, (size_t)len);
         s->peer_len = (size_t)len;
-        s->peer_ok = k56flex_v8bis_peer_acceptable(pkt, (size_t)len);
-        if (s->cfg.client_model)                        /* test stand-in: peer is the server */
-            s->peer_ok = len >= 14 && (pkt[0] >> 4) == 1 && pkt[13] == 0x42;
+        s->peer_ok = s->cfg.client_model ? server_acceptable(pkt, (size_t)len)
+                                         : k56flex_v8bis_peer_acceptable(pkt, (size_t)len);
     }
 }
 
 static void queue_message(k56flex_v8bis_t *s, k56flex_v8bis_msg_t type)
 {
-    uint8_t payload[16], frame[32], bits[300];
-    size_t n = k56flex_v8bis_payload(type, s->cfg.v90_capable, s->cfg.mu_law, payload);
+    uint8_t payload[18], frame[32], bits[300];
+    size_t n = s->cfg.client_model ? k56flex_v8bis_rockwell_client_payload(type, payload)
+                                   : k56flex_v8bis_payload(type, s->cfg.v90_capable, s->cfg.mu_law, payload);
     size_t fn, nb, i;
-    if (s->cfg.client_model && n == 16)
-        payload[13] = 0x02;                             /* client version octet; server is 0x42 */
     fn = k56flex_v8bis_frame(payload, n, frame);
     nb = k56flex_v8bis_stuff(frame, fn, bits);
     s->tx_n = 0;

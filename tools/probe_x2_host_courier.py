@@ -13,7 +13,7 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-EMU = ROOT.parent / 'courier-emu'
+EMU = Path(os.environ.get('X2_HOST_EMU_ROOT', ROOT.parent / 'courier-emu'))
 sys.path.insert(0, str(EMU))
 
 

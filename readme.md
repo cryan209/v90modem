@@ -22,8 +22,8 @@ comes from **our analogue V.90 caller against an Eicon Diva digital answerer**.
 | V.34 | Full-duplex data and impaired-line tests; Eicon hardware checked echo in both laws at 31200 upstream / 21600 downstream | Native V.34 sustained-transfer coverage comparable to the V.90 soaks |
 | V.32/V.32bis, V.22/V.22bis, V.21, V.23, Bell 103/212A | Datapumps, engine-pair payload tests and legacy automode | Broad hardware compatibility coverage |
 | V.91, clear channel, V.110/V.120 | Digital bearer implementations and local/engine-pair tests | Foreign digital-peer qualification; a byte-exact compatible bearer is required |
-| Fax | T.31/T.32 interfaces and V.34 half-duplex; Eicon pages verified in both directions/laws up to 28800 bit/s | Class 2.1 V.34 fax at 31200/33600 and broader peer coverage |
-| x2 | Initial asymmetric bidirectional PTY transfer against original Courier firmware in an emulator; symmetric engine-pair support | Downstream payload after the 54666-bit/s rate change fails at the emulated receiver; real hardware and sustained qualification remain |
+| Fax | T.31/T.32 interfaces and V.34 half-duplex; Eicon pages verified in both directions/laws up to 28800 bit/s | Class 2.1 33600 has local SIP/RTP coverage; hardware qualification at that rate and broader peers remain |
+| x2 | Initial asymmetric bidirectional PTY transfer against original Courier firmware in an emulator; symmetric engine-pair support | After the 54666-bit/s rate change, the emulator loses correctly demodulated words at its DSP/supervisor output bank; real hardware and sustained qualification remain |
 | K56flex | Payload components, V.8bis exchange and experimental training probes | Complete live upstream training/data connection; the client remains test-only |
 | Application | SIP calling/registration, AT control, PTY/TCP, diagnostics, GUI and supervised multi-line workers | Each line uses a separate worker process; interoperability depends on the bearer and selected mode |
 
@@ -432,8 +432,9 @@ GPL-2.0 (due to spandsp LGPL and linmodem GPL heritage)
 bidirectional payload delivery is verified through real PTYs against original
 Courier firmware running in an emulator at 32000 downstream / 24000 upstream.
 The observed rate change to 54666 / 31200 completes, but downstream payload
-injected after it is corrupted at the emulated Courier; our raw transmit tap
-recovers that payload exactly. Symmetric x2 also has engine-pair coverage.
+injected after it is corrupted at the emulated Courier DTE. Both our raw
+transmit tap and the Courier receive DSP recover it exactly; the emulator
+drops words at its DSP-to-supervisor output bank. Symmetric x2 also has engine-pair coverage.
 These results do not qualify sustained or real-hardware x2 interoperability.
 Run `make x2-test x2-session-test x2-sym-test`. See
 [x2 implementation and evidence](docs/x2_implementation.md).

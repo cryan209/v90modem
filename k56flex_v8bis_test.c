@@ -33,9 +33,39 @@ int main(void)
     k56flex_v8bis_t *ini, *rsp;
     const uint8_t *p;
     size_t n;
-    uint8_t cl[16];
+    uint8_t cl[16], rcl[18];
 
-    /* Full exchange: the initiator stands in for a client (version octet 0x02). */
+    /* Predicate on recovered messages, before any audio. */
+    {
+        uint8_t m[18];
+        k56flex_v8bis_rockwell_client_payload(K56FLEX_V8BIS_CL, m);
+        CHECK(k56flex_v8bis_ns_offset(m, 18) == 8 && k56flex_v8bis_flex_version(m, 18) == 0x03,
+              "Rockwell CL: NS at %d, version %d", k56flex_v8bis_ns_offset(m, 18), k56flex_v8bis_flex_version(m, 18));
+        CHECK(k56flex_v8bis_peer_acceptable(m, 18), "Rockwell CL offer 0x03 accepted");
+        k56flex_v8bis_rockwell_client_payload(K56FLEX_V8BIS_MS, m);
+        CHECK(k56flex_v8bis_peer_acceptable(m, 18), "Rockwell MS reply 0x02 accepted");
+        m[15] = 0x01;
+        CHECK(!k56flex_v8bis_peer_acceptable(m, 18), "version 0x01 rejected");
+        m[15] = 0x43;
+        CHECK(!k56flex_v8bis_peer_acceptable(m, 18), "server version 0x43 rejected");
+        k56flex_v8bis_rockwell_client_payload(K56FLEX_V8BIS_CL, m);
+        m[1] = 0x81;                     /* HSF 7.12: NS-present bit never set */
+        CHECK(k56flex_v8bis_flex_version(m, 18) < 0 && !k56flex_v8bis_peer_acceptable(m, 18),
+              "message without NS-present bit rejected");
+        k56flex_v8bis_rockwell_client_payload(K56FLEX_V8BIS_CL, m);
+        CHECK(!k56flex_v8bis_peer_acceptable(m, 15), "truncated NS rejected");
+
+        k56flex_v8bis_payload(K56FLEX_V8BIS_CL, 0, 1, cl);
+        CHECK(k56flex_v8bis_ns_offset(cl, 16) == 6 && k56flex_v8bis_flex_version(cl, 16) == 0x42,
+              "MICA template: NS at 6, version 0x42");
+        CHECK(!k56flex_v8bis_peer_acceptable(cl, 16), "server template rejected as a client");
+        cl[13] = 0x02;
+        CHECK(k56flex_v8bis_peer_acceptable(cl, 16), "MICA-layout 0x02 still accepted");
+        cl[13] = 0x21;
+        CHECK(k56flex_v8bis_peer_acceptable(cl, 16), "MICA-layout 0x21 still accepted");
+    }
+
+    /* Full exchange: the initiator stands in for a Rockwell client (CL offer 0x03). */
     ini = k56flex_v8bis_new(&ic);
     rsp = k56flex_v8bis_new(&rc);
     run(ini, rsp, 12, 0);
@@ -44,9 +74,8 @@ int main(void)
     CHECK(k56flex_v8bis_state(ini) == K56V8B_DONE, "initiator state %s (%s)",
           k56flex_v8bis_state_name(k56flex_v8bis_state(ini)), k56flex_v8bis_result_name(k56flex_v8bis_result(ini)));
     p = k56flex_v8bis_peer_payload(rsp, &n);
-    k56flex_v8bis_payload(K56FLEX_V8BIS_CL, 1, 1, cl);
-    cl[13] = 0x02;
-    CHECK(p && n == 16 && !memcmp(p, cl, 16), "responder saw the client CL");
+    k56flex_v8bis_rockwell_client_payload(K56FLEX_V8BIS_CL, rcl);
+    CHECK(p && n == 18 && !memcmp(p, rcl, 18), "responder saw the Rockwell client CL");
     p = k56flex_v8bis_peer_payload(ini, &n);
     k56flex_v8bis_payload(K56FLEX_V8BIS_MS, 1, 1, cl);
     CHECK(p && n == 16 && !memcmp(p, cl, 16), "initiator saw the server MS (v90, mu-law edits)");
@@ -67,7 +96,7 @@ int main(void)
               k56flex_v8bis_result_name(k56flex_v8bis_result(ini)), k56flex_v8bis_state_name(k56flex_v8bis_state(rsp)),
               k56flex_v8bis_result_name(k56flex_v8bis_result(rsp)));
         p = k56flex_v8bis_peer_payload(ini, &n);
-        CHECK(p && n == 16 && p[13] == 0x02 && p[0] == 0x11, "server saw the client MS");
+        CHECK(p && n == 18 && k56flex_v8bis_flex_version(p, n) == 0x02 && p[0] == 0x11, "server saw the client MS");
         p = k56flex_v8bis_peer_payload(rsp, &n);
         CHECK(p && n == 16 && p[13] == 0x42 && p[0] == 0x12, "client saw the server CL");
         k56flex_v8bis_free(ini);

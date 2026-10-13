@@ -41,8 +41,8 @@ is K56flex" at the end. The K56flex PCM module is overlay 8C/8D.
 `ME_K56FLEX=1` makes the engine run the V.8bis exchange before V.8 (Draft 0.23
 clause 4.1: V.8bis precedes V.8). As answerer it listens up to 3 s for CRe
 (1375+2002 Hz, then 400 Hz), waits 500 ms, sends CRd (1529+2225 Hz, then
-1900 Hz), receives the client's CL on V.21 channel 1, applies the documented
-offset-13 predicate (0x02 or 0x21), replies MS (or NAK1) on channel 2 and logs a
+1900 Hz), receives the client's CL on V.21 channel 1, applies the peer predicate
+(below), replies MS (or NAK1) on channel 2 and logs a
 trailing ACK1/NAK1. A dialling call runs the initiator side, which is the lab case: v90modem
 calls the MultiTech RAS, so v90modem starts V.8bis with CRe and sends the
 server's CL (version octet 0x42), and the RAS would answer CRd and MS. Whatever happens,
@@ -193,6 +193,35 @@ python3 tools/generate_k56flex_vectors.py ../MicaEmu .
 make k56flex-test
 ```
 
+## V.8bis peer predicate and the Rockwell client
+
+The client side was recovered from the Rockwell HCF controller
+(`silver98.exe` `WIN95AC.VXD`) and cross-checked against the Patton server
+(overlay 11); see `cruft/patton-re/K56-client-comparison.md`. Two
+differences from the MICA template matter:
+
+- The client's NPar block after SPar(1) is three octets (`80 B0 CF`), not
+  MICA's one (`C2`). The NS block, and with it the version octet, therefore
+  start two octets later: the version octet is at payload offset 15, not 13.
+  `k56flex_v8bis_ns_offset` walks the blocks instead, as Patton PM2BD7 does:
+  SPar(1) bits 0 and 1 each announce a block ended by an octet with both
+  delimiting bits set, and bit 2 announces one octet. It requires I-field
+  octet 1 bit 6 (NS present) and T.35 country `B5`.
+- The version octet is a bitmap: bits 0-4 are versions, bit 5 an option and
+  bit 6 means server. A client offers `0x03` in CL and answers a `0x42`
+  server with `0x02`. Patton answers `0x03` with `0x42`.
+
+`k56flex_v8bis_peer_acceptable` accepts AC6D's `0x02`/`0x21` and any client
+value (bit 6 clear) with version bit 1, so it accepts the Rockwell CL offer.
+The old fixed-offset predicate read the client's licensee octet (`0x81`) and
+NAKed every Rockwell HCF client. HSF 7.12 soft modems never set the
+NS-present bit, so they are still rejected and the call continues as V.90.
+
+`client_model` now sends the recovered Rockwell CL/MS
+(`k56flex_v8bis_rockwell_client_payload`), so the loopback tests exercise
+the walker. These are static recoveries; no Rockwell modem has been
+connected.
+
 ## Draft 0.23 correction found while implementing
 
 Draft 0.23 labels the tables selected by DM EC6E bit 0 = 0 as A-law and = 1 as
@@ -202,8 +231,12 @@ in the bit-0 = 1 tables is an A-law magnitude. `k56flex_test` asserts this for
 all 3,148 levels. The probe levels in clause 4.10.1 follow the same pattern
 (3772 is mu-law, 3904 is A-law). `k56flex_law_t` is named by the data, so
 `K56FLEX_LAW_MU` is EC6E bit 0 = 0. The octet-18 law bit in the V.8bis template
-(`0x20` when EC6E bit 0 is set) is a separate documented field and is kept as
-the spec gives it; whether it should be inverted too is unresolved.
+is `0x20` when EC6E bit 0 is set, i.e. for the A-law tables. The Rockwell
+client confirms the polarity: its NS parser (HCF/HSF `WIN95AC.VXD`,
+100A4B54) reads bit 5 of that octet as "Server is an ALaw server", and bit 6
+as "server forces the law". `k56flex_v8bis_payload` therefore sets `0x20` for
+A-law. It used to set it for mu-law, which told a client on a PCMU call that
+the server forced A-law.
 
 The spec's recovered serial compander is mu-law only, but that is the DSP's
 T1 output stage. Here the codeword is chosen in the bearer's law, so PCMU uses
@@ -440,3 +473,310 @@ Open: why MICA's 509-symbol LMS lands 8 dB short. Candidates: the 16-bit
 rounded coefficient store (the 32-bit path at 4DBB is not taken: DM
 90A4+0x19 is zero), the 4-point TRN as the only excitation, its front end
 (4580 resampler/AGC) before the equalizer, or a remaining core fault.
+
+### 6910 coefficients through TRN, sweep and data (2026-10-12)
+
+`tools/k56flex_upstream_rig/dump_equalizer.py COMMAND.json OUTDIR T...` reruns
+the saved deterministic command with `mica_trace --dump T` and compares DM
+0B80..0C3F (192 words) between call times. Relative change of the whole
+vector (norm of the difference over the norm of the final vector):
+
+| call time (s) | rms | distance to final | step from previous |
+|---|---:|---:|---:|
+| 16.45 (TRN starting) | 347 | 1.06 | - |
+| 16.6 (TRN LMS ends 16.653) | 794 | 0.35 | 0.84 |
+| 16.8 | 934 | 0.12 | 0.27 |
+| 17.2 (DD sweep running) | 1256 | 0.23 | 0.31 |
+| 17.8 | 1258 | 0.23 | 0.02 |
+| 18.4 | 1256 | 0.23 | 0.01 |
+| 18.8 (data from 18.697) | 1033 | 0 | 0.23 |
+| 19.0, 20.5 (frozen from 19.061) | 1033 | 0 | **0.000** |
+
+- **No tap jitter in data.** The vector is bit-identical at 18.8, 19.0 and
+  20.5 s, so the "large LMS step" explanation for the unexplained 0.32 floor
+  is ruled out: during data MICA's equalizer does not move at all.
+- **The training result is the data-mode equalizer, and the sweep makes it
+  worse.** TRN leaves the vector at 0.12 of its final value by 16.8 s; the
+  decision-directed sweep (16.9 s on) then moves it AWAY (0.12 -> 0.23) and
+  grows the main taps (the 5624/4449 pair gains ~+1700/+1400 by 17.2 s).
+  After that it creeps 1-2% per 0.6 s.
+- **A discrete event at data start.** Between 18.4 and 18.8 s the main taps
+  drop by ~1250/~1040 (about -22% overall, rms 1256 -> 1033) in one step,
+  which lines up with the data start at 18.697 s rather than with gradual
+  adaptation. Worth identifying which routine writes it (`--writers-range
+  0xB80 0xC40 --from 18.5 --to 18.8`): a gain renormalisation is plausible
+  and, if it is a fixed rescale, would explain a coloured, static floor.
+- The structure is 12 rows of 16: three rows of two interleaved halves with
+  a main-tap pair per row (rows 2/5/8/11), as expected for a T/2 complex FIR.
+
+Next: run the `--writers-range` pass over 18.5-18.8 s, and test whether the
+sweep's outward drift is the 8 dB shortfall (freeze the vector at its 16.8 s
+value in a scratch run and compare the data-start error).
+
+#### Who writes the coefficients at data start (2026-10-12, `--writers-range 0xb80 0xc3f --from 18.5 --to 18.8`)
+
+This corrects the "discrete event at data start" reading above. Only two
+instructions write DM 0B80..0C3F in that window, 699C and 69A0: the
+sequential-tap decision-directed sweep. It is still running, visiting every
+tap once per ~10.4 ms (18-19 writes per tap, 3564 writes), and it stops at
+18.697 s. Nothing else rescales the vector.
+
+What changes is the size of its updates. RMS step per visit:
+
+| call time (s) | 18.50-18.55 | 18.56 | 18.58-18.60 | 18.62 | 18.64-18.66 | 18.68 | 18.70 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| rms step | 3.5 | 20 | **60** | 42 | 29 | 16 | 3 |
+
+Main tap 0C04 is flat (7679 -> 7677) for seven visits, then falls 7677 ->
+6312 (-18%) in the last ten (about -100 to -260 per visit); 0BA5 behaves
+the same (6881 -> 5624). Total variation over the window is 3x the net change,
+so the small taps also dither.
+
+The onset is the call's phase 13 at **18.56 s** (`requested_status` 12288,
+then 16384 at 18.66, phase 17 at 18.74): the signal our client sends
+changes at that instant and the sweep, which was settled on the training
+signal, suddenly sees large errors and pulls the equalizer away from the TRN
+solution. So the final vector is the TRN result *plus* ~110 ms of
+adaptation to our own startup/E signalling.
+
+**Lead:** check what our client transmits from 18.56 s (E / startup-ack frames,
+`ME_K56` `--startup-e-symbols 5`, `--startup-ack-frames 4`) against what
+MICA's slicer expects at that point (constellation, level, scrambler state).
+A symbol set the slicer mis-decodes there would corrupt the equalizer exactly
+this way, and it is OUR transmit, to be inspected on our TX tap
+(`txw.caller` from V34_DATA_TX_DUMP) before blaming the peer. Test: rerun with
+the client holding the training pattern, or with the sweep's inputs frozen at
+18.55 s, and compare data-start error.
+
+#### What our client transmits from 18.56 s (2026-10-12)
+
+`tools/k56flex_upstream_rig/startup_constellation.py UP.g711 TX.caller` aligns
+the `V34_DATA_TX_DUMP` data points to the upstream recording (`tee_peer.py`; the
+`mica_trace --capture` option is parsed but unused), fits a linear receiver on
+the first 2000 data symbols (0.13 spacings error) and applies it backwards.
+The data start aligns to 18.6925 s (peak/median 61).
+
+| interval (s) | what we send |
+|---|---|
+| up to 18.55 | constant-modulus 4-point (radius 11.6 +/-0.2, 4 distinct points, cv 0.01): TRN |
+| 18.55 - 18.69 | a 4x4 16-point grid at +/-3.67 and +/-11.0 (radii 5.0, 11, 12, 15.6; rms 11.6, the same power as TRN): the sixteen-point MP/MP'/E frames of `--parameter-mp` / `--upstream-data` |
+| 18.6925 on | data, 28800 lattice (half-integer points, spacing 1, up to +/-15.5) |
+
+So the change at 18.55 s is a change of constellation, not an error: V.34
+10.1.3.2/10.1.3.8/10.1.3.9 allow 4 or 16 points per J, and the client
+deliberately uses MICA's resident sixteen-point labels (PM 02A0). Power is
+continuous across it. Two things stand out:
+
+- TRN is 4-point but MP/E are 16-point. The spec ties TRN, MP, MP' and E to
+  one constellation size signalled by J (Table 18), so this mix is only
+  right if MICA treats them separately; the rig accepts it (MP0 CRC and the
+  gates pass).
+- The 16-point grid (3.67, 11.0) is NOT on the half-integer data lattice
+  (3.5, 10.5/11.5): a data-lattice slicer sees up to 0.5-spacing errors on
+  the outer rows. If the 699C/69A0 sweep slices with the data lattice during
+  MP, that alone would drive the tap changes seen from 18.56 s.
+
+Not yet decided: which constellation MICA's slicer uses during the sweep at
+18.55-18.69. Our transmit looks as designed, so this is not a defect found in
+our TX; the next step is in MICA: read what 699C/69A0 compare against
+(decision table pointer) during phase 13, or run with the client holding 4-point TRN
+through that window and see whether the 18% main-tap drop disappears.
+
+#### The sweep's decision table is the 16-point grid from 16.9157 s (2026-10-12)
+
+The sweep (699C/69A0, routine 6952..69af) only applies updates; decisions come
+from the worker slicer at 58F2 -> 5903, which finds the nearest point by
+subtracting entries of the DM table at **DAD3** from |I| and |Q|
+(`lar ar5,#dad3`, squared distance via `sqra`, entry count-1 in DM 8D2E).
+Dumps of DAD3.. and 8D2E, and a `--writers-range 0xdad3 0xdada` pass:
+
+| call time (s) | DM 8D2E | DAD3.. | meaning |
+|---|---|---|---|
+| 16.45 - 16.8 (known-reference TRN) | 0 | 9159, 9159 | **4-point**: one quadrant point, (8.2, 8.2) in our units |
+| 16.91575 | 0 -> 3 | 4096,4096 / 4096,12288 / 12288,4096 / 12288,12288 | **16-point** (1,3) grid, spacing 4096 = 3.67 |
+| 17.2 - 20.5 | 3 | unchanged | |
+
+The switch is one event: routine 1507 copies 8 words from PM **0298** to DAD3
+(`tblr`, writer 151C; 8D2E set at PC 6B38). The 4-point alternative sits at PM
+0292 (9159, 9159). It coincides with the start of the DAE7 sweep (8F31 = 0400,
+16.916 s) and the call's phase 8/10 at 16.96/17.0.
+
+**This explains the sweep's drift.** From 16.9157 s MICA slices against the
+16-point grid, but our client keeps sending 4-point TRN, points (+/-8.2,
++/-8.2), until 18.55 s (previous section). 8.2 is 2.2 spacings from 3.67 and 2.8
+from 11.0, so every decision is wrong by a constant 2-3 spacings in the same
+direction. The sweep therefore pushes the main taps UP (+1700 on the main pair
+by 17.2 s, the 0.12 -> 0.23 move away from the TRN solution) for 1.64 s. When
+the client's 16-point MP arrives at 18.55 s the decisions become right, the
+update size jumps (rms 3.5 -> 60) and the main taps fall back ~18%
+(correcting the earlier "rescale at data start" reading). The final vector is
+then a compromise between wrong and right decisions, which fits the 8 dB
+shortfall against an ideal LMS.
+
+Per V.34 Table 18 and 10.1.3.8, J gives ONE constellation size for TRN, MP,
+MP' and E. MICA selects 16-point at 16.9157 s, so a compliant client sends
+16-point TRN from that instant; ours is 4-point throughout (SpanDSP's V.34
+modulator) and only MP/E are 16-point.
+
+Next: make the client's TRN 16-point from the switch (scrambled ones, four
+bits per symbol: Q2n Q1n select the quadrant-point, In rotates, per 10.1.3.8)
+and re-run `dump_equalizer.py` and the 28800 ISI measurement. If the main
+taps stay put after 16.9 s and the data-start error falls from 0.51-0.62
+toward the 0.22 an ideal LMS reaches, this is the 28800 blocker.
+
+#### Putting the report on the 16-point grid (2026-10-12)
+
+Correction to the previous section's "TRN": the 512-symbol known-reference TRN
+ends at 16.65 s, before MICA switches its slicer. What our client sends from
+16.9157 to 18.55 s is the repeated 24-bit **report** (4-point differential,
+`k56flex_training_tx.inc`), and that is what the 16-point slicer mis-judges.
+Making it a real 16-point signal would change the report path (2 bits per
+symbol), so the experiment keeps the bits and moves only the amplitude:
+`K56_REPORT_GRID_SCALE` (MicaEmu `native/k56flex_training_tx.inc`, rebuild with
+`tools/build_k56flex_training_tx.py`) scales the report onto a grid corner.
+Corner (3,3) is 12288/9159 = 1.3417 times the 4-point radius, corner (1,1)
+0.4472. Full deterministic rerun of the 28800 connect command, MICA's trellis
+input (47B9 capture) against our transmitted points, `isi_by_window.py
+18.74 21.55`, first window:
+
+| report scale | startup | raw error (spacings) | ISI energy | after own +/-24 fit |
+|---|---|---:|---:|---:|
+| 1.0 (baseline, off the grid) | reaches data | 0.630 | 0.051 | 0.325 |
+| **1.3417 (corner 3,3)** | reaches data | **0.497** | **0.033** | 0.362 |
+| 0.4472 (corner 1,1) | reaches data | 0.850 | 0.058 | 0.597 |
+| 0.75, 1.15, 1.5 (off the grid) | **never reaches data** (capture empty) | - | - | - |
+
+- **MICA's startup depends on the slicer's decisions being exact.** Only the
+  two scales that land the report ON a grid point reach data; three nearby
+  off-grid scales do not. That is direct confirmation that the DAD3
+  16-point table is in the decision loop for the report.
+- Corner (3,3) lowers MICA's error 0.63 -> 0.50 (-2.0 dB) and the static ISI
+  energy by a third (0.051 -> 0.033), and the equalizer vector now stays put
+  after training (17.2 -> 18.4 s step 0.024 and settled at 18.4 s, where it
+  used to drift 0.23 away from the TRN solution).
+- It does NOT reach the 0.22 an ideal LMS gets, and 28800 still decodes zero
+  bits (needs ~0.15). The non-ISI part ("after own fit") rose slightly
+  (0.325 -> 0.362) as the ISI part fell, so a second contributor remains.
+- Corner (1,1) is worse: the report then sits at -7 dB, so the level into
+  MICA's AGC/equalizer matters as well as the grid.
+
+Remaining candidates for the other 0.36: the equalizer's 16-bit rounded
+coefficient store and step size in the sweep, the 4-point known-reference TRN
+itself (9159 reference), and the 18.55-18.69 s MP/E frames. Result: partial
+fix, kept behind the environment variable (default 1.0 = unchanged).
+
+#### The known-reference LMS step (2026-10-12)
+
+All with the report on grid corner (3,3) (previous section; control 0.497).
+`tools/k56flex_upstream_rig/mica_trace_poke.patch` adds `--poke T ADDR VAL` to a
+private copy of `mica_trace` (a control run reproduces 0.497 exactly);
+`rerun_poke.py` drives it.
+
+- The LMS (4D72..4DE9) rounds its gradient with a right shift = TREG1,
+  loaded from the record cell DM 90B7. That cell is a copy (4C08) of DM
+  **90A0**, which routine 1B94 rewrites at each of three stage starts
+  (16.494, 16.5766 and 16.662 s) with a PM-table value: **5, 4, 4**. A
+  larger value is a smaller step.
+- Poking 90A0 just after a stage's write (it is copied at the next 4C08):
+
+| change | result |
+|---|---|
+| stage 1 (shift 5) -> 3, 4, 6 | never reaches data |
+| stage 2 (shift 4) -> **5** | reaches data, raw error **0.462** (was 0.497), ISI 0.031 |
+| stage 2 -> 3, 6, 7, 8 | never reaches data |
+| stages 2+3 -> 5 | never reaches data |
+
+The shipped schedule is close to the edge of what the startup tolerates in
+both directions, and the best single change buys only -0.035 (0.6 dB): the step
+is not what holds MICA at 0.46-0.50 versus the 0.22 of an ideal LMS. What
+remains is the amount of known-reference training itself: three stages of
+~83 ms (earlier measured as a fixed ~509-symbol block LMS), after which MICA is
+decision-directed. Ideal LMS reaches 0.16 only after 2048 symbols. Next: find
+what ends each stage (counter or timer in the 1B94 / 4C08 schedule) and whether
+a longer known-reference stage is reachable; earlier tests with TRN 512 / 2048 /
+4096 gave the SAME end instant, so the end is MICA's own.
+
+#### What ends each known-reference stage (2026-10-12)
+
+The stage machine is a continuation chain: DM 90F8 holds the next handler
+(`splk @78,#...`, page 121), driven from the 1B17 / 1B97 / 1BBB / 1BF4
+handlers. A `--writers-range 0x9080 0x90c9` pass over 16.48-16.68 s shows:
+
+- **Stage descriptors are PM records** (5 words copied to DM 9080..9084 by
+  1B2F): 9080 = 5, **9081 = 10** (passes per stage), 9082 = 4, and **9083 =
+  next-descriptor pointer**: 0xBDB5 at 16.4941, 0xBDC1 at 16.5766, 0 at 16.6621.
+  Three records; the last (pointer 0) ends the chain, and the call-through at
+  1BFE (`lar ar2,*; banz 1c05`) loops to the next while the pointer is non-zero.
+- **Only two stages run the block LMS**: 90BA (the busy flag, set by 4DF2,
+  cleared by 4C71) is 1 for 16.533-16.576 and 16.616-16.661 s. Within a
+  stage 90BB (copied from 9081 at 4C0A) counts passes 10 -> 0, each pass ~17
+  symbols (the 47-word block at 90BC against a 16-tap window): 2 x 10 x 17 =
+  340 plus setup, i.e. the "~509-symbol block LMS" is the TRN-length-matched
+  window, not a free parameter.
+- The step shift written to 90A0 by 1B94 (5, 4, 4) is a PM-table lookup per
+  record (previous section).
+
+Lengthening it: poking 9081 (just after 1B36 writes it, before the 4C0A
+copy) to 20/40 with the stock TRN = the LMS then trains past the end of our
+4-point TRN on the report, and with TRN 512 -> 768/1024 the startup is not
+reached even at the stock pass count (`TRN=768 rerun_poke.py` with 9081 = 10
+never gets to data; 1024 reaches data but not a decodable one). So the
+512-symbol TRN is tied to MICA's own schedule (report/MP timing), and both the
+TRN length and the stage table would have to move together. The block LMS is
+therefore bounded by TRN = 512 symbols unless the descriptor records in PM
+(near BDA9) are changed, which means modifying MICA's firmware tables rather
+than our transmit.
+
+Where that leaves the 28800 upstream: the transmit side now sits at 0.46-0.50
+from 0.63 (report on the grid corner, stage-2 step 5); the rest of the gap to
+the ideal 0.22 is MICA's short known-reference training plus the DD sweep.
+Remaining options are on MICA's side (descriptor table, or a lower-order
+equaliser span than the 48-tap T/2 FIR that the channel overfits), or a
+smaller, cleaner TRN reference so the same 340 symbols train better. (The
+measurement tool `isi_by_window.py` now takes `ISI_SEARCH=N` to widen its
+600-symbol alignment search.)
+
+#### Patching the PM descriptor chain (2026-10-12)
+
+`mica_trace_poke.patch` now also has `--poke-pm T ADDR VAL` (`load_program`).
+Program and data space are different memories here (data 0xBDAA reads 0xF445,
+program 0xBDAA reads 10), so the earlier data-space `--poke` cannot reach the
+descriptors. The three records are 12 words at **BDA9, BDB5, BDC1**: `[5,
+passes=10, 4, next, 90F9, shift, FFFF, FFFF, 0, 0, 0, 0]`, so the pass counts
+are PM BDAA / BDB6 / BDC2. Patched at 10 s (the table is already resident), all
+three set to N, with the stock 512-symbol TRN, 28800 connect, report on grid
+corner (3,3); `isi_by_window.py` first window:
+
+| passes N | startup | raw error (spacings) |
+|---|---|---:|
+| 10 (stock) | data | 0.497 |
+| 11 | data | 0.787 |
+| 12, 13, 14, 16, 17 | stalls in phase 13 (MP), never data | - |
+| **15** | data | **0.457** (ISI energy 0.030) |
+| 18 | data, undecodable (error 203) | - |
+| 20 | stalls in phase 13 | - |
+
+With TRN lengthened to match (+34 symbols per extra pass: N=12/546, 15/682,
+20/852) every run stalls in phase 13 as well.
+
+Reading: a longer MICA-side training is NOT a clean win. The failures are not
+in training; the runs reach phase 13 (MP exchange, requested_status 4096 /
+8192) and then do not advance to data (phase 17), i.e. the MP/acknowledge
+frames are no longer accepted when the equalizer comes out of a different
+training length. So the startup MP decode is already marginal with the
+equalizer MICA produces here, and its pass/fail pattern across N is chaotic
+(11 worse, 15 slightly better, 12-14 dead). Best case 0.457, ~0.04 better than
+stock, again far from 0.22. A stable improvement needs the MP/E frames decoded
+robustly first: they are 16-point on a grid MICA's slicer now agrees with, so
+the next place to look is why MP acceptance (4096 -> 8192 -> 16384 status
+sequence) depends on the equaliser at all, not more training.
+
+## Mainline integration, 13 October 2026
+
+The `k56flex-rockwell-ns` work was consolidated onto main while retaining
+the newer mainline GUI, fax and modulation documentation. The integration
+adds Rockwell variable-offset V.8bis parameter parsing and corrects the
+server law bit (Draft 0.23 clause 4.1; recovered WIN95AC client predicates
+are cited in the implementation). All five fast-list K56flex regressions
+pass after rebuilding with vendored SpanDSP. These are offline checks,
+not qualification of a complete live K56flex connection.

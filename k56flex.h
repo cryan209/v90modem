@@ -122,9 +122,21 @@ typedef enum {
 } k56flex_v8bis_msg_t;
 
 /* Payload octets (no flags/FCS).  `v90_capable` is DM EEAC bit 9 (octet 12 =
- * 0x83), `mu_law` is DM EC6E bit 0 (octet 15 gains 0x20).  Returns length. */
+ * 0x83).  Octet 15 gains 0x20 for an A-law server (DM EC6E bit 0 = 1, which
+ * selects the A-law tables), so it is set when `mu_law` is 0.  Returns length. */
 size_t k56flex_v8bis_payload(k56flex_v8bis_msg_t type, int v90_capable, int mu_law,
                              uint8_t out[16]);
+/* A Rockwell HCF client's MS/CL/ACK1/NAK1 payload as its controller builds it
+ * (three-octet NPar block, version offer 0x03 in CL, 0x02 in MS).  Returns
+ * length (18, or 1 for ACK1/NAK1). */
+size_t k56flex_v8bis_rockwell_client_payload(k56flex_v8bis_msg_t type, uint8_t out[18]);
+/* Offset of the non-standard information block's length octet in an MS/CL
+ * payload, found by walking the SPar(1) parameter blocks rather than assuming
+ * a fixed layout; -1 if absent or not a T.35 0xB5 block. */
+int k56flex_v8bis_ns_offset(const uint8_t *p, size_t len);
+/* The NS block's K56flex version octet, or -1.  Bits 0-4 are version bits,
+ * bit 5 an option flag and bit 6 marks a server (central-site) modem. */
+int k56flex_v8bis_flex_version(const uint8_t *p, size_t len);
 uint16_t k56flex_v8bis_fcs(const uint8_t *data, size_t len);
 /* 3 x 7E, payload, FCS low then high, 2 x 7E.  Returns octet count (len+7). */
 size_t k56flex_v8bis_frame(const uint8_t *payload, size_t len, uint8_t *out);

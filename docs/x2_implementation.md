@@ -752,3 +752,35 @@ No modem DSP constants or bearer handling were changed.
 Validation: the fresh closed-loop test exercises the new injection gate and
 pacing; Python compilation passes. The expected interop failure is retained
 as a failed `call.json`, not counted as a passing payload qualification.
+
+## Where the index-14 payload is lost, 12 October 2026
+
+`tools/analyze_x2_courier_output.py` reads a PC-`832a` capture
+(`X2_HOST_CAPTURE_PC=832a`, `--capture-receiver`, with B=36/MD=5 selecting
+index 14 per Draft 0.33 sections 20 and 22). At that Courier 403 ROM
+instruction ACC is the output-bank ready bit and data 0320 holds the next
+descrambled word; ACC=0 returns without publishing it.
+
+On `artifacts/x2-codex-20261012-output-capture/` (the 1080-byte after-change
+payload):
+
+| stage | result |
+|---|---|
+| words reaching 832a at index 14 | 35306 |
+| 8N1 decode of those words | all 1080 source bytes, exact |
+| words dropped (bank not ready) | 2948 (8.3%) |
+| 8N1 decode of the published words only | 1022 bytes, source NOT found |
+
+So the Courier's own receive DSP demodulates our index-14 downstream
+correctly; the corruption seen at its DTE is introduced after demodulation,
+where the DSP hands a word to a supervisor that has not yet freed the output
+bank. That is courier-emu service/scheduling timing (the earlier batch32,
+service64, cpu1 and cpu3 artifacts probed the same area), not our transmit
+path, which was already verified at our raw G.711 boundary. Qualifying x2
+above index 1 therefore needs the emulator's DSP/supervisor pacing fixed or
+real hardware. No modem code changed.
+
+The capture tools now take `X2_HOST_EMU_ROOT` (emulator checkout, so a
+committed export can be used instead of the sibling working tree) and
+`X2_HOST_CAPTURE_PC`, and hook `step`, `step_cycles` and `service_step`
+because the modern bearer advances by cycles.

@@ -11,7 +11,8 @@ import struct
 from pathlib import Path
 import sys
 
-EMU = Path(__file__).resolve().parents[1].parent / 'courier-emu'
+EMU = Path(os.environ.get('X2_HOST_EMU_ROOT',
+                         Path(__file__).resolve().parents[1].parent / 'courier-emu'))
 sys.path.insert(0, str(EMU))
 mode = sys.argv.pop(1)
 if mode == 'cli':
@@ -29,7 +30,6 @@ from courier_emu.dsp import NativeC5x
 if os.environ.get('X2_HOST_CAPTURE_LIBRARY'):
     from courier_emu import dsp
     dsp.LIBRARY = Path(os.environ['X2_HOST_CAPTURE_LIBRARY'])
-original_step = NativeC5x.step
 rows = []
 codec_capture = os.environ.get('X2_HOST_CAPTURE_CODEC') == '1'
 codec_samples = bytearray()
@@ -57,6 +57,7 @@ if receiver:
     addresses = [0x39f, 0x6f, 0x351, 0x364, 0x343, 0x340, 0x341,
                  *range(0x940, 0x944), 0x31c, 0x37d, 0x36e,
                  *range(0x320, 0x333), *range(0x350, 0x36b)]
+    addresses += [0x31e, 0x31f, *range(0x222, 0x22a)]
 if tx_writes:
     addresses = [0x17, 0x390, 0x391, 0x340, 0x398, 0x399, 0x366, 0x367]
     if pulse_capture:
@@ -64,11 +65,13 @@ if tx_writes:
     if gain_capture:
         addresses += [0x3c7, 0x392, 0x3fb, 0x39f, 0x214]
 capture_pc = 0xe11c if receiver else 0xb08c
+if os.environ.get('X2_HOST_CAPTURE_PC'):
+    capture_pc = int(os.environ['X2_HOST_CAPTURE_PC'], 16)
 if tx_writes:
     if not codec_capture:
         raise SystemExit('TX write capture requires X2_HOST_CAPTURE_CODEC=1')
     capture_pc = 0x80e1 if gain_capture else 0xb461 if pulse_capture else 0x818f
-def step(self, *a, **kw):
+def step(self, *a, _original, **kw):
     global codec_cursor, codec_events
     if not getattr(self, '_x2_host_capture', False):
         self.set_pc_capture(capture_pc, addresses)
@@ -81,7 +84,7 @@ def step(self, *a, **kw):
             else:
                 self.set_data_trace_range(0x0b00, 0x0cff)
         self._x2_host_capture = True
-    result = original_step(self, *a, **kw)
+    result = _original(self, *a, **kw)
     # Explicit causal experiment only: change the native runtime level before
     # its fractional multiply/store, never repair already wrapped line PCM.
     # This is not an unmodified-firmware interop qualification.
@@ -111,7 +114,16 @@ def step(self, *a, **kw):
         self.trace_data_writes(clear=True)
     self.clear_pc_captures()
     return result
-NativeC5x.step = step
+# The modern bearer advances by cycles, and its native fast path can also
+# call service_step. Hook every entry point; drained captures are cleared,
+# so nested calls cannot duplicate rows. Native worker captures are drained
+# on the next Python entry rather than silently missing the DATA phase.
+def capture_step(original):
+    def wrapped(self, *a, **kw):
+        return step(self, *a, _original=original, **kw)
+    return wrapped
+for method in ('step', 'step_cycles', 'service_step'):
+    setattr(NativeC5x, method, capture_step(getattr(NativeC5x, method)))
 @atexit.register
 def save():
     Path(os.environ['X2_HOST_NATIVE_CAPTURE']).write_text(
