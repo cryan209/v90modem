@@ -1030,6 +1030,38 @@ distinguishable from receive-side acceptance), the origin of kappa = 0.40, B13 =
 16800, and whether courier-emu's other callers (the Courier modems) were
 affected by the same `XC` skip.
 
+
+### Which isomorphism: the first one (2026-10-13)
+
+The label-to-dibit permutations and the polarity of Y0 were only fixed up to the
+four isomorphisms of the recovered coder, which a receiver cannot tell apart. The
+DSP itself can: with the emulated MICA transmitting terbo marks, its data memory
+holds the transmitter's coder variables. `DM_TRACE` over 0.2 s (480 symbols) of
+the cells that are written once per symbol, compared with the labels sliced from
+that call's own audio (`demod/iso_find.py`):
+
+- **cell `0x8C0C` is the differential-encoder state d.** Against the sliced
+  symbols (transmission delay 33 symbols) it is consistent with the dibit of every
+  isomorphism, and **identical to isomorphism 0's d** (`0->0, 1->1, 2->2, 3->3`,
+  all 300 symbols); isomorphisms 1, 2 and 3 are the same series shifted by a
+  constant (+1, +2, +3 mod 4).
+- **cell `0x8C0E` is the convolutional state s** (8 values). Y0 is bit 2 of it
+  (states 0-3 give 0, 4-7 give 1) for isomorphism 0 and the inverse for 1 and 3.
+- **The DSP's own state follows SpanDSP's table.** `s[i] == CONV[s[i-1]][d[i]]` for
+  **478 of 478** symbols (110 of 478 with the d cell one symbol off), using
+  `v17tx.c`'s `v17_convolutional_encoder`.
+
+So MICA uses **isomorphism 0**, which is also `CONV_ISO[0]` that
+`v32bis_set_terbo_tx(..., iso = 0, ...)` and the analysis scripts took first: d is
+the diff state as SpanDSP computes it, Y0 = `(convolution >> 2) & 1` after the
+update, same table. The V.32terbo coder is V.32bis's, not merely isomorphic to it.
+
+Not settled by this: the quarter turn of the constellation. The receiver resolves
+it itself (all four are accepted) and I could not find a cell that carries the
+transmitted I/Q coordinates (no data cell in 0x8000-0x9FFF correlates with the
+warped site coordinates above |r| = 0.26), probably because the points are looked
+up from a program-memory table in the modulator.
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler
