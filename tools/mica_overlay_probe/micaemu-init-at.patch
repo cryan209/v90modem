@@ -1,5 +1,5 @@
 --- /Users/scottcryan/MicaEmu/native/mica_line.cpp	2026-09-27 20:52:15
-+++ /private/tmp/claude-501/-Users-scottcryan-v90modem/b442a30f-0d70-488d-a0ac-3b8d09113582/scratchpad/rig/native/mica_line.cpp	2026-10-13 12:38:10
++++ /private/tmp/claude-501/-Users-scottcryan-v90modem/b442a30f-0d70-488d-a0ac-3b8d09113582/scratchpad/rig/native/mica_line.cpp	2026-10-13 13:12:37
 @@ -152,6 +152,7 @@
      bool realtime = false, idle_skip = true, interrupts = true, result_codes = false;
      int prime_blocks = PRIME_BLOCKS, dte_fd = -1;
@@ -28,7 +28,7 @@
                      const int now = mica::channel_state(message);
                      if(now >= 0 && now != state) {
                          std::fprintf(stderr, "channel 0: %s at %.2f s\n", mica::channel_state_name(now), call_time());
-@@ -234,6 +241,28 @@
+@@ -234,6 +241,29 @@
                  }
              };
  
@@ -54,13 +54,57 @@
 +                    std::fprintf(stderr, "\n");
 +                }
 +            };
++        if(std::getenv("COV_OUT")) core.set_coverage(true);
          if(!board.configure_call(0, false))
              throw std::runtime_error("channel 0 host queue is occupied");
          board.run(CALL_SETUP_INSTRUCTIONS);
-@@ -287,6 +316,29 @@
+@@ -287,6 +317,72 @@
                      std::this_thread::sleep_for(std::chrono::duration<double, std::milli>(ahead - lead_ms));
              }
              board.run(LINK_RUN_SLICE);
++            if(const char *co = std::getenv("COV_OUT")) {       // COV_AT="t1,t2": dump PCs first executed in each interval
++                static const std::vector<double> times = [] {
++                    std::vector<double> v; std::string t = std::getenv("COV_AT") ? std::getenv("COV_AT") : "";
++                    size_t pos = 0; while(pos < t.size()) { size_t c = t.find(',', pos); v.push_back(std::stod(t.substr(pos, c == std::string::npos ? std::string::npos : c - pos))); if(c == std::string::npos) break; pos = c + 1; }
++                    return v; }();
++                static size_t next = 0;
++                static std::set<unsigned> seen;
++                if(next < times.size() && call_time() >= times[next]) {
++                    std::string path = std::string(co) + "." + std::to_string(next);
++                    FILE *f = std::fopen(path.c_str(), "w");
++                    for(unsigned pc = 0; pc < 0x10000; ++pc)
++                        if(core.first_exec(uint16_t(pc)) && !seen.count(pc)) { seen.insert(pc); std::fprintf(f, "%04x\n", pc); }
++                    std::fclose(f);
++                    ++next;
++                }
++            }
++            if(const char *dt = std::getenv("DM_TRACE")) {         // "t,dur,lo,hi" (hex lo, hi): writes to lo..hi, to stderr as DMW lines
++                static double ts = -1, dur = 0; static unsigned lo = 0, hi = 0; static int phase = 0;
++                if(ts < 0) { std::string t = dt; size_t p1 = t.find(','), p2 = t.find(',', p1 + 1), p3 = t.find(',', p2 + 1);
++                    ts = std::stod(t.substr(0, p1)); dur = std::stod(t.substr(p1 + 1, p2 - p1 - 1));
++                    lo = std::stoul(t.substr(p2 + 1, p3 - p2 - 1), nullptr, 16); hi = std::stoul(t.substr(p3 + 1), nullptr, 16); }
++                if(phase == 0 && call_time() >= ts) {
++                    core.set_data_event_limit(2000000); core.set_data_trace_changes_only(false);
++                    core.set_data_trace_range(uint16_t(lo), uint16_t(hi), true); core.set_data_trace(true); core.clear_data_events(); phase = 1;
++                } else if(phase == 1 && call_time() >= ts + dur) {
++                    core.set_data_trace(false);
++                    for(const auto &e : core.data_events()) std::fprintf(stderr, "DMW %04x %04x %04x\n", e.address, e.value, e.pc);
++                    phase = 2;
++                }
++            }
++            if(const char *dr = std::getenv("DM_RATE")) {          // "t1,t2": per-second write rates of every data cell
++                static double t1 = -1, t2 = -1;
++                static std::vector<uint64_t> c1;
++                if(t1 < 0) { std::string t = dr; t1 = std::stod(t.substr(0, t.find(','))); t2 = std::stod(t.substr(t.find(',') + 1)); }
++                if(c1.empty() && call_time() >= t1) { c1.resize(65536); for(unsigned a = 0; a < 65536; ++a) c1[a] = core.data_write_count(uint16_t(a)); }
++                else if(!c1.empty() && t2 > 0 && call_time() >= t2) {
++                    for(unsigned a = 0; a < 65536; ++a) {
++                        const double rate = (core.data_write_count(uint16_t(a)) - c1[a]) / (t2 - t1);
++                        if(rate >= 400) std::fprintf(stderr, "DMRATE %04x %.0f\n", a, rate);
++                    }
++                    t2 = -1;
++                }
++            }
 +            if(const char *dc = std::getenv("DSPCMD_AT")) {   // "seconds:hexcmd[,seconds:hexcmd...]"
 +                static std::vector<std::pair<double, unsigned>> pending;
 +                static bool parsed = false;

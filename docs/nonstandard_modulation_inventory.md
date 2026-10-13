@@ -967,6 +967,69 @@ board's handling of it. The V.34 overlay's trellis decode works in the same
 emulator (16 000 bytes each way byte-identical over V.90, `handoff.md`), so the
 fault is specific to overlay 8E's receiver. Not localised further.
 
+
+### The instruction: XC over the end of an RPTB block (2026-10-13)
+
+**Found, fixed and verified.** The emulated C53 (courier-emu's `op_xc`) mishandled
+`XC` when the instruction it skips is the **last word of a block-repeat (RPTB)
+body**: a false XC advanced the PC with `CHANGE_PC(m_pc + n)`, which bypasses the
+fetch-time test that redirects the PC back to the block start, so the loop ended
+after that pass. SPRU056D: a false XC executes NOPs in its place, and the fetch
+still triggers the repeat. The V.32bis overlay's minimum-metric searches are
+exactly that shape (`rptb c50b: ... crlt; lacc *+; xc 1,c; sar ar2,@21`), and the
+first false condition cut every search short, so the trellis receiver chose wrong
+paths and delivered noise. 4800 bit/s, which has no such search, was unaffected.
+
+How it was found, for the method:
+
+1. Coverage (`first_exec`) for PCs executed in a 14400 call but not a 4800 one:
+   617 PCs, almost all in a few routines (`c44c-c795`, `5985-59b9`, ...).
+2. Mnemonics in those routines, against the rest of the 4800 run: the rare ones
+   are the Viterbi/search kit (`crlt`, `crgt`, `exar`, `xc`, `mpys`, `ltp`,
+   `sqra`, `mads`, `addt`).
+3. Each audited against SPRU056D (`docs/spru056d-c5x-users-guide.pdf` in
+   courier-emu). `crlt`/`crgt`/`addt`/`adds`/`sbb`/`sfl`/`sfr`/`satl`/`neg` and the
+   others read were correct. `XC` is modelled with a pipeline-condition quirk, and
+   its skip path is the one that does not go through the fetch.
+4. A 14-word test program: three RPTB passes, XC 1,C with C clear skipping the
+   loop's last word: ACC = 1 (should be 3). A control that skips a middle word
+   gives the right answer.
+
+`courier-emu-xc-rptb.patch` (skipped words are fetched, which keeps the block-
+repeat check) and `test_xc_rptb.py` (fails on the unpatched core with ACC = 1).
+**courier-emu itself is not changed**; everything below was run on a patched
+copy.
+
+Results on the patched core:
+
+| | before | after |
+|---|---|---|
+| MICA's received words, SpanDSP caller marks at 7200 / 14400 | 0.65 / 0.53 ones | **1.000 / 1.000** |
+| two MICAs, 9600 / 14400 | 0.52 / 0.55 ones, random | 0.745 / 0.748, the V.42 pattern, both ends |
+| plain V.32bis call, default `S32 = 2` | retrains 0.5 s after STEADY, then every ~8 s | steady (STEADY 17.06 s, nothing after) |
+| terbo call, default `S32 = 2` | retrain at STEADY + 0.5 s | steady, no retrain |
+
+So **`ATS32=0` is no longer needed** and the "speed shift" the previous sections
+found was MICA's bit-error fallback acting on a receiver that really was broken;
+S32/S35 remain the knobs that govern it.
+
+**MICA's receiver now consumes our terbo transmitter, which tests it from the
+other side.** All 16 `mirror = 0` variants of `v32bis_set_terbo_tx()` (4 coder
+isomorphisms x 4 quarter turns) give 1.000 ones in MICA's received words; all 16
+`mirror = 1` variants give 0.54 (random). So the transmitter's lattice, warp
+(kappa 0.40), V.32bis coder, energy-rank point map and GPC scrambler are accepted
+by MICA's own 512-point receiver, with the orientation not mirrored; the four
+isomorphisms and quarter turns cannot be told apart this way (the receiver
+resolves them itself). **Caller to MICA, data:** 4380 characters of known text,
+sent by the caller as async frames through the terbo constellation, come out of
+MICA's DTE as 4380 bytes, exact; **MICA to caller:** the earlier 4480-byte message
+as before. Both directions, one call, no retrain.
+
+Still open: which of the four isomorphisms/quarter-turns MICA itself uses (not
+distinguishable from receive-side acceptance), the origin of kappa = 0.40, B13 =
+16800, and whether courier-emu's other callers (the Courier modems) were
+affected by the same `XC` skip.
+
 ## Next steps, in order of what could actually be lifted
 
 1. Disassemble the entry of each unidentified pair and find its scrambler
