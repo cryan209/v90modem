@@ -320,7 +320,10 @@ Ruled out, each by a run:
 - `trn1Sigma` (which differs between the attempts) is a double printed with `%d`
   (`fstpl` at `.text` 0x4342d), so it is noise in the log line, not an overflow.
 
-Open: why slmodemd's FIRST V.92 Phase 3 misses an intact Jd. The wrapper differences still
-untested as a pair are `IODELAY` and `CODECTYPE` together beyond the one `aon1` call, and the
-`V90Phase3Demodulator` state machine (`getV90Decision`, `.text` 0x23830) has `Wait For Jd` /
+- The wrapper's ioctl answers: `SLM_CODECTYPE=4 SLM_IODELAY=0` together (AonCyberLabs' values)
+  with genuine QC (`both_pqc1`): startup still misses Jd; slmodemd picks 3200 baud at startup;
+  the retrain-1 Phase 4 ratio drops to +1.858 (the tower's failing retrain logged +1.825) and
+  is still rejected; same V.90 drop.
+
+Open: why slmodemd's FIRST V.92 Phase 3 misses an intact Jd. The `V90Phase3Demodulator` state machine (`getV90Decision`, `.text` 0x23830) has `Wait For Jd` /
 `Wait For V92Jd` states whose log lines are below `-d9`.
