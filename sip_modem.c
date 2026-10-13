@@ -29,6 +29,7 @@
 #include "v250_ctl.h"
 #include "line_monitor.h"
 #include <fcntl.h>
+#include <pthread.h>
 #include <limits.h>
 
 #include <pjsua-lib/pjsua.h>
@@ -1200,6 +1201,115 @@ static void gui_start_monitor(void)
     gui_dest.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     gui_dest.sin_port = htons(n);
 }
+
+/* Local single-endpoint ATA registrar, RFC 3261 §§10.2, 10.3, 22.2.
+ * No proxy routing: registered devices call this modem directly. */
+static int ata_server;
+static pjsip_auth_srv ata_auth;
+static pj_str_t ata_nonce;
+static const char *ata_user, *ata_password;
+static pthread_mutex_t ata_lock = PTHREAD_MUTEX_INITIALIZER;
+static char ata_peer[64], ata_contact[512];
+static time_t ata_expiry;
+static unsigned ata_registrations, ata_rejections;
+
+static pj_status_t ata_lookup(pj_pool_t *pool, const pj_str_t *realm,
+                              const pj_str_t *name, pjsip_cred_info *cred)
+{
+    if (!ata_user || pj_strcmp2(name, ata_user)) return PJSIP_EAUTHACCNOTFOUND;
+    memset(cred, 0, sizeof *cred);
+    pj_strdup(pool, &cred->realm, realm);
+    cred->scheme = pj_str("digest");
+    pj_strdup(pool, &cred->username, name);
+    cred->data_type = PJSIP_CRED_DATA_PLAIN_PASSWD;
+    pj_strdup2(pool, &cred->data, ata_password);
+    return PJ_SUCCESS;
+}
+
+static pj_bool_t ata_request(pjsip_rx_data *rdata)
+{
+    pjsip_msg *msg = rdata->msg_info.msg;
+    int registration = msg->line.req.method.id == PJSIP_REGISTER_METHOD;
+    int invite = msg->line.req.method.id == PJSIP_INVITE_METHOD;
+    if (!registration && !invite) return PJ_FALSE;
+    pjsip_endpoint *endpt = pjsua_get_pjsip_endpt();
+    if (ata_password && *ata_password) {
+        int status = 401;
+        pjsip_authorization_hdr *auth = pjsip_msg_find_hdr(msg, PJSIP_H_AUTHORIZATION, NULL);
+        int nonce_ok = auth && !pj_stricmp2(&auth->scheme, "digest") &&
+                       !pj_strcmp(&auth->credential.digest.nonce, &ata_nonce);
+        if (!nonce_ok || pjsip_auth_srv_verify(&ata_auth, rdata, &status) != PJ_SUCCESS) {
+            pjsip_tx_data *response;
+            pthread_mutex_lock(&ata_lock); ata_rejections++; pthread_mutex_unlock(&ata_lock);
+            if (pjsip_endpt_create_response(endpt, rdata, 401, NULL, &response) == PJ_SUCCESS) {
+                pjsip_auth_srv_challenge(&ata_auth, NULL, &ata_nonce, NULL, PJ_FALSE, response);
+                pjsip_endpt_send_response2(endpt, rdata, response, NULL, NULL);
+            }
+            return PJ_TRUE;
+        }
+    }
+    if (invite) return PJ_FALSE; /* Existing pjsua incoming-call machinery. */
+    pjsip_contact_hdr *contact = pjsip_msg_find_hdr(msg, PJSIP_H_CONTACT, NULL);
+    if (contact && pjsip_msg_find_hdr(msg, PJSIP_H_CONTACT, contact->next)) {
+        pjsip_endpt_respond_stateless(endpt, rdata, 400, NULL, NULL, NULL);
+        return PJ_TRUE; /* One binding, bounded storage. */
+    }
+    char contact_uri[512] = "";
+    if (contact && !contact->star) {
+        int length = pjsip_uri_print(PJSIP_URI_IN_CONTACT_HDR, contact->uri, contact_uri, sizeof contact_uri-1);
+        if (length < 0) {
+            pjsip_endpt_respond_stateless(endpt, rdata, 400, NULL, NULL, NULL);
+            return PJ_TRUE;
+        }
+        contact_uri[length] = 0;
+    }
+    pjsip_expires_hdr *expires = pjsip_msg_find_hdr(msg, PJSIP_H_EXPIRES, NULL);
+    int seconds = expires ? expires->ivalue : 300;
+    if (contact && contact->expires != PJSIP_EXPIRES_NOT_SPECIFIED) seconds = contact->expires;
+    if (seconds < 0) seconds = 300;
+    if (seconds > 3600) seconds = 3600;
+    if (contact && contact->star && seconds != 0) {
+        pjsip_endpt_respond_stateless(endpt, rdata, 400, NULL, NULL, NULL);
+        return PJ_TRUE;
+    }
+    pjsip_tx_data *response;
+    if (pjsip_endpt_create_response(endpt, rdata, 200, NULL, &response) != PJ_SUCCESS) return PJ_TRUE;
+    if (contact) {
+        pthread_mutex_lock(&ata_lock);
+        snprintf(ata_peer, sizeof ata_peer, "%s:%d", rdata->pkt_info.src_name, rdata->pkt_info.src_port);
+        ata_expiry = seconds ? time(NULL)+seconds : 0;
+        snprintf(ata_contact, sizeof ata_contact, "%s", seconds ? contact_uri : "");
+        ata_registrations++;
+        pthread_mutex_unlock(&ata_lock);
+        if (!contact->star && seconds) {
+            pjsip_contact_hdr *copy = pjsip_hdr_clone(response->pool, contact);
+            copy->expires = seconds;
+            pjsip_msg_add_hdr(response->msg, (pjsip_hdr *)copy);
+        }
+    }
+    if (!contact) {
+        pthread_mutex_lock(&ata_lock);
+        seconds = ata_expiry > time(NULL) ? (int)(ata_expiry-time(NULL)) : 0;
+        snprintf(contact_uri, sizeof contact_uri, "%s", ata_contact);
+        pthread_mutex_unlock(&ata_lock);
+        if (seconds && *contact_uri) {
+            char *text = pj_pool_alloc(response->pool, strlen(contact_uri)+1);
+            strcpy(text, contact_uri);
+            pjsip_contact_hdr *binding = pjsip_contact_hdr_create(response->pool);
+            binding->uri = pjsip_parse_uri(response->pool, text, strlen(text), 0);
+            binding->expires = seconds;
+            if (binding->uri) pjsip_msg_add_hdr(response->msg, (pjsip_hdr *)binding);
+        }
+    }
+    pjsip_msg_add_hdr(response->msg, (pjsip_hdr *)pjsip_expires_hdr_create(response->pool, seconds));
+    pjsip_endpt_send_response2(endpt, rdata, response, NULL, NULL);
+    return PJ_TRUE;
+}
+static pjsip_module ata_module = {
+    .name = {"mod-ata-test", 12}, .id = -1,
+    .priority = PJSIP_MOD_PRIORITY_UA_PROXY_LAYER-1, .on_rx_request = ata_request
+};
+
 static void gui_publish(void)
 {
     static uint64_t last;
@@ -1220,6 +1330,45 @@ static void gui_publish(void)
     int extra = lm_gui_json(buf+n, sizeof(buf)-(size_t)n-2);
     if (extra < 0) return;
     n += extra;
+    if (ata_server) {
+        char peer[512] = "", codec[32] = "", call_state[32] = "idle";
+        pjsua_call_id call = g_call_id != PJSUA_INVALID_ID ? g_call_id : g_ringing_call;
+        pjsua_call_info ci;
+        pjsua_stream_stat stats; memset(&stats, 0, sizeof stats);
+        if (call != PJSUA_INVALID_ID && pjsua_call_get_info(call, &ci) == PJ_SUCCESS) {
+            size_t at = 0;
+            for (int i = 0; i < ci.remote_info.slen && at < sizeof peer-3; i++) {
+                unsigned char c = ci.remote_info.ptr[i];
+                if (c == '"' || c == '\\') peer[at++] = '\\';
+                peer[at++] = c >= 32 && c < 127 ? c : '?';
+            }
+            peer[at] = 0;
+            snprintf(call_state, sizeof call_state, "%.*s", (int)ci.state_text.slen, ci.state_text.ptr);
+            for (unsigned i = 0; i < ci.media_cnt; i++) {
+                pjsua_stream_info si;
+                if (ci.media[i].type == PJMEDIA_TYPE_AUDIO &&
+                    pjsua_call_get_stream_info(call, i, &si) == PJ_SUCCESS && si.type == PJMEDIA_TYPE_AUDIO) {
+                    snprintf(codec, sizeof codec, "%.*s/%u", (int)si.info.aud.fmt.encoding_name.slen,
+                             si.info.aud.fmt.encoding_name.ptr, si.info.aud.fmt.clock_rate);
+                    pjsua_call_get_stream_stat(call, i, &stats);
+                    break;
+                }
+            }
+        }
+        int media_added = snprintf(buf+n, sizeof(buf)-(size_t)n,
+            ",\"ata_call\":{\"peer\":\"%s\",\"state\":\"%s\",\"codec\":\"%s\",\"rx_packets\":%u,\"tx_packets\":%u,\"rx_loss\":%u,\"rx_jitter_ms\":%.3f}",
+            peer, call_state, codec, stats.rtcp.rx.pkt, stats.rtcp.tx.pkt, stats.rtcp.rx.loss, stats.rtcp.rx.jitter.mean/1000.0);
+        if (media_added < 0 || (size_t)media_added >= sizeof(buf)-(size_t)n-1) return;
+        n += media_added;
+        pthread_mutex_lock(&ata_lock);
+        long remaining = ata_expiry > time(NULL) ? (long)(ata_expiry-time(NULL)) : 0;
+        int added = snprintf(buf+n, sizeof(buf)-(size_t)n,
+            ",\"ata_registration\":{\"peer\":\"%s\",\"expires\":%ld,\"accepted\":%u,\"challenges\":%u}",
+            ata_peer, remaining, ata_registrations, ata_rejections);
+        pthread_mutex_unlock(&ata_lock);
+        if (added < 0 || (size_t)added >= sizeof(buf)-(size_t)n-1) return;
+        n += added;
+    }
     buf[n++] = '}';
     sendto(gui_socket, buf, n, 0, (struct sockaddr *)&gui_dest, sizeof(gui_dest));
 }
@@ -1246,6 +1395,8 @@ static void print_usage(FILE *f, const char *argv0)
         "--connect-timeout sets S7 likewise (default 120 s, 1-255): a dial or\n"
         "answer that has not reached CONNECT by then ends with NO CARRIER.\n"
         "\n"
+        "--ata-server enables a local single-endpoint registrar; optional auth via\n"
+        "ATA_TEST_USER and ATA_TEST_PASSWORD (realm modem-test).\n"
         "--lines N runs N lines, one worker process each: SIP port local-port+i,\n"
         "RTP port rtp-port+100*i, console <link>.i, profile <file>.i, and the i-th\n"
         "of a comma-separated --username/--password (docs/multi_line.md).\n"
@@ -1333,6 +1484,8 @@ int main(int argc, char *argv[])
         } else if (!strcmp(a, "--help") || !strcmp(a, "-h")) {
             print_usage(stdout, argv[0]);
             return 0;
+        } else if (!strcmp(a, "--ata-server")) {
+            ata_server = 1;
         } else if (!strcmp(a, "--sip-server") && has_val) {
             sip_server = argv[++i];
         } else if (!strcmp(a, "--username") && has_val) {
@@ -1542,6 +1695,18 @@ int main(int argc, char *argv[])
     /* Use null sound device — audio is handled by our media port */
     pjsua_set_null_snd_dev();
 
+    if (ata_server) {
+        if (sip_server) { fprintf(stderr, "ATA server cannot use an upstream SIP server\n"); return 2; }
+        ata_user = getenv("ATA_TEST_USER"); ata_password = getenv("ATA_TEST_PASSWORD");
+        if (ata_password && *ata_password && (!ata_user || !*ata_user)) {
+            fprintf(stderr, "ATA_TEST_PASSWORD requires ATA_TEST_USER\n"); return 2;
+        }
+        pj_str_t realm = pj_str("modem-test");
+        pj_create_unique_string(g_pool, &ata_nonce);
+        pjsip_auth_srv_init(g_pool, &ata_auth, &realm, ata_lookup, 0);
+        status = pjsip_endpt_register_module(pjsua_get_pjsip_endpt(), &ata_module);
+        if (status != PJ_SUCCESS) { fprintf(stderr, "ATA registrar initialization failed\n"); return 1; }
+    }
     status = pjsua_start();
     if (status != PJ_SUCCESS) {
         PJ_LOG(1, ("sip_modem", "pjsua_start failed"));

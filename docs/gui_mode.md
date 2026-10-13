@@ -21,6 +21,56 @@ The serial console enables sending after the DCE reports the data connection,
 not merely after the physical carrier appears. Closing the native window stops
 the child modem; for the browser monitor use Ctrl-C in its launching terminal.
 
+## ATA test server
+
+`make gui-ata` starts a local UDP SIP listener with a single-endpoint registrar.
+The native ATA test server tab and browser panel show address/ports, answering,
+registration status, incoming peer, negotiated codec and RTP RX/TX packets,
+receive loss and mean jitter. These are PJSIP transport statistics, not modem
+CONNECT or decoded-data success. The engine plots and AT/serial consoles remain
+available for testing a modem attached to the ATA's analogue port.
+
+```sh
+# Explicit LAN address (recommended when several interfaces are available):
+./sip_v90_modem --gui --ata-server --bind-addr 192.168.1.20 --local-port 5060 --rtp-port 4000
+# Browser alternative:
+python3 tools/modem_gui.py --web ./sip_v90_modem --ata-server
+```
+
+The launcher chooses the IPv4 address used by the default route when no address
+is supplied. Verify it in the panel. Start / apply replaces an idle listener;
+hang up first when a call is in progress. Stop terminates the SIP backend and
+releases its SIP/RTP sockets while retaining the GUI. The RTP base must be even;
+its adjacent port is used for RTCP. Answer rings 0 means manual `ATA`, 1–9 selects
+S0 automatic answering. Port/address failures remain visible in the process log
+and the GUI stays available for correcting settings.
+
+Copy ATA setup supplies proxy/registrar, username, realm and the endpoint URI.
+Configure the ATA to use this LAN address and UDP port as its proxy and registrar;
+registration is optional for direct calling. Dial `sip:modem@ADDRESS:PORT` (or use
+the ATA's dial plan to route a test number there). Select G.711 PCMU/PCMA and
+turn off VAD, echo cancellation and gain processing. SIP and RTP must be reachable
+between the ATA and host; the local web control API remains loopback-only.
+
+A nonempty password enables SIP digest authentication for REGISTER and incoming
+INVITE. The realm is `modem-test`; configure the same username/password on the ATA.
+An empty password disables authentication. Passwords are held in the child
+process environment, never returned by the state API or copied into setup text.
+CLI-only servers accept `ATA_TEST_USER` / `ATA_TEST_PASSWORD`. GUI fields are
+session settings and are not saved to disk.
+
+This is a local single-endpoint test registrar (RFC 3261 §§10.2–10.3, 22.2),
+not a PBX or routing proxy. The latest registration's source and expiry are shown;
+it does not route calls between subscribers. Registration lifetimes are capped
+at one hour. Digest challenges use a per-process nonce. Listener restart clears
+registration and authentication state. Direct SIP mode without `--ata-server`
+continues to behave as before.
+
+`make gui-ata-test` verifies registration/unregister, authentication challenges,
+wrong/stale credentials, an authenticated incoming INVITE, input validation and
+stop/restart using localhost UDP. `make gui-smoke-test` separately exercises the
+existing bidirectional media/data path. Neither establishes physical ATA interop.
+
 ## Apple USB Modem (macOS)
 
 The native and browser GUIs can run the existing A1082 (`05ac:1401`) analogue

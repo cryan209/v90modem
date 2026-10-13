@@ -1103,3 +1103,9 @@ fax-v34-test: fax_class_test fax_class2_test engine_pair_test v90_engine_peer
 fax-v34-engine-test: fax_class2_test v90_engine_peer
 	$(RUN_TESTS) --group fax-v34-engine-test $(TEST_LISTS)
 
+
+.PHONY: gui-ata gui-ata-test
+gui-ata: $(TARGET) modem_gui_native
+	python3 tools/modem_gui.py ./$(TARGET) --ata-server
+gui-ata-test: $(TARGET)
+	python3 tools/gui_ata_test.py

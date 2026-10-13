@@ -79,7 +79,7 @@ def main():
                 send('at', b'ATD6004\r')
                 def connected():
                     s = state()
-                    return s if s.get('state') == 4 and s.get('age', 9) < 1 and len(s.get('iq', [[]])[0]) == 256 else None
+                    return s if s.get('state') == 4 and s.get('data_ready') and s.get('age', 9) < 1 and len(s.get('iq', [[]])[0]) == 256 and all(w.get('runs') for w in s.get('wire', [])) else None
                 s = wait_for(connected)
                 assert all(len(a) == 512 for a in s['audio'])
                 assert len(s['eye']) == 128 and s['eye_count'] >= 128

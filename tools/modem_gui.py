@@ -20,6 +20,7 @@ import time
 import tty
 import webbrowser
 import datetime
+import ipaddress
 
 
 LOOPBACK_PROFILES = {
@@ -51,6 +52,9 @@ def main():
         args.pop(0)
     if not args:
         raise SystemExit('Usage: tools/modem_gui.py ./sip_v90_modem [modem options]')
+    ata = '--ata-server' in args
+    if ata and any(flag in args for flag in ('--apple','--loopback','--sip-server','--username','--password','--profile')):
+        raise SystemExit('ATA test server owns its local SIP account; omit Apple, loopback and upstream account options')
     apple = '--apple' in args
     if apple:
         args.remove('--apple')
@@ -148,6 +152,25 @@ def main():
         try: discover_apple()
         except (OSError,ValueError,subprocess.SubprocessError) as error:
             record('log',f'Apple discovery: {error}\n'.encode())
+
+    ata_settings = None
+    if ata:
+        def option(flag, default): return args[args.index(flag)+1] if flag in args else default
+        def replace_option(call_args, flag, value):
+            if flag in call_args: call_args[call_args.index(flag)+1] = str(value)
+            else: call_args += [flag,str(value)]
+        address = option('--bind-addr','')
+        if not address:
+            try:
+                with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as route:
+                    route.connect(('192.0.2.1',9)); address = route.getsockname()[0]
+            except OSError: address = '127.0.0.1'
+        ata_settings = {'address':address,'sip_port':int(option('--local-port',5060)),
+            'rtp_port':int(option('--rtp-port',4000)), 'rings':int(option('--auto-answer',1)),
+            'username':env.get('ATA_TEST_USER','modem'),'authenticated':bool(env.get('ATA_TEST_PASSWORD')),
+            'running':True}
+        for flag,key in [('--bind-addr','address'),('--local-port','sip_port'),('--rtp-port','rtp_port'),('--auto-answer','rings')]:
+            replace_option(args,flag,ata_settings[key])
 
     peer = None; peer_udp = None
     if loopback:
@@ -355,9 +378,10 @@ def main():
                     value['streams'] = {k: list(v) for k, v in streams.items()}
                     value['ports'] = ports
                     value['interfaces_ready'] = all(name in fds for name in ('at','data'))
+                    if ata: value['ata_server'] = dict(ata_settings, realm='modem-test')
                     value['backend'] = 'Apple USB modem' if apple else 'SIP/G.711'
                     if apple: value['hardware'] = dict(apple_options, usb_address=env.get('APPLE_MODEM_ADDR','Automatic'), audio_uid=env.get('APPLE_MODEM_AUDIO_UID','Automatic'), profile_path=env['APPLE_GUI_PROFILE'], captures=apple_captures())
-                    value['exit'] = None if test['busy'] else child.poll()
+                    value['exit'] = None if test['busy'] or (ata and not ata_settings['running']) else child.poll()
                     pair_ready = bool(value.get('data_ready') and peer_telemetry.get('data_ready'))
                     if not pair_ready: test['connected_since'] = None
                     elif test.get('connected_since') is None: test['connected_since'] = time.monotonic()
@@ -371,7 +395,7 @@ def main():
             # Capability URL + same-origin check: arbitrary websites cannot operate PTYs.
             origin = self.headers.get('Origin')
             expected = f'http://127.0.0.1:{self.server.server_port}'
-            if self.path not in ('/'+token+'/send', '/'+token+'/loopback', '/'+token+'/apple') or origin != expected:
+            if self.path not in ('/'+token+'/send', '/'+token+'/loopback', '/'+token+'/apple', '/'+token+'/ata') or origin != expected:
                 return self.respond(403, b'{}')
             try:
                 length = int(self.headers.get('Content-Length', '0'))
@@ -379,6 +403,9 @@ def main():
                     raise ValueError('Invalid message size')
                 req = json.loads(self.rfile.read(length))
                 if not isinstance(req,dict): raise ValueError('Expected a JSON object')
+                if self.path.endswith('/ata'):
+                    ata_action(req)
+                    return self.respond(200,b'{}')
                 if self.path.endswith('/apple'):
                     apple_action(req)
                     return self.respond(200,b'{}')
@@ -434,6 +461,48 @@ def main():
     else:
         webbrowser.open(url)
     threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    def ata_action(req):
+        nonlocal child, generation
+        if not ata: raise ValueError('Launch with --ata-server first')
+        action = req.get('action')
+        if action not in ('start','stop'): raise ValueError('Choose start or stop')
+        with lifecycle:
+            if action == 'start':
+                with lock:
+                    if telemetry.get('state',0) != 0 and child.poll() is None: raise ValueError('Hang up before changing listener settings')
+                address = str(ipaddress.IPv4Address(req.get('address','')))
+                if address == '0.0.0.0': raise ValueError('Choose the actual LAN address for SIP and RTP advertisement')
+                def number(key,low,high):
+                    value = req.get(key)
+                    if type(value) is not int or not low <= value <= high: raise ValueError('Invalid '+key)
+                    return value
+                sip_port = number('sip_port',1024,65535); rtp_port = number('rtp_port',1024,65534)
+                rings = number('rings',0,9)
+                if rtp_port % 2 or sip_port in (rtp_port,rtp_port+1): raise ValueError('Use an even RTP port and separate SIP port')
+                username = req.get('username','modem'); password = req.get('password','')
+                if not isinstance(username,str) or not username or len(username)>64 or not all(c.isascii() and (c.isalnum() or c in '_.-') for c in username): raise ValueError('Use a short SIP username with letters, digits, dot, dash or underscore')
+                if not isinstance(password,str) or len(password)>256 or '\x00' in password: raise ValueError('Invalid password')
+            if child.poll() is None:
+                child.terminate()
+                try: child.wait(timeout=5)
+                except subprocess.TimeoutExpired: raise ValueError('SIP backend did not stop')
+            port_stop.set()
+            for thread in port_threads: thread.join(timeout=1)
+            for fd in list(fds.values()): os.close(fd)
+            fds.clear()
+            with lock:
+                generation += 1; telemetry.clear(); ata_settings['running'] = False
+            if action == 'stop': return
+            for path in ports.values():
+                if os.path.islink(path): os.unlink(path)
+            call_args = list(args)
+            for flag,value in [('--bind-addr',address),('--local-port',sip_port),('--rtp-port',rtp_port),('--auto-answer',rings)]: replace_option(call_args,flag,value)
+            call_env = dict(env,ATA_TEST_USER=username,ATA_TEST_PASSWORD=password)
+            child = subprocess.Popen(call_args,env=call_env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+            with lock: ata_settings.update(address=address,sip_port=sip_port,rtp_port=rtp_port,rings=rings,username=username,authenticated=bool(password),running=True)
+            threading.Thread(target=log_reader,args=(child,),daemon=True).start()
+            launch_ports()
 
     def restart_apple(replay=None):
         nonlocal child, generation
@@ -532,9 +601,12 @@ def main():
         while not stop.wait(.2):
             with lifecycle:
                 if not test["busy"] and child.poll() is not None:
-                    if not apple or not telemetry: break
-                    record('log',f'Apple session ended ({child.returncode}); returning to on-hook command mode\n'.encode())
-                    restart_apple()
+                    if ata:
+                        with lock: ata_settings['running'] = False
+                    else:
+                        if not apple or not telemetry: break
+                        record('log',f'Apple session ended ({child.returncode}); returning to on-hook command mode\n'.encode())
+                        restart_apple()
             if not test["busy"] and peer is not None and peer.poll() is not None:
                 record('log', b'Local loopback peer exited\n'); break
             if native is not None and native.poll() is not None:

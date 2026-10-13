@@ -368,6 +368,11 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow!
     let status = NSTextField(labelWithString:"Starting modem…")
     let diagnostics = NSTabView()
+    var ataTab: NSTabViewItem?
+    let ataIP = NSTextField(string:""), ataSIP = NSTextField(string:"5060"), ataRTP = NSTextField(string:"4000"), ataRings = NSTextField(string:"1"), ataUser = NSTextField(string:"modem")
+    let ataPassword = NSSecureTextField(string:"")
+    let ataSetup = NSTextField(wrappingLabelWithString:""), ataStatus = NSTextField(wrappingLabelWithString:"")
+    var ataInitialized = false
     var appleTab: NSTabViewItem?
     let usbPicker = NSPopUpButton(), audioPicker = NSPopUpButton(), capturePicker = NSPopUpButton(), autoAnswer = NSPopUpButton()
     let onHookMonitor = NSButton(checkboxWithTitle:"On-hook monitor",target:nil,action:nil)
@@ -503,6 +508,14 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             row([captureAudio,capturePicker,button("Replay RX",#selector(replayApple)),button("Stop replay",#selector(stopAppleReplay))]),
             lineHealth,audioHealth,capturePath]))
         diagnostics.removeTabViewItem(appleTab!)
+        for field in [ataIP,ataUser,ataPassword] { field.widthAnchor.constraint(equalToConstant:170).isActive = true }
+        for field in [ataSIP,ataRTP,ataRings] { field.widthAnchor.constraint(equalToConstant:65).isActive = true }
+        ataPassword.placeholderString = "Empty: auth off"
+        ataSetup.font = .systemFont(ofSize:11); ataStatus.font = .systemFont(ofSize:11)
+        ataTab = tab("ATA test server",panel("Direct SIP listener / local registrar",[
+            row([label("LAN IP"),ataIP,label("SIP"),ataSIP,label("RTP"),ataRTP,label("Answer rings (0 manual)"),ataRings]),
+            row([label("User"),ataUser,label("Password"),ataPassword,button("Start / apply",#selector(startATA)),button("Stop",#selector(stopATA)),button("Copy ATA setup",#selector(copyATA))]),ataSetup,ataStatus]))
+        diagnostics.removeTabViewItem(ataTab!)
         diagnostics.heightAnchor.constraint(equalToConstant:205).isActive = true
         startLoop = button("Start loopback",#selector(startLoopback))
         pattern = button("256-byte pattern",#selector(sendPattern))
@@ -552,6 +565,24 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         post("apple",["action":"replay","id":appleCaptureIDs[capturePicker.indexOfSelectedItem]])
     }
     @objc func stopAppleReplay() { post("apple",["action":"stop"]) }
+    @objc func startATA() {
+        guard let sip = Int(ataSIP.stringValue), let rtp = Int(ataRTP.stringValue), let rings = Int(ataRings.stringValue) else { error.stringValue = "Ports and rings must be integers"; return }
+        post("ata",["action":"start","address":ataIP.stringValue,"sip_port":sip,"rtp_port":rtp,"rings":rings,"username":ataUser.stringValue,"password":ataPassword.stringValue])
+    }
+    @objc func stopATA() { post("ata",["action":"stop"]) }
+    @objc func copyATA() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(ataSetup.stringValue,forType:.string) }
+    func renderATA(_ s:[String:Any], _ a:[String:Any]) {
+        if let tab = ataTab, !diagnostics.tabViewItems.contains(where: { $0 === tab }) { diagnostics.addTabViewItem(tab); diagnostics.selectTabViewItem(tab) }
+        let ip = a["address"] as? String ?? "", port = a["sip_port"] as? Int ?? 5060, user = a["username"] as? String ?? "modem"
+        if !ataInitialized {
+            ataInitialized = true; ataIP.stringValue = ip; ataSIP.stringValue = String(port); ataRTP.stringValue = String(a["rtp_port"] as? Int ?? 4000); ataRings.stringValue = String(a["rings"] as? Int ?? 1); ataUser.stringValue = user
+        }
+        ataSetup.stringValue = "ATA proxy / registrar: \(ip):\(port) · User: \(user) · Realm: modem-test · Auth \((a["authenticated"] as? Bool ?? false) ? "on" : "off")\nDial sip:modem@\(ip):\(port) · G.711 PCMU/PCMA; disable VAD, echo cancellation and gain processing."
+        let r = s["ata_registration"] as? [String:Any] ?? [:], expiry = r["expires"] as? Int ?? 0
+        let media = s["ata_call"] as? [String:Any] ?? [:]
+        let running = a["running"] as? Bool ?? false
+        ataStatus.stringValue = "Listener \(running ? (s["exit"] is Int ? "failed" : "running") : "stopped") · \(expiry > 0 ? "Registered \(r["peer"] as? String ?? "") · \(expiry)s" : "No active registration") · Accepted \(r["accepted"] as? Int ?? 0) · Auth challenges \(r["challenges"] as? Int ?? 0) · \(media["state"] as? String ?? "idle") \(media["peer"] as? String ?? "")\n\(media["codec"] as? String ?? "No media") · RTP RX/TX \(media["rx_packets"] as? Int ?? 0)/\(media["tx_packets"] as? Int ?? 0) · RX loss \(media["rx_loss"] as? Int ?? 0) · jitter \(String(format:"%.1f",media["rx_jitter_ms"] as? Double ?? 0))ms"
+    }
     func renderApple(_ s:[String:Any], _ hardware:[String:Any]) {
         if let tab = appleTab, !diagnostics.tabViewItems.contains(where: { $0 === tab }) {
             diagnostics.addTabViewItem(tab); diagnostics.selectTabViewItem(tab)
@@ -704,6 +735,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }.resume()
     }
     func render(_ s:[String:Any]) {
+        if let ata = s["ata_server"] as? [String:Any] { renderATA(s,ata) }
         let states = ["Idle","Dialling","V.8 negotiation","Training","Connected","Hanging up"]
         let mods = ["—","V.91","V.90","V.34","V.22bis","x2","V.32bis","Clear channel","V.21","Bell 103","V.23"]
         let state = s["state"] as? Int ?? 0, mod = s["modulation"] as? Int ?? 0
