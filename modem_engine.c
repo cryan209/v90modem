@@ -2513,6 +2513,13 @@ static unsigned g_x2_last_reversals, g_x2_last_b_reversed;
  * renegotiation and §9.7 cleardown.  See docs/v90_analogue_role.md.
  */
 static bool g_v90_analogue_role = false;
+/* This call is ANSWERED by the V.90/V.92 analogue role (V.92 9.2.3: the digital
+ * modem called). Phase 2 is the analogue modem's whatever the call direction, so
+ * the borrowed SpanDSP engine is initialised as its "calling" (analogue) side. */
+static bool g_v90a_answering = false;
+/* The analogue role was taken for this call only (a digital answerer that heard QC1d/QC2d,
+ * V.92 9.2.4.1/.2); the power-on setting is restored when the call ends. */
+static bool g_v90a_role_borrowed = false;
 
 static bool me_v90_analogue_role(void)
 {
@@ -6386,6 +6393,11 @@ static void cleanup_v34_v90_training_locked(void)
     g_v92_upstream_slicer_set = false;
     g_v92_active = false;
     g_peer_lapm_signalled = false;
+    g_v90a_answering = false;
+    if (g_v90a_role_borrowed) {
+        g_v90_analogue_role = false;
+        g_v90a_role_borrowed = false;
+    }
     g_v92_v8_offered = false;
     g_v92_info0_local_advertised = false;
     g_v92_info0_peer_capable = false;
@@ -8847,7 +8859,7 @@ static void start_v34_training(void)
      * an outbound call to an analogue RAS: it must send INFO0d/Tone B/INFO1d,
      * not the caller-shaped INFO0a/Tone A/INFO1a sequence.
      */
-    phase2_calling_party = v90_upstream ? false : g_calling_party;
+    phase2_calling_party = v90_upstream ? false : (g_v90a_answering || g_calling_party);
 
     /* Start with a conservative profile that is typically more robust over
      * gateway+RTP paths, then iterate upward once baseline connectivity is proven. */
@@ -8974,7 +8986,7 @@ static void start_v34_training(void)
         case 3429: exact_baud = 2400.0f * 10.0f / 7.0f; break;
         default:   exact_baud = 2400.0f; break;
         }
-        if (g_calling_party) {
+        if (g_calling_party || g_v90a_answering) {
             /* Caller TX = high carrier */
             switch (g_v34_start_baud) {
             case 2400: our_tx_carrier = exact_baud * 3.0f / 4.0f; break;
@@ -8998,7 +9010,7 @@ static void start_v34_training(void)
         }
         /* Compute RX carrier to check separation */
         float rx_carrier;
-        if (g_calling_party) {
+        if (g_calling_party || g_v90a_answering) {
             /* Caller RX = low carrier */
             switch (g_v34_start_baud) {
             case 2400: rx_carrier = exact_baud * 2.0f / 3.0f; break;
@@ -9352,6 +9364,14 @@ static bool me_qc_offer_lapm(void)
     return !(cfg.es_set && !pol.attempt);
 }
 
+static void me_borrow_analogue_role(void)
+{
+    if (!g_v90_analogue_role) {
+        g_v90_analogue_role = true;
+        g_v90a_role_borrowed = true;
+    }
+}
+
 static void me_qc_begin(const v8_parms_t *r)
 {
     int b = r->v92;
@@ -9466,6 +9486,7 @@ static void me_qc_begin(const v8_parms_t *r)
         g_qc_peer_analogue = (b & 1) == 0;
         g_qc_peer_digital = (b & 1) != 0;
         g_qc_role_swap = !me_v90_analogue_role();
+        me_borrow_analogue_role();
         g_phase_start_ms = trace_now_ms();
         if (g_qc_peer_digital)
             ME_LOG("[ME] V.92 9.2.3.1: QC1d (P=%d) from a digital modem -> QCA1a, then ANSpcm, TONEq\n",
@@ -9592,6 +9613,8 @@ static bool me_qc2_event_locked(const v8bis_modem_event_t *e)
             g_qc_lapm = lapm;
             g_qc_peer_digital = digital;
             g_qc_role_swap = !me_v90_analogue_role();
+            me_borrow_analogue_role();
+        me_borrow_analogue_role();
             g_qc_peer_analogue = !digital;
             ME_LOG("[ME] V.92 9.2.3.2: %s (P=%d) -> QCA2a, then %s, TONEq\n",
                    digital ? "QC2d from a digital modem" : "QC2a from an analogue modem",
@@ -9882,7 +9905,7 @@ static void me_qc_finish(void)
     synth.v92 = g_qc_byte;
     synth.jm_cm.call_function = V8_CALL_V_SERIES;
     /* Two analogue modems have no PCM leg: plain V.34 (Figures 7 and 8). */
-    synth.jm_cm.modulations = ((g_qc_peer_analogue && !g_qc_dig_caller) || g_qc_role_swap)
+    synth.jm_cm.modulations = (g_qc_peer_analogue && !g_qc_dig_caller)
                             ? V8_MOD_V34 : (V8_MOD_V90 | V8_MOD_V34);
     synth.jm_cm.peer_modulations = synth.jm_cm.modulations;
     synth.jm_cm.protocols = g_qc_lapm ? V8_PROTOCOL_LAPM_V42 : V8_PROTOCOL_NONE;
@@ -10047,18 +10070,12 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
         /*
          * We offered the analogue role and the peer offered V.90.
          *
-         * V.90 puts the analogue modem on the calling side (§9.2 has it send
-         * INFO0a and INFO1a), and SpanDSP's Phase 2 keys the analogue INFO
-         * variants off calling_party.  An answering call cannot take this role
-         * without lying about which INFO it will send, so it falls back.
+         * The analogue role's Phase 2 (§9.2.2) is the analogue modem's whatever
+         * the call direction (V.92 9.2.3: a digital modem may have called us), so an
+         * answering call initialises the borrowed Phase 2 engine as its analogue
+         * side (g_v90a_answering).
          */
-        if (!g_calling_party) {
-            ME_LOG("[ME] V.90 analogue role requires the calling side (§9.2); "
-                   "this call is answering — falling back to V.34\n");
-            trace_phase("V8 selected V90 analogue role on answer side; using V34");
-            g_mod = ME_MOD_V34;
-            start_v34_training();
-        } else if (!me_v90a_load_dil(&g_v90a_dil)) {
+        if (!me_v90a_load_dil(&g_v90a_dil)) {
             ME_LOG("[ME] V.90 analogue role: no DIL descriptor — falling back to V.34\n");
             trace_phase("V8 selected V90 analogue role; no DIL, using V34");
             g_mod = ME_MOD_V34;
@@ -10066,6 +10083,7 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
         } else {
             int saved_baud = g_v34_start_baud;
 
+            g_v90a_answering = !g_calling_party;
             g_v90a_dil_valid = true;
             g_v90a_u_info = me_v90a_u_info();
             ME_LOG("[ME] V.8 negotiated V.90 with this end as the ANALOGUE modem "

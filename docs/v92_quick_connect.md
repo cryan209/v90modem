@@ -129,15 +129,14 @@ The digital caller already sent QC1d with CM whenever V.92 was on offer (octet
   stops, 75 ms of silence, Phase 2. A digital answerer that hears QC1d / QC2d now does
   the same ("may take on the role of the analogue modem", 9.2.4.1/.2): `g_qc_role_swap`
   marks the call, the QCA1a/QCA2a reply and the ANSpcm wait are the analogue answerer's,
-  and the synthesised V.8 result offers V.34 only. Phase 2 has the same limit as
-  above, so two default-role engines reach the end of Phase 1 (`--expect-no-connect`).
+  and the analogue role is borrowed for the rest of the call (`g_v90a_role_borrowed`, restored
+  at the next call), so Phase 2 onward is the analogue modem's. Two default-role engines
+  connect after it (V.92 56000/48000).
 
-**Phase 2 after it does not work**, and did not before: the digital caller starts a
-V.90 digital-role Phase 2 and our analogue-role answerer can only run V.34
-(SpanDSP keys the analogue INFO sequences off `calling_party`, so an analogue
-modem cannot answer a V.90 call). The pair tests therefore check Phase 1 by log
-and expect no CONNECT; they should become ordinary CONNECT tests when that
-exists. A foreign analogue answerer is what this was written for.
+An analogue-role engine ANSWERING a digital caller runs the real Phase 2 and Phase 3/4:
+`g_v90a_answering` makes `start_v34_training` initialise the borrowed SpanDSP engine as the
+analogue ("calling") side whatever the call direction (docs/v90_analogue_role.md). The pair tests
+for these cases are ordinary CONNECT tests, short Phase 2 included.
 
 ## Short Phase 2 (9.4), both roles
 

@@ -775,15 +775,17 @@ codebase.
    changes a decision the card makes about a signal it chooses its own level
    for is not established.
 
-## When it still falls back to V.34
+## An answering call, and when it still falls back to V.34
 
-Two cases, and both are refusals to advertise something this side cannot honour:
+The role also works on an ANSWERING call (V.92 9.2.3: a digital modem may have dialled us). V.90's
+Phase 2 roles come from analogue/digital, not call direction, and SpanDSP encodes the analogue role in
+`calling_party`, so `start_v34_training` initialises the borrowed engine with `calling_party = true`
+when `g_v90a_answering` is set; V.42 keeps the real call direction. Engine pairs connect both ways
+(V.90/V.92 data mode, with and without Quick Connect and short Phase 2).
 
-- **An answering call.** V.90 puts the analogue modem on the calling side —
-  §9.2 has it send INFO0a and INFO1a — and SpanDSP's Phase 2 keys the analogue
-  INFO variants off `calling_party`. An answering call taking this role would
-  be lying about which INFO it is going to send, so it falls back and says so.
-  Dial out to use the role.
+
+One case is still a refusal to advertise something this side cannot honour:
+
 - **No usable DIL descriptor.** The analogue modem authors the DIL, and
   §9.3.2.9 measures exactly what it asked for. A preset that will not load
   leaves nothing to ask for.
