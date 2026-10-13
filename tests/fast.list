@@ -733,3 +733,5 @@ V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 V34_HDX_ANSWER_SOURCE=1 V34_HDX_BLOCK_SAM
 ./engine_pair_test --seconds 60 --expect V90 --both-at "AT+PIG=0" --both-at "AT+PQC=0" --both-env ME_MODE=v92 --both-env ME_V8BIS=1 --call-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --call-expect "CONNECT 56000" --answer-expect "CONNECT 48000" --answer-log "V.92 9.2.3.2: QC2d" --both-nolog "short Phase 2 abandoned"
 # The analogue role answering a plain V.8 call (no Quick Connect): Phase 2 is the analogue modem's whoever dialled.
 ./engine_pair_test --seconds 60 --expect V90 --both-at "AT+PIG=0" --both-env ME_MODE=v92 --answer-env ME_V90_ROLE=analogue --call-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --call-expect "CONNECT 56000" --answer-expect "CONNECT 48000"
+./engine_pair_test --seconds 60 --expect V90 --both-env ME_MODE=v90 --answer-env ME_V90_ROLE=analogue --call-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --call-expect "CONNECT 56000" --answer-expect "CONNECT 31200"
+./engine_pair_test --alaw --seconds 60 --expect V90 --both-at "AT+PIG=0" --both-env ME_MODE=v92 --answer-env ME_V90_ROLE=analogue --call-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0
