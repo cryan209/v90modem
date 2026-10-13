@@ -9250,6 +9250,7 @@ static bool     g_qc_active = false;
 static bool     g_qc_watch = false;     /* analogue answerer: V.8 sends ANSam, the detector listens for TONEq */
 static bool     g_qc_peer_analogue = false;   /* the other end is an analogue modem: V.34 follows, not V.90 */
 static bool     g_qc_dig_caller = false;      /* we are the digital modem CALLING an analogue one (9.2.2) */
+static bool     g_qc_role_swap = false;       /* a digital answerer that took the analogue role on QC1d/QC2d (9.2.4.1/.2) */
 static bool     g_qc_peer_digital = false;    /* we answer as an analogue modem a digital caller (9.2.3.1) */
 static bool     g_qc_finish_pending = false;
 static bool     g_qc_failed = false;     /* tried this call; do not answer a second QC1a */
@@ -9277,6 +9278,7 @@ static void qc_call_reset_locked(void)
     g_qc_peer_analogue = false;
     g_qc_dig_caller = false;
     g_qc_peer_digital = false;
+    g_qc_role_swap = false;
     g_qc_active = false;
     g_qc_finish_pending = false;
     g_qc_failed = false;
@@ -9407,7 +9409,9 @@ static void me_qc_begin(const v8_parms_t *r)
         return;
     }
 
-    if (me_v90_analogue_role()) {
+    if (me_v90_analogue_role() || (!g_calling_party && (b & 1))) {
+        /* 9.2.4.1: a digital answerer that hears QC1d "may take on the role of the
+         * analogue modem and proceed according to 9.2.3.1" -- it does. */
         /* 9.2.3.1: an analogue answerer that hears QC1a from an analogue caller
          * "may" answer QCA1a, then ANSam 75 ms later, and wait for TONEq (Figure 7).
          * A digital caller's QC1d is answered with QCA1a as well, and then it is
@@ -9434,6 +9438,7 @@ static void me_qc_begin(const v8_parms_t *r)
         g_qc_lapm = (b & 0x04) != 0;
         g_qc_peer_analogue = (b & 1) == 0;
         g_qc_peer_digital = (b & 1) != 0;
+        g_qc_role_swap = !me_v90_analogue_role();
         g_phase_start_ms = trace_now_ms();
         if (g_qc_peer_digital)
             ME_LOG("[ME] V.92 9.2.3.1: QC1d (P=%d) from a digital modem -> QCA1a, then ANSpcm, TONEq\n",
@@ -9545,7 +9550,8 @@ static bool me_qc2_event_locked(const v8bis_modem_event_t *e)
         if (qca || !e->qc2_high || g_qc_failed || g_qc_active || g_g711_rx_octets == 0
             || !me_quick_connect_enabled() || g_qc2_dig_pending || g_qc2_ana_ans_pending)
             return false;
-        if (me_v90_analogue_role()) {
+        if (me_v90_analogue_role() || digital) {
+            /* 9.2.4.2: a digital answerer may take the analogue role on QC2d. */
             /* 9.2.3.2: an analogue answerer answers QC2a, or a digital caller's
                QC2d, with QCA2a (Table 5: analogue, QCA, P, WXYZ 0101).  After an
                analogue caller comes silence and ANSam (Figure 8); after a digital
@@ -9558,6 +9564,7 @@ static bool me_qc2_event_locked(const v8bis_modem_event_t *e)
             g_qc_byte = (lapm ? 0x04 : 0) | (digital ? 1 : 0);
             g_qc_lapm = lapm;
             g_qc_peer_digital = digital;
+            g_qc_role_swap = !me_v90_analogue_role();
             g_qc_peer_analogue = !digital;
             ME_LOG("[ME] V.92 9.2.3.2: %s (P=%d) -> QCA2a, then %s, TONEq\n",
                    digital ? "QC2d from a digital modem" : "QC2a from an analogue modem",
@@ -9848,7 +9855,7 @@ static void me_qc_finish(void)
     synth.v92 = g_qc_byte;
     synth.jm_cm.call_function = V8_CALL_V_SERIES;
     /* Two analogue modems have no PCM leg: plain V.34 (Figures 7 and 8). */
-    synth.jm_cm.modulations = (g_qc_peer_analogue && !g_qc_dig_caller)
+    synth.jm_cm.modulations = ((g_qc_peer_analogue && !g_qc_dig_caller) || g_qc_role_swap)
                             ? V8_MOD_V34 : (V8_MOD_V90 | V8_MOD_V34);
     synth.jm_cm.peer_modulations = synth.jm_cm.modulations;
     synth.jm_cm.protocols = g_qc_lapm ? V8_PROTOCOL_LAPM_V42 : V8_PROTOCOL_NONE;

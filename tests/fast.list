@@ -721,3 +721,6 @@ V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 V34_HDX_BLOCK_SAMPLES=80 ./v34_hdx_test 3
 V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 V34_HDX_BLOCK_SAMPLES=160 ./v34_hdx_test 3429 33600 alaw 12
 V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 V34_HDX_ANSWER_SOURCE=1 V34_HDX_BLOCK_SAMPLES=80 ./v34_hdx_test 3429 33600 alaw 12
 V34_HDX_PRIMARY=1 V34_HDX_TURNAROUND=1 V34_HDX_ANSWER_SOURCE=1 V34_HDX_BLOCK_SAMPLES=160 ./v34_hdx_test 3429 33600 alaw 12
+# A digital answerer taking the analogue role on QC1d / QC2d (9.2.4.1, 9.2.4.2): two default-role engines.
+./engine_pair_test --seconds 45 --expect-no-connect --both-at "AT+PQC=1" --both-env ME_MODE=v92 --both-env ME_V8BIS=0 --call-log "V.92 9.2.2.1: QCA1a" --answer-log "V.92 9.2.3.1: QC1d" --answer-log "V.92 9.2.1.3: short Phase 1 complete" --call-log "V.92 9.2.2.3: short Phase 1 complete"
+./engine_pair_test --seconds 45 --expect-no-connect --both-at "AT+PQC=1" --both-env ME_MODE=v92 --both-env ME_V8BIS=1 --call-log "V.92 9.2.2.2: QCA2a" --answer-log "V.92 9.2.3.2: QC2d" --answer-log "V.92 9.2.1.3: short Phase 1 complete" --call-log "V.92 9.2.2.3: short Phase 1 complete"

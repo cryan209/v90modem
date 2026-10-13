@@ -126,8 +126,11 @@ The digital caller already sent QC1d with CM whenever V.92 was on offer (octet
   by QC2d (Table 11) and QCA2a (Table 5) plays the same part.
 - The analogue answerer answers QC1d / QC2d with QCA1a / QCA2a (WXYZ 0101, UQTS 70) and
   then, silent, waits up to 2 s for ANSpcm for 1 s (9.2.3.3), sends TONEq until it
-  stops, 75 ms of silence, Phase 2. A digital answerer ignores a QC1d (9.2.4.1 only
-  says it "may" turn analogue).
+  stops, 75 ms of silence, Phase 2. A digital answerer that hears QC1d / QC2d now does
+  the same ("may take on the role of the analogue modem", 9.2.4.1/.2): `g_qc_role_swap`
+  marks the call, the QCA1a/QCA2a reply and the ANSpcm wait are the analogue answerer's,
+  and the synthesised V.8 result offers V.34 only. Phase 2 has the same limit as
+  above, so two default-role engines reach the end of Phase 1 (`--expect-no-connect`).
 
 **Phase 2 after it does not work**, and did not before: the digital caller starts a
 V.90 digital-role Phase 2 and our analogue-role answerer can only run V.34
@@ -177,8 +180,8 @@ nothing here has met a foreign V.92 modem.
 
 ## Not implemented (either procedure)
 
-- A digital answerer taking the analogue role when it hears QC1d (9.2.4.1), and
-  an analogue answerer for a V.90 call (Phase 2).
+- An analogue answerer for a V.90 call (Phase 2), which also limits the digital
+  answerer's role swap on QC1d (9.2.4.1) to Phase 1.
 - **ODP/ADP bypass** (9.2.5) on the live path: the P bit is sent and read, and
   the existing LAPM handling takes the caller's P bit, but no V.42 detection
   phase is skipped here.
