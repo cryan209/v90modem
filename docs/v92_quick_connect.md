@@ -222,15 +222,24 @@ commit before slmodemd gained its internal RcFixed resampler, `fd78cab9`) with t
 `SIP_LOGIN`, two positional args) built against the main tree's pjsip.install.
 `qc_slm_pve.sh` uses it by default (`SLM_BUILD=rig`; `SLM_BUILD=stock` for the old pair).
 
-Result: **no data mode on either build.** Short Phase 1 completes on this build too (`+PQC` 1
-and 0, `AT+MS=92`; with `AT+MS=90` slm sends no QC), but Phase 2 then never confirms INFO0: slm
-logs "Repeated info0 ... errorrecovery", sits in Tone AB, and ends "train timeout / Link Error"
-(~13 s); our digital side never decodes slm's INFO0a (rx goes INFO0 -> TONE_A) while slm decodes
-ours. Identical for `+PQC=3`, `AT+MS=90/92`, and for the commit before any Quick Connect work
-(`44164407^`, built on CT 117 as `/root/v90old`), so it is NOT a regression from this
-session. RTP is clean (no loss, ts_delta 160), so the cause is in slm's output as delivered,
-most likely a slmodemd/d-modem difference from the tower build (the tower's `/src/slmodemd`
-carried hooks that are not in the repo or in the D-Modem history; `rig/slmodemd/` has only the
-PCM-upstream patch). Next step if this rig is to be used for data mode: recover the tower's
-slmodemd tree, or find why slm's INFO0a (DPSK, ~100 ms after V.8) is not decoded by our
-answerer on this rig (the stock build only recovered on the retrain, where INFO0 is omitted).
+Result before the fix below: no data mode, and Phase 2 never confirmed INFO0: our digital side
+never decoded slm's INFO0a (rx went INFO0 -> TONE_A) while slm decoded ours -- also on the commit
+before any Quick Connect work (`44164407^`), so not a regression.
+
+**Cause (found 2026-10-13): the rig's slmodemd frames its audio to d-modem as
+`struct { s16 buf[192]; int volume; }`** -- a 4-byte trailer after every 20 ms -- and the repo's
+`rig/d-modem/d-modem.c` read only the 192 samples, so the trailer was consumed as two more
+samples each frame: a 190/192 time stretch. Measured on the wire: slm's Tone A at **2377.75 Hz**
+(2400.0 on the stock build, whose pair speaks a different protocol), TONEq at 975 Hz, the
+9600 Hz tap (`/tmp/dm_from_dsp_9600.raw`) at 2372.5 Hz; INFO0a's 600-baud DPSK drifted half a
+symbol over its ~60 symbols, CRC `0x195f`. (Tone-level tells: a sinc re-resampling of the 9600
+tap did not help -- the error is the time base, not the interpolator.) `d-modem` now takes
+`DM_SLM_FRAME_TRAILER=4` (set by `qc_slm_pve.sh`) and skips the trailer.
+
+With it, on the rebuilt rig: INFO0a decodes, "INFO0 confirmed mutually", INFO1d/INFO1a exchange,
+Phase 3 starts and our Ja descriptor parses, for `+PQC` 3, 1 and 0 (Quick Connect Phase 1 as
+above before it). slm's first INFO1a selects a 2400 baud V.34 upstream, which our strict check
+(3000/3200 only) declines, we retrain through Phase 2 and the second INFO1a (3200) is accepted.
+The call still does not reach data mode: after TRN1d the call ends ~25 s in (our side hangs up,
+slm's d-modem stopped sending ~5 s before). That is a Phase 3/4 matter with this slmodemd, the
+same for `+PQC=3`, so it is outside Quick Connect; it has not been investigated.
