@@ -892,6 +892,7 @@ bool v92_upstream_wave_decode_viterbi_frame(
 
         if (eta != candidates[i][0])
             state->slicing_errors++;
+        state->decided[i] = u;
         push_history(state->u_history, u);
         push_history(state->x_history, u);
         push_history(state->v_history, u);

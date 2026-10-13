@@ -271,6 +271,71 @@ static void record(v92_p3_eq_t *eq, double y, int d, int ref)
     (void)d;
 }
 
+/* A refit window is complete: solve its normal equations (with and without
+ * the decision feedback) and take the result unless its residual is more than
+ * twice the first accepted one's. */
+static void refit_finish(v92_p3_eq_t *eq)
+{
+    const int n = eq->cfg.ntaps;
+    const int dim = n + eq->cfg.nfb;
+    double w[LS_MAX];
+    double atd[LS_MAX];
+    double fit = 0.0;
+
+    static double mff[LS_MAX][LS_MAX + 1];
+    double wff[LS_MAX];
+    bool ff_ok;
+
+    for (int i = 0; i < dim; i++)
+        atd[i] = eq->refit_m[i][dim];
+    /* The feed-forward-only fit is the top-left n x n block of the
+     * same normal equations; take it before solve_normal() destroys
+     * them in place. */
+    for (int i = 0; i < n; i++) {
+        for (int j = i; j < n; j++)
+            mff[i][j] = eq->refit_m[i][j];
+        mff[i][n] = eq->refit_m[i][dim];
+    }
+    ff_ok = solve_normal(mff, n, wff);
+    if (eq->ff_only) {
+        /* Feedback is off: the feed-forward solution is the solve. */
+        double fitff = 0.0;
+
+        for (int i = 0; i < n; i++)
+            fitff += wff[i]*atd[i];
+        eq->refit_resid = sqrt(fmax(eq->refit_dd - fitff, 0.0)/eq->refit_n);
+        if (!ff_ok) {
+            eq->refits_rejected++;
+        } else if (eq->refit_base > 0.0 && eq->refit_resid > 2.0*eq->refit_base) {
+            eq->refits_rejected++;
+        } else {
+            if (eq->refit_base == 0.0)
+                eq->refit_base = eq->refit_resid;
+            memcpy(eq->taps, wff, (size_t)n*sizeof(double));
+            memcpy(eq->taps_ff, wff, (size_t)n*sizeof(double));
+            eq->refits++;
+        }
+    } else if (solve_normal(eq->refit_m, dim, w)) {
+        /* For the least-squares w, |Aw - d|^2 = d'd - w'A'd. */
+        for (int i = 0; i < dim; i++)
+            fit += w[i]*atd[i];
+        eq->refit_resid = sqrt(fmax(eq->refit_dd - fit, 0.0)/eq->refit_n);
+        if (eq->refit_base > 0.0 && eq->refit_resid > 2.0*eq->refit_base) {
+            eq->refits_rejected++;
+        } else {
+            if (eq->refit_base == 0.0)
+                eq->refit_base = eq->refit_resid;
+            memcpy(eq->taps, w, (size_t)n*sizeof(double));
+            memcpy(eq->fb, w + n, (size_t)eq->cfg.nfb*sizeof(double));
+            if (ff_ok) {
+                memcpy(eq->taps_ff, wff, (size_t)n*sizeof(double));
+                eq->have_ff = true;
+            }
+            eq->refits++;
+        }
+    }
+}
+
 bool v92_p3_eq_step(v92_p3_eq_t *eq)
 {
     const int n = eq->cfg.ntaps;
@@ -342,10 +407,9 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
         row[n] = y;
         eq->cap_count++;
     }
-    if (eq->refit_left > 0) {
+    if (eq->refit_left > 0 && !eq->refit_aided) {
         const int dim = n + eq->cfg.nfb;
         double a[LS_MAX];
-        double w[LS_MAX];
 
         for (int j = 0; j < n; j++)
             a[j] = u[j];
@@ -354,65 +418,14 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
         accumulate(eq->refit_m, dim, a, d);
         eq->refit_dd += d*d;
         eq->refit_n++;
-        if (--eq->refit_left == 0) {
-            double atd[LS_MAX];
-            double fit = 0.0;
-
-            static double mff[LS_MAX][LS_MAX + 1];
-            double wff[LS_MAX];
-            bool ff_ok;
-
-            for (int i = 0; i < dim; i++)
-                atd[i] = eq->refit_m[i][dim];
-            /* The feed-forward-only fit is the top-left n x n block of the
-             * same normal equations; take it before solve_normal() destroys
-             * them in place. */
-            for (int i = 0; i < n; i++) {
-                for (int j = i; j < n; j++)
-                    mff[i][j] = eq->refit_m[i][j];
-                mff[i][n] = eq->refit_m[i][dim];
-            }
-            ff_ok = solve_normal(mff, n, wff);
-            if (eq->ff_only) {
-                /* Feedback is off: the feed-forward solution is the solve. */
-                double fitff = 0.0;
-
-                for (int i = 0; i < n; i++)
-                    fitff += wff[i]*atd[i];
-                eq->refit_resid = sqrt(fmax(eq->refit_dd - fitff, 0.0)/eq->refit_n);
-                if (!ff_ok) {
-                    eq->refits_rejected++;
-                } else if (eq->refit_base > 0.0 && eq->refit_resid > 2.0*eq->refit_base) {
-                    eq->refits_rejected++;
-                } else {
-                    if (eq->refit_base == 0.0)
-                        eq->refit_base = eq->refit_resid;
-                    memcpy(eq->taps, wff, (size_t)n*sizeof(double));
-                    memcpy(eq->taps_ff, wff, (size_t)n*sizeof(double));
-                    eq->refits++;
-                }
-            } else if (solve_normal(eq->refit_m, dim, w)) {
-                /* For the least-squares w, |Aw - d|^2 = d'd - w'A'd. */
-                for (int i = 0; i < dim; i++)
-                    fit += w[i]*atd[i];
-                eq->refit_resid = sqrt(fmax(eq->refit_dd - fit, 0.0)/eq->refit_n);
-                if (eq->refit_base > 0.0 && eq->refit_resid > 2.0*eq->refit_base) {
-                    eq->refits_rejected++;
-                } else {
-                    if (eq->refit_base == 0.0)
-                        eq->refit_base = eq->refit_resid;
-                    memcpy(eq->taps, w, (size_t)n*sizeof(double));
-                    memcpy(eq->fb, w + n, (size_t)eq->cfg.nfb*sizeof(double));
-                    if (ff_ok) {
-                        memcpy(eq->taps_ff, wff, (size_t)n*sizeof(double));
-                        eq->have_ff = true;
-                    }
-                    eq->refits++;
-                }
-            }
-        }
+        if (--eq->refit_left == 0)
+            refit_finish(eq);
     }
+    if (eq->ring) {
+        double *slot = eq->ring + (size_t)(eq->k % eq->ring_capacity)*(size_t)n;
 
+        memcpy(slot, u, (size_t)n*sizeof(double));
+    }
     if (eq->k >= eq->cfg.seed_symbols && eq->hold)
         eq->tau += eq->freq;
     else if (eq->k >= eq->cfg.seed_symbols) {
@@ -528,6 +541,43 @@ void v92_p3_eq_integer_timing(v92_p3_eq_t *eq)
         return;
     eq->tau = floor(eq->tau + 0.5);
     eq->freq = 0.0;
+}
+
+void v92_p3_eq_set_ring(v92_p3_eq_t *eq, double *buf, int capacity)
+{
+    if (!eq)
+        return;
+    eq->ring = (buf && capacity > 0) ? buf : NULL;
+    eq->ring_capacity = eq->ring ? capacity : 0;
+}
+
+void v92_p3_eq_set_refit_aided(v92_p3_eq_t *eq, bool aided)
+{
+    if (eq)
+        eq->refit_aided = aided;
+}
+
+bool v92_p3_eq_aided_row(v92_p3_eq_t *eq, int back, double target)
+{
+    const int n = eq ? eq->cfg.ntaps : 0;
+    double a[LS_MAX] = {0};
+    int64_t k;
+
+    if (!eq || !eq->ring || !eq->refit_aided || back < 0 || back >= eq->ring_capacity)
+        return false;
+    k = eq->k - 1 - back;              /* eq->k is the next symbol */
+    if (k < 0 || eq->k - k > eq->ring_capacity)
+        return false;
+    if (eq->refit_left <= 0)
+        return true;
+    memcpy(a, eq->ring + (size_t)(k % eq->ring_capacity)*(size_t)n,
+           (size_t)n*sizeof(double));
+    accumulate(eq->refit_m, n + eq->cfg.nfb, a, target);
+    eq->refit_dd += target*target;
+    eq->refit_n++;
+    if (--eq->refit_left == 0)
+        refit_finish(eq);
+    return true;
 }
 
 int v92_p3_eq_captured(const v92_p3_eq_t *eq)

@@ -552,9 +552,10 @@ int v92_upstream_b1_rx_feed_values(v92_upstream_rx_t *rx,
             if (rx->frame_pos < V92_UPSTREAM_INTERVALS)
                 continue;
             rx->frame_pos = 0;
-            if (decode_frame_with(rx, &rx->wave_rx, rx->frame, bits))
+            if (decode_frame_with(rx, &rx->wave_rx, rx->frame, bits)) {
+                rx->decoded_frames++;
                 deliver_bits(rx, bits, k);
-            else
+            } else
                 rx->rejected_frames++;
             continue;
         }

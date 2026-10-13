@@ -72,6 +72,11 @@ typedef struct {
      * part way through, e.g. B1u after its first frame); cleared by the
      * decode, which leaves the survivor's end state. */
     bool any_initial_state;
+    /* The last decoded frame's symbols as the decoder settled them: the
+     * Viterbi survivor's signed constellation points (before the CPd gain G).
+     * With no precoder or prefilter coefficients, G times these is what was
+     * transmitted. */
+    double decided[V92_UPSTREAM_INTERVALS];
 } v92_upstream_wave_rx_t;
 
 /* V.92 Table 30 and §6.1: rate=(drn+17)*8000/6, hence a twelve-symbol

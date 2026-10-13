@@ -1458,7 +1458,7 @@ static double         g_v92_trn2u_sigma;           /* last pushed to the CPd des
 /* One least-squares refit of the Phase 3/4 equaliser on TRN2u (see
  * v92_p3_eq_refit()); the noise figures above restart when it lands. */
 #define V92_P4_REFIT_SYMBOLS 4000
-#define V92_DATA_REFIT_SYMBOLS 16000  /* data-mode least-squares window */
+#define V92_DATA_REFIT_SYMBOLS 4000   /* data-mode least-squares window, trellis-aided rows: 0.5 s (2 s let the channel drift inside it: 94 vs 43 rejected frames in 10 s) */
 static bool           g_v92_p4_refit_armed = false;
 /* V.92 9.3 sends a retrain between two V.92 modems back through V.92's
  * Phase 2, where INFO1d bit 70 OFFERS PCM upstream.  slmodemd's retrained
@@ -1510,6 +1510,15 @@ static double         g_v92_data_levels[V92_P3_EQ_MAX_LEVELS];
 static double         g_v92_b1u_ref[V92_B1U_TRAIN_SYMBOLS];
 static double         g_v92_b1u_capture[V92_B1U_TRAIN_CAPTURE*(V92_P3_EQ_MAX_TAPS + 1)];
 static bool           g_v92_b1u_train_pending = false;
+/* Data-mode refits from the trellis decoder: each decoded frame's survivor
+ * points (what was transmitted, with no precoder or prefilter coefficients)
+ * become least-squares rows against the equaliser inputs that produced them,
+ * instead of the hard slicer's decisions -- which at 0.05 LU are wrong one
+ * symbol in ten, so a decision-directed solve settles there. */
+#define V92_AIDED_RING 64
+static double         g_v92_aided_ring[V92_AIDED_RING*V92_P3_EQ_MAX_TAPS];
+static bool           g_v92_aided_refits = false;
+static uint64_t       g_v92_aided_frames_seen = 0;
 static int            g_v92_data_nlevels = 0;
 static double         g_v92_data_err2 = 0.0;
 /* Window sums for the 10 s y = g d + c fit over decided levels d. */
@@ -6110,6 +6119,11 @@ static void me_v92_data_slicer_locked(void)
         v92_p3_eq_set_capture(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law],
                               ok ? g_v92_b1u_capture : NULL, V92_B1U_TRAIN_CAPTURE);
     }
+    g_v92_aided_refits = !cpd->coeffs_present;
+    g_v92_aided_frames_seen = 0;
+    v92_p3_eq_set_ring(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law],
+                       g_v92_aided_refits ? g_v92_aided_ring : NULL, V92_AIDED_RING);
+    v92_p3_eq_set_refit_aided(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law], g_v92_aided_refits);
     memcpy(g_v92_data_levels, positive, (size_t)n*sizeof(positive[0]));
     g_v92_data_nlevels = n;
     g_v92_data_err2 = 0.0;
@@ -6154,6 +6168,8 @@ static void me_v92_b1u_train_locked(v92_p3_eq_t *eq, double scale)
         if (v92_upstream_b1_rx_init_equalized(&g_v92_upstream_rx, &cpd,
                                               v92_upstream_live_byte, NULL))
             me_v92_b1u_feed_values_locked(replay, n);
+        /* Those frames' inputs are not in the aided-refit ring. */
+        g_v92_aided_frames_seen = g_v92_upstream_rx.decoded_frames;
     }
     ME_LOG("[ME] V.92 B1u training: found at captured symbol %d (correlation %.4f); "
            "feed-forward taps solved on %d B1u symbols, residual %.4f LU; "
@@ -6471,6 +6487,8 @@ static void cleanup_v34_v90_training_locked(void)
     memset(g_v92_trn2u_lvl_n, 0, sizeof(g_v92_trn2u_lvl_n));
     g_v92_p4_refit_armed = false;
     g_v92_b1u_train_pending = false;
+    g_v92_aided_refits = false;
+    g_v92_aided_frames_seen = 0;
     g_v92_p4_refits_seen = 0;
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
@@ -6613,6 +6631,8 @@ static bool restart_v90_phase2_locked(const char *reason)
     memset(g_v92_trn2u_lvl_n, 0, sizeof(g_v92_trn2u_lvl_n));
     g_v92_p4_refit_armed = false;
     g_v92_b1u_train_pending = false;
+    g_v92_aided_refits = false;
+    g_v92_aided_frames_seen = 0;
     g_v92_p4_refits_seen = 0;
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
@@ -10750,6 +10770,8 @@ static void v92_call_state_reset_locked(void)
     memset(g_v92_trn2u_lvl_n, 0, sizeof(g_v92_trn2u_lvl_n));
     g_v92_p4_refit_armed = false;
     g_v92_b1u_train_pending = false;
+    g_v92_aided_refits = false;
+    g_v92_aided_frames_seen = 0;
     g_v92_p4_refits_seen = 0;
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
@@ -16908,7 +16930,25 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
 
                     for (int k = 0; k < n; k++)
                         dec[k] = values[k]/g_v92_trn2u_lu*scale;
-                    me_v92_b1u_feed_values_locked(dec, n);
+                    for (int k = 0; k < n; k++) {
+                        me_v92_b1u_feed_values_locked(&dec[k], 1);
+                        if (g_v92_aided_refits && g_v92_upstream_rx.locked
+                            && g_v92_upstream_rx.decoded_frames != g_v92_aided_frames_seen) {
+                            /* A frame ended with this value; its symbol i is
+                             * (n - 1 - k) + (11 - i) before the equaliser's
+                             * latest output. */
+                            g_v92_aided_frames_seen = g_v92_upstream_rx.decoded_frames;
+                            /* decided[] are constellation points; the
+                             * equaliser's unit is G x point, as for the
+                             * slicer levels. */
+                            double g = (double)g_v92_upstream_rx.cpd.gain_q0_16/(4.0*65536.0);
+
+                            for (int i = 0; i < V92_UPSTREAM_INTERVALS; i++)
+                                (void)v92_p3_eq_aided_row(eq,
+                                    (n - 1 - k) + (V92_UPSTREAM_INTERVALS - 1 - i),
+                                    g_v92_upstream_rx.wave_rx.decided[i]*g/scale);
+                        }
+                    }
                     if (g_v92_b1u_train_pending
                         && v92_p3_eq_captured(eq) >= V92_B1U_TRAIN_CAPTURE)
                         me_v92_b1u_train_locked(eq, scale);

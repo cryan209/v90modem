@@ -90,6 +90,9 @@ typedef struct {
                                                survived */
     int best_first_ones;                    /* most ones any frame-0 trial
                                                decoded (of K) */
+    /* After lock: frames decoded, and the last one's symbols as decoded
+     * (wave_rx.decided), for data-aided equaliser refits. */
+    uint64_t decoded_frames;
 } v92_upstream_rx_t;
 
 bool v92_upstream_b1_rx_init(v92_upstream_rx_t *rx,

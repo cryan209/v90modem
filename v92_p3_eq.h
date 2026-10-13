@@ -177,6 +177,12 @@ typedef struct {
     double *cap;
     int cap_capacity;              /* symbols */
     int cap_count;
+
+    /* Data-aided refits (v92_p3_eq_set_ring(), v92_p3_eq_aided_row()): the
+     * input windows of the last ring_capacity symbols, by symbol index. */
+    double *ring;
+    int ring_capacity;
+    bool refit_aided;              /* refit rows come only from aided_row() */
 } v92_p3_eq_t;
 
 void v92_p3_eq_default_config(v92_p3_eq_config_t *cfg);
@@ -221,6 +227,17 @@ void v92_p3_eq_set_capture(v92_p3_eq_t *eq, double *buf, int capacity);
  * while the 16-tap interpolator at a fractional offset cannot reproduce a
  * signal with energy near Nyquist.  Leaves the taps alone. */
 void v92_p3_eq_integer_timing(v92_p3_eq_t *eq);
+
+/* Data-aided refits: keep the input windows of the last `capacity` symbols
+ * in buf (capacity*ntaps doubles); with refit_aided set, v92_p3_eq_refit()
+ * windows are filled only by v92_p3_eq_aided_row(), which adds the symbol
+ * `back` before the latest (0 = latest) with a known transmitted value --
+ * e.g. the trellis decoder's survivor, re-mapped to output units -- in place
+ * of the hard slicer's decision.  aided_row returns false if that symbol is
+ * no longer in the ring. */
+void v92_p3_eq_set_ring(v92_p3_eq_t *eq, double *buf, int capacity);
+void v92_p3_eq_set_refit_aided(v92_p3_eq_t *eq, bool aided);
+bool v92_p3_eq_aided_row(v92_p3_eq_t *eq, int back, double target);
 int v92_p3_eq_captured(const v92_p3_eq_t *eq);
 
 /* Find ref (nref symbols, output units) in the captured outputs by
