@@ -1185,6 +1185,20 @@ static void conditionally_send_v92(v8_state_t *s)
                      "V.92 QCA suppressed: no peer QC received; continuing normal V.8\n");
             return;
         }
+        /* 9.2.4.1 again, when a QC1a did arrive: QCA1d commits the answerer to
+           "silence for 75 ± 5 ms and then QTS, QTS\ and ANSpcm", and 9.2.1.1
+           has the caller stop CM and wait for exactly that.  With Quick
+           Connect off (+PQC=3) none of it follows, so QCA here is a promise
+           the answerer breaks: slmodemd took it as "Got Good QCA1d", ran its
+           QC line verification against nothing and carried its quick connect
+           flag into the first V.92 Phase 3, where it never detected our Jd. */
+        if ((s->parms.v92 & 0x02)  &&  !s->parms.v92_quick_connect)
+        {
+            span_log(&s->logging,
+                     SPAN_LOG_FLOW,
+                     "V.92 QCA suppressed: Quick Connect disabled; answering QC1a with normal V.8\n");
+            return;
+        }
         /* Send 2 V.92 packets */
         for (i = 0;  i < 2;  i++)
         {

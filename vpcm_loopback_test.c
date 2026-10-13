@@ -9742,8 +9742,10 @@ static bool test_v8_v92_qc_exchange_over_analog_g711(v91_law_t law)
                 answer_result.result.jm_cm.pcm_modem_availability);
         return false;
     }
-    if (caller_result.result.v92 != answer_v92 || answer_result.result.v92 != caller_v92) {
-        fprintf(stderr, "V.8 V.92 QC exchange control byte mismatch caller_rx=0x%X answer_rx=0x%X expected caller=0x%X answer=0x%X\n",
+    /* The answerer hears the QC byte, but with Quick Connect off it must not
+       answer QCA: V.92 9.2.4.1 ties QCA1d to the QTS/ANSpcm that follows it. */
+    if (caller_result.result.v92 >= 0 || answer_result.result.v92 != caller_v92) {
+        fprintf(stderr, "V.8 V.92 QC exchange control byte mismatch caller_rx=0x%X answer_rx=0x%X expected caller=none (QCA %#x suppressed) answer=0x%X\n",
                 caller_result.result.v92,
                 answer_result.result.v92,
                 answer_v92,
@@ -9751,9 +9753,8 @@ static bool test_v8_v92_qc_exchange_over_analog_g711(v91_law_t law)
         return false;
     }
 
-    vpcm_log("PASS: V.8 V.92 QC/QCA exchange over analog-over-G.711 (%s), caller_rx=0x%02X answer_rx=0x%02X",
+    vpcm_log("PASS: V.8 V.92 QC received, QCA withheld with Quick Connect off, over analog-over-G.711 (%s), answer_rx=0x%02X",
              vpcm_law_to_str(law),
-             caller_result.result.v92,
              answer_result.result.v92);
     return true;
 }

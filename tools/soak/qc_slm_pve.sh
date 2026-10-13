@@ -8,6 +8,9 @@
 # (before its internal RcFixed resampler) + the repo's rig/d-modem/d-modem.c with the sinc
 # resampler, like the tower; SLM_BUILD=stock is /root/D-Modem (RcFixed, --sip-* flags), which
 # cannot hold a V.90 downstream (rig/README.md).
+# SLM_BIN=slmodemd_map (rig build only) is the same slmodemd linked with the V92EchoCanceller
+# bypass hook (rig/slmodemd/README.md); both carry the env-gated PCM-upstream patch, so a V.92
+# call is SLM_BIN=slmodemd_map SLM_ENV='SLM_V92_PCM_UPSTREAM=1 DM_V92EC_BYPASS=1'.
 #
 #   ORIG=slm|ours PQC=0|1|2|3 MS=<slm +MS> HOLD=<s> OURS_ENV="ME_V90_ROLE=analogue" \
 #   OURS_INIT="AT+PIG=0" qc_slm_pve.sh <name>
@@ -51,7 +54,7 @@ if [ "${SLM_BUILD:-rig}" = rig ]; then
     # with the repo's rig/d-modem/d-modem.c): sinc resampler in d-modem, SIP_LOGIN env.
     sx "cd /root/D-Modem-rig; rm -f /tmp/slm.log; \
         ( env SLMODEMD_V8_OPEN_STUB=0 DM_RESAMPLER=sinc DM_RS_HEADROOM=0.25 DM_SLM_FRAME_TRAILER=4 SIP_FORCE_PCMU=1 $SLM_ENV \
-          SIP_LOGIN=$SLM_ACCT:$SLM_ACCT@asterisk.net.cryan.nz nohup ./slmodemd/slmodemd -d9 -e /root/D-Modem-rig/d-modem \
+          SIP_LOGIN=$SLM_ACCT:$SLM_ACCT@asterisk.net.cryan.nz nohup ./slmodemd/${SLM_BIN:-slmodemd} -d9 -e /root/D-Modem-rig/d-modem \
           > /tmp/slm.log 2>&1 & ); sleep 8; chmod 666 \$(readlink -f /dev/ttySL0)"
 else
     sx "cd /root/D-Modem; rm -f /tmp/slm.log; \

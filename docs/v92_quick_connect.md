@@ -268,3 +268,59 @@ handling, does no harm to the rest of the call, and is the same through data mod
 Not exercised against slmodemd: short Phase 2 (slm never requests it), the V.92 ODP/ADP bypass
 (slm falls to V.90), the analogue-caller and digital-caller QC roles (slm is analogue-only and
 only ever calls QC1a).
+
+### Correction: `+PQC=3` was answering QC1a with QCA1d (2026-10-13, evening)
+
+Every `+MS=92` call above logs `V8: QCA1d: Got Good QCA1d` at slmodemd, `+PQC=3` included
+(and so does the 2026-10-11 build, `9c818516`). As the digital answerer our V.8 octet is
+`0x47` (QCA bit set), and `conditionally_send_v92()` sent it whenever the peer had sent QC1a,
+whatever `+PQC` said. That is a QCA1d with no QTS/ANSpcm behind it: 9.2.4.1 ties QCA1d to
+"silence for 75 +- 5 ms and then QTS, QTS\ and ANSpcm", and 9.2.1.1 has the caller stop CM
+and wait for them. slmodemd accepted it, ran its QC line verification against nothing and
+set its quick-connect flag. So the `+PQC=3` row in the tables above did NOT run "ordinary
+V.8". v8.c now withholds QCA when Quick Connect is off (regression:
+`test_v8_v92_qc_exchange_over_analog_g711`); live, slmodemd logs
+`quick connect indication from phase1 = 0`.
+
+Consequence for V.92 against slmodemd: its DSP enables V.92 only for a Quick Connect session
+(`initial Session Type = 2`, `localV92- 1`); without QC it starts Session Type 1, reports
+`V92 capabilities: local=0` and selects V.90. Every V.92 PCM-upstream result against
+slmodemd so far (the tower's 2026-10-11 data calls included) got V.92 through the unsolicited
+QCA1d. The conformant route is real Quick Connect (`+PQC=0/1`).
+
+### V.92 PCM upstream on the Proxmox rig: deterministic three-attempt failure
+
+`slmodemd_map` (PCM-upstream patch + V92EchoCanceller bypass, `rig/slmodemd/README.md`),
+`SLM_V92_PCM_UPSTREAM=1 DM_V92EC_BYPASS=1`, ours `ME_V92_PCM_UPSTREAM=1 AT+PIG=0`,
+`AT+MS=92,0,300,56000`. Identical with the unsolicited QCA (`+PQC=3`, before the fix) and with
+genuine Quick Connect (`+PQC=1`, after it); slmodemd's log is byte-for-byte the same size
+call to call:
+
+1. Startup V.92 Phase 3: slmodemd enters `waitForJd` ~0.16 s after our Jd starts and never
+   logs `Jd Detected`; retrains after 3.1 s.
+2. Retrain 1: `Jd Detected` 0.4 s after `waitForJd`; Phase 4 rejected,
+   `ph4MeanErrorEnergyBeforeToAfterUpdateRatio` +2.531 (+2.228 with real QC).
+3. Retrain 2: we withdraw the PCM offer, V.90-form data at 54667/31200; slmodemd's data EE
+   climbs 20 -> 60 within 0.8 s and it drops to V.34 (`drop to V34 requested`, call ends).
+   In plain V.90 calls the same first-data climb happens, and they survive it only because
+   slmodemd still has a retrain left.
+
+Ruled out, each by a run:
+- Our Jd: CRC-valid, matches Table 21 (bits 41:46 zero, bit 47 = 0), and identical in the
+  missed and the detected attempt.
+- The path: `tools/analyze_dmodem_pcm_path.py` puts every Sd at slmodemd's DSP with
+  correlation 1.000 and a constant 45 ms delay.
+- TRN1d length: 12000, 16008, 24000 and 30000T all miss in attempt 1.
+- Our build: `9c818516` (2026-10-11) behaves identically, so this is not a regression.
+- slmodemd's startup choice of 2400 baud: dropping INFO1d rows (2743/2800 were offered at
+  startup only, because `v34_restart` clears the far INFO0a baud capabilities) did not move
+  it; slmodemd's choice comes from its own probe analysis. `SLM_CODECTYPE=4` (AonCyberLabs'
+  value; this fork says AD1803 = 12) makes it pick 3200, but attempt 1 still misses Jd.
+- The DSP blob: `dsplibs.o` here is AonCyberLabs' (`e64b4a7`).
+- `trn1Sigma` (which differs between the attempts) is a double printed with `%d`
+  (`fstpl` at `.text` 0x4342d), so it is noise in the log line, not an overflow.
+
+Open: why slmodemd's FIRST V.92 Phase 3 misses an intact Jd. The wrapper differences still
+untested as a pair are `IODELAY` and `CODECTYPE` together beyond the one `aon1` call, and the
+`V90Phase3Demodulator` state machine (`getV90Decision`, `.text` 0x23830) has `Wait For Jd` /
+`Wait For V92Jd` states whose log lines are below `-d9`.

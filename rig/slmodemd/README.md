@@ -62,6 +62,32 @@ docker exec d-modem sh -c "cd /src/slmodemd && cp modem.c.bak-prev92up modem.c &
 # or just restore the binary: cp slmodemd.bak-prev92up slmodemd
 ```
 
+## Proxmox rig build (CT 100, `/root/D-Modem-rig`, 2026-10-13)
+
+`v92-pcm-upstream.patch` applies there from the tree root (`patch -p1`). This DSP blob has
+no `V90Demapper::resetNoSpectral`, so `v92_demapper_ec_wrap.c` does not link; the EC-only cut
+`v92_ec_bypass_wrap.c` does:
+
+```sh
+objcopy --add-symbol _ZN16V92EchoCanceller7processEPfS0_j_original=.text:0x11870,global,function \
+  dsplibs.o dsplibs_ec.o
+gcc -m32 -O2 -c v92_ec_bypass_wrap.c -o ec_bypass_wrap.o
+gcc -m32 -Wl,--allow-multiple-definition -o slmodemd_map modem_main.o modem_cmdline.o modem.o \
+  modem_datafile.o modem_at.o modem_timer.o modem_pack.o modem_ec.o modem_comp.o modem_param.o \
+  modem_debug.o homolog_data.o dp_sinus.o dp_dummy.o ec_bypass_wrap.o dsplibs_ec.o sysdep_common.o
+```
+
+`tools/soak/qc_slm_pve.sh` takes `SLM_BIN=slmodemd_map`.
+
+`socket-ioctl-overrides.patch` (env-gated, default unchanged): `SLM_CODECTYPE` and
+`SLM_IODELAY` override what this fork's socket driver reports to the DSP. AonCyberLabs'
+slmodemd (the tower's) returns codec 4 (STLC7550) and I/O delay 0; this fork returns
+`CODEC_AD1803` (12) and 192. The codec type changes slmodemd's startup upstream symbol rate
+(2400 -> 3200).
+
+Note on V.92: this DSP enables V.92 only in a Quick Connect session (Session Type 2); see
+`docs/v92_quick_connect.md`.
+
 ## TRN2d reference capture (`tools/smartlink_trn2d_reference_wrap.c`)
 
 Settles which of sign / level / timing the peer's Phase-4 Error Energy plateau
