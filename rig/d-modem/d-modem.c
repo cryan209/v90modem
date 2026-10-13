@@ -570,10 +570,11 @@ static pj_status_t dmodem_put_frame(pjmedia_port *this_port, pjmedia_frame *fram
  * DM_UP_RESAMPLER=sinc decimates with a 65-tap Hann-windowed sinc at 4 kHz
  * instead: 192 in, 160 out per frame as before, plus a constant 32-sample
  * (3.3 ms) delay. */
-#define UP_HALF 32
-#define UP_HIST (2*UP_HALF + 2)
+#define UP_HALF_MAX 32
+#define UP_HIST (2*UP_HALF_MAX + 2)
 static int up_sinc = -1;
-static double up_coef[5][2*UP_HALF + 1];
+static int UP_HALF = UP_HALF_MAX;   /* DM_UP_SINC_HALF: 4..32 (delay UP_HALF + 1) */
+static double up_coef[5][2*UP_HALF_MAX + 1];
 static pj_int16_t up_hist[UP_HIST];
 
 static void up_sinc_init(void)
@@ -583,6 +584,8 @@ static void up_sinc_init(void)
 	up_sinc = (e && strcmp(e, "sinc") == 0);
 	if (!up_sinc)
 		return;
+	if ((e = getenv("DM_UP_SINC_HALF")) && atoi(e) >= 4 && atoi(e) <= UP_HALF_MAX)
+		UP_HALF = atoi(e);
 	for (int ph = 0; ph < 5; ph++) {
 		double frac = ph / 5.0, sum = 0.0;
 
@@ -598,7 +601,7 @@ static void up_sinc_init(void)
 		for (int j = 0; j <= 2*UP_HALF; j++)
 			up_coef[ph][j] /= sum;       /* unity DC gain on every phase */
 	}
-	printf("upstream 9600->8000: windowed-sinc decimator (DM_UP_RESAMPLER=sinc)\n");
+	printf("upstream 9600->8000: windowed-sinc decimator, half-length %d (DM_UP_RESAMPLER=sinc)\n", UP_HALF);
 }
 static pj_status_t dmodem_get_frame(pjmedia_port *this_port, pjmedia_frame *frame) {
 	struct dmodem *sm = (struct dmodem *)this_port;
@@ -678,6 +681,26 @@ static pj_status_t dmodem_get_frame(pjmedia_port *this_port, pjmedia_frame *fram
 		int a = raw[i];
 		int b = (i + 1 < in_n) ? raw[i + 1] : raw[i];
 		out[k] = (pj_int16_t)((a * (5 - frac) + b * frac) / 5);
+	}
+	{
+		/* DM_UP_DELAY=<samples>: a pure delay on the 8 kHz upstream, to
+		 * separate a decimator's delay from its response in A/B tests. */
+		static int up_delay = -1;
+		static pj_int16_t dl[4096];
+		static int dl_pos;
+
+		if (up_delay < 0) {
+			const char *e = getenv("DM_UP_DELAY");
+			up_delay = e ? atoi(e) : 0;
+			if (up_delay < 0 || up_delay > 4000) up_delay = 0;
+		}
+		for (k = 0; up_delay && k < out_n; k++) {
+			pj_int16_t v = out[k];
+
+			out[k] = dl[(dl_pos + 4096 - up_delay) & 4095];
+			dl[dl_pos] = v;
+			dl_pos = (dl_pos + 1) & 4095;
+		}
 	}
 	len = out_n * 2;
 

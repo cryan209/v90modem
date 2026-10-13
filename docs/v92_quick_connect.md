@@ -494,3 +494,28 @@ Same settings as `lapm1` (+PQC=1, `\N3` both ends, `slmodemd_map` with `SLM_FREE
 Every call takes exactly one retrain, identically: slmodemd's first Phase 4 check reads
 `ph4MeanErrorEnergyBeforeToAfterUpdateRatio` +2.504 and retrains; the second reads +2.310 and
 passes into data. That ~15 s first-attempt retrain is the remaining startup cost.
+
+### The first-attempt Phase 4 retrain (2026-10-14)
+
+`rig/slmodemd/phase4_eval_hook.c` logs every `V90ConnectionEvaluator::evaluatePhase4(ratio)`
+call (`slmodemd_eval`). The decision path (`.text` 0x3fad0): while the evaluator's flag at
++0xb0 is set, a `ph4MeanErrorEnergyBeforeToAfterUpdateRatio` above **`V90Parameters`+0x438 =
+1.500** initiates a retrain ("due to meanErrBefToAftUpdateRatio"), at most +0x45c = 2 times. The
+retrain clears the flag, so **the ratio is checked once per call**: attempt 2 (2.31) is not
+judged at all. Both attempts are above the threshold; slmodemd simply stops looking.
+
+The ratio follows the rig's upstream path, deterministically per configuration:
+
+| upstream 9600 -> 8000 in d-modem | added delay | first-attempt ratio | retrain |
+|---|---|---|---|
+| linear interpolation | 0 | 1.172 | no (`eval_lin`; the upstream data then fails, sigma ~190) |
+| sinc, half-length 8 (`DM_UP_SINC_HALF=8`) | ~9 | 1.697 | yes (`h8`) |
+| linear + 33-sample delay (`DM_UP_DELAY=33`) | 33 | 1.939 | yes |
+| sinc, half-length 32 (default) | 33 | 2.505 | yes |
+
+Our TRN2d length barely matters (2040T 2.481, 3996T 2.505, 8004T 2.668), and our Phase 4
+timeline (CPt, Ri, 24T barred Ri, TRN2d) is the same in every row, so the effect is not in what
+we transmit. Open: how slmodemd's upstream path (both its delay and its frequency response)
+reaches its downstream equaliser's before/after-update error -- the next step is a hook on
+`V90Equalizer::calcMeanErrorStatistics` to see which windows the two energies (+0x84, +0x13c)
+cover. Workable now: accept the one retrain (~15 s), or the linear path for startup-only tests.
