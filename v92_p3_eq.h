@@ -170,6 +170,13 @@ typedef struct {
     bool have_ff;
     bool ff_only;                  /* feedback off: taps_ff in use, refits
                                       solve feed-forward only */
+
+    /* Data-aided capture (v92_p3_eq_set_capture()): per symbol, the
+     * feed-forward input window then the output, (ntaps + 1) doubles, in an
+     * engine-owned buffer. */
+    double *cap;
+    int cap_capacity;              /* symbols */
+    int cap_count;
 } v92_p3_eq_t;
 
 void v92_p3_eq_default_config(v92_p3_eq_config_t *cfg);
@@ -201,6 +208,34 @@ void v92_p3_eq_hold(v92_p3_eq_t *eq, bool hold);
  * decisions.  Returns false (and changes nothing) if no such solution
  * exists. */
 bool v92_p3_eq_use_ff(v92_p3_eq_t *eq);
+
+/* Data-aided training on a known sequence (V.92 8.7.1 B1u, which starts from
+ * zero scrambler, encoder, precoder and prefilter memories and so is fixed by
+ * the CPd alone).  From now on keep each symbol's input window and output in
+ * buf, which holds capacity*(ntaps + 1) doubles; NULL stops. */
+void v92_p3_eq_set_capture(v92_p3_eq_t *eq, double *buf, int capacity);
+
+/* Sample at whole input samples from now on: round the timing offset and stop
+ * the learned frequency, so the interpolator returns the input itself.  A
+ * T-spaced least-squares solve takes any fixed fractional delay into its taps,
+ * while the 16-tap interpolator at a fractional offset cannot reproduce a
+ * signal with energy near Nyquist.  Leaves the taps alone. */
+void v92_p3_eq_integer_timing(v92_p3_eq_t *eq);
+int v92_p3_eq_captured(const v92_p3_eq_t *eq);
+
+/* Find ref (nref symbols, output units) in the captured outputs by
+ * correlation, then solve the feed-forward taps by least squares against it
+ * over ref[skip..nref) and switch to them (feedback off, as
+ * v92_p3_eq_use_ff()).  Returns the solve's rms residual, or a negative value
+ * if the reference was not found (*corr below min_corr) or the solve failed;
+ * *at is ref[0]'s index in the capture. */
+double v92_p3_eq_train_on_reference(v92_p3_eq_t *eq, const double *ref, int nref,
+                                    int skip, double min_corr,
+                                    int *at, double *corr);
+
+/* Re-equalise captured symbols [from, cap_count) with the current taps into
+ * out (at most max); returns the number written. */
+int v92_p3_eq_replay_capture(const v92_p3_eq_t *eq, int from, double *out, int max);
 /* Decision-directed on 4-point PAM from here on (Phase 4): decisions,
  * decision feedback, tap and timing adaptation all use the 4-level slicer.
  * Two-level decisions on a four-level signal corrupt every feedback term. */

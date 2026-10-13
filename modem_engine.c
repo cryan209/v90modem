@@ -1499,6 +1499,17 @@ static bool           g_v92_upstream_slicer_set = false;
  * output lands on them once data arrives: the same figure the offline
  * chain test reports, so a live call and the model can be compared. */
 static double         g_v92_data_levels[V92_P3_EQ_MAX_LEVELS];
+/* B1u data-aided training (V.92 8.7.1): B1u starts from zero scrambler,
+ * encoder, precoder and prefilter memories, so the CPd alone fixes all 576
+ * symbols.  From the data slicer on, the equaliser keeps each symbol's input
+ * window; once V92_B1U_TRAIN_CAPTURE symbols are in, B1u is found in them by
+ * correlation, the feed-forward taps are solved against it, and the captured
+ * symbols are re-equalised and fed to a restarted B1u receiver. */
+#define V92_B1U_TRAIN_SYMBOLS (48*V92_UPSTREAM_INTERVALS)
+#define V92_B1U_TRAIN_CAPTURE 1400
+static double         g_v92_b1u_ref[V92_B1U_TRAIN_SYMBOLS];
+static double         g_v92_b1u_capture[V92_B1U_TRAIN_CAPTURE*(V92_P3_EQ_MAX_TAPS + 1)];
+static bool           g_v92_b1u_train_pending = false;
 static int            g_v92_data_nlevels = 0;
 static double         g_v92_data_err2 = 0.0;
 /* Window sums for the 10 s y = g d + c fit over decided levels d. */
@@ -6076,6 +6087,29 @@ static void me_v92_data_slicer_locked(void)
      * accepted. */
     if (v92_p3_eq_use_ff(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law]))
         ME_LOG("[ME] V.92 data slicer: feed-forward-only taps from the TRN2u solve, decision feedback off\n");
+    {
+        v92_upstream_wave_tx_t tx;
+        uint8_t ones[V92_UPSTREAM_MAX_FRAME_BITS];
+        int k = v92_upstream_bits_per_frame(cpd->selected_upstream_drn);
+        bool ok = k > 0 && k <= V92_UPSTREAM_MAX_FRAME_BITS;
+
+        memset(ones, 1, sizeof(ones));
+        v92_upstream_wave_tx_init(&tx);
+        for (int f = 0; ok && f < 48; f++)
+            ok = v92_upstream_wave_encode_frame(&tx, cpd, ones, k,
+                                                g_v92_b1u_ref + f*V92_UPSTREAM_INTERVALS);
+        /* Encoder units are G x point; the equaliser's are the levels above. */
+        for (int i = 0; ok && i < V92_B1U_TRAIN_SYMBOLS; i++)
+            g_v92_b1u_ref[i] *= unit/lu;
+        g_v92_b1u_train_pending = ok;
+        /* The B1u solve is T-spaced on whole samples; the interpolator at
+         * the TRN2u-learned fractional offset left 0.12 LU against B1u that
+         * no taps could remove (0.036 on whole samples). */
+        if (ok)
+            v92_p3_eq_integer_timing(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law]);
+        v92_p3_eq_set_capture(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law],
+                              ok ? g_v92_b1u_capture : NULL, V92_B1U_TRAIN_CAPTURE);
+    }
     memcpy(g_v92_data_levels, positive, (size_t)n*sizeof(positive[0]));
     g_v92_data_nlevels = n;
     g_v92_data_err2 = 0.0;
@@ -6088,6 +6122,45 @@ static void me_v92_data_slicer_locked(void)
 }
 
 static void enter_v90_data_locked(void);
+static void me_v92_b1u_feed_values_locked(const double *values, int n);
+
+static void me_v92_b1u_train_locked(v92_p3_eq_t *eq, double scale)
+{
+    static double replay[V92_B1U_TRAIN_CAPTURE];
+    int at = -1, n;
+    double corr = 0.0;
+    /* Skip B1u's first frames: the taps' span reaches back into E2u. */
+    double resid = v92_p3_eq_train_on_reference(eq, g_v92_b1u_ref,
+                                                V92_B1U_TRAIN_SYMBOLS,
+                                                2*V92_UPSTREAM_INTERVALS, 0.5,
+                                                &at, &corr);
+
+    g_v92_b1u_train_pending = false;
+    if (resid < 0.0) {
+        v92_p3_eq_set_capture(eq, NULL, 0);
+        ME_LOG("[ME] V.92 B1u training: reference not found (best correlation %.3f at %d)\n",
+               corr, at);
+        return;
+    }
+    n = v92_p3_eq_replay_capture(eq, 0, replay, V92_B1U_TRAIN_CAPTURE);
+    v92_p3_eq_set_capture(eq, NULL, 0);
+    for (int i = 0; i < n; i++)
+        replay[i] *= scale;
+    /* Restart the B1u search on the re-equalised capture: everything it was
+     * fed so far went through the TRN2u taps. */
+    {
+        v92_cpd_frame_t cpd = g_v92_upstream_rx.cpd;   /* init clears rx */
+
+        if (v92_upstream_b1_rx_init_equalized(&g_v92_upstream_rx, &cpd,
+                                              v92_upstream_live_byte, NULL))
+            me_v92_b1u_feed_values_locked(replay, n);
+    }
+    ME_LOG("[ME] V.92 B1u training: found at captured symbol %d (correlation %.4f); "
+           "feed-forward taps solved on %d B1u symbols, residual %.4f LU; "
+           "%d symbols re-equalised, B1u %s\n",
+           at, corr, V92_B1U_TRAIN_SYMBOLS - 2*V92_UPSTREAM_INTERVALS, resid, n,
+           g_v92_upstream_rx.locked ? "locked" : "not yet locked");
+}
 
 static void me_v92_b1u_locked_locked(void)
 {
@@ -6397,6 +6470,7 @@ static void cleanup_v34_v90_training_locked(void)
     memset(g_v92_trn2u_lvl_sum2, 0, sizeof(g_v92_trn2u_lvl_sum2));
     memset(g_v92_trn2u_lvl_n, 0, sizeof(g_v92_trn2u_lvl_n));
     g_v92_p4_refit_armed = false;
+    g_v92_b1u_train_pending = false;
     g_v92_p4_refits_seen = 0;
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
@@ -6538,6 +6612,7 @@ static bool restart_v90_phase2_locked(const char *reason)
     memset(g_v92_trn2u_lvl_sum2, 0, sizeof(g_v92_trn2u_lvl_sum2));
     memset(g_v92_trn2u_lvl_n, 0, sizeof(g_v92_trn2u_lvl_n));
     g_v92_p4_refit_armed = false;
+    g_v92_b1u_train_pending = false;
     g_v92_p4_refits_seen = 0;
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
@@ -10674,6 +10749,7 @@ static void v92_call_state_reset_locked(void)
     memset(g_v92_trn2u_lvl_sum2, 0, sizeof(g_v92_trn2u_lvl_sum2));
     memset(g_v92_trn2u_lvl_n, 0, sizeof(g_v92_trn2u_lvl_n));
     g_v92_p4_refit_armed = false;
+    g_v92_b1u_train_pending = false;
     g_v92_p4_refits_seen = 0;
     g_v92_upstream_rx_active = false;
     g_v92_upstream_lock_logged = false;
@@ -16833,6 +16909,9 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                     for (int k = 0; k < n; k++)
                         dec[k] = values[k]/g_v92_trn2u_lu*scale;
                     me_v92_b1u_feed_values_locked(dec, n);
+                    if (g_v92_b1u_train_pending
+                        && v92_p3_eq_captured(eq) >= V92_B1U_TRAIN_CAPTURE)
+                        me_v92_b1u_train_locked(eq, scale);
                 }
                 if (n > 0 && trn2u_phase)
                     (void)v92_trn2u_demod_feed_values(&g_v92_trn2u_demod,

@@ -5,6 +5,8 @@
 #include "v92_p3_eq.h"
 
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define HMASK (V92_P3_EQ_HISTORY - 1)
@@ -333,6 +335,13 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
     } else
         d = y >= 0.0 ? 1 : -1;
     record(eq, y, (int)(d >= 0.0 ? 1 : -1), ref);
+    if (eq->cap && eq->cap_count < eq->cap_capacity) {
+        double *row = eq->cap + (size_t)eq->cap_count*(size_t)(n + 1);
+
+        memcpy(row, u, (size_t)n*sizeof(double));
+        row[n] = y;
+        eq->cap_count++;
+    }
     if (eq->refit_left > 0) {
         const int dim = n + eq->cfg.nfb;
         double a[LS_MAX];
@@ -502,6 +511,107 @@ double v92_p3_eq_refit_residual(const v92_p3_eq_t *eq)
 void v92_p3_eq_hold(v92_p3_eq_t *eq, bool hold)
 {
     eq->hold = hold;
+}
+
+void v92_p3_eq_set_capture(v92_p3_eq_t *eq, double *buf, int capacity)
+{
+    if (!eq)
+        return;
+    eq->cap = (buf && capacity > 0) ? buf : NULL;
+    eq->cap_capacity = eq->cap ? capacity : 0;
+    eq->cap_count = 0;
+}
+
+void v92_p3_eq_integer_timing(v92_p3_eq_t *eq)
+{
+    if (!eq)
+        return;
+    eq->tau = floor(eq->tau + 0.5);
+    eq->freq = 0.0;
+}
+
+int v92_p3_eq_captured(const v92_p3_eq_t *eq)
+{
+    return eq ? eq->cap_count : 0;
+}
+
+double v92_p3_eq_train_on_reference(v92_p3_eq_t *eq, const double *ref, int nref,
+                                    int skip, double min_corr,
+                                    int *at, double *corr)
+{
+    static double m[LS_MAX][LS_MAX + 1];
+    double w[LS_MAX];
+    const int n = eq ? eq->cfg.ntaps : 0;
+    const int stride = n + 1;
+    double rr = 0.0, best = -2.0, fit = 0.0, dd = 0.0;
+    int best_at = -1;
+
+    if (at) *at = -1;
+    if (corr) *corr = 0.0;
+    if (!eq || !eq->cap || !ref || nref <= skip + n || eq->cap_count < nref)
+        return -1.0;
+    for (int j = 0; j < nref; j++)
+        rr += ref[j]*ref[j];
+    for (int lag = 0; lag + nref <= eq->cap_count; lag++) {
+        double xy = 0.0, yy = 0.0;
+
+        for (int j = 0; j < nref; j++) {
+            double y = eq->cap[(size_t)(lag + j)*(size_t)stride + (size_t)n];
+
+            xy += y*ref[j];
+            yy += y*y;
+        }
+        if (yy > 0.0 && xy/sqrt(yy*rr) > best) {
+            best = xy/sqrt(yy*rr);
+            best_at = lag;
+        }
+    }
+    if (at) *at = best_at;
+    if (corr) *corr = best;
+    if (best_at < 0 || best < min_corr)
+        return -1.0;
+    memset(m, 0, sizeof(m));
+    for (int j = skip; j < nref; j++) {
+        const double *u = eq->cap + (size_t)(best_at + j)*(size_t)stride;
+
+        accumulate(m, n, u, ref[j]);
+        dd += ref[j]*ref[j];
+    }
+    {
+        double atd[LS_MAX];
+
+        for (int i = 0; i < n; i++)
+            atd[i] = m[i][n];
+        if (!solve_normal(m, n, w))
+            return -1.0;
+        for (int i = 0; i < n; i++)
+            fit += w[i]*atd[i];
+    }
+    memcpy(eq->taps, w, (size_t)n*sizeof(double));
+    memcpy(eq->taps_ff, w, (size_t)n*sizeof(double));
+    memset(eq->fb, 0, sizeof(eq->fb));
+    eq->have_ff = true;
+    eq->ff_only = true;
+    eq->refit_base = 0.0;
+    return sqrt(fmax(dd - fit, 0.0)/(nref - skip));
+}
+
+int v92_p3_eq_replay_capture(const v92_p3_eq_t *eq, int from, double *out, int max)
+{
+    const int n = eq ? eq->cfg.ntaps : 0;
+    int w = 0;
+
+    if (!eq || !eq->cap || !out || from < 0)
+        return 0;
+    for (int i = from; i < eq->cap_count && w < max; i++) {
+        const double *u = eq->cap + (size_t)i*(size_t)(n + 1);
+        double y = 0.0;
+
+        for (int j = 0; j < n; j++)
+            y += eq->taps[j]*u[j];
+        out[w++] = y;
+    }
+    return w;
 }
 
 bool v92_p3_eq_use_ff(v92_p3_eq_t *eq)
