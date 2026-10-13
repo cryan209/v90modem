@@ -308,6 +308,9 @@ static void v8_result_handler(void *user_data, v8_parms_t *result);
 static bool me_quick_connect_enabled(void);
 static bool me_short_phase2_enabled(void);
 static bool me_qc_offer_lapm(void);
+static bool me_qc2_event_locked(const v8bis_modem_event_t *e);
+static bool me_qc2_tick_locked(void);
+static void qc2_reset_locked(void);
 
 /* ------------------------------------------------------------------ */
 /* Phase trace helpers                                                 */
@@ -4025,6 +4028,8 @@ static bool me_v8bis_start_locked(void)
     cfg.fsm.mr_reply = V8BIS_MRR_CRD;          /* transaction 10/11 */
     cfg.fsm.accept = me_v8bis_accept;
     cfg.fsm.select_ms = me_v8bis_select_ms;
+    cfg.qc2 = me_quick_connect_enabled();      /* V.92 QC2/QCA2 over V.8bis (9.2.1.2, 9.2.4.2) */
+    ME_LOG("[ME] V.8bis: Quick Connect (QC2/QCA2) %s\n", cfg.qc2 ? "on" : "off");
     cfg.retries = 0;   /* 10.2.2/10.1: 3 s after each signal; the window still decides */
     cfg.fsm.answering_station = !g_calling_party;
     g_v8bis_window_ms = 2000;
@@ -4119,9 +4124,14 @@ static void me_v8bis_progress_locked(int len)
             me_v8bis_finish_locked(e.type == V8BIS_MEV_NO_PEER ? "no V.8bis peer"
                                                                : v8bis_why_name(e.why), false);
             return;
+        } else if (e.type == V8BIS_MEV_QC2_RX || e.type == V8BIS_MEV_QC2_CRE) {
+            if (me_qc2_event_locked(&e))
+                return;                                   /* Quick Connect took the line */
         }
     }
     if (!g_v8bis)
+        return;
+    if (me_qc2_tick_locked())
         return;
     if (g_v8bis_to_v8) {
         if (!v8bis_modem_tx_busy(g_v8bis))                /* the ACK(1) has to be out first */
@@ -9259,6 +9269,7 @@ static void qc_call_reset_locked(void)
     g_qc_failed = false;
     g_qc_byte = -1;
     g_qc_aligned = false;
+    qc2_reset_locked();
 }
 
 /* +PQC 0 and 1 enable short Phase 1; 3 disables; +PSS 2 forces the full
@@ -9368,6 +9379,140 @@ static void me_qc_begin(const v8_parms_t *r)
            wxyz, uqts, g_qc_lapm ? 1 : 0, me_v92_anspcm_level_to_str(1));
     trace_phase("V92 QC1a: short Phase 1 (UQTS %d)", uqts);
     pthread_mutex_unlock(&g_state_mtx);
+}
+
+/* ---- QC2/QCA2: Quick Connect started by V.8bis (9.2.1.2, 9.2.4.2) ---------- */
+
+/* The V.8bis modem carries the two messages (type 1011, V.92 Tables 3-5); once
+ * they have been exchanged the line passes to the same sequence as above.  All
+ * of this runs under g_state_mtx from me_v8bis_progress_locked(). */
+static bool     g_qc2_dig_pending = false;    /* QCA2d sent or queued; start the sequence when it is out */
+static int      g_qc2_uqts = 0;
+static int      g_qc2_peer_byte = -1;         /* the peer's identification, in V.8's octet layout */
+static bool     g_qc2_ana_waiting = false;    /* QC2a sent; waiting 1 s for QCA2d */
+static int64_t  g_qc2_ana_idle_since = -1;
+
+static void qc2_reset_locked(void)
+{
+    g_qc2_dig_pending = false;
+    g_qc2_ana_waiting = false;
+    g_qc2_ana_idle_since = -1;
+}
+
+static bool qc2_free_v8bis_locked(void)
+{
+    v8bis_modem_free(g_v8bis);
+    g_v8bis = NULL;
+    g_v8bis_to_v8 = false;
+    return true;
+}
+
+static bool me_qc2_event_locked(const v8bis_modem_event_t *e)
+{
+    const uint8_t b = e->qc2_info[1];
+    /* Tables 3/12: WXYZ in octet bits 0-3 (W first), then 0, P, QC/QCA, a/d. */
+    const bool lapm = (b & 0x20) != 0;
+    const bool qca = (b & 0x40) != 0;
+    const bool digital = (b & 0x80) != 0;
+
+    if (e->type == V8BIS_MEV_QC2_CRE) {
+        if (!g_calling_party || !me_v90_analogue_role() || g_qc_failed || g_qc_active
+            || g_g711_rx_octets == 0) {
+            v8bis_modem_release_cre(g_v8bis);
+            return false;
+        }
+        {
+            uint8_t f[2] = { 0x2D, (uint8_t) (0x0A | (me_qc_offer_lapm() ? 0x20 : 0)) };
+
+            if (!v8bis_modem_send_frame(g_v8bis, true, f, 2)) {
+                v8bis_modem_release_cre(g_v8bis);
+                return false;
+            }
+        }
+        g_qc2_ana_waiting = true;
+        g_qc2_ana_idle_since = -1;
+        ME_LOG("[ME] V.92 9.2.1.2: CRe heard; sending QC2a (UQTS 70) instead of answering it\n");
+        trace_phase("V92 QC2a sent");
+        return false;
+    }
+
+    if (!g_calling_party) {
+        /* 9.2.4.2: QC2a from an analogue modem. */
+        int wxyz = ((b & 1) << 3) | (((b >> 1) & 1) << 2) | (((b >> 2) & 1) << 1) | ((b >> 3) & 1);
+
+        if (digital || qca || !e->qc2_high || g_qc_failed || g_qc_active || g_g711_rx_octets == 0
+            || !me_quick_connect_enabled() || wxyz == 0xF || g_qc2_dig_pending)
+            return false;
+        {
+            /* QCA2d: LM 01 (-12 dBm0), P, QCA, digital. */
+            uint8_t f[2] = { 0x2D, (uint8_t) (0x02 | (me_qc_offer_lapm() ? 0x20 : 0) | 0x40 | 0x80) };
+
+            if (!v8bis_modem_send_frame(g_v8bis, false, f, 2))
+                return false;
+        }
+        g_qc2_dig_pending = true;
+        g_qc2_uqts = v92_short_phase1_uqts_from_wxyz(wxyz);
+        /* V.8's layout of the analogue QC octet, for the result handler. */
+        g_qc2_peer_byte = (lapm ? 0x04 : 0) | (((wxyz >> 3) & 1) << 3) | (((wxyz >> 2) & 1) << 5)
+                        | (((wxyz >> 1) & 1) << 6) | ((wxyz & 1) << 7);
+        ME_LOG("[ME] V.92 9.2.4.2: QC2a (WXYZ=%X, UQTS=%d, P=%d) -> QCA2d, QTS, ANSpcm, TONEq\n",
+               wxyz, g_qc2_uqts, lapm ? 1 : 0);
+        trace_phase("V92 QC2a: short Phase 1 (UQTS %d)", g_qc2_uqts);
+        return false;
+    }
+
+    /* The analogue caller: QCA2d from the digital modem (9.2.1.2). */
+    if (!digital || !qca || e->qc2_high || !g_qc2_ana_waiting || g_qc_active)
+        return false;
+    {
+        int lm = ((b & 1) << 1) | ((b >> 1) & 1);
+
+        qc2_reset_locked();
+        if (!v92_qca_start(&g_qca, g_law == ME_LAW_ALAW ? V91_LAW_ALAW : V91_LAW_ULAW))
+            return false;
+        g_qc_active = true;
+        g_qc_analogue = true;
+        g_qc_finish_pending = false;
+        g_qc_byte = 0x03 | (lapm ? 0x04 : 0) | (lm << 6);
+        g_qc_lapm = lapm;
+        g_phase_start_ms = trace_now_ms();
+        ME_LOG("[ME] V.92 9.2.1.2: QCA2d (LM=%d, P=%d) -> silence, ANSpcm, TONEq\n", lm, lapm ? 1 : 0);
+        trace_phase("V92 QCA2d: short Phase 1 (analogue caller)");
+    }
+    return qc2_free_v8bis_locked();
+}
+
+static bool me_qc2_tick_locked(void)
+{
+    if (g_qc2_dig_pending && g_v8bis && !v8bis_modem_tx_busy(g_v8bis)) {
+        unsigned tail = v8bis_modem_tx_idle_tail(g_v8bis);
+
+        g_qc2_dig_pending = false;
+        if (!v92_qc_start_after_qca(&g_qc, g_law == ME_LAW_ALAW ? V91_LAW_ALAW : V91_LAW_ULAW,
+                                    g_qc2_uqts, 1, me_qc_offer_lapm(), tail)) {
+            g_qc_failed = true;
+            return false;
+        }
+        g_qc_active = true;
+        g_qc_finish_pending = false;
+        g_qc_byte = g_qc2_peer_byte;
+        g_qc_lapm = (g_qc2_peer_byte & 0x04) != 0;
+        g_phase_start_ms = trace_now_ms();
+        return qc2_free_v8bis_locked();
+    }
+    if (g_qc2_ana_waiting && g_v8bis && !v8bis_modem_tx_busy(g_v8bis)) {
+        /* 9.2.1.2: neither QCA2d nor QCA2a 1 s after QC2a -- proceed per V.8bis,
+         * which means answering the CRe after all. */
+        if (g_qc2_ana_idle_since < 0)
+            g_qc2_ana_idle_since = (int64_t) g_v8bis_samples;
+        else if ((int64_t) g_v8bis_samples - g_qc2_ana_idle_since >= 8000) {
+            ME_LOG("[ME] V.92 9.2.1.2: no QCA2d within 1 s of QC2a; V.8bis\n");
+            qc2_reset_locked();
+            g_qc_failed = true;
+            v8bis_modem_release_cre(g_v8bis);
+        }
+    }
+    return false;
 }
 
 /* Receive side, called with the lock held on every codeword block while

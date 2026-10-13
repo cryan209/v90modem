@@ -379,8 +379,40 @@ static void test_analogue(v91_law_t law)
     printf("PASS: analogue caller law=%d: ANSpcm -> TONEq -> silence -> Phase 2; timeout -> V.8\n", (int) law);
 }
 
+/* The V.8bis route resumes at the 75 ms of silence after QCA2d, minus whatever
+ * the message's last block already held. */
+static void test_after_qca2d(void)
+{
+    for (unsigned silent = 0; silent <= 700; silent += 107) {
+        v92_qc_t q;
+        stream_t s = { .n = 0 };
+        unsigned want = silent > 600 ? 0 : 600 - silent;
+
+        v92_qc_init(&q);
+        assert(v92_qc_start_after_qca(&q, V91_LAW_ULAW, 70, 1, true, silent));
+        run_tx(&q, &s, 600 + 800 + 300, 160);
+        CHECK(q.qts_start == (long) want, "silent=%u: QTS at %ld, want %u", silent, q.qts_start, want);
+        CHECK(s.n > 0 && s.cw[want] == v91_ucode_to_codeword(V91_LAW_ULAW, 70, true),
+              "silent=%u: first QTS symbol", silent);
+        /* the 2 s limit counts from the end of QCA2d, so from the start of the gap */
+        for (int i = s.n; i < 40000 && v92_qc_running(&q); ) {
+            uint8_t o[160];
+            int got = v92_qc_tx(&q, o, 160);
+
+            i += got;
+            if (got < 160)
+                break;
+        }
+        CHECK(q.state == V92_QC_V8 && q.since_qca == V92_QC_TONEQ_TIMEOUT, "silent=%u: limit %ld",
+              silent, q.since_qca);
+        v92_qc_free(&q);
+    }
+    printf("PASS: sequence resumes after QCA2d with the silence already sent accounted for\n");
+}
+
 int main(void)
 {
+    test_after_qca2d();
     test_analogue(V91_LAW_ULAW);
     test_analogue(V91_LAW_ALAW);
     test_sd_alignment();

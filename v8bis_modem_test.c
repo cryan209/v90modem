@@ -149,6 +149,9 @@ static void drain(bench_t *b, int i)
         case V8BIS_MEV_RX_BAD_FRAME:
             b->bad_frames[i]++;
             break;
+        case V8BIS_MEV_QC2_RX:
+        case V8BIS_MEV_QC2_CRE:
+            break;
         }
     }
 }
@@ -890,8 +893,111 @@ static void test_audio_fuzz(void)
     CHECK(sigs == 0 && msgs == 0);
 }
 
+/* V.92 9.2.1.2 / 9.2.4.2: the digital modem's CRe is answered by the analogue
+ * modem's QC2a (V.21(H), type 1011), and that by the digital modem's QCA2d
+ * (V.21(L)); neither is a V.8bis message and neither reaches the state machine. */
+static void test_qc2(void)
+{
+    v8bis_modem_cfg_t cfg;
+    v8bis_modem_t *dig, *ana;
+    bool got_cre = false, got_qc2a = false, got_qca2d = false;
+    uint8_t qc2a[2], qca2d[2];
+    uint64_t t_qc2a = 0;
+
+    printf("QC2/QCA2 messages\n");
+    v8bis_modem_cfg_default(&cfg);
+    cfg.qc2 = true;
+    cfg.fsm.answering_station = true;
+    cfg.fsm.auto_answer_call = true;
+    dig = v8bis_modem_new(&cfg);
+    cfg.fsm.answering_station = false;
+    ana = v8bis_modem_new(&cfg);
+    CHECK(dig && ana);
+    CHECK(v8bis_modem_initiate(dig, V8BIS_INIT_CR));
+    for (int blk = 0; blk < 8000*8/BLOCK; blk++) {
+        int16_t td[BLOCK], ta[BLOCK];
+        v8bis_modem_event_t e;
+
+        v8bis_modem_tx(dig, td, BLOCK);
+        v8bis_modem_tx(ana, ta, BLOCK);
+        v8bis_modem_rx(dig, ta, BLOCK);
+        v8bis_modem_rx(ana, td, BLOCK);
+        while (v8bis_modem_event(ana, &e)) {
+            if (e.type == V8BIS_MEV_QC2_CRE && !got_cre) {
+                /* 0x2D: type 1011 and revision 0100; WXYZ 0101, P */
+                static const uint8_t f[2] = { 0x2D, 0x0A | 0x20 };
+
+                got_cre = true;
+                v8bis_modem_send_frame(ana, true, f, 2);
+            } else if (e.type == V8BIS_MEV_QC2_RX) {
+                got_qca2d = true;
+                memcpy(qca2d, e.qc2_info, 2);
+                CHECK(!e.qc2_high);
+            }
+        }
+        while (v8bis_modem_event(dig, &e)) {
+            if (e.type == V8BIS_MEV_QC2_RX && !got_qc2a) {
+                /* 0x2D; LM 01 (-12 dBm0), P, QCA, digital */
+                static const uint8_t f[2] = { 0x2D, 0x02 | 0x20 | 0x40 | 0x80 };
+
+                got_qc2a = true;
+                t_qc2a = v8bis_modem_now(dig);
+                memcpy(qc2a, e.qc2_info, 2);
+                CHECK(e.qc2_high);
+                v8bis_modem_send_frame(dig, false, f, 2);
+            }
+        }
+        if (got_qca2d)
+            break;
+    }
+    CHECK(got_cre);
+    CHECK(got_qc2a && qc2a[0] == 0x2D && qc2a[1] == 0x2A);
+    CHECK(got_qca2d && qca2d[0] == 0x2D && qca2d[1] == 0xE2);
+    CHECK(t_qc2a > 0 && t_qc2a < 8000*3);
+    v8bis_modem_free(dig);
+    v8bis_modem_free(ana);
+
+    /* No QC2a from the analogue modem: releasing the CRe gets the ordinary V.8bis answer. */
+    v8bis_modem_cfg_default(&cfg);
+    cfg.qc2 = true;
+    cfg.fsm.answering_station = true;
+    cfg.fsm.auto_answer_call = true;
+    dig = v8bis_modem_new(&cfg);
+    cfg.fsm.answering_station = false;
+    ana = v8bis_modem_new(&cfg);
+    v8bis_modem_initiate(dig, V8BIS_INIT_CR);
+    {
+        bool held = false, answered = false, released = false;
+
+        for (int blk = 0; blk < 8000*6/BLOCK; blk++) {
+            int16_t td[BLOCK], ta[BLOCK];
+            v8bis_modem_event_t e;
+
+            v8bis_modem_tx(dig, td, BLOCK);
+            v8bis_modem_tx(ana, ta, BLOCK);
+            v8bis_modem_rx(dig, ta, BLOCK);
+            v8bis_modem_rx(ana, td, BLOCK);
+            while (v8bis_modem_event(ana, &e))
+                if (e.type == V8BIS_MEV_QC2_CRE)
+                    held = true;
+            if (held && !released) {
+                v8bis_modem_release_cre(ana);
+                released = true;
+            }
+            if (released)
+                for (int i = 0; i < BLOCK; i++)
+                    if (ta[i])
+                        answered = true;
+        }
+        CHECK(held && released && answered);
+    }
+    v8bis_modem_free(dig);
+    v8bis_modem_free(ana);
+}
+
 int main(void)
 {
+    test_qc2();
     test_table7_audio();
     test_waveform();
     test_line_conditions();

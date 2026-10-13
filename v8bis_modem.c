@@ -74,6 +74,8 @@ struct v8bis_modem_s {
     uint64_t last_tone_end;
     bool tone_active;
     unsigned idle_acc;
+    unsigned idle_run;                  /* trailing idle samples of the last tx block */
+    bool held_cre;                      /* cfg.qc2: a CRe waits for the caller's decision */
 
     /* receive */
     v8bis_tone_rx_t trx;
@@ -419,8 +421,10 @@ void v8bis_modem_tx(v8bis_modem_t *m, int16_t *amp, int len)
         if (!m->cur_valid && !next_segment(m)) {
             amp[i++] = 0;
             idle++;
+            m->idle_run++;
             continue;
         }
+        m->idle_run = 0;
         switch (m->cur.kind) {
         case SEG_SILENCE: {
             unsigned left = m->cur.n_samples - m->cur_pos;
@@ -501,6 +505,16 @@ static void frame_cb(void *user, const uint8_t *info, size_t len, v8bis_frame_st
     m->last_rx_high = c->ch == 1;
     m->rx_active = true;
     memset(&e, 0, sizeof(e));
+    if (m->cfg.qc2 && st == V8BIS_FRAME_OK && len >= 2 && (info[0] & 0x0F) == 0x0D) {
+        /* V.92 Tables 3-5: message type 1011 in transmission order is 0xD in the
+         * low nibble of the first octet. */
+        e.type = V8BIS_MEV_QC2_RX;
+        e.qc2_info[0] = info[0];
+        e.qc2_info[1] = info[1];
+        e.qc2_high = c->ch == 1;
+        post(m, &e);
+        return;
+    }
     if (st == V8BIS_FRAME_OK && v8bis_msg_decode(info, len, &d) == 0) {
         e.type = V8BIS_MEV_RX_MESSAGE;
         e.msg_type = d.type;
@@ -607,6 +621,14 @@ static void deliver_signal(v8bis_modem_t *m, v8bis_signal_t sig, bool set)
     e.sig = sig;
     e.responding_set = set;
     post(m, &e);
+    if (m->cfg.qc2 && sig == V8BIS_SIG_CRE && !set && m->fsm.state == V8BIS_S_INITIAL) {
+        /* 9.2.1.2: this is where an analogue modem with Quick Connect says QC2a
+         * instead of answering the CRe. */
+        m->held_cre = true;
+        e.type = V8BIS_MEV_QC2_CRE;
+        post(m, &e);
+        return;
+    }
     v8bis_fsm_signal(&m->fsm, sig, set);
     handle_actions(m);
 }
@@ -692,4 +714,39 @@ void v8bis_modem_free(v8bis_modem_t *m)
             fsk_rx_free(m->ch[c].rx);
     }
     free(m);
+}
+
+/* ---- Quick Connect ---------------------------------------------------------- */
+
+bool v8bis_modem_send_frame(v8bis_modem_t *m, bool high, const uint8_t *info, size_t len)
+{
+    seg_t *s;
+    size_t nb;
+
+    m->sh = m->sn = 0;
+    m->cur_valid = false;
+    m->tone_active = false;
+    m->watching = false;
+    m->watch_armed = false;
+    s = q_bits(m, high);
+    if (!s)
+        return false;
+    nb = v8bis_frame_encode(info, len, MARK_PREAMBLE_BITS - MODULATOR_LEAD_BITS,
+                            m->cfg.open_flags, m->cfg.close_flags, s->bits, BITS_MAX);
+    s->nbits = (unsigned) nb;
+    return nb > 0;
+}
+
+void v8bis_modem_release_cre(v8bis_modem_t *m)
+{
+    if (!m->held_cre)
+        return;
+    m->held_cre = false;
+    v8bis_fsm_signal(&m->fsm, V8BIS_SIG_CRE, false);
+    handle_actions(m);
+}
+
+unsigned v8bis_modem_tx_idle_tail(const v8bis_modem_t *m)
+{
+    return m->idle_run;
 }

@@ -68,6 +68,31 @@ Between two of our engines the whole of Quick Connect (short Phase 1 and 2)
 now runs: `engine_pair_test ... --both-at AT+PQC=0` reaches V.92 data mode in
 both laws and in V.90 data mode.
 
+## QC2 / QCA2: Quick Connect started by V.8bis (9.2.1.2, 9.2.4.2)
+
+With `ME_V8BIS=1` and `+PQC` 0 or 1 the same sequences start from V.8bis. The
+digital modem's CRe is answered by the analogue modem's **QC2a**, a V.8bis-framed
+message on V.21(H) (Table 3: first octet 0x2D = type 1011 and revision 0100 in
+transmission order, then WXYZ, P, QC, analogue); the digital modem stops CRe and
+answers with **QCA2d** on V.21(L) (Table 12: LM, P, QCA, digital), 75 ms of
+silence, QTS, QTS\, ANSpcm, and from there it is the sequence above.
+
+- `v8bis_modem` (`cfg.qc2`) hands a type-1011 frame to the engine as an event
+  instead of to the V.8bis state machine, and holds a CRe that finds a station in
+  the Initial State instead of answering it. `v8bis_modem_send_frame()` puts a
+  frame in place of whatever is queued; `v8bis_modem_release_cre()` gives the held
+  CRe to the state machine after all.
+- The analogue modem waits 1 s after QC2a for QCA2d. Without it the CRe is
+  released and V.8bis goes on (the `+PQC=3` answerer case), so a caller with
+  Quick Connect on costs a V.8bis call against such an answerer one second.
+- The digital modem resumes at the silence after QCA2d, less the idle samples
+  that block already held (`v8bis_modem_tx_idle_tail`), so the 75 ms is exact.
+- If no TONEq arrives in the 2 s after QCA2d the digital modem sends ANSam and V.8
+  (9.2.4.1), as for QCA1d.
+
+An ANSam heard first still sends the caller to the QC1a route; QCA2a (an analogue
+answerer) and the digital modem taking the analogue role are not handled.
+
 ## Short Phase 2 (9.4), both roles
 
 With `+PQC` 0 or 2 each modem's INFO0 carries the V.92 capability bit and the
@@ -109,8 +134,7 @@ nothing here has met a foreign V.92 modem.
 
 ## Not implemented (either procedure)
 
-- **QC2/QCA2** (the V.8bis family, 9.2.1.2 and 9.2.4.2) and the cases where
-  the answerer is an analogue modem (QCA1a, Figures 7/8, 9.2.1.1/9.2.1.4), or
+- The cases where the answerer is an analogue modem (QCA2a too) (QCA1a, Figures 7/8, 9.2.1.1/9.2.1.4), or
   the digital answerer takes the analogue role (9.2.4.1).
 - **ODP/ADP bypass** (9.2.5) on the live path: the P bit is sent and read, and
   the existing LAPM handling takes the caller's P bit, but no V.42 detection

@@ -91,6 +91,13 @@ void v92_qc_free(v92_qc_t *q);
 bool v92_qc_start(v92_qc_t *q, v91_law_t law, int uqts_ucode,
                   int anspcm_level, bool lapm);
 
+/* As v92_qc_start(), for the V.8bis route (9.2.4.2): the caller's QC2a has been
+ * answered by QCA2d, which the V.8bis modem sent, so the sequence resumes at the
+ * 75 ms of silence after it.  `silent` of those codewords have already gone out
+ * with the end of the last block. */
+bool v92_qc_start_after_qca(v92_qc_t *q, v91_law_t law, int uqts_ucode,
+                            int anspcm_level, bool lapm, unsigned silent);
+
 /* Fill up to n codewords of the transmit stream.  Returns how many were
  * produced: n, unless the sequence reached PHASE2 or V8 part-way, in which
  * case it is the count up to that instant and the caller supplies the rest

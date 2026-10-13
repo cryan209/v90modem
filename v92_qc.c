@@ -95,6 +95,24 @@ bool v92_qc_start(v92_qc_t *q, v91_law_t law, int uqts_ucode,
     return true;
 }
 
+bool v92_qc_start_after_qca(v92_qc_t *q, v91_law_t law, int uqts_ucode,
+                            int anspcm_level, bool lapm, unsigned silent)
+{
+    if (!v92_qc_start(q, law, uqts_ucode, anspcm_level, lapm))
+        return false;
+    /* No QCA1d of our own to send. */
+    if (q->fsk) {
+        fsk_tx_free((fsk_tx_state_t *) q->fsk);
+        q->fsk = NULL;
+    }
+    if (silent > V92_QC_SILENCE_SYMBOLS)
+        silent = V92_QC_SILENCE_SYMBOLS;
+    q->state = V92_QC_GAP;
+    q->pos = silent;
+    q->since_qca = silent;
+    return true;
+}
+
 static uint8_t qc_silence(const v92_qc_t *q)
 {
     return v91_ucode_to_codeword(q->law, 0, true);
