@@ -4599,7 +4599,11 @@ static int process_rx_info1a(v34_rx_state_t *s, info1a_t *info1a, uint8_t buf[])
             if (info1a->baud_rate_a_to_c >= 0  &&  info1a->baud_rate_a_to_c <= 5)
             {
                 s->baud_rate = info1a->baud_rate_a_to_c;
-                s->high_carrier = s->local_info1c_high_carrier[s->baud_rate];
+                /* V.92 9.4: a short Phase 2 sends no INFO1d, so Table 19 bit 33
+                   gives the carrier. */
+                s->high_carrier = s->v92_short_phase2
+                                ? ((s->info1a_raw_32_33 & 2) != 0)
+                                : s->local_info1c_high_carrier[s->baud_rate];
                 s->v34_carrier_phase_rate = dds_phase_ratef(carrier_frequency(s->baud_rate, s->high_carrier));
                 create_godard_coeffs(&s->pri_ted,
                                      carrier_frequency(s->baud_rate, s->high_carrier),
@@ -4717,6 +4721,9 @@ static void v90_enter_phase3_from_info1a(v34_rx_state_t *s)
        lock.  Enter Phase 3 synchronously so the first primary-channel sample is
        processed with the same clean frontend used by offline replay. */
     owner = (v34_state_t *) ((char *) s - offsetof(v34_state_t, rx));
+    /* A short Phase 2 (V.92 9.4) ends with the INFO1a that starts Phase 3. */
+    owner->tx.v92_short_active = false;
+    s->v92_short_phase2 = false;
 
     /* Table 10 bits 37:39 confirm which protocol the analogue modem actually
        committed to: the integer 6 means genuine V.90 PCM downstream; 0-5

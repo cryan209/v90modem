@@ -140,7 +140,7 @@ static const range_param_t range_params[] = {
     /* 6.8.7/6.8.8: short Phase 1 (Quick Connect, digital answerer) is live;
        short Phase 2 is not, so 2 -- Phase 2 alone -- is ERROR, and 0 enables
        what there is. */
-    { "PQC",   1, { 0 },        { 3 },           false, "+PQC: (0,1,3)", { BIT(0) | BIT(1) | BIT(3) } },
+    { "PQC",   1, { 0 },        { 3 },           false, "+PQC: (0-3)", { BIT(0) | BIT(1) | BIT(2) | BIT(3) } },
     { "PSS",   1, { 0 },        { 2 },           false, "+PSS: (0,2)", { BIT(0) | BIT(2) } },
     /* 6.6.2: the stream method only (the packet methods are not
        implemented); the V.44 codec's own limits. */

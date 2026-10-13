@@ -392,6 +392,89 @@ static void v90_phase2_reset_transactions(v34_state_t *s)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* V.92 9.4 short Phase 2.  It is used when both INFO0 sequences carry the V.92
+   capability bit and the short-Phase-2 request bit -- bits 26 (INFO0d: short
+   request) and 27 (INFO0d: capability), and the other way round in INFO0a --
+   so the raw field read from the peer has both bits set whichever end reads
+   it.  Both ends see the same two sequences, so both reach the same verdict. */
+static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s);
+
+enum
+{
+    V92_SHORT_B_MIN_BAUDS = 30,         /* Tone B for at least 50 ms before the reversal */
+    V92_SHORT_WAIT_BAUDS = 1500         /* 2500 ms (9.4.1.2.2/.3); analogue gets 3 s */
+};
+
+/* Test hook: the analogue modem never answers the digital modem's Tone B
+   reversal, so the 9.4.1.2.2 timeout and the fall back to the full Phase 2
+   can be run end to end. */
+static bool v92_short_test_no_reply(void)
+{
+    static int cached = -1;
+
+    if (cached < 0)
+    {
+        const char *e = getenv("V92_SHORT_TEST_NO_REPLY");
+
+        cached = (e  &&  e[0]  &&  e[0] != '0')  ?  1  :  0;
+    }
+    /*endif*/
+    return cached != 0;
+}
+/*- End of function --------------------------------------------------------*/
+
+static bool v92_short_phase2_agreed(const v34_state_t *s)
+{
+    return s->tx.v90_mode
+        &&  s->tx.v92_info0_capable
+        &&  s->tx.v92_short_phase2_requested
+        &&  !s->tx.v92_short_failed
+        &&  (s->rx.info0_raw_26_27 & 0x03) == 0x03;
+}
+/*- End of function --------------------------------------------------------*/
+
+static void v92_short_begin(v34_state_t *s, const char *who)
+{
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+             "Tx - V.92 9.4: short Phase 2 (%s): INFO0 bits 26/27 agree\n", who);
+    s->tx.v92_short_armed = false;
+    s->tx.v92_short_active = true;
+    s->tx.v92_short_a_seen = false;
+    s->tx.v92_short_count = 0;
+    s->rx.v92_short_phase2 = true;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* 9.4.1.2.2/9.4.1.2.3: the transaction did not complete.  Carry on with the
+   full Phase 2 and keep it for the rest of the call.  The digital modem sends
+   Tone B and waits for Tone A, which is where the full procedure starts after
+   INFO0. */
+static void v92_short_fallback(v34_state_t *s, const char *why)
+{
+    V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+             "Tx - V.92 9.4: short Phase 2 abandoned (%s); full Phase 2\n", why);
+    s->tx.v92_short_armed = false;
+    s->tx.v92_short_active = false;
+    s->tx.v92_short_failed = true;
+    s->rx.v92_short_phase2 = false;
+    if (!s->tx.calling_party)
+    {
+        v90_phase2_reset_transactions(s);
+        s->tx.lastbit = complex_sig_set(TRAINING_SCALE(TRAINING_AMP), TRAINING_SCALE(0.0f));
+        s->tx.tone_duration = 0;
+        s->tx.current_modulator = V34_MODULATION_CC;
+        s->tx.current_getbaud = get_initial_fdx_b_not_b_baud;
+        s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
+        s->rx.received_event = V34_EVENT_NONE;
+        s->rx.persistence1 = 0;
+        s->rx.persistence2 = 0;
+        s->rx.current_demodulator = V34_MODULATION_TONES;
+        s->rx.stage = V34_RX_STAGE_TONE_A;
+    }
+    /*endif*/
+}
+/*- End of function --------------------------------------------------------*/
+
 /* Split a sample count into whole milliseconds plus a tenths digit, so stage
    timings can be logged at sub-millisecond resolution without pulling floating
    point into the log path. Done as two divisions rather than samples*10/8 so
@@ -1655,9 +1738,25 @@ static void prepare_v90_info1a(v34_state_t *s)
     /* V.92 9.3, Tables 15-18: select PCM upstream only when the caller
        installed a PCM transmitter and the received digital offer permits it.
        Keep the V.34 modulator's baud index in range for the Phase-2 seam. */
+    if (s->tx.v92_short_active  &&  s->tx.calling_party)
+    {
+        /* V.92 Table 19 bit 33 carries the carrier choice that INFO1d's row
+           carries in the full procedure, and no INFO1d was received: take the
+           high carrier where both ends can transmit it at this symbol rate. */
+        bool hi;
+
+        hi = s->rx.far_capabilities.support_baud_rate_high_carrier[s->tx.baud_rate]
+          && v34_local_tx_carrier_supported(s->tx.baud_rate, 1);
+        s->tx.info1a.use_high_carrier = hi;
+        s->tx.high_carrier = hi;
+        s->tx.v34_carrier_phase_rate =
+            dds_phase_ratef(carrier_frequency(s->tx.baud_rate, s->tx.high_carrier));
+    }
+    /*endif*/
     if (s->tx.v92_pcm_upstream_capable && s->tx.v92_info0_capable
-        && (s->rx.info0_raw_26_27 & 2) && s->rx.info1c_received
-        && s->rx.info1c.rate_data[5].use_high_carrier)
+        && (s->rx.info0_raw_26_27 & 2)
+        && ((s->rx.info1c_received && s->rx.info1c.rate_data[5].use_high_carrier)
+            ||  s->tx.v92_short_active))
     {
         s->tx.info1a.baud_rate_a_to_c = 6;
         s->tx.info1a.freq_offset = 0x3FF; /* Table 18: reserved ones */
@@ -1858,8 +1957,11 @@ static int v90_info1a_sequence_tx(v34_tx_state_t *s, info1a_t *info1a)
     /* 25:31    U_INFO: Ucode of the PCM codeword to be used for the 2-point training
                 signal by the digital modem (7 bits). */
     bitstream_put(&bs, &t, info1a->max_data_rate, 7);
-    /* 32:33    Reserved for ITU (set to 0) */
-    bitstream_put(&bs, &t, 0, 2);
+    /* 32:33    Reserved for ITU (set to 0); V.92 Table 19 uses bit 33 (value 2
+                with the first bit as the least significant) for the high carrier
+                of a short Phase 2, which has no INFO1d to say. */
+    bitstream_put(&bs, &t, (s->v92_short_active  &&  info1a->use_high_carrier
+                            &&  info1a->baud_rate_a_to_c != 6)  ?  2  :  0, 2);
     /* 34:36    Symbol rate for upstream (analog→digital). 3=3000, 4=3200, 5=3429 */
     bitstream_put(&bs, &t, info1a->baud_rate_a_to_c, 3);
     /* 37:39    Symbol rate code 6 = 8000 PCM downstream rate */
@@ -2936,6 +3038,12 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
             && !s->tx.calling_party
             && s->tx.duplex)
         {
+            /* An INFO0 exchange is under way, so this is a startup: a retrain
+               omits INFO0 and comes straight to Tone B, and must not begin a
+               short Phase 2 off the flags the startup left behind. */
+            if (s->tx.stage == V34_TX_STAGE_INFO0)
+                s->tx.v92_short_armed = true;
+            /*endif*/
             if (s->rx.info0_received)
             {
                 if (!s->tx.info0_acknowledgement
@@ -2955,6 +3063,9 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
                     s->rx.received_event = V34_EVENT_NONE;
                     initial_ab_not_ab_baud_init(s);
                     s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
+                    if (s->tx.v92_short_armed  &&  v92_short_phase2_agreed(s))
+                        v92_short_begin(s, "digital");
+                    /*endif*/
                     if (bit)
                         s->tx.lastbit.re = -s->tx.lastbit.re;
                     /*endif*/
@@ -3047,6 +3158,9 @@ static complex_sig_t get_info0_baud(v34_state_t *s)
            stage, where we keep repeating INFO0 */
         else if (s->tx.stage == V34_TX_STAGE_INFO0)
         {
+            /* A startup (a retrain omits INFO0 and never comes through here):
+               whether V.92 9.4 applies is decided when INFO0d is in. */
+            s->tx.v92_short_armed = s->tx.v90_mode  &&  s->tx.calling_party;
             initial_ab_not_ab_baud_init(s);
         }
         else if (s->tx.stage == V34_TX_STAGE_INFO0_RETRY
@@ -3252,6 +3366,9 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
                    delay before sending our reversal back. */
                 V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - INITIAL_A: INFO0 + reversal already seen, skipping FIRST_A\n");
+                if (s->tx.v92_short_armed  &&  v92_short_phase2_agreed(s))
+                    v92_short_begin(s, "analogue");
+                /*endif*/
                 s->tx.tone_duration = 0;
                 s->tx.stage = V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN;
             }
@@ -3268,6 +3385,27 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
            V.90/9.2.2.1.3 -- identical wording: "After Tone B is detected and
            Tone A has been transmitted for at least 50 ms").  INITIAL_A served
            the 50 ms. */
+        if (s->tx.v92_short_armed  &&  s->rx.info0_received  &&  v92_short_phase2_agreed(s))
+        {
+            /* V.92 9.4.2.1.2/.3: the digital modem reverses first.  Keep
+               sending Tone A until its Tone B reversal is detected, then
+               answer it 40 ms later (the stages below) and send INFO1a. */
+            if (s->rx.received_event == V34_EVENT_REVERSAL_1  &&  !v92_short_test_no_reply())
+            {
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - FIRST_A: Tone B reversal detected, answering in 40 ms (V.92 9.4.2.1.3)\n");
+                v92_short_begin(s, "analogue");
+                s->tx.tone_duration = 0;
+                s->tx.stage = V34_TX_STAGE_FIRST_NOT_A_REVERSAL_SEEN;
+            }
+            else if (++s->tx.v92_short_count > 2*V92_SHORT_WAIT_BAUDS)
+            {
+                v92_short_fallback(s, "no Tone B reversal");
+            }
+            /*endif*/
+            break;
+        }
+        /*endif*/
         if (s->tx.phase2_reranging)
         {
             /* Re-ranging out of the §11.2.2.1.1 INFO0 recovery.  The call
@@ -3467,6 +3605,17 @@ static complex_sig_t get_initial_fdx_a_not_a_baud(v34_state_t *s)
         /* Send phase reversed pure tone for 10ms */
         if (++s->tx.tone_duration == 6)
         {
+            if (s->tx.v92_short_active  &&  s->tx.calling_party)
+            {
+                /* V.92 9.4.2.1.4: Tone A for 10 ms after the reversal, then
+                   INFO1a, and Phase 3 as it signals. */
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.92 9.4.2.1.4: sending INFO1a\n");
+                s->tx.tone_duration = 0;
+                info1_baud_init(s);
+                break;
+            }
+            /*endif*/
             if (s->tx.v90_mode  &&  !s->tx.calling_party)
             {
                 /* V.90 §9.2.1.1.5: digital modem does NOT send L1/L2 here.
@@ -3704,6 +3853,8 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
                      "Tx - V.90: INFO0a received, continuing Tone B and waiting for Tone A reversal\n");
             s->tx.stage = V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN;
             s->rx.received_event = V34_EVENT_NONE;
+            if (s->tx.v92_short_armed  &&  !s->tx.info0_acknowledgement  &&  v92_short_phase2_agreed(s))
+                v92_short_begin(s, "digital");
         }
         else if (v90_phase2_reversal_pending(s))
         {
@@ -3757,6 +3908,39 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
         /*endif*/
         break;
     case V34_TX_STAGE_V90_PHASE2_B_INFO0_SEEN:
+        if (s->tx.v92_short_active)
+        {
+            /* V.92 9.4.1.1.3: "After Tone A has been detected and Tone B has
+               been transmitted for at least 50 ms, the digital modem shall
+               transmit a Tone B phase reversal.  Tone B shall be transmitted
+               for another 10 ms after the phase reversal."  The digital
+               modem leads here; the full procedure has it follow. */
+            ++s->tx.v92_short_count;
+            if (s->rx.received_event == V34_EVENT_TONE_SEEN  ||  s->rx.persistence2 >= 20)
+                s->tx.v92_short_a_seen = true;
+            /*endif*/
+            if (s->tx.v92_short_a_seen  &&  s->tx.v92_short_count >= V92_SHORT_B_MIN_BAUDS)
+            {
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.92 9.4.1.1.3: Tone A detected, Tone B for %d bauds; sending the Tone B reversal\n",
+                         s->tx.v92_short_count);
+                s->tx.lastbit.re = -s->tx.lastbit.re;
+                s->tx.v92_short_rev_time = s->rx.sample_time;
+                /* Only the analogue modem's reply counts from here. */
+                v90_phase2_reset_transactions(s);
+                s->rx.received_event = V34_EVENT_NONE;
+                s->tx.v92_short_count = 0;
+                s->tx.tone_duration = 1;
+                s->tx.stage = V34_TX_STAGE_FIRST_NOT_B;
+            }
+            else if (s->tx.v92_short_count > V92_SHORT_WAIT_BAUDS)
+            {
+                v92_short_fallback(s, "no Tone A");
+            }
+            /*endif*/
+            break;
+        }
+        /*endif*/
         /* A completed Tone A reversal commits the peer to 9.2.2.1.3.  Consume
            that transaction before considering a concurrently decoded INFO0a
            repeat; otherwise the repeat regresses both modems to INFO0 recovery
@@ -3827,6 +4011,34 @@ static complex_sig_t get_initial_fdx_b_not_b_baud(v34_state_t *s)
         /*endif*/
         break;
     case V34_TX_STAGE_FIRST_B_SILENCE:
+        if (s->tx.v92_short_active)
+        {
+            /* V.92 9.4.1.1.4: the Tone A reversal is the analogue modem's reply
+               to ours, 40 ms after it received it, so the round trip delay is
+               that interval less 40 ms.  Then silence and INFO1a. */
+            if (v90_phase2_reversal_pending(s))
+            {
+                span_sample_timer_t rtd;
+
+                v90_phase2_consume_reversal(s);
+                rtd = s->rx.tone_ab_hop_time - s->tx.v92_short_rev_time - 40*(SAMPLE_RATE/1000);
+                if (rtd > 0)
+                    s->rx.round_trip_delay_estimate = (int) rtd;
+                /*endif*/
+                V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                         "Tx - V.92 9.4.1.1.4: Tone A reversal received; round trip %d samples; waiting for INFO1a\n",
+                         s->rx.round_trip_delay_estimate);
+                s->tx.v92_short_count = 0;
+                v90_wait_info1a_init(s);
+            }
+            else if (++s->tx.v92_short_count > V92_SHORT_WAIT_BAUDS)
+            {
+                v92_short_fallback(s, "no Tone A reversal");
+            }
+            /*endif*/
+            return zero;
+        }
+        /*endif*/
         /* Send silence, as we wait for reversal (V.34/11.2.1.1.4) */
         if (s->tx.v90_mode && v90_phase2_reversal_pending(s))
         {
@@ -5457,6 +5669,7 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
 
     if (s->tx.stage == V34_TX_STAGE_V90_RETRAIN_SILENCE)
     {
+        s->tx.v92_short_armed = false;
         /* V.90 §9.5.1.2/§9.5.2 and V.34 §11.5: after 70 +/- 5 ms of silence,
            transmit the role's tone and resume Phase 2 with the INFO0
            exchange omitted.
@@ -5530,6 +5743,37 @@ static complex_sig_t get_v90_wait_info1a_baud(v34_state_t *s)
     /*endif*/
     if (s->tx.stage != V34_TX_STAGE_V90_WAIT_INFO1A)
         return zero;
+    /*endif*/
+
+    if (s->tx.v92_short_active)
+    {
+        /* V.92 9.4.1.1.5 / 9.4.1.2.3: INFO1a, or 2500 ms from the reversal
+           and back to the full procedure.  None of the V.90 INFO1d re-send
+           recovery below applies: no INFO1d was sent. */
+        if (s->rx.received_event == V34_EVENT_INFO1_OK)
+        {
+            V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
+                     "Tx - V.92 9.4.1.1.5: INFO1a received after %d bauds; Phase 3\n",
+                     s->tx.v92_short_count);
+            s->tx.v92_short_active = false;
+            s->rx.v92_short_phase2 = false;
+            s->rx.received_event = V34_EVENT_NONE;
+            if (s->rx.v90_v34_fallback)
+                v90_v34_fallback_wait_init(s);
+            else
+                s_not_s_baud_init(s);
+            /*endif*/
+            return zero;
+        }
+        /*endif*/
+        if (s->rx.received_event == V34_EVENT_INFO1_BAD)
+            s->rx.received_event = V34_EVENT_NONE;
+        /*endif*/
+        if (++s->tx.v92_short_count > V92_SHORT_WAIT_BAUDS)
+            v92_short_fallback(s, "no INFO1a");
+        /*endif*/
+        return zero;
+    }
     /*endif*/
 
     if (s->tx.baud_rate >= 0  &&  s->tx.baud_rate <= 5)
@@ -6234,6 +6478,8 @@ static complex_sig_t get_info1_baud(v34_state_t *s)
             {
                 V34_TX_LOG(&s->logging, SPAN_LOG_FLOW,
                          "Tx - V.90: INFO1a complete, entering Phase 3 S/!S handoff\n");
+                s->tx.v92_short_active = false;
+                s->rx.v92_short_phase2 = false;
                 s->tx.tone_duration = 0;
                 s_not_s_baud_init(s);
             }

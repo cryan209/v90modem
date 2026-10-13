@@ -18,7 +18,7 @@ comes from **our analogue V.90 caller against an Eicon Diva digital answerer**.
 |---|---|---|
 | V.90 analogue caller | Eicon hardware: 56000 downstream / 31200 upstream, LAPM/V.42bis, both PCMU and PCMA; checked sustained transfers, PPP and HTTP | Broader peer/network coverage; emulator training results have separate limitations |
 | V.90 digital answerer (primary goal) | Native training, byte-exact PCM downstream, V.34 upstream and directed PCM/startup regressions | Repeatable analogue-client/FXS hardware qualification and sustained bidirectional transfers across chipsets |
-| V.92 | PCM-upstream datapump, Phase 3/4 codecs and procedure tests; Quick Connect short Phase 1 as the digital answerer (`AT+PQC=1`, engine-level test against a scripted analogue modem) | Complete native foreign-peer call, remaining timing/trellis/recovery integration, short Phase 2, and sustained payload qualification |
+| V.92 | PCM-upstream datapump, Phase 3/4 codecs and procedure tests; Quick Connect: short Phase 1 as the digital answerer and short Phase 2 in both roles (`AT+PQC`, engine-level tests) | Complete native foreign-peer call, remaining timing/trellis/recovery integration, Quick Connect against a real modem, and sustained payload qualification |
 | V.34 | Full-duplex data and impaired-line tests; Eicon hardware checked echo in both laws at 31200 upstream / 21600 downstream | Native V.34 sustained-transfer coverage comparable to the V.90 soaks |
 | V.32/V.32bis, V.22/V.22bis, V.21, V.23, Bell 103/212A | Datapumps, engine-pair payload tests and legacy automode | Broad hardware compatibility coverage |
 | V.91, clear channel, V.110/V.120 | Digital bearer implementations and local/engine-pair tests | Foreign digital-peer qualification; a byte-exact compatible bearer is required |
@@ -421,7 +421,7 @@ Native SUVd/CPd and CPu/CPu-prime handling, PCM-upstream datapump components
 and recovery procedure tests are implemented. Full foreign-peer PCM-upstream
 startup and sustained data are still under development; see
 [V.92 implementation status](docs/v92_phase4_implementation.md).
-Quick Connect's short Phase 1 (digital answerer) is described in
+Quick Connect (short Phase 1 and 2) is described in
 [docs/v92_quick_connect.md](docs/v92_quick_connect.md).
 
 ## License

@@ -1103,7 +1103,7 @@ static void test_pmhr(void)
     expect(dte, "AT+PMH=0;+PMHT=6;+PIG=0;+PCW=1", "OK");
     expect(dte, "AT+PMH?;+PMHT?", "+PMHT: 6");
     expect(dte, "ATI4", "+PCW: 1");
-    expect(dte, "AT+PQC=2", "ERROR");
+    expect(dte, "AT+PQC=4", "ERROR");
     expect(dte, "AT+PMHF", "ERROR");
     expect(dte, "AT&F", "OK");
     expect(dte, "AT+PMH?", "+PMH: 1");

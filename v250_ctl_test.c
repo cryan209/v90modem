@@ -459,13 +459,13 @@ static void test_v92_parameters(void)
     check(v250_ctl_command(&c, "PMHT=?", info, sizeof(info)) == V250_CTL_OK && !strcmp(info, "+PMHT: (0-13)"),
           "+PMHT=? is (0-13)");
     check(v250_ctl_command(&c, "PIG=0", info, sizeof(info)) == V250_CTL_OK && c.pig == 0, "+PIG=0 enables PCM upstream");
-    check(v250_ctl_command(&c, "PQC=2", info, sizeof(info)) == V250_CTL_ERROR
-          && v250_ctl_command(&c, "PQC=4", info, sizeof(info)) == V250_CTL_ERROR
+    check(v250_ctl_command(&c, "PQC=4", info, sizeof(info)) == V250_CTL_ERROR
+          && v250_ctl_command(&c, "PQC=2", info, sizeof(info)) == V250_CTL_OK && c.pqc == 2
           && v250_ctl_command(&c, "PQC=1", info, sizeof(info)) == V250_CTL_OK && c.pqc == 1
           && v250_ctl_command(&c, "PQC=0", info, sizeof(info)) == V250_CTL_OK && c.pqc == 0
           && v250_ctl_command(&c, "PQC=3", info, sizeof(info)) == V250_CTL_OK && c.pqc == 3
-          && v250_ctl_command(&c, "PQC=?", info, sizeof(info)) == V250_CTL_OK && !strcmp(info, "+PQC: (0,1,3)"),
-          "+PQC: 0, 1 and 3 (short Phase 2 alone is not live)");
+          && v250_ctl_command(&c, "PQC=?", info, sizeof(info)) == V250_CTL_OK && !strcmp(info, "+PQC: (0-3)"),
+          "+PQC: 0-3");
     check(v250_ctl_command(&c, "PSS=1", info, sizeof(info)) == V250_CTL_ERROR
           && v250_ctl_command(&c, "PSS=2", info, sizeof(info)) == V250_CTL_OK && c.pss == 2,
           "+PSS: 0 and 2, not 1");

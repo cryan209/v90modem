@@ -306,6 +306,7 @@ static int g_report_rx_rate = 0;
 static void on_training_complete(me_modulation_t mod, int rate, const char *name);
 static void v8_result_handler(void *user_data, v8_parms_t *result);
 static bool me_quick_connect_enabled(void);
+static bool me_short_phase2_enabled(void);
 
 /* ------------------------------------------------------------------ */
 /* Phase trace helpers                                                 */
@@ -9265,6 +9266,19 @@ static bool me_quick_connect_enabled(void)
     return (cfg.pqc == 0 || cfg.pqc == 1) && cfg.pss != 2;
 }
 
+/* +PQC 0 and 2 enable the short Phase 2 (V.92 9.4); the INFO0 sequences then
+ * carry the request and the procedure runs when both ends ask.  +PSS 2 forces
+ * the full procedure. */
+static bool me_short_phase2_enabled(void)
+{
+    v250_ctl_t cfg;
+
+    if (!g_enable_v92)
+        return false;
+    di_get_v250_settings(&cfg);
+    return (cfg.pqc == 0 || cfg.pqc == 2) && cfg.pss != 2;
+}
+
 static bool me_qc_offer_lapm(void)
 {
     v250_ctl_t cfg;
@@ -9583,7 +9597,8 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
             if (g_v34) {
                 v34_set_v90_mode(g_v34, (g_law == ME_LAW_ALAW) ? 1 : 0);
                 v34_set_v90_u_info(g_v34, g_v90a_u_info);
-                v34_set_v92_info0_capabilities(g_v34, g_enable_v92, 0);
+                v34_set_v92_info0_capabilities(g_v34, g_enable_v92,
+                                                me_short_phase2_enabled() ? 1 : 0);
                 v34_set_v92_pcm_upstream_capability(g_v34,
                     g_enable_v92 && v92_pcm_upstream_advertised());
             }
@@ -9652,7 +9667,8 @@ static void v8_result_handler(void *user_data, v8_parms_t *result)
             v34_set_v90_mode(g_v34, (g_law == ME_LAW_ALAW) ? 1 : 0);
             v34_set_v92_info0_capabilities(g_v34,
                                             g_v92_info0_local_advertised ? 1 : 0,
-                                            0);
+                                            (g_v92_info0_local_advertised
+                                             && me_short_phase2_enabled()) ? 1 : 0);
             v34_set_v92_pcm_upstream_capability(g_v34,
                                                 v92_pcm_upstream_advertised() ? 1 : 0);
         }
@@ -13054,8 +13070,12 @@ static bool get_strict_v90_info1a_locked(v90_info1a_t *info, bool *v92_selected)
         }
         return false;
     }
+    /* V.92 Table 19 bit 33 (raw 2) is the upstream carrier, which a short
+     * Phase 2 has no INFO1d to carry (9.4); the V.90 Table 10 reserves it. */
     return received.raw_12_17 == 0
-        && received.raw_32_33 == 0
+        && (received.raw_32_33 == 0
+            || (received.raw_32_33 == 2 && g_v92_info0_mutual
+                && g_v92_info0_peer_short_phase2 && me_short_phase2_enabled()))
         && received.u_info > 0
         && received.upstream_symbol_rate_code >= 3
         && received.upstream_symbol_rate_code <= 4
@@ -13064,10 +13084,10 @@ static bool get_strict_v90_info1a_locked(v90_info1a_t *info, bool *v92_selected)
 }
 
 /* Read the CRC-validated INFO0a captured by SpanDSP.  Table 16 bit 26 is
- * the analogue V.92 capability and bit 27 requests short Phase 2.  We only
- * implement the full procedure and leave our short request clear. V.92 9.4
- * requires BOTH requests to select short Phase 2; the peer's request alone
- * must not revoke the mutual V.92 capability established by 9.3. */
+ * the analogue V.92 capability and bit 27 requests short Phase 2.  Our own
+ * request follows +PQC (me_short_phase2_enabled).  V.92 9.4 requires BOTH
+ * requests to select short Phase 2 (v34tx.c decides that); the peer's request
+ * alone must not revoke the mutual V.92 capability established by 9.3. */
 static void v92_refresh_info0_confirmation_locked(void)
 {
     v34_v90_info0a_t info0a;

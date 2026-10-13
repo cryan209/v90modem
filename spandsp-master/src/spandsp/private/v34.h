@@ -1095,10 +1095,22 @@ typedef struct
     /*! \brief V.90 PCM law: 0 = µ-law, 1 = A-law */
     int v90_pcm_law;
     /*! \brief V.92 INFO0d extensions.  Table 15 bit 27 advertises V.92
-        capability; bit 26 requests the short Phase 2 procedure.  The
-        application currently implements the long procedure only. */
+        capability; bit 26 requests the short Phase 2 procedure (+PQC 0/2). */
     bool v92_info0_capable;
     bool v92_short_phase2_requested;
+    /*! \brief V.92 9.4 short Phase 2.  `armed`: this attempt's INFO0 exchange
+        was error-free and both INFO0 sequences carried the capability and
+        short-request bits, so the Tone A/B reversal transaction below
+        replaces ranging.  `active`: that transaction is under way.  `failed`:
+        it ran out of time and the call fell back to the full Phase 2, which
+        it then keeps for the rest of the call (a retrain omits INFO0 and
+        never starts a short Phase 2 anyway). */
+    bool v92_short_armed;
+    bool v92_short_active;
+    bool v92_short_failed;
+    bool v92_short_a_seen;
+    int v92_short_count;
+    span_sample_timer_t v92_short_rev_time;
     bool v92_info1d_mode;
     /*! \brief V.92 INFO1d Table 17 bit 70: PCM upstream supported by this
         digital endpoint.  Off by default -- the upstream data path is still
@@ -2028,6 +2040,9 @@ typedef struct
 
     bool info0_acknowledgement;
     uint8_t info0_raw_26_27;
+    /*! \brief V.92 9.4 short Phase 2 is under way: INFO1a carries no INFO1d
+        row to take the upstream carrier from, so its bit 33 says. */
+    bool v92_short_phase2;
     uint8_t info0d_nominal_power_code;
     uint8_t info0d_max_power_code;
     bool info0d_power_measured_at_codec_output;

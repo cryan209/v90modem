@@ -481,6 +481,19 @@ PAIR_RETRAIN=answer ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test alaw v8
 ./engine_pair_test --expect V90 --both-at "AT+PIG=0" --both-env ME_MODE=v92 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --call-expect "CONNECT 48000" --answer-expect "CONNECT 56000" --both-after ATI6 --both-expect "Modulation         V92"
 ./engine_pair_test --alaw --expect V90 --both-at "AT+PIG=0" --both-env ME_MODE=v92 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --call-expect "CONNECT 48000" --both-after ATI6 --both-expect "Modulation         V92"
 ./engine_pair_test --expect V90 --both-env ME_MODE=v92 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --call-expect "CONNECT 31200" --both-after ATI6 --both-expect "Modulation         V90"
+
+# V.92 9.4 short Phase 2: both INFO0s carry bits 26/27, the digital modem
+# reverses Tone B first, the analogue modem answers 40 ms later and sends
+# INFO1a; no probing, no INFO1d (docs/v92_quick_connect.md).
+./engine_pair_test --expect V90 --both-at "AT+PIG=0" --both-at "AT+PQC=2" --both-env ME_MODE=v92 --both-env ME_V34_SPAN_FLOW_LOG=1 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --call-expect "CONNECT 48000" --answer-expect "CONNECT 56000" --answer-log "V.92 9.4.1.1.4: Tone A reversal received" --call-log "V.92 9.4.2.1.4: sending INFO1a" --both-nolog "short Phase 2 abandoned" --both-after ATI6 --both-expect "Modulation         V92"
+./engine_pair_test --alaw --expect V90 --both-at "AT+PIG=0" --both-at "AT+PQC=2" --both-env ME_MODE=v92 --both-env ME_V34_SPAN_FLOW_LOG=1 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --call-expect "CONNECT 48000" --answer-log "V.92 9.4.1.1.4: Tone A reversal received" --call-log "V.92 9.4.2.1.4: sending INFO1a" --both-nolog "short Phase 2 abandoned"
+./engine_pair_test --expect V90 --both-at "AT+PQC=0" --both-env ME_MODE=v92 --both-env ME_V34_SPAN_FLOW_LOG=1 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --call-expect "CONNECT 31200" --answer-log "V.92 9.4.1.1.4: Tone A reversal received" --call-log "V.92 9.4.2.1.4: sending INFO1a" --both-nolog "short Phase 2 abandoned" --both-after ATI6 --both-expect "Modulation         V90"
+# One end alone asking for it is not an agreement: the full Phase 2 runs.
+./engine_pair_test --expect V90 --both-at "AT+PIG=0" --answer-at "AT+PQC=2" --call-at "AT+PQC=3" --both-env ME_MODE=v92 --both-env ME_V34_SPAN_FLOW_LOG=1 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --call-expect "CONNECT 48000" --both-nolog "short Phase 2 ("
+./engine_pair_test --expect V90 --both-at "AT+PIG=0" --call-at "AT+PQC=2" --answer-at "AT+PQC=3" --both-env ME_MODE=v92 --both-env ME_V34_SPAN_FLOW_LOG=1 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --call-expect "CONNECT 48000" --both-nolog "short Phase 2 ("
+# 9.4.1.2.2: the analogue modem never answers the reversal; both ends give up on
+# the short procedure after their timers and the call completes on the full one.
+./engine_pair_test --expect V90 --seconds 60 --both-at "AT+PIG=0" --both-at "AT+PQC=2" --both-env ME_MODE=v92 --both-env ME_V34_SPAN_FLOW_LOG=1 --call-env ME_V90_ROLE=analogue --answer-env ME_V90_JA_HEURISTIC_FALLBACK_MS=0 --call-env V92_SHORT_TEST_NO_REPLY=1 --call-expect "CONNECT 48000" --call-log "short Phase 2 abandoned (no Tone B reversal)" --answer-log "short Phase 2 abandoned (no Tone A reversal)"
 # A whole V.34 call through one slot of the channel bank (docs/v34_fdm.md).
 ./engine_pair_test --expect V34 --expect-connect 24000 --both-env ME_MODE=v34 --fdm-slot 5
 ./engine_pair_test --expect V32BIS --expect-connect 9600 --both-at "AT+MS=V32"
