@@ -477,3 +477,20 @@ This is a property of slmodemd on a shared-clock rig, not something our receiver
 (the best linear fit degrades, not just ours). A real V.92 analogue modem does slave its
 upstream timing to the network clock; whether our receiver needs timing tracking for a peer
 whose estimate wanders is open.
+
+### Repeatability: 5/5 error-free (2026-10-14, `rep1`..`rep5`)
+
+Same settings as `lapm1` (+PQC=1, `\N3` both ends, `slmodemd_map` with `SLM_FREEZE_TX_TIMING=0`,
+130 s hold, payload from 60 s), five calls back to back:
+
+| call | link | up lines (gaps) | down lines (gaps) | rejected upstream frames |
+|---|---|---|---|---|
+| rep1 | V.92 54667 / 32000, V.42bis | 26884 (0) | 22450 (0) | 39 in 90 s |
+| rep2 | same | 28000 (0) | 27950 (0) | 31 in 80 s |
+| rep3 | same | 25950 (0) | 28250 (0) | 35 in 80 s |
+| rep4 | same | 27900 (0) | 27850 (0) | 24 in 80 s |
+| rep5 | same | 28250 (0) | 28200 (0) | 8 in 80 s |
+
+Every call takes exactly one retrain, identically: slmodemd's first Phase 4 check reads
+`ph4MeanErrorEnergyBeforeToAfterUpdateRatio` +2.504 and retrains; the second reads +2.310 and
+passes into data. That ~15 s first-attempt retrain is the remaining startup cost.
