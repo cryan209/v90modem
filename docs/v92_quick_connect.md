@@ -184,3 +184,32 @@ quietly left the call on the full Phase 2 on the digital side, which the analogu
 side then waited out.
 
 Not done: nothing here has met a foreign V.92 modem.
+
+## Qualification against slmodemd (Proxmox rig, 2026-10-13)
+
+First contact with a foreign V.92 modem. Rig: Proxmox host, CT 100 (`slmodem`) runs the
+**stock** D-Modem (`slmodemd` + `d-modem`, Asterisk account 6003), CT 117 (`v90modem-dev`)
+runs our `sip_v90_modem` (account 6002); driver `tools/soak/qc_slm_pve.sh` (run on the
+Proxmox host, `pct exec` into both). Limits of this rig: it is NOT the tower's build -- no
+sinc resampler (slmodemd's internal RcFixed 9.6k<->8k instead, which the tower notes say
+guts V.90 downstream), so no data mode; the repo's `rig/d-modem/d-modem.c` speaks a
+different socket protocol from this slmodemd and cannot replace it.
+
+slmodemd dials us (`AT+MS=92`), us digital, µ-law:
+
+| `+PQC` | result |
+|---|---|
+| 3 (factory) | slm's QC1a (WXYZ 9, LAPM, ANSpcm -15 dBm0) is ignored, ordinary V.8, V.90 Phase 2; ends in retrains / NO CARRIER (rig resampler) |
+| 1, 0 | **short Phase 1 completes against real slmodemd**: we answer QC1a with QCA1d, QTS (UQTS 78) and ANSpcm; slm detects them and sends **TONEq** (9.2.4.3 "TONEq detected", 75 ms silence, Phase 2) |
+
+Phase 2 afterwards: slm's INFO0a carries V.92 capability (bit 26) but **not** the short-Phase-2
+request (bit 27), so both ends correctly select the full Phase 2 (`+PQC=0` degrades to the same
+as `+PQC=1`, no "abandoned" fallback needed). The call then behaves like the `+PQC=3` baseline:
+INFO1a is rejected ("upstream_code=0, downstream_code=6, v92_contract=0") or a Phase 3 retrain
+follows, both caused by the rig's resampler, not by Quick Connect.
+
+Not qualified: our analogue caller against slmodemd answering (`ATA`): slm is an analogue-only
+modem (`digital_side=no`) so it can never answer QC1a with QCA1d, and the runs did not get that
+far -- the PBX answered the call itself after slm's REGISTER drew a 403 (baseline `+PQC=3`
+failed identically). Short Phase 2, ODP/ADP bypass and data mode against slmodemd need the
+tower's resampler build of slmodemd/d-modem, which is not on this rig.
