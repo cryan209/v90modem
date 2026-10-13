@@ -104,9 +104,9 @@ bool v92_qc_start_analogue_answer(v92_qc_t *q, v91_law_t law, bool lapm)
     q->law = law;
     q->lapm = lapm;
     q->ana_answer = true;
-    /* QCA1a, Table 4: analogue, QCA; W0XYZ is the UQTS of a digital caller's QTS,
-       which an analogue caller does not use, so 0. */
-    q->qca_len = v92_build_short_phase1_sequence(false, true, lapm, 0,
+    /* QCA1a, Table 4: analogue, QCA; W0XYZ is the UQTS of a digital caller's QTS
+       (an analogue caller ignores it): 0101, UQTS 70. */
+    q->qca_len = v92_build_short_phase1_sequence(false, true, lapm, 5,
                                                  q->qca_bits, (int) sizeof(q->qca_bits));
     if (q->qca_len != 70)
         return false;
@@ -340,7 +340,13 @@ bool v92_qca_start(v92_qca_t *q, v91_law_t law)
 
 bool v92_qca_start_ansam(v92_qca_t *q, v91_law_t law, int blocks)
 {
+    return v92_qca_start_limit(q, law, blocks, V92_QCA_WAIT_LIMIT);
+}
+
+bool v92_qca_start_limit(v92_qca_t *q, v91_law_t law, int blocks, long limit)
+{
     v92_qca_init(q);
+    q->wait_limit = limit;
     q->pcm_blocks_needed = blocks;
     q->law = law;
     q->state = V92_QCA_WAIT_PCM;
@@ -361,7 +367,7 @@ int v92_qca_tx(v92_qca_t *q, uint8_t *cw, int n)
         case V92_QCA_WAIT_PCM:
             cw[done++] = sil;
             q->waited++;
-            if (q->waited >= V92_QCA_WAIT_LIMIT) {
+            if (q->waited >= q->wait_limit) {
                 q->state = V92_QCA_V8;
                 return done;
             }

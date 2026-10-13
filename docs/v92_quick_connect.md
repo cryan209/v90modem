@@ -115,6 +115,27 @@ ANSam in place of ANSpcm.
 
 Not covered: a digital caller (QC1d, QC2d), which this engine never is.
 
+## A digital modem calling (9.2.2; 9.2.3.1 and 9.2.3.3 for the answerer)
+
+The digital caller already sent QC1d with CM whenever V.92 was on offer (octet
+0x45). With `+PQC` 0 or 1 it now acts on the reply:
+
+- **QCA1a** (from V.8; Table 4, whose W0XYZ is the UQTS for our QTS) makes it stop CM
+  and, after 75 ms of silence, send QTS, QTS\ and ANSpcm until TONEq comes, then 75
+  ms of silence and Phase 2 as the V.90 digital role. Over V.8bis, a CRe is answered
+  by QC2d (Table 11) and QCA2a (Table 5) plays the same part.
+- The analogue answerer answers QC1d / QC2d with QCA1a / QCA2a (WXYZ 0101, UQTS 70) and
+  then, silent, waits up to 2 s for ANSpcm for 1 s (9.2.3.3), sends TONEq until it
+  stops, 75 ms of silence, Phase 2. A digital answerer ignores a QC1d (9.2.4.1 only
+  says it "may" turn analogue).
+
+**Phase 2 after it does not work**, and did not before: the digital caller starts a
+V.90 digital-role Phase 2 and our analogue-role answerer can only run V.34
+(SpanDSP keys the analogue INFO sequences off `calling_party`, so an analogue
+modem cannot answer a V.90 call). The pair tests therefore check Phase 1 by log
+and expect no CONNECT; they should become ordinary CONNECT tests when that
+exists. A foreign analogue answerer is what this was written for.
+
 ## Short Phase 2 (9.4), both roles
 
 With `+PQC` 0 or 2 each modem's INFO0 carries the V.92 capability bit and the
@@ -156,8 +177,8 @@ nothing here has met a foreign V.92 modem.
 
 ## Not implemented (either procedure)
 
-- A digital modem calling (QC1d/QC2d), and a digital answerer taking the
-  analogue role when it hears QC1d (9.2.4.1).
+- A digital answerer taking the analogue role when it hears QC1d (9.2.4.1), and
+  an analogue answerer for a V.90 call (Phase 2).
 - **ODP/ADP bypass** (9.2.5) on the live path: the P bit is sent and read, and
   the existing LAPM handling takes the caller's P bit, but no V.42 detection
   phase is skipped here.

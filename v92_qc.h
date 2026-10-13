@@ -147,6 +147,7 @@ typedef struct {
     int pcm_run, pcm_miss;
     long tonq_symbols;
     int pcm_blocks_needed;
+    long wait_limit;                  /* symbols before giving up on the tone */
 } v92_qca_t;
 
 void v92_qca_init(v92_qca_t *q);
@@ -156,6 +157,9 @@ bool v92_qca_start(v92_qca_t *q, v91_law_t law);
  * and then answered with TONEq, for `blocks` 10 ms blocks (9.2.1.1: until
  * detected; 9.2.1.2: for 1 s). */
 bool v92_qca_start_ansam(v92_qca_t *q, v91_law_t law, int blocks);
+/* The same, with the limit (symbols) the caller's clause gives: 9.2.3.3 allows the
+ * analogue answerer 2 s for ANSpcm after QCA1a/QCA2a. */
+bool v92_qca_start_limit(v92_qca_t *q, v91_law_t law, int blocks, long limit);
 /* As v92_qc_tx(): returns how many codewords it supplied, short at the end. */
 int v92_qca_tx(v92_qca_t *q, uint8_t *codewords, int n);
 void v92_qca_rx(v92_qca_t *q, const uint8_t *codewords, int n);

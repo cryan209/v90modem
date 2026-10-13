@@ -689,7 +689,7 @@ static void v92_decode(v8_state_t *s)
        0 at bit 25 (byte bit 4) of the analogue forms; an answerer that has
        been told to take Quick Connect responds without waiting for the CM. */
     if (!s->calling_party  &&  s->parms.v92_quick_connect  &&  !s->qc_reported
-        &&  !from_digital  &&  !qca  &&  (v92 & 0x10) == 0)
+        &&  !qca  &&  (from_digital  ?  (v92 & 0x38) == 0  :  (v92 & 0x10) == 0))
     {
         s->qc_reported = true;
         s->result.status = V8_STATUS_V92_QUICK_CONNECT;

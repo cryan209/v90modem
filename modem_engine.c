@@ -312,6 +312,7 @@ static bool me_qc2_event_locked(const v8bis_modem_event_t *e);
 static bool me_qc2_tick_locked(void);
 static void qc2_reset_locked(void);
 static bool qc_ansam_watch_locked(void);
+static bool qc_ana_wait_anspcm_locked(void);
 
 /* ------------------------------------------------------------------ */
 /* Phase trace helpers                                                 */
@@ -9248,6 +9249,8 @@ static bool     g_qc_analogue = false;  /* g_qca, not g_qc, owns the line */
 static bool     g_qc_active = false;
 static bool     g_qc_watch = false;     /* analogue answerer: V.8 sends ANSam, the detector listens for TONEq */
 static bool     g_qc_peer_analogue = false;   /* the other end is an analogue modem: V.34 follows, not V.90 */
+static bool     g_qc_dig_caller = false;      /* we are the digital modem CALLING an analogue one (9.2.2) */
+static bool     g_qc_peer_digital = false;    /* we answer as an analogue modem a digital caller (9.2.3.1) */
 static bool     g_qc_finish_pending = false;
 static bool     g_qc_failed = false;     /* tried this call; do not answer a second QC1a */
 static int      g_qc_byte = -1;          /* the caller's QC octet (V.8 byte layout) */
@@ -9272,6 +9275,8 @@ static void qc_call_reset_locked(void)
     g_qc_analogue = false;
     g_qc_watch = false;
     g_qc_peer_analogue = false;
+    g_qc_dig_caller = false;
+    g_qc_peer_digital = false;
     g_qc_active = false;
     g_qc_finish_pending = false;
     g_qc_failed = false;
@@ -9288,11 +9293,8 @@ static bool me_quick_connect_enabled(void)
 {
     v250_ctl_t cfg;
 
-    /* The digital modem answering (9.2.4), the analogue modem calling (9.2.1) and
-       the analogue modem answering (9.2.3): not a digital modem calling, which
-       this engine does not do. */
-    if (!g_enable_v92 || !g_advertise_v90 || g_enable_x2 || g_qc_failed
-        || (g_calling_party && !me_v90_analogue_role()))
+    /* All four roles of 9.2: digital or analogue, calling or answering. */
+    if (!g_enable_v92 || !g_advertise_v90 || g_enable_x2 || g_qc_failed)
         return false;
     di_get_v250_settings(&cfg);
     return (cfg.pqc == 0 || cfg.pqc == 1) && cfg.pss != 2;
@@ -9334,6 +9336,43 @@ static void me_qc_begin(const v8_parms_t *r)
         /* 9.2.1.1: we sent QC1a and the digital modem has answered with QCA1d
          * (V.8 reports it the moment it decodes).  Stop CM, go silent, and
          * wait for ANSpcm. */
+        if (!me_v90_analogue_role()) {
+            /* 9.2.2.1: we are the digital modem, we sent QC1d and CM, and the
+             * analogue answerer has replied QCA1a (its W0XYZ is the UQTS for our
+             * QTS).  Stop CM; 75 ms of silence, QTS, QTS\ and ANSpcm follow. */
+            pthread_mutex_lock(&g_state_mtx);
+            if (g_qc_active || g_qc_failed)
+                why = "a Quick Connect attempt has already run on this call";
+            else if (g_state != ME_V8)
+                why = "not in V.8";
+            else if (b & 1)
+                why = "the answerer is a digital modem";
+            else if (!g_rx_from_g711)
+                why = "the bearer is not G.711 codewords";
+            else if (wxyz == 0xF)
+                why = "UQTS 1111 is not a Quick Connect";
+            else if (!v92_qc_start_after_qca(&g_qc,
+                         g_law == ME_LAW_ALAW ? V91_LAW_ALAW : V91_LAW_ULAW,
+                         uqts, 1 /* -12 dBm0, as QC1d's LM said */, me_qc_offer_lapm(), 0))
+                why = "the sequence could not be started";
+            if (why) {
+                ME_LOG("[ME] V.92 9.2.2.1: QCA1a seen but not taken (%s); continuing V.8\n", why);
+                pthread_mutex_unlock(&g_state_mtx);
+                return;
+            }
+            g_qc_active = true;
+            g_qc_finish_pending = false;
+            g_qc_byte = b;
+            g_qc_lapm = (b & 0x04) != 0;
+            g_qc_peer_analogue = true;
+            g_qc_dig_caller = true;
+            g_phase_start_ms = trace_now_ms();
+            ME_LOG("[ME] V.92 9.2.2.1: QCA1a (UQTS=%d, P=%d) -> silence, QTS, ANSpcm, TONEq\n",
+                   uqts, g_qc_lapm ? 1 : 0);
+            trace_phase("V92 QCA1a: short Phase 1 (digital caller)");
+            pthread_mutex_unlock(&g_state_mtx);
+            return;
+        }
         pthread_mutex_lock(&g_state_mtx);
         if (g_qc_active || g_qc_failed)
             why = "a Quick Connect attempt has already run on this call";
@@ -9371,7 +9410,8 @@ static void me_qc_begin(const v8_parms_t *r)
     if (me_v90_analogue_role()) {
         /* 9.2.3.1: an analogue answerer that hears QC1a from an analogue caller
          * "may" answer QCA1a, then ANSam 75 ms later, and wait for TONEq (Figure 7).
-         * A digital caller's QC1d is not one this engine sees (it never calls). */
+         * A digital caller's QC1d is answered with QCA1a as well, and then it is
+         * ANSpcm that is waited for (9.2.3.3). */
         pthread_mutex_lock(&g_state_mtx);
         if (g_qc_active || g_qc_failed)
             why = "a Quick Connect attempt has already run on this call";
@@ -9383,7 +9423,8 @@ static void me_qc_begin(const v8_parms_t *r)
                      g_law == ME_LAW_ALAW ? V91_LAW_ALAW : V91_LAW_ULAW, me_qc_offer_lapm()))
             why = "the response could not be started";
         if (why) {
-            ME_LOG("[ME] V.92 9.2.3.1: QC1a seen but not taken (%s); continuing V.8\n", why);
+            ME_LOG("[ME] V.92 9.2.3.1: QC1%c seen but not taken (%s); continuing V.8\n",
+                   (b & 1) ? 'd' : 'a', why);
             pthread_mutex_unlock(&g_state_mtx);
             return;
         }
@@ -9391,10 +9432,15 @@ static void me_qc_begin(const v8_parms_t *r)
         g_qc_finish_pending = false;
         g_qc_byte = b;
         g_qc_lapm = (b & 0x04) != 0;
-        g_qc_peer_analogue = true;
+        g_qc_peer_analogue = (b & 1) == 0;
+        g_qc_peer_digital = (b & 1) != 0;
         g_phase_start_ms = trace_now_ms();
-        ME_LOG("[ME] V.92 9.2.3.1: QC1a (P=%d) from an analogue modem -> QCA1a, ANSam, TONEq\n",
-               g_qc_lapm ? 1 : 0);
+        if (g_qc_peer_digital)
+            ME_LOG("[ME] V.92 9.2.3.1: QC1d (P=%d) from a digital modem -> QCA1a, then ANSpcm, TONEq\n",
+                   g_qc_lapm ? 1 : 0);
+        else
+            ME_LOG("[ME] V.92 9.2.3.1: QC1a (P=%d) from an analogue modem -> QCA1a, ANSam, TONEq\n",
+                   g_qc_lapm ? 1 : 0);
         trace_phase("V92 QC1a: short Phase 1 (analogue answerer)");
         pthread_mutex_unlock(&g_state_mtx);
         return;
@@ -9405,6 +9451,8 @@ static void me_qc_begin(const v8_parms_t *r)
         why = "a Quick Connect attempt has already run on this call";
     else if (g_state != ME_V8 || g_calling_party)
         why = "not answering in V.8";
+    else if (b & 1)
+        why = "the caller is a digital modem (V.91 territory, not Quick Connect)";
     else if (!g_rx_from_g711)
         why = "the bearer is not G.711 codewords";
     else if (wxyz == 0xF)
@@ -9466,13 +9514,15 @@ static bool me_qc2_event_locked(const v8bis_modem_event_t *e)
     const bool digital = (b & 0x80) != 0;
 
     if (e->type == V8BIS_MEV_QC2_CRE) {
-        if (!g_calling_party || !me_v90_analogue_role() || g_qc_failed || g_qc_active
-            || g_g711_rx_octets == 0) {
+        if (!g_calling_party || g_qc_failed || g_qc_active || g_g711_rx_octets == 0) {
             v8bis_modem_release_cre(g_v8bis);
             return false;
         }
         {
-            uint8_t f[2] = { 0x2D, (uint8_t) (0x0A | (me_qc_offer_lapm() ? 0x20 : 0)) };
+            /* QC2a (Table 3: WXYZ 0101, P, QC, analogue) or, from a digital modem,
+               QC2d (Table 11: LM 01 = -12 dBm0, P, QC, digital). */
+            uint8_t f[2] = { 0x2D, (uint8_t) ((me_v90_analogue_role() ? 0x0A : 0x82)
+                                              | (me_qc_offer_lapm() ? 0x20 : 0)) };
 
             if (!v8bis_modem_send_frame(g_v8bis, true, f, 2)) {
                 v8bis_modem_release_cre(g_v8bis);
@@ -9481,7 +9531,9 @@ static bool me_qc2_event_locked(const v8bis_modem_event_t *e)
         }
         g_qc2_ana_waiting = true;
         g_qc2_ana_idle_since = -1;
-        ME_LOG("[ME] V.92 9.2.1.2: CRe heard; sending QC2a (UQTS 70) instead of answering it\n");
+        ME_LOG("[ME] V.92 %s: CRe heard; sending %s instead of answering it\n",
+               me_v90_analogue_role() ? "9.2.1.2" : "9.2.2.2",
+               me_v90_analogue_role() ? "QC2a (UQTS 70)" : "QC2d (LM 1)");
         trace_phase("V92 QC2a sent");
         return false;
     }
@@ -9490,25 +9542,31 @@ static bool me_qc2_event_locked(const v8bis_modem_event_t *e)
         /* 9.2.4.2: QC2a from an analogue modem. */
         int wxyz = ((b & 1) << 3) | (((b >> 1) & 1) << 2) | (((b >> 2) & 1) << 1) | ((b >> 3) & 1);
 
-        if (digital || qca || !e->qc2_high || g_qc_failed || g_qc_active || g_g711_rx_octets == 0
-            || !me_quick_connect_enabled() || wxyz == 0xF || g_qc2_dig_pending
-            || g_qc2_ana_ans_pending)
+        if (qca || !e->qc2_high || g_qc_failed || g_qc_active || g_g711_rx_octets == 0
+            || !me_quick_connect_enabled() || g_qc2_dig_pending || g_qc2_ana_ans_pending)
             return false;
         if (me_v90_analogue_role()) {
-            /* 9.2.3.2: an analogue answerer may answer QC2a with QCA2a (Table 5:
-               analogue, QCA, P, WXYZ 0), then silence and ANSam (Figure 8). */
-            uint8_t f[2] = { 0x2D, (uint8_t) (0x40 | (me_qc_offer_lapm() ? 0x20 : 0)) };
+            /* 9.2.3.2: an analogue answerer answers QC2a, or a digital caller's
+               QC2d, with QCA2a (Table 5: analogue, QCA, P, WXYZ 0101).  After an
+               analogue caller comes silence and ANSam (Figure 8); after a digital
+               one the caller's QTS and ANSpcm. */
+            uint8_t f[2] = { 0x2D, (uint8_t) (0x4A | (me_qc_offer_lapm() ? 0x20 : 0)) };
 
             if (!v8bis_modem_send_frame(g_v8bis, false, f, 2))
                 return false;
             g_qc2_ana_ans_pending = true;
-            g_qc_byte = (lapm ? 0x04 : 0);
+            g_qc_byte = (lapm ? 0x04 : 0) | (digital ? 1 : 0);
             g_qc_lapm = lapm;
-            ME_LOG("[ME] V.92 9.2.3.2: QC2a (P=%d) from an analogue modem -> QCA2a, ANSam, TONEq\n",
-                   lapm ? 1 : 0);
-            trace_phase("V92 QC2a: short Phase 1 (analogue answerer)");
+            g_qc_peer_digital = digital;
+            g_qc_peer_analogue = !digital;
+            ME_LOG("[ME] V.92 9.2.3.2: %s (P=%d) -> QCA2a, then %s, TONEq\n",
+                   digital ? "QC2d from a digital modem" : "QC2a from an analogue modem",
+                   lapm ? 1 : 0, digital ? "ANSpcm" : "ANSam");
+            trace_phase("V92 QC2: short Phase 1 (analogue answerer)");
             return false;
         }
+        if (digital || wxyz == 0xF)
+            return false;
         {
             /* QCA2d: LM 01 (-12 dBm0), P, QCA, digital. */
             uint8_t f[2] = { 0x2D, (uint8_t) (0x02 | (me_qc_offer_lapm() ? 0x20 : 0) | 0x40 | 0x80) };
@@ -9531,6 +9589,30 @@ static bool me_qc2_event_locked(const v8bis_modem_event_t *e)
      * one, in which case it is ANSam (for 1 s) that TONEq answers (9.2.1.2). */
     if (!qca || e->qc2_high || !g_qc2_ana_waiting || g_qc_active)
         return false;
+    if (!me_v90_analogue_role()) {
+        /* 9.2.2.2: the digital caller's QC2d was answered by QCA2a: 75 ms of
+           silence, QTS, QTS\, ANSpcm. */
+        int wxyz = ((b & 1) << 3) | (((b >> 1) & 1) << 2) | (((b >> 2) & 1) << 1) | ((b >> 3) & 1);
+
+        if (digital || wxyz == 0xF)
+            return false;
+        qc2_reset_locked();
+        if (!v92_qc_start_after_qca(&g_qc, g_law == ME_LAW_ALAW ? V91_LAW_ALAW : V91_LAW_ULAW,
+                                    v92_short_phase1_uqts_from_wxyz(wxyz), 1, me_qc_offer_lapm(), 0))
+            return false;
+        g_qc_active = true;
+        g_qc_finish_pending = false;
+        g_qc_byte = (lapm ? 0x04 : 0) | (((wxyz >> 3) & 1) << 3) | (((wxyz >> 2) & 1) << 5)
+                  | (((wxyz >> 1) & 1) << 6) | ((wxyz & 1) << 7);
+        g_qc_lapm = lapm;
+        g_qc_peer_analogue = true;
+        g_qc_dig_caller = true;
+        g_phase_start_ms = trace_now_ms();
+        ME_LOG("[ME] V.92 9.2.2.2: QCA2a (UQTS=%d, P=%d) -> silence, QTS, ANSpcm, TONEq\n",
+               v92_short_phase1_uqts_from_wxyz(wxyz), lapm ? 1 : 0);
+        trace_phase("V92 QCA2a: short Phase 1 (digital caller)");
+        return qc2_free_v8bis_locked();
+    }
     {
         int lm = digital ? ((b & 1) << 1) | ((b >> 1) & 1) : 0;
 
@@ -9560,9 +9642,11 @@ static bool me_qc2_tick_locked(void)
     if (g_qc2_ana_ans_pending && g_v8bis && !v8bis_modem_tx_busy(g_v8bis)) {
         /* QCA2a is out: V.8bis gives way to ANSam (its 75 ms silence is V.8's own). */
         g_qc2_ana_ans_pending = false;
-        g_qc_peer_analogue = true;
         qc2_free_v8bis_locked();
-        (void) qc_ansam_watch_locked();
+        if (g_qc_peer_digital)
+            (void) qc_ana_wait_anspcm_locked();
+        else
+            (void) qc_ansam_watch_locked();
         return true;
     }
     if (g_qc2_dig_pending && g_v8bis && !v8bis_modem_tx_busy(g_v8bis)) {
@@ -9680,6 +9764,25 @@ static bool qc_ansam_watch_locked(void)
     return true;
 }
 
+/* The analogue answerer has sent QCA1a / QCA2a to a digital caller: its QTS and
+ * ANSpcm follow, and TONEq answers them (9.2.3.3, within 2 s). Locked. */
+static bool qc_ana_wait_anspcm_locked(void)
+{
+    if (!v92_qca_start_limit(&g_qca, g_law == ME_LAW_ALAW ? V91_LAW_ALAW : V91_LAW_ULAW,
+                             V92_QCA_PCM_BLOCKS, V92_QC_TONEQ_TIMEOUT)) {
+        g_qc_active = false;
+        g_qc_failed = true;
+        return false;
+    }
+    g_qc_analogue = true;
+    g_qc_active = true;
+    g_qc_finish_pending = false;
+    g_qc_peer_analogue = false;
+    g_phase_start_ms = trace_now_ms();
+    ME_LOG("[ME] V.92 9.2.3.3: QCA sent; silence, waiting for ANSpcm\n");
+    return true;
+}
+
 static void me_qc_finish(void)
 {
     v92_qc_state_t st;
@@ -9693,6 +9796,13 @@ static void me_qc_finish(void)
     g_qc_finish_pending = false;
     st = g_qc_analogue ? (g_qca.state == V92_QCA_PHASE2 ? V92_QC_PHASE2 : V92_QC_V8)
                        : v92_qc_state(&g_qc);
+    if (st == V92_QC_ANSAM && g_qc_peer_digital) {
+        /* QCA1a / QCA2a is out and the caller is digital: now it is the caller's
+         * QTS and ANSpcm that come, and TONEq that answers them (9.2.3.3; 2 s). */
+        (void) qc_ana_wait_anspcm_locked();
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
     if (st == V92_QC_ANSAM) {
         (void) qc_ansam_watch_locked();
         pthread_mutex_unlock(&g_state_mtx);
@@ -9721,6 +9831,9 @@ static void me_qc_finish(void)
     if (g_qc_analogue)
         ME_LOG("[ME] V.92 9.2.1.3: short Phase 1 complete (TONEq %ld symbols); Phase 2\n",
                g_qca.tonq_symbols);
+    else if (g_qc_dig_caller)
+        ME_LOG("[ME] V.92 9.2.2.3: short Phase 1 complete (%ld symbols, QTS at %ld); Phase 2\n",
+               g_qc.total, g_qc.qts_start);
     else if (g_qc_peer_analogue)
         ME_LOG("[ME] V.92 9.2.3.4: short Phase 1 complete (both analogue); V.34 Phase 2\n");
     else
@@ -9735,7 +9848,8 @@ static void me_qc_finish(void)
     synth.v92 = g_qc_byte;
     synth.jm_cm.call_function = V8_CALL_V_SERIES;
     /* Two analogue modems have no PCM leg: plain V.34 (Figures 7 and 8). */
-    synth.jm_cm.modulations = g_qc_peer_analogue ? V8_MOD_V34 : (V8_MOD_V90 | V8_MOD_V34);
+    synth.jm_cm.modulations = (g_qc_peer_analogue && !g_qc_dig_caller)
+                            ? V8_MOD_V34 : (V8_MOD_V90 | V8_MOD_V34);
     synth.jm_cm.peer_modulations = synth.jm_cm.modulations;
     synth.jm_cm.protocols = g_qc_lapm ? V8_PROTOCOL_LAPM_V42 : V8_PROTOCOL_NONE;
     synth.jm_cm.pstn_access = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
