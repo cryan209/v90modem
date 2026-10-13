@@ -6065,6 +6065,17 @@ static void me_v92_data_slicer_locked(void)
      * whole call, offline on its tap. */
     v92_p3_eq_hold(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law], true);
     v92_p3_eq_set_levels(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law], positive, n);
+    /* The decision feedback was trained on four-level TRN2u, where every
+     * decision is right.  On the dense data levels its wrong decisions go
+     * back through the feedback taps -- slmodemd's transmit FIR is a
+     * high-pass whose inverse leans hard on them -- and against slmodemd's
+     * own symbols (a hook on V92Transmitter::process) the output reached
+     * three times the transmitted level within ~200 symbols of this point.
+     * The same TRN2u least-squares window solved feed-forward only reads
+     * 0.050 LU on its data instead of 0.23, and lets the 2 s re-solves be
+     * accepted. */
+    if (v92_p3_eq_use_ff(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law]))
+        ME_LOG("[ME] V.92 data slicer: feed-forward-only taps from the TRN2u solve, decision feedback off\n");
     memcpy(g_v92_data_levels, positive, (size_t)n*sizeof(positive[0]));
     g_v92_data_nlevels = n;
     g_v92_data_err2 = 0.0;
@@ -13780,6 +13791,13 @@ static void me_v92_p4_eq_mode_locked(void)
     int phase;
 
     if (!g_v90 || g_v92_p3_rx.eq_law < 0)
+        return;
+    /* From the CPd acknowledgement on, me_v92_data_slicer_locked() owns the
+     * equaliser (held, feed-forward only, slicing on the data levels,
+     * re-solved by least squares); this runs every block and used to release
+     * the hold again, putting it back on NLMS and the timing loop over the
+     * dense data decisions. */
+    if (g_v92_upstream_slicer_set)
         return;
     eq = &g_v92_p3_rx.eq[g_v92_p3_rx.eq_law];
     phase = v90_get_tx_phase(g_v90);

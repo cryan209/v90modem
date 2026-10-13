@@ -46,6 +46,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "data_interface.h"
 #include "modem_engine.h"
@@ -228,6 +230,7 @@ int main(int argc, char *argv[])
     const char *schedule = NULL;
     /* Its own link, so a replay never fights a live server for /tmp/modem0. */
     const char *pty_link = "/tmp/modem-replay";
+    const char *at_cmds = NULL;
     long start;
     long pos;
     int64_t t0;
@@ -237,7 +240,7 @@ int main(int argc, char *argv[])
     if (argc < 2) {
         fprintf(stderr,
                 "usage: %s <tap.g711> [ulaw|alaw] [--fast] [--from SECONDS]"
-                " [--pty-link PATH] [--dial] [--split] [--schedule IO.bin]\n",
+                " [--pty-link PATH] [--at \"AT..;AT..\"] [--dial] [--split] [--schedule IO.bin]\n",
                 argv[0]);
         return 2;
     }
@@ -253,6 +256,8 @@ int main(int argc, char *argv[])
             from = atof(argv[++i]);
         else if (strcmp(argv[i], "--pty-link") == 0 && i + 1 < argc)
             pty_link = argv[++i];
+        else if (strcmp(argv[i], "--at") == 0 && i + 1 < argc)
+            at_cmds = argv[++i];
         else if (strcmp(argv[i], "--dial") == 0)
             dial = 1;
         else if (strcmp(argv[i], "--split") == 0)
@@ -293,6 +298,31 @@ int main(int argc, char *argv[])
     }
     printf("engine replay: DTE on %s\n", pty_link);
     fflush(stdout);
+    if (at_cmds) {
+        /* The live call's DTE configured the modem before the call (+PQC,
+         * +PIG, ...); the call is connected below, so play that DTE here,
+         * one command at a time, before it is. */
+        int fd = open(pty_link, O_RDWR | O_NOCTTY);
+        char buf[512];
+
+        if (fd < 0) {
+            fprintf(stderr, "cannot open %s to send --at\n", pty_link);
+            return 1;
+        }
+        snprintf(buf, sizeof(buf), "%s", at_cmds);
+        for (char *cmd = strtok(buf, ";"); cmd; cmd = strtok(NULL, ";")) {
+            char line[256];
+            struct timespec pause = { 0, 300000000L };
+
+            snprintf(line, sizeof(line), "%s\r", cmd);
+            if (write(fd, line, strlen(line)) < 0)
+                perror("write --at");
+            nanosleep(&pause, NULL);
+            printf("engine replay: DTE sent %s\n", cmd);
+        }
+        close(fd);
+        fflush(stdout);
+    }
     me_set_law(alaw ? ME_LAW_ALAW : ME_LAW_ULAW);
     if (dial)
         me_dial("replay");

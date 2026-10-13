@@ -75,6 +75,41 @@ static int resample(const double *in, int n, int up, int down, int half,
     return m;
 }
 
+/* rig/d-modem/d-modem.c DM_UP_RESAMPLER=sinc, coefficient for coefficient:
+ * 65-tap Hann-windowed sinc at 4 kHz, five phases normalised to unity DC. */
+static int dmodem_up_sinc65(const double *in, int n, double *out, int out_max)
+{
+    double coef[5][65];
+    int m = 0;
+
+    for (int ph = 0; ph < 5; ph++) {
+        double frac = ph/5.0, sum = 0.0;
+
+        for (int j = -32; j <= 32; j++) {
+            double y = (j - frac)*(8000.0/9600.0);
+            double t = (j - frac + 32)/64.0;
+            double w = (t <= 0.0 || t >= 1.0) ? 0.0 : 0.5 - 0.5*cos(2.0*M_PI*t);
+
+            coef[ph][j + 32] = sinc(y)*w;
+            sum += sinc(y)*w;
+        }
+        for (int j = 0; j < 65; j++)
+            coef[ph][j] /= sum;
+    }
+    for (int k = 0; m < out_max; k++, m++) {
+        int num = k*6, c = num/5;
+        double acc = 0.0;
+
+        if (c >= n)
+            break;
+        for (int j = -32; j <= 32; j++)
+            if (c + j >= 0 && c + j < n)
+                acc += coef[num % 5][j + 32]*in[c + j];
+        out[m] = acc;
+    }
+    return m;
+}
+
 static double mulaw(double x)
 {
     /* G.711 mu-law round trip on the 16-bit scale. */
@@ -93,6 +128,7 @@ static double mulaw(double x)
 }
 
 static bool k3_half_profile;
+static bool live_profile;   /* the CPd we sent live in upsinc1 (Proxmox rig) */
 static int member_policy = V92_UPSTREAM_MEMBER_MIN_X;
 
 static void make_cpd(v92_cpd_frame_t *cpd)
@@ -104,6 +140,21 @@ static void make_cpd(v92_cpd_frame_t *cpd)
     memset(cpd, 0, sizeof(*cpd));
     cpd->modulus_present = true;
     cpd->constellations_present = true;
+    if (live_profile) {
+        /* upsinc1: drn 7 (32000), 20 points, 4G = 90, Mi = 20 / 10 at k = 3. */
+        static const int live[20] = { 227, 688, 1126, 1579, 2130, 2648, 3167,
+                                      3685, 4268, 4787, 5305, 5823, 6342, 6860,
+                                      7378, 7897, 8804, 9322, 9841, 10359 };
+
+        cpd->selected_upstream_drn = 7;
+        cpd->gain_q0_16 = 90;
+        for (int i = 0; i < 20; i++)
+            cpd->points[0][i] = (uint16_t)live[i];
+        cpd->set_sizes[0] = 20;
+        for (int i = 0; i < 12; i++)
+            cpd->moduli[i] = (uint8_t)(i%4 == 3 ? 10 : 20);
+        return;
+    }
     cpd->selected_upstream_drn = 6;
     cpd->gain_q0_16 = 23;
     int n = k3_half_profile ? 14 : 15;
@@ -234,7 +285,9 @@ static void run(int channel)
         memcpy(ds0, f96, (size_t)n96*sizeof(double));
         nout = n96;
     } else {
-        nout = resample(f96, n96, 5, 6, 16, 0.95, ds0, nsym*2);
+        nout = (getenv("CHAIN_DMODEM_UP") && strcmp(getenv("CHAIN_DMODEM_UP"), "sinc65") == 0)
+             ? dmodem_up_sinc65(f96, n96, ds0, nsym*2)
+             : resample(f96, n96, 5, 6, 16, 0.95, ds0, nsym*2);
     }
     /* Received TRN2u was ~1400 rms on the r9 call; scale to that before
      * mu-law, which is what makes the quantisation realistic. */
@@ -343,5 +396,11 @@ int main(void)
     printf("--- slmodemd precoder, LC 14, Mi = 7 at k = 3\n");
     run(CH_IDENTITY);
     run(CH_SLM);
+    live_profile = true;
+    printf("--- slmodemd precoder, live upsinc1 profile (20 points, drn 7, 4G 90)\n");
+    run(CH_IDENTITY);
+    run(CH_SLM);
+    run(CH_RESAMPLERS_ONLY);
+    run(CH_FIR_ONLY);
     return failures ? 1 : 0;
 }

@@ -162,6 +162,14 @@ typedef struct {
     double refit_resid;            /* last solve's rms residual */
     double refit_m[V92_P3_EQ_MAX_TAPS + V92_P3_EQ_MAX_FB]
                   [V92_P3_EQ_MAX_TAPS + V92_P3_EQ_MAX_FB + 1];
+
+    /* Feed-forward-only least-squares taps from the same window as the last
+     * accepted refit (the top-left block of its normal equations), for data
+     * mode: see v92_p3_eq_use_ff(). */
+    double taps_ff[V92_P3_EQ_MAX_TAPS];
+    bool have_ff;
+    bool ff_only;                  /* feedback off: taps_ff in use, refits
+                                      solve feed-forward only */
 } v92_p3_eq_t;
 
 void v92_p3_eq_default_config(v92_p3_eq_config_t *cfg);
@@ -185,6 +193,14 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq);
  * of something the equaliser must not train on (V.92 Phase 3's silences
  * and three-level Su) costs only the frequency error times its length. */
 void v92_p3_eq_hold(v92_p3_eq_t *eq, bool hold);
+
+/* Switch to the feed-forward-only solution of the last accepted refit and
+ * drop the decision feedback for good (later refits solve feed-forward only,
+ * with a fresh residual baseline).  For data mode, where a decision feedback
+ * trained on four-level TRN2u propagates the dense constellation's wrong
+ * decisions.  Returns false (and changes nothing) if no such solution
+ * exists. */
+bool v92_p3_eq_use_ff(v92_p3_eq_t *eq);
 /* Decision-directed on 4-point PAM from here on (Phase 4): decisions,
  * decision feedback, tap and timing adaptation all use the 4-level slicer.
  * Two-level decisions on a four-level signal corrupt every feedback term. */

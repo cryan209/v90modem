@@ -103,6 +103,22 @@ gcc -m32 -O2 -c phase3_decision_hook.c -o p3hook.o
 # link as slmodemd_map, with p3hook.o and dsplibs_p3.o in place of dsplibs_ec.o -> slmodemd_p3
 ```
 
+## Phase-4 transmit-symbol hook (`phase4_symbol_hook.c`)
+
+Records every upstream symbol slmodemd transmits in Phase 4 and data to `/tmp/p4sym.bin`
+(int16 pairs [state, symbol]; state 100 = data from `V92Transmitter::process`). Build as the
+Phase-3 hook, adding to `dsplibs_p3.o`:
+
+```sh
+objcopy --add-symbol _ZN18V92Phase4Modulator14generateSymbolEv_original=.text:0x18050,global,function \
+        --add-symbol _ZN14V92Transmitter7processEPhjPsRj_original=.text:0x54590,global,function \
+        dsplibs_p3.o dsplibs_p4.o
+gcc -m32 -O2 -c phase4_symbol_hook.c -o p4hook.o   # link with p3hook.o p4hook.o dsplibs_p4.o -> slmodemd_p4
+```
+
+Data symbols are produced ahead of emission (a ~600-symbol queue), and 21 `generateSymbol`
+symbols interleave at the hand-over, so align data separately from Phase 4.
+
 ## TRN2d reference capture (`tools/smartlink_trn2d_reference_wrap.c`)
 
 Settles which of sign / level / timing the peer's Phase-4 Error Energy plateau

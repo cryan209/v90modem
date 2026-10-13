@@ -349,9 +349,40 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
             double atd[LS_MAX];
             double fit = 0.0;
 
+            static double mff[LS_MAX][LS_MAX + 1];
+            double wff[LS_MAX];
+            bool ff_ok;
+
             for (int i = 0; i < dim; i++)
                 atd[i] = eq->refit_m[i][dim];
-            if (solve_normal(eq->refit_m, dim, w)) {
+            /* The feed-forward-only fit is the top-left n x n block of the
+             * same normal equations; take it before solve_normal() destroys
+             * them in place. */
+            for (int i = 0; i < n; i++) {
+                for (int j = i; j < n; j++)
+                    mff[i][j] = eq->refit_m[i][j];
+                mff[i][n] = eq->refit_m[i][dim];
+            }
+            ff_ok = solve_normal(mff, n, wff);
+            if (eq->ff_only) {
+                /* Feedback is off: the feed-forward solution is the solve. */
+                double fitff = 0.0;
+
+                for (int i = 0; i < n; i++)
+                    fitff += wff[i]*atd[i];
+                eq->refit_resid = sqrt(fmax(eq->refit_dd - fitff, 0.0)/eq->refit_n);
+                if (!ff_ok) {
+                    eq->refits_rejected++;
+                } else if (eq->refit_base > 0.0 && eq->refit_resid > 2.0*eq->refit_base) {
+                    eq->refits_rejected++;
+                } else {
+                    if (eq->refit_base == 0.0)
+                        eq->refit_base = eq->refit_resid;
+                    memcpy(eq->taps, wff, (size_t)n*sizeof(double));
+                    memcpy(eq->taps_ff, wff, (size_t)n*sizeof(double));
+                    eq->refits++;
+                }
+            } else if (solve_normal(eq->refit_m, dim, w)) {
                 /* For the least-squares w, |Aw - d|^2 = d'd - w'A'd. */
                 for (int i = 0; i < dim; i++)
                     fit += w[i]*atd[i];
@@ -363,6 +394,10 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
                         eq->refit_base = eq->refit_resid;
                     memcpy(eq->taps, w, (size_t)n*sizeof(double));
                     memcpy(eq->fb, w + n, (size_t)eq->cfg.nfb*sizeof(double));
+                    if (ff_ok) {
+                        memcpy(eq->taps_ff, wff, (size_t)n*sizeof(double));
+                        eq->have_ff = true;
+                    }
                     eq->refits++;
                 }
             }
@@ -382,7 +417,7 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
             energy += eq->dhist[j]*eq->dhist[j];
         for (int j = 0; j < n; j++)
             eq->taps[j] += mu*e*u[j]/energy;
-        for (int j = 0; j < eq->cfg.nfb; j++)
+        for (int j = 0; j < eq->cfg.nfb && !eq->ff_only; j++)
             eq->fb[j] += mu*e*eq->dhist[j]/energy;
 
         /* Second-order timing loop on a slow average of the detector (for
@@ -467,6 +502,17 @@ double v92_p3_eq_refit_residual(const v92_p3_eq_t *eq)
 void v92_p3_eq_hold(v92_p3_eq_t *eq, bool hold)
 {
     eq->hold = hold;
+}
+
+bool v92_p3_eq_use_ff(v92_p3_eq_t *eq)
+{
+    if (!eq || !eq->have_ff)
+        return false;
+    memcpy(eq->taps, eq->taps_ff, (size_t)eq->cfg.ntaps*sizeof(double));
+    memset(eq->fb, 0, sizeof(eq->fb));
+    eq->ff_only = true;
+    eq->refit_base = 0.0;         /* data-mode residuals are a new scale */
+    return true;
 }
 
 

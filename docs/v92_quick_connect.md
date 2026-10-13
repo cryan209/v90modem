@@ -374,3 +374,36 @@ upstream**, `Link: DP is V.92, rate: rx 54667, tx 32000`, `CONNECT 54667`. Not y
   CONNECT, no lines move either way, and slmodemd hangs up.
 - slmodemd's Phase 4 verdict on attempt 1 varies between calls (ratio 1.171 passed in
   `sufix1`, 2.504 failed here), so attempt 1 does not always reach data.
+
+### B1u in data mode: our decision feedback, measured against slmodemd's own symbols (2026-10-14)
+
+`rig/slmodemd/phase4_symbol_hook.c` records slmodemd's transmitted upstream symbols
+(`V92Phase4Modulator::generateSymbol` for Phase 4, `V92Transmitter::process` for data -- its
+`written` argument is the exact count; hooking `V92BitsToSymbol::process` instead reads stale
+buffer). slmodemd transmits our CPd exactly: 100% of 145644 data symbols on +-1.3733 x point,
+rms 0.98 LU. The bearer is clean (our tap = mu-law of d-modem's output, one fixed lag, error
+<= 1.4 quantisation steps), and a least-squares FIR fitted against the true symbols reads
+0.030 LU on TRN2u and 0.033 LU on data. So the path is linear and decodable; the fault is ours.
+
+Against the true symbols, our equaliser reads 0.018 LU through TRN2u, SUVu and CPu, then at
+the CPd acknowledgement (data slicer) its output jumps to three times the transmitted level
+within ~200 symbols. The cause is the 8-tap decision feedback trained on four-level TRN2u:
+on the 20 dense data levels its wrong decisions recirculate (slmodemd's transmit FIR is a
+high-pass whose inverse leans on the feedback). Fixes:
+- `v92_p3_eq` also solves the feed-forward-only fit from each least-squares window (the
+  top-left block of the same normal equations) and `v92_p3_eq_use_ff()` switches to it with
+  feedback off; the engine does so at the data slicer.
+- `me_v92_p4_eq_mode_locked()` no longer releases the data slicer's hold on every block.
+
+Replay of `p4sym3` (CPd unchanged): data 0.227 -> 0.050 LU from the nearest level, rms
+distance 142.7 -> 72.3 DS0, data-mode re-solves 1 accepted / 5 refused -> 6 / 0, best B1u
+candidate 3 -> 6 of 16 frames. **Still no lock**: 0.050 LU against a 0.079 half-spacing is
+~10% symbol errors. TRN2u-trained linear taps give 0.049 on this data while data-trained ones
+give 0.033, and decision-directed re-solves cannot get there through those errors. Next:
+train on B1u data-aided (known scrambled ones through the CPd mapper), or design the CPd with
+margin for 0.05 LU.
+
+Tools: `v90_engine_replay --at "AT..;AT.."` plays the live DTE's configuration before the call
+(the `+PQC`/`+PIG` a V.92 replay needs; `--fast` reproduces the live numbers exactly);
+`v92_slm_chain_test` has the live 20-point profile (locks in the model) and
+`CHAIN_DMODEM_UP=sinc65` for the new d-modem decimator.
