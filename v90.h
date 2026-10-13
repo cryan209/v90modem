@@ -213,6 +213,12 @@ v34_state_t *v90_get_v34(v90_state_t *s);
 /* Get current Phase 3/4 TX sub-state. */
 v90_tx_phase_t v90_get_tx_phase(v90_state_t *s);
 
+/* V.92 8.3.6: with QTS sent, data frame alignment is the digital modem's
+ * from the first QTS symbol on.  Before each codeword the engine says which
+ * frame interval (0-5) it is in, or -1 for no constraint; Sd then waits for
+ * a frame boundary. */
+void v90_set_tx_frame_phase(v90_state_t *s, int phase);
+
 /*
  * Check if V.90 Phase 3 TX should take over from V.34 TX.
  * Returns true once Phase 2 INFO exchange is complete and the

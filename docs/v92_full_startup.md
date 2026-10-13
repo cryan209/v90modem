@@ -4,7 +4,8 @@ Reference: `ITU Docs/T-REC-V.92-200011-I!!PDF-E.pdf`, clauses 3, 6,
 8.5–8.8 and 9.3–9.6, Tables 15–18, 20, 23, 27, 30 and 31. The local
 Amendment 1, Amendment 2 and Corrigendum 1 were checked too. Amendment 1
 retains Table 18's 276-symbol MD unit. This implements the full-training
-procedure, not Quick Connect.
+procedure; Quick Connect's short Phase 1 for the answering digital modem is
+in `docs/v92_quick_connect.md`.
 
 ## Endpoint interfaces
 

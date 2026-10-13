@@ -187,6 +187,8 @@ hsf_v90_coupler
 v42bis_test
 v92_mh_test
 v92_mh_line_test
+v92_qc_test
+v92_qc_engine_test
 v92_mh_retrain_test
 v92_rn_test
 v92_rsig_test

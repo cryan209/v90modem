@@ -51,6 +51,8 @@
 #include "v92_mh.h"
 #include "v92_mh_line.h"
 #include "v92_tone_a.h"
+#include "v92_qc.h"
+#include "v92_short_phase1_decode.h"
 #include "v25_automode.h"
 
 #include <spandsp.h>
@@ -303,6 +305,7 @@ static int g_report_tx_rate = 0;
 static int g_report_rx_rate = 0;
 static void on_training_complete(me_modulation_t mod, int rate, const char *name);
 static void v8_result_handler(void *user_data, v8_parms_t *result);
+static bool me_quick_connect_enabled(void);
 
 /* ------------------------------------------------------------------ */
 /* Phase trace helpers                                                 */
@@ -4161,6 +4164,9 @@ static int me_start_or_restart_v8_locked(int answer_tone)
         v8_parms.v92            = g_calling_party ? 0x45 : 0x47;
     else
         v8_parms.v92            = -1;
+    /* V.92 9.2.4.1: an answering digital modem that detects QC1a answers it
+       with the short Phase 1 sequence instead of running V.8 (+PQC). */
+    v8_parms.v92_quick_connect = me_quick_connect_enabled() ? 1 : 0;
     v8_parms.jm_cm.call_function      = V8_CALL_V_SERIES;
     v8_parms.jm_cm.modulations        = me_offer_bits(g_advertise_v22,
                                                       g_advertise_v32,
@@ -9201,10 +9207,204 @@ static void me_x2_rx_locked(const int16_t *samples, int count)
     me_x2_progress_locked();
 }
 
+
+/* ------------------------------------------------------------------ */
+/* V.92 Quick Connect: short Phase 1, digital answerer (9.2.4)         */
+/* ------------------------------------------------------------------ */
+
+/* V.8 reports V8_STATUS_V92_QUICK_CONNECT the moment it has decoded a QC1a
+ * (V.92 Table 2) while we answer.  From there the line belongs to
+ * v92_qc_t -- QCA1d, silence, QTS, QTS\, ANSpcm, then silence once TONEq
+ * arrives -- until it says PHASE2 (start V.90/V.92 Phase 2 exactly as if V.8
+ * had just completed) or V8 (no TONEq in 2 s: ANSam and ordinary V.8, 9.2.4.3).
+ *
+ * The engine stays in ME_V8 throughout.  Receive and transmit are taken in the
+ * G.711 domain before anything else sees them, because QTS and ANSpcm are
+ * codeword sequences; V.8 itself is simply not fed for the duration. */
+static v92_qc_t g_qc;
+static bool     g_qc_active = false;
+static bool     g_qc_finish_pending = false;
+static bool     g_qc_failed = false;     /* tried this call; do not answer a second QC1a */
+static int      g_qc_byte = -1;          /* the caller's QC octet (V.8 byte layout) */
+static bool     g_qc_lapm = false;
+/* 8.3.6: "The digital modem shall keep data frame alignment from this point
+ * on" -- the first QTS symbol is frame interval 0.  g_qc_qts_abs is that
+ * codeword's index in the transmit stream (counted like g_g711_tx_octets), and
+ * the g_tx_chunk_* trio says where the block being produced sits in it, so
+ * the Phase 3 generator can tell Sd which frame interval each codeword is in. */
+static bool     g_qc_aligned = false;
+static uint64_t g_qc_qts_abs = 0;
+static uint64_t g_qc_origin = 0;
+static uint8_t *g_tx_chunk_ptr = NULL;
+static int      g_tx_chunk_len = 0;
+static uint64_t g_tx_chunk_base = 0;
+
+static void qc_call_reset_locked(void)
+{
+    v92_qc_free(&g_qc);
+    v92_qc_init(&g_qc);
+    g_qc_active = false;
+    g_qc_finish_pending = false;
+    g_qc_failed = false;
+    g_qc_byte = -1;
+    g_qc_aligned = false;
+}
+
+/* +PQC 0 and 1 enable short Phase 1; 3 disables; +PSS 2 forces the full
+ * startup.  Needs V.92 on offer, the digital V.90/V.92 role, and a G.711
+ * bearer (checked again when a QC1a arrives, since QTS cannot be sent as
+ * linear audio). */
+static bool me_quick_connect_enabled(void)
+{
+    v250_ctl_t cfg;
+
+    if (!g_enable_v92 || !g_advertise_v90 || me_v90_analogue_role()
+        || g_calling_party || g_enable_x2 || g_qc_failed)
+        return false;
+    di_get_v250_settings(&cfg);
+    return (cfg.pqc == 0 || cfg.pqc == 1) && cfg.pss != 2;
+}
+
+static bool me_qc_offer_lapm(void)
+{
+    v250_ctl_t cfg;
+    v250_ec_policy_t pol;
+
+    di_get_v250_settings(&cfg);
+    v250_ctl_ec_policy(&cfg, g_calling_party, &pol);
+    return !(cfg.es_set && !pol.attempt);
+}
+
+static void me_qc_begin(const v8_parms_t *r)
+{
+    int b = r->v92;
+    /* Table 2: W is octet bit 3, then a 0, then X, Y, Z (bits 5..7). */
+    int wxyz = (((b >> 3) & 1) << 3) | (((b >> 5) & 1) << 2)
+             | (((b >> 6) & 1) << 1) | ((b >> 7) & 1);
+    int uqts = v92_short_phase1_uqts_from_wxyz(wxyz);
+    const char *why = NULL;
+
+    pthread_mutex_lock(&g_state_mtx);
+    if (g_qc_active || g_qc_failed)
+        why = "a Quick Connect attempt has already run on this call";
+    else if (g_state != ME_V8 || g_calling_party)
+        why = "not answering in V.8";
+    else if (!g_rx_from_g711)
+        why = "the bearer is not G.711 codewords";
+    else if (wxyz == 0xF)
+        why = "UQTS 1111 is the modem-on-hold cleardown, not a Quick Connect";
+    else if (!v92_qc_start(&g_qc,
+                           g_law == ME_LAW_ALAW ? V91_LAW_ALAW : V91_LAW_ULAW,
+                           uqts, 1 /* -12 dBm0 */, me_qc_offer_lapm()))
+        why = "the response could not be started";
+    if (why) {
+        ME_LOG("[ME] V.92 9.2.4.1: QC1a seen but not taken (%s); continuing V.8\n", why);
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    g_qc_active = true;
+    g_qc_finish_pending = false;
+    g_qc_byte = b;
+    g_qc_lapm = (b & 0x04) != 0;
+    g_phase_start_ms = trace_now_ms();
+    ME_LOG("[ME] V.92 9.2.4.1: QC1a (WXYZ=%X, UQTS=%d, P=%d) -> QCA1d, QTS, ANSpcm %s, TONEq\n",
+           wxyz, uqts, g_qc_lapm ? 1 : 0, me_v92_anspcm_level_to_str(1));
+    trace_phase("V92 QC1a: short Phase 1 (UQTS %d)", uqts);
+    pthread_mutex_unlock(&g_state_mtx);
+}
+
+/* Receive side, called with the lock held on every codeword block while
+ * g_qc_active.  Always consumes the block. */
+static void qc_rx_locked(const uint8_t *codewords, int count)
+{
+    v92_qc_state_t before = v92_qc_state(&g_qc);
+
+    v92_qc_rx(&g_qc, codewords, count);
+    if (before == V92_QC_ANSPCM && v92_qc_state(&g_qc) == V92_QC_SILENCE) {
+        ME_LOG("[ME] V.92 9.2.4.3: TONEq detected; ANSpcm stopped, 75 ms of silence follows\n");
+        trace_phase("V92 TONEq detected");
+    }
+}
+
+/* Transmit side: how many of `count` codewords the sequence supplied, or -1
+ * when it is not running.  The count is short exactly when the sequence has
+ * just ended, and the caller then runs me_qc_finish() outside the lock. */
+static int qc_tx_locked(uint8_t *codewords, int count)
+{
+    int n;
+
+    if (!g_qc_active || g_qc_finish_pending)
+        return -1;
+    if (g_qc.total == 0)
+        g_qc_origin = g_tx_chunk_base;
+    n = v92_qc_tx(&g_qc, codewords, count);
+    if (g_qc.qts_start >= 0 && !g_qc_aligned) {
+        g_qc_qts_abs = g_qc_origin + (uint64_t) g_qc.qts_start;
+        g_qc_aligned = true;
+    }
+    if (!v92_qc_running(&g_qc))
+        g_qc_finish_pending = true;
+    return n;
+}
+
+static void me_qc_finish(void)
+{
+    v92_qc_state_t st;
+    v8_parms_t synth;
+
+    pthread_mutex_lock(&g_state_mtx);
+    if (!g_qc_finish_pending) {
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    g_qc_finish_pending = false;
+    g_qc_active = false;
+    g_qc_failed = true;
+    st = v92_qc_state(&g_qc);
+    if (st != V92_QC_PHASE2) {
+        /* 9.2.4.3: no TONEq in the 2 s after QCA1d.  Send ANSam and go on by
+         * V.8, which the far end will do too once its own timer runs out. */
+        ME_LOG("[ME] V.92 9.2.4.3: no TONEq within 2 s of QCA1d; ANSam and V.8\n");
+        trace_phase("V92 QC: no TONEq -> V.8");
+        v92_qc_free(&g_qc);
+        g_qc_aligned = false;
+        g_phase_start_ms = trace_now_ms();
+        if (me_start_or_restart_v8_locked(g_v8_answer_tone) != 0)
+            ME_LOG("[ME] v8_init failed after the Quick Connect timeout\n");
+        else
+            v25_automode_arm_locked();
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+    ME_LOG("[ME] V.92 9.2.4.3: short Phase 1 complete (%ld symbols, QTS at %ld); Phase 2\n",
+           g_qc.total, g_qc.qts_start);
+    trace_phase("V92 QC: short Phase 1 complete -> Phase 2");
+    /* What V.8 would have settled on, as far as the rest of the call can
+     * tell: the analogue modem is a V.90 modem (it signalled V.92 in QC1a)
+     * and its INFO0a will say the rest. */
+    memset(&synth, 0, sizeof(synth));
+    synth.status = V8_STATUS_V8_CALL;
+    synth.v92 = g_qc_byte;
+    synth.jm_cm.call_function = V8_CALL_V_SERIES;
+    synth.jm_cm.modulations = V8_MOD_V90 | V8_MOD_V34;
+    synth.jm_cm.peer_modulations = synth.jm_cm.modulations;
+    synth.jm_cm.protocols = g_qc_lapm ? V8_PROTOCOL_LAPM_V42 : V8_PROTOCOL_NONE;
+    synth.jm_cm.pstn_access = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
+    synth.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_ANALOGUE;
+    synth.jm_cm.nsf = -1;
+    synth.jm_cm.t66 = -1;
+    pthread_mutex_unlock(&g_state_mtx);
+    v8_result_handler(NULL, &synth);
+}
+
 static void v8_result_handler(void *user_data, v8_parms_t *result)
 {
     (void)user_data;
     char mod_str[96];
+    if (result->status == V8_STATUS_V92_QUICK_CONNECT) {
+        me_qc_begin(result);
+        return;
+    }
     v8_mod_mask_to_str(result->jm_cm.modulations, mod_str, sizeof(mod_str));
 
     ME_LOG("[ME] V.8 result: status=%d, modulations=0x%X pstn_access=0x%X\n",
@@ -10153,6 +10353,7 @@ void me_on_sip_connected(void)
     g_v8_tx_count      = 0;
     g_v8_active_answer_tone = g_v8_answer_tone;
     g_v8_answer_tone_retry_done = false;
+    qc_call_reset_locked();
     v92_call_state_reset_locked();
     mh_disarm_locked();
     v92_tone_a_init(&g_v92_tone_a);
@@ -10358,6 +10559,7 @@ void me_on_sip_disconnected_status(int sip_status)
         cc_release(&g_cc);
         g_cc_active = false;
     }
+    qc_call_reset_locked();
     mh_disarm_locked();
     g_mh_retrain_reply = false;
     g_mh_resume_pending = false;
@@ -14137,6 +14339,13 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
         while (pos < len && v90_get_tx_phase(g_v90) != V90_TX_DATA) {
             v90_tx_phase_t phase_before = v90_get_tx_phase(g_v90);
 
+            if (g_qc_aligned && codewords + pos >= g_tx_chunk_ptr
+                && codewords + pos < g_tx_chunk_ptr + g_tx_chunk_len) {
+                uint64_t idx = g_tx_chunk_base
+                             + (uint64_t) ((codewords + pos) - g_tx_chunk_ptr);
+
+                v90_set_tx_frame_phase(g_v90, (int) ((idx - g_qc_qts_abs) % 6));
+            }
             if (v90_phase3_tx_codewords(g_v90, codewords + pos, 1) != 1)
                 return false;
             pos++;
@@ -15861,6 +16070,14 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
             di_write_data(buf, n);
         return;
     }
+    if (g_qc_active) {
+        qc_rx_locked(codewords, count);
+        g_rx_audio_samples += (uint64_t)count;
+        pthread_mutex_unlock(&g_state_mtx);
+        if (g_g711_rx_tap)
+            (void)fwrite(codewords, 1, (size_t)count, g_g711_rx_tap);
+        return;
+    }
     if (mh_rx_locked(codewords, count)) {
         g_rx_audio_samples += (uint64_t)count;
         pthread_mutex_unlock(&g_state_mtx);
@@ -16127,6 +16344,9 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
         return 0;
 
     io_schedule_note('T', count);
+    g_tx_chunk_ptr = codewords;
+    g_tx_chunk_len = count;
+    g_tx_chunk_base = g_g711_tx_octets;
 
     /* Which transmit path a call actually takes, once a second.  A Canon
        TR7560 was sent EXACTLY zero for twenty seconds while the V.34 state
@@ -16229,7 +16449,22 @@ static int me_tx_g711_impl(uint8_t *codewords, int count)
     pthread_mutex_unlock(&g_state_mtx);
 
     pthread_mutex_lock(&g_state_mtx);
-    offset = mh_tx_locked(codewords, count);
+    if (g_qc_finish_pending) {
+        /* Short Phase 1 ended on the last block's final codeword. */
+        pthread_mutex_unlock(&g_state_mtx);
+        me_qc_finish();
+        pthread_mutex_lock(&g_state_mtx);
+    }
+    offset = qc_tx_locked(codewords, count);
+    if (offset >= 0 && offset < count) {
+        /* Short Phase 1 has just ended mid-block: the rest is ordinary
+           transmit, after the next phase has been started. */
+        pthread_mutex_unlock(&g_state_mtx);
+        me_qc_finish();
+        pthread_mutex_lock(&g_state_mtx);
+    } else if (offset < 0) {
+        offset = mh_tx_locked(codewords, count);
+    }
     if (offset == count) {
         g_g711_tx_octets += (uint64_t)count;
         pthread_mutex_unlock(&g_state_mtx);

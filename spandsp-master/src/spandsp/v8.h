@@ -117,7 +117,12 @@ enum v8_status_e
     /*! Non-V.8 calling tone received. */
     V8_STATUS_CALLING_TONE_RECEIVED = 6,
     /*! FAX CNG tone received. */
-    V8_STATUS_FAX_CNG_TONE_RECEIVED = 7
+    V8_STATUS_FAX_CNG_TONE_RECEIVED = 7,
+    /*! V.92 9.2.4.1: an answering digital modem has detected QC1a (a Quick Connect request
+        from an analogue modem). Only reported when parms.v92_quick_connect is set. The
+        caller is expected to abandon V.8 and run the short Phase 1 response; the QC byte
+        is in result.v92. */
+    V8_STATUS_V92_QUICK_CONNECT = 8
 };
 
 typedef struct v8_state_s v8_state_t;
@@ -154,6 +159,8 @@ struct v8_parms_s
     int32_t send_ci;
     int32_t v92;
     v8_cm_jm_parms_t jm_cm;
+    /*! Answerer only: report V8_STATUS_V92_QUICK_CONNECT the moment a QC1a is decoded. */
+    int32_t v92_quick_connect;
 };
 
 #if defined(__cplusplus)

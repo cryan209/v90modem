@@ -526,6 +526,10 @@ struct v90_state_s {
     v90_scrambler_t  scrambler;
     int              diff_enc;      /* Differential encoder state (last sign bit) */
     int              sample_count;  /* Sample counter within current sub-state */
+    /* V.92 8.3.6: after QTS the digital modem keeps data frame alignment, so
+     * Sd must start in frame interval 0.  The engine says which interval the
+     * codeword being produced is in (0-5); -1 means nothing constrains Sd. */
+    int              tx_align_phase;
     int              rep_count;     /* Repetition counter (for Jd, Sd, etc.) */
     bool             phase4_hold_logged;
     bool             jd_rate_cap_logged;
@@ -714,6 +718,20 @@ static int v90_sd_delay_samples(const v90_state_t *s)
  * WaitForSd arming, and an Sd transmitted before that arming leaves its
  * Phase 3 equalizer training on unanchored TRN1d (error energy pinned at
  * ~3000 instead of converging; observed live 2026-07-22, call 10 attempt 2). */
+void v90_set_tx_frame_phase(v90_state_t *s, int phase)
+{
+    if (s)
+        s->tx_align_phase = (phase >= 0 && phase < 6) ? phase : -1;
+}
+
+/* The codeword being produced is the last of a 6-symbol frame (or nothing
+ * constrains the frame), so the next one may start a signal that must begin
+ * in frame interval 0. */
+static bool v90_sd_may_start_next(const v90_state_t *s)
+{
+    return s->tx_align_phase < 0 || s->tx_align_phase == 5;
+}
+
 void v90_set_sd_delay_ms(v90_state_t *s, int ms)
 {
     if (!s)
@@ -3689,7 +3707,8 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                        ? V90_WAIT_JA_RESYNC_SAMPLES
                        : v90_wait_ja_fallback_samples();
 
-        if (!s->v92_phase3 && ++s->sample_count >= wait_limit) {
+        if (!s->v92_phase3 && ++s->sample_count >= wait_limit
+            && v90_sd_may_start_next(s)) {
             fprintf(stderr,
                     "[V90] Phase 3: %s after %.1f ms, starting Sd via interop fallback\n",
                     s->jd_resync_wait ? "Jd resync silence elapsed"
@@ -3713,7 +3732,8 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
          * of it and retrained after its own ~3.1s local timeout, every
          * time. Default 0 preserves prior (immediate) behaviour for
          * everything else; env-tunable per peer. */
-        if (++s->sample_count >= v90_sd_delay_samples(s)) {
+        if (++s->sample_count >= v90_sd_delay_samples(s)
+            && v90_sd_may_start_next(s)) {
             s->tx_phase = V90_TX_SD;
             s->sample_count = 0;
             s->rep_count = 0;
@@ -4453,6 +4473,7 @@ v90_state_t *v90_init_with_v34(v34_state_t *v34, v90_law_t law)
     s->v34 = v34;
     s->law = law;
     s->sd_delay_override_samples = -1;
+    s->tx_align_phase = -1;
     s->tx_phase = V90_TX_PHASE2;
     s->u_info = 80;
     s->owns_v34 = false;
@@ -4686,10 +4707,11 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
         if (s->tx_phase == V90_TX_WAIT_JA) {
             int delay_samples = v90_sd_delay_samples(s);
 
-            if (delay_samples > 0) {
+            if (delay_samples > 0 || s->tx_align_phase >= 0) {
                 fprintf(stderr,
-                        "[V90] Phase 3: analogue Ja detected, delaying Sd by %d ms\n",
-                        delay_samples / 8);
+                        "[V90] Phase 3: analogue Ja detected, delaying Sd by %d ms%s\n",
+                        delay_samples / 8,
+                        s->tx_align_phase >= 0 ? " (to a frame boundary)" : "");
                 s->tx_phase = V90_TX_SD_DELAY;
             } else {
                 fprintf(stderr, "[V90] Phase 3: analogue Ja detected, starting Sd\n");

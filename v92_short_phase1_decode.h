@@ -71,6 +71,14 @@ bool v92_decode_short_phase1_candidate_soft(const uint8_t *bits,
 
 const char *v92_anspcm_level_to_str(int level);
 
+/* Table 2/V.92 transmit side: builds QC1/QCA1 (a) or (d) as the bit
+ * sequence the strict decoder accepts.  aux_value is WXYZ for the analogue
+ * form and LM for the digital one.  Returns 60 (QC) or 70 (QCA) bits. */
+int v92_build_short_phase1_sequence(bool digital_modem, bool qca, bool lapm,
+                                    int aux_value, uint8_t *bits, int max_bits);
+/* Table 2/V.92: the Ucode a WXYZ value selects for QTS, or -1. */
+int v92_short_phase1_uqts_from_wxyz(int wxyz);
+
 bool v92_detect_qts_sequence(const uint8_t *codewords,
                              int total,
                              v91_law_t law,

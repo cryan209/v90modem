@@ -56,8 +56,9 @@ void v250_ctl_reset(v250_ctl_t *c)
     /* 6.8.  +PMH and +PIG default to 0 (enabled) in 6.8.2/6.8.5; here both
      * features are unverified against any foreign V.92 modem, so they stay
      * off until the DTE (or ME_V92_MH / ME_V92_PCM_UPSTREAM) asks.  +PMHT 3
-     * is what the engine has always granted (30 s).  +PQC 3: the short
-     * Phase 1/2 procedures are decode-only here, not live.  +PCW 2: a second
+     * is what the engine has always granted (30 s).  +PQC 3: Quick
+     * Connect has been qualified against no foreign peer, so it stays off
+     * until the DTE asks (AT+PQC=1).  +PCW 2: a second
      * SIP call is refused busy (6.8.1 names 0, which needs circuit 125). */
     c->pcw = 2;
     c->pmh = 1;
@@ -136,8 +137,10 @@ static const range_param_t range_params[] = {
     { "PMH",   1, { 0 },        { 1 },           false, NULL, { 0 } },
     { "PMHT",  1, { 0 },        { 13 },          false, NULL, { 0 } },
     { "PIG",   1, { 0 },        { 1 },           false, NULL, { 0 } },
-    /* 6.8.7/6.8.8: no live short startup, so only "disabled" and "full". */
-    { "PQC",   1, { 3 },        { 3 },           false, "+PQC: (3)", { 0 } },
+    /* 6.8.7/6.8.8: short Phase 1 (Quick Connect, digital answerer) is live;
+       short Phase 2 is not, so 2 -- Phase 2 alone -- is ERROR, and 0 enables
+       what there is. */
+    { "PQC",   1, { 0 },        { 3 },           false, "+PQC: (0,1,3)", { BIT(0) | BIT(1) | BIT(3) } },
     { "PSS",   1, { 0 },        { 2 },           false, "+PSS: (0,2)", { BIT(0) | BIT(2) } },
     /* 6.6.2: the stream method only (the packet methods are not
        implemented); the V.44 codec's own limits. */

@@ -130,7 +130,7 @@ static const at_help_entry_t plus_rows[] = {
     { "+PMHR",     "Ask the far end for MOH; +PMHR: n follows (ERROR if not armed)", NULL },
     { "+PIG=0/1",  "V.92 PCM upstream: 0 offered, 1 not (factory)",   "+PIG?" },
     { "+PCW=1/2",  "Second call mid-call: 1 hang up for it, 2 busy (486)", "+PCW?" },
-    { "+PQC=3 +PSS", "Short Phase 1/2 are not live: PQC 3, PSS 0 or 2 only", "+PQC?" },
+    { "+PQC=0/1/3 +PSS", "Quick Connect (short Phase 1, digital answerer): PQC 0/1 on, 3 off; no short Phase 2", "+PQC?" },
     { "",          "Not implemented: +MA and +PMHF (ERROR: no line to flash).", NULL },
 };
 

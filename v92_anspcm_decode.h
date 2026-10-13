@@ -73,6 +73,10 @@ bool v92_anspcm_table_decode(const uint8_t   *codewords,
                              int              search_end,
                              v92_anspcm_table_hit_t *out);
 
+/* 8.3.1 transmit side: codeword `index` of ANSpcm at `level` (0-3, Table 6)
+ * in `law`.  The sequence is the one the decoder matches against. */
+uint8_t v92_anspcm_codeword(v91_law_t law, int level, long index);
+
 /* Human-readable level string ("-9.5 dBm0" etc.) */
 const char *v92_anspcm_table_level_str(int level);
 

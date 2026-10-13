@@ -145,6 +145,41 @@ static uint16_t v92_build_frame_bits(bool digital_modem,
     return frame_bits;
 }
 
+/* Table 2/V.92 (and Tables 3-5): the transmit side of the strict decoder.
+ * The sequence is ten ONEs, 0101010101, one frame, then the ten ONEs, the
+ * sync and the same frame again; a QCA sequence ends with ten more ONEs
+ * (bit positions 60:69).  Bit 0 goes first.  Returns the length in bits
+ * (60 for QC, 70 for QCA), or 0 if `max_bits` is too small. */
+int v92_build_short_phase1_sequence(bool digital_modem, bool qca, bool lapm,
+                                    int aux_value, uint8_t *bits, int max_bits)
+{
+    static const uint8_t sync_pattern[10] = { 0,1,0,1,0,1,0,1,0,1 };
+    uint16_t frame = v92_build_frame_bits(digital_modem, qca, lapm, aux_value);
+    int n = qca ? 70 : 60;
+
+    if (!bits || max_bits < n)
+        return 0;
+    for (int rep = 0; rep < 2; rep++) {
+        int base = rep * 30;
+
+        for (int i = 0; i < 10; i++) {
+            bits[base + i] = 1;
+            bits[base + 10 + i] = sync_pattern[i];
+            bits[base + 20 + i] = (uint8_t) ((frame >> i) & 1U);
+        }
+    }
+    if (qca) {
+        for (int i = 60; i < 70; i++)
+            bits[i] = 1;
+    }
+    return n;
+}
+
+int v92_short_phase1_uqts_from_wxyz(int wxyz)
+{
+    return v92_uqts_from_wxyz(wxyz);
+}
+
 static bool v92_decode_frame_bits_soft(uint16_t observed_bits,
                                        const double *confidence,
                                        bool use_ch2,

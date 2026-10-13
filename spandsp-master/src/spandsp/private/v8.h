@@ -91,6 +91,7 @@ struct v8_state_s
     bool got_ci;
     bool got_cm_jm;
     bool got_cj;
+    bool qc_reported;
     int zero_byte_count;
     /*! \brief Error and flow logging control */
     logging_state_t logging;

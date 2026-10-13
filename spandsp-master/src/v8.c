@@ -138,6 +138,8 @@ SPAN_DECLARE(const char *) v8_status_to_str(int status)
         return "Calling tone received";
     case V8_STATUS_FAX_CNG_TONE_RECEIVED:
         return "FAX CNG tone received";
+    case V8_STATUS_V92_QUICK_CONNECT:
+        return "V.92 Quick Connect request (QC1a) received";
     }
     /*endswitch*/
     return "Unknown status";
@@ -681,6 +683,19 @@ static void v92_decode(v8_state_t *s)
              v92,
              lapm ? "yes" : "no",
              anspcm_levels[level]);
+
+    /* V.92 9.2.4.1: QC1a is sent once, followed at once by CM, so it is
+       decoded before the caller can have sent anything else.  Table 2 puts a
+       0 at bit 25 (byte bit 4) of the analogue forms; an answerer that has
+       been told to take Quick Connect responds without waiting for the CM. */
+    if (!s->calling_party  &&  s->parms.v92_quick_connect  &&  !s->qc_reported
+        &&  !from_digital  &&  !qca  &&  (v92 & 0x10) == 0)
+    {
+        s->qc_reported = true;
+        s->result.status = V8_STATUS_V92_QUICK_CONNECT;
+        report_event(s);
+    }
+    /*endif*/
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -852,6 +867,7 @@ static void v8_decode_init(v8_state_t *s)
     s->got_ci = false;
     s->got_cm_jm = false;
     s->got_cj = false;
+    s->qc_reported = false;
     s->zero_byte_count = 0;
     s->rx_data_ptr = 0;
 }

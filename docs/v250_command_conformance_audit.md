@@ -91,8 +91,8 @@ The 6.8 `+P` commands were stubs that answered OK and stored nothing.  Now:
 | `+PMHR` | action | ERROR unless MH is armed on a call in data mode; else OK, the engine sends MHreq, and `+PMHR: <n>` follows (granted T1 code, 0 denied/no answer/ended first, 14 MHnack 0101). |
 | `+PMHF` | ERROR | The digital modem never holds a subscriber line to flash. |
 | `+PIG` | 0, 1 (factory **1**) | Offers V.92 PCM upstream (`ME_V92_PCM_UPSTREAM` wins when set). Same deviation and reason as `+PMH`. |
-| `+PQC` | 3 only | The short Phase 1/2 procedures are decode-only here, not live. |
-| `+PSS` | 0, 2 | 1 (force short) is ERROR for the same reason. |
+| `+PQC` | 0, 1, 3 (factory 3) | Short Phase 1 (Quick Connect, digital answerer) is live: 0 and 1 enable it, 3 disables it. Short Phase 2 is not, so 2 is ERROR and 0 does not enable it. See `docs/v92_quick_connect.md`. |
+| `+PSS` | 0, 2 | 1 (force short) is ERROR: only the answerer's short Phase 1 exists, and that is not a calling-DCE choice. 2 also stops the answerer taking a QC1a. |
 
 All are stored by `&W`.  `+PMHR` and `+PCW` have no live verification: no
 V.92 peer has exercised MH against this modem, and the second-call path is

@@ -390,6 +390,22 @@ bool v92_anspcm_table_decode(const uint8_t   *codewords,
 /* Utilities                                                           */
 /* ------------------------------------------------------------------ */
 
+/* The transmit side: symbol `index` (counted from the first ANSpcm symbol)
+ * of the signal, 8.3.1 -- the 301-symbol period of Tables 7-10, negated
+ * (sign bit, either law) in every other block of 3612 symbols. */
+uint8_t v92_anspcm_codeword(v91_law_t law, int level, long index)
+{
+    uint8_t cw;
+
+    anspcm_build_ref();
+    if (level < 0 || level >= V92_ANSPCM_NUM_LEVELS)
+        level = 1;
+    cw = ref_table[law == V91_LAW_ALAW ? 1 : 0][level][index % V92_ANSPCM_PERIOD];
+    if (((index / V92_ANSPCM_REVERSAL_LEN) & 1) != 0)
+        cw ^= 0x80;
+    return cw;
+}
+
 const char *v92_anspcm_table_level_str(int level)
 {
     switch (level) {
