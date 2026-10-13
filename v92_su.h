@@ -19,6 +19,9 @@ typedef struct {
     bool alaw;
     double window[6], previous_i, previous_q, reference_i, reference_q;
     unsigned filled, stable;
+    /* Sliding six-sample bin on the same absolute clock, for Su-bar. */
+    double slide_i[6], slide_q[6], slide_sum_i, slide_sum_q;
+    unsigned slide_filled, bar_run;
 } v92_su_t;
 void v92_su_init(v92_su_t *s, bool alaw);
 v92_su_event_t v92_su_put(v92_su_t *s, uint8_t cw);

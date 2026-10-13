@@ -88,6 +88,21 @@ slmodemd (the tower's) returns codec 4 (STLC7550) and I/O delay 0; this fork ret
 Note on V.92: this DSP enables V.92 only in a Quick Connect session (Session Type 2); see
 `docs/v92_quick_connect.md`.
 
+## Phase-3 decision hook (`phase3_decision_hook.c`)
+
+Logs every state transition of `V90Phase3Demodulator::getV90Decision` /
+`getV92Decision` to `/tmp/p3hook.txt` and one record per symbol to `/tmp/p3hook.bin`.
+Useful states of `getV92Decision`: 0 WaitForSd, 3 TRN1d known data, 5 TRN1d demod,
+7 wait V92Jd, 8 wait Jp ("V92JdPhase"), 9 Jd demod, 16 -> 19 Phase 3 done, 23 timeout.
+
+```sh
+objcopy --add-symbol _ZN20V90Phase3Demodulator14getV90DecisionEf_original=.text:0x23830,global,function \
+        --add-symbol _ZN20V90Phase3Demodulator14getV92DecisionEf_original=.text:0x21680,global,function \
+        dsplibs_ec.o dsplibs_p3.o
+gcc -m32 -O2 -c phase3_decision_hook.c -o p3hook.o
+# link as slmodemd_map, with p3hook.o and dsplibs_p3.o in place of dsplibs_ec.o -> slmodemd_p3
+```
+
 ## TRN2d reference capture (`tools/smartlink_trn2d_reference_wrap.c`)
 
 Settles which of sign / level / timing the peer's Phase-4 Error Energy plateau

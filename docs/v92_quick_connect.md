@@ -327,3 +327,29 @@ Ruled out, each by a run:
 
 Open: why slmodemd's FIRST V.92 Phase 3 misses an intact Jd. The `V90Phase3Demodulator` state machine (`getV90Decision`, `.text` 0x23830) has `Wait For Jd` /
 `Wait For V92Jd` states whose log lines are below `-d9`.
+
+### Root cause of the startup "Jd miss": our Su-bar detector (2026-10-13, night)
+
+`rig/slmodemd/phase3_decision_hook.c` interposes on slmodemd's per-symbol Phase-3 state
+machines (`getV90Decision` / `getV92Decision`, one call site each) and logs every state
+transition. slmodemd did NOT miss Jd: in attempt 1 it entered Wait-For-V92Jd (state 7) and
+detected our Jd 131 symbols later (7 -> 8); state 8 waits for **Jp** and timed out after
+24803 symbols (`JdPhaseDemod TimeOut`, 8 -> 23). Its `Jd Detected` line prints only at a
+later stage, which is what made it look like a miss. We never sent Jp because our
+`v92_su.c` never reported Su-bar.
+
+9.5.2.1.7 sends Su-bar for only 24.5T (about four of the detector's six-symbol blocks) and
+it lands anywhere on the detector's block grid. The detector required a block to differ
+from the previous one by under 3%, and with the line's ISI none of the reversed blocks did
+on most alignments: replaying the live tap, attempt 1's Su-bar is missed at 5 of 6
+alignments and attempt 2's at 2 of 6. So success depended on where the burst fell. The
+detector now also evaluates the same bin with a sliding window on the absolute clock and
+takes six consecutive reversed windows as Su-bar (`v92_su_test`: both live slices at all
+alignments, synthetic 24.5T Su-bar for 12 phases x 2 laws, no false Su-bar without a
+reversal; the old detector misses 7 cases).
+
+Live (`sufix1`, +PQC=1): slmodemd detects Jd and gets Jp in attempt 1, Phase 3 completes,
+its TRN2 check passes (ratio +1.171, `disable linear mapping study`), it designs 69-point
+constellations and the SUVd/SUVu exchange runs. Next blocker, ours: the CPd design
+refuses the upstream, `CPd profile cannot arm B1u receiver (noise sigma 193.27 DS0, rx rms
+1252)` (the tower measured ~27), no CPd goes out, and slmodemd ends on `Phase4 TimeOut`.

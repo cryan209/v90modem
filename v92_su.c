@@ -41,7 +41,32 @@ v92_su_event_t v92_su_put(v92_su_t *s, uint8_t cw)
                                     0, -.8660254037844386, -.8660254037844386};
         s->window[s->phase] = sample;
         if (s->filled < 6) s->filled++;
-        if (s->filled == 6 && s->phase == 5) {
+        /* 9.5.2.1.7 sends Su-bar for only 24.5T, about four blocks of this
+         * grid, wherever it happens to fall on it; with line ISI no reversed
+         * block was stable enough on most alignments (slmodemd, live: we
+         * missed it, never sent Jp, and the peer retrained).  The same bin
+         * evaluated every sample on the absolute clock does not depend on the
+         * alignment: six consecutive reversed windows (one Su period) is
+         * Su-bar. */
+        s->slide_sum_i += c[s->phase]*sample - s->slide_i[s->phase];
+        s->slide_sum_q += q[s->phase]*sample - s->slide_q[s->phase];
+        s->slide_i[s->phase] = c[s->phase]*sample;
+        s->slide_q[s->phase] = q[s->phase]*sample;
+        if (s->slide_filled < 6) s->slide_filled++;
+        if (s->stage == V92_SU_ACQUIRED && s->slide_filled == 6) {
+            double e = s->slide_sum_i*s->slide_sum_i + s->slide_sum_q*s->slide_sum_q;
+            double r = s->reference_i*s->reference_i + s->reference_q*s->reference_q;
+            double d = s->slide_sum_i*s->reference_i + s->slide_sum_q*s->reference_q;
+            s->bar_run = (e > 900.0*900*9 && d < -.85*sqrt(r*e)) ? s->bar_run+1 : 0;
+            if (s->bar_run >= 6) {
+                event = V92_SU_BAR;
+                s->stage = event;
+                s->lock = 0;
+                s->stable = 0;
+                s->bar_run = 0;
+            }
+        }
+        if (s->filled == 6 && s->phase == 5 && !event) {
             double re = 0, im = 0;
             for (int j = 0; j < 6; j++) { re += c[j]*s->window[j]; im += q[j]*s->window[j]; }
             double energy = re*re+im*im;

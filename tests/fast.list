@@ -627,6 +627,7 @@ PAIR_RETRAIN=answer ME_DATA_FRAMING=lapm ./v32bis_engine_pair_test alaw v8
 ./v92_mh_test
 ./v92_mh_line_test
 ./v92_qc_test
+./v92_su_test
 ./v92_qc_engine_test
 ./v92_mh_retrain_test
 ./v92_rn_test
