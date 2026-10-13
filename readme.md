@@ -1,12 +1,57 @@
 # SIP V.90 Modem
 
-A standalone SIP-based V.90 digital modem server built on PJSIP and spandsp.
+A standalone SIP/G.711 softmodem built on vendored PJSIP and SpanDSP,
+with native modem DSP, an AT command interface, and PTY/TCP data connections.
+Its primary goal is the **digital answerer** in a V.90/V.92 connection:
+an analogue modem dials in over a transparent G.711 bearer. It also implements
+an analogue caller, lower-speed modem families, digital bearers and fax.
 
-This acts as the **digital side** of a V.90 connection. An analog V.90 client modem
-dials in via a SIP provider (or directly via an ATA/FXS gateway), and this software
-answers the call, performs V.90 digital modem negotiation over the G.711 μ-law RTP
-stream, and bridges the resulting data connection to a PTY (virtual serial port) or
-TCP socket.
+## Implementation status (13 October 2026)
+
+This is an active interoperability project with working data connections,
+not a fully qualified replacement for every hardware modem. Completion varies
+by role and peer; a loopback pass or CONNECT message alone does not establish
+hardware compatibility. The strongest sustained hardware evidence currently
+comes from **our analogue V.90 caller against an Eicon Diva digital answerer**.
+
+| Area | Implemented and demonstrated | Qualification still needed |
+|---|---|---|
+| V.90 analogue caller | Eicon hardware: 56000 downstream / 31200 upstream, LAPM/V.42bis, both PCMU and PCMA; checked sustained transfers, PPP and HTTP | Broader peer/network coverage; emulator training results have separate limitations |
+| V.90 digital answerer (primary goal) | Native training, byte-exact PCM downstream, V.34 upstream and directed PCM/startup regressions | Repeatable analogue-client/FXS hardware qualification and sustained bidirectional transfers across chipsets |
+| V.92 | PCM-upstream datapump, Phase 3/4 codecs and procedure tests | Complete native foreign-peer call, remaining timing/trellis/recovery integration and sustained payload qualification |
+| V.34 | Full-duplex data and impaired-line tests; Eicon hardware checked echo in both laws at 31200 upstream / 21600 downstream | Native V.34 sustained-transfer coverage comparable to the V.90 soaks |
+| V.32/V.32bis, V.22/V.22bis, V.21, V.23, Bell 103/212A | Datapumps, engine-pair payload tests and legacy automode | Broad hardware compatibility coverage |
+| V.91, clear channel, V.110/V.120 | Digital bearer implementations and local/engine-pair tests | Foreign digital-peer qualification; a byte-exact compatible bearer is required |
+| Fax | T.31/T.32 interfaces and V.34 half-duplex; Eicon pages verified in both directions/laws up to 28800 bit/s | Class 2.1 V.34 fax at 31200/33600 and broader peer coverage |
+| x2 | Initial asymmetric bidirectional PTY transfer against original Courier firmware in an emulator; symmetric engine-pair support | Downstream payload after the 54666-bit/s rate change fails at the emulated receiver; real hardware and sustained qualification remain |
+| K56flex | Payload components, V.8bis exchange and experimental training probes | Complete live upstream training/data connection; the client remains test-only |
+| Application | SIP calling/registration, AT control, PTY/TCP, diagnostics, GUI and supervised multi-line workers | Each line uses a separate worker process; interoperability depends on the bearer and selected mode |
+
+On 8 October, two uninterrupted Eicon V.90 calls lasted about 26 minutes
+37 seconds each and checked **16,177,152 payload bytes** with zero sequence,
+CRC or exact-payload errors. Both laws also passed PPP with 30/30 ping replies
+and exact 1 MiB HTTP downloads/uploads. A separate short PCMU LAN probe with
+40 ms fixed jitter buffering measured 6.44 kB/s binary download; its HTTP
+check measured 6.21 kB/s. These are measured application rates on that path,
+not universal throughput guarantees or digital-answerer validation.
+
+Evidence and limitations: [hardware interoperability](docs/v90_hardware_interop.md),
+[Eicon soak/PPP/HTTP](docs/eicon_soak_ppp.md),
+[PCM regression boundaries](docs/pcm_loopback_testing.md),
+[V.92 remaining work](docs/v92_phase4_implementation.md),
+[fax hardware results](docs/eicon_v34_fax_20261009.md),
+[x2 status](docs/x2_implementation.md) and
+[K56flex status](docs/k56flex_implementation.md).
+
+## Build and test coverage
+
+Use the vendored `spandsp-master/` and `pjproject/` trees. `make` builds the
+application and test binaries; `make test-fast` runs the quick tier,
+`make test-slow` the longer matrices, and `make test` both. The parallel runner
+isolates each test's temporary files and retains failure logs in `test-logs/`.
+The test definitions are [fast.list](tests/fast.list) and
+[slow.list](tests/slow.list). Offline tests measure protocol/datapump behavior;
+the hardware evidence above is a separate qualification layer.
 
 ## Live GUI
 
@@ -57,7 +102,7 @@ digital modem can select specific μ-law codeword levels that the analog client 
 can resolve after a single D/A conversion at the far-end ATA/FXS port.
 
 ### Requirements for V.90 to work:
-- G.711 μ-law (PCMU) codec, no transcoding anywhere in the path
+- G.711 PCMU or PCMA with the correct law selected, no transcoding anywhere in the path
 - No voice activity detection (VAD) or comfort noise generation (CNG)
 - No echo cancellation on the SIP path
 - Minimal, fixed jitter buffering
@@ -70,15 +115,15 @@ can resolve after a single D/A conversion at the far-end ATA/FXS port.
 - Registers with SIP provider, listens for incoming calls
 - Can also originate outbound calls
 
-### `modem_engine.c` — spandsp V.90 modem wrapper
-- Configures spandsp for V.90 digital (server) mode
+### `modem_engine.c` — call state and modem engine
+- Coordinates native V.PCM DSP and vendored SpanDSP, including digital and analogue roles
 - Handles V.8 negotiation → V.90 training → data mode
 - Falls back to V.34 if V.90 training fails
 
 ### `clock_recovery.c` — RTP-to-synchronous bridge
 - Accepts RTP packets (variable timing, 20ms frames = 160 samples)
 - Outputs steady 8000 Hz sample stream to spandsp
-- Handles clock drift compensation
+- Preserves 8000 Hz sample accounting; sample insertion/deletion or resampling breaks PCM modem operation
 
 ### `data_interface.c` — User data I/O
 - Creates PTY pair (virtual serial port)
@@ -141,7 +186,11 @@ touched, and `ATZ`/`AT&F` restore the default:
 | `X2`       | x2, asymmetric (V.34 upstream; symmetric not implemented) | same             |
 | `CLEAR` (`CLEARMODE`, `64K`) | no V.8: the DS0 is the bit pipe, V.14 (or LAPM) on it; max rate <=56000 selects restricted 56k | same |
 | `V120`     | no V.8: V.120 UI frames on the DS0; max rate <=56000 selects 56k | same |
-| `B103`, `B212`, `V110`, `X75` | recognised, no datapump here | ERROR (both) |
+| `V21`, `B103` | 300-bit/s FSK | same |
+| `B212` | Bell 212A at 1200 bit/s; legacy Bell 103 fallback | same |
+| `V23C` | V.23 1200/75 bit/s, with direction selected by rate bounds | same |
+| `V110` | V.110 rate adaptation on a compatible digital bearer | same |
+| `X75` | recognised, no datapump here | ERROR (both) |
 
 `AT+MS?` reads back e.g. `+MS: V34,1,0,0,0,0`; `AT+MS=?` lists the carriers;
 `AT+MS$` prints Courier-style help -- the syntax, every carrier with its
@@ -202,8 +251,7 @@ data with them over SIP; see `docs/clear_channel_v120.md`.
 
 - The top-level `make` now prefers the in-repo `pjproject/` tree by default.
 - The bundled `spandsp-master/` and local `pjproject/` builds are host-specific, and `make` will automatically rebuild them when the host OS/arch changes.
-- If needed, disable this and use system/Homebrew pjproject with:
-  - `make USE_LOCAL_PJPROJECT=0`
+- Use the vendored libraries for supported builds; system copies are not substitutes.
 
 ## Offline Tone Regression
 
@@ -369,10 +417,10 @@ and HTTP to 6.21 kB/s. See [deployment and evidence](docs/eicon_soak_ppp.md).
 
 ### V.92 Phase 4
 
-Strict Table 31 SUVd and mandatory-part Table 30 CPd codecs are implemented,
-and the Phase 4 analyzer now reports progression through SUVd, CPd,
-acknowledgement, Ed, B1d, and DATA. Full CPd optional parts and live CPu-driven
-exchange remain under development; see `docs/v92_phase4_implementation.md`.
+Native SUVd/CPd and CPu/CPu-prime handling, PCM-upstream datapump components
+and recovery procedure tests are implemented. Full foreign-peer PCM-upstream
+startup and sustained data are still under development; see
+[V.92 implementation status](docs/v92_phase4_implementation.md).
 
 ## License
 
@@ -380,12 +428,12 @@ GPL-2.0 (due to spandsp LGPL and linmodem GPL heritage)
 
 ## Experimental x2
 
-`--mode x2` selects the initial PCMU digital-answerer implementation. Capability
-exchange and A/B/J/C/D/E training are wired into the engine, including the
-Courier's received J and S-bar gates. The payload mapper is verified against
-original DSP vectors. The supported short MP is decoded from the line and selects original-firmware
-data banks; mapped startup then activates downstream payload transmission.
-Upstream E/B1 data handoff and bidirectional verification remain; this mode
-does not yet complete an x2 connection.
-Run `make x2-test x2-session-test`. See `docs/x2_implementation.md` for
-supported profiles, capture verification and firmware-vector reproduction.
+`--mode x2` selects the experimental x2 implementation. Initial asymmetric
+bidirectional payload delivery is verified through real PTYs against original
+Courier firmware running in an emulator at 32000 downstream / 24000 upstream.
+The observed rate change to 54666 / 31200 completes, but downstream payload
+injected after it is corrupted at the emulated Courier; our raw transmit tap
+recovers that payload exactly. Symmetric x2 also has engine-pair coverage.
+These results do not qualify sustained or real-hardware x2 interoperability.
+Run `make x2-test x2-session-test x2-sym-test`. See
+[x2 implementation and evidence](docs/x2_implementation.md).
