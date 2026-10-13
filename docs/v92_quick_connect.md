@@ -442,3 +442,38 @@ something over 10-30 s is not: a 0.5 s T-spaced re-solve with correct targets ca
 it. Two leads: the aided-row error is not uniform across the 12-symbol frame (0.055 LU at
 positions 0-3, 0.044 at 8-11, on the replay), and the degradation starts before any payload
 (idle ones until 60 s), so it is not data-dependent.
+
+### Ground truth over a full call: slmodemd's transmit timing offset; error-free V.92 both ways
+
+`phase4_symbol_hook.c` over a 96 s data call (`gt90`), sliding least-squares fits of our
+received tap against slmodemd's transmitted symbols: one fixed lag for the whole call (no
+slips), but the best achievable linear fit per 0.5 s went 0.033 LU at the start -> 0.12-0.14
+LU at 40-60 s -> 0.035 at 95 s, and shorter windows (250 symbols) did not help. So from about
+10 s on our receiver was at the limit of what any linear equaliser could get: the received
+upstream itself stopped fitting a fixed channel. The residual was 81% in 3800-4000 Hz at 45 s
+(29% at 5 s), varying from one 10 ms block to the next, kurtosis ~3 (not glitches).
+
+A hook on `ResamplerTimingOffset::setTimingOffset` (12 call sites;
+`V92Modulator::progress` calls it every block) shows slmodemd applying its receiver's timing
+estimate, ~+0.57 ppm drifting to +0.556, to its 8000 -> 9600 transmit resampler. On the SIP rig
+both modems share one clock, so the true offset is 0; the resulting slow transmit-phase drift
+(~0.45 samples over the call) makes that resampler's error near Nyquist grow and fade.
+`rig/slmodemd/slm_tx_timing_freeze.c` (linked into `slmodemd_map`; `qc_slm_pve.sh` sets
+`SLM_FREEZE_TX_TIMING=0` by default) holds the offset at 0:
+
+| | offset tracked | offset 0 |
+|---|---|---|
+| data distance | 58 -> 72 DS0 | 35 DS0, steady |
+| rejected upstream frames, 90 s | 12594 | 55 |
+| B1u solve residual | 0.036 LU | 0.022 LU |
+| upstream lines (`\N0`) | 8 | 16425 (DTE overrun loses the rest: 500 lines/s > 32000 bps) |
+
+**With LAPM (`\N3` both ends, `lapm1`): V.92, PCM upstream 32000 / downstream 54666, ODP/ADP
+bypassed (9.2.5), V.42bis negotiated; 18037 upstream lines and 21100 downstream lines, each a
+contiguous span with no gaps -- error-free in both directions.** First complete V.92 data
+transfer against slmodemd on this rig.
+
+This is a property of slmodemd on a shared-clock rig, not something our receiver can undo
+(the best linear fit degrades, not just ours). A real V.92 analogue modem does slave its
+upstream timing to the network clock; whether our receiver needs timing tracking for a peer
+whose estimate wanders is open.

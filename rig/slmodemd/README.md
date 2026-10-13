@@ -103,6 +103,21 @@ gcc -m32 -O2 -c phase3_decision_hook.c -o p3hook.o
 # link as slmodemd_map, with p3hook.o and dsplibs_p3.o in place of dsplibs_ec.o -> slmodemd_p3
 ```
 
+## Transmit timing freeze (`slm_tx_timing_freeze.c`)
+
+`SLM_FREEZE_TX_TIMING=<value>` replaces the timing offset slmodemd hands its upstream resampler
+(`ResamplerTimingOffset::setTimingOffset`, `.text` 0x35510) with a constant. On the SIP rig the
+true value is 0, and slmodemd's own ~0.57 ppm estimate drifts its transmit phase until its
+resampler's near-Nyquist error wrecks the V.92 PCM upstream (`docs/v92_quick_connect.md`).
+`slmodemd_map` on CT 100 includes it; `qc_slm_pve.sh` sets it to 0 by default:
+
+```sh
+objcopy --add-symbol _ZN21ResamplerTimingOffset15setTimingOffsetEf_original=.text:0x35510,global,function \
+        dsplibs_ec.o dsplibs_ec_tim.o
+gcc -m32 -O2 -c slm_tx_timing_freeze.c -o tim_freeze.o
+# link as slmodemd_map, adding tim_freeze.o and using dsplibs_ec_tim.o
+```
+
 ## Phase-4 transmit-symbol hook (`phase4_symbol_hook.c`)
 
 Records every upstream symbol slmodemd transmits in Phase 4 and data to `/tmp/p4sym.bin`

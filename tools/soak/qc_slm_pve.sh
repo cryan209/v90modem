@@ -53,7 +53,7 @@ if [ "${SLM_BUILD:-rig}" = rig ]; then
     # The tower rig's build (/root/D-Modem-rig, D-Modem before its internal resampler, built
     # with the repo's rig/d-modem/d-modem.c): sinc resampler in d-modem, SIP_LOGIN env.
     sx "cd /root/D-Modem-rig; rm -f /tmp/slm.log; \
-        ( env SLMODEMD_V8_OPEN_STUB=0 DM_RESAMPLER=sinc DM_UP_RESAMPLER=${DM_UP_RESAMPLER:-sinc} DM_RS_HEADROOM=0.25 DM_SLM_FRAME_TRAILER=4 SIP_FORCE_PCMU=1 $SLM_ENV \
+        ( env SLMODEMD_V8_OPEN_STUB=0 DM_RESAMPLER=sinc DM_UP_RESAMPLER=${DM_UP_RESAMPLER:-sinc} DM_RS_HEADROOM=0.25 DM_SLM_FRAME_TRAILER=4 SLM_FREEZE_TX_TIMING=${SLM_FREEZE_TX_TIMING-0} SIP_FORCE_PCMU=1 $SLM_ENV \
           SIP_LOGIN=$SLM_ACCT:$SLM_ACCT@asterisk.net.cryan.nz nohup ./slmodemd/${SLM_BIN:-slmodemd} -d9 -e /root/D-Modem-rig/d-modem \
           > /tmp/slm.log 2>&1 & ); sleep 8; chmod 666 \$(readlink -f /dev/ttySL0)"
 else

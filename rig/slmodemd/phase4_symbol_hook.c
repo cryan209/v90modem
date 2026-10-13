@@ -18,6 +18,12 @@
  * BitsToSymbol's `count` instead reads stale buffer: it is a request, not a
  * result.)
  *
+ * Also hooks ResamplerTimingOffset::setTimingOffset(float) (.text 0x35510),
+ * which V92Modulator::progress calls every block with the transmit timing
+ * offset slaved to its receiver: each change goes to /tmp/p4tim.txt as
+ * "<symbols so far> <offset>".  SLM_FREEZE_TX_TIMING=<value> replaces every
+ * offset with that constant (A/B against the wander).
+ *
  * Offsets for dsplibs.o e64b4a7 (AonCyberLabs): generateSymbol at .text 0x18050.
  */
 #include <stdio.h>
@@ -28,6 +34,9 @@ extern short orig_gen(void *self) __asm__("_ZN18V92Phase4Modulator14generateSymb
 short hook_gen(void *self) __asm__("_ZN18V92Phase4Modulator14generateSymbolEv");
 extern void orig_tx(void *self, uint8_t *bits, unsigned nbytes, short *out, unsigned *written) __asm__("_ZN14V92Transmitter7processEPhjPsRj_original");
 void hook_tx(void *self, uint8_t *bits, unsigned nbytes, short *out, unsigned *written) __asm__("_ZN14V92Transmitter7processEPhjPsRj");
+
+extern void orig_sto(void *self, float v) __asm__("_ZN21ResamplerTimingOffset15setTimingOffsetEf_original");
+void hook_sto(void *self, float v) __asm__("_ZN21ResamplerTimingOffset15setTimingOffsetEf");
 
 static FILE *txt, *bin;
 static long max_pairs = -1, n;
@@ -80,4 +89,25 @@ void hook_tx(void *self, uint8_t *bits, unsigned nbytes, short *out, unsigned *w
     }
     if (bin && *written)
         fflush(bin);
+}
+
+void hook_sto(void *self, float v)
+{
+    static FILE *tim;
+    static float last = 1e30f;
+    static int freeze = -1;
+    static float frozen;
+
+    if (freeze < 0) {
+        const char *e = getenv("SLM_FREEZE_TX_TIMING");
+        freeze = e != NULL;
+        frozen = e ? (float)atof(e) : 0.0f;
+        tim = fopen("/tmp/p4tim.txt", "w");
+    }
+    if (tim && v != last) {
+        fprintf(tim, "%ld %.6f %p\n", n, v, self);
+        fflush(tim);
+        last = v;
+    }
+    orig_sto(self, freeze ? frozen : v);
 }
