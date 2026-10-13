@@ -213,3 +213,24 @@ modem (`digital_side=no`) so it can never answer QC1a with QCA1d, and the runs d
 far -- the PBX answered the call itself after slm's REGISTER drew a 403 (baseline `+PQC=3`
 failed identically). Short Phase 2, ODP/ADP bypass and data mode against slmodemd need the
 tower's resampler build of slmodemd/d-modem, which is not on this rig.
+
+### Attempt at the tower's sinc-resampler build (same day)
+
+Rebuilt on CT 100 as `/root/D-Modem-rig`: `git worktree` of cryan209/D-Modem at `cf5ea9e6` (the
+commit before slmodemd gained its internal RcFixed resampler, `fd78cab9`) with the original
+`dsplibs.o`, `make -C slmodemd` (gcc -m32), plus the repo's `rig/d-modem/d-modem.c` (6/5 sinc,
+`SIP_LOGIN`, two positional args) built against the main tree's pjsip.install.
+`qc_slm_pve.sh` uses it by default (`SLM_BUILD=rig`; `SLM_BUILD=stock` for the old pair).
+
+Result: **no data mode on either build.** Short Phase 1 completes on this build too (`+PQC` 1
+and 0, `AT+MS=92`; with `AT+MS=90` slm sends no QC), but Phase 2 then never confirms INFO0: slm
+logs "Repeated info0 ... errorrecovery", sits in Tone AB, and ends "train timeout / Link Error"
+(~13 s); our digital side never decodes slm's INFO0a (rx goes INFO0 -> TONE_A) while slm decodes
+ours. Identical for `+PQC=3`, `AT+MS=90/92`, and for the commit before any Quick Connect work
+(`44164407^`, built on CT 117 as `/root/v90old`), so it is NOT a regression from this
+session. RTP is clean (no loss, ts_delta 160), so the cause is in slm's output as delivered,
+most likely a slmodemd/d-modem difference from the tower build (the tower's `/src/slmodemd`
+carried hooks that are not in the repo or in the D-Modem history; `rig/slmodemd/` has only the
+PCM-upstream patch). Next step if this rig is to be used for data mode: recover the tower's
+slmodemd tree, or find why slm's INFO0a (DPSK, ~100 ms after V.8) is not decoded by our
+answerer on this rig (the stock build only recovered on the retrain, where INFO0 is omitted).

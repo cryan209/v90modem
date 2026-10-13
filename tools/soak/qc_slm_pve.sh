@@ -4,9 +4,10 @@
 # (slmodemd + the repo's rig/d-modem/d-modem.c, sinc resampler), CT_OURS (117)
 # runs /root/v90modem/sip_v90_modem.  Accounts on asterisk.net.cryan.nz:
 # slmodemd 6003, ours 6002 (6000, 6001 do not authenticate with pw=ext).
-# CT_SLM runs the STOCK d-modem/slmodemd pair (internal RcFixed 9.6k<->8k resampler,
-# --sip-* flags, sip control socket), NOT the tower rig's sinc-resampler build: V.90
-# downstream quality is therefore degraded (rig/README.md), so grade Phase 1/2 here.
+# CT_SLM has two builds: SLM_BUILD=rig (default) is /root/D-Modem-rig = D-Modem at cf5ea9e6
+# (before its internal RcFixed resampler) + the repo's rig/d-modem/d-modem.c with the sinc
+# resampler, like the tower; SLM_BUILD=stock is /root/D-Modem (RcFixed, --sip-* flags), which
+# cannot hold a V.90 downstream (rig/README.md).
 #
 #   ORIG=slm|ours PQC=0|1|2|3 MS=<slm +MS> HOLD=<s> OURS_ENV="ME_V90_ROLE=analogue" \
 #   OURS_INIT="AT+PIG=0" qc_slm_pve.sh <name>
@@ -27,13 +28,14 @@ PAYLOAD=${PAYLOAD:-1}
 OURS_ENV=${OURS_ENV:-}
 OURS_INIT=${OURS_INIT:-AT+PIG=0}
 OUR_ACCT=${OUR_ACCT:-6002}
+SLM_ENV=${SLM_ENV:-}
 SLM_ACCT=${SLM_ACCT:-6003}
 DIR=/root/qc/$NAME
 ox() { pct exec $CT_OURS -- bash -c "$1"; }
 sx() { pct exec $CT_SLM -- bash -c "$1"; }
 
 ox "pkill -x sip_v90_modem; sleep 1; mkdir -p $DIR; rm -f /tmp/v90slm; pkill -f '[c]at /tmp/v90slm'; true"
-ox "cd /root/v90modem && ( env SIP_FORCE_PCMU=1 ME_MODE=v92 ME_LAPM_XID_OPTION_OCTETS=auto VPCM_G711_TAP_DIR=$DIR $OURS_ENV \
+ox "cd ${SRV_DIR:-/root/v90modem} && ( env SIP_FORCE_PCMU=1 ME_MODE=v92 ME_LAPM_XID_OPTION_OCTETS=auto VPCM_G711_TAP_DIR=$DIR $OURS_ENV \
     nohup timeout $((HOLD + 90)) ./sip_v90_modem --sip-server asterisk.net.cryan.nz --username $OUR_ACCT --password $OUR_ACCT \
     --local-port 5074 --rtp-port 14100 --pty-link /tmp/v90slm --verbose > $DIR/server.log 2>&1 & ); sleep 5"
 ox "stty -F /tmp/v90slm raw -echo; ( cat /tmp/v90slm > $DIR/pty-rx.bin & ) ; true"
@@ -44,10 +46,19 @@ for c in "AT" "$OURS_INIT" "AT+PQC=$PQC"; do
 done
 
 sx "pkill '[s]lmodemd'; pkill '[d]-modem'; sleep 1; rm -f /dev/ttySL0"
-sx "cd /root/D-Modem; rm -f /tmp/slm.log; \
-    ( env SLMODEMD_V8_OPEN_STUB=0 SIP_FORCE_PCMU=1 \
-      nohup ./slmodemd/slmodemd -d9 -e /root/D-Modem/d-modem --sip-server asterisk.net.cryan.nz --sip-user $SLM_ACCT --sip-password $SLM_ACCT \
-      > /tmp/slm.log 2>&1 & ); sleep 8; chmod 666 \$(readlink -f /dev/ttySL0)"
+if [ "${SLM_BUILD:-rig}" = rig ]; then
+    # The tower rig's build (/root/D-Modem-rig, D-Modem before its internal resampler, built
+    # with the repo's rig/d-modem/d-modem.c): sinc resampler in d-modem, SIP_LOGIN env.
+    sx "cd /root/D-Modem-rig; rm -f /tmp/slm.log; \
+        ( env SLMODEMD_V8_OPEN_STUB=0 DM_RESAMPLER=sinc DM_RS_HEADROOM=0.25 SIP_FORCE_PCMU=1 $SLM_ENV \
+          SIP_LOGIN=$SLM_ACCT:$SLM_ACCT@asterisk.net.cryan.nz nohup ./slmodemd/slmodemd -d9 -e /root/D-Modem-rig/d-modem \
+          > /tmp/slm.log 2>&1 & ); sleep 8; chmod 666 \$(readlink -f /dev/ttySL0)"
+else
+    sx "cd /root/D-Modem; rm -f /tmp/slm.log; \
+        ( env SLMODEMD_V8_OPEN_STUB=0 SIP_FORCE_PCMU=1 $SLM_ENV \
+          nohup ./slmodemd/slmodemd -d9 -e /root/D-Modem/d-modem --sip-server asterisk.net.cryan.nz --sip-user $SLM_ACCT --sip-password $SLM_ACCT \
+          > /tmp/slm.log 2>&1 & ); sleep 8; chmod 666 \$(readlink -f /dev/ttySL0)"
+fi
 
 if [ "$ORIG" = slm ]; then DIALCMD="ATD$OUR_ACCT"; else DIALCMD=ATA; fi
 PAY_DELAY=${PAY_DELAY:-45}
