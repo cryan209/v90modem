@@ -24,7 +24,7 @@ ORIG=${ORIG:-slm}
 PQC=${PQC:-3}
 MS=${MS:-92}
 HOLD=${HOLD:-90}
-PAYLOAD=${PAYLOAD:-1}
+PAYLOAD=${PAYLOAD-1}
 OURS_ENV=${OURS_ENV:-}
 OURS_INIT=${OURS_INIT:-AT+PIG=0}
 OUR_ACCT=${OUR_ACCT:-6002}
@@ -71,7 +71,7 @@ fi
   printf 'ATZ\r';  sleep 2
   printf 'ATX3\r'; sleep 1
   printf 'ATE1V1Q0\r'; sleep 1
-  printf 'AT\\N3\r'; sleep 1
+  printf 'AT%s\r' "${SLM_NPARM:-\\N3}"; sleep 1
   [ -n "$MS" ] && { printf 'AT+MS=%s\r' "$MS"; sleep 2; }
   printf '%s\r' "$DIALCMD"
   if [ -n "$PAYLOAD" ]; then
@@ -101,5 +101,5 @@ sx "pkill '[s]lmodemd'; true"
 echo "== $NAME (ORIG=$ORIG PQC=$PQC MS=$MS ${OURS_ENV})"
 echo "ours : $(ox "grep -ao 'CONNECT[^\r]*' $DIR/pty-rx.bin | head -1")"
 echo "peer : $(grep -ao 'CONNECT[^\r]*' /tmp/qc-$NAME.serial | head -1)"
-echo "U-lines at ours: $(ox "tr -d '\r' < $DIR/pty-rx.bin | grep -ac '^U[0-9]\{7\}\$'")  D-lines at peer: $(tr -d '\r' < /tmp/qc-$NAME.serial | grep -ac '^D[0-9]\{7\}\$')"
+echo "ours->slm U-lines at the peer DTE: $(tr -d '\r' < /tmp/qc-$NAME.serial | grep -ac '^U[0-9]\{7\}$')  slm->ours D-lines at our DTE: $(ox "tr -d '\r' < $DIR/pty-rx.bin | grep -ac '^D[0-9]\{7\}\$'")"
 echo "ours QC log:"; ox "grep -a 'V.92 9\.\|Quick Connect\|short Phase\|ODP' $DIR/server.log | cut -c1-170 | head -12"

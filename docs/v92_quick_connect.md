@@ -240,6 +240,31 @@ With it, on the rebuilt rig: INFO0a decodes, "INFO0 confirmed mutually", INFO1d/
 Phase 3 starts and our Ja descriptor parses, for `+PQC` 3, 1 and 0 (Quick Connect Phase 1 as
 above before it). slm's first INFO1a selects a 2400 baud V.34 upstream, which our strict check
 (3000/3200 only) declines, we retrain through Phase 2 and the second INFO1a (3200) is accepted.
-The call still does not reach data mode: after TRN1d the call ends ~25 s in (our side hangs up,
-slm's d-modem stopped sending ~5 s before). That is a Phase 3/4 matter with this slmodemd, the
-same for `+PQC=3`, so it is outside Quick Connect; it has not been investigated.
+**That hangup was my own test script.** The numbered-line payload began typing into our serial
+port while the call was still in handshake, and `PAYLOAD=` (empty) was being read as the default
+(`${PAYLOAD:-1}`), so the "no payload" runs had it too; a DTE character aborts a call that has
+not connected (fixed: `${PAYLOAD-1}`, `PAY_DELAY` must exceed the connect time, ~55-70 s).
+
+Final matrix (rig build, `AT+MS=92`, slm dials us, µ-law, digital side ours, no payload typed
+before connect):
+
+| `+PQC` | Phase 1 | Phase 2 | result |
+|---|---|---|---|
+| 3 | slm's QC1a ignored (ordinary V.8) | full | `CONNECT 54666` |
+| 1 | **short Phase 1 completes** (QCA1d/QTS/ANSpcm -> slm's TONEq) | full (slm never asks for short) | `CONNECT 54666` |
+| 0 | as 1 | full | `CONNECT 54666` |
+
+All through one Phase 2 retrain (slm's first INFO1a picks 2400 baud, which we decline per the
+V.90 rules; the second picks 3200). slm reports `V92 capabilities: local=0 ... selected=90`: its
+V.92 path is off without the PCM-upstream patch (`rig/slmodemd/v92-pcm-upstream.patch`), so these
+are V.90 data modes and the ODP/ADP bypass (V.92 only) correctly does not engage. With `\N0` on
+both DTEs (`SLM_NPARM='\N0' OURS_INIT='AT+PIG=0;AT\N0'`) both ends print CONNECT (54666 / 54667) and
+**11928 of 11949 numbered lines ours->slm arrive (99.8 %)** over the PCM downstream. The V.34
+upstream slm->ours delivered no lines (0 D-lines; the DTE saw garbled bytes): the known V.90
+upstream-receive problem (docs/v90_upstream_*, memory notes), unrelated to Quick Connect.
+
+Qualification summary: Quick Connect short Phase 1 interoperates with slmodemd's QC1a/TONEq
+handling, does no harm to the rest of the call, and is the same through data mode as `+PQC=3`.
+Not exercised against slmodemd: short Phase 2 (slm never requests it), the V.92 ODP/ADP bypass
+(slm falls to V.90), the analogue-caller and digital-caller QC roles (slm is analogue-only and
+only ever calls QC1a).
