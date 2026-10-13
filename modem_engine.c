@@ -829,9 +829,30 @@ static bool g_data_t400_deferred;
 static bool g_mh_resume_pending;
 static uint64_t g_mh_hold_until_ms;
 
+/* V.92 9.2.5 / 9.3.1: "If both modems indicate V.92 capability as well as
+ * indicating LAPM protocol in V.8 or V.8 bis, then the V.42 ODP/ADP exchange
+ * shall be bypassed."  Recorded from the peer's V.8 protocol octet or V.92 QC
+ * P bit (me_log_v8_peer_summary); ours is what the V.8 offer carried.  Only with
+ * a Quick Connect feature enabled (+PQC != 3): peers that send ODP regardless
+ * (slmodemd) would otherwise stop answering a detection phase that is no longer
+ * run, so the factory setting keeps the detection phase. */
+static bool g_peer_lapm_signalled;
+static bool g_v92_active;
+static v92a_t *g_v92a;
+static bool me_v92_odp_bypass(void)
+{
+    v250_ctl_t cfg;
+
+    if (!g_peer_lapm_signalled || !(g_v92_active || g_v92a) || !me_qc_offer_lapm())
+        return false;
+    di_get_v250_settings(&cfg);
+    return cfg.pqc != 3;
+}
+
 static int data_stack_start_online(int bit_rate, bool calling_party)
 {
     int result = 0;
+    bool detect = g_data_lapm_detect;
 
     /* V.92 9.10.3 (Amd.2): back from modem-on-hold.  Not a new call -- no
        detection, no XID, and the C/R roles of the original connection even
@@ -855,6 +876,10 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
     g_data_connect_reported = false;
     g_data_link_failed = false;
     g_report_tx_rate = g_report_rx_rate = 0;
+    if (g_data_framing == DS_FRAMING_V42 && detect && me_v92_odp_bypass()) {
+        detect = false;
+        ME_LOG("[ME] V.92 9.2.5/9.3.1: both modems signalled LAPM; ODP/ADP bypassed\n");
+    }
     if (g_data_framing == DS_FRAMING_V42) {
         /* Compression: a +DS the DTE has issued governs; otherwise the
            environment (ME_DATA_COMPRESSION), otherwise the shipped default
@@ -867,21 +892,21 @@ static int data_stack_start_online(int bit_rate, bool calling_party)
         di_get_v250_settings(&cfg);
         v250_ctl_compression(&cfg, calling_party, &dc);
         if (cfg.ds_set)
-            result = ds_init_v42_ex(&g_data_stack, calling_party, g_data_lapm_detect, bit_rate,
+            result = ds_init_v42_ex(&g_data_stack, calling_party, detect, bit_rate,
                                     dc.enabled ? dc.p0 : 0,
                                     dc.enabled ? dc.p1 : 512, dc.enabled ? dc.p2 : 6,
                                     data_stack_pull_dte_byte, NULL,
                                     data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
         else if (compression && strcmp(compression, "v44") == 0)
-            result = ds_init_v44(&g_data_stack, calling_party, g_data_lapm_detect, bit_rate,
+            result = ds_init_v44(&g_data_stack, calling_party, detect, bit_rate,
                                  NULL, data_stack_pull_dte_byte, NULL,
                                  data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
         else if (compression && strcmp(compression, "none") == 0)
-            result = ds_init_v42_ex(&g_data_stack, calling_party, g_data_lapm_detect, bit_rate,
+            result = ds_init_v42_ex(&g_data_stack, calling_party, detect, bit_rate,
                                     0, 512, 6, data_stack_pull_dte_byte, NULL,
                                     data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
         else
-            result = ds_init_v42(&g_data_stack, calling_party, g_data_lapm_detect, bit_rate,
+            result = ds_init_v42(&g_data_stack, calling_party, detect, bit_rate,
                                  data_stack_pull_dte_byte, NULL,
                                  data_stack_push_dte_byte, NULL, data_stack_link_event, NULL);
         if (result == 0)
@@ -3731,6 +3756,7 @@ static void me_log_v8_peer_summary(const v8_parms_t *result)
 
         if (!lapm && qc_lapm)
             lapm = true;
+        g_peer_lapm_signalled = lapm;
         me_decide_data_framing();
         ME_LOG("[ME] DTE framing from V.8 protocol%s: %s\n",
                (qc_lapm && result->jm_cm.protocols != V8_PROTOCOL_LAPM_V42)
@@ -6359,6 +6385,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v92_upstream_eq_mode = false;
     g_v92_upstream_slicer_set = false;
     g_v92_active = false;
+    g_peer_lapm_signalled = false;
     g_v92_v8_offered = false;
     g_v92_info0_local_advertised = false;
     g_v92_info0_peer_capable = false;

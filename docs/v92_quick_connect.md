@@ -182,10 +182,16 @@ nothing here has met a foreign V.92 modem.
 
 - An analogue answerer for a V.90 call (Phase 2), which also limits the digital
   answerer's role swap on QC1d (9.2.4.1) to Phase 1.
-- **ODP/ADP bypass** (9.2.5) on the live path: the P bit is sent and read, and
-  the existing LAPM handling takes the caller's P bit, but no V.42 detection
-  phase is skipped here.
 - No foreign peer has been qualified. A V.92 analogue modem that sends QC1a
   (the Motorola, USR and Agere captures in `docs/v92_short_phase1_plan.md` do)
   is the next test; the factory `+PQC=3` keeps the working slmodemd flow
   unchanged until that is done.
+
+## ODP/ADP bypass (9.2.5, 9.3.1)
+
+When the call is V.92 (digital `g_v92_active`, analogue `g_v92a`) and both ends signalled
+LAPM (our V.8/V.8bis offer, the peer's protocol octet or QC P bit), `data_stack_start_online`
+starts V.42 with `detect=false`: the originator goes straight to XID/SABME and no ODP/ADP is
+sent or waited for (`me_v92_odp_bypass`, log "ODP/ADP bypassed"). It applies after the short
+and the full startup alike and only while a Quick Connect feature is enabled (`+PQC` != 3):
+slmodemd sends ODP regardless of V.92, so the factory setting keeps the detection phase.
