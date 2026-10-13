@@ -427,3 +427,18 @@ data: 5 lines reached our DTE, rejected frames 201 at 10 s -> 8537 at 70 s (~18%
 settle back at TRN2u quality. Next: data-aided re-solves in data mode from the trellis
 decoder's output re-encoded (the decoded bits through our encoder give the transmitted
 symbols wherever the decode is right), instead of the hard slicer.
+
+### Data re-solves from the trellis decoder (372f0979)
+
+The Viterbi survivor's points of each decoded frame (G x point; no precoder or prefilter
+coefficients here, so what was transmitted) become the least-squares targets for the input
+windows that produced them; the hard slicer no longer trains the data equaliser. Window 4000
+symbols (0.5 s). No wrong targets reach it (|equaliser - target| > 0.3 LU: 0 of 120000 rows).
+
+Live (`aided1`): rejected upstream frames at 10 / 20 / 30 s of data 48 / 272 / 888 (B1u-only
+training: 201 / 450 / 1150), data distance 58.8 DS0 at 10 s but 72 DS0 from ~30 s on, the same
+plateau as before; 12 lines upstream, 24168 downstream. So the first seconds are fixed and
+something over 10-30 s is not: a 0.5 s T-spaced re-solve with correct targets cannot follow
+it. Two leads: the aided-row error is not uniform across the 12-symbol frame (0.055 LU at
+positions 0-3, 0.044 at 8-11, on the replay), and the degradation starts before any payload
+(idle ones until 60 s), so it is not data-dependent.
