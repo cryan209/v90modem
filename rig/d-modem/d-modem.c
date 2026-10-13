@@ -575,8 +575,32 @@ static pj_status_t dmodem_get_frame(pjmedia_port *this_port, pjmedia_frame *fram
 	in_n = out_n * 6 / 5;
 	if (in_n > (int)PJ_ARRAY_SIZE(raw))
 		return PJ_ETOOBIG;
-	if ((len=read(sm->sock, raw, in_n*2)) != in_n*2) {
-		error_exit("error reading frame",0);
+	/* Newer slmodemd builds (D-Modem since 2025-02) send each audio frame as
+	 * struct { s16 buf[192]; int volume; }: a 4-byte trailer after every 20 ms.
+	 * Reading only the samples leaves that trailer in the stream, where it is
+	 * taken for two more samples per frame -- a 190/192 time stretch (Tone A at
+	 * 2375 Hz, every INFO0a CRC-bad).  DM_SLM_FRAME_TRAILER=4 consumes it. */
+	{
+		static int trailer = -1;
+		pj_int16_t scratch[4];
+
+		if (trailer < 0) {
+			const char *e = getenv("DM_SLM_FRAME_TRAILER");
+
+			trailer = e ? atoi(e) : 0;
+			if (trailer < 0 || trailer > (int)sizeof(scratch)) trailer = 0;
+		}
+		if ((len=read(sm->sock, raw, in_n*2)) != in_n*2) {
+			error_exit("error reading frame",0);
+		}
+		if (trailer) {
+			int got = 0, r;
+			while (got < trailer) {
+				r = read(sm->sock, (char *)scratch + got, trailer - got);
+				if (r <= 0) error_exit("error reading frame trailer",0);
+				got += r;
+			}
+		}
 	}
 	/* Pre-interpolation tap: the DSP's native 9600 Hz upstream output,
 	 * before the 6/5 linear interpolation below.  dm_from_dsp.raw is
