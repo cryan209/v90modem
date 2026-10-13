@@ -307,6 +307,7 @@ static void on_training_complete(me_modulation_t mod, int rate, const char *name
 static void v8_result_handler(void *user_data, v8_parms_t *result);
 static bool me_quick_connect_enabled(void);
 static bool me_short_phase2_enabled(void);
+static bool me_qc_offer_lapm(void);
 
 /* ------------------------------------------------------------------ */
 /* Phase trace helpers                                                 */
@@ -4220,10 +4221,15 @@ static int me_start_or_restart_v8_locked(int answer_tone)
          */
         v8_parms.jm_cm.pstn_access            = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
         v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_ANALOGUE;
-        /* The V.92 QC/QCA octet below encodes the *digital* modem's
-         * capabilities; there is no analogue equivalent wired up here, so V.92
-         * stays out of an analogue-role offer rather than being guessed. */
+        /* The V.92 QC/QCA octet encodes the *digital* modem's capabilities;
+         * an analogue offer carries V.92 only as Quick Connect's QC1a (Table 2:
+         * analogue, QC, P, WXYZ), and only when that is on. */
         v8_parms.v92 = -1;
+        if (me_quick_connect_enabled()) {
+            /* Octet bits: 0 digital=0, 1 QCA=0, 2 P, 3 W, 4 0, 5 X, 6 Y, 7 Z;
+               WXYZ = 0101 selects UQTS 70 (Table 2). */
+            v8_parms.v92 = 0xA0 | (me_qc_offer_lapm() ? 0x04 : 0);
+        }
     } else if (g_advertise_v90) {
         v8_parms.jm_cm.pstn_access            = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
         v8_parms.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_DIGITAL;
@@ -9223,6 +9229,8 @@ static void me_x2_rx_locked(const int16_t *samples, int count)
  * G.711 domain before anything else sees them, because QTS and ANSpcm are
  * codeword sequences; V.8 itself is simply not fed for the duration. */
 static v92_qc_t g_qc;
+static v92_qca_t g_qca;                 /* the analogue caller's side */
+static bool     g_qc_analogue = false;  /* g_qca, not g_qc, owns the line */
 static bool     g_qc_active = false;
 static bool     g_qc_finish_pending = false;
 static bool     g_qc_failed = false;     /* tried this call; do not answer a second QC1a */
@@ -9244,6 +9252,8 @@ static void qc_call_reset_locked(void)
 {
     v92_qc_free(&g_qc);
     v92_qc_init(&g_qc);
+    v92_qca_init(&g_qca);
+    g_qc_analogue = false;
     g_qc_active = false;
     g_qc_finish_pending = false;
     g_qc_failed = false;
@@ -9259,8 +9269,10 @@ static bool me_quick_connect_enabled(void)
 {
     v250_ctl_t cfg;
 
-    if (!g_enable_v92 || !g_advertise_v90 || me_v90_analogue_role()
-        || g_calling_party || g_enable_x2 || g_qc_failed)
+    /* The digital modem answering (9.2.4) or the analogue modem calling
+       (9.2.1): the two roles of this clause that V.8 starts. */
+    if (!g_enable_v92 || !g_advertise_v90 || g_enable_x2 || g_qc_failed
+        || g_calling_party != me_v90_analogue_role())
         return false;
     di_get_v250_settings(&cfg);
     return (cfg.pqc == 0 || cfg.pqc == 1) && cfg.pss != 2;
@@ -9298,6 +9310,37 @@ static void me_qc_begin(const v8_parms_t *r)
     int uqts = v92_short_phase1_uqts_from_wxyz(wxyz);
     const char *why = NULL;
 
+    if (g_calling_party) {
+        /* 9.2.1.1: we sent QC1a and the digital modem has answered with QCA1d
+         * (V.8 reports it the moment it decodes).  Stop CM, go silent, and
+         * wait for ANSpcm. */
+        pthread_mutex_lock(&g_state_mtx);
+        if (g_qc_active || g_qc_failed)
+            why = "a Quick Connect attempt has already run on this call";
+        else if (g_state != ME_V8 || !me_v90_analogue_role())
+            why = "not the analogue caller in V.8";
+        else if (!g_rx_from_g711)
+            why = "the bearer is not G.711 codewords";
+        else if (!v92_qca_start(&g_qca, g_law == ME_LAW_ALAW ? V91_LAW_ALAW : V91_LAW_ULAW))
+            why = "the sequence could not be started";
+        if (why) {
+            ME_LOG("[ME] V.92 9.2.1.1: QCA1d seen but not taken (%s); continuing V.8\n", why);
+            pthread_mutex_unlock(&g_state_mtx);
+            return;
+        }
+        g_qc_active = true;
+        g_qc_analogue = true;
+        g_qc_finish_pending = false;
+        g_qc_byte = b;
+        g_qc_lapm = (b & 0x04) != 0;
+        g_phase_start_ms = trace_now_ms();
+        ME_LOG("[ME] V.92 9.2.1.1: QCA1d (LM=%d, P=%d) -> silence, ANSpcm, TONEq\n",
+               (b >> 6) & 3, g_qc_lapm ? 1 : 0);
+        trace_phase("V92 QCA1d: short Phase 1 (analogue caller)");
+        pthread_mutex_unlock(&g_state_mtx);
+        return;
+    }
+
     pthread_mutex_lock(&g_state_mtx);
     if (g_qc_active || g_qc_failed)
         why = "a Quick Connect attempt has already run on this call";
@@ -9331,7 +9374,29 @@ static void me_qc_begin(const v8_parms_t *r)
  * g_qc_active.  Always consumes the block. */
 static void qc_rx_locked(const uint8_t *codewords, int count)
 {
-    v92_qc_state_t before = v92_qc_state(&g_qc);
+    v92_qc_state_t before;
+
+    if (g_qc_analogue) {
+        v92_qca_state_t was = g_qca.state;
+
+        /* The digital modem's INFO0d can start before our Phase 2 receiver
+         * exists (it times its 75 ms from detecting TONEq, we time ours from
+         * ANSpcm ending), so keep the audio the way V.8 does, for
+         * me_v90_prepare_info0a_preroll(). */
+        for (int i = 0; i < count; i++) {
+            g_v8_rx_hist[g_v8_rx_hist_wr] = pcm_to_linear(codewords[i]);
+            g_v8_rx_hist_wr = (g_v8_rx_hist_wr + 1) % V8_RX_HIST_SAMPLES;
+        }
+        g_v8_rx_hist_len += count;
+        if (g_v8_rx_hist_len > V8_RX_HIST_SAMPLES)
+            g_v8_rx_hist_len = V8_RX_HIST_SAMPLES;
+        v92_qca_rx(&g_qca, codewords, count);
+        if (was != g_qca.state)
+            ME_LOG("[ME] V.92 9.2.1.3: %s -> %s\n", v92_qca_state_name(was),
+                   v92_qca_state_name(g_qca.state));
+        return;
+    }
+    before = v92_qc_state(&g_qc);
 
     v92_qc_rx(&g_qc, codewords, count);
     if (before == V92_QC_ANSPCM && v92_qc_state(&g_qc) == V92_QC_SILENCE) {
@@ -9349,6 +9414,12 @@ static int qc_tx_locked(uint8_t *codewords, int count)
 
     if (!g_qc_active || g_qc_finish_pending)
         return -1;
+    if (g_qc_analogue) {
+        n = v92_qca_tx(&g_qca, codewords, count);
+        if (!v92_qca_running(&g_qca))
+            g_qc_finish_pending = true;
+        return n;
+    }
     if (g_qc.total == 0)
         g_qc_origin = g_tx_chunk_base;
     n = v92_qc_tx(&g_qc, codewords, count);
@@ -9374,11 +9445,15 @@ static void me_qc_finish(void)
     g_qc_finish_pending = false;
     g_qc_active = false;
     g_qc_failed = true;
-    st = v92_qc_state(&g_qc);
+    st = g_qc_analogue ? (g_qca.state == V92_QCA_PHASE2 ? V92_QC_PHASE2 : V92_QC_V8)
+                       : v92_qc_state(&g_qc);
     if (st != V92_QC_PHASE2) {
         /* 9.2.4.3: no TONEq in the 2 s after QCA1d.  Send ANSam and go on by
-         * V.8, which the far end will do too once its own timer runs out. */
-        ME_LOG("[ME] V.92 9.2.4.3: no TONEq within 2 s of QCA1d; ANSam and V.8\n");
+         * V.8, which the far end will do too once its own timer runs out.
+         * (The caller's mirror: no ANSpcm after QCA1d; back to V.8.) */
+        ME_LOG(g_qc_analogue
+               ? "[ME] V.92 9.2.1.1: no ANSpcm after QCA1d; back to V.8\n"
+               : "[ME] V.92 9.2.4.3: no TONEq within 2 s of QCA1d; ANSam and V.8\n");
         trace_phase("V92 QC: no TONEq -> V.8");
         v92_qc_free(&g_qc);
         g_qc_aligned = false;
@@ -9390,8 +9465,12 @@ static void me_qc_finish(void)
         pthread_mutex_unlock(&g_state_mtx);
         return;
     }
-    ME_LOG("[ME] V.92 9.2.4.3: short Phase 1 complete (%ld symbols, QTS at %ld); Phase 2\n",
-           g_qc.total, g_qc.qts_start);
+    if (g_qc_analogue)
+        ME_LOG("[ME] V.92 9.2.1.3: short Phase 1 complete (TONEq %ld symbols); Phase 2\n",
+               g_qca.tonq_symbols);
+    else
+        ME_LOG("[ME] V.92 9.2.4.3: short Phase 1 complete (%ld symbols, QTS at %ld); Phase 2\n",
+               g_qc.total, g_qc.qts_start);
     trace_phase("V92 QC: short Phase 1 complete -> Phase 2");
     /* What V.8 would have settled on, as far as the rest of the call can
      * tell: the analogue modem is a V.90 modem (it signalled V.92 in QC1a)
@@ -9404,7 +9483,10 @@ static void me_qc_finish(void)
     synth.jm_cm.peer_modulations = synth.jm_cm.modulations;
     synth.jm_cm.protocols = g_qc_lapm ? V8_PROTOCOL_LAPM_V42 : V8_PROTOCOL_NONE;
     synth.jm_cm.pstn_access = V8_PSTN_ACCESS_DCE_ON_DIGITAL;
-    synth.jm_cm.pcm_modem_availability = V8_PSTN_PCM_MODEM_V90_V92_ANALOGUE;
+    /* The peer's side of the access: the answerer is the analogue modem unless
+       we are. */
+    synth.jm_cm.pcm_modem_availability = g_qc_analogue
+        ? V8_PSTN_PCM_MODEM_V90_V92_DIGITAL : V8_PSTN_PCM_MODEM_V90_V92_ANALOGUE;
     synth.jm_cm.nsf = -1;
     synth.jm_cm.t66 = -1;
     pthread_mutex_unlock(&g_state_mtx);

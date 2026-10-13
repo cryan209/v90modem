@@ -101,6 +101,48 @@ int v92_qc_tx(v92_qc_t *q, uint8_t *codewords, int n);
 /* Feed received codewords to the TONEq detector. */
 void v92_qc_rx(v92_qc_t *q, const uint8_t *codewords, int n);
 
+/* ------------------------------------------------------------------ */
+/* The analogue caller's side (9.2.1.1 after QCA1d, 9.2.1.3)           */
+/* ------------------------------------------------------------------ */
+
+typedef enum {
+    V92_QCA_IDLE = 0,
+    V92_QCA_WAIT_PCM,   /* silence; waiting for ANSpcm to have been heard for 1 s */
+    V92_QCA_TONEQ,      /* sending TONEq until ANSpcm stops */
+    V92_QCA_SILENCE,    /* 75 ms */
+    V92_QCA_PHASE2,     /* done: proceed to Phase 2 */
+    V92_QCA_V8          /* done: no ANSpcm, back to V.8 */
+} v92_qca_state_t;
+
+#define V92_QCA_PCM_BLOCKS     100     /* 1 s of ANSpcm */
+#define V92_QCA_PCM_MISS       3       /* blocks without it that mean it has stopped */
+#define V92_QCA_WAIT_LIMIT     48000   /* 6 s from QCA1d: the digital modem has given up */
+
+typedef struct {
+    v91_law_t law;
+    v92_qca_state_t state;
+    long pos;
+    long waited;                      /* symbols since the start */
+    double tone_phase;
+    int blk_n;
+    double blk_e, blk_s1, blk_s2;
+    int pcm_run, pcm_miss;
+    long tonq_symbols;
+} v92_qca_t;
+
+void v92_qca_init(v92_qca_t *q);
+/* Begin once QCA1d has been detected: stop CM, go silent, listen for ANSpcm. */
+bool v92_qca_start(v92_qca_t *q, v91_law_t law);
+/* As v92_qc_tx(): returns how many codewords it supplied, short at the end. */
+int v92_qca_tx(v92_qca_t *q, uint8_t *codewords, int n);
+void v92_qca_rx(v92_qca_t *q, const uint8_t *codewords, int n);
+static inline bool v92_qca_running(const v92_qca_t *q)
+{
+    return q->state != V92_QCA_IDLE && q->state != V92_QCA_PHASE2
+        && q->state != V92_QCA_V8;
+}
+const char *v92_qca_state_name(v92_qca_state_t s);
+
 static inline v92_qc_state_t v92_qc_state(const v92_qc_t *q) { return q->state; }
 static inline bool v92_qc_running(const v92_qc_t *q)
 {

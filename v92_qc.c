@@ -248,3 +248,124 @@ void v92_qc_rx(v92_qc_t *q, const uint8_t *cw, int n)
         }
     }
 }
+
+/* ------------------------------------------------------------------ */
+/* Analogue caller                                                     */
+/* ------------------------------------------------------------------ */
+
+#define ANSPCM_HZ      2100.0
+#define TONEQ_TX_PEAK  2500.0     /* about -13 dBm0 */
+
+const char *v92_qca_state_name(v92_qca_state_t s)
+{
+    switch (s) {
+    case V92_QCA_IDLE:     return "idle";
+    case V92_QCA_WAIT_PCM: return "wait-ANSpcm";
+    case V92_QCA_TONEQ:    return "TONEq";
+    case V92_QCA_SILENCE:  return "silence";
+    case V92_QCA_PHASE2:   return "phase2";
+    case V92_QCA_V8:       return "v8";
+    }
+    return "?";
+}
+
+void v92_qca_init(v92_qca_t *q)
+{
+    memset(q, 0, sizeof(*q));
+    q->state = V92_QCA_IDLE;
+}
+
+bool v92_qca_start(v92_qca_t *q, v91_law_t law)
+{
+    v92_qca_init(q);
+    q->law = law;
+    q->state = V92_QCA_WAIT_PCM;
+    return true;
+}
+
+int v92_qca_tx(v92_qca_t *q, uint8_t *cw, int n)
+{
+    int done = 0;
+    uint8_t sil = v91_ucode_to_codeword(q->law, 0, true);
+
+    while (done < n) {
+        switch (q->state) {
+        case V92_QCA_IDLE:
+        case V92_QCA_PHASE2:
+        case V92_QCA_V8:
+            return done;
+        case V92_QCA_WAIT_PCM:
+            cw[done++] = sil;
+            q->waited++;
+            if (q->waited >= V92_QCA_WAIT_LIMIT) {
+                q->state = V92_QCA_V8;
+                return done;
+            }
+            break;
+        case V92_QCA_TONEQ:
+            cw[done++] = v91_linear_to_codeword(q->law,
+                             (int16_t) lrint(TONEQ_TX_PEAK * sin(q->tone_phase)));
+            q->tone_phase += 2.0 * M_PI * TONEQ_HZ / 8000.0;
+            q->tonq_symbols++;
+            break;
+        case V92_QCA_SILENCE:
+            cw[done++] = sil;
+            if (++q->pos >= V92_QC_SILENCE_SYMBOLS) {
+                q->state = V92_QCA_PHASE2;
+                return done;
+            }
+            break;
+        }
+    }
+    return done;
+}
+
+/* One 10 ms block: is it ANSpcm (a pure 2100 Hz tone at signalling level)? */
+static void qca_block_done(v92_qca_t *q)
+{
+    double c = 2.0 * cos(2.0 * M_PI * ANSPCM_HZ / 8000.0);
+    double mag2 = q->blk_s1 * q->blk_s1 + q->blk_s2 * q->blk_s2 - c * q->blk_s1 * q->blk_s2;
+    double tone_e = 2.0 * mag2 / V92_QC_TONEQ_BLOCK;
+    double rms = sqrt(q->blk_e / V92_QC_TONEQ_BLOCK);
+    bool pcm = rms >= TONEQ_MIN_RMS && q->blk_e > 0.0 && tone_e / q->blk_e >= TONEQ_PURITY;
+
+    if (pcm) {
+        q->pcm_run++;
+        q->pcm_miss = 0;
+    } else if (++q->pcm_miss >= V92_QCA_PCM_MISS) {
+        /* ANSpcm's phase reversals (every 3612 symbols) smear a block or two;
+         * three in a row is the signal gone. */
+        if (q->state == V92_QCA_TONEQ) {
+            /* 9.2.1.3: ANSpcm no longer detected -- end TONEq, 75 +/- 5 ms. */
+            q->state = V92_QCA_SILENCE;
+            q->pos = 0;
+        }
+        q->pcm_run = 0;
+    }
+    if (q->state == V92_QCA_WAIT_PCM && q->pcm_run >= V92_QCA_PCM_BLOCKS) {
+        /* 9.2.1.3: ANSpcm detected for 1 s -- TONEq. */
+        q->state = V92_QCA_TONEQ;
+        q->tone_phase = 0.0;
+    }
+    q->blk_n = 0;
+    q->blk_e = 0.0;
+    q->blk_s1 = q->blk_s2 = 0.0;
+}
+
+void v92_qca_rx(v92_qca_t *q, const uint8_t *cw, int n)
+{
+    double c = 2.0 * cos(2.0 * M_PI * ANSPCM_HZ / 8000.0);
+
+    if (q->state == V92_QCA_IDLE)
+        return;
+    for (int i = 0; i < n; i++) {
+        double x = (double) v91_codeword_to_linear(q->law, cw[i]);
+        double s0 = x + c * q->blk_s1 - q->blk_s2;
+
+        q->blk_s2 = q->blk_s1;
+        q->blk_s1 = s0;
+        q->blk_e += x * x;
+        if (++q->blk_n == V92_QC_TONEQ_BLOCK)
+            qca_block_done(q);
+    }
+}

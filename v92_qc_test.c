@@ -297,8 +297,92 @@ static void test_sd_alignment(void)
     printf("PASS: Sd waits for the QTS frame boundary\n");
 }
 
+/* 9.2.1.3, the analogue caller: ANSpcm for 1 s brings TONEq, ANSpcm ending
+ * ends it, and 75 ms of silence follows. */
+static void test_analogue(v91_law_t law)
+{
+    v92_qca_t q;
+    uint8_t out[160], in[160];
+    long k = 0;
+    int tone_tx = 0;
+
+    v92_qca_init(&q);
+    assert(v92_qca_start(&q, law));
+    /* 0.5 s of ANSpcm is not enough. */
+    for (int f = 0; f < 25; f++) {
+        for (int i = 0; i < 160; i++)
+            in[i] = v92_anspcm_codeword(law, 1, k++);
+        v92_qca_rx(&q, in, 160);
+        assert(v92_qca_tx(&q, out, 160) == 160);
+    }
+    CHECK(q.state == V92_QCA_WAIT_PCM, "0.5 s of ANSpcm answered with %s", v92_qca_state_name(q.state));
+    /* It carries on for another second, across a phase reversal at 3612. */
+    for (int f = 0; f < 60 && q.state == V92_QCA_WAIT_PCM; f++) {
+        for (int i = 0; i < 160; i++)
+            in[i] = v92_anspcm_codeword(law, 1, k++);
+        v92_qca_rx(&q, in, 160);
+        assert(v92_qca_tx(&q, out, 160) == 160);
+    }
+    CHECK(q.state == V92_QCA_TONEQ, "1.5 s of ANSpcm gave %s", v92_qca_state_name(q.state));
+    /* TONEq goes out (a 980 Hz tone) until ANSpcm stops. */
+    for (int f = 0; f < 8; f++) {
+        int16_t x[80];
+        double c = 2.0 * cos(2.0 * M_PI * 980.0 / 8000.0), s1 = 0, s2 = 0, e = 0;
+
+        for (int i = 0; i < 160; i++)
+            in[i] = v92_anspcm_codeword(law, 1, k++);
+        v92_qca_rx(&q, in, 160);
+        assert(v92_qca_tx(&q, out, 160) == 160);
+        for (int i = 0; i < 80; i++)
+            x[i] = v91_codeword_to_linear(law, out[i]);
+        for (int i = 0; i < 80; i++) {
+            double s0 = x[i] + c * s1 - s2;
+
+            s2 = s1; s1 = s0; e += (double) x[i] * x[i];
+        }
+        if (e > 0 && 2.0 * (s1 * s1 + s2 * s2 - c * s1 * s2) / (80 * e) > 0.9)
+            tone_tx++;
+    }
+    CHECK(tone_tx == 8, "TONEq not a 980 Hz tone in %d of 8 frames", 8 - tone_tx);
+    memset(in, v91_ucode_to_codeword(law, 0, true), sizeof(in));
+    for (int f = 0; f < 3 && q.state == V92_QCA_TONEQ; f++)
+        v92_qca_rx(&q, in, 160);
+    CHECK(q.state == V92_QCA_SILENCE, "ANSpcm gone: %s", v92_qca_state_name(q.state));
+    {
+        long total = 0;
+
+        while (v92_qca_running(&q)) {
+            int got = v92_qca_tx(&q, out, 160);
+
+            total += got;
+            if (got < 160)
+                break;
+        }
+        CHECK(q.state == V92_QCA_PHASE2 && total == 600, "silence %ld codewords, state %s",
+              total, v92_qca_state_name(q.state));
+    }
+    /* No ANSpcm at all: back to V.8 after 6 s. */
+    v92_qca_start(&q, law);
+    {
+        long total = 0;
+
+        while (v92_qca_running(&q) && total < 100000) {
+            int got = v92_qca_tx(&q, out, 160);
+
+            total += got;
+            if (got < 160)
+                break;
+        }
+        CHECK(q.state == V92_QCA_V8 && total == V92_QCA_WAIT_LIMIT, "no ANSpcm: %s after %ld",
+              v92_qca_state_name(q.state), total);
+    }
+    printf("PASS: analogue caller law=%d: ANSpcm -> TONEq -> silence -> Phase 2; timeout -> V.8\n", (int) law);
+}
+
 int main(void)
 {
+    test_analogue(V91_LAW_ULAW);
+    test_analogue(V91_LAW_ALAW);
     test_sd_alignment();
     for (int law = 0; law < 2; law++) {
         test_qca1d((v91_law_t) law, 1, true);

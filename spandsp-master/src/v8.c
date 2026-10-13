@@ -696,6 +696,20 @@ static void v92_decode(v8_state_t *s)
         report_event(s);
     }
     /*endif*/
+    /* V.92 9.2.1.1, the other end of it: the analogue caller that sent QC1a
+       and sees QCA1d (Table 5; octet bits 3-5 are the 000 before LM) is
+       answered by a digital modem that has taken the offer. */
+    else if (s->calling_party  &&  s->parms.v92_quick_connect  &&  !s->qc_reported
+             &&  from_digital  &&  qca  &&  (v92 & 0x38) == 0)
+    {
+        /* A QCA octet is not yet Quick Connect: an answerer that has no such
+           thing but saw our QC sends it ahead of its JM, in the V.8 stream.
+           Table 5's QCA1d ends in ten ONEs and then the line goes quiet (9.2.4.1:
+           silence for 75 ms), whereas a JM preamble follows at once in the other
+           case.  Report when the carrier drops, not before. */
+        s->qc_pending = true;
+    }
+    /*endif*/
 }
 /*- End of function --------------------------------------------------------*/
 
@@ -713,6 +727,15 @@ static void put_bit(void *user_data, int bit)
         switch (bit)
         {
         case SIG_STATUS_CARRIER_DOWN:
+            if (s->qc_pending)
+            {
+                s->qc_pending = false;
+                s->qc_reported = true;
+                s->result.status = V8_STATUS_V92_QUICK_CONNECT;
+                report_event(s);
+                break;
+            }
+            /*endif*/
             /* V.8: the calling DCE drops the V.21 carrier immediately after
                sending CJ, before starting Phase 2.  CJ is only three zero
                octets, sent once, so a single bit error loses it for good.
@@ -769,6 +792,9 @@ static void put_bit(void *user_data, int bit)
         break;
     }
     /*endswitch*/
+    if (new_preamble_type == V8_SYNC_CM_JM)
+        s->qc_pending = false;      /* it was a QCA ahead of JM, not QCA1d */
+    /*endif*/
     if (new_preamble_type != V8_SYNC_UNKNOWN)
     {
         /* We have seen a fresh sync code */
@@ -868,6 +894,7 @@ static void v8_decode_init(v8_state_t *s)
     s->got_cm_jm = false;
     s->got_cj = false;
     s->qc_reported = false;
+    s->qc_pending = false;
     s->zero_byte_count = 0;
     s->rx_data_ptr = 0;
 }
