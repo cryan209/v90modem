@@ -79,6 +79,22 @@ gcc -m32 -Wl,--allow-multiple-definition -o slmodemd_map modem_main.o modem_cmdl
 
 `tools/soak/qc_slm_pve.sh` takes `SLM_BIN=slmodemd_map`.
 
+**Build d-modem against the main tree's pjproject, never with a bare `make d-modem` there.**
+`/root/D-Modem-rig/Makefile` links its own `pjsip.install` (pjproject 2.11.1), and a d-modem
+built that way passes every startup metric but never reaches data mode: our B1u search does not
+find slmodemd's upstream (2026-10-14: 7/7 calls, the default-kernel controls included, where the
+binary built against `/root/D-Modem/pjsip.install` (pjproject 2.15.1) delivered 2/2 error-free).
+Build it like this:
+
+```sh
+cd /root/D-Modem-rig
+gcc -Wall -Islmodemd/ -o d-modem d-modem.c \
+  $(PKG_CONFIG_PATH=/root/D-Modem/pjsip.install/lib/pkgconfig pkg-config --static --cflags --libs libpjproject)
+```
+
+A correctly linked d-modem logs nothing of its own to `slm.log` (no "resampler phase" or
+"upstream 9600->8000" lines); one that does was linked against 2.11.1.
+
 `socket-ioctl-overrides.patch` (env-gated, default unchanged): `SLM_CODECTYPE` and
 `SLM_IODELAY` override what this fork's socket driver reports to the DSP. AonCyberLabs'
 slmodemd (the tower's) returns codec 4 (STLC7550) and I/O delay 0; this fork returns

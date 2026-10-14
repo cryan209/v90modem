@@ -628,6 +628,11 @@ which is fitting slmodemd and not a fix; or find what puts -0.66 in the DFE.
 
 #### What puts -0.66 in slmodemd's DFE: the 4 kHz band edge of the rig's downstream
 
+(Correction, same evening: every d-modem rebuilt for this section and the next -- the DC block
+and every `DM_RS_TAPS` row -- was linked against the wrong pjproject (see the end of this
+chapter). Their startup metrics look plausible but are superseded by the re-run below; the
+`DM_RS_FC` rows and the input capture ran on the correctly linked binary.)
+
 Captured slmodemd's equaliser input (`EQ_DUMP_INPUT=1`) on a good call and fitted it against
 our transmitted TRN1d:
 
@@ -681,3 +686,61 @@ The Jd-state lottery shrinks from 1.17-3.25 to 1.19-1.49, under slmodemd's 1.5 l
 states tried, but with thin margins. Open: more Jd states, the sinc upstream, and whether the
 first-attempt retrain goes away on full calls; and whether a real line, which rolls off from
 about 3.4 kHz, behaves like the soft edge.
+
+#### Kernel sweep on the correctly linked d-modem (2026-10-14, evening)
+
+Every d-modem rebuilt from about 15:45 linked `/root/D-Modem-rig`'s own pjproject 2.11.1 instead
+of the main tree's 2.15.1 (`rig/slmodemd/README.md`). That build reaches Phase 4 but never data
+mode: 7/7 full calls failed, the default-kernel controls included, while the original binary
+gave 2/2 CONNECT 54667. Rebuilt correctly, the controls deliver error-free (27900 up / 27950 down
+lines, 0 gaps; 27800 / 27547, 0 gaps).
+
+Re-run of the kernel comparison, sinc upstream, the call's natural Jd state (our server was on
+the bisect build without `ME_V92_JD_SKIP_REPS`, so the four nominal states per row were one):
+
+| downstream kernel | Phase 4 ratio | DFE taps 1, 2 | pad-gain fit |
+|---|---|---|---|
+| 257 Hann (default) | 2.505, retrain | -0.67, -0.08 | 10512 |
+| 513 Hann | 2.110, retrain | -0.49, -0.24 | 12402 |
+| 129 Hann | 1.800, retrain | -0.39, +0.03 | 6849 |
+| 65 Hann | **1.451, no retrain** | -0.24, +0.09 | 2715 |
+
+Softer is monotonically better; only 65 taps gets under slmodemd's 1.5, by a thin margin. (513
+is better than 257 here, unlike on the mislinked build.) Not yet repeated across Jd states.
+
+#### Why the 65-tap call then fails: 34666 upstream does not lock
+
+With 65 taps slmodemd does not retrain, but no call reaches data mode: our B1u solve reads 0.0546
+LU (0.0216 on the default kernel) and B1u never locks. In those calls our CPd design chose
+**34666 bps (drn 9, 24 points)** instead of 32000 (drn 7, 20 points). It has been chosen in no
+other call on this rig and never locked; 32000 has locked in 25 of 47.
+
+Ground truth (`slmodemd_p4`, its `V92Transmitter` output, calls `p4k65` and `p4k0`):
+
+- slmodemd transmits exactly what the CPd asks. Every data symbol is 1.3733 (its logged
+  constellation gain after LU) x one of our points, and its 576 B1u symbols equal our
+  regenerated B1u (8.7.1, all-ones through `v92_upstream_wave_encode_frame`) at both rates. With
+  no precoder filter the minimum-|x| member is always the smaller magnitude, so it uses only the
+  lower 12 of the 24 points (`min(p[K], p[LC-1-K])`, as our Table 30 power rule assumes).
+- The channel is linear and its noise is the same at both rates: a 49-tap least-squares fit of
+  our received tap onto slmodemd's symbols leaves 19.9 vs 19.7, and the residual does not
+  correlate with tx|tx| or tx^3.
+- So 34666 has less margin, not more noise: its levels are 23% closer, and even the ideal fit
+  sits at 0.258 of the smallest spacing against 0.196 at 32000. Our rate rule admitted 24 points
+  because TRN2u's sigma estimate came in at 23.7 instead of 24.6; a `--fast` replay of the same
+  call measures 25.2 and designs 32000, so this call sat right on the threshold.
+- The upstream also arrived about half a sample off: main tap split +1.000 / +0.490 at lags 0, +1
+  (symmetric at 32000). A 31-tap T-spaced solve costs only 12% there in the ideal fit (22.3 vs
+  19.9), yet our B1u solve is 2.5x worse than at 32000 where the ideal is 1.1x. So our solve
+  loses most of it, most likely by its 31-tap window sitting off-centre (positioned from the
+  TRN2u solve, timing rounded to whole samples by `v92_p3_eq_integer_timing`).
+
+That the downstream kernel moves the upstream's sampling phase points at slmodemd slaving its
+transmit timing to its receiver; not yet shown. Diagnostics added to `modem_engine.c` log the
+TRN2u timing before rounding and where the B1u solve's largest tap and outer-tap energy sit;
+the first calls with them (65 taps vs default) are running.
+
+Two things to fix on our side whichever way that lands: the rate rule should price the margin
+the receiver actually achieves (TRN2u's sigma is measured at a different timing and with
+four-level data), and the B1u/data solve should centre its window on the response, or use more
+taps, rather than inherit the TRN2u position.

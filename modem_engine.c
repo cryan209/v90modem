@@ -6114,8 +6114,11 @@ static void me_v92_data_slicer_locked(void)
         /* The B1u solve is T-spaced on whole samples; the interpolator at
          * the TRN2u-learned fractional offset left 0.12 LU against B1u that
          * no taps could remove (0.036 on whole samples). */
-        if (ok)
+        if (ok) {
+            ME_LOG("[ME] V.92 B1u training: TRN2u timing %.3f samples, rounded to whole samples\n",
+                   g_v92_p3_rx.eq[g_v92_p3_rx.eq_law].tau);
             v92_p3_eq_integer_timing(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law]);
+        }
         v92_p3_eq_set_capture(&g_v92_p3_rx.eq[g_v92_p3_rx.eq_law],
                               ok ? g_v92_b1u_capture : NULL, V92_B1U_TRAIN_CAPTURE);
     }
@@ -6170,6 +6173,22 @@ static void me_v92_b1u_train_locked(v92_p3_eq_t *eq, double scale)
             me_v92_b1u_feed_values_locked(replay, n);
         /* Those frames' inputs are not in the aided-refit ring. */
         g_v92_aided_frames_seen = g_v92_upstream_rx.decoded_frames;
+    }
+    {
+        /* Where the solved response sits in the window: a channel that needs
+         * taps past either edge is truncated, not fitted. */
+        const int nt = eq->cfg.ntaps;
+        double e = 0.0, lo = 0.0, hi = 0.0, big = 0.0;
+        int peak = 0;
+
+        for (int i = 0; i < nt; i++) {
+            e += eq->taps[i]*eq->taps[i];
+            if (i < 4) lo += eq->taps[i]*eq->taps[i];
+            if (i >= nt - 4) hi += eq->taps[i]*eq->taps[i];
+            if (fabs(eq->taps[i]) > big) { big = fabs(eq->taps[i]); peak = i; }
+        }
+        ME_LOG("[ME] V.92 B1u training: largest tap %d of %d, outer 4 taps hold %.1f%% / %.1f%% of tap energy\n",
+               peak, nt, e > 0.0 ? 100.0*lo/e : 0.0, e > 0.0 ? 100.0*hi/e : 0.0);
     }
     ME_LOG("[ME] V.92 B1u training: found at captured symbol %d (correlation %.4f); "
            "feed-forward taps solved on %d B1u symbols, residual %.4f LU; "
