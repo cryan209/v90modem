@@ -271,8 +271,8 @@ int main(int argc, char **argv)
     expect("AT+FCLASS=?",  "0,1,1.0,2.0,2.1", 300);
     expect("AT+FCLASS=2.1", "OK", 300);
     expect("AT+FCLASS?", "2.1", 300);
-    expect("AT+FCC?", "1,B,0,2,3,1,0,7,0", 300);
-    expect("AT+FCC=?", "(0-B)", 300);
+    expect("AT+FCC?", "1,D,0,2,3,1,0,7,0", 300);  /* T.32 Amd 1 C.5.1: BR=D 33600 */
+    expect("AT+FCC=?", "(0-D)", 300);
     expect("AT+FCLASS=0", "OK", 300);
 
     /*
