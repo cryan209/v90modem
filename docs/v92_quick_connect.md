@@ -766,3 +766,39 @@ against the wrong equaliser length. What is left is the rate: 34666's 23% smalle
 spacing. Its 2.5x residual is still not explained by the window or the timing rounding; the
 next step is to replay `bw65` (`v90_engine_replay --fast`) and solve B1u offline with the known
 symbols at both rates.
+
+#### Forced-rate sweep, and the rate rule priced on the data-mode error (2026-10-14, night)
+
+`ME_V92_UP_DRN=N` (62a28214) forces our CPd to upstream drn N at the widest spacing that carries
+it. Sweep against slmodemd, default d-modem kernel, two passes in opposite order, LAPM payload
+graded (`/root/upsweep.sh` on vmhost; `PAY_DELAY=80`: `qc_slm_pve.sh`'s default 45 s types
+payload into slmodemd's serial port before a retrained V.92 call reaches CONNECT, which aborts
+the dial). Every rate gave identical figures in both passes.
+
+| forced upstream | levels | B1u | upstream frames rejected / 80 s | lines down / up |
+|---|---|---|---|---|
+| 24000-29333 | 10-16 | locked, 0.020-0.027 LU | 0 | ~18400 / ~18450 |
+| 32000 | 20 | locked, 0.029 | 64-70 | ~18450 / ~18500 (LAPM retransmits) |
+| 34666 | 24 | locked, 0.023 | (counter unreliable) | 12526-18450 / **2607-2788** |
+| 37333 | 36 | locked, enters data | - | none: LAPM never comes up |
+| 40000-48000 | 44-78 | never locks | - | none (one 44000 call withdrew PCM and ran V.90) |
+
+- **slmodemd does not trade downstream for upstream.** Its downstream was 54667 with noise
+  energy 8.92 at every upstream rate from 24000 to 48000 (on this 4-wire rig; a 2-wire line's
+  echo is a different matter).
+- **Data mode's error is ~37 DS0 at every rate**, not the 24.6 the CPd design was given. The
+  design's sigma came from TRN2u through the Phase 4 equaliser *with* decision feedback; data
+  mode drops the feedback (`v92_p3_eq_use_ff`). Measuring TRN2u through the feed-forward taps of
+  the same refit (`v92_p3_eq_t.y_ff`, `v92_p3_rx_follow_ff`) gives **37.6 DS0** on a replay of
+  the sweep's own recording, against data-mode 36-38.
+- The rule now takes the larger of the two sigmas, with the margin unchanged at 4.0: it designs
+  **28000** on this channel, one step under the last error-free rate (29333). 3.0 would design
+  30666, 2.6 32000, and 2.5 already 34666; `v92_startup_test` (zero-error assertions) also fails
+  at 3.0.
+
+The 65-tap kernel is a different channel for the upstream, not a rate problem: there B1u's
+residual is about twice the default's at every rate (0.042-0.059 LU) and 26666 carried 250
+upstream lines. The feed-forward sigma is **104.9 DS0 against 25.2 with feedback** (replay of
+`uk3a`, matching its live data-mode 75-78), so that channel needs the decision feedback our data
+mode drops. Priced honestly, no constellation fits, the CPd cannot be built, and the call falls
+back through a retrain to V.90 with a V.34 upstream.

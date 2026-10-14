@@ -1449,11 +1449,24 @@ int v92_p3_rx_follow(v92_p3_rx_t *rx, uint8_t codeword, int sample_index,
         dec_push(rx, law, eq->decision > 0);
         if (out && produced < max)
             out[produced] = eq->y;
+        if (produced < 4)
+            rx->follow_ff[produced] = eq->y_ff;
         produced++;
     }
     trn1u2_search(rx);
     trn1u2_gate(rx);
     return produced < max ? produced : max;
+}
+
+int v92_p3_rx_follow_ff(const v92_p3_rx_t *rx, double *out, int n)
+{
+    if (!rx || !out)
+        return 0;
+    if (n > 4)
+        n = 4;
+    for (int i = 0; i < n; i++)
+        out[i] = rx->follow_ff[i];
+    return n;
 }
 
 void v92_p3_rx_expect_trn1u2(v92_p3_rx_t *rx, int sample_index)

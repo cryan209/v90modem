@@ -373,8 +373,17 @@ bool v92_p3_eq_step(v92_p3_eq_t *eq)
 
     for (int j = 0; j < n; j++)
         y += eq->taps[j]*u[j];
+    if (eq->have_ff && !eq->ff_only) {
+        double yff = 0.0;
+
+        for (int j = 0; j < n; j++)
+            yff += eq->taps_ff[j]*u[j];
+        eq->y_ff = yff;
+    }
     for (int j = 0; j < eq->cfg.nfb; j++)
         y += eq->fb[j]*eq->dhist[j];
+    if (!eq->have_ff || eq->ff_only)
+        eq->y_ff = y;
     ref = eq->k >= eq->ref_from && eq->k < eq->ref_until
         ? reference_next(&eq->gpa) : 0;
     if (ref)

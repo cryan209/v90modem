@@ -957,7 +957,15 @@ static bool v90_build_v92_suvd_mapped(v90_state_t *s, bool ack)
  * absent until real upstream channel measurements exist.  The acknowledge
  * bit reflects whether a valid CPu has been received.
  */
-/* CPd points are kept at least 2 x this x the measured TRN2u sigma apart. */
+/* CPd points are kept at least 2 x this x the measured TRN2u sigma apart.
+ * The sigma is the error data mode will have: TRN2u through the equaliser's
+ * feed-forward taps alone, since data mode drops the decision feedback
+ * (modem_engine.c).  Against slmodemd (docs/v92_quick_connect.md, forced-rate
+ * sweep) that is 37.6 DS0 where the feedback equaliser reads 24.6, and data
+ * mode measured 36-38 at every rate.  Up to 29333 the upstream rejected no
+ * frame in 80 s; 32000 rejected 64-70 (LAPM kept the lines up) and 34666 --
+ * what the feedback sigma admitted -- carried 14% of them.  4.0 on the
+ * data-mode sigma designs 28000; 3.0 would design 30666, 2.5 34666. */
 #define V92_UPSTREAM_MARGIN 4.0
 
 /* V.92 Table 30: "the digital modem shall design the modulation parameters

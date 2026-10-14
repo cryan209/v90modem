@@ -136,6 +136,9 @@ typedef struct {
 
     /* Per-symbol output of the last symbol produced. */
     double y;                      /* soft value, reference = +/-1 */
+    double y_ff;                   /* the same symbol through taps_ff alone
+                                      (y when there are none or ff_only):
+                                      what data mode's equaliser would give */
     int decision;                  /* +1 / -1 */
     int reference;                 /* +1 / -1 while data-aided, else 0 */
 

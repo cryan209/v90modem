@@ -1452,9 +1452,12 @@ static double         g_v92_trn2u_err2 = 0.0;
  * codec levels by construction (6.4.2) and are not rounded at all.
  * Measured on a byte-exact bearer: 27 DS0 units by distance, 4.4 within
  * level, and data decoding error-free at zero margin. */
-static double         g_v92_trn2u_lvl_sum[4], g_v92_trn2u_lvl_sum2[4];
-static uint64_t       g_v92_trn2u_lvl_n[4];
+/* Per TRN2u level: [0] the equaliser's output, [1] the same symbols through
+ * its feed-forward taps alone (v92_p3_rx_follow_ff()). */
+static double         g_v92_trn2u_lvl_sum[2][4], g_v92_trn2u_lvl_sum2[2][4];
+static uint64_t       g_v92_trn2u_lvl_n[2][4];
 static double         g_v92_trn2u_sigma;           /* last pushed to the CPd design */
+static double         g_v92_trn2u_sigma_dfe;       /* the [0] figure, for the log */
 /* One least-squares refit of the Phase 3/4 equaliser on TRN2u (see
  * v92_p3_eq_refit()); the noise figures above restart when it lands. */
 #define V92_P4_REFIT_SYMBOLS 4000
@@ -6348,7 +6351,7 @@ static void v92_live_p4u_frame(void *user_data,
                     g_v92_upstream_lock_logged = false;
                     ME_LOG("[ME] V.92 PCM-upstream B1u receiver armed (%s): drn=%u rate=%d bps, "
                            "%u points (largest %u), 4G=%u/65536, TRN2u error %.3f LU over %llu, rx rms %.0f, "
-                           "noise sigma %.2f DS0\n",
+                           "noise sigma %.2f DS0 (feed-forward only; %.2f with feedback)\n",
                            eq_mode ? "equalised, decoded lock" : "raw, correlator",
                            (unsigned)cpd.selected_upstream_drn,
                            ((int)cpd.selected_upstream_drn + 17)*8000/6,
@@ -6358,7 +6361,7 @@ static void v92_live_p4u_frame(void *user_data,
                            g_v92_trn2u_nerr ? sqrt(g_v92_trn2u_err2/(double)g_v92_trn2u_nerr) : 0.0,
                            (unsigned long long)g_v92_trn2u_nerr,
                            g_v92_trn2u_npow ? sqrt(g_v92_trn2u_pow/(double)g_v92_trn2u_npow) : 0.0,
-                           g_v92_trn2u_sigma);
+                           g_v92_trn2u_sigma, g_v92_trn2u_sigma_dfe);
                     {
                         char pl[1024];
                         int at = 0;
@@ -16880,6 +16883,9 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                     g_v92_trn2u_pow += lin*lin;
                     g_v92_trn2u_npow++;
                 }
+                double ff[4];
+
+                (void)v92_p3_rx_follow_ff(&g_v92_p3_rx, ff, n);
                 for (int k = 0; k < n; k++) {
                     double v = values[k]*sqrt(5.0);
                     double d = 2.0*floor(v/2.0) + 1.0;
@@ -16889,11 +16895,18 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                     g_v92_trn2u_err2 += (v - d)*(v - d)/5.0;
                     g_v92_trn2u_nerr++;
                     {
-                        int lvl = (int)(d + 3.0)/2;      /* -3,-1,1,3 -> 0..3 */
+                        /* -3,-1,1,3 -> 0..3.  The feed-forward value is
+                         * grouped by the equaliser's decision: its own would
+                         * hide the errors it makes. */
+                        int lvl = (int)(d + 3.0)/2;
+                        double vf = ff[k]*sqrt(5.0);
 
-                        g_v92_trn2u_lvl_sum[lvl] += v;
-                        g_v92_trn2u_lvl_sum2[lvl] += v*v;
-                        g_v92_trn2u_lvl_n[lvl]++;
+                        g_v92_trn2u_lvl_sum[0][lvl] += v;
+                        g_v92_trn2u_lvl_sum2[0][lvl] += v*v;
+                        g_v92_trn2u_lvl_n[0][lvl]++;
+                        g_v92_trn2u_lvl_sum[1][lvl] += vf;
+                        g_v92_trn2u_lvl_sum2[1][lvl] += vf*vf;
+                        g_v92_trn2u_lvl_n[1][lvl]++;
                     }
                     values[k] *= g_v92_trn2u_lu;
                 }
@@ -16918,20 +16931,33 @@ static void me_rx_g711_impl(const uint8_t *codewords, int count)
                      * 3.8 makes LU the data mode transmit power, so the
                      * received TRN2u rms converts its error to DS0 units. */
                     double lu_rx = sqrt(g_v92_trn2u_pow/(double)g_v92_trn2u_npow);
-                    double within = 0.0, sigma;
-                    uint64_t nwithin = 0;
+                    double sig[2], sigma;
 
-                    for (int l = 0; l < 4; l++) {
-                        if (g_v92_trn2u_lvl_n[l] < 2)
-                            continue;
-                        within += g_v92_trn2u_lvl_sum2[l]
-                                - g_v92_trn2u_lvl_sum[l]*g_v92_trn2u_lvl_sum[l]
-                                  /(double)g_v92_trn2u_lvl_n[l];
-                        nwithin += g_v92_trn2u_lvl_n[l];
+                    for (int e = 0; e < 2; e++) {
+                        double within = 0.0;
+                        uint64_t nwithin = 0;
+
+                        for (int l = 0; l < 4; l++) {
+                            if (g_v92_trn2u_lvl_n[e][l] < 2)
+                                continue;
+                            within += g_v92_trn2u_lvl_sum2[e][l]
+                                    - g_v92_trn2u_lvl_sum[e][l]*g_v92_trn2u_lvl_sum[e][l]
+                                      /(double)g_v92_trn2u_lvl_n[e][l];
+                            nwithin += g_v92_trn2u_lvl_n[e][l];
+                        }
+                        /* Units of +/-1, +/-3 -> LU (/sqrt5) -> DS0. */
+                        sig[e] = nwithin ? sqrt(fmax(within, 0.0)/(5.0*(double)nwithin))*lu_rx
+                                         : 0.0;
                     }
-                    /* Units of +/-1, +/-3 -> LU (/sqrt5) -> DS0. */
-                    sigma = nwithin ? sqrt(fmax(within, 0.0)/(5.0*(double)nwithin))*lu_rx
-                                    : 0.0;
+                    /* Price the rate on the error data mode will have.  Data
+                     * mode drops the decision feedback (v92_p3_eq_use_ff()),
+                     * so its equaliser is the feed-forward part alone.
+                     * Against slmodemd that reads 37.6 DS0 where the feedback
+                     * equaliser reads 24.6, and data mode measured 36-38 at
+                     * every rate; 34666, which the 24.6 admitted, carried 14%
+                     * of its upstream (docs/v92_quick_connect.md). */
+                    g_v92_trn2u_sigma_dfe = sig[0];
+                    sigma = fmax(sig[0], sig[1]);
                     /* v90_set_v92_upstream_noise() needs a positive figure. */
                     if (sigma < 0.01)
                         sigma = 0.01;

@@ -69,7 +69,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_G711_CAPTURE` | modem_engine.c | Record the wire codewords both ways. |
 | `VPCM_ME_VERBOSE` | modem_engine.c | Engine log verbosity. |
 
-## Live-path switches (35, 1 with no test/script/doc reference)
+## Live-path switches (35, 0 with no test/script/doc reference)
 
 | name | read in | default | refs | nearest comment |
 |---|---|---|---|---|
@@ -102,7 +102,7 @@ or the makefile, `s` a script, `d` a current doc, `h` `docs/project_history.md`
 | `ME_V92_ENABLE` | modem_engine.c | 0 | td | under the ME_V92_ENABLE compatibility alias.  False for an unknown name. |
 | `ME_V92_JD_EXTRA_REPS` | v90.c |  | d | to move everything after Jd without changing the upstream path. |
 | `ME_V92_JD_SKIP_REPS` | v90.c |  | d | reps (ME_V92_JD_EXTRA_REPS) with no shift in time. |
-| `ME_V92_UP_DRN` | v90.c |  | - | from it to force a higher one.  0/unset = the noise rule. |
+| `ME_V92_UP_DRN` | v90.c |  | d | from it to force a higher one.  0/unset = the noise rule. |
 | `ME_X2_CONTROL_LAW` | modem_engine.c |  | sd |  |
 | `P3_BYPASS_EQUALIZER` | p3_demod.c |  | c | RRC T/2 resampler and Godard timing loop |
 | `V91_SIM_ROBBED_RX` | modem_engine.c |  | s | cadence phase (0..5). |

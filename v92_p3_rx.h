@@ -183,6 +183,7 @@ typedef struct {
     int      trn1u2_state;   /* 0 not expected, 1 searching, 3 retraining,
                                 2 trained, -1 refused */
     int      follow_sample;  /* DS0 sample of the newest codeword followed */
+    double   follow_ff[4];   /* v92_p3_rx_follow_ff() */
     int      fed_until;      /* newest DS0 sample v92_p3_rx_feed consumed */
     uint8_t  follow_sign[1024]; /* raw codeword signs, by sample & 1023 */ /* ignore Phase-3 lock before this sample */
 
@@ -294,6 +295,11 @@ void v92_p3_rx_feed_block(v92_p3_rx_t *rx,
  */
 int v92_p3_rx_follow(v92_p3_rx_t *rx, uint8_t codeword, int sample_index,
                      double *out, int max);
+
+/* The values the last v92_p3_rx_follow() call wrote, through the
+ * equaliser's feed-forward-only taps (v92_p3_eq_t.y_ff): the error data
+ * mode will see, since it drops the decision feedback.  Copies n (<= 4). */
+int v92_p3_rx_follow_ff(const v92_p3_rx_t *rx, double *out, int n);
 
 /* The Su receiver reported the final Su-bar (9.5.1.1.9) at upstream sample
  * `sample_index`: the second TRN1u (9.5.1.1.10), zero-initialised like the
