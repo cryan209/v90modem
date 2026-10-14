@@ -411,6 +411,16 @@ static int v90_trn1d_phase_dither(int phase, int amplitude)
  * inside its window. */
 #define V90_WAIT_JA_RESYNC_SAMPLES 9600    /* 1.2 s at 8 kHz */
 
+/* ME_V92_JD_EXTRA_REPS=N: diagnostic only.  Send N more Jd repetitions
+ * after S-bar-u than V.92 9.5.1.1.7 asks for ("complete the current Jd"),
+ * to move everything after Jd without changing the upstream path. */
+static int v92_jd_extra_reps(void)
+{
+    const char *value = getenv("ME_V92_JD_EXTRA_REPS");
+
+    return (value && *value) ? atoi(value) : 0;
+}
+
 static int v90_jd_resync_symbols(void)
 {
     const char *value = getenv("ME_V90_JD_RESYNC_SYMBOLS");
@@ -542,6 +552,7 @@ struct v90_state_s {
     bool             dil_requested;
     bool             jd_terminated_by_s;
     bool             jd_terminated_by_su;
+    int              jd_extra_reps_left; /* ME_V92_JD_EXTRA_REPS diagnostic */
     /* Set when WAIT_JA was entered from the Jd no-S resync rather than at the
      * start of Phase 3, so the fallback back to Sd can use a deadline that
      * fits inside the peer's WaitForSd patience. */
@@ -3875,7 +3886,10 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                 s->jd_terminated_by_su = false;
                 return v90_pcm_idle(s->law);
             }
-            if (s->jd_terminate_requested && s->jd_bit_pos == 0) {
+            if (s->jd_terminate_requested && s->jd_bit_pos == 0
+                && s->jd_extra_reps_left > 0)
+                s->jd_extra_reps_left--;
+            else if (s->jd_terminate_requested && s->jd_bit_pos == 0) {
                 /* Say which one actually terminated Jd.  This used to print
                  * "S detected" unconditionally, including when the interop
                  * timeout above set jd_terminate_requested with no S ever
@@ -3883,9 +3897,18 @@ static uint8_t v90_phase3_codeword(v90_state_t *s)
                  * cost a full investigation before the timeout was spotted
                  * on the preceding line. */
                 if (s->v92_phase3) {
+                    /* ME_V92_JD_SKIP_REPS=N, diagnostic only: run the Jd
+                     * generator for N repetitions without sending them, so
+                     * Jp starts from the scrambler/sign state of N extra
+                     * reps (ME_V92_JD_EXTRA_REPS) with no shift in time. */
+                    const char *skip_env = getenv("ME_V92_JD_SKIP_REPS");
+                    int skip = (skip_env && *skip_env) ? atoi(skip_env) : 0;
+
+                    for (int i = 0; i < skip * V90_JD_BITS; i++)
+                        s->diff_enc ^= v90_scramble_bit(&s->scrambler, v90_get_jd_bit(s));
                     fprintf(stderr,
-                            "[V92] Phase 3: Su sequence complete, finished Jd after %d symbols; starting Jp\n",
-                            s->sample_count);
+                            "[V92] Phase 3: Su sequence complete, finished Jd after %d symbols; starting Jp (scrambler %06x, sign %d)\n",
+                            s->sample_count, s->scrambler.sr & 0x7fffff, s->diff_enc);
                     s->tx_phase = V90_TX_JP;
                     s->jp_bit_pos = 0;
                 } else {
@@ -4786,6 +4809,7 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
             s->v92_su_bar_seen = true;
             s->jd_terminate_requested = true;
             s->jd_terminated_by_su = true;
+            s->jd_extra_reps_left = v92_jd_extra_reps();
             fprintf(stderr,
                     "[V92] Phase 3: Su-to-S-bar-u detected; completing current Jd\n");
             return true;

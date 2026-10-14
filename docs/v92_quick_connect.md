@@ -546,3 +546,56 @@ between its directions. Our Jp always sends a zero phase extension (Table 22 bit
 `adjustUinfoToPhaseOffset()`, but a fixed fraction does not fix the fit (0.25: ratio 3.10,
 fit 7338; 0.5: 2.26, 13684; 0.75: no Phase 4 on attempt 1), so that is not it as stated.
 Open: what in slmodemd's Phase 3 DIL analysis follows its upstream path.
+
+#### It is Jp's content, not the upstream path (2026-10-14, afternoon)
+
+The upstream path was only a proxy. Its delay moves our Su-bar detection across a Jd
+boundary: every sinc call ran Jd for 4536 symbols, every linear call 4392. Two diagnostics
+in `v90.c` separate the variables (both off by default, neither spec behaviour):
+`ME_V92_JD_EXTRA_REPS=N` sends N more 72-bit Jd repetitions after Su-bar, and
+`ME_V92_JD_SKIP_REPS=N` runs the Jd generator N repetitions without sending them, so Jp
+starts from the same scrambler and differential-encoder state with no shift in time. The
+Jd->Jp log line now prints that state. Linear upstream throughout (`jdab.sh` on the
+Proxmox host); every number repeats exactly (rep 0 twice: 424, 424):
+
+| Jd reps | Jd | sent? | pad-gain fit | Phase 4 ratio |
+|---|---|---|---|---|
+| +0 | 4392 | -- | 424 | 1.172 |
+| +1 | 4464 | sent | 1968 | 1.361 |
+| +2 | 4536 | sent | 16894 | 1.985 |
+| +3 | 4608 | sent | 6871 | 1.947 |
+| +4 | 4680 | sent | 1628 | 1.227 |
+| +5 | 4752 | sent | 45996 | 2.923 |
+| +6 | 4824 | sent | 26011 | 3.146 |
+| +7 | 4896 | sent | 2542 | 1.445 |
+| +8 | 4968 | sent | 3143 | 1.470 |
+| +2 | 4392 | skipped | 7621 | 1.875 |
+| +5 | 4392 | skipped | 28939 | 2.868 |
+| +6 | 4392 | skipped | 12961 | 3.247 |
+
+Skipping the repetitions reproduces sending them, so **slmodemd's DIL analysis depends on
+the scrambled content of our Jp/Jp'**, pseudo-randomly in the scrambler state, not on when
+it arrives or on the upstream. The DIL itself is identical in every arm (absolute SP signs,
+V.90 8.4.1, as we send it), and so is the DIL-to-CPt time (4540 ms), so slmodemd does not
+cut its study short. Jp's sign balance does not predict it (+5 is positive and worst, +8
+negative and good), nor does the differential sign at Jp start.
+
+What goes wrong is visible in slmodemd's `linearMapping` (its measured DIL levels). In a
+good state every level is 4.000x the mu-law value (residual 2.5 after a gain+offset fit).
+In a bad one the error has one sign for the whole call (+5/+6 high, +2 low), grows with
+the level (Ucode 115: +403), and steps at particular DIL segments (Ucode 64 -> 63: +87 ->
++28); residual 20-28. That is an equaliser whose response was left wrong by Jp and keeps
+drifting through the DIL (its error energy climbs 6 -> 13 there, against a flat 8.5 when
+good).
+
+A line-like DC block in d-modem's downstream (first-order 100 Hz) did not help: the good
+state got worse (424 -> 9987), the content dependence stayed (skip 5: 132063, skip 2:
+7275), and Jd stretched to 5544. Reverted, so slmodemd needs the DC the digital path
+passes.
+
+The lever we own is Jd length: 9.5.1.1.8 ends Jd only "once the digital modem has
+determined the proper phase adjustment", in whole repetitions. But which states are good
+is a property of slmodemd's equaliser, and nothing we can compute predicts it yet. Next:
+dump slmodemd's equaliser taps at DIL start (a hook like `phase4_errstats_hook.c`) for a
+good and a bad state and compare their responses; if Jp's content excites a direction its
+adaptation leaves unconstrained, that says what a robust Jp/Jd ending would be.
