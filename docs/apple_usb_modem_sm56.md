@@ -1807,3 +1807,66 @@ Ja deadline conceded to V.34 and retrained.  Next: rerun V.90 with
 `V90_JA_BIT_DUMP` and the server's `v34_rx.raw` to replay the Ja decode
 offline, and find out why the analogue side's J'd bit walk missed the 12 zeros
 (it logged only the first Jd frame, so a slip after it is possible).
+
+### Ja fails on our analogue transmitter's clock: ~195 ppm, and V.34 allows 100 (2026-10-15)
+
+`artifacts/apple-pve-20261015/v90-ja1` repeats the V.90 call with
+`V90_JA_BIT_DUMP` and the server's `v34_rx.raw`.  Same outcome: the Apple side
+recovers Sd → TRN1d → Jd (this time it also sees J'd and sits in DIL receive),
+and the server never parses Ja.
+
+**The live dump cannot answer this, and it looks as if it can.**
+`V90_JA_BIT_DUMP` is rewritten on every pass until the call ends, and each
+hypothesis is a 16384-bit ring (~2.5 s at 6400 bit/s), so at the end of a 40 s
+call it holds the last 2.5 s, not Ja.  Its bits are white, but so are the
+engine pair's, whose Ja parses.  Use the one-shot dump on a replay:
+`ME_V90_JA_DUMP_EARLY=1 ME_V90_JA_DUMP_PREFIX=... ME_V90_JA_DUMP_MIN_BITS=8000
+./v90_engine_replay live-rx.g711 ulaw --fast --from 0`.  The replay reproduces
+the live capture start exactly (first Ja bits at 11.160 s, 48 bits).
+
+**Ground truth is free, because the sender is ours.**  `v90_dil_preset_load(
+V90_DIL_PRESET_MEASUREMENT)` + `v90_build_dil_descriptor_bits()` regenerates
+the 1260 transmitted bits, and the analogue side's TX stage log dates TRN
+(640 ms) and Ja (533 ms: 9.812-10.345 s, cut short when it saw Sd).  Scoring
+each 128-bit window of every hypothesis against the descriptor (any rotation,
+either polarity):
+
+- **engine pair (positive control):** hypotheses 8 and 11 match solidly from
+  bit ~3600; aligned BER **0.00**.
+- **Apple call:** the **same hypotheses 8/11** match in only two isolated
+  windows inside the Ja span; aligned BER **0.07-0.25 per 256 bits**
+  (0.18 typical), then 0.48 when Ja stops.
+
+So the digital side demodulates Ja on the right hypothesis with ~18% bit
+errors, and the parser is exonerated.
+
+**The upstream is drifting, not noisy.**  A least-squares FIR from the Apple
+side's own TX tap (9600 → 8000) to the server's receive tap peaks at
+**17-22 dB in the middle of a 0.5 s window and falls to ~6 dB at both
+edges**, symmetrically: the timebase is sliding under the fit.  Tracking the
+TX-to-RX offset through Phase 2-3 gives a smooth slope from 7.4901 to 7.4883 s
+over 9.25 s: **-195 ppm** between the Apple codec and the ATA's 8 kHz (163 ppm
+against the VG224, above).  (Steps of exactly 0.3 s in V.8/Phase 2 are
+correlation aliases on periodic signals, not jitter-buffer jumps.)  Across
+TRN + Ja that is ~0.75 of a 3200-baud symbol.
+
+**Single-variable test, offline:** the server's `live-rx.g711` FFT-resampled
+by -195 ppm, re-encoded to µ-law (the round trip changes only -0 to +0) and
+replayed:
+
+| tap | Ja |
+|---|---|
+| as recorded (0 ppm control) | no descriptor; concedes after 20 s |
+| **-195 ppm** | **`parsed Ja DIL descriptor (N=120 LSP=12 LTP=11)`**, the descriptor sent, between 12.00 and 12.24 s, inside the Ja window |
+| +195 ppm (wrong sign) | no descriptor |
+
+**The fault is our analogue transmitter, and the spec says so:** V.34 §5.2
+fixes the symbol rate at S ± 0.01%, and this codec puts our Phase 3 symbols
+~195 ppm off.  The SM56's host datapump must have loop-timed its transmitter
+(V.34 INFO0 bits 26:27 = 1, "synchronized to receive timing"), and
+`apple_usb_modem_coupler` free-runs it.  The fix belongs in the coupler: a
+receive-timing-derived correction to both rational resamplers (the 1200 Hz
+Phase 2 CC already measures the offset to ~1 ppm), not a wider timing range in
+the digital receiver.  That is a resampler ratio, not buffering: no samples are
+spliced or dropped.  Every upstream stage after Ja (CP, MP, data) inherits the
+same offset, so expect this to be the next gate for V.34 MP too.
