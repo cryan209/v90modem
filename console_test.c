@@ -105,6 +105,53 @@ static size_t collect(int fd, char *out, size_t max, int timeout_ms)
     return used;
 }
 
+/* Does the reply end with a final result code (V.250 5.7.2, verbose form)?
+ * That ends the command line, so nothing more is owed to it. */
+static int ends_final(const char *out, size_t used)
+{
+    static const char *const finals[] = { "OK\r\n", "ERROR\r\n", "NO CARRIER\r\n" };
+
+    for (size_t i = 0; i < sizeof(finals) / sizeof(finals[0]); i++) {
+        size_t n = strlen(finals[i]);
+
+        if (used >= n && !memcmp(out + used - n, finals[i], n)
+            && (used == n || out[used - n - 1] == '\n'))
+            return 1;
+    }
+    return 0;
+}
+
+/* collect(), but done once the reply has ended in a final result code and the
+ * port has stayed quiet for 30 ms after it.  A reply without one (a dial, Q1,
+ * text that should have been payload) still waits out timeout_ms, so negative
+ * checks see the whole window.  Waiting the full window after every command
+ * was nearly all of this test's run time. */
+static size_t collect_reply(int fd, char *out, size_t max, int timeout_ms)
+{
+    size_t used = 0;
+    int quiet = 0;
+
+    out[0] = '\0';
+    for (int waited = 0; waited < timeout_ms; waited += 10) {
+        char buf[512];
+        int n = (int) read(fd, buf, sizeof(buf));
+
+        if (n > 0) {
+            if (used + (size_t) n < max) {
+                memcpy(out + used, buf, (size_t) n);
+                used += (size_t) n;
+                out[used] = '\0';
+            }
+            quiet = 0;
+        } else {
+            if (ends_final(out, used) && (quiet += 10) >= 30)
+                break;
+            usleep(10000);
+        }
+    }
+    return used;
+}
+
 static void send_str(int fd, const char *s)
 {
     if (write(fd, s, strlen(s)) != (ssize_t) strlen(s))
@@ -120,7 +167,7 @@ static void expect(int fd, const char *cmd, const char *want)
 
     snprintf(line, sizeof(line), "%s\r", cmd);
     send_str(fd, line);
-    collect(fd, resp, sizeof(resp), 250);
+    collect_reply(fd, resp, sizeof(resp), 250);
     snprintf(what, sizeof(what), "%s -> %s", cmd, want);
     if (!strstr(resp, want))
         printf("       got \"%s\"\n", resp);
@@ -199,9 +246,9 @@ static void test_classic(void)
     send_str(dte, "a+++b");
     check(engine_reads(got, sizeof(got) - 1, 300) == 5 && !memcmp(got, "a+++b", 5),
           "+++ inside a payload run is payload");
-    sleep(2);
+    usleep(1200000);                    /* > the 1 s S12 guard: only the sleep is timed */
     send_str(dte, "+++");
-    collect(dte, buf, sizeof(buf), 1500);
+    collect_reply(dte, buf, sizeof(buf), 1500);
     check(strstr(buf, "OK") != NULL, "guarded +++ answers OK (online command state)");
     check(hangup_calls == 0, "the escape does not drop the call");
     expect(dte, "ATS0?", "000");
@@ -211,9 +258,9 @@ static void test_classic(void)
     check(engine_reads(got, sizeof(got) - 1, 300) == 11 && !memcmp(got, "back online", 11),
           "ATO resumes the data connection");
 
-    sleep(2);
+    usleep(1200000);                    /* > the 1 s S12 guard: only the sleep is timed */
     send_str(dte, "+++");
-    collect(dte, buf, sizeof(buf), 1500);
+    collect_reply(dte, buf, sizeof(buf), 1500);
     send_str(dte, "ATH\r");
     usleep(200000);
     check(hangup_calls == 1, "ATH from online command state hangs up");
@@ -349,7 +396,7 @@ static void exchange(int fd, const char *cmd, char *out, size_t max)
 
     snprintf(line, sizeof(line), "%s\r", cmd);
     send_str(fd, line);
-    collect(fd, out, max, 250);
+    collect_reply(fd, out, max, 250);
 }
 
 static void test_v250_parameters(void)
@@ -715,7 +762,7 @@ static void test_help(void)
     }
     usleep(300000);                                 /* S12 guard, then escape to ask */
     send_str(dte, "***");
-    collect(dte, buf, sizeof(buf), 500);
+    collect_reply(dte, buf, sizeof(buf), 500);
     check(strstr(buf, "OK") != NULL, "\"***\" escapes with S2=42 and a 0.2 s S12 guard");
     exchange(dte, "ATI6", buf, sizeof(buf));
     check(strstr(buf, "Originate, retraining") && strstr(buf, "TX 48000  RX 26400"),
@@ -870,7 +917,7 @@ static void test_call_progress(void)
     /* S7: no connection in time is NO CARRIER and a hang-up. */
     h = hangup_calls;
     expect(dte, "ATS7=1D1", "");
-    collect(dte, buf, sizeof(buf), 1500);
+    collect_reply(dte, buf, sizeof(buf), 1500);
     check(strstr(buf, "NO CARRIER") && hangup_calls == h + 1, "S7=1: NO CARRIER after a second");
     expect(dte, "ATI6", "Timeout (S7)");
     expect(dte, "ATS7=60", "OK");

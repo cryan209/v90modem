@@ -154,6 +154,18 @@ with implemented optional facilities required. Accepting a setting with OK
 while discarding it does not meet that contract. Supporting a smaller honest
 subset is preferable to test responses advertising unusable settings.
 
+`console_test` run time (2026-10-15): 117 s wall for 0.33 s of CPU, all of it
+waiting. Each of its ~250 command exchanges sat out a fixed 250 ms window
+after the reply had already arrived. The guarded escapes slept 2 s before
+`+++`, then waited 1.5 s for the OK. Command replies now return once they end
+in a final result code (OK, ERROR or NO CARRIER) and the port has been quiet
+for 30 ms. A reply without one, such as a dial, Q1, or text that should be
+payload, still waits the whole window, so negative checks are unchanged. The
+pre-guard is 1.2 s: escape timing is taken on the DI thread from the last
+byte it read, so a sleep longer than S12's 1 s still tests the guard. The test
+now takes 41 s with the same 407 checks. What is left is about 400 short fixed
+windows, mostly negative checks that need their full length.
+
 ## Findings and priority
 
 | ID | Priority / clauses | Observed implementation | Required change |
