@@ -131,6 +131,28 @@ Dumps every `V90Equalizer::calcMeanErrorStatistics()` call (`.text` 0x388c0, 3 c
 entries, mean, saved "before" energy and the whole error history, to `/tmp/p4err.txt`. Link with
 the evaluator hook into `slmodemd_err`.
 
+## Equaliser tap dump (`eq_tap_hook.c`)
+
+Wraps `V90Equalizer::process(float*, unsigned, short*, float*, unsigned&)` (`.text` 0x38d80, one
+call site in `V90Demodulator::progress`, returns void; 40 symbols per call on this rig) and every
+`EQ_DUMP_EVERY` calls (default 10) appends the 300 linear (T/2) and 12 DFE taps to
+`/tmp/eqtaps.txt`, plus the int16 copies when MMX mode (+0xb0) is on. It writes `<eqdump N>` to
+stderr, so each dump lands in `slm.log` between slmodemd's own lines. Layout from
+`zeroLinearEquCoefs`/`zeroDfeCoefs`: linear count +0x0c, taps +0x14; DFE count +0x38, taps +0x40.
+Built on `slmodemd_err`:
+
+```sh
+objcopy --add-symbol _ZN12V90Equalizer7processEPfjPsS0_Rj_original=.text:0x38d80,global,function \
+        dsplibs_err.o dsplibs_eq.o
+gcc -m32 -O2 -c eq_tap_hook.c -o eq_hook.o
+gcc -m32 -Wl,--allow-multiple-definition -o slmodemd_eq modem_main.o modem_cmdline.o modem.o \
+  modem_datafile.o modem_at.o modem_timer.o modem_pack.o modem_ec.o modem_comp.o modem_param.o \
+  modem_debug.o homolog_data.o dp_sinus.o dp_dummy.o ec_bypass_wrap.o tim_freeze.o eval_hook.o \
+  err_hook.o eq_hook.o dsplibs_eq.o sysdep_common.o
+```
+
+It does not change behaviour: the pad-gain fits of hooked calls match unhooked ones exactly.
+
 ## Phase-4 transmit-symbol hook (`phase4_symbol_hook.c`)
 
 Records every upstream symbol slmodemd transmits in Phase 4 and data to `/tmp/p4sym.bin`

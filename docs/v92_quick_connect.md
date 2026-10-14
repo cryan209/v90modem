@@ -599,3 +599,29 @@ is a property of slmodemd's equaliser, and nothing we can compute predicts it ye
 dump slmodemd's equaliser taps at DIL start (a hook like `phase4_errstats_hook.c`) for a
 good and a bad state and compare their responses; if Jp's content excites a direction its
 adaptation leaves unconstrained, that says what a robust Jp/Jd ending would be.
+
+#### slmodemd's equaliser through Jp and the DIL (`eq_tap_hook.c`)
+
+Taps dumped every 400 symbols (`slmodemd_eq`), Jd skip 0 (good) against 2, 5, 6 (bad), linear
+upstream; the hooked calls reproduce the unhooked fits exactly (424, 7621, 28939, 12961).
+The equaliser is 300 T/2 linear taps plus 12 symbol-spaced DFE taps.
+
+- Every run is identical up to slmodemd's "Jd Detected". During Jp the bad runs pick up a
+  small in-band difference (|taps - good| 0.003-0.004 at Jd, 0.007-0.017 at DIL start),
+  rising with frequency toward 4 kHz, and nothing above the data band.
+- The DIL then amplifies it instead of removing it: 0.024 (skip 2), 0.066-0.068 (skips 5, 6)
+  by Phase 4. Each run also drifts against its own DIL-start taps, the good one included
+  (0.021; bad 0.031-0.056).
+- The DFE carries the drift. Its first tap sits at about -0.66 in every run; through the DIL,
+  skip 5's goes -0.62 -> -0.41 while the linear DC gain stays at 1.016-1.018, so the combined
+  low-frequency gain lin/(1 - sum DFE) climbs 0.58 -> 0.90 (good 0.57 -> 0.77, skips 2 and 6
+  0.58 -> 0.59-0.60). The DIL's long runs of one level make the linear and DFE taps nearly
+  collinear, and decision-directed adaptation wanders along that ridge.
+
+So the mechanism is slmodemd's equaliser adapting on the DIL it requested itself (N=144,
+LSP=LTP=120), poorly conditioned, from a starting point Jp's content perturbs. It is not a
+defect in what we send. A first DFE tap of -0.66 with a flat linear response (1.015 from 150
+to 3950 Hz) is itself odd for this nearly ideal digital channel and suggests a fixed filter
+in slmodemd's receive front end; that is not established. Options: accept the one retrain
+(about 15 s); pick a Jd length (spec-legal, 9.5.1.1.8) from a table measured for this peer,
+which is fitting slmodemd and not a fix; or find what puts -0.66 in the DFE.
