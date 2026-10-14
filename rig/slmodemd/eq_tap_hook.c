@@ -14,7 +14,9 @@
  * /tmp/eqtaps.txt a header line and the float taps (and the int16 copies in
  * MMX mode), and writes "<eqdump N>" to stderr so each dump can be ordered
  * against slmodemd's own log lines (Jd Detected, DIL, findPadGain).
- * EQ_DUMP_MAX (default 3000) bounds the file. */
+ * EQ_DUMP_MAX (default 3000) bounds the file.
+ * EQ_DUMP_INPUT=1 also appends every call's input block (n floats, two per
+ * symbol here) to /tmp/eqin.f32, and the per-call n to /tmp/eqin.n (uint32). */
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -49,6 +51,27 @@ void hook_eq_process(void *self, float *in, unsigned n, short *out, float *err, 
     static unsigned calls, dumps, every, max;
     unsigned nlin, ndfe, mmx;
 
+    static int dump_input = -1;
+    static FILE *fin, *fn;
+
+    if (dump_input < 0) {
+        const char *e = getenv("EQ_DUMP_INPUT");
+
+        dump_input = e && atoi(e) > 0;
+    }
+    if (dump_input && n && n < 4096) {
+        /* Before the call: process() may work on the buffer in place. */
+        if (!fin)
+            fin = fopen("/tmp/eqin.f32", "wb");
+        if (!fn)
+            fn = fopen("/tmp/eqin.n", "wb");
+        if (fin && fn) {
+            fwrite(in, sizeof(float), n, fin);
+            fwrite(&n, sizeof(n), 1, fn);
+            fflush(fin);
+            fflush(fn);
+        }
+    }
     orig_eq_process(self, in, n, out, err, cnt);
     if (!every) {
         const char *e = getenv("EQ_DUMP_EVERY");

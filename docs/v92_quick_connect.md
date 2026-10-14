@@ -625,3 +625,47 @@ to 3950 Hz) is itself odd for this nearly ideal digital channel and suggests a f
 in slmodemd's receive front end; that is not established. Options: accept the one retrain
 (about 15 s); pick a Jd length (spec-legal, 9.5.1.1.8) from a table measured for this peer,
 which is fitting slmodemd and not a fix; or find what puts -0.66 in the DFE.
+
+#### What puts -0.66 in slmodemd's DFE: the 4 kHz band edge of the rig's downstream
+
+Captured slmodemd's equaliser input (`EQ_DUMP_INPUT=1`) on a good call and fitted it against
+our transmitted TRN1d:
+
+- The channel into its equaliser is clean: per T/2 phase a plain fractional delay of a
+  band-limited signal (phase 0 = sinc(n - 0.23), phase 1 = sinc(n + 0.27)).
+- Its own linear taps alone already give x[n]: correlation 0.9998-1.0000, every ISI term
+  under 1%, residual 0.4% of rms. So the 12-tap "DFE" has no ISI to cancel; it acts on past
+  errors as a noise predictor. The residual has lag-1 autocorrelation -0.67/-0.76 and 71-85%
+  of its power in 3-4 kHz, and its optimal one-step predictor's first tap is -0.658 against
+  the dumped -0.666.
+- Not slmodemd's pre-filter: `V90PreFilter` (`prefilter_hook.c`) is the identity through
+  Phase 4 here.
+- d-modem's 8000 -> 9600 downstream (257-tap Hann sinc, cutoff at exactly 4000 Hz) is -32 dB
+  re signal against an ideal band-limited resampling, 99.4% of the error in 3.8-4.2 kHz: its
+  transition band straddles the input Nyquist.
+
+The fix that suggested itself does not work. d-modem gains `DM_RS_TAPS` (any odd length at the
+same cutoff, on a ring-buffer pipeline), `DM_RS_EXTRA_DELAY` and `DM_RS_WINDOW=kaiser`; all off
+by default. Skip 0 unless noted, linear upstream:
+
+| downstream kernel | pipeline | slmodemd | TRN1d error energy | pad fit | ratio | DFE 1, 2 |
+|---|---|---|---|---|---|---|
+| 259 Hann (= default response) | 160 | V.92 | 22 | 3591 | 1.27 | -0.65, -0.08 |
+| 259 Hann + 3 frames | 640 | V.92 | 20 | 736 | 1.29 | -0.67, -0.10 |
+| 513 Hann | 320 | V.92 | 38 | 17598 | 2.84 | -0.76, -0.25 |
+| 1025 Hann | 640 | falls back to V.34 at Jd | 550-780 | -- | -- | -- |
+| 2049 Hann | 1120 | retrains at Ja end (rtd 5656) | -- | -- | -- | -- |
+| cutoff 3800/3900/3950 (257) | 160 | falls back to V.34 | -- | -- | -- | -- |
+
+Offline the longer kernels are much closer to ideal (1025: -40 dB, 2049: -55 dB), yet slmodemd
+does worse with them: a sharper edge is harder for its 150-symbol equaliser, so more is left
+for the noise predictor; at 1025 its TRN1d does not converge. Delay alone changes nothing (259
++ 3 frames). Any extra roll-off at 4 kHz trips `V90SpectralVerifier` (the call that logs "No
+special conditions" when it passes) and slmodemd falls back to V.34. (Pad fits here also move
+with the Jd state, which the pipeline delay changes, so compare error energy and taps, not fits.)
+
+So the -0.66 is slmodemd's receiver coping with a downstream that is flat right up to a hard
+edge at 4 kHz, which is what an ideal digital path delivers. Nothing in our transmitter is
+involved. Still open: a softer edge with the -6 dB point kept at 4000 Hz (129 and 65 taps are
+being measured), and whether a real line, which rolls off from about 3.4 kHz, avoids the
+Jd-state lottery altogether.

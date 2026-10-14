@@ -125,6 +125,127 @@ static double rs_fc = 4000.0;
 static unsigned long rs_clip_count, rs_out_count, rs_clip_logged;
 static double rs_clip_worst;
 
+/* DM_RS_TAPS=<odd n, 33..4097>: a sinc kernel of another length at the same
+ * 4 kHz cutoff, on its own pipeline (a ring of input, delayed by whole frames,
+ * so any length works; the default 257-tap path takes its future taps from the
+ * next frame).  DM_RS_TAPS=259 reproduces the default response.
+ * DM_RS_EXTRA_DELAY=<frames> adds pipeline delay; DM_RS_WINDOW=kaiser
+ * (DM_RS_KAISER_BETA, default 8) replaces Hann.  Experiment knobs, default off.
+ *
+ * Why the band edge matters (docs/v92_quick_connect.md): with the cutoff at
+ * the input Nyquist, the 257-tap kernel's error against an ideal band-limited
+ * resampling is -32 dB re signal, 99% of it in 3.8-4.2 kHz, and SmartLink's
+ * equaliser leaves a residual there that its feedback section whitens (a
+ * first tap of -0.66).  A SHARPER edge is worse, not better: 513 taps raise
+ * that tap to -0.76 and its Phase 3 error energy 22 -> 38; 1025 taps stop its
+ * TRN1d converging at all (error energy 550+, falls back to V.34); delay alone
+ * (259 taps + 3 frames) changes nothing.  Lowering DM_RS_FC is not an option
+ * either: any extra roll-off at 4 kHz trips SmartLink's V90SpectralVerifier
+ * and it falls back to V.34. */
+#define RS_LONG_MAX 4097
+#define RS_RING     16384
+static int    rs_long_taps;            /* 0 = the default 257-tap path */
+static float  rs_long_ker[RS_PHASES][RS_LONG_MAX];
+static pj_int16_t rs_ring[RS_RING];
+static long   rs_ring_w;               /* absolute input samples written */
+static int    rs_long_delay;           /* input samples, a whole number of frames */
+
+static double rs_bessel_i0(double x)
+{
+	double sum = 1.0, term = 1.0;
+	for (int k = 1; k < 60; k++) {
+		term *= (x/(2.0*k))*(x/(2.0*k));
+		sum += term;
+		if (term < 1e-12*sum) break;
+	}
+	return sum;
+}
+
+static void rs_build_long_kernel(double wc)
+{
+	const char *env = getenv("DM_RS_TAPS");
+	int n = env ? atoi(env) : 0, kaiser = 0, half, p, t;
+	double beta = 8.0, worst = 0.0;
+
+	if (n < 33) return;
+	if (n > RS_LONG_MAX) n = RS_LONG_MAX;
+	if (!(n & 1)) n++;
+	if ((env = getenv("DM_RS_WINDOW")) && strcmp(env, "kaiser") == 0) kaiser = 1;
+	if ((env = getenv("DM_RS_KAISER_BETA")) && atof(env) > 0.0) beta = atof(env);
+	half = n/2;
+	for (p = 0; p < RS_PHASES; p++) {
+		double f = (double)p/(double)RS_PHASES, sum = 0.0, l1 = 0.0;
+		for (t = 0; t < n; t++) {
+			double x = (double)(t - half) - f, y = wc*x, s, w;
+			if (fabs(y) < 1e-9) s = wc;
+			else s = wc*sin(M_PI*y)/(M_PI*y);
+			if (kaiser) {
+				double r = 2.0*(t - f)/(double)(n - 1) - 1.0;
+				w = (fabs(r) >= 1.0) ? 0.0
+				  : rs_bessel_i0(beta*sqrt(1.0 - r*r))/rs_bessel_i0(beta);
+			} else
+				w = 0.5 - 0.5*cos(2.0*M_PI*t/(n-1));
+			rs_long_ker[p][t] = (float)(s*w);
+			sum += rs_long_ker[p][t];
+		}
+		for (t = 0; t < n; t++) {
+			rs_long_ker[p][t] = (float)(rs_long_ker[p][t]/sum*rs_headroom);
+			l1 += fabs((double)rs_long_ker[p][t]);
+		}
+		if (l1 > worst) worst = l1;
+	}
+	rs_long_taps = n;
+	rs_long_delay = ((half + 1 + 159)/160)*160;
+	/* DM_RS_EXTRA_DELAY=<frames>: more pipeline, to separate a longer
+	 * kernel's delay from its sharpness in A/B tests. */
+	if ((env = getenv("DM_RS_EXTRA_DELAY")) && atoi(env) > 0 && atoi(env) <= 40)
+		rs_long_delay += 160*atoi(env);
+	PJ_LOG(3,(__FILE__, "ACTIVE downstream resampler: %d-tap %s sinc at %.0f Hz "
+	                    "(DM_RS_TAPS), %d-sample pipeline, worst phase L1 %.3f",
+	          n, kaiser ? "Kaiser" : "Hann", wc*4000.0, rs_long_delay, worst));
+}
+
+/* Append in[] to the ring and render out_n outputs, rs_long_delay input
+ * samples behind the newest; output k sits at input position k*5/6. */
+static void rs_long_render(const pj_int16_t *in, int in_n, pj_int16_t *out, int out_n)
+{
+	int half = rs_long_taps/2;
+	long start;
+
+	for (int i = 0; i < in_n; i++)
+		rs_ring[(rs_ring_w + i) & (RS_RING - 1)] = in[i];
+	rs_ring_w += in_n;
+	start = rs_ring_w - in_n - rs_long_delay;
+	for (int k = 0; k < out_n; k++) {
+		int num = k*5, ph = num % 6;
+		long ic = start + num/6, base = ic - half;
+		const float *h = rs_long_ker[ph];
+		float acc = 0.0f;
+
+		for (int t = 0; t < rs_long_taps; t++) {
+			long a = base + t;
+			if (a >= 0)
+				acc += (float)rs_ring[a & (RS_RING - 1)] * h[t];
+		}
+		if (acc > 32767.0f || acc < -32768.0f) {
+			double over = fabs((double)acc)/32767.0;
+			if (over > rs_clip_worst) rs_clip_worst = over;
+			rs_clip_count++;
+		}
+		if (acc > 32767.0f) acc = 32767.0f;
+		else if (acc < -32768.0f) acc = -32768.0f;
+		out[k] = (pj_int16_t)(acc >= 0 ? acc + 0.5f : acc - 0.5f);
+	}
+	rs_out_count += out_n;
+	if (rs_clip_count && rs_out_count - rs_clip_logged >= 9600) {
+		PJ_LOG(2,(__FILE__, "resampler CLIPPING %lu/%lu samples (%.3f%%), worst %.2fx int16 FS "
+		          "-- this breaks the peer's findPadGain(); lower DM_RS_HEADROOM (now %.3f)",
+		          rs_clip_count, rs_out_count,
+		          100.0*(double)rs_clip_count/(double)rs_out_count, rs_clip_worst, rs_headroom));
+		rs_clip_logged = rs_out_count;
+	}
+}
+
 /* ---------------------------------------------------------------------------
  * Loop model: DS0 staircase + local-loop lowpass (DM_RESAMPLER=zoh).
  *
@@ -273,6 +394,7 @@ static void rs_build_kernel(void) {
 	}
 	PJ_LOG(3,(__FILE__, "resampler cutoff %.0f Hz, headroom %.3f (%.2f dB) folded into kernel",
 	          rs_fc, rs_headroom, 20.0*log10(rs_headroom)));
+	rs_build_long_kernel(wc);
 	rs_ker_ready = 1;
 }
 
@@ -435,6 +557,10 @@ static pj_status_t dmodem_put_frame(pjmedia_port *this_port, pjmedia_frame *fram
 		loop_build_kernel();
 		if (in_n > 1024)
 			return PJ_ETOOBIG;
+		if (rs_long_taps) {
+			out_n = in_n * 6 / 5;
+			rs_long_render(in, in_n, out, out_n);
+		} else {
 		if (prev_n >= 0 && (prev_n < RS_PAST || in_n < RS_FUTURE))
 			return PJ_EINVAL;
 
@@ -550,6 +676,7 @@ static pj_status_t dmodem_put_frame(pjmedia_port *this_port, pjmedia_frame *fram
 				hist[i] = prev[prev_n - RS_PAST + i];
 			memcpy(prev, in, (size_t)in_n * 2);
 			prev_n = in_n;
+		}
 		}
 		if (!dm_tap_rx) dm_tap_rx = fopen("/tmp/dm_to_dsp.raw","wb");
 		if (dm_tap_rx) { fwrite(out,2,out_n,dm_tap_rx); fflush(dm_tap_rx); }

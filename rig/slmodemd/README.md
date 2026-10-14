@@ -152,6 +152,21 @@ gcc -m32 -Wl,--allow-multiple-definition -o slmodemd_eq modem_main.o modem_cmdli
 ```
 
 It does not change behaviour: the pad-gain fits of hooked calls match unhooked ones exactly.
+`EQ_DUMP_INPUT=1` also writes every call's input block to `/tmp/eqin.f32` (float, two samples
+per symbol) and its length to `/tmp/eqin.n`, i.e. what the equaliser receives after
+`FloatFIR` (the pre-filter), `Agc` and `V90Resampler`.
+
+## Receive pre-filter hook (`prefilter_hook.c`)
+
+`V90Demodulator::progress` runs `FloatFIR::process` -> `Agc` -> `V90Resampler` -> `V90Equalizer`.
+The `FloatFIR` is a `V90PreFilter`, whose `setFilter(unsigned)` (`.text` 0x45090, called from
+0x1d552 and 0x1e046) loads one of `preFilterCoefType1/2` (20 taps, index 0-30) or `Type3` (40
+taps, 10-50): index 0 is the identity, higher indices are high-band boosts (Type1 index 30: x12 at
+3.6 kHz). The hook logs every call to `/tmp/prefilter.txt` and `PREFILTER_FORCE=<n>` overrides the
+index. On this rig it is never called through Phase 4: the constructor loads Type1 index 0 directly
+(`FloatFIR::setCoefficients`), so the pre-filter is the identity. Built like `slmodemd_eq`, adding
+`--add-symbol _ZN12V90PreFilter9setFilterEj_original=.text:0x45090,global,function` and
+`pf_hook.o` -> `slmodemd_pf`.
 
 ## Phase-4 transmit-symbol hook (`phase4_symbol_hook.c`)
 
