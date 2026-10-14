@@ -68,6 +68,10 @@ struct v90_analogue_phase4_s {
     int      hist_ucode[R_HISTORY];
     int      hist_len;
     int      r_ucode;
+    /* The level each of R's six slots arrived at, for the level-tolerant
+     * comparison: on a two-wire line they are NOT one level -- see the hunt. */
+    int      r_slot_ucode[R_PERIOD];
+    int      r_level_misses;        /* consecutive R-signed symbols off level */
     int      r_phase;               /* index%6 holding slot 0 */
     int      r_polarity;            /* sign seen in slot 0 when R was acquired */
     int      r_symbols;
@@ -780,12 +784,36 @@ static unsigned put_one(v90_analogue_phase4_t *s, uint8_t c)
              * this reported "hunting Ri (Ri 0T)" for the whole call until the
              * §9.4.2 deadline retrained it.  Same shape as §8.4.4's Sd hunt.
              */
-            for (int i = 1; i < R_HISTORY; i++) {
-                if (p4_level_tolerant(s)
-                    ? !p4_same_level(s, s->hist_ucode[i], s->hist_ucode[0])
-                    : s->hist_ucode[i] != s->hist_ucode[0]) {
-                    level = false;
-                    break;
+            /*
+             * And not one level either, on a line.  §8.6.4's + + + − − − has
+             * a component at 4000 Hz (amplitude a third of the level: the
+             * sequence times (−1)^n sums to 2 per period of 6), and no analogue loop or
+             * codec reconstruction filter passes 4000 Hz.  Take it away and
+             * what remains is 2/3, 4/3, 2/3 of the level across each run of
+             * three -- measured on the Apple modem's Ri
+             * (artifacts/apple-pve-20261015/v90-lt6) as Ucodes 64, 82, 68,
+             * linear 527, 1151, 623 around a sent Ucode 78 (943), fixed by
+             * slot for ten seconds.  Twelve symbols "at one level" therefore
+             * never happen and this hunted for the whole of Phase 4 on every
+             * attempt.  What an LTI channel cannot change is that the sent
+             * sequence repeats every six symbols, so a slot is compared with
+             * the same slot one period earlier.
+             */
+            if (p4_level_tolerant(s)) {
+                for (int i = 0; i < R_PERIOD; i++) {
+                    if (s->hist_ucode[i] == 0
+                        ||  !p4_same_level(s, s->hist_ucode[i + R_PERIOD],
+                                           s->hist_ucode[i])) {
+                        level = false;
+                        break;
+                    }
+                }
+            } else {
+                for (int i = 1; i < R_HISTORY; i++) {
+                    if (s->hist_ucode[i] != s->hist_ucode[0]) {
+                        level = false;
+                        break;
+                    }
                 }
             }
             for (int phase = 0; level  &&  phase < R_PERIOD; phase++) {
@@ -800,7 +828,11 @@ static unsigned put_one(v90_analogue_phase4_t *s, uint8_t c)
                 s->r_phase = (int) ((s->index - (R_HISTORY - 1 - phase))%R_PERIOD);
                 if (s->r_phase < 0)
                     s->r_phase += R_PERIOD;
+                for (int i = R_PERIOD; i < R_HISTORY; i++)
+                    s->r_slot_ucode[(i - phase + R_HISTORY)%R_PERIOD] = s->hist_ucode[i];
                 s->r_symbols = R_HISTORY;
+                s->r_level_misses = 0;
+                s->r_reversed_slots = 0;
                 s->stage = V90A4_RX_R;
                 events |= V90A4_RX_EVENT_R;
                 break;
@@ -817,7 +849,25 @@ static unsigned put_one(v90_analogue_phase4_t *s, uint8_t c)
             slot += R_PERIOD;
         want = (slot < 3) ? s->r_polarity : !s->r_polarity;
         s->r_symbols++;
-        if (p4_level_tolerant(s) ? !p4_same_level(s, ucode, s->r_ucode)
+        /*
+         * Level is only asked of symbols that still read as R, and only a
+         * whole period of them off level ends it.  §8.6.4's R̄ reverses every
+         * sign, so its first three symbols extend R's last run to six, and on
+         * a line the equalised channel's tails pull the levels on BOTH sides
+         * of that run away from R's slot levels (measured -50 and +75 against
+         * 67 and 64, v90-lt6 attempt 2) -- one symbol off level here threw
+         * away 6194T of Ri four symbols before R̄.  The sign is what carries
+         * §9.4.2.2's transition; the level only rejects a false R.
+         */
+        if (p4_level_tolerant(s)) {
+            if (sign == want  &&  !p4_same_level(s, ucode, s->r_slot_ucode[slot]))
+                s->r_level_misses++;
+            else if (sign == want)
+                s->r_level_misses = 0;
+            /*endif*/
+        }
+        /*endif*/
+        if (p4_level_tolerant(s) ? s->r_level_misses >= R_PERIOD
                                  : ucode != s->r_ucode) {
             /* R is over without a reversal this side could see.  §9.4.2.2 has
              * nothing to act on, so start again rather than pretend. */
@@ -857,17 +907,24 @@ static unsigned put_one(v90_analogue_phase4_t *s, uint8_t c)
          * §8.6.4 fixes R̄ at four repetitions and §9.4.1.2 sends exactly 24T of
          * it, so TRN2d's first symbol is counted rather than searched for --
          * and 24 is a whole number of frames, which is what puts the §5.4
-         * frame grid in step with R's alignment.  A level change before then
-         * means the count was wrong somewhere, so take that too.
+         * frame grid in step with R's alignment.  On a DS0 a level change
+         * before then means the count was wrong somewhere, so take that too.
          */
         s->r_bar_symbols++;
-        if (s->r_bar_symbols >= R_BAR_SYMBOLS  ||  ucode != s->r_ucode) {
+        /*
+         * The level-change exit is the DS0's.  On a line every slot of R̄ reads
+         * at its own level (see the hunt), so `ucode != r_ucode` fired on R̄'s
+         * very next symbol and started TRN2d eleven symbols early -- off the
+         * frame grid for the rest of the call.  There the count is the answer.
+         */
+        if (s->r_bar_symbols >= R_BAR_SYMBOLS
+            ||  (!p4_level_tolerant(s)  &&  ucode != s->r_ucode)) {
             /* §8.6.5: scrambler, differential encoder and shaping state are
              * all zero at TRN2d's first frame, which is what makes everything
              * after it decodable. */
             start_training_mapper(s, false);
             events |= V90A4_RX_EVENT_TRN2D;
-            if (ucode != s->r_ucode) {
+            if (s->r_bar_symbols < R_BAR_SYMBOLS) {
                 /* This codeword is already TRN2d's first. */
                 s->frame[s->frame_fill++] = c;
                 s->trn2d_symbols++;

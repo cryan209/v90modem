@@ -1937,3 +1937,80 @@ logs `hunting Ri` from Phase 4 start until its §9.4.2 deadline (~11 s) and
 retrains, on every attempt; the downstream TRN2d/MP the server sends are never
 acquired.  Downstream timing is now on the far end's clock too (the receive
 resamplers are corrected), so this is the analogue Phase 4 receiver itself.
+
+### Ri was never acquired because §8.6.4's R is not one level on a line (2026-10-15)
+
+**The wire is right.**  The digital side's own tap (`server/live-tx.g711`,
+v90-lt6) holds exactly §8.6.4's Ri: `31 31 31 b1 b1 b1`, Ucode 78 (= U_INFO),
+`+++−−−`.  It runs for 11.6 s on the first attempt, where the server never
+accepted our CPt.  On the second it runs 763 ms, and R̄i is 24T with the run of
+six at the junction (§8.6.4, §9.4.1.2), then TRN2d from sample 294106.
+
+**The analogue receiver saw it all along.**  `V90A_RX_CODEWORD_DUMP` on
+`--rx-replay` of the same call shows the sliced stream holding the
+`+++−−−` sign pattern on 100% of symbols for 10 s.  It never sits at one
+level, though.  Per slot of each run of three it reads **Ucode ~64 / ~82 /
+~68** (linear 527 / 1151 / 623 around a sent 943), fixed by slot for the whole
+of Ri.  That is the physics from the Sd section above.  `+++−−−` times (−1)^n
+sums to 2 per period, so its 4000 Hz component has a third of the level.  No
+loop passes 4000 Hz, and without that component the run reads 2/3, 4/3, 2/3.
+The Ri hunt asked for twelve symbols at one level, within `level_tolerance`
+(0.35), so it could never fire.  That is the `hunting Ri` from Phase 4 start to
+the §9.4.2 deadline on every attempt.
+
+**Two more traps behind it, both found by replay:**
+
+- Once Ri was held (6194T), a single symbol off level dropped it four symbols
+  before R̄i.  The equalised channel's tails pull the levels on *both* sides
+  of the junction's run of six (−50 and +75 against slot levels 67 and 64).
+- In R̄i, `ucode != r_ucode` (the DS0's "level changed, so TRN2d has begun")
+  is true on almost every symbol on a line.  It would have started TRN2d 11
+  symbols early, off the §5.4 frame grid for the rest of the call.
+
+**Fix (`v90_analogue_phase4.c`, level-tolerant mode only; the DS0 path keeps
+its exact tests):**
+
+- The hunt compares each slot with the same slot one period earlier.  An LTI
+  channel cannot change the fact that R repeats every six symbols.  It also
+  records the six slot levels.
+- R is dropped only after a whole period of R-signed symbols off their slot's
+  level, and reversed symbols are judged by sign alone.  The sign carries
+  §9.4.2.2's transition; the level only rejects a false R.
+- R̄i is counted to exactly 24T.
+
+**Verified offline against ground truth.**  On v90-lt6 the receiver now
+acquires Ri, then R̄i, then TRN2d on both attempts where the server sent R̄i
+(attempt 1 holds Ri until the deadline, which is correct: the server stayed in
+Ri).  TRN2d's first symbol lands at cw 161090 and 280964.  Aligning the
+server's tap to the received stream by sign correlation (93% agreement) puts it
+at **exactly those symbols**, so the frame grid is right.  v90-ab-on1 and
+v90-ab-on3 behave the same way on every attempt where the server sent R̄i.
+`make test-fast` 546/546.
+
+**Live, four calls after the change** (alternating nothing; the change only
+acts once a Phase 4 receiver exists):
+
+| call | Ja parsed by server | Phase 4 on the analogue side |
+|---|---|---|
+| v90-ri1, v90-ri3 | no (conceded after 20 s) | never reached.  The server goes to Ri without sending the DIL, and we wait in DIL receive |
+| v90-ri2 | -- | V.8 failed on the analogue side (rig flake) |
+| v90-ri4 | 3 / 3 attempts | attempts 1 and 3: server never accepted CPt and stayed in Ri; **we held Ri** until the deadline.  Attempt 2: server accepted CPt; **we acquired Ri (6418T), R̄i and TRN2d live**, switched to sending CP, and the server accepted that CP (drn 4) 60+ times while sending MP.  MP never decoded: see below |
+
+Before the change, 0 of 9 attempts ever left `hunting Ri`.  Ja yield (2 of 4
+calls) is rig variance in Phase 3's upstream, unchanged by this.  Two
+digital-side facts showed up on the way and are separate follow-ups: the
+server proceeds to Ri with no DIL when Ja fails, and on roughly half the
+attempts it never accepts a CPt that the analogue side keeps sending.
+
+**Next blocker: TRN2d decodes to nothing, and the cause is level accuracy, not
+timing.**  Over TRN2d's first 4000 symbols the sliced codewords match the sent
+ones **5%** of the time, with signs right 94% of the time.  A least-squares fit
+of received against sent linear levels gives gain **0.79** (2 dB low, so every
+Ucode reads 1-8 low).  SNR is **7.9 dB** with one tap and **14.6 dB** even with
+±8 taps of residual ISI.  The equaliser was frozen at the DIL in the
+sign-slicing (`Sd line`) mode and never calibrated, and CPt demapping needs
+codewords that are exact.  TRN2d is known data (§8.6.5: scrambled ones through
+the CPt mapping, all state zeroed at its first frame, which now lands on the
+right symbol).  So the obvious next step is data-aided training and gain
+calibration of the analogue equaliser over TRN2d, under the 4000 Hz null this
+section and the Sd section both describe.
