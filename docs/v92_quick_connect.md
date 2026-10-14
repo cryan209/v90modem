@@ -802,3 +802,31 @@ upstream lines. The feed-forward sigma is **104.9 DS0 against 25.2 with feedback
 `uk3a`, matching its live data-mode 75-78), so that channel needs the decision feedback our data
 mode drops. Priced honestly, no constellation fits, the CPd cannot be built, and the call falls
 back through a retrain to V.90 with a V.34 upstream.
+
+#### Decision feedback in data mode does not survive this channel (2026-10-14, night)
+
+Tried behind a throwaway switch and backed out: B1u solved feed-forward plus 8 feedback taps on
+the known reference's past symbols, data mode keeping the feedback, 2 s refits on the slicer's
+decisions. Replays of the sweep's own recordings (`uk3a` 65 taps at 26666, `us7a` default at
+32000; a receiver-only change leaves the transmitted audio, and so the replay, valid):
+
+| | B1u residual with true past symbols | through its own decisions | data-mode rms to nearest level |
+|---|---|---|---|
+| `uk3a`, feed-forward only | 0.0479 LU | - | 75-78 DS0 |
+| `uk3a`, with feedback | **0.0147** | 0.165, 276/552 decisions wrong | 115-117 |
+| `us7a`, feed-forward only | 0.0286 | - | 36.6-38.1 |
+| `us7a`, with feedback | **0.0151** | 0.287, every decision wrong | 71-72 |
+
+Fed the true symbols, the feedback triples the margin on both channels. Fed its own decisions,
+it never recovers from the first wrong one: the feedback weights (in output units) are
+0.15/0.44/-0.01/0.19... on `uk3a` and 0.12/0.47/0.11/0.11... on `us7a`, summing to 1.10 and
+0.94, so one wrong level feeds back nearly half a spacing and two make the next error. This is
+the instability the data-slicer comment already records for the TRN2u feedback (three times the
+transmitted level within ~200 symbols); it is a property of the channel, not of that training.
+
+The specification's place for that feedback is the analogue modem's precoder (V.92 Table 30
+p1/z1, carried in CPd, applied to the true symbols, nothing to propagate). It was evaluated for
+the default channel and not built because its ~1.9 dB power penalty ate the gain there
+(`docs/v92_full_startup.md`); on the 65-tap channel the feed-forward-only loss is ~12 dB
+(104.9 vs 25.2 DS0), which changes that sum. `v92_upstream_data.c` already applies CPd
+precoder/prefilter coefficients in loopback.
