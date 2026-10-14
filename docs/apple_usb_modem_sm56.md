@@ -1729,3 +1729,81 @@ The instrument labels that reference as requested rather than measured.
 Long-run clock tracking, late TRN1d margin, DIL and Phase 4 through this loop
 remain separate work; the good 16000-symbol channel grade does not claim that
 every symbol of the entire recording was recovered.
+
+## Through the Grandstream ATA against `sip_v90_modem` (2026-10-15)
+
+The modem now hangs off the Grandstream ATA's line 2 (**6005**), not the VG224,
+and dials the digital end, which ran from a HEAD build on vmhost CT 117
+(`/root/apple-head`, ext **6002**) because tower was unreachable.  Recipe:
+`artifacts/apple-pve-20261015/run.sh <name> <mode> [hold]`; it dials `6002#`
+with `APPLE_MODEM_DTMF_MS=150/150` and collects both ends' logs and taps.
+
+### Rig: every `endpoint-modem` endpoint was missing from Asterisk
+
+The ATA could not register (8576 rejected REGISTERs for 6005 that day, "No
+matching endpoint found" then "Failed to authenticate"), and **this ATA removes
+loop battery while unregistered**, so the modem read line sense 0x00, "no pair",
+and went on reading it on-hook.  Asterisk had restarted on 2026-10-12 22:34
+and parsed `allow=!all,clearmode,ulaw` (the `endpoint-modem` template) before
+`codec_clearmode.so` had registered its format, so **every endpoint built on
+that template failed to load**: 6000/6001 (the long-standing "6000 does not
+authenticate"), 6004/6005, and all of the VG224's 84xx.  `module reload
+res_pjsip.so` with the codec already loaded fixed it, and both ATA lines
+registered within seconds.  A restart will break it again unless the load order
+changes.  The first symptom is a 400 Hz tone with ±20 Hz sidebands after
+dialling, which is the ATA saying it cannot route.
+
+### What the line is
+
+- **Round trip ≈ 0.5 s**: the digital side's V.34 echo canceller fits a bulk
+  delay of 533 ms; ICMP from Asterisk to the ATA is 36–50 ms, so most of it is
+  the ATA's jitter buffer.
+- **The ATA drops nothing downstream.**  Counting 20 ms holes (a frame under
+  25% of its neighbours) in all four taps, every hole the Apple modem received
+  was already in the server's own transmit.  Upstream, the V.90/V.92 calls
+  show 4–5 holes at the server against 2 sent: at most 2–3 per minute.
+- Echo is negligible: on V.22bis each side's own band is 0.5% of what it
+  receives.
+
+### Mode matrix, one call each, 60 s hold
+
+| mode | furthest point |
+|---|---|
+| V.22bis | V.8 → training; both ends restart in a coupled ~1.16 s cycle |
+| V.32bis | V.8 → start-up; nothing logged for 55 s on either side |
+| V.34 | Phase 4 MP both ends at 3200 baud (caller projected N=13); caller "Training failed" 3.6 s into MP; the retrain stalls in Phase 3 |
+| V.90 | **Phase 3 complete on both ends**; digital enters Phase 4 (Ri); analogue stuck awaiting J'd |
+| V.92 | same as V.90 (V.92 INFO0 mutual, but no PCM upstream offered, so it runs as V.90) |
+
+**V.22bis.**  SpanDSP restarts the transmitter as well as the receiver on a
+carrier drop once the receiver is past symbol acquisition
+(`v22bis_rx.c:919`), so one drop at either end starts a loop: the answerer goes
+back to 75 ms of silence and USB1 (still on air 15 s in; the 2250 Hz line is
+dibit 11 at 600 baud), the caller loses carrier and restarts, and its
+transmitter bursts 0.6 s on and 0.66 s off.  `engine_pair_test` connects V.22bis
+with no delay; the 0.5 s round trip is the obvious difference and is
+untested.  The `Training rx: RMS=0.0` line on the answer side is wrong: its
+own G.711 tap carries the caller at RMS ~1200 throughout.
+
+**V.34 retrain.**  After the first MP failure, both ends' INFO1 report
+`max N by baud ... all 0`, and the digital side says `no legal measured duplex
+symbol-rate pair`: the retrain has no line-probing result to choose from, so it
+cannot succeed as built.
+
+**V.90/V.92: first live Sd → TRN1d → Jd on the analogue side.**  The line
+recovery from the section above works live: `Sd acquired on its 1333 Hz line
+(line fraction 0.568)`, S-bar-d reversal found, TRN1d CMA, and **a Jd frame with
+0 bad bits at TRN1d 20084T** (the digital side sent 20004T).  Repeated on the
+V.92 call (fraction 0.662, Jd at 20083T).  The digital side detects the
+analogue S after 5964 Jd symbols, sends J'd and enters Phase 4.
+
+**The remaining blocker is still Ja, upstream.**  The digital side never decodes
+a CRC-valid Ja descriptor (`parsed=0` throughout) and starts Sd only on the
+energy-gap fallback 500 ms after the gap.  With no descriptor it sends **no
+DIL**: J'd is followed by Ri.  The analogue side requested a 120-segment DIL,
+and it leaves Jd only on J'd's 12 zeros or on the DIL's level change.  It saw
+neither, and sat in "S (awaiting J'd)" for 47 s, until the digital side's 20 s
+Ja deadline conceded to V.34 and retrained.  Next: rerun V.90 with
+`V90_JA_BIT_DUMP` and the server's `v34_rx.raw` to replay the Ja decode
+offline, and find out why the analogue side's J'd bit walk missed the 12 zeros
+(it logged only the first Jd frame, so a slip after it is possible).
