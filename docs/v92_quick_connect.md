@@ -830,3 +830,18 @@ the default channel and not built because its ~1.9 dB power penalty ate the gain
 (`docs/v92_full_startup.md`); on the 65-tap channel the feed-forward-only loss is ~12 dB
 (104.9 vs 25.2 DS0), which changes that sum. `v92_upstream_data.c` already applies CPd
 precoder/prefilter coefficients in loopback.
+
+#### The rate rule live (8f8505b2, 2026-10-15)
+
+Six unforced calls, default kernel and 65 taps alternated (`/root/ratechk.sh` on vmhost):
+
+- **Default kernel, 3/3: CPd designs 28000 (drn 4, 14 points)** on feed-forward sigma 37.2-37.6
+  (24.6 with feedback), B1u locked at 0.023 LU, **0 frames rejected in 80 s**, data-mode rms
+  34.0-34.6 DS0, ~18400 lines each way. (32000 under the old rule: 64-70 rejected per 80 s.)
+- **65 taps, 0/3 CONNECT.** Feed-forward sigma 104.8, the CPd cannot be built, slmodemd times
+  out of Phase 4 and retrains; the retrained attempt measures 196 and fails the same way; only
+  then is the PCM-upstream offer withdrawn (after one failed retrain, 9c818516). slmodemd then
+  answers a V.90 INFO1a, the V.90 attempt is retrained by the peer in Phase 3/4, and the call
+  is in plain V.34 training when slmodemd's ~60 s connect timeout ends it (BYE at +65 s). The
+  second PCM attempt cannot succeed when the first could not even design a constellation, so
+  withdrawing the offer at the first unbuildable CPd would save one full retrain.
