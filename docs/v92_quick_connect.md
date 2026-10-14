@@ -666,6 +666,18 @@ with the Jd state, which the pipeline delay changes, so compare error energy and
 
 So the -0.66 is slmodemd's receiver coping with a downstream that is flat right up to a hard
 edge at 4 kHz, which is what an ideal digital path delivers. Nothing in our transmitter is
-involved. Still open: a softer edge with the -6 dB point kept at 4000 Hz (129 and 65 taps are
-being measured), and whether a real line, which rolls off from about 3.4 kHz, avoids the
-Jd-state lottery altogether.
+involved.
+
+A SOFTER edge, with the -6 dB point still at 4000 Hz, is the direction that works; the spectral
+verifier passes at both lengths:
+
+| downstream kernel | DFE 1 | Phase 3 error energy | ratio, skip 0 | ratio, skip 5 |
+|---|---|---|---|---|
+| 257/259 Hann (default) | -0.65 | 22 | 1.17-1.27 | 2.87 |
+| 129 Hann | -0.39 | 17.7 | 1.186 | 1.476 |
+| 65 Hann | -0.24 | 13.0 | 1.461 | 1.491 |
+
+The Jd-state lottery shrinks from 1.17-3.25 to 1.19-1.49, under slmodemd's 1.5 limit at both
+states tried, but with thin margins. Open: more Jd states, the sinc upstream, and whether the
+first-attempt retrain goes away on full calls; and whether a real line, which rolls off from
+about 3.4 kHz, behaves like the soft edge.
