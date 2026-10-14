@@ -1870,3 +1870,70 @@ Phase 2 CC already measures the offset to ~1 ppm), not a wider timing range in
 the digital receiver.  That is a resampler ratio, not buffering: no samples are
 spliced or dropped.  Every upstream stage after Ja (CP, MP, data) inherits the
 same offset, so expect this to be the next gate for V.34 MP too.
+
+### Loop timing in the coupler: Ja parses on every attempt (2026-10-15)
+
+`apple_usb_modem_coupler` now loop-times its transmitter (V.34 INFO0 bits
+26:27, "synchronized to receive timing"), which is what the section above
+calls for.
+
+**Measurement.**  The far end's ANSam, on the raw device stream before any
+resampler, mixed to baseband in 20 ms blocks and **squared**, so V.25's 450 ms
+phase reversals vanish; the unwrapped phase is fitted for frequency.  From
+answer detection it takes 2 s of tone (or what there is, minimum 0.8 s),
+gated at 0.2 rad residual and ±1000 ppm.  Live it reads **-164.8 to -165.6
+ppm at 0.003-0.06 rad** on every call; unsquared the same fit gives the
+-364 ppm / 0.88 rad that made ANSam look unusable before.
+
+**Correction.**  All three resamplers became one variable-ratio polyphase:
+240 phases (divisible by 3, 5 and 6, so at 0 ppm every output lands exactly on
+a phase and the old exact-rational behaviour is unchanged), 48 taps per phase
+as before, adjacent phases interpolated off nominal, and an integer position
+accumulator.  Receive ratios are scaled by (1+d), transmit by 1/(1+d), so one
+device sample in still owes one device sample out: nothing is spliced.
+`--selftest` now also runs every path at ±200 ppm, for 3 s so the position
+wraps several times: gain 0.998-1.003, SNDR 52.7-78.9 dB, the nominal figures.
+
+**Verified at the far end.**  Our Phase 2 2400 Hz tone, measured on the
+digital side's receive tap: **2399.604 Hz (-164.9 ppm) before, 2400.0000 Hz
+±0.1 ppm after**, residual 0.001-0.003 rad.
+
+**The trap it exposed: the transmit ring ran at exactly zero margin.**  The
+first loop-timed calls slipped the upstream by one device sample (a clean
+90 degree step at 2400 Hz) every 0.64 s: 32-33 underrun runs, ~300 samples
+per call.  The rates were balanced (stage ratios +153 and -151 ppm); the cause
+is granularity.  The engine produces 96-sample blocks and CoreAudio takes
+512-frame cycles, so the ring's fill swings by up to a block with where block
+edges fall against cycle edges, and the startup underruns (the engine starts
+part way through a cycle) left its low point at exactly empty.  At exact 5/6
+and 6/5 that alignment never moves; loop timing moves it one engine sample per
+rx-resampler wrap (0.63 s at 165 ppm), and each crossing dipped below empty.
+**`--rx-replay` hid it, because it drained in 80-sample chunks**;
+`APPLE_REPLAY_CHUNK=512` reproduces the live count exactly (32 runs, 286
+samples).  Zeros pre-filled into the ring, or owed to the output side, were
+both eaten by the startup underruns.  The fix is a pre-roll: after engine
+start the output plays silence, without reading the ring, until the ring holds
+a whole callback plus 192 samples, then drains.  Zero underruns at replay
+chunks 80/512/1024 and on every live call since.  New exit line: underrun
+runs and samples (dated), device in/out frame counts (equal on every call:
+input and output share the clock) and the ring's minimum fill per 0.5 s.
+
+**Live, V.90, Apple on ATA 6005 → HEAD `sip_v90_modem` on CT 117, final build,
+alternated arms:**
+
+| loop timing | connected calls | Ja parsed | server accepted CPt |
+|---|---|---|---|
+| on | 3 (lt6, ab-on1, ab-on3) | **9 / 9 attempts** (start + 2 retrains each) | 5 |
+| off | 4 (nolt4, ab-off1, ab-off2, ab-off3) | **0** | 0 |
+
+(Before the change, 0 of 2 more; ab-on2 and lt5 never reached the server, a
+dial failure, not an arm.)  With Ja parsed, the digital side sends the DIL
+the Apple side asked for (120 segments, LSP=12, LTP=11), the Apple side
+receives it and enters Phase 4 (CPt at drn 16, CP at drn 4 = 32000 up), and
+the server accepts that CPt and sends TRN2d (D=24, K=18) and MP.
+
+**Next blocker: the analogue side's Phase 4 receiver never finds Ri.**  It
+logs `hunting Ri` from Phase 4 start until its §9.4.2 deadline (~11 s) and
+retrains, on every attempt; the downstream TRN2d/MP the server sends are never
+acquired.  Downstream timing is now on the far end's clock too (the receive
+resamplers are corrected), so this is the analogue Phase 4 receiver itself.

@@ -44,9 +44,23 @@
  * failing on all three.  A 5/6 polyphase discards nothing and has no free
  * parameter; the constant group delay it adds is not a choice.
  *
+ * Exact, that is, against the CODEC's clock -- which is not the far end's.
+ * Measured -165 ppm against a Grandstream ATA (-163 against the VG224), where
+ * V.34 §5.2 allows the symbol rate +/-0.01%: our Phase 3 upstream arrived 165
+ * ppm slow and the digital side decoded Ja at ~18% bit errors, never parsing
+ * it.  So the coupler loop-times (V.34 INFO0 bits 26:27, "synchronized to
+ * receive timing"): it measures the far end's ANSam on the raw device stream
+ * and scales all three ratios by the codec's offset, still with no free phase
+ * and no sample dropped or inserted.  APPLE_MODEM_LOOP_TIMING=0 turns it off,
+ * APPLE_MODEM_CLOCK_PPM forces a value.  The transmit ring pre-rolls a cushion
+ * so the moving block/cycle alignment that loop timing brings never underruns.
+ *
  * --rate still accepts 8000, which skips the receive resampler entirely and is
- * one filter fewer if all you want is V.34; it cannot feed the T/2 path.
- * --selftest measures the resamplers, since they are load-bearing.
+ * one filter fewer if all you want is V.34; it cannot feed the T/2 path, and
+ * it is not loop-timed.
+ * --selftest measures the resamplers, at nominal and at +/-200 ppm, since they
+ * are load-bearing.  APPLE_REPLAY_CHUNK=512 makes --rx-replay drain the
+ * transmit ring in live-sized cycles, which is what reproduces ring underruns.
  *
  * The DC offset is removed unconditionally.  This device sits at about +650
  * counts, and on the HSF part a standing 908-count offset made SpanDSP's
@@ -281,27 +295,45 @@ static int build_dial_script(const char *digits, double on_ms, double off_ms)
  * only 400 Hz into the stopband.  Both would have presented inside the modem as
  * a level or noise problem, miles from the cause. */
 #define RS_TAPS 48
-#define RS_L_MAX 6
 #define RS_HIST (RS_TAPS + 2)
 
+/* Loop timing (V.34 §5.2, INFO0 bits 26:27 "synchronized to receive timing").
+ * The codec's clock is free-running and is NOT the network's: measured at
+ * -165 ppm against a Grandstream ATA and -163 against the VG224, where V.34
+ * allows the transmitted symbol rate +/-0.01%.  So the ratios are L/M only
+ * nominally: each resampler can be scaled by the codec's measured offset, and
+ * the engine's 8 kHz grid then runs on the far end's clock in both directions.
+ * Scaling every ratio by the same factor keeps the transmit ring balanced --
+ * one device sample in still owes one device sample out -- so no sample is
+ * ever dropped or inserted; only where the filter samples between inputs moves.
+ *
+ * 240 phases because it is divisible by 3, 5 and 6: at zero offset every
+ * output lands exactly on a phase, and the resampler is the exact rational
+ * polyphase it always was.  Off zero, adjacent phases are interpolated
+ * linearly; at 240 phases that error is far below the -53 dB stopband. */
+#define RS_NPH 240
+#define RS_FRAC_BITS 24
+#define RS_UNIT ((uint64_t)RS_NPH << RS_FRAC_BITS)   /* position units per input */
+
 struct resamp {
-    int L, M;
-    double h[RS_TAPS * RS_L_MAX + RS_L_MAX];   /* h[j*L + p] */
+    double h[RS_TAPS * RS_NPH + 1];     /* h[j*RS_NPH + p], p = phase */
     double hist[RS_HIST];
-    int hn;                             /* input samples consumed */
-    long k;                             /* output index */
+    long hn;                            /* input samples consumed */
+    uint64_t pos;                       /* next output's input position, RS_UNIT per sample */
+    uint64_t step;                      /* input samples per output, same units */
+    uint64_t step_nominal;              /* M/L exactly */
 };
 
 static void rs_init(struct resamp *r, int L, int M)
 {
-    int n = RS_TAPS * L;
-    double fc = 0.5 / (L > M ? L : M);   /* normalised to the L*fs_in rate */
-    double sum = 0;
+    int n = RS_TAPS * RS_NPH;
+    /* Cut at the lower of the two Nyquists, as before: 0.5/max(L,M) at the L*fs
+     * rate is 0.5*min(1, L/M) cycles per input sample. */
+    double fc = 0.5 * (L < M ? (double)L / M : 1.0) / RS_NPH;
 
     memset(r, 0, sizeof *r);
-    r->L = L;
-    r->M = M;
-    (void)sum;
+    r->step_nominal = (uint64_t)M * RS_NPH / L << RS_FRAC_BITS;
+    r->step = r->step_nominal;
     for (int i = 0; i < n; i++) {
         double t = i - (n - 1) / 2.0;
         double x = 2.0 * M_PI * fc * t;
@@ -312,15 +344,23 @@ static void rs_init(struct resamp *r, int L, int M)
         r->h[i] = sinc * w;
     }
     /* Normalise EACH PHASE to unit DC gain.  One output touches one phase, so
-     * normalising the whole prototype would leave every output a factor of L
-     * out -- and a gain error here presents as a level problem in the modem,
-     * miles from its cause. */
-    for (int p = 0; p < L; p++) {
+     * normalising the whole prototype would leave every output a factor of the
+     * phase count out -- and a gain error here presents as a level problem in
+     * the modem, miles from its cause. */
+    for (int p = 0; p < RS_NPH; p++) {
         double ps = 0;
-        for (int j = 0; j < RS_TAPS; j++) ps += r->h[j * L + p];
+        for (int j = 0; j < RS_TAPS; j++) ps += r->h[j * RS_NPH + p];
         if (fabs(ps) < 1e-12) ps = 1.0;
-        for (int j = 0; j < RS_TAPS; j++) r->h[j * L + p] /= ps;
+        for (int j = 0; j < RS_TAPS; j++) r->h[j * RS_NPH + p] /= ps;
     }
+    r->h[n] = 0;   /* phase RS_NPH of the last tap: past the window, zero */
+}
+
+/* Scale input-samples-per-output by `factor`.  Takes effect at the next output,
+ * from wherever the position already is, so the timeline stays continuous. */
+static void rs_set_factor(struct resamp *r, double factor)
+{
+    r->step = (uint64_t)llround((double)r->step_nominal * factor);
 }
 
 /* Feed one input sample, emit however many outputs fall due (0, 1 or more). */
@@ -331,23 +371,29 @@ static int rs_put(struct resamp *r, double x, double *out, int max_out)
     for (int i = RS_HIST - 1; i > 0; i--) r->hist[i] = r->hist[i - 1];
     r->hist[0] = x;
     r->hn++;
-    /* Output k sits at input position k*M/L; emit while that is the sample just
-     * pushed.  One input can owe several outputs when L > M. */
+    /* Emit while the next output's position is at or before the sample just
+     * pushed.  One input can owe several outputs when upsampling. */
     for (;;) {
-        long m = (r->k * r->M) / r->L;
-        int  p = (int)((r->k * r->M) % r->L);
+        long m = (long)(r->pos / RS_UNIT);
+        uint64_t rem = r->pos % RS_UNIT;
+        int p = (int)(rem >> RS_FRAC_BITS);
+        double fr = (double)(rem & (((uint64_t)1 << RS_FRAC_BITS) - 1))
+                    / (double)((uint64_t)1 << RS_FRAC_BITS);
         double acc = 0;
 
         if (m > r->hn - 1) break;
         if (got >= max_out) break;
-        /* hist[0] is input n = hn-1, so input (m - j) is hist[hn-1-m+j]. */
+        /* hist[0] is input n = hn-1, so input (m - j) is hist[hn-1-m+j].
+         * Phase p+1 == RS_NPH is phase 0 one tap on, which the h[] layout
+         * gives for free; it drops only tap 0 of that phase, a window tail. */
         for (int j = 0; j < RS_TAPS; j++) {
             int hi = (int)(r->hn - 1 - m) + j;
+            const double *hp = &r->h[j * RS_NPH + p];
             if (hi < 0 || hi >= RS_HIST) continue;
-            acc += r->h[j * r->L + p] * r->hist[hi];
+            acc += (fr == 0.0 ? hp[0] : hp[0] + fr * (hp[1] - hp[0])) * r->hist[hi];
         }
         out[got++] = acc;
-        r->k++;
+        r->pos += r->step;
     }
     return got;
 }
@@ -366,6 +412,22 @@ static int16_t clip16(double v)
 static AudioUnit au;
 static AudioBufferList *in_abl;
 static _Atomic int render_errors;
+/* Transmit-ring underruns while the engine runs: each one plays a zero the
+ * engine never produced, i.e. delays everything after it by one device sample
+ * -- a 90 degree step at 2400 Hz on the far end's tap.  Counted always, not
+ * only for the GUI, because that is exactly what a resampler ratio change can
+ * provoke; the first few are dated in output samples since off-hook. */
+static _Atomic unsigned long tx_underrun_samples, tx_underrun_runs;
+static unsigned long tx_out_count, tx_underrun_at[8];
+static int tx_in_underrun;
+/* Device sample accounting.  Input and output share one device clock, so over
+ * a call these must agree to within a buffer; if they do not, no ring cushion
+ * can hold and the difference is what the far end hears as slips.  The ring's
+ * fill is sampled once per output callback into 0.5 s bins (minimum kept). */
+static unsigned long dev_in_frames, dev_out_frames;
+#define FILL_BINS 160
+static int fill_min[FILL_BINS];
+static int fill_bins_init;
 static const char *g_pty_link;
 static const char *g_dial;
 static const char *g_replay_path;
@@ -533,6 +595,8 @@ static void answer_block(const int16_t *s)
  * v90_engine_replay --split reproduces.  Its transmit goes into a ring that the
  * output callback drains, so one clock owns the DS0 grid. */
 #define RING_N 8192
+#define TX_CUSHION 192            /* two engine blocks, 20 ms at 9600 */
+static volatile int tx_preroll;
 static int16_t ring[RING_N];
 static volatile unsigned ring_w, ring_r;
 
@@ -563,6 +627,28 @@ static void engine_block_8k(const int16_t *s, long n)
             }
         }
         if (g_answered && !g_engine_running) {
+            /* The transmit ring needs a margin, and it has to be laid down
+             * on the OUTPUT side.  The engine makes 96-sample blocks and the
+             * device takes 512-frame cycles, so the ring's fill at each
+             * output callback swings by up to a block with where block edges
+             * fall against cycle edges.  At exact 5/6 and 6/5 that alignment
+             * never moves and the startup underruns (the engine starts part
+             * way through a cycle) leave the ring at EXACTLY zero margin --
+             * harmless only because nothing ever moves.  Loop timing moves it
+             * one engine sample every 0.63 s at 165 ppm, and each time a block
+             * edge crosses a cycle edge the fill dips below empty: a zero the
+             * engine never made, a one-sample slip in the upstream (live: 32
+             * runs, 286 samples in 30 s; reproduced exactly by a 512-frame
+             * replay).  Neither zeros pre-filled into the ring nor zeros
+             * owed to the output side survive: the engine's first, partial
+             * cycle underruns AFTER them and resets the margin to zero.  So
+             * the output side pre-rolls: it plays silence, without reading
+             * the ring, until the ring holds a whole callback plus
+             * TX_CUSHION, and only then starts draining.  That is a constant
+             * delay ahead of the engine's first sample, and the ring keeps
+             * TX_CUSHION of margin over its steady-state low point for the
+             * rest of the call. */
+            tx_preroll = 1;
             g_engine_running = 1;
             me_on_sip_connected();
             fprintf(stderr, "[APPLE] starting analogue engine (device %.0f Hz)\n", g_rate);
@@ -591,9 +677,131 @@ static void engine_block_8k(const int16_t *s, long n)
     }
 }
 
+/* Receive-timing measurement for loop timing (see the resampler header).
+ *
+ * The reference is the far end's answer tone: generated on its own clock, on
+ * the line for seconds before anything of ours matters, and ending exactly
+ * when V.8 moves on.  ANSam reverses phase every 450 ms (V.25), which defeats
+ * a plain phase fit -- measured: 0.88 rad residual and -364 ppm -- so the fit
+ * runs on the SQUARED baseband, where a 180 degree reversal is invisible.  On
+ * four recorded calls that read +165.0..+165.3 ppm at 0.005 rad residual, and
+ * a server tap corrected anywhere in -100..-230 ppm parses the Ja descriptor
+ * that 0 ppm cannot.  Raw device samples are measured, before any resampler,
+ * so the correction never measures itself. */
+#define LT_F0        2100.0
+#define LT_BLOCK     192             /* 20 ms at 9600 */
+#define LT_MAX       100             /* 2 s of tone is plenty */
+#define LT_MIN       40              /* 0.8 s, or no verdict */
+#define LT_MAX_PPM   1000.0
+#define LT_MAX_RESID 0.2             /* rad, on the squared phase */
+
+static int    lt_enabled = 1, lt_done;
+static double lt_ph[LT_MAX], lt_w[LT_MAX], lt_t[LT_MAX];
+static int    lt_n, lt_fill, lt_misses;
+static long   lt_block_index;
+static double lt_re, lt_im, lt_energy, lt_osc;
+
+static void loop_timing_apply(double ppm, const char *why)
+{
+    /* The codec runs at g_rate*(1+d) in the far end's time.  Receive paths
+     * consume (1+d) more device samples per output; transmit consumes 1/(1+d)
+     * more engine samples per device sample. */
+    double d = ppm * 1e-6;
+
+    rs_set_factor(&rs_8k, 1.0 + d);
+    rs_set_factor(&rs_16k, 1.0 + d);
+    rs_set_factor(&rs_tx, 1.0 / (1.0 + d));
+    lt_done = 1;
+    fprintf(stderr, "[APPLE] loop timing: codec clock %+.1f ppm (%s); all three "
+                    "resamplers corrected\n", ppm, why);
+}
+
+static void loop_timing_fit(void)
+{
+    double sw = 0, st = 0, sp = 0, stt = 0, stp = 0, slope, icpt, res = 0, ppm;
+    char why[160];
+
+    lt_done = 1;
+    if (lt_n < LT_MIN) {
+        fprintf(stderr, "[APPLE] loop timing: only %d blocks of answer tone (need %d); "
+                        "codec left uncorrected\n", lt_n, LT_MIN);
+        return;
+    }
+    for (int i = 0; i < lt_n; i++) {
+        sw += lt_w[i]; st += lt_w[i] * lt_t[i]; sp += lt_w[i] * lt_ph[i];
+        stt += lt_w[i] * lt_t[i] * lt_t[i]; stp += lt_w[i] * lt_t[i] * lt_ph[i];
+    }
+    slope = (sw * stp - st * sp) / (sw * stt - st * st);
+    icpt = (sp - slope * st) / sw;
+    for (int i = 0; i < lt_n; i++) {
+        double e = lt_ph[i] - (slope * lt_t[i] + icpt);
+        res += lt_w[i] * e * e;
+    }
+    res = sqrt(res / sw);
+    /* Squared baseband: slope is 2*2*pi*(f_meas - F0).  The tone was made at F0
+     * on the far clock and reads f_meas on ours, so (1+d) = F0 / f_meas. */
+    double f_meas = LT_F0 + slope / (4.0 * M_PI);
+    ppm = (LT_F0 / f_meas - 1.0) * 1e6;
+    snprintf(why, sizeof why, "answer tone %.4f Hz over %.2f s, residual %.3f rad",
+             f_meas, lt_n * LT_BLOCK / g_rate, res);
+    if (res > LT_MAX_RESID || fabs(ppm) > LT_MAX_PPM) {
+        fprintf(stderr, "[APPLE] loop timing: %s -> %+.1f ppm REJECTED; codec left "
+                        "uncorrected\n", why, ppm);
+        return;
+    }
+    loop_timing_apply(ppm, why);
+}
+
+static void loop_timing_feed(const int16_t *s, long n)
+{
+    const double w0 = 2.0 * M_PI * LT_F0 / g_rate;
+
+    if (!lt_enabled || lt_done || !g_answered || g_rate == 8000.0)
+        return;
+    for (long i = 0; i < n; i++) {
+        double x = s[i];
+        lt_re += x * cos(lt_osc);
+        lt_im -= x * sin(lt_osc);
+        lt_energy += x * x;
+        lt_osc += w0;
+        if (lt_osc > 2.0 * M_PI) lt_osc -= 2.0 * M_PI;
+        if (++lt_fill < LT_BLOCK)
+            continue;
+        /* One 20 ms block.  It counts as tone on the answer detector's terms --
+         * most of its power in the 2100 Hz bin -- and the tone ending (V.8
+         * moving on) is what closes the measurement. */
+        double mag2 = lt_re * lt_re + lt_im * lt_im;
+        double frac = 2.0 * mag2 / (LT_BLOCK * fmax(lt_energy, 1.0));
+        if (frac > 0.3) {
+            double sr = lt_re * lt_re - lt_im * lt_im, si = 2.0 * lt_re * lt_im;
+            double ph = atan2(si, sr);
+            if (lt_n > 0) {
+                double prev = lt_ph[lt_n - 1];
+                while (ph - prev >  M_PI) ph -= 2.0 * M_PI;
+                while (ph - prev < -M_PI) ph += 2.0 * M_PI;
+            }
+            lt_ph[lt_n] = ph;
+            lt_w[lt_n] = sqrt(sr * sr + si * si);
+            lt_t[lt_n] = (lt_block_index + 0.5) * LT_BLOCK / g_rate;
+            lt_n++;
+            lt_misses = 0;
+        } else if (lt_n > 0 && ++lt_misses >= 5) {
+            loop_timing_fit();
+            return;
+        }
+        lt_block_index++;
+        lt_fill = 0; lt_re = lt_im = lt_energy = 0;
+        if (lt_n >= LT_MAX) {
+            loop_timing_fit();
+            return;
+        }
+    }
+}
+
 static void engine_feed(int16_t *s, long n)
 {
     dc_block(s, n);
+    loop_timing_feed(s, n);
 
     if (g_rate == 8000.0) {                      /* no receive resampler at all */
         engine_block_8k(s, n);
@@ -716,6 +924,7 @@ static OSStatus input_cb(void *ref, AudioUnitRenderActionFlags *flags,
             fprintf(stderr, "  AudioUnitRender: %d\n", (int)rc);
         return rc;
     }
+    dev_in_frames += nframes;
     if (rx_tap)
         fwrite(in_abl->mBuffers[0].mData, 2, nframes, rx_tap);
     gui_raw_feed(0,in_abl->mBuffers[0].mData,nframes);
@@ -730,6 +939,24 @@ static OSStatus output_cb(void *ref, AudioUnitRenderActionFlags *flags,
     int16_t *out = io->mBuffers[0].mData;
 
     (void)ref; (void)flags; (void)ts; (void)bus;
+    if (!fill_bins_init) { for (int b = 0; b < FILL_BINS; b++) fill_min[b] = -1; fill_bins_init = 1; }
+    if (g_engine_running) {
+        int fill = (int)((ring_w + RING_N - ring_r) % RING_N);
+        long bin = (long)(dev_out_frames / (g_rate * 0.5));
+        if (bin < FILL_BINS && (fill_min[bin] < 0 || fill < fill_min[bin])) fill_min[bin] = fill;
+    }
+    dev_out_frames += nframes;
+    if (tx_preroll && g_engine_running && !gui_monitor_only && tx_seg >= tx_nseg) {
+        unsigned fill = (ring_w + RING_N - ring_r) % RING_N;
+        if (fill < nframes + TX_CUSHION) {
+            memset(out, 0, nframes * sizeof *out);
+            tx_out_count += nframes;
+            gui_raw_feed(1, out, nframes);
+            if (tx_tap) fwrite(out, 2, nframes, tx_tap);
+            return noErr;
+        }
+        tx_preroll = 0;
+    }
     unsigned empty_samples = 0;
     for (UInt32 i = 0; i < nframes; i++) {
         double v = 0;
@@ -751,8 +978,20 @@ static OSStatus output_cb(void *ref, AudioUnitRenderActionFlags *flags,
             continue;
         }
         tx_dtmf_done = 1;
-        if (ring_r != ring_w) { out[i] = ring[ring_r]; ring_r = (ring_r + 1) % RING_N; }
-        else { out[i] = 0; if (g_engine_running) empty_samples++; }
+        tx_out_count++;
+        if (ring_r != ring_w) { out[i] = ring[ring_r]; ring_r = (ring_r + 1) % RING_N; tx_in_underrun = 0; }
+        else {
+            out[i] = 0;
+            if (g_engine_running) {
+                empty_samples++;
+                tx_underrun_samples++;
+                if (!tx_in_underrun) {
+                    if (tx_underrun_runs < 8) tx_underrun_at[tx_underrun_runs] = tx_out_count;
+                    tx_underrun_runs++;
+                }
+                tx_in_underrun = 1;
+            }
+        }
     }
     if (g_gui_control) { pthread_mutex_lock(&gui_raw_lock); gui_empty_tx += empty_samples; pthread_mutex_unlock(&gui_raw_lock); }
     gui_raw_feed(1,out,nframes);
@@ -965,7 +1204,12 @@ static void gui_ring_poll(void)
 static int replay(const char *path)
 {
     FILE *fp = fopen(path, "rb");
-    int16_t buf[80];
+    int16_t buf[4096];
+    /* Live CoreAudio delivers 512-frame cycles; replay's default 80 hides
+     * transmit-ring effects that only a whole cycle's demand exposes. */
+    const char *chunk_env = getenv("APPLE_REPLAY_CHUNK");
+    size_t chunk = chunk_env ? (size_t)atoi(chunk_env) : 80;
+    if (chunk < 1 || chunk > 4096) chunk = 80;
     long total = 0;
 
     if (!fp) { perror(path); return 1; }
@@ -977,17 +1221,45 @@ static int replay(const char *path)
      * the answer detector was mis-tuned by the same ratio.  Two wrongs.  The tap
      * must be at --rate, since that is what the device produced. */
     for (; !g_stop;) {
-        size_t n = fread(buf, 2, 80, fp);
+        size_t n = fread(buf, 2, chunk, fp);
         if (n == 0) break;
         gui_raw_feed(0,buf,(unsigned)n);
         engine_feed(buf, (long)n);
         if (g_gui_control) { gui_status = "Offline replay · no USB line"; gui_publish(); CFRunLoopRunInMode(kCFRunLoopDefaultMode,(double)n/g_rate,false); }
-        ring_r = ring_w;                 /* no line to transmit into */
+        /* No line to transmit into, but drain the ring as a device whose input
+         * and output share one clock would: n samples out per n in.  That
+         * makes transmit-ring underruns -- each a one-sample slip in what the
+         * far end receives -- reproducible offline. */
+        if (tx_preroll && g_engine_running) {
+            if ((ring_w + RING_N - ring_r) % RING_N < n + TX_CUSHION) {
+                tx_out_count += n;
+                total += (long)n;
+                continue;
+            }
+            tx_preroll = 0;
+        }
+        for (size_t i = 0; i < n; i++) {
+            tx_out_count++;
+            if (ring_r != ring_w) { ring_r = (ring_r + 1) % RING_N; tx_in_underrun = 0; }
+            else if (g_engine_running) {
+                tx_underrun_samples++;
+                if (!tx_in_underrun) {
+                    if (tx_underrun_runs < 8) tx_underrun_at[tx_underrun_runs] = tx_out_count;
+                    tx_underrun_runs++;
+                }
+                tx_in_underrun = 1;
+            }
+        }
         total += (long)n;
     }
     fclose(fp);
     fprintf(stderr, "[APPLE] replay: %ld samples at %.0f Hz (%.2f s), engine %s\n",
             total, g_rate, total / g_rate, g_engine_running ? "ran" : "NEVER STARTED");
+    fprintf(stderr, "[APPLE] replay transmit ring underruns: %lu runs, %lu samples",
+            (unsigned long)tx_underrun_runs, (unsigned long)tx_underrun_samples);
+    for (unsigned long i = 0; i < tx_underrun_runs && i < 8; i++)
+        fprintf(stderr, "%s%.3f s", i ? ", " : " (first at ", tx_underrun_at[i] / g_rate);
+    fprintf(stderr, "%s\n", tx_underrun_runs ? ")" : "");
     return g_engine_running ? 0 : 1;
 }
 
@@ -1005,6 +1277,19 @@ static void rs_setup(void)
     rs_init(&rs_8k,  5, 6);
     rs_init(&rs_16k, 5, 3);
     rs_init(&rs_tx,  6, 5);
+
+    const char *lt = getenv("APPLE_MODEM_LOOP_TIMING");
+    const char *forced = getenv("APPLE_MODEM_CLOCK_PPM");
+    lt_enabled = !(lt && strcmp(lt, "0") == 0);
+    lt_done = 0; lt_n = 0; lt_fill = 0; lt_misses = 0; lt_block_index = 0;
+    lt_re = lt_im = lt_energy = lt_osc = 0;
+    if (forced && *forced) {
+        loop_timing_apply(atof(forced), "APPLE_MODEM_CLOCK_PPM");
+    } else if (!lt_enabled) {
+        lt_done = 1;
+        fprintf(stderr, "[APPLE] loop timing: off (APPLE_MODEM_LOOP_TIMING=0); "
+                        "transmitting on the codec's free-running clock\n");
+    }
 }
 
 /* The resamplers are load-bearing, so they are measurable without a device:
@@ -1020,31 +1305,48 @@ static int selftest(void)
     const double in_rate[3] = { 9600.0, 9600.0, 8000.0 };
     int bad = 0;
 
+    /* Loop timing scales every ratio by the codec's offset, so the off-nominal
+     * rows matter as much as the nominal ones: a tone must come out at exactly
+     * f times the factor, at full gain, with nothing left over.  +/-200 ppm is
+     * past the -165 ppm this hardware measures. */
+    static const double ppms[] = { 0.0, +200.0, -200.0 };
+    for (unsigned pi = 0; pi < sizeof ppms / sizeof ppms[0]; pi++)
     for (int t = 0; t < 3; t++) {
         /* 3673 Hz is V.34's worst case: 3429 baud at fc 1959 reaches it, and it
          * is 327 Hz from the 8 kHz grid's Nyquist, so it is the frequency that
          * decides whether this bearer can carry the top symbol rate. */
         static const double freqs[] = { 300, 1000, 2000, 3000, 3520, 3673 };
+        double d = ppms[pi] * 1e-6;
+        /* Receive paths take (1+d) input per output, transmit 1/(1+d). */
+        double factor = (t == 2) ? 1.0 / (1.0 + d) : 1.0 + d;
         for (unsigned fi = 0; fi < sizeof freqs / sizeof freqs[0]; fi++) {
-            double f = freqs[fi];
-            struct resamp r;
+            double f = freqs[fi], fo = f * factor;
+            static struct resamp r;
             double *y = malloc(sizeof(double) * 200000);
             long ny = 0;
-            long nin = (long)(in_rate[t] * 0.5);
+            /* Off nominal the position sweeps through every phase and wraps a
+             * whole input sample once per 1/(ppm * phases-per-output) outputs --
+             * 0.63 s at 165 ppm on the receive path.  Half a second never sees a
+             * wrap, so those rows run long enough to cross several. */
+            long nin = (long)(in_rate[t] * (ppms[pi] != 0.0 ? 3.0 : 0.5));
 
+            if (ppms[pi] != 0.0 && f != 1000 && f != 3673)
+                continue;
             rs_init(&r, c[t].L, c[t].M);
+            rs_set_factor(&r, factor);
             for (long i = 0; i < nin; i++) {
                 double o[8];
                 int got = rs_put(&r, 10000.0 * sin(2 * M_PI * f * i / in_rate[t]), o, 8);
                 for (int j = 0; j < got; j++) y[ny++] = o[j];
             }
-            /* Skip the filter's transient, then fit amplitude and phase at f and
-             * report what is left: a resampler wrong in gain, in phase slope or
-             * in aliasing all show up in the residual. */
+            /* Skip the filter's transient, then fit amplitude and phase at the
+             * expected frequency and report what is left: a resampler wrong in
+             * gain, in phase slope, in ratio or in aliasing all show up in the
+             * residual. */
             long s0 = 4 * RS_TAPS * c[t].M / c[t].L + 64, n = ny - s0 - 64;
             double sc = 0, ss = 0, e = 0, pw = 0;
             for (long i = 0; i < n; i++) {
-                double ph = 2 * M_PI * f * i / c[t].out_rate;
+                double ph = 2 * M_PI * fo * i / c[t].out_rate;
                 sc += y[s0 + i] * cos(ph);
                 ss += y[s0 + i] * sin(ph);
                 pw += y[s0 + i] * y[s0 + i];
@@ -1052,15 +1354,15 @@ static int selftest(void)
             sc *= 2.0 / n; ss *= 2.0 / n;
             double amp = sqrt(sc * sc + ss * ss);
             for (long i = 0; i < n; i++) {
-                double ph = 2 * M_PI * f * i / c[t].out_rate;
+                double ph = 2 * M_PI * fo * i / c[t].out_rate;
                 double fit = sc * cos(ph) + ss * sin(ph);
                 e += (y[s0 + i] - fit) * (y[s0 + i] - fit);
             }
             double sndr = 10 * log10((pw / n) / fmax(1e-12, e / n));
             int bad_row = fabs(amp / 10000.0 - 1.0) > 0.03 || sndr < 40.0;
-            printf("  %-34s %4.0f Hz: gain %6.4f  SNDR %5.1f dB%s\n",
-                   fi == 0 ? c[t].name : "", f, amp / 10000.0, sndr,
-                   bad_row ? "   <- BAD" : "");
+            printf("  %-34s %+5.0f ppm %4.0f Hz: gain %6.4f  SNDR %5.1f dB%s\n",
+                   fi == 0 || (ppms[pi] != 0.0 && f == 1000) ? c[t].name : "",
+                   ppms[pi], f, amp / 10000.0, sndr, bad_row ? "   <- BAD" : "");
             bad += bad_row;
             free(y);
         }
@@ -1413,6 +1715,16 @@ int main(int argc, char **argv)
     fprintf(stderr, "[APPLE] render errors %d, engine %s, DTMF %s\n",
             render_errors, g_engine_running ? "ran" : "never started",
             tx_dtmf_done ? "completed" : "CUT SHORT");
+    fprintf(stderr, "[APPLE] transmit ring underruns while the engine ran: %lu runs, "
+                    "%lu samples", (unsigned long)tx_underrun_runs,
+            (unsigned long)tx_underrun_samples);
+    for (unsigned long i = 0; i < tx_underrun_runs && i < 8; i++)
+        fprintf(stderr, "%s%.3f s", i ? ", " : " (first at ", tx_underrun_at[i] / g_rate);
+    fprintf(stderr, "%s\n", tx_underrun_runs ? ")" : "");
+    fprintf(stderr, "[APPLE] device frames: in %lu, out %lu (out-in %+ld); ring fill minimum per 0.5 s:",
+            dev_in_frames, dev_out_frames, (long)dev_out_frames - (long)dev_in_frames);
+    for (int b = 0; b < FILL_BINS; b++) if (fill_min[b] >= 0) fprintf(stderr, " %d", fill_min[b]);
+    fprintf(stderr, "\n");
     line_hook(0);                            /* always release the line */
     libusb_close(usb);
     libusb_exit(NULL);
