@@ -519,3 +519,30 @@ we transmit. Open: how slmodemd's upstream path (both its delay and its frequenc
 reaches its downstream equaliser's before/after-update error -- the next step is a hook on
 `V90Equalizer::calcMeanErrorStatistics` to see which windows the two energies (+0x84, +0x13c)
 cover. Workable now: accept the one retrain (~15 s), or the linear path for startup-only tests.
+
+#### The two error windows (`phase4_errstats_hook.c`)
+
+`V90Equalizer::calcMeanErrorStatistics` averages the equaliser's error-energy history (float
+array at +0x98, 45 entries here). `V90Demapper::linearMappingStudy` raises two events during
+TRN2d (+0x1ea4, +0x1ea6); at the first the mean is saved as "before" (+0x13c) and the history
+cleared, at the second the new mean is "after". The update between them is slmodemd replacing
+its downstream level map (from Phase 3's `findPadGain`) with levels measured on TRN2d.
+
+| upstream | before | after | ratio | `findPadGain` best fit error |
+|---|---|---|---|---|
+| sinc (default) | 22.8 | 9.1 | 2.505 | 10512 |
+| linear | 12.9 | 11.0 | 1.172 | 424 |
+
+The "before" window is a flat ~10-unit offset over all 45 entries (same bumps at the same
+entries in both arms), not a slower convergence, and it vanishes at the update. The sinc arm's
+"after" is the better of the two. So with the sinc upstream slmodemd's Phase 3 pad-gain fit
+of our DIL is 25x worse, its initial level map is off, and the measured-level update fixes it;
+the evaluator reads that improvement as "not trained enough".
+
+Our transmitted downstream is bit-identical between the arms up to TRN1d; after Jd it is the
+same content shifted in time (Jd length follows our Su-bar detection). d-modem shares no state
+between its directions. Our Jp always sends a zero phase extension (Table 22 bits 18:33;
+9.5.1.1.6-8 has the digital modem measure it from Su), and slmodemd has
+`adjustUinfoToPhaseOffset()`, but a fixed fraction does not fix the fit (0.25: ratio 3.10,
+fit 7338; 0.5: 2.26, 13684; 0.75: no Phase 4 on attempt 1), so that is not it as stated.
+Open: what in slmodemd's Phase 3 DIL analysis follows its upstream path.

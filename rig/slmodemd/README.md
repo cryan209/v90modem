@@ -125,6 +125,12 @@ to `/tmp/p4eval.txt`: the before/after-update ratio, the evaluator flag (+0xb0) 
 count, the `V90Parameters` thresholds (+0x438 is the ratio limit, 1.5) and the verdict
 (4 = retrain, 5 = fall back to V.34). Linked like the timing freeze, into `slmodemd_eval`.
 
+## Equaliser error-statistics hook (`phase4_errstats_hook.c`)
+
+Dumps every `V90Equalizer::calcMeanErrorStatistics()` call (`.text` 0x388c0, 3 call sites):
+entries, mean, saved "before" energy and the whole error history, to `/tmp/p4err.txt`. Link with
+the evaluator hook into `slmodemd_err`.
+
 ## Phase-4 transmit-symbol hook (`phase4_symbol_hook.c`)
 
 Records every upstream symbol slmodemd transmits in Phase 4 and data to `/tmp/p4sym.bin`
