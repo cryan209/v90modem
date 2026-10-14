@@ -1168,9 +1168,11 @@ and RX in Class 1/1.0 and Class 2.1. See [fax_class_at.md](fax_class_at.md#v34-f
 for configuration, supported profiles, test coverage and hardware limitations.
 `make fax-v34-test` runs the eight class/law/callback-size page combinations
 and the full production engine page matrix, as well as two Class 1 control
-exchanges. `make fax-v34-engine-test` runs the production page matrix alone,
-with both A4 (1728 × 2292) and Letter (1728 × 2156) fine-resolution rasters
-in every class/law/callback combination. Engine tests default to A4;
+exchanges. `make fax-v34-engine-test` runs the production page rows alone:
+one per class and callback size, with law and paper alternated so each class
+sees A4 (1728 × 2292) and Letter (1728 × 2156) fine-resolution rasters, both
+laws and both callback sizes (cut from the full 16-row matrix 2026-10-15,
+which ran the same path four times at ~50 min of CPU). Engine tests default to A4;
 `FAX_TEST_PAGE=letter ./fax_class2_test --engine-class21 ulaw 160` selects
 Letter. The full-height pattern includes margins, a checkerboard, horizontal
 rules and distinct row indices; every received raster row is compared. The
