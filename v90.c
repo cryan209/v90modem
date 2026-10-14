@@ -997,6 +997,114 @@ bool v90_set_v92_upstream_noise(v90_state_t *s, double sigma_linear,
     return true;
 }
 
+/* The CPd's positive points for one spacing (DS0 linear units): every
+ * Ucode at least `spacing` above the last, inverse-mapped by `scale`,
+ * trimmed to the Table 30 power and to an even count.  Returns the count. */
+static int v92_cpd_points(const v90_state_t *s, double scale,
+                          uint16_t gain_q0_16, double spacing,
+                          uint16_t *pts)
+{
+    int16_t prev_linear = 0;
+    int points = 0;
+
+    /* Every Ucode is a candidate; the spacing above decides.  Odd Ucodes
+     * alone are at most 64 levels, and 12*log2(62) - 3 = 68 bits per frame
+     * stops 6.4.1's product(Mi) >= 2^K at drn 17 (45333) even on a
+     * noiseless bearer: 48000 (K = 72) needs about 76 levels. */
+    for (int ucode = 1; ucode < 128 && points < V92_CPD_MAX_POINTS;
+         ucode++) {
+        int16_t linear = v90_pcm_to_linear(
+            s->law, ucode_to_pcm_positive(s->law, ucode));
+
+        if (linear <= 0)
+            continue;
+        if (points == 0 ? (double)linear < spacing/2.0
+                        : (double)(linear - prev_linear) < spacing)
+            continue;
+        prev_linear = linear;
+        /* V.92 6.4.2/Table 30: CPd points precede the gain G. Choose
+         * their inverse images so G*point lands on the desired network
+         * reconstruction level. Sending the G.711 levels themselves
+         * attenuated low points into the same ADC cell (often zero). */
+        double point = (double)linear * scale;
+        if (point > 65535.0) break;
+        pts[points++] = (uint16_t)lround(point);
+    }
+    /* Table 30: the design assumes G x (prefilter output) at mean square 1
+     * is the analogue modem's desired power, which 3.8 makes LU's, and its
+     * note has the analogue modem minimise the power at the precoder output
+     * symbol by symbol.  With Mi = LC (and 2Mi = LC at k = 3) each
+     * equivalence class holds the positive point p[K] and the negative point
+     * of magnitude p[LC-1-K], and the precoder sends the smaller: the mean
+     * square is over min(p[K], p[LC-1-K]), not over the whole set.  Taking
+     * the whole set (each point equally likely) left too few points on
+     * slmodemd's TRN2u level for even drn 1, so no CPd went out and the
+     * peer retrained out of Phase 4.  Drop the largest points until that
+     * mean square is within the received LU's.  This, not G's range, is
+     * what bounds the top level. */
+    if (s->v92_upstream_lu_rx > 1.0) {
+        double unit = s->v92_upstream_lu_rx*(double)gain_q0_16/(4.0*65536.0);
+        double lu = s->v92_upstream_lu_rx;
+
+        while (points > 8) {
+            int lc = points & ~1;          /* the LC the frame will carry */
+            double ms = 0.0;
+
+            for (int i = 0; i < lc; i++) {
+                double a = pts[i];
+                double b = pts[lc - 1 - i];
+                double level = unit*(a < b ? a : b);
+
+                ms += level*level;
+            }
+            if (ms/lc <= lu*lu)
+                break;
+            points--;
+        }
+    }
+    /* The fourth symbol of each trellis frame (k = 3: intervals 3, 7, 11)
+     * carries the convolutional code's parity, and 6.4.2 makes its
+     * equivalence classes modulo 2*Mi.  Give it Mi = LC/2 with LC even.
+     * Mi = LC is legal too, but slmodemd's precoder computes the k = 3 z
+     * range by truncating division and without the parity bit, so for
+     * 2Ki + parity >= LC it picks eta >= LC, reads past its table and
+     * transmits 0 -- half of every k = 3 symbol in slm-r9, recovered by
+     * deconvolving its own output.  With LC even and Mi = LC/2 its range
+     * is exactly the valid members. */
+    if (points > 2 && (points & 1))
+        points--;                             /* drop the largest point */
+    return points;
+}
+
+/* 6.4.1: product(Mi) >= 2^K, K = 2*(drn + 17), with Mi = LC except LC/2 at
+ * k = 3 (see v90_build_v92_cpd_frame()).  The highest drn `points` carries,
+ * 0 if none. */
+static int v92_cpd_max_drn(int points)
+{
+    __uint128_t product = 1;
+    int drn = 19;
+
+    if (points < 2)
+        return 0;
+    for (int i = 0; i < 12; i++)
+        product *= (unsigned)((i%4 == 3) ? points/2 : points);
+    while (drn > 0 && product < ((__uint128_t)1 << (2*(drn + 17))))
+        drn--;
+    return drn;
+}
+
+/* ME_V92_UP_DRN=N (1..19): diagnostic only.  Design the CPd for upstream
+ * drn N whatever the TRN2u noise says, at the widest spacing that still
+ * carries it -- up from the noise rule's spacing to cap the rate, down
+ * from it to force a higher one.  0/unset = the noise rule. */
+static int v92_forced_up_drn(void)
+{
+    const char *value = getenv("ME_V92_UP_DRN");
+    int drn = (value && *value) ? atoi(value) : 0;
+
+    return (drn >= 1 && drn <= 19) ? drn : 0;
+}
+
 bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
 {
     int points = 0;
@@ -1067,73 +1175,35 @@ bool v90_build_v92_cpd_frame(const v90_state_t *s, v92_cpd_frame_t *out)
             break;
         spacing *= 0.9;
     }
-    int16_t prev_linear = 0;
-    /* Every Ucode is a candidate; the spacing above decides.  Odd Ucodes
-     * alone are at most 64 levels, and 12*log2(62) - 3 = 68 bits per frame
-     * stops 6.4.1's product(Mi) >= 2^K at drn 17 (45333) even on a
-     * noiseless bearer: 48000 (K = 72) needs about 76 levels. */
-    for (int ucode = 1; ucode < 128 && points < V92_CPD_MAX_POINTS;
-         ucode++) {
-        int16_t linear = v90_pcm_to_linear(
-            s->law, ucode_to_pcm_positive(s->law, ucode));
+    {
+        const int forced = v92_forced_up_drn();
 
-        if (linear <= 0)
-            continue;
-        if (points == 0 ? (double)linear < spacing/2.0
-                        : (double)(linear - prev_linear) < spacing)
-            continue;
-        prev_linear = linear;
-        /* V.92 6.4.2/Table 30: CPd points precede the gain G. Choose
-         * their inverse images so G*point lands on the desired network
-         * reconstruction level. Sending the G.711 levels themselves
-         * attenuated low points into the same ADC cell (often zero). */
-        double point = (double)linear * scale;
-        if (point > 65535.0) break;
-        out->points[0][points++] = (uint16_t)lround(point);
-    }
-    /* Table 30: the design assumes G x (prefilter output) at mean square 1
-     * is the analogue modem's desired power, which 3.8 makes LU's, and its
-     * note has the analogue modem minimise the power at the precoder output
-     * symbol by symbol.  With Mi = LC (and 2Mi = LC at k = 3) each
-     * equivalence class holds the positive point p[K] and the negative point
-     * of magnitude p[LC-1-K], and the precoder sends the smaller: the mean
-     * square is over min(p[K], p[LC-1-K]), not over the whole set.  Taking
-     * the whole set (each point equally likely) left too few points on
-     * slmodemd's TRN2u level for even drn 1, so no CPd went out and the
-     * peer retrained out of Phase 4.  Drop the largest points until that
-     * mean square is within the received LU's.  This, not G's range, is
-     * what bounds the top level. */
-    if (s->v92_upstream_lu_rx > 1.0) {
-        double unit = s->v92_upstream_lu_rx*(double)out->gain_q0_16/(4.0*65536.0);
-        double lu = s->v92_upstream_lu_rx;
+        points = v92_cpd_points(s, scale, out->gain_q0_16, spacing,
+                                out->points[0]);
+        if (forced && spacing > 0.0) {
+            /* Widen while the set still carries the forced drn (capping), or
+             * narrow until it does (forcing up); 1% steps. */
+            double sp = spacing;
+            uint16_t trial[V92_CPD_MAX_POINTS];
 
-        while (points > 8) {
-            int lc = points & ~1;          /* the LC the frame will carry */
-            double ms = 0.0;
+            if (v92_cpd_max_drn(points) >= forced) {
+                for (int i = 0; i < 400; i++) {
+                    int n = v92_cpd_points(s, scale, out->gain_q0_16, sp*1.01, trial);
 
-            for (int i = 0; i < lc; i++) {
-                double a = out->points[0][i];
-                double b = out->points[0][lc - 1 - i];
-                double level = unit*(a < b ? a : b);
-
-                ms += level*level;
+                    if (v92_cpd_max_drn(n) < forced)
+                        break;
+                    sp *= 1.01;
+                }
+            } else {
+                while (sp > 1.0
+                       && v92_cpd_max_drn(v92_cpd_points(s, scale, out->gain_q0_16,
+                                                         sp, trial)) < forced)
+                    sp *= 0.99;
             }
-            if (ms/lc <= lu*lu)
-                break;
-            points--;
+            points = v92_cpd_points(s, scale, out->gain_q0_16, sp, out->points[0]);
+            out->selected_upstream_drn = (uint8_t)forced;
         }
     }
-    /* The fourth symbol of each trellis frame (k = 3: intervals 3, 7, 11)
-     * carries the convolutional code's parity, and 6.4.2 makes its
-     * equivalence classes modulo 2*Mi.  Give it Mi = LC/2 with LC even.
-     * Mi = LC is legal too, but slmodemd's precoder computes the k = 3 z
-     * range by truncating division and without the parity bit, so for
-     * 2Ki + parity >= LC it picks eta >= LC, reads past its table and
-     * transmits 0 -- half of every k = 3 symbol in slm-r9, recovered by
-     * deconvolving its own output.  With LC even and Mi = LC/2 its range
-     * is exactly the valid members. */
-    if (points > 2 && (points & 1))
-        points--;                             /* drop the largest point */
     /* Dropped points must not linger past LC: the frame is compared and
      * encoded whole. */
     for (int i = points; i < V92_CPD_MAX_POINTS; i++)
