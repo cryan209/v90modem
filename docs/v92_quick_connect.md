@@ -744,3 +744,25 @@ Two things to fix on our side whichever way that lands: the rate rule should pri
 the receiver actually achieves (TRN2u's sigma is measured at a different timing and with
 four-level data), and the B1u/data solve should centre its window on the response, or use more
 taps, rather than inherit the TRN2u position.
+
+#### The B1u window is not off-centre (2026-10-14, night)
+
+The first calls with the new diagnostics (`bw65`, `bw0`: `slmodemd_p4`, otherwise as `p4k65` /
+`p4k0`) rule the window out. The data-mode equaliser has **63** taps, not 31 (the engine sets
+it with `v92_p3_rx_set_equaliser_taps`), and the solved response sits in the middle of it on
+both kernels:
+
+| call | rate | TRN2u tau | largest tap | outer 4 taps (each side) | B1u residual |
+|---|---|---|---|---|---|
+| `bw65` (65 taps) | 34666, 24 levels | +0.660 -> 1 | 30 of 63 | 0.1% / 0.0% | 0.0546 LU, no lock |
+| `bw0` (default) | 32000, 20 levels | -0.339 -> 0 | 31 of 63 | 0.0% / 0.0% | 0.0216 LU, locked |
+
+The rounding error is 0.34 samples in both, so whole-sample rounding does not separate them
+either. `bw65` chose 34666 again (and its slmodemd retrained once later); `bw0` retrained once
+in Phase 4 as usual, then locked at 32000.
+
+So "the window sits off-centre" is withdrawn, and the "31-tap ideal fit" comparison above was
+against the wrong equaliser length. What is left is the rate: 34666's 23% smaller level
+spacing. Its 2.5x residual is still not explained by the window or the timing rounding; the
+next step is to replay `bw65` (`v90_engine_replay --fast`) and solve B1u offline with the known
+symbols at both rates.
