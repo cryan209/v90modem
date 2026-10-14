@@ -841,7 +841,9 @@ static void pump_until(fax_state_t *peer, int frames, const char *needle)
     if (engine_fax_test && image_rows > 80 && frames >= 30*50) frames *= 3;
     for (int i = 0; i < frames; i++) {
         pump(peer, 1);
-        fc2_poll();
+        /* pump() has just polled; the engine's second poll would only sleep. */
+        if (!(engine_fax_test && external_class21))
+            fc2_poll();
         if (dte_find(needle)
             && (!(engine_fax_test && external_class21 && !strcmp(needle,"+FPS:"))
                 || dte_find("\r\nOK\r\n")))

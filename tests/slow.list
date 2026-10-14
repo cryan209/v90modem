@@ -1,4 +1,4 @@
-# Slow tier: `make test-slow`.  Real-time engine runs that take 50-380 s each
+# Slow tier: `make test-slow`.  Real-time engine runs that take 50-140 s each
 # (they wait on the fax protocol, not on the CPU).  Measured 2026-10-10;
 # the fax matrix was cut to four rows 2026-10-15.
 

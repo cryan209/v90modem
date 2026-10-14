@@ -1178,6 +1178,18 @@ Letter. The full-height pattern includes margins, a checkerboard, horizontal
 rules and distinct row indices; every received raster row is compared. The
 short 80-row fixtures remain in the direct transport and legacy AT tests.
 
+The Class 2.1 engine rows used to take 3.5x as long as Class 1 for the same
+pages (~380 s against ~105 s at 80-sample callbacks) while using 24 s of CPU:
+the harness slept. In Class 2.1 the test is the DTE on the engine's PTY, and
+its `fc2_poll` stand-in (`test_fc2_poll` in `fax_engine_test.h`) slept 5 ms on
+every call, which `pump()` makes after every 10 or 20 ms bearer tick and
+`pump_until()` makes a second time. A tick already yields 1 ms to the PTY
+reader threads and drains both PTYs, so the sleep now applies only to a poll
+with no tick before it (the post-call drain loops), and `pump_until()` skips
+its redundant second poll on the engine path. No assertion changed; the rows
+now take ~135 s (80) and ~72 s (160), and `make test` 430 s -> 172 s wall
+(2026-10-15).
+
 The production engine exposed a Phase 2 event-lifetime defect not seen when
 starting two bare V.34 modems together: INFO0 can finish while our transmitter
 is still draining its own INFO0, and Tone A replaces the INFO0_OK event. The

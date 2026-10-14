@@ -17,6 +17,7 @@ typedef struct {
 } engine_fax_side_t;
 static engine_fax_side_t engine_sides[2];
 static int engine_running, engine_sequence;
+static int engine_just_ticked; /* a bearer tick ran since the last test_fc2_poll */
 static void engine_poll_side(int k);
 
 static void engine_io_fail(const char *operation)
@@ -256,6 +257,7 @@ static void pump_engine_fax(fax_state_t *peer)
     for (int k=0;k<2;k++) memcpy(engine_sides[k].audio,next[k],external_block);
     usleep(1000); /* PTY reader threads must run between bearer ticks. */
     for (int k=0;k<2;k++) engine_poll_side(k);
+    engine_just_ticked=1;
 }
 static void engine_reset(void)
 {
@@ -294,6 +296,15 @@ static void test_fc2_on_disconnected(void)
 }
 static void test_fc2_poll(void)
 {
-    if (engine_fax_test && external_class21) { usleep(5000); engine_poll_side(0); }
-    else fc2_poll();
+    /* Straight after a bearer tick the PTY reader threads have had that
+     * tick's yield and side 0 has just been drained, so only a poll with no
+     * tick before it waits for them in wall time.  Sleeping on every tick
+     * as well made a Class 2.1 page run 5x slower than Class 1. */
+    if (engine_fax_test && external_class21) {
+        if (!engine_just_ticked) usleep(5000);
+        engine_just_ticked = 0;
+        engine_poll_side(0);
+        return;
+    }
+    fc2_poll();
 }
