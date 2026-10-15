@@ -461,3 +461,19 @@ keep it beside their RX/TX captures. The file rotates at 2 MiB with one `.1`
 backup. For direct coupler use, choose `--line-events FILE` or the diagnostic
 `APPLE_MODEM_LINE_EVENTS` environment variable. These observations do not alter
 DSP samples or the SIP audio path.
+
+
+Apple physical dialling accepts `ATDP<number>` or `ATP` followed by `ATD`.
+`ATDT`/`ATT` select tones. Mixed P/T strings, stored numbers and redial preserve
+the selected modes. Pulse generation uses 10 pps and returns on-hook on abort;
+the exchange/ATA must accept pulse dialling. The lab verified USB hook timing
+and ATH restoration, but did not establish destination ringing with pulses.
+
+For deeper PCM measurements, direct CLI `--loopback-pattern ulaw|alaw` with
+`--rate 8000` exercises G.711 levels. `--loopback-test isolation|analog` are
+line-side diagnostics which briefly go off-hook; use a quiet established call
+for analog measurements so dial tone does not swamp the test. These modes are
+not selected by the GUI button. Score saved raw taps with
+`tools/apple_pcm_loopback_report.py <capture-directory>` (NumPy required).
+See `docs/apple_usb_modem_sm56.md` for measured results and the intermittent
+digital packet-mixing failure retained from this test series.

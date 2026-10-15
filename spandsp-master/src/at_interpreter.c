@@ -1142,6 +1142,7 @@ static const char *at_cmd_D(at_state_t *s, const char *t)
     char *u;
     char num[100 + 1];
     char dial[100 + 1];
+    char physical_plan[100 + 2];
     const char *p;
     char ch;
 
@@ -1163,6 +1164,10 @@ static const char *at_cmd_D(at_state_t *s, const char *t)
     /*endswitch*/
     /* There are a numbers of options in a dial command string.
        Many are completely irrelevant in this application. */
+    /* Preserve the initial default and in-string mode switches for a physical
+       backend; SIP continues to receive only num (V.250 6.3.1.3–4). */
+    physical_plan[0] = s->p.pulse_dial ? 'P' : 'T';
+    snprintf(physical_plan+1, sizeof(physical_plan)-1, "%s", dial);
     u = num;
     for (p = dial;  (ch = *p);  p++)
     {
@@ -1258,6 +1263,7 @@ static const char *at_cmd_D(at_state_t *s, const char *t)
         return NULL;
     /*endif*/
     snprintf(s->last_dial, sizeof(s->last_dial), "%s", dial);
+    at_modem_control(s, AT_MODEM_CONTROL_DIAL_PLAN, physical_plan);
     if (at_modem_control(s, AT_MODEM_CONTROL_CALL, num) < 0)
         return NULL;
     /*endif*/

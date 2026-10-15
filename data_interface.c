@@ -261,6 +261,8 @@ static int64_t  last_data_byte_ms = 0;
 
 /* Callbacks registered by the modem engine */
 static di_dial_cb_t   dial_cb   = NULL;
+static di_dial_plan_cb_t dial_plan_cb;
+static char physical_dial_plan[104];
 static di_answer_cb_t answer_cb = NULL;
 static di_hangup_cb_t hangup_cb = NULL;
 static void          *cb_user_data = NULL;
@@ -1417,13 +1419,17 @@ static int at_modem_control_handler(t31_state_t *t31_state, void *user_data,
     (void)user_data;
 
     switch (op) {
+    case AT_MODEM_CONTROL_DIAL_PLAN:
+        snprintf(physical_dial_plan, sizeof physical_dial_plan, "%s", num ? num : "");
+        break;
     case AT_MODEM_CONTROL_CALL:
+        if (dial_plan_cb && dial_plan_cb(physical_dial_plan, cb_user_data) < 0) return -1;
         pthread_mutex_lock(&test_mtx);
         link_next_originate = true;
         pthread_mutex_unlock(&test_mtx);
         call_pending = 1;
         call_pending_ms = now_ms();
-        if (dial_cb && num && num[0])
+        if (!dial_plan_cb && dial_cb && num && num[0])
             dial_cb(num, cb_user_data);
         break;
 
@@ -1860,6 +1866,7 @@ static int di_start(void)
         fprintf(stderr, "di_open: t31_init failed\n");
         return -1;
     }
+    physical_dial_plan[0] = 0;
     at = t31_get_at_state(t31);
     /* Audio mode, and keep generating silence when the fax transmitter is
      * idle: the RTP path needs a sample for every timeslot either way. */
@@ -1935,11 +1942,14 @@ void di_close(void)
     esc_count = 0;
 }
 
+void di_set_dial_plan_callback(di_dial_plan_cb_t callback) { dial_plan_cb = callback; }
+
 void di_set_callbacks(di_dial_cb_t   dial,
                       di_answer_cb_t answer,
                       di_hangup_cb_t hangup,
                       void *user_data)
 {
+    dial_plan_cb = NULL;
     dial_cb      = dial;
     answer_cb    = answer;
     hangup_cb    = hangup;

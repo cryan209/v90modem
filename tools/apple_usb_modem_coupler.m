@@ -3,8 +3,8 @@
  *
  * The role hsf_v90_coupler.c / hsf_fxo_probe.c play for the Conexant 0572:1300
  * (docs/hsf_analogue_v90_coupler.md).  This part seizes the line, dials an
- * extension with DTMF, waits for the far end's answer tone and then runs the
- * modem engine over the result, with the DTE on a PTY.
+ * extension with DTMF or hook pulses, waits for the far end's answer tone
+ * and then runs the modem engine over the result, with the DTE on a PTY.
  *
  * Line control is USB; audio is CoreAudio.  Both are established against the
  * device and written up in docs/apple_usb_modem_sm56.md:
@@ -114,6 +114,7 @@
 #include <spandsp.h>
 #include "apple_modem_line.h"
 #include "apple_modem_loopback.h"
+#include "apple_modem_dial.h"
 #include "test_tmp.h"
 
 #define VID 0x05ac
@@ -278,15 +279,26 @@ static int usb_open_line(void)
 static int line_hook(int off_hook)
 {
     int v = reg_read(REG_HOOK), sense;
+    int protection = off_hook ? reg_read(17) : -1;
 
-    if (v < 0) { fprintf(stderr, "cannot read register 5\n"); return -1; }
+    if (v < 0 || (off_hook && protection < 0)) { fprintf(stderr, "cannot read hook/protection register\n"); return -1; }
+    /* Si3056 §5.22: OPE must be cleared before an off-hook transition and
+     * re-enabled after 25 ms. Leaving it set trips on normal make transients. */
+    if (off_hook && (protection&8) && reg_write(17,(unsigned char)(protection&~8)) < 0) return -1;
     line_event("hook_request",@{@"off_hook":@(off_hook),@"register_before":@(v)});
     v = off_hook ? (v | REG_HOOK_BIT) : (v & ~REG_HOOK_BIT);
     /* The monitor bit is left set either way: on-hook it is what makes a
      * capture possible at all, and off-hook it costs nothing. */
     v |= REG_MONITOR_BIT;
     if (reg_write(REG_HOOK, (unsigned char)v) < 0) {
+        if (off_hook) reg_write(17,(unsigned char)protection);
         fprintf(stderr, "hook write rejected\n"); return -1;
+    }
+    if (off_hook && (protection&8)) {
+        usleep(25000);
+        if (reg_write(17,(unsigned char)protection) < 0) {
+            reg_write(REG_HOOK,(unsigned char)(v&~1)); return -1;
+        }
     }
     /* Match the original driver's overload decision while the line settles,
      * rather than leaving the loop closed through an unchecked 500 ms sleep. */
@@ -327,6 +339,8 @@ static double tx_amp = 0.15;   /* per tone; a pair lands near -16.5 dBFS */
 static double g_rate = 9600.0;   /* see the header: not 8000 */
 static double g_tx_gain = 1.0;
 static volatile int tx_dtmf_done;
+static _Atomic int dial_control_active, dial_control_tone;
+static struct apple_dial_plan physical_plan;
 
 static int dtmf_pair(char c, double *lo, double *hi)
 {
@@ -355,6 +369,7 @@ static int build_dial_script(const char *digits, double on_ms, double off_ms)
     tx_add(0, 0, 300.0);            /* let the exchange settle after seizure */
     for (const char *p = digits; *p; p++) {
         char c = *p;
+        if (c == 'P' || c == 'T' || c == 'p' || c == 't' || c == '-') continue;
         if (c == ',' || c == ' ') { tx_add(0, 0, 500.0); continue; }
         if (c >= 'a' && c <= 'd') c -= 32;
         if (dtmf_pair(c, &lo, &hi) < 0) {
@@ -759,6 +774,7 @@ static void engine_events(const me_diag_snapshot_t *d)
     }
 }
 static NSDictionary *loopback_last;
+static const char *loopback_pattern = "prbs";
 static NSDictionary *cid_json(void)
 {
     pthread_mutex_lock(&cid_lock); unsigned bad = cid_malformed; pthread_mutex_unlock(&cid_lock);
@@ -777,6 +793,14 @@ static void gui_dial(const char *number, void *user)
         gui_request = n < 0 || (size_t)n >= sizeof gui_number ? 3 : 1;
     }
     pthread_mutex_unlock(&gui_request_lock);
+}
+static int gui_dial_plan(const char *plan, void *user)
+{
+    struct apple_dial_plan checked;
+    if (apple_dial_build(&checked,plan,70,70) < 0 ||
+        (!checked.pulses && checked.count+1 > TX_MAX_SEG)) return -1;
+    gui_dial(plan,user);
+    return 0;
 }
 static void gui_answer(void *user)
 {
@@ -1331,6 +1355,7 @@ static OSStatus input_cb(void *ref, AudioUnitRenderActionFlags *flags,
         memcpy(loopback_samples[0]+loopback_count[0],in_abl->mBuffers[0].mData,n*sizeof(int16_t));
         loopback_count[0] += n;
     }
+    else if (atomic_load(&dial_control_active)) { /* capture only while dialling */ }
     else if (gui_monitor_only) cid_feed(in_abl->mBuffers[0].mData,nframes);
     else engine_feed(in_abl->mBuffers[0].mData,nframes);
     return noErr;
@@ -1356,6 +1381,22 @@ static OSStatus output_cb(void *ref, AudioUnitRenderActionFlags *flags,
         memcpy(out,loopback_samples[1]+loopback_count[1],n*sizeof(int16_t));
         memset(out+n,0,(nframes-n)*sizeof(int16_t));
         loopback_count[1] += n;
+        gui_raw_feed(1,out,nframes);
+        if (tx_tap) fwrite(out,2,nframes,tx_tap);
+        return noErr;
+    }
+    if (atomic_load(&dial_control_active)) {
+        static int previous;
+        static double phase1, phase2;
+        int digit = atomic_load(&dial_control_tone);
+        double lo = 0, hi = 0;
+        if (digit != previous) { phase1 = phase2 = 0; previous = digit; }
+        if (digit) dtmf_pair((char)digit,&lo,&hi);
+        for (UInt32 i = 0; i < nframes; i++) {
+            double v = digit ? tx_amp*(sin(phase1)+sin(phase2)) : 0;
+            out[i] = (int16_t)lrint(fmax(-0.999,fmin(0.999,v))*32767.0);
+            phase1 += 2*M_PI*lo/g_rate; phase2 += 2*M_PI*hi/g_rate;
+        }
         gui_raw_feed(1,out,nframes);
         if (tx_tap) fwrite(out,2,nframes,tx_tap);
         return noErr;
@@ -1593,12 +1634,13 @@ static void loopback_save(NSDictionary *value)
     [loopback_last release]; loopback_last = [value retain];
     line_event("loopback_result",value);
 }
-/* Si3056 §5.30: mutually exclusive digital/filter loopbacks require no
- * off-hook sequence. Save and restore every touched register on every exit.
- * No analogue/line-side loopback is attempted by this on-hook test. */
+/* Si3056 §5.30: loopbacks are mutually exclusive. Digital/startup stay
+ * on-hook; CLI isolation/analog modes seize and calibrate the line-side.
+ * Release the line and restore every touched register on every exit. */
 static int hardware_loopback(const char *mode)
 {
     @autoreleasepool {
+        int powered = !strcmp(mode,"analog") || !strcmp(mode,"isolation");
         int hook = reg_read(REG_HOOK);
         if (hook < 0 || (hook & 1) || g_engine_running || (g_gui_control &&
             ((getenv("APPLE_MODEM_RX_TAP") && *getenv("APPLE_MODEM_RX_TAP")) ||
@@ -1635,6 +1677,19 @@ static int hardware_loopback(const char *mode)
                 }
             }
             if (ready && reg_write(REG_HOOK,(unsigned char)(hook|8)) < 0) { ready = 0; reason = "Cannot enable on-hook receive path"; }
+            /* Si3056 §5.30: line-side loopbacks need off-hook plus >402.75 ms
+             * calibration before setting IDL or clearing HBE. line_hook waits
+             * 500 ms and checks the hardware overload guard throughout. */
+            if (ready && powered) {
+                if (line_hook(1) < 0) { ready = 0; reason = "Cannot power line-side test"; }
+                else {
+                    int index = !strcmp(mode,"isolation") ? 0 : 1;
+                    target[index] = index == 0 ? target[index]|2 : target[index]&~2;
+                    if (reg_write(regs[index],(unsigned char)target[index]) < 0 || reg_read(regs[index]) != target[index]) {
+                        ready = 0; reason = "Test register did not read back";
+                    }
+                }
+            }
         } else reason = "Cannot read test registers";
         if (ready) {
             loopback_capacity = (unsigned)(g_rate*4);
@@ -1645,12 +1700,24 @@ static int hardware_loopback(const char *mode)
         if (ready) {
             loopback_count[0] = loopback_count[1] = 0;
             apple_loop_pattern(loopback_samples[1],loopback_capacity,(unsigned)g_rate);
+            if (strcmp(loopback_pattern,"prbs")) {
+                uint32_t state = 0x6d56a108u;
+                for (unsigned i = 0; i < loopback_capacity; i++) {
+                    state ^= state<<13; state ^= state>>17; state ^= state<<5;
+                    int16_t value = !strcmp(loopback_pattern,"ulaw") ? ulaw_to_linear((uint8_t)state) : alaw_to_linear((uint8_t)state);
+                    loopback_samples[1][i] = i >= g_rate && i < g_rate*2.5 ? value : 0;
+                }
+            }
+            /* §5.30: analog HBE-off needs 12 dB TX headroom. Also leave
+             * this margin in IDL to distinguish filter loss from saturation. */
+            if (powered) for (unsigned i = 0; i < loopback_capacity; i++) loopback_samples[1][i] /= 4;
             loopback_audio_active = 1;
             gui_status = "On-hook hardware loopback test";
             if (audio_start() < 0) { ready = 0; reason = "CoreAudio test could not start"; }
             else {
                 uint64_t end = apple_now_ms()+3000;
                 while (!g_stop && apple_now_ms() < end) {
+                    if (powered && line_poll(0) < 0) break;
                     if (g_gui_control) gui_publish();
                     CFRunLoopRunInMode(kCFRunLoopDefaultMode,0.01,false);
                 }
@@ -1663,6 +1730,7 @@ static int hardware_loopback(const char *mode)
         }
         free(loopback_samples[0]); free(loopback_samples[1]);
         loopback_samples[0] = loopback_samples[1] = NULL;
+        if (powered && reg_write(REG_HOOK,(unsigned char)(hook&~1)) < 0) restored = 0;
         /* Restore even the register whose write/readback failed. */
         for (int i = changed-1; i >= 0; i--) {
             if (reg_write(regs[i],(unsigned char)saved[i]) < 0 || reg_read(regs[i]) != saved[i]) restored = 0;
@@ -1671,10 +1739,12 @@ static int hardware_loopback(const char *mode)
         line_poll(1);
         int passed = ready && !g_stop && restored && result.found &&
             (!strcmp(mode,"digital") ? result.mismatches == 0 :
+                powered ? fabs(result.correlation) > 0.5 :
                 result.correlation > 0.8 && result.gain > 0.5 && result.gain < 1.2);
         if (!restored) reason = "Register restoration failed";
-        else if (result.found) reason = passed ? "Known pattern returned" : "Return differs from the test pattern";
+        else if (result.found) reason = powered ? "Line-side return measured; sample errors are not a PCM BER" : passed ? "Known pattern returned" : "Return differs from the test pattern";
         loopback_save(@{@"mode":@(mode),@"passed":@(passed),@"status":passed ? @"passed" : !strcmp(reason,"Test register did not read back") ? @"unsupported" : @"failed",
+            @"pattern":@(loopback_pattern),@"line_side":@(powered),@"tx_scale":@(powered ? 0.25 : 1.0),
             @"reason":@(reason),@"restored":@(restored),@"frames_compared":@(result.frames),
             @"lag_samples":@(result.lag),@"lag_ms":@(result.lag*1000.0/g_rate),
             @"correlation":@(result.correlation),@"gain":@(result.gain),@"dc":@(result.dc),
@@ -1688,6 +1758,70 @@ static int hardware_loopback(const char *mode)
         gui_watch = !g_stop && (monitored ? gui_audio_active : 1) ? watch : 0;
         return passed ? 0 : 1;
     }
+}
+
+/* Si3056 §5.17: disable resistor recalibration during pulse makes. Preserve
+ * country settings and restore calibration/protection on every exit. §5.22
+ * re-arms OPE 25 ms after each make. Absolute deadlines keep
+ * USB and log latency out of the nominal 10 pps cadence. Never run USB from
+ * the audio callback. Abort rather than silently stretch a late pulse. */
+static int pulse_setting(unsigned char reg, int value, int mask)
+{
+    int written = reg_write(reg,(unsigned char)value), actual = reg_read(reg);
+    int accepted = written == 0 && actual >= 0 && (actual&mask) == (value&mask);
+    line_event("pulse_register",@{@"register":@(reg),@"requested":@(value),@"readback":@(actual),@"mask":@(mask),@"accepted":@(accepted)});
+    return accepted;
+}
+static int physical_dial_run(void)
+{
+    int calibration = reg_read(25), adc = reg_read(17), counter = reg_read(31);
+    int hook = reg_read(REG_HOOK), ok = 1;
+    if (calibration < 0 || adc < 0 || counter < 0 || hook < 0 || !(hook & 1)) return -1;
+    if (!pulse_setting(25,calibration|32,0x6f)) ok = 0;
+    /* §5.11/5.21: keep the existing ADC calibration during short makes and
+     * use the 8 ms off-hook counter. Ignore read-only/sticky event bits when
+     * verifying writable configuration; OPE is re-armed per §5.22. */
+    if (!pulse_setting(17,adc|32,0xec) || !pulse_setting(31,counter|96,0xef)) ok = 0;
+    line_event("pulse_dial_started",@{@"digits":@(physical_plan.digits),@"pulses":@(physical_plan.pulses),@"pps":@10,@"break_ms":@60,@"make_ms":@40});
+    uint64_t deadline = apple_now_ms()+300;
+    while (!g_stop && apple_now_ms() < deadline) usleep(1000);
+    unsigned worst_late = 0;
+    for (unsigned i = 0; ok && !g_stop && i < physical_plan.count; i++) {
+        struct apple_dial_step step = physical_plan.step[i];
+        uint64_t now = apple_now_ms();
+        unsigned late = now > deadline ? (unsigned)(now-deadline) : 0;
+        if (late > worst_late) worst_late = late;
+        if (late > 10) { ok = 0; break; }
+        atomic_store(&dial_control_tone,step.kind == APPLE_DIAL_TONE ? step.digit : 0);
+        if (step.kind == APPLE_DIAL_BREAK || step.kind == APPLE_DIAL_MAKE) {
+            int v = step.kind == APPLE_DIAL_BREAK ? hook & ~1 : hook | 1;
+            if (step.kind == APPLE_DIAL_BREAK && reg_write(17,(unsigned char)((adc|32)&~8)) < 0) { ok = 0; break; }
+            if (reg_write(REG_HOOK,(unsigned char)v) < 0) { ok = 0; break; }
+            line_event("pulse_edge",@{@"off_hook":@(!!(v&1)),@"digit":@((int)step.digit-'0'),@"step":@(i)});
+        }
+        deadline += step.ms;
+        if (step.kind == APPLE_DIAL_MAKE && (adc&8)) {
+            /* §5.22: arm OPE after the make transient, not before it. */
+            uint64_t armed = apple_now_ms()+25;
+            while (!g_stop && apple_now_ms() < armed) usleep(1000);
+            if (reg_write(17,(unsigned char)(adc|32)) < 0) ok = 0;
+        }
+        /* Readbacks/overload checks belong in the interdigit gap, not the
+         * 40 ms make. Hardware overcurrent protection remains enabled. */
+        if (step.kind == APPLE_DIAL_WAIT && step.ms == 600) {
+            if (line_poll(1) < 0 || (line_status.hook&1) != 1) ok = 0;
+        }
+        while (ok && !g_stop && apple_now_ms() < deadline) usleep(1000);
+    }
+    atomic_store(&dial_control_tone,0);
+    if (!ok || g_stop) reg_write(REG_HOOK,(unsigned char)(hook&~1));
+    int restored = 1;
+    if (!pulse_setting(31,counter,0xef)) restored = 0;
+    if (!pulse_setting(17,adc,0xec)) restored = 0;
+    if (!pulse_setting(25,calibration,0x6f)) restored = 0;
+    if (!restored) { reg_write(REG_HOOK,(unsigned char)(hook&~1)); ok = 0; }
+    line_event("pulse_dial_result",@{@"completed":@(ok && !g_stop),@"calibration_restored":@(restored),@"max_late_ms":@(worst_late)});
+    return ok && !g_stop ? 0 : -1;
 }
 
 /* Commands arrive over launcher-owned stdin. Only the control loop executes
@@ -1991,14 +2125,16 @@ static void usage(const char *a0)
         "       %s --selftest\n"
         "\n"
         "  --line-events FILE  append timestamped line/engine events as JSONL\n"
-        "  --loopback-test digital|startup  on-hook hardware transport self-test\n"
+        "  --loopback-test digital|startup|isolation|analog  hardware loopback\n"
+        "               isolation/analog seize the line briefly, then restore it\n"
+        "  --loopback-pattern prbs|ulaw|alaw  G.711 requires --rate 8000\n"
         "  --devices    read-only USB/CoreAudio device inventory as JSON\n"
         "  --diagnostic-selftest  check passive raw taps without hardware\n"
         "  --gui-replay PATH  offline raw RX replay with GUI split consoles\n"
         "  --gui-control wait on split AT/data PTYs for ATD or ATA; one call per\n"
         "               process, with passive ME_GUI_PORT telemetry\n"
         "  --control-link PATH --data-link PATH  split consoles for GUI mode\n"
-        "  --dial       seize the line, DTMF the number, wait for 2100 Hz, run\n"
+        "  --dial       seize the line, dial (P=pulse/T=tone), wait for 2100 Hz, run\n"
         "               the engine.  Goes back on-hook on exit or SIGINT\n"
         "  --answer-rings N  answer after N bursts (1 default; use 2 for inter-ring CID)\n"
         "  --answer     wait for CDC RING_DETECT on the interrupt endpoint, go\n"
@@ -2084,6 +2220,12 @@ static int gui_diagnostic_selftest(void)
             gui_ring_burst(2000,&last) || !gui_ring_burst(4000,&last)) return 1;
 
         /* Independent transport faults must not pass the PRBS comparison. */
+        struct apple_dial_plan dial;
+        if (apple_dial_build(&dial,"P10T#P2",70,70) || dial.pulses != 13 || dial.digits != 4 ||
+            dial.step[0].kind != APPLE_DIAL_BREAK || dial.step[0].ms != 60 ||
+            dial.step[1].kind != APPLE_DIAL_MAKE || dial.step[1].ms != 40 ||
+            apple_dial_build(&dial,"P*",70,70) == 0 || apple_dial_build(&dial,"P",70,70) == 0 ||
+            apple_dial_build(&dial,"T12!",70,70) == 0) return 1;
         const unsigned test_rate = 8000, test_n = 24000, delay = 123;
         int16_t *reference = calloc(test_n,sizeof(int16_t));
         int16_t *received = calloc(test_n+delay,sizeof(int16_t));
@@ -2215,6 +2357,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--pty-link") && i + 1 < argc)   g_pty_link = argv[++i];
         else if (!strcmp(argv[i], "--rx-replay") && i + 1 < argc)   g_replay_path = argv[++i];
         else if (!strcmp(argv[i], "--hook") && i + 1 < argc)        hook_arg = argv[++i];
+        else if (!strcmp(argv[i], "--loopback-pattern") && i + 1 < argc) loopback_pattern = argv[++i];
         else if (!strcmp(argv[i], "--rate") && i + 1 < argc)        g_rate = atof(argv[++i]);
         else if (!strcmp(argv[i], "--hold") && i + 1 < argc)        hold = atof(argv[++i]);
         else if (!strcmp(argv[i], "--selftest"))                    return selftest();
@@ -2229,7 +2372,9 @@ int main(int argc, char **argv)
     if (cid_replay_path) return cid_replay_file(cid_replay_path);
     if (loopback_mode) {
         signal(SIGINT,on_signal); signal(SIGTERM,on_signal);
-        if (strcmp(loopback_mode,"digital") && strcmp(loopback_mode,"startup")) { fprintf(stderr,"loopback must be digital or startup\n"); return 2; }
+        if (strcmp(loopback_mode,"digital") && strcmp(loopback_mode,"startup") && strcmp(loopback_mode,"isolation") && strcmp(loopback_mode,"analog")) { fprintf(stderr,"loopback must be digital, startup, isolation or analog\n"); return 2; }
+        if (strcmp(loopback_pattern,"prbs") && strcmp(loopback_pattern,"ulaw") && strcmp(loopback_pattern,"alaw")) { fprintf(stderr,"loopback pattern must be prbs, ulaw or alaw\n"); return 2; }
+        if (strcmp(loopback_pattern,"prbs") && g_rate != 8000) { fprintf(stderr,"G.711 symbol testing requires --rate 8000\n"); return 2; }
         if (g_gui_control || g_dial || g_answer_mode || g_replay_path || hook_arg) { fprintf(stderr,"loopback excludes calls and replay\n"); return 2; }
         if (usb_open_line() < 0) return 1;
         int result = hardware_loopback(loopback_mode);
@@ -2258,6 +2403,7 @@ int main(int argc, char **argv)
         setenv("ME_V90_ROLE","analogue",0);
         me_set_verbose(1); me_init(); me_set_law(ME_LAW_ULAW);
         di_set_callbacks(gui_dial,gui_answer,gui_hangup,NULL);
+        di_set_dial_plan_callback(gui_dial_plan);
         if (di_open_split(g_control_link,g_data_link) < 0) { me_destroy(); return 1; }
         g_di_open = 1;
         di_set_auto_answer(0);
@@ -2346,11 +2492,19 @@ int main(int argc, char **argv)
     signal(SIGTERM, on_signal);
 
     if (usb_open_line() < 0) return 1;
-    if (g_dial && build_dial_script(g_dial, on_ms, off_ms) < 0) return 2;
+    if (g_dial) {
+        if (apple_dial_build(&physical_plan,g_dial,(unsigned)on_ms,(unsigned)off_ms) < 0) {
+            fprintf(stderr,"Invalid physical dial plan; line not seized\n"); return 2;
+        }
+        if (!physical_plan.pulses && (physical_plan.count+1 > TX_MAX_SEG ||
+            build_dial_script(g_dial,on_ms,off_ms) < 0)) return 2;
+        atomic_store(&dial_control_active,physical_plan.pulses != 0);
+    }
 
     if (!g_gui_control) {
         me_set_verbose(1); me_init(); me_set_law(ME_LAW_ULAW);
         di_set_callbacks(gui_dial,gui_answer,gui_hangup,NULL);
+        di_set_dial_plan_callback(gui_dial_plan);
         if ((g_control_link ? di_open_split(g_control_link,g_data_link) :
              g_pty_link ? di_open(g_pty_link) : 0) < 0) {
             fprintf(stderr,"failed to open PTY\n"); me_destroy(); return 1;
@@ -2395,8 +2549,18 @@ int main(int argc, char **argv)
         return 1;
     }
     gui_audio_active = 1;
+    if (physical_plan.pulses) {
+        if (physical_dial_run() < 0) {
+            line_hook(0); gui_audio_stop(); close_dte(); me_destroy();
+            libusb_close(usb); libusb_exit(NULL); return 1;
+        }
+        atomic_store(&dial_control_active,0);
+        tx_dtmf_done = 1;
+    }
     if (g_answer_mode)
         fprintf(stderr, "[APPLE] answered; engine runs from the first block\n");
+    else if (physical_plan.pulses)
+        fprintf(stderr,"[APPLE] pulse dial sequence completed; waiting for answer\n");
     else
         fprintf(stderr, "[APPLE] dialling %s, %d DTMF segments at %.0f/%.0f ms\n",
                 g_dial, tx_nseg, on_ms, off_ms);
@@ -2422,7 +2586,7 @@ int main(int argc, char **argv)
     close_dte();
     me_destroy();
     taps_close();
-    fprintf(stderr, "[APPLE] render errors %d, engine %s, DTMF %s\n",
+    fprintf(stderr, "[APPLE] render errors %d, engine %s, dial sequence %s\n",
             render_errors, g_engine_running ? "ran" : "never started",
             tx_dtmf_done ? "completed" : "CUT SHORT");
     fprintf(stderr, "[APPLE] transmit ring underruns while the engine ran: %lu runs, "

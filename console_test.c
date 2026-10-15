@@ -1363,8 +1363,45 @@ static void test_profile(void)
     unlink(jfile);
 }
 
+static int cb_physical_plan(const char *plan, void *u)
+{
+    cb_dial(plan,u);
+    return strchr(plan,'!') ? -1 : 0;
+}
+static void test_physical_dial_plan(void)
+{
+    char buf[4096];
+    const char *link = test_tmp("console_physical_dial");
+    if (di_open(link) < 0) { failures++; return; }
+    di_set_callbacks(cb_dial,cb_answer,cb_hangup,NULL);
+    di_set_dial_plan_callback(cb_physical_plan);
+    int dte = open_dte(link);
+    if (dte < 0) { failures++; di_close(); return; }
+    expect(dte,"ATE0","OK");
+    expect(dte,"ATP","OK");
+    expect(dte,"ATD120",""); usleep(100000);
+    check(!strcmp(last_number,"P120"),"ATP survives into physical dial plan");
+    di_on_disconnected(); collect(dte,buf,sizeof buf,150);
+    expect(dte,"ATDT12P30T#",""); usleep(100000);
+    check(!strcmp(last_number,"PT12P30T#"),"mixed T/P switches survive in order");
+    di_on_disconnected(); collect(dte,buf,sizeof buf,150);
+    expect(dte,"AT&Z2=P42T#","OK");
+    expect(dte,"ATDS2",""); usleep(100000);
+    check(!strcmp(last_number,"TP42T#"),"stored physical dial plan expands before dispatch");
+    di_on_disconnected(); collect(dte,buf,sizeof buf,150);
+    expect(dte,"ATDL",""); usleep(100000);
+    check(!strcmp(last_number,"TP42T#"),"redial retains mixed physical dial plan");
+    di_on_disconnected(); collect(dte,buf,sizeof buf,150);
+    expect(dte,"ATD1!2","ERROR");
+    di_set_dial_plan_callback(NULL);
+    expect(dte,"ATDT555",""); usleep(100000);
+    check(!strcmp(last_number,"555"),"legacy callback still receives normalized number");
+    di_on_disconnected(); close(dte); di_close();
+}
+
 int main(void)
 {
+    test_physical_dial_plan();
     test_classic();
     test_split();
     test_v250_parameters();

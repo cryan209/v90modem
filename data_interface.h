@@ -54,6 +54,12 @@ void di_set_callbacks(di_dial_cb_t  dial_cb,
                       di_hangup_cb_t hangup_cb,
                       void *user_data);
 
+/* Optional physical dial callback; initial P/T plus expanded dial string.
+ * V.250 §§6.3.1.3–4. Return <0 to reject before CALL becomes pending.
+ * Without it the existing dial callback receives the normalized number. */
+typedef int (*di_dial_plan_cb_t)(const char *plan, void *user_data);
+void di_set_dial_plan_callback(di_dial_plan_cb_t callback);
+
 /*
  * AT+MS (V.250 6.4.1) modulation selection.  The engine registers these in
  * me_init(); with none registered, +MS answers ERROR.  set takes an engine

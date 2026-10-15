@@ -2537,10 +2537,9 @@ registers without claiming a pass.
 
 The compatible DAA supports host-controlled pulse dialling at nominal 10 pulses
 per second (Si3056 §5.17), using hook switching and the prescribed calibration
-handling. The current coupler generates DTMF. The AT parser accepts P/T dial
-modifiers but does not convey that choice to this backend, so `ATDP` does not
-yet generate pulse dialling. No live pulse-dial interoperability is claimed;
-the attached exchange/ATA must also accept pulses.
+handling. At the initial diagnostic commit the coupler generated only DTMF, even though
+the parser accepted P/T modifiers. The implementation below supersedes that
+limitation; the attached exchange/ATA must also accept pulses.
 
 Manufacturer reference: [Si3056 data sheet, §§5.17 and 5.30](https://www.skyworksinc.com/-/media/Skyworks/SL/documents/public/data-sheets/si3056.pdf).
 
@@ -2551,3 +2550,99 @@ engine for one second and returned on-hook; no overload event occurred.
 Evidence and a reproduction script are in
 `artifacts/apple-events-answer-20261016/`. This remains a monitoring/answer
 transition check rather than a trained modem connection.
+
+
+## Physical pulse dialling and PCM loopback measurements (2026-10-16)
+
+### Physical dial plans
+
+`ATDP6005`, `ATP` followed by `ATD6005`, stored numbers and `ATDL` now preserve
+the initial pulse/tone default and every in-string P/T switch. An optional
+physical-plan callback leaves the SIP callback's normalized number unchanged.
+Unsupported physical modifiers are rejected before seizure rather than silently
+removed. The Apple backend validates the complete plan, then performs USB hook
+writes on its control thread, never an audio callback. CLI equivalent:
+`--dial P6005`; an initial T (or no modifier) selects the normal DTMF path.
+Mixed pulse/tone plans are also executed in order. Pulse-only transmission is
+silent; mixed plans render DTMF only during their tone steps.
+
+V.250 §§6.3.1.3–4 and 6.3.3–4 define the mode selection. The host schedule uses
+10 pps, 60 ms break / 40 ms make, 600 ms additional interdigit pause; zero is
+10 pulses. Si3056 §5.17 requires RCALD during makes. ADC calibration is held
+and the 8 ms off-hook counter is selected (§§5.11/5.21), then all three settings
+are restored and checked on success, error, or ATH/SIGINT. Configuration
+readbacks exclude read-only/sticky status bits. A late schedule aborts the
+attempt instead of stretching subsequent pulses.
+
+An important correction to seizure control came from live testing: §5.22
+requires OPE to be cleared **before** an off-hook transition, then re-armed
+25 ms afterwards. Leaving it continuously enabled produced OPD during normal
+make transients. Normal seizure and pulse makes now follow this sequence;
+current saturation and USB overload notifications still stop the attempt.
+The early failed attempts remain in `artifacts/apple-pulse-dial-20261016/`.
+
+`artifacts/apple-pulse-dial-20261016-r4/` records a complete CLI `P6005` attempt:
+31 pulses / 62 hook edges, observed break intervals 58–61 ms, intra-digit make
+intervals 39–42 ms, maximum scheduler lateness 1 ms, configuration restored.
+The destination did not ring. This verifies host-command timing, **not** physical
+loop-current pulse shape or exchange acceptance. The HT802 has a separate
+Enable Pulse Dialing option, default No, and a pulse-standard selector; the
+current ATA setting has not been inspected or changed. Manufacturer reference:
+[HT80x administration guide](https://documentation.grandstream.com/knowledge-base/ht80x-administration-guide/).
+
+`artifacts/apple-atdp-20261016/` verifies the real split PTY's `ATDP6005`
+dispatch: the complete attempt produced 62 edges and restored settings; an ATH
+after the first edge stopped the attempt and restored settings. Both returned
+on-hook. `console_test` covers default ATP, mixed P/T, stored expansion, redial,
+backend rejection and unchanged legacy callback numbers. The diagnostic
+self-test covers zero's ten pulses and invalid physical dial plans.
+
+### What survives the hardware loopback
+
+The CLI now accepts `--loopback-test digital|startup|isolation|analog` with
+`--loopback-pattern prbs|ulaw|alaw`. G.711 tests require `--rate 8000`: the
+pattern is independent G.711 §3 decoded levels at 8000 symbols/s, including
+both signs and the full alphabet. Mu-law's two zero codes represent one level,
+so it has 255 distinct linear levels; A-law has 256. This is an uncoded full
+alphabet PCM probe, **not** a V.90 negotiation or an achievable-rate claim.
+
+The GUI button remains an on-hook digital test. CLI isolation/analog tests
+briefly seize the line, run the test, release the line, and restore the saved
+registers. Si3056 §5.30 defines IDL (register 1 bit 1) and analog HBE-off
+(register 2 bit 1); the latter needs 12 dB TX headroom. Both line-side modes
+use quarter-amplitude samples to leave headroom. A correlated line-side
+return only establishes the path: its raw sample bit differences are not a
+modulation BER. The separate report performs symbol decisions.
+
+`tools/apple_pcm_loopback_report.py` trains a fixed 65-tap linear equalizer
+on 4096 samples and scores 6544 separate held-out samples. No held-out targets
+fit gain, DC or equalizer taps. It reports nearest G.711 level decisions,
+canonicalizing mu-law zero, residual RMS/SNR and codeword bit errors. Synthetic
+checks recover a delayed half-gain signal with a DC offset exactly and reject
+an independent-noise control. It also reports candidate transport delays from
+three-sample pattern matches, useful for spotting packet mixing.
+
+| path | modem 0:13 | modem 0:14 | evidence |
+|---|---|---|---|
+| digital, A-law and mu-law | 8000/8000 exact samples in each run | same on repeat | `artifacts/apple-pcm-loopback-20261016-r2/` |
+| isolation, mu-law, quarter TX | 21.48 dB held-out SNR; 88.13% symbol errors | 21.48 dB; 88.33% | same |
+| analog, quiet call, quarter TX | 16.59 dB; 92.33% symbol errors | 16.66 dB; 92.25% | `artifacts/apple-pcm-loopback-20261016-quiet/` |
+
+The isolation return includes about 3.3–3.5k counts of DC and filter ISI; even
+after this equalizer it does not preserve arbitrary full-alphabet 64 kbit/s
+PCM. The analog result includes the actual line-side path. Initial analog
+attempts simply seized the FXS port, so its loud dial tone swamped the probe;
+those are not codec-fidelity measurements. The quiet runs used bounded PBX
+Wait calls from 6002 to 6004/6005, answered by the loopback test. All tests
+restored registers and returned on-hook. These equalizer-specific error rates
+are not upper bounds on what a trained receiver or reduced constellation can
+recover; V.90 §5 uses a different end-to-end path and negotiated constellations.
+
+One initial **digital A-law** run on `0:14` was a real failure: 2992/8000 sample
+errors. Its error pattern repeats every eight samples: five samples have lag
+1113, three have lag 1193 (an extra 80 samples / 10 ms). This is packet/sample
+mixing rather than a scalar gain or law conversion. The raw taps are retained
+under `artifacts/apple-pcm-loopback-20261016/0-14-digital-alaw/`; all four digital
+law/device combinations passed on the repeat. The intermittent fault remains
+unresolved; an exact self-test failure must not be hidden by an equalizer or
+by dropping/splicing samples.

@@ -131,7 +131,10 @@ enum at_modem_control_operation_e
         configuration as profile n.  "Y<n>": restore profile n at power-on.
         "Z<n>": Z has just restored the factory values; put back what &Wn
         stored, if anything.  A negative return is ERROR. */
-    AT_MODEM_CONTROL_PROFILE
+    AT_MODEM_CONTROL_PROFILE,
+    /* Optional physical dial plan: initial P/T followed by expanded dial string.
+       V.250 6.3.1.3–4. CALL still receives the normalized number. */
+    AT_MODEM_CONTROL_DIAL_PLAN
 };
 
 enum
