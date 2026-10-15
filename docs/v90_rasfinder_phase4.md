@@ -1,5 +1,67 @@
 # RasFinder Phase 4: CRC-anchored measurements, 2026-09-28
 
+## 2026-10-16: B1 is acquired without a template; the upstream now dies ~0.8 s later
+
+**Why B1 never matched: the MT5634 does not reset its scrambler before B1.**
+10.1.3.1/V.34 zeroes the scrambler, trellis encoder, differential encoder and
+precoder before B1, and every template we build assumes it.  On
+`v90-6313-cap9600` (upstream 9600, 12-point constellation, decisions clean at
+0.04 from the lattice) the symbols after E are V.34 9600 data on our own
+mapper's constellation, and every later mapping frame of B1 is reproduced
+*exactly* by our mapper from scrambler state `0x18e679` -- which neither a
+zero reset nor ones run on from E's line bits reaches.  The B1 symbols'
+amplitude sequence is identical across calls on different lines, so the state
+is something fixed in the modem, but nothing on the wire says what.  With the
+scrambler wrong, every template is uncorrelated whatever the trellis state, so
+the search sat at the 42-parameters-on-128-symbols noise floor (17-27%).  It is
+the same thing v34rx_data.c already records for this peer's B1 after a V.34
+renegotiation (0.19-0.25 at every state).
+
+Two more facts, from the same calls: the clock offset to our bearer is about
+10 ppm, and **B1 starts nine symbols after the last 4-point symbol** of CP'/E
+on every call measured (6311-1, 6313-1, diag-6313-21600, and cap9600 to the
+mapping frame) -- one transition symbol and eight of near-silence.  The
+silence is not always quiet enough to find by energy (diag-6313-21600: powers
+0.02-0.2 of the signal), and a B1 start one symbol out decodes clean symbols
+(0.02 from the lattice) to white bits, which the frame-phase sweep cannot
+repair because it only moves whole mapping frames.
+
+**Fix (v34rx.c, `v90_t3_blind_acquire()`):** when no template fits, train the
+T/3 filter on the 4-point CP'/E before E (CMA, decision-directed LMS, then
+least squares on the decisions: 35-37 dB on every call), find its last clean
+symbol, take B1 nine symbols later, scale to the constellation using the
+data's own measured power, and start the Viterbi decoder with no state
+preference.  B1 is only needed to train; the scrambler self-synchronises and
+the quadrant is differential.  Only tried after the template search fails, so
+peers that do reset (slmodemd) are unaffected; `ME_V90_T3_NO_BLIND=1` turns it
+off.  `tests/fast.list` replays `artifacts/rf-mt5634-v90-b1` (the cap9600
+call) and requires B1 to decode as 100% ones.
+
+Replays: 6311-1/6312-1/6313-1 at 31200 decode B1 at 91-99% ones; cap9600
+decodes at 0.002 from the lattice, 100% ones, and V.42 detection succeeds.
+Live from vmhost CT 117 (`blind-6311-1` at 31200, `blind-6312-21600`,
+`final-6311-21600`, `bf-6312-21600`, `v14-6313-21600`): every call acquires,
+B1 decodes as ones, and the V.42 detection phase succeeds on our side.
+
+**The new blocker: about 0.8 s after B1 the upstream eye closes for good, on
+every call, at 31200 and at 21600** (0.02 from the lattice to 0.66 within
+about 20 symbols at 21600; the peer retrains ~12 s later; LAPM never comes
+up).  It is in the signal, not the receiver: a fully frozen receiver, and an
+offline least-squares filter on the receiver's raw T/3 samples
+(`diag-6313-21600/raw.bin`), both see it.  Ruled out on those samples: a
+timing slip or drift (the 3200 Hz cyclostationary line holds phase across
+it), gain (power 92.2 -> 92.4, gain scan 0.3-3 x), rotation, the V.34
+non-linear encoder (9.7, both Theta), precoding (3- and 6-tap DD fits find
+h ~ 0), a 4-point retrain signal, RTP loss (0 lost packets), and our V.42:
+with `ME_DATA_FRAMING=v14` (we send only ones) it happens the same, at the
+moment the peer's own DTE data starts (V.14 framing appears in the same
+window).  Our transmit leaves a 60-130 ms hole in the RTP stream when the B1
+search runs in the media thread (`rtp-tx.csv`), but a 43 ms one makes no
+difference to when the eye closes.  Next: decide whether it is the peer or
+the AudioCodes, e.g. by comparing what the gateway passes against the
+peer's line with the analogue-side capture, and look at the error vector
+around the event on a 9600 call (which survives it: 0.008 -> 0.07).
+
 ## 2026-10-15: Phase 4 passes; the upstream B1 is now the blocker
 
 The RasFinder is back on three AudioCodes MP-114 lines, ext 6311/6312/6313

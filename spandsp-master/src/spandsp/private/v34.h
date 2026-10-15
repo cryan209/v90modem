@@ -1616,6 +1616,9 @@ typedef struct
     int v90_t3_sweep_best_pos;
     int v90_t3_sweep_episodes;
     int v90_t3_acq_retries;
+    /*! Whether the 4-point-trained acquisition (no B1 template) has been
+        tried on this call. */
+    bool v90_t3_blind_tried;
     int64_t v90_t3_acq_retry_at;
     /*! ME_V90_UPSTREAM_SYM_DUMP: the equalized data-era symbols, as text. */
     FILE *v90_t3_sym_dump;

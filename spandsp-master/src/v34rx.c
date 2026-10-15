@@ -12961,6 +12961,368 @@ static void v90_t3_acq_retry_or_abandon(v34_rx_state_t *s, const char *why)
 }
 /*- End of function --------------------------------------------------------*/
 
+/* The fractionally spaced filter's output at raw index c, through taps w. */
+static complexf_t v90_t3_fse_at(const v34_rx_state_t *s,
+                                const complexf_t w[V34_V90_T3_FSE_TAPS],
+                                int64_t c)
+{
+    int pre = V34_V90_T3_FSE_TAPS/2;
+    complexf_t y = {0.0f, 0.0f};
+
+    for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+    {
+        complexf_t x = v90_t3_raw_get(s, c - pre + tap);
+        complexf_t z = complex_mulf(&w[tap], &x);
+
+        y = complex_addf(&y, &z);
+    }
+    return y;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Squared distance of y from the nearest point of the unit-power 4-point
+   constellation (10.1.3.3/V.34's points, on the diagonals). */
+static float v90_t3_4point_err(complexf_t y)
+{
+    float er = y.re - ((y.re >= 0.0f) ? 0.70710678f : -0.70710678f);
+    float ei = y.im - ((y.im >= 0.0f) ? 0.70710678f : -0.70710678f);
+
+    return er*er + ei*ei;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Train the filter on a stretch of the 4-point signal, symbols at
+   base + phase + 3n up to end: blind CMA, then decision-directed LMS, at each
+   of the three sampling phases, and finally least squares on the decisions
+   of the best.  Returns the decision error (unit-power points), or a large
+   value if the stretch is too short. */
+static float v90_t3_train_4point(v34_rx_state_t *s,
+                                 int64_t base,
+                                 int64_t end,
+                                 complexf_t w_out[V34_V90_T3_FSE_TAPS],
+                                 int *phase_out)
+{
+    enum { N = 2*V34_V90_T3_FSE_TAPS };
+    int pre = V34_V90_T3_FSE_TAPS/2;
+    double norm = 0.0;
+    float best_err = 1.0e9f;
+    int best_phase = -1;
+    complexf_t w[V34_V90_T3_FSE_TAPS];
+
+    if ((end - base)/3 < 200)
+        return 1.0e9f;
+    for (int64_t i = base;  i < end;  i++)
+    {
+        complexf_t x = v90_t3_raw_get(s, i);
+
+        norm += x.re*x.re + x.im*x.im;
+    }
+    norm = sqrt(norm/(double) (end - base));
+    if (norm <= 0.0)
+        return 1.0e9f;
+    for (int phase = 0;  phase < 3;  phase++)
+    {
+        float err = 0.0f;
+        int counted = 0;
+
+        memset(w, 0, sizeof(w));
+        w[pre].re = (float) (1.0/norm);
+        for (int pass = 0;  pass < 6;  pass++)
+        {
+            for (int64_t c = base + phase;  c + 3 < end;  c += 3)
+            {
+                complexf_t x[V34_V90_T3_FSE_TAPS];
+                complexf_t y = {0.0f, 0.0f};
+                complexf_t e;
+                double energy = 0.0;
+                float mu;
+
+                for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+                {
+                    complexf_t z;
+
+                    x[tap] = v90_t3_raw_get(s, c - pre + tap);
+                    z = complex_mulf(&w[tap], &x[tap]);
+                    y = complex_addf(&y, &z);
+                    energy += x[tap].re*x[tap].re + x[tap].im*x[tap].im;
+                }
+                if (pass < 3)
+                {
+                    float r = y.re*y.re + y.im*y.im - 1.0f;
+
+                    e.re = y.re*r;
+                    e.im = y.im*r;
+                }
+                else
+                {
+                    e.re = y.re - ((y.re >= 0.0f) ? 0.70710678f : -0.70710678f);
+                    e.im = y.im - ((y.im >= 0.0f) ? 0.70710678f : -0.70710678f);
+                    if (pass == 5)
+                    {
+                        err += e.re*e.re + e.im*e.im;
+                        counted++;
+                    }
+                }
+                mu = (energy > 0.0) ? (float) (0.04/energy) : 0.0f;
+                for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+                {
+                    w[tap].re -= mu*(e.re*x[tap].re + e.im*x[tap].im);
+                    w[tap].im -= mu*(e.im*x[tap].re - e.re*x[tap].im);
+                }
+            }
+        }
+        if (counted > 0)
+            err /= counted;
+        if (err < best_err)
+        {
+            best_err = err;
+            best_phase = phase;
+            memcpy(w_out, w, sizeof(w));
+        }
+    }
+    if (best_phase < 0)
+        return 1.0e9f;
+    /* The LMS taps only reach about 28 dB; least squares on the same
+       decisions reaches about 36 dB on this channel, which is the difference
+       between a 31200 bit/s lattice the decision-directed loop can hold and
+       one it cannot. */
+    {
+        double matrix[N*N];
+        double rhs[N];
+        double solution[N];
+        double trace = 0.0;
+        double err = 0.0;
+        int counted = 0;
+
+        memset(matrix, 0, sizeof(matrix));
+        memset(rhs, 0, sizeof(rhs));
+        for (int64_t c = base + best_phase;  c + 3 < end;  c += 3)
+        {
+            double fr[N];
+            double fi[N];
+            complexf_t y = v90_t3_fse_at(s, w_out, c);
+            double dr = (y.re >= 0.0f) ? 0.70710678 : -0.70710678;
+            double di = (y.im >= 0.0f) ? 0.70710678 : -0.70710678;
+
+            for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+            {
+                complexf_t x = v90_t3_raw_get(s, c - pre + tap);
+
+                fr[2*tap] = x.re;
+                fr[2*tap + 1] = -x.im;
+                fi[2*tap] = x.im;
+                fi[2*tap + 1] = x.re;
+            }
+            for (int row = 0;  row < N;  row++)
+            {
+                rhs[row] += fr[row]*dr + fi[row]*di;
+                for (int column = 0;  column < N;  column++)
+                    matrix[row*N + column] += fr[row]*fr[column] + fi[row]*fi[column];
+            }
+        }
+        for (int row = 0;  row < N;  row++)
+            trace += matrix[row*N + row];
+        for (int row = 0;  row < N;  row++)
+            matrix[row*N + row] += trace*1e-7;
+        if (v90_t3_solve(matrix, rhs, solution, N))
+        {
+            complexf_t w_ls[V34_V90_T3_FSE_TAPS];
+
+            for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+            {
+                w_ls[tap].re = (float) solution[2*tap];
+                w_ls[tap].im = (float) solution[2*tap + 1];
+            }
+            for (int64_t c = base + best_phase;  c + 3 < end;  c += 3)
+            {
+                err += v90_t3_4point_err(v90_t3_fse_at(s, w_ls, c));
+                counted++;
+            }
+            if (counted > 0  &&  err/counted < best_err)
+            {
+                best_err = (float) (err/counted);
+                memcpy(w_out, w_ls, sizeof(w_ls));
+            }
+        }
+    }
+    *phase_out = best_phase;
+    return best_err;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* The last symbol, on the grid c0 + 3n, of the 4-point signal through taps
+   w: the one before a run of three off it (error above threshold), after at
+   least a hundred on it.  -1 if the scan never leaves it. */
+static int64_t v90_t3_4point_end(const v34_rx_state_t *s,
+                                 const complexf_t w[V34_V90_T3_FSE_TAPS],
+                                 int64_t c0,
+                                 int64_t limit,
+                                 float threshold)
+{
+    int good = 0;
+    int bad = 0;
+
+    for (int64_t c = c0;  c < limit;  c += 3)
+    {
+        if (v90_t3_4point_err(v90_t3_fse_at(s, w, c)) > threshold)
+        {
+            if (++bad >= 3  &&  good >= 100)
+                return c - 3*bad;
+        }
+        else
+        {
+            good += 1 + bad;
+            bad = 0;
+        }
+    }
+    return -1;
+}
+/*- End of function --------------------------------------------------------*/
+
+/* Acquire the upstream without a B1 template, from the 4-point CP/E signal
+   that precedes it.
+
+   10.1.3.1/V.34 resets the scrambler, trellis encoder, differential encoder
+   and precoder before B1, and the template is built from that reset state.
+   The RasFinder's MT5634SMI does not reset its scrambler (nor, as plain V.34
+   already showed, its trellis encoder) in V.90 mode.  Its B1 is scrambled
+   ones on the selected constellation -- at 9600 bit/s
+   (artifacts/rf-pve-20261015/v90-6313-cap9600) every mapping frame of it is
+   reproduced exactly by our own mapper from the scrambler state 0x18e679,
+   which no reset reaches -- so no template fits it, and the search scored
+   17-27%, the noise floor of 42 parameters fitted to 128 symbols.
+
+   B1 is not needed to decode: the scrambler is self-synchronising and the
+   quadrant is differentially coded.  It is needed only to train, and the
+   CP'/E the analogue modem sends just before it is a 4-point signal on the
+   same carrier, symbol clock and channel (8.5.2/V.90, 10.1.3.2/V.34) whose
+   decisions are unambiguous.  So train the same filter on that, find where
+   the 4-point signal stops, and start data there.  Returns the raw index of
+   the first B1 symbol, or -1. */
+static int64_t v90_t3_blind_acquire(v34_rx_state_t *s,
+                                    complexf_t coeff[V34_V90_T3_FSE_TAPS])
+{
+    enum { TRAIN = 600, LOOKAHEAD = 96 };
+    int pre = V34_V90_T3_FSE_TAPS/2;
+    int64_t oldest = s->v90_t3_raw_count - V34_V90_T3_RAW_SIZE + pre + 4;
+    int64_t limit = s->v90_t3_e_anchor + 3*LOOKAHEAD;
+    int64_t base;
+    int64_t end;
+    int64_t qend;
+    int64_t first = -1;
+    complexf_t w[V34_V90_T3_FSE_TAPS];
+    int phase = 0;
+    float err;
+    double target_power = 0.0;
+    float scale;
+
+    if (oldest < pre + 4)
+        oldest = pre + 4;
+    /* E is recognised a few dozen symbols after the 4-point signal ends, by
+       an amount that varies; start well clear of it, find where the signal
+       really ends, and train again right up to that point. */
+    end = s->v90_t3_e_anchor - 3*60;
+    base = (end - 3*TRAIN > oldest)  ?  end - 3*TRAIN  :  oldest;
+    err = v90_t3_train_4point(s, base, end, w, &phase);
+    if (err > 0.05f)
+        return -1;
+    qend = v90_t3_4point_end(s, w, base + phase, limit, 0.25f);
+    if (qend < 0)
+        return -1;
+    end = qend - 3*4;
+    base = (end - 3*TRAIN > oldest)  ?  end - 3*TRAIN  :  oldest;
+    err = v90_t3_train_4point(s, base, end, w, &phase);
+    if (err > 0.01f)
+    {
+        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                 "Rx - V.90 T/3 4-point training failed: decision error "
+                 "%.4f\n", err);
+        return -1;
+    }
+    /* Now the last CLEAN 4-point symbol: the one after it is already part
+       of the transition (measured 0.05 against the 0.0003 of the signal on
+       one call, 0.5 on others). */
+    {
+        float threshold = 20.0f*err;
+
+        if (threshold < 0.02f)
+            threshold = 0.02f;
+        if (threshold > 0.25f)
+            threshold = 0.25f;
+        qend = v90_t3_4point_end(s, w, base + phase, limit, threshold);
+    }
+    if (qend < 0)
+        return -1;
+    /* B1 starts nine symbols after it, on every call measured
+       (artifacts/rf-pve-20261015: v90-6311-1, v90-6313-1, diag-6313-21600,
+       and v90-6313-cap9600 where B1 decodes to the mapping frame): one
+       transition symbol and eight symbols of near-silence -- the same eight
+       the plain V.34 B1 search finds this peer puts between E and B1.  Where
+       the silence is not quite silent, looking for it finds the wrong
+       symbol, and B1 must be found to the symbol: the frame-phase search
+       downstream only relabels whole mapping frames. */
+    first = qend + 3*9;
+    V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+             "Rx - V.90 T/3 4-point training: %d symbols, decision error "
+             "%.5f (%.1f dB); the 4-point signal ends at %lld, B1 taken to "
+             "start at %lld (%+lld from E)\n",
+             (int) ((end - base)/3), err, -10.0*log10(err + 1e-12),
+             (long long) qend, (long long) first,
+             (long long) (first - s->v90_t3_e_anchor));
+    /* The constellation's own mean power -- measured over the mapper's
+       output when the template was built -- not B1's 128 symbols. */
+    if (s->v90_t3_cma_n > 0  &&  s->v90_t3_cma_p2 > 0.0)
+    {
+        target_power = s->v90_t3_cma_p2/s->v90_t3_cma_n;
+    }
+    else if (s->v90_t3_b1_symbols > 0)
+    {
+        for (int n = 0;  n < s->v90_t3_b1_symbols;  n++)
+        {
+            target_power += s->v90_t3_b1[n].re*s->v90_t3_b1[n].re
+                          + s->v90_t3_b1[n].im*s->v90_t3_b1[n].im;
+        }
+        target_power /= s->v90_t3_b1_symbols;
+    }
+    if (target_power <= 0.0)
+        return -1;
+    /* Training and data are sent at the same power to within a few per
+       cent: enough at 9600 bit/s, not for the outer points of a 31200
+       constellation.  Measure the data's own power after B1 starts. 4-point
+       points lie on the data lattice's diagonals, so only a scale separates
+       the two. */
+    {
+        double p = 0.0;
+        int counted = 0;
+
+        for (int64_t c = first;
+             counted < 1024  &&  c + pre + 1 < s->v90_t3_raw_count;
+             c += 3)
+        {
+            complexf_t y = v90_t3_fse_at(s, w, c);
+
+            p += y.re*y.re + y.im*y.im;
+            counted++;
+        }
+        if (counted < 128  ||  p <= 0.0)
+            return -1;
+        p /= counted;
+        V34_RX_LOG(s->logging, SPAN_LOG_WARNING,
+                 "Rx - V.90 T/3 data power %.3f of the 4-point signal's "
+                 "over %d symbols; constellation power %.1f\n",
+                 p, counted, target_power);
+        target_power /= p;
+    }
+    scale = (float) sqrt(target_power);
+    for (int tap = 0;  tap < V34_V90_T3_FSE_TAPS;  tap++)
+    {
+        coeff[tap].re = w[tap].re*scale;
+        coeff[tap].im = w[tap].im*scale;
+    }
+    return first;
+}
+/*- End of function --------------------------------------------------------*/
+
 static void v90_t3_try_acquire(v34_rx_state_t *s)
 {
     /* The E handover is only a coarse anchor: it is detected on the CP bit
@@ -12985,6 +13347,9 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     int best_tap = 0;
     int best_trellis = -1;
     bool best_expanded = s->parms.expanded_shaping;
+    bool blind = false;
+    int mp_tap = v34_expected_b1_default_tap(s);
+    int mp_trellis = s->v90_t3_trellis_size;
     /* 6.5/V.90 puts GPA on the analogue modem's upstream, but slmodemd
        measurably uses GPC, and a template built with the wrong polynomial
        does not correlate at all (about 5%, versus the 95% this needs).  The
@@ -13115,6 +13480,33 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
                  "(first=%lld coarse=%.1f%% fit=%.1f%% tap=%d trellis=%d)\n",
                  (long long)best_first, 100.0f*best_coarse,
                  100.0f*best_match, best_tap, best_trellis);
+        /* No template fits a peer that does not reset its scrambler before
+           B1 (10.1.3.1/V.34); train on the 4-point signal before it
+           instead.  See v90_t3_blind_acquire(). */
+        if (!s->v90_t3_blind_tried  &&  !s->x2_mode
+            &&  !V34_DIAG_GETENV("ME_V90_T3_NO_BLIND"))
+        {
+            int64_t first;
+
+            s->v90_t3_blind_tried = true;
+            /* The template search above left its best guesses behind; with
+               no template matching, the tap is 6.5/V.90's GPA and the
+               trellis is the one our MP selected. */
+            s->v90_far_tap_measured = mp_tap;
+            s->v90_t3_trellis_size = mp_trellis;
+            (void) v34_build_expected_b1_tap_trellis(s, mp_tap, mp_trellis, 0);
+            first = v90_t3_blind_acquire(s, best_coeff);
+            if (first >= 0)
+            {
+                best_first = first;
+                best_conjugate = false;
+                best_match = 0.0f;
+                best_tap = mp_tap;
+                best_trellis = mp_trellis;
+                blind = true;
+                goto commit;
+            }
+        }
         /* This used to return without arming a retry, leaving
            v90_t3_acquisition_attempted set -- so the ONE window that happened
            to be in front of the anchor decided the whole call, and a call
@@ -13281,6 +13673,7 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
         }
         /*endif*/
     }
+commit:
     if (s->x2_mode && best_trellis >= 0)
     {
         const uint8_t (*table)[16];
@@ -13328,6 +13721,16 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
     s->v90_t3_suppress_output = true;
     s->v90_t3_acquired = true;
     s->v90_t3_b1_start = best_first;
+    if (blind)
+    {
+        /* Nothing says which state the far end's trellis encoder is in
+           (v34_rx_b1_search() has the peer that does not zero it), so start
+           the Viterbi decoder with no preference. */
+        int prior = (s->viterbi.ptr - 1) & 0xF;
+
+        for (int state = 0;  state < s->viterbi.state_count;  state++)
+            s->viterbi.vit[prior].cumulative_path_metric[state] = 0U;
+    }
     s->v90_t3_b1_frame_err = 0.0f;
     s->v90_t3_in_b1 = true;
     s->v90_t3_data_symbols = 0;
@@ -13470,7 +13873,10 @@ static void v90_t3_try_acquire(v34_rx_state_t *s)
        between them is the advance per symbol.  Averaging coherently inside
        each half before taking an angle is what makes it work over so few
        symbols -- the obvious one-lag autocorrelation reads an order of
-       magnitude high because it never averages the noise down first. */
+       magnitude high because it never averages the noise down first.
+       Not after a 4-point-trained acquisition: the loaded template is not
+       what the wire carried, and the angle would be noise. */
+    if (!blind)
     {
         {
             complexf_t c0 = {0.0f, 0.0f};
@@ -17016,6 +17422,7 @@ static bool v90_t3_start(v34_rx_state_t *rx)
     rx->v90_t3_phase_pending = false;
     rx->v90_t3_phase_pos = 0;
     rx->v90_t3_acq_retries = 0;
+    rx->v90_t3_blind_tried = false;
     rx->v90_t3_acq_abandoned = false;
     rx->v90_t3_acq_best_valid = false;
     rx->v90_t3_acq_best_rel = 0.0f;
