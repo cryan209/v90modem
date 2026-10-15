@@ -224,8 +224,12 @@ def main():
                         destination.update(value)
                     else:
                         raw = destination.get('hardware_audio')
+                        cid = destination.get('caller_id')
+                        line = destination.get('line_diagnostics')
                         destination.clear()
                         if raw is not None: destination['hardware_audio'] = raw
+                        if cid is not None: destination['caller_id'] = cid
+                        if line is not None: destination['line_diagnostics'] = line
                         value["epoch"] = value.get("epoch", 0)+generation*1000000
                         destination.update(value, received=time.monotonic())
             except socket.timeout:

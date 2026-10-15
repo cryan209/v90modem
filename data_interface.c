@@ -2117,6 +2117,33 @@ void di_set_caller_id(const char *number, const char *name)
     pthread_mutex_unlock(&t31_mtx);
 }
 
+void di_clear_caller_id(void)
+{
+    if (!at) return;
+    pthread_mutex_lock(&t31_mtx);
+    at_reset_call_info(at);
+    pthread_mutex_unlock(&t31_mtx);
+}
+
+void di_receive_caller_id(const char *number, const char *name,
+                          const char *date, const char *tod)
+{
+    if (!at) return;
+    pthread_mutex_lock(&t31_mtx);
+    /* V.253 §9.2.3.1.3, Table 13: these are the received values, not the
+     * host's clock. Do not reset rings_indicated while awaiting S0. */
+    int rings = at->rings_indicated;
+    uint8_t ring_reg = at->p.s_regs[1];
+    at_reset_call_info(at);
+    at->rings_indicated = rings; at->p.s_regs[1] = ring_reg;
+    if (date && *date) at_set_call_info(at,"DATE",date);
+    if (tod && *tod) at_set_call_info(at,"TIME",tod);
+    if (number && *number) at_set_call_info(at,"NMBR",number);
+    if (name && *name) at_set_call_info(at,"NAME",name);
+    if (at->display_call_info && rings > 0) at_display_call_info(at);
+    pthread_mutex_unlock(&t31_mtx);
+}
+
 void di_set_auto_answer(int rings)
 {
     pthread_mutex_lock(&t31_mtx);

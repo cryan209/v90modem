@@ -336,8 +336,7 @@ gui-smoke-test: $(TARGET)
 	python3 tools/gui_smoke_test.py
 
 gui-apple-test: apple_usb_modem_coupler
-	./apple_usb_modem_coupler --diagnostic-selftest
-	python3 tools/gui_apple_test.py
+	python3 tools/run_tests.py --logdir test-logs/apple tests/apple.list
 
 gui-spectrum-test:
 	python3 tools/gui_spectrum_test.py
@@ -383,6 +382,7 @@ hsf_v90_coupler.o: hsf_fxo_probe.c hsf_fxo.h modem_engine.h data_interface.h
 apple_usb_modem_probe: $(APPLE_USB_MODEM_PROBE_OBJS)
 	$(CC) $(APPLE_USB_MODEM_PROBE_OBJS) -o $@ $(LIBUSB_LIBS)
 
+tools/apple_usb_modem_probe.o: tools/apple_modem_line.h
 tools/apple_usb_modem_probe.o: CFLAGS += $(LIBUSB_CFLAGS)
 
 # CoreAudio/AVFoundation, not libusb: once the configuration is set, usbaudiod
@@ -405,7 +405,7 @@ apple_usb_modem_coupler: $(APPLE_USB_MODEM_COUPLER_OBJS) spandsp $(PJ_BUILD_PRER
 
 tools/apple_usb_modem_coupler.o: CFLAGS += $(LIBUSB_CFLAGS)
 tools/apple_usb_modem_coupler.o: tools/apple_usb_modem_coupler.m \
-    modem_engine.h data_interface.h line_monitor.h
+    modem_engine.h data_interface.h line_monitor.h tools/apple_modem_line.h
 	$(CC) $(CFLAGS) $(LIBUSB_CFLAGS) -c $< -o $@
 
 vpcm_loopback_test: $(TEST_OBJS) spandsp $(PJ_BUILD_PREREQ)

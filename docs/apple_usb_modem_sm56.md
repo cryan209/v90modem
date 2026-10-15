@@ -17,7 +17,9 @@ line control is not.
 readback, on-hook raw audio monitoring, ring watching and S0 auto-answer.
 Raw codec audio is available before engine startup and during dialling;
 engine eye and constellation remain separate. Optional RX/TX captures include
-rate metadata and can be replayed without USB. Diagnostics report raw DC/RMS,
+rate metadata and can be replayed without USB. Ring watching also keeps the
+on-hook caller-ID receiver active; live CID now passes on both attached modems.
+Diagnostics report line status/current, an uncalibrated voltage estimate, raw DC/RMS,
 near-rail samples and transport counters. Profile 0 and hardware choices persist
 across the fresh backend processes used for each call.
 
@@ -2374,3 +2376,125 @@ These observations use the existing passive taps (V.90 §5 analogue role); they
 do not alter transport or training (V.34 §10.1). Synthetic selftests cover
 rail, zero and constant-DC input across history wraparound. See `docs/gui_mode.md`
 for units and limitations. Hardware interop remains untested by these checks.
+
+## Caller ID and electrical status recovered and tested (2026-10-16)
+
+Both modems were connected but at USB configuration 0. USB discovery inside
+Codex's sandbox returned an empty list; outside the sandbox both were present.
+Configuring each exposed both CoreAudio devices. Current mapping, established
+by live incoming calls (USB addresses are valid only until replug):
+
+| USB | CoreAudio UID substring | lab extension | on-hook raw sense |
+|---|---|---|---|
+| `0:13` | `145430` | 6004 | `0x32` (+50 signed) |
+| `0:14` | `:000000:` | 6005 | `0x32` (+50 signed) |
+
+### The original USB driver does have a digital-line guard
+
+The Boot Camp `MotorolaSetup.exe` linked above was downloaded again and its
+SHA-256 matched the recorded `f22dc405…4483`. Extracted x86 `USmSerial.sys`
+has SHA-256 `5b79a2d94bca4a7e4de085602fc4b43a691b7f7d5b2ecc938461e8a632f03c12`.
+Its bundled Readme documents the "Loop current too high" warning specifically
+in this USB distribution. Decompilation supplies the actual decisions:
+
+- `ReadReg` at `0x9ca6b` reads through the existing command channel.
+- `0x9d15e` reads register `0x0c`: bit 6 must be set, bits 4:0 must be nonzero;
+  code 31 reports `0x8002` and calls the on-hook routine. Other nonzero codes
+  are accepted. An invalid link/zero current has a separate retry/failure path.
+- The USB dispatcher also handles notification `a1 29`, `wValue=9` by calling
+  on-hook and reporting `0x8002`.
+- `0x1609c` maps `0x8002` to result `0x55`; the result table contains
+  `LINE OVERLOAD DETECTED`.
+
+Register `0x11=0x0c` also has the compatible DAA's OPE hardware-protection bit
+(bit 3) set. The readout now exposes this enable bit. Si3056 §5.22 documents
+the resulting OPD indication (register 19 bit 0), which also trips the coupler
+guard. Receive overload (register 19 bit 2) alone does not. No OPE, country or
+gain bits are rewritten by this change.
+
+The coupler now checks this overload decision during its 500 ms seizure
+settling interval and polls during active calls. It also recognizes the USB
+notification even when a register read consumes it. On overload it clears the
+hook bit, stops the call and returns failure. Hardware-free checks cover code
+31, failed reads, invalid FDT, on-hook status and the notification framing.
+No real overload was induced; these tests do not certify protection timing.
+
+### Line voltage/current: useful estimates, not calibration
+
+The compatible Silicon Labs DAA layout is documented in the manufacturer
+[Si3056/Si3018/19/10 data sheet](https://www.skyworksinc.com/-/media/Skyworks/SL/documents/public/data-sheets/si3056.pdf),
+registers 11, 12, 19 and 29, and in the
+[Si3050/Si3011/18/19 data sheet](https://www.skyworksinc.com/-/media/SkyWorks/SL/documents/public/data-sheets/Si3050-11-18-19.pdf),
+§5.8 and §5.12. The driver's use of the current/link fields corroborates that
+part of the layout independently. Both Apple modems read revision register
+`0x0b=0x14`, status `0x0c=0x40` on-hook, and auxiliary `0x13=0x02`.
+
+Register `0x1d` is now exposed both raw and signed. The earlier VG224 values
+`0xd8`–`0xda` are −40 to −38 signed, not a mysterious unsigned level near 217.
+The current ATA reads +50 on-hook and +7 off-hook; these fit a 1 V/code LVS
+interpretation, including polarity. **This is an inference, not a calibrated
+Apple voltage measurement.** In particular the family data sheets restrict
+some LVS functionality by line-side variant; a shared register layout and a
+plausible reading do not establish the exact Apple silicon/BOM. Voltage is
+explicitly labelled inferred/uncalibrated and cannot identify a digital line.
+The 3.3 mA/code current scale is also an approximation from the compatible DAA
+layout. Raw current code 31, rather than an estimated mA threshold, drives the
+guard recovered from the driver.
+
+`apple_usb_modem_probe --line-status` and both GUIs expose these readings,
+current code, link validity, receive overload and off-hook dropout. An unreadable
+register is not converted into a voltage or alarm. Register 19 bit 2 indicates
+receive input overload, which is distinct from loop-current overload. Its bit
+1 is normally set on-hook and is only presented as dropout while off-hook.
+
+### Live CID works while remaining on-hook
+
+Ring watching now starts silent-TX/on-hook RX **before** ringing and keeps RX
+running between bursts. A private resampler feeds the vendored SpanDSP Bell
+202 and V.23 ADSI receivers at 8 kHz; it changes neither raw samples nor the
+engine resamplers. Checksum-valid SDMF/MDMF supplies number, name, private/
+out-of-area reasons and received date/time. Structural bounds are checked
+before parsing fields. V.253 §9.2.3.1.3 and Table 13 govern formatted AT reports;
+V.23 §2 supplies the V.23 carrier pair. No DTMF or call-waiting CID is claimed.
+
+An asynchronous data-interface entry point preserves S0's ring count: the old
+`di_set_caller_id` calls `at_reset_call_info`, which resets rings as well as
+fields. Pre-ring CID waits for the first RING; inter-ring CID reports when it
+arrives with `AT+VCID=1`. Packet date/time replaces the previous synthesized
+host timestamp. Decoder repeats are suppressed within a ring sequence.
+The `decoder` label names the accepting receiver: Bell 202 and V.23 passbands
+overlap, so this is not an independently measured modulation classification.
+
+Bounded 12-second PBX calls, caller `6002 / Apple CID Test`, no answering:
+
+| called extension | receiving modem | result | evidence |
+|---|---|---|---|
+| 6005 | `0:14` | checksum-valid number, name, date/time; AT fields after RING | `artifacts/apple-cid-20261016/modem-1/` |
+| 6004 | `0:13` | same; four RING indications, CID reported once | `artifacts/apple-cid-20261016-r2/modem-0/` |
+
+Both raw recordings decode again through `--cid-replay`. Neither test seized
+its line. Both devices' manual/watch ownership and shutdown were also checked:
+turning off the manual monitor does not stop a watch; stopping the final user
+stops audio and clears the monitor bit.
+
+**Answer transition, CLI:** `--answer --answer-rings 2 --ring-wait 20 --hold 1`
+on `0:13` received `6002 / Apple Answer Test`, reported `RING 1/2`, decoded CID,
+then reported `RING 2/2` and went off-hook. Active status was `0x49`, current
+code 9 (approximately 29.7 mA), raw sense `0x07` (approximately +7 V). The
+one-second engine run had zero render errors, zero TX underruns and exactly
+135168 input/output device frames, including on-hook monitoring. It then
+returned on-hook with sense `0x32`. Evidence:
+`artifacts/apple-cid-answer-20261016/`. This verifies the monitoring/answer
+transition, not a complete modem connection.
+
+The CLI's default remains first-ring answer; `--answer-rings 2` (or GUI S0=2)
+leaves time for inter-ring CID. The CLI wait timeout now uses elapsed monotonic
+time, rather than treating each USB completion as half a second. The latter
+would time out early under frequent ring notifications.
+
+`make gui-apple-test` runs `tests/apple.list`: bounded raw-tap/status checks,
+independent FSK waveforms at 8000/9600 Hz for both carrier pairs and both
+message formats, privacy, bad checksums, malformed TLVs and DC silence, plus
+the existing GUI lifecycle checks. `console_test` covers received date/time,
+pre-ring/inter-ring delivery, disabled reporting, no fabricated CID and S0/S1
+ring-count preservation. Logs use the normal isolated test runner.

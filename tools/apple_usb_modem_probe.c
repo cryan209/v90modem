@@ -82,6 +82,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <libusb.h>
+#include "apple_modem_line.h"
 
 #define VID 0x05ac
 #define PID 0x1401
@@ -363,7 +364,7 @@ static int claim_command_path(void)
 static int cmd_regs(int argc, char **argv)
 {
     static const unsigned char dflt[] = {
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x0a, 0x0f, 0x10, 0x11, 0x1a, 0x1e, 0x1f
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x0a, 0x0b, 0x0c, 0x0d, 0x0f, 0x10, 0x11, 0x13, 0x1a, 0x1d, 0x1e, 0x1f
     };
     if (claim_command_path() < 0) { fprintf(stderr, "claim failed\n"); return 1; }
     if (argc > 2) {
@@ -436,13 +437,40 @@ static int cmd_hook_bit(const char *what, unsigned char bit, const char *name)
     return 0;
 }
 
+
+/* Read-only snapshot; does not close the loop or change the receive path. */
+static int cmd_line_status(void)
+{
+    if (claim_command_path() < 0) { fprintf(stderr,"claim failed\n"); return 1; }
+    apple_modem_line_t s;
+    s.hook = reg_read(5); s.status = reg_read(12); s.sense = reg_read(29);
+    s.revision = reg_read(11); s.auxiliary = reg_read(19);
+    int protection = reg_read(17);
+    int valid = apple_line_valid(&s);
+    printf("{\"hook_register\":%d,\"status_register\":%d,\"revision_register\":%d,\"aux_register\":%d,\"sense_raw\":%d,\"valid\":%s,\"voltage_calibrated\":false,\"voltage_estimate_v\":",
+        s.hook,s.status,s.revision,s.auxiliary,s.sense,valid ? "true" : "false");
+    if (valid && s.sense >= 0) printf("%d",apple_line_signed_sense(s.sense)); else printf("null");
+    printf(",\"protection_register\":%d,\"hardware_protection_enabled\":",protection);
+    if (protection >= 0) printf("%s",protection & 8 ? "true" : "false"); else printf("null");
+    printf(",\"current_code\":");
+    if (valid && (s.hook & 1)) printf("%d",s.status & 31); else printf("null");
+    printf(",\"current_estimate_ma\":");
+    if (valid && (s.hook & 1) && (s.status & 31) < 31) printf("%.1f",(s.status & 31)*3.3); else printf("null");
+    printf(",\"overcurrent\":%s,\"receive_overload\":",apple_line_overcurrent(&s) ? "true" : "false");
+    if (valid && s.auxiliary >= 0) printf("%s",s.auxiliary & 4 ? "true" : "false"); else printf("null");
+    printf(",\"dropout\":");
+    if (valid && (s.hook & 1) && s.auxiliary >= 0) printf("%s",s.auxiliary & 2 ? "true" : "false"); else printf("null");
+    puts("}");
+    return valid && s.sense >= 0 ? 0 : 1;
+}
+
 static void usage(const char *argv0)
 {
     fprintf(stderr,
         "usage: %s [--descriptors | --configure | --sweep | --get |\n"
         "           --send \"<hex bytes>\" | --notify [seconds] |\n"
         "           --regs [idx ...] | --read <idx> | --write <idx> <val> |\n"
-        "           --hook on|off | --monitor on|off]\n"
+        "           --hook on|off | --monitor on|off | --line-status]\n"
         "\n"
         "  --descriptors  (default) dump the configuration, interfaces, endpoints\n"
         "                 and the audio rate list; does not claim anything\n"
@@ -453,6 +481,7 @@ static void usage(const char *argv0)
         "  --send         one SEND_ENCAPSULATED_COMMAND; WRITES to the device,\n"
         "                 and the opcodes are not understood -- see the header\n"
         "  --notify       listen on the interface 0 interrupt endpoint\n"
+        "  --line-status  read hook, signed voltage estimate, loop current and overload flags\n"
         "  --regs         read the registers that are known to answer (or those given)\n"
         "  --read         read one register, hex index\n"
         "  --write        write one register and read it back; WRITES to the\n"
@@ -532,7 +561,8 @@ int main(int argc, char **argv)
             printf("device is at configuration %d; setting it first\n", cfg);
             configure();
         }
-        if      (!strcmp(mode, "--sweep"))  rc = sweep();
+        if      (!strcmp(mode, "--line-status")) rc = cmd_line_status();
+        else if (!strcmp(mode, "--sweep"))  rc = sweep();
         else if (!strcmp(mode, "--get"))    rc = get_response();
         else if (!strcmp(mode, "--send"))   rc = (argc > 2) ? send_command(argv[2])
                                                            : (usage(argv[0]), 1);

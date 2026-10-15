@@ -368,6 +368,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow!
     let status = NSTextField(labelWithString:"Starting modem…")
     let diagnostics = NSTabView()
+    var diagnosticsHeight: NSLayoutConstraint!
     var ataTab: NSTabViewItem?
     let ataIP = NSTextField(string:""), ataSIP = NSTextField(string:"5060"), ataRTP = NSTextField(string:"4000"), ataRings = NSTextField(string:"1"), ataUser = NSTextField(string:"modem")
     let ataPassword = NSSecureTextField(string:"")
@@ -379,6 +380,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
     let watchRings = NSButton(checkboxWithTitle:"Watch rings",target:nil,action:nil)
     let rawSource = NSButton(checkboxWithTitle:"Device audio",target:nil,action:nil)
     let captureAudio = NSButton(checkboxWithTitle:"Record RX/TX",target:nil,action:nil)
+    let electricalHealth = NSTextField(labelWithString:"Line measurements: unchecked")
+    let callerID = NSTextField(labelWithString:"Caller ID: inactive")
     let lineHealth = NSTextField(labelWithString:"Line: unchecked"), audioHealth = NSTextField(labelWithString:"Audio: waiting")
     let capturePath = NSTextField(labelWithString:"")
     var appleUSBIDs = [""], appleAudioIDs = [""], appleCaptureIDs: [String] = []
@@ -501,12 +504,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             control.target = self; control.action = action
         }
         rawSource.state = .on
-        for field in [lineHealth,audioHealth,capturePath] { field.font = .systemFont(ofSize:10); field.lineBreakMode = .byTruncatingMiddle }
+        for field in [lineHealth,electricalHealth,callerID,audioHealth,capturePath] { field.font = .systemFont(ofSize:10); field.lineBreakMode = .byTruncatingMiddle }
         appleTab = tab("Apple hardware",panel("Codec / line controls · raw audio and saved AT settings",[
             row([label("USB"),usbPicker,label("Audio"),audioPicker,button("Refresh",#selector(refreshApple)),button("Apply",#selector(applyApple))]),
             row([button("Check line",#selector(probeApple)),onHookMonitor,rawSource,watchRings,autoAnswer,button("Save AT settings",#selector(saveAppleSettings))]),
             row([captureAudio,capturePicker,button("Replay RX",#selector(replayApple)),button("Stop replay",#selector(stopAppleReplay))]),
-            lineHealth,audioHealth,capturePath]))
+            lineHealth,electricalHealth,callerID,audioHealth,capturePath]))
         diagnostics.removeTabViewItem(appleTab!)
         for field in [ataIP,ataUser,ataPassword] { field.widthAnchor.constraint(equalToConstant:170).isActive = true }
         for field in [ataSIP,ataRTP,ataRings] { field.widthAnchor.constraint(equalToConstant:65).isActive = true }
@@ -516,7 +519,8 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             row([label("LAN IP"),ataIP,label("SIP"),ataSIP,label("RTP"),ataRTP,label("Answer rings (0 manual)"),ataRings]),
             row([label("User"),ataUser,label("Password"),ataPassword,button("Start / apply",#selector(startATA)),button("Stop",#selector(stopATA)),button("Copy ATA setup",#selector(copyATA))]),ataSetup,ataStatus]))
         diagnostics.removeTabViewItem(ataTab!)
-        diagnostics.heightAnchor.constraint(equalToConstant:205).isActive = true
+        diagnosticsHeight = diagnostics.heightAnchor.constraint(equalToConstant:205)
+        diagnosticsHeight.isActive = true
         startLoop = button("Start loopback",#selector(startLoopback))
         pattern = button("256-byte pattern",#selector(sendPattern))
         loopbackRow = row([label("Local test"),loopbackMode,startLoop,pattern,loopbackStatus]); loopbackRow.isHidden = true
@@ -584,6 +588,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ataStatus.stringValue = "Listener \(running ? (s["exit"] is Int ? "failed" : "running") : "stopped") · \(expiry > 0 ? "Registered \(r["peer"] as? String ?? "") · \(expiry)s" : "No active registration") · Accepted \(r["accepted"] as? Int ?? 0) · Auth challenges \(r["challenges"] as? Int ?? 0) · \(media["state"] as? String ?? "idle") \(media["peer"] as? String ?? "")\n\(media["codec"] as? String ?? "No media") · RTP RX/TX \(media["rx_packets"] as? Int ?? 0)/\(media["tx_packets"] as? Int ?? 0) · RX loss \(media["rx_loss"] as? Int ?? 0) · jitter \(String(format:"%.1f",media["rx_jitter_ms"] as? Double ?? 0))ms"
     }
     func renderApple(_ s:[String:Any], _ hardware:[String:Any]) {
+        diagnosticsHeight.constant = 245
         if let tab = appleTab, !diagnostics.tabViewItems.contains(where: { $0 === tab }) {
             diagnostics.addTabViewItem(tab); diagnostics.selectTabViewItem(tab)
         }
@@ -618,6 +623,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let hookText = hook < 0 ? "unchecked" : hook & 1 == 1 ? "off-hook" : "on-hook"
         let senseText = sense < 0 ? "unchecked" : sense == 0 ? "no telephone pair" : String(format:"0x%02X · uncalibrated",sense)
         lineHealth.stringValue = "USB \((health["usb_open"] as? Bool ?? false) ? "open" : "not opened") · Hook \(hookText) · Line sense \(senseText) · \(health["rings"] as? Int ?? 0) ring bursts"
+        let electrical = s["line_diagnostics"] as? [String:Any] ?? [:]
+        let voltage = (electrical["voltage_estimate_v"] as? Int).map { "≈\($0) V (inferred scale, uncalibrated)" } ?? "unavailable"
+        let current = (electrical["current_code"] as? Int).map { $0 == 31 ? "OVERLOAD" : String(format:"≈%.1f mA (code %d)",electrical["current_estimate_ma"] as? Double ?? 0,$0) } ?? "on-hook / unavailable"
+        electricalHealth.stringValue = "Line link \((electrical["valid"] as? Bool ?? false) ? "valid" : "unavailable") · Voltage \(voltage) · Loop current \(current) · Hardware guard \((electrical["hardware_protection_enabled"] as? Bool).map { $0 ? "enabled" : "disabled" } ?? "unchecked") · \((electrical["overcurrent"] as? Bool ?? false) ? "LINE OVERLOAD — call stopped" : (electrical["receive_overload"] as? Bool ?? false) ? "receive overload" : (electrical["dropout"] as? Bool ?? false) ? "line dropout" : "no overload reported")"
+        let cid = s["caller_id"] as? [String:Any] ?? [:]
+        callerID.stringValue = "Caller ID \((cid["listening"] as? Bool ?? false) ? "listening (Bell 202 / V.23)" : "inactive") · \(cid["number"] as? String ?? "") · \(cid["name"] as? String ?? "") · \(cid["date"] as? String ?? "") \(cid["time"] as? String ?? "") · \(cid["messages"] as? Int ?? 0) valid messages"
         let raw = s["hardware_audio"] as? [String:Any] ?? [:], metrics = raw["metrics"] as? [[String:Any]] ?? []
         let levels = metrics.enumerated().map { dir,m -> String in
             let dbfs = (m["ac_dbfs"] as? Double).map { String(format:"%.1f",$0) } ?? "−∞"

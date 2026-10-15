@@ -99,13 +99,44 @@ and pre-engine audio. Turn it off to inspect the engine's 8 kHz diagnostic taps.
 Raw views use the actual codec rate (normally 9600 Hz); recovered eye and
 constellation remain engine measurements. Diagnostic playback is output-only.
 
-Watch rings polls the CDC interrupt endpoint. Notifications separated by more
+Watch rings enables on-hook audio and the CID receiver before polling the CDC
+interrupt endpoint. RX stays active through rings and the gaps between them; TX
+is silent. Disabling the manual monitor cannot stop an enabled ring watch.
+Stopping watch stops audio unless the manual monitor is also enabled.
+Notifications separated by more
 than 1.5 seconds count as separate bursts; this heuristic needs hardware
 validation. Auto-answer uses the existing S0 interpreter, with 0 disabling it
 and 1–9 selecting a burst count. A saved positive setting resumes ring watching
 on launch and after calls. `ATA` waits for a ring unless one was recently seen;
-`--ring-wait` defaults to 60 seconds. `ATDnumber` dials the physical line.
+`--ring-wait` defaults to 60 seconds. The CLI `--answer` also listens on-hook;
+`--answer-rings 2` waits for a second burst to leave time for inter-ring CID
+(the CLI default remains one burst). Use S0=2 or higher in the GUI for this
+style of CID; S0=1 answers before the inter-ring packet can arrive. `ATDnumber` dials the physical line.
 `ATH`, closing the GUI, or the `--hold` limit releases an active call.
+
+Caller ID is decoded from a private audio copy at 8 kHz by the vendored
+SpanDSP Bell 202 and V.23 receivers. SDMF and MDMF number, name, received
+date/time and private/out-of-area reasons appear in both GUIs. `AT+VCID=1`
+enables formatted `DATE`, `TIME`, `NMBR` and `NAME` reports (V.253 §9.2.3.1.3).
+Pre-ring CID is retained until the first RING; inter-ring CID is reported when
+received, without resetting S0's ring count. Invalid checksums are rejected;
+there is no invented caller timestamp when no packet was received. Repeated
+packets in one ring sequence are suppressed. The telemetry `decoder` field
+names the receiver that accepted the packet, not a measured modulation type:
+the two FSK passbands overlap. DTMF CID and call-waiting CID are not implemented.
+
+The line measurements update once a second while the device is open. They show
+raw signed sense and an **inferred, uncalibrated voltage estimate**, off-hook
+current code and approximate mA (3.3 mA/code), link validity, the hardware
+protection enable bit and receive overload. Hardware OPD, current code 31 or
+the USB overload notification can trip the coupler guard.
+Dropout is meaningful only off-hook. A missing read is unavailable, not zero.
+The coupler checks for current overload during seizure and active calls, and
+recognizes the driver's USB overload notification; it releases the hook and
+ends the call on either indication. This is host-side detection, not a claim
+of independently certified electrical protection or digital-line identification.
+`apple_usb_modem_probe --line-status` returns the same read-only JSON snapshot.
+The probe itself does not apply the coupler's automatic guard.
 
 Save AT settings writes profile 0. The launcher saves it before dial/answer and
 before device, recording or replay restarts; each fresh backend loads it from
@@ -136,11 +167,23 @@ underruns while the engine runs, separating them from expected idle empty TX.
 These measurements do not change samples, gains,
 resamplers or the SIP G.711 path (V.90 §5; V.34 §10.1).
 
-`make gui-apple-test` uses deliberately invalid USB address `0:0` and a synthetic
+`make gui-apple-test` runs `tests/apple.list` through the normal isolated test
+runner, with logs in `test-logs/apple`. The GUI integration check uses
+deliberately invalid USB address `0:0` and a synthetic
 capture to verify settings persistence, device validation, failure recovery,
 capture metadata, bounded raw replay, stopping and rate restoration. The
 coupler's `--diagnostic-selftest` checks raw copies, metrics and ring debounce.
-These and the resampler selftest do not establish live hardware interoperability.
+The CID waveform test covers both rates and carrier pairs, SDMF/MDMF, privacy,
+bad checksums and malformed fields. These and the resampler selftest do not
+establish live hardware interoperability. Live CID checks on both modems and
+the second-ring answer transition are recorded in `docs/apple_usb_modem_sm56.md`.
+
+To decode an on-hook recording without hardware:
+
+```sh
+./apple_usb_modem_coupler --cid-replay path/to/rx.s16 --rate 9600
+```
+
 
 ## What the views measure
 

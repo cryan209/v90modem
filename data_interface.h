@@ -149,6 +149,13 @@ void di_on_ring(void);
  * "P" (private) or NULL; name may be NULL.  Also restarts the ring count.
  */
 void di_set_caller_id(const char *number, const char *name);
+/* Clear caller fields and the ring count at the start of an incoming call. */
+void di_clear_caller_id(void);
+/* A checksum-valid on-hook CID packet, received asynchronously between rings.
+ * V.253 §9.2.3.1.3: retain network date/time and report once if +VCID=1.
+ * Unlike di_set_caller_id this does not restart S0's ring count. */
+void di_receive_caller_id(const char *number, const char *name,
+                          const char *date, const char *tod);
 
 /*
  * S0's factory value: answer after this many rings (0 = only on ATA).  ATZ

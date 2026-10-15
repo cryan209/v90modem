@@ -950,6 +950,32 @@ static void test_call_progress(void)
     collect(dte, buf, sizeof(buf), 150);
     check(strstr(buf, "RING") && !strstr(buf, "NMBR"), "...after the first ring only");
     expect(dte, "ATH", "OK");
+    di_set_caller_id(NULL, NULL);
+    di_on_ring(); collect(dte, buf, sizeof(buf), 100);
+    di_receive_caller_id("6421555123", "On-hook CID", "1016", "0930");
+    collect(dte, buf, sizeof(buf), 100);
+    check(strstr(buf, "DATE = 1016") && strstr(buf, "TIME = 0930") &&
+          strstr(buf, "NMBR = 6421555123") && strstr(buf, "NAME = On-hook CID"),
+          "asynchronous CID retains network date/time and reports between rings");
+    expect(dte, "ATS1?", "001");
+    di_on_ring(); collect(dte, buf, sizeof(buf), 100);
+    check(strstr(buf,"RING") && !strstr(buf,"NMBR"), "asynchronous CID not repeated next ring");
+    expect(dte, "ATS1?", "002");
+    expect(dte, "ATH+VCID=0", "OK");
+    di_receive_caller_id("6005", NULL, "1016", "0931");
+    collect(dte, buf, sizeof(buf), 100);
+    check(!strstr(buf,"NMBR"), "asynchronous CID honors +VCID=0");
+    expect(dte, "AT+VCID=1", "OK");
+    di_clear_caller_id();
+    di_receive_caller_id("6006", "Pre-ring CID", "1016", "0932");
+    collect(dte, buf, sizeof(buf), 100);
+    check(!strstr(buf,"NMBR"), "pre-ring CID waits for RING before +VCID report");
+    di_on_ring(); collect(dte, buf, sizeof(buf), 100);
+    check(strstr(buf,"RING") && strstr(buf,"NMBR = 6006") && strstr(buf,"TIME = 0932"),
+          "pre-ring CID reported on first ring with received time");
+    di_clear_caller_id();
+    di_on_ring(); collect(dte, buf, sizeof(buf), 100);
+    check(strstr(buf,"RING") && !strstr(buf,"DATE"), "no fabricated CID date when no packet received");
     di_set_caller_id("P", NULL);
     di_on_ring();
     collect(dte, buf, sizeof(buf), 150);
