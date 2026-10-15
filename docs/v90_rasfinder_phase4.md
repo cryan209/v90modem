@@ -75,6 +75,14 @@ from.  Next call: check `slow media callback` stays under ~20 ms in data
 mode, `tools/echo_lag_track.py` shows no step (or the log shows `echo moved`
 and the eye recovering), and whether LAPM comes up.
 
+Two calls from this Mac over the VPN (vmhost down, `artifacts/rf-mac-20261016/`)
+could not test it.  The far end reports 0.3-0.4% of OUR packets lost, in
+80 ms bursts, and nothing lost in our receive direction.  Call 1 lost V.8:
+ANSam, then the pure 2250 Hz tone at ~8 s, then V.32 AC (600 + 3000 Hz), so
+the peer never heard our CM.  Call 2 missed INFO1a three times (once invalid),
+declined V.90 and fell back to plain V.34 16800, with no LAPM.  The V.90 T/3
+path never ran.  Live checks still need the wired rig.
+
 ## 2026-10-16: B1 is acquired without a template; the upstream now dies ~0.8 s later
 
 **Why B1 never matched: the MT5634 does not reset its scrambler before B1.**
