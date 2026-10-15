@@ -1,5 +1,42 @@
 # RasFinder Phase 4: CRC-anchored measurements, 2026-09-28
 
+## 2026-10-15: Phase 4 passes; the upstream B1 is now the blocker
+
+The RasFinder is back on three AudioCodes MP-114 lines, ext 6311/6312/6313
+(calls placed from vmhost CT 117, wired; tower was down; recipe in
+`artifacts/rf-pve-20261015/run.sh`). On HEAD (c2262d89), one call per line:
+V.8, Phase 2, 3 and 4 complete on the first attempt every time, and the
+peer sends data-mode CP and E. **V.90 data mode at 45333 / 45333 / 49333
+downstream, 31200 upstream** is the first V.90 data mode against this peer.
+The 2.04 s Phase 4 timer described below no longer fires.
+
+What fails now is our upstream receive. The V.90 T/3 B1 search never
+matches. Its best fit over 7 windows is 17-27%, which is the noise floor,
+and the bar is 95%. V.42 then sees nothing, and the peer retrains about 12 s
+into data. The second V.90 attempt does the same thing. The call then falls
+back to plain V.34 21600, where the symbol-domain B1 finder locks (correlation
+1.000, 8 symbols after E, far-end trellis state 13, SNR 35 dB). The peer
+hangs up at about 90 s, before LAPM comes up.
+
+Ruled out (each on the offline replay, which reproduces the failure in
+3.5 s: `v90_engine_replay artifacts/rf-pve-20261015/v90-6313-1/live-rx.g711
+ulaw --fast --dial`):
+
+- **Carrier.** The CPt batch log's `carrier=high` only means
+  `v90_cp_live.c` tries the high carrier first; differential CPt decoding
+  tolerates the ~91 Hz difference. Phase 3's S detector reads the low
+  carrier at 1.00/0.01, and the receive tap after E is a continuous in-band
+  3200-baud signal (centroid about 1780 Hz).
+- **Trellis start state** (the MT5634 trait that broke plain V.34). The V.90
+  template searched over every initial state of all three trellis sizes,
+  in a temporary hack that has been reverted, still peaks at 25-27%.
+- **Rate.** `ME_V90_UPSTREAM_MAX_BPS=9600` live gives an upstream of 9600 and
+  the same 20% fits.
+
+So B1 is not being found where the T/3 search looks, or the template is
+wrong for this peer in some way that does not depend on rate (precoder,
+shaping, timing, or the anchor).
+
 ## Where this stands (updated 2026-09-29)
 
 V.90 data mode against the RasFinder is **not** established. What is now settled,
