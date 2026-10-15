@@ -4805,6 +4805,20 @@ const char *v90_rx_event_name(v90_rx_event_t event)
     return "UNKNOWN";
 }
 
+static int v90_dil_s_minimum_segments(const v90_state_t *s)
+{
+    int cycle_limit = v90_dil_autoterminate_cycles();
+
+    return (cycle_limit > 0 ? cycle_limit : 1) * s->dil.n;
+}
+
+bool v90_dil_s_can_terminate(const v90_state_t *s)
+{
+    return s && !s->v92_phase3 && s->tx_phase == V90_TX_DIL
+        && !s->dil_terminate_requested
+        && s->dil_segment_index >= v90_dil_s_minimum_segments(s);
+}
+
 bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
 {
     if (!s)
@@ -4847,7 +4861,7 @@ bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event)
         if (s->tx_phase == V90_TX_DIL && !s->dil_terminate_requested) {
             int cycle_limit = v90_dil_autoterminate_cycles();
             int minimum_cycles = cycle_limit > 0 ? cycle_limit : 1;
-            int minimum_segments = minimum_cycles * s->dil.n;
+            int minimum_segments = v90_dil_s_minimum_segments(s);
 
             /* The analogue modem may still produce the Su/Su-bar transition
              * near the J'd -> DIL boundary.  SpanDSP exposes both polarities

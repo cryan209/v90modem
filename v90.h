@@ -329,6 +329,11 @@ void v90_notify_s_detected(v90_state_t *s);
  * only when the event is valid for, and accepted by, the current TX phase. */
 bool v90_handle_rx_event(v90_state_t *s, v90_rx_event_t event);
 
+/* Whether a far-end S received now could end DIL (V.90 9.3.2.10).  False
+ * outside DIL, and during its first descriptor cycle, where
+ * v90_handle_rx_event() ignores S. */
+bool v90_dil_s_can_terminate(const v90_state_t *s);
+
 const char *v90_rx_event_name(v90_rx_event_t event);
 
 /*

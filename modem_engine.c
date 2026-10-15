@@ -13617,9 +13617,18 @@ skip_8k_codewords:
                          * that check, as they can also be tones or noise. */
                         bool alternating_s = g_v34
                             && v34_phase3_s_alternation_confirmed(g_v34);
+                        /* The check is a p3_demod pass over 200 ms, ~20 ms of
+                           work in this media callback, which also sends our
+                           RTP.  During DIL's first cycle v90.c ignores S
+                           anyway, so it is only run where its answer can end
+                           DIL: run there, it made 31-34 ms holes in our DIL
+                           on the RasFinder rig, the kind that makes the
+                           AudioCodes re-centre its playout
+                           (docs/v90_rasfinder_phase4.md, 2026-10-16). */
                         if ((int)v90_get_tx_phase(g_v90) == V90_TX_DIL
                             && !line_s
                             && !alternating_s
+                            && v90_dil_s_can_terminate(g_v90)
                             && !v90_p3_confirm_signal_locked(P3_SIGNAL_S)) {
                             fprintf(stderr,
                                     "[ME] V.90 strict RX event: index=%d event=S tx_phase=%d "
