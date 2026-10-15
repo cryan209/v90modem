@@ -2317,3 +2317,48 @@ hang-up started renegotiation 2, offering 24000.
   the analogue side needs `ME_V42_T400_MS`; the default stays at V.42's 750 ms.
 - `--rx-replay` segfaults at V.14 fallback without `--pty-link`; pass one.
 - Startup's Phase 4 is still a coin flip on some attempts (v90-rr-2).
+
+### The upstream floor is noise, not equaliser span (2026-10-15)
+
+The previous section blamed the server's 21-tap T/3 FSE.  Measured at the
+symbol level, that is wrong.  Truth symbols come from demodulating our own
+`call/tx-tap.s16`.  It runs on the Apple codec clock, −164 ppm against the
+server, so it has to be resampled *and* carrier-corrected onto the server's
+timebase first.  These symbols were fitted to `server/live-rx.g711` through
+the same front end as `v34rx.c` (6/5, analytic, 1828.57 Hz).  v90-rr-5,
+26400, 50-56 s:
+
+| T/3 taps (span) | 21 (2.2 ms) | 41 (4.3) | 63 (6.6) | 99 (10.3) |
+|---|---|---|---|---|
+| LS from B1-length 128 symbols, out of sample | 0.223 | 0.205 | 0.214 | 0.275 |
+| RLS tracking (λ 0.9995) | 0.21 | 0.175 | 0.171 | 0.165 |
+
+Figures are distance to the lattice, the server's own metric.  Span is worth
+≈1 dB at most.  The residual is white: a 3-tap noise predictor gains 0.3 dB,
+so V.34 precoding (MP Type 1, §9.6) would not help either.  The waveform bound
+(18 dB at 2.2 ms) was measuring the RRC band edges, which carry no symbol
+information.
+
+The waveform fit (15 ms span) reaches 31.4 dB, with a flat residual of
+32-33 dB across 300-3300 Hz.  Echo of the server's downstream is −53 dB.  The
+floor has two parts:
+- μ-law quantisation, 36.9 dB.  It is fixed whatever the level.
+- Analogue-side noise, 32.8 dB at the received −21.6 dBm0.  The analogue
+  engine transmits at the tree's −14 dBm0 nominal (`ME_V34_TX_DBM0`), and
+  V.90 §3.4 leaves that level to the user.
+
+**Live, up-lvl9-1 (analogue side `ME_V34_TX_DBM0=-9`, server unchanged):**
+- The upstream arrives 5.0 dB hotter (RMS 330 → 588).
+- The waveform SNR rises 31.4 → 34.5 dB.  The analogue-noise part went
+  32.8 → 37.7 dB, so that noise is additive.
+- At 26400 the server settled at 0.078, and its running error over the whole
+  stretch fell 0.128 → 0.093.  At 31200 it settled at 0.238, still unusable.
+- LAPM connected.  A peer retrain followed at +75 s (not investigated).
+
+μ-law (37 dB) is now the binding floor.  At most ~2.5 dB more is available
+from level (−6 dBm0, peaks then near DAC full scale).  At 34.5 dB the server
+sits ~1.7 dB above the symbol bound, which is the only place a longer FSE
+could still pay.  Below 0.05 at 26400 needs both the level and that
+receiver gap closed; 31200 is not reachable over μ-law on this loop.
+Scripts: the session scratchpad's `symbound.py`, `adapt.py`, `resid.py`
+and `echo.py`; they have not been moved into `tools/`.
