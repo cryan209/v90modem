@@ -3141,6 +3141,10 @@ static int      g_v90a_pr4_stage = -1;
 #define V90A_PR4_TAPS        64
 #define V90A_PR4_DMAX        24
 #define V90A_PR4_DEPTH       24
+/* Decision-directed tracking step, thousandths (ME_V90A_PR4_MU).  1, 2 and 5
+ * all hold v90-rr-3 replayed at 0-0.4% codeword error to the end of the call,
+ * where the held taps drift to 27%. */
+#define V90A_PR4_MU_MILLI    2
 #define V90A_PR4_TRAIN       5000
 /* Set while me_rx_g711() is forwarding its own linear copy to me_rx_audio(),
  * so the codeword path is not run twice on one call's samples. */
@@ -5348,6 +5352,53 @@ static int me_v34_retrain_after_ms(void)
  * Uses the shared DATA-entry epoch, which the native V.90 handover sets.
  * Zero, the default, means never. */
 static bool g_v90_reneg_probe_done = false;
+/*
+ * Per-call upstream ceiling learnt from the upstream receiver itself, 0 = none.
+ * §9.6 is how a V.90 call changes its data signalling rate ("Data signalling
+ * rate ... may change as a result of rate renegotiation"), and the digital
+ * modem picks the upstream rate through MP bits 24:27 (§9.4.2.4).  Before
+ * this, every renegotiation re-offered the rate V.34 trained at, so a line
+ * the receiver could not decode at that rate renegotiated into the same
+ * failure until the per-call cap -- Apple rig v90-pr4-1: settled at 0.296
+ * decision error at 31200 (healthy upstreams settle near 0.025) on a loop whose
+ * long response the 21-tap T/3 equaliser cannot span.  Survives retrains: the
+ * line and the receiver are the same.
+ */
+static int g_v90_upstream_learnt_cap = 0;
+
+/* Decision error at which the settled upstream counts as undecodable at its
+ * rate, and at which it is worth two steps rather than one. */
+#define ME_V90_UPSTREAM_STEP_ERR    0.10f
+#define ME_V90_UPSTREAM_STEP2_ERR   0.20f
+
+/* Called just before a renegotiation for upstream loss: lower the rate the
+ * renegotiated MP offers when the receiver never decoded the current one.
+ * A loss on a clean upstream (a slip) keeps its rate.  ME_V90_UPSTREAM_STEP=0
+ * disables it. */
+static void v90_upstream_step_down_locked(void)
+{
+    float settled = 0.0f;
+    int current, next, floor_bps;
+    const char *e = getenv("ME_V90_UPSTREAM_STEP");
+
+    if ((e && atoi(e) == 0) || !g_v34 || !g_v90)
+        return;
+    (void) v34_v90_upstream_rx_error(g_v34, &settled);
+    current = v90_mp_upstream_max_bps(g_v90);
+    if (settled < ME_V90_UPSTREAM_STEP_ERR || current <= 4800)
+        return;
+    next = current - ((settled >= ME_V90_UPSTREAM_STEP2_ERR) ? 2 : 1)*2400;
+    floor_bps = (g_lim[LIM_MIN_RX] > 4800) ? g_lim[LIM_MIN_RX] : 4800;
+    if (next < floor_bps)
+        next = floor_bps;
+    if (next >= current)
+        return;
+    g_v90_upstream_learnt_cap = next;
+    v90_set_upstream_rate_limit(g_v90, next);
+    ME_LOG("[ME] V.90 upstream settled at %.3f decision error at %d bps; "
+           "the renegotiation offers %d bps (§9.6, MP bits 24:27)\n",
+           settled, current, next);
+}
 /* §9.6.1.1.1: set while the receiver is watching for the peer's S/S-bar
  * answer to Rd, cleared when it hands over to the CP search. */
 static bool g_v90_reneg_await_s = false;
@@ -5675,9 +5726,22 @@ static bool v90_accept_cp_diag_locked(const vpcm_cp_diag_t *diag,
         int rate = v34_get_current_bit_rate(g_v34);
         int max_rate = v90_upstream_baud_max_bps(baud);
 
+        int mp_rate = v90_mp_upstream_max_bps(g_v90);
+
         if (rate > max_rate)
             rate = max_rate;
         rate = me_v90_upstream_cap(rate);
+        /* §9.4.2.4: the analogue modem transmits at the highest rate enabled
+         * in both modems, no higher than MP's bits 24:27 -- and our MP's
+         * mask is the intersection with the CP's bits 36:48.  A peer that
+         * caps its own upstream in CP therefore transmits below the rate
+         * V.34 trained at; preparing for the trained rate left this receiver
+         * at 31200 against a 24000 transmitter (Apple rig, v90-pr4-2). */
+        if (mp_rate > 0 && mp_rate < rate) {
+            ME_LOG("[ME] V.90 upstream: CP/MP mask limits the upstream "
+                   "%d -> %d bps (§9.4.2.4)\n", rate, mp_rate);
+            rate = mp_rate;
+        }
         /* trellis code 0 = V34_TRELLIS_16 (v34_tables.h, not exported); the
          * peer's own decode of our Type-0 MP confirms 16-state upstream. */
         if (v34_v90_prepare_upstream_data(g_v34, baud,
@@ -6508,6 +6572,7 @@ static void cleanup_v34_v90_training_locked(void)
     g_v34_data_entry_samples = 0;
     g_v34_reneg_probe_done = false;
     g_v90_reneg_probe_done = false;
+    g_v90_upstream_learnt_cap = 0;
     g_v90_retrain_probe_done = false;
     g_v90_reneg_await_s = false;
     g_v90_reneg_cp_rx_marked = false;
@@ -15017,6 +15082,8 @@ static void enter_v90_phase4_rx_locked(void)
          * at 31200 the symbols arrive with 3-4 units of error against a
          * constellation spacing of 2 -- too dense for this path to decode. */
         limit = me_v90_upstream_cap(limit);
+        if (g_v90_upstream_learnt_cap > 0 && g_v90_upstream_learnt_cap < limit)
+            limit = g_v90_upstream_learnt_cap;
         /* V.250 6.4.1 +MS: the upstream is our receive direction. */
         if (g_lim[LIM_MAX_RX] > 0 && (limit <= 0 || limit > g_lim[LIM_MAX_RX]))
             limit = g_lim[LIM_MAX_RX];
@@ -15201,6 +15268,7 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                 ME_LOG("[ME] V.90 upstream discontinuity; requesting early "
                        "§9.6/§11.6 training-and-B1 resynchronization\n");
                 trace_phase("V90 upstream discontinuity resync");
+                v90_upstream_step_down_locked();
                 (void) v90_request_rate_renegotiation(g_v90);
             } else {
                 ME_LOG("[ME] V.90 upstream discontinuity; §9.6 per-call cap "
@@ -15225,6 +15293,7 @@ static bool generate_v90_raw_codewords_locked(uint8_t *codewords, int len)
                 && v90_rate_renegotiation_count(g_v90) < ME_V90_MAX_RENEGOTIATIONS) {
                 ME_LOG("[ME] V.90 upstream carrier lost; requesting a §9.6 "
                        "rate renegotiation to re-acquire\n");
+                v90_upstream_step_down_locked();
                 (void) v90_request_rate_renegotiation(g_v90);
                 /* Clear it: at the cap, the condition would otherwise be
                  * re-raised on every block for the rest of the call. */
@@ -16534,7 +16603,13 @@ void me_rx_v90a_16k(const int16_t *amp, int len)
                               parse_env_int("ME_V90A_DFE_TAPS", V90A_DFE_TAPS));
         /* ME_V90A_PR4=0 leaves Phase 4 on the equaliser's own slicer. */
         if (parse_env_int("ME_V90A_PR4", 1) != 0)
+        {
             g_v90a_pr4 = v90a_pr4_init(V90A_PR4_TAPS, V90A_PR4_DMAX, V90A_PR4_DEPTH);
+            /* ME_V90A_PR4_MU: decision-directed tracking after TRN1d
+             * (v90_analogue_pr4.c track()), in thousandths; 0 holds. */
+            v90a_pr4_set_tracking(g_v90a_pr4,
+                                  parse_env_int("ME_V90A_PR4_MU", V90A_PR4_MU_MILLI)/1000.0);
+        }
         /*
          * FROZEN, not CMA.  The first thing on the line is §8.4.4's Sd, which
          * is not constant modulus -- four slots at W and two at zero -- so the

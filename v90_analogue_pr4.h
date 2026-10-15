@@ -80,5 +80,9 @@ void v90a_pr4_resync(v90a_pr4_t *s);
 /* Decided codewords, in symbol order.  Returns how many were written. */
 int v90a_pr4_take(v90a_pr4_t *s, uint8_t *codewords, int max);
 int64_t v90a_pr4_next_index(const v90a_pr4_t *s);   /* index of the next codeword out */
+/* Decision-directed NLMS step on the traced-back decisions while detecting;
+ * 0 (the init default) holds the trained taps. */
+void v90a_pr4_set_tracking(v90a_pr4_t *s, double mu);
+long v90a_pr4_updates(const v90a_pr4_t *s);
 
 #endif

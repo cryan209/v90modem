@@ -11,6 +11,7 @@
 #define MAX_STATES  260         /* 128 Ucodes x 2 signs, plus room */
 #define HIST        64          /* decision history kept for training targets */
 #define OUT_RING    1024        /* reorder buffer, symbols */
+#define TRACK_MIN_SET 8         /* candidates (levels x signs) a step needs to adapt on */
 
 typedef struct {
     int      n;
@@ -27,6 +28,8 @@ typedef struct {
     step_t  *steps;             /* ring of depth + 1 steps */
     int      count;             /* steps taken */
     double   pm[MAX_STATES];
+    int64_t  last_index;        /* the last decided step on this interleave */
+    double   last_lv;
 } interleave_t;
 
 struct v90a_pr4_s {
@@ -51,6 +54,11 @@ struct v90a_pr4_s {
     v90a_pr4_set_fn set_fn;
     void    *user;
     interleave_t il[2];
+    /* decision-directed tracking: the input each output was made from */
+    double   mu;
+    double  *xr;                /* XR(depth) rows of `taps` */
+    int      xr_rows;
+    long     updates;
     uint8_t  out_cw[OUT_RING];
     bool     out_ok[OUT_RING];
     int64_t  next_out;
@@ -72,7 +80,9 @@ v90a_pr4_t *v90a_pr4_init(int taps, int dmax, int depth)
     s->w = calloc((size_t) taps, sizeof(double));
     s->il[0].steps = calloc((size_t) depth + 1, sizeof(step_t));
     s->il[1].steps = calloc((size_t) depth + 1, sizeof(step_t));
-    if (!s->x || !s->w || !s->il[0].steps || !s->il[1].steps) {
+    s->xr_rows = 2*depth + 8;
+    s->xr = calloc((size_t) s->xr_rows*(size_t) taps, sizeof(double));
+    if (!s->x || !s->w || !s->il[0].steps || !s->il[1].steps || !s->xr) {
         v90a_pr4_free(s);
         return NULL;
     }
@@ -83,7 +93,7 @@ void v90a_pr4_free(v90a_pr4_t *s)
 {
     if (s == NULL)
         return;
-    free(s->x); free(s->w); free(s->R); free(s->q); free(s->e);
+    free(s->x); free(s->w); free(s->xr); free(s->R); free(s->q); free(s->e);
     free(s->il[0].steps); free(s->il[1].steps);
     free(s);
 }
@@ -125,6 +135,8 @@ int v90a_pr4_delay(const v90a_pr4_t *s) { return s ? s->delay : 0; }
 double v90a_pr4_train_snr_db(const v90a_pr4_t *s) { return s ? s->snr_db : 0.0; }
 bool v90a_pr4_running(const v90a_pr4_t *s) { return s && s->running; }
 int64_t v90a_pr4_next_index(const v90a_pr4_t *s) { return s ? s->next_out : 0; }
+void v90a_pr4_set_tracking(v90a_pr4_t *s, double mu) { if (s) s->mu = (mu > 0.0) ? mu : 0.0; }
+long v90a_pr4_updates(const v90a_pr4_t *s) { return s ? s->updates : 0; }
 
 static double dec_at(const v90a_pr4_t *s, int64_t k)
 {
@@ -255,6 +267,38 @@ static void trellis_step(v90a_pr4_t *s, interleave_t *il, step_t *cur, const ste
     memcpy(il->pm, npm, sizeof(double)*(size_t) n);
 }
 
+/*
+ * Decision-directed NLMS on the traced-back decision: the target for the
+ * output z[k] is s[k] - s[k-2], the decided symbol less the one before it on
+ * the same interleave.  Training on TRN1d fixes the taps once, but the call
+ * goes on for minutes: held, the codeword error rate on Apple rig v90-rr-3
+ * climbed from 0 at B1d to 5-9% twenty seconds later, which is what lost a
+ * renegotiation's two-frame Ed.  The decision is the Viterbi's, `depth`
+ * symbols late, so it is far more reliable than a slicer's.
+ */
+static void track(v90a_pr4_t *s, const step_t *dp, const interleave_t *il)
+{
+    const double *x;
+    double e, norm = 0.0;
+
+    /* Only on a real constellation: §8.6.4's R signals are one level with a
+     * sign pattern, which any taps that reproduce a period-6 square wave
+     * fit -- adapting on Ri took the trained 41 dB to 24 within a second. */
+    if (il->last_index != dp->index - 2  ||  dp->n < TRACK_MIN_SET)
+        return;
+    if (dp->index < 0  ||  s->sym - dp->index - s->delay > s->xr_rows - 1)
+        return;
+    x = s->xr + (size_t) (dp->index % s->xr_rows)*(size_t) s->taps;
+    e = (dp->dec_lv - il->last_lv) - dp->z;
+    for (int i = 0; i < s->taps; i++)
+        norm += x[i]*x[i];
+    if (norm <= 1e-12)
+        return;
+    for (int i = 0; i < s->taps; i++)
+        s->w[i] += s->mu*e*x[i]/norm;
+    s->updates++;
+}
+
 static void viterbi_step(v90a_pr4_t *s, int64_t index, double z)
 {
     interleave_t *il = &s->il[index & 1];
@@ -287,6 +331,10 @@ static void viterbi_step(v90a_pr4_t *s, int64_t index, double z)
             dp->dec_lv = dp->lv[st];
             dp->dec_cw = dp->cw[st];
             emit(s, dp->index, dp->cw[st]);
+            if (s->mu > 0.0)
+                track(s, dp, il);
+            il->last_index = dp->index;
+            il->last_lv = dp->dec_lv;
         }
     }
 }
@@ -337,6 +385,7 @@ bool v90a_pr4_start(v90a_pr4_t *s, int64_t first,
     s->set_fn = set_fn;
     s->user = user;
     s->il[0].count = s->il[1].count = 0;
+    s->il[0].last_index = s->il[1].last_index = -1;
     memset(s->out_ok, 0, sizeof(s->out_ok));
     return true;
 }
@@ -379,6 +428,9 @@ void v90a_pr4_symbol(v90a_pr4_t *s, double decision)
 
         for (int i = 0; i < s->taps; i++)
             z += s->w[i]*s->x[i];
+        if (k - s->delay >= 0)
+            memcpy(s->xr + (size_t) ((k - s->delay) % s->xr_rows)*(size_t) s->taps,
+                   s->x, sizeof(double)*(size_t) s->taps);
         viterbi_step(s, k - s->delay, z);
     }
 }

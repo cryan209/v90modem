@@ -1437,6 +1437,13 @@ static uint16_t v90_capped_upstream_mask(const v90_state_t *s)
     return (uint16_t)(mask & limited);
 }
 
+int v90_mp_upstream_max_bps(const v90_state_t *s)
+{
+    if (!s)
+        return 0;
+    return v90_upstream_mask_max_drn(v90_capped_upstream_mask(s))*2400;
+}
+
 void v90_set_upstream_rate_floor(v90_state_t *s, int bps)
 {
     if (!s || bps < 0)

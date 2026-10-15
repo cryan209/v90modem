@@ -122,6 +122,9 @@ struct v90_analogue_phase4_s {
     int      rd_bar_symbols;
     int      rate_renegotiations;
     bool     renegotiation_training;
+    /* §8.6/§8.6.5: what a renegotiation's TRN2d/MP/Ed are mapped with --
+     * CPt's constellations and K, the data mode's (CP's) spectral shaping. */
+    vpcm_cp_frame_t rr_training;
     bool     silence_cycle;
 
     int      mp_frames;
@@ -137,7 +140,7 @@ int v90_analogue_phase4_slicer_ucodes(const v90_analogue_phase4_t *s,
     switch (s->stage) {
     case V90A4_RX_TRN2D:
     case V90A4_RX_MP:
-        cp = s->renegotiation_training ? &s->cfg.cp : &s->cfg.cpt;
+        cp = s->renegotiation_training ? &s->rr_training : &s->cfg.cpt;
         break;
     case V90A4_RX_B1D:
     case V90A4_RX_DATA:
@@ -172,6 +175,24 @@ static void or_slot_mask(const vpcm_cp_frame_t *cp, int slot, bool on[128])
             on[u] = true;
 }
 
+/* Set the highest-power Ucode of `cp`'s receive mask at frame slot `slot`:
+ * §8.6.4's Rd (CP) and Rt (CPt) use that one point per data frame interval. */
+static void or_slot_highest(const vpcm_cp_frame_t *cp, int slot, bool on[128])
+{
+    int c = cp->dfi[slot];
+    const uint8_t *mask;
+
+    if (c >= cp->constellation_count)
+        return;
+    mask = cp->codec_constellations_differ ? cp->codec_masks[c] : cp->masks[c];
+    for (int u = 127; u >= 0; u--) {
+        if (vpcm_cp_mask_get(mask, u)) {
+            on[u] = true;
+            return;
+        }
+    }
+}
+
 int v90_analogue_phase4_ucodes_ahead(const v90_analogue_phase4_t *s, int ahead,
                                      uint8_t *out, int capacity)
 {
@@ -181,7 +202,7 @@ int v90_analogue_phase4_ucodes_ahead(const v90_analogue_phase4_t *s, int ahead,
 
     if (!s || !out || capacity < 128 || ahead < 0)
         return 0;
-    training = s->renegotiation_training ? &s->cfg.cp : &s->cfg.cpt;
+    training = s->renegotiation_training ? &s->rr_training : &s->cfg.cpt;
     switch (s->stage) {
     case V90A4_RX_HUNT_R:
     case V90A4_RX_R:
@@ -220,8 +241,48 @@ int v90_analogue_phase4_ucodes_ahead(const v90_analogue_phase4_t *s, int ahead,
     case V90A4_RX_DATA:
         or_slot_mask(&s->cfg.cp, (s->frame_fill + ahead)%6, on);
         break;
+    case V90A4_RX_RR_RD:
+        /*
+         * §8.6.4: Rd is R on the highest-power point of each data frame
+         * interval of CP, and R̄d (same points, signs inverted) can start on
+         * any frame boundary.  Offering more than that was the reason Rd
+         * never ended: with U_INFO in the set the detector decided Rd as
+         * ±78 against a true ±68/67 (v90-pr4-1, replayed), so no frame
+         * matched r_frame_polarity(), R̄d was never counted, and the digital
+         * modem's §9.6.1 timeout retrained the call.
+         */
+        or_slot_highest(&s->cfg.cp, (s->frame_fill + ahead)%6, on);
+        break;
+    case V90A4_RX_RR_R_BAR: {
+        /* §9.6.1.2.2: 24T of R̄d, then optional TRN2d and MP on CPt's
+         * constellations (§8.6.5, start_training_mapper()). */
+        int remaining = R_BAR_SYMBOLS - s->rd_bar_symbols - s->frame_fill;
+
+        if (ahead < remaining)
+            or_slot_highest(&s->cfg.cp, (s->frame_fill + ahead)%6, on);
+        else
+            or_slot_mask(&s->rr_training, (s->frame_fill + ahead)%6, on);
+        break;
+    }
+    case V90A4_RX_RR_RT:
+        /* §9.6.1.2.5-.6: Ucode-0 silence after Ed, then Rt on CPt's
+         * highest point per data frame interval. */
+        if (s->rd_symbols == 0)
+            on[0] = true;
+        or_slot_highest(&s->cfg.cpt, (s->frame_fill + ahead)%6, on);
+        break;
+    case V90A4_RX_RR_RT_BAR: {
+        /* 24T of R̄t, then MP (§9.6.1.2.6, §9.4.1.4). */
+        int remaining = R_BAR_SYMBOLS - s->rd_bar_symbols - s->frame_fill;
+
+        if (ahead < remaining)
+            or_slot_highest(&s->cfg.cpt, (s->frame_fill + ahead)%6, on);
+        else
+            or_slot_mask(&s->rr_training, (s->frame_fill + ahead)%6, on);
+        break;
+    }
     default:
-        /* §9.6's Rd/R̄d and their training: everything that can arrive. */
+        /* Anything else: everything that can arrive. */
         on[s->cfg.u_info & 0x7F] = true;
         for (int slot = 0; slot < 6; slot++) {
             or_slot_mask(&s->cfg.cpt, slot, on);
@@ -293,6 +354,19 @@ v90_analogue_phase4_t *v90_analogue_phase4_init(const v90_analogue_phase4_config
         return NULL;
     s->cfg = *cfg;
     s->bits_per_frame = cfg->cpt.drn + 8;
+    /* §8.6: "During rate renegotiation, TRN2d, MP and Ed use the spectral
+     * shaping parameters as used in the preceding data mode along with the K
+     * previously derived from CPt", and §8.6.5 passes TRN2d's constellation
+     * in CPt -- always.  Mapping them on CP's points instead (the data-mode
+     * constellation) left this receiver in TRN2d through the whole of the
+     * digital modem's renegotiation, which maps on CPt (v90-rr-1). */
+    s->rr_training = cfg->cpt;
+    s->rr_training.shaping_redundancy = cfg->cp.shaping_redundancy;
+    s->rr_training.shaping_lookahead = cfg->cp.shaping_lookahead;
+    s->rr_training.shaping_a1_q1_6 = cfg->cp.shaping_a1_q1_6;
+    s->rr_training.shaping_a2_q1_6 = cfg->cp.shaping_a2_q1_6;
+    s->rr_training.shaping_b1_q1_6 = cfg->cp.shaping_b1_q1_6;
+    s->rr_training.shaping_b2_q1_6 = cfg->cp.shaping_b2_q1_6;
     s->stage = V90A4_RX_HUNT_R;
     s->r_phase = -1;
     s->mp_candidate = -1;
@@ -492,10 +566,14 @@ static unsigned push_bit(v90_analogue_phase4_t *s, int bit)
 
 static void start_training_mapper(v90_analogue_phase4_t *s, bool renegotiation)
 {
-    /* §8.6: during rate renegotiation TRN2d/MP/Ed use the preceding data-mode
-     * constellation and shaping parameters, but retain K from CPt. */
+    /* §8.6: during rate renegotiation TRN2d/MP/Ed keep K from CPt (and its
+     * constellations, §8.6.5) but take the data mode's spectral shaping, so
+     * D = K + S with S = 6 - Sr from CP. */
     s->renegotiation_training = renegotiation;
     s->bits_per_frame = s->cfg.cpt.drn + 8;
+    if (renegotiation)
+        s->bits_per_frame += s->cfg.cpt.shaping_redundancy
+                             - s->cfg.cp.shaping_redundancy;
     s->descramble_reg = 0;
     s->prev_sign = 0;
     memset(&s->shaper, 0, sizeof(s->shaper));
@@ -663,7 +741,7 @@ static unsigned demap_frame(v90_analogue_phase4_t *s)
 
     data_mode = (s->stage == V90A4_RX_B1D || s->stage == V90A4_RX_DATA);
     mapping = data_mode ? &s->cfg.cp
-                        : s->renegotiation_training ? &s->cfg.cp : &s->cfg.cpt;
+                        : s->renegotiation_training ? &s->rr_training : &s->cfg.cpt;
     /* §5.4.5: Sr = 0 disables spectral shaping, and the signs are then
      * §5.4.5.1's differential chain rather than the shaper's output. */
     if (mapping->shaping_redundancy == 0) {

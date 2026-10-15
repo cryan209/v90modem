@@ -2209,3 +2209,111 @@ to try a 24000 upstream but did not take effect: the server still negotiated
 formed: the Apple side fell back to V.14, because our LAPM frames did not
 survive the upstream.  That is the upstream workstream (see the V.90 upstream
 notes), and the analogue side does not yet answer a §9.6 Rd while in data mode.
+
+### The upstream, §9.6 renegotiation, and V.42 LAPM held (2026-10-15)
+
+The previous section ended with data mode live but the call dying on the
+upstream, an unanswered §9.6 Rd, and no LAPM.  Five findings, four of them
+ours; recordings `artifacts/apple-pve-20261015/v90-rr-{1..5}`.
+
+**Why the upstream is poor: the line's response is longer than the server's
+equaliser.**  Fitted from what we sent (`call/tx-tap.s16`, resampled 9600 →
+8000 and drift-corrected per window) to what the server received
+(`server/live-rx.g711`), v90-pr4-1's two data stretches:
+
+- Our transmitter is clean: −20.4 dBFS RMS, peak −10.7 dBFS, no clipping.  It
+  arrives at −21.8 dBm0.  The idle line at the server is RMS ~6, 35 dB down.
+- Echo of the server's own downstream in the upstream is −38 dB.  There is no
+  echo problem on the digital side.
+- The wire is good *if the receiver spans it*.  A linear equaliser from the
+  received stream back to our transmitted waveform reaches, in band:
+
+  | span | 1 ms | 2.2 ms | 4 ms | 6 ms | 9 ms | 12 ms | 18 ms |
+  |---|---|---|---|---|---|---|---|
+  | SNR | 15.8 | 18.0 | 23.0 | 25.8 | 27.8 | 29.0 | 30.3 dB |
+
+  The server's V.90 upstream FSE is `V34_V90_T3_FSE_TAPS` = 21 taps at T/3:
+  **7 symbols, 2.2 ms, the 18 dB column**.  31200 needs ~30 dB, which matches the
+  observed ~35% symbol errors.  The loop's DC null (the same one the 1 − D²
+  detector exists for downstream) gives a long tail that 7 symbols cannot
+  cover.  MP is Type 0, so the analogue side is not asked to precode either.
+  Lengthening the FSE in `v90_upstream_replay` moved B1's out-of-sample
+  distance 0.551 → 0.469 → 0.458 (21/41/63 taps), but whole-call replay error
+  stayed near white in every arm (replay does not reproduce the live upstream
+  here: 55-60% against 35% live).  So that change is untested and was not made.
+
+**`ME_V90_ANALOGUE_UPSTREAM_MAX_N` did take effect; our server ignored it.**
+v90-pr4-2's CP carried mask 0x01FF and the server's MP answered max drn 10
+(24000), mask 0x01FF.  The analogue side transmitted at 24000 (`enter DATA ...
+upstream=24000`).  But the server prepared its receiver at
+`v34_get_current_bit_rate()` = 31200, the rate V.34 trained at, ignoring the
+rate its own MP announced.  §9.4.2.4 has the analogue modem transmit at the
+highest rate enabled in both, at or below MP bits 24:27.  That call was a rate
+mismatch, not a measurement of 24000.  Fixed: the receiver is prepared at
+`v90_mp_upstream_max_bps()` when that is lower (`CP/MP mask limits the
+upstream 31200 -> 26400 bps`).
+
+**The analogue side never saw R̄d.**  It acquired Rd, but in the RR stages the
+1 − D² detector's candidates were the union of U_INFO, CPt and CP.  It decided
+every Rd frame as ±78 (U_INFO) against a true ±68/67.  `r_frame_polarity()`
+needs the exact highest Ucode, so no frame counted, R̄d never registered, and
+the server's §9.6.1 timeout retrained.  Now `ucodes_ahead()` offers what §8.6.4
+says can arrive: Rd/R̄d on CP's highest point per slot, Rt/R̄t on CPt's, then
+Ucode-0 silence before Rt.
+
+**Then it never saw MP: wrong constellation for renegotiation training.**  The
+analogue side mapped the renegotiation's TRN2d/MP/Ed on CP's points.  §8.6
+carries the data mode's *spectral shaping* into a renegotiation, "along with
+the K previously derived from CPt", and §8.6.5 passes TRN2d's constellation in
+CPt.  The server maps on CPt, correctly.  A merged frame (`rr_training`: CPt's
+constellations, CP's Sr/ld/a1..b2, D = K(CPt) + 6 − Sr(CP)) fixed it.  In the
+v90-rr-1 replay, MP decodes and the analogue side sends CP' and E/B1.
+
+**Then Ed: the downstream equaliser drifts.**  The 1 − D² taps were fitted on
+TRN1d and then held.  Aligned against the server's transmit tap (sign agreement
+≥ 99.5%), codeword error in v90-rr-3 rose from 0-1% at B1d to 5-9% twenty
+seconds later, and 27% further on.  A renegotiation's two-frame Ed then has
+about even odds.  `v90_analogue_pr4.c` now tracks: decision-directed NLMS
+against s[k] − s[k−2] from the Viterbi's traced-back decisions, only on steps
+with ≥ 8 candidates.  Adapting on Ri's single-level square wave took the
+trained 41 dB to 24 within a second.  At `ME_V90A_PR4_MU` 1, 2 or 5
+(thousandths; default 2) v90-rr-3 replays at 0-0.4% to the end of the call, and
+the renegotiation completes: B1d 48/48, 0 bit errors, then data.
+
+**The server now learns the upstream rate.**  Before a renegotiation for
+upstream loss, if the receiver settled at ≥ 0.10 decision error (healthy
+upstreams settle near 0.025; this rig: 0.20-0.31 at 31200), the renegotiated
+MP offers one rate lower, or two at ≥ 0.20.  The cap persists for the call,
+including retrains (`g_v90_upstream_learnt_cap`; `ME_V90_UPSTREAM_STEP=0`
+disables it).  Live, 31200 settled at 0.200-0.262 and 26400 at 0.071-0.112.
+
+**LAPM: T400 runs out before our server can hear the ODP.**  The server's
+upstream delivers its first data bit ~1.1 s after data entry (B1 acquisition
+from the capture ring: v90-rr-4, +32.90 → +34.04 s).  The analogue side's V.42
+T400 is 750 ms (V.42 §9.1.1) from its own data entry, so it fell back to V.14
+before the server, which did detect the ODP, could answer.  With
+`ME_V42_T400_MS=3000` on the analogue side, LAPM forms.
+
+**Live (Apple ATA 6005 → CT 117 6002, this build):**
+
+| call | renegotiation, analogue side | upstream | LAPM |
+|---|---|---|---|
+| v90-rr-1 (Rd fix only) | S/S̄/CP sent, MP never decoded → Ed deadline | 31200 → 26400 offered | no |
+| v90-rr-2 | not reached: Phase 4 deadlines (22-ones TRN2d) | — | — |
+| v90-rr-3 (+ CPt training) | MP decoded, Ed missed (5-9% codeword error) | 31200 (0.200) → 26400 (0.071) | no (T400) |
+| v90-rr-4 (+ tracking) | **completes: B1d 48/48 → data** | 31200 (0.242) → 26400 (0.109) | no (T400) |
+| v90-rr-5 (+ T400 3 s, 90 s hold) | **completes** | 31200 (0.262) → 26400 (0.112) | **connected at +28 s, held to hang-up** |
+
+v90-rr-5 is the first call on this rig where V.42 LAPM (with V.42bis
+negotiated) came up and held.  Data held for the rest of the call through a
+completed renegotiation.  An upstream discontinuity 1 s before the 90 s
+hang-up started renegotiation 2, offering 24000.
+
+**Still open:**
+- The server's T/3 FSE span on this loop.  It is the reason 31200 (and
+  marginally 26400) decodes poorly; a longer FSE or precoding (MP Type 1) is
+  the real fix.
+- The server's 1.1 s upstream acquisition latency.  Until it falls below T400
+  the analogue side needs `ME_V42_T400_MS`; the default stays at V.42's 750 ms.
+- `--rx-replay` segfaults at V.14 fallback without `--pty-link`; pass one.
+- Startup's Phase 4 is still a coin flip on some attempts (v90-rr-2).
