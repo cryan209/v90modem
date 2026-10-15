@@ -1,5 +1,114 @@
 # RasFinder Phase 4: CRC-anchored measurements, 2026-09-28
 
+## 2026-10-16 (evening): the Phase 3/4 "lottery" was our echo-canceller fit stalling DIL
+
+**The calls that never reached V.90 data mode were ours.**  Of the 11 V.90
+attempts on the fix builds (`rf-mini-20261016/fix2-*`, `fix3-*`, `fix4-*`),
+four first attempts failed (fix2-6313, fix3-2-6312, fix4-1-6311,
+fix4-4-6311), and every one of them died the same way: the peer sent a
+CRC-valid **1788-bit CPt** that we rejected (`accepted=0`, 6-7 copies) until
+it retrained about 4.7 s after our Ri.  Every first attempt that reached data
+mode got a 972-bit CPt instead.  1788 = 156 + 136 x 12 is Table 14 with six
+constellations and bit 128 set (codec-output masks follow the transmit
+masks).  Decoded outside the receiver (`V90_CP_BIT_DUMP` under
+`v90_engine_replay --dial`, framed with `tools/v90_cp_frame.py`), fix4-1's CPt
+is drn=9, Sr=1, ld=1, `trn1d_gain` 16384 (exactly 2.0, i.e. 6 dB of claimed
+loss), six identical transmit sets {53,94,112,119}, and six codec sets that
+are not a pad of them or of each other: {48,75,85}, {50,52,80}, {49,79},
+{67,75,85}, {37,44,80}, {68,75}.  `v90_configure_phase4_mapper()` refuses a
+codec set whose population differs from its transmit set, so the frame never
+configures TRN2d.  The peer is not merely mis-sizing a pad: its DIL analysis
+came out as garbage.
+
+**What goes wrong first is our transmission at DIL start.**  The V.90 line
+echo canceller is fitted when we detect the analogue modem's S, i.e. in the
+media callback that switches our transmitter from J'd to DIL (8.3.4,
+9.3.1.x).  That fit's bulk-delay search correlated 5953 lags one at a time
+through the bounds-checked `tx_at()`, 10-16 ms on the mini (measured with a
+bench on the host itself), on top of the ~10 ms of normal receive work, and
+it is logged as `slow media callback: rx took 23-28 ms (v34_rx=10)` straight
+after `line echo canceller: fit 1`.  Our RTP is sent from that same callback,
+so `rtp-tx.csv` shows a send gap at DIL start on **every** call, and its
+length decides the call:
+
+| attempt | send gap at DIL start | CPt | outcome |
+| --- | --- | --- | --- |
+| fix2-6311 #1, fix2-6312 #1, fix3-1, fix3-3 #1, fix3-4 #1, fix4-3 | 30.8-32.9 ms | 972 bits | V.90 data mode (all 6) |
+| fix3-4 #2 (a later retrain) | 33.3 ms | 972 bits | data mode |
+| fix4-2, fix3-3 #2 (a later retrain) | 30.8 ms | 972 bits | TRN2d/MP sent, peer retrained without CP (below) |
+| fix2-6313, fix3-2, fix4-1 #1, fix4-1 #2, fix4-4 #1, fix4-4 #2 | 36.0-41.7 ms | 1788 bits, rejected | peer retrain at Ri + ~4.7 s |
+| fix2-6311 #2 | 37.5 ms | none decoded | peer retrain after Ri |
+| fix2-6312 #2 (a later retrain) | 42.3 ms | 972 bits | data mode |
+
+So 7 of the 8 attempts with a gap over 35 ms failed at CPt, and none of the
+10 under 34 ms did.  This is the mechanism already measured after B1 (top
+section below): a hole in our RTP longer than the AudioCodes' playout margin
+makes it re-centre, and here the hole lands in the first few DIL segments, so
+the analogue modem measures a DIL that is shifted part way through.  The
+replay reproduces the rejected CPt exactly but cannot test the fix: the peer's
+answer is in the recording.
+
+**Fix 1 (57f34b5b, `v34_line_ec.c`):** the bulk-delay search runs over a linear
+copy of the transmit history with 16 lags accumulated per pass, each in its
+original summation order, and the least-squares loops index the same copy.
+The fit takes 1.2-4.5 ms on the mini (was 10-16) and 2.3 ms on the dev Mac
+(was 13.6); its output (lag, ERLE, every fit line) is identical on all 12
+taps.  make test-fast 550/550.
+
+**The other two failure shapes, not this one:**
+
+- fix4-2 accepted a normal CPt and sent R-bar-i, TRN2d and MP, but the peer
+  kept sending CPt for 4 s (about 25 frames) and retrained: it never
+  detected R-bar-i (9.4.2.2).  No send gap or slow callback there.
+  fix3-3's second attempt is similar (TRN2d/MP, retrain 6.6 s later).  Left
+  open.
+- fix-6313 (the build before fix2) died in Phase 3: the peer sent Tone A
+  (band2400 0.43) where its S should have been, about 1.8 s into our Jd, so
+  its TRN1d training failed.  The only anomaly is a 35.2 ms send gap 1.9 s
+  into TRN1d with no slow callback logged.  The INFO1a that followed is not
+  nonsense: baud 0 (2400) both ways, pre-emphasis 10, is a valid V.34
+  INFO1a; this peer falls back to V.34 after a failed V.90 Phase 3, and the
+  call reached plain V.34 data at 21600 (the 2400-baud maximum).
+
+**Live, from the mini (`rf-mini-20261016/lec-*`, `lec2-*`), accounts 2901 ->
+6311/6312/6313 in rotation, upstream capped at 21600, 90 s apart:**
+
+| build | calls | V.90 data mode | send gap at DIL start | bad CPt | slow callback in DIL |
+| --- | --- | --- | --- | --- | --- |
+| fix2-fix4 (before) | 11 | 6 | 30.8-42.3 ms | 4 calls | 23-28 ms (the fit) |
+| 57f34b5b (fit only), `lec-*` | 12 | **10** | 23.2-32.4 ms | 0 | 31-40 ms on lec-1 #2, lec-3, lec-9 (structural check, below) |
+| 3c9645b0 (both), `lec2-*` | 12 | **10** | 25.8-32.4 ms | 0 | none |
+
+No unusable CPt in 24 calls and 40 DIL starts.  Two of the 1788-bit CPts in
+these batches (lec-2, lec-9) carry consistent codec sets, one chord below the
+transmit sets with `trn1d_gain` 2.0, and are accepted and used: bit 128 is
+not the defect, a DIL measured across a playout jump is.
+
+Batch 1 showed a second synchronous job inside DIL.  Every S candidate after
+the one that ends Jd went through p3_demod's 200 ms structural check before
+`v90.c`, which ignores S during DIL's first descriptor cycle (all of DIL on
+this peer) whatever the check says.  That made 31-40 ms callbacks, and both
+batch-1 calls that missed data mode (lec-3, lec-9) had one, then got as far
+as TRN2d/MP without the peer ever sending CP.  **3c9645b0** runs the check
+only when `v90_dil_s_can_terminate()`; the replays' outcomes are unchanged,
+and batch 2 had no slow callback in Phase 3 at all.
+
+What still misses V.90 data mode is not a hole of ours: the peer retraining
+in our Jd (fix-6313 and lec2-11 #1: no S, its TRN1d training failed),
+the peer never answering our R-bar-i/TRN2d/MP with CP (fix4-2, fix3-3 #2,
+lec2-11 #2), and lec2-12, where the peer's first INFO1a already chose V.34
+(baud 4 both ways).
+
+**What now limits LAPM is the same mechanism after B1, not this one.**  Of
+the 20 calls that reached V.90 data mode, the 4 that reached the RasFinder
+login prompt (lec-12, lec2-3, lec2-6, lec2-9) are the 4 whose echo never
+moved.  On almost every call the receive callback just after B1 is still
+20-26 ms on the mini (d99f144d had none over 20 ms in its one data-mode
+call), the echo moves +5 to +10 ms, the tracker follows, and about 12 s
+later the discontinuity detector asks for a resync and the peer retrains.
+The callbacks need to come down further on this host, or the tracker's
+correction needs to keep the upstream alive.
+
 ## 2026-10-16 (later): the eye closes because our echo moved and our canceller did not
 
 **What changes on the wire 0.8 s after B1 is the delay of our own echo.**
@@ -84,8 +193,9 @@ vmhost was down).** Accounts 2901 → 6311/6312/6313, upstream capped at 21600:
 | d99f144d (training split, cheap builds) | 1 of 4 | none (no callback over 20 ms) | 6313: **LAPM + login**, upstream 0.024-0.029 for the whole 47 s until our hangup |
 
 The calls that never reached data mode retrained in Phase 3/4 or got an
-INFO1a that declined V.90, the usual per-call lottery on this rig, before
-any of this code runs.  The mini is about 2.5x slower than the dev Mac, and
+INFO1a that declined V.90.  That was not the rig's lottery: most of it was
+our echo-canceller fit stalling the start of DIL (section above, fixed in
+57f34b5b and 3c9645b0).  The mini is about 2.5x slower than the dev Mac, and
 the playout moved by about (callback - 13 ms), so callbacks need to stay well
 under one packet on the slowest host that runs calls.  Plain V.34 fallbacks on
 the same rig reached LAPM and the login prompt too (16800).
